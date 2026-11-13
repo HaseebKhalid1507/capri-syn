@@ -692,6 +692,11 @@ def main():
                 print("ovl closed")
             elif kind == "stackcheck":
                 kids = [c.id for c in xroot().query_tree().children]
+                try:
+                    axid = json.loads(ctl("state"))["xid"]
+                    print("avatar", hex(axid), kids.index(axid) if axid in kids else None)
+                except Exception as e:
+                    print("avatar ?", e)
                 for w_ in staged:
                     print("stage", hex(w_.id), kids.index(w_.id) if w_.id in kids else None)
                 for w_ in pwins:

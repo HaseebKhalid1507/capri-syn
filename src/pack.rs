@@ -397,6 +397,8 @@ pub struct BrainSpec {
     pub sulk: Vec<Step>,
     pub wave: Vec<Step>,
     pub floor_sit: Option<MoodSpec>,
+    /// After a sulk she sits down where she landed and stays low: this base and loop.
+    pub sulk_sit: Option<MoodSpec>,
     pub nap: Option<String>,
     pub hop_crouch: Option<String>,
     /// Approach → frame: `hang`, `hang_upside_down`, `cling_left`, `cling_right`, `peek`. A
@@ -667,6 +669,11 @@ impl Pack {
                 }
                 check_steps("brain.floorSit entry", fs.entry.as_deref().unwrap_or(&[]), &mut errors, &pack);
                 check_steps("brain.floorSit exit", fs.exit.as_deref().unwrap_or(&[]), &mut errors, &pack);
+            }
+            if let Some(ss) = &b.sulk_sit
+                && !pack.index.contains_key(&ss.base)
+            {
+                errors.push(format!("moods.json brain.sulkSit: base `{}` does not resolve", ss.base));
             }
             for id in b.nap.iter().chain(b.hop_crouch.iter()) {
                 if !pack.index.contains_key(id) {

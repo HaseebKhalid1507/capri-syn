@@ -20,6 +20,8 @@ pub const FLOAT_CLEAR: f32 = 24.0;
 pub const PEEK_CURSOR: f32 = 600.0;
 /// Float beside: within this of the focused window's side (logical px).
 pub const BESIDE_MAX: f32 = 200.0;
+/// Capri's hands either side of her hang grip, as a fraction of the body width.
+const HANG_HAND: f32 = 0.16;
 
 /// Body boxes (relative to each pose's anchor point) of every pose she can be placed in.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -473,23 +475,36 @@ fn hang_spots(w: &World, f: &WinRect, upside_down: bool) -> Vec<Spot> {
     let (right, _) = far_corner(f, w.cursor);
     let inset = w.d(16.0);
     let mut out = Vec::new();
+    let ap = Some(if upside_down { Approach::HangUpsideDown } else { Approach::Hang });
+    if !upside_down {
+        // By the hands: the outer hand right over the window's far corner, so her hair
+        // hangs mostly outside it (less of the title bar and the first lines covered).
+        let hand = (rel.w as f32 * HANG_HAND) as i32;
+        let x = if right { f.right() - hand } else { f.x + hand };
+        out.push(w.spot(SpotKind::Hang { upside_down }, (x, line), rel, ap));
+    }
     // Over the far corner, then shifted outward so less of his window is covered.
     for shift in [0, rel.w / 4, rel.w / 2, rel.w * 3 / 4] {
         let x = if right { f.right() - inset + shift - (rel.x + rel.w) } else { f.x + inset - shift - rel.x };
-        out.push(w.spot(SpotKind::Hang { upside_down }, (x, line), rel, Some(if upside_down { Approach::HangUpsideDown } else { Approach::Hang })));
+        out.push(w.spot(SpotKind::Hang { upside_down }, (x, line), rel, ap));
     }
     out
 }
 
 fn cling_spots(w: &World, f: &WinRect) -> Vec<Spot> {
     let (right, _) = far_corner(f, w.cursor);
-    // The window's right edge is on her right (pose-dock-right), the left one on her left.
-    let Some(rel) = (if right { w.boxes.cling_r } else { w.boxes.cling_l }) else { return Vec::new() };
     let x = if right { f.right() } else { f.x };
-    [0.12, 0.2, 0.3]
-        .iter()
-        .map(|k| w.spot(SpotKind::Cling { left: !right }, (x, f.y + (f.h as f32 * k) as i32), rel, Some(Approach::Cling)))
-        .collect()
+    let mut out = Vec::new();
+    // Outside the far edge first, holding it (the left edge on her right: pose-dock-right),
+    // so she covers none of it; then inside, the edge on her side.
+    let outside = if right { w.boxes.cling_l.map(|r| (r, true)) } else { w.boxes.cling_r.map(|r| (r, false)) };
+    let inside = if right { w.boxes.cling_r.map(|r| (r, false)) } else { w.boxes.cling_l.map(|r| (r, true)) };
+    for (rel, left) in outside.into_iter().chain(inside) {
+        for k in [0.12, 0.2, 0.3] {
+            out.push(w.spot(SpotKind::Cling { left }, (x, f.y + (f.h as f32 * k) as i32), rel, Some(Approach::Cling)));
+        }
+    }
+    out
 }
 
 fn sit_edge_spots(w: &World, f: &WinRect) -> Vec<Spot> {
@@ -759,6 +774,41 @@ mod tests {
         let near = w.spot(SpotKind::Hang { upside_down: false }, (1100, 29), boxes().hang.unwrap(), Some(Approach::Hang));
         assert!(near.cover_pct < 12.0);
         assert_eq!(guard(&w, &near), Err(Block::Cover));
+    }
+
+    #[test]
+    fn hang_by_the_hand_at_the_corner() {
+        // Focused on the right tile, cursor on its right: the far corner is the top left,
+        // and there's room left of it. Her outer hand is over the corner, most of her
+        // outside the window.
+        let mut fx = tiled();
+        fx.focused = Some(fx.stack[1]);
+        fx.cursor = (2300, 900);
+        let w = fx.world();
+        let s = resolve(&bid(&[Approach::Hang]), &w, &mut Rng::new(3)).unwrap();
+        let f = fx.stack[1];
+        assert_eq!(s.anchor.0, f.x + (300.0 * HANG_HAND) as i32, "the hand, not the middle, over the corner");
+        assert!(s.body.x < f.x && s.cover_pct < 6.0, "{:?} cover {}", s.body, s.cover_pct);
+        // At the monitor's edge there is no room outside: the old shifts, inside.
+        let w = tiled();
+        let s = resolve(&bid(&[Approach::Hang]), &w.world(), &mut Rng::new(3)).unwrap();
+        assert!(s.body.x >= 0 && s.cover_pct <= 12.0);
+    }
+
+    #[test]
+    fn cling_outside_first() {
+        let mut fx = tiled();
+        fx.focused = Some(fx.stack[1]);
+        fx.cursor = (2300, 900);
+        let w = fx.world();
+        let s = resolve(&bid(&[Approach::Cling]), &w, &mut Rng::new(4)).unwrap();
+        assert_eq!(s.kind, SpotKind::Cling { left: false }, "the left edge on her right: outside it");
+        assert!(s.cover_pct < 1.0 && s.body.x < fx.stack[1].x, "only the hand on his window: {}", s.cover_pct);
+        // No room outside (the left tile at the monitor edge): inside, the edge on her left.
+        let fx = tiled();
+        let w = fx.world();
+        let s = resolve(&bid(&[Approach::Cling]), &w, &mut Rng::new(4)).unwrap();
+        assert_eq!(s.kind, SpotKind::Cling { left: true });
     }
 
     #[test]

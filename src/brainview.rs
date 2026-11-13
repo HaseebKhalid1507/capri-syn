@@ -15,10 +15,32 @@ use crate::places::{self, Boxes, Spot, SpotKind, World};
 use crate::settings::{Attention, Settings};
 use std::io::Write as _;
 
+/// Knees of a hanging frame, as a fraction of its visible height from the top.
+const KNEE_AT: f32 = 0.73;
 /// He is near her: her body within this of the focused window (logical px), same monitor.
 const NEAR_PX: f32 = 250.0;
 /// How often the drives are written to state.json at most (wall clock).
 const SAVE_EVERY: Duration = Duration::from_secs(10);
+/// The bid marker (a "!" badge by her head): effect layers after the glints.
+const MARK_LAYER: usize = GLINT_LAYER + 2 * GLINTS_MAX;
+const MARK_RIM: u32 = 0x0b0e14;
+const MARK_FILL: u32 = 0xffffff;
+const MARK_GLYPH: u32 = 0xff1744;
+/// Badge radius, logical px.
+const MARK_R: f32 = 13.0;
+/// How long a summon's NEEDS YOU pulses after she lands, and its half period.
+const PULSE_FOR: Duration = Duration::from_millis(6_000);
+const PULSE_HALF_MS: u128 = 450;
+
+/// The bid marker: up from the first bid emote to the end of the bid.
+#[derive(Clone, Copy)]
+pub(super) struct Marker {
+    t0: Instant,
+    /// The last beat (a pop).
+    pop: Instant,
+    /// Insist level 2: "!!".
+    double: bool,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum FsHide {
@@ -46,6 +68,8 @@ pub(super) struct InFlight {
     arrival: Arrival,
     spot: Spot,
     active: bool,
+    /// A summon for a pending prompt: she lands loud (a hop, a point at his window).
+    summon_prompt: bool,
 }
 
 pub(super) struct Scoot {
@@ -88,6 +112,16 @@ pub(super) struct BrainHost {
     typed_at: Option<Instant>,
     /// A bid's swing kick while hanging: (start, px at the bottom).
     kick: Option<(Instant, f32)>,
+    /// An insist beat's leg kick while hanging (start, direction).
+    leg_kick: Option<(Instant, f32)>,
+    marker: Option<Marker>,
+    /// What the marker layers show now: (origin, size, scale step), to skip no-op updates.
+    marker_shown: Option<(i32, i32, i32, bool)>,
+    /// A summon landed: NEEDS YOU pulses from here.
+    pulse: Option<Instant>,
+    pulse_last: bool,
+    /// Sitting low after a sulk (the floor sit uses the sulk loop).
+    sulk_sit: bool,
 }
 
 fn env_rect(k: &str) -> Option<WinRect> {
@@ -256,6 +290,12 @@ impl Avatar {
             last_senses: None,
             typed_at: None,
             kick: None,
+            leg_kick: None,
+            marker: None,
+            marker_shown: None,
+            pulse: None,
+            pulse_last: false,
+            sulk_sit: false,
         });
         if let Some(h) = &mut self.brain {
             let v = serde_json::json!({ "t": 0.0, "k": "start", "scale": scale, "seed": seed, "settings": h.brain.snapshot(0.0)["settings"] });
@@ -507,14 +547,30 @@ impl Avatar {
         if h.save_due {
             take(h.saved_at.map(|s| s + SAVE_EVERY));
         }
+        take(self.marker_next_change(now));
+        if let Some(p) = h.pulse {
+            let d = now.saturating_duration_since(p);
+            if d < PULSE_FOR + Duration::from_millis(PULSE_HALF_MS as u64) {
+                let next = (d.as_millis() / PULSE_HALF_MS + 1) * PULSE_HALF_MS;
+                take(Some(p + Duration::from_millis(next as u64)));
+            }
+        }
         t
     }
 
     /// Per tick: the scoot, landings, held emotes, the fullscreen hide, then the brain if due.
     /// True if the view must redraw.
     pub(super) fn brain_tick(&mut self, now: Instant) -> bool {
+        let pulse = self.summon_pulse_on(now);
         let Some(h) = &mut self.brain else { return false };
         let mut dirty = false;
+        if pulse != h.pulse_last {
+            h.pulse_last = pulse;
+            dirty = true;
+        }
+        if h.pulse.is_some_and(|p| now.saturating_duration_since(p) > PULSE_FOR + Duration::from_secs(1)) {
+            h.pulse = None;
+        }
         let later: Vec<EmoteKey> = {
             let (due, keep): (Vec<_>, Vec<_>) = h.later.drain(..).partition(|l| l.0 <= now);
             h.later = keep;
@@ -675,7 +731,11 @@ impl Avatar {
         h.rng = rng;
         h.write(line);
         let approach = if active { spot.approach } else { None };
-        h.flight = Some(InFlight { approach, arrival, spot, active });
+        let summon_prompt = matches!(plan.goal, Goal::Active { why: Why::Summon(crate::brain::SummonKind::Prompt(_)), .. });
+        h.flight = Some(InFlight { approach, arrival, spot, active, summon_prompt });
+        // Any move ends the bid marker and a sulk sit.
+        h.marker = None;
+        h.sulk_sit = false;
         if spot.kind == SpotKind::InPlace {
             // Bid right where she is.
             self.glitch = Some(Glitch::new(GlitchKind::Burst, now, self.rng.next()));
@@ -686,6 +746,8 @@ impl Avatar {
         if let Some(h) = &mut self.brain {
             h.rest = None;
         }
+        // Passive moves (roams, leaving his window) teleport quietly; bids and summons don't.
+        let quiet = !active;
         match arrival {
             Arrival::Hop => {
                 let mut rng = Rng::new(self.rng.next());
@@ -699,8 +761,8 @@ impl Avatar {
                 }
                 self.relayer(now);
             }
-            Arrival::Glitch => self.start_glitch_move(origin, place, now),
-            _ => self.start_teleport(origin, place, now),
+            Arrival::Glitch => self.start_glitch_move(origin, place, now, quiet),
+            _ => self.start_teleport_q(origin, place, now, quiet),
         }
     }
 
@@ -734,8 +796,8 @@ impl Avatar {
     }
 
     /// The `glitch` arrival: vanish, then land there; no bolt.
-    fn start_glitch_move(&mut self, to: (i32, i32), place: Placement, now: Instant) {
-        self.start_teleport(to, place, now);
+    fn start_glitch_move(&mut self, to: (i32, i32), place: Placement, now: Instant, quiet: bool) {
+        self.start_teleport_q(to, place, now, quiet);
         if let Some(tp) = &mut self.teleport {
             tp.no_bolt = true;
         }
@@ -814,9 +876,36 @@ impl Avatar {
             self.home = self.ground();
         }
         self.brain_feed(BrainEvent::Arrived(Arrived { approach: f.approach, arrival: f.arrival, covering }), now);
+        if f.summon_prompt {
+            self.summon_landed(now);
+        }
         for e in queued {
             self.play_emote(e, now);
         }
+    }
+
+    /// A summon for his prompt landed: one hop, a point at his window, then the attentive
+    /// lean (the NeedsYou mood) with the status pulsing for a few seconds.
+    fn summon_landed(&mut self, now: Instant) {
+        if self.placement == Placement::Ground {
+            self.hop = Some(now);
+            let right = self.brain_focused().is_some_and(|f| f.center().0 > self.ground().0);
+            let steps = [crate::pack::Step::Clip(if right { "point_right" } else { "point_left" }.into())];
+            let seq = self.pack.flatten(&steps);
+            if !seq.is_empty() {
+                self.anim.play(seq, now);
+            }
+        }
+        if let Some(h) = &mut self.brain {
+            h.pulse = Some(now);
+        }
+    }
+
+    /// NEEDS YOU inverted (the pulse's "on" half) at `now`.
+    pub(super) fn summon_pulse_on(&self, now: Instant) -> bool {
+        let Some(t0) = self.brain.as_ref().and_then(|h| h.pulse) else { return false };
+        let d = now.saturating_duration_since(t0);
+        d < PULSE_FOR && (d.as_millis() / PULSE_HALF_MS).is_multiple_of(2) && self.prompt_ui.as_ref().is_some_and(|p| !p.dismissed)
     }
 
     // ---- emotes, hide ---------------------------------------------------------------------------
@@ -888,11 +977,55 @@ impl Avatar {
             EmoteKey::Wave => 0,
         };
         let mut played = "fx";
-        if standing && !steps.is_empty() {
+        // The bid marker: up on a bid, a pop on every beat, gone when it's over.
+        if let Some(h) = &mut self.brain {
+            match e {
+                EmoteKey::Bid(_) | EmoteKey::Insist(_) => {
+                    let double = matches!(e, EmoteKey::Insist(s) if s >= 2);
+                    let t0 = h.marker.map_or(now, |m| m.t0);
+                    h.marker = Some(Marker { t0, pop: now, double });
+                }
+                EmoteKey::Satisfied { .. } | EmoteKey::Sulk => h.marker = None,
+                EmoteKey::Wave => {}
+            }
+        }
+        let sulk_sit = e == EmoteKey::Sulk
+            && standing
+            && self.placement == Placement::Ground
+            && self.pack.behaviour.brain.floor_sit.is_some()
+            && self.pack.behaviour.brain.sulk_sit.is_some();
+        if sulk_sit {
+            // Arms crossed, sad, then down onto the floor, and she stays low.
+            if let Some(h) = &mut self.brain {
+                h.rest = Some(RestPose::FloorSit);
+                h.sulk_sit = true;
+            }
+            self.relayer(now);
+            let entry = self.pack.behaviour.brain.floor_sit.as_ref().and_then(|s| s.entry.clone()).unwrap_or_default();
+            let mut seq = self.pack.flatten(&self.resolve_steps(&steps));
+            seq.extend(self.pack.flatten(&entry));
+            if !seq.is_empty() {
+                self.anim.play(seq, now);
+            }
+            played = "clip+sit";
+        } else if standing && !steps.is_empty() {
             let seq = self.pack.flatten(&self.resolve_steps(&steps));
             if !seq.is_empty() {
                 self.anim.play(seq, now);
                 played = "clip";
+            }
+        }
+        // Each insist beat: a hop on the floor or a window side, a leg kick from the bar.
+        if let EmoteKey::Insist(_) = e {
+            let hang = matches!(self.placement, Placement::Pose { frame } if self.brain_pose("hang") == Some(frame) || self.brain_pose("hang_upside_down") == Some(frame));
+            if self.placement == Placement::Ground || (self.posed() && !hang) {
+                self.hop = Some(now);
+            }
+            if self.posed() {
+                let dir = if self.rng.pick(2) == 0 { 1.0 } else { -1.0 };
+                if let Some(h) = &mut self.brain {
+                    h.leg_kick = Some((now, dir));
+                }
             }
         }
         if played == "fx" && self.posed() {
@@ -959,19 +1092,158 @@ impl Avatar {
         }
     }
 
-    /// The hanging pendulum (device px at the bottom, in 2 px steps): a slow idle sway, plus
-    /// a bid's kick decaying over ~3 s.
-    pub(super) fn hang_swing(&self, now: Instant) -> i32 {
+    /// Hanging life, device px in 2 px steps: (the pendulum at the bottom, the shins' extra
+    /// kick from the knee). A slow sway, a bid's kick decaying over ~3 s, and every ~3.6 s
+    /// one leg-kick out and back (alternating sides), plus a bigger one on an insist beat.
+    pub(super) fn hang_swing(&self, now: Instant) -> (i32, i32) {
+        use std::f32::consts::{PI, TAU};
         let sf = self.layout.sf;
         let t = now.saturating_duration_since(self.bob_t0).as_secs_f32();
-        let mut v = 3.0 * sf * (t * std::f32::consts::TAU / 3.4).sin();
+        let mut v = 5.0 * sf * (t * TAU / 3.2).sin();
         if let Some((t0, amp)) = self.brain.as_ref().and_then(|h| h.kick) {
             let k = now.saturating_duration_since(t0).as_secs_f32();
             if k < 3.5 {
-                v += amp * (-k / 1.1).exp() * (k * std::f32::consts::TAU / 1.25).sin();
+                v += amp * (-k / 1.1).exp() * (k * TAU / 1.25).sin();
             }
         }
-        ((v / 2.0).round() * 2.0) as i32
+        let cycle = 3.6;
+        let n = (t / cycle).floor();
+        let u = (t - n * cycle) / 0.8;
+        let mut leg = if u < 1.0 { 9.0 * sf * (PI * u).sin() * if n as i64 % 2 == 0 { 1.0 } else { -1.0 } } else { 0.0 };
+        if let Some((t0, dir)) = self.brain.as_ref().and_then(|h| h.leg_kick) {
+            let k = now.saturating_duration_since(t0).as_secs_f32() / 0.7;
+            if k < 1.0 {
+                leg += 14.0 * sf * dir * (PI * k).sin();
+            }
+        }
+        let q = |x: f32| ((x / 2.0).round() * 2.0) as i32;
+        (q(v), q(leg))
+    }
+
+    /// The knee row of a hanging frame (kick from here), or past the bottom (no kick: hanging
+    /// by the feet, standing).
+    pub(super) fn knee_row(&self, fi: usize, f: &Frame) -> i32 {
+        let kick = match self.placement {
+            Placement::Pose { frame } if frame == fi => self.brain_pose("hang_upside_down") != Some(fi),
+            _ => false,
+        };
+        if !kick {
+            return i32::MAX / 2;
+        }
+        let vb = self.pack.frames[fi].bounds;
+        f.top + (vb.height as f32 * self.layout.geo.scale * KNEE_AT) as i32
+    }
+
+    // ---- the bid marker -------------------------------------------------------------------------
+
+    /// The marker's bob (device px) and pop scale at `now`, quantized (what is drawn).
+    fn marker_state(&self, now: Instant) -> Option<(i32, i32)> {
+        let m = self.brain.as_ref()?.marker?;
+        let sf = self.layout.sf;
+        let t = now.saturating_duration_since(m.t0).as_secs_f32();
+        let bob = ((2.5 * sf * (t * std::f32::consts::TAU / 1.2).sin() / 2.0).round() * 2.0) as i32;
+        let p = now.saturating_duration_since(m.pop).as_secs_f32();
+        let scale = if p < 0.12 {
+            0.45 + 0.8 * p / 0.12
+        } else if p < 0.3 {
+            1.25 - 0.25 * (p - 0.12) / 0.18
+        } else {
+            1.0
+        };
+        Some((bob, (scale * 20.0).round() as i32))
+    }
+
+    pub(super) fn marker_next_change(&self, now: Instant) -> Option<Instant> {
+        let cur = self.marker_state(now)?;
+        let step = Duration::from_millis(33);
+        (1..=60).map(|k| now + step * k).find(|&t| self.marker_state(t) != Some(cur)).or(Some(now + Duration::from_secs(2)))
+    }
+
+    /// Draw (or take down) the "!" badge by her head: shaped solid-colour layers like the
+    /// hearts, so it costs no GPUI redraw.
+    pub(super) fn update_marker(&mut self, now: Instant) {
+        let show = self.loaded && !self.hidden && !self.quitting && self.teleport.is_none();
+        let st = if show { self.marker_state(now) } else { None };
+        let geo = st.and_then(|(bob, sc)| {
+            let f = self.frame_or_default(self.anim.frame())?;
+            let l = self.layout;
+            let sf = l.sf;
+            let base = ((self.applied.0 + l.avatar_x) as f32, (self.applied.1 + l.avatar_y) as f32);
+            let head = (base.0 + f.head_x as f32, base.1 + f.face.0 as f32);
+            // Beside her head, on the side away from his window (never over more of it).
+            let away = self.brain_focused().map_or(1.0, |w| if head.0 < w.center().0 as f32 { -1.0 } else { 1.0 });
+            let c = (head.0 + away * 50.0 * sf, head.1 - 22.0 * sf + bob as f32);
+            Some((c, head, sc as f32 / 20.0, away))
+        });
+        let double = self.brain.as_ref().and_then(|h| h.marker).is_some_and(|m| m.double);
+        let key = geo.map(|(c, _, sc, _)| (c.0.round() as i32, c.1.round() as i32, (sc * 20.0) as i32, double));
+        let Some(h) = &mut self.brain else { return };
+        if key == h.marker_shown {
+            return;
+        }
+        h.marker_shown = key;
+        let Some((c, head, sc, away)) = geo else {
+            for k in 0..3 {
+                self.x11.fx_unmap(MARK_LAYER + k);
+            }
+            self.x11.flush();
+            return;
+        };
+        let r = MARK_R * self.layout.sf * sc;
+        let place = |polys: &[Vec<(f32, f32)>]| {
+            let all: Vec<(f32, f32)> = polys.iter().flatten().copied().collect();
+            let x0 = all.iter().map(|p| p.0).fold(f32::MAX, f32::min).floor() as i32;
+            let y0 = all.iter().map(|p| p.1).fold(f32::MAX, f32::min).floor() as i32;
+            let x1 = all.iter().map(|p| p.0).fold(f32::MIN, f32::max).ceil() as i32;
+            let y1 = all.iter().map(|p| p.1).fold(f32::MIN, f32::max).ceil() as i32;
+            let mut rows = Vec::new();
+            for poly in polys {
+                let local: Vec<(f32, f32)> = poly.iter().map(|&(x, y)| (x - x0 as f32, y - y0 as f32)).collect();
+                shape::poly_rows(&local, &mut rows);
+            }
+            ((x0, y0), (x1 - x0, y1 - y0), rows)
+        };
+        let disc = |rad: f32| -> Vec<(f32, f32)> {
+            (0..28).map(|i| {
+                let a = i as f32 / 28.0 * std::f32::consts::TAU;
+                (c.0 + rad * a.cos(), c.1 + rad * a.sin())
+            }).collect()
+        };
+        // A short tail toward her head.
+        let to = ((head.0 - c.0), (head.1 - c.1));
+        let len = (to.0 * to.0 + to.1 * to.1).sqrt().max(1.0);
+        let (ux, uy) = (to.0 / len, to.1 / len);
+        let tail = |rad: f32| -> Vec<(f32, f32)> {
+            let (px_, py_) = (-uy, ux);
+            vec![
+                (c.0 + ux * rad * 0.7 + px_ * rad * 0.42, c.1 + uy * rad * 0.7 + py_ * rad * 0.42),
+                (c.0 + ux * rad * 0.7 - px_ * rad * 0.42, c.1 + uy * rad * 0.7 - py_ * rad * 0.42),
+                (c.0 + ux * (rad + r * 0.55), c.1 + uy * (rad + r * 0.55)),
+            ]
+        };
+        let edge = 2.0 * self.layout.sf;
+        let bang = |cx: f32, w: f32| -> Vec<Vec<(f32, f32)>> {
+            let dot: Vec<(f32, f32)> = (0..12)
+                .map(|i| {
+                    let a = i as f32 / 12.0 * std::f32::consts::TAU;
+                    (cx + r * 0.15 * a.cos(), c.1 + r * 0.47 + r * 0.15 * a.sin())
+                })
+                .collect();
+            vec![vec![(cx - w, c.1 - r * 0.62), (cx + w, c.1 - r * 0.62), (cx + w * 0.6, c.1 + r * 0.2), (cx - w * 0.6, c.1 + r * 0.2)], dot]
+        };
+        let glyph: Vec<Vec<(f32, f32)>> = if double {
+            [c.0 - r * 0.27, c.0 + r * 0.27].iter().flat_map(|&x| bang(x, r * 0.15)).collect()
+        } else {
+            bang(c.0, r * 0.22)
+        };
+        let _ = away;
+        let (o, sz, rows) = place(&glyph);
+        self.x11.fx_set(MARK_LAYER + 2, MARK_GLYPH, o, sz, &rows).ok();
+        let (o, sz, rows) = place(&[disc(r), tail(r)]);
+        self.x11.fx_set_below(MARK_LAYER + 1, MARK_LAYER + 2, MARK_FILL, o, sz, &rows).ok();
+        let (o, sz, rows) = place(&[disc(r + edge), tail(r + edge)]);
+        self.x11.fx_set_below(MARK_LAYER, MARK_LAYER + 1, MARK_RIM, o, sz, &rows).ok();
+        self.x11.flush();
     }
 
     // ---- layer ----------------------------------------------------------------------------------
@@ -989,7 +1261,8 @@ impl Avatar {
         let b = &self.pack.behaviour.brain;
         match rest {
             RestPose::FloorSit => {
-                let fs = b.floor_sit.as_ref()?;
+                let sulky = self.brain.as_ref().is_some_and(|h| h.sulk_sit);
+                let fs = if sulky { b.sulk_sit.as_ref().or(b.floor_sit.as_ref())? } else { b.floor_sit.as_ref()? };
                 Some((self.pack.index.get(&fs.base).copied()?, self.loop_seq(fs.r#loop.as_ref())))
             }
             RestPose::Nap => Some((self.pack.index.get(b.nap.as_ref()?).copied()?, None)),

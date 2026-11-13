@@ -65,6 +65,8 @@ pub struct Glitch {
     pub kind: GlitchKind,
     pub ms: f32,
     seed: u64,
+    /// The quiet passive-teleport legs: short, small offsets, little fringing.
+    pub soft: bool,
 }
 
 impl Glitch {
@@ -76,7 +78,18 @@ impl Glitch {
             GlitchKind::Land => 330.0,
             GlitchKind::Vanish => 300.0,
         };
-        Glitch { t0: now, kind, ms, seed }
+        Glitch { t0: now, kind, ms, seed, soft: false }
+    }
+
+    /// A quiet teleport leg (passive moves): a shorter dissolve, and a ~150 ms rebuild
+    /// with little RGB fringing.
+    pub fn soft(kind: GlitchKind, now: Instant, seed: u64) -> Glitch {
+        let ms = match kind {
+            GlitchKind::Land => 150.0,
+            GlitchKind::Vanish => 240.0,
+            _ => Glitch::new(kind, now, seed).ms,
+        };
+        Glitch { t0: now, kind, ms, seed, soft: true }
     }
 
     pub fn done(&self, now: Instant) -> bool {
@@ -90,6 +103,10 @@ impl Glitch {
     /// Interference 0..1.
     pub fn strength(&self, now: Instant) -> f32 {
         let u = self.u(now);
+        if self.soft && self.kind == GlitchKind::Land {
+            // Reassembled at once; a faint settle.
+            return if u < 0.35 { 0.35 } else { 0.25 * (1.0 - (u - 0.35) / 0.65) };
+        }
         match self.kind {
             GlitchKind::Burst => stutter(&STUTTER_MINOR, u, self.seed),
             GlitchKind::Big => stutter(&STUTTER_BIG, u, self.seed),
@@ -118,6 +135,7 @@ impl Glitch {
         match self.kind {
             GlitchKind::Burst | GlitchKind::Big | GlitchKind::Appear => 1.0,
             // Starts a quarter in, so the body never blinks out between bolt and arrival.
+            GlitchKind::Land if self.soft => 0.5 + 0.5 * (u / 0.3).min(1.0),
             GlitchKind::Land => 0.25 + 0.75 * (u / 0.4).min(1.0),
             GlitchKind::Vanish => 1.0 - 0.8 * u,
         }
@@ -148,7 +166,7 @@ impl Glitch {
         let u = self.u(now);
         match self.kind {
             GlitchKind::Vanish if u > 0.45 => Some(BOLT_RED),
-            GlitchKind::Land if u < 0.3 => Some(BOLT_RED),
+            GlitchKind::Land if u < if self.soft { 0.2 } else { 0.3 } => Some(BOLT_RED),
             _ => None,
         }
     }
@@ -500,6 +518,8 @@ pub struct Pose {
     /// Hanging (from the bar, a window side): rows below the grip shear this far at the
     /// bottom, the grip stays put. Overrides the others.
     pub swing: i32,
+    /// Hanging: the shins kick this far more (at the feet) than the swing, from the knee.
+    pub kick: i32,
 }
 
 /// Rows (avatar-local) a pose acts on.
@@ -518,20 +538,26 @@ pub struct PoseRows {
     pub waist: i32,
     /// The grip row of a hanging pose (`swing`).
     pub grip: i32,
+    /// The knee row of a hanging pose (`kick`; at or past `h`: no kick).
+    pub knee: i32,
 }
 
 /// Bands `(y0, y1, dx, dy)` in paint order (legs, torso, head) for a pose. The waist rows
 /// repeat over the breath height, so nothing opens up between torso and legs.
 pub fn pose_bands(p: Pose, r: PoseRows) -> Vec<(i32, i32, i32, i32)> {
-    if p.swing != 0 {
-        // A pendulum from the grip: 0 at the grip row, `swing` at the bottom.
+    if p.swing != 0 || p.kick != 0 {
+        // A pendulum from the grip: 0 at the grip row, `swing` at the bottom; the shins
+        // swing `kick` further from the knee down.
         let grip = r.grip.clamp(r.y0, r.h - 1);
         let span = (r.h - grip).max(1) as f32;
+        let knee = r.knee.clamp(grip + 1, r.h);
+        let shin = (r.h - knee).max(1) as f32;
         let mut out = vec![(r.y0, grip, 0, 0)];
         let mut y = grip;
         while y < r.h {
             let y1 = (y + 2).min(r.h);
-            let dx = (p.swing as f32 * (y - grip) as f32 / span).round() as i32;
+            let leg = if y >= knee { p.kick as f32 * (y - knee) as f32 / shin } else { 0.0 };
+            let dx = (p.swing as f32 * (y - grip) as f32 / span + leg).round() as i32;
             match out.last_mut() {
                 Some(last) if last.1 == y && last.2 == dx => last.1 = y1,
                 _ => out.push((y, y1, dx, 0)),
@@ -704,6 +730,9 @@ pub const BOLT_LAND: f32 = 0.5;
 pub const BOLT_END: f32 = 0.66;
 /// The travelling line: one flat layer in the bar's bolt red.
 pub const BOLT_LINE: u32 = 0xff1738;
+/// The bolt's light core and dark edge.
+pub const BOLT_CORE: u32 = 0xffe1e8;
+pub const BOLT_EDGE: u32 = 0x3a0012;
 
 #[derive(Clone, Copy, Debug)]
 struct RoutePt {
@@ -789,6 +818,12 @@ impl Bolt {
     /// The bolt at time `u` as one polygon, root px (empty before/after the strike):
     /// thickest just behind the tip, tapering to the trail.
     pub fn frame(&self, u: f32) -> Vec<(f32, f32)> {
+        self.frame_k(u, 1.0, 0.0)
+    }
+
+    /// The same strike `k` times as thick plus `pad` px: a light core (k < 1) or a dark
+    /// outline (k = 1, pad > 0) that makes the line read as a streak, not a stray mark.
+    pub fn frame_k(&self, u: f32, k: f32, pad: f32) -> Vec<(f32, f32)> {
         let (head, tail) = Bolt::span(u);
         if head <= tail + 0.004 {
             return Vec::new();
@@ -807,7 +842,7 @@ impl Bolt {
         let widths: Vec<f32> = seg
             .iter()
             .enumerate()
-            .map(|(i, p)| if i == 0 || i == n - 1 { 0.6 } else { radius * (0.45 + 0.6 * (p.2 - tail) / travelled) })
+            .map(|(i, p)| if i == 0 || i == n - 1 { 0.6 + pad * 0.5 } else { radius * k * (0.45 + 0.6 * (p.2 - tail) / travelled) + pad })
             .collect();
         ribbon(&seg.iter().map(|p| (p.0, p.1)).collect::<Vec<_>>(), &widths)
     }
@@ -1015,8 +1050,8 @@ mod tests {
 
     #[test]
     fn pose_bands_cover_without_gaps() {
-        let r = PoseRows { y0: -50, h: 400, top: 10, shear_end: 80, neck: 120, waist: 220, grip: 0 };
-        let bands = pose_bands(Pose { breath: 2, nod: 0, sway: 3, swing: 0 }, r);
+        let r = PoseRows { y0: -50, h: 400, top: 10, shear_end: 80, neck: 120, waist: 220, grip: 0, knee: 400 };
+        let bands = pose_bands(Pose { breath: 2, nod: 0, sway: 3, ..Pose::default() }, r);
         // Every destination row from the top to the bottom is painted by some band.
         for y in 10..400 {
             assert!(bands.iter().any(|&(a, b, _, dy)| y >= a + dy && y < b + dy), "row {y} {bands:?}");
@@ -1026,7 +1061,7 @@ mod tests {
         // The legs never move.
         assert!(bands.iter().filter(|b| b.1 > 220).all(|b| b.2 == 0 && b.3 == 0));
         // Music: the shear reaches down to the waist (the upper body tilts), head nods.
-        let music = pose_bands(Pose { breath: 0, nod: 4, sway: 4, swing: 0 }, PoseRows { shear_end: 220, ..r });
+        let music = pose_bands(Pose { breath: 0, nod: 4, sway: 4, ..Pose::default() }, PoseRows { shear_end: 220, ..r });
         for y in 10..400 {
             assert!(music.iter().any(|&(a, b, _, dy)| y >= a + dy && y < b + dy), "row {y}");
         }
@@ -1040,6 +1075,13 @@ mod tests {
         }
         assert!(hang.iter().filter(|b| b.1 <= 31).all(|b| b.2 == 0));
         assert_eq!(hang.last().unwrap().2, -9);
+        // A kick from the knee: nothing above it moves more than the swing, the feet the most.
+        let kick = pose_bands(Pose { swing: 4, kick: 10, ..Pose::default() }, PoseRows { grip: 30, knee: 300, ..r });
+        for y in -50..400 {
+            assert_eq!(kick.iter().filter(|&&(a, b, _, _)| y >= a && y < b).count(), 1, "row {y}");
+        }
+        assert!(kick.iter().filter(|b| b.1 <= 300).all(|b| b.2 <= 4));
+        assert_eq!(kick.last().unwrap().2, 14);
     }
 
     #[test]

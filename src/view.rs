@@ -251,8 +251,12 @@ impl Bubble {
 
 const TYPE_TICK: Duration = Duration::from_millis(35);
 const HEARTS_MS: u64 = 1_150;
-/// Effect layer of the teleport bolt.
+/// Effect layers of the teleport bolt: the red line, its light core and its dark edge.
 const BOLT_LAYER: usize = 0;
+const BOLT_CORE_LAYER: usize = 1;
+const BOLT_EDGE_LAYER: usize = 2;
+/// The bubble and tag come back this long after a loud teleport has reformed her.
+const HUD_AFTER_TELEPORT: Duration = Duration::from_millis(200);
 /// First effect layer of the hearts: a rim and a fill per heart.
 const HEART_LAYER: usize = 6;
 /// The contact shadow under a perch, stacked right below the avatar window.
@@ -326,6 +330,9 @@ struct Teleport {
     moved: bool,
     /// The brain's `glitch` arrival: vanish, then land there (no bolt).
     no_bolt: bool,
+    /// A passive move: a shorter dissolve, a ~150 ms rebuild with little fringing, and the
+    /// tag back with the body.
+    quiet: bool,
 }
 
 pub struct Avatar {
@@ -344,6 +351,8 @@ pub struct Avatar {
     rng: Rng,
     bubble: Option<Bubble>,
     hearts: Option<(Instant, Point<Pixels>)>,
+    /// The HUD stays down until then (a beat after a teleport).
+    hud_after: Option<Instant>,
     /// Click reaction in progress: the status tag steps aside until then.
     reaction_until: Option<Instant>,
     menu: Option<(Point<Pixels>, Instant)>,
@@ -483,6 +492,7 @@ impl Avatar {
             rng: Rng::seeded(),
             bubble: None,
             hearts: None,
+            hud_after: None,
             reaction_until: None,
             menu: None,
             press: None,
@@ -731,12 +741,13 @@ impl Avatar {
             // over two beats (4 px at the top of the hair).
             let nod = (4.0 * sf * (0.5 + 0.5 * (p * std::f32::consts::TAU).cos())).round() as i32;
             let sway = (4.0 * sf * (beats * std::f32::consts::PI).sin()).round() as i32;
-            return fx::Pose { breath: 0, nod, sway, swing: 0 };
+            return fx::Pose { breath: 0, nod, sway, ..fx::Pose::default() };
         }
         if self.posed() {
             // Hanging: no breath or hair sway (they'd pull the hands off the grip), a slow
             // pendulum instead, kicked by the bid emotes.
-            return fx::Pose { swing: self.hang_swing(now), ..fx::Pose::default() };
+            let (swing, kick) = self.hang_swing(now);
+            return fx::Pose { swing, kick, ..fx::Pose::default() };
         }
         let life = &self.pack.behaviour.life;
         let t = now.saturating_duration_since(self.bob_t0);
@@ -749,7 +760,7 @@ impl Avatar {
         } else {
             0
         };
-        fx::Pose { breath, nod: 0, sway, swing: 0 }
+        fx::Pose { breath, nod: 0, sway, ..fx::Pose::default() }
     }
 
     fn pose_next_change(&self, now: Instant) -> Option<Instant> {
@@ -775,6 +786,7 @@ impl Avatar {
             Placement::Pose { frame } if frame == fi => self.anchor_px(fi).1 - l.avatar_y,
             _ => 0,
         };
+        let knee = self.knee_row(fi, f);
         fx::PoseRows {
             y0: -l.avatar_y,
             h: l.geo.height as i32,
@@ -783,6 +795,7 @@ impl Avatar {
             neck,
             waist,
             grip,
+            knee,
         }
     }
 
@@ -1053,7 +1066,9 @@ impl Avatar {
     }
 
     fn fx_hide_bolt(&self) {
+        self.x11.fx_unmap(BOLT_CORE_LAYER);
         self.x11.fx_unmap(BOLT_LAYER);
+        self.x11.fx_unmap(BOLT_EDGE_LAYER);
         self.x11.flush();
     }
 
@@ -1088,6 +1103,7 @@ impl Avatar {
             take(Some((now + FRAME_FX).min(t0 + Duration::from_millis(HEARTS_MS))));
         }
         take(self.reaction_until);
+        take(self.hud_after.filter(|&t| t > now));
         take(self.menu.map(|m| m.1));
         if let Some(s) = &self.session {
             take(s.link.deadline(now));
@@ -1219,6 +1235,10 @@ impl Avatar {
             self.reaction_until = None;
             dirty = true;
         }
+        if self.hud_after.is_some_and(|t| t <= now) {
+            self.hud_after = None;
+            dirty = true;
+        }
         if let Some((_, until)) = self.menu
             && until <= now
         {
@@ -1322,6 +1342,7 @@ impl Avatar {
         self.apply_offset(now);
         self.update_notes(now);
         self.update_glints(now);
+        self.update_marker(now);
         if dirty {
             cx.notify();
         }
@@ -1369,7 +1390,7 @@ impl Avatar {
                 let (to, place, seed) = self.teleport.as_ref().map(|t| (t.to, t.place, t.seed)).unwrap_or((self.origin, self.placement, 0));
                 self.arrive(to, place, now);
                 self.hidden = false;
-                self.glitch = Some(Glitch::new(GlitchKind::Land, now, seed ^ 0x1a4d));
+                self.glitch = Some(self.land_glitch(now, seed));
                 if let Some(tp) = &mut self.teleport {
                     tp.moved = true;
                     tp.leg = Leg::Appear;
@@ -1387,7 +1408,7 @@ impl Avatar {
                 }
             }
             Leg::Appear => {
-                self.teleport = None;
+                self.teleport_done(now);
                 if self.placement == Placement::Ground {
                     state::save_ground(self.ground());
                 }
@@ -1406,7 +1427,7 @@ impl Avatar {
         // The trail is short and closing in: the landing glitch starts under it.
         if u >= fx::BOLT_LAND && self.hidden {
             self.hidden = false;
-            self.glitch = Some(Glitch::new(GlitchKind::Land, now, seed ^ 0x1a4d));
+            self.glitch = Some(self.land_glitch(now, seed));
             if !moved {
                 moved = true;
                 if let Some(tp) = &mut self.teleport {
@@ -1421,7 +1442,7 @@ impl Avatar {
             self.fx_hide_bolt();
             if self.glitch.is_none() {
                 // The landing already finished (a stalled frame): done.
-                self.teleport = None;
+                self.teleport_done(now);
                 if self.placement == Placement::Ground {
                     state::save_ground(self.ground());
                 }
@@ -1434,8 +1455,15 @@ impl Avatar {
         if let Some(b) = &tp.bolt {
             let (bx, by, bw, bh) = b.bbox();
             let o = (bx, by);
-            let rects = fx::bolt_rects(&b.frame(u), o);
-            self.x11.fx_set(BOLT_LAYER, fx::BOLT_LINE, o, (bw, bh), &rects).ok();
+            // A light core over the red line and a dark edge under it: a streak, legible on
+            // light and dark windows alike.
+            let sf = self.layout.sf;
+            let core = fx::bolt_rects(&b.frame_k(u, 0.38, 0.0), o);
+            let line = fx::bolt_rects(&b.frame(u), o);
+            let edge = fx::bolt_rects(&b.frame_k(u, 1.0, 1.5 * sf), o);
+            self.x11.fx_set(BOLT_CORE_LAYER, fx::BOLT_CORE, o, (bw, bh), &core).ok();
+            self.x11.fx_set_below(BOLT_LAYER, BOLT_CORE_LAYER, fx::BOLT_LINE, o, (bw, bh), &line).ok();
+            self.x11.fx_set_below(BOLT_EDGE_LAYER, BOLT_LAYER, fx::BOLT_EDGE, o, (bw, bh), &edge).ok();
             self.x11.flush();
         }
         if u >= fx::BOLT_ARRIVE && !moved {
@@ -2232,7 +2260,34 @@ impl Avatar {
         }
         let seed = self.rng.next();
         self.glitch = Some(Glitch::new(GlitchKind::Vanish, now, seed));
-        self.teleport = Some(Teleport { seed, leg: Leg::Vanish, to, place, bolt: None, moved: false, no_bolt: false });
+        self.teleport = Some(Teleport { seed, leg: Leg::Vanish, to, place, bolt: None, moved: false, no_bolt: false, quiet: false });
+    }
+
+    /// A teleport, quiet (passive moves) or not.
+    fn start_teleport_q(&mut self, to: (i32, i32), place: Placement, now: Instant, quiet: bool) {
+        self.start_teleport(to, place, now);
+        if quiet && let Some(tp) = &mut self.teleport {
+            tp.quiet = true;
+            self.glitch = Some(Glitch::soft(GlitchKind::Vanish, now, tp.seed));
+        }
+    }
+
+    /// The landing glitch of the teleport in flight.
+    fn land_glitch(&self, now: Instant, seed: u64) -> Glitch {
+        if self.teleport.as_ref().is_some_and(|t| t.quiet) {
+            Glitch::soft(GlitchKind::Land, now, seed ^ 0x1a4d)
+        } else {
+            Glitch::new(GlitchKind::Land, now, seed ^ 0x1a4d)
+        }
+    }
+
+    /// The HUD comes back a beat after a loud teleport has fully reformed her.
+    fn teleport_done(&mut self, now: Instant) {
+        let quiet = self.teleport.as_ref().is_some_and(|t| t.quiet);
+        self.teleport = None;
+        if !quiet {
+            self.hud_after = Some(now + HUD_AFTER_TELEPORT);
+        }
     }
 
     /// Window origin that puts the seat (or the feet) on `r`'s top edge at `r.x + dx`.
@@ -3178,8 +3233,15 @@ impl Render for Avatar {
             .h(l.lp(ah)),
         );
 
-        let hud = !hidden && self.teleport.is_none() && !self.quitting;
-        let Status { label, tone, invert, glyph: glyph_kind } = self.status();
+        let hud = !hidden && self.teleport.is_none() && !self.quitting && self.hud_after.is_none_or(|t| t <= now);
+        // A quiet (passive) teleport brings the tag back with the body as it reforms.
+        let tag_hud = hud || (!hidden && !self.quitting && self.teleport.as_ref().is_some_and(|t| t.quiet && matches!(t.leg, Leg::Appear)));
+        let Status { label, tone, mut invert, glyph: glyph_kind } = self.status();
+        // A summon's NEEDS YOU pulses for a few seconds after she lands.
+        let pulse = self.summon_pulse_on(now);
+        if pulse {
+            invert = !invert;
+        }
         // What the bubble shows: the text field, a pending prompt, the reply, or the probe.
         let mode = if !hud {
             None
@@ -3204,7 +3266,7 @@ impl Render for Avatar {
         // Hanging from the bar or clinging to a window side, the tag would sit in the bar or
         // over his window: it comes back when she lands (a prompt or reply still shows it).
         let posed_quiet = self.posed() && self.prompt_ui.is_none() && !self.bubble.as_ref().is_some_and(|b| b.collapsed);
-        let show_tag = hud && self.frames.iter().any(Option::is_some) && !bubble_open && self.reaction_until.is_none() && !posed_quiet;
+        let show_tag = tag_hud && self.frames.iter().any(Option::is_some) && !bubble_open && self.reaction_until.is_none() && !posed_quiet;
         // In a glitch the tag tears with the body: strips of it, shifted by the same bands.
         let mut tag_strips: Vec<ShapeRect> = Vec::new();
         let torn = show_tag && !collapsed && self.glitch.is_some();
@@ -3418,7 +3480,7 @@ impl Render for Avatar {
             let tail_x = head_l.clamp(lo, hi.max(lo));
             let g = PanelGeom { x, y, w, h, tail_x, tip: (head_l.clamp(tail_x - 9.0, tail_x + 9.0), y + h + TAIL_H) };
             panel_geom = Some(g);
-            let (frame_c, accent_c, bar_c, surface_c) = (pal.frame, pal.accent, pal.slash, pal.surface);
+            let (frame_c, accent_c, bar_c, surface_c) = (if pulse { tone } else { pal.frame }, pal.accent, pal.slash, pal.surface);
             let bg = canvas(
                 |_, _, _| (),
                 move |_, _, window, _| {
@@ -3469,14 +3531,18 @@ impl Render for Avatar {
                 )
                 .child(tracked(&header_label, 1.5).text_size(px(9.5)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(pal.dim)))
                 .child(div().flex_1())
-                .child(
+                .child({
+                    // Pulsing (a summon just landed): the status chip inverts.
+                    let (fg, bg) = if pulse { (pal.surface, tone) } else { (tone, pal.surface) };
                     div()
                         .flex()
                         .items_center()
                         .gap(px(5.0))
-                        .child(glyph(&glyph_kind, tone, pal.surface))
-                        .child(tracked(&label, 1.5).text_size(px(9.5)).font_weight(FontWeight::BOLD).text_color(rgb(tone))),
-                );
+                        .px(px(if pulse { 4.0 } else { 0.0 }))
+                        .when(pulse, |d| d.bg(rgb(bg)))
+                        .child(glyph(&glyph_kind, fg, bg))
+                        .child(tracked(&label, 1.5).text_size(px(9.5)).font_weight(FontWeight::BOLD).text_color(rgb(fg)))
+                });
             let caret = matches!(mode, PanelMode::Input { .. });
             let n_lines = lines.len();
             let text_c = pal.text;

@@ -427,7 +427,7 @@
       "anchor": {
         "name": "ceiling",
         "x": 626,
-        "y": 119
+        "y": 110
       },
       "visibleBounds": {
         "x": 186,
@@ -623,18 +623,31 @@
     },
     "sulk": [
       {
-        "frame": "annoyed",
-        "ms": 900
-      },
-      {
         "frame": "arms_crossed-annoyed",
-        "ms": 3000
+        "ms": 2600
       },
       {
         "frame": "sad",
-        "ms": 1600
+        "ms": 1500
+      },
+      {
+        "frame": "concerned",
+        "ms": 900
       }
     ],
+    "sulkSit": {
+      "base": "sit_floor-neutral",
+      "loop": [
+        {
+          "frame": "sit_floor-neutral",
+          "ms": 5000
+        },
+        {
+          "frame": "sit_floor-sleepy",
+          "ms": 3500
+        }
+      ]
+    },
     "wave": [
       "wave"
     ],

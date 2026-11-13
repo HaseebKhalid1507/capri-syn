@@ -88,7 +88,8 @@ impl Default for BrainSettings {
                 (Approach::Beside, 1.0),
             ],
             // drop_in needs the ragdoll (R-P3): weight 0 until then, whatever the file says.
-            arrivals: vec![(Arrival::Teleport, 3.0), (Arrival::Glitch, 2.0), (Arrival::DropIn, 0.0), (Arrival::Hop, 1.0)],
+            // glitch lost both r6 critic pairs to teleport: 1 by default (still selectable).
+            arrivals: vec![(Arrival::Teleport, 3.0), (Arrival::Glitch, 1.0), (Arrival::DropIn, 0.0), (Arrival::Hop, 1.0)],
             no_repeat: 2,
             cover_max_pct: 12.0,
             passive_every_min: (3.0, 10.0),
@@ -243,6 +244,7 @@ mod tests {
         let d = BrainSettings::default();
         assert!(d.enabled && d.no_repeat == 2 && d.cover_max_pct == 12.0 && d.max_moves_per_hour == 15);
         assert_eq!(d.fullscreen, Fullscreen::Hide);
+        assert_eq!(d.arrivals.iter().find(|a| a.0 == Arrival::Glitch).unwrap().1, 1.0, "glitch: 1 by default since r6");
     }
 
     #[test]
