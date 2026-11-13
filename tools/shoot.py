@@ -360,6 +360,27 @@ def main():
     if subprocess.run(["pgrep", "-x", "synaps-avatar"], capture_output=True).returncode == 0:
         print("shoot: an avatar is already running; refusing", file=sys.stderr)
         return 1
+    if stage:
+        # His own Capri on the stage, or his pointer over it: wait (up to SA_CLEAR_WAIT s) for
+        # the stage to be clear for 5 s in a row before starting at all.
+        t = time.time()
+        r = xroot()
+        st4 = tuple(stage[:4])
+        clear_since = None
+        while True:
+            q = r.query_pointer()
+            ptr_in = st4[0] <= q.root_x < st4[0] + st4[2] and st4[1] <= q.root_y < st4[1] + st4[3]
+            busy = ptr_in or foreign_on_stage(xdisp(), r, st4)
+            now_ = time.time()
+            clear_since = None if busy else (clear_since or now_)
+            if clear_since and now_ - clear_since >= 5:
+                break
+            if now_ - t > float(os.environ.get("SA_CLEAR_WAIT", "300")):
+                print(f"shoot: stage not clear (his avatar or pointer on it) for {now_ - t:.0f} s: not starting")
+                return 3
+            time.sleep(0.5)
+        if time.time() - t > 6:
+            print(f"shoot: waited {time.time() - t:.0f} s for the stage to clear")
     tmo = min(tmo, 300 if long_run else 30)
     # The user's own state (her spot, her drives) and settings are never touched by tests.
     import shutil
