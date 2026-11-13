@@ -1359,9 +1359,15 @@ impl Avatar {
     /// Hanging life, device px in 2 px steps: (the pendulum at the bottom, the shins' extra
     /// kick from the knee). A slow sway, a bid's kick decaying over ~3 s, and every ~3.6 s
     /// one leg-kick out and back (alternating sides), plus a bigger one on an insist beat.
+    /// The bid swing runs: posed (hanging, clinging), there, not carried (SA_BID_SWING=0: off,
+    /// the r7 pose-step sway instead).
+    pub(super) fn swing_on(&self) -> bool {
+        self.posed() && self.rag.is_none() && !self.hidden && self.teleport.is_none() && self.loaded && std::env::var("SA_BID_SWING").map_or(true, |v| v != "0")
+    }
+
     /// Step the bid swing (create it for a new pose frame). True: redraw.
     pub(super) fn swing_tick(&mut self, now: Instant) -> bool {
-        let on = self.posed() && self.rag.is_none() && !self.hidden && self.teleport.is_none() && self.loaded && std::env::var("SA_BID_SWING").map_or(true, |v| v != "0");
+        let on = self.swing_on();
         let fi = self.anim.frame();
         if !on {
             return self.brain.as_mut().and_then(|h| h.swing.take()).is_some();

@@ -1169,8 +1169,8 @@ impl Avatar {
         }
         take(self.brain_deadline(now));
         take(self.rag_deadline(now));
-        if self.posed() {
-            take(self.brain.as_ref().and_then(|h| h.swing.as_ref()).map_or(Some(now + FRAME_FX), |s| Some(s.due)));
+        if self.swing_on() {
+            take(self.brain.as_ref().and_then(|h| h.swing.as_ref()).map_or(Some(now), |s| Some(s.due)));
         }
         t
     }
