@@ -285,6 +285,11 @@ impl Avatar {
         };
         r.last = now;
         r.t += dt;
+        // What was committed last tick is drawn now (on top); this tick's state goes under
+        // it. Shifted here, not at render: every render in a tick paints the same pair.
+        if let Some(n) = r.next.clone() {
+            r.cur = Some(n);
+        }
         let t = r.t;
         match r.m.phase() {
             Phase::Held { .. } => self.rag_held_step(now, t, dt),
@@ -681,18 +686,22 @@ impl Avatar {
                 plan.pivot = ((l.ground_x - l.avatar_x) as f32, (l.ground_y - l.avatar_y) as f32);
             }
         }
+        if let Ok(path) = std::env::var("SA_RAG_TRACE") {
+            // One line per committed state: virtual time, frame, window origin, plan.
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            plan.slices.hash(&mut h);
+            plan.sx.to_bits().hash(&mut h);
+            plan.sy.to_bits().hash(&mut h);
+            let line = format!("{:.4} {} {},{} {:016x}\n", r.t, self.pack.frames[frame].id, self.origin.0, self.origin.1, h.finish());
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+                use std::io::Write as _;
+                f.write_all(line.as_bytes()).ok();
+            }
+        }
         let shown = Shown { frame, plan };
         if let Some(r) = &mut self.rag {
             r.next = Some(shown);
-        }
-    }
-
-    /// After a render: what was `next` is on screen now.
-    pub(super) fn rag_presented(&mut self) {
-        if let Some(r) = &mut self.rag
-            && let Some(n) = r.next.clone()
-        {
-            r.cur = Some(n);
         }
     }
 
