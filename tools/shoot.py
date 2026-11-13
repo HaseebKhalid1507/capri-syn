@@ -10,9 +10,16 @@ steps:  cmd:<avatarctl line>      send a dev-control command
         rclick:<x>:<y>            xdotool click at root coords
         state                     print the state JSON
         log                       print the app's stderr so far
-        pwin:<x>:<y>:<w>:<h>[:light|dark]  map a managed (i3-floating) test window; {pwin} in cmds = its id
+        pwin:<x>:<y>:<w>:<h>[:light|dark]  map a managed (i3-floating) test window, never focused
+                                  (_NET_WM_USER_TIME 0); {pwin}/{pwin1} in cmds = the first one's id, {pwin2}…
+                                  the next ones, {pwinN.x} {pwinN.y} {pwinN.w} {pwinN.h} its frame rect
         waitframe:<prefix>[:secs]  poll state until the current frame id starts with prefix
-        pmove:<x>:<y>             move the test window; pclose closes it
+        pmove:<x>:<y>[:n]         move test window n (default the last); pclose[:n] closes it
+--bar H: a 1-colour "top bar" H px tall over the stage's top edge (the stage must start at a monitor top;
+        the real dock's strut still sets her hang line, the strip only hides the real bar in captures).
+--long: allow --timeout up to 300 s (default cap 30 s).  --settings FILE: the test's settings.toml.
+Tests never touch the user's state or settings: XDG_STATE_HOME=/tmp/sa-test/state, XDG_CONFIG_HOME=/tmp/sa-test/config
+(wiped at start unless --keep-state).
 --stage X,Y,W,H[,FLOOR[,0xRRGGBB]]: before the app starts, map an override-redirect backdrop that shows
         a plain colour, or the root wallpaper (ParentRelative: no focus change, no layout change) and a dark floor
         slab FLOOR px tall at its bottom; desk/rec default to the stage rect; {floor} = slab top - 6 (ground room).
@@ -61,8 +68,9 @@ def ctl(line, timeout=5):
     return buf.decode().strip()
 
 
-def stage_windows(x, y, w, h, floor, plain=None):
-    """Backdrop (wallpaper via ParentRelative, or a plain colour) + floor slab. Returns the windows."""
+def stage_windows(x, y, w, h, floor, plain=None, bar=0):
+    """Backdrop (wallpaper via ParentRelative, or a plain colour) + floor slab (+ a top bar strip).
+    Returns the windows."""
     from Xlib import X
     d = xdisp()
     root = xroot()
@@ -80,6 +88,17 @@ def stage_windows(x, y, w, h, floor, plain=None):
                                   background_pixel=0x2b3a4a)
         edge.map()
         out.append(slab)
+    if bar:
+        strip = root.create_window(x, y, w, bar, 0, X.CopyFromParent, X.InputOutput, X.CopyFromParent,
+                                   background_pixel=0x0b0f14, override_redirect=True)
+        strip.set_wm_class("sa-stage", "sa-stage")
+        line = strip.create_window(0, bar - 1, w, 1, 0, X.CopyFromParent, X.InputOutput, X.CopyFromParent,
+                                   background_pixel=0x26323f)
+        line.map()
+        for i, (bx, bw, c) in enumerate([(12, 26, 0x8ef5ed), (46, 26, 0x3a4a5c), (80, 26, 0x3a4a5c), (w - 150, 120, 0x3a4a5c)]):
+            b = strip.create_window(bx, 7, bw, bar - 14, 0, X.CopyFromParent, X.InputOutput, X.CopyFromParent, background_pixel=c)
+            b.map()
+        out.append(strip)
     for win in out:
         win.map()
     d.sync()
@@ -93,7 +112,8 @@ THEMES = {
 
 
 def perch_window(x, y, w, h, theme="dark"):
-    """A managed dialog (i3 floats dialogs): body, title strip, a few 'text' bars."""
+    """A managed dialog (i3 floats dialogs): body, title strip, a few 'text' bars. Mapped with
+    _NET_WM_USER_TIME 0, so i3 doesn't give it the focus (the user keeps typing where he was)."""
     body, title, ink = THEMES[theme]
     from Xlib import X, Xatom
     d = xdisp()
@@ -104,6 +124,11 @@ def perch_window(x, y, w, h, theme="dark"):
     win.set_wm_class("sa-perch-test", "sa-perch-test")
     win.change_property(d.intern_atom("_NET_WM_WINDOW_TYPE"), Xatom.ATOM, 32, [d.intern_atom("_NET_WM_WINDOW_TYPE_DIALOG")])
     win.set_wm_normal_hints(flags=1 | 2 | 4 | 8, x=x, y=y, width=w, height=h)  # USPosition|USSize|PPosition|PSize
+    win.change_property(d.intern_atom("_NET_WM_USER_TIME"), Xatom.CARDINAL, 32, [0])
+    # Straight onto the visible workspace under (x, y), not briefly onto the focused one.
+    ws = workspace_at(x + w // 2, y + h // 2)
+    if ws is not None:
+        win.change_property(d.intern_atom("_NET_WM_DESKTOP"), Xatom.CARDINAL, 32, [ws])
     bar = win.create_window(0, 0, w, 30, 0, X.CopyFromParent, X.InputOutput, X.CopyFromParent, background_pixel=title)
     bar.map()
     for i, (lw, c) in enumerate([(0.62, ink[0]), (0.48, ink[1]), (0.7, ink[1]), (0.36, ink[1])]):
@@ -112,6 +137,23 @@ def perch_window(x, y, w, h, theme="dark"):
     win.map()
     d.sync()
     return win
+
+
+def workspace_at(x, y):
+    """_NET_WM_DESKTOP index of the visible i3 workspace whose output contains (x, y)."""
+    try:
+        wss = json.loads(subprocess.run(["i3-msg", "-t", "get_workspaces"], capture_output=True, text=True).stdout)
+        outs = json.loads(subprocess.run(["i3-msg", "-t", "get_outputs"], capture_output=True, text=True).stdout)
+        out = next(o["name"] for o in outs if o.get("active") and o["rect"]["x"] <= x < o["rect"]["x"] + o["rect"]["width"]
+                   and o["rect"]["y"] <= y < o["rect"]["y"] + o["rect"]["height"])
+        name = next(w["name"] for w in wss if w["visible"] and w["output"] == out)
+        d = xdisp()
+        p = xroot().get_full_property(d.intern_atom("_NET_DESKTOP_NAMES"), d.intern_atom("UTF8_STRING"))
+        names = p.value.decode().split("\0") if isinstance(p.value, bytes) else str(p.value).split("\0")
+        return names.index(name)
+    except Exception as e:
+        print(f"shoot: workspace_at: {e}", file=sys.stderr)
+        return None
 
 
 def focus_is_ours():
@@ -223,7 +265,7 @@ def main():
     argv = sys.argv[1:]
     binp = f"{HOME}/.cache/cargo-target-synaps-avatar/debug/synaps-avatar"
     extra, tmo, stage, ground, rec_start, bg_rec = [], 28, None, None, None, None
-    remote_sandbox = False
+    remote_sandbox, long_run, bar, settings, keep_state = False, False, 0, None, False
     while argv and argv[0].startswith("--"):
         k = argv.pop(0)
         if k == "--bin":
@@ -245,6 +287,14 @@ def main():
             print(f"shoot: user idle {need} ms before start: {'ok' if ok else 'NO (user active)'} after {time.time()-t:.1f}s")
         elif k == "--ground":
             ground = argv.pop(0)
+        elif k == "--long":
+            long_run = True
+        elif k == "--bar":
+            bar = int(argv.pop(0))
+        elif k == "--settings":
+            settings = argv.pop(0)
+        elif k == "--keep-state":
+            keep_state = True
         elif k == "--stage":
             stage = [int(v, 0) for v in argv.pop(0).split(",")]
     # Daemon safety: only ever the desktopproto sandbox, or no session at all.
@@ -272,20 +322,39 @@ def main():
     if subprocess.run(["pgrep", "-x", "synaps-avatar"], capture_output=True).returncode == 0:
         print("shoot: an avatar is already running; refusing", file=sys.stderr)
         return 1
-    tmo = min(tmo, 30)
+    tmo = min(tmo, 300 if long_run else 30)
+    # The user's own state (her spot, her drives) and settings are never touched by tests.
+    import shutil
+    test_root = "/tmp/sa-test"
+    if not keep_state:
+        shutil.rmtree(test_root, ignore_errors=True)
+    os.makedirs(f"{test_root}/state", exist_ok=True)
+    os.makedirs(f"{test_root}/config/synaps-avatar", exist_ok=True)
+    os.environ["XDG_STATE_HOME"] = f"{test_root}/state"
+    os.environ["XDG_CONFIG_HOME"] = f"{test_root}/config"
+    if settings:
+        shutil.copy(settings, f"{test_root}/config/synaps-avatar/settings.toml")
     focus0 = xdisp().get_input_focus().focus
     focus0 = focus0.id if hasattr(focus0, "id") else None
-    staged, pwin = [], None
+    staged, pwins = [], []
+    def subst(line):
+        for n in range(len(pwins), 0, -1):
+            w = pwins[n - 1]
+            g = w.query_tree().parent.get_geometry() if w else None
+            for k, v in (("x", g.x if g else 0), ("y", g.y if g else 0), ("w", g.width if g else 0), ("h", g.height if g else 0)):
+                line = line.replace(f"{{pwin{n}.{k}}}", str(v))
+            line = line.replace(f"{{pwin{n}}}", hex(w.id) if w else "0")
+        return line.replace("{pwin}", hex(pwins[0].id) if pwins and pwins[0] else "0")
     if stage:
         sx, sy, sw, sh = stage[:4]
         floor = stage[4] if len(stage) > 4 else 0
         plain = stage[5] if len(stage) > 5 else None
-        staged = stage_windows(sx, sy, sw, sh, floor, plain)
+        staged = stage_windows(sx, sy, sw, sh, floor, plain, bar)
         # Feet keep the app's 6 px ground room above the slab, as above the monitor edge.
         os.environ["SA_FLOOR"] = str(sy + sh - floor - 6)
     if ground:
         gx, gy = ground.replace("{floor}", os.environ.get("SA_FLOOR", "0")).split(",")
-        sp = f"{HOME}/.local/state/synaps-avatar/state.json"
+        sp = f"{os.environ['XDG_STATE_HOME']}/synaps-avatar/state.json"
         os.makedirs(os.path.dirname(sp), exist_ok=True)
         open(sp, "w").write(json.dumps({"ground": [int(gx), int(gy)]}))
     log = open("/tmp/sa-shoot.log", "w")
@@ -316,7 +385,7 @@ def main():
         for step in argv:
             kind, _, rest = step.partition(":")
             if kind == "cmd":
-                line = rest.replace("{pwin}", hex(pwin.id) if pwin else "0")
+                line = subst(rest)
                 if stage:
                     line = line.replace("{floor}", os.environ["SA_FLOOR"])
                 print(f"> {line}: {ctl(line)}")
@@ -324,25 +393,44 @@ def main():
                 parts = rest.split(":")
                 x, y, w, h = (int(v) for v in parts[:4])
                 pwin = perch_window(x, y, w, h, parts[4] if len(parts) > 4 else "dark")
+                pwins.append(pwin)
                 time.sleep(0.4)
                 print(i3(f'[id="{pwin.id}"] floating enable, resize set {w} px {h} px, move absolute position {x} {y}'))
                 time.sleep(0.3)
                 frame = pwin.query_tree().parent
-                # The stage is override-redirect and sits above i3's frames: tuck it under.
+                # The stage is override-redirect and sits above i3's frames: tuck it under the
+                # first test window (later ones map above that one).
                 from Xlib import X
-                for w in staged:
-                    w.configure(sibling=frame, stack_mode=X.Below)
-                xdisp().sync()
+                # i3 restacks the frame after the move: tuck until the order holds (the stage
+                # above a test window would hide its edge from her occlusion check).
+                frames = [w_.query_tree().parent for w_ in pwins if w_]
+                # Test windows stack in creation order (a later one covers an earlier one).
+                for attempt in range(8):
+                    for f_ in frames[1:]:
+                        f_.configure(stack_mode=X.Above)
+                    for sw_ in staged:
+                        sw_.configure(sibling=frames[0], stack_mode=X.Below)
+                    xdisp().sync()
+                    time.sleep(0.15)
+                    kids = [c.id for c in xroot().query_tree().children]
+                    order = [kids.index(f_.id) for f_ in frames if f_.id in kids]
+                    if order == sorted(order) and all(kids.index(sw_.id) < order[0] for sw_ in staged if sw_.id in kids):
+                        break
+                else:
+                    print("shoot: WARNING the stage stays above the test window", file=sys.stderr)
                 g = frame.get_geometry()
                 print(f"pwin {hex(pwin.id)} frame at {g.x},{g.y} {g.width}x{g.height}; focus {hex(xdisp().get_input_focus().focus.id)}")
             elif kind == "pmove":
-                x, y = rest.split(":")
-                print(i3(f'[id="{pwin.id}"] move absolute position {x} {y}'))
+                x, y, *n = rest.split(":")
+                w_ = pwins[int(n[0]) - 1] if n else [w for w in pwins if w][-1]
+                print(i3(f'[id="{w_.id}"] move absolute position {x} {y}'))
             elif kind == "pclose":
-                pwin.destroy()
-                xdisp().sync()
-                pwin = None
-                print("pwin closed")
+                n = int(rest) if rest else len(pwins)
+                if pwins[n - 1]:
+                    pwins[n - 1].destroy()
+                    xdisp().sync()
+                    pwins[n - 1] = None
+                print(f"pwin {n} closed")
             elif kind == "sleep":
                 time.sleep(float(rest))
             elif kind == "waitframe":
@@ -569,8 +657,10 @@ def main():
     finally:
         if bg_rec is not None:
             bg_rec.wait(timeout=30)
-        if pwin is not None:
-            pwin.destroy()
+        for w_ in pwins:
+            if w_ is not None:
+                w_.destroy()
+        if pwins:
             xdisp().sync()
         for w in staged:
             w.destroy()

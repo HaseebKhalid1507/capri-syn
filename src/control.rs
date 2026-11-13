@@ -21,6 +21,10 @@ pub enum Command {
     Perch { sit: bool, win: Option<u32> },
     /// Leave the perch: teleport back to the ground.
     Unperch,
+    /// Dev: a drag released right where she is (the release snap).
+    Drop,
+    /// Dev: the window stack as she sees it (bottom → top), and the work areas.
+    Stack,
     /// One-line JSON snapshot of the avatar's state.
     State,
     /// Glitch out, then quit.
@@ -88,6 +92,8 @@ impl Command {
                 "prev" | "-" => Command::Page(-1),
                 _ => bail!("usage: page next|prev"),
             },
+            "drop" => Command::Drop,
+            "stack" => Command::Stack,
             "collapse" => Command::Collapse(true),
             "expand" => Command::Collapse(false),
             "glitch" => Command::Glitch,
@@ -111,7 +117,7 @@ impl Command {
             "hide" => Command::Hide,
             "quit" => Command::Quit,
             _ => bail!(
-                "unknown command `{line}` (mood <name> | clip <id> | say <text> | pos <x> <y> [now] | perch [sit|stand] [win] | perch off | page next|prev | collapse | expand | music on|off | glitch | submit <text> | abort | prompt confirm|secret [text] | state | hide | quit)"
+                "unknown command `{line}` (mood <name> | clip <id> | say <text> | pos <x> <y> [now] | perch [sit|stand] [win] | perch off | drop | stack | page next|prev | collapse | expand | music on|off | glitch | submit <text> | abort | prompt confirm|secret [text] | state | hide | quit)"
             ),
         })
     }

@@ -5,6 +5,7 @@
 
 use crate::anim::{Animator, Mood, Rng, Seq};
 use crate::control::Command;
+use crate::edges;
 use crate::frames::{Frame, Geometry, NoteMasks};
 use crate::fx::{self, BodyPlan, Bolt, Glint, Glitch, GlitchKind};
 use crate::pack::{MoodSpec, MusicSpec, Pack, PerchSpec, Steps};
@@ -70,6 +71,16 @@ const EDGE_MARGIN: f32 = 60.0;
 const PERCH_AT: f32 = 0.75;
 /// Feet stay this far above the monitor's bottom edge (device px).
 const GROUND_ROOM: i32 = 6;
+/// The most a perch slides sideways to stay on an exposed stretch (logical px).
+const LAND_SLIDE: f32 = 16.0;
+
+/// x intervals, root px.
+type Ranges = Vec<(i32, i32)>;
+
+/// The point of `ranges` (inclusive) nearest `x`.
+fn nearest_in(ranges: &[(i32, i32)], x: i32) -> Option<i32> {
+    ranges.iter().map(|&(a, b)| x.clamp(a, b)).min_by_key(|&v| (v - x).abs())
+}
 
 impl Layout {
     pub fn new(pack: &Pack, sf: f32, body_height: f32) -> Layout {
@@ -1326,7 +1337,7 @@ impl Avatar {
             Leg::Appear => {
                 self.teleport = None;
                 if self.placement == Placement::Ground {
-                    state::save(self.ground());
+                    state::save_ground(self.ground());
                 }
             }
             Leg::Bolt(_) => {}
@@ -1360,7 +1371,7 @@ impl Avatar {
                 // The landing already finished (a stalled frame): done.
                 self.teleport = None;
                 if self.placement == Placement::Ground {
-                    state::save(self.ground());
+                    state::save_ground(self.ground());
                 }
             } else if let Some(tp) = &mut self.teleport {
                 tp.leg = Leg::Appear;
@@ -1441,7 +1452,7 @@ impl Avatar {
                     self.hidden = false;
                     self.fx_hide_bolt();
                     self.arrive(o, Placement::Ground, now);
-                    state::save(self.ground());
+                    state::save_ground(self.ground());
                 } else {
                     self.start_teleport(o, Placement::Ground, now);
                 }
@@ -1451,6 +1462,30 @@ impl Avatar {
                 Ok(r) => format!("ok perch 0x{:x} {} {} {}x{}", r.id, r.x, r.y, r.w, r.h),
                 Err(e) => format!("error: {e}"),
             },
+            Command::Drop => {
+                if self.teleport.is_some() {
+                    "error: teleporting".into()
+                } else {
+                    if matches!(self.placement, Placement::Perch { .. }) {
+                        let was_sitting = self.sitting();
+                        self.placement = Placement::Ground;
+                        self.x11.set_target(0);
+                        if was_sitting {
+                            self.relayer(now);
+                        }
+                    }
+                    self.drop_here(now);
+                    match self.placement {
+                        Placement::Perch { win, dx, .. } => format!("ok perch 0x{win:x} dx {dx}"),
+                        Placement::Ground => "ok ground".into(),
+                    }
+                }
+            }
+            Command::Stack => {
+                let stack: Vec<_> = self.x11.stack().into_iter().map(|(r, e)| serde_json::json!([format!("0x{:x}", r.id), r.x, r.y, r.w, r.h, e])).collect();
+                let areas: Vec<_> = self.x11.work_areas().into_iter().map(|m| serde_json::json!([m.x, m.y, m.w, m.h])).collect();
+                serde_json::json!({ "stack": stack, "areas": areas }).to_string()
+            }
             Command::Unperch => {
                 if matches!(self.placement, Placement::Perch { .. }) {
                     self.fall(now);
@@ -1610,7 +1645,7 @@ impl Avatar {
 
     fn finish_quit(&mut self, cx: &mut Context<Self>) {
         if self.placement == Placement::Ground && self.teleport.is_none() {
-            state::save(self.ground());
+            state::save_ground(self.ground());
         }
         self.fx_hide_all();
         std::fs::remove_file(crate::control::socket_path()).ok();
@@ -2050,12 +2085,12 @@ impl Avatar {
         (self.origin.0 + self.layout.ground_x, self.origin.1 + self.layout.ground_y)
     }
 
-    /// Keep the avatar (not the bubble area) on the monitor under it; feet no lower than
-    /// the monitor's bottom edge.
+    /// Keep the avatar (not the bubble area) in the work area under it (the monitor minus
+    /// docks); feet no lower than its bottom edge.
     pub fn clamp(x11: &X11, l: &Layout, (x, y): (i32, i32)) -> (i32, i32) {
         let (aw, ah) = (l.geo.width as i32, l.geo.height as i32);
         let (cx, cy) = (x + l.avatar_x + aw / 2, y + l.avatar_y + ah / 2);
-        let m = x11.monitor_at(cx, cy);
+        let m = x11.area_at(cx, cy);
         let ax = (x + l.avatar_x).clamp(m.x, (m.x + m.w - aw).max(m.x));
         let gy = (y + l.ground_y).min(m.y + m.h - l.foot_pad - GROUND_ROOM);
         let top = gy - l.ground_y + l.avatar_y;
@@ -2064,7 +2099,7 @@ impl Avatar {
     }
 
     pub fn default_origin(x11: &X11, l: &Layout) -> (i32, i32) {
-        let m = x11.primary();
+        let m = x11.primary_area();
         let x = m.x + m.w - (l.avatar_x + l.geo.width as i32) - (24.0 * l.sf) as i32;
         let y = m.y + m.h - l.foot_pad - GROUND_ROOM - l.ground_y;
         (x, y)
@@ -2087,7 +2122,7 @@ impl Avatar {
         let o = Self::clamp(&self.x11, &self.layout, o);
         self.set_origin(o);
         if persist {
-            state::save(self.ground());
+            state::save_ground(self.ground());
         }
     }
 
@@ -2163,15 +2198,44 @@ impl Avatar {
         Some(want.unwrap_or((r.w as f32 * PERCH_AT) as i32).clamp(lo, hi))
     }
 
-    /// Whether a perch on `r` keeps the figure on `r`'s monitor and below its top.
+    /// Whether a perch on `r` keeps the figure in its work area (under the docks) and
+    /// `r` is not fullscreen.
     fn perch_fits(&self, r: &WinRect, o: (i32, i32), sit: bool) -> bool {
         let m = self.x11.monitor_at(r.x + r.w / 2, r.y + 1);
         if r.x == m.x && r.y == m.y && r.w == m.w && r.h == m.h {
             return false; // fullscreen
         }
+        let a = self.x11.area_at(r.x + r.w / 2, r.y + 1);
         let base = if sit { self.perch_spec().map(|p| p.base.clone()) } else { None }.unwrap_or_else(|| self.pack.catalog.default_sprite.clone());
         let top = self.pack.index.get(&base).and_then(|&i| self.frames[i].as_ref()).map_or(0, |f| f.top);
-        o.1 + self.layout.avatar_y + top >= m.y && r.y > m.y
+        o.1 + self.layout.avatar_y + top >= a.y && r.y > a.y
+    }
+
+    fn edge_margin(&self) -> i32 {
+        (EDGE_MARGIN * self.layout.sf).round() as i32
+    }
+
+    /// Contact extent for `sit` (relative to the seat or feet), or a margin-wide guess.
+    fn contact_or_default(&self, sit: bool) -> (i32, i32) {
+        let m = self.edge_margin();
+        self.contact[sit as usize].unwrap_or((-m, m))
+    }
+
+    /// The exposed parts of `r`'s top edge and the seat (or feet) x ranges on them, root px.
+    /// `r` may be newer than the stack's copy of it (a window that just moved).
+    fn exposed_seats(&self, r: &WinRect, sit: bool) -> (Ranges, Ranges) {
+        let (mut stack, _): (Vec<WinRect>, Vec<bool>) = self.x11.stack().into_iter().unzip();
+        let i = match stack.iter().position(|w| w.id == r.id) {
+            Some(i) => {
+                stack[i] = *r;
+                i
+            }
+            None => {
+                stack.push(*r);
+                stack.len() - 1
+            }
+        };
+        (edges::exposed_spans(&stack, i), edges::seat_ranges(&stack, i, self.contact_or_default(sit), self.edge_margin()))
     }
 
     fn perch(&mut self, sit: bool, win: Option<u32>, now: Instant) -> anyhow::Result<WinRect> {
@@ -2185,7 +2249,14 @@ impl Avatar {
             anyhow::bail!("that's me");
         }
         let r = self.x11.toplevel_rect(top).ok_or_else(|| anyhow::anyhow!("window 0x{top:x} is not visible"))?;
-        let dx = self.perch_dx(&r, sit, None).ok_or_else(|| anyhow::anyhow!("window 0x{top:x} is too narrow to sit on"))?;
+        self.perch_dx(&r, sit, None).ok_or_else(|| anyhow::anyhow!("window 0x{top:x} is too narrow to sit on"))?;
+        // PERCH_AT across, moved to the nearest seat on an exposed stretch of the edge.
+        let want = r.x + (r.w as f32 * PERCH_AT) as i32;
+        let (spans, seats) = self.exposed_seats(&r, sit);
+        let x = nearest_in(&seats, want).ok_or_else(|| {
+            anyhow::anyhow!("edge hidden: window 0x{top:x} has no exposed stretch wide enough (exposed {spans:?}, contact {:?})", self.contact_or_default(sit))
+        })?;
+        let dx = x - r.x;
         let o = self.perch_origin(&r, sit, dx);
         if !self.perch_fits(&r, o, sit) {
             anyhow::bail!("no room above window 0x{top:x} (or it is fullscreen)");
@@ -2215,10 +2286,24 @@ impl Avatar {
                 if win != r.id || self.teleport.is_some() {
                     return;
                 }
-                let Some(dx) = self.perch_dx(&r, sit, Some(dx)) else {
+                if self.perch_dx(&r, sit, Some(dx)).is_none() {
+                    self.fall(now);
+                    return;
+                }
+                // Stay on an exposed stretch: clamp into it, but never slide across a
+                // window that now covers her seat (more than a nudge: she falls).
+                let x = r.x + dx;
+                let (spans, ranges) = self.exposed_seats(&r, sit);
+                let Some(nx) = nearest_in(&ranges, x) else {
                     self.fall(now);
                     return;
                 };
+                let hidden = x >= r.x && x < r.right() && !spans.iter().any(|&(a, b)| a <= x && x < b);
+                if hidden && (nx - x).abs() > (LAND_SLIDE * self.layout.sf) as i32 {
+                    self.fall(now);
+                    return;
+                }
+                let dx = nx - r.x;
                 let o = self.perch_origin(&r, sit, dx);
                 if self.perch_fits(&r, o, sit) {
                     self.placement = Placement::Perch { win, sit, dx };
@@ -2235,18 +2320,37 @@ impl Avatar {
         }
     }
 
-    /// After a drag: a window whose top edge is near the seat or the feet.
+    /// After a drag: an exposed stretch of a window's top edge near the seat or the feet
+    /// (`edges::choose_snap`: a stretch hidden by a window above is never a seat).
     fn snap_target(&self) -> Option<(WinRect, i32)> {
         let l = &self.layout;
         let (gx, gy) = self.ground();
         let sy = l.seat_y.map_or(gy, |s| self.origin.1 + s);
         let tol = (36.0 * l.sf) as i32;
-        self.x11.toplevels().into_iter().rev().find_map(|r| {
-            let inside = gx > r.x + 20 && gx < r.x + r.w - 20;
-            let near = (sy - r.y).abs() < tol || (gy - r.y).abs() < tol;
-            let dx = self.perch_dx(&r, true, Some(gx - r.x))?;
-            (inside && near && self.perch_fits(&r, self.perch_origin(&r, true, dx), true)).then_some((r, dx))
-        })
+        let (stack, eligible): (Vec<WinRect>, Vec<bool>) = self.x11.stack().into_iter().unzip();
+        let fits = |i: usize, x: i32| {
+            let r = &stack[i];
+            self.perch_fits(r, self.perch_origin(r, true, x - r.x), true)
+        };
+        let (i, x) = edges::choose_snap(&stack, &eligible, (gx, sy), (gx, gy), tol, self.contact_or_default(true), self.edge_margin(), &fits)?;
+        Some((stack[i], x - stack[i].x))
+    }
+
+    /// A drag ended where she is now: sit on an exposed edge near the seat or the feet,
+    /// else stay there (the new home).
+    fn drop_here(&mut self, now: Instant) {
+        if let Some((r, dx)) = self.snap_target() {
+            self.home = self.ground();
+            let o = self.perch_origin(&r, true, dx);
+            self.placement = Placement::Perch { win: r.id, sit: self.layout.seat_y.is_some(), dx };
+            self.set_origin(o);
+            self.x11.set_target(r.id);
+            self.relayer(now);
+            self.glitch = Some(Glitch::new(GlitchKind::Burst, now, self.rng.next()));
+        } else {
+            self.home = self.ground();
+            state::save_ground(self.ground());
+        }
     }
 
     // ---- pointer --------------------------------------------------------------------
@@ -2271,6 +2375,9 @@ impl Avatar {
             self.schedule(cx);
         }
         let Some(head) = self.hit(ev.position) else { return };
+        // Tests drive her with synthetic taps only: a real press in a recording means a person
+        // touched her (the clip is thrown away).
+        eprintln!("synaps-avatar: real pointer press ({:?}, {})", ev.button, if head { "head" } else { "body" });
         match ev.button {
             MouseButton::Left => {
                 let root = self.x11.pointer().unwrap_or((0, 0));
@@ -2319,18 +2426,7 @@ impl Avatar {
         let Some(p) = self.press.take() else { return };
         let now = Instant::now();
         if p.dragging {
-            if let Some((r, dx)) = self.snap_target() {
-                self.home = self.ground();
-                let o = self.perch_origin(&r, true, dx);
-                self.placement = Placement::Perch { win: r.id, sit: self.layout.seat_y.is_some(), dx };
-                self.set_origin(o);
-                self.x11.set_target(r.id);
-                self.relayer(now);
-                self.glitch = Some(Glitch::new(GlitchKind::Burst, now, self.rng.next()));
-            } else {
-                self.home = self.ground();
-                state::save(self.ground());
-            }
+            self.drop_here(now);
             cx.notify();
             self.schedule(cx);
             return;
