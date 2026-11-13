@@ -475,6 +475,18 @@ def main():
                 while time.time() < t_end and not json.loads(ctl("state"))["frame"].startswith(pre):
                     time.sleep(0.01)
                 print(f"waitframe {pre}: {json.loads(ctl('state'))['frame']}")
+            elif kind == "waitrag":
+                # waitrag:<phase>[:secs]: until state.rag.phase matches (rest = no rag).
+                want, _, secs = rest.partition(":")
+                t = time.time()
+                got = None
+                while time.time() - t < float(secs or 10):
+                    r = json.loads(ctl("state")).get("rag")
+                    got = r["phase"] if r else "rest"
+                    if got == want or (want != "rest" and got.startswith(want)):
+                        break
+                    time.sleep(0.02)
+                print(f"waitrag {want}: {got} after {time.time()-t:.2f}s")
             elif kind == "state":
                 print(ctl("state"))
             elif kind in ("shot", "desk"):
