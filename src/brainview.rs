@@ -1095,7 +1095,7 @@ impl Avatar {
     /// Hanging life, device px in 2 px steps: (the pendulum at the bottom, the shins' extra
     /// kick from the knee). A slow sway, a bid's kick decaying over ~3 s, and every ~3.6 s
     /// one leg-kick out and back (alternating sides), plus a bigger one on an insist beat.
-    pub(super) fn hang_swing(&self, now: Instant) -> (i32, i32) {
+    pub(super) fn hang_swing(&self, now: Instant) -> (i32, i32, bool) {
         use std::f32::consts::{PI, TAU};
         let sf = self.layout.sf;
         let t = now.saturating_duration_since(self.bob_t0).as_secs_f32();
@@ -1109,15 +1109,18 @@ impl Avatar {
         let cycle = 3.6;
         let n = (t / cycle).floor();
         let u = (t - n * cycle) / 0.8;
-        let mut leg = if u < 1.0 { 9.0 * sf * (PI * u).sin() * if n as i64 % 2 == 0 { 1.0 } else { -1.0 } } else { 0.0 };
+        // Each leg kicks outward in turn.
+        let mut right = (n as i64).rem_euclid(2) == 0;
+        let mut leg = if u < 1.0 { 12.0 * sf * (PI * u).sin() * if right { 1.0 } else { -1.0 } } else { 0.0 };
         if let Some((t0, dir)) = self.brain.as_ref().and_then(|h| h.leg_kick) {
             let k = now.saturating_duration_since(t0).as_secs_f32() / 0.7;
             if k < 1.0 {
-                leg += 14.0 * sf * dir * (PI * k).sin();
+                right = dir > 0.0;
+                leg = 18.0 * sf * dir * (PI * k).sin();
             }
         }
         let q = |x: f32| ((x / 2.0).round() * 2.0) as i32;
-        (q(v), q(leg))
+        (q(v), q(leg), right)
     }
 
     /// The knee row of a hanging frame (kick from here), or past the bottom (no kick: hanging

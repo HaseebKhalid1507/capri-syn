@@ -746,8 +746,8 @@ impl Avatar {
         if self.posed() {
             // Hanging: no breath or hair sway (they'd pull the hands off the grip), a slow
             // pendulum instead, kicked by the bid emotes.
-            let (swing, kick) = self.hang_swing(now);
-            return fx::Pose { swing, kick, ..fx::Pose::default() };
+            let (swing, kick, kick_right) = self.hang_swing(now);
+            return fx::Pose { swing, kick, kick_right, ..fx::Pose::default() };
         }
         let life = &self.pack.behaviour.life;
         let t = now.saturating_duration_since(self.bob_t0);
@@ -787,6 +787,7 @@ impl Avatar {
             _ => 0,
         };
         let knee = self.knee_row(fi, f);
+        let split = f.head_x;
         fx::PoseRows {
             y0: -l.avatar_y,
             h: l.geo.height as i32,
@@ -796,6 +797,7 @@ impl Avatar {
             waist,
             grip,
             knee,
+            split,
         }
     }
 
@@ -3060,7 +3062,10 @@ impl Render for Avatar {
             if pose != fx::Pose::default()
                 && let Some(f) = self.frames.get(fi).and_then(|f| f.as_ref())
             {
-                plan.slices = Some(fx::pose_bands(pose, self.pose_rows(fi, f)));
+                let rows = self.pose_rows(fi, f);
+                let bands = fx::pose_bands(pose, rows);
+                plan.leg = fx::pose_leg(pose, rows, &bands);
+                plan.slices = Some(bands);
                 under = (POSE_REACH * sf).ceil();
             }
         }
@@ -3184,6 +3189,18 @@ impl Render for Avatar {
                                 }
                                 for (i, &(y0, y1, dx, dy)) in bands.iter().enumerate() {
                                     if plan2.solid.get(i).is_some_and(Option::is_some) {
+                                        continue;
+                                    }
+                                    let kick = plan2.leg.as_ref().and_then(|l| Some((l, *l.dx.get(i)?))).filter(|(_, d)| *d != 0);
+                                    if let Some((l, e)) = kick {
+                                        // The kicking leg's columns move on their own.
+                                        let s = l.split as f32;
+                                        let (still, moving) = if l.right { ((ix, s - ix), (s, ix + iw - s)) } else { ((s, ix + iw - s), (ix, s - ix)) };
+                                        for ((x0, w), d) in [(still, dx), (moving, dx + e)] {
+                                            let shifted = rect(ix + d as f32, iy + dy as f32, iw, ih);
+                                            let clip = rect(x0 + d as f32, (y0 + dy) as f32, w, (y1 - y0) as f32);
+                                            window.paint_image(clip, shifted, Corners::default(), img.clone(), 0, false).ok();
+                                        }
                                         continue;
                                     }
                                     let shifted = rect(ix + dx as f32, iy + dy as f32, iw, ih);

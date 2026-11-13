@@ -477,11 +477,14 @@ fn hang_spots(w: &World, f: &WinRect, upside_down: bool) -> Vec<Spot> {
     let mut out = Vec::new();
     let ap = Some(if upside_down { Approach::HangUpsideDown } else { Approach::Hang });
     if !upside_down {
-        // By the hands: the outer hand right over the window's far corner, so her hair
-        // hangs mostly outside it (less of the title bar and the first lines covered).
+        // By the hands, so her hair hangs mostly outside his window (less of the title bar
+        // and the first lines covered): the inner hand just over the far corner, else the
+        // outer one.
         let hand = (rel.w as f32 * HANG_HAND) as i32;
-        let x = if right { f.right() - hand } else { f.x + hand };
-        out.push(w.spot(SpotKind::Hang { upside_down }, (x, line), rel, ap));
+        let grip = w.d(10.0);
+        for x in if right { [f.right() - grip + hand, f.right() - hand] } else { [f.x + grip - hand, f.x + hand] } {
+            out.push(w.spot(SpotKind::Hang { upside_down }, (x, line), rel, ap));
+        }
     }
     // Over the far corner, then shifted outward so less of his window is covered.
     for shift in [0, rel.w / 4, rel.w / 2, rel.w * 3 / 4] {
@@ -787,8 +790,8 @@ mod tests {
         let w = fx.world();
         let s = resolve(&bid(&[Approach::Hang]), &w, &mut Rng::new(3)).unwrap();
         let f = fx.stack[1];
-        assert_eq!(s.anchor.0, f.x + (300.0 * HANG_HAND) as i32, "the hand, not the middle, over the corner");
-        assert!(s.body.x < f.x && s.cover_pct < 6.0, "{:?} cover {}", s.body, s.cover_pct);
+        assert_eq!(s.anchor.0, f.x + 10 - (300.0 * HANG_HAND) as i32, "the inner hand, not the middle, over the corner");
+        assert!(s.body.x < f.x && s.cover_pct > 0.0 && s.cover_pct < 4.0, "{:?} cover {}", s.body, s.cover_pct);
         // At the monitor's edge there is no room outside: the old shifts, inside.
         let w = tiled();
         let s = resolve(&bid(&[Approach::Hang]), &w.world(), &mut Rng::new(3)).unwrap();

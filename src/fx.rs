@@ -223,10 +223,20 @@ pub struct BodyPlan {
     pub face: Option<(i32, i32)>,
     /// Draw the body as a solid silhouette of this colour (teleport dissolve/land).
     pub tint: Option<u32>,
+    /// A hanging leg kick over `slices`.
+    pub leg: Option<LegKick>,
 }
 
 pub const SPLIT_RED: u32 = 0xff2448;
 pub const SPLIT_BLUE: u32 = 0x2e7bff;
+
+impl LegKick {
+    /// Extra dx for a run `x..x+w` in band `i`: the kicking side's columns only.
+    pub fn extra(&self, i: usize, x: i32, w: i32) -> i32 {
+        let d = self.dx.get(i).copied().unwrap_or(0);
+        if d != 0 && ((x + w / 2 >= self.split) == self.right) { d } else { 0 }
+    }
+}
 
 impl BodyPlan {
     pub fn plain() -> BodyPlan {
@@ -241,6 +251,7 @@ impl BodyPlan {
             scan: 0.0,
             face: None,
             tint: None,
+            leg: None,
         }
     }
 
@@ -403,7 +414,8 @@ impl BodyPlan {
                         }
                         let (y0, y1) = (ry0.max(b0), ry1.min(b1));
                         if y1 > y0 {
-                            out.push(mv(x, y0, w, y1 - y0, sx, sy));
+                            let kick = self.leg.as_ref().map_or(0, |l| l.extra(i, x as i32, w as i32));
+                            out.push(mv(x, y0, w, y1 - y0, sx + kick, sy));
                         }
                     }
                 }
@@ -518,8 +530,10 @@ pub struct Pose {
     /// Hanging (from the bar, a window side): rows below the grip shear this far at the
     /// bottom, the grip stays put. Overrides the others.
     pub swing: i32,
-    /// Hanging: the shins kick this far more (at the feet) than the swing, from the knee.
+    /// Hanging: one shin kicks this far (at the foot) from the knee, on top of the swing.
     pub kick: i32,
+    /// The kicking leg is the one right of `PoseRows::split` on screen.
+    pub kick_right: bool,
 }
 
 /// Rows (avatar-local) a pose acts on.
@@ -540,26 +554,44 @@ pub struct PoseRows {
     pub grip: i32,
     /// The knee row of a hanging pose (`kick`; at or past `h`: no kick).
     pub knee: i32,
+    /// The column between the legs (`kick`).
+    pub split: i32,
+}
+
+/// One leg's kick over `pose_bands` (parallel to them): extra dx per band for the columns
+/// on the kicking side of `split`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LegKick {
+    pub split: i32,
+    pub right: bool,
+    pub dx: Vec<i32>,
+}
+
+pub fn pose_leg(p: Pose, r: PoseRows, bands: &[(i32, i32, i32, i32)]) -> Option<LegKick> {
+    if p.kick == 0 || r.knee >= r.h {
+        return None;
+    }
+    let shin = (r.h - r.knee).max(1) as f32;
+    let dx = bands.iter().map(|&(y0, _, _, _)| if y0 >= r.knee { (p.kick as f32 * (y0 - r.knee) as f32 / shin).round() as i32 } else { 0 }).collect();
+    Some(LegKick { split: r.split, right: p.kick_right, dx })
 }
 
 /// Bands `(y0, y1, dx, dy)` in paint order (legs, torso, head) for a pose. The waist rows
 /// repeat over the breath height, so nothing opens up between torso and legs.
 pub fn pose_bands(p: Pose, r: PoseRows) -> Vec<(i32, i32, i32, i32)> {
     if p.swing != 0 || p.kick != 0 {
-        // A pendulum from the grip: 0 at the grip row, `swing` at the bottom; the shins
-        // swing `kick` further from the knee down.
+        // A pendulum from the grip: 0 at the grip row, `swing` at the bottom. Below the knee
+        // the bands stay 2 px (one leg kicks band by band: `pose_leg`).
         let grip = r.grip.clamp(r.y0, r.h - 1);
         let span = (r.h - grip).max(1) as f32;
-        let knee = r.knee.clamp(grip + 1, r.h);
-        let shin = (r.h - knee).max(1) as f32;
+        let knee = if p.kick != 0 { r.knee.clamp(grip + 1, r.h) } else { r.h };
         let mut out = vec![(r.y0, grip, 0, 0)];
         let mut y = grip;
         while y < r.h {
             let y1 = (y + 2).min(r.h);
-            let leg = if y >= knee { p.kick as f32 * (y - knee) as f32 / shin } else { 0.0 };
-            let dx = (p.swing as f32 * (y - grip) as f32 / span + leg).round() as i32;
+            let dx = (p.swing as f32 * (y - grip) as f32 / span).round() as i32;
             match out.last_mut() {
-                Some(last) if last.1 == y && last.2 == dx => last.1 = y1,
+                Some(last) if last.1 == y && last.2 == dx && y < knee => last.1 = y1,
                 _ => out.push((y, y1, dx, 0)),
             }
             y = y1;
@@ -1050,7 +1082,7 @@ mod tests {
 
     #[test]
     fn pose_bands_cover_without_gaps() {
-        let r = PoseRows { y0: -50, h: 400, top: 10, shear_end: 80, neck: 120, waist: 220, grip: 0, knee: 400 };
+        let r = PoseRows { y0: -50, h: 400, top: 10, shear_end: 80, neck: 120, waist: 220, grip: 0, knee: 400, split: 100 };
         let bands = pose_bands(Pose { breath: 2, nod: 0, sway: 3, ..Pose::default() }, r);
         // Every destination row from the top to the bottom is painted by some band.
         for y in 10..400 {
@@ -1075,13 +1107,23 @@ mod tests {
         }
         assert!(hang.iter().filter(|b| b.1 <= 31).all(|b| b.2 == 0));
         assert_eq!(hang.last().unwrap().2, -9);
-        // A kick from the knee: nothing above it moves more than the swing, the feet the most.
-        let kick = pose_bands(Pose { swing: 4, kick: 10, ..Pose::default() }, PoseRows { grip: 30, knee: 300, ..r });
+        // One leg kicks from the knee: the bands are the swing's, the kick is per band and
+        // only right of the split.
+        let p = Pose { swing: 4, kick: 10, kick_right: true, ..Pose::default() };
+        let rows = PoseRows { grip: 30, knee: 300, ..r };
+        let kick = pose_bands(p, rows);
         for y in -50..400 {
             assert_eq!(kick.iter().filter(|&&(a, b, _, _)| y >= a && y < b).count(), 1, "row {y}");
         }
-        assert!(kick.iter().filter(|b| b.1 <= 300).all(|b| b.2 <= 4));
-        assert_eq!(kick.last().unwrap().2, 14);
+        assert_eq!(kick.last().unwrap().2, 4);
+        let leg = pose_leg(p, rows, &kick).unwrap();
+        assert_eq!(leg.dx.len(), kick.len());
+        let last = kick.len() - 1;
+        assert!(leg.dx[last] >= 9);
+        assert!(kick.iter().zip(&leg.dx).all(|(b, &d)| b.0 >= 300 || d == 0), "nothing above the knee kicks");
+        assert_eq!(leg.extra(last, 120, 20), leg.dx[last]);
+        assert_eq!(leg.extra(last, 60, 20), 0, "the other leg stays");
+        assert!(pose_leg(Pose { kick: 0, ..p }, rows, &kick).is_none());
     }
 
     #[test]
