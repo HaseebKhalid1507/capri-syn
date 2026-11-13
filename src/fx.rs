@@ -626,6 +626,19 @@ pub fn pose_bands(p: Pose, r: PoseRows) -> Vec<(i32, i32, i32, i32)> {
     out
 }
 
+/// Bands (src y0, y1, dx, dy) in source rows → the same bands over the image scaled by
+/// (sx, sy) about `pivot`: each source row y sits at py + (y - py)·sy there. Boundaries are
+/// rounded the same way on both sides, so the bands still tile.
+pub fn scale_bands(b: &[(i32, i32, i32, i32)], pivot: (f32, f32), sx: f32, sy: f32) -> Vec<(i32, i32, i32, i32)> {
+    let row = |y: i32| (pivot.1 + (y as f32 - pivot.1) * sy).round() as i32;
+    b.iter()
+        .map(|&(y0, y1, dx, dy)| {
+            let (a, z) = (row(y0), row(y1));
+            (a, z.max(a), (dx as f32 * sx).round() as i32, (dy as f32 * sy).round() as i32)
+        })
+        .collect()
+}
+
 /// Capri's note particle noise.
 fn noise(n: u64, seed: u32) -> f32 {
     let v = (((n + 1) as f32) * 12.9898 + seed as f32 * 78.233).sin() * 43758.547;
@@ -935,6 +948,19 @@ pub fn bolt_rects(poly: &[(f32, f32)], origin: (i32, i32)) -> Vec<ShapeRect> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scaled_bands_tile_and_cover() {
+        let b = vec![(10, 30, 0, 0), (30, 34, 3, 1), (34, 38, 5, 2), (38, 90, 8, 4)];
+        for &(sx, sy) in &[(1.0, 1.12), (0.9, 0.78), (1.0, 0.08), (1.05, 1.05)] {
+            let s = scale_bands(&b, (50.0, 90.0), sx, sy);
+            for w in s.windows(2) {
+                assert_eq!(w[0].1, w[1].0, "contiguous at {sx},{sy}");
+            }
+            assert_eq!(s[0].0, (90.0 + (10.0 - 90.0) * sy).round() as i32);
+            assert_eq!(s.last().unwrap().1, 90, "the pivot row stays");
+        }
+    }
 
     #[test]
     fn squash_springs_back() {

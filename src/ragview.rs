@@ -698,6 +698,14 @@ impl Avatar {
                 plan.pivot = ((l.ground_x - l.avatar_x) as f32, (l.ground_y - l.avatar_y) as f32);
             }
         }
+        // Bands are source rows; a scaled plan draws the image scaled about the pivot, so the
+        // bands go to the scaled rows too (else the clip cuts the scaled art: a flat top at
+        // a stretch, a gap at a squash).
+        if (plan.sx != 1.0 || plan.sy != 1.0)
+            && let Some(b) = plan.slices.take()
+        {
+            plan.slices = Some(fx::scale_bands(&b, plan.pivot, plan.sx, plan.sy));
+        }
         if let Ok(path) = std::env::var("SA_RAG_TRACE") {
             // One line per committed state: virtual time, frame, window origin, plan.
             use std::hash::{Hash, Hasher};
