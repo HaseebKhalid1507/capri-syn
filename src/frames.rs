@@ -78,6 +78,8 @@ pub struct Frame {
     pub head_line: i32,
     /// Device-px top of the frame's visible bounds inside the avatar rect.
     pub top: i32,
+    /// Device-px lowest opaque row + 1 (the ragdoll's grip zones run top..bottom).
+    pub bottom: i32,
     /// Device-px x of the head: mask centroid over the top 30 % of the visible bounds.
     pub head_x: i32,
     /// Points well inside the upper part of the figure (hair), for glints.
@@ -318,7 +320,9 @@ fn decode_one(pack: &Pack, f: &FrameSource, geo: &Geometry, verify: bool, resize
     let rgba = image::RgbaImage::from_raw(geo.width, geo.height, px).expect("buffer size");
     let (head_x, glints) = head_and_glints(&mask, top.round() as i32, (vb.height as f32 * geo.scale) as i32);
     let profile = Arc::new(top_profile(&mask));
+    let bottom = (0..mask.h as i32).rev().find(|&y| (0..mask.w as i32).any(|x| mask.get(x, y))).map_or(top.round() as i32 + 1, |y| y + 1);
     Ok(Frame {
+        bottom,
         profile,
         face,
         id: f.id.clone(),

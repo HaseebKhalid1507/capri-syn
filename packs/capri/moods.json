@@ -693,5 +693,105 @@
       "cling_right": "pose-dock-right",
       "peek": "crouch-attentive"
     }
+  },
+  "drag": {
+    "grab": [
+      {
+        "frame": "surprised",
+        "ms": 260
+      }
+    ],
+    "hang": "surprised",
+    "still": [
+      {
+        "afterMs": 2500,
+        "frame": "embarrassed"
+      },
+      {
+        "afterMs": 6500,
+        "frame": "arms_crossed-annoyed"
+      }
+    ],
+    "swing": [
+      {
+        "frame": "idle-laughing",
+        "ms": 900
+      },
+      {
+        "frame": "happy",
+        "ms": 600
+      }
+    ],
+    "shake": "idle-surprised_closed",
+    "dizzy": [
+      {
+        "frame": "idle-surprised_closed",
+        "ms": 450
+      },
+      {
+        "frame": "concerned",
+        "ms": 900
+      }
+    ],
+    "ankle": "pose-ceiling-upside-down",
+    "cling": "pose-ceiling",
+    "zones": [
+      0.3,
+      0.62
+    ]
+  },
+  "fling": {
+    "launch": [
+      {
+        "frame": "idle-surprised_closed",
+        "ms": 90
+      }
+    ],
+    "fly": "crouch-surprised",
+    "fall": "surprised",
+    "bounce": [
+      {
+        "frame": "idle-surprised_closed",
+        "ms": 110
+      }
+    ],
+    "annoyedAfter": 3
+  },
+  "land": {
+    "soft": [
+      {
+        "frame": "crouch-neutral",
+        "ms": 140
+      },
+      {
+        "frame": "transition-stand_crouch",
+        "ms": 160
+      }
+    ],
+    "hard": [
+      {
+        "frame": "crouch-surprised",
+        "ms": 260
+      },
+      {
+        "frame": "transition-stand_crouch",
+        "ms": 140
+      },
+      {
+        "frame": "annoyed",
+        "ms": 900
+      },
+      {
+        "frame": "arms_crossed-annoyed",
+        "ms": 1400
+      }
+    ],
+    "perch": [
+      {
+        "frame": "transition-edge_perch",
+        "ms": 160
+      }
+    ],
+    "hardGlitch": "land"
   }
 }

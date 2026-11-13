@@ -2,8 +2,7 @@
 //! window flight with bounces, the work-area arena, the pointer estimators and the squash
 //! spring. Pure: no gpui, no x11rb, no `Instant`; seconds in, device px.
 //!
-//! Round A ships the sim and its tests only; the view wiring is round B (R-P2/P3).
-#![allow(dead_code)] // wired in round B (R-P2/P3)
+//! The view wiring is ragview.rs.
 
 use crate::edges::{Platform, WinRect};
 
@@ -102,6 +101,8 @@ pub struct Chain {
     v_prev: Option<f32>,
     still: f32,
     asleep: bool,
+    /// Per down node: lateral limits relative to the grip (else `p.room`).
+    rooms: Vec<(f32, f32)>,
 }
 
 impl Chain {
@@ -125,7 +126,13 @@ impl Chain {
             v_prev: None,
             still: 0.0,
             asleep: false,
+            rooms: Vec::new(),
         }
+    }
+
+    /// Per-node lateral limits (the window's room for the rows around each down node).
+    pub fn set_rooms(&mut self, rooms: Vec<(f32, f32)>) {
+        self.rooms = rooms.into_iter().map(|(a, b)| (fin(a).min(0.0), fin(b).max(0.0))).collect();
     }
 
     /// Evenly spaced rest rows for `links` nodes over `len` px (down) or `-len` (up).
@@ -241,7 +248,8 @@ impl Chain {
         clamp_angles(&mut self.down, &self.rows_down, a, s, sw, bd, false);
         clamp_angles(&mut self.up, &self.rows_up, a, s, swu, bd, true);
         let room = self.p.room;
-        for nd in self.down.iter_mut().chain(self.up.iter_mut()) {
+        for (i, nd) in self.down.iter_mut().enumerate().chain(self.up.iter_mut().map(|n| (usize::MAX, n))) {
+            let room = self.rooms.get(i).copied().unwrap_or(room);
             nd.p.0 = nd.p.0.clamp(a.0 + room.0, a.0 + room.1);
             if !(nd.p.0.is_finite() && nd.p.1.is_finite()) {
                 nd.p = a;
@@ -348,6 +356,7 @@ impl Chain {
         bands.iter().find(|b| dest.1 >= b.0 + b.3 && dest.1 < b.1 + b.3).map(|b| (dest.0 - b.2, dest.1 - b.3))
     }
 
+    #[cfg(test)]
     pub fn segment_angles(&self) -> (Vec<f32>, Vec<f32>) {
         let ang = |nodes: &[Node], up: bool| -> Vec<f32> {
             let mut prev = self.anchor;
@@ -536,6 +545,10 @@ impl Pointer {
         let sx: f32 = pts.iter().map(|p| (p.0 - mt) * (p.1 - mx)).sum();
         let sy: f32 = pts.iter().map(|p| (p.0 - mt) * (p.2 - my)).sum();
         (sx / stt, sy / stt)
+    }
+
+    pub fn last(&self) -> Option<(f32, f32)> {
+        self.samples.back().map(|s| (s.1, s.2))
     }
 
     /// The release velocity at `t`, clamped to `V_MAX`.

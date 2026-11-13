@@ -384,6 +384,58 @@ pub struct Behaviour {
     pub music: Option<MusicSpec>,
     #[serde(default)]
     pub brain: BrainSpec,
+    /// The ragdoll (BRIEF-ragdoll §2.4): held, flung, landing frames. All optional.
+    #[serde(default)]
+    pub drag: Option<DragSpec>,
+    #[serde(default)]
+    pub fling: Option<FlingSpec>,
+    #[serde(default)]
+    pub land: Option<LandSpec>,
+}
+
+/// While held (BRIEF-ragdoll §2.2).
+#[derive(Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DragSpec {
+    pub grab: Vec<Step>,
+    pub hang: Option<String>,
+    pub still: Vec<StillStep>,
+    pub swing: Vec<Step>,
+    pub shake: Option<String>,
+    pub dizzy: Vec<Step>,
+    /// Held by the legs: upside down (a grip anchor, not ground/seat).
+    pub ankle: Option<String>,
+    /// Head-zone variant: hands up gripping the cursor (off by default).
+    pub cling: Option<String>,
+    /// Grip zones by height: head below zones[0], torso below zones[1], legs after.
+    pub zones: Option<[f32; 2]>,
+}
+
+#[derive(Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct StillStep {
+    pub after_ms: u32,
+    pub frame: String,
+}
+
+#[derive(Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct FlingSpec {
+    pub launch: Vec<Step>,
+    pub fly: Option<String>,
+    pub fall: Option<String>,
+    pub bounce: Vec<Step>,
+    pub annoyed_after: Option<u32>,
+}
+
+#[derive(Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LandSpec {
+    pub soft: Vec<Step>,
+    pub hard: Vec<Step>,
+    /// Seat-anchored frames only.
+    pub perch: Vec<Step>,
+    pub hard_glitch: Option<String>,
 }
 
 /// What the brain plays (BRIEF-brain §6.4, §14.1). Steps may use the clip ids `@look` and
@@ -595,6 +647,14 @@ impl Pack {
         if let Some(w) = behaviour.music.as_ref().and_then(|m| m.window.clone()) {
             perch_frames.insert(w);
         }
+        // Landing on an edge: registered on the seat like the perch base.
+        if let Some(l) = &behaviour.land {
+            for st in &l.perch {
+                if let Step::Hold { frame, .. } = st {
+                    perch_frames.insert(frame.clone());
+                }
+            }
+        }
         let mut pack =
             Pack { dir: dir.to_owned(), name: pack_name, catalog, behaviour, frames, index, poses: Vec::new(), seat_ref, perch_frames };
 
@@ -699,6 +759,70 @@ impl Pack {
                     }
                     _ => {}
                 }
+            }
+        }
+        // The ragdoll's frames (BRIEF-ragdoll §2.4).
+        if let Some(d) = &pack.behaviour.drag {
+            check_steps("drag.grab", &d.grab, &mut errors, &pack);
+            check_steps("drag.swing", &d.swing, &mut errors, &pack);
+            check_steps("drag.dizzy", &d.dizzy, &mut errors, &pack);
+            for (k, id) in [("hang", &d.hang), ("shake", &d.shake)] {
+                if let Some(id) = id
+                    && !pack.index.contains_key(id)
+                {
+                    errors.push(format!("moods.json drag.{k}: frame `{id}` does not resolve"));
+                }
+            }
+            for st in &d.still {
+                if !pack.index.contains_key(&st.frame) {
+                    errors.push(format!("moods.json drag.still: frame `{}` does not resolve", st.frame));
+                }
+            }
+            for (k, id) in [("ankle", &d.ankle), ("cling", &d.cling)] {
+                match id.as_ref().map(|id| (id, pack.index.get(id))) {
+                    Some((id, None)) => errors.push(format!("moods.json drag.{k}: frame `{id}` does not resolve")),
+                    Some((id, Some(&i))) if matches!(pack.frames[i].anchor.name.as_str(), "ground" | "seat") => {
+                        errors.push(format!("moods.json drag.{k}: frame `{id}` needs a grip anchor (not ground/seat)"))
+                    }
+                    _ => {}
+                }
+            }
+            if let Some([a, b]) = d.zones
+                && !(0.0 < a && a < b && b < 1.0)
+            {
+                errors.push(format!("moods.json drag.zones: [{a}, {b}] must be ascending inside (0, 1)"));
+            }
+        }
+        if let Some(f) = &pack.behaviour.fling {
+            check_steps("fling.launch", &f.launch, &mut errors, &pack);
+            check_steps("fling.bounce", &f.bounce, &mut errors, &pack);
+            for (k, id) in [("fly", &f.fly), ("fall", &f.fall)] {
+                if let Some(id) = id
+                    && !pack.index.contains_key(id)
+                {
+                    errors.push(format!("moods.json fling.{k}: frame `{id}` does not resolve"));
+                }
+            }
+        }
+        if let Some(l) = &pack.behaviour.land {
+            check_steps("land.soft", &l.soft, &mut errors, &pack);
+            check_steps("land.hard", &l.hard, &mut errors, &pack);
+            check_steps("land.perch", &l.perch, &mut errors, &pack);
+            for st in &l.perch {
+                let ids: Vec<String> = match st {
+                    Step::Hold { frame, .. } => vec![frame.clone()],
+                    Step::Clip(c) => pack.clip(c).map(|c| c.frames.iter().map(|f| f.id.clone()).collect()).unwrap_or_default(),
+                };
+                for id in ids {
+                    if pack.index.get(&id).is_some_and(|&i| pack.frames[i].anchor.name != "seat") {
+                        errors.push(format!("moods.json land.perch: frame `{id}` has no seat anchor"));
+                    }
+                }
+            }
+            if let Some(g) = &l.hard_glitch
+                && !matches!(g.as_str(), "land" | "burst" | "none")
+            {
+                errors.push(format!("moods.json land.hardGlitch: `{g}` (land|burst|none)"));
             }
         }
         for f in &pack.behaviour.font_files {

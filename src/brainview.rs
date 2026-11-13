@@ -403,7 +403,7 @@ impl Avatar {
         if self.music.is_some() {
             v.push("music");
         }
-        if self.press.is_some() {
+        if self.press.is_some() || self.rag.is_some() {
             v.push("drag");
         }
         if self.session.as_ref().and_then(|s| s.shown.as_ref()).is_some_and(|b| b.busy) {
@@ -414,10 +414,33 @@ impl Avatar {
 
     /// Work areas and monitors, cut to the test arena when there is one (its bottom is her
     /// floor there, its sides are the walls).
-    fn arena_filter(&self, areas: Vec<WinRect>, monitors: Vec<WinRect>) -> (Vec<WinRect>, Vec<WinRect>) {
+    pub(super) fn arena_filter(&self, areas: Vec<WinRect>, monitors: Vec<WinRect>) -> (Vec<WinRect>, Vec<WinRect>) {
         match self.brain.as_ref().and_then(|h| h.ov.arena) {
             Some(a) => areas.into_iter().zip(monitors).filter_map(|(w, m)| Some((w.intersect(&a)?, m.intersect(&a)?))).unzip(),
             None => (areas, monitors),
+        }
+    }
+
+    /// Work areas and monitors as she flies in them (cut to the test arena). Asked once per
+    /// release, never per frame.
+    pub(super) fn rag_areas(&self) -> (Vec<WinRect>, Vec<WinRect>) {
+        self.arena_filter(
+            self.x11.work_areas().iter().map(crate::platform::x11::Monitor::rect).collect(),
+            self.x11.monitors().iter().map(crate::platform::x11::Monitor::rect).collect(),
+        )
+    }
+
+    /// The windows she may use (a test's `brain sense windows`), None = any.
+    pub(super) fn brain_allowed_windows(&self) -> Option<Vec<u32>> {
+        self.brain.as_ref().and_then(|h| h.ov.windows.clone())
+    }
+
+    /// Picked up mid-move: the move is dropped (she is where the hand is).
+    pub(super) fn brain_cancel_move(&mut self) {
+        if let Some(h) = &mut self.brain {
+            h.flight = None;
+            h.scoot = None;
+            h.next_plan = None;
         }
     }
 
@@ -1188,7 +1211,7 @@ impl Avatar {
     /// Draw (or take down) the "!" badge by her head: shaped solid-colour layers like the
     /// hearts, so it costs no GPUI redraw.
     pub(super) fn update_marker(&mut self, now: Instant) {
-        let show = self.loaded && !self.hidden && !self.quitting && self.teleport.is_none();
+        let show = self.loaded && !self.hidden && !self.quitting && self.teleport.is_none() && self.rag.is_none();
         let st = if show { self.marker_state(now) } else { None };
         let geo = st.and_then(|(bob, sc)| {
             let fi = self.anim.frame();

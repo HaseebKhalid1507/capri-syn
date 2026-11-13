@@ -57,6 +57,96 @@ pub enum Command {
     SettingsReload,
     /// A synthetic tap on her head (headpat) or body, as a click would.
     Tap { head: bool },
+    /// A scripted drag (the real pointer is never touched): ops in order.
+    Drag(Vec<crate::drag::DragOp>),
+}
+
+/// `drag grab X,Y path T:DX,DY… [smooth] release | cancel | fling X,Y VX,VY [LEAD] |
+/// shake X,Y AX,AY HZ MS [release] | seed N`, chained on one line.
+fn parse_drag(rest: &str) -> Result<Vec<crate::drag::DragOp>> {
+    use crate::drag::DragOp;
+    let w: Vec<&str> = rest.split_whitespace().collect();
+    let pair = |s: &str| -> Result<(f32, f32)> {
+        let (a, b) = s.split_once(',').with_context(|| format!("`{s}`: X,Y"))?;
+        let (a, b): (f32, f32) = (a.parse()?, b.parse()?);
+        if !(a.is_finite() && b.is_finite()) {
+            bail!("`{s}`: not finite");
+        }
+        Ok((a, b))
+    };
+    let ipair = |s: &str| pair(s).map(|(a, b)| (a.round() as i32, b.round() as i32));
+    let mut ops = Vec::new();
+    let mut i = 0;
+    while i < w.len() {
+        match w[i] {
+            "grab" => {
+                ops.push(DragOp::Grab(ipair(w.get(i + 1).context("grab X,Y")?)?.0, ipair(w[i + 1])?.1));
+                i += 2;
+            }
+            "path" => {
+                let mut keys = Vec::new();
+                let mut smooth = false;
+                i += 1;
+                while i < w.len() {
+                    if w[i] == "smooth" {
+                        smooth = true;
+                        i += 1;
+                        continue;
+                    }
+                    let Some((t, xy)) = w[i].split_once(':') else { break };
+                    let (x, y) = ipair(xy)?;
+                    keys.push((t.parse::<u32>().with_context(|| format!("path time `{t}`"))?, x, y));
+                    i += 1;
+                }
+                if keys.is_empty() {
+                    bail!("path T:DX,DY…");
+                }
+                ops.push(DragOp::Path(keys, smooth));
+            }
+            "release" => {
+                ops.push(DragOp::Release);
+                i += 1;
+            }
+            "cancel" => {
+                ops.push(DragOp::Cancel);
+                i += 1;
+            }
+            "fling" => {
+                let at = ipair(w.get(i + 1).context("fling X,Y VX,VY [LEAD_MS]")?)?;
+                let v = pair(w.get(i + 2).context("fling X,Y VX,VY [LEAD_MS]")?)?;
+                i += 3;
+                let lead_ms = match w.get(i).and_then(|v| v.parse::<u32>().ok()) {
+                    Some(l) => {
+                        i += 1;
+                        l
+                    }
+                    None => 120,
+                };
+                ops.push(DragOp::Fling { at, v, lead_ms });
+            }
+            "shake" => {
+                let at = ipair(w.get(i + 1).context("shake X,Y AX,AY HZ MS [release]")?)?;
+                let amp = pair(w.get(i + 2).context("shake X,Y AX,AY HZ MS")?)?;
+                let hz: f32 = w.get(i + 3).context("shake HZ")?.parse()?;
+                let ms: u32 = w.get(i + 4).context("shake MS")?.parse()?;
+                i += 5;
+                let release = w.get(i) == Some(&"release");
+                if release {
+                    i += 1;
+                }
+                ops.push(DragOp::Shake { at, amp, hz, ms, release });
+            }
+            "seed" => {
+                ops.push(DragOp::Seed(w.get(i + 1).context("seed N")?.parse().context("seed: a number")?));
+                i += 2;
+            }
+            other => bail!("drag: unexpected `{other}` (grab|path|release|cancel|fling|shake|seed)"),
+        }
+    }
+    if ops.is_empty() {
+        bail!("usage: drag grab X,Y [path T:DX,DY… [smooth]] [release] | cancel | fling X,Y VX,VY [LEAD_MS] | shake X,Y AX,AY HZ MS [release] | seed N");
+    }
+    Ok(ops)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -193,6 +283,7 @@ impl Command {
                 }
                 Command::Perch { sit, win }
             }
+            "drag" => Command::Drag(parse_drag(rest)?),
             "page" => match rest {
                 "next" | "+" => Command::Page(1),
                 "prev" | "-" => Command::Page(-1),
@@ -298,6 +389,29 @@ fn handle(stream: UnixStream, tx: async_channel::Sender<(Command, Reply)>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drag_commands_parse() {
+        use crate::drag::DragOp;
+        let p = |s: &str| match Command::parse(s).unwrap() {
+            Command::Drag(v) => v,
+            c => panic!("{c:?}"),
+        };
+        assert_eq!(
+            p("drag grab 270,330 path 0:0,0 400:0,-140 smooth release"),
+            vec![DragOp::Grab(270, 330), DragOp::Path(vec![(0, 0, 0), (400, 0, -140)], true), DragOp::Release]
+        );
+        assert_eq!(p("drag fling 270,330 2600,-1400"), vec![DragOp::Fling { at: (270, 330), v: (2600.0, -1400.0), lead_ms: 120 }]);
+        assert_eq!(
+            p("drag shake 270,330 150,0 5 1200 release"),
+            vec![DragOp::Shake { at: (270, 330), amp: (150.0, 0.0), hz: 5.0, ms: 1200, release: true }]
+        );
+        assert_eq!(p("drag seed 7 cancel"), vec![DragOp::Seed(7), DragOp::Cancel]);
+        assert!(Command::parse("drag grab").is_err());
+        assert!(Command::parse("drag path").is_err());
+        assert!(Command::parse("drag wiggle").is_err());
+        assert!(Command::parse("drag grab nan,3").is_err());
+    }
 
     #[test]
     fn brain_commands_parse() {

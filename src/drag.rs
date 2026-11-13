@@ -1,7 +1,6 @@
 //! The ragdoll's sprite state machine (BRIEF-ragdoll §2): which frame she shows while held,
 //! flung, bouncing and landing. Pure: seconds in, frame ids out. The view (round B) feeds the
 //! pointer estimators and the flight contacts from ragdoll.rs.
-#![allow(dead_code)] // wired in round B (R-P2/P3)
 
 use crate::ragdoll::{Contact, HARD_VY, HARD_WALL, V_FLING};
 
@@ -19,6 +18,7 @@ pub struct Step {
     pub ms: u32,
 }
 
+#[cfg(test)]
 fn steps(v: &[(&str, u32)]) -> Vec<Step> {
     v.iter().map(|&(f, ms)| Step { frame: f.into(), ms }).collect()
 }
@@ -47,6 +47,7 @@ pub struct RagSpec {
 }
 
 impl RagSpec {
+    #[cfg(test)]
     pub fn capri() -> RagSpec {
         RagSpec {
             grab: steps(&[("surprised", 260)]),
@@ -79,6 +80,104 @@ impl RagSpec {
         } else {
             Zone::Torso
         }
+    }
+}
+
+/// One scripted-drag operation (`avatarctl drag …`, BRIEF-ragdoll §6). Window-local device px
+/// for grab points; ms since the grab and root px offsets from the grab point for paths.
+#[derive(Clone, Debug, PartialEq)]
+pub enum DragOp {
+    Grab(i32, i32),
+    Path(Vec<(u32, i32, i32)>, bool),
+    Release,
+    Cancel,
+    Fling { at: (i32, i32), v: (f32, f32), lead_ms: u32 },
+    Shake { at: (i32, i32), amp: (f32, f32), hz: f32, ms: u32, release: bool },
+    Seed(u64),
+}
+
+/// A scripted pointer: keyframes (seconds since the grab, root offset), linear or Catmull-Rom,
+/// plus an optional sinusoidal shake on top; the release time if one was asked for.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Script {
+    keys: Vec<(f32, f32, f32)>,
+    smooth: bool,
+    shake: Option<(f32, f32, f32, f32, f32)>,
+    pub release_at: Option<f32>,
+}
+
+impl Script {
+    /// Keyframes at `ms` (appended; an earlier time than the last is moved after it).
+    pub fn path(&mut self, keys: &[(u32, i32, i32)], smooth: bool) {
+        for &(ms, x, y) in keys {
+            let t = (ms as f32 / 1000.0).max(self.keys.last().map_or(0.0, |k| k.0));
+            self.keys.push((t, x as f32, y as f32));
+        }
+        self.smooth |= smooth;
+    }
+
+    /// Speed up from rest to `v` (px/s) over `lead` s, keep it 80 ms (the release estimate
+    /// sees a steady speed), then release.
+    pub fn fling(v: (f32, f32), lead: f32) -> Script {
+        let lead = lead.max(0.02);
+        let mut s = Script::default();
+        let n = 12;
+        for i in 0..=n {
+            let t = lead * i as f32 / n as f32;
+            let k = 0.5 * t * t / lead;
+            s.keys.push((t, v.0 * k, v.1 * k));
+        }
+        let (x, y) = (v.0 * lead * 0.5, v.1 * lead * 0.5);
+        s.keys.push((lead + 0.08, x + v.0 * 0.08, y + v.1 * 0.08));
+        s.release_at = Some(lead + 0.08);
+        s
+    }
+
+    pub fn shake(amp: (f32, f32), hz: f32, ms: u32, release: bool) -> Script {
+        let dur = ms as f32 / 1000.0;
+        Script { keys: vec![(0.0, 0.0, 0.0)], smooth: false, shake: Some((amp.0, amp.1, hz.max(0.1), 0.0, dur)), release_at: release.then_some(dur) }
+    }
+
+    /// When the scripted motion is over (s since the grab).
+    pub fn ends_at(&self) -> f32 {
+        let k = self.keys.last().map_or(0.0, |k| k.0);
+        let s = self.shake.map_or(0.0, |s| s.3 + s.4);
+        k.max(s).max(self.release_at.unwrap_or(0.0))
+    }
+
+    /// The root offset from the grab point at `t` s.
+    pub fn at(&self, t: f32) -> (f32, f32) {
+        let t = if t.is_finite() { t.max(0.0) } else { 0.0 };
+        let mut p = match self.keys.len() {
+            0 => (0.0, 0.0),
+            _ if t <= self.keys[0].0 => (self.keys[0].1, self.keys[0].2),
+            n if t >= self.keys[n - 1].0 => (self.keys[n - 1].1, self.keys[n - 1].2),
+            n => {
+                let i = (1..n).find(|&i| self.keys[i].0 >= t).unwrap_or(n - 1);
+                let (a, b) = (self.keys[i - 1], self.keys[i]);
+                let u = if b.0 > a.0 { (t - a.0) / (b.0 - a.0) } else { 1.0 };
+                if self.smooth {
+                    let p0 = if i >= 2 { self.keys[i - 2] } else { a };
+                    let p3 = if i + 1 < n { self.keys[i + 1] } else { b };
+                    let cr = |p0: f32, p1: f32, p2: f32, p3: f32| {
+                        let (u2, u3) = (u * u, u * u * u);
+                        0.5 * (2.0 * p1 + (-p0 + p2) * u + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * u2 + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * u3)
+                    };
+                    (cr(p0.1, a.1, b.1, p3.1), cr(p0.2, a.2, b.2, p3.2))
+                } else {
+                    (a.1 + (b.1 - a.1) * u, a.2 + (b.2 - a.2) * u)
+                }
+            }
+        };
+        if let Some((ax, ay, hz, t0, dur)) = self.shake
+            && t >= t0
+            && t <= t0 + dur
+        {
+            let w = (std::f32::consts::TAU * hz * (t - t0)).sin();
+            p.0 += ax * w;
+            p.1 += ay * w;
+        }
+        p
     }
 }
 
@@ -177,6 +276,28 @@ impl RagMachine {
 
     pub fn phase(&self) -> Phase {
         self.phase
+    }
+
+    /// The next landing is hard whatever its speed (the brain's fling offence).
+    pub fn force_hard(&mut self, t: f32) {
+        let n = self.spec.annoyed_after.max(1) as usize;
+        self.flings.extend(std::iter::repeat_n(t, n));
+    }
+
+    /// When the playing clip or the next still stage changes the frame (machine time), so a
+    /// held, still, asleep chain needs no ticks until then.
+    pub fn next_change(&self, t: f32) -> Option<f32> {
+        let clip = self.playing_end().filter(|&e| e > t);
+        let still = match (self.phase, self.still_since) {
+            (Phase::Held { state: HeldState::Hang | HeldState::Still(_), .. }, Some(s)) => {
+                self.spec.still.iter().map(|(a, _)| s + a).find(|&x| x > t)
+            }
+            _ => None,
+        };
+        match (clip, still) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     fn play(&mut self, t: f32, s: Vec<Step>, then: Option<String>) {
@@ -420,6 +541,40 @@ impl RagMachine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn script_paths() {
+        let mut s = Script::default();
+        s.path(&[(0, 0, 0), (400, 0, -140), (900, 240, -140)], false);
+        let near = |a: (f32, f32), b: (f32, f32)| (a.0 - b.0).abs() < 1e-3 && (a.1 - b.1).abs() < 1e-3;
+        assert!(near(s.at(0.2), (0.0, -70.0)));
+        assert!(near(s.at(0.65), (120.0, -140.0)), "{:?}", s.at(0.65));
+        assert_eq!(s.at(5.0), (240.0, -140.0));
+        assert!((s.ends_at() - 0.9).abs() < 1e-6);
+        // Fling: the release estimate sees the asked speed.
+        let f = Script::fling((2600.0, -1400.0), 0.12);
+        let r = f.release_at.unwrap();
+        let mut p = crate::ragdoll::Pointer::default();
+        let mut t = 0.0;
+        while t <= r + 1e-6 {
+            let (x, y) = f.at(t);
+            p.push(t, x, y);
+            t += 1.0 / 60.0;
+        }
+        let v = p.velocity(r);
+        assert!((v.0 - 2600.0).abs() < 2600.0 * 0.08 && (v.1 + 1400.0).abs() < 1400.0 * 0.08, "{v:?}");
+        // Shake: back at the rest point after whole cycles; reversals counted.
+        let sh = Script::shake((150.0, 0.0), 5.0, 1200, false);
+        assert!(sh.at(1.2).0.abs() < 1e-2);
+        let mut p = crate::ragdoll::Pointer::default();
+        let mut t = 0.0;
+        while t < 1.2 {
+            let (x, y) = sh.at(t);
+            p.push(t, x, y);
+            t += 1.0 / 60.0;
+        }
+        assert!(p.reversals(1.2).0 >= SHAKE_REVERSALS);
+    }
 
     fn ev(e: RagEvent) -> RagInput {
         RagInput { event: Some(e), ..RagInput::default() }
