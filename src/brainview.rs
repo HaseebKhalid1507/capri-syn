@@ -1090,8 +1090,10 @@ impl Avatar {
                     let v = serde_json::json!({ "t": b - h.brain.start(), "k": "sense", "focus": format!("{:?}", h.ov.focus), "cursor": h.ov.cursor,
                                                 "idle": h.ov.idle.map(|i| i.1), "fs": h.ov.fullscreen });
                     h.write(v);
-                    // A changed sense is read at the next poll, as a real one would be.
+                    // Read now (a real change waits for the next poll; a test wants it in order).
+                    h.brain.poll_now();
                 }
+                self.brain_run(now, true);
             }
         }
         "ok".into()

@@ -743,6 +743,11 @@ impl Brain {
         self.advance(now);
     }
 
+    /// Read the senses at the next tick (a test changed one: `brain sense …`).
+    pub fn poll_now(&mut self) {
+        self.next_poll = self.next_poll.min(self.t);
+    }
+
     fn emit(&mut self, t: f64, i: Intent) {
         let what = match &i {
             Intent::Move(p) => format!("move {}", plan_text(p)),
@@ -1165,6 +1170,10 @@ impl Brain {
                             self.mode = Mode::Summoned { kind, until: t + hold };
                         }
                     }
+                } else if a.approach.is_none() && self.mode == Mode::Passive && self.moves.back().is_some_and(|&m| t - m > 5.0) {
+                    // The view held the move back (behind a clip, a bubble): the next roam
+                    // counts from when she got there.
+                    self.roam = 0.0;
                 }
                 self.emit(t, Intent::Save);
             }
