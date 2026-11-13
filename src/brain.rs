@@ -62,16 +62,19 @@ pub enum Arrival {
     DropIn,
     /// A hop along a short arc (within ~300 px only).
     Hop,
+    /// Float to float: an eased drift (a transport the view picks by distance, no weight).
+    Drift,
 }
 
 impl Arrival {
-    pub const ALL: [Arrival; 4] = [Arrival::Teleport, Arrival::Glitch, Arrival::DropIn, Arrival::Hop];
+    pub const ALL: [Arrival; 5] = [Arrival::Teleport, Arrival::Glitch, Arrival::DropIn, Arrival::Hop, Arrival::Drift];
     pub fn key(self) -> &'static str {
         match self {
             Arrival::Teleport => "teleport",
             Arrival::Glitch => "glitch",
             Arrival::DropIn => "drop_in",
             Arrival::Hop => "hop",
+            Arrival::Drift => "drift",
         }
     }
     pub fn parse(s: &str) -> Option<Arrival> {
@@ -774,7 +777,13 @@ impl Brain {
 
     fn step(&mut self, t: f64, senses: Option<&Senses>) {
         self.advance(t);
-        // Poll: the only place senses are read.
+        // The fullscreen gate is read at every tick that brings senses (a timer between two
+        // polls must not move her onto a fullscreen app that came up since the last poll).
+        if let Some(s) = senses {
+            self.sensed.fullscreen = s.fullscreen;
+            self.sensed.fullscreen_here = s.fullscreen_here;
+        }
+        // Poll: the only place the other senses are read.
         if self.next_poll <= t + EPS
             && let Some(s) = senses
         {

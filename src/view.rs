@@ -1169,6 +1169,9 @@ impl Avatar {
         }
         take(self.brain_deadline(now));
         take(self.rag_deadline(now));
+        if self.posed() {
+            take(self.brain.as_ref().and_then(|h| h.swing.as_ref()).map_or(Some(now + FRAME_FX), |s| Some(s.due)));
+        }
         t
     }
 
@@ -1364,6 +1367,7 @@ impl Avatar {
             self.hop = None;
         }
         dirty |= self.rag_tick(now);
+        dirty |= self.swing_tick(now);
         if self.loaded {
             dirty |= self.brain_tick(now);
         }
@@ -2298,7 +2302,7 @@ impl Avatar {
 
     fn apply_offset(&mut self, now: Instant) {
         let hop = self.hop.and_then(|t| fx::hop(now.saturating_duration_since(t), 16.0 * self.layout.sf)).unwrap_or(0);
-        let pos = (self.origin.0, self.origin.1 - hop);
+        let pos = (self.origin.0, self.origin.1 - hop + self.drop_in_offset(now) + self.float_bob(now));
         if pos != self.applied {
             self.x11.move_to(pos.0, pos.1).ok();
             self.applied = pos;
@@ -3136,14 +3140,26 @@ impl Render for Avatar {
         if plan.slices.is_none() && plan.sx == 1.0 && plan.sy == 1.0 && !hidden && self.rag.is_none() {
             let pose = self.pose_at(now);
             let fi = self.anim.frame();
-            if pose != fx::Pose::default()
+            let swing = self.frames.get(fi).and_then(|f| f.as_ref()).and_then(|f| self.swing_bands(fi, f, false));
+            if (pose != fx::Pose::default() || swing.is_some())
                 && let Some(f) = self.frames.get(fi).and_then(|f| f.as_ref())
             {
                 let rows = self.pose_rows(fi, f);
-                let bands = fx::pose_bands(pose, rows);
+                let bands = swing.unwrap_or_else(|| fx::pose_bands(pose, rows));
                 plan.leg = fx::pose_leg(pose, rows, &bands);
                 plan.slices = Some(bands);
                 under = (POSE_REACH * sf).ceil();
+                // The chain swing moves more per frame than the smear reaches: its next
+                // bands go underneath (commit-ahead).
+                if next.is_none()
+                    && let Some(nb) = self.swing_bands(fi, f, true)
+                {
+                    let np = self.pose_at(now + Duration::from_millis(33));
+                    let mut n = BodyPlan::plain();
+                    n.leg = fx::pose_leg(np, rows, &nb);
+                    n.slices = Some(nb);
+                    next = Some(n);
+                }
             }
         }
         // The glitch ends next frame: the plain or posed figure comes back.

@@ -88,9 +88,9 @@ impl Default for BrainSettings {
                 (Approach::Peek, 1.0),
                 (Approach::Beside, 1.0),
             ],
-            // drop_in needs the ragdoll (R-P3): weight 0 until then, whatever the file says.
             // glitch lost both r6 critic pairs to teleport: 1 by default (still selectable).
-            arrivals: vec![(Arrival::Teleport, 3.0), (Arrival::Glitch, 1.0), (Arrival::DropIn, 0.0), (Arrival::Hop, 1.0)],
+            // drop_in exists now (the ragdoll round): 2, as in the brief's file.
+            arrivals: vec![(Arrival::Teleport, 3.0), (Arrival::Glitch, 1.0), (Arrival::DropIn, 2.0), (Arrival::Hop, 1.0)],
             no_repeat: 2,
             cover_max_pct: 12.0,
             passive_every_min: (3.0, 10.0),
@@ -196,8 +196,8 @@ impl Settings {
         if let Some(a) = r.attention {
             b.attention = Attention::parse(&a).context("brain.attention must be \"mix\", \"hang_only\" or \"off\"")?;
         }
-        // The ragdoll isn't in yet: drop_in can't happen.
-        b.arrivals.iter_mut().filter(|p| p.0 == Arrival::DropIn).for_each(|p| p.1 = 0.0);
+        // Drift is a transport (by distance), never drawn from the pool.
+        b.arrivals.retain(|p| p.0 != Arrival::Drift);
         Ok(Settings { brain: b })
     }
 
@@ -266,7 +266,7 @@ fullscreen = "stay"
         )
         .unwrap();
         assert_eq!(s.brain.fullscreen, Fullscreen::Stay);
-        assert_eq!(s.brain.arrivals.iter().find(|a| a.0 == Arrival::DropIn).unwrap().1, 0.0, "drop_in waits for the ragdoll");
+        assert!(s.brain.arrivals.iter().find(|a| a.0 == Arrival::DropIn).unwrap().1 > 0.0, "drop_in is on with the ragdoll");
         let s = Settings::parse("[brain]\napproaches = { hang = 0, peek = 2.5 }\npassive_every_min = [1, 2]\n").unwrap();
         assert_eq!(s.brain.approaches.iter().find(|a| a.0 == Approach::Hang).unwrap().1, 0.0);
         assert_eq!(s.brain.approaches.iter().find(|a| a.0 == Approach::Peek).unwrap().1, 2.5);

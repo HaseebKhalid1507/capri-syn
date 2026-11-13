@@ -623,6 +623,11 @@ impl Avatar {
         {
             self.music_on(now, until).ok();
         }
+        // The brain's emotes from while she was carried (a fling's sulk).
+        let queued = self.brain.as_mut().map(|h| std::mem::take(h.queued_mut())).unwrap_or_default();
+        for e in queued {
+            self.play_emote(e, now);
+        }
         let spec = self.spec(self.mood).cloned();
         let autonomous = spec.as_ref().map_or(self.mood == Mood::Idle, |s| s.autonomy);
         if autonomous && self.pack.catalog.autonomy.enabled && !self.activities().is_empty() {
