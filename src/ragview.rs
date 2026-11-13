@@ -59,6 +59,8 @@ pub(super) struct Rag {
     vel: (f32, f32),
     /// The rigid drag: pointer offset to the window origin.
     offset: (i32, i32),
+    /// SA_RAG_PROF: sim + plan time per tick (µs).
+    prof: Option<Vec<u32>>,
 }
 
 pub(super) fn lockstep() -> bool {
@@ -243,6 +245,7 @@ impl Avatar {
             hard: false,
             vel: (0.0, 0.0),
             offset: (self.origin.0 - p0.0 as i32, self.origin.1 - p0.1 as i32),
+            prof: std::env::var("SA_RAG_PROF").is_ok_and(|v| v == "1").then(Vec::new),
         };
         if !rigid {
             rag.chain.kick((0.0, -400.0 * self.layout.sf));
@@ -291,6 +294,7 @@ impl Avatar {
             r.cur = Some(n);
         }
         let t = r.t;
+        let t0 = Instant::now();
         match r.m.phase() {
             Phase::Held { .. } => self.rag_held_step(now, t, dt),
             Phase::Flight { .. } => self.rag_flight_step(now, t, dt),
@@ -298,6 +302,9 @@ impl Avatar {
             Phase::Idle => self.rag_end(now),
         }
         self.rag_plan_next();
+        if let Some(p) = self.rag.as_mut().and_then(|r| r.prof.as_mut()) {
+            p.push(t0.elapsed().as_micros() as u32);
+        }
         true
     }
 
@@ -602,6 +609,11 @@ impl Avatar {
     }
 
     fn rag_restore_with(&mut self, r: Rag, now: Instant, landed: bool) {
+        if let Some(mut p) = r.prof.clone().filter(|p| !p.is_empty()) {
+            p.sort_unstable();
+            let q = |f: f32| p[((p.len() - 1) as f32 * f) as usize];
+            eprintln!("rag-prof: {} ticks, sim+plan p50 {} µs, p95 {} µs, max {} µs", p.len(), q(0.5), q(0.95), q(1.0));
+        }
         if r.restore.0
             && let Some(b) = &mut self.bubble
         {
