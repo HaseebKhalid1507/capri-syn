@@ -649,6 +649,13 @@ def main():
                     return t
                 def rss():
                     return int(open(f"/proc/{pid}/status").read().split("VmRSS:")[1].split()[0]) // 1024
+                def xorg_ns():
+                    try:
+                        xp = subprocess.run(["pgrep", "-x", "Xorg"], capture_output=True, text=True).stdout.split()[0]
+                        return int(open(f"/proc/{xp}/schedstat").read().split()[0])
+                    except (IndexError, OSError, ValueError):
+                        return None
+                x0 = xorg_ns()
                 c0, w0, peak = ns(), time.time(), rss()
                 if kind == "cpu":
                     end = w0 + float(rest)
@@ -666,7 +673,9 @@ def main():
                             pass
                         time.sleep(0.1)
                 c1, w1 = ns(), time.time()
-                print(f"{kind} {rest}: CPU {100 * (c1 - c0) / 1e9 / (w1 - w0):.2f} % of one core over {w1 - w0:.1f} s "
+                x1 = xorg_ns()
+                xs = f"; Xorg {100 * (x1 - x0) / 1e9 / (w1 - w0):.2f} %" if x0 is not None and x1 is not None else ""
+                print(f"{kind} {rest}: CPU {100 * (c1 - c0) / 1e9 / (w1 - w0):.2f} % of one core{xs} over {w1 - w0:.1f} s "
                       f"({(c1 - c0) / 1e6:.0f} ms); RSS now {rss()} MB, peak {peak} MB; threads {len(os.listdir(f'/proc/{pid}/task'))}; "
                       f"load {open('/proc/loadavg').read().split()[0]}")
             elif kind == "killtunnel":
