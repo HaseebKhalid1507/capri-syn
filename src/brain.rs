@@ -384,7 +384,9 @@ pub enum Mode {
     Summoned { kind: SummonKind, until: f64 },
     /// Linger; `leave_at`: move off his window first.
     Satisfied { until: f64, leave_at: Option<f64> },
-    Sulking { until: f64 },
+    /// `far`: still on his window (it sulked in place), so the far move ends the sulk.
+    /// Otherwise she stays down where she sulked and her next roam goes far.
+    Sulking { until: f64, far: bool },
     /// He is away: pose overlay on the ground.
     Napping,
 }
@@ -690,7 +692,7 @@ impl Brain {
                     take(*l);
                 }
             }
-            Mode::Sulking { until } => take(*until),
+            Mode::Sulking { until, .. } => take(*until),
             Mode::Passive => {
                 let r = self.attn_rate();
                 if self.settings.attention != Attention::Off && r > 0.0 && self.attn < self.theta {
@@ -891,11 +893,15 @@ impl Brain {
                     self.note(t, "linger over".into());
                 }
             }
-            Mode::Sulking { until } if t + EPS >= until => {
+            Mode::Sulking { until, far } if t + EPS >= until => {
                 self.mode = Mode::Passive;
                 self.redraw_roam();
                 self.covering = false;
-                if self.gate_open(t) {
+                if !far {
+                    // She left his window to sulk and sits it out: no move now.
+                    self.far_next = true;
+                    self.note(t, "sulk over: stays low, the next roam goes far".into());
+                } else if self.gate_open(t) {
                     self.record_move(t);
                     let arrivals = self.passive_arrivals();
                     self.emit(t, Intent::Move(MovePlan { goal: Goal::Passive { far: true }, arrivals }));
@@ -1044,10 +1050,12 @@ impl Brain {
     fn sulk(&mut self, t: f64, ignored: bool) {
         self.attn = if ignored { 0.0 } else { -0.8 };
         self.redraw_theta(if ignored { self.tuning.theta_raise } else { 0.0 });
-        self.mode = Mode::Sulking { until: t + self.tuning.sulk_s };
+        // Offended (a fling) or sulking on his window: the far move at the end.
+        let far = !ignored || (self.covering && !self.sulk_leaves);
+        self.mode = Mode::Sulking { until: t + self.tuning.sulk_s, far };
         if ignored {
             // Off his window first (a hang can't sulk with its arms crossed): the sulk plays
-            // where she lands, then the far move.
+            // where she lands, and she stays down there.
             if self.covering && self.sulk_leaves {
                 self.leave(t);
             }
@@ -1481,9 +1489,13 @@ mod tests {
         assert!(insists[0] == 720.0 && distinct.contains(&1) && distinct.contains(&2) && !distinct.contains(&3), "{insists:?} {distinct:?}");
         let sulk = r.log.iter().find(|(_, i)| *i == Intent::Emote(EmoteKey::Sulk)).expect("sulk").0;
         assert_eq!(sulk, 760.0);
-        let far = moves(&r).into_iter().find(|(t, _)| *t > sulk).expect("far move");
-        assert_eq!((far.0, far.1.goal), (766.0, Goal::Passive { far: true }));
+        // She stays low after the sulk (r6 critics): no move then; her next roam goes far.
+        assert!(moves(&r).into_iter().all(|(t, _)| t <= sulk), "no move right after the sulk");
         assert!(b.theta >= b.tuning.theta.0 + 0.3 - 1e-6 && b.theta != theta0);
+        let r = run(&mut b, 800.0, 2000.0, false, &here, &[]);
+        let next = moves(&r).into_iter().next().expect("a roam later");
+        assert_eq!(next.1.goal, Goal::Passive { far: true });
+        assert!(next.0 >= 766.0 + 180.0 - 1e-6, "on the roam clock: {}", next.0);
     }
 
     #[test]
