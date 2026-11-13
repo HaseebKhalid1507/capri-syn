@@ -860,7 +860,7 @@ impl Avatar {
             .collect()
     }
 
-    fn head_point(&self) -> Point<Pixels> {
+    pub(super) fn head_point(&self) -> Point<Pixels> {
         let f = self.frame_or_default(self.anim.frame());
         let (x, y) = f.map_or((self.layout.geo.width as i32 / 2, 40), |f| (f.mask.w as i32 / 2, f.head_line / 2));
         let sf = self.layout.sf;

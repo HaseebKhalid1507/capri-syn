@@ -1514,6 +1514,11 @@ impl Avatar {
                 Ok(r) => format!("ok perch 0x{:x} {} {} {}x{}", r.id, r.x, r.y, r.w, r.h),
                 Err(e) => format!("error: {e}"),
             },
+            Command::Menu => {
+                self.brain_touch(crate::brain::Touch::Menu);
+                self.menu = Some((self.head_point(), now + Duration::from_secs(8)));
+                "ok".into()
+            }
             Command::Drop => {
                 if self.teleport.is_some() {
                     "error: teleporting".into()

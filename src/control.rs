@@ -25,6 +25,8 @@ pub enum Command {
     Drop,
     /// Dev: the window stack as she sees it (bottom → top), and the work areas.
     Stack,
+    /// Dev: the right-click menu, at her head (as a right press there would open it).
+    Menu,
     /// One-line JSON snapshot of the avatar's state.
     State,
     /// Glitch out, then quit.
@@ -198,6 +200,7 @@ impl Command {
             },
             "drop" => Command::Drop,
             "stack" => Command::Stack,
+            "menu" => Command::Menu,
             "collapse" => Command::Collapse(true),
             "expand" => Command::Collapse(false),
             "glitch" => Command::Glitch,
