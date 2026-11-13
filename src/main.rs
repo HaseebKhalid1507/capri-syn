@@ -10,6 +10,7 @@ mod edges;
 mod frames;
 mod fx;
 mod pack;
+mod places;
 mod platform;
 mod session;
 mod settings;

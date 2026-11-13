@@ -30,6 +30,10 @@ impl WinRect {
     pub fn center(&self) -> (i32, i32) {
         (self.x + self.w / 2, self.y + self.h / 2)
     }
+    /// Grown by `d` on every side.
+    pub fn grow(&self, d: i32) -> WinRect {
+        WinRect { id: self.id, x: self.x - d, y: self.y - d, w: self.w + 2 * d, h: self.h + 2 * d }
+    }
     /// The overlap, if any.
     pub fn intersect(&self, o: &WinRect) -> Option<WinRect> {
         let (x0, y0) = (self.x.max(o.x), self.y.max(o.y));
