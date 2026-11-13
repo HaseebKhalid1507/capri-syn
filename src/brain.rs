@@ -774,7 +774,13 @@ impl Brain {
 
     fn step(&mut self, t: f64, senses: Option<&Senses>) {
         self.advance(t);
-        // Poll: the only place senses are read.
+        // The fullscreen gate is read at every tick that brings senses (a timer between two
+        // polls must not move her onto a fullscreen app that came up since the last poll).
+        if let Some(s) = senses {
+            self.sensed.fullscreen = s.fullscreen;
+            self.sensed.fullscreen_here = s.fullscreen_here;
+        }
+        // Poll: the only place the other senses are read.
         if self.next_poll <= t + EPS
             && let Some(s) = senses
         {
