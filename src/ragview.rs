@@ -46,6 +46,8 @@ pub(super) struct Rag {
     due: Instant,
     pub cur: Option<Shown>,
     pub next: Option<Shown>,
+    /// `next` has been painted (underneath) by a render: it may become `cur` (the shape).
+    pub painted: bool,
     arena: Arena,
     plats: Vec<crate::edges::Platform>,
     /// (bubble was open, prompt was shown) at the grab.
@@ -233,6 +235,7 @@ impl Avatar {
             last: now,
             due: now,
             cur: None,
+            painted: false,
             next: None,
             arena: Arena::default(),
             plats: Vec::new(),
@@ -275,6 +278,13 @@ impl Avatar {
     /// Advance the rag one tick. True: redraw.
     pub(super) fn rag_tick(&mut self, now: Instant) -> bool {
         let Some(r) = &mut self.rag else { return false };
+        // The shape follows `cur`, so `cur` must already be on screen: a tick waits for the
+        // render that paints the last `next` (two ticks between renders would show a region
+        // never painted: stale black). Lockstep stays deterministic (virtual time advances
+        // per tick, not per wall clock).
+        if r.next.is_some() && !r.painted {
+            return true;
+        }
         let dt = if lockstep() {
             if now + Duration::from_millis(1) < r.due {
                 return false;
@@ -293,6 +303,7 @@ impl Avatar {
         if let Some(n) = r.next.clone() {
             r.cur = Some(n);
         }
+        r.painted = false;
         let t = r.t;
         let t0 = Instant::now();
         match r.m.phase() {
@@ -665,6 +676,13 @@ impl Avatar {
         }
         self.rag_restore_with(r, now, true);
         self.relayer(now);
+    }
+
+    /// A render painted the rag's `next`.
+    pub(super) fn rag_painted(&mut self) {
+        if let Some(r) = &mut self.rag {
+            r.painted = true;
+        }
     }
 
     /// The plan for the sim state now: it becomes `next` (painted underneath this frame).

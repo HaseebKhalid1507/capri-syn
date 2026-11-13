@@ -3038,6 +3038,7 @@ impl Render for Avatar {
         }
         // Carried: the rag's committed frame and plan on top, its next one underneath.
         let rag_shown = self.rag.as_ref().map(|r| (r.cur.clone().or_else(|| r.next.clone()), r.next.clone()));
+        self.rag_painted();
         let rag_flight = self.rag_json().get("phase").and_then(|p| p.as_str()).is_some_and(|p| p == "fling" || p == "drop");
         let shown_i = rag_shown.as_ref().and_then(|(c, _)| c.as_ref().map(|c| c.frame)).unwrap_or_else(|| self.anim.frame());
         let frame = self.frame_or_default(shown_i);
