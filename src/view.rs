@@ -1596,6 +1596,14 @@ impl Avatar {
                 }
                 None => "error: no session".into(),
             },
+            Command::FakePromptOff => {
+                if self.prompt_ui.as_ref().is_some_and(|p| p.fake) {
+                    self.answer(None);
+                    "ok".into()
+                } else {
+                    "error: no dev prompt".into()
+                }
+            }
             Command::Brain(c) => self.brain_cmd(c, now),
             Command::SettingsReload => self.settings_reload(now),
             Command::Tap { head } => {

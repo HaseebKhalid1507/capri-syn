@@ -371,7 +371,7 @@ def main():
         time.sleep(0.4)
         print(f"rec-start {out}")
     # The user's pointer over the stage while we record: the clip may show (or get) his input.
-    watch = {"in_stage": 0, "active": 0, "stop": False}
+    watch = {"in_stage": 0, "active": 0, "stop": False, "hidden": 0, "armed": False}
     if stage:
         import threading
         def watch_pointer():
@@ -385,6 +385,21 @@ def main():
                     watch["in_stage"] += 1
                 if r_.screensaver_query_info().idle < 300:
                     watch["active"] += 1
+                # Every test window still viewable and above the stage (his workspace switch or
+                # a restack would hide it: the clip no longer shows what she reacts to).
+                try:
+                    kids = [c.id for c in r_.query_tree().children]
+                    st_ids = [w.id for w in staged]
+                    top_stage = max((kids.index(i) for i in st_ids if i in kids), default=-1)
+                    for w_ in list(pwins) if watch["armed"] else []:
+                        if w_ is None:
+                            continue
+                        fr = dd.create_resource_object("window", w_.id).query_tree().parent
+                        if fr.get_attributes().map_state != 2 or fr.id not in kids or kids.index(fr.id) < top_stage:
+                            watch["hidden"] += 1
+                            break
+                except Exception:
+                    pass
                 time.sleep(0.2)
         threading.Thread(target=watch_pointer, daemon=True).start()
     p = subprocess.Popen(["timeout", str(tmo), binp] + extra, stdout=log, stderr=subprocess.STDOUT, env=os.environ)
@@ -409,6 +424,7 @@ def main():
                     line = line.replace("{floor}", os.environ["SA_FLOOR"])
                 print(f"> {line}: {ctl(line)}")
             elif kind == "pwin":
+                watch["armed"] = False
                 parts = rest.split(":")
                 x, y, w, h = (int(v) for v in parts[:4])
                 pwin = perch_window(x, y, w, h, parts[4] if len(parts) > 4 else "dark")
@@ -439,6 +455,7 @@ def main():
                     print("shoot: WARNING the stage stays above the test window", file=sys.stderr)
                 g = frame.get_geometry()
                 print(f"pwin {hex(pwin.id)} frame at {g.x},{g.y} {g.width}x{g.height}; focus {hex(xdisp().get_input_focus().focus.id)}")
+                watch["armed"] = True
             elif kind == "pmove":
                 x, y, *n = rest.split(":")
                 w_ = pwins[int(n[0]) - 1] if n else [w for w in pwins if w][-1]
@@ -652,6 +669,16 @@ def main():
                 t = time.time()
                 ok = wait_user_idle(int(ms), float(mx or 12))
                 print(f"waitidle {ms} ms: {'ok' if ok else 'USER ACTIVE'} after {time.time()-t:.1f}s")
+            elif kind == "stackcheck":
+                kids = [c.id for c in xroot().query_tree().children]
+                for w_ in staged:
+                    print("stage", hex(w_.id), kids.index(w_.id) if w_.id in kids else None)
+                for w_ in pwins:
+                    if w_ is None:
+                        continue
+                    fr = w_.query_tree().parent
+                    print("pwin", hex(w_.id), "frame", hex(fr.id), kids.index(fr.id) if fr.id in kids else None,
+                          "map", fr.get_attributes().map_state, "watch", watch)
             elif kind == "focus":
                 f = xdisp().get_input_focus().focus
                 print("X input focus:", hex(f.id) if hasattr(f, "id") else f)
@@ -685,9 +712,10 @@ def main():
             except Exception:
                 gone.append(n_)
         if stage:
-            bad = watch["in_stage"] > 0 or gone
+            bad = watch["in_stage"] > 0 or gone or watch["hidden"] > 0
             print(f"shoot: {'TAINT' if bad else 'clean'}: user pointer over the stage {watch['in_stage']} samples, "
-                  f"user input {watch['active']} samples (5 Hz), test windows unmapped {gone or 'none'}")
+                  f"user input {watch['active']} samples (5 Hz), test windows hidden/under the stage {watch['hidden']} samples, "
+                  f"unmapped at the end {gone or 'none'}")
         for w_ in pwins:
             if w_ is not None:
                 w_.destroy()

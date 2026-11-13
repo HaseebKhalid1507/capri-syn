@@ -46,6 +46,8 @@ pub enum Command {
     Abort,
     /// Dev: show a prompt panel (confirm or secret) that answers nowhere.
     FakePrompt { secret: bool, text: String },
+    /// Dev: close that panel, as if answered.
+    FakePromptOff,
     /// The brain: on/off, DND, state, time scale, test senses, forced decisions, synthetic
     /// session signals.
     Brain(BrainCmd),
@@ -207,7 +209,8 @@ impl Command {
                 match kind {
                     "confirm" => Command::FakePrompt { secret: false, text },
                     "secret" => Command::FakePrompt { secret: true, text },
-                    _ => bail!("usage: prompt confirm|secret [text]"),
+                    "off" => Command::FakePromptOff,
+                    _ => bail!("usage: prompt confirm|secret [text] | prompt off"),
                 }
             }
             "state" => Command::State,
