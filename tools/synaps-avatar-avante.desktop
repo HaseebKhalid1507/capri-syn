@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Capri (avante)
+Comment=The synaps-avatar desktop companion, watching her own session on avante's Synaps daemon over SSH
+Exec=/home/haseeb/.local/bin/synaps-avatar-remote avante
+Terminal=false
+Categories=Development;

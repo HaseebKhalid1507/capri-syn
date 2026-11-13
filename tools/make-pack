@@ -1,0 +1,81 @@
+#!/usr/bin/env python3
+"""make-pack CAPRICORE_DIR [OUT_DIR] [--moods FILE]
+
+Build the Capri character pack from a CapriCore checkout (https://github.com/CapriChooms/CapriCore).
+The artwork is third-party (see the pack's NOTICE.md): it is never committed to this repo; this
+script assembles it on your machine.
+
+OUT_DIR defaults to $XDG_DATA_HOME/synaps-avatar/packs/capri (~/.local/share/...).
+--moods defaults to packs/capri/moods.json in this repo (the avatar's own behaviour file).
+
+Layout produced:
+  sprites.json          <- assets/capri/sprites/v1/runtime-sprite-set.json
+  capri-*.png           <- assets/capri/sprites/v1/*.png + assets/default/capri-headpat.png
+  poses/poses.json      <- assets/capri/sprites/poses-v2/runtime-poses.json (+ PNG/*.png)
+  music/*.png           <- assets/default/capri-music-v1/*.png
+  fonts/Exo2-*.ttf      <- static instances of assets/fonts/exo2/Exo2-Variable.ttf (fontTools), + OFL.txt
+  NOTICE.md             <- docs/character-assets.md
+  moods.json            <- --moods
+Then run `synaps-avatar --pack OUT_DIR --check` to verify it (sha256 of every frame)."""
+import json, os, shutil, subprocess, sys
+from pathlib import Path
+
+WEIGHTS = {"Regular": 400, "Medium": 500, "SemiBold": 600, "Bold": 700}
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help"):
+        print(__doc__.strip())
+        return 2
+    repo = Path(__file__).resolve().parent.parent
+    moods = repo / "packs/capri/moods.json"
+    if "--moods" in argv:
+        i = argv.index("--moods")
+        moods = Path(argv[i + 1])
+        del argv[i:i + 2]
+    src = Path(argv[0])
+    data = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))
+    out = Path(argv[1]) if len(argv) > 1 else data / "synaps-avatar/packs/capri"
+    v1 = src / "assets/capri/sprites/v1"
+    for need in (v1 / "runtime-sprite-set.json", src / "assets/capri/sprites/poses-v2/runtime-poses.json",
+                 src / "assets/default/capri-music-v1", src / "assets/fonts/exo2/Exo2-Variable.ttf", moods):
+        if not need.exists():
+            sys.exit(f"make-pack: missing {need}")
+    out.mkdir(parents=True, exist_ok=True)
+    for sub in ("poses", "music", "fonts"):
+        (out / sub).mkdir(exist_ok=True)
+
+    shutil.copy2(v1 / "runtime-sprite-set.json", out / "sprites.json")
+    n = 0
+    for p in sorted(v1.glob("*.png")):
+        shutil.copy2(p, out / p.name)
+        n += 1
+    shutil.copy2(src / "assets/default/capri-headpat.png", out / "capri-headpat.png")
+    poses = src / "assets/capri/sprites/poses-v2"
+    shutil.copy2(poses / "runtime-poses.json", out / "poses/poses.json")
+    for p in sorted((poses / "PNG").glob("*.png")):
+        shutil.copy2(p, out / "poses" / p.name)
+    for p in sorted((src / "assets/default/capri-music-v1").glob("*.png")):
+        shutil.copy2(p, out / "music" / p.name)
+    shutil.copy2(src / "docs/character-assets.md", out / "NOTICE.md")
+    shutil.copy2(moods, out / "moods.json")
+
+    exo = src / "assets/fonts/exo2"
+    shutil.copy2(exo / "OFL.txt", out / "fonts/OFL.txt")
+    for name, w in WEIGHTS.items():
+        dst = out / f"fonts/Exo2-{name}.ttf"
+        r = subprocess.run([sys.executable, "-m", "fontTools.varLib.instancer", str(exo / "Exo2-Variable.ttf"),
+                            f"wght={w}", "--static", "--update-name-table", "-q", "-o", str(dst)], capture_output=True, text=True)
+        if r.returncode != 0:
+            sys.exit(f"make-pack: fontTools could not cut Exo2 {name} (pip install fonttools): {r.stderr.strip()[:200]}")
+
+    cat = json.loads((out / "sprites.json").read_text())
+    print(f"make-pack: {cat.get('character')} -> {out}: {n + 1} frames, "
+          f"{len(list((out / 'poses').glob('*.png')))} poses, {len(list((out / 'music').glob('*.png')))} music sprites, "
+          f"{len(WEIGHTS)} font weights")
+    print(f"make-pack: verify with  synaps-avatar --pack {out} --check")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

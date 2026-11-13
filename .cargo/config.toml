@@ -1,0 +1,4 @@
+# synaps-client is a git dependency on a private repo: fetch with the git CLI so the
+# machine's credentials (gh auth git-credential, ssh keys) are used.
+[net]
+git-fetch-with-cli = true

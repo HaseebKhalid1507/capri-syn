@@ -1,0 +1,53 @@
+#!/bin/bash
+# synaps-avatar-remote [host] [avatar args...]   (default host: avante)
+# Runs the desktop avatar here, attached to the Synaps daemon on <host> through an SSH-forwarded
+# Unix socket ($XDG_RUNTIME_DIR/synaps-<host>-capri.sock, 0600, never the desktop app's socket).
+# The avatar is long-lived, so the tunnel is respawned whenever ssh drops (network, <host> asleep);
+# the avatar shows Away meanwhile and comes back by itself. The tunnel goes when the avatar exits.
+# Extra args go to synaps-avatar (e.g. --session NAME). Modelled on lynx's synaps-desktop-remote.
+#
+# Test hooks (sandbox only): SYNAPS_AVATAR_REMOTE_SOCK = the socket path on <host>
+# (default <remote $HOME>/.synaps-cli/run/daemon.sock); SYNAPS_AVATAR_SSH_OPTS = extra ssh options;
+# SYNAPS_AVATAR_BIN = the avatar binary (default ~/.local/bin/synaps-avatar).
+set -uo pipefail
+host=avante
+if [ $# -gt 0 ] && [[ $1 != -* ]]; then host=$1; shift; fi
+rt="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+sock="$rt/synaps-$host-capri.sock"
+bin="${SYNAPS_AVATAR_BIN:-$HOME/.local/bin/synaps-avatar}"
+read -r -a extra <<< "${SYNAPS_AVATAR_SSH_OPTS:-}"
+ssh_opts=(-o BatchMode=yes -o ConnectTimeout=10 "${extra[@]}")
+log() { echo "synaps-avatar-remote: $*" >&2; }
+
+remote="${SYNAPS_AVATAR_REMOTE_SOCK:-}"
+if [ -z "$remote" ]; then
+  rhome="$(ssh "${ssh_opts[@]}" "$host" 'echo $HOME' </dev/null 2>/dev/null)" || rhome=""
+  # <host> unreachable right now: same layout as here (the tunnel keeps trying).
+  remote="${rhome:-$HOME}/.synaps-cli/run/daemon.sock"
+fi
+
+# The tunnel loop: one ssh at a time, again 5 s after it ends, until the avatar is gone.
+tunnel() {
+  local ssh_pid=
+  trap '[ -n "$ssh_pid" ] && kill "$ssh_pid" 2>/dev/null; exit 0' TERM INT
+  while kill -0 "$1" 2>/dev/null; do
+    ssh -N "${ssh_opts[@]}" -o ExitOnForwardFailure=yes -o StreamLocalBindUnlink=yes -o StreamLocalBindMask=0177 \
+        -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -L "$sock:$remote" "$host" </dev/null &
+    ssh_pid=$!
+    wait "$ssh_pid"
+    log "tunnel to $host ended (exit $?); again in 5 s"
+    ssh_pid=
+    sleep 5 & wait $!
+  done
+}
+
+tunnel $$ &
+loop=$!
+trap 'kill "$loop" 2>/dev/null; wait "$loop" 2>/dev/null; rm -f "$sock"' EXIT
+trap 'exit 130' INT TERM HUP
+for _ in $(seq 1 100); do
+  [ -S "$sock" ] && break
+  sleep 0.1
+done
+[ -S "$sock" ] || log "tunnel socket not up yet; starting anyway (the avatar shows Away until it is)"
+"$bin" --socket "$sock" "$@"

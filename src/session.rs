@@ -868,7 +868,7 @@ mod tests {
     use synaps_client::protocol::{DaemonFrame, decode_frame};
 
     fn fixture(name: &str) -> String {
-        std::fs::read_to_string(format!("{}/../synaps-client/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"))).unwrap()
+        std::fs::read_to_string(format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"))).unwrap()
     }
 
     fn opts() -> Options {

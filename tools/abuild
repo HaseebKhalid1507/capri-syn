@@ -1,0 +1,31 @@
+#!/bin/bash
+# tools/abuild <cargo args...>   build/test/clippy this repo on bella (the build machine)
+#
+#   tools/abuild build --release      tools/abuild test      tools/abuild clippy --all-targets
+#
+# Mirrors this checkout to bella:~/Projects/synaps-avatar (content-compared, no .git/target) and runs
+# cargo there through bella's shared build lane (~/.cache/bbuild-lane: the same two lanes, locks,
+# nice level and memory cap as every other bella build). One target dir:
+# bella:~/.cache/cargo-target-synaps-avatar. Blocking; the output also goes to
+# ~/.cache/synaps-avatar-abuild.log here. Never run cargo on bella by hand.
+#   ABUILD_HOST=bella   build host        ABUILD_JOBS=6   cargo -j (the lane caps memory either way)
+set -euo pipefail
+[ $# -ge 1 ] || { sed -n '2,4p' "$0"; exit 2; }
+repo="$(cd "$(dirname "$0")/.." && pwd)"
+host="${ABUILD_HOST:-bella}"
+jobs="${ABUILD_JOBS:-6}"
+[ -f "$repo/Cargo.toml" ] || { echo "abuild: no Cargo.toml at $repo" >&2; exit 2; }
+ssh -o ConnectTimeout=10 "$host" 'test -f ~/.cache/bbuild-lane' \
+  || { echo "abuild: $host has no ~/.cache/bbuild-lane (it comes with lynx's dbuild)" >&2; exit 2; }
+rsync -a --no-times --checksum --delete --exclude '/.git' --exclude '/target' --exclude '/shots' \
+  "$repo/" "$host:Projects/synaps-avatar/"
+sub="$1"; shift
+args=("$sub")
+case "$sub" in build|test|clippy|check|run) args+=(-j "$jobs") ;; esac
+args+=("$@")
+remote="cd ~/Projects/synaps-avatar && exec bash ~/.cache/bbuild-lane one \"\$HOME/.cache/cargo-target-synaps-avatar\" cargo $(printf '%q ' "${args[@]}")"
+log="${XDG_CACHE_HOME:-$HOME/.cache}/synaps-avatar-abuild.log"
+mkdir -p "$(dirname "$log")"
+set +e
+ssh -o ConnectTimeout=10 "$host" "bash -c $(printf '%q' "$remote")" < /dev/null 2>&1 | tee "$log"
+exit "${PIPESTATUS[0]}"

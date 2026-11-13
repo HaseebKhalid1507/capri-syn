@@ -1,0 +1,524 @@
+{
+  "schemaVersion": 1,
+  "font": "Exo 2",
+  "fontFiles": [
+    "fonts/Exo2-Regular.ttf",
+    "fonts/Exo2-Medium.ttf",
+    "fonts/Exo2-SemiBold.ttf",
+    "fonts/Exo2-Bold.ttf"
+  ],
+  "tones": {
+    "online": "#8ef5ed",
+    "busy": "#ffb547",
+    "alert": "#ffa53d",
+    "done": "#7dff9b",
+    "error": "#ff3b62",
+    "sleep": "#a295ff",
+    "offline": "#8795a3",
+    "think": "#7fb8ff",
+    "speak": "#ff6fd8",
+    "music": "#c6ff5e"
+  },
+  "life": {
+    "bobPx": 2,
+    "bobPeriodMs": 4400,
+    "sparkleEveryMs": [
+      900,
+      2200
+    ],
+    "sparkleMs": 560,
+    "firstActivityMs": 6000,
+    "activityGapMs": 7500,
+    "swayPx": 4,
+    "swayPeriodMs": 7200
+  },
+  "moods": {
+    "idle": {
+      "base": "neutral",
+      "loop": [
+        {
+          "frame": "neutral",
+          "ms": 3000
+        },
+        {
+          "frame": "idle-blink_half",
+          "ms": 80
+        },
+        {
+          "frame": "idle-blink_closed",
+          "ms": 110
+        },
+        {
+          "frame": "idle-blink_half",
+          "ms": 80
+        },
+        {
+          "frame": "neutral",
+          "ms": 700
+        }
+      ],
+      "autonomy": true,
+      "status": "ONLINE",
+      "tone": "online",
+      "glyph": "dot"
+    },
+    "thinking": {
+      "base": "chin_rest-neutral",
+      "entry": [
+        {
+          "frame": "transition-edge_prepare",
+          "ms": 180
+        },
+        {
+          "frame": "transition-edge_perch",
+          "ms": 220
+        }
+      ],
+      "exit": [
+        {
+          "frame": "transition-edge_perch",
+          "ms": 160
+        },
+        {
+          "frame": "transition-edge_prepare",
+          "ms": 160
+        }
+      ],
+      "loop": [
+        {
+          "frame": "chin_rest-neutral",
+          "ms": 2600
+        },
+        {
+          "frame": "chin_rest-flirty",
+          "ms": 900
+        }
+      ],
+      "status": "THINKING",
+      "tone": "think",
+      "glyph": "dots"
+    },
+    "working": {
+      "base": "arms_crossed-focused",
+      "loop": [
+        {
+          "frame": "arms_crossed-focused",
+          "ms": 3200
+        },
+        {
+          "frame": "arms_crossed-skeptical",
+          "ms": 700
+        }
+      ],
+      "status": "WORKING",
+      "tone": "busy",
+      "glyph": "gear"
+    },
+    "talking": {
+      "base": "neutral",
+      "loop": [
+        {
+          "frame": "idle-mouth_small",
+          "ms": 90
+        },
+        {
+          "frame": "idle-mouth_round",
+          "ms": 150
+        },
+        {
+          "frame": "idle-mouth_wide",
+          "ms": 160
+        },
+        {
+          "frame": "idle-mouth_round",
+          "ms": 140
+        },
+        {
+          "frame": "idle-mouth_small",
+          "ms": 90
+        },
+        {
+          "frame": "idle-mouth_wide",
+          "ms": 150
+        },
+        {
+          "frame": "idle-mouth_round",
+          "ms": 140
+        },
+        {
+          "frame": "neutral",
+          "ms": 80
+        }
+      ],
+      "status": "SPEAKING",
+      "tone": "speak",
+      "glyph": "play"
+    },
+    "needs_you": {
+      "base": "lean_in-attentive",
+      "entry": [
+        "wave"
+      ],
+      "loop": [
+        {
+          "frame": "lean_in-attentive",
+          "ms": 2200
+        },
+        {
+          "frame": "idle-wave_raise",
+          "ms": 200
+        },
+        {
+          "frame": "idle-wave_a",
+          "ms": 230
+        },
+        {
+          "frame": "idle-wave_b",
+          "ms": 230
+        },
+        {
+          "frame": "idle-wave_a",
+          "ms": 230
+        },
+        {
+          "frame": "idle-wave_b",
+          "ms": 230
+        },
+        {
+          "frame": "idle-wave_raise",
+          "ms": 200
+        }
+      ],
+      "hopEveryMs": 3200,
+      "invert": true,
+      "status": "NEEDS YOU",
+      "tone": "alert",
+      "glyph": "bang",
+      "big": true
+    },
+    "done": {
+      "base": "hand_on_hip-happy",
+      "entry": [
+        "excited"
+      ],
+      "status": "DONE",
+      "tone": "done",
+      "then": {
+        "mood": "idle",
+        "afterMs": 4500
+      },
+      "glyph": "check",
+      "big": true
+    },
+    "annoyed": {
+      "base": "crouch-surprised",
+      "entry": [
+        {
+          "frame": "annoyed",
+          "ms": 260
+        },
+        {
+          "frame": "transition-stand_crouch",
+          "ms": 160
+        }
+      ],
+      "exit": [
+        {
+          "frame": "transition-stand_crouch",
+          "ms": 180
+        }
+      ],
+      "loop": [
+        {
+          "frame": "crouch-surprised",
+          "ms": 2400
+        },
+        {
+          "frame": "crouch-attentive",
+          "ms": 900
+        }
+      ],
+      "glitchEveryMs": 3400,
+      "invert": true,
+      "status": "ERROR",
+      "tone": "error",
+      "glyph": "cross",
+      "big": true
+    },
+    "sleepy": {
+      "base": "sit_floor-sleepy",
+      "entry": [
+        "floor_sit"
+      ],
+      "exit": [
+        "floor_stand"
+      ],
+      "status": "SLEEPING",
+      "tone": "sleep",
+      "glyph": "moon",
+      "big": true
+    },
+    "away": {
+      "base": "recline-sleepy",
+      "entry": [
+        "floor_sit",
+        {
+          "frame": "recline-neutral",
+          "ms": 500
+        }
+      ],
+      "exit": [
+        {
+          "frame": "sit_floor-neutral",
+          "ms": 300
+        },
+        "floor_stand"
+      ],
+      "status": "OFFLINE",
+      "tone": "offline",
+      "glyph": "ring",
+      "big": true
+    }
+  },
+  "activities": [
+    [
+      "shrug"
+    ],
+    [
+      {
+        "frame": "idle-look_left",
+        "ms": 1700
+      }
+    ],
+    [
+      {
+        "frame": "idle-look_right",
+        "ms": 1700
+      }
+    ],
+    [
+      {
+        "frame": "idle-look_up",
+        "ms": 1300
+      }
+    ],
+    [
+      {
+        "frame": "idle-look_down",
+        "ms": 1300
+      }
+    ],
+    [
+      {
+        "frame": "idle-look_left",
+        "ms": 900
+      },
+      {
+        "frame": "neutral",
+        "ms": 250
+      },
+      {
+        "frame": "idle-look_right",
+        "ms": 900
+      }
+    ],
+    [
+      "wink",
+      {
+        "frame": "flirty",
+        "ms": 400
+      }
+    ],
+    [
+      {
+        "frame": "skeptical",
+        "ms": 1500
+      }
+    ],
+    [
+      {
+        "frame": "hand_on_hip-neutral",
+        "ms": 1800
+      },
+      {
+        "frame": "hand_on_hip-smirk",
+        "ms": 900
+      }
+    ],
+    [
+      {
+        "frame": "smirk",
+        "ms": 1200
+      }
+    ],
+    [
+      "point_right"
+    ],
+    [
+      "floor_sit",
+      {
+        "frame": "sit_floor-neutral",
+        "ms": 6000
+      },
+      {
+        "frame": "sit_floor-thinking",
+        "ms": 2500
+      },
+      "floor_stand"
+    ]
+  ],
+  "extraFrames": [
+    {
+      "id": "headpat",
+      "file": "capri-headpat.png",
+      "like": "neutral"
+    },
+    {
+      "id": "music-window",
+      "file": "music/capri-music-window.png",
+      "anchor": {
+        "name": "seat",
+        "x": 628,
+        "y": 771
+      },
+      "visibleBounds": {
+        "x": 194,
+        "y": 76,
+        "width": 889,
+        "height": 1090
+      },
+      "sha256": "dedf301392e1784e08ef565200530d296c79dd84269bc68eceef3f2e923e4b97"
+    },
+    {
+      "id": "music-floor",
+      "file": "music/capri-music-floor.png",
+      "anchor": {
+        "name": "ground",
+        "x": 641,
+        "y": 1164
+      },
+      "visibleBounds": {
+        "x": 199,
+        "y": 296,
+        "width": 883,
+        "height": 871
+      },
+      "sha256": "c2ade3c79770565ca4be45371d6dbab213da2359f2844c50a3628f4e0e254181"
+    },
+    {
+      "id": "pose-sit-edge",
+      "file": "poses/capri-sit-edge.png",
+      "anchor": {
+        "name": "seat",
+        "x": 609,
+        "y": 787
+      },
+      "visibleBounds": {
+        "x": 182,
+        "y": 111,
+        "width": 891,
+        "height": 1067
+      },
+      "sha256": "e9a487ce91a391045b5e8f4ba2a3a00b85483ceedd6911b00a9be2442cc96c5d"
+    }
+  ],
+  "click": {
+    "head": [
+      {
+        "frame": "headpat",
+        "ms": 1450
+      }
+    ],
+    "body": [
+      [
+        {
+          "frame": "surprised",
+          "ms": 160
+        },
+        {
+          "frame": "idle-surprised_closed",
+          "ms": 120
+        },
+        {
+          "frame": "surprised",
+          "ms": 700
+        }
+      ],
+      [
+        {
+          "frame": "embarrassed",
+          "ms": 1300
+        }
+      ],
+      [
+        "laugh"
+      ],
+      [
+        {
+          "frame": "skeptical",
+          "ms": 1200
+        }
+      ]
+    ],
+    "annoyed": [
+      {
+        "frame": "annoyed",
+        "ms": 900
+      },
+      {
+        "frame": "arms_crossed-annoyed",
+        "ms": 2600
+      }
+    ],
+    "annoyedAfter": 5,
+    "streakMs": 1600,
+    "headFraction": 0.3
+  },
+  "perch": {
+    "base": "pose-sit-edge",
+    "moods": {},
+    "activities": [],
+    "click": [],
+    "rim": "#7d8bab",
+    "sliverPx": 4,
+    "sliver": "#05060a"
+  },
+  "music": {
+    "floor": "music-floor",
+    "window": "music-window",
+    "bpm": 110,
+    "notes": [
+      "music/01-eighth-cyan.png",
+      "music/02-beamed-lime.png",
+      "music/03-quarter-pink.png",
+      "music/04-sixteenth-violet.png"
+    ],
+    "emitters": {
+      "music-window": [
+        [
+          533,
+          402
+        ],
+        [
+          764,
+          365
+        ]
+      ],
+      "music-floor": [
+        [
+          522,
+          642
+        ],
+        [
+          775,
+          591
+        ]
+      ]
+    },
+    "status": "LISTENING",
+    "tone": "music",
+    "glyph": "note",
+    "activityChance": 0.18,
+    "activityMs": 24000
+  }
+}

@@ -1,0 +1,9 @@
+/target
+/shots
+/packs/*/*.png
+/packs/*/poses
+/packs/*/music
+/packs/*/fonts
+/packs/*/sprites.json
+/packs/*/NOTICE.md
+__pycache__/
