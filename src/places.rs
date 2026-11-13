@@ -482,6 +482,11 @@ fn hang_spots(w: &World, f: &WinRect, upside_down: bool) -> Vec<Spot> {
         let x = if right { f.right() - grip } else { f.x + grip };
         out.push(w.spot(SpotKind::Hang { upside_down }, (x, line), rel, ap));
     } else {
+        // Room beside the far corner: hang just outside it, no pixel of her over his window
+        // (r7 critics: the hair over the title bar and the first lines).
+        let gap = w.d(6.0);
+        let x = if right { f.right() + gap - rel.x } else { f.x - gap - (rel.x + rel.w) };
+        out.push(w.spot(SpotKind::Hang { upside_down }, (x, line), rel, ap));
         // By the hands, so her hair hangs mostly outside his window (less of the title bar
         // and the first lines covered): the inner hand just over the far corner, else the
         // outer one.
@@ -794,6 +799,20 @@ mod tests {
         let w = fx.world();
         let s = resolve(&bid(&[Approach::Hang]), &w, &mut Rng::new(3)).unwrap();
         let f = fx.stack[1];
+        // There's room left of it (over the left tile): fully outside, nothing over his window.
+        assert_eq!(s.body.right(), f.x - 6, "{:?}", s.body);
+        assert_eq!(s.cover_pct, 0.0);
+        // Without the room (the left tile's pixels can't hold her: shrink the monitor), the
+        // inner hand just over the corner.
+        let mut fx2 = tiled();
+        fx2.stack.remove(0);
+        fx2.eligible.remove(0);
+        fx2.focused = Some(r(2, 200, 41, 1264, 1547));
+        fx2.stack[0] = fx2.focused.unwrap();
+        fx2.cursor = (1300, 900);
+        let w = fx2.world();
+        let s = resolve(&bid(&[Approach::Hang]), &w, &mut Rng::new(3)).unwrap();
+        let f = fx2.stack[0];
         assert_eq!(s.anchor.0, f.x + 10 - (300.0 * HANG_HAND) as i32, "the inner hand, not the middle, over the corner");
         assert!(s.body.x < f.x && s.cover_pct > 0.0 && s.cover_pct < 4.0, "{:?} cover {}", s.body, s.cover_pct);
         // At the monitor's edge there is no room outside: the old shifts, inside.

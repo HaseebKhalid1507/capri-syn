@@ -85,7 +85,7 @@ impl Glitch {
     /// with little RGB fringing.
     pub fn soft(kind: GlitchKind, now: Instant, seed: u64) -> Glitch {
         let ms = match kind {
-            GlitchKind::Land => 150.0,
+            GlitchKind::Land => 70.0,
             GlitchKind::Vanish => 240.0,
             _ => Glitch::new(kind, now, seed).ms,
         };
@@ -104,8 +104,8 @@ impl Glitch {
     pub fn strength(&self, now: Instant) -> f32 {
         let u = self.u(now);
         if self.soft && self.kind == GlitchKind::Land {
-            // Reassembled at once; a faint settle.
-            return if u < 0.35 { 0.35 } else { 0.25 * (1.0 - (u - 0.35) / 0.65) };
+            // Reassembled at once, then a short settle (2 frames) that registers the landing.
+            return if u < 0.5 { 0.6 } else { 0.0 };
         }
         match self.kind {
             GlitchKind::Burst => stutter(&STUTTER_MINOR, u, self.seed),
@@ -135,7 +135,7 @@ impl Glitch {
         match self.kind {
             GlitchKind::Burst | GlitchKind::Big | GlitchKind::Appear => 1.0,
             // Starts a quarter in, so the body never blinks out between bolt and arrival.
-            GlitchKind::Land if self.soft => 0.5 + 0.5 * (u / 0.3).min(1.0),
+            GlitchKind::Land if self.soft => 1.0,
             GlitchKind::Land => 0.25 + 0.75 * (u / 0.4).min(1.0),
             GlitchKind::Vanish => 1.0 - 0.8 * u,
         }
@@ -166,7 +166,8 @@ impl Glitch {
         let u = self.u(now);
         match self.kind {
             GlitchKind::Vanish if u > 0.45 => Some(BOLT_RED),
-            GlitchKind::Land if u < if self.soft { 0.2 } else { 0.3 } => Some(BOLT_RED),
+            GlitchKind::Land if self.soft => None,
+            GlitchKind::Land if u < 0.3 => Some(BOLT_RED),
             _ => None,
         }
     }
@@ -845,6 +846,22 @@ impl Bolt {
             1.0 - (1.0 - v) * (1.0 - v)
         };
         (ease(0.06 + u / 0.4), ease((u - 0.13) / 0.55))
+    }
+
+    /// The quiet (passive) strike: one thin straight shard, `len` px long and `w` px wide
+    /// at its head, flying along the same span. Root px, empty before/after.
+    pub fn streak(&self, u: f32, len: f32, w: f32) -> Vec<(f32, f32)> {
+        let (head, tail) = Bolt::span(u);
+        if head <= tail + 0.004 {
+            return Vec::new();
+        }
+        let h = head * self.len;
+        let t = (tail * self.len).max(h - len);
+        let tip = along(self.a, self.axis, h, 0.0);
+        let back = along(self.a, self.axis, t, 0.0);
+        let mid = h - (h - t).min(w * 2.5);
+        let (l, r) = (along(self.a, self.axis, mid, w / 2.0), along(self.a, self.axis, mid, -w / 2.0));
+        vec![back, l, tip, r]
     }
 
     /// The bolt at time `u` as one polygon, root px (empty before/after the strike):

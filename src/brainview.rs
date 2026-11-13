@@ -24,10 +24,11 @@ const SAVE_EVERY: Duration = Duration::from_secs(10);
 /// The bid marker (a "!" badge by her head): effect layers after the glints.
 const MARK_LAYER: usize = GLINT_LAYER + 2 * GLINTS_MAX;
 const MARK_RIM: u32 = 0x0b0e14;
-const MARK_FILL: u32 = 0xffffff;
-const MARK_GLYPH: u32 = 0xff1744;
+/// r7 critics: the white badge was lost in her hair. Warning yellow, a black "!".
+const MARK_FILL: u32 = 0xffd83a;
+const MARK_GLYPH: u32 = 0x0b0e14;
 /// Badge radius, logical px.
-const MARK_R: f32 = 13.0;
+const MARK_R: f32 = 19.0;
 /// How long a summon's NEEDS YOU pulses after she lands, and its half period.
 const PULSE_FOR: Duration = Duration::from_millis(6_000);
 const PULSE_HALF_MS: u128 = 450;
@@ -40,6 +41,8 @@ pub(super) struct Marker {
     pop: Instant,
     /// Insist level 2: "!!".
     double: bool,
+    /// Her work area when it went up: the badge stays inside it.
+    area: Option<WinRect>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -416,6 +419,16 @@ impl Avatar {
             Some(a) => areas.into_iter().zip(monitors).filter_map(|(w, m)| Some((w.intersect(&a)?, m.intersect(&a)?))).unzip(),
             None => (areas, monitors),
         }
+    }
+
+    /// Her work area (cut to the test arena), for clamping effects.
+    pub(super) fn her_area(&self) -> Option<WinRect> {
+        let (areas, monitors) = self.arena_filter(
+            self.x11.work_areas().iter().map(crate::platform::x11::Monitor::rect).collect(),
+            self.x11.monitors().iter().map(crate::platform::x11::Monitor::rect).collect(),
+        );
+        let her = self.her_spot(&areas, &monitors);
+        areas.get(her.area).copied()
     }
 
     fn brain_senses(&self, now: Instant) -> Senses {
@@ -982,11 +995,17 @@ impl Avatar {
             match e {
                 EmoteKey::Bid(_) | EmoteKey::Insist(_) => {
                     let double = matches!(e, EmoteKey::Insist(s) if s >= 2);
-                    let t0 = h.marker.map_or(now, |m| m.t0);
-                    h.marker = Some(Marker { t0, pop: now, double });
+                    let (t0, area) = h.marker.map_or((now, None), |m| (m.t0, m.area));
+                    h.marker = Some(Marker { t0, pop: now, double, area });
                 }
                 EmoteKey::Satisfied { .. } | EmoteKey::Sulk => h.marker = None,
                 EmoteKey::Wave => {}
+            }
+        }
+        if self.brain.as_ref().and_then(|h| h.marker).is_some_and(|m| m.area.is_none()) {
+            let area = self.her_area();
+            if let Some(m) = self.brain.as_mut().and_then(|h| h.marker.as_mut()) {
+                m.area = area;
             }
         }
         let sulk_sit = e == EmoteKey::Sulk
@@ -1001,7 +1020,9 @@ impl Avatar {
                 h.sulk_sit = true;
             }
             self.relayer(now);
-            let entry = self.pack.behaviour.brain.floor_sit.as_ref().and_then(|s| s.entry.clone()).unwrap_or_default();
+            // The sulk sit's own entry (a head-down crouch, no standing beat), else the floor sit's.
+            let b = &self.pack.behaviour.brain;
+            let entry = b.sulk_sit.as_ref().and_then(|s| s.entry.clone()).or_else(|| b.floor_sit.as_ref().and_then(|s| s.entry.clone())).unwrap_or_default();
             let mut seq = self.pack.flatten(&self.resolve_steps(&steps));
             seq.extend(self.pack.flatten(&entry));
             if !seq.is_empty() {
@@ -1183,9 +1204,23 @@ impl Avatar {
             } else {
                 (base.0 + f.head_x as f32, base.1 + f.face.0 as f32)
             };
-            // Beside her head, on the side away from his window (never over more of it).
+            // Clear of her hair: beside her whole outline at head height, on the side away
+            // from his window (never over more of it), inside her work area (flipped to the
+            // other side if there's no room).
             let away = self.brain_focused().map_or(1.0, |w| if head.0 < w.center().0 as f32 { -1.0 } else { 1.0 });
-            let c = (head.0 + away * if ud { 40.0 } else { 50.0 } * sf, head.1 - 22.0 * sf + bob as f32);
+            let cols: Vec<usize> = f.profile.iter().enumerate().filter(|(_, y)| **y != i16::MAX).map(|(x, _)| x).collect();
+            let (c0, c1) = (base.0 + *cols.first()? as f32, base.0 + *cols.last()? as f32);
+            let r = MARK_R * sf * 1.25;
+            let gap = 4.0 * sf;
+            let side = |a: f32| if a > 0.0 { c1 + gap + r } else { c0 - gap - r };
+            let area = self.brain.as_ref().and_then(|h| h.marker).and_then(|m| m.area);
+            let fits = |x: f32| area.is_none_or(|a| x - r >= a.x as f32 && x + r <= a.right() as f32);
+            let away = if fits(side(away)) || !fits(side(-away)) { away } else { -away };
+            let mut c = (side(away), head.1 - 6.0 * sf + bob as f32);
+            if let Some(a) = area {
+                c.0 = c.0.clamp(a.x as f32 + r, (a.right() as f32 - r).max(a.x as f32 + r));
+                c.1 = c.1.clamp(a.y as f32 + r, (a.bottom() as f32 - r).max(a.y as f32 + r));
+            }
             Some((c, head, sc as f32 / 20.0, away))
         });
         let double = self.brain.as_ref().and_then(|h| h.marker).is_some_and(|m| m.double);
@@ -1234,7 +1269,7 @@ impl Avatar {
                 (c.0 + ux * (rad + r * 0.55), c.1 + uy * (rad + r * 0.55)),
             ]
         };
-        let edge = 2.0 * self.layout.sf;
+        let edge = 3.0 * self.layout.sf;
         let bang = |cx: f32, w: f32| -> Vec<Vec<(f32, f32)>> {
             let dot: Vec<(f32, f32)> = (0..12)
                 .map(|i| {

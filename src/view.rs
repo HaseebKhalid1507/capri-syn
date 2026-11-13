@@ -353,6 +353,12 @@ pub struct Avatar {
     hearts: Option<(Instant, Point<Pixels>)>,
     /// The HUD stays down until then (a beat after a teleport).
     hud_after: Option<Instant>,
+    /// The work-area top (root px) for the hearts burst that started at the key.
+    hearts_area: (Option<Instant>, Option<i32>),
+    /// The bubble panel and tag as last painted: a part of the HUD only goes into the X shape
+    /// once it has been painted where it is (present lag: else stale pixels show for a frame).
+    panel_last: Rc<Cell<Option<PanelGeom>>>,
+    tag_last: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// Click reaction in progress: the status tag steps aside until then.
     reaction_until: Option<Instant>,
     menu: Option<(Point<Pixels>, Instant)>,
@@ -493,6 +499,9 @@ impl Avatar {
             bubble: None,
             hearts: None,
             hud_after: None,
+            hearts_area: (None, None),
+            panel_last: Rc::new(Cell::new(None)),
+            tag_last: Rc::new(Cell::new(None)),
             reaction_until: None,
             menu: None,
             press: None,
@@ -1460,12 +1469,22 @@ impl Avatar {
             // A light core over the red line and a dark edge under it: a streak, legible on
             // light and dark windows alike.
             let sf = self.layout.sf;
-            let core = fx::bolt_rects(&b.frame_k(u, 0.38, 0.0), o);
-            let line = fx::bolt_rects(&b.frame(u), o);
-            let edge = fx::bolt_rects(&b.frame_k(u, 1.0, 1.5 * sf), o);
-            self.x11.fx_set(BOLT_CORE_LAYER, fx::BOLT_CORE, o, (bw, bh), &core).ok();
-            self.x11.fx_set_below(BOLT_LAYER, BOLT_CORE_LAYER, fx::BOLT_LINE, o, (bw, bh), &line).ok();
-            self.x11.fx_set_below(BOLT_EDGE_LAYER, BOLT_LAYER, fx::BOLT_EDGE, o, (bw, bh), &edge).ok();
+            if tp.quiet {
+                // A passive move: one thin short shard (r7 critics: the zig-zag was the
+                // loudest frame), a dark hairline under it.
+                let line = fx::bolt_rects(&b.streak(u, 90.0 * sf, 5.0 * sf), o);
+                let edge = fx::bolt_rects(&b.streak(u, 94.0 * sf, 8.0 * sf), o);
+                self.x11.fx_unmap(BOLT_CORE_LAYER);
+                self.x11.fx_set(BOLT_LAYER, fx::BOLT_LINE, o, (bw, bh), &line).ok();
+                self.x11.fx_set_below(BOLT_EDGE_LAYER, BOLT_LAYER, fx::BOLT_EDGE, o, (bw, bh), &edge).ok();
+            } else {
+                let core = fx::bolt_rects(&b.frame_k(u, 0.38, 0.0), o);
+                let line = fx::bolt_rects(&b.frame(u), o);
+                let edge = fx::bolt_rects(&b.frame_k(u, 1.0, 1.5 * sf), o);
+                self.x11.fx_set(BOLT_CORE_LAYER, fx::BOLT_CORE, o, (bw, bh), &core).ok();
+                self.x11.fx_set_below(BOLT_LAYER, BOLT_CORE_LAYER, fx::BOLT_LINE, o, (bw, bh), &line).ok();
+                self.x11.fx_set_below(BOLT_EDGE_LAYER, BOLT_LAYER, fx::BOLT_EDGE, o, (bw, bh), &edge).ok();
+            }
             self.x11.flush();
         }
         if u >= fx::BOLT_ARRIVE && !moved {
@@ -2908,7 +2927,7 @@ struct Palette {
 }
 
 /// Bubble panel geometry, logical px in window coordinates.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 struct PanelGeom {
     x: f32,
     y: f32,
@@ -3889,6 +3908,14 @@ impl Render for Avatar {
         let t_start = self.t_start;
         let ground_px = (l.ground_x as i16, (l.ground_y - 1) as i16, 1u16, 1u16);
         let hearts = self.hearts.filter(|_| hud).map(|(t0, at)| (now.saturating_duration_since(t0).as_secs_f32() * 1000.0, at));
+        // The hearts stay inside her work area (under the bar, on screen).
+        if let Some((t0, _)) = self.hearts
+            && self.hearts_area.0 != Some(t0)
+        {
+            self.hearts_area = (Some(t0), self.her_area().map(|a| a.y));
+        }
+        let hearts_ceiling = self.hearts_area.1.map(|y| (y - self.origin.1) as f32 / sf);
+        let (panel_last, tag_last) = (self.panel_last.clone(), self.tag_last.clone());
         let worigin = self.origin;
         let tag_clickable = collapsed || self.session.is_some();
         let tag_w = self.tag_w.clone();
@@ -3896,26 +3923,46 @@ impl Render for Avatar {
         root.child(
             canvas(
                 |_, _, _| (),
-                move |_, _, _, _| {
+                move |_, _, window, _| {
                     let mut input: Vec<ShapeRect> =
                         if hidden { Vec::new() } else { rects.iter().map(|r| (r.0 + ax, r.1 + ay, r.2, r.3)).collect() };
                     let mut visible: Vec<ShapeRect> = body_shape.iter().map(|r| (r.0 + ax, r.1 + ay, r.2, r.3)).collect();
                     let dev = |pts: &[(f32, f32)]| pts.iter().map(|&(x, y)| (x * sf, y * sf)).collect::<Vec<_>>();
+                    // What was on screen last frame is what shows inside this frame's shape
+                    // (present lag): a panel goes into the shape only where it was painted.
+                    let prev = panel_last.replace(panel_geom);
                     if let Some(g) = panel_geom {
                         input.push(to_device(Bounds::new(point(px(g.x), px(g.y)), size(px(g.w), px(g.h))), sf));
-                        shape::poly_rows(&dev(&g.poly()), &mut visible);
+                        let same_column = |p: &PanelGeom| p.x == g.x && p.w == g.w && p.tail_x == g.tail_x && p.y + p.h == g.y + g.h;
+                        let shown = match prev {
+                            Some(p) if p == g => Some(g),
+                            // Grown or shrunk upward: the smaller of the two was painted both times.
+                            Some(p) if same_column(&p) => Some(if p.h < g.h { p } else { g }),
+                            _ => None,
+                        };
+                        match shown {
+                            Some(s) => shape::poly_rows(&dev(&s.poly()), &mut visible),
+                            None => window.request_animation_frame(),
+                        }
+                        if shown != Some(g) {
+                            window.request_animation_frame();
+                        }
                     }
                     if let Some(b) = menu_cell.get() {
                         input.push(to_device(b, sf));
                         visible.push(to_device(b, sf));
                     }
+                    let prev_tag = tag_last.replace(tag_cell.get());
                     if let Some(b) = tag_cell.get() {
                         tag_w.set(f32::from(b.size.width));
                         tag_box.set(Some(b));
                         if torn {
                             visible.extend(tag_strips.iter().copied());
-                        } else {
+                        } else if prev_tag == Some(b) {
                             visible.push(to_device(b, sf));
+                        } else {
+                            // New or moved: painted now, shown from the next frame.
+                            window.request_animation_frame();
                         }
                         if tag_clickable {
                             input.push(to_device(b, sf));
@@ -3942,8 +3989,9 @@ impl Render for Avatar {
                             None => x11.fx_set(layer, rgb, (x0, y0), (x1 - x0, y1 - y0), &r).ok(),
                         };
                     };
-                    // Rise from the click to clear air above the hair.
-                    let target = (top_l - 22.0).max(16.0);
+                    // Rise from the click to clear air above the hair, never past the work area's
+                    // top (the bar, the screen edge).
+                    let target = (top_l - 22.0).max(16.0).max(hearts_ceiling.map_or(f32::MIN, |c| c + 3.0 * 16.0 + 26.0));
                     for (i, (dx, size, delay, colour)) in HEARTS.iter().enumerate() {
                         let (rim, fill) = (HEART_LAYER + 2 * i, HEART_LAYER + 2 * i + 1);
                         let geom = hearts.and_then(|(t, at)| {

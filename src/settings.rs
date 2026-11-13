@@ -80,9 +80,10 @@ impl Default for BrainSettings {
         BrainSettings {
             enabled: true,
             approaches: vec![
-                (Approach::Hang, 3.0),
-                (Approach::HangUpsideDown, 2.0),
-                (Approach::Cling, 2.0),
+                // r7 critics: cling > hang > hang_upside_down.
+                (Approach::Hang, 2.0),
+                (Approach::HangUpsideDown, 1.0),
+                (Approach::Cling, 3.0),
                 (Approach::SitEdge, 3.0),
                 (Approach::Peek, 1.0),
                 (Approach::Beside, 1.0),
@@ -269,7 +270,7 @@ fullscreen = "stay"
         let s = Settings::parse("[brain]\napproaches = { hang = 0, peek = 2.5 }\npassive_every_min = [1, 2]\n").unwrap();
         assert_eq!(s.brain.approaches.iter().find(|a| a.0 == Approach::Hang).unwrap().1, 0.0);
         assert_eq!(s.brain.approaches.iter().find(|a| a.0 == Approach::Peek).unwrap().1, 2.5);
-        assert_eq!(s.brain.approaches.iter().find(|a| a.0 == Approach::Cling).unwrap().1, 2.0, "unlisted keep their default");
+        assert_eq!(s.brain.approaches.iter().find(|a| a.0 == Approach::Cling).unwrap().1, 3.0, "unlisted keep their default");
         assert_eq!(s.brain.passive_every_min, (1.0, 2.0));
     }
 

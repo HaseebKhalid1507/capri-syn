@@ -624,18 +624,32 @@
     "sulk": [
       {
         "frame": "arms_crossed-annoyed",
-        "ms": 2600
+        "ms": 1200
       },
       {
         "frame": "sad",
-        "ms": 1500
+        "ms": 650
       },
       {
-        "frame": "concerned",
-        "ms": 900
+        "frame": "idle-look_down",
+        "ms": 550
       }
     ],
     "sulkSit": {
+      "entry": [
+        {
+          "frame": "transition-stand_crouch",
+          "ms": 260
+        },
+        {
+          "frame": "crouch-neutral",
+          "ms": 260
+        },
+        {
+          "frame": "transition-crouch_floor",
+          "ms": 350
+        }
+      ],
       "base": "sit_floor-neutral",
       "loop": [
         {
