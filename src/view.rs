@@ -3,6 +3,9 @@
 //! teleport), and keeps the X input/bounding shape in step with what is drawn. State
 //! changes go through `apply` (commands), `tick` (time) or the pointer handlers.
 
+#[path = "brainview.rs"]
+mod brainview;
+
 use crate::anim::{Animator, Mood, Rng, Seq};
 use crate::control::Command;
 use crate::edges;
@@ -298,6 +301,10 @@ struct Press {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Placement {
     Ground,
+    /// Standing in the air (a float spot), not clamped to the floor.
+    Float,
+    /// A brain approach pose (hang, cling, peek): this frame, whatever the mood.
+    Pose { frame: usize },
     /// On `win`'s top edge; `dx` = seat (or feet) x minus the window's left edge.
     Perch { win: u32, sit: bool, dx: i32 },
 }
@@ -317,6 +324,8 @@ struct Teleport {
     place: Placement,
     bolt: Option<Bolt>,
     moved: bool,
+    /// The brain's `glitch` arrival: vanish, then land there (no bolt).
+    no_bolt: bool,
 }
 
 pub struct Avatar {
@@ -411,6 +420,10 @@ pub struct Avatar {
     _subs: Vec<Subscription>,
     /// Laid-out bubble buttons (window logical px), for the dev `state` (test clicks).
     buttons: Buttons,
+    /// The cat brain (None: SA_NO_BRAIN).
+    brain: Option<brainview::BrainHost>,
+    /// Ticks run so far (wake-ups), for the dev `state`.
+    view_ticks: u64,
 }
 
 pub struct Init {
@@ -454,7 +467,7 @@ impl Avatar {
         let l = init.layout;
         let home = (init.origin.0 + l.ground_x, init.origin.1 + l.ground_y);
         let now = Instant::now();
-        Avatar {
+        let mut a = Avatar {
             frames: (0..pack.frames.len()).map(|_| None).collect(),
             anim: Animator::new(default),
             name: init.name.to_uppercase().into(),
@@ -522,7 +535,13 @@ impl Avatar {
             hint: None,
             _subs: vec![activation],
             buttons: Rc::default(),
+            brain: None,
+            view_ticks: 0,
+        };
+        if std::env::var_os("SA_NO_BRAIN").is_none() {
+            a.brain_start();
         }
+        a
     }
 
     pub fn set_notes(&mut self, notes: Vec<NoteMasks>) {
@@ -831,12 +850,19 @@ impl Avatar {
             let id = p.moods.get(m.key()).unwrap_or(&p.base);
             return (self.pack.index.get(id).copied().unwrap_or(default), None);
         }
+        if let Some(l) = self.brain_layer(m) {
+            return l;
+        }
         let spec = self.spec(m);
         let base = spec.and_then(|s| self.pack.index.get(&s.base).copied()).unwrap_or(default);
         (base, self.loop_seq(spec.and_then(|s| s.r#loop.as_ref())))
     }
 
     fn activities(&self) -> &[Vec<crate::pack::Step>] {
+        // Standing clips would break a hang or a floor sit.
+        if self.posed() || (!self.sitting() && !self.standing()) {
+            return &[];
+        }
         match self.perch_spec() {
             Some(p) if self.sitting() => &p.activities,
             _ => &self.pack.behaviour.activities,
@@ -849,7 +875,7 @@ impl Avatar {
         }
         let prev = self.mood;
         let mut seq: Seq = Vec::new();
-        if !self.sitting() {
+        if !self.sitting() && !self.posed() {
             if m != prev
                 && let Some(exit) = self.spec(prev).and_then(|s| s.exit.clone())
             {
@@ -1001,7 +1027,7 @@ impl Avatar {
             // Cut off at the window's bottom edge: the shadow falls on the window, not past it.
             let win = match self.placement {
                 Placement::Perch { win, .. } => self.x11.toplevel_rect(win),
-                Placement::Ground => None,
+                _ => None,
             };
             let h = win.map_or(l.geo.height as i32, |r| (r.y + r.h - at.1).clamp(1, l.geo.height as i32));
             let rgb = self.perch_spec().and_then(|p| u32::from_str_radix(p.sliver.trim_start_matches('#'), 16).ok()).unwrap_or(0x05060a);
@@ -1025,7 +1051,7 @@ impl Avatar {
 
     fn hop_allowed(&self) -> bool {
         self.loaded
-            && !matches!(self.placement, Placement::Perch { sit: true, .. })
+            && !matches!(self.placement, Placement::Perch { sit: true, .. } | Placement::Pose { .. })
             && self.press.is_none()
             && self.teleport.is_none()
             && self.music.is_none()
@@ -1089,6 +1115,7 @@ impl Avatar {
         } else if self.hop_allowed() {
             take(self.next_hop);
         }
+        take(self.brain_deadline(now));
         t
     }
 
@@ -1099,6 +1126,7 @@ impl Avatar {
 
     fn tick(&mut self, cx: &mut Context<Self>) {
         let now = Instant::now();
+        self.view_ticks += 1;
         let mut dirty = self.anim.tick(now);
         if let Some((at, m)) = self.mood_then
             && at <= now
@@ -1278,6 +1306,9 @@ impl Avatar {
         {
             self.hop = None;
         }
+        if self.loaded {
+            dirty |= self.brain_tick(now);
+        }
         self.apply_offset(now);
         self.update_notes(now);
         self.update_glints(now);
@@ -1323,6 +1354,17 @@ impl Avatar {
         }
         let Some((leg, to)) = self.teleport.as_ref().map(|t| (t.leg, t.to)) else { return };
         match leg {
+            Leg::Vanish if self.teleport.as_ref().is_some_and(|t| t.no_bolt) => {
+                // Vanished: appear there at once, the landing glitch reassembles her.
+                let (to, place, seed) = self.teleport.as_ref().map(|t| (t.to, t.place, t.seed)).unwrap_or((self.origin, self.placement, 0));
+                self.arrive(to, place, now);
+                self.hidden = false;
+                self.glitch = Some(Glitch::new(GlitchKind::Land, now, seed ^ 0x1a4d));
+                if let Some(tp) = &mut self.teleport {
+                    tp.moved = true;
+                    tp.leg = Leg::Appear;
+                }
+            }
             Leg::Vanish => {
                 self.hidden = true;
                 let from = self.center_root(self.origin);
@@ -1402,9 +1444,9 @@ impl Avatar {
         self.set_origin(to);
         match place {
             Placement::Perch { win, .. } => self.x11.set_target(win),
-            Placement::Ground => self.x11.set_target(0),
+            _ => self.x11.set_target(0),
         }
-        if was_sitting != self.sitting() {
+        if was_sitting != self.sitting() || self.brain.is_some() {
             self.relayer(now);
         }
     }
@@ -1477,7 +1519,7 @@ impl Avatar {
                     self.drop_here(now);
                     match self.placement {
                         Placement::Perch { win, dx, .. } => format!("ok perch 0x{win:x} dx {dx}"),
-                        Placement::Ground => "ok ground".into(),
+                        _ => "ok ground".into(),
                     }
                 }
             }
@@ -1544,6 +1586,18 @@ impl Avatar {
                 }
                 None => "error: no session".into(),
             },
+            Command::Brain(c) => self.brain_cmd(c, now),
+            Command::SettingsReload => self.settings_reload(now),
+            Command::Tap { head } => {
+                if self.hidden || self.teleport.is_some() || !self.loaded {
+                    "error: not there".into()
+                } else {
+                    let at = self.tap_point(head);
+                    self.click_reaction(head, at, now);
+                    self.brain_touch(if head { crate::brain::Touch::Headpat } else { crate::brain::Touch::Click });
+                    "ok".into()
+                }
+            }
             Command::FakePrompt { secret, text } => {
                 let view = PromptView { id: 0, title: if secret { "password required".into() } else { "Confirm tool call".into() }, text, secret };
                 self.prompt_ui = Some(PromptUi { view, shown_at: now, dismissed: false, fake: true });
@@ -1598,6 +1652,7 @@ impl Avatar {
     }
 
     fn hide(&mut self, now: Instant) {
+        self.brain_save(now, true);
         self.menu = None;
         self.bubble = None;
         self.quitting = true;
@@ -1666,6 +1721,8 @@ impl Avatar {
         let placement = match self.placement {
             Placement::Ground => serde_json::json!({ "kind": "ground" }),
             Placement::Perch { win, sit, dx } => serde_json::json!({ "kind": if sit { "sit" } else { "stand" }, "win": win, "dx": dx }),
+            Placement::Float => serde_json::json!({ "kind": "float" }),
+            Placement::Pose { frame } => serde_json::json!({ "kind": "pose", "frame": self.pack.frames.get(frame).map(|f| f.id.clone()) }),
         };
         serde_json::json!({
             "mood": self.mood.key(),
@@ -1853,6 +1910,10 @@ impl Avatar {
         if self.loaded && prev.as_ref().map(|p| p.mood) != Some(b.mood) {
             self.set_mood(b.mood, now);
         }
+        let (pp, pm) = (prev.as_ref().and_then(|p| p.prompt.as_ref().map(|x| x.id)), prev.as_ref().map(|p| p.mood));
+        if pp != b.prompt.as_ref().map(|x| x.id) || pm != Some(b.mood) {
+            self.brain_session(pp, b.prompt.as_ref().map(|x| x.id), pm, b.mood);
+        }
         self.label_override = b.label.clone().map(|l| (b.mood, l));
         self.echo = b.echo.clone();
         if prev.as_ref().map(|p| &p.prompt) != Some(&b.prompt) {
@@ -1968,6 +2029,7 @@ impl Avatar {
 
     /// Send a message (submit, or steer while a turn runs).
     fn send(&mut self, text: String) -> Result<(), String> {
+        self.brain_touch(crate::brain::Touch::Submit);
         let text = text.trim().to_string();
         if text.is_empty() {
             return Err("empty".into());
@@ -1982,6 +2044,7 @@ impl Avatar {
     }
 
     fn abort(&mut self) {
+        self.brain_aborted();
         if let Some(s) = &mut self.session {
             let acts = s.link.abort(Instant::now());
             self.run_acts(acts);
@@ -1990,6 +2053,7 @@ impl Avatar {
 
     fn answer(&mut self, value: Option<String>) {
         let Some(u) = self.prompt_ui.take() else { return };
+        self.brain_touch(crate::brain::Touch::PromptAnswer);
         if !u.fake
             && let Some(s) = &mut self.session
         {
@@ -2003,6 +2067,7 @@ impl Avatar {
     }
 
     fn input_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.brain_touch(crate::brain::Touch::Typing);
         let now = Instant::now();
         let busy = self.session.as_ref().is_some_and(|s| s.link.busy());
         let k = &ev.keystroke;
@@ -2144,7 +2209,7 @@ impl Avatar {
         }
         let seed = self.rng.next();
         self.glitch = Some(Glitch::new(GlitchKind::Vanish, now, seed));
-        self.teleport = Some(Teleport { seed, leg: Leg::Vanish, to, place, bolt: None, moved: false });
+        self.teleport = Some(Teleport { seed, leg: Leg::Vanish, to, place, bolt: None, moved: false, no_bolt: false });
     }
 
     /// Window origin that puts the seat (or the feet) on `r`'s top edge at `r.x + dx`.
@@ -2384,6 +2449,7 @@ impl Avatar {
                 self.press = Some(Press { root, origin: self.origin, head, dragging: false });
             }
             MouseButton::Right => {
+                self.brain_touch(crate::brain::Touch::Menu);
                 self.menu = Some((ev.position, Instant::now() + Duration::from_secs(8)));
                 cx.notify();
                 self.schedule(cx);
@@ -2405,15 +2471,16 @@ impl Avatar {
         let o = (p.origin.0 + dx, p.origin.1 + dy);
         if !p.dragging {
             p.dragging = true;
-            // Picked up off a perch: stand again while carried.
-            if matches!(self.placement, Placement::Perch { .. }) {
-                let was_sitting = self.sitting();
+            self.brain_touch(crate::brain::Touch::DragStart);
+            // Picked up off a perch (or a pose): stand again while carried.
+            if let Some(h) = &mut self.brain {
+                h.rest = None;
+            }
+            if self.placement != Placement::Ground {
                 self.placement = Placement::Ground;
                 self.x11.set_target(0);
-                if was_sitting {
-                    self.relayer(Instant::now());
-                    cx.notify();
-                }
+                self.relayer(Instant::now());
+                cx.notify();
             }
         }
         self.move_to(o, false);
@@ -2431,6 +2498,28 @@ impl Avatar {
             self.schedule(cx);
             return;
         }
+        self.click_reaction(p.head, ev.position, now);
+        // A tap on the body (not a headpat) opens the field to talk to the session.
+        if !p.head && self.session.is_some() {
+            self.open_input(None, window, cx);
+        }
+        self.brain_touch(if p.head { crate::brain::Touch::Headpat } else { crate::brain::Touch::Click });
+        cx.notify();
+        self.schedule(cx);
+    }
+
+    /// Where a synthetic tap lands (window logical px): the head, or the middle of the body.
+    fn tap_point(&self, head: bool) -> Point<Pixels> {
+        let sf = self.layout.sf;
+        let (w, h, hl) = self.frame_or_default(self.anim.frame()).map_or((self.layout.geo.width as i32, self.layout.geo.height as i32, 100), |f| {
+            (f.mask.w as i32, f.mask.h as i32, f.head_line)
+        });
+        let y = if head { hl / 2 } else { (hl + h) / 2 };
+        point(px((self.layout.avatar_x + w / 2) as f32 / sf), px((self.layout.avatar_y + y) as f32 / sf))
+    }
+
+    /// A click on her (real or `tap`): the reaction clip, hearts on a headpat, the squash.
+    fn click_reaction(&mut self, head: bool, at: Point<Pixels>, now: Instant) {
         self.streak = if now.duration_since(self.streak.1) < Duration::from_millis(self.pack.behaviour.click.streak_ms) {
             (self.streak.0 + 1, now)
         } else {
@@ -2438,16 +2527,22 @@ impl Avatar {
         };
         let click = self.pack.behaviour.click.clone();
         let perch_click = self.perch_spec().filter(|_| self.sitting()).map(|p| p.click.clone());
-        let steps = if let Some(steps) = perch_click {
-            if p.head {
-                self.hearts = Some((now, ev.position));
+        let steps = if !self.sitting() && !self.standing() {
+            // Hanging or sitting on the floor: no standing clip, hearts on the head.
+            if head {
+                self.hearts = Some((now, at));
+            }
+            Vec::new()
+        } else if let Some(steps) = perch_click {
+            if head {
+                self.hearts = Some((now, at));
             }
             steps
         } else if self.streak.0 >= click.annoyed_after && !click.annoyed.is_empty() {
             self.streak.0 = 0;
             click.annoyed
-        } else if p.head && !click.head.is_empty() {
-            self.hearts = Some((now, ev.position));
+        } else if head && !click.head.is_empty() {
+            self.hearts = Some((now, at));
             click.head
         } else if !click.body.is_empty() {
             let i = self.rng.pick(click.body.len());
@@ -2457,25 +2552,22 @@ impl Avatar {
         };
         let seq = self.pack.flatten(&steps);
         let len: u64 = seq.iter().map(|s| s.1 as u64).sum();
-        self.anim.play(seq, now);
-        self.squash = Some(now);
-        // A tap on the body (not a headpat) opens the field to talk to the session.
-        if !p.head && self.session.is_some() {
-            self.open_input(None, window, cx);
+        if !seq.is_empty() {
+            self.anim.play(seq, now);
         }
+        self.squash = Some(now);
         let hold = if self.hearts.is_some() { len.max(HEARTS_MS) } else { len.max(600) };
         self.reaction_until = Some(now + Duration::from_millis(hold));
         if self.next_activity.is_some() {
             self.next_activity = Some(now + self.autonomy_gap());
         }
-        cx.notify();
-        self.schedule(cx);
     }
 
     /// The status tag: reopen what is behind the chip (a prompt put off, the last reply),
     /// else open the field.
     fn chip_click(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let now = Instant::now();
+        self.brain_touch(crate::brain::Touch::Chip);
         if let Some(p) = self.prompt_ui.as_mut().filter(|p| p.dismissed) {
             p.dismissed = false;
             p.shown_at = now;
@@ -3615,9 +3707,9 @@ impl Render for Avatar {
                     .hover(|s| s.bg(with_alpha(frame_c, 0.2)))
                     .child(tracked(label, 1.2))
             };
-            let max_x = l.lp(self.vis.1) - px(150.0);
+            let max_x = l.lp(self.vis.1) - px(220.0);
             let menu = div()
-                .w(px(140.0))
+                .w(px(210.0))
                 .flex()
                 .flex_col()
                 .py(px(4.0))
@@ -3631,6 +3723,37 @@ impl Render for Avatar {
                         this.reset_position(cx);
                     }),
                 ))
+                .when_some(self.attention_label(), |m, att| {
+                    let dnd = self.dnd_on();
+                    m.child(item(if dnd { "DND OFF" } else { "DND 1 HOUR" }).id("dnd").on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            this.menu = None;
+                            this.toggle_dnd();
+                            cx.notify();
+                            this.schedule(cx);
+                        }),
+                    ))
+                    .child(item(match att {
+                        "MIX" => "ATTENTION: MIX ▸",
+                        "HANG ONLY" => "ATTENTION: HANG ONLY ▸",
+                        _ => "ATTENTION: OFF ▸",
+                    })
+                    .id("attention")
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            this.cycle_attention();
+                            if let Some(m) = &mut this.menu {
+                                m.1 = Instant::now() + Duration::from_secs(8);
+                            }
+                            cx.notify();
+                            this.schedule(cx);
+                        }),
+                    ))
+                })
                 .child(item("HIDE").id("hide").on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, _: &MouseDownEvent, _, cx| {

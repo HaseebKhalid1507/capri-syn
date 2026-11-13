@@ -46,6 +46,102 @@ pub enum Command {
     Abort,
     /// Dev: show a prompt panel (confirm or secret) that answers nowhere.
     FakePrompt { secret: bool, text: String },
+    /// The brain: on/off, DND, state, time scale, test senses, forced decisions, synthetic
+    /// session signals.
+    Brain(BrainCmd),
+    /// Re-read ~/.config/synaps-avatar/settings.toml.
+    SettingsReload,
+    /// A synthetic tap on her head (headpat) or body, as a click would.
+    Tap { head: bool },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum BrainCmd {
+    On,
+    Off,
+    /// Minutes; None = DND off.
+    Dnd(Option<f64>),
+    State,
+    Scale(f64),
+    Seed(u64),
+    Force(crate::brain::Force),
+    Event(crate::brain::SessionSignal),
+    Sense(Sense),
+}
+
+/// Test senses. `None` = back to the real one.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Sense {
+    /// A window id (client or frame), `Some(None)` = nothing focused.
+    Focus(Option<Option<u32>>),
+    Cursor(Option<(i32, i32)>),
+    /// Seconds since the last input, growing from now.
+    Idle(Option<f64>),
+    Fullscreen(Option<bool>),
+    /// Only this root rect is hers (areas and windows outside are left alone).
+    Arena(Option<(i32, i32, i32, i32)>),
+    /// Only these windows may be sat on, hung over or focused.
+    Windows(Option<Vec<u32>>),
+    /// Every sense back to real.
+    Real,
+}
+
+fn win_id(w: &str) -> Result<u32> {
+    let v = w.trim_start_matches("0x");
+    let radix = if v.len() < w.len() { 16 } else { 10 };
+    u32::from_str_radix(v, radix).with_context(|| format!("bad window id `{w}`"))
+}
+
+fn parse_brain(rest: &str) -> Result<BrainCmd> {
+    use crate::brain::{Force, SessionSignal};
+    let w: Vec<&str> = rest.split_whitespace().collect();
+    let num = |i: usize| -> Result<f64> { w.get(i).and_then(|v| v.parse::<f64>().ok()).filter(|v| v.is_finite()).context("a number") };
+    Ok(match w.as_slice() {
+        ["on"] => BrainCmd::On,
+        ["off"] => BrainCmd::Off,
+        ["state"] | [] => BrainCmd::State,
+        ["dnd", "off"] => BrainCmd::Dnd(None),
+        ["dnd"] => BrainCmd::Dnd(Some(60.0)),
+        ["dnd", _] => BrainCmd::Dnd(Some(num(1)?.max(0.1))),
+        ["scale", _] => BrainCmd::Scale(num(1)?.clamp(0.01, 1000.0)),
+        ["seed", n] => BrainCmd::Seed(n.parse().context("seed: a number")?),
+        ["force", f] => BrainCmd::Force(match *f {
+            "roam" => Force::Roam,
+            "seek" | "bid" => Force::Seek,
+            "summon" => Force::Summon,
+            "sulk" => Force::Sulk,
+            "nap" => Force::Nap,
+            _ => bail!("brain force roam|seek|summon|sulk|nap"),
+        }),
+        ["event", "prompt", id] => BrainCmd::Event(SessionSignal::Prompt(id.parse().context("prompt id")?)),
+        ["event", "prompt"] => BrainCmd::Event(SessionSignal::Prompt(1)),
+        ["event", "done"] => BrainCmd::Event(SessionSignal::Done),
+        ["event", "error"] => BrainCmd::Event(SessionSignal::Error { own_abort: false }),
+        ["event", "abort"] => BrainCmd::Event(SessionSignal::Error { own_abort: true }),
+        ["event", "cleared" | "answered"] => BrainCmd::Event(SessionSignal::Cleared),
+        ["sense", "real"] => BrainCmd::Sense(Sense::Real),
+        ["sense", "focus", "real"] => BrainCmd::Sense(Sense::Focus(None)),
+        ["sense", "focus", "none"] => BrainCmd::Sense(Sense::Focus(Some(None))),
+        ["sense", "focus", id] => BrainCmd::Sense(Sense::Focus(Some(Some(win_id(id)?)))),
+        ["sense", "cursor", "real"] => BrainCmd::Sense(Sense::Cursor(None)),
+        ["sense", "cursor", _, _] => BrainCmd::Sense(Sense::Cursor(Some((num(2)? as i32, num(3)? as i32)))),
+        ["sense", "idle", "real"] => BrainCmd::Sense(Sense::Idle(None)),
+        ["sense", "idle", _] => BrainCmd::Sense(Sense::Idle(Some(num(2)?.max(0.0)))),
+        ["sense", "fullscreen", "real"] => BrainCmd::Sense(Sense::Fullscreen(None)),
+        ["sense", "fullscreen", "on"] => BrainCmd::Sense(Sense::Fullscreen(Some(true))),
+        ["sense", "fullscreen", "off"] => BrainCmd::Sense(Sense::Fullscreen(Some(false))),
+        ["sense", "arena", "off"] => BrainCmd::Sense(Sense::Arena(None)),
+        ["sense", "arena", _, _, _, _] => {
+            BrainCmd::Sense(Sense::Arena(Some((num(2)? as i32, num(3)? as i32, num(4)? as i32, num(5)? as i32))))
+        }
+        ["sense", "windows", "any"] => BrainCmd::Sense(Sense::Windows(None)),
+        ["sense", "windows", ids @ ..] if !ids.is_empty() => {
+            BrainCmd::Sense(Sense::Windows(Some(ids.iter().map(|i| win_id(i)).collect::<Result<_>>()?)))
+        }
+        _ => bail!(
+            "usage: brain on|off|state|dnd [MIN|off]|scale K|seed N|force roam|seek|summon|sulk|nap|event prompt [ID]|done|error|abort|cleared|sense real|focus ID|none|real|cursor X Y|real|idle S|real|fullscreen on|off|real|arena X Y W H|off|windows ID..|any"
+        ),
+    })
 }
 
 impl Command {
@@ -114,16 +210,24 @@ impl Command {
                 }
             }
             "state" => Command::State,
+            "brain" => Command::Brain(parse_brain(rest)?),
+            "settings" if rest == "reload" => Command::SettingsReload,
+            "tap" => match rest {
+                "head" => Command::Tap { head: true },
+                "body" | "" => Command::Tap { head: false },
+                _ => bail!("usage: tap head|body"),
+            },
             "hide" => Command::Hide,
             "quit" => Command::Quit,
             _ => bail!(
-                "unknown command `{line}` (mood <name> | clip <id> | say <text> | pos <x> <y> [now] | perch [sit|stand] [win] | perch off | drop | stack | page next|prev | collapse | expand | music on|off | glitch | submit <text> | abort | prompt confirm|secret [text] | state | hide | quit)"
+                "unknown command `{line}` (mood <name> | clip <id> | say <text> | pos <x> <y> [now] | perch [sit|stand] [win] | perch off | drop | stack | page next|prev | collapse | expand | music on|off | glitch | submit <text> | abort | prompt confirm|secret [text] | brain … | settings reload | tap head|body | state | hide | quit)"
             ),
         })
     }
 }
 
 pub type Reply = std::sync::mpsc::Sender<String>;
+
 
 pub fn socket_path() -> PathBuf {
     let dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
@@ -176,5 +280,30 @@ fn handle(stream: UnixStream, tx: async_channel::Sender<(Command, Reply)>) {
         if writeln!(out, "{reply}").is_err() {
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn brain_commands_parse() {
+        use crate::brain::{Force, SessionSignal};
+        let p = |s: &str| match Command::parse(s).unwrap() {
+            Command::Brain(b) => b,
+            c => panic!("{c:?}"),
+        };
+        assert_eq!(p("brain dnd 30"), BrainCmd::Dnd(Some(30.0)));
+        assert_eq!(p("brain dnd off"), BrainCmd::Dnd(None));
+        assert_eq!(p("brain force seek"), BrainCmd::Force(Force::Seek));
+        assert_eq!(p("brain event prompt 7"), BrainCmd::Event(SessionSignal::Prompt(7)));
+        assert_eq!(p("brain sense focus 0x1a"), BrainCmd::Sense(Sense::Focus(Some(Some(26)))));
+        assert_eq!(p("brain sense cursor 10 20"), BrainCmd::Sense(Sense::Cursor(Some((10, 20)))));
+        assert_eq!(p("brain sense windows 0x10 17"), BrainCmd::Sense(Sense::Windows(Some(vec![16, 17]))));
+        assert_eq!(p("brain scale 20"), BrainCmd::Scale(20.0));
+        assert!(Command::parse("brain fly").is_err());
+        assert!(matches!(Command::parse("tap head").unwrap(), Command::Tap { head: true }));
+        assert!(matches!(Command::parse("settings reload").unwrap(), Command::SettingsReload));
     }
 }

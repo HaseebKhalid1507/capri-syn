@@ -1,7 +1,7 @@
 //! The ragdoll's sprite state machine (BRIEF-ragdoll §2): which frame she shows while held,
 //! flung, bouncing and landing. Pure: seconds in, frame ids out. The view (round B) feeds the
 //! pointer estimators and the flight contacts from ragdoll.rs.
-#![cfg_attr(not(test), allow(dead_code))]
+#![allow(dead_code)] // wired in round B (R-P2/P3)
 
 use crate::ragdoll::{Contact, HARD_VY, HARD_WALL, V_FLING};
 

@@ -91,22 +91,6 @@ pub enum Touch {
     Menu,
 }
 
-impl Touch {
-    pub fn parse(s: &str) -> Option<Touch> {
-        Some(match s {
-            "headpat" | "pat" => Touch::Headpat,
-            "click" => Touch::Click,
-            "drag" => Touch::DragStart,
-            "chip" => Touch::Chip,
-            "typing" => Touch::Typing,
-            "submit" => Touch::Submit,
-            "answer" => Touch::PromptAnswer,
-            "menu" => Touch::Menu,
-            _ => return None,
-        })
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SummonKind {
     Prompt(u64),
@@ -158,8 +142,10 @@ pub struct Arrived {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum BrainEvent {
     Interaction(Touch),
-    /// Released as a fling (ragdoll, R-P3).
+    /// Released as a fling (ragdoll, R-P3: the view sends these in round B).
+    #[cfg_attr(not(test), allow(dead_code))]
     Flung { speed: f32 },
+    #[allow(dead_code)]
     Landed { hard: bool },
     Arrived(Arrived),
     /// The view couldn't do the move: nothing fits, or it is busy/gated right now.
@@ -208,8 +194,6 @@ pub enum EmoteKey {
 pub enum RestPose {
     FloorSit,
     Nap,
-    Float,
-    Peek,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1052,6 +1036,11 @@ impl Brain {
         self.redraw_theta(if ignored { self.tuning.theta_raise } else { 0.0 });
         self.mode = Mode::Sulking { until: t + self.tuning.sulk_s };
         if ignored {
+            // Off his window first (a hang can't sulk with its arms crossed): the sulk plays
+            // where she lands, then the far move.
+            if self.covering {
+                self.leave(t);
+            }
             self.emit(t, Intent::Emote(EmoteKey::Sulk));
         } else {
             self.note(t, "offended (the ragdoll's hard landing plays the sulk)".into());
@@ -1237,12 +1226,7 @@ impl Brain {
                     self.force_seek = true;
                 }
                 Force::Summon => self.pending = Some(Pending { kind: SummonKind::Done, since: t, forced: true }),
-                Force::Sulk => {
-                    if self.covering {
-                        self.leave(t);
-                    }
-                    self.sulk(t, true);
-                }
+                Force::Sulk => self.sulk(t, true),
                 Force::Nap => {
                     self.present = false;
                     self.away_since = Some(t - self.tuning.nap_after_s);
@@ -1255,6 +1239,7 @@ impl Brain {
 
     // ---- read-outs ----------------------------------------------------------------------
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn mode_key(&self) -> &'static str {
         self.mode.key()
     }
@@ -1264,14 +1249,9 @@ impl Brain {
     pub fn dnd_left(&self, now: f64) -> Option<f64> {
         self.dnd_until.filter(|&d| d > now).map(|d| d - now)
     }
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn covering(&self) -> bool {
         self.covering
-    }
-    pub fn hidden(&self) -> bool {
-        self.hidden
-    }
-    pub fn present(&self) -> bool {
-        self.present
     }
     /// Lines logged so far (ever), and the kept tail.
     pub fn log(&self) -> (u64, &VecDeque<LogLine>) {

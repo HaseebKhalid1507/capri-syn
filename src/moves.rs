@@ -1,5 +1,6 @@
 //! Short moves without walk art (BRIEF-brain §6): hop-scoot along the floor, and the float
-//! drift path. Pure; logical px and ms, the view scales.
+//! drift path. Pure; logical px and ms, the view scales. The view uses the hop for the `hop`
+//! arrival; the passive scoot and the float drift are B3.
 
 use crate::anim::Rng;
 
@@ -12,7 +13,9 @@ pub const SCOOT_MAX: f32 = 520.0;
 pub const SCOOT_HOPS_MAX: usize = 6;
 /// The `hop` arrival is only for spots this close (logical px).
 pub const HOP_ARRIVAL_MAX: f32 = 300.0;
+#[cfg_attr(not(test), allow(dead_code))]
 pub const DRIFT_MAX_SPEED: f32 = 90.0;
+#[cfg_attr(not(test), allow(dead_code))]
 pub const DRIFT_BURST_S: (f32, f32) = (1.5, 4.0);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -74,12 +77,14 @@ pub fn plan_scoot(from_x: f32, to_x: f32, rng: &mut Rng) -> Option<Vec<Hop>> {
 
 /// The scoot cut short at the first hop whose landing breaks a rule (`ok(x)` = false): that
 /// hop's start becomes the spot.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn scoot_until(hops: &[Hop], ok: impl Fn(f32) -> bool) -> Vec<Hop> {
     hops.iter().take_while(|h| ok(h.to_x)).copied().collect()
 }
 
 /// A drift leg: cubic ease in/out between two points, slow enough that its peak speed stays
 /// under `DRIFT_MAX_SPEED` (a smoothstep peaks at 1.5x the mean speed).
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Drift {
     pub from: (f32, f32),
@@ -87,6 +92,7 @@ pub struct Drift {
     pub secs: f32,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 impl Drift {
     pub fn new(from: (f32, f32), to: (f32, f32), rng: &mut Rng) -> Drift {
         let d = ((to.0 - from.0).powi(2) + (to.1 - from.1).powi(2)).sqrt();

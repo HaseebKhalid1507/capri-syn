@@ -441,7 +441,7 @@ fn active(w: &World, why: Why, approaches: &[Approach], rng: &mut Rng) -> Result
 fn in_place(w: &World, _why: Why) -> Option<Spot> {
     let f = w.focused?;
     let mon = w.area_of(f.center().0, f.center().1);
-    (w.her.area == mon).then(|| Spot { kind: SpotKind::InPlace, approach: Some(Approach::Beside), ..w.her })
+    (w.her.area == mon).then_some(Spot { kind: SpotKind::InPlace, approach: Some(Approach::Beside), ..w.her })
 }
 
 fn hang_spots(w: &World, f: &WinRect, upside_down: bool) -> Vec<Spot> {

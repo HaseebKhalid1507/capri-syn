@@ -3,7 +3,7 @@
 //! spring. Pure: no gpui, no x11rb, no `Instant`; seconds in, device px.
 //!
 //! Round A ships the sim and its tests only; the view wiring is round B (R-P2/P3).
-#![cfg_attr(not(test), allow(dead_code))]
+#![allow(dead_code)] // wired in round B (R-P2/P3)
 
 use crate::edges::{Platform, WinRect};
 
@@ -953,14 +953,14 @@ mod tests {
             cur_apex = cur_apex.min(f.pos.1);
             lowest = lowest.max(f.pos.1);
             if let Contact::Bounce { .. } = c {
-                if cur_apex < floor - 0.5 && apexes.len() > 0 && contacts.len() > 0 {
+                if cur_apex < floor - 0.5 && !apexes.is_empty() && !contacts.is_empty() {
                     apexes.push(floor - cur_apex);
                 }
                 contacts.push(c);
                 cur_apex = f32::MAX;
             }
             if f.landed {
-                if contacts.len() > 0 && cur_apex < floor - 0.5 {
+                if !contacts.is_empty() && cur_apex < floor - 0.5 {
                     apexes.push(floor - cur_apex);
                 }
                 break;
