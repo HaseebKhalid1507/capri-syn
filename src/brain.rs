@@ -1013,7 +1013,8 @@ impl Brain {
         if !self.covering {
             return true;
         }
-        if !self.sensed.busy.is_empty() || self.sensed.fullscreen || self.hidden {
+        // Busy (a reaction, a bubble) doesn't hold it: the view runs it right after.
+        if self.sensed.fullscreen || self.hidden {
             return false;
         }
         self.covering = false;
@@ -1228,6 +1229,10 @@ impl Brain {
                 Force::Seek => {
                     self.attn = self.attn.max(self.theta);
                     self.force_seek = true;
+                    // A test hook: a linger or a sulk doesn't hold it back.
+                    if matches!(self.mode, Mode::Satisfied { .. } | Mode::Sulking { .. }) {
+                        self.mode = Mode::Passive;
+                    }
                 }
                 Force::Summon => self.pending = Some(Pending { kind: SummonKind::Done, since: t, forced: true }),
                 Force::Sulk => self.sulk(t, true),

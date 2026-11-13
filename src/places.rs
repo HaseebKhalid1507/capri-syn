@@ -261,7 +261,14 @@ pub fn guard(w: &World, s: &Spot) -> Result<(), Block> {
 /// chain. Err: why each try failed (for the decision log).
 pub fn resolve(goal: &Goal, w: &World, rng: &mut Rng) -> Result<Spot, Vec<(String, Block)>> {
     match goal {
-        Goal::Passive { far } => passive(w, *far, false, rng),
+        // Far (after a sulk or a fling) if there is such a spot, else just away.
+        Goal::Passive { far: true } => passive(w, true, false, rng).or_else(|mut why| {
+            passive(w, false, false, rng).map_err(|more| {
+                why.extend(more);
+                why
+            })
+        }),
+        Goal::Passive { far: false } => passive(w, false, false, rng),
         Goal::Leave => passive(w, false, true, rng),
         Goal::Active { why, approaches } => active(w, *why, approaches, rng),
     }
