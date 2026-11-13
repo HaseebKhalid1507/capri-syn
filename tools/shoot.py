@@ -338,7 +338,7 @@ def main():
         shutil.copy(settings, f"{test_root}/config/synaps-avatar/settings.toml")
     focus0 = xdisp().get_input_focus().focus
     focus0 = focus0.id if hasattr(focus0, "id") else None
-    staged, pwins = [], []
+    staged, pwins, ovls = [], [], []
     def subst(line):
         for n in range(len(pwins), 0, -1):
             w = pwins[n - 1]
@@ -669,6 +669,27 @@ def main():
                 t = time.time()
                 ok = wait_user_idle(int(ms), float(mx or 12))
                 print(f"waitidle {ms} ms: {'ok' if ok else 'USER ACTIVE'} after {time.time()-t:.1f}s")
+            elif kind == "ovl":
+                # ovl:<x>:<y>:<w>:<h>[:0xRRGGBB]  a plain override-redirect window just under the
+                # avatar (a stand-in for a fullscreen app: i3 never restacks it)
+                from Xlib import X
+                parts = rest.split(":")
+                x, y, w, h = (int(v) for v in parts[:4])
+                col = int(parts[4], 0) if len(parts) > 4 else 0x0b0e14
+                ov = xroot().create_window(x, y, w, h, 0, X.CopyFromParent, X.InputOutput, X.CopyFromParent,
+                                           override_redirect=True, background_pixel=col)
+                ov.map()
+                xid = json.loads(ctl("state"))["xid"]
+                ov.configure(sibling=xid, stack_mode=X.Below)
+                xdisp().sync()
+                ovls.append(ov)
+                print(f"ovl {hex(ov.id)} at {x},{y} {w}x{h} under the avatar")
+            elif kind == "ovlclose":
+                for ov in ovls:
+                    ov.destroy()
+                ovls.clear()
+                xdisp().sync()
+                print("ovl closed")
             elif kind == "stackcheck":
                 kids = [c.id for c in xroot().query_tree().children]
                 for w_ in staged:
@@ -721,7 +742,7 @@ def main():
                 w_.destroy()
         if pwins:
             xdisp().sync()
-        for w in staged:
+        for w in staged + ovls:
             w.destroy()
         if staged:
             xdisp().sync()

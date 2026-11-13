@@ -331,8 +331,16 @@ fn passive(w: &World, far: bool, leaving: bool, rng: &mut Rng) -> Result<Spot, V
         why.push((["edge", "floor", "floor_sit", "float"][kind as usize].to_string(), last_block));
         if leaving && pool.is_empty() && why.len() == 1 {
             pool = vec![(0, 0.5), (3, 0.5)];
+        } else if pool.is_empty()
+            && !leaving
+            && let Some(l) = last.filter(|_| !why.iter().any(|w| w.0 == "last"))
+        {
+            // Nothing else fits: the same kind as last time beats not moving at all.
+            why.push(("last".into(), Block::NoSpot));
+            pool = vec![(l, 1.0)];
         }
     }
+    why.retain(|w| w.0 != "last");
     Err(why)
 }
 

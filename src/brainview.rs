@@ -35,6 +35,7 @@ pub(super) struct Overrides {
     /// (brain time it was set, idle seconds then)
     idle: Option<(f64, f64)>,
     fullscreen: Option<bool>,
+    near: Option<bool>,
     arena: Option<WinRect>,
     /// Top-level ids she may use.
     windows: Option<Vec<u32>>,
@@ -404,10 +405,10 @@ impl Avatar {
                 (fs, here)
             }
         };
-        let near = focused.zip(her_mon).is_some_and(|(f, m)| {
+        let near = h.ov.near.unwrap_or_else(|| focused.zip(her_mon).is_some_and(|(f, m)| {
             let reach = (NEAR_PX * self.layout.sf) as i32;
             m.intersect(&f).is_some() && f.grow(reach).intersect(&her.body).is_some()
-        });
+        }));
         Senses { now: b, idle_s, fullscreen, fullscreen_here, busy: self.brain_busy(), near, placement: self.placement_kind() }
     }
 
@@ -1079,6 +1080,7 @@ impl Avatar {
                         Sense::Cursor(c) => h.ov.cursor = c,
                         Sense::Idle(i) => h.ov.idle = i.map(|v| (b, v)),
                         Sense::Fullscreen(f) => h.ov.fullscreen = f,
+                        Sense::Near(n) => h.ov.near = n,
                         Sense::Arena(a) => h.ov.arena = a.map(|(x, y, w, hh)| WinRect::new(x, y, w, hh)),
                         Sense::Windows(w) => {
                             h.ov.windows = w.map(|ids| ids.into_iter().map(|id| self.x11.toplevel_of(id).unwrap_or(id)).collect())
