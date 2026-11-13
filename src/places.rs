@@ -476,12 +476,16 @@ fn hang_spots(w: &World, f: &WinRect, upside_down: bool) -> Vec<Spot> {
     let inset = w.d(16.0);
     let mut out = Vec::new();
     let ap = Some(if upside_down { Approach::HangUpsideDown } else { Approach::Hang });
-    if !upside_down {
+    let grip = w.d(10.0);
+    if upside_down {
+        // By the feet, just inside the far corner: half her hair hangs outside his window.
+        let x = if right { f.right() - grip } else { f.x + grip };
+        out.push(w.spot(SpotKind::Hang { upside_down }, (x, line), rel, ap));
+    } else {
         // By the hands, so her hair hangs mostly outside his window (less of the title bar
         // and the first lines covered): the inner hand just over the far corner, else the
         // outer one.
         let hand = (rel.w as f32 * HANG_HAND) as i32;
-        let grip = w.d(10.0);
         for x in if right { [f.right() - grip + hand, f.right() - hand] } else { [f.x + grip - hand, f.x + hand] } {
             out.push(w.spot(SpotKind::Hang { upside_down }, (x, line), rel, ap));
         }

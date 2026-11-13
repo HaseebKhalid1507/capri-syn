@@ -1099,19 +1099,21 @@ impl Avatar {
         use std::f32::consts::{PI, TAU};
         let sf = self.layout.sf;
         let t = now.saturating_duration_since(self.bob_t0).as_secs_f32();
-        let mut v = 5.0 * sf * (t * TAU / 3.2).sin();
+        let mut v = 7.0 * sf * (t * TAU / 3.2).sin();
         if let Some((t0, amp)) = self.brain.as_ref().and_then(|h| h.kick) {
             let k = now.saturating_duration_since(t0).as_secs_f32();
             if k < 3.5 {
                 v += amp * (-k / 1.1).exp() * (k * TAU / 1.25).sin();
             }
         }
-        let cycle = 3.6;
-        let n = (t / cycle).floor();
-        let u = (t - n * cycle) / 0.8;
-        // Each leg kicks outward in turn.
+        // One knee bent out at a time, held ~1 s, then the other: never two frames of a
+        // rigid drop.
+        let half = 1.5;
+        let n = (t / half).floor();
+        let u = t - n * half;
         let mut right = (n as i64).rem_euclid(2) == 0;
-        let mut leg = if u < 1.0 { 12.0 * sf * (PI * u).sin() * if right { 1.0 } else { -1.0 } } else { 0.0 };
+        let env = (u / 0.3).min((half - u) / 0.3).clamp(0.0, 1.0);
+        let mut leg = 12.0 * sf * env * if right { 1.0 } else { -1.0 };
         if let Some((t0, dir)) = self.brain.as_ref().and_then(|h| h.leg_kick) {
             let k = now.saturating_duration_since(t0).as_secs_f32() / 0.7;
             if k < 1.0 {
@@ -1168,14 +1170,22 @@ impl Avatar {
         let show = self.loaded && !self.hidden && !self.quitting && self.teleport.is_none();
         let st = if show { self.marker_state(now) } else { None };
         let geo = st.and_then(|(bob, sc)| {
-            let f = self.frame_or_default(self.anim.frame())?;
+            let fi = self.anim.frame();
+            let f = self.frame_or_default(fi)?;
             let l = self.layout;
             let sf = l.sf;
             let base = ((self.applied.0 + l.avatar_x) as f32, (self.applied.1 + l.avatar_y) as f32);
-            let head = (base.0 + f.head_x as f32, base.1 + f.face.0 as f32);
+            // Upside down her head is at the bottom: by her shoulders instead.
+            let ud = self.brain_pose("hang_upside_down").is_some_and(|u| u == fi && self.posed());
+            let head = if ud {
+                let h = self.pack.frames.get(fi).map_or(300.0, |s| s.bounds.height as f32 * l.geo.scale);
+                (base.0 + f.head_x as f32, base.1 + f.top as f32 + 0.5 * h)
+            } else {
+                (base.0 + f.head_x as f32, base.1 + f.face.0 as f32)
+            };
             // Beside her head, on the side away from his window (never over more of it).
             let away = self.brain_focused().map_or(1.0, |w| if head.0 < w.center().0 as f32 { -1.0 } else { 1.0 });
-            let c = (head.0 + away * 50.0 * sf, head.1 - 22.0 * sf + bob as f32);
+            let c = (head.0 + away * if ud { 40.0 } else { 50.0 } * sf, head.1 - 22.0 * sf + bob as f32);
             Some((c, head, sc as f32 / 20.0, away))
         });
         let double = self.brain.as_ref().and_then(|h| h.marker).is_some_and(|m| m.double);
