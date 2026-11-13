@@ -498,6 +498,9 @@ pub struct Brain {
     pub approaches: Bag<Approach>,
     pub arrivals: Bag<Arrival>,
     pub emotes: Bag<usize>,
+    /// An ignored bid that covered his window leaves it before the sulk (false: sulks in place,
+    /// then the far move; the gauntlet's B variant).
+    pub sulk_leaves: bool,
     log: VecDeque<LogLine>,
     logged: u64,
     out: Vec<(f64, Intent)>,
@@ -544,6 +547,7 @@ impl Brain {
             approaches: Bag::default(),
             arrivals: Bag::default(),
             emotes: Bag::default(),
+            sulk_leaves: true,
             log: VecDeque::new(),
             logged: 0,
             out: Vec::new(),
@@ -1038,7 +1042,7 @@ impl Brain {
         if ignored {
             // Off his window first (a hang can't sulk with its arms crossed): the sulk plays
             // where she lands, then the far move.
-            if self.covering {
+            if self.covering && self.sulk_leaves {
                 self.leave(t);
             }
             self.emit(t, Intent::Emote(EmoteKey::Sulk));

@@ -85,6 +85,8 @@ pub(super) struct BrainHost {
     last_abort: Option<Instant>,
     last_senses: Option<serde_json::Value>,
     typed_at: Option<Instant>,
+    /// A bid's swing kick while hanging: (start, px at the bottom).
+    kick: Option<(Instant, f32)>,
 }
 
 fn env_rect(k: &str) -> Option<WinRect> {
@@ -136,7 +138,7 @@ impl Avatar {
     }
 
     /// Window-local device px of frame `i`'s anchor point.
-    fn anchor_px(&self, i: usize) -> (i32, i32) {
+    pub(super) fn anchor_px(&self, i: usize) -> (i32, i32) {
         let l = &self.layout;
         let f = &self.pack.frames[i];
         let (dx, dy) = self.pack.offset(f);
@@ -208,7 +210,8 @@ impl Avatar {
         let unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64());
         let saved = state::load_brain().and_then(|v| Saved::from_json(&v));
         let seed = std::env::var("SA_BRAIN_SEED").ok().and_then(|v| v.parse().ok()).unwrap_or_else(|| self.rng.next());
-        let brain = Brain::new(seed, bs.clone(), Tuning::new(&bs), saved.as_ref().map(|s| (s, (unix - s.saved_unix).max(0.0) * scale)), 0.0);
+        let mut brain = Brain::new(seed, bs.clone(), Tuning::new(&bs), saved.as_ref().map(|s| (s, (unix - s.saved_unix).max(0.0) * scale)), 0.0);
+        brain.sulk_leaves = std::env::var_os("SA_SULK_INPLACE").is_none();
         let log = std::env::var_os("SA_BRAIN_LOG").and_then(|p| std::fs::OpenOptions::new().create(true).append(true).open(p).ok());
         let mut ov = Overrides { arena: env_rect("SA_BRAIN_ARENA"), ..Overrides::default() };
         if let Ok(w) = std::env::var("SA_BRAIN_WINDOWS") {
@@ -251,6 +254,7 @@ impl Avatar {
             last_abort: None,
             last_senses: None,
             typed_at: None,
+            kick: None,
         });
         if let Some(h) = &mut self.brain {
             let v = serde_json::json!({ "t": 0.0, "k": "start", "scale": scale, "seed": seed, "settings": h.brain.snapshot(0.0)["settings"] });
@@ -493,6 +497,9 @@ impl Avatar {
             take(Some(now + FRAME_FAST));
         }
         take(h.later.iter().map(|l| l.0).min());
+        if h.next_plan.is_some() {
+            take(Some(now + Duration::from_millis(100)));
+        }
         if h.fs == FsHide::Hiding {
             take(Some(now + FRAME_FAST));
         }
@@ -528,6 +535,11 @@ impl Avatar {
             self.play_emote(e, now);
             dirty = true;
         }
+        let free = self.teleport.is_none() && !self.anim.busy() && self.brain.as_ref().is_some_and(|h| h.flight.is_none() && h.scoot.is_none());
+        if free && let Some(p) = self.brain.as_mut().and_then(|h| h.next_plan.take()) {
+            self.brain_move(p, now);
+            dirty = true;
+        }
         self.brain_run(now, false);
         self.brain_save(now, false);
         dirty
@@ -538,7 +550,9 @@ impl Avatar {
     fn brain_move(&mut self, plan: MovePlan, now: Instant) {
         let t = self.brain.as_ref().map_or(0.0, |h| h.bnow(now) - h.brain.start());
         let moving = self.teleport.is_some() || self.brain.as_ref().is_some_and(|h| h.scoot.is_some() || h.flight.is_some());
-        if moving && self.press.is_none() && !self.quitting {
+        // A passive move waits for the emote on screen to finish (the sulk plays out first).
+        let emoting = !matches!(plan.goal, Goal::Active { .. }) && self.anim.busy();
+        if (moving || emoting) && self.press.is_none() && !self.quitting {
             // Still landing from the last one: this one goes next (a sulk's far move after
             // the leave, a summon after a passive hop).
             if let Some(h) = &mut self.brain {
@@ -802,9 +816,6 @@ impl Avatar {
         for e in queued {
             self.play_emote(e, now);
         }
-        if let Some(p) = self.brain.as_mut().and_then(|h| h.next_plan.take()) {
-            self.brain_move(p, now);
-        }
     }
 
     // ---- emotes, hide ---------------------------------------------------------------------------
@@ -883,8 +894,28 @@ impl Avatar {
                 played = "clip";
             }
         }
-        if played == "fx" || matches!(e, EmoteKey::Satisfied { pat: true }) {
-            // No standing frames up here: the emote is the body's effects.
+        if played == "fx" && self.posed() {
+            // Hanging: the emote is a kick of the swing (and hearts for the heart one).
+            let (amp, extra) = match e {
+                EmoteKey::Bid(i) => ([14.0, 9.0, 7.0, 11.0][i % 4], i % 4),
+                EmoteKey::Insist(s) => (if s >= 2 { 18.0 } else { 15.0 }, if s >= 2 { 2 } else { 0 }),
+                EmoteKey::Satisfied { .. } => (6.0, 1),
+                EmoteKey::Sulk => (-12.0, 2),
+                EmoteKey::Wave => (12.0, 0),
+            };
+            let sign = if self.rng.pick(2) == 0 { 1.0 } else { -1.0 };
+            if let Some(h) = &mut self.brain {
+                h.kick = Some((now, amp * sign * self.layout.sf));
+            }
+            match extra {
+                1 => self.hearts = Some((now, self.head_point())),
+                2 => {
+                    self.glitch.get_or_insert(Glitch::new(GlitchKind::Burst, now, self.rng.next()));
+                }
+                _ => {}
+            }
+        } else if played == "fx" || matches!(e, EmoteKey::Satisfied { pat: true }) {
+            // No standing frames (a floor sit): the emote is the body's effects.
             match fx_kind % 4 {
                 0 => {
                     self.squash = Some(now);
@@ -925,6 +956,21 @@ impl Avatar {
             self.hidden = false;
             self.glitch = Some(Glitch::new(GlitchKind::Appear, now, self.rng.next()));
         }
+    }
+
+    /// The hanging pendulum (device px at the bottom, in 2 px steps): a slow idle sway, plus
+    /// a bid's kick decaying over ~3 s.
+    pub(super) fn hang_swing(&self, now: Instant) -> i32 {
+        let sf = self.layout.sf;
+        let t = now.saturating_duration_since(self.bob_t0).as_secs_f32();
+        let mut v = 3.0 * sf * (t * std::f32::consts::TAU / 3.4).sin();
+        if let Some((t0, amp)) = self.brain.as_ref().and_then(|h| h.kick) {
+            let k = now.saturating_duration_since(t0).as_secs_f32();
+            if k < 3.5 {
+                v += amp * (-k / 1.1).exp() * (k * std::f32::consts::TAU / 1.25).sin();
+            }
+        }
+        ((v / 2.0).round() * 2.0) as i32
     }
 
     // ---- layer ----------------------------------------------------------------------------------

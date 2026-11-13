@@ -731,7 +731,12 @@ impl Avatar {
             // over two beats (4 px at the top of the hair).
             let nod = (4.0 * sf * (0.5 + 0.5 * (p * std::f32::consts::TAU).cos())).round() as i32;
             let sway = (4.0 * sf * (beats * std::f32::consts::PI).sin()).round() as i32;
-            return fx::Pose { breath: 0, nod, sway };
+            return fx::Pose { breath: 0, nod, sway, swing: 0 };
+        }
+        if self.posed() {
+            // Hanging: no breath or hair sway (they'd pull the hands off the grip), a slow
+            // pendulum instead, kicked by the bid emotes.
+            return fx::Pose { swing: self.hang_swing(now), ..fx::Pose::default() };
         }
         let life = &self.pack.behaviour.life;
         let t = now.saturating_duration_since(self.bob_t0);
@@ -744,12 +749,12 @@ impl Avatar {
         } else {
             0
         };
-        fx::Pose { breath, nod: 0, sway }
+        fx::Pose { breath, nod: 0, sway, swing: 0 }
     }
 
     fn pose_next_change(&self, now: Instant) -> Option<Instant> {
         let life = &self.pack.behaviour.life;
-        if !self.pose_active() || (self.music_frame().is_none() && life.bob_px <= 0 && life.sway_px <= 0) {
+        if !self.pose_active() || (self.music_frame().is_none() && life.bob_px <= 0 && life.sway_px <= 0 && !self.posed()) {
             return None;
         }
         let cur = self.pose_at(now);
@@ -766,6 +771,10 @@ impl Avatar {
         let waist = line - (span * if seat { 0.3 } else { 0.5 }) as i32;
         let neck = f.face.1 + (span * 0.04) as i32;
         let music = self.music.is_some() && self.music_frame() == Some(fi);
+        let grip = match self.placement {
+            Placement::Pose { frame } if frame == fi => self.anchor_px(fi).1 - l.avatar_y,
+            _ => 0,
+        };
         fx::PoseRows {
             y0: -l.avatar_y,
             h: l.geo.height as i32,
@@ -773,6 +782,7 @@ impl Avatar {
             shear_end: if music { waist } else { f.face.0 },
             neck,
             waist,
+            grip,
         }
     }
 

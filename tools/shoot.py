@@ -283,8 +283,10 @@ def main():
         elif k == "--idle":
             need = int(argv.pop(0))
             t = time.time()
-            ok = wait_user_idle(need, 60)
-            print(f"shoot: user idle {need} ms before start: {'ok' if ok else 'NO (user active)'} after {time.time()-t:.1f}s")
+            ok = wait_user_idle(need, 300)
+            print(f"shoot: user idle {need} ms before start: {'ok' if ok else 'NO (user active): not starting'} after {time.time()-t:.1f}s")
+            if not ok:
+                return 3
         elif k == "--ground":
             ground = argv.pop(0)
         elif k == "--long":
@@ -368,6 +370,23 @@ def main():
                                    *ENC, out])
         time.sleep(0.4)
         print(f"rec-start {out}")
+    # The user's pointer over the stage while we record: the clip may show (or get) his input.
+    watch = {"in_stage": 0, "active": 0, "stop": False}
+    if stage:
+        import threading
+        def watch_pointer():
+            from Xlib import display as _d
+            dd = _d.Display()
+            r_ = dd.screen().root
+            sx_, sy_, sw_, sh_ = stage[:4]
+            while not watch["stop"]:
+                q_ = r_.query_pointer()
+                if sx_ <= q_.root_x < sx_ + sw_ and sy_ <= q_.root_y < sy_ + sh_:
+                    watch["in_stage"] += 1
+                if r_.screensaver_query_info().idle < 300:
+                    watch["active"] += 1
+                time.sleep(0.2)
+        threading.Thread(target=watch_pointer, daemon=True).start()
     p = subprocess.Popen(["timeout", str(tmo), binp] + extra, stdout=log, stderr=subprocess.STDOUT, env=os.environ)
     st = None
     q = xroot().query_pointer()
@@ -657,6 +676,18 @@ def main():
     finally:
         if bg_rec is not None:
             bg_rec.wait(timeout=30)
+        watch["stop"] = True
+        gone = []
+        for n_, w_ in enumerate(pwins, 1):
+            try:
+                if w_ is not None and w_.get_attributes().map_state != 2:
+                    gone.append(n_)
+            except Exception:
+                gone.append(n_)
+        if stage:
+            bad = watch["in_stage"] > 0 or gone
+            print(f"shoot: {'TAINT' if bad else 'clean'}: user pointer over the stage {watch['in_stage']} samples, "
+                  f"user input {watch['active']} samples (5 Hz), test windows unmapped {gone or 'none'}")
         for w_ in pwins:
             if w_ is not None:
                 w_.destroy()

@@ -497,6 +497,9 @@ pub struct Pose {
     pub breath: i32,
     pub nod: i32,
     pub sway: i32,
+    /// Hanging (from the bar, a window side): rows below the grip shear this far at the
+    /// bottom, the grip stays put. Overrides the others.
+    pub swing: i32,
 }
 
 /// Rows (avatar-local) a pose acts on.
@@ -513,11 +516,30 @@ pub struct PoseRows {
     pub neck: i32,
     /// Rows above this breathe.
     pub waist: i32,
+    /// The grip row of a hanging pose (`swing`).
+    pub grip: i32,
 }
 
 /// Bands `(y0, y1, dx, dy)` in paint order (legs, torso, head) for a pose. The waist rows
 /// repeat over the breath height, so nothing opens up between torso and legs.
 pub fn pose_bands(p: Pose, r: PoseRows) -> Vec<(i32, i32, i32, i32)> {
+    if p.swing != 0 {
+        // A pendulum from the grip: 0 at the grip row, `swing` at the bottom.
+        let grip = r.grip.clamp(r.y0, r.h - 1);
+        let span = (r.h - grip).max(1) as f32;
+        let mut out = vec![(r.y0, grip, 0, 0)];
+        let mut y = grip;
+        while y < r.h {
+            let y1 = (y + 2).min(r.h);
+            let dx = (p.swing as f32 * (y - grip) as f32 / span).round() as i32;
+            match out.last_mut() {
+                Some(last) if last.1 == y && last.2 == dx => last.1 = y1,
+                _ => out.push((y, y1, dx, 0)),
+            }
+            y = y1;
+        }
+        return out;
+    }
     let b = p.breath.max(0);
     let waist = r.waist.clamp(r.y0 + 1, r.h);
     let neck = r.neck.clamp(r.y0, waist);
@@ -993,8 +1015,8 @@ mod tests {
 
     #[test]
     fn pose_bands_cover_without_gaps() {
-        let r = PoseRows { y0: -50, h: 400, top: 10, shear_end: 80, neck: 120, waist: 220 };
-        let bands = pose_bands(Pose { breath: 2, nod: 0, sway: 3 }, r);
+        let r = PoseRows { y0: -50, h: 400, top: 10, shear_end: 80, neck: 120, waist: 220, grip: 0 };
+        let bands = pose_bands(Pose { breath: 2, nod: 0, sway: 3, swing: 0 }, r);
         // Every destination row from the top to the bottom is painted by some band.
         for y in 10..400 {
             assert!(bands.iter().any(|&(a, b, _, dy)| y >= a + dy && y < b + dy), "row {y} {bands:?}");
@@ -1004,13 +1026,20 @@ mod tests {
         // The legs never move.
         assert!(bands.iter().filter(|b| b.1 > 220).all(|b| b.2 == 0 && b.3 == 0));
         // Music: the shear reaches down to the waist (the upper body tilts), head nods.
-        let music = pose_bands(Pose { breath: 0, nod: 4, sway: 4 }, PoseRows { shear_end: 220, ..r });
+        let music = pose_bands(Pose { breath: 0, nod: 4, sway: 4, swing: 0 }, PoseRows { shear_end: 220, ..r });
         for y in 10..400 {
             assert!(music.iter().any(|&(a, b, _, dy)| y >= a + dy && y < b + dy), "row {y}");
         }
         assert!(music.iter().any(|b| b.0 >= 120 && b.1 <= 220 && b.2 != 0));
         let still = pose_bands(Pose::default(), r);
         assert!(still.iter().all(|b| b.2 == 0 && b.3 == 0));
+        // Hanging: the grip row and above stay, the bottom swings the full amount, no gaps.
+        let hang = pose_bands(Pose { swing: -9, ..Pose::default() }, PoseRows { grip: 30, ..r });
+        for y in -50..400 {
+            assert_eq!(hang.iter().filter(|&&(a, b, _, _)| y >= a && y < b).count(), 1, "row {y}");
+        }
+        assert!(hang.iter().filter(|b| b.1 <= 31).all(|b| b.2 == 0));
+        assert_eq!(hang.last().unwrap().2, -9);
     }
 
     #[test]
