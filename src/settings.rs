@@ -105,6 +105,21 @@ impl Default for BrainSettings {
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct Settings {
     pub brain: BrainSettings,
+    pub ragdoll: RagdollSettings,
+}
+
+/// `[ragdoll]`: how much she bends, squashes and swings.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RagdollSettings {
+    /// 0 = rigid (today's drag), 1 = the full-strength chain; 0.5 by default (Haseeb: "too
+    /// strong" at 1). Scales the bend, squash/stretch, shake response and bid swing together.
+    pub strength: f32,
+}
+
+impl Default for RagdollSettings {
+    fn default() -> Self {
+        RagdollSettings { strength: 0.5 }
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -112,6 +127,14 @@ pub struct Settings {
 struct FileRaw {
     #[serde(default)]
     brain: Option<BrainRaw>,
+    #[serde(default)]
+    ragdoll: Option<RagdollRaw>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RagdollRaw {
+    strength: Option<f64>,
 }
 
 #[derive(Deserialize, Default)]
@@ -150,7 +173,12 @@ impl Settings {
     pub fn parse(text: &str) -> Result<Settings> {
         let raw: FileRaw = toml::from_str(text).context("settings.toml")?;
         let mut b = BrainSettings::default();
-        let Some(r) = raw.brain else { return Ok(Settings { brain: b }) };
+        let mut ragdoll = RagdollSettings::default();
+        if let Some(v) = raw.ragdoll.and_then(|r| r.strength) {
+            anyhow::ensure!(v.is_finite() && (0.0..=1.0).contains(&v), "ragdoll.strength must be 0..1");
+            ragdoll.strength = v as f32;
+        }
+        let Some(r) = raw.brain else { return Ok(Settings { brain: b, ragdoll }) };
         if let Some(v) = r.enabled {
             b.enabled = v;
         }
@@ -198,7 +226,7 @@ impl Settings {
         }
         // Drift is a transport (by distance), never drawn from the pool.
         b.arrivals.retain(|p| p.0 != Arrival::Drift);
-        Ok(Settings { brain: b })
+        Ok(Settings { brain: b, ragdoll })
     }
 
     /// The file's settings (defaults when there is none). Err: a bad file (keep the old values).
@@ -237,6 +265,15 @@ fn set_attention(text: &str, a: Attention) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ragdoll_strength() {
+        assert_eq!(Settings::parse("").unwrap().ragdoll.strength, 0.5, "the toned-down default");
+        assert_eq!(Settings::parse("[ragdoll]\nstrength = 1").unwrap().ragdoll.strength, 1.0);
+        assert_eq!(Settings::parse("[ragdoll]\nstrength = 0.25\n[brain]\nenabled = false").unwrap().ragdoll.strength, 0.25);
+        assert!(Settings::parse("[ragdoll]\nstrength = 1.5").is_err());
+        assert!(Settings::parse("[ragdoll]\nstrenght = 0.5").is_err(), "unknown keys are errors");
+    }
 
     #[test]
     fn defaults_without_a_file_or_keys() {

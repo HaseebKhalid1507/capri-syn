@@ -442,6 +442,8 @@ pub struct Avatar {
     brain: Option<brainview::BrainHost>,
     /// Carried, flung, landing (None: not ragdolling).
     rag: Option<ragview::Rag>,
+    /// settings.toml `[ragdoll] strength` (read at start and by `settings reload`).
+    rag_strength: crate::ragdoll::Strength,
     /// Ticks run so far (wake-ups), for the dev `state`.
     view_ticks: u64,
 }
@@ -561,6 +563,7 @@ impl Avatar {
             buttons: Rc::default(),
             brain: None,
             rag: None,
+            rag_strength: crate::ragdoll::Strength(crate::settings::Settings::load().map_or(0.5, |s| s.ragdoll.strength)),
             view_ticks: 0,
         };
         if std::env::var_os("SA_NO_BRAIN").is_none() {

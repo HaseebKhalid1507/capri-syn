@@ -32,6 +32,12 @@ pub struct Params {
     pub stretch_zeta: f32,
     /// Lateral limits of the chain relative to the grip.
     pub room: (f32, f32),
+    /// Share of the anchor's motion every node takes directly (0 = pure physics): the lag
+    /// that bends her when she's dragged or shaken shrinks by this much.
+    pub follow: f32,
+    /// Damping of each node's velocity relative to its parent (1/s): kills the fast leg flap
+    /// (the chain's bending mode) without slowing the whole-body swing.
+    pub bend_damping: f32,
 }
 
 impl Default for Params {
@@ -53,6 +59,44 @@ impl Default for Params {
             stretch_omega: std::f32::consts::TAU * 3.2,
             stretch_zeta: 0.32,
             room: (-1.0e5, 1.0e5),
+            follow: 0.0,
+            bend_damping: 0.0,
+        }
+    }
+}
+
+/// Bending damping at strength 0 (1/s); half of it at the 0.5 default.
+pub const BEND_DAMPING: f32 = 120.0;
+
+/// `[ragdoll] strength` → the physics (0 = rigid, 1 = the full-strength defaults).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Strength(pub f32);
+
+impl Strength {
+    pub fn k(self) -> f32 {
+        fin(self.0).clamp(0.0, 1.0)
+    }
+    /// Damping multiplier: x1 at full strength, x2 at 0.5 (settles about twice as fast).
+    pub fn damp(self) -> f32 {
+        1.0 + 2.0 * (1.0 - self.k())
+    }
+    /// The chain params: bend limits, stretch and drag/shake lag scale with k; the damping
+    /// (whole-body and bending) grows as k drops. At 1 these are exactly `Params::default()`.
+    pub fn params(self) -> Params {
+        let (k, d) = (self.k(), self.damp());
+        let p = Params::default();
+        Params {
+            damping: p.damping * d,
+            damping_near_rest: p.damping_near_rest * d,
+            max_swing_deg: p.max_swing_deg * k,
+            max_swing_up_deg: p.max_swing_up_deg * k,
+            max_bend_deg: p.max_bend_deg * k,
+            stretch: (1.0 - (1.0 - p.stretch.0) * k, 1.0 + (p.stretch.1 - 1.0) * k),
+            stretch_per_accel: p.stretch_per_accel * k,
+            stretch_zeta: (p.stretch_zeta * d).min(1.0),
+            follow: 1.0 - k,
+            bend_damping: BEND_DAMPING * (1.0 - k),
+            ..p
         }
     }
 }
@@ -210,6 +254,13 @@ impl Chain {
     fn substep(&mut self, a: (f32, f32)) {
         let prev_anchor = self.anchor;
         self.anchor = a;
+        if self.p.follow > 0.0 {
+            let d = ((a.0 - prev_anchor.0) * self.p.follow, (a.1 - prev_anchor.1) * self.p.follow);
+            for nd in self.down.iter_mut().chain(self.up.iter_mut()) {
+                nd.p = (nd.p.0 + d.0, nd.p.1 + d.1);
+                nd.prev = (nd.prev.0 + d.0, nd.prev.1 + d.1);
+            }
+        }
         // Stretch: driven by the anchor's vertical acceleration.
         let v = (a.1 - prev_anchor.1) / H;
         let acc = self.v_prev.map_or(0.0, |vp| (v - vp) / H).clamp(-60_000.0, 60_000.0);
@@ -228,6 +279,30 @@ impl Chain {
         let damp = if off < 3.0 && spd < 40.0 { self.p.damping_near_rest } else { self.p.damping };
         let keep = (-damp * H).exp();
         let g = self.gravity * H * H;
+        if self.p.bend_damping > 0.0 {
+            // Each segment's spin relative to the segment above it decays (the leg flap); a
+            // whole-body swing (every segment spinning together) is left alone.
+            let f = 1.0 - (-self.p.bend_damping * H).exp();
+            let va = (a.0 - prev_anchor.0, a.1 - prev_anchor.1);
+            for nodes in [&mut self.down, &mut self.up] {
+                let (mut pp, mut pv) = (a, va);
+                let mut prev_w: Option<f32> = None;
+                for nd in nodes.iter_mut() {
+                    let d = (nd.p.0 - pp.0, nd.p.1 - pp.1);
+                    let dd = (d.0 * d.0 + d.1 * d.1).max(1e-6);
+                    let v = (nd.p.0 - nd.prev.0, nd.p.1 - nd.prev.1);
+                    let rel = (v.0 - pv.0, v.1 - pv.1);
+                    let w = (d.0 * rel.1 - d.1 * rel.0) / dd;
+                    let radial = (rel.0 * d.0 + rel.1 * d.1) / dd;
+                    let w2 = prev_w.map_or(w, |pw| w - (w - pw) * f);
+                    let nv = (pv.0 + radial * d.0 - w2 * d.1, pv.1 + radial * d.1 + w2 * d.0);
+                    nd.prev = (nd.p.0 - nv.0, nd.p.1 - nv.1);
+                    prev_w = Some(w2);
+                    pp = nd.p;
+                    pv = nv;
+                }
+            }
+        }
         for nd in self.down.iter_mut().chain(self.up.iter_mut()) {
             let vx = (nd.p.0 - nd.prev.0) * keep;
             let vy = (nd.p.1 - nd.prev.1) * keep;
@@ -443,11 +518,14 @@ pub struct SquashAnim {
     pub s: f32,
     pub v: f32,
     accum: f32,
+    z: f32,
 }
 
-pub fn squash_spring(impact: f32) -> SquashAnim {
-    let depth = (0.05 + fin(impact).abs() / 2600.0 * 0.17).clamp(0.05, 0.22);
-    SquashAnim { s: 1.0 - depth, v: 0.0, accum: 0.0 }
+/// The landing squash for an impact speed (logical px/s), depth scaled by `strength`.
+pub fn squash_spring(impact: f32, strength: Strength) -> SquashAnim {
+    let k = strength.k();
+    let depth = (0.05 + fin(impact).abs() / 2600.0 * 0.17).clamp(0.05, 0.22) * k;
+    SquashAnim { s: 1.0 - depth, v: 0.0, accum: 0.0, z: (SquashAnim::Z * strength.damp()).min(1.0) }
 }
 
 impl SquashAnim {
@@ -458,7 +536,7 @@ impl SquashAnim {
         self.accum += sane_dt(dt);
         while self.accum >= H {
             self.accum -= H;
-            let f = -Self::W * Self::W * (self.s - 1.0) - 2.0 * Self::Z * Self::W * self.v;
+            let f = -Self::W * Self::W * (self.s - 1.0) - 2.0 * self.z * Self::W * self.v;
             self.v += f * H;
             self.s += self.v * H;
         }
@@ -773,15 +851,89 @@ impl Flight {
         Contact::None
     }
 
-    /// Flight stretch on the dominant axis: 1 + |v| / 12000, at most 1.10.
-    pub fn stretch(&self) -> f32 {
-        1.0 + ((self.vel.0 * self.vel.0 + self.vel.1 * self.vel.1).sqrt() / 12_000.0).clamp(0.0, 0.10)
+    /// Flight stretch on the dominant axis: 1 + |v| / 12000, at most 1.10, scaled by strength.
+    pub fn stretch(&self, strength: Strength) -> f32 {
+        1.0 + ((self.vel.0 * self.vel.0 + self.vel.1 * self.vel.1).sqrt() / 12_000.0).clamp(0.0, 0.10) * strength.k()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Feet x relative to the hand, 240 Hz, until asleep (or 30 s): a kick at rest, then a
+    /// 260 px drag in 0.3 s that stops.
+    fn traces(p: &Params) -> (Vec<f32>, Vec<f32>) {
+        let mut c = Chain::new(p, &[], &Chain::rows(p.links_down, 290, false), (500.0, 100.0));
+        c.kick((120.0, 0.0));
+        let mut kick = Vec::new();
+        while !c.asleep() && kick.len() < 240 * 30 {
+            c.step((500.0, 100.0), H);
+            kick.push(c.feet_offset().0);
+        }
+        let mut c = Chain::new(p, &[], &Chain::rows(p.links_down, 290, false), (500.0, 100.0));
+        let mut drag = Vec::new();
+        for i in 0..240 * 6 {
+            let t = i as f32 * H;
+            c.step((500.0 + 260.0 * (t / 0.3).min(1.0), 100.0), H);
+            drag.push(c.feet_offset().0);
+        }
+        (kick, drag)
+    }
+
+    fn crossings(x: &[f32]) -> usize {
+        x.windows(2).filter(|w| w[0].signum() != w[1].signum() && w[0].abs().max(w[1].abs()) > 1.0).count()
+    }
+
+    #[test]
+    fn strength_halves_the_bend_and_settles_faster() {
+        let full = Strength(1.0).params();
+        let half = Strength(0.5).params();
+        assert_eq!(full, Params::default(), "1 = the old values");
+        assert_eq!(half.max_swing_deg, 16.0);
+        assert_eq!(half.max_bend_deg, 7.0);
+        assert!((half.stretch.0 - 0.96).abs() < 1e-6 && (half.stretch.1 - 1.04).abs() < 1e-6, "±4 %");
+        let ((k1, d1), (k2, d2)) = (traces(&full), traces(&half));
+        let secs = |x: &[f32]| x.len() as f32 * H;
+        // After the drag stops (0.3 s): when the feet are last more than 2 px off.
+        let rest = |x: &[f32]| x.iter().rposition(|v| v.abs() > 2.0).map_or(0.0, |i| i as f32 * H) - 0.3;
+        let peak = |x: &[f32]| x.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        let (st1, st2) = (secs(&k1), secs(&k2));
+        let (r1, r2) = (rest(&d1), rest(&d2));
+        let (c1, c2) = (crossings(&k1), crossings(&k2));
+        let (p1, p2) = (peak(&d1), peak(&d2));
+        assert!(st2 <= 0.5 * st1 && r2 <= 0.5 * r1, "settles >= 2x faster: kick {st1:.2} → {st2:.2} s, drag {r1:.2} → {r2:.2} s");
+        assert!(c2 * 3 <= c1, "overshoots less: {c1} → {c2} crossings");
+        assert!(p2 <= 0.6 * p1, "about half the swing: {p1:.0} → {p2:.0} px");
+        // A shake (±150 px at 5 Hz): the feet lag the hand about half as much.
+        let lag = |p: &Params| {
+            let mut c = Chain::new(p, &[], &Chain::rows(p.links_down, 290, false), (500.0, 100.0));
+            let mut m = 0.0f32;
+            for i in 0..72 {
+                let t = i as f32 / 60.0;
+                c.step((500.0 + 150.0 * (t * std::f32::consts::TAU * 5.0).sin(), 100.0), 1.0 / 60.0);
+                m = m.max(c.feet_offset().0.abs());
+            }
+            m
+        };
+        let (l1, l2) = (lag(&full), lag(&half));
+        assert!(l2 <= 0.6 * l1, "a calmer shake: {l1:.0} → {l2:.0} px");
+        eprintln!(
+            "strength 1 → 0.5: drag swing {p1:.0} → {p2:.0} px; at rest after the stop {r1:.2} → {r2:.2} s; kick settle {st1:.2} → {st2:.2} s, \
+             {c1} → {c2} crossings; shake lag {l1:.0} → {l2:.0} px"
+        );
+    }
+
+    #[test]
+    fn strength_zero_is_rigid() {
+        let p = Strength(0.0).params();
+        assert_eq!((p.max_swing_deg, p.max_bend_deg, p.follow), (0.0, 0.0, 1.0));
+        let mut c = Chain::new(&p, &[], &Chain::rows(p.links_down, 290, false), (500.0, 100.0));
+        for i in 0..60 {
+            c.step((500.0 + 8.0 * i as f32, 100.0), 1.0 / 60.0);
+        }
+        assert!(c.feet_offset().0.abs() < 1.0, "the feet stay under the hand: {:?}", c.feet_offset());
+    }
 
     fn chain(p: &Params) -> Chain {
         Chain::new(p, &[], &Chain::rows(p.links_down, 290, false), (500.0, 100.0))
@@ -1042,7 +1194,7 @@ mod tests {
 
     #[test]
     fn squash_settles() {
-        let mut s = squash_spring(1500.0);
+        let mut s = squash_spring(1500.0, Strength(1.0));
         assert!(s.scale().1 < 0.92 && s.scale().0 > 1.0);
         let mut t = 0.0;
         while !s.done() && t < 2.0 {
@@ -1050,7 +1202,8 @@ mod tests {
             t += 1.0 / 60.0;
         }
         assert!((0.3..0.7).contains(&t), "{t}");
-        assert_eq!(squash_spring(f32::NAN).scale().1, 0.95);
-        assert_eq!(squash_spring(1e9).scale().1, 0.78);
+        assert_eq!(squash_spring(f32::NAN, Strength(1.0)).scale().1, 0.95);
+        assert_eq!(squash_spring(1e9, Strength(1.0)).scale().1, 0.78);
+        assert!((squash_spring(1e9, Strength(0.5)).scale().1 - 0.89).abs() < 1e-6, "half the squash at 0.5");
     }
 }

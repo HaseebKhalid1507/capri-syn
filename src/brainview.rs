@@ -76,6 +76,8 @@ pub(super) struct BidSwing {
     pub due: Instant,
     peak: f32,
     side: f32,
+    /// The feet amplitude the pump keeps (logical px, scaled by strength).
+    amp: f32,
 }
 
 /// Feet amplitude she pumps the swing to (logical px), and the tick.
@@ -1362,7 +1364,13 @@ impl Avatar {
     /// The bid swing runs: posed (hanging, clinging), there, not carried (SA_BID_SWING=0: off,
     /// the r7 pose-step sway instead).
     pub(super) fn swing_on(&self) -> bool {
-        self.posed() && self.rag.is_none() && !self.hidden && self.teleport.is_none() && self.loaded && std::env::var("SA_BID_SWING").map_or(true, |v| v != "0")
+        self.posed()
+            && self.rag.is_none()
+            && !self.hidden
+            && self.teleport.is_none()
+            && self.loaded
+            && self.rag_strength.k() > 0.0
+            && std::env::var("SA_BID_SWING").map_or(true, |v| v != "0")
     }
 
     /// Step the bid swing (create it for a new pose frame). True: redraw.
@@ -1376,12 +1384,13 @@ impl Avatar {
         if self.brain.as_ref().and_then(|h| h.swing.as_ref()).is_none_or(|s| s.frame != fi) {
             let Some(f) = self.frame_or_default(fi) else { return false };
             let grip = (self.anchor_px(fi).1 - self.layout.avatar_y).clamp(f.top, f.bottom - 1);
-            let p = crate::ragdoll::Params::default().scaled(sf);
+            let p = self.rag_strength.params().scaled(sf);
+            let amp = SWING_AMP * self.rag_strength.k();
             let mut chain = crate::ragdoll::Chain::new(&p, &[], &crate::ragdoll::Chain::rows(8, (f.bottom - grip).max(8), false), (0.0, 0.0));
             let side = if self.rng.pick(2) == 0 { 1.0 } else { -1.0 };
-            chain.kick((side * SWING_AMP * sf * 4.0, 0.0));
+            chain.kick((side * amp * sf * 4.0, 0.0));
             if let Some(h) = &mut self.brain {
-                h.swing = Some(BidSwing { chain, frame: fi, grip, last: now, due: now + SWING_TICK, peak: 0.0, side });
+                h.swing = Some(BidSwing { chain, frame: fi, grip, last: now, due: now + SWING_TICK, peak: 0.0, side, amp });
             }
             return true;
         }
@@ -1400,8 +1409,9 @@ impl Avatar {
     /// An insist beat or a bid emote: a push on the swing.
     pub(super) fn swing_push(&mut self, px: f32) {
         let sf = self.layout.sf;
+        let k = self.rag_strength.k();
         if let Some(s) = self.brain.as_mut().and_then(|h| h.swing.as_mut()) {
-            s.chain.kick((px * sf * 5.0, 0.0));
+            s.chain.kick((px * k * sf * 5.0, 0.0));
         }
     }
 
@@ -1410,7 +1420,7 @@ impl Avatar {
         let s = self.brain.as_ref()?.swing.as_ref().filter(|s| s.frame == fi)?;
         let bp = ((6.0 * self.layout.sf).round() as i32).max(2);
         if ahead {
-            let mut s2 = BidSwing { chain: s.chain.clone(), frame: s.frame, grip: s.grip, last: s.last, due: s.due, peak: s.peak, side: s.side };
+            let mut s2 = BidSwing { chain: s.chain.clone(), frame: s.frame, grip: s.grip, last: s.last, due: s.due, peak: s.peak, side: s.side, amp: s.amp };
             s2.chain.step((0.0, 0.0), SWING_TICK.as_secs_f32());
             swing_pump(&mut s2, self.layout.sf);
             return Some(s2.chain.bands(bp, f.top, f.bottom, s.grip));
@@ -1726,7 +1736,8 @@ impl Avatar {
     pub(super) fn settings_reload(&mut self, now: Instant) -> String {
         match Settings::load() {
             Ok(s) => {
-                let Some(h) = &mut self.brain else { return "error: no brain".into() };
+                self.rag_strength = crate::ragdoll::Strength(s.ragdoll.strength);
+                let Some(h) = &mut self.brain else { return format!("ok ragdoll.strength={} (no brain)", s.ragdoll.strength) };
                 let mut bs = s.brain.clone();
                 // Keep the pack's zeros.
                 for (a, w) in bs.approaches.iter_mut() {
@@ -1742,7 +1753,7 @@ impl Avatar {
                     self.brain_feed(BrainEvent::Control(if s.brain.enabled { Ctl::On } else { Ctl::Off }), now);
                 }
                 self.brain_run(now, true);
-                format!("ok attention={} fullscreen={:?}", s.brain.attention.key(), s.brain.fullscreen)
+                format!("ok attention={} fullscreen={:?} ragdoll.strength={}", s.brain.attention.key(), s.brain.fullscreen, s.ragdoll.strength)
             }
             Err(e) => format!("error: {e:#} (kept the old settings)"),
         }
@@ -1808,7 +1819,7 @@ fn swing_pump(s: &mut BidSwing, sf: f32) {
     s.peak = s.peak.max(x.abs());
     let now_side = if x > 0.5 { 1.0 } else if x < -0.5 { -1.0 } else { s.side };
     if now_side != s.side {
-        let short = (SWING_AMP * sf - s.peak).max(0.0);
+        let short = (s.amp * sf - s.peak).max(0.0);
         s.chain.kick((now_side * short * 2.6, 0.0));
         s.side = now_side;
         s.peak = 0.0;

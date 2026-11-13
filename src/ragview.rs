@@ -128,7 +128,7 @@ impl Avatar {
     /// The chain for `frame` gripped at `grip` (avatar-local), at rest, its anchor at `anchor`.
     fn rag_chain(&self, frame: usize, grip: (i32, i32), zone: Zone, anchor: (f32, f32)) -> Chain {
         let l = &self.layout;
-        let mut p = Params::default().scaled(l.sf);
+        let mut p = self.rag_strength.params().scaled(l.sf);
         if let Some(n) = std::env::var("SA_RAG_LINKS").ok().and_then(|v| v.parse::<usize>().ok()) {
             p.links_down = n.clamp(1, 16);
         }
@@ -204,7 +204,7 @@ impl Avatar {
         }
         let music_until = self.music.take().map(|m| m.until);
         self.update_notes(now);
-        let rigid = !rag_enabled() || std::env::var("SA_REDUCED_MOTION").is_ok_and(|v| v == "1");
+        let rigid = !rag_enabled() || self.rag_strength.k() <= 0.0 || std::env::var("SA_REDUCED_MOTION").is_ok_and(|v| v == "1");
         let frame = self.anim.frame();
         let mut m = RagMachine::new(self.rag_spec());
         let (top, bottom) = self.frame_or_default(frame).map_or((0, 1), |f| (f.top, f.bottom.max(f.top + 1)));
@@ -492,7 +492,7 @@ impl Avatar {
         let feet = f.pos;
         let v = f.vel;
         // Flight stretch on the dominant axis, smoothed (40 ms).
-        let s = f.stretch();
+        let s = f.stretch(self.rag_strength);
         let want = if v.1.abs() >= v.0.abs() { (1.0, s) } else { (s, 1.0) };
         let k = 1.0 - (-dt / 0.04).exp();
         r.stretch = (r.stretch.0 + (want.0 - r.stretch.0) * k, r.stretch.1 + (want.1 - r.stretch.1) * k);
@@ -534,7 +534,7 @@ impl Avatar {
                     feet_local
                 };
                 let Some(r) = &mut self.rag else { return };
-                r.squash = Some((ragdoll::squash_spring(speed / l.sf), pivot, normal.0 != 0.0));
+                r.squash = Some((ragdoll::squash_spring(speed / l.sf, self.rag_strength), pivot, normal.0 != 0.0));
                 r.chain.kick((-normal.0 * speed * 0.15, -normal.1 * speed * 0.15));
             }
             Contact::Floor { speed } => {
@@ -542,7 +542,7 @@ impl Avatar {
                 r.hard = hard;
                 r.landed = Some("floor");
                 r.flight = None;
-                r.squash = Some((ragdoll::squash_spring(speed / l.sf), feet_local, false));
+                r.squash = Some((ragdoll::squash_spring(speed / l.sf, self.rag_strength), feet_local, false));
                 r.chain.set_gravity(0.0);
                 self.placement = Placement::Ground;
                 self.x11.set_target(0);
@@ -565,7 +565,7 @@ impl Avatar {
                 r.landed = Some("perch");
                 r.flight = None;
                 let seat = l.seat_y.map_or(feet_local, |s| (feet_local.0, (s - l.avatar_y) as f32));
-                r.squash = Some((ragdoll::squash_spring(speed / l.sf), seat, false));
+                r.squash = Some((ragdoll::squash_spring(speed / l.sf, self.rag_strength), seat, false));
                 if let Some(rect) = self.x11.toplevel_rect(win) {
                     let dx = x.round() as i32 - rect.x;
                     let o = self.perch_origin(&rect, true, dx);
