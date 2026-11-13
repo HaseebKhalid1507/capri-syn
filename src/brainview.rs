@@ -1113,12 +1113,12 @@ impl Avatar {
         let u = t - n * half;
         let mut right = (n as i64).rem_euclid(2) == 0;
         let env = (u / 0.3).min((half - u) / 0.3).clamp(0.0, 1.0);
-        let mut leg = 12.0 * sf * env * if right { 1.0 } else { -1.0 };
+        let mut leg = 20.0 * sf * env * if right { 1.0 } else { -1.0 };
         if let Some((t0, dir)) = self.brain.as_ref().and_then(|h| h.leg_kick) {
             let k = now.saturating_duration_since(t0).as_secs_f32() / 0.7;
             if k < 1.0 {
                 right = dir > 0.0;
-                leg = 18.0 * sf * dir * (PI * k).sin();
+                leg = 30.0 * sf * dir * (PI * k).sin();
             }
         }
         let q = |x: f32| ((x / 2.0).round() * 2.0) as i32;
