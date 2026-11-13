@@ -274,6 +274,10 @@ fn passive(w: &World, far: bool, leaving: bool, rng: &mut Rng) -> Result<Spot, V
     let kinds: [(u8, f64); 4] = [(0, 0.40), (1, 0.25), (2, 0.20), (3, 0.15)];
     let last = w.last_kind.map(|k| k.family());
     let mut pool: Vec<(u8, f64)> = kinds.iter().copied().filter(|k| Some(k.0) != last).collect();
+    if leaving {
+        // Off his window to stand on the floor (a sulk or the satisfied beat plays there).
+        pool = vec![(1, 1.0)];
+    }
     let min_move = if leaving { w.d(80.0) } else { w.d(MIN_TELEPORT) };
     let her_win = w.her.win();
     let ok = |s: &Spot| -> Result<(), Block> {
@@ -318,6 +322,9 @@ fn passive(w: &World, far: bool, leaving: bool, rng: &mut Rng) -> Result<Spot, V
             }
         }
         why.push((["edge", "floor", "floor_sit", "float"][kind as usize].to_string(), last_block));
+        if leaving && pool.is_empty() && why.len() == 1 {
+            pool = vec![(0, 0.5), (3, 0.5)];
+        }
     }
     Err(why)
 }

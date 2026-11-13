@@ -15,6 +15,8 @@ use crate::places::{self, Boxes, Spot, SpotKind, World};
 use crate::settings::{Attention, Settings};
 use std::io::Write as _;
 
+/// He is near her: her body within this of the focused window (logical px), same monitor.
+const NEAR_PX: f32 = 250.0;
 /// How often the drives are written to state.json at most (wall clock).
 const SAVE_EVERY: Duration = Duration::from_secs(10);
 
@@ -63,6 +65,8 @@ pub(super) struct BrainHost {
     ov: Overrides,
     flight: Option<InFlight>,
     scoot: Option<Scoot>,
+    /// A move decided while another was still landing: done right after it.
+    next_plan: Option<MovePlan>,
     pub rest: Option<RestPose>,
     last_wins: Vec<u32>,
     last_kind: Option<SpotKind>,
@@ -229,6 +233,7 @@ impl Avatar {
             ov,
             flight: None,
             scoot: None,
+            next_plan: None,
             rest: None,
             last_wins: Vec::new(),
             last_kind: None,
@@ -359,9 +364,11 @@ impl Avatar {
         v
     }
 
+    /// Work areas and monitors, cut to the test arena when there is one (its bottom is her
+    /// floor there, its sides are the walls).
     fn arena_filter(&self, areas: Vec<WinRect>, monitors: Vec<WinRect>) -> (Vec<WinRect>, Vec<WinRect>) {
         match self.brain.as_ref().and_then(|h| h.ov.arena) {
-            Some(a) => areas.into_iter().zip(monitors).filter(|(m, _)| m.intersect(&a).is_some()).unzip(),
+            Some(a) => areas.into_iter().zip(monitors).filter_map(|(w, m)| Some((w.intersect(&a)?, m.intersect(&a)?))).unzip(),
             None => (areas, monitors),
         }
     }
@@ -370,6 +377,8 @@ impl Avatar {
         let Some(h) = &self.brain else { return Senses::default() };
         let b = h.bnow(now);
         let idle_s = match h.ov.idle {
+            // Negative: he is busy at the keyboard (idle stays 0).
+            Some((_, v)) if v < 0.0 => 0.0,
             Some((t0, v)) => v + (b - t0).max(0.0),
             None => self.x11.idle_ms().map_or(0.0, |ms| ms as f64 / 1000.0 * h.scale),
         };
@@ -392,7 +401,7 @@ impl Avatar {
             }
         };
         let near = focused.zip(her_mon).is_some_and(|(f, m)| {
-            let reach = (400.0 * self.layout.sf) as i32;
+            let reach = (NEAR_PX * self.layout.sf) as i32;
             m.intersect(&f).is_some() && f.grow(reach).intersect(&her.body).is_some()
         });
         Senses { now: b, idle_s, fullscreen, fullscreen_here, busy: self.brain_busy(), near, placement: self.placement_kind() }
@@ -528,7 +537,16 @@ impl Avatar {
 
     fn brain_move(&mut self, plan: MovePlan, now: Instant) {
         let t = self.brain.as_ref().map_or(0.0, |h| h.bnow(now) - h.brain.start());
-        if self.teleport.is_some() || self.press.is_some() || self.quitting || self.brain.as_ref().is_some_and(|h| h.scoot.is_some() || h.flight.is_some() || h.fs != FsHide::Shown) {
+        let moving = self.teleport.is_some() || self.brain.as_ref().is_some_and(|h| h.scoot.is_some() || h.flight.is_some());
+        if moving && self.press.is_none() && !self.quitting {
+            // Still landing from the last one: this one goes next (a sulk's far move after
+            // the leave, a summon after a passive hop).
+            if let Some(h) = &mut self.brain {
+                h.next_plan = Some(plan);
+            }
+            return;
+        }
+        if self.press.is_some() || self.quitting || self.brain.as_ref().is_some_and(|h| h.fs != FsHide::Shown) {
             if let Some(h) = &mut self.brain {
                 h.write(serde_json::json!({ "t": t, "k": "fail", "busy": true }));
             }
@@ -783,6 +801,9 @@ impl Avatar {
         self.brain_feed(BrainEvent::Arrived(Arrived { approach: f.approach, arrival: f.arrival, covering }), now);
         for e in queued {
             self.play_emote(e, now);
+        }
+        if let Some(p) = self.brain.as_mut().and_then(|h| h.next_plan.take()) {
+            self.brain_move(p, now);
         }
     }
 

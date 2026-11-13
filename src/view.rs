@@ -3178,7 +3178,10 @@ impl Render for Avatar {
 
         // Status tag above the hair, unless the bubble carries the status or a reaction
         // needs the space.
-        let show_tag = hud && self.frames.iter().any(Option::is_some) && !bubble_open && self.reaction_until.is_none();
+        // Hanging from the bar or clinging to a window side, the tag would sit in the bar or
+        // over his window: it comes back when she lands (a prompt or reply still shows it).
+        let posed_quiet = self.posed() && self.prompt_ui.is_none() && !self.bubble.as_ref().is_some_and(|b| b.collapsed);
+        let show_tag = hud && self.frames.iter().any(Option::is_some) && !bubble_open && self.reaction_until.is_none() && !posed_quiet;
         // In a glitch the tag tears with the body: strips of it, shifted by the same bands.
         let mut tag_strips: Vec<ShapeRect> = Vec::new();
         let torn = show_tag && !collapsed && self.glitch.is_some();

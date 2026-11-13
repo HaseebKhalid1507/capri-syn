@@ -75,7 +75,7 @@ pub enum Sense {
     /// A window id (client or frame), `Some(None)` = nothing focused.
     Focus(Option<Option<u32>>),
     Cursor(Option<(i32, i32)>),
-    /// Seconds since the last input, growing from now.
+    /// Seconds since the last input, growing from now (negative: "active", stays 0).
     Idle(Option<f64>),
     Fullscreen(Option<bool>),
     /// Only this root rect is hers (areas and windows outside are left alone).
@@ -126,6 +126,7 @@ fn parse_brain(rest: &str) -> Result<BrainCmd> {
         ["sense", "cursor", "real"] => BrainCmd::Sense(Sense::Cursor(None)),
         ["sense", "cursor", _, _] => BrainCmd::Sense(Sense::Cursor(Some((num(2)? as i32, num(3)? as i32)))),
         ["sense", "idle", "real"] => BrainCmd::Sense(Sense::Idle(None)),
+        ["sense", "idle", "active"] => BrainCmd::Sense(Sense::Idle(Some(-1.0))),
         ["sense", "idle", _] => BrainCmd::Sense(Sense::Idle(Some(num(2)?.max(0.0)))),
         ["sense", "fullscreen", "real"] => BrainCmd::Sense(Sense::Fullscreen(None)),
         ["sense", "fullscreen", "on"] => BrainCmd::Sense(Sense::Fullscreen(Some(true))),
@@ -139,7 +140,7 @@ fn parse_brain(rest: &str) -> Result<BrainCmd> {
             BrainCmd::Sense(Sense::Windows(Some(ids.iter().map(|i| win_id(i)).collect::<Result<_>>()?)))
         }
         _ => bail!(
-            "usage: brain on|off|state|dnd [MIN|off]|scale K|seed N|force roam|seek|summon|sulk|nap|event prompt [ID]|done|error|abort|cleared|sense real|focus ID|none|real|cursor X Y|real|idle S|real|fullscreen on|off|real|arena X Y W H|off|windows ID..|any"
+            "usage: brain on|off|state|dnd [MIN|off]|scale K|seed N|force roam|seek|summon|sulk|nap|event prompt [ID]|done|error|abort|cleared|sense real|focus ID|none|real|cursor X Y|real|idle S|active|real|fullscreen on|off|real|arena X Y W H|off|windows ID..|any"
         ),
     })
 }
