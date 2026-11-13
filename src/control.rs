@@ -75,13 +75,32 @@ fn parse_drag(rest: &str) -> Result<Vec<crate::drag::DragOp>> {
         Ok((a, b))
     };
     let ipair = |s: &str| pair(s).map(|(a, b)| (a.round() as i32, b.round() as i32));
+    let target = |s: &str| -> Result<crate::drag::Target> {
+        use crate::drag::{Target, Zone};
+        Ok(match s {
+            "head" => Target::Zone(Zone::Head),
+            "torso" => Target::Zone(Zone::Torso),
+            "legs" => Target::Zone(Zone::Legs),
+            _ => {
+                let (x, y) = ipair(s)?;
+                Target::At(x, y)
+            }
+        })
+    };
     let mut ops = Vec::new();
     let mut i = 0;
     while i < w.len() {
         match w[i] {
             "grab" => {
-                ops.push(DragOp::Grab(ipair(w.get(i + 1).context("grab X,Y")?)?.0, ipair(w[i + 1])?.1));
+                ops.push(DragOp::Grab(target(w.get(i + 1).context("grab X,Y|head|torso|legs")?)?));
                 i += 2;
+            }
+            "wiggle" => {
+                let amp = pair(w.get(i + 1).context("wiggle AX,AY HZ MS")?)?;
+                let hz: f32 = w.get(i + 2).context("wiggle HZ")?.parse()?;
+                let ms: u32 = w.get(i + 3).context("wiggle MS")?.parse()?;
+                ops.push(DragOp::Wiggle { amp, hz, ms });
+                i += 4;
             }
             "path" => {
                 let mut keys = Vec::new();
@@ -112,7 +131,7 @@ fn parse_drag(rest: &str) -> Result<Vec<crate::drag::DragOp>> {
                 i += 1;
             }
             "fling" => {
-                let at = ipair(w.get(i + 1).context("fling X,Y VX,VY [LEAD_MS]")?)?;
+                let at = target(w.get(i + 1).context("fling X,Y VX,VY [LEAD_MS]")?)?;
                 let v = pair(w.get(i + 2).context("fling X,Y VX,VY [LEAD_MS]")?)?;
                 i += 3;
                 let lead_ms = match w.get(i).and_then(|v| v.parse::<u32>().ok()) {
@@ -125,7 +144,7 @@ fn parse_drag(rest: &str) -> Result<Vec<crate::drag::DragOp>> {
                 ops.push(DragOp::Fling { at, v, lead_ms });
             }
             "shake" => {
-                let at = ipair(w.get(i + 1).context("shake X,Y AX,AY HZ MS [release]")?)?;
+                let at = target(w.get(i + 1).context("shake X,Y AX,AY HZ MS [release]")?)?;
                 let amp = pair(w.get(i + 2).context("shake X,Y AX,AY HZ MS")?)?;
                 let hz: f32 = w.get(i + 3).context("shake HZ")?.parse()?;
                 let ms: u32 = w.get(i + 4).context("shake MS")?.parse()?;
@@ -140,7 +159,7 @@ fn parse_drag(rest: &str) -> Result<Vec<crate::drag::DragOp>> {
                 ops.push(DragOp::Seed(w.get(i + 1).context("seed N")?.parse().context("seed: a number")?));
                 i += 2;
             }
-            other => bail!("drag: unexpected `{other}` (grab|path|release|cancel|fling|shake|seed)"),
+            other => bail!("drag: unexpected `{other}` (grab|path|wiggle|release|cancel|fling|shake|seed)"),
         }
     }
     if ops.is_empty() {
@@ -392,21 +411,23 @@ mod tests {
 
     #[test]
     fn drag_commands_parse() {
-        use crate::drag::DragOp;
+        use crate::drag::{DragOp, Target, Zone};
         let p = |s: &str| match Command::parse(s).unwrap() {
             Command::Drag(v) => v,
             c => panic!("{c:?}"),
         };
         assert_eq!(
             p("drag grab 270,330 path 0:0,0 400:0,-140 smooth release"),
-            vec![DragOp::Grab(270, 330), DragOp::Path(vec![(0, 0, 0), (400, 0, -140)], true), DragOp::Release]
+            vec![DragOp::Grab(Target::At(270, 330)), DragOp::Path(vec![(0, 0, 0), (400, 0, -140)], true), DragOp::Release]
         );
-        assert_eq!(p("drag fling 270,330 2600,-1400"), vec![DragOp::Fling { at: (270, 330), v: (2600.0, -1400.0), lead_ms: 120 }]);
+        assert_eq!(p("drag fling torso 2600,-1400"), vec![DragOp::Fling { at: Target::Zone(Zone::Torso), v: (2600.0, -1400.0), lead_ms: 120 }]);
         assert_eq!(
             p("drag shake 270,330 150,0 5 1200 release"),
-            vec![DragOp::Shake { at: (270, 330), amp: (150.0, 0.0), hz: 5.0, ms: 1200, release: true }]
+            vec![DragOp::Shake { at: Target::At(270, 330), amp: (150.0, 0.0), hz: 5.0, ms: 1200, release: true }]
         );
         assert_eq!(p("drag seed 7 cancel"), vec![DragOp::Seed(7), DragOp::Cancel]);
+        assert_eq!(p("drag grab legs release"), vec![DragOp::Grab(Target::Zone(Zone::Legs)), DragOp::Release]);
+        assert_eq!(p("drag grab head wiggle 150,0 5 1200"), vec![DragOp::Grab(Target::Zone(Zone::Head)), DragOp::Wiggle { amp: (150.0, 0.0), hz: 5.0, ms: 1200 }]);
         assert!(Command::parse("drag grab").is_err());
         assert!(Command::parse("drag path").is_err());
         assert!(Command::parse("drag wiggle").is_err());

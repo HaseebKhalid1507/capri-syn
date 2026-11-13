@@ -6,7 +6,7 @@
 //! file feeds it and turns its state into a `BodyPlan` one frame ahead (`cur`/`next`, §4).
 
 use super::*;
-use crate::drag::{DragOp, LandKind, Phase, RagEvent, RagInput, RagMachine, RagSpec, Script, Zone};
+use crate::drag::{DragOp, LandKind, Phase, RagEvent, RagInput, RagMachine, RagSpec, Script, Target, Zone};
 use crate::ragdoll::{self, Arena, BodyExtents, Chain, Contact, Flight, Params, Pointer, SquashAnim};
 
 /// Permanent room under the feet for the chain's stretch (logical px, §4).
@@ -640,9 +640,11 @@ impl Avatar {
     pub(super) fn rag_cancel(&mut self, now: Instant) {
         let Some(r) = self.rag.take() else { return };
         if r.landed.is_none() && !r.rigid {
-            let o = self.origin;
+            // In the air: on the floor below (no mid-air parking).
+            let o = (self.origin.0, self.origin.1 + 100_000);
             self.move_to(o, true);
             self.placement = Placement::Ground;
+            self.home = self.ground();
         }
         self.rag_restore_with(r, now, true);
         self.relayer(now);
@@ -755,11 +757,15 @@ impl Avatar {
             n += 1;
             match op {
                 DragOp::Seed(s) => self.rng = Rng::new(s),
-                DragOp::Grab(x, y) => {
-                    if let Err(e) = self.drag_grab_at((x, y), Script::default(), now) {
+                DragOp::Grab(at) => {
+                    if let Err(e) = self.drag_grab_at(at, Script::default(), now) {
                         return e;
                     }
                 }
+                DragOp::Wiggle { amp, hz, ms } => match self.rag.as_mut().map(|r| &mut r.feed) {
+                    Some(Feed::Script { s, .. }) => s.wiggle(amp, hz, ms),
+                    _ => return "error: not held (drag grab first)".into(),
+                },
                 DragOp::Fling { at, v, lead_ms } => {
                     let s = Script::fling(v, lead_ms as f32 / 1000.0);
                     if let Err(e) = self.drag_grab_at(at, s, now) {
@@ -793,7 +799,26 @@ impl Avatar {
         format!("ok drag {n} ends_at={}", (ends * 1000.0).round() as i64)
     }
 
-    fn drag_grab_at(&mut self, w: (i32, i32), s: Script, now: Instant) -> Result<(), String> {
+    /// Window-local device px of an opaque pixel in the middle of a grip zone, nearest the
+    /// head's column.
+    fn zone_point(&self, z: Zone) -> Option<(i32, i32)> {
+        let f = self.frame_or_default(self.shown_frame())?;
+        let spec = self.rag_spec();
+        let u = match z {
+            Zone::Head => spec.zones.0 * 0.5,
+            Zone::Torso => (spec.zones.0 + spec.zones.1) * 0.5,
+            Zone::Legs => (spec.zones.1 + 1.0) * 0.5,
+        };
+        let y = f.top + ((f.bottom - f.top) as f32 * u) as i32;
+        let x = (0..f.mask.w as i32).filter(|&x| f.mask.get(x, y)).min_by_key(|&x| (x - f.head_x).abs())?;
+        Some((x + self.layout.avatar_x, y + self.layout.avatar_y))
+    }
+
+    fn drag_grab_at(&mut self, at: Target, s: Script, now: Instant) -> Result<(), String> {
+        let w = match at {
+            Target::At(x, y) => (x, y),
+            Target::Zone(z) => self.zone_point(z).ok_or_else(|| "error: miss".to_string())?,
+        };
         if !self.loaded || self.hidden || self.quitting || self.teleport.as_ref().is_some_and(|t| matches!(t.leg, Leg::Bolt(_))) {
             return Err("error: not there".into());
         }

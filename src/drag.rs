@@ -87,13 +87,23 @@ impl RagSpec {
 /// for grab points; ms since the grab and root px offsets from the grab point for paths.
 #[derive(Clone, Debug, PartialEq)]
 pub enum DragOp {
-    Grab(i32, i32),
+    Grab(Target),
     Path(Vec<(u32, i32, i32)>, bool),
     Release,
     Cancel,
-    Fling { at: (i32, i32), v: (f32, f32), lead_ms: u32 },
-    Shake { at: (i32, i32), amp: (f32, f32), hz: f32, ms: u32, release: bool },
+    Fling { at: Target, v: (f32, f32), lead_ms: u32 },
+    Shake { at: Target, amp: (f32, f32), hz: f32, ms: u32, release: bool },
+    /// While held: a shake from where the path ends now.
+    Wiggle { amp: (f32, f32), hz: f32, ms: u32 },
     Seed(u64),
+}
+
+/// Where a scripted grab lands: window-local device px, or the middle of a grip zone (an
+/// opaque pixel nearest the head's column).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Target {
+    At(i32, i32),
+    Zone(Zone),
 }
 
 /// A scripted pointer: keyframes (seconds since the grab, root offset), linear or Catmull-Rom,
@@ -136,6 +146,16 @@ impl Script {
     pub fn shake(amp: (f32, f32), hz: f32, ms: u32, release: bool) -> Script {
         let dur = ms as f32 / 1000.0;
         Script { keys: vec![(0.0, 0.0, 0.0)], smooth: false, shake: Some((amp.0, amp.1, hz.max(0.1), 0.0, dur)), release_at: release.then_some(dur) }
+    }
+
+    /// A shake from the end of the path so far (held there meanwhile).
+    pub fn wiggle(&mut self, amp: (f32, f32), hz: f32, ms: u32) {
+        let t0 = self.keys.last().map_or(0.0, |k| k.0);
+        let dur = ms as f32 / 1000.0;
+        if let Some(&(_, x, y)) = self.keys.last() {
+            self.keys.push((t0 + dur, x, y));
+        }
+        self.shake = Some((amp.0, amp.1, hz.max(0.1), t0, dur));
     }
 
     /// When the scripted motion is over (s since the grab).
