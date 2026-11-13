@@ -53,6 +53,42 @@ def xroot():
     return xdisp().screen().root
 
 
+def foreign_on_stage(dd, root, st):
+    """True if a mapped top-level window owned by an avatar process that isn't ours (comm
+    != synaps-avatar, e.g. his `capri-bin`) intersects the stage. Read-only."""
+    pid_atom = dd.intern_atom("_NET_WM_PID")
+    sx, sy, sw, sh = st
+    for c in root.query_tree().children:
+        a = c.get_attributes()
+        if a.map_state != 2:
+            continue
+        pids = []
+        for w in [c] + list(c.query_tree().children):
+            p = w.get_full_property(pid_atom, 0)
+            if p and p.value:
+                pids.append(int(p.value[0]))
+        if not any(_foreign_avatar(p) for p in pids):
+            continue
+        g = c.get_geometry()
+        if g.x < sx + sw and g.x + g.width > sx and g.y < sy + sh and g.y + g.height > sy:
+            return True
+    return False
+
+
+_comm_cache = {}
+
+
+def _foreign_avatar(pid):
+    if pid not in _comm_cache:
+        try:
+            comm = open(f"/proc/{pid}/comm").read().strip()
+            exe = os.path.basename(os.readlink(f"/proc/{pid}/exe"))
+        except OSError:
+            comm, exe = "", ""
+        _comm_cache[pid] = comm != "synaps-avatar" and ("capri" in comm or "capri" in exe or "synaps-avatar" in exe)
+    return _comm_cache[pid]
+
+
 def ctl(line, timeout=5):
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.settimeout(timeout)
@@ -371,7 +407,7 @@ def main():
         time.sleep(0.4)
         print(f"rec-start {out}")
     # The user's pointer over the stage while we record: the clip may show (or get) his input.
-    watch = {"in_stage": 0, "active": 0, "stop": False, "hidden": 0, "armed": False}
+    watch = {"in_stage": 0, "active": 0, "stop": False, "hidden": 0, "armed": False, "foreign": 0}
     if stage:
         import threading
         def watch_pointer():
@@ -379,7 +415,17 @@ def main():
             dd = _d.Display()
             r_ = dd.screen().root
             sx_, sy_, sw_, sh_ = stage[:4]
+            n_ = 0
             while not watch["stop"]:
+                # His own Capri (any avatar process that isn't ours) on the stage: the clip
+                # shows her. Read-only: geometry and _NET_WM_PID, never touched.
+                n_ += 1
+                if n_ % 5 == 1:
+                    try:
+                        if foreign_on_stage(dd, r_, (sx_, sy_, sw_, sh_)):
+                            watch["foreign"] += 1
+                    except Exception:
+                        pass
                 q_ = r_.query_pointer()
                 if sx_ <= q_.root_x < sx_ + sw_ and sy_ <= q_.root_y < sy_ + sh_:
                     watch["in_stage"] += 1
@@ -658,8 +704,9 @@ def main():
                       f"({(c1 - c0) / 1e6:.0f} ms); RSS now {rss()} MB, peak {peak} MB; threads {len(os.listdir(f'/proc/{pid}/task'))}; "
                       f"load {open('/proc/loadavg').read().split()[0]}")
             elif kind == "killtunnel":
-                r = subprocess.run(["pkill", "-f", "ssh -N .*synaps-localhost-capri.sock"], capture_output=True)
-                print(f"killtunnel: {'killed' if r.returncode == 0 else 'no tunnel'}")
+                # Disabled: his own Capri may ride that tunnel. Tests never kill anything but
+                # their own `synaps-avatar`.
+                print("killtunnel: disabled (never kill a process we didn't start)")
             elif kind == "tunnel":
                 r = subprocess.run(["pgrep", "-af", "ssh -N .*synaps-localhost-capri.sock"], capture_output=True, text=True)
                 print(f"tunnel: {len(r.stdout.splitlines())} ssh; socket {'up' if os.path.exists(os.environ.get('XDG_RUNTIME_DIR', '/tmp') + '/synaps-localhost-capri.sock') else 'gone'}")
@@ -738,10 +785,10 @@ def main():
             except Exception:
                 gone.append(n_)
         if stage:
-            bad = watch["in_stage"] > 0 or gone or watch["hidden"] > 0
+            bad = watch["in_stage"] > 0 or gone or watch["hidden"] > 0 or watch["foreign"] > 0
             print(f"shoot: {'TAINT' if bad else 'clean'}: user pointer over the stage {watch['in_stage']} samples, "
                   f"user input {watch['active']} samples (5 Hz), test windows hidden/under the stage {watch['hidden']} samples, "
-                  f"unmapped at the end {gone or 'none'}")
+                  f"his avatar on the stage {watch['foreign']} samples (1 Hz), unmapped at the end {gone or 'none'}")
         for w_ in pwins:
             if w_ is not None:
                 w_.destroy()
