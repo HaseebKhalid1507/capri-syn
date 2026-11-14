@@ -32,6 +32,8 @@ const MARK_R: f32 = 19.0;
 /// How long a summon's NEEDS YOU pulses after she lands, and its half period.
 const PULSE_FOR: Duration = Duration::from_millis(6_000);
 const PULSE_HALF_MS: u128 = 450;
+/// The settled summon's border breath.
+const GLOW_S: f32 = 1.8;
 
 /// The bid marker: up from the first bid emote to the end of the bid.
 #[derive(Clone, Copy)]
@@ -168,6 +170,10 @@ pub(super) struct BrainHost {
     /// A summon landed: NEEDS YOU pulses from here.
     pulse: Option<Instant>,
     pulse_last: bool,
+    /// A summon landed: once the blink is over, the bubble's border glows warm while the
+    /// prompt waits (from this time), and the last glow level drawn.
+    glow: Option<Instant>,
+    glow_last: Option<u8>,
     /// Sitting low after a sulk (the floor sit uses the sulk loop).
     sulk_sit: bool,
 }
@@ -355,6 +361,8 @@ impl Avatar {
             marker_shown: None,
             pulse: None,
             pulse_last: false,
+            glow: None,
+            glow_last: None,
             sulk_sit: false,
         });
         if let Some(h) = &mut self.brain {
@@ -645,6 +653,7 @@ impl Avatar {
             take(h.saved_at.map(|s| s + SAVE_EVERY));
         }
         take(self.marker_next_change(now));
+        take(self.glow_next_change(now));
         if let Some(p) = h.pulse {
             let d = now.saturating_duration_since(p);
             if d < PULSE_FOR + Duration::from_millis(PULSE_HALF_MS as u64) {
@@ -659,11 +668,20 @@ impl Avatar {
     /// True if the view must redraw.
     pub(super) fn brain_tick(&mut self, now: Instant) -> bool {
         let pulse = self.summon_pulse_on(now);
+        let glow = self.summon_glow(now);
+        let waiting = self.prompt_ui.as_ref().is_some_and(|p| !p.dismissed);
         let Some(h) = &mut self.brain else { return false };
         let mut dirty = false;
         if pulse != h.pulse_last {
             h.pulse_last = pulse;
             dirty = true;
+        }
+        if glow != h.glow_last {
+            h.glow_last = glow;
+            dirty = true;
+        }
+        if !waiting && h.glow.is_some_and(|g| now.saturating_duration_since(g) > Duration::from_secs(1)) {
+            h.glow = None;
         }
         if h.pulse.is_some_and(|p| now.saturating_duration_since(p) > PULSE_FOR + Duration::from_secs(1)) {
             h.pulse = None;
@@ -1161,7 +1179,34 @@ impl Avatar {
         }
         if let Some(h) = &mut self.brain {
             h.pulse = Some(now);
+            h.glow = Some(now);
         }
+    }
+
+    /// The settled summon's warm border: 0..=6 on a slow ~1.8 s breath, once the landing
+    /// blink is over, while the prompt waits.
+    pub(super) fn summon_glow(&self, now: Instant) -> Option<u8> {
+        let t0 = self.brain.as_ref()?.glow?;
+        if !self.prompt_ui.as_ref().is_some_and(|p| !p.dismissed) {
+            return None;
+        }
+        let d = now.saturating_duration_since(t0);
+        if d < PULSE_FOR {
+            return None;
+        }
+        let ph = ((d - PULSE_FOR).as_secs_f32() / GLOW_S).fract();
+        Some((6.0 * (0.5 - 0.5 * (std::f32::consts::TAU * ph).cos())).round() as u8)
+    }
+
+    fn glow_next_change(&self, now: Instant) -> Option<Instant> {
+        let t0 = self.brain.as_ref()?.glow?;
+        let cur = self.summon_glow(now);
+        if cur.is_none() {
+            let start = t0 + PULSE_FOR;
+            return (start > now && self.prompt_ui.as_ref().is_some_and(|p| !p.dismissed)).then_some(start);
+        }
+        let step = Duration::from_millis(50);
+        (1..=40).map(|k| now + step * k).find(|&t| self.summon_glow(t) != cur)
     }
 
     /// NEEDS YOU inverted (the pulse's "on" half) at `now`.
@@ -1532,8 +1577,26 @@ impl Avatar {
             let side = |a: f32| if a > 0.0 { c1 + gap + r } else { c0 - gap - r };
             let area = self.brain.as_ref().and_then(|h| h.marker).and_then(|m| m.area);
             let fits = |x: f32| area.is_none_or(|a| x - r >= a.x as f32 && x + r <= a.right() as f32);
-            let away = if fits(side(away)) || !fits(side(-away)) { away } else { -away };
-            let mut c = (side(away), head.1 - 6.0 * sf + bob as f32);
+            // Off his window, always: if the away side has no room at head height, slide down
+            // her away side (inside the work area) to the first rows clear of her outline.
+            let mut c = if fits(side(away)) {
+                (side(away), head.1 - 6.0 * sf + bob as f32)
+            } else if let Some(a) = area {
+                let x = if away > 0.0 { a.right() as f32 - r } else { a.x as f32 + r };
+                let (lx0, lx1) = ((x - r - gap - base.0) as i32, (x + r + gap - base.0) as i32);
+                let clear = |cy: f32| {
+                    let (ly0, ly1) = ((cy - r - gap - base.1) as i32, (cy + r + gap - base.1) as i32);
+                    !f.rects.iter().any(|&(rx, ry, rw, rh)| {
+                        let (rx, ry) = (rx as i32, ry as i32);
+                        rx < lx1 && rx + rw as i32 > lx0 && ry < ly1 && ry + rh as i32 > ly0
+                    })
+                };
+                let y0 = head.1 - 6.0 * sf;
+                let y = (0..40).map(|k| y0 + k as f32 * 6.0 * sf).find(|&y| clear(y)).unwrap_or(y0);
+                (x, y + bob as f32)
+            } else {
+                (side(away), head.1 - 6.0 * sf + bob as f32)
+            };
             if let Some(a) = area {
                 c.0 = c.0.clamp(a.x as f32 + r, (a.right() as f32 - r).max(a.x as f32 + r));
                 c.1 = c.1.clamp(a.y as f32 + r, (a.bottom() as f32 - r).max(a.y as f32 + r));

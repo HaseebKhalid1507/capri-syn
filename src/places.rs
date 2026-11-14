@@ -505,6 +505,8 @@ fn hang_spots(w: &World, f: &WinRect, upside_down: bool) -> Vec<Spot> {
 
 fn cling_spots(w: &World, f: &WinRect) -> Vec<Spot> {
     let (right, _) = far_corner(f, w.cursor);
+    // The hand hooks round the frame's outer edge: fingertips a little past it.
+    let hook = (3.0 * w.sf).round() as i32;
     let x = if right { f.right() } else { f.x };
     let mut out = Vec::new();
     // Outside the far edge first, holding it (the left edge on her right: pose-dock-right),
@@ -512,6 +514,9 @@ fn cling_spots(w: &World, f: &WinRect) -> Vec<Spot> {
     let outside = if right { w.boxes.cling_l.map(|r| (r, true)) } else { w.boxes.cling_r.map(|r| (r, false)) };
     let inside = if right { w.boxes.cling_r.map(|r| (r, false)) } else { w.boxes.cling_l.map(|r| (r, true)) };
     for (rel, left) in outside.into_iter().chain(inside) {
+        // Outside the edge (holding it from her side), the hand reaches over it by `hook`.
+        let out_side = left == right;
+        let x = if out_side { x + if right { -hook } else { hook } } else { x };
         for k in [0.12, 0.2, 0.3] {
             out.push(w.spot(SpotKind::Cling { left }, (x, f.y + (f.h as f32 * k) as i32), rel, Some(Approach::Cling)));
         }
