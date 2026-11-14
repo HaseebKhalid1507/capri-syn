@@ -761,11 +761,9 @@ pub const BOLT_ARRIVE: f32 = 0.4;
 pub const BOLT_LAND: f32 = 0.5;
 /// …and the trail drains into her for a few more frames (no empty frame in between).
 pub const BOLT_END: f32 = 0.66;
-/// The travelling line: one flat layer in the bar's bolt red.
+/// The travelling line: one flat layer in the bar's bolt red. Plain red only (LOCKED #1:
+/// no glow, no core, no outline, no colour split; legibility may change length/thickness).
 pub const BOLT_LINE: u32 = 0xff1738;
-/// The bolt's light core and dark edge.
-pub const BOLT_CORE: u32 = 0xffe1e8;
-pub const BOLT_EDGE: u32 = 0x3a0012;
 
 #[derive(Clone, Copy, Debug)]
 struct RoutePt {
@@ -867,12 +865,6 @@ impl Bolt {
     /// The bolt at time `u` as one polygon, root px (empty before/after the strike):
     /// thickest just behind the tip, tapering to the trail.
     pub fn frame(&self, u: f32) -> Vec<(f32, f32)> {
-        self.frame_k(u, 1.0, 0.0)
-    }
-
-    /// The same strike `k` times as thick plus `pad` px: a light core (k < 1) or a dark
-    /// outline (k = 1, pad > 0) that makes the line read as a streak, not a stray mark.
-    pub fn frame_k(&self, u: f32, k: f32, pad: f32) -> Vec<(f32, f32)> {
         let (head, tail) = Bolt::span(u);
         if head <= tail + 0.004 {
             return Vec::new();
@@ -891,7 +883,7 @@ impl Bolt {
         let widths: Vec<f32> = seg
             .iter()
             .enumerate()
-            .map(|(i, p)| if i == 0 || i == n - 1 { 0.6 + pad * 0.5 } else { radius * k * (0.45 + 0.6 * (p.2 - tail) / travelled) + pad })
+            .map(|(i, p)| if i == 0 || i == n - 1 { 0.6 } else { radius * (0.45 + 0.6 * (p.2 - tail) / travelled) })
             .collect();
         ribbon(&seg.iter().map(|p| (p.0, p.1)).collect::<Vec<_>>(), &widths)
     }

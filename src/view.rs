@@ -251,10 +251,8 @@ impl Bubble {
 
 const TYPE_TICK: Duration = Duration::from_millis(35);
 const HEARTS_MS: u64 = 1_150;
-/// Effect layers of the teleport bolt: the red line, its light core and its dark edge.
+/// The effect layer of the teleport bolt: one plain red line (LOCKED #1).
 const BOLT_LAYER: usize = 0;
-const BOLT_CORE_LAYER: usize = 1;
-const BOLT_EDGE_LAYER: usize = 2;
 /// The bubble and tag come back this long after a loud teleport has reformed her.
 const HUD_AFTER_TELEPORT: Duration = Duration::from_millis(200);
 /// First effect layer of the hearts: a rim and a fill per heart.
@@ -1077,9 +1075,7 @@ impl Avatar {
     }
 
     fn fx_hide_bolt(&self) {
-        self.x11.fx_unmap(BOLT_CORE_LAYER);
         self.x11.fx_unmap(BOLT_LAYER);
-        self.x11.fx_unmap(BOLT_EDGE_LAYER);
         self.x11.flush();
     }
 
@@ -1466,25 +1462,10 @@ impl Avatar {
         if let Some(b) = &tp.bolt {
             let (bx, by, bw, bh) = b.bbox();
             let o = (bx, by);
-            // A light core over the red line and a dark edge under it: a streak, legible on
-            // light and dark windows alike.
-            let sf = self.layout.sf;
-            if tp.quiet {
-                // A passive move: one thin short shard (r7 critics: the zig-zag was the
-                // loudest frame), a dark hairline under it.
-                let line = fx::bolt_rects(&b.streak(u, 90.0 * sf, 5.0 * sf), o);
-                let edge = fx::bolt_rects(&b.streak(u, 94.0 * sf, 8.0 * sf), o);
-                self.x11.fx_unmap(BOLT_CORE_LAYER);
-                self.x11.fx_set(BOLT_LAYER, fx::BOLT_LINE, o, (bw, bh), &line).ok();
-                self.x11.fx_set_below(BOLT_EDGE_LAYER, BOLT_LAYER, fx::BOLT_EDGE, o, (bw, bh), &edge).ok();
-            } else {
-                let core = fx::bolt_rects(&b.frame_k(u, 0.38, 0.0), o);
-                let line = fx::bolt_rects(&b.frame(u), o);
-                let edge = fx::bolt_rects(&b.frame_k(u, 1.0, 1.5 * sf), o);
-                self.x11.fx_set(BOLT_CORE_LAYER, fx::BOLT_CORE, o, (bw, bh), &core).ok();
-                self.x11.fx_set_below(BOLT_LAYER, BOLT_CORE_LAYER, fx::BOLT_LINE, o, (bw, bh), &line).ok();
-                self.x11.fx_set_below(BOLT_EDGE_LAYER, BOLT_LAYER, fx::BOLT_EDGE, o, (bw, bh), &edge).ok();
-            }
+            // One plain red layer, nothing else (LOCKED #1). A passive move draws a short
+            // thin shard instead of the full strike (r7: the zig-zag was the loudest frame).
+            let poly = if tp.quiet { b.streak(u, 90.0 * self.layout.sf, 6.0 * self.layout.sf) } else { b.frame(u) };
+            self.x11.fx_set(BOLT_LAYER, fx::BOLT_LINE, o, (bw, bh), &fx::bolt_rects(&poly, o)).ok();
             self.x11.flush();
         }
         if u >= fx::BOLT_ARRIVE && !moved {
