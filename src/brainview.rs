@@ -466,6 +466,9 @@ impl Avatar {
         if self.input.is_some() {
             v.push("field");
         }
+        if self.line.is_some() {
+            v.push("line");
+        }
         if self.prompt_ui.as_ref().is_some_and(|p| !p.dismissed) {
             v.push("prompt");
         }

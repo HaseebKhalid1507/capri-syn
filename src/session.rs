@@ -149,6 +149,8 @@ pub struct Body {
     /// The user's line of the running turn.
     pub echo: Option<String>,
     pub prompt: Option<PromptView>,
+    /// Every pending prompt, oldest first (`prompt` is the first), whole text.
+    pub prompts: Vec<PromptView>,
     /// Attached and connected: input can go out.
     pub live: bool,
 }
@@ -469,6 +471,11 @@ impl Link {
         let msg = format!("refusing to attach to `{what}`: that is the `{GUARDED}` session (pinned, the memory keeper)");
         self.retry_at = None;
         vec![Act::Fatal(msg)]
+    }
+
+    /// Everything said in the session as the client holds it (the Line's thread).
+    pub fn transcript(&self) -> &Transcript {
+        &self.transcript
     }
 
     pub fn busy(&self) -> bool {
@@ -940,12 +947,13 @@ impl Link {
             }
             reply.push_str(n);
         }
-        let prompt = self.prompts.first().map(|p| PromptView {
-            id: p.id,
-            title: one_line(&p.title, 60),
-            text: one_line(&p.prompt, 400),
-            secret: p.kind.as_str() != Some("confirm"),
-        });
+        // Whole: a security decision is made on the full text (the bubble cuts its own copy).
+        let prompts: Vec<PromptView> = self
+            .prompts
+            .iter()
+            .map(|p| PromptView { id: p.id, title: p.title.trim().to_string(), text: p.prompt.trim_end().to_string(), secret: p.kind.as_str() != Some("confirm") })
+            .collect();
+        let prompt = prompts.first().cloned();
         Body {
             mood,
             label,
@@ -955,6 +963,7 @@ impl Link {
             busy: self.busy,
             echo: self.echo.clone().filter(|_| self.busy),
             prompt,
+            prompts,
             live: self.live(),
         }
     }
@@ -965,6 +974,19 @@ fn tool_label(name: &str) -> String {
     let n = name.rsplit("__").next().unwrap_or(name);
     let n: String = n.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':')).collect();
     if n.chars().count() > TOOL_MAX { format!("{}…", n.chars().take(TOOL_MAX - 1).collect::<String>()) } else { n }
+}
+
+/// Who woke a turn, from its user text: `[comms] #12 ask from spike: …` is another session
+/// (Some(("SPIKE", "ask", text))); anything else is him (None).
+pub fn origin(user_text: &str) -> Option<(String, String, String)> {
+    let rest = user_text.trim_start().strip_prefix("[comms]")?.trim_start();
+    let rest = rest.strip_prefix('#')?;
+    let (_, rest) = rest.split_once(' ')?;
+    let (kind, rest) = rest.trim_start().split_once(' ')?;
+    let rest = rest.trim_start().strip_prefix("from ")?;
+    let (who, text) = rest.split_once(':')?;
+    let who = who.trim();
+    (!who.is_empty() && !who.contains(char::is_whitespace)).then(|| (who.to_uppercase(), kind.to_string(), text.trim().to_string()))
 }
 
 /// Whitespace collapsed to single spaces, at most `max` chars (with an ellipsis).

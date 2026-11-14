@@ -7,6 +7,8 @@
 mod brainview;
 #[path = "ragview.rs"]
 mod ragview;
+#[path = "lineview.rs"]
+mod lineview;
 
 use crate::anim::{Animator, Mood, Rng, Seq};
 use crate::control::Command;
@@ -511,6 +513,21 @@ pub struct Avatar {
     buttons: Buttons,
     /// The READER window (a long reply), its X id, and who had the keyboard before it.
     reader: Option<(WindowHandle<crate::reader::Reader>, u32, Option<u32>)>,
+    /// The LINE (the conversation window), when open.
+    line: Option<lineview::LineWin>,
+    /// The summon key went down then (`talk press`): a tap or a hold at release.
+    talk_down: Option<Instant>,
+    /// What he sent this run, oldest first (the Line's ↑).
+    sent: Vec<String>,
+    /// A missed reply (or a refused message): one line on her tag until he acknowledges it.
+    unread: Option<lineview::Unread>,
+    /// The last turn he has seen, and the turn the strip is about.
+    seen_turn: u64,
+    unread_turn: u64,
+    /// A refused message to hand back to the open Line.
+    line_restore_text: Option<String>,
+    /// How long the last Line took to open (ms).
+    line_opened_ms: Option<u128>,
     /// The perch window unmapped; she falls if it isn't back within the grace.
     perch_gone: Option<edges::PerchGone>,
     /// The player stopped: the headphones come off at this time (MUSIC_GRACE).
@@ -682,6 +699,14 @@ impl Avatar {
             _subs: vec![activation],
             buttons: Rc::default(),
             reader: None,
+            line: None,
+            talk_down: None,
+            sent: Vec::new(),
+            unread: None,
+            seen_turn: 0,
+            unread_turn: 0,
+            line_restore_text: None,
+            line_opened_ms: None,
             perch_gone: None,
             parked: None,
             music_stop_at: None,
@@ -1576,9 +1601,11 @@ impl Avatar {
                 && at <= now
             {
                 if b.stream {
-                    // The last reply stays behind the chip.
+                    // The last reply stays behind the chip; unseen, it leaves a strip.
                     b.collapsed = true;
                     b.hide_at = None;
+                    let text = b.text.clone();
+                    self.reply_missed(&text);
                 } else {
                     self.bubble = None;
                 }
@@ -2021,7 +2048,16 @@ impl Avatar {
             }
             Command::State => {
                 let reader = self.reader.as_ref().and_then(|(h, xid, _)| h.read_with(cx, |r, _| (*xid, r.scroll_info(), r.buttons())).ok());
-                self.state_json(reader)
+                let line = self.line_json(cx);
+                let s = self.state_json(reader);
+                match serde_json::from_str::<serde_json::Value>(&s) {
+                    Ok(mut v) => {
+                        v["line"] = line;
+                        v["unread"] = serde_json::json!(self.unread.as_ref().map(|u| serde_json::json!({ "n": u.n, "text": u.text, "refused": u.refused })));
+                        v.to_string()
+                    }
+                    Err(_) => s,
+                }
             }
             Command::Hide => {
                 self.park(now);
@@ -2080,6 +2116,22 @@ impl Avatar {
                 Ok(()) => "ok".into(),
                 Err(e) => format!("error: {e}"),
             },
+            Command::Talk(press) => {
+                if press {
+                    self.talk_press(cx)
+                } else {
+                    self.talk_release()
+                }
+            }
+            Command::LineClose => {
+                if self.line.is_some() {
+                    self.close_line(true, cx);
+                    "ok".into()
+                } else {
+                    "error: no line".into()
+                }
+            }
+            Command::Copy => self.copy_last_reply(cx),
             Command::Abort => match &self.session {
                 Some(_) => {
                     self.abort();
@@ -2680,6 +2732,12 @@ impl Avatar {
         }
         self.run_acts(acts);
         self.sync_body(now);
+        if let Some(t) = self.line_restore_text.take()
+            && !self.line_restore(t.clone(), cx)
+        {
+            self.draft = t;
+        }
+        self.line_push(cx);
         cx.notify();
         self.schedule(cx);
     }
@@ -2741,9 +2799,16 @@ impl Avatar {
                 }
                 Once::Restore(t) => {
                     elog!("synaps-avatar: input not accepted; kept as a draft");
-                    match &mut self.input {
-                        Some(i) if i.secret.is_none() && i.text.is_empty() => i.text = t,
-                        _ => self.draft = t,
+                    if self.line.is_some() {
+                        // Back into the Line's field, with the reason.
+                        self.line_restore_text = Some(t);
+                    } else {
+                        match &mut self.input {
+                            Some(i) if i.secret.is_none() && i.text.is_empty() => i.text = t,
+                            _ => self.draft = t,
+                        }
+                        // Seen where he looks: her tag, until he acknowledges it.
+                        self.unread = Some(lineview::Unread { n: 1, text: "NOT SENT · draft kept · $mod+c".into(), refused: true });
                     }
                     self.hint = Some(("NOT SENT · TEXT KEPT".into(), now + Duration::from_secs(4)));
                 }
@@ -3546,6 +3611,7 @@ impl Avatar {
     /// else open the field.
     fn chip_click(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let now = Instant::now();
+        self.ack_unread();
         self.brain_touch(crate::brain::Touch::Chip);
         if let Some(p) = self.prompt_ui.as_mut().filter(|p| p.dismissed) {
             p.dismissed = false;
@@ -4314,6 +4380,9 @@ impl Render for Avatar {
             None
         } else if let Some(i) = &self.input {
             Some(PanelMode::Input { secret: i.secret.is_some() })
+        } else if self.line.is_some() {
+            // The Line shows the words (one place for them).
+            None
         } else if self.prompt_ui.as_ref().is_some_and(|p| !p.dismissed) {
             Some(PanelMode::Prompt)
         } else if self.focus_probe.is_some() {
@@ -4339,7 +4408,11 @@ impl Render for Avatar {
         let torn = show_tag && !collapsed && self.glitch.is_some();
         if show_tag {
             let (bg, fg, border) = if invert { (tone, pal.surface, tone) } else { (pal.surface, tone, tone) };
-            let text = format!("{} // {}", self.name, label);
+            let text = match &self.unread {
+                Some(u) if u.refused => format!("{} // {}", self.name, u.text),
+                Some(u) => format!("{} // {} NEW ▸ {}", self.name, u.n, crate::session::one_line(&u.text, 44)),
+                None => format!("{} // {}", self.name, label),
+            };
             let make_ring = || {
                 let plate = div()
                     .flex()
@@ -4416,6 +4489,16 @@ impl Render for Avatar {
                         .bg(rgb(0x02060a))
                         .child(div().w(px(20.0)).h(px(19.0)).flex().items_center().justify_center().border_1().border_color(rgb(tone)).bg(rgb(pal.surface)).child(chevron(Chevron::Up, rgb(tone)))),
                 );
+            }
+            if self.unread.is_some() {
+                // The pointer passing over the strip acknowledges it.
+                row = row.on_hover(cx.listener(|this, over: &bool, _, cx| {
+                    if *over && this.unread.is_some() {
+                        this.ack_unread();
+                        cx.notify();
+                        this.schedule(cx);
+                    }
+                }));
             }
             if collapsed || self.session.is_some() {
                 row = row.on_mouse_down(
@@ -4983,6 +5066,17 @@ impl Render for Avatar {
                         }),
                     ))
                 })
+                .child(item("COPY LAST REPLY").id("copy").on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.menu = None;
+                        let r = this.copy_last_reply(cx);
+                        elog!("synaps-avatar: menu copy: {r}");
+                        cx.notify();
+                        this.schedule(cx);
+                    }),
+                ))
                 .child(item("HIDE").id("hide").on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, _: &MouseDownEvent, _, cx| {

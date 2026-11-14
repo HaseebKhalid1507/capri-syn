@@ -271,6 +271,14 @@ impl X11 {
         Ok(())
     }
 
+    /// Place and size one of our own windows (the Line).
+    pub fn configure(&self, w: u32, x: i32, y: i32, width: i32, height: i32) -> Result<()> {
+        let aux = xproto::ConfigureWindowAux::new().x(x).y(y).width(width.max(1) as u32).height(height.max(1) as u32);
+        self.conn.configure_window(w, &aux)?;
+        self.conn.flush()?;
+        Ok(())
+    }
+
     pub fn pointer(&self) -> Result<(i32, i32)> {
         let r = self.conn.query_pointer(self.root)?.reply()?;
         Ok((r.root_x as i32, r.root_y as i32))

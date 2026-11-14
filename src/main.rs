@@ -35,6 +35,7 @@ mod moves;
 mod platform;
 mod ragdoll;
 mod reader;
+mod line;
 mod chip;
 mod mpris;
 mod session;
@@ -362,6 +363,9 @@ fn run(t_start: Instant) -> Result<()> {
     let name = args.name.clone().unwrap_or_else(|| pack.name.clone());
 
     gpui_kit::application().run(move |cx: &mut App| {
+        // The kit's components (the Line's text field) and its dark theme.
+        gpui_kit::init(cx);
+        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
         if !fonts.is_empty()
             && let Err(e) = cx.text_system().add_fonts(fonts)
         {
