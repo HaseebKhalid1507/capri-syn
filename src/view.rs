@@ -321,7 +321,14 @@ struct MusicOn {
     t0: Instant,
     /// Autonomy sessions end on their own; `music on` runs until `music off`.
     until: Option<Instant>,
+    /// A player's tempo (MPRIS metadata), over the pack's.
+    bpm: Option<f32>,
+    /// Started by a playing media player (it stops with it).
+    auto: bool,
 }
+
+/// After a player pauses or stops, the headphones stay this long (a track change, a seek).
+const MUSIC_GRACE: Duration = Duration::from_secs(5);
 const FRAME_FAST: Duration = Duration::from_millis(16);
 const FRAME_FX: Duration = Duration::from_millis(33);
 /// A quiet arrival's sliver widens back into her over ~3 frames.
@@ -478,6 +485,10 @@ pub struct Avatar {
     reader: Option<(WindowHandle<crate::reader::Reader>, u32, Option<u32>)>,
     /// The perch window unmapped; she falls if it isn't back within the grace.
     perch_gone: Option<edges::PerchGone>,
+    /// The player stopped: the headphones come off at this time (MUSIC_GRACE).
+    music_stop_at: Option<Instant>,
+    /// What the media players add up to, last heard.
+    player: crate::mpris::Playback,
     /// HIDE from her menu: vanishing (false) or hidden (true); the process keeps running.
     parked: Option<bool>,
     /// The restore chip's window while she is hidden, and where (device px).
@@ -620,6 +631,8 @@ impl Avatar {
             reader: None,
             perch_gone: None,
             parked: None,
+            music_stop_at: None,
+            player: crate::mpris::Playback::default(),
             chip: None,
             chip_rect: None,
             unpark_req: None,
@@ -667,7 +680,7 @@ impl Avatar {
         if self.mood != Mood::Idle {
             self.set_mood(Mood::Idle, now);
         }
-        let was = self.music.replace(MusicOn { t0: now, until });
+        let was = self.music.replace(MusicOn { t0: now, until, bpm: None, auto: false });
         self.relayer(now);
         if was.is_none() && self.loaded && self.teleport.is_none() {
             self.glitch = Some(Glitch::new(GlitchKind::Burst, now, self.rng.next()));
@@ -675,7 +688,43 @@ impl Avatar {
         Ok(())
     }
 
+    /// A media player started (`playing`) or stopped: real LISTENING, off after a grace.
+    fn playback(&mut self, p: crate::mpris::Playback, now: Instant) -> String {
+        self.player = p;
+        if p.playing && (self.mood != Mood::Idle || !self.loaded) {
+            // The session's mood first; the headphones go on when she is idle again (tick).
+            return "ok (later)".into();
+        }
+        if p.playing {
+            self.music_stop_at = None;
+            match &mut self.music {
+                Some(m) if m.until.is_none() && !m.auto => {} // `music on` by hand: left alone
+                Some(m) => {
+                    m.until = None;
+                    m.auto = true;
+                    m.bpm = p.bpm;
+                }
+                None => {
+                    if let Err(e) = self.music_on(now, None) {
+                        return format!("error: {e}");
+                    }
+                    if let Some(m) = &mut self.music {
+                        m.auto = true;
+                        m.bpm = p.bpm;
+                    }
+                }
+            }
+            "ok listening".into()
+        } else {
+            if self.music.as_ref().is_some_and(|m| m.auto) {
+                self.music_stop_at = Some(now + MUSIC_GRACE);
+            }
+            "ok quiet".into()
+        }
+    }
+
     fn music_off(&mut self, now: Instant) {
+        self.music_stop_at = None;
         if self.music.take().is_some() {
             self.relayer(now);
             self.update_notes(now);
@@ -694,7 +743,7 @@ impl Avatar {
             let emitters = spec.emitters.get(&src.id).map(Vec::as_slice).unwrap_or(&[]);
             let (ox, oy) = self.pack.offset(src);
             let l = self.layout;
-            let beat = 60.0 / spec.bpm.clamp(40.0, 240.0);
+            let beat = 60.0 / self.music.as_ref().and_then(|m| m.bpm).unwrap_or(spec.bpm).clamp(40.0, 240.0);
             let parts = fx::music_notes(now.saturating_duration_since(m.t0).as_secs_f32(), beat, emitters);
             let base = (self.applied.0 + l.avatar_x, self.applied.1 + l.avatar_y);
             for n in parts.iter().take(NOTES_MAX) {
@@ -818,7 +867,7 @@ impl Avatar {
             // Held on twos (12 fps) like Capri's music body.
             let hold = 1000.0 / 12.0;
             let t = (now.saturating_duration_since(m.t0).as_secs_f32() * 1000.0 / hold).floor() * hold;
-            let beats = t / (60_000.0 / spec.bpm.clamp(40.0, 240.0));
+            let beats = t / (60_000.0 / self.music.as_ref().and_then(|m| m.bpm).unwrap_or(spec.bpm).clamp(40.0, 240.0));
             let p = beats.fract();
             // Head down on the beat and back up (4 px), the upper body tilting side to side
             // over two beats (4 px at the top of the hair).
@@ -1209,6 +1258,7 @@ impl Avatar {
         take(self.reaction_until);
         take(self.perch_gone.map(|g| g.due()));
         take(self.quit_armed);
+        take(self.music_stop_at);
         if self.unpark_req.is_some() {
             take(Some(now));
         }
@@ -1387,6 +1437,15 @@ impl Avatar {
         }
         if let Some(why) = self.unpark_req.take() {
             dirty |= self.unpark(why, now, cx);
+        }
+        if self.music_stop_at.is_some_and(|t| now >= t) {
+            self.music_off(now);
+            dirty = true;
+        }
+        if self.player.playing && self.music.is_none() && self.loaded && self.mood == Mood::Idle && self.parked != Some(false) {
+            let p = self.player;
+            self.playback(p, now);
+            dirty = true;
         }
         if self.quit_armed.is_some_and(|t| now >= t) {
             self.quit_armed = None;
@@ -1753,6 +1812,7 @@ impl Avatar {
                 }
             }
             Command::Page(d) => self.page(d, now),
+            Command::Playback(p) => self.playback(p, now),
             Command::Scroll(d) => self.scroll_bubble(d, now),
             Command::Reader(op) => self.reader_cmd(op, cx),
             Command::Collapse(c) => match &mut self.bubble {

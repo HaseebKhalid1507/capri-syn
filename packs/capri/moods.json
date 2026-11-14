@@ -582,7 +582,7 @@
     "status": "LISTENING",
     "tone": "music",
     "glyph": "note",
-    "activityChance": 0.18,
+    "activityChance": 0.0,
     "activityMs": 24000
   },
   "brain": {

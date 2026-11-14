@@ -118,6 +118,28 @@ pub struct Settings {
     pub brain: BrainSettings,
     pub ragdoll: RagdollSettings,
     pub session: SessionSettings,
+    pub music: MusicSettings,
+}
+
+/// `[music]`: LISTENING when a media player is playing (MPRIS), not at random.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MusicSettings {
+    pub detect: bool,
+    /// Player bus-name substrings that never count (calls, voice chat).
+    pub ignore: Vec<String>,
+}
+
+impl Default for MusicSettings {
+    fn default() -> Self {
+        MusicSettings { detect: true, ignore: vec!["discord".into(), "vesktop".into()] }
+    }
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct MusicRaw {
+    detect: Option<bool>,
+    ignore: Option<Vec<String>>,
 }
 
 /// `[session]`: her OWN session's persona, model and thinking (never applied to a session
@@ -182,6 +204,8 @@ struct FileRaw {
     ragdoll: Option<RagdollRaw>,
     #[serde(default)]
     session: Option<SessionRaw>,
+    #[serde(default)]
+    music: Option<MusicRaw>,
 }
 
 #[derive(Deserialize, Default)]
@@ -250,6 +274,15 @@ impl Settings {
             anyhow::ensure!(v.is_finite() && (0.0..=1.0).contains(&v), "ragdoll.strength must be 0..1");
             ragdoll.strength = v as f32;
         }
+        let mut music = MusicSettings::default();
+        if let Some(m) = raw.music {
+            if let Some(d) = m.detect {
+                music.detect = d;
+            }
+            if let Some(i) = m.ignore {
+                music.ignore = i.into_iter().map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()).collect();
+            }
+        }
         let mut session = SessionSettings::default();
         if let Some(r) = raw.session {
             if let Some(m) = r.model.map(|m| m.trim().to_string()) {
@@ -267,7 +300,7 @@ impl Settings {
                 session.persona_file = Some(expand_home(f.trim()));
             }
         }
-        let Some(r) = raw.brain else { return Ok(Settings { brain: b, ragdoll, session }) };
+        let Some(r) = raw.brain else { return Ok(Settings { brain: b, ragdoll, session, music }) };
         if let Some(v) = r.enabled {
             b.enabled = v;
         }
@@ -322,7 +355,7 @@ impl Settings {
         }
         // Drift is a transport (by distance), never drawn from the pool.
         b.arrivals.retain(|p| p.0 != Arrival::Drift);
-        Ok(Settings { brain: b, ragdoll, session })
+        Ok(Settings { brain: b, ragdoll, session, music })
     }
 
     /// The file's settings (defaults when there is none). Err: a bad file (keep the old values).
@@ -379,6 +412,10 @@ mod tests {
         assert!(d.enabled && d.no_repeat == 2 && d.cover_max_pct == 12.0 && d.max_moves_per_hour == 15);
         assert_eq!(d.fullscreen, Fullscreen::Hide);
         assert_eq!(d.monitor, MonitorPolicy::Follow, "her hops stay on his monitor by default");
+        let m = MusicSettings::default();
+        assert!(m.detect && m.ignore == ["discord", "vesktop"]);
+        let s = Settings::parse("[music]\ndetect = false\nignore = [\"Teams\", \" \"]\n").unwrap().music;
+        assert!(!s.detect && s.ignore == ["teams"]);
         assert_eq!(Settings::parse("[brain]\nmonitor = \"any\"\n").unwrap().brain.monitor, MonitorPolicy::Any);
         assert_eq!(d.arrivals.iter().find(|a| a.0 == Arrival::Glitch).unwrap().1, 1.0, "glitch: 1 by default since r6");
     }
@@ -447,6 +484,7 @@ fullscreen = "stay"
             "[brain\n",
             "[brain]\nfullscreen = \"maybe\"\n",
             "[brain]\nmonitor = \"both\"\n",
+            "[music]\ndetect = \"yes\"\n",
             "[brain]\napproaches = { fly = 1 }\n",
             "[brain]\napproaches = { hang = -1 }\n",
             "[brain]\nno_repeat = 9\n",

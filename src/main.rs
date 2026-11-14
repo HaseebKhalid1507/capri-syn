@@ -17,6 +17,7 @@ mod platform;
 mod ragdoll;
 mod reader;
 mod chip;
+mod mpris;
 mod session;
 mod settings;
 mod shape;
@@ -395,6 +396,21 @@ fn run(t_start: Instant) -> Result<()> {
             })
             .map_err(|e| eprintln!("synaps-avatar: x11 watcher: {e:#}"))
             .ok();
+            // Real LISTENING: media players on the session bus (signals only). Tests see only
+            // their own fake player (SA_MPRIS_ONLY), never his.
+            let music = settings::Settings::load().map(|s| s.music).unwrap_or_default();
+            let only = std::env::var("SA_MPRIS_ONLY").ok().filter(|s| !s.is_empty());
+            let synth = std::env::var_os("SA_BRAIN_SYNTH").is_some();
+            if music.detect && (only.is_some() || !synth) {
+                let tx = tx2.clone();
+                let filter = mpris::Filter { ignore: music.ignore, only };
+                if let Err(e) = mpris::spawn(filter, move |p| {
+                    let (r, _) = std::sync::mpsc::channel();
+                    tx.send_blocking((control::Command::Playback(p), r)).ok();
+                }) {
+                    eprintln!("synaps-avatar: mpris: {e:#} (no music detection)");
+                }
+            }
             eprintln!(
                 "synaps-avatar: pack `{}` ({} frames) sf {sf:.3} window 0x{win:x} {}x{} at {},{} composited={} (pack load {t_pack} ms)",
                 pack2.name,

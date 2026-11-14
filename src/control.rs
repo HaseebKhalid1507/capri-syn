@@ -48,6 +48,8 @@ pub enum Command {
     Page(i32),
     /// Back from HIDE (the restore chip's click).
     Show,
+    /// Internal: a media player started or stopped (MPRIS).
+    Playback(crate::mpris::Playback),
     /// Scroll the bubble by n lines (the wheel's path).
     Scroll(i32),
     /// The reader panel.
