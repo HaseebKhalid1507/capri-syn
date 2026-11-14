@@ -165,10 +165,18 @@ impl Avatar {
         let (gx, gy) = self.ground();
         let here = self.x11.monitor_at(gx, gy - 1);
         let there = self.x11.monitor_at(area.x + area.w / 2, area.y + area.h / 2);
-        if (here.x, here.y) == (there.x, there.y) || self.rag.is_some() || self.hidden || !self.loaded {
+        if self.rag.is_some() || self.hidden || !self.loaded {
             return;
         }
         let l = self.layout;
+        // On his monitor already: she moves only if the Line would cover her (it sits at
+        // the bottom, she stands beside it).
+        let (ax, aw) = (self.origin.0 + l.avatar_x, l.geo.width as i32);
+        let low = gy > area.y + area.h * 2 / 3;
+        let same = (here.x, here.y) == (there.x, there.y);
+        if same && !(low && ax < lx + lw && ax + aw > lx) {
+            return;
+        }
         let half = l.geo.width as i32 / 2;
         let gap = (40.0 * l.sf) as i32;
         let left = lx - gap - half;
@@ -179,7 +187,7 @@ impl Avatar {
         self.brain_cancel_move();
         self.start_teleport(o, Placement::Ground, now);
         self.home = (o.0 + l.ground_x, o.1 + l.ground_y);
-        elog!("synaps-avatar: line on another monitor: she comes over to {},{}", self.home.0, self.home.1);
+        elog!("synaps-avatar: line {}: she comes over to {},{}", if same { "over her" } else { "on another monitor" }, self.home.0, self.home.1);
     }
 
     /// The thread, from the session's transcript (thinking left out).

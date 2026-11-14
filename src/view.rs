@@ -4411,7 +4411,13 @@ impl Render for Avatar {
             let (bg, fg, border) = if invert { (tone, pal.surface, tone) } else { (pal.surface, tone, tone) };
             let text = match &self.unread {
                 Some(u) if u.refused => format!("{} // {}", self.name, u.text),
-                Some(u) => format!("{} // {} NEW ▸ {}", self.name, u.n, crate::session::one_line(&u.text, 44)),
+                Some(u) => {
+                    // Inside her window: the plate is centred on her, the chip's caret beside it.
+                    let head = format!("{} // {} NEW ▸ ", self.name, u.n);
+                    let per = TAG_FONT * 0.62 + 1.5;
+                    let fit = ((l.win_w as f32 / sf - 96.0) / per) as usize;
+                    format!("{head}{}", crate::session::one_line(&u.text, fit.saturating_sub(head.chars().count()).clamp(8, 44)))
+                }
                 None => format!("{} // {}", self.name, label),
             };
             let make_ring = || {
