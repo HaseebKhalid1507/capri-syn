@@ -421,6 +421,8 @@ pub struct Avatar {
     shadow_at: Option<(i32, i32)>,
     /// Last laid-out width of the status tag (logical px), to place the next one.
     tag_w: Rc<Cell<f32>>,
+    /// The HUD's top while a bubble is up: (resting frame, avatar-local device px).
+    hud_top: Cell<Option<(usize, i32)>>,
     /// Last laid-out box of the status tag (window logical px), to tear it in a glitch.
     tag_box: Cell2,
     music: Option<MusicOn>,
@@ -553,6 +555,7 @@ impl Avatar {
             shadow: None,
             shadow_at: None,
             tag_w: Rc::new(Cell::new(150.0)),
+            hud_top: Cell::new(None),
             tag_box: Rc::new(Cell::new(None)),
             music: None,
             notes: Vec::new(),
@@ -3050,7 +3053,17 @@ impl Render for Avatar {
         // HUD placement follows the mood's resting frame, so loops don't make it jitter.
         let base = self.frame_or_default(self.anim.base()).or(frame);
         // …but a taller one-shot (an entry clip) pushes it up so it never sits on the hair.
-        let (base_top, head_x) = base.map_or((0, l.geo.width as i32 / 2), |f| (f.top.min(frame.map_or(f.top, |c| c.top)), f.head_x));
+        let (mut base_top, head_x) = base.map_or((0, l.geo.width as i32 / 2), |f| (f.top.min(frame.map_or(f.top, |c| c.top)), f.head_x));
+        // While a bubble is up its height holds (per resting frame): a one-shot raising a hand
+        // made it jump ~10 px and back.
+        if self.bubble.is_some() {
+            match self.hud_top.get() {
+                Some((b, t)) if b == self.anim.base() => base_top = t,
+                _ => self.hud_top.set(Some((self.anim.base(), base_top))),
+            }
+        } else {
+            self.hud_top.set(None);
+        }
         let top_l = (l.avatar_y + base_top) as f32 / sf;
         let head_l = (l.avatar_x + head_x) as f32 / sf;
         // The status tag sits just clear of the hair under the tag itself (this frame and
@@ -3095,7 +3108,14 @@ impl Render for Avatar {
         // shape grows, this frame's pixels show for a moment. Without an underlay they're
         // transparent (black slabs without a compositor); with it, they're what comes next.
         let mut next: Option<BodyPlan> = None;
-        if let Some(g) = self.glitch {
+        if let Some(sx) = self.glitch.and_then(|g| g.squeeze_sx(now)) {
+            // A quiet exit: squeezed in one piece; the next width goes underneath.
+            plan.sx = sx;
+            plan.pivot.0 = sliver_px;
+            let mut n = plan.clone();
+            n.sx = self.glitch.and_then(|g| g.squeeze_sx(now + FRAME_FX)).unwrap_or(sx);
+            next = Some(n);
+        } else if let Some(g) = self.glitch {
             let (top, face, bx0, bx1) = frame.map_or((0, None, 0, aw), |f| {
                 let (x0, x1) = f.profile.iter().enumerate().filter(|p| *p.1 != i16::MAX).fold((aw, 0), |a, (i, _)| (a.0.min(i as i32), a.1.max(i as i32)));
                 (f.top, g.keeps_face().then_some(f.face), x0, x1.max(x0 + 1))
@@ -3128,6 +3148,7 @@ impl Render for Avatar {
                     solid: g.solid(at),
                     tag,
                     sf,
+                    calm: g.kind == GlitchKind::Land,
                 });
                 p.tint = g.tint(at);
                 p

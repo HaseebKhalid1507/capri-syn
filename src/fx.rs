@@ -86,7 +86,7 @@ impl Glitch {
     pub fn soft(kind: GlitchKind, now: Instant, seed: u64) -> Glitch {
         let ms = match kind {
             GlitchKind::Land => 70.0,
-            GlitchKind::Vanish => 240.0,
+            GlitchKind::Vanish => 200.0,
             _ => Glitch::new(kind, now, seed).ms,
         };
         Glitch { t0: now, kind, ms, seed, soft: true }
@@ -145,6 +145,15 @@ impl Glitch {
         self.seed
     }
 
+    /// A quiet exit squeezes her, in one piece, into a sliver (no bands): her width at `now`.
+    pub fn squeeze_sx(&self, now: Instant) -> Option<f32> {
+        if !(self.soft && self.kind == GlitchKind::Vanish) {
+            return None;
+        }
+        let u = self.u(now);
+        Some(1.0 - 0.94 * u * u * (3.0 - 2.0 * u))
+    }
+
     /// Fraction of bands drawn as a single colour channel instead of the image: coming
     /// online, the figure builds up from channel ghosts to full colour in ~400 ms, never
     /// from nothing.
@@ -199,6 +208,9 @@ pub struct GlitchStep {
     pub tag: Option<(i32, i32)>,
     /// Device px per logical px (band heights, split widths).
     pub sf: f32,
+    /// A teleport landing: bands come back top-down in one piece (no loose chunks), no
+    /// chroma bars or corruption cells, lighter scanlines.
+    pub calm: bool,
 }
 
 /// How the body is drawn this frame. Device px, relative to the avatar rect.
@@ -329,7 +341,9 @@ impl BodyPlan {
                 (0, (rng.range(4.0, 8.0) * g.sf * amp).round() as i32)
             };
             // Teleport legs drop bands (coverage); a glitch never does.
-            let keep = g.coverage >= 1.0 || face || hash01(y0.div_euclid(12) as u32, g.order as u32) < g.coverage;
+            let keep = g.coverage >= 1.0
+                || face
+                || if g.calm { (y0 - top) as f32 <= g.coverage * bh.max(1) as f32 } else { hash01(y0.div_euclid(12) as u32, g.order as u32) < g.coverage };
             if !keep {
                 continue;
             }
@@ -347,7 +361,7 @@ impl BodyPlan {
         let palette = [YELLOW, VIOLET, CYAN, PINK];
         // Chroma bars: 1 in the build-up and the aftershocks, 1–3 at the peak; 4–10 px tall,
         // thicker with the strength; anywhere from below the face to the knees.
-        if s > 0.2 {
+        if s > 0.2 && !g.calm {
             let bars = if s > 0.8 { 1 + rng.pick(3) } else { 1 };
             let t0 = g.face.map_or(by + bh / 5, |f| f.1 + (4.0 * g.sf) as i32);
             let t1 = (by + bh * 4 / 5).max(t0 + 1);
@@ -361,7 +375,7 @@ impl BodyPlan {
             }
         }
         // Corruption cells, 2–4 px tall (never on the face).
-        for i in 0..(s * 7.0) as usize {
+        for i in 0..if g.calm { 0 } else { (s * 7.0) as usize } {
             let cw = (rng.range(8.0, 30.0) * g.sf) as u16;
             let ch = rng.range(2.0, 4.99) as u16;
             let x = bx + (rng.range(0.0, 1.0) * bw as f32) as i32;
@@ -371,7 +385,7 @@ impl BodyPlan {
             }
             self.bars.push(((x as i16, y as i16, cw, ch), palette[(i + 1) % palette.len()]));
         }
-        self.scan = 0.32 * s;
+        self.scan = if g.calm { 0.14 } else { 0.32 } * s;
     }
 
     /// Squash/stretch a rect about the pivot without opening gaps between bands.
@@ -976,6 +990,18 @@ mod tests {
     }
 
     #[test]
+    fn quiet_exit_is_one_piece() {
+        let t = Instant::now();
+        let g = Glitch::soft(GlitchKind::Vanish, t, 7);
+        assert_eq!(g.ms, 200.0);
+        assert_eq!(g.squeeze_sx(t), Some(1.0));
+        let mid = g.squeeze_sx(t + Duration::from_millis(100)).unwrap();
+        assert!(mid > 0.4 && mid < 0.6, "{mid}");
+        assert!((g.squeeze_sx(t + Duration::from_millis(200)).unwrap() - 0.06).abs() < 1e-4);
+        assert_eq!(Glitch::new(GlitchKind::Vanish, t, 7).squeeze_sx(t), None);
+    }
+
+    #[test]
     fn glitch_vanish_thins_to_red() {
         let t = Instant::now();
         let g = Glitch::new(GlitchKind::Vanish, t, 7);
@@ -991,6 +1017,7 @@ mod tests {
             solid: 0.0,
             tag: None,
             sf: 1.0,
+            calm: false,
         };
         let mut plan = BodyPlan::plain();
         plan.glitch(step(t));
@@ -1024,6 +1051,7 @@ mod tests {
                     solid: g.solid(at),
                     tag: Some((-40, -14)),
                     sf: 1.0,
+                    calm: false,
                 });
                 let bands = plan.slices.clone().unwrap();
                 // Every row from the HUD to the feet is in exactly one band: nothing dropped.
@@ -1103,6 +1131,7 @@ mod tests {
                 solid: 0.0,
                 tag: None,
                 sf: 1.0,
+                calm: false,
             });
             let bands = plan.slices.clone().unwrap();
             if g.strength(at) > 0.05 {

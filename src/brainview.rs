@@ -1571,40 +1571,26 @@ impl Avatar {
             } else {
                 (base.0 + f.head_x as f32, base.1 + f.face.0 as f32)
             };
-            // Clear of her hair: beside her whole outline at head height, on the side away
-            // from his window (never over more of it), inside her work area (flipped to the
-            // other side if there's no room).
+            // Next to her face, never over his window: beside her outline at head height on
+            // the side away from it; with no room there, above her head (leaning away); the
+            // whole badge (rim, tail, pop) clamped inside her work area, so never cut off.
             let away = self.brain_focused().map_or(1.0, |w| if head.0 < w.center().0 as f32 { -1.0 } else { 1.0 });
             let cols: Vec<usize> = f.profile.iter().enumerate().filter(|(_, y)| **y != i16::MAX).map(|(x, _)| x).collect();
             let (c0, c1) = (base.0 + *cols.first()? as f32, base.0 + *cols.last()? as f32);
             let r = MARK_R * sf * 1.25;
+            // Reach from the centre: the popped disc, the rim and the tail.
+            let reach = r * 1.55 + 3.0 * sf;
             let gap = 4.0 * sf;
-            let side = |a: f32| if a > 0.0 { c1 + gap + r } else { c0 - gap - r };
-            let area = self.brain.as_ref().and_then(|h| h.marker).and_then(|m| m.area);
-            let fits = |x: f32| area.is_none_or(|a| x - r >= a.x as f32 && x + r <= a.right() as f32);
-            // Off his window, always: if the away side has no room at head height, slide down
-            // her away side (inside the work area) to the first rows clear of her outline.
-            let mut c = if fits(side(away)) {
-                (side(away), head.1 - 6.0 * sf + bob as f32)
-            } else if let Some(a) = area {
-                let x = if away > 0.0 { a.right() as f32 - r } else { a.x as f32 + r };
-                let (lx0, lx1) = ((x - r - gap - base.0) as i32, (x + r + gap - base.0) as i32);
-                let clear = |cy: f32| {
-                    let (ly0, ly1) = ((cy - r - gap - base.1) as i32, (cy + r + gap - base.1) as i32);
-                    !f.rects.iter().any(|&(rx, ry, rw, rh)| {
-                        let (rx, ry) = (rx as i32, ry as i32);
-                        rx < lx1 && rx + rw as i32 > lx0 && ry < ly1 && ry + rh as i32 > ly0
-                    })
-                };
-                let y0 = head.1 - 6.0 * sf;
-                let y = (0..40).map(|k| y0 + k as f32 * 6.0 * sf).find(|&y| clear(y)).unwrap_or(y0);
-                (x, y + bob as f32)
-            } else {
-                (side(away), head.1 - 6.0 * sf + bob as f32)
-            };
+            let area = self.brain.as_ref().and_then(|h| h.marker).and_then(|m| m.area).or_else(|| self.her_area());
+            let inside = |x: f32, y: f32| area.is_none_or(|a| x - reach >= a.x as f32 && x + reach <= a.right() as f32 && y - reach >= a.y as f32);
+            let beside = (if away > 0.0 { c1 + gap + r } else { c0 - gap - r }, head.1 - 6.0 * sf);
+            let top = base.1 + f.top as f32;
+            let above = (head.0 + away * 0.8 * r, top - gap - r);
+            let mut c = if inside(beside.0, beside.1) || !inside(above.0, above.1) { beside } else { above };
+            c.1 += bob as f32;
             if let Some(a) = area {
-                c.0 = c.0.clamp(a.x as f32 + r, (a.right() as f32 - r).max(a.x as f32 + r));
-                c.1 = c.1.clamp(a.y as f32 + r, (a.bottom() as f32 - r).max(a.y as f32 + r));
+                c.0 = c.0.clamp(a.x as f32 + reach, (a.right() as f32 - reach).max(a.x as f32 + reach));
+                c.1 = c.1.clamp(a.y as f32 + reach, (a.bottom() as f32 - reach).max(a.y as f32 + reach));
             }
             Some((c, head, sc as f32 / 20.0, away))
         });

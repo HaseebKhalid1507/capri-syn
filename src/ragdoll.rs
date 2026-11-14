@@ -141,8 +141,6 @@ pub struct Chain {
     asleep: bool,
     /// Per down node: lateral limits relative to the grip (else `p.room`).
     rooms: Vec<(f32, f32)>,
-    /// Multiplier on the bend limits (in flight: less, so head, arms and legs stay readable).
-    cap: f32,
 }
 
 impl Chain {
@@ -167,13 +165,7 @@ impl Chain {
             still: 0.0,
             asleep: false,
             rooms: Vec::new(),
-            cap: 1.0,
         }
-    }
-
-    /// Scale the swing and bend limits (1 = the params' own).
-    pub fn set_cap(&mut self, k: f32) {
-        self.cap = fin(k).clamp(0.0, 1.0);
     }
 
     /// Per-node lateral limits (the window's room for the rows around each down node).
@@ -295,9 +287,9 @@ impl Chain {
         // Muscle: bend pull toward the parent's direction (down), straight up (up).
         pull(&mut self.down, &self.rows_down, a, s, self.p.bend_stiff, false);
         pull(&mut self.up, &self.rows_up, a, s, self.p.up_stiff, true);
-        let sw = (self.p.max_swing_deg * self.cap).to_radians();
-        let swu = (self.p.max_swing_up_deg * self.cap).to_radians();
-        let bd = (self.p.max_bend_deg * self.cap).to_radians();
+        let sw = self.p.max_swing_deg.to_radians();
+        let swu = self.p.max_swing_up_deg.to_radians();
+        let bd = self.p.max_bend_deg.to_radians();
         clamp_angles(&mut self.down, &self.rows_down, a, s, sw, bd, false);
         clamp_angles(&mut self.up, &self.rows_up, a, s, swu, bd, true);
         let room = self.p.room;

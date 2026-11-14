@@ -425,6 +425,7 @@ pub struct FlingSpec {
     pub fly: Option<String>,
     pub fall: Option<String>,
     pub bounce: Vec<Step>,
+    pub tuck: Vec<Step>,
     pub annoyed_after: Option<u32>,
 }
 
@@ -796,6 +797,7 @@ impl Pack {
         if let Some(f) = &pack.behaviour.fling {
             check_steps("fling.launch", &f.launch, &mut errors, &pack);
             check_steps("fling.bounce", &f.bounce, &mut errors, &pack);
+            check_steps("fling.tuck", &f.tuck, &mut errors, &pack);
             for (k, id) in [("fly", &f.fly), ("fall", &f.fall)] {
                 if let Some(id) = id
                     && !pack.index.contains_key(id)

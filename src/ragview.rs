@@ -74,9 +74,6 @@ pub(super) fn lockstep() -> bool {
 }
 
 /// Tick period: 1/refresh, or SA_RAG_TICK_MS (slow capture under lockstep).
-/// In flight the chain bends at most this share of its limits (a tumble stays readable).
-const FLIGHT_CAP: f32 = 0.35;
-
 fn tick_period() -> Duration {
     let ms = std::env::var("SA_RAG_TICK_MS").ok().and_then(|v| v.parse::<f64>().ok()).filter(|v| *v >= 4.0).unwrap_or(1000.0 / 60.0);
     Duration::from_secs_f64(ms / 1000.0)
@@ -111,6 +108,7 @@ impl Avatar {
             fly: have(&f.fly).unwrap_or_else(|| hang.clone()),
             fall: have(&f.fall).unwrap_or_else(|| hang.clone()),
             bounce: ids(&f.bounce),
+            tuck: ids(&f.tuck),
             annoyed_after: f.annoyed_after.unwrap_or(3),
             soft: ids(&l.soft),
             hard: ids(&l.hard),
@@ -459,7 +457,6 @@ impl Avatar {
         let feet = ((self.origin.0 + l.ground_x) as f32, (self.origin.1 + l.ground_y) as f32);
         let Some(r) = &mut self.rag else { return };
         r.flight = Some(if fling { Flight::new(feet, vel) } else { Flight::drop(feet, vel) });
-        r.chain.set_cap(FLIGHT_CAP);
         if !fling {
             // Already standing on the floor: land at once (soft).
             let ext = self.rag_extents();
@@ -513,7 +510,9 @@ impl Avatar {
         let l = self.layout;
         let Some(r) = &mut self.rag else { return };
         let Some(f) = &mut r.flight else { return };
+        let vy0 = f.vel.1;
         let c = f.step(dt, &r.arena, &r.plats, ext);
+        let apex = vy0 < 0.0 && f.vel.1 >= 0.0 && c == Contact::None;
         let feet = f.pos;
         let v = f.vel;
         // Flight stretch on the dominant axis, smoothed (40 ms).
@@ -524,7 +523,7 @@ impl Avatar {
         let o = (feet.0.round() as i32 - l.ground_x, feet.1.round() as i32 - l.ground_y);
         let anchor = ((o.0 + l.avatar_x + r.grip.0) as f32, (o.1 + l.avatar_y + r.grip.1) as f32);
         r.chain.step(anchor, dt);
-        let out = r.m.update(t, &RagInput::default());
+        let out = r.m.update(t, &RagInput { event: apex.then_some(RagEvent::Apex), ..Default::default() });
         let fi = self.rag_frame(self.rag.as_ref().expect("rag"), out.frame.as_deref());
         if let Some(r) = &mut self.rag {
             r.frame = fi;
@@ -567,8 +566,7 @@ impl Avatar {
                 r.hard = hard;
                 r.landed = Some("floor");
                 r.flight = None;
-                r.chain.set_cap(1.0);
-                r.squash = Some((ragdoll::squash_spring(speed / l.sf, self.rag_strength), feet_local, false));
+                        r.squash = Some((ragdoll::squash_spring(speed / l.sf, self.rag_strength), feet_local, false));
                 r.chain.set_gravity(0.0);
                 self.placement = Placement::Ground;
                 self.x11.set_target(0);
@@ -590,8 +588,7 @@ impl Avatar {
             Contact::Perch { win, x, speed } => {
                 r.landed = Some("perch");
                 r.flight = None;
-                r.chain.set_cap(1.0);
-                let seat = l.seat_y.map_or(feet_local, |s| (feet_local.0, (s - l.avatar_y) as f32));
+                        let seat = l.seat_y.map_or(feet_local, |s| (feet_local.0, (s - l.avatar_y) as f32));
                 r.squash = Some((ragdoll::squash_spring(speed / l.sf, self.rag_strength), seat, false));
                 if let Some(rect) = self.x11.toplevel_rect(win) {
                     let dx = x.round() as i32 - rect.x;
@@ -844,7 +841,6 @@ impl Avatar {
         let t = r.t;
         r.m.update(t, &RagInput { event: Some(RagEvent::Catch { u }), ..Default::default() });
         r.flight = None;
-        r.chain.set_cap(1.0);
         r.squash = None;
         r.landed = None;
         r.feed = Feed::Real;
