@@ -1318,8 +1318,11 @@ impl Avatar {
             take(Some(now + GLINT_TICK));
         }
         take(self.next_glint);
-        take(self.pose_next_change(now));
-        take(self.pose_wait.map(|t| t + POSE_SLACK));
+        // One wake per pose step, at its slack's end (not one at the step and one after).
+        match self.pose_wait {
+            Some(t) => take(Some(t + POSE_SLACK)),
+            None => take(self.pose_next_change(now).map(|t| t + POSE_SLACK)),
+        }
         if self.music.is_some() {
             take(Some(now + NOTE_TICK));
             take(self.music.as_ref().and_then(|m| m.until));
@@ -1558,8 +1561,17 @@ impl Avatar {
         // POSE_SLACK for company.
         let pose = self.pose_at(now);
         if pose != self.pose_last && !dirty {
-            let since = *self.pose_wait.get_or_insert(now);
-            dirty = now.saturating_duration_since(since) >= POSE_SLACK;
+            // Since when this pose has held (20 ms steps back): the step's time, even when
+            // this tick is the first to see it.
+            if self.pose_wait.is_none() {
+                let held = (1..=20)
+                    .map_while(|k| now.checked_sub(Duration::from_millis(20 * k)))
+                    .take_while(|&t| self.pose_at(t) == pose)
+                    .last();
+                self.pose_wait = Some(held.unwrap_or(now));
+            }
+            let since = self.pose_wait.unwrap_or(now);
+            dirty = now.saturating_duration_since(since) + Duration::from_millis(20) >= POSE_SLACK;
         }
         // Latched here, not in render: a wait left set until GPUI got round to rendering
         // was a past deadline (it spun ~900 ticks/s).
