@@ -422,10 +422,6 @@ pub struct Avatar {
     turn: Option<(Instant, bool)>,
     /// Shape mode: the turn's painted frames so far (`facing::turn_band`).
     turn_frame: u32,
-    /// Shape mode: this turn goes onto art not shown yet (`facing::BAND_FIRST`).
-    turn_first: bool,
-    /// (frame, mirrored) shown as her art so far: a turn onto one of these is a short one.
-    shown_art: std::collections::HashSet<(usize, bool)>,
     /// Turns so far, the last one's reason, and when.
     turns: u32,
     turn_why: &'static str,
@@ -630,8 +626,6 @@ impl Avatar {
             flip: false,
             turn: None,
             turn_frame: 0,
-            turn_first: false,
-            shown_art: Default::default(),
             turns: 0,
             turn_why: "",
             last_turn: None,
@@ -1100,8 +1094,6 @@ impl Avatar {
         } else {
             self.turn = Some((now, to));
             self.turn_frame = 0;
-            let i = self.anim.frame();
-            self.turn_first = !self.shown_art.contains(&(i, to));
         }
     }
 
@@ -1159,7 +1151,7 @@ impl Avatar {
             return true;
         }
         if !self.x11.composited() {
-            match crate::facing::turn_band(self.turn_frame, self.turn_first) {
+            match crate::facing::turn_band(self.turn_frame) {
                 Some((_, new)) => {
                     let shown = if new { to } else { !to };
                     if shown != self.flip {
@@ -3892,9 +3884,6 @@ impl Render for Avatar {
         self.rag_painted();
         let rag_flight = self.rag_json().get("phase").and_then(|p| p.as_str()).is_some_and(|p| p == "fling" || p == "drop");
         let shown_i = rag_shown.as_ref().and_then(|(c, _)| c.as_ref().map(|c| c.frame)).unwrap_or_else(|| self.anim.frame());
-        if !self.hidden {
-            self.shown_art.insert((shown_i, self.mirrored(shown_i)));
-        }
         let frame = self.frame_or_default(shown_i);
         // HUD placement follows the mood's resting frame, so loops don't make it jitter.
         let base = self.frame_or_default(self.anim.base()).or(frame);
@@ -4130,7 +4119,7 @@ impl Render for Avatar {
         // Shape mode turn: the art as it is (it's on screen already), shown through a band
         // about her feet (`facing::turn_band`); only the shape moves, so nothing lands late.
         if turning && !alpha {
-            if let Some((frac, _)) = crate::facing::turn_band(self.turn_frame, self.turn_first)
+            if let Some((frac, _)) = crate::facing::turn_band(self.turn_frame)
                 && !hidden
             {
                 let p = sliver_px as i32;
@@ -4162,18 +4151,6 @@ impl Render for Avatar {
         } else {
             Vec::new()
         };
-        // A shape-mode turn: on the frames before the swap the art it turns to is drawn under the
-        // art shown (outside the shape it's clipped, inside it's covered). Its texture's first
-        // draws came out torn (r17: shards in the frame the new art first showed, whatever the
-        // band's timing; an off-window warm is culled), so they happen where nothing shows.
-        let turn_under = (turning && !alpha && !hidden && crate::facing::turn_band(self.turn_frame.saturating_sub(1), self.turn_first).is_some_and(|b| !b.1))
-            .then(|| self.turn.map(|t| t.1))
-            .flatten()
-            .and_then(|t| {
-                let f = self.frames.get(shown_i).and_then(|f| f.as_ref())?;
-                let target = t && self.flippable.get(shown_i).copied().unwrap_or(false);
-                Some(if target { f.mirrored() } else { f }.image.clone())
-            });
 
         let menu_cell: Cell2 = Rc::new(Cell::new(None));
         let tag_cell: Cell2 = Rc::new(Cell::new(None));
@@ -4237,9 +4214,6 @@ impl Render for Avatar {
                         }
                         let (ix, iy, iw, ih) = plan2.image_rect(aw, ah);
                         let ib = rect(ix, iy, iw, ih);
-                        if let Some(u) = &turn_under {
-                            window.paint_image(ib, ib, Corners::default(), u.clone(), 0, false).ok();
-                        }
                         match &plan2.slices {
                             _ if plan2.tint.is_some() => {
                                 let c = rgb(plan2.tint.unwrap_or(fx::BOLT_RED));
