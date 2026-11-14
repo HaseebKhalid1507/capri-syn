@@ -9,6 +9,8 @@ mod brainview;
 mod ragview;
 #[path = "lineview.rs"]
 mod lineview;
+#[path = "voiceview.rs"]
+mod voiceview;
 
 use crate::anim::{Animator, Mood, Rng, Seq};
 use crate::control::Command;
@@ -517,6 +519,10 @@ pub struct Avatar {
     line: Option<lineview::LineWin>,
     /// The summon key went down then (`talk press`): a tap or a hold at release.
     talk_down: Option<Instant>,
+    /// The talk key went down on an open Line: a tap (not a hold) closes it at key-up.
+    tap_closes: bool,
+    /// Push-to-talk and spoken replies (the `capri-voice` sidecar).
+    voice: voiceview::VoiceState,
     /// What he sent this run, oldest first (the Line's ↑).
     sent: Vec<String>,
     /// A missed reply (or a refused message): one line on her tag until he acknowledges it.
@@ -648,6 +654,7 @@ impl Avatar {
             last_turn: None,
             turner: Default::default(),
             mirror_cfg: crate::settings::Settings::load().map(|s| s.mirror).unwrap_or_default(),
+            voice: voiceview::VoiceState::new(crate::settings::Settings::load().map(|s| s.voice).unwrap_or_default()),
             art_right,
             flippable,
             t_start: init.t_start,
@@ -701,6 +708,7 @@ impl Avatar {
             reader: None,
             line: None,
             talk_down: None,
+            tap_closes: false,
             sent: Vec::new(),
             unread: None,
             seen_turn: 0,
@@ -1225,6 +1233,9 @@ impl Avatar {
         if let Some(i) = self.music_frame() {
             return (i, None);
         }
+        if let Some(i) = self.voice_layer() {
+            return (i, None);
+        }
         if self.sitting()
             && let Some(p) = self.perch_spec()
         {
@@ -1332,7 +1343,24 @@ impl Avatar {
         }
     }
 
+    fn hidden_reason(&self) -> Option<&'static str> {
+        if self.parked.is_some() {
+            Some("user")
+        } else if self.brain.as_ref().is_some_and(|h| h.fs != brainview::FsHide::Shown) {
+            Some("fullscreen")
+        } else if !self.hidden {
+            None
+        } else if self.teleport.is_some() {
+            Some("teleport")
+        } else {
+            Some("other")
+        }
+    }
+
     fn status(&self) -> Status {
+        if let Some(s) = self.voice_status() {
+            return s;
+        }
         if let (Some(_), Some(spec)) = (&self.music, self.music_spec()) {
             return Status {
                 label: spec.status.clone().unwrap_or_else(|| "LISTENING".into()),
@@ -1463,6 +1491,7 @@ impl Avatar {
             }
         };
         take(self.anim.deadline());
+        take(self.voice_deadline(now));
         if !self.anim.busy() {
             take(self.next_activity);
         }
@@ -1544,6 +1573,7 @@ impl Avatar {
             self.sliver = None;
         }
         let mut dirty = self.anim.tick(now);
+        dirty |= self.voice_tick(now);
         dirty |= self.step_turn(now);
         if let Some((at, m)) = self.mood_then
             && at <= now
@@ -2054,6 +2084,7 @@ impl Avatar {
                     Ok(mut v) => {
                         v["line"] = line;
                         v["unread"] = serde_json::json!(self.unread.as_ref().map(|u| serde_json::json!({ "n": u.n, "text": u.text, "refused": u.refused })));
+                        v["voice"] = self.voice_state_json();
                         v.to_string()
                     }
                     Err(_) => s,
@@ -2124,7 +2155,7 @@ impl Avatar {
                 if press {
                     self.talk_press(cx)
                 } else {
-                    self.talk_release()
+                    self.talk_release(cx)
                 }
             }
             Command::LineClose => {
@@ -2618,6 +2649,10 @@ impl Avatar {
             "page": [page, pages],
             "read": self.bubble.as_ref().is_some_and(|b| b.long()),
             "hidden_by_user": self.parked.is_some(),
+            // Why she isn't drawn: "user" (HIDE), "fullscreen" (hid for a fullscreen window:
+            // `hidden_cover` is it), "teleport" (between the legs), "other"; null when shown.
+            "hidden": self.hidden_reason(),
+            "hidden_cover": self.brain.as_ref().filter(|h| h.fs != brainview::FsHide::Shown).and_then(|h| h.fs_cover).map(|w| format!("0x{w:x}")),
             "chip": self.chip_rect.map(|r| [r.0 as i64, r.1 as i64, r.2 as i64, r.3 as i64, r.4 as i64]),
             "reader": reader.map(|(xid, (scroll, max), buttons)| {
                 let g = self.x11.toplevel_rect(xid).map_or((0, 0, 0, 0), |r| (r.x, r.y, r.w, r.h));
@@ -2868,6 +2903,10 @@ impl Avatar {
                 more: b.busy,
                 width: 0.0,
             });
+        }
+        // A spoken turn: its sentences go to the sidecar; the bubble is the caption.
+        if self.voice_reply(b, new_turn) {
+            return;
         }
         if let Some(Some((t0, got))) = &mut self.timing
             && !*got
@@ -3461,6 +3500,10 @@ impl Avatar {
             self.schedule(cx);
         }
         let Some(head) = self.hit(ev.position) else { return };
+        // A click on her stops her talking (barge-in); the press goes on as usual.
+        if self.voice_speaking() {
+            self.voice_hush("click");
+        }
         // Tests drive her with synthetic taps only: a real press in a recording means a person
         // touched her (the clip is thrown away).
         elog!("synaps-avatar: real pointer press ({:?}, {})", ev.button, if head { "head" } else { "body" });
@@ -3828,6 +3871,8 @@ fn glyph(kind: &str, fg: u32, bg: u32) -> impl IntoElement {
                     fill_poly(window, &circle(5.5, 5.5, 4.6), fg);
                     fill_poly(window, &circle(5.5, 5.5, 2.6), bg);
                 }
+                // The mic is open: a filled dot.
+                "rec" => fill_poly(window, &circle(5.5, 5.5, 4.4), fg),
                 "gear" => {
                     let pts: Vec<(f32, f32)> = (0..32)
                         .map(|i| {
@@ -4430,7 +4475,7 @@ impl Render for Avatar {
                 Some(u) if u.refused => format!("{} // {}", self.name, u.text),
                 Some(u) => {
                     // Inside her window: the plate is centred on her.
-                    let head = format!("{} {} NEW  ", self.name, u.n);
+                    let head = format!("{} {} NEW  READ ▸  ", self.name, u.n);
                     let per = TAG_FONT * 0.62 + 1.5;
                     let fit = ((l.win_w as f32 / sf - 80.0) / per) as usize;
                     crate::session::one_line(&u.text, fit.saturating_sub(head.chars().count()).clamp(8, 44))
@@ -4459,6 +4504,10 @@ impl Render for Avatar {
                             .child(div().px(px(5.0)).bg(rgb(pal.name)).text_color(rgb(pal.surface)).child(tracked(&b, 1.0)))
                     })
                     .child(tracked(&text, if fresh { 0.4 } else { 1.5 }))
+                    // It opens: say so, inside the plate.
+                    .when(fresh, |d| {
+                        d.child(div().pl(px(7.0)).border_l_1().border_color(rgb(pal.name)).text_color(rgb(pal.name)).child(tracked("READ ▸", 1.2)))
+                    })
                     // A reply put away behind the plate: a small up-chevron inside it.
                     .when(collapsed && !fresh, |d| d.child(chevron(Chevron::Up, rgb(fg))));
                 // A dark ring keeps the plate legible on busy backgrounds.
@@ -4569,7 +4618,10 @@ impl Render for Avatar {
                         // A turn another session woke is theirs, not his.
                         Some(e) => match crate::session::origin(e) {
                             Some((who, _, text)) => format!("⇄ {who} › {}", crate::session::one_line(&text, 24)),
-                            None => format!("YOU › {}", crate::session::one_line(e, 26)),
+                            None => match crate::voice::spoken(e) {
+                                Some(said) => format!("◉ YOU › {}", crate::session::one_line(said, 24)),
+                                None => format!("YOU › {}", crate::session::one_line(e, 26)),
+                            },
                         },
                         None => "INCOMING TRANSMISSION".into(),
                     };

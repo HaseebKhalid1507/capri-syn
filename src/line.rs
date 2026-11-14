@@ -16,8 +16,9 @@ use std::time::{Duration, Instant};
 
 /// Prompt keys do nothing this long after a prompt shows (as the buttons).
 pub const ARM: Duration = Duration::from_millis(400);
-/// A risky prompt (a tool activation, shell/exec/write-class tools) allows only on Shift+A
-/// or A held this long; a bare tap of A does nothing there.
+/// A risky prompt (a tool activation, shell/exec/write-class tools) allows only on A (or a
+/// click on ALLOW) held this long; a tap does nothing there. No Shift+A: that is just a capital
+/// A, which typing into the wrong focus would send.
 pub const HOLD: Duration = Duration::from_millis(450);
 const ESC_AGAIN: Duration = Duration::from_millis(1000);
 const PAD: f32 = 14.0;
@@ -53,6 +54,14 @@ pub struct Snap {
     pub busy: bool,
     pub live: bool,
     pub prompts: Vec<PromptView>,
+    /// She is speaking a spoken reply (Esc hushes her first).
+    pub speaking: bool,
+    /// The mic is held open (Esc cancels: nothing sent).
+    pub listening: bool,
+    /// The mic row while he holds the key (`● MIC 0:02 ▮▮▯▯▯`), or what follows key-up.
+    pub mic: Option<String>,
+    /// The sentence she is saying now (the caption, paced by her voice).
+    pub caption: Option<String>,
 }
 
 /// The kit's components (the Line's text field), its dark theme and caret policy: set up
@@ -87,6 +96,10 @@ pub enum Ask {
     Height(f32),
     Copy(String),
     OpenUrl(String),
+    /// Esc while she speaks: stop talking (the reply stays in the thread).
+    Hush,
+    /// Esc while the mic is held: nothing is transcribed or sent.
+    CancelListen,
 }
 
 pub type OnAsk = Box<dyn Fn(Ask, &mut App) -> Result<(), String>>;
@@ -107,6 +120,11 @@ pub struct Line {
     secret: Option<(u64, Entity<InputState>)>,
     focus: FocusHandle,
     scroll: ScrollHandle,
+    /// ALLOW's box (window px, from the last paint), for tests.
+    allow_box: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
+    /// The thread's height cut to whole rows (from the last layout), so at the bottom its top
+    /// starts at a row, never half of one under the header.
+    fit_h: Option<f32>,
     /// Scrolled up by him: new rows don't pull the view down.
     pinned_up: bool,
     sent: Vec<String>,
@@ -272,6 +290,8 @@ impl Line {
             secret: None,
             focus,
             scroll: ScrollHandle::new(),
+            allow_box: Default::default(),
+            fit_h: None,
             pinned_up: false,
             sent,
             recall: None,
@@ -381,6 +401,7 @@ impl Line {
             "renders": self.renders.get(),
             "side": self.side,
             "holding": self.hold_at.is_some(),
+            "allow": self.allow_box.get().map(|b| [f32::from(b.origin.x), f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height)]),
             "risky": self.prompt().is_some_and(risky),
             "note": self.note,
             "prompts": self.snap.prompts.len(),
@@ -518,6 +539,16 @@ impl Line {
             return true;
         }
         match (k.key.as_str(), self.mode) {
+            ("escape", _) if self.snap.listening => {
+                (self.on_ask)(Ask::CancelListen, cx).ok();
+                true
+            }
+            ("escape", _) if self.snap.speaking => {
+                (self.on_ask)(Ask::Hush, cx).ok();
+                self.note = Some("HUSHED · THE REST IS HERE".into());
+                cx.notify();
+                true
+            }
             ("escape", Mode::Text) if self.snap.busy => {
                 if self.esc_at.is_some_and(|t| now < t + ESC_AGAIN) {
                     self.esc_at = None;
@@ -611,25 +642,12 @@ impl Line {
                 if now < self.prompt_at + ARM {
                     return true;
                 }
-                if !risky || m.shift {
+                if !risky {
                     self.hold_at = None;
                     self.answer(id, Some("y".into()), window, cx);
                 } else if self.hold_at.is_none() {
                     // Held: it allows at HOLD unless A comes up first (key repeats ignored).
-                    self.hold_at = Some(now);
-                    self.note = None;
-                    cx.spawn_in(window, async move |this, cx| {
-                        cx.background_executor().timer(HOLD).await;
-                        this.update_in(cx, |l, window, cx| {
-                            if l.hold_at == Some(now) && l.prompt().is_some_and(|p| p.id == id) {
-                                l.hold_at = None;
-                                l.answer(id, Some("y".into()), window, cx);
-                            }
-                        })
-                        .ok();
-                    })
-                    .detach();
-                    cx.notify();
+                    self.start_hold(id, now, window, cx);
                 }
                 true
             }
@@ -659,18 +677,38 @@ impl Line {
         }
     }
 
+    /// A risky allow, held (A or a click on ALLOW): it fires at HOLD unless let go first.
+    fn start_hold(&mut self, id: u64, now: Instant, window: &mut Window, cx: &mut Context<Line>) {
+        self.hold_at = Some(now);
+        self.note = None;
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(HOLD).await;
+            this.update_in(cx, |l, window, cx| {
+                if l.hold_at == Some(now) && l.prompt().is_some_and(|p| p.id == id) {
+                    l.hold_at = None;
+                    l.answer(id, Some("y".into()), window, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
     /// A let go before HOLD on a risky prompt: nothing allowed, and he is told how.
+    fn let_go(&mut self, cx: &mut Context<Line>) {
+        if let Some(t0) = self.hold_at.take() {
+            if t0.elapsed() < HOLD {
+                self.note = Some(format!("NOT ALLOWED · HOLD A FOR {:.2} s TO ALLOW THIS ONE", HOLD.as_secs_f32()));
+            }
+            cx.notify();
+        }
+    }
+
     fn key_up(&mut self, k: &Keystroke, cx: &mut Context<Line>) {
         if k.key == "a" {
             self.a_down = false;
-        }
-        if k.key == "a"
-            && let Some(t0) = self.hold_at.take()
-        {
-            if t0.elapsed() < HOLD {
-                self.note = Some("NOT ALLOWED · HOLD A (OR ⇧A) TO ALLOW THIS ONE".into());
-            }
-            cx.notify();
+            self.let_go(cx);
         }
     }
 
@@ -959,7 +997,7 @@ impl Line {
                     .items_center()
                     .gap(px(6.0))
                     .child(div().px(px(6.0)).border_1().border_color(rgb(pal.frame)).text_color(rgb(pal.frame)).font_weight(FontWeight::BOLD).child("HOLD A"))
-                    .child(div().text_color(rgb(pal.dim)).child("or ⇧A"))
+                    .child(div().text_color(rgb(pal.text)).child(format!("· {:.2} s", HOLD.as_secs_f32())))
                     .child(
                         div()
                             .relative()
@@ -980,20 +1018,47 @@ impl Line {
                     .gap(px(22.0))
                     .text_size(px(12.5))
                     .child(div().id("deny").cursor_pointer().child(key("D", "DENY", pal.slash)).on_click(cx.listener(move |this, _, window, cx| this.answer(id, None, window, cx))))
-                    .child(div().id("allow").cursor_pointer().child(allow).on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
-                        // A click allows a risky one only with Shift held.
-                        if !risky || ev.modifiers().shift {
-                            this.answer(id, Some("y".into()), window, cx);
-                        } else {
-                            this.note = Some("NOT ALLOWED · ⇧CLICK, ⇧A OR HOLD A".into());
-                            cx.notify();
-                        }
-                    })))
+                    .child(
+                        div()
+                            .id("allow")
+                            .relative()
+                            .cursor_pointer()
+                            .child(allow)
+                            .child({
+                                let cell = self.allow_box.clone();
+                                canvas(move |b, _, _| cell.set(Some(b)), |_, _, _, _| {}).absolute().top_0().left_0().size_full()
+                            })
+                            // A click allows a benign one; a risky one wants the press held.
+                            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                                if Instant::now() < this.prompt_at + ARM {
+                                    return;
+                                }
+                                if !risky {
+                                    this.answer(id, Some("y".into()), window, cx);
+                                } else if this.hold_at.is_none() {
+                                    this.start_hold(id, Instant::now(), window, cx);
+                                }
+                            }))
+                            .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, cx| this.let_go(cx)))
+                            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, cx| this.let_go(cx))),
+                    )
                     .child(key("ESC", "LATER", pal.dim))
                     .child(key("TAB", "SAY SOMETHING INSTEAD", pal.dim)),
             );
             if risky {
-                col = col.child(div().text_size(px(11.5)).text_color(rgb(pal.slash)).child("this one can run or change things: a tap of A does nothing"));
+                col = col.child(
+                    div()
+                        .mt(px(2.0))
+                        .px(px(8.0))
+                        .py(px(4.0))
+                        .border_l_2()
+                        .border_color(rgb(pal.slash))
+                        .bg(rgba((pal.slash << 8) | 0x1c))
+                        .text_size(px(14.0))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(rgb(pal.slash))
+                        .child(format!("This one can run or change things on your machine. Hold A (or hold the click) for {:.2} s to allow; a tap does nothing.", HOLD.as_secs_f32())),
+                );
             }
         }
         if !armed {
@@ -1036,8 +1101,28 @@ impl Render for Line {
             .child(div().flex_1())
             .child(div().text_color(rgb(if self.parked { pal.dim } else { pal.frame })).child(status));
         let rows: Vec<AnyElement> = self.snap.rows.iter().enumerate().map(|(i, r)| self.row_el(i, r, cx)).collect();
-        // Scrolled: the top edge fades out instead of cutting a line in half.
-        let scrolled = self.scroll.offset().y < px(-1.0);
+        // At the bottom the thread starts at a whole row: its height is cut to the rows that
+        // fit (measured on the last layout; one more frame when that changes).
+        let fit = {
+            let top = self.scroll.bounds().top();
+            let items: Vec<Bounds<Pixels>> = (0..).map_while(|i| self.scroll.bounds_for_item(i)).collect();
+            items.last().and_then(|last| {
+                let total = f32::from(last.bottom() - top) + 10.0;
+                (total > self.max_thread)
+                    .then(|| items.iter().map(|b| f32::from(b.top() - top)).find(|c| total - (c - 6.0) <= self.max_thread).map(|c| total - c + 6.0))
+                    .flatten()
+            })
+        };
+        if fit != self.fit_h {
+            self.fit_h = fit;
+            if !self.pinned_up {
+                self.scroll.scroll_to_bottom();
+            }
+            cx.on_next_frame(window, |_, _, cx| cx.notify());
+        }
+        // Scrolled up mid-row: the top edge fades out instead of cutting a line in half.
+        let at_bottom = self.scroll.offset().y <= -self.scroll.max_offset().y + px(1.0);
+        let scrolled = self.scroll.offset().y < px(-1.0) && !at_bottom;
         let thread = (!rows.is_empty()).then(|| {
             let fade = linear_gradient(180.0, linear_color_stop(rgb(pal.surface), 0.0), linear_color_stop(rgba(pal.surface << 8), 1.0));
             div()
@@ -1045,7 +1130,7 @@ impl Render for Line {
                 .child(
                     div()
                         .id("thread")
-                        .max_h(px(self.max_thread))
+                        .max_h(px(self.fit_h.unwrap_or(self.max_thread)))
                         .overflow_y_scroll()
                         .track_scroll(&self.scroll)
                         .px(px(PAD))
@@ -1091,8 +1176,41 @@ impl Render for Line {
                     ),
             )
         });
+        // Voice: the mic row while he holds the key; the caption while she speaks.
+        let voice_row = self.snap.mic.clone().map(|m| {
+            div()
+                .mx(px(PAD))
+                .mt(px(6.0))
+                .px(px(10.0))
+                .py(px(7.0))
+                .border_2()
+                .border_color(rgb(0xff3b62))
+                .bg(rgba(0xff3b6222))
+                .flex()
+                .gap(px(14.0))
+                .text_size(px(14.0))
+                .font_weight(FontWeight::BOLD)
+                .child(div().text_color(rgb(0xff3b62)).child(m))
+        });
+        let caption = self.snap.caption.clone().map(|c| {
+            div()
+                .mx(px(PAD))
+                .mt(px(6.0))
+                .px(px(10.0))
+                .py(px(6.0))
+                .border_l_2()
+                .border_color(rgb(0xff6fd8))
+                .bg(rgba(0xff6fd818))
+                .flex()
+                .gap(px(10.0))
+                .text_size(px(FONT))
+                .child(div().flex_none().text_color(rgb(0xff6fd8)).font_weight(FontWeight::BOLD).child("▶"))
+                .child(div().flex_1().text_color(rgb(pal.text)).child(c))
+        });
         let hint = if self.mode == Mode::Prompt {
             None
+        } else if self.snap.caption.is_some() {
+            Some("esc or $mod+c hush · the whole reply is in the thread".into())
         } else if !self.snap.live {
             Some("OFFLINE · not sent while offline · draft is kept".to_string())
         } else if self.snap.busy {
@@ -1124,6 +1242,8 @@ impl Render for Line {
             .children(thread)
             .children(pending)
             .children(prompt)
+            .children(caption)
+            .children(voice_row)
             .children(input)
             .child(footer)
             .child(

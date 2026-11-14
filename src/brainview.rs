@@ -155,6 +155,8 @@ pub(super) struct BrainHost {
     saved_at: Option<Instant>,
     save_due: bool,
     pub fs: FsHide,
+    /// The fullscreen window she hid for (the focused client when the hide began).
+    pub fs_cover: Option<u32>,
     boxes: Boxes,
     pub ticks: u64,
     last_abort: Option<Instant>,
@@ -355,6 +357,7 @@ impl Avatar {
             saved_at: None,
             save_due: false,
             fs: FsHide::Shown,
+            fs_cover: None,
             boxes,
             ticks: 0,
             last_abort: None,
@@ -1517,7 +1520,21 @@ impl Avatar {
     }
 
     fn brain_hide(&mut self, hide: bool, now: Instant) {
+        let cover = if hide {
+            let ov = self.brain.as_ref().and_then(|h| h.ov.focus.flatten());
+            ov.or_else(|| self.x11.active_window()).or_else(|| self.x11.focused_window().ok()).filter(|&w| w > 1)
+        } else {
+            None
+        };
         let Some(h) = &mut self.brain else { return };
+        // One line each way: a fullscreen hide leaves her as a 1 px shape, easy to take for gone.
+        if hide && h.fs == FsHide::Shown {
+            let user = if self.parked.is_some() { " (already hidden from her menu)" } else { "" };
+            elog!("synaps-avatar: fullscreen-hide: on, a fullscreen window covers her monitor ({}){user}", cover.map_or("unknown".into(), |w| format!("0x{w:x}")));
+        } else if !hide && h.fs != FsHide::Shown {
+            elog!("synaps-avatar: fullscreen-hide: off, back after {}", h.fs_cover.map_or("a fullscreen window".into(), |w| format!("0x{w:x} left fullscreen")));
+        }
+        h.fs_cover = if hide { cover.or(h.fs_cover) } else { None };
         let t = h.bnow(now) - h.brain.start();
         h.write(serde_json::json!({ "t": t, "k": if hide { "hide" } else { "show" } }));
         if self.parked.is_some() {
@@ -1930,6 +1947,7 @@ impl Avatar {
             Ok(s) => {
                 self.rag_strength = crate::ragdoll::Strength(s.ragdoll.strength);
                 self.mirror_cfg = s.mirror.clone();
+                self.voice.cfg = s.voice.clone();
                 if crate::env_composited().is_none() && self.x11.force_composited(s.display.composited) {
                     elog!("synaps-avatar: settings: {} mode", if self.x11.composited() { "alpha" } else { "shape" });
                     self.alpha_switched();

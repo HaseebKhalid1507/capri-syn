@@ -38,9 +38,20 @@ impl Avatar {
     /// `talk press`: open the Line (or resume it parked, or close it).
     pub(super) fn talk_press(&mut self, cx: &mut Context<Self>) -> String {
         let now = Instant::now();
+        // Held keys repeat: a press while down, or inside the key-up window, is the same press.
+        if self.voice_repeat() || self.talk_down.is_some_and(|t| t.elapsed() < Duration::from_secs(120)) {
+            return "ok held".into();
+        }
         self.talk_down = Some(now);
+        let hushed = self.voice_press(now, cx);
         self.brain_touch(crate::brain::Touch::Typing);
         if let Some(l) = &self.line {
+            // Open and his: a tap closes it, a hold (voice) keeps it: decided at key-up. A
+            // tap that hushed her only hushed her.
+            if !l.parked {
+                self.tap_closes = !hushed;
+                return "ok line open".into();
+            }
             let (view, handle) = (l.view.clone(), l.handle);
             // Deferred: closing calls back into this view.
             cx.defer(move |cx| {
@@ -51,12 +62,27 @@ impl Avatar {
         self.open_line(cx)
     }
 
-    /// `talk release`: a hold is voice's hook (not built yet: it typed, as a tap).
-    pub(super) fn talk_release(&mut self) -> String {
-        let Some(t0) = self.talk_down.take() else { return "ok (no press)".into() };
+    /// `talk release`: a tap typed (the Line is open); a hold sends what she heard (voice
+    /// on), after the auto-repeat window.
+    pub(super) fn talk_release(&mut self, cx: &mut Context<Self>) -> String {
+        let Some(t0) = self.talk_down else { return "ok (no press)".into() };
         let ms = t0.elapsed().as_millis();
+        if !self.voice_up(cx) {
+            return "ok repeat (key still down)".into();
+        }
+        if std::mem::take(&mut self.tap_closes)
+            && ms < TAP_MS
+            && let Some(l) = &self.line
+        {
+            let (view, handle) = (l.view.clone(), l.handle);
+            cx.defer(move |cx| {
+                handle.update(cx, |_, window, cx| view.update(cx, |l, cx| l.summon(window, cx))).ok();
+            });
+        }
         if ms >= TAP_MS {
-            elog!("synaps-avatar: talk held {ms} ms: push-to-talk isn't built yet; the Line opened for typing");
+            if !self.voice_on() {
+                elog!("synaps-avatar: talk held {ms} ms: voice is off ([voice] enabled = false); the Line opened for typing");
+            }
             format!("ok hold {ms} ms")
         } else {
             format!("ok tap {ms} ms")
@@ -212,7 +238,10 @@ impl Avatar {
                 K::Thinking => continue,
                 K::User => match crate::session::origin(&it.text) {
                     Some((who, kind, text)) => Row { who: Who::Relay(who, kind), text, detail: String::new(), streaming: false },
-                    None => Row { who: Who::You, text: it.text.trim().to_string(), detail: String::new(), streaming: false },
+                    None => match crate::voice::spoken(&it.text) {
+                        Some(said) => Row { who: Who::You, text: format!("◉ {}", said.trim()), detail: String::new(), streaming: false },
+                        None => Row { who: Who::You, text: it.text.trim().to_string(), detail: String::new(), streaming: false },
+                    },
                 },
                 K::Assistant => {
                     if it.text.trim().is_empty() {
@@ -246,7 +275,17 @@ impl Avatar {
         }
         rows.reverse();
         let b = s.shown.as_ref();
-        Snap { rows, status, busy: s.link.busy(), live: b.is_some_and(|b| b.live), prompts: b.map(|b| b.prompts.clone()).unwrap_or_default() }
+        Snap {
+            rows,
+            status,
+            busy: s.link.busy(),
+            live: b.is_some_and(|b| b.live),
+            prompts: b.map(|b| b.prompts.clone()).unwrap_or_default(),
+            speaking: self.voice_speaking(),
+            listening: self.voice_listening(),
+            mic: self.voice_mic_row(),
+            caption: self.voice_caption_now(),
+        }
     }
 
     /// Bring an open Line up to date (deferred: the Line may call back).
@@ -280,6 +319,17 @@ impl Avatar {
             }
             Ask::Abort => {
                 self.abort();
+                Ok(())
+            }
+            Ask::Hush => {
+                if self.voice_speaking() {
+                    self.voice_hush("esc");
+                }
+                Ok(())
+            }
+            Ask::CancelListen => {
+                elog!("synaps-avatar: voice: esc in the Line while listening");
+                self.voice_cancel(cx);
                 Ok(())
             }
             Ask::Answer(id, value) => {

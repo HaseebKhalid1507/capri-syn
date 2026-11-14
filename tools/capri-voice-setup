@@ -1,0 +1,16 @@
+#!/bin/bash
+# capri-voice-setup: the sidecar's user-local venv and models (no sudo, nothing system-wide).
+#   ~/.local/share/capri-voice/venv   kokoro-onnx (+ onnxruntime CPU), system site-packages for pywhispercpp
+#   ~/.local/share/capri-voice/models ggml-small.en-q5_1 (190 MB), ggml-base.en-q5_1 (60 MB),
+#                                     kokoro-v1.0.int8.onnx (92 MB), kokoro-v1.0.onnx (326 MB), voices-v1.0.bin (28 MB)
+# pywhispercpp itself comes from the distro (python-pywhispercpp-cpu on bella).
+set -eu
+V=~/.local/share/capri-voice; mkdir -p $V/models; cd $V
+[ -d venv ] || uv venv -q --system-site-packages -p /usr/bin/python3 venv
+VIRTUAL_ENV=$V/venv uv pip install -q kokoro-onnx
+B=https://huggingface.co/ggerganov/whisper.cpp/resolve/main
+for m in ggml-small.en-q5_1.bin ggml-base.en-q5_1.bin; do [ -s models/$m ] || curl -sSfL -o models/$m $B/$m; done
+K=https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0
+for m in kokoro-v1.0.int8.onnx voices-v1.0.bin; do [ -s models/$m ] || curl -sSfL -o models/$m $K/$m; done
+venv/bin/python -c "import kokoro_onnx, pywhispercpp; print('capri-voice: ok')"
+du -sh venv models

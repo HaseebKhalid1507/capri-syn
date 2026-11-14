@@ -44,6 +44,7 @@ mod shape;
 mod ticker;
 mod state;
 mod view;
+mod voice;
 
 use anyhow::{Context as _, Result, bail};
 use gpui_kit::*;
