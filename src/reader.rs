@@ -407,7 +407,9 @@ impl Render for Reader {
                     .line_height(px(LINE))
                     .text_color(rgb(pal.text))
                     .child(div().flex_none().min_w(px(14.0)).text_color(rgb(pal.frame)).font_weight(FontWeight::BOLD).child(marker.clone()))
-                    .child(div().flex_1().child(styled(t, pal)))
+                    // min_w(0): a flex item's min width is its content's, so without it a long
+                    // item never wraps and runs off the panel's right edge.
+                    .child(div().flex_1().min_w(px(0.0)).child(styled(t, pal)))
                     .into_any_element(),
                 Block::Rule => div().h(px(1.0)).my(px(6.0)).bg(rgba((pal.frame << 8) | 0x44)).into_any_element(),
                 Block::Code { lang, text } => {
