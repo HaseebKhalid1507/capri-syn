@@ -269,6 +269,10 @@ impl Avatar {
         }
         let shown = Shown { frame: self.rag_frame(&rag, out.frame.as_deref()), plan: BodyPlan::plain() };
         rag.next = Some(shown);
+        // No X round trips inside her 60 Hz ticks: monitors and work areas as of now, and
+        // the real pointer from its own thread.
+        self.x11.freeze_layout(true);
+        self.x11.poll_pointer(matches!(rag.feed, Feed::Real));
         self.rag = Some(rag);
         self.brain_touch(crate::brain::Touch::DragStart);
         self.rag_plan_next();
@@ -337,7 +341,7 @@ impl Avatar {
                 let o = s.at(r.t);
                 (grab.0 + o.0, grab.1 + o.1)
             }
-            Feed::Real => self.x11.pointer().map_or_else(|_| r.ptr_last(), |p| (p.0 as f32, p.1 as f32)),
+            Feed::Real => self.x11.pointer_fast().map_or_else(|_| r.ptr_last(), |p| (p.0 as f32, p.1 as f32)),
         }
     }
 
@@ -642,6 +646,8 @@ impl Avatar {
     }
 
     fn rag_restore_with(&mut self, r: Rag, now: Instant, landed: bool) {
+        self.x11.freeze_layout(false);
+        self.x11.poll_pointer(false);
         if let Some(mut p) = r.prof.clone().filter(|p| !p.is_empty()) {
             p.sort_unstable();
             let q = |f: f32| p[((p.len() - 1) as f32 * f) as usize];
@@ -833,6 +839,7 @@ impl Avatar {
         r.squash = None;
         r.landed = None;
         r.feed = Feed::Real;
+        self.x11.poll_pointer(true);
         r.grip = local;
         r.zone = zone;
         r.ptr = Pointer::default();

@@ -70,6 +70,14 @@ pub struct X11 {
     fx: Mutex<Vec<(u32, bool, u32)>>,
     /// Work areas as last computed, and when (they cost a stack walk: cached briefly).
     areas: Mutex<Option<(std::time::Instant, Vec<Monitor>)>>,
+    /// Monitors as last read (a RandR round trip: cached like the work areas).
+    mons: Mutex<Option<(std::time::Instant, Vec<Monitor>)>>,
+    /// While she's carried or flying: both caches stay as snapshotted at the grab (no round
+    /// trip inside a 60 Hz tick).
+    frozen: AtomicBool,
+    /// The pointer polled on its own connection while she's held by the real mouse:
+    /// (x << 32 | y as u32, or u64::MAX before the first read; stop flag).
+    poll: Mutex<Option<(Arc<std::sync::atomic::AtomicU64>, Arc<AtomicBool>)>>,
 }
 
 /// One viewable root child, as `stack()` sees it.
@@ -146,6 +154,9 @@ impl X11 {
             target: Arc::new(AtomicU32::new(0)),
             fx: Mutex::new(Vec::new()),
             areas: Mutex::new(None),
+            mons: Mutex::new(None),
+            frozen: AtomicBool::new(false),
+            poll: Mutex::new(None),
         })
     }
 
@@ -352,7 +363,7 @@ impl X11 {
     pub fn work_areas(&self) -> Vec<Monitor> {
         if let Ok(c) = self.areas.lock()
             && let Some((t, a)) = c.as_ref()
-            && t.elapsed() < AREAS_TTL
+            && (t.elapsed() < AREAS_TTL || self.frozen.load(Ordering::Relaxed))
         {
             return a.clone();
         }
@@ -546,7 +557,82 @@ impl X11 {
         }
     }
 
+    /// The monitors (cached for `AREAS_TTL`, or frozen while she's carried).
     pub fn monitors(&self) -> Vec<Monitor> {
+        if let Ok(c) = self.mons.lock()
+            && let Some((t, m)) = c.as_ref()
+            && (t.elapsed() < AREAS_TTL || self.frozen.load(Ordering::Relaxed))
+        {
+            return m.clone();
+        }
+        let out = self.read_monitors();
+        if let Ok(mut c) = self.mons.lock() {
+            *c = Some((std::time::Instant::now(), out.clone()));
+        }
+        out
+    }
+
+    /// Carried (on) or back to normal (off): on takes a fresh snapshot of the monitors and
+    /// work areas and keeps it until off.
+    pub fn freeze_layout(&self, on: bool) {
+        if on {
+            self.frozen.store(false, Ordering::Relaxed);
+            if let Ok(mut c) = self.mons.lock() {
+                *c = None;
+            }
+            if let Ok(mut c) = self.areas.lock() {
+                *c = None;
+            }
+            self.work_areas();
+        }
+        self.frozen.store(on, Ordering::Relaxed);
+    }
+
+    /// Poll the pointer on a thread with its own connection (125 Hz) while on, so a held
+    /// tick reads an atomic instead of a QueryPointer round trip.
+    pub fn poll_pointer(&self, on: bool) {
+        let Ok(mut g) = self.poll.lock() else { return };
+        if !on {
+            if let Some((_, stop)) = g.take() {
+                stop.store(true, Ordering::Relaxed);
+            }
+            return;
+        }
+        if g.is_some() {
+            return;
+        }
+        let pos = Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (p, s) = (pos.clone(), stop.clone());
+        let spawned = std::thread::Builder::new().name("avatar-pointer".into()).spawn(move || {
+            let Ok((c, screen)) = x11rb::connect(None) else { return };
+            let root = c.setup().roots[screen].root;
+            while !s.load(Ordering::Relaxed) {
+                if let Ok(Ok(r)) = c.query_pointer(root).map(|k| k.reply()) {
+                    p.store(((r.root_x as i32 as u32 as u64) << 32) | r.root_y as i32 as u32 as u64, Ordering::Relaxed);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(8));
+            }
+        });
+        if spawned.is_ok() {
+            *g = Some((pos, stop));
+        }
+    }
+
+    /// The polled pointer while polling (and read once), else a QueryPointer.
+    pub fn pointer_fast(&self) -> Result<(i32, i32)> {
+        if let Ok(g) = self.poll.lock()
+            && let Some((pos, _)) = g.as_ref()
+        {
+            let v = pos.load(Ordering::Relaxed);
+            if v != u64::MAX {
+                return Ok(((v >> 32) as u32 as i32, v as u32 as i32));
+            }
+        }
+        self.pointer()
+    }
+
+    fn read_monitors(&self) -> Vec<Monitor> {
         let mut out = Vec::new();
         if let Ok(Ok(r)) = self.conn.randr_get_monitors(self.root, true).map(|c| c.reply()) {
             for m in r.monitors {
