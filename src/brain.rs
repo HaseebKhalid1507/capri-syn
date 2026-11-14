@@ -62,16 +62,19 @@ pub enum Arrival {
     DropIn,
     /// A hop along a short arc (within ~300 px only).
     Hop,
+    /// Float to float: an eased drift (a transport the view picks by distance, no weight).
+    Drift,
 }
 
 impl Arrival {
-    pub const ALL: [Arrival; 4] = [Arrival::Teleport, Arrival::Glitch, Arrival::DropIn, Arrival::Hop];
+    pub const ALL: [Arrival; 5] = [Arrival::Teleport, Arrival::Glitch, Arrival::DropIn, Arrival::Hop, Arrival::Drift];
     pub fn key(self) -> &'static str {
         match self {
             Arrival::Teleport => "teleport",
             Arrival::Glitch => "glitch",
             Arrival::DropIn => "drop_in",
             Arrival::Hop => "hop",
+            Arrival::Drift => "drift",
         }
     }
     pub fn parse(s: &str) -> Option<Arrival> {

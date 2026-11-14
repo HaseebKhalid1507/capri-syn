@@ -5,6 +5,8 @@
 
 #[path = "brainview.rs"]
 mod brainview;
+#[path = "ragview.rs"]
+mod ragview;
 
 use crate::anim::{Animator, Mood, Rng, Seq};
 use crate::control::Command;
@@ -122,7 +124,8 @@ impl Layout {
             geo,
             foot_pad,
             win_w,
-            win_h: avatar_y + geo.height as i32,
+            // Room under the feet for the ragdoll's stretch (the shape hides it otherwise).
+            win_h: avatar_y + geo.height as i32 + d(ragview::DRAG_PAD_B),
             avatar_x,
             avatar_y,
             ground_x: avatar_x + gx.round() as i32,
@@ -442,6 +445,10 @@ pub struct Avatar {
     buttons: Buttons,
     /// The cat brain (None: SA_NO_BRAIN).
     brain: Option<brainview::BrainHost>,
+    /// Carried, flung, landing (None: not ragdolling).
+    rag: Option<ragview::Rag>,
+    /// settings.toml `[ragdoll] strength` (read at start and by `settings reload`).
+    rag_strength: crate::ragdoll::Strength,
     /// Ticks run so far (wake-ups), for the dev `state`.
     view_ticks: u64,
 }
@@ -562,6 +569,8 @@ impl Avatar {
             _subs: vec![activation],
             buttons: Rc::default(),
             brain: None,
+            rag: None,
+            rag_strength: crate::ragdoll::Strength(crate::settings::Settings::load().map_or(0.5, |s| s.ragdoll.strength)),
             view_ticks: 0,
         };
         if std::env::var_os("SA_NO_BRAIN").is_none() {
@@ -691,7 +700,7 @@ impl Avatar {
     /// Move the glint layers to `now`; unmap the ones not in use.
     fn update_glints(&mut self, now: Instant) {
         let life_ms = self.pack.behaviour.life.sparkle_ms;
-        let show = self.loaded && !self.hidden && !self.quitting && self.glitch.is_none() && self.teleport.is_none() && self.squash.is_none();
+        let show = self.loaded && !self.hidden && !self.quitting && self.glitch.is_none() && self.teleport.is_none() && self.squash.is_none() && self.rag.is_none();
         let l = self.layout;
         let base = ((self.applied.0 + l.avatar_x) as f32, (self.applied.1 + l.avatar_y) as f32);
         let mut used = 0;
@@ -938,7 +947,12 @@ impl Avatar {
         let chatter = m == Mood::Talking || prev == Mood::Talking;
         if m != prev && !chatter && self.loaded && self.teleport.is_none() && self.status_of(m).tone != self.status_of(prev).tone {
             let big = self.spec(m).is_some_and(|s| s.big) || self.spec(prev).is_some_and(|s| s.big);
-            self.glitch = Some(Glitch::new(if big { GlitchKind::Big } else { GlitchKind::Burst }, now, self.rng.next()));
+            let kind = if big { GlitchKind::Big } else { GlitchKind::Burst };
+            match &mut self.rag {
+                // Carried: kept (the strongest) and fired after the landing.
+                Some(r) => r.pending_glitch = Some(if big || r.pending_glitch == Some(GlitchKind::Big) { GlitchKind::Big } else { kind }),
+                None => self.glitch = Some(Glitch::new(kind, now, self.rng.next())),
+            }
         }
         self.mood = m;
         let spec = self.spec(m).cloned();
@@ -953,6 +967,9 @@ impl Avatar {
             None
         };
         self.next_hop = spec.as_ref().and_then(|s| s.hop_every_ms).filter(|&p| p > 0).map(|p| now + jitter(&mut self.rng, p) / 2);
+        if self.rag.is_some() {
+            self.next_activity = None;
+        }
         self.next_glitch = spec.as_ref().and_then(|s| s.glitch_every_ms).filter(|&p| p > 0).map(|p| now + jitter(&mut self.rng, p));
     }
 
@@ -1042,7 +1059,7 @@ impl Avatar {
 
     /// Show, move or hide the contact shadow to match the placement.
     fn sync_shadow(&mut self) {
-        let want = self.sitting() && self.loaded && !self.hidden && self.teleport.is_none() && !self.quitting && self.press.is_none();
+        let want = self.sitting() && self.loaded && !self.hidden && self.teleport.is_none() && !self.quitting && self.press.is_none() && self.rag.is_none();
         // The resting frame of the current layer (music swaps the pose), else the perch base.
         let base = Some(self.anim.base())
             .filter(|&i| self.pack.frames.get(i).is_some_and(|f| f.anchor.name == "seat"))
@@ -1094,6 +1111,7 @@ impl Avatar {
         self.loaded
             && !matches!(self.placement, Placement::Perch { sit: true, .. } | Placement::Pose { .. })
             && self.press.is_none()
+            && self.rag.is_none()
             && self.teleport.is_none()
             && self.music.is_none()
     }
@@ -1158,6 +1176,10 @@ impl Avatar {
             take(self.next_hop);
         }
         take(self.brain_deadline(now));
+        take(self.rag_deadline(now));
+        if self.swing_on() {
+            take(self.brain.as_ref().and_then(|h| h.swing.as_ref()).map_or(Some(now), |s| Some(s.due)));
+        }
         t
     }
 
@@ -1355,6 +1377,8 @@ impl Avatar {
         {
             self.hop = None;
         }
+        dirty |= self.rag_tick(now);
+        dirty |= self.swing_tick(now);
         if self.loaded {
             dirty |= self.brain_tick(now);
         }
@@ -1376,7 +1400,7 @@ impl Avatar {
         }
         let gap = (self.rng.range(lo as f32, hi.max(lo) as f32) as u64).max(250);
         self.next_glint = Some(now + Duration::from_millis(gap));
-        if !self.loaded || self.hidden || self.teleport.is_some() {
+        if !self.loaded || self.hidden || self.teleport.is_some() || self.rag.is_some() {
             return;
         }
         let Some(f) = self.frame_or_default(self.anim.frame()) else { return };
@@ -1515,6 +1539,17 @@ impl Avatar {
 
     pub fn apply(&mut self, cmd: Command, cx: &mut Context<Self>) -> String {
         let now = Instant::now();
+        // While she is carried: placing commands are refused; in the air or landing, the rag
+        // gives way first. hide/quit always win.
+        if self.rag.is_some() {
+            let places = matches!(cmd, Command::Pos(..) | Command::Perch { .. } | Command::Unperch | Command::Drop);
+            if places && self.rag_held() {
+                return "error: held".into();
+            }
+            if places || matches!(cmd, Command::Hide | Command::Quit) {
+                self.rag_cancel(now);
+            }
+        }
         let reply = match cmd {
             Command::Mood(m) => {
                 self.set_mood(m, now);
@@ -1606,9 +1641,13 @@ impl Avatar {
                 "bye".into()
             }
             Command::Glitch => {
-                self.glitch = Some(Glitch::new(GlitchKind::Big, now, self.rng.next()));
+                match &mut self.rag {
+                    Some(r) => r.pending_glitch = Some(GlitchKind::Big),
+                    None => self.glitch = Some(Glitch::new(GlitchKind::Big, now, self.rng.next())),
+                }
                 "ok".into()
             }
+            Command::Drag(ops) => self.drag_cmd(ops, now),
             Command::Music(on) => {
                 if on {
                     match self.music_on(now, None) {
@@ -1779,7 +1818,7 @@ impl Avatar {
     }
 
     fn state_json(&self) -> String {
-        let frame = self.frame_or_default(self.anim.frame()).map(|f| f.id.clone()).unwrap_or_default();
+        let frame = self.frame_or_default(self.shown_frame()).map(|f| f.id.clone()).unwrap_or_default();
         let (gx, gy) = self.ground();
         let m = self.x11.monitor_at(gx, gy - 1);
         let (page, pages) = self.bubble.as_ref().map_or((0, 0), |b| {
@@ -1797,6 +1836,7 @@ impl Avatar {
             "xid": self.x11.win,
             "monitor": { "x": m.x, "y": m.y, "w": m.w, "h": m.h },
             "frame": frame,
+            "rag": self.rag_json(),
             "status": self.status().label,
             "window": { "x": self.origin.0, "y": self.origin.1, "w": self.layout.win_w, "h": self.layout.win_h },
             "ground": [gx, gy],
@@ -2261,7 +2301,7 @@ impl Avatar {
 
     fn apply_offset(&mut self, now: Instant) {
         let hop = self.hop.and_then(|t| fx::hop(now.saturating_duration_since(t), 16.0 * self.layout.sf)).unwrap_or(0);
-        let pos = (self.origin.0, self.origin.1 - hop);
+        let pos = (self.origin.0, self.origin.1 - hop + self.drop_in_offset(now) + self.float_bob(now));
         if pos != self.applied {
             self.x11.move_to(pos.0, pos.1).ok();
             self.applied = pos;
@@ -2521,10 +2561,11 @@ impl Avatar {
     }
 
     fn hit(&self, p: Point<Pixels>) -> Option<bool> {
-        if self.hidden || self.teleport.is_some() {
+        // A teleport can be grabbed in its vanish and landing legs (not as the bolt).
+        if self.hidden || self.quitting || self.teleport.as_ref().is_some_and(|t| matches!(t.leg, Leg::Bolt(_))) {
             return None;
         }
-        let f = self.frame_or_default(self.anim.frame())?;
+        let f = self.frame_or_default(self.shown_frame())?;
         let (x, y) = self.local(p);
         f.mask.get(x, y).then_some(y < f.head_line)
     }
@@ -2538,10 +2579,20 @@ impl Avatar {
         // Tests drive her with synthetic taps only: a real press in a recording means a person
         // touched her (the clip is thrown away).
         eprintln!("synaps-avatar: real pointer press ({:?}, {})", ev.button, if head { "head" } else { "body" });
+        // A real press beats a scripted drag: the script is dropped, the press goes on.
+        if self.rag.as_ref().is_some_and(|r| matches!(r.feed, ragview::Feed::Script { .. })) {
+            self.rag_cancel(Instant::now());
+        }
         match ev.button {
             MouseButton::Left => {
                 let root = self.x11.pointer().unwrap_or((0, 0));
-                self.press = Some(Press { root, origin: self.origin, head, dragging: false });
+                // Caught mid-flight: held again at once.
+                let caught = self.rag_catch(self.local(ev.position), Instant::now());
+                self.press = Some(Press { root, origin: self.origin, head, dragging: caught });
+                if caught {
+                    cx.notify();
+                    self.schedule(cx);
+                }
             }
             MouseButton::Right => {
                 self.brain_touch(crate::brain::Touch::Menu);
@@ -2563,22 +2614,15 @@ impl Avatar {
         if !p.dragging && dx * dx + dy * dy < 25 {
             return;
         }
-        let o = (p.origin.0 + dx, p.origin.1 + dy);
         if !p.dragging {
             p.dragging = true;
-            self.brain_touch(crate::brain::Touch::DragStart);
-            // Picked up off a perch (or a pose): stand again while carried.
-            if let Some(h) = &mut self.brain {
-                h.rest = None;
-            }
-            if self.placement != Placement::Ground {
-                self.placement = Placement::Ground;
-                self.x11.set_target(0);
-                self.relayer(Instant::now());
-                cx.notify();
-            }
+            // The press point on her, avatar-local (where the pointer went down).
+            let local = (p.root.0 - p.origin.0 - self.layout.avatar_x, p.root.1 - p.origin.1 - self.layout.avatar_y);
+            self.rag_grab(local, ragview::Feed::Real, Instant::now());
         }
-        self.move_to(o, false);
+        // The rag samples the pointer once per tick; motion only wakes it.
+        cx.notify();
+        self.schedule(cx);
     }
 
     fn mouse_up(&mut self, ev: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -2588,7 +2632,9 @@ impl Avatar {
         let Some(p) = self.press.take() else { return };
         let now = Instant::now();
         if p.dragging {
-            self.drop_here(now);
+            if self.rag.as_ref().is_some_and(|r| matches!(r.feed, ragview::Feed::Real)) {
+                self.rag_release(now);
+            }
             cx.notify();
             self.schedule(cx);
             return;
@@ -2995,7 +3041,12 @@ impl Render for Avatar {
                 b.wrap = Some(w);
             }
         }
-        let frame = self.frame_or_default(self.anim.frame());
+        // Carried: the rag's committed frame and plan on top, its next one underneath.
+        let rag_shown = self.rag.as_ref().map(|r| (r.cur.clone().or_else(|| r.next.clone()), r.next.clone()));
+        self.rag_painted();
+        let rag_flight = self.rag_json().get("phase").and_then(|p| p.as_str()).is_some_and(|p| p == "fling" || p == "drop");
+        let shown_i = rag_shown.as_ref().and_then(|(c, _)| c.as_ref().map(|c| c.frame)).unwrap_or_else(|| self.anim.frame());
+        let frame = self.frame_or_default(shown_i);
         // HUD placement follows the mood's resting frame, so loops don't make it jitter.
         let base = self.frame_or_default(self.anim.base()).or(frame);
         // …but a taller one-shot (an entry clip) pushes it up so it never sits on the hair.
@@ -3016,6 +3067,9 @@ impl Render for Avatar {
         let rects = frame.map(|f| f.rects.clone()).unwrap_or_default();
         let hidden = self.hidden || frame.is_none();
         let has_frame = frame.is_some() && !hidden;
+        // P6: while she's carried or flying, the bounding shape's rows merged within 1 px
+        // (inward only): Xorg's per-move cost scales with the shape's rects (1,220 -> ~570).
+        let motion_tol = shape_tol().or(self.rag.is_some().then_some(1));
         let (aw, ah) = (l.geo.width as i32, l.geo.height as i32);
 
         // Body plan: squash, glitch.
@@ -3023,9 +3077,13 @@ impl Render for Avatar {
         plan.pivot = self.pivot();
         if let Some(t0) = self.squash
             && let Some((sx, sy)) = fx::squash(now.saturating_duration_since(t0))
+            && self.rag.is_none()
         {
             plan.sx = sx;
             plan.sy = sy;
+        }
+        if let Some((Some(c), _)) = &rag_shown {
+            plan = c.plan.clone();
         }
         let sliver_px = (l.ground_x - l.avatar_x) as f32;
         if let Some(sx) = self.sliver_sx(now) {
@@ -3053,8 +3111,11 @@ impl Render for Avatar {
             };
             self.glitch_step.set((Some(g.t0), step + 1));
             let base = plan.clone();
-            let lay = |at: Instant, step: u64| {
-                let mut p = base.clone();
+            // Carried or landing, the next frame is the rag's next plan: the pattern goes
+            // underneath on that (its squash and frame), not on this one.
+            let rag_next = rag_shown.as_ref().and_then(|(_, n)| n.clone());
+            let lay_on = |b: &BodyPlan, at: Instant, step: u64| {
+                let mut p = b.clone();
                 p.glitch(fx::GlitchStep {
                     strength: g.strength(at),
                     coverage: g.coverage(at),
@@ -3078,11 +3139,12 @@ impl Render for Avatar {
                 // At the time it was laid underneath last frame (the frame came later or
                 // sooner than planned: a pattern laid at `now` instead would grow the shape
                 // where nothing was painted, a black slab without a compositor).
-                plan = lay(laid_at.unwrap_or(now), step);
+                plan = lay_on(&base, laid_at.unwrap_or(now), step);
             }
             let at = (now + FRAME_FX).max(g.t0);
             self.glitch_at.set(Some(at));
-            next = Some(if g.done(at) { base } else { lay(at, step + 1) });
+            let next_base = rag_next.as_ref().map_or(base, |n| n.plan.clone());
+            next = Some(if g.done(at) { next_base.clone() } else { lay_on(&next_base, at, step + 1) });
         }
         // The sliver widens next frame: that width goes underneath.
         if let Some(sx) = self.sliver_sx(now + FRAME_FX).or(self.sliver.map(|_| 1.0)) {
@@ -3094,19 +3156,42 @@ impl Render for Avatar {
             n.sx = sx;
             n.pivot.0 = sliver_px;
         }
+        // The rag's next plan (and frame) goes underneath (§4: commit one frame ahead).
+        let mut next_img: Option<Arc<RenderImage>> = None;
+        if let Some((_, Some(n))) = &rag_shown {
+            // Under a glitch, `next` is already the pattern laid on this plan.
+            if self.glitch.is_none() {
+                next = Some(n.plan.clone());
+            }
+            if n.frame != shown_i {
+                next_img = self.frame_or_default(n.frame).map(|f| f.image.clone());
+            }
+        }
         // Device px the art is also painted at underneath the posed bands (see the body).
         let mut under = 0.0f32;
-        if plan.slices.is_none() && plan.sx == 1.0 && plan.sy == 1.0 && !hidden {
+        if plan.slices.is_none() && plan.sx == 1.0 && plan.sy == 1.0 && !hidden && self.rag.is_none() {
             let pose = self.pose_at(now);
             let fi = self.anim.frame();
-            if pose != fx::Pose::default()
+            let swing = self.frames.get(fi).and_then(|f| f.as_ref()).and_then(|f| self.swing_bands(fi, f, false));
+            if (pose != fx::Pose::default() || swing.is_some())
                 && let Some(f) = self.frames.get(fi).and_then(|f| f.as_ref())
             {
                 let rows = self.pose_rows(fi, f);
-                let bands = fx::pose_bands(pose, rows);
+                let bands = swing.unwrap_or_else(|| fx::pose_bands(pose, rows));
                 plan.leg = fx::pose_leg(pose, rows, &bands);
                 plan.slices = Some(bands);
                 under = (POSE_REACH * sf).ceil();
+                // The chain swing moves more per frame than the smear reaches: its next
+                // bands go underneath (commit-ahead).
+                if next.is_none()
+                    && let Some(nb) = self.swing_bands(fi, f, true)
+                {
+                    let np = self.pose_at(now + Duration::from_millis(33));
+                    let mut n = BodyPlan::plain();
+                    n.leg = fx::pose_leg(np, rows, &nb);
+                    n.slices = Some(nb);
+                    next = Some(n);
+                }
             }
         }
         // The glitch ends next frame: the plain or posed figure comes back.
@@ -3182,6 +3267,7 @@ impl Render for Avatar {
                                 window.paint_quad(fill(rect(r.0 as f32, r.1 as f32, r.2 as f32, r.3 as f32), rgb(c)));
                             }
                             let (nx, ny, nw, nh) = n.image_rect(aw, ah);
+                            let img = next_img.clone().unwrap_or_else(|| img.clone());
                             match (&n.slices, n.tint) {
                                 (_, Some(_)) => {}
                                 (None, None) => {
@@ -3290,9 +3376,9 @@ impl Render for Avatar {
             .h(l.lp(ah)),
         );
 
-        let hud = !hidden && self.teleport.is_none() && !self.quitting && self.hud_after.is_none_or(|t| t <= now);
+        let hud = !hidden && self.teleport.is_none() && self.rag.is_none() && !self.quitting && self.hud_after.is_none_or(|t| t <= now);
         // A quiet (passive) teleport brings the tag back with the body as it reforms.
-        let tag_hud = hud || (!hidden && !self.quitting && self.teleport.as_ref().is_some_and(|t| t.quiet && matches!(t.leg, Leg::Appear)));
+        let tag_hud = hud || (!hidden && !self.quitting && self.rag.is_none() && self.teleport.as_ref().is_some_and(|t| t.quiet && matches!(t.leg, Leg::Appear)));
         let Status { label, tone, mut invert, glyph: glyph_kind } = self.status();
         // A summon's NEEDS YOU pulses for a few seconds after she lands.
         let pulse = self.summon_pulse_on(now);
@@ -3955,9 +4041,15 @@ impl Render for Avatar {
             canvas(
                 |_, _, _| (),
                 move |_, _, window, _| {
-                    let mut input: Vec<ShapeRect> =
-                        if hidden { Vec::new() } else { rects.iter().map(|r| (r.0 + ax, r.1 + ay, r.2, r.3)).collect() };
                     let mut visible: Vec<ShapeRect> = body_shape.iter().map(|r| (r.0 + ax, r.1 + ay, r.2, r.3)).collect();
+                    // In the air she can be caught where she is drawn.
+                    let mut input: Vec<ShapeRect> = if hidden {
+                        Vec::new()
+                    } else if rag_flight {
+                        visible.clone()
+                    } else {
+                        rects.iter().map(|r| (r.0 + ax, r.1 + ay, r.2, r.3)).collect()
+                    };
                     let dev = |pts: &[(f32, f32)]| pts.iter().map(|&(x, y)| (x * sf, y * sf)).collect::<Vec<_>>();
                     // What was on screen last frame is what shows inside this frame's shape
                     // (present lag): a panel goes into the shape only where it was painted.
@@ -4060,9 +4152,18 @@ impl Render for Avatar {
                     if visible.is_empty() {
                         visible.push(ground_px);
                     }
+                    // P6 sweep (measurement switches): one box, or rows merged within `tol` px
+                    // (inward only: never more than what was painted).
+                    if let Some(tol) = motion_tol {
+                        visible = crate::shape::merge_tol(&visible, tol);
+                    }
+                    if shape_box() {
+                        visible = crate::shape::bbox(&visible).into_iter().collect();
+                    }
                     let mut last = last.borrow_mut();
-                    if last.0 != input || last.1 != visible {
-                        x11.set_shape(&input, &visible).ok();
+                    let (di, dv) = (last.0 != input, last.1 != visible);
+                    if di || dv {
+                        x11.set_shapes(di.then_some(&input[..]), dv.then_some(&visible[..])).ok();
                         *last = (input, visible);
                     }
                     if has_frame && !first.get() {
@@ -4086,6 +4187,18 @@ fn frames_angle(deg: f32) -> usize {
         .enumerate()
         .min_by(|a, b| (a.1 - deg).abs().total_cmp(&(b.1 - deg).abs()))
         .map_or(3, |p| p.0)
+}
+
+/// `SA_SHAPE_TOL=n`: the bounding shape's rows merged within n px (P6 sweep).
+fn shape_tol() -> Option<i32> {
+    static T: std::sync::OnceLock<Option<i32>> = std::sync::OnceLock::new();
+    *T.get_or_init(|| std::env::var("SA_SHAPE_TOL").ok().and_then(|v| v.parse().ok()).filter(|&t| t > 0))
+}
+
+/// `SA_SHAPE_BOX=1`: the bounding shape as one box (P6 sweep: numbers only, she shows a box).
+fn shape_box() -> bool {
+    static B: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *B.get_or_init(|| std::env::var("SA_SHAPE_BOX").is_ok_and(|v| v == "1"))
 }
 
 /// `a` → `b` by `k` (0..1), per channel.

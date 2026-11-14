@@ -68,6 +68,45 @@ pub(super) struct Overrides {
     windows: Option<Vec<u32>>,
 }
 
+/// The bid swing: a ragdoll chain from her grip, pumped at each zero crossing toward a
+/// target amplitude (a kid on a swing), stepped at 30 Hz. Bands from it replace the shear;
+/// they're computed once per tick (held: no 1 px flicker), with the next tick's for the
+/// commit-ahead underlay.
+pub(super) struct BidSwing {
+    sw: crate::ragdoll::PumpedSwing,
+    frame: usize,
+    grip: i32,
+    last: Instant,
+    pub due: Instant,
+    bands: (Bands, Bands),
+}
+
+type Bands = Vec<(i32, i32, i32, i32)>;
+
+/// An insist beat's leg kick: out and back once over this long (LOCKED #9: >= 400 ms).
+const LEG_KICK_S: f32 = 0.8;
+
+/// Feet amplitude she pumps the swing to (logical px), and the tick.
+const SWING_AMP: f32 = 30.0;
+const SWING_TICK: Duration = Duration::from_millis(33);
+
+/// Float to float: legs of at most `DRIFT_LEG` px, a pause between them, so a drift is
+/// bursts of 1.5–4 s and never more than ~15 s of a minute.
+pub(super) struct DriftMove {
+    legs: Vec<moves::Drift>,
+    i: usize,
+    t0: Instant,
+    pause_until: Option<Instant>,
+}
+const DRIFT_LEG: f32 = 220.0;
+const DRIFT_PAUSE: Duration = Duration::from_millis(1500);
+const DRIFT_TICK: Duration = Duration::from_millis(33);
+/// The float bob: 5 px over 3.2 s in 1 px steps, 20 s on, 30 s still.
+const FLOAT_BOB_ON: f32 = 20.0;
+const FLOAT_BOB_CYCLE: f32 = 50.0;
+/// drop_in falls from this far above the spot (logical px): standing, posed.
+const DROP_IN_H: (f32, f32) = (240.0, 70.0);
+
 pub(super) struct InFlight {
     approach: Option<Approach>,
     arrival: Arrival,
@@ -119,6 +158,12 @@ pub(super) struct BrainHost {
     kick: Option<(Instant, f32)>,
     /// An insist beat's leg kick while hanging (start, direction).
     leg_kick: Option<(Instant, f32)>,
+    /// Hanging or clinging: the ragdoll chain she swings on (a gentle pumped pendulum).
+    pub swing: Option<BidSwing>,
+    /// Float to float: an eased drift in short bursts (moves only, no redraw).
+    drift: Option<DriftMove>,
+    /// The drop_in arrival: falling the last stretch onto the spot (start, height px, posed).
+    drop_in: Option<(Instant, f32, bool)>,
     marker: Option<Marker>,
     /// What the marker layers show now: (origin, size, scale step), to skip no-op updates.
     marker_shown: Option<(i32, i32, i32, bool)>,
@@ -143,6 +188,15 @@ fn rect_json(r: &WinRect) -> serde_json::Value {
 }
 
 impl BrainHost {
+    pub fn queued_mut(&mut self) -> &mut Vec<EmoteKey> {
+        &mut self.queued
+    }
+
+    /// A move's own motion is running (a scoot, a drift, a drop): the landing waits for it.
+    fn moving(&self) -> bool {
+        self.scoot.is_some() || self.drift.is_some() || self.drop_in.is_some()
+    }
+
     fn bnow(&self, now: Instant) -> f64 {
         self.base_b + now.saturating_duration_since(self.base_t).as_secs_f64() * self.scale
     }
@@ -299,6 +353,9 @@ impl Avatar {
             last_senses: None,
             typed_at: None,
             kick: None,
+            swing: None,
+            drift: None,
+            drop_in: None,
             leg_kick: None,
             marker: None,
             marker_shown: None,
@@ -405,13 +462,13 @@ impl Avatar {
         if self.reaction_until.is_some_and(|t| t > now) {
             v.push("reaction");
         }
-        if self.teleport.is_some() || self.brain.as_ref().is_some_and(|h| h.flight.is_some() || h.scoot.is_some()) {
+        if self.teleport.is_some() || self.brain.as_ref().is_some_and(|h| h.flight.is_some() || h.moving()) {
             v.push("teleport");
         }
         if self.music.is_some() {
             v.push("music");
         }
-        if self.press.is_some() {
+        if self.press.is_some() || self.rag.is_some() {
             v.push("drag");
         }
         if self.session.as_ref().and_then(|s| s.shown.as_ref()).is_some_and(|b| b.busy) {
@@ -422,10 +479,33 @@ impl Avatar {
 
     /// Work areas and monitors, cut to the test arena when there is one (its bottom is her
     /// floor there, its sides are the walls).
-    fn arena_filter(&self, areas: Vec<WinRect>, monitors: Vec<WinRect>) -> (Vec<WinRect>, Vec<WinRect>) {
+    pub(super) fn arena_filter(&self, areas: Vec<WinRect>, monitors: Vec<WinRect>) -> (Vec<WinRect>, Vec<WinRect>) {
         match self.brain.as_ref().and_then(|h| h.ov.arena) {
             Some(a) => areas.into_iter().zip(monitors).filter_map(|(w, m)| Some((w.intersect(&a)?, m.intersect(&a)?))).unzip(),
             None => (areas, monitors),
+        }
+    }
+
+    /// Work areas and monitors as she flies in them (cut to the test arena). Asked once per
+    /// release, never per frame.
+    pub(super) fn rag_areas(&self) -> (Vec<WinRect>, Vec<WinRect>) {
+        self.arena_filter(
+            self.x11.work_areas().iter().map(crate::platform::x11::Monitor::rect).collect(),
+            self.x11.monitors().iter().map(crate::platform::x11::Monitor::rect).collect(),
+        )
+    }
+
+    /// The windows she may use (a test's `brain sense windows`), None = any.
+    pub(super) fn brain_allowed_windows(&self) -> Option<Vec<u32>> {
+        self.brain.as_ref().and_then(|h| h.ov.windows.clone())
+    }
+
+    /// Picked up mid-move: the move is dropped (she is where the hand is).
+    pub(super) fn brain_cancel_move(&mut self) {
+        if let Some(h) = &mut self.brain {
+            h.flight = None;
+            h.scoot = None;
+            h.next_plan = None;
         }
     }
 
@@ -560,9 +640,13 @@ impl Avatar {
                 t = Some(t.map_or(d, |t| t.min(d)));
             }
         };
-        if h.scoot.is_some() || (h.flight.is_some() && self.teleport.is_none()) {
+        if h.scoot.is_some() || h.drop_in.is_some() || (h.flight.is_some() && self.teleport.is_none() && h.drift.is_none()) {
             take(Some(now + FRAME_FAST));
         }
+        if let Some(d) = &h.drift {
+            take(Some(d.pause_until.unwrap_or(now + DRIFT_TICK)));
+        }
+        take(self.float_bob_next(now));
         take(h.later.iter().map(|l| l.0).min());
         if h.next_plan.is_some() {
             take(Some(now + Duration::from_millis(100)));
@@ -619,7 +703,9 @@ impl Avatar {
             dirty = true;
         }
         dirty |= self.step_scoot(now);
-        let landed = self.brain.as_ref().is_some_and(|h| h.flight.is_some() && h.scoot.is_none()) && self.teleport.is_none();
+        dirty |= self.step_drift(now);
+        dirty |= self.step_drop_in(now);
+        let landed = self.brain.as_ref().is_some_and(|h| h.flight.is_some() && !h.moving()) && self.teleport.is_none() && self.rag.is_none();
         if landed {
             self.brain_landed(now);
             dirty = true;
@@ -628,7 +714,7 @@ impl Avatar {
             self.play_emote(e, now);
             dirty = true;
         }
-        let free = self.teleport.is_none() && !self.anim.busy() && self.brain.as_ref().is_some_and(|h| h.flight.is_none() && h.scoot.is_none());
+        let free = self.teleport.is_none() && self.rag.is_none() && !self.anim.busy() && self.brain.as_ref().is_some_and(|h| h.flight.is_none() && !h.moving());
         if free && let Some(p) = self.brain.as_mut().and_then(|h| h.next_plan.take()) {
             self.brain_move(p, now);
             dirty = true;
@@ -642,7 +728,7 @@ impl Avatar {
 
     fn brain_move(&mut self, plan: MovePlan, now: Instant) {
         let t = self.brain.as_ref().map_or(0.0, |h| h.bnow(now) - h.brain.start());
-        let moving = self.teleport.is_some() || self.brain.as_ref().is_some_and(|h| h.scoot.is_some() || h.flight.is_some());
+        let moving = self.teleport.is_some() || self.rag.is_some() || self.brain.as_ref().is_some_and(|h| h.moving() || h.flight.is_some());
         // A passive move waits for the emote on screen to finish (the sulk plays out first).
         let emoting = !matches!(plan.goal, Goal::Active { .. }) && self.anim.busy();
         if (moving || emoting) && self.press.is_none() && !self.quitting {
@@ -743,6 +829,8 @@ impl Avatar {
             && ground_kind(spot.kind)
             && dy.abs() <= 4
             && (dx.abs() as f32) / l.sf <= moves::HOP_ARRIVAL_MAX;
+        let active = matches!(plan.goal, Goal::Active { .. });
+        let pose_kind = |k: SpotKind| matches!(k, SpotKind::Hang { .. } | SpotKind::Cling { .. } | SpotKind::Peek);
         let arrival = plan
             .arrivals
             .iter()
@@ -751,10 +839,30 @@ impl Avatar {
                 Arrival::Teleport => true,
                 Arrival::Glitch => dist <= 1400.0,
                 Arrival::Hop => can_hop,
-                Arrival::DropIn => false,
+                Arrival::DropIn => ground_kind(spot.kind) || pose_kind(spot.kind),
+                Arrival::Drift => false,
             })
             .unwrap_or(Arrival::Teleport);
-        let active = matches!(plan.goal, Goal::Active { .. });
+        // Passive transports by distance (§4.1): float to float drifts; along the same floor
+        // within SCOOT_MAX she hop-scoots half the time, and always under MIN_TELEPORT.
+        // `hop = 0` in settings: she never hops (no scoot either).
+        let hops_on = h.settings.brain.arrivals.iter().any(|a| a.0 == Arrival::Hop && a.1 > 0.0);
+        let can_scoot = self.placement == Placement::Ground
+            && hops_on
+            && h.rest.is_none()
+            && ground_kind(spot.kind)
+            && dy.abs() <= 4
+            && (dx.abs() as f32) / l.sf <= moves::SCOOT_MAX
+            && dist >= moves::HOP_DX.0;
+        let arrival = if active {
+            arrival
+        } else if self.placement == Placement::Float && spot.kind == SpotKind::Float && dist <= 600.0 {
+            Arrival::Drift
+        } else if can_scoot && (dist < moves::MIN_TELEPORT || h.rng.clone().pick(2) == 0) {
+            Arrival::Hop
+        } else {
+            arrival
+        };
         let cover_ok = |s: &Spot| s.cover_pct <= world.cover_max_pct + 1e-9;
         let line = serde_json::json!({
             "t": t, "k": "move", "goal": goal_s, "approach": spot.approach.map(Approach::key), "arrival": arrival.key(),
@@ -791,6 +899,20 @@ impl Avatar {
                 let from = her.anchor.0 as f32 / sf;
                 let to = spot.anchor.0 as f32 / sf;
                 let hops = moves::plan_scoot(from, to, &mut rng).unwrap_or_default();
+                // Every hop's landing re-checks the rules: never into his window, never at the
+                // cursor. A hop that would is where the scoot stops.
+                let clear = places::CURSOR_CLEAR * sf;
+                let body = spot.body;
+                let ok = |x: f32| {
+                    let b = WinRect { x: body.x + (x * sf).round() as i32 - spot.anchor.0, ..body };
+                    let (cx, cy) = cursor;
+                    let dx = (cx - b.x.clamp(cx.min(b.x), b.right())).abs().min((cx - b.right()).abs()).min((cx - b.x).abs());
+                    let inside_x = cx >= b.x && cx < b.right();
+                    let dy = if cy >= b.y && cy < b.bottom() { 0 } else { (cy - b.y).abs().min((cy - b.bottom()).abs()) };
+                    let d = if inside_x { dy as f32 } else { ((dx * dx + dy * dy) as f32).sqrt() };
+                    focused.is_none_or(|f| f.intersect(&b).is_none()) && d >= clear
+                };
+                let hops = moves::scoot_until(&hops, ok);
                 let hops: Vec<moves::Hop> = hops.into_iter().map(|hp| moves::Hop { from_x: hp.from_x * sf, to_x: hp.to_x * sf }).collect();
                 if let Some(h) = &mut self.brain {
                     h.scoot = Some(Scoot { hops, i: 0, t0: now, feet_y: spot.anchor.1, crouched: false });
@@ -798,7 +920,28 @@ impl Avatar {
                 self.relayer(now);
             }
             Arrival::Glitch => self.start_glitch_move(origin, place, now, quiet),
-            _ => self.start_teleport_q(origin, place, now, quiet),
+            Arrival::Drift => {
+                let from = (self.origin.0 as f32, self.origin.1 as f32);
+                let to = (origin.0 as f32, origin.1 as f32);
+                let d = ((to.0 - from.0).powi(2) + (to.1 - from.1).powi(2)).sqrt();
+                let n = (d / (DRIFT_LEG * l.sf)).ceil().max(1.0) as usize;
+                let mut rng = Rng::new(self.rng.next());
+                let legs: Vec<moves::Drift> = (0..n)
+                    .map(|k| {
+                        let a = k as f32 / n as f32;
+                        let b = (k + 1) as f32 / n as f32;
+                        let p = |u: f32| (from.0 + (to.0 - from.0) * u, from.1 + (to.1 - from.1) * u);
+                        // moves::Drift caps the speed in logical px/s: plan in logical, move in device.
+                        let dr = moves::Drift::new((p(a).0 / l.sf, p(a).1 / l.sf), (p(b).0 / l.sf, p(b).1 / l.sf), &mut rng);
+                        moves::Drift { from: p(a), to: p(b), secs: dr.secs }
+                    })
+                    .collect();
+                if let Some(h) = &mut self.brain {
+                    h.drift = Some(DriftMove { legs, i: 0, t0: now, pause_until: None });
+                }
+            }
+            Arrival::DropIn => self.start_drop_in(origin, place, now),
+            Arrival::Teleport => self.start_teleport_q(origin, place, now, quiet),
         }
     }
 
@@ -837,6 +980,113 @@ impl Avatar {
         if let Some(tp) = &mut self.teleport {
             tp.no_bolt = true;
         }
+    }
+
+    /// Appear above the spot (a quick soft glitch) and fall onto it: a squash on the floor,
+    /// a swing on a grip.
+    fn start_drop_in(&mut self, to: (i32, i32), place: Placement, now: Instant) {
+        let l = self.layout;
+        let posed = matches!(place, Placement::Pose { .. });
+        let mut h = (if posed { DROP_IN_H.1 } else { DROP_IN_H.0 }) * l.sf;
+        // Not above the top of her work area (standing); a grip may start over the bar.
+        if !posed && let Some(a) = self.her_area_at(to) {
+            let top = to.1 + l.avatar_y + self.frame_or_default(self.anim.base()).map_or(0, |f| f.top);
+            h = h.min((top - a.y).max(0) as f32);
+        }
+        self.x11.set_target(0);
+        self.arrive(to, place, now);
+        if let Some(hb) = &mut self.brain {
+            hb.drop_in = Some((now, h, posed));
+        }
+        self.apply_offset(now);
+        let mut g = Glitch::new(GlitchKind::Appear, now, self.rng.next());
+        g.soft = true;
+        self.glitch = Some(g);
+    }
+
+    /// The window offset of a drop_in at `now` (up = negative), falling under gravity.
+    pub(super) fn drop_in_offset(&self, now: Instant) -> i32 {
+        let Some((t0, h, _)) = self.brain.as_ref().and_then(|b| b.drop_in) else { return 0 };
+        let g = ragdoll_g(self.layout.sf);
+        let t = now.saturating_duration_since(t0).as_secs_f32();
+        let fallen = 0.5 * g * t * t;
+        -((h - fallen).max(0.0)).round() as i32
+    }
+
+    fn step_drop_in(&mut self, now: Instant) -> bool {
+        let Some((_, _, posed)) = self.brain.as_ref().and_then(|b| b.drop_in) else { return false };
+        if self.drop_in_offset(now) < 0 {
+            return false;
+        }
+        if let Some(h) = &mut self.brain {
+            h.drop_in = None;
+        }
+        if posed {
+            // Caught the line: a big swing.
+            let side = if self.rng.pick(2) == 0 { 1.0 } else { -1.0 };
+            self.swing_tick(now);
+            self.swing_push(side * 26.0);
+        } else {
+            self.squash = Some(now);
+        }
+        self.apply_offset(now);
+        true
+    }
+
+    fn her_area_at(&self, o: (i32, i32)) -> Option<WinRect> {
+        let (areas, _) = self.rag_areas();
+        let (gx, gy) = (o.0 + self.layout.ground_x, o.1 + self.layout.ground_y - 1);
+        areas.iter().find(|a| a.contains(gx, gy)).or(areas.first()).copied()
+    }
+
+    fn step_drift(&mut self, now: Instant) -> bool {
+        let Some(h) = &mut self.brain else { return false };
+        let Some(d) = &mut h.drift else { return false };
+        if d.pause_until.is_some_and(|p| p > now) {
+            return false;
+        }
+        if let Some(p) = d.pause_until.take() {
+            d.t0 = p;
+        }
+        let Some(leg) = d.legs.get(d.i).copied() else {
+            h.drift = None;
+            return true;
+        };
+        let t = now.saturating_duration_since(d.t0).as_secs_f32();
+        let p = leg.at(t);
+        if leg.done(t) {
+            d.i += 1;
+            if d.i < d.legs.len() {
+                d.pause_until = Some(now + DRIFT_PAUSE);
+            } else {
+                h.drift = None;
+            }
+        }
+        self.set_origin((p.0.round() as i32, p.1.round() as i32));
+        false
+    }
+
+    /// The float bob (window offset, up = negative): 20 s of a slow ±2.5 px bob in 1 px
+    /// steps, then 30 s still.
+    pub(super) fn float_bob(&self, now: Instant) -> i32 {
+        if self.placement != Placement::Float || self.brain.as_ref().is_none_or(|h| h.drift.is_some()) {
+            return 0;
+        }
+        let t = now.saturating_duration_since(self.bob_t0).as_secs_f32() % FLOAT_BOB_CYCLE;
+        if t >= FLOAT_BOB_ON {
+            return 0;
+        }
+        let env = (t / 1.0).min((FLOAT_BOB_ON - t) / 1.0).min(1.0);
+        -(2.5 * self.layout.sf * env * (t * std::f32::consts::TAU / 3.2).sin()).round() as i32
+    }
+
+    fn float_bob_next(&self, now: Instant) -> Option<Instant> {
+        if self.placement != Placement::Float {
+            return None;
+        }
+        let cur = self.float_bob(now);
+        let step = Duration::from_millis(40);
+        (1..=200).map(|k| now + step * k).find(|&t| self.float_bob(t) != cur).or(Some(now + Duration::from_secs(8)))
     }
 
     fn step_scoot(&mut self, now: Instant) -> bool {
@@ -975,7 +1225,8 @@ impl Avatar {
 
     fn brain_emote(&mut self, e: EmoteKey, now: Instant) {
         let Some(h) = &mut self.brain else { return };
-        if h.flight.is_some() || h.scoot.is_some() {
+        // Moving or carried: after the landing.
+        if h.flight.is_some() || h.moving() || self.rag.is_some() {
             h.queued.push(e);
             return;
         }
@@ -1019,7 +1270,7 @@ impl Avatar {
         point(px((self.layout.avatar_x + x) as f32 / sf), px((self.layout.avatar_y + y) as f32 / sf))
     }
 
-    fn play_emote(&mut self, e: EmoteKey, now: Instant) {
+    pub(super) fn play_emote(&mut self, e: EmoteKey, now: Instant) {
         let spec = self.pack.behaviour.brain.clone();
         let pick = |v: &Vec<Vec<crate::pack::Step>>, i: usize| v.get(i % v.len().max(1)).cloned();
         let steps = match e {
@@ -1112,6 +1363,7 @@ impl Avatar {
             if let Some(h) = &mut self.brain {
                 h.kick = Some((now, amp * sign * self.layout.sf));
             }
+            self.swing_push(amp * sign);
             match extra {
                 1 => self.hearts = Some((now, self.head_point())),
                 2 => {
@@ -1164,16 +1416,87 @@ impl Avatar {
     }
 
     /// Hanging life, device px in 2 px steps: (the pendulum at the bottom, the shins' extra
-    /// kick from the knee). A slow sway, a bid's kick decaying over ~3 s, and one slow leg kick
-    /// on an insist beat; no kicking at rest (LOCKED #9).
+    /// kick from the knee). A slow sway (when the chain swing is off), a bid's kick decaying
+    /// over ~3 s, and one slow leg kick on an insist beat; no kicking at rest.
+    /// The bid swing runs: posed (hanging, clinging), there, not carried (SA_BID_SWING=0: off,
+    /// the r7 pose-step sway instead).
+    pub(super) fn swing_on(&self) -> bool {
+        self.posed()
+            && self.rag.is_none()
+            && !self.hidden
+            && self.teleport.is_none()
+            && self.loaded
+            && self.rag_strength.k() > 0.0
+            && std::env::var("SA_BID_SWING").map_or(true, |v| v != "0")
+    }
+
+    /// Step the bid swing (create it for a new pose frame). True: redraw.
+    pub(super) fn swing_tick(&mut self, now: Instant) -> bool {
+        let on = self.swing_on();
+        let fi = self.anim.frame();
+        if !on {
+            return self.brain.as_mut().and_then(|h| h.swing.take()).is_some();
+        }
+        let sf = self.layout.sf;
+        if self.brain.as_ref().and_then(|h| h.swing.as_ref()).is_none_or(|s| s.frame != fi) {
+            let Some((top, bottom)) = self.frame_or_default(fi).map(|f| (f.top, f.bottom)) else { return false };
+            let grip = (self.anchor_px(fi).1 - self.layout.avatar_y).clamp(top, bottom - 1);
+            let p = self.rag_strength.params().scaled(sf);
+            let amp = SWING_AMP * self.rag_strength.k() * sf;
+            let chain = crate::ragdoll::Chain::new(&p, &[], &crate::ragdoll::Chain::rows(8, (bottom - grip).max(8), false), (0.0, 0.0));
+            let side = if self.rng.pick(2) == 0 { 1.0 } else { -1.0 };
+            let mut s = BidSwing { sw: crate::ragdoll::PumpedSwing::new(chain, amp, side), frame: fi, grip, last: now, due: now + SWING_TICK, bands: (Vec::new(), Vec::new()) };
+            s.bands = swing_bands_pair(&mut s, (top, bottom), self.swing_band_px());
+            if let Some(h) = &mut self.brain {
+                h.swing = Some(s);
+            }
+            return true;
+        }
+        let rows = self.frame_or_default(fi).map(|f| (f.top, f.bottom));
+        let bp = self.swing_band_px();
+        let Some(s) = self.brain.as_mut().and_then(|h| h.swing.as_mut()) else { return false };
+        if now + Duration::from_millis(1) < s.due {
+            return false;
+        }
+        let dt = if super::ragview::lockstep() { SWING_TICK.as_secs_f32() } else { now.saturating_duration_since(s.last).as_secs_f32().min(0.1) };
+        s.last = now;
+        s.due = now.max(s.due) + SWING_TICK;
+        s.sw.step(dt);
+        if let Some(rows) = rows {
+            s.bands = swing_bands_pair(s, rows, bp);
+        }
+        true
+    }
+
+    fn swing_band_px(&self) -> i32 {
+        ((6.0 * self.layout.sf).round() as i32).max(2)
+    }
+
+    /// An insist beat or a bid emote: a push on the swing.
+    pub(super) fn swing_push(&mut self, px: f32) {
+        let sf = self.layout.sf;
+        let k = self.rag_strength.k();
+        if let Some(s) = self.brain.as_mut().and_then(|h| h.swing.as_mut()) {
+            s.sw.push(px * k * sf * 5.0);
+        }
+    }
+
+    /// The swing's bands now, or one tick ahead (`ahead`: what the next frame will draw).
+    pub(super) fn swing_bands(&self, fi: usize, _f: &Frame, ahead: bool) -> Option<Bands> {
+        let s = self.brain.as_ref()?.swing.as_ref().filter(|s| s.frame == fi)?;
+        let b = if ahead { &s.bands.1 } else { &s.bands.0 };
+        (!b.is_empty()).then(|| b.clone())
+    }
+
     pub(super) fn hang_swing(&self, now: Instant) -> (i32, i32, bool) {
         use std::f32::consts::{PI, TAU};
         let sf = self.layout.sf;
         let t = now.saturating_duration_since(self.bob_t0).as_secs_f32();
-        let mut v = 7.0 * sf * (t * TAU / 3.2).sin();
+        let chain = self.brain.as_ref().is_some_and(|h| h.swing.is_some());
+        let mut v = if chain { 0.0 } else { 7.0 * sf * (t * TAU / 3.2).sin() };
         if let Some((t0, amp)) = self.brain.as_ref().and_then(|h| h.kick) {
             let k = now.saturating_duration_since(t0).as_secs_f32();
-            if k < 3.5 {
+            if k < 3.5 && !chain {
                 v += amp * (-k / 1.1).exp() * (k * TAU / 1.25).sin();
             }
         }
@@ -1232,7 +1555,7 @@ impl Avatar {
     /// Draw (or take down) the "!" badge by her head: shaped solid-colour layers like the
     /// hearts, so it costs no GPUI redraw.
     pub(super) fn update_marker(&mut self, now: Instant) {
-        let show = self.loaded && !self.hidden && !self.quitting && self.teleport.is_none();
+        let show = self.loaded && !self.hidden && !self.quitting && self.teleport.is_none() && self.rag.is_none();
         let st = if show { self.marker_state(now) } else { None };
         let geo = st.and_then(|(bob, sc)| {
             let fi = self.anim.frame();
@@ -1485,7 +1808,8 @@ impl Avatar {
     pub(super) fn settings_reload(&mut self, now: Instant) -> String {
         match Settings::load() {
             Ok(s) => {
-                let Some(h) = &mut self.brain else { return "error: no brain".into() };
+                self.rag_strength = crate::ragdoll::Strength(s.ragdoll.strength);
+                let Some(h) = &mut self.brain else { return format!("ok ragdoll.strength={} (no brain)", s.ragdoll.strength) };
                 let mut bs = s.brain.clone();
                 // Keep the pack's zeros.
                 for (a, w) in bs.approaches.iter_mut() {
@@ -1501,7 +1825,7 @@ impl Avatar {
                     self.brain_feed(BrainEvent::Control(if s.brain.enabled { Ctl::On } else { Ctl::Off }), now);
                 }
                 self.brain_run(now, true);
-                format!("ok attention={} fullscreen={:?}", s.brain.attention.key(), s.brain.fullscreen)
+                format!("ok attention={} fullscreen={:?} ragdoll.strength={}", s.brain.attention.key(), s.brain.fullscreen, s.ragdoll.strength)
             }
             Err(e) => format!("error: {e:#} (kept the old settings)"),
         }
@@ -1558,6 +1882,20 @@ impl Avatar {
 
 /// `CURSOR_CLEAR` from places.rs (logical px), for the log.
 const CURSOR_CLEAR_LOGICAL: f32 = places::CURSOR_CLEAR;
-/// An insist beat's leg kick: out and back once over this long (LOCKED #9: >= 400 ms).
-const LEG_KICK_S: f32 = 0.8;
 
+
+/// At each zero crossing of the feet, push in the direction of travel by what the last
+/// half-swing fell short of the target amplitude.
+/// The swing's bands now and one tick ahead (a clone stepped one tick: what the next frame
+/// draws), both held.
+fn swing_bands_pair(s: &mut BidSwing, rows: (i32, i32), bp: i32) -> (Bands, Bands) {
+    let now = s.sw.bands(bp, rows.0, rows.1, s.grip);
+    let mut ahead = s.sw.clone();
+    ahead.step(SWING_TICK.as_secs_f32());
+    (now, ahead.bands(bp, rows.0, rows.1, s.grip))
+}
+
+/// The ragdoll's flight gravity in device px/s².
+fn ragdoll_g(sf: f32) -> f32 {
+    crate::ragdoll::G_FLIGHT * sf
+}

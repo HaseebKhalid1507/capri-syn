@@ -88,9 +88,9 @@ impl Default for BrainSettings {
                 (Approach::Peek, 1.0),
                 (Approach::Beside, 1.0),
             ],
-            // drop_in needs the ragdoll (R-P3): weight 0 until then, whatever the file says.
             // glitch lost both r6 critic pairs to teleport: 1 by default (still selectable).
-            arrivals: vec![(Arrival::Teleport, 3.0), (Arrival::Glitch, 1.0), (Arrival::DropIn, 0.0), (Arrival::Hop, 1.0)],
+            // drop_in exists now (the ragdoll round): 2, as in the brief's file.
+            arrivals: vec![(Arrival::Teleport, 3.0), (Arrival::Glitch, 1.0), (Arrival::DropIn, 2.0), (Arrival::Hop, 1.0)],
             no_repeat: 2,
             cover_max_pct: 12.0,
             passive_every_min: (3.0, 10.0),
@@ -105,6 +105,21 @@ impl Default for BrainSettings {
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct Settings {
     pub brain: BrainSettings,
+    pub ragdoll: RagdollSettings,
+}
+
+/// `[ragdoll]`: how much she bends, squashes and swings.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RagdollSettings {
+    /// 0 = rigid (today's drag), 1 = the full-strength chain; 0.5 by default (Haseeb: "too
+    /// strong" at 1). Scales the bend, squash/stretch, shake response and bid swing together.
+    pub strength: f32,
+}
+
+impl Default for RagdollSettings {
+    fn default() -> Self {
+        RagdollSettings { strength: 0.5 }
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -112,6 +127,14 @@ pub struct Settings {
 struct FileRaw {
     #[serde(default)]
     brain: Option<BrainRaw>,
+    #[serde(default)]
+    ragdoll: Option<RagdollRaw>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RagdollRaw {
+    strength: Option<f64>,
 }
 
 #[derive(Deserialize, Default)]
@@ -150,7 +173,12 @@ impl Settings {
     pub fn parse(text: &str) -> Result<Settings> {
         let raw: FileRaw = toml::from_str(text).context("settings.toml")?;
         let mut b = BrainSettings::default();
-        let Some(r) = raw.brain else { return Ok(Settings { brain: b }) };
+        let mut ragdoll = RagdollSettings::default();
+        if let Some(v) = raw.ragdoll.and_then(|r| r.strength) {
+            anyhow::ensure!(v.is_finite() && (0.0..=1.0).contains(&v), "ragdoll.strength must be 0..1");
+            ragdoll.strength = v as f32;
+        }
+        let Some(r) = raw.brain else { return Ok(Settings { brain: b, ragdoll }) };
         if let Some(v) = r.enabled {
             b.enabled = v;
         }
@@ -196,9 +224,9 @@ impl Settings {
         if let Some(a) = r.attention {
             b.attention = Attention::parse(&a).context("brain.attention must be \"mix\", \"hang_only\" or \"off\"")?;
         }
-        // The ragdoll isn't in yet: drop_in can't happen.
-        b.arrivals.iter_mut().filter(|p| p.0 == Arrival::DropIn).for_each(|p| p.1 = 0.0);
-        Ok(Settings { brain: b })
+        // Drift is a transport (by distance), never drawn from the pool.
+        b.arrivals.retain(|p| p.0 != Arrival::Drift);
+        Ok(Settings { brain: b, ragdoll })
     }
 
     /// The file's settings (defaults when there is none). Err: a bad file (keep the old values).
@@ -239,6 +267,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ragdoll_strength() {
+        assert_eq!(Settings::parse("").unwrap().ragdoll.strength, 0.5, "the toned-down default");
+        assert_eq!(Settings::parse("[ragdoll]\nstrength = 1").unwrap().ragdoll.strength, 1.0);
+        assert_eq!(Settings::parse("[ragdoll]\nstrength = 0.25\n[brain]\nenabled = false").unwrap().ragdoll.strength, 0.25);
+        assert!(Settings::parse("[ragdoll]\nstrength = 1.5").is_err());
+        assert!(Settings::parse("[ragdoll]\nstrenght = 0.5").is_err(), "unknown keys are errors");
+    }
+
+    #[test]
     fn defaults_without_a_file_or_keys() {
         assert_eq!(Settings::parse("").unwrap(), Settings::default());
         assert_eq!(Settings::parse("[brain]\n").unwrap(), Settings::default());
@@ -266,7 +303,7 @@ fullscreen = "stay"
         )
         .unwrap();
         assert_eq!(s.brain.fullscreen, Fullscreen::Stay);
-        assert_eq!(s.brain.arrivals.iter().find(|a| a.0 == Arrival::DropIn).unwrap().1, 0.0, "drop_in waits for the ragdoll");
+        assert!(s.brain.arrivals.iter().find(|a| a.0 == Arrival::DropIn).unwrap().1 > 0.0, "drop_in is on with the ragdoll");
         let s = Settings::parse("[brain]\napproaches = { hang = 0, peek = 2.5 }\npassive_every_min = [1, 2]\n").unwrap();
         assert_eq!(s.brain.approaches.iter().find(|a| a.0 == Approach::Hang).unwrap().1, 0.0);
         assert_eq!(s.brain.approaches.iter().find(|a| a.0 == Approach::Peek).unwrap().1, 2.5);

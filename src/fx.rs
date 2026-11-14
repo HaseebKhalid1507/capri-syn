@@ -626,6 +626,21 @@ pub fn pose_bands(p: Pose, r: PoseRows) -> Vec<(i32, i32, i32, i32)> {
     out
 }
 
+/// Bands (src y0, y1, dx, dy) → the same bands over the image scaled by (sx, sy) about
+/// `pivot`. Chain bands tile in destination rows (y0 + dy), so those are what get scaled
+/// (rounded once each, shared by neighbours: still tiling); the source window starts at the
+/// scaled y0.
+pub fn scale_bands(b: &[(i32, i32, i32, i32)], pivot: (f32, f32), sx: f32, sy: f32) -> Vec<(i32, i32, i32, i32)> {
+    let row = |y: i32| (pivot.1 + (y as f32 - pivot.1) * sy).round() as i32;
+    b.iter()
+        .map(|&(y0, y1, dx, dy)| {
+            let (d0, d1) = (row(y0 + dy), row(y1 + dy));
+            let a = row(y0);
+            (a, a + (d1 - d0).max(0), (dx as f32 * sx).round() as i32, d0 - a)
+        })
+        .collect()
+}
+
 /// Capri's note particle noise.
 fn noise(n: u64, seed: u32) -> f32 {
     let v = (((n + 1) as f32) * 12.9898 + seed as f32 * 78.233).sin() * 43758.547;
@@ -927,6 +942,24 @@ pub fn bolt_rects(poly: &[(f32, f32)], origin: (i32, i32)) -> Vec<ShapeRect> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scaled_bands_tile_and_cover() {
+        // Destination-tiling bands with uneven source windows (a chain mid-swing).
+        let b = vec![(10, 30, 0, 0), (31, 35, 3, -1), (33, 38, 5, 1), (40, 90, 8, -1)];
+        for w in b.windows(2) {
+            assert_eq!(w[0].1 + w[0].3, w[1].0 + w[1].3);
+        }
+        for &(sx, sy) in &[(1.0, 1.12), (0.9, 0.78), (1.0, 0.08), (1.05, 1.05), (1.0, 1.0)] {
+            let s = scale_bands(&b, (50.0, 89.0), sx, sy);
+            for w in s.windows(2) {
+                assert_eq!(w[0].1 + w[0].3, w[1].0 + w[1].3, "destinations tile at {sx},{sy}");
+            }
+            let last = s.last().unwrap();
+            assert_eq!(last.1 + last.3, (89.0 + (89.0 - 89.0) * sy) as i32, "the pivot row stays");
+        }
+        assert_eq!(scale_bands(&b, (50.0, 89.0), 1.0, 1.0), b, "identity");
+    }
 
     #[test]
     fn squash_springs_back() {

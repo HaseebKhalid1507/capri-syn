@@ -212,15 +212,48 @@ fn process_setup() {
             continue;
         }
         let dev = e.path().join("device");
-        cards.push((read(dev.join("device")), read(dev.join("boot_vga")) == "1"));
+        cards.push((read(dev.join("device")), read(dev.join("boot_vga")) == "1", read(dev.join("vendor"))));
     }
     if cards.len() < 2 {
         return;
     }
-    if let Some((id, _)) = cards.iter().find(|c| c.1 && !c.0.is_empty()) {
+    if let Some((id, _, vendor)) = cards.iter().find(|c| c.1 && !c.0.is_empty()) {
         eprintln!("synaps-avatar: {} GPUs, rendering on the boot VGA device {id} (SA_ANY_GPU=1 to let GPUI pick)", cards.len());
         unsafe { std::env::set_var("ZED_DEVICE_ID", id) };
+        // Only that vendor's Vulkan driver: the loader otherwise maps every ICD, and the
+        // unused NVIDIA one alone was ~52 MB of RSS (libnvidia-gpucomp/rtcore/glcore).
+        if std::env::var_os("VK_DRIVER_FILES").is_none()
+            && std::env::var_os("VK_ICD_FILENAMES").is_none()
+            && let Some(files) = vendor_icds(vendor)
+        {
+            unsafe { std::env::set_var("VK_DRIVER_FILES", &files) };
+        }
     }
+}
+
+/// The Vulkan driver manifests of a PCI vendor (`0x8086` …), joined for `VK_DRIVER_FILES`.
+fn vendor_icds(vendor: &str) -> Option<String> {
+    let prefixes: &[&str] = match vendor {
+        "0x8086" => &["intel"],
+        "0x1002" => &["radeon", "amd"],
+        "0x10de" => &["nvidia"],
+        _ => return None,
+    };
+    let data_dirs = std::env::var("XDG_DATA_DIRS").unwrap_or_else(|_| "/usr/local/share:/usr/share".into());
+    let mut dirs: Vec<std::path::PathBuf> = data_dirs.split(':').map(|d| std::path::Path::new(d).join("vulkan/icd.d")).collect();
+    dirs.push("/etc/vulkan/icd.d".into());
+    let mut files: Vec<String> = Vec::new();
+    for d in dirs {
+        for e in std::fs::read_dir(d).into_iter().flatten().flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.ends_with(".json") && prefixes.iter().any(|p| name.starts_with(p)) {
+                files.push(e.path().to_string_lossy().into_owned());
+            }
+        }
+    }
+    files.sort();
+    files.dedup();
+    (!files.is_empty()).then(|| files.join(":"))
 }
 
 /// Whether the Vulkan loader will find at least one driver manifest.
@@ -324,6 +357,9 @@ fn run(t_start: Instant) -> Result<()> {
             is_minimizable: false,
             window_background: WindowBackgroundAppearance::Transparent,
             app_id: Some("synaps-avatar".into()),
+            // She is never the active window: GPUI's default caps inactive windows at 30 fps
+            // (a drag then ran ~40 ticks/s). Our own deadlines decide when she draws.
+            inactive_frame_interval: None,
             ..Default::default()
         };
 
