@@ -1557,12 +1557,15 @@ impl Avatar {
         // Any redraw draws the current pose (render latches it); a pose step alone waits
         // POSE_SLACK for company.
         let pose = self.pose_at(now);
-        if pose == self.pose_last {
-            // (Stepped back before it was drawn: nothing to wait for, no stale deadline.)
-            self.pose_wait = None;
-        } else if !dirty {
+        if pose != self.pose_last && !dirty {
             let since = *self.pose_wait.get_or_insert(now);
             dirty = now.saturating_duration_since(since) >= POSE_SLACK;
+        }
+        // Latched here, not in render: a wait left set until GPUI got round to rendering
+        // was a past deadline (it spun ~900 ticks/s).
+        if dirty || pose == self.pose_last {
+            self.pose_last = pose;
+            self.pose_wait = None;
         }
         if dirty {
             cx.notify();
@@ -3613,6 +3616,7 @@ impl Render for Avatar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.renders += 1;
         let now = Instant::now();
+        // This frame draws the current pose: a pending step rode on it.
         self.pose_last = self.pose_at(now);
         self.pose_wait = None;
         let l = self.layout;
