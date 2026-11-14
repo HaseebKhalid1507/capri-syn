@@ -67,18 +67,22 @@ pub(super) struct Overrides {
 }
 
 /// The bid swing: a ragdoll chain from her grip, pumped at each zero crossing toward a
-/// target amplitude (a kid on a swing), stepped at 30 Hz. Bands from it replace the shear.
+/// target amplitude (a kid on a swing), stepped at 30 Hz. Bands from it replace the shear;
+/// they're computed once per tick (held: no 1 px flicker), with the next tick's for the
+/// commit-ahead underlay.
 pub(super) struct BidSwing {
-    chain: crate::ragdoll::Chain,
+    sw: crate::ragdoll::PumpedSwing,
     frame: usize,
     grip: i32,
     last: Instant,
     pub due: Instant,
-    peak: f32,
-    side: f32,
-    /// The feet amplitude the pump keeps (logical px, scaled by strength).
-    amp: f32,
+    bands: (Bands, Bands),
 }
+
+type Bands = Vec<(i32, i32, i32, i32)>;
+
+/// An insist beat's leg kick: out and back once over this long (LOCKED #9: >= 400 ms).
+const LEG_KICK_S: f32 = 0.8;
 
 /// Feet amplitude she pumps the swing to (logical px), and the tick.
 const SWING_AMP: f32 = 30.0;
@@ -1362,8 +1366,8 @@ impl Avatar {
     }
 
     /// Hanging life, device px in 2 px steps: (the pendulum at the bottom, the shins' extra
-    /// kick from the knee). A slow sway, a bid's kick decaying over ~3 s, and every ~3.6 s
-    /// one leg-kick out and back (alternating sides), plus a bigger one on an insist beat.
+    /// kick from the knee). A slow sway (when the chain swing is off), a bid's kick decaying
+    /// over ~3 s, and one slow leg kick on an insist beat; no kicking at rest.
     /// The bid swing runs: posed (hanging, clinging), there, not carried (SA_BID_SWING=0: off,
     /// the r7 pose-step sway instead).
     pub(super) fn swing_on(&self) -> bool {
@@ -1385,18 +1389,21 @@ impl Avatar {
         }
         let sf = self.layout.sf;
         if self.brain.as_ref().and_then(|h| h.swing.as_ref()).is_none_or(|s| s.frame != fi) {
-            let Some(f) = self.frame_or_default(fi) else { return false };
-            let grip = (self.anchor_px(fi).1 - self.layout.avatar_y).clamp(f.top, f.bottom - 1);
+            let Some((top, bottom)) = self.frame_or_default(fi).map(|f| (f.top, f.bottom)) else { return false };
+            let grip = (self.anchor_px(fi).1 - self.layout.avatar_y).clamp(top, bottom - 1);
             let p = self.rag_strength.params().scaled(sf);
-            let amp = SWING_AMP * self.rag_strength.k();
-            let mut chain = crate::ragdoll::Chain::new(&p, &[], &crate::ragdoll::Chain::rows(8, (f.bottom - grip).max(8), false), (0.0, 0.0));
+            let amp = SWING_AMP * self.rag_strength.k() * sf;
+            let chain = crate::ragdoll::Chain::new(&p, &[], &crate::ragdoll::Chain::rows(8, (bottom - grip).max(8), false), (0.0, 0.0));
             let side = if self.rng.pick(2) == 0 { 1.0 } else { -1.0 };
-            chain.kick((side * amp * sf * 4.0, 0.0));
+            let mut s = BidSwing { sw: crate::ragdoll::PumpedSwing::new(chain, amp, side), frame: fi, grip, last: now, due: now + SWING_TICK, bands: (Vec::new(), Vec::new()) };
+            s.bands = swing_bands_pair(&mut s, (top, bottom), self.swing_band_px());
             if let Some(h) = &mut self.brain {
-                h.swing = Some(BidSwing { chain, frame: fi, grip, last: now, due: now + SWING_TICK, peak: 0.0, side, amp });
+                h.swing = Some(s);
             }
             return true;
         }
+        let rows = self.frame_or_default(fi).map(|f| (f.top, f.bottom));
+        let bp = self.swing_band_px();
         let Some(s) = self.brain.as_mut().and_then(|h| h.swing.as_mut()) else { return false };
         if now + Duration::from_millis(1) < s.due {
             return false;
@@ -1404,9 +1411,15 @@ impl Avatar {
         let dt = if super::ragview::lockstep() { SWING_TICK.as_secs_f32() } else { now.saturating_duration_since(s.last).as_secs_f32().min(0.1) };
         s.last = now;
         s.due = now.max(s.due) + SWING_TICK;
-        s.chain.step((0.0, 0.0), dt);
-        swing_pump(s, sf);
+        s.sw.step(dt);
+        if let Some(rows) = rows {
+            s.bands = swing_bands_pair(s, rows, bp);
+        }
         true
+    }
+
+    fn swing_band_px(&self) -> i32 {
+        ((6.0 * self.layout.sf).round() as i32).max(2)
     }
 
     /// An insist beat or a bid emote: a push on the swing.
@@ -1414,21 +1427,15 @@ impl Avatar {
         let sf = self.layout.sf;
         let k = self.rag_strength.k();
         if let Some(s) = self.brain.as_mut().and_then(|h| h.swing.as_mut()) {
-            s.chain.kick((px * k * sf * 5.0, 0.0));
+            s.sw.push(px * k * sf * 5.0);
         }
     }
 
     /// The swing's bands now, or one tick ahead (`ahead`: what the next frame will draw).
-    pub(super) fn swing_bands(&self, fi: usize, f: &Frame, ahead: bool) -> Option<Vec<(i32, i32, i32, i32)>> {
+    pub(super) fn swing_bands(&self, fi: usize, _f: &Frame, ahead: bool) -> Option<Bands> {
         let s = self.brain.as_ref()?.swing.as_ref().filter(|s| s.frame == fi)?;
-        let bp = ((6.0 * self.layout.sf).round() as i32).max(2);
-        if ahead {
-            let mut s2 = BidSwing { chain: s.chain.clone(), frame: s.frame, grip: s.grip, last: s.last, due: s.due, peak: s.peak, side: s.side, amp: s.amp };
-            s2.chain.step((0.0, 0.0), SWING_TICK.as_secs_f32());
-            swing_pump(&mut s2, self.layout.sf);
-            return Some(s2.chain.bands(bp, f.top, f.bottom, s.grip));
-        }
-        Some(s.chain.bands(bp, f.top, f.bottom, s.grip))
+        let b = if ahead { &s.bands.1 } else { &s.bands.0 };
+        (!b.is_empty()).then(|| b.clone())
     }
 
     pub(super) fn hang_swing(&self, now: Instant) -> (i32, i32, bool) {
@@ -1443,19 +1450,13 @@ impl Avatar {
                 v += amp * (-k / 1.1).exp() * (k * TAU / 1.25).sin();
             }
         }
-        // One knee bent out at a time, held ~1 s, then the other: never two frames of a
-        // rigid drop.
-        let half = 1.5;
-        let n = (t / half).floor();
-        let u = t - n * half;
-        let mut right = (n as i64).rem_euclid(2) == 0;
-        let env = (u / 0.3).min((half - u) / 0.3).clamp(0.0, 1.0);
-        let mut leg = 20.0 * sf * env * if right { 1.0 } else { -1.0 };
+        // Legs hang still and follow the swing (LOCKED #9); an insist beat is one slow kick.
+        let (mut right, mut leg) = (true, 0.0);
         if let Some((t0, dir)) = self.brain.as_ref().and_then(|h| h.leg_kick) {
-            let k = now.saturating_duration_since(t0).as_secs_f32() / 0.7;
+            let k = now.saturating_duration_since(t0).as_secs_f32() / LEG_KICK_S;
             if k < 1.0 {
                 right = dir > 0.0;
-                leg = 30.0 * sf * dir * (PI * k).sin();
+                leg = 24.0 * sf * dir * (PI * k).sin();
             }
         }
         let q = |x: f32| ((x / 2.0).round() * 2.0) as i32;
@@ -1817,16 +1818,13 @@ const CURSOR_CLEAR_LOGICAL: f32 = places::CURSOR_CLEAR;
 
 /// At each zero crossing of the feet, push in the direction of travel by what the last
 /// half-swing fell short of the target amplitude.
-fn swing_pump(s: &mut BidSwing, sf: f32) {
-    let x = s.chain.feet_offset().0;
-    s.peak = s.peak.max(x.abs());
-    let now_side = if x > 0.5 { 1.0 } else if x < -0.5 { -1.0 } else { s.side };
-    if now_side != s.side {
-        let short = (s.amp * sf - s.peak).max(0.0);
-        s.chain.kick((now_side * short * 2.6, 0.0));
-        s.side = now_side;
-        s.peak = 0.0;
-    }
+/// The swing's bands now and one tick ahead (a clone stepped one tick: what the next frame
+/// draws), both held.
+fn swing_bands_pair(s: &mut BidSwing, rows: (i32, i32), bp: i32) -> (Bands, Bands) {
+    let now = s.sw.bands(bp, rows.0, rows.1, s.grip);
+    let mut ahead = s.sw.clone();
+    ahead.step(SWING_TICK.as_secs_f32());
+    (now, ahead.bands(bp, rows.0, rows.1, s.grip))
 }
 
 /// The ragdoll's flight gravity in device px/s².

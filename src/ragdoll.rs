@@ -35,9 +35,6 @@ pub struct Params {
     /// Share of the anchor's motion every node takes directly (0 = pure physics): the lag
     /// that bends her when she's dragged or shaken shrinks by this much.
     pub follow: f32,
-    /// Damping of each node's velocity relative to its parent (1/s): kills the fast leg flap
-    /// (the chain's bending mode) without slowing the whole-body swing.
-    pub bend_damping: f32,
 }
 
 impl Default for Params {
@@ -45,7 +42,8 @@ impl Default for Params {
         Params {
             links_down: 8,
             links_up: 0,
-            gravity: 5200.0,
+            // One slow pendulum: ~1.5–1.7 s for her height (LOCKED #9).
+            gravity: 2000.0,
             damping: 1.9,
             damping_near_rest: 7.0,
             iterations: 4,
@@ -60,13 +58,9 @@ impl Default for Params {
             stretch_zeta: 0.32,
             room: (-1.0e5, 1.0e5),
             follow: 0.0,
-            bend_damping: 0.0,
         }
     }
 }
-
-/// Bending damping at strength 0 (1/s); half of it at the 0.5 default.
-pub const BEND_DAMPING: f32 = 120.0;
 
 /// `[ragdoll] strength` → the physics (0 = rigid, 1 = the full-strength defaults).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -76,12 +70,13 @@ impl Strength {
     pub fn k(self) -> f32 {
         fin(self.0).clamp(0.0, 1.0)
     }
-    /// Damping multiplier: x1 at full strength, x2 at 0.5 (settles about twice as fast).
+    /// Damping multiplier: x1 at full strength, x3 at 0.5 (settles about twice as fast,
+    /// one small back-swing).
     pub fn damp(self) -> f32 {
-        1.0 + 2.0 * (1.0 - self.k())
+        1.0 + 4.0 * (1.0 - self.k())
     }
     /// The chain params: bend limits, stretch and drag/shake lag scale with k; the damping
-    /// (whole-body and bending) grows as k drops. At 1 these are exactly `Params::default()`.
+    /// grows as k drops. At 1 these are exactly `Params::default()`.
     pub fn params(self) -> Params {
         let (k, d) = (self.k(), self.damp());
         let p = Params::default();
@@ -95,7 +90,6 @@ impl Strength {
             stretch_per_accel: p.stretch_per_accel * k,
             stretch_zeta: (p.stretch_zeta * d).min(1.0),
             follow: 1.0 - k,
-            bend_damping: BEND_DAMPING * (1.0 - k),
             ..p
         }
     }
@@ -279,30 +273,6 @@ impl Chain {
         let damp = if off < 3.0 && spd < 40.0 { self.p.damping_near_rest } else { self.p.damping };
         let keep = (-damp * H).exp();
         let g = self.gravity * H * H;
-        if self.p.bend_damping > 0.0 {
-            // Each segment's spin relative to the segment above it decays (the leg flap); a
-            // whole-body swing (every segment spinning together) is left alone.
-            let f = 1.0 - (-self.p.bend_damping * H).exp();
-            let va = (a.0 - prev_anchor.0, a.1 - prev_anchor.1);
-            for nodes in [&mut self.down, &mut self.up] {
-                let (mut pp, mut pv) = (a, va);
-                let mut prev_w: Option<f32> = None;
-                for nd in nodes.iter_mut() {
-                    let d = (nd.p.0 - pp.0, nd.p.1 - pp.1);
-                    let dd = (d.0 * d.0 + d.1 * d.1).max(1e-6);
-                    let v = (nd.p.0 - nd.prev.0, nd.p.1 - nd.prev.1);
-                    let rel = (v.0 - pv.0, v.1 - pv.1);
-                    let w = (d.0 * rel.1 - d.1 * rel.0) / dd;
-                    let radial = (rel.0 * d.0 + rel.1 * d.1) / dd;
-                    let w2 = prev_w.map_or(w, |pw| w - (w - pw) * f);
-                    let nv = (pv.0 + radial * d.0 - w2 * d.1, pv.1 + radial * d.1 + w2 * d.0);
-                    nd.prev = (nd.p.0 - nv.0, nd.p.1 - nv.1);
-                    prev_w = Some(w2);
-                    pp = nd.p;
-                    pv = nv;
-                }
-            }
-        }
         for nd in self.down.iter_mut().chain(self.up.iter_mut()) {
             let vx = (nd.p.0 - nd.prev.0) * keep;
             let vy = (nd.p.1 - nd.prev.1) * keep;
@@ -367,7 +337,17 @@ impl Chain {
     }
 
     /// Bands that tile the deformed frame: (src y0, src y1, dx, dy), drawn at rows y0+dy..y1+dy.
+    #[cfg(test)]
     pub fn bands(&self, band_px: i32, src_top: i32, src_bottom: i32, grip_row: i32) -> Vec<(i32, i32, i32, i32)> {
+        self.bands_with(band_px, src_top, src_bottom, grip_row, None)
+    }
+
+    /// `bands` with each boundary's offset held by `hold` (no 1 px back-and-forth).
+    pub fn bands_held(&self, hold: &mut BandHold, band_px: i32, src_top: i32, src_bottom: i32, grip_row: i32) -> Vec<(i32, i32, i32, i32)> {
+        self.bands_with(band_px, src_top, src_bottom, grip_row, Some(hold))
+    }
+
+    fn bands_with(&self, band_px: i32, src_top: i32, src_bottom: i32, grip_row: i32, mut hold: Option<&mut BandHold>) -> Vec<(i32, i32, i32, i32)> {
         let bp = band_px.max(2);
         if src_bottom <= src_top {
             return Vec::new();
@@ -375,11 +355,18 @@ impl Chain {
         let grip = grip_row.clamp(src_top, src_bottom - 1);
         let g0 = (grip - bp / 2).max(src_top);
         let g1 = (g0 + bp).min(src_bottom);
-        let dest = |s: i32| -> (i32, i32) {
+        if let Some(h) = hold.as_deref_mut() {
+            h.keyed((bp, src_top, src_bottom, grip));
+        }
+        let mut dest = |s: i32| -> (i32, i32) {
             let (dx, dy) = self.map((s - grip) as f32);
-            let (dx, dy) = (fin(dx), fin(dy));
-            ((dx.round() as i32).clamp(-100_000, 100_000), (grip as f32 + dy).round().clamp(-1.0e6, 1.0e6) as i32)
+            let (dx, dy) = (fin(dx).clamp(-100_000.0, 100_000.0), (grip as f32 + fin(dy)).clamp(-1.0e6, 1.0e6));
+            match hold.as_deref_mut() {
+                Some(h) => h.at(s, dx, dy),
+                None => (dx.round() as i32, dy.round() as i32),
+            }
         };
+        let dx_g1 = dest(g1).0;
         // Boundaries outward from the grip band; dest rows forced monotone.
         let mut down: Vec<(i32, i32, i32)> = vec![(g1, g1, 0)];
         let mut s = g1;
@@ -418,7 +405,7 @@ impl Chain {
         }
         out.push((g0, g1, 0, 0));
         for w in down.windows(2) {
-            let dx = if w[0].0 == g1 { dest(g1).0 } else { w[0].2 };
+            let dx = if w[0].0 == g1 { dx_g1 } else { w[0].2 };
             if let Some(b) = band(w[0].0, w[0].1, w[1].1, dx) {
                 out.push(b);
             }
@@ -475,6 +462,10 @@ fn relax(nodes: &mut [Node], rows: &[f32], a: (f32, f32), s: f32) {
 fn pull(nodes: &mut [Node], rows: &[f32], a: (f32, f32), s: f32, k: f32, up: bool) {
     let sign = if up { -1.0 } else { 1.0 };
     for i in 0..nodes.len() {
+        // Hanging, gravity swings the body; the pull only keeps it straight along itself.
+        if !up && i == 0 {
+            continue;
+        }
         let parent = if i == 0 { a } else { nodes[i - 1].p };
         let dir = if up || i == 0 {
             (0.0, sign)
@@ -486,8 +477,12 @@ fn pull(nodes: &mut [Node], rows: &[f32], a: (f32, f32), s: f32, k: f32, up: boo
         };
         let l = seg_len(rows, i, s);
         let t = (parent.0 + dir.0 * l, parent.1 + dir.1 * l);
-        nodes[i].p.0 += (t.0 - nodes[i].p.0) * k;
-        nodes[i].p.1 += (t.1 - nodes[i].p.1) * k;
+        // First order: the node and its previous position move together, so the pull
+        // straightens without adding velocity (a positional spring here rang the legs at
+        // ~10 Hz; LOCKED #9: one slow swing, no buzz).
+        let d = ((t.0 - nodes[i].p.0) * k, (t.1 - nodes[i].p.1) * k);
+        nodes[i].p = (nodes[i].p.0 + d.0, nodes[i].p.1 + d.1);
+        nodes[i].prev = (nodes[i].prev.0 + d.0, nodes[i].prev.1 + d.1);
     }
 }
 
@@ -508,6 +503,115 @@ fn clamp_angles(nodes: &mut [Node], rows: &[f32], a: (f32, f32), s: f32, swing: 
         let (sx, sy) = (ang.sin() * l, ang.cos() * l * if up { -1.0 } else { 1.0 });
         nodes[i].p = (parent.0 + sx, parent.1 + sy);
         prev_ang = ang;
+    }
+}
+
+// ---- calm bands and the bid swing ------------------------------------------------------
+
+/// One held integer offset: it follows the float value, but turning back needs 1.5 px, so a
+/// value wobbling around a pixel edge never flips 1 px back and forth (LOCKED #9).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Held {
+    v: i32,
+    dir: i8,
+}
+
+impl Held {
+    const ON: f32 = 0.75;
+    const BACK: f32 = 1.5;
+    fn new(raw: f32) -> Held {
+        Held { v: raw.round() as i32, dir: 0 }
+    }
+    fn at(&mut self, raw: f32) -> i32 {
+        let d = raw - self.v as f32;
+        let up = if self.dir < 0 { Held::BACK } else { Held::ON };
+        let down = if self.dir > 0 { Held::BACK } else { Held::ON };
+        if d >= up {
+            self.v = (self.v + 1).max(raw.round() as i32);
+            self.dir = 1;
+        } else if d <= -down {
+            self.v = (self.v - 1).min(raw.round() as i32);
+            self.dir = -1;
+        }
+        self.v
+    }
+}
+
+/// The held offsets of a chain's band boundaries (by source row); reset when the band
+/// geometry (band size, frame rows, grip) changes.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BandHold {
+    key: Option<(i32, i32, i32, i32)>,
+    at: std::collections::BTreeMap<i32, (Held, Held)>,
+}
+
+impl BandHold {
+    fn keyed(&mut self, key: (i32, i32, i32, i32)) {
+        if self.key != Some(key) {
+            self.key = Some(key);
+            self.at.clear();
+        }
+    }
+    fn at(&mut self, s: i32, dx: f32, dy: f32) -> (i32, i32) {
+        let e = self.at.entry(s).or_insert_with(|| (Held::new(dx), Held::new(dy)));
+        (e.0.at(dx), e.1.at(dy))
+    }
+}
+
+/// A hanging bid's swing: the chain driven by a small steady push along its motion (sized to
+/// what the damping takes out, plus a little for any shortfall), so the feet keep swinging
+/// `amp` px (device) as one slow sine: no kicks, no jolts. Its bands are held.
+#[derive(Clone, Debug)]
+pub struct PumpedSwing {
+    pub chain: Chain,
+    amp: f32,
+    /// The pendulum's angular frequency, estimated from its length and gravity (rad/s).
+    w: f32,
+    /// Peak |feet x| of the half swing in progress and of the last finished one.
+    peak: f32,
+    last_peak: f32,
+    x: f32,
+    side: f32,
+    hold: BandHold,
+}
+
+impl PumpedSwing {
+    /// Starts swinging toward `side` (±1).
+    pub fn new(mut chain: Chain, amp: f32, side: f32) -> PumpedSwing {
+        let len = chain.rows_down.last().copied().unwrap_or(1.0).max(1.0);
+        let w = (1.5 * chain.gravity.max(1.0) / len).sqrt();
+        chain.kick((side * amp * w * 1.4, 0.0));
+        PumpedSwing { chain, amp, w, peak: 0.0, last_peak: 0.0, x: 0.0, side, hold: BandHold::default() }
+    }
+
+    pub fn step(&mut self, dt: f32) {
+        let dt = sane_dt(dt);
+        self.chain.step((0.0, 0.0), dt);
+        let x = self.chain.feet_offset().0;
+        let v = (x - self.x) / dt.max(1e-4);
+        self.x = x;
+        if x.signum() != self.side && x.abs() > 0.5 {
+            self.side = x.signum();
+            self.last_peak = self.peak;
+            self.peak = 0.0;
+        }
+        self.peak = self.peak.max(x.abs());
+        // Steady push along the motion: the damping's loss at `amp`, plus a gain on the
+        // shortfall (a restart from rest pushes toward `side`).
+        let c = self.chain.p.damping;
+        let short = ((self.amp - self.last_peak.max(self.peak)) / self.amp.max(1.0)).clamp(-0.5, 1.0);
+        let f = c * std::f32::consts::PI * self.w * self.amp / 4.0 * (1.0 + 1.5 * short).max(0.0);
+        let dir = if v.abs() > 1.0 { v.signum() } else { self.side };
+        self.chain.kick((dir * f * dt, 0.0));
+    }
+
+    /// An insist beat or an emote: a push (device px/s at the feet).
+    pub fn push(&mut self, px: f32) {
+        self.chain.kick((px, 0.0));
+    }
+
+    pub fn bands(&mut self, band_px: i32, src_top: i32, src_bottom: i32, grip_row: i32) -> Vec<(i32, i32, i32, i32)> {
+        self.chain.bands_held(&mut self.hold, band_px, src_top, src_bottom, grip_row)
     }
 }
 
@@ -900,10 +1004,16 @@ mod tests {
         let peak = |x: &[f32]| x.iter().fold(0.0f32, |m, v| m.max(v.abs()));
         let (st1, st2) = (secs(&k1), secs(&k2));
         let (r1, r2) = (rest(&d1), rest(&d2));
-        let (c1, c2) = (crossings(&k1), crossings(&k2));
+        let (c1, c2) = (crossings(&d1), crossings(&d2));
         let (p1, p2) = (peak(&d1), peak(&d2));
-        assert!(st2 <= 0.5 * st1 && r2 <= 0.5 * r1, "settles >= 2x faster: kick {st1:.2} → {st2:.2} s, drag {r1:.2} → {r2:.2} s");
-        assert!(c2 * 3 <= c1, "overshoots less: {c1} → {c2} crossings");
+        // The back-swing after the stop, relative to the swing past the hand.
+        let back = |x: &[f32]| {
+            let e: Vec<f32> = (1..x.len() - 1).filter(|&i| i as f32 * H > 0.3 && (x[i] - x[i - 1]) * (x[i + 1] - x[i]) < 0.0).map(|i| x[i]).collect();
+            if e.len() >= 2 { (e[1] / e[0]).abs() } else { 0.0 }
+        };
+        let (b1, b2) = (back(&d1), back(&d2));
+        assert!(r2 <= 0.5 * r1 && st2 <= 0.65 * st1, "settles ~2x faster: drag {r1:.2} → {r2:.2} s, kick {st1:.2} → {st2:.2} s");
+        assert!(b2 <= 0.6 * b1 && c2 < c1, "overshoots less: back-swing {:.0} % → {:.0} %, {c1} → {c2} crossings", 100.0 * b1, 100.0 * b2);
         assert!(p2 <= 0.6 * p1, "about half the swing: {p1:.0} → {p2:.0} px");
         // A shake (±150 px at 5 Hz): the feet lag the hand about half as much.
         let lag = |p: &Params| {
@@ -919,9 +1029,89 @@ mod tests {
         let (l1, l2) = (lag(&full), lag(&half));
         assert!(l2 <= 0.6 * l1, "a calmer shake: {l1:.0} → {l2:.0} px");
         eprintln!(
-            "strength 1 → 0.5: drag swing {p1:.0} → {p2:.0} px; at rest after the stop {r1:.2} → {r2:.2} s; kick settle {st1:.2} → {st2:.2} s, \
-             {c1} → {c2} crossings; shake lag {l1:.0} → {l2:.0} px"
+            "strength 1 → 0.5: drag swing {p1:.0} → {p2:.0} px; at rest after the stop {r1:.2} → {r2:.2} s; kick settle {st1:.2} → {st2:.2} s; \
+             back-swing {:.0} % → {:.0} %, {c1} → {c2} crossings; shake lag {l1:.0} → {l2:.0} px",
+            100.0 * b1,
+            100.0 * b2
         );
+    }
+
+    /// A hanging bid as the view runs it (30 Hz ticks, sf 1.083, ~330 px under the grip).
+    fn bid_swing(k: f32) -> PumpedSwing {
+        let sf = 1.083;
+        let p = Strength(k).params().scaled(sf);
+        PumpedSwing::new(Chain::new(&p, &[], &Chain::rows(8, 330, false), (0.0, 0.0)), 30.0 * k * sf, 1.0)
+    }
+
+    /// Per band: direction reversals of its offset (dx and dy) and 1 px back-and-forths.
+    fn band_wobble(frames: &[Vec<(i32, i32, i32, i32)>]) -> (usize, usize) {
+        let (mut worst, mut flips) = (0, 0);
+        for b in 0..frames[0].len() {
+            for comp in [2, 3] {
+                let seq: Vec<i32> = frames.iter().filter_map(|f| f.get(b)).map(|x| if comp == 2 { x.2 } else { x.0 + x.3 }).collect();
+                let steps: Vec<i32> = seq.windows(2).map(|w| w[1] - w[0]).filter(|d| *d != 0).collect();
+                worst = worst.max(steps.windows(2).filter(|w| w[0].signum() != w[1].signum()).count());
+                flips += seq.windows(3).filter(|w| w[0] == w[2] && (w[1] - w[0]).abs() == 1).count();
+            }
+        }
+        (worst, flips)
+    }
+
+    #[test]
+    fn hanging_bid_is_one_slow_calm_swing() {
+        for k in [0.5, 1.0] {
+            let mut sw = bid_swing(k);
+            let mut xs = Vec::new();
+            let mut frames = Vec::new();
+            for i in 0..240 {
+                sw.step(1.0 / 30.0);
+                let b = sw.bands(6, 0, 389, 30);
+                if i >= 60 {
+                    xs.push(sw.chain.feet_offset().0);
+                    frames.push(b);
+                }
+            }
+            // 3 s at rest: every band offset turns back at most ~2x/s, never a 1 px flicker.
+            let (worst, flips) = band_wobble(&frames[..90]);
+            assert!(worst <= 6, "k {k}: a band reversed {worst} times in 3 s");
+            assert_eq!(flips, 0, "k {k}: 1 px back-and-forth");
+            // One slow pendulum: the feet cross the middle ~2x per 1.5–2 s, at the target size.
+            let ups: Vec<usize> = xs.windows(2).enumerate().filter(|(_, w)| w[0] < 0.0 && w[1] >= 0.0).map(|(i, _)| i).collect();
+            let per = (ups[ups.len() - 1] - ups[0]) as f32 / (ups.len() - 1) as f32 / 30.0;
+            assert!((1.45..=2.0).contains(&per), "k {k}: period {per:.2} s");
+            let rev = xs.windows(3).filter(|w| (w[1] - w[0]) * (w[2] - w[1]) < 0.0).count() as f32 / 6.0;
+            assert!(rev <= 1.6, "k {k}: the feet turn {rev:.1}x/s (a high-frequency mode)");
+            let amp = xs.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+            assert!((amp - 30.0 * k * 1.083).abs() < 0.3 * 30.0 * k * 1.083, "k {k}: feet swing {amp:.0} px");
+            eprintln!("bid swing k {k}: period {per:.2} s, feet {amp:.0} px, worst band {worst} reversals / 3 s, feet turns {rev:.1}/s");
+        }
+    }
+
+    #[test]
+    fn held_chain_settles_without_flicker() {
+        // Dragged 260 px and stopped: then 3 s hanging still in the hand.
+        let p = Strength(0.5).params().scaled(1.083);
+        let mut c = Chain::new(&p, &[], &Chain::rows(8, 330, false), (500.0, 100.0));
+        let mut hold = BandHold::default();
+        let mut frames = Vec::new();
+        for i in 0..150 {
+            let t = i as f32 / 60.0;
+            c.step((500.0 + 260.0 * (t / 0.3).min(1.0), 100.0), 1.0 / 60.0);
+            let b = c.bands_held(&mut hold, 6, 0, 389, 30);
+            if i >= 60 {
+                frames.push(b);
+            }
+        }
+        let (worst, flips) = band_wobble(&frames);
+        assert!(worst <= 3, "a band reversed {worst} times in 1.5 s");
+        assert_eq!(flips, 0, "1 px back-and-forth");
+    }
+
+    #[test]
+    fn held_offsets_never_flicker() {
+        let mut h = Held::new(10.4);
+        let vals: Vec<i32> = [10.6, 10.4, 10.55, 10.45, 10.7, 10.3, 11.2, 11.6, 11.1, 10.9, 10.2, 9.4].iter().map(|&v| h.at(v)).collect();
+        assert_eq!(vals, vec![10, 10, 10, 10, 10, 10, 11, 11, 11, 11, 11, 9], "on 0.75 px, back 1.5 px");
     }
 
     #[test]

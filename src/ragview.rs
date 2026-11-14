@@ -32,6 +32,8 @@ pub(super) struct Rag {
     pub m: RagMachine,
     rigid: bool,
     chain: Chain,
+    /// The chain's band offsets, held (no 1 px back-and-forth between ticks).
+    hold: ragdoll::BandHold,
     zone: Zone,
     /// The frame the chain was built for and the grip in it (avatar-local device px).
     frame: usize,
@@ -223,6 +225,7 @@ impl Avatar {
             m,
             rigid,
             chain,
+            hold: ragdoll::BandHold::default(),
             zone,
             frame,
             grip: local,
@@ -687,16 +690,27 @@ impl Avatar {
 
     /// The plan for the sim state now: it becomes `next` (painted underneath this frame).
     fn rag_plan_next(&mut self) {
+        // The held bands first (they update the hold: once per tick).
+        let held = {
+            let Some(r) = &self.rag else { return };
+            let frame = if r.rigid { self.rag_frame(r, None) } else { r.frame };
+            match self.frame_or_default(frame) {
+                Some(f) if !r.rigid && r.landed.is_none() => Some((f.top, f.bottom)),
+                _ => None,
+            }
+        };
+        let bp = ((4.0 * self.layout.sf).round() as i32).max(2);
+        let slices = match (held, self.rag.as_mut()) {
+            (Some((top, bottom)), Some(r)) => Some(r.chain.bands_held(&mut r.hold, bp, top, bottom, r.grip.1.clamp(top, bottom - 1))),
+            _ => None,
+        };
         let Some(r) = &self.rag else { return };
         let l = &self.layout;
         let frame = if r.rigid { self.rag_frame(r, None) } else { r.frame };
         let mut plan = BodyPlan::plain();
-        if !r.rigid
-            && let Some(f) = self.frame_or_default(frame)
-        {
+        if !r.rigid && self.frame_or_default(frame).is_some() {
             if r.landed.is_none() {
-                let bp = ((4.0 * l.sf).round() as i32).max(2);
-                plan.slices = Some(r.chain.bands(bp, f.top, f.bottom, r.grip.1.clamp(f.top, f.bottom - 1)));
+                plan.slices = slices;
             }
             if let Some((t0, _)) = r.flip {
                 let u = r.t - t0;
