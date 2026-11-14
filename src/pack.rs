@@ -380,6 +380,10 @@ pub struct Behaviour {
     pub life: Life,
     #[serde(default)]
     pub perch: Option<PerchSpec>,
+    /// The way the art faces unmirrored: "right" (default) or "left" (Capri: her hair sweeps
+    /// back to the right). Every facing decision goes through it (`art_faces_right`).
+    #[serde(default, alias = "facing")]
+    pub faces: Option<String>,
     #[serde(default)]
     pub music: Option<MusicSpec>,
     #[serde(default)]
@@ -391,6 +395,13 @@ pub struct Behaviour {
     pub fling: Option<FlingSpec>,
     #[serde(default)]
     pub land: Option<LandSpec>,
+}
+
+impl Behaviour {
+    /// The art faces right unmirrored (`faces`, default right).
+    pub fn art_faces_right(&self) -> bool {
+        !self.faces.as_deref().is_some_and(|f| f.trim().eq_ignore_ascii_case("left"))
+    }
 }
 
 /// While held (BRIEF-ragdoll §2.2).
@@ -530,10 +541,13 @@ impl Pack {
             r = Some(r.map_or(b, |r| r.union(&b)));
         }
         let r = r.expect("pack has frames");
-        let (cw, ch) = (self.catalog.canvas.width as i32, self.catalog.canvas.height as i32);
-        let x = (r.x - 2).max(0);
+        let ch = self.catalog.canvas.height as i32;
         let y = (r.y - 2).max(0);
-        Rect { x, y, width: (r.right() + 2).min(cw) - x, height: (r.bottom() + 2).min(ch) - y }
+        // Symmetric about the canonical anchor (padded past the canvas where it must be): a
+        // frame mirrored about the rect's centre keeps her feet where they were.
+        let ax = self.catalog.canonical_anchor.x;
+        let reach = (ax - r.x).max(r.right() - ax) + 2;
+        Rect { x: ax - reach, y, width: 2 * reach, height: (r.bottom() + 2).min(ch) - y }
     }
 
     pub fn load(dir: &Path) -> Result<Pack> {

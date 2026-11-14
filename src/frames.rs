@@ -88,6 +88,54 @@ pub struct Frame {
     pub profile: Arc<Vec<i16>>,
     /// Device-px rows of the face (brows to mouth): glitches keep it readable.
     pub face: (i32, i32),
+    /// This frame mirrored left-right, built on first use (`mirrored`).
+    mirror: std::sync::OnceLock<Box<Frame>>,
+}
+
+impl Frame {
+    /// This frame mirrored about the avatar rect's centre, which is the canonical anchor
+    /// (the crop is symmetric about it): her feet stay put. Image, hit mask, shape rects,
+    /// head, glints and profile all mirror together; built once, then cached, so a turn
+    /// costs no more than any frame change.
+    pub fn mirrored(&self) -> &Frame {
+        self.mirror.get_or_init(|| Box::new(self.build_mirror()))
+    }
+
+    fn build_mirror(&self) -> Frame {
+        let (w, h) = (self.mask.w, self.mask.h);
+        let mut mask = Mask::new(w, h);
+        for y in 0..h as i32 {
+            for x in 0..w as i32 {
+                if self.mask.get(x, y) {
+                    mask.set(w - 1 - x as u32, y as u32);
+                }
+            }
+        }
+        let src = self.image.as_bytes(0).unwrap_or(&[]);
+        let mut px = vec![0u8; src.len()];
+        let row = w as usize * 4;
+        for (d, s) in px.chunks_exact_mut(row).zip(src.chunks_exact(row)) {
+            for (dp, sp) in d.as_chunks_mut::<4>().0.iter_mut().zip(s.as_chunks::<4>().0.iter().rev()) {
+                *dp = *sp;
+            }
+        }
+        let rgba = image::RgbaImage::from_raw(w, h, px).unwrap_or_else(|| image::RgbaImage::new(w, h));
+        let mx = |x: i32| w as i32 - 1 - x;
+        Frame {
+            id: self.id.clone(),
+            image: Arc::new(RenderImage::new(vec![image::Frame::new(rgba)])),
+            rects: Arc::new(mask.rects()),
+            mask,
+            head_line: self.head_line,
+            top: self.top,
+            bottom: self.bottom,
+            head_x: mx(self.head_x),
+            glints: self.glints.iter().map(|&(x, y)| (mx(x as i32) as i16, y)).collect(),
+            profile: Arc::new(self.profile.iter().rev().copied().collect()),
+            face: self.face,
+            mirror: std::sync::OnceLock::new(),
+        }
+    }
 }
 
 /// Topmost opaque row per column.
@@ -333,6 +381,7 @@ fn decode_one(pack: &Pack, f: &FrameSource, geo: &Geometry, verify: bool, resize
         top: top.round() as i32,
         head_x,
         glints,
+        mirror: std::sync::OnceLock::new(),
     })
 }
 

@@ -46,6 +46,8 @@ pub enum Command {
     Quit,
     /// Dev: a glitch burst.
     Glitch,
+    /// Dev: turn her (`None`: the other way), with the turn's squeeze.
+    Face(Option<bool>),
     /// Bubble paging: +1 / -1.
     Page(i32),
     /// Back from HIDE (the restore chip's click).
@@ -344,6 +346,12 @@ impl Command {
             "collapse" => Command::Collapse(true),
             "expand" => Command::Collapse(false),
             "glitch" => Command::Glitch,
+            "face" => Command::Face(match rest.trim() {
+                "left" => Some(false),
+                "right" => Some(true),
+                "toggle" => None,
+                _ => bail!("usage: face left|right|toggle"),
+            }),
             "music" => match rest {
                 "on" | "" => Command::Music(true),
                 "off" => Command::Music(false),

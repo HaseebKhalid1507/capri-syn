@@ -26,6 +26,7 @@ mod brain;
 mod control;
 mod drag;
 mod edges;
+mod facing;
 mod frames;
 mod fx;
 mod pack;

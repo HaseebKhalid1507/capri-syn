@@ -1,5 +1,6 @@
 {
   "schemaVersion": 1,
+  "faces": "left",
   "font": "Exo 2",
   "fontFiles": [
     "fonts/Exo2-Regular.ttf",
