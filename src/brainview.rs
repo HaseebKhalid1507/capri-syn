@@ -1170,11 +1170,21 @@ impl Avatar {
         }
     }
 
+    /// A hop moves the whole window: with a bubble up (a summon's prompt) it would jump
+    /// with her, so she squashes in place instead.
+    fn hop_or_squash(&mut self, now: Instant) {
+        if self.bubble.is_some() {
+            self.squash = Some(now);
+        } else {
+            self.hop = Some(now);
+        }
+    }
+
     /// A summon for his prompt landed: one hop, a point at his window, then the attentive
     /// lean (the NeedsYou mood) with the status pulsing for a few seconds.
     fn summon_landed(&mut self, now: Instant) {
         if self.placement == Placement::Ground {
-            self.hop = Some(now);
+            self.hop_or_squash(now);
             let right = self.brain_focused().is_some_and(|f| f.center().0 > self.ground().0);
             let steps = [crate::pack::Step::Clip(if right { "point_right" } else { "point_left" }.into())];
             let seq = self.pack.flatten(&steps);
@@ -1341,7 +1351,7 @@ impl Avatar {
         if let EmoteKey::Insist(_) = e {
             let hang = matches!(self.placement, Placement::Pose { frame } if self.brain_pose("hang") == Some(frame) || self.brain_pose("hang_upside_down") == Some(frame));
             if self.placement == Placement::Ground || (self.posed() && !hang) {
-                self.hop = Some(now);
+                self.hop_or_squash(now);
             }
             if self.posed() {
                 let dir = if self.rng.pick(2) == 0 { 1.0 } else { -1.0 };

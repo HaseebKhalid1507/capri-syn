@@ -285,7 +285,8 @@ impl BodyPlan {
     pub fn glitch(&mut self, g: GlitchStep) {
         let mut rng = Rng::new(g.seed | 1);
         let s = g.strength;
-        let amp = (s * 1.15).min(1.0);
+        // A calm landing tears half as far (no loose slivers flying off).
+        let amp = (s * 1.15).min(1.0) * if g.calm { 0.5 } else { 1.0 };
         let (bx, by, bw, bh) = g.body;
         let top = by.clamp(g.y0, g.h);
         // Band edges: the tag (or the HUD) cut once, n over the figure, the face's edges.
