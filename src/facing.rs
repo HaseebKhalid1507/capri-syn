@@ -1,6 +1,6 @@
-//! Which way she faces. The art is drawn facing one way (the pack's `facing`, right by
-//! default); mirrored, she faces the other. Pure: the hysteresis that turns her on a drag,
-//! and where she should look on her own.
+//! Which way she faces. The art is drawn facing one way (the pack's `faces`, right by
+//! default; Capri faces left); mirrored, she faces the other. Pure: the hysteresis that
+//! turns her on a drag, where she should look on her own, and which art that means.
 
 /// A drag turns her once the pointer's horizontal velocity (logical px/s, the same fit the
 /// drag follow uses) has pointed the other way past this for `TURN_HOLD`.
@@ -57,6 +57,35 @@ impl Turner {
     }
 }
 
+/// A turn's shape over its life `u` in 0..1: (sx, sy) about her feet. A one-frame
+/// anticipation first (she dips 4 % and widens 3 %), then the squeeze, |cos| down to
+/// `TURN_MIN_SX` edge-on, where the art swaps (`TURN_SWAP_U`), and back out.
+pub const TURN_ANTIC: f32 = 0.18;
+pub const TURN_MIN_SX: f32 = 0.32;
+pub const TURN_SWAP_U: f32 = TURN_ANTIC + (1.0 - TURN_ANTIC) * 0.5;
+pub fn turn_shape(u: f32) -> Option<(f32, f32)> {
+    use std::f32::consts::PI;
+    if !(0.0..1.0).contains(&u) {
+        return None;
+    }
+    if u < TURN_ANTIC {
+        let s = (PI * u / TURN_ANTIC).sin();
+        return Some((1.0 + 0.03 * s, 1.0 - 0.04 * s));
+    }
+    let w = (u - TURN_ANTIC) / (1.0 - TURN_ANTIC);
+    Some(((PI * w).cos().abs().max(TURN_MIN_SX), 1.0))
+}
+
+/// Shown mirrored to face `right`, for art that faces right (`art_right`) or left unmirrored.
+pub fn mirrored_for(art_right: bool, right: bool) -> bool {
+    right != art_right
+}
+
+/// She faces right: the art's own way, or the other one mirrored.
+pub fn faces_right(art_right: bool, mirrored: bool) -> bool {
+    art_right != mirrored
+}
+
 /// Face `target_x` from `x` (root px), unless it is within `dead` px.
 pub fn toward(x: i32, target_x: i32, dead: i32) -> Option<bool> {
     ((target_x - x).abs() > dead).then_some(target_x > x)
@@ -100,6 +129,73 @@ mod tests {
             t += 0.008;
         }
         turns
+    }
+
+    /// Capri's art faces left: going right shows her mirrored, going left unmirrored; a
+    /// right-facing pack the other way round. Every rule decides a side, then the art.
+    #[test]
+    fn a_left_facing_pack_mirrors_to_go_right() {
+        let left_art = false;
+        // A drag to the right, from rest (unmirrored: facing left).
+        let turns = run(|t| 300.0 + 500.0 * t, 0.6, faces_right(left_art, false));
+        assert_eq!(turns.len(), 1, "{turns:?}");
+        assert!(turns[0].1, "turns to face right");
+        assert!(mirrored_for(left_art, true), "right = the flipped art");
+        // ...then back left: the art as drawn.
+        let turns = run(|t| 900.0 - 500.0 * t, 0.6, faces_right(left_art, true));
+        assert_eq!(turns.iter().map(|t| t.1).collect::<Vec<_>>(), vec![false]);
+        assert!(!mirrored_for(left_art, false));
+        // Already facing the way she's dragged: no turn.
+        assert!(run(|t| 900.0 - 500.0 * t, 0.6, faces_right(left_art, false)).is_empty());
+        // A right-facing pack: the opposite art for the same sides.
+        assert!(!mirrored_for(true, true) && mirrored_for(true, false));
+        for (art, m) in [(false, false), (false, true), (true, false), (true, true)] {
+            assert_eq!(mirrored_for(art, faces_right(art, m)), m);
+        }
+    }
+
+    #[test]
+    fn a_left_facing_pack_looks_at_the_pointer_into_the_screen_and_at_the_window() {
+        let left_art = false;
+        // His pointer to her right: face right = flipped; to her left: as drawn.
+        assert_eq!(toward(500, 900, 40).map(|r| mirrored_for(left_art, r)), Some(true));
+        assert_eq!(toward(500, 100, 40).map(|r| mirrored_for(left_art, r)), Some(false));
+        // Near the left edge of a monitor she faces into it (right): flipped. Right edge: as drawn.
+        assert_eq!(inward(100, 0, 1920).map(|r| mirrored_for(left_art, r)), Some(true));
+        assert_eq!(inward(1850, 0, 1920).map(|r| mirrored_for(left_art, r)), Some(false));
+        assert_eq!(inward(2000, 1920, 2560).map(|r| mirrored_for(left_art, r)), Some(true));
+        // On a window's edge she faces its middle: a window to her right = flipped.
+        let (win_x, win_w) = (600, 800);
+        assert_eq!(toward(610, win_x + win_w / 2, 40).map(|r| mirrored_for(left_art, r)), Some(true));
+        assert_eq!(toward(1390, win_x + win_w / 2, 40).map(|r| mirrored_for(left_art, r)), Some(false));
+    }
+
+    #[test]
+    fn the_capri_pack_faces_left() {
+        let b: crate::pack::Behaviour = serde_json::from_str(include_str!("../packs/capri/moods.json")).expect("moods.json");
+        assert!(!b.art_faces_right());
+        let d: crate::pack::Behaviour = serde_json::from_str("{}").expect("empty");
+        assert!(d.art_faces_right(), "other packs default to right");
+        let old: crate::pack::Behaviour = serde_json::from_str(r#"{"facing": "left"}"#).expect("alias");
+        assert!(!old.art_faces_right());
+    }
+
+    #[test]
+    fn the_turn_dips_then_squeezes_never_thinner_than_the_floor_and_swaps_edge_on() {
+        assert_eq!(turn_shape(0.0), Some((1.0, 1.0)));
+        assert_eq!(turn_shape(1.0), None);
+        let (ax, ay) = turn_shape(TURN_ANTIC / 2.0).unwrap();
+        assert!(ax > 1.0 && ay < 0.97, "anticipation: {ax} {ay}");
+        let at_swap = turn_shape(TURN_SWAP_U).unwrap();
+        assert!((at_swap.0 - TURN_MIN_SX).abs() < 1e-4 && at_swap.1 == 1.0, "{at_swap:?}");
+        let mut u = 0.0;
+        while u < 1.0 {
+            let (sx, sy) = turn_shape(u).unwrap();
+            assert!((TURN_MIN_SX..=1.031).contains(&sx) && (0.959..=1.0).contains(&sy), "{u}: {sx} {sy}");
+            u += 0.01;
+        }
+        let (ex, _) = turn_shape(0.99).unwrap();
+        assert!(ex > 0.99, "ends full width: {ex}");
     }
 
     #[test]

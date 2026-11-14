@@ -137,7 +137,7 @@ pub struct MirrorSettings {
 
 impl Default for MirrorSettings {
     fn default() -> Self {
-        MirrorSettings { drag: true, own: true, idle_every_min: (1.0, 4.0), turn_ms: 110 }
+        MirrorSettings { drag: true, own: true, idle_every_min: (1.0, 4.0), turn_ms: 150 }
     }
 }
 
@@ -552,7 +552,7 @@ mod tests {
     #[test]
     fn mirror_section_and_the_drag_alias() {
         let d = Settings::parse("").unwrap().mirror;
-        assert_eq!(d, MirrorSettings { drag: true, own: true, idle_every_min: (1.0, 4.0), turn_ms: 110 });
+        assert_eq!(d, MirrorSettings { drag: true, own: true, idle_every_min: (1.0, 4.0), turn_ms: 150 });
         let m = Settings::parse("[mirror]\ndrag = false\nself = false\nidle_every_min = [0.5, 2]\nturn_ms = 0\n").unwrap().mirror;
         assert_eq!(m, MirrorSettings { drag: false, own: false, idle_every_min: (0.5, 2.0), turn_ms: 0 });
         assert!(!Settings::parse("[drag]\nmirror = false\n").unwrap().mirror.drag);

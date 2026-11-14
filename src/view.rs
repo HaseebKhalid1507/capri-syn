@@ -566,7 +566,7 @@ fn jitter(rng: &mut Rng, ms: u64) -> Duration {
 impl Avatar {
     pub fn new(init: Init, window: &mut Window, cx: &mut Context<Self>) -> Avatar {
         let pack = init.pack;
-        let art_right = !pack.behaviour.facing.as_deref().is_some_and(|f| f.eq_ignore_ascii_case("left"));
+        let art_right = pack.behaviour.art_faces_right();
         let flippable = pack.frames.iter().map(|f| matches!(f.anchor.name.as_str(), "ground" | "seat")).collect();
         let default = pack.frame(&pack.catalog.default_sprite).unwrap_or(0);
         let font = pack.behaviour.font.clone().unwrap_or_else(|| "Fira Sans".into());
@@ -864,7 +864,14 @@ impl Avatar {
     /// Move the glint layers to `now`; unmap the ones not in use.
     fn update_glints(&mut self, now: Instant) {
         let life_ms = self.pack.behaviour.life.sparkle_ms;
-        let show = self.loaded && !self.hidden && !self.quitting && self.glitch.is_none() && self.teleport.is_none() && self.squash.is_none() && self.rag.is_none();
+        let show = self.loaded
+            && !self.hidden
+            && !self.quitting
+            && self.glitch.is_none()
+            && self.teleport.is_none()
+            && self.squash.is_none()
+            && self.rag.is_none()
+            && self.turn.is_none();
         let l = self.layout;
         let base = ((self.applied.0 + l.avatar_x) as f32, (self.applied.1 + l.avatar_y) as f32);
         let mut used = 0;
@@ -1061,17 +1068,17 @@ impl Avatar {
 
     /// She faces right (or will, once a turn in progress is through).
     pub(super) fn facing_right(&self) -> bool {
-        self.art_right != self.turn.map_or(self.flip, |t| t.1)
+        crate::facing::faces_right(self.art_right, self.turn.map_or(self.flip, |t| t.1))
     }
 
     /// Turn to face `right`. `snap`: at once (a drag, a departure); else the turn's squeeze
-    /// (`[mirror] turn_ms`), where the art swaps halfway.
+    /// (`[mirror] turn_ms`), where the art swaps edge-on.
     pub(super) fn face(&mut self, right: bool, why: &'static str, now: Instant, snap: bool) {
         // In the air or landing she keeps the way she was flung (and her chain its grip).
         if self.facing_right() == right || (self.rag.is_some() && !self.rag_held()) {
             return;
         }
-        let to = right != self.art_right;
+        let to = crate::facing::mirrored_for(self.art_right, right);
         self.turns += 1;
         self.turn_why = why;
         self.last_turn = Some(now);
@@ -1113,20 +1120,32 @@ impl Avatar {
         self.rag_mirrored();
     }
 
-    /// The turn's squeeze: |cos| over `turn_ms`, never thinner than a quarter.
-    fn turn_sx(&self, at: Instant) -> Option<f32> {
-        let (t0, _) = self.turn?;
+    /// The turn's (sx, sy) at `at` (`facing::turn_shape` over `turn_ms`), and the flip shown then.
+    fn turn_at(&self, at: Instant) -> Option<((f32, f32), bool)> {
+        let (t0, to) = self.turn?;
         let ms = self.mirror_cfg.turn_ms.max(1) as f32;
         let u = at.saturating_duration_since(t0).as_secs_f32() * 1000.0 / ms;
-        (u < 1.0).then(|| (std::f32::consts::PI * u).cos().abs().max(0.25))
+        let shown = if u >= crate::facing::TURN_SWAP_U { to } else { self.flip };
+        crate::facing::turn_shape(u).map(|k| (k, shown))
     }
 
-    /// Advance a turn: the art swaps halfway, the squeeze ends at `turn_ms`.
+    /// Frame `i` as it shows with `flip` (unmirrored if it may not mirror).
+    fn frame_as(&self, i: usize, flip: bool) -> Option<&Frame> {
+        let f = self.frames.get(i)?.as_ref()?;
+        Some(if flip && self.flippable.get(i).copied().unwrap_or(false) { f.mirrored() } else { f })
+    }
+
+    /// Frame `i` as drawn in the pack (never mirrored), else the default sprite.
+    fn raw_frame_or_default(&self, i: usize) -> Option<&Frame> {
+        self.frames.get(i).and_then(|f| f.as_ref()).or_else(|| self.frames.get(self.pack.frame(&self.pack.catalog.default_sprite).ok()?)?.as_ref())
+    }
+
+    /// Advance a turn: the art swaps edge-on (`facing::TURN_SWAP_U`), it ends at `turn_ms`.
     fn step_turn(&mut self, now: Instant) -> bool {
         let Some((t0, to)) = self.turn else { return false };
         let ms = now.saturating_duration_since(t0).as_secs_f32() * 1000.0;
         let full = self.mirror_cfg.turn_ms as f32;
-        if ms >= full * 0.5 && self.flip != to {
+        if ms >= full * crate::facing::TURN_SWAP_U && self.flip != to {
             self.set_flip(to);
         }
         if ms >= full {
@@ -3845,7 +3864,12 @@ impl Render for Avatar {
         // HUD placement follows the mood's resting frame, so loops don't make it jitter.
         let base = self.frame_or_default(self.anim.base()).or(frame);
         // …but a taller one-shot (an entry clip) pushes it up so it never sits on the hair.
-        let (mut base_top, head_x) = base.map_or((0, l.geo.width as i32 / 2), |f| (f.top.min(frame.map_or(f.top, |c| c.top)), f.head_x));
+        // The tag's column is the art's own (unmirrored) head: a turn never moves it (a moved
+        // tag sits out of the shape for two frames: it blinked out mid-turn).
+        let raw_base = self.raw_frame_or_default(self.anim.base());
+        let raw_frame = self.raw_frame_or_default(shown_i);
+        let head_x = raw_base.or(raw_frame).map_or(l.geo.width as i32 / 2, |f| f.head_x);
+        let mut base_top = base.map_or(0, |f| f.top.min(frame.map_or(f.top, |c| c.top)));
         // While a bubble is up its height holds (per resting frame): a one-shot raising a hand
         // made it jump ~10 px and back.
         if self.panel_up() {
@@ -3863,10 +3887,21 @@ impl Render for Avatar {
         let tag_hair = {
             let tw = self.tag_w.get();
             let (c0, c1) = (((head_l - tw / 2.0) * sf) as i32 - l.avatar_x - 4, ((head_l + tw / 2.0) * sf) as i32 - l.avatar_x + 4);
+            // Clear of the hair under it facing either way (the profile mirrors by reversal):
+            // its height doesn't change on a turn either.
+            let both = self.mirror_cfg.drag || self.mirror_cfg.own;
             let under = |f: Option<&Frame>| {
-                f.and_then(|f| (c0.max(0)..c1.min(f.profile.len() as i32)).map(|x| f.profile[x as usize]).min()).filter(|&v| v != i16::MAX).map(i32::from)
+                f.and_then(|f| {
+                    let n = f.profile.len() as i32;
+                    let cols = c0.max(0)..c1.min(n);
+                    let own = cols.clone().map(|x| f.profile[x as usize]).min();
+                    let other = if both { cols.map(|x| f.profile[(n - 1 - x) as usize]).min() } else { None };
+                    own.into_iter().chain(other).min()
+                })
+                .filter(|&v| v != i16::MAX)
+                .map(i32::from)
             };
-            under(base).into_iter().chain(under(frame)).min().unwrap_or(base_top)
+            under(raw_base).into_iter().chain(under(raw_frame)).min().unwrap_or(base_top)
         };
         let image = frame.map(|f| f.image.clone());
         let rects = frame.map(|f| f.rects.clone()).unwrap_or_default();
@@ -3895,9 +3930,14 @@ impl Render for Avatar {
             plan.sx = sx;
             plan.pivot.0 = sliver_px;
         }
-        if let Some(k) = self.turn_sx(now).filter(|_| self.rag.is_none()) {
-            plan.sx *= k;
-            plan.pivot.0 = sliver_px;
+        // A turn: its shape now; its next one goes underneath (with the art it shows then),
+        // not the unsquashed frame (that peeked out at her edges as shards on the rebound).
+        let pre_turn = (plan.sx, plan.sy);
+        let turning = self.rag.is_none() && self.turn_at(now).is_some();
+        if let Some(((kx, ky), _)) = self.turn_at(now).filter(|_| turning) {
+            plan.sx *= kx;
+            plan.sy *= ky;
+            plan.pivot = (sliver_px, plan.pivot.1);
         }
         // The next frame's plan, painted underneath this one. The bounding shape is set when
         // a frame paints, but its present lands up to a frame later, so wherever the next
@@ -3963,6 +4003,18 @@ impl Render for Avatar {
             let next_base = rag_next.as_ref().map_or(base, |n| n.plan.clone());
             next = Some(if g.done(at) { next_base.clone() } else { lay_on(&next_base, at, step + 1) });
         }
+        let mut turn_next_img: Option<Arc<RenderImage>> = None;
+        if turning && next.is_none() {
+            let at = now + FRAME_FX;
+            let ((kx, ky), shown) = self.turn_at(at).unwrap_or(((1.0, 1.0), self.turn.map_or(self.flip, |t| t.1)));
+            let mut n = plan.clone();
+            n.sx = pre_turn.0 * kx;
+            n.sy = pre_turn.1 * ky;
+            next = Some(n);
+            if shown != self.flip {
+                turn_next_img = self.frame_as(shown_i, shown).map(|f| f.image.clone());
+            }
+        }
         // The sliver widens next frame: that width goes underneath.
         if let Some(sx) = self.sliver_sx(now + FRAME_FX).or(self.sliver.map(|_| 1.0)) {
             let n = next.get_or_insert_with(|| {
@@ -3974,7 +4026,7 @@ impl Render for Avatar {
             n.pivot.0 = sliver_px;
         }
         // The rag's next plan (and frame) goes underneath (§4: commit one frame ahead).
-        let mut next_img: Option<Arc<RenderImage>> = None;
+        let mut next_img: Option<Arc<RenderImage>> = turn_next_img;
         if let Some((_, Some(n))) = &rag_shown {
             // Under a glitch, `next` is already the pattern laid on this plan.
             if self.glitch.is_none() {
@@ -4031,7 +4083,7 @@ impl Render for Avatar {
             }
         }
         // The glitch ends next frame: the plain or posed figure comes back.
-        if next.as_ref().is_some_and(|n| n.slices.is_none()) {
+        if !turning && next.as_ref().is_some_and(|n| n.slices.is_none()) {
             under = (POSE_REACH * sf).ceil();
         }
         let next_ghosts = next.as_ref().filter(|n| n.has_ghosts() && !hidden).map(|n| n.ghost_rects(&rects)).unwrap_or_default();
@@ -4139,7 +4191,7 @@ impl Render for Avatar {
                                 // (squashed) bounding shape it's invisible, but it fills the
                                 // window's backing pixels there, so the band the shape grows
                                 // back into on the rebound shows hair, not stale black.
-                                if (plan2.sy < 1.0 || plan2.sx < 1.0) && !alpha {
+                                if (plan2.sy < 1.0 || plan2.sx < 1.0) && !alpha && !turning {
                                     let full = rect(0.0, 0.0, aw as f32, ah as f32);
                                     window.paint_image(full, full, Corners::default(), img.clone(), 0, false).ok();
                                 }

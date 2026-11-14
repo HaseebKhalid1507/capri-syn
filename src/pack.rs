@@ -380,9 +380,10 @@ pub struct Behaviour {
     pub life: Life,
     #[serde(default)]
     pub perch: Option<PerchSpec>,
-    /// The way the art faces: "right" (default) or "left". Mirrored, she faces the other.
-    #[serde(default)]
-    pub facing: Option<String>,
+    /// The way the art faces unmirrored: "right" (default) or "left" (Capri: her hair sweeps
+    /// back to the right). Every facing decision goes through it (`art_faces_right`).
+    #[serde(default, alias = "facing")]
+    pub faces: Option<String>,
     #[serde(default)]
     pub music: Option<MusicSpec>,
     #[serde(default)]
@@ -394,6 +395,13 @@ pub struct Behaviour {
     pub fling: Option<FlingSpec>,
     #[serde(default)]
     pub land: Option<LandSpec>,
+}
+
+impl Behaviour {
+    /// The art faces right unmirrored (`faces`, default right).
+    pub fn art_faces_right(&self) -> bool {
+        !self.faces.as_deref().is_some_and(|f| f.trim().eq_ignore_ascii_case("left"))
+    }
 }
 
 /// While held (BRIEF-ragdoll §2.2).
