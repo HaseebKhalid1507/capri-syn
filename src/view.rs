@@ -47,6 +47,8 @@ pub struct Layout {
 }
 
 // Logical px. The HUD follows Capri's CSS (cyberpunk.css, avatar-detach.css).
+/// A turn's held step without a compositor (two frames at 60 Hz).
+const TURN_STEP_MS: f32 = 34.0;
 const MARGIN: f32 = 8.0;
 const TOP_MARGIN: f32 = 6.0;
 const BODY_FONT: f32 = 20.0;
@@ -1124,9 +1126,20 @@ impl Avatar {
     fn turn_at(&self, at: Instant) -> Option<((f32, f32), bool)> {
         let (t0, to) = self.turn?;
         let ms = self.mirror_cfg.turn_ms.max(1) as f32;
-        let u = at.saturating_duration_since(t0).as_secs_f32() * 1000.0 / ms;
+        let mut u = at.saturating_duration_since(t0).as_secs_f32() * 1000.0 / ms;
+        // Without a compositor its width moves in held steps (~2 frames each): the bounding
+        // shape is set as a frame paints and its pixels land a frame later, so a width that
+        // changed every frame grew over stale pixels (shards). Held, the next step's art
+        // lies underneath exactly where the shape grows.
+        if !self.x11.composited() && u < 1.0 {
+            let n = (ms / TURN_STEP_MS).round().max(3.0);
+            u = ((u * n).floor() + 0.5) / n;
+        }
         let shown = if u >= crate::facing::TURN_SWAP_U { to } else { self.flip };
-        crate::facing::turn_shape(u).map(|k| (k, shown))
+        // The anticipation (a dip that widens) only under a compositor: without one, the
+        // shape it grows uncovers stale edge pixels (a blue fringe).
+        let antic = self.x11.composited() || u >= crate::facing::TURN_ANTIC;
+        crate::facing::turn_shape(u).map(|k| (if antic { k } else { (1.0, 1.0) }, shown))
     }
 
     /// Frame `i` as it shows with `flip` (unmirrored if it may not mirror).
@@ -1145,8 +1158,10 @@ impl Avatar {
         let Some((t0, to)) = self.turn else { return false };
         let ms = now.saturating_duration_since(t0).as_secs_f32() * 1000.0;
         let full = self.mirror_cfg.turn_ms as f32;
-        if ms >= full * crate::facing::TURN_SWAP_U && self.flip != to {
-            self.set_flip(to);
+        // The art swaps on the turn's own clock (stepped or not).
+        let shown = self.turn_at(now).map_or(to, |t| t.1);
+        if shown != self.flip {
+            self.set_flip(shown);
         }
         if ms >= full {
             self.turn = None;
@@ -5060,6 +5075,18 @@ impl Render for Avatar {
                         // a landing). Torn (a glitch) included.
                         if run < 2 && !alpha {
                             window.request_animation_frame();
+                            // Moved a little (her bob steps it a pixel): where it was and is now
+                            // both painted it, so that stays (the whole tag blinked out for two
+                            // frames on every bob step).
+                            if !torn
+                                && let Some(p) = prev_tag
+                                && p.size == b.size
+                            {
+                                let i = p.intersect(&b);
+                                if f32::from(i.size.height) >= f32::from(b.size.height) * 0.5 && f32::from(i.size.width) > 0.0 {
+                                    visible.push(to_device(i, sf));
+                                }
+                            }
                         } else if torn {
                             visible.extend(tag_strips.iter().copied());
                         } else {
