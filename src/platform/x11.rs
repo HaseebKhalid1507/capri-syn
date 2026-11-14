@@ -78,6 +78,9 @@ pub struct X11 {
     /// The pointer polled on its own connection while she's held by the real mouse:
     /// (x << 32 | y as u32, or u64::MAX before the first read; stop flag).
     poll: Mutex<Option<(Arc<std::sync::atomic::AtomicU64>, Arc<AtomicBool>)>>,
+    /// Bounding shapes sent, and their rects (for the rag's meter).
+    shape_sends: std::sync::atomic::AtomicU64,
+    shape_rects: std::sync::atomic::AtomicU64,
 }
 
 /// One viewable root child, as `stack()` sees it.
@@ -157,6 +160,8 @@ impl X11 {
             mons: Mutex::new(None),
             frozen: AtomicBool::new(false),
             poll: Mutex::new(None),
+            shape_sends: std::sync::atomic::AtomicU64::new(0),
+            shape_rects: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -189,34 +194,34 @@ impl X11 {
     /// Input region = `input`; everything else clicks through to the windows below.
     /// Without a compositor the bounding shape is set to `visible`, so no black box shows.
     pub fn set_shape(&self, input: &[ShapeRect], visible: &[ShapeRect]) -> Result<()> {
+        self.set_shapes(Some(input), Some(visible))
+    }
+
+    /// Send only the shapes given (each `None` stays as it is): a bounding change no longer
+    /// resends the input shape, nor the other way round.
+    pub fn set_shapes(&self, input: Option<&[ShapeRect]>, visible: Option<&[ShapeRect]>) -> Result<()> {
         let conv = |r: &[ShapeRect]| -> Vec<xproto::Rectangle> {
             r.iter().map(|&(x, y, width, height)| xproto::Rectangle { x, y, width, height }).collect()
         };
-        let rects = conv(input);
-        self.conn.shape_rectangles(
-            shape::SO::SET,
-            shape::SK::INPUT,
-            xproto::ClipOrdering::UNSORTED,
-            self.win,
-            0,
-            0,
-            &rects,
-        )?;
-        if self.composited() {
-            self.conn.shape_mask(shape::SO::SET, shape::SK::BOUNDING, self.win, 0, 0, x11rb::NONE)?;
-        } else {
-            self.conn.shape_rectangles(
-                shape::SO::SET,
-                shape::SK::BOUNDING,
-                xproto::ClipOrdering::UNSORTED,
-                self.win,
-                0,
-                0,
-                &conv(visible),
-            )?;
+        if let Some(input) = input {
+            self.conn.shape_rectangles(shape::SO::SET, shape::SK::INPUT, xproto::ClipOrdering::UNSORTED, self.win, 0, 0, &conv(input))?;
+        }
+        if let Some(visible) = visible {
+            if self.composited() {
+                self.conn.shape_mask(shape::SO::SET, shape::SK::BOUNDING, self.win, 0, 0, x11rb::NONE)?;
+            } else {
+                self.conn.shape_rectangles(shape::SO::SET, shape::SK::BOUNDING, xproto::ClipOrdering::UNSORTED, self.win, 0, 0, &conv(visible))?;
+                self.shape_sends.fetch_add(1, Ordering::Relaxed);
+                self.shape_rects.fetch_add(visible.len() as u64, Ordering::Relaxed);
+            }
         }
         self.conn.flush()?;
         Ok(())
+    }
+
+    /// Bounding shapes sent and their total rects since the last call (the rag's meter).
+    pub fn take_shape_stats(&self) -> (u64, u64) {
+        (self.shape_sends.swap(0, Ordering::Relaxed), self.shape_rects.swap(0, Ordering::Relaxed))
     }
 
     pub fn move_to(&self, x: i32, y: i32) -> Result<()> {

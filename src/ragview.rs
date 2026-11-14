@@ -272,6 +272,7 @@ impl Avatar {
         // No X round trips inside her 60 Hz ticks: monitors and work areas as of now, and
         // the real pointer from its own thread.
         self.x11.freeze_layout(true);
+        self.x11.take_shape_stats();
         self.x11.poll_pointer(matches!(rag.feed, Feed::Real));
         self.rag = Some(rag);
         self.brain_touch(crate::brain::Touch::DragStart);
@@ -651,7 +652,15 @@ impl Avatar {
         if let Some(mut p) = r.prof.clone().filter(|p| !p.is_empty()) {
             p.sort_unstable();
             let q = |f: f32| p[((p.len() - 1) as f32 * f) as usize];
-            eprintln!("rag-prof: {} ticks, sim+plan p50 {} µs, p95 {} µs, max {} µs", p.len(), q(0.5), q(0.95), q(1.0));
+            let (sends, rects) = self.x11.take_shape_stats();
+            eprintln!(
+                "rag-prof: {} ticks, sim+plan p50 {} µs, p95 {} µs, max {} µs; bounding shapes sent {sends}, {} rects each",
+                p.len(),
+                q(0.5),
+                q(0.95),
+                q(1.0),
+                rects / sends.max(1)
+            );
         }
         if r.restore.0
             && let Some(b) = &mut self.bubble

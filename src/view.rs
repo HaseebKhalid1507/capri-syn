@@ -4149,9 +4149,18 @@ impl Render for Avatar {
                     if visible.is_empty() {
                         visible.push(ground_px);
                     }
+                    // P6 sweep (measurement switches): one box, or rows merged within `tol` px
+                    // (inward only: never more than what was painted).
+                    if let Some(tol) = shape_tol() {
+                        visible = crate::shape::merge_tol(&visible, tol);
+                    }
+                    if shape_box() {
+                        visible = crate::shape::bbox(&visible).into_iter().collect();
+                    }
                     let mut last = last.borrow_mut();
-                    if last.0 != input || last.1 != visible {
-                        x11.set_shape(&input, &visible).ok();
+                    let (di, dv) = (last.0 != input, last.1 != visible);
+                    if di || dv {
+                        x11.set_shapes(di.then_some(&input[..]), dv.then_some(&visible[..])).ok();
                         *last = (input, visible);
                     }
                     if has_frame && !first.get() {
@@ -4175,6 +4184,18 @@ fn frames_angle(deg: f32) -> usize {
         .enumerate()
         .min_by(|a, b| (a.1 - deg).abs().total_cmp(&(b.1 - deg).abs()))
         .map_or(3, |p| p.0)
+}
+
+/// `SA_SHAPE_TOL=n`: the bounding shape's rows merged within n px (P6 sweep).
+fn shape_tol() -> Option<i32> {
+    static T: std::sync::OnceLock<Option<i32>> = std::sync::OnceLock::new();
+    *T.get_or_init(|| std::env::var("SA_SHAPE_TOL").ok().and_then(|v| v.parse().ok()).filter(|&t| t > 0))
+}
+
+/// `SA_SHAPE_BOX=1`: the bounding shape as one box (P6 sweep: numbers only, she shows a box).
+fn shape_box() -> bool {
+    static B: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *B.get_or_init(|| std::env::var("SA_SHAPE_BOX").is_ok_and(|v| v == "1"))
 }
 
 /// `a` → `b` by `k` (0..1), per channel.
