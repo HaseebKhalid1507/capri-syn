@@ -1,0 +1,23 @@
+# Capri's voice sidecar (push-to-talk STT + spoken replies). NOT installed by anything.
+# Install by hand:
+#   mkdir -p ~/.config/systemd/user && cp tools/systemd/capri-voice.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now capri-voice
+# Needs ~/.local/share/capri-voice (venv + models: see tools/capri-voice-setup) and
+# `[voice] enabled = true` in ~/.config/synaps-avatar/settings.toml.
+# The mic is opened only between talk press (held) and release; stopping this unit closes it for good.
+[Unit]
+Description=Capri voice sidecar (whisper.cpp + Kokoro, CPU only)
+After=pipewire.service pipewire-pulse.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/share/capri-voice/venv/bin/python %h/.local/bin/capri-voice
+Environment=CAPRI_VOICE_THREADS=8
+# CPU only: no CUDA device for the models (onnxruntime here is the CPU build anyway).
+Environment=CUDA_VISIBLE_DEVICES=
+Nice=5
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
