@@ -486,8 +486,9 @@ impl Avatar {
         self.follow_at = Some(now);
         let Some(r) = &mut self.rag else { return };
         r.ptr.push(t, p.0, p.1);
-        // She faces the way she's dragged: the same pointer samples, through a hold.
-        let vx = r.ptr.velocity(t).0 / l.sf;
+        // She turns with the drag (back where she's pulled from, by default): the same pointer
+        // samples, through a hold.
+        let vx = crate::facing::drag_vx(r.ptr.velocity(t).0 / l.sf, self.mirror_cfg.drag_back);
         if self.mirror_cfg.drag
             && let Some(right) = self.turner.feed(t, vx, self.facing_right())
         {
@@ -572,9 +573,10 @@ impl Avatar {
         let t = r.t;
         let vel = r.ptr.velocity(t);
         r.vel = vel;
-        // Let go moving sideways: she faces the way she flies, through the fall and landing.
+        // Let go moving sideways: the drag's rule holds through the fall and landing (back: she
+        // keeps looking where she came from, so letting go never flips her mid-air).
         if self.mirror_cfg.drag && (vel.0 / self.layout.sf).abs() > crate::facing::TURN_V {
-            self.face(vel.0 > 0.0, "fling", now, true);
+            self.face(crate::facing::drag_vx(vel.0, self.mirror_cfg.drag_back) > 0.0, "fling", now, true);
         }
         let speed = (vel.0 * vel.0 + vel.1 * vel.1).sqrt();
         let fling = speed >= ragdoll::V_FLING * self.layout.sf;

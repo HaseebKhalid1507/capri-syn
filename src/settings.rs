@@ -123,13 +123,17 @@ pub struct Settings {
     pub mirror: MirrorSettings,
 }
 
-/// `[mirror]`: she faces where she goes. `drag`: the way she is dragged (and flung); `self`:
+/// `[mirror]`: she faces where she goes. `drag`: turn while dragged (and flung), looking back
+/// where she's pulled from (`drag_facing = "back"`, default) or the way she moves ("forward"); `self`:
 /// her own turns (travel, what she cares about, an idle look-around every `idle_every_min`
 /// minutes). `turn_ms`: the turn's squeeze (0: an instant flip). `[drag] mirror` is an alias
 /// of `[mirror] drag` (`[mirror]` wins when both are set).
 #[derive(Clone, Debug, PartialEq)]
 pub struct MirrorSettings {
     pub drag: bool,
+    /// `drag_facing`: "back" (default: dragged and flung she looks back where she's pulled
+    /// from) or "forward" (the way she moves).
+    pub drag_back: bool,
     pub own: bool,
     pub idle_every_min: (f32, f32),
     pub turn_ms: u32,
@@ -137,7 +141,7 @@ pub struct MirrorSettings {
 
 impl Default for MirrorSettings {
     fn default() -> Self {
-        MirrorSettings { drag: true, own: true, idle_every_min: (1.0, 4.0), turn_ms: 150 }
+        MirrorSettings { drag: true, drag_back: true, own: true, idle_every_min: (1.0, 4.0), turn_ms: 150 }
     }
 }
 
@@ -145,6 +149,7 @@ impl Default for MirrorSettings {
 #[serde(deny_unknown_fields)]
 struct MirrorRaw {
     drag: Option<bool>,
+    drag_facing: Option<String>,
     #[serde(rename = "self")]
     own: Option<bool>,
     idle_every_min: Option<Vec<f64>>,
@@ -365,6 +370,13 @@ impl Settings {
             if let Some(d) = m.drag {
                 mirror.drag = d;
             }
+            if let Some(f) = m.drag_facing {
+                mirror.drag_back = match f.trim() {
+                    "back" => true,
+                    "forward" => false,
+                    _ => anyhow::bail!("mirror.drag_facing must be \"back\" or \"forward\""),
+                };
+            }
             if let Some(o) = m.own {
                 mirror.own = o;
             }
@@ -552,9 +564,11 @@ mod tests {
     #[test]
     fn mirror_section_and_the_drag_alias() {
         let d = Settings::parse("").unwrap().mirror;
-        assert_eq!(d, MirrorSettings { drag: true, own: true, idle_every_min: (1.0, 4.0), turn_ms: 150 });
-        let m = Settings::parse("[mirror]\ndrag = false\nself = false\nidle_every_min = [0.5, 2]\nturn_ms = 0\n").unwrap().mirror;
-        assert_eq!(m, MirrorSettings { drag: false, own: false, idle_every_min: (0.5, 2.0), turn_ms: 0 });
+        assert_eq!(d, MirrorSettings { drag: true, drag_back: true, own: true, idle_every_min: (1.0, 4.0), turn_ms: 150 });
+        let m = Settings::parse("[mirror]\ndrag = false\ndrag_facing = \"forward\"\nself = false\nidle_every_min = [0.5, 2]\nturn_ms = 0\n").unwrap().mirror;
+        assert_eq!(m, MirrorSettings { drag: false, drag_back: false, own: false, idle_every_min: (0.5, 2.0), turn_ms: 0 });
+        assert!(Settings::parse("[mirror]\ndrag_facing = \"back\"\n").unwrap().mirror.drag_back);
+        assert!(Settings::parse("[mirror]\ndrag_facing = \"sideways\"\n").is_err());
         assert!(!Settings::parse("[drag]\nmirror = false\n").unwrap().mirror.drag);
         assert!(Settings::parse("[drag]\nmirror = false\n[mirror]\ndrag = true\n").unwrap().mirror.drag);
         assert!(Settings::parse("[mirror]\nidle_every_min = [4, 1]\n").is_err());

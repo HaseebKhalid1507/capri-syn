@@ -15,6 +15,12 @@ pub const EDGE_SHARE: f32 = 0.2;
 /// Idle look-arounds: never within this of another turn (s).
 pub const LOOK_QUIET_S: f64 = 20.0;
 
+/// The velocity she faces along while dragged and flung: `back` (the default) looks back
+/// where she's pulled from, against the motion; forward, along it.
+pub fn drag_vx(vx: f32, back: bool) -> f32 {
+    if back { -vx } else { vx }
+}
+
 /// Drag facing with hysteresis.
 #[derive(Default, Clone, Debug)]
 pub struct Turner {
@@ -81,7 +87,13 @@ pub fn turn_shape(u: f32) -> Option<(f32, f32)> {
 /// turn there keeps the pixels still and animates only the shape: a band about her feet
 /// closes over the old art, holds edge-on while the new art lands, then opens over it. Per
 /// painted frame `k`: (band width as a share of her half-width, the new art yet), None after.
-pub const BAND: [(f32, bool); 8] = [(0.72, false), (0.42, false), (0.16, false), (0.16, true), (0.16, true), (0.16, true), (0.42, true), (0.72, true)];
+/// Frame 0 is a full-width pre-roll (nothing shows; the new art's texture warms). The new art
+/// is painted as the band passes 0.42 closing, lands while it is edge-on and leads the open by
+/// three frames (pixels land up to two late; the first use of a mirrored texture, later still:
+/// torn legs at a two-frame lead). Edge-on two frames, no longer (r16: 4-5 read as a stall).
+pub const BAND: [(f32, bool); 7] = [(1.0, false), (0.72, false), (0.42, true), (0.16, true), (0.16, true), (0.42, true), (0.72, true)];
+/// The first frame painted with the new art.
+pub const BAND_SWAP: u32 = 2;
 pub fn turn_band(k: u32) -> Option<(f32, bool)> {
     BAND.get(k as usize).copied()
 }
@@ -125,14 +137,19 @@ mod tests {
     use crate::ragdoll::Pointer;
 
     /// Drive a Turner from pointer samples every 8 ms through the drag's own velocity fit.
-    fn run(path: impl Fn(f32) -> f32, secs: f32, mut right: bool) -> Vec<(f32, bool)> {
+    fn run(path: impl Fn(f32) -> f32, secs: f32, right: bool) -> Vec<(f32, bool)> {
+        run_as(path, secs, right, false)
+    }
+
+    /// The same, facing `back` (against the motion) or forward.
+    fn run_as(path: impl Fn(f32) -> f32, secs: f32, mut right: bool, back: bool) -> Vec<(f32, bool)> {
         let mut p = Pointer::default();
         let mut tr = Turner::default();
         let mut turns = Vec::new();
         let mut t = 0.0;
         while t <= secs {
             p.push(t, path(t), 300.0);
-            if let Some(r) = tr.feed(t, p.velocity(t).0, right) {
+            if let Some(r) = tr.feed(t, drag_vx(p.velocity(t).0, back), right) {
                 right = r;
                 turns.push((t, r));
             }
@@ -161,6 +178,35 @@ mod tests {
         assert!(!mirrored_for(true, true) && mirrored_for(true, false));
         for (art, m) in [(false, false), (false, true), (true, false), (true, true)] {
             assert_eq!(mirrored_for(art, faces_right(art, m)), m);
+        }
+    }
+
+    /// Haseeb's pick (`drag_facing = "back"`): dragged, she looks back where she's pulled from,
+    /// and a fling keeps that side, so letting go never flips her mid-air.
+    #[test]
+    fn dragged_back_she_faces_against_the_motion_and_the_fling_keeps_it() {
+        let left_art = false;
+        // Dragged right from rest (facing left, as drawn): already looking back, no turn.
+        assert!(run_as(|t| 300.0 + 500.0 * t, 0.6, faces_right(left_art, false), true).is_empty());
+        // Dragged left from rest: she turns to face right (the flipped art), once.
+        let turns = run_as(|t| 900.0 - 500.0 * t, 0.6, faces_right(left_art, false), true);
+        assert_eq!(turns.iter().map(|t| t.1).collect::<Vec<_>>(), vec![true], "{turns:?}");
+        assert!(mirrored_for(left_art, true));
+        // Right then left: left, then right.
+        let path = |t: f32| if t < 0.6 { 400.0 + 500.0 * t } else { 700.0 - 500.0 * (t - 0.6) };
+        let turns = run_as(path, 1.2, true, true);
+        assert_eq!(turns.iter().map(|t| t.1).collect::<Vec<_>>(), vec![false, true], "{turns:?}");
+        // Let go moving right at the end of a rightward drag: the fling faces left, the side
+        // the drag already showed.
+        let (drag, fling) = (run_as(|t| 300.0 + 500.0 * t, 0.6, true, true), drag_vx(500.0, true) > 0.0);
+        assert_eq!(drag.last().map(|t| t.1), Some(false));
+        assert!(!fling);
+        // Forward: along the motion, as before.
+        assert_eq!(run_as(|t| 300.0 + 500.0 * t, 0.6, false, false).iter().map(|t| t.1).collect::<Vec<_>>(), vec![true]);
+        assert!(drag_vx(500.0, false) > 0.0);
+        // Jitter stays still either way.
+        for back in [true, false] {
+            assert!(run_as(|t: f32| 500.0 + 12.0 * (std::f32::consts::TAU * 4.0 * t).sin(), 3.0, true, back).is_empty());
         }
     }
 
@@ -212,9 +258,14 @@ mod tests {
     fn shape_mode_turn_closes_holds_edge_on_and_opens_once() {
         let b: Vec<(f32, bool)> = (0..).map_while(turn_band).collect();
         let swap = b.iter().position(|s| s.1).unwrap();
+        assert_eq!(swap as u32, BAND_SWAP);
+        assert_eq!(b[0], (1.0, false), "a full-width pre-roll first");
         assert!(b[..swap].windows(2).all(|w| w[1].0 < w[0].0), "closes: {b:?}");
-        let last_min = b.iter().rposition(|s| s.0 == b[swap].0).unwrap();
-        assert!(last_min - swap >= 2, "the new art holds edge-on long enough to land: {b:?}");
+        let min = b.iter().map(|s| s.0).fold(f32::MAX, f32::min);
+        let last_min = b.iter().rposition(|s| s.0 == min).unwrap();
+        assert!(last_min - swap + 1 >= 3, "the new art leads the open by three frames (pixels land late): {b:?}");
+        let edge_on = b.iter().filter(|s| s.0 == min).count();
+        assert!((1..=2).contains(&edge_on), "edge-on 1-2 frames, not a stall: {b:?}");
         assert!(b[last_min..].windows(2).all(|w| w[1].0 > w[0].0), "one monotonic open: {b:?}");
         assert!(b[swap..].iter().all(|s| s.1) && b[..swap].iter().all(|s| !s.1));
         assert_eq!(turn_band(b.len() as u32), None);

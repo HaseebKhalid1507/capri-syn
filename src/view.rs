@@ -4151,11 +4151,11 @@ impl Render for Avatar {
         } else {
             Vec::new()
         };
-        // A shape-mode turn: the art it turns to is painted off-window while the band closes,
-        // so its texture is up before the swap (its first use came late: shards at the open).
+        // A shape-mode turn: the art it turns to is painted off-window on every frame before the
+        // swap, so its texture is up by then (its first use came late: shards at the open).
         if turning
             && !alpha
-            && let Some((t, false)) = self.turn.map(|t| t.1).zip(crate::facing::turn_band(self.turn_frame).map(|b| b.1))
+            && let Some(t) = self.turn.map(|t| t.1).filter(|_| self.turn_frame <= crate::facing::BAND_SWAP)
             && let Some(f) = self.frames.get(shown_i).and_then(|f| f.as_ref())
         {
             let target = t && self.flippable.get(shown_i).copied().unwrap_or(false);
