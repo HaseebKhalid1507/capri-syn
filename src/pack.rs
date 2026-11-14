@@ -586,7 +586,7 @@ impl Pack {
             if !path.is_file() {
                 // Optional add-ons (e.g. music/) may be absent; their users check for the id.
                 if x.like.is_none() {
-                    eprintln!("synaps-avatar: pack extra frame `{}`: {} is missing; skipped", x.id, x.file);
+                    elog!("synaps-avatar: pack extra frame `{}`: {} is missing; skipped", x.id, x.file);
                     continue;
                 }
                 errors.push(format!("moods.json extraFrames `{}`: file {} is missing", x.id, x.file));

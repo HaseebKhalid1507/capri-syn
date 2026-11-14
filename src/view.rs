@@ -2051,7 +2051,7 @@ impl Avatar {
                 if let Some(b) = &mut self.bubble {
                     b.hide_at = None;
                 }
-                eprintln!("synaps-avatar: reader open at {x},{y} {w}x{h} (0x{xid:x})");
+                elog!("synaps-avatar: reader open at {x},{y} {w}x{h} (0x{xid:x})");
                 format!("ok reader {x},{y} {w}x{h}")
             }
             Err(e) => format!("error: reader: {e:#}"),
@@ -2145,7 +2145,7 @@ impl Avatar {
         }
         self.parked = Some(false);
         state::save_hidden(true);
-        eprintln!("synaps-avatar: hidden (HIDE); the chip brings her back");
+        elog!("synaps-avatar: hidden (HIDE); the chip brings her back");
         if self.hidden {
             // Already out of sight (a fullscreen hide): parked at once.
             self.parked = Some(true);
@@ -2175,7 +2175,7 @@ impl Avatar {
             h.update(cx, |_, window, _| window.remove_window()).ok();
         }
         self.chip_rect = None;
-        eprintln!("synaps-avatar: shown again ({why})");
+        elog!("synaps-avatar: shown again ({why})");
         let fs_hidden = self.brain.as_ref().is_some_and(|h| h.fs != brainview::FsHide::Shown);
         if !fs_hidden {
             self.hidden = false;
@@ -2234,9 +2234,9 @@ impl Avatar {
             Ok(h) => {
                 self.chip = Some(h);
                 self.chip_rect = Some((x, y, cw, ch, xid.get()));
-                eprintln!("synaps-avatar: restore chip at {x},{y} {cw}x{ch}");
+                elog!("synaps-avatar: restore chip at {x},{y} {cw}x{ch}");
             }
-            Err(e) => eprintln!("synaps-avatar: restore chip: {e:#}"),
+            Err(e) => elog!("synaps-avatar: restore chip: {e:#}"),
         }
     }
 
@@ -2272,7 +2272,7 @@ impl Avatar {
         if s.closing {
             self.finish_quit(cx);
         } else if s.generation == generation {
-            eprintln!("synaps-avatar: the session client stopped; a new one in {} s", RESPAWN_SOON.as_secs());
+            elog!("synaps-avatar: the session client stopped; a new one in {} s", RESPAWN_SOON.as_secs());
             s.respawn_at = Some(Instant::now() + RESPAWN_SOON);
             cx.notify();
             self.schedule(cx);
@@ -2366,7 +2366,7 @@ impl Avatar {
         let (client, rx) = match Client::spawn(options.clone()) {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("synaps-avatar: cannot start the session client: {e}");
+                elog!("synaps-avatar: cannot start the session client: {e}");
                 std::process::exit(1);
             }
         };
@@ -2406,7 +2406,7 @@ impl Avatar {
         let (client, rx) = match Client::spawn(s.options.clone()) {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("synaps-avatar: cannot start a new session client: {e}");
+                elog!("synaps-avatar: cannot start a new session client: {e}");
                 s.respawn_at = Some(now + respawn_after());
                 return;
             }
@@ -2416,7 +2416,7 @@ impl Avatar {
         s.generation += 1;
         s.link.reconnect(now);
         let generation = s.generation;
-        eprintln!("synaps-avatar: new session client (#{generation})");
+        elog!("synaps-avatar: new session client (#{generation})");
         self.pump(rx, generation, cx);
     }
 
@@ -2443,7 +2443,7 @@ impl Avatar {
             let r = match a {
                 Act::Attach(id, mode) => {
                     if std::env::var_os("SA_DEBUG").is_some() {
-                        eprintln!("synaps-avatar: attach {id} as {mode:?}");
+                        elog!("synaps-avatar: attach {id} as {mode:?}");
                     }
                     s.client.attach(id, mode).map(|seq| s.link.attaching(seq))
                 }
@@ -2462,14 +2462,14 @@ impl Avatar {
                     Ok(())
                 }
                 Act::Fatal(msg) => {
-                    eprintln!("synaps-avatar: {msg}");
+                    elog!("synaps-avatar: {msg}");
                     self.fatal = true;
                     self.quit_requested = true;
                     Ok(())
                 }
             };
             if let Err(e) = r {
-                eprintln!("synaps-avatar: {e}");
+                elog!("synaps-avatar: {e}");
             }
         }
     }
@@ -2493,7 +2493,7 @@ impl Avatar {
                     }
                 }
                 Once::Restore(t) => {
-                    eprintln!("synaps-avatar: input not accepted; kept as a draft");
+                    elog!("synaps-avatar: input not accepted; kept as a draft");
                     match &mut self.input {
                         Some(i) if i.secret.is_none() && i.text.is_empty() => i.text = t,
                         _ => self.draft = t,
@@ -2560,7 +2560,7 @@ impl Avatar {
             && !b.reply.is_empty()
         {
             *got = true;
-            eprintln!("timing: first reply text from the daemon {} ms after Enter", t0.elapsed().as_millis());
+            elog!("timing: first reply text from the daemon {} ms after Enter", t0.elapsed().as_millis());
         }
         let annoyed = b.mood == Mood::Annoyed;
         let Some(bb) = self.bubble.as_mut().filter(|x| x.stream) else { return };
@@ -2606,7 +2606,7 @@ impl Avatar {
             }
         }
         if let Err(e) = self.x11.take_focus() {
-            eprintln!("synaps-avatar: cannot take the keyboard: {e:#}");
+            elog!("synaps-avatar: cannot take the keyboard: {e:#}");
         }
         window.focus(&self.focus, cx);
         cx.notify();
@@ -2972,7 +2972,7 @@ impl Avatar {
         if self.teleport.is_some() || self.rag.is_some() {
             return;
         }
-        eprintln!("synaps-avatar: falls in place (why={why}) at {} ms", self.t_start.elapsed().as_millis());
+        elog!("synaps-avatar: falls in place (why={why}) at {} ms", self.t_start.elapsed().as_millis());
         if let Some(h) = &mut self.brain {
             let t = h.bnow(now);
             h.brain.note_external(t, why);
@@ -3002,7 +3002,7 @@ impl Avatar {
             edges::GoneVerdict::Wait => false,
             edges::GoneVerdict::Stay => {
                 self.perch_gone = None;
-                eprintln!("synaps-avatar: perch 0x{:x} came back: stays", g.win);
+                elog!("synaps-avatar: perch 0x{:x} came back: stays", g.win);
                 false
             }
             edges::GoneVerdict::Fall => {
@@ -3019,7 +3019,7 @@ impl Avatar {
     fn watch(&mut self, ev: WatchEvent, now: Instant) {
         match ev {
             WatchEvent::Compositor(c) => {
-                eprintln!("synaps-avatar: compositor {}", if c { "appeared" } else { "went away" });
+                elog!("synaps-avatar: compositor {}", if c { "appeared" } else { "went away" });
                 self.last_shape.borrow_mut().0.clear();
             }
             WatchEvent::TargetMoved(r) => {
@@ -3056,7 +3056,7 @@ impl Avatar {
             WatchEvent::TargetGone(id) => {
                 // Not at once: a workspace flicked back within the grace keeps her put.
                 if matches!(self.placement, Placement::Perch { win, .. } if win == id) && self.perch_gone.is_none() {
-                    eprintln!("synaps-avatar: perch 0x{id:x} unmapped at {} ms: falls in 300 ms unless it comes back", self.t_start.elapsed().as_millis());
+                    elog!("synaps-avatar: perch 0x{id:x} unmapped at {} ms: falls in 300 ms unless it comes back", self.t_start.elapsed().as_millis());
                     self.perch_gone = Some(edges::PerchGone { win: id, since: now });
                 }
             }
@@ -3126,7 +3126,7 @@ impl Avatar {
         let Some(head) = self.hit(ev.position) else { return };
         // Tests drive her with synthetic taps only: a real press in a recording means a person
         // touched her (the clip is thrown away).
-        eprintln!("synaps-avatar: real pointer press ({:?}, {})", ev.button, if head { "head" } else { "body" });
+        elog!("synaps-avatar: real pointer press ({:?}, {})", ev.button, if head { "head" } else { "body" });
         // A real press beats a scripted drag: the script is dropped, the press goes on.
         if self.rag.as_ref().is_some_and(|r| matches!(r.feed, ragview::Feed::Script { .. })) {
             self.rag_cancel(Instant::now());
@@ -3574,7 +3574,7 @@ impl Render for Avatar {
         if let Some(Some((t0, true))) = self.timing
             && self.bubble.as_ref().is_some_and(|b| b.stream && b.shown > 0 && !b.collapsed)
         {
-            eprintln!("timing: first word on screen {} ms after Enter", t0.elapsed().as_millis());
+            elog!("timing: first word on screen {} ms after Enter", t0.elapsed().as_millis());
             self.timing = Some(None);
         }
         if let Some(b) = &self.bubble
@@ -4493,7 +4493,7 @@ impl Render for Avatar {
                             window.focus(&this.focus, cx);
                             if this.focus_probe.is_some() {
                                 let fw = this.x11.focused_window().unwrap_or(0);
-                                eprintln!("focus-probe: SetInputFocus err={:?}; X focus now 0x{fw:x} (ours 0x{:x})", r.err(), this.x11.win);
+                                elog!("focus-probe: SetInputFocus err={:?}; X focus now 0x{fw:x} (ours 0x{:x})", r.err(), this.x11.win);
                             }
                             cx.notify();
                         }),
@@ -4503,7 +4503,7 @@ impl Render for Avatar {
                             this.input_key(ev, window, cx);
                             return;
                         }
-                        eprintln!("focus-probe: key down `{}` char {:?}", ev.keystroke.key, ev.keystroke.key_char);
+                        elog!("focus-probe: key down `{}` char {:?}", ev.keystroke.key, ev.keystroke.key_char);
                         if let Some(t) = &mut this.focus_probe {
                             match ev.keystroke.key.as_str() {
                                 "backspace" => {
@@ -4778,7 +4778,7 @@ impl Render for Avatar {
                     }
                     if has_frame && !first.get() {
                         first.set(true);
-                        eprintln!("first-frame: painted {} ms after process start", t_start.elapsed().as_millis());
+                        elog!("first-frame: painted {} ms after process start", t_start.elapsed().as_millis());
                     }
                 },
             )

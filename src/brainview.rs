@@ -284,7 +284,7 @@ impl Avatar {
         let settings = match Settings::load() {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("synaps-avatar: {e:#} (using the defaults)");
+                elog!("synaps-avatar: {e:#} (using the defaults)");
                 Settings::default()
             }
         };
@@ -881,7 +881,7 @@ impl Avatar {
             "why": plan.why, "only": only,
         });
         // One line per move on stderr too (rare): what moved her, from where to where.
-        eprintln!(
+        elog!(
             "synaps-avatar: brain move why={} goal={goal_s} spot={} {},{} -> {},{} by {}",
             plan.why,
             spot.kind.key(),
@@ -1875,7 +1875,7 @@ impl Avatar {
         h.settings.brain.attention = next;
         h.brain.settings.attention = next;
         if let Err(e) = Settings::save_attention(next) {
-            eprintln!("synaps-avatar: settings.toml: {e:#}");
+            elog!("synaps-avatar: settings.toml: {e:#}");
         }
         let now = Instant::now();
         self.brain_feed(BrainEvent::Interaction(Touch::Menu), now);

@@ -148,7 +148,7 @@ pub fn spawn(filter: Filter, on_change: impl Fn(Playback) + Send + Sync + 'stati
                 s.last = now;
                 let names: Vec<String> =
                     s.players.values().filter(|p| filter.counts(&p.name)).map(|p| format!("{}={}", p.name.trim_start_matches(PREFIX), p.status)).collect();
-                eprintln!("synaps-avatar: mpris {} ({})", if now.playing { "playing" } else { "quiet" }, names.join(", "));
+                elog!("synaps-avatar: mpris {} ({})", if now.playing { "playing" } else { "quiet" }, names.join(", "));
                 on_change(now);
             }
         }
@@ -165,7 +165,7 @@ pub fn spawn(filter: Filter, on_change: impl Fn(Playback) + Send + Sync + 'stati
                 let Ok(m) = m else { continue };
                 let Some(sender) = m.header().sender().map(|s| s.to_string()) else { continue };
                 if stats {
-                    eprintln!("synaps-avatar: mpris signal from {sender}");
+                    elog!("synaps-avatar: mpris signal from {sender}");
                 }
                 let Ok((_, changed, _)) = m.body().deserialize::<(String, HashMap<String, OwnedValue>, Vec<String>)>() else { continue };
                 let Ok(mut s) = shared.lock() else { return };

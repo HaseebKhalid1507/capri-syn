@@ -672,7 +672,7 @@ impl Avatar {
             p.sort_unstable();
             let q = |f: f32| p[((p.len() - 1) as f32 * f) as usize];
             let (sends, rects) = self.x11.take_shape_stats();
-            eprintln!(
+            elog!(
                 "rag-prof: {} ticks, sim+plan p50 {} µs, p95 {} µs, max {} µs; bounding shapes sent {sends}, {} rects each",
                 p.len(),
                 q(0.5),
