@@ -141,6 +141,8 @@ pub struct Chain {
     asleep: bool,
     /// Per down node: lateral limits relative to the grip (else `p.room`).
     rooms: Vec<(f32, f32)>,
+    /// Multiplier on the bend limits (in flight: less, so head, arms and legs stay readable).
+    cap: f32,
 }
 
 impl Chain {
@@ -165,7 +167,13 @@ impl Chain {
             still: 0.0,
             asleep: false,
             rooms: Vec::new(),
+            cap: 1.0,
         }
+    }
+
+    /// Scale the swing and bend limits (1 = the params' own).
+    pub fn set_cap(&mut self, k: f32) {
+        self.cap = fin(k).clamp(0.0, 1.0);
     }
 
     /// Per-node lateral limits (the window's room for the rows around each down node).
@@ -287,9 +295,9 @@ impl Chain {
         // Muscle: bend pull toward the parent's direction (down), straight up (up).
         pull(&mut self.down, &self.rows_down, a, s, self.p.bend_stiff, false);
         pull(&mut self.up, &self.rows_up, a, s, self.p.up_stiff, true);
-        let sw = self.p.max_swing_deg.to_radians();
-        let swu = self.p.max_swing_up_deg.to_radians();
-        let bd = self.p.max_bend_deg.to_radians();
+        let sw = (self.p.max_swing_deg * self.cap).to_radians();
+        let swu = (self.p.max_swing_up_deg * self.cap).to_radians();
+        let bd = (self.p.max_bend_deg * self.cap).to_radians();
         clamp_angles(&mut self.down, &self.rows_down, a, s, sw, bd, false);
         clamp_angles(&mut self.up, &self.rows_up, a, s, swu, bd, true);
         let room = self.p.room;
@@ -503,6 +511,72 @@ fn clamp_angles(nodes: &mut [Node], rows: &[f32], a: (f32, f32), s: f32, swing: 
         let (sx, sy) = (ang.sin() * l, ang.cos() * l * if up { -1.0 } else { 1.0 });
         nodes[i].p = (parent.0 + sx, parent.1 + sy);
         prev_ang = ang;
+    }
+}
+
+// ---- the upper body's lag in a shake -------------------------------------------------
+
+/// The head and shoulders lag the hand: a damped spring (~3.5 Hz, ζ 0.45) on the hand's x,
+/// so a shake rocks the upper body a few px a beat late. Held (no 1 px flicker), capped at `max`.
+#[derive(Clone, Debug)]
+pub struct Wobble {
+    x: f32,
+    v: f32,
+    last: Option<f32>,
+    gain: f32,
+    max: f32,
+    held: Held,
+}
+
+impl Wobble {
+    const W: f32 = std::f32::consts::TAU * 3.5;
+    const ZETA: f32 = 0.45;
+
+    /// `max`: device px at the top of the head; `gain`: the share of the hand's travel the
+    /// head keeps for a moment (inertia).
+    pub fn new(max: f32, gain: f32) -> Wobble {
+        Wobble { x: 0.0, v: 0.0, last: None, gain, max: max.max(0.0), held: Held::default() }
+    }
+
+    pub fn step(&mut self, hand_x: f32, dt: f32) {
+        let dt = sane_dt(dt);
+        let hand_x = fin(hand_x);
+        let moved = self.last.map_or(0.0, |l| hand_x - l);
+        self.last = Some(hand_x);
+        self.x -= moved * self.gain;
+        let n = (dt * 240.0).ceil().max(1.0);
+        let h = dt / n;
+        for _ in 0..n as usize {
+            self.v += (-Wobble::W * Wobble::W * self.x - 2.0 * Wobble::ZETA * Wobble::W * self.v) * h;
+            self.x += self.v * h;
+        }
+        if self.x.abs() > self.max {
+            self.x = self.x.clamp(-self.max, self.max);
+            self.v = 0.0;
+        }
+    }
+
+    /// The head's offset (device px, held).
+    pub fn px(&mut self) -> i32 {
+        if self.x.abs() < 0.3 && self.v.abs() < 1.0 {
+            self.held = Held::default();
+            return 0;
+        }
+        self.held.at(self.x)
+    }
+
+    /// Shift the upper body's bands: the full offset at the frame top, fading to 0 at 45 % of
+    /// the height (the waist), where the chain's bands take over.
+    pub fn apply(off: i32, bands: &mut [(i32, i32, i32, i32)], top: i32, bottom: i32) {
+        if off == 0 {
+            return;
+        }
+        let reach = (0.45 * (bottom - top) as f32).max(1.0);
+        for b in bands.iter_mut() {
+            let mid = ((b.0 + b.1) / 2 - top) as f32;
+            let w = (1.0 - mid / reach).clamp(0.0, 1.0);
+            b.2 += (off as f32 * w).round() as i32;
+        }
     }
 }
 
@@ -1112,6 +1186,31 @@ mod tests {
         let mut h = Held::new(10.4);
         let vals: Vec<i32> = [10.6, 10.4, 10.55, 10.45, 10.7, 10.3, 11.2, 11.6, 11.1, 10.9, 10.2, 9.4].iter().map(|&v| h.at(v)).collect();
         assert_eq!(vals, vec![10, 10, 10, 10, 10, 10, 11, 11, 11, 11, 11, 9], "on 0.75 px, back 1.5 px");
+    }
+
+    #[test]
+    fn wobble_lags_a_shake_and_settles() {
+        let mut w = Wobble::new(8.0, 0.35);
+        let mut peak = 0i32;
+        let mut seq = Vec::new();
+        for i in 0..120 {
+            let t = i as f32 / 60.0;
+            let hand = if t < 1.2 { 150.0 * (t * 5.0 * std::f32::consts::TAU).sin() } else { 0.0 };
+            w.step(hand, 1.0 / 60.0);
+            let p = w.px();
+            peak = peak.max(p.abs());
+            seq.push(p);
+        }
+        assert!((4..=8).contains(&peak), "a few px: {peak}");
+        for _ in 0..60 {
+            w.step(0.0, 1.0 / 60.0);
+        }
+        assert_eq!(w.px(), 0, "settles");
+        let flips = seq.windows(3).filter(|v| v[0] == v[2] && (v[1] - v[0]).abs() == 1).count();
+        assert_eq!(flips, 0, "no 1 px flicker");
+        let mut b = vec![(0, 50, 0, 0), (200, 250, 0, 0), (400, 450, 0, 0)];
+        Wobble::apply(8, &mut b, 0, 450);
+        assert_eq!((b[0].2, b[2].2), (7, 0), "the head moves, the legs don't");
     }
 
     #[test]

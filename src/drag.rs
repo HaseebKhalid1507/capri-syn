@@ -55,7 +55,7 @@ impl RagSpec {
             still: vec![(2.5, "embarrassed".into()), (6.5, "arms_crossed-annoyed".into())],
             swing: steps(&[("idle-laughing", 900), ("happy", 600)]),
             shake: "idle-surprised_closed".into(),
-            dizzy: steps(&[("idle-surprised_closed", 450), ("concerned", 900)]),
+            dizzy: steps(&[("idle-surprised_closed", 1100), ("concerned", 1000)]),
             ankle: Some("pose-ceiling-upside-down".into()),
             zones: (0.30, 0.62),
             launch: steps(&[("idle-surprised_closed", 90)]),
@@ -643,8 +643,10 @@ mod tests {
         assert_eq!(m.update(0.7, &calm(0.25)).phase, Phase::Held { zone: Zone::Head, state: HeldState::Shake });
         let o = m.update(0.95, &calm(0.5));
         assert_eq!(o.phase, Phase::Held { zone: Zone::Head, state: HeldState::Dizzy });
-        assert_eq!(m.update(1.5, &calm(1.0)).frame.as_deref(), Some("concerned"));
-        assert_eq!(m.update(2.4, &calm(2.0)).phase, Phase::Held { zone: Zone::Head, state: HeldState::Hang });
+        // Eyes shut long enough to read (1.1 s), then concerned, then the hang.
+        assert_eq!(m.update(1.5, &calm(1.0)).frame.as_deref(), Some("idle-surprised_closed"));
+        assert_eq!(m.update(2.4, &calm(2.0)).frame.as_deref(), Some("concerned"));
+        assert_eq!(m.update(3.4, &calm(3.0)).phase, Phase::Held { zone: Zone::Head, state: HeldState::Hang });
     }
 
     #[test]

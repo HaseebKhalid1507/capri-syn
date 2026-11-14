@@ -726,11 +726,11 @@
     "dizzy": [
       {
         "frame": "idle-surprised_closed",
-        "ms": 450
+        "ms": 1100
       },
       {
         "frame": "concerned",
-        "ms": 900
+        "ms": 1000
       }
     ],
     "ankle": "pose-ceiling-upside-down",
