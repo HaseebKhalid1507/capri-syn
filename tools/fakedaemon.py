@@ -5,7 +5,7 @@ tests/fake_daemon.rs: Hello -> Welcome (one live session named `capri`), Session
 Attach -> the attached_history.json fixture, then events on demand.
 
 Control: one line per connection on /tmp/sa-fake/ctl.sock:
-  secret | confirm | confirm2 | compact | compacted | idle | refuse | relay | say TEXT | quit
+  secret | confirm | confirm2 | benign | compact | compacted | idle | refuse | relay | say TEXT | quit
 A submit or steer streams a canned reply (FAKE: no model): a turn, text deltas every
 FAKE_DELTA_MS (default 30), done, idle. `refuse`: the next submit is refused instead.
 `relay`: a turn another session woke ([comms] ...). `say TEXT`: a turn with that reply.
@@ -183,6 +183,9 @@ def control():
                              "They can run any command in a shell you started, read its output and type into it "
                              "until the session ends. Nothing outside this session is affected.\n"
                              "Allow exactly these tools?"}
+        elif cmd == "benign":
+            req = {"id": 44, "kind": "confirm", "title": "Confirm tool call",
+                   "prompt": "[FAKE DAEMON] read: README.md (lines 1-40)"}
         if req:
             with lock:
                 pending[req["id"]] = req
