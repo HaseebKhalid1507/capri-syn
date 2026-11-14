@@ -22,7 +22,7 @@ pub(super) enum Feed {
 }
 
 /// A frame and its plan, committed one frame ahead.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub(super) struct Shown {
     pub frame: usize,
     pub plan: BodyPlan,
@@ -67,6 +67,19 @@ pub(super) struct Rag {
     offset: (i32, i32),
     /// SA_RAG_PROF: sim + plan time per tick (µs).
     prof: Option<Vec<u32>>,
+}
+
+/// SA_FOLLOW_LOG=1: one line per follow (CLOCK_MONOTONIC seconds, as Python's perf_counter).
+pub(super) fn follow_log() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("SA_FOLLOW_LOG").is_some())
+}
+
+pub(super) fn mono_s() -> f64 {
+    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: a plain clock read into a local.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+    ts.tv_sec as f64 + ts.tv_nsec as f64 * 1e-9
 }
 
 pub(super) fn lockstep() -> bool {
@@ -292,6 +305,17 @@ impl Avatar {
         self.x11.freeze_layout(true);
         self.x11.take_shape_stats();
         self.x11.poll_pointer(matches!(rag.feed, Feed::Real));
+        // The follow runs at her monitor's refresh, halved above 170 Hz (240 -> 120: each
+        // move exposes the windows below her; 144 stays 144). SA_FOLLOW_HZ overrides.
+        let hz = std::env::var("SA_FOLLOW_HZ").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or_else(|| {
+            let (cx, cy) = (self.applied.0 + self.layout.avatar_x + self.layout.geo.width as i32 / 2, self.applied.1 + self.layout.avatar_y);
+            let r = self.x11.refresh_at(cx, cy);
+            r / (r / 170.0).ceil().max(1.0)
+        });
+        self.follow_period = Duration::from_secs_f32(1.0 / hz.clamp(30.0, 500.0));
+        self.follow_at = None;
+        self.follow_ptr = None;
+        self.follow_due = None;
         self.rag = Some(rag);
         if touch {
             self.brain_touch(crate::brain::Touch::DragStart);
@@ -353,7 +377,68 @@ impl Avatar {
         if let Some(p) = self.rag.as_mut().and_then(|r| r.prof.as_mut()) {
             p.push(t0.elapsed().as_micros() as u32);
         }
+        // Nothing new to draw (a rigid drag, a still chain): the window moves (apply_offset),
+        // no render and no present. It was a full repaint every tick.
+        if let Some(r) = &mut self.rag
+            && r.next.is_some()
+            && r.next == r.cur
+        {
+            r.painted = true;
+            return false;
+        }
         true
+    }
+
+    /// Between rag ticks, the held window follows the pointer at the monitor's refresh
+    /// (capped; `follow_period`): the window origin is `pointer - grip` whatever the bands
+    /// do, so it can move without a render. The bands still bend at the tick rate. True: moved.
+    pub(super) fn rag_follow(&mut self, now: Instant, motion: bool) -> bool {
+        let Some(r) = &self.rag else { return false };
+        if !matches!(r.m.phase(), Phase::Held { .. }) || !matches!(r.feed, Feed::Real) || lockstep() {
+            return false;
+        }
+        if let Some(t) = self.follow_at.filter(|&t| now < t + self.follow_period - Duration::from_micros(500)) {
+            // Too soon after the last move: a motion books the next slot itself (the poller
+            // often hasn't seen it yet, and the follow then waited for the next rag tick).
+            if motion {
+                self.follow_due = Some(t + self.follow_period);
+            }
+            return false;
+        }
+        self.follow_due = None;
+        // A fresh QueryPointer (at most once per follow period, drags only): the motion event
+        // that called us usually beats the 2 ms poller to the new position, and a stale
+        // read left the move to the next rag tick (step lag p50 15.9 ms).
+        let Ok(p) = self.x11.pointer().or_else(|_| self.x11.pointer_fast()) else { return false };
+        let l = self.layout;
+        let (rigid, offset, grip) = (r.rigid, r.offset, r.grip);
+        self.follow_at = Some(now);
+        self.follow_ptr = Some(p);
+        let before = self.applied;
+        if rigid {
+            self.move_to((p.0 + offset.0, p.1 + offset.1), false);
+        } else {
+            self.set_origin((p.0 - l.avatar_x - grip.0, p.1 - l.avatar_y - grip.1));
+        }
+        self.apply_offset(now);
+        if follow_log() {
+            elog!("follow {:.6} ptr {},{} moved {}", mono_s(), p.0, p.1, self.applied != before);
+        }
+        self.applied != before
+    }
+
+    /// When the follow may move the window again (a held drag only).
+    pub(super) fn follow_deadline(&self) -> Option<Instant> {
+        let r = self.rag.as_ref()?;
+        if !matches!(r.m.phase(), Phase::Held { .. }) || !matches!(r.feed, Feed::Real) || lockstep() {
+            return None;
+        }
+        if self.follow_due.is_some() {
+            return self.follow_due;
+        }
+        // Only while the pointer is somewhere the window hasn't followed yet.
+        let p = self.x11.pointer_fast().ok()?;
+        (Some(p) != self.follow_ptr).then(|| self.follow_at.map_or_else(Instant::now, |t| t + self.follow_period))
     }
 
     fn rag_pointer(&self, r: &Rag) -> (f32, f32) {
@@ -371,6 +456,10 @@ impl Avatar {
         let p = self.rag_pointer(r);
         let release = matches!(&r.feed, Feed::Script { s, .. } if s.release_at.is_some_and(|at| t + 1e-4 >= at));
         let l = self.layout;
+        // The tick's own move counts against the follow's rate (moves cost Xorg a region
+        // recompute of her ~570-rect shape each).
+        self.follow_ptr = Some((p.0 as i32, p.1 as i32));
+        self.follow_at = Some(now);
         let Some(r) = &mut self.rag else { return };
         r.ptr.push(t, p.0, p.1);
         if r.rigid {

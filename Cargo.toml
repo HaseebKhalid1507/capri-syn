@@ -56,3 +56,8 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.image]
 opt-level = 3
+
+# GPUI's X11 backend, patched (vendor/gpui-pre-linux/PATCHES.md): a pure window move no longer
+# re-renders and presents the whole window, nor does a GetGeometry round trip.
+[patch.crates-io]
+gpui-pre-linux = { path = "vendor/gpui-pre-linux" }

@@ -1910,6 +1910,8 @@ impl Avatar {
             "fs_hide": format!("{:?}", h.fs),
             "ticks": h.ticks,
             "view_ticks": self.view_ticks,
+            "renders": self.renders,
+            "moves": self.moves,
             "overrides": { "focus": format!("{:?}", h.ov.focus), "cursor": h.ov.cursor, "idle": h.ov.idle.map(|i| i.1),
                            "fullscreen": h.ov.fullscreen, "arena": h.ov.arena.as_ref().map(rect_json), "windows": h.ov.windows },
         });

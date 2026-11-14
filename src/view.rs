@@ -514,6 +514,16 @@ pub struct Avatar {
     rag_strength: crate::ragdoll::Strength,
     /// Ticks run so far (wake-ups), for the dev `state`.
     view_ticks: u64,
+    /// Renders and window moves since start (`brain state`, the perf meters).
+    renders: u64,
+    moves: u64,
+    /// The held drag's window follow (ragview::rag_follow): last move, its period, and the
+    /// pointer it followed.
+    follow_at: Option<Instant>,
+    follow_period: Duration,
+    follow_ptr: Option<(i32, i32)>,
+    /// A motion's follow booked for the next slot.
+    follow_due: Option<Instant>,
 }
 
 pub struct Init {
@@ -648,6 +658,12 @@ impl Avatar {
             rag: None,
             rag_strength: crate::ragdoll::Strength(crate::settings::Settings::load().map_or(0.5, |s| s.ragdoll.strength)),
             view_ticks: 0,
+            renders: 0,
+            moves: 0,
+            follow_at: None,
+            follow_period: Duration::from_millis(16),
+            follow_ptr: None,
+            follow_due: None,
         };
         if std::env::var_os("SA_NO_BRAIN").is_none() {
             a.brain_start();
@@ -1307,6 +1323,7 @@ impl Avatar {
         }
         take(self.brain_deadline(now));
         take(self.rag_deadline(now));
+        take(self.follow_deadline());
         if self.swing_on() {
             take(self.brain.as_ref().and_then(|h| h.swing.as_ref()).map_or(Some(now), |s| Some(s.due)));
         }
@@ -1524,6 +1541,7 @@ impl Avatar {
             self.hop = None;
         }
         dirty |= self.check_perch_gone(now);
+        self.rag_follow(now, false);
         dirty |= self.rag_tick(now);
         dirty |= self.swing_tick(now);
         if self.loaded {
@@ -2336,6 +2354,7 @@ impl Avatar {
             "glitch": self.glitch.is_some(),
             "composited": self.x11.composited(),
             "loaded": self.loaded,
+            "counters": { "ticks": self.view_ticks, "renders": self.renders, "moves": self.moves },
             "scale_factor": self.layout.sf,
             "focus_probe": self.focus_probe,
             "music": self.music.is_some(),
@@ -2797,6 +2816,7 @@ impl Avatar {
         let hop = self.hop.and_then(|t| fx::hop(now.saturating_duration_since(t), 16.0 * self.layout.sf)).unwrap_or(0);
         let pos = (self.origin.0, self.origin.1 - hop + self.drop_in_offset(now) + self.float_bob(now));
         if pos != self.applied {
+            self.moves += 1;
             self.x11.move_to(pos.0, pos.1).ok();
             self.applied = pos;
         }
@@ -3135,12 +3155,16 @@ impl Avatar {
             MouseButton::Left => {
                 let root = self.x11.pointer().unwrap_or((0, 0));
                 // Caught mid-flight: held again at once.
-                let caught = self.rag_catch(self.local(ev.position), Instant::now());
+                let now = Instant::now();
+                let caught = self.rag_catch(self.local(ev.position), now);
                 self.press = Some(Press { root, origin: self.origin, head, dragging: caught });
-                if caught {
-                    cx.notify();
-                    self.schedule(cx);
+                if !caught && self.rag.is_none() && self.teleport.is_none() {
+                    // Felt at once: she gives under the press (it went unanswered until the
+                    // release or 5 px of drag).
+                    self.squash = Some(now);
                 }
+                cx.notify();
+                self.schedule(cx);
             }
             MouseButton::Right => {
                 self.brain_touch(crate::brain::Touch::Menu);
@@ -3156,19 +3180,31 @@ impl Avatar {
         if ev.pressed_button != Some(MouseButton::Left) {
             return;
         }
+        if ragview::follow_log() {
+            elog!("motion {:.6} pressed {:?} press {}", ragview::mono_s(), ev.pressed_button, self.press.is_some());
+        }
         let Some(p) = &mut self.press else { return };
-        let Ok(root) = self.x11.pointer() else { return };
-        let (dx, dy) = (root.0 - p.root.0, root.1 - p.root.1);
-        if !p.dragging && dx * dx + dy * dy < 25 {
+        if p.dragging {
+            // Held: the window follows the pointer now (capped at the monitor's refresh), the
+            // bands bend at the rag tick. No render here (each `notify` was a full repaint
+            // and present per motion event) and no X round trip per event.
+            self.rag_follow(Instant::now(), true);
+            self.schedule(cx);
             return;
         }
-        if !p.dragging {
-            p.dragging = true;
-            // The press point on her, avatar-local (where the pointer went down).
-            let local = (p.root.0 - p.origin.0 - self.layout.avatar_x, p.root.1 - p.origin.1 - self.layout.avatar_y);
-            self.rag_grab(local, ragview::Feed::Real, Instant::now());
+        // Before the drag starts the window hasn't moved since the press: the event's
+        // position is exact.
+        let sf = self.layout.sf;
+        let root = (self.applied.0 + (f32::from(ev.position.x) * sf) as i32, self.applied.1 + (f32::from(ev.position.y) * sf) as i32);
+        let (dx, dy) = (root.0 - p.root.0, root.1 - p.root.1);
+        if dx * dx + dy * dy < 25 {
+            return;
         }
-        // The rag samples the pointer once per tick; motion only wakes it.
+        p.dragging = true;
+        // The press point on her, avatar-local (where the pointer went down).
+        let local = (p.root.0 - p.origin.0 - self.layout.avatar_x, p.root.1 - p.origin.1 - self.layout.avatar_y);
+        self.squash = None;
+        self.rag_grab(local, ragview::Feed::Real, Instant::now());
         cx.notify();
         self.schedule(cx);
     }
@@ -3244,7 +3280,10 @@ impl Avatar {
         if !seq.is_empty() {
             self.anim.play(seq, now);
         }
-        self.squash = Some(now);
+        // A press already started it (mouse_down): a click keeps that one going.
+        if self.squash.is_none_or(|t| now.saturating_duration_since(t) > Duration::from_millis(400)) {
+            self.squash = Some(now);
+        }
         let hold = if self.hearts.is_some() { len.max(HEARTS_MS) } else { len.max(600) };
         self.reaction_until = Some(now + Duration::from_millis(hold));
         if self.next_activity.is_some() {
@@ -3559,6 +3598,7 @@ const HEARTS: [(f32, f32, f32, u32); 4] = [
 
 impl Render for Avatar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.renders += 1;
         let now = Instant::now();
         let l = self.layout;
         let sf = l.sf;

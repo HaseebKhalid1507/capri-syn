@@ -2413,8 +2413,6 @@ dependencies = [
 [[package]]
 name = "gpui-pre-linux"
 version = "0.3.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "54bab418d0b7c027af9495f278619b46887362b3bd6446e246c87c5b0fa167df"
 dependencies = [
  "accesskit",
  "accesskit_unix",
@@ -6240,6 +6238,7 @@ dependencies = [
  "toml 0.8.23",
  "toml_edit 0.22.27",
  "x11rb",
+ "zbus 5.19.0",
 ]
 
 [[package]]

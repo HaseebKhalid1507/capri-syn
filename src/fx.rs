@@ -214,7 +214,7 @@ pub struct GlitchStep {
 }
 
 /// How the body is drawn this frame. Device px, relative to the avatar rect.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct BodyPlan {
     /// Squash about `pivot`.
     pub sx: f32,
