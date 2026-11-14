@@ -87,15 +87,18 @@ pub fn turn_shape(u: f32) -> Option<(f32, f32)> {
 /// turn there keeps the pixels still and animates only the shape: a band about her feet
 /// closes over the old art, holds edge-on while the new art lands, then opens over it. Per
 /// painted frame `k`: (band width as a share of her half-width, the new art yet), None after.
-/// Frame 0 is a full-width pre-roll (nothing shows; the new art's texture warms). The new art
-/// is painted as the band passes 0.42 closing, lands while it is edge-on and leads the open by
-/// three frames (pixels land up to two late; the first use of a mirrored texture, later still:
-/// torn legs at a two-frame lead). Edge-on two frames, no longer (r16: 4-5 read as a stall).
-pub const BAND: [(f32, bool); 7] = [(1.0, false), (0.72, false), (0.42, true), (0.16, true), (0.16, true), (0.42, true), (0.72, true)];
-/// The first frame painted with the new art.
-pub const BAND_SWAP: u32 = 2;
-pub fn turn_band(k: u32) -> Option<(f32, bool)> {
-    BAND.get(k as usize).copied()
+/// Frame 0 is a full-width pre-roll: nothing shows, the new art is drawn underneath from there
+/// on (its mirror is built then, not at the swap: that cost delayed the swap's pixels behind
+/// its shape, torn legs). The new art swaps in edge-on, where a shape/pixel mismatch is a
+/// sliver, and leads the open by two frames. Edge-on two frames (r16: four read as a stall).
+pub const BAND: [(f32, bool); 7] = [(1.0, false), (0.72, false), (0.42, false), (0.16, true), (0.16, true), (0.42, true), (0.72, true)];
+/// A turn onto art never shown yet this session: its first frames on screen came out torn for
+/// two or three frames after the swap (r17, :0, the first turn of 2 in 3 fresh starts, whatever
+/// was drawn ahead), so it holds edge-on until that's through (the r16 timing). Once per frame
+/// and side.
+pub const BAND_FIRST: [(f32, bool); 8] = [(0.72, false), (0.42, false), (0.16, false), (0.16, true), (0.16, true), (0.16, true), (0.42, true), (0.72, true)];
+pub fn turn_band(k: u32, first: bool) -> Option<(f32, bool)> {
+    if first { BAND_FIRST.get(k as usize).copied() } else { BAND.get(k as usize).copied() }
 }
 
 /// Shown mirrored to face `right`, for art that faces right (`art_right`) or left unmirrored.
@@ -256,19 +259,24 @@ mod tests {
 
     #[test]
     fn shape_mode_turn_closes_holds_edge_on_and_opens_once() {
-        let b: Vec<(f32, bool)> = (0..).map_while(turn_band).collect();
+        let first: Vec<(f32, bool)> = (0..).map_while(|k| turn_band(k, true)).collect();
+        let fs = first.iter().position(|s| s.1).unwrap();
+        assert!(first.iter().rposition(|s| s.0 == first[fs].0).unwrap() - fs + 1 >= 3, "first use: a 3-frame lead: {first:?}");
+        let b: Vec<(f32, bool)> = (0..).map_while(|k| turn_band(k, false)).collect();
         let swap = b.iter().position(|s| s.1).unwrap();
-        assert_eq!(swap as u32, BAND_SWAP);
+        assert_eq!(swap, 3);
         assert_eq!(b[0], (1.0, false), "a full-width pre-roll first");
         assert!(b[..swap].windows(2).all(|w| w[1].0 < w[0].0), "closes: {b:?}");
         let min = b.iter().map(|s| s.0).fold(f32::MAX, f32::min);
         let last_min = b.iter().rposition(|s| s.0 == min).unwrap();
-        assert!(last_min - swap + 1 >= 3, "the new art leads the open by three frames (pixels land late): {b:?}");
+        assert_eq!(b[swap].0, min, "the new art swaps in edge-on: {b:?}");
+        assert!(last_min - swap + 1 >= 2, "the new art leads the open by two frames (pixels land late): {b:?}");
         let edge_on = b.iter().filter(|s| s.0 == min).count();
         assert!((1..=2).contains(&edge_on), "edge-on 1-2 frames, not a stall: {b:?}");
         assert!(b[last_min..].windows(2).all(|w| w[1].0 > w[0].0), "one monotonic open: {b:?}");
         assert!(b[swap..].iter().all(|s| s.1) && b[..swap].iter().all(|s| !s.1));
-        assert_eq!(turn_band(b.len() as u32), None);
+        assert_eq!(turn_band(b.len() as u32, false), None);
+        assert_eq!(turn_band(first.len() as u32, true), None);
     }
 
     #[test]
