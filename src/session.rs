@@ -322,7 +322,7 @@ impl Link {
         }
         let ours = if self.mode == AttachMode::Mirror { self.owner == Some(self.me) } else { self.owner.is_none() };
         if !ours {
-            eprintln!("synaps-avatar: persona: another client owns input on her session; not set");
+            elog!("synaps-avatar: persona: another client owns input on her session; not set");
             self.persona_done = Some(id);
             return Vec::new();
         }
@@ -333,7 +333,7 @@ impl Link {
         self.persona_wait += diffs.len();
         self.persona_sent = now;
         self.touched = now;
-        eprintln!("synaps-avatar: persona: setting {} on her session", diffs.iter().map(Setting::name).collect::<Vec<_>>().join(", "));
+        elog!("synaps-avatar: persona: setting {} on her session", diffs.iter().map(Setting::name).collect::<Vec<_>>().join(", "));
         diffs.into_iter().map(Act::Set).collect()
     }
 
@@ -525,7 +525,7 @@ impl Link {
                     return acts;
                 }
                 if let Err(e) = self.transcript.load_attached(&attached) {
-                    eprintln!("synaps-avatar: attach: {e}");
+                    elog!("synaps-avatar: attach: {e}");
                 }
                 // Hers: created or resumed by her (not for --session), or carrying her name (or
                 // no name and the id she remembers). A renamed session is someone's now.
@@ -545,7 +545,7 @@ impl Link {
                     let v = &attached.view;
                     let sys = v.get("system_prompt").and_then(|s| s.as_str());
                     let persona_sys = self.opts.persona.system.as_deref().map(str::trim);
-                    eprintln!(
+                    elog!(
                         "synaps-avatar: attached {} ({}) {mode:?}{} mine={mine}: model={} reasoning={} system={}",
                         id.get(..8).unwrap_or(id),
                         attached.meta.name.as_deref().unwrap_or("-"),
@@ -601,7 +601,7 @@ impl Link {
                 }
                 self.response_at = self.raw.len();
                 if attached.rejected.total() > 0 {
-                    eprintln!("synaps-avatar: attach snapshot: {} entries did not decode", attached.rejected);
+                    elog!("synaps-avatar: attach snapshot: {} entries did not decode", attached.rejected);
                 }
                 if again {
                     self.once.push(Once::Appear);
@@ -622,17 +622,17 @@ impl Link {
                 self.owner = owner;
             }
             Event::SettingApplied { setting, view, .. } => {
-                eprintln!("synaps-avatar: persona: {setting} set");
+                elog!("synaps-avatar: persona: {setting} set");
                 self.view = Some(view);
                 self.persona_wait = self.persona_wait.saturating_sub(1);
             }
             Event::Error { error: Error::SettingRefused { setting, reason, .. }, .. } => {
                 // Logged, never shown: she just keeps the session's own settings.
-                eprintln!("synaps-avatar: persona: {setting} not set: {reason}");
+                elog!("synaps-avatar: persona: {setting} not set: {reason}");
                 self.persona_wait = self.persona_wait.saturating_sub(1);
             }
             Event::Reattaching { attach_seq, reason, .. } => {
-                eprintln!("synaps-avatar: session connection lost ({reason}); re-attaching");
+                elog!("synaps-avatar: session connection lost ({reason}); re-attaching");
                 self.attach = Attach::Reattaching(attach_seq);
                 self.lost = true;
                 if let Some(t) = self.pending_input.take() {
@@ -640,7 +640,7 @@ impl Link {
                 }
             }
             Event::Detached { reason, .. } => {
-                eprintln!("synaps-avatar: detached: {reason}");
+                elog!("synaps-avatar: detached: {reason}");
                 let was = self.attach;
                 self.attach = Attach::None;
                 if matches!(was, Attach::Live(_) | Attach::Reattaching(_)) || self.switching {
@@ -679,15 +679,15 @@ impl Link {
             }
             Event::Error { error, .. } => match error {
                 Error::Refused { command, reason } => {
-                    eprintln!("synaps-avatar: {} refused: {reason}", command.as_deref().unwrap_or("command"));
+                    elog!("synaps-avatar: {} refused: {reason}", command.as_deref().unwrap_or("command"));
                     if let Some(t) = self.pending_input.take() {
                         self.once.push(Once::Restore(t));
                     }
                 }
-                Error::Decode(e) => eprintln!("synaps-avatar: session event did not decode: {e}"),
-                other => eprintln!("synaps-avatar: {other}"),
+                Error::Decode(e) => elog!("synaps-avatar: session event did not decode: {e}"),
+                other => elog!("synaps-avatar: {other}"),
             },
-            Event::CwdFallback { missing, .. } => eprintln!("synaps-avatar: cwd {missing} is gone on the daemon's machine; running in ~"),
+            Event::CwdFallback { missing, .. } => elog!("synaps-avatar: cwd {missing} is gone on the daemon's machine; running in ~"),
             _ => {}
         }
         acts
@@ -770,7 +770,7 @@ impl Link {
             SessionEvent::CompactionApplied { .. } | SessionEvent::CompactionCancelled => self.compacting = false,
             SessionEvent::CompactionFailed { message } => {
                 self.compacting = false;
-                eprintln!("synaps-avatar: compaction failed: {message}");
+                elog!("synaps-avatar: compaction failed: {message}");
             }
             SessionEvent::Cleared { .. } => {
                 self.raw.clear();
@@ -798,7 +798,7 @@ impl Link {
         }
         match self.opts.target.clone() {
             Target::Session(s) => {
-                eprintln!("synaps-avatar: no live session `{s}`; looking again in {} s", RETRY_SLOW.as_secs());
+                elog!("synaps-avatar: no live session `{s}`; looking again in {} s", RETRY_SLOW.as_secs());
                 self.retry_at = Some(now + RETRY_SLOW);
                 Vec::new()
             }

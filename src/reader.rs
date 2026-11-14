@@ -264,7 +264,7 @@ impl Reader {
             }
             None => cx.write_to_clipboard(ClipboardItem::new_string(text.clone())),
         }
-        eprintln!("synaps-avatar: reader: copied {} bytes ({})", text.len(), if which == usize::MAX { "the reply".to_string() } else { format!("code block {which}") });
+        elog!("synaps-avatar: reader: copied {} bytes ({})", text.len(), if which == usize::MAX { "the reply".to_string() } else { format!("code block {which}") });
         self.copied = Some(which);
         cx.notify();
         // One timer after a click, then quiet again (no ticking while it is open).

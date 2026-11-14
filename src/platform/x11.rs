@@ -623,7 +623,8 @@ impl X11 {
                 if let Ok(Ok(r)) = c.query_pointer(root).map(|k| k.reply()) {
                     p.store(((r.root_x as i32 as u32 as u64) << 32) | r.root_y as i32 as u32 as u64, Ordering::Relaxed);
                 }
-                std::thread::sleep(std::time::Duration::from_millis(4));
+                // 2 ms: the window follows it at up to the monitor's refresh (see rag_follow).
+                std::thread::sleep(std::time::Duration::from_millis(2));
             }
         });
         if spawned.is_ok() {
@@ -642,6 +643,26 @@ impl X11 {
             }
         }
         self.pointer()
+    }
+
+    /// Refresh rate (Hz) of the CRTC showing (x, y), from its RandR mode timings; 60 when
+    /// unknown. A few round trips: called once per drag, at the grab.
+    pub fn refresh_at(&self, x: i32, y: i32) -> f32 {
+        let get = || -> Option<f32> {
+            let res = self.conn.randr_get_screen_resources_current(self.root).ok()?.reply().ok()?;
+            for &c in &res.crtcs {
+                let Ok(Ok(ci)) = self.conn.randr_get_crtc_info(c, res.config_timestamp).map(|r| r.reply()) else { continue };
+                let (cx, cy, cw, ch) = (ci.x as i32, ci.y as i32, ci.width as i32, ci.height as i32);
+                if ci.mode == 0 || x < cx || y < cy || x >= cx + cw || y >= cy + ch {
+                    continue;
+                }
+                let m = res.modes.iter().find(|m| m.id == ci.mode)?;
+                let total = m.htotal as f64 * m.vtotal as f64;
+                return (total > 0.0).then(|| (m.dot_clock as f64 / total) as f32);
+            }
+            None
+        };
+        get().filter(|r| (20.0..=500.0).contains(r)).unwrap_or(60.0)
     }
 
     fn read_monitors(&self) -> Vec<Monitor> {

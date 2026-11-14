@@ -214,7 +214,7 @@ pub struct GlitchStep {
 }
 
 /// How the body is drawn this frame. Device px, relative to the avatar rect.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct BodyPlan {
     /// Squash about `pivot`.
     pub sx: f32,
@@ -758,16 +758,41 @@ pub struct Glint {
     pub y: f32,
     pub size: f32,
     pub spin: f32,
+    /// Travel over its life (device px), centred on (x, y).
+    pub drift: (f32, f32),
 }
 
+/// Samples per glint life: ticks land at the centres of `GLINT_STEPS` equal slices, plus one
+/// at its end that takes it away: it swells over 4 frames and fades over 4 (sin(pi u):
+/// 0.22, 0.62, 0.90, 1.0, 0.90, 0.62, 0.22, gone).
+pub const GLINT_STEPS: u32 = 7;
+
 impl Glint {
-    /// (scale 0..1) or None when finished.
-    pub fn scale(&self, now: Instant, life_ms: u64) -> Option<f32> {
-        let u = ms(now.saturating_duration_since(self.t0)) / life_ms as f32;
-        if u >= 1.0 {
-            return None;
+    /// Life fraction 0..1, or None before it starts or once finished.
+    fn u(&self, now: Instant, life_ms: u64) -> Option<f32> {
+        if now < self.t0 {
+            return Some(0.0);
         }
-        Some((PI * u).sin().powf(1.6))
+        let u = ms(now.saturating_duration_since(self.t0)) / life_ms as f32;
+        (u < 1.0).then_some(u)
+    }
+
+    /// (scale 0..1) or None when finished: one eased curve drives size, halo and colour.
+    pub fn scale(&self, now: Instant, life_ms: u64) -> Option<f32> {
+        self.u(now, life_ms).map(|u| (PI * u).sin())
+    }
+
+    /// Where it is now, relative to (x, y): it drifts along its slant.
+    pub fn offset(&self, now: Instant, life_ms: u64) -> (f32, f32) {
+        let u = self.u(now, life_ms).unwrap_or(1.0) - 0.5;
+        (self.drift.0 * u, self.drift.1 * u)
+    }
+
+    /// Its next sample instant after `now` (slice centres, then its end), if it isn't done.
+    pub fn next_sample(&self, now: Instant, life_ms: u64) -> Option<Instant> {
+        let life = Duration::from_millis(life_ms);
+        let step = life / GLINT_STEPS;
+        (0..GLINT_STEPS).map(|k| self.t0 + step * k + step / 2).chain([self.t0 + life]).find(|&t| t > now)
     }
 }
 
@@ -1228,5 +1253,30 @@ mod tests {
         assert!(h > 0.99 && h - t > 0.08, "{h} {t}");
         let (h, t) = Bolt::span(BOLT_END);
         assert!(h > 0.99 && t > 0.98, "{h} {t}");
+    }
+}
+
+#[cfg(test)]
+mod glint_tests {
+    use super::*;
+
+    #[test]
+    fn glint_swells_and_fades_symmetrically_then_ends_on_a_wake() {
+        let t0 = Instant::now();
+        let g = Glint { t0, x: 0.0, y: 0.0, size: 10.0, spin: 0.0, drift: (8.0, 0.0) };
+        let life = 560;
+        let mut at = t0;
+        let mut scales = Vec::new();
+        while let Some(t) = g.next_sample(at, life) {
+            scales.push(g.scale(t, life));
+            at = t;
+        }
+        assert_eq!(scales.len(), GLINT_STEPS as usize + 1);
+        assert_eq!(scales.last(), Some(&None), "the last wake is its end: nothing left drawn");
+        let s: Vec<f32> = scales.iter().flatten().copied().collect();
+        assert!(s.windows(2).take(3).all(|w| w[1] > w[0]), "4 frames up: {s:?}");
+        assert!(s.windows(2).skip(3).all(|w| w[1] < w[0]), "4 frames down: {s:?}");
+        assert!(s[0] < 0.3 && *s.last().unwrap() < 0.3);
+        assert!((g.offset(t0, life).0 + 4.0).abs() < 1e-3 && g.offset(t0 + Duration::from_millis(280), life).0.abs() < 1e-3);
     }
 }

@@ -3,6 +3,24 @@
 //! (moods from turn events, the reply in the bubble, a text field that submits to the
 //! session). A dev control socket takes commands for testing and overrides.
 
+/// stderr that never panics. `eprintln!` panics when stderr is gone (a closed pipe:
+/// `synaps-avatar … 2>&1 | head -1`), and release builds abort on panic. A lost log line
+/// is not worth the process.
+macro_rules! elog {
+    ($($t:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr(), $($t)*);
+    }};
+}
+
+/// stdout, the same way (`--help`, `--check`).
+macro_rules! olog {
+    ($($t:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stdout(), $($t)*);
+    }};
+}
+
 mod anim;
 mod brain;
 mod control;
@@ -137,7 +155,7 @@ fn parse_args_from(argv: impl IntoIterator<Item = String>) -> Result<Args> {
                 a.sleepy_after = std::time::Duration::from_secs_f64(m * 60.0);
             }
             "-h" | "--help" => {
-                println!("{USAGE}");
+                olog!("{USAGE}");
                 std::process::exit(0);
             }
             _ => bail!("unknown argument `{arg}`\n{USAGE}"),
@@ -176,7 +194,7 @@ impl log::Log for StderrLog {
         true
     }
     fn log(&self, r: &log::Record) {
-        eprintln!("[{} {}] {}", r.level(), r.target(), r.args());
+        elog!("[{} {}] {}", r.level(), r.target(), r.args());
     }
     fn flush(&self) {}
 }
@@ -221,7 +239,7 @@ fn process_setup() {
         return;
     }
     if let Some((id, _, vendor)) = cards.iter().find(|c| c.1 && !c.0.is_empty()) {
-        eprintln!("synaps-avatar: {} GPUs, rendering on the boot VGA device {id} (SA_ANY_GPU=1 to let GPUI pick)", cards.len());
+        elog!("synaps-avatar: {} GPUs, rendering on the boot VGA device {id} (SA_ANY_GPU=1 to let GPUI pick)", cards.len());
         unsafe { std::env::set_var("ZED_DEVICE_ID", id) };
         // Only that vendor's Vulkan driver: the loader otherwise maps every ICD, and the
         // unused NVIDIA one alone was ~52 MB of RSS (libnvidia-gpucomp/rtcore/glcore).
@@ -283,7 +301,7 @@ fn main() {
         log::set_max_level(level);
     }
     if let Err(e) = run(t_start) {
-        eprintln!("synaps-avatar: {e:#}");
+        elog!("synaps-avatar: {e:#}");
         std::process::exit(1);
     }
 }
@@ -302,7 +320,7 @@ fn run(t_start: Instant) -> Result<()> {
         let d = frames::decode(&pack, &layout.geo, &all, args.verify, args.threads)?;
         let bytes: usize = d.frames.len() * (layout.geo.width * layout.geo.height * 4) as usize;
         let rects: Vec<usize> = d.frames.iter().map(|f| f.rects.len()).collect();
-        println!(
+        olog!(
             "pack `{}` ok: {} frames + {} poses, crop {:?}, frame {}x{} px, {:.1} MB scaled RGBA, \
              shape rects/frame {}..{}, load {t_pack} ms, decode {} ms ({} threads, verify={})",
             pack.name,
@@ -336,7 +354,7 @@ fn run(t_start: Instant) -> Result<()> {
         if !fonts.is_empty()
             && let Err(e) = cx.text_system().add_fonts(fonts)
         {
-            eprintln!("synaps-avatar: pack fonts not loaded: {e:#}");
+            elog!("synaps-avatar: pack fonts not loaded: {e:#}");
         }
         // GPUI's X11 displays are the root size divided by its scale factor.
         let display_w = cx.primary_display().map(|d| f32::from(d.bounds().size.width)).unwrap_or(0.0);
@@ -375,7 +393,7 @@ fn run(t_start: Instant) -> Result<()> {
                 Ok(RawWindowHandle::Xcb(h)) => h.window.get(),
                 Ok(RawWindowHandle::Xlib(h)) => h.window as u32,
                 other => {
-                    eprintln!("synaps-avatar: not an X11 window ({other:?}); phase 1 supports X11 only");
+                    elog!("synaps-avatar: not an X11 window ({other:?}); phase 1 supports X11 only");
                     std::process::exit(1);
                 }
             };
@@ -394,7 +412,7 @@ fn run(t_start: Instant) -> Result<()> {
                 let (r, _) = std::sync::mpsc::channel();
                 tx.send_blocking((control::Command::Watch(ev), r)).ok();
             })
-            .map_err(|e| eprintln!("synaps-avatar: x11 watcher: {e:#}"))
+            .map_err(|e| elog!("synaps-avatar: x11 watcher: {e:#}"))
             .ok();
             // Real LISTENING: media players on the session bus (signals only). Tests see only
             // their own fake player (SA_MPRIS_ONLY), never his.
@@ -408,10 +426,10 @@ fn run(t_start: Instant) -> Result<()> {
                     let (r, _) = std::sync::mpsc::channel();
                     tx.send_blocking((control::Command::Playback(p), r)).ok();
                 }) {
-                    eprintln!("synaps-avatar: mpris: {e:#} (no music detection)");
+                    elog!("synaps-avatar: mpris: {e:#} (no music detection)");
                 }
             }
-            eprintln!(
+            elog!(
                 "synaps-avatar: pack `{}` ({} frames) sf {sf:.3} window 0x{win:x} {}x{} at {},{} composited={} (pack load {t_pack} ms)",
                 pack2.name,
                 pack2.frames.len(),
@@ -427,7 +445,7 @@ fn run(t_start: Instant) -> Result<()> {
             view
         });
         if let Err(e) = opened {
-            eprintln!("synaps-avatar: cannot open the window: {e:#}");
+            elog!("synaps-avatar: cannot open the window: {e:#}");
             std::fs::remove_file(control::socket_path()).ok();
             std::process::exit(1);
         }
@@ -455,7 +473,7 @@ fn run(t_start: Instant) -> Result<()> {
                 Ok(d) => d,
                 Err(e) => fatal(e),
             };
-            eprintln!(
+            elog!(
                 "synaps-avatar: decoded {} frames in {} ms on {threads} threads; all frames ready {} ms after start",
                 all.frames.len(),
                 all.decode_ms,
@@ -467,7 +485,7 @@ fn run(t_start: Instant) -> Result<()> {
                 let size = crate::view::note_px(&geo);
                 match off_thread(move || frames::decode_notes(&p3, &m.notes, size)).await {
                     Ok(notes) => decode_view.update(cx, |v, _| v.set_notes(notes)),
-                    Err(e) => eprintln!("synaps-avatar: music notes unavailable: {e:#}"),
+                    Err(e) => elog!("synaps-avatar: music notes unavailable: {e:#}"),
                 }
             }
             #[cfg(target_env = "gnu")]
@@ -518,7 +536,7 @@ fn persona_for(args: &Args, pack_dir: &std::path::Path) -> session::Persona {
         return session::Persona::default();
     }
     session_persona(&settings::Settings::load().map(|s| s.session).unwrap_or_else(|e| {
-        eprintln!("synaps-avatar: {e:#}; the session gets no persona settings");
+        elog!("synaps-avatar: {e:#}; the session gets no persona settings");
         settings::SessionSettings { persona: false, ..Default::default() }
     }), args.model.clone(), pack_dir)
 }
@@ -526,7 +544,7 @@ fn persona_for(args: &Args, pack_dir: &std::path::Path) -> session::Persona {
 /// The persona from `[session]` (and a model that overrides it).
 pub(crate) fn session_persona(s: &settings::SessionSettings, model: Option<String>, pack_dir: &std::path::Path) -> session::Persona {
     let system = s.persona_text(pack_dir).unwrap_or_else(|e| {
-        eprintln!("synaps-avatar: persona: {e:#}; none sent");
+        elog!("synaps-avatar: persona: {e:#}; none sent");
         None
     });
     session::Persona { system, model: model.or_else(|| s.model.clone()), thinking: s.thinking.clone() }
@@ -548,7 +566,7 @@ fn connect_session(args: &Args, character: &str, persona: session::Persona, view
         }
     };
     let remembered = state::remembered_session(&key);
-    eprintln!(
+    elog!(
         "synaps-avatar: session: {key}, client `{me}`, target {:?}{}",
         args.target,
         if args.target == session::Target::Default { format!(" (her own: `{me}`{})", remembered.as_deref().map(|r| format!(", last {r}")).unwrap_or_default()) } else { String::new() }
@@ -578,7 +596,7 @@ async fn off_thread<T: Send + 'static>(f: impl FnOnce() -> anyhow::Result<T> + S
 }
 
 fn fatal(e: anyhow::Error) -> ! {
-    eprintln!("synaps-avatar: {e:#}");
+    elog!("synaps-avatar: {e:#}");
     std::fs::remove_file(control::socket_path()).ok();
     std::process::exit(1);
 }
@@ -590,6 +608,28 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<Args> {
         parse_args_from(args.iter().map(|s| s.to_string()))
+    }
+
+    /// stderr a closed pipe (the reader of `2>&1 | head -1` gone): `elog!` carries on where
+    /// `eprintln!` panicked (and the release build aborted).
+    #[test]
+    fn logging_survives_a_closed_stderr() {
+        use std::io::Write as _;
+        let mut fds = [0; 2];
+        // SAFETY: plain fd juggling on this process's own descriptors; fd 2 is restored.
+        unsafe {
+            assert_eq!(libc::pipe(fds.as_mut_ptr()), 0);
+            libc::close(fds[0]);
+            let saved = libc::dup(2);
+            libc::dup2(fds[1], 2);
+            let broken = std::io::stderr().write_all(b"x\n").is_err();
+            elog!("synaps-avatar: into a closed pipe {}", 42);
+            elog!("and again");
+            libc::dup2(saved, 2);
+            libc::close(saved);
+            libc::close(fds[1]);
+            assert!(broken, "the pipe was not closed: the test proves nothing");
+        }
     }
 
     #[test]

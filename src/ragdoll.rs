@@ -1094,7 +1094,7 @@ mod tests {
         };
         let (l1, l2) = (lag(&full), lag(&half));
         assert!(l2 <= 0.6 * l1, "a calmer shake: {l1:.0} → {l2:.0} px");
-        eprintln!(
+        elog!(
             "strength 1 → 0.5: drag swing {p1:.0} → {p2:.0} px; at rest after the stop {r1:.2} → {r2:.2} s; kick settle {st1:.2} → {st2:.2} s; \
              back-swing {:.0} % → {:.0} %, {c1} → {c2} crossings; shake lag {l1:.0} → {l2:.0} px",
             100.0 * b1,
@@ -1149,7 +1149,7 @@ mod tests {
             assert!(rev <= 1.6, "k {k}: the feet turn {rev:.1}x/s (a high-frequency mode)");
             let amp = xs.iter().fold(0.0f32, |m, v| m.max(v.abs()));
             assert!((amp - 30.0 * k * 1.083).abs() < 0.3 * 30.0 * k * 1.083, "k {k}: feet swing {amp:.0} px");
-            eprintln!("bid swing k {k}: period {per:.2} s, feet {amp:.0} px, worst band {worst} reversals / 3 s, feet turns {rev:.1}/s");
+            elog!("bid swing k {k}: period {per:.2} s, feet {amp:.0} px, worst band {worst} reversals / 3 s, feet turns {rev:.1}/s");
         }
     }
 

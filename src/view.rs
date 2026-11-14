@@ -310,7 +310,9 @@ const NOTE_TICK: Duration = Duration::from_millis(40);
 /// the hearts, so a glint costs no GPUI redraw.
 const GLINT_LAYER: usize = NOTE_LAYER + 2 * NOTES_MAX;
 const GLINTS_MAX: usize = 4;
-const GLINT_TICK: Duration = Duration::from_millis(60);
+/// A bob or sway step (1-2 px) alone waits this long for another redraw to ride on (a
+/// blink, the other axis): at rest every pose step was a render of its own.
+const POSE_SLACK: Duration = Duration::from_millis(250);
 
 /// Device px of the largest note sprite for this geometry.
 pub fn note_px(geo: &Geometry) -> u32 {
@@ -471,6 +473,8 @@ pub struct Avatar {
     glints_shown: usize,
     /// Breath/sway/nod as last drawn.
     pose_last: fx::Pose,
+    /// A pose step not drawn yet, since (POSE_SLACK).
+    pose_wait: Option<Instant>,
     session: Option<SessionLink>,
     input: Option<InputBox>,
     /// Text typed but not sent (closed field, refused input).
@@ -514,6 +518,16 @@ pub struct Avatar {
     rag_strength: crate::ragdoll::Strength,
     /// Ticks run so far (wake-ups), for the dev `state`.
     view_ticks: u64,
+    /// Renders and window moves since start (`brain state`, the perf meters).
+    renders: u64,
+    moves: u64,
+    /// The held drag's window follow (ragview::rag_follow): last move, its period, and the
+    /// pointer it followed.
+    follow_at: Option<Instant>,
+    follow_period: Duration,
+    follow_ptr: Option<(i32, i32)>,
+    /// A motion's follow booked for the next slot.
+    follow_due: Option<Instant>,
 }
 
 pub struct Init {
@@ -624,6 +638,7 @@ impl Avatar {
             notes_shown: 0,
             glints_shown: 0,
             pose_last: fx::Pose::default(),
+            pose_wait: None,
             session: None,
             input: None,
             draft: String::new(),
@@ -648,6 +663,12 @@ impl Avatar {
             rag: None,
             rag_strength: crate::ragdoll::Strength(crate::settings::Settings::load().map_or(0.5, |s| s.ragdoll.strength)),
             view_ticks: 0,
+            renders: 0,
+            moves: 0,
+            follow_at: None,
+            follow_period: Duration::from_millis(16),
+            follow_ptr: None,
+            follow_due: None,
         };
         if std::env::var_os("SA_NO_BRAIN").is_none() {
             a.brain_start();
@@ -822,7 +843,8 @@ impl Avatar {
                     break;
                 }
                 let Some(sc) = g.scale(now, life_ms).filter(|&v| v > 0.02) else { continue };
-                let (cx, cy, r) = (base.0 + g.x, base.1 + g.y, g.size * sc);
+                let (dx, dy) = g.offset(now, life_ms);
+                let (cx, cy, r) = (base.0 + g.x + dx, base.1 + g.y + dy, g.size * sc);
                 let place = |pts: Vec<(f32, f32)>| {
                     let x0 = pts.iter().map(|p| p.0).fold(f32::MAX, f32::min).floor() as i32;
                     let y0 = pts.iter().map(|p| p.1).fold(f32::MAX, f32::min).floor() as i32;
@@ -834,9 +856,11 @@ impl Avatar {
                     ((x0, y0), (x1 - x0, y1 - y0), rows)
                 };
                 let (core, glow) = (GLINT_LAYER + 2 * used + 1, GLINT_LAYER + 2 * used);
+                // The same curve fades it: the core goes pink -> white -> pink and the halo
+                // grows out of it (1-bit windows: no alpha).
                 let (o, sz, rows) = place(fx::star(cx, cy, r, g.spin + 0.04));
-                self.x11.fx_set(core, 0xffffff, o, sz, &rows).ok();
-                let (o, sz, rows) = place(fx::star(cx, cy, r * 1.3, g.spin));
+                self.x11.fx_set(core, mix_rgb(0xffc2e2, 0xffffff, sc), o, sz, &rows).ok();
+                let (o, sz, rows) = place(fx::star(cx, cy, r * (1.0 + 0.32 * sc), g.spin));
                 self.x11.fx_set_below(glow, core, 0xffc2e2, o, sz, &rows).ok();
                 used += 1;
             }
@@ -1291,11 +1315,15 @@ impl Avatar {
         if self.squash.is_some() || self.sliver.is_some() {
             take(Some(now + FRAME_FAST));
         }
-        if !self.glints.is_empty() {
-            take(Some(now + GLINT_TICK));
-        }
+        // Glints: at their slice centres (fx::GLINT_STEPS per life), not a free-running tick.
+        let life_ms = self.pack.behaviour.life.sparkle_ms;
+        take(self.glints.iter().filter_map(|g| g.next_sample(now, life_ms)).min());
         take(self.next_glint);
-        take(self.pose_next_change(now));
+        // One wake per pose step, at its slack's end (not one at the step and one after).
+        match self.pose_wait {
+            Some(t) => take(Some(t + POSE_SLACK)),
+            None => take(self.pose_next_change(now).map(|t| t + POSE_SLACK)),
+        }
         if self.music.is_some() {
             take(Some(now + NOTE_TICK));
             take(self.music.as_ref().and_then(|m| m.until));
@@ -1307,6 +1335,7 @@ impl Avatar {
         }
         take(self.brain_deadline(now));
         take(self.rag_deadline(now));
+        take(self.follow_deadline());
         if self.swing_on() {
             take(self.brain.as_ref().and_then(|h| h.swing.as_ref()).map_or(Some(now), |s| Some(s.due)));
         }
@@ -1501,11 +1530,6 @@ impl Avatar {
             self.music_off(now);
             dirty = true;
         }
-        let pose = self.pose_at(now);
-        if pose != self.pose_last {
-            self.pose_last = pose;
-            dirty = true;
-        }
 
         // Window offset: the attention hop moves the window, no redraw.
         if let Some(at) = self.next_hop
@@ -1524,6 +1548,7 @@ impl Avatar {
             self.hop = None;
         }
         dirty |= self.check_perch_gone(now);
+        self.rag_follow(now, false);
         dirty |= self.rag_tick(now);
         dirty |= self.swing_tick(now);
         if self.loaded {
@@ -1533,6 +1558,28 @@ impl Avatar {
         self.update_notes(now);
         self.update_glints(now);
         self.update_marker(now);
+        // Any redraw draws the current pose (render latches it); a pose step alone waits
+        // POSE_SLACK for company.
+        let pose = self.pose_at(now);
+        if pose != self.pose_last && !dirty {
+            // Since when this pose has held (20 ms steps back): the step's time, even when
+            // this tick is the first to see it.
+            if self.pose_wait.is_none() {
+                let held = (1..=20)
+                    .map_while(|k| now.checked_sub(Duration::from_millis(20 * k)))
+                    .take_while(|&t| self.pose_at(t) == pose)
+                    .last();
+                self.pose_wait = Some(held.unwrap_or(now));
+            }
+            let since = self.pose_wait.unwrap_or(now);
+            dirty = now.saturating_duration_since(since) + Duration::from_millis(20) >= POSE_SLACK;
+        }
+        // Latched here, not in render: a wait left set until GPUI got round to rendering
+        // was a past deadline (it spun ~900 ticks/s).
+        if dirty || pose == self.pose_last {
+            self.pose_last = pose;
+            self.pose_wait = None;
+        }
         if dirty {
             cx.notify();
         }
@@ -1558,12 +1605,17 @@ impl Avatar {
         let n = if self.rng.range(0.0, 1.0) < 0.3 { 2 } else { 1 };
         for k in 0..n {
             let (x, y) = pts[self.rng.pick(pts.len())];
+            let spin = self.rng.range(-0.25, 0.25);
+            let travel = self.rng.range(6.0, 10.0) * self.layout.sf;
+            let dir = if self.rng.range(0.0, 1.0) < 0.5 { -1.0 } else { 1.0 };
             self.glints.push(Glint {
                 t0: now + Duration::from_millis(k * 140),
                 x: x as f32,
                 y: y as f32,
                 size: self.rng.range(7.0, 12.0) * self.layout.sf,
-                spin: self.rng.range(-0.25, 0.25),
+                spin,
+                // A little travel along its long arm (the strand it sits on).
+                drift: (spin.cos() * travel * dir, spin.sin() * travel * dir),
             });
         }
     }
@@ -2051,7 +2103,7 @@ impl Avatar {
                 if let Some(b) = &mut self.bubble {
                     b.hide_at = None;
                 }
-                eprintln!("synaps-avatar: reader open at {x},{y} {w}x{h} (0x{xid:x})");
+                elog!("synaps-avatar: reader open at {x},{y} {w}x{h} (0x{xid:x})");
                 format!("ok reader {x},{y} {w}x{h}")
             }
             Err(e) => format!("error: reader: {e:#}"),
@@ -2145,7 +2197,7 @@ impl Avatar {
         }
         self.parked = Some(false);
         state::save_hidden(true);
-        eprintln!("synaps-avatar: hidden (HIDE); the chip brings her back");
+        elog!("synaps-avatar: hidden (HIDE); the chip brings her back");
         if self.hidden {
             // Already out of sight (a fullscreen hide): parked at once.
             self.parked = Some(true);
@@ -2175,7 +2227,7 @@ impl Avatar {
             h.update(cx, |_, window, _| window.remove_window()).ok();
         }
         self.chip_rect = None;
-        eprintln!("synaps-avatar: shown again ({why})");
+        elog!("synaps-avatar: shown again ({why})");
         let fs_hidden = self.brain.as_ref().is_some_and(|h| h.fs != brainview::FsHide::Shown);
         if !fs_hidden {
             self.hidden = false;
@@ -2234,9 +2286,9 @@ impl Avatar {
             Ok(h) => {
                 self.chip = Some(h);
                 self.chip_rect = Some((x, y, cw, ch, xid.get()));
-                eprintln!("synaps-avatar: restore chip at {x},{y} {cw}x{ch}");
+                elog!("synaps-avatar: restore chip at {x},{y} {cw}x{ch}");
             }
-            Err(e) => eprintln!("synaps-avatar: restore chip: {e:#}"),
+            Err(e) => elog!("synaps-avatar: restore chip: {e:#}"),
         }
     }
 
@@ -2272,7 +2324,7 @@ impl Avatar {
         if s.closing {
             self.finish_quit(cx);
         } else if s.generation == generation {
-            eprintln!("synaps-avatar: the session client stopped; a new one in {} s", RESPAWN_SOON.as_secs());
+            elog!("synaps-avatar: the session client stopped; a new one in {} s", RESPAWN_SOON.as_secs());
             s.respawn_at = Some(Instant::now() + RESPAWN_SOON);
             cx.notify();
             self.schedule(cx);
@@ -2336,6 +2388,7 @@ impl Avatar {
             "glitch": self.glitch.is_some(),
             "composited": self.x11.composited(),
             "loaded": self.loaded,
+            "counters": { "ticks": self.view_ticks, "renders": self.renders, "moves": self.moves },
             "scale_factor": self.layout.sf,
             "focus_probe": self.focus_probe,
             "music": self.music.is_some(),
@@ -2366,7 +2419,7 @@ impl Avatar {
         let (client, rx) = match Client::spawn(options.clone()) {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("synaps-avatar: cannot start the session client: {e}");
+                elog!("synaps-avatar: cannot start the session client: {e}");
                 std::process::exit(1);
             }
         };
@@ -2406,7 +2459,7 @@ impl Avatar {
         let (client, rx) = match Client::spawn(s.options.clone()) {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("synaps-avatar: cannot start a new session client: {e}");
+                elog!("synaps-avatar: cannot start a new session client: {e}");
                 s.respawn_at = Some(now + respawn_after());
                 return;
             }
@@ -2416,7 +2469,7 @@ impl Avatar {
         s.generation += 1;
         s.link.reconnect(now);
         let generation = s.generation;
-        eprintln!("synaps-avatar: new session client (#{generation})");
+        elog!("synaps-avatar: new session client (#{generation})");
         self.pump(rx, generation, cx);
     }
 
@@ -2443,7 +2496,7 @@ impl Avatar {
             let r = match a {
                 Act::Attach(id, mode) => {
                     if std::env::var_os("SA_DEBUG").is_some() {
-                        eprintln!("synaps-avatar: attach {id} as {mode:?}");
+                        elog!("synaps-avatar: attach {id} as {mode:?}");
                     }
                     s.client.attach(id, mode).map(|seq| s.link.attaching(seq))
                 }
@@ -2462,14 +2515,14 @@ impl Avatar {
                     Ok(())
                 }
                 Act::Fatal(msg) => {
-                    eprintln!("synaps-avatar: {msg}");
+                    elog!("synaps-avatar: {msg}");
                     self.fatal = true;
                     self.quit_requested = true;
                     Ok(())
                 }
             };
             if let Err(e) = r {
-                eprintln!("synaps-avatar: {e}");
+                elog!("synaps-avatar: {e}");
             }
         }
     }
@@ -2493,7 +2546,7 @@ impl Avatar {
                     }
                 }
                 Once::Restore(t) => {
-                    eprintln!("synaps-avatar: input not accepted; kept as a draft");
+                    elog!("synaps-avatar: input not accepted; kept as a draft");
                     match &mut self.input {
                         Some(i) if i.secret.is_none() && i.text.is_empty() => i.text = t,
                         _ => self.draft = t,
@@ -2560,7 +2613,7 @@ impl Avatar {
             && !b.reply.is_empty()
         {
             *got = true;
-            eprintln!("timing: first reply text from the daemon {} ms after Enter", t0.elapsed().as_millis());
+            elog!("timing: first reply text from the daemon {} ms after Enter", t0.elapsed().as_millis());
         }
         let annoyed = b.mood == Mood::Annoyed;
         let Some(bb) = self.bubble.as_mut().filter(|x| x.stream) else { return };
@@ -2606,7 +2659,7 @@ impl Avatar {
             }
         }
         if let Err(e) = self.x11.take_focus() {
-            eprintln!("synaps-avatar: cannot take the keyboard: {e:#}");
+            elog!("synaps-avatar: cannot take the keyboard: {e:#}");
         }
         window.focus(&self.focus, cx);
         cx.notify();
@@ -2797,6 +2850,7 @@ impl Avatar {
         let hop = self.hop.and_then(|t| fx::hop(now.saturating_duration_since(t), 16.0 * self.layout.sf)).unwrap_or(0);
         let pos = (self.origin.0, self.origin.1 - hop + self.drop_in_offset(now) + self.float_bob(now));
         if pos != self.applied {
+            self.moves += 1;
             self.x11.move_to(pos.0, pos.1).ok();
             self.applied = pos;
         }
@@ -2972,7 +3026,7 @@ impl Avatar {
         if self.teleport.is_some() || self.rag.is_some() {
             return;
         }
-        eprintln!("synaps-avatar: falls in place (why={why}) at {} ms", self.t_start.elapsed().as_millis());
+        elog!("synaps-avatar: falls in place (why={why}) at {} ms", self.t_start.elapsed().as_millis());
         if let Some(h) = &mut self.brain {
             let t = h.bnow(now);
             h.brain.note_external(t, why);
@@ -3002,7 +3056,7 @@ impl Avatar {
             edges::GoneVerdict::Wait => false,
             edges::GoneVerdict::Stay => {
                 self.perch_gone = None;
-                eprintln!("synaps-avatar: perch 0x{:x} came back: stays", g.win);
+                elog!("synaps-avatar: perch 0x{:x} came back: stays", g.win);
                 false
             }
             edges::GoneVerdict::Fall => {
@@ -3019,7 +3073,7 @@ impl Avatar {
     fn watch(&mut self, ev: WatchEvent, now: Instant) {
         match ev {
             WatchEvent::Compositor(c) => {
-                eprintln!("synaps-avatar: compositor {}", if c { "appeared" } else { "went away" });
+                elog!("synaps-avatar: compositor {}", if c { "appeared" } else { "went away" });
                 self.last_shape.borrow_mut().0.clear();
             }
             WatchEvent::TargetMoved(r) => {
@@ -3056,7 +3110,7 @@ impl Avatar {
             WatchEvent::TargetGone(id) => {
                 // Not at once: a workspace flicked back within the grace keeps her put.
                 if matches!(self.placement, Placement::Perch { win, .. } if win == id) && self.perch_gone.is_none() {
-                    eprintln!("synaps-avatar: perch 0x{id:x} unmapped at {} ms: falls in 300 ms unless it comes back", self.t_start.elapsed().as_millis());
+                    elog!("synaps-avatar: perch 0x{id:x} unmapped at {} ms: falls in 300 ms unless it comes back", self.t_start.elapsed().as_millis());
                     self.perch_gone = Some(edges::PerchGone { win: id, since: now });
                 }
             }
@@ -3126,7 +3180,7 @@ impl Avatar {
         let Some(head) = self.hit(ev.position) else { return };
         // Tests drive her with synthetic taps only: a real press in a recording means a person
         // touched her (the clip is thrown away).
-        eprintln!("synaps-avatar: real pointer press ({:?}, {})", ev.button, if head { "head" } else { "body" });
+        elog!("synaps-avatar: real pointer press ({:?}, {})", ev.button, if head { "head" } else { "body" });
         // A real press beats a scripted drag: the script is dropped, the press goes on.
         if self.rag.as_ref().is_some_and(|r| matches!(r.feed, ragview::Feed::Script { .. })) {
             self.rag_cancel(Instant::now());
@@ -3135,12 +3189,16 @@ impl Avatar {
             MouseButton::Left => {
                 let root = self.x11.pointer().unwrap_or((0, 0));
                 // Caught mid-flight: held again at once.
-                let caught = self.rag_catch(self.local(ev.position), Instant::now());
+                let now = Instant::now();
+                let caught = self.rag_catch(self.local(ev.position), now);
                 self.press = Some(Press { root, origin: self.origin, head, dragging: caught });
-                if caught {
-                    cx.notify();
-                    self.schedule(cx);
+                if !caught && self.rag.is_none() && self.teleport.is_none() {
+                    // Felt at once: she gives under the press (it went unanswered until the
+                    // release or 5 px of drag).
+                    self.squash = Some(now);
                 }
+                cx.notify();
+                self.schedule(cx);
             }
             MouseButton::Right => {
                 self.brain_touch(crate::brain::Touch::Menu);
@@ -3156,19 +3214,31 @@ impl Avatar {
         if ev.pressed_button != Some(MouseButton::Left) {
             return;
         }
+        if ragview::follow_log() {
+            elog!("motion {:.6} pressed {:?} press {}", ragview::mono_s(), ev.pressed_button, self.press.is_some());
+        }
         let Some(p) = &mut self.press else { return };
-        let Ok(root) = self.x11.pointer() else { return };
-        let (dx, dy) = (root.0 - p.root.0, root.1 - p.root.1);
-        if !p.dragging && dx * dx + dy * dy < 25 {
+        if p.dragging {
+            // Held: the window follows the pointer now (capped at the monitor's refresh), the
+            // bands bend at the rag tick. No render here (each `notify` was a full repaint
+            // and present per motion event) and no X round trip per event.
+            self.rag_follow(Instant::now(), true);
+            self.schedule(cx);
             return;
         }
-        if !p.dragging {
-            p.dragging = true;
-            // The press point on her, avatar-local (where the pointer went down).
-            let local = (p.root.0 - p.origin.0 - self.layout.avatar_x, p.root.1 - p.origin.1 - self.layout.avatar_y);
-            self.rag_grab(local, ragview::Feed::Real, Instant::now());
+        // Before the drag starts the window hasn't moved since the press: the event's
+        // position is exact.
+        let sf = self.layout.sf;
+        let root = (self.applied.0 + (f32::from(ev.position.x) * sf) as i32, self.applied.1 + (f32::from(ev.position.y) * sf) as i32);
+        let (dx, dy) = (root.0 - p.root.0, root.1 - p.root.1);
+        if dx * dx + dy * dy < 25 {
+            return;
         }
-        // The rag samples the pointer once per tick; motion only wakes it.
+        p.dragging = true;
+        // The press point on her, avatar-local (where the pointer went down).
+        let local = (p.root.0 - p.origin.0 - self.layout.avatar_x, p.root.1 - p.origin.1 - self.layout.avatar_y);
+        self.squash = None;
+        self.rag_grab(local, ragview::Feed::Real, Instant::now());
         cx.notify();
         self.schedule(cx);
     }
@@ -3244,7 +3314,10 @@ impl Avatar {
         if !seq.is_empty() {
             self.anim.play(seq, now);
         }
-        self.squash = Some(now);
+        // A press already started it (mouse_down): a click keeps that one going.
+        if self.squash.is_none_or(|t| now.saturating_duration_since(t) > Duration::from_millis(400)) {
+            self.squash = Some(now);
+        }
         let hold = if self.hearts.is_some() { len.max(HEARTS_MS) } else { len.max(600) };
         self.reaction_until = Some(now + Duration::from_millis(hold));
         if self.next_activity.is_some() {
@@ -3559,7 +3632,11 @@ const HEARTS: [(f32, f32, f32, u32); 4] = [
 
 impl Render for Avatar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.renders += 1;
         let now = Instant::now();
+        // This frame draws the current pose: a pending step rode on it.
+        self.pose_last = self.pose_at(now);
+        self.pose_wait = None;
         let l = self.layout;
         let sf = l.sf;
         let pal = Palette {
@@ -3574,7 +3651,7 @@ impl Render for Avatar {
         if let Some(Some((t0, true))) = self.timing
             && self.bubble.as_ref().is_some_and(|b| b.stream && b.shown > 0 && !b.collapsed)
         {
-            eprintln!("timing: first word on screen {} ms after Enter", t0.elapsed().as_millis());
+            elog!("timing: first word on screen {} ms after Enter", t0.elapsed().as_millis());
             self.timing = Some(None);
         }
         if let Some(b) = &self.bubble
@@ -4098,11 +4175,14 @@ impl Render for Avatar {
             let (lines, pages, text_w, total_lines, header_label): (Vec<String>, Option<(usize, usize)>, f32, usize, String) = match mode {
                 PanelMode::Reply => {
                     let b = self.bubble.as_ref().expect("reply mode has a bubble");
-                    let lines = b.page_lines();
-                    if lines.is_empty() {
+                    // The reader open: the bubble is a stub (header + CLOSE READER), not a
+                    // second copy of the text.
+                    let lines = if self.reader.is_some() { Vec::new() } else { b.page_lines() };
+                    if lines.is_empty() && self.reader.is_none() {
                         placeholder = Some("…".into());
                     }
                     let label = match &self.echo {
+                        _ if self.reader.is_some() => "IN THE READER".into(),
                         Some(e) => format!("YOU › {}", crate::session::one_line(e, 26)),
                         None => "INCOMING TRANSMISSION".into(),
                     };
@@ -4158,7 +4238,11 @@ impl Render for Avatar {
                 + 32.0;
             let min_w = PANEL_MIN_W.max(header_w).min(max_w);
             let mut w = (text_w + PAD_L + PAD_R + 2.0).clamp(min_w, max_w);
-            if mode == PanelMode::Reply
+            if mode == PanelMode::Reply && self.reader.is_some() {
+                // The stub (reader open): only as wide as its header; the reply's width is kept
+                // for when the reader closes.
+                w = min_w;
+            } else if mode == PanelMode::Reply
                 && let Some(b) = &mut self.bubble
             {
                 // A streaming reply takes the full width at once: no growth mid-stream.
@@ -4167,7 +4251,9 @@ impl Render for Avatar {
             }
             // Fit the page: the lines it will hold once typed out (so it doesn't grow while
             // streaming), never an empty band above the footer.
+            let stub = mode == PanelMode::Reply && self.reader.is_some();
             let rows = match (mode, &self.bubble) {
+                _ if stub => 0,
                 (PanelMode::Reply, Some(b)) => b.rows().max(1),
                 _ => total_lines.clamp(1, LINES_PER_PAGE),
             };
@@ -4365,11 +4451,36 @@ impl Render for Avatar {
                     if busy {
                         row = row.child(abort_btn(cx)).child(div().w(px(4.0)));
                     }
+                    let open = self.reader.is_some();
                     if let Some(b) = self.bubble.as_ref().filter(|b| b.long()) {
-                        let label = format!("▸ READ ({} LINES)", b.read_lines());
-                        let open = self.reader.is_some();
+                        // A filled chip in her name colour, dark bold type: it reads as a
+                        // button on any frame (the outlined 10 px one nearly vanished).
+                        // While the reader is open the bubble is just this, full width: the
+                        // control for the panel beside her, no empty body.
+                        let label = if open { format!("◂ CLOSE READER · {} LINES", b.read_lines()) } else { format!("▸ READ ({} LINES)", b.read_lines()) };
+                        let read_probes = self.buttons.clone();
+                        let (fill_c, ink_c) = (pal.name, pal.surface);
+                        if open {
+                            row = row.left(px(PAD_L));
+                        }
+                        let chip = div()
+                            .when(open, |d| d.flex_1().justify_center())
+                            .child(canvas(move |b, _, _| read_probes.borrow_mut().push(("read", b)), |_, _, _, _| {}).absolute().top_0().left_0().size_full())
+                            .relative()
+                            .id("read")
+                            .h(px(FOOTER_H))
+                            .px(px(11.0))
+                            .flex()
+                            .items_center()
+                            .bg(rgb(fill_c))
+                            .border_1()
+                            .border_color(rgb(pal.name))
+                            .text_size(px(11.5))
+                            .font_weight(FontWeight::EXTRA_BOLD)
+                            .text_color(rgb(ink_c))
+                            .child(tracked(&label, 1.3));
                         row = row
-                            .child(tbtn("read", &label, pal.name, !open).on_mouse_down(
+                            .child(chip.on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(|this, _: &MouseDownEvent, _, cx| {
                                     cx.stop_propagation();
@@ -4382,9 +4493,11 @@ impl Render for Avatar {
                                     this.schedule(cx);
                                 }),
                             ))
-                            .child(div().w(px(4.0)));
+                            .when(!open, |d| d.child(div().w(px(4.0))));
                     }
-                    row = row.child(collapse_btn(cx));
+                    if !open {
+                        row = row.child(collapse_btn(cx));
+                    }
                 }
                 PanelMode::Input { secret } => {
                     let i = self.input.as_ref().expect("input mode has a field");
@@ -4493,7 +4606,7 @@ impl Render for Avatar {
                             window.focus(&this.focus, cx);
                             if this.focus_probe.is_some() {
                                 let fw = this.x11.focused_window().unwrap_or(0);
-                                eprintln!("focus-probe: SetInputFocus err={:?}; X focus now 0x{fw:x} (ours 0x{:x})", r.err(), this.x11.win);
+                                elog!("focus-probe: SetInputFocus err={:?}; X focus now 0x{fw:x} (ours 0x{:x})", r.err(), this.x11.win);
                             }
                             cx.notify();
                         }),
@@ -4503,7 +4616,7 @@ impl Render for Avatar {
                             this.input_key(ev, window, cx);
                             return;
                         }
-                        eprintln!("focus-probe: key down `{}` char {:?}", ev.keystroke.key, ev.keystroke.key_char);
+                        elog!("focus-probe: key down `{}` char {:?}", ev.keystroke.key, ev.keystroke.key_char);
                         if let Some(t) = &mut this.focus_probe {
                             match ev.keystroke.key.as_str() {
                                 "backspace" => {
@@ -4778,7 +4891,7 @@ impl Render for Avatar {
                     }
                     if has_frame && !first.get() {
                         first.set(true);
-                        eprintln!("first-frame: painted {} ms after process start", t_start.elapsed().as_millis());
+                        elog!("first-frame: painted {} ms after process start", t_start.elapsed().as_millis());
                     }
                 },
             )
