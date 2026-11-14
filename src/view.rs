@@ -1067,7 +1067,8 @@ impl Avatar {
     /// Turn to face `right`. `snap`: at once (a drag, a departure); else the turn's squeeze
     /// (`[mirror] turn_ms`), where the art swaps halfway.
     pub(super) fn face(&mut self, right: bool, why: &'static str, now: Instant, snap: bool) {
-        if self.facing_right() == right {
+        // In the air or landing she keeps the way she was flung (and her chain its grip).
+        if self.facing_right() == right || (self.rag.is_some() && !self.rag_held()) {
             return;
         }
         let to = right != self.art_right;
@@ -1852,6 +1853,21 @@ impl Avatar {
         }
         if was_sitting != self.sitting() || self.brain.is_some() {
             self.relayer(now);
+        }
+        // Set down somewhere (not by a brain move: its landing knows what she came for):
+        // near a monitor's edge she faces into the screen; perched, the window's middle.
+        if self.mirror_cfg.own && self.loaded && !self.brain_in_flight() {
+            let l = self.layout;
+            let (x, y) = (to.0 + l.ground_x, to.1 + l.ground_y);
+            let dead = (crate::facing::DEAD_PX * l.sf) as i32;
+            let m = self.x11.monitor_at(x, y - 1);
+            let face = crate::facing::inward(x, m.x, m.w).or_else(|| match place {
+                Placement::Perch { win, .. } => self.x11.toplevel_rect(win).and_then(|r| crate::facing::toward(x, r.x + r.w / 2, dead)),
+                _ => None,
+            });
+            if let Some(r) = face {
+                self.face(r, "arrive", now, false);
+            }
         }
     }
 
@@ -2992,6 +3008,13 @@ impl Avatar {
     }
 
     fn start_teleport(&mut self, to: (i32, i32), place: Placement, now: Instant) {
+        // She looks the way she is about to go.
+        if self.mirror_cfg.own && self.loaded {
+            let dead = (crate::facing::DEAD_PX * self.layout.sf) as i32;
+            if let Some(r) = crate::facing::toward(self.origin.0, to.0, dead) {
+                self.face(r, "travel", now, true);
+            }
+        }
         self.x11.set_target(0);
         self.menu = None;
         self.hop = None;

@@ -114,8 +114,8 @@ pub(super) struct InFlight {
     active: bool,
     /// A summon for a pending prompt: she lands loud (a hop, a point at his window).
     summon_prompt: bool,
-    /// Which way she faces once there (`[mirror] self`): his pointer on a bid or summon,
-    /// a window's middle from its edge, into the screen near a monitor's edge.
+    /// Which way she faces once there (`[mirror] self`): his pointer on a bid or summon;
+    /// else into the screen near a monitor's edge, a window's middle from its edge.
     face: Option<bool>,
 }
 
@@ -416,6 +416,11 @@ impl Avatar {
             return None;
         }
         self.x11.toplevel_rect(top)
+    }
+
+    /// A brain move is under way (its landing decides which way she faces).
+    pub(super) fn brain_in_flight(&self) -> bool {
+        self.brain.as_ref().is_some_and(|h| h.flight.is_some())
     }
 
     pub(super) fn brain_cursor(&self) -> (i32, i32) {
@@ -912,12 +917,11 @@ impl Avatar {
         } else if active {
             crate::facing::toward(ax, cursor.0, dead).or_else(|| focused.and_then(|f| crate::facing::toward(ax, mid(&f), dead)))
         } else {
-            match spot.kind {
+            monitors.iter().find(|m| m.x <= ax && ax < m.x + m.w).and_then(|m| crate::facing::inward(ax, m.x, m.w)).or_else(|| match spot.kind {
                 SpotKind::Edge { win } | SpotKind::SitEdge { win } => stack.iter().find(|r| r.id == win).and_then(|r| crate::facing::toward(ax, mid(r), dead)),
                 SpotKind::Beside | SpotKind::FloatBeside => focused.and_then(|f| crate::facing::toward(ax, mid(&f), dead)),
                 _ => None,
-            }
-            .or_else(|| monitors.iter().find(|m| m.x <= ax && ax < m.x + m.w).and_then(|m| crate::facing::inward(ax, m.x, m.w)))
+            })
         };
         if let Some(r) = travel {
             self.face(r, "travel", now, true);
@@ -1309,6 +1313,11 @@ impl Avatar {
         let own = self.mirror_cfg.own;
         let Some(h) = &mut self.brain else { return false };
         let b = h.bnow(now);
+        if !own || !h.brain.enabled() {
+            // No wake-ups for it while off; scheduled again once she's on.
+            h.look_b = None;
+            return false;
+        }
         let Some(at) = h.look_b else {
             let u = h.look_rng.range(0.0, 1.0);
             h.look_b = Some(b + crate::facing::look_gap(every, u));
@@ -1318,9 +1327,7 @@ impl Avatar {
             return false;
         }
         let since = self.last_turn.map_or(f64::MAX, |t| b - h.bnow(t));
-        let busy = !own
-            || !h.brain.enabled()
-            || h.moving()
+        let busy = h.moving()
             || h.flight.is_some()
             || since < crate::facing::LOOK_QUIET_S
             || !self.loaded
