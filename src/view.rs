@@ -478,6 +478,15 @@ pub struct Avatar {
     reader: Option<(WindowHandle<crate::reader::Reader>, u32, Option<u32>)>,
     /// The perch window unmapped; she falls if it isn't back within the grace.
     perch_gone: Option<edges::PerchGone>,
+    /// HIDE from her menu: vanishing (false) or hidden (true); the process keeps running.
+    parked: Option<bool>,
+    /// The restore chip's window while she is hidden, and where (device px).
+    chip: Option<WindowHandle<crate::chip::Chip>>,
+    chip_rect: Option<(i32, i32, i32, i32, u32)>,
+    /// Restore asked for where there was no window context (a session summon).
+    unpark_req: Option<&'static str>,
+    /// QUIT in the menu was clicked once: a second click before this exits.
+    quit_armed: Option<Instant>,
     /// The wheel's fractional lines over the bubble.
     wheel: Cell<f32>,
     /// The speech panel as last laid out (window logical px): the reader keeps clear of it.
@@ -610,6 +619,11 @@ impl Avatar {
             buttons: Rc::default(),
             reader: None,
             perch_gone: None,
+            parked: None,
+            chip: None,
+            chip_rect: None,
+            unpark_req: None,
+            quit_armed: None,
             wheel: Cell::new(0.0),
             panel_rect: Cell::new(None),
             brain: None,
@@ -880,6 +894,13 @@ impl Avatar {
         if first {
             // Materialise with a glitch, like Capri coming online.
             self.glitch = Some(Glitch::new(GlitchKind::Appear, now, self.rng.next()));
+        }
+        if complete && !self.loaded && state::load_hidden() {
+            // Hidden last time (HIDE): stay hidden, the chip shows where she is.
+            self.parked = Some(true);
+            self.hidden = true;
+            self.glitch = None;
+            self.open_chip(cx);
         }
         if complete && !self.loaded {
             self.loaded = true;
@@ -1187,6 +1208,10 @@ impl Avatar {
         }
         take(self.reaction_until);
         take(self.perch_gone.map(|g| g.due()));
+        take(self.quit_armed);
+        if self.unpark_req.is_some() {
+            take(Some(now));
+        }
         take(self.hud_after.filter(|&t| t > now));
         take(self.menu.map(|m| m.1));
         if let Some(s) = &self.session {
@@ -1357,7 +1382,14 @@ impl Avatar {
         }
         if self.quit_requested && !self.quitting {
             self.quit_requested = false;
-            self.hide(now);
+            self.vanish_quit(now);
+            dirty = true;
+        }
+        if let Some(why) = self.unpark_req.take() {
+            dirty |= self.unpark(why, now, cx);
+        }
+        if self.quit_armed.is_some_and(|t| now >= t) {
+            self.quit_armed = None;
             dirty = true;
         }
         if let Some(acts) = self.session.as_mut().map(|s| s.link.tick(now)) {
@@ -1475,6 +1507,10 @@ impl Avatar {
     fn glitch_done(&mut self, now: Instant, cx: &mut Context<Self>) {
         if self.quitting {
             self.quit(cx);
+            return;
+        }
+        if self.parked == Some(false) {
+            self.parked_done(cx);
             return;
         }
         let Some((leg, to)) = self.teleport.as_ref().map(|t| (t.leg, t.to)) else { return };
@@ -1687,8 +1723,11 @@ impl Avatar {
                 self.state_json(reader)
             }
             Command::Hide => {
-                self.hide(now);
-                "bye".into()
+                self.park(now);
+                "ok hidden".into()
+            }
+            Command::Show => {
+                if self.unpark("show", now, cx) { "ok shown".into() } else { "ok (not hidden)".into() }
             }
             Command::Quit => {
                 self.quit(cx);
@@ -2011,12 +2050,125 @@ impl Avatar {
         true
     }
 
-    fn hide(&mut self, now: Instant) {
+    /// The end: vanish, then exit (QUIT, `quit_requested`).
+    fn vanish_quit(&mut self, now: Instant) {
         self.brain_save(now, true);
         self.menu = None;
         self.bubble = None;
         self.quitting = true;
         self.glitch = Some(Glitch::new(GlitchKind::Vanish, now, self.rng.next()));
+    }
+
+    /// HIDE: she glitches out and stays out (the process keeps running); a chip at the edge
+    /// of her monitor brings her back, as do a session summon and `show`.
+    fn park(&mut self, now: Instant) {
+        if self.parked.is_some() || self.quitting {
+            return;
+        }
+        self.brain_save(now, true);
+        self.menu = None;
+        self.quit_armed = None;
+        if let Some(b) = &mut self.bubble {
+            b.collapsed = true;
+        }
+        if self.input.is_some() {
+            self.close_input(true);
+        }
+        self.parked = Some(false);
+        state::save_hidden(true);
+        eprintln!("synaps-avatar: hidden (HIDE); the chip brings her back");
+        if self.hidden {
+            // Already out of sight (a fullscreen hide): parked at once.
+            self.parked = Some(true);
+            self.unpark_req = None;
+        } else {
+            self.glitch = Some(Glitch::new(GlitchKind::Vanish, now, self.rng.next()));
+        }
+    }
+
+    /// The vanish is over: hidden, and the chip up.
+    fn parked_done(&mut self, cx: &mut Context<Self>) {
+        self.parked = Some(true);
+        self.hidden = true;
+        self.fx_hide_all();
+        self.open_chip(cx);
+    }
+
+    /// Back from HIDE with the appear glitch where she was. False: she wasn't hidden.
+    fn unpark(&mut self, why: &str, now: Instant, cx: &mut Context<Self>) -> bool {
+        if self.parked.is_none() {
+            return false;
+        }
+        self.parked = None;
+        self.unpark_req = None;
+        state::save_hidden(false);
+        if let Some(h) = self.chip.take() {
+            h.update(cx, |_, window, _| window.remove_window()).ok();
+        }
+        self.chip_rect = None;
+        eprintln!("synaps-avatar: shown again ({why})");
+        let fs_hidden = self.brain.as_ref().is_some_and(|h| h.fs != brainview::FsHide::Shown);
+        if !fs_hidden {
+            self.hidden = false;
+            self.glitch = Some(Glitch::new(GlitchKind::Appear, now, self.rng.next()));
+        }
+        cx.notify();
+        self.schedule(cx);
+        true
+    }
+
+    /// The restore chip: her name and a dot at the bottom corner of her monitor's work
+    /// area (the side nearer her), on top, never taking the keyboard.
+    fn open_chip(&mut self, cx: &mut Context<Self>) {
+        if self.chip.is_some() {
+            return;
+        }
+        let l = self.layout;
+        let sf = l.sf;
+        let (gx, gy) = self.ground();
+        let m = self.x11.monitor_at(gx, gy.saturating_sub(10));
+        let area = self.her_area().unwrap_or(WinRect { id: 0, x: m.x, y: m.y, w: m.w, h: m.h });
+        let (cw, ch) = ((crate::chip::SIZE.0 * sf) as i32, (crate::chip::SIZE.1 * sf) as i32);
+        let pad = (14.0 * sf) as i32;
+        let right = gx >= area.x + area.w / 2;
+        let x = if right { area.right() - cw - pad } else { area.x + pad };
+        let y = area.bottom() - ch - pad;
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(Bounds::new(point(px(x as f32 / sf), px(y as f32 / sf)), size(px(crate::chip::SIZE.0), px(crate::chip::SIZE.1))))),
+            titlebar: Some(TitlebarOptions { title: Some("synaps-avatar chip".into()), ..Default::default() }),
+            focus: false,
+            show: true,
+            kind: WindowKind::PopUp,
+            is_movable: false,
+            is_resizable: false,
+            is_minimizable: false,
+            window_background: WindowBackgroundAppearance::Opaque,
+            app_id: Some("synaps-avatar".into()),
+            ..Default::default()
+        };
+        let me = cx.entity().downgrade();
+        let (name, font, pal) = (self.name.clone(), self.font.clone(), self.reader_pal());
+        let xid = Rc::new(Cell::new(0u32));
+        let xid2 = xid.clone();
+        match cx.open_window(options, move |window, cx| {
+            if let Ok(RawWindowHandle::Xcb(h)) = HasWindowHandle::window_handle(&*window).map(|h| h.as_raw()) {
+                xid2.set(h.window.get());
+            }
+            let on_click: crate::chip::OnClick = Box::new(move |cx: &mut App| {
+                me.update(cx, |a, cx| {
+                    a.unpark("chip", Instant::now(), cx);
+                })
+                .ok();
+            });
+            cx.new(|_| crate::chip::Chip::new(name, font, pal, on_click))
+        }) {
+            Ok(h) => {
+                self.chip = Some(h);
+                self.chip_rect = Some((x, y, cw, ch, xid.get()));
+                eprintln!("synaps-avatar: restore chip at {x},{y} {cw}x{ch}");
+            }
+            Err(e) => eprintln!("synaps-avatar: restore chip: {e:#}"),
+        }
     }
 
     fn quit(&mut self, cx: &mut Context<Self>) {
@@ -2099,6 +2251,8 @@ impl Avatar {
             "bubble": self.bubble.as_ref().map(|b| b.text.iter().collect::<String>()),
             "page": [page, pages],
             "read": self.bubble.as_ref().is_some_and(|b| b.long()),
+            "hidden_by_user": self.parked.is_some(),
+            "chip": self.chip_rect.map(|r| [r.0 as i64, r.1 as i64, r.2 as i64, r.3 as i64, r.4 as i64]),
             "reader": reader.map(|(xid, (scroll, max), buttons)| {
                 let g = self.x11.toplevel_rect(xid).map_or((0, 0, 0, 0), |r| (r.x, r.y, r.w, r.h));
                 let b: serde_json::Map<String, serde_json::Value> = buttons
@@ -2283,6 +2437,10 @@ impl Avatar {
             self.set_mood(b.mood, now);
         }
         let (pp, pm) = (prev.as_ref().and_then(|p| p.prompt.as_ref().map(|x| x.id)), prev.as_ref().map(|p| p.mood));
+        // Hidden (HIDE): a session that needs him brings her back.
+        if self.parked.is_some() && b.prompt.is_some() && pp != b.prompt.as_ref().map(|x| x.id) {
+            self.unpark_req = Some("summon");
+        }
         if pp != b.prompt.as_ref().map(|x| x.id) || pm != Some(b.mood) {
             self.brain_session(pp, b.prompt.as_ref().map(|x| x.id), pm, b.mood);
         }
@@ -2745,7 +2903,7 @@ impl Avatar {
         if self.teleport.is_some() || self.rag.is_some() {
             return;
         }
-        eprintln!("synaps-avatar: falls in place (why={why})");
+        eprintln!("synaps-avatar: falls in place (why={why}) at {} ms", self.t_start.elapsed().as_millis());
         if let Some(h) = &mut self.brain {
             let t = h.bnow(now);
             h.brain.note_external(t, why);
@@ -2829,6 +2987,7 @@ impl Avatar {
             WatchEvent::TargetGone(id) => {
                 // Not at once: a workspace flicked back within the grace keeps her put.
                 if matches!(self.placement, Placement::Perch { win, .. } if win == id) && self.perch_gone.is_none() {
+                    eprintln!("synaps-avatar: perch 0x{id:x} unmapped at {} ms: falls in 300 ms unless it comes back", self.t_start.elapsed().as_millis());
                     self.perch_gone = Some(edges::PerchGone { win: id, since: now });
                 }
             }
@@ -4350,11 +4509,33 @@ impl Render for Avatar {
                     MouseButton::Left,
                     cx.listener(|this, _: &MouseDownEvent, _, cx| {
                         cx.stop_propagation();
-                        this.hide(Instant::now());
+                        this.park(Instant::now());
                         cx.notify();
                         this.schedule(cx);
                     }),
-                ));
+                ))
+                .child(div().h(px(1.0)).mx(px(8.0)).my(px(3.0)).bg(with_alpha(pal.frame, 0.3)))
+                .child(
+                    item(if self.quit_armed.is_some() { "QUIT? CLICK AGAIN" } else { "QUIT" }).id("quit").on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            let now = Instant::now();
+                            if this.quit_armed.is_some_and(|t| now < t) {
+                                this.quit_armed = None;
+                                this.vanish_quit(now);
+                            } else {
+                                // A second click within 2 s exits; the menu stays up that long.
+                                this.quit_armed = Some(now + Duration::from_secs(2));
+                                if let Some(m) = &mut this.menu {
+                                    m.1 = m.1.max(now + Duration::from_secs(3));
+                                }
+                            }
+                            cx.notify();
+                            this.schedule(cx);
+                        }),
+                    ),
+                );
             root = root.child(
                 div()
                     .absolute()

@@ -468,6 +468,9 @@ impl Avatar {
         if self.music.is_some() {
             v.push("music");
         }
+        if self.parked.is_some() {
+            v.push("hidden");
+        }
         if self.press.is_some() || self.rag.is_some() {
             v.push("drag");
         }
@@ -1422,6 +1425,11 @@ impl Avatar {
         let Some(h) = &mut self.brain else { return };
         let t = h.bnow(now) - h.brain.start();
         h.write(serde_json::json!({ "t": t, "k": if hide { "hide" } else { "show" } }));
+        if self.parked.is_some() {
+            // Hidden from her menu: the fullscreen hide only keeps its books.
+            h.fs = if hide { FsHide::Hidden } else { FsHide::Shown };
+            return;
+        }
         if hide {
             if h.fs != FsHide::Shown {
                 return;
@@ -1790,7 +1798,13 @@ impl Avatar {
                 self.brain_feed(BrainEvent::Control(Ctl::Seed(s)), now);
             }
             BrainCmd::Force(f) => self.brain_feed(BrainEvent::Control(Ctl::Force(f)), now),
-            BrainCmd::Event(s) => self.brain_feed(BrainEvent::Session(s), now),
+            BrainCmd::Event(s) => {
+                // A synthetic summon brings her back from HIDE like a real one.
+                if matches!(s, SessionSignal::Prompt(_)) && self.parked.is_some() {
+                    self.unpark_req = Some("summon");
+                }
+                self.brain_feed(BrainEvent::Session(s), now)
+            }
             BrainCmd::Sense(s) => {
                 if let Some(h) = &mut self.brain {
                     let b = h.bnow(now);

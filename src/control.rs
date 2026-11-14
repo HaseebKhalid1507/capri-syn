@@ -46,6 +46,8 @@ pub enum Command {
     Glitch,
     /// Bubble paging: +1 / -1.
     Page(i32),
+    /// Back from HIDE (the restore chip's click).
+    Show,
     /// Scroll the bubble by n lines (the wheel's path).
     Scroll(i32),
     /// The reader panel.
@@ -364,9 +366,10 @@ impl Command {
                 _ => bail!("usage: tap head|body"),
             },
             "hide" => Command::Hide,
+            "show" => Command::Show,
             "quit" => Command::Quit,
             _ => bail!(
-                "unknown command `{line}` (mood <name> | clip <id> | say <text> | pos <x> <y> [now] | perch [sit|stand] [win] | perch off | drop | stack | page next|prev | scroll <n> | reader open [focus]|close|copy [n]|scroll <px> | collapse | expand | music on|off | glitch | submit <text> | abort | prompt confirm|secret [text] | brain … | settings reload | tap head|body | state | hide | quit)"
+                "unknown command `{line}` (mood <name> | clip <id> | say <text> | pos <x> <y> [now] | perch [sit|stand] [win] | perch off | drop | stack | page next|prev | scroll <n> | reader open [focus]|close|copy [n]|scroll <px> | collapse | expand | music on|off | glitch | submit <text> | abort | prompt confirm|secret [text] | brain … | settings reload | tap head|body | state | hide | show | quit)"
             ),
         })
     }

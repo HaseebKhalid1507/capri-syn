@@ -403,6 +403,8 @@ def main():
             for k, v in (("x", g.x if g else 0), ("y", g.y if g else 0), ("w", g.width if g else 0), ("h", g.height if g else 0)):
                 line = line.replace(f"{{pwin{n}.{k}}}", str(v))
             line = line.replace(f"{{pwin{n}}}", hex(w.id) if w else "0")
+        for n in range(len(ovls), 0, -1):
+            line = line.replace(f"{{ovl{n}}}", hex(ovls[n - 1].id))
         return line.replace("{pwin}", hex(pwins[0].id) if pwins and pwins[0] else "0")
     if stage:
         sx, sy, sw, sh = stage[:4]
@@ -637,6 +639,34 @@ def main():
                     continue
                 subprocess.run(["xdotool", "mousemove", str(x), str(y), *btns, "mousemove", "restore"], check=True)
                 print(f"{kind} {rest} at {x},{y}")
+            elif kind == "clickchip":
+                # clickchip  click OUR restore chip (HIDE) by its rect from state, the user idle.
+                c = json.loads(ctl("state")).get("chip")
+                if not c:
+                    print("shoot: no restore chip", file=sys.stderr)
+                    continue
+                x, y = c[0] + c[2] // 2, c[1] + c[3] // 2
+                # Only if the topmost viewable window at that point is the chip (or its frame).
+                top = None
+                for ch_ in reversed(xroot().query_tree().children):
+                    try:
+                        if ch_.get_attributes().map_state != 2:
+                            continue
+                        g = ch_.get_geometry()
+                    except Exception:
+                        continue
+                    if g.x <= x < g.x + g.width and g.y <= y < g.y + g.height:
+                        top = ch_
+                        break
+                kids = [k.id for k in top.query_tree().children] if top else []
+                if not top or (top.id != c[4] and c[4] not in kids):
+                    print(f"shoot: the window at {x},{y} is not our chip ({hex(top.id) if top else None}); click refused", file=sys.stderr)
+                    continue
+                if not wait_user_idle():
+                    print("shoot: user is active; chip click skipped", file=sys.stderr)
+                    continue
+                subprocess.run(["xdotool", "mousemove", str(x), str(y), "click", "1", "mousemove", "restore"], check=True)
+                print(f"clickchip at {x},{y}")
             elif kind == "rkey":
                 # rkey:<keys>  synthetic keys addressed to OUR reader window only (XSendEvent).
                 r = json.loads(ctl("state")).get("reader")
@@ -832,6 +862,23 @@ def main():
                 xdisp().sync()
                 ovls.append(ov)
                 print(f"ovl {hex(ov.id)} at {x},{y} {w}x{h} under the avatar")
+            elif kind in ("ovlunmap", "ovlmap", "ovlflick"):
+                # ovlunmap[:n] / ovlmap[:n]: unmap or map OUR override-redirect test window n
+                # (default the last), the id kept, like a workspace switch does to a frame.
+                # ovlflick:<ms>[:n]: unmap, wait ms, map again (a fast workspace flick).
+                parts = rest.split(":") if rest else []
+                if kind == "ovlflick":
+                    ms, parts = int(parts[0]), parts[1:]
+                ov = ovls[int(parts[0]) - 1] if parts else ovls[-1]
+                if kind in ("ovlunmap", "ovlflick"):
+                    ov.unmap()
+                    xdisp().sync()
+                if kind == "ovlflick":
+                    time.sleep(ms / 1000)
+                if kind in ("ovlmap", "ovlflick"):
+                    ov.map()
+                    xdisp().sync()
+                print(f"{kind} {hex(ov.id)} {rest}")
             elif kind == "ovlclose":
                 for ov in ovls:
                     ov.destroy()

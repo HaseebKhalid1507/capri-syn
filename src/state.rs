@@ -48,6 +48,15 @@ pub fn save_ground(ground: (i32, i32)) {
     merge(&path(), "ground", serde_json::json!([ground.0, ground.1]));
 }
 
+/// Hidden from her menu (HIDE): she stays hidden across restarts until restored.
+pub fn load_hidden() -> bool {
+    read(&path()).get("hidden").and_then(|v| v.as_bool()).unwrap_or(false)
+}
+
+pub fn save_hidden(hidden: bool) {
+    merge(&path(), "hidden", serde_json::json!(hidden));
+}
+
 /// The brain's drives (brain.rs `Saved`).
 pub fn load_brain() -> Option<serde_json::Value> {
     read(&path()).get("brain").cloned()
