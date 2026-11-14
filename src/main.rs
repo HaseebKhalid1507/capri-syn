@@ -277,6 +277,16 @@ fn vendor_icds(vendor: &str) -> Option<String> {
     (!files.is_empty()).then(|| files.join(":"))
 }
 
+/// `SA_COMPOSITED=1` (alpha) or `0` (the X shape) forces the mode over settings.toml;
+/// `auto` or unset: None (the settings key decides, then the compositor).
+pub fn env_composited() -> Option<Option<bool>> {
+    match std::env::var("SA_COMPOSITED").ok()?.trim() {
+        "1" | "on" | "true" => Some(Some(true)),
+        "0" | "off" | "false" => Some(Some(false)),
+        _ => None,
+    }
+}
+
 /// Whether the Vulkan loader will find at least one driver manifest.
 fn has_vulkan_driver() -> bool {
     let mut dirs: Vec<std::path::PathBuf> = Vec::new();
@@ -399,6 +409,7 @@ fn run(t_start: Instant) -> Result<()> {
             };
             x11.win = win;
             let x11 = Arc::new(x11);
+            x11.force_composited(env_composited().unwrap_or_else(|| settings::Settings::load().ok().and_then(|s| s.display.composited)));
             // Nothing clickable until the first frame is decoded. Keep one pixel visible:
             // an empty bounding shape makes X report the window fully obscured, and GPUI
             // stops drawing a window it thinks is hidden.

@@ -1836,6 +1836,10 @@ impl Avatar {
         match Settings::load() {
             Ok(s) => {
                 self.rag_strength = crate::ragdoll::Strength(s.ragdoll.strength);
+                if crate::env_composited().is_none() && self.x11.force_composited(s.display.composited) {
+                    elog!("synaps-avatar: settings: {} mode", if self.x11.composited() { "alpha" } else { "shape" });
+                    self.alpha_switched();
+                }
                 // Her own session's persona, compared (and set) again if it changed.
                 if let Some(sl) = &mut self.session {
                     let model = sl.link.cli_model();
@@ -1862,7 +1866,13 @@ impl Avatar {
                     self.brain_feed(BrainEvent::Control(if s.brain.enabled { Ctl::On } else { Ctl::Off }), now);
                 }
                 self.brain_run(now, true);
-                format!("ok attention={} fullscreen={:?} ragdoll.strength={}", s.brain.attention.key(), s.brain.fullscreen, s.ragdoll.strength)
+                format!(
+                    "ok attention={} fullscreen={:?} ragdoll.strength={} composited={}",
+                    s.brain.attention.key(),
+                    s.brain.fullscreen,
+                    s.ragdoll.strength,
+                    self.x11.composited()
+                )
             }
             Err(e) => format!("error: {e:#} (kept the old settings)"),
         }
