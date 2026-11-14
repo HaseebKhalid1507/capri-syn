@@ -4951,7 +4951,8 @@ impl Render for Avatar {
                             cx.listener(|this, _: &MouseDownEvent, _, cx| {
                                 cx.stop_propagation();
                                 if this.session.is_some() {
-                                    this.open_line(cx);
+                                    let r = this.open_line(cx);
+                                    elog!("synaps-avatar: REVIEW clicked: {r}");
                                 }
                             }),
                         ));
