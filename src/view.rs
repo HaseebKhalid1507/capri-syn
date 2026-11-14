@@ -2435,9 +2435,7 @@ impl Avatar {
         self.brain_save(now, true);
         self.menu = None;
         self.quit_armed = None;
-        if let Some(b) = &mut self.bubble {
-            b.collapsed = true;
-        }
+        self.fold_reply();
         if self.input.is_some() {
             self.close_input(true);
         }
@@ -3130,9 +3128,7 @@ impl Avatar {
         self.x11.set_target(0);
         self.menu = None;
         self.hop = None;
-        if let Some(b) = &mut self.bubble {
-            b.collapsed = true;
-        }
+        self.fold_reply();
         let seed = self.rng.next();
         self.glitch = Some(Glitch::new(GlitchKind::Vanish, now, seed));
         self.teleport = Some(Teleport { seed, leg: Leg::Vanish, to, place, bolt: None, moved: false, no_bolt: false, quiet: false });

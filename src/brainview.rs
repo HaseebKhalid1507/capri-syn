@@ -1531,9 +1531,7 @@ impl Avatar {
             }
             h.fs = FsHide::Hiding;
             self.menu = None;
-            if let Some(b) = &mut self.bubble {
-                b.collapsed = true;
-            }
+            self.fold_reply();
             self.glitch = Some(Glitch::new(GlitchKind::Vanish, now, self.rng.next()));
         } else {
             if h.fs == FsHide::Shown {

@@ -419,6 +419,19 @@ impl Avatar {
         self.seen_turn = self.session.as_ref().and_then(|s| s.shown.as_ref()).map_or(self.seen_turn, |b| b.turn);
     }
 
+    /// The bubble goes behind the chip before its hold ran out (she teleports, hides): a
+    /// reply he hasn't seen leaves the strip as if it had.
+    pub(super) fn fold_reply(&mut self) {
+        let Some(b) = &mut self.bubble else { return };
+        let was_open = !b.collapsed;
+        b.collapsed = true;
+        if was_open && b.stream && !b.text.is_empty() {
+            b.hide_at = None;
+            let text = b.text.clone();
+            self.reply_missed(&text);
+        }
+    }
+
     /// The bubble's hold ran out: if he never saw this reply, it leaves a strip.
     pub(super) fn reply_missed(&mut self, text: &[char]) {
         let turn = self.session.as_ref().and_then(|s| s.shown.as_ref()).map_or(0, |b| b.turn);

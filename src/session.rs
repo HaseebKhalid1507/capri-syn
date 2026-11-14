@@ -602,7 +602,9 @@ impl Link {
                 parts.reverse();
                 let raw = parts.join("\n\n");
                 // A switch keeps what was streamed if the snapshot says the same.
-                if !(switch && clean(&raw) == clean(&self.raw)) {
+                // (A turn with no user message reads back with the replies before it.)
+                let same = |a: &str, b: &str| a == b || (!b.is_empty() && a.ends_with(b));
+                if !(switch && same(&clean(&raw), &clean(&self.raw))) {
                     self.turn += 1;
                     self.raw = raw;
                 }
