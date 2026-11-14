@@ -266,6 +266,8 @@ impl Avatar {
             prompts: b.map(|b| b.prompts.clone()).unwrap_or_default(),
             speaking: self.voice_speaking(),
             listening: self.voice_listening(),
+            mic: self.voice_mic_row(),
+            caption: self.voice_caption_now(),
         }
     }
 

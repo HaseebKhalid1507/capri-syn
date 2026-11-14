@@ -58,6 +58,10 @@ pub struct Snap {
     pub speaking: bool,
     /// The mic is held open (Esc cancels: nothing sent).
     pub listening: bool,
+    /// The mic row while he holds the key (`● MIC 0:02 ▮▮▯▯▯`), or what follows key-up.
+    pub mic: Option<String>,
+    /// The sentence she is saying now (the caption, paced by her voice).
+    pub caption: Option<String>,
 }
 
 /// The kit's components (the Line's text field), its dark theme and caret policy: set up
@@ -1163,8 +1167,42 @@ impl Render for Line {
                     ),
             )
         });
+        // Voice: the mic row while he holds the key; the caption while she speaks.
+        let voice_row = self.snap.mic.clone().map(|m| {
+            div()
+                .mx(px(PAD))
+                .mt(px(6.0))
+                .px(px(10.0))
+                .py(px(7.0))
+                .border_2()
+                .border_color(rgb(0xff3b62))
+                .bg(rgba(0xff3b6222))
+                .flex()
+                .gap(px(14.0))
+                .text_size(px(14.0))
+                .font_weight(FontWeight::BOLD)
+                .child(div().text_color(rgb(0xff3b62)).child(m))
+                .child(div().text_color(rgb(pal.text)).child("listening · release to send · esc to cancel"))
+        });
+        let caption = self.snap.caption.clone().map(|c| {
+            div()
+                .mx(px(PAD))
+                .mt(px(6.0))
+                .px(px(10.0))
+                .py(px(6.0))
+                .border_l_2()
+                .border_color(rgb(0xff6fd8))
+                .bg(rgba(0xff6fd818))
+                .flex()
+                .gap(px(10.0))
+                .text_size(px(FONT))
+                .child(div().flex_none().text_color(rgb(0xff6fd8)).font_weight(FontWeight::BOLD).child("▶"))
+                .child(div().flex_1().text_color(rgb(pal.text)).child(c))
+        });
         let hint = if self.mode == Mode::Prompt {
             None
+        } else if self.snap.caption.is_some() {
+            Some("esc or $mod+c hush · the whole reply is in the thread".into())
         } else if !self.snap.live {
             Some("OFFLINE · not sent while offline · draft is kept".to_string())
         } else if self.snap.busy {
@@ -1196,6 +1234,8 @@ impl Render for Line {
             .children(thread)
             .children(pending)
             .children(prompt)
+            .children(caption)
+            .children(voice_row)
             .children(input)
             .child(footer)
             .child(

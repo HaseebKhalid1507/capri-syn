@@ -40,6 +40,7 @@ pub(super) struct VoiceState {
     turn_done: bool,
     reply: String,
     lips: Option<Lips>,
+    caption: Option<String>,
     held: bool,
     /// A key-up waiting out the auto-repeat window.
     up_at: Option<Instant>,
@@ -352,6 +353,7 @@ impl Avatar {
                 let shapes: Vec<u8> = v.get("shapes").and_then(|x| x.as_array()).map(|a| a.iter().map(|s| s.as_u64().unwrap_or(0) as u8).collect()).unwrap_or_default();
                 self.voice.lips = Some(Lips { t0: now, step, shapes });
                 let text = v.get("text").and_then(|t| t.as_str()).unwrap_or("").to_string();
+                self.voice.caption = Some(text.clone());
                 self.voice_caption(&text, now);
                 self.voice_changed(cx);
             }
@@ -485,10 +487,8 @@ impl Avatar {
 
     /// Lips: the mouth follows the track. True if the frame changed.
     pub(super) fn voice_tick(&mut self, now: Instant) -> bool {
-        let Some(l) = &self.voice.lips else { return false };
-        let k = (now.saturating_duration_since(l.t0).as_millis() / l.step.as_millis().max(1)) as usize;
-        if k > l.shapes.len() + 1 {
-            self.voice.lips = None;
+        if self.voice.lips.is_none() && self.voice.mic.is_none() {
+            return false;
         }
         let before = self.anim.frame();
         if let Some(i) = self.voice_layer() {
@@ -526,6 +526,20 @@ impl Avatar {
             return Some(Status { label: format!("▶ SPEAKING {}", bars(s as f32 / 3.0)), tone: self.pack.tone(Some("speak")), invert: false, glyph: "play".into() });
         }
         None
+    }
+
+    /// The Line's mic row: the tag's label while held, then what follows key-up.
+    pub(super) fn voice_mic_row(&self) -> Option<String> {
+        if self.voice_listening() || self.voice.transcribing {
+            return self.voice_status().map(|s| s.label);
+        }
+        None
+    }
+
+    /// The sentence she is saying now.
+    pub(super) fn voice_caption_now(&self) -> Option<String> {
+        self.voice.lips.as_ref()?;
+        self.voice.caption.clone()
     }
 
     pub(super) fn voice_state_json(&self) -> serde_json::Value {
