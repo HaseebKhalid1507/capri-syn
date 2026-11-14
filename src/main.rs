@@ -4,13 +4,19 @@
 //! session). A dev control socket takes commands for testing and overrides.
 
 mod anim;
+mod brain;
 mod control;
+mod drag;
 mod edges;
 mod frames;
 mod fx;
 mod pack;
+mod places;
+mod moves;
 mod platform;
+mod ragdoll;
 mod session;
+mod settings;
 mod shape;
 mod ticker;
 mod state;

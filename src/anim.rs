@@ -75,6 +75,7 @@ impl Mood {
 pub type Seq = Vec<(usize, u32)>;
 
 /// Small xorshift; jitter and random picks don't need more.
+#[derive(Clone, Debug)]
 pub struct Rng(u64);
 
 impl Rng {

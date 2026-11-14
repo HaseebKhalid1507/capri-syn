@@ -94,6 +94,8 @@ struct Atoms {
     strut: u32,
     wm_type: u32,
     wm_type_dock: u32,
+    wm_state: u32,
+    wm_state_fullscreen: u32,
 }
 
 fn intern(conn: &RustConnection, name: &str) -> Result<u32> {
@@ -129,6 +131,8 @@ impl X11 {
             strut: intern(&conn, "_NET_WM_STRUT")?,
             wm_type: intern(&conn, "_NET_WM_WINDOW_TYPE")?,
             wm_type_dock: intern(&conn, "_NET_WM_WINDOW_TYPE_DOCK")?,
+            wm_state: intern(&conn, "_NET_WM_STATE")?,
+            wm_state_fullscreen: intern(&conn, "_NET_WM_STATE_FULLSCREEN")?,
         };
         let composited = conn.get_selection_owner(atoms.cm)?.reply()?.owner != x11rb::NONE;
         Ok(X11 {
@@ -246,6 +250,22 @@ impl X11 {
     pub fn active_window(&self) -> Option<u32> {
         let r = self.conn.get_property(false, self.root, self.atoms.active_window, xproto::AtomEnum::WINDOW, 0, 1).ok()?.reply().ok()?;
         r.value32()?.next().filter(|&w| w != 0)
+    }
+
+    /// Milliseconds since the last keyboard or mouse input anywhere (MIT-SCREEN-SAVER).
+    pub fn idle_ms(&self) -> Option<u32> {
+        use x11rb::protocol::screensaver::ConnectionExt as _;
+        Some(self.conn.screensaver_query_info(self.root).ok()?.reply().ok()?.ms_since_user_input)
+    }
+
+    /// `w` (a client) asks for fullscreen (`_NET_WM_STATE_FULLSCREEN`).
+    pub fn is_fullscreen(&self, w: u32) -> bool {
+        self.conn
+            .get_property(false, w, self.atoms.wm_state, xproto::AtomEnum::ATOM, 0, 16)
+            .ok()
+            .and_then(|c| c.reply().ok())
+            .and_then(|r| r.value32().map(|mut v| v.any(|a| a == self.atoms.wm_state_fullscreen)))
+            .unwrap_or(false)
     }
 
     /// The child of the root that contains `w` (the WM frame for a managed client).

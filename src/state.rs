@@ -48,6 +48,15 @@ pub fn save_ground(ground: (i32, i32)) {
     merge(&path(), "ground", serde_json::json!([ground.0, ground.1]));
 }
 
+/// The brain's drives (brain.rs `Saved`).
+pub fn load_brain() -> Option<serde_json::Value> {
+    read(&path()).get("brain").cloned()
+}
+
+pub fn save_brain(v: serde_json::Value) {
+    merge(&path(), "brain", v);
+}
+
 fn sessions_path() -> PathBuf {
     path().with_file_name("sessions.json")
 }

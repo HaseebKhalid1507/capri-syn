@@ -382,6 +382,35 @@ pub struct Behaviour {
     pub perch: Option<PerchSpec>,
     #[serde(default)]
     pub music: Option<MusicSpec>,
+    #[serde(default)]
+    pub brain: BrainSpec,
+}
+
+/// What the brain plays (BRIEF-brain §6.4, §14.1). Steps may use the clip ids `@look` and
+/// `@point`: the view turns them toward the cursor (`idle-look_left/right/up`, `point_left/right`).
+#[derive(Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct BrainSpec {
+    pub bid: Vec<Vec<Step>>,
+    pub insist: Vec<Vec<Step>>,
+    pub satisfied: SatisfiedSpec,
+    pub sulk: Vec<Step>,
+    pub wave: Vec<Step>,
+    pub floor_sit: Option<MoodSpec>,
+    /// After a sulk she sits down where she landed and stays low: this base and loop.
+    pub sulk_sit: Option<MoodSpec>,
+    pub nap: Option<String>,
+    pub hop_crouch: Option<String>,
+    /// Approach → frame: `hang`, `hang_upside_down`, `cling_left`, `cling_right`, `peek`. A
+    /// missing one gives that approach weight 0.
+    pub poses: BTreeMap<String, String>,
+}
+
+#[derive(Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SatisfiedSpec {
+    pub pat: Vec<Step>,
+    pub other: Vec<Step>,
 }
 
 /// A frame to decode: catalog sprite or sidecar extra.
@@ -429,7 +458,13 @@ impl Pack {
             ("seat", Some(s)) if self.perch_frames.contains(&f.id) => s - f.anchor.y,
             _ => 0,
         };
-        (c.x - f.anchor.x, dy)
+        // Grip anchors (ceiling, dock-left/right) keep their canvas registration: centring a
+        // wall grip at x would push the body off the canvas.
+        let dx = match f.anchor.name.as_str() {
+            "ground" | "seat" => c.x - f.anchor.x,
+            _ => 0,
+        };
+        (dx, dy)
     }
 
     /// Union of every body frame's visible bounds after anchor registration. Every
@@ -617,6 +652,54 @@ impl Pack {
         check_steps("click.annoyed", &pack.behaviour.click.annoyed, &mut errors, &pack);
         for (i, b) in pack.behaviour.click.body.iter().enumerate() {
             check_steps(&format!("click.body #{i}"), b, &mut errors, &pack);
+        }
+        {
+            let b = &pack.behaviour.brain;
+            for (i, s) in b.bid.iter().chain(b.insist.iter()).enumerate() {
+                let s: Vec<Step> = s.iter().filter(|x| !matches!(x, Step::Clip(id) if id.starts_with('@'))).cloned().collect();
+                check_steps(&format!("brain bid/insist #{i}"), &s, &mut errors, &pack);
+            }
+            check_steps("brain.satisfied.pat", &b.satisfied.pat, &mut errors, &pack);
+            check_steps("brain.satisfied.other", &b.satisfied.other, &mut errors, &pack);
+            check_steps("brain.sulk", &b.sulk, &mut errors, &pack);
+            check_steps("brain.wave", &b.wave, &mut errors, &pack);
+            if let Some(fs) = &b.floor_sit {
+                if !pack.index.contains_key(&fs.base) {
+                    errors.push(format!("moods.json brain.floorSit: base `{}` does not resolve", fs.base));
+                }
+                check_steps("brain.floorSit entry", fs.entry.as_deref().unwrap_or(&[]), &mut errors, &pack);
+                check_steps("brain.floorSit exit", fs.exit.as_deref().unwrap_or(&[]), &mut errors, &pack);
+            }
+            if let Some(ss) = &b.sulk_sit
+                && !pack.index.contains_key(&ss.base)
+            {
+                errors.push(format!("moods.json brain.sulkSit: base `{}` does not resolve", ss.base));
+            }
+            for id in b.nap.iter().chain(b.hop_crouch.iter()) {
+                if !pack.index.contains_key(id) {
+                    errors.push(format!("moods.json brain: frame `{id}` does not resolve"));
+                }
+            }
+            for (k, id) in &b.poses {
+                let want = match k.as_str() {
+                    "hang" => "ceiling",
+                    "hang_upside_down" => "ceiling-upside-down",
+                    "cling_left" => "dock-left",
+                    "cling_right" => "dock-right",
+                    "peek" => "ground",
+                    _ => {
+                        errors.push(format!("moods.json brain.poses: unknown approach `{k}`"));
+                        continue;
+                    }
+                };
+                match pack.index.get(id) {
+                    None => errors.push(format!("moods.json brain.poses.{k}: frame `{id}` does not resolve")),
+                    Some(&i) if pack.frames[i].anchor.name != want => {
+                        errors.push(format!("moods.json brain.poses.{k}: frame `{id}` needs a `{want}` anchor"))
+                    }
+                    _ => {}
+                }
+            }
         }
         for f in &pack.behaviour.font_files {
             if !dir.join(f).is_file() {

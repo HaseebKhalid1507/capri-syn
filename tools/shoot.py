@@ -53,6 +53,42 @@ def xroot():
     return xdisp().screen().root
 
 
+def foreign_on_stage(dd, root, st):
+    """True if a mapped top-level window owned by an avatar process that isn't ours (comm
+    != synaps-avatar, e.g. his `capri-bin`) intersects the stage. Read-only."""
+    pid_atom = dd.intern_atom("_NET_WM_PID")
+    sx, sy, sw, sh = st
+    for c in root.query_tree().children:
+        a = c.get_attributes()
+        if a.map_state != 2:
+            continue
+        pids = []
+        for w in [c] + list(c.query_tree().children):
+            p = w.get_full_property(pid_atom, 0)
+            if p and p.value:
+                pids.append(int(p.value[0]))
+        if not any(_foreign_avatar(p) for p in pids):
+            continue
+        g = c.get_geometry()
+        if g.x < sx + sw and g.x + g.width > sx and g.y < sy + sh and g.y + g.height > sy:
+            return True
+    return False
+
+
+_comm_cache = {}
+
+
+def _foreign_avatar(pid):
+    if pid not in _comm_cache:
+        try:
+            comm = open(f"/proc/{pid}/comm").read().strip()
+            exe = os.path.basename(os.readlink(f"/proc/{pid}/exe"))
+        except OSError:
+            comm, exe = "", ""
+        _comm_cache[pid] = comm != "synaps-avatar" and ("capri" in comm or "capri" in exe or "synaps-avatar" in exe)
+    return _comm_cache[pid]
+
+
 def ctl(line, timeout=5):
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.settimeout(timeout)
@@ -283,8 +319,10 @@ def main():
         elif k == "--idle":
             need = int(argv.pop(0))
             t = time.time()
-            ok = wait_user_idle(need, 60)
-            print(f"shoot: user idle {need} ms before start: {'ok' if ok else 'NO (user active)'} after {time.time()-t:.1f}s")
+            ok = wait_user_idle(need, 300)
+            print(f"shoot: user idle {need} ms before start: {'ok' if ok else 'NO (user active): not starting'} after {time.time()-t:.1f}s")
+            if not ok:
+                return 3
         elif k == "--ground":
             ground = argv.pop(0)
         elif k == "--long":
@@ -322,6 +360,27 @@ def main():
     if subprocess.run(["pgrep", "-x", "synaps-avatar"], capture_output=True).returncode == 0:
         print("shoot: an avatar is already running; refusing", file=sys.stderr)
         return 1
+    if stage:
+        # His own Capri on the stage, or his pointer over it: wait (up to SA_CLEAR_WAIT s) for
+        # the stage to be clear for 5 s in a row before starting at all.
+        t = time.time()
+        r = xroot()
+        st4 = tuple(stage[:4])
+        clear_since = None
+        while True:
+            q = r.query_pointer()
+            ptr_in = st4[0] <= q.root_x < st4[0] + st4[2] and st4[1] <= q.root_y < st4[1] + st4[3]
+            busy = ptr_in or foreign_on_stage(xdisp(), r, st4)
+            now_ = time.time()
+            clear_since = None if busy else (clear_since or now_)
+            if clear_since and now_ - clear_since >= 5:
+                break
+            if now_ - t > float(os.environ.get("SA_CLEAR_WAIT", "300")):
+                print(f"shoot: stage not clear (his avatar or pointer on it) for {now_ - t:.0f} s: not starting")
+                return 3
+            time.sleep(0.5)
+        if time.time() - t > 6:
+            print(f"shoot: waited {time.time() - t:.0f} s for the stage to clear")
     tmo = min(tmo, 300 if long_run else 30)
     # The user's own state (her spot, her drives) and settings are never touched by tests.
     import shutil
@@ -336,7 +395,7 @@ def main():
         shutil.copy(settings, f"{test_root}/config/synaps-avatar/settings.toml")
     focus0 = xdisp().get_input_focus().focus
     focus0 = focus0.id if hasattr(focus0, "id") else None
-    staged, pwins = [], []
+    staged, pwins, ovls = [], [], []
     def subst(line):
         for n in range(len(pwins), 0, -1):
             w = pwins[n - 1]
@@ -368,6 +427,48 @@ def main():
                                    *ENC, out])
         time.sleep(0.4)
         print(f"rec-start {out}")
+    # The user's pointer over the stage while we record: the clip may show (or get) his input.
+    watch = {"in_stage": 0, "active": 0, "stop": False, "hidden": 0, "armed": False, "foreign": 0}
+    if stage:
+        import threading
+        def watch_pointer():
+            from Xlib import display as _d
+            dd = _d.Display()
+            r_ = dd.screen().root
+            sx_, sy_, sw_, sh_ = stage[:4]
+            n_ = 0
+            while not watch["stop"]:
+                # His own Capri (any avatar process that isn't ours) on the stage: the clip
+                # shows her. Read-only: geometry and _NET_WM_PID, never touched.
+                n_ += 1
+                if n_ % 5 == 1:
+                    try:
+                        if foreign_on_stage(dd, r_, (sx_, sy_, sw_, sh_)):
+                            watch["foreign"] += 1
+                    except Exception:
+                        pass
+                q_ = r_.query_pointer()
+                if sx_ <= q_.root_x < sx_ + sw_ and sy_ <= q_.root_y < sy_ + sh_:
+                    watch["in_stage"] += 1
+                if r_.screensaver_query_info().idle < 300:
+                    watch["active"] += 1
+                # Every test window still viewable and above the stage (his workspace switch or
+                # a restack would hide it: the clip no longer shows what she reacts to).
+                try:
+                    kids = [c.id for c in r_.query_tree().children]
+                    st_ids = [w.id for w in staged]
+                    top_stage = max((kids.index(i) for i in st_ids if i in kids), default=-1)
+                    for w_ in list(pwins) if watch["armed"] else []:
+                        if w_ is None:
+                            continue
+                        fr = dd.create_resource_object("window", w_.id).query_tree().parent
+                        if fr.get_attributes().map_state != 2 or fr.id not in kids or kids.index(fr.id) < top_stage:
+                            watch["hidden"] += 1
+                            break
+                except Exception:
+                    pass
+                time.sleep(0.2)
+        threading.Thread(target=watch_pointer, daemon=True).start()
     p = subprocess.Popen(["timeout", str(tmo), binp] + extra, stdout=log, stderr=subprocess.STDOUT, env=os.environ)
     st = None
     q = xroot().query_pointer()
@@ -390,6 +491,7 @@ def main():
                     line = line.replace("{floor}", os.environ["SA_FLOOR"])
                 print(f"> {line}: {ctl(line)}")
             elif kind == "pwin":
+                watch["armed"] = False
                 parts = rest.split(":")
                 x, y, w, h = (int(v) for v in parts[:4])
                 pwin = perch_window(x, y, w, h, parts[4] if len(parts) > 4 else "dark")
@@ -420,6 +522,7 @@ def main():
                     print("shoot: WARNING the stage stays above the test window", file=sys.stderr)
                 g = frame.get_geometry()
                 print(f"pwin {hex(pwin.id)} frame at {g.x},{g.y} {g.width}x{g.height}; focus {hex(xdisp().get_input_focus().focus.id)}")
+                watch["armed"] = True
             elif kind == "pmove":
                 x, y, *n = rest.split(":")
                 w_ = pwins[int(n[0]) - 1] if n else [w for w in pwins if w][-1]
@@ -622,8 +725,9 @@ def main():
                       f"({(c1 - c0) / 1e6:.0f} ms); RSS now {rss()} MB, peak {peak} MB; threads {len(os.listdir(f'/proc/{pid}/task'))}; "
                       f"load {open('/proc/loadavg').read().split()[0]}")
             elif kind == "killtunnel":
-                r = subprocess.run(["pkill", "-f", "ssh -N .*synaps-localhost-capri.sock"], capture_output=True)
-                print(f"killtunnel: {'killed' if r.returncode == 0 else 'no tunnel'}")
+                # Disabled: his own Capri may ride that tunnel. Tests never kill anything but
+                # their own `synaps-avatar`.
+                print("killtunnel: disabled (never kill a process we didn't start)")
             elif kind == "tunnel":
                 r = subprocess.run(["pgrep", "-af", "ssh -N .*synaps-localhost-capri.sock"], capture_output=True, text=True)
                 print(f"tunnel: {len(r.stdout.splitlines())} ssh; socket {'up' if os.path.exists(os.environ.get('XDG_RUNTIME_DIR', '/tmp') + '/synaps-localhost-capri.sock') else 'gone'}")
@@ -633,6 +737,42 @@ def main():
                 t = time.time()
                 ok = wait_user_idle(int(ms), float(mx or 12))
                 print(f"waitidle {ms} ms: {'ok' if ok else 'USER ACTIVE'} after {time.time()-t:.1f}s")
+            elif kind == "ovl":
+                # ovl:<x>:<y>:<w>:<h>[:0xRRGGBB]  a plain override-redirect window just under the
+                # avatar (a stand-in for a fullscreen app: i3 never restacks it)
+                from Xlib import X
+                parts = rest.split(":")
+                x, y, w, h = (int(v) for v in parts[:4])
+                col = int(parts[4], 0) if len(parts) > 4 else 0x0b0e14
+                ov = xroot().create_window(x, y, w, h, 0, X.CopyFromParent, X.InputOutput, X.CopyFromParent,
+                                           override_redirect=True, background_pixel=col)
+                ov.map()
+                xid = json.loads(ctl("state"))["xid"]
+                ov.configure(sibling=xid, stack_mode=X.Below)
+                xdisp().sync()
+                ovls.append(ov)
+                print(f"ovl {hex(ov.id)} at {x},{y} {w}x{h} under the avatar")
+            elif kind == "ovlclose":
+                for ov in ovls:
+                    ov.destroy()
+                ovls.clear()
+                xdisp().sync()
+                print("ovl closed")
+            elif kind == "stackcheck":
+                kids = [c.id for c in xroot().query_tree().children]
+                try:
+                    axid = json.loads(ctl("state"))["xid"]
+                    print("avatar", hex(axid), kids.index(axid) if axid in kids else None)
+                except Exception as e:
+                    print("avatar ?", e)
+                for w_ in staged:
+                    print("stage", hex(w_.id), kids.index(w_.id) if w_.id in kids else None)
+                for w_ in pwins:
+                    if w_ is None:
+                        continue
+                    fr = w_.query_tree().parent
+                    print("pwin", hex(w_.id), "frame", hex(fr.id), kids.index(fr.id) if fr.id in kids else None,
+                          "map", fr.get_attributes().map_state, "watch", watch)
             elif kind == "focus":
                 f = xdisp().get_input_focus().focus
                 print("X input focus:", hex(f.id) if hasattr(f, "id") else f)
@@ -657,12 +797,25 @@ def main():
     finally:
         if bg_rec is not None:
             bg_rec.wait(timeout=30)
+        watch["stop"] = True
+        gone = []
+        for n_, w_ in enumerate(pwins, 1):
+            try:
+                if w_ is not None and w_.get_attributes().map_state != 2:
+                    gone.append(n_)
+            except Exception:
+                gone.append(n_)
+        if stage:
+            bad = watch["in_stage"] > 0 or gone or watch["hidden"] > 0 or watch["foreign"] > 0
+            print(f"shoot: {'TAINT' if bad else 'clean'}: user pointer over the stage {watch['in_stage']} samples, "
+                  f"user input {watch['active']} samples (5 Hz), test windows hidden/under the stage {watch['hidden']} samples, "
+                  f"his avatar on the stage {watch['foreign']} samples (1 Hz), unmapped at the end {gone or 'none'}")
         for w_ in pwins:
             if w_ is not None:
                 w_.destroy()
         if pwins:
             xdisp().sync()
-        for w in staged:
+        for w in staged + ovls:
             w.destroy()
         if staged:
             xdisp().sync()

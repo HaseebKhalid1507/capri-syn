@@ -124,6 +124,11 @@ fn face_band(px: &[u8], w: u32, top: i32, height: i32) -> (i32, i32) {
 /// (no speckle from anti-aliased edges) and stays off coloured parts. Drawn into
 /// transparent pixels only: behind the art, never over it. RGBA straight alpha.
 fn add_rim(px: &mut [u8], w: u32, h: u32, from: i32, rgb: u32) {
+    add_rim_rows(px, w, h, from, h as i32, rgb);
+}
+
+/// `add_rim` over rows `from..to` only.
+fn add_rim_rows(px: &mut [u8], w: u32, h: u32, from: i32, to: i32, rgb: u32) {
     let (w, h) = (w as i32, h as i32);
     let at = |x: i32, y: i32| (y * w + x) as usize * 4;
     let inside = |px: &[u8], x: i32, y: i32| x >= 0 && y >= 0 && x < w && y < h && px[at(x, y) + 3] >= HIT_ALPHA;
@@ -135,7 +140,7 @@ fn add_rim(px: &mut [u8], w: u32, h: u32, from: i32, rgb: u32) {
         (px[i] as u32 * 3 + px[i + 1] as u32 * 6 + px[i + 2] as u32) < 10 * 80
     };
     let mut set = Vec::new();
-    for y in from.max(0)..h {
+    for y in from.max(0)..to.min(h) {
         for x in 0..w {
             if inside(px, x, y) {
                 continue;
@@ -287,6 +292,17 @@ fn decode_one(pack: &Pack, f: &FrameSource, geo: &Geometry, verify: bool, resize
     }
     let vb = f.bounds.offset(dx, dy);
     let (_, top) = geo.to_device(0, vb.y);
+    if pack.behaviour.brain.poses.get("hang") == Some(&f.id)
+        && let Some(rim) = pack.behaviour.perch.as_ref().and_then(|p| u32::from_str_radix(p.rim.trim_start_matches('#'), 16).ok())
+    {
+        // The hands over the bar (dark claws on a dark bar): a 2 px light rim from the top
+        // to a little under the grip, so they read as gripping the edge.
+        let (_, grip) = geo.to_device(0, f.anchor.y + dy);
+        let to = (grip + 16.0 * geo.scale).round() as i32;
+        for _ in 0..2 {
+            add_rim_rows(&mut px, geo.width, geo.height, top.round() as i32 - 4, to, rim);
+        }
+    }
     let face = face_band(&px, geo.width, top.round() as i32, (vb.height as f32 * geo.scale) as i32);
 
     let mut mask = Mask::new(geo.width, geo.height);
