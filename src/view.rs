@@ -4138,8 +4138,10 @@ impl Render for Avatar {
             let (lines, pages, text_w, total_lines, header_label): (Vec<String>, Option<(usize, usize)>, f32, usize, String) = match mode {
                 PanelMode::Reply => {
                     let b = self.bubble.as_ref().expect("reply mode has a bubble");
-                    let lines = b.page_lines();
-                    if lines.is_empty() {
+                    // The reader open: the bubble is a stub (header + CLOSE READER), not a
+                    // second copy of the text.
+                    let lines = if self.reader.is_some() { Vec::new() } else { b.page_lines() };
+                    if lines.is_empty() && self.reader.is_none() {
                         placeholder = Some("…".into());
                     }
                     let label = match &self.echo {
@@ -4207,7 +4209,9 @@ impl Render for Avatar {
             }
             // Fit the page: the lines it will hold once typed out (so it doesn't grow while
             // streaming), never an empty band above the footer.
+            let stub = mode == PanelMode::Reply && self.reader.is_some();
             let rows = match (mode, &self.bubble) {
+                _ if stub => 0,
                 (PanelMode::Reply, Some(b)) => b.rows().max(1),
                 _ => total_lines.clamp(1, LINES_PER_PAGE),
             };
@@ -4406,10 +4410,30 @@ impl Render for Avatar {
                         row = row.child(abort_btn(cx)).child(div().w(px(4.0)));
                     }
                     if let Some(b) = self.bubble.as_ref().filter(|b| b.long()) {
-                        let label = format!("▸ READ ({} LINES)", b.read_lines());
                         let open = self.reader.is_some();
+                        // A filled chip in her name colour, dark bold type: it reads as a
+                        // button on any frame (the outlined 10 px one nearly vanished).
+                        // While the reader is open it closes it.
+                        let label = if open { "◂ CLOSE READER".to_string() } else { format!("▸ READ ({} LINES)", b.read_lines()) };
+                        let read_probes = self.buttons.clone();
+                        let (fill_c, ink_c) = if open { (pal.surface, pal.name) } else { (pal.name, pal.surface) };
+                        let chip = div()
+                            .child(canvas(move |b, _, _| read_probes.borrow_mut().push(("read", b)), |_, _, _, _| {}).absolute().top_0().left_0().size_full())
+                            .relative()
+                            .id("read")
+                            .h(px(FOOTER_H))
+                            .px(px(11.0))
+                            .flex()
+                            .items_center()
+                            .bg(rgb(fill_c))
+                            .border_1()
+                            .border_color(rgb(pal.name))
+                            .text_size(px(11.5))
+                            .font_weight(FontWeight::EXTRA_BOLD)
+                            .text_color(rgb(ink_c))
+                            .child(tracked(&label, 1.3));
                         row = row
-                            .child(tbtn("read", &label, pal.name, !open).on_mouse_down(
+                            .child(chip.on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(|this, _: &MouseDownEvent, _, cx| {
                                     cx.stop_propagation();
