@@ -5,7 +5,10 @@ tests/fake_daemon.rs: Hello -> Welcome (one live session named `capri`), Session
 Attach -> the attached_history.json fixture, then events on demand.
 
 Control: one line per connection on /tmp/sa-fake/ctl.sock:
-  secret | confirm | compact | compacted | idle | quit
+  secret | confirm | confirm2 | compact | compacted | idle | refuse | relay | say TEXT | quit
+A submit or steer streams a canned reply (FAKE: no model): a turn, text deltas every
+FAKE_DELTA_MS (default 30), done, idle. `refuse`: the next submit is refused instead.
+`relay`: a turn another session woke ([comms] ...). `say TEXT`: a turn with that reply.
 Commands the avatar sends are printed; answer values are never printed (only their length)."""
 import json, os, socket, sys, threading, time
 
@@ -22,6 +25,53 @@ pending = {}           # prompt id -> request (in every Attached snapshot until 
 seq = [100]
 client_id = [10]
 lock = threading.Lock()
+refuse_next = [False]
+replies = [
+    "Build's green, choom. Spike pushed the reader fix eleven minutes ago.",
+    "Here's the build command:\n\n```bash\ntools/abuild build --release\n```\n\nDocs: [gpui-component](https://github.com/longbridge/gpui-component)",
+    "Rebasing polish-e onto main. Two conflicts in view.rs; he's on it.",
+    "Checking. CI on main is green as of 21:05; I'll ping you when polish-e lands.",
+]
+n_reply = [0]
+DELTA = float(os.environ.get("FAKE_DELTA_MS", "30")) / 1000.0
+
+
+def remember(msgs):
+    """The turn goes into the history a later attach gets (as a real daemon keeps it)."""
+    with lock:
+        c = ATTACHED["conversation"]
+        c["api_messages"] = list(c["api_messages"]) + msgs
+        c["messages_len"] = len(c["api_messages"])
+
+
+def stream_turn(user_text, reply, trigger="user", tool=None):
+    event({"ev": "turn_started", "turn_baseline": 1, "trigger": trigger, "user_text": user_text})
+    event({"ev": "stream", "event": {"kind": "llm", "llm": "response_start"}})
+    if tool:
+        event({"ev": "stream", "event": {"kind": "llm", "llm": "tool_use_start", "tool_name": tool[0], "tool_id": "toolu_fake1"}})
+        event({"ev": "stream", "event": {"kind": "llm", "llm": "tool_use", "tool_name": tool[0], "tool_id": "toolu_fake1", "input": tool[1]}})
+        time.sleep(0.3)
+        event({"ev": "stream", "event": {"kind": "llm", "llm": "tool_result", "tool_id": "toolu_fake1", "result": "ok"}})
+        event({"ev": "stream", "event": {"kind": "llm", "llm": "response_start"}})
+    words = reply.split(" ")
+    for i, w in enumerate(words):
+        event({"ev": "stream", "event": {"kind": "llm", "llm": "text", "text": (w if i == 0 else " " + w)}})
+        time.sleep(DELTA)
+    msgs = [{"role": "user", "content": user_text}] if user_text else []
+    if tool:
+        msgs += [{"role": "assistant", "content": [{"id": "toolu_fake1", "input": tool[1], "name": tool[0], "type": "tool_use"}]},
+                 {"role": "user", "content": [{"content": "ok", "tool_use_id": "toolu_fake1", "type": "tool_result"}]}]
+    msgs.append({"role": "assistant", "content": [{"text": reply, "type": "text"}]})
+    remember(msgs)
+    event({"ev": "stream", "event": {"kind": "session", "session": "done"}})
+    event({"ev": "idle"})
+
+
+def reply_to(text):
+    r = replies[n_reply[0] % len(replies)]
+    n_reply[0] += 1
+    tool = ("bash", {"command": "gh run list --branch main --limit 1"}) if "CI" in text else None
+    threading.Thread(target=stream_turn, args=(text, r), kwargs={"tool": tool}, daemon=True).start()
 
 
 def log(*a):
@@ -85,6 +135,11 @@ def serve(conn):
                     event({"ev": "prompt_resolved", "prompt_id": c.get("prompt_id")})
                 elif c.get("cmd") in ("submit", "steer"):
                     log(f"cmd {c.get('cmd')} <{len(c.get('text', ''))} chars>")
+                    if refuse_next[0]:
+                        refuse_next[0] = False
+                        send(conn, wl, {"type": "error", "session_id": SID, "message": "refused: not the input owner (FAKE)"})
+                    else:
+                        reply_to(c.get("text", ""))
                 else:
                     log(f"cmd {c.get('cmd')}")
                     if c.get("cmd") == "detach":
@@ -121,6 +176,13 @@ def control():
         elif cmd == "confirm":
             req = {"id": 42, "kind": "confirm", "title": "Confirm tool call",
                    "prompt": "[FAKE DAEMON] bash: rm -rf /tmp/sa-fake/nothing"}
+        elif cmd == "confirm2":
+            req = {"id": 43, "kind": "confirm", "title": "Confirm tool activation",
+                   "prompt": "[FAKE DAEMON] The model requests session-scoped activation of 3 exact tool id(s):\n"
+                             "  builtin:shell_end\n  builtin:shell_send\n  builtin:shell_start\n"
+                             "They can run any command in a shell you started, read its output and type into it "
+                             "until the session ends. Nothing outside this session is affected.\n"
+                             "Allow exactly these tools?"}
         if req:
             with lock:
                 pending[req["id"]] = req
@@ -131,6 +193,13 @@ def control():
             event({"ev": "compaction_applied", "previous_session_id": SID, "session_id": SID, "msg_count": 4})
         elif cmd == "idle":
             event({"ev": "idle"})
+        elif cmd == "refuse":
+            refuse_next[0] = True
+        elif cmd == "relay":
+            threading.Thread(target=stream_turn, args=("[comms] #12 ask from spike: CI is red on main after the rebase. Rebase polish-e again or merge main in?",
+                                                        "Spike's asking: rebase or merge for polish-e? Your call."), kwargs={"trigger": "event"}, daemon=True).start()
+        elif cmd.startswith("say "):
+            threading.Thread(target=stream_turn, args=(None, cmd[4:].replace("\\n", "\n")), kwargs={"trigger": "event"}, daemon=True).start()
         elif cmd == "quit":
             c.sendall(b"ok\n")
             os._exit(0)

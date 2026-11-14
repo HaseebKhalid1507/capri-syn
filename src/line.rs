@@ -102,6 +102,8 @@ pub struct Line {
     closing: bool,
     copied_at: Option<Instant>,
     height: f32,
+    /// SA_TIMING: Enter, until her first word of the reply is drawn.
+    sent_at: Option<(Instant, usize)>,
     on_ask: OnAsk,
     _subs: Vec<Subscription>,
 }
@@ -155,7 +157,22 @@ impl Line {
         let placeholder = format!("say something to {}", name.to_lowercase());
         let input = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 6).submit_on_enter(true).placeholder(placeholder).default_value(draft));
         let focus = cx.focus_handle();
+        // Before the field's own bindings (↑ moves its caret, Ctrl+Y is its redo): the
+        // Line's keys first, in this window only.
+        let me = cx.entity().downgrade();
+        let mine = window.window_handle().window_id();
+        let keys = cx.intercept_keystrokes(move |ev, window, cx| {
+            if window.window_handle().window_id() != mine {
+                return;
+            }
+            let ks = ev.keystroke.clone();
+            let handled = me.update(cx, |l, cx| l.key(&ks, window, cx)).unwrap_or(false);
+            if handled {
+                cx.stop_propagation();
+            }
+        });
         let subs = vec![
+            keys,
             cx.subscribe_in(&input, window, |this: &mut Line, _, ev: &InputEvent, window, cx| match ev {
                 InputEvent::PressEnter { shift: false, .. } => this.submit(window, cx),
                 InputEvent::Change => {
@@ -215,6 +232,7 @@ impl Line {
             closing: false,
             copied_at: None,
             height: 0.0,
+            sent_at: None,
             on_ask,
             _subs: subs,
         };
@@ -330,6 +348,9 @@ impl Line {
         }
         match (self.on_ask)(Ask::Send(text.clone()), cx) {
             Ok(()) => {
+                if std::env::var_os("SA_TIMING").is_some() {
+                    self.sent_at = Some((Instant::now(), self.snap.rows.len()));
+                }
                 self.input.update(cx, |s, cx| s.set_value("", window, cx));
                 if self.sent.last() != Some(&text) {
                     self.sent.push(text);
@@ -403,8 +424,7 @@ impl Line {
     }
 
     /// Keys before the field sees them: Esc, ↑/↓ recall, paging, copy, prompt answers.
-    fn key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Line>) -> bool {
-        let k = &ev.keystroke;
+    fn key(&mut self, k: &Keystroke, window: &mut Window, cx: &mut Context<Line>) -> bool {
         let m = k.modifiers;
         let ctrl = m.control || m.platform;
         let plain = !ctrl && !m.alt && !m.shift;
@@ -723,6 +743,12 @@ impl Line {
 impl Render for Line {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = self.pal;
+        if let Some((t0, n)) = self.sent_at
+            && self.snap.rows.iter().skip(n).any(|r| r.who == Who::Her && !r.text.trim().is_empty())
+        {
+            self.sent_at = None;
+            elog!("timing: line: first word of her reply drawn {} ms after Enter", t0.elapsed().as_millis());
+        }
         let status = if self.parked { "PARKED · $MOD+C TO RESUME".to_string() } else { self.snap.status.clone() };
         let header = div()
             .flex()
@@ -839,11 +865,6 @@ impl Render for Line {
             .id("line")
             .track_focus(&self.focus)
             .key_context("Line")
-            .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
-                if this.key(ev, window, cx) {
-                    cx.stop_propagation();
-                }
-            }))
             .size_full()
             .relative()
             .overflow_hidden()

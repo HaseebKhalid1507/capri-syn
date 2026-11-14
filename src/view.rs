@@ -4583,7 +4583,10 @@ impl Render for Avatar {
                         }
                     }
                     let n = lines.len().max(1);
-                    (lines, None, w.width.max(260.0), n, crate::session::one_line(&u.view.title.to_uppercase(), 28))
+                    // More waiting: a count (all of them, whole, in the Line: $mod+c).
+                    let more = self.session.as_ref().and_then(|s| s.shown.as_ref()).map_or(0, |b| b.prompts.len());
+                    let title = crate::session::one_line(&u.view.title.to_uppercase(), 28);
+                    (lines, None, w.width.max(260.0), n, if more > 1 { format!("{title} · 1 OF {more}") } else { title })
                 }
                 PanelMode::Probe => {
                     let text = self.focus_probe.clone().unwrap_or_default();
