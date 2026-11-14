@@ -310,7 +310,11 @@ const NOTE_TICK: Duration = Duration::from_millis(40);
 /// the hearts, so a glint costs no GPUI redraw.
 const GLINT_LAYER: usize = NOTE_LAYER + 2 * NOTES_MAX;
 const GLINTS_MAX: usize = 4;
-const GLINT_TICK: Duration = Duration::from_millis(60);
+/// A glint's scale steps (its 560 ms life in 7): 12.5 fps reads the same twinkle as 16.
+const GLINT_TICK: Duration = Duration::from_millis(80);
+/// A bob or sway step (1-2 px) alone waits this long for another redraw to ride on (a
+/// blink, the other axis): at rest every pose step was a render of its own.
+const POSE_SLACK: Duration = Duration::from_millis(250);
 
 /// Device px of the largest note sprite for this geometry.
 pub fn note_px(geo: &Geometry) -> u32 {
@@ -471,6 +475,8 @@ pub struct Avatar {
     glints_shown: usize,
     /// Breath/sway/nod as last drawn.
     pose_last: fx::Pose,
+    /// A pose step not drawn yet, since (POSE_SLACK).
+    pose_wait: Option<Instant>,
     session: Option<SessionLink>,
     input: Option<InputBox>,
     /// Text typed but not sent (closed field, refused input).
@@ -634,6 +640,7 @@ impl Avatar {
             notes_shown: 0,
             glints_shown: 0,
             pose_last: fx::Pose::default(),
+            pose_wait: None,
             session: None,
             input: None,
             draft: String::new(),
@@ -1312,6 +1319,7 @@ impl Avatar {
         }
         take(self.next_glint);
         take(self.pose_next_change(now));
+        take(self.pose_wait.map(|t| t + POSE_SLACK));
         if self.music.is_some() {
             take(Some(now + NOTE_TICK));
             take(self.music.as_ref().and_then(|m| m.until));
@@ -1518,11 +1526,6 @@ impl Avatar {
             self.music_off(now);
             dirty = true;
         }
-        let pose = self.pose_at(now);
-        if pose != self.pose_last {
-            self.pose_last = pose;
-            dirty = true;
-        }
 
         // Window offset: the attention hop moves the window, no redraw.
         if let Some(at) = self.next_hop
@@ -1551,6 +1554,16 @@ impl Avatar {
         self.update_notes(now);
         self.update_glints(now);
         self.update_marker(now);
+        // Any redraw draws the current pose (render latches it); a pose step alone waits
+        // POSE_SLACK for company.
+        let pose = self.pose_at(now);
+        if pose == self.pose_last {
+            // (Stepped back before it was drawn: nothing to wait for, no stale deadline.)
+            self.pose_wait = None;
+        } else if !dirty {
+            let since = *self.pose_wait.get_or_insert(now);
+            dirty = now.saturating_duration_since(since) >= POSE_SLACK;
+        }
         if dirty {
             cx.notify();
         }
@@ -3600,6 +3613,8 @@ impl Render for Avatar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.renders += 1;
         let now = Instant::now();
+        self.pose_last = self.pose_at(now);
+        self.pose_wait = None;
         let l = self.layout;
         let sf = l.sf;
         let pal = Palette {
