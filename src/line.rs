@@ -16,6 +16,9 @@ use std::time::{Duration, Instant};
 
 /// Prompt keys do nothing this long after a prompt shows (as the buttons).
 pub const ARM: Duration = Duration::from_millis(400);
+/// A risky prompt (a tool activation, shell/exec/write-class tools) allows only on Shift+A
+/// or A held this long; a bare tap of A does nothing there.
+pub const HOLD: Duration = Duration::from_millis(450);
 const ESC_AGAIN: Duration = Duration::from_millis(1000);
 const PAD: f32 = 14.0;
 const FONT: f32 = 16.0;
@@ -64,7 +67,7 @@ pub fn kit_init(cx: &mut App) {
     // The caret blinks while he types, then holds still: an open, idle Line schedules
     // nothing (a 500 ms blink was two repaints a second, forever). gpui-base's Theme is the
     // one the field reads.
-    let blink = gpui_kit::base::input::CursorBlink::blinking(Duration::from_millis(500)).with_idle_timeout(Duration::from_secs(4));
+    let blink = gpui_kit::base::input::CursorBlink::blinking(Duration::from_millis(530)).with_idle_timeout(Duration::from_secs(10));
     gpui_kit::base::Theme::global_mut(cx).cursor_blink = blink;
     gpui_kit::component::Theme::global_mut(cx).cursor_blink = blink;
 }
@@ -123,6 +126,15 @@ pub struct Line {
     sent_at: Option<(Instant, usize)>,
     /// Renders so far (`state`: an idle Line should not render).
     renders: std::cell::Cell<u64>,
+    /// Code blocks and tool rows opened by a click: (row, block); tool rows use block 0.
+    open: std::collections::HashSet<(usize, usize)>,
+    /// A held A on a risky prompt: when it went down (the allow fires at HOLD).
+    hold_at: Option<Instant>,
+    /// A is down (from a press on a prompt): its key repeats never reach the field, even
+    /// after the prompt it allowed has gone.
+    a_down: bool,
+    /// Which side of the Line she stands on (-1 left, 1 right, 0 not beside it).
+    side: i8,
     on_ask: OnAsk,
     _subs: Vec<Subscription>,
 }
@@ -154,6 +166,23 @@ pub fn links(md: &str) -> Vec<String> {
     out
 }
 
+/// A prompt that can do harm when allowed by accident: any tool activation, or a tool that
+/// runs, writes or deletes. Those need Shift+A or a held A; the rest keep a plain A.
+pub fn risky(p: &PromptView) -> bool {
+    if p.secret {
+        return false;
+    }
+    const WORDS: [&str; 27] = [
+        "activation", "activate", "bash", "sh", "zsh", "command", "commands", "terminal", "run", "runs", "write", "edit", "delete",
+        "remove", "rm", "sudo", "install", "kill", "patch", "apply", "push", "mv", "chmod", "chown", "create", "mkdir", "dd",
+    ];
+    const STEMS: [&str; 4] = ["shell", "exec", "write", "delet"];
+    let t = format!("{} {}", p.title, p.text).to_lowercase();
+    t.split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|w| !w.is_empty())
+        .any(|w| WORDS.contains(&w) || STEMS.iter().any(|s| w.starts_with(s)) || w.contains("shell_"))
+}
+
 /// One line: whitespace collapsed, at most `max` chars.
 fn one(s: &str, max: usize) -> String {
     crate::session::one_line(s, max)
@@ -173,7 +202,13 @@ impl Line {
         window: &mut Window,
         cx: &mut Context<Line>,
     ) -> Line {
-        let placeholder = format!("say something to {}", name.to_lowercase());
+        let mut title = name.to_lowercase();
+        if let Some(c) = title.get(..1) {
+            title = c.to_uppercase() + &title[1..];
+        }
+        let placeholder = format!("talk to {title}…");
+        // The caret in her accent (1 px wide in the kit: the colour has to carry it).
+        gpui_kit::component::Theme::global_mut(cx).colors.caret = rgb(pal.frame).into();
         let input = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 6).submit_on_enter(true).placeholder(placeholder).default_value(draft));
         let focus = cx.focus_handle();
         // Before the field's own bindings (↑ moves its caret, Ctrl+Y is its redo): the
@@ -253,6 +288,10 @@ impl Line {
             height: 0.0,
             sent_at: None,
             renders: Default::default(),
+            open: Default::default(),
+            hold_at: None,
+            a_down: false,
+            side: 0,
             on_ask,
             _subs: subs,
         };
@@ -340,6 +379,9 @@ impl Line {
             "rows": self.snap.rows.len(),
             "draft_chars": self.input.read(cx).value().chars().count(),
             "renders": self.renders.get(),
+            "side": self.side,
+            "holding": self.hold_at.is_some(),
+            "risky": self.prompt().is_some_and(risky),
             "note": self.note,
             "prompts": self.snap.prompts.len(),
             "prompt_ix": self.prompt_ix,
@@ -472,6 +514,9 @@ impl Line {
         if k.key != "escape" {
             self.esc_at = None;
         }
+        if k.key == "a" && self.a_down {
+            return true;
+        }
         match (k.key.as_str(), self.mode) {
             ("escape", Mode::Text) if self.snap.busy => {
                 if self.esc_at.is_some_and(|t| now < t + ESC_AGAIN) {
@@ -553,10 +598,38 @@ impl Line {
                 self.open_last_link(cx);
                 true
             }
-            ("a" | "d", Mode::Prompt) if plain && self.secret.is_none() => {
+            ("d", Mode::Prompt) if plain && self.secret.is_none() => {
+                self.hold_at = None;
                 if let Some(id) = self.prompt().map(|p| p.id) {
-                    let v = (k.key == "a").then(|| "y".to_string());
-                    self.answer(id, v, window, cx);
+                    self.answer(id, None, window, cx);
+                }
+                true
+            }
+            ("a", Mode::Prompt) if !ctrl && !m.alt && self.secret.is_none() => {
+                self.a_down = true;
+                let Some((id, risky)) = self.prompt().map(|p| (p.id, risky(p))) else { return true };
+                if now < self.prompt_at + ARM {
+                    return true;
+                }
+                if !risky || m.shift {
+                    self.hold_at = None;
+                    self.answer(id, Some("y".into()), window, cx);
+                } else if self.hold_at.is_none() {
+                    // Held: it allows at HOLD unless A comes up first (key repeats ignored).
+                    self.hold_at = Some(now);
+                    self.note = None;
+                    cx.spawn_in(window, async move |this, cx| {
+                        cx.background_executor().timer(HOLD).await;
+                        this.update_in(cx, |l, window, cx| {
+                            if l.hold_at == Some(now) && l.prompt().is_some_and(|p| p.id == id) {
+                                l.hold_at = None;
+                                l.answer(id, Some("y".into()), window, cx);
+                            }
+                        })
+                        .ok();
+                    })
+                    .detach();
+                    cx.notify();
                 }
                 true
             }
@@ -586,10 +659,71 @@ impl Line {
         }
     }
 
+    /// A let go before HOLD on a risky prompt: nothing allowed, and he is told how.
+    fn key_up(&mut self, k: &Keystroke, cx: &mut Context<Line>) {
+        if k.key == "a" {
+            self.a_down = false;
+        }
+        if k.key == "a"
+            && let Some(t0) = self.hold_at.take()
+        {
+            if t0.elapsed() < HOLD {
+                self.note = Some("NOT ALLOWED · HOLD A (OR ⇧A) TO ALLOW THIS ONE".into());
+            }
+            cx.notify();
+        }
+    }
+
+    /// Her side of the Line: a thick edge and a pointer at her feet, so it reads as hers.
+    fn tail(&self) -> Option<AnyElement> {
+        if self.side == 0 {
+            return None;
+        }
+        let (tone, left) = (if self.parked { self.pal.dim } else { self.pal.frame }, self.side < 0);
+        let edge = div().absolute().top_0().bottom_0().w(px(5.0)).bg(rgb(tone));
+        let edge = if left { edge.left_0() } else { edge.right_0() };
+        let arrow = canvas(
+            |_, _, _| {},
+            move |b, _, window, _| {
+                let (h, w) = (px(26.0), px(12.0));
+                let y = b.bottom() - px(14.0) - h;
+                let x = if left { b.left() + px(5.0) } else { b.right() - px(5.0) };
+                let dx = if left { w } else { -w };
+                let mut p = PathBuilder::fill();
+                p.move_to(point(x, y));
+                p.line_to(point(x + dx, y + h / 2.0));
+                p.line_to(point(x, y + h));
+                p.close();
+                if let Ok(path) = p.build() {
+                    window.paint_path(path, rgb(tone));
+                }
+            },
+        )
+        .absolute()
+        .size_full();
+        Some(div().absolute().top_0().left_0().size_full().child(edge).child(arrow).into_any_element())
+    }
+
+    /// Which side she stands on (from the avatar, after placing the Line).
+    pub fn set_side(&mut self, side: i8, cx: &mut Context<Line>) {
+        if self.side != side {
+            self.side = side;
+            cx.notify();
+        }
+    }
+
+    /// Opened from her unread strip: the reply, from its first line.
+    pub fn show_last_reply(&mut self, cx: &mut Context<Line>) {
+        if let Some(ix) = self.snap.rows.iter().rposition(|r| r.who == Who::Her) {
+            self.scroll.scroll_to_top_of_item(ix);
+            cx.notify();
+        }
+    }
+
     fn plate(&self, who: &Who) -> (String, u32) {
         let p = self.pal;
         match who {
-            Who::You => ("YOU".into(), p.dim),
+            Who::You => ("YOU".into(), p.frame),
             Who::Her => (self.name.to_uppercase(), p.name),
             Who::Relay(c, _) => (format!("⇄ {c}"), 0x9fd2ff),
             Who::Tool => ("⚙".into(), p.frame),
@@ -614,10 +748,10 @@ impl Line {
         StyledText::new(plain).with_highlights(hl)
     }
 
-    fn her_body(&self, md: &str, cx: &mut Context<Line>) -> Div {
+    fn her_body(&self, row: usize, md: &str, cx: &mut Context<Line>) -> Div {
         let pal = self.pal;
         let mut col = div().flex().flex_col().gap(px(6.0)).min_w(px(0.0)).flex_1();
-        for b in parse(md) {
+        for (bi, b) in parse(md).into_iter().enumerate() {
             col = col.child(match b {
                 Block::Heading(_, t) => div().font_weight(FontWeight::BOLD).text_color(rgb(pal.name)).child(self.styled(&t)).into_any_element(),
                 Block::Para(t) => div().text_color(rgb(pal.text)).child(self.styled(&t)).into_any_element(),
@@ -630,7 +764,39 @@ impl Line {
                     .child(div().flex_1().min_w(px(0.0)).child(self.styled(&t)))
                     .into_any_element(),
                 Block::Rule => div().h(px(1.0)).bg(rgba((pal.frame << 8) | 0x44)).into_any_element(),
+                Block::Code { lang, text } if !self.open.contains(&(row, bi)) => {
+                    // One line until clicked: the language, the first line, the size.
+                    let n = text.lines().count();
+                    let first = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim().to_string();
+                    div()
+                        .id(SharedString::from(format!("code-{row}-{bi}")))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .px(px(8.0))
+                        .py(px(2.0))
+                        .border_1()
+                        .border_color(rgba((pal.frame << 8) | 0x44))
+                        .bg(rgb(0x070b10))
+                        .cursor_pointer()
+                        .text_size(px(12.5))
+                        .child(div().flex_none().text_color(rgb(pal.frame)).child("▸"))
+                        .child(div().flex_none().font_weight(FontWeight::BOLD).text_color(rgb(pal.dim)).child(if lang.is_empty() { "CODE".to_string() } else { lang.to_uppercase() }))
+                        .child(div().flex_1().min_w(px(0.0)).overflow_hidden().whitespace_nowrap().font_family(MONO).text_color(rgb(0xd8e6ee)).child(one(&first, 70)))
+                        .child(div().flex_none().text_color(rgb(pal.dim)).child(format!("{n} line{}", if n == 1 { "" } else { "s" })))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.open.insert((row, bi));
+                            cx.notify();
+                        }))
+                        .into_any_element()
+                }
                 Block::Code { lang, text } => div()
+                    .id(SharedString::from(format!("code-{row}-{bi}")))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.open.remove(&(row, bi));
+                        cx.notify();
+                    }))
                     .border_1()
                     .border_color(rgba((pal.frame << 8) | 0x44))
                     .bg(rgb(0x070b10))
@@ -672,28 +838,43 @@ impl Line {
         col
     }
 
-    fn row_el(&self, r: &Row, cx: &mut Context<Line>) -> AnyElement {
+    fn row_el(&self, ix: usize, r: &Row, cx: &mut Context<Line>) -> AnyElement {
         let pal = self.pal;
         let (plate, tone) = self.plate(&r.who);
         let head = div().flex_none().w(px(74.0)).text_size(px(11.5)).font_weight(FontWeight::BOLD).text_color(rgb(tone)).pt(px(3.0)).child(plate);
         let body: AnyElement = match &r.who {
             Who::Her => {
-                let mut b = self.her_body(&r.text, cx);
+                let mut b = self.her_body(ix, &r.text, cx);
                 if r.streaming {
                     b = b.child(div().w(px(9.0)).h(px(3.0)).bg(rgb(pal.frame)));
                 }
                 b.into_any_element()
             }
-            Who::Tool => div()
-                .flex()
-                .gap(px(8.0))
-                .min_w(px(0.0))
-                .flex_1()
-                .text_size(px(13.0))
-                .text_color(rgb(pal.dim))
-                .child(div().flex_none().font_weight(FontWeight::BOLD).child(r.text.clone()))
-                .child(div().flex_1().min_w(px(0.0)).overflow_hidden().whitespace_nowrap().font_family(MONO).text_size(px(12.0)).child(r.detail.clone()))
-                .into_any_element(),
+            Who::Tool => {
+                // One line (its input clipped) until clicked.
+                let open = self.open.contains(&(ix, 0));
+                let detail = div().flex_1().min_w(px(0.0)).font_family(MONO).text_size(px(12.0));
+                let detail = if open { detail.child(r.detail.clone()) } else { detail.overflow_hidden().whitespace_nowrap().child(one(&r.detail, 90)) };
+                div()
+                    .id(SharedString::from(format!("tool-{ix}")))
+                    .flex()
+                    .gap(px(8.0))
+                    .min_w(px(0.0))
+                    .flex_1()
+                    .cursor_pointer()
+                    .text_size(px(13.0))
+                    .text_color(rgb(pal.dim))
+                    .child(div().flex_none().text_color(rgb(pal.frame)).child(if open { "▾" } else { "▸" }))
+                    .child(div().flex_none().font_weight(FontWeight::BOLD).child(r.text.clone()))
+                    .child(detail)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.open.remove(&(ix, 0)) {
+                            this.open.insert((ix, 0));
+                        }
+                        cx.notify();
+                    }))
+                    .into_any_element()
+            }
             Who::Relay(_, kind) => div()
                 .flex()
                 .flex_col()
@@ -702,13 +883,22 @@ impl Line {
                 .child(div().text_size(px(11.0)).text_color(rgb(pal.dim)).child(kind.clone()))
                 .child(div().border_l_2().border_color(rgb(0x9fd2ff)).pl(px(8.0)).text_color(rgb(pal.text)).child(r.text.clone()))
                 .into_any_element(),
-            Who::You => div().flex_1().min_w(px(0.0)).text_color(rgb(pal.dim)).child(r.text.clone()).into_any_element(),
+            Who::You => div()
+                .flex_1()
+                .min_w(px(0.0))
+                .border_l_2()
+                .border_color(rgb(pal.frame))
+                .bg(rgba((pal.frame << 8) | 0x14))
+                .pl(px(8.0))
+                .text_color(rgb(pal.text))
+                .child(r.text.clone())
+                .into_any_element(),
             Who::Sys | Who::Error => div().flex_1().min_w(px(0.0)).text_size(px(13.5)).text_color(rgb(tone)).child(r.text.clone()).into_any_element(),
         };
         div().flex().gap(px(10.0)).child(head).child(body).into_any_element()
     }
 
-    fn prompt_el(&self, cx: &mut Context<Line>) -> Option<Div> {
+    fn prompt_el(&self, window: &mut Window, cx: &mut Context<Line>) -> Option<Div> {
         let pal = self.pal;
         let p = self.prompt()?;
         let n = self.snap.prompts.len();
@@ -756,16 +946,55 @@ impl Line {
                 .child(div().text_size(px(11.5)).text_color(rgb(pal.dim)).child("⏎ answer · esc later · never spoken, never logged"));
         } else {
             let id = p.id;
+            let risky = risky(p);
+            // Deny first; a risky allow says how it's held, and fills while A is down.
+            let allow = if risky {
+                let fill = self.hold_at.map_or(0.0, |t| (t.elapsed().as_secs_f32() / HOLD.as_secs_f32()).min(1.0));
+                if self.hold_at.is_some() {
+                    window.request_animation_frame();
+                }
+                div()
+                    .relative()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(div().px(px(6.0)).border_1().border_color(rgb(pal.frame)).text_color(rgb(pal.frame)).font_weight(FontWeight::BOLD).child("HOLD A"))
+                    .child(div().text_color(rgb(pal.dim)).child("or ⇧A"))
+                    .child(
+                        div()
+                            .relative()
+                            .px(px(6.0))
+                            .border_1()
+                            .border_color(rgb(if armed { pal.frame } else { pal.dim }))
+                            .font_weight(FontWeight::BOLD)
+                            .child(div().absolute().left_0().top_0().bottom_0().w(relative(fill)).bg(rgba((pal.frame << 8) | 0x88)))
+                            .child(div().relative().text_color(rgb(if armed { pal.frame } else { pal.dim })).child("ALLOW")),
+                    )
+            } else {
+                key("A", "ALLOW", pal.frame)
+            };
             col = col.child(
                 div()
                     .flex()
+                    .items_center()
                     .gap(px(22.0))
                     .text_size(px(12.5))
-                    .child(div().id("allow").cursor_pointer().child(key("A", "ALLOW", pal.frame)).on_click(cx.listener(move |this, _, window, cx| this.answer(id, Some("y".into()), window, cx))))
                     .child(div().id("deny").cursor_pointer().child(key("D", "DENY", pal.slash)).on_click(cx.listener(move |this, _, window, cx| this.answer(id, None, window, cx))))
+                    .child(div().id("allow").cursor_pointer().child(allow).on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
+                        // A click allows a risky one only with Shift held.
+                        if !risky || ev.modifiers().shift {
+                            this.answer(id, Some("y".into()), window, cx);
+                        } else {
+                            this.note = Some("NOT ALLOWED · ⇧CLICK, ⇧A OR HOLD A".into());
+                            cx.notify();
+                        }
+                    })))
                     .child(key("ESC", "LATER", pal.dim))
                     .child(key("TAB", "SAY SOMETHING INSTEAD", pal.dim)),
             );
+            if risky {
+                col = col.child(div().text_size(px(11.5)).text_color(rgb(pal.slash)).child("this one can run or change things: a tap of A does nothing"));
+            }
         }
         if !armed {
             // Re-render when the keys arm.
@@ -806,21 +1035,29 @@ impl Render for Line {
             .child(div().text_color(rgb(pal.dim)).child("LINE"))
             .child(div().flex_1())
             .child(div().text_color(rgb(if self.parked { pal.dim } else { pal.frame })).child(status));
-        let rows: Vec<AnyElement> = self.snap.rows.iter().map(|r| self.row_el(r, cx)).collect();
+        let rows: Vec<AnyElement> = self.snap.rows.iter().enumerate().map(|(i, r)| self.row_el(i, r, cx)).collect();
+        // Scrolled: the top edge fades out instead of cutting a line in half.
+        let scrolled = self.scroll.offset().y < px(-1.0);
         let thread = (!rows.is_empty()).then(|| {
+            let fade = linear_gradient(180.0, linear_color_stop(rgb(pal.surface), 0.0), linear_color_stop(rgba(pal.surface << 8), 1.0));
             div()
-                .id("thread")
-                .max_h(px(self.max_thread))
-                .overflow_y_scroll()
-                .track_scroll(&self.scroll)
-                .px(px(PAD))
-                .py(px(10.0))
-                .flex()
-                .flex_col()
-                .gap(px(9.0))
-                .children(rows)
+                .relative()
+                .child(
+                    div()
+                        .id("thread")
+                        .max_h(px(self.max_thread))
+                        .overflow_y_scroll()
+                        .track_scroll(&self.scroll)
+                        .px(px(PAD))
+                        .py(px(10.0))
+                        .flex()
+                        .flex_col()
+                        .gap(px(9.0))
+                        .children(rows),
+                )
+                .children(scrolled.then(|| div().absolute().top_0().left_0().right_0().h(px(LINE_H * 1.2)).bg(fade)))
         });
-        let prompt = (self.mode == Mode::Prompt).then(|| self.prompt_el(cx)).flatten();
+        let prompt = (self.mode == Mode::Prompt).then(|| self.prompt_el(window, cx)).flatten();
         let pending = (self.mode == Mode::Text && !self.snap.prompts.is_empty()).then(|| {
             div()
                 .px(px(PAD))
@@ -831,20 +1068,28 @@ impl Render for Line {
                 .font_weight(FontWeight::BOLD)
                 .child(format!("! {} PROMPT{} WAITING · TAB TO ANSWER", self.snap.prompts.len(), if self.snap.prompts.len() > 1 { "S" } else { "" }))
         });
+        // A text box you can't miss: filled, outlined, lit in her colour while it has the keyboard.
+        let typing = self.mode == Mode::Text && !self.parked;
         let input = (self.mode == Mode::Text).then(|| {
-            div()
-                .flex()
-                .gap(px(8.0))
-                .px(px(PAD))
-                .pt(px(10.0))
-                .border_t_1()
-                .border_color(rgba((pal.frame << 8) | 0x55))
-                .child(div().flex_none().pt(px(1.0)).text_color(rgb(pal.frame)).font_weight(FontWeight::BOLD).child("›"))
-                .child(
-                    div().flex_1().min_w(px(0.0)).child(
-                        Textarea::new(&self.input).appearance(false).text_size(px(FONT)).line_height(px(LINE_H)).text_color(rgb(pal.text)),
+            div().px(px(PAD)).pt(px(10.0)).border_t_1().border_color(rgba((pal.frame << 8) | 0x55)).child(
+                div()
+                    .p(px(if typing { 0.0 } else { 1.0 }))
+                    .border_color(rgb(if typing { pal.frame } else { pal.dim }))
+                    .when(typing, |d| d.border_2())
+                    .when(!typing, |d| d.border_1())
+                    .bg(rgb(0x0c1a24))
+                    .flex()
+                    .items_start()
+                    .gap(px(8.0))
+                    .px(px(10.0))
+                    .py(px(7.0))
+                    .child(div().flex_none().text_color(rgb(if typing { pal.frame } else { pal.dim })).font_weight(FontWeight::BOLD).child("›"))
+                    .child(
+                        div().flex_1().min_w(px(0.0)).child(
+                            Textarea::new(&self.input).appearance(false).text_size(px(FONT)).line_height(px(LINE_H)).text_color(rgb(pal.text)),
+                        ),
                     ),
-                )
+            )
         });
         let hint = if self.mode == Mode::Prompt {
             None
@@ -906,6 +1151,7 @@ impl Render for Line {
             .id("line")
             .track_focus(&self.focus)
             .key_context("Line")
+            .on_key_up(cx.listener(|this, ev: &KeyUpEvent, _, cx| this.key_up(&ev.keystroke, cx)))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseDownEvent, window, cx| {
@@ -928,12 +1174,29 @@ impl Render for Line {
             .border_2()
             .border_color(rgb(if self.parked { pal.dim } else { pal.frame }))
             .child(content)
+            .children(self.tail())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::links;
+    use super::{links, risky};
+    use crate::session::PromptView;
+
+    fn confirm(title: &str, text: &str) -> PromptView {
+        PromptView { id: 1, title: title.into(), text: text.into(), secret: false }
+    }
+
+    #[test]
+    fn risky_prompts_are_activations_and_tools_that_run_or_change_things() {
+        assert!(risky(&confirm("Confirm tool activation", "activation of 3 tool id(s):\n  builtin:shell_end")));
+        assert!(risky(&confirm("Confirm tool call", "bash: rm -rf /tmp/x")));
+        assert!(risky(&confirm("Confirm tool call", "write_file: src/main.rs")));
+        assert!(risky(&confirm("Confirm tool call", "exec: make")));
+        assert!(!risky(&confirm("Confirm tool call", "read: README.md (lines 1-40)")));
+        assert!(!risky(&confirm("Confirm compaction", "Summarise older turns now?")));
+        assert!(!risky(&PromptView { id: 2, title: "password required".into(), text: "run it".into(), secret: true }));
+    }
 
     #[test]
     fn links_keep_their_address() {

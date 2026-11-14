@@ -3612,6 +3612,13 @@ impl Avatar {
     /// else open the field.
     fn chip_click(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let now = Instant::now();
+        // An unread reply (or a refused draft): the plate opens the Line, at that reply.
+        if self.unread.is_some() && self.session.is_some() {
+            self.brain_touch(crate::brain::Touch::Chip);
+            let r = self.open_line(cx);
+            elog!("synaps-avatar: unread plate clicked: {r}");
+            return;
+        }
         self.ack_unread();
         self.brain_touch(crate::brain::Touch::Chip);
         if let Some(p) = self.prompt_ui.as_mut().filter(|p| p.dismissed) {
@@ -4408,18 +4415,29 @@ impl Render for Avatar {
         let mut tag_strips: Vec<ShapeRect> = Vec::new();
         let torn = show_tag && !collapsed && self.glitch.is_some();
         if show_tag {
-            let (bg, fg, border) = if invert { (tone, pal.surface, tone) } else { (pal.surface, tone, tone) };
+            // An unread reply is a notification, not a status: her name-yellow, a filled
+            // "N NEW" badge, the reply's first words; the whole plate opens the Line there.
+            let fresh = self.unread.as_ref().is_some_and(|u| !u.refused);
+            let (bg, fg, border) = if fresh {
+                (pal.surface, pal.text, pal.name)
+            } else if invert {
+                (tone, pal.surface, tone)
+            } else {
+                (pal.surface, tone, tone)
+            };
+            let badge = self.unread.as_ref().filter(|u| !u.refused).map(|u| format!("{} NEW", u.n));
             let text = match &self.unread {
                 Some(u) if u.refused => format!("{} // {}", self.name, u.text),
                 Some(u) => {
-                    // Inside her window: the plate is centred on her, the chip's caret beside it.
-                    let head = format!("{} // {} NEW ▸ ", self.name, u.n);
+                    // Inside her window: the plate is centred on her.
+                    let head = format!("{} {} NEW  ", self.name, u.n);
                     let per = TAG_FONT * 0.62 + 1.5;
-                    let fit = ((l.win_w as f32 / sf - 96.0) / per) as usize;
-                    format!("{head}{}", crate::session::one_line(&u.text, fit.saturating_sub(head.chars().count()).clamp(8, 44)))
+                    let fit = ((l.win_w as f32 / sf - 80.0) / per) as usize;
+                    crate::session::one_line(&u.text, fit.saturating_sub(head.chars().count()).clamp(8, 44))
                 }
                 None => format!("{} // {}", self.name, label),
             };
+            let name_up = self.name.to_uppercase();
             let make_ring = || {
                 let plate = div()
                     .flex()
@@ -4435,8 +4453,14 @@ impl Render for Avatar {
                     .text_size(px(TAG_FONT))
                     .line_height(px(TAG_FONT + 1.0))
                     .font_weight(FontWeight::BOLD)
-                    .child(glyph(&glyph_kind, fg, bg))
-                    .child(tracked(&text, 1.5));
+                    .child(glyph(&glyph_kind, if fresh { pal.name } else { fg }, bg))
+                    .when_some(badge.clone(), |d, b| {
+                        d.child(div().text_color(rgb(pal.name)).child(tracked(&name_up, 1.5)))
+                            .child(div().px(px(5.0)).bg(rgb(pal.name)).text_color(rgb(pal.surface)).child(tracked(&b, 1.0)))
+                    })
+                    .child(tracked(&text, if fresh { 0.4 } else { 1.5 }))
+                    // A reply put away behind the plate: a small up-chevron inside it.
+                    .when(collapsed && !fresh, |d| d.child(chevron(Chevron::Up, rgb(fg))));
                 // A dark ring keeps the plate legible on busy backgrounds.
                 div().p(px(1.0)).bg(rgb(0x02060a)).child(plate)
             };
@@ -4488,26 +4512,8 @@ impl Render for Avatar {
                 }
             }
             let ring = make_ring();
-            let mut row = div().id("tag").flex().items_end().gap(px(3.0));
-            if collapsed {
-                row = row.child(
-                    div()
-                        .p(px(1.0))
-                        .bg(rgb(0x02060a))
-                        .child(div().w(px(20.0)).h(px(19.0)).flex().items_center().justify_center().border_1().border_color(rgb(tone)).bg(rgb(pal.surface)).child(chevron(Chevron::Up, rgb(tone)))),
-                );
-            }
-            if self.unread.is_some() {
-                // The pointer passing over the strip acknowledges it.
-                row = row.on_hover(cx.listener(|this, over: &bool, _, cx| {
-                    if *over && this.unread.is_some() {
-                        this.ack_unread();
-                        cx.notify();
-                        this.schedule(cx);
-                    }
-                }));
-            }
-            if collapsed || self.session.is_some() {
+            let mut row = div().id("tag").flex().items_end().gap(px(3.0)).cursor_pointer();
+            if collapsed || self.session.is_some() || self.unread.is_some() {
                 row = row.on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, _: &MouseDownEvent, window, cx| {
@@ -4910,7 +4916,24 @@ impl Render for Avatar {
                 PanelMode::Prompt => {
                     let u = self.prompt_ui.as_ref().expect("prompt mode has a prompt");
                     let armed = now >= u.shown_at + PROMPT_ARM;
-                    if u.view.secret {
+                    let (secret, risky) = (u.view.secret, crate::line::risky(&u.view));
+                    // DENY first. A risky one (a tool activation, a tool that runs or changes
+                    // things) has no one-click ALLOW here: REVIEW opens the Line, where it
+                    // takes Shift+A or a held A.
+                    if !secret {
+                        row = row.child(tbtn("deny", "DENY", pal.slash, armed).on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                cx.stop_propagation();
+                                if this.prompt_ui.as_ref().is_some_and(|u| Instant::now() >= u.shown_at + PROMPT_ARM) {
+                                    this.answer(None);
+                                    cx.notify();
+                                    this.schedule(cx);
+                                }
+                            }),
+                        ));
+                    }
+                    if secret {
                         row = row.child(tbtn("answer", "ANSWER", pal.frame, armed).on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, _: &MouseDownEvent, window, cx| {
@@ -4919,6 +4942,17 @@ impl Render for Avatar {
                                 if Instant::now() >= u.shown_at + PROMPT_ARM {
                                     let id = u.view.id;
                                     this.open_input(Some(id), window, cx);
+                                }
+                            }),
+                        ));
+                    } else if risky {
+                        row = row.child(tbtn("review", "REVIEW ▸", pal.frame, armed).on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                cx.stop_propagation();
+                                if this.session.is_some() {
+                                    let r = this.open_line(cx);
+                                    elog!("synaps-avatar: REVIEW clicked: {r}");
                                 }
                             }),
                         ));
@@ -4935,8 +4969,8 @@ impl Render for Avatar {
                             }),
                         ));
                     }
-                    row = row
-                        .child(tbtn("deny", "DENY", pal.slash, armed).on_mouse_down(
+                    if secret {
+                        row = row.child(tbtn("deny", "DENY", pal.slash, armed).on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, _: &MouseDownEvent, _, cx| {
                                 cx.stop_propagation();
@@ -4946,9 +4980,9 @@ impl Render for Avatar {
                                     this.schedule(cx);
                                 }
                             }),
-                        ))
-                        .child(div().w(px(4.0)))
-                        .child(collapse_btn(cx));
+                        ));
+                    }
+                    row = row.child(div().w(px(4.0))).child(collapse_btn(cx));
                 }
                 PanelMode::Probe => {}
             }
