@@ -108,6 +108,9 @@ pub struct Line {
     secret: Option<(u64, Entity<InputState>)>,
     focus: FocusHandle,
     scroll: ScrollHandle,
+    /// The thread's height cut to whole rows (from the last layout), so at the bottom its top
+    /// starts at a row, never half of one under the header.
+    fit_h: Option<f32>,
     /// Scrolled up by him: new rows don't pull the view down.
     pinned_up: bool,
     sent: Vec<String>,
@@ -273,6 +276,7 @@ impl Line {
             secret: None,
             focus,
             scroll: ScrollHandle::new(),
+            fit_h: None,
             pinned_up: false,
             sent,
             recall: None,
@@ -1066,8 +1070,28 @@ impl Render for Line {
             .child(div().flex_1())
             .child(div().text_color(rgb(if self.parked { pal.dim } else { pal.frame })).child(status));
         let rows: Vec<AnyElement> = self.snap.rows.iter().enumerate().map(|(i, r)| self.row_el(i, r, cx)).collect();
-        // Scrolled: the top edge fades out instead of cutting a line in half.
-        let scrolled = self.scroll.offset().y < px(-1.0);
+        // At the bottom the thread starts at a whole row: its height is cut to the rows that
+        // fit (measured on the last layout; one more frame when that changes).
+        let fit = {
+            let top = self.scroll.bounds().top();
+            let items: Vec<Bounds<Pixels>> = (0..).map_while(|i| self.scroll.bounds_for_item(i)).collect();
+            items.last().and_then(|last| {
+                let total = f32::from(last.bottom() - top) + 10.0;
+                (total > self.max_thread)
+                    .then(|| items.iter().map(|b| f32::from(b.top() - top)).find(|c| total - (c - 6.0) <= self.max_thread).map(|c| total - c + 6.0))
+                    .flatten()
+            })
+        };
+        if fit != self.fit_h {
+            self.fit_h = fit;
+            if !self.pinned_up {
+                self.scroll.scroll_to_bottom();
+            }
+            cx.on_next_frame(window, |_, _, cx| cx.notify());
+        }
+        // Scrolled up mid-row: the top edge fades out instead of cutting a line in half.
+        let at_bottom = self.scroll.offset().y <= -self.scroll.max_offset().y + px(1.0);
+        let scrolled = self.scroll.offset().y < px(-1.0) && !at_bottom;
         let thread = (!rows.is_empty()).then(|| {
             let fade = linear_gradient(180.0, linear_color_stop(rgb(pal.surface), 0.0), linear_color_stop(rgba(pal.surface << 8), 1.0));
             div()
@@ -1075,7 +1099,7 @@ impl Render for Line {
                 .child(
                     div()
                         .id("thread")
-                        .max_h(px(self.max_thread))
+                        .max_h(px(self.fit_h.unwrap_or(self.max_thread)))
                         .overflow_y_scroll()
                         .track_scroll(&self.scroll)
                         .px(px(PAD))
