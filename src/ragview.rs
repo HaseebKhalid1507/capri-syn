@@ -291,8 +291,10 @@ impl Avatar {
         // render that paints the last `next` (two ticks between renders would show a region
         // never painted: stale black). Lockstep stays deterministic (virtual time advances
         // per tick, not per wall clock).
+        // The render that paints it is already requested (the tick that set `next` asked
+        // for a redraw): nothing to do until it lands (`rag_painted` re-arms the ticker).
         if r.next.is_some() && !r.painted {
-            return true;
+            return false;
         }
         let dt = if lockstep() {
             if now + Duration::from_millis(1) < r.due {
@@ -699,8 +701,11 @@ impl Avatar {
 
     /// A render painted the rag's `next`.
     pub(super) fn rag_painted(&mut self) {
-        if let Some(r) = &mut self.rag {
-            r.painted = true;
+        let Some(r) = &mut self.rag else { return };
+        let was = r.painted;
+        r.painted = true;
+        if !was && r.next.is_some() {
+            self.ticker.set(self.next_deadline());
         }
     }
 
@@ -781,6 +786,12 @@ impl Avatar {
 
     pub(super) fn rag_deadline(&self, now: Instant) -> Option<Instant> {
         let r = self.rag.as_ref()?;
+        // Waiting for the render that paints `next`: no wake-up (it re-arms the ticker).
+        // Before, `due.max(now)` kept the loop spinning between renders: ~73 k view ticks/s
+        // in a drag (127 k rigid), against ~40 renders/s.
+        if r.next.is_some() && !r.painted {
+            return None;
+        }
         let active = match r.m.phase() {
             Phase::Held { .. } => {
                 r.rigid
