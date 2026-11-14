@@ -388,6 +388,9 @@ pub struct Avatar {
     glitch: Option<Glitch>,
     /// Frames drawn in the current glitch (keyed by its start): each gets a new pattern.
     glitch_step: Cell<(Option<Instant>, u64)>,
+    /// The time the glitch's next step was laid at (underneath): that step is laid at it
+    /// again when it's drawn, so it's exactly what was painted under the last frame.
+    glitch_at: Cell<Option<Instant>>,
     next_glitch: Option<Instant>,
     squash: Option<Instant>,
     glints: Vec<Glint>,
@@ -528,6 +531,7 @@ impl Avatar {
             next_hop: None,
             glitch: None,
             glitch_step: Cell::new((None, 0)),
+            glitch_at: Cell::new(None),
             next_glitch: None,
             squash: None,
             glints: Vec::new(),
@@ -3076,9 +3080,9 @@ impl Render for Avatar {
                 let y = f32::from(b.origin.y) * sf - l.avatar_y as f32;
                 (y as i32, (y + f32::from(b.size.height) * sf) as i32)
             });
-            let step = match self.glitch_step.get() {
-                (Some(t0), n) if t0 == g.t0 => n,
-                _ => 0,
+            let (step, laid_at) = match self.glitch_step.get() {
+                (Some(t0), n) if t0 == g.t0 => (n, self.glitch_at.get()),
+                _ => (0, None),
             };
             self.glitch_step.set((Some(g.t0), step + 1));
             let base = plan.clone();
@@ -3104,10 +3108,14 @@ impl Render for Avatar {
             // underneath (one frame late, no black slabs on the onset).
             let pre_roll = step == 0 && matches!(g.kind, GlitchKind::Burst | GlitchKind::Big | GlitchKind::Vanish);
             if !pre_roll {
-                plan = lay(now, step);
+                // At the time it was laid underneath last frame (the frame came later or
+                // sooner than planned: a pattern laid at `now` instead would grow the shape
+                // where nothing was painted, a black slab without a compositor).
+                plan = lay(laid_at.unwrap_or(now), step);
             }
-            let at = now + FRAME_FX;
-            next = Some(if g.done(at) { base } else { lay(at.max(g.t0), step + 1) });
+            let at = (now + FRAME_FX).max(g.t0);
+            self.glitch_at.set(Some(at));
+            next = Some(if g.done(at) { base } else { lay(at, step + 1) });
         }
         // The rag's next plan (and frame) goes underneath (§4: commit one frame ahead).
         let mut next_img: Option<Arc<RenderImage>> = None;
