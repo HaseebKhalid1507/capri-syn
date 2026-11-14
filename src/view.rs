@@ -3299,6 +3299,7 @@ impl Render for Avatar {
         if pulse {
             invert = !invert;
         }
+        let glow = self.summon_glow(now);
         // What the bubble shows: the text field, a pending prompt, the reply, or the probe.
         let mode = if !hud {
             None
@@ -3537,7 +3538,14 @@ impl Render for Avatar {
             let tail_x = head_l.clamp(lo, hi.max(lo));
             let g = PanelGeom { x, y, w, h, tail_x, tip: (head_l.clamp(tail_x - 9.0, tail_x + 9.0), y + h + TAIL_H) };
             panel_geom = Some(g);
-            let (frame_c, accent_c, bar_c, surface_c) = (if pulse { tone } else { pal.frame }, pal.accent, pal.slash, pal.surface);
+            // Settled after a summon: the border breathes between a warm mix and the tone.
+            let frame_c = match glow {
+                _ if pulse => tone,
+                Some(k) => mix_rgb(mix_rgb(pal.frame, tone, 0.5), tone, k as f32 / 6.0),
+                None => pal.frame,
+            };
+            let warm = pulse || glow.is_some();
+            let (accent_c, bar_c, surface_c) = (pal.accent, pal.slash, pal.surface);
             let bg = canvas(
                 |_, _, _| (),
                 move |_, _, window, _| {
@@ -3549,7 +3557,7 @@ impl Render for Avatar {
                     }
                     // Centred on the edge: the outer half falls outside the X shape, so
                     // 1.5 px shows.
-                    let mut edge = PathBuilder::stroke(px(3.0));
+                    let mut edge = PathBuilder::stroke(px(if warm { 5.0 } else { 3.0 }));
                     edge.add_polygon(&pts, true);
                     if let Ok(p) = edge.build() {
                         window.paint_path(p, with_alpha(frame_c, 0.85));
@@ -3563,6 +3571,7 @@ impl Render for Avatar {
             .top_0()
             .left_0()
             .size_full();
+            let prompt_mode = matches!(mode, PanelMode::Prompt);
             let header_label = if probe {
                 if self.focus.is_focused(window) { "FOCUS PROBE // KEYS OK".to_string() } else { header_label }
             } else {
@@ -3586,7 +3595,7 @@ impl Render for Avatar {
                         .child(tracked(&self.name, 1.8).text_color(rgb(pal.name)))
                         .child(div().ml(px(4.0)).text_color(rgb(pal.slash)).child("/")),
                 )
-                .child(tracked(&header_label, 1.5).text_size(px(9.5)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(pal.dim)))
+                .child(tracked(&header_label, 1.5).text_size(px(9.5)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(if prompt_mode { pal.text } else { pal.dim })))
                 .child(div().flex_1())
                 .child({
                     // Pulsing (a summon just landed): the status chip inverts.
@@ -3601,6 +3610,7 @@ impl Render for Avatar {
                         .child(tracked(&label, 1.5).text_size(px(9.5)).font_weight(FontWeight::BOLD).text_color(rgb(fg)))
                 });
             let caret = matches!(mode, PanelMode::Input { .. });
+            let body_weight = if prompt_mode { FontWeight::BOLD } else { FontWeight::SEMIBOLD };
             let n_lines = lines.len();
             let text_c = pal.text;
             let mut body = div()
@@ -3612,7 +3622,7 @@ impl Render for Avatar {
                 .flex_col()
                 .text_size(px(BODY_FONT))
                 .line_height(px(LINE_H))
-                .font_weight(FontWeight::SEMIBOLD)
+                .font_weight(body_weight)
                 .text_color(rgb(pal.text));
             let caret_bar = move || div().ml(px(1.0)).w(px(2.0)).h(px(BODY_FONT)).bg(rgb(text_c));
             if let Some(ph) = &placeholder {
