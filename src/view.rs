@@ -1343,6 +1343,20 @@ impl Avatar {
         }
     }
 
+    fn hidden_reason(&self) -> Option<&'static str> {
+        if self.parked.is_some() {
+            Some("user")
+        } else if self.brain.as_ref().is_some_and(|h| h.fs != brainview::FsHide::Shown) {
+            Some("fullscreen")
+        } else if !self.hidden {
+            None
+        } else if self.teleport.is_some() {
+            Some("teleport")
+        } else {
+            Some("other")
+        }
+    }
+
     fn status(&self) -> Status {
         if let Some(s) = self.voice_status() {
             return s;
@@ -2635,6 +2649,10 @@ impl Avatar {
             "page": [page, pages],
             "read": self.bubble.as_ref().is_some_and(|b| b.long()),
             "hidden_by_user": self.parked.is_some(),
+            // Why she isn't drawn: "user" (HIDE), "fullscreen" (hid for a fullscreen window:
+            // `hidden_cover` is it), "teleport" (between the legs), "other"; null when shown.
+            "hidden": self.hidden_reason(),
+            "hidden_cover": self.brain.as_ref().filter(|h| h.fs != brainview::FsHide::Shown).and_then(|h| h.fs_cover).map(|w| format!("0x{w:x}")),
             "chip": self.chip_rect.map(|r| [r.0 as i64, r.1 as i64, r.2 as i64, r.3 as i64, r.4 as i64]),
             "reader": reader.map(|(xid, (scroll, max), buttons)| {
                 let g = self.x11.toplevel_rect(xid).map_or((0, 0, 0, 0), |r| (r.x, r.y, r.w, r.h));

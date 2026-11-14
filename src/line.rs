@@ -120,6 +120,8 @@ pub struct Line {
     secret: Option<(u64, Entity<InputState>)>,
     focus: FocusHandle,
     scroll: ScrollHandle,
+    /// ALLOW's box (window px, from the last paint), for tests.
+    allow_box: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
     /// The thread's height cut to whole rows (from the last layout), so at the bottom its top
     /// starts at a row, never half of one under the header.
     fit_h: Option<f32>,
@@ -288,6 +290,7 @@ impl Line {
             secret: None,
             focus,
             scroll: ScrollHandle::new(),
+            allow_box: Default::default(),
             fit_h: None,
             pinned_up: false,
             sent,
@@ -398,6 +401,7 @@ impl Line {
             "renders": self.renders.get(),
             "side": self.side,
             "holding": self.hold_at.is_some(),
+            "allow": self.allow_box.get().map(|b| [f32::from(b.origin.x), f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height)]),
             "risky": self.prompt().is_some_and(risky),
             "note": self.note,
             "prompts": self.snap.prompts.len(),
@@ -1017,8 +1021,13 @@ impl Line {
                     .child(
                         div()
                             .id("allow")
+                            .relative()
                             .cursor_pointer()
                             .child(allow)
+                            .child({
+                                let cell = self.allow_box.clone();
+                                canvas(move |b, _, _| cell.set(Some(b)), |_, _, _, _| {}).absolute().top_0().left_0().size_full()
+                            })
                             // A click allows a benign one; a risky one wants the press held.
                             .on_mouse_down(MouseButton::Left, cx.listener(move |this, _: &MouseDownEvent, window, cx| {
                                 if Instant::now() < this.prompt_at + ARM {
