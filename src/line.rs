@@ -54,6 +54,10 @@ pub struct Snap {
     pub busy: bool,
     pub live: bool,
     pub prompts: Vec<PromptView>,
+    /// She is speaking a spoken reply (Esc hushes her first).
+    pub speaking: bool,
+    /// The mic is held open (Esc cancels: nothing sent).
+    pub listening: bool,
 }
 
 /// The kit's components (the Line's text field), its dark theme and caret policy: set up
@@ -88,6 +92,10 @@ pub enum Ask {
     Height(f32),
     Copy(String),
     OpenUrl(String),
+    /// Esc while she speaks: stop talking (the reply stays in the thread).
+    Hush,
+    /// Esc while the mic is held: nothing is transcribed or sent.
+    CancelListen,
 }
 
 pub type OnAsk = Box<dyn Fn(Ask, &mut App) -> Result<(), String>>;
@@ -523,6 +531,16 @@ impl Line {
             return true;
         }
         match (k.key.as_str(), self.mode) {
+            ("escape", _) if self.snap.listening => {
+                (self.on_ask)(Ask::CancelListen, cx).ok();
+                true
+            }
+            ("escape", _) if self.snap.speaking => {
+                (self.on_ask)(Ask::Hush, cx).ok();
+                self.note = Some("HUSHED · THE REST IS HERE".into());
+                cx.notify();
+                true
+            }
             ("escape", Mode::Text) if self.snap.busy => {
                 if self.esc_at.is_some_and(|t| now < t + ESC_AGAIN) {
                     self.esc_at = None;

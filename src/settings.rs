@@ -121,6 +121,37 @@ pub struct Settings {
     pub music: MusicSettings,
     pub display: DisplaySettings,
     pub mirror: MirrorSettings,
+    pub voice: VoiceSettings,
+}
+
+/// `[voice]`: push-to-talk (hold the talk key) and spoken replies, through the `capri-voice`
+/// sidecar. Off by default. `stt_model`: "small.en" (default) | "base.en" | "medium.en";
+/// `voice`: a Kokoro voice, a blend ("af_bella:0.6,af_nicole:0.4"), "+glitch" for the trace;
+/// `speed`: 0.5..2; `duck`: what other audio does while she listens or speaks: "pause"
+/// (MPRIS pause, then play), "duck" (lowered through PipeWire) or "off".
+#[derive(Clone, Debug, PartialEq)]
+pub struct VoiceSettings {
+    pub enabled: bool,
+    pub stt_model: String,
+    pub voice: String,
+    pub speed: f32,
+    pub duck: String,
+}
+
+impl Default for VoiceSettings {
+    fn default() -> Self {
+        VoiceSettings { enabled: false, stt_model: "small.en".into(), voice: "af_heart".into(), speed: 1.0, duck: "pause".into() }
+    }
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct VoiceRaw {
+    enabled: Option<bool>,
+    stt_model: Option<String>,
+    voice: Option<String>,
+    speed: Option<f64>,
+    duck: Option<String>,
 }
 
 /// `[mirror]`: she faces where she goes. `drag`: turn while dragged (and flung), looking back
@@ -273,6 +304,8 @@ struct FileRaw {
     mirror: Option<MirrorRaw>,
     #[serde(default)]
     drag: Option<DragRaw>,
+    #[serde(default)]
+    voice: Option<VoiceRaw>,
 }
 
 #[derive(Deserialize, Default)]
@@ -409,7 +442,29 @@ impl Settings {
                 session.persona_file = Some(expand_home(f.trim()));
             }
         }
-        let Some(r) = raw.brain else { return Ok(Settings { brain: b, ragdoll, session, music, display, mirror }) };
+        let mut voice = VoiceSettings::default();
+        if let Some(v) = raw.voice {
+            if let Some(e) = v.enabled {
+                voice.enabled = e;
+            }
+            if let Some(m) = v.stt_model.map(|m| m.trim().to_string()) {
+                anyhow::ensure!(["tiny.en", "base.en", "small.en", "medium.en"].contains(&m.as_str()), "voice.stt_model must be \"base.en\", \"small.en\" or \"medium.en\"");
+                voice.stt_model = m;
+            }
+            if let Some(n) = v.voice.map(|n| n.trim().to_string()) {
+                anyhow::ensure!(!n.is_empty() && !n.contains(char::is_whitespace), "voice.voice must be a voice name");
+                voice.voice = n;
+            }
+            if let Some(s) = v.speed {
+                anyhow::ensure!(s.is_finite() && (0.5..=2.0).contains(&s), "voice.speed must be 0.5..2");
+                voice.speed = s as f32;
+            }
+            if let Some(d) = v.duck.map(|d| d.trim().to_ascii_lowercase()) {
+                anyhow::ensure!(["pause", "duck", "off"].contains(&d.as_str()), "voice.duck must be \"pause\", \"duck\" or \"off\"");
+                voice.duck = d;
+            }
+        }
+        let Some(r) = raw.brain else { return Ok(Settings { brain: b, ragdoll, session, music, display, mirror, voice }) };
         if let Some(v) = r.enabled {
             b.enabled = v;
         }
@@ -464,7 +519,7 @@ impl Settings {
         }
         // Drift is a transport (by distance), never drawn from the pool.
         b.arrivals.retain(|p| p.0 != Arrival::Drift);
-        Ok(Settings { brain: b, ragdoll, session, music, display, mirror })
+        Ok(Settings { brain: b, ragdoll, session, music, display, mirror, voice })
     }
 
     /// The file's settings (defaults when there is none). Err: a bad file (keep the old values).
@@ -572,6 +627,11 @@ mod tests {
         assert!(!Settings::parse("[drag]\nmirror = false\n").unwrap().mirror.drag);
         assert!(Settings::parse("[drag]\nmirror = false\n[mirror]\ndrag = true\n").unwrap().mirror.drag);
         assert!(Settings::parse("[mirror]\nidle_every_min = [4, 1]\n").is_err());
+        let v = Settings::parse("[voice]\nenabled = true\nstt_model = \"base.en\"\nvoice = \"bf_emma+glitch\"\nspeed = 1.1\nduck = \"duck\"\n").unwrap().voice;
+        assert_eq!((v.enabled, v.stt_model.as_str(), v.voice.as_str(), v.speed, v.duck.as_str()), (true, "base.en", "bf_emma+glitch", 1.1, "duck"));
+        assert_eq!(Settings::parse("").unwrap().voice, VoiceSettings::default());
+        assert!(Settings::parse("[voice]\nduck = \"loud\"\n").is_err());
+        assert!(Settings::parse("[voice]\nspeed = 3\n").is_err());
         assert!(Settings::parse("[mirror]\nflip = true\n").is_err());
     }
 

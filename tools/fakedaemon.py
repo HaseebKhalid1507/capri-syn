@@ -67,7 +67,15 @@ def stream_turn(user_text, reply, trigger="user", tool=None):
     event({"ev": "idle"})
 
 
+VOICE_REPLY = ("On it, choom. Spike pushed the reader fix eleven minutes ago, and CI went green right after. "
+               "Want me to nudge lynx about the rebase?\n---\nRun 9f8e7d6 · https://github.com/HaseebKhalid1507/capri-syn/actions")
+
+
 def reply_to(text):
+    if text.startswith("[voice"):
+        # A spoken turn (synthetic): a short, speakable reply, the details after the rule.
+        threading.Thread(target=stream_turn, args=(text, VOICE_REPLY), daemon=True).start()
+        return
     r = replies[n_reply[0] % len(replies)]
     n_reply[0] += 1
     tool = ("bash", {"command": "gh run list --branch main --limit 1"}) if "CI" in text else None

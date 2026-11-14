@@ -1,0 +1,570 @@
+#!/usr/bin/env python3
+"""capri-voice: Capri's voice sidecar. It owns the mic, the speech models and the speaker.
+
+The avatar connects to a unix socket ($XDG_RUNTIME_DIR/capri-voice.sock) and talks
+newline-delimited JSON:
+
+  avatar -> here                       here -> avatar
+  {"op":"config", stt_model, voice, speed}
+  {"op":"listen-start"}                {"ev":"mic-open"}  {"ev":"level","v":0..1} (5 Hz)
+  {"op":"listen-stop"}                 {"ev":"mic-closed"} {"ev":"heard","text":..., "why":..., "ms":{...}}
+  {"op":"listen-cancel"}               {"ev":"mic-closed"}
+  {"op":"say","id":n,"text":...}       {"ev":"say-start","id","text","dur_ms","step_ms","shapes"}  {"ev":"say-end","id"}
+  {"op":"hush"}                        {"ev":"hushed"}
+  {"op":"media-hold","mode":"pause|duck|off"}   {"op":"media-release"}
+  {"op":"stats"}                       {"ev":"stats", ...}
+
+Privacy (ADVICE-ux 4.3, hard rules): the capture stream (pw-record) exists only between
+listen-start and listen-stop/cancel; mic-open/mic-closed report that process, not the intent.
+Audio lives in RAM and is dropped after decoding; nothing is written to disk. Everything runs
+on the CPU (whisper.cpp, Kokoro on onnxruntime's CPU provider).
+
+Test hooks (never needed in use): CAPRI_VOICE_SOURCE / CAPRI_VOICE_SINK name PipeWire nodes
+to record from / play to (default: the default ones); CAPRI_VOICE_PLAYERS limits pause to
+these MPRIS players (comma list); CAPRI_VOICE_DUCK_MATCH limits ducking to streams whose
+application name contains it.
+
+Other modes: --render TEXT --voice V --out F.wav (a sample, for the blind listen), --bench.
+"""
+import json, os, re, select, signal, socket, subprocess, sys, threading, time
+
+import numpy as np
+
+HOME = os.path.expanduser('~')
+MODELS = os.environ.get('CAPRI_VOICE_MODELS', f'{HOME}/.local/share/capri-voice/models')
+RUNTIME = os.environ.get('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}')
+SOCK = os.environ.get('CAPRI_VOICE_SOCK', f'{RUNTIME}/capri-voice.sock')
+STATE = os.environ.get('CAPRI_VOICE_STATE', f'{HOME}/.local/state/capri-voice/media.json')
+SOURCE = os.environ.get('CAPRI_VOICE_SOURCE') or None
+SINK = os.environ.get('CAPRI_VOICE_SINK') or None
+PLAYERS = [p for p in os.environ.get('CAPRI_VOICE_PLAYERS', '').split(',') if p]
+DUCK_MATCH = os.environ.get('CAPRI_VOICE_DUCK_MATCH') or None
+THREADS = int(os.environ.get('CAPRI_VOICE_THREADS', '8'))
+STT_FILES = {'tiny.en': 'ggml-tiny.en-q5_1.bin', 'base.en': 'ggml-base.en-q5_1.bin', 'small.en': 'ggml-small.en-q5_1.bin',
+             'medium.en': f'{HOME}/.local/share/pywhispercpp/models/ggml-medium.en-q5_0.bin'}
+VOCAB = 'Capri, choom, Synaps, spike, lynx, polish-e, GPUI, avatarctl, Jawz, i3, Haseeb, bella, avante'
+SAY_FIX = [(r'\bSynaps\b', 'Synapse'), (r'\bGPUI\b', 'G P U I'), (r'\bavatarctl\b', 'avatar control'), (r'\bJawz\b', 'Jaws'),
+           (r'\bi3\b', 'i three'), (r'\bCI\b', 'C I'), (r'\bPR\b', 'P R'), (r'\bchoom\b', 'chewm')]
+MIC_RATE, TTS_RATE, STEP_MS = 16000, 24000, 90
+
+
+def log(*a):
+    print(time.strftime('%H:%M:%S'), *a, file=sys.stderr, flush=True)
+
+
+def now_ms():
+    return time.monotonic() * 1000.0
+
+
+# ---- models ---------------------------------------------------------------------------------
+
+class Stt:
+    def __init__(self, name):
+        from pywhispercpp.model import Model
+        path = STT_FILES.get(name, STT_FILES['small.en'])
+        path = path if path.startswith('/') else f'{MODELS}/{path}'
+        t = now_ms()
+        self.name = name
+        self.m = Model(path, n_threads=THREADS, print_progress=False, print_realtime=False, redirect_whispercpp_logs_to=None)
+        log(f'stt {name} loaded in {now_ms() - t:.0f} ms ({os.path.basename(path)}, {THREADS} threads, CPU)')
+
+    def __call__(self, pcm):
+        # The encoder window cut to the utterance (+1 s), not Whisper's fixed 30 s.
+        ctx = min(1500, int(np.ceil((len(pcm) / MIC_RATE + 1.0) * 50 / 64) * 64))
+        segs = self.m.transcribe(pcm, initial_prompt=VOCAB, no_context=True, single_segment=True, audio_ctx=ctx, temperature=0.0)
+        text = ' '.join(s.text for s in segs).strip()
+        text = re.sub(r'\[[^\]]*\]|\([^)]*\)', '', text).strip()
+        return text
+
+
+class Tts:
+    def __init__(self, model='kokoro-v1.0.int8.onnx'):
+        import onnxruntime as ort
+        from kokoro_onnx import Kokoro
+        t = now_ms()
+        so = ort.SessionOptions()
+        so.intra_op_num_threads = min(THREADS, 6)
+        so.inter_op_num_threads = 1
+        sess = ort.InferenceSession(f'{MODELS}/{model}', so, providers=['CPUExecutionProvider'])
+        self.k = Kokoro.from_session(sess, f'{MODELS}/voices-v1.0.bin')
+        log(f'tts kokoro loaded in {now_ms() - t:.0f} ms ({model}, CPU)')
+
+    def style(self, voice):
+        """'af_heart', 'af_bella:0.6,af_nicole:0.4'; a '+glitch' suffix is the effect."""
+        voice = voice.split('+')[0]
+        if ',' not in voice and ':' not in voice:
+            return voice
+        parts = [p.split(':') for p in voice.split(',')]
+        ws = np.array([float(p[1]) if len(p) > 1 else 1.0 for p in parts])
+        ws = ws / ws.sum()
+        return sum(w * self.k.get_voice_style(p[0]) for w, p in zip(ws, parts))
+
+    def __call__(self, text, voice='af_heart', speed=1.0):
+        said = text
+        for a, b in SAY_FIX:
+            said = re.sub(a, b, said)
+        lang = 'en-gb' if voice.startswith('b') else 'en-us'
+        a, sr = self.k.create(said, voice=self.style(voice), speed=speed, lang=lang)
+        a = np.asarray(a, np.float32)
+        if sr != TTS_RATE:
+            a = np.interp(np.linspace(0, len(a) - 1, int(len(a) * TTS_RATE / sr)), np.arange(len(a)), a).astype(np.float32)
+        if '+glitch' in voice:
+            a = glitch(a)
+        return a
+
+
+def glitch(a, seed=7):
+    """A trace of the machine on the attack: ~140 ms bit-crushed and sample-held, fading into
+    the clean voice, plus two 12 ms ring-modulated stutters. Clean after that."""
+    a = a.copy()
+    n = min(len(a), int(0.14 * TTS_RATE))
+    if n < 10:
+        return a
+    hold = np.repeat(a[:n:3], 3)[:n]
+    crushed = np.round(hold * 12) / 12
+    mix = np.linspace(0.85, 0.0, n) ** 1.5
+    a[:n] = mix * crushed + (1 - mix) * a[:n]
+    rng = np.random.default_rng(seed)
+    for at in rng.integers(int(0.03 * TTS_RATE), max(int(0.03 * TTS_RATE) + 1, min(len(a) - 400, int(0.5 * TTS_RATE))), 2):
+        m = int(0.012 * TTS_RATE)
+        if at + m < len(a):
+            t = np.arange(m) / TTS_RATE
+            a[at:at + m] *= 0.6 + 0.4 * np.sign(np.sin(2 * np.pi * 900 * t))
+    return a
+
+
+def shapes(a):
+    """The mouth track at STEP_MS: 0 closed, 1 small, 2 round, 3 wide, from RMS (smoothed
+    0.25 old + 0.75 new; lower thresholds to stay in a shape than to enter it)."""
+    step = int(TTS_RATE * STEP_MS / 1000)
+    out, sm, cur = [], 0.0, 0
+    peak = float(np.max(np.abs(a))) if len(a) else 1.0
+    g = 0.5 / peak if peak > 0 else 1.0  # loudness relative to the line, not absolute gain
+    for i in range(0, len(a), step):
+        r = float(np.sqrt(np.mean((a[i:i + step] * g) ** 2))) if i < len(a) else 0.0
+        sm = 0.25 * sm + 0.75 * r
+        enter = [0.012, 0.06, 0.15]
+        stay = [0.008, 0.045, 0.12]
+        lvl = 0
+        for k in range(3):
+            if sm > (stay[k] if cur > k else enter[k]):
+                lvl = k + 1
+        cur = lvl
+        out.append(lvl)
+    return out
+
+
+# ---- media ----------------------------------------------------------------------------------
+
+class Media:
+    """Other audio while she listens or speaks: MPRIS pause (then play, only the ones she paused
+    and that are still paused), or PipeWire duck (saved levels restored). Saved to STATE so a
+    crash mid-hold is repaired at the next start."""
+
+    def __init__(self):
+        self.held = None
+        self.restore_saved()
+
+    def _save(self):
+        os.makedirs(os.path.dirname(STATE), exist_ok=True)
+        if self.held:
+            with open(STATE, 'w') as f:
+                json.dump(self.held, f)
+        elif os.path.exists(STATE):
+            os.remove(STATE)
+
+    def restore_saved(self):
+        try:
+            self.held = json.load(open(STATE))
+            log('media: repairing a hold left by a crash:', self.held)
+            self.release()
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            log('media: bad state file', e)
+
+    def hold(self, mode):
+        if self.held or mode == 'off':
+            return
+        if mode == 'pause':
+            players = [p for p in run(['playerctl', '-l']).split() if not PLAYERS or p in PLAYERS]
+            paused = []
+            for p in players:
+                if run(['playerctl', '-p', p, 'status']).strip() == 'Playing':
+                    run(['playerctl', '-p', p, 'pause'])
+                    paused.append(p)
+            self.held = {'mode': 'pause', 'players': paused}
+        elif mode == 'duck':
+            levels = {}
+            for si in sink_inputs():
+                vol = si.get('volume', {})
+                first = next(iter(vol.values()), {}).get('value_percent', '100%') if vol else '100%'
+                levels[str(si['index'])] = first
+                run(['pactl', 'set-sink-input-volume', str(si['index']), '30%'])
+            self.held = {'mode': 'duck', 'levels': levels}
+        self._save()
+        log('media: hold', self.held)
+
+    def release(self):
+        h, self.held = self.held, None
+        if not h:
+            return
+        if h.get('mode') == 'pause':
+            for p in h.get('players', []):
+                if run(['playerctl', '-p', p, 'status']).strip() == 'Paused':
+                    run(['playerctl', '-p', p, 'play'])
+        elif h.get('mode') == 'duck':
+            for idx, v in h.get('levels', {}).items():
+                run(['pactl', 'set-sink-input-volume', idx, v])
+        self._save()
+        log('media: released', h)
+
+
+def run(cmd):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=3).stdout
+    except Exception:
+        return ''
+
+
+def sink_inputs():
+    try:
+        items = json.loads(run(['pactl', '-f', 'json', 'list', 'sink-inputs']) or '[]')
+    except ValueError:
+        return []
+    out = []
+    for si in items:
+        props = si.get('properties', {})
+        name = (props.get('application.name') or '') + ' ' + (props.get('media.name') or '')
+        if 'capri-voice' in name:
+            continue
+        if DUCK_MATCH and DUCK_MATCH not in name:
+            continue
+        out.append(si)
+    return out
+
+
+# ---- the sidecar ----------------------------------------------------------------------------
+
+class Voice:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.conn = None
+        self.cfg = {'stt_model': os.environ.get('CAPRI_VOICE_STT', 'small.en'), 'voice': 'af_heart', 'speed': 1.0}
+        self.stt = Stt(self.cfg['stt_model'])
+        self.tts = Tts()
+        self.media = Media()
+        self.release_timer = None
+        self.rec = None          # the pw-record process: the open capture stream
+        self.rec_buf = []
+        self.rec_stop_at = None
+        self.cancelled = False
+        self.say_q = []          # (id, text, t_recv)
+        self.play_q = []         # (id, text, pcm, shapes, t_recv, synth_ms)
+        self.player = None       # the pw-play process now playing
+        self.hush_gen = 0
+        self.cv = threading.Condition(self.lock)
+        self.turns = []          # timings, last 20
+        self.cur = {}
+        threading.Thread(target=self._synth_loop, daemon=True).start()
+        threading.Thread(target=self._play_loop, daemon=True).start()
+
+    # -- out
+    def emit(self, **ev):
+        line = (json.dumps(ev) + '\n').encode()
+        c = self.conn
+        if c is None:
+            return
+        try:
+            c.sendall(line)
+        except OSError:
+            pass
+
+    # -- mic
+    def listen_start(self):
+        if self.rec is not None:
+            return
+        self.cur = {'t_start': now_ms()}
+        cmd = ['pw-record', '--rate', str(MIC_RATE), '--channels', '1', '--format', 's16', '--raw',
+               '-P', '{ application.name = "capri-voice" media.name = "capri-voice push-to-talk" }']
+        if SOURCE:
+            cmd += ['--target', SOURCE]
+        self.rec_buf, self.rec_stop_at, self.cancelled = [], None, False
+        self.rec = subprocess.Popen(cmd + ['-'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
+        threading.Thread(target=self._rec_loop, args=(self.rec,), daemon=True).start()
+        log('mic: capture starting', SOURCE or '(default source)')
+
+    def _rec_loop(self, p):
+        opened, last_lvl, fd = False, 0.0, p.stdout.fileno()
+        while True:
+            if self.rec_stop_at is not None and now_ms() >= self.rec_stop_at:
+                break
+            r, _, _ = select.select([fd], [], [], 0.02)
+            if not r:
+                if p.poll() is not None:
+                    break
+                continue
+            chunk = os.read(fd, 3200)
+            if not chunk:
+                break
+            if not opened:
+                opened = True
+                self.cur['t_mic_open'] = now_ms()
+                self.emit(ev='mic-open')
+                log(f"mic: open (+{self.cur['t_mic_open'] - self.cur['t_start']:.0f} ms)")
+            if not self.cancelled:
+                self.rec_buf.append(chunk)
+            t = now_ms()
+            if t - last_lvl >= 200:
+                last_lvl = t
+                x = np.frombuffer(chunk[:len(chunk) // 2 * 2], np.int16).astype(np.float32) / 32768.0
+                self.emit(ev='level', v=round(min(1.0, float(np.sqrt(np.mean(x * x))) * 8), 3) if len(x) else 0.0)
+        p.terminate()
+        try:
+            p.wait(1)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            p.wait()
+        self.rec = None
+        self.cur['t_mic_closed'] = now_ms()
+        self.emit(ev='mic-closed')
+        log('mic: closed (process gone)')
+        if self.cancelled:
+            self.rec_buf = []
+            return
+        pcm = np.frombuffer(b''.join(self.rec_buf), np.int16).astype(np.float32) / 32768.0
+        self.rec_buf = []
+        self._heard(pcm)
+
+    def listen_stop(self):
+        self.cur['t_keyup'] = now_ms()
+        if self.rec is None:
+            return
+        # A short tail so the last consonant survives.
+        self.rec_stop_at = now_ms() + 120
+
+    def listen_cancel(self):
+        self.cancelled = True
+        self.rec_buf = []
+        self.rec_stop_at = now_ms()
+
+    def _heard(self, pcm):
+        c = self.cur
+        dur = len(pcm) / MIC_RATE
+        # Gate on voice activity: Whisper invents short phrases from silence.
+        fr = int(0.02 * MIC_RATE)
+        n = len(pcm) // fr
+        rms = np.sqrt(np.mean(pcm[:n * fr].reshape(n, fr) ** 2, axis=1)) if n else np.zeros(0)
+        floor = float(np.percentile(rms, 20)) if n else 0.0
+        voiced = float(np.sum(rms > max(0.008, floor * 3)) * 0.02)
+        if voiced < 0.3:
+            del pcm
+            c['t_heard'] = now_ms()
+            self.emit(ev='heard', text='', why="DIDN'T CATCH THAT", ms=self._ms())
+            log(f'heard: nothing ({voiced:.2f} s voiced of {dur:.1f} s)')
+            return
+        t = now_ms()
+        text = self.stt(pcm)
+        del pcm  # dropped after decoding (never written anywhere)
+        c['stt_ms'] = now_ms() - t
+        c['t_heard'] = now_ms()
+        self.emit(ev='heard', text=text, why='' if text else "DIDN'T CATCH THAT", ms=self._ms())
+        log(f"heard: {len(text)} chars in {c['stt_ms']:.0f} ms from {dur:.1f} s ({voiced:.1f} s voiced)")
+
+    def _ms(self):
+        c = self.cur
+        d = lambda a, b: round(c[b] - c[a]) if a in c and b in c else None
+        return {'keyup_to_closed': d('t_keyup', 't_mic_closed'), 'stt': round(c['stt_ms']) if 'stt_ms' in c else None,
+                'keyup_to_heard': d('t_keyup', 't_heard'), 'press_to_open': d('t_start', 't_mic_open')}
+
+    # -- speech
+    def say(self, sid, text):
+        with self.cv:
+            self.say_q.append((sid, text, now_ms(), self.hush_gen))
+            self.cv.notify_all()
+
+    def hush(self):
+        with self.cv:
+            self.hush_gen += 1
+            self.say_q.clear()
+            self.play_q.clear()
+            p = self.player
+            self.cv.notify_all()
+        if p is not None:
+            p.kill()
+        self.emit(ev='hushed')
+        log('hush')
+
+    def _synth_loop(self):
+        while True:
+            with self.cv:
+                while not self.say_q:
+                    self.cv.wait()
+                sid, text, t_recv, gen = self.say_q.pop(0)
+            t = now_ms()
+            try:
+                pcm = self.tts(text, self.cfg['voice'], float(self.cfg['speed']))
+            except Exception as e:
+                log('tts failed:', e)
+                self.emit(ev='say-end', id=sid, error=str(e))
+                continue
+            synth = now_ms() - t
+            with self.cv:
+                if gen != self.hush_gen:
+                    continue
+                self.play_q.append((sid, text, pcm, shapes(pcm), t_recv, synth, gen))
+                self.cv.notify_all()
+
+    def _play_loop(self):
+        while True:
+            with self.cv:
+                while not self.play_q:
+                    self.cv.wait()
+                sid, text, pcm, shp, t_recv, synth, gen = self.play_q.pop(0)
+                if gen != self.hush_gen:
+                    continue
+                cmd = ['pw-play', '--rate', str(TTS_RATE), '--channels', '1', '--format', 's16', '--raw',
+                       '-P', '{ application.name = "capri-voice" media.name = "capri-voice speech" }']
+                if SINK:
+                    cmd += ['--target', SINK]
+                p = subprocess.Popen(cmd + ['-'], stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                self.player = p
+            data = (np.clip(pcm, -1, 1) * 32767).astype(np.int16).tobytes()
+            t0 = now_ms()
+            self.emit(ev='say-start', id=sid, text=text, dur_ms=round(len(pcm) / TTS_RATE * 1000), step_ms=STEP_MS, shapes=shp,
+                      ms={'queued_to_audio': round(t0 - t_recv), 'synth': round(synth)})
+            log(f'say {sid}: {len(text)} chars, synth {synth:.0f} ms, recv->audio {t0 - t_recv:.0f} ms, {len(pcm) / TTS_RATE:.2f} s')
+            try:
+                p.stdin.write(data)
+                p.stdin.close()
+            except (BrokenPipeError, ValueError):
+                pass
+            p.wait()
+            with self.cv:
+                self.player = None
+                hushed = gen != self.hush_gen
+            if not hushed:
+                self.emit(ev='say-end', id=sid)
+
+    # -- protocol
+    def handle(self, msg):
+        op = msg.get('op')
+        if op == 'config':
+            for k in ('voice', 'speed'):
+                if k in msg:
+                    self.cfg[k] = msg[k]
+            if msg.get('stt_model') and msg['stt_model'] != self.stt.name:
+                self.cfg['stt_model'] = msg['stt_model']
+                self.stt = Stt(msg['stt_model'])
+            self.emit(ev='ready', cfg=self.cfg)
+        elif op == 'listen-start':
+            self.listen_start()
+        elif op == 'listen-stop':
+            self.listen_stop()
+        elif op == 'listen-cancel':
+            self.listen_cancel()
+        elif op == 'say':
+            self.say(msg.get('id', 0), msg.get('text', ''))
+        elif op == 'hush':
+            self.hush()
+        elif op == 'media-hold':
+            if self.release_timer is not None:
+                self.release_timer.cancel()
+                self.release_timer = None
+            self.media.hold(msg.get('mode', 'pause'))
+        elif op == 'media-release':
+            # Other audio comes back a beat after her last word (after_ms), or now.
+            if self.release_timer is not None:
+                self.release_timer.cancel()
+            after = float(msg.get('after_ms', 0)) / 1000.0
+            if after > 0:
+                self.release_timer = threading.Timer(after, self.media.release)
+                self.release_timer.daemon = True
+                self.release_timer.start()
+            else:
+                self.release_timer = None
+                self.media.release()
+        elif op == 'stats':
+            self.emit(ev='stats', mic_open=self.rec is not None, speaking=self.player is not None, cfg=self.cfg)
+        else:
+            self.emit(ev='error', why=f'unknown op {op!r}')
+
+    def serve(self):
+        if os.path.exists(SOCK):
+            os.remove(SOCK)
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.bind(SOCK)
+        os.chmod(SOCK, 0o600)
+        srv.listen(2)
+        log('listening on', SOCK)
+        while True:
+            c, _ = srv.accept()
+            old, self.conn = self.conn, c
+            if old is not None:
+                try:
+                    old.close()
+                except OSError:
+                    pass
+            threading.Thread(target=self._client, args=(c,), daemon=True).start()
+
+    def _client(self, c):
+        log('avatar connected')
+        buf = b''
+        while True:
+            try:
+                d = c.recv(4096)
+            except OSError:
+                d = b''
+            if not d:
+                break
+            buf += d
+            while b'\n' in buf:
+                line, buf = buf.split(b'\n', 1)
+                try:
+                    self.handle(json.loads(line))
+                except Exception as e:
+                    log('bad message:', e)
+        log('avatar gone')
+        if self.conn is c:
+            self.conn = None
+            # Her end went away: the mic closes, she stops, other audio comes back.
+            if self.rec is not None:
+                self.listen_cancel()
+            self.hush()
+            self.media.release()
+
+
+def write_wav(path, a, rate=TTS_RATE):
+    import wave
+    with wave.open(path, 'wb') as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes((np.clip(a, -1, 1) * 32767).astype(np.int16).tobytes())
+
+
+def main():
+    args = sys.argv[1:]
+    if args[:1] == ['--render']:
+        # --render TEXT --voice V [--speed S] --out F.wav  (a sample: her TTS, never the mic)
+        text = args[1]
+        opt = dict(zip(args[2::2], args[3::2]))
+        tts = Tts(opt.get('--model', 'kokoro-v1.0.int8.onnx'))
+        parts = [tts(s, opt.get('--voice', 'af_heart'), float(opt.get('--speed', '1.0'))) for s in text.split(' || ')]
+        gap = np.zeros(int(0.45 * TTS_RATE), np.float32)
+        out = np.concatenate([x for p in parts for x in (p, gap)][:-1])
+        write_wav(opt['--out'], out)
+        print(opt['--out'], f'{len(out) / TTS_RATE:.1f} s')
+        return
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    v = Voice()
+    try:
+        v.serve()
+    finally:
+        v.media.release()
+        if v.rec is not None:
+            v.rec.kill()
+
+
+if __name__ == '__main__':
+    main()

@@ -1930,6 +1930,7 @@ impl Avatar {
             Ok(s) => {
                 self.rag_strength = crate::ragdoll::Strength(s.ragdoll.strength);
                 self.mirror_cfg = s.mirror.clone();
+                self.voice.cfg = s.voice.clone();
                 if crate::env_composited().is_none() && self.x11.force_composited(s.display.composited) {
                     elog!("synaps-avatar: settings: {} mode", if self.x11.composited() { "alpha" } else { "shape" });
                     self.alpha_switched();

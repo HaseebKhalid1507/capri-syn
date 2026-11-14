@@ -9,6 +9,8 @@ mod brainview;
 mod ragview;
 #[path = "lineview.rs"]
 mod lineview;
+#[path = "voiceview.rs"]
+mod voiceview;
 
 use crate::anim::{Animator, Mood, Rng, Seq};
 use crate::control::Command;
@@ -517,6 +519,8 @@ pub struct Avatar {
     line: Option<lineview::LineWin>,
     /// The summon key went down then (`talk press`): a tap or a hold at release.
     talk_down: Option<Instant>,
+    /// Push-to-talk and spoken replies (the `capri-voice` sidecar).
+    voice: voiceview::VoiceState,
     /// What he sent this run, oldest first (the Line's ↑).
     sent: Vec<String>,
     /// A missed reply (or a refused message): one line on her tag until he acknowledges it.
@@ -648,6 +652,7 @@ impl Avatar {
             last_turn: None,
             turner: Default::default(),
             mirror_cfg: crate::settings::Settings::load().map(|s| s.mirror).unwrap_or_default(),
+            voice: voiceview::VoiceState::new(crate::settings::Settings::load().map(|s| s.voice).unwrap_or_default()),
             art_right,
             flippable,
             t_start: init.t_start,
@@ -1225,6 +1230,9 @@ impl Avatar {
         if let Some(i) = self.music_frame() {
             return (i, None);
         }
+        if let Some(i) = self.voice_layer() {
+            return (i, None);
+        }
         if self.sitting()
             && let Some(p) = self.perch_spec()
         {
@@ -1333,6 +1341,9 @@ impl Avatar {
     }
 
     fn status(&self) -> Status {
+        if let Some(s) = self.voice_status() {
+            return s;
+        }
         if let (Some(_), Some(spec)) = (&self.music, self.music_spec()) {
             return Status {
                 label: spec.status.clone().unwrap_or_else(|| "LISTENING".into()),
@@ -1463,6 +1474,7 @@ impl Avatar {
             }
         };
         take(self.anim.deadline());
+        take(self.voice_deadline(now));
         if !self.anim.busy() {
             take(self.next_activity);
         }
@@ -1544,6 +1556,7 @@ impl Avatar {
             self.sliver = None;
         }
         let mut dirty = self.anim.tick(now);
+        dirty |= self.voice_tick(now);
         dirty |= self.step_turn(now);
         if let Some((at, m)) = self.mood_then
             && at <= now
@@ -2054,6 +2067,7 @@ impl Avatar {
                     Ok(mut v) => {
                         v["line"] = line;
                         v["unread"] = serde_json::json!(self.unread.as_ref().map(|u| serde_json::json!({ "n": u.n, "text": u.text, "refused": u.refused })));
+                        v["voice"] = self.voice_state_json();
                         v.to_string()
                     }
                     Err(_) => s,
@@ -2124,7 +2138,7 @@ impl Avatar {
                 if press {
                     self.talk_press(cx)
                 } else {
-                    self.talk_release()
+                    self.talk_release(cx)
                 }
             }
             Command::LineClose => {
@@ -2869,6 +2883,10 @@ impl Avatar {
                 width: 0.0,
             });
         }
+        // A spoken turn: its sentences go to the sidecar; the bubble is the caption.
+        if self.voice_reply(b, new_turn) {
+            return;
+        }
         if let Some(Some((t0, got))) = &mut self.timing
             && !*got
             && !b.reply.is_empty()
@@ -3461,6 +3479,10 @@ impl Avatar {
             self.schedule(cx);
         }
         let Some(head) = self.hit(ev.position) else { return };
+        // A click on her stops her talking (barge-in); the press goes on as usual.
+        if self.voice_speaking() {
+            self.voice_hush("click");
+        }
         // Tests drive her with synthetic taps only: a real press in a recording means a person
         // touched her (the clip is thrown away).
         elog!("synaps-avatar: real pointer press ({:?}, {})", ev.button, if head { "head" } else { "body" });
@@ -4573,7 +4595,10 @@ impl Render for Avatar {
                         // A turn another session woke is theirs, not his.
                         Some(e) => match crate::session::origin(e) {
                             Some((who, _, text)) => format!("⇄ {who} › {}", crate::session::one_line(&text, 24)),
-                            None => format!("YOU › {}", crate::session::one_line(e, 26)),
+                            None => match crate::voice::spoken(e) {
+                                Some(said) => format!("◉ YOU › {}", crate::session::one_line(said, 24)),
+                                None => format!("YOU › {}", crate::session::one_line(e, 26)),
+                            },
                         },
                         None => "INCOMING TRANSMISSION".into(),
                     };

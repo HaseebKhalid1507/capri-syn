@@ -1,0 +1,540 @@
+//! Voice, from the avatar's side: push-to-talk on the talk key, the `capri-voice` sidecar link,
+//! the truthful `● MIC` tag, spoken replies with captions and lip-sync, barge-in. A child
+//! module of `view`. The sidecar owns the mic and the models; nothing here touches audio.
+
+use super::*;
+use crate::settings::VoiceSettings;
+use crate::voice::{self, Speech};
+use std::io::{BufRead, Write};
+use std::os::unix::net::UnixStream;
+
+/// Key-up waits this long before it counts: X auto-repeat sends release/press pairs.
+const UP_DEBOUNCE: Duration = Duration::from_millis(60);
+/// Other audio comes back this long after her last word.
+const RESTORE_MS: u64 = 800;
+
+pub(super) struct Lips {
+    t0: Instant,
+    step: Duration,
+    shapes: Vec<u8>,
+}
+
+#[derive(Default)]
+pub(super) struct VoiceState {
+    pub cfg: VoiceSettings,
+    link: Option<UnixStream>,
+    generation: u64,
+    /// listen-start sent (the hold), not yet stopped.
+    asked: Option<Instant>,
+    /// The sidecar says the capture stream is open, since.
+    pub mic: Option<Instant>,
+    level: f32,
+    transcribing: bool,
+    /// The next new turn is the one he spoke.
+    pending: bool,
+    /// The spoken turn, and what of it is said.
+    turn: Option<u64>,
+    speech: Speech,
+    sent: u32,
+    ended: u32,
+    turn_done: bool,
+    reply: String,
+    lips: Option<Lips>,
+    held: bool,
+    /// A key-up waiting out the auto-repeat window.
+    up_at: Option<Instant>,
+    /// Timings of the last turn (ms), for `voice stats`.
+    keyup: Option<Instant>,
+    heard_at: Option<Instant>,
+    submit_at: Option<Instant>,
+    pub stats: serde_json::Map<String, serde_json::Value>,
+}
+
+impl VoiceState {
+    pub fn new(cfg: VoiceSettings) -> VoiceState {
+        VoiceState { cfg, ..Default::default() }
+    }
+}
+
+fn sock_path() -> std::path::PathBuf {
+    if let Some(p) = std::env::var_os("CAPRI_VOICE_SOCK") {
+        return p.into();
+    }
+    let rt = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir);
+    rt.join("capri-voice.sock")
+}
+
+impl Avatar {
+    pub(super) fn voice_on(&self) -> bool {
+        self.voice.cfg.enabled
+    }
+
+    pub(super) fn voice_speaking(&self) -> bool {
+        self.voice.turn.is_some() && self.voice.sent > self.voice.ended
+    }
+
+    pub(super) fn voice_listening(&self) -> bool {
+        self.voice.asked.is_some() || self.voice.mic.is_some()
+    }
+
+    /// Connect to the sidecar if not yet (it is started on its own: a systemd user unit).
+    pub(super) fn voice_connect(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.voice.link.is_some() {
+            return true;
+        }
+        let path = sock_path();
+        let s = match UnixStream::connect(&path) {
+            Ok(s) => s,
+            Err(e) => {
+                elog!("synaps-avatar: voice: no sidecar at {} ({e})", path.display());
+                return false;
+            }
+        };
+        let Ok(r) = s.try_clone() else { return false };
+        self.voice.generation += 1;
+        let generation = self.voice.generation;
+        let (tx, rx) = async_channel::unbounded::<serde_json::Value>();
+        std::thread::Builder::new()
+            .name("voice-rx".into())
+            .spawn(move || {
+                for line in std::io::BufReader::new(r).lines() {
+                    let Ok(l) = line else { break };
+                    if let Ok(v) = serde_json::from_str(&l)
+                        && tx.send_blocking(v).is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+            .ok();
+        cx.spawn(async move |this, cx| {
+            while let Ok(v) = rx.recv().await {
+                if this.update(cx, |a, cx| a.voice_event(generation, v, cx)).is_err() {
+                    return;
+                }
+            }
+            this.update(cx, |a, cx| a.voice_gone(generation, cx)).ok();
+        })
+        .detach();
+        self.voice.link = Some(s);
+        let c = &self.voice.cfg;
+        let cfg = serde_json::json!({ "op": "config", "stt_model": c.stt_model, "voice": c.voice, "speed": c.speed });
+        self.voice_send(cfg);
+        elog!("synaps-avatar: voice: sidecar connected ({})", path.display());
+        self.voice.link.is_some()
+    }
+
+    fn voice_send(&mut self, v: serde_json::Value) {
+        let Some(s) = &mut self.voice.link else { return };
+        let mut line = v.to_string();
+        line.push('\n');
+        if let Err(e) = s.write_all(line.as_bytes()) {
+            elog!("synaps-avatar: voice: sidecar write failed: {e}");
+            self.voice.link = None;
+        }
+    }
+
+    fn voice_gone(&mut self, generation: u64, cx: &mut Context<Self>) {
+        if generation != self.voice.generation {
+            return;
+        }
+        elog!("synaps-avatar: voice: sidecar gone (its mic is closed with it)");
+        self.voice.link = None;
+        self.voice.mic = None;
+        self.voice.asked = None;
+        self.voice.transcribing = false;
+        self.voice_stop_speech();
+        self.hint = Some(("VOICE OFF · SIDECAR GONE".into(), Instant::now() + Duration::from_secs(4)));
+        self.voice_changed(cx);
+    }
+
+    fn voice_changed(&mut self, cx: &mut Context<Self>) {
+        let now = Instant::now();
+        self.relayer(now);
+        self.line_push(cx);
+        cx.notify();
+        self.schedule(cx);
+    }
+
+    // ---- the talk key ---------------------------------------------------------------------
+
+    /// A fresh press (not an auto-repeat): she stops talking at once, and a hold past the tap
+    /// time opens the mic.
+    pub(super) fn voice_press(&mut self, t0: Instant, cx: &mut Context<Self>) {
+        if self.voice_speaking() {
+            self.voice_hush("talk key");
+        }
+        if !self.voice_on() {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_millis(lineview::TAP_MS as u64)).await;
+            this.update(cx, |a, cx| a.voice_hold(t0, cx)).ok();
+        })
+        .detach();
+    }
+
+    /// Still held at the tap time: listen (the stream opens only now, on his act).
+    fn voice_hold(&mut self, t0: Instant, cx: &mut Context<Self>) {
+        if self.talk_down != Some(t0) || self.voice.asked.is_some() {
+            return;
+        }
+        // Secrets and approvals are never heard.
+        if self.prompt_ui.as_ref().is_some_and(|p| p.view.secret) || self.input.as_ref().is_some_and(|i| i.secret.is_some()) {
+            self.hint = Some(("NO MIC · A SECRET IS ON SCREEN".into(), Instant::now() + Duration::from_secs(3)));
+            cx.notify();
+            return;
+        }
+        if !self.voice_connect(cx) {
+            self.hint = Some(("VOICE OFF · START capri-voice".into(), Instant::now() + Duration::from_secs(4)));
+            cx.notify();
+            self.schedule(cx);
+            return;
+        }
+        let mode = self.voice.cfg.duck.clone();
+        self.voice_send(serde_json::json!({ "op": "media-hold", "mode": mode }));
+        self.voice.held = true;
+        self.voice_send(serde_json::json!({ "op": "listen-start" }));
+        self.voice.asked = Some(Instant::now());
+        elog!("synaps-avatar: voice: hold: listening");
+        self.voice_changed(cx);
+    }
+
+    /// Key-up, after the auto-repeat window: a hold stops listening (and sends what was heard).
+    pub(super) fn voice_up(&mut self, cx: &mut Context<Self>) {
+        let at = Instant::now();
+        self.voice.up_at = Some(at);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(UP_DEBOUNCE).await;
+            this.update(cx, |a, cx| {
+                if a.voice.up_at == Some(at) {
+                    a.voice.up_at = None;
+                    a.voice_released(at, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// A press inside the key-up window: an auto-repeat pair, not a new press.
+    pub(super) fn voice_repeat(&mut self) -> bool {
+        self.voice.up_at.take().is_some()
+    }
+
+    fn voice_released(&mut self, at: Instant, cx: &mut Context<Self>) {
+        self.talk_down = None;
+        if self.voice.asked.take().is_none() {
+            return;
+        }
+        self.voice.keyup = Some(at);
+        self.voice.transcribing = true;
+        self.voice_send(serde_json::json!({ "op": "listen-stop" }));
+        elog!("synaps-avatar: voice: key up: transcribing");
+        self.voice_changed(cx);
+    }
+
+    /// Esc while holding: nothing is transcribed or sent.
+    pub(super) fn voice_cancel(&mut self, cx: &mut Context<Self>) {
+        if self.voice.asked.take().is_some() || self.voice.mic.is_some() {
+            self.voice_send(serde_json::json!({ "op": "listen-cancel" }));
+            self.voice_send(serde_json::json!({ "op": "media-release" }));
+            self.voice.held = false;
+            self.hint = Some(("CANCELLED · NOTHING SENT".into(), Instant::now() + Duration::from_secs(3)));
+            self.voice_changed(cx);
+        }
+    }
+
+    /// Stop talking now (the key, Esc, a click). The reply keeps arriving in the thread.
+    pub(super) fn voice_hush(&mut self, why: &str) {
+        self.voice_send(serde_json::json!({ "op": "hush" }));
+        elog!("synaps-avatar: voice: hushed ({why})");
+        self.voice_stop_speech();
+        self.hint = Some(("■ HUSHED · REST IS ON THE LINE".into(), Instant::now() + Duration::from_secs(4)));
+    }
+
+    fn voice_stop_speech(&mut self) {
+        let was = self.voice.turn.is_some();
+        self.voice.speech = Speech::default();
+        self.voice.speech.feed("", true);
+        self.voice.sent = 0;
+        self.voice.ended = 0;
+        self.voice.lips = None;
+        if was {
+            self.voice.turn = None;
+            self.voice_caption_done();
+        }
+        if self.voice.held {
+            self.voice.held = false;
+            self.voice_send(serde_json::json!({ "op": "media-release", "after_ms": RESTORE_MS }));
+        }
+    }
+
+    // ---- the sidecar's events -------------------------------------------------------------
+
+    fn voice_event(&mut self, generation: u64, v: serde_json::Value, cx: &mut Context<Self>) {
+        if generation != self.voice.generation {
+            return;
+        }
+        let now = Instant::now();
+        let ev = v.get("ev").and_then(|e| e.as_str()).unwrap_or("");
+        match ev {
+            "mic-open" => {
+                self.voice.mic = Some(now);
+                if let Some(a) = self.voice.asked {
+                    self.voice.stats.insert("hold_to_mic_ms".into(), ((now - a).as_millis() as u64).into());
+                }
+                self.voice_changed(cx);
+            }
+            "level" => {
+                self.voice.level = v.get("v").and_then(|x| x.as_f64()).unwrap_or(0.0) as f32;
+                self.line_push(cx);
+                cx.notify();
+            }
+            "mic-closed" => {
+                self.voice.mic = None;
+                self.voice.level = 0.0;
+                self.voice_changed(cx);
+            }
+            "heard" => {
+                self.voice.transcribing = false;
+                self.voice.heard_at = Some(now);
+                let text = v.get("text").and_then(|t| t.as_str()).unwrap_or("").trim().to_string();
+                if let Some(ms) = v.get("ms").and_then(|m| m.as_object()) {
+                    for (k, x) in ms {
+                        self.voice.stats.insert(format!("sidecar_{k}"), x.clone());
+                    }
+                }
+                if let Some(k) = self.voice.keyup {
+                    self.voice.stats.insert("keyup_to_heard_ms".into(), ((now - k).as_millis() as u64).into());
+                }
+                if text.is_empty() {
+                    let why = v.get("why").and_then(|t| t.as_str()).filter(|w| !w.is_empty()).unwrap_or("DIDN'T CATCH THAT").to_string();
+                    self.hint = Some((why, now + Duration::from_secs(3)));
+                    self.voice_send(serde_json::json!({ "op": "media-release" }));
+                    self.voice.held = false;
+                } else {
+                    elog!("synaps-avatar: voice: heard {} chars", text.chars().count());
+                    self.voice.pending = true;
+                    self.voice.submit_at = Some(now);
+                    match self.send(voice::wrap(&text)) {
+                        Ok(()) => self.ack_unread(),
+                        Err(e) => {
+                            self.voice.pending = false;
+                            self.voice_send(serde_json::json!({ "op": "media-release" }));
+                            self.voice.held = false;
+                            self.unread = Some(lineview::Unread { n: 1, text: format!("NOT SENT ({e}) · \"{text}\""), refused: true });
+                        }
+                    }
+                }
+                self.voice_changed(cx);
+            }
+            "say-start" => {
+                let id = v.get("id").and_then(|x| x.as_u64()).unwrap_or(0);
+                if self.voice.turn.is_none_or(|t| t != id) {
+                    return;
+                }
+                if !self.voice.stats.contains_key("keyup_to_audio_ms")
+                    && let Some(k) = self.voice.keyup
+                {
+                    self.voice.stats.insert("keyup_to_audio_ms".into(), ((now - k).as_millis() as u64).into());
+                    if let Some(s) = self.voice.submit_at {
+                        self.voice.stats.insert("submit_to_audio_ms".into(), ((now - s).as_millis() as u64).into());
+                    }
+                    if let Some(ms) = v.get("ms").and_then(|m| m.as_object()) {
+                        for (k, x) in ms {
+                            self.voice.stats.insert(format!("say1_{k}"), x.clone());
+                        }
+                    }
+                    elog!("timing: voice: {}", serde_json::Value::Object(self.voice.stats.clone()));
+                }
+                let step = Duration::from_millis(v.get("step_ms").and_then(|x| x.as_u64()).unwrap_or(90));
+                let shapes: Vec<u8> = v.get("shapes").and_then(|x| x.as_array()).map(|a| a.iter().map(|s| s.as_u64().unwrap_or(0) as u8).collect()).unwrap_or_default();
+                self.voice.lips = Some(Lips { t0: now, step, shapes });
+                let text = v.get("text").and_then(|t| t.as_str()).unwrap_or("").to_string();
+                self.voice_caption(&text, now);
+                self.voice_changed(cx);
+            }
+            "say-end" => {
+                let id = v.get("id").and_then(|x| x.as_u64()).unwrap_or(0);
+                if self.voice.turn != Some(id) {
+                    return;
+                }
+                self.voice.ended += 1;
+                if self.voice.ended >= self.voice.sent {
+                    self.voice.lips = None;
+                    if self.voice.turn_done {
+                        self.voice_finish();
+                    }
+                }
+                self.voice_changed(cx);
+            }
+            "ready" | "hushed" | "stats" => {}
+            "error" => elog!("synaps-avatar: voice: sidecar: {v}"),
+            _ => {}
+        }
+    }
+
+    /// The reply of a turn, as it streams: a spoken turn's sentences go to the sidecar.
+    /// True when the turn is spoken (the bubble shows captions, not the stream).
+    pub(super) fn voice_reply(&mut self, b: &crate::session::Body, new_turn: bool) -> bool {
+        if new_turn {
+            let spoken = self.voice.pending && b.echo.as_deref().and_then(voice::spoken).is_some();
+            if self.voice.turn.is_some() {
+                self.voice_hush("new turn");
+            }
+            self.voice.pending = false;
+            if !spoken || self.voice.link.is_none() {
+                return false;
+            }
+            self.voice.turn = Some(b.turn);
+            self.voice.speech = Speech::default();
+            self.voice.sent = 0;
+            self.voice.ended = 0;
+            self.voice.turn_done = false;
+            self.voice.stats.remove("keyup_to_audio_ms");
+            if let Some(s) = self.voice.submit_at {
+                self.voice.stats.insert("submit_to_turn_ms".into(), (s.elapsed().as_millis() as u64).into());
+            }
+        }
+        if self.voice.turn != Some(b.turn) {
+            return false;
+        }
+        self.voice.reply = b.reply.clone();
+        let first_text = self.voice.sent == 0 && !b.raw.trim().is_empty() && !self.voice.stats.contains_key("submit_to_text_ms");
+        if first_text && let Some(s) = self.voice.submit_at {
+            self.voice.stats.insert("submit_to_text_ms".into(), (s.elapsed().as_millis() as u64).into());
+        }
+        for s in self.voice.speech.feed(&b.raw, !b.busy) {
+            let id = b.turn;
+            self.voice_send(serde_json::json!({ "op": "say", "id": id, "text": s }));
+            self.voice.sent += 1;
+        }
+        if !b.busy {
+            self.voice.turn_done = true;
+            if self.voice.ended >= self.voice.sent {
+                self.voice_finish();
+            }
+        }
+        true
+    }
+
+    /// Her last word: other audio comes back, the bubble gets the whole reply.
+    fn voice_finish(&mut self) {
+        self.voice.turn = None;
+        self.voice.lips = None;
+        if self.voice.held {
+            self.voice.held = false;
+            self.voice_send(serde_json::json!({ "op": "media-release", "after_ms": RESTORE_MS }));
+        }
+        self.voice_caption_done();
+    }
+
+    fn voice_caption(&mut self, text: &str, now: Instant) {
+        let _ = now;
+        let Some(bb) = self.bubble.as_mut().filter(|x| x.stream) else { return };
+        bb.text = text.chars().collect();
+        bb.shown = bb.text.len();
+        bb.wrap = None;
+        bb.page = None;
+        bb.more = true;
+        bb.collapsed = false;
+        bb.hide_at = None;
+        bb.next_char = None;
+    }
+
+    fn voice_caption_done(&mut self) {
+        let reply = std::mem::take(&mut self.voice.reply);
+        let now = Instant::now();
+        let Some(bb) = self.bubble.as_mut().filter(|x| x.stream) else { return };
+        if !reply.is_empty() {
+            bb.text = reply.chars().collect();
+            bb.shown = bb.text.len();
+            bb.wrap = None;
+            bb.page = None;
+        }
+        bb.more = false;
+        bb.reveal_all_if_long();
+        if !bb.collapsed {
+            bb.hide_at = Some(now + hold_for(bb.text.len()));
+        }
+    }
+
+    // ---- what shows -----------------------------------------------------------------------
+
+    /// The mouth shape now (standing only, v1), or closed while a spoken turn waits for audio.
+    fn voice_shape(&self, now: Instant) -> Option<u8> {
+        self.voice.turn?;
+        let Some(l) = &self.voice.lips else { return Some(0) };
+        let k = (now.saturating_duration_since(l.t0).as_millis() / l.step.as_millis().max(1)) as usize;
+        Some(l.shapes.get(k).copied().unwrap_or(0))
+    }
+
+    /// The frame her layer shows for voice: leaning in while the mic is open, the mouth from
+    /// the audio while she speaks. Standing only.
+    pub(super) fn voice_layer(&self) -> Option<usize> {
+        if !self.standing() || self.posed() {
+            return None;
+        }
+        if self.voice.mic.is_some() || self.voice.asked.is_some() {
+            return self.pack.index.get("lean_in-attentive").copied();
+        }
+        let s = self.voice_shape(Instant::now())?;
+        self.pack.index.get(voice::mouth_frame(s)).copied()
+    }
+
+    /// Lips: the mouth follows the track. True if the frame changed.
+    pub(super) fn voice_tick(&mut self, now: Instant) -> bool {
+        let Some(l) = &self.voice.lips else { return false };
+        let k = (now.saturating_duration_since(l.t0).as_millis() / l.step.as_millis().max(1)) as usize;
+        if k > l.shapes.len() + 1 {
+            self.voice.lips = None;
+        }
+        let before = self.anim.frame();
+        if let Some(i) = self.voice_layer() {
+            self.anim.set_layer(i, None, now);
+        }
+        before != self.anim.frame() || self.voice.mic.is_some()
+    }
+
+    pub(super) fn voice_deadline(&self, now: Instant) -> Option<Instant> {
+        if let Some(l) = &self.voice.lips {
+            let k = now.saturating_duration_since(l.t0).as_millis() / l.step.as_millis().max(1) + 1;
+            if (k as usize) <= l.shapes.len() + 2 {
+                return Some(l.t0 + l.step * k as u32);
+            }
+        }
+        // The MIC timer counts seconds.
+        self.voice.mic.map(|m| m + Duration::from_secs(now.saturating_duration_since(m).as_secs() + 1))
+    }
+
+    /// The tag while the mic is open, he waits for the words, or she speaks.
+    pub(super) fn voice_status(&self) -> Option<Status> {
+        let bars = |v: f32| -> String { (0..5).map(|i| if v * 5.0 > i as f32 + 0.3 { '▮' } else { '▯' }).collect() };
+        if let Some(m) = self.voice.mic {
+            let s = m.elapsed().as_secs();
+            return Some(Status { label: format!("● MIC {}:{:02} {}", s / 60, s % 60, bars(self.voice.level)), tone: 0xff3b62, invert: true, glyph: "ring".into() });
+        }
+        if self.voice.asked.is_some() {
+            return Some(Status { label: "● MIC …".into(), tone: 0xff3b62, invert: false, glyph: "ring".into() });
+        }
+        if self.voice.transcribing {
+            return Some(Status { label: "◉ HEARD · …".into(), tone: self.pack.tone(Some("think")), invert: false, glyph: "dots".into() });
+        }
+        if self.voice_speaking() {
+            let s = self.voice_shape(Instant::now()).unwrap_or(0);
+            return Some(Status { label: format!("▶ SPEAKING {}", bars(s as f32 / 3.0)), tone: self.pack.tone(Some("speak")), invert: false, glyph: "play".into() });
+        }
+        None
+    }
+
+    pub(super) fn voice_state_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "enabled": self.voice.cfg.enabled, "connected": self.voice.link.is_some(),
+            "mic_open": self.voice.mic.is_some(), "listening": self.voice_listening(), "transcribing": self.voice.transcribing,
+            "speaking": self.voice_speaking(), "turn": self.voice.turn, "sent": self.voice.sent, "ended": self.voice.ended,
+            "shape": self.voice_shape(Instant::now()), "held": self.voice.held,
+            "stats": serde_json::Value::Object(self.voice.stats.clone()),
+        })
+    }
+}
