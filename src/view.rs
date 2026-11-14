@@ -397,7 +397,8 @@ pub struct Avatar {
     /// The bubble panel and tag as last painted: a part of the HUD only goes into the X shape
     /// once it has been painted where it is (present lag: else stale pixels show for a frame).
     panel_last: Rc<Cell<Option<PanelGeom>>>,
-    tag_last: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// The tag's bounds last frame and for how many frames in a row they have been laid out.
+    tag_last: Rc<Cell<(Option<Bounds<Pixels>>, u8)>>,
     /// Click reaction in progress: the status tag steps aside until then.
     reaction_until: Option<Instant>,
     menu: Option<(Point<Pixels>, Instant)>,
@@ -575,7 +576,7 @@ impl Avatar {
             hud_after: None,
             hearts_area: (None, None),
             panel_last: Rc::new(Cell::new(None)),
-            tag_last: Rc::new(Cell::new(None)),
+            tag_last: Rc::new(Cell::new((None, 0))),
             reaction_until: None,
             menu: None,
             press: None,
@@ -1890,11 +1891,13 @@ impl Avatar {
         let per_tick = (text.len() / (5_000 / TYPE_TICK.as_millis() as usize)).max(2);
         let long = text.len() >= TYPE_MAX_CHARS;
         self.bubble = Some(Bubble {
+            // Long: all at once, finished by the next tick like a typed-out reply (the hold,
+            // SPEAKING settling to idle).
             shown: if long { text.len() } else { 0 },
             text,
             per_tick,
-            next_char: if long { None } else { Some(now) },
-            hide_at: if long { Some(now + hold_for(raw.len())) } else { None },
+            next_char: Some(now),
+            hide_at: None,
             wrap: None,
             page: None,
             raw,
@@ -2106,11 +2109,9 @@ impl Avatar {
         if b.shown >= b.text.len() {
             return false;
         }
+        // The tick finishes it like a typed-out reply (the hold, SPEAKING settling).
         b.shown = b.text.len();
-        b.next_char = None;
-        if !b.more {
-            b.hide_at = Some(now + hold_for(b.text.len()));
-        }
+        b.next_char = Some(now);
         true
     }
 
@@ -4676,17 +4677,21 @@ impl Render for Avatar {
                         input.push(to_device(b, sf));
                         visible.push(to_device(b, sf));
                     }
-                    let prev_tag = tag_last.replace(tag_cell.get());
+                    let (prev_tag, run) = tag_last.get();
+                    let run = if prev_tag.is_some() && prev_tag == tag_cell.get() { run.saturating_add(1) } else { 0 };
+                    tag_last.set((tag_cell.get(), run));
                     if let Some(b) = tag_cell.get() {
                         tag_w.set(f32::from(b.size.width));
                         tag_box.set(Some(b));
-                        if torn {
-                            visible.extend(tag_strips.iter().copied());
-                        } else if prev_tag == Some(b) {
-                            visible.push(to_device(b, sf));
-                        } else {
-                            // New or moved: painted now, shown from the next frame.
+                        // New or moved: in the shape only once two frames have painted it (GPUI
+                        // presents up to two frames late: one frame of lag left a black tag at
+                        // a landing). Torn (a glitch) included.
+                        if run < 2 {
                             window.request_animation_frame();
+                        } else if torn {
+                            visible.extend(tag_strips.iter().copied());
+                        } else {
+                            visible.push(to_device(b, sf));
                         }
                         if tag_clickable {
                             input.push(to_device(b, sf));
