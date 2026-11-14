@@ -575,7 +575,12 @@ impl X11 {
     /// Carried (on) or back to normal (off): on takes a fresh snapshot of the monitors and
     /// work areas and keeps it until off.
     pub fn freeze_layout(&self, on: bool) {
-        if on {
+        // A snapshot younger than ~1 s is fresh enough (the refresh walks the tree: a few ms
+        // on the first dragged frame).
+        let fresh = |m: &Mutex<Option<(std::time::Instant, Vec<Monitor>)>>| {
+            m.lock().ok().is_some_and(|c| c.as_ref().is_some_and(|(t, _)| t.elapsed() < std::time::Duration::from_secs(1)))
+        };
+        if on && !(fresh(&self.mons) && fresh(&self.areas)) {
             self.frozen.store(false, Ordering::Relaxed);
             if let Ok(mut c) = self.mons.lock() {
                 *c = None;
@@ -588,7 +593,7 @@ impl X11 {
         self.frozen.store(on, Ordering::Relaxed);
     }
 
-    /// Poll the pointer on a thread with its own connection (125 Hz) while on, so a held
+    /// Poll the pointer on a thread with its own connection (250 Hz) while on, so a held
     /// tick reads an atomic instead of a QueryPointer round trip.
     pub fn poll_pointer(&self, on: bool) {
         let Ok(mut g) = self.poll.lock() else { return };
@@ -611,7 +616,7 @@ impl X11 {
                 if let Ok(Ok(r)) = c.query_pointer(root).map(|k| k.reply()) {
                     p.store(((r.root_x as i32 as u32 as u64) << 32) | r.root_y as i32 as u32 as u64, Ordering::Relaxed);
                 }
-                std::thread::sleep(std::time::Duration::from_millis(8));
+                std::thread::sleep(std::time::Duration::from_millis(4));
             }
         });
         if spawned.is_ok() {
