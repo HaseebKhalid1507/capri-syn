@@ -3067,6 +3067,9 @@ impl Render for Avatar {
         let rects = frame.map(|f| f.rects.clone()).unwrap_or_default();
         let hidden = self.hidden || frame.is_none();
         let has_frame = frame.is_some() && !hidden;
+        // P6: while she's carried or flying, the bounding shape's rows merged within 1 px
+        // (inward only): Xorg's per-move cost scales with the shape's rects (1,220 -> ~570).
+        let motion_tol = shape_tol().or(self.rag.is_some().then_some(1));
         let (aw, ah) = (l.geo.width as i32, l.geo.height as i32);
 
         // Body plan: squash, glitch.
@@ -4151,7 +4154,7 @@ impl Render for Avatar {
                     }
                     // P6 sweep (measurement switches): one box, or rows merged within `tol` px
                     // (inward only: never more than what was painted).
-                    if let Some(tol) = shape_tol() {
+                    if let Some(tol) = motion_tol {
                         visible = crate::shape::merge_tol(&visible, tol);
                     }
                     if shape_box() {
