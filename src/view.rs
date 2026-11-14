@@ -478,6 +478,8 @@ pub struct Avatar {
     reader: Option<(WindowHandle<crate::reader::Reader>, u32, Option<u32>)>,
     /// The wheel's fractional lines over the bubble.
     wheel: Cell<f32>,
+    /// The speech panel as last laid out (window logical px): the reader keeps clear of it.
+    panel_rect: Cell<Option<(f32, f32, f32, f32)>>,
     /// The cat brain (None: SA_NO_BRAIN).
     brain: Option<brainview::BrainHost>,
     /// Carried, flung, landing (None: not ragdolling).
@@ -606,6 +608,7 @@ impl Avatar {
             buttons: Rc::default(),
             reader: None,
             wheel: Cell::new(0.0),
+            panel_rect: Cell::new(None),
             brain: None,
             rag: None,
             rag_strength: crate::ragdoll::Strength(crate::settings::Settings::load().map_or(0.5, |s| s.ragdoll.strength)),
@@ -1771,10 +1774,12 @@ impl Avatar {
     }
 
     fn say(&mut self, text: String, now: Instant) {
-        let text: Vec<char> = text.chars().collect();
+        // The bubble shows it as a session reply would be (markdown cleaned); the reader
+        // gets it as written.
+        let raw = text;
+        let text: Vec<char> = crate::session::clean(&raw).chars().collect();
         // Reveal in at most ~5 s however long the text is.
         let per_tick = (text.len() / (5_000 / TYPE_TICK.as_millis() as usize)).max(2);
-        let raw: String = text.iter().collect();
         let long = text.len() >= TYPE_MAX_CHARS;
         self.bubble = Some(Bubble {
             shown: if long { text.len() } else { 0 },
@@ -1834,7 +1839,17 @@ impl Avatar {
     fn reader_rect(&self, raw: &str) -> (i32, i32, i32, i32) {
         let l = self.layout;
         let sf = l.sf;
-        let body = WinRect { id: 0, x: self.applied.0 + l.avatar_x, y: self.applied.1 + l.avatar_y, w: l.geo.width as i32, h: l.geo.height as i32 };
+        let mut body = WinRect { id: 0, x: self.applied.0 + l.avatar_x, y: self.applied.1 + l.avatar_y, w: l.geo.width as i32, h: l.geo.height as i32 };
+        // Her and her bubble: the reader goes beside both.
+        if let Some((px_, py_, pw, ph)) = self.panel_rect.get() {
+            let (x0, y0) = (self.applied.0 + (px_ * sf) as i32, self.applied.1 + (py_ * sf) as i32);
+            let (x1, y1) = (x0 + (pw * sf) as i32, y0 + (ph * sf) as i32);
+            let (bx1, by1) = (body.right().max(x1), body.bottom().max(y1));
+            body.x = body.x.min(x0);
+            body.y = body.y.min(y0);
+            body.w = bx1 - body.x;
+            body.h = by1 - body.y;
+        }
         let (bcx, bcy) = body.center();
         let m = self.x11.monitor_at(bcx, bcy);
         let area = self.her_area().unwrap_or(WinRect { id: 0, x: m.x, y: m.y, w: m.w, h: m.h });
@@ -3786,6 +3801,7 @@ impl Render for Avatar {
         let busy = self.session.as_ref().is_some_and(|sess| sess.link.busy());
         if mode.is_none() {
             self.panel_bottom = None;
+            self.panel_rect.set(None);
         }
         if let Some(mode) = mode {
             let line_strings = |chars: &[char], w: &Wrapped| -> Vec<String> {
@@ -3884,6 +3900,7 @@ impl Render for Avatar {
             let hi = x + w - CUT - TAIL_W / 2.0 - 6.0;
             let tail_x = head_l.clamp(lo, hi.max(lo));
             let g = PanelGeom { x, y, w, h, tail_x, tip: (head_l.clamp(tail_x - 9.0, tail_x + 9.0), y + h + TAIL_H) };
+            self.panel_rect.set(Some((x, y, w, h + TAIL_H)));
             panel_geom = Some(g);
             // Settled after a summon: the border breathes between a warm mix and the tone.
             let frame_c = match glow {

@@ -649,8 +649,17 @@ def main():
                 # wheel:<dx>:<dy>:<n>:<up|down>  n wheel clicks at window-relative px on the avatar
                 # (the bubble), only on her input shape, the user idle.
                 dx, dy, n, d = rest.split(":")
-                w = json.loads(ctl("state"))["window"]
-                x, y = w["x"] + int(dx), w["y"] + int(dy)
+                st = json.loads(ctl("state"))
+                w = st["window"]
+                if dx.startswith("@"):
+                    # wheel:@<button>:<up px>:<n>:<dir>  over a bubble button's centre, dy px above it
+                    b = st.get("buttons", {}).get(dx[1:])
+                    if not b:
+                        print(f"shoot: no button {dx[1:]!r}", file=sys.stderr)
+                        continue
+                    x, y = b[0] + b[2] // 2, b[1] + b[3] // 2 - int(dy)
+                else:
+                    x, y = w["x"] + int(dx), w["y"] + int(dy)
                 if not on_avatar(x, y):
                     print(f"shoot: {x},{y} is not on the avatar's input shape; wheel refused", file=sys.stderr)
                     continue
