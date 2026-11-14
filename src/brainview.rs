@@ -548,6 +548,11 @@ impl Avatar {
 
     /// The brain's part of the next wake-up.
     pub(super) fn brain_deadline(&self, now: Instant) -> Option<Instant> {
+        // `tick` runs the brain only once the frames are in (add_frames schedules then): a
+        // past `wake` before that spun the loop through the whole load.
+        if !self.loaded {
+            return None;
+        }
         let h = self.brain.as_ref()?;
         let mut t = h.wake;
         let mut take = |d: Option<Instant>| {
