@@ -445,6 +445,9 @@ pub struct Avatar {
     /// and a prompt or the text field doesn't move at all: buttons stay under the pointer
     /// when her pose changes.
     panel_bottom: Option<f32>,
+    /// A prompt panel's height while that prompt is up (a re-wrap never shrinks it: the
+    /// summon's panel dropped a line, 16 px, when her header changed at the settle).
+    prompt_h: Option<(Instant, f32)>,
     /// Quit at the next tick (from where there is no `cx`).
     quit_requested: bool,
     placement: Placement,
@@ -605,6 +608,7 @@ impl Avatar {
             quitting: false,
             fatal: false,
             panel_bottom: None,
+            prompt_h: None,
             quit_requested: false,
             placement: Placement::Ground,
             home,
@@ -4163,7 +4167,16 @@ impl Render for Avatar {
                 _ => total_lines.clamp(1, LINES_PER_PAGE),
             };
             let footer = !probe;
-            let h = PAD_T + HEADER_H + HEADER_GAP + rows as f32 * LINE_H + if footer { FOOTER_GAP + FOOTER_H } else { 0.0 } + PAD_B;
+            let mut h = PAD_T + HEADER_H + HEADER_GAP + rows as f32 * LINE_H + if footer { FOOTER_GAP + FOOTER_H } else { 0.0 } + PAD_B;
+            if mode == PanelMode::Prompt
+                && let Some(key) = self.prompt_ui.as_ref().map(|p| p.shown_at)
+            {
+                match self.prompt_h {
+                    Some((k, held)) if k == key => h = h.max(held),
+                    _ => {}
+                }
+                self.prompt_h = Some((key, h));
+            }
             let x = (head_l - w * 0.45).clamp(vis_l + MARGIN, (vis_r - MARGIN - w).max(vis_l + MARGIN));
             let want = top_l - TIP_GAP - TAIL_H;
             let bottom = match self.panel_bottom {
