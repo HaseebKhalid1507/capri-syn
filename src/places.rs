@@ -144,6 +144,19 @@ pub struct World<'a> {
     pub last_kind: Option<SpotKind>,
     /// Summons: room the HUD needs above her body (prompt panel, reply).
     pub hud_h: i32,
+    /// monitor = "follow": passive spots only in this area (his monitor).
+    pub only: Option<usize>,
+}
+
+/// The monitor he is working on: the focused window's (most of it), else the cursor's.
+pub fn follow_area(monitors: &[WinRect], focused: Option<WinRect>, cursor: (i32, i32)) -> Option<usize> {
+    let by_focus = focused.and_then(|f| {
+        (0..monitors.len())
+            .filter_map(|i| monitors[i].intersect(&f).map(|o| (i, area_of(&o))))
+            .max_by_key(|&(_, a)| a)
+            .map(|(i, _)| i)
+    });
+    by_focus.or_else(|| monitors.iter().position(|m| m.contains(cursor.0, cursor.1)))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -158,6 +171,8 @@ pub enum Block {
     NoSpot,
     /// The HUD (prompt) wouldn't fit above her.
     NoHudRoom,
+    /// Not on the monitor he is working on (monitor = "follow").
+    OtherMonitor,
 }
 
 impl World<'_> {
@@ -179,6 +194,33 @@ impl World<'_> {
 
     fn floor_y(&self, area: usize) -> i32 {
         self.areas[area].bottom() - self.floor_pad
+    }
+
+    /// A tiling WM's floor: his window reaches the bottom of the work area, so standing or
+    /// sitting on the floor means overlapping its bottom strip. Allowed for the floor kinds
+    /// when the overlap stays in its lower half and within `cover_max_pct` (the cursor is
+    /// checked apart).
+    fn floor_strip_ok(&self, s: &Spot, f: &WinRect) -> bool {
+        let Some(o) = f.intersect(&s.body) else { return true };
+        let Some(a) = self.areas.get(s.area) else { return false };
+        matches!(s.kind, SpotKind::Floor | SpotKind::FloorSit)
+            && s.approach.is_none()
+            && f.bottom() >= a.bottom() - self.d(24.0)
+            && o.y >= f.y + f.h / 2
+            && s.cover_pct <= self.cover_max_pct + 1e-9
+    }
+
+    /// Areas the passive kinds draw from: `only`, else hers (70 %) or another (30 %).
+    fn pick_area(&self, rng: &mut Rng) -> usize {
+        if let Some(i) = self.only.filter(|&i| i < self.areas.len()) {
+            return i;
+        }
+        if self.areas.len() > 1 && rng.range(0.0, 1.0) >= 0.7 {
+            let others: Vec<usize> = (0..self.areas.len()).filter(|&i| i != self.her.area).collect();
+            others[rng.pick(others.len())]
+        } else {
+            self.her.area.min(self.areas.len().saturating_sub(1))
+        }
     }
 
     fn spot(&self, kind: SpotKind, anchor: (i32, i32), rel: WinRect, approach: Option<Approach>) -> Spot {
@@ -235,6 +277,8 @@ pub fn guard(w: &World, s: &Spot) -> Result<(), Block> {
         match (s.kind, s.approach) {
             // Sitting on its top edge: the hanging legs overlap the top strip.
             (SpotKind::SitEdge { win }, _) if win == f.id => {}
+            // On a tiling WM's floor: its bottom strip.
+            (SpotKind::Floor | SpotKind::FloorSit, None) if w.floor_strip_ok(s, &f) => {}
             (_, Some(ap)) if ap.covers() => {
                 if s.cover_pct > w.cover_max_pct {
                     return Err(Block::Cover);
@@ -290,8 +334,11 @@ fn passive(w: &World, far: bool, leaving: bool, rng: &mut Rng) -> Result<Spot, V
     let min_move = if leaving { w.d(80.0) } else { w.d(MIN_TELEPORT) };
     let her_win = w.her.win();
     let ok = |s: &Spot| -> Result<(), Block> {
+        if w.only.is_some_and(|i| s.area != i) {
+            return Err(Block::OtherMonitor);
+        }
         guard(w, s)?;
-        if s.covers_focus() {
+        if s.covers_focus() && !w.focused.is_some_and(|f| w.floor_strip_ok(s, &f)) {
             return Err(Block::FocusedInterior);
         }
         let (dx, dy) = ((s.anchor.0 - w.her.anchor.0) as i64, (s.anchor.1 - w.her.anchor.1) as i64);
@@ -368,13 +415,8 @@ fn floor_spots(w: &World, sit: bool, rng: &mut Rng) -> Vec<Spot> {
     let mut out = Vec::new();
     let rel = if sit { w.boxes.floor_sit } else { w.boxes.stand };
     for _ in 0..16 {
-        // Her monitor 70 %, another 30 %.
-        let i = if w.areas.len() > 1 && rng.range(0.0, 1.0) >= 0.7 {
-            let others: Vec<usize> = (0..w.areas.len()).filter(|&i| i != w.her.area).collect();
-            others[rng.pick(others.len())]
-        } else {
-            w.her.area.min(w.areas.len().saturating_sub(1))
-        };
+        // Her monitor 70 %, another 30 % (monitor = "any"); his monitor (follow).
+        let i = w.pick_area(rng);
         let a = w.areas[i];
         let x = a.x + (a.w as f32 * rng.range(0.1, 0.9)) as i32;
         out.push(w.spot(if sit { SpotKind::FloorSit } else { SpotKind::Floor }, (x, w.floor_y(i)), rel, None));
@@ -387,8 +429,7 @@ fn float_spots(w: &World, rng: &mut Rng) -> Vec<Spot> {
     let clear = w.d(FLOAT_CLEAR);
     let mut out = Vec::new();
     for _ in 0..24 {
-        let i = w.her.area.min(w.areas.len().saturating_sub(1));
-        let i = if w.areas.len() > 1 && rng.range(0.0, 1.0) >= 0.7 { rng.pick(w.areas.len()) } else { i };
+        let i = w.pick_area(rng);
         let a = w.areas[i];
         let x = a.x + (a.w as f32 * rng.range(0.1, 0.9)) as i32;
         let body_top = a.y + (a.h as f32 * rng.range(0.15, 0.70)) as i32;
@@ -679,6 +720,7 @@ mod tests {
                 last_wins: &[],
                 last_kind: None,
                 hud_h: 0,
+                only: None,
             }
         }
     }
@@ -711,11 +753,74 @@ mod tests {
         let fx = tiled();
         let w = fx.world();
         let mut rng = Rng::new(1);
+        let f = fx.focused.unwrap();
         for _ in 0..300 {
             let s = resolve(&Goal::Passive { far: false }, &w, &mut rng).unwrap();
             assert_ne!(s.win(), Some(1), "never on the focused window");
-            assert!(s.body.intersect(&fx.focused.unwrap()).is_none(), "{s:?}");
+            // A tile reaching the floor: only its bottom strip, within cover_max_pct.
+            if let Some(o) = s.body.intersect(&f) {
+                assert!(matches!(s.kind, SpotKind::Floor | SpotKind::FloorSit), "{s:?}");
+                assert!(o.y >= f.y + f.h / 2 && s.cover_pct <= 12.0, "{s:?}");
+            }
         }
+    }
+
+    #[test]
+    fn follow_area_is_his_monitor() {
+        // The focused window's monitor (most of it), else the cursor's.
+        assert_eq!(follow_area(&MONS, Some(r(9, 2700, 100, 900, 600)), (100, 100)), Some(1));
+        assert_eq!(follow_area(&MONS, Some(r(9, 2400, 100, 900, 600)), (100, 100)), Some(1));
+        assert_eq!(follow_area(&MONS, None, (3000, 700)), Some(1));
+        assert_eq!(follow_area(&MONS, None, (300, 700)), Some(0));
+    }
+
+    #[test]
+    fn follow_keeps_passive_hops_on_his_monitor() {
+        // She is on monitor 0, he works on monitor 1 (window 3 focused): every passive kind
+        // (edge, floor, floor_sit, float) lands on monitor 1.
+        let mut fx = tiled();
+        fx.focused = Some(fx.stack[2]);
+        fx.cursor = (3500, 200);
+        let mut w = fx.world();
+        w.only = follow_area(w.monitors, w.focused, w.cursor);
+        assert_eq!(w.only, Some(1));
+        let mut rng = Rng::new(5);
+        let mut kinds = std::collections::HashSet::new();
+        for _ in 0..300 {
+            let s = resolve(&Goal::Passive { far: false }, &w, &mut rng).unwrap();
+            assert_eq!(s.area, 1, "{s:?}");
+            kinds.insert(s.kind.family());
+        }
+        assert!(kinds.len() >= 3, "{kinds:?}");
+        // "any": monitor 0 shows up too.
+        w.only = None;
+        let other = (0..300).filter(|_| resolve(&Goal::Passive { far: false }, &w, &mut rng).unwrap().area == 0).count();
+        assert!(other > 0);
+    }
+
+    #[test]
+    fn tiling_floor_strip_is_allowed_but_not_more() {
+        let fx = tiled();
+        let mut w = fx.world();
+        w.only = Some(0);
+        let f = fx.focused.unwrap();
+        // Standing on the floor under the focused tile: its bottom strip, ~4.6 % of it.
+        let s = w.spot(SpotKind::Floor, (600, w.floor_y(0)), w.boxes.stand, None);
+        assert!(s.body.intersect(&f).is_some() && s.cover_pct < 12.0);
+        assert_eq!(guard(&w, &s), Ok(()));
+        // Not floating in it, not with the cursor on her.
+        let fl = w.spot(SpotKind::Float, (600, 900), w.boxes.stand, None);
+        assert_eq!(guard(&w, &fl), Err(Block::FocusedInterior));
+        let mut w2 = fx.world();
+        w2.cursor = (600, w.floor_y(0) - 100);
+        assert_eq!(guard(&w2, &s), Err(Block::Cursor));
+        // A small focused window that reaches the floor: covering > 12 % of it is refused.
+        let small = r(7, 500, 1288, 300, 300);
+        let fx3 = Fixture { focused: Some(small), stack: vec![small], eligible: vec![true], ..tiled() };
+        let w3 = fx3.world();
+        let s3 = w3.spot(SpotKind::Floor, (650, w3.floor_y(0)), w3.boxes.stand, None);
+        assert!(s3.cover_pct > 12.0);
+        assert_eq!(guard(&w3, &s3), Err(Block::FocusedInterior));
     }
 
     #[test]
@@ -759,8 +864,9 @@ mod tests {
             let s = resolve(&bid(&[]), &w, &mut rng).unwrap();
             assert!(s.kind == SpotKind::InPlace || s.body.intersect(&fx.focused.unwrap()).is_none(), "{s:?}");
         }
-        // A spot over his window is refused by the guard unless it's an exception.
-        let over = w.spot(SpotKind::Floor, (600, 1588), boxes().stand, None);
+        // A spot over his window's interior is refused by the guard unless it's an exception
+        // (the floor under a tile is one: tiling_floor_strip_is_allowed_but_not_more).
+        let over = w.spot(SpotKind::Float, (600, 1000), boxes().stand, None);
         assert_eq!(guard(&w, &over), Err(Block::FocusedInterior));
     }
 

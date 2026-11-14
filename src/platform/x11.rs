@@ -53,6 +53,8 @@ pub enum WatchEvent {
     TargetMoved(WinRect),
     /// The perch target was unmapped or destroyed.
     TargetGone(u32),
+    /// The target window is mapped again (a workspace flicked back).
+    TargetBack(u32),
 }
 
 pub struct X11 {
@@ -722,7 +724,12 @@ impl X11 {
                                 }));
                             }
                         }
-                        Event::MapNotify(e) if e.window != win => *restack = true,
+                        Event::MapNotify(e) if e.window != win => {
+                            *restack = true;
+                            if t != 0 && e.window == t {
+                                on_event(WatchEvent::TargetBack(t));
+                            }
+                        }
                         Event::UnmapNotify(e) if t != 0 && e.window == t => on_event(WatchEvent::TargetGone(t)),
                         Event::DestroyNotify(e) => {
                             may_cover.remove(&e.window);

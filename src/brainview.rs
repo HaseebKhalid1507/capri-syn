@@ -197,7 +197,7 @@ impl BrainHost {
         self.scoot.is_some() || self.drift.is_some() || self.drop_in.is_some()
     }
 
-    fn bnow(&self, now: Instant) -> f64 {
+    pub(super) fn bnow(&self, now: Instant) -> f64 {
         self.base_b + now.saturating_duration_since(self.base_t).as_secs_f64() * self.scale
     }
 
@@ -206,7 +206,7 @@ impl BrainHost {
         self.base_t + Duration::from_secs_f64(d)
     }
 
-    fn write(&mut self, v: serde_json::Value) {
+    pub(super) fn write(&mut self, v: serde_json::Value) {
         if let Some(f) = &mut self.log {
             writeln!(f, "{v}").ok();
         }
@@ -779,6 +779,10 @@ impl Avatar {
         let fullscreen: Vec<bool> = monitors.iter().map(|m| senses_fs && (focused.is_none_or(|f| m.intersect(&f).is_some()))).collect();
         let l = self.layout;
         let hud_h = ((TOP_MARGIN + PANEL_MAX_H + TAIL_H + TIP_GAP) * l.sf) as i32;
+        // monitor = "follow": her own hops stay on the monitor he works on (visits go to his
+        // window anyway).
+        let follow = h.settings.brain.monitor == crate::settings::MonitorPolicy::Follow && matches!(plan.goal, Goal::Passive { .. } | Goal::Leave);
+        let only = if follow { places::follow_area(&monitors, focused, cursor) } else { None };
         let world = World {
             stack: &stack,
             eligible: &eligible,
@@ -797,6 +801,7 @@ impl Avatar {
             last_wins: &h.last_wins,
             last_kind: h.last_kind,
             hud_h,
+            only,
         };
         let mut rng = h.rng.clone();
         let res = places::resolve(&plan.goal, &world, &mut rng);
@@ -870,7 +875,19 @@ impl Avatar {
             "cursor": [cursor.0, cursor.1], "focus": focused.as_ref().map(rect_json), "cover_pct": (spot.cover_pct * 100.0).round() / 100.0,
             "cover_ok": cover_ok(&spot), "fs": senses_fs, "dnd": dnd, "enabled": enabled, "area": rect_json(&areas[spot.area.min(areas.len() - 1)]),
             "clear_px": (CURSOR_CLEAR_LOGICAL * l.sf).round(), "from": [her.anchor.0, her.anchor.1],
+            "why": plan.why, "only": only,
         });
+        // One line per move on stderr too (rare): what moved her, from where to where.
+        eprintln!(
+            "synaps-avatar: brain move why={} goal={goal_s} spot={} {},{} -> {},{} by {}",
+            plan.why,
+            spot.kind.key(),
+            her.anchor.0,
+            her.anchor.1,
+            spot.anchor.0,
+            spot.anchor.1,
+            arrival.key()
+        );
         let Some(h) = &mut self.brain else { return };
         h.rng = rng;
         h.write(line);

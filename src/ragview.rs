@@ -173,6 +173,26 @@ impl Avatar {
 
     /// She is picked up at `local` (avatar-local device px).
     pub(super) fn rag_grab(&mut self, local: (i32, i32), feed: Feed, now: Instant) {
+        self.rag_begin(local, feed, now, true);
+    }
+
+    /// Her perch went away: the ragdoll's drop from where she is (no hand, no touch for the
+    /// brain), straight down onto an exposed edge below or this monitor's floor; the fall
+    /// frame (surprised) on the way. False: the rag is off (stiff) and nothing started.
+    pub(super) fn rag_drop(&mut self, now: Instant) -> bool {
+        if !rag_enabled() || self.rag_strength.k() <= 0.0 || std::env::var("SA_REDUCED_MOTION").is_ok_and(|v| v == "1") || self.rag.is_some() {
+            return false;
+        }
+        let frame = self.anim.frame();
+        let (top, bottom) = self.frame_or_default(frame).map_or((0, 1), |f| (f.top, f.bottom.max(f.top + 1)));
+        let local = (self.layout.geo.width as i32 / 2, top + (bottom - top) * 3 / 10);
+        let grab = self.grip_root(self.origin, local);
+        self.rag_begin(local, Feed::Script { s: crate::drag::Script::default(), grab }, now, false);
+        self.rag_release(now);
+        self.rag.is_some()
+    }
+
+    fn rag_begin(&mut self, local: (i32, i32), feed: Feed, now: Instant, touch: bool) {
         // A teleport in its vanish or landing leg is cancelled: she stays (or is) here.
         if let Some(tp) = &self.teleport {
             if matches!(tp.leg, Leg::Vanish) {
@@ -257,7 +277,7 @@ impl Avatar {
             offset: (self.origin.0 - p0.0 as i32, self.origin.1 - p0.1 as i32),
             prof: std::env::var("SA_RAG_PROF").is_ok_and(|v| v == "1").then(Vec::new),
         };
-        if !rigid {
+        if !rigid && touch {
             rag.chain.kick((0.0, -400.0 * self.layout.sf));
             if out.flip
                 && let Some(a) = rag.m.spec.ankle.clone()
@@ -273,7 +293,9 @@ impl Avatar {
         self.x11.take_shape_stats();
         self.x11.poll_pointer(matches!(rag.feed, Feed::Real));
         self.rag = Some(rag);
-        self.brain_touch(crate::brain::Touch::DragStart);
+        if touch {
+            self.brain_touch(crate::brain::Touch::DragStart);
+        }
         self.rag_plan_next();
     }
 

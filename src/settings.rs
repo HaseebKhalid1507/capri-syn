@@ -61,6 +61,15 @@ pub enum Fullscreen {
     Stay,
 }
 
+/// Which monitors her passive hops may use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MonitorPolicy {
+    /// The one he is working on (the focused window's, else the cursor's).
+    Follow,
+    /// Any monitor (she wanders).
+    Any,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct BrainSettings {
     pub enabled: bool,
@@ -73,6 +82,7 @@ pub struct BrainSettings {
     pub max_moves_per_hour: u32,
     pub fullscreen: Fullscreen,
     pub attention: Attention,
+    pub monitor: MonitorPolicy,
 }
 
 impl Default for BrainSettings {
@@ -98,6 +108,7 @@ impl Default for BrainSettings {
             max_moves_per_hour: 15,
             fullscreen: Fullscreen::Hide,
             attention: Attention::Mix,
+            monitor: MonitorPolicy::Follow,
         }
     }
 }
@@ -210,6 +221,7 @@ struct BrainRaw {
     max_moves_per_hour: Option<i64>,
     fullscreen: Option<String>,
     attention: Option<String>,
+    monitor: Option<String>,
 }
 
 fn weight(v: &toml::Value) -> Option<f64> {
@@ -291,6 +303,13 @@ impl Settings {
             anyhow::ensure!((1..=120).contains(&n), "brain.max_moves_per_hour must be 1..120");
             b.max_moves_per_hour = n as u32;
         }
+        if let Some(m) = r.monitor {
+            b.monitor = match m.as_str() {
+                "follow" => MonitorPolicy::Follow,
+                "any" => MonitorPolicy::Any,
+                _ => anyhow::bail!("brain.monitor must be \"follow\" or \"any\""),
+            };
+        }
         if let Some(f) = r.fullscreen {
             b.fullscreen = match f.as_str() {
                 "hide" => Fullscreen::Hide,
@@ -359,6 +378,8 @@ mod tests {
         let d = BrainSettings::default();
         assert!(d.enabled && d.no_repeat == 2 && d.cover_max_pct == 12.0 && d.max_moves_per_hour == 15);
         assert_eq!(d.fullscreen, Fullscreen::Hide);
+        assert_eq!(d.monitor, MonitorPolicy::Follow, "her hops stay on his monitor by default");
+        assert_eq!(Settings::parse("[brain]\nmonitor = \"any\"\n").unwrap().brain.monitor, MonitorPolicy::Any);
         assert_eq!(d.arrivals.iter().find(|a| a.0 == Arrival::Glitch).unwrap().1, 1.0, "glitch: 1 by default since r6");
     }
 
@@ -425,6 +446,7 @@ fullscreen = "stay"
         for bad in [
             "[brain\n",
             "[brain]\nfullscreen = \"maybe\"\n",
+            "[brain]\nmonitor = \"both\"\n",
             "[brain]\napproaches = { fly = 1 }\n",
             "[brain]\napproaches = { hang = -1 }\n",
             "[brain]\nno_repeat = 9\n",

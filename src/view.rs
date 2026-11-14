@@ -476,6 +476,8 @@ pub struct Avatar {
     buttons: Buttons,
     /// The READER window (a long reply), its X id, and who had the keyboard before it.
     reader: Option<(WindowHandle<crate::reader::Reader>, u32, Option<u32>)>,
+    /// The perch window unmapped; she falls if it isn't back within the grace.
+    perch_gone: Option<edges::PerchGone>,
     /// The wheel's fractional lines over the bubble.
     wheel: Cell<f32>,
     /// The speech panel as last laid out (window logical px): the reader keeps clear of it.
@@ -607,6 +609,7 @@ impl Avatar {
             _subs: vec![activation],
             buttons: Rc::default(),
             reader: None,
+            perch_gone: None,
             wheel: Cell::new(0.0),
             panel_rect: Cell::new(None),
             brain: None,
@@ -1183,6 +1186,7 @@ impl Avatar {
             take(Some((now + FRAME_FX).min(t0 + Duration::from_millis(HEARTS_MS))));
         }
         take(self.reaction_until);
+        take(self.perch_gone.map(|g| g.due()));
         take(self.hud_after.filter(|&t| t > now));
         take(self.menu.map(|m| m.1));
         if let Some(s) = &self.session {
@@ -1423,6 +1427,7 @@ impl Avatar {
         {
             self.hop = None;
         }
+        dirty |= self.check_perch_gone(now);
         dirty |= self.rag_tick(now);
         dirty |= self.swing_tick(now);
         if self.loaded {
@@ -1671,7 +1676,7 @@ impl Avatar {
             }
             Command::Unperch => {
                 if matches!(self.placement, Placement::Perch { .. }) {
-                    self.fall(now);
+                    self.fall("unperch", now);
                     "ok".into()
                 } else {
                     "error: not perched".into()
@@ -2731,10 +2736,57 @@ impl Avatar {
     }
 
     /// The perch window is gone, fullscreen or out of room: teleport back to the ground.
-    fn fall(&mut self, now: Instant) {
+    /// Her perch went away or has no room left: she falls where she is, straight down on
+    /// the same monitor (the ragdoll's drop, a surprised face), onto an exposed edge below or
+    /// that monitor's floor. Never a teleport to `home` (it may be on another monitor).
+    fn fall(&mut self, why: &'static str, now: Instant) {
+        self.perch_gone = None;
         self.x11.set_target(0);
-        let o = Self::clamp(&self.x11, &self.layout, (self.home.0 - self.layout.ground_x, self.home.1 - self.layout.ground_y));
-        self.start_teleport(o, Placement::Ground, now);
+        if self.teleport.is_some() || self.rag.is_some() {
+            return;
+        }
+        eprintln!("synaps-avatar: falls in place (why={why})");
+        if let Some(h) = &mut self.brain {
+            let t = h.bnow(now);
+            h.brain.note_external(t, why);
+            h.write(serde_json::json!({ "t": t, "k": "fall", "why": why, "from": [self.origin.0, self.origin.1] }));
+        }
+        self.brain_cancel_move();
+        if self.rag_drop(now) {
+            return;
+        }
+        // Stiff: straight down to this monitor's floor.
+        if let Some(h) = &mut self.brain {
+            h.rest = None;
+        }
+        self.placement = Placement::Ground;
+        let o = Self::clamp(&self.x11, &self.layout, (self.origin.0, self.origin.1 + 100_000));
+        self.move_to(o, true);
+        self.home = self.ground();
+        state::save_ground(self.ground());
+        self.relayer(now);
+    }
+
+    /// The perch window's grace ran out (or it came back): fall, or stay.
+    fn check_perch_gone(&mut self, now: Instant) -> bool {
+        let Some(g) = self.perch_gone else { return false };
+        let back = matches!(g.verdict(now, false), edges::GoneVerdict::Fall) && self.x11.toplevel_rect(g.win).is_some();
+        match g.verdict(now, back) {
+            edges::GoneVerdict::Wait => false,
+            edges::GoneVerdict::Stay => {
+                self.perch_gone = None;
+                eprintln!("synaps-avatar: perch 0x{:x} came back: stays", g.win);
+                false
+            }
+            edges::GoneVerdict::Fall => {
+                let still = matches!(self.placement, Placement::Perch { win, .. } if win == g.win);
+                self.perch_gone = None;
+                if still {
+                    self.fall("perch_gone", now);
+                }
+                still
+            }
+        }
     }
 
     fn watch(&mut self, ev: WatchEvent, now: Instant) {
@@ -2749,7 +2801,7 @@ impl Avatar {
                     return;
                 }
                 if self.perch_dx(&r, sit, Some(dx)).is_none() {
-                    self.fall(now);
+                    self.fall("perch_no_room", now);
                     return;
                 }
                 // Stay on an exposed stretch: clamp into it, but never slide across a
@@ -2757,12 +2809,12 @@ impl Avatar {
                 let x = r.x + dx;
                 let (spans, ranges) = self.exposed_seats(&r, sit);
                 let Some(nx) = nearest_in(&ranges, x) else {
-                    self.fall(now);
+                    self.fall("perch_covered", now);
                     return;
                 };
                 let hidden = x >= r.x && x < r.right() && !spans.iter().any(|&(a, b)| a <= x && x < b);
                 if hidden && (nx - x).abs() > (LAND_SLIDE * self.layout.sf) as i32 {
-                    self.fall(now);
+                    self.fall("perch_covered", now);
                     return;
                 }
                 let dx = nx - r.x;
@@ -2771,12 +2823,18 @@ impl Avatar {
                     self.placement = Placement::Perch { win, sit, dx };
                     self.set_origin(o);
                 } else {
-                    self.fall(now);
+                    self.fall("perch_no_room", now);
                 }
             }
             WatchEvent::TargetGone(id) => {
-                if matches!(self.placement, Placement::Perch { win, .. } if win == id) {
-                    self.fall(now);
+                // Not at once: a workspace flicked back within the grace keeps her put.
+                if matches!(self.placement, Placement::Perch { win, .. } if win == id) && self.perch_gone.is_none() {
+                    self.perch_gone = Some(edges::PerchGone { win: id, since: now });
+                }
+            }
+            WatchEvent::TargetBack(id) => {
+                if self.perch_gone.is_some_and(|g| g.win == id) {
+                    self.perch_gone = None;
                 }
             }
         }

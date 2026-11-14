@@ -1422,6 +1422,35 @@ mod tests {
     }
 
     #[test]
+    fn perch_gone_falls_on_the_same_monitor() {
+        // bella: eDP (0..2560, floor 1600) left of DP-3 (2560..5120, floor 1440). She sat on
+        // a window edge at y 600 on DP-3; it went away. Straight down: DP-3's floor at her x,
+        // never the other monitor; with a window below, its exposed edge.
+        let ar = Arena { areas: vec![WinRect::new(0, 29, 2560, 1571), WinRect::new(2560, 29, 2560, 1411)], floor_pad: 0 };
+        let land = |plats: &[Platform]| {
+            let mut f = Flight::drop((4200.0, 600.0), (0.0, 0.0));
+            let mut last = Contact::None;
+            for _ in 0..4000 {
+                let c = f.step(1.0 / 240.0, &ar, plats, B);
+                if c != Contact::None {
+                    last = c;
+                }
+                if f.landed {
+                    break;
+                }
+            }
+            assert!(f.landed);
+            (f.pos, last)
+        };
+        let (pos, c) = land(&[]);
+        assert!((pos.0 - 4200.0).abs() < 1.0 && (pos.1 - 1440.0).abs() < 1.0, "{pos:?}");
+        assert!(matches!(c, Contact::Floor { .. }), "{c:?}");
+        let plats = [Platform { win: 9, y: 1000, seat_x: (3900, 4500) }];
+        let (pos, c) = land(&plats);
+        assert!(matches!(c, Contact::Perch { win: 9, .. }) && (pos.1 - 1000.0).abs() < 1.0, "{c:?} {pos:?}");
+    }
+
+    #[test]
     fn arena_seams() {
         // Side by side, unequal heights.
         let ar = Arena { areas: vec![WinRect::new(0, 29, 2560, 1571), WinRect::new(2560, 29, 2560, 1411)], floor_pad: 0 };
