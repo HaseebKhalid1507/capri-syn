@@ -324,6 +324,9 @@ fn run(t_start: Instant) -> Result<()> {
             is_minimizable: false,
             window_background: WindowBackgroundAppearance::Transparent,
             app_id: Some("synaps-avatar".into()),
+            // She is never the active window: GPUI's default caps inactive windows at 30 fps
+            // (a drag then ran ~40 ticks/s). Our own deadlines decide when she draws.
+            inactive_frame_interval: None,
             ..Default::default()
         };
 

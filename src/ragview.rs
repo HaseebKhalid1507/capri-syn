@@ -304,7 +304,8 @@ impl Avatar {
             1.0 / 60.0
         } else {
             let d = now.saturating_duration_since(r.last).as_secs_f32();
-            r.due = now + tick_period();
+            // On the period grid (no drift: `now + period` gives ~58 Hz), never bunched.
+            r.due = (r.due + tick_period()).max(now + tick_period() / 2);
             d.min(ragdoll::MAX_FRAME_DT)
         };
         r.last = now;
@@ -786,11 +787,11 @@ impl Avatar {
 
     pub(super) fn rag_deadline(&self, now: Instant) -> Option<Instant> {
         let r = self.rag.as_ref()?;
-        // Waiting for the render that paints `next`: no wake-up (it re-arms the ticker).
-        // Before, `due.max(now)` kept the loop spinning between renders: ~73 k view ticks/s
-        // in a drag (127 k rigid), against ~40 renders/s.
+        // Waiting for the render that paints `next`: it re-arms the ticker; only a 50 ms
+        // watchdog (a hidden window never renders). Before, `due.max(now)` kept the loop
+        // spinning between renders: ~73 k view ticks/s in a drag (127 k rigid), ~40 renders/s.
         if r.next.is_some() && !r.painted {
-            return None;
+            return Some(now + Duration::from_millis(50));
         }
         let active = match r.m.phase() {
             Phase::Held { .. } => {
