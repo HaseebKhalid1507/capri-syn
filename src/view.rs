@@ -1964,10 +1964,14 @@ impl Avatar {
         let (bcx, bcy) = body.center();
         let m = self.x11.monitor_at(bcx, bcy);
         let area = self.her_area().unwrap_or(WinRect { id: 0, x: m.x, y: m.y, w: m.w, h: m.h });
-        let w = ((0.40 * m.w as f32) as i32).max((420.0 * sf) as i32).min(area.w);
+        let gap = (12.0 * sf) as i32;
+        let w0 = ((0.40 * m.w as f32) as i32).max((420.0 * sf) as i32).min(area.w);
+        // Not enough room beside her and her bubble at 40 %: the roomier side's room (down to
+        // 420 px), so it sits beside them rather than over the bubble.
+        let room = (area.right() - body.right() - gap).max(body.x - gap - area.x);
+        let w = if room >= w0 { w0 } else { room.max((420.0 * sf) as i32).min(area.w) };
         let est = (crate::reader::estimate_height(&crate::reader::parse(raw), w as f32 / sf) * sf) as i32;
         let h = est.clamp((180.0 * sf) as i32, (0.60 * m.h as f32) as i32).min(area.h);
-        let gap = (12.0 * sf) as i32;
         let cursor = self.x11.pointer().ok();
         let y0 = body.y.clamp(area.y, (area.bottom() - h).max(area.y));
         let right = (body.right() + gap, y0);
