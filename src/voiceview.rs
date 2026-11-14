@@ -41,6 +41,8 @@ pub(super) struct VoiceState {
     reply: String,
     lips: Option<Lips>,
     caption: Option<String>,
+    /// Auto-repeat releases seen while the key stayed down (ignored).
+    repeats: u32,
     held: bool,
     /// A key-up waiting out the auto-repeat window.
     up_at: Option<Instant>,
@@ -204,7 +206,12 @@ impl Avatar {
     }
 
     /// Key-up, after the auto-repeat window: a hold stops listening (and sends what was heard).
-    pub(super) fn voice_up(&mut self, cx: &mut Context<Self>) {
+    /// False if the key is still down (an X auto-repeat's release): ignored.
+    pub(super) fn voice_up(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.talk_down.is_some() && self.x11.char_key_down(self.voice.cfg.key).unwrap_or(false) {
+            self.voice.repeats += 1;
+            return false;
+        }
         let at = Instant::now();
         self.voice.up_at = Some(at);
         cx.spawn(async move |this, cx| {
@@ -218,6 +225,7 @@ impl Avatar {
             .ok();
         })
         .detach();
+        true
     }
 
     /// A press inside the key-up window: an auto-repeat pair, not a new press.
@@ -549,7 +557,7 @@ impl Avatar {
             "enabled": self.voice.cfg.enabled, "connected": self.voice.link.is_some(),
             "mic_open": self.voice.mic.is_some(), "listening": self.voice_listening(), "transcribing": self.voice.transcribing,
             "speaking": self.voice_speaking(), "turn": self.voice.turn, "sent": self.voice.sent, "ended": self.voice.ended,
-            "shape": self.voice_shape(Instant::now()), "held": self.voice.held,
+            "shape": self.voice_shape(Instant::now()), "held": self.voice.held, "repeats_ignored": self.voice.repeats,
             "stats": serde_json::Value::Object(self.voice.stats.clone()),
         })
     }

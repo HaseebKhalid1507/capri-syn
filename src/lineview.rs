@@ -67,7 +67,9 @@ impl Avatar {
     pub(super) fn talk_release(&mut self, cx: &mut Context<Self>) -> String {
         let Some(t0) = self.talk_down else { return "ok (no press)".into() };
         let ms = t0.elapsed().as_millis();
-        self.voice_up(cx);
+        if !self.voice_up(cx) {
+            return "ok repeat (key still down)".into();
+        }
         if std::mem::take(&mut self.tap_closes)
             && ms < TAP_MS
             && let Some(l) = &self.line

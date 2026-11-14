@@ -136,11 +136,15 @@ pub struct VoiceSettings {
     pub voice: String,
     pub speed: f32,
     pub duck: String,
+    /// The talk key's letter (`$mod+c` in i3): a release while it is still down is an X
+    /// auto-repeat, not his release.
+    pub key: char,
 }
 
 impl Default for VoiceSettings {
     fn default() -> Self {
-        VoiceSettings { enabled: false, stt_model: "small.en".into(), voice: "af_heart".into(), speed: 1.0, duck: "pause".into() }
+        // The voice is provisional (the blind listen decides): the husky American blend.
+        VoiceSettings { enabled: false, stt_model: "small.en".into(), voice: "af_bella:0.55,af_nicole:0.45".into(), speed: 1.05, duck: "pause".into(), key: 'c' }
     }
 }
 
@@ -152,6 +156,7 @@ struct VoiceRaw {
     voice: Option<String>,
     speed: Option<f64>,
     duck: Option<String>,
+    key: Option<String>,
 }
 
 /// `[mirror]`: she faces where she goes. `drag`: turn while dragged (and flung), looking back
@@ -462,6 +467,13 @@ impl Settings {
             if let Some(d) = v.duck.map(|d| d.trim().to_ascii_lowercase()) {
                 anyhow::ensure!(["pause", "duck", "off"].contains(&d.as_str()), "voice.duck must be \"pause\", \"duck\" or \"off\"");
                 voice.duck = d;
+            }
+            if let Some(k) = v.key.map(|k| k.trim().to_string()) {
+                let mut c = k.chars();
+                match (c.next(), c.next()) {
+                    (Some(ch), None) if ch.is_ascii_alphanumeric() => voice.key = ch,
+                    _ => anyhow::bail!("voice.key must be one letter or digit (the talk key, as in $mod+c)"),
+                }
             }
         }
         let Some(r) = raw.brain else { return Ok(Settings { brain: b, ragdoll, session, music, display, mirror, voice }) };

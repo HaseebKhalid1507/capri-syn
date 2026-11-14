@@ -291,6 +291,25 @@ impl X11 {
         Ok((r.root_x as i32, r.root_y as i32))
     }
 
+    /// Whether a key that types `ch` is physically down now. An X auto-repeat sends a release
+    /// and a press back to back; the key stays down through it, a real release does not.
+    pub fn char_key_down(&self, ch: char) -> Result<bool> {
+        let setup = self.conn.setup();
+        let (min, max) = (setup.min_keycode, setup.max_keycode);
+        let map = self.conn.get_keyboard_mapping(min, max - min + 1)?.reply()?;
+        let per = map.keysyms_per_keycode.max(1) as usize;
+        let want = [ch.to_ascii_lowercase() as u32, ch.to_ascii_uppercase() as u32];
+        let codes: Vec<u8> = map
+            .keysyms
+            .chunks(per)
+            .enumerate()
+            .filter(|(_, syms)| syms.iter().take(2).any(|s| want.contains(s)))
+            .map(|(i, _)| min + i as u8)
+            .collect();
+        let keys = self.conn.query_keymap()?.reply()?.keys;
+        Ok(codes.iter().any(|&c| keys[c as usize / 8] & (1 << (c % 8)) != 0))
+    }
+
     /// Ask the server for keyboard focus (override-redirect windows never get it from the WM).
     pub fn take_focus(&self) -> Result<()> {
         self.conn.set_input_focus(xproto::InputFocus::PARENT, self.win, x11rb::CURRENT_TIME)?;
