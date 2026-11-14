@@ -368,8 +368,10 @@ fn run(t_start: Instant) -> Result<()> {
         gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
         // The Line's caret blinks while he types, then holds still: an open, idle Line
         // schedules nothing (a 500 ms blink was two repaints a second, forever).
-        gpui_kit::component::Theme::global_mut(cx).cursor_blink = gpui_kit::component::input::CursorBlink::blinking(std::time::Duration::from_millis(500))
-            .with_idle_timeout(std::time::Duration::from_secs(4));
+        // (gpui-base's Theme: the field's caret reads that one, not the component theme.)
+        let blink = gpui_kit::base::input::CursorBlink::blinking(std::time::Duration::from_millis(500)).with_idle_timeout(std::time::Duration::from_secs(4));
+        gpui_kit::base::Theme::global_mut(cx).cursor_blink = blink;
+        gpui_kit::component::Theme::global_mut(cx).cursor_blink = blink;
         if !fonts.is_empty()
             && let Err(e) = cx.text_system().add_fonts(fonts)
         {

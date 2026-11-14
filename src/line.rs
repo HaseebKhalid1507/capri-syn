@@ -104,6 +104,8 @@ pub struct Line {
     height: f32,
     /// SA_TIMING: Enter, until her first word of the reply is drawn.
     sent_at: Option<(Instant, usize)>,
+    /// Renders so far (`state`: an idle Line should not render).
+    renders: std::cell::Cell<u64>,
     on_ask: OnAsk,
     _subs: Vec<Subscription>,
 }
@@ -233,6 +235,7 @@ impl Line {
             copied_at: None,
             height: 0.0,
             sent_at: None,
+            renders: Default::default(),
             on_ask,
             _subs: subs,
         };
@@ -319,6 +322,7 @@ impl Line {
             "parked": self.parked,
             "rows": self.snap.rows.len(),
             "draft_chars": self.input.read(cx).value().chars().count(),
+            "renders": self.renders.get(),
             "note": self.note,
             "prompts": self.snap.prompts.len(),
             "prompt_ix": self.prompt_ix,
@@ -762,6 +766,7 @@ impl Line {
 impl Render for Line {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = self.pal;
+        self.renders.set(self.renders.get() + 1);
         if let Some((t0, n)) = self.sent_at
             && self.snap.rows.iter().skip(n).any(|r| r.who == Who::Her && !r.text.trim().is_empty())
         {
