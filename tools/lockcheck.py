@@ -70,6 +70,18 @@ def main():
     # Leading/trailing rest frames can differ in count only; compare the motion between.
     same = sa == sb and len(sa) > 0
     first = next((i for i, (x, y) in enumerate(zip(sa, sb)) if x != y), None)
+    # Same rendered states in the same order, apart from extra states that are in only one
+    # clip: a capture that caught the window moved but not yet repainted, held for >= 2
+    # captures (x11grab isn't synced to the app's frames).
+    ia = {h: i for i, h in enumerate(sa)}
+    ib = {h: i for i, h in enumerate(sb)}
+    only_a = [i for i, h in enumerate(sa) if h not in ib]
+    only_b = [i for i, h in enumerate(sb) if h not in ia]
+    common_a = [h for h in sa if h in ib]
+    common_b = [h for h in sb if h in ia]
+    isolated = all(i - 1 not in only_a for i in only_a) and all(i - 1 not in only_b for i in only_b)
+    print(f"lockcheck: common states {len(common_a)}, same order: {common_a == common_b}; only in A {len(only_a)}, "
+          f"only in B {len(only_b)} (all isolated single states: {isolated})")
     print(f"lockcheck: motion A {len(sa)} states ({ra} runs), B {len(sb)} states ({rb} runs): "
           f"{'IDENTICAL' if same else f'DIFFER (first at {first}, len {len(sa)} vs {len(sb)})'}")
     sys.exit(0 if same else 1)
