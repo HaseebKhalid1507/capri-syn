@@ -39,6 +39,8 @@ pub enum Command {
     Menu,
     /// One-line JSON snapshot of the avatar's state.
     State,
+    /// The bounding rects of the last paint (computed in alpha mode too, just not sent).
+    Shape,
     /// Glitch out, then quit.
     Hide,
     Quit,
@@ -360,6 +362,7 @@ impl Command {
                 }
             }
             "state" => Command::State,
+            "shape" => Command::Shape,
             "brain" => Command::Brain(parse_brain(rest)?),
             "settings" if rest == "reload" => Command::SettingsReload,
             "tap" => match rest {

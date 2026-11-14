@@ -413,6 +413,9 @@ pub struct Avatar {
     ticker: Ticker,
     _tick_loop: Task<()>,
     last_shape: Rc<RefCell<(Vec<ShapeRect>, Vec<ShapeRect>)>>,
+    /// The bounding rects of the 2 paints before the last (dev `shape`: a present lands up to
+    /// two frames after its paint).
+    shape_hist: Rc<RefCell<[Vec<ShapeRect>; 2]>>,
     t_start: Instant,
     /// SA_TIMING=1: when Enter sent the last turn, and whether its first reply text came in.
     timing: Option<Option<(Instant, bool)>>,
@@ -600,6 +603,7 @@ impl Avatar {
             ticker,
             _tick_loop: tick_loop,
             last_shape: Rc::new(RefCell::new((vec![(0, 0, 1, 1)], vec![]))),
+            shape_hist: Rc::new(RefCell::new([Vec::new(), Vec::new()])),
             t_start: init.t_start,
             timing: std::env::var_os("SA_TIMING").map(|_| None),
             first_frame: Rc::new(Cell::new(false)),
@@ -1833,6 +1837,10 @@ impl Avatar {
                 } else {
                     "error: not perched".into()
                 }
+            }
+            Command::Shape => {
+                let h = self.shape_hist.borrow();
+                serde_json::json!({ "composited": self.x11.composited(), "bounding": self.last_shape.borrow().1, "before": [h[0], h[1]] }).to_string()
             }
             Command::State => {
                 let reader = self.reader.as_ref().and_then(|(h, xid, _)| h.read_with(cx, |r, _| (*xid, r.scroll_info(), r.buttons())).ok());
@@ -4767,6 +4775,7 @@ impl Render for Avatar {
         let (ax, ay) = (l.avatar_x as i16, l.avatar_y as i16);
         let x11 = self.x11.clone();
         let last = self.last_shape.clone();
+        let hist = self.shape_hist.clone();
         let first = self.first_frame.clone();
         let t_start = self.t_start;
         let ground_px = (l.ground_x as i16, (l.ground_y - 1) as i16, 1u16, 1u16);
@@ -4804,6 +4813,8 @@ impl Render for Avatar {
                         input.push(to_device(Bounds::new(point(px(g.x), px(g.y)), size(px(g.w), px(g.h))), sf));
                         let same_column = |p: &PanelGeom| p.x == g.x && p.w == g.w && p.tail_x == g.tail_x && p.y + p.h == g.y + g.h;
                         let shown = match prev {
+                            // Alpha mode: no shape to lag behind; the rects are only the record.
+                            _ if alpha => Some(g),
                             Some(p) if p == g => Some(g),
                             // Grown or shrunk upward: the smaller of the two was painted both times.
                             Some(p) if same_column(&p) => Some(if p.h < g.h { p } else { g }),
@@ -4830,7 +4841,7 @@ impl Render for Avatar {
                         // New or moved: in the shape only once two frames have painted it (GPUI
                         // presents up to two frames late: one frame of lag left a black tag at
                         // a landing). Torn (a glitch) included.
-                        if run < 2 {
+                        if run < 2 && !alpha {
                             window.request_animation_frame();
                         } else if torn {
                             visible.extend(tag_strips.iter().copied());
@@ -4914,6 +4925,11 @@ impl Render for Avatar {
                     let (di, dv) = (last.0 != input, last.1 != visible);
                     if di || dv {
                         x11.set_shapes(di.then_some(&input[..]), dv.then_some(&visible[..])).ok();
+                        if dv {
+                            let mut h = hist.borrow_mut();
+                            h.swap(0, 1);
+                            h[0] = std::mem::take(&mut last.1);
+                        }
                         *last = (input, visible);
                     }
                     if has_frame && !first.get() {
