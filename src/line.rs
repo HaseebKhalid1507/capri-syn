@@ -52,6 +52,23 @@ pub struct Snap {
     pub prompts: Vec<PromptView>,
 }
 
+/// The kit's components (the Line's text field), its dark theme and caret policy: set up
+/// when the first Line opens (it costs ~15 MB of RSS a Line never opened shouldn't pay).
+pub fn kit_init(cx: &mut App) {
+    static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if DONE.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    gpui_kit::init(cx);
+    gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
+    // The caret blinks while he types, then holds still: an open, idle Line schedules
+    // nothing (a 500 ms blink was two repaints a second, forever). gpui-base's Theme is the
+    // one the field reads.
+    let blink = gpui_kit::base::input::CursorBlink::blinking(Duration::from_millis(500)).with_idle_timeout(Duration::from_secs(4));
+    gpui_kit::base::Theme::global_mut(cx).cursor_blink = blink;
+    gpui_kit::component::Theme::global_mut(cx).cursor_blink = blink;
+}
+
 /// What the Line asks the avatar for. `Send` and `Answer` may be refused (the reason).
 pub enum Ask {
     Send(String),

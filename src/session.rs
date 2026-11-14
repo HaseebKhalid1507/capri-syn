@@ -1608,4 +1608,12 @@ mod tests {
         assert_eq!(l.mode(), AttachMode::Observe);
         assert!(!l.live());
     }
+
+    #[test]
+    fn origin_attributes_a_relay_turn_and_leaves_his_own_alone() {
+        let o = origin("[comms] #12 ask from spike: CI is red on main. Rebase?");
+        assert_eq!(o, Some(("SPIKE".into(), "ask".into(), "CI is red on main. Rebase?".into())));
+        assert_eq!(origin("what's spike doing?"), None);
+        assert_eq!(origin("[comms] from nobody"), None);
+    }
 }

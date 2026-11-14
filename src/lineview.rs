@@ -123,6 +123,7 @@ impl Avatar {
         let xid2 = xid.clone();
         let built: Rc<RefCell<Option<Entity<Line>>>> = Rc::default();
         let built2 = built.clone();
+        crate::line::kit_init(cx);
         let opened = cx.open_window(options, move |window, cx| {
             if let Ok(RawWindowHandle::Xcb(h)) = HasWindowHandle::window_handle(&*window).map(|h| h.as_raw()) {
                 xid2.set(h.window.get());
@@ -144,7 +145,7 @@ impl Avatar {
             self.x11.give_focus(xid).ok();
         }
         self.line = Some(LineWin { view, handle: handle.into(), xid, prev, at: (x, bottom, w, h), parked: false });
-        self.x11.clicks.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.x11.arm_clicks(true);
         self.line_opened_ms = Some(now.elapsed().as_millis());
         // He is reading the thread now: nothing is unread, and the bubble gives way.
         self.ack_unread();
@@ -294,7 +295,7 @@ impl Avatar {
                 Ok(())
             }
             Ask::Closed { restore, draft, sent } => {
-                self.x11.clicks.store(false, std::sync::atomic::Ordering::Relaxed);
+                self.x11.arm_clicks(false);
                 if let Some(l) = self.line.take() {
                     self.draft = draft;
                     self.sent = sent;
@@ -319,7 +320,7 @@ impl Avatar {
                 Ok(())
             }
             Ask::Parked(p) => {
-                self.x11.clicks.store(!p && self.line.is_some(), std::sync::atomic::Ordering::Relaxed);
+                self.x11.arm_clicks(!p && self.line.is_some());
                 if let Some(l) = &mut self.line {
                     l.parked = p;
                     if !p && l.xid != 0 && std::env::var_os("SA_LINE_NOFOCUS").is_none() {
@@ -374,7 +375,7 @@ impl Avatar {
             return;
         }
         l.parked = true;
-        self.x11.clicks.store(false, std::sync::atomic::Ordering::Relaxed);
+        self.x11.arm_clicks(false);
         let back = l.prev.filter(|&p| self.x11.toplevel_rect(p).is_some_and(|r| x >= r.x && x < r.right() && y >= r.y && y < r.bottom()));
         if let Some(p) = back {
             self.x11.give_focus(p).ok();

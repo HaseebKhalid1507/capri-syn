@@ -4560,7 +4560,11 @@ impl Render for Avatar {
                     }
                     let label = match &self.echo {
                         _ if self.reader.is_some() => "IN THE READER".into(),
-                        Some(e) => format!("YOU › {}", crate::session::one_line(e, 26)),
+                        // A turn another session woke is theirs, not his.
+                        Some(e) => match crate::session::origin(e) {
+                            Some((who, _, text)) => format!("⇄ {who} › {}", crate::session::one_line(&text, 24)),
+                            None => format!("YOU › {}", crate::session::one_line(e, 26)),
+                        },
                         None => "INCOMING TRANSMISSION".into(),
                     };
                     (lines, Some(b.pages()), b.wrap.as_ref().map_or(260.0, |w| w.width), b.wrap.as_ref().map_or(1, |w| w.lines.len()), label)
