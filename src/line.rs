@@ -16,8 +16,9 @@ use std::time::{Duration, Instant};
 
 /// Prompt keys do nothing this long after a prompt shows (as the buttons).
 pub const ARM: Duration = Duration::from_millis(400);
-/// A risky prompt (a tool activation, shell/exec/write-class tools) allows only on Shift+A
-/// or A held this long; a bare tap of A does nothing there.
+/// A risky prompt (a tool activation, shell/exec/write-class tools) allows only on A (or a
+/// click on ALLOW) held this long; a tap does nothing there. No Shift+A: that is just a capital
+/// A, which typing into the wrong focus would send.
 pub const HOLD: Duration = Duration::from_millis(450);
 const ESC_AGAIN: Duration = Duration::from_millis(1000);
 const PAD: f32 = 14.0;
@@ -611,25 +612,12 @@ impl Line {
                 if now < self.prompt_at + ARM {
                     return true;
                 }
-                if !risky || m.shift {
+                if !risky {
                     self.hold_at = None;
                     self.answer(id, Some("y".into()), window, cx);
                 } else if self.hold_at.is_none() {
                     // Held: it allows at HOLD unless A comes up first (key repeats ignored).
-                    self.hold_at = Some(now);
-                    self.note = None;
-                    cx.spawn_in(window, async move |this, cx| {
-                        cx.background_executor().timer(HOLD).await;
-                        this.update_in(cx, |l, window, cx| {
-                            if l.hold_at == Some(now) && l.prompt().is_some_and(|p| p.id == id) {
-                                l.hold_at = None;
-                                l.answer(id, Some("y".into()), window, cx);
-                            }
-                        })
-                        .ok();
-                    })
-                    .detach();
-                    cx.notify();
+                    self.start_hold(id, now, window, cx);
                 }
                 true
             }
@@ -659,18 +647,38 @@ impl Line {
         }
     }
 
+    /// A risky allow, held (A or a click on ALLOW): it fires at HOLD unless let go first.
+    fn start_hold(&mut self, id: u64, now: Instant, window: &mut Window, cx: &mut Context<Line>) {
+        self.hold_at = Some(now);
+        self.note = None;
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(HOLD).await;
+            this.update_in(cx, |l, window, cx| {
+                if l.hold_at == Some(now) && l.prompt().is_some_and(|p| p.id == id) {
+                    l.hold_at = None;
+                    l.answer(id, Some("y".into()), window, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
     /// A let go before HOLD on a risky prompt: nothing allowed, and he is told how.
+    fn let_go(&mut self, cx: &mut Context<Line>) {
+        if let Some(t0) = self.hold_at.take() {
+            if t0.elapsed() < HOLD {
+                self.note = Some(format!("NOT ALLOWED · HOLD A FOR {:.2} s TO ALLOW THIS ONE", HOLD.as_secs_f32()));
+            }
+            cx.notify();
+        }
+    }
+
     fn key_up(&mut self, k: &Keystroke, cx: &mut Context<Line>) {
         if k.key == "a" {
             self.a_down = false;
-        }
-        if k.key == "a"
-            && let Some(t0) = self.hold_at.take()
-        {
-            if t0.elapsed() < HOLD {
-                self.note = Some("NOT ALLOWED · HOLD A (OR ⇧A) TO ALLOW THIS ONE".into());
-            }
-            cx.notify();
+            self.let_go(cx);
         }
     }
 
@@ -959,7 +967,7 @@ impl Line {
                     .items_center()
                     .gap(px(6.0))
                     .child(div().px(px(6.0)).border_1().border_color(rgb(pal.frame)).text_color(rgb(pal.frame)).font_weight(FontWeight::BOLD).child("HOLD A"))
-                    .child(div().text_color(rgb(pal.dim)).child("or ⇧A"))
+                    .child(div().text_color(rgb(pal.text)).child(format!("· {:.2} s", HOLD.as_secs_f32())))
                     .child(
                         div()
                             .relative()
@@ -980,20 +988,42 @@ impl Line {
                     .gap(px(22.0))
                     .text_size(px(12.5))
                     .child(div().id("deny").cursor_pointer().child(key("D", "DENY", pal.slash)).on_click(cx.listener(move |this, _, window, cx| this.answer(id, None, window, cx))))
-                    .child(div().id("allow").cursor_pointer().child(allow).on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
-                        // A click allows a risky one only with Shift held.
-                        if !risky || ev.modifiers().shift {
-                            this.answer(id, Some("y".into()), window, cx);
-                        } else {
-                            this.note = Some("NOT ALLOWED · ⇧CLICK, ⇧A OR HOLD A".into());
-                            cx.notify();
-                        }
-                    })))
+                    .child(
+                        div()
+                            .id("allow")
+                            .cursor_pointer()
+                            .child(allow)
+                            // A click allows a benign one; a risky one wants the press held.
+                            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                                if Instant::now() < this.prompt_at + ARM {
+                                    return;
+                                }
+                                if !risky {
+                                    this.answer(id, Some("y".into()), window, cx);
+                                } else if this.hold_at.is_none() {
+                                    this.start_hold(id, Instant::now(), window, cx);
+                                }
+                            }))
+                            .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, cx| this.let_go(cx)))
+                            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, cx| this.let_go(cx))),
+                    )
                     .child(key("ESC", "LATER", pal.dim))
                     .child(key("TAB", "SAY SOMETHING INSTEAD", pal.dim)),
             );
             if risky {
-                col = col.child(div().text_size(px(11.5)).text_color(rgb(pal.slash)).child("this one can run or change things: a tap of A does nothing"));
+                col = col.child(
+                    div()
+                        .mt(px(2.0))
+                        .px(px(8.0))
+                        .py(px(4.0))
+                        .border_l_2()
+                        .border_color(rgb(pal.slash))
+                        .bg(rgba((pal.slash << 8) | 0x1c))
+                        .text_size(px(14.0))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(rgb(pal.slash))
+                        .child(format!("This one can run or change things on your machine. Hold A (or hold the click) for {:.2} s to allow; a tap does nothing.", HOLD.as_secs_f32())),
+                );
             }
         }
         if !armed {
