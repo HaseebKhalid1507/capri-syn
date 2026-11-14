@@ -539,6 +539,25 @@ impl Link {
                     },
                 };
                 self.own = mine.then(|| id.to_string());
+                {
+                    // One line per attach (rare): which session, how, and what its settings are,
+                    // so a persona Set (or its absence) can be read off the log.
+                    let v = &attached.view;
+                    let sys = v.get("system_prompt").and_then(|s| s.as_str());
+                    let persona_sys = self.opts.persona.system.as_deref().map(str::trim);
+                    eprintln!(
+                        "synaps-avatar: attached {} ({}) {mode:?}{} mine={mine}: model={} reasoning={} system={}",
+                        id.get(..8).unwrap_or(id),
+                        attached.meta.name.as_deref().unwrap_or("-"),
+                        if reconnect { " reconnect" } else { "" },
+                        v.get("model").and_then(|m| m.as_str()).unwrap_or("?"),
+                        v.get("reasoning_level").and_then(|m| m.as_str()).unwrap_or("?"),
+                        match sys {
+                            None => "absent".to_string(),
+                            Some(t) => format!("{} chars{}", t.len(), if persona_sys == Some(t.trim()) { " (the persona)" } else { "" }),
+                        }
+                    );
+                }
                 self.view = Some(attached.view.clone());
                 self.me = attached.client;
                 self.owner = attached.input_owner;
