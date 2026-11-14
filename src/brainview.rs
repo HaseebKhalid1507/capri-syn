@@ -1805,6 +1805,16 @@ impl Avatar {
         match Settings::load() {
             Ok(s) => {
                 self.rag_strength = crate::ragdoll::Strength(s.ragdoll.strength);
+                // Her own session's persona, compared (and set) again if it changed.
+                if let Some(sl) = &mut self.session {
+                    let model = sl.link.cli_model();
+                    let acts = if sl.link.rides_other() {
+                        Vec::new()
+                    } else {
+                        sl.link.set_persona(crate::session_persona(&s.session, model, &self.pack.dir), now)
+                    };
+                    self.run_acts(acts);
+                }
                 let Some(h) = &mut self.brain else { return format!("ok ragdoll.strength={} (no brain)", s.ragdoll.strength) };
                 let mut bs = s.brain.clone();
                 // Keep the pack's zeros.

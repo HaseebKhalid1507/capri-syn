@@ -106,6 +106,46 @@ impl Default for BrainSettings {
 pub struct Settings {
     pub brain: BrainSettings,
     pub ragdoll: RagdollSettings,
+    pub session: SessionSettings,
+}
+
+/// `[session]`: her OWN session's persona, model and thinking (never applied to a session
+/// she rides with `--session`, nor to `subconscious`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SessionSettings {
+    pub model: Option<String>,
+    /// `low` | `medium` | `high` | `xhigh`.
+    pub thinking: Option<String>,
+    /// Send the pack's persona (`persona.md`) as her session's system prompt.
+    pub persona: bool,
+    /// A persona file of your own instead of the pack's.
+    pub persona_file: Option<PathBuf>,
+}
+
+impl Default for SessionSettings {
+    fn default() -> Self {
+        SessionSettings { model: None, thinking: None, persona: true, persona_file: None }
+    }
+}
+
+impl SessionSettings {
+    /// The persona text: `persona_file`, else the pack's `persona.md`; None when off,
+    /// missing or blank. Err: `persona_file` set but unreadable.
+    pub fn persona_text(&self, pack_dir: &std::path::Path) -> Result<Option<String>> {
+        if !self.persona {
+            return Ok(None);
+        }
+        let text = match &self.persona_file {
+            Some(p) => std::fs::read_to_string(p).with_context(|| format!("session.persona_file {}", p.display()))?,
+            None => match std::fs::read_to_string(pack_dir.join("persona.md")) {
+                Ok(t) => t,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(e) => return Err(e).context("persona.md"),
+            },
+        };
+        let t = text.trim();
+        Ok((!t.is_empty()).then(|| t.to_string()))
+    }
 }
 
 /// `[ragdoll]`: how much she bends, squashes and swings.
@@ -129,6 +169,26 @@ struct FileRaw {
     brain: Option<BrainRaw>,
     #[serde(default)]
     ragdoll: Option<RagdollRaw>,
+    #[serde(default)]
+    session: Option<SessionRaw>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct SessionRaw {
+    model: Option<String>,
+    thinking: Option<String>,
+    persona: Option<bool>,
+    persona_file: Option<String>,
+}
+
+/// `~/…` and `$HOME/…` in a path setting.
+fn expand_home(p: &str) -> PathBuf {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    match (p.strip_prefix("~/").or_else(|| p.strip_prefix("$HOME/")), home) {
+        (Some(rest), Some(h)) => h.join(rest),
+        _ => PathBuf::from(p),
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -178,7 +238,24 @@ impl Settings {
             anyhow::ensure!(v.is_finite() && (0.0..=1.0).contains(&v), "ragdoll.strength must be 0..1");
             ragdoll.strength = v as f32;
         }
-        let Some(r) = raw.brain else { return Ok(Settings { brain: b, ragdoll }) };
+        let mut session = SessionSettings::default();
+        if let Some(r) = raw.session {
+            if let Some(m) = r.model.map(|m| m.trim().to_string()) {
+                anyhow::ensure!(!m.is_empty() && !m.contains(char::is_whitespace), "session.model must be a model name");
+                session.model = Some(m);
+            }
+            if let Some(t) = r.thinking.map(|t| t.trim().to_ascii_lowercase()) {
+                anyhow::ensure!(["low", "medium", "high", "xhigh"].contains(&t.as_str()), "session.thinking must be \"low\", \"medium\", \"high\" or \"xhigh\"");
+                session.thinking = Some(t);
+            }
+            if let Some(p) = r.persona {
+                session.persona = p;
+            }
+            if let Some(f) = r.persona_file.filter(|f| !f.trim().is_empty()) {
+                session.persona_file = Some(expand_home(f.trim()));
+            }
+        }
+        let Some(r) = raw.brain else { return Ok(Settings { brain: b, ragdoll, session }) };
         if let Some(v) = r.enabled {
             b.enabled = v;
         }
@@ -226,7 +303,7 @@ impl Settings {
         }
         // Drift is a transport (by distance), never drawn from the pool.
         b.arrivals.retain(|p| p.0 != Arrival::Drift);
-        Ok(Settings { brain: b, ragdoll })
+        Ok(Settings { brain: b, ragdoll, session })
     }
 
     /// The file's settings (defaults when there is none). Err: a bad file (keep the old values).
@@ -283,6 +360,38 @@ mod tests {
         assert!(d.enabled && d.no_repeat == 2 && d.cover_max_pct == 12.0 && d.max_moves_per_hour == 15);
         assert_eq!(d.fullscreen, Fullscreen::Hide);
         assert_eq!(d.arrivals.iter().find(|a| a.0 == Arrival::Glitch).unwrap().1, 1.0, "glitch: 1 by default since r6");
+    }
+
+    #[test]
+    fn session_section() {
+        let s = Settings::parse("").unwrap().session;
+        assert_eq!(s, SessionSettings { model: None, thinking: None, persona: true, persona_file: None });
+        let s = Settings::parse("[session]\nmodel = \"claude-sonnet-4-6\"\nthinking = \"Low\"\npersona = false\npersona_file = \"~/p.txt\"").unwrap().session;
+        assert_eq!(s.model.as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(s.thinking.as_deref(), Some("low"));
+        assert!(!s.persona);
+        assert!(s.persona_file.unwrap().ends_with("p.txt"));
+        assert!(Settings::parse("[session]\nthinking = \"ultra\"").is_err());
+        assert!(Settings::parse("[session]\nmodel = \"\"").is_err());
+        assert!(Settings::parse("[session]\npersonna = true").is_err(), "unknown keys are errors");
+    }
+
+    #[test]
+    fn persona_text_sources() {
+        let dir = std::env::temp_dir().join(format!("sa-persona-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let s = SessionSettings::default();
+        assert_eq!(s.persona_text(&dir).unwrap(), None, "no persona.md: none");
+        std::fs::write(dir.join("persona.md"), "  You are Capri.\n\n").unwrap();
+        assert_eq!(s.persona_text(&dir).unwrap().as_deref(), Some("You are Capri."));
+        let off = SessionSettings { persona: false, ..SessionSettings::default() };
+        assert_eq!(off.persona_text(&dir).unwrap(), None);
+        std::fs::write(dir.join("mine.txt"), "Mine.").unwrap();
+        let own = SessionSettings { persona_file: Some(dir.join("mine.txt")), ..SessionSettings::default() };
+        assert_eq!(own.persona_text(&dir).unwrap().as_deref(), Some("Mine."));
+        let gone = SessionSettings { persona_file: Some(dir.join("gone.txt")), ..SessionSettings::default() };
+        assert!(gone.persona_text(&dir).is_err());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

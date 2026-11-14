@@ -6245,7 +6245,7 @@ dependencies = [
 [[package]]
 name = "synaps-client"
 version = "0.0.1"
-source = "git+https://github.com/HaseebKhalid1507/synaps-desktop?rev=deabaf1fbc5b0f7e57c8615c2d3932db68f349ac#deabaf1fbc5b0f7e57c8615c2d3932db68f349ac"
+source = "git+https://github.com/HaseebKhalid1507/synaps-desktop?rev=cea36394f133f1b46d0fc0bc2133d24781281d5c#cea36394f133f1b46d0fc0bc2133d24781281d5c"
 dependencies = [
  "anyhow",
  "async-channel",

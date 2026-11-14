@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use synaps_client::protocol::{LlmEvent, PromptRequest, SessionStreamEvent, StreamEvent};
 use synaps_client::transcript::ItemKind;
-use synaps_client::{AttachMode, CreateOptions, Cwd, Error, Event, SessionEvent, SessionMeta, Status, Transcript};
+use synaps_client::{AttachMode, CreateOptions, Cwd, Error, Event, SessionEvent, SessionMeta, Setting, Status, Transcript};
 
 /// The session the avatar never attaches to, by name or by id (pinned; the memory keeper).
 pub const GUARDED: &str = "subconscious";
@@ -33,6 +33,18 @@ const RETRY_SOON: Duration = Duration::from_secs(2);
 const RETRY_SLOW: Duration = Duration::from_secs(10);
 /// Longest tool name shown in the tag.
 const TOOL_MAX: usize = 18;
+/// The persona's `Set`s get this long for their replies before the Mirror attach drops back.
+const PERSONA_WAIT: Duration = Duration::from_secs(10);
+
+/// Her own session's character: system prompt, model, reasoning level (settings.toml
+/// `[session]` plus the pack's persona). Applied only to HER session, never to one she rides
+/// (`--session`) or to `subconscious`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Persona {
+    pub system: Option<String>,
+    pub model: Option<String>,
+    pub thinking: Option<String>,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Target {
@@ -55,6 +67,7 @@ pub struct Options {
     pub cwd: Option<PathBuf>,
     pub model: Option<String>,
     pub sleepy_after: Duration,
+    pub persona: Persona,
 }
 
 /// `name` (or a name given for an id) is the guarded session.
@@ -85,6 +98,8 @@ pub enum Act {
     Answer(u64, Option<Secret>),
     Abort,
     Detach,
+    /// A setting of her own session (the persona), from the Mirror attach.
+    Set(Setting),
     /// Her own session's id: remember it for next time.
     Remember(String),
     /// A guard tripped: say why and stop.
@@ -193,6 +208,19 @@ pub struct Link {
     pending_input: Option<String>,
     once: Vec<Once>,
     transcript: Transcript,
+    /// The session that is hers (created or resumed by her, or named as her): the only one
+    /// the persona is ever applied to.
+    own: Option<String>,
+    /// The session's settings as last seen (`Attached.view`, `SettingApplied.view`).
+    view: Option<serde_json::Value>,
+    /// This connection's client id and who owns input.
+    me: u64,
+    owner: Option<u64>,
+    /// The persona was compared (and set, or skipped) on this session: once per session.
+    persona_done: Option<String>,
+    /// `Set`s waiting for their reply, and since when.
+    persona_wait: usize,
+    persona_sent: Instant,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -239,7 +267,92 @@ impl Link {
             pending_input: None,
             once: Vec::new(),
             transcript: Transcript::new(),
+            own: None,
+            view: None,
+            me: 0,
+            owner: None,
+            persona_done: None,
+            persona_wait: 0,
+            persona_sent: now,
         }
+    }
+
+    /// What differs between the persona and the session's settings, in the order to set
+    /// them (a model change may clamp the reasoning level; the prompt last).
+    fn persona_diffs(&self, view: &serde_json::Value) -> Vec<Setting> {
+        let p = &self.opts.persona;
+        let mut out = Vec::new();
+        if let Some(m) = &p.model
+            && view.get("model").and_then(|v| v.as_str()) != Some(m.as_str())
+        {
+            out.push(Setting::model(m.clone()));
+        }
+        if let Some(t) = &p.thinking
+            && !view.get("reasoning_level").and_then(|v| v.as_str()).is_some_and(|v| v.eq_ignore_ascii_case(t))
+        {
+            out.push(Setting::reasoning_level(t.clone()));
+        }
+        if let Some(s) = &p.system
+            && view.get("system_prompt").and_then(|v| v.as_str()).map(str::trim) != Some(s.trim())
+        {
+            out.push(Setting::system_prompt(s.clone()));
+        }
+        out
+    }
+
+    /// Bring her own session in line with the persona: compare its settings, switch to
+    /// Mirror only if something differs (Set is the input owner's), send just that, once.
+    fn persona_step(&mut self, now: Instant) -> Vec<Act> {
+        let Some(id) = self.follow.clone() else { return Vec::new() };
+        if self.own.as_deref() != Some(id.as_str()) || self.persona_done.as_deref() == Some(id.as_str()) || self.switching || !self.live() {
+            return Vec::new();
+        }
+        // The guard, again: never anyone else's session, never the memory keeper's.
+        if matches!(self.opts.target, Target::Session(_)) || guarded(&id) || guarded(&self.opts.name) {
+            self.persona_done = Some(id);
+            return Vec::new();
+        }
+        let Some(view) = &self.view else { return Vec::new() };
+        let diffs = self.persona_diffs(view);
+        if diffs.is_empty() {
+            self.persona_done = Some(id);
+            return Vec::new();
+        }
+        let ours = if self.mode == AttachMode::Mirror { self.owner == Some(self.me) } else { self.owner.is_none() };
+        if !ours {
+            eprintln!("synaps-avatar: persona: another client owns input on her session; not set");
+            self.persona_done = Some(id);
+            return Vec::new();
+        }
+        if self.mode != AttachMode::Mirror {
+            return self.upgrade();
+        }
+        self.persona_done = Some(id);
+        self.persona_wait += diffs.len();
+        self.persona_sent = now;
+        self.touched = now;
+        eprintln!("synaps-avatar: persona: setting {} on her session", diffs.iter().map(Setting::name).collect::<Vec<_>>().join(", "));
+        diffs.into_iter().map(Act::Set).collect()
+    }
+
+    /// The `--model` she was started with.
+    pub fn cli_model(&self) -> Option<String> {
+        self.opts.model.clone()
+    }
+
+    /// Riding someone else's session (`--session`): no persona, ever.
+    pub fn rides_other(&self) -> bool {
+        matches!(self.opts.target, Target::Session(_))
+    }
+
+    /// `settings reload`: a new persona is compared (and set) again.
+    pub fn set_persona(&mut self, p: Persona, now: Instant) -> Vec<Act> {
+        if p == self.opts.persona {
+            return Vec::new();
+        }
+        self.opts.persona = p;
+        self.persona_done = None;
+        self.persona_step(now)
     }
 
     fn current(&self) -> Option<u64> {
@@ -278,6 +391,7 @@ impl Link {
         self.busy = false;
         self.prompts.clear();
         self.retry_at = None;
+        self.persona_wait = 0;
     }
 
     /// The user's text (Enter): it goes out in Mirror, now or once the switch is done.
@@ -411,6 +525,21 @@ impl Link {
                 if let Err(e) = self.transcript.load_attached(&attached) {
                     eprintln!("synaps-avatar: attach: {e}");
                 }
+                // Hers: created or resumed by her (not for --session), or carrying her name (or
+                // no name and the id she remembers). A renamed session is someone's now.
+                let id = attached.meta.id.as_str();
+                let mine = match &self.opts.target {
+                    Target::Session(_) => false,
+                    Target::New => self.creating.is_some() || self.own.as_deref() == Some(id),
+                    Target::Default => match attached.meta.name.as_deref() {
+                        Some(n) => n == self.opts.name,
+                        None => self.creating.is_some() || self.own.as_deref() == Some(id) || self.opts.remembered.as_deref() == Some(id),
+                    },
+                };
+                self.own = mine.then(|| id.to_string());
+                self.view = Some(attached.view.clone());
+                self.me = attached.client;
+                self.owner = attached.input_owner;
                 // A mode switch on the session we follow: same body, no new bubble.
                 let switch = self.switching && !reconnect && self.follow.as_deref() == Some(attached.meta.id.as_str());
                 let again = reconnect || self.lost;
@@ -465,6 +594,21 @@ impl Link {
                         acts.extend(self.send(i));
                     }
                 }
+                acts.extend(self.persona_step(now));
+            }
+            Event::InputOwner { client, owner, .. } => {
+                self.me = client;
+                self.owner = owner;
+            }
+            Event::SettingApplied { setting, view, .. } => {
+                eprintln!("synaps-avatar: persona: {setting} set");
+                self.view = Some(view);
+                self.persona_wait = self.persona_wait.saturating_sub(1);
+            }
+            Event::Error { error: Error::SettingRefused { setting, reason, .. }, .. } => {
+                // Logged, never shown: she just keeps the session's own settings.
+                eprintln!("synaps-avatar: persona: {setting} not set: {reason}");
+                self.persona_wait = self.persona_wait.saturating_sub(1);
             }
             Event::Reattaching { attach_seq, reason, .. } => {
                 eprintln!("synaps-avatar: session connection lost ({reason}); re-attaching");
@@ -492,6 +636,7 @@ impl Link {
                 }
                 self.switching = false;
                 self.mode = AttachMode::Observe;
+                self.persona_wait = 0;
                 self.restore_queued();
                 self.busy = false;
                 self.compacting = false;
@@ -667,13 +812,19 @@ impl Link {
         }
     }
 
+    /// Only ever for her own session (Default or New: `resolve` never creates for --session).
     fn create_options(&self) -> CreateOptions {
         let mut o = CreateOptions::new().mode(AttachMode::Observe);
         if let Some(c) = &self.opts.cwd {
             o = o.cwd(Cwd::Path(c.clone())).fallback_cwd(Cwd::Home);
         }
-        if let Some(m) = &self.opts.model {
+        if let Some(m) = self.opts.model.as_ref().or(self.opts.persona.model.as_ref()) {
             o = o.model(m.clone());
+        }
+        if !matches!(self.opts.target, Target::Session(_))
+            && let Some(s) = &self.opts.persona.system
+        {
+            o = o.system(s.clone());
         }
         o
     }
@@ -707,7 +858,7 @@ impl Link {
             && self.prompts.is_empty()
             && self.queued.is_empty()
             && self.pending_input.is_none();
-        idle.then_some(self.touched + MIRROR_LINGER)
+        idle.then_some(if self.persona_wait > 0 { self.persona_sent + PERSONA_WAIT } else { self.touched + MIRROR_LINGER })
     }
 
     /// The next instant the body or the link changes by itself.
@@ -872,7 +1023,15 @@ mod tests {
     }
 
     fn opts() -> Options {
-        Options { target: Target::Default, name: "capri".into(), remembered: None, cwd: None, model: None, sleepy_after: Duration::from_secs(600) }
+        Options {
+            target: Target::Default,
+            name: "capri".into(),
+            remembered: None,
+            cwd: None,
+            model: None,
+            sleepy_after: Duration::from_secs(600),
+            persona: Persona::default(),
+        }
     }
 
     fn attached(seq: u64, name: &str) -> Event {
@@ -910,6 +1069,178 @@ mod tests {
         l.on_event(attached(1, "attached_create.json"), t0);
         assert!(l.live());
         l
+    }
+
+    /// `on_event` without the `Remember` (her id saved for next time).
+    fn on(l: &mut Link, ev: Event, t: Instant) -> Vec<Act> {
+        l.on_event(ev, t).into_iter().filter(|a| !matches!(a, Act::Remember(_))).collect()
+    }
+
+    fn persona() -> Persona {
+        Persona { system: Some("You are Capri.".into()), model: Some("anthropic/claude-sonnet-4-6".into()), thinking: Some("medium".into()) }
+    }
+
+    /// Her session (named `capri`) attached in `mode`; `owner`: who owns input (she is client 1).
+    fn mine(seq: u64, mode: AttachMode, owner: Option<u64>, name: Option<&str>, view: Option<&Persona>) -> Event {
+        let Event::Attached { mut attached, .. } = attached(seq, "attached_create.json") else { panic!() };
+        attached.meta.name = name.map(str::to_string);
+        attached.input_owner = owner;
+        if let Some(p) = view {
+            attached.view["model"] = serde_json::json!(p.model);
+            attached.view["reasoning_level"] = serde_json::json!(p.thinking);
+            attached.view["system_prompt"] = serde_json::json!(p.system);
+        }
+        Event::Attached { attach_seq: seq, attached, mode, reconnect: false }
+    }
+
+    fn applied(seq: u64, setting: &str, p: &Persona) -> Event {
+        let view = serde_json::json!({"model": p.model, "reasoning_level": p.thinking, "system_prompt": p.system});
+        Event::SettingApplied { attach_seq: seq, session_id: "s".into(), id: 0, setting: setting.into(), message: None, view }
+    }
+
+    const SID: &str = "20261113-073427-5fde";
+
+    /// Created by her: the create carries the persona's prompt and model; after it attaches
+    /// (Observe) what still differs (the thinking level) is set from a Mirror attach, then
+    /// she drops back to Observe. Nothing more on the next attach (idempotent).
+    #[test]
+    fn her_new_session_gets_the_persona() {
+        let t0 = Instant::now();
+        let mut l = Link::new(Options { persona: persona(), ..opts() }, t0);
+        l.on_event(connected(), t0);
+        let acts = l.on_event(Event::Sessions(vec![]), t0);
+        let [Act::Create(o)] = acts.as_slice() else { panic!("{acts:?}") };
+        assert_eq!((o.system.as_deref(), o.model.as_deref(), o.name.as_deref()), (Some("You are Capri."), Some("anthropic/claude-sonnet-4-6"), Some("capri")));
+        l.attaching(1);
+        let created = Persona { thinking: Some("low".into()), ..persona() };
+        let acts = on(&mut l, mine(1, AttachMode::Observe, None, Some("capri"), Some(&created)), t0);
+        let [Act::Attach(id, AttachMode::Mirror)] = acts.as_slice() else { panic!("{acts:?}") };
+        assert_eq!(id, SID);
+        l.attaching(2);
+        let acts = on(&mut l, mine(2, AttachMode::Mirror, Some(1), Some("capri"), Some(&created)), t0);
+        match acts.as_slice() {
+            [Act::Set(s)] => assert_eq!(s, &Setting::reasoning_level("medium")),
+            other => panic!("{other:?}"),
+        }
+        // Waits for the reply, then lingers, then Observe again.
+        assert!(l.tick(t0 + MIRROR_LINGER).is_empty(), "still waiting for the reply");
+        l.on_event(applied(2, "reasoning_level", &persona()), t0);
+        let acts = l.tick(t0 + MIRROR_LINGER);
+        assert!(matches!(acts.as_slice(), [Act::Attach(_, AttachMode::Observe)]), "{acts:?}");
+        l.attaching(3);
+        assert!(on(&mut l, mine(3, AttachMode::Observe, None, Some("capri"), Some(&persona())), t0).is_empty());
+        assert_eq!(l.mode(), AttachMode::Observe);
+    }
+
+    /// Her existing session, all three different: model, then thinking, then the prompt;
+    /// a session that already matches gets nothing (no Mirror switch at all).
+    #[test]
+    fn her_existing_session_gets_only_what_differs() {
+        let t0 = Instant::now();
+        let mut l = Link::new(Options { persona: persona(), ..opts() }, t0);
+        l.on_event(connected(), t0);
+        let acts = l.on_event(Event::Sessions(vec![meta(SID, Some("capri"))]), t0);
+        assert!(matches!(acts.as_slice(), [Act::Attach(_, AttachMode::Observe)]), "{acts:?}");
+        l.attaching(1);
+        let acts = on(&mut l, mine(1, AttachMode::Observe, None, Some("capri"), None), t0);
+        assert!(matches!(acts.as_slice(), [Act::Attach(_, AttachMode::Mirror)]), "{acts:?}");
+        l.attaching(2);
+        let acts = on(&mut l, mine(2, AttachMode::Mirror, Some(1), Some("capri"), None), t0);
+        let names: Vec<&str> = acts.iter().map(|a| if let Act::Set(s) = a { s.name() } else { "?" }).collect();
+        assert_eq!(names, ["model", "reasoning_level", "system_prompt"]);
+
+        let mut l = Link::new(Options { persona: persona(), ..opts() }, t0);
+        l.on_event(connected(), t0);
+        l.on_event(Event::Sessions(vec![meta(SID, Some("capri"))]), t0);
+        l.attaching(1);
+        assert!(on(&mut l, mine(1, AttachMode::Observe, None, Some("capri"), Some(&persona())), t0).is_empty());
+    }
+
+    /// The hard guard: never a session she rides with --session (even named like her), never
+    /// a renamed one she finds by the remembered id, never `subconscious`.
+    #[test]
+    fn the_persona_never_touches_anyone_elses_session() {
+        let t0 = Instant::now();
+        // --session capri: someone else's session, even with her name and a persona.
+        let mut l = Link::new(Options { target: Target::Session("capri".into()), persona: persona(), ..opts() }, t0);
+        l.on_event(connected(), t0);
+        let acts = l.on_event(Event::Sessions(vec![meta(SID, Some("capri"))]), t0);
+        assert!(matches!(acts.as_slice(), [Act::Attach(_, AttachMode::Observe)]));
+        l.attaching(1);
+        assert!(on(&mut l, mine(1, AttachMode::Observe, None, Some("capri"), None), t0).is_empty());
+        // Typing switches it to Mirror: still no Set.
+        let acts = l.set_typing(true, t0);
+        assert!(matches!(acts.as_slice(), [Act::Attach(_, AttachMode::Mirror)]));
+        l.attaching(2);
+        assert!(on(&mut l, mine(2, AttachMode::Mirror, Some(1), Some("capri"), None), t0).iter().all(|a| !matches!(a, Act::Set(_))));
+        assert!(l.set_persona(Persona { thinking: Some("high".into()), ..persona() }, t0).is_empty());
+        // Her remembered id, renamed by someone to `work`: theirs now.
+        let mut l = Link::new(Options { remembered: Some(SID.into()), persona: persona(), ..opts() }, t0);
+        l.on_event(connected(), t0);
+        let acts = l.on_event(Event::Sessions(vec![meta(SID, Some("work"))]), t0);
+        assert!(matches!(acts.as_slice(), [Act::Attach(_, AttachMode::Observe)]), "{acts:?}");
+        l.attaching(1);
+        assert!(on(&mut l, mine(1, AttachMode::Observe, None, Some("work"), None), t0).is_empty());
+        // `subconscious`: refused before any persona.
+        let mut l = Link::new(Options { remembered: Some(SID.into()), persona: persona(), ..opts() }, t0);
+        l.on_event(connected(), t0);
+        l.on_event(Event::Sessions(vec![meta(SID, None)]), t0);
+        l.attaching(1);
+        let acts = on(&mut l, mine(1, AttachMode::Observe, None, Some("subconscious"), None), t0);
+        assert!(matches!(acts.as_slice(), [Act::Detach, Act::Fatal(_)]), "{acts:?}");
+    }
+
+    /// Someone else owns input: no Mirror switch, no Set. A refusal is logged, never shown.
+    #[test]
+    fn a_refused_persona_is_quiet() {
+        let t0 = Instant::now();
+        let mut l = Link::new(Options { persona: persona(), ..opts() }, t0);
+        l.on_event(connected(), t0);
+        l.on_event(Event::Sessions(vec![meta(SID, Some("capri"))]), t0);
+        l.attaching(1);
+        assert!(on(&mut l, mine(1, AttachMode::Observe, Some(7), Some("capri"), None), t0).is_empty(), "the TUI owns input");
+        // Owner gone, a Set refused anyway: no restore, no flash, back to Observe in time.
+        let mut l = Link::new(Options { persona: persona(), ..opts() }, t0);
+        l.on_event(connected(), t0);
+        l.on_event(Event::Sessions(vec![meta(SID, Some("capri"))]), t0);
+        l.attaching(1);
+        on(&mut l, mine(1, AttachMode::Observe, None, Some("capri"), None), t0);
+        l.attaching(2);
+        assert_eq!(on(&mut l, mine(2, AttachMode::Mirror, Some(1), Some("capri"), None), t0).len(), 3);
+        for s in ["model", "reasoning_level", "system_prompt"] {
+            let e = Error::SettingRefused { id: 1, setting: s.into(), reason: "input is owned by client #7".into() };
+            l.on_event(Event::Error { attach_seq: Some(2), error: e }, t0);
+        }
+        assert_eq!(l.take_once(), vec![]);
+        assert_eq!(l.body(t0).mood, Mood::Idle);
+        assert!(matches!(l.tick(t0 + MIRROR_LINGER).as_slice(), [Act::Attach(_, AttachMode::Observe)]));
+        // No reply at all (an older daemon): Observe after PERSONA_WAIT anyway.
+        let mut l = Link::new(Options { persona: persona(), ..opts() }, t0);
+        l.on_event(connected(), t0);
+        l.on_event(Event::Sessions(vec![meta(SID, Some("capri"))]), t0);
+        l.attaching(1);
+        on(&mut l, mine(1, AttachMode::Observe, None, Some("capri"), None), t0);
+        l.attaching(2);
+        on(&mut l, mine(2, AttachMode::Mirror, Some(1), Some("capri"), None), t0);
+        assert!(l.tick(t0 + MIRROR_LINGER).is_empty());
+        assert!(matches!(l.tick(t0 + PERSONA_WAIT).as_slice(), [Act::Attach(_, AttachMode::Observe)]));
+    }
+
+    /// `settings reload` with a new thinking level: compared and set again.
+    #[test]
+    fn a_reloaded_persona_is_applied() {
+        let t0 = Instant::now();
+        let mut l = Link::new(Options { persona: persona(), ..opts() }, t0);
+        l.on_event(connected(), t0);
+        l.on_event(Event::Sessions(vec![meta(SID, Some("capri"))]), t0);
+        l.attaching(1);
+        assert!(on(&mut l, mine(1, AttachMode::Observe, None, Some("capri"), Some(&persona())), t0).is_empty());
+        assert!(l.set_persona(persona(), t0).is_empty(), "unchanged");
+        let acts = l.set_persona(Persona { thinking: Some("high".into()), ..persona() }, t0);
+        assert!(matches!(acts.as_slice(), [Act::Attach(_, AttachMode::Mirror)]), "{acts:?}");
+        l.attaching(2);
+        let acts = on(&mut l, mine(2, AttachMode::Mirror, Some(1), Some("capri"), Some(&persona())), t0);
+        assert!(matches!(acts.as_slice(), [Act::Set(s)] if *s == Setting::reasoning_level("high")), "{acts:?}");
     }
 
     /// The fixture's real turn (thinking, text, a bash tool, more text, idle) in moods.

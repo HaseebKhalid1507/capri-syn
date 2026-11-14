@@ -1973,6 +1973,7 @@ impl Avatar {
                 Act::Answer(id, v) => s.client.answer(id, v.map(|v| v.0)),
                 Act::Abort => s.client.abort(),
                 Act::Detach => s.client.detach(),
+                Act::Set(setting) => s.client.set(setting).map(drop),
                 Act::Remember(id) => {
                     state::remember_session(&s.key, &id);
                     Ok(())
