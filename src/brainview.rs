@@ -1114,8 +1114,8 @@ impl Avatar {
     }
 
     /// Hanging life, device px in 2 px steps: (the pendulum at the bottom, the shins' extra
-    /// kick from the knee). A slow sway, a bid's kick decaying over ~3 s, and every ~3.6 s
-    /// one leg-kick out and back (alternating sides), plus a bigger one on an insist beat.
+    /// kick from the knee). A slow sway, a bid's kick decaying over ~3 s, and one slow leg kick
+    /// on an insist beat; no kicking at rest (LOCKED #9).
     pub(super) fn hang_swing(&self, now: Instant) -> (i32, i32, bool) {
         use std::f32::consts::{PI, TAU};
         let sf = self.layout.sf;
@@ -1127,19 +1127,13 @@ impl Avatar {
                 v += amp * (-k / 1.1).exp() * (k * TAU / 1.25).sin();
             }
         }
-        // One knee bent out at a time, held ~1 s, then the other: never two frames of a
-        // rigid drop.
-        let half = 1.5;
-        let n = (t / half).floor();
-        let u = t - n * half;
-        let mut right = (n as i64).rem_euclid(2) == 0;
-        let env = (u / 0.3).min((half - u) / 0.3).clamp(0.0, 1.0);
-        let mut leg = 20.0 * sf * env * if right { 1.0 } else { -1.0 };
+        // Legs hang still and follow the swing (LOCKED #9); an insist beat is one slow kick.
+        let (mut right, mut leg) = (true, 0.0);
         if let Some((t0, dir)) = self.brain.as_ref().and_then(|h| h.leg_kick) {
-            let k = now.saturating_duration_since(t0).as_secs_f32() / 0.7;
+            let k = now.saturating_duration_since(t0).as_secs_f32() / LEG_KICK_S;
             if k < 1.0 {
                 right = dir > 0.0;
-                leg = 30.0 * sf * dir * (PI * k).sin();
+                leg = 24.0 * sf * dir * (PI * k).sin();
             }
         }
         let q = |x: f32| ((x / 2.0).round() * 2.0) as i32;
@@ -1496,4 +1490,6 @@ impl Avatar {
 
 /// `CURSOR_CLEAR` from places.rs (logical px), for the log.
 const CURSOR_CLEAR_LOGICAL: f32 = places::CURSOR_CLEAR;
+/// An insist beat's leg kick: out and back once over this long (LOCKED #9: >= 400 ms).
+const LEG_KICK_S: f32 = 0.8;
 
