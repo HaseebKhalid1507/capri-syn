@@ -30,7 +30,7 @@ def main():
     probe = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v", "-show_entries", "stream=width,height", "-of", "csv=p=0", a.clip],
                            capture_output=True, text=True, check=True).stdout.split(",")
     W, H = (w, h) if a.crop else (int(probe[0]), int(probe[1]))
-    raw = subprocess.run(["ffmpeg", "-loglevel", "error", "-i", a.clip, "-vf", ",".join(vf), "-vsync", "0", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+    raw = subprocess.run(["ffmpeg", "-loglevel", "error", "-i", a.clip, "-vf", ",".join(vf), "-fps_mode", "passthrough", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
                          capture_output=True, check=True).stdout
     n = len(raw) // (W * H * 3)
     fr = np.frombuffer(raw[: n * W * H * 3], np.uint8).reshape(n, H, W, 3).astype(np.float32)
