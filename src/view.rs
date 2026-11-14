@@ -295,6 +295,8 @@ struct MusicOn {
 }
 const FRAME_FAST: Duration = Duration::from_millis(16);
 const FRAME_FX: Duration = Duration::from_millis(33);
+/// A quiet arrival's sliver widens back into her over ~3 frames.
+const SLIVER: Duration = Duration::from_millis(100);
 
 struct Press {
     root: (i32, i32),
@@ -392,6 +394,8 @@ pub struct Avatar {
     /// again when it's drawn, so it's exactly what was painted under the last frame.
     glitch_at: Cell<Option<Instant>>,
     next_glitch: Option<Instant>,
+    /// A quiet teleport's arrival: a sliver widening back into her (from this time).
+    sliver: Option<Instant>,
     squash: Option<Instant>,
     glints: Vec<Glint>,
     next_glint: Option<Instant>,
@@ -533,6 +537,7 @@ impl Avatar {
             glitch_step: Cell::new((None, 0)),
             glitch_at: Cell::new(None),
             next_glitch: None,
+            sliver: None,
             squash: None,
             glints: Vec::new(),
             next_glint: None,
@@ -1153,7 +1158,7 @@ impl Avatar {
             take(Some(now + FRAME_FAST));
         }
         take(self.next_glitch);
-        if self.squash.is_some() {
+        if self.squash.is_some() || self.sliver.is_some() {
             take(Some(now + FRAME_FAST));
         }
         if !self.glints.is_empty() {
@@ -1186,6 +1191,9 @@ impl Avatar {
     fn tick(&mut self, cx: &mut Context<Self>) {
         let now = Instant::now();
         self.view_ticks += 1;
+        if self.sliver.is_some_and(|t| now.saturating_duration_since(t) > SLIVER) {
+            self.sliver = None;
+        }
         let mut dirty = self.anim.tick(now);
         if let Some((at, m)) = self.mood_then
             && at <= now
@@ -1463,6 +1471,9 @@ impl Avatar {
         if u >= fx::BOLT_LAND && self.hidden {
             self.hidden = false;
             self.glitch = Some(self.land_glitch(now, seed));
+            if self.teleport.as_ref().is_some_and(|t| t.quiet) {
+                self.sliver = Some(now);
+            }
             if !moved {
                 moved = true;
                 if let Some(tp) = &mut self.teleport {
@@ -2728,6 +2739,12 @@ impl Avatar {
     }
 
     /// Squash pivot: the seat when sitting on an edge, else the feet (avatar-local).
+    /// A quiet arrival: her width from a sliver back to full over `SLIVER` (the exit, reversed).
+    fn sliver_sx(&self, at: Instant) -> Option<f32> {
+        let t = at.saturating_duration_since(self.sliver?).as_secs_f32() / SLIVER.as_secs_f32();
+        (t < 1.0).then_some(0.06 + 0.94 * (t * t * (3.0 - 2.0 * t)))
+    }
+
     fn pivot(&self) -> (f32, f32) {
         let l = &self.layout;
         let y = match (self.sitting(), l.seat_y) {
@@ -3065,6 +3082,11 @@ impl Render for Avatar {
         if let Some((Some(c), _)) = &rag_shown {
             plan = c.plan.clone();
         }
+        let sliver_px = (l.ground_x - l.avatar_x) as f32;
+        if let Some(sx) = self.sliver_sx(now) {
+            plan.sx = sx;
+            plan.pivot.0 = sliver_px;
+        }
         // The next frame's plan, painted underneath this one. The bounding shape is set when
         // a frame paints, but its present lands up to a frame later, so wherever the next
         // shape grows, this frame's pixels show for a moment. Without an underlay they're
@@ -3120,6 +3142,16 @@ impl Render for Avatar {
             self.glitch_at.set(Some(at));
             let next_base = rag_next.as_ref().map_or(base, |n| n.plan.clone());
             next = Some(if g.done(at) { next_base.clone() } else { lay_on(&next_base, at, step + 1) });
+        }
+        // The sliver widens next frame: that width goes underneath.
+        if let Some(sx) = self.sliver_sx(now + FRAME_FX).or(self.sliver.map(|_| 1.0)) {
+            let n = next.get_or_insert_with(|| {
+                let mut p = BodyPlan::plain();
+                p.pivot = plan.pivot;
+                p
+            });
+            n.sx = sx;
+            n.pivot.0 = sliver_px;
         }
         // The rag's next plan (and frame) goes underneath (§4: commit one frame ahead).
         let mut next_img: Option<Arc<RenderImage>> = None;
