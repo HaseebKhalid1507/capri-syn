@@ -4430,7 +4430,7 @@ impl Render for Avatar {
                 Some(u) if u.refused => format!("{} // {}", self.name, u.text),
                 Some(u) => {
                     // Inside her window: the plate is centred on her.
-                    let head = format!("{} {} NEW  ", self.name, u.n);
+                    let head = format!("{} {} NEW  READ ▸  ", self.name, u.n);
                     let per = TAG_FONT * 0.62 + 1.5;
                     let fit = ((l.win_w as f32 / sf - 80.0) / per) as usize;
                     crate::session::one_line(&u.text, fit.saturating_sub(head.chars().count()).clamp(8, 44))
@@ -4459,6 +4459,10 @@ impl Render for Avatar {
                             .child(div().px(px(5.0)).bg(rgb(pal.name)).text_color(rgb(pal.surface)).child(tracked(&b, 1.0)))
                     })
                     .child(tracked(&text, if fresh { 0.4 } else { 1.5 }))
+                    // It opens: say so, inside the plate.
+                    .when(fresh, |d| {
+                        d.child(div().pl(px(7.0)).border_l_1().border_color(rgb(pal.name)).text_color(rgb(pal.name)).child(tracked("READ ▸", 1.2)))
+                    })
                     // A reply put away behind the plate: a small up-chevron inside it.
                     .when(collapsed && !fresh, |d| d.child(chevron(Chevron::Up, rgb(fg))));
                 // A dark ring keeps the plate legible on busy backgrounds.
