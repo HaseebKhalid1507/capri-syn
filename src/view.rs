@@ -47,8 +47,6 @@ pub struct Layout {
 }
 
 // Logical px. The HUD follows Capri's CSS (cyberpunk.css, avatar-detach.css).
-/// A turn's held step without a compositor (two frames at 60 Hz).
-const TURN_STEP_MS: f32 = 34.0;
 const MARGIN: f32 = 8.0;
 const TOP_MARGIN: f32 = 6.0;
 const BODY_FONT: f32 = 20.0;
@@ -422,6 +420,8 @@ pub struct Avatar {
     pub(super) flip: bool,
     /// A turn's squeeze in progress: (start, the flip it turns to). The art swaps halfway.
     turn: Option<(Instant, bool)>,
+    /// Shape mode: the turn's painted frames so far (`facing::turn_band`).
+    turn_frame: u32,
     /// Turns so far, the last one's reason, and when.
     turns: u32,
     turn_why: &'static str,
@@ -625,6 +625,7 @@ impl Avatar {
             shape_hist: Rc::new(RefCell::new([Vec::new(), Vec::new()])),
             flip: false,
             turn: None,
+            turn_frame: 0,
             turns: 0,
             turn_why: "",
             last_turn: None,
@@ -1092,6 +1093,7 @@ impl Avatar {
             self.set_flip(to);
         } else {
             self.turn = Some((now, to));
+            self.turn_frame = 0;
         }
     }
 
@@ -1124,28 +1126,14 @@ impl Avatar {
 
     /// The turn's (sx, sy) at `at` (`facing::turn_shape` over `turn_ms`), and the flip shown then.
     fn turn_at(&self, at: Instant) -> Option<((f32, f32), bool)> {
+        if !self.x11.composited() {
+            return None;
+        }
         let (t0, to) = self.turn?;
         let ms = self.mirror_cfg.turn_ms.max(1) as f32;
-        let mut u = at.saturating_duration_since(t0).as_secs_f32() * 1000.0 / ms;
-        // Without a compositor its width moves in held steps (~2 frames each): the bounding
-        // shape is set as a frame paints and its pixels land a frame later, so a width that
-        // changed every frame grew over stale pixels (shards). Held, the next step's art
-        // lies underneath exactly where the shape grows.
-        if !self.x11.composited() && u < 1.0 {
-            let n = (ms / TURN_STEP_MS).round().max(3.0);
-            u = ((u * n).floor() + 0.5) / n;
-        }
+        let u = at.saturating_duration_since(t0).as_secs_f32() * 1000.0 / ms;
         let shown = if u >= crate::facing::TURN_SWAP_U { to } else { self.flip };
-        // The anticipation (a dip that widens) only under a compositor: without one, the
-        // shape it grows uncovers stale edge pixels (a blue fringe).
-        let antic = self.x11.composited() || u >= crate::facing::TURN_ANTIC;
-        crate::facing::turn_shape(u).map(|k| (if antic { k } else { (1.0, 1.0) }, shown))
-    }
-
-    /// Frame `i` as it shows with `flip` (unmirrored if it may not mirror).
-    fn frame_as(&self, i: usize, flip: bool) -> Option<&Frame> {
-        let f = self.frames.get(i)?.as_ref()?;
-        Some(if flip && self.flippable.get(i).copied().unwrap_or(false) { f.mirrored() } else { f })
+        crate::facing::turn_shape(u).map(|k| (k, shown))
     }
 
     /// Frame `i` as drawn in the pack (never mirrored), else the default sprite.
@@ -1156,6 +1144,27 @@ impl Avatar {
     /// Advance a turn: the art swaps edge-on (`facing::TURN_SWAP_U`), it ends at `turn_ms`.
     fn step_turn(&mut self, now: Instant) -> bool {
         let Some((t0, to)) = self.turn else { return false };
+        // Anything else taking her over (a glitch, a teleport, a grab) ends it at once.
+        if self.glitch.is_some() || self.teleport.is_some() || self.rag.is_some() || self.hidden {
+            self.turn = None;
+            self.set_flip(to);
+            return true;
+        }
+        if !self.x11.composited() {
+            match crate::facing::turn_band(self.turn_frame) {
+                Some((_, new)) => {
+                    let shown = if new { to } else { !to };
+                    if shown != self.flip {
+                        self.set_flip(shown);
+                    }
+                }
+                None => {
+                    self.turn = None;
+                    self.set_flip(to);
+                }
+            }
+            return true;
+        }
         let ms = now.saturating_duration_since(t0).as_secs_f32() * 1000.0;
         let full = self.mirror_cfg.turn_ms as f32;
         // The art swaps on the turn's own clock (stepped or not).
@@ -3947,8 +3956,7 @@ impl Render for Avatar {
         }
         // A turn: its shape now; its next one goes underneath (with the art it shows then),
         // not the unsquashed frame (that peeked out at her edges as shards on the rebound).
-        let pre_turn = (plan.sx, plan.sy);
-        let turning = self.rag.is_none() && self.turn_at(now).is_some();
+        let turning = self.rag.is_none() && self.turn.is_some();
         if let Some(((kx, ky), _)) = self.turn_at(now).filter(|_| turning) {
             plan.sx *= kx;
             plan.sy *= ky;
@@ -4018,18 +4026,6 @@ impl Render for Avatar {
             let next_base = rag_next.as_ref().map_or(base, |n| n.plan.clone());
             next = Some(if g.done(at) { next_base.clone() } else { lay_on(&next_base, at, step + 1) });
         }
-        let mut turn_next_img: Option<Arc<RenderImage>> = None;
-        if turning && next.is_none() {
-            let at = now + FRAME_FX;
-            let ((kx, ky), shown) = self.turn_at(at).unwrap_or(((1.0, 1.0), self.turn.map_or(self.flip, |t| t.1)));
-            let mut n = plan.clone();
-            n.sx = pre_turn.0 * kx;
-            n.sy = pre_turn.1 * ky;
-            next = Some(n);
-            if shown != self.flip {
-                turn_next_img = self.frame_as(shown_i, shown).map(|f| f.image.clone());
-            }
-        }
         // The sliver widens next frame: that width goes underneath.
         if let Some(sx) = self.sliver_sx(now + FRAME_FX).or(self.sliver.map(|_| 1.0)) {
             let n = next.get_or_insert_with(|| {
@@ -4041,7 +4037,7 @@ impl Render for Avatar {
             n.pivot.0 = sliver_px;
         }
         // The rag's next plan (and frame) goes underneath (§4: commit one frame ahead).
-        let mut next_img: Option<Arc<RenderImage>> = turn_next_img;
+        let mut next_img: Option<Arc<RenderImage>> = None;
         if let Some((_, Some(n))) = &rag_shown {
             // Under a glitch, `next` is already the pattern laid on this plan.
             if self.glitch.is_none() {
@@ -4113,24 +4109,58 @@ impl Render for Avatar {
         let next = next.filter(|_| !hidden).map(Rc::new);
         let next_tag = next.clone();
         let plan = Rc::new(plan);
-        let body_shape: Vec<ShapeRect> = if hidden {
+        let mut body_shape: Vec<ShapeRect> = if hidden {
             Vec::new()
         } else if plan.is_plain() {
             rects.to_vec()
         } else {
             plan.shape(&rects)
         };
+        // Shape mode turn: the art as it is (it's on screen already), shown through a band
+        // about her feet (`facing::turn_band`); only the shape moves, so nothing lands late.
+        if turning && !alpha {
+            if let Some((frac, _)) = crate::facing::turn_band(self.turn_frame)
+                && !hidden
+            {
+                let p = sliver_px as i32;
+                let x0 = body_shape.iter().map(|r| r.0 as i32).min().unwrap_or(p);
+                let x1 = body_shape.iter().map(|r| r.0 as i32 + r.2 as i32).max().unwrap_or(p);
+                let half = (((p - x0).max(x1 - p)) as f32 * frac).max(3.0) as i32;
+                let (a, b) = (p - half, p + half);
+                let clipped: Vec<ShapeRect> = body_shape
+                    .iter()
+                    .filter_map(|r| {
+                        let (rx0, rx1) = ((r.0 as i32).max(a), (r.0 as i32 + r.2 as i32).min(b));
+                        (rx1 > rx0).then(|| (rx0 as i16, r.1, (rx1 - rx0) as u16, r.3))
+                    })
+                    .collect();
+                if !clipped.is_empty() {
+                    body_shape = clipped;
+                }
+            }
+            self.turn_frame += 1;
+        }
         let ghost_rects = if !plan.has_ghosts() || hidden { Vec::new() } else { plan.ghost_rects(&rects) };
         let solid_rects = if plan.solid.iter().all(Option::is_none) || hidden { Vec::new() } else { plan.solid_rects(&rects) };
         let tint_rects = if plan.tint.is_some() && !hidden { plan.body_rects(&rects) } else { Vec::new() };
         let bar_rects = if hidden || plan.tint.is_some() { Vec::new() } else { plan.bar_rects(&rects) };
         let entity = cx.entity();
-        let warm: Vec<Arc<RenderImage>> = if self.loaded && !self.warmed {
+        let mut warm: Vec<Arc<RenderImage>> = if self.loaded && !self.warmed {
             self.warmed = true;
             self.frames.iter().flatten().map(|f| f.image.clone()).collect()
         } else {
             Vec::new()
         };
+        // A shape-mode turn: the art it turns to is painted off-window while the band closes,
+        // so its texture is up before the swap (its first use came late: shards at the open).
+        if turning
+            && !alpha
+            && let Some((t, false)) = self.turn.map(|t| t.1).zip(crate::facing::turn_band(self.turn_frame).map(|b| b.1))
+            && let Some(f) = self.frames.get(shown_i).and_then(|f| f.as_ref())
+        {
+            let target = t && self.flippable.get(shown_i).copied().unwrap_or(false);
+            warm.push(if target { f.mirrored() } else { f }.image.clone());
+        }
 
         let menu_cell: Cell2 = Rc::new(Cell::new(None));
         let tag_cell: Cell2 = Rc::new(Cell::new(None));

@@ -76,6 +76,16 @@ pub fn turn_shape(u: f32) -> Option<(f32, f32)> {
     Some(((PI * w).cos().abs().max(TURN_MIN_SX), 1.0))
 }
 
+/// Without a compositor the window's shape and its pixels land apart (the shape at once, the
+/// pixels up to two frames later), so a squeeze, whose pixels change every frame, tears. A
+/// turn there keeps the pixels still and animates only the shape: a band about her feet
+/// closes over the old art, holds edge-on while the new art lands, then opens over it. Per
+/// painted frame `k`: (band width as a share of her half-width, the new art yet), None after.
+pub const BAND: [(f32, bool); 8] = [(0.72, false), (0.42, false), (0.16, false), (0.16, true), (0.16, true), (0.16, true), (0.42, true), (0.72, true)];
+pub fn turn_band(k: u32) -> Option<(f32, bool)> {
+    BAND.get(k as usize).copied()
+}
+
 /// Shown mirrored to face `right`, for art that faces right (`art_right`) or left unmirrored.
 pub fn mirrored_for(art_right: bool, right: bool) -> bool {
     right != art_right
@@ -196,6 +206,18 @@ mod tests {
         }
         let (ex, _) = turn_shape(0.99).unwrap();
         assert!(ex > 0.99, "ends full width: {ex}");
+    }
+
+    #[test]
+    fn shape_mode_turn_closes_holds_edge_on_and_opens_once() {
+        let b: Vec<(f32, bool)> = (0..).map_while(turn_band).collect();
+        let swap = b.iter().position(|s| s.1).unwrap();
+        assert!(b[..swap].windows(2).all(|w| w[1].0 < w[0].0), "closes: {b:?}");
+        let last_min = b.iter().rposition(|s| s.0 == b[swap].0).unwrap();
+        assert!(last_min - swap >= 2, "the new art holds edge-on long enough to land: {b:?}");
+        assert!(b[last_min..].windows(2).all(|w| w[1].0 > w[0].0), "one monotonic open: {b:?}");
+        assert!(b[swap..].iter().all(|s| s.1) && b[..swap].iter().all(|s| !s.1));
+        assert_eq!(turn_band(b.len() as u32), None);
     }
 
     #[test]
