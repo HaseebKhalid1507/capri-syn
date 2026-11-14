@@ -160,19 +160,21 @@ impl Avatar {
     // ---- the talk key ---------------------------------------------------------------------
 
     /// A fresh press (not an auto-repeat): she stops talking at once, and a hold past the tap
-    /// time opens the mic.
-    pub(super) fn voice_press(&mut self, t0: Instant, cx: &mut Context<Self>) {
-        if self.voice_speaking() {
+    /// time opens the mic. True if it hushed her (a tap then does nothing more).
+    pub(super) fn voice_press(&mut self, t0: Instant, cx: &mut Context<Self>) -> bool {
+        let hushed = self.voice_speaking();
+        if hushed {
             self.voice_hush("talk key");
         }
         if !self.voice_on() {
-            return;
+            return hushed;
         }
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(Duration::from_millis(lineview::TAP_MS as u64)).await;
             this.update(cx, |a, cx| a.voice_hold(t0, cx)).ok();
         })
         .detach();
+        hushed
     }
 
     /// Still held at the tap time: listen (the stream opens only now, on his act).
@@ -381,7 +383,7 @@ impl Avatar {
     /// True when the turn is spoken (the bubble shows captions, not the stream).
     pub(super) fn voice_reply(&mut self, b: &crate::session::Body, new_turn: bool) -> bool {
         if new_turn {
-            let spoken = self.voice.pending && b.echo.as_deref().and_then(voice::spoken).is_some();
+            let spoken = self.voice.pending && b.echo.as_deref().is_some_and(|e| e.starts_with("[voice"));
             if self.voice.turn.is_some() {
                 self.voice_hush("new turn");
             }
@@ -513,27 +515,27 @@ impl Avatar {
         let bars = |v: f32| -> String { (0..5).map(|i| if v * 5.0 > i as f32 + 0.3 { '▮' } else { '▯' }).collect() };
         if let Some(m) = self.voice.mic {
             let s = m.elapsed().as_secs();
-            return Some(Status { label: format!("● MIC {}:{:02} {}", s / 60, s % 60, bars(self.voice.level)), tone: 0xff3b62, invert: true, glyph: "ring".into() });
+            return Some(Status { label: format!("MIC {}:{:02} {}", s / 60, s % 60, bars(self.voice.level)), tone: 0xff3b62, invert: true, glyph: "rec".into() });
         }
         if self.voice.asked.is_some() {
-            return Some(Status { label: "● MIC …".into(), tone: 0xff3b62, invert: false, glyph: "ring".into() });
+            return Some(Status { label: "MIC …".into(), tone: 0xff3b62, invert: false, glyph: "ring".into() });
         }
         if self.voice.transcribing {
-            return Some(Status { label: "◉ HEARD · …".into(), tone: self.pack.tone(Some("think")), invert: false, glyph: "dots".into() });
+            return Some(Status { label: "HEARD · …".into(), tone: self.pack.tone(Some("think")), invert: false, glyph: "dots".into() });
         }
         if self.voice_speaking() {
             let s = self.voice_shape(Instant::now()).unwrap_or(0);
-            return Some(Status { label: format!("▶ SPEAKING {}", bars(s as f32 / 3.0)), tone: self.pack.tone(Some("speak")), invert: false, glyph: "play".into() });
+            return Some(Status { label: format!("SPEAKING {}", bars(s as f32 / 3.0)), tone: self.pack.tone(Some("speak")), invert: false, glyph: "play".into() });
         }
         None
     }
 
     /// The Line's mic row: the tag's label while held, then what follows key-up.
     pub(super) fn voice_mic_row(&self) -> Option<String> {
-        if self.voice_listening() || self.voice.transcribing {
-            return self.voice_status().map(|s| s.label);
+        if self.voice_listening() {
+            return self.voice_status().map(|s| format!("● {}  ·  listening · release to send · esc to cancel", s.label));
         }
-        None
+        self.voice.transcribing.then(|| "◉ HEARD  ·  writing it down (nothing is kept)".to_string())
     }
 
     /// The sentence she is saying now.

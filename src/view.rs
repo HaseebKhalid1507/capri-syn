@@ -519,6 +519,8 @@ pub struct Avatar {
     line: Option<lineview::LineWin>,
     /// The summon key went down then (`talk press`): a tap or a hold at release.
     talk_down: Option<Instant>,
+    /// The talk key went down on an open Line: a tap (not a hold) closes it at key-up.
+    tap_closes: bool,
     /// Push-to-talk and spoken replies (the `capri-voice` sidecar).
     voice: voiceview::VoiceState,
     /// What he sent this run, oldest first (the Line's ↑).
@@ -706,6 +708,7 @@ impl Avatar {
             reader: None,
             line: None,
             talk_down: None,
+            tap_closes: false,
             sent: Vec::new(),
             unread: None,
             seen_turn: 0,
@@ -3850,6 +3853,8 @@ fn glyph(kind: &str, fg: u32, bg: u32) -> impl IntoElement {
                     fill_poly(window, &circle(5.5, 5.5, 4.6), fg);
                     fill_poly(window, &circle(5.5, 5.5, 2.6), bg);
                 }
+                // The mic is open: a filled dot.
+                "rec" => fill_poly(window, &circle(5.5, 5.5, 4.4), fg),
                 "gear" => {
                     let pts: Vec<(f32, f32)> = (0..32)
                         .map(|i| {

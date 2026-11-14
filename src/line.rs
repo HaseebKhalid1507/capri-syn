@@ -1182,7 +1182,6 @@ impl Render for Line {
                 .text_size(px(14.0))
                 .font_weight(FontWeight::BOLD)
                 .child(div().text_color(rgb(0xff3b62)).child(m))
-                .child(div().text_color(rgb(pal.text)).child("listening · release to send · esc to cancel"))
         });
         let caption = self.snap.caption.clone().map(|c| {
             div()

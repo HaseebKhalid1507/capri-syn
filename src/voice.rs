@@ -3,8 +3,8 @@
 //! about 60 words at most). The audio itself lives in the `capri-voice` sidecar.
 
 /// Sent ahead of a spoken message (per turn, so the system prompt and its cache stay put).
-pub const HINT: &str = "[voice: he spoke this and your reply is read aloud. Open with a short sentence; two sentences at most, about 40 words. \
-Nothing aloud that can't be said: code, paths, URLs or hashes go after a line that reads ---]";
+/// Short, so the echo (cut at 200 chars) still holds his words.
+pub const HINT: &str = "[voice: spoken; read aloud. 1-2 short sentences, ~40 words; code, paths, URLs only after a line ---]";
 
 /// Words spoken at most; then she says the rest is written.
 const WORDS_MAX: usize = 60;
@@ -18,8 +18,7 @@ pub fn wrap(text: &str) -> String {
 /// His words, if `user_text` is a spoken turn (the hint stripped).
 pub fn spoken(user_text: &str) -> Option<&str> {
     let t = user_text.strip_prefix("[voice")?;
-    let end = t.find("] ")?;
-    Some(t[end + 2..].trim_start())
+    Some(t.find("] ").map_or("", |end| t[end + 2..].trim_start()))
 }
 
 /// The mouth frame for a loudness shape from the sidecar (0 closed .. 3 wide).
@@ -233,6 +232,7 @@ mod tests {
         assert!(w.starts_with("[voice"));
         assert_eq!(spoken(&w), Some("what's spike doing?"));
         assert_eq!(spoken("what's spike doing?"), None);
+        assert!(HINT.len() < 120, "the echo is cut at 200 chars: the hint must leave room for his words");
         assert_eq!(mouth_frame(0), "neutral");
         assert_eq!(mouth_frame(9), "idle-mouth_wide");
     }

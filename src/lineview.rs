@@ -43,9 +43,15 @@ impl Avatar {
             return "ok held".into();
         }
         self.talk_down = Some(now);
-        self.voice_press(now, cx);
+        let hushed = self.voice_press(now, cx);
         self.brain_touch(crate::brain::Touch::Typing);
         if let Some(l) = &self.line {
+            // Open and his: a tap closes it, a hold (voice) keeps it: decided at key-up. A
+            // tap that hushed her only hushed her.
+            if !l.parked {
+                self.tap_closes = !hushed;
+                return "ok line open".into();
+            }
             let (view, handle) = (l.view.clone(), l.handle);
             // Deferred: closing calls back into this view.
             cx.defer(move |cx| {
@@ -62,6 +68,15 @@ impl Avatar {
         let Some(t0) = self.talk_down else { return "ok (no press)".into() };
         let ms = t0.elapsed().as_millis();
         self.voice_up(cx);
+        if std::mem::take(&mut self.tap_closes)
+            && ms < TAP_MS
+            && let Some(l) = &self.line
+        {
+            let (view, handle) = (l.view.clone(), l.handle);
+            cx.defer(move |cx| {
+                handle.update(cx, |_, window, cx| view.update(cx, |l, cx| l.summon(window, cx))).ok();
+            });
+        }
         if ms >= TAP_MS {
             if !self.voice_on() {
                 elog!("synaps-avatar: talk held {ms} ms: voice is off ([voice] enabled = false); the Line opened for typing");
@@ -311,6 +326,7 @@ impl Avatar {
                 Ok(())
             }
             Ask::CancelListen => {
+                elog!("synaps-avatar: voice: esc in the Line while listening");
                 self.voice_cancel(cx);
                 Ok(())
             }
