@@ -400,7 +400,9 @@ impl Avatar {
         if let Some(t) = self.follow_at.filter(|&t| now < t + self.follow_period - Duration::from_micros(500)) {
             // Too soon after the last move: a motion books the next slot itself (the poller
             // often hasn't seen it yet, and the follow then waited for the next rag tick).
-            if motion {
+            // A booking refused (a rag tick moved her since) moves on with the slot: left in
+            // the past it was a deadline that spun until the cap let it through.
+            if motion || self.follow_due.is_some() {
                 self.follow_due = Some(t + self.follow_period);
             }
             return false;
