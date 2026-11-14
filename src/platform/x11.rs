@@ -55,6 +55,8 @@ pub enum WatchEvent {
     TargetGone(u32),
     /// The target window is mapped again (a workspace flicked back).
     TargetBack(u32),
+    /// A click anywhere, at root (x, y), while the Line holds the keyboard.
+    Click(i32, i32),
 }
 
 pub struct X11 {
@@ -81,6 +83,8 @@ pub struct X11 {
     /// While she's carried or flying: both caches stay as snapshotted at the grab (no round
     /// trip inside a 60 Hz tick).
     frozen: AtomicBool,
+    /// The Line holds the keyboard: clicks elsewhere are reported (`watch_clicks`).
+    pub clicks: Arc<AtomicBool>,
     /// The pointer polled on its own connection while she's held by the real mouse:
     /// (x << 32 | y as u32, or u64::MAX before the first read; stop flag).
     poll: Mutex<Option<(Arc<std::sync::atomic::AtomicU64>, Arc<AtomicBool>)>>,
@@ -166,6 +170,7 @@ impl X11 {
             areas: Mutex::new(None),
             mons: Mutex::new(None),
             frozen: AtomicBool::new(false),
+            clicks: Arc::new(AtomicBool::new(false)),
             poll: Mutex::new(None),
             shape_sends: std::sync::atomic::AtomicU64::new(0),
             shape_rects: std::sync::atomic::AtomicU64::new(0),
@@ -670,6 +675,30 @@ impl X11 {
         if spawned.is_ok() {
             *g = Some((pos, stop));
         }
+    }
+
+    /// Clicks anywhere (XInput2 raw button presses on the root: every client may listen,
+    /// nothing is grabbed or taken), at the pointer, while `armed`. One thread, started on
+    /// first use; it sleeps in the X read between clicks.
+    pub fn watch_clicks(&self, armed: Arc<AtomicBool>, on_click: impl Fn(i32, i32) + Send + 'static) -> Result<()> {
+        use x11rb::protocol::xinput::{self, ConnectionExt as _};
+        let (c, screen) = x11rb::connect(None)?;
+        let root = c.setup().roots[screen].root;
+        c.xinput_xi_query_version(2, 2)?.reply()?;
+        let mask = xinput::EventMask { deviceid: xinput::Device::ALL_MASTER.into(), mask: vec![xinput::XIEventMask::RAW_BUTTON_PRESS] };
+        c.xinput_xi_select_events(root, &[mask])?;
+        c.flush()?;
+        std::thread::Builder::new().name("avatar-clicks".into()).spawn(move || {
+            while let Ok(ev) = c.wait_for_event() {
+                if let x11rb::protocol::Event::XinputRawButtonPress(_) = ev
+                    && armed.load(Ordering::Relaxed)
+                    && let Ok(Ok(r)) = c.query_pointer(root).map(|k| k.reply())
+                {
+                    on_click(r.root_x as i32, r.root_y as i32);
+                }
+            }
+        })?;
+        Ok(())
     }
 
     /// The polled pointer while polling (and read once), else a QueryPointer.

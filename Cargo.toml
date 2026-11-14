@@ -29,7 +29,7 @@ sha2 = "0.10"
 raw-window-handle = "0.6"
 log = "0.4"
 libc = "0.2"
-x11rb = { version = "0.13", features = ["shape", "randr", "xfixes", "screensaver"] }
+x11rb = { version = "0.13", features = ["shape", "randr", "xfixes", "screensaver", "xinput"] }
 # settings.toml (both already in the lock through GPUI).
 toml = "0.8"
 toml_edit = "0.22"

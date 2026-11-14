@@ -189,7 +189,7 @@ impl Line {
                 let active = window.is_window_active();
                 if active {
                     this.was_active = true;
-                    if this.parked {
+                    if this.parked && !this.closing {
                         this.parked = false;
                         (this.on_ask)(Ask::Parked(false), cx).ok();
                         this.refocus(window, cx);
@@ -327,6 +327,12 @@ impl Line {
         })
     }
 
+    /// Parked from outside (a click elsewhere): it shows so until the summon key or a click.
+    pub fn park(&mut self, cx: &mut Context<Line>) {
+        self.parked = true;
+        cx.notify();
+    }
+
     /// The summon key on an open Line: back to it (parked), or close it.
     pub fn summon(&mut self, window: &mut Window, cx: &mut Context<Line>) -> &'static str {
         if self.parked || !window.is_window_active() {
@@ -339,6 +345,19 @@ impl Line {
             self.close(true, window, cx);
             "closed"
         }
+    }
+
+    /// The field's text, the caret at its end (set_value leaves it at the start).
+    fn set_field(&mut self, t: String, window: &mut Window, cx: &mut Context<Line>) {
+        let line = t.split('\n').count().saturating_sub(1) as u32;
+        let character = t.rsplit('\n').next().map_or(0, |l| l.encode_utf16().count()) as u32;
+        let parked = self.parked;
+        self.input.update(cx, |s, cx| {
+            s.set_value(t, window, cx);
+            if !parked {
+                s.set_cursor_position(gpui_kit::component::input::Position { line, character }, window, cx);
+            }
+        });
     }
 
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Line>) {
@@ -369,7 +388,7 @@ impl Line {
     /// A refused message came back after it went out: into the field, with the reason.
     pub fn restore(&mut self, text: String, why: &str, window: &mut Window, cx: &mut Context<Line>) {
         if self.input.read(cx).value().trim().is_empty() {
-            self.input.update(cx, |s, cx| s.set_value(text, window, cx));
+            self.set_field(text, window, cx);
         }
         self.note = Some(format!("NOT SENT · {} · text kept", why.to_uppercase()));
         cx.notify();
@@ -470,7 +489,7 @@ impl Line {
                     };
                     self.recall = Some(i);
                     let t = self.sent[i].clone();
-                    self.input.update(cx, |s, cx| s.set_value(t, window, cx));
+                    self.set_field(t, window, cx);
                     cx.notify();
                     return true;
                 }
@@ -489,7 +508,7 @@ impl Line {
                         self.recall = None;
                         String::new()
                     };
-                    self.input.update(cx, |s, cx| s.set_value(t, window, cx));
+                    self.set_field(t, window, cx);
                     cx.notify();
                     return true;
                 }
@@ -865,6 +884,18 @@ impl Render for Line {
             .id("line")
             .track_focus(&self.focus)
             .key_context("Line")
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                    // A click on the parked Line brings it back.
+                    if this.parked {
+                        this.parked = false;
+                        (this.on_ask)(Ask::Parked(false), cx).ok();
+                        this.refocus(window, cx);
+                        cx.notify();
+                    }
+                }),
+            )
             .size_full()
             .relative()
             .overflow_hidden()

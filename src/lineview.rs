@@ -144,6 +144,7 @@ impl Avatar {
             self.x11.give_focus(xid).ok();
         }
         self.line = Some(LineWin { view, handle: handle.into(), xid, prev, at: (x, bottom, w, h), parked: false });
+        self.x11.clicks.store(true, std::sync::atomic::Ordering::Relaxed);
         self.line_opened_ms = Some(now.elapsed().as_millis());
         // He is reading the thread now: nothing is unread, and the bubble gives way.
         self.ack_unread();
@@ -285,6 +286,7 @@ impl Avatar {
                 Ok(())
             }
             Ask::Closed { restore, draft, sent } => {
+                self.x11.clicks.store(false, std::sync::atomic::Ordering::Relaxed);
                 if let Some(l) = self.line.take() {
                     self.draft = draft;
                     self.sent = sent;
@@ -309,6 +311,7 @@ impl Avatar {
                 Ok(())
             }
             Ask::Parked(p) => {
+                self.x11.clicks.store(!p && self.line.is_some(), std::sync::atomic::Ordering::Relaxed);
                 if let Some(l) = &mut self.line {
                     l.parked = p;
                     if !p && l.xid != 0 && std::env::var_os("SA_LINE_NOFOCUS").is_none() {
@@ -351,6 +354,28 @@ impl Avatar {
         cx.notify();
         self.schedule(cx);
         r
+    }
+
+    /// A click while the Line holds the keyboard: outside it, the Line parks and the keyboard
+    /// goes back to the window he clicked if that is the one he came from (i3 thinks it is
+    /// focused already and wouldn't move the keyboard); any other window i3 focuses itself.
+    pub(super) fn line_click_elsewhere(&mut self, x: i32, y: i32, cx: &mut Context<Self>) {
+        let Some(l) = &mut self.line else { return };
+        let (lx, bottom, w, h) = l.at;
+        if l.parked || (x >= lx && x < lx + w && y >= bottom - h && y < bottom) {
+            return;
+        }
+        l.parked = true;
+        self.x11.clicks.store(false, std::sync::atomic::Ordering::Relaxed);
+        let back = l.prev.filter(|&p| self.x11.toplevel_rect(p).is_some_and(|r| x >= r.x && x < r.right() && y >= r.y && y < r.bottom()));
+        if let Some(p) = back {
+            self.x11.give_focus(p).ok();
+        }
+        let (view, handle) = (l.view.clone(), l.handle);
+        cx.defer(move |cx| {
+            handle.update(cx, |_, _, cx| view.update(cx, |l, cx| l.park(cx))).ok();
+        });
+        elog!("synaps-avatar: click at {x},{y} outside the Line: parked{}", if back.is_some() { ", keyboard back" } else { "" });
     }
 
     /// Close the Line from here (deferred: it calls back).

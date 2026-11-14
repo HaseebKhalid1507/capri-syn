@@ -430,6 +430,15 @@ fn run(t_start: Instant) -> Result<()> {
             })
             .map_err(|e| elog!("synaps-avatar: x11 watcher: {e:#}"))
             .ok();
+            // A click outside the Line parks it (an override-redirect window keeps the
+            // keyboard when he clicks back into the window i3 already thinks is focused).
+            let tx = tx2.clone();
+            x11.watch_clicks(x11.clicks.clone(), move |x, y| {
+                let (r, _) = std::sync::mpsc::channel();
+                tx.send_blocking((control::Command::Watch(platform::x11::WatchEvent::Click(x, y)), r)).ok();
+            })
+            .map_err(|e| elog!("synaps-avatar: click watcher (XInput2): {e:#}; a click elsewhere won't park the Line"))
+            .ok();
             // Real LISTENING: media players on the session bus (signals only). Tests see only
             // their own fake player (SA_MPRIS_ONLY), never his.
             let music = settings::Settings::load().map(|s| s.music).unwrap_or_default();

@@ -2108,6 +2108,10 @@ impl Avatar {
                 }
                 None => "error: no bubble".into(),
             },
+            Command::Watch(WatchEvent::Click(x, y)) => {
+                self.line_click_elsewhere(x, y, cx);
+                "ok".into()
+            }
             Command::Watch(ev) => {
                 self.watch(ev, now);
                 "ok".into()
@@ -3401,6 +3405,7 @@ impl Avatar {
                     self.perch_gone = None;
                 }
             }
+            WatchEvent::Click(..) => {}
         }
     }
 
