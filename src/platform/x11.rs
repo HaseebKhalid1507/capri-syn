@@ -7,7 +7,7 @@ use anyhow::{Context as _, Result, bail};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use x11rb::connection::{Connection as _, RequestConnection as _};
 use x11rb::protocol::Event;
 use x11rb::protocol::randr::ConnectionExt as _;
@@ -63,7 +63,11 @@ pub struct X11 {
     root: u32,
     pub screen_w: u16,
     pub screen_h: u16,
+    /// A compositor owns `_NET_WM_CM_S{screen}` (kept current by the watcher).
     composited: Arc<AtomicBool>,
+    /// The mode forced by `SA_COMPOSITED` or settings.toml `[display] composited`: 0 = follow
+    /// the compositor, 1 = shape (no alpha), 2 = alpha.
+    force: AtomicU8,
     atoms: Atoms,
     /// Top-level window the watcher follows (0 = none).
     target: Arc<AtomicU32>,
@@ -155,6 +159,7 @@ impl X11 {
             screen_w,
             screen_h,
             composited: Arc::new(AtomicBool::new(composited)),
+            force: AtomicU8::new(0),
             atoms,
             target: Arc::new(AtomicU32::new(0)),
             fx: Mutex::new(Vec::new()),
@@ -167,8 +172,35 @@ impl X11 {
         })
     }
 
+    /// Alpha mode: the window's own alpha is what shows (a compositor blends it), so no
+    /// bounding shape and nothing painted that only a shape would hide. Else shape mode.
     pub fn composited(&self) -> bool {
+        match self.force.load(Ordering::Relaxed) {
+            1 => false,
+            2 => true,
+            _ => self.composited.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Whether a compositor is running, whatever the mode.
+    pub fn compositor_running(&self) -> bool {
         self.composited.load(Ordering::Relaxed)
+    }
+
+    /// Force a mode (`None`: follow the compositor). True if the effective mode changed.
+    pub fn force_composited(&self, mode: Option<bool>) -> bool {
+        let before = self.composited();
+        self.force.store(mode.map_or(0, |m| if m { 2 } else { 1 }), Ordering::Relaxed);
+        before != self.composited()
+    }
+
+    /// What forces the mode: `SA_COMPOSITED=0|1` (env) wins over the settings key.
+    pub fn forced_mode(&self) -> Option<bool> {
+        match self.force.load(Ordering::Relaxed) {
+            1 => Some(false),
+            2 => Some(true),
+            _ => None,
+        }
     }
 
     /// Properties for the compositor: a `_GTK_FRAME_EXTENTS` of zero keeps picom's stock

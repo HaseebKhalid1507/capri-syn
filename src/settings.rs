@@ -119,6 +119,27 @@ pub struct Settings {
     pub ragdoll: RagdollSettings,
     pub session: SessionSettings,
     pub music: MusicSettings,
+    pub display: DisplaySettings,
+}
+
+/// `[display]`: `composited = "auto"` (default: alpha while a compositor runs, the X shape
+/// otherwise), `"on"` (always alpha) or `"off"` (always the shape). `SA_COMPOSITED=0|1` wins.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct DisplaySettings {
+    pub composited: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Mode {
+    Bool(bool),
+    Word(String),
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct DisplayRaw {
+    composited: Option<Mode>,
 }
 
 /// `[music]`: LISTENING when a media player is playing (MPRIS), not at random.
@@ -206,6 +227,8 @@ struct FileRaw {
     session: Option<SessionRaw>,
     #[serde(default)]
     music: Option<MusicRaw>,
+    #[serde(default)]
+    display: Option<DisplayRaw>,
 }
 
 #[derive(Deserialize, Default)]
@@ -283,6 +306,18 @@ impl Settings {
                 music.ignore = i.into_iter().map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()).collect();
             }
         }
+        let mut display = DisplaySettings::default();
+        if let Some(c) = raw.display.and_then(|d| d.composited) {
+            display.composited = match c {
+                Mode::Bool(b) => Some(b),
+                Mode::Word(w) => match w.trim().to_ascii_lowercase().as_str() {
+                    "auto" => None,
+                    "on" | "true" | "alpha" => Some(true),
+                    "off" | "false" | "shape" => Some(false),
+                    _ => anyhow::bail!("display.composited must be \"auto\", \"on\" or \"off\""),
+                },
+            };
+        }
         let mut session = SessionSettings::default();
         if let Some(r) = raw.session {
             if let Some(m) = r.model.map(|m| m.trim().to_string()) {
@@ -300,7 +335,7 @@ impl Settings {
                 session.persona_file = Some(expand_home(f.trim()));
             }
         }
-        let Some(r) = raw.brain else { return Ok(Settings { brain: b, ragdoll, session, music }) };
+        let Some(r) = raw.brain else { return Ok(Settings { brain: b, ragdoll, session, music, display }) };
         if let Some(v) = r.enabled {
             b.enabled = v;
         }
@@ -355,7 +390,7 @@ impl Settings {
         }
         // Drift is a transport (by distance), never drawn from the pool.
         b.arrivals.retain(|p| p.0 != Arrival::Drift);
-        Ok(Settings { brain: b, ragdoll, session, music })
+        Ok(Settings { brain: b, ragdoll, session, music, display })
     }
 
     /// The file's settings (defaults when there is none). Err: a bad file (keep the old values).
@@ -450,6 +485,17 @@ mod tests {
         let gone = SessionSettings { persona_file: Some(dir.join("gone.txt")), ..SessionSettings::default() };
         assert!(gone.persona_text(&dir).is_err());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn display_composited_auto_on_off() {
+        assert_eq!(Settings::parse("").unwrap().display.composited, None);
+        assert_eq!(Settings::parse("[display]\ncomposited = \"auto\"\n").unwrap().display.composited, None);
+        assert_eq!(Settings::parse("[display]\ncomposited = \"on\"\n").unwrap().display.composited, Some(true));
+        assert_eq!(Settings::parse("[display]\ncomposited = \"off\"\n").unwrap().display.composited, Some(false));
+        assert_eq!(Settings::parse("[display]\ncomposited = false\n").unwrap().display.composited, Some(false));
+        assert!(Settings::parse("[display]\ncomposited = \"maybe\"\n").is_err());
+        assert!(Settings::parse("[display]\nblur = 1\n").is_err());
     }
 
     #[test]

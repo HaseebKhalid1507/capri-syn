@@ -2387,6 +2387,8 @@ impl Avatar {
             "teleporting": self.teleport.is_some(),
             "glitch": self.glitch.is_some(),
             "composited": self.x11.composited(),
+            "compositor": self.x11.compositor_running(),
+            "composited_forced": self.x11.forced_mode(),
             "loaded": self.loaded,
             "counters": { "ticks": self.view_ticks, "renders": self.renders, "moves": self.moves },
             "scale_factor": self.layout.sf,
@@ -3070,11 +3072,22 @@ impl Avatar {
         }
     }
 
+    /// Alpha <-> shape mode changed: send both shapes again on the next paint (the bounding
+    /// one is the mode: none in alpha mode, the figure's rects in shape mode).
+    pub(super) fn alpha_switched(&mut self) {
+        *self.last_shape.borrow_mut() = (vec![(0, 0, 0, 0)], vec![(0, 0, 0, 0)]);
+    }
+
     fn watch(&mut self, ev: WatchEvent, now: Instant) {
         match ev {
             WatchEvent::Compositor(c) => {
-                elog!("synaps-avatar: compositor {}", if c { "appeared" } else { "went away" });
-                self.last_shape.borrow_mut().0.clear();
+                elog!(
+                    "synaps-avatar: compositor {}: {} mode{}",
+                    if c { "appeared" } else { "went away" },
+                    if self.x11.composited() { "alpha" } else { "shape" },
+                    if self.x11.forced_mode().is_some() { " (forced)" } else { "" }
+                );
+                self.alpha_switched();
             }
             WatchEvent::TargetMoved(r) => {
                 let Placement::Perch { win, sit, dx } = self.placement else { return };
@@ -3806,6 +3819,16 @@ impl Render for Avatar {
                 next_img = self.frame_or_default(n.frame).map(|f| f.image.clone());
             }
         }
+        // Alpha mode (a compositor shows the window's own alpha): nothing is clipped by a
+        // bounding shape, so everything painted shows, and there is no shape lag to cover.
+        // Every underlay below (the next plan, the 8-way smear under posed bands, the
+        // unsquashed frame, the tag's next strips) would show as stacked offset copies of her
+        // edges: none of them in alpha mode.
+        let alpha = self.x11.composited();
+        if alpha {
+            next = None;
+            next_img = None;
+        }
         // Device px the art is also painted at underneath the posed bands (see the body).
         let mut under = 0.0f32;
         if plan.slices.is_none() && plan.sx == 1.0 && plan.sy == 1.0 && !hidden && self.rag.is_none() {
@@ -3819,10 +3842,11 @@ impl Render for Avatar {
                 let bands = swing.unwrap_or_else(|| fx::pose_bands(pose, rows));
                 plan.leg = fx::pose_leg(pose, rows, &bands);
                 plan.slices = Some(bands);
-                under = (POSE_REACH * sf).ceil();
+                under = if alpha { 0.0 } else { (POSE_REACH * sf).ceil() };
                 // The chain swing moves more per frame than the smear reaches: its next
                 // bands go underneath (commit-ahead).
                 if next.is_none()
+                    && !alpha
                     && let Some(nb) = self.swing_bands(fi, f, true)
                 {
                     let np = self.pose_at(now + Duration::from_millis(33));
@@ -3942,7 +3966,7 @@ impl Render for Avatar {
                                 // (squashed) bounding shape it's invisible, but it fills the
                                 // window's backing pixels there, so the band the shape grows
                                 // back into on the rebound shows hair, not stale black.
-                                if plan2.sy < 1.0 || plan2.sx < 1.0 {
+                                if (plan2.sy < 1.0 || plan2.sx < 1.0) && !alpha {
                                     let full = rect(0.0, 0.0, aw as f32, ah as f32);
                                     window.paint_image(full, full, Corners::default(), img.clone(), 0, false).ok();
                                 }
@@ -4082,8 +4106,11 @@ impl Render for Avatar {
                 let t0 = by * sf - l.avatar_y as f32;
                 // Next frame's strips first (underneath, same reason as the body's underlay),
                 // then this frame's on top. Only this frame's go into the shape.
-                let under_bands: Vec<(i32, i32, i32, i32)> =
-                    next_tag.as_ref().and_then(|n| n.slices.clone()).unwrap_or_else(|| vec![(i32::MIN / 2, i32::MAX / 2, 0, 0)]);
+                let under_bands: Vec<(i32, i32, i32, i32)> = if alpha {
+                    Vec::new()
+                } else {
+                    next_tag.as_ref().and_then(|n| n.slices.clone()).unwrap_or_else(|| vec![(i32::MIN / 2, i32::MAX / 2, 0, 0)])
+                };
                 for &(y0, y1, dx, _) in &under_bands {
                     let (a, c) = ((y0 as f32).max(t0), (y1 as f32).min(t0 + bh * sf));
                     if c <= a {
