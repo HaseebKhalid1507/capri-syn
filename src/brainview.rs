@@ -818,7 +818,10 @@ impl Avatar {
             .unwrap_or(Arrival::Teleport);
         // Passive transports by distance (§4.1): float to float drifts; along the same floor
         // within SCOOT_MAX she hop-scoots half the time, and always under MIN_TELEPORT.
+        // `hop = 0` in settings: she never hops (no scoot either).
+        let hops_on = h.settings.brain.arrivals.iter().any(|a| a.0 == Arrival::Hop && a.1 > 0.0);
         let can_scoot = self.placement == Placement::Ground
+            && hops_on
             && h.rest.is_none()
             && ground_kind(spot.kind)
             && dy.abs() <= 4
