@@ -25,6 +25,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use synaps_client::{Client, ClientOptions};
 
 /// Window layout in device pixels (X11 works in these; GPUI gets them / scale factor).
@@ -50,7 +51,12 @@ const MARGIN: f32 = 8.0;
 const TOP_MARGIN: f32 = 6.0;
 const BODY_FONT: f32 = 20.0;
 const LINE_H: f32 = 27.0;
-const LINES_PER_PAGE: usize = 4;
+/// The bubble grows to this many lines (and scrolls with the wheel past them).
+const LINES_PER_PAGE: usize = 8;
+/// A long reply (more lines than the bubble, or code) shows its opening lines and READ.
+const OPENING_LINES: usize = 3;
+/// Replies shorter than this type out; longer ones appear at once.
+const TYPE_MAX_CHARS: usize = 160;
 const PAD_T: f32 = 11.0;
 const PAD_B: f32 = 8.0;
 const PAD_L: f32 = 21.0;
@@ -154,8 +160,10 @@ struct Bubble {
     next_char: Option<Instant>,
     hide_at: Option<Instant>,
     wrap: Option<Wrapped>,
-    /// Page picked with ‹ ›; None follows the newest text.
+    /// The first line shown (the wheel scrolls it); None: from the top.
     page: Option<usize>,
+    /// The reply as written (markdown), for the reader.
+    raw: String,
     collapsed: bool,
     /// A session reply: it collapses to the chip instead of vanishing, and the mood is the
     /// session's business.
@@ -229,26 +237,47 @@ const ESC_AGAIN: Duration = Duration::from_millis(1_000);
 const INPUT_MAX: usize = 4_000;
 
 impl Bubble {
-    /// (current page, page count). Before wrapping: (0, 1).
-    fn pages(&self) -> (usize, usize) {
-        let Some(w) = &self.wrap else { return (0, 1) };
-        let total = w.lines.len().max(1).div_ceil(LINES_PER_PAGE);
-        let cursor = w.lines.iter().rposition(|&(s, _)| s < self.shown.max(1)).unwrap_or(0);
-        let follow = cursor / LINES_PER_PAGE;
-        (self.page.unwrap_or(follow).min(total - 1), total)
+    /// More lines than the bubble holds, or code: the opening lines plus READ.
+    fn long(&self) -> bool {
+        self.wrap.as_ref().is_some_and(|w| w.lines.len() > LINES_PER_PAGE) || self.raw.contains("```") || self.raw.contains("~~~")
     }
 
-    /// The revealed text of the current page, one string per line.
+    /// Lines the bubble shows at once.
+    fn rows(&self) -> usize {
+        let total = self.wrap.as_ref().map_or(1, |w| w.lines.len().max(1));
+        if self.long() { OPENING_LINES.min(total) } else { total.min(LINES_PER_PAGE) }
+    }
+
+    /// (first line shown, line count). Before wrapping: (0, 1).
+    fn pages(&self) -> (usize, usize) {
+        let Some(w) = &self.wrap else { return (0, 1) };
+        let total = w.lines.len().max(1);
+        (self.page.unwrap_or(0).min(total.saturating_sub(self.rows())), total)
+    }
+
+    /// Lines in the reader: the raw reply's.
+    fn read_lines(&self) -> usize {
+        self.raw.lines().count().max(self.wrap.as_ref().map_or(1, |w| w.lines.len()))
+    }
+
+    /// The revealed text in view, one string per line.
     fn page_lines(&self) -> Vec<String> {
         let Some(w) = &self.wrap else { return Vec::new() };
-        let (p, _) = self.pages();
+        let (top, _) = self.pages();
         w.lines
             .iter()
-            .skip(p * LINES_PER_PAGE)
-            .take(LINES_PER_PAGE)
+            .skip(top)
+            .take(self.rows())
             .take_while(|&&(s, _)| s < self.shown)
             .map(|&(s, e)| self.text[s..e.min(self.shown)].iter().collect::<String>().trim_end().to_string())
             .collect()
+    }
+
+    /// Type out short text only; anything longer appears at once.
+    fn reveal_all_if_long(&mut self) {
+        if self.text.len() >= TYPE_MAX_CHARS {
+            self.shown = self.text.len();
+        }
     }
 }
 
@@ -292,7 +321,14 @@ struct MusicOn {
     t0: Instant,
     /// Autonomy sessions end on their own; `music on` runs until `music off`.
     until: Option<Instant>,
+    /// A player's tempo (MPRIS metadata), over the pack's.
+    bpm: Option<f32>,
+    /// Started by a playing media player (it stops with it).
+    auto: bool,
 }
+
+/// After a player pauses or stops, the headphones stay this long (a track change, a seek).
+const MUSIC_GRACE: Duration = Duration::from_secs(5);
 const FRAME_FAST: Duration = Duration::from_millis(16);
 const FRAME_FX: Duration = Duration::from_millis(33);
 /// A quiet arrival's sliver widens back into her over ~3 frames.
@@ -361,7 +397,8 @@ pub struct Avatar {
     /// The bubble panel and tag as last painted: a part of the HUD only goes into the X shape
     /// once it has been painted where it is (present lag: else stale pixels show for a frame).
     panel_last: Rc<Cell<Option<PanelGeom>>>,
-    tag_last: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// The tag's bounds last frame and for how many frames in a row they have been laid out.
+    tag_last: Rc<Cell<(Option<Bounds<Pixels>>, u8)>>,
     /// Click reaction in progress: the status tag steps aside until then.
     reaction_until: Option<Instant>,
     menu: Option<(Point<Pixels>, Instant)>,
@@ -409,6 +446,9 @@ pub struct Avatar {
     /// and a prompt or the text field doesn't move at all: buttons stay under the pointer
     /// when her pose changes.
     panel_bottom: Option<f32>,
+    /// A prompt panel's height while that prompt is up (a re-wrap never shrinks it: the
+    /// summon's panel dropped a line, 16 px, when her header changed at the settle).
+    prompt_h: Option<(Instant, f32)>,
     /// Quit at the next tick (from where there is no `cx`).
     quit_requested: bool,
     placement: Placement,
@@ -421,6 +461,8 @@ pub struct Avatar {
     shadow_at: Option<(i32, i32)>,
     /// Last laid-out width of the status tag (logical px), to place the next one.
     tag_w: Rc<Cell<f32>>,
+    /// The HUD's top while a bubble is up: (resting frame, avatar-local device px).
+    hud_top: Cell<Option<(usize, i32)>>,
     /// Last laid-out box of the status tag (window logical px), to tear it in a glitch.
     tag_box: Cell2,
     music: Option<MusicOn>,
@@ -443,6 +485,27 @@ pub struct Avatar {
     _subs: Vec<Subscription>,
     /// Laid-out bubble buttons (window logical px), for the dev `state` (test clicks).
     buttons: Buttons,
+    /// The READER window (a long reply), its X id, and who had the keyboard before it.
+    reader: Option<(WindowHandle<crate::reader::Reader>, u32, Option<u32>)>,
+    /// The perch window unmapped; she falls if it isn't back within the grace.
+    perch_gone: Option<edges::PerchGone>,
+    /// The player stopped: the headphones come off at this time (MUSIC_GRACE).
+    music_stop_at: Option<Instant>,
+    /// What the media players add up to, last heard.
+    player: crate::mpris::Playback,
+    /// HIDE from her menu: vanishing (false) or hidden (true); the process keeps running.
+    parked: Option<bool>,
+    /// The restore chip's window while she is hidden, and where (device px).
+    chip: Option<WindowHandle<crate::chip::Chip>>,
+    chip_rect: Option<(i32, i32, i32, i32, u32)>,
+    /// Restore asked for where there was no window context (a session summon).
+    unpark_req: Option<&'static str>,
+    /// QUIT in the menu was clicked once: a second click before this exits.
+    quit_armed: Option<Instant>,
+    /// The wheel's fractional lines over the bubble.
+    wheel: Cell<f32>,
+    /// The speech panel as last laid out (window logical px): the reader keeps clear of it.
+    panel_rect: Cell<Option<(f32, f32, f32, f32)>>,
     /// The cat brain (None: SA_NO_BRAIN).
     brain: Option<brainview::BrainHost>,
     /// Carried, flung, landing (None: not ragdolling).
@@ -513,7 +576,7 @@ impl Avatar {
             hud_after: None,
             hearts_area: (None, None),
             panel_last: Rc::new(Cell::new(None)),
-            tag_last: Rc::new(Cell::new(None)),
+            tag_last: Rc::new(Cell::new((None, 0))),
             reaction_until: None,
             menu: None,
             press: None,
@@ -546,6 +609,7 @@ impl Avatar {
             quitting: false,
             fatal: false,
             panel_bottom: None,
+            prompt_h: None,
             quit_requested: false,
             placement: Placement::Ground,
             home,
@@ -553,6 +617,7 @@ impl Avatar {
             shadow: None,
             shadow_at: None,
             tag_w: Rc::new(Cell::new(150.0)),
+            hud_top: Cell::new(None),
             tag_box: Rc::new(Cell::new(None)),
             music: None,
             notes: Vec::new(),
@@ -568,6 +633,17 @@ impl Avatar {
             hint: None,
             _subs: vec![activation],
             buttons: Rc::default(),
+            reader: None,
+            perch_gone: None,
+            parked: None,
+            music_stop_at: None,
+            player: crate::mpris::Playback::default(),
+            chip: None,
+            chip_rect: None,
+            unpark_req: None,
+            quit_armed: None,
+            wheel: Cell::new(0.0),
+            panel_rect: Cell::new(None),
             brain: None,
             rag: None,
             rag_strength: crate::ragdoll::Strength(crate::settings::Settings::load().map_or(0.5, |s| s.ragdoll.strength)),
@@ -609,7 +685,7 @@ impl Avatar {
         if self.mood != Mood::Idle {
             self.set_mood(Mood::Idle, now);
         }
-        let was = self.music.replace(MusicOn { t0: now, until });
+        let was = self.music.replace(MusicOn { t0: now, until, bpm: None, auto: false });
         self.relayer(now);
         if was.is_none() && self.loaded && self.teleport.is_none() {
             self.glitch = Some(Glitch::new(GlitchKind::Burst, now, self.rng.next()));
@@ -617,7 +693,43 @@ impl Avatar {
         Ok(())
     }
 
+    /// A media player started (`playing`) or stopped: real LISTENING, off after a grace.
+    fn playback(&mut self, p: crate::mpris::Playback, now: Instant) -> String {
+        self.player = p;
+        if p.playing && (self.mood != Mood::Idle || !self.loaded) {
+            // The session's mood first; the headphones go on when she is idle again (tick).
+            return "ok (later)".into();
+        }
+        if p.playing {
+            self.music_stop_at = None;
+            match &mut self.music {
+                Some(m) if m.until.is_none() && !m.auto => {} // `music on` by hand: left alone
+                Some(m) => {
+                    m.until = None;
+                    m.auto = true;
+                    m.bpm = p.bpm;
+                }
+                None => {
+                    if let Err(e) = self.music_on(now, None) {
+                        return format!("error: {e}");
+                    }
+                    if let Some(m) = &mut self.music {
+                        m.auto = true;
+                        m.bpm = p.bpm;
+                    }
+                }
+            }
+            "ok listening".into()
+        } else {
+            if self.music.as_ref().is_some_and(|m| m.auto) {
+                self.music_stop_at = Some(now + MUSIC_GRACE);
+            }
+            "ok quiet".into()
+        }
+    }
+
     fn music_off(&mut self, now: Instant) {
+        self.music_stop_at = None;
         if self.music.take().is_some() {
             self.relayer(now);
             self.update_notes(now);
@@ -636,7 +748,7 @@ impl Avatar {
             let emitters = spec.emitters.get(&src.id).map(Vec::as_slice).unwrap_or(&[]);
             let (ox, oy) = self.pack.offset(src);
             let l = self.layout;
-            let beat = 60.0 / spec.bpm.clamp(40.0, 240.0);
+            let beat = 60.0 / self.music.as_ref().and_then(|m| m.bpm).unwrap_or(spec.bpm).clamp(40.0, 240.0);
             let parts = fx::music_notes(now.saturating_duration_since(m.t0).as_secs_f32(), beat, emitters);
             let base = (self.applied.0 + l.avatar_x, self.applied.1 + l.avatar_y);
             for n in parts.iter().take(NOTES_MAX) {
@@ -760,7 +872,7 @@ impl Avatar {
             // Held on twos (12 fps) like Capri's music body.
             let hold = 1000.0 / 12.0;
             let t = (now.saturating_duration_since(m.t0).as_secs_f32() * 1000.0 / hold).floor() * hold;
-            let beats = t / (60_000.0 / spec.bpm.clamp(40.0, 240.0));
+            let beats = t / (60_000.0 / self.music.as_ref().and_then(|m| m.bpm).unwrap_or(spec.bpm).clamp(40.0, 240.0));
             let p = beats.fract();
             // Head down on the beat and back up (4 px), the upper body tilting side to side
             // over two beats (4 px at the top of the hair).
@@ -837,6 +949,13 @@ impl Avatar {
             // Materialise with a glitch, like Capri coming online.
             self.glitch = Some(Glitch::new(GlitchKind::Appear, now, self.rng.next()));
         }
+        if complete && !self.loaded && state::load_hidden() {
+            // Hidden last time (HIDE): stay hidden, the chip shows where she is.
+            self.parked = Some(true);
+            self.hidden = true;
+            self.glitch = None;
+            self.open_chip(cx);
+        }
         if complete && !self.loaded {
             self.loaded = true;
             self.contact = [self.measure_contact(true), self.measure_contact(false)];
@@ -851,6 +970,11 @@ impl Avatar {
         }
         cx.notify();
         self.schedule(cx);
+    }
+
+    /// A speech panel is open: the text field, a pending prompt, or a reply.
+    pub(super) fn panel_up(&self) -> bool {
+        self.input.is_some() || self.prompt_ui.as_ref().is_some_and(|p| !p.dismissed) || self.bubble.as_ref().is_some_and(|b| !b.collapsed)
     }
 
     fn spec(&self, m: Mood) -> Option<&MoodSpec> {
@@ -1137,6 +1261,12 @@ impl Avatar {
             take(Some((now + FRAME_FX).min(t0 + Duration::from_millis(HEARTS_MS))));
         }
         take(self.reaction_until);
+        take(self.perch_gone.map(|g| g.due()));
+        take(self.quit_armed);
+        take(self.music_stop_at);
+        if self.unpark_req.is_some() {
+            take(Some(now));
+        }
         take(self.hud_after.filter(|&t| t > now));
         take(self.menu.map(|m| m.1));
         if let Some(s) = &self.session {
@@ -1307,7 +1437,23 @@ impl Avatar {
         }
         if self.quit_requested && !self.quitting {
             self.quit_requested = false;
-            self.hide(now);
+            self.vanish_quit(now);
+            dirty = true;
+        }
+        if let Some(why) = self.unpark_req.take() {
+            dirty |= self.unpark(why, now, cx);
+        }
+        if self.music_stop_at.is_some_and(|t| now >= t) {
+            self.music_off(now);
+            dirty = true;
+        }
+        if self.player.playing && self.music.is_none() && self.loaded && self.mood == Mood::Idle && self.parked != Some(false) {
+            let p = self.player;
+            self.playback(p, now);
+            dirty = true;
+        }
+        if self.quit_armed.is_some_and(|t| now >= t) {
+            self.quit_armed = None;
             dirty = true;
         }
         if let Some(acts) = self.session.as_mut().map(|s| s.link.tick(now)) {
@@ -1377,6 +1523,7 @@ impl Avatar {
         {
             self.hop = None;
         }
+        dirty |= self.check_perch_gone(now);
         dirty |= self.rag_tick(now);
         dirty |= self.swing_tick(now);
         if self.loaded {
@@ -1424,6 +1571,10 @@ impl Avatar {
     fn glitch_done(&mut self, now: Instant, cx: &mut Context<Self>) {
         if self.quitting {
             self.quit(cx);
+            return;
+        }
+        if self.parked == Some(false) {
+            self.parked_done(cx);
             return;
         }
         let Some((leg, to)) = self.teleport.as_ref().map(|t| (t.leg, t.to)) else { return };
@@ -1625,16 +1776,22 @@ impl Avatar {
             }
             Command::Unperch => {
                 if matches!(self.placement, Placement::Perch { .. }) {
-                    self.fall(now);
+                    self.fall("unperch", now);
                     "ok".into()
                 } else {
                     "error: not perched".into()
                 }
             }
-            Command::State => self.state_json(),
+            Command::State => {
+                let reader = self.reader.as_ref().and_then(|(h, xid, _)| h.read_with(cx, |r, _| (*xid, r.scroll_info(), r.buttons())).ok());
+                self.state_json(reader)
+            }
             Command::Hide => {
-                self.hide(now);
-                "bye".into()
+                self.park(now);
+                "ok hidden".into()
+            }
+            Command::Show => {
+                if self.unpark("show", now, cx) { "ok shown".into() } else { "ok (not hidden)".into() }
             }
             Command::Quit => {
                 self.quit(cx);
@@ -1660,6 +1817,9 @@ impl Avatar {
                 }
             }
             Command::Page(d) => self.page(d, now),
+            Command::Playback(p) => self.playback(p, now),
+            Command::Scroll(d) => self.scroll_bubble(d, now),
+            Command::Reader(op) => self.reader_cmd(op, cx),
             Command::Collapse(c) => match &mut self.bubble {
                 Some(b) => {
                     b.collapsed = c;
@@ -1723,17 +1883,24 @@ impl Avatar {
     }
 
     fn say(&mut self, text: String, now: Instant) {
-        let text: Vec<char> = text.chars().collect();
+        // The bubble shows it as a session reply would be (markdown cleaned); the reader
+        // gets it as written.
+        let raw = text;
+        let text: Vec<char> = crate::session::clean(&raw).chars().collect();
         // Reveal in at most ~5 s however long the text is.
         let per_tick = (text.len() / (5_000 / TYPE_TICK.as_millis() as usize)).max(2);
+        let long = text.len() >= TYPE_MAX_CHARS;
         self.bubble = Some(Bubble {
+            // Long: all at once, finished by the next tick like a typed-out reply (the hold,
+            // SPEAKING settling to idle).
+            shown: if long { text.len() } else { 0 },
             text,
-            shown: 0,
             per_tick,
             next_char: Some(now),
             hide_at: None,
             wrap: None,
             page: None,
+            raw,
             collapsed: false,
             stream: false,
             more: false,
@@ -1746,24 +1913,331 @@ impl Avatar {
         }
     }
 
+    /// Scroll the bubble by `d` views (`page next|prev`).
     fn page(&mut self, d: i32, now: Instant) -> String {
+        let rows = self.bubble.as_ref().map_or(1, |b| b.rows()) as i32;
+        self.scroll_bubble(d * rows, now)
+    }
+
+    /// Scroll the bubble by `d` lines (the wheel).
+    fn scroll_bubble(&mut self, d: i32, now: Instant) -> String {
         let Some(b) = &mut self.bubble else { return "error: no bubble".into() };
         let (cur, total) = b.pages();
-        let next = (cur as i32 + d).clamp(0, total as i32 - 1) as usize;
+        let next = (cur as i32 + d).clamp(0, total.saturating_sub(b.rows()) as i32) as usize;
         b.page = Some(next);
         b.collapsed = false;
         if b.next_char.is_none() {
             b.hide_at = Some(now + Duration::from_secs(10));
         }
-        format!("ok {}/{}", next + 1, total)
+        format!("ok line {}/{}", next + 1, total)
     }
 
-    fn hide(&mut self, now: Instant) {
+    /// The pack's palette (for panels drawn elsewhere: the reader).
+    fn reader_pal(&self) -> crate::reader::Pal {
+        crate::reader::Pal {
+            frame: self.pack.tone_or("frame", 0x8ef5ed),
+            accent: self.pack.tone_or("accent", 0xc6fcf0),
+            surface: self.pack.tone_or("surface", 0x0b131a),
+            text: self.pack.tone_or("text", 0xf1f7f9),
+            dim: self.pack.tone_or("dim", 0xc4d6df),
+            name: self.pack.tone_or("name", 0xf4ed75),
+            slash: self.pack.tone_or("slash", 0xff3c68),
+        }
+    }
+
+    /// Where the reader goes (device px): beside her, inside her work area, clear of the
+    /// cursor; up to 40 % of the monitor wide and 60 % tall.
+    fn reader_rect(&self, raw: &str) -> (i32, i32, i32, i32) {
+        let l = self.layout;
+        let sf = l.sf;
+        let mut body = WinRect { id: 0, x: self.applied.0 + l.avatar_x, y: self.applied.1 + l.avatar_y, w: l.geo.width as i32, h: l.geo.height as i32 };
+        // Her and her bubble: the reader goes beside both.
+        if let Some((px_, py_, pw, ph)) = self.panel_rect.get() {
+            let (x0, y0) = (self.applied.0 + (px_ * sf) as i32, self.applied.1 + (py_ * sf) as i32);
+            let (x1, y1) = (x0 + (pw * sf) as i32, y0 + (ph * sf) as i32);
+            let (bx1, by1) = (body.right().max(x1), body.bottom().max(y1));
+            body.x = body.x.min(x0);
+            body.y = body.y.min(y0);
+            body.w = bx1 - body.x;
+            body.h = by1 - body.y;
+        }
+        let (bcx, bcy) = body.center();
+        let m = self.x11.monitor_at(bcx, bcy);
+        let area = self.her_area().unwrap_or(WinRect { id: 0, x: m.x, y: m.y, w: m.w, h: m.h });
+        let gap = (12.0 * sf) as i32;
+        let w0 = ((0.40 * m.w as f32) as i32).max((420.0 * sf) as i32).min(area.w);
+        // Not enough room beside her and her bubble at 40 %: the roomier side's room (down to
+        // 420 px), so it sits beside them rather than over the bubble.
+        let room = (area.right() - body.right() - gap).max(body.x - gap - area.x);
+        let w = if room >= w0 { w0 } else { room.max((420.0 * sf) as i32).min(area.w) };
+        let est = (crate::reader::estimate_height(&crate::reader::parse(raw), w as f32 / sf) * sf) as i32;
+        let h = est.clamp((180.0 * sf) as i32, (0.60 * m.h as f32) as i32).min(area.h);
+        let cursor = self.x11.pointer().ok();
+        let y0 = body.y.clamp(area.y, (area.bottom() - h).max(area.y));
+        let right = (body.right() + gap, y0);
+        let left = (body.x - gap - w, y0);
+        let fits = |p: (i32, i32)| p.0 >= area.x && p.0 + w <= area.right();
+        let clear = |p: (i32, i32)| cursor.is_none_or(|c| !(c.0 >= p.0 && c.0 < p.0 + w && c.1 >= p.1 && c.1 < p.1 + h));
+        let roomier = if area.right() - body.right() >= body.x - area.x { right } else { left };
+        let pick = [right, left].into_iter().filter(|&p| fits(p)).find(|&p| clear(p)).or_else(|| [right, left].into_iter().find(|&p| fits(p))).unwrap_or(roomier);
+        let mut x = pick.0.clamp(area.x, (area.right() - w).max(area.x));
+        let mut y = pick.1;
+        // Still under the cursor (no room on either side): above or below it, whichever fits.
+        if !clear((x, y))
+            && let Some(c) = cursor
+        {
+            let above = c.1 - gap - h;
+            let below = c.1 + gap;
+            if above >= area.y {
+                y = above;
+            } else if below + h <= area.bottom() {
+                y = below;
+            } else {
+                x = if c.0 - area.x > area.right() - c.0 { (c.0 - gap - w).max(area.x) } else { (c.0 + gap).min(area.right() - w) };
+            }
+        }
+        (x, y, w, h)
+    }
+
+    /// Open the reader on the current reply (or bring the open one up to date).
+    fn open_reader(&mut self, take_focus: bool, cx: &mut Context<Self>) -> String {
+        let Some(b) = &self.bubble else { return "error: no reply".into() };
+        let raw = if b.raw.trim().is_empty() { b.text.iter().collect::<String>() } else { b.raw.clone() };
+        if let Some((h, _, _)) = &self.reader {
+            h.update(cx, |r, _, cx| r.set_text(raw, cx)).ok();
+            return "ok (open)".into();
+        }
+        // Tests on the live desktop never take the keyboard (SA_READER_NOFOCUS).
+        let take_focus = take_focus && std::env::var_os("SA_READER_NOFOCUS").is_none();
+        let sf = self.layout.sf;
+        let (x, y, w, h) = self.reader_rect(&raw);
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(Bounds::new(point(px(x as f32 / sf), px(y as f32 / sf)), size(px(w as f32 / sf), px(h as f32 / sf))))),
+            titlebar: Some(TitlebarOptions { title: Some("synaps-avatar reader".into()), ..Default::default() }),
+            focus: take_focus,
+            show: true,
+            kind: WindowKind::PopUp,
+            is_movable: false,
+            is_resizable: false,
+            is_minimizable: false,
+            window_background: WindowBackgroundAppearance::Opaque,
+            app_id: Some("synaps-avatar".into()),
+            ..Default::default()
+        };
+        let ours = self.x11.win;
+        let prev = if take_focus { self.x11.active_window().or_else(|| self.x11.focused_window().ok()).filter(|&w| w > 1 && w != ours) } else { None };
+        let me = cx.entity().downgrade();
+        let (title, font, pal) = (self.name.to_uppercase(), self.font.clone(), self.reader_pal());
+        let xid = Rc::new(Cell::new(0u32));
+        let xid2 = xid.clone();
+        let opened = cx.open_window(options, move |window, cx| {
+            if let Ok(RawWindowHandle::Xcb(h)) = HasWindowHandle::window_handle(&*window).map(|h| h.as_raw()) {
+                xid2.set(h.window.get());
+            } else if let Ok(RawWindowHandle::Xlib(h)) = HasWindowHandle::window_handle(&*window).map(|h| h.as_raw()) {
+                xid2.set(h.window as u32);
+            }
+            let on_close: crate::reader::OnClose = Box::new(move |restore, cx: &mut App| {
+                me.update(cx, |a, cx| a.reader_closed(restore, cx)).ok();
+            });
+            cx.new(|cx| crate::reader::Reader::new(raw, title, font, pal, on_close, window, cx))
+        });
+        match opened {
+            Ok(handle) => {
+                let xid = xid.get();
+                if take_focus && xid != 0 {
+                    self.x11.give_focus(xid).ok();
+                }
+                self.reader = Some((handle, xid, prev));
+                if let Some(b) = &mut self.bubble {
+                    b.hide_at = None;
+                }
+                eprintln!("synaps-avatar: reader open at {x},{y} {w}x{h} (0x{xid:x})");
+                format!("ok reader {x},{y} {w}x{h}")
+            }
+            Err(e) => format!("error: reader: {e:#}"),
+        }
+    }
+
+    /// The reader closed (Esc, ✕, a click elsewhere): `restore` hands the keyboard back.
+    fn reader_closed(&mut self, restore: bool, cx: &mut Context<Self>) {
+        let Some((_, _, prev)) = self.reader.take() else { return };
+        if restore
+            && std::env::var_os("SA_READER_NO_RESTORE").is_none()
+            && let Some(w) = prev
+        {
+            self.x11.give_focus(w).ok();
+        }
+        if let Some(b) = &mut self.bubble
+            && b.next_char.is_none()
+            && !b.more
+        {
+            b.hide_at = Some(Instant::now() + Duration::from_secs(6));
+        }
+        cx.notify();
+        self.schedule(cx);
+    }
+
+    /// Close the reader from here (deferred: it calls back into this view).
+    fn close_reader(&mut self, restore: bool, cx: &mut Context<Self>) {
+        if let Some((h, _, _)) = &self.reader {
+            let h = *h;
+            cx.defer(move |cx| {
+                h.update(cx, |r, window, cx| r.close(restore, window, cx)).ok();
+            });
+        }
+    }
+
+    /// `reader open|close|copy [n]|scroll <px>|state`.
+    fn reader_cmd(&mut self, op: crate::control::ReaderOp, cx: &mut Context<Self>) -> String {
+        use crate::control::ReaderOp;
+        match op {
+            ReaderOp::Open { focus } => self.open_reader(focus, cx),
+            ReaderOp::Close => {
+                self.close_reader(false, cx);
+                "ok".into()
+            }
+            ReaderOp::Copy(n) => match &self.reader {
+                Some((h, _, _)) => h.update(cx, |r, _, cx| r.copy_block(n, cx)).unwrap_or_else(|e| format!("error: {e}")),
+                None => "error: no reader".into(),
+            },
+            ReaderOp::Scroll(dy) => match &self.reader {
+                Some((h, _, _)) => h.update(cx, |r, _, cx| r.scroll_by(dy, cx)).map_or_else(|e| format!("error: {e}"), |_| "ok".into()),
+                None => "error: no reader".into(),
+            },
+        }
+    }
+
+    /// A click on the reply skips the typing.
+    fn skip_typing(&mut self, now: Instant) -> bool {
+        let Some(b) = &mut self.bubble else { return false };
+        if b.shown >= b.text.len() {
+            return false;
+        }
+        // The tick finishes it like a typed-out reply (the hold, SPEAKING settling).
+        b.shown = b.text.len();
+        b.next_char = Some(now);
+        true
+    }
+
+    /// The end: vanish, then exit (QUIT, `quit_requested`).
+    fn vanish_quit(&mut self, now: Instant) {
         self.brain_save(now, true);
         self.menu = None;
         self.bubble = None;
         self.quitting = true;
         self.glitch = Some(Glitch::new(GlitchKind::Vanish, now, self.rng.next()));
+    }
+
+    /// HIDE: she glitches out and stays out (the process keeps running); a chip at the edge
+    /// of her monitor brings her back, as do a session summon and `show`.
+    fn park(&mut self, now: Instant) {
+        if self.parked.is_some() || self.quitting {
+            return;
+        }
+        self.brain_save(now, true);
+        self.menu = None;
+        self.quit_armed = None;
+        if let Some(b) = &mut self.bubble {
+            b.collapsed = true;
+        }
+        if self.input.is_some() {
+            self.close_input(true);
+        }
+        self.parked = Some(false);
+        state::save_hidden(true);
+        eprintln!("synaps-avatar: hidden (HIDE); the chip brings her back");
+        if self.hidden {
+            // Already out of sight (a fullscreen hide): parked at once.
+            self.parked = Some(true);
+            self.unpark_req = None;
+        } else {
+            self.glitch = Some(Glitch::new(GlitchKind::Vanish, now, self.rng.next()));
+        }
+    }
+
+    /// The vanish is over: hidden, and the chip up.
+    fn parked_done(&mut self, cx: &mut Context<Self>) {
+        self.parked = Some(true);
+        self.hidden = true;
+        self.fx_hide_all();
+        self.open_chip(cx);
+    }
+
+    /// Back from HIDE with the appear glitch where she was. False: she wasn't hidden.
+    fn unpark(&mut self, why: &str, now: Instant, cx: &mut Context<Self>) -> bool {
+        if self.parked.is_none() {
+            return false;
+        }
+        self.parked = None;
+        self.unpark_req = None;
+        state::save_hidden(false);
+        if let Some(h) = self.chip.take() {
+            h.update(cx, |_, window, _| window.remove_window()).ok();
+        }
+        self.chip_rect = None;
+        eprintln!("synaps-avatar: shown again ({why})");
+        let fs_hidden = self.brain.as_ref().is_some_and(|h| h.fs != brainview::FsHide::Shown);
+        if !fs_hidden {
+            self.hidden = false;
+            self.glitch = Some(Glitch::new(GlitchKind::Appear, now, self.rng.next()));
+        }
+        cx.notify();
+        self.schedule(cx);
+        true
+    }
+
+    /// The restore chip: her name and a dot at the bottom corner of her monitor's work
+    /// area (the side nearer her), on top, never taking the keyboard.
+    fn open_chip(&mut self, cx: &mut Context<Self>) {
+        if self.chip.is_some() {
+            return;
+        }
+        let l = self.layout;
+        let sf = l.sf;
+        let (gx, gy) = self.ground();
+        let m = self.x11.monitor_at(gx, gy.saturating_sub(10));
+        let area = self.her_area().unwrap_or(WinRect { id: 0, x: m.x, y: m.y, w: m.w, h: m.h });
+        let (cw, ch) = ((crate::chip::SIZE.0 * sf) as i32, (crate::chip::SIZE.1 * sf) as i32);
+        let pad = (14.0 * sf) as i32;
+        let right = gx >= area.x + area.w / 2;
+        let x = if right { area.right() - cw - pad } else { area.x + pad };
+        let y = area.bottom() - ch - pad;
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(Bounds::new(point(px(x as f32 / sf), px(y as f32 / sf)), size(px(crate::chip::SIZE.0), px(crate::chip::SIZE.1))))),
+            titlebar: Some(TitlebarOptions { title: Some("synaps-avatar chip".into()), ..Default::default() }),
+            focus: false,
+            show: true,
+            kind: WindowKind::PopUp,
+            is_movable: false,
+            is_resizable: false,
+            is_minimizable: false,
+            window_background: WindowBackgroundAppearance::Opaque,
+            app_id: Some("synaps-avatar".into()),
+            ..Default::default()
+        };
+        let me = cx.entity().downgrade();
+        let (name, font, pal) = (self.name.clone(), self.font.clone(), self.reader_pal());
+        let xid = Rc::new(Cell::new(0u32));
+        let xid2 = xid.clone();
+        match cx.open_window(options, move |window, cx| {
+            if let Ok(RawWindowHandle::Xcb(h)) = HasWindowHandle::window_handle(&*window).map(|h| h.as_raw()) {
+                xid2.set(h.window.get());
+            }
+            let on_click: crate::chip::OnClick = Box::new(move |cx: &mut App| {
+                me.update(cx, |a, cx| {
+                    a.unpark("chip", Instant::now(), cx);
+                })
+                .ok();
+            });
+            cx.new(|_| crate::chip::Chip::new(name, font, pal, on_click))
+        }) {
+            Ok(h) => {
+                self.chip = Some(h);
+                self.chip_rect = Some((x, y, cw, ch, xid.get()));
+                eprintln!("synaps-avatar: restore chip at {x},{y} {cw}x{ch}");
+            }
+            Err(e) => eprintln!("synaps-avatar: restore chip: {e:#}"),
+        }
     }
 
     fn quit(&mut self, cx: &mut Context<Self>) {
@@ -1817,7 +2291,8 @@ impl Avatar {
         cx.quit();
     }
 
-    fn state_json(&self) -> String {
+    fn state_json(&self, reader: Option<crate::reader::ReaderState>) -> String {
+        let sf = self.layout.sf;
         let frame = self.frame_or_default(self.shown_frame()).map(|f| f.id.clone()).unwrap_or_default();
         let (gx, gy) = self.ground();
         let m = self.x11.monitor_at(gx, gy - 1);
@@ -1844,6 +2319,17 @@ impl Avatar {
                         "w": self.layout.geo.width, "h": self.layout.geo.height },
             "bubble": self.bubble.as_ref().map(|b| b.text.iter().collect::<String>()),
             "page": [page, pages],
+            "read": self.bubble.as_ref().is_some_and(|b| b.long()),
+            "hidden_by_user": self.parked.is_some(),
+            "chip": self.chip_rect.map(|r| [r.0 as i64, r.1 as i64, r.2 as i64, r.3 as i64, r.4 as i64]),
+            "reader": reader.map(|(xid, (scroll, max), buttons)| {
+                let g = self.x11.toplevel_rect(xid).map_or((0, 0, 0, 0), |r| (r.x, r.y, r.w, r.h));
+                let b: serde_json::Map<String, serde_json::Value> = buttons
+                    .into_iter()
+                    .map(|(id, r)| (id, serde_json::json!([g.0 + (r[0] * sf) as i32, g.1 + (r[1] * sf) as i32, (r[2] * sf) as i32, (r[3] * sf) as i32])))
+                    .collect();
+                serde_json::json!({ "xid": xid, "rect": [g.0, g.1, g.2, g.3], "scroll": scroll, "max": max, "buttons": b })
+            }),
             "collapsed": self.bubble.as_ref().is_some_and(|b| b.collapsed),
             "placement": placement,
             "teleporting": self.teleport.is_some(),
@@ -1970,6 +2456,7 @@ impl Avatar {
                 Act::Answer(id, v) => s.client.answer(id, v.map(|v| v.0)),
                 Act::Abort => s.client.abort(),
                 Act::Detach => s.client.detach(),
+                Act::Set(setting) => s.client.set(setting).map(drop),
                 Act::Remember(id) => {
                     state::remember_session(&s.key, &id);
                     Ok(())
@@ -2019,6 +2506,10 @@ impl Avatar {
             self.set_mood(b.mood, now);
         }
         let (pp, pm) = (prev.as_ref().and_then(|p| p.prompt.as_ref().map(|x| x.id)), prev.as_ref().map(|p| p.mood));
+        // Hidden (HIDE): a session that needs him brings her back.
+        if self.parked.is_some() && b.prompt.is_some() && pp != b.prompt.as_ref().map(|x| x.id) {
+            self.unpark_req = Some("summon");
+        }
         if pp != b.prompt.as_ref().map(|x| x.id) || pm != Some(b.mood) {
             self.brain_session(pp, b.prompt.as_ref().map(|x| x.id), pm, b.mood);
         }
@@ -2057,6 +2548,7 @@ impl Avatar {
                 hide_at: None,
                 wrap: None,
                 page: None,
+                raw: String::new(),
                 collapsed: !b.busy,
                 stream: true,
                 more: b.busy,
@@ -2079,6 +2571,8 @@ impl Avatar {
         }
         bb.shown = if new_turn && !b.busy { text.len() } else { bb.shown.min(same) };
         bb.text = text;
+        bb.raw = b.raw.clone();
+        bb.reveal_all_if_long();
         bb.more = b.busy;
         if annoyed && !b.busy {
             // The reason (aborted, error) must be seen.
@@ -2469,10 +2963,57 @@ impl Avatar {
     }
 
     /// The perch window is gone, fullscreen or out of room: teleport back to the ground.
-    fn fall(&mut self, now: Instant) {
+    /// Her perch went away or has no room left: she falls where she is, straight down on
+    /// the same monitor (the ragdoll's drop, a surprised face), onto an exposed edge below or
+    /// that monitor's floor. Never a teleport to `home` (it may be on another monitor).
+    fn fall(&mut self, why: &'static str, now: Instant) {
+        self.perch_gone = None;
         self.x11.set_target(0);
-        let o = Self::clamp(&self.x11, &self.layout, (self.home.0 - self.layout.ground_x, self.home.1 - self.layout.ground_y));
-        self.start_teleport(o, Placement::Ground, now);
+        if self.teleport.is_some() || self.rag.is_some() {
+            return;
+        }
+        eprintln!("synaps-avatar: falls in place (why={why}) at {} ms", self.t_start.elapsed().as_millis());
+        if let Some(h) = &mut self.brain {
+            let t = h.bnow(now);
+            h.brain.note_external(t, why);
+            h.write(serde_json::json!({ "t": t, "k": "fall", "why": why, "from": [self.origin.0, self.origin.1] }));
+        }
+        self.brain_cancel_move();
+        if self.rag_drop(now) {
+            return;
+        }
+        // Stiff: straight down to this monitor's floor.
+        if let Some(h) = &mut self.brain {
+            h.rest = None;
+        }
+        self.placement = Placement::Ground;
+        let o = Self::clamp(&self.x11, &self.layout, (self.origin.0, self.origin.1 + 100_000));
+        self.move_to(o, true);
+        self.home = self.ground();
+        state::save_ground(self.ground());
+        self.relayer(now);
+    }
+
+    /// The perch window's grace ran out (or it came back): fall, or stay.
+    fn check_perch_gone(&mut self, now: Instant) -> bool {
+        let Some(g) = self.perch_gone else { return false };
+        let back = matches!(g.verdict(now, false), edges::GoneVerdict::Fall) && self.x11.toplevel_rect(g.win).is_some();
+        match g.verdict(now, back) {
+            edges::GoneVerdict::Wait => false,
+            edges::GoneVerdict::Stay => {
+                self.perch_gone = None;
+                eprintln!("synaps-avatar: perch 0x{:x} came back: stays", g.win);
+                false
+            }
+            edges::GoneVerdict::Fall => {
+                let still = matches!(self.placement, Placement::Perch { win, .. } if win == g.win);
+                self.perch_gone = None;
+                if still {
+                    self.fall("perch_gone", now);
+                }
+                still
+            }
+        }
     }
 
     fn watch(&mut self, ev: WatchEvent, now: Instant) {
@@ -2487,7 +3028,7 @@ impl Avatar {
                     return;
                 }
                 if self.perch_dx(&r, sit, Some(dx)).is_none() {
-                    self.fall(now);
+                    self.fall("perch_no_room", now);
                     return;
                 }
                 // Stay on an exposed stretch: clamp into it, but never slide across a
@@ -2495,12 +3036,12 @@ impl Avatar {
                 let x = r.x + dx;
                 let (spans, ranges) = self.exposed_seats(&r, sit);
                 let Some(nx) = nearest_in(&ranges, x) else {
-                    self.fall(now);
+                    self.fall("perch_covered", now);
                     return;
                 };
                 let hidden = x >= r.x && x < r.right() && !spans.iter().any(|&(a, b)| a <= x && x < b);
                 if hidden && (nx - x).abs() > (LAND_SLIDE * self.layout.sf) as i32 {
-                    self.fall(now);
+                    self.fall("perch_covered", now);
                     return;
                 }
                 let dx = nx - r.x;
@@ -2509,12 +3050,19 @@ impl Avatar {
                     self.placement = Placement::Perch { win, sit, dx };
                     self.set_origin(o);
                 } else {
-                    self.fall(now);
+                    self.fall("perch_no_room", now);
                 }
             }
             WatchEvent::TargetGone(id) => {
-                if matches!(self.placement, Placement::Perch { win, .. } if win == id) {
-                    self.fall(now);
+                // Not at once: a workspace flicked back within the grace keeps her put.
+                if matches!(self.placement, Placement::Perch { win, .. } if win == id) && self.perch_gone.is_none() {
+                    eprintln!("synaps-avatar: perch 0x{id:x} unmapped at {} ms: falls in 300 ms unless it comes back", self.t_start.elapsed().as_millis());
+                    self.perch_gone = Some(edges::PerchGone { win: id, since: now });
+                }
+            }
+            WatchEvent::TargetBack(id) => {
+                if self.perch_gone.is_some_and(|g| g.win == id) {
+                    self.perch_gone = None;
                 }
             }
         }
@@ -2847,8 +3395,6 @@ fn tracked(s: &str, spacing: f32) -> Div {
 
 #[derive(Clone, Copy)]
 enum Chevron {
-    Left,
-    Right,
     Down,
     Up,
 }
@@ -2860,8 +3406,6 @@ fn chevron(dir: Chevron, colour: Rgba) -> impl IntoElement {
         move |b, _, window, _| {
             let (x, y) = (f32::from(b.origin.x), f32::from(b.origin.y));
             let pts: [(f32, f32); 3] = match dir {
-                Chevron::Left => [(6.5, 1.5), (2.5, 5.0), (6.5, 8.5)],
-                Chevron::Right => [(3.5, 1.5), (7.5, 5.0), (3.5, 8.5)],
                 Chevron::Down => [(1.5, 3.0), (5.0, 7.0), (8.5, 3.0)],
                 Chevron::Up => [(1.5, 7.0), (5.0, 3.0), (8.5, 7.0)],
             };
@@ -3050,7 +3594,17 @@ impl Render for Avatar {
         // HUD placement follows the mood's resting frame, so loops don't make it jitter.
         let base = self.frame_or_default(self.anim.base()).or(frame);
         // …but a taller one-shot (an entry clip) pushes it up so it never sits on the hair.
-        let (base_top, head_x) = base.map_or((0, l.geo.width as i32 / 2), |f| (f.top.min(frame.map_or(f.top, |c| c.top)), f.head_x));
+        let (mut base_top, head_x) = base.map_or((0, l.geo.width as i32 / 2), |f| (f.top.min(frame.map_or(f.top, |c| c.top)), f.head_x));
+        // While a bubble is up its height holds (per resting frame): a one-shot raising a hand
+        // made it jump ~10 px and back.
+        if self.panel_up() {
+            match self.hud_top.get() {
+                Some((b, t)) if b == self.anim.base() => base_top = t,
+                _ => self.hud_top.set(Some((self.anim.base(), base_top))),
+            }
+        } else {
+            self.hud_top.set(None);
+        }
         let top_l = (l.avatar_y + base_top) as f32 / sf;
         let head_l = (l.avatar_x + head_x) as f32 / sf;
         // The status tag sits just clear of the hair under the tag itself (this frame and
@@ -3095,7 +3649,14 @@ impl Render for Avatar {
         // shape grows, this frame's pixels show for a moment. Without an underlay they're
         // transparent (black slabs without a compositor); with it, they're what comes next.
         let mut next: Option<BodyPlan> = None;
-        if let Some(g) = self.glitch {
+        if let Some(sx) = self.glitch.and_then(|g| g.squeeze_sx(now)) {
+            // A quiet exit: squeezed in one piece; the next width goes underneath.
+            plan.sx = sx;
+            plan.pivot.0 = sliver_px;
+            let mut n = plan.clone();
+            n.sx = self.glitch.and_then(|g| g.squeeze_sx(now + FRAME_FX)).unwrap_or(sx);
+            next = Some(n);
+        } else if let Some(g) = self.glitch {
             let (top, face, bx0, bx1) = frame.map_or((0, None, 0, aw), |f| {
                 let (x0, x1) = f.profile.iter().enumerate().filter(|p| *p.1 != i16::MAX).fold((aw, 0), |a, (i, _)| (a.0.min(i as i32), a.1.max(i as i32)));
                 (f.top, g.keeps_face().then_some(f.face), x0, x1.max(x0 + 1))
@@ -3128,6 +3689,7 @@ impl Render for Avatar {
                     solid: g.solid(at),
                     tag,
                     sf,
+                    calm: g.kind == GlitchKind::Land,
                 });
                 p.tint = g.tint(at);
                 p
@@ -3525,6 +4087,7 @@ impl Render for Avatar {
         let busy = self.session.as_ref().is_some_and(|sess| sess.link.busy());
         if mode.is_none() {
             self.panel_bottom = None;
+            self.panel_rect.set(None);
         }
         if let Some(mode) = mode {
             let line_strings = |chars: &[char], w: &Wrapped| -> Vec<String> {
@@ -3604,12 +4167,21 @@ impl Render for Avatar {
             }
             // Fit the page: the lines it will hold once typed out (so it doesn't grow while
             // streaming), never an empty band above the footer.
-            let rows = match pages {
-                Some((cur, n)) if n > 1 => total_lines.saturating_sub(cur * LINES_PER_PAGE).clamp(1, LINES_PER_PAGE),
+            let rows = match (mode, &self.bubble) {
+                (PanelMode::Reply, Some(b)) => b.rows().max(1),
                 _ => total_lines.clamp(1, LINES_PER_PAGE),
             };
             let footer = !probe;
-            let h = PAD_T + HEADER_H + HEADER_GAP + rows as f32 * LINE_H + if footer { FOOTER_GAP + FOOTER_H } else { 0.0 } + PAD_B;
+            let mut h = PAD_T + HEADER_H + HEADER_GAP + rows as f32 * LINE_H + if footer { FOOTER_GAP + FOOTER_H } else { 0.0 } + PAD_B;
+            if mode == PanelMode::Prompt
+                && let Some(key) = self.prompt_ui.as_ref().map(|p| p.shown_at)
+            {
+                match self.prompt_h {
+                    Some((k, held)) if k == key => h = h.max(held),
+                    _ => {}
+                }
+                self.prompt_h = Some((key, h));
+            }
             let x = (head_l - w * 0.45).clamp(vis_l + MARGIN, (vis_r - MARGIN - w).max(vis_l + MARGIN));
             let want = top_l - TIP_GAP - TAIL_H;
             let bottom = match self.panel_bottom {
@@ -3623,6 +4195,7 @@ impl Render for Avatar {
             let hi = x + w - CUT - TAIL_W / 2.0 - 6.0;
             let tail_x = head_l.clamp(lo, hi.max(lo));
             let g = PanelGeom { x, y, w, h, tail_x, tip: (head_l.clamp(tail_x - 9.0, tail_x + 9.0), y + h + TAIL_H) };
+            self.panel_rect.set(Some((x, y, w, h + TAIL_H)));
             panel_geom = Some(g);
             // Settled after a summon: the border breathes between a warm mix and the tone.
             let frame_c = match glow {
@@ -3788,36 +4361,23 @@ impl Render for Avatar {
             let mut row = div().absolute().bottom(px(PAD_B)).right(px(PAD_R - 4.0)).h(px(FOOTER_H)).flex().items_center().gap(px(4.0));
             match mode {
                 PanelMode::Reply => {
-                    let (cur, total) = pages.unwrap_or((0, 1));
+                    let _ = pages;
                     if busy {
                         row = row.child(abort_btn(cx)).child(div().w(px(4.0)));
                     }
-                    if total > 1 {
+                    if let Some(b) = self.bubble.as_ref().filter(|b| b.long()) {
+                        let label = format!("▸ READ ({} LINES)", b.read_lines());
+                        let open = self.reader.is_some();
                         row = row
-                            .child(btn("prev", Chevron::Left, cur > 0).on_mouse_down(
+                            .child(tbtn("read", &label, pal.name, !open).on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(|this, _: &MouseDownEvent, _, cx| {
                                     cx.stop_propagation();
-                                    this.page(-1, Instant::now());
-                                    cx.notify();
-                                    this.schedule(cx);
-                                }),
-                            ))
-                            .child(
-                                div()
-                                    .min_w(px(40.0))
-                                    .flex()
-                                    .justify_center()
-                                    .text_size(px(10.0))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(rgb(pal.text))
-                                    .child(format!("{} / {}", cur + 1, total)),
-                            )
-                            .child(btn("next", Chevron::Right, cur + 1 < total).on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                                    cx.stop_propagation();
-                                    this.page(1, Instant::now());
+                                    if this.reader.is_some() {
+                                        this.close_reader(true, cx);
+                                    } else {
+                                        this.open_reader(true, cx);
+                                    }
                                     cx.notify();
                                     this.schedule(cx);
                                 }),
@@ -3897,6 +4457,30 @@ impl Render for Avatar {
             }
             if footer {
                 panel = panel.child(row);
+            }
+            if mode == PanelMode::Reply {
+                panel = panel
+                    .on_scroll(cx.listener(|this, ev: &ScrollEvent, _, cx| {
+                        let dy = f32::from(ev.delta.pixel_delta(px(LINE_H)).y);
+                        let acc = this.wheel.get() - dy / LINE_H;
+                        let n = acc.trunc() as i32;
+                        this.wheel.set(acc - n as f32);
+                        if n != 0 {
+                            this.scroll_bubble(n, Instant::now());
+                            cx.notify();
+                            this.schedule(cx);
+                        }
+                    }))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            if this.skip_typing(Instant::now()) {
+                                cx.notify();
+                                this.schedule(cx);
+                            }
+                        }),
+                    );
             }
             if matches!(mode, PanelMode::Input { .. } | PanelMode::Probe) {
                 panel = panel
@@ -4003,11 +4587,33 @@ impl Render for Avatar {
                     MouseButton::Left,
                     cx.listener(|this, _: &MouseDownEvent, _, cx| {
                         cx.stop_propagation();
-                        this.hide(Instant::now());
+                        this.park(Instant::now());
                         cx.notify();
                         this.schedule(cx);
                     }),
-                ));
+                ))
+                .child(div().h(px(1.0)).mx(px(8.0)).my(px(3.0)).bg(with_alpha(pal.frame, 0.3)))
+                .child(
+                    item(if self.quit_armed.is_some() { "QUIT? CLICK AGAIN" } else { "QUIT" }).id("quit").on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            let now = Instant::now();
+                            if this.quit_armed.is_some_and(|t| now < t) {
+                                this.quit_armed = None;
+                                this.vanish_quit(now);
+                            } else {
+                                // A second click within 2 s exits; the menu stays up that long.
+                                this.quit_armed = Some(now + Duration::from_secs(2));
+                                if let Some(m) = &mut this.menu {
+                                    m.1 = m.1.max(now + Duration::from_secs(3));
+                                }
+                            }
+                            cx.notify();
+                            this.schedule(cx);
+                        }),
+                    ),
+                );
             root = root.child(
                 div()
                     .absolute()
@@ -4075,17 +4681,21 @@ impl Render for Avatar {
                         input.push(to_device(b, sf));
                         visible.push(to_device(b, sf));
                     }
-                    let prev_tag = tag_last.replace(tag_cell.get());
+                    let (prev_tag, run) = tag_last.get();
+                    let run = if prev_tag.is_some() && prev_tag == tag_cell.get() { run.saturating_add(1) } else { 0 };
+                    tag_last.set((tag_cell.get(), run));
                     if let Some(b) = tag_cell.get() {
                         tag_w.set(f32::from(b.size.width));
                         tag_box.set(Some(b));
-                        if torn {
-                            visible.extend(tag_strips.iter().copied());
-                        } else if prev_tag == Some(b) {
-                            visible.push(to_device(b, sf));
-                        } else {
-                            // New or moved: painted now, shown from the next frame.
+                        // New or moved: in the shape only once two frames have painted it (GPUI
+                        // presents up to two frames late: one frame of lag left a black tag at
+                        // a landing). Torn (a glitch) included.
+                        if run < 2 {
                             window.request_animation_frame();
+                        } else if torn {
+                            visible.extend(tag_strips.iter().copied());
+                        } else {
+                            visible.push(to_device(b, sf));
                         }
                         if tag_clickable {
                             input.push(to_device(b, sf));

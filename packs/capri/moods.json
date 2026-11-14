@@ -582,7 +582,7 @@
     "status": "LISTENING",
     "tone": "music",
     "glyph": "note",
-    "activityChance": 0.18,
+    "activityChance": 0.0,
     "activityMs": 24000
   },
   "brain": {
@@ -747,12 +747,18 @@
         "ms": 90
       }
     ],
-    "fly": "crouch-surprised",
+    "fly": "surprised",
     "fall": "surprised",
     "bounce": [
       {
-        "frame": "idle-surprised_closed",
-        "ms": 110
+        "frame": "crouch-surprised",
+        "ms": 70
+      }
+    ],
+    "tuck": [
+      {
+        "frame": "crouch-surprised",
+        "ms": 70
       }
     ],
     "annoyedAfter": 3

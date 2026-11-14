@@ -39,6 +39,8 @@ pub struct RagSpec {
     pub fly: String,
     pub fall: String,
     pub bounce: Vec<Step>,
+    /// The tuck at the apex of a fling (a beat; `fly` the rest of the flight).
+    pub tuck: Vec<Step>,
     pub annoyed_after: u32,
     pub soft: Vec<Step>,
     pub hard: Vec<Step>,
@@ -59,9 +61,10 @@ impl RagSpec {
             ankle: Some("pose-ceiling-upside-down".into()),
             zones: (0.30, 0.62),
             launch: steps(&[("idle-surprised_closed", 90)]),
-            fly: "crouch-surprised".into(),
+            fly: "surprised".into(),
             fall: "surprised".into(),
-            bounce: steps(&[("idle-surprised_closed", 110)]),
+            bounce: steps(&[("crouch-surprised", 70)]),
+            tuck: steps(&[("crouch-surprised", 70)]),
             annoyed_after: 3,
             soft: steps(&[("crouch-neutral", 140), ("transition-stand_crouch", 160)]),
             hard: steps(&[("crouch-surprised", 260), ("transition-stand_crouch", 140), ("annoyed", 900), ("arms_crossed-annoyed", 1400)]),
@@ -222,6 +225,8 @@ pub enum RagEvent {
     Settled,
     /// A press on her mid-flight.
     Catch { u: f32 },
+    /// A fling passed the top of its arc.
+    Apex,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -380,6 +385,11 @@ impl RagMachine {
                         self.play(t, Vec::new(), Some(fall));
                     }
                     self.phase = Phase::Flight { fling };
+                }
+                (Phase::Flight { fling: true }, RagEvent::Apex) => {
+                    let k = self.spec.tuck.clone();
+                    let fly = self.spec.fly.clone();
+                    self.play(t, k, Some(fly));
                 }
                 (Phase::Flight { fling }, RagEvent::Contact(c)) => match c {
                     Contact::Bounce { speed, normal } => {
@@ -668,10 +678,14 @@ mod tests {
         m.update(0.0, &ev(RagEvent::Grab { u: 0.4 }));
         let o = m.update(1.0, &ev(RagEvent::Release { vel: (1500.0, -200.0) }));
         assert_eq!((o.phase, o.frame.as_deref()), (Phase::Flight { fling: true }, Some("idle-surprised_closed")));
-        assert_eq!(m.update(1.1, &RagInput::default()).frame.as_deref(), Some("crouch-surprised"));
+        // Open (head, arms, legs readable) most of the flight; tucked only a beat at the apex
+        // and at a bounce.
+        assert_eq!(m.update(1.1, &RagInput::default()).frame.as_deref(), Some("surprised"));
+        assert_eq!(m.update(1.15, &ev(RagEvent::Apex)).frame.as_deref(), Some("crouch-surprised"));
+        assert_eq!(m.update(1.25, &RagInput::default()).frame.as_deref(), Some("surprised"));
         let o = m.update(1.3, &ev(RagEvent::Contact(Contact::Bounce { normal: (-1.0, 0.0), speed: 1200.0 })));
-        assert_eq!((o.frame.as_deref(), o.squash), (Some("idle-surprised_closed"), Some(1200.0)));
-        assert_eq!(m.update(1.5, &RagInput::default()).frame.as_deref(), Some("crouch-surprised"));
+        assert_eq!((o.frame.as_deref(), o.squash), (Some("crouch-surprised"), Some(1200.0)));
+        assert_eq!(m.update(1.5, &RagInput::default()).frame.as_deref(), Some("surprised"));
         let o = m.update(1.8, &ev(RagEvent::Contact(Contact::Floor { speed: 800.0 })));
         assert_eq!((o.phase, o.frame.as_deref(), o.glitch), (Phase::Land(LandKind::Soft), Some("crouch-neutral"), false));
         assert_eq!(m.update(2.0, &RagInput::default()).frame.as_deref(), Some("transition-stand_crouch"));

@@ -177,6 +177,9 @@ pub enum Goal {
 #[derive(Clone, Debug, PartialEq)]
 pub struct MovePlan {
     pub goal: Goal,
+    /// The rule that asked for it (the decision log, `brain state`): roam, sulk_far, bid,
+    /// summon, covering.
+    pub why: &'static str,
     /// Arrival styles in order; the view takes the first that fits the distance.
     pub arrivals: Vec<Arrival>,
 }
@@ -493,6 +496,8 @@ pub struct Brain {
     prompt_summons: HashMap<u64, (u8, f64)>,
     last_summon: Option<f64>,
     covering: bool,
+    /// The last moves asked for and why (`brain state`).
+    recent_moves: std::collections::VecDeque<(f64, &'static str)>,
     far_next: bool,
     no_bid_before: f64,
     /// The bid before the one out now (a failed bid didn't happen).
@@ -543,6 +548,7 @@ impl Brain {
             prompt_summons: HashMap::new(),
             last_summon: None,
             covering: false,
+            recent_moves: std::collections::VecDeque::new(),
             far_next: false,
             no_bid_before: now + tuning.launch_grace_s,
             prev_bid: None,
@@ -755,7 +761,13 @@ impl Brain {
 
     fn emit(&mut self, t: f64, i: Intent) {
         let what = match &i {
-            Intent::Move(p) => format!("move {}", plan_text(p)),
+            Intent::Move(p) => {
+                self.recent_moves.push_back((t, p.why));
+                while self.recent_moves.len() > 12 {
+                    self.recent_moves.pop_front();
+                }
+                format!("move {} (why {})", plan_text(p), p.why)
+            }
             Intent::Emote(e) => format!("emote {e:?}"),
             Intent::Pose(p) => format!("pose {p:?}"),
             Intent::Hide(h) => format!("hide {h}"),
@@ -913,7 +925,7 @@ impl Brain {
                 } else if self.gate_open(t) {
                     self.record_move(t);
                     let arrivals = self.passive_arrivals();
-                    self.emit(t, Intent::Move(MovePlan { goal: Goal::Passive { far: true }, arrivals }));
+                    self.emit(t, Intent::Move(MovePlan { goal: Goal::Passive { far: true }, why: "sulk_far", arrivals }));
                 } else {
                     self.far_next = true;
                 }
@@ -970,7 +982,7 @@ impl Brain {
             self.redraw_roam();
             self.record_move(t);
             let arrivals = self.passive_arrivals();
-            self.emit(t, Intent::Move(MovePlan { goal: Goal::Passive { far }, arrivals }));
+            self.emit(t, Intent::Move(MovePlan { goal: Goal::Passive { far }, why: "roam", arrivals }));
             self.emit(t, Intent::Save);
         }
     }
@@ -1013,7 +1025,8 @@ impl Brain {
             arrivals.push(Arrival::Teleport);
         }
         self.mode = Mode::Seeking { why, since: t };
-        self.emit(t, Intent::Move(MovePlan { goal: Goal::Active { why, approaches }, arrivals }));
+        let w = if matches!(why, Why::Summon(_)) { "summon" } else { "bid" };
+        self.emit(t, Intent::Move(MovePlan { goal: Goal::Active { why, approaches }, why: w, arrivals }));
     }
 
     /// The bid or summon is over (no response needed): back to passive, off his window.
@@ -1040,7 +1053,7 @@ impl Brain {
         self.covering = false;
         self.record_move(t);
         let arrivals = self.passive_arrivals();
-        self.emit(t, Intent::Move(MovePlan { goal: Goal::Leave, arrivals }));
+        self.emit(t, Intent::Move(MovePlan { goal: Goal::Leave, why: "covering", arrivals }));
         true
     }
 
@@ -1284,6 +1297,15 @@ impl Brain {
     pub fn dnd_left(&self, now: f64) -> Option<f64> {
         self.dnd_until.filter(|&d| d > now).map(|d| d - now)
     }
+    /// A move the view made on its own (her perch went away): logged with its rule.
+    pub fn note_external(&mut self, t: f64, why: &'static str) {
+        self.recent_moves.push_back((t, why));
+        while self.recent_moves.len() > 12 {
+            self.recent_moves.pop_front();
+        }
+        self.note(t, format!("view move (why {why})"));
+    }
+
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn covering(&self) -> bool {
         self.covering
@@ -1325,13 +1347,14 @@ impl Brain {
             "last_interaction_s": ago(self.last_interaction),
             "next_wake_in": r(self.due() - now),
             "moves_last_hour": self.moves_in_hour(now),
+            "recent_moves": self.recent_moves.iter().map(|(t, w)| serde_json::json!({ "ago_s": r(now - t), "why": w })).collect::<Vec<_>>(),
             "last_bid_ago": ago(self.last_bid),
             "pending_summon": self.pending.map(|p| format!("{:?}", p.kind)),
             "prompt_open": self.prompt_open,
             "settings": { "enabled": s.enabled, "attention": s.attention.key(), "no_repeat": s.no_repeat,
                           "cover_max_pct": s.cover_max_pct, "passive_every_min": [s.passive_every_min.0, s.passive_every_min.1],
                           "bid_every_min": [s.bid_every_min.0, s.bid_every_min.1], "max_moves_per_hour": s.max_moves_per_hour,
-                          "fullscreen": format!("{:?}", s.fullscreen).to_lowercase(),
+                          "fullscreen": format!("{:?}", s.fullscreen).to_lowercase(), "monitor": format!("{:?}", s.monitor).to_lowercase(),
                           "approaches": s.approaches.iter().map(|(a, w)| (a.key().to_string(), serde_json::json!(w))).collect::<serde_json::Map<_, _>>(),
                           "arrivals": s.arrivals.iter().map(|(a, w)| (a.key().to_string(), serde_json::json!(w))).collect::<serde_json::Map<_, _>>() },
             "bags": { "approach": self.approaches.history.iter().map(|a| a.key()).collect::<Vec<_>>(),
@@ -1456,6 +1479,27 @@ mod tests {
             assert!((1200.0..=1800.0 + 1e-6).contains(&first), "seed {seed}: first bid at {first}");
             assert!(first >= b.tuning.launch_grace_s);
         }
+    }
+
+    #[test]
+    fn focus_changes_never_evict_her() {
+        // Sitting on the floor; his focus flips every 7 s between a window under her and
+        // another one (near on/off), as workspace switches do. No move until the roam clock,
+        // the same as with no focus change at all, and every move is a roam.
+        let s = BrainSettings { attention: Attention::Off, ..Default::default() };
+        let mk = || Brain::new(11, s.clone(), Tuning::new(&s), None, 0.0);
+        let flicker = |t: f64| Senses { near: (t / 7.0) as i64 % 2 == 0, placement: PlaceKind::Ground, ..here(t) };
+        let calm = |t: f64| Senses { placement: PlaceKind::Ground, ..here(t) };
+        let mut a = mk();
+        let ra = run(&mut a, 0.0, 1500.0, true, &flicker, &[]);
+        let mut b = mk();
+        let rb = run(&mut b, 0.0, 1500.0, true, &calm, &[]);
+        let (ma, mb) = (moves(&ra), moves(&rb));
+        assert!(!ma.is_empty(), "a roam happens eventually");
+        assert_eq!(ma.iter().map(|m| m.0).collect::<Vec<_>>(), mb.iter().map(|m| m.0).collect::<Vec<_>>(), "focus changes move nothing");
+        assert!(ma[0].0 >= s.passive_every_min.0 * 60.0 - 1e-6, "first move {} is on the roam clock", ma[0].0);
+        assert!(ma.iter().all(|(_, p)| p.why == "roam" && matches!(p.goal, Goal::Passive { .. })));
+        assert!(a.snapshot(1500.0)["recent_moves"].as_array().is_some_and(|v| v.iter().all(|m| m["why"] == "roam")));
     }
 
     #[test]

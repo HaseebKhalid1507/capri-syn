@@ -246,9 +246,62 @@ pub fn work_areas(monitors: &[WinRect], root: (i32, i32), struts: &[Strut]) -> V
         .collect()
 }
 
+/// Her perch window unmapped (a workspace switch, a minimize): she waits this long for it
+/// to come back (fast workspace flicking) before she falls.
+pub const PERCH_GONE_GRACE: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// The perch window went away at `since`; it may come back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PerchGone {
+    pub win: u32,
+    pub since: std::time::Instant,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GoneVerdict {
+    /// Still inside the grace: keep waiting.
+    Wait,
+    /// It came back: she stays where she is (no fall at all).
+    Stay,
+    /// Gone for good: she falls in place.
+    Fall,
+}
+
+impl PerchGone {
+    pub fn due(&self) -> std::time::Instant {
+        self.since + PERCH_GONE_GRACE
+    }
+
+    /// `back`: the window is viewable again.
+    pub fn verdict(&self, now: std::time::Instant, back: bool) -> GoneVerdict {
+        if back {
+            GoneVerdict::Stay
+        } else if now < self.due() {
+            GoneVerdict::Wait
+        } else {
+            GoneVerdict::Fall
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn perch_gone_debounce() {
+        let t0 = std::time::Instant::now();
+        let g = PerchGone { win: 7, since: t0 };
+        let ms = |m: u64| t0 + std::time::Duration::from_millis(m);
+        // Inside the grace: wait; back by then (a workspace flicked back): stay, no fall.
+        assert_eq!(g.verdict(ms(100), false), GoneVerdict::Wait);
+        assert_eq!(g.verdict(ms(150), true), GoneVerdict::Stay);
+        assert_eq!(g.verdict(ms(300), true), GoneVerdict::Stay);
+        // Gone past the grace: she falls.
+        assert_eq!(g.verdict(ms(299), false), GoneVerdict::Wait);
+        assert_eq!(g.verdict(ms(300), false), GoneVerdict::Fall);
+        assert_eq!(g.due(), ms(300));
+    }
 
     fn w(id: u32, x: i32, y: i32, ww: i32, h: i32) -> WinRect {
         WinRect { id, x, y, w: ww, h }

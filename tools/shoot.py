@@ -403,6 +403,8 @@ def main():
             for k, v in (("x", g.x if g else 0), ("y", g.y if g else 0), ("w", g.width if g else 0), ("h", g.height if g else 0)):
                 line = line.replace(f"{{pwin{n}.{k}}}", str(v))
             line = line.replace(f"{{pwin{n}}}", hex(w.id) if w else "0")
+        for n in range(len(ovls), 0, -1):
+            line = line.replace(f"{{ovl{n}}}", hex(ovls[n - 1].id))
         return line.replace("{pwin}", hex(pwins[0].id) if pwins and pwins[0] else "0")
     if stage:
         sx, sy, sw, sh = stage[:4]
@@ -607,9 +609,96 @@ def main():
                     if not safe_click(x, y):
                         break
                     print(f"button {rest} at {x},{y} (try {attempt + 1})")
-                    if rest == "chip":
-                        break  # the tag stays
+                    if rest in ("chip", "read"):
+                        break  # the tag (and READ) stay
                     time.sleep(0.4)
+            elif kind in ("rbutton", "rwheel"):
+                # rbutton:<id>  click a READER button (copy-all, copy-N, close) by its laid-out rect.
+                # rwheel:<n>:<up|down>  n wheel clicks over the reader's middle. Both only inside
+                # our reader window (an override-redirect window on top), the user idle.
+                r = json.loads(ctl("state")).get("reader")
+                if not r:
+                    print("shoot: no reader open", file=sys.stderr)
+                    continue
+                rx, ry, rw, rh = r["rect"]
+                if kind == "rbutton":
+                    b = r.get("buttons", {}).get(rest)
+                    if not b:
+                        print(f"shoot: no reader button {rest!r}", file=sys.stderr)
+                        continue
+                    x, y, btns = b[0] + b[2] // 2, b[1] + b[3] // 2, ["click", "1"]
+                else:
+                    n, d = rest.split(":")
+                    x, y = rx + rw // 2, ry + rh // 2
+                    btns = ["click", "--repeat", n, "--delay", "60", "5" if d == "down" else "4"]
+                if not (rx <= x < rx + rw and ry <= y < ry + rh):
+                    print(f"shoot: {x},{y} is outside the reader; refused", file=sys.stderr)
+                    continue
+                if not wait_user_idle():
+                    print("shoot: user is active; reader input skipped", file=sys.stderr)
+                    continue
+                subprocess.run(["xdotool", "mousemove", str(x), str(y), *btns, "mousemove", "restore"], check=True)
+                print(f"{kind} {rest} at {x},{y}")
+            elif kind == "clickchip":
+                # clickchip  click OUR restore chip (HIDE) by its rect from state, the user idle.
+                c = json.loads(ctl("state")).get("chip")
+                if not c:
+                    print("shoot: no restore chip", file=sys.stderr)
+                    continue
+                x, y = c[0] + c[2] // 2, c[1] + c[3] // 2
+                # Only if the topmost viewable window at that point is the chip (or its frame).
+                top = None
+                for ch_ in reversed(xroot().query_tree().children):
+                    try:
+                        if ch_.get_attributes().map_state != 2:
+                            continue
+                        g = ch_.get_geometry()
+                    except Exception:
+                        continue
+                    if g.x <= x < g.x + g.width and g.y <= y < g.y + g.height:
+                        top = ch_
+                        break
+                kids = [k.id for k in top.query_tree().children] if top else []
+                if not top or (top.id != c[4] and c[4] not in kids):
+                    print(f"shoot: the window at {x},{y} is not our chip ({hex(top.id) if top else None}); click refused", file=sys.stderr)
+                    continue
+                if not wait_user_idle():
+                    print("shoot: user is active; chip click skipped", file=sys.stderr)
+                    continue
+                subprocess.run(["xdotool", "mousemove", str(x), str(y), "click", "1", "mousemove", "restore"], check=True)
+                print(f"clickchip at {x},{y}")
+            elif kind == "rkey":
+                # rkey:<keys>  synthetic keys addressed to OUR reader window only (XSendEvent).
+                r = json.loads(ctl("state")).get("reader")
+                if not r:
+                    print("shoot: no reader open", file=sys.stderr)
+                    continue
+                send_keys(r["xid"], rest.split(), delay=0.08)
+                print(f"rkey {rest}")
+            elif kind == "wheel":
+                # wheel:<dx>:<dy>:<n>:<up|down>  n wheel clicks at window-relative px on the avatar
+                # (the bubble), only on her input shape, the user idle.
+                dx, dy, n, d = rest.split(":")
+                st = json.loads(ctl("state"))
+                w = st["window"]
+                if dx.startswith("@"):
+                    # wheel:@<button>:<up px>:<n>:<dir>  over a bubble button's centre, dy px above it
+                    b = st.get("buttons", {}).get(dx[1:])
+                    if not b:
+                        print(f"shoot: no button {dx[1:]!r}", file=sys.stderr)
+                        continue
+                    x, y = b[0] + b[2] // 2, b[1] + b[3] // 2 - int(dy)
+                else:
+                    x, y = w["x"] + int(dx), w["y"] + int(dy)
+                if not on_avatar(x, y):
+                    print(f"shoot: {x},{y} is not on the avatar's input shape; wheel refused", file=sys.stderr)
+                    continue
+                if not wait_user_idle():
+                    print("shoot: user is active; wheel skipped", file=sys.stderr)
+                    continue
+                subprocess.run(["xdotool", "mousemove", str(x), str(y), "click", "--repeat", n, "--delay", "80", "5" if d == "down" else "4",
+                                "mousemove", "restore"], check=True)
+                print(f"wheel {n} {d} at {x},{y}")
             elif kind == "probe" and not os.environ.get("SA_POINTER_OK"):
                 print("shoot: probe moves the user's pointer; refused (SA_POINTER_OK=1 overrides)", file=sys.stderr)
             elif kind == "probe":
@@ -773,6 +862,23 @@ def main():
                 xdisp().sync()
                 ovls.append(ov)
                 print(f"ovl {hex(ov.id)} at {x},{y} {w}x{h} under the avatar")
+            elif kind in ("ovlunmap", "ovlmap", "ovlflick"):
+                # ovlunmap[:n] / ovlmap[:n]: unmap or map OUR override-redirect test window n
+                # (default the last), the id kept, like a workspace switch does to a frame.
+                # ovlflick:<ms>[:n]: unmap, wait ms, map again (a fast workspace flick).
+                parts = rest.split(":") if rest else []
+                if kind == "ovlflick":
+                    ms, parts = int(parts[0]), parts[1:]
+                ov = ovls[int(parts[0]) - 1] if parts else ovls[-1]
+                if kind in ("ovlunmap", "ovlflick"):
+                    ov.unmap()
+                    xdisp().sync()
+                if kind == "ovlflick":
+                    time.sleep(ms / 1000)
+                if kind in ("ovlmap", "ovlflick"):
+                    ov.map()
+                    xdisp().sync()
+                print(f"{kind} {hex(ov.id)} {rest}")
             elif kind == "ovlclose":
                 for ov in ovls:
                     ov.destroy()

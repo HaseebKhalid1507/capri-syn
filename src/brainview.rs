@@ -197,7 +197,7 @@ impl BrainHost {
         self.scoot.is_some() || self.drift.is_some() || self.drop_in.is_some()
     }
 
-    fn bnow(&self, now: Instant) -> f64 {
+    pub(super) fn bnow(&self, now: Instant) -> f64 {
         self.base_b + now.saturating_duration_since(self.base_t).as_secs_f64() * self.scale
     }
 
@@ -206,7 +206,7 @@ impl BrainHost {
         self.base_t + Duration::from_secs_f64(d)
     }
 
-    fn write(&mut self, v: serde_json::Value) {
+    pub(super) fn write(&mut self, v: serde_json::Value) {
         if let Some(f) = &mut self.log {
             writeln!(f, "{v}").ok();
         }
@@ -467,6 +467,9 @@ impl Avatar {
         }
         if self.music.is_some() {
             v.push("music");
+        }
+        if self.parked.is_some() {
+            v.push("hidden");
         }
         if self.press.is_some() || self.rag.is_some() {
             v.push("drag");
@@ -779,6 +782,10 @@ impl Avatar {
         let fullscreen: Vec<bool> = monitors.iter().map(|m| senses_fs && (focused.is_none_or(|f| m.intersect(&f).is_some()))).collect();
         let l = self.layout;
         let hud_h = ((TOP_MARGIN + PANEL_MAX_H + TAIL_H + TIP_GAP) * l.sf) as i32;
+        // monitor = "follow": her own hops stay on the monitor he works on (visits go to his
+        // window anyway).
+        let follow = h.settings.brain.monitor == crate::settings::MonitorPolicy::Follow && matches!(plan.goal, Goal::Passive { .. } | Goal::Leave);
+        let only = if follow { places::follow_area(&monitors, focused, cursor) } else { None };
         let world = World {
             stack: &stack,
             eligible: &eligible,
@@ -797,6 +804,7 @@ impl Avatar {
             last_wins: &h.last_wins,
             last_kind: h.last_kind,
             hud_h,
+            only,
         };
         let mut rng = h.rng.clone();
         let res = places::resolve(&plan.goal, &world, &mut rng);
@@ -870,7 +878,19 @@ impl Avatar {
             "cursor": [cursor.0, cursor.1], "focus": focused.as_ref().map(rect_json), "cover_pct": (spot.cover_pct * 100.0).round() / 100.0,
             "cover_ok": cover_ok(&spot), "fs": senses_fs, "dnd": dnd, "enabled": enabled, "area": rect_json(&areas[spot.area.min(areas.len() - 1)]),
             "clear_px": (CURSOR_CLEAR_LOGICAL * l.sf).round(), "from": [her.anchor.0, her.anchor.1],
+            "why": plan.why, "only": only,
         });
+        // One line per move on stderr too (rare): what moved her, from where to where.
+        eprintln!(
+            "synaps-avatar: brain move why={} goal={goal_s} spot={} {},{} -> {},{} by {}",
+            plan.why,
+            spot.kind.key(),
+            her.anchor.0,
+            her.anchor.1,
+            spot.anchor.0,
+            spot.anchor.1,
+            arrival.key()
+        );
         let Some(h) = &mut self.brain else { return };
         h.rng = rng;
         h.write(line);
@@ -1170,11 +1190,21 @@ impl Avatar {
         }
     }
 
+    /// A hop moves the whole window: with a bubble up (a summon's prompt) it would jump
+    /// with her, so she squashes in place instead.
+    fn hop_or_squash(&mut self, now: Instant) {
+        if self.panel_up() {
+            self.squash = Some(now);
+        } else {
+            self.hop = Some(now);
+        }
+    }
+
     /// A summon for his prompt landed: one hop, a point at his window, then the attentive
     /// lean (the NeedsYou mood) with the status pulsing for a few seconds.
     fn summon_landed(&mut self, now: Instant) {
         if self.placement == Placement::Ground {
-            self.hop = Some(now);
+            self.hop_or_squash(now);
             let right = self.brain_focused().is_some_and(|f| f.center().0 > self.ground().0);
             let steps = [crate::pack::Step::Clip(if right { "point_right" } else { "point_left" }.into())];
             let seq = self.pack.flatten(&steps);
@@ -1341,7 +1371,7 @@ impl Avatar {
         if let EmoteKey::Insist(_) = e {
             let hang = matches!(self.placement, Placement::Pose { frame } if self.brain_pose("hang") == Some(frame) || self.brain_pose("hang_upside_down") == Some(frame));
             if self.placement == Placement::Ground || (self.posed() && !hang) {
-                self.hop = Some(now);
+                self.hop_or_squash(now);
             }
             if self.posed() {
                 let dir = if self.rng.pick(2) == 0 { 1.0 } else { -1.0 };
@@ -1395,6 +1425,11 @@ impl Avatar {
         let Some(h) = &mut self.brain else { return };
         let t = h.bnow(now) - h.brain.start();
         h.write(serde_json::json!({ "t": t, "k": if hide { "hide" } else { "show" } }));
+        if self.parked.is_some() {
+            // Hidden from her menu: the fullscreen hide only keeps its books.
+            h.fs = if hide { FsHide::Hidden } else { FsHide::Shown };
+            return;
+        }
         if hide {
             if h.fs != FsHide::Shown {
                 return;
@@ -1571,40 +1606,26 @@ impl Avatar {
             } else {
                 (base.0 + f.head_x as f32, base.1 + f.face.0 as f32)
             };
-            // Clear of her hair: beside her whole outline at head height, on the side away
-            // from his window (never over more of it), inside her work area (flipped to the
-            // other side if there's no room).
+            // Next to her face, never over his window: beside her outline at head height on
+            // the side away from it; with no room there, above her head (leaning away); the
+            // whole badge (rim, tail, pop) clamped inside her work area, so never cut off.
             let away = self.brain_focused().map_or(1.0, |w| if head.0 < w.center().0 as f32 { -1.0 } else { 1.0 });
             let cols: Vec<usize> = f.profile.iter().enumerate().filter(|(_, y)| **y != i16::MAX).map(|(x, _)| x).collect();
             let (c0, c1) = (base.0 + *cols.first()? as f32, base.0 + *cols.last()? as f32);
             let r = MARK_R * sf * 1.25;
+            // Reach from the centre: the popped disc, the rim and the tail.
+            let reach = r * 1.55 + 3.0 * sf;
             let gap = 4.0 * sf;
-            let side = |a: f32| if a > 0.0 { c1 + gap + r } else { c0 - gap - r };
-            let area = self.brain.as_ref().and_then(|h| h.marker).and_then(|m| m.area);
-            let fits = |x: f32| area.is_none_or(|a| x - r >= a.x as f32 && x + r <= a.right() as f32);
-            // Off his window, always: if the away side has no room at head height, slide down
-            // her away side (inside the work area) to the first rows clear of her outline.
-            let mut c = if fits(side(away)) {
-                (side(away), head.1 - 6.0 * sf + bob as f32)
-            } else if let Some(a) = area {
-                let x = if away > 0.0 { a.right() as f32 - r } else { a.x as f32 + r };
-                let (lx0, lx1) = ((x - r - gap - base.0) as i32, (x + r + gap - base.0) as i32);
-                let clear = |cy: f32| {
-                    let (ly0, ly1) = ((cy - r - gap - base.1) as i32, (cy + r + gap - base.1) as i32);
-                    !f.rects.iter().any(|&(rx, ry, rw, rh)| {
-                        let (rx, ry) = (rx as i32, ry as i32);
-                        rx < lx1 && rx + rw as i32 > lx0 && ry < ly1 && ry + rh as i32 > ly0
-                    })
-                };
-                let y0 = head.1 - 6.0 * sf;
-                let y = (0..40).map(|k| y0 + k as f32 * 6.0 * sf).find(|&y| clear(y)).unwrap_or(y0);
-                (x, y + bob as f32)
-            } else {
-                (side(away), head.1 - 6.0 * sf + bob as f32)
-            };
+            let area = self.brain.as_ref().and_then(|h| h.marker).and_then(|m| m.area).or_else(|| self.her_area());
+            let inside = |x: f32, y: f32| area.is_none_or(|a| x - reach >= a.x as f32 && x + reach <= a.right() as f32 && y - reach >= a.y as f32);
+            let beside = (if away > 0.0 { c1 + gap + r } else { c0 - gap - r }, head.1 - 6.0 * sf);
+            let top = base.1 + f.top as f32;
+            let above = (head.0 + away * 0.8 * r, top - gap - r);
+            let mut c = if inside(beside.0, beside.1) || !inside(above.0, above.1) { beside } else { above };
+            c.1 += bob as f32;
             if let Some(a) = area {
-                c.0 = c.0.clamp(a.x as f32 + r, (a.right() as f32 - r).max(a.x as f32 + r));
-                c.1 = c.1.clamp(a.y as f32 + r, (a.bottom() as f32 - r).max(a.y as f32 + r));
+                c.0 = c.0.clamp(a.x as f32 + reach, (a.right() as f32 - reach).max(a.x as f32 + reach));
+                c.1 = c.1.clamp(a.y as f32 + reach, (a.bottom() as f32 - reach).max(a.y as f32 + reach));
             }
             Some((c, head, sc as f32 / 20.0, away))
         });
@@ -1777,7 +1798,13 @@ impl Avatar {
                 self.brain_feed(BrainEvent::Control(Ctl::Seed(s)), now);
             }
             BrainCmd::Force(f) => self.brain_feed(BrainEvent::Control(Ctl::Force(f)), now),
-            BrainCmd::Event(s) => self.brain_feed(BrainEvent::Session(s), now),
+            BrainCmd::Event(s) => {
+                // A synthetic summon brings her back from HIDE like a real one.
+                if matches!(s, SessionSignal::Prompt(_)) && self.parked.is_some() {
+                    self.unpark_req = Some("summon");
+                }
+                self.brain_feed(BrainEvent::Session(s), now)
+            }
             BrainCmd::Sense(s) => {
                 if let Some(h) = &mut self.brain {
                     let b = h.bnow(now);
@@ -1809,6 +1836,16 @@ impl Avatar {
         match Settings::load() {
             Ok(s) => {
                 self.rag_strength = crate::ragdoll::Strength(s.ragdoll.strength);
+                // Her own session's persona, compared (and set) again if it changed.
+                if let Some(sl) = &mut self.session {
+                    let model = sl.link.cli_model();
+                    let acts = if sl.link.rides_other() {
+                        Vec::new()
+                    } else {
+                        sl.link.set_persona(crate::session_persona(&s.session, model, &self.pack.dir), now)
+                    };
+                    self.run_acts(acts);
+                }
                 let Some(h) = &mut self.brain else { return format!("ok ragdoll.strength={} (no brain)", s.ragdoll.strength) };
                 let mut bs = s.brain.clone();
                 // Keep the pack's zeros.

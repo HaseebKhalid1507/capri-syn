@@ -15,6 +15,9 @@ mod places;
 mod moves;
 mod platform;
 mod ragdoll;
+mod reader;
+mod chip;
+mod mpris;
 mod session;
 mod settings;
 mod shape;
@@ -393,6 +396,21 @@ fn run(t_start: Instant) -> Result<()> {
             })
             .map_err(|e| eprintln!("synaps-avatar: x11 watcher: {e:#}"))
             .ok();
+            // Real LISTENING: media players on the session bus (signals only). Tests see only
+            // their own fake player (SA_MPRIS_ONLY), never his.
+            let music = settings::Settings::load().map(|s| s.music).unwrap_or_default();
+            let only = std::env::var("SA_MPRIS_ONLY").ok().filter(|s| !s.is_empty());
+            let synth = std::env::var_os("SA_BRAIN_SYNTH").is_some();
+            if music.detect && (only.is_some() || !synth) {
+                let tx = tx2.clone();
+                let filter = mpris::Filter { ignore: music.ignore, only };
+                if let Err(e) = mpris::spawn(filter, move |p| {
+                    let (r, _) = std::sync::mpsc::channel();
+                    tx.send_blocking((control::Command::Playback(p), r)).ok();
+                }) {
+                    eprintln!("synaps-avatar: mpris: {e:#} (no music detection)");
+                }
+            }
             eprintln!(
                 "synaps-avatar: pack `{}` ({} frames) sf {sf:.3} window 0x{win:x} {}x{} at {},{} composited={} (pack load {t_pack} ms)",
                 pack2.name,
@@ -464,7 +482,8 @@ fn run(t_start: Instant) -> Result<()> {
             if session::guarded(&who(&pack.name)) {
                 fatal(anyhow::anyhow!("this pack's character is called `{}`: that is the guarded session's name", pack.name));
             }
-            connect_session(&args, &pack.name, &view, cx);
+            let persona = persona_for(&args, &pack.dir);
+            connect_session(&args, &pack.name, persona, &view, cx);
         }
 
         control::serve(listener, tx);
@@ -492,8 +511,29 @@ pub fn who(character: &str) -> String {
     if synaps_client::Identity::new(&w).is_err() { "avatar".into() } else { w }
 }
 
+/// Her own session's persona: settings.toml `[session]` and the pack's persona.md (a CLI
+/// `--model` wins). None at all for `--session` (someone else's session).
+fn persona_for(args: &Args, pack_dir: &std::path::Path) -> session::Persona {
+    if matches!(args.target, session::Target::Session(_)) {
+        return session::Persona::default();
+    }
+    session_persona(&settings::Settings::load().map(|s| s.session).unwrap_or_else(|e| {
+        eprintln!("synaps-avatar: {e:#}; the session gets no persona settings");
+        settings::SessionSettings { persona: false, ..Default::default() }
+    }), args.model.clone(), pack_dir)
+}
+
+/// The persona from `[session]` (and a model that overrides it).
+pub(crate) fn session_persona(s: &settings::SessionSettings, model: Option<String>, pack_dir: &std::path::Path) -> session::Persona {
+    let system = s.persona_text(pack_dir).unwrap_or_else(|e| {
+        eprintln!("synaps-avatar: persona: {e:#}; none sent");
+        None
+    });
+    session::Persona { system, model: model.or_else(|| s.model.clone()), thinking: s.thinking.clone() }
+}
+
 /// Start the session link: the client and its pump live in the view.
-fn connect_session(args: &Args, character: &str, view: &Entity<view::Avatar>, cx: &mut App) {
+fn connect_session(args: &Args, character: &str, persona: session::Persona, view: &Entity<view::Avatar>, cx: &mut App) {
     let me = who(character);
     let identity = match synaps_client::Identity::new(&me) {
         Ok(i) => i,
@@ -520,6 +560,7 @@ fn connect_session(args: &Args, character: &str, view: &Entity<view::Avatar>, cx
         cwd: args.cwd.clone(),
         model: args.model.clone(),
         sleepy_after: args.sleepy_after,
+        persona,
     };
     let link = session::Link::new(opts, Instant::now());
     let options = synaps_client::ClientOptions::new(endpoint, identity);
