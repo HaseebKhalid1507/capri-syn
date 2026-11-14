@@ -380,6 +380,9 @@ pub struct Behaviour {
     pub life: Life,
     #[serde(default)]
     pub perch: Option<PerchSpec>,
+    /// The way the art faces: "right" (default) or "left". Mirrored, she faces the other.
+    #[serde(default)]
+    pub facing: Option<String>,
     #[serde(default)]
     pub music: Option<MusicSpec>,
     #[serde(default)]
@@ -530,10 +533,13 @@ impl Pack {
             r = Some(r.map_or(b, |r| r.union(&b)));
         }
         let r = r.expect("pack has frames");
-        let (cw, ch) = (self.catalog.canvas.width as i32, self.catalog.canvas.height as i32);
-        let x = (r.x - 2).max(0);
+        let ch = self.catalog.canvas.height as i32;
         let y = (r.y - 2).max(0);
-        Rect { x, y, width: (r.right() + 2).min(cw) - x, height: (r.bottom() + 2).min(ch) - y }
+        // Symmetric about the canonical anchor (padded past the canvas where it must be): a
+        // frame mirrored about the rect's centre keeps her feet where they were.
+        let ax = self.catalog.canonical_anchor.x;
+        let reach = (ax - r.x).max(r.right() - ax) + 2;
+        Rect { x: ax - reach, y, width: 2 * reach, height: (r.bottom() + 2).min(ch) - y }
     }
 
     pub fn load(dir: &Path) -> Result<Pack> {

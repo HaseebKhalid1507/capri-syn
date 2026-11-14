@@ -114,6 +114,9 @@ pub(super) struct InFlight {
     active: bool,
     /// A summon for a pending prompt: she lands loud (a hop, a point at his window).
     summon_prompt: bool,
+    /// Which way she faces once there (`[mirror] self`): his pointer on a bid or summon,
+    /// a window's middle from its edge, into the screen near a monitor's edge.
+    face: Option<bool>,
 }
 
 pub(super) struct Scoot {
@@ -145,6 +148,9 @@ pub(super) struct BrainHost {
     later: Vec<(Instant, EmoteKey)>,
     log: Option<std::fs::File>,
     log_seen: u64,
+    /// Brain time of the next idle look-around (`[mirror] idle_every_min`), its own rng.
+    look_b: Option<f64>,
+    look_rng: Rng,
     rng: Rng,
     saved_at: Option<Instant>,
     save_due: bool,
@@ -343,6 +349,8 @@ impl Avatar {
             later: Vec::new(),
             log,
             log_seen: 0,
+            look_b: None,
+            look_rng: Rng::new(seed ^ 0x51ab_1007),
             rng,
             saved_at: None,
             save_due: false,
@@ -410,7 +418,7 @@ impl Avatar {
         self.x11.toplevel_rect(top)
     }
 
-    fn brain_cursor(&self) -> (i32, i32) {
+    pub(super) fn brain_cursor(&self) -> (i32, i32) {
         match self.brain.as_ref().and_then(|h| h.ov.cursor) {
             Some(c) => c,
             None => self.x11.pointer().unwrap_or((0, 0)),
@@ -651,6 +659,7 @@ impl Avatar {
         }
         take(self.float_bob_next(now));
         take(h.later.iter().map(|l| l.0).min());
+        take(h.look_b.map(|b| h.instant(b)));
         if h.next_plan.is_some() {
             take(Some(now + Duration::from_millis(100)));
         }
@@ -723,6 +732,7 @@ impl Avatar {
             dirty = true;
         }
         self.brain_run(now, false);
+        dirty |= self.idle_look(now);
         self.brain_save(now, false);
         dirty
     }
@@ -891,12 +901,33 @@ impl Avatar {
             spot.anchor.1,
             arrival.key()
         );
+        // Facing (`[mirror] self`): the way she goes, then what she cares about once there.
+        let own = self.mirror_cfg.own;
+        let dead = (crate::facing::DEAD_PX * l.sf) as i32;
+        let mid = |r: &WinRect| r.x + r.w / 2;
+        let ax = spot.anchor.0;
+        let travel = crate::facing::toward(her.anchor.0, ax, dead).filter(|_| own && spot.kind != SpotKind::InPlace);
+        let face = if !own {
+            None
+        } else if active {
+            crate::facing::toward(ax, cursor.0, dead).or_else(|| focused.and_then(|f| crate::facing::toward(ax, mid(&f), dead)))
+        } else {
+            match spot.kind {
+                SpotKind::Edge { win } | SpotKind::SitEdge { win } => stack.iter().find(|r| r.id == win).and_then(|r| crate::facing::toward(ax, mid(r), dead)),
+                SpotKind::Beside | SpotKind::FloatBeside => focused.and_then(|f| crate::facing::toward(ax, mid(&f), dead)),
+                _ => None,
+            }
+            .or_else(|| monitors.iter().find(|m| m.x <= ax && ax < m.x + m.w).and_then(|m| crate::facing::inward(ax, m.x, m.w)))
+        };
+        if let Some(r) = travel {
+            self.face(r, "travel", now, true);
+        }
         let Some(h) = &mut self.brain else { return };
         h.rng = rng;
         h.write(line);
         let approach = if active { spot.approach } else { None };
         let summon_prompt = matches!(plan.goal, Goal::Active { why: Why::Summon(crate::brain::SummonKind::Prompt(_)), .. });
-        h.flight = Some(InFlight { approach, arrival, spot, active, summon_prompt });
+        h.flight = Some(InFlight { approach, arrival, spot, active, summon_prompt, face });
         // Any move ends the bid marker and a sulk sit.
         h.marker = None;
         h.sulk_sit = false;
@@ -1181,6 +1212,9 @@ impl Avatar {
         if self.placement == Placement::Ground {
             self.home = self.ground();
         }
+        if let Some(r) = f.face {
+            self.face(r, "arrive", now, false);
+        }
         self.brain_feed(BrainEvent::Arrived(Arrived { approach: f.approach, arrival: f.arrival, covering }), now);
         if f.summon_prompt {
             self.summon_landed(now);
@@ -1267,13 +1301,64 @@ impl Avatar {
         self.play_emote(e, now);
     }
 
+    /// An idle look-around once in a while (`[mirror] idle_every_min`, brain clock): never
+    /// while she speaks, a panel is up, mid-gesture or on the move, nor within
+    /// `LOOK_QUIET_S` of another turn.
+    fn idle_look(&mut self, now: Instant) -> bool {
+        let every = self.mirror_cfg.idle_every_min;
+        let own = self.mirror_cfg.own;
+        let Some(h) = &mut self.brain else { return false };
+        let b = h.bnow(now);
+        let Some(at) = h.look_b else {
+            let u = h.look_rng.range(0.0, 1.0);
+            h.look_b = Some(b + crate::facing::look_gap(every, u));
+            return false;
+        };
+        if at > b {
+            return false;
+        }
+        let since = self.last_turn.map_or(f64::MAX, |t| b - h.bnow(t));
+        let busy = !own
+            || !h.brain.enabled()
+            || h.moving()
+            || h.flight.is_some()
+            || since < crate::facing::LOOK_QUIET_S
+            || !self.loaded
+            || self.hidden
+            || self.bubble.is_some()
+            || self.reader.is_some()
+            || self.panel_up()
+            || self.anim.busy()
+            || self.rag.is_some()
+            || self.teleport.is_some()
+            || self.glitch.is_some()
+            || self.press.is_some()
+            || self.turn_busy()
+            || matches!(self.mood, Mood::Talking | Mood::Thinking | Mood::Working | Mood::NeedsYou)
+            || !self.can_mirror_now();
+        let Some(h) = &mut self.brain else { return false };
+        if busy {
+            // Try again in a little while.
+            let u = h.look_rng.range(8.0, 20.0) as f64;
+            h.look_b = Some(b + u);
+            return false;
+        }
+        let u = h.look_rng.range(0.0, 1.0);
+        h.look_b = Some(b + crate::facing::look_gap(every, u));
+        h.write(serde_json::json!({ "t": b - h.brain.start(), "k": "look" }));
+        let right = !self.facing_right();
+        self.face(right, "look", now, false);
+        true
+    }
+
     /// `@look` / `@point` toward the cursor.
     fn resolve_steps(&self, steps: &[crate::pack::Step]) -> Vec<crate::pack::Step> {
         use crate::pack::Step;
         let c = self.brain_cursor();
         let (gx, gy) = self.ground();
         let head_y = gy - (self.layout.geo.height as f32 * 0.8) as i32;
-        let right = c.0 > gx;
+        // The look and point frames are drawn to a side: mirrored, the other one points there.
+        let right = (c.0 > gx) != self.turn_target();
         steps
             .iter()
             .map(|s| match s {
@@ -1836,6 +1921,7 @@ impl Avatar {
         match Settings::load() {
             Ok(s) => {
                 self.rag_strength = crate::ragdoll::Strength(s.ragdoll.strength);
+                self.mirror_cfg = s.mirror.clone();
                 if crate::env_composited().is_none() && self.x11.force_composited(s.display.composited) {
                     elog!("synaps-avatar: settings: {} mode", if self.x11.composited() { "alpha" } else { "shape" });
                     self.alpha_switched();

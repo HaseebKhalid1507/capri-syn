@@ -257,6 +257,7 @@ impl Avatar {
         };
         let mut ptr = Pointer::default();
         ptr.push(0.0, p0.0, p0.1);
+        self.turner = Default::default();
         let mut rag = Rag {
             m,
             rigid,
@@ -453,6 +454,27 @@ impl Avatar {
         }
     }
 
+    /// She turned while held: the pointer keeps the same spot of the (now mirrored) art.
+    pub(super) fn rag_mirrored(&mut self) {
+        let l = self.layout;
+        let aw = l.geo.width as i32;
+        let Some(r) = &self.rag else { return };
+        let p = r.ptr.last().unwrap_or_else(|| self.grip_root(self.origin, r.grip));
+        if r.rigid {
+            // The window moves so the mirrored spot is under the pointer.
+            let gx = -r.offset.0 - l.avatar_x;
+            let Some(r) = &mut self.rag else { return };
+            r.offset.0 = -(aw - 1 - gx) - l.avatar_x;
+            return;
+        }
+        let (frame, zone) = (r.frame, r.zone);
+        let grip = (aw - 1 - r.grip.0, r.grip.1);
+        let chain = self.rag_chain(frame, grip, zone, p);
+        let Some(r) = &mut self.rag else { return };
+        r.grip = grip;
+        r.chain = chain;
+    }
+
     fn rag_held_step(&mut self, now: Instant, t: f32, dt: f32) {
         let Some(r) = &self.rag else { return };
         let p = self.rag_pointer(r);
@@ -464,6 +486,14 @@ impl Avatar {
         self.follow_at = Some(now);
         let Some(r) = &mut self.rag else { return };
         r.ptr.push(t, p.0, p.1);
+        // She faces the way she's dragged: the same pointer samples, through a hold.
+        let vx = r.ptr.velocity(t).0 / l.sf;
+        if self.mirror_cfg.drag
+            && let Some(right) = self.turner.feed(t, vx, self.facing_right())
+        {
+            self.face(right, "drag", now, true);
+        }
+        let Some(r) = &mut self.rag else { return };
         if r.rigid {
             let o = (p.0 as i32 + r.offset.0, p.1 as i32 + r.offset.1);
             let _ = dt;
@@ -542,6 +572,10 @@ impl Avatar {
         let t = r.t;
         let vel = r.ptr.velocity(t);
         r.vel = vel;
+        // Let go moving sideways: she faces the way she flies, through the fall and landing.
+        if self.mirror_cfg.drag && (vel.0 / self.layout.sf).abs() > crate::facing::TURN_V {
+            self.face(vel.0 > 0.0, "fling", now, true);
+        }
         let speed = (vel.0 * vel.0 + vel.1 * vel.1).sqrt();
         let fling = speed >= ragdoll::V_FLING * self.layout.sf;
         if fling {
