@@ -310,8 +310,6 @@ const NOTE_TICK: Duration = Duration::from_millis(40);
 /// the hearts, so a glint costs no GPUI redraw.
 const GLINT_LAYER: usize = NOTE_LAYER + 2 * NOTES_MAX;
 const GLINTS_MAX: usize = 4;
-/// A glint's scale steps (its 560 ms life in 7): 12.5 fps reads the same twinkle as 16.
-const GLINT_TICK: Duration = Duration::from_millis(80);
 /// A bob or sway step (1-2 px) alone waits this long for another redraw to ride on (a
 /// blink, the other axis): at rest every pose step was a render of its own.
 const POSE_SLACK: Duration = Duration::from_millis(250);
@@ -845,7 +843,8 @@ impl Avatar {
                     break;
                 }
                 let Some(sc) = g.scale(now, life_ms).filter(|&v| v > 0.02) else { continue };
-                let (cx, cy, r) = (base.0 + g.x, base.1 + g.y, g.size * sc);
+                let (dx, dy) = g.offset(now, life_ms);
+                let (cx, cy, r) = (base.0 + g.x + dx, base.1 + g.y + dy, g.size * sc);
                 let place = |pts: Vec<(f32, f32)>| {
                     let x0 = pts.iter().map(|p| p.0).fold(f32::MAX, f32::min).floor() as i32;
                     let y0 = pts.iter().map(|p| p.1).fold(f32::MAX, f32::min).floor() as i32;
@@ -857,9 +856,11 @@ impl Avatar {
                     ((x0, y0), (x1 - x0, y1 - y0), rows)
                 };
                 let (core, glow) = (GLINT_LAYER + 2 * used + 1, GLINT_LAYER + 2 * used);
+                // The same curve fades it: the core goes pink -> white -> pink and the halo
+                // grows out of it (1-bit windows: no alpha).
                 let (o, sz, rows) = place(fx::star(cx, cy, r, g.spin + 0.04));
-                self.x11.fx_set(core, 0xffffff, o, sz, &rows).ok();
-                let (o, sz, rows) = place(fx::star(cx, cy, r * 1.3, g.spin));
+                self.x11.fx_set(core, mix_rgb(0xffc2e2, 0xffffff, sc), o, sz, &rows).ok();
+                let (o, sz, rows) = place(fx::star(cx, cy, r * (1.0 + 0.32 * sc), g.spin));
                 self.x11.fx_set_below(glow, core, 0xffc2e2, o, sz, &rows).ok();
                 used += 1;
             }
@@ -1314,9 +1315,9 @@ impl Avatar {
         if self.squash.is_some() || self.sliver.is_some() {
             take(Some(now + FRAME_FAST));
         }
-        if !self.glints.is_empty() {
-            take(Some(now + GLINT_TICK));
-        }
+        // Glints: at their slice centres (fx::GLINT_STEPS per life), not a free-running tick.
+        let life_ms = self.pack.behaviour.life.sparkle_ms;
+        take(self.glints.iter().filter_map(|g| g.next_sample(now, life_ms)).min());
         take(self.next_glint);
         // One wake per pose step, at its slack's end (not one at the step and one after).
         match self.pose_wait {
@@ -1604,12 +1605,17 @@ impl Avatar {
         let n = if self.rng.range(0.0, 1.0) < 0.3 { 2 } else { 1 };
         for k in 0..n {
             let (x, y) = pts[self.rng.pick(pts.len())];
+            let spin = self.rng.range(-0.25, 0.25);
+            let travel = self.rng.range(6.0, 10.0) * self.layout.sf;
+            let dir = if self.rng.range(0.0, 1.0) < 0.5 { -1.0 } else { 1.0 };
             self.glints.push(Glint {
                 t0: now + Duration::from_millis(k * 140),
                 x: x as f32,
                 y: y as f32,
                 size: self.rng.range(7.0, 12.0) * self.layout.sf,
-                spin: self.rng.range(-0.25, 0.25),
+                spin,
+                // A little travel along its long arm (the strand it sits on).
+                drift: (spin.cos() * travel * dir, spin.sin() * travel * dir),
             });
         }
     }
@@ -4176,6 +4182,7 @@ impl Render for Avatar {
                         placeholder = Some("…".into());
                     }
                     let label = match &self.echo {
+                        _ if self.reader.is_some() => "IN THE READER".into(),
                         Some(e) => format!("YOU › {}", crate::session::one_line(e, 26)),
                         None => "INCOMING TRANSMISSION".into(),
                     };
@@ -4231,7 +4238,11 @@ impl Render for Avatar {
                 + 32.0;
             let min_w = PANEL_MIN_W.max(header_w).min(max_w);
             let mut w = (text_w + PAD_L + PAD_R + 2.0).clamp(min_w, max_w);
-            if mode == PanelMode::Reply
+            if mode == PanelMode::Reply && self.reader.is_some() {
+                // The stub (reader open): only as wide as its header; the reply's width is kept
+                // for when the reader closes.
+                w = min_w;
+            } else if mode == PanelMode::Reply
                 && let Some(b) = &mut self.bubble
             {
                 // A streaming reply takes the full width at once: no growth mid-stream.
@@ -4440,15 +4451,20 @@ impl Render for Avatar {
                     if busy {
                         row = row.child(abort_btn(cx)).child(div().w(px(4.0)));
                     }
+                    let open = self.reader.is_some();
                     if let Some(b) = self.bubble.as_ref().filter(|b| b.long()) {
-                        let open = self.reader.is_some();
                         // A filled chip in her name colour, dark bold type: it reads as a
                         // button on any frame (the outlined 10 px one nearly vanished).
-                        // While the reader is open it closes it.
-                        let label = if open { "◂ CLOSE READER".to_string() } else { format!("▸ READ ({} LINES)", b.read_lines()) };
+                        // While the reader is open the bubble is just this, full width: the
+                        // control for the panel beside her, no empty body.
+                        let label = if open { format!("◂ CLOSE READER · {} LINES", b.read_lines()) } else { format!("▸ READ ({} LINES)", b.read_lines()) };
                         let read_probes = self.buttons.clone();
-                        let (fill_c, ink_c) = if open { (pal.surface, pal.name) } else { (pal.name, pal.surface) };
+                        let (fill_c, ink_c) = (pal.name, pal.surface);
+                        if open {
+                            row = row.left(px(PAD_L));
+                        }
                         let chip = div()
+                            .when(open, |d| d.flex_1().justify_center())
                             .child(canvas(move |b, _, _| read_probes.borrow_mut().push(("read", b)), |_, _, _, _| {}).absolute().top_0().left_0().size_full())
                             .relative()
                             .id("read")
@@ -4477,9 +4493,11 @@ impl Render for Avatar {
                                     this.schedule(cx);
                                 }),
                             ))
-                            .child(div().w(px(4.0)));
+                            .when(!open, |d| d.child(div().w(px(4.0))));
                     }
-                    row = row.child(collapse_btn(cx));
+                    if !open {
+                        row = row.child(collapse_btn(cx));
+                    }
                 }
                 PanelMode::Input { secret } => {
                     let i = self.input.as_ref().expect("input mode has a field");

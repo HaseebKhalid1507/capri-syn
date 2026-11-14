@@ -758,16 +758,39 @@ pub struct Glint {
     pub y: f32,
     pub size: f32,
     pub spin: f32,
+    /// Travel over its life (device px), centred on (x, y).
+    pub drift: (f32, f32),
 }
 
+/// Samples per glint life: ticks land at the centres of `GLINT_STEPS` equal slices, so it
+/// swells over 4 frames and fades over 4 (sin(pi u): 0.20, 0.56, 0.83, 0.98, then back).
+pub const GLINT_STEPS: u32 = 8;
+
 impl Glint {
-    /// (scale 0..1) or None when finished.
-    pub fn scale(&self, now: Instant, life_ms: u64) -> Option<f32> {
-        let u = ms(now.saturating_duration_since(self.t0)) / life_ms as f32;
-        if u >= 1.0 {
-            return None;
+    /// Life fraction 0..1, or None before it starts or once finished.
+    fn u(&self, now: Instant, life_ms: u64) -> Option<f32> {
+        if now < self.t0 {
+            return Some(0.0);
         }
-        Some((PI * u).sin().powf(1.6))
+        let u = ms(now.saturating_duration_since(self.t0)) / life_ms as f32;
+        (u < 1.0).then_some(u)
+    }
+
+    /// (scale 0..1) or None when finished: one eased curve drives size, halo and colour.
+    pub fn scale(&self, now: Instant, life_ms: u64) -> Option<f32> {
+        self.u(now, life_ms).map(|u| (PI * u).sin())
+    }
+
+    /// Where it is now, relative to (x, y): it drifts along its slant.
+    pub fn offset(&self, now: Instant, life_ms: u64) -> (f32, f32) {
+        let u = self.u(now, life_ms).unwrap_or(1.0) - 0.5;
+        (self.drift.0 * u, self.drift.1 * u)
+    }
+
+    /// Its next sample instant after `now` (slice centres), if it isn't done.
+    pub fn next_sample(&self, now: Instant, life_ms: u64) -> Option<Instant> {
+        let step = Duration::from_millis(life_ms) / GLINT_STEPS;
+        (0..GLINT_STEPS).map(|k| self.t0 + step * k + step / 2).find(|&t| t > now)
     }
 }
 
