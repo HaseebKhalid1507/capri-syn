@@ -3086,8 +3086,11 @@ impl Render for Avatar {
             };
             self.glitch_step.set((Some(g.t0), step + 1));
             let base = plan.clone();
-            let lay = |at: Instant, step: u64| {
-                let mut p = base.clone();
+            // Carried or landing, the next frame is the rag's next plan: the pattern goes
+            // underneath on that (its squash and frame), not on this one.
+            let rag_next = rag_shown.as_ref().and_then(|(_, n)| n.clone());
+            let lay_on = |b: &BodyPlan, at: Instant, step: u64| {
+                let mut p = b.clone();
                 p.glitch(fx::GlitchStep {
                     strength: g.strength(at),
                     coverage: g.coverage(at),
@@ -3111,18 +3114,20 @@ impl Render for Avatar {
                 // At the time it was laid underneath last frame (the frame came later or
                 // sooner than planned: a pattern laid at `now` instead would grow the shape
                 // where nothing was painted, a black slab without a compositor).
-                plan = lay(laid_at.unwrap_or(now), step);
+                plan = lay_on(&base, laid_at.unwrap_or(now), step);
             }
             let at = (now + FRAME_FX).max(g.t0);
             self.glitch_at.set(Some(at));
-            next = Some(if g.done(at) { base } else { lay(at, step + 1) });
+            let next_base = rag_next.as_ref().map_or(base, |n| n.plan.clone());
+            next = Some(if g.done(at) { next_base.clone() } else { lay_on(&next_base, at, step + 1) });
         }
         // The rag's next plan (and frame) goes underneath (§4: commit one frame ahead).
         let mut next_img: Option<Arc<RenderImage>> = None;
-        if let Some((_, Some(n))) = &rag_shown
-            && self.glitch.is_none()
-        {
-            next = Some(n.plan.clone());
+        if let Some((_, Some(n))) = &rag_shown {
+            // Under a glitch, `next` is already the pattern laid on this plan.
+            if self.glitch.is_none() {
+                next = Some(n.plan.clone());
+            }
             if n.frame != shown_i {
                 next_img = self.frame_or_default(n.frame).map(|f| f.image.clone());
             }
