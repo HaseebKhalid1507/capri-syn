@@ -1173,7 +1173,7 @@ impl Avatar {
     /// A hop moves the whole window: with a bubble up (a summon's prompt) it would jump
     /// with her, so she squashes in place instead.
     fn hop_or_squash(&mut self, now: Instant) {
-        if self.bubble.is_some() {
+        if self.panel_up() {
             self.squash = Some(now);
         } else {
             self.hop = Some(now);

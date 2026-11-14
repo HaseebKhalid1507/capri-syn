@@ -140,6 +140,8 @@ pub struct Body {
     pub label: Option<String>,
     /// The reply of the current (or last) turn, cleaned for the bubble, plus a notice.
     pub reply: String,
+    /// The reply as written (markdown), for the reader.
+    pub raw: String,
     /// Bumps for every new reply: a new bubble.
     pub turn: u64,
     /// The turn still runs (more text may come).
@@ -929,6 +931,7 @@ impl Link {
             mood,
             label,
             reply,
+            raw: self.raw.trim().to_string(),
             turn: self.turn,
             busy: self.busy,
             echo: self.echo.clone().filter(|_| self.busy),

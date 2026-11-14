@@ -25,6 +25,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use synaps_client::{Client, ClientOptions};
 
 /// Window layout in device pixels (X11 works in these; GPUI gets them / scale factor).
@@ -50,7 +51,12 @@ const MARGIN: f32 = 8.0;
 const TOP_MARGIN: f32 = 6.0;
 const BODY_FONT: f32 = 20.0;
 const LINE_H: f32 = 27.0;
-const LINES_PER_PAGE: usize = 4;
+/// The bubble grows to this many lines (and scrolls with the wheel past them).
+const LINES_PER_PAGE: usize = 8;
+/// A long reply (more lines than the bubble, or code) shows its opening lines and READ.
+const OPENING_LINES: usize = 3;
+/// Replies shorter than this type out; longer ones appear at once.
+const TYPE_MAX_CHARS: usize = 160;
 const PAD_T: f32 = 11.0;
 const PAD_B: f32 = 8.0;
 const PAD_L: f32 = 21.0;
@@ -154,8 +160,10 @@ struct Bubble {
     next_char: Option<Instant>,
     hide_at: Option<Instant>,
     wrap: Option<Wrapped>,
-    /// Page picked with ‹ ›; None follows the newest text.
+    /// The first line shown (the wheel scrolls it); None: from the top.
     page: Option<usize>,
+    /// The reply as written (markdown), for the reader.
+    raw: String,
     collapsed: bool,
     /// A session reply: it collapses to the chip instead of vanishing, and the mood is the
     /// session's business.
@@ -229,26 +237,47 @@ const ESC_AGAIN: Duration = Duration::from_millis(1_000);
 const INPUT_MAX: usize = 4_000;
 
 impl Bubble {
-    /// (current page, page count). Before wrapping: (0, 1).
-    fn pages(&self) -> (usize, usize) {
-        let Some(w) = &self.wrap else { return (0, 1) };
-        let total = w.lines.len().max(1).div_ceil(LINES_PER_PAGE);
-        let cursor = w.lines.iter().rposition(|&(s, _)| s < self.shown.max(1)).unwrap_or(0);
-        let follow = cursor / LINES_PER_PAGE;
-        (self.page.unwrap_or(follow).min(total - 1), total)
+    /// More lines than the bubble holds, or code: the opening lines plus READ.
+    fn long(&self) -> bool {
+        self.wrap.as_ref().is_some_and(|w| w.lines.len() > LINES_PER_PAGE) || self.raw.contains("```") || self.raw.contains("~~~")
     }
 
-    /// The revealed text of the current page, one string per line.
+    /// Lines the bubble shows at once.
+    fn rows(&self) -> usize {
+        let total = self.wrap.as_ref().map_or(1, |w| w.lines.len().max(1));
+        if self.long() { OPENING_LINES.min(total) } else { total.min(LINES_PER_PAGE) }
+    }
+
+    /// (first line shown, line count). Before wrapping: (0, 1).
+    fn pages(&self) -> (usize, usize) {
+        let Some(w) = &self.wrap else { return (0, 1) };
+        let total = w.lines.len().max(1);
+        (self.page.unwrap_or(0).min(total.saturating_sub(self.rows())), total)
+    }
+
+    /// Lines in the reader: the raw reply's.
+    fn read_lines(&self) -> usize {
+        self.raw.lines().count().max(self.wrap.as_ref().map_or(1, |w| w.lines.len()))
+    }
+
+    /// The revealed text in view, one string per line.
     fn page_lines(&self) -> Vec<String> {
         let Some(w) = &self.wrap else { return Vec::new() };
-        let (p, _) = self.pages();
+        let (top, _) = self.pages();
         w.lines
             .iter()
-            .skip(p * LINES_PER_PAGE)
-            .take(LINES_PER_PAGE)
+            .skip(top)
+            .take(self.rows())
             .take_while(|&&(s, _)| s < self.shown)
             .map(|&(s, e)| self.text[s..e.min(self.shown)].iter().collect::<String>().trim_end().to_string())
             .collect()
+    }
+
+    /// Type out short text only; anything longer appears at once.
+    fn reveal_all_if_long(&mut self) {
+        if self.text.len() >= TYPE_MAX_CHARS {
+            self.shown = self.text.len();
+        }
     }
 }
 
@@ -445,6 +474,10 @@ pub struct Avatar {
     _subs: Vec<Subscription>,
     /// Laid-out bubble buttons (window logical px), for the dev `state` (test clicks).
     buttons: Buttons,
+    /// The READER window (a long reply), its X id, and who had the keyboard before it.
+    reader: Option<(WindowHandle<crate::reader::Reader>, u32, Option<u32>)>,
+    /// The wheel's fractional lines over the bubble.
+    wheel: Cell<f32>,
     /// The cat brain (None: SA_NO_BRAIN).
     brain: Option<brainview::BrainHost>,
     /// Carried, flung, landing (None: not ragdolling).
@@ -571,6 +604,8 @@ impl Avatar {
             hint: None,
             _subs: vec![activation],
             buttons: Rc::default(),
+            reader: None,
+            wheel: Cell::new(0.0),
             brain: None,
             rag: None,
             rag_strength: crate::ragdoll::Strength(crate::settings::Settings::load().map_or(0.5, |s| s.ragdoll.strength)),
@@ -854,6 +889,11 @@ impl Avatar {
         }
         cx.notify();
         self.schedule(cx);
+    }
+
+    /// A speech panel is open: the text field, a pending prompt, or a reply.
+    pub(super) fn panel_up(&self) -> bool {
+        self.input.is_some() || self.prompt_ui.as_ref().is_some_and(|p| !p.dismissed) || self.bubble.as_ref().is_some_and(|b| !b.collapsed)
     }
 
     fn spec(&self, m: Mood) -> Option<&MoodSpec> {
@@ -1634,7 +1674,10 @@ impl Avatar {
                     "error: not perched".into()
                 }
             }
-            Command::State => self.state_json(),
+            Command::State => {
+                let reader = self.reader.as_ref().and_then(|(h, xid, _)| h.read_with(cx, |r, _| (*xid, r.scroll_info(), r.buttons())).ok());
+                self.state_json(reader)
+            }
             Command::Hide => {
                 self.hide(now);
                 "bye".into()
@@ -1663,6 +1706,8 @@ impl Avatar {
                 }
             }
             Command::Page(d) => self.page(d, now),
+            Command::Scroll(d) => self.scroll_bubble(d, now),
+            Command::Reader(op) => self.reader_cmd(op, cx),
             Command::Collapse(c) => match &mut self.bubble {
                 Some(b) => {
                     b.collapsed = c;
@@ -1729,14 +1774,17 @@ impl Avatar {
         let text: Vec<char> = text.chars().collect();
         // Reveal in at most ~5 s however long the text is.
         let per_tick = (text.len() / (5_000 / TYPE_TICK.as_millis() as usize)).max(2);
+        let raw: String = text.iter().collect();
+        let long = text.len() >= TYPE_MAX_CHARS;
         self.bubble = Some(Bubble {
+            shown: if long { text.len() } else { 0 },
             text,
-            shown: 0,
             per_tick,
-            next_char: Some(now),
-            hide_at: None,
+            next_char: if long { None } else { Some(now) },
+            hide_at: if long { Some(now + hold_for(raw.len())) } else { None },
             wrap: None,
             page: None,
+            raw,
             collapsed: false,
             stream: false,
             more: false,
@@ -1749,16 +1797,198 @@ impl Avatar {
         }
     }
 
+    /// Scroll the bubble by `d` views (`page next|prev`).
     fn page(&mut self, d: i32, now: Instant) -> String {
+        let rows = self.bubble.as_ref().map_or(1, |b| b.rows()) as i32;
+        self.scroll_bubble(d * rows, now)
+    }
+
+    /// Scroll the bubble by `d` lines (the wheel).
+    fn scroll_bubble(&mut self, d: i32, now: Instant) -> String {
         let Some(b) = &mut self.bubble else { return "error: no bubble".into() };
         let (cur, total) = b.pages();
-        let next = (cur as i32 + d).clamp(0, total as i32 - 1) as usize;
+        let next = (cur as i32 + d).clamp(0, total.saturating_sub(b.rows()) as i32) as usize;
         b.page = Some(next);
         b.collapsed = false;
         if b.next_char.is_none() {
             b.hide_at = Some(now + Duration::from_secs(10));
         }
-        format!("ok {}/{}", next + 1, total)
+        format!("ok line {}/{}", next + 1, total)
+    }
+
+    /// The pack's palette (for panels drawn elsewhere: the reader).
+    fn reader_pal(&self) -> crate::reader::Pal {
+        crate::reader::Pal {
+            frame: self.pack.tone_or("frame", 0x8ef5ed),
+            accent: self.pack.tone_or("accent", 0xc6fcf0),
+            surface: self.pack.tone_or("surface", 0x0b131a),
+            text: self.pack.tone_or("text", 0xf1f7f9),
+            dim: self.pack.tone_or("dim", 0xc4d6df),
+            name: self.pack.tone_or("name", 0xf4ed75),
+            slash: self.pack.tone_or("slash", 0xff3c68),
+        }
+    }
+
+    /// Where the reader goes (device px): beside her, inside her work area, clear of the
+    /// cursor; up to 40 % of the monitor wide and 60 % tall.
+    fn reader_rect(&self, raw: &str) -> (i32, i32, i32, i32) {
+        let l = self.layout;
+        let sf = l.sf;
+        let body = WinRect { id: 0, x: self.applied.0 + l.avatar_x, y: self.applied.1 + l.avatar_y, w: l.geo.width as i32, h: l.geo.height as i32 };
+        let (bcx, bcy) = body.center();
+        let m = self.x11.monitor_at(bcx, bcy);
+        let area = self.her_area().unwrap_or(WinRect { id: 0, x: m.x, y: m.y, w: m.w, h: m.h });
+        let w = ((0.40 * m.w as f32) as i32).max((420.0 * sf) as i32).min(area.w);
+        let est = (crate::reader::estimate_height(&crate::reader::parse(raw), w as f32 / sf) * sf) as i32;
+        let h = est.clamp((180.0 * sf) as i32, (0.60 * m.h as f32) as i32).min(area.h);
+        let gap = (12.0 * sf) as i32;
+        let cursor = self.x11.pointer().ok();
+        let y0 = body.y.clamp(area.y, (area.bottom() - h).max(area.y));
+        let right = (body.right() + gap, y0);
+        let left = (body.x - gap - w, y0);
+        let fits = |p: (i32, i32)| p.0 >= area.x && p.0 + w <= area.right();
+        let clear = |p: (i32, i32)| cursor.is_none_or(|c| !(c.0 >= p.0 && c.0 < p.0 + w && c.1 >= p.1 && c.1 < p.1 + h));
+        let roomier = if area.right() - body.right() >= body.x - area.x { right } else { left };
+        let pick = [right, left].into_iter().filter(|&p| fits(p)).find(|&p| clear(p)).or_else(|| [right, left].into_iter().find(|&p| fits(p))).unwrap_or(roomier);
+        let mut x = pick.0.clamp(area.x, (area.right() - w).max(area.x));
+        let mut y = pick.1;
+        // Still under the cursor (no room on either side): above or below it, whichever fits.
+        if !clear((x, y))
+            && let Some(c) = cursor
+        {
+            let above = c.1 - gap - h;
+            let below = c.1 + gap;
+            if above >= area.y {
+                y = above;
+            } else if below + h <= area.bottom() {
+                y = below;
+            } else {
+                x = if c.0 - area.x > area.right() - c.0 { (c.0 - gap - w).max(area.x) } else { (c.0 + gap).min(area.right() - w) };
+            }
+        }
+        (x, y, w, h)
+    }
+
+    /// Open the reader on the current reply (or bring the open one up to date).
+    fn open_reader(&mut self, take_focus: bool, cx: &mut Context<Self>) -> String {
+        let Some(b) = &self.bubble else { return "error: no reply".into() };
+        let raw = if b.raw.trim().is_empty() { b.text.iter().collect::<String>() } else { b.raw.clone() };
+        if let Some((h, _, _)) = &self.reader {
+            h.update(cx, |r, _, cx| r.set_text(raw, cx)).ok();
+            return "ok (open)".into();
+        }
+        // Tests on the live desktop never take the keyboard (SA_READER_NOFOCUS).
+        let take_focus = take_focus && std::env::var_os("SA_READER_NOFOCUS").is_none();
+        let sf = self.layout.sf;
+        let (x, y, w, h) = self.reader_rect(&raw);
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(Bounds::new(point(px(x as f32 / sf), px(y as f32 / sf)), size(px(w as f32 / sf), px(h as f32 / sf))))),
+            titlebar: Some(TitlebarOptions { title: Some("synaps-avatar reader".into()), ..Default::default() }),
+            focus: take_focus,
+            show: true,
+            kind: WindowKind::PopUp,
+            is_movable: false,
+            is_resizable: false,
+            is_minimizable: false,
+            window_background: WindowBackgroundAppearance::Opaque,
+            app_id: Some("synaps-avatar".into()),
+            ..Default::default()
+        };
+        let ours = self.x11.win;
+        let prev = if take_focus { self.x11.active_window().or_else(|| self.x11.focused_window().ok()).filter(|&w| w > 1 && w != ours) } else { None };
+        let me = cx.entity().downgrade();
+        let (title, font, pal) = (self.name.to_uppercase(), self.font.clone(), self.reader_pal());
+        let xid = Rc::new(Cell::new(0u32));
+        let xid2 = xid.clone();
+        let opened = cx.open_window(options, move |window, cx| {
+            if let Ok(RawWindowHandle::Xcb(h)) = HasWindowHandle::window_handle(&*window).map(|h| h.as_raw()) {
+                xid2.set(h.window.get());
+            } else if let Ok(RawWindowHandle::Xlib(h)) = HasWindowHandle::window_handle(&*window).map(|h| h.as_raw()) {
+                xid2.set(h.window as u32);
+            }
+            let on_close: crate::reader::OnClose = Box::new(move |restore, cx: &mut App| {
+                me.update(cx, |a, cx| a.reader_closed(restore, cx)).ok();
+            });
+            cx.new(|cx| crate::reader::Reader::new(raw, title, font, pal, on_close, window, cx))
+        });
+        match opened {
+            Ok(handle) => {
+                let xid = xid.get();
+                if take_focus && xid != 0 {
+                    self.x11.give_focus(xid).ok();
+                }
+                self.reader = Some((handle, xid, prev));
+                if let Some(b) = &mut self.bubble {
+                    b.hide_at = None;
+                }
+                eprintln!("synaps-avatar: reader open at {x},{y} {w}x{h} (0x{xid:x})");
+                format!("ok reader {x},{y} {w}x{h}")
+            }
+            Err(e) => format!("error: reader: {e:#}"),
+        }
+    }
+
+    /// The reader closed (Esc, ✕, a click elsewhere): `restore` hands the keyboard back.
+    fn reader_closed(&mut self, restore: bool, cx: &mut Context<Self>) {
+        let Some((_, _, prev)) = self.reader.take() else { return };
+        if restore
+            && std::env::var_os("SA_READER_NO_RESTORE").is_none()
+            && let Some(w) = prev
+        {
+            self.x11.give_focus(w).ok();
+        }
+        if let Some(b) = &mut self.bubble
+            && b.next_char.is_none()
+            && !b.more
+        {
+            b.hide_at = Some(Instant::now() + Duration::from_secs(6));
+        }
+        cx.notify();
+        self.schedule(cx);
+    }
+
+    /// Close the reader from here (deferred: it calls back into this view).
+    fn close_reader(&mut self, restore: bool, cx: &mut Context<Self>) {
+        if let Some((h, _, _)) = &self.reader {
+            let h = *h;
+            cx.defer(move |cx| {
+                h.update(cx, |r, window, cx| r.close(restore, window, cx)).ok();
+            });
+        }
+    }
+
+    /// `reader open|close|copy [n]|scroll <px>|state`.
+    fn reader_cmd(&mut self, op: crate::control::ReaderOp, cx: &mut Context<Self>) -> String {
+        use crate::control::ReaderOp;
+        match op {
+            ReaderOp::Open { focus } => self.open_reader(focus, cx),
+            ReaderOp::Close => {
+                self.close_reader(false, cx);
+                "ok".into()
+            }
+            ReaderOp::Copy(n) => match &self.reader {
+                Some((h, _, _)) => h.update(cx, |r, _, cx| r.copy_block(n, cx)).unwrap_or_else(|e| format!("error: {e}")),
+                None => "error: no reader".into(),
+            },
+            ReaderOp::Scroll(dy) => match &self.reader {
+                Some((h, _, _)) => h.update(cx, |r, _, cx| r.scroll_by(dy, cx)).map_or_else(|e| format!("error: {e}"), |_| "ok".into()),
+                None => "error: no reader".into(),
+            },
+        }
+    }
+
+    /// A click on the reply skips the typing.
+    fn skip_typing(&mut self, now: Instant) -> bool {
+        let Some(b) = &mut self.bubble else { return false };
+        if b.shown >= b.text.len() {
+            return false;
+        }
+        b.shown = b.text.len();
+        b.next_char = None;
+        if !b.more {
+            b.hide_at = Some(now + hold_for(b.text.len()));
+        }
+        true
     }
 
     fn hide(&mut self, now: Instant) {
@@ -1820,7 +2050,8 @@ impl Avatar {
         cx.quit();
     }
 
-    fn state_json(&self) -> String {
+    fn state_json(&self, reader: Option<crate::reader::ReaderState>) -> String {
+        let sf = self.layout.sf;
         let frame = self.frame_or_default(self.shown_frame()).map(|f| f.id.clone()).unwrap_or_default();
         let (gx, gy) = self.ground();
         let m = self.x11.monitor_at(gx, gy - 1);
@@ -1847,6 +2078,15 @@ impl Avatar {
                         "w": self.layout.geo.width, "h": self.layout.geo.height },
             "bubble": self.bubble.as_ref().map(|b| b.text.iter().collect::<String>()),
             "page": [page, pages],
+            "read": self.bubble.as_ref().is_some_and(|b| b.long()),
+            "reader": reader.map(|(xid, (scroll, max), buttons)| {
+                let g = self.x11.toplevel_rect(xid).map_or((0, 0, 0, 0), |r| (r.x, r.y, r.w, r.h));
+                let b: serde_json::Map<String, serde_json::Value> = buttons
+                    .into_iter()
+                    .map(|(id, r)| (id, serde_json::json!([g.0 + (r[0] * sf) as i32, g.1 + (r[1] * sf) as i32, (r[2] * sf) as i32, (r[3] * sf) as i32])))
+                    .collect();
+                serde_json::json!({ "xid": xid, "rect": [g.0, g.1, g.2, g.3], "scroll": scroll, "max": max, "buttons": b })
+            }),
             "collapsed": self.bubble.as_ref().is_some_and(|b| b.collapsed),
             "placement": placement,
             "teleporting": self.teleport.is_some(),
@@ -2061,6 +2301,7 @@ impl Avatar {
                 hide_at: None,
                 wrap: None,
                 page: None,
+                raw: String::new(),
                 collapsed: !b.busy,
                 stream: true,
                 more: b.busy,
@@ -2083,6 +2324,8 @@ impl Avatar {
         }
         bb.shown = if new_turn && !b.busy { text.len() } else { bb.shown.min(same) };
         bb.text = text;
+        bb.raw = b.raw.clone();
+        bb.reveal_all_if_long();
         bb.more = b.busy;
         if annoyed && !b.busy {
             // The reason (aborted, error) must be seen.
@@ -2851,8 +3094,6 @@ fn tracked(s: &str, spacing: f32) -> Div {
 
 #[derive(Clone, Copy)]
 enum Chevron {
-    Left,
-    Right,
     Down,
     Up,
 }
@@ -2864,8 +3105,6 @@ fn chevron(dir: Chevron, colour: Rgba) -> impl IntoElement {
         move |b, _, window, _| {
             let (x, y) = (f32::from(b.origin.x), f32::from(b.origin.y));
             let pts: [(f32, f32); 3] = match dir {
-                Chevron::Left => [(6.5, 1.5), (2.5, 5.0), (6.5, 8.5)],
-                Chevron::Right => [(3.5, 1.5), (7.5, 5.0), (3.5, 8.5)],
                 Chevron::Down => [(1.5, 3.0), (5.0, 7.0), (8.5, 3.0)],
                 Chevron::Up => [(1.5, 7.0), (5.0, 3.0), (8.5, 7.0)],
             };
@@ -3057,7 +3296,7 @@ impl Render for Avatar {
         let (mut base_top, head_x) = base.map_or((0, l.geo.width as i32 / 2), |f| (f.top.min(frame.map_or(f.top, |c| c.top)), f.head_x));
         // While a bubble is up its height holds (per resting frame): a one-shot raising a hand
         // made it jump ~10 px and back.
-        if self.bubble.is_some() {
+        if self.panel_up() {
             match self.hud_top.get() {
                 Some((b, t)) if b == self.anim.base() => base_top = t,
                 _ => self.hud_top.set(Some((self.anim.base(), base_top))),
@@ -3626,8 +3865,8 @@ impl Render for Avatar {
             }
             // Fit the page: the lines it will hold once typed out (so it doesn't grow while
             // streaming), never an empty band above the footer.
-            let rows = match pages {
-                Some((cur, n)) if n > 1 => total_lines.saturating_sub(cur * LINES_PER_PAGE).clamp(1, LINES_PER_PAGE),
+            let rows = match (mode, &self.bubble) {
+                (PanelMode::Reply, Some(b)) => b.rows().max(1),
                 _ => total_lines.clamp(1, LINES_PER_PAGE),
             };
             let footer = !probe;
@@ -3810,36 +4049,23 @@ impl Render for Avatar {
             let mut row = div().absolute().bottom(px(PAD_B)).right(px(PAD_R - 4.0)).h(px(FOOTER_H)).flex().items_center().gap(px(4.0));
             match mode {
                 PanelMode::Reply => {
-                    let (cur, total) = pages.unwrap_or((0, 1));
+                    let _ = pages;
                     if busy {
                         row = row.child(abort_btn(cx)).child(div().w(px(4.0)));
                     }
-                    if total > 1 {
+                    if let Some(b) = self.bubble.as_ref().filter(|b| b.long()) {
+                        let label = format!("▸ READ ({} LINES)", b.read_lines());
+                        let open = self.reader.is_some();
                         row = row
-                            .child(btn("prev", Chevron::Left, cur > 0).on_mouse_down(
+                            .child(tbtn("read", &label, pal.name, !open).on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(|this, _: &MouseDownEvent, _, cx| {
                                     cx.stop_propagation();
-                                    this.page(-1, Instant::now());
-                                    cx.notify();
-                                    this.schedule(cx);
-                                }),
-                            ))
-                            .child(
-                                div()
-                                    .min_w(px(40.0))
-                                    .flex()
-                                    .justify_center()
-                                    .text_size(px(10.0))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(rgb(pal.text))
-                                    .child(format!("{} / {}", cur + 1, total)),
-                            )
-                            .child(btn("next", Chevron::Right, cur + 1 < total).on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                                    cx.stop_propagation();
-                                    this.page(1, Instant::now());
+                                    if this.reader.is_some() {
+                                        this.close_reader(true, cx);
+                                    } else {
+                                        this.open_reader(true, cx);
+                                    }
                                     cx.notify();
                                     this.schedule(cx);
                                 }),
@@ -3919,6 +4145,30 @@ impl Render for Avatar {
             }
             if footer {
                 panel = panel.child(row);
+            }
+            if mode == PanelMode::Reply {
+                panel = panel
+                    .on_scroll(cx.listener(|this, ev: &ScrollEvent, _, cx| {
+                        let dy = f32::from(ev.delta.pixel_delta(px(LINE_H)).y);
+                        let acc = this.wheel.get() - dy / LINE_H;
+                        let n = acc.trunc() as i32;
+                        this.wheel.set(acc - n as f32);
+                        if n != 0 {
+                            this.scroll_bubble(n, Instant::now());
+                            cx.notify();
+                            this.schedule(cx);
+                        }
+                    }))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            if this.skip_typing(Instant::now()) {
+                                cx.notify();
+                                this.schedule(cx);
+                            }
+                        }),
+                    );
             }
             if matches!(mode, PanelMode::Input { .. } | PanelMode::Probe) {
                 panel = panel

@@ -9,6 +9,16 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+/// `reader …`: the long-reply panel.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ReaderOp {
+    Open { focus: bool },
+    Close,
+    /// None: the whole reply; Some(n): code block n.
+    Copy(Option<usize>),
+    Scroll(f32),
+}
+
 #[derive(Debug, Clone)]
 pub enum Command {
     Mood(Mood),
@@ -36,6 +46,10 @@ pub enum Command {
     Glitch,
     /// Bubble paging: +1 / -1.
     Page(i32),
+    /// Scroll the bubble by n lines (the wheel's path).
+    Scroll(i32),
+    /// The reader panel.
+    Reader(ReaderOp),
     /// Music mode (headphones, notes, head-bob to the pack's BPM).
     Music(bool),
     /// Collapse the bubble to the status tag (true) or expand it again.
@@ -303,6 +317,16 @@ impl Command {
                 Command::Perch { sit, win }
             }
             "drag" => Command::Drag(parse_drag(rest)?),
+            "scroll" => Command::Scroll(rest.trim().parse().map_err(|_| anyhow::anyhow!("usage: scroll <lines>"))?),
+            "reader" => Command::Reader(match rest.split_whitespace().collect::<Vec<_>>().as_slice() {
+                ["open"] => ReaderOp::Open { focus: false },
+                ["open", "focus"] => ReaderOp::Open { focus: true },
+                ["close"] => ReaderOp::Close,
+                ["copy"] => ReaderOp::Copy(None),
+                ["copy", n] => ReaderOp::Copy(Some(n.parse().map_err(|_| anyhow::anyhow!("usage: reader copy [n]"))?)),
+                ["scroll", d] => ReaderOp::Scroll(d.parse().map_err(|_| anyhow::anyhow!("usage: reader scroll <px>"))?),
+                _ => bail!("usage: reader open [focus]|close|copy [n]|scroll <px>"),
+            }),
             "page" => match rest {
                 "next" | "+" => Command::Page(1),
                 "prev" | "-" => Command::Page(-1),
@@ -342,7 +366,7 @@ impl Command {
             "hide" => Command::Hide,
             "quit" => Command::Quit,
             _ => bail!(
-                "unknown command `{line}` (mood <name> | clip <id> | say <text> | pos <x> <y> [now] | perch [sit|stand] [win] | perch off | drop | stack | page next|prev | collapse | expand | music on|off | glitch | submit <text> | abort | prompt confirm|secret [text] | brain … | settings reload | tap head|body | state | hide | quit)"
+                "unknown command `{line}` (mood <name> | clip <id> | say <text> | pos <x> <y> [now] | perch [sit|stand] [win] | perch off | drop | stack | page next|prev | scroll <n> | reader open [focus]|close|copy [n]|scroll <px> | collapse | expand | music on|off | glitch | submit <text> | abort | prompt confirm|secret [text] | brain … | settings reload | tap head|body | state | hide | quit)"
             ),
         })
     }

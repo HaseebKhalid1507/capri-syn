@@ -15,6 +15,7 @@ mod places;
 mod moves;
 mod platform;
 mod ragdoll;
+mod reader;
 mod session;
 mod settings;
 mod shape;
