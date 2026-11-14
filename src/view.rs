@@ -4916,7 +4916,24 @@ impl Render for Avatar {
                 PanelMode::Prompt => {
                     let u = self.prompt_ui.as_ref().expect("prompt mode has a prompt");
                     let armed = now >= u.shown_at + PROMPT_ARM;
-                    if u.view.secret {
+                    let (secret, risky) = (u.view.secret, crate::line::risky(&u.view));
+                    // DENY first. A risky one (a tool activation, a tool that runs or changes
+                    // things) has no one-click ALLOW here: REVIEW opens the Line, where it
+                    // takes Shift+A or a held A.
+                    if !secret {
+                        row = row.child(tbtn("deny", "DENY", pal.slash, armed).on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                cx.stop_propagation();
+                                if this.prompt_ui.as_ref().is_some_and(|u| Instant::now() >= u.shown_at + PROMPT_ARM) {
+                                    this.answer(None);
+                                    cx.notify();
+                                    this.schedule(cx);
+                                }
+                            }),
+                        ));
+                    }
+                    if secret {
                         row = row.child(tbtn("answer", "ANSWER", pal.frame, armed).on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, _: &MouseDownEvent, window, cx| {
@@ -4925,6 +4942,16 @@ impl Render for Avatar {
                                 if Instant::now() >= u.shown_at + PROMPT_ARM {
                                     let id = u.view.id;
                                     this.open_input(Some(id), window, cx);
+                                }
+                            }),
+                        ));
+                    } else if risky {
+                        row = row.child(tbtn("review", "REVIEW ▸", pal.frame, armed).on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                cx.stop_propagation();
+                                if this.session.is_some() {
+                                    this.open_line(cx);
                                 }
                             }),
                         ));
@@ -4941,8 +4968,8 @@ impl Render for Avatar {
                             }),
                         ));
                     }
-                    row = row
-                        .child(tbtn("deny", "DENY", pal.slash, armed).on_mouse_down(
+                    if secret {
+                        row = row.child(tbtn("deny", "DENY", pal.slash, armed).on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, _: &MouseDownEvent, _, cx| {
                                 cx.stop_propagation();
@@ -4952,9 +4979,9 @@ impl Render for Avatar {
                                     this.schedule(cx);
                                 }
                             }),
-                        ))
-                        .child(div().w(px(4.0)))
-                        .child(collapse_btn(cx));
+                        ));
+                    }
+                    row = row.child(div().w(px(4.0))).child(collapse_btn(cx));
                 }
                 PanelMode::Probe => {}
             }

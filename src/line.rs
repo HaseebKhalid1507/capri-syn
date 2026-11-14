@@ -130,6 +130,9 @@ pub struct Line {
     open: std::collections::HashSet<(usize, usize)>,
     /// A held A on a risky prompt: when it went down (the allow fires at HOLD).
     hold_at: Option<Instant>,
+    /// A is down (from a press on a prompt): its key repeats never reach the field, even
+    /// after the prompt it allowed has gone.
+    a_down: bool,
     /// Which side of the Line she stands on (-1 left, 1 right, 0 not beside it).
     side: i8,
     on_ask: OnAsk,
@@ -199,7 +202,11 @@ impl Line {
         window: &mut Window,
         cx: &mut Context<Line>,
     ) -> Line {
-        let placeholder = format!("talk to {name}…");
+        let mut title = name.to_lowercase();
+        if let Some(c) = title.get(..1) {
+            title = c.to_uppercase() + &title[1..];
+        }
+        let placeholder = format!("talk to {title}…");
         // The caret in her accent (1 px wide in the kit: the colour has to carry it).
         gpui_kit::component::Theme::global_mut(cx).colors.caret = rgb(pal.frame).into();
         let input = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 6).submit_on_enter(true).placeholder(placeholder).default_value(draft));
@@ -283,6 +290,7 @@ impl Line {
             renders: Default::default(),
             open: Default::default(),
             hold_at: None,
+            a_down: false,
             side: 0,
             on_ask,
             _subs: subs,
@@ -506,6 +514,9 @@ impl Line {
         if k.key != "escape" {
             self.esc_at = None;
         }
+        if k.key == "a" && self.a_down {
+            return true;
+        }
         match (k.key.as_str(), self.mode) {
             ("escape", Mode::Text) if self.snap.busy => {
                 if self.esc_at.is_some_and(|t| now < t + ESC_AGAIN) {
@@ -595,6 +606,7 @@ impl Line {
                 true
             }
             ("a", Mode::Prompt) if !ctrl && !m.alt && self.secret.is_none() => {
+                self.a_down = true;
                 let Some((id, risky)) = self.prompt().map(|p| (p.id, risky(p))) else { return true };
                 if now < self.prompt_at + ARM {
                     return true;
@@ -649,6 +661,9 @@ impl Line {
 
     /// A let go before HOLD on a risky prompt: nothing allowed, and he is told how.
     fn key_up(&mut self, k: &Keystroke, cx: &mut Context<Line>) {
+        if k.key == "a" {
+            self.a_down = false;
+        }
         if k.key == "a"
             && let Some(t0) = self.hold_at.take()
         {
