@@ -35,6 +35,7 @@ mod moves;
 mod platform;
 mod ragdoll;
 mod reader;
+mod line;
 mod chip;
 mod mpris;
 mod session;
@@ -425,6 +426,15 @@ fn run(t_start: Instant) -> Result<()> {
                 tx.send_blocking((control::Command::Watch(ev), r)).ok();
             })
             .map_err(|e| elog!("synaps-avatar: x11 watcher: {e:#}"))
+            .ok();
+            // A click outside the Line parks it (an override-redirect window keeps the
+            // keyboard when he clicks back into the window i3 already thinks is focused).
+            let tx = tx2.clone();
+            x11.watch_clicks(move |x, y| {
+                let (r, _) = std::sync::mpsc::channel();
+                tx.send_blocking((control::Command::Watch(platform::x11::WatchEvent::Click(x, y)), r)).ok();
+            })
+            .map_err(|e| elog!("synaps-avatar: click watcher (XInput2): {e:#}; a click elsewhere won't park the Line"))
             .ok();
             // Real LISTENING: media players on the session bus (signals only). Tests see only
             // their own fake player (SA_MPRIS_ONLY), never his.

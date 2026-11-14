@@ -55,6 +55,8 @@ pub enum WatchEvent {
     TargetGone(u32),
     /// The target window is mapped again (a workspace flicked back).
     TargetBack(u32),
+    /// A click anywhere, at root (x, y), while the Line holds the keyboard.
+    Click(i32, i32),
 }
 
 pub struct X11 {
@@ -81,6 +83,9 @@ pub struct X11 {
     /// While she's carried or flying: both caches stay as snapshotted at the grab (no round
     /// trip inside a 60 Hz tick).
     frozen: AtomicBool,
+    /// The Line holds the keyboard: clicks elsewhere are reported (`watch_clicks`).
+    clicks: Arc<AtomicBool>,
+    click_conn: Mutex<Option<(Arc<RustConnection>, u32)>>,
     /// The pointer polled on its own connection while she's held by the real mouse:
     /// (x << 32 | y as u32, or u64::MAX before the first read; stop flag).
     poll: Mutex<Option<(Arc<std::sync::atomic::AtomicU64>, Arc<AtomicBool>)>>,
@@ -166,6 +171,8 @@ impl X11 {
             areas: Mutex::new(None),
             mons: Mutex::new(None),
             frozen: AtomicBool::new(false),
+            clicks: Arc::new(AtomicBool::new(false)),
+            click_conn: Mutex::new(None),
             poll: Mutex::new(None),
             shape_sends: std::sync::atomic::AtomicU64::new(0),
             shape_rects: std::sync::atomic::AtomicU64::new(0),
@@ -267,6 +274,14 @@ impl X11 {
     pub fn raise(&self) -> Result<()> {
         self.conn
             .configure_window(self.win, &xproto::ConfigureWindowAux::new().stack_mode(xproto::StackMode::ABOVE))?;
+        self.conn.flush()?;
+        Ok(())
+    }
+
+    /// Place and size one of our own windows (the Line).
+    pub fn configure(&self, w: u32, x: i32, y: i32, width: i32, height: i32) -> Result<()> {
+        let aux = xproto::ConfigureWindowAux::new().x(x).y(y).width(width.max(1) as u32).height(height.max(1) as u32);
+        self.conn.configure_window(w, &aux)?;
         self.conn.flush()?;
         Ok(())
     }
@@ -662,6 +677,48 @@ impl X11 {
         if spawned.is_ok() {
             *g = Some((pos, stop));
         }
+    }
+
+    /// Clicks anywhere (XInput2 raw button presses on the root: every client may listen,
+    /// nothing is grabbed or taken), at the pointer, while armed (`arm_clicks`): only then
+    /// are they selected, so a closed Line costs nothing per click. One thread on its own
+    /// connection, asleep in the X read.
+    pub fn watch_clicks(&self, on_click: impl Fn(i32, i32) + Send + 'static) -> Result<()> {
+        use x11rb::protocol::xinput::ConnectionExt as _;
+        let (c, screen) = x11rb::connect(None)?;
+        let root = c.setup().roots[screen].root;
+        c.xinput_xi_query_version(2, 2)?.reply()?;
+        let c = Arc::new(c);
+        let armed = self.clicks.clone();
+        let (c2, armed2) = (c.clone(), armed.clone());
+        std::thread::Builder::new().name("avatar-clicks".into()).spawn(move || {
+            while let Ok(ev) = c2.wait_for_event() {
+                if let x11rb::protocol::Event::XinputRawButtonPress(_) = ev
+                    && armed2.load(Ordering::Relaxed)
+                    && let Ok(Ok(r)) = c2.query_pointer(root).map(|k| k.reply())
+                {
+                    on_click(r.root_x as i32, r.root_y as i32);
+                }
+            }
+        })?;
+        if let Ok(mut g) = self.click_conn.lock() {
+            *g = Some((c, root));
+        }
+        Ok(())
+    }
+
+    /// Report clicks (the Line holds the keyboard) or not.
+    pub fn arm_clicks(&self, on: bool) {
+        use x11rb::protocol::xinput::{self, ConnectionExt as _};
+        if self.clicks.swap(on, Ordering::Relaxed) == on {
+            return;
+        }
+        let Ok(g) = self.click_conn.lock() else { return };
+        let Some((c, root)) = g.as_ref() else { return };
+        let mask = if on { vec![xinput::XIEventMask::RAW_BUTTON_PRESS] } else { vec![xinput::XIEventMask::from(0u32)] };
+        let m = xinput::EventMask { deviceid: xinput::Device::ALL_MASTER.into(), mask };
+        c.xinput_xi_select_events(*root, &[m]).ok();
+        c.flush().ok();
     }
 
     /// The polled pointer while polling (and read once), else a QueryPointer.

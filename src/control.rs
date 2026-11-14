@@ -68,6 +68,12 @@ pub enum Command {
     Submit(String),
     /// Abort the running turn.
     Abort,
+    /// The summon key went down (true) or up: open the Line (tap), voice later (hold).
+    Talk(bool),
+    /// Close the Line (as Esc).
+    LineClose,
+    /// Copy her last reply as written.
+    Copy,
     /// Dev: show a prompt panel (confirm or secret) that answers nowhere.
     FakePrompt { secret: bool, text: String },
     /// Dev: close that panel, as if answered.
@@ -359,6 +365,16 @@ impl Command {
             },
             "submit" if !rest.is_empty() => Command::Submit(rest.to_owned()),
             "abort" => Command::Abort,
+            "talk" => match rest {
+                "press" | "" => Command::Talk(true),
+                "release" => Command::Talk(false),
+                _ => bail!("usage: talk press|release"),
+            },
+            "line" => match rest {
+                "close" => Command::LineClose,
+                _ => bail!("usage: line close"),
+            },
+            "copy" => Command::Copy,
             "prompt" => {
                 let (kind, text) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
                 let text = if text.trim().is_empty() { "Allow the bash tool to run `ls ~`?".to_string() } else { text.trim().to_string() };

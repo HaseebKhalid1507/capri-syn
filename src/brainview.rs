@@ -466,6 +466,9 @@ impl Avatar {
         if self.input.is_some() {
             v.push("field");
         }
+        if self.line.is_some() {
+            v.push("line");
+        }
         if self.prompt_ui.as_ref().is_some_and(|p| !p.dismissed) {
             v.push("prompt");
         }
@@ -1528,9 +1531,7 @@ impl Avatar {
             }
             h.fs = FsHide::Hiding;
             self.menu = None;
-            if let Some(b) = &mut self.bubble {
-                b.collapsed = true;
-            }
+            self.fold_reply();
             self.glitch = Some(Glitch::new(GlitchKind::Vanish, now, self.rng.next()));
         } else {
             if h.fs == FsHide::Shown {
