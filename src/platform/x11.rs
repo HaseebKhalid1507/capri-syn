@@ -29,6 +29,9 @@ pub struct Monitor {
 }
 
 impl Monitor {
+    pub fn rect(&self) -> WinRect {
+        WinRect::new(self.x, self.y, self.w, self.h)
+    }
     pub fn contains(&self, x: i32, y: i32) -> bool {
         x >= self.x && y >= self.y && x < self.x + self.w && y < self.y + self.h
     }
@@ -39,15 +42,8 @@ impl Monitor {
     }
 }
 
-/// A top-level window's outer rect in root px.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct WinRect {
-    pub id: u32,
-    pub x: i32,
-    pub y: i32,
-    pub w: i32,
-    pub h: i32,
-}
+pub use crate::edges::WinRect;
+use crate::edges::{self, Strut};
 
 /// What the watcher thread reports.
 #[derive(Clone, Copy, Debug)]
@@ -72,7 +68,20 @@ pub struct X11 {
     /// Effect windows (teleport bolt layers), created on first use: (window, mapped).
     /// Effect layers: (window, mapped, background colour).
     fx: Mutex<Vec<(u32, bool, u32)>>,
+    /// Work areas as last computed, and when (they cost a stack walk: cached briefly).
+    areas: Mutex<Option<(std::time::Instant, Vec<Monitor>)>>,
 }
+
+/// One viewable root child, as `stack()` sees it.
+#[derive(Clone, Debug)]
+struct Child {
+    rect: WinRect,
+    override_redirect: bool,
+    i3_frame: bool,
+}
+
+/// How long `work_areas()` reuses its last answer.
+const AREAS_TTL: std::time::Duration = std::time::Duration::from_secs(3);
 
 #[derive(Clone, Copy)]
 struct Atoms {
@@ -81,6 +90,10 @@ struct Atoms {
     gtk_frame_extents: u32,
     compton_shadow: u32,
     active_window: u32,
+    strut_partial: u32,
+    strut: u32,
+    wm_type: u32,
+    wm_type_dock: u32,
 }
 
 fn intern(conn: &RustConnection, name: &str) -> Result<u32> {
@@ -112,6 +125,10 @@ impl X11 {
             gtk_frame_extents: intern(&conn, "_GTK_FRAME_EXTENTS")?,
             compton_shadow: intern(&conn, "_COMPTON_SHADOW")?,
             active_window: intern(&conn, "_NET_ACTIVE_WINDOW")?,
+            strut_partial: intern(&conn, "_NET_WM_STRUT_PARTIAL")?,
+            strut: intern(&conn, "_NET_WM_STRUT")?,
+            wm_type: intern(&conn, "_NET_WM_WINDOW_TYPE")?,
+            wm_type_dock: intern(&conn, "_NET_WM_WINDOW_TYPE_DOCK")?,
         };
         let composited = conn.get_selection_owner(atoms.cm)?.reply()?.owner != x11rb::NONE;
         Ok(X11 {
@@ -124,6 +141,7 @@ impl X11 {
             atoms,
             target: Arc::new(AtomicU32::new(0)),
             fx: Mutex::new(Vec::new()),
+            areas: Mutex::new(None),
         })
     }
 
@@ -253,8 +271,9 @@ impl X11 {
         Some(WinRect { id: w, x: g.x as i32, y: g.y as i32, w: g.width as i32 + 2 * b, h: g.height as i32 + 2 * b })
     }
 
-    /// Viewable top-level windows, bottom to top, except ours and tiny ones.
-    pub fn toplevels(&self) -> Vec<WinRect> {
+    /// Viewable root children, bottom → top, except ours, our effect layers and InputOnly
+    /// windows. Small and override-redirect ones stay (they occlude).
+    fn children(&self) -> Vec<Child> {
         let Ok(Ok(tree)) = self.conn.query_tree(self.root).map(|c| c.reply()) else { return Vec::new() };
         let fx: Vec<u32> = self.fx.lock().map(|v| v.iter().map(|f| f.0).collect()).unwrap_or_default();
         let cookies: Vec<_> = tree
@@ -263,17 +282,130 @@ impl X11 {
             .filter(|&&w| w != self.win && !fx.contains(&w))
             .filter_map(|&w| Some((w, self.conn.get_window_attributes(w).ok()?, self.conn.get_geometry(w).ok()?)))
             .collect();
-        cookies
+        let viewable: Vec<(WinRect, bool)> = cookies
             .into_iter()
             .filter_map(|(w, a, g)| {
                 let (a, g) = (a.reply().ok()?, g.reply().ok()?);
-                if a.map_state != xproto::MapState::VIEWABLE || g.width < 120 || g.height < 60 {
+                if a.map_state != xproto::MapState::VIEWABLE || a.class == xproto::WindowClass::INPUT_ONLY {
                     return None;
                 }
                 let b = g.border_width as i32;
-                Some(WinRect { id: w, x: g.x as i32, y: g.y as i32, w: g.width as i32 + 2 * b, h: g.height as i32 + 2 * b })
+                Some((WinRect { id: w, x: g.x as i32, y: g.y as i32, w: g.width as i32 + 2 * b, h: g.height as i32 + 2 * b }, a.override_redirect))
+            })
+            .collect();
+        // i3 frames are override-redirect too: tell them from popups by class.
+        let class: Vec<_> = viewable
+            .iter()
+            .map(|(r, or)| {
+                (*or && r.w >= 120 && r.h >= 60)
+                    .then(|| self.conn.get_property(false, r.id, self.atoms.wm_class, xproto::AtomEnum::STRING, 0, 64).ok())
+                    .flatten()
+            })
+            .collect();
+        viewable
+            .into_iter()
+            .zip(class)
+            .map(|((rect, or), c)| {
+                let i3_frame = c.and_then(|c| c.reply().ok()).is_some_and(|r| r.value.windows(8).any(|s| s == b"i3-frame"));
+                Child { rect, override_redirect: or, i3_frame }
             })
             .collect()
+    }
+
+    /// Every viewable root child, bottom → top (see `children`), and whether it is a
+    /// window she may sit on: at least 120×60 and managed (an override-redirect popup or
+    /// menu only occludes; i3's own frames count as managed).
+    pub fn stack(&self) -> Vec<(WinRect, bool)> {
+        self.children()
+            .into_iter()
+            .map(|c| {
+                let big = c.rect.w >= 120 && c.rect.h >= 60;
+                (c.rect, big && (!c.override_redirect || c.i3_frame))
+            })
+            .collect()
+    }
+
+    /// Each monitor minus the docks' struts (`_NET_WM_STRUT_PARTIAL`, `_NET_WM_STRUT`, or a
+    /// `_NET_WM_WINDOW_TYPE_DOCK` window's own geometry). i3 sets no `_NET_WORKAREA`, and its
+    /// docks sit inside i3 frames, so the frames' children are read too. Cached for 3 s;
+    /// on any failure, the monitors.
+    pub fn work_areas(&self) -> Vec<Monitor> {
+        if let Ok(c) = self.areas.lock()
+            && let Some((t, a)) = c.as_ref()
+            && t.elapsed() < AREAS_TTL
+        {
+            return a.clone();
+        }
+        let mons = self.monitors();
+        let rects: Vec<WinRect> = mons.iter().map(Monitor::rect).collect();
+        let root = (self.screen_w as i32, self.screen_h as i32);
+        let struts = self.struts(&rects, root);
+        let areas: Vec<Monitor> = edges::work_areas(&rects, root, &struts)
+            .into_iter()
+            .zip(&mons)
+            .map(|(a, m)| Monitor { primary: m.primary, x: a.x, y: a.y, w: a.w, h: a.h })
+            .collect();
+        if let Ok(mut c) = self.areas.lock() {
+            *c = Some((std::time::Instant::now(), areas.clone()));
+        }
+        areas
+    }
+
+    /// The work area containing (x, y), else the nearest one.
+    pub fn area_at(&self, x: i32, y: i32) -> Monitor {
+        let ms = self.work_areas();
+        ms.iter()
+            .find(|m| m.contains(x, y))
+            .cloned()
+            .unwrap_or_else(|| ms.iter().min_by_key(|m| m.distance2(x, y)).cloned().expect("a monitor"))
+    }
+
+    pub fn primary_area(&self) -> Monitor {
+        let ms = self.work_areas();
+        ms.iter().find(|m| m.primary).cloned().unwrap_or_else(|| ms[0].clone())
+    }
+
+    /// Struts of the docks: thin viewable windows hugging a monitor edge, and their
+    /// children (a reparenting WM puts the dock client inside a frame).
+    fn struts(&self, mons: &[WinRect], root: (i32, i32)) -> Vec<Strut> {
+        let hugs = |r: &WinRect| {
+            mons.iter().any(|m| {
+                m.intersect(r).is_some()
+                    && ((r.h <= 160 && (r.y <= m.y + 2 || r.bottom() >= m.bottom() - 2))
+                        || (r.w <= 160 && (r.x <= m.x + 2 || r.right() >= m.right() - 2)))
+            })
+        };
+        let docks: Vec<WinRect> = self.children().into_iter().map(|c| c.rect).filter(|r| hugs(r)).collect();
+        let mut wins: Vec<(u32, WinRect)> = docks.iter().map(|r| (r.id, *r)).collect();
+        let kids: Vec<_> = docks.iter().filter_map(|r| Some((*r, self.conn.query_tree(r.id).ok()?))).collect();
+        for (r, k) in kids {
+            if let Ok(t) = k.reply() {
+                wins.extend(t.children.into_iter().map(|c| (c, r)));
+            }
+        }
+        let a = self.atoms;
+        let cookies: Vec<_> = wins
+            .iter()
+            .map(|&(w, r)| {
+                let get = |atom: u32, ty: xproto::AtomEnum, n: u32| self.conn.get_property(false, w, atom, ty, 0, n).ok();
+                (r, get(a.strut_partial, xproto::AtomEnum::CARDINAL, 12), get(a.strut, xproto::AtomEnum::CARDINAL, 4), get(a.wm_type, xproto::AtomEnum::ATOM, 8))
+            })
+            .collect();
+        let mut out = Vec::new();
+        for (r, p, s, t) in cookies {
+            let vals = |c: Option<x11rb::cookie::Cookie<'_, Arc<RustConnection>, xproto::GetPropertyReply>>| {
+                c.and_then(|c| c.reply().ok()).and_then(|r| r.value32().map(|v| v.collect::<Vec<u32>>())).unwrap_or_default()
+            };
+            let (p, s, t) = (vals(p), vals(s), vals(t));
+            if let Some(st) = Strut::partial(&p).or_else(|| Strut::plain(&s, root)) {
+                out.push(st);
+            } else if t.contains(&a.wm_type_dock)
+                && let Some(st) = Strut::from_dock(&r, mons, root)
+            {
+                out.push(st);
+            }
+        }
+        out
     }
 
     /// Follow `w` (0 = nothing) in the watcher thread.
@@ -417,11 +549,6 @@ impl X11 {
             });
         }
         out
-    }
-
-    pub fn primary(&self) -> Monitor {
-        let ms = self.monitors();
-        ms.iter().find(|m| m.primary).cloned().unwrap_or_else(|| ms[0].clone())
     }
 
     /// The monitor containing (x, y), else the nearest one.

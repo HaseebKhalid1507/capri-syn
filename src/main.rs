@@ -5,6 +5,7 @@
 
 mod anim;
 mod control;
+mod edges;
 mod frames;
 mod fx;
 mod pack;
@@ -70,7 +71,7 @@ Session (one Synaps daemon session drives the body):
 Dev control: newline commands on $XDG_RUNTIME_DIR/synaps-avatar.sock
   mood <idle|thinking|working|talking|needs_you|done|annoyed|sleepy|away>
   clip <clip, action or frame id>   say <text>   page next|prev   collapse   expand
-  pos <x> <y> [now]   perch [sit|stand] [window id]   perch off
+  pos <x> <y> [now]   perch [sit|stand] [window id]   perch off   drop
   music on|off   glitch   state   hide   quit
   submit <text>   abort   prompt confirm|secret [text]   (session / dev)";
 
@@ -299,7 +300,7 @@ fn run(t_start: Instant) -> Result<()> {
         let display_w = cx.primary_display().map(|d| f32::from(d.bounds().size.width)).unwrap_or(0.0);
         let sf = if display_w > 0.0 { x11.screen_w as f32 / display_w } else { 1.0 };
         let layout = view::Layout::new(&pack, sf, args.height);
-        let origin = state::load()
+        let origin = state::load_ground()
             .map(|(gx, gy)| view::Avatar::clamp(&x11, &layout, (gx - layout.ground_x, gy - layout.ground_y)))
             .unwrap_or_else(|| view::Avatar::default_origin(&x11, &layout));
 
