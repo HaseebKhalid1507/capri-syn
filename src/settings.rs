@@ -127,9 +127,11 @@ pub struct Settings {
 /// `[voice]`: push-to-talk (hold the talk key) and spoken replies, through the `capri-voice`
 /// sidecar. Off by default. `stt_model`: "small.en" (default) | "base.en" | "medium.en";
 /// `voice`: a Kokoro voice or a voice string (see docs/VOICE.md: blends, timbre|prosody,
-/// @semitones, +clean, +glitch); the default is Haseeb's pick; `speed`: 0.5..2 (1.32 with the
-/// default voice); `flow`: "emphasis" (default: a `*word*` in her reply is stressed), "pauses",
-/// "full" or "off"; `duck`: what other audio does while she listens or speaks: "pause" (MPRIS
+/// @semitones, +clean, +glitch); the default is Haseeb's pick; `speed`: 0.5..2 (1/0.77 with the
+/// default voice); `pace`: how the speed is made: "stretch" (default: Kokoro at its own speed,
+/// the time scaled in the pitch pass, which keeps its pitch shape) or "model" (Kokoro's speed);
+/// `flow`: "emphasis" (default: a `*word*` in her reply is stressed), "pauses", "full" or "off";
+/// `duck`: what other audio does while she listens or speaks: "pause" (MPRIS
 /// pause, then play), "duck" (lowered through PipeWire) or "off".
 #[derive(Clone, Debug, PartialEq)]
 pub struct VoiceSettings {
@@ -137,6 +139,7 @@ pub struct VoiceSettings {
     pub stt_model: String,
     pub voice: String,
     pub speed: f32,
+    pub pace: String,
     pub flow: String,
     pub duck: String,
     /// The talk key's letter (`$mod+c` in i3): a release while it is still down is an X
@@ -145,13 +148,15 @@ pub struct VoiceSettings {
 }
 
 /// Her voice (Haseeb's picks, LOCKED 13 + 14): W3, the bright blend (timbre af_heart/af_bella/
-/// af_jessica; prosody af_heart/af_jessica pushed away from af_sarah), pitched to a ~270 Hz
-/// median, cleaned; spoken at speed 1.32 with flow "emphasis".
-pub const VOICE: &str = "af_heart:0.5,af_bella:0.3,af_jessica:0.2|af_heart:0.84,af_jessica:0.56,af_sarah:-0.4@+4.50+clean";
+/// af_jessica; prosody af_heart/af_jessica pushed away from af_sarah), pitched to a ~272 Hz
+/// median, cleaned; at speed 1/0.77 by pace "stretch", with flow "emphasis" (his r24 "ALT").
+pub const VOICE: &str = "af_heart:0.5,af_bella:0.3,af_jessica:0.2|af_heart:0.84,af_jessica:0.56,af_sarah:-0.4@+4.93+clean";
+/// His pick: `rubberband -t 0.77`, as a speed.
+pub const SPEED: f32 = 1.2987;
 
 impl Default for VoiceSettings {
     fn default() -> Self {
-        VoiceSettings { enabled: false, stt_model: "small.en".into(), voice: VOICE.into(), speed: 1.32, flow: "emphasis".into(), duck: "pause".into(), key: 'c' }
+        VoiceSettings { enabled: false, stt_model: "small.en".into(), voice: VOICE.into(), speed: SPEED, pace: "stretch".into(), flow: "emphasis".into(), duck: "pause".into(), key: 'c' }
     }
 }
 
@@ -162,6 +167,7 @@ struct VoiceRaw {
     stt_model: Option<String>,
     voice: Option<String>,
     speed: Option<f64>,
+    pace: Option<String>,
     flow: Option<String>,
     duck: Option<String>,
     key: Option<String>,
@@ -472,6 +478,10 @@ impl Settings {
                 anyhow::ensure!(s.is_finite() && (0.5..=2.0).contains(&s), "voice.speed must be 0.5..2");
                 voice.speed = s as f32;
             }
+            if let Some(p) = v.pace.map(|p| p.trim().to_ascii_lowercase()) {
+                anyhow::ensure!(["stretch", "model"].contains(&p.as_str()), "voice.pace must be \"stretch\" or \"model\"");
+                voice.pace = p;
+            }
             if let Some(f) = v.flow.map(|f| f.trim().to_ascii_lowercase()) {
                 anyhow::ensure!(["emphasis", "pauses", "full", "off"].contains(&f.as_str()), "voice.flow must be \"emphasis\", \"pauses\", \"full\" or \"off\"");
                 voice.flow = f;
@@ -657,7 +667,10 @@ mod tests {
         assert!(Settings::parse("[voice]\nduck = \"loud\"\n").is_err());
         assert!(Settings::parse("[voice]\nspeed = 3\n").is_err());
         let v = Settings::parse("").unwrap().voice;
-        assert_eq!((v.flow.as_str(), v.speed, v.voice.as_str()), ("emphasis", 1.32, VOICE));
+        assert_eq!((v.flow.as_str(), v.pace.as_str(), v.speed, v.voice.as_str()), ("emphasis", "stretch", SPEED, VOICE));
+        assert!((1.0 / SPEED - 0.77).abs() < 1e-4, "his pick: rubberband -t 0.77");
+        assert_eq!(Settings::parse("[voice]\npace = \"model\"\n").unwrap().voice.pace, "model");
+        assert!(Settings::parse("[voice]\npace = \"warp\"\n").is_err());
         assert_eq!(Settings::parse("[voice]\nflow = \"Off\"\n").unwrap().voice.flow, "off");
         assert!(Settings::parse("[voice]\nflow = \"loud\"\n").is_err());
         assert!(Settings::parse("[mirror]\nflip = true\n").is_err());

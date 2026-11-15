@@ -128,7 +128,7 @@ impl Avatar {
     /// The sidecar gets the `[voice]` settings (on connect, and again when settings reload).
     pub(super) fn voice_config(&mut self) {
         let c = &self.voice.cfg;
-        let cfg = serde_json::json!({ "op": "config", "stt_model": c.stt_model, "voice": c.voice, "speed": c.speed, "flow": c.flow });
+        let cfg = serde_json::json!({ "op": "config", "stt_model": c.stt_model, "voice": c.voice, "speed": c.speed, "pace": c.pace, "flow": c.flow });
         self.voice_send(cfg);
     }
 

@@ -5,7 +5,7 @@ The avatar connects to a unix socket ($XDG_RUNTIME_DIR/capri-voice.sock) and tal
 newline-delimited JSON:
 
   avatar -> here                       here -> avatar
-  {"op":"config", stt_model, voice, speed, flow}
+  {"op":"config", stt_model, voice, speed, flow, pace}
   {"op":"listen-start"}                {"ev":"mic-open"}  {"ev":"level","v":0..1} (5 Hz)
   {"op":"listen-stop"}                 {"ev":"mic-closed"} {"ev":"heard","text":..., "why":..., "ms":{...}}
   {"op":"listen-cancel"}               {"ev":"mic-closed"}
@@ -24,7 +24,7 @@ to record from / play to (default: the default ones); CAPRI_VOICE_PLAYERS limits
 these MPRIS players (comma list); CAPRI_VOICE_DUCK_MATCH limits ducking to streams whose
 application name contains it.
 
-Other modes: --render TEXT --out F.wav [--voice V --speed S --flow F] (a sample; never the mic),
+Other modes: --render TEXT --out F.wav [--voice V --speed S --flow F --pace P] (a sample; never the mic),
 --selftest (no audio device; with the models, the graph patch and the flow rules).
 """
 import json, os, re, select, shutil, signal, socket, subprocess, sys, threading, time, zlib
@@ -88,12 +88,15 @@ class Stt:
 #   @SEMITONES: a formant-keeping pitch shift (rubberband; without it, done inside the model).
 #   +clean: EQ, de-esser and a gentle compressor. +glitch: the machine trace on the attack.
 # W3 (Haseeb's pick, LOCKED 13): bright and energetic, pitched to a ~240 Hz median at speed 1.
-# VOICE (LOCKED 14, the default): W3 + 2 st (~270 Hz median) at SPEED 1.32 (his "+2 st, 23 %
-# faster", built in the engine) with flow "emphasis". At speed 1.32 Kokoro's own F0 plan sits
-# ~0.4 st higher, so the shift is +4.50, not +4.93.
+# VOICE (LOCKED 14, the default): W3 + 2 st (~272 Hz median), flow "emphasis", at SPEED 1/0.77
+# with PACE "stretch": Kokoro speaks at its own speed 1 and the time goes x0.77 in the same
+# rubberband pass as the pitch shift, so the sentence keeps Kokoro's speed-1 pitch shape. His
+# blind pick (r24 "ALT") over PACE "model" (Kokoro's speed 1.32): that one dropped the floor
+# ~1.4 st and the sentence ends ~2 st deeper (and with it, use @+4.50: its pitch plan is higher).
 W3 = 'af_heart:0.5,af_bella:0.3,af_jessica:0.2|af_heart:0.84,af_jessica:0.56,af_sarah:-0.4@+2.93+clean'
-VOICE = 'af_heart:0.5,af_bella:0.3,af_jessica:0.2|af_heart:0.84,af_jessica:0.56,af_sarah:-0.4@+4.50+clean'
-SPEED, FLOW = 1.32, 'emphasis'
+VOICE = 'af_heart:0.5,af_bella:0.3,af_jessica:0.2|af_heart:0.84,af_jessica:0.56,af_sarah:-0.4@+4.93+clean'
+SPEED, FLOW, PACE = 1.2987, 'emphasis', 'stretch'
+PACES = ('stretch', 'model')
 VOICE_RE = re.compile(r'^(?P<t>[a-z]{2}_[a-z]+(?::-?[\d.]+)?(?:,[a-z]{2}_[a-z]+(?::-?[\d.]+)?)*)'
                       r'(?:\|(?P<p>[a-z]{2}_[a-z]+(?::-?[\d.]+)?(?:,[a-z]{2}_[a-z]+(?::-?[\d.]+)?)*))?'
                       r'(?:@(?P<st>[+-]?\d+(?:\.\d+)?))?(?P<fx>(?:\+(?:clean|glitch))*)$')
@@ -146,9 +149,14 @@ class Tts:
             self._styles = {key: np.asarray(st, np.float32)}
         return self._styles[key]
 
-    def __call__(self, text, voice=VOICE, speed=SPEED, flow=FLOW, gap_before=0.0):
-        """One sentence -> PCM at TTS_RATE. `text` may carry the speech markup (*word*, —, …)."""
+    def __call__(self, text, voice=VOICE, speed=SPEED, flow=FLOW, gap_before=0.0, pace=PACE):
+        """One sentence -> PCM at TTS_RATE. `text` may carry the speech markup (*word*, —, …).
+        `pace`: "stretch" (Kokoro at speed 1, the time scaled by 1/speed in the rubberband pass)
+        or "model" (Kokoro's own speed); without rubberband it is always "model"."""
         v = parse_voice(voice)
+        tempo = 1.0
+        if pace == 'stretch' and self.rubberband and abs(speed - 1.0) > 1e-3:
+            tempo, speed = 1.0 / speed, 1.0
         said = text
         for a, b in SAY_FIX:
             said = re.sub(a, b, said)
@@ -164,8 +172,8 @@ class Tts:
             a, sr = self.flow(said, st, speed, {**(preset or {}), 'heard_shift': shift}, lang, in_model)
         if sr != TTS_RATE:
             a = np.interp(np.linspace(0, len(a) - 1, int(len(a) * TTS_RATE / sr)), np.arange(len(a)), a).astype(np.float32)
-        if shift and self.rubberband:
-            a = pitch_shift(a, shift, self.rubberband)
+        if (shift or tempo != 1.0) and self.rubberband:
+            a = pitch_shift(a, shift, self.rubberband, tempo)
         if v['clean']:
             a = clean_fx(a)
         if v['glitch']:
@@ -191,18 +199,22 @@ def register(text, continuing):
     return (-0.6 if continuing else 0.4) + (0.5 if text.rstrip().endswith('?') else 0.0)
 
 
-def pitch_shift(a, semis, exe):
-    """Formant-keeping pitch shift through the rubberband CLI (R3 engine, offline; RAM files)."""
-    if abs(semis) < 1e-3 or len(a) < 256:
+def pitch_shift(a, semis, exe, tempo=1.0):
+    """Formant-keeping pitch shift through the rubberband CLI (R3 engine, offline; RAM files);
+    `tempo` < 1 also makes it faster in the same pass (the output is then shorter)."""
+    if (abs(semis) < 1e-3 and tempo == 1.0) or len(a) < 256:
         return a
     import tempfile
     with tempfile.TemporaryDirectory(dir='/dev/shm' if os.path.isdir('/dev/shm') else None) as td:
         write_wav(f'{td}/i.wav', a)
-        r = subprocess.run([exe, '-q', '-p', f'{semis:.3f}', '-F', '-3', f'{td}/i.wav', f'{td}/o.wav'], capture_output=True)
+        cmd = [exe, '-q', '-p', f'{semis:.3f}'] + (['-t', f'{tempo:.4f}'] if tempo != 1.0 else []) + ['-F', '-3', f'{td}/i.wav', f'{td}/o.wav']
+        r = subprocess.run(cmd, capture_output=True)
         if r.returncode:
             log('rubberband failed:', r.stderr.decode(errors='replace')[-200:])
             return a
         y = read_wav(f'{td}/o.wav')
+    if tempo != 1.0:
+        return y
     return np.concatenate([y, np.zeros(max(0, len(a) - len(y)), np.float32)])[:len(a)]
 
 
@@ -284,6 +296,7 @@ PAUSES = {  # seconds of silence (as heard), drawn per mark from a generator see
     'comma_s': (0.06, 0.13), 'comma': (0.13, 0.27), 'semi': (0.23, 0.35), 'dash': (0.20, 0.33),
     'ellip': (0.45, 0.70), 'stop': (0.32, 0.54), 'q': (0.40, 0.62)}
 SENT_GAP = 0.44   # s heard between two sentences of a reply at speed 1 (W3's renders: 0.39-0.46)
+REPLY_GAP = 0.66  # s heard between two replies in a --render sample, at speed 1
 GAPS = {'.': (0.32, 0.54), '!': (0.30, 0.44), '?': (0.40, 0.62), '…': (0.45, 0.70), ';': (0.23, 0.35), '': (0.30, 0.45)}
 EMPHASIS = {'stretch': 1.25, 'onset_c': 1, 'emph_st': 4.0, 'rin_ms': 80, 'rout_ms': 120, 'emph_n': 1.6, 'pfc_st': 1.0, 'pfc_n': 0.6}
 FLOW_PRESETS = {
@@ -764,7 +777,7 @@ class Voice:
     def __init__(self):
         self.lock = threading.Lock()
         self.conn = None
-        self.cfg = {'stt_model': os.environ.get('CAPRI_VOICE_STT', 'small.en'), 'voice': VOICE, 'speed': SPEED, 'flow': FLOW}
+        self.cfg = {'stt_model': os.environ.get('CAPRI_VOICE_STT', 'small.en'), 'voice': VOICE, 'speed': SPEED, 'flow': FLOW, 'pace': PACE}
         self.last_said = (None, '', 0.0)  # (id, text, tail silence s) of the last sentence: the gap before the next
         self.stt = Stt(self.cfg['stt_model'])
         self.tts = Tts()
@@ -920,7 +933,7 @@ class Voice:
             try:
                 prev_id, prev_text, prev_tail = self.last_said
                 gap = max(0.0, sentence_gap(prev_text, self.cfg['flow'], float(self.cfg['speed'])) - prev_tail) if prev_id == sid else 0.0
-                pcm = self.tts(text, self.cfg['voice'], float(self.cfg['speed']), self.cfg['flow'], gap)
+                pcm = self.tts(text, self.cfg['voice'], float(self.cfg['speed']), self.cfg['flow'], gap, self.cfg['pace'])
                 self.last_said = (sid, text, edge_silence(pcm)[1])
             except Exception as e:
                 log('tts failed:', e)
@@ -968,7 +981,7 @@ class Voice:
     def handle(self, msg):
         op = msg.get('op')
         if op == 'config':
-            for k in ('voice', 'speed', 'flow'):
+            for k in ('voice', 'speed', 'flow', 'pace'):
                 if k in msg:
                     self.cfg[k] = msg[k]
             try:
@@ -978,6 +991,8 @@ class Voice:
                 self.cfg['voice'] = VOICE
             if self.cfg['flow'] not in FLOW_PRESETS:
                 self.cfg['flow'] = FLOW
+            if self.cfg['pace'] not in PACES:
+                self.cfg['pace'] = PACE
             if msg.get('stt_model') and msg['stt_model'] != self.stt.name:
                 self.cfg['stt_model'] = msg['stt_model']
                 self.stt = Stt(msg['stt_model'])
@@ -1082,7 +1097,8 @@ def selftest():
     present, that the patched graph with neutral inputs speaks exactly like the stock one."""
     v = parse_voice(W3)
     assert v['p'] and abs(v['shift'] - 2.93) < 1e-9 and v['clean'] and not v['glitch'], v
-    assert parse_voice(VOICE)['shift'] == 4.5 and parse_voice(VOICE)['t'] == v['t'] and parse_voice(VOICE)['p'] == v['p']
+    assert parse_voice(VOICE)['shift'] == 4.93 and parse_voice(VOICE)['t'] == v['t'] and parse_voice(VOICE)['p'] == v['p']
+    assert PACE in PACES and abs(1 / SPEED - 0.77) < 1e-4, 'the default is his pick: rubberband -t 0.77'
     assert parse_voice('af_heart') == {'t': 'af_heart', 'p': None, 'shift': 0.0, 'clean': False, 'glitch': False}
     assert parse_voice('af_bella:0.6,af_nicole:0.4+glitch')['glitch']
     assert parse_voice('af_bella|bf_lily@-1.5')['shift'] == -1.5
@@ -1132,39 +1148,53 @@ def selftest():
     assert abs(lens[1.30] / lens[1.38] - 1.38 / 1.30) < 0.03 and 1.15 < lens[1.0] / lens[1.30] < 1.35, lens   # (every token keeps >= 1 frame)
     # same text, same audio
     E = {**FLOW_PRESETS[FLOW], 'heard_shift': parse_voice(VOICE)['shift']}
-    a1 = f('Spike pushed the reader fix *eleven* minutes ago.', st, SPEED, E, 'en-us')[0]
-    assert np.array_equal(a1, f('Spike pushed the reader fix *eleven* minutes ago.', st, SPEED, E, 'en-us')[0])
+    SP = 1.0 if PACE == 'stretch' else SPEED                    # Kokoro's own speed under the default pace
+    a1 = f('Spike pushed the reader fix *eleven* minutes ago.', st, SP, E, 'en-us')[0]
+    assert np.array_equal(a1, f('Spike pushed the reader fix *eleven* minutes ago.', st, SP, E, 'en-us')[0])
     # the stressed word: a local, capped bump; never past 400 Hz as heard; none on a first word
     w = f.last['words'][0]
     assert 0.5 <= f.last['bumps'][0] <= E['emph_st'] and w['peak_hz'] * 2 ** ((f.last['bumps'][0] + E['heard_shift']) / 12) <= 400.5, f.last
-    f('*Bold* move, choom.', st, SPEED, E, 'en-us')
+    f('*Bold* move, choom.', st, SP, E, 'en-us')
     assert f.last['bumps'] == [0.0], f.last
     # a yes/no question keeps its rise over the stressed word; a wh-question is left alone
-    f('Wait, you want me to delete the *whole* branch?', st, SPEED, E, 'en-us')
+    f('Wait, you want me to delete the *whole* branch?', st, SP, E, 'en-us')
     assert f.last.get('lift', 0) > 0 and f.last['bumps'][0] <= 2.0, f.last
-    f('So why did you delete the *whole* branch?', st, SPEED, E, 'en-us')
+    f('So why did you delete the *whole* branch?', st, SP, E, 'en-us')
     assert 'lift' not in f.last, f.last
-    print('selftest: flow ok (neutral patch == stock, stress spans exact, speed linear, local stress, question rise)')
+    # pace: "stretch" scales the time by 1/speed in the pitch pass, "model" runs Kokoro faster
+    if tts.rubberband:
+        n1 = len(tts('Need your okay on something.', VOICE, 1.0, FLOW))
+        ns = len(tts('Need your okay on something.', VOICE, SPEED, FLOW, pace='stretch'))
+        nm = len(tts('Need your okay on something.', VOICE, SPEED, FLOW, pace='model'))
+        assert abs(n1 / ns - SPEED) < 0.02 and nm < n1 * 0.9, (n1, ns, nm)
+    print('selftest: flow ok (neutral patch == stock, stress spans exact, speed linear, local stress, question rise, pace)')
 
 
 def main():
     args = sys.argv[1:]
     if args[:1] == ['--render']:
-        # --render TEXT --out F.wav [--voice V] [--speed S] [--flow emphasis|pauses|full|off]
-        # A sample (her TTS, never the mic). Sentences are split by " || ", as the avatar sends them.
+        # --render TEXT --out F.wav [--voice V] [--speed S] [--flow emphasis|pauses|full|off] [--pace stretch|model]
+        # A sample (her TTS, never the mic). Sentences are split by " || ", as the avatar sends them;
+        # " ||| " starts a new reply (REPLY_GAP heard, at speed 1).
         text = args[1]
         opt = dict(zip(args[2::2], args[3::2]))
         tts = Tts(opt.get('--model', 'kokoro-v1.0.int8.onnx'))
-        voice, flow, speed = opt.get('--voice', VOICE), opt.get('--flow', FLOW), float(opt.get('--speed', SPEED))
+        voice, flow, speed, pace = opt.get('--voice', VOICE), opt.get('--flow', FLOW), float(opt.get('--speed', SPEED)), opt.get('--pace', PACE)
         parts, prev = [], ''
-        for i, sent in enumerate(text.split(' || ')):
-            t = now_ms()
-            gap = max(0.0, sentence_gap(prev, flow, speed) - edge_silence(parts[-1])[1]) if i else 0.0
-            parts.append(tts(sent, voice, speed, flow, gap))
-            log(f'render: {now_ms() - t:.0f} ms for {len(parts[-1]) / TTS_RATE:.2f} s: {strip_markup(sent)!r}')
-            prev = sent
-        gap = np.zeros(int(0.45 * TTS_RATE) if not FLOW_PRESETS.get(flow) else 0, np.float32)
-        out = np.concatenate([x for p in parts for x in (p, gap)][:-1] if len(gap) else parts)
+        for r, reply in enumerate(text.split(' ||| ')):
+            for i, sent in enumerate(reply.split(' || ')):
+                t = now_ms()
+                gap = max(0.0, sentence_gap(prev, flow, speed) - edge_silence(parts[-1])[1]) if i else 0.0
+                a = tts(sent, voice, speed, flow, gap, pace)
+                log(f'render: {now_ms() - t:.0f} ms for {len(a) / TTS_RATE:.2f} s: {strip_markup(sent)!r}')
+                if r and not i:
+                    g = max(0.0, REPLY_GAP / speed - edge_silence(parts[-1])[1] - edge_silence(a)[0])
+                    parts.append(np.zeros(int(g * TTS_RATE), np.float32))
+                elif parts and not FLOW_PRESETS.get(flow):
+                    parts.append(np.zeros(int(0.45 * TTS_RATE), np.float32))
+                parts.append(a)
+                prev = sent
+        out = np.concatenate(parts)
         write_wav(opt['--out'], out)
         print(opt['--out'], f'{len(out) / TTS_RATE:.1f} s')
         return
