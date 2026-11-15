@@ -10,6 +10,9 @@ use crate::fx::{Bolt, Glitch, GlitchKind};
 use crate::pack::Step;
 use std::time::{Duration, Instant};
 
+/// How far along a window top she shifts to lie down on it (logical px).
+const LIE_SLIDE: f32 = 260.0;
+
 /// Which arrival sequence a teleport lands with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ArriveKind {
@@ -173,6 +176,7 @@ impl Avatar {
             }
             (true, Some(t0)) if !self.arrive.deep && self.nap_deep_after().is_some_and(|d| now >= t0 + d) => {
                 self.arrive.deep = true;
+                self.slide_to_lie();
                 self.relayer(now);
                 true
             }
@@ -180,21 +184,53 @@ impl Avatar {
         }
     }
 
-    /// Asleep on a window top: the seat-registered lying frame, if the window's top is long
-    /// enough for it (else she sleeps sitting).
+    /// The lying frame on a window top: its index and its x extent relative to the seat.
+    fn lying_span(&self) -> Option<(usize, i32, i32)> {
+        let i = *self.pack.index.get(self.pack.behaviour.brain.nap_perch.as_ref()?)?;
+        let f = self.fr(i)?;
+        let cols: Vec<i32> = (0..f.mask.w as i32).filter(|&x| (0..f.mask.h as i32).any(|y| f.mask.get(x, y))).collect();
+        let (x0, x1) = (*cols.first()?, *cols.last()?);
+        // The seat is at origin + ground_x (perch_origin).
+        let (l, g) = (self.layout.avatar_x, self.layout.ground_x);
+        Some((i, l + x0 - g, l + x1 - g))
+    }
+
+    /// Asleep on a window top: the seat-registered lying frame, if it lies on the exposed
+    /// top (else she sleeps sitting).
     pub(super) fn perch_sleep_frame(&self, m: crate::anim::Mood) -> Option<usize> {
         let sleepy = self.arrive.deep || m == crate::anim::Mood::Sleepy;
         if !sleepy || !self.sitting() {
             return None;
         }
-        let i = *self.pack.index.get(self.pack.behaviour.brain.nap_perch.as_ref()?)?;
-        let Placement::Perch { win, .. } = self.placement else { return None };
+        let (i, a, b) = self.lying_span()?;
+        let Placement::Perch { win, dx, .. } = self.placement else { return None };
         let r = self.x11.toplevel_rect(win)?;
-        let f = self.fr(i)?;
-        let cols: Vec<i32> = (0..f.mask.w as i32).filter(|&x| (0..f.mask.h as i32).any(|y| f.mask.get(x, y))).collect();
-        let (x0, x1) = (*cols.first()?, *cols.last()?);
-        let left = self.origin.0 + self.layout.avatar_x;
-        (r.x <= left + x0 && left + x1 < r.x + r.w).then_some(i)
+        let x = r.x + dx;
+        let (spans, _) = self.exposed_seats(&r, true);
+        spans.iter().any(|&(lo, hi)| lo <= x + a && x + b < hi).then_some(i)
+    }
+
+    /// Falling asleep on a window top where the lying frame doesn't fit: along the top (the
+    /// soft glitch covers it), by at most `LIE_SLIDE`, if the exposed stretch is long enough.
+    fn slide_to_lie(&mut self) {
+        if !self.sitting() || self.perch_sleep_frame(crate::anim::Mood::Sleepy).is_some() {
+            return;
+        }
+        let Some((_, a, b)) = self.lying_span() else { return };
+        let Placement::Perch { win, sit, dx } = self.placement else { return };
+        let Some(r) = self.x11.toplevel_rect(win) else { return };
+        let x = r.x + dx;
+        let (spans, _) = self.exposed_seats(&r, sit);
+        let fits: Vec<(i32, i32)> = spans.iter().filter(|(lo, hi)| hi - lo > b - a).map(|&(lo, hi)| (lo - a, hi - 1 - b)).collect();
+        let Some(nx) = super::nearest_in(&fits, x) else { return };
+        if (nx - x).abs() > (LIE_SLIDE * self.layout.sf) as i32 {
+            return;
+        }
+        let o = self.perch_origin(&r, sit, nx - r.x);
+        if self.perch_fits(&r, o, sit) {
+            self.placement = Placement::Perch { win, sit, dx: nx - r.x };
+            self.set_origin(o);
+        }
     }
 
     /// The nap's frame on the floor: on her side once it's deep.
