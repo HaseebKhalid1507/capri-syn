@@ -15,11 +15,48 @@ for speech. Setup: `tools/capri-voice-setup`, then `tools/systemd/capri-voice.se
 | `speed` | `1.2987` | 0.5 to 2; 1.2987 = 1/0.77 goes with the default voice |
 | `pace` | `"stretch"` | how the speed is made: `"stretch"` (Kokoro at its own speed, the time scaled in the pitch pass) or `"model"` (Kokoro's speed) |
 | `flow` | `"emphasis"` | `"emphasis"`, `"pauses"`, `"full"` or `"off"` (below) |
-| `duck` | `"pause"` | other audio while she listens or speaks: `"pause"` (MPRIS), `"duck"` (PipeWire) or `"off"` |
+| `duck` | `"duck"` | other audio while she listens or speaks: `"duck"` (−18 dB, put back exactly), `"pause"` (MPRIS) or `"off"` |
 | `speak_unprompted` | `true` | her replies to what arrives on its own are spoken too (below) |
 | `key` | `'c'` | the talk key's letter (`$mod+c` in i3) |
 
 `avatarctl settings reload` re-sends changed voice settings to a connected sidecar.
+
+## Other audio while he talks or she speaks (`duck`)
+
+- `"duck"` (default): every eligible stream (browser video, music, games) goes down **−18 dB** (each
+  channel's raw volume ×0.5; Pulse volume is cubic) while his mic is open and while she answers him, then
+  comes back to **exactly** its old per-channel level, 800 ms after her last word.
+  - Never ducked: her own streams, module/virtual streams (e.g. a combine-sink's loopback), calls
+    (`media.role` phone/communication, the `[music] ignore` apps), notification sounds. While another app
+    captures a real mic (a call with no role), nothing is ducked at all.
+  - A stream that starts (or unpauses) mid-duck is ducked too. A stream whose volume he changed mid-duck
+    keeps his change. A stream is only put back if it is the same stream (`object.serial`).
+  - WirePlumber remembers a stream's last volume per app: a stream that ends while ducked would come
+    back ducked next time. Its old level is kept for 10 minutes, and a stream of that app that shows up
+    at exactly the ducked level gets it back.
+  - A crash mid-duck is repaired at the sidecar's next start (the levels are saved to
+    `~/.local/state/capri-voice/media.json`, written atomically).
+- `"pause"`: MPRIS players are paused, then played again (only the ones she paused).
+- Her replies to events never duck or pause anything.
+
+## What counts as speech
+
+- Before Whisper runs, Silero VAD (v5, 2.3 MB, `tools/capri-voice-setup` fetches it, SHA-256 checked)
+  must find at least **6 speech frames (192 ms)** in the clip, peaking at p ≥ 0.70. Otherwise nothing is
+  transcribed or sent, and her tag says DIDN'T CATCH THAT. The clip is trimmed to 400 ms before the first
+  speech frame and 200 ms after the last. Without the file, the old energy gate stands in (`stats` says
+  `vad: "energy"`).
+- A transcript is dropped (same quiet hint) when it is junk Whisper writes from near-silence:
+  - no letters (`-2,`, `,`, `2.`). Note: a bare number he says, written by Whisper as `2.`, is dropped too;
+  - two letters or fewer, unless one of `no ok hi go yo ya ye up on me do it` (`nd,` and `Q.` drop);
+  - a single word with no vowel (`, chr,`, `hmm`);
+  - `you`, `thanks for watching`, `please subscribe`; `thank you` and `bye` from under 400 ms of speech;
+  - three or more words that are all from the recognition prompt (Capri, spike, lynx, …).
+- A drop is logged by length and milliseconds of speech, never the words or the audio.
+- Whisper's window: the utterance + 1 s, but at least 10 s under 1.5 s of speech (a lone "yes" in a
+  2.5 s window decodes into loops like "yes, yes, yes" and took 2–7 s); no temperature retries; a token
+  cap; a run of 4+ of the same word is kept once.
+- Limits: whispering is not heard (the speech detector scores it below the gate).
 
 ## Which replies are spoken
 

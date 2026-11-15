@@ -5,7 +5,7 @@ The avatar connects to a unix socket ($XDG_RUNTIME_DIR/capri-voice.sock) and tal
 newline-delimited JSON:
 
   avatar -> here                       here -> avatar
-  {"op":"config", stt_model, voice, speed, flow, pace}
+  {"op":"config", stt_model, voice, speed, flow, pace, duck_ignore}
   {"op":"listen-start"}                {"ev":"mic-open"}  {"ev":"level","v":0..1} (5 Hz)
   {"op":"listen-stop"}                 {"ev":"mic-closed"} {"ev":"heard","text":..., "why":..., "ms":{...}}
   {"op":"listen-cancel"}               {"ev":"mic-closed"}
@@ -72,13 +72,138 @@ class Stt:
         self.m = Model(path, n_threads=THREADS, print_progress=False, print_realtime=False, redirect_whispercpp_logs_to=None)
         log(f'stt {name} loaded in {now_ms() - t:.0f} ms ({os.path.basename(path)}, {THREADS} threads, CPU)')
 
-    def __call__(self, pcm):
-        # The encoder window cut to the utterance (+1 s), not Whisper's fixed 30 s.
-        ctx = min(1500, int(np.ceil((len(pcm) / MIC_RATE + 1.0) * 50 / 64) * 64))
-        segs = self.m.transcribe(pcm, initial_prompt=VOCAB, no_context=True, single_segment=True, audio_ctx=ctx, temperature=0.0)
+    def __call__(self, pcm, speech_ms=None):
+        # The encoder window cut to the utterance (+1 s), not Whisper's fixed 30 s. But a short word
+        # in a window under ~3 s decodes into loops ("yes, yes, yes", "stomp, stomp") and slow
+        # temperature retries (5-7 s): under 1.5 s of speech the window is 512 (10 s).
+        dur = len(pcm) / MIC_RATE
+        ctx = min(1500, int(np.ceil((dur + 1.0) * 50 / 64) * 64))
+        if speech_ms is not None and speech_ms < 1500:
+            ctx = max(ctx, 512)
+        segs = self.m.transcribe(pcm, initial_prompt=VOCAB, no_context=True, single_segment=True, audio_ctx=ctx, temperature=0.0,
+                                 temperature_inc=0.0, max_tokens=int(16 + 12 * dur))
         text = ' '.join(s.text for s in segs).strip()
         text = re.sub(r'\[[^\]]*\]|\([^)]*\)', '', text).strip()
-        return text
+        return unloop(text)
+
+
+# ---- what counts as speech: Silero VAD, and the junk Whisper writes from near-silence ---------
+
+VAD_FILE = 'silero_vad.onnx'   # Silero VAD v5.1.2 (MIT), 2.3 MB
+VAD_SHA = '2623a2953f6ff3d2c1e61740c6cdb7168133479b267dfef114a4a3cc5bdd788f'
+VAD_FRAME, VAD_CTX = 512, 64   # 32 ms at 16 kHz, plus the 64 samples before it (v5 needs them)
+SPEECH_P, PEAK_P = 0.50, 0.70  # a speech frame; the clip's peak must reach PEAK_P
+MIN_FRAMES = {'hold': 6, 'toggle': 6, 'hands-free': 8, 'wake': 8}   # 192 ms / 256 ms of speech
+LEAD_S, TAIL_S = 0.40, 0.20    # what is kept around the speech for Whisper
+
+
+class Vad:
+    """Silero VAD v5 on onnxruntime (CPU, one thread): a speech probability per 32 ms frame."""
+
+    def __init__(self, path):
+        import onnxruntime as ort
+        so = ort.SessionOptions()
+        so.intra_op_num_threads = so.inter_op_num_threads = 1
+        self.s = ort.InferenceSession(path, so, providers=['CPUExecutionProvider'])
+        self.sr = np.array(MIC_RATE, np.int64)
+        self.reset()
+
+    @staticmethod
+    def load():
+        path = f'{MODELS}/{VAD_FILE}'
+        if not os.path.exists(path):
+            log(f'vad: no {VAD_FILE}: the energy gate (run tools/capri-voice-setup)')
+            return None
+        import hashlib
+        if hashlib.sha256(open(path, 'rb').read()).hexdigest() != VAD_SHA:
+            log(f'vad: {VAD_FILE} is not the expected file: the energy gate')
+            return None
+        try:
+            v = Vad(path)
+            v(np.zeros(VAD_FRAME, np.float32))   # a wrong input name fails here, not mid-capture
+            v.reset()
+            return v
+        except Exception as e:
+            log(f'vad: {VAD_FILE} did not load ({e}): the energy gate')
+            return None
+
+    def reset(self):
+        self.state = np.zeros((2, 1, 128), np.float32)
+        self.ctx = np.zeros(VAD_CTX, np.float32)
+
+    def __call__(self, frame):
+        x = np.concatenate([self.ctx, frame])[None, :].astype(np.float32)
+        out, self.state = self.s.run(None, {'input': x, 'state': self.state, 'sr': self.sr})
+        self.ctx = frame[-VAD_CTX:]
+        return float(out[0, 0])
+
+    def probs(self, pcm):
+        self.reset()
+        return [self(pcm[i:i + VAD_FRAME]) for i in range(0, len(pcm) - VAD_FRAME + 1, VAD_FRAME)]
+
+
+class VadStream:
+    """The capture's s16 bytes as they come, into frame probabilities (frame k = samples k*512..)."""
+
+    def __init__(self, vad):
+        self.vad, self.buf, self.p = vad, b'', []
+        vad.reset()
+
+    def feed(self, chunk):
+        self.buf += chunk
+        n = len(self.buf) // (2 * VAD_FRAME) * 2 * VAD_FRAME
+        if n:
+            x = np.frombuffer(self.buf[:n], np.int16).astype(np.float32) / 32768.0
+            self.buf = self.buf[n:]
+            for i in range(0, len(x), VAD_FRAME):
+                self.p.append(self.vad(x[i:i + VAD_FRAME]))
+
+
+def speech_span(probs, mode='hold'):
+    """(first, last, frames) of the speech in a clip, or None if it is not speech enough."""
+    sp = [i for i, x in enumerate(probs) if x >= SPEECH_P]
+    if len(sp) < MIN_FRAMES.get(mode, 6) or max(probs, default=0.0) < PEAK_P:
+        return None
+    return sp[0], sp[-1], len(sp)
+
+
+def unloop(text):
+    """A decode loop ("no, no, no, no, ...") kept once: a run of 4+ of the same word."""
+    w = text.split()
+    key = lambda x: re.sub(r'[^a-z0-9]', '', x.lower())
+    out, i = [], 0
+    while i < len(w):
+        j = i
+        while j < len(w) and key(w[j]) == key(w[i]):
+            j += 1
+        out.extend(w[i:j] if j - i < 4 else [w[i].rstrip(',;')])
+        i = j
+    return ' '.join(out)
+
+
+SHORT_OK = {'no', 'ok', 'hi', 'go', 'yo', 'ya', 'ye', 'up', 'on', 'me', 'do', 'it'}
+JUNK_ALWAYS = {'you', 'thanks for watching', 'thank you for watching', 'please subscribe'}
+JUNK_SHORT = {'thank you', 'bye'}       # junk only from under 400 ms of speech
+VOCAB_WORDS = set(re.findall(r"[a-z0-9']+", VOCAB.lower()))
+
+
+def junk(text, speech_ms):
+    """Why a transcript is junk Whisper made from near-silence or a clipped sound, or None."""
+    t = text.lower()
+    letters = re.sub(r'[^a-z]', '', t)
+    words = re.findall(r"[a-z0-9']+", t)
+    if not letters:
+        return 'no letters'
+    if len(letters) <= 2 and letters not in SHORT_OK:
+        return 'too short'
+    if len(words) == 1 and not re.search('[aeiouy]', words[0]):
+        return 'not a word'
+    whole = ' '.join(words)
+    if whole in JUNK_ALWAYS or (whole in JUNK_SHORT and speech_ms < 400):
+        return 'a stock hallucination'
+    if len(words) >= 3 and all(w in VOCAB_WORDS for w in words):
+        return 'the prompt echoed'
+    return None
 
 
 # ---- the voice: split-style blends, a pitch target, the clean chain ---------------------------
@@ -686,68 +811,198 @@ def shapes(a):
 
 # ---- media ----------------------------------------------------------------------------------
 
+DUCK_RAW = 0.5            # each channel's raw volume x 0.5: Pulse volume is cubic, so that is -18 dB
+NEVER_DUCK_ROLES = {'phone', 'communication', 'event', 'notification', 'alert', 'accessibility'}
+VANISHED_S = 600          # a stream gone mid-duck: its originals are kept this long (see Media)
+
+
+def write_json(path, v):
+    """Atomic: a crash leaves the old file or the new one, never half of one."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = f'{path}.tmp'
+    with open(tmp, 'w') as f:
+        json.dump(v, f)
+    os.replace(tmp, path)
+
+
+def raw_volume(si):
+    return [int(ch.get('value', 65536)) for ch in (si.get('volume') or {}).values()]
+
+
+def close_to(a, b):
+    return len(a) == len(b) and all(abs(x - y) <= 1 for x, y in zip(a, b))
+
+
 class Media:
     """Other audio while she listens or speaks: MPRIS pause (then play, only the ones she paused
-    and that are still paused), or PipeWire duck (saved levels restored). Saved to STATE so a
-    crash mid-hold is repaired at the next start."""
+    and that are still paused), or a duck: every eligible stream's channels at x0.5 raw (-18 dB),
+    put back exactly. Saved to STATE (atomically, on every change) so a crash mid-hold is repaired
+    at the next start.
+
+    Duck rules: never her own streams, module/virtual streams (combine-sink loopbacks), calls
+    (media.role phone/communication, the [music] ignore list), event/notification sounds; nothing
+    at all while another app captures a real source (a call with no role). Corked streams are
+    skipped, and ducked if they start mid-hold; a stream that starts mid-hold is ducked too.
+    Restore only a stream with the same object.serial whose volume is still what we set (a change
+    he made wins). WirePlumber saves a stream's volume per app: a stream that dies while ducked
+    would come back ducked, so its originals are kept (VANISHED_S) and a stream of the same app
+    that shows up at exactly our ducked level gets them back."""
 
     def __init__(self):
         self.held = None
+        self.vanished = []       # {'app', 'bin', 'orig', 'set', 't'}
+        self.ignore = []
+        self.lk = threading.RLock()
+        self.watch = None        # pactl subscribe, while held (duck) or something vanished
         self.restore_saved()
 
     def _save(self):
-        os.makedirs(os.path.dirname(STATE), exist_ok=True)
-        if self.held:
-            with open(STATE, 'w') as f:
-                json.dump(self.held, f)
+        if self.held or self.vanished:
+            write_json(STATE, {**(self.held or {}), 'vanished': self.vanished})
         elif os.path.exists(STATE):
             os.remove(STATE)
 
     def restore_saved(self):
         try:
-            self.held = json.load(open(STATE))
-            log('media: repairing a hold left by a crash:', self.held)
-            self.release()
+            st = json.load(open(STATE))
         except FileNotFoundError:
-            pass
+            return
         except Exception as e:
             log('media: bad state file', e)
+            return
+        self.vanished = [v for v in st.pop('vanished', []) if time.time() - v.get('t', 0) < VANISHED_S]
+        self.held = st if st.get('mode') else None
+        log('media: repairing a hold left by a crash:', json.dumps(self.held), f'({len(self.vanished)} vanished)')
+        self.release()
+        self._watch()
+
+    def eligible(self, si):
+        pr = si.get('properties', {})
+        app, binary = pr.get('application.name') or '', pr.get('application.process.binary') or ''
+        name = f'{app} {pr.get("media.name") or ""}'
+        if not app or 'capri-voice' in name:
+            return False
+        if pr.get('pulse.module.id') or pr.get('node.virtual') == 'true' or pr.get('node.passive') == 'true':
+            return False
+        if (pr.get('media.role') or '').lower() in NEVER_DUCK_ROLES:
+            return False
+        low = f'{app} {binary}'.lower()
+        if any(i and i in low for i in self.ignore):
+            return False
+        return not DUCK_MATCH or DUCK_MATCH in name
+
+    def _duck(self, si, orig=None):
+        idx, pr = str(si['index']), si.get('properties', {})
+        cur = raw_volume(si)
+        orig = orig or cur
+        want = [max(0, round(v * DUCK_RAW)) for v in orig]
+        if not close_to(cur, want):
+            run(['pactl', 'set-sink-input-volume', idx, *map(str, want)])
+        self.held['streams'][idx] = {'serial': pr.get('object.serial'), 'app': pr.get('application.name') or '',
+                                     'bin': pr.get('application.process.binary') or '', 'orig': orig, 'set': want}
+        self._save()
 
     def hold(self, mode):
-        if self.held or mode == 'off':
-            return
-        if mode == 'pause':
-            players = [p for p in run(['playerctl', '-l']).split() if not PLAYERS or p in PLAYERS]
-            paused = []
-            for p in players:
-                if run(['playerctl', '-p', p, 'status']).strip() == 'Playing':
-                    run(['playerctl', '-p', p, 'pause'])
-                    paused.append(p)
-            self.held = {'mode': 'pause', 'players': paused}
-        elif mode == 'duck':
-            levels = {}
-            for si in sink_inputs():
-                vol = si.get('volume', {})
-                first = next(iter(vol.values()), {}).get('value_percent', '100%') if vol else '100%'
-                levels[str(si['index'])] = first
-                run(['pactl', 'set-sink-input-volume', str(si['index']), '30%'])
-            self.held = {'mode': 'duck', 'levels': levels}
-        self._save()
-        log('media: hold', self.held)
+        with self.lk:
+            if self.held or mode == 'off':
+                return              # nested: the first hold's originals stand
+            if mode == 'pause':
+                players = [p for p in run(['playerctl', '-l']).split() if not PLAYERS or p in PLAYERS]
+                paused = []
+                for p in players:
+                    if run(['playerctl', '-p', p, 'status']).strip() == 'Playing':
+                        run(['playerctl', '-p', p, 'pause'])
+                        paused.append(p)
+                self.held = {'mode': 'pause', 'players': paused}
+            elif mode == 'duck':
+                app = in_call()
+                app = 'unknown' if app is None else app     # can't tell: touch nothing
+                self.held = {'mode': 'duck', 'streams': {}, 'call': app or None}
+                if not app:
+                    for si in sink_inputs():
+                        if self.eligible(si) and not si.get('corked'):
+                            self._duck(si)
+            self._save()
+            log('media: hold', json.dumps(self.held))
+        self._watch()
 
     def release(self):
-        h, self.held = self.held, None
-        if not h:
-            return
-        if h.get('mode') == 'pause':
-            for p in h.get('players', []):
-                if run(['playerctl', '-p', p, 'status']).strip() == 'Paused':
-                    run(['playerctl', '-p', p, 'play'])
-        elif h.get('mode') == 'duck':
-            for idx, v in h.get('levels', {}).items():
-                run(['pactl', 'set-sink-input-volume', idx, v])
-        self._save()
-        log('media: released', h)
+        with self.lk:
+            h, self.held = self.held, None
+            if not h:
+                return
+            if h.get('mode') == 'pause':
+                for p in h.get('players', []):
+                    if run(['playerctl', '-p', p, 'status']).strip() == 'Paused':
+                        run(['playerctl', '-p', p, 'play'])
+            elif h.get('mode') == 'duck':
+                now = {str(si['index']): si for si in sink_inputs()}
+                for idx, e in h.get('streams', {}).items():
+                    si = now.get(idx)
+                    if si is None or si.get('properties', {}).get('object.serial') != e.get('serial'):
+                        self.vanished.append({**{k: e[k] for k in ('app', 'bin', 'orig', 'set')}, 't': time.time()})
+                    elif close_to(raw_volume(si), e['set']):
+                        run(['pactl', 'set-sink-input-volume', idx, *map(str, e['orig'])])
+                    else:
+                        log(f'media: stream {idx} was changed while ducked: left as he set it')
+            self._save()
+            log('media: released', json.dumps(h))
+
+    # -- the watcher: streams that start, uncork or die while ducked; ones that come back after
+    def _watch(self):
+        with self.lk:
+            want = (self.held or {}).get('mode') == 'duck' or bool(self.vanished)
+            if want and self.watch is None:
+                p = subprocess.Popen(['pactl', 'subscribe'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+                self.watch = p
+                threading.Thread(target=self._watch_loop, args=(p,), daemon=True).start()
+
+    def _watch_loop(self, p):
+        rx = re.compile(r"Event '(new|change|remove)' on sink-input #(\d+)")
+        for line in p.stdout:
+            m = rx.search(line)
+            if m:
+                try:
+                    self._event(m.group(1), m.group(2))
+                except Exception as e:
+                    log('media: watch:', e)
+            with self.lk:
+                self.vanished = [v for v in self.vanished if time.time() - v['t'] < VANISHED_S]
+                if (self.held or {}).get('mode') != 'duck' and not self.vanished:
+                    self.watch = None
+                    p.terminate()
+                    return
+
+    def _event(self, kind, idx):
+        if os.environ.get('CAPRI_VOICE_DEBUG'):
+            log('media: event', kind, idx, json.dumps(self.vanished))
+        with self.lk:
+            held = self.held if (self.held or {}).get('mode') == 'duck' and not self.held.get('call') else None
+            if kind == 'remove':
+                e = held and held['streams'].pop(idx, None)
+                if e:
+                    self.vanished.append({**{k: e[k] for k in ('app', 'bin', 'orig', 'set')}, 't': time.time()})
+                    self._save()
+                return
+            if held and idx in held['streams']:
+                return              # ours (our own set fires 'change' too)
+            si = next((x for x in sink_inputs() if str(x['index']) == idx), None)
+            if si is None or not self.eligible(si):
+                return
+            pr, cur = si.get('properties', {}), raw_volume(si)
+            back = next((v for v in self.vanished if v['app'] == (pr.get('application.name') or '')
+                         and v['bin'] == (pr.get('application.process.binary') or '') and close_to(cur, v['set'])), None)
+            if held and si.get('corked'):
+                return              # ducked when it starts playing (a stream often starts corked)
+            if back:
+                self.vanished.remove(back)
+            if held:
+                self._duck(si, back['orig'] if back else None)
+            elif back:
+                # It came back after the hold at our ducked level (WirePlumber's saved volume).
+                run(['pactl', 'set-sink-input-volume', idx, *map(str, back['orig'])])
+                log(f'media: stream {idx} ({back["app"]}) came back ducked: put back')
+            self._save()
 
 
 def feed(p, data):
@@ -767,22 +1022,10 @@ def run(cmd, timeout=3):
 
 def sink_inputs():
     try:
-        items = json.loads(run(['pactl', '-f', 'json', 'list', 'sink-inputs']) or '[]')
+        return json.loads(run(['pactl', '-f', 'json', 'list', 'sink-inputs']) or '[]')
     except ValueError:
         return []
-    out = []
-    for si in items:
-        props = si.get('properties', {})
-        name = (props.get('application.name') or '') + ' ' + (props.get('media.name') or '')
-        if 'capri-voice' in name:
-            continue
-        if DUCK_MATCH and DUCK_MATCH not in name:
-            continue
-        out.append(si)
-    return out
 
-
-# ---- the sidecar ----------------------------------------------------------------------------
 
 # ---- unprompted replies: when she stays silent -----------------------------------------------
 
@@ -931,6 +1174,8 @@ class Voice:
         self.cfg = {'stt_model': os.environ.get('CAPRI_VOICE_STT', 'small.en'), 'voice': VOICE, 'speed': SPEED, 'flow': FLOW, 'pace': PACE}
         self.last_said = (None, '', 0.0)  # (id, text, tail silence s) of the last sentence: the gap before the next
         self.stt = Stt(self.cfg['stt_model'])
+        self.vad = Vad.load()
+        self.vs = None           # the capture's VAD, as it streams
         self.tts = Tts()
         self.media = Media()
         self.release_timer = None
@@ -970,6 +1215,7 @@ class Voice:
         if SOURCE:
             cmd += ['--target', SOURCE]
         self.rec_buf, self.rec_stop_at, self.cancelled = [], None, False
+        self.vs = VadStream(self.vad) if self.vad else None
         self.rec = subprocess.Popen(cmd + ['-'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
         threading.Thread(target=self._rec_loop, args=(self.rec,), daemon=True).start()
         log('mic: capture starting', SOURCE or '(default source)')
@@ -994,6 +1240,8 @@ class Voice:
                 log(f"mic: open (+{self.cur['t_mic_open'] - self.cur['t_start']:.0f} ms)")
             if not self.cancelled:
                 self.rec_buf.append(chunk)
+                if self.vs:
+                    self.vs.feed(chunk)
             t = now_ms()
             if t - last_lvl >= 200:
                 last_lvl = t
@@ -1028,28 +1276,45 @@ class Voice:
         self.rec_buf = []
         self.rec_stop_at = now_ms()
 
+    def _drop(self, why, chars, speech_ms, dur):
+        """Not sent: a quiet DIDN'T CATCH THAT on her tag. Logged by length only, never words or audio."""
+        self.cur['t_heard'] = now_ms()
+        self.emit(ev='heard', text='', why="DIDN'T CATCH THAT", ms=self._ms())
+        log(f'heard: dropped ({why}; {chars} chars, {speech_ms:.0f} ms of speech in {dur:.1f} s)')
+
     def _heard(self, pcm):
         c = self.cur
         dur = len(pcm) / MIC_RATE
-        # Gate on voice activity: Whisper invents short phrases from silence.
-        fr = int(0.02 * MIC_RATE)
-        n = len(pcm) // fr
-        rms = np.sqrt(np.mean(pcm[:n * fr].reshape(n, fr) ** 2, axis=1)) if n else np.zeros(0)
-        floor = float(np.percentile(rms, 20)) if n else 0.0
-        voiced = float(np.sum(rms > max(0.008, floor * 3)) * 0.02)
-        if voiced < 0.3:
-            del pcm
-            c['t_heard'] = now_ms()
-            self.emit(ev='heard', text='', why="DIDN'T CATCH THAT", ms=self._ms())
-            log(f'heard: nothing ({voiced:.2f} s voiced of {dur:.1f} s)')
-            return
+        # Gate on speech before Whisper: it invents short phrases from silence and clicks.
+        if self.vs:
+            span = speech_span(self.vs.p, c.get('mode', 'hold'))
+            speech_ms = sum(x >= SPEECH_P for x in self.vs.p) * VAD_FRAME / MIC_RATE * 1000
+            self.vs = None
+            if span is None:
+                del pcm
+                return self._drop('no speech', 0, speech_ms, dur)
+            a = max(0, span[0] * VAD_FRAME - int(LEAD_S * MIC_RATE))
+            b = min(len(pcm), (span[1] + 1) * VAD_FRAME + int(TAIL_S * MIC_RATE))
+            pcm = pcm[a:b]
+        else:
+            fr = int(0.02 * MIC_RATE)
+            n = len(pcm) // fr
+            rms = np.sqrt(np.mean(pcm[:n * fr].reshape(n, fr) ** 2, axis=1)) if n else np.zeros(0)
+            floor = float(np.percentile(rms, 20)) if n else 0.0
+            speech_ms = float(np.sum(rms > max(0.008, floor * 3)) * 20)
+            if speech_ms < 300:
+                del pcm
+                return self._drop('no speech (energy gate)', 0, speech_ms, dur)
         t = now_ms()
-        text = self.stt(pcm)
+        text = self.stt(pcm, speech_ms)
         del pcm  # dropped after decoding (never written anywhere)
         c['stt_ms'] = now_ms() - t
+        why = junk(text, speech_ms) if text else 'empty'
+        if why:
+            return self._drop(why, len(text), speech_ms, dur)
         c['t_heard'] = now_ms()
-        self.emit(ev='heard', text=text, why='' if text else "DIDN'T CATCH THAT", ms=self._ms())
-        log(f"heard: {len(text)} chars in {c['stt_ms']:.0f} ms from {dur:.1f} s ({voiced:.1f} s voiced)")
+        self.emit(ev='heard', text=text, why='', ms=self._ms())
+        log(f"heard: {len(text)} chars in {c['stt_ms']:.0f} ms from {dur:.1f} s ({speech_ms:.0f} ms of speech)")
 
     def _ms(self):
         c = self.cur
@@ -1185,6 +1450,8 @@ class Voice:
             for k in ('voice', 'speed', 'flow', 'pace'):
                 if k in msg:
                     self.cfg[k] = msg[k]
+            if isinstance(msg.get('duck_ignore'), list):
+                self.media.ignore = [str(i).lower() for i in msg['duck_ignore'] if str(i).strip()]
             try:
                 parse_voice(self.cfg['voice'])
             except ValueError as e:
@@ -1228,7 +1495,8 @@ class Voice:
                 self.release_timer = None
                 self.media.release()
         elif op == 'stats':
-            self.emit(ev='stats', mic_open=self.rec is not None, speaking=self.player is not None, cfg=self.cfg)
+            self.emit(ev='stats', mic_open=self.rec is not None, speaking=self.player is not None, cfg=self.cfg,
+                      vad='silero' if self.vad else 'energy')
         else:
             self.emit(ev='error', why=f'unknown op {op!r}')
 
@@ -1355,6 +1623,42 @@ def selftest_gate():
         _sh.rmtree(shim, ignore_errors=True)
 
 
+def selftest_junk():
+    for j in ['-2,', ', chr,', 'nd,', 'Q.', ',', '2.', '♪', 'hmm', 'You', 'Thanks for watching!', 'Capri, spike, lynx.']:
+        assert junk(j, 1500), f'{j!r} passed'
+    assert junk('Thank you.', 300) and not junk('Thank you.', 900) and junk('Bye.', 200)
+    for ok in ['yes', 'no', 'ok', 'okay', 'stop', 'go', 'hi', 'hey', 'wait', 'what', 'why', 'done', 'next', 'back', 'undo',
+               'Capri', 'spike', 'lynx']:
+        for v in (ok, ok.capitalize() + '.', ok.upper() + '!', ok + '?'):
+            assert junk(v, 250) is None, f'{v!r} dropped: {junk(v, 250)}'
+    assert junk("What's spike doing?", 900) is None and junk('Capri, stop.', 600) is None
+    assert unloop('yes, yes, yes, yes, yes, yes,') == 'yes' and unloop('Well, no, no, no, no, no') == 'Well, no'
+    assert unloop('OK, okay, okay.') == 'OK, okay, okay.' and unloop('Stop.') == 'Stop.' and unloop('no no no') == 'no no no'
+    assert speech_span([0.1] * 50) is None, 'silence'
+    assert speech_span([0.9] * 5 + [0.1] * 40) is None, '5 frames (160 ms) is not enough'
+    assert speech_span([0.1] * 10 + [0.6] * 7 + [0.1] * 5) is None, 'never reaches 0.70'
+    assert speech_span([0.1] * 10 + [0.8] * 6 + [0.1] * 5) == (10, 15, 6)
+    assert speech_span([0.1] * 10 + [0.8] * 7 + [0.1] * 5, 'hands-free') is None, 'hands-free wants 8'
+
+
+def selftest_duck():
+    m = Media.__new__(Media)
+    m.ignore = ['discord', 'vesktop']
+    si = lambda **pr: {'index': 1, 'properties': {'application.name': 'Firefox', **pr}, 'volume': {'front-left': {'value': 52429}}}
+    saved = globals()['DUCK_MATCH']
+    globals()['DUCK_MATCH'] = None
+    assert m.eligible(si())
+    assert not m.eligible(si(**{'application.name': 'capri-voice'})), 'her own'
+    assert not m.eligible(si(**{'pulse.module.id': '536870916', 'node.virtual': 'true'})), 'a combine-sink loopback'
+    assert not m.eligible(si(**{'media.role': 'phone'})) and not m.eligible(si(**{'media.role': 'Notification'}))
+    assert not m.eligible(si(**{'application.name': 'Vesktop'})) and not m.eligible(si(**{'application.process.binary': 'Discord'}))
+    assert not m.eligible({'index': 2, 'properties': {}}), 'no app name: not ours to touch'
+    globals()['DUCK_MATCH'] = saved
+    assert raw_volume(si()) == [52429] and [round(v * DUCK_RAW) for v in [52429, 65536]] == [26214, 32768]
+    assert close_to([32768, 32767], [32768, 32768]) and not close_to([32768], [32700]) and not close_to([1], [1, 1])
+    assert abs(60 * np.log10(DUCK_RAW) + 18.06) < 0.01, 'x0.5 raw is -18 dB (cubic)'
+
+
 def selftest():
     """Checks that need no audio device: the voice string, the markup, the gaps; with the models
     present, that the patched graph with neutral inputs speaks exactly like the stock one."""
@@ -1385,10 +1689,30 @@ def selftest():
     print('selftest: parsing ok')
     selftest_gate()
     print('selftest: unprompted gate ok (call, lock, budget, cap, too late)')
+    selftest_junk()
+    print('selftest: junk filter ok')
+    selftest_duck()
+    print('selftest: duck rules ok')
     if not os.path.exists(f'{MODELS}/kokoro-v1.0.int8.onnx'):
         print('selftest: no models, skipping the graph checks')
         return
     tts = Tts()
+    vad = Vad.load()
+    if vad:
+        rng = np.random.default_rng(3)
+        sil = np.zeros(32000, np.float32)
+        click = sil.copy()
+        click[8000:8040] = 0.8
+        noise = (rng.standard_normal(32000) * 0.03).astype(np.float32)
+        for name, clip in (('silence', sil), ('a click', click), ('noise', noise)):
+            assert speech_span(vad.probs(clip)) is None, f'{name} passed the gate'
+        for word in ('Stop.', 'No.', 'Yes.'):
+            a = tts(word, VOICE, 1.0, 'off', 0.0, 'model')
+            n = int(len(a) * MIC_RATE / TTS_RATE)
+            x = np.interp(np.linspace(0, len(a) - 1, n), np.arange(len(a)), a).astype(np.float32)
+            x = np.concatenate([np.zeros(8000, np.float32), x, np.zeros(8000, np.float32)])
+            assert speech_span(vad.probs(x)), f'{word!r} (stock TTS) did not pass the gate'
+        print('selftest: vad ok (silence, a click, noise gated; stock-TTS stop/no/yes pass)')
     assert tts.flow, 'the flow patch did not load'
     k, f = tts.k, tts.flow
     st = tts.style('af_heart')
