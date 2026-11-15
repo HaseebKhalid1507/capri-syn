@@ -245,6 +245,79 @@ fn head_and_glints(mask: &Mask, top: i32, height: i32) -> (i32, Vec<(i16, i16)>)
     (head_x, glints)
 }
 
+/// Her face mask inside `rect` of an RGBA canvas: the bright green of her face, its gaps
+/// (eyes, brows) of up to `FACE_GAP` px closed along rows then columns, grown by
+/// `FACE_GROW` px. Row-major over `rect`.
+fn face_mask(px: &[u8], w: u32, rect: Rect) -> Vec<bool> {
+    const FACE_GAP: usize = 24;
+    let (rw, rh) = (rect.width.max(0) as usize, rect.height.max(0) as usize);
+    let mut m = vec![false; rw * rh];
+    for y in 0..rh {
+        for x in 0..rw {
+            let (cx, cy) = (rect.x + x as i32, rect.y + y as i32);
+            if cx < 0 || cy < 0 || cx >= w as i32 {
+                continue;
+            }
+            let i = (cy as usize * w as usize + cx as usize) * 4;
+            let Some(p) = px.get(i..i + 4) else { continue };
+            m[y * rw + x] = p[1] > 170 && p[0] < 140 && p[2] < 170 && p[3] > 200;
+        }
+    }
+    // Close the gaps between face pixels: rows, then columns (each pass on the last's result).
+    let close = |m: &mut [bool], n: usize, len: usize, at: &dyn Fn(usize, usize) -> usize| {
+        for line in 0..n {
+            let mut last: Option<usize> = None;
+            for k in 0..len {
+                if m[at(line, k)] {
+                    if let Some(p) = last
+                        && k - p > 1
+                        && k - p <= FACE_GAP
+                    {
+                        for j in p + 1..k {
+                            m[at(line, j)] = true;
+                        }
+                    }
+                    last = Some(k);
+                }
+            }
+        }
+    };
+    close(&mut m, rh, rw, &|y, x| y * rw + x);
+    close(&mut m, rw, rh, &|x, y| y * rw + x);
+    let mut out = m.clone();
+    for y in 0..rh {
+        for x in 0..rw {
+            if !m[y * rw + x] {
+                continue;
+            }
+            for yy in y.saturating_sub(FACE_GROW)..(y + FACE_GROW + 1).min(rh) {
+                for xx in x.saturating_sub(FACE_GROW)..(x + FACE_GROW + 1).min(rw) {
+                    out[yy * rw + xx] = true;
+                }
+            }
+        }
+    }
+    out
+}
+
+const FACE_GROW: usize = 3;
+
+/// Paint the face of `src` (inside `rect`) onto `dst`, moved by `d`: e.g. the headpat's
+/// closed happy eyes onto the perch frame. Both are canvases `w`×`h`.
+pub fn face_patch(dst: &mut [u8], src: &[u8], w: u32, h: u32, rect: Rect, d: (i32, i32)) {
+    let m = face_mask(src, w, rect);
+    let rw = rect.width.max(0) as usize;
+    for (k, _) in m.iter().enumerate().filter(|x| *x.1) {
+        let (sx, sy) = (rect.x + (k % rw) as i32, rect.y + (k / rw) as i32);
+        let (tx, ty) = (sx + d.0, sy + d.1);
+        if sx < 0 || sy < 0 || tx < 0 || ty < 0 || sx >= w as i32 || sy >= h as i32 || tx >= w as i32 || ty >= h as i32 {
+            continue;
+        }
+        let (si, ti) = ((sy as usize * w as usize + sx as usize) * 4, (ty as usize * w as usize + tx as usize) * 4);
+        dst[ti..ti + 4].copy_from_slice(&src[si..si + 4]);
+    }
+}
+
 /// Display geometry shared by all frames.
 #[derive(Clone, Copy, Debug)]
 pub struct Geometry {
@@ -295,9 +368,26 @@ fn decode_one(pack: &Pack, f: &FrameSource, geo: &Geometry, verify: bool, resize
             bail!("frame `{}`: sha256 mismatch for {} (catalog {want}, file {got})", f.id, f.path.display());
         }
     }
-    let img = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)
+    let mut img = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)
         .with_context(|| format!("frame `{}`: {} is not a valid PNG", f.id, f.path.display()))?
         .into_rgba8();
+    if let Some((path, rect, pdx, pdy, sha)) = &f.patch {
+        let pb = std::fs::read(path).with_context(|| format!("frame `{}`: cannot read its patch {}", f.id, path.display()))?;
+        if verify
+            && let Some(want) = sha
+            && !sha_hex(&pb).eq_ignore_ascii_case(want)
+        {
+            bail!("frame `{}`: sha256 mismatch for its patch {}", f.id, path.display());
+        }
+        let src = image::load_from_memory_with_format(&pb, image::ImageFormat::Png)
+            .with_context(|| format!("frame `{}`: patch {} is not a valid PNG", f.id, path.display()))?
+            .into_rgba8();
+        if src.dimensions() != img.dimensions() {
+            bail!("frame `{}`: patch {} is not the frame's size", f.id, path.display());
+        }
+        let (w, h) = img.dimensions();
+        face_patch(img.as_mut(), src.as_raw(), w, h, *rect, (*pdx, *pdy));
+    }
     let (iw, ih) = img.dimensions();
     let canvas = &pack.catalog.canvas;
     if iw != canvas.width || ih != canvas.height {

@@ -270,6 +270,14 @@ impl X11 {
         Ok(())
     }
 
+    /// `_NET_WM_ICON` on `win`: (w, h, ARGB pixels…) per size.
+    pub fn set_icon(&self, win: u32, data: &[u32]) -> Result<()> {
+        let atom = intern(&self.conn, "_NET_WM_ICON")?;
+        self.conn.change_property32(xproto::PropMode::REPLACE, win, atom, xproto::AtomEnum::CARDINAL, data)?;
+        self.conn.flush()?;
+        Ok(())
+    }
+
     /// Input region = `input`; everything else clicks through to the windows below.
     /// Without a compositor the bounding shape is set to `visible`, so no black box shows.
     pub fn set_shape(&self, input: &[ShapeRect], visible: &[ShapeRect]) -> Result<()> {

@@ -10,6 +10,7 @@ use crate::brain::{
     SessionSignal, Touch, Tuning, Why,
 };
 use crate::control::{BrainCmd, Sense};
+use super::arriveview::ArriveKind;
 use crate::moves;
 use crate::places::{self, Boxes, Spot, SpotKind, World};
 use crate::settings::{Attention, Settings};
@@ -106,6 +107,9 @@ const FLOAT_BOB_ON: f32 = 20.0;
 const FLOAT_BOB_CYCLE: f32 = 50.0;
 /// drop_in falls from this far above the spot (logical px): standing, posed.
 const DROP_IN_H: (f32, f32) = (240.0, 70.0);
+/// A leap this far up or across (logical px) takes the deeper crouch (`brain.bigHopCrouch`).
+const BIG_LEAP_UP: f32 = 150.0;
+const BIG_LEAP_DX: f32 = 220.0;
 
 pub(super) struct InFlight {
     approach: Option<Approach>,
@@ -743,6 +747,7 @@ impl Avatar {
         }
         take(self.marker_next_change(now));
         take(self.glow_next_change(now));
+        take(self.nap_deadline());
         if let Some(p) = h.pulse {
             let d = now.saturating_duration_since(p);
             if d < PULSE_FOR + Duration::from_millis(PULSE_HALF_MS as u64) {
@@ -815,6 +820,7 @@ impl Avatar {
             }
         }
         self.brain_run(now, false);
+        dirty |= self.step_nap(now);
         dirty |= self.idle_look(now);
         self.brain_save(now, false);
         dirty
@@ -1133,7 +1139,16 @@ impl Avatar {
                 }
             }
             Arrival::DropIn => self.start_drop_in(origin, place, now),
-            Arrival::Teleport => self.start_teleport_q(origin, place, now, quiet),
+            Arrival::Teleport => {
+                self.start_teleport_q(origin, place, now, quiet);
+                // Some land with the intro's arrival (on a window top: onto it, then sit); a
+                // closed perch's rescue always does (LOCKED #18). A summon has its own landing.
+                match plan.why {
+                    "perch_closed" => self.arrive_with(ArriveKind::Rescue),
+                    "summon" => {}
+                    _ => self.arrive_with(ArriveKind::Teleport),
+                }
+            }
         }
     }
 
@@ -1468,7 +1483,11 @@ impl Avatar {
         if !lp.crouched {
             lp.crouched = true;
             let startled = lp.startled;
-            let crouch = self.pack.behaviour.brain.hop_crouch.as_ref().and_then(|c| self.pack.index.get(c)).copied();
+            // A big leap (well up, or far) or a startled one: the deeper crouch.
+            let big = startled || lp.leap.from.1 - lp.leap.to.1 > BIG_LEAP_UP || (lp.leap.to.0 - lp.leap.from.0).abs() > BIG_LEAP_DX;
+            let b = &self.pack.behaviour.brain;
+            let id = if big { b.big_hop_crouch.as_ref().or(b.hop_crouch.as_ref()) } else { b.hop_crouch.as_ref() };
+            let crouch = id.and_then(|c| self.pack.index.get(c)).copied();
             let air = lp.leap.air_ms();
             let mut seq: Vec<(usize, u32)> = crouch.map(|c| vec![(c, moves::HOP_CROUCH_MS)]).unwrap_or_default();
             // Startled: wide-eyed in the air.
@@ -1536,7 +1555,11 @@ impl Avatar {
                     self.squash = Some(now);
                 }
                 if standing {
-                    let seq = self.pack.flatten(&[crate::pack::Step::Hold { frame: "surprised".into(), ms: 600 }]);
+                    let steps = match &self.pack.behaviour.brain.startle {
+                        s if s.is_empty() => vec![crate::pack::Step::Hold { frame: "surprised".into(), ms: 600 }],
+                        s => s.clone(),
+                    };
+                    let seq = self.pack.flatten(&steps);
                     if !seq.is_empty() {
                         self.anim.play(seq, now);
                     }
@@ -1788,7 +1811,12 @@ impl Avatar {
             .iter()
             .map(|s| match s {
                 Step::Clip(id) if id == "@look" => {
-                    let f = if c.1 < head_y - (200.0 * self.layout.sf) as i32 && (c.0 - gx).abs() < (300.0 * self.layout.sf) as i32 {
+                    let sf = self.layout.sf;
+                    // Right in front of her (or on her): straight at him.
+                    let front = (c.0 - gx).abs() < (90.0 * sf) as i32 && c.1 >= head_y - (60.0 * sf) as i32 && c.1 <= gy;
+                    let f = if let Some(f) = self.pack.behaviour.brain.look_front.as_deref().filter(|_| front) {
+                        f
+                    } else if c.1 < head_y - (200.0 * sf) as i32 && (c.0 - gx).abs() < (300.0 * sf) as i32 {
                         "idle-look_up"
                     } else if right {
                         "idle-look_right"
@@ -1823,6 +1851,11 @@ impl Avatar {
         }
         .unwrap_or_default();
         let standing = self.standing();
+        // Rarely, a headpat that settled a bid gets the air kiss instead.
+        let steps = match e {
+            EmoteKey::Satisfied { pat: true } if standing => self.maybe_kiss(0, now).unwrap_or(steps),
+            _ => steps,
+        };
         let fx_kind = match e {
             EmoteKey::Bid(i) => i % 4,
             EmoteKey::Insist(s) => s as usize,
@@ -2241,7 +2274,7 @@ impl Avatar {
                 let fs = if sulky { b.sulk_sit.as_ref().or(b.floor_sit.as_ref())? } else { b.floor_sit.as_ref()? };
                 Some((self.pack.index.get(&fs.base).copied()?, self.loop_seq(fs.r#loop.as_ref())))
             }
-            RestPose::Nap => Some((self.pack.index.get(b.nap.as_ref()?).copied()?, None)),
+            RestPose::Nap => Some((self.nap_frame()?, None)),
         }
     }
 

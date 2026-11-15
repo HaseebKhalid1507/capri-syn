@@ -250,6 +250,9 @@ pub struct PerchSpec {
     pub activities: Vec<Vec<Step>>,
     #[serde(default)]
     pub click: Vec<Step>,
+    /// A headpat while perched (seat-anchored frames): her perch frame with the headpat face.
+    #[serde(default)]
+    pub headpat: Vec<Step>,
     /// A clean 1 px rim around the dark limbs of perch frames below the seat line, drawn
     /// at decode time behind the art, so they stay visible over dark windows
     /// (`#rrggbb`; empty = off).
@@ -291,6 +294,50 @@ pub struct ExtraFrame {
     pub visible_bounds: Option<Rect>,
     #[serde(default)]
     pub sha256: Option<String>,
+    /// Paint another file's face onto this frame (canvas px): the pixels inside `rect` of
+    /// `file` that belong to her face, moved by (`dx`, `dy`). See `frames::face_patch`.
+    #[serde(default)]
+    pub patch: Option<Patch>,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct Patch {
+    pub file: String,
+    pub rect: Rect,
+    #[serde(default)]
+    pub dx: i32,
+    #[serde(default)]
+    pub dy: i32,
+    #[serde(default)]
+    pub sha256: Option<String>,
+}
+
+/// Arrival sequences (CapriCore's intro-v1 frames, PROPOSAL-assets §4.1), played as she
+/// reappears: at launch after the plain red bolt, on a $mod+c summon, on some teleports, on
+/// a window top. All optional.
+#[derive(Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ArriveSpec {
+    pub launch: Vec<Step>,
+    pub summon: Vec<Step>,
+    pub teleport: Vec<Step>,
+    /// Onto a window top (seat-anchored frames only).
+    pub perch: Vec<Step>,
+    /// The share of passive and bid teleports that land with `teleport` / `perch` (never
+    /// twice in a row).
+    pub teleport_chance: f32,
+}
+
+/// The rare air kiss after a headpat: its steps, the chance per headpat, the hearts' start
+/// into the steps, and the least time between two.
+#[derive(Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct KissSpec {
+    pub steps: Vec<Step>,
+    pub chance: f32,
+    pub hearts_at_ms: u64,
+    pub gap_ms: u64,
 }
 
 /// Music mode: a headphones pose (floor and window-edge variants), note sprites drifting up
@@ -395,6 +442,13 @@ pub struct Behaviour {
     pub fling: Option<FlingSpec>,
     #[serde(default)]
     pub land: Option<LandSpec>,
+    #[serde(default)]
+    pub arrive: Option<ArriveSpec>,
+    /// Her icon (a square PNG in the pack) for her windows' `_NET_WM_ICON`.
+    #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default)]
+    pub kiss: Option<KissSpec>,
 }
 
 impl Behaviour {
@@ -464,7 +518,20 @@ pub struct BrainSpec {
     /// After a sulk she sits down where she landed and stays low: this base and loop.
     pub sulk_sit: Option<MoodSpec>,
     pub nap: Option<String>,
+    /// After `nap_deep_after_ms` of the nap: asleep on her side (a soft glitch into it), on the
+    /// floor `nap_deep`, on a window top `nap_perch` (seat-anchored) if the top is long
+    /// enough. Waking from it: a soft glitch and `nap_wake` (floor) / the perch base.
+    pub nap_deep: Option<String>,
+    pub nap_deep_after_ms: Option<u64>,
+    pub nap_perch: Option<String>,
+    pub nap_wake: Vec<Step>,
     pub hop_crouch: Option<String>,
+    /// The crouch before a big leap (up or far) and in a startle.
+    pub big_hop_crouch: Option<String>,
+    /// A startle in place (the pointer swiped past her).
+    pub startle: Vec<Step>,
+    /// The pointer right in front of her (or on her): this frame instead of a side look.
+    pub look_front: Option<String>,
     /// Approach → frame: `hang`, `hang_upside_down`, `cling_left`, `cling_right`, `peek`. A
     /// missing one gives that approach weight 0.
     pub poses: BTreeMap<String, String>,
@@ -485,6 +552,8 @@ pub struct FrameSource {
     pub anchor: Anchor,
     pub bounds: Rect,
     pub sha256: Option<String>,
+    /// A face painted on at decode (file, rect, dx, dy, sha256).
+    pub patch: Option<(PathBuf, Rect, i32, i32, Option<String>)>,
 }
 
 pub struct Pack {
@@ -593,6 +662,7 @@ impl Pack {
                 anchor: s.anchor.clone(),
                 bounds: b,
                 sha256: s.sha256.clone(),
+                patch: None,
             });
         }
         for x in &behaviour.extra_frames {
@@ -605,15 +675,22 @@ impl Pack {
                 }
                 errors.push(format!("moods.json extraFrames `{}`: file {} is missing", x.id, x.file));
             }
+            let patch = x.patch.as_ref().map(|p| (dir.join(&p.file), p.rect, p.dx, p.dy, p.sha256.clone()));
+            if let Some((pp, ..)) = &patch
+                && !pp.is_file()
+            {
+                elog!("synaps-avatar: pack extra frame `{}`: patch {} is missing; skipped", x.id, pp.display());
+                continue;
+            }
             let src = match (&x.like, &x.anchor, x.visible_bounds) {
                 (Some(like), _, _) => match index.get(like) {
-                    Some(&i) => FrameSource { id: x.id.clone(), path, sha256: None, ..frames[i].clone() },
+                    Some(&i) => FrameSource { id: x.id.clone(), path, sha256: None, patch, ..frames[i].clone() },
                     None => {
                         errors.push(format!("moods.json extraFrames `{}`: `like` frame `{like}` is unknown", x.id));
                         continue;
                     }
                 },
-                (None, Some(a), Some(b)) => FrameSource { id: x.id.clone(), path, anchor: a.clone(), bounds: b, sha256: x.sha256.clone() },
+                (None, Some(a), Some(b)) => FrameSource { id: x.id.clone(), path, anchor: a.clone(), bounds: b, sha256: x.sha256.clone(), patch },
                 _ => {
                     errors.push(format!("moods.json extraFrames `{}`: needs `like` or `anchor` + `visibleBounds`", x.id));
                     continue;
@@ -662,14 +739,14 @@ impl Pack {
         if let Some(w) = behaviour.music.as_ref().and_then(|m| m.window.clone()) {
             perch_frames.insert(w);
         }
-        // Landing on an edge: registered on the seat like the perch base.
-        if let Some(l) = &behaviour.land {
-            for st in &l.perch {
-                if let Step::Hold { frame, .. } = st {
-                    perch_frames.insert(frame.clone());
-                }
+        // Landing on an edge, a headpat or a nap there: registered on the seat like the perch base.
+        let seat_steps = behaviour.land.iter().flat_map(|l| l.perch.iter()).chain(behaviour.arrive.iter().flat_map(|a| a.perch.iter()));
+        for st in seat_steps.chain(behaviour.perch.iter().flat_map(|p| p.headpat.iter())) {
+            if let Step::Hold { frame, .. } = st {
+                perch_frames.insert(frame.clone());
             }
         }
+        perch_frames.extend(behaviour.brain.nap_perch.clone());
         let mut pack =
             Pack { dir: dir.to_owned(), name: pack_name, catalog, behaviour, frames, index, poses: Vec::new(), seat_ref, perch_frames };
 
@@ -684,6 +761,20 @@ impl Pack {
                         errors.push(format!("moods.json {what}: frame `{frame}` does not resolve"))
                     }
                     _ => {}
+                }
+            }
+        };
+        // Steps shown on a window top: seat-anchored frames only.
+        let seat_only = |what: &str, steps: &[Step], errors: &mut Vec<String>, pack: &Pack| {
+            for st in steps {
+                let ids: Vec<String> = match st {
+                    Step::Hold { frame, .. } => vec![frame.clone()],
+                    Step::Clip(c) => pack.clip(c).map(|c| c.frames.iter().map(|f| f.id.clone()).collect()).unwrap_or_default(),
+                };
+                for id in ids {
+                    if pack.index.get(&id).is_some_and(|&i| pack.frames[i].anchor.name != "seat") {
+                        errors.push(format!("moods.json {what}: frame `{id}` has no seat anchor"));
+                    }
                 }
             }
         };
@@ -722,6 +813,23 @@ impl Pack {
                 check_steps(&format!("perch.activities #{i}"), a, &mut errors, &pack);
             }
             check_steps("perch.click", &p.click, &mut errors, &pack);
+            check_steps("perch.headpat", &p.headpat, &mut errors, &pack);
+            seat_only("perch.headpat", &p.headpat, &mut errors, &pack);
+        }
+        if let Some(a) = &pack.behaviour.arrive {
+            for (k, st) in [("launch", &a.launch), ("summon", &a.summon), ("teleport", &a.teleport), ("perch", &a.perch)] {
+                check_steps(&format!("arrive.{k}"), st, &mut errors, &pack);
+            }
+            seat_only("arrive.perch", &a.perch, &mut errors, &pack);
+            if !(0.0..=1.0).contains(&a.teleport_chance) {
+                errors.push(format!("moods.json arrive.teleportChance: {} (0..1)", a.teleport_chance));
+            }
+        }
+        if let Some(k) = &pack.behaviour.kiss {
+            check_steps("kiss.steps", &k.steps, &mut errors, &pack);
+            if !(0.0..=1.0).contains(&k.chance) {
+                errors.push(format!("moods.json kiss.chance: {} (0..1)", k.chance));
+            }
         }
         check_steps("click.head", &pack.behaviour.click.head, &mut errors, &pack);
         check_steps("click.annoyed", &pack.behaviour.click.annoyed, &mut errors, &pack);
@@ -750,11 +858,20 @@ impl Pack {
             {
                 errors.push(format!("moods.json brain.sulkSit: base `{}` does not resolve", ss.base));
             }
-            for id in b.nap.iter().chain(b.hop_crouch.iter()) {
+            for id in b.nap.iter().chain(b.hop_crouch.iter()).chain(b.nap_deep.iter()).chain(b.big_hop_crouch.iter()).chain(b.look_front.iter()) {
                 if !pack.index.contains_key(id) {
                     errors.push(format!("moods.json brain: frame `{id}` does not resolve"));
                 }
             }
+            if let Some(id) = &b.nap_perch {
+                match pack.index.get(id) {
+                    None => errors.push(format!("moods.json brain.napPerch: frame `{id}` does not resolve")),
+                    Some(&i) if pack.frames[i].anchor.name != "seat" => errors.push(format!("moods.json brain.napPerch: frame `{id}` has no seat anchor")),
+                    _ => {}
+                }
+            }
+            check_steps("brain.napWake", &b.nap_wake, &mut errors, &pack);
+            check_steps("brain.startle", &b.startle, &mut errors, &pack);
             for (k, id) in &b.poses {
                 let want = match k.as_str() {
                     "hang" => "ceiling",
@@ -866,6 +983,7 @@ impl Pack {
                             anchor: s.anchor,
                             bounds: s.visible_bounds,
                             sha256: s.sha256,
+                            patch: None,
                         });
                     }
                 }
