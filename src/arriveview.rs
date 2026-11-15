@@ -31,6 +31,8 @@ pub(super) struct ArriveState {
     last_variant: bool,
     /// The pack has a launch intro: hidden until the frames are in, then the bolt.
     pub launch_wait: bool,
+    /// The launch intro's bolt is in flight: an appearance, not a move (the brain isn't held).
+    pub launching: bool,
     /// Napping since (the brain's `napping`), and asleep on her side.
     nap_since: Option<Instant>,
     pub deep: bool,
@@ -91,6 +93,7 @@ impl Avatar {
     /// A new teleport, or one that ended before she appeared: nothing pending.
     pub(super) fn arrive_reset(&mut self) {
         self.arrive.on_appear = None;
+        self.arrive.launching = false;
     }
 
     /// An arrival sequence is playing (a relayer keeps it).
@@ -119,6 +122,7 @@ impl Avatar {
         self.teleport = Some(Teleport { seed, leg: Leg::Bolt(now), to: self.origin, place: self.placement, bolt: Some(bolt), moved: true, no_bolt: false, quiet: false });
         elog!("synaps-avatar: arrival Launch: {} frames after the bolt", seq.len());
         self.arrive.on_appear = Some(seq);
+        self.arrive.launching = true;
         true
     }
 

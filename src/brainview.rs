@@ -540,7 +540,7 @@ impl Avatar {
         if self.reaction_until.is_some_and(|t| t > now) {
             v.push("reaction");
         }
-        if self.teleport.is_some() || self.brain.as_ref().is_some_and(|h| h.flight.is_some() || h.moving()) {
+        if (self.teleport.is_some() && !self.arrive.launching) || self.brain.as_ref().is_some_and(|h| h.flight.is_some() || h.moving()) {
             v.push("teleport");
         }
         if self.music.is_some() {
@@ -1815,10 +1815,11 @@ impl Avatar {
             .map(|s| match s {
                 Step::Clip(id) if id == "@look" => {
                     let sf = self.layout.sf;
-                    // Close, level with her face or chest (or on her): straight at him.
-                    let half = self.brain.as_ref().map_or(0, |h| h.boxes.stand.w / 2);
-                    let front = (c.0 - gx).abs() < half + (FRONT_PX * sf) as i32
-                        && (head_y - (80.0 * sf) as i32..=head_y + (200.0 * sf) as i32).contains(&c.1);
+                    // Close to her body, level with her face or chest (or on her): straight at him.
+                    let reach = (FRONT_PX * sf) as i32;
+                    let front = self.brain.as_ref().and_then(|h| h.watch_box?.0).is_some_and(|b| {
+                        (b.x - reach..=b.right() + reach).contains(&c.0) && (b.y..=b.y + b.h * 3 / 5).contains(&c.1)
+                    });
                     let f = if let Some(f) = self.pack.behaviour.brain.look_front.as_deref().filter(|_| front) {
                         f
                     } else if c.1 < head_y - (200.0 * sf) as i32 && (c.0 - gx).abs() < (300.0 * sf) as i32 {
