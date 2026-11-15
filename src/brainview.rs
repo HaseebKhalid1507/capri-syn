@@ -663,6 +663,8 @@ impl Avatar {
         }
         h.sync_log();
         self.brain_apply(d.intents, now);
+        // Woken (or fallen asleep) by this decision: the nap's frames follow at once.
+        self.step_nap(now);
     }
 
     pub(super) fn brain_feed(&mut self, ev: BrainEvent, now: Instant) {
