@@ -459,7 +459,8 @@ impl Avatar {
         if std::mem::take(&mut w.turn) {
             self.voice.mic = None;
             self.voice.level = 0.0;
-            if self.voice.held && !self.voice_speaking() {
+            // (the capture that closed it holds other audio itself)
+            if self.voice.held && !self.voice_speaking() && !self.voice_other_mic() {
                 self.voice.held = false;
                 self.voice_send(serde_json::json!({ "op": "media-release", "after_ms": RESTORE_MS }));
             }
