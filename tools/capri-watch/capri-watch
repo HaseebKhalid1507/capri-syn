@@ -969,14 +969,14 @@ class Watcher:
         for key, v in list(fired.items()):
             if not v.get("level") and now - v.get("t", now) > 30 * 86400:
                 del fired[key]
-        self.state["sent"] = [t for t in self.state["sent"] if now - t < 3600]
+        self.state["sent"] = [t for t in self.state["sent"] if 0 <= now - t < 3600]   # (a clock jump back drops them)
 
     def gate(self, now):
         """Why delivery must wait now (None: go)."""
         g = self.cfg["safeguards"]
         if in_quiet(g["quiet_hours"], self.sys.local_minutes(now)):
             return "quiet hours"
-        sent = [t for t in self.state["sent"] if now - t < 3600]
+        sent = [t for t in self.state["sent"] if 0 <= now - t < 3600]
         if len(sent) >= g["max_per_hour"]:
             return f"wake cap ({g['max_per_hour']}/h)"
         if g["dnd"] or g["music"] != "ignore":

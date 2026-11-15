@@ -3,7 +3,7 @@
 
     python3 tools/capri-watch/test_capri_watch.py
 """
-import base64, importlib.machinery, importlib.util, io, json, os, re, sys, unittest
+import atexit, base64, importlib.machinery, importlib.util, io, json, os, re, shutil, sys, tempfile, unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 _loader = importlib.machinery.SourceFileLoader("capri_watch", os.path.join(HERE, "capri-watch"))
@@ -14,6 +14,8 @@ if not os.environ.get("CAPRI_WATCH_TEST_LOG"):
     cw.log = lambda msg: None   # the watcher's journal lines; set CAPRI_WATCH_TEST_LOG=1 to see them
 
 T0 = 1_800_000_000.0   # 2027-01-15T08:00:00Z
+TMP = tempfile.mkdtemp(prefix="capri-watch-test-")   # never the real ~/.local/state/capri-watch
+atexit.register(shutil.rmtree, TMP, True)
 
 
 def ts(t):
@@ -96,7 +98,9 @@ class FakeTransport(cw.Transport):
 
 
 def config(toml="", role="bella"):
-    return cw.load_config(text=f'role = "{role}"\n' + toml)
+    c = cw.load_config(text=f'role = "{role}"\n' + toml)
+    c["state_file"] = os.path.join(TMP, "state.json")
+    return c
 
 
 class Base(unittest.TestCase):
@@ -670,7 +674,7 @@ class SafeguardTest(Base):
         self.assertEqual(len(self.tr.sent), 1)
 
     def test_state_survives_a_restart(self):
-        path = os.path.join(os.environ.get("TMPDIR", "/tmp"), f"capri-watch-test-{os.getpid()}.json")
+        path = os.path.join(TMP, "restart.json")
         self.cfg["state_file"] = path
         try:
             self.fire("a.service")
@@ -683,6 +687,15 @@ class SafeguardTest(Base):
             for p in (path, path + ".tmp"):
                 if os.path.exists(p):
                     os.remove(p)
+
+    def test_tests_never_touch_the_real_state(self):
+        self.assertTrue(self.cfg["state_file"].startswith(TMP))
+
+    def test_a_clock_jump_back_does_not_freeze_the_cap(self):
+        self.w.state["sent"] = [T0 + 86400 * 365]   # a timestamp from the future
+        self.fire("a.service")
+        self.tick()
+        self.assertEqual(len(self.tr.sent), 1)
 
     def test_dry_run_never_sends_or_writes(self):
         out = io.StringIO()
