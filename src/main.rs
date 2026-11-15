@@ -437,6 +437,16 @@ fn run(t_start: Instant) -> Result<()> {
             })
             .map_err(|e| elog!("synaps-avatar: click watcher (XInput2): {e:#}; a click elsewhere won't park the Line"))
             .ok();
+            // The pointer near her, swiping past, resting on her (her lively reactions).
+            let tx = tx2.clone();
+            let sf = layout.sf;
+            let cfg = platform::x11::PointerCfg { near_px: 150.0 * sf, swipe_px: 120.0 * sf, swipe_speed: 1500.0 * sf, hover: std::time::Duration::from_millis(1500) };
+            x11.watch_pointer(cfg, move |p| {
+                let (r, _) = std::sync::mpsc::channel();
+                tx.send_blocking((control::Command::Watch(platform::x11::WatchEvent::Pointer(p)), r)).ok();
+            })
+            .map_err(|e| elog!("synaps-avatar: pointer watcher: {e:#}"))
+            .ok();
             // Real LISTENING: media players on the session bus (signals only). Tests see only
             // their own fake player (SA_MPRIS_ONLY), never his.
             let music = settings::Settings::load().map(|s| s.music).unwrap_or_default();

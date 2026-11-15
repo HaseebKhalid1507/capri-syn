@@ -11,6 +11,8 @@ mod ragview;
 mod lineview;
 #[path = "voiceview.rs"]
 mod voiceview;
+#[path = "arriveview.rs"]
+mod arriveview;
 
 use crate::anim::{Animator, Mood, Rng, Seq};
 use crate::control::Command;
@@ -463,6 +465,8 @@ pub struct Avatar {
     glints: Vec<Glint>,
     next_glint: Option<Instant>,
     teleport: Option<Teleport>,
+    /// Arrival sequences, the deep nap, the air kiss (arriveview).
+    arrive: arriveview::ArriveState,
     /// Body not drawn (between dematerialise and materialise).
     hidden: bool,
     quitting: bool,
@@ -676,6 +680,7 @@ impl Avatar {
             glints: Vec::new(),
             next_glint: None,
             teleport: None,
+            arrive: Default::default(),
             hidden: false,
             quitting: false,
             fatal: false,
@@ -1045,8 +1050,9 @@ impl Avatar {
             self.frames[i] = Some(f);
         }
         let now = Instant::now();
-        if first {
-            // Materialise with a glitch, like Capri coming online.
+        // Materialise with a glitch, like Capri coming online; with a launch intro she stays
+        // hidden until the frames are in, then arrives on the bolt.
+        if first && !self.launch_hold() {
             self.glitch = Some(Glitch::new(GlitchKind::Appear, now, self.rng.next()));
         }
         if complete && !self.loaded && state::load_hidden() {
@@ -1060,6 +1066,13 @@ impl Avatar {
             self.loaded = true;
             self.contact = [self.measure_contact(true), self.measure_contact(false)];
             self.set_mood(Mood::Idle, now);
+            let held = self.arrive.launch_wait;
+            if held && !self.launch_intro(now) && self.parked.is_none() {
+                self.hidden = false;
+                self.glitch = Some(Glitch::new(GlitchKind::Appear, now, self.rng.next()));
+            }
+            let win = self.x11.win;
+            self.set_icon_on(win);
             self.next_glint = Some(now + Duration::from_millis(700));
             self.bob_t0 = now;
             // Moods held back until the frames were in.
@@ -1238,6 +1251,9 @@ impl Avatar {
         if let Some(i) = self.voice_layer() {
             return (i, None);
         }
+        if let Some(i) = self.perch_sleep_frame(m) {
+            return (i, None);
+        }
         if self.sitting()
             && let Some(p) = self.perch_spec()
         {
@@ -1276,6 +1292,8 @@ impl Avatar {
             }
         }
         let mut seq: Seq = Vec::new();
+        // An arrival sequence (the launch intro) plays through; the mood's entry follows it.
+        let arriving = self.arriving(now);
         if !self.sitting() && !self.posed() {
             if m != prev
                 && let Some(exit) = self.spec(prev).and_then(|s| s.exit.clone())
@@ -1288,9 +1306,11 @@ impl Avatar {
         }
         let (base, looping) = self.layer(m);
         self.anim.set_layer(base, looping, now);
-        if !seq.is_empty() {
+        if !seq.is_empty() && arriving {
+            self.anim.then(seq, now);
+        } else if !seq.is_empty() {
             self.anim.play(seq, now);
-        } else if m != prev {
+        } else if m != prev && !arriving {
             self.anim.stop_oneshot(now);
         }
         // A change of signal colour glitches, like Capri's state bursts.
@@ -1326,9 +1346,14 @@ impl Avatar {
 
     /// Re-apply the current mood's layer after the placement changed (no entry/exit).
     fn relayer(&mut self, now: Instant) {
+        let before = self.anim.frame();
         let (base, looping) = self.layer(self.mood);
         self.anim.set_layer(base, looping, now);
-        self.anim.stop_oneshot(now);
+        // An arrival sequence plays through the landing's relayer.
+        if !self.arriving(now) {
+            self.anim.stop_oneshot(now);
+        }
+        self.lying_cut(before, now);
         let autonomous =
             self.music.is_none() && self.spec(self.mood).map_or(self.mood == Mood::Idle, |s| s.autonomy) && !self.activities().is_empty();
         let next = if autonomous { Some(now + self.autonomy_gap()) } else { None };
@@ -1493,6 +1518,7 @@ impl Avatar {
             }
         };
         take(self.anim.deadline());
+        take(self.kiss_deadline());
         take(self.voice_deadline(now));
         if !self.anim.busy() {
             take(self.next_activity);
@@ -1565,6 +1591,7 @@ impl Avatar {
 
     fn schedule(&mut self, _cx: &mut Context<Self>) {
         self.sync_shadow();
+        self.sync_pointer_watch();
         self.ticker.set(self.next_deadline());
     }
 
@@ -1574,8 +1601,13 @@ impl Avatar {
         if self.sliver.is_some_and(|t| now.saturating_duration_since(t) > SLIVER) {
             self.sliver = None;
         }
+        let before = self.anim.frame();
         let mut dirty = self.anim.tick(now);
         self.voice_keepalive(now, cx);
+        if dirty {
+            self.lying_cut(before, now);
+        }
+        dirty |= self.step_kiss(now);
         dirty |= self.voice_tick(now, cx);
         dirty |= self.step_turn(now);
         if let Some((at, m)) = self.mood_then
@@ -1863,6 +1895,7 @@ impl Avatar {
                 self.arrive(to, place, now);
                 self.hidden = false;
                 self.glitch = Some(self.land_glitch(now, seed));
+                self.arrive_appeared(now);
                 if let Some(tp) = &mut self.teleport {
                     tp.moved = true;
                     tp.leg = Leg::Appear;
@@ -1910,6 +1943,7 @@ impl Avatar {
                 }
                 self.arrive(to, place, now);
             }
+            self.arrive_appeared(now);
             redraw = true;
         }
         // The trail has drained into her: the landing glitch finishes the teleport.
@@ -3194,6 +3228,7 @@ impl Avatar {
         self.fold_reply();
         let seed = self.rng.next();
         self.glitch = Some(Glitch::new(GlitchKind::Vanish, now, seed));
+        self.arrive_reset();
         self.teleport = Some(Teleport { seed, leg: Leg::Vanish, to, place, bolt: None, moved: false, no_bolt: false, quiet: false });
     }
 
@@ -3219,6 +3254,7 @@ impl Avatar {
     fn teleport_done(&mut self, now: Instant) {
         let quiet = self.teleport.as_ref().is_some_and(|t| t.quiet);
         self.teleport = None;
+        self.arrive_reset();
         if !quiet {
             self.hud_after = Some(now + HUD_AFTER_TELEPORT);
         }
@@ -3397,7 +3433,9 @@ impl Avatar {
                 let still = matches!(self.placement, Placement::Perch { win, .. } if win == g.win);
                 self.perch_gone = None;
                 if still {
-                    self.fall("perch_gone", now);
+                    // Closed: another window's top (the brain decides, 55 %) or the fall;
+                    // gone with the workspace he left: she follows him.
+                    self.brain_perch_gone(g.win, now);
                 }
                 still
             }
@@ -3424,6 +3462,11 @@ impl Avatar {
             WatchEvent::TargetMoved(r) => {
                 let Placement::Perch { win, sit, dx } = self.placement else { return };
                 if win != r.id || self.teleport.is_some() {
+                    return;
+                }
+                self.brain_perch_moved(&r, now);
+                if self.placement != (Placement::Perch { win, sit, dx }) {
+                    // Startled off it.
                     return;
                 }
                 if self.perch_dx(&r, sit, Some(dx)).is_none() {
@@ -3465,6 +3508,7 @@ impl Avatar {
                 }
             }
             WatchEvent::Click(..) => {}
+            WatchEvent::Focus | WatchEvent::Desktop | WatchEvent::Pointer(_) => self.brain_watch(ev, now),
         }
     }
 
@@ -3635,7 +3679,7 @@ impl Avatar {
             (1, now)
         };
         let click = self.pack.behaviour.click.clone();
-        let perch_click = self.perch_spec().filter(|_| self.sitting()).map(|p| p.click.clone());
+        let perch_click = self.perch_spec().filter(|_| self.sitting()).map(|p| if head && !p.headpat.is_empty() { p.headpat.clone() } else { p.click.clone() });
         let steps = if !self.sitting() && !self.standing() {
             // Hanging or sitting on the floor: no standing clip, hearts on the head.
             if head {
@@ -3652,7 +3696,13 @@ impl Avatar {
             click.annoyed
         } else if head && !click.head.is_empty() {
             self.hearts = Some((now, at));
-            click.head
+            // Rarely the headpat ends in an air kiss.
+            let ms: u64 = self.pack.flatten(&click.head).iter().map(|s| s.1 as u64).sum();
+            let mut steps = click.head;
+            if let Some(k) = self.maybe_kiss(ms, now) {
+                steps.extend(k);
+            }
+            steps
         } else if !click.body.is_empty() {
             let i = self.rng.pick(click.body.len());
             click.body[i].clone()

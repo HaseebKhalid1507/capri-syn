@@ -140,6 +140,62 @@ pub struct Arrived {
     pub arrival: Arrival,
     /// Her body overlaps the focused window (cover exception): she must leave after.
     pub covering: bool,
+    /// The rule that asked for the move (`MovePlan::why`).
+    pub why: &'static str,
+}
+
+/// What a small hop is for (all ≤ 300 px, `places::HOP_MAX`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum HopKind {
+    /// A micro-hop: along the edge she's on, to the next window over, down to the floor and back.
+    Micro,
+    /// Her perch is being dragged fast: off it, landing nearby.
+    Startle,
+    /// The pointer hovered on her a while: a playful hop away from it.
+    Dodge,
+}
+
+impl HopKind {
+    pub fn key(self) -> &'static str {
+        match self {
+            HopKind::Micro => "micro",
+            HopKind::Startle => "startle",
+            HopKind::Dodge => "dodge",
+        }
+    }
+}
+
+/// Things on screen she reacts to (the view sees them; she decides).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Screen {
+    /// He focused another window.
+    Focus,
+    /// The window she sits on is being dragged at this speed (device px/s).
+    PerchDragged { speed: f32 },
+    /// The window she sat on closed; `target`: another visible window has room on top.
+    PerchClosed { target: bool },
+    /// The pointer came within reach (~150 px).
+    CursorNear,
+    /// The pointer swept past her at this speed (device px/s).
+    CursorSwipe { speed: f32 },
+    /// The pointer has rested on her a while.
+    CursorHover,
+    /// He switched workspace. `away`: she isn't on the monitor he works on; `stranded`: her
+    /// perch went with the old workspace (she'd fall).
+    Workspace { away: bool, stranded: bool },
+}
+
+/// A reaction in place (no move): the view plays it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum React {
+    /// Look at the pointer.
+    Look,
+    /// A startled jump in place.
+    Startle,
+    /// Lean in for a headpat.
+    Lean,
+    /// Her perch closed and she doesn't teleport: she falls (as before).
+    Fall,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -151,10 +207,14 @@ pub enum BrainEvent {
     #[allow(dead_code)]
     Landed { hard: bool },
     Arrived(Arrived),
-    /// The view couldn't do the move: nothing fits, or it is busy/gated right now.
-    MoveFailed { busy: bool },
+    /// The view couldn't do the move: nothing fits, or it is busy/gated right now. `why`:
+    /// the plan's rule.
+    MoveFailed { busy: bool, why: &'static str },
     Session(SessionSignal),
     Control(Ctl),
+    /// Something on screen (focus, a window, the pointer, a workspace): decided at the next
+    /// tick, on fresh senses (busy, typing, fullscreen, where she is).
+    Screen(Screen),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -172,6 +232,16 @@ pub enum Goal {
     Active { why: Why, approaches: Vec<Approach> },
     /// Leave his window after a bid that covered it (a quiet passive spot).
     Leave,
+    /// A small hop (≤ 300 px). `away`: he is typing, keep away from his window.
+    Hop { kind: HopKind, away: bool },
+    /// A roam while he has been idle a while: any monitor, more of the others.
+    Explore,
+    /// The newly focused window's top edge (else the floor beside it), never his work area.
+    FocusEdge,
+    /// Her perch closed: the top of another visible window (a teleport).
+    Rescue,
+    /// He switched workspace: a spot (a window top first) on the monitor he works on.
+    Follow,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -211,6 +281,8 @@ pub enum Intent {
     Hide(bool),
     /// Open the reply bubble (a Done/Error summon landed next to his work).
     Unfold,
+    /// A reaction in place.
+    React(React),
     /// Persist the drives.
     Save,
 }
@@ -246,6 +318,8 @@ pub struct Senses {
     /// He is near her: her monitor has the focus and she is within reach of the focused window.
     pub near: bool,
     pub placement: PlaceKind,
+    /// He is typing fast (input every second or so, the pointer still): only micro-hops.
+    pub typing: bool,
 }
 
 // ---- tuning ------------------------------------------------------------------------------
@@ -260,6 +334,7 @@ pub struct Tuning {
     pub roam_s: (f64, f64),
     pub move_cap_per_hour: u32,
     pub launch_grace_s: f64,
+    /// A fresh start roams first this long after launch; a saved roam clock no sooner.
     pub first_roam_min_s: f64,
     pub away_after_s: f64,
     pub back_idle_s: f64,
@@ -287,6 +362,34 @@ pub struct Tuning {
     pub back_grace_s: f64,
     /// Number of entries in the pack's bid pool.
     pub bid_pool: usize,
+    // ---- lively (LOCKED #17) ----
+    /// A micro-hop every this often while she is out of the way.
+    pub micro_s: (f64, f64),
+    /// What a small hop (micro, startle, dodge) counts against `move_cap_per_hour`.
+    pub hop_weight: f64,
+    /// A focus change makes her hop to its edge this often, this long after it, at most once
+    /// in `focus_gap_s`.
+    pub focus_p: f64,
+    pub focus_delay_s: (f64, f64),
+    pub focus_gap_s: f64,
+    /// The pointer near her: a look at most this often.
+    pub look_gap_s: f64,
+    /// A fast swipe past her (this fast, device px/s): a startle, at most this often.
+    pub swipe_speed: f32,
+    pub startle_gap_s: f64,
+    /// The pointer resting on her: a dodge (`dodge_p`) or a lean, at most this often.
+    pub hover_gap_s: f64,
+    pub dodge_p: f64,
+    /// Her perch dragged this fast (device px/s): a startled hop off it, at most this often.
+    pub drag_speed: f32,
+    pub drag_gap_s: f64,
+    /// Her perch closed and another window has room on top: she teleports there this often
+    /// (Haseeb 22:55: 50–60 %), else she falls.
+    pub close_teleport_p: f64,
+    /// He switched workspace and she isn't on his monitor: she follows this long after.
+    pub follow_delay_s: (f64, f64),
+    /// Idle this long: her roams explore (any monitor).
+    pub explore_idle_s: f64,
 }
 
 impl Tuning {
@@ -300,7 +403,7 @@ impl Tuning {
             roam_s: (s.passive_every_min.0 * 60.0, s.passive_every_min.1 * 60.0),
             move_cap_per_hour: s.max_moves_per_hour,
             launch_grace_s: 600.0,
-            first_roam_min_s: 90.0,
+            first_roam_min_s: 30.0,
             away_after_s: 300.0,
             back_idle_s: 3.0,
             nap_after_s: 600.0,
@@ -308,7 +411,7 @@ impl Tuning {
             bid_emote_s: (6.0, 10.0),
             escalations: 2,
             sulk_s: 6.0,
-            linger_s: (60.0, 150.0),
+            linger_s: (20.0, 60.0),
             offense_window_s: 90.0,
             summon_gap_s: 120.0,
             resummon_s: 300.0,
@@ -321,8 +424,33 @@ impl Tuning {
             leave_after_s: 3.0,
             back_grace_s: 120.0,
             bid_pool: 4,
+            micro_s: (20.0, 60.0),
+            hop_weight: 0.25,
+            focus_p: 1.0 / 3.0,
+            focus_delay_s: (2.0, 5.0),
+            focus_gap_s: 15.0,
+            look_gap_s: 15.0,
+            swipe_speed: 1500.0,
+            startle_gap_s: 30.0,
+            hover_gap_s: 45.0,
+            dodge_p: 0.5,
+            drag_speed: 1800.0,
+            drag_gap_s: 5.0,
+            close_teleport_p: 0.55,
+            follow_delay_s: (0.8, 2.0),
+            explore_idle_s: 120.0,
         }
     }
+}
+
+/// Moves that count fully against the hourly cap and those that count `hop_weight`.
+fn weight_of(why: &str, hop: f64) -> f64 {
+    if matches!(why, "micro" | "dodge" | "startle_drag") { hop } else { 1.0 }
+}
+
+/// Rules whose arrival restarts the roam clock when the view held the move back.
+fn roam_kind(why: &str) -> bool {
+    matches!(why, "roam" | "explore" | "sulk_far" | "covering")
 }
 
 // ---- shuffle bag ------------------------------------------------------------------------
@@ -433,19 +561,22 @@ pub struct Saved {
     pub dnd_until_unix: Option<f64>,
     pub enabled: bool,
     pub moves_unix: Vec<f64>,
+    /// Small hops (they count `hop_weight` against the cap).
+    pub hops_unix: Vec<f64>,
 }
 
 impl Saved {
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::json!({ "v": 1, "savedUnix": self.saved_unix, "attention": self.attention, "theta": self.theta,
             "roamFrac": self.roam_frac, "lastBidUnix": self.last_bid_unix, "dndUntilUnix": self.dnd_until_unix,
-            "enabled": self.enabled, "movesUnix": self.moves_unix })
+            "enabled": self.enabled, "movesUnix": self.moves_unix, "hopsUnix": self.hops_unix })
     }
     pub fn from_json(v: &serde_json::Value) -> Option<Saved> {
         if v.get("v")?.as_i64()? != 1 {
             return None;
         }
         let f = |k: &str| v.get(k).and_then(serde_json::Value::as_f64);
+        let list = |k: &str| v.get(k).and_then(|m| m.as_array()).map(|a| a.iter().filter_map(serde_json::Value::as_f64).collect()).unwrap_or_default();
         Some(Saved {
             saved_unix: f("savedUnix")?,
             attention: f("attention")?.clamp(-0.8, 1.2),
@@ -454,7 +585,8 @@ impl Saved {
             last_bid_unix: f("lastBidUnix"),
             dnd_until_unix: f("dndUntilUnix"),
             enabled: v.get("enabled").and_then(serde_json::Value::as_bool).unwrap_or(true),
-            moves_unix: v.get("movesUnix").and_then(|m| m.as_array()).map(|a| a.iter().filter_map(serde_json::Value::as_f64).collect()).unwrap_or_default(),
+            moves_unix: list("movesUnix"),
+            hops_unix: list("hopsUnix"),
         })
     }
 }
@@ -489,7 +621,21 @@ pub struct Brain {
     last_bid: Option<f64>,
     last_active_arrival: Option<f64>,
     last_interaction: Option<f64>,
-    moves: VecDeque<f64>,
+    /// Autonomous moves of the last hour: (time, weight against the cap, rule).
+    moves: VecDeque<(f64, f64, &'static str)>,
+    /// The next micro-hop.
+    next_micro: f64,
+    /// A focus hop and a workspace follow waiting for their beat.
+    focus_at: Option<f64>,
+    follow_at: Option<f64>,
+    /// Rate limits of the reactions (when each last went).
+    last_focus: Option<f64>,
+    last_look: Option<f64>,
+    last_startle: Option<f64>,
+    last_hover: Option<f64>,
+    last_drag: Option<f64>,
+    /// Screen things waiting for the next tick's senses.
+    screen_q: Vec<Screen>,
     pending: Option<Pending>,
     /// The unanswered prompt, and per prompt id: (summons so far, last summon).
     prompt_open: Option<u64>,
@@ -522,8 +668,10 @@ impl Brain {
         let mut rng = Rng::new(seed);
         let theta = rng.range(tuning.theta.0 as f32, tuning.theta.1 as f32) as f64;
         let t_roam = rng.range(tuning.roam_s.0 as f32, tuning.roam_s.1 as f32) as f64;
-        // A fresh start roams first after FIRST_ROAM_MIN..ROAM_MAX.
-        let first = rng.range(tuning.first_roam_min_s as f32, tuning.roam_s.1.max(tuning.first_roam_min_s) as f32) as f64;
+        // A fresh start roams first 30 s after launch (LOCKED #17).
+        let first = tuning.first_roam_min_s;
+        // The first micro-hop no sooner than the first roam.
+        let micro = rng.range(tuning.micro_s.0.max(tuning.first_roam_min_s) as f32, tuning.micro_s.1.max(tuning.first_roam_min_s + 1.0) as f32) as f64;
         let mut b = Brain {
             rng,
             start: now,
@@ -543,6 +691,15 @@ impl Brain {
             last_active_arrival: None,
             last_interaction: None,
             moves: VecDeque::new(),
+            next_micro: now + micro,
+            focus_at: None,
+            follow_at: None,
+            last_focus: None,
+            last_look: None,
+            last_startle: None,
+            last_hover: None,
+            last_drag: None,
+            screen_q: Vec::new(),
             pending: None,
             prompt_open: None,
             prompt_summons: HashMap::new(),
@@ -574,7 +731,11 @@ impl Brain {
             b.enabled = s.enabled;
             b.last_bid = s.last_bid_unix.map(|u| now - ago - (s.saved_unix - u));
             b.dnd_until = s.dnd_until_unix.map(|u| now - ago + (u - s.saved_unix)).filter(|&d| d > now);
-            b.moves = s.moves_unix.iter().map(|&u| now - ago - (s.saved_unix - u)).filter(|&m| m > now - 3600.0).collect();
+            let at = |u: f64| now - ago - (s.saved_unix - u);
+            let hop = b.tuning.hop_weight;
+            let mut m: Vec<(f64, f64, &'static str)> = s.moves_unix.iter().map(|&u| (at(u), 1.0, "roam")).chain(s.hops_unix.iter().map(|&u| (at(u), hop, "micro"))).filter(|m| m.0 > now - 3600.0).collect();
+            m.sort_by(|a, b| a.0.total_cmp(&b.0));
+            b.moves = m.into();
         }
         b.note(now, format!("start attention={:.2} theta={:.2} roam={:.2} t_roam={:.0}", b.attn, b.theta, b.roam, b.t_roam));
         b
@@ -591,7 +752,8 @@ impl Brain {
             last_bid_unix: self.last_bid.map(unix),
             dnd_until_unix: self.dnd_until.filter(|&d| d > now).map(unix),
             enabled: self.enabled,
-            moves_unix: self.moves.iter().map(|&m| unix(m)).collect(),
+            moves_unix: self.moves.iter().filter(|m| m.1 >= 1.0).map(|m| unix(m.0)).collect(),
+            hops_unix: self.moves.iter().filter(|m| m.1 < 1.0).map(|m| unix(m.0)).collect(),
         }
     }
 
@@ -645,19 +807,30 @@ impl Brain {
         self.enabled && !self.dnd(t) && !self.sensed.fullscreen && !self.hidden && self.present
     }
 
-    fn moves_in_hour(&self, t: f64) -> usize {
-        self.moves.iter().filter(|&&m| m > t - 3600.0).count()
+    /// The moves of the rolling hour, weighted (a small hop counts `hop_weight`).
+    fn load(&self, t: f64) -> f64 {
+        self.moves.iter().filter(|m| m.0 > t - 3600.0).map(|m| m.1).sum()
     }
 
-    fn cap_ok(&self, t: f64) -> bool {
-        self.moves_in_hour(t) < self.tuning.move_cap_per_hour as usize
+    /// A move weighing `w` fits in the hour's cap.
+    fn cap_ok(&self, t: f64, w: f64) -> bool {
+        self.load(t) + w <= self.tuning.move_cap_per_hour as f64 + EPS
     }
 
-    /// When the rolling hour frees a slot again.
-    fn cap_free_at(&self, t: f64) -> f64 {
-        let recent: Vec<f64> = self.moves.iter().copied().filter(|&m| m > t - 3600.0).collect();
-        let cap = self.tuning.move_cap_per_hour as usize;
-        if recent.len() < cap { t } else { recent[recent.len() - cap] + 3600.0 }
+    /// When the rolling hour has room for `w` again.
+    fn cap_free_at(&self, t: f64, w: f64) -> f64 {
+        let cap = self.tuning.move_cap_per_hour as f64;
+        let mut load = self.load(t);
+        if load + w <= cap + EPS {
+            return t;
+        }
+        for m in self.moves.iter().filter(|m| m.0 > t - 3600.0) {
+            load -= m.1;
+            if load + w <= cap + EPS {
+                return m.0 + 3600.0;
+            }
+        }
+        t
     }
 
     fn bid_allowed_at(&self) -> f64 {
@@ -709,14 +882,23 @@ impl Brain {
                 }
                 if self.attn >= self.theta - EPS || self.force_seek {
                     take(self.bid_allowed_at());
-                    take(self.cap_free_at(t));
+                    take(self.cap_free_at(t, 2.0));
                 }
                 let rr = self.roam_rate();
                 if rr > 0.0 && self.roam < 1.0 {
                     take(t + (1.0 - self.roam) / rr);
                 }
                 if self.roam >= 1.0 - EPS {
-                    take(self.cap_free_at(t));
+                    take(self.cap_free_at(t, 1.0));
+                }
+                if self.present {
+                    take(self.next_micro);
+                    if let Some(f) = self.focus_at {
+                        take(f);
+                    }
+                    if let Some(f) = self.follow_at {
+                        take(f);
+                    }
                 }
             }
             Mode::Napping => {}
@@ -772,6 +954,7 @@ impl Brain {
             Intent::Pose(p) => format!("pose {p:?}"),
             Intent::Hide(h) => format!("hide {h}"),
             Intent::Unfold => "unfold".into(),
+            Intent::React(r) => format!("react {r:?}"),
             Intent::Save => return self.out.push((t, i)),
         };
         self.note(t, what);
@@ -808,6 +991,11 @@ impl Brain {
             self.note(t, "dnd ends".into());
             self.emit(t, Intent::Save);
         }
+        if senses.is_some() {
+            for s in std::mem::take(&mut self.screen_q) {
+                self.screen(s, t);
+            }
+        }
         if let (false, Some(a)) = (self.present, self.away_since)
             && self.mode != Mode::Napping
             && t + EPS >= a + self.tuning.nap_after_s
@@ -840,6 +1028,7 @@ impl Brain {
             self.present = true;
             self.away_since = None;
             self.no_bid_before = self.no_bid_before.max(t + self.tuning.back_grace_s);
+            self.next_micro = t + self.micro_gap();
             self.note(t, "back".into());
             if self.mode == Mode::Napping {
                 self.mode = Mode::Passive;
@@ -875,7 +1064,7 @@ impl Brain {
         match self.mode.clone() {
             Mode::Seeking { since, .. } if t + EPS >= since + self.tuning.seek_timeout_s => {
                 self.note(t, "seek timed out".into());
-                self.move_failed(t, false);
+                self.move_failed(t, false, "seek");
             }
             Mode::Bidding { stage, since, next_emote, emote } => {
                 if t + EPS >= since + self.tuning.bid_stage_s * (stage as f64 + 1.0) {
@@ -923,7 +1112,7 @@ impl Brain {
                     self.far_next = true;
                     self.note(t, "sulk over: stays low, the next roam goes far".into());
                 } else if self.gate_open(t) {
-                    self.record_move(t);
+                    self.record_move(t, "sulk_far");
                     let arrivals = self.passive_arrivals();
                     self.emit(t, Intent::Move(MovePlan { goal: Goal::Passive { far: true }, why: "sulk_far", arrivals }));
                 } else {
@@ -960,37 +1149,124 @@ impl Brain {
                 }
             }
         }
+        // A due micro-hop that can't go now is skipped, not held (the next one comes later).
+        let micro_due = self.present && t + EPS >= self.next_micro;
+        let micro_fresh = micro_due && t - self.next_micro < 5.0;
+        if micro_due {
+            self.next_micro = t + self.micro_gap();
+        }
+        // Stale reaction beats (she was busy elsewhere meanwhile) are dropped.
+        let focus_due = self.focus_at.filter(|&f| t + EPS >= f).inspect(|_| self.focus_at = None);
+        let follow_due = self.follow_at.filter(|&f| t + EPS >= f).inspect(|_| self.follow_at = None);
         if self.mode != Mode::Passive || !self.gate_open(t) {
             return;
         }
         let busy = !self.sensed.busy.is_empty();
+        // He is typing fast: only micro-hops (roams and visits wait for a pause).
+        let typing = self.sensed.typing;
+        // Reactions first: they are about what he just did.
+        if let Some(f) = follow_due
+            && t - f < 10.0
+            && !busy
+            && self.cap_ok(t, 1.0)
+        {
+            self.relocated(t, "workspace", Goal::Follow, vec![Arrival::Glitch, Arrival::Teleport]);
+            return;
+        }
+        if let Some(f) = focus_due
+            && t - f < 10.0
+            && !busy
+            && !typing
+            && self.cap_ok(t, 1.0)
+        {
+            self.last_focus = Some(t);
+            let arrivals = self.reaction_arrivals();
+            self.relocated(t, "focus", Goal::FocusEdge, arrivals);
+            return;
+        }
         // Attention bid.
         // A bid keeps one slot of the hour free for leaving his window after it.
-        let room = self.moves_in_hour(t) + 1 < self.tuning.move_cap_per_hour as usize;
-        let rules = self.force_seek || (t + EPS >= self.bid_allowed_at() && room);
+        let room = self.cap_ok(t, 2.0);
+        let rules = self.force_seek || (t + EPS >= self.bid_allowed_at() && room && !typing);
         if self.settings.attention != Attention::Off && self.attn >= self.theta - EPS && rules && !busy {
             self.force_seek = false;
             self.prev_bid = self.last_bid;
             self.last_bid = Some(t);
-            self.record_move(t);
+            self.record_move(t, "bid");
+            self.focus_at = None;
+            self.follow_at = None;
             self.seek(t, Why::Attention);
             return;
         }
-        // Roam.
-        if self.roam >= 1.0 - EPS && self.cap_ok(t) && !busy {
+        // Roam: the bigger hops, in his pauses.
+        if self.roam >= 1.0 - EPS && self.cap_ok(t, 1.0) && !busy && !typing {
             let far = std::mem::take(&mut self.far_next);
+            let explore = !far && self.sensed.idle_s >= self.tuning.explore_idle_s;
             self.redraw_roam();
-            self.record_move(t);
+            let (goal, why) = if explore { (Goal::Explore, "explore") } else { (Goal::Passive { far }, "roam") };
+            self.record_move(t, why);
+            self.next_micro = self.next_micro.max(t + self.micro_gap());
             let arrivals = self.passive_arrivals();
-            self.emit(t, Intent::Move(MovePlan { goal: Goal::Passive { far }, why: "roam", arrivals }));
+            self.emit(t, Intent::Move(MovePlan { goal, why, arrivals }));
             self.emit(t, Intent::Save);
+            return;
+        }
+        // Micro-hop: a little burst of life while she is out of the way.
+        // A micro-hop keeps a full slot of the hour free for the next roam.
+        if micro_fresh && !busy && self.hops_on() && self.out_of_the_way() && self.cap_ok(t, self.tuning.hop_weight + 1.0) {
+            self.record_move(t, "micro");
+            self.emit(t, Intent::Move(MovePlan { goal: Goal::Hop { kind: HopKind::Micro, away: typing }, why: "micro", arrivals: vec![Arrival::Hop] }));
         }
     }
 
-    fn record_move(&mut self, t: f64) {
-        self.moves.push_back(t);
-        while self.moves.front().is_some_and(|&m| m <= t - 3600.0) {
+    /// Out of the way: on the floor or a window top (not floating, hanging or on his window),
+    /// not sitting low after a sulk.
+    fn out_of_the_way(&self) -> bool {
+        !self.covering && !self.far_next && matches!(self.sensed.placement, PlaceKind::Ground | PlaceKind::Perch)
+    }
+
+    fn micro_gap(&mut self) -> f64 {
+        let (lo, hi) = self.tuning.micro_s;
+        self.rng.range(lo as f32, hi as f32) as f64
+    }
+
+    /// A reaction that moves her somewhere new (focus, workspace, a closed perch): a full move,
+    /// and the roam clock halves (she just went somewhere).
+    fn relocated(&mut self, t: f64, why: &'static str, goal: Goal, arrivals: Vec<Arrival>) {
+        self.record_move(t, why);
+        self.roam *= 0.5;
+        self.next_micro = self.next_micro.max(t + self.micro_gap());
+        self.emit(t, Intent::Move(MovePlan { goal, why, arrivals }));
+        self.emit(t, Intent::Save);
+    }
+
+    /// A hop if it's close, else the arrival bag's order (a teleport last).
+    fn reaction_arrivals(&mut self) -> Vec<Arrival> {
+        let mut v = if self.hops_on() { vec![Arrival::Hop] } else { Vec::new() };
+        for a in self.passive_arrivals() {
+            if !v.contains(&a) {
+                v.push(a);
+            }
+        }
+        v
+    }
+
+    /// `arrivals.hop = 0` in settings: she never hops (no micro-hops, dodges or startled hops).
+    fn hops_on(&self) -> bool {
+        self.settings.arrivals.iter().any(|a| a.0 == Arrival::Hop && a.1 > 0.0)
+    }
+
+    fn record_move(&mut self, t: f64, why: &'static str) {
+        self.moves.push_back((t, weight_of(why, self.tuning.hop_weight), why));
+        while self.moves.front().is_some_and(|m| m.0 <= t - 3600.0) {
             self.moves.pop_front();
+        }
+    }
+
+    /// A move that didn't happen: off the books (the last one with that rule).
+    fn unrecord(&mut self, why: &str) {
+        if let Some(i) = self.moves.iter().rposition(|m| m.2 == why) {
+            self.moves.remove(i);
         }
     }
 
@@ -999,8 +1275,10 @@ impl Brain {
         self.rng.range(lo as f32, hi as f32) as f64
     }
 
+    /// Her own moves draw from the arrival weights too (LOCKED #17: hop 4, teleport 2, drop_in
+    /// 2, glitch 1); the view takes the first that fits the distance, a teleport last.
     fn passive_arrivals(&mut self) -> Vec<Arrival> {
-        let w: Vec<(Arrival, f64)> = self.settings.arrivals.iter().copied().filter(|a| matches!(a.0, Arrival::Teleport | Arrival::Glitch)).collect();
+        let w: Vec<(Arrival, f64)> = self.settings.arrivals.iter().copied().filter(|a| a.0 != Arrival::Drift).collect();
         let mut v = Bag::<Arrival>::default().order(&w, 0, &mut self.rng);
         if !v.contains(&Arrival::Teleport) {
             v.push(Arrival::Teleport);
@@ -1016,6 +1294,8 @@ impl Brain {
     }
 
     fn seek(&mut self, t: f64, why: Why) {
+        self.focus_at = None;
+        self.follow_at = None;
         let n = self.settings.no_repeat;
         let mut approaches = self.approaches.order(&self.approach_weights(), n, &mut self.rng);
         approaches.retain(|a| *a != Approach::Beside);
@@ -1051,7 +1331,7 @@ impl Brain {
             return false;
         }
         self.covering = false;
-        self.record_move(t);
+        self.record_move(t, "covering");
         let arrivals = self.passive_arrivals();
         self.emit(t, Intent::Move(MovePlan { goal: Goal::Leave, why: "covering", arrivals }));
         true
@@ -1089,7 +1369,13 @@ impl Brain {
         self.covering = false;
     }
 
-    fn move_failed(&mut self, t: f64, busy: bool) {
+    fn move_failed(&mut self, t: f64, busy: bool, why: &'static str) {
+        // Hops and reactions that couldn't go simply didn't happen (the view falls for a
+        // closed perch).
+        if matches!(why, "micro" | "dodge" | "startle_drag" | "focus" | "workspace" | "perch_closed") {
+            self.unrecord(why);
+            return;
+        }
         match self.mode.clone() {
             Mode::Seeking { why: Why::Attention, .. } => {
                 self.mode = Mode::Passive;
@@ -1098,7 +1384,7 @@ impl Brain {
                     self.no_bid_before = self.no_bid_before.max(t + self.tuning.retry_s);
                 }
                 self.last_bid = self.prev_bid;
-                self.moves.pop_back();
+                self.unrecord("bid");
             }
             Mode::Seeking { why: Why::Summon(kind), .. } => {
                 self.mode = Mode::Passive;
@@ -1176,7 +1462,11 @@ impl Brain {
                     format!("arrived {} by {}{}", a.approach.map_or("passive", Approach::key), a.arrival.key(), if a.covering { " (covering)" } else { "" }),
                 );
                 self.covering = a.covering;
-                if let Mode::Seeking { why, .. } = self.mode {
+                // Only the visit's or the summon's own landing ends the seek (a hop decided
+                // just before it may land first).
+                if let Mode::Seeking { why, .. } = self.mode
+                    && matches!(a.why, "bid" | "summon")
+                {
                     self.last_active_arrival = Some(t);
                     if let Some(ap) = a.approach {
                         self.approaches.used(ap);
@@ -1200,16 +1490,21 @@ impl Brain {
                             self.mode = Mode::Summoned { kind, until: t + hold };
                         }
                     }
-                } else if a.approach.is_none() && self.mode == Mode::Passive && self.moves.back().is_some_and(|&m| t - m > 5.0) {
+                } else if a.approach.is_none() && self.mode == Mode::Passive && roam_kind(a.why) && self.moves.iter().rev().find(|m| m.2 == a.why).is_some_and(|m| t - m.0 > 5.0) {
                     // The view held the move back (behind a clip, a bubble): the next roam
                     // counts from when she got there.
                     self.roam = 0.0;
                 }
                 self.emit(t, Intent::Save);
             }
-            BrainEvent::MoveFailed { busy } => {
-                self.note(t, format!("move failed{}", if busy { " (busy)" } else { "" }));
-                self.move_failed(t, busy);
+            BrainEvent::MoveFailed { busy, why } => {
+                self.note(t, format!("move failed{} (why {why})", if busy { " (busy)" } else { "" }));
+                self.move_failed(t, busy, why);
+            }
+            BrainEvent::Screen(s) => {
+                // Read the senses now: the reaction is decided on what is up this moment.
+                self.screen_q.push(s);
+                self.next_poll = self.next_poll.min(t);
             }
             BrainEvent::Session(sig) => {
                 self.note(t, format!("session {sig:?}"));
@@ -1244,6 +1539,94 @@ impl Brain {
         // React now (a forced roam, a summon), not at the next wake-up.
         self.timers(t);
         self.triggers(t);
+    }
+
+    /// Something on screen, on this tick's senses. Every reaction needs the gate open (on, no
+    /// DND, no fullscreen, he is here, not hidden) and nothing up: a bubble, a field, the Line,
+    /// a prompt, the menu, a drag (`HOLDERS`), a move under way or her hidden; the moves also
+    /// fit the hourly cap.
+    fn screen(&mut self, s: Screen, t: f64) {
+        let busy = self.sensed.busy.iter().any(|b| HOLDERS.contains(b) || matches!(*b, "teleport" | "hidden"));
+        let typing = self.sensed.typing;
+        self.note(t, format!("screen {s:?}{}{}", if busy { " busy" } else { "" }, if typing { " typing" } else { "" }));
+        let calm = self.gate_open(t) && !busy;
+        let passive = self.mode == Mode::Passive;
+        let since = |l: Option<f64>, gap: f64| l.is_none_or(|l| t - l >= gap - EPS);
+        match s {
+            Screen::Focus => {
+                // A newer focus change replaces the hop waiting for the last one.
+                self.focus_at = None;
+                if calm && passive && !typing && since(self.last_focus, self.tuning.focus_gap_s) && (self.rng.range(0.0, 1.0) as f64) < self.tuning.focus_p {
+                    let (lo, hi) = self.tuning.focus_delay_s;
+                    let at = t + self.rng.range(lo as f32, hi as f32) as f64;
+                    self.focus_at = Some(at);
+                    self.note(t, format!("focus hop in {:.1} s", at - t));
+                }
+            }
+            Screen::PerchDragged { speed } => {
+                let w = self.tuning.hop_weight;
+                if speed >= self.tuning.drag_speed && calm && passive && self.hops_on() && since(self.last_drag, self.tuning.drag_gap_s) && self.cap_ok(t, w) {
+                    self.last_drag = Some(t);
+                    self.record_move(t, "startle_drag");
+                    self.emit(t, Intent::Move(MovePlan { goal: Goal::Hop { kind: HopKind::Startle, away: false }, why: "startle_drag", arrivals: vec![Arrival::Hop] }));
+                }
+            }
+            Screen::PerchClosed { target } => {
+                // No target, a gate shut, something up, a visit under way: she falls as before.
+                let go = target && calm && !self.mode.active() && self.cap_ok(t, 1.0) && (self.rng.range(0.0, 1.0) as f64) < self.tuning.close_teleport_p;
+                if go {
+                    if !passive {
+                        // A linger or a sulk is over: she went somewhere else.
+                        self.mode = Mode::Passive;
+                    }
+                    self.relocated(t, "perch_closed", Goal::Rescue, vec![Arrival::Teleport]);
+                } else {
+                    self.emit(t, Intent::React(React::Fall));
+                }
+            }
+            Screen::CursorNear => {
+                if calm && self.mode != Mode::Napping && since(self.last_look, self.tuning.look_gap_s) {
+                    self.last_look = Some(t);
+                    self.emit(t, Intent::React(React::Look));
+                }
+            }
+            Screen::CursorSwipe { speed } => {
+                if speed >= self.tuning.swipe_speed && calm && !self.mode.active() && since(self.last_startle, self.tuning.startle_gap_s) {
+                    self.last_startle = Some(t);
+                    // A startle counts as a look too (no look right after).
+                    self.last_look = Some(t);
+                    self.emit(t, Intent::React(React::Startle));
+                }
+            }
+            Screen::CursorHover => {
+                if calm && self.mode != Mode::Napping && since(self.last_hover, self.tuning.hover_gap_s) {
+                    self.last_hover = Some(t);
+                    let w = self.tuning.hop_weight;
+                    let dodge = passive && self.hops_on() && self.out_of_the_way() && self.cap_ok(t, w) && (self.rng.range(0.0, 1.0) as f64) < self.tuning.dodge_p;
+                    if dodge {
+                        self.record_move(t, "dodge");
+                        self.emit(t, Intent::Move(MovePlan { goal: Goal::Hop { kind: HopKind::Dodge, away: false }, why: "dodge", arrivals: vec![Arrival::Hop] }));
+                    } else {
+                        self.emit(t, Intent::React(React::Lean));
+                    }
+                }
+            }
+            Screen::Workspace { away, stranded } => {
+                self.follow_at = None;
+                if stranded {
+                    // Her perch went with the old workspace: follow him now, else fall.
+                    if calm && !self.mode.active() && self.cap_ok(t, 1.0) {
+                        self.mode = Mode::Passive;
+                        self.relocated(t, "workspace", Goal::Follow, vec![Arrival::Glitch, Arrival::Teleport]);
+                    } else {
+                        self.emit(t, Intent::React(React::Fall));
+                    }
+                } else if away && calm && passive {
+                    let (lo, hi) = self.tuning.follow_delay_s;
+                    self.follow_at = Some(t + self.rng.range(lo as f32, hi as f32) as f64);
+                }
+            }
+        }
     }
 
     fn control(&mut self, c: Ctl, t: f64) {
@@ -1346,7 +1729,12 @@ impl Brain {
             "covering": self.covering,
             "last_interaction_s": ago(self.last_interaction),
             "next_wake_in": r(self.due() - now),
-            "moves_last_hour": self.moves_in_hour(now),
+            "moves_last_hour": self.moves.iter().filter(|m| m.0 > now - 3600.0).count(),
+            "load_last_hour": r(self.load(now)),
+            "next_micro_in": self.present.then(|| r(self.next_micro - now)),
+            "focus_hop_in": self.focus_at.map(|f| r(f - now)),
+            "follow_in": self.follow_at.map(|f| r(f - now)),
+            "typing": self.sensed.typing,
             "recent_moves": self.recent_moves.iter().map(|(t, w)| serde_json::json!({ "ago_s": r(now - t), "why": w })).collect::<Vec<_>>(),
             "last_bid_ago": ago(self.last_bid),
             "pending_summon": self.pending.map(|p| format!("{:?}", p.kind)),
@@ -1369,11 +1757,28 @@ impl Brain {
     }
 }
 
+/// What holds a move back at the very last moment (the view checks right before it runs one;
+/// the brain only reads `busy` at its polls): a bubble, a field, the Line, a prompt, the menu
+/// or a drag. Summons win, and leaving his window after a visit isn't held either (as before).
+pub const HOLDERS: [&str; 6] = ["bubble", "field", "line", "prompt", "menu", "drag"];
+
+pub fn held_by(busy: &[&str], plan: &MovePlan) -> Option<&'static str> {
+    if matches!(plan.goal, Goal::Active { why: Why::Summon(_), .. } | Goal::Leave) {
+        return None;
+    }
+    HOLDERS.iter().copied().find(|h| busy.contains(h))
+}
+
 fn plan_text(p: &MovePlan) -> String {
     let arr: Vec<_> = p.arrivals.iter().map(|a| a.key()).collect();
     match &p.goal {
         Goal::Passive { far } => format!("passive{} [{}]", if *far { " far" } else { "" }, arr.join(",")),
         Goal::Leave => format!("leave [{}]", arr.join(",")),
+        Goal::Hop { kind, away } => format!("hop {}{} [{}]", kind.key(), if *away { " away" } else { "" }, arr.join(",")),
+        Goal::Explore => format!("explore [{}]", arr.join(",")),
+        Goal::FocusEdge => format!("focus_edge [{}]", arr.join(",")),
+        Goal::Rescue => format!("rescue [{}]", arr.join(",")),
+        Goal::Follow => format!("follow [{}]", arr.join(",")),
         Goal::Active { why, approaches } => {
             let ap: Vec<_> = approaches.iter().map(|a| a.key()).collect();
             format!("{} [{}] [{}]", match why {
@@ -1424,7 +1829,7 @@ mod tests {
                         Goal::Active { approaches, .. } => (approaches.first().copied(), approaches.first().is_some_and(|a| a.covers())),
                         _ => (None, false),
                     };
-                    let a = Arrived { approach, arrival: p.arrivals[0], covering };
+                    let a = Arrived { approach, arrival: p.arrivals[0], covering, why: p.why };
                     log.push((ti, i.clone()));
                     b.on_event(BrainEvent::Arrived(a), ti);
                     pending.extend(std::mem::take(&mut b.out));
@@ -1476,7 +1881,8 @@ mod tests {
             let mut b = brain(seed);
             let r = run(&mut b, 0.0, 4000.0, false, &here, &[]);
             let first = bids(&r)[0];
-            assert!((1200.0..=1800.0 + 1e-6).contains(&first), "seed {seed}: first bid at {first}");
+            // θ·fill = 8–15 min (LOCKED #17), not before the launch grace.
+            assert!((600.0..=900.0 + 1e-6).contains(&first), "seed {seed}: first bid at {first}");
             assert!(first >= b.tuning.launch_grace_s);
         }
     }
@@ -1496,10 +1902,11 @@ mod tests {
         let rb = run(&mut b, 0.0, 1500.0, true, &calm, &[]);
         let (ma, mb) = (moves(&ra), moves(&rb));
         assert!(!ma.is_empty(), "a roam happens eventually");
-        assert_eq!(ma.iter().map(|m| m.0).collect::<Vec<_>>(), mb.iter().map(|m| m.0).collect::<Vec<_>>(), "focus changes move nothing");
-        assert!(ma[0].0 >= s.passive_every_min.0 * 60.0 - 1e-6, "first move {} is on the roam clock", ma[0].0);
-        assert!(ma.iter().all(|(_, p)| p.why == "roam" && matches!(p.goal, Goal::Passive { .. })));
-        assert!(a.snapshot(1500.0)["recent_moves"].as_array().is_some_and(|v| v.iter().all(|m| m["why"] == "roam")));
+        assert_eq!(ma.iter().map(|m| m.0).collect::<Vec<_>>(), mb.iter().map(|m| m.0).collect::<Vec<_>>(), "the near sense flickering moves nothing");
+        assert!(ma[0].0 >= b.tuning.first_roam_min_s - 1e-6, "first move {} is on the roam clock", ma[0].0);
+        // Only her own clocks move her (a focus hop needs a real focus event, `focus_hop_*`).
+        assert!(ma.iter().all(|(_, p)| matches!(p.why, "roam" | "micro")));
+        assert!(a.snapshot(1500.0)["recent_moves"].as_array().is_some_and(|v| v.iter().all(|m| m["why"] == "roam" || m["why"] == "micro")));
     }
 
     #[test]
@@ -1519,47 +1926,49 @@ mod tests {
     #[test]
     fn response_satisfies() {
         let mut b = brain(4);
-        let ev = [(700.0, BrainEvent::Control(Ctl::Force(Force::Seek))), (705.0, BrainEvent::Interaction(Touch::Headpat))];
-        let r = run(&mut b, 0.0, 3000.0, false, &here, &ev);
-        let bids = bids(&r);
-        assert_eq!(bids[0], 700.0);
-        assert!(r.log.iter().any(|(t, i)| *t == 705.0 && *i == Intent::Emote(EmoteKey::Satisfied { pat: true })));
-        assert!(bids.get(1).is_none_or(|&t| t >= 700.0 + 1200.0), "next bid {bids:?}");
+        let ev = [(500.0, BrainEvent::Control(Ctl::Force(Force::Seek))), (505.0, BrainEvent::Interaction(Touch::Headpat))];
+        let r = run(&mut b, 0.0, 975.0, false, &here, &ev);
+        let first = bids(&r);
+        assert_eq!(first, vec![500.0]);
+        assert!(r.log.iter().any(|(t, i)| *t == 505.0 && *i == Intent::Emote(EmoteKey::Satisfied { pat: true })));
         // If the approach covered his window, she leaves 3 s after the emote; never later.
-        let covered = moves(&r).iter().any(|(_, p)| matches!(&p.goal, Goal::Active { approaches, .. } if approaches[0].covers()));
-        let left = moves(&r).iter().any(|(t, p)| *t == 708.0 && p.goal == Goal::Leave);
+        let covered = moves(&r).iter().any(|(t, p)| *t == 500.0 && matches!(&p.goal, Goal::Active { approaches, .. } if approaches[0].covers()));
+        let left = moves(&r).iter().any(|(t, p)| *t == 508.0 && p.goal == Goal::Leave);
         assert_eq!(covered, left);
         assert!(!b.covering());
+        let r = run(&mut b, 975.0, 2400.0, false, &here, &[]);
+        assert!(bids(&r).first().is_none_or(|&t| t >= 500.0 + 480.0), "next bid {:?}", bids(&r));
     }
 
     #[test]
     fn ignored_escalates_then_sulks() {
         let mut b = brain(5);
         let theta0 = b.theta;
-        let r = run(&mut b, 0.0, 800.0, false, &here, &[(700.0, BrainEvent::Control(Ctl::Force(Force::Seek)))]);
+        let r = run(&mut b, 0.0, 600.0, false, &here, &[(500.0, BrainEvent::Control(Ctl::Force(Force::Seek)))]);
         let insists: Vec<_> = r.log.iter().filter(|(_, i)| matches!(i, Intent::Emote(EmoteKey::Insist(_)))).map(|x| x.0).collect();
         let distinct: Vec<u8> = r.log.iter().filter_map(|(_, i)| if let Intent::Emote(EmoteKey::Insist(s)) = i { Some(*s) } else { None }).collect();
-        assert!(insists[0] == 720.0 && distinct.contains(&1) && distinct.contains(&2) && !distinct.contains(&3), "{insists:?} {distinct:?}");
+        assert!(insists[0] == 520.0 && distinct.contains(&1) && distinct.contains(&2) && !distinct.contains(&3), "{insists:?} {distinct:?}");
         let sulk = r.log.iter().find(|(_, i)| *i == Intent::Emote(EmoteKey::Sulk)).expect("sulk").0;
-        assert_eq!(sulk, 760.0);
+        assert_eq!(sulk, 560.0);
         // She stays low after the sulk (r6 critics): no move then; her next roam goes far.
         assert!(moves(&r).into_iter().all(|(t, _)| t <= sulk), "no move right after the sulk");
         assert!(b.theta >= b.tuning.theta.0 + 0.3 - 1e-6 && b.theta != theta0);
-        let r = run(&mut b, 800.0, 2000.0, false, &here, &[]);
+        let r = run(&mut b, 600.0, 2000.0, false, &here, &[]);
         let next = moves(&r).into_iter().next().expect("a roam later");
         assert_eq!(next.1.goal, Goal::Passive { far: true });
-        assert!(next.0 >= 766.0 + 180.0 - 1e-6, "on the roam clock: {}", next.0);
+        assert!(next.0 >= 566.0 + 45.0 - 1e-6, "on the roam clock: {}", next.0);
     }
 
     #[test]
     fn fling_offends() {
         let mut b = brain(6);
-        let ev = [(700.0, BrainEvent::Control(Ctl::Force(Force::Seek))), (730.0, BrainEvent::Flung { speed: 1500.0 })];
+        let ev = [(500.0, BrainEvent::Control(Ctl::Force(Force::Seek))), (530.0, BrainEvent::Flung { speed: 1500.0 })];
         let r = run(&mut b, 0.0, 6000.0, false, &here, &ev);
         let bids = bids(&r);
-        assert!(bids[1] >= 730.0 + 2400.0 - 1.0, "{bids:?}");
+        // From -0.8 back up to θ (>= 0.32): at least 1.12 fills.
+        assert!(bids[1] >= 530.0 + (0.8 + b.tuning.theta.0) * b.tuning.attn_fill_s - 1.0, "{bids:?}");
         let mut b = brain(6);
-        let ev = [(700.0, BrainEvent::Control(Ctl::Force(Force::Seek))), (705.0, BrainEvent::Interaction(Touch::Click))];
+        let ev = [(500.0, BrainEvent::Control(Ctl::Force(Force::Seek))), (505.0, BrainEvent::Interaction(Touch::Click))];
         run(&mut b, 0.0, 900.0, false, &here, &ev);
         let a0 = b.attn_at(900.0);
         b.on_event(BrainEvent::Flung { speed: 1500.0 }, 900.0);
@@ -1570,16 +1979,16 @@ mod tests {
     #[test]
     fn summon_bypasses_rate_but_not_gate() {
         let mut b = brain(7);
-        // A bid at 700, then a prompt at 710: the summon goes at once (no gap, no grace).
+        // A bid at 500, then a prompt at 510: the summon goes at once (no gap, no grace).
         let ev = [
-            (700.0, BrainEvent::Control(Ctl::Force(Force::Seek))),
-            (710.0, BrainEvent::Session(SessionSignal::Prompt(1))),
-            (715.0, BrainEvent::Session(SessionSignal::Prompt(1))),
+            (500.0, BrainEvent::Control(Ctl::Force(Force::Seek))),
+            (510.0, BrainEvent::Session(SessionSignal::Prompt(1))),
+            (515.0, BrainEvent::Session(SessionSignal::Prompt(1))),
         ];
-        let r = run(&mut b, 0.0, 760.0, false, &here, &ev);
+        let r = run(&mut b, 0.0, 560.0, false, &here, &ev);
         let s: Vec<_> = moves(&r).into_iter().filter(|(_, p)| matches!(p.goal, Goal::Active { why: Why::Summon(_), .. })).collect();
         assert_eq!(s.len(), 1, "one summon per prompt id: {s:?}");
-        assert_eq!(s[0].0, 710.0);
+        assert_eq!(s[0].0, 510.0);
         // Under fullscreen: deferred until the first poll after it ends.
         let mut b = brain(8);
         let fs = |t: f64| Senses { fullscreen: (300.0..600.0).contains(&t), ..here(t) };
@@ -1651,8 +2060,24 @@ mod tests {
             };
             ev.push(((t / 15.0).floor() * 15.0 + 7.0, e));
         }
+        // The screen: focus changes, the pointer, windows, workspaces, every 20–260 s.
+        let mut t = 0.0;
+        while t < 24.0 * 3600.0 {
+            t += 20.0 + rng.range(0.0, 240.0) as f64;
+            let sc = match rng.pick(7) {
+                0 | 1 => Screen::Focus,
+                2 => Screen::CursorNear,
+                3 => Screen::CursorHover,
+                4 => Screen::CursorSwipe { speed: rng.range(800.0, 3000.0) },
+                5 => Screen::PerchClosed { target: rng.pick(4) > 0 },
+                _ => Screen::Workspace { away: rng.pick(2) == 0, stranded: rng.pick(3) == 0 },
+            };
+            ev.push(((t / 15.0).floor() * 15.0 + 11.0, BrainEvent::Screen(sc)));
+        }
+        // Sampled at the whole second (a step at 44.6 sees what a tick at 45 sees): the world
+        // changes at most once a second, so ticking every second can match the exact wakes.
         let f = move |t: f64| {
-            let i = ((t / 15.0).floor() as usize).min(n);
+            let i = ((t.ceil() / 15.0).floor() as usize).min(n);
             Senses { idle_s: idle_at[i], fullscreen: fs[i], fullscreen_here: fs[i], busy: if busy[i] { vec!["bubble"] } else { vec![] }, ..here(t) }
         };
         (f, ev)
@@ -1670,41 +2095,62 @@ mod tests {
             for (t, _) in &m {
                 assert!(!s(*t).fullscreen, "seed {seed}: move at {t} under fullscreen");
             }
-            // Autonomous moves (not summons, not leaving): <= 15 in any rolling hour.
-            let auto: Vec<f64> =
-                m.iter().filter(|(_, p)| !matches!(p.goal, Goal::Active { why: Why::Summon(_), .. } | Goal::Leave)).map(|x| x.0).collect();
-            for (i, &t) in auto.iter().enumerate() {
-                let n = auto[..=i].iter().filter(|&&x| x > t - 3600.0).count();
-                assert!(n <= 15, "seed {seed}: {n} moves in the hour before {t}");
+            // Autonomous moves (not summons, not leaving): <= 45 in any rolling hour, a small hop
+            // counting a quarter (LOCKED #17).
+            let auto: Vec<(f64, f64)> = m
+                .iter()
+                .filter(|(_, p)| !matches!(p.goal, Goal::Active { why: Why::Summon(_), .. } | Goal::Leave))
+                .map(|(t, p)| (*t, weight_of(p.why, 0.25)))
+                .collect();
+            for (i, &(t, _)) in auto.iter().enumerate() {
+                let load: f64 = auto[..=i].iter().filter(|x| x.0 > t - 3600.0).map(|x| x.1).sum();
+                assert!(load <= 45.0 + 1e-9, "seed {seed}: {load} moves in the hour before {t}");
             }
-            // Passive moves at least ROAM_MIN apart from the move before.
-            let passive: Vec<f64> = m.iter().filter(|(_, p)| p.goal == Goal::Passive { far: false }).map(|x| x.0).collect();
-            for (i, &t) in passive.iter().enumerate() {
-                let prev = m.iter().map(|x| x.0).filter(|&x| x < t).fold(f64::MIN, f64::max);
-                if i > 0 {
-                    assert!(t - prev >= 180.0 - 1e-6 || prev == f64::MIN, "seed {seed}: passive move {t} only {} s after {prev}", t - prev);
+            assert!(m.iter().any(|(_, p)| p.why == "micro"), "seed {seed}: micro-hops happen");
+            // Roams at least ROAM_MIN (45 s) after the last roam, visit, summon or sulk move
+            // (reactions and hops don't feed the roam clock).
+            let clock: Vec<(f64, &str)> = m.iter().filter(|(_, p)| !matches!(p.why, "micro" | "dodge" | "startle_drag" | "focus" | "workspace" | "perch_closed")).map(|(t, p)| (*t, p.why)).collect();
+            for (i, &(t, why)) in clock.iter().enumerate() {
+                if i > 0 && matches!(why, "roam" | "explore") {
+                    let prev = clock[i - 1].0;
+                    assert!(t - prev >= 45.0 - 1e-6, "seed {seed}: {why} at {t} only {} s after {prev}", t - prev);
                 }
             }
             let bids = bids(&r);
             for w in bids.windows(2) {
-                assert!(w[1] - w[0] >= 1200.0 - 1e-6, "seed {seed}: bids {w:?}");
+                assert!(w[1] - w[0] >= 480.0 - 1e-6, "seed {seed}: bids {w:?}");
             }
         }
     }
 
     #[test]
-    fn calm_day_passive_gaps_within_range() {
-        let mut b = brain(31);
-        let s = BrainSettings { attention: Attention::Off, ..BrainSettings::default() };
-        b.settings = s;
-        let r = run(&mut b, 0.0, 6.0 * 3600.0, false, &here, &[]);
-        let p: Vec<f64> = moves(&r).iter().map(|x| x.0).collect();
-        assert!(p.len() > 30);
-        for w in p.windows(2) {
-            let g = w[1] - w[0];
-            // Longer only when the hourly cap held it back.
-            let capped = p.iter().filter(|&&m| m > w[1] - 3600.0 - 1e-6 && m < w[1]).count() >= 15;
-            assert!((180.0 - 1e-6..=600.0 + 1e-6).contains(&g) || capped, "gap {g} at {}", w[1]);
+    fn calm_day_lively_rates() {
+        // LOCKED #17: roams every 0.75–3 min, micro-hops every 20–60 s, <= 45 an hour (a hop a
+        // quarter): longer gaps only where the hourly cap held one back.
+        for seed in [31, 32, 33] {
+            let mut b = brain(seed);
+            b.settings.attention = Attention::Off;
+            let m = moves(&run(&mut b, 0.0, 6.0 * 3600.0, false, &here, &[]));
+            let load_before = |t: f64| -> f64 { m.iter().filter(|x| x.0 > t - 3600.0 - 1e-6 && x.0 < t).map(|x| weight_of(x.1.why, 0.25)).sum() };
+            let roams: Vec<f64> = m.iter().filter(|x| x.1.why == "roam").map(|x| x.0).collect();
+            let micros: Vec<f64> = m.iter().filter(|x| x.1.why == "micro").map(|x| x.0).collect();
+            assert!(roams.len() > 6 * 20 && micros.len() > 6 * 40, "seed {seed}: {} roams, {} micro-hops in 6 h", roams.len(), micros.len());
+            for w in roams.windows(2) {
+                let g = w[1] - w[0];
+                let capped = load_before(w[1]) + 1.0 > 45.0 - 1e-6;
+                assert!((45.0 - 1e-6..=180.0 + 1e-6).contains(&g) || (g > 180.0 && capped), "seed {seed}: roam gap {g} at {}", w[1]);
+            }
+            let uncapped = roams.windows(2).filter(|w| w[1] - w[0] <= 180.0 + 1e-6).count();
+            assert!(uncapped * 10 >= (roams.len() - 1) * 7, "seed {seed}: the cap held back {} of {} roams", roams.len() - 1 - uncapped, roams.len() - 1);
+            for w in micros.windows(2) {
+                assert!(w[1] - w[0] >= 20.0 - 1e-6, "seed {seed}: micro-hops {w:?}");
+            }
+            // Mean micro gap: 20–60 s, plus the beats skipped for the cap or a roam.
+            let mean = (micros.last().unwrap() - micros[0]) / (micros.len() - 1) as f64;
+            assert!((25.0..=100.0).contains(&mean), "seed {seed}: mean micro gap {mean}");
+            for x in &m {
+                assert!(load_before(x.0 + 1e-3) <= 45.0 + 1e-9, "seed {seed}: over the cap at {}", x.0);
+            }
         }
     }
 
@@ -1718,8 +2164,13 @@ mod tests {
         assert_eq!(ra.log, rb.log, "same seed + script: same log");
         let mut c = brain(41);
         let rc = run(&mut c, 0.0, 6.0 * 3600.0, true, &s, &ev);
-        let fmt = |r: &Run| r.log.iter().map(|(t, i)| format!("{:.6} {i:?}", t)).collect::<Vec<_>>();
-        assert_eq!(fmt(&ra), fmt(&rc), "ticking every second = ticking at wake_at");
+        // (The last second: the every-second run's next tick falls past the end.)
+        let fmt = |r: &Run| r.log.iter().filter(|(t, _)| *t < 6.0 * 3600.0 - 1.0).map(|(t, i)| format!("{:.6} {i:?}", t)).collect::<Vec<_>>();
+        let (fa, fc) = (fmt(&ra), fmt(&rc));
+        if let Some(k) = (0..fa.len().max(fc.len())).find(|&k| fa.get(k) != fc.get(k)) {
+            let near = |v: &Vec<String>| v[k.saturating_sub(3)..(k + 3).min(v.len())].to_vec();
+            panic!("ticking every second != ticking at wake_at from #{k}:\n wake: {:#?}\n every second: {:#?}", near(&fa), near(&fc));
+        }
         assert!(ra.log.len() > 20);
     }
 
@@ -1735,7 +2186,8 @@ mod tests {
             t = d.wake_at;
             wakes += 1;
         }
-        assert!(wakes <= 3600 / 15 + 20, "{wakes} wakes in an hour");
+        // Polls, micro-hop beats (>= 20 s) and roam crossings (>= 45 s).
+        assert!(wakes <= 3600 / 15 + 3600 / 20 + 3600 / 45 + 20, "{wakes} wakes in an hour");
     }
 
     #[test]
@@ -1754,7 +2206,7 @@ mod tests {
         c.attn = 2.0;
         let r = run(&mut c, 50.0, 50.0 + 590.0, false, &here, &[]);
         assert!(bids(&r).is_empty(), "no bid within the launch grace");
-        assert!(moves(&r).iter().all(|(t, _)| *t >= 50.0 + 90.0 - 1e-6), "first roam no sooner than FIRST_ROAM_MIN");
+        assert!(moves(&r).iter().all(|(t, _)| *t >= 50.0 + 30.0 - 1e-6), "first move no sooner than FIRST_ROAM_MIN (30 s)");
     }
 
     #[test]
@@ -1787,8 +2239,8 @@ mod tests {
     #[test]
     fn six_bids_mix_combos() {
         let mut b = brain(71);
-        let ev: Vec<_> = (0..6).map(|k| (700.0 + 1300.0 * k as f64, BrainEvent::Control(Ctl::Force(Force::Seek)))).collect();
-        let pats: Vec<_> = (0..6).map(|k| (705.0 + 1300.0 * k as f64, BrainEvent::Interaction(Touch::Headpat))).collect();
+        let ev: Vec<_> = (0..6).map(|k| (500.0 + 1300.0 * k as f64, BrainEvent::Control(Ctl::Force(Force::Seek)))).collect();
+        let pats: Vec<_> = (0..6).map(|k| (505.0 + 1300.0 * k as f64, BrainEvent::Interaction(Touch::Headpat))).collect();
         let r = run(&mut b, 0.0, 9000.0, false, &here, &[ev, pats].concat());
         let combos: Vec<_> = moves(&r)
             .into_iter()
@@ -1821,5 +2273,417 @@ mod tests {
         assert!(r.log.iter().all(|(_, i)| !matches!(i, Intent::Hide(_))));
         assert!(moves(&r).iter().all(|(t, _)| !(300.0..600.0).contains(t)));
         assert!(moves(&r).iter().any(|(t, _)| *t == 600.0), "the forced roam waits for the gate");
+    }
+
+    // ---- lively (LOCKED #17) -------------------------------------------------------------
+
+    fn screen(at: f64, sc: Screen) -> (f64, BrainEvent) {
+        (at, BrainEvent::Screen(sc))
+    }
+    fn whys(r: &Run) -> Vec<(f64, &'static str)> {
+        moves(r).into_iter().map(|(t, p)| (t, p.why)).collect()
+    }
+    fn reacts(r: &Run) -> Vec<(f64, React)> {
+        r.log.iter().filter_map(|(t, i)| if let Intent::React(x) = i { Some((*t, *x)) } else { None }).collect()
+    }
+    /// Attention off (no visits in the way). Seeds 2k and 2k+1 would be the same rng: odd only.
+    fn calm(seed: u64) -> Brain {
+        let s = BrainSettings { attention: Attention::Off, ..Default::default() };
+        Brain::new(2 * seed + 1, s.clone(), Tuning::new(&s), None, 0.0)
+    }
+
+    #[test]
+    fn lively_tuning_is_the_lock() {
+        let t = Tuning::new(&BrainSettings::default());
+        assert_eq!(t.roam_s, (45.0, 180.0), "roams every 0.75–3 min");
+        assert_eq!(t.active_gap_min_s, 480.0, "visits no closer than 8 min");
+        assert!((t.theta.0 * t.attn_fill_s - 480.0).abs() < 1e-6 && (t.theta.1 * t.attn_fill_s - 900.0).abs() < 1e-6, "visits every 8–15 min");
+        assert_eq!(t.move_cap_per_hour, 45);
+        assert_eq!(t.hop_weight, 0.25, "a micro-hop counts a quarter");
+        assert_eq!(t.first_roam_min_s, 30.0);
+        assert_eq!(t.linger_s, (20.0, 60.0));
+        assert_eq!(t.micro_s, (20.0, 60.0));
+        assert!((0.5..=0.6).contains(&t.close_teleport_p), "Haseeb 22:55: 50–60 %");
+        assert!((t.focus_p - 1.0 / 3.0).abs() < 1e-9 && t.focus_delay_s == (2.0, 5.0));
+    }
+
+    #[test]
+    fn first_roam_30s_after_launch() {
+        for seed in 1..60 {
+            let mut b = calm(seed);
+            let m = moves(&run(&mut b, 0.0, 400.0, false, &here, &[]));
+            let first_roam = m.iter().find(|x| x.1.why == "roam").expect("a roam").0;
+            assert!((first_roam - 30.0).abs() < 1e-6, "seed {seed}: first roam at {first_roam}");
+            assert!(m[0].0 >= 30.0 - 1e-6, "seed {seed}: nothing before 30 s ({})", m[0].0);
+        }
+    }
+
+    #[test]
+    fn linger_after_a_visit_is_20_to_60_s() {
+        for seed in 1..30 {
+            let mut b = brain(seed);
+            let ev = [(500.0, BrainEvent::Control(Ctl::Force(Force::Seek))), (505.0, BrainEvent::Interaction(Touch::Headpat))];
+            let r = run(&mut b, 0.0, 505.0 + 0.5, false, &here, &ev);
+            assert!(r.log.iter().any(|(_, i)| *i == Intent::Emote(EmoteKey::Satisfied { pat: true })));
+            let Mode::Satisfied { until, .. } = b.mode else { panic!("seed {seed}: {:?}", b.mode) };
+            assert!((525.0 - 1e-3..=565.0 + 1e-3).contains(&until), "seed {seed}: linger until {until}");
+        }
+    }
+
+    #[test]
+    fn micro_hops_only_while_out_of_the_way() {
+        let only = |pk: PlaceKind| move |t: f64| Senses { placement: pk, ..here(t) };
+        for (pk, want) in [(PlaceKind::Ground, true), (PlaceKind::Perch, true), (PlaceKind::Float, false), (PlaceKind::Hang, false)] {
+            let mut b = calm(5);
+            let r = run(&mut b, 0.0, 1800.0, false, &only(pk), &[]);
+            let n = whys(&r).iter().filter(|x| x.1 == "micro").count();
+            assert_eq!(n > 0, want, "{pk:?}: {n} micro-hops");
+        }
+        // Busy (a bubble, the Line, a menu...) at the polls: no micro-hop, no roam.
+        let mut b = calm(6);
+        let busy = |t: f64| Senses { busy: vec!["line"], ..here(t) };
+        assert!(moves(&run(&mut b, 0.0, 1800.0, false, &busy, &[])).is_empty());
+        // Sitting low after a sulk: no micro-hop until the far roam.
+        for seed in 1..20 {
+            let mut b = brain(seed);
+            let r = run(&mut b, 0.0, 2000.0, false, &here, &[(500.0, BrainEvent::Control(Ctl::Force(Force::Seek)))]);
+            let sulk = r.log.iter().find(|(_, i)| *i == Intent::Emote(EmoteKey::Sulk)).expect("sulk").0;
+            let after: Vec<_> = moves(&r).into_iter().filter(|x| x.0 >= sulk && x.1.why != "covering").collect();
+            assert!(after.first().is_some_and(|x| x.1.goal == Goal::Passive { far: true }), "seed {seed}: {:?}", after.first());
+        }
+    }
+
+    #[test]
+    fn typing_only_micro_hops_then_the_pause_brings_the_roam() {
+        // Typing fast 0–1200 s: no roams or visits, micro-hops keep away from his window.
+        let typing = |t: f64| Senses { typing: t < 1200.0, ..here(t) };
+        for seed in 1..15 {
+            let mut b = brain(seed);
+            let r = run(&mut b, 0.0, 1200.0, false, &typing, &[]);
+            assert!(bids(&r).is_empty(), "seed {seed}: no visit while he types");
+            let mut b = calm(seed);
+            let r = run(&mut b, 0.0, 1600.0, false, &typing, &[]);
+            let m = moves(&r);
+            assert!(m.iter().filter(|x| x.0 < 1200.0).all(|x| x.1.goal == Goal::Hop { kind: HopKind::Micro, away: true }), "seed {seed}: {m:?}");
+            assert!(m.iter().any(|x| x.0 < 1200.0), "seed {seed}: micro-hops while typing");
+            // The pause: the held roam goes at the first poll (<= 15 s), the bigger hop.
+            let roam = m.iter().find(|x| x.0 >= 1200.0 && x.1.why == "roam").expect("roam after the pause").0;
+            assert!(roam <= 1200.0 + 15.0 + 1e-6, "seed {seed}: roam at {roam}");
+        }
+    }
+
+    #[test]
+    fn idle_two_minutes_explores() {
+        let mut b = calm(9);
+        let idle = |t: f64| Senses { idle_s: if t < 600.0 { 0.0 } else { (t - 600.0).min(250.0) }, ..here(t) };
+        let r = run(&mut b, 0.0, 2000.0, false, &idle, &[]);
+        let m = moves(&r);
+        assert!(m.iter().filter(|x| x.0 < 600.0).all(|x| x.1.why != "explore"));
+        assert!(m.iter().any(|x| x.1.goal == Goal::Explore && x.0 >= 720.0), "{:?}", whys(&r));
+        assert!(m.iter().filter(|x| x.1.goal == Goal::Explore).all(|x| x.0 >= 720.0 - 1e-6), "only after 2 min idle");
+    }
+
+    #[test]
+    fn focus_hop_about_one_in_three_2_to_5_s_later() {
+        let (mut hops, mut n) = (0, 0);
+        for seed in 0..1500u64 {
+            let mut b = calm(seed);
+            let r = run(&mut b, 0.0, 60.0, false, &here, &[screen(40.0, Screen::Focus)]);
+            n += 1;
+            if let Some((t, p)) = moves(&r).into_iter().find(|x| x.1.why == "focus") {
+                hops += 1;
+                assert!((42.0 - 1e-6..=45.0 + 1e-6).contains(&t), "seed {seed}: focus hop at {t}");
+                assert_eq!(p.goal, Goal::FocusEdge);
+                assert_eq!(p.arrivals[0], Arrival::Hop, "a hop when it's close");
+            }
+        }
+        let share = hops as f64 / n as f64;
+        assert!((share - 1.0 / 3.0).abs() <= 0.05, "focus hops {share:.3}");
+        // Never while typing, busy, under DND or fullscreen; a newer focus change replaces the
+        // waiting hop; at most one in 15 s.
+        let busy_at = |t: f64| Senses { busy: if (39.0..50.0).contains(&t) { vec!["menu"] } else { vec![] }, ..here(t) };
+        let typing_at = |t: f64| Senses { typing: (39.0..50.0).contains(&t), ..here(t) };
+        for seed in 0..300u64 {
+            for (k, s) in [&busy_at as &dyn Fn(f64) -> Senses, &typing_at].into_iter().enumerate() {
+                let mut b = calm(seed);
+                let r = run(&mut b, 0.0, 60.0, false, s, &[screen(40.0, Screen::Focus)]);
+                assert!(whys(&r).iter().all(|x| x.1 != "focus"), "seed {seed} case {k}");
+            }
+            let mut b = calm(seed);
+            let fs = |t: f64| Senses { fullscreen: true, ..here(t) };
+            assert!(whys(&run(&mut b, 0.0, 60.0, false, &fs, &[screen(40.0, Screen::Focus)])).is_empty());
+            let mut b = calm(seed);
+            let ev = [(10.0, BrainEvent::Control(Ctl::Dnd(600.0))), screen(40.0, Screen::Focus)];
+            assert!(whys(&run(&mut b, 0.0, 60.0, false, &here, &ev)).is_empty());
+            let mut b = calm(seed);
+            let ev: Vec<_> = (0..20).map(|k| screen(40.0 + 6.0 * k as f64, Screen::Focus)).collect();
+            let f: Vec<f64> = whys(&run(&mut b, 0.0, 200.0, false, &here, &ev)).into_iter().filter(|x| x.1 == "focus").map(|x| x.0).collect();
+            assert!(f.windows(2).all(|w| w[1] - w[0] >= 15.0 - 1e-6), "seed {seed}: {f:?}");
+        }
+    }
+
+    #[test]
+    fn fast_drag_startles_her_off() {
+        let drag = |v: f32| Screen::PerchDragged { speed: v };
+        let perch = |t: f64| Senses { placement: PlaceKind::Perch, ..here(t) };
+        let mut b = calm(3);
+        let r = run(&mut b, 0.0, 50.0, false, &perch, &[screen(40.0, drag(2500.0)), screen(41.0, drag(2600.0))]);
+        let s: Vec<_> = moves(&r).into_iter().filter(|x| x.1.why == "startle_drag").collect();
+        assert_eq!(s.len(), 1, "one startle per {} s: {s:?}", b.tuning.drag_gap_s);
+        assert_eq!(s[0].1.goal, Goal::Hop { kind: HopKind::Startle, away: false });
+        // A slow drag: she rides it (as before).
+        let mut b = calm(3);
+        assert!(whys(&run(&mut b, 0.0, 50.0, false, &perch, &[screen(40.0, drag(600.0))])).iter().all(|x| x.1 != "startle_drag"));
+        // Busy or DND: she rides it.
+        let mut b = calm(3);
+        let busy = |t: f64| Senses { busy: vec!["bubble"], ..perch(t) };
+        assert!(whys(&run(&mut b, 0.0, 50.0, false, &busy, &[screen(40.0, drag(3000.0))])).is_empty());
+        let mut b = calm(3);
+        let ev = [(10.0, BrainEvent::Control(Ctl::Dnd(600.0))), screen(40.0, drag(3000.0))];
+        assert!(whys(&run(&mut b, 0.0, 50.0, false, &perch, &ev)).is_empty());
+    }
+
+    #[test]
+    fn cursor_look_startle_dodge_or_lean_rate_limited() {
+        // Near every 2 s for a minute: a look at most every 15 s.
+        let mut b = calm(4);
+        let ev: Vec<_> = (0..30).map(|k| screen(31.0 + 2.0 * k as f64, Screen::CursorNear)).collect();
+        let looks: Vec<f64> = reacts(&run(&mut b, 0.0, 95.0, false, &here, &ev)).into_iter().filter(|x| x.1 == React::Look).map(|x| x.0).collect();
+        assert!(looks.len() >= 4 && looks.windows(2).all(|w| w[1] - w[0] >= 15.0 - 1e-6), "{looks:?}");
+        // Swipes: a fast one startles (at most every 30 s), a slow one doesn't.
+        let mut b = calm(4);
+        let ev = [screen(31.0, Screen::CursorSwipe { speed: 900.0 }), screen(33.0, Screen::CursorSwipe { speed: 2400.0 }), screen(40.0, Screen::CursorSwipe { speed: 2400.0 }), screen(64.0, Screen::CursorSwipe { speed: 2400.0 })];
+        let st: Vec<f64> = reacts(&run(&mut b, 0.0, 70.0, false, &here, &ev)).into_iter().filter(|x| x.1 == React::Startle).map(|x| x.0).collect();
+        assert_eq!(st, vec![33.0, 64.0]);
+        // Hover: a dodge (a hop away, a quarter move) or a lean, about half each, every 45 s at most.
+        let (mut dodges, mut leans) = (0, 0);
+        for seed in 0..1000u64 {
+            let mut b = calm(seed);
+            let r = run(&mut b, 0.0, 41.0, false, &here, &[screen(31.0, Screen::CursorHover), screen(35.0, Screen::CursorHover)]);
+            let d = whys(&r).iter().filter(|x| x.1 == "dodge").count();
+            let l = reacts(&r).iter().filter(|x| x.1 == React::Lean).count();
+            assert_eq!(d + l, 1, "seed {seed}: one per 45 s");
+            dodges += d;
+            leans += l;
+        }
+        assert!((dodges as f64 / 1000.0 - 0.5).abs() <= 0.05, "{dodges} dodges, {leans} leans");
+        // None of it under DND, fullscreen, or with something up.
+        let fs: fn(f64) -> Senses = |t: f64| Senses { fullscreen: true, ..here(t) };
+        for (ev, s) in [(vec![(10.0, BrainEvent::Control(Ctl::Dnd(600.0)))], here as fn(f64) -> Senses), (vec![], fs)] {
+            let mut b = calm(4);
+            let mut ev = ev;
+            ev.extend([screen(31.0, Screen::CursorNear), screen(32.0, Screen::CursorSwipe { speed: 3000.0 }), screen(33.0, Screen::CursorHover)]);
+            let r = run(&mut b, 0.0, 40.0, false, &s, &ev);
+            assert!(reacts(&r).is_empty() && moves(&r).is_empty(), "{:?}", r.log);
+        }
+        let mut b = calm(4);
+        let busy = |t: f64| Senses { busy: vec!["prompt"], ..here(t) };
+        let ev = [screen(31.0, Screen::CursorNear), screen(32.0, Screen::CursorHover)];
+        assert!(reacts(&run(&mut b, 0.0, 40.0, false, &busy, &ev)).is_empty());
+    }
+
+    #[test]
+    fn perch_close_teleport_or_fall_split() {
+        // A window she sits on closes: 55 % a teleport to another window's top, else the fall.
+        let perch = |t: f64| Senses { placement: PlaceKind::Perch, ..here(t) };
+        let (mut tele, n) = (0, 4000u64);
+        for seed in 0..n {
+            let mut b = calm(seed);
+            let r = run(&mut b, 0.0, 41.0, false, &perch, &[screen(40.0, Screen::PerchClosed { target: true })]);
+            let m: Vec<_> = moves(&r).into_iter().filter(|x| x.0 == 40.0).collect();
+            let f = reacts(&r).iter().filter(|x| x.1 == React::Fall).count();
+            match (m.first(), f) {
+                (Some((_, p)), 0) => {
+                    assert_eq!((p.goal.clone(), p.arrivals.clone(), p.why), (Goal::Rescue, vec![Arrival::Teleport], "perch_closed"));
+                    tele += 1;
+                }
+                (None, 1) => {}
+                other => panic!("seed {seed}: {other:?}"),
+            }
+        }
+        let share = tele as f64 / n as f64;
+        assert!((share - 0.55).abs() <= 0.03 && (0.5..=0.6).contains(&share), "teleport share {share:.3}");
+        // No other window with room on top: she always falls.
+        for seed in 0..500 {
+            let mut b = calm(seed);
+            let r = run(&mut b, 0.0, 41.0, false, &perch, &[screen(40.0, Screen::PerchClosed { target: false })]);
+            assert!(moves(&r).iter().all(|x| x.0 != 40.0) && reacts(&r) == vec![(40.0, React::Fall)], "seed {seed}");
+        }
+        // DND, fullscreen, something up, or mid-visit: the fall (no decision to move).
+        for seed in 0..200 {
+            let mut b = calm(seed);
+            let ev = [(10.0, BrainEvent::Control(Ctl::Dnd(600.0))), screen(40.0, Screen::PerchClosed { target: true })];
+            assert_eq!(reacts(&run(&mut b, 0.0, 41.0, false, &perch, &ev)), vec![(40.0, React::Fall)]);
+            let mut b = calm(seed);
+            let busy = |t: f64| Senses { busy: if t >= 35.0 { vec!["line"] } else { vec![] }, ..perch(t) };
+            assert_eq!(reacts(&run(&mut b, 0.0, 41.0, false, &busy, &[screen(40.0, Screen::PerchClosed { target: true })])), vec![(40.0, React::Fall)]);
+            let mut b = brain(seed);
+            let ev = [(500.0, BrainEvent::Control(Ctl::Force(Force::Seek))), screen(505.0, Screen::PerchClosed { target: true })];
+            let r = run(&mut b, 0.0, 506.0, false, &perch, &ev);
+            assert!(reacts(&r).contains(&(505.0, React::Fall)) && whys(&r).iter().all(|x| x.1 != "perch_closed"));
+        }
+    }
+
+    #[test]
+    fn workspace_follow_within_two_seconds() {
+        for seed in 0..200 {
+            // On another monitor than his: she follows 0.8–2 s later.
+            let mut b = calm(seed);
+            let r = run(&mut b, 0.0, 45.0, false, &here, &[screen(40.0, Screen::Workspace { away: true, stranded: false })]);
+            let f: Vec<_> = moves(&r).into_iter().filter(|x| x.1.why == "workspace").collect();
+            assert_eq!(f.len(), 1, "seed {seed}");
+            assert!((40.8 - 1e-6..=42.0 + 1e-6).contains(&f[0].0) && f[0].1.goal == Goal::Follow, "seed {seed}: {f:?}");
+            // Her perch went with the old workspace: she follows right away.
+            let mut b = calm(seed);
+            let r = run(&mut b, 0.0, 41.0, false, &here, &[screen(40.0, Screen::Workspace { away: true, stranded: true })]);
+            assert!(moves(&r).iter().any(|x| x.0 == 40.0 && x.1.goal == Goal::Follow));
+            // On his monitor already: nothing.
+            let mut b = calm(seed);
+            let r = run(&mut b, 0.0, 45.0, false, &here, &[screen(40.0, Screen::Workspace { away: false, stranded: false })]);
+            assert!(whys(&r).iter().all(|x| x.1 != "workspace"));
+            // DND: stranded falls, away stays.
+            let mut b = calm(seed);
+            let ev = [(10.0, BrainEvent::Control(Ctl::Dnd(600.0))), screen(40.0, Screen::Workspace { away: true, stranded: true }), screen(42.0, Screen::Workspace { away: true, stranded: false })];
+            let r = run(&mut b, 0.0, 45.0, false, &here, &ev);
+            assert!(moves(&r).is_empty() && reacts(&r) == vec![(40.0, React::Fall)]);
+        }
+    }
+
+    #[test]
+    fn protected_summons_win_over_reactions() {
+        // A focus hop waits for its beat; a prompt summon comes first and the hop is dropped.
+        for seed in 0..200 {
+            let mut b = calm(seed);
+            let ev = [screen(700.0, Screen::Focus), (701.0, BrainEvent::Session(SessionSignal::Prompt(1))), screen(702.0, Screen::CursorHover)];
+            let r = run(&mut b, 0.0, 760.0, false, &here, &ev);
+            let m = whys(&r);
+            assert!(m.iter().any(|x| x == &(701.0, "summon")), "seed {seed}: {m:?}");
+            assert!(m.iter().filter(|x| x.0 >= 701.0).all(|x| x.1 == "summon"), "seed {seed}: nothing moves her off a summon {m:?}");
+        }
+    }
+
+    #[test]
+    fn protected_dnd_and_fullscreen_hold_everything_new() {
+        // A day of screen events: DND 2 h and fullscreen blocks: no move, no reaction but the
+        // fall (physics) while they hold.
+        for seed in [91, 92] {
+            let (s, mut ev) = day_script(seed);
+            ev.push((3600.0, BrainEvent::Control(Ctl::Dnd(7200.0))));
+            let mut b = brain(seed);
+            let r = run(&mut b, 0.0, 6.0 * 3600.0, false, &s, &ev);
+            for (t, i) in &r.log {
+                let quiet = (3600.0..10800.0).contains(t) || s(*t).fullscreen;
+                if quiet {
+                    let leave = matches!(i, Intent::Move(p) if p.goal == Goal::Leave);
+                    assert!(leave || matches!(i, Intent::React(React::Fall) | Intent::Hide(_) | Intent::Pose(_) | Intent::Emote(_)), "seed {seed}: {i:?} at {t}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn protected_busy_holds_moves() {
+        // The Line open 600–1800 s (polled): no autonomous move once a poll saw it (<= 15 s).
+        for seed in 0..40 {
+            let mut b = brain(seed);
+            let s = |t: f64| Senses { busy: if (600.0..1800.0).contains(&t) { vec!["line"] } else { vec![] }, ..here(t) };
+            let ev = [screen(900.0, Screen::Focus), screen(1000.0, Screen::CursorHover)];
+            let m = whys(&run(&mut b, 0.0, 2400.0, false, &s, &ev));
+            assert!(m.iter().all(|x| !(615.0..1800.0).contains(&x.0)), "seed {seed}: {m:?}");
+        }
+        // And the view's last check holds every plan but a summon or leaving his window.
+        let plan = |goal: Goal, why: &'static str| MovePlan { goal, why, arrivals: vec![Arrival::Teleport] };
+        for busy in [&["bubble"][..], &["line"], &["prompt"], &["menu"], &["field"], &["drag"]] {
+            for p in [plan(Goal::Passive { far: false }, "roam"), plan(Goal::Hop { kind: HopKind::Micro, away: false }, "micro"), plan(Goal::FocusEdge, "focus"), plan(Goal::Rescue, "perch_closed"), plan(Goal::Follow, "workspace"), plan(Goal::Active { why: Why::Attention, approaches: vec![] }, "bid")] {
+                assert!(held_by(busy, &p).is_some(), "{busy:?} {p:?}");
+            }
+            assert_eq!(held_by(busy, &plan(Goal::Active { why: Why::Summon(SummonKind::Done), approaches: vec![] }, "summon")), None, "summons win");
+            assert_eq!(held_by(busy, &plan(Goal::Leave, "covering")), None);
+        }
+        assert_eq!(held_by(&["music", "session", "reaction"], &plan(Goal::Passive { far: false }, "roam")), None);
+    }
+
+    #[test]
+    fn hang_only_still_only_hangs() {
+        // His settings.toml: attention = "hang_only". Every visit leads with the hang; no
+        // lively reaction asks for an approach.
+        let s = BrainSettings { attention: Attention::HangOnly, ..Default::default() };
+        let mut b = Brain::new(12, s.clone(), Tuning::new(&s), None, 0.0);
+        let (sc, ev) = day_script(12);
+        let r = run(&mut b, 0.0, 12.0 * 3600.0, false, &sc, &ev);
+        let visits: Vec<_> = moves(&r).into_iter().filter_map(|(_, p)| if let Goal::Active { why: Why::Attention, approaches } = p.goal { Some(approaches) } else { None }).collect();
+        assert!(visits.len() >= 3, "{} visits", visits.len());
+        assert!(visits.iter().all(|a| a == &vec![Approach::Hang, Approach::Beside]), "{visits:?}");
+    }
+
+    #[test]
+    fn hop_weight_is_a_quarter_and_persists() {
+        let mut b = calm(13);
+        run(&mut b, 0.0, 1200.0, false, &here, &[]);
+        let full = b.moves.iter().filter(|m| m.1 == 1.0).count() as f64;
+        let hops = b.moves.iter().filter(|m| m.1 == 0.25).count() as f64;
+        assert!(hops > 0.0 && (b.load(1200.0) - (full + hops / 4.0)).abs() < 1e-9);
+        let s = b.saved(1200.0, 2_000_000.0);
+        let back = Saved::from_json(&s.to_json()).unwrap();
+        assert_eq!(back.hops_unix.len() as f64, hops);
+        let st = BrainSettings::default();
+        let c = Brain::new(14, st.clone(), Tuning::new(&st), Some((&back, 0.0)), 1200.0);
+        assert!((c.load(1200.0) - b.load(1200.0)).abs() < 1e-9, "the hour's load survives a restart");
+        // An old state.json (no hopsUnix) still loads.
+        let mut v = s.to_json();
+        v.as_object_mut().unwrap().remove("hopsUnix");
+        assert!(Saved::from_json(&v).is_some_and(|x| x.hops_unix.is_empty()));
+    }
+
+    #[test]
+    fn hop_zero_means_no_hops() {
+        // `arrivals = { hop = 0 }`: no micro-hops, no dodges, no startled hops; she still roams.
+        let mut st = BrainSettings { attention: Attention::Off, ..Default::default() };
+        st.arrivals.iter_mut().filter(|a| a.0 == Arrival::Hop).for_each(|a| a.1 = 0.0);
+        for seed in 0..50u64 {
+            let mut b = Brain::new(2 * seed + 1, st.clone(), Tuning::new(&st), None, 0.0);
+            let perch = |t: f64| Senses { placement: PlaceKind::Perch, ..here(t) };
+            let ev = [screen(100.0, Screen::CursorHover), screen(200.0, Screen::PerchDragged { speed: 4000.0 }), screen(300.0, Screen::Focus)];
+            let r = run(&mut b, 0.0, 1200.0, false, &perch, &ev);
+            let m = moves(&r);
+            assert!(m.iter().all(|x| !matches!(x.1.goal, Goal::Hop { .. }) && !x.1.arrivals.contains(&Arrival::Hop)), "seed {seed}: {m:?}");
+            assert!(m.iter().any(|x| x.1.why == "roam"));
+        }
+    }
+
+    #[test]
+    fn roams_draw_from_all_four_arrivals() {
+        let mut b = calm(17);
+        let m = moves(&run(&mut b, 0.0, 6.0 * 3600.0, false, &here, &[]));
+        let firsts: Vec<Arrival> = m.iter().filter(|x| x.1.why == "roam").map(|x| x.1.arrivals[0]).collect();
+        let n = |a: Arrival| firsts.iter().filter(|&&x| x == a).count() as f64 / firsts.len() as f64;
+        // hop 4 : teleport 2 : drop_in 2 : glitch 1 (the view takes the first that fits).
+        assert!((n(Arrival::Hop) - 4.0 / 9.0).abs() < 0.08 && (n(Arrival::Glitch) - 1.0 / 9.0).abs() < 0.06, "{:?}", (n(Arrival::Hop), n(Arrival::Teleport), n(Arrival::DropIn), n(Arrival::Glitch)));
+        assert!(m.iter().filter(|x| x.1.why == "roam").all(|x| x.1.arrivals.last() == Some(&Arrival::Teleport) || x.1.arrivals.contains(&Arrival::Teleport)));
+    }
+
+    #[test]
+    fn protected_no_repeat_with_lively_rates() {
+        // 8 h of natural visits (attention mix, every 8–15 min): the lead approach never repeats
+        // one of the last `no_repeat` (2), and no two visits closer than 8 min.
+        for seed in [3u64, 9, 27] {
+            let mut b = brain(seed);
+            let r = run(&mut b, 0.0, 8.0 * 3600.0, false, &here, &[]);
+            let firsts: Vec<(f64, Approach)> = moves(&r)
+                .into_iter()
+                .filter_map(|(t, p)| match p.goal {
+                    Goal::Active { why: Why::Attention, approaches } => Some((t, approaches[0])),
+                    _ => None,
+                })
+                .collect();
+            // (Ignored visits raise θ: the gaps grow past 15 min when nobody answers.)
+            assert!(firsts.len() >= 15, "seed {seed}: {} visits in 8 h", firsts.len());
+            for w in firsts.windows(3) {
+                assert!(w[2].1 != w[1].1 && w[2].1 != w[0].1, "seed {seed}: approach repeated within 2: {w:?}");
+            }
+            for w in firsts.windows(2) {
+                assert!(w[1].0 - w[0].0 >= 480.0 - 1e-6, "seed {seed}: visits {:.0} s apart", w[1].0 - w[0].0);
+            }
+        }
     }
 }
