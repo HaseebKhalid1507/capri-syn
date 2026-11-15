@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
-"""make-pack CAPRICORE_DIR [OUT_DIR] [--moods FILE]
+"""make-pack CAPRICORE_DIR [OUT_DIR] [--moods FILE] [--sleep FILE]
 
 Build the Capri character pack from a CapriCore checkout (https://github.com/CapriChooms/CapriCore).
 The artwork is third-party (see the pack's NOTICE.md): it is never committed to this repo; this
 script assembles it on your machine.
+
+PINNED: the checkout must be CapriCore v1.0.4 (bc93892). Every file copied is checked against
+tools/capricore-v1.0.4.sha256 and make-pack refuses anything else (1.1.x retired and redrew most
+of the frames her behaviour uses). One frame comes from v1.1.2 (bb0c2d7): pose-sleep, checked
+against its own pinned sha256. It is read from the checkout's git objects if they have it, else
+from --sleep FILE, else downloaded from GitHub at that commit.
 
 OUT_DIR defaults to $XDG_DATA_HOME/synaps-avatar/packs/capri (~/.local/share/...).
 --moods defaults to packs/capri/moods.json in this repo (the avatar's own behaviour file).
@@ -12,15 +18,84 @@ Layout produced:
   sprites.json          <- assets/capri/sprites/v1/runtime-sprite-set.json
   capri-*.png           <- assets/capri/sprites/v1/*.png + assets/default/capri-headpat.png
   poses/poses.json      <- assets/capri/sprites/poses-v2/runtime-poses.json (+ PNG/*.png)
+  poses/capri-sleep.png <- v1.1.2 assets/capri/sprites/poses-v2/PNG/capri-sleep.png
+  intro/0[2-6]-*.png    <- assets/capri/intro-v1/PNG (+ runtime-intro.json); her bolt replaces 01,
+                           and 07 is her neutral frame
   music/*.png           <- assets/default/capri-music-v1/*.png
+  icon.png              <- assets/default/icon-source.png
   fonts/Exo2-*.ttf      <- static instances of assets/fonts/exo2/Exo2-Variable.ttf (fontTools), + OFL.txt
-  NOTICE.md             <- docs/character-assets.md
+  NOTICE.md             <- docs/character-assets.md + one line naming the CapriCore versions
   moods.json            <- --moods
 Then run `synaps-avatar --pack OUT_DIR --check` to verify it (sha256 of every frame)."""
-import json, os, shutil, subprocess, sys
+import hashlib, json, os, shutil, subprocess, sys, urllib.request
 from pathlib import Path
 
 WEIGHTS = {"Regular": 400, "Medium": 500, "SemiBold": 600, "Bold": 700}
+PIN_COMMIT = "bc93892c751a73fdce14355b477dcdc775e46fd9"
+SLEEP_COMMIT = "bb0c2d71e751db6e7cab4926b4f251b1b2c05f5a"
+SLEEP_PATH = "assets/capri/sprites/poses-v2/PNG/capri-sleep.png"
+SLEEP_SHA = "f76c310daa7ebd0cc683b01d03ff84bb02d9c51985f38a7e1adaabc2b2a734d5"
+SLEEP_URL = f"https://raw.githubusercontent.com/CapriChooms/CapriCore/{SLEEP_COMMIT}/{SLEEP_PATH}"
+NOTICE_LINE = ("Assembled by capri-syn's tools/make-pack from CapriCore v1.0.4 (bc93892), "
+               "plus one frame (pose-sleep) from CapriCore v1.1.2 (bb0c2d7).")
+
+
+def sha(b):
+    return hashlib.sha256(b).hexdigest()
+
+
+def pins(repo):
+    out = {}
+    for line in (repo / "tools/capricore-v1.0.4.sha256").read_text().splitlines():
+        if line.strip() and not line.startswith("#"):
+            h, p = line.split(None, 1)
+            out[p.strip()] = h
+    return out
+
+
+def check_source(src, pinned):
+    """Refuse anything but v1.0.4: the git HEAD if it's a checkout, and every pinned file."""
+    if (src / ".git").exists():
+        r = subprocess.run(["git", "-C", str(src), "rev-parse", "HEAD"], capture_output=True, text=True)
+        head = r.stdout.strip()
+        if r.returncode == 0 and head != PIN_COMMIT:
+            sys.exit(f"make-pack: {src} is at {head[:7]}, not CapriCore v1.0.4 ({PIN_COMMIT[:7]}). "
+                     f"Run `git -C {src} checkout v1.0.4` (1.1.x drops frames she uses).")
+    bad = []
+    for rel, want in pinned.items():
+        p = src / rel
+        if not p.is_file():
+            bad.append(f"missing {rel}")
+        elif sha(p.read_bytes()) != want:
+            bad.append(f"changed {rel}")
+    if bad:
+        sys.exit(f"make-pack: {src} is not CapriCore v1.0.4 ({len(bad)} file(s) differ from tools/capricore-v1.0.4.sha256):\n  "
+                 + "\n  ".join(bad[:10]) + ("\n  ..." if len(bad) > 10 else ""))
+
+
+def sleep_frame(src, given):
+    """pose-sleep (v1.1.2), checksum-pinned: --sleep FILE, the checkout's git objects, or GitHub."""
+    tried = []
+    if given:
+        b = Path(given).read_bytes()
+        if sha(b) == SLEEP_SHA:
+            return b
+        sys.exit(f"make-pack: {given} is not v1.1.2's capri-sleep.png (sha256 {sha(b)[:12]}…, want {SLEEP_SHA[:12]}…)")
+    if (src / ".git").exists():
+        r = subprocess.run(["git", "-C", str(src), "show", f"{SLEEP_COMMIT}:{SLEEP_PATH}"], capture_output=True)
+        if r.returncode == 0 and sha(r.stdout) == SLEEP_SHA:
+            return r.stdout
+        tried.append("the checkout's git objects (no v1.1.2: `git fetch --tags`)")
+    try:
+        with urllib.request.urlopen(SLEEP_URL, timeout=30) as f:
+            b = f.read()
+        if sha(b) == SLEEP_SHA:
+            return b
+        tried.append(f"{SLEEP_URL} (sha256 {sha(b)[:12]}…)")
+    except OSError as e:
+        tried.append(f"{SLEEP_URL} ({e})")
+    sys.exit("make-pack: no checksum-matching pose-sleep from v1.1.2. Tried: " + "; ".join(tried)
+             + ". Pass --sleep FILE (v1.1.2 " + SLEEP_PATH + ").")
 
 
 def main(argv):
@@ -28,51 +103,66 @@ def main(argv):
         print(__doc__.strip())
         return 2
     repo = Path(__file__).resolve().parent.parent
-    moods = repo / "packs/capri/moods.json"
-    if "--moods" in argv:
-        i = argv.index("--moods")
-        moods = Path(argv[i + 1])
-        del argv[i:i + 2]
+    opts = {"--moods": repo / "packs/capri/moods.json", "--sleep": None}
+    for k in list(opts):
+        if k in argv:
+            i = argv.index(k)
+            opts[k] = Path(argv[i + 1])
+            del argv[i:i + 2]
+    moods = opts["--moods"]
     src = Path(argv[0])
     data = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))
     out = Path(argv[1]) if len(argv) > 1 else data / "synaps-avatar/packs/capri"
-    v1 = src / "assets/capri/sprites/v1"
-    for need in (v1 / "runtime-sprite-set.json", src / "assets/capri/sprites/poses-v2/runtime-poses.json",
-                 src / "assets/default/capri-music-v1", src / "assets/fonts/exo2/Exo2-Variable.ttf", moods):
-        if not need.exists():
-            sys.exit(f"make-pack: missing {need}")
+    if not moods.exists():
+        sys.exit(f"make-pack: missing {moods}")
+    pinned = pins(repo)
+    check_source(src, pinned)
+    sleep = sleep_frame(src, opts["--sleep"])
+
     out.mkdir(parents=True, exist_ok=True)
-    for sub in ("poses", "music", "fonts"):
+    for sub in ("poses", "music", "fonts", "intro"):
         (out / sub).mkdir(exist_ok=True)
 
-    shutil.copy2(v1 / "runtime-sprite-set.json", out / "sprites.json")
+    def copy(rel, dst):
+        # Only pinned files leave the checkout.
+        assert rel in pinned, rel
+        shutil.copy2(src / rel, out / dst)
+
+    v1 = "assets/capri/sprites/v1"
+    poses = "assets/capri/sprites/poses-v2"
+    copy(f"{v1}/runtime-sprite-set.json", "sprites.json")
     n = 0
-    for p in sorted(v1.glob("*.png")):
-        shutil.copy2(p, out / p.name)
+    for rel in sorted(p for p in pinned if p.startswith(f"{v1}/") and p.endswith(".png")):
+        copy(rel, Path(rel).name)
         n += 1
-    shutil.copy2(src / "assets/default/capri-headpat.png", out / "capri-headpat.png")
-    poses = src / "assets/capri/sprites/poses-v2"
-    shutil.copy2(poses / "runtime-poses.json", out / "poses/poses.json")
-    for p in sorted((poses / "PNG").glob("*.png")):
-        shutil.copy2(p, out / "poses" / p.name)
-    for p in sorted((src / "assets/default/capri-music-v1").glob("*.png")):
-        shutil.copy2(p, out / "music" / p.name)
-    shutil.copy2(src / "docs/character-assets.md", out / "NOTICE.md")
+    copy("assets/default/capri-headpat.png", "capri-headpat.png")
+    copy(f"{poses}/runtime-poses.json", "poses/poses.json")
+    for rel in sorted(p for p in pinned if p.startswith(f"{poses}/PNG/")):
+        copy(rel, f"poses/{Path(rel).name}")
+    (out / "poses/capri-sleep.png").write_bytes(sleep)
+    copy("assets/capri/intro-v1/runtime-intro.json", "intro/runtime-intro.json")
+    for rel in sorted(p for p in pinned if p.startswith("assets/capri/intro-v1/PNG/")):
+        copy(rel, f"intro/{Path(rel).name}")
+    for rel in sorted(p for p in pinned if p.startswith("assets/default/capri-music-v1/")):
+        copy(rel, f"music/{Path(rel).name}")
+    copy("assets/default/icon-source.png", "icon.png")
+    notice = (src / "docs/character-assets.md").read_text().rstrip("\n")
+    (out / "NOTICE.md").write_text(f"{notice}\n\n{NOTICE_LINE}\n")
     shutil.copy2(moods, out / "moods.json")
 
-    exo = src / "assets/fonts/exo2"
-    shutil.copy2(exo / "OFL.txt", out / "fonts/OFL.txt")
+    exo = "assets/fonts/exo2"
+    copy(f"{exo}/OFL.txt", "fonts/OFL.txt")
     for name, w in WEIGHTS.items():
         dst = out / f"fonts/Exo2-{name}.ttf"
-        r = subprocess.run([sys.executable, "-m", "fontTools.varLib.instancer", str(exo / "Exo2-Variable.ttf"),
+        r = subprocess.run([sys.executable, "-m", "fontTools.varLib.instancer", str(src / exo / "Exo2-Variable.ttf"),
                             f"wght={w}", "--static", "--update-name-table", "-q", "-o", str(dst)], capture_output=True, text=True)
         if r.returncode != 0:
             sys.exit(f"make-pack: fontTools could not cut Exo2 {name} (pip install fonttools): {r.stderr.strip()[:200]}")
 
     cat = json.loads((out / "sprites.json").read_text())
-    print(f"make-pack: {cat.get('character')} -> {out}: {n + 1} frames, "
-          f"{len(list((out / 'poses').glob('*.png')))} poses, {len(list((out / 'music').glob('*.png')))} music sprites, "
-          f"{len(WEIGHTS)} font weights")
+    print(f"make-pack: {cat.get('character')} (CapriCore v1.0.4 + pose-sleep v1.1.2) -> {out}: {n + 1} frames, "
+          f"{len(list((out / 'poses').glob('*.png')))} poses, {len(list((out / 'intro').glob('*.png')))} intro frames, "
+          f"{len(list((out / 'music').glob('*.png')))} music sprites, {len(WEIGHTS)} font weights, icon")
     print(f"make-pack: verify with  synaps-avatar --pack {out} --check")
     return 0
 

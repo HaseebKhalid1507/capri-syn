@@ -176,6 +176,14 @@ impl Animator {
         self.one_pos = 0;
     }
 
+    /// Play `seq` after the one-shot in progress (or now, if none).
+    pub fn then(&mut self, seq: Seq, now: Instant) {
+        match &mut self.oneshot {
+            Some(s) => s.extend(seq),
+            None => self.play(seq, now),
+        }
+    }
+
     pub fn stop_oneshot(&mut self, now: Instant) {
         if self.oneshot.take().is_some() {
             self.start_loop(now);
@@ -238,5 +246,20 @@ mod tests {
         a.tick(t + Duration::from_millis(200));
         assert_eq!(a.frame(), 0);
         assert!(!a.busy());
+    }
+
+    #[test]
+    fn then_follows_the_oneshot_in_progress() {
+        let t = Instant::now();
+        let mut a = Animator::new(0);
+        a.play(vec![(5, 100)], t);
+        a.then(vec![(7, 100)], t + Duration::from_millis(50));
+        assert_eq!(a.frame(), 5, "the arrival keeps playing");
+        a.tick(t + Duration::from_millis(100));
+        assert_eq!(a.frame(), 7, "then the entry");
+        a.tick(t + Duration::from_millis(200));
+        assert!(!a.busy());
+        a.then(vec![(3, 100)], t + Duration::from_millis(300));
+        assert_eq!(a.frame(), 3, "nothing playing: now");
     }
 }

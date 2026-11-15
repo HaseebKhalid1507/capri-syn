@@ -81,6 +81,57 @@ pub fn scoot_until(hops: &[Hop], ok: impl Fn(f32) -> bool) -> Vec<Hop> {
     hops.iter().take_while(|h| ok(h.to_x)).copied().collect()
 }
 
+/// A leap between two points (a small hop: along an edge, to the next window, down to the
+/// floor and back up): crouch, a parabola whose top clears the higher end by `LEAP_H`, land.
+/// Logical px; the air time grows with the distance.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Leap {
+    pub from: (f32, f32),
+    pub to: (f32, f32),
+}
+
+pub const LEAP_H: f32 = 36.0;
+
+impl Leap {
+    pub fn air_ms(&self) -> u32 {
+        let d = ((self.to.0 - self.from.0).powi(2) + (self.to.1 - self.from.1).powi(2)).sqrt();
+        (HOP_AIR_MS as f32 + 0.3 * d).clamp(HOP_AIR_MS as f32, 760.0) as u32
+    }
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn ms(&self) -> u32 {
+        HOP_CROUCH_MS + self.air_ms() + HOP_LAND_MS
+    }
+
+    /// Where she is `ms` into the leap (y down). Still in the crouch and the landing.
+    pub fn at(&self, ms: u32) -> (f32, f32) {
+        if ms < HOP_CROUCH_MS {
+            return self.from;
+        }
+        let air = self.air_ms();
+        let a = ms - HOP_CROUCH_MS;
+        if a >= air {
+            return self.to;
+        }
+        let u = a as f32 / air as f32;
+        // A parabola with its apex LEAP_H above the higher end.
+        let (y0, y1) = (self.from.1, self.to.1);
+        let b = bump(y0, y1, y0.min(y1) - LEAP_H);
+        (self.from.0 + (self.to.0 - self.from.0) * u, y0 + (y1 - y0) * u - b * u * (1.0 - u))
+    }
+
+    /// Landed (`at` holds `to` from here on).
+    pub fn done(&self, ms: u32) -> bool {
+        ms >= HOP_CROUCH_MS + self.air_ms()
+    }
+}
+
+/// The bump b of y(u) = y0 + (y1 - y0)u - b·u(1 - u) whose minimum on [0, 1] is `top`
+/// (closed form: with D = y1 - y0 and H = y0 - top, b = D + 2H + 2·sqrt(H·(D + H))).
+fn bump(y0: f32, y1: f32, top: f32) -> f32 {
+    let (d, h) = (y1 - y0, (y0 - top).max(0.0));
+    d + 2.0 * h + 2.0 * (h * (d + h)).max(0.0).sqrt()
+}
+
 /// A drift leg: cubic ease in/out between two points, slow enough that its peak speed stays
 /// under `DRIFT_MAX_SPEED` (a smoothstep peaks at 1.5x the mean speed).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -155,6 +206,27 @@ mod tests {
         assert!(cut.iter().all(|h| h.to_x < 250.0));
         assert_eq!(cut.last().unwrap().to_x, hops[cut.len() - 1].to_x);
         assert!(scoot_until(&hops, |_| false).is_empty());
+    }
+
+    #[test]
+    fn leap_arc_clears_the_higher_end() {
+        let mut rng = Rng::new(4);
+        for _ in 0..300 {
+            let from = (rng.range(0.0, 2000.0), rng.range(200.0, 1500.0));
+            let to = (from.0 + rng.range(-300.0, 300.0), rng.range(200.0, 1500.0));
+            let l = Leap { from, to };
+            assert_eq!(l.at(0), from);
+            assert_eq!(l.at(l.ms()), to);
+            assert!(l.done(l.ms()) && !l.done(HOP_CROUCH_MS));
+            let ys: Vec<f32> = (0..l.ms()).step_by(5).map(|ms| l.at(ms).1).collect();
+            let top = ys.iter().copied().fold(f32::MAX, f32::min);
+            let want = from.1.min(to.1) - LEAP_H;
+            assert!((top - want).abs() < 2.0, "apex {top} vs {want}");
+            // x only moves forward, never past the ends.
+            let xs: Vec<f32> = (0..l.ms()).step_by(5).map(|ms| l.at(ms).0).collect();
+            assert!(xs.windows(2).all(|w| (w[1] - w[0]) * (to.0 - from.0) >= -1e-3));
+            assert!(l.ms() <= HOP_CROUCH_MS + 760 + HOP_LAND_MS);
+        }
     }
 
     #[test]
