@@ -193,11 +193,12 @@ sudo apt-get install -y --no-install-recommends \
 It renders through Vulkan, so you also need a Vulkan driver for your GPU (Mesa's on Intel and AMD).
 
 **2. Assemble her pack.** The art is CapriChooms's and stays out of this repository. `make-pack` copies
-it from your own CapriCore checkout into `~/.local/share/synaps-avatar/packs/capri` (it needs Python's
-`fonttools`).
+it from your own CapriCore checkout (v1.0.4, the look she wears; it refuses others) into
+`~/.local/share/synaps-avatar/packs/capri` (it needs Python's `fonttools`).
 
 ```sh
 git clone https://github.com/CapriChooms/CapriCore /tmp/CapriCore
+git -C /tmp/CapriCore checkout v1.0.4
 tools/make-pack /tmp/CapriCore
 synaps-avatar --check        # loads the pack and verifies every frame, no window
 ```
