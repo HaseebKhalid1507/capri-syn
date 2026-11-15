@@ -1947,7 +1947,10 @@ impl Avatar {
             Ok(s) => {
                 self.rag_strength = crate::ragdoll::Strength(s.ragdoll.strength);
                 self.mirror_cfg = s.mirror.clone();
-                self.voice.cfg = s.voice.clone();
+                if self.voice.cfg != s.voice {
+                    self.voice.cfg = s.voice.clone();
+                    self.voice_config();
+                }
                 if crate::env_composited().is_none() && self.x11.force_composited(s.display.composited) {
                     elog!("synaps-avatar: settings: {} mode", if self.x11.composited() { "alpha" } else { "shape" });
                     self.alpha_switched();
@@ -1958,7 +1961,7 @@ impl Avatar {
                     let acts = if sl.link.rides_other() {
                         Vec::new()
                     } else {
-                        sl.link.set_persona(crate::session_persona(&s.session, model, &self.pack.dir), now)
+                        sl.link.set_persona(crate::session_persona(&s.session, s.voice.enabled, model, &self.pack.dir), now)
                     };
                     self.run_acts(acts);
                 }

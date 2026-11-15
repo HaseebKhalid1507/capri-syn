@@ -779,6 +779,7 @@ impl Line {
                 let s = match m {
                     Mark::Bold => HighlightStyle { font_weight: Some(FontWeight::BOLD), color: Some(rgb(pal.text).into()), ..Default::default() },
                     Mark::Code => HighlightStyle { color: Some(rgb(pal.accent).into()), background_color: Some(rgb(0x18242e).into()), ..Default::default() },
+                    Mark::Em => HighlightStyle { font_style: Some(FontStyle::Italic), color: Some(rgb(pal.text).into()), ..Default::default() },
                 };
                 (r, s)
             })

@@ -101,10 +101,12 @@ pub fn parse(md: &str) -> Vec<Block> {
 pub enum Mark {
     Bold,
     Code,
+    /// `*word*`: her stressed word (the speech markup), shown in italics, never as asterisks.
+    Em,
 }
 
-/// Inline marks: `**bold**`/`__bold__`, `` `code` ``, `[text](url)` → `text (url)`. The plain
-/// text and the marked byte ranges in it.
+/// Inline marks: `**bold**`/`__bold__`, `*em*`, `` `code` ``, `[text](url)` → `text (url)`. The
+/// plain text and the marked byte ranges in it.
 pub fn inline(s: &str) -> (String, Vec<(Range<usize>, Mark)>) {
     let mut out = String::with_capacity(s.len());
     let mut marks = Vec::new();
@@ -127,6 +129,15 @@ pub fn inline(s: &str) -> (String, Vec<(Range<usize>, Mark)>) {
             out.push_str(&r[..end]);
             marks.push((a..out.len(), Mark::Bold));
             rest = &r[end + 2..];
+            continue;
+        }
+        if crate::voice::em_opens(out.chars().next_back(), rest)
+            && let Some(end) = crate::voice::em_close(&rest[1..])
+        {
+            let a = out.len();
+            out.push_str(&rest[1..1 + end]);
+            marks.push((a..out.len(), Mark::Em));
+            rest = &rest[end + 2..];
             continue;
         }
         if let Some(r) = rest.strip_prefix('[')
@@ -328,6 +339,7 @@ fn styled(text: &str, pal: Pal) -> StyledText {
             let s = match m {
                 Mark::Bold => HighlightStyle { font_weight: Some(FontWeight::BOLD), color: Some(rgb(pal.text).into()), ..Default::default() },
                 Mark::Code => HighlightStyle { color: Some(rgb(pal.accent).into()), background_color: Some(rgb(0x18242e).into()), ..Default::default() },
+                Mark::Em => HighlightStyle { font_style: Some(FontStyle::Italic), color: Some(rgb(pal.text).into()), ..Default::default() },
             };
             (r, s)
         })
@@ -510,6 +522,9 @@ mod tests {
         assert_eq!(t, "run cargo test then ls -la see docs (https://x.y)");
         assert_eq!(m, vec![(4..14, Mark::Bold), (20..26, Mark::Code)]);
         assert_eq!(inline("a * b ** c").0, "a * b ** c");
+        let (t, m) = inline("I'm *not* signing, 2*3*4 and *two words* `*.rs` stay");
+        assert_eq!(t, "I'm not signing, 2*3*4 and two words *.rs stay");
+        assert_eq!(m, vec![(4..7, Mark::Em), (27..36, Mark::Em), (37..41, Mark::Code)]);
         assert_eq!(inline("ünï `cödé`").1, vec![(6..12, Mark::Code)]);
     }
 

@@ -1,10 +1,102 @@
-//! Voice, the pure parts: the spoken-turn hint, and what of a reply is spoken (whole
-//! sentences, in order, with the guards: nothing after `---`, no code, tables or URLs aloud,
-//! about 60 words at most). The audio itself lives in the `capri-voice` sidecar.
+//! Voice, the pure parts: the spoken-turn hint, the persona lines for speech, the speech
+//! markup (`*word*` stresses a word aloud, and is never shown), and what of a reply is spoken
+//! (whole sentences, in order, with the guards: nothing after `---`, no code, tables or URLs
+//! aloud, about 60 words at most). The audio itself lives in the `capri-voice` sidecar.
 
 /// Sent ahead of a spoken message (per turn, so the system prompt and its cache stay put).
 /// Short, so the echo (cut at 200 chars) still holds his words.
 pub const HINT: &str = "[voice: spoken; read aloud. 1-2 short sentences, ~40 words; code, paths, URLs only after a line ---]";
+
+/// Added to her persona while voice is on: how a reply that will be heard is written. Light on
+/// purpose: a stressed word in every sentence sounds like a sales pitch.
+pub const PERSONA: &str = "When a message starts with [voice: ...], your reply is read aloud. Write it for the ear: \
+short sentences, contractions, numbers and names the way you'd say them. If one word carries the point, you may \
+wrap it in *asterisks* and it will be stressed: at most one in a reply, and most replies need none. A dash — is a \
+beat. No lists, headings, emoji or caps for emphasis.";
+
+/// The persona with the voice lines added (`voice`: `[voice] enabled`).
+pub fn persona(system: Option<String>, voice: bool) -> Option<String> {
+    match system {
+        Some(s) if voice => Some(format!("{}\n\n{PERSONA}", s.trim_end())),
+        s => s,
+    }
+}
+
+/// Speech markup, opening: a single `*` (not `**`) that is not inside a word. `prev`: the
+/// character before it.
+pub fn em_opens(prev: Option<char>, at: &str) -> bool {
+    at.starts_with('*') && !at.starts_with("**") && !prev.is_some_and(|p| p.is_alphanumeric() || p == '*')
+}
+
+/// Speech markup, closing: in `r` (the text just after an opening `*`), the byte offset of the
+/// `*` that closes a `*word*` span: the span starts and ends with a non-space, stays on one
+/// line, holds no code, and the closing `*` is not followed by a letter or a digit. So `a * b`,
+/// `2*3*4` and `**bold**` are not spans.
+pub fn em_close(r: &str) -> Option<usize> {
+    let first = r.chars().next()?;
+    if first.is_whitespace() || first == '*' {
+        return None;
+    }
+    let mut prev = first;
+    for (i, c) in r.char_indices().skip(1) {
+        match c {
+            '`' | '\n' => return None,
+            '*' => {
+                let next = r[i + 1..].chars().next();
+                return (!prev.is_whitespace() && next != Some('*') && !next.is_some_and(char::is_alphanumeric)).then_some(i);
+            }
+            _ => prev = c,
+        }
+    }
+    None
+}
+
+/// `s` as shown: the asterisks of `*word*` spans dropped (outside `code`); other asterisks stay.
+pub fn unmark(s: &str) -> String {
+    marks(s, |inner, out| out.push_str(inner), |c, out| out.push(c))
+}
+
+/// `s` as said: a `*span*` of up to three words keeps its asterisks (the sidecar stresses it),
+/// longer ones are read plain, `**` and stray asterisks go.
+fn speech_marks(s: &str) -> String {
+    let s = s.replace("**", "");
+    marks(
+        &s,
+        |inner, out| {
+            if inner.split_whitespace().count() <= 3 {
+                out.push('*');
+                out.push_str(inner);
+                out.push('*');
+            } else {
+                out.push_str(inner);
+            }
+        },
+        |c, out| out.push(if c == '*' { ' ' } else { c }),
+    )
+}
+
+fn marks(s: &str, span: impl Fn(&str, &mut String), other: impl Fn(char, &mut String)) -> String {
+    let mut out = String::with_capacity(s.len());
+    let (mut rest, mut prev, mut code) = (s, None, false);
+    while let Some(c) = rest.chars().next() {
+        if c == '`' {
+            code = !code;
+        } else if !code
+            && em_opens(prev, rest)
+            && let Some(end) = em_close(&rest[1..])
+        {
+            let inner = &rest[1..1 + end];
+            span(inner, &mut out);
+            prev = Some('*');
+            rest = &rest[end + 2..];
+            continue;
+        }
+        if code { out.push(c) } else { other(c, &mut out) }
+        prev = Some(c);
+        rest = &rest[c.len_utf8()..];
+    }
+    out
+}
 
 /// Words spoken at most; then she says the rest is written.
 const WORDS_MAX: usize = 60;
@@ -140,21 +232,20 @@ fn plain(line: &str) -> String {
     }
     for (i, p) in parts.enumerate() {
         if i % 2 == 0 {
-            o.push_str(if p.len() <= 24 && !p.contains(['/', '\\', '(', '{', '=']) { p } else { "that (it's on the line)" });
+            o.push_str(&if p.len() <= 24 && !p.contains(['/', '\\', '(', '{', '=']) { p.replace('*', " ") } else { "that (it's on the line)".into() });
         } else {
             o.push_str(p);
         }
     }
-    let words: Vec<String> = o
+    let words: Vec<String> = speech_marks(&o)
         .split_whitespace()
-        .map(|w| if w.contains("://") || w.starts_with("www.") { "the link's on the line".to_string() } else { w.replace(['*', '_'], " ").trim().to_string() })
-        .filter(|w| !w.is_empty())
+        .flat_map(|w| if w.contains("://") || w.starts_with("www.") { vec!["the link's on the line".to_string()] } else { w.replace('_', " ").split_whitespace().map(str::to_string).collect() })
         .collect();
     words.join(" ")
 }
 
-/// Whole sentences of `s`: they end at `. ? ! ; …` followed by a space (closing quotes and
-/// brackets go with them), not inside a decimal or after a common abbreviation. `finished`:
+/// Whole sentences of `s`: they end at `. ? ! ; …` followed by a space (closing quotes,
+/// brackets and a closing `*` go with them), not inside a decimal or after a common abbreviation. `finished`:
 /// the remainder is one too.
 fn sentences(s: &str, finished: bool) -> Vec<String> {
     const ABBR: [&str; 9] = ["e.g", "i.e", "etc", "vs", "mr", "mrs", "dr", "st", "approx"];
@@ -166,7 +257,7 @@ fn sentences(s: &str, finished: bool) -> Vec<String> {
         let c = chars[i];
         if matches!(c, '.' | '?' | '!' | ';' | '…') {
             let mut j = i + 1;
-            while j < chars.len() && matches!(chars[j], '.' | '?' | '!' | '"' | '\'' | '”' | '’' | ')' | ']') {
+            while j < chars.len() && matches!(chars[j], '.' | '?' | '!' | '"' | '\'' | '”' | '’' | ')' | ']' | '*') {
                 j += 1;
             }
             let spaced = j < chars.len() && chars[j].is_whitespace();
@@ -224,6 +315,33 @@ mod tests {
         assert_eq!(out.last().map(String::as_str), Some(REST));
         assert!(out.len() <= 8);
         assert!(sp.feed(&long, true).is_empty());
+    }
+
+    #[test]
+    fn a_stressed_word_reaches_the_sidecar_and_nothing_else_does() {
+        let mut sp = Speech::default();
+        let r = "I'm *not* signing that. It's **really** fine, *slightly* odd *and much too long a span*. Then *why*? 2*3*4 a * b";
+        assert_eq!(sp.feed(r, true), vec!["I'm *not* signing that.", "It's really fine, *slightly* odd and much too long a span.", "Then *why*?", "2 3 4 a b."]);
+        let mut sp = Speech::default();
+        assert_eq!(sp.feed("Run `*.rs` now, and it's *done.* Next", true), vec!["Run .rs now, and it's *done.*", "Next."]);
+    }
+
+    #[test]
+    fn markup_is_never_shown() {
+        assert_eq!(unmark("I'm *not* signing that, *choom*."), "I'm not signing that, choom.");
+        assert_eq!(unmark("a * b, 2*3*4, `*.rs` and *two words*"), "a * b, 2*3*4, `*.rs` and two words");
+        assert_eq!(unmark("*unclosed and a lone *"), "*unclosed and a lone *");
+        assert!(em_opens(None, "*x*") && !em_opens(Some('a'), "*x*") && !em_opens(None, "**x**"));
+        assert_eq!((em_close("not* x"), em_close(" not*"), em_close("not *"), em_close("no*t")), (Some(3), None, None, None));
+    }
+
+    #[test]
+    fn the_voice_lines_join_the_persona_only_with_voice_on() {
+        assert_eq!(persona(Some("You are Capri.\n".into()), false).as_deref(), Some("You are Capri.\n"));
+        let on = persona(Some("You are Capri.\n".into()), true).unwrap();
+        assert!(on.starts_with("You are Capri.\n\nWhen a message starts with [voice") && on.contains("*asterisks*"));
+        assert_eq!(persona(None, true), None, "no persona (off): nothing is sent, voice or not");
+        assert!(PERSONA.contains("at most one in a reply"), "light on stress: she must not mark every sentence");
     }
 
     #[test]
