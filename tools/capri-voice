@@ -1497,15 +1497,23 @@ class Voice:
         # Calls: a new source-output re-checks (no polling).
         sub = subprocess.Popen(['pactl', 'subscribe'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
 
+        def check_call():
+            app = in_call()
+            if app is None:                  # can't tell: an open mic fails closed
+                app = 'unknown'
+            if app:
+                call['app'] = app
+            return bool(app)
+
         def watch():
+            # A new capture isn't linked to its source yet when it is announced: look again on its
+            # 'change' events and 0.3 s later.
             for line in sub.stdout:
-                if "'new' on source-output" in line:
-                    app = in_call()
-                    if app is None:          # can't tell: an open mic fails closed
-                        app = 'unknown'
-                    if app:
-                        call['app'] = app
+                if "'new' on source-output" in line or "'change' on source-output" in line:
+                    if check_call():
                         return
+                    if "'new'" in line:
+                        threading.Timer(0.3, check_call).start()
         threading.Thread(target=watch, daemon=True).start()
 
         def reset_turn():
@@ -1609,7 +1617,7 @@ class Voice:
                 self.emit(ev='level', v=round(min(1.0, float(np.sqrt(np.mean(x * x))) * 8), 3) if len(x) else 0.0)
             # Her first sentence: does her voice come back through the mic? The mic's level on a 20 ms
             # grid, each frame timed from the chunk's arrival, against her playback's level.
-            if echo == 'headphones':
+            if observe and echo == 'headphones':      # only while a sentence of hers is to be checked
                 n20 = MIC_RATE // 50
                 lv = env_db(x, n20)
                 t_end = time.time()
@@ -1642,6 +1650,7 @@ class Voice:
                         self.emit(ev='echo', mode='speakers', corr=round(corr, 2), db=round(loud, 1), lag_ms=lag * 20)
                         reset_turn()                 # what it holds is her first sentence
                     observe, check = False, None
+                    ring.clear()
             if echo == 'speakers' and (replying or time.time() < quiet_until):
                 continue                      # half-duplex: deaf while she speaks
             tb += chunk
@@ -1652,6 +1661,8 @@ class Voice:
                     if sum(v >= BARGE_P for v in bi) >= BARGE_N:
                         bi = []
                         log(f'barge-in: his voice over hers ({now_ms() - t:.0f} ms behind the mic)')
+                        if TEST:
+                            log('barge-in: p', ' '.join(f'{v:.2f}' for v in vs.p[-30:]))
                         self.hush(why='barge-in')
                         self.emit(ev='barge-in')
                 elif bi:
