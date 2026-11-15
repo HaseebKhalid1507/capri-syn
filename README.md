@@ -334,8 +334,9 @@ Reference (session rules, every setting and flag, pack format, dev control, test
   <!-- TODO(Haseeb): link the X post -->
 - **The art.** Capri's sprite art is by CapriChooms
   ([CapriCore](https://github.com/CapriChooms/CapriCore)). It is not included in this repository:
-  `tools/make-pack` assembles the pack on your machine from your own CapriCore checkout. The images and
-  clips on this page show the app running with that pack; the artwork in them remains CapriChooms's.
+  `tools/make-pack` assembles the pack on your machine from your own CapriCore checkout. The clips on
+  this page show the app running with that pack. The banner and the cards are composed from those
+  captures. The artwork in all of them remains CapriChooms's.
 - **Unofficial.** This is a fan project. It is not affiliated with or endorsed by CD PROJEKT RED,
   R. Talsorian Games, Studio Trigger or Netflix. All trademarks belong to their owners.
 - **Her voice.** Speech uses stock Kokoro voices, blended, with light DSP. Nothing is cloned and nobody's voice
