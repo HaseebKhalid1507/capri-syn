@@ -1026,7 +1026,7 @@ pub fn clean(raw: &str) -> String {
             None => l.to_string(),
         };
         s = s.replace("**", "").replace("__", "");
-        s = links(&s);
+        s = crate::voice::unmark(&links(&s));
         let s = s.trim_end().to_string();
         if s.is_empty() {
             continue;
@@ -1471,6 +1471,7 @@ mod tests {
         assert_eq!(clean("a\n```rust\nfn x() {}\n```\nb"), "a\n‹code›\nb");
         assert_eq!(clean("a\n```rust\nfn x"), "a\n‹code›");
         assert_eq!(clean("#hashtag"), "#hashtag");
+        assert_eq!(clean("I'm *not* signing that, 2*3 and a * b, `*.rs`"), "I'm not signing that, 2*3 and a * b, `*.rs`", "her stressed word shows plain");
         assert_eq!(tool_label("mcp__github__create_pull_request"), "create_pull_request".chars().take(17).collect::<String>() + "…");
         assert_eq!(tool_label("bash"), "bash");
         assert_eq!(one_line("  a \n b  ", 10), "a b");

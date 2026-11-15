@@ -120,11 +120,16 @@ impl Avatar {
         })
         .detach();
         self.voice.link = Some(s);
-        let c = &self.voice.cfg;
-        let cfg = serde_json::json!({ "op": "config", "stt_model": c.stt_model, "voice": c.voice, "speed": c.speed });
-        self.voice_send(cfg);
+        self.voice_config();
         elog!("synaps-avatar: voice: sidecar connected ({})", path.display());
         self.voice.link.is_some()
+    }
+
+    /// The sidecar gets the `[voice]` settings (on connect, and again when settings reload).
+    pub(super) fn voice_config(&mut self) {
+        let c = &self.voice.cfg;
+        let cfg = serde_json::json!({ "op": "config", "stt_model": c.stt_model, "voice": c.voice, "speed": c.speed, "pace": c.pace, "flow": c.flow });
+        self.voice_send(cfg);
     }
 
     fn voice_send(&mut self, v: serde_json::Value) {
@@ -362,7 +367,7 @@ impl Avatar {
                 let step = Duration::from_millis(v.get("step_ms").and_then(|x| x.as_u64()).unwrap_or(90));
                 let shapes: Vec<u8> = v.get("shapes").and_then(|x| x.as_array()).map(|a| a.iter().map(|s| s.as_u64().unwrap_or(0) as u8).collect()).unwrap_or_default();
                 self.voice.lips = Some(Lips { t0: now, step, shapes });
-                let text = v.get("text").and_then(|t| t.as_str()).unwrap_or("").to_string();
+                let text = voice::unmark(v.get("text").and_then(|t| t.as_str()).unwrap_or(""));
                 self.voice.caption = Some(text.clone());
                 self.voice_caption(&text, now);
                 self.voice_changed(cx);
