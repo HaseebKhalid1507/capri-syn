@@ -184,7 +184,7 @@ class Endpointer:
 
     def draft_at(self):
         """Trailing silence (s) at which a draft decode starts, so it is done when the pause is."""
-        return max(0.2, self.base() - (0.9 if self.speech * FRAME_S < 1.5 else 0.7))
+        return max(0.2, self.base() - 0.9)      # Whisper takes 0.65-0.9 s here (its window is never under 10 s)
 
     def feed(self, p):
         self.n += 1
@@ -1857,9 +1857,9 @@ def selftest_endpoint():
     assert run([0.9] * 2000)[0] == 'cap', 'the cap sends'
     assert run(speech + sil * 80, silence_s=2.0) == ('silence', round((40 + 63) * FRAME_S, 2))
     e = Endpointer()
-    for q in [0.9] * 50 + sil * 10:          # 1.6 s of speech: the decode takes ~0.7 s
+    for q in [0.9] * 50 + sil * 10:          # 1.6 s of speech: the decode takes up to ~0.9 s
         e.feed(q)
-    assert abs(e.draft_at() - 0.3) < 1e-6 and Endpointer(silence_s=0.5).draft_at() == 0.2
+    assert abs(e.draft_at() - 0.2) < 1e-6 and abs(Endpointer(silence_s=2.0).draft_at() - 2.1) < 1e-6
     e.extra = DANGLE_S
     assert all(e.feed(0.05) is None for _ in range(60)) and e.feed(0.9) is None and e.extra == 0.0, 'held on; speech resets it'
     for t in ('I want to check the build and', 'Send the note to.', 'Okay, so first,', 'Well…', 'It broke because', 'um'):
