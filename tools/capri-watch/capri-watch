@@ -34,7 +34,7 @@ except ImportError:  # Python < 3.11
 # ─── config ────────────────────────────────────────────────────────────────────────────────
 
 REPOS = ["HaseebKhalid1507/capri-syn", "HaseebKhalid1507/SynapsCLI", "HaseebKhalid1507/Axon",
-         "HaseebKhalid1507/synaps-desktop", "HaseebKhalid1507/axel", "HaseebKhalid1507/agent-comms"]
+         "HaseebKhalid1507/synaps-desk", "HaseebKhalid1507/axel", "HaseebKhalid1507/agent-comms"]
 
 DEFAULTS = {
     "role": "",            # "bella" (Capri's machine: GitHub + local delivery) | "avante" (ssh delivery); "" = by hostname
