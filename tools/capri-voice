@@ -145,6 +145,8 @@ WAKE_VERIFY_N, WAKE_VERIFY_S, WAKE_PAUSE_S = 12, 600.0, 600.0   # 12 Whisper che
 if TEST and os.environ.get('CAPRI_VOICE_TEST_WAKE_CHECKS'):
     WAKE_VERIFY_N = int(os.environ['CAPRI_VOICE_TEST_WAKE_CHECKS'])   # tests only: a long e2e run makes more than 12
 WAKE_WAIT_S, WAKE_TURN_S = 5.0, 30.0               # after the phrase: speech within 5 s; a turn is sent at 30 s
+WAKE_SECOND_S = 10.0                               # a rejected candidate's second look: his turn, at most this long
+WAKE_SECOND = os.environ.get('CAPRI_VOICE_WAKE_SECOND', '1') == '1'
 WAKE_HEY = {'hey', 'hay', 'hi', 'hei', 'hej', 'heh', 'hai', 'he', 'eh', 'ay', 'a', 'hello', 'hallo', 'halle', 'haley', 'hailey', 'heli'}
 # "Capri" as Whisper spells what it heard: Capri, Copry, Kapree, "cup pray", "kah preen"; never Capricorn, Capra, caprese
 _CAPRI = r"(?:k|c|ck|g|q)[aeiouy]{1,2}[rl]?h?p{1,2}r(?:[eiy]{1,3}|ay)(?:n|ne)?"
@@ -1474,7 +1476,7 @@ class Voice:
         self.wake = None         # the wake word's stage 1: loaded when first turned on
         self.wake_paused_until = 0.0
         self.wake_checks = collections.deque(maxlen=WAKE_VERIFY_N)   # times of the last Whisper checks
-        self.wake_n = {'candidates': 0, 'rejected': 0, 'woke': 0, 'paused': 0, 'verify_ms': []}
+        self.wake_n = {'candidates': 0, 'rejected': 0, 'woke': 0, 'second': 0, 'paused': 0, 'verify_ms': []}
         self.tts = Tts()
         self.media = Media()
         self.release_timer = None
@@ -1675,6 +1677,7 @@ class Voice:
         ws = WakeEar.Stream(ear)
         opened, last_lock, last_lvl, prev, last_fire, quiet_until = False, now_ms(), 0.0, 0.0, 0.0, 0.0
         cand, turn, end_why, call = None, None, None, {'app': None}
+        follow = []                      # a bare "Hey Capri." found at the second look: his turn starts now
         sub = self._watch_calls(call)
 
         def check(c, pcm):
@@ -1694,7 +1697,7 @@ class Voice:
             tn['vs'].feed(bytes(data))
             for q in tn['vs'].p[tn['seen']:]:
                 why = tn['ep'].feed(q)
-                if tn['ep'].speech == tn['ep'].min_frames:
+                if tn['ep'].speech == tn['ep'].min_frames and not tn.get('quiet'):
                     self.emit(ev='speech')
                 if why:
                     tn['seen'] = len(tn['vs'].p)
@@ -1702,7 +1705,47 @@ class Voice:
             tn['seen'] = len(tn['vs'].p)
             return None
 
+        def second(tn, why):
+            """A rejected candidate's second look: his whole turn (the phrase and what follows, up to 10 s),
+            decoded once as any turn is. It says "hey capri": a wake, sent at once. Else dropped, words never logged.
+            Nothing shows while it is taken: no tag, no meter, no media hold."""
+            c, e = tn['c'], tn['ep']
+            if why == 'nothing':
+                return
+            speech_ms = e.speech * FRAME_S * 1000
+            pcm = np.frombuffer(bytes(tn['buf']), np.int16).astype(np.float32) / 32768.0
+            dur = len(pcm) / MIC_RATE
+
+            def out():
+                t0 = now_ms()
+                with self.stt_lock:
+                    text = self.stt(pcm, speech_ms)
+                c['stt_ms'] = now_ms() - t0
+                if not wake_says(text):
+                    log(f"wake: the second look rejected it too ({dur:.1f} s, {c['stt_ms']:.0f} ms)")
+                    return
+                self.wake_n['woke'] += 1
+                self.wake_n['second'] += 1
+                log(f"wake: heard at the second look ({dur:.1f} s, {c['stt_ms']:.0f} ms)")
+                if self.player is not None or self.play_q or self.say_q:
+                    self.hush(why='wake')
+                self.emit(ev='wake', second=True, ms={'fire_to_wake': now_ms() - c['t_start'], 'verify': round(c['stt_ms'])})
+                c['t_endpoint'] = c['t_keyup'] = now_ms()
+                self.emit(ev='endpoint', why=why, speech_ms=round(speech_ms), silence_ms=round(e.trail * FRAME_S * 1000))
+                rest, hf = wake_rest(text)
+                if hf:
+                    c['t_heard'] = now_ms()
+                    self.emit(ev='wake-handsfree', ms=self._ms(c))
+                    return
+                if not rest:
+                    follow.append(c)
+                    return
+                self._sent(rest, speech_ms, dur, c)
+            threading.Thread(target=out, daemon=True).start()
+
         def finish(tn, why):
+            if tn.get('quiet'):
+                return second(tn, why)
             c, e = tn['c'], tn['ep']
             c['t_endpoint'] = c['t_keyup'] = now_ms()
             speech_ms = e.speech * FRAME_S * 1000
@@ -1763,8 +1806,23 @@ class Voice:
             if self.cancelled:
                 continue
             chunk = chunk[:len(chunk) // 2 * 2]
+            if follow and turn is None:
+                c, cand = follow.pop(), None     # his request, from what came after the phrase (in the ring)
+                turn = {'buf': bytearray(), 'vs': VadStream(self.vad), 'seen': 0, 'c': c,
+                        'ep': Endpointer(float(np.clip(silence_s, 0.5, 5.0)), max_s=WAKE_TURN_S, wait_s=WAKE_WAIT_S,
+                                         min_frames=MIN_FRAMES['wake'])}
+                pre, ring = bytes(ring), bytearray()
+                why = feed_turn(turn, pre)
+                if why:
+                    finish(turn, why)
+                    turn = None
+            if turn is not None and turn.get('quiet') and echo == 'speakers' and (self.player is not None or self.play_q or self.say_q):
+                turn, cand = None, None          # she started speaking on speakers: the second look is dropped
+                ring.clear()
+                ws, prev, last_fire = WakeEar.Stream(ear), 0.0, time.time()
+                continue
             if turn is not None:
-                if t - last_lvl >= 200:
+                if t - last_lvl >= 200 and not turn.get('quiet'):
                     last_lvl = t
                     x = np.frombuffer(chunk, np.int16).astype(np.float32) / 32768.0
                     self.emit(ev='level', v=round(min(1.0, float(np.sqrt(np.mean(x * x))) * 8), 3) if len(x) else 0.0)
@@ -1810,7 +1868,17 @@ class Voice:
                             turn = None
                     else:
                         self.wake_n['rejected'] += 1
-                        log(f"wake: a candidate rejected by the check (score {cand['score']:.2f}, {cand['ms']:.0f} ms)")
+                        log(f"wake: a candidate rejected by the check (score {cand['score']:.2f}, {cand['ms']:.0f} ms)"
+                            + ('; a second look at his turn' if WAKE_SECOND else ''))
+                        if WAKE_SECOND:
+                            c = {'t_start': cand['t'], 't_mic_open': cand['t'], 'mode': 'wake'}
+                            turn = {'buf': bytearray(cand['pre']), 'vs': VadStream(self.vad), 'seen': 0, 'c': c, 'quiet': True,
+                                    'ep': Endpointer(float(np.clip(silence_s, 0.5, 5.0)), max_s=WAKE_SECOND_S, wait_s=WAKE_WAIT_S,
+                                                     min_frames=MIN_FRAMES['wake'])}
+                            why = feed_turn(turn, cand['post'])
+                            if why:
+                                finish(turn, why)
+                                turn = None
                     cand = None
                 continue
             for sc in ws.push(np.frombuffer(chunk, np.int16)):
@@ -2411,7 +2479,7 @@ class Voice:
             self.emit(ev='stats', mic_open=self.rec is not None, mic_mode=self.cur.get('mode') if self.rec is not None else None,
                       speaking=self.player is not None, cfg=self.cfg, vad='silero' if self.vad else 'energy',
                       wake={'loaded': self.wake is not None, 'candidates': w['candidates'], 'rejected': w['rejected'], 'woke': w['woke'],
-                            'paused': w['paused'], 'paused_s': max(0, round(self.wake_paused_until - time.time())),
+                            'second': w['second'], 'paused': w['paused'], 'paused_s': max(0, round(self.wake_paused_until - time.time())),
                             'verify_ms_p50': round(float(np.median(w['verify_ms']))) if w['verify_ms'] else None})
         else:
             self.emit(ev='error', why=f'unknown op {op!r}')
