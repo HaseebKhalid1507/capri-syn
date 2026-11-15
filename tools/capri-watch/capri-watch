@@ -1,0 +1,1092 @@
+#!/usr/bin/env python3
+"""capri-watch: event hooks that wake Capri.
+
+One small poller per machine. It watches GitHub (bella only), the local Synaps daemon's
+sessions, failed systemd units, free disk, the Jawz backup and a few opt-in extras, and
+delivers each new event into Capri's session as ONE short framed line:
+
+    [watch] <event>@<host>: <what> (<id/link>)
+
+bella delivers with `synaps send --session capri --source watch:<event> -- <line>`; avante runs
+the same command on bella over ssh (BatchMode). The transport is pluggable ([deliver] transport
+= "local" | "ssh" | "command"), so agent-comms can replace ssh later.
+
+Safeguards: dedupe (an event fires once per state change), burst bundling (one digest per
+`bundle_s` window), a wake cap per hour, her DND and music state (read from the avatar's control
+socket, the one capri-ctl talks to), quiet hours, stale held events dropped (a dropped condition
+is re-checked). Her own session is never reported (no loops); sessions are never attached to.
+
+Config: ~/.config/synaps-avatar/watch.toml (tools/capri-watch/watch.toml is the documented
+example; a missing file means the built-in defaults below). State: ~/.local/state/capri-watch/.
+
+  capri-watch                  run (the systemd --user unit)
+  capri-watch --dry-run        print what would be sent; never sends, never writes state
+  capri-watch --once           one poll pass, flush at once, exit
+  capri-watch --print-config   the merged config as JSON
+"""
+import argparse, base64, copy, datetime as dt, fnmatch, glob, inspect, json, os, re, socket, sqlite3, subprocess, sys, time
+
+try:
+    import tomllib
+except ImportError:  # Python < 3.11
+    tomllib = None
+
+# ─── config ────────────────────────────────────────────────────────────────────────────────
+
+REPOS = ["HaseebKhalid1507/capri-syn", "HaseebKhalid1507/SynapsCLI", "HaseebKhalid1507/Axon",
+         "HaseebKhalid1507/synaps-desktop", "HaseebKhalid1507/axel", "HaseebKhalid1507/agent-comms"]
+
+DEFAULTS = {
+    "role": "",            # "bella" (Capri's machine: GitHub + local delivery) | "avante" (ssh delivery); "" = by hostname
+    "host": "",            # the name in event lines; "" = the role
+    "poll_s": 10,          # local sources (sessions, units, disk, ...)
+    "synaps": "",          # this machine's synaps CLI for `daemon sessions --json`; "" = synaps (bella) / synaps-dev (avante)
+    "profile": "",         # its --profile
+    "synaps_home": "~/.synaps-cli",
+    "ignore_sessions": ["capri"],   # names / ids / id prefixes never reported: her own session (no loops)
+    "state_file": "~/.local/state/capri-watch/state.json",
+    "github": {"enabled": None, "poll_s": 120, "repos": REPOS},   # enabled None = on for role bella only
+    "deliver": {
+        "transport": "",   # "local" | "ssh" | "command"; "" = local (bella) / ssh (avante)
+        "session": "capri",
+        "synaps": "synaps",
+        "profile": "",
+        "ssh_host": "bella",
+        "connect_timeout_s": 5,
+        "command": [],     # transport "command": argv with {source} {text} {session}
+    },
+    "safeguards": {
+        "bundle_s": 15,        # events inside one window become one digest
+        "max_per_hour": 6,     # wakes per rolling hour; more are held, then sent as one digest
+        "quiet_hours": "",     # "23:00-08:00" (local time) holds events; "" = off
+        "dnd": True,           # hold while her DND is on (the avatar's `brain state`)
+        "music": "defer",      # music playing: "defer" | "drop" | "ignore"
+        "stale_s": 3600,       # a held event older than this is dropped (a condition is re-checked)
+        "avatar_socket": "",   # "" = $XDG_RUNTIME_DIR/capri/synaps-avatar.sock (capri-ctl's)
+    },
+    "event": {
+        # ON
+        "ci_failed": {"enabled": True, "branches": ["main"], "prs": "mine"},    # prs: mine | all | none
+        "approval_waiting": {"enabled": True, "after_s": 30},
+        "session_error": {"enabled": True},
+        "unit_failed": {"enabled": True, "system": True, "user": True, "ignore_transient": True,
+                        "ignore": ["dunst*", "xdg-document-portal*", "xdg-desktop-portal*", "run-*", "probe-*"]},
+        "disk_low": {"enabled": True, "paths": ["/", "/home"], "min_free_pct": 10, "min_free_gb": 20},
+        "backup_failed": {"enabled": True, "unit": "jawz-backup-local.service", "log": "~/Jawz/logs/backup-local.log"},
+        # OFF (implemented)
+        "pr_opened": {"enabled": False},
+        "pr_merged": {"enabled": False},
+        "review_requested": {"enabled": False},
+        "long_turn": {"enabled": False, "min_s": 600, "away_idle_s": 300},
+        "release": {"enabled": False},
+        "battery_low": {"enabled": False, "below_pct": 15},
+        "gpu_hot": {"enabled": False, "above_c": 85},
+        "calendar": {"enabled": False, "lead_min": 10, "db": "~/Jawz/data/calendar.db"},
+    },
+}
+
+EVENTS = list(DEFAULTS["event"])
+
+
+def merge(base, over, path=""):
+    out = copy.deepcopy(base)
+    for k, v in (over or {}).items():
+        if k not in out:
+            raise ValueError(f"unknown setting {path}{k}")
+        if isinstance(out[k], dict) and out[k] and not isinstance(v, dict):
+            raise ValueError(f"{path}{k} must be a table")
+        out[k] = merge(out[k], v, f"{path}{k}.") if isinstance(out[k], dict) and out[k] else v
+    return out
+
+
+def load_config(path=None, text=None, hostname=None):
+    over = {}
+    if text is None and path and os.path.exists(path):
+        with open(path, "rb") as f:
+            text = f.read().decode()
+    if text:
+        if tomllib is None:
+            raise RuntimeError("Python 3.11+ (tomllib) is needed to read watch.toml")
+        over = tomllib.loads(text)
+    cfg = merge(DEFAULTS, over)
+    hn = (hostname or socket.gethostname()).split(".")[0].lower()
+    if not cfg["role"]:
+        cfg["role"] = "bella" if hn in ("bella", "parabellum") else "avante"
+    if cfg["role"] not in ("bella", "avante"):
+        raise ValueError('role must be "bella" or "avante"')
+    bella = cfg["role"] == "bella"
+    cfg["host"] = cfg["host"] or cfg["role"]
+    cfg["synaps"] = cfg["synaps"] or ("synaps" if bella else "synaps-dev")
+    if cfg["github"]["enabled"] is None:
+        cfg["github"]["enabled"] = bella
+    d = cfg["deliver"]
+    d["transport"] = d["transport"] or ("local" if bella else "ssh")
+    if d["transport"] not in ("local", "ssh", "command"):
+        raise ValueError('deliver.transport must be "local", "ssh" or "command"')
+    if cfg["safeguards"]["music"] not in ("defer", "drop", "ignore"):
+        raise ValueError('safeguards.music must be "defer", "drop" or "ignore"')
+    parse_quiet(cfg["safeguards"]["quiet_hours"])
+    return cfg
+
+
+def parse_quiet(spec):
+    if not spec:
+        return None
+    m = re.fullmatch(r"\s*(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})\s*", spec)
+    if not m:
+        raise ValueError('safeguards.quiet_hours must look like "23:00-08:00"')
+    a, b = int(m[1]) * 60 + int(m[2]), int(m[3]) * 60 + int(m[4])
+    return a, b
+
+
+def in_quiet(spec, local_minutes):
+    q = parse_quiet(spec)
+    if not q:
+        return False
+    a, b = q
+    return a <= local_minutes < b if a <= b else (local_minutes >= a or local_minutes < b)
+
+# ─── small helpers ─────────────────────────────────────────────────────────────────────────
+
+SECRETISH = re.compile(r"(gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,}|sk-[A-Za-z0-9_-]{16,}"
+                       r"|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|eyJ[A-Za-z0-9_-]{16,}\.[A-Za-z0-9._-]+)")
+
+
+def clean(s, n=300):
+    s = re.sub(r"[\x00-\x1f\x7f]+", " ", str(s))
+    s = SECRETISH.sub("[redacted]", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s if len(s) <= n else s[: n - 1].rstrip() + "…"
+
+
+def title(s, n=50):
+    return '"' + clean(s or "", n) + '"'
+
+
+def ago(secs):
+    secs = int(max(0, secs))
+    if secs < 90:
+        return f"{secs} s"
+    if secs < 5400:
+        return f"{round(secs / 60)} min"
+    return f"{secs / 3600:.1f} h"
+
+
+def iso(s):
+    """Synaps/GitHub timestamps → unix seconds (None when missing)."""
+    if not s:
+        return None
+    s = re.sub(r"(\.\d{6})\d+", r"\1", s.replace("Z", "+00:00"))
+    return dt.datetime.fromisoformat(s).timestamp()
+
+
+def log(msg):
+    print(f"capri-watch: {msg}", file=sys.stderr, flush=True)
+
+
+class Ev:
+    """One event. `level`: a condition (fires when it starts holding, again only after it
+    cleared); otherwise a one-shot (fires once, ever)."""
+    __slots__ = ("kind", "key", "text", "level", "t")
+
+    def __init__(self, kind, key, text, level=True, t=None):
+        self.kind, self.key, self.text, self.level, self.t = kind, key, text, level, t
+
+    def to_json(self):
+        return {"kind": self.kind, "key": self.key, "text": self.text, "level": self.level, "t": self.t}
+
+    @classmethod
+    def from_json(cls, d):
+        return cls(d["kind"], d["key"], d["text"], d.get("level", True), d.get("t"))
+
+    def __repr__(self):
+        return f"Ev({self.key!r}, {self.text!r})"
+
+
+class Sys:
+    """Everything that touches the machine. The tests swap it for a fake."""
+
+    def run(self, argv, timeout=30, stdin=None):
+        try:
+            p = subprocess.run(argv, input=stdin, capture_output=True, text=True, timeout=timeout)
+            return p.returncode, p.stdout, p.stderr
+        except FileNotFoundError:
+            return 127, "", f"{argv[0]}: not found"
+        except subprocess.TimeoutExpired:
+            return 124, "", f"{argv[0]}: timed out after {timeout} s"
+
+    def statvfs(self, path):
+        """(filesystem id, free bytes, total bytes). The id is the mount's source device, so two btrfs
+        subvolumes of one disk (bella's / and /home: different st_dev) count as one filesystem."""
+        st = os.statvfs(path)
+        return self.fs_id(path), st.f_bavail * st.f_frsize, st.f_blocks * st.f_frsize
+
+    def fs_id(self, path):
+        real, best, src = os.path.realpath(path), "", None
+        try:
+            with open("/proc/self/mountinfo") as f:
+                for line in f:
+                    left, _, right = line.partition(" - ")
+                    mnt = re.sub(r"\\([0-7]{3})", lambda m: chr(int(m[1], 8)), left.split()[4])
+                    if (real == mnt or real.startswith(mnt.rstrip("/") + "/")) and len(mnt) >= len(best):
+                        best, src = mnt, (right.split() + ["", ""])[1]
+        except OSError:
+            pass
+        return src if src and src.startswith("/dev/") else os.stat(path).st_dev
+
+    def read(self, path, tail=None):
+        with open(path, "rb") as f:
+            if tail:
+                f.seek(0, 2)
+                f.seek(max(0, f.tell() - tail))
+            return f.read().decode("utf-8", "replace")
+
+    def glob(self, pattern):
+        return sorted(glob.glob(pattern))
+
+    def exists(self, path):
+        return os.path.exists(path)
+
+    def now(self):
+        return time.time()
+
+    def local_minutes(self, t):
+        lt = time.localtime(t)
+        return lt.tm_hour * 60 + lt.tm_min
+
+    def sqlite_rows(self, path, sql, args):
+        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
+        try:
+            return con.execute(sql, args).fetchall()
+        finally:
+            con.close()
+
+# ─── the avatar's state (DND, music, presence) ─────────────────────────────────────────────
+
+
+def probe_avatar(sock=""):
+    """Her DND, music and his presence from the avatar's control socket (read-only `brain state`
+    and `state`). Self-contained: the ssh transport runs this very function on bella."""
+    import json, os, socket, subprocess
+    sock = sock or os.path.join(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}", "capri", "synaps-avatar.sock")
+
+    def ask(cmd, tries=2):
+        # The avatar answers "ok" when its UI thread doesn't reply within 3 s (asleep between
+        # frames): ask again once.
+        for i in range(tries):
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(5)
+            try:
+                s.connect(sock)
+                s.sendall(cmd.encode() + b"\n")
+                buf = b""
+                while not buf.endswith(b"\n"):
+                    chunk = s.recv(1 << 16)
+                    if not chunk:
+                        break
+                    buf += chunk
+            finally:
+                s.close()
+            try:
+                return json.loads(buf.decode() or "null")
+            except ValueError:
+                if i == tries - 1:
+                    raise
+
+    out = {"reachable": False, "dnd": False, "music": None, "present": None, "idle_s": None}
+    try:
+        b = ask("brain state") or {}
+        st = ask("state") or {}
+        out.update(reachable=True, dnd=(b.get("gate") or {}).get("dnd_left_s") is not None,
+                   present=b.get("present"), idle_s=b.get("idle_s"), music=bool(st.get("music")))
+    except Exception:
+        pass
+    if out["music"] is None:  # no avatar: ask MPRIS directly
+        try:
+            r = subprocess.run(["playerctl", "--all-players", "status"], capture_output=True, text=True, timeout=3)
+            out["music"] = "Playing" in r.stdout.split()
+        except Exception:
+            out["music"] = False
+    return out
+
+# ─── transports ────────────────────────────────────────────────────────────────────────────
+
+REMOTE_RUN = "import base64,json,subprocess,sys\nargv=json.loads(base64.b64decode('{b64}'))\n" \
+             "sys.exit(subprocess.run(argv,timeout=30).returncode)\n"
+
+
+class Transport:
+    """Delivers a line into her session and reads her avatar's state on that same machine."""
+
+    def __init__(self, cfg, sysx):
+        self.d, self.sys = cfg["deliver"], sysx
+        self.sock = cfg["safeguards"]["avatar_socket"]
+
+    def send_argv(self, source, text):
+        a = [self.d["synaps"]]
+        if self.d["profile"]:
+            a += ["--profile", self.d["profile"]]
+        return a + ["send", "--session", self.d["session"], "--source", source, "--", text]
+
+    def send(self, source, text):
+        raise NotImplementedError
+
+    def avatar(self):
+        return probe_avatar(self.sock)
+
+
+class LocalTransport(Transport):
+    def send(self, source, text):
+        rc, _, err = self.sys.run(self.send_argv(source, text), timeout=30)
+        return rc == 0, clean(err, 200)
+
+
+class SshTransport(Transport):
+    def ssh(self):
+        return ["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={int(self.d['connect_timeout_s'])}",
+                "-o", "ServerAliveInterval=5", self.d["ssh_host"], "python3", "-"]
+
+    def remote_script(self, argv):
+        # The argv travels base64-encoded inside a Python script on stdin: no remote shell
+        # quoting at all (bella's login shell is fish).
+        return REMOTE_RUN.format(b64=base64.b64encode(json.dumps(argv).encode()).decode())
+
+    def send(self, source, text):
+        rc, _, err = self.sys.run(self.ssh(), timeout=45, stdin=self.remote_script(self.send_argv(source, text)))
+        return rc == 0, clean(err, 200)
+
+    def avatar(self):
+        src = inspect.getsource(probe_avatar) + f"\nimport json\nprint(json.dumps(probe_avatar({self.sock!r})))\n"
+        rc, out, _ = self.sys.run(self.ssh(), timeout=20, stdin=src)
+        try:
+            return json.loads(out) if rc == 0 else None
+        except ValueError:
+            return None
+
+
+class CommandTransport(Transport):
+    def send(self, source, text):
+        if not self.d["command"]:
+            return False, "deliver.command is empty"
+        argv = [a.replace("{source}", source).replace("{text}", text).replace("{session}", self.d["session"])
+                for a in self.d["command"]]
+        rc, _, err = self.sys.run(argv, timeout=30)
+        return rc == 0, clean(err, 200)
+
+
+def make_transport(cfg, sysx):
+    return {"local": LocalTransport, "ssh": SshTransport, "command": CommandTransport}[cfg["deliver"]["transport"]](cfg, sysx)
+
+# ─── sources ───────────────────────────────────────────────────────────────────────────────
+
+
+class Source:
+    name = ""
+    kinds = ()
+
+    def __init__(self, w):
+        self.w, self.cfg, self.sys, self.host = w, w.cfg, w.sys, w.cfg["host"]
+        self.unknown = []      # key prefixes this pass could not check (their conditions are kept)
+        self.next_at = 0.0
+        self.note = ""         # what this pass saw, for --verbose
+
+    @property
+    def state(self):
+        return self.w.state["src"].setdefault(self.name, {})
+
+    def on(self, kind):
+        return self.w.on(kind)
+
+    def interval(self):
+        return self.cfg["poll_s"]
+
+    def active(self):
+        return any(self.on(k) for k in self.kinds)
+
+    def json_of(self, argv, timeout=30):
+        rc, out, err = self.sys.run(argv, timeout=timeout)
+        if rc != 0:
+            raise RuntimeError(f"{' '.join(argv[:3])}: exit {rc}: {clean(err, 160)}")
+        return json.loads(out or "null")
+
+
+class GitHub(Source):
+    name = "github"
+    kinds = ("ci_failed", "pr_opened", "pr_merged", "review_requested", "release")
+    FAIL = {"failure", "timed_out", "startup_failure"}
+    PR_FAIL = {"FAILURE", "TIMED_OUT", "STARTUP_FAILURE", "ERROR"}
+
+    def interval(self):
+        return self.cfg["github"]["poll_s"]
+
+    def active(self):
+        return self.cfg["github"]["enabled"] and super().active()
+
+    def me(self):
+        if not self.state.get("me"):
+            rc, out, err = self.sys.run(["gh", "api", "user", "--jq", ".login"], timeout=20)
+            if rc != 0 or not out.strip():
+                raise RuntimeError(f"gh api user: {clean(err, 160)}")
+            self.state["me"] = out.strip()
+        return self.state["me"]
+
+    def poll(self, now):
+        out, self.unknown = [], []
+        ci = self.cfg["event"]["ci_failed"]
+        for repo in self.cfg["github"]["repos"]:
+            short = repo.split("/")[-1]
+            try:
+                if self.on("ci_failed"):
+                    for br in ci["branches"]:
+                        out += self.ci_branch(repo, short, br)
+                if (self.on("ci_failed") and ci["prs"] != "none") or self.on("pr_opened"):
+                    out += self.open_prs(repo, short)
+                if self.on("pr_merged"):
+                    out += self.merged(repo, short)
+                if self.on("release"):
+                    out += self.releases(repo, short)
+            except Exception as e:
+                log(f"github {repo}: {e}")
+                self.unknown += [f"{k}:{self.host}:{repo}" for k in self.kinds]
+        self.note = f"{len(self.cfg['github']['repos'])} repos, {len(self.unknown) // len(self.kinds)} unreachable"
+        if self.on("review_requested"):
+            try:
+                out += self.reviews()
+            except Exception as e:
+                log(f"github reviews: {e}")
+                self.unknown.append(f"review_requested:{self.host}:")
+        return out
+
+    def ci_branch(self, repo, short, br):
+        runs = self.json_of(["gh", "run", "list", "-R", repo, "--branch", br, "--limit", "20", "--json",
+                             "databaseId,workflowName,status,conclusion,headSha,url,event"]) or []
+        latest = {}
+        for r in runs:  # newest first: the last completed run of each workflow decides
+            if r.get("event") == "pull_request" or r.get("status") != "completed":
+                continue
+            latest.setdefault(r.get("workflowName") or "?", r)
+        return [Ev("ci_failed", f"ci_failed:{self.host}:{repo}:{br}:{wf}",
+                   f"{short} {br}: {clean(wf, 40)} failed on {(r.get('headSha') or '')[:7]} ({r.get('url')})")
+                for wf, r in latest.items() if r.get("conclusion") in self.FAIL]
+
+    def open_prs(self, repo, short):
+        prs = self.json_of(["gh", "pr", "list", "-R", repo, "--state", "open", "--limit", "50", "--json",
+                            "number,title,url,author,isDraft,statusCheckRollup"]) or []
+        out = []
+        mode = self.cfg["event"]["ci_failed"]["prs"]
+        if self.on("ci_failed") and mode != "none":
+            me = self.me() if mode == "mine" else None
+            for p in prs:
+                if me and (p.get("author") or {}).get("login") != me:
+                    continue
+                bad = [c.get("name") or c.get("context") or "?" for c in p.get("statusCheckRollup") or []
+                       if (c.get("conclusion") or c.get("state") or "").upper() in self.PR_FAIL]
+                if bad:
+                    out.append(Ev("ci_failed", f"ci_failed:{self.host}:{repo}#{p['number']}",
+                                  f"{short} #{p['number']} {title(p.get('title'))}: {clean(', '.join(bad[:3]), 60)} failed ({p.get('url')})"))
+        if self.on("pr_opened"):
+            seen = self.state.setdefault("open", {})
+            nums = [p["number"] for p in prs]
+            if repo in seen:
+                for p in prs:
+                    if p["number"] not in seen[repo]:
+                        who = (p.get("author") or {}).get("login") or "?"
+                        out.append(Ev("pr_opened", f"pr_opened:{self.host}:{repo}#{p['number']}",
+                                      f"{short} #{p['number']} {title(p.get('title'))} opened by {clean(who, 30)} ({p.get('url')})", level=False))
+            seen[repo] = sorted(set(nums) | set(seen.get(repo, [])))[-200:]
+        return out
+
+    def merged(self, repo, short):
+        prs = self.json_of(["gh", "pr", "list", "-R", repo, "--state", "merged", "--limit", "10", "--json",
+                            "number,title,url,mergedBy"]) or []
+        seen = self.state.setdefault("merged", {})
+        out = []
+        if repo in seen:
+            for p in prs:
+                if p["number"] not in seen[repo]:
+                    who = (p.get("mergedBy") or {}).get("login") or "?"
+                    out.append(Ev("pr_merged", f"pr_merged:{self.host}:{repo}#{p['number']}",
+                                  f"{short} #{p['number']} {title(p.get('title'))} merged by {clean(who, 30)} ({p.get('url')})", level=False))
+        seen[repo] = sorted(set(seen.get(repo, [])) | {p["number"] for p in prs})[-200:]
+        return out
+
+    def releases(self, repo, short):
+        rel = self.json_of(["gh", "release", "list", "-R", repo, "--limit", "5", "--json",
+                            "tagName,name,isDraft,isPrerelease"]) or []
+        rel = [r for r in rel if not r.get("isDraft")]
+        seen = self.state.setdefault("releases", {})
+        out = []
+        if repo in seen:
+            for r in rel:
+                if r["tagName"] not in seen[repo]:
+                    pre = " (pre-release)" if r.get("isPrerelease") else ""
+                    out.append(Ev("release", f"release:{self.host}:{repo}@{r['tagName']}",
+                                  f"{short} {clean(r['tagName'], 40)} published{pre} (https://github.com/{repo}/releases/tag/{r['tagName']})", level=False))
+        seen[repo] = (seen.get(repo, []) + [r["tagName"] for r in rel if r["tagName"] not in seen.get(repo, [])])[-50:]
+        return out
+
+    def reviews(self):
+        prs = self.json_of(["gh", "search", "prs", "--review-requested=@me", "--state=open", "--limit", "20",
+                            "--json", "number,title,url,repository"]) or []
+        return [Ev("review_requested", f"review_requested:{self.host}:{(p.get('repository') or {}).get('nameWithOwner')}#{p['number']}",
+                   f"{clean((p.get('repository') or {}).get('name') or '?', 40)} #{p['number']} {title(p.get('title'))} wants your review ({p.get('url')})")
+                for p in prs]
+
+
+class Daemon(Source):
+    """`synaps daemon sessions --json`: approvals waiting, turns that end without a reply, long
+    turns. Errors aren't in the listing (0.11.1), so a turn's end is read from its journal on disk:
+    a turn that succeeded ends on an assistant text message; one that failed or was aborted ends
+    on the user's prompt or a tool result (the daemon repairs the history that way). The daemon
+    log around the turn's end names the reason when there is one (HTTP status, turn budget)."""
+    name = "daemon"
+    kinds = ("approval_waiting", "session_error", "long_turn")
+    REASONS = [(re.compile(r"API request failed \(not retried\) status=(\d+)"), "HTTP {0}"),
+               (re.compile(r'turn ended: budget exhausted.*?dimension="?(\w+)'), "turn budget: {0}"),
+               (re.compile(r"turn reported an error"), "error")]
+
+    def home(self):
+        h = os.path.expanduser(self.cfg["synaps_home"])
+        return os.path.join(h, self.cfg["profile"]) if self.cfg["profile"] else h
+
+    def ignored(self, s):
+        for pat in self.cfg["ignore_sessions"]:
+            if pat and (s.get("name") == pat or s.get("id") == pat or str(s.get("id", "")).startswith(pat)):
+                return True
+        return False
+
+    def poll(self, now):
+        argv = [self.cfg["synaps"]] + (["--profile", self.cfg["profile"]] if self.cfg["profile"] else []) + \
+               ["daemon", "sessions", "--json"]
+        sessions = self.json_of(argv, timeout=20) or []
+        st = self.state.setdefault("sessions", {})
+        out, live = [], set()
+        for s in sessions:
+            sid = s.get("id")
+            if not sid or self.ignored(s):
+                continue
+            live.add(sid)
+            prev = st.get(sid)
+            cur = {"busy": bool(s.get("busy")), "since": s.get("state_since"), "life": s.get("lifecycle") or "live",
+                   "msgs": s.get("messages") or 0, "await_t": None, "check": (prev or {}).get("check")}
+            label = clean(s.get("name") or s.get("title") or sid[-4:], 40)
+            if (s.get("awaiting_input") or 0) > 0:
+                cur["await_t"] = (prev or {}).get("await_t") or now
+                waited = now - cur["await_t"]
+                if self.on("approval_waiting") and waited >= self.cfg["event"]["approval_waiting"]["after_s"]:
+                    out.append(Ev("approval_waiting", f"approval_waiting:{self.host}:{sid}",
+                                  f"session {label} is waiting on an approval ({sid})"))
+            if prev and cur["life"] == "live" and prev["life"] == "live" and not cur["busy"] and \
+                    (prev["busy"] or (cur["since"] != prev["since"] and prev["since"] is not None)):
+                cur["check"] = {"start": prev["since"] if prev["busy"] else None, "end": cur["since"],
+                                "prev_msgs": prev["msgs"], "tries": 0}
+            if cur["check"] and not cur["busy"]:
+                done, evs = self.turn_end(s, sid, label, cur["check"], now)
+                out += evs
+                cur["check"] = None if done else cur["check"]
+            elif cur["busy"]:
+                cur["check"] = None
+            st[sid] = cur
+        for sid in list(st):
+            if sid not in live:
+                del st[sid]
+        self.note = (f"{len(sessions)} sessions ({len(sessions) - len(live)} ignored): "
+                     f"{sum(1 for v in st.values() if v['busy'])} busy, "
+                     f"{sum(1 for v in st.values() if v['await_t'])} awaiting approval, "
+                     f"{sum(1 for v in st.values() if v['check'])} turn end(s) waiting for the journal")
+        return out
+
+    def turn_end(self, s, sid, label, chk, now):
+        """(finished?, events) for a turn that just ended."""
+        out = []
+        start, end = iso(chk["start"]), iso(chk["end"])
+        if start and end and self.on("long_turn") and end - start >= self.cfg["event"]["long_turn"]["min_s"] and self.away():
+            out.append(Ev("long_turn", f"long_turn:{self.host}:{sid}:{chk['end']}",
+                          f"session {label} finished a turn after {ago(end - start)} ({sid})", level=False))
+        n, before = s.get("messages") or 0, chk["prev_msgs"]
+        compacted = before - n >= 4 and n < before * 0.6   # an error's repair drops a message or two, not half
+        idle_noop = chk["start"] is None and n <= before   # seen idle on both passes and nothing was added
+        if not self.on("session_error") or compacted or idle_noop:
+            return True, out
+        chk["tries"] += 1
+        ok = self.ended_with_reply(s)
+        if ok is None and chk["tries"] < 4:
+            return False, []   # the journal isn't saved yet: look again next pass (long_turn waits too)
+        if ok is False:
+            why = self.log_reason(end)
+            what = f"turn failed ({why})" if why else "turn ended without a reply (error or abort)"
+            out.append(Ev("session_error", f"session_error:{self.host}:{sid}:{chk['end']}",
+                          f"session {label}: {what} ({sid})", level=False))
+        return True, out
+
+    def ended_with_reply(self, s):
+        """True: the journal ends on a reply; False: on a prompt/tool result; None: not readable / not saved yet."""
+        path = os.path.join(self.home(), "sessions", f"{s.get('journal_id') or s['id']}.json")
+        try:
+            d = json.loads(self.sys.read(path))
+        except Exception:
+            return None
+        msgs = d.get("api_messages") or []
+        if not msgs or len(msgs) != (s.get("messages") or len(msgs)):
+            return None
+        last = msgs[-1]
+        if last.get("role") != "assistant":
+            return False
+        c = last.get("content")
+        if isinstance(c, str):
+            return bool(c)
+        return bool(c) and not any(isinstance(b, dict) and b.get("type") == "tool_use" for b in c)
+
+    def log_reason(self, end):
+        if not end:
+            return None
+        day = dt.datetime.fromtimestamp(end, dt.timezone.utc).strftime("%Y-%m-%d")
+        try:
+            text = self.sys.read(os.path.join(self.home(), f"synaps.log.{day}"), tail=4 << 20)
+        except Exception:
+            return None
+        why = None
+        for line in text.splitlines():
+            if " WARN " not in line and " ERROR " not in line:
+                continue
+            try:
+                t = iso(line.split(" ", 1)[0])
+            except ValueError:
+                continue
+            if t is None or not (end - 20 <= t <= end + 3):
+                continue
+            for rx, fmt in self.REASONS:
+                m = rx.search(line)
+                if m:
+                    why = fmt.format(*m.groups())
+        return why
+
+    def away(self):
+        a = self.w.avatar()
+        if not a or not a.get("reachable"):
+            return True
+        return a.get("present") is False or (a.get("idle_s") or 0) >= self.cfg["event"]["long_turn"]["away_idle_s"]
+
+
+class Units(Source):
+    name = "units"
+    kinds = ("unit_failed",)
+
+    def poll(self, now):
+        e = self.cfg["event"]["unit_failed"]
+        out, self.unknown = [], []
+        skip = set()
+        if self.on("backup_failed"):
+            skip.add(self.cfg["event"]["backup_failed"]["unit"])   # reported by backup_failed
+        seen = []
+        for scope in ("system", "user"):
+            if not e[scope]:
+                continue
+            try:
+                names = self.failed(scope == "user")
+                seen.append(f"{scope} {len(names)}")
+                for name in names:
+                    if name in skip or any(fnmatch.fnmatch(name, p) for p in e["ignore"]):
+                        continue
+                    out.append(Ev("unit_failed", f"unit_failed:{self.host}:{scope}:{name}", f"{clean(name, 80)} failed ({scope})"))
+            except Exception as ex:
+                log(f"units ({scope}): {ex}")
+                self.unknown.append(f"unit_failed:{self.host}:{scope}:")
+        self.note = f"failed (transient units left out): {', '.join(seen)}; reported after the filter: {len(out)}"
+        return out
+
+    def failed(self, user):
+        base = ["systemctl"] + (["--user"] if user else [])
+        rc, out, err = self.sys.run(base + ["list-units", "--state=failed", "--all", "--no-pager", "--output=json"], timeout=20)
+        if rc != 0:
+            raise RuntimeError(clean(err, 160))
+        names = [u["unit"] for u in json.loads(out or "[]")]
+        if names and self.cfg["event"]["unit_failed"]["ignore_transient"]:
+            rc, out, _ = self.sys.run(base + ["show", "-p", "Id", "-p", "Transient", "--"] + names, timeout=20)
+            if rc == 0:
+                transient, cur = set(), None
+                for line in out.splitlines():
+                    if line.startswith("Id="):
+                        cur = line[3:]
+                    elif line == "Transient=yes" and cur:
+                        transient.add(cur)
+                names = [n for n in names if n not in transient]
+        return names
+
+
+class Disk(Source):
+    name = "disk"
+    kinds = ("disk_low",)
+
+    def poll(self, now):
+        e = self.cfg["event"]["disk_low"]
+        low = self.state.setdefault("low", [])
+        out, devs = [], {}
+        for p in e["paths"]:
+            try:
+                dev, free, total = self.sys.statvfs(p)
+            except OSError as ex:
+                log(f"disk {p}: {ex}")
+                continue
+            devs.setdefault(dev, {"paths": [], "free": free, "total": total})["paths"].append(p)
+        notes = []
+        for dev, d in devs.items():
+            key = f"disk_low:{self.host}:{d['paths'][0]}"
+            pct = 100.0 * d["free"] / d["total"] if d["total"] else 100.0
+            gb = d["free"] / 1e9
+            notes.append(f"{'+'.join(d['paths'])} {gb:.1f} GB free ({pct:.1f} %)")
+            self.note = "; ".join(notes)
+            # Hysteresis: once low, it stays low until 10 % past both lines (no flapping on the edge).
+            k = 1.1 if key in low else 1.0
+            if pct < e["min_free_pct"] * k or gb < e["min_free_gb"] * k:
+                if key not in low:
+                    low.append(key)
+                where = " and ".join(d["paths"])
+                out.append(Ev("disk_low", key, f"{where} low on space: {gb:.1f} GB free ({pct:.0f} %)"))
+            elif key in low:
+                low.remove(key)
+        return out
+
+
+class Backup(Source):
+    name = "backup"
+    kinds = ("backup_failed",)
+
+    def poll(self, now):
+        e = self.cfg["event"]["backup_failed"]
+        rc, out, err = self.sys.run(["systemctl", "--user", "show", e["unit"], "-p", "LoadState", "-p", "ExecMainStatus",
+                                     "-p", "ExecMainExitTimestamp", "-p", "ActiveState"], timeout=20)
+        if rc != 0:
+            raise RuntimeError(clean(err, 160))
+        p = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+        if p.get("LoadState") != "loaded":
+            self.note = f"{e['unit']}: {p.get('LoadState') or '?'} (no backup here)"
+            return []   # no such backup on this machine
+        status = int(p.get("ExecMainStatus") or 0) if p.get("ExecMainExitTimestamp") else 0
+        errors = 0
+        try:
+            text = self.sys.read(os.path.expanduser(e["log"]), tail=1 << 20)
+            last = text.rsplit("===== Local backup started =====", 1)
+            errors = sum(1 for line in (last[1] if len(last) == 2 else text).splitlines() if "ERROR" in line)
+        except OSError:
+            pass
+        self.note = f"{e['unit']}: last exit {status}, {errors} ERROR line(s) in the last run"
+        if status == 0 and errors == 0:
+            return []
+        stem = e["unit"].removesuffix(".service")
+        what = [f"exited {status}"] if status else []
+        if errors:
+            what.append(f"{errors} ERROR line{'s' if errors != 1 else ''} in its last run")
+        when = (p.get("ExecMainExitTimestamp") or "").strip()
+        return [Ev("backup_failed", f"backup_failed:{self.host}:{e['unit']}",
+                   f"{stem} failed: {', '.join(what)}" + (f" ({clean(when, 40)})" if when else ""))]
+
+
+class Battery(Source):
+    name = "battery"
+    kinds = ("battery_low",)
+
+    def poll(self, now):
+        below = self.cfg["event"]["battery_low"]["below_pct"]
+        out = []
+        for bat in self.sys.glob("/sys/class/power_supply/BAT*"):
+            try:
+                cap = int(self.sys.read(f"{bat}/capacity").strip())
+                status = self.sys.read(f"{bat}/status").strip()
+            except (OSError, ValueError):
+                continue
+            key = f"battery_low:{self.host}:{os.path.basename(bat)}"
+            lowlist = self.state.setdefault("low", [])
+            limit = below + 5 if key in lowlist else below
+            if status == "Discharging" and cap < limit:
+                if key not in lowlist:
+                    lowlist.append(key)
+                out.append(Ev("battery_low", key, f"battery at {cap} % and discharging"))
+            elif key in lowlist:
+                lowlist.remove(key)
+        return out
+
+
+class Gpu(Source):
+    name = "gpu"
+    kinds = ("gpu_hot",)
+
+    def poll(self, now):
+        above = self.cfg["event"]["gpu_hot"]["above_c"]
+        rc, out, err = self.sys.run(["nvidia-smi", "--query-gpu=index,temperature.gpu", "--format=csv,noheader,nounits"], timeout=15)
+        if rc != 0:
+            raise RuntimeError(clean(err, 160))
+        evs, hot = [], self.state.setdefault("hot", [])
+        for line in out.splitlines():
+            try:
+                idx, temp = [x.strip() for x in line.split(",")[:2]]
+                temp = int(float(temp))
+            except ValueError:
+                continue
+            key = f"gpu_hot:{self.host}:{idx}"
+            limit = above - 5 if key in hot else above
+            if temp >= limit:
+                if key not in hot:
+                    hot.append(key)
+                evs.append(Ev("gpu_hot", key, f"GPU {idx} at {temp} °C"))
+            elif key in hot:
+                hot.remove(key)
+        return evs
+
+
+class Calendar(Source):
+    name = "calendar"
+    kinds = ("calendar",)
+    SQL = ("SELECT id, title, date, time FROM events WHERE time IS NOT NULL AND (recurring_pattern IS NULL OR "
+           "recurring_pattern = '') AND date BETWEEN ? AND ? UNION ALL SELECT e.id, COALESCE(ei.override_title, e.title), "
+           "ei.occurrence_date, ei.occurrence_time FROM events e JOIN event_instances ei ON e.id = ei.event_id "
+           "WHERE ei.status = 'active' AND ei.occurrence_time IS NOT NULL AND ei.occurrence_date BETWEEN ? AND ?")
+
+    def poll(self, now):
+        e = self.cfg["event"]["calendar"]
+        db = os.path.expanduser(e["db"])
+        if not self.sys.exists(db):
+            return []
+        lead = e["lead_min"] * 60
+        d0 = dt.datetime.fromtimestamp(now, dt.timezone.utc).date()
+        d1 = dt.datetime.fromtimestamp(now + lead, dt.timezone.utc).date()
+        out = []
+        for eid, name, day, hhmm in self.sys.sqlite_rows(db, self.SQL, (str(d0), str(d1), str(d0), str(d1))):
+            try:  # the calendar keeps UTC dates and times
+                start = dt.datetime.fromisoformat(f"{day}T{hhmm}").replace(tzinfo=dt.timezone.utc).timestamp()
+            except ValueError:
+                continue
+            if now < start <= now + lead:
+                local = time.strftime("%H:%M", time.localtime(start))
+                out.append(Ev("calendar", f"calendar:{self.host}:{eid}:{day}T{hhmm}",
+                              f"{title(name)} starts in {ago(start - now)} ({local})", level=False))
+        return out
+
+
+SOURCES = [GitHub, Daemon, Units, Disk, Backup, Battery, Gpu, Calendar]
+
+# ─── the watcher: dedupe, bundling, gates, delivery ────────────────────────────────────────
+
+
+class Watcher:
+    def __init__(self, cfg, sysx=None, transport=None, dry_run=False, out=None, state=None, verbose=False):
+        self.cfg, self.sys, self.verbose = cfg, sysx or Sys(), verbose
+        self.transport = transport or make_transport(cfg, self.sys)
+        self.dry, self.out = dry_run, out or sys.stdout
+        self.state = state if state is not None else self.load_state()
+        for k in ("fired", "src"):
+            self.state.setdefault(k, {})
+        for k in ("pending", "sent"):
+            self.state.setdefault(k, [])
+        self.state.setdefault("retry_at", 0)
+        self.state.setdefault("hold_until", 0)
+        self.sources = [S(self) for S in SOURCES]
+        self._avatar, self._held_why, self._errors = None, None, {}
+
+    # state
+    def state_path(self):
+        return os.path.expanduser(self.cfg["state_file"])
+
+    def load_state(self):
+        try:
+            with open(self.state_path()) as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return {}
+
+    def save_state(self):
+        if self.dry:
+            return
+        p = self.state_path()
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        tmp = p + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(self.state, f)
+        os.replace(tmp, p)
+
+    @property
+    def pending(self):
+        return self.state["pending"]
+
+    def on(self, kind):
+        return bool(self.cfg["event"][kind]["enabled"])
+
+    def avatar(self):
+        if self._avatar is None:
+            try:
+                self._avatar = self.transport.avatar() or {}
+            except Exception as e:
+                log(f"avatar: {e}")
+                self._avatar = {}
+        return self._avatar
+
+    # one pass
+    def tick(self, now=None, force=False):
+        now = self.sys.now() if now is None else now
+        self._avatar = None
+        self.drop_stale(now)   # first: a stale condition that still holds is found again on this pass
+        for src in self.sources:
+            if not src.active() or (not force and now < src.next_at):
+                continue
+            src.next_at = now + src.interval()
+            try:
+                evs = src.poll(now)
+            except Exception as e:
+                if self._errors.get(src.name) != str(e):   # once per distinct error, not every pass
+                    log(f"{src.name}: {e}")
+                self._errors[src.name] = str(e)
+                continue
+            if self._errors.pop(src.name, None):
+                log(f"{src.name}: reachable again")
+            if self.verbose:
+                log(f"{src.name}: {src.note or 'ok'} -> {len(evs)} condition(s)/event(s)")
+            self.absorb(src, evs, now)
+        self.prune(now)
+        self.flush(now, force=force)
+        self.save_state()
+
+    def absorb(self, src, evs, now):
+        fired, seen = self.state["fired"], set()
+        for e in evs:
+            if not self.on(e.kind):
+                continue
+            seen.add(e.key)
+            if e.key in fired:
+                continue
+            fired[e.key] = {"t": now, "level": e.level}
+            e.t = now
+            self.pending.append(e.to_json())
+        # A condition that no longer holds clears: it may fire again later. If it cleared before
+        # it was delivered (an approval answered inside the window), it is not delivered at all.
+        for key, v in list(fired.items()):
+            if v.get("level") and key.split(":", 1)[0] in src.kinds and key not in seen \
+                    and not any(key.startswith(p) for p in src.unknown):
+                del fired[key]
+                self.state["pending"] = [p for p in self.pending if p["key"] != key]
+
+    def prune(self, now):
+        fired = self.state["fired"]
+        for key, v in list(fired.items()):
+            if not v.get("level") and now - v.get("t", now) > 30 * 86400:
+                del fired[key]
+        self.state["sent"] = [t for t in self.state["sent"] if 0 <= now - t < 3600]   # (a clock jump back drops them)
+
+    def gate(self, now):
+        """Why delivery must wait now (None: go)."""
+        g = self.cfg["safeguards"]
+        if in_quiet(g["quiet_hours"], self.sys.local_minutes(now)):
+            return "quiet hours"
+        sent = [t for t in self.state["sent"] if 0 <= now - t < 3600]
+        if len(sent) >= g["max_per_hour"]:
+            return f"wake cap ({g['max_per_hour']}/h)"
+        if g["dnd"] or g["music"] != "ignore":
+            a = self.avatar()
+            if g["dnd"] and a.get("dnd"):
+                return "her DND is on"
+            if g["music"] != "ignore" and a.get("music"):
+                return "music is playing"
+        return None
+
+    def drop_stale(self, now):
+        keep = []
+        for p in self.pending:
+            if now - p["t"] > self.cfg["safeguards"]["stale_s"]:
+                log(f"dropped (stale, held {ago(now - p['t'])}): {p['key']}")
+                if p.get("level"):
+                    self.state["fired"].pop(p["key"], None)   # re-checked on the next poll
+            else:
+                keep.append(p)
+        self.state["pending"] = keep
+
+    def flush(self, now, force=False):
+        self.drop_stale(now)
+        if not self.pending:
+            self._held_why = None
+            return
+        oldest = min(p["t"] for p in self.pending)
+        if not force and (now - oldest < self.cfg["safeguards"]["bundle_s"] or now < self.state["retry_at"]
+                          or now < self.state["hold_until"]):
+            return
+        why = self.gate(now)
+        if why == "music is playing" and self.cfg["safeguards"]["music"] == "drop":
+            log(f"dropped {len(self.pending)} event(s): music is playing")
+            self.state["pending"] = []
+            return
+        source, text = self.render(now)
+        if why:
+            if why != self._held_why:
+                log(f"holding {len(self.pending)} event(s): {why}")
+            self._held_why = why
+            if self.dry:
+                print(f"--- held ({why}); when it clears, would send --source {source}:\n{text}", file=self.out, flush=True)
+            self.state["hold_until"] = now + 30
+            return
+        self._held_why = None
+        if self.dry:
+            print(f"--- would send --source {source}:\n{text}", file=self.out, flush=True)
+            self.state["pending"] = []
+            return
+        ok, err = self.transport.send(source, text)
+        if ok:
+            log(f"sent ({source}): {text.splitlines()[0]}")
+            self.state["sent"].append(now)
+            self.state["pending"] = []
+            self.state["retry_at"] = 0
+        else:
+            log(f"delivery failed, retrying in 60 s: {err}")
+            self.state["retry_at"] = now + 60
+
+    def line(self, p, now):
+        late = now - p["t"]
+        suffix = f" [{ago(late)} ago]" if late >= 300 else ""
+        return clean(f"[watch] {p['kind']}@{self.cfg['host']}: {p['text']}{suffix}", 400)
+
+    def render(self, now):
+        ps = sorted(self.pending, key=lambda p: p["t"])
+        if len(ps) == 1:
+            return f"watch:{ps[0]['kind']}", self.line(ps[0], now)
+        lines = [f"[watch] digest@{self.cfg['host']}: {len(ps)} events"] + [self.line(p, now) for p in ps[:10]]
+        if len(ps) > 10:
+            lines.append(f"[watch] digest@{self.cfg['host']}: and {len(ps) - 10} more")
+        return "watch:digest", "\n".join(lines)
+
+# ─── main ──────────────────────────────────────────────────────────────────────────────────
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="capri-watch", description="Event hooks that wake Capri.")
+    ap.add_argument("--config", default=os.path.expanduser("~/.config/synaps-avatar/watch.toml"))
+    ap.add_argument("--dry-run", action="store_true", help="print what would be sent; never send, never write state")
+    ap.add_argument("--once", action="store_true", help="one poll pass, flush at once, exit")
+    ap.add_argument("--state", help="state file (dry runs start empty unless given)")
+    ap.add_argument("--print-config", action="store_true")
+    ap.add_argument("-v", "--verbose", action="store_true", help="log what each source saw on every pass")
+    a = ap.parse_args(argv)
+    try:
+        cfg = load_config(a.config)
+    except Exception as e:
+        log(f"config {a.config}: {e}")
+        return 2
+    if a.state:
+        cfg["state_file"] = a.state
+    if a.print_config:
+        print(json.dumps(cfg, indent=2))
+        return 0
+    state = {} if a.dry_run and not a.state else None
+    w = Watcher(cfg, dry_run=a.dry_run, state=state, verbose=a.verbose)
+    on = [k for k in EVENTS if w.on(k)]
+    log(f"role {cfg['role']} as {cfg['host']}, delivering via {cfg['deliver']['transport']} to session "
+        f"{cfg['deliver']['session']!r}{' (DRY RUN)' if a.dry_run else ''}; events on: {', '.join(on) or 'none'}")
+    if a.once:
+        w.tick(force=True)
+        return 0
+    try:
+        while True:
+            w.tick()
+            time.sleep(max(1, min(cfg["poll_s"], cfg["safeguards"]["bundle_s"])))
+    except KeyboardInterrupt:
+        return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

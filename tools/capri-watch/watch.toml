@@ -1,0 +1,100 @@
+# capri-watch: which events wake Capri, and how. Copy to ~/.config/synaps-avatar/watch.toml.
+# Every value below is the built-in default: a missing file (or a missing key) means exactly this.
+# Lines she gets look like:  [watch] ci_failed@bella: capri-syn main: ci failed on 09b138d (https://…)
+
+# "bella": Capri's machine (watches GitHub, delivers locally). "avante": any other machine (no GitHub,
+# delivers over ssh to bella). Empty: bella when the hostname is bella/parabellum, else avante.
+role = ""
+host = ""                 # the name in event lines; empty = the role
+poll_s = 10               # sessions, units, disk, backup, battery, GPU, calendar
+synaps = ""               # this machine's CLI for `daemon sessions --json`: empty = synaps (bella), synaps-dev (avante)
+profile = ""
+synaps_home = "~/.synaps-cli"
+ignore_sessions = ["capri"]   # never reported (her own session: no loops). Names, ids or id prefixes.
+state_file = "~/.local/state/capri-watch/state.json"
+
+[github]
+# enabled = true          # unset: on for role bella only. Uses gh's existing login.
+poll_s = 120
+repos = ["HaseebKhalid1507/capri-syn", "HaseebKhalid1507/SynapsCLI", "HaseebKhalid1507/Axon",
+         "HaseebKhalid1507/synaps-desktop", "HaseebKhalid1507/axel", "HaseebKhalid1507/agent-comms"]
+
+[deliver]
+transport = ""            # "local" (bella) | "ssh" (avante) | "command"; empty = by role
+session = "capri"
+synaps = "synaps"         # the CLI on the machine she lives on
+profile = ""
+ssh_host = "bella"
+connect_timeout_s = 5
+command = []              # transport "command": argv, with {source} {text} {session} filled in
+
+[safeguards]
+bundle_s = 15             # events inside one window arrive as one digest
+max_per_hour = 6          # wakes per rolling hour; the rest wait and arrive as one digest
+quiet_hours = ""          # e.g. "23:00-08:00" (local time): events wait; empty = off
+dnd = true                # wait while her DND is on (DND 1 HOUR in her menu)
+music = "defer"           # music playing: "defer" (wait for it to stop) | "drop" | "ignore"
+stale_s = 3600            # anything held longer is dropped; a condition still true fires again
+avatar_socket = ""        # empty = $XDG_RUNTIME_DIR/capri/synaps-avatar.sock (what capri-ctl uses)
+
+# ── ON by default ───────────────────────────────────────────────────────────────────────────
+[event.ci_failed]         # the last run of a workflow on a branch failed, or a check on an open PR
+enabled = true
+branches = ["main"]
+prs = "mine"              # "mine" (PRs by your gh account) | "all" | "none"
+
+[event.approval_waiting]  # a session (this machine's daemon) waits on an approval
+enabled = true
+after_s = 30
+
+[event.session_error]     # a session's turn ended without a reply (an error or an abort)
+enabled = true
+
+[event.unit_failed]       # a systemd unit failed (system + user)
+enabled = true
+system = true
+user = true
+ignore_transient = true   # systemd-run units (Transient=yes)
+ignore = ["dunst*", "xdg-document-portal*", "xdg-desktop-portal*", "run-*", "probe-*"]
+
+[event.disk_low]          # less than min_free_pct OR less than min_free_gb free
+enabled = true
+paths = ["/", "/home"]
+min_free_pct = 10
+min_free_gb = 20
+
+[event.backup_failed]     # the Jawz backup exited non-zero or logged ERROR lines in its last run (avante)
+enabled = true
+unit = "jawz-backup-local.service"
+log = "~/Jawz/logs/backup-local.log"
+
+# ── OFF by default (built, waiting for a yes) ──────────────────────────────────────────────
+[event.pr_opened]
+enabled = false
+
+[event.pr_merged]
+enabled = false
+
+[event.review_requested]
+enabled = false
+
+[event.long_turn]         # a turn of min_s or more finished while he's away (her avatar: away or idle)
+enabled = false
+min_s = 600
+away_idle_s = 300
+
+[event.release]
+enabled = false
+
+[event.battery_low]       # bella
+enabled = false
+below_pct = 15
+
+[event.gpu_hot]           # nvidia-smi
+enabled = false
+above_c = 85
+
+[event.calendar]          # jawz-calendar: a timed event starts within lead_min
+enabled = false
+lead_min = 10
+db = "~/Jawz/data/calendar.db"
