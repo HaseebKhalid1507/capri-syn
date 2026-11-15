@@ -160,8 +160,10 @@ impl Avatar {
 
     /// The sidecar gets the `[voice]` settings (on connect, and again when settings reload).
     pub(super) fn voice_config(&mut self) {
+        // Calls are never ducked: the [music] ignore list (player names) goes along.
+        let ignore = crate::settings::Settings::load().map(|s| s.music.ignore).unwrap_or_default();
         let c = &self.voice.cfg;
-        let cfg = serde_json::json!({ "op": "config", "stt_model": c.stt_model, "voice": c.voice, "speed": c.speed, "pace": c.pace, "flow": c.flow });
+        let cfg = serde_json::json!({ "op": "config", "stt_model": c.stt_model, "voice": c.voice, "speed": c.speed, "pace": c.pace, "flow": c.flow, "duck_ignore": ignore });
         self.voice_send(cfg);
     }
 

@@ -132,8 +132,8 @@ pub struct Settings {
 /// default voice); `pace`: how the speed is made: "stretch" (default: Kokoro at its own speed,
 /// the time scaled in the pitch pass, which keeps its pitch shape) or "model" (Kokoro's speed);
 /// `flow`: "emphasis" (default: a `*word*` in her reply is stressed), "pauses", "full" or "off";
-/// `duck`: what other audio does while she listens or speaks: "pause" (MPRIS
-/// pause, then play), "duck" (lowered through PipeWire) or "off"; `speak_unprompted`: her
+/// `duck`: what other audio does while she listens or speaks: "duck" (default: lowered
+/// -18 dB through PipeWire, then put back exactly), "pause" (MPRIS pause, then play) or "off"; `speak_unprompted`: her
 /// replies to what arrives on its own (events, hooks, other sessions' messages) are spoken
 /// too (default true; never over music, an approval or a secret).
 #[derive(Clone, Debug, PartialEq)]
@@ -160,7 +160,7 @@ pub const SPEED: f32 = 1.2987;
 
 impl Default for VoiceSettings {
     fn default() -> Self {
-        VoiceSettings { enabled: false, stt_model: "small.en".into(), voice: VOICE.into(), speed: SPEED, pace: "stretch".into(), flow: "emphasis".into(), duck: "pause".into(), speak_unprompted: true, key: 'c' }
+        VoiceSettings { enabled: false, stt_model: "small.en".into(), voice: VOICE.into(), speed: SPEED, pace: "stretch".into(), flow: "emphasis".into(), duck: "duck".into(), speak_unprompted: true, key: 'c' }
     }
 }
 
@@ -696,6 +696,7 @@ mod tests {
         assert_eq!(Settings::parse("[voice]\nflow = \"Off\"\n").unwrap().voice.flow, "off");
         assert!(Settings::parse("[voice]\nflow = \"loud\"\n").is_err());
         assert!(v.speak_unprompted, "her replies to events are spoken by default");
+        assert_eq!(v.duck, "duck", "browser video is lowered, not paused (Haseeb, 22:47)");
         assert!(!Settings::parse("[voice]\nspeak_unprompted = false\n").unwrap().voice.speak_unprompted);
         assert!(Settings::parse("[mirror]\nflip = true\n").is_err());
     }
