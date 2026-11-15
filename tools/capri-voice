@@ -142,6 +142,8 @@ WAKE_HOP, WAKE_CTX = 1280, 480                     # 80 ms hops; each mel call s
 WAKE_RING_S = 2.5                                  # all the idle mic is kept: 2.5 s, in RAM
 WAKE_REFRACTORY_S = 2.0
 WAKE_VERIFY_N, WAKE_VERIFY_S, WAKE_PAUSE_S = 12, 600.0, 600.0   # 12 Whisper checks in 10 min, else 10 min off
+if TEST and os.environ.get('CAPRI_VOICE_TEST_WAKE_CHECKS'):
+    WAKE_VERIFY_N = int(os.environ['CAPRI_VOICE_TEST_WAKE_CHECKS'])   # tests only: a long e2e run makes more than 12
 WAKE_WAIT_S, WAKE_TURN_S = 5.0, 30.0               # after the phrase: speech within 5 s; a turn is sent at 30 s
 WAKE_HEY = {'hey', 'hay', 'hi', 'hei', 'hej', 'heh', 'hai', 'he', 'eh', 'ay', 'a', 'hello', 'hallo', 'halle', 'haley', 'hailey', 'heli'}
 # "Capri" as Whisper spells what it heard: Capri, Copry, Kapree, "cup pray", "kah preen"; never Capricorn, Capra, caprese
@@ -1679,7 +1681,8 @@ class Voice:
             t0 = now_ms()
             try:
                 with self.stt_lock:
-                    c['ok'] = wake_says(wake_text(self.stt, pcm))
+                    c['text'] = wake_text(self.stt, pcm)      # kept in RAM for the turn below, never logged
+                    c['ok'] = wake_says(c['text'])
             except Exception as e:
                 log(f'wake: the check failed ({e})')
             c['ms'] = now_ms() - t0
@@ -1793,10 +1796,15 @@ class Voice:
                             self.hush(why='wake')
                         c = {'t_start': cand['t'], 't_mic_open': cand['t'], 'mode': 'wake'}
                         self.emit(ev='wake', ms={'fire_to_wake': now_ms() - cand['t'], 'verify': round(cand['ms'])})
-                        turn = {'buf': bytearray(cand['pre']), 'vs': VadStream(self.vad), 'seen': 0, 'c': c,
+                        # The check heard more than the phrase: the turn is the phrase and what follows (the phrase is
+                        # cut from its words). Only the phrase ("Hey Capri." then a pause): the turn starts after the
+                        # checked audio, so his pause isn't taken as the end of the turn; 5 s for him to start.
+                        bare = not wake_rest(cand.get('text', ''))[0]
+                        cut = int(WAKE_CHECK_DELAY_S * MIC_RATE) * 2
+                        turn = {'buf': bytearray() if bare else bytearray(cand['pre']), 'vs': VadStream(self.vad), 'seen': 0, 'c': c,
                                 'ep': Endpointer(float(np.clip(silence_s, 0.5, 5.0)), max_s=WAKE_TURN_S, wait_s=WAKE_WAIT_S,
                                                  min_frames=MIN_FRAMES['wake'])}
-                        why = feed_turn(turn, cand['post'])
+                        why = feed_turn(turn, cand['post'][cut:] if bare else cand['post'])
                         if why:
                             finish(turn, why)
                             turn = None
