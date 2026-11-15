@@ -50,6 +50,11 @@ she acts when one of them wins.
     <td width="50%" align="center"><img src="docs/media/tour-bids.webp" width="100%" alt="Capri hangs from the top bar beside a window, clings to the window's side, then hangs upside down, with a yellow attention marker"><br><b>Attention bids</b><br><sub>Wants attention. Will hang off your bar for it.</sub></td>
     <td width="50%" align="center"><img src="docs/media/tour-ragdoll.webp" width="100%" alt="The pointer grabs Capri and lifts her, shakes her so she swings, flings her, and she lands"><br><b>Ragdoll</b><br><sub>Grab her, shake her, fling her. She lands it.</sub></td>
   </tr>
+</table>
+
+<p align="center"><img src="docs/media/card-glitch.png" width="100%" alt="Glitch, don't fade. She tears out in scanlines, one red bolt crosses the screen, and she lands on the edge she picked."></p>
+
+<table>
   <tr>
     <td width="50%" align="center"><img src="docs/media/tour-headpat.webp" width="100%" alt="The pointer clicks Capri's head twice and hearts float up"><br><b>Headpats</b><br><sub>Headpats are supported. Hearts are not optional.</sub></td>
     <td width="50%" align="center"><img src="docs/media/tour-music.webp" width="100%" alt="Music starts playing: Capri puts headphones on, notes float up and her tag reads LISTENING"><br><b>Music</b><br><sub>Something's playing? Headphones on.</sub></td>
@@ -101,8 +106,6 @@ you're doing.
 - **Voice is opt-in and local.** Hold the key to talk and let go to send. Speech-to-text is whisper.cpp
   and her voice is Kokoro, both on the CPU. The mic is open only while the key is down, audio stays in
   memory, and nothing is written to disk. There is no wake word.
-
-<p align="center"><img src="docs/media/card-glitch.png" width="100%" alt="Glitch, don't fade. She tears out in scanlines, one red bolt crosses the screen, and she lands on the edge she picked."></p>
 
 ## How it works
 
