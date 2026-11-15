@@ -45,10 +45,18 @@ for speech. Setup: `tools/capri-voice-setup`, then `tools/systemd/capri-voice.se
 - **Caps** in the sidecar, whatever the avatar does: hold 120 s, toggle 65 s.
 - `avatarctl state` → `voice.mic = {open, mode: "ptt"|"toggle", since_ms}`. While a toggled mic is open
   the avatar asks the sidecar every 2 s; if it says the mic is closed, it is.
-- **How the end is found:** Silero on 32 ms frames. Speech is p ≥ 0.50 and stays speech until
-  p < 0.35, so a soft word ending isn't silence. A turn has started after 6 speech frames. The pause
-  is counted from there. Not yet: holding on after a dangling word ("…and") — a 1.3 s pause after one
-  ends the turn.
+- **How the end is found:** Silero on 32 ms frames. Speech starts at p ≥ 0.50 and stays speech until
+  p < 0.35, so a soft word ending isn't silence. Once out of speech, every frame counts toward the pause,
+  frames in the 0.35–0.50 band too, so a far voice or a TV hovering there doesn't hold the mic open. A turn
+  has started after 6 speech frames.
+- **A draft decode** starts in his pause (`silence_s − 0.9 s`, at least 0.2 s), while the stream stays
+  open. If no new speech came by the end, its words are sent with no second decode (speech end → sent:
+  ~1.1 s instead of ~1.7 s). If they end on a dangling word ("and", "the", "because"…) or on `,` `…` `—`,
+  she waits 1.5 s more.
+- **The one exception to "her tag on screen":** when a toggle opens the Line, the Line moves her (a
+  teleport), so for a moment she isn't drawn. The Line and its mic row are on screen the whole time, so a
+  teleport closes a toggled mic only if she stays undrawn for more than 2 s. Hiding (user, fullscreen)
+  closes it at once.
 
 ## Other audio while he talks or she speaks (`duck`)
 

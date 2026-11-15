@@ -177,6 +177,7 @@ class Endpointer:
     def __init__(self, silence_s=1.0, max_s=TOGGLE_MAX_S, wait_s=TOGGLE_WAIT_S, min_frames=MIN_FRAMES['toggle']):
         self.silence_s, self.max_s, self.wait_s, self.min_frames = silence_s, max_s, wait_s, min_frames
         self.n = self.speech = self.trail = 0
+        self.in_speech = False   # hysteresis: on at p >= .50, off under .35; a frame between keeps it
         self.extra = 0.0         # more silence asked for: the words so far end on "and", "the", ","...
 
     def base(self):
@@ -190,12 +191,13 @@ class Endpointer:
         self.n += 1
         if p >= SPEECH_P:
             self.speech += 1
-            self.trail = 0
+            self.in_speech = True
             self.extra = 0.0
         elif p < SILENCE_P:
-            self.trail += 1
-        else:
-            self.trail = 0
+            self.in_speech = False
+        # Out of speech every frame counts toward the pause, the in-between band too: a far voice
+        # or a TV hovering at p .35-.50 after he stopped doesn't hold the mic open.
+        self.trail = 0 if self.in_speech else self.trail + 1
         t = self.n * FRAME_S
         need = self.base() + self.extra
         if self.speech >= self.min_frames:
@@ -1852,6 +1854,7 @@ def selftest_endpoint():
     pause = speech + sil * 28 + speech + sil * 40         # a 0.9 s pause mid-sentence: not the end
     assert run(pause)[1] > (40 + 28 + 40) * FRAME_S, 'a 0.9 s pause is not the end'
     assert run(speech + [0.4] * 50 + sil * 40)[1] > (40 + 50) * FRAME_S, 'hysteresis: 0.35..0.5 is still speech'
+    assert run(speech + sil * 5 + [0.40] * 60) == ('silence', round((40 + 32) * FRAME_S, 2)), 'out of speech, the band counts as pause'
     assert run(sil * 300) == ('nothing', round(250 * FRAME_S, 2)), '8 s of nothing closes it'
     assert run([0.9] * 3 + sil * 300)[0] == 'nothing', 'a blip is not a turn'
     assert run([0.9] * 2000)[0] == 'cap', 'the cap sends'

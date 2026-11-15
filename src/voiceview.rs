@@ -18,6 +18,8 @@ const RESTORE_MS: u64 = 800;
 const RECONNECT: Duration = Duration::from_secs(10);
 /// The toggle chord's key is polled this often until it is up: its auto-repeat is one toggle.
 const KEY_POLL: Duration = Duration::from_millis(30);
+/// No key state: this long without a toggle command counts as the key up.
+const REPEAT_QUIET: Duration = Duration::from_millis(300);
 /// While a toggled mic is open, the sidecar is asked this often whether it really is (it wins).
 const MIC_CHECK: Duration = Duration::from_secs(2);
 /// Not drawn this long for a reason other than hiding (a teleport): a hands-off mic closes.
@@ -86,6 +88,7 @@ pub(super) struct VoiceState {
     /// A toggle was taken and its key is not yet seen up: more toggles are its auto-repeat.
     toggle_lock: bool,
     toggles_ignored: u32,
+    toggle_last: Option<Instant>,
     /// She isn't drawn (any reason), since.
     hidden_since: Option<Instant>,
     mic_check_at: Option<Instant>,
@@ -316,6 +319,7 @@ impl Avatar {
     /// has started, else cancel). One toggle per key-down: its auto-repeat is ignored until
     /// the chord's key is seen up. Ignored while the talk key is held.
     pub(super) fn voice_toggle(&mut self, cx: &mut Context<Self>) -> String {
+        self.voice.toggle_last = Some(Instant::now());
         if self.voice.toggle_lock {
             self.voice.toggles_ignored += 1;
             return "ok held (one toggle per press)".into();
@@ -331,13 +335,19 @@ impl Avatar {
     }
 
     /// Ignore toggles until the chord's key is up (polled; X has no key-up for i3's bindings).
+    /// If the key state can't be read, up = 300 ms without a toggle (auto-repeat sends ~30/s).
     fn voice_toggle_lock(&mut self, cx: &mut Context<Self>) {
         self.voice.toggle_lock = true;
         let key = self.voice.cfg.toggle_key;
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(KEY_POLL).await;
-                let up = this.update(cx, |a, _| !a.x11.char_key_down(key).unwrap_or(false)).unwrap_or(true);
+                let up = this
+                    .update(cx, |a, _| match a.x11.char_key_down(key) {
+                        Ok(down) => !down,
+                        Err(_) => a.voice.toggle_last.is_none_or(|t| t.elapsed() >= REPEAT_QUIET),
+                    })
+                    .unwrap_or(true);
                 if up {
                     this.update(cx, |a, _| a.voice.toggle_lock = false).ok();
                     return;
