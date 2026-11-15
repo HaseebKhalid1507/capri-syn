@@ -181,6 +181,8 @@ def wake_rest(text):
 
 
 WAKE_STT_FLOOR = int(os.environ.get('CAPRI_VOICE_WAKE_CTX', '512'))   # Whisper's window for the check (see the PR)
+WAKE_CHECK_DELAY_S = float(os.environ.get('CAPRI_VOICE_WAKE_DELAY', '0.3'))   # the check waits this much more audio: stage 1
+                                                                          # often fires inside "-pri", and a cut word fails
 
 
 def wake_text(stt, pcm, floor=None):
@@ -1776,6 +1778,10 @@ class Voice:
             del ring[:max(0, len(ring) - ring_max)]
             if cand is not None:
                 cand['post'] += chunk
+                if not cand['started'] and len(cand['post']) >= int(WAKE_CHECK_DELAY_S * MIC_RATE) * 2:
+                    cand['started'] = True
+                    pcm = np.frombuffer((cand['pre'] + bytes(cand['post']))[-4 * MIC_RATE:], np.int16).astype(np.float32) / 32768.0
+                    threading.Thread(target=check, args=(cand, pcm), daemon=True).start()
                 if cand['done'].is_set():
                     if cand['ok']:
                         self.wake_n['woke'] += 1
@@ -1808,10 +1814,8 @@ class Voice:
                         break
                     self.wake_checks.append(now)
                     self.wake_n['candidates'] += 1
-                    pcm = np.frombuffer(bytes(ring[-4 * MIC_RATE:]), np.int16).astype(np.float32) / 32768.0
                     cand = {'pre': bytes(ring), 'post': bytearray(), 'done': threading.Event(), 'ok': False, 'ms': 0,
-                            't': now_ms(), 'score': sc}
-                    threading.Thread(target=check, args=(cand, pcm), daemon=True).start()
+                            't': now_ms(), 'score': sc, 'started': False}
                     break
                 prev = sc
             if end_why:
