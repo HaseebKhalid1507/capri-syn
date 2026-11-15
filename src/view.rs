@@ -5190,6 +5190,25 @@ impl Render for Avatar {
                         }),
                     ))
                 })
+                .when(self.voice_on() && self.voice.cfg.handsfree, |m| {
+                    let on = self.voice.hf.is_some();
+                    m.child(item(if on { "END HANDS-FREE" } else { "HANDS-FREE TALK" }).id("handsfree").on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            this.menu = None;
+                            let r = if on {
+                                this.voice_hf_end("HANDS-FREE OFF", cx);
+                                "ok hands-free off".to_string()
+                            } else {
+                                this.voice_hf_start(cx)
+                            };
+                            elog!("synaps-avatar: menu hands-free: {r}");
+                            cx.notify();
+                            this.schedule(cx);
+                        }),
+                    ))
+                })
                 .child(item("COPY LAST REPLY").id("copy").on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, _: &MouseDownEvent, _, cx| {

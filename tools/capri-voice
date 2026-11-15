@@ -113,9 +113,10 @@ SILENCE_P = 0.35               # endpointing hysteresis: speech until p falls un
 TOGGLE_MAX_S, TOGGLE_WAIT_S = 60.0, 8.0   # a 42 s utterance decodes whole (measured), so 60 s; no speech in 8 s: closed
 CAP_S_MODE = {'hold': 120.0, 'toggle': TOGGLE_MAX_S + 5.0, 'handsfree': 30 * 60.0}   # hard caps (hands-free: its max_s)
 HF_TURN_S = 60.0               # one hands-free utterance: sent at this length
-BARGE_P, BARGE_N, BARGE_OF = 0.60, 10, 12   # talking over her (headphones): p >= .6 on 10 of the last 12 frames
+BARGE_P, BARGE_N, BARGE_OF = 0.50, 7, 9     # talking over her (headphones): p >= .5 on 7 of the last 9 frames (224 ms)
 DUPLEX_S = 0.25                # speakers: the mic hears again this long after her last sample
 ECHO_CORR, ECHO_DB = 0.5, 10.0 # her first sentence: mic follows her playback this well, this loud -> speakers
+ECHO_LAGS = 31                 # 20 ms frames: 0..600 ms after pw-play is launched
 ECHO_WORDS, ECHO_WINDOW_S = 0.7, 15.0   # a transcript this much made of what she said lately is her own voice
 
 
@@ -1139,17 +1140,20 @@ def screen_locked():
     return False
 
 
-def sink_kind():
-    """'headphones' when the default sink's active port, name or form factor says so; else 'speakers'."""
+def sink_kind(with_id=False):
+    """'headphones' when the default sink's active port, name or form factor says so; else 'speakers'.
+    with_id: (kind, (sink, port)) to tell a change."""
     name = run(['pactl', 'get-default-sink'], 1.0).strip()
+    kind, port = 'speakers', None
     for si in pactl_json('sinks') or []:
         if si.get('name') != name:
             continue
         port = si.get('active_port') or ''
         types = [x.get('type', '') for x in si.get('ports', []) if x.get('name') == port]
         blob = ' '.join([name, port, *types, si.get('properties', {}).get('device.form-factor', '')]).lower()
-        return 'headphones' if re.search(r'headphone|headset|earbud|hands-?free', blob) else 'speakers'
-    return 'speakers'
+        kind = 'headphones' if re.search(r'headphone|headset|earbud|hands-?free', blob) else 'speakers'
+        break
+    return (kind, (name, port)) if with_id else kind
 
 
 def env_db(x, n):
@@ -1160,9 +1164,11 @@ def env_db(x, n):
     return (20 * np.log10(np.sqrt(np.mean(x[:k * n].reshape(k, n) ** 2, axis=1)) + 1e-6)).astype(np.float32)
 
 
-def echo_corr(mic, play, max_lag=13):
-    """Best correlation of the mic's level envelope with her playback's over lags 0..max_lag frames."""
-    best = 0.0
+def echo_corr(mic, play, max_lag=ECHO_LAGS, with_lag=False):
+    """Best correlation of the mic's level envelope with her playback's, 20 ms frames, over lags
+    0..max_lag frames: pw-play's own start (~0.1-0.2 s, measured from its launch) plus up to 0.4 s of
+    output latency (Bluetooth and HDMI sit at 0.15-0.3 s)."""
+    best, at = 0.0, 0
     for lag in range(max_lag):
         a, b = mic[lag:lag + len(play)], play[:len(mic) - lag]
         n = min(len(a), len(b))
@@ -1170,9 +1176,9 @@ def echo_corr(mic, play, max_lag=13):
             break
         a, b = a[:n] - a[:n].mean(), b[:n] - b[:n].mean()
         d = float(np.sqrt((a * a).sum() * (b * b).sum()))
-        if d > 0:
-            best = max(best, float((a * b).sum()) / d)
-    return best
+        if d > 0 and float((a * b).sum()) / d > best:
+            best, at = float((a * b).sum()) / d, lag
+    return (best, at) if with_lag else best
 
 
 def words_of(t):
@@ -1434,7 +1440,7 @@ class Voice:
         self.capture_tag = f'{os.getpid()}-{self.capture_n}'
         return self.capture_tag
 
-    def _watchdog(self, p, cur):
+    def _watchdog(self, p, cur, hf=False):
         """The capture stays on the source it opened. If PipeWire moves it (a device removed, a
         default changed), the capture is killed at once and what it heard is dropped: it is never
         whatever the new source is."""
@@ -1464,8 +1470,9 @@ class Voice:
                 if o.get('source') != src:
                     log(f'mic: watchdog: our stream moved (source {src} -> {o.get("source")}): killed, nothing kept')
                     cur['moved'] = True
-                    self.cancelled = True
-                    cur.setdefault('refused', 'MIC LOST · ITS SOURCE CHANGED')
+                    if not hf:
+                        self.cancelled = True
+                        cur.setdefault('refused', 'MIC LOST · ITS SOURCE CHANGED')
                     p.kill()
                     break
         sub.terminate()
@@ -1482,8 +1489,10 @@ class Voice:
         tb = bytearray()                     # this turn's audio: frame k of vs.p = tb[k*1024:(k+1)*1024]
         new_ep = lambda: Endpointer(silence_s, max_s=HF_TURN_S, wait_s=1e9, min_frames=MIN_FRAMES['hands-free'])
         ep, dr, bi = new_ep(), None, []
-        floor, mic_env, play_mark, first_env = [], [], None, None
+        ring = collections.deque(maxlen=1500)      # (time, dB) of every 20 ms of mic: 30 s
+        check = None                                # her sentence under observation: t0, env, due
         quiet_until, end_why, call = 0.0, None, {'app': None}
+        sink_id, last_t0 = (sink_kind(True)[1] if echo == 'headphones' else None), None
         self.hf_drop = False
         # Calls: a new source-output re-checks (no polling).
         sub = subprocess.Popen(['pactl', 'subscribe'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
@@ -1492,17 +1501,23 @@ class Voice:
             for line in sub.stdout:
                 if "'new' on source-output" in line:
                     app = in_call()
+                    if app is None:          # can't tell: an open mic fails closed
+                        app = 'unknown'
                     if app:
                         call['app'] = app
                         return
         threading.Thread(target=watch, daemon=True).start()
 
         def reset_turn():
-            nonlocal ep, dr
+            nonlocal ep, dr, seen
             n = len(vs.p) * 2 * VAD_FRAME
             del tb[:n]
             vs.p.clear()
-            ep, dr = new_ep(), None
+            ep, dr, seen = new_ep(), None, 0
+
+        sink_now = {}                        # the sink re-read at her sentence, off the reader thread
+        def read_sink():
+            sink_now['v'] = sink_kind(True)
 
         def finish(why_ep, d):
             """The turn's words: the draft's, or decoded now (in a worker)."""
@@ -1514,6 +1529,8 @@ class Voice:
 
             def out():
                 d['done'].wait(10.0)
+                if cur.get('moved'):
+                    return                   # the stream left its source: nothing it heard goes out
                 text = d.get('text') or ''
                 c['stt_ms'] = d.get('stt_ms', 0)
                 if text and her_own(text, said):
@@ -1532,6 +1549,9 @@ class Voice:
                 break
             if call['app']:
                 end_why = 'call'
+                break
+            if cur.get('moved'):
+                end_why = 'mic lost'
                 break
             if now_ms() - last_lock >= 900:
                 last_lock = now_ms()
@@ -1554,55 +1574,84 @@ class Voice:
                 cur['t_mic_open'] = t
                 self.emit(ev='mic-open', mode='handsfree', echo=echo)
                 log(f"mic: open (+{t - cur['t_start']:.0f} ms, hands-free, {echo})")
+                threading.Thread(target=self._watchdog, args=(p, cur, True), daemon=True).start()
             if self.cancelled:
                 continue
             if self.hf_drop:                  # Esc: what is being heard now is dropped; the stream stays
                 self.hf_drop = False
                 reset_turn()
             playing = self.player is not None
-            if playing:
+            # Her reply, not her sentence: the gaps between sentences are hers too (synthesis takes
+            # longer than DUPLEX_S), so a word he starts there isn't cut by her next sentence.
+            replying = playing or bool(self.play_q) or bool(self.say_q)
+            if replying:
                 quiet_until = time.time() + DUPLEX_S
+            pl = self.played
+            if echo == 'headphones' and playing and pl and pl['t0'] != last_t0:
+                last_t0 = pl['t0']
+                threading.Thread(target=read_sink, daemon=True).start()
+            if echo == 'headphones' and 'v' in sink_now:
+                # each sentence: if the sink or its port changed (headphones unplugged), one that
+                # isn't headphones is speakers at once, another headphone one is observed again
+                kind, sid_ = sink_now.pop('v')
+                if sid_ != sink_id and kind != 'headphones':
+                    echo = cur['echo'] = 'speakers'
+                    log('echo: the sink changed and is not headphones: speakers')
+                    self.emit(ev='echo', mode='speakers', why='sink')
+                    reset_turn()
+                    observe, check = False, None
+                elif sid_ != sink_id:
+                    sink_id, observe, check = sid_, True, None
+                    log('echo: another headphone sink or port: observing this sentence again')
             x = np.frombuffer(chunk[:len(chunk) // 2 * 2], np.int16).astype(np.float32) / 32768.0
             if t - last_lvl >= 200:
                 last_lvl = t
                 self.emit(ev='level', v=round(min(1.0, float(np.sqrt(np.mean(x * x))) * 8), 3) if len(x) else 0.0)
-            # Her first sentence: does her voice come back through the mic?
-            lv = env_db(x, len(x)) if len(x) else np.zeros(0)
-            if observe and len(lv):
+            # Her first sentence: does her voice come back through the mic? The mic's level on a 20 ms
+            # grid, each frame timed from the chunk's arrival, against her playback's level.
+            if echo == 'headphones':
+                n20 = MIC_RATE // 50
+                lv = env_db(x, n20)
+                t_end = time.time()
+                for j, v in enumerate(lv):
+                    ring.append((t_end - (len(x) - j * n20) / MIC_RATE, float(v)))
+            if observe and echo == 'headphones':
                 pl = self.played
-                if playing and pl and (play_mark is None or pl['t0'] == play_mark):
-                    if play_mark is None:
-                        play_mark, first_env, mic_env = pl['t0'], pl['env'], []
-                    mic_env.append((time.time() - len(x) / MIC_RATE, float(lv[0])))
-                elif play_mark is not None:
-                    # that sentence is over (or the next began): correlate, on a 20 ms grid
-                    env = first_env
-                    grid = np.full(len(env), -120.0, np.float32)
-                    for tm, v in mic_env:
-                        i = int(round((tm - play_mark) / 0.02))
+                if check is None and playing and pl:
+                    check = {'t0': pl['t0'], 'env': pl['env'], 'due': None}
+                elif check is not None and check['due'] is None and (not playing or (pl and pl['t0'] != check['t0'])):
+                    check['due'] = time.time() + ECHO_LAGS * 0.02    # her tail, as late as it may come
+                if check is not None and check['due'] is not None and time.time() >= check['due']:
+                    env, t0 = check['env'], check['t0']
+                    grid = np.full(len(env) + ECHO_LAGS, -120.0, np.float32)
+                    ok = np.zeros(len(grid), bool)
+                    before = [v for tm, v in ring if tm < t0]
+                    for tm, v in ring:
+                        i = int(round((tm - t0) / 0.02))
                         if 0 <= i < len(grid):
-                            grid[i] = v
-                    ok = grid > -119
-                    fl = float(np.median(floor)) if floor else -90.0
-                    corr = echo_corr(np.where(ok, grid, fl), env)
+                            grid[i], ok[i] = v, True
+                    fl = float(np.median(before[-150:])) if before else -90.0
+                    if ok.any():
+                        idx = np.arange(len(grid))
+                        grid = np.interp(idx, idx[ok], grid[ok]).astype(np.float32)   # a late chunk's gap
+                    corr, lag = echo_corr(grid, env, with_lag=True)
                     loud = float(np.percentile(grid[ok], 90)) - fl if ok.any() else 0.0
-                    log(f'echo check: corr {corr:.2f}, mic {loud:.1f} dB over its floor')
+                    log(f'echo check: corr {corr:.2f} at {lag * 20} ms, mic {loud:.1f} dB over its floor')
                     if corr >= ECHO_CORR and loud >= ECHO_DB:
                         echo = cur['echo'] = 'speakers'
-                        self.emit(ev='echo', mode='speakers', corr=round(corr, 2), db=round(loud, 1))
-                    observe, play_mark = False, None
-                else:
-                    floor = (floor + [float(lv[0])])[-150:]
-            if echo == 'speakers' and (playing or time.time() < quiet_until):
+                        self.emit(ev='echo', mode='speakers', corr=round(corr, 2), db=round(loud, 1), lag_ms=lag * 20)
+                        reset_turn()                 # what it holds is her first sentence
+                    observe, check = False, None
+            if echo == 'speakers' and (replying or time.time() < quiet_until):
                 continue                      # half-duplex: deaf while she speaks
             tb += chunk
             vs.feed(chunk)
             for q in vs.p[seen:]:
-                if playing and echo == 'headphones' and not observe:
+                if replying and echo == 'headphones' and not observe:
                     bi = (bi + [q])[-BARGE_OF:]
                     if sum(v >= BARGE_P for v in bi) >= BARGE_N:
                         bi = []
-                        log('barge-in: his voice over hers')
+                        log(f'barge-in: his voice over hers ({now_ms() - t:.0f} ms behind the mic)')
                         self.hush(why='barge-in')
                         self.emit(ev='barge-in')
                 elif bi:
@@ -2181,6 +2230,8 @@ def selftest_hf():
     play = (rng.standard_normal(150) * 8 - 30).astype(np.float32)          # her level, 3 s on a 20 ms grid
     mic = np.concatenate([np.full(3, -70.0), play[:-3] - 18]).astype(np.float32) + rng.standard_normal(150).astype(np.float32)
     assert echo_corr(mic, play) > 0.8, 'her voice back through the mic, 60 ms late'
+    bt = np.concatenate([np.full(15, -70.0), play[:-15] - 18]).astype(np.float32) + rng.standard_normal(150).astype(np.float32)
+    assert echo_corr(bt, play) > 0.8, 'Bluetooth: 300 ms late'
     assert echo_corr((rng.standard_normal(150) * 8 - 60).astype(np.float32), play) < 0.3, 'an unrelated room'
     said = words_of("Tests are green on bella. Want me to tag a release candidate?")
     assert her_own('tests are green on bella', said) and her_own('Want me to tag a release', said)

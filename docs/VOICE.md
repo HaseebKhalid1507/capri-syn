@@ -20,6 +20,10 @@ for speech. Setup: `tools/capri-voice-setup`, then `tools/systemd/capri-voice.se
 | `key` | `'c'` | the talk key's letter (`$mod+c` in i3) |
 | `silence_s` | `1.0` | 0.5 to 5: the pause that ends a toggled turn |
 | `toggle_key` | `'c'` | the toggle chord's letter (`$mod+Ctrl+c` in i3): its auto-repeat is one toggle |
+| `handsfree` | `true` | the double-tap, `talk handsfree on` and the menu item can start a hands-free conversation. It is always off at launch |
+| `handsfree_timeout` | `60` | 15 to 600 s: it ends after this long with no accepted turn of his |
+| `handsfree_max` | `30` | minutes, 0 = no cap: it ends after this long in all |
+| `echo` | `"auto"` | `"auto"` (the sink says headphones or speakers), `"headphones"` (talking over her stops her) or `"speakers"` (half-duplex) |
 
 `avatarctl settings reload` re-sends changed voice settings to a connected sidecar.
 
@@ -57,6 +61,60 @@ for speech. Setup: `tools/capri-voice-setup`, then `tools/systemd/capri-voice.se
   teleport), so for a moment she isn't drawn. The Line and its mic row are on screen the whole time, so a
   teleport closes a toggled mic only if she stays undrawn for more than 2 s. Hiding (user, fullscreen)
   closes it at once.
+
+## Hands-free: a conversation
+
+- **On:** double-tap the toggle chord (the second tap within 400 ms, before he has said anything), the
+  menu's HANDS-FREE TALK, or `capri-ctl talk handsfree on`. Always off at launch, never restored.
+  Refused, with the reason on her tag, when voice is off, `handsfree = false`, a secret is on screen,
+  the screen is locked, he is in a call, she is hidden, or there is no sidecar.
+- **One stream, many turns.** Each utterance ends on his pause exactly as a toggle does (Silero, the
+  draft decode, the hold after a dangling word) and is sent; the mic stays open. Her reply is spoken. The
+  tag reads `● MIC LIVE · HANDS-FREE 0:42 ▮▯▯▯▯`; the Line's mic row says how to end it.
+- **Off**, the stream closed by the sidecar, the reason on her tag:
+
+  | cause | tag |
+  |---|---|
+  | the chord (one tap), the menu, `talk handsfree off`, `talk cancel` | `HANDS-FREE OFF` |
+  | an end phrase, the whole utterance: `that's all`, `that is all`, `that'll be all`, `we're done`, `stop listening`, `goodbye`, `bye` (a leading ok/okay/alright/thanks and a trailing capri/thanks/for now/thank you are allowed; never over 6 words). Not sent | `HANDS-FREE OFF` |
+  | `handsfree_timeout` with no accepted turn of his (the last 10 s count down on the tag) | `HANDS-FREE OFF · 60 S QUIET` |
+  | `handsfree_max` | `HANDS-FREE OFF · 30 MIN` |
+  | the screen locks | `HANDS-FREE ENDED AT LOCK` |
+  | a call starts (another app captures a real source, or `pactl` can't say) | `HANDS-FREE OFF · IN A CALL` |
+  | a secret on screen | `HANDS-FREE OFF · A SECRET IS ON SCREEN` |
+  | she is hidden | `HANDS-FREE OFF · HIDDEN` |
+  | the stream dies, or PipeWire moves it to another source | `HANDS-FREE OFF · MIC LOST` |
+
+  A lost stream is never reopened on whatever the new default source is.
+- **The quiet clock** restarts on an accepted turn of his and while she thinks, speaks or writes his
+  words down. His voice alone doesn't restart it: a TV that Whisper turns into junk (dropped) doesn't
+  keep the mic open. It never ends mid-utterance.
+- **Esc** drops what he is saying now (`DROPPED · STILL LISTENING`); the conversation stays. The talk key
+  only hushes her (no second capture).
+- **Other audio** is held (ducked or paused, `duck`) for the whole conversation and comes back 0.8 s after
+  it ends.
+- **Her voice and his.** `echo = "auto"` reads the default sink at the start: headphones (port, name or
+  form factor says headphone/headset/earbud/hands-free) or speakers.
+  - **Speakers: half-duplex.** The mic stays open but hears nothing from her first sentence of a reply to
+    0.25 s after her last one (the gaps between her sentences included), so she can't answer herself.
+    `$mod+c`, the chord or a click stop her.
+  - **Headphones: talking over her stops her** (Silero p ≥ 0.50 on 7 of the last 9 frames, ~0.3 s of
+    his voice).
+  - **The echo check** (a jack labelled Headphones may feed desk speakers): her first sentence is
+    observe-only. The mic's 20 ms level envelope is correlated with her playback's over 0–600 ms after
+    pw-play starts; correlation ≥ 0.5 with the mic ≥ 10 dB over its idle floor → speakers for the rest of
+    the conversation (`HEARING MYSELF · TALK-OVER OFF`), and what the mic held is dropped. The sink and its
+    port are read again at each of her sentences: one that changed and isn't headphones is speakers at
+    once; another headphone one is observed again.
+  - **The echo guard**, both modes: an utterance whose words are ≥ 70 % what she said in the last 15 s
+    is dropped (logged by length only).
+- **Replies to what arrives on its own** are spoken while he is quiet, and stay text while he is
+  mid-utterance (`speak_unprompted`, below).
+- **The one exception to "her tag on screen"** holds here too: the Line's opening moves her, and a
+  hands-free stream closes only if she stays undrawn for more than 2 s. Hidden for a fullscreen window
+  ends it at once, so hands-free can't run under a fullscreen app.
+- Cap in the sidecar, whatever the avatar does: its `max_s` (from `handsfree_max`).
+- Measured on the virtual chain (bella, nothing played aloud): see the PR.
 
 ## Other audio while he talks or she speaks (`duck`)
 
