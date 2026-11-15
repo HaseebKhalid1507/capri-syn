@@ -3,10 +3,6 @@
 </h1>
 
 <p align="center">
-  <b>Perches on your windows. Patches you through to your agents.</b>
-</p>
-
-<p align="center">
   <img alt="Rust 1.100" src="https://img.shields.io/badge/rust-1.100-8ef5ed?style=flat-square&labelColor=0b131a&logo=rust&logoColor=8ef5ed">
   <img alt="X11" src="https://img.shields.io/badge/display-X11-8ef5ed?style=flat-square&labelColor=0b131a">
   <img alt="GPUI" src="https://img.shields.io/badge/ui-GPUI-8ef5ed?style=flat-square&labelColor=0b131a">
@@ -149,7 +145,7 @@ daemon is gone. Away fixes itself when the daemon comes back.
   corner. She stays on the monitor you're working on.
 - **Bid.** Leave her alone long enough (20 to 30 minutes) and she comes over: hanging from the bar above
   your window, clinging to its side, sitting on its edge, peeking round a corner. She avoids
-  her last two entrances. Ignore the bid and she insists, then sulks somewhere far away. A headpat settles it.
+  her last two entrances. Ignore the bid and she insists, then sulks and keeps her distance for a while. A headpat settles it.
 - **Summon.** When her session needs you (a prompt, a finished turn, an error) she comes straight to the
   window you're in, unless she's already beside you. This is the one move that isn't her idea.
 - **Manners.** She doesn't wander off mid-conversation: an open bubble, the Line or her menu keeps her
@@ -295,13 +291,13 @@ flags and debug knobs is in [docs/REFERENCE.md](docs/REFERENCE.md).
 
 | You | She |
 |---|---|
-| Click her body | Reacts, and opens a text field to her session |
+| Click her body | Reacts, and opens a quick text field |
 | Click her head | Headpat. Hearts |
 | Keep poking her | Gets annoyed |
 | Drag her | Goes limp and swings; drop her on a window edge to perch her there |
 | Fling her | Flies, lands, and may take it personally |
 | Right-click | Menu: reset position, DND 1 hour, attention mix / hang only / off, copy last reply, hide, quit (asks twice) |
-| <kbd>$mod</kbd>+<kbd>c</kbd>, tap | Opens the Line where you're working; she teleports over |
+| <kbd>$mod</kbd>+<kbd>c</kbd>, tap | Opens the Line where you're working; she teleports over. Tap again to close |
 | <kbd>$mod</kbd>+<kbd>c</kbd>, hold | Push-to-talk. Release sends (voice on) |
 | <kbd>Enter</kbd> / <kbd>Shift</kbd>+<kbd>Enter</kbd> | Send, or steer a running turn / new line |
 | <kbd>↑</kbd> <kbd>↓</kbd> | Recall what you sent |
@@ -337,7 +333,7 @@ Reference (session rules, every flag, pack format, dev control, testing rules):
   clips on this page show the app running with that pack; the artwork in them remains CapriChooms's.
 - **Unofficial.** This is a fan project. It is not affiliated with or endorsed by CD PROJEKT RED,
   R. Talsorian Games, Studio Trigger or Netflix. All trademarks belong to their owners.
-- **Her voice.** Speech uses stock Kokoro voices with light DSP. Nothing is cloned and nobody's voice
+- **Her voice.** Speech uses stock Kokoro voices, blended, with light DSP. Nothing is cloned and nobody's voice
   is imitated.
 - **Built on** [Synaps](https://github.com/HaseebKhalid1507/SynapsCLI) and
   [GPUI](https://www.gpui.rs/).
