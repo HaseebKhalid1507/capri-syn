@@ -26,7 +26,7 @@ application name contains it.
 
 Other modes: --render TEXT --voice V --out F.wav (a sample, for the blind listen), --bench.
 """
-import json, os, re, select, signal, socket, subprocess, sys, threading, time
+import json, os, re, select, shutil, signal, socket, subprocess, sys, threading, time, zlib
 
 import numpy as np
 
@@ -77,6 +77,39 @@ class Stt:
         return text
 
 
+# ---- the voice: split-style blends, a pitch target, the clean chain ---------------------------
+#
+# Voice string: TIMBRE[|PROSODY][@SEMITONES][+clean][+glitch]
+#   TIMBRE / PROSODY: a Kokoro voice or a blend "af_heart:0.5,af_bella:0.3,...". Kokoro's style
+#   vector is two halves: [:128] drives the decoder (timbre), [128:] the duration/F0/energy
+#   predictors (prosody). "T|P" takes each half from its own blend. A negative weight pushes away
+#   from a voice (P + a(P - Q) is the blend (1+a)P - aQ).
+#   @SEMITONES: a formant-keeping pitch shift (rubberband; without it, done inside the model).
+#   +clean: EQ, de-esser and a gentle compressor. +glitch: the machine trace on the attack.
+# W3 (Haseeb's pick, 2026-11-14): bright and energetic, pitched to a ~240 Hz median.
+W3 = 'af_heart:0.5,af_bella:0.3,af_jessica:0.2|af_heart:0.84,af_jessica:0.56,af_sarah:-0.4@+2.93+clean'
+VOICE_RE = re.compile(r'^(?P<t>[a-z]{2}_[a-z]+(?::-?[\d.]+)?(?:,[a-z]{2}_[a-z]+(?::-?[\d.]+)?)*)'
+                      r'(?:\|(?P<p>[a-z]{2}_[a-z]+(?::-?[\d.]+)?(?:,[a-z]{2}_[a-z]+(?::-?[\d.]+)?)*))?'
+                      r'(?:@(?P<st>[+-]?\d+(?:\.\d+)?))?(?P<fx>(?:\+(?:clean|glitch))*)$')
+
+
+def parse_voice(v):
+    """'T|P@st+clean+glitch' -> dict(t, p, shift, clean, glitch). ValueError on anything else."""
+    m = VOICE_RE.match(v.strip())
+    if not m:
+        raise ValueError(f'bad voice {v!r}')
+    fx = m.group('fx') or ''
+    return {'t': m.group('t'), 'p': m.group('p'), 'shift': float(m.group('st') or 0.0), 'clean': '+clean' in fx, 'glitch': '+glitch' in fx}
+
+
+def blend_weights(spec):
+    parts = [p.split(':') for p in spec.split(',')]
+    ws = np.array([float(p[1]) if len(p) > 1 else 1.0 for p in parts])
+    if abs(ws.sum()) < 1e-6:
+        raise ValueError(f'blend weights of {spec!r} sum to 0')
+    return [p[0] for p in parts], ws / ws.sum()
+
+
 class Tts:
     def __init__(self, model='kokoro-v1.0.int8.onnx'):
         import onnxruntime as ort
@@ -87,30 +120,463 @@ class Tts:
         so.inter_op_num_threads = 1
         sess = ort.InferenceSession(f'{MODELS}/{model}', so, providers=['CPUExecutionProvider'])
         self.k = Kokoro.from_session(sess, f'{MODELS}/voices-v1.0.bin')
-        log(f'tts kokoro loaded in {now_ms() - t:.0f} ms ({model}, CPU)')
+        self.flow = Flow.load(f'{MODELS}/{model}', self.k, so)
+        self.rubberband = shutil.which('rubberband')
+        self._styles = {}
+        log(f'tts kokoro loaded in {now_ms() - t:.0f} ms ({model}, CPU; flow {"on" if self.flow else "off"}, '
+            f'pitch {"rubberband" if self.rubberband else "in-model"})')
+
+    def blend(self, spec):
+        names, ws = blend_weights(spec)
+        return sum(w * self.k.get_voice_style(n) for w, n in zip(ws, names))
 
     def style(self, voice):
-        """'af_heart', 'af_bella:0.6,af_nicole:0.4'; a '+glitch' suffix is the effect."""
-        voice = voice.split('+')[0]
-        if ',' not in voice and ':' not in voice:
-            return voice
-        parts = [p.split(':') for p in voice.split(',')]
-        ws = np.array([float(p[1]) if len(p) > 1 else 1.0 for p in parts])
-        ws = ws / ws.sum()
-        return sum(w * self.k.get_voice_style(p[0]) for w, p in zip(ws, parts))
+        """The (510, 1, 256) style pack of a voice string (cached)."""
+        v = parse_voice(voice)
+        key = (v['t'], v['p'])
+        if key not in self._styles:
+            t = self.blend(v['t'])
+            st = t if not v['p'] else np.concatenate([t[..., :128], self.blend(v['p'])[..., 128:]], -1)
+            self._styles = {key: np.asarray(st, np.float32)}
+        return self._styles[key]
 
-    def __call__(self, text, voice='af_heart', speed=1.0):
+    def __call__(self, text, voice=W3, speed=1.0, flow='full', gap_before=0.0):
+        """One sentence -> PCM at TTS_RATE. `text` may carry the speech markup (*word*, —, …)."""
+        v = parse_voice(voice)
         said = text
         for a, b in SAY_FIX:
             said = re.sub(a, b, said)
-        lang = 'en-gb' if voice.startswith('b') else 'en-us'
-        a, sr = self.k.create(said, voice=self.style(voice), speed=speed, lang=lang)
-        a = np.asarray(a, np.float32)
+        lang = 'en-gb' if v['t'].startswith('b') else 'en-us'
+        st = self.style(voice)
+        preset = FLOW_PRESETS.get(flow) if self.flow else None
+        shift = v['shift'] + (preset or {}).get('register', 0.0) * register(text, gap_before > 0)
+        in_model = 0.0 if self.rubberband else shift
+        if preset is None and not in_model:
+            a, sr = self.k.create(strip_markup(said), voice=st, speed=speed, lang=lang)
+            a = np.asarray(a, np.float32)
+        else:
+            a, sr = self.flow(said, st, speed, {**(preset or {}), 'heard_shift': shift}, lang, in_model)
         if sr != TTS_RATE:
             a = np.interp(np.linspace(0, len(a) - 1, int(len(a) * TTS_RATE / sr)), np.arange(len(a)), a).astype(np.float32)
-        if '+glitch' in voice:
+        if shift and self.rubberband:
+            a = pitch_shift(a, shift, self.rubberband)
+        if v['clean']:
+            a = clean_fx(a)
+        if v['glitch']:
             a = glitch(a)
+        if gap_before > 0:   # the silence heard: what the sentence already starts with counts
+            a = np.concatenate([np.zeros(int(max(0.0, gap_before - edge_silence(a)[0]) * TTS_RATE), np.float32), a])
         return a
+
+
+def edge_silence(a):
+    """(head, tail) seconds of 10 ms frames below p95 - 40 dB at either end."""
+    n = len(a) // 240
+    if n < 3:
+        return 0.0, 0.0
+    db = 20 * np.log10(np.sqrt((a[:n * 240].reshape(n, 240) ** 2).mean(1)) + 1e-9)
+    on = np.nonzero(db > np.percentile(db, 95) - 40)[0]
+    return (on[0] * 0.01, (n - 1 - on[-1]) * 0.01) if len(on) else (0.0, 0.0)
+
+
+def register(text, continuing):
+    """Pitch offset by position (semitones; scaled by the preset): a reply's first sentence a
+    touch up, the ones that continue it down, a question up."""
+    return (-0.6 if continuing else 0.4) + (0.5 if text.rstrip().endswith('?') else 0.0)
+
+
+def pitch_shift(a, semis, exe):
+    """Formant-keeping pitch shift through the rubberband CLI (R3 engine, offline; RAM files)."""
+    if abs(semis) < 1e-3 or len(a) < 256:
+        return a
+    import tempfile
+    with tempfile.TemporaryDirectory(dir='/dev/shm' if os.path.isdir('/dev/shm') else None) as td:
+        write_wav(f'{td}/i.wav', a)
+        r = subprocess.run([exe, '-q', '-p', f'{semis:.3f}', '-F', '-3', f'{td}/i.wav', f'{td}/o.wav'], capture_output=True)
+        if r.returncode:
+            log('rubberband failed:', r.stderr.decode(errors='replace')[-200:])
+            return a
+        y = read_wav(f'{td}/o.wav')
+    return np.concatenate([y, np.zeros(max(0, len(a) - len(y)), np.float32)])[:len(a)]
+
+
+# ---- the clean chain (EQ, de-esser, compressor; numpy only) -----------------------------------
+
+def _fft_eq(a, gain_fn):
+    n = 1 << int(np.ceil(np.log2(len(a) + 2048)))
+    f = np.fft.rfftfreq(n, 1 / TTS_RATE)
+    return np.fft.irfft(np.fft.rfft(a, n) * gain_fn(f), n)[:len(a)].astype(np.float32)
+
+
+def _bell(f, fc, db, q_oct):
+    x = np.log2(np.maximum(f, 1) / fc) / q_oct
+    return 10 ** (db * np.exp(-x * x * 2.77) / 20)
+
+
+def _follow(lv, attack_ms, release_ms):
+    """Attack/release follower over 1 ms levels (dB)."""
+    aa, rr = np.exp(-1 / attack_ms), np.exp(-1 / release_ms)
+    y = np.empty(len(lv))
+    s = lv[0]
+    for i, x in enumerate(lv):
+        c = aa if x > s else rr
+        s = c * s + (1 - c) * x
+        y[i] = s
+    return y
+
+
+def _levels(a):
+    blk = TTS_RATE // 1000
+    n = len(a) // blk + 1
+    x = np.concatenate([a, np.zeros(n * blk - len(a), np.float32)]).reshape(n, blk)
+    return 10 * np.log10((x.astype(np.float64) ** 2).mean(1) + 1e-12), blk, n
+
+
+def clean_fx(a, f0_med=240.0):
+    """HPF 70 Hz, +1.5 dB body at 1.15 x F0, +2 dB presence at 3 kHz, -2 dB air above 8 kHz; de-esser
+    5.5-9 kHz 3:1 (at most 6 dB); compressor 2.5:1 at -20 dBFS, 5/80 ms."""
+    if len(a) < 2048:
+        return a
+    hp = lambda f: 1 / np.sqrt(1 + (70 / np.maximum(f, 1e-3)) ** 4)
+    shelf = lambda f: 10 ** (-2.0 * 0.5 * (1 + np.tanh(np.log2(np.maximum(f, 1) / 8000) / 0.4)) / 20)
+    a = _fft_eq(a, lambda f: hp(f) * _bell(f, 1.15 * f0_med, 1.5, 1.1) * _bell(f, 3000, 2.0, 1.0) * shelf(f))
+    band = _fft_eq(a, lambda f: ((f >= 5500) & (f <= 9000)).astype(float))
+    lv, blk, n = _levels(band)
+    e = np.sqrt(np.convolve(a * a, np.ones(1200) / 1200, 'same') + 1e-12)
+    act = e > 0.1 * e.max()
+    th = 10 * np.log10((a[act].astype(np.float64) ** 2).mean() + 1e-12) - 9
+    over = np.maximum(_follow(lv, 1.0, 50.0) - th, 0)
+    g = 10 ** (np.interp(np.arange(len(a)) / blk, np.arange(n), -np.minimum(over - over / 3.0, 6.0)) / 20)
+    a = (a - band + band * g).astype(np.float32)
+    lv, blk, n = _levels(a)
+    over = np.maximum(_follow(lv, 5.0, 80.0) + 20, 0)
+    g = 10 ** (np.interp(np.arange(len(a)) / blk, np.arange(n), -(over - over / 2.5)) / 20)
+    return (a * g).astype(np.float32)
+
+
+# ---- flow: Kokoro's own predictors, steered --------------------------------------------------
+#
+# Her replies may mark speech:  *word* stresses one word;  — is a beat;  … trails off;
+# , ; : are clause pauses. Kokoro has no SSML and barely reacts to stress marks, but its graph
+# predicts per-phoneme durations, then an F0 curve and an energy curve, before the decoder.
+# The model file is patched IN MEMORY (weights and voices untouched, nothing trained or cloned):
+#   pred  = the graph pruned to text encoder + duration predictor (~20 ms), output: durations;
+#   synth = the full graph with durations as an input, plus an F0 multiplier and an energy offset.
+# Per sentence: pass 1 durations -> set pause lengths on punctuation tokens (the model plans its
+# own boundary tones around them), stretch the stressed word -> pass 2 with a pitch accent and an
+# energy bump on that word and a lower, quieter stretch after it. One decoder pass, no seams.
+
+FLOW_SR, FLOW_HOP = 24000, 600        # one duration frame = 25 ms; F0/energy run at 12.5 ms
+KOKORO_INT8_SHA256 = '6e742170d309016e5891a994e1ce1559c702a2ccd0075e67ef7157974f6406cb'
+FLOW_TAPS = ('/encoder/Gather_output_0', '/encoder/F0_proj/Conv_output_0', '/encoder/N_proj/Conv_output_0')
+VOWELS = set('aeiouæɐɑɒɔəɚɛɜɪʊʌᵻᵊ')
+PAUSE_MARKS = set(',;:—….!?')
+EMPH_RE = re.compile(r'\*([^*\s](?:[^*]{0,40}?[^*\s])?)\*')
+PAUSES = {  # seconds of silence (as heard), drawn per mark from a generator seeded by the text
+    'comma_s': (0.06, 0.13), 'comma': (0.13, 0.27), 'semi': (0.23, 0.35), 'dash': (0.20, 0.33),
+    'ellip': (0.45, 0.70), 'stop': (0.32, 0.54), 'q': (0.40, 0.62)}
+GAPS = {'.': (0.32, 0.54), '!': (0.30, 0.44), '?': (0.40, 0.62), '…': (0.45, 0.70), ';': (0.23, 0.35), '': (0.30, 0.45)}
+EMPHASIS = {'stretch': 1.25, 'onset_c': 1, 'emph_st': 2.0, 'rin_ms': 80, 'rout_ms': 120, 'emph_n': 1.6, 'pfc_st': 1.0, 'pfc_n': 0.6}
+FLOW_PRESETS = {
+    'off': None,
+    'pauses': {'pauses': True},
+    'emphasis': {**EMPHASIS},
+    'full': {'pauses': True, **EMPHASIS, 'speed_jit': 0.04, 'register': 1.0},
+}
+
+
+def strip_markup(text):
+    """The words as written, without the speech marks (for the bubble, captions, plain TTS)."""
+    return EMPH_RE.sub(r'\1', text).replace('*', '')
+
+
+def sentence_gap(prev_text, flow):
+    """Silence before a sentence that follows `prev_text` in the same reply (0 with flow off)."""
+    if not FLOW_PRESETS.get(flow) or not (FLOW_PRESETS[flow].get('pauses')):
+        return 0.0
+    end = prev_text.rstrip().rstrip('"\')]”’')[-1:]
+    lo, hi = GAPS.get(end, GAPS[''])
+    g = np.random.default_rng(zlib.crc32(prev_text.encode())).uniform(lo, hi)
+    return float(g)
+
+
+# Raw protobuf edits of the ONNX model (no onnx package needed).
+def _pb_varint(b, i):
+    r = s = 0
+    while True:
+        c = b[i]
+        i += 1
+        r |= (c & 0x7f) << s
+        s += 7
+        if c < 0x80:
+            return r, i
+
+
+def _pb_fields(b, i=0, end=None):
+    end = len(b) if end is None else end
+    while i < end:
+        e0 = i
+        key, i = _pb_varint(b, i)
+        f, wt = key >> 3, key & 7
+        if wt == 0:
+            _, j = _pb_varint(b, i)
+        elif wt == 2:
+            n, i = _pb_varint(b, i)
+            j = i + n
+        elif wt == 1:
+            j = i + 8
+        elif wt == 5:
+            j = i + 4
+        else:
+            raise ValueError(f'protobuf wire type {wt}')
+        yield f, i, j, e0
+        i = j
+
+
+def _pb_v(n):
+    out = bytearray()
+    while True:
+        c = n & 0x7f
+        n >>= 7
+        out.append(c | (0x80 if n else 0))
+        if not n:
+            return bytes(out)
+
+
+def _pb_ld(f, payload):
+    payload = payload.encode() if isinstance(payload, str) else payload
+    return _pb_v(f << 3 | 2) + _pb_v(len(payload)) + payload
+
+
+def _pb_node(op, ins, outs, name):
+    return b''.join([_pb_ld(1, x) for x in ins] + [_pb_ld(2, x) for x in outs] + [_pb_ld(3, name), _pb_ld(4, op)])
+
+
+def _pb_vinfo(name, elem, dims):
+    shape = b''.join(_pb_ld(1, _pb_ld(2, d) if isinstance(d, str) else _pb_v(1 << 3) + _pb_v(d)) for d in dims)
+    return _pb_ld(1, name) + _pb_ld(2, _pb_ld(1, _pb_v(1 << 3) + _pb_v(elem) + _pb_ld(2, shape)))
+
+
+def _pb_graph(b):
+    for f, s, e, e0 in _pb_fields(b):
+        if f == 7:
+            return b[:e0], s, e, b[e:]
+    raise ValueError('no graph in the model')
+
+
+def _pb_strings(b, s, e, field):
+    return [b[s2:e2].decode() for f, s2, e2, _ in _pb_fields(b, s, e) if f == field]
+
+
+def _pb_rewire(b, s, e, old, new):
+    return b''.join(_pb_ld(1, new) if f == 1 and b[s2:e2].decode() == old else b[e0:e2] for f, s2, e2, e0 in _pb_fields(b, s, e))
+
+
+def patch_synth(b):
+    """The full graph with inputs dur_in (int64 [T]), f0_mul and n_add (float [1, 1, 2*sum(dur_in)])."""
+    dur, f0, nn = FLOW_TAPS
+    pre, gs, ge, post = _pb_graph(b)
+    g = bytearray()
+    for f, s, e, e0 in _pb_fields(b, gs, ge):
+        if f == 1:
+            ins = _pb_strings(b, s, e, 1)
+            if dur in ins:
+                g += _pb_ld(1, _pb_rewire(b, s, e, dur, 'dur_in'))
+                continue
+            if f0 in ins:
+                g += _pb_ld(1, _pb_node('Mul', [f0, 'f0_mul'], ['f0_mod'], 'flow_f0_mul')) + _pb_ld(1, _pb_rewire(b, s, e, f0, 'f0_mod'))
+                continue
+            if nn in ins:
+                g += _pb_ld(1, _pb_node('Add', [nn, 'n_add'], ['n_mod'], 'flow_n_add')) + _pb_ld(1, _pb_rewire(b, s, e, nn, 'n_mod'))
+                continue
+        g += b[e0:e]
+    g += _pb_ld(11, _pb_vinfo('dur_in', 7, ['n_tok'])) + _pb_ld(11, _pb_vinfo('f0_mul', 1, [1, 1, 'f0_len'])) + _pb_ld(11, _pb_vinfo('n_add', 1, [1, 1, 'f0_len']))
+    return pre + _pb_ld(7, bytes(g)) + post
+
+
+def patch_pred(b, dur=FLOW_TAPS[0], out='duration', elem=7, dims=('n_tok',)):
+    """The graph pruned to what one tensor needs, exposed as `out`: by default the durations
+    (int64 [T], frames per token); on the synth patch, the F0 curve for given durations."""
+    pre, gs, ge, post = _pb_graph(b)
+    nodes, other = [], []
+    for f, s, e, e0 in _pb_fields(b, gs, ge):
+        if f == 1:
+            nodes.append((_pb_strings(b, s, e, 1), _pb_strings(b, s, e, 2), b[e0:e]))
+        else:
+            other.append((f, s, e, e0))
+    made = {o: i for i, (_, outs, _) in enumerate(nodes) for o in outs}
+    need, names, todo = set(), set(), [dur]
+    while todo:
+        t = todo.pop()
+        names.add(t)
+        i = made.get(t)
+        if i is not None and i not in need:
+            need.add(i)
+            todo += [x for x in nodes[i][0] if x]
+    g = bytearray(b''.join(raw for i, (_, _, raw) in enumerate(nodes) if i in need))
+    g += _pb_ld(1, _pb_node('Identity', [dur], [out], 'flow_' + out))
+    for f, s, e, e0 in other:
+        if f == 12:
+            continue
+        if f in (5, 11, 13) and next(iter(_pb_strings(b, s, e, 8 if f == 5 else 1)), '') not in names:
+            continue
+        g += b[e0:e]
+    g += _pb_ld(12, _pb_vinfo(out, elem, list(dims)))
+    return pre + _pb_ld(7, bytes(g)) + post
+
+
+class Flow:
+    @classmethod
+    def load(cls, path, kokoro, so):
+        """The patched sessions, or None (then speech is plain Kokoro) if this is not the model
+        the taps were found in or the patch does not load."""
+        import hashlib
+        import onnxruntime as ort
+        try:
+            b = open(path, 'rb').read()
+            if hashlib.sha256(b).hexdigest() != KOKORO_INT8_SHA256:
+                log('flow: off (not the kokoro-v1.0.int8.onnx the taps were found in)')
+                return None
+            f = cls()
+            f.pred = ort.InferenceSession(patch_pred(b), so, providers=['CPUExecutionProvider'])
+            f.synth = ort.InferenceSession(patch_synth(b), so, providers=['CPUExecutionProvider'])
+            f.f0 = ort.InferenceSession(patch_pred(patch_synth(b), FLOW_TAPS[1], 'f0_pred', 1, (1, 1, 'f0_len')), so, providers=['CPUExecutionProvider'])
+            f.k, f.tok, f.vocab = kokoro, kokoro.tokenizer, kokoro.tokenizer.vocab
+            return f
+        except Exception as e:
+            log('flow: off, the patch failed:', e)
+            return None
+
+    def known(self, ph):
+        return ''.join(c for c in ph if c in self.vocab)
+
+    def phonemes(self, text, lang):
+        """Phonemes (vocabulary only) and the [start, end) spans of the stressed words in them.
+        Runs between stressed words are phonemized apart, so the spans are exact (and a stressed
+        word comes out in its citation form, with its own primary stress). One stressed word per
+        sentence at most; extra marks are read plain."""
+        ms = list(EMPH_RE.finditer(text))[:1]
+        out, spans, pos = '', [], 0
+        for m in ms + [None]:
+            seg = strip_markup(text[pos:m.start()] if m else text[pos:])
+            if seg.strip():
+                p = self.known(self.tok.phonemize(seg, lang))
+                out = f'{out} {p}'.strip()
+            if m:
+                tail = re.match(r'[^\s*]*', text[m.end():]).group(0)
+                p = self.known(self.tok.phonemize(m.group(1) + tail, lang))
+                core = p.rstrip(''.join(PAUSE_MARKS) + '“” ')
+                out = f'{out} ' if out else ''
+                spans.append((len(out), len(out) + len(core)))
+                out += p
+                pos = m.end() + len(tail)
+        return out, spans
+
+    def __call__(self, text, style, speed, P, lang, shift_st=0.0):
+        rng = np.random.default_rng(zlib.crc32(text.encode()))
+        if P.get('speed_jit'):
+            speed = float(np.clip(speed * (1 + rng.uniform(-P['speed_jit'], P['speed_jit'])), 0.5, 2.0))
+        ph, spans = self.phonemes(text, lang)
+        ph = ph[:510]
+        ids = [self.vocab[c] for c in ph]
+        if not ids:
+            raise ValueError(f'nothing to say in {text!r}')
+        tok = np.array([[0, *ids, 0]], np.int64)
+        st = np.asarray(style[min(len(ids), len(style)) - 1], np.float32).reshape(1, 256)
+        sp = np.array([speed], np.float32)
+        d0 = self.pred.run(None, {'tokens': tok, 'style': st, 'speed': sp})[0].astype(np.int64)
+        d = d0.astype(np.float64)
+        ch = f' {ph} '                                          # ch[i]: the phoneme of token i
+        frames = lambda s: s * FLOW_SR / FLOW_HOP
+        mutes = []
+        if P.get('pauses'):
+            syl = 0
+            for i in range(1, len(ch) - 2):
+                c = ch[i]
+                syl += c in VOWELS and ch[i - 1] not in VOWELS
+                if c not in PAUSE_MARKS:
+                    continue
+                kind = ('comma_s' if c == ',' and syl <= 2 else 'comma' if c == ',' else 'semi' if c in ';:' else 'dash' if c == '—'
+                        else 'ellip' if c == '…' else 'q' if c == '?' else 'stop')
+                syl = 0
+                d[i] += frames(rng.uniform(*PAUSES[kind]))      # on top of the model's own frames (the release)
+                mutes.append(i)
+        for a, b in spans:
+            i0, i1 = a + 1, b + 1
+            if P.get('stretch'):
+                k = ch[i0:i1].find('ˈ')
+                for i in range(i0 + max(k, 0), i1):            # the stressed vowel (diphthong, length mark)
+                    if ch[i] in VOWELS or ch[i] == 'ː':
+                        d[i] = max(d[i] * P['stretch'], d[i] + 1)
+                        if i + 1 < i1 and (ch[i + 1] in VOWELS or ch[i + 1] == 'ː'):
+                            continue
+                        break
+                if P.get('onset_c') and ch[i0] not in VOWELS and ch[i0] not in 'ˈˌ':
+                    d[i0] += P['onset_c']
+        di = np.diff(np.concatenate([[0], np.round(np.cumsum(d))])).astype(np.int64)
+        di = np.maximum(di, np.minimum(d0, 1))
+        edges = np.concatenate([[0], np.cumsum(di)])
+        n = int(2 * edges[-1])
+        f0, en = np.full(n, shift_st), np.zeros(n)
+        t = np.arange(n)
+
+        def bump(a, b, h, rin, rout):
+            env = np.zeros(n)
+            a, b = max(0, a), min(n, b)
+            env[a:b] = 1.0
+            m = (t < a) & (t >= a - rin)
+            env[m] = 0.5 - 0.5 * np.cos(np.pi * (t[m] - (a - rin)) / max(rin, 1))
+            m = (t >= b) & (t < b + rout)
+            env[m] = 0.5 + 0.5 * np.cos(np.pi * (t[m] - b) / max(rout, 1))
+            return env * h
+        ms = lambda x: int(round(x / 12.5))
+        pred_f0 = self.f0.run(None, {'tokens': tok, 'style': st, 'dur_in': di})[0].ravel() if spans and P.get('emph_st') else None
+        for a, b in spans:
+            i0, i1 = a + 1, b + 1
+            k = ch[i0:i1].find('ˈ')
+            fa, fb, wa = 2 * edges[i0 + max(k, 0)], 2 * edges[i1], 2 * edges[i0]
+            pe = 2 * edges[next((i for i in range(i1, len(ch) - 1) if ch[i] in PAUSE_MARKS), len(ch) - 1)]
+            h = P.get('emph_st', 0.0) if a > 0 else 0.0          # a sentence-initial word already rides the onset
+            if h and pred_f0 is not None:
+                # closed loop: the peak ends up 2 st over the rest of its phrase, or 1 st over its own,
+                # at most +4 st and 400 Hz as heard
+                ps = 2 * edges[max([i for i in range(1, i0) if ch[i] in PAUSE_MARKS] + [0])]
+                own = pred_f0[fa:fb][pred_f0[fa:fb] > 50]
+                rest = np.concatenate([pred_f0[ps:wa], pred_f0[fb:pe]])
+                rest = rest[rest > 50]
+                if len(own) and len(rest):
+                    o = float(own.max())
+                    want = max(np.percentile(rest, 90) * 2 ** (2 / 12), o * 2 ** (1 / 12))
+                    h = max(0.0, min(12 * np.log2(want / o), 4.0, 12 * np.log2(400 / o) - P.get('heard_shift', 0.0)))
+            if h:
+                f0 += bump(fa, fb, h, ms(P['rin_ms']), ms(P['rout_ms']))
+            if P.get('emph_n'):
+                en += bump(wa, fb, P['emph_n'], ms(40), ms(60))
+            if pe > fb + ms(150):                               # post-focal: lower and quieter
+                if P.get('pfc_st'):
+                    f0 -= bump(fb + ms(120), pe, P['pfc_st'], ms(80), ms(80))
+                if P.get('pfc_n'):
+                    en -= bump(fb + ms(60), pe, P['pfc_n'], ms(80), ms(80))
+        a = self.synth.run(None, {'tokens': tok, 'style': st, 'speed': sp, 'dur_in': di,
+                                  'f0_mul': (2 ** (f0 / 12)).astype(np.float32).reshape(1, 1, n),
+                                  'n_add': en.astype(np.float32).reshape(1, 1, n)})[0].ravel()
+        # Forced pause frames are not all silent (the decoder fills some with hiss or a hum): mute
+        # what was added, keep the model's own frames; the closing mark goes too, then trim.
+        last = max([i for i in range(1, len(ch) - 1) if ch[i] != ' '] + [0])
+        if ch[last] in PAUSE_MARKS and P.get('pauses'):
+            mutes.append(last)
+        fd = int(0.02 * FLOW_SR)
+        for i in mutes:
+            s0 = int((edges[i] + (min(1, d0[i]) if i == last else d0[i])) * FLOW_HOP)
+            e0 = int(edges[i + 1] * FLOW_HOP)
+            if e0 - s0 >= 2 * fd + 240:
+                g = np.zeros(e0 - s0, np.float32)
+                g[:fd] = 0.5 + 0.5 * np.cos(np.pi * np.arange(fd) / fd)
+                if i != last:
+                    g[-fd:] = 0.5 - 0.5 * np.cos(np.pi * np.arange(fd) / fd)
+                a[s0:e0] *= g
+        from kokoro_onnx.trim import trim
+        return np.asarray(trim(a)[0], np.float32), FLOW_SR
 
 
 def glitch(a, seed=7):
@@ -250,7 +716,8 @@ class Voice:
     def __init__(self):
         self.lock = threading.Lock()
         self.conn = None
-        self.cfg = {'stt_model': os.environ.get('CAPRI_VOICE_STT', 'small.en'), 'voice': 'af_heart', 'speed': 1.0}
+        self.cfg = {'stt_model': os.environ.get('CAPRI_VOICE_STT', 'small.en'), 'voice': W3, 'speed': 1.0, 'flow': 'full'}
+        self.last_said = (None, '', 0.0)  # (id, text, tail silence s) of the last sentence: the gap before the next
         self.stt = Stt(self.cfg['stt_model'])
         self.tts = Tts()
         self.media = Media()
@@ -403,7 +870,10 @@ class Voice:
                 sid, text, t_recv, gen = self.say_q.pop(0)
             t = now_ms()
             try:
-                pcm = self.tts(text, self.cfg['voice'], float(self.cfg['speed']))
+                prev_id, prev_text, prev_tail = self.last_said
+                gap = max(0.0, sentence_gap(prev_text, self.cfg['flow']) - prev_tail) if prev_id == sid else 0.0
+                pcm = self.tts(text, self.cfg['voice'], float(self.cfg['speed']), self.cfg['flow'], gap)
+                self.last_said = (sid, text, edge_silence(pcm)[1])
             except Exception as e:
                 log('tts failed:', e)
                 self.emit(ev='say-end', id=sid, error=str(e))
@@ -450,9 +920,16 @@ class Voice:
     def handle(self, msg):
         op = msg.get('op')
         if op == 'config':
-            for k in ('voice', 'speed'):
+            for k in ('voice', 'speed', 'flow'):
                 if k in msg:
                     self.cfg[k] = msg[k]
+            try:
+                parse_voice(self.cfg['voice'])
+            except ValueError as e:
+                log(f'{e}; using W3')
+                self.cfg['voice'] = W3
+            if self.cfg['flow'] not in FLOW_PRESETS:
+                self.cfg['flow'] = 'full'
             if msg.get('stt_model') and msg['stt_model'] != self.stt.name:
                 self.cfg['stt_model'] = msg['stt_model']
                 self.stt = Stt(msg['stt_model'])
@@ -543,18 +1020,87 @@ def write_wav(path, a, rate=TTS_RATE):
         w.writeframes((np.clip(a, -1, 1) * 32767).astype(np.int16).tobytes())
 
 
+def read_wav(path):
+    import wave
+    with wave.open(path, 'rb') as w:
+        x = np.frombuffer(w.readframes(w.getnframes()), np.int16)
+        if w.getnchannels() > 1:
+            x = x.reshape(-1, w.getnchannels()).mean(1)
+    return (x / 32768.0).astype(np.float32)
+
+
+def selftest():
+    """Checks that need no audio device: the voice string, the markup, the gaps; with the models
+    present, that the patched graph with neutral inputs speaks exactly like the stock one."""
+    v = parse_voice(W3)
+    assert v['p'] and abs(v['shift'] - 2.93) < 1e-9 and v['clean'] and not v['glitch'], v
+    assert parse_voice('af_heart') == {'t': 'af_heart', 'p': None, 'shift': 0.0, 'clean': False, 'glitch': False}
+    assert parse_voice('af_bella:0.6,af_nicole:0.4+glitch')['glitch']
+    assert parse_voice('af_bella|bf_lily@-1.5')['shift'] == -1.5
+    for bad in ('', 'af heart', 'af_heart@', 'af_heart+loud', 'af_heart||bf_lily'):
+        try:
+            parse_voice(bad)
+            raise AssertionError(f'accepted {bad!r}')
+        except ValueError:
+            pass
+    names, ws = blend_weights('af_heart:0.84,af_jessica:0.56,af_sarah:-0.4')
+    assert names == ['af_heart', 'af_jessica', 'af_sarah'] and abs(ws.sum() - 1) < 1e-9 and ws[2] < 0
+    assert strip_markup("I'm *not* signing that.") == "I'm not signing that."
+    assert strip_markup('a * b and *two words* and **bold**') == 'a  b and two words and bold'
+    assert sentence_gap('Fine.', 'off') == 0.0 and sentence_gap('Fine.', 'emphasis') == 0.0
+    g = sentence_gap('Fine.', 'full')
+    assert 0.32 <= g <= 0.54 and g == sentence_gap('Fine.', 'full'), 'gaps: in range and the same text gives the same gap'
+    assert 0.40 <= sentence_gap('Really?', 'full') <= 0.62
+    print('selftest: parsing ok')
+    if not os.path.exists(f'{MODELS}/kokoro-v1.0.int8.onnx'):
+        print('selftest: no models, skipping the graph checks')
+        return
+    tts = Tts()
+    assert tts.flow, 'the flow patch did not load'
+    k, f = tts.k, tts.flow
+    st = tts.style('af_heart')
+    ph = f.known(k.tokenizer.phonemize("Lynx wants a shell, and I'm not signing that.", 'en-us'))
+    tok = np.array([[0, *[f.vocab[c] for c in ph], 0]], np.int64)
+    s1 = np.asarray(st[len(ph) - 1], np.float32).reshape(1, 256)
+    sp = np.array([1.0], np.float32)
+    stock = k.sess.run(None, {'tokens': tok, 'style': s1, 'speed': sp})[0].ravel()
+    d = f.pred.run(None, {'tokens': tok, 'style': s1, 'speed': sp})[0]
+    n = int(2 * d.sum())
+    same = f.synth.run(None, {'tokens': tok, 'style': s1, 'speed': sp, 'dur_in': d.astype(np.int64),
+                              'f0_mul': np.ones((1, 1, n), np.float32), 'n_add': np.zeros((1, 1, n), np.float32)})[0].ravel()
+    assert len(same) == len(stock) == d.sum() * FLOW_HOP, (len(same), len(stock), d.sum())
+    assert np.abs(same - stock).max() < 1e-3, 'neutral taps must not change the audio'
+    ph2, spans = f.phonemes("I'm *not* signing that, choom.", 'en-us')
+    assert len(spans) == 1 and 'ɑ' in ph2[spans[0][0]:spans[0][1]], (ph2, spans)
+    plain_ = f("I'm not signing that, choom.", st, 1.0, {}, 'en-us')[0]
+    marked = f("I'm *not* signing that, choom.", st, 1.0, FLOW_PRESETS['full'], 'en-us')[0]
+    assert len(marked) > len(plain_), 'stress and pauses make the sentence longer'
+    print('selftest: flow ok (neutral patch == stock, stress spans exact)')
+
+
 def main():
     args = sys.argv[1:]
     if args[:1] == ['--render']:
-        # --render TEXT --voice V [--speed S] --out F.wav  (a sample: her TTS, never the mic)
+        # --render TEXT --out F.wav [--voice V] [--speed S] [--flow full|pauses|emphasis|off]
+        # A sample (her TTS, never the mic). Sentences are split by " || ", as the avatar sends them.
         text = args[1]
         opt = dict(zip(args[2::2], args[3::2]))
         tts = Tts(opt.get('--model', 'kokoro-v1.0.int8.onnx'))
-        parts = [tts(s, opt.get('--voice', 'af_heart'), float(opt.get('--speed', '1.0'))) for s in text.split(' || ')]
-        gap = np.zeros(int(0.45 * TTS_RATE), np.float32)
-        out = np.concatenate([x for p in parts for x in (p, gap)][:-1])
+        voice, flow, speed = opt.get('--voice', W3), opt.get('--flow', 'full'), float(opt.get('--speed', '1.0'))
+        parts, prev = [], ''
+        for i, sent in enumerate(text.split(' || ')):
+            t = now_ms()
+            gap = max(0.0, sentence_gap(prev, flow) - edge_silence(parts[-1])[1]) if i else 0.0
+            parts.append(tts(sent, voice, speed, flow, gap))
+            log(f'render: {now_ms() - t:.0f} ms for {len(parts[-1]) / TTS_RATE:.2f} s: {strip_markup(sent)!r}')
+            prev = sent
+        gap = np.zeros(int(0.45 * TTS_RATE if flow == 'off' or not FLOW_PRESETS.get(flow, {}).get('pauses') else 0), np.float32)
+        out = np.concatenate([x for p in parts for x in (p, gap)][:-1] if len(gap) else parts)
         write_wav(opt['--out'], out)
         print(opt['--out'], f'{len(out) / TTS_RATE:.1f} s')
+        return
+    if args[:1] == ['--selftest']:
+        selftest()
         return
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     v = Voice()

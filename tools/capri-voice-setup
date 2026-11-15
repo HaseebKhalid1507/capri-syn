@@ -1,6 +1,8 @@
 #!/bin/bash
 # capri-voice-setup: the sidecar's user-local venv and models (no sudo, nothing system-wide).
 #   ~/.local/share/capri-voice/venv   kokoro-onnx (+ onnxruntime CPU), system site-packages for pywhispercpp
+# The voice's pitch shift uses the rubberband CLI if it is installed (pacman -S rubberband); without it
+# the shift is done inside the model.
 #   ~/.local/share/capri-voice/models ggml-small.en-q5_1 (190 MB), ggml-base.en-q5_1 (60 MB),
 #                                     kokoro-v1.0.int8.onnx (92 MB), kokoro-v1.0.onnx (326 MB), voices-v1.0.bin (28 MB)
 # pywhispercpp itself comes from the distro (python-pywhispercpp-cpu on bella).
