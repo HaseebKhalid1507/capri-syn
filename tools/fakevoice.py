@@ -101,7 +101,7 @@ def handle(m):
     elif op == "listen-stop":
         if mic["open"]:
             mic["open"] = False
-            emit(ev="mic-closed")
+            emit(ev="mic-closed", mode=mic.get("mode", "hold"))
             emit(ev="heard", text=HEARD, why="", ms={"stt": 1})
     elif op == "listen-cancel":
         if mic["open"]:

@@ -325,6 +325,9 @@ impl Avatar {
 
     fn voice_released(&mut self, at: Instant, cx: &mut Context<Self>) {
         self.talk_down = None;
+        if self.voice.hf.is_some() {
+            return;                 // hands-free's stream isn't the talk key's
+        }
         if self.voice.asked.take().is_none() {
             return;
         }
