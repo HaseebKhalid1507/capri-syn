@@ -144,16 +144,24 @@ daemon is gone. Away fixes itself when the daemon comes back.
 
 ### The cat brain
 
-- **Roam.** Every few minutes (3 to 10 by default) she picks a new spot: a window edge, the floor, a
-  corner. She stays on the monitor you're working on.
-- **Bid.** Leave her alone long enough (20 to 30 minutes) and she comes over: hanging from the bar above
+- **Roam.** Every 45 seconds to 3 minutes she picks a new spot, most often the top edge of a window (her
+  favourite), else the floor or a corner. Four times in five it's on the monitor your pointer is on. In
+  between she does small hops: along the edge she sits on, to the next window over, down and back up.
+- **React.** Switch windows and about one time in three she hops to the new one's edge. Drag her window
+  fast and she hops off, startled. Bring the pointer close and she looks at it; swipe past and she
+  startles; rest it on her and she dodges or leans in for a headpat. Switch workspace and she follows
+  you within a couple of seconds. Close the window she's sitting on and, a bit over half the time, she
+  glitches over to the top of another one; otherwise she falls. While you type fast she only does the
+  small hops, away from your window; after two idle minutes she explores.
+- **Bid.** Leave her alone long enough (8 to 15 minutes) and she comes over: hanging from the bar above
   your window, clinging to its side, sitting on its edge, peeking round a corner. She avoids
   her last two entrances. Ignore the bid and she insists, then sulks and keeps her distance for a while. A headpat settles it.
 - **Summon.** When her session needs you (a prompt, a finished turn, an error) she comes straight to the
   window you're in, unless she's already beside you. This is the one move that isn't her idea.
 - **Manners.** She doesn't wander off mid-conversation: an open bubble, the Line or her menu keeps her
-  where she is. She hides when a window goes fullscreen on her monitor, makes at most 15 moves an hour on
-  her own, and takes `DND 1 HOUR` from the right-click menu.
+  where she is. She hides when a window goes fullscreen on her monitor, makes at most 45 moves an hour on
+  her own (a small hop counts a quarter), stays off the window you're working in unless she's come over for you, and
+  takes `DND 1 HOUR` from the right-click menu.
 
 ## Install
 
@@ -246,9 +254,9 @@ enabled = true
 attention = "mix"            # "mix" | "hang_only" | "off"  (also in the right-click menu)
 fullscreen = "hide"          # "hide" | "stay"
 monitor = "follow"           # "follow" the monitor you work on | "any"
-passive_every_min = [3, 10]  # minutes between her own moves
-bid_every_min = [20, 30]     # minutes between attention bids
-max_moves_per_hour = 15
+passive_every_min = [0.75, 3] # minutes between her own roams (micro-hops in between)
+bid_every_min = [8, 15]      # minutes between attention bids
+max_moves_per_hour = 45      # a micro-hop counts a quarter
 no_repeat = 2                # avoid her last N entrances
 
 [brain.approaches]           # how she shows up for a bid; weights, 0 turns one off
@@ -259,11 +267,11 @@ sit_edge = 3
 peek = 1
 beside = 1
 
-[brain.arrivals]             # how she gets there
-teleport = 3
-glitch = 1
+[brain.arrivals]             # how she gets there (hop = 0: no hops at all)
+hop = 4
+teleport = 2
 drop_in = 2
-hop = 1
+glitch = 1
 
 [ragdoll]
 strength = 0.5               # 0 = rigid, 1 = full floppy

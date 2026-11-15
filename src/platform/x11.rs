@@ -57,6 +57,39 @@ pub enum WatchEvent {
     TargetBack(u32),
     /// A click anywhere, at root (x, y), while the Line holds the keyboard.
     Click(i32, i32),
+    /// `_NET_ACTIVE_WINDOW` changed (he focused another window).
+    Focus,
+    /// `_NET_CURRENT_DESKTOP` changed (he switched workspace).
+    Desktop,
+    /// The pointer near her, swept past her, or resting on her (`watch_pointer`).
+    Pointer(PointerEv),
+}
+
+/// What the pointer watcher reports (device px, px/s).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PointerEv {
+    Near,
+    Swipe(f32),
+    Hover,
+}
+
+/// The pointer watcher's view of her: her body box (root px, w = 0: none) and whether it
+/// reports at all.
+#[derive(Default)]
+pub struct PointerWatch {
+    her: Mutex<WinRect>,
+    armed: AtomicBool,
+    /// Milliseconds (since the watcher started) of the last pointer motion, u64::MAX: none yet.
+    moved_ms: std::sync::atomic::AtomicU64,
+    started: Mutex<Option<std::time::Instant>>,
+}
+
+/// Pointer watcher tuning (device px at sf 1, scaled by the caller's sf).
+pub struct PointerCfg {
+    pub near_px: f32,
+    pub swipe_px: f32,
+    pub swipe_speed: f32,
+    pub hover: std::time::Duration,
 }
 
 pub struct X11 {
@@ -92,6 +125,8 @@ pub struct X11 {
     /// Bounding shapes sent, and their rects (for the rag's meter).
     shape_sends: std::sync::atomic::AtomicU64,
     shape_rects: std::sync::atomic::AtomicU64,
+    /// The pointer watcher's shared state (`watch_pointer`).
+    pub pointer_watch: Arc<PointerWatch>,
 }
 
 /// One viewable root child, as `stack()` sees it.
@@ -112,6 +147,7 @@ struct Atoms {
     gtk_frame_extents: u32,
     compton_shadow: u32,
     active_window: u32,
+    current_desktop: u32,
     strut_partial: u32,
     strut: u32,
     wm_type: u32,
@@ -149,6 +185,7 @@ impl X11 {
             gtk_frame_extents: intern(&conn, "_GTK_FRAME_EXTENTS")?,
             compton_shadow: intern(&conn, "_COMPTON_SHADOW")?,
             active_window: intern(&conn, "_NET_ACTIVE_WINDOW")?,
+            current_desktop: intern(&conn, "_NET_CURRENT_DESKTOP")?,
             strut_partial: intern(&conn, "_NET_WM_STRUT_PARTIAL")?,
             strut: intern(&conn, "_NET_WM_STRUT")?,
             wm_type: intern(&conn, "_NET_WM_WINDOW_TYPE")?,
@@ -176,6 +213,7 @@ impl X11 {
             poll: Mutex::new(None),
             shape_sends: std::sync::atomic::AtomicU64::new(0),
             shape_rects: std::sync::atomic::AtomicU64::new(0),
+            pointer_watch: Arc::new(PointerWatch { moved_ms: std::sync::atomic::AtomicU64::new(u64::MAX), ..PointerWatch::default() }),
         })
     }
 
@@ -362,6 +400,12 @@ impl X11 {
             w = t.parent;
         }
         None
+    }
+
+    /// The window still exists (mapped or not): an unmap without a destroy is a workspace
+    /// switch or a minimise, not a close.
+    pub fn window_exists(&self, w: u32) -> bool {
+        self.conn.get_window_attributes(w).ok().and_then(|c| c.reply().ok()).is_some()
     }
 
     /// Outer rect of a top-level window, if it is mapped and viewable.
@@ -726,6 +770,90 @@ impl X11 {
         Ok(())
     }
 
+    /// Watch the pointer on its own connection: near her (`near_px` of her body box), a fast
+    /// swipe past her (a segment between two samples passing within `swipe_px`), resting on
+    /// her for `hover`. Polled, 16 Hz within ~700 px of her, 5 Hz farther, 2 Hz disarmed (her
+    /// box and the arming come from the view, `PointerWatch`). One QueryPointer a sample.
+    pub fn watch_pointer(&self, cfg: PointerCfg, on: impl Fn(PointerEv) + Send + 'static) -> Result<()> {
+        let (c, screen) = x11rb::connect(None)?;
+        let root = c.setup().roots[screen].root;
+        let pw = self.pointer_watch.clone();
+        let t0 = std::time::Instant::now();
+        if let Ok(mut g) = pw.started.lock() {
+            *g = Some(t0);
+        }
+        std::thread::Builder::new().name("avatar-pointer-watch".into()).spawn(move || {
+            let mut last: Option<(std::time::Instant, i32, i32)> = None;
+            let (mut was_near, mut hover_since): (bool, Option<std::time::Instant>) = (false, None);
+            let mut hovered = false;
+            loop {
+                let armed = pw.armed.load(Ordering::Relaxed);
+                let Ok(Ok(r)) = c.query_pointer(root).map(|k| k.reply()) else { return };
+                let now = std::time::Instant::now();
+                let (x, y) = (r.root_x as i32, r.root_y as i32);
+                if last.is_none_or(|l| (l.1, l.2) != (x, y)) {
+                    pw.moved_ms.store(now.duration_since(t0).as_millis() as u64, Ordering::Relaxed);
+                }
+                let her = pw.her.lock().map(|g| *g).unwrap_or_default();
+                let mut far = true;
+                if armed && her.w > 0 {
+                    let d = rect_dist(&her, x as f32, y as f32);
+                    far = d > 700.0;
+                    let near = d <= cfg.near_px;
+                    if near && !was_near && d > 0.0 {
+                        on(PointerEv::Near);
+                    }
+                    was_near = near;
+                    // Resting on her a while (once per visit of the pointer).
+                    if d <= 0.0 {
+                        let since = *hover_since.get_or_insert(now);
+                        if !hovered && now.duration_since(since) >= cfg.hover {
+                            hovered = true;
+                            on(PointerEv::Hover);
+                        }
+                    } else {
+                        hover_since = None;
+                        hovered = false;
+                    }
+                    // A fast swipe past her: the segment since the last sample comes close,
+                    // both ends outside her.
+                    if let Some((lt, lx, ly)) = last {
+                        let dt = now.duration_since(lt).as_secs_f32();
+                        let len = (((x - lx).pow(2) + (y - ly).pow(2)) as f32).sqrt();
+                        if dt > 0.0 && dt < 0.4 && len / dt >= cfg.swipe_speed && d > 0.0 && rect_dist(&her, lx as f32, ly as f32) > 0.0 {
+                            let seg = seg_rect_dist(&her, (lx as f32, ly as f32), (x as f32, y as f32));
+                            if seg <= cfg.swipe_px {
+                                on(PointerEv::Swipe(len / dt));
+                            }
+                        }
+                    }
+                } else {
+                    was_near = false;
+                    hover_since = None;
+                }
+                last = Some((now, x, y));
+                let wait = if !armed { 500 } else if far { 200 } else { 60 };
+                std::thread::sleep(std::time::Duration::from_millis(wait));
+            }
+        })?;
+        Ok(())
+    }
+
+    /// Her body box for the pointer watcher, and whether it reports.
+    pub fn set_pointer_watch(&self, her: Option<WinRect>, armed: bool) {
+        if let Ok(mut g) = self.pointer_watch.her.lock() {
+            *g = her.unwrap_or_default();
+        }
+        self.pointer_watch.armed.store(armed && her.is_some(), Ordering::Relaxed);
+    }
+
+    /// Milliseconds since the pointer last moved (None: no watcher, or no motion seen yet).
+    pub fn pointer_still_ms(&self) -> Option<u64> {
+        let t0 = (*self.pointer_watch.started.lock().ok()?)?;
+        let m = self.pointer_watch.moved_ms.load(Ordering::Relaxed);
+        (m != u64::MAX).then(|| (t0.elapsed().as_millis() as u64).saturating_sub(m))
+    }
+
     /// Report clicks (the Line holds the keyboard) or not.
     pub fn arm_clicks(&self, on: bool) {
         use x11rb::protocol::xinput::{self, ConnectionExt as _};
@@ -816,7 +944,7 @@ impl X11 {
         let target = self.target.clone();
         conn.change_window_attributes(
             root,
-            &xproto::ChangeWindowAttributesAux::new().event_mask(xproto::EventMask::SUBSTRUCTURE_NOTIFY),
+            &xproto::ChangeWindowAttributesAux::new().event_mask(xproto::EventMask::SUBSTRUCTURE_NOTIFY | xproto::EventMask::PROPERTY_CHANGE),
         )?;
         let have_xfixes = conn.extension_information(xfixes::X11_EXTENSION_NAME)?.is_some();
         if have_xfixes {
@@ -866,6 +994,8 @@ impl X11 {
                                 on_event(WatchEvent::TargetGone(t));
                             }
                         }
+                        Event::PropertyNotify(e) if e.window == root && e.atom == atoms.active_window => on_event(WatchEvent::Focus),
+                        Event::PropertyNotify(e) if e.window == root && e.atom == atoms.current_desktop => on_event(WatchEvent::Desktop),
                         Event::XfixesSelectionNotify(e) if e.selection == atoms.cm => {
                             let now = e.owner != x11rb::NONE;
                             if composited.swap(now, Ordering::Relaxed) != now {
@@ -886,6 +1016,18 @@ impl X11 {
         })?;
         Ok(())
     }
+}
+
+/// Distance from (x, y) to the rect (0 inside).
+fn rect_dist(r: &WinRect, x: f32, y: f32) -> f32 {
+    let dx = (r.x as f32 - x).max(x - r.right() as f32).max(0.0);
+    let dy = (r.y as f32 - y).max(y - r.bottom() as f32).max(0.0);
+    (dx * dx + dy * dy).sqrt()
+}
+
+/// Closest distance from the segment a→b to the rect (sampled: 24 points, enough at 60 ms).
+fn seg_rect_dist(r: &WinRect, a: (f32, f32), b: (f32, f32)) -> f32 {
+    (0..=24).map(|k| k as f32 / 24.0).map(|u| rect_dist(r, a.0 + (b.0 - a.0) * u, a.1 + (b.1 - a.1) * u)).fold(f32::MAX, f32::min)
 }
 
 fn keep_above(conn: &RustConnection, win: u32, root: u32, atoms: Atoms, may_cover: &mut HashMap<u32, bool>) -> Result<()> {
