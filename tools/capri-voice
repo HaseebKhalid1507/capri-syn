@@ -42,7 +42,7 @@ application name contains it.
 Other modes: --render TEXT --out F.wav [--voice V --speed S --flow F --pace P] (a sample; never the mic),
 --selftest (no audio device; with the models, the graph patch and the flow rules).
 """
-import collections, json, math, os, re, select, shutil, signal, socket, subprocess, sys, threading, time, zlib
+import collections, json, math, os, re, select, shutil, signal, socket, subprocess, sys, threading, time, unicodedata, zlib
 
 import numpy as np
 
@@ -143,17 +143,18 @@ WAKE_RING_S = 2.5                                  # all the idle mic is kept: 2
 WAKE_REFRACTORY_S = 2.0
 WAKE_VERIFY_N, WAKE_VERIFY_S, WAKE_PAUSE_S = 12, 600.0, 600.0   # 12 Whisper checks in 10 min, else 10 min off
 WAKE_WAIT_S, WAKE_TURN_S = 5.0, 30.0               # after the phrase: speech within 5 s; a turn is sent at 30 s
-WAKE_HEY = {'hey', 'hay', 'hi', 'hei', 'heh', 'hai', 'he', 'eh', 'ay', 'a'}
+WAKE_HEY = {'hey', 'hay', 'hi', 'hei', 'hej', 'heh', 'hai', 'he', 'eh', 'ay', 'a', 'hello', 'hallo', 'halle', 'haley', 'hailey', 'heli'}
 # "Capri" as Whisper spells what it heard: Capri, Copry, Kapree, "cup pray", "kah preen"; never Capricorn, Capra, caprese
-_CAPRI = r"(?:k|c|ck|g|q)[aeiouy]{1,2}h?p{1,2}r(?:[eiy]{1,3}|ay)n?"
+_CAPRI = r"(?:k|c|ck|g|q)[aeiouy]{1,2}[rl]?h?p{1,2}r(?:[eiy]{1,3}|ay)(?:n|ne)?"
 WAKE_CAPRI = re.compile(_CAPRI)
-WAKE_FUSED = re.compile(r"h[aeiy]{1,3}" + _CAPRI)       # "Haikapri", "Hekopri", "Heikah Preen"
+WAKE_FUSED = re.compile(r"h[aeiy]{1,3}(?:l[aeiy]{0,2})?" + _CAPRI)     # "Haikapri", "Hekopri", "Heikah Preen", "Helicapri"
 WAKE_HF = {"let's talk", 'lets talk', "let's chat", 'lets chat', 'hands free', 'handsfree'}
 
 
 def wake_find(text):
     """Where "hey capri" ends in Whisper's words (an offset into text), or None: a hey-like word, then a capri-like
     one (one word or two), or the two fused ("Haikapri")."""
+    text = unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode()      # "Caprín" -> "Caprin"
     toks = [(m.group().lower(), m.end()) for m in re.finditer(r"[A-Za-z']+", text)]
     w = [t[:-2] if t.endswith("'s") else t.strip("'") for t, _ in toks]
     for i in range(len(w)):
@@ -172,6 +173,7 @@ def wake_says(text):
 
 def wake_rest(text):
     """What he said after "hey capri" (the phrase cut), and whether it asks for hands-free."""
+    text = unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode()
     e = wake_find(text)
     rest = text[e:].lstrip(" ,.!?:;-") if e is not None else text.strip()
     rest = rest[:1].upper() + rest[1:]
@@ -2582,11 +2584,13 @@ def selftest_endpoint():
 def selftest_wake():
     # (the loose spellings: Whisper on stock voices saying "hey capri", from the stage-2 evaluation)
     for t in ('Hey Capri.', "Hey, Capri, what's spike doing?", 'hey kapri', 'Hi Capri!', 'Hey Capree, pause the music.', 'hey capri',
-              'Hey, Copry.', 'Haikapri.', 'Hekopri, House', 'Heikah Preen.', 'A copry.', 'Hey, cup, pray.', 'Heik Aapri, Remi.', "Hey Capri's"):
+              'Hey, Copry.', 'Haikapri.', 'Hekopri, House', 'Heikah Preen.', 'A copry.', 'Hey, cup, pray.', 'Heik Aapri, Remi.', "Hey Capri's",
+              'Hello Capri.', 'Heli Capri.', 'Hey, Carprey.', 'Hey, Caprín.', 'Hey, Caprine.', 'Halle Capri.'):
         assert wake_says(t), t
     for t in ('Hey Capricorn.', 'Hey Carrie.', 'Capri said the build passed.', 'Hey copy that.', 'Hey caprese', 'tell Capri to wait',
               'Hey Kerry', 'Hey!', '', 'helicopter.', 'Take a pre.', 'Te copri', 'K-copry', 'Hey Capra', 'Hey Cappy', 'hey crappy',
-              'Hey, come free.', 'hey Kaplan', 'I love Capri in summer.', 'Hey, Cap.', 'capris', 'Hey Kafka'):
+              'Hey, come free.', 'hey Kaplan', 'I love Capri in summer.', 'Hey, Cap.', 'capris', 'Hey Kafka', 'Helicopters.', 'Hey Capitol',
+              'Hello, Carrie.', 'Hey Caprisun', 'hey capricious'):
         assert not wake_says(t), t
     assert wake_rest('Haikapri, pause the music.') == ('Pause the music.', False)
     assert wake_rest("Hey, cup, pray, what's next?") == ("What's next?", False)
