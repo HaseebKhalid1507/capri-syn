@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Voice: her replies to what arrives on its own are spoken
+- `[voice] speak_unprompted = true` (default): a reply she makes without him typing first is spoken: events
+  (hooks, `synaps send`, comms, summons) and the session driver (`event_auto`, `driver_auto`, live turns
+  only). Turns he typed stay silent, as before. Unknown triggers stay silent.
+- First lines only: two sentences / 30 words / up to `---`, then "The rest is on the line." once.
+- Silent over an approval or a secret, while music plays (skipped, not queued), with his mic open, when
+  hidden for fullscreen; the sidecar adds calls, the screen lock, dunst do-not-disturb, 10 s per reply,
+  20 s per 60 s and 15 s staleness (`say-skipped`). Any of these mid-reply stops her for that turn.
+- Such a reply waits behind her last sentences instead of cutting them off; one waits at most (newest
+  wins). No duck or pause for these. Events never open the mic.
+- With voice on, the avatar connects to the sidecar at start and every 10 s after it went away.
+- Sidecar protocol: `say … "unprompted": true`, `drop`, `say-skipped`, `ready.features`.
+- Tools: `tools/fakevoice.py` (a fake sidecar, no audio); the fake daemon's event turns are `event_auto`,
+  plus `trig T TEXT` and `resolve`.
+
 ### Voice: her picked voice, and stress on a word (LOCKED 13 + 14)
 - The default voice is Haseeb's pick:
   - **W3**, the bright blend (`timbre|prosody` split, pushed away from af_sarah, `+clean`);

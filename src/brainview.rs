@@ -2414,7 +2414,7 @@ impl Avatar {
                     let acts = if sl.link.rides_other() {
                         Vec::new()
                     } else {
-                        sl.link.set_persona(crate::session_persona(&s.session, s.voice.enabled, model, &self.pack.dir), now)
+                        sl.link.set_persona(crate::session_persona(&s.session, &s.voice, model, &self.pack.dir), now)
                     };
                     self.run_acts(acts);
                 }

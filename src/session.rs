@@ -148,6 +148,9 @@ pub struct Body {
     pub busy: bool,
     /// The user's line of the running turn.
     pub echo: Option<String>,
+    /// Who started the current turn: the daemon's `TurnStarted.trigger` (`user`, `event_auto`,
+    /// ...); empty for the reply an attach shows, and after a clear.
+    pub trigger: String,
     pub prompt: Option<PromptView>,
     /// Every pending prompt, oldest first (`prompt` is the first), whole text.
     pub prompts: Vec<PromptView>,
@@ -205,6 +208,7 @@ pub struct Link {
     notice: Option<String>,
     turn: u64,
     echo: Option<String>,
+    trigger: String,
     flash: Option<(Mood, Instant)>,
     last_active: Instant,
     retry_at: Option<Instant>,
@@ -265,6 +269,7 @@ impl Link {
             notice: None,
             turn: 0,
             echo: None,
+            trigger: String::new(),
             flash: None,
             last_active: now,
             retry_at: None,
@@ -606,6 +611,7 @@ impl Link {
                 let same = |a: &str, b: &str| a == b || (!b.is_empty() && a.ends_with(b));
                 if !(switch && same(&clean(&raw), &clean(&self.raw))) {
                     self.turn += 1;
+                    self.trigger.clear();
                     self.raw = raw;
                 }
                 self.response_at = self.raw.len();
@@ -704,7 +710,8 @@ impl Link {
 
     fn session_event(&mut self, ev: SessionEvent, now: Instant) {
         match ev {
-            SessionEvent::TurnStarted { user_text, .. } => {
+            SessionEvent::TurnStarted { user_text, trigger, .. } => {
+                self.trigger = trigger;
                 self.busy = true;
                 self.phase = Phase::Thinking;
                 self.raw.clear();
@@ -786,6 +793,7 @@ impl Link {
                 self.response_at = 0;
                 self.notice = None;
                 self.turn += 1;
+                self.trigger.clear();
             }
             _ => {}
         }
@@ -964,6 +972,7 @@ impl Link {
             turn: self.turn,
             busy: self.busy,
             echo: self.echo.clone().filter(|_| self.busy),
+            trigger: self.trigger.clone(),
             prompt,
             prompts,
             live: self.live(),
@@ -1335,6 +1344,35 @@ mod tests {
         assert!(b.busy);
         assert!(b.echo.as_deref().unwrap().starts_with("Think briefly, then write"));
         assert_eq!(b.reply, "");
+    }
+
+    #[test]
+    fn only_a_live_turn_says_who_started_it() {
+        let t0 = Instant::now();
+        let mut l = live_link(t0);
+        assert_eq!(l.body(t0).trigger, "", "the reply an attach shows has no trigger (never spoken as an event's)");
+        let evs = turn(1);
+        for ev in &evs[..60] {
+            l.on_event(ev.clone(), t0);
+        }
+        assert_eq!(l.body(t0).trigger, "user");
+        // Mid-turn reattach: the turn already running comes from the snapshot, with no trigger.
+        l.on_event(Event::Reattaching { attach_seq: 1, session_id: "s".into(), reason: "reload".into() }, t0);
+        let Event::Attached { attached, .. } = attached(1, "attached_history.json") else { panic!() };
+        l.on_event(Event::Attached { attach_seq: 1, attached, mode: AttachMode::Mirror, reconnect: true }, t0);
+        assert_eq!(l.body(t0).trigger, "");
+        // A live event turn on this attach.
+        let ev = |e: serde_json::Value| {
+            let line = serde_json::json!({"type": "event", "session_id": "s", "seq": 900, "ts": "t", "event": e}).to_string();
+            let DaemonFrame::Event(env) = decode_frame(&line).unwrap() else { panic!() };
+            let event = env.decode().unwrap();
+            Event::Session { attach_seq: 1, session_id: "s".into(), seq: env.seq, event, raw: Arc::new(env.event.clone()) }
+        };
+        l.on_event(ev(serde_json::json!({"ev": "turn_started", "turn_baseline": 2, "trigger": "event_auto"})), t0);
+        let b = l.body(t0);
+        assert_eq!((b.trigger.as_str(), b.busy, b.echo.as_deref()), ("event_auto", true, None));
+        l.on_event(ev(serde_json::json!({"ev": "cleared", "session_id": "s"})), t0);
+        assert_eq!(l.body(t0).trigger, "");
     }
 
     #[test]

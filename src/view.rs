@@ -788,6 +788,8 @@ impl Avatar {
     /// A media player started (`playing`) or stopped: real LISTENING, off after a grace.
     fn playback(&mut self, p: crate::mpris::Playback, now: Instant) -> String {
         self.player = p;
+        // Music started under an unprompted reply: she stops.
+        self.voice_guard();
         if p.playing && (self.mood != Mood::Idle || !self.loaded) {
             // The session's mood first; the headphones go on when she is idle again (tick).
             return "ok (later)".into();
@@ -1601,6 +1603,7 @@ impl Avatar {
         }
         let before = self.anim.frame();
         let mut dirty = self.anim.tick(now);
+        self.voice_keepalive(now, cx);
         if dirty {
             self.lying_cut(before, now);
         }
@@ -2913,6 +2916,8 @@ impl Avatar {
         if new_turn || prev.as_ref().is_some_and(|p| p.reply != b.reply || p.busy != b.busy) {
             self.stream_reply(&b, new_turn, now);
         }
+        // A prompt that came up mid-reply stops an unprompted one.
+        self.voice_guard();
     }
 
     /// The session's reply into the bubble: a new turn opens a new one (an old reply, on
