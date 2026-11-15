@@ -813,7 +813,7 @@ def shapes(a):
 
 DUCK_RAW = 0.5            # each channel's raw volume x 0.5: Pulse volume is cubic, so that is -18 dB
 NEVER_DUCK_ROLES = {'phone', 'communication', 'event', 'notification', 'alert', 'accessibility'}
-VANISHED_S = 600          # a stream gone mid-duck: its originals are kept this long (see Media)
+VANISHED_S = 21600        # a stream gone mid-duck: its originals are kept this long (see Media)
 
 
 def write_json(path, v):
@@ -990,12 +990,17 @@ class Media:
             if si is None or not self.eligible(si):
                 return
             pr, cur = si.get('properties', {}), raw_volume(si)
-            back = next((v for v in self.vanished if v['app'] == (pr.get('application.name') or '')
-                         and v['bin'] == (pr.get('application.process.binary') or '') and close_to(cur, v['set'])), None)
+            same = lambda v: (v['app'] == (pr.get('application.name') or '') and v['bin'] == (pr.get('application.process.binary') or '')
+                              and close_to(cur, v['set']))
+            back = next((v for v in self.vanished if same(v)), None)
+            # A sibling: another stream of an app we hold ducked starts at the ducked level
+            # (WirePlumber's per-app restore); its original is the held one, not -18 dB.
+            sib = next((v for v in (held or {}).get('streams', {}).values() if same(v)), None) if not back else None
             if held and si.get('corked'):
                 return              # ducked when it starts playing (a stream often starts corked)
             if back:
                 self.vanished.remove(back)
+            back = back or sib
             if held:
                 self._duck(si, back['orig'] if back else None)
             elif back:
@@ -1073,13 +1078,16 @@ def other_capture(items, sources):
     return None
 
 
-def pactl_json(what):
-    """`pactl list WHAT` as JSON, or None when pactl fails (unknown is not empty)."""
-    try:
-        r = subprocess.run(['pactl', '-f', 'json', 'list', what], capture_output=True, text=True, timeout=0.5)
-        return json.loads(r.stdout or '[]') if r.returncode == 0 else None
-    except Exception:
-        return None
+def pactl_json(what, tries=2):
+    """`pactl list WHAT` as JSON, or None when pactl fails twice (unknown is not empty)."""
+    for _ in range(tries):
+        try:
+            r = subprocess.run(['pactl', '-f', 'json', 'list', what], capture_output=True, text=True, timeout=0.5)
+            if r.returncode == 0:
+                return json.loads(r.stdout or '[]')
+        except Exception:
+            pass
+    return None
 
 
 def in_call():
@@ -1125,13 +1133,14 @@ class Gate:
         """A new avatar: its turn ids start again (the budget stays)."""
         self.queued, self.skipped, self.dropped, self.spent = {}, set(), set(), {}
 
-    def now_why(self):
-        """Why nothing she says may be heard now (any speech, his turns too): the lock, a call."""
+    def now_why(self, unprompted=True):
+        """Why nothing she says may be heard now (any speech, his turns too): the lock, a call. When
+        pactl can't tell, an unprompted reply stays silent; his own spoken turn goes on."""
         if screen_locked() or self._cached('hint', 2.0, locked_hint):
             return 'screen locked'
         app = in_call()
         if app is None:
-            return 'audio state unknown'
+            return 'audio state unknown' if unprompted else None
         if app:
             return f'call ({app})'
         return None
@@ -1175,7 +1184,6 @@ class Voice:
         self.last_said = (None, '', 0.0)  # (id, text, tail silence s) of the last sentence: the gap before the next
         self.stt = Stt(self.cfg['stt_model'])
         self.vad = Vad.load()
-        self.vs = None           # the capture's VAD, as it streams
         self.tts = Tts()
         self.media = Media()
         self.release_timer = None
@@ -1215,12 +1223,12 @@ class Voice:
         if SOURCE:
             cmd += ['--target', SOURCE]
         self.rec_buf, self.rec_stop_at, self.cancelled = [], None, False
-        self.vs = VadStream(self.vad) if self.vad else None
+        vs = VadStream(self.vad) if self.vad else None
         self.rec = subprocess.Popen(cmd + ['-'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
-        threading.Thread(target=self._rec_loop, args=(self.rec,), daemon=True).start()
+        threading.Thread(target=self._rec_loop, args=(self.rec, vs), daemon=True).start()
         log('mic: capture starting', SOURCE or '(default source)')
 
-    def _rec_loop(self, p):
+    def _rec_loop(self, p, vs):
         opened, last_lvl, fd = False, 0.0, p.stdout.fileno()
         while True:
             if self.rec_stop_at is not None and now_ms() >= self.rec_stop_at:
@@ -1240,8 +1248,8 @@ class Voice:
                 log(f"mic: open (+{self.cur['t_mic_open'] - self.cur['t_start']:.0f} ms)")
             if not self.cancelled:
                 self.rec_buf.append(chunk)
-                if self.vs:
-                    self.vs.feed(chunk)
+                if vs:
+                    vs.feed(chunk)
             t = now_ms()
             if t - last_lvl >= 200:
                 last_lvl = t
@@ -1253,16 +1261,19 @@ class Voice:
         except subprocess.TimeoutExpired:
             p.kill()
             p.wait()
+        # This capture's clip and fate, taken before self.rec is cleared (a new capture may start
+        # right after and reset them).
+        buf, cancelled, cur = self.rec_buf, self.cancelled, self.cur
+        self.rec_buf = []
         self.rec = None
-        self.cur['t_mic_closed'] = now_ms()
+        cur['t_mic_closed'] = now_ms()
         self.emit(ev='mic-closed')
         log('mic: closed (process gone)')
-        if self.cancelled:
-            self.rec_buf = []
+        if cancelled:
             return
-        pcm = np.frombuffer(b''.join(self.rec_buf), np.int16).astype(np.float32) / 32768.0
-        self.rec_buf = []
-        self._heard(pcm)
+        pcm = np.frombuffer(b''.join(buf), np.int16).astype(np.float32) / 32768.0
+        del buf
+        self._heard(pcm, vs, cur)
 
     def listen_stop(self):
         self.cur['t_keyup'] = now_ms()
@@ -1276,23 +1287,21 @@ class Voice:
         self.rec_buf = []
         self.rec_stop_at = now_ms()
 
-    def _drop(self, why, chars, speech_ms, dur):
+    def _drop(self, why, chars, speech_ms, dur, c):
         """Not sent: a quiet DIDN'T CATCH THAT on her tag. Logged by length only, never words or audio."""
-        self.cur['t_heard'] = now_ms()
-        self.emit(ev='heard', text='', why="DIDN'T CATCH THAT", ms=self._ms())
+        c['t_heard'] = now_ms()
+        self.emit(ev='heard', text='', why="DIDN'T CATCH THAT", ms=self._ms(c))
         log(f'heard: dropped ({why}; {chars} chars, {speech_ms:.0f} ms of speech in {dur:.1f} s)')
 
-    def _heard(self, pcm):
-        c = self.cur
+    def _heard(self, pcm, vs, c):
         dur = len(pcm) / MIC_RATE
         # Gate on speech before Whisper: it invents short phrases from silence and clicks.
-        if self.vs:
-            span = speech_span(self.vs.p, c.get('mode', 'hold'))
-            speech_ms = sum(x >= SPEECH_P for x in self.vs.p) * VAD_FRAME / MIC_RATE * 1000
-            self.vs = None
+        if vs:
+            span = speech_span(vs.p, c.get('mode', 'hold'))
+            speech_ms = sum(x >= SPEECH_P for x in vs.p) * VAD_FRAME / MIC_RATE * 1000
             if span is None:
                 del pcm
-                return self._drop('no speech', 0, speech_ms, dur)
+                return self._drop('no speech', 0, speech_ms, dur, c)
             a = max(0, span[0] * VAD_FRAME - int(LEAD_S * MIC_RATE))
             b = min(len(pcm), (span[1] + 1) * VAD_FRAME + int(TAIL_S * MIC_RATE))
             pcm = pcm[a:b]
@@ -1304,20 +1313,20 @@ class Voice:
             speech_ms = float(np.sum(rms > max(0.008, floor * 3)) * 20)
             if speech_ms < 300:
                 del pcm
-                return self._drop('no speech (energy gate)', 0, speech_ms, dur)
+                return self._drop('no speech (energy gate)', 0, speech_ms, dur, c)
         t = now_ms()
         text = self.stt(pcm, speech_ms)
         del pcm  # dropped after decoding (never written anywhere)
         c['stt_ms'] = now_ms() - t
         why = junk(text, speech_ms) if text else 'empty'
         if why:
-            return self._drop(why, len(text), speech_ms, dur)
+            return self._drop(why, len(text), speech_ms, dur, c)
         c['t_heard'] = now_ms()
-        self.emit(ev='heard', text=text, why='', ms=self._ms())
+        self.emit(ev='heard', text=text, why='', ms=self._ms(c))
         log(f"heard: {len(text)} chars in {c['stt_ms']:.0f} ms from {dur:.1f} s ({speech_ms:.0f} ms of speech)")
 
-    def _ms(self):
-        c = self.cur
+    def _ms(self, c=None):
+        c = self.cur if c is None else c
         d = lambda a, b: round(c[b] - c[a]) if a in c and b in c else None
         return {'keyup_to_closed': d('t_keyup', 't_mic_closed'), 'stt': round(c['stt_ms']) if 'stt_ms' in c else None,
                 'keyup_to_heard': d('t_keyup', 't_heard'), 'press_to_open': d('t_start', 't_mic_open')}
@@ -1400,7 +1409,7 @@ class Voice:
                 if gen != self.hush_gen:
                     continue
             t = now_ms()
-            why = self.gate.now_why()
+            why = self.gate.now_why(unprompted)
             if not why and unprompted:
                 why, pcm = self.gate.check(sid, len(pcm) / TTS_RATE, pcm)
             self.gate.check_ms = now_ms() - t
@@ -1431,7 +1440,7 @@ class Voice:
                     p.wait(timeout=0.35)
                     break
                 except subprocess.TimeoutExpired:
-                    if why is None and (why := self.gate.now_why()):
+                    if why is None and (why := self.gate.now_why(unprompted)):
                         p.kill()
             if unprompted:
                 self.gate.played(len(pcm) / TTS_RATE if why is None else (now_ms() - t0) / 1000)
@@ -1618,6 +1627,7 @@ def selftest_gate():
     os.environ['PATH'] = f'{shim}:{real}'
     try:
         assert in_call() is None and Gate().now_why() in ('audio state unknown', 'screen locked'), 'pactl failing is unknown, not "no call"'
+        assert Gate().now_why(unprompted=False) in (None, 'screen locked'), 'unknown does not mute his own turn'
     finally:
         os.environ['PATH'] = real
         _sh.rmtree(shim, ignore_errors=True)
