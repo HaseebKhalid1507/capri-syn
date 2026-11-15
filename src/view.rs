@@ -1563,6 +1563,7 @@ impl Avatar {
 
     fn schedule(&mut self, _cx: &mut Context<Self>) {
         self.sync_shadow();
+        self.sync_pointer_watch();
         self.ticker.set(self.next_deadline());
     }
 
@@ -3373,7 +3374,9 @@ impl Avatar {
                 let still = matches!(self.placement, Placement::Perch { win, .. } if win == g.win);
                 self.perch_gone = None;
                 if still {
-                    self.fall("perch_gone", now);
+                    // Closed: another window's top (the brain decides, 55 %) or the fall;
+                    // gone with the workspace he left: she follows him.
+                    self.brain_perch_gone(g.win, now);
                 }
                 still
             }
@@ -3400,6 +3403,11 @@ impl Avatar {
             WatchEvent::TargetMoved(r) => {
                 let Placement::Perch { win, sit, dx } = self.placement else { return };
                 if win != r.id || self.teleport.is_some() {
+                    return;
+                }
+                self.brain_perch_moved(&r, now);
+                if self.placement != (Placement::Perch { win, sit, dx }) {
+                    // Startled off it.
                     return;
                 }
                 if self.perch_dx(&r, sit, Some(dx)).is_none() {
@@ -3441,6 +3449,7 @@ impl Avatar {
                 }
             }
             WatchEvent::Click(..) => {}
+            WatchEvent::Focus | WatchEvent::Desktop | WatchEvent::Pointer(_) => self.brain_watch(ev, now),
         }
     }
 

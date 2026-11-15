@@ -117,6 +117,36 @@ pub(super) struct InFlight {
     /// Which way she faces once there (`[mirror] self`): his pointer on a bid or summon;
     /// else into the screen near a monitor's edge, a window's middle from its edge.
     face: Option<bool>,
+    /// The plan's rule.
+    why: &'static str,
+}
+
+/// The world as read for one decision (owned; `Avatar::world` lends it out as a `World`).
+pub(super) struct WorldBuf {
+    stack: Vec<WinRect>,
+    eligible: Vec<bool>,
+    areas: Vec<WinRect>,
+    monitors: Vec<WinRect>,
+    fullscreen: Vec<bool>,
+    focused: Option<WinRect>,
+    cursor: (i32, i32),
+    her: Spot,
+    senses_fs: bool,
+    hud_h: i32,
+    only: Option<usize>,
+    prefer: Option<usize>,
+}
+
+/// A small hop under way: her feet along `leap` (device px), then she settles into `place` at
+/// `origin`.
+pub(super) struct LeapMove {
+    leap: moves::Leap,
+    t0: Instant,
+    origin: (i32, i32),
+    place: Placement,
+    crouched: bool,
+    /// A startled hop: the surprised face in the air.
+    startled: bool,
 }
 
 pub(super) struct Scoot {
@@ -184,6 +214,21 @@ pub(super) struct BrainHost {
     glow_last: Option<u8>,
     /// Sitting low after a sulk (the floor sit uses the sulk loop).
     sulk_sit: bool,
+    // ---- lively (LOCKED #17) ----
+    /// A small hop in the air.
+    leap: Option<LeapMove>,
+    /// The focused top-level last seen (a focus change is a different one).
+    focus_seen: Option<u32>,
+    /// He switched workspace at: and the check of where she is, a beat later (after a perch
+    /// that went with it has had its grace).
+    desk_at: Option<Instant>,
+    desk_check: Option<Instant>,
+    /// Her perch window's last position and when (a fast drag startles her), and the drag
+    /// already reported.
+    perch_seen: Option<(u32, Instant, i32, i32)>,
+    drag_told: Option<Instant>,
+    /// The body box last given to the pointer watcher, and its arming.
+    watch_box: Option<(Option<WinRect>, bool)>,
 }
 
 fn env_rect(k: &str) -> Option<WinRect> {
@@ -202,7 +247,7 @@ impl BrainHost {
 
     /// A move's own motion is running (a scoot, a drift, a drop): the landing waits for it.
     fn moving(&self) -> bool {
-        self.scoot.is_some() || self.drift.is_some() || self.drop_in.is_some()
+        self.scoot.is_some() || self.drift.is_some() || self.drop_in.is_some() || self.leap.is_some()
     }
 
     pub(super) fn bnow(&self, now: Instant) -> f64 {
@@ -375,6 +420,13 @@ impl Avatar {
             glow: None,
             glow_last: None,
             sulk_sit: false,
+            leap: None,
+            focus_seen: None,
+            desk_at: None,
+            desk_check: None,
+            perch_seen: None,
+            drag_told: None,
+            watch_box: None,
         });
         if let Some(h) = &mut self.brain {
             let v = serde_json::json!({ "t": 0.0, "k": "start", "scale": scale, "seed": seed, "settings": h.brain.snapshot(0.0)["settings"] });
@@ -527,6 +579,7 @@ impl Avatar {
         if let Some(h) = &mut self.brain {
             h.flight = None;
             h.scoot = None;
+            h.leap = None;
             h.next_plan = None;
         }
     }
@@ -572,7 +625,13 @@ impl Avatar {
             let reach = (NEAR_PX * self.layout.sf) as i32;
             m.intersect(&f).is_some() && f.grow(reach).intersect(&her.body).is_some()
         }));
-        Senses { now: b, idle_s, fullscreen, fullscreen_here, busy: self.brain_busy(), near, placement: self.placement_kind() }
+        // Typing fast: input within the last 1.5 s with the pointer still for 3 s (the watcher
+        // sees the pointer; keys are never read). A test's negative idle means "typing".
+        let typing = match h.ov.idle {
+            Some((_, v)) => v < 0.0,
+            None => idle_s < 1.5 * h.scale && self.x11.pointer_still_ms().is_some_and(|ms| ms >= 3000),
+        };
+        Senses { now: b, idle_s, fullscreen, fullscreen_here, busy: self.brain_busy(), near, placement: self.placement_kind(), typing }
     }
 
     // ---- the loop -----------------------------------------------------------------------------
@@ -589,7 +648,7 @@ impl Avatar {
         let d = h.brain.tick(&senses);
         h.wake = Some(h.instant(d.wake_at));
         let sv = serde_json::json!({ "idle": (senses.idle_s / 30.0).floor() * 30.0, "fs": senses.fullscreen, "fs_here": senses.fullscreen_here,
-                                     "near": senses.near, "busy": senses.busy });
+                                     "near": senses.near, "busy": senses.busy, "typing": senses.typing });
         if h.last_senses.as_ref() != Some(&sv) {
             let t = ((senses.now - h.brain.start()) * 1000.0).round() / 1000.0;
             h.write(serde_json::json!({ "t": t, "k": "senses", "s": sv }));
@@ -618,6 +677,7 @@ impl Avatar {
                     self.relayer(now);
                 }
                 Intent::Hide(hide) => self.brain_hide(hide, now),
+                Intent::React(r) => self.brain_react(r, now),
                 Intent::Unfold => {
                     if let Some(b) = &mut self.bubble {
                         b.collapsed = false;
@@ -662,9 +722,10 @@ impl Avatar {
                 t = Some(t.map_or(d, |t| t.min(d)));
             }
         };
-        if h.scoot.is_some() || h.drop_in.is_some() || (h.flight.is_some() && self.teleport.is_none() && h.drift.is_none()) {
+        if h.scoot.is_some() || h.leap.is_some() || h.drop_in.is_some() || (h.flight.is_some() && self.teleport.is_none() && h.drift.is_none()) {
             take(Some(now + FRAME_FAST));
         }
+        take(h.desk_check);
         if let Some(d) = &h.drift {
             take(Some(d.pause_until.unwrap_or(now + DRIFT_TICK)));
         }
@@ -726,7 +787,11 @@ impl Avatar {
             dirty = true;
         }
         dirty |= self.step_scoot(now);
+        dirty |= self.step_leap(now);
         dirty |= self.step_drift(now);
+        if self.brain.as_ref().and_then(|h| h.desk_check).is_some_and(|d| d <= now) {
+            self.desk_settled(now);
+        }
         dirty |= self.step_drop_in(now);
         let landed = self.brain.as_ref().is_some_and(|h| h.flight.is_some() && !h.moving()) && self.teleport.is_none() && self.rag.is_none();
         if landed {
@@ -742,6 +807,13 @@ impl Avatar {
             self.brain_move(p, now);
             dirty = true;
         }
+        // The focus at launch: the first change after it is a focus change.
+        if self.loaded && self.brain.as_ref().is_some_and(|h| h.focus_seen.is_none()) {
+            let f = self.brain_focused().map(|r| r.id);
+            if let Some(h) = &mut self.brain {
+                h.focus_seen = f;
+            }
+        }
         self.brain_run(now, false);
         dirty |= self.idle_look(now);
         self.brain_save(now, false);
@@ -750,33 +822,18 @@ impl Avatar {
 
     // ---- moves --------------------------------------------------------------------------------
 
-    fn brain_move(&mut self, plan: MovePlan, now: Instant) {
-        let t = self.brain.as_ref().map_or(0.0, |h| h.bnow(now) - h.brain.start());
-        let moving = self.teleport.is_some() || self.rag.is_some() || self.brain.as_ref().is_some_and(|h| h.moving() || h.flight.is_some());
-        // A passive move waits for the emote on screen to finish (the sulk plays out first).
-        let emoting = !matches!(plan.goal, Goal::Active { .. }) && self.anim.busy();
-        if (moving || emoting) && self.press.is_none() && !self.quitting {
-            // Still landing from the last one: this one goes next (a sulk's far move after
-            // the leave, a summon after a passive hop).
-            if let Some(h) = &mut self.brain {
-                h.next_plan = Some(plan);
-            }
-            return;
-        }
-        if self.press.is_some() || self.quitting || self.brain.as_ref().is_some_and(|h| h.fs != FsHide::Shown) {
-            if let Some(h) = &mut self.brain {
-                h.write(serde_json::json!({ "t": t, "k": "fail", "busy": true }));
-            }
-            self.brain_feed(BrainEvent::MoveFailed { busy: true }, now);
-            return;
-        }
-        let stack_all = self.x11.stack();
-        let (mut stack, mut eligible): (Vec<WinRect>, Vec<bool>) = stack_all.into_iter().unzip();
+    /// The world for a decision: the stack (her own layers out, the arena and the test's
+    /// window list applied), work areas, his focus, the pointer, where she is.
+    fn world_buf(&self, goal: &Goal) -> Option<WorldBuf> {
+        let h = self.brain.as_ref()?;
+        let (mut stack, mut eligible): (Vec<WinRect>, Vec<bool>) = self.x11.stack().into_iter().unzip();
         let (areas, monitors) = self.arena_filter(
             self.x11.work_areas().iter().map(crate::platform::x11::Monitor::rect).collect(),
             self.x11.monitors().iter().map(crate::platform::x11::Monitor::rect).collect(),
         );
-        let Some(h) = &self.brain else { return };
+        if areas.is_empty() {
+            return None;
+        }
         if let Some(a) = h.ov.arena {
             for (r, e) in stack.iter().zip(eligible.iter_mut()) {
                 *e &= a.intersect(r).is_some_and(|o| o == WinRect::new(r.x, r.y, r.w, r.h));
@@ -803,19 +860,28 @@ impl Avatar {
         let fullscreen: Vec<bool> = monitors.iter().map(|m| senses_fs && (focused.is_none_or(|f| m.intersect(&f).is_some()))).collect();
         let l = self.layout;
         let hud_h = ((TOP_MARGIN + PANEL_MAX_H + TAIL_H + TIP_GAP) * l.sf) as i32;
-        // monitor = "follow": her own hops stay on the monitor he works on (visits go to his
-        // window anyway).
-        let follow = h.settings.brain.monitor == crate::settings::MonitorPolicy::Follow && matches!(plan.goal, Goal::Passive { .. } | Goal::Leave);
-        let only = if follow { places::follow_area(&monitors, focused, cursor) } else { None };
-        let world = World {
-            stack: &stack,
-            eligible: &eligible,
-            focused,
-            areas: &areas,
-            monitors: &monitors,
-            fullscreen: &fullscreen,
-            cursor,
-            her,
+        // monitor = "follow": roams, perches and teleports prefer the cursor's monitor
+        // (places::CURSOR_MONITOR_P); leaving his window stays on his monitor; small hops are
+        // local; visits go to his window anyway.
+        let follow = h.settings.brain.monitor == crate::settings::MonitorPolicy::Follow;
+        let cursor_area = areas.iter().position(|a| a.contains(cursor.0, cursor.1)).or_else(|| monitors.iter().position(|m| m.contains(cursor.0, cursor.1)));
+        let only = if follow && *goal == Goal::Leave { places::follow_area(&monitors, focused, cursor) } else { None };
+        let prefer = if follow && matches!(goal, Goal::Passive { .. } | Goal::Explore | Goal::Rescue | Goal::Follow) { cursor_area } else { None };
+        Some(WorldBuf { stack, eligible, areas, monitors, fullscreen, focused, cursor, her, senses_fs, hud_h, only, prefer })
+    }
+
+    fn world<'a>(&'a self, b: &'a WorldBuf) -> Option<World<'a>> {
+        let h = self.brain.as_ref()?;
+        let l = self.layout;
+        Some(World {
+            stack: &b.stack,
+            eligible: &b.eligible,
+            focused: b.focused,
+            areas: &b.areas,
+            monitors: &b.monitors,
+            fullscreen: &b.fullscreen,
+            cursor: b.cursor,
+            her: b.her,
             boxes: h.boxes,
             contact: self.contact_or_default(true),
             margin: self.edge_margin(),
@@ -824,9 +890,42 @@ impl Avatar {
             cover_max_pct: h.settings.brain.cover_max_pct,
             last_wins: &h.last_wins,
             last_kind: h.last_kind,
-            hud_h,
-            only,
-        };
+            hud_h: b.hud_h,
+            only: b.only,
+            prefer: b.prefer,
+        })
+    }
+
+    fn brain_move(&mut self, plan: MovePlan, now: Instant) {
+        let t = self.brain.as_ref().map_or(0.0, |h| h.bnow(now) - h.brain.start());
+        let moving = self.teleport.is_some() || self.rag.is_some() || self.brain.as_ref().is_some_and(|h| h.moving() || h.flight.is_some());
+        // A passive move waits for the emote on screen to finish (the sulk plays out first);
+        // a closed perch or a lost workspace can't wait (she'd hang in the air).
+        let urgent = matches!(plan.goal, Goal::Rescue | Goal::Follow);
+        let emoting = !matches!(plan.goal, Goal::Active { .. }) && !urgent && self.anim.busy();
+        if (moving || emoting) && self.press.is_none() && !self.quitting {
+            // Still landing from the last one: this one goes next (a sulk's far move after
+            // the leave, a summon after a passive hop).
+            if let Some(h) = &mut self.brain {
+                h.next_plan = Some(plan);
+            }
+            return;
+        }
+        // The last check: a bubble, a field, the Line, a prompt, the menu or a drag holds every
+        // move but a summon or leaving his window (the brain reads `busy` only at its polls).
+        let busy = self.brain_busy();
+        let held = crate::brain::held_by(&busy, &plan);
+        if self.press.is_some() || self.quitting || self.brain.as_ref().is_some_and(|h| h.fs != FsHide::Shown) || held.is_some() {
+            if let Some(h) = &mut self.brain {
+                h.write(serde_json::json!({ "t": t, "k": "fail", "busy": true, "why": plan.why, "held_by": held }));
+            }
+            self.brain_feed(BrainEvent::MoveFailed { busy: true, why: plan.why }, now);
+            self.move_failed_fallback(&plan, now);
+            return;
+        }
+        let Some(wb) = self.world_buf(&plan.goal) else { return };
+        let Some(world) = self.world(&wb) else { return };
+        let Some(h) = &self.brain else { return };
         let mut rng = h.rng.clone();
         let res = places::resolve(&plan.goal, &world, &mut rng);
         let dnd = h.brain.dnd_left(h.bnow(now)).is_some();
@@ -836,7 +935,13 @@ impl Avatar {
             Goal::Leave => "leave".into(),
             Goal::Active { why: Why::Attention, .. } => "bid".into(),
             Goal::Active { why: Why::Summon(k), .. } => format!("summon_{k:?}").to_lowercase(),
+            Goal::Hop { kind, .. } => format!("hop_{}", kind.key()),
+            Goal::Explore => "explore".into(),
+            Goal::FocusEdge => "focus_edge".into(),
+            Goal::Rescue => "rescue".into(),
+            Goal::Follow => "follow".into(),
         };
+        let (stack, areas, monitors, focused, cursor, her, senses_fs, only, prefer) = (&wb.stack, &wb.areas, &wb.monitors, wb.focused, wb.cursor, wb.her, wb.senses_fs, wb.only, wb.prefer);
         let spot = match res {
             Ok(s) => s,
             Err(why) => {
@@ -845,20 +950,29 @@ impl Avatar {
                     h.rng = rng;
                     h.write(serde_json::json!({ "t": t, "k": "fail", "goal": goal_s, "why": why }));
                 }
-                self.brain_feed(BrainEvent::MoveFailed { busy: false }, now);
+                self.brain_feed(BrainEvent::MoveFailed { busy: false, why: plan.why }, now);
+                self.move_failed_fallback(&plan, now);
                 return;
             }
         };
         // The first arrival that fits the distance.
+        let l = self.layout;
         let (dx, dy) = (spot.anchor.0 - her.anchor.0, spot.anchor.1 - her.anchor.1);
         let dist = ((dx * dx + dy * dy) as f32).sqrt() / l.sf;
         let ground_kind = |k: SpotKind| matches!(k, SpotKind::Floor | SpotKind::Beside | SpotKind::FloorSit);
+        // A leap: a small hop between any two spots (edge, floor) within reach.
+        let can_leap = h.rest != Some(RestPose::Nap)
+            && matches!(self.placement, Placement::Ground | Placement::Perch { .. })
+            && matches!(spot.kind, SpotKind::Edge { .. } | SpotKind::SitEdge { .. } | SpotKind::Floor | SpotKind::Beside)
+            && (dx.abs() as f32) / l.sf <= places::HOP_MAX + 1.0
+            && (-dy as f32) / l.sf <= places::HOP_UP_MAX + 1.0;
         let can_hop = self.placement == Placement::Ground
             && h.rest.is_none()
             && ground_kind(spot.kind)
             && dy.abs() <= 4
             && (dx.abs() as f32) / l.sf <= moves::HOP_ARRIVAL_MAX;
         let active = matches!(plan.goal, Goal::Active { .. });
+        let small = matches!(plan.goal, Goal::Hop { .. });
         let pose_kind = |k: SpotKind| matches!(k, SpotKind::Hang { .. } | SpotKind::Cling { .. } | SpotKind::Peek);
         let arrival = plan
             .arrivals
@@ -867,11 +981,21 @@ impl Avatar {
             .find(|a| match a {
                 Arrival::Teleport => true,
                 Arrival::Glitch => dist <= 1400.0,
-                Arrival::Hop => can_hop,
+                Arrival::Hop => can_hop || ((small || plan.why == "focus") && can_leap),
                 Arrival::DropIn => ground_kind(spot.kind) || pose_kind(spot.kind),
                 Arrival::Drift => false,
             })
-            .unwrap_or(Arrival::Teleport);
+            .unwrap_or(if small { Arrival::Hop } else { Arrival::Teleport });
+        if small && !can_leap {
+            // A small hop that can't be leapt (from a float or a rest pose): not now.
+            if let Some(h) = &mut self.brain {
+                h.rng = rng;
+                h.write(serde_json::json!({ "t": t, "k": "fail", "goal": goal_s, "why": ["no_leap"] }));
+            }
+            self.brain_feed(BrainEvent::MoveFailed { busy: false, why: plan.why }, now);
+            return;
+        }
+        let leap = arrival == Arrival::Hop && !can_hop && can_leap;
         // Passive transports by distance (§4.1): float to float drifts; along the same floor
         // within SCOOT_MAX she hop-scoots half the time, and always under MIN_TELEPORT.
         // `hop = 0` in settings: she never hops (no scoot either).
@@ -883,7 +1007,8 @@ impl Avatar {
             && dy.abs() <= 4
             && (dx.abs() as f32) / l.sf <= moves::SCOOT_MAX
             && dist >= moves::HOP_DX.0;
-        let arrival = if active {
+        let reactive = matches!(plan.goal, Goal::Rescue | Goal::Follow | Goal::FocusEdge);
+        let arrival = if active || small || reactive {
             arrival
         } else if self.placement == Placement::Float && spot.kind == SpotKind::Float && dist <= 600.0 {
             Arrival::Drift
@@ -894,12 +1019,12 @@ impl Avatar {
         };
         let cover_ok = |s: &Spot| s.cover_pct <= world.cover_max_pct + 1e-9;
         let line = serde_json::json!({
-            "t": t, "k": "move", "goal": goal_s, "approach": spot.approach.map(Approach::key), "arrival": arrival.key(),
+            "t": t, "k": "move", "goal": goal_s, "approach": spot.approach.map(Approach::key), "arrival": if leap { "leap" } else { arrival.key() },
             "spot": spot.kind.key(), "anchor": [spot.anchor.0, spot.anchor.1], "body": rect_json(&spot.body),
             "cursor": [cursor.0, cursor.1], "focus": focused.as_ref().map(rect_json), "cover_pct": (spot.cover_pct * 100.0).round() / 100.0,
             "cover_ok": cover_ok(&spot), "fs": senses_fs, "dnd": dnd, "enabled": enabled, "area": rect_json(&areas[spot.area.min(areas.len() - 1)]),
             "clear_px": (CURSOR_CLEAR_LOGICAL * l.sf).round(), "from": [her.anchor.0, her.anchor.1],
-            "why": plan.why, "only": only,
+            "why": plan.why, "only": only, "prefer": prefer,
         });
         // One line per move on stderr too (rare): what moved her, from where to where.
         elog!(
@@ -910,7 +1035,7 @@ impl Avatar {
             her.anchor.1,
             spot.anchor.0,
             spot.anchor.1,
-            arrival.key()
+            if leap { "leap" } else { arrival.key() }
         );
         // Facing (`[mirror] self`): the way she goes, then what she cares about once there.
         let own = self.mirror_cfg.own;
@@ -929,6 +1054,7 @@ impl Avatar {
                 _ => None,
             })
         };
+        let her_anchor = her.anchor;
         if let Some(r) = travel {
             self.face(r, "travel", now, true);
         }
@@ -937,7 +1063,7 @@ impl Avatar {
         h.write(line);
         let approach = if active { spot.approach } else { None };
         let summon_prompt = matches!(plan.goal, Goal::Active { why: Why::Summon(crate::brain::SummonKind::Prompt(_)), .. });
-        h.flight = Some(InFlight { approach, arrival, spot, active, summon_prompt, face });
+        h.flight = Some(InFlight { approach, arrival, spot, active, summon_prompt, face, why: plan.why });
         // Any move ends the bid marker and a sulk sit.
         h.marker = None;
         h.sulk_sit = false;
@@ -951,8 +1077,13 @@ impl Avatar {
         if let Some(h) = &mut self.brain {
             h.rest = None;
         }
-        // Passive moves (roams, leaving his window) teleport quietly; bids and summons don't.
-        let quiet = !active;
+        if leap {
+            self.start_leap(her_anchor, &spot, origin, place, plan.why == "startle_drag", now);
+            return;
+        }
+        // Passive moves (roams, leaving his window) teleport quietly; bids, summons and a
+        // closed perch's rescue don't (the plain red bolt, LOCKED #1).
+        let quiet = !active && plan.why != "perch_closed";
         match arrival {
             Arrival::Hop => {
                 let mut rng = Rng::new(self.rng.next());
@@ -1225,7 +1356,7 @@ impl Avatar {
         if let Some(r) = f.face {
             self.face(r, "arrive", now, false);
         }
-        self.brain_feed(BrainEvent::Arrived(Arrived { approach: f.approach, arrival: f.arrival, covering }), now);
+        self.brain_feed(BrainEvent::Arrived(Arrived { approach: f.approach, arrival: f.arrival, covering, why: f.why }), now);
         if f.summon_prompt {
             self.summon_landed(now);
         }
@@ -1293,6 +1424,287 @@ impl Avatar {
         let Some(t0) = self.brain.as_ref().and_then(|h| h.pulse) else { return false };
         let d = now.saturating_duration_since(t0);
         d < PULSE_FOR && (d.as_millis() / PULSE_HALF_MS).is_multiple_of(2) && self.prompt_ui.as_ref().is_some_and(|p| !p.dismissed)
+    }
+
+    // ---- lively: small hops, reactions, the screen ------------------------------------------------
+
+    /// A move that couldn't run: a closed perch's rescue or a stranded workspace follow
+    /// falls instead (she'd be sitting on nothing).
+    fn move_failed_fallback(&mut self, plan: &MovePlan, now: Instant) {
+        if matches!(plan.why, "perch_closed" | "workspace")
+            && let Placement::Perch { win, .. } = self.placement
+            && self.x11.toplevel_rect(win).is_none()
+        {
+            self.fall("perch_gone", now);
+        }
+    }
+
+    /// Start a small hop from `from` (her anchor: feet or seat) to the spot: standing frames
+    /// in the air, her feet along the arc, then she settles into the spot's pose.
+    fn start_leap(&mut self, from: (i32, i32), spot: &Spot, origin: (i32, i32), place: Placement, startled: bool, now: Instant) {
+        let l = self.layout;
+        let sf = l.sf;
+        self.x11.set_target(0);
+        self.hop = None;
+        self.menu = None;
+        let to = spot.anchor;
+        let leap = moves::Leap { from: (from.0 as f32 / sf, from.1 as f32 / sf), to: (to.0 as f32 / sf, to.1 as f32 / sf) };
+        self.placement = Placement::Ground;
+        if let Some(h) = &mut self.brain {
+            h.leap = Some(LeapMove { leap, t0: now, origin, place, crouched: false, startled });
+        }
+        self.set_origin((from.0 - l.ground_x, from.1 - l.ground_y));
+        self.relayer(now);
+        if startled {
+            self.glitch.get_or_insert(Glitch::new(GlitchKind::Burst, now, self.rng.next()));
+        }
+    }
+
+    fn step_leap(&mut self, now: Instant) -> bool {
+        let Some(h) = &mut self.brain else { return false };
+        let Some(lp) = &mut h.leap else { return false };
+        let l = self.layout;
+        let ms = now.saturating_duration_since(lp.t0).as_millis() as u32;
+        if !lp.crouched {
+            lp.crouched = true;
+            let startled = lp.startled;
+            let crouch = self.pack.behaviour.brain.hop_crouch.as_ref().and_then(|c| self.pack.index.get(c)).copied();
+            let air = lp.leap.air_ms();
+            let mut seq: Vec<(usize, u32)> = crouch.map(|c| vec![(c, moves::HOP_CROUCH_MS)]).unwrap_or_default();
+            // Startled: wide-eyed in the air.
+            if startled {
+                seq.extend(self.pack.flatten(&[crate::pack::Step::Hold { frame: "surprised".into(), ms: air + moves::HOP_LAND_MS }]));
+            }
+            if !seq.is_empty() {
+                self.anim.play(seq, now);
+            }
+        }
+        let Some(h) = &mut self.brain else { return false };
+        let Some(lp) = &mut h.leap else { return false };
+        let (x, y) = lp.leap.at(ms);
+        let feet = ((x * l.sf).round() as i32, (y * l.sf).round() as i32);
+        if lp.leap.done(ms) {
+            let (origin, place) = (lp.origin, lp.place);
+            h.leap = None;
+            self.squash = Some(now);
+            self.arrive(origin, place, now);
+            if place == Placement::Ground {
+                self.home = self.ground();
+                state::save_ground(self.ground());
+            }
+            return true;
+        }
+        self.set_origin((feet.0 - l.ground_x, feet.1 - l.ground_y));
+        true
+    }
+
+    /// A reaction in place (the brain checked the gate and the rate limits).
+    fn brain_react(&mut self, r: crate::brain::React, now: Instant) {
+        use crate::brain::React;
+        if r == React::Fall {
+            if matches!(self.placement, Placement::Perch { .. }) {
+                self.fall("perch_gone", now);
+            }
+            return;
+        }
+        // Never over a move, a drag, a hidden body or a panel.
+        if self.hidden || self.parked.is_some() || self.teleport.is_some() || self.rag.is_some() || self.press.is_some() || self.brain_in_flight() || self.panel_up() {
+            return;
+        }
+        let c = self.brain_cursor();
+        let (gx, _) = self.ground();
+        let right = c.0 > gx;
+        let standing = self.standing() && !self.anim.busy();
+        let what = match r {
+            React::Look => {
+                if self.mirror_cfg.own {
+                    self.face(right, "look", now, false);
+                }
+                if standing {
+                    let seq = self.pack.flatten(&self.resolve_steps(&[crate::pack::Step::Clip("@look".into())]));
+                    if !seq.is_empty() {
+                        self.anim.play(seq, now);
+                    }
+                }
+                "look"
+            }
+            React::Startle => {
+                self.glitch.get_or_insert(Glitch::new(GlitchKind::Burst, now, self.rng.next()));
+                if self.hop_allowed() {
+                    self.hop_or_squash(now);
+                } else {
+                    self.squash = Some(now);
+                }
+                if standing {
+                    let seq = self.pack.flatten(&[crate::pack::Step::Hold { frame: "surprised".into(), ms: 600 }]);
+                    if !seq.is_empty() {
+                        self.anim.play(seq, now);
+                    }
+                }
+                "startle"
+            }
+            React::Lean => {
+                if self.mirror_cfg.own {
+                    self.face(right, "look", now, false);
+                }
+                let seq = if standing { self.pack.flatten(&[crate::pack::Step::Hold { frame: "lean_in-flirty".into(), ms: 2200 }]) } else { Vec::new() };
+                if seq.is_empty() {
+                    self.hearts = Some((now, self.head_point()));
+                } else {
+                    self.anim.play(seq, now);
+                }
+                "lean"
+            }
+            React::Fall => unreachable!(),
+        };
+        if let Some(h) = &mut self.brain {
+            let t = h.bnow(now) - h.brain.start();
+            h.write(serde_json::json!({ "t": t, "k": "react", "what": what, "cursor": [c.0, c.1] }));
+        }
+    }
+
+    /// Focus, workspace and pointer events from the X watchers.
+    pub(super) fn brain_watch(&mut self, ev: WatchEvent, now: Instant) {
+        use crate::brain::Screen;
+        if self.brain.is_none() || !self.loaded {
+            return;
+        }
+        match ev {
+            WatchEvent::Focus => {
+                let f = self.brain_focused().map(|r| r.id);
+                let Some(h) = &mut self.brain else { return };
+                if f.is_none() || f == h.focus_seen {
+                    return;
+                }
+                let first = h.focus_seen.is_none();
+                h.focus_seen = f;
+                // A workspace switch moves the focus too: the workspace rule has it.
+                if first || h.desk_at.is_some_and(|d| now.duration_since(d) < Duration::from_millis(1500)) {
+                    return;
+                }
+                self.brain_feed(BrainEvent::Screen(Screen::Focus), now);
+            }
+            WatchEvent::Desktop => {
+                if let Some(h) = &mut self.brain {
+                    h.desk_at = Some(now);
+                    // Where she is, once a perch that went with the old workspace has had its
+                    // grace (edges::PERCH_GONE_GRACE) and the WM has settled.
+                    h.desk_check = Some(now + edges::PERCH_GONE_GRACE + Duration::from_millis(150));
+                }
+            }
+            WatchEvent::Pointer(p) => {
+                let s = match p {
+                    crate::platform::x11::PointerEv::Near => Screen::CursorNear,
+                    crate::platform::x11::PointerEv::Swipe(v) => Screen::CursorSwipe { speed: v / self.layout.sf },
+                    crate::platform::x11::PointerEv::Hover => Screen::CursorHover,
+                };
+                self.brain_feed(BrainEvent::Screen(s), now);
+            }
+            _ => {}
+        }
+    }
+
+    /// A beat after a workspace switch: she follows if she isn't on the monitor he works on.
+    fn desk_settled(&mut self, now: Instant) {
+        if let Some(h) = &mut self.brain {
+            h.desk_check = None;
+        }
+        // Mid-move, carried, or her perch's own verdict is still out: that decides.
+        if self.teleport.is_some() || self.rag.is_some() || self.press.is_some() || self.brain_in_flight() || self.perch_gone.is_some() {
+            return;
+        }
+        let (areas, monitors) = self.rag_areas();
+        let her = self.her_spot(&areas, &monitors);
+        let cursor = self.brain_cursor();
+        let his = areas.iter().position(|a| a.contains(cursor.0, cursor.1)).or_else(|| places::follow_area(&monitors, self.brain_focused(), cursor));
+        let away = his.is_some_and(|i| i != her.area);
+        if let Some(h) = &mut self.brain {
+            let t = h.bnow(now) - h.brain.start();
+            h.write(serde_json::json!({ "t": t, "k": "desk", "her_area": her.area, "his_area": his, "cursor": [cursor.0, cursor.1], "away": away }));
+        }
+        self.brain_feed(BrainEvent::Screen(crate::brain::Screen::Workspace { away, stranded: false }), now);
+    }
+
+    /// Her perch went away for good (past the grace): closed (another window's top or the
+    /// fall, the brain decides), or gone with the workspace he left (she follows him).
+    pub(super) fn brain_perch_gone(&mut self, win: u32, now: Instant) {
+        let Some(h) = &self.brain else {
+            self.fall("perch_gone", now);
+            return;
+        };
+        let switched = h.desk_at.is_some_and(|d| now.duration_since(d) < Duration::from_millis(1500));
+        let exists = self.x11.window_exists(win);
+        let s = if switched && exists {
+            elog!("synaps-avatar: perch 0x{win:x} left with the workspace: she follows");
+            if let Some(h) = &mut self.brain {
+                h.desk_check = None;
+            }
+            crate::brain::Screen::Workspace { away: true, stranded: true }
+        } else {
+            let wb = self.world_buf(&Goal::Rescue);
+            let res = wb.as_ref().and_then(|b| self.world(b)).map(|w| places::rescue_target(&w));
+            let target = matches!(res, Some(Ok(())));
+            let why = match &res {
+                Some(Err(why)) => why.iter().map(|(k, b)| format!("{k}:{b:?}")).collect::<Vec<_>>().join(" "),
+                _ => String::new(),
+            };
+            elog!(
+                "synaps-avatar: perch 0x{win:x} closed ({}): teleport or fall{}",
+                if target { "another window has room" } else { "no other window with room: falls" },
+                if why.is_empty() { String::new() } else { format!(" [{why}]") }
+            );
+            crate::brain::Screen::PerchClosed { target }
+        };
+        self.brain_feed(BrainEvent::Screen(s), now);
+        // Nothing decided (the brain is off, say): she mustn't stay up on nothing.
+        let decided = self.teleport.is_some() || self.brain_in_flight() || self.rag.is_some() || !matches!(self.placement, Placement::Perch { win: w, .. } if w == win);
+        if !decided && self.brain.as_ref().is_some_and(|h| h.next_plan.is_none()) {
+            self.fall("perch_gone", now);
+        }
+    }
+
+    /// Her perch moved (she rides it): dragged fast, the brain may startle her off it.
+    pub(super) fn brain_perch_moved(&mut self, r: &WinRect, now: Instant) {
+        let Some(h) = &mut self.brain else { return };
+        let prev = h.perch_seen.filter(|p| p.0 == r.id);
+        h.perch_seen = Some((r.id, now, r.x, r.y));
+        let Some((_, t0, x0, y0)) = prev else { return };
+        let dt = now.saturating_duration_since(t0).as_secs_f32();
+        if !(0.008..0.25).contains(&dt) {
+            return;
+        }
+        let v = ((((r.x - x0).pow(2) + (r.y - y0).pow(2)) as f32).sqrt() / dt) / self.layout.sf;
+        let told = h.drag_told.is_some_and(|t| now.duration_since(t) < Duration::from_millis(800));
+        if v >= h.brain.tuning.drag_speed && !told {
+            h.drag_told = Some(now);
+            self.brain_feed(BrainEvent::Screen(crate::brain::Screen::PerchDragged { speed: v }), now);
+        }
+    }
+
+    /// Her body box and arming for the pointer watcher (only when they change).
+    pub(super) fn sync_pointer_watch(&mut self) {
+        let armed = self.loaded
+            && !self.hidden
+            && self.parked.is_none()
+            && self.brain.as_ref().is_some_and(|h| h.brain.enabled() && h.fs == FsHide::Shown && h.brain.dnd_left(h.bnow(Instant::now())).is_none());
+        let bx = if armed {
+            let fi = self.anim.frame();
+            self.frame_or_default(fi).and_then(|f| {
+                let l = self.layout;
+                let cols: Vec<usize> = f.profile.iter().enumerate().filter(|(_, y)| **y != i16::MAX).map(|(x, _)| x).collect();
+                let (c0, c1) = (*cols.first()? as i32, *cols.last()? as i32);
+                let (bx, by) = (self.applied.0 + l.avatar_x, self.applied.1 + l.avatar_y);
+                Some(WinRect::new(bx + c0, by + f.top, c1 - c0 + 1, f.bottom - f.top))
+            })
+        } else {
+            None
+        };
+        let Some(h) = &mut self.brain else { return };
+        if h.watch_box == Some((bx, armed)) {
+            return;
+        }
+        h.watch_box = Some((bx, armed));
+        self.x11.set_pointer_watch(bx, armed);
     }
 
     // ---- emotes, hide ---------------------------------------------------------------------------
@@ -2037,6 +2449,7 @@ impl Avatar {
             "view_ticks": self.view_ticks,
             "renders": self.renders,
             "moves": self.moves,
+            "body": h.watch_box.and_then(|w| w.0).as_ref().map(rect_json),
             "overrides": { "focus": format!("{:?}", h.ov.focus), "cursor": h.ov.cursor, "idle": h.ov.idle.map(|i| i.1),
                            "fullscreen": h.ov.fullscreen, "arena": h.ov.arena.as_ref().map(rect_json), "windows": h.ov.windows },
         });

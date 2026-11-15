@@ -5,7 +5,7 @@
 //! anchor (feet, seat, grip), so a spot's `body` is exactly what will cover the screen.
 
 use crate::anim::Rng;
-use crate::brain::{Approach, Goal, Why};
+use crate::brain::{Approach, Goal, HopKind, Why};
 use crate::edges::{self, WinRect};
 
 /// The pointer is never covered: the body box clears it by this (logical px).
@@ -22,6 +22,26 @@ pub const PEEK_CURSOR: f32 = 600.0;
 pub const BESIDE_MAX: f32 = 200.0;
 /// Capri's hands either side of her hang grip, as a fraction of the body width.
 const HANG_HAND: f32 = 0.16;
+/// Roams, perches and teleports (the window-close one too) land on the monitor the cursor is
+/// on this often, on the other monitor(s) the rest (Haseeb 22:59). A monitor with no valid
+/// target hands over to the others.
+pub const CURSOR_MONITOR_P: f64 = 0.8;
+/// Exploring (he has been idle a while): the cursor's monitor only this often.
+pub const EXPLORE_MONITOR_P: f64 = 0.5;
+/// The passive kinds (edge, floor, floor sit, float) and their weights: sitting on a window's
+/// top edge is her favourite (Haseeb 22:55), and the only kind that may follow itself (on
+/// another window).
+const PASSIVE_KINDS: [(u8, f64); 4] = [(0, 0.70), (1, 0.10), (2, 0.10), (3, 0.10)];
+/// A small hop (micro, startle, dodge) reaches at most this far across (logical px), at least
+/// `HOP_MIN`. Down to the floor it drops any height; up onto a window top (the "and back")
+/// it leaps at most `HOP_UP_MAX`.
+pub const HOP_MAX: f32 = 300.0;
+pub const HOP_MIN: f32 = 60.0;
+pub const HOP_UP_MAX: f32 = 1400.0;
+/// He is typing: a micro-hop ends at least this far from his window and never nearer to it.
+pub const TYPING_CLEAR: f32 = 200.0;
+/// A dodge ends at least this much farther from the pointer (logical px).
+pub const DODGE_GAIN: f32 = 100.0;
 
 /// Body boxes (relative to each pose's anchor point) of every pose she can be placed in.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -139,13 +159,17 @@ pub struct World<'a> {
     pub floor_pad: i32,
     pub sf: f32,
     pub cover_max_pct: f64,
-    /// Windows she sat on lately (not again).
+    /// Windows she sat on lately: the last one isn't sat on again right away (a roam goes
+    /// to another window's top).
     pub last_wins: &'a [u32],
     pub last_kind: Option<SpotKind>,
     /// Summons: room the HUD needs above her body (prompt panel, reply).
     pub hud_h: i32,
-    /// monitor = "follow": passive spots only in this area (his monitor).
+    /// Passive spots only in this area (leaving his window: his monitor).
     pub only: Option<usize>,
+    /// The cursor's area: roams, perches and teleports go there `CURSOR_MONITOR_P` of the
+    /// time (None: `pick_area`'s old 70/30 around her, monitor = "any").
+    pub prefer: Option<usize>,
 }
 
 /// The monitor he is working on: the focused window's (most of it), else the cursor's.
@@ -306,32 +330,84 @@ pub fn guard(w: &World, s: &Spot) -> Result<(), Block> {
 /// Resolve a goal to a spot: the passive kinds, or the approaches in order then the beside
 /// chain. Err: why each try failed (for the decision log).
 pub fn resolve(goal: &Goal, w: &World, rng: &mut Rng) -> Result<Spot, Vec<(String, Block)>> {
+    let roam = Roam { far: false, leaving: false, min_move: w.d(MIN_TELEPORT), skip_recent: true, kinds: &PASSIVE_KINDS, retry_last: true };
     match goal {
         // Far (after a sulk or a fling) if there is such a spot, else just away.
-        Goal::Passive { far: true } => passive(w, true, false, rng).or_else(|mut why| {
-            passive(w, false, false, rng).map_err(|more| {
-                why.extend(more);
-                why
+        Goal::Passive { far: true } => by_monitor(w, CURSOR_MONITOR_P, rng, |w, rng| {
+            passive(w, &Roam { far: true, ..roam }, rng).or_else(|mut why| {
+                passive(w, &roam, rng).map_err(|more| {
+                    why.extend(more);
+                    why
+                })
             })
         }),
-        Goal::Passive { far: false } => passive(w, false, false, rng),
-        Goal::Leave => passive(w, false, true, rng),
+        Goal::Passive { far: false } => by_monitor(w, CURSOR_MONITOR_P, rng, |w, rng| passive(w, &roam, rng)),
+        Goal::Explore => by_monitor(w, EXPLORE_MONITOR_P, rng, |w, rng| passive(w, &roam, rng)),
+        Goal::Leave => passive(w, &Roam { leaving: true, min_move: w.d(80.0), ..roam }, rng),
         Goal::Active { why, approaches } => active(w, *why, approaches, rng),
+        Goal::Hop { kind, away } => hop(w, *kind, *away, rng),
+        Goal::FocusEdge => focus_edge(w),
+        // Any other window's top (not his, not the one that closed: it's gone from the stack).
+        Goal::Rescue => by_monitor(w, CURSOR_MONITOR_P, rng, |w, rng| passive(w, &Roam { min_move: 0, skip_recent: false, kinds: &[(0, 1.0)], retry_last: false, ..roam }, rng)),
+        // Follow him: his monitor first, a window top first.
+        Goal::Follow => by_monitor(w, 1.0, rng, |w, rng| passive(w, &Roam { min_move: 0, kinds: &[(0, 0.8), (1, 0.1), (2, 0.1)], retry_last: false, ..roam }, rng)),
     }
+}
+
+/// A rescue target exists: another visible window has room on top for her (the window-close
+/// teleport, else she falls).
+pub fn rescue_target(w: &World) -> Result<(), Vec<(String, Block)>> {
+    resolve(&Goal::Rescue, w, &mut Rng::new(0x5eed)).map(|_| ())
+}
+
+/// The monitor preference: the cursor's area with probability `p`, else one of the others;
+/// one with no valid target hands over to the rest (the others, then the cursor's).
+fn by_monitor(w: &World, p: f64, rng: &mut Rng, f: impl Fn(&World, &mut Rng) -> Result<Spot, Vec<(String, Block)>>) -> Result<Spot, Vec<(String, Block)>> {
+    let n = w.areas.len();
+    let Some(pref) = w.prefer.filter(|&i| i < n && n > 1 && w.only.is_none()) else { return f(w, rng) };
+    let mut others: Vec<usize> = (0..n).filter(|&i| i != pref).collect();
+    for i in (1..others.len()).rev() {
+        others.swap(i, rng.pick(i + 1));
+    }
+    let order: Vec<usize> = if (rng.range(0.0, 1.0) as f64) < p { std::iter::once(pref).chain(others).collect() } else { others.into_iter().chain([pref]).collect() };
+    let mut why = Vec::new();
+    for i in order {
+        match f(&World { only: Some(i), ..w.clone() }, rng) {
+            Ok(s) => return Ok(s),
+            Err(e) => why.extend(e),
+        }
+    }
+    Err(why)
 }
 
 // ---- passive -------------------------------------------------------------------------
 
-fn passive(w: &World, far: bool, leaving: bool, rng: &mut Rng) -> Result<Spot, Vec<(String, Block)>> {
+/// How a passive spot is chosen.
+#[derive(Clone, Copy)]
+struct Roam<'k> {
+    /// ≥ `FAR_PX` from the cursor, not her window (after a sulk or a fling).
+    far: bool,
+    /// Off his window, to the floor (after a visit that covered it).
+    leaving: bool,
+    /// At least this far from where she is (device px).
+    min_move: i32,
+    /// Not the windows she sat on last.
+    skip_recent: bool,
+    kinds: &'k [(u8, f64)],
+    /// Nothing else fits: the kind she had last time (roams only).
+    retry_last: bool,
+}
+
+fn passive(w: &World, o: &Roam, rng: &mut Rng) -> Result<Spot, Vec<(String, Block)>> {
+    let (far, leaving, min_move) = (o.far, o.leaving, o.min_move);
     let mut why = Vec::new();
-    let kinds: [(u8, f64); 4] = [(0, 0.40), (1, 0.25), (2, 0.20), (3, 0.15)];
+    // The kind she just had isn't repeated, except the window top (another window's).
     let last = w.last_kind.map(|k| k.family());
-    let mut pool: Vec<(u8, f64)> = kinds.iter().copied().filter(|k| Some(k.0) != last).collect();
+    let mut pool: Vec<(u8, f64)> = o.kinds.iter().copied().filter(|k| k.0 == 0 || Some(k.0) != last).collect();
     if leaving {
         // Off his window to stand on the floor (a sulk or the satisfied beat plays there).
         pool = vec![(1, 1.0)];
     }
-    let min_move = if leaving { w.d(80.0) } else { w.d(MIN_TELEPORT) };
     let her_win = w.her.win();
     let ok = |s: &Spot| -> Result<(), Block> {
         if w.only.is_some_and(|i| s.area != i) {
@@ -366,7 +442,7 @@ fn passive(w: &World, far: bool, leaving: bool, rng: &mut Rng) -> Result<Spot, V
         }
         let kind = pool.remove(k).0;
         let cands = match kind {
-            0 => edge_spots(w, rng),
+            0 => edge_spots(w, o.skip_recent, rng),
             1 | 2 => floor_spots(w, kind == 2, rng),
             _ => float_spots(w, rng),
         };
@@ -382,6 +458,7 @@ fn passive(w: &World, far: bool, leaving: bool, rng: &mut Rng) -> Result<Spot, V
             pool = vec![(0, 0.5), (3, 0.5)];
         } else if pool.is_empty()
             && !leaving
+            && o.retry_last
             && let Some(l) = last.filter(|_| !why.iter().any(|w| w.0 == "last"))
         {
             // Nothing else fits: the same kind as last time beats not moving at all.
@@ -393,11 +470,17 @@ fn passive(w: &World, far: bool, leaving: bool, rng: &mut Rng) -> Result<Spot, V
     Err(why)
 }
 
-/// Sit spots on exposed edges of eligible windows other than the focused one and the last two.
-fn edge_spots(w: &World, rng: &mut Rng) -> Vec<Spot> {
+/// Sit spots on exposed edges of eligible windows other than the focused one (and the one she
+/// sat on last, and is on: `skip_recent`).
+fn edge_spots(w: &World, skip_recent: bool, rng: &mut Rng) -> Vec<Spot> {
     let mut out = Vec::new();
     let mut plats = edges::platforms(w.stack, w.eligible, w.contact, w.margin);
-    plats.retain(|p| Some(p.win) != w.focused.map(|f| f.id) && !w.last_wins.contains(&p.win));
+    let recent = |win: u32| skip_recent && (w.last_wins.last() == Some(&win) || w.her.win() == Some(win));
+    plats.retain(|p| Some(p.win) != w.focused.map(|f| f.id) && !recent(p.win));
+    if let Some(i) = w.only {
+        // Platforms on that monitor only (the rest would be refused anyway).
+        plats.retain(|p| w.area_of(p.seat_x.0.midpoint(p.seat_x.1), p.y) == i);
+    }
     // Shuffle.
     for i in (1..plats.len()).rev() {
         plats.swap(i, rng.pick(i + 1));
@@ -442,6 +525,196 @@ fn float_spots(w: &World, rng: &mut Rng) -> Vec<Spot> {
         }
     }
     out
+}
+
+// ---- small hops and reactions ------------------------------------------------------------
+
+/// A small hop (≤ `HOP_MAX` across, `HOP_UP_MAX` up, any drop), on her own monitor, under
+/// every passive rule (the guard, never over his window, the cursor clear).
+/// Micro: along her edge, to the next window over, down to the floor and back. Startle: off
+/// her window (the next one or the floor). Dodge: anywhere close, farther from the pointer.
+/// `away`: he is typing, keep away from his window.
+fn hop(w: &World, kind: HopKind, away: bool, rng: &mut Rng) -> Result<Spot, Vec<(String, Block)>> {
+    let her = w.her;
+    let (lo, hi) = (w.d(HOP_MIN) as i64, w.d(HOP_MAX) as i64);
+    let her_win = her.win();
+    let on_edge = her_win.is_some();
+    let gap = |a: &WinRect, f: &WinRect| -> f64 {
+        let dx = (f.x - a.right()).max(a.x - f.right()).max(0) as f64;
+        let dy = (f.y - a.bottom()).max(a.y - f.bottom()).max(0) as f64;
+        (dx * dx + dy * dy).sqrt()
+    };
+    let cursor_d = |b: &WinRect| (dist2(b, w.cursor.0, w.cursor.1) as f64).sqrt();
+    let ok = |s: &Spot| -> Result<(), Block> {
+        if s.area != her.area {
+            return Err(Block::OtherMonitor);
+        }
+        guard(w, s)?;
+        if s.covers_focus() && !w.focused.is_some_and(|f| w.floor_strip_ok(s, &f)) {
+            return Err(Block::FocusedInterior);
+        }
+        let (dx, dy) = ((s.anchor.0 - her.anchor.0) as i64, (s.anchor.1 - her.anchor.1) as i64);
+        if dx * dx + dy * dy < lo * lo || dx.abs() > hi || -dy > w.d(HOP_UP_MAX) as i64 {
+            return Err(Block::NoSpot);
+        }
+        if away && let Some(f) = w.focused {
+            // At least TYPING_CLEAR from his window, and never nearer to it than now.
+            let (gs, gh) = (gap(&s.body, &f), gap(&her.body, &f));
+            if gs < (w.d(TYPING_CLEAR) as f64).min(gh) - 1.0 {
+                return Err(Block::FocusedInterior);
+            }
+        }
+        if kind == HopKind::Dodge && cursor_d(&s.body) < cursor_d(&her.body) + w.d(DODGE_GAIN) as f64 {
+            return Err(Block::Cursor);
+        }
+        Ok(())
+    };
+    // Families: 0 along her edge, 1 the next window over, 2 the floor (down, or along it).
+    let fams: Vec<(u8, f64)> = match (kind, on_edge) {
+        (HopKind::Micro, true) => vec![(0, 0.5), (1, 0.35), (2, 0.15)],
+        // On the floor: back up onto a window top (her favourite) more often than along.
+        (HopKind::Micro, false) => vec![(1, 0.75), (2, 0.25)],
+        // After a reaction too, a window top before the floor (Haseeb 22:55).
+        (HopKind::Startle, _) => vec![(1, 0.65), (2, 0.35)],
+        (HopKind::Dodge, true) => vec![(0, 0.4), (1, 0.4), (2, 0.2)],
+        (HopKind::Dodge, false) => vec![(1, 0.65), (2, 0.35)],
+    };
+    let mut pool = fams;
+    let mut why = Vec::new();
+    while !pool.is_empty() {
+        let total: f64 = pool.iter().map(|p| p.1).sum();
+        let mut r = rng.range(0.0, 1.0) as f64 * total;
+        let mut k = pool.len() - 1;
+        for (i, p) in pool.iter().enumerate() {
+            if r < p.1 {
+                k = i;
+                break;
+            }
+            r -= p.1;
+        }
+        let fam = pool.remove(k).0;
+        let mut cands = match fam {
+            0 => along_spots(w, rng),
+            1 => near_edge_spots(w, rng),
+            _ => near_floor_spots(w, on_edge, rng),
+        };
+        // A dodge takes the farthest from the pointer; the rest are already shuffled.
+        if kind == HopKind::Dodge {
+            cands.sort_by(|a, b| cursor_d(&b.body).total_cmp(&cursor_d(&a.body)));
+        }
+        let mut last = Block::NoSpot;
+        for s in cands {
+            match ok(&s) {
+                Ok(()) => return Ok(s),
+                Err(b) => last = b,
+            }
+        }
+        why.push((["along", "next_window", "floor"][fam as usize].to_string(), last));
+    }
+    Err(why)
+}
+
+/// Seats along the edge she sits on, HOP_MIN..HOP_MAX either side.
+fn along_spots(w: &World, rng: &mut Rng) -> Vec<Spot> {
+    let Some(win) = w.her.win() else { return Vec::new() };
+    let Some(i) = w.stack.iter().position(|r| r.id == win) else { return Vec::new() };
+    let (lo, hi) = (w.d(HOP_MIN), w.d(HOP_MAX));
+    let x0 = w.her.anchor.0;
+    let mut out = Vec::new();
+    for (a, b) in edges::seat_ranges(w.stack, i, w.contact, w.margin) {
+        for _ in 0..6 {
+            let d = lo + rng.pick((hi - lo).max(1) as usize) as i32;
+            for x in [x0 - d, x0 + d] {
+                if (a..=b).contains(&x) {
+                    out.push(w.spot(SpotKind::Edge { win }, (x, w.stack[i].y), w.boxes.sit, None));
+                }
+            }
+        }
+    }
+    for i in (1..out.len()).rev() {
+        out.swap(i, rng.pick(i + 1));
+    }
+    out
+}
+
+/// Seats on other windows' exposed tops (not hers, not his) near her x.
+fn near_edge_spots(w: &World, rng: &mut Rng) -> Vec<Spot> {
+    let hi = w.d(HOP_MAX);
+    let x0 = w.her.anchor.0;
+    let mut plats = edges::platforms(w.stack, w.eligible, w.contact, w.margin);
+    plats.retain(|p| Some(p.win) != w.her.win() && Some(p.win) != w.focused.map(|f| f.id));
+    for i in (1..plats.len()).rev() {
+        plats.swap(i, rng.pick(i + 1));
+    }
+    let mut out = Vec::new();
+    for p in plats {
+        let near = x0.clamp(p.seat_x.0, p.seat_x.1);
+        for x in [near, near + rng.pick(hi.max(1) as usize) as i32 - hi / 2] {
+            out.push(w.spot(SpotKind::Edge { win: p.win }, (x.clamp(p.seat_x.0, p.seat_x.1), p.y), w.boxes.sit, None));
+        }
+    }
+    out
+}
+
+/// Her monitor's floor within HOP_MAX of her x (straight down from a window top first).
+fn near_floor_spots(w: &World, from_edge: bool, rng: &mut Rng) -> Vec<Spot> {
+    let (lo, hi) = (w.d(HOP_MIN), w.d(HOP_MAX));
+    let i = w.her.area.min(w.areas.len().saturating_sub(1));
+    let x0 = w.her.anchor.0;
+    let mut out = Vec::new();
+    if from_edge {
+        out.push(w.spot(SpotKind::Floor, (x0, w.floor_y(i)), w.boxes.stand, None));
+    }
+    for _ in 0..10 {
+        let d = (if from_edge { 0 } else { lo }) + rng.pick((hi - lo).max(1) as usize) as i32;
+        let x = if rng.pick(2) == 0 { x0 - d } else { x0 + d };
+        out.push(w.spot(SpotKind::Floor, (x, w.floor_y(i)), w.boxes.stand, None));
+    }
+    out
+}
+
+/// The newly focused window's top edge at the end farther from the cursor (legs over its top
+/// strip at most `cover_max_pct`, the cursor clear); no room on top: the floor beside it.
+fn focus_edge(w: &World) -> Result<Spot, Vec<(String, Block)>> {
+    let Some(f) = w.focused else { return Err(vec![("focus".into(), Block::NoSpot)]) };
+    let mut why = Vec::new();
+    if let Some(i) = w.stack.iter().position(|r| r.id == f.id) {
+        let area = w.areas[w.area_of(f.center().0, f.y)];
+        let mut xs: Vec<i32> = Vec::new();
+        for (lo, hi) in edges::seat_ranges(w.stack, i, w.contact, w.margin) {
+            xs.extend([lo, hi, (lo + hi) / 2, lo + (hi - lo) / 4, hi - (hi - lo) / 4]);
+        }
+        xs.sort_by_key(|&x| -(x - w.cursor.0).abs());
+        xs.dedup();
+        let mut block = Block::NoSpot;
+        for x in xs {
+            let s = w.spot(SpotKind::SitEdge { win: f.id }, (x, f.y), w.boxes.sit, None);
+            if f.y <= area.y || s.body.y < area.y {
+                block = Block::Offscreen;
+                continue;
+            }
+            if s.cover_pct > w.cover_max_pct + 1e-9 {
+                block = Block::Cover;
+                continue;
+            }
+            match guard(w, &s) {
+                Ok(()) => return Ok(s),
+                Err(b) => block = b,
+            }
+        }
+        why.push(("focus_edge".into(), block));
+    }
+    let mut block = Block::NoSpot;
+    for s in beside_spots(w, &f) {
+        let s = Spot { approach: None, ..s };
+        match guard(w, &s) {
+            Ok(()) if !s.covers_focus() => return Ok(s),
+            Ok(()) => block = Block::FocusedInterior,
+            Err(b) => block = b,
+        }
+    }
+    why.push(("beside".into(), block));
+    Err(why)
 }
 
 // ---- active -----------------------------------------------------------------------------
@@ -721,6 +994,7 @@ mod tests {
                 last_kind: None,
                 hud_h: 0,
                 only: None,
+                prefer: None,
             }
         }
     }
@@ -776,8 +1050,9 @@ mod tests {
 
     #[test]
     fn follow_keeps_passive_hops_on_his_monitor() {
-        // She is on monitor 0, he works on monitor 1 (window 3 focused): every passive kind
-        // (edge, floor, floor_sit, float) lands on monitor 1.
+        // `only` (leaving his window: his monitor) holds: she is on monitor 0, he works on
+        // monitor 1 (window 3 focused): every passive kind (edge, floor, floor_sit, float)
+        // lands on monitor 1.
         let mut fx = tiled();
         fx.focused = Some(fx.stack[2]);
         fx.cursor = (3500, 200);
@@ -1059,5 +1334,361 @@ mod tests {
         assert_eq!(s.kind, SpotKind::Cling { left: true });
         assert_eq!(s.anchor.0, 12);
         assert!(s.cover_pct <= 12.0);
+    }
+
+    // ---- lively: the window top is her favourite, the cursor's monitor 80/20 ---------------
+
+    /// Floating windows with head room on both monitors; he works in 12 (monitor 0).
+    fn desk() -> Fixture {
+        let w = vec![
+            r(11, 150, 420, 900, 640),
+            r(12, 1300, 300, 1000, 760),
+            r(13, 2750, 380, 950, 620),
+            r(14, 3900, 560, 950, 520),
+            r(15, 700, 1150, 700, 300),
+            r(16, 1700, 1180, 700, 300),
+            r(17, 3300, 1080, 800, 300),
+        ];
+        let n = w.len();
+        Fixture { stack: w, eligible: vec![true; n], focused: Some(r(12, 1300, 300, 1000, 760)), cursor: (1700, 700), fs: [false; 2], her: (600, 1588) }
+    }
+
+    fn her_at(w: &mut World, s: Spot) {
+        w.her = s;
+    }
+
+    #[test]
+    fn passive_roams_favour_window_tops() {
+        // Roams chained from wherever the last one landed: >= 60 % on a window's top edge, and
+        // edge after edge allowed (never the same window twice running, never his).
+        let fx = desk();
+        let mut w = fx.world();
+        let mut rng = Rng::new(21);
+        let (mut edges, n) = (0, 3000);
+        let mut last_wins: Vec<u32> = Vec::new();
+        let mut prev_win = None;
+        for _ in 0..n {
+            let lw = last_wins.clone();
+            let w2 = World { last_wins: &lw, ..w.clone() };
+            let s = resolve(&Goal::Passive { far: false }, &w2, &mut rng).unwrap();
+            if let SpotKind::Edge { win } = s.kind {
+                edges += 1;
+                assert_ne!(Some(win), prev_win, "not the same window twice running");
+                assert_ne!(win, 12, "never on his window");
+                last_wins.push(win);
+                if last_wins.len() > 2 {
+                    last_wins.remove(0);
+                }
+                prev_win = Some(win);
+            } else {
+                prev_win = None;
+            }
+            w.last_kind = Some(s.kind);
+            her_at(&mut w, s);
+        }
+        let share = edges as f64 / n as f64;
+        assert!(share >= 0.6, "window tops {share:.3}");
+    }
+
+    #[test]
+    fn cursor_monitor_80_20_over_many_seeds() {
+        // Roams, perches and the window-close teleport: the cursor's monitor 80 % (±5), the
+        // others 20 %.
+        for (cursor, focus, pref) in [((1700, 700), 12u32, 0usize), ((3300, 700), 13, 1)] {
+            let mut fx = desk();
+            fx.cursor = cursor;
+            fx.focused = fx.stack.iter().find(|r| r.id == focus).copied();
+            for goal in [Goal::Passive { far: false }, Goal::Rescue] {
+                let mut on = 0;
+                let n = 2000;
+                for seed in 0..n {
+                    let mut w = fx.world();
+                    w.prefer = Some(pref);
+                    let s = resolve(&goal, &w, &mut Rng::new(2 * seed + 1)).unwrap();
+                    assert!(guard(&w, &s).is_ok());
+                    on += usize::from(s.area == pref);
+                }
+                let share = on as f64 / n as f64;
+                assert!((share - 0.8).abs() <= 0.05, "{goal:?} cursor on {pref}: {share:.3}");
+            }
+        }
+        // Exploring (idle a while): about half each.
+        let fx = desk();
+        let on = (0..2000).filter(|&seed| {
+            let mut w = fx.world();
+            w.prefer = Some(0);
+            resolve(&Goal::Explore, &w, &mut Rng::new(2 * seed + 1)).unwrap().area == 0
+        });
+        let share = on.count() as f64 / 2000.0;
+        assert!((share - 0.5).abs() <= 0.05, "explore {share:.3}");
+    }
+
+    #[test]
+    fn cursor_monitor_without_a_target_hands_over() {
+        // The cursor's monitor (0) has no window top but his: every rescue goes to monitor 1.
+        let mut fx = desk();
+        fx.stack.retain(|r| r.id == 12 || r.x >= 2560);
+        fx.eligible = vec![true; fx.stack.len()];
+        for seed in 0..500 {
+            let mut w = fx.world();
+            w.prefer = Some(0);
+            let s = resolve(&Goal::Rescue, &w, &mut Rng::new(seed)).unwrap();
+            assert_eq!(s.area, 1, "seed {seed}");
+            assert!(matches!(s.kind, SpotKind::Edge { win } if win != 12));
+        }
+        // A fullscreen app on the cursor's monitor (she is on the other one): roams there too.
+        let mut fx = desk();
+        fx.fs = [true, false];
+        fx.her = (3300, 1428);
+        fx.focused = fx.stack.iter().find(|r| r.id == 13).copied();
+        for seed in 0..500 {
+            let mut w = fx.world();
+            w.prefer = Some(0);
+            assert_eq!(resolve(&Goal::Passive { far: false }, &w, &mut Rng::new(seed)).unwrap().area, 1, "seed {seed}");
+        }
+        // The other monitor empty: the cursor's always (never "no spot" while one exists).
+        let mut fx = desk();
+        fx.stack.retain(|r| r.x < 2560);
+        fx.eligible = vec![true; fx.stack.len()];
+        for seed in 0..300 {
+            let mut w = fx.world();
+            w.prefer = Some(0);
+            assert_eq!(resolve(&Goal::Rescue, &w, &mut Rng::new(seed)).unwrap().area, 0);
+        }
+    }
+
+    #[test]
+    fn rescue_needs_another_window_with_room() {
+        let fx = desk();
+        let w = fx.world();
+        assert!(rescue_target(&w).is_ok());
+        // Only his window left (and windows without head room): no target, she falls.
+        let mut fx = desk();
+        fx.stack = vec![r(12, 1300, 300, 1000, 760), r(16, 12, 29, 1200, 1500), r(17, 2572, 29, 2500, 1400)];
+        fx.eligible = vec![true; 3];
+        let w = fx.world();
+        assert!(rescue_target(&w).is_err(), "nothing but his window and tiles under the bar");
+        // A window whose top is hidden under another: not a target.
+        let mut fx = desk();
+        fx.stack = vec![r(12, 1300, 300, 1000, 760), r(18, 2800, 500, 900, 500), r(19, 2700, 400, 1200, 300)];
+        fx.eligible = vec![true, true, false];
+        let w = fx.world();
+        assert!(rescue_target(&w).is_err(), "18's top is under 19 (not eligible)");
+    }
+
+    #[test]
+    fn micro_hops_stay_small_and_clear() {
+        let fx = desk();
+        let mut rng = Rng::new(31);
+        let base = fx.world();
+        // From a seat on window 11 and from the floor; many tries.
+        let seat = base.spot(SpotKind::Edge { win: 11 }, (600, 420), base.boxes.sit, None);
+        let floor = base.spot(SpotKind::Floor, (900, base.floor_y(0)), base.boxes.stand, None);
+        let mut fams = std::collections::HashMap::new();
+        for from in [seat, floor] {
+            for _ in 0..400 {
+                let w = World { her: from, ..base.clone() };
+                let Ok(s) = resolve(&Goal::Hop { kind: HopKind::Micro, away: false }, &w, &mut rng) else { continue };
+                let (dx, dy) = (s.anchor.0 - from.anchor.0, s.anchor.1 - from.anchor.1);
+                assert!(dx.abs() <= 300 && -dy <= 1400 && dx * dx + dy * dy >= 60 * 60, "{from:?} -> {s:?}");
+                assert_eq!(s.area, from.area);
+                assert!(guard(&w, &s).is_ok() && !s.covers_focus() || w.focused.is_some_and(|f| w.floor_strip_ok(&s, &f)));
+                assert_ne!(s.win(), Some(12), "never on his window");
+                let fam = match (from.win(), s.win()) {
+                    (Some(a), Some(b)) if a == b => "along",
+                    (_, Some(_)) => "window",
+                    _ => "floor",
+                };
+                *fams.entry((from.kind.key(), fam)).or_insert(0) += 1;
+            }
+        }
+        for k in [("edge", "along"), ("edge", "window"), ("edge", "floor"), ("floor", "window"), ("floor", "floor")] {
+            assert!(fams.get(&k).copied().unwrap_or(0) > 10, "{k:?} in {fams:?}");
+        }
+        // He is typing: never nearer his window than now, and >= 200 px from it.
+        let f = fx.focused.unwrap();
+        let gap = |b: &WinRect| {
+            let dx = (f.x - b.right()).max(b.x - f.right()).max(0) as f64;
+            let dy = (f.y - b.bottom()).max(b.y - f.bottom()).max(0) as f64;
+            (dx * dx + dy * dy).sqrt()
+        };
+        for _ in 0..300 {
+            let w = World { her: seat, ..base.clone() };
+            if let Ok(s) = resolve(&Goal::Hop { kind: HopKind::Micro, away: true }, &w, &mut rng) {
+                assert!(gap(&s.body) >= 200.0f64.min(gap(&seat.body)) - 1.0, "{s:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn startle_leaves_the_window_and_dodge_gets_away_from_the_pointer() {
+        let fx = desk();
+        let base = fx.world();
+        let seat = base.spot(SpotKind::Edge { win: 11 }, (600, 420), base.boxes.sit, None);
+        let mut rng = Rng::new(41);
+        for _ in 0..200 {
+            let w = World { her: seat, ..base.clone() };
+            let s = resolve(&Goal::Hop { kind: HopKind::Startle, away: false }, &w, &mut rng).unwrap();
+            assert_ne!(s.win(), Some(11), "off the dragged window");
+            let c = (seat.body.right() + 70, seat.body.y + 100);
+            let w = World { her: seat, cursor: c, ..base.clone() };
+            if let Ok(s) = resolve(&Goal::Hop { kind: HopKind::Dodge, away: false }, &w, &mut rng) {
+                let d = |b: &WinRect| (dist2(b, c.0, c.1) as f64).sqrt();
+                assert!(d(&s.body) >= d(&seat.body) + 100.0, "{s:?}");
+                assert!(!s.body.grow(64).contains(c.0, c.1));
+            }
+        }
+        // With another window's top in reach, the reactions land on a top more often than not
+        // (her favourite spot, Haseeb 22:55).
+        let mut fx = desk();
+        fx.stack.push(r(21, 1050, 520, 220, 400));
+        fx.eligible.push(true);
+        let base = fx.world();
+        let seat = base.spot(SpotKind::Edge { win: 11 }, (900, 420), base.boxes.sit, None);
+        let (mut startle_tops, mut dodge_tops, mut dodge_n) = (0, 0, 0);
+        for seed in 0..1000u64 {
+            let w = World { her: seat, ..base.clone() };
+            let s = resolve(&Goal::Hop { kind: HopKind::Startle, away: false }, &w, &mut Rng::new(2 * seed + 1)).unwrap();
+            startle_tops += usize::from(s.win().is_some());
+            let w = World { her: seat, cursor: (seat.body.x - 60, seat.body.y + 120), ..base.clone() };
+            if let Ok(s) = resolve(&Goal::Hop { kind: HopKind::Dodge, away: false }, &w, &mut Rng::new(2 * seed + 1)) {
+                dodge_n += 1;
+                dodge_tops += usize::from(s.win().is_some());
+            }
+        }
+        assert!(startle_tops > 550, "startle: {startle_tops}/1000 on a window top");
+        assert!(dodge_n > 500 && dodge_tops * 10 > dodge_n * 6, "dodge: {dodge_tops}/{dodge_n} on a window top");
+    }
+
+    #[test]
+    fn focus_edge_far_end_within_cover_max() {
+        let mut fx = desk();
+        fx.cursor = (1500, 700);
+        let w = fx.world();
+        let s = resolve(&Goal::FocusEdge, &w, &mut Rng::new(1)).unwrap();
+        let f = fx.focused.unwrap();
+        assert_eq!(s.kind, SpotKind::SitEdge { win: 12 });
+        assert!(s.anchor.0 > f.center().0, "the end farther from the cursor: {s:?}");
+        assert!(s.cover_pct <= 12.0 && guard(&w, &s).is_ok());
+        // A small window: covering more than cover_max_pct of it is refused (beside instead).
+        let mut fx = desk();
+        let small = r(20, 1500, 900, 360, 260);
+        fx.stack.push(small);
+        fx.eligible.push(true);
+        fx.focused = Some(small);
+        fx.cursor = (1600, 1000);
+        let w = fx.world();
+        if let Ok(s) = resolve(&Goal::FocusEdge, &w, &mut Rng::new(2)) {
+            assert!(s.cover_pct <= 12.0, "{s:?}");
+            assert!(s.kind != SpotKind::SitEdge { win: 20 } || s.cover_pct <= 12.0);
+        }
+        // An i3 tile under the bar (no head room): the floor beside it, never over it.
+        let fx = tiled();
+        let w = fx.world();
+        if let Ok(s) = resolve(&Goal::FocusEdge, &w, &mut Rng::new(3)) {
+            assert!(!s.covers_focus() && s.kind == SpotKind::Beside, "{s:?}");
+        }
+    }
+
+    #[test]
+    fn perch_share_long_sim() {
+        // Her own clocks for 8 h on the desk (his settings: hang_only), every move resolved
+        // here, his focus and pointer moving, a screen event every 1–3 min (focus, pointer
+        // swipes and rests, her window dragged): she spends most of the time on a window top,
+        // and lands on one most often after a roam and after a reaction too.
+        use crate::brain::{Arrived, Brain, BrainEvent, Intent, PlaceKind, Screen, Senses, Tuning};
+        use crate::settings::{Attention, BrainSettings};
+        let fx = desk();
+        let wins: Vec<WinRect> = fx.stack.clone();
+        for seed in [1u64, 4, 6] {
+            let st = BrainSettings { attention: Attention::HangOnly, ..Default::default() };
+            let mut b = Brain::new(seed, st.clone(), Tuning::new(&st), None, 0.0);
+            let mut rng = Rng::new(seed ^ 0x77);
+            let mut prng = Rng::new(seed ^ 0x99);
+            let base = fx.world();
+            let mut her = base.her;
+            let (mut last_wins, mut last_kind): (Vec<u32>, Option<SpotKind>) = (Vec::new(), None);
+            let (mut t, mut since) = (0.0f64, 0.0f64);
+            let mut time: std::collections::HashMap<&str, f64> = std::collections::HashMap::new();
+            let mut goals: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+            let (mut focus, mut cursor) = (wins[1], (1700, 700));
+            let end = 8.0 * 3600.0;
+            let mut next_ev = 90.0;
+            let (mut react_n, mut react_tops) = (0usize, 0usize);
+            while t < end {
+                if prng.range(0.0, 1.0) < 0.02 {
+                    focus = wins[prng.pick(wins.len())];
+                    cursor = (focus.x + prng.pick(focus.w as usize) as i32, focus.y + prng.pick(focus.h as usize) as i32);
+                }
+                let placement = match her.kind {
+                    SpotKind::Edge { .. } | SpotKind::SitEdge { .. } => PlaceKind::Perch,
+                    SpotKind::Float | SpotKind::FloatBeside => PlaceKind::Float,
+                    SpotKind::Hang { .. } | SpotKind::Cling { .. } | SpotKind::Peek => PlaceKind::Hang,
+                    _ => PlaceKind::Ground,
+                };
+                let d = b.tick(&Senses { now: t, placement, ..Senses::default() });
+                for (_, i) in d.intents {
+                    let Intent::Move(p) = i else { continue };
+                    let lw = last_wins.clone();
+                    let areas_pref = if cursor.0 >= 2560 { 1 } else { 0 };
+                    let w = World { her, focused: Some(focus), cursor, last_wins: &lw, last_kind, prefer: Some(areas_pref), ..base.clone() };
+                    let res = resolve(&p.goal, &w, &mut rng);
+                    *goals.entry(format!("{}->{}", p.why, res.as_ref().map_or("FAIL".to_string(), |s| s.kind.key().to_string()))).or_insert(0) += 1;
+                    match res {
+                        Ok(s) => {
+                            if matches!(p.why, "startle_drag" | "dodge" | "focus") {
+                                react_n += 1;
+                                react_tops += usize::from(s.win().is_some());
+                            }
+                            // Protected all along: cover_max_pct, and never on the area he works in
+                            // (a visit's approach and the focus hop's seat on his window's top edge
+                            // may overlap it within cover_max_pct, far from his pointer; nothing else).
+                            assert!(s.cover_pct <= w.cover_max_pct + 1e-9, "seed {seed}: {} covers {:.1} %", p.why, s.cover_pct);
+                            if !matches!(p.goal, Goal::Active { .. } | Goal::FocusEdge) {
+                                assert!(!s.covers_focus() || w.floor_strip_ok(&s, &focus), "seed {seed}: {} onto his window {s:?}", p.why);
+                            }
+                            *time.entry(if her.win().is_some() { "top" } else { "other" }).or_insert(0.0) += t - since;
+                            since = t;
+                            if let SpotKind::Edge { win } = s.kind {
+                                last_wins.push(win);
+                                if last_wins.len() > 2 {
+                                    last_wins.remove(0);
+                                }
+                            }
+                            if matches!(p.goal, Goal::Passive { .. } | Goal::Explore) {
+                                last_kind = Some(s.kind);
+                            }
+                            her = s;
+                            let covering = s.approach.is_some_and(|a| a.covers()) && s.covers_focus();
+                            b.on_event(BrainEvent::Arrived(Arrived { approach: s.approach.filter(|_| matches!(p.goal, Goal::Active { .. })), arrival: p.arrivals[0], covering, why: p.why }), t);
+                        }
+                        Err(_) => b.on_event(BrainEvent::MoveFailed { busy: false, why: p.why }, t),
+                    }
+                }
+                let wake = d.wake_at.min(end);
+                if next_ev <= wake {
+                    t = next_ev;
+                    let s = match prng.pick(4) {
+                        0 => Screen::Focus,
+                        1 => Screen::CursorHover,
+                        2 if placement == PlaceKind::Perch => Screen::PerchDragged { speed: 3000.0 },
+                        _ => Screen::CursorSwipe { speed: 3000.0 },
+                    };
+                    b.on_event(BrainEvent::Screen(s), t);
+                    next_ev += 60.0 + prng.range(0.0, 120.0) as f64;
+                } else {
+                    t = wake;
+                }
+            }
+            *time.entry(if her.win().is_some() { "top" } else { "other" }).or_insert(0.0) += t - since;
+            let share = time["top"] / (time["top"] + time.get("other").copied().unwrap_or(0.0));
+            let roams: usize = goals.iter().filter(|(k, _)| k.starts_with("roam->")).map(|x| x.1).sum();
+            let roam_tops = goals.get("roam->edge").copied().unwrap_or(0);
+            assert!(roam_tops * 10 >= roams * 7, "seed {seed}: {roam_tops} of {roams} roams on a window top ({goals:?})");
+            assert!(share > 0.6, "seed {seed}: on a window top {share:.3} of the time ({goals:?})");
+            // After reactions the top wins whenever one is in reach (the test above); on this
+            // sparse desk a startled hop off a dragged window often has none within 300 px.
+            assert!(react_n >= 20 && react_tops * 20 >= react_n * 7, "seed {seed}: after reactions {react_tops}/{react_n} on a window top ({goals:?})");
+        }
     }
 }
