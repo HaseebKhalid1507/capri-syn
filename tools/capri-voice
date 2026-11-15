@@ -11,6 +11,11 @@ newline-delimited JSON:
                                        one stream, many turns: speech/endpoint/heard per utterance;
                                        {"ev":"barge-in"} {"ev":"echo","mode":"speakers"} {"ev":"handsfree-end","why":"call|lock|max|mic lost"}
   {"op":"listen-drop"}                 (hands-free) what is being heard now is dropped; the stream stays
+  {"op":"listen-start","mode":"wake","sensitivity":0.5,"silence_s","echo"}   DRAFT, off unless his
+                                       [voice] wake_word: {"ev":"mic-open","mode":"wake"} (no level events while idle);
+                                       "hey capri" heard and checked by Whisper -> {"ev":"wake"}, the turn as a toggle's
+                                       ({"ev":"heard"}; "let's talk" -> {"ev":"wake-handsfree"}); {"ev":"wake-end","why":
+                                       "call|lock|false starts|mic lost"}. Any other listen-start closes it first.
   {"op":"listen-start","mode":"toggle","silence_s":1.0}   {"ev":"mic-open","mode"} ... {"ev":"speech"} (he started)
                                        ... {"ev":"endpoint","why":"silence|cap|nothing","speech_ms","silence_ms"}
                                        (the toggle stops itself on a pause; "nothing": no speech in 8 s, nothing sent)
@@ -83,14 +88,14 @@ class Stt:
         self.m = Model(path, n_threads=THREADS, print_progress=False, print_realtime=False, redirect_whispercpp_logs_to=None)
         log(f'stt {name} loaded in {now_ms() - t:.0f} ms ({os.path.basename(path)}, {THREADS} threads, CPU)')
 
-    def __call__(self, pcm, speech_ms=None):
+    def __call__(self, pcm, speech_ms=None, prompt=VOCAB):
         # The encoder window cut to the utterance (+1 s), not Whisper's fixed 30 s, but never under
         # 512 (10 s): a trimmed clip in a smaller window decodes into loops ("b, b, b, b", "yes,
         # yes, yes") and slow temperature retries. Measured on 30 sentences of 1-3 s of speech:
         # the bare formula 56 % word errors and 15 loops, the 512 floor 3 % and none.
         dur = len(pcm) / MIC_RATE
         ctx = max(512, min(1500, int(np.ceil((dur + 1.0) * 50 / 64) * 64)))
-        segs = self.m.transcribe(pcm, initial_prompt=VOCAB, no_context=True, single_segment=True, audio_ctx=ctx, temperature=0.0,
+        segs = self.m.transcribe(pcm, initial_prompt=prompt, no_context=True, single_segment=True, audio_ctx=ctx, temperature=0.0,
                                  temperature_inc=0.0, max_tokens=int(16 + 12 * dur))
         text = ' '.join(s.text for s in segs).strip()
         text = re.sub(r'\[[^\]]*\]|\([^)]*\)', '', text).strip()
@@ -111,13 +116,120 @@ LEAD_S, TAIL_S = 0.40, 0.20    # what is kept around the speech for Whisper
 FRAME_S = VAD_FRAME / MIC_RATE
 SILENCE_P = 0.35               # endpointing hysteresis: speech until p falls under this
 TOGGLE_MAX_S, TOGGLE_WAIT_S = 60.0, 8.0   # a 42 s utterance decodes whole (measured), so 60 s; no speech in 8 s: closed
-CAP_S_MODE = {'hold': 120.0, 'toggle': TOGGLE_MAX_S + 5.0, 'handsfree': 30 * 60.0}   # hard caps (hands-free: its max_s)
+CAP_S_MODE = {'hold': 120.0, 'toggle': TOGGLE_MAX_S + 5.0, 'handsfree': 30 * 60.0, 'wake': 0.0}   # wake: none (his standing setting)   # hard caps (hands-free: its max_s)
 HF_TURN_S = 60.0               # one hands-free utterance: sent at this length
 BARGE_P, BARGE_N, BARGE_OF = 0.50, 7, 9     # talking over her (headphones): p >= .5 on 7 of the last 9 frames (224 ms)
 DUPLEX_S = 0.25                # speakers: the mic hears again this long after her last sample
 ECHO_CORR, ECHO_DB = 0.5, 10.0 # her first sentence: mic follows her playback this well, this loud -> speakers
 ECHO_LAGS = 31                 # 20 ms frames: 0..600 ms after pw-play is launched
 ECHO_WORDS, ECHO_WINDOW_S = 0.7, 15.0   # a transcript this much made of what she said lately is her own voice
+
+
+# ---- the wake word ("hey capri"): a DRAFT, off by default -------------------------------------
+#
+# Stage 1: openWakeWord's front end (its v0.5.1 melspectrogram + embedding onnx, Apache-2.0; the
+# files are SHA-pinned), streamed: every 80 ms the mel of the last 110 ms, one 96-number embedding
+# from the last 76 mel frames; our head (1536 -> 64 -> 1, numpy) scores the last 16 embeddings (~2 s).
+# Two hops in a row over the threshold = a candidate. Stage 2: the loaded Whisper decodes the last
+# 2 s; it must say a hey-like word, then capri-like (whole word: "Capricorn" fails). Trained on stock
+# TTS voices only (Kokoro packs and blends, espeak-ng): no recording of anyone. Detection on his
+# voice is unmeasured; wake_sensitivity is the remedy.
+WAKE_FILES = {'melspectrogram.onnx': 'ba2b0e0f8b7b875369a2c89cb13360ff53bac436f2895cced9f479fa65eb176f',
+              'embedding_model.onnx': '70d164290c1d095d1d4ee149bc5e00543250a7316b59f31d056cff7bd3075c1f',
+              'hey-capri-v1.npz': None}           # set when the head is trained (below)
+WAKE_HOP, WAKE_CTX = 1280, 480                     # 80 ms hops; each mel call sees 30 ms before its hop
+WAKE_RING_S = 2.5                                  # all the idle mic is kept: 2.5 s, in RAM
+WAKE_REFRACTORY_S = 2.0
+WAKE_VERIFY_N, WAKE_VERIFY_S, WAKE_PAUSE_S = 12, 600.0, 600.0   # 12 Whisper checks in 10 min, else 10 min off
+WAKE_WAIT_S, WAKE_TURN_S = 5.0, 30.0               # after the phrase: speech within 5 s; a turn is sent at 30 s
+WAKE_HEY = {'hey', 'hay', 'hi', 'hei', 'heh', 'eh', 'ay', 'a'}
+WAKE_CAPRI = re.compile(r"^(capri|kapri|capree|kapree|caprie|capry|caprey|capri's)$")
+WAKE_HF = {"let's talk", 'lets talk', "let's chat", 'lets chat', 'hands free', 'handsfree'}
+
+
+def wake_says(text):
+    """Whisper's words say "hey capri": a hey-like word, then a capri-like one."""
+    w = re.sub(r"[^a-z' ]", ' ', text.lower().replace('-', ' ')).split()
+    return any(w[i] in WAKE_HEY and WAKE_CAPRI.match(w[i + 1]) for i in range(len(w) - 1))
+
+
+def wake_rest(text):
+    """What he said after "hey capri" (the phrase cut), and whether it asks for hands-free."""
+    m = re.search(r"\b(?:hey|hay|hi|hei|heh|eh|ay|a)[\s,.!?-]+(?:capri|kapri|capree|kapree|caprie|capry|caprey)(?:'s)?\b[\s,.!?:;-]*",
+                  text, re.I)
+    rest = text[m.end():].strip() if m else text.strip()
+    rest = rest[:1].upper() + rest[1:]
+    words = re.sub(r"[^a-z' ]", ' ', rest.lower().replace('-', ' ')).split()
+    while words and words[-1] in ('please', 'capri'):
+        words.pop()
+    return rest, ' '.join(words) in WAKE_HF
+
+
+def wake_text(stt, pcm):
+    """The Whisper check of a candidate: no recognition prompt (it would lean toward "Capri")."""
+    return stt(pcm, None, prompt=None)
+
+
+class WakeEar:
+    """Stage 1, loaded only when the wake word is turned on."""
+
+    def __init__(self, d):
+        import onnxruntime as ort
+        so = ort.SessionOptions()
+        so.intra_op_num_threads = so.inter_op_num_threads = 1
+        self.mel = ort.InferenceSession(f'{d}/melspectrogram.onnx', so, providers=['CPUExecutionProvider'])
+        self.emb = ort.InferenceSession(f'{d}/embedding_model.onnx', so, providers=['CPUExecutionProvider'])
+        self.mi, self.ei = self.mel.get_inputs()[0].name, self.emb.get_inputs()[0].name
+        h = np.load(f'{d}/hey-capri-v1.npz', allow_pickle=False)
+        self.mu, self.sd, self.W1, self.b1, self.W2, self.b2 = (h[k].astype(np.float32) for k in ('mu', 'sd', 'W1', 'b1', 'W2', 'b2'))
+        self.thresholds = h['thresholds'].astype(np.float32)        # wake_sensitivity 0.1 .. 0.9
+
+    @staticmethod
+    def load(d=None):
+        """(WakeEar, None) or (None, why): every file there and the expected one."""
+        import hashlib
+        d = d or MODELS
+        for f, sha in WAKE_FILES.items():
+            path = f'{d}/{f}'
+            if not os.path.exists(path):
+                return None, f'no {f} (capri-voice-setup)'
+            if sha and hashlib.sha256(open(path, 'rb').read()).hexdigest() != sha:
+                return None, f'{f} is not the expected file'
+        try:
+            return WakeEar(d), None
+        except Exception as e:
+            return None, f'the wake models did not load ({e})'
+
+    def threshold(self, sensitivity):
+        i = int(round((float(np.clip(sensitivity, 0.1, 0.9)) - 0.1) * 10))
+        return float(self.thresholds[i])
+
+    def mels(self, x):
+        return self.mel.run(None, {self.mi: x.astype(np.float32)[None, :]})[0].reshape(-1, 32) / 10 + 2
+
+    def score(self, e16):
+        x = (e16.reshape(1, -1) - self.mu) / self.sd
+        h = np.maximum(0, x @ self.W1 + self.b1)
+        return float(1 / (1 + np.exp(-(h @ self.W2 + self.b2)[0, 0])))
+
+    class Stream:
+        """Incremental: push int16 samples, get a head score per 80 ms hop (0 until 16 embeddings)."""
+
+        def __init__(self, ear):
+            self.ear, self.raw, self.pend = ear, np.zeros(WAKE_CTX, np.int16), np.zeros(0, np.int16)
+            self.melbuf, self.embs = np.ones((76, 32), np.float32), collections.deque(maxlen=16)
+
+        def push(self, x):
+            self.pend = np.concatenate([self.pend, x])
+            out = []
+            while len(self.pend) >= WAKE_HOP:
+                h, self.pend = self.pend[:WAKE_HOP], self.pend[WAKE_HOP:]
+                self.raw = np.concatenate([self.raw, h])[-(WAKE_HOP + WAKE_CTX):]
+                self.melbuf = np.concatenate([self.melbuf, self.ear.mels(self.raw)])[-76:]
+                e = self.ear.emb.run(None, {self.ear.ei: self.melbuf[None, :, :, None]})[0].reshape(96)
+                self.embs.append(e)
+                out.append(self.ear.score(np.stack(self.embs)) if len(self.embs) == 16 else 0.0)
+            return out
 
 
 class Vad:
@@ -1334,6 +1446,10 @@ class Voice:
         self.played = None       # her sentence now playing: start, level envelope (hands-free)
         self.said = collections.deque(maxlen=40)   # (t_end, words) of her sentences: the echo guard
         self.hf_drop = False
+        self.wake = None         # the wake word's stage 1: loaded when first turned on
+        self.wake_paused_until = 0.0
+        self.wake_checks = collections.deque(maxlen=WAKE_VERIFY_N)   # times of the last Whisper checks
+        self.wake_n = {'candidates': 0, 'rejected': 0, 'woke': 0, 'paused': 0, 'verify_ms': []}
         self.tts = Tts()
         self.media = Media()
         self.release_timer = None
@@ -1364,7 +1480,9 @@ class Voice:
             pass
 
     # -- mic
-    def listen_start(self, mode='hold', silence_s=1.0, max_s=0.0, echo='auto'):
+    def listen_start(self, mode='hold', silence_s=1.0, max_s=0.0, echo='auto', sensitivity=0.5):
+        if self.rec is not None and self.cur.get('mode') == 'wake' and mode != 'wake' and self.rec_stop_at is None:
+            self.listen_cancel()          # his act wins over the standing wake stream; the avatar re-arms it after
         # A capture that is closing (the toggle giving way to hands-free) is waited for, briefly.
         for _ in range(150):
             if self.rec is None or self.rec_stop_at is None:
@@ -1385,6 +1503,18 @@ class Voice:
             refuse = 'NO MIC · NO SPEECH DETECTOR (capri-voice-setup)'
         elif mode == 'handsfree' and (app := in_call()) != '':
             refuse = 'NO MIC · IN A CALL' if app else 'NO MIC · AUDIO STATE UNKNOWN'
+        elif mode == 'wake':
+            if time.time() < self.wake_paused_until:
+                refuse = 'WAKE PAUSED · TOO MANY FALSE STARTS'
+            elif (app := in_call()) != '':
+                refuse = 'WAKE PAUSED · IN A CALL' if app else 'WAKE PAUSED · AUDIO STATE UNKNOWN'
+            else:
+                if self.wake is None:
+                    self.wake, why = WakeEar.load()      # loaded the first time it is asked for, never before
+                    if why:
+                        log(f'wake: {why}')
+                if self.wake is None:
+                    refuse = 'WAKE OFF · NO MODEL (capri-voice-setup)'
         if refuse:
             self.cur['t_heard'] = now_ms()
             self.emit(ev='mic-closed', mode=mode)
@@ -1402,14 +1532,18 @@ class Voice:
         silence_s = float(np.clip(silence_s, 0.5, 5.0))
         ep = Endpointer(silence_s) if mode == 'toggle' and vs else None
         self.rec = subprocess.Popen(cmd + ['-'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
-        if mode == 'handsfree':
+        if mode == 'wake':
+            echo = echo if echo in ('headphones', 'speakers') else sink_kind()
+            self.cur.update(echo=echo, thr=self.wake.threshold(sensitivity))
+            threading.Thread(target=self._wake_loop, args=(self.rec, silence_s, self.cur), daemon=True).start()
+        elif mode == 'handsfree':
             cap = float(max_s) if max_s and max_s > 0 else CAP_S_MODE['handsfree']
             echo = echo if echo in ('headphones', 'speakers') else sink_kind()
             self.cur.update(cap_s=cap, echo=echo)
             threading.Thread(target=self._hf_loop, args=(self.rec, vs, silence_s, self.cur), daemon=True).start()
         else:
             threading.Thread(target=self._rec_loop, args=(self.rec, vs, ep, self.cur), daemon=True).start()
-        log('mic: capture starting', SOURCE or '(default source)', f'({mode}' + (f", {self.cur['echo']}" if mode == 'handsfree' else '') + ')')
+        log('mic: capture starting', SOURCE or '(default source)', f'({mode}' + (f", {self.cur['echo']}" if mode in ('handsfree', 'wake') else '') + ')')
 
     def _draft(self, vs, speech, data=None, mode='toggle'):
         """Decode what he said so far, in a worker (the capture goes on)."""
@@ -1477,6 +1611,205 @@ class Voice:
                     break
         sub.terminate()
 
+    def _watch_calls(self, call):
+        """While a hands-off stream is open, a capture that appears re-checks for a call (no polling).
+        A new capture isn't linked to its source when announced: look again on its 'change' events
+        and 0.3 s later. Unknown counts as a call (an open mic fails closed)."""
+        sub = subprocess.Popen(['pactl', 'subscribe'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+
+        def check():
+            app = in_call()
+            if app is None:
+                app = 'unknown'
+            if app:
+                call['app'] = app
+            return bool(app)
+
+        def watch():
+            for line in sub.stdout:
+                if "'new' on source-output" in line or "'change' on source-output" in line:
+                    if check():
+                        return
+                    if "'new'" in line:
+                        threading.Timer(0.3, check).start()
+        threading.Thread(target=watch, daemon=True).start()
+        return sub
+
+    def _wake_loop(self, p, silence_s, cur):
+        """The wake word: one standing stream. Idle, the last 2.5 s stay in RAM and are scored every
+        80 ms; no level events. A candidate goes to Whisper (at most 12 in 10 min, else 10 min off);
+        a pass is a turn, endpointed as a toggle's. On speakers her voice is dropped at the reader, so
+        she can't wake herself; on headphones a wake while she speaks stops her. It ends on
+        listen-cancel, the lock, a call, too many false starts, or the stream dying."""
+        fd = p.stdout.fileno()
+        ear, thr, echo = self.wake, cur['thr'], cur['echo']
+        ring, ring_max = bytearray(), int(WAKE_RING_S * MIC_RATE) * 2
+        ws = WakeEar.Stream(ear)
+        opened, last_lock, last_lvl, prev, last_fire, quiet_until = False, now_ms(), 0.0, 0.0, 0.0, 0.0
+        cand, turn, end_why, call = None, None, None, {'app': None}
+        sub = self._watch_calls(call)
+
+        def check(c, pcm):
+            t0 = now_ms()
+            try:
+                with self.stt_lock:
+                    c['ok'] = wake_says(wake_text(self.stt, pcm))
+            except Exception as e:
+                log(f'wake: the check failed ({e})')
+            c['ms'] = now_ms() - t0
+            self.wake_n['verify_ms'] = (self.wake_n['verify_ms'] + [c['ms']])[-50:]
+            c['done'].set()
+
+        def feed_turn(tn, data):
+            tn['buf'] += data
+            tn['vs'].feed(bytes(data))
+            for q in tn['vs'].p[tn['seen']:]:
+                why = tn['ep'].feed(q)
+                if tn['ep'].speech == tn['ep'].min_frames:
+                    self.emit(ev='speech')
+                if why:
+                    tn['seen'] = len(tn['vs'].p)
+                    return why
+            tn['seen'] = len(tn['vs'].p)
+            return None
+
+        def finish(tn, why):
+            c, e = tn['c'], tn['ep']
+            c['t_endpoint'] = c['t_keyup'] = now_ms()
+            speech_ms = e.speech * FRAME_S * 1000
+            self.emit(ev='endpoint', why=why, speech_ms=round(speech_ms), silence_ms=round(e.trail * FRAME_S * 1000))
+            if why == 'nothing':
+                c['t_heard'] = now_ms()
+                self.emit(ev='heard', text='', why='NOTHING HEARD · MIC CLOSED', ms=self._ms(c))
+                log('wake: nothing said after the phrase')
+                return
+            pcm = np.frombuffer(bytes(tn['buf']), np.int16).astype(np.float32) / 32768.0
+            dur = len(pcm) / MIC_RATE
+
+            def out():
+                t0 = now_ms()
+                with self.stt_lock:
+                    text = self.stt(pcm, speech_ms)
+                c['stt_ms'] = now_ms() - t0
+                rest, hf = wake_rest(text)
+                if hf:
+                    c['t_heard'] = now_ms()
+                    self.emit(ev='wake-handsfree', ms=self._ms(c))
+                    log('wake: "let\'s talk": hands-free')
+                    return
+                self._sent(rest, speech_ms, dur, c)
+            threading.Thread(target=out, daemon=True).start()
+
+        while True:
+            if self.rec_stop_at is not None and now_ms() >= self.rec_stop_at:
+                break
+            if call['app']:
+                end_why = 'call'
+                break
+            if cur.get('moved'):
+                end_why = 'mic lost'
+                break
+            if now_ms() - last_lock >= 900:
+                last_lock = now_ms()
+                if screen_locked():
+                    end_why = 'lock'
+                    break
+            r, _, _ = select.select([fd], [], [], 0.02)
+            if not r:
+                if p.poll() is not None:
+                    end_why = 'mic lost'
+                    break
+                continue
+            chunk = os.read(fd, 3200)
+            if not chunk:
+                end_why = 'mic lost'
+                break
+            t = now_ms()
+            if not opened:
+                opened = True
+                cur['t_mic_open'] = t
+                self.emit(ev='mic-open', mode='wake', echo=echo)
+                log(f"mic: open (+{t - cur['t_start']:.0f} ms, wake word, {echo}, threshold {thr:.2f})")
+                threading.Thread(target=self._watchdog, args=(p, cur, True), daemon=True).start()
+            if self.cancelled:
+                continue
+            chunk = chunk[:len(chunk) // 2 * 2]
+            if turn is not None:
+                if t - last_lvl >= 200:
+                    last_lvl = t
+                    x = np.frombuffer(chunk, np.int16).astype(np.float32) / 32768.0
+                    self.emit(ev='level', v=round(min(1.0, float(np.sqrt(np.mean(x * x))) * 8), 3) if len(x) else 0.0)
+                why = feed_turn(turn, chunk)
+                if why:
+                    finish(turn, why)
+                    turn, cand = None, None
+                    ring.clear()
+                    ws, prev, last_fire = WakeEar.Stream(ear), 0.0, time.time()
+                continue
+            replying = self.player is not None or bool(self.play_q) or bool(self.say_q)
+            if replying:
+                quiet_until = time.time() + DUPLEX_S
+            if echo == 'speakers' and (replying or time.time() < quiet_until):
+                continue                     # half-duplex: she can't wake herself
+            ring += chunk
+            del ring[:max(0, len(ring) - ring_max)]
+            if cand is not None:
+                cand['post'] += chunk
+                if cand['done'].is_set():
+                    if cand['ok']:
+                        self.wake_n['woke'] += 1
+                        log(f"wake: heard (score {cand['score']:.2f}, checked in {cand['ms']:.0f} ms)")
+                        if self.player is not None or self.play_q or self.say_q:
+                            self.hush(why='wake')
+                        c = {'t_start': cand['t'], 't_mic_open': cand['t'], 'mode': 'wake'}
+                        self.emit(ev='wake', ms={'fire_to_wake': now_ms() - cand['t'], 'verify': round(cand['ms'])})
+                        turn = {'buf': bytearray(cand['pre']), 'vs': VadStream(self.vad), 'seen': 0, 'c': c,
+                                'ep': Endpointer(float(np.clip(silence_s, 0.5, 5.0)), max_s=WAKE_TURN_S, wait_s=WAKE_WAIT_S,
+                                                 min_frames=MIN_FRAMES['wake'])}
+                        why = feed_turn(turn, cand['post'])
+                        if why:
+                            finish(turn, why)
+                            turn = None
+                    else:
+                        self.wake_n['rejected'] += 1
+                        log(f"wake: a candidate rejected by the check (score {cand['score']:.2f}, {cand['ms']:.0f} ms)")
+                    cand = None
+                continue
+            for sc in ws.push(np.frombuffer(chunk, np.int16)):
+                if sc >= thr and prev >= thr and time.time() - last_fire >= WAKE_REFRACTORY_S:
+                    last_fire = now = time.time()
+                    while self.wake_checks and now - self.wake_checks[0] > WAKE_VERIFY_S:
+                        self.wake_checks.popleft()
+                    if len(self.wake_checks) >= WAKE_VERIFY_N:
+                        self.wake_paused_until = now + WAKE_PAUSE_S
+                        self.wake_n['paused'] += 1
+                        end_why = 'false starts'
+                        break
+                    self.wake_checks.append(now)
+                    self.wake_n['candidates'] += 1
+                    pcm = np.frombuffer(bytes(ring[-4 * MIC_RATE:]), np.int16).astype(np.float32) / 32768.0
+                    cand = {'pre': bytes(ring), 'post': bytearray(), 'done': threading.Event(), 'ok': False, 'ms': 0,
+                            't': now_ms(), 'score': sc}
+                    threading.Thread(target=check, args=(cand, pcm), daemon=True).start()
+                    break
+                prev = sc
+            if end_why:
+                break
+        sub.terminate()
+        p.terminate()
+        try:
+            p.wait(1)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            p.wait()
+        cancelled = self.cancelled
+        self.rec = None
+        cur['t_mic_closed'] = now_ms()
+        self.emit(ev='mic-closed', mode='wake')
+        log(f"mic: closed (wake word{', ' + end_why if end_why else ''})")
+        if not cancelled and end_why:
+            self.emit(ev='wake-end', why=end_why, app=call['app'] or '')
+
     def _hf_loop(self, p, vs, silence_s, cur):
         """Hands-free: one stream, many turns. Each utterance ends on his pause (draft-decoded, held on
         after dangling words) and is sent; the stream stays open. On speakers the mic is deaf while
@@ -1494,27 +1827,7 @@ class Voice:
         quiet_until, end_why, call = 0.0, None, {'app': None}
         sink_id, last_t0 = (sink_kind(True)[1] if echo == 'headphones' else None), None
         self.hf_drop = False
-        # Calls: a new source-output re-checks (no polling).
-        sub = subprocess.Popen(['pactl', 'subscribe'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
-
-        def check_call():
-            app = in_call()
-            if app is None:                  # can't tell: an open mic fails closed
-                app = 'unknown'
-            if app:
-                call['app'] = app
-            return bool(app)
-
-        def watch():
-            # A new capture isn't linked to its source yet when it is announced: look again on its
-            # 'change' events and 0.3 s later.
-            for line in sub.stdout:
-                if "'new' on source-output" in line or "'change' on source-output" in line:
-                    if check_call():
-                        return
-                    if "'new'" in line:
-                        threading.Timer(0.3, check_call).start()
-        threading.Thread(target=watch, daemon=True).start()
+        sub = self._watch_calls(call)
 
         def reset_turn():
             nonlocal ep, dr, seen
@@ -2026,7 +2339,8 @@ class Voice:
                 self.stt = Stt(msg['stt_model'])
             self.emit(ev='ready', cfg=self.cfg, features=FEATURES)
         elif op == 'listen-start':
-            self.listen_start(msg.get('mode', 'hold'), float(msg.get('silence_s', 1.0)), float(msg.get('max_s', 0) or 0), msg.get('echo', 'auto'))
+            self.listen_start(msg.get('mode', 'hold'), float(msg.get('silence_s', 1.0)), float(msg.get('max_s', 0) or 0), msg.get('echo', 'auto'),
+                              float(msg.get('sensitivity', 0.5)))
         elif op == 'listen-drop':
             self.hf_drop = True
         elif op == 'listen-stop':
@@ -2057,8 +2371,12 @@ class Voice:
                 self.release_timer = None
                 self.media.release()
         elif op == 'stats':
-            self.emit(ev='stats', mic_open=self.rec is not None, speaking=self.player is not None, cfg=self.cfg,
-                      vad='silero' if self.vad else 'energy')
+            w = self.wake_n
+            self.emit(ev='stats', mic_open=self.rec is not None, mic_mode=self.cur.get('mode') if self.rec is not None else None,
+                      speaking=self.player is not None, cfg=self.cfg, vad='silero' if self.vad else 'energy',
+                      wake={'loaded': self.wake is not None, 'candidates': w['candidates'], 'rejected': w['rejected'], 'woke': w['woke'],
+                            'paused': w['paused'], 'paused_s': max(0, round(self.wake_paused_until - time.time())),
+                            'verify_ms_p50': round(float(np.median(w['verify_ms']))) if w['verify_ms'] else None})
         else:
             self.emit(ev='error', why=f'unknown op {op!r}')
 
@@ -2235,6 +2553,29 @@ def selftest_endpoint():
         assert not dangles(t), t
 
 
+def selftest_wake():
+    for t in ('Hey Capri.', "Hey, Capri, what's spike doing?", 'hey kapri', 'Hi Capri!', 'Hey Capree, pause the music.', 'hey capri'):
+        assert wake_says(t), t
+    for t in ('Hey Capricorn.', 'Hey Carrie.', 'Capri said the build passed.', 'Hey copy that.', 'Hey caprese', 'tell Capri to wait',
+              'Hey Kerry', 'Hey!', ''):
+        assert not wake_says(t), t
+    assert wake_rest("Hey Capri, what's spike doing?") == ("What's spike doing?", False)
+    assert wake_rest('Hey Capri. Pause the music.') == ('Pause the music.', False)
+    assert wake_rest("Hey Capri, let's talk.")[1] and wake_rest("hey capri let's chat please")[1] and wake_rest('Hey Capri, hands-free.')[1]
+    assert wake_rest('Hey Capri.') == ('', False) and not wake_rest("Hey Capri, let's talk about the build.")[1]
+    if all(os.path.exists(f'{MODELS}/{f}') for f in WAKE_FILES):
+        ear, why = WakeEar.load()
+        assert ear is not None, why
+        st = WakeEar.Stream(ear)
+        x = (np.random.default_rng(4).standard_normal(16000 * 3) * 300).astype(np.int16)
+        sc = [v for i in range(0, len(x), 320) for v in st.push(x[i:i + 320])]
+        assert len(sc) == 37 and sc[14] == 0.0 and 0.0 <= sc[15] <= 1.0 and max(sc) < 0.5, sc
+        assert ear.threshold(0.1) >= ear.threshold(0.5) >= ear.threshold(0.9)
+        print('selftest: wake word ok (phrase check, stage 1 loads, SHA-pinned, room noise scores low)')
+    else:
+        print('selftest: wake word phrase check ok (no wake models)')
+
+
 def selftest_hf():
     rng = np.random.default_rng(1)
     play = (rng.standard_normal(150) * 8 - 30).astype(np.float32)          # her level, 3 s on a 20 ms grid
@@ -2305,6 +2646,7 @@ def selftest():
     print('selftest: endpointer ok')
     selftest_hf()
     print('selftest: hands-free helpers ok (echo correlation, her own words)')
+    selftest_wake()
     if not os.path.exists(f'{MODELS}/kokoro-v1.0.int8.onnx'):
         print('selftest: no models, skipping the graph checks')
         return

@@ -43,6 +43,27 @@ pub(super) struct HandsFree {
     closed: bool,
 }
 
+/// The wake word ("hey capri", a draft; `[voice] wake_word`): its standing stream, asked for while
+/// the setting is on and nothing keeps it closed. Its tag is static (no timer, no meter).
+#[derive(Clone, Debug, Default)]
+pub(super) struct Wake {
+    /// `listen-start wake` sent, not yet answered.
+    asked: Option<Instant>,
+    /// Its stream is open, since.
+    open: Option<Instant>,
+    /// "Hey Capri" was heard and checked: his turn is being taken.
+    turn: bool,
+    /// Why it is closed for now (her tag says so), and when to ask again.
+    paused: Option<String>,
+    retry_at: Option<Instant>,
+    /// Its stream died: not reopened on whatever the default source is now (a settings reload
+    /// or a new sidecar clears it).
+    lost: bool,
+}
+
+/// Asked for, not answered: ask again after this long. Closed for a call or the lock: ask again this often.
+const WAKE_RETRY: Duration = Duration::from_secs(3);
+
 /// A toggled turn (`talk toggle`): open until his pause, a second tap, Esc or `talk cancel`.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Toggle {
@@ -105,6 +126,8 @@ pub(super) struct VoiceState {
     pub toggle: Option<Toggle>,
     /// A hands-free conversation, while it lasts.
     pub hf: Option<HandsFree>,
+    /// The wake word's stream (a draft, off by default).
+    pub wake: Wake,
     /// A session turn is running (she is thinking or writing).
     busy: bool,
     /// A toggle was taken and its key is not yet seen up: more toggles are its auto-repeat.
@@ -215,6 +238,14 @@ impl Avatar {
         let c = &self.voice.cfg;
         let cfg = serde_json::json!({ "op": "config", "stt_model": c.stt_model, "voice": c.voice, "speed": c.speed, "pace": c.pace, "flow": c.flow, "duck_ignore": ignore });
         self.voice_send(cfg);
+        // New settings take a fresh wake stream (a new sensitivity; the word back on after a lost one).
+        let w = &mut self.voice.wake;
+        w.lost = false;
+        w.retry_at = None;
+        if w.open.is_some() && !w.turn {
+            w.open = None;
+            self.voice_send(serde_json::json!({ "op": "listen-cancel" }));
+        }
     }
 
     fn voice_send(&mut self, v: serde_json::Value) {
@@ -236,6 +267,7 @@ impl Avatar {
         self.voice.mic = None;
         self.voice.asked = None;
         self.voice.transcribing = false;
+        self.voice.wake = Wake::default();
         self.voice_stop_speech();
         self.hint = Some(("VOICE OFF · SIDECAR GONE".into(), Instant::now() + Duration::from_secs(4)));
         self.voice_changed(cx);
@@ -373,6 +405,65 @@ impl Avatar {
             return self.voice_toggle_tap(cx);
         }
         self.voice_toggle_start(cx)
+    }
+
+    // ---- the wake word (a draft) ------------------------------------------------------------
+
+    /// Another capture of his is asked for or open (the sidecar closes the wake stream for it).
+    fn voice_other_mic(&self) -> bool {
+        self.voice.toggle.is_some() || self.voice.hf.is_some() || self.talk_down.is_some() || self.voice.asked.is_some()
+            || (self.voice.mic.is_some() && !self.voice.wake.turn)
+    }
+
+    /// Each tick: the wake stream is asked for while his setting is on and nothing keeps it
+    /// closed; a secret on screen or her hidden closes it (and its turn) at once.
+    fn voice_wake_tick(&mut self, cx: &mut Context<Self>) {
+        let now = Instant::now();
+        let want = self.voice.cfg.wake_word && self.voice_on();
+        let block = if want { self.voice_mic_refusal(true).map(|b| b.replace("NO MIC", "WAKE PAUSED")) } else { None };
+        let w = &mut self.voice.wake;
+        if w.asked.is_some_and(|a| now - a >= WAKE_RETRY) {
+            w.asked = None;          // never answered (closed for another capture before it opened)
+        }
+        let stream = w.open.is_some() || w.asked.is_some();
+        if stream && (!want || block.is_some()) {
+            self.voice_send(serde_json::json!({ "op": "listen-cancel" }));
+            self.voice_wake_closed(cx);
+            elog!("synaps-avatar: voice: wake word closed ({})", block.as_deref().unwrap_or("off"));
+        }
+        let w = &mut self.voice.wake;
+        if w.paused != block && (block.is_some() || w.paused.as_deref().is_some_and(|p| p.contains("SECRET") || p.contains("HIDDEN"))) {
+            w.paused = block.clone();
+            self.voice_changed(cx);
+        }
+        let w = &self.voice.wake;
+        if !want || block.is_some() || w.lost || w.open.is_some() || w.asked.is_some() || w.retry_at.is_some_and(|t| now < t) || self.voice_other_mic() {
+            return;
+        }
+        if !self.voice_connect(cx) {
+            return;
+        }
+        let c = &self.voice.cfg;
+        let msg = serde_json::json!({ "op": "listen-start", "mode": "wake", "sensitivity": c.wake_sensitivity, "silence_s": c.silence_s, "echo": c.echo });
+        self.voice_send(msg);
+        self.voice.wake.asked = Some(now);
+        self.voice.wake.retry_at = None;
+    }
+
+    /// The wake stream is gone (closed by us, or the sidecar said so): its turn too.
+    fn voice_wake_closed(&mut self, cx: &mut Context<Self>) {
+        let w = &mut self.voice.wake;
+        w.open = None;
+        w.asked = None;
+        if std::mem::take(&mut w.turn) {
+            self.voice.mic = None;
+            self.voice.level = 0.0;
+            if self.voice.held && !self.voice_speaking() {
+                self.voice.held = false;
+                self.voice_send(serde_json::json!({ "op": "media-release", "after_ms": RESTORE_MS }));
+            }
+        }
+        self.voice_changed(cx);
     }
 
     // ---- hands-free -----------------------------------------------------------------------
@@ -698,6 +789,69 @@ impl Avatar {
         let now = Instant::now();
         let ev = v.get("ev").and_then(|e| e.as_str()).unwrap_or("");
         match ev {
+            "mic-open" if v.get("mode").and_then(|m| m.as_str()) == Some("wake") => {
+                let w = &mut self.voice.wake;
+                w.open = Some(now);
+                w.asked = None;
+                w.paused = None;
+                elog!("synaps-avatar: voice: wake word listening (sensitivity {})", self.voice.cfg.wake_sensitivity);
+                self.voice_changed(cx);
+            }
+            "mic-closed" if v.get("mode").and_then(|m| m.as_str()) == Some("wake") => {
+                // Refused before it opened: the sidecar's `heard` with the reason follows.
+                if self.voice.wake.open.is_some() || self.voice.wake.turn {
+                    self.voice_wake_closed(cx);
+                }
+            }
+            // "Hey Capri", checked: his turn is taken as a toggle's (it ends on his pause).
+            "wake" => {
+                let w = &mut self.voice.wake;
+                if w.open.is_none() {
+                    return;
+                }
+                w.turn = true;
+                self.voice.mic = Some(now);
+                self.voice.keyup = None;
+                if let Some(ms) = v.get("ms").and_then(|m| m.as_object()) {
+                    for (k, x) in ms {
+                        self.voice.stats.insert(format!("wake_{k}"), x.clone());
+                    }
+                }
+                if self.voice_speaking() {
+                    self.voice_stop_speech();
+                }
+                let mode = self.voice.cfg.duck.clone();
+                self.voice_send(serde_json::json!({ "op": "media-hold", "mode": mode }));
+                self.voice.held = true;
+                elog!("synaps-avatar: voice: wake word: \"hey capri\"");
+                self.voice_changed(cx);
+            }
+            "wake-handsfree" => {
+                self.voice.wake.turn = false;
+                self.voice.mic = None;
+                self.voice.transcribing = false;
+                elog!("synaps-avatar: voice: wake word: let's talk");
+                let r = self.voice_hf_start(cx);
+                if !r.starts_with("ok") {
+                    self.voice_send(serde_json::json!({ "op": "media-release" }));
+                    self.voice.held = false;
+                }
+            }
+            "wake-end" => {
+                let why = v.get("why").and_then(|x| x.as_str()).unwrap_or("");
+                let w = &mut self.voice.wake;
+                let (label, again) = match why {
+                    "call" => ("WAKE PAUSED · IN A CALL", Some(WAKE_RETRY)),
+                    "lock" => ("WAKE PAUSED · SCREEN LOCKED", Some(WAKE_RETRY)),
+                    "false starts" => ("WAKE PAUSED · TOO MANY FALSE STARTS", Some(Duration::from_secs(600))),
+                    _ => ("WAKE OFF · MIC LOST", None),
+                };
+                w.paused = Some(label.into());
+                w.retry_at = again.map(|d| now + d);
+                w.lost = again.is_none();
+                elog!("synaps-avatar: voice: wake word ended ({why})");
+                self.voice_wake_closed(cx);
+            }
             "mic-open" => {
                 self.voice.mic = Some(now);
                 if let Some(a) = self.voice.asked {
@@ -779,6 +933,16 @@ impl Avatar {
                     self.voice_changed(cx);
                     return;
                 }
+                if self.voice.wake.turn {
+                    self.voice.mic = None;
+                    self.voice.level = 0.0;
+                    if why != "nothing" {
+                        self.voice.keyup = Some(now);
+                        self.voice.transcribing = true;
+                    }
+                    self.voice_changed(cx);
+                    return;
+                }
                 if self.voice.toggle.is_some() {
                     self.voice.asked = None;
                     if why != "nothing" {
@@ -798,8 +962,24 @@ impl Avatar {
                     self.voice_changed(cx);
                 }
             }
+            // The wake stream refused (a call, the lock, paused, no model): not now; asked again later.
+            "heard"
+                if self.voice.wake.asked.is_some()
+                    && self.voice.wake.open.is_none()
+                    && v.get("text").and_then(|t| t.as_str()).unwrap_or("").is_empty() =>
+            {
+                let why = v.get("why").and_then(|t| t.as_str()).unwrap_or("").replace("NO MIC", "WAKE PAUSED");
+                let w = &mut self.voice.wake;
+                w.asked = None;
+                w.lost = why.contains("NO MODEL") || why.contains("TEST SIDECAR") || why.contains("SOURCE IS GONE");
+                w.retry_at = (!w.lost).then(|| now + if why.contains("FALSE STARTS") { Duration::from_secs(60) } else { WAKE_RETRY });
+                elog!("synaps-avatar: voice: wake word refused ({why})");
+                w.paused = Some(why);
+                self.voice_changed(cx);
+            }
             "heard" => {
                 self.voice.transcribing = false;
+                self.voice.wake.turn = false;
                 self.voice.heard_at = Some(now);
                 let text = v.get("text").and_then(|t| t.as_str()).unwrap_or("").trim().to_string();
                 if let Some(ms) = v.get("ms").and_then(|m| m.as_object()) {
@@ -1189,6 +1369,7 @@ impl Avatar {
     pub(super) fn voice_tick(&mut self, now: Instant, cx: &mut Context<Self>) -> bool {
         self.voice_guard();
         self.voice_mic_guard(cx);
+        self.voice_wake_tick(cx);
         if self.voice.lips.is_none() && self.voice.mic.is_none() {
             return false;
         }
@@ -1211,7 +1392,8 @@ impl Avatar {
         if let Some(t) = [timer, self.voice.mic_check_at].into_iter().flatten().min() {
             return Some(t);
         }
-        self.voice.retry_at.filter(|_| self.voice_on() && self.voice.link.is_none())
+        let wake = self.voice.wake.retry_at.filter(|_| self.voice.cfg.wake_word && self.voice_on());
+        [self.voice.retry_at.filter(|_| self.voice_on() && self.voice.link.is_none()), wake].into_iter().flatten().min()
     }
 
     /// The tag while the mic is open, he waits for the words, or she speaks.
@@ -1235,8 +1417,15 @@ impl Avatar {
         if self.voice.asked.is_some() {
             return Some(Status { label: "MIC …".into(), tone: 0xff3b62, invert: false, glyph: "ring".into() });
         }
+        // The idle wake stream: open all along, so it keeps the first slot; static (no timer, no meter).
+        if self.voice.wake.open.is_some() {
+            return Some(Status { label: "MIC ON · SAY \"HEY CAPRI\"".into(), tone: 0xb8435c, invert: false, glyph: "ring".into() });
+        }
         if self.voice.transcribing {
             return Some(Status { label: "HEARD · …".into(), tone: self.pack.tone(Some("think")), invert: false, glyph: "dots".into() });
+        }
+        if let Some(p) = self.voice.wake.paused.as_ref().filter(|_| self.voice.cfg.wake_word && !self.voice_speaking()) {
+            return Some(Status { label: p.clone(), tone: 0x8a5a66, invert: false, glyph: String::new() });
         }
         if self.voice_speaking() {
             let s = self.voice_shape(Instant::now()).unwrap_or(0);
@@ -1272,14 +1461,16 @@ impl Avatar {
             "speak_unprompted": self.voice.cfg.speak_unprompted, "sidecar_unprompted": self.voice.can_unprompted,
             "shape": self.voice_shape(Instant::now()), "held": self.voice.held, "repeats_ignored": self.voice.repeats,
             "mic": {
-                "open": self.voice.mic.is_some(),
-                "mode": if self.voice.hf.is_some() { "handsfree" } else if self.voice.toggle.is_some() { "toggle" } else if self.voice_listening() { "ptt" } else { "" },
-                "since_ms": self.voice.mic.map(|m| m.elapsed().as_millis() as u64),
+                "open": self.voice.mic.is_some() || self.voice.wake.open.is_some(),
+                "mode": if self.voice.hf.is_some() { "handsfree" } else if self.voice.toggle.is_some() { "toggle" } else if self.voice.wake.turn { "wake-turn" } else if self.voice_listening() { "ptt" } else if self.voice.wake.open.is_some() { "wake" } else { "" },
+                "since_ms": self.voice.mic.or(self.voice.wake.open).map(|m| m.elapsed().as_millis() as u64),
             },
             "toggle": self.voice.toggle.map(|t| serde_json::json!({ "hearing": t.hearing, "opened_line": t.opened_line, "ms": t.at.elapsed().as_millis() as u64 })),
             "hint": self.hint.as_ref().filter(|h| h.1 > Instant::now()).map(|h| h.0.clone()),
             "handsfree": self.voice.hf.map(|h| serde_json::json!({ "ms": h.since.elapsed().as_millis() as u64, "quiet_ms": h.quiet_since.elapsed().as_millis() as u64, "hearing": h.hearing, "left_s": self.voice_hf_left() })),
             "busy": self.voice.busy,
+            "wake": { "on": self.voice.cfg.wake_word, "sensitivity": self.voice.cfg.wake_sensitivity, "open": self.voice.wake.open.is_some(),
+                      "asked": self.voice.wake.asked.is_some(), "turn": self.voice.wake.turn, "paused": self.voice.wake.paused, "lost": self.voice.wake.lost },
             "toggle_lock": self.voice.toggle_lock, "toggles_ignored": self.voice.toggles_ignored, "silence_s": self.voice.cfg.silence_s,
             "stats": serde_json::Value::Object(self.voice.stats.clone()),
         })
