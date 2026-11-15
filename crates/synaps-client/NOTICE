@@ -1,0 +1,16 @@
+synaps-client (vendored in capri-syn)
+Copyright (c) 2026 Haseeb Khalid
+
+Licensed under the MIT License (see LICENSE).
+
+Parts of it are ported from, or mirror, SynapsCLI
+(https://github.com/HaseebKhalid1507/SynapsCLI), which is licensed under the
+Apache License, Version 2.0 (see LICENSE-APACHE):
+
+- src/ipc.rs        endpoint/pipe naming and the same-user check
+                    (from SynapsCLI crates/agent-engine/src/ipc.rs)
+- src/protocol.rs   the daemon wire protocol types
+- src/discovery.rs  the base-dir and socket discovery order
+
+Those portions remain under the Apache License, Version 2.0. The modifications
+are distributed under the MIT License.

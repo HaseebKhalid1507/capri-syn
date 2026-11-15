@@ -1,0 +1,30 @@
+[package]
+name = "synaps-client"
+description = "Thin wire client for the Synaps daemon: discovery, connection, protocol mirrors. No GUI."
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.98"
+publish = false
+license = "MIT"
+
+# Vendored from synaps-desk (see VENDORED.md). The dependency specs are the ones
+# synaps-desk's workspace gave it, written out here because capri-syn has no shared table.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+tokio = { version = "1", default-features = false, features = ["rt", "net", "io-util", "time", "sync", "macros"] }
+async-channel = "2"
+anyhow = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+sha2 = "0.10"
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }
