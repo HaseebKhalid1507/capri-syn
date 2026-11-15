@@ -37,7 +37,7 @@ application name contains it.
 Other modes: --render TEXT --out F.wav [--voice V --speed S --flow F --pace P] (a sample; never the mic),
 --selftest (no audio device; with the models, the graph patch and the flow rules).
 """
-import collections, json, os, re, select, shutil, signal, socket, subprocess, sys, threading, time, zlib
+import collections, json, math, os, re, select, shutil, signal, socket, subprocess, sys, threading, time, zlib
 
 import numpy as np
 
@@ -1618,11 +1618,10 @@ class Voice:
             # Her first sentence: does her voice come back through the mic? The mic's level on a 20 ms
             # grid, each frame timed from the chunk's arrival, against her playback's level.
             if observe and echo == 'headphones':      # only while a sentence of hers is to be checked
-                n20 = MIC_RATE // 50
-                lv = env_db(x, n20)
-                t_end = time.time()
-                for j, v in enumerate(lv):
-                    ring.append((t_end - (len(x) - j * n20) / MIC_RATE, float(v)))
+                n20, t_end = MIC_RATE // 50, time.time()
+                for j in range(len(x) // n20):
+                    seg = x[j * n20:(j + 1) * n20]
+                    ring.append((t_end - (len(x) - j * n20) / MIC_RATE, 10 * math.log10(float(seg @ seg) / n20 + 1e-12)))
             if observe and echo == 'headphones':
                 pl = self.played
                 if check is None and playing and pl:
