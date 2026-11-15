@@ -158,8 +158,8 @@ from GitHub at that commit, or given with `--sleep FILE`. It needs `fonttools` f
 Toolchain 1.100.0 (`rust-toolchain.toml`). GPUI is pinned exactly: `gpui-kit =0.9.1`,
 `gpui-pre =0.3.12`.
 
-`synaps-client` is a git dependency on the private synaps-desktop repo, pinned to an exact rev.
-`.cargo/config.toml` sets `net.git-fetch-with-cli`, so the machine's GitHub credentials are used.
+`synaps-client` is vendored in `crates/synaps-client` (a workspace member, path dependency):
+capri-syn has no git dependencies. Its source and how to sync it: `crates/synaps-client/VENDORED.md`.
 
 ### Maintainer notes
 
@@ -208,4 +208,5 @@ windows, each with `real` to go back to the real senses).
 - No real secrets, ever: secret prompts are tested against the fake daemon only.
 
 CI (`.github/workflows/ci.yml`) runs clippy and the unit tests headless. Nothing in them needs a display
-or a GPU. It needs a `SYNAPS_DESKTOP_TOKEN` secret (read access to synaps-desktop) to fetch `synaps-client`.
+or a GPU. No secrets and no git dependencies: `synaps-client` is vendored. It covers the whole workspace,
+so the client's own tests run too.
