@@ -57,10 +57,6 @@ she acts when one of them wins.
 <table>
   <tr>
     <td width="50%" align="center"><img src="docs/media/tour-headpat.webp" width="100%" alt="The pointer clicks Capri's head twice and hearts float up"><br><b>Headpats</b><br><sub>Headpats are supported. Hearts are not optional.</sub></td>
-    <td width="50%" align="center"><img src="docs/media/tour-music.webp" width="100%" alt="Music starts playing: Capri puts headphones on, notes float up and her tag reads LISTENING"><br><b>Music</b><br><sub>Something's playing? Headphones on.</sub></td>
-  </tr>
-  <tr>
-    <td width="50%" align="center"><img src="docs/media/tour-moods.webp" width="100%" alt="Her bubble and tag go from THINKING to WORKING with bash to DONE as her session runs a turn"><br><b>Moods</b><br><sub>Her mood is your session's: thinking, working, done.</sub></td>
     <td width="50%" align="center"><img src="docs/media/tour-facing.webp" width="100%" alt="The pointer drags Capri right, then left; each time she turns to look back the way she came"><br><b>Facing</b><br><sub>Drag her one way. She looks back the other.</sub></td>
   </tr>
 </table>
@@ -76,24 +72,6 @@ you're doing.
   <img src="docs/media/tour-line.webp" width="100%" alt="A key press opens the Line beside Capri with the earlier exchange in its thread; a message is typed, sent, and her reply streams in">
   <br><b>The Line</b><br>
   <sub>Tap $mod+c. Type. She relays it to her session.</sub>
-</p>
-
-<p align="center">
-  <img src="docs/media/tour-allow.webp" width="100%" alt="A risky tool prompt appears in the Line; a tap of A is refused, holding A fills the ALLOW button and the call goes through">
-  <br><b>Hold to allow</b><br>
-  <sub>Risky tool call? Hold A. A tap does nothing.</sub>
-</p>
-
-<p align="center">
-  <img src="docs/media/tour-reader.webp" width="100%" alt="A long reply opens in the reader panel beside Capri, with a heading, a numbered list and a code block, and scrolls">
-  <br><b>Reader</b><br>
-  <sub>Long reply? It opens in a reader, not a bubble.</sub>
-</p>
-
-<p align="center">
-  <img src="docs/media/tour-voice.webp" width="100%" alt="The mic row shows what she heard; her reply appears as captions while she speaks">
-  <br><b>Voice</b><br>
-  <sub>Hold the key, talk, let go. She answers aloud.</sub>
 </p>
 
 - **The thread stays open.** Enter sends, or steers a turn that's already running. Esc closes and keeps
