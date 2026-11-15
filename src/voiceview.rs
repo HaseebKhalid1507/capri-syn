@@ -444,7 +444,8 @@ impl Avatar {
             return;
         }
         let c = &self.voice.cfg;
-        let msg = serde_json::json!({ "op": "listen-start", "mode": "wake", "sensitivity": c.wake_sensitivity, "silence_s": c.silence_s, "echo": c.echo });
+        let sens = (f64::from(c.wake_sensitivity) * 100.0).round() / 100.0;
+        let msg = serde_json::json!({ "op": "listen-start", "mode": "wake", "sensitivity": sens, "silence_s": c.silence_s, "echo": c.echo });
         self.voice_send(msg);
         self.voice.wake.asked = Some(now);
         self.voice.wake.retry_at = None;

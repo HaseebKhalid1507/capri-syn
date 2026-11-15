@@ -5,7 +5,8 @@
 # the shift is done inside the model.
 #   ~/.local/share/capri-voice/models ggml-small.en-q5_1 (190 MB), ggml-base.en-q5_1 (60 MB),
 #                                     kokoro-v1.0.int8.onnx (92 MB), kokoro-v1.0.onnx (326 MB), voices-v1.0.bin (28 MB),
-#                                     silero_vad.onnx (2.3 MB)
+#                                     silero_vad.onnx (2.3 MB); the wake word's melspectrogram.onnx,
+#                                     embedding_model.onnx (2.4 MB) and hey-capri-v1.npz (from tools/wake)
 # pywhispercpp itself comes from the distro (python-pywhispercpp-cpu on bella).
 set -eu
 V=~/.local/share/capri-voice; mkdir -p $V/models; cd $V
@@ -19,5 +20,13 @@ for m in kokoro-v1.0.int8.onnx voices-v1.0.bin; do [ -s models/$m ] || curl -sSf
 S=https://raw.githubusercontent.com/snakers4/silero-vad/v5.1.2/src/silero_vad/data/silero_vad.onnx
 [ -s models/silero_vad.onnx ] || curl -sSfL -o models/silero_vad.onnx $S
 echo "2623a2953f6ff3d2c1e61740c6cdb7168133479b267dfef114a4a3cc5bdd788f  models/silero_vad.onnx" | sha256sum -c --quiet
+# The wake word (a draft; [voice] wake_word, off by default): openWakeWord v0.5.1's two feature models (its
+# README: code Apache-2.0, released models CC BY-NC-SA 4.0, so personal use; fetched here, not in the repo)
+# and our "hey capri" head (tools/wake), trained on stock TTS voices only.
+W=https://github.com/dscripka/openWakeWord/releases/download/v0.5.1
+for m in melspectrogram.onnx embedding_model.onnx; do [ -s models/$m ] || curl -sSfL -o models/$m $W/$m; done
+printf '%s  %s\n' ba2b0e0f8b7b875369a2c89cb13360ff53bac436f2895cced9f479fa65eb176f models/melspectrogram.onnx \
+  70d164290c1d095d1d4ee149bc5e00543250a7316b59f31d056cff7bd3075c1f models/embedding_model.onnx | sha256sum -c --quiet
+install -m 644 "$(dirname "$(readlink -f "$0")")/wake/hey-capri-v1.npz" models/hey-capri-v1.npz
 venv/bin/python -c "import kokoro_onnx, pywhispercpp; print('capri-voice: ok')"
 du -sh venv models

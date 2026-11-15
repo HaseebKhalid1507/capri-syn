@@ -127,8 +127,8 @@ ECHO_WORDS, ECHO_WINDOW_S = 0.7, 15.0   # a transcript this much made of what sh
 
 # ---- the wake word ("hey capri"): a DRAFT, off by default -------------------------------------
 #
-# Stage 1: openWakeWord's front end (its v0.5.1 melspectrogram + embedding onnx, Apache-2.0; the
-# files are SHA-pinned), streamed: every 80 ms the mel of the last 110 ms, one 96-number embedding
+# Stage 1: openWakeWord's front end (its v0.5.1 melspectrogram + embedding onnx; its README: code
+# Apache-2.0, released models CC BY-NC-SA 4.0, so personal use; SHA-pinned), streamed: every 80 ms the mel of the last 110 ms, one 96-number embedding
 # from the last 76 mel frames; our head (1536 -> 64 -> 1, numpy) scores the last 16 embeddings (~2 s).
 # Two hops in a row over the threshold = a candidate. Stage 2: the loaded Whisper decodes the last
 # 2 s; it must say a hey-like word, then capri-like (whole word: "Capricorn" fails). Trained on stock
