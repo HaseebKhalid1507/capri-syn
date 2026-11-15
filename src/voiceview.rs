@@ -20,6 +20,8 @@ const RECONNECT: Duration = Duration::from_secs(10);
 const KEY_POLL: Duration = Duration::from_millis(30);
 /// While a toggled mic is open, the sidecar is asked this often whether it really is (it wins).
 const MIC_CHECK: Duration = Duration::from_secs(2);
+/// Not drawn this long for a reason other than hiding (a teleport): a hands-off mic closes.
+const HIDDEN_GRACE: Duration = Duration::from_secs(2);
 
 /// A toggled turn (`talk toggle`): open until his pause, a second tap, Esc or `talk cancel`.
 #[derive(Clone, Copy, Debug)]
@@ -84,6 +86,8 @@ pub(super) struct VoiceState {
     /// A toggle was taken and its key is not yet seen up: more toggles are its auto-repeat.
     toggle_lock: bool,
     toggles_ignored: u32,
+    /// She isn't drawn (any reason), since.
+    hidden_since: Option<Instant>,
     mic_check_at: Option<Instant>,
     /// Timings of the last turn (ms), for `voice stats`.
     keyup: Option<Instant>,
@@ -352,9 +356,14 @@ impl Avatar {
         if self.prompt_ui.as_ref().is_some_and(|p| p.view.secret) || self.input.as_ref().is_some_and(|i| i.secret.is_some()) {
             return Some("NO MIC · A SECRET IS ON SCREEN");
         }
-        // Her tag must be on screen while a hands-off mic is open.
-        if hands_off && self.hidden_reason().is_some() {
-            return Some("NO MIC · SHE IS HIDDEN");
+        // Her tag must be on screen while a hands-off mic is open. A teleport (she moves; the
+        // Line's opening moves her too) is not hiding unless it lasts.
+        if hands_off {
+            match self.hidden_reason() {
+                Some("user" | "fullscreen") => return Some("NO MIC · SHE IS HIDDEN"),
+                Some(_) if self.voice.hidden_since.is_some_and(|t| t.elapsed() >= HIDDEN_GRACE) => return Some("NO MIC · SHE IS HIDDEN"),
+                _ => {}
+            }
         }
         None
     }
@@ -451,6 +460,11 @@ impl Avatar {
 
     /// A secret on screen closes any open mic; hiding closes a toggled one. Each tick.
     fn voice_mic_guard(&mut self, cx: &mut Context<Self>) {
+        match (self.hidden_reason(), self.voice.hidden_since) {
+            (Some(_), None) => self.voice.hidden_since = Some(Instant::now()),
+            (None, Some(_)) => self.voice.hidden_since = None,
+            _ => {}
+        }
         if !self.voice_listening() {
             return;
         }
@@ -991,6 +1005,7 @@ impl Avatar {
                 "since_ms": self.voice.mic.map(|m| m.elapsed().as_millis() as u64),
             },
             "toggle": self.voice.toggle.map(|t| serde_json::json!({ "hearing": t.hearing, "opened_line": t.opened_line, "ms": t.at.elapsed().as_millis() as u64 })),
+            "hint": self.hint.as_ref().filter(|h| h.1 > Instant::now()).map(|h| h.0.clone()),
             "toggle_lock": self.voice.toggle_lock, "toggles_ignored": self.voice.toggles_ignored, "silence_s": self.voice.cfg.silence_s,
             "stats": serde_json::Value::Object(self.voice.stats.clone()),
         })
