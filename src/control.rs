@@ -74,6 +74,8 @@ pub enum Command {
     TalkToggle,
     /// `talk cancel`: an open mic closes, nothing is sent.
     TalkCancel,
+    /// `talk handsfree on|off`: a hands-free conversation (the mic stays open across turns).
+    TalkHandsfree(bool),
     /// Close the Line (as Esc).
     LineClose,
     /// Copy her last reply as written.
@@ -374,7 +376,9 @@ impl Command {
                 "release" => Command::Talk(false),
                 "toggle" => Command::TalkToggle,
                 "cancel" => Command::TalkCancel,
-                _ => bail!("usage: talk press|release|toggle|cancel"),
+                "handsfree on" => Command::TalkHandsfree(true),
+                "handsfree off" => Command::TalkHandsfree(false),
+                _ => bail!("usage: talk press|release|toggle|cancel|handsfree on|off"),
             },
             "line" => match rest {
                 "close" => Command::LineClose,
@@ -404,7 +408,7 @@ impl Command {
             "show" => Command::Show,
             "quit" => Command::Quit,
             _ => bail!(
-                "unknown command `{line}` (mood <name> | clip <id> | say <text> | talk press|release|toggle|cancel | pos <x> <y> [now] | perch [sit|stand] [win] | perch off | drop | stack | page next|prev | scroll <n> | reader open [focus]|close|copy [n]|scroll <px> | collapse | expand | music on|off | glitch | submit <text> | abort | prompt confirm|secret [text] | brain … | settings reload | tap head|body | state | hide | show | quit)"
+                "unknown command `{line}` (mood <name> | clip <id> | say <text> | talk press|release|toggle|cancel|handsfree on|off | pos <x> <y> [now] | perch [sit|stand] [win] | perch off | drop | stack | page next|prev | scroll <n> | reader open [focus]|close|copy [n]|scroll <px> | collapse | expand | music on|off | glitch | submit <text> | abort | prompt confirm|secret [text] | brain … | settings reload | tap head|body | state | hide | show | quit)"
             ),
         })
     }
@@ -518,5 +522,8 @@ mod tests {
         assert!(matches!(Command::parse("talk cancel").unwrap(), Command::TalkCancel));
         assert!(matches!(Command::parse("talk").unwrap(), Command::Talk(true)));
         assert!(Command::parse("talk twice").is_err());
+        assert!(matches!(Command::parse("talk handsfree on").unwrap(), Command::TalkHandsfree(true)));
+        assert!(matches!(Command::parse("talk handsfree off").unwrap(), Command::TalkHandsfree(false)));
+        assert!(Command::parse("talk handsfree").is_err());
     }
 }

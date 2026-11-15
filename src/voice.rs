@@ -171,6 +171,37 @@ pub fn wrap(text: &str) -> String {
     format!("{HINT} {text}")
 }
 
+/// A hands-free utterance that ends the conversation ("that's all", "goodbye"): the whole of it,
+/// after a leading ok/okay/alright/thanks and a trailing capri/thanks/for now; never over 6 words.
+pub fn end_phrase(text: &str) -> bool {
+    let norm: String = text.to_lowercase().chars().map(|c| if c.is_alphanumeric() || c == '\'' || c == ' ' { c } else { ' ' }).collect();
+    let mut w: Vec<&str> = norm.split_whitespace().collect();
+    if w.is_empty() || w.len() > 6 {
+        return false;
+    }
+    while let Some(&first) = w.first() {
+        if ["ok", "okay", "alright", "thanks"].contains(&first) && w.len() > 1 {
+            w.remove(0);
+        } else if first == "all" && w.get(1) == Some(&"right") && w.len() > 2 {
+            w.drain(..2);
+        } else {
+            break;
+        }
+    }
+    loop {
+        let n = w.len();
+        if n > 1 && ["capri", "thanks"].contains(&w[n - 1]) {
+            w.pop();
+        } else if n > 2 && matches!((w[n - 2], w[n - 1]), ("for", "now") | ("thank", "you")) {
+            w.truncate(n - 2);
+        } else {
+            break;
+        }
+    }
+    let p = w.join(" ");
+    ["that's all", "that is all", "that'll be all", "we're done", "we are done", "stop listening", "goodbye", "bye", "bye bye"].contains(&p.as_str())
+}
+
 /// His words, if `user_text` is a spoken turn (the hint stripped).
 pub fn spoken(user_text: &str) -> Option<&str> {
     let t = user_text.strip_prefix("[voice")?;
@@ -372,6 +403,16 @@ fn sentences(s: &str, finished: bool) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hands_free_ends_on_a_whole_end_phrase_only() {
+        for t in ["That's all.", "Okay, that's all, Capri.", "Thanks, that's all for now.", "We're done", "Stop listening.", "Goodbye!", "bye", "Alright, we're done, thanks", "OK. That is all."] {
+            assert!(end_phrase(t), "{t}");
+        }
+        for t in ["That's all I wanted to say about the build, really.", "Is that all?", "Tell lynx goodbye", "Stop", "Don't stop listening", "", "Bye the way, what's next", "okay"] {
+            assert!(!end_phrase(t), "{t}");
+        }
+    }
 
     #[test]
     fn sentences_come_whole_and_in_order_as_the_reply_streams() {

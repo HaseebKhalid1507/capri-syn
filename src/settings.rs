@@ -136,7 +136,12 @@ pub struct Settings {
 /// replies to what arrives on its own (events, hooks, other sessions' messages) are spoken
 /// too (default true; never over music, an approval or a secret); `silence_s`: the pause that
 /// ends a toggled turn (`talk toggle`, 0.5..5 s, default 1.0); `toggle_key`: the toggle chord's
-/// letter (`$mod+Ctrl+c` in i3): its auto-repeat is one toggle.
+/// letter (`$mod+Ctrl+c` in i3): its auto-repeat is one toggle; `handsfree`: the double-tap (and
+/// `talk handsfree on`) can start a hands-free conversation (default true; it is always off at
+/// launch); `handsfree_timeout`: it ends after this many seconds with no accepted turn (15..600,
+/// default 60); `handsfree_max`: and after this many minutes in all (0 = never, default 30);
+/// `echo`: "auto" (default: the sink's port says headphones or speakers), "headphones" (talking
+/// over her stops her) or "speakers" (the mic is deaf while she speaks).
 #[derive(Clone, Debug, PartialEq)]
 pub struct VoiceSettings {
     pub enabled: bool,
@@ -152,6 +157,10 @@ pub struct VoiceSettings {
     pub key: char,
     pub silence_s: f32,
     pub toggle_key: char,
+    pub handsfree: bool,
+    pub handsfree_timeout: u32,
+    pub handsfree_max: u32,
+    pub echo: String,
 }
 
 /// Her voice (Haseeb's picks, LOCKED 13 + 14): W3, the bright blend (timbre af_heart/af_bella/
@@ -163,7 +172,7 @@ pub const SPEED: f32 = 1.2987;
 
 impl Default for VoiceSettings {
     fn default() -> Self {
-        VoiceSettings { enabled: false, stt_model: "small.en".into(), voice: VOICE.into(), speed: SPEED, pace: "stretch".into(), flow: "emphasis".into(), duck: "duck".into(), speak_unprompted: true, key: 'c', silence_s: 1.0, toggle_key: 'c' }
+        VoiceSettings { enabled: false, stt_model: "small.en".into(), voice: VOICE.into(), speed: SPEED, pace: "stretch".into(), flow: "emphasis".into(), duck: "duck".into(), speak_unprompted: true, key: 'c', silence_s: 1.0, toggle_key: 'c', handsfree: true, handsfree_timeout: 60, handsfree_max: 30, echo: "auto".into() }
     }
 }
 
@@ -181,6 +190,10 @@ struct VoiceRaw {
     key: Option<String>,
     silence_s: Option<f64>,
     toggle_key: Option<String>,
+    handsfree: Option<bool>,
+    handsfree_timeout: Option<i64>,
+    handsfree_max: Option<i64>,
+    echo: Option<String>,
 }
 
 /// `[mirror]`: she faces where she goes. `drag`: turn while dragged (and flung), looking back
@@ -520,6 +533,21 @@ impl Settings {
                 anyhow::ensure!(s.is_finite() && (0.5..=5.0).contains(&s), "voice.silence_s must be 0.5..5 (seconds)");
                 voice.silence_s = s as f32;
             }
+            if let Some(h) = v.handsfree {
+                voice.handsfree = h;
+            }
+            if let Some(t) = v.handsfree_timeout {
+                anyhow::ensure!((15..=600).contains(&t), "voice.handsfree_timeout must be 15..600 (seconds)");
+                voice.handsfree_timeout = t as u32;
+            }
+            if let Some(m) = v.handsfree_max {
+                anyhow::ensure!((0..=600).contains(&m), "voice.handsfree_max must be 0..600 (minutes; 0 = never)");
+                voice.handsfree_max = m as u32;
+            }
+            if let Some(e) = v.echo.map(|e| e.trim().to_ascii_lowercase()) {
+                anyhow::ensure!(["auto", "headphones", "speakers"].contains(&e.as_str()), "voice.echo must be \"auto\", \"headphones\" or \"speakers\"");
+                voice.echo = e;
+            }
         }
         let Some(r) = raw.brain else { return Ok(Settings { brain: b, ragdoll, session, music, display, mirror, voice }) };
         if let Some(v) = r.enabled {
@@ -704,6 +732,11 @@ mod tests {
         assert_eq!((t.silence_s, t.toggle_key), (2.5, 'v'));
         assert!(Settings::parse("[voice]\nsilence_s = 0.2\n").is_err() && Settings::parse("[voice]\nsilence_s = 9\n").is_err());
         assert!(Settings::parse("[voice]\ntoggle_key = \"ctrl+c\"\n").is_err());
+        assert_eq!((v.handsfree, v.handsfree_timeout, v.handsfree_max, v.echo.as_str()), (true, 60, 30, "auto"));
+        let h = Settings::parse("[voice]\nhandsfree = false\nhandsfree_timeout = 15\nhandsfree_max = 0\necho = \"Speakers\"\n").unwrap().voice;
+        assert_eq!((h.handsfree, h.handsfree_timeout, h.handsfree_max, h.echo.as_str()), (false, 15, 0, "speakers"));
+        assert!(Settings::parse("[voice]\nhandsfree_timeout = 5\n").is_err() && Settings::parse("[voice]\nhandsfree_max = 9999\n").is_err());
+        assert!(Settings::parse("[voice]\necho = \"aec\"\n").is_err());
         assert!(Settings::parse("[mirror]\nflip = true\n").is_err());
     }
 

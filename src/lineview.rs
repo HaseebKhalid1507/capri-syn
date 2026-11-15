@@ -333,7 +333,7 @@ impl Avatar {
             }
             Ask::CancelListen => {
                 elog!("synaps-avatar: voice: esc in the Line while listening");
-                self.voice_cancel(cx);
+                self.voice_esc(cx);
                 Ok(())
             }
             Ask::Answer(id, value) => {

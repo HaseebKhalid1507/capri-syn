@@ -2162,6 +2162,16 @@ impl Avatar {
                 }
             }
             Command::TalkToggle => self.voice_toggle(cx),
+            Command::TalkHandsfree(on) => {
+                if on {
+                    self.voice_hf_start(cx)
+                } else if self.voice.hf.is_some() {
+                    self.voice_hf_end("HANDS-FREE OFF", cx);
+                    "ok hands-free off".into()
+                } else {
+                    "ok (not hands-free)".into()
+                }
+            }
             Command::TalkCancel => {
                 if self.voice_listening() {
                     self.voice_cancel(cx);
