@@ -107,6 +107,9 @@ const FLOAT_BOB_ON: f32 = 20.0;
 const FLOAT_BOB_CYCLE: f32 = 50.0;
 /// drop_in falls from this far above the spot (logical px): standing, posed.
 const DROP_IN_H: (f32, f32) = (240.0, 70.0);
+/// The pointer this close to her side (logical px), level with her face or chest: the look is
+/// straight ahead (`brain.lookFront`), not to the side.
+const FRONT_PX: f32 = 60.0;
 /// A leap this far up or across (logical px) takes the deeper crouch (`brain.bigHopCrouch`).
 const BIG_LEAP_UP: f32 = 150.0;
 const BIG_LEAP_DX: f32 = 220.0;
@@ -1812,8 +1815,10 @@ impl Avatar {
             .map(|s| match s {
                 Step::Clip(id) if id == "@look" => {
                     let sf = self.layout.sf;
-                    // Right in front of her (or on her): straight at him.
-                    let front = (c.0 - gx).abs() < (90.0 * sf) as i32 && c.1 >= head_y - (60.0 * sf) as i32 && c.1 <= gy;
+                    // Close, level with her face or chest (or on her): straight at him.
+                    let half = self.brain.as_ref().map_or(0, |h| h.boxes.stand.w / 2);
+                    let front = (c.0 - gx).abs() < half + (FRONT_PX * sf) as i32
+                        && (head_y - (80.0 * sf) as i32..=head_y + (200.0 * sf) as i32).contains(&c.1);
                     let f = if let Some(f) = self.pack.behaviour.brain.look_front.as_deref().filter(|_| front) {
                         f
                     } else if c.1 < head_y - (200.0 * sf) as i32 && (c.0 - gx).abs() < (300.0 * sf) as i32 {

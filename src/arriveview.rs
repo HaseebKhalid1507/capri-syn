@@ -74,6 +74,9 @@ impl Avatar {
             }
         }
         let seq = self.pack.flatten(&self.arrive_steps(k));
+        if !seq.is_empty() {
+            elog!("synaps-avatar: arrival {k:?}: {} frames", seq.len());
+        }
         self.arrive.on_appear = (!seq.is_empty()).then_some(seq);
     }
 
@@ -114,6 +117,7 @@ impl Avatar {
         self.hidden = true;
         self.glitch = None;
         self.teleport = Some(Teleport { seed, leg: Leg::Bolt(now), to: self.origin, place: self.placement, bolt: Some(bolt), moved: true, no_bolt: false, quiet: false });
+        elog!("synaps-avatar: arrival Launch: {} frames after the bolt", seq.len());
         self.arrive.on_appear = Some(seq);
         true
     }
