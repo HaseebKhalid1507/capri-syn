@@ -134,7 +134,9 @@ pub struct Settings {
 /// `duck`: what other audio does while she listens or speaks: "duck" (default: lowered
 /// -18 dB through PipeWire, then put back exactly), "pause" (MPRIS pause, then play) or "off"; `speak_unprompted`: her
 /// replies to what arrives on its own (events, hooks, other sessions' messages) are spoken
-/// too (default true; never over music, an approval or a secret).
+/// too (default true; never over music, an approval or a secret); `silence_s`: the pause that
+/// ends a toggled turn (`talk toggle`, 0.5..5 s, default 1.0); `toggle_key`: the toggle chord's
+/// letter (`$mod+Ctrl+c` in i3): its auto-repeat is one toggle.
 #[derive(Clone, Debug, PartialEq)]
 pub struct VoiceSettings {
     pub enabled: bool,
@@ -148,6 +150,8 @@ pub struct VoiceSettings {
     /// The talk key's letter (`$mod+c` in i3): a release while it is still down is an X
     /// auto-repeat, not his release.
     pub key: char,
+    pub silence_s: f32,
+    pub toggle_key: char,
 }
 
 /// Her voice (Haseeb's picks, LOCKED 13 + 14): W3, the bright blend (timbre af_heart/af_bella/
@@ -159,7 +163,7 @@ pub const SPEED: f32 = 1.2987;
 
 impl Default for VoiceSettings {
     fn default() -> Self {
-        VoiceSettings { enabled: false, stt_model: "small.en".into(), voice: VOICE.into(), speed: SPEED, pace: "stretch".into(), flow: "emphasis".into(), duck: "duck".into(), speak_unprompted: true, key: 'c' }
+        VoiceSettings { enabled: false, stt_model: "small.en".into(), voice: VOICE.into(), speed: SPEED, pace: "stretch".into(), flow: "emphasis".into(), duck: "duck".into(), speak_unprompted: true, key: 'c', silence_s: 1.0, toggle_key: 'c' }
     }
 }
 
@@ -175,6 +179,8 @@ struct VoiceRaw {
     duck: Option<String>,
     speak_unprompted: Option<bool>,
     key: Option<String>,
+    silence_s: Option<f64>,
+    toggle_key: Option<String>,
 }
 
 /// `[mirror]`: she faces where she goes. `drag`: turn while dragged (and flung), looking back
@@ -497,12 +503,22 @@ impl Settings {
             if let Some(u) = v.speak_unprompted {
                 voice.speak_unprompted = u;
             }
-            if let Some(k) = v.key.map(|k| k.trim().to_string()) {
-                let mut c = k.chars();
+            let letter = |k: String, what: &str| -> Result<char> {
+                let mut c = k.trim().chars();
                 match (c.next(), c.next()) {
-                    (Some(ch), None) if ch.is_ascii_alphanumeric() => voice.key = ch,
-                    _ => anyhow::bail!("voice.key must be one letter or digit (the talk key, as in $mod+c)"),
+                    (Some(ch), None) if ch.is_ascii_alphanumeric() => Ok(ch),
+                    _ => anyhow::bail!("voice.{what} must be one letter or digit (as in $mod+c)"),
                 }
+            };
+            if let Some(k) = v.key {
+                voice.key = letter(k, "key")?;
+            }
+            if let Some(k) = v.toggle_key {
+                voice.toggle_key = letter(k, "toggle_key")?;
+            }
+            if let Some(s) = v.silence_s {
+                anyhow::ensure!(s.is_finite() && (0.5..=5.0).contains(&s), "voice.silence_s must be 0.5..5 (seconds)");
+                voice.silence_s = s as f32;
             }
         }
         let Some(r) = raw.brain else { return Ok(Settings { brain: b, ragdoll, session, music, display, mirror, voice }) };
@@ -683,6 +699,11 @@ mod tests {
         assert!(v.speak_unprompted, "her replies to events are spoken by default");
         assert_eq!(v.duck, "duck", "browser video is lowered, not paused (Haseeb, 22:47)");
         assert!(!Settings::parse("[voice]\nspeak_unprompted = false\n").unwrap().voice.speak_unprompted);
+        assert_eq!((v.silence_s, v.toggle_key), (1.0, 'c'), "a toggled turn ends after 1 s of silence (LOCKED 16)");
+        let t = Settings::parse("[voice]\nsilence_s = 2.5\ntoggle_key = \"v\"\n").unwrap().voice;
+        assert_eq!((t.silence_s, t.toggle_key), (2.5, 'v'));
+        assert!(Settings::parse("[voice]\nsilence_s = 0.2\n").is_err() && Settings::parse("[voice]\nsilence_s = 9\n").is_err());
+        assert!(Settings::parse("[voice]\ntoggle_key = \"ctrl+c\"\n").is_err());
         assert!(Settings::parse("[mirror]\nflip = true\n").is_err());
     }
 
