@@ -1290,9 +1290,9 @@ impl Avatar {
             }
         }
         let mut seq: Seq = Vec::new();
-        // An arrival sequence (the launch intro) plays through; the new layer shows after it.
+        // An arrival sequence (the launch intro) plays through; the mood's entry follows it.
         let arriving = self.arriving(now);
-        if !self.sitting() && !self.posed() && !arriving {
+        if !self.sitting() && !self.posed() {
             if m != prev
                 && let Some(exit) = self.spec(prev).and_then(|s| s.exit.clone())
             {
@@ -1304,7 +1304,9 @@ impl Avatar {
         }
         let (base, looping) = self.layer(m);
         self.anim.set_layer(base, looping, now);
-        if !seq.is_empty() {
+        if !seq.is_empty() && arriving {
+            self.anim.then(seq, now);
+        } else if !seq.is_empty() {
             self.anim.play(seq, now);
         } else if m != prev && !arriving {
             self.anim.stop_oneshot(now);
