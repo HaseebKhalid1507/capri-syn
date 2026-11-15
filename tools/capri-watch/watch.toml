@@ -17,7 +17,7 @@ state_file = "~/.local/state/capri-watch/state.json"
 # enabled = true          # unset: on for role bella only. Uses gh's existing login.
 poll_s = 120
 repos = ["HaseebKhalid1507/capri-syn", "HaseebKhalid1507/SynapsCLI", "HaseebKhalid1507/Axon",
-         "HaseebKhalid1507/synaps-desktop", "HaseebKhalid1507/axel", "HaseebKhalid1507/agent-comms"]
+         "HaseebKhalid1507/synaps-desk", "HaseebKhalid1507/axel", "HaseebKhalid1507/agent-comms"]
 
 [deliver]
 transport = ""            # "local" (bella) | "ssh" (avante) | "command"; empty = by role

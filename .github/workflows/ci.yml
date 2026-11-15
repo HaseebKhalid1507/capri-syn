@@ -22,18 +22,6 @@ jobs:
       - name: Toolchain (rust-toolchain.toml)
         run: rustup show active-toolchain || rustup toolchain install
 
-      # synaps-client comes from the private synaps-desktop repo (Cargo.toml pins the rev).
-      - name: Access to synaps-desktop
-        env:
-          TOKEN: ${{ secrets.SYNAPS_DESKTOP_TOKEN }}
-        run: |
-          if [ -z "$TOKEN" ]; then
-            echo "::error::set the SYNAPS_DESKTOP_TOKEN secret (read access to HaseebKhalid1507/synaps-desktop)"
-            exit 1
-          fi
-          git config --global url."https://x-access-token:${TOKEN}@github.com/HaseebKhalid1507/synaps-desktop".insteadOf \
-            "https://github.com/HaseebKhalid1507/synaps-desktop"
-
       - uses: actions/cache@v4
         with:
           path: |

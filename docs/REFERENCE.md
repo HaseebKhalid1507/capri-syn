@@ -150,8 +150,8 @@ synaps-avatar --check                     # verifies every frame
 Toolchain 1.100.0 (`rust-toolchain.toml`). GPUI is pinned exactly: `gpui-kit =0.9.1`,
 `gpui-pre =0.3.12`.
 
-`synaps-client` is a git dependency on the private synaps-desktop repo, pinned to an exact rev.
-`.cargo/config.toml` sets `net.git-fetch-with-cli`, so the machine's GitHub credentials are used.
+`synaps-client` is a git dependency on the public [synaps-desk](https://github.com/HaseebKhalid1507/synaps-desk) repo,
+pinned to an exact rev. `.cargo/config.toml` sets `net.git-fetch-with-cli` (cargo fetches with the git CLI).
 
 ### Maintainer notes
 
@@ -200,4 +200,4 @@ windows, each with `real` to go back to the real senses).
 - No real secrets, ever: secret prompts are tested against the fake daemon only.
 
 CI (`.github/workflows/ci.yml`) runs clippy and the unit tests headless. Nothing in them needs a display
-or a GPU. It needs a `SYNAPS_DESKTOP_TOKEN` secret (read access to synaps-desktop) to fetch `synaps-client`.
+or a GPU. No secrets: `synaps-client` comes from the public synaps-desk repo.
