@@ -88,15 +88,15 @@ class Stt:
         self.m = Model(path, n_threads=THREADS, print_progress=False, print_realtime=False, redirect_whispercpp_logs_to=None)
         log(f'stt {name} loaded in {now_ms() - t:.0f} ms ({os.path.basename(path)}, {THREADS} threads, CPU)')
 
-    def __call__(self, pcm, speech_ms=None, prompt=VOCAB):
+    def __call__(self, pcm, speech_ms=None, prompt=VOCAB, floor=512, tokens=None):
         # The encoder window cut to the utterance (+1 s), not Whisper's fixed 30 s, but never under
         # 512 (10 s): a trimmed clip in a smaller window decodes into loops ("b, b, b, b", "yes,
         # yes, yes") and slow temperature retries. Measured on 30 sentences of 1-3 s of speech:
         # the bare formula 56 % word errors and 15 loops, the 512 floor 3 % and none.
         dur = len(pcm) / MIC_RATE
-        ctx = max(512, min(1500, int(np.ceil((dur + 1.0) * 50 / 64) * 64)))
+        ctx = max(floor, min(1500, int(np.ceil((dur + 1.0) * 50 / 64) * 64)))
         segs = self.m.transcribe(pcm, initial_prompt=prompt, no_context=True, single_segment=True, audio_ctx=ctx, temperature=0.0,
-                                 temperature_inc=0.0, max_tokens=int(16 + 12 * dur))
+                                 temperature_inc=0.0, max_tokens=tokens or int(16 + 12 * dur))
         text = ' '.join(s.text for s in segs).strip()
         text = re.sub(r'\[[^\]]*\]|\([^)]*\)', '', text).strip()
         out = unloop(text)
@@ -165,9 +165,12 @@ def wake_rest(text):
     return rest, ' '.join(words) in WAKE_HF
 
 
-def wake_text(stt, pcm):
-    """The Whisper check of a candidate: no recognition prompt (it would lean toward "Capri")."""
-    return stt(pcm, None, prompt=None)
+WAKE_STT_FLOOR = int(os.environ.get('CAPRI_VOICE_WAKE_CTX', '512'))   # Whisper's window for the check (see the PR)
+
+
+def wake_text(stt, pcm, floor=None):
+    """The Whisper check of a candidate: no recognition prompt (it would lean toward "Capri"), a few tokens."""
+    return stt(pcm, None, prompt=None, floor=floor or WAKE_STT_FLOOR, tokens=12)
 
 
 class WakeEar:
@@ -1534,7 +1537,10 @@ class Voice:
         self.rec = subprocess.Popen(cmd + ['-'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
         if mode == 'wake':
             echo = echo if echo in ('headphones', 'speakers') else sink_kind()
-            self.cur.update(echo=echo, thr=self.wake.threshold(sensitivity))
+            thr = self.wake.threshold(sensitivity)
+            if TEST and os.environ.get('CAPRI_VOICE_TEST_WAKE_THR'):
+                thr = float(os.environ['CAPRI_VOICE_TEST_WAKE_THR'])   # tests only: every hop a candidate (the limiter's test)
+            self.cur.update(echo=echo, thr=thr)
             threading.Thread(target=self._wake_loop, args=(self.rec, silence_s, self.cur), daemon=True).start()
         elif mode == 'handsfree':
             cap = float(max_s) if max_s and max_s > 0 else CAP_S_MODE['handsfree']

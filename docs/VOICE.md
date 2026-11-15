@@ -23,6 +23,8 @@ for speech. Setup: `tools/capri-voice-setup`, then `tools/systemd/capri-voice.se
 | `handsfree` | `true` | the double-tap, `talk handsfree on` and the menu item can start a hands-free conversation. It is always off at launch |
 | `handsfree_timeout` | `60` | 15 to 600 s: it ends after this long with no accepted turn of his |
 | `handsfree_max` | `30` | minutes, 0 = no cap: it ends after this long in all |
+| `wake_word` | `false` | **a draft, not for use yet**: "Hey Capri" opens a turn (below). On, a mic stream stays open, shown on her tag |
+| `wake_sensitivity` | `0.5` | 0.1 to 0.9: higher wakes more easily (and falsely more often) |
 | `echo` | `"auto"` | `"auto"` (the sink says headphones or speakers), `"headphones"` (talking over her stops her) or `"speakers"` (half-duplex) |
 
 `avatarctl settings reload` re-sends changed voice settings to a connected sidecar.
@@ -115,6 +117,38 @@ for speech. Setup: `tools/capri-voice-setup`, then `tools/systemd/capri-voice.se
   ends it at once, so hands-free can't run under a fullscreen app.
 - Cap in the sidecar, whatever the avatar does: its `max_s` (from `handsfree_max`).
 - Measured on the virtual chain (bella, nothing played aloud): see the PR.
+
+## "Hey Capri": the wake word (a draft, off by default)
+
+**Not for use until it is measured on his voice.** Everything below was measured on stock synthetic voices
+only (Kokoro packs held out of training, espeak-ng), never on a recording of anyone.
+
+- **On** only with `wake_word = true` (and voice on). Nothing about it loads before that. Then one mic
+  stream stays open, and her tag says so all the time: `◌ MIC ON · SAY "HEY CAPRI"` (dim red outline, no
+  timer, no meter, no level events). It keeps the tag's first slot.
+- **Stage 1, always on:** openWakeWord's front end (its v0.5.1 `melspectrogram.onnx` and
+  `embedding_model.onnx`, SHA-pinned; its README puts its released models under CC BY-NC-SA 4.0, so
+  personal use) and our head (`tools/wake/hey-capri-v1.npz`: 16 embeddings of 96 → 64 → 1, numpy). Every
+  80 ms it scores the last ~2 s. The last 2.5 s of audio are kept in RAM, nothing more.
+- **Stage 2, only on a candidate** (two hops in a row over the threshold): the loaded Whisper decodes the
+  last 2 s with no recognition prompt. It must say a hey-like word, then capri-like (`capri`, `kapri`,
+  `capree`…, whole word: "Capricorn" fails). Fail: nothing visible happens, nothing is held or sent, and the
+  log gets a count and a score, never words. **At most 12 checks in any 10 minutes**; the 13th candidate
+  pauses it for 10 minutes (`WAKE PAUSED · TOO MANY FALSE STARTS`).
+- **A pass** flips the tag to `● MIC`, holds other audio, and takes his turn as a toggle does (it ends on
+  his pause). "Hey Capri, what's spike doing?" is one turn, and the phrase is cut from it. "Hey Capri" then
+  a pause: the mic waits 5 s for speech, then `NOTHING HEARD`. "Hey Capri, let's talk" (`let's chat`,
+  `hands free`) starts hands-free. A turn is sent at 30 s.
+- **She can't wake herself:** on speakers her voice is dropped at the reader while she speaks (+0.25 s).
+  On headphones the phrase cuts in and stops her.
+- **Closed** (no stream, the reason on her tag) while: a secret is on screen (`WAKE PAUSED · A SECRET IS ON
+  SCREEN`), she is hidden, the screen is locked, he is in a call (or `pactl` can't say). It comes back when
+  the cause clears (the avatar asks again every 3 s; the sidecar refuses while locked or in a call). Push-to-
+  talk, a toggle or hands-free close it for their turn, and it comes back after. A stream that dies is not
+  reopened (`WAKE OFF · MIC LOST`) until the settings are reloaded.
+- `avatarctl state` → `voice.wake = {on, sensitivity, open, turn, paused, lost}`; `voice.mic.mode` is
+  `"wake"` while it listens and `"wake-turn"` during his turn. The sidecar's `stats` count candidates,
+  rejections, wakes and pauses.
 
 ## Other audio while he talks or she speaks (`duck`)
 
