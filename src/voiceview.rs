@@ -445,6 +445,10 @@ impl Avatar {
                 let id = v.get("id").and_then(|x| x.as_u64()).unwrap_or(0);
                 let why = v.get("why").and_then(|x| x.as_str()).unwrap_or("").to_string();
                 elog!("synaps-avatar: voice: the sidecar kept turn {id} silent ({why})");
+                if self.voice_ours(id) {
+                    let short = why.split(" (").next().unwrap_or("").to_uppercase();
+                    self.hint = Some((format!("QUIET · {short} · IT'S ON THE LINE"), now + Duration::from_secs(3)));
+                }
                 if self.voice.prev == Some(id) {
                     self.voice.prev = None;
                     self.voice.prev_left = 0;
@@ -525,9 +529,9 @@ impl Avatar {
             // at most one waits: a newer one replaces it (that one stays text).
             let playing = self.voice.turn.filter(|_| self.voice.turn_done && (self.voice.sent > self.voice.ended || self.voice.prev_left > 0));
             let wait = unprompted && spoken && playing.is_some();
-            // A silent reply to an event doesn't cut his spoken reply short either: it plays on,
-            // its captions kept out of the new bubble.
-            let orphan = unprompted && !spoken && playing.is_some() && !self.voice.unprompted && !self.voice.prev_unprompted;
+            // A silent turn that isn't his (an event's, compaction, an unknown trigger) doesn't cut
+            // his spoken reply short either: it plays on, its captions kept out of the new bubble.
+            let orphan = origin != voice::Origin::His && !spoken && playing.is_some() && !self.voice.unprompted && !self.voice.prev_unprompted;
             if orphan {
                 self.voice.orphan = true;
             } else if self.voice.turn.is_some() && !wait {

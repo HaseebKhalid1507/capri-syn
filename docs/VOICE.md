@@ -36,7 +36,8 @@ for speech. Setup: `tools/capri-voice-setup`, then `tools/systemd/capri-voice.se
   always), then "The rest is on the line." once if anything is left. The persona asks her to open such a
   reply with one sentence that stands alone and names who it is from.
 - She stays **silent** (the reply still lands in the bubble, the Line and the unread strip). The decision
-  is made when the turn starts, and silent at the start means silent for the whole turn. If one of these
+  is made when the turn starts (conservative: a condition that clears before her first sentence still
+  keeps the turn silent), and silent at the start means silent for the whole turn. If one of these
   becomes true while she speaks, she stops and does not resume:
   - an approval or a secret is on screen (a prompt's text is never spoken);
   - a media player is playing (the same MPRIS check as her LISTENING mood, `[music] ignore` honoured):
@@ -44,15 +45,18 @@ for speech. Setup: `tools/capri-voice-setup`, then `tools/systemd/capri-voice.se
   - his mic is open or his words are being written down;
   - she is hidden for a fullscreen window;
   - the sidecar's gate (`capri-voice`, checked before each sentence and every 0.35 s while one plays):
-    a call (any other app capturing a real source), the screen locked (a locker process such as
-    `i3lock`, or logind's LockedHint), his do-not-disturb (dunst paused), more than 10 s of audio for
-    this reply, more than 20 s of unprompted speech in the last 60 s, or a reply that waited over 15 s
-    for its turn;
+    his do-not-disturb (dunst paused), more than 10 s of audio for this reply, more than 20 s of
+    unprompted speech in the last 60 s, or a reply that waited over 15 s for its turn;
   - voice is off, no sidecar is running, or the sidecar is too old to gate (fail closed).
 - Never a monologue: a reply to an event never cuts her off. It waits behind her last sentences, and at
   most one waits: a newer one replaces it (the replaced one stays text). Hushing her (click, talk key, Esc)
   drops the waiting one too. A new turn of his stops her at once.
 - These replies never pause or duck other audio, and there is no chime. **Events never open the mic.**
+- **Nothing she says is heard** (his spoken turns included) **with the screen locked or in a call**: the
+  sidecar checks before every sentence and every 0.35 s while one plays, stops her, and her tag says why.
+  Locked = a locker process (`i3lock`, `xsecurelock`, `slock`, `swaylock`, … by name) or logind's
+  LockedHint. A call = any other app capturing a real source (not a monitor; level meters don't count).
+  If `pactl` can't answer, that counts as a call ("audio state unknown").
 - With voice on, the avatar connects to the sidecar at start and looks for it again every 10 s.
   Connecting opens no mic.
 
