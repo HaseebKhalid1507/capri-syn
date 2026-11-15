@@ -12,6 +12,10 @@ have said and when.
   listen-start mode toggle -> mic-open {mode}, then as FAKE_TOGGLE (a JSON file, read at each
                        start) says: {"speech_ms": 300, "end_ms": 1500, "why": "silence|cap|nothing"}
                        -> speech, endpoint, mic-closed, heard; no file or {} -> open until stop/cancel
+  listen-start mode handsfree -> mic-open {mode}, then the steps of FAKE_HF (a JSON list, read at each
+                       start): {"at": ms, "heard": "text"} (speech, endpoint, heard), {"at": ms, "ev": "...", ...}
+                       (any event), {"at": ms, "die": true} (the stream dies: mic-closed)
+  listen-drop       -> printed only
   stats             -> stats {mic_open}
 Run the avatar with CAPRI_VOICE_SOCK=SOCK."""
 import json, os, socket, sys, threading, time
@@ -26,6 +30,7 @@ gen = [0]
 conn = [None]
 mic = {"open": False, "n": 0}
 TOGGLE = os.environ.get("FAKE_TOGGLE", "")
+HF = os.environ.get("FAKE_HF", "")
 
 
 def log(**v):
@@ -78,8 +83,14 @@ def handle(m):
             queue.clear()
         emit(ev="hushed")
     elif op == "listen-start":
-        mic["open"], mic["n"] = True, mic["n"] + 1
+        mic["open"], mic["n"], mic["mode"] = True, mic["n"] + 1, m.get("mode", "hold")
         emit(ev="mic-open", mode=m.get("mode", "hold"))
+        if m.get("mode") == "handsfree":
+            try:
+                steps = json.load(open(HF)) if HF else []
+            except (OSError, ValueError):
+                steps = []
+            threading.Thread(target=hf_run, args=(mic["n"], steps), daemon=True).start()
         if m.get("mode") == "toggle":
             try:
                 plan = json.load(open(TOGGLE)) if TOGGLE else {}
@@ -90,14 +101,43 @@ def handle(m):
     elif op == "listen-stop":
         if mic["open"]:
             mic["open"] = False
-            emit(ev="mic-closed")
+            emit(ev="mic-closed", mode=mic.get("mode", "hold"))
             emit(ev="heard", text=HEARD, why="", ms={"stt": 1})
     elif op == "listen-cancel":
         if mic["open"]:
             mic["open"] = False
-            emit(ev="mic-closed")
+            emit(ev="mic-closed", mode=mic.get("mode", "hold"))
     elif op == "stats":
         emit(ev="stats", mic_open=mic["open"])
+
+
+def hf_run(n, steps):
+    """A hands-free session as scripted: utterances heard, events, the stream dying."""
+    t0 = time.time()
+    for st in steps:
+        time.sleep(max(0, st.get("at", 0) / 1000 - (time.time() - t0)))
+        if mic["n"] != n or not mic["open"]:
+            return
+        if "heard" in st:
+            emit(ev="speech")
+            time.sleep(0.3)
+            emit(ev="endpoint", why="silence", speech_ms=900, silence_ms=1000)
+            emit(ev="heard", text=st["heard"], why=st.get("why", ""), ms={"stt": 1})
+            log(ev="heard", text=st["heard"])
+        elif st.get("die"):
+            mic["open"] = False
+            emit(ev="mic-closed", mode="handsfree")
+            log(ev="died")
+            return
+        else:
+            ev = {k: v for k, v in st.items() if k != "at"}
+            if ev.get("ev") == "handsfree-end":      # as the real one: the stream closes, then why
+                emit(ev="mic-closed", mode="handsfree")
+            emit(**ev)
+            log(**ev)
+            if ev.get("ev") == "handsfree-end":
+                mic["open"] = False
+                return
 
 
 def toggle_run(n, plan):

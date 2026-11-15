@@ -25,6 +25,24 @@ const MIC_CHECK: Duration = Duration::from_secs(2);
 /// Not drawn this long for a reason other than hiding (a teleport): a hands-off mic closes.
 const HIDDEN_GRACE: Duration = Duration::from_secs(2);
 
+/// A second tap this soon after the first, before he spoke: hands-free instead.
+const DOUBLE_TAP: Duration = Duration::from_millis(400);
+/// The quiet countdown shows on her tag for its last seconds.
+const HF_WARN: Duration = Duration::from_secs(10);
+
+/// A hands-free conversation: one stream, many turns, until he ends it or it goes quiet.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct HandsFree {
+    pub since: Instant,
+    /// The quiet clock: restarts at his accepted turn and at her last word; runs only while
+    /// nothing is going on (she isn't thinking or speaking, nothing is being written down).
+    quiet_since: Instant,
+    /// The sidecar heard him start an utterance (a reply to an event waits).
+    hearing: bool,
+    /// The stream closed; the sidecar's reason (`handsfree-end`) may still come.
+    closed: bool,
+}
+
 /// A toggled turn (`talk toggle`): open until his pause, a second tap, Esc or `talk cancel`.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Toggle {
@@ -85,6 +103,10 @@ pub(super) struct VoiceState {
     up_at: Option<Instant>,
     /// A toggled turn, while its mic is asked for or open.
     pub toggle: Option<Toggle>,
+    /// A hands-free conversation, while it lasts.
+    pub hf: Option<HandsFree>,
+    /// A session turn is running (she is thinking or writing).
+    busy: bool,
     /// A toggle was taken and its key is not yet seen up: more toggles are its auto-repeat.
     toggle_lock: bool,
     toggles_ignored: u32,
@@ -236,8 +258,8 @@ impl Avatar {
         if hushed {
             self.voice_hush("talk key");
         }
-        if !self.voice_on() {
-            return hushed;
+        if !self.voice_on() || self.voice.hf.is_some() {
+            return hushed;          // hands-free already listens: the talk key only cuts her off
         }
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(Duration::from_millis(lineview::TAP_MS as u64)).await;
@@ -303,6 +325,9 @@ impl Avatar {
 
     fn voice_released(&mut self, at: Instant, cx: &mut Context<Self>) {
         self.talk_down = None;
+        if self.voice.hf.is_some() {
+            return;                 // hands-free's stream isn't the talk key's
+        }
         if self.voice.asked.take().is_none() {
             return;
         }
@@ -328,10 +353,117 @@ impl Avatar {
             return "ok ignored (the talk key is held)".into();
         }
         self.voice_toggle_lock(cx);
+        if self.voice.hf.is_some() {
+            self.voice_hf_end("HANDS-FREE OFF", cx);
+            return "ok hands-free off".into();
+        }
+        if let Some(t) = self.voice.toggle
+            && !t.hearing
+            && t.at.elapsed() <= DOUBLE_TAP
+            && self.voice.cfg.handsfree
+        {
+            // The double-tap: the toggle's stream gives way to a hands-free one.
+            self.voice_send(serde_json::json!({ "op": "listen-cancel" }));
+            self.voice.asked = None;
+            self.voice.mic = None;
+            self.voice_toggle_end(cx);
+            return self.voice_hf_start(cx);
+        }
         if self.voice.toggle.is_some() {
             return self.voice_toggle_tap(cx);
         }
         self.voice_toggle_start(cx)
+    }
+
+    // ---- hands-free -----------------------------------------------------------------------
+
+    /// `talk handsfree on`, the double-tap: the mic stays open across turns. Always off at launch.
+    pub(super) fn voice_hf_start(&mut self, cx: &mut Context<Self>) -> String {
+        let now = Instant::now();
+        if self.voice.hf.is_some() {
+            return "ok hands-free already".into();
+        }
+        if !self.voice.cfg.handsfree {
+            self.hint = Some(("HANDS-FREE IS OFF IN SETTINGS".into(), now + Duration::from_secs(3)));
+            self.voice_changed(cx);
+            return "error: [voice] handsfree = false".into();
+        }
+        if self.voice.toggle.is_some() || self.voice.asked.is_some() {
+            self.voice_cancel(cx);
+        }
+        if self.voice_speaking() {
+            self.voice_hush("hands-free");
+        }
+        if let Some(why) = self.voice_mic_refusal(true) {
+            self.hint = Some((why.into(), now + Duration::from_secs(3)));
+            self.voice_changed(cx);
+            return format!("error: {why}");
+        }
+        if !self.voice_connect(cx) {
+            self.hint = Some(("VOICE OFF · START capri-voice".into(), now + Duration::from_secs(4)));
+            self.voice_changed(cx);
+            return "error: no sidecar".into();
+        }
+        let c = &self.voice.cfg;
+        let max_s = if c.handsfree_max == 0 { 86_400 } else { c.handsfree_max * 60 };
+        let (mode, silence_s, echo) = (c.duck.clone(), c.silence_s, c.echo.clone());
+        self.voice_send(serde_json::json!({ "op": "media-hold", "mode": mode }));
+        self.voice.held = true;
+        self.voice_send(serde_json::json!({ "op": "listen-start", "mode": "handsfree", "silence_s": silence_s, "max_s": max_s, "echo": echo }));
+        self.voice.asked = Some(now);
+        self.voice.keyup = None;
+        self.voice.hf = Some(HandsFree { since: now, quiet_since: now, hearing: false, closed: false });
+        self.voice.mic_check_at = Some(now + MIC_CHECK);
+        elog!("synaps-avatar: voice: hands-free on (ends after {} s quiet)", self.voice.cfg.handsfree_timeout);
+        self.voice_changed(cx);
+        "ok hands-free on".into()
+    }
+
+    /// Hands-free ends: the stream closes (if the sidecar hasn't already), other audio comes back
+    /// after her last word, and her tag says why.
+    pub(super) fn voice_hf_end(&mut self, why: &str, cx: &mut Context<Self>) {
+        let Some(h) = self.voice.hf.take() else { return };
+        if !h.closed {
+            self.voice_send(serde_json::json!({ "op": "listen-cancel" }));
+        }
+        self.voice.asked = None;
+        self.voice.mic = None;
+        self.voice.mic_check_at = None;
+        if self.voice.held && !self.voice_speaking() {
+            self.voice.held = false;
+            self.voice_send(serde_json::json!({ "op": "media-release", "after_ms": RESTORE_MS }));
+        }
+        elog!("synaps-avatar: voice: {} after {} s", why.to_lowercase(), h.since.elapsed().as_secs());
+        self.hint = Some((why.to_string(), Instant::now() + Duration::from_secs(4)));
+        self.voice_changed(cx);
+    }
+
+    /// The quiet clock and the cap. Each tick. The clock restarts after anything of hers (she is
+    /// thinking, speaking, writing his words down); his voice alone doesn't restart it (a TV must
+    /// not keep the mic open), but it never ends mid-utterance.
+    fn voice_hf_clock(&mut self, cx: &mut Context<Self>) {
+        let Some(h) = &mut self.voice.hf else { return };
+        if self.voice.busy || self.voice.transcribing || self.voice.turn.is_some() {
+            h.quiet_since = Instant::now();
+            return;
+        }
+        if h.hearing {
+            return;
+        }
+        let max = self.voice.cfg.handsfree_max;
+        if max > 0 && h.since.elapsed() >= Duration::from_secs(max as u64 * 60) {
+            self.voice_hf_end(&format!("HANDS-FREE OFF · {max} MIN"), cx);
+        } else if h.quiet_since.elapsed() >= Duration::from_secs(self.voice.cfg.handsfree_timeout as u64) {
+            let t = self.voice.cfg.handsfree_timeout;
+            self.voice_hf_end(&format!("HANDS-FREE OFF · {t} S QUIET"), cx);
+        }
+    }
+
+    /// Seconds of quiet left, when the countdown shows.
+    fn voice_hf_left(&self) -> Option<u64> {
+        let h = self.voice.hf?;
+        let left = Duration::from_secs(self.voice.cfg.handsfree_timeout as u64).saturating_sub(h.quiet_since.elapsed());
+        (left <= HF_WARN && !self.voice.busy && self.voice.turn.is_none()).then(|| left.as_secs() + u64::from(left.subsec_nanos() > 0))
     }
 
     /// Ignore toggles until the chord's key is up (polled; X has no key-up for i3's bindings).
@@ -478,13 +610,19 @@ impl Avatar {
         if !self.voice_listening() {
             return;
         }
-        let hands_off = self.voice.toggle.is_some();
+        let hands_off = self.voice.toggle.is_some() || self.voice.hf.is_some();
         if let Some(why) = self.voice_mic_refusal(hands_off) {
+            if self.voice.hf.is_some() {
+                let why = why.replace("NO MIC · ", "HANDS-FREE OFF · ").replace("SHE IS HIDDEN", "HIDDEN");
+                self.voice_hf_end(&why, cx);
+                return;
+            }
             let why = why.replace("NO MIC", "MIC CLOSED");
             elog!("synaps-avatar: voice: {why}");
             self.voice_cancel(cx);
             self.hint = Some((why, Instant::now() + Duration::from_secs(3)));
         }
+        self.voice_hf_clock(cx);
         // The sidecar is asked now and then whether a toggled mic is open; it wins.
         if let Some(t) = self.voice.mic_check_at
             && Instant::now() >= t
@@ -494,8 +632,24 @@ impl Avatar {
         }
     }
 
+    /// Esc in hands-free: what is being heard now is dropped; the conversation stays.
+    pub(super) fn voice_esc(&mut self, cx: &mut Context<Self>) {
+        if let Some(h) = &mut self.voice.hf {
+            h.hearing = false;
+            self.voice_send(serde_json::json!({ "op": "listen-drop" }));
+            self.hint = Some(("DROPPED · STILL LISTENING".into(), Instant::now() + Duration::from_secs(3)));
+            self.voice_changed(cx);
+            return;
+        }
+        self.voice_cancel(cx);
+    }
+
     /// Esc while holding (or toggled), `talk cancel`: nothing is transcribed or sent.
     pub(super) fn voice_cancel(&mut self, cx: &mut Context<Self>) {
+        if self.voice.hf.is_some() {
+            self.voice_hf_end("HANDS-FREE OFF", cx);
+            return;
+        }
         if self.voice.asked.take().is_some() || self.voice.mic.is_some() {
             self.voice_send(serde_json::json!({ "op": "listen-cancel" }));
             self.voice_send(serde_json::json!({ "op": "media-release" }));
@@ -529,7 +683,7 @@ impl Avatar {
             self.voice.turn = None;
             self.voice_caption_done();
         }
-        if self.voice.held {
+        if self.voice.held && self.voice.hf.is_none() {
             self.voice.held = false;
             self.voice_send(serde_json::json!({ "op": "media-release", "after_ms": RESTORE_MS }));
         }
@@ -559,6 +713,20 @@ impl Avatar {
             "mic-closed" => {
                 self.voice.mic = None;
                 self.voice.level = 0.0;
+                let mode = v.get("mode").and_then(|m| m.as_str()).unwrap_or("handsfree");
+                if let Some(h) = &mut self.voice.hf
+                    && mode == "handsfree"
+                {
+                    // Its reason (`handsfree-end`) follows if the sidecar ended it; else it died.
+                    h.closed = true;
+                    self.voice_hf_end("HANDS-FREE OFF · MIC LOST", cx);
+                    return;
+                }
+                if self.voice.hf.is_some() {
+                    // The toggle's stream, closing as hands-free takes over.
+                    self.voice_changed(cx);
+                    return;
+                }
                 // A toggled stream that ended on its own (refused, the lock, the hard cap): the
                 // sidecar's `heard` follows.
                 if self.voice.toggle.is_some() && self.voice.asked.take().is_some() {
@@ -571,10 +739,46 @@ impl Avatar {
                 if let Some(t) = &mut self.voice.toggle {
                     t.hearing = true;
                 }
+                if let Some(h) = &mut self.voice.hf {
+                    h.hearing = true;
+                }
+            }
+            "handsfree-end" => {
+                let why = match v.get("why").and_then(|x| x.as_str()).unwrap_or("") {
+                    "call" => "HANDS-FREE OFF · IN A CALL".to_string(),
+                    "lock" => "HANDS-FREE ENDED AT LOCK".to_string(),
+                    "max" => format!("HANDS-FREE OFF · {} MIN", self.voice.cfg.handsfree_max),
+                    _ => "HANDS-FREE OFF · MIC LOST".to_string(),
+                };
+                if self.voice.hf.is_some() {
+                    self.voice.hf.as_mut().unwrap().closed = true;
+                    self.voice_hf_end(&why, cx);
+                } else {
+                    // mic-closed already ended it as MIC LOST: the real reason replaces the hint.
+                    self.hint = Some((why, now + Duration::from_secs(4)));
+                    self.voice_changed(cx);
+                }
+            }
+            // His voice over hers (headphones): the sidecar already stopped her.
+            "barge-in" => {
+                elog!("synaps-avatar: voice: barge-in");
+                self.voice_stop_speech();
+                self.voice_changed(cx);
+            }
+            "echo" => {
+                self.hint = Some(("HEARING MYSELF · TALK-OVER OFF".into(), now + Duration::from_secs(4)));
+                self.voice_changed(cx);
             }
             // A toggled turn's end: his pause (or the cap) sends it; no speech in 8 s closes it.
             "endpoint" => {
                 let why = v.get("why").and_then(|x| x.as_str()).unwrap_or("");
+                if let Some(h) = &mut self.voice.hf {
+                    h.hearing = false;
+                    self.voice.keyup = Some(now);
+                    self.voice.transcribing = true;
+                    self.voice_changed(cx);
+                    return;
+                }
                 if self.voice.toggle.is_some() {
                     self.voice.asked = None;
                     if why != "nothing" {
@@ -605,6 +809,37 @@ impl Avatar {
                 }
                 if let Some(k) = self.voice.keyup {
                     self.voice.stats.insert("keyup_to_heard_ms".into(), ((now - k).as_millis() as u64).into());
+                }
+                if self.voice.hf.is_some() {
+                    let why = v.get("why").and_then(|t| t.as_str()).unwrap_or("").to_string();
+                    if text.is_empty() && why.starts_with("NO MIC") {
+                        self.voice.hf.as_mut().unwrap().closed = true;
+                        self.voice_hf_end(&why.replace("NO MIC · ", "HANDS-FREE OFF · "), cx);
+                        return;
+                    }
+                    if text.is_empty() {
+                        if why != "ECHO" {
+                            self.hint = Some((if why.is_empty() { "DIDN'T CATCH THAT".into() } else { why }, now + Duration::from_secs(3)));
+                        }
+                    } else if voice::end_phrase(&text) {
+                        self.voice_hf_end("HANDS-FREE OFF", cx);
+                        return;
+                    } else {
+                        elog!("synaps-avatar: voice: hands-free: heard {} chars", text.chars().count());
+                        self.voice.pending = true;
+                        self.voice.submit_at = Some(now);
+                        if let Some(h) = &mut self.voice.hf {
+                            h.quiet_since = now;
+                        }
+                        if let Err(e) = self.send(voice::wrap(&text)) {
+                            self.voice.pending = false;
+                            self.unread = Some(lineview::Unread { n: 1, text: format!("NOT SENT ({e}) · \"{text}\""), refused: true });
+                        } else {
+                            self.ack_unread();
+                        }
+                    }
+                    self.voice_changed(cx);
+                    return;
                 }
                 if text.is_empty() {
                     let why = v.get("why").and_then(|t| t.as_str()).filter(|w| !w.is_empty()).unwrap_or("DIDN'T CATCH THAT").to_string();
@@ -713,6 +948,12 @@ impl Avatar {
             }
             "stats" => {
                 // The sidecar wins: a toggled mic it says is closed is closed here too.
+                if self.voice.hf.is_some() && self.voice.mic.is_some() && v.get("mic_open").and_then(|x| x.as_bool()) == Some(false) {
+                    elog!("synaps-avatar: voice: the sidecar says the mic is closed: hands-free ends");
+                    self.voice.hf.as_mut().unwrap().closed = true;
+                    self.voice_hf_end("HANDS-FREE OFF · MIC LOST", cx);
+                    return;
+                }
                 if self.voice.toggle.is_some()
                     && self.voice.mic.is_some()
                     && v.get("mic_open").and_then(|x| x.as_bool()) == Some(false)
@@ -743,7 +984,11 @@ impl Avatar {
             no_sidecar: self.voice.link.is_none() || !self.voice.can_unprompted,
             prompt: self.voice_prompt_up(),
             music: self.player.playing,
-            mic: self.voice_listening() || self.voice.transcribing,
+            // Hands-free listens all along: only an utterance under way (or being written down) waits.
+            mic: match self.voice.hf {
+                Some(h) => h.hearing || self.voice.transcribing,
+                None => self.voice_listening() || self.voice.transcribing,
+            },
             hidden: self.hidden_reason() == Some("fullscreen"),
         }
         .why()
@@ -771,6 +1016,7 @@ impl Avatar {
     /// is silent for the whole turn). True when the turn is spoken (the bubble shows captions,
     /// not the stream).
     pub(super) fn voice_reply(&mut self, b: &crate::session::Body, new_turn: bool) -> bool {
+        self.voice.busy = b.busy;
         if new_turn {
             let his = self.voice.pending && b.echo.as_deref().is_some_and(|e| e.starts_with("[voice"));
             let origin = voice::origin(&b.trigger);
@@ -870,9 +1116,12 @@ impl Avatar {
         self.voice.prev_unprompted = false;
         self.voice.unprompted = false;
         self.voice.lips = None;
-        if self.voice.held {
+        if self.voice.held && self.voice.hf.is_none() {
             self.voice.held = false;
             self.voice_send(serde_json::json!({ "op": "media-release", "after_ms": RESTORE_MS }));
+        }
+        if let Some(h) = &mut self.voice.hf {
+            h.quiet_since = Instant::now();
         }
         self.voice_caption_done();
     }
@@ -968,6 +1217,16 @@ impl Avatar {
     /// The tag while the mic is open, he waits for the words, or she speaks.
     pub(super) fn voice_status(&self) -> Option<Status> {
         let bars = |v: f32| -> String { (0..5).map(|i| if v * 5.0 > i as f32 + 0.3 { '▮' } else { '▯' }).collect() };
+        if let (Some(h), Some(_)) = (self.voice.hf, self.voice.mic) {
+            let label = match self.voice_hf_left() {
+                Some(left) => format!("MIC LIVE · HANDS-FREE · ENDS IN 0:{left:02}"),
+                None => {
+                    let s = h.since.elapsed().as_secs();
+                    format!("MIC LIVE · HANDS-FREE {}:{:02} {}", s / 60, s % 60, bars(self.voice.level))
+                }
+            };
+            return Some(Status { label, tone: 0xff3b62, invert: true, glyph: "rec".into() });
+        }
         if let Some(m) = self.voice.mic {
             let s = m.elapsed().as_secs();
             let auto = if self.voice.toggle.is_some() { " · AUTO" } else { "" };
@@ -988,6 +1247,9 @@ impl Avatar {
 
     /// The Line's mic row: the tag's label while held, then what follows key-up.
     pub(super) fn voice_mic_row(&self) -> Option<String> {
+        if self.voice.hf.is_some() {
+            return self.voice_status().map(|s| format!("● {}  ·  say \"that's all\" or press $mod+Ctrl+c to end · esc drops what you're saying", s.label));
+        }
         if self.voice_listening() {
             let how = if self.voice.toggle.is_some() { "sends when you pause · tap again to send now · esc cancels" } else { "release to send · esc to cancel" };
             return self.voice_status().map(|s| format!("● {}  ·  listening · {how}", s.label));
@@ -1011,11 +1273,13 @@ impl Avatar {
             "shape": self.voice_shape(Instant::now()), "held": self.voice.held, "repeats_ignored": self.voice.repeats,
             "mic": {
                 "open": self.voice.mic.is_some(),
-                "mode": if self.voice.toggle.is_some() { "toggle" } else if self.voice_listening() { "ptt" } else { "" },
+                "mode": if self.voice.hf.is_some() { "handsfree" } else if self.voice.toggle.is_some() { "toggle" } else if self.voice_listening() { "ptt" } else { "" },
                 "since_ms": self.voice.mic.map(|m| m.elapsed().as_millis() as u64),
             },
             "toggle": self.voice.toggle.map(|t| serde_json::json!({ "hearing": t.hearing, "opened_line": t.opened_line, "ms": t.at.elapsed().as_millis() as u64 })),
             "hint": self.hint.as_ref().filter(|h| h.1 > Instant::now()).map(|h| h.0.clone()),
+            "handsfree": self.voice.hf.map(|h| serde_json::json!({ "ms": h.since.elapsed().as_millis() as u64, "quiet_ms": h.quiet_since.elapsed().as_millis() as u64, "hearing": h.hearing, "left_s": self.voice_hf_left() })),
+            "busy": self.voice.busy,
             "toggle_lock": self.voice.toggle_lock, "toggles_ignored": self.voice.toggles_ignored, "silence_s": self.voice.cfg.silence_s,
             "stats": serde_json::Value::Object(self.voice.stats.clone()),
         })

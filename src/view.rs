@@ -2196,6 +2196,16 @@ impl Avatar {
                 }
             }
             Command::TalkToggle => self.voice_toggle(cx),
+            Command::TalkHandsfree(on) => {
+                if on {
+                    self.voice_hf_start(cx)
+                } else if self.voice.hf.is_some() {
+                    self.voice_hf_end("HANDS-FREE OFF", cx);
+                    "ok hands-free off".into()
+                } else {
+                    "ok (not hands-free)".into()
+                }
+            }
             Command::TalkCancel => {
                 if self.voice_listening() {
                     self.voice_cancel(cx);
@@ -5225,6 +5235,25 @@ impl Render for Avatar {
                             if let Some(m) = &mut this.menu {
                                 m.1 = Instant::now() + Duration::from_secs(8);
                             }
+                            cx.notify();
+                            this.schedule(cx);
+                        }),
+                    ))
+                })
+                .when(self.voice_on() && self.voice.cfg.handsfree, |m| {
+                    let on = self.voice.hf.is_some();
+                    m.child(item(if on { "END HANDS-FREE" } else { "HANDS-FREE TALK" }).id("handsfree").on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            this.menu = None;
+                            let r = if on {
+                                this.voice_hf_end("HANDS-FREE OFF", cx);
+                                "ok hands-free off".to_string()
+                            } else {
+                                this.voice_hf_start(cx)
+                            };
+                            elog!("synaps-avatar: menu hands-free: {r}");
                             cx.notify();
                             this.schedule(cx);
                         }),
