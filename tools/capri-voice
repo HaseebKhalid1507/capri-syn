@@ -1350,6 +1350,42 @@ class Voice:
         threading.Thread(target=run, daemon=True).start()
         return dr
 
+    def _watchdog(self, p, cur):
+        """The capture stays on the source it opened. If PipeWire moves it (a device removed, a
+        default changed), the capture is killed at once and what it heard is dropped: it is never
+        whatever the new source is."""
+        so = None
+        for _ in range(40):
+            if p.poll() is not None:
+                return
+            so = next((o for o in pactl_json('source-outputs') or []
+                       if o.get('properties', {}).get('application.process.id') == str(p.pid)), None)
+            if so:
+                break
+            time.sleep(0.05)
+        if not so:
+            log('mic: watchdog: our stream was not found')
+            return
+        idx, src = str(so.get('index')), so.get('source')
+        cur['source'] = src
+        sub = subprocess.Popen(['pactl', 'subscribe'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        cur['watch'] = sub
+        for line in sub.stdout:
+            if p.poll() is not None:
+                break
+            if f"on source-output #{idx}" in line or "'remove' on source #" in line:
+                o = next((x for x in pactl_json('source-outputs') or [] if str(x.get('index')) == idx), None)
+                if o is None:
+                    break
+                if o.get('source') != src:
+                    log(f'mic: watchdog: our stream moved (source {src} -> {o.get("source")}): killed, nothing kept')
+                    cur['moved'] = True
+                    self.cancelled = True
+                    cur.setdefault('refused', 'MIC LOST · ITS SOURCE CHANGED')
+                    p.kill()
+                    break
+        sub.terminate()
+
     def _rec_loop(self, p, vs, ep, cur):
         opened, last_lvl, last_lock, fd = False, 0.0, now_ms(), p.stdout.fileno()
         cap = CAP_S_MODE[cur.get('mode', 'hold')] * 1000
@@ -1377,6 +1413,7 @@ class Voice:
             if not opened:
                 opened = True
                 cur['t_mic_open'] = now_ms()
+                threading.Thread(target=self._watchdog, args=(p, cur), daemon=True).start()
                 self.emit(ev='mic-open', mode=cur.get('mode', 'hold'))
                 log(f"mic: open (+{cur['t_mic_open'] - cur['t_start']:.0f} ms)")
             if not self.cancelled:
@@ -1420,9 +1457,11 @@ class Voice:
         except subprocess.TimeoutExpired:
             p.kill()
             p.wait()
+        if cur.get('watch'):
+            cur['watch'].terminate()
         # This capture's clip and fate, taken before self.rec is cleared (a new capture may start
         # right after and reset them).
-        buf, cancelled = self.rec_buf, self.cancelled
+        buf, cancelled = self.rec_buf, self.cancelled or cur.get('moved')
         self.rec_buf = []
         self.rec = None
         cur['t_mic_closed'] = now_ms()
