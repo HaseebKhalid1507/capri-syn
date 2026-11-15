@@ -98,14 +98,15 @@ impl Default for BrainSettings {
                 (Approach::Peek, 1.0),
                 (Approach::Beside, 1.0),
             ],
-            // glitch lost both r6 critic pairs to teleport: 1 by default (still selectable).
-            // drop_in exists now (the ragdoll round): 2, as in the brief's file.
-            arrivals: vec![(Arrival::Teleport, 3.0), (Arrival::Glitch, 1.0), (Arrival::DropIn, 2.0), (Arrival::Hop, 1.0)],
+            // Lively is her default (LOCKED #17): more hopping, teleports less often.
+            arrivals: vec![(Arrival::Teleport, 2.0), (Arrival::Glitch, 1.0), (Arrival::DropIn, 2.0), (Arrival::Hop, 4.0)],
             no_repeat: 2,
             cover_max_pct: 12.0,
-            passive_every_min: (3.0, 10.0),
-            bid_every_min: (20.0, 30.0),
-            max_moves_per_hour: 15,
+            // LOCKED #17: roams every 0.75–3 min, visits every 8–15 min, 45 moves an hour (a
+            // micro-hop counts a quarter).
+            passive_every_min: (0.75, 3.0),
+            bid_every_min: (8.0, 15.0),
+            max_moves_per_hour: 45,
             fullscreen: Fullscreen::Hide,
             attention: Attention::Mix,
             monitor: MonitorPolicy::Follow,
@@ -614,7 +615,12 @@ mod tests {
         assert_eq!(Settings::parse("").unwrap(), Settings::default());
         assert_eq!(Settings::parse("[brain]\n").unwrap(), Settings::default());
         let d = BrainSettings::default();
-        assert!(d.enabled && d.no_repeat == 2 && d.cover_max_pct == 12.0 && d.max_moves_per_hour == 15);
+        assert!(d.enabled && d.no_repeat == 2 && d.cover_max_pct == 12.0 && d.max_moves_per_hour == 45);
+        // LOCKED #17: the lively values are the defaults.
+        assert_eq!((d.passive_every_min, d.bid_every_min), ((0.75, 3.0), (8.0, 15.0)));
+        let w = |a: Arrival| d.arrivals.iter().find(|x| x.0 == a).unwrap().1;
+        assert_eq!((w(Arrival::Hop), w(Arrival::Teleport), w(Arrival::DropIn), w(Arrival::Glitch)), (4.0, 2.0, 2.0, 1.0));
+        assert_eq!(d.attention, Attention::Mix);
         assert_eq!(d.fullscreen, Fullscreen::Hide);
         assert_eq!(d.monitor, MonitorPolicy::Follow, "her hops stay on his monitor by default");
         let m = MusicSettings::default();
@@ -623,6 +629,15 @@ mod tests {
         assert!(!s.detect && s.ignore == ["teams"]);
         assert_eq!(Settings::parse("[brain]\nmonitor = \"any\"\n").unwrap().brain.monitor, MonitorPolicy::Any);
         assert_eq!(d.arrivals.iter().find(|a| a.0 == Arrival::Glitch).unwrap().1, 1.0, "glitch: 1 by default since r6");
+    }
+
+    #[test]
+    fn haseebs_file_keeps_hang_only_with_the_lively_defaults() {
+        // His settings.toml: only `attention = "hang_only"` set; everything else is the default.
+        let s = Settings::parse("[brain]\nattention = \"hang_only\"\n# passive_every_min = [3, 10]\n").unwrap();
+        assert_eq!(s.brain.attention, Attention::HangOnly);
+        assert_eq!(s.brain, BrainSettings { attention: Attention::HangOnly, ..BrainSettings::default() });
+        assert_eq!(s.brain.max_moves_per_hour, 45);
     }
 
     #[test]
