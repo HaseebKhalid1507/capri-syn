@@ -247,11 +247,19 @@
       "big": true
     },
     "sleepy": {
-      "base": "sit_floor-sleepy",
+      "base": "pose-sleep",
       "entry": [
-        "floor_sit"
+        "floor_sit",
+        {
+          "frame": "sit_floor-sleepy",
+          "ms": 2500
+        }
       ],
       "exit": [
+        {
+          "frame": "sit_floor-neutral",
+          "ms": 300
+        },
         "floor_stand"
       ],
       "status": "SLEEPING",
@@ -344,6 +352,22 @@
       {
         "frame": "hand_on_hip-smirk",
         "ms": 900
+      }
+    ],
+    [
+      {
+        "frame": "arms_crossed-neutral",
+        "ms": 2200
+      }
+    ],
+    [
+      {
+        "frame": "hand_on_hip-flirty",
+        "ms": 1500
+      },
+      {
+        "frame": "hand_on_hip-neutral",
+        "ms": 600
       }
     ],
     [
@@ -485,6 +509,178 @@
         "height": 1102
       },
       "sha256": "7d7030a85efd9d7a0232b53f79388442d1ad22c6b10dd951e07330be9110b40c"
+    },
+    {
+      "id": "intro-gaze",
+      "file": "intro/02-gaze.png",
+      "anchor": {
+        "name": "ground",
+        "x": 627,
+        "y": 1166
+      },
+      "visibleBounds": {
+        "x": 197,
+        "y": 116,
+        "width": 885,
+        "height": 602
+      },
+      "sha256": "5a0b546f629a29049fc3f1849ed633e3d823940937ff23f2ad7d787a24d760c1"
+    },
+    {
+      "id": "intro-arrival",
+      "file": "intro/03-arrival.png",
+      "anchor": {
+        "name": "ground",
+        "x": 627,
+        "y": 1166
+      },
+      "visibleBounds": {
+        "x": 197,
+        "y": 76,
+        "width": 886,
+        "height": 1025
+      },
+      "sha256": "c32578480206c9e4964b1885abbdbbfdb9247949bc8ae88864b425d52c546808"
+    },
+    {
+      "id": "intro-landing",
+      "file": "intro/04-landing.png",
+      "anchor": {
+        "name": "ground",
+        "x": 627,
+        "y": 1166
+      },
+      "visibleBounds": {
+        "x": 198,
+        "y": 487,
+        "width": 885,
+        "height": 679
+      },
+      "sha256": "0695b6f496de79703e4a065031dfef17137cb462139f1b0801c93799e33300b9"
+    },
+    {
+      "id": "intro-greeting",
+      "file": "intro/05-greeting.png",
+      "anchor": {
+        "name": "ground",
+        "x": 627,
+        "y": 1166
+      },
+      "visibleBounds": {
+        "x": 190,
+        "y": 77,
+        "width": 893,
+        "height": 1090
+      },
+      "sha256": "44f777a33823cafa022420b5b163ed6c27c07a79586559a2ed1651c108de6b51"
+    },
+    {
+      "id": "intro-wink",
+      "file": "intro/06-wink.png",
+      "anchor": {
+        "name": "ground",
+        "x": 627,
+        "y": 1166
+      },
+      "visibleBounds": {
+        "x": 203,
+        "y": 116,
+        "width": 878,
+        "height": 1049
+      },
+      "sha256": "848abb6ef8a8299c31d0ebca17300dcf2e5e23922d8fc3c57f0a6b44ff9336b2"
+    },
+    {
+      "id": "intro-landing-seat",
+      "file": "intro/04-landing.png",
+      "anchor": {
+        "name": "seat",
+        "x": 627,
+        "y": 1166
+      },
+      "visibleBounds": {
+        "x": 198,
+        "y": 487,
+        "width": 885,
+        "height": 679
+      },
+      "sha256": "0695b6f496de79703e4a065031dfef17137cb462139f1b0801c93799e33300b9"
+    },
+    {
+      "id": "pose-crouch",
+      "file": "poses/capri-crouch.png",
+      "anchor": {
+        "name": "ground",
+        "x": 625,
+        "y": 1166
+      },
+      "visibleBounds": {
+        "x": 185,
+        "y": 339,
+        "width": 883,
+        "height": 832
+      },
+      "sha256": "83bc69576286372a428bcc00704a973b5b47de1b3f6e59921ff20dc6a30adc31"
+    },
+    {
+      "id": "pose-sleep",
+      "file": "poses/capri-sleep.png",
+      "anchor": {
+        "name": "ground",
+        "x": 627,
+        "y": 1166
+      },
+      "visibleBounds": {
+        "x": 76,
+        "y": 709,
+        "width": 1102,
+        "height": 457
+      },
+      "sha256": "f76c310daa7ebd0cc683b01d03ff84bb02d9c51985f38a7e1adaabc2b2a734d5"
+    },
+    {
+      "id": "pose-sleep-seat",
+      "file": "poses/capri-sleep.png",
+      "anchor": {
+        "name": "seat",
+        "x": 627,
+        "y": 1166
+      },
+      "visibleBounds": {
+        "x": 76,
+        "y": 709,
+        "width": 1102,
+        "height": 457
+      },
+      "sha256": "f76c310daa7ebd0cc683b01d03ff84bb02d9c51985f38a7e1adaabc2b2a734d5"
+    },
+    {
+      "id": "perch-headpat",
+      "file": "poses/capri-sit-edge.png",
+      "anchor": {
+        "name": "seat",
+        "x": 609,
+        "y": 787
+      },
+      "visibleBounds": {
+        "x": 182,
+        "y": 111,
+        "width": 891,
+        "height": 1067
+      },
+      "sha256": "e9a487ce91a391045b5e8f4ba2a3a00b85483ceedd6911b00a9be2442cc96c5d",
+      "patch": {
+        "file": "capri-headpat.png",
+        "rect": {
+          "x": 560,
+          "y": 318,
+          "width": 165,
+          "height": 125
+        },
+        "dx": -14,
+        "dy": 1,
+        "sha256": "05b4e109a921f9c48e14535d396e4afcae75d6cb161bc09f7e82f53a9f0bb181"
+      }
     }
   ],
   "click": {
@@ -546,7 +742,13 @@
     "click": [],
     "rim": "#7d8bab",
     "sliverPx": 4,
-    "sliver": "#05060a"
+    "sliver": "#05060a",
+    "headpat": [
+      {
+        "frame": "perch-headpat",
+        "ms": 1450
+      }
+    ]
   },
   "music": {
     "floor": "music-floor",
@@ -686,7 +888,29 @@
       ]
     },
     "nap": "sit_floor-sleepy",
+    "napDeep": "pose-sleep",
+    "napDeepAfterMs": 60000,
+    "napPerch": "pose-sleep-seat",
+    "napWake": [
+      {
+        "frame": "sit_floor-neutral",
+        "ms": 300
+      },
+      "floor_stand"
+    ],
     "hopCrouch": "transition-stand_crouch",
+    "bigHopCrouch": "pose-crouch",
+    "startle": [
+      {
+        "frame": "pose-crouch",
+        "ms": 140
+      },
+      {
+        "frame": "surprised",
+        "ms": 600
+      }
+    ],
+    "lookFront": "attentive",
     "poses": {
       "hang": "pose-ceiling",
       "hang_upside_down": "pose-ceiling-upside-down",
@@ -800,5 +1024,77 @@
       }
     ],
     "hardGlitch": "land"
-  }
+  },
+  "arrive": {
+    "launch": [
+      {
+        "frame": "intro-gaze",
+        "ms": 208
+      },
+      {
+        "frame": "intro-arrival",
+        "ms": 292
+      },
+      {
+        "frame": "intro-landing",
+        "ms": 417
+      },
+      {
+        "frame": "intro-greeting",
+        "ms": 750
+      },
+      {
+        "frame": "intro-wink",
+        "ms": 583
+      },
+      {
+        "frame": "neutral",
+        "ms": 583
+      }
+    ],
+    "summon": [
+      {
+        "frame": "intro-arrival",
+        "ms": 292
+      },
+      {
+        "frame": "intro-landing",
+        "ms": 417
+      },
+      {
+        "frame": "intro-greeting",
+        "ms": 750
+      }
+    ],
+    "teleport": [
+      {
+        "frame": "intro-arrival",
+        "ms": 292
+      },
+      {
+        "frame": "intro-landing",
+        "ms": 417
+      }
+    ],
+    "perch": [
+      {
+        "frame": "intro-landing-seat",
+        "ms": 300
+      },
+      {
+        "frame": "transition-edge_perch",
+        "ms": 160
+      }
+    ],
+    "teleportChance": 0.5
+  },
+  "kiss": {
+    "steps": [
+      "air_kiss"
+    ],
+    "chance": 0.1,
+    "heartsAtMs": 810,
+    "gapMs": 600000
+  },
+  "icon": "icon.png"
 }

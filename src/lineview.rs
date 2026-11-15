@@ -176,6 +176,9 @@ impl Avatar {
         };
         let Some(view) = built.borrow_mut().take() else { return "error: line: not built".into() };
         let xid = xid.get();
+        if xid != 0 {
+            self.set_icon_on(xid);
+        }
         if xid != 0 && std::env::var_os("SA_LINE_NOFOCUS").is_none() {
             self.x11.give_focus(xid).ok();
         }
@@ -225,6 +228,7 @@ impl Avatar {
         let o = Self::clamp(&self.x11, &self.layout, (her_x - l.ground_x, floor - l.ground_y));
         self.brain_cancel_move();
         self.start_teleport(o, Placement::Ground, now);
+        self.arrive_with(super::arriveview::ArriveKind::Summon);
         self.home = (o.0 + l.ground_x, o.1 + l.ground_y);
         elog!("synaps-avatar: line: she comes {}to its edge at {},{}", if other { "over from another monitor " } else { "" }, self.home.0, self.home.1);
         true
