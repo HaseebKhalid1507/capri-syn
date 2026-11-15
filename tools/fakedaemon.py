@@ -5,10 +5,13 @@ tests/fake_daemon.rs: Hello -> Welcome (one live session named `capri`), Session
 Attach -> the attached_history.json fixture, then events on demand.
 
 Control: one line per connection on /tmp/sa-fake/ctl.sock:
-  secret | confirm | confirm2 | benign | compact | compacted | idle | refuse | relay | say TEXT | quit
+  secret | confirm | confirm2 | benign | compact | compacted | idle | refuse | relay | say TEXT | trig T TEXT
+  | resolve | quit
 A submit or steer streams a canned reply (FAKE: no model): a turn, text deltas every
 FAKE_DELTA_MS (default 30), done, idle. `refuse`: the next submit is refused instead.
-`relay`: a turn another session woke ([comms] ...). `say TEXT`: a turn with that reply.
+`relay`: a turn another session woke ([comms] ...). `say TEXT`: a turn with that reply. Both come as
+trigger `event_auto`, as the real daemon's event turns do; a submit's turn is `user`. `trig T TEXT`: a
+turn with trigger T. `resolve`: the pending prompts are answered elsewhere (they go).
 Commands the avatar sends are printed; answer values are never printed (only their length)."""
 import json, os, socket, sys, threading, time
 
@@ -208,9 +211,18 @@ def control():
             refuse_next[0] = True
         elif cmd == "relay":
             threading.Thread(target=stream_turn, args=("[comms] #12 ask from spike: CI is red on main after the rebase. Rebase polish-e again or merge main in?",
-                                                        "Spike's asking: rebase or merge for polish-e? Your call."), kwargs={"trigger": "event"}, daemon=True).start()
+                                                        "Spike's asking: rebase or merge for polish-e? Your call."), kwargs={"trigger": "event_auto"}, daemon=True).start()
         elif cmd.startswith("say "):
-            threading.Thread(target=stream_turn, args=(None, cmd[4:].replace("\\n", "\n")), kwargs={"trigger": "event"}, daemon=True).start()
+            threading.Thread(target=stream_turn, args=(None, cmd[4:].replace("\\n", "\n")), kwargs={"trigger": "event_auto"}, daemon=True).start()
+        elif cmd.startswith("trig "):
+            _, trig, text = cmd.split(" ", 2)
+            threading.Thread(target=stream_turn, args=(None, text.replace("\\n", "\n")), kwargs={"trigger": trig}, daemon=True).start()
+        elif cmd == "resolve":
+            with lock:
+                ids = list(pending)
+                pending.clear()
+            for i in ids:
+                event({"ev": "prompt_resolved", "prompt_id": i})
         elif cmd == "quit":
             c.sendall(b"ok\n")
             os._exit(0)

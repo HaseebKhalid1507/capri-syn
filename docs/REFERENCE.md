@@ -186,6 +186,8 @@ windows, each with `real` to go back to the real senses).
   compaction on demand) for what the sandbox can't raise safely. Run the avatar with
   `--socket /tmp/sa-fake/d.sock`.
 - `tools/fakempris.py`: a fake MPRIS player for the music idle.
+- `tools/fakevoice.py SOCK`: a fake `capri-voice` sidecar (no audio, no mic, no models) that prints every
+  op it gets; run the avatar with `CAPRI_VOICE_SOCK=SOCK` to see what she would say.
 - `tools/measure.py`: start-up, memory and CPU of the body alone (`--no-session`).
 - `tools/sheet.py`: contact sheets from recordings. `tools/stacktest.py`: stacking against an i3 dialog.
 - `tools/daylog.py`: audits a brain decision log (`SA_BRAIN_LOG`) against the hard rules.

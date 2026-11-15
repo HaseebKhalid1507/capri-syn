@@ -1,6 +1,7 @@
 //! Voice, from the avatar's side: push-to-talk on the talk key, the `capri-voice` sidecar link,
-//! the truthful `● MIC` tag, spoken replies with captions and lip-sync, barge-in. A child
-//! module of `view`. The sidecar owns the mic and the models; nothing here touches audio.
+//! the truthful `● MIC` tag, spoken replies (his spoken turns, and her replies to what arrives
+//! on its own) with captions and lip-sync, barge-in. A child module of `view`. The sidecar owns
+//! the mic and the models; nothing here touches audio.
 
 use super::*;
 use crate::settings::VoiceSettings;
@@ -12,6 +13,8 @@ use std::os::unix::net::UnixStream;
 const UP_DEBOUNCE: Duration = Duration::from_millis(60);
 /// Other audio comes back this long after her last word.
 const RESTORE_MS: u64 = 800;
+/// With voice on, a missing sidecar is looked for again this often (connecting opens no mic).
+const RECONNECT: Duration = Duration::from_secs(10);
 
 pub(super) struct Lips {
     t0: Instant,
@@ -34,6 +37,21 @@ pub(super) struct VoiceState {
     pending: bool,
     /// The spoken turn, and what of it is said.
     turn: Option<u64>,
+    /// It arrived on its own (not his): what keeps her quiet is checked all along.
+    unprompted: bool,
+    /// The turn before it, still playing (an unprompted turn waits behind it), and how many of
+    /// its sentences are still out. At most one turn waits: a newer one replaces it.
+    prev: Option<u64>,
+    prev_left: u32,
+    prev_unprompted: bool,
+    /// His reply plays on under a newer, silent turn's bubble: its captions stay out of it.
+    orphan: bool,
+    /// The sidecar can gate unprompted speech (calls, lock, budget): its `ready` says so. Without
+    /// it, unprompted replies stay silent (fail closed).
+    can_unprompted: bool,
+    /// The next look for a missing sidecar; its first miss is logged, not every retry.
+    retry_at: Option<Instant>,
+    missed: bool,
     speech: Speech,
     sent: u32,
     ended: u32,
@@ -73,7 +91,7 @@ impl Avatar {
     }
 
     pub(super) fn voice_speaking(&self) -> bool {
-        self.voice.turn.is_some() && self.voice.sent > self.voice.ended
+        self.voice.turn.is_some() && (self.voice.sent > self.voice.ended || self.voice.prev_left > 0)
     }
 
     pub(super) fn voice_listening(&self) -> bool {
@@ -89,10 +107,13 @@ impl Avatar {
         let s = match UnixStream::connect(&path) {
             Ok(s) => s,
             Err(e) => {
-                elog!("synaps-avatar: voice: no sidecar at {} ({e})", path.display());
+                if !std::mem::replace(&mut self.voice.missed, true) {
+                    elog!("synaps-avatar: voice: no sidecar at {} ({e}); looking again every {} s", path.display(), RECONNECT.as_secs());
+                }
                 return false;
             }
         };
+        self.voice.missed = false;
         let Ok(r) = s.try_clone() else { return false };
         self.voice.generation += 1;
         let generation = self.voice.generation;
@@ -123,6 +144,18 @@ impl Avatar {
         self.voice_config();
         elog!("synaps-avatar: voice: sidecar connected ({})", path.display());
         self.voice.link.is_some()
+    }
+
+    /// With voice on, the sidecar is kept connected (at start, and after it went away), so a
+    /// reply to an event can be heard before he ever pressed the talk key.
+    pub(super) fn voice_keepalive(&mut self, now: Instant, cx: &mut Context<Self>) {
+        if !self.voice_on() || self.voice.link.is_some() || self.voice.retry_at.is_some_and(|t| now < t) {
+            return;
+        }
+        self.voice.retry_at = Some(now + RECONNECT);
+        if self.voice_connect(cx) {
+            self.voice.retry_at = None;
+        }
     }
 
     /// The sidecar gets the `[voice]` settings (on connect, and again when settings reload).
@@ -276,6 +309,10 @@ impl Avatar {
         self.voice.sent = 0;
         self.voice.ended = 0;
         self.voice.lips = None;
+        self.voice.prev = None;
+        self.voice.prev_left = 0;
+        self.voice.prev_unprompted = false;
+        self.voice.unprompted = false;
         if was {
             self.voice.turn = None;
             self.voice_caption_done();
@@ -347,10 +384,16 @@ impl Avatar {
             }
             "say-start" => {
                 let id = v.get("id").and_then(|x| x.as_u64()).unwrap_or(0);
-                if self.voice.turn.is_none_or(|t| t != id) {
+                if !self.voice_ours(id) {
                     return;
                 }
-                if !self.voice.stats.contains_key("keyup_to_audio_ms")
+                if self.voice.turn == Some(id) && self.voice.prev.is_some() {
+                    // The turn before it is over (the sidecar plays in order).
+                    self.voice.prev = None;
+                    self.voice.prev_left = 0;
+                }
+                if !self.voice.unprompted
+                    && !self.voice.stats.contains_key("keyup_to_audio_ms")
                     && let Some(k) = self.voice.keyup
                 {
                     self.voice.stats.insert("keyup_to_audio_ms".into(), ((now - k).as_millis() as u64).into());
@@ -374,11 +417,18 @@ impl Avatar {
             }
             "say-end" => {
                 let id = v.get("id").and_then(|x| x.as_u64()).unwrap_or(0);
-                if self.voice.turn != Some(id) {
+                if !self.voice_ours(id) {
                     return;
                 }
-                self.voice.ended += 1;
-                if self.voice.ended >= self.voice.sent {
+                if self.voice.prev == Some(id) {
+                    self.voice.prev_left = self.voice.prev_left.saturating_sub(1);
+                    if self.voice.prev_left == 0 {
+                        self.voice.prev = None;
+                    }
+                } else {
+                    self.voice.ended += 1;
+                }
+                if self.voice.ended >= self.voice.sent && self.voice.prev_left == 0 {
                     self.voice.lips = None;
                     if self.voice.turn_done {
                         self.voice_finish();
@@ -386,50 +436,164 @@ impl Avatar {
                 }
                 self.voice_changed(cx);
             }
-            "ready" | "hushed" | "stats" => {}
+            "ready" => {
+                self.voice.can_unprompted = v.get("features").and_then(|f| f.as_array()).is_some_and(|f| f.iter().any(|x| x == "unprompted"));
+            }
+            // The sidecar kept an unprompted reply silent (a call, the lock, his do-not-disturb,
+            // the speech budget, too late): the rest of it stays text.
+            "say-skipped" => {
+                let id = v.get("id").and_then(|x| x.as_u64()).unwrap_or(0);
+                let why = v.get("why").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                elog!("synaps-avatar: voice: the sidecar kept turn {id} silent ({why})");
+                if self.voice.prev == Some(id) {
+                    self.voice.prev = None;
+                    self.voice.prev_left = 0;
+                } else if self.voice.turn == Some(id) {
+                    self.voice.speech = Speech::default();
+                    self.voice.speech.feed("", true);
+                    self.voice.sent = 0;
+                    self.voice.ended = 0;
+                    if self.voice.prev.is_none() {
+                        self.voice_stop_speech();
+                    } else {
+                        // Its turn never came: the one before it plays on; this one is text.
+                        self.voice.turn_done = true;
+                    }
+                }
+                self.voice_changed(cx);
+            }
+            "hushed" | "stats" => {}
             "error" => elog!("synaps-avatar: voice: sidecar: {v}"),
             _ => {}
         }
     }
 
-    /// The reply of a turn, as it streams: a spoken turn's sentences go to the sidecar.
-    /// True when the turn is spoken (the bubble shows captions, not the stream).
+    /// A sentence of the spoken turn, or of the one still finishing before it.
+    fn voice_ours(&self, id: u64) -> bool {
+        self.voice.turn == Some(id) || self.voice.prev == Some(id)
+    }
+
+    /// Why a reply that arrived on its own stays silent now, if it does.
+    fn voice_unprompted_quiet(&self) -> Option<&'static str> {
+        voice::Quiet {
+            voice_off: !self.voice_on(),
+            setting_off: !self.voice.cfg.speak_unprompted,
+            no_sidecar: self.voice.link.is_none() || !self.voice.can_unprompted,
+            prompt: self.voice_prompt_up(),
+            music: self.player.playing,
+            mic: self.voice_listening() || self.voice.transcribing,
+            hidden: self.hidden_reason() == Some("fullscreen"),
+        }
+        .why()
+    }
+
+    /// An approval or a secret is on screen (never by voice: no mic, no speech).
+    fn voice_prompt_up(&self) -> bool {
+        self.prompt_ui.is_some() || self.input.as_ref().is_some_and(|i| i.secret.is_some())
+    }
+
+    /// While an unprompted reply is out: if something now keeps her quiet (music started, a
+    /// prompt, his mic, fullscreen), she stops, and that turn stays silent after it clears.
+    pub(super) fn voice_guard(&mut self) {
+        if self.voice.turn.is_none() || !(self.voice.unprompted || self.voice.prev_unprompted) {
+            return;
+        }
+        if let Some(why) = self.voice_unprompted_quiet() {
+            self.voice_hush(why);
+        }
+    }
+
+    /// The reply of a turn, as it streams: a spoken turn's sentences go to the sidecar. Spoken:
+    /// his turns that he spoke here, and (`speak_unprompted`) her replies to what arrived on its
+    /// own, unless something keeps her quiet (decided once, at the start: silent at the start
+    /// is silent for the whole turn). True when the turn is spoken (the bubble shows captions,
+    /// not the stream).
     pub(super) fn voice_reply(&mut self, b: &crate::session::Body, new_turn: bool) -> bool {
         if new_turn {
-            let spoken = self.voice.pending && b.echo.as_deref().is_some_and(|e| e.starts_with("[voice"));
-            if self.voice.turn.is_some() {
+            let his = self.voice.pending && b.echo.as_deref().is_some_and(|e| e.starts_with("[voice"));
+            let origin = voice::origin(&b.trigger);
+            let unprompted = !his && origin == voice::Origin::Unprompted;
+            let quiet = if unprompted { self.voice_unprompted_quiet() } else { None };
+            if let Some(why) = quiet {
+                elog!("synaps-avatar: voice: a reply to {} stays silent ({why})", b.trigger);
+            } else if origin == voice::Origin::Quiet && !b.trigger.is_empty() && b.trigger != "compaction" {
+                elog!("synaps-avatar: voice: trigger {:?} is unknown here: its reply stays silent", b.trigger);
+            }
+            let spoken = (his && self.voice.link.is_some()) || (unprompted && quiet.is_none());
+            // His new turn stops her. An unprompted one that will be heard waits behind her last
+            // sentences instead (events queued while she talked start the moment her text ends);
+            // at most one waits: a newer one replaces it (that one stays text).
+            let playing = self.voice.turn.filter(|_| self.voice.turn_done && (self.voice.sent > self.voice.ended || self.voice.prev_left > 0));
+            let wait = unprompted && spoken && playing.is_some();
+            // A silent reply to an event doesn't cut his spoken reply short either: it plays on,
+            // its captions kept out of the new bubble.
+            let orphan = unprompted && !spoken && playing.is_some() && !self.voice.unprompted && !self.voice.prev_unprompted;
+            if orphan {
+                self.voice.orphan = true;
+            } else if self.voice.turn.is_some() && !wait {
                 self.voice_hush("new turn");
             }
             self.voice.pending = false;
-            if !spoken || self.voice.link.is_none() {
+            if !spoken {
                 return false;
             }
-            self.voice.turn = Some(b.turn);
-            self.voice.speech = Speech::default();
+            self.voice.orphan = false;
+            if wait {
+                if self.voice.prev.is_some() {
+                    // The one playing goes on; the one waiting is replaced (newest wins).
+                    let id = self.voice.turn;
+                    self.voice_send(serde_json::json!({ "op": "drop", "id": id }));
+                    elog!("synaps-avatar: voice: a newer reply replaces the waiting one (turn {id:?} stays text)");
+                } else {
+                    self.voice.prev = self.voice.turn;
+                    self.voice.prev_left = self.voice.sent - self.voice.ended;
+                    self.voice.prev_unprompted = self.voice.unprompted;
+                }
+            } else {
+                self.voice.prev = None;
+                self.voice.prev_left = 0;
+                self.voice.prev_unprompted = false;
+            }
             self.voice.sent = 0;
             self.voice.ended = 0;
+            self.voice.turn = Some(b.turn);
+            self.voice.unprompted = unprompted;
+            self.voice.speech = if unprompted { Speech::unprompted() } else { Speech::default() };
             self.voice.turn_done = false;
-            self.voice.stats.remove("keyup_to_audio_ms");
-            if let Some(s) = self.voice.submit_at {
-                self.voice.stats.insert("submit_to_turn_ms".into(), (s.elapsed().as_millis() as u64).into());
+            if unprompted {
+                // Never a pause or a duck for these: only calls and games are left to push down.
+                elog!("synaps-avatar: voice: speaking a reply to {}", b.trigger);
+            } else {
+                self.voice.stats.remove("keyup_to_audio_ms");
+                if let Some(s) = self.voice.submit_at {
+                    self.voice.stats.insert("submit_to_turn_ms".into(), (s.elapsed().as_millis() as u64).into());
+                }
             }
         }
         if self.voice.turn != Some(b.turn) {
             return false;
         }
+        self.voice_guard();
+        if self.voice.turn != Some(b.turn) {
+            return false;
+        }
         self.voice.reply = b.reply.clone();
-        let first_text = self.voice.sent == 0 && !b.raw.trim().is_empty() && !self.voice.stats.contains_key("submit_to_text_ms");
+        let first_text = !self.voice.unprompted && self.voice.sent == 0 && !b.raw.trim().is_empty() && !self.voice.stats.contains_key("submit_to_text_ms");
         if first_text && let Some(s) = self.voice.submit_at {
             self.voice.stats.insert("submit_to_text_ms".into(), (s.elapsed().as_millis() as u64).into());
         }
         for s in self.voice.speech.feed(&b.raw, !b.busy) {
             let id = b.turn;
-            self.voice_send(serde_json::json!({ "op": "say", "id": id, "text": s }));
+            let mut say = serde_json::json!({ "op": "say", "id": id, "text": s });
+            if self.voice.unprompted {
+                say["unprompted"] = true.into();
+            }
+            self.voice_send(say);
             self.voice.sent += 1;
         }
         if !b.busy {
             self.voice.turn_done = true;
-            if self.voice.ended >= self.voice.sent {
+            if self.voice.ended >= self.voice.sent && self.voice.prev_left == 0 {
                 self.voice_finish();
             }
         }
@@ -439,6 +603,10 @@ impl Avatar {
     /// Her last word: other audio comes back, the bubble gets the whole reply.
     fn voice_finish(&mut self) {
         self.voice.turn = None;
+        self.voice.prev = None;
+        self.voice.prev_left = 0;
+        self.voice.prev_unprompted = false;
+        self.voice.unprompted = false;
         self.voice.lips = None;
         if self.voice.held {
             self.voice.held = false;
@@ -449,6 +617,9 @@ impl Avatar {
 
     fn voice_caption(&mut self, text: &str, now: Instant) {
         let _ = now;
+        if self.voice.orphan {
+            return;
+        }
         let Some(bb) = self.bubble.as_mut().filter(|x| x.stream) else { return };
         bb.text = text.chars().collect();
         bb.shown = bb.text.len();
@@ -462,6 +633,9 @@ impl Avatar {
 
     fn voice_caption_done(&mut self) {
         let reply = std::mem::take(&mut self.voice.reply);
+        if std::mem::take(&mut self.voice.orphan) {
+            return;
+        }
         let now = Instant::now();
         let Some(bb) = self.bubble.as_mut().filter(|x| x.stream) else { return };
         if !reply.is_empty() {
@@ -502,6 +676,7 @@ impl Avatar {
 
     /// Lips: the mouth follows the track. True if the frame changed.
     pub(super) fn voice_tick(&mut self, now: Instant) -> bool {
+        self.voice_guard();
         if self.voice.lips.is_none() && self.voice.mic.is_none() {
             return false;
         }
@@ -520,7 +695,10 @@ impl Avatar {
             }
         }
         // The MIC timer counts seconds.
-        self.voice.mic.map(|m| m + Duration::from_secs(now.saturating_duration_since(m).as_secs() + 1))
+        if let Some(m) = self.voice.mic {
+            return Some(m + Duration::from_secs(now.saturating_duration_since(m).as_secs() + 1));
+        }
+        self.voice.retry_at.filter(|_| self.voice_on() && self.voice.link.is_none())
     }
 
     /// The tag while the mic is open, he waits for the words, or she speaks.
@@ -561,7 +739,9 @@ impl Avatar {
         serde_json::json!({
             "enabled": self.voice.cfg.enabled, "connected": self.voice.link.is_some(),
             "mic_open": self.voice.mic.is_some(), "listening": self.voice_listening(), "transcribing": self.voice.transcribing,
-            "speaking": self.voice_speaking(), "turn": self.voice.turn, "sent": self.voice.sent, "ended": self.voice.ended,
+            "speaking": self.voice_speaking(), "turn": self.voice.turn, "prev": self.voice.prev, "prev_left": self.voice.prev_left,
+            "unprompted": self.voice.unprompted, "sent": self.voice.sent, "ended": self.voice.ended,
+            "speak_unprompted": self.voice.cfg.speak_unprompted, "sidecar_unprompted": self.voice.can_unprompted,
             "shape": self.voice_shape(Instant::now()), "held": self.voice.held, "repeats_ignored": self.voice.repeats,
             "stats": serde_json::Value::Object(self.voice.stats.clone()),
         })

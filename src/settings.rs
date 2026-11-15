@@ -132,7 +132,9 @@ pub struct Settings {
 /// the time scaled in the pitch pass, which keeps its pitch shape) or "model" (Kokoro's speed);
 /// `flow`: "emphasis" (default: a `*word*` in her reply is stressed), "pauses", "full" or "off";
 /// `duck`: what other audio does while she listens or speaks: "pause" (MPRIS
-/// pause, then play), "duck" (lowered through PipeWire) or "off".
+/// pause, then play), "duck" (lowered through PipeWire) or "off"; `speak_unprompted`: her
+/// replies to what arrives on its own (events, hooks, other sessions' messages) are spoken
+/// too (default true; never over music, an approval or a secret).
 #[derive(Clone, Debug, PartialEq)]
 pub struct VoiceSettings {
     pub enabled: bool,
@@ -142,6 +144,7 @@ pub struct VoiceSettings {
     pub pace: String,
     pub flow: String,
     pub duck: String,
+    pub speak_unprompted: bool,
     /// The talk key's letter (`$mod+c` in i3): a release while it is still down is an X
     /// auto-repeat, not his release.
     pub key: char,
@@ -156,7 +159,7 @@ pub const SPEED: f32 = 1.2987;
 
 impl Default for VoiceSettings {
     fn default() -> Self {
-        VoiceSettings { enabled: false, stt_model: "small.en".into(), voice: VOICE.into(), speed: SPEED, pace: "stretch".into(), flow: "emphasis".into(), duck: "pause".into(), key: 'c' }
+        VoiceSettings { enabled: false, stt_model: "small.en".into(), voice: VOICE.into(), speed: SPEED, pace: "stretch".into(), flow: "emphasis".into(), duck: "pause".into(), speak_unprompted: true, key: 'c' }
     }
 }
 
@@ -170,6 +173,7 @@ struct VoiceRaw {
     pace: Option<String>,
     flow: Option<String>,
     duck: Option<String>,
+    speak_unprompted: Option<bool>,
     key: Option<String>,
 }
 
@@ -490,6 +494,9 @@ impl Settings {
                 anyhow::ensure!(["pause", "duck", "off"].contains(&d.as_str()), "voice.duck must be \"pause\", \"duck\" or \"off\"");
                 voice.duck = d;
             }
+            if let Some(u) = v.speak_unprompted {
+                voice.speak_unprompted = u;
+            }
             if let Some(k) = v.key.map(|k| k.trim().to_string()) {
                 let mut c = k.chars();
                 match (c.next(), c.next()) {
@@ -673,6 +680,8 @@ mod tests {
         assert!(Settings::parse("[voice]\npace = \"warp\"\n").is_err());
         assert_eq!(Settings::parse("[voice]\nflow = \"Off\"\n").unwrap().voice.flow, "off");
         assert!(Settings::parse("[voice]\nflow = \"loud\"\n").is_err());
+        assert!(v.speak_unprompted, "her replies to events are spoken by default");
+        assert!(!Settings::parse("[voice]\nspeak_unprompted = false\n").unwrap().voice.speak_unprompted);
         assert!(Settings::parse("[mirror]\nflip = true\n").is_err());
     }
 

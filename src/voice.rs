@@ -1,7 +1,8 @@
 //! Voice, the pure parts: the spoken-turn hint, the persona lines for speech, the speech
 //! markup (`*word*` stresses a word aloud, and is never shown), and what of a reply is spoken
 //! (whole sentences, in order, with the guards: nothing after `---`, no code, tables or URLs
-//! aloud, about 60 words at most). The audio itself lives in the `capri-voice` sidecar.
+//! aloud, about 60 words at most), and whose turn is spoken (his spoken turns; her replies to
+//! what arrives on its own). The audio itself lives in the `capri-voice` sidecar.
 
 /// Sent ahead of a spoken message (per turn, so the system prompt and its cache stay put).
 /// Short, so the echo (cut at 200 chars) still holds his words.
@@ -14,11 +15,74 @@ short sentences, contractions, numbers and names the way you'd say them. If one 
 wrap it in *asterisks* and it will be stressed: at most one in a reply, and most replies need none. A dash — is a \
 beat. No lists, headings, emoji or caps for emphasis.";
 
-/// The persona with the voice lines added (`voice`: `[voice] enabled`).
-pub fn persona(system: Option<String>, voice: bool) -> Option<String> {
+/// Added with `[voice] speak_unprompted`: her replies to what arrives on its own are heard too,
+/// and only their first lines are (`Speech::unprompted`): the first sentence carries it.
+pub const PERSONA_UNPROMPTED: &str = "Replies to messages that arrive on their own are read aloud: open with one \
+short sentence that stands alone and names who it is from; details after a line ---";
+
+/// The persona with the voice lines added (`voice`: `[voice] enabled`; `unprompted`: `[voice]
+/// speak_unprompted`).
+pub fn persona(system: Option<String>, voice: bool, unprompted: bool) -> Option<String> {
     match system {
+        Some(s) if voice && unprompted => Some(format!("{}\n\n{PERSONA} {PERSONA_UNPROMPTED}", s.trim_end())),
         Some(s) if voice => Some(format!("{}\n\n{PERSONA}", s.trim_end())),
         s => s,
+    }
+}
+
+/// Who started a turn, from the daemon's `TurnStarted.trigger` (only a live one: the reply an
+/// attach shows, or a turn already running at attach, has none).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    /// He did: typed, queued, a command he ran (`user`, `queued_auto`, `plugin_command`), or no
+    /// trigger at all (an older daemon, an attach): spoken only if he spoke it here.
+    His,
+    /// It arrived on its own: an event (hooks, `synaps send`, comms, a summons: `event_auto`) or
+    /// the session driver (`driver_auto`).
+    Unprompted,
+    /// Never spoken: compaction, and triggers this build doesn't know (a replay must not be read
+    /// aloud: fail closed).
+    Quiet,
+}
+
+pub fn origin(trigger: &str) -> Origin {
+    match trigger {
+        "user" | "queued_auto" | "plugin_command" | "" => Origin::His,
+        "event_auto" | "driver_auto" => Origin::Unprompted,
+        _ => Origin::Quiet,
+    }
+}
+
+/// What she can't be heard through: why an unprompted reply stays silent (it is still on the
+/// Line, the bubble and the unread strip), or None to speak it.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Quiet {
+    pub voice_off: bool,
+    pub setting_off: bool,
+    pub no_sidecar: bool,
+    /// An approval or a secret on screen: those are never by voice.
+    pub prompt: bool,
+    /// A media player is playing (LOCK 12 (9)): skipped, not queued, so nothing is said late.
+    pub music: bool,
+    /// His mic is open or his words are being written down.
+    pub mic: bool,
+    /// She is hidden for a fullscreen window.
+    pub hidden: bool,
+}
+
+impl Quiet {
+    pub fn why(&self) -> Option<&'static str> {
+        [
+            (self.voice_off, "voice off"),
+            (self.setting_off, "speak_unprompted = false"),
+            (self.no_sidecar, "no sidecar"),
+            (self.prompt, "a prompt is on screen"),
+            (self.music, "music is playing"),
+            (self.mic, "his mic is open"),
+            (self.hidden, "hidden for fullscreen"),
+        ]
+        .into_iter()
+        .find_map(|(on, why)| on.then_some(why))
     }
 }
 
@@ -128,9 +192,20 @@ pub fn mouth_frame(shape: u8) -> &'static str {
 pub struct Speech {
     said: usize,
     stopped: bool,
+    /// An unprompted reply's cap: its first sentences only (`unprompted`).
+    cap: Option<(usize, usize)>,
 }
 
+/// An unprompted reply says this much at most: two sentences, 30 words.
+pub const UNPROMPTED_CAP: (usize, usize) = (2, 30);
+
 impl Speech {
+    /// For a reply to what arrived on its own: up to `---`, two sentences or 30 words (the first
+    /// sentence always), then the closing line once if anything is left.
+    pub fn unprompted() -> Speech {
+        Speech { cap: Some(UNPROMPTED_CAP), ..Default::default() }
+    }
+
     /// The sentences of `raw` (the reply as written so far) not yet given out; `finished`:
     /// the turn is over, so the last one is complete too.
     pub fn feed(&mut self, raw: &str, finished: bool) -> Vec<String> {
@@ -143,6 +218,13 @@ impl Speech {
         let mut words = 0;
         for (i, s) in all.into_iter().enumerate() {
             words += s.split_whitespace().count();
+            if let Some((n, w)) = self.cap
+                && (i >= n || (i > 0 && words > w))
+            {
+                out.push(REST.into());
+                self.stopped = true;
+                return out;
+            }
             if i >= self.said {
                 out.push(s);
             }
@@ -155,6 +237,9 @@ impl Speech {
         }
         if ended {
             self.stopped = true;
+            if self.cap.is_some() {
+                out.push(REST.into());
+            }
         }
         out
     }
@@ -337,11 +422,51 @@ mod tests {
 
     #[test]
     fn the_voice_lines_join_the_persona_only_with_voice_on() {
-        assert_eq!(persona(Some("You are Capri.\n".into()), false).as_deref(), Some("You are Capri.\n"));
-        let on = persona(Some("You are Capri.\n".into()), true).unwrap();
+        assert_eq!(persona(Some("You are Capri.\n".into()), false, true).as_deref(), Some("You are Capri.\n"));
+        let on = persona(Some("You are Capri.\n".into()), true, false).unwrap();
         assert!(on.starts_with("You are Capri.\n\nWhen a message starts with [voice") && on.contains("*asterisks*"));
-        assert_eq!(persona(None, true), None, "no persona (off): nothing is sent, voice or not");
+        assert!(!on.contains("on its own"));
+        assert!(persona(Some("You are Capri.".into()), true, true).unwrap().ends_with(PERSONA_UNPROMPTED));
+        assert_eq!(persona(None, true, true), None, "no persona (off): nothing is sent, voice or not");
         assert!(PERSONA.contains("at most one in a reply"), "light on stress: she must not mark every sentence");
+    }
+
+    #[test]
+    fn whose_turn_and_what_keeps_her_quiet() {
+        for t in ["user", "queued_auto", "plugin_command"] {
+            assert_eq!(origin(t), Origin::His, "{t}");
+        }
+        assert_eq!(origin(""), Origin::His, "no trigger (older daemon, attach): his rule");
+        assert_eq!((origin("event_auto"), origin("driver_auto")), (Origin::Unprompted, Origin::Unprompted));
+        for t in ["compaction", "event", "replay", "something_new"] {
+            assert_eq!(origin(t), Origin::Quiet, "{t}: unknown fails closed");
+        }
+        assert_eq!(Quiet::default().why(), None);
+        assert_eq!(Quiet { music: true, ..Default::default() }.why(), Some("music is playing"));
+        assert_eq!(Quiet { prompt: true, music: true, ..Default::default() }.why(), Some("a prompt is on screen"));
+        assert_eq!(Quiet { mic: true, ..Default::default() }.why(), Some("his mic is open"));
+        assert_eq!(Quiet { setting_off: true, ..Default::default() }.why(), Some("speak_unprompted = false"));
+        assert_eq!(Quiet { hidden: true, ..Default::default() }.why(), Some("hidden for fullscreen"));
+    }
+
+    #[test]
+    fn an_unprompted_reply_says_its_first_lines_only() {
+        let mut sp = Speech::unprompted();
+        assert_eq!(sp.feed("Spike says CI is red. Rebase or merge?", false), vec!["Spike says CI is red."]);
+        assert_eq!(sp.feed("Spike says CI is red. Rebase or merge? He waits on you. More", false), vec!["Rebase or merge?", REST]);
+        assert!(sp.feed("Spike says CI is red. Rebase or merge? He waits on you. More.", true).is_empty());
+        // 30 words: the second sentence would cross it.
+        let mut sp = Speech::unprompted();
+        let long = format!("Lynx finished the rebase. {}.", "word ".repeat(30).trim());
+        assert_eq!(sp.feed(&long, true), vec!["Lynx finished the rebase.", REST]);
+        // The first sentence always, however long; and the rule ends it with the closing line.
+        let mut sp = Speech::unprompted();
+        let one = format!("{}.", "word ".repeat(40).trim());
+        assert_eq!(sp.feed(&one, true), vec![one.clone()]);
+        let mut sp = Speech::unprompted();
+        assert_eq!(sp.feed("From spike: merged.\n---\nsha 9f8e7d6", true), vec!["From spike: merged.", REST]);
+        let mut sp = Speech::unprompted();
+        assert_eq!(sp.feed("From spike: merged.", true), vec!["From spike: merged."], "nothing left: no closing line");
     }
 
     #[test]

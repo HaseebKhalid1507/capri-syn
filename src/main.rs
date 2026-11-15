@@ -558,21 +558,21 @@ fn persona_for(args: &Args, pack_dir: &std::path::Path) -> session::Persona {
     if matches!(args.target, session::Target::Session(_)) {
         return session::Persona::default();
     }
-    let (s, voice) = settings::Settings::load().map(|s| (s.session, s.voice.enabled)).unwrap_or_else(|e| {
+    let (s, voice) = settings::Settings::load().map(|s| (s.session, s.voice)).unwrap_or_else(|e| {
         elog!("synaps-avatar: {e:#}; the session gets no persona settings");
-        (settings::SessionSettings { persona: false, ..Default::default() }, false)
+        (settings::SessionSettings { persona: false, ..Default::default() }, Default::default())
     });
-    session_persona(&s, voice, args.model.clone(), pack_dir)
+    session_persona(&s, &voice, args.model.clone(), pack_dir)
 }
 
 /// The persona from `[session]` (and a model that overrides it); with voice on, the lines on
 /// writing for the ear (voice::PERSONA) follow it.
-pub(crate) fn session_persona(s: &settings::SessionSettings, voice: bool, model: Option<String>, pack_dir: &std::path::Path) -> session::Persona {
+pub(crate) fn session_persona(s: &settings::SessionSettings, voice: &settings::VoiceSettings, model: Option<String>, pack_dir: &std::path::Path) -> session::Persona {
     let system = s.persona_text(pack_dir).unwrap_or_else(|e| {
         elog!("synaps-avatar: persona: {e:#}; none sent");
         None
     });
-    session::Persona { system: voice::persona(system, voice), model: model.or_else(|| s.model.clone()), thinking: s.thinking.clone() }
+    session::Persona { system: voice::persona(system, voice.enabled, voice.speak_unprompted), model: model.or_else(|| s.model.clone()), thinking: s.thinking.clone() }
 }
 
 /// Start the session link: the client and its pump live in the view.

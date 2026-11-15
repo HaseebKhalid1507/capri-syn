@@ -10,6 +10,8 @@ newline-delimited JSON:
   {"op":"listen-stop"}                 {"ev":"mic-closed"} {"ev":"heard","text":..., "why":..., "ms":{...}}
   {"op":"listen-cancel"}               {"ev":"mic-closed"}
   {"op":"say","id":n,"text":...}       {"ev":"say-start","id","text","dur_ms","step_ms","shapes"}  {"ev":"say-end","id"}
+  {"op":"say",...,"unprompted":true}   (a reply he didn't ask for: Gate)   {"ev":"say-skipped","id","why"}
+  {"op":"drop","id":n}                 (that turn's sentences go; the one playing stops)
   {"op":"hush"}                        {"ev":"hushed"}
   {"op":"media-hold","mode":"pause|duck|off"}   {"op":"media-release"}
   {"op":"stats"}                       {"ev":"stats", ...}
@@ -747,9 +749,17 @@ class Media:
         log('media: released', h)
 
 
-def run(cmd):
+def feed(p, data):
     try:
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=3).stdout
+        p.stdin.write(data)
+        p.stdin.close()
+    except (BrokenPipeError, ValueError, OSError):
+        pass
+
+
+def run(cmd, timeout=3):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout).stdout
     except Exception:
         return ''
 
@@ -773,10 +783,133 @@ def sink_inputs():
 
 # ---- the sidecar ----------------------------------------------------------------------------
 
+# ---- unprompted replies: when she stays silent -----------------------------------------------
+
+FEATURES = ['unprompted']
+# Screen lockers (their /proc comm, cut to 15 chars). bella locks with a bare `i3lock`, which sets no
+# logind LockedHint, so the process is the signal; LockedHint is the second one.
+LOCKERS = [n[:15] for n in (os.environ.get('CAPRI_VOICE_LOCKERS') or
+                            'i3lock,i3lock-color,betterlockscreen,xsecurelock,slock,swaylock,gtklock,hyprlock').split(',') if n]
+CAP_S = 10.0                    # one unprompted reply: at most this much audio
+BUDGET_S, WINDOW_S = 20.0, 60.0 # unprompted speech in any rolling window
+STALE_S = 15.0                  # a reply that waited longer than this for its turn stays text
+
+
+def screen_locked():
+    for d in os.listdir('/proc'):
+        if d.isdigit():
+            try:
+                with open(f'/proc/{d}/comm') as f:
+                    if f.read().strip() in LOCKERS:
+                        return True
+            except OSError:
+                pass
+    return False
+
+
+def locked_hint():
+    for sid in run(['loginctl', 'show-user', str(os.getuid()), '-p', 'Sessions', '--value'], 0.5).split():
+        if run(['loginctl', 'show-session', sid, '-p', 'LockedHint', '--value'], 0.5).strip() == 'yes':
+            return True
+    return False
+
+
+def other_capture(items, sources):
+    """Another app capturing a real source (not a monitor): a call, a recorder. Ours, and level
+    meters, don't count."""
+    for o in items:
+        pr = o.get('properties', {})
+        if pr.get('application.name') == 'capri-voice' or pr.get('media.name') == 'Peak detect' or pr.get('stream.monitor') == 'true':
+            continue
+        src = sources.get(o.get('source'))
+        if src is None or src.get('name', '').endswith('.monitor') or src.get('properties', {}).get('device.class') == 'monitor':
+            continue
+        return pr.get('application.name') or 'an app'
+    return None
+
+
+def in_call():
+    try:
+        items = json.loads(run(['pactl', '-f', 'json', 'list', 'source-outputs'], 0.5) or '[]')
+        if not items:
+            return None
+        sources = {x['index']: x for x in json.loads(run(['pactl', '-f', 'json', 'list', 'sources'], 0.5) or '[]')}
+    except (ValueError, KeyError):
+        return None
+    return other_capture(items, sources)
+
+
+def dnd_on():
+    """His do-not-disturb: dunst paused ($mod+Ctrl+n). Asked over D-Bus (dunstctl takes seconds)."""
+    return run(['busctl', '--user', 'get-property', 'org.freedesktop.Notifications', '/org/freedesktop/Notifications',
+                'org.dunstproject.cmd0', 'paused'], 0.5).strip() == 'b true'
+
+
+class Gate:
+    """An unprompted reply (she speaks without him asking) stays silent in a call (any other app
+    capturing a mic), with the screen locked, with his do-not-disturb on (dunst paused), past the
+    speech budget, past CAP_S for the reply, or after waiting STALE_S for its turn. Checked before
+    each of its sentences, and every 0.5 s while one plays (call, lock)."""
+
+    def __init__(self):
+        self.queued = {}         # id -> when its first sentence arrived
+        self.skipped, self.dropped = set(), set()
+        self.spent = {}          # id -> seconds of it heard
+        self.heard = []          # (t_end, seconds) of unprompted audio
+        self.cache = {}
+        self.check_ms = 0.0
+
+    def _cached(self, key, ttl, fn):
+        t, v = self.cache.get(key, (-1e9, None))
+        if time.monotonic() - t > ttl:
+            v = fn()
+            self.cache[key] = (time.monotonic(), v)
+        return v
+
+    def now_why(self):
+        if screen_locked() or self._cached('hint', 2.0, locked_hint):
+            return 'screen locked'
+        if (app := in_call()):
+            return f'call ({app})'
+        return None
+
+    def budget_used(self, now):
+        self.heard = [(t, d) for t, d in self.heard if t > now - WINDOW_S]
+        return sum(min(d, t - (now - WINDOW_S)) for t, d in self.heard)
+
+    def check(self, sid, dur, pcm):
+        """(why, pcm): why this sentence of turn `sid` stays silent, or None (pcm, maybe cut to the
+        reply's cap)."""
+        now = time.monotonic()
+        first = sid not in self.spent
+        if first and now - self.queued.get(sid, now) > STALE_S:
+            return 'too late', pcm
+        if (why := self.now_why()):
+            return why, pcm
+        if first and self._cached('dnd', 5.0, dnd_on):
+            return 'do not disturb', pcm
+        spent = self.spent.get(sid, 0.0)
+        if not first and spent + dur > CAP_S:
+            return 'reply cap', pcm
+        if first and dur > CAP_S:
+            n, fade = int(CAP_S * TTS_RATE), int(0.15 * TTS_RATE)
+            pcm = pcm[:n].copy()
+            pcm[-fade:] *= np.linspace(1, 0, fade, dtype=np.float32)
+            dur = CAP_S
+        if self.budget_used(now) + dur > BUDGET_S:
+            return 'speech budget', pcm
+        self.spent[sid] = spent + dur
+        return None, pcm
+
+    def played(self, secs):
+        self.heard.append((time.monotonic(), secs))
+
+
 class Voice:
     def __init__(self):
         self.lock = threading.Lock()
         self.conn = None
+        self.gate = Gate()
         self.cfg = {'stt_model': os.environ.get('CAPRI_VOICE_STT', 'small.en'), 'voice': VOICE, 'speed': SPEED, 'flow': FLOW, 'pace': PACE}
         self.last_said = (None, '', 0.0)  # (id, text, tail silence s) of the last sentence: the gap before the next
         self.stt = Stt(self.cfg['stt_model'])
@@ -790,6 +923,7 @@ class Voice:
         self.say_q = []          # (id, text, t_recv)
         self.play_q = []         # (id, text, pcm, shapes, t_recv, synth_ms)
         self.player = None       # the pw-play process now playing
+        self.playing = None      # ... and whose sentence it is
         self.hush_gen = 0
         self.cv = threading.Condition(self.lock)
         self.turns = []          # timings, last 20
@@ -906,16 +1040,42 @@ class Voice:
                 'keyup_to_heard': d('t_keyup', 't_heard'), 'press_to_open': d('t_start', 't_mic_open')}
 
     # -- speech
-    def say(self, sid, text):
+    def say(self, sid, text, unprompted=False):
         with self.cv:
-            self.say_q.append((sid, text, now_ms(), self.hush_gen))
+            if sid in self.gate.skipped or sid in self.gate.dropped:
+                return
+            if unprompted:
+                self.gate.queued.setdefault(sid, time.monotonic())
+            self.say_q.append((sid, text, now_ms(), self.hush_gen, unprompted))
             self.cv.notify_all()
+
+    def drop(self, sid):
+        with self.cv:
+            self.gate.dropped.add(sid)
+            self.say_q = [q for q in self.say_q if q[0] != sid]
+            self.play_q = [q for q in self.play_q if q[0] != sid]
+            p = self.player if self.playing == sid else None
+        if p is not None:
+            p.kill()
+        log(f'drop {sid}')
+
+    def skip(self, sid, why):
+        """An unprompted reply stays silent from here (it is text on her side)."""
+        with self.cv:
+            if sid in self.gate.skipped:
+                return
+            self.gate.skipped.add(sid)
+            self.say_q = [q for q in self.say_q if q[0] != sid]
+            self.play_q = [q for q in self.play_q if q[0] != sid]
+        self.emit(ev='say-skipped', id=sid, why=why)
+        log(f'say {sid}: skipped ({why})')
 
     def hush(self):
         with self.cv:
             self.hush_gen += 1
             self.say_q.clear()
             self.play_q.clear()
+            self.gate.queued.clear()
             p = self.player
             self.cv.notify_all()
         if p is not None:
@@ -928,7 +1088,7 @@ class Voice:
             with self.cv:
                 while not self.say_q:
                     self.cv.wait()
-                sid, text, t_recv, gen = self.say_q.pop(0)
+                sid, text, t_recv, gen, unprompted = self.say_q.pop(0)
             t = now_ms()
             try:
                 prev_id, prev_text, prev_tail = self.last_said
@@ -943,7 +1103,9 @@ class Voice:
             with self.cv:
                 if gen != self.hush_gen:
                     continue
-                self.play_q.append((sid, text, pcm, shapes(pcm), t_recv, synth, gen))
+                if sid in self.gate.skipped or sid in self.gate.dropped:
+                    continue
+                self.play_q.append((sid, text, pcm, shapes(pcm), t_recv, synth, gen, unprompted))
                 self.cv.notify_all()
 
     def _play_loop(self):
@@ -951,30 +1113,50 @@ class Voice:
             with self.cv:
                 while not self.play_q:
                     self.cv.wait()
-                sid, text, pcm, shp, t_recv, synth, gen = self.play_q.pop(0)
+                sid, text, pcm, shp, t_recv, synth, gen, unprompted = self.play_q.pop(0)
                 if gen != self.hush_gen:
+                    continue
+            if unprompted:
+                t = now_ms()
+                why, pcm = self.gate.check(sid, len(pcm) / TTS_RATE, pcm)
+                self.gate.check_ms = now_ms() - t
+                if why:
+                    self.skip(sid, why)
+                    continue
+            with self.cv:
+                if gen != self.hush_gen or sid in self.gate.dropped:
                     continue
                 cmd = ['pw-play', '--rate', str(TTS_RATE), '--channels', '1', '--format', 's16', '--raw',
                        '-P', '{ application.name = "capri-voice" media.name = "capri-voice speech" }']
                 if SINK:
                     cmd += ['--target', SINK]
                 p = subprocess.Popen(cmd + ['-'], stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
-                self.player = p
+                self.player, self.playing = p, sid
             data = (np.clip(pcm, -1, 1) * 32767).astype(np.int16).tobytes()
             t0 = now_ms()
             self.emit(ev='say-start', id=sid, text=text, dur_ms=round(len(pcm) / TTS_RATE * 1000), step_ms=STEP_MS, shapes=shp,
                       ms={'queued_to_audio': round(t0 - t_recv), 'synth': round(synth)})
-            log(f'say {sid}: {len(text)} chars, synth {synth:.0f} ms, recv->audio {t0 - t_recv:.0f} ms, {len(pcm) / TTS_RATE:.2f} s')
-            try:
-                p.stdin.write(data)
-                p.stdin.close()
-            except (BrokenPipeError, ValueError):
-                pass
-            p.wait()
+            log(f'say {sid}: {len(text)} chars, synth {synth:.0f} ms, recv->audio {t0 - t_recv:.0f} ms, {len(pcm) / TTS_RATE:.2f} s'
+                + (f' (unprompted, gate {self.gate.check_ms:.0f} ms)' if unprompted else ''))
+            # Fed from a thread (pw-play takes its input in big gulps), so an unprompted sentence
+            # stops within ~0.4 s if a call starts or the screen locks under it.
+            threading.Thread(target=feed, args=(p, data), daemon=True).start()
+            why = None
+            while True:
+                try:
+                    p.wait(timeout=0.35 if unprompted else None)
+                    break
+                except subprocess.TimeoutExpired:
+                    if why is None and (why := self.gate.now_why()):
+                        p.kill()
+            if unprompted:
+                self.gate.played(len(pcm) / TTS_RATE if why is None else (now_ms() - t0) / 1000)
             with self.cv:
-                self.player = None
-                hushed = gen != self.hush_gen
-            if not hushed:
+                self.player, self.playing = None, None
+                hushed = gen != self.hush_gen or sid in self.gate.dropped
+            if why:
+                self.skip(sid, why)
+            elif not hushed:
                 self.emit(ev='say-end', id=sid)
 
     # -- protocol
@@ -996,7 +1178,7 @@ class Voice:
             if msg.get('stt_model') and msg['stt_model'] != self.stt.name:
                 self.cfg['stt_model'] = msg['stt_model']
                 self.stt = Stt(msg['stt_model'])
-            self.emit(ev='ready', cfg=self.cfg)
+            self.emit(ev='ready', cfg=self.cfg, features=FEATURES)
         elif op == 'listen-start':
             self.listen_start()
         elif op == 'listen-stop':
@@ -1004,7 +1186,9 @@ class Voice:
         elif op == 'listen-cancel':
             self.listen_cancel()
         elif op == 'say':
-            self.say(msg.get('id', 0), msg.get('text', ''))
+            self.say(msg.get('id', 0), msg.get('text', ''), bool(msg.get('unprompted')))
+        elif op == 'drop':
+            self.drop(msg.get('id', 0))
         elif op == 'hush':
             self.hush()
         elif op == 'media-hold':
@@ -1092,6 +1276,49 @@ def read_wav(path):
     return (x / 32768.0).astype(np.float32)
 
 
+def selftest_gate():
+    global LOCKERS
+    mic = {68: {'name': 'alsa_input.x.Mic1__source', 'properties': {'device.class': 'sound'}},
+           49: {'name': 'both_speakers.monitor', 'properties': {'device.class': 'monitor'}}}
+    out = lambda app, src, **pr: {'source': src, 'properties': {'application.name': app, **pr}}
+    assert other_capture([out('capri-voice', 68)], mic) is None, 'her own push-to-talk is not a call'
+    assert other_capture([out('obs', 49), out('pavucontrol', 68, **{'media.name': 'Peak detect'})], mic) is None
+    assert other_capture([out('capri-voice', 68), out('Discord', 68)], mic) == 'Discord'
+    saved = LOCKERS
+    LOCKERS = [open('/proc/self/comm').read().strip()]
+    assert screen_locked(), 'a locker process is the lock'
+    LOCKERS = ['capri-no-such-locker'[:15]]
+    assert not screen_locked()
+    LOCKERS = saved
+    assert 'betterlockscree' in LOCKERS, 'comm is cut to 15 chars'
+
+    class Quiet(Gate):
+        why = None
+
+        def now_why(self):
+            return self.why
+    g = Quiet()
+    g.cache['dnd'] = (time.monotonic() + 1e6, False)
+    one = np.ones(int(4 * TTS_RATE), np.float32)
+    assert g.check(1, 4.0, one)[0] is None and g.check(1, 4.0, one)[0] is None
+    assert g.check(1, 4.0, one)[0] == 'reply cap', 'one reply: 10 s at most'
+    long = np.ones(int(12 * TTS_RATE), np.float32)
+    why, cut = g.check(2, 12.0, long)
+    assert why is None and len(cut) == int(CAP_S * TTS_RATE) and cut[-1] == 0.0, 'a first sentence over the cap is cut, faded'
+    g.played(8.0)
+    g.played(10.0)
+    assert g.check(3, 4.0, one)[0] == 'speech budget', 'at most 20 s in any 60 s'
+    g.heard = [(time.monotonic() - 61, 10.0)]
+    assert g.check(3, 4.0, one)[0] is None, 'the window rolls'
+    g.queued[4] = time.monotonic() - STALE_S - 1
+    assert g.check(4, 1.0, one)[0] == 'too late'
+    g.why = 'call (Discord)'
+    assert g.check(5, 1.0, one)[0] == 'call (Discord)'
+    g.why = None
+    g.cache['dnd'] = (time.monotonic() + 1e6, True)
+    assert g.check(6, 1.0, one)[0] == 'do not disturb'
+
+
 def selftest():
     """Checks that need no audio device: the voice string, the markup, the gaps; with the models
     present, that the patched graph with neutral inputs speaks exactly like the stock one."""
@@ -1120,6 +1347,8 @@ def selftest():
     assert 0.32 <= g <= 0.54 and g == sentence_gap('Fine.', 'full'), 'gaps: in range and the same text gives the same gap'
     assert 0.40 <= sentence_gap('Really?', 'full') <= 0.62
     print('selftest: parsing ok')
+    selftest_gate()
+    print('selftest: unprompted gate ok (call, lock, budget, cap, too late)')
     if not os.path.exists(f'{MODELS}/kokoro-v1.0.int8.onnx'):
         print('selftest: no models, skipping the graph checks')
         return
