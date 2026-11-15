@@ -246,7 +246,7 @@ monitor = "follow"           # "follow" the monitor you work on | "any"
 passive_every_min = [3, 10]  # minutes between her own moves
 bid_every_min = [20, 30]     # minutes between attention bids
 max_moves_per_hour = 15
-no_repeat = 2                # never reuse her last N entrances
+no_repeat = 2                # avoid her last N entrances
 
 [brain.approaches]           # how she shows up for a bid; weights, 0 turns one off
 hang = 2
@@ -299,10 +299,12 @@ flags and debug knobs is in [docs/REFERENCE.md](docs/REFERENCE.md).
 | Right-click | Menu: reset position, DND 1 hour, attention mix / hang only / off, copy last reply, hide, quit (asks twice) |
 | <kbd>$mod</kbd>+<kbd>c</kbd>, tap | Opens the Line where you're working; she teleports over. Tap again to close |
 | <kbd>$mod</kbd>+<kbd>c</kbd>, hold | Push-to-talk. Release sends (voice on) |
-| <kbd>Enter</kbd> / <kbd>Shift</kbd>+<kbd>Enter</kbd> | Send, or steer a running turn / new line |
+| <kbd>Enter</kbd> | Send, or steer a running turn |
+| <kbd>Shift</kbd>+<kbd>Enter</kbd> | New line |
 | <kbd>↑</kbd> <kbd>↓</kbd> | Recall what you sent |
 | <kbd>PgUp</kbd> <kbd>PgDn</kbd> | Scroll the thread |
-| <kbd>Ctrl</kbd>+<kbd>Y</kbd> / <kbd>Ctrl</kbd>+<kbd>O</kbd> | Copy her last reply / open its last link |
+| <kbd>Ctrl</kbd>+<kbd>Y</kbd> | Copy her last reply |
+| <kbd>Ctrl</kbd>+<kbd>O</kbd> | Open the last link in it |
 | <kbd>Esc</kbd> | Close the Line (draft kept). While she's speaking: hush. While listening: cancel |
 | <kbd>Esc</kbd> <kbd>Esc</kbd> | Abort the running turn |
 | <kbd>A</kbd> / hold <kbd>A</kbd> | Allow a prompt / allow a risky one (about half a second) |
@@ -319,7 +321,7 @@ flags and debug knobs is in [docs/REFERENCE.md](docs/REFERENCE.md).
   `moods.json`, so another pack is possible. Capri is the only one that exists.
 - **Building needs access to `synaps-client`**, which is private for now.
 
-Reference (session rules, every flag, pack format, dev control, testing rules):
+Reference (session rules, every setting and flag, pack format, dev control, testing rules):
 [docs/REFERENCE.md](docs/REFERENCE.md).
 
 ## Credits & legal
