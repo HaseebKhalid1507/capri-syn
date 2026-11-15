@@ -128,22 +128,30 @@ A pack is a directory:
 |---|---|
 | `sprites.json` | the sprite catalog (CapriCore's `runtime-sprite-set.json`, schema 2): canvas, canonical anchor, sprites with pose/expression/anchor/visible bounds/sha256, clips (blink, speech), actions |
 | `*.png` | the frames the catalog names (1254×1254, sha256-verified unless `--no-verify`) |
-| `poses/poses.json` + PNGs | docking poses (sit-edge for perching on windows, hanging, clinging, ...) |
+| `poses/poses.json` + PNGs | docking poses (sit-edge for perching on windows, hanging, clinging, crouching, asleep on her side, ...) |
+| `intro/*.png` | the arrival frames (CapriCore's intro-v1, 02–06): launch, $mod+c, some teleports, landing on a window top |
+| `icon.png` | her icon (`_NET_WM_ICON` on her window and the Line) |
 | `music/*.png` | headphones frames and note sprites for the music idle |
 | `fonts/*.ttf` | the HUD font (Exo 2 static instances; OFL) |
-| `moods.json` | **the avatar's behaviour sidecar**, our file: HUD tones, idle life (bob, sway, sparkles, activity timing), the mood table (frames, entry clips, labels, glyphs), idle activities, extra frames, click reactions (head pat / body / annoyed streak), perch rules, music. The code ships no character ids: everything character-specific is in here |
+| `moods.json` | **the avatar's behaviour sidecar**, our file: HUD tones, idle life (bob, sway, sparkles, activity timing), the mood table (frames, entry clips, labels, glyphs), idle activities, extra frames (an extra frame may paint another file's face onto it: `patch`), click reactions (head pat / body / annoyed streak), perch rules (one frame, plus the headpat face), music, arrivals (`arrive`: launch / summon / teleport / perch sequences, `teleportChance`), the deep nap (`brain.napDeep`, `napPerch`, `napDeepAfterMs`, `napWake`), the startle and big-leap crouch, the look straight ahead (`brain.lookFront`), the rare air kiss (`kiss`) and the icon. The code ships no character ids: everything character-specific is in here |
 | `persona.md` | optional: her session's system prompt (`[session] persona`) |
-| `NOTICE.md` | the art's notice |
+| `NOTICE.md` | the art's notice, plus a line naming the CapriCore versions it came from |
 
 `packs/capri/moods.json` is Capri's sidecar. Build the full pack from a CapriCore checkout with:
 
 ```
 git clone https://github.com/CapriChooms/CapriCore /tmp/CapriCore
+git -C /tmp/CapriCore checkout v1.0.4
 tools/make-pack /tmp/CapriCore            # -> ~/.local/share/synaps-avatar/packs/capri
 synaps-avatar --check                     # verifies every frame
 ```
 
-(`make-pack` needs `fonttools` for the Exo 2 instances.)
+`make-pack` is pinned to **CapriCore v1.0.4** (`bc93892`): it refuses any other checkout, and checks every
+file it copies against `tools/capricore-v1.0.4.sha256` (1.1.x retired and redrew most of the frames her
+behaviour uses). One frame comes from v1.1.2 (`bb0c2d7`): `pose-sleep`, checked against its own pinned
+sha256. It's read from the checkout's git objects when they have it (`git fetch --tags`), else downloaded
+from GitHub at that commit, or given with `--sleep FILE`. It needs `fonttools` for the Exo 2 instances.
+`python3 tools/test_make_pack.py` tests it on fake checkouts.
 
 ## Building
 
