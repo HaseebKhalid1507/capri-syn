@@ -135,6 +135,12 @@ only (Kokoro packs held out of training, espeak-ng), never on a recording of any
   spells it (Capri, Copry, Kapree, "cup pray", "Haikapri"); never Capricorn, Capra, caprese or Cappy. Fail: nothing visible happens, nothing is held or sent, and the
   log gets a count and a score, never words. **At most 12 checks in any 10 minutes**; the 13th candidate
   pauses it for 10 minutes (`WAKE PAUSED · TOO MANY FALSE STARTS`).
+- **A second look** (`CAPRI_VOICE_WAKE_SECOND=0` turns it off): a candidate the check rejects is not
+  dropped at once. His turn is taken quietly (no tag, no meter, no media hold) until his pause, 10 s at
+  most, and decoded once as any turn is. If those words say "hey capri", it is a wake and the request goes
+  at once (a bare "Hey Capri." opens his turn then). Else it is dropped, words never logged. Whisper reads
+  the phrase far better with the request after it; the price is no early `● MIC` on that path, and up to
+  12.5 s of audio in RAM (not 2.5 s) while it is looked at.
 - **A pass** flips the tag to `● MIC`, holds other audio, and takes his turn as a toggle does (it ends on
   his pause). "Hey Capri, what's spike doing?" is one turn, and the phrase is cut from it. "Hey Capri" then
   a pause: the mic waits 5 s for speech, then `NOTHING HEARD`. "Hey Capri, let's talk" (`let's chat`,
@@ -148,11 +154,11 @@ only (Kokoro packs held out of training, espeak-ng), never on a recording of any
   reopened (`WAKE OFF · MIC LOST`) until the settings are reloaded.
 - **Measured (synthetic voices only: 8 Kokoro packs held out of training, and espeak-ng):** stage 1 at
   sensitivity 0.5 finds 94 % of clean wakes and 92 % at 10 dB with reverb, and fires 0.4 times an hour on
-  real read speech (2 in 5.4 h of LibriSpeech test-clean) and 0.5 an hour on the validation set. But
-  Whisper accepts only about half of the true wakes on these voices (56 % clean, 33 % noisy), so **end to
-  end it wakes on about half (clean) and a third (noisy)**. That is under the 90 % bar, which is why it is
-  a draft. With the prompt "Hey Capri." the check passes 85 % / 74 %, but near phrases ("hey caprese",
-  "hey Cappy") then pass 9 % of the time instead of 2.5 %. Details in the PR.
+  real read speech (2 in 5.4 h of LibriSpeech test-clean) and 0.5 an hour on the validation set. The
+  check alone accepts 76 % of "hey capri, <request>" (clean) and 39 % (10 dB + reverb); **with the second
+  look, 92 % clean and 66 % noisy**, while near phrases + a request wake about 3 % of the time ("hey
+  caprese", "hey Capra", "hey cabbie": Whisper writes "Hey Capri" for them). Clean meets the 90 % bar;
+  noisy (80 %) and near phrases (2 %) don't, which is why it is still a draft. Details in the PR.
 - `avatarctl state` → `voice.wake = {on, sensitivity, open, turn, paused, lost}`; `voice.mic.mode` is
   `"wake"` while it listens and `"wake-turn"` during his turn. The sidecar's `stats` count candidates,
   rejections, wakes and pauses.

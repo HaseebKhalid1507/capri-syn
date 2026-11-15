@@ -1872,10 +1872,10 @@ class Voice:
                             + ('; a second look at his turn' if WAKE_SECOND else ''))
                         if WAKE_SECOND:
                             c = {'t_start': cand['t'], 't_mic_open': cand['t'], 'mode': 'wake'}
-                            turn = {'buf': bytearray(cand['pre']), 'vs': VadStream(self.vad), 'seen': 0, 'c': c, 'quiet': True,
+                            turn = {'buf': bytearray(), 'vs': VadStream(self.vad), 'seen': 0, 'c': c, 'quiet': True,
                                     'ep': Endpointer(float(np.clip(silence_s, 0.5, 5.0)), max_s=WAKE_SECOND_S, wait_s=WAKE_WAIT_S,
                                                      min_frames=MIN_FRAMES['wake'])}
-                            why = feed_turn(turn, cand['post'])
+                            why = feed_turn(turn, cand['pre'] + bytes(cand['post']))   # the phrase counts as his speech
                             if why:
                                 finish(turn, why)
                                 turn = None
