@@ -617,3 +617,34 @@ pub fn decode_notes(pack: &Pack, files: &[String], size: u32) -> Result<Vec<Note
     }
     Ok(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn face_patch_moves_the_green_face_with_its_eyes_and_nothing_else() {
+        let (w, h) = (40u32, 30u32);
+        let px = |c: [u8; 4]| -> Vec<u8> { (0..w * h).flat_map(|_| c).collect() };
+        let red = [220, 10, 40, 255];
+        // The source: a green face (10..30 × 8..18) with a dark eye slit inside, on red hair.
+        let mut src = px(red);
+        for y in 8..18 {
+            for x in 10..30 {
+                let eye = (14..18).contains(&x) && (11..13).contains(&y);
+                let i = ((y * w + x) * 4) as usize;
+                src[i..i + 4].copy_from_slice(&if eye { [5, 5, 5, 255] } else { [40, 240, 90, 255] });
+            }
+        }
+        let mut dst = px([1, 2, 3, 255]);
+        face_patch(&mut dst, &src, w, h, Rect { x: 5, y: 4, width: 30, height: 20 }, (-2, 1));
+        let at = |b: &[u8], x: u32, y: u32| b[((y * w + x) * 4) as usize..][..4].to_vec();
+        assert_eq!(at(&dst, 14, 12), vec![5, 5, 5, 255], "the eye came along (gap closed)");
+        assert_eq!(at(&dst, 10, 10), vec![40, 240, 90, 255], "the face, moved by (-2, 1)");
+        assert_eq!(at(&dst, 38, 28), vec![1, 2, 3, 255], "far outside: untouched");
+        assert_eq!(at(&dst, 2, 2), vec![1, 2, 3, 255], "the hair isn't copied");
+        // Grown by FACE_GROW px around the face, no more.
+        assert_ne!(at(&dst, 10 - 2 - FACE_GROW as u32, 12 + 1), vec![1, 2, 3, 255]);
+        assert_eq!(at(&dst, 10 - 2 - FACE_GROW as u32 - 1, 12 + 1), vec![1, 2, 3, 255]);
+    }
+}

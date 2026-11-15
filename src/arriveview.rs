@@ -67,7 +67,7 @@ impl Avatar {
         }
         if k == ArriveKind::Teleport {
             let p = self.pack.behaviour.arrive.as_ref().map_or(0.0, |a| a.teleport_chance);
-            let go = !self.arrive.last_variant && self.rng.range(0.0, 1.0) < p;
+            let go = variant(self.arrive.last_variant, self.rng.range(0.0, 1.0), p);
             self.arrive.last_variant = go;
             if !go {
                 return;
@@ -212,10 +212,11 @@ impl Avatar {
     /// once in `gapMs`. True if it plays (its steps come after `after_ms` of what's playing).
     pub(super) fn maybe_kiss(&mut self, after_ms: u64, now: Instant) -> Option<Vec<Step>> {
         let k = self.pack.behaviour.kiss.clone()?;
-        if k.steps.is_empty() || !self.standing() || self.arrive.kissed.is_some_and(|t| now < t + Duration::from_millis(k.gap_ms)) {
+        if k.steps.is_empty() || !self.standing() {
             return None;
         }
-        if self.rng.range(0.0, 1.0) >= k.chance {
+        let roll = self.rng.range(0.0, 1.0);
+        if !rare(self.arrive.kissed, now, Duration::from_millis(k.gap_ms), roll, k.chance) {
             return None;
         }
         self.arrive.kissed = Some(now);
@@ -258,5 +259,58 @@ impl Avatar {
         if let Err(e) = self.x11.set_icon(xid, &data) {
             elog!("synaps-avatar: icon on 0x{xid:x}: {e:#}");
         }
+    }
+}
+
+/// A passive/bid teleport lands with the arrival sequence: chance `p`, never twice running
+/// (so about p / (1 + p) of them: 0.5 gives 1 in 3).
+fn variant(last: bool, roll: f32, p: f32) -> bool {
+    !last && roll < p
+}
+
+/// A rare beat: chance `p`, and never within `gap` of the last one.
+fn rare(last: Option<Instant>, now: Instant, gap: Duration, roll: f32, p: f32) -> bool {
+    last.is_none_or(|t| now >= t + gap) && roll < p
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::anim::Rng;
+
+    #[test]
+    fn teleport_variant_one_in_three_never_twice_running() {
+        let mut rng = Rng::new(7);
+        let (mut last, mut n) = (false, 0);
+        for _ in 0..30_000 {
+            let go = variant(last, rng.range(0.0, 1.0), 0.5);
+            assert!(!(go && last), "twice running");
+            n += go as u32;
+            last = go;
+        }
+        let share = n as f64 / 30_000.0;
+        assert!((0.31..0.36).contains(&share), "{share}");
+        assert!(!variant(false, 0.0, 0.0), "chance 0: never");
+    }
+
+    #[test]
+    fn the_kiss_is_rare_and_spaced() {
+        let t0 = Instant::now();
+        let gap = Duration::from_secs(600);
+        assert!(rare(None, t0, gap, 0.05, 0.1));
+        assert!(!rare(None, t0, gap, 0.2, 0.1), "the roll misses");
+        assert!(!rare(Some(t0), t0 + Duration::from_secs(599), gap, 0.0, 0.1), "within the gap");
+        assert!(rare(Some(t0), t0 + gap, gap, 0.0, 0.1));
+        // Headpats every 20 s for 2 h: at most one kiss per 10 min, and some.
+        let mut rng = Rng::new(3);
+        let (mut last, mut kisses) = (None, Vec::new());
+        for i in 0..360u64 {
+            let now = t0 + Duration::from_secs(20 * i);
+            if rare(last, now, gap, rng.range(0.0, 1.0), 0.1) {
+                last = Some(now);
+                kisses.push(now);
+            }
+        }
+        assert!(kisses.windows(2).all(|w| w[1] - w[0] >= gap) && (3..=12).contains(&kisses.len()), "{}", kisses.len());
     }
 }

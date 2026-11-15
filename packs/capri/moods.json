@@ -1086,7 +1086,7 @@
         "ms": 160
       }
     ],
-    "teleportChance": 0.33
+    "teleportChance": 0.5
   },
   "kiss": {
     "steps": [
