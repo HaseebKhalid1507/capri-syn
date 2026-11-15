@@ -95,7 +95,7 @@ class Stt:
         # the bare formula 56 % word errors and 15 loops, the 512 floor 3 % and none.
         dur = len(pcm) / MIC_RATE
         ctx = max(floor, min(1500, int(np.ceil((dur + 1.0) * 50 / 64) * 64)))
-        segs = self.m.transcribe(pcm, initial_prompt=prompt, no_context=True, single_segment=True, audio_ctx=ctx, temperature=0.0,
+        segs = self.m.transcribe(pcm, initial_prompt=prompt or '', no_context=True, single_segment=True, audio_ctx=ctx, temperature=0.0,
                                  temperature_inc=0.0, max_tokens=tokens or int(16 + 12 * dur))
         text = ' '.join(s.text for s in segs).strip()
         text = re.sub(r'\[[^\]]*\]|\([^)]*\)', '', text).strip()
