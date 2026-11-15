@@ -53,9 +53,9 @@ for speech. Setup: `tools/capri-voice-setup`, then `tools/systemd/capri-voice.se
   - `you`, `thanks for watching`, `please subscribe`; `thank you` and `bye` from under 400 ms of speech;
   - three or more words that are all from the recognition prompt (Capri, spike, lynx, …).
 - A drop is logged by length and milliseconds of speech, never the words or the audio.
-- Whisper's window: the utterance + 1 s, but at least 10 s under 1.5 s of speech (a lone "yes" in a
-  2.5 s window decodes into loops like "yes, yes, yes" and took 2–7 s); no temperature retries; a token
-  cap; a run of 4+ of the same word is kept once.
+- Whisper's window: the utterance + 1 s, but never under 10 s (a trimmed clip in a smaller window
+  decodes into loops like "yes, yes, yes" or "b, b, b" and took 2–7 s); no temperature retries; a token
+  cap; a run of 4+ of the same word is kept once (the log says how many were dropped, never the words).
 - Limits: whispering is not heard (the speech detector scores it below the gate).
 
 ## Which replies are spoken

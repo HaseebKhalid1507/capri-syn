@@ -7,14 +7,17 @@
   while he talks and while she answers, then back to exactly their old per-channel levels. Never her own
   streams, module loopbacks, calls (role or `[music] ignore`), notification sounds; nothing at all while
   another app captures a mic. Streams that start or unpause mid-duck are ducked too; his own change wins;
-  same stream only (`object.serial`); WirePlumber's per-app restore of a ducked level is undone; a crash
+  same stream only (`object.serial`); WirePlumber's per-app restore of a ducked level is undone (for a stream that comes back, and for a
+  sibling stream of an app still ducked); a crash
   mid-duck is repaired at the next start (state written atomically).
 - Silero VAD v5.1.2 gates Whisper: at least 6 speech frames (192 ms) peaking at p ≥ 0.70, else nothing is
   transcribed or sent (DIDN'T CATCH THAT). The clip is trimmed to the speech (+400 ms / +200 ms).
 - Junk transcripts are dropped: no letters (`-2,` `,` `2.`), ≤ 2 letters unless a real short word (`nd,`
   `Q.`), one vowel-less word (`, chr,` `hmm`), stock hallucinations, the prompt echoed.
-- Short words no longer take 2–7 s or come back as loops ("stomp, stomp, stomp"): a 10 s window under 1.5 s
-  of speech, no temperature retries, a token cap. A lone "stop" is heard in ~0.8 s.
+- Whisper's window is never under 10 s: on trimmed clips the smaller formula window looped ("b, b, b, b")
+  and garbled most short sentences (56 % word errors on 30 test sentences; 3 % with the floor). Short words
+  no longer take 2–7 s or come back as loops ("stomp, stomp, stomp"); no temperature retries; a token cap.
+  A lone "stop" is heard in ~0.7 s.
 - `tools/capri-voice-setup` fetches `silero_vad.onnx` (SHA-256 checked).
 
 ### Voice: her replies to what arrives on its own are spoken
