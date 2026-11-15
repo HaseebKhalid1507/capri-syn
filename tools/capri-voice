@@ -131,12 +131,13 @@ ECHO_WORDS, ECHO_WINDOW_S = 0.7, 15.0   # a transcript this much made of what sh
 # Apache-2.0, released models CC BY-NC-SA 4.0, so personal use; SHA-pinned), streamed: every 80 ms the mel of the last 110 ms, one 96-number embedding
 # from the last 76 mel frames; our head (1536 -> 64 -> 1, numpy) scores the last 16 embeddings (~2 s).
 # Two hops in a row over the threshold = a candidate. Stage 2: the loaded Whisper decodes the last
-# 2 s; it must say a hey-like word, then capri-like (whole word: "Capricorn" fails). Trained on stock
+# 2 s, 0.3 s after the candidate; it must say a hey-like word, then capri-like, loosely spelled ("Copry",
+# "Haikapri"), never "Capricorn". Trained on stock
 # TTS voices only (Kokoro packs and blends, espeak-ng): no recording of anyone. Detection on his
 # voice is unmeasured; wake_sensitivity is the remedy.
 WAKE_FILES = {'melspectrogram.onnx': 'ba2b0e0f8b7b875369a2c89cb13360ff53bac436f2895cced9f479fa65eb176f',
               'embedding_model.onnx': '70d164290c1d095d1d4ee149bc5e00543250a7316b59f31d056cff7bd3075c1f',
-              'hey-capri-v1.npz': None}           # set when the head is trained (below)
+              'hey-capri-v1.npz': '68ccb1ca224258e7be4383df7b8f6a6e11d4051ce13085aca9ecc0e63f1c43ab'}   # tools/wake (its manifest inside)
 WAKE_HOP, WAKE_CTX = 1280, 480                     # 80 ms hops; each mel call sees 30 ms before its hop
 WAKE_RING_S = 2.5                                  # all the idle mic is kept: 2.5 s, in RAM
 WAKE_REFRACTORY_S = 2.0
