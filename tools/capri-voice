@@ -48,6 +48,9 @@ PLAYERS = [p for p in os.environ.get('CAPRI_VOICE_PLAYERS', '').split(',') if p]
 DUCK_MATCH = os.environ.get('CAPRI_VOICE_DUCK_MATCH') or None
 THREADS = int(os.environ.get('CAPRI_VOICE_THREADS', '8'))
 TEST = os.environ.get('CAPRI_VOICE_TEST')   # a test sidecar: never a real (alsa_) or unset source or sink
+# Tests only: the capture stream without node.dont-reconnect, so it can be moved (the watchdog's test).
+# In use the stream is pinned: pactl and WirePlumber can't move it, and pw-record ends with its source.
+MOVABLE = bool(TEST and os.environ.get('CAPRI_VOICE_TEST_MOVABLE'))
 STT_FILES = {'tiny.en': 'ggml-tiny.en-q5_1.bin', 'base.en': 'ggml-base.en-q5_1.bin', 'small.en': 'ggml-small.en-q5_1.bin',
              'medium.en': f'{HOME}/.local/share/pywhispercpp/models/ggml-medium.en-q5_0.bin'}
 VOCAB = 'Capri, choom, Synaps, spike, lynx, polish-e, GPUI, avatarctl, Jawz, i3, Haseeb, bella, avante'
@@ -1317,7 +1320,7 @@ class Voice:
         # 20 ms chunks (pw-record's default is ~100 ms): the endpoint sees a pause that much sooner.
         cmd = ['pw-record', '--rate', str(MIC_RATE), '--channels', '1', '--format', 's16', '--raw', '--latency', '20ms',
                '-P', f'{{ application.name = "capri-voice" media.name = "capri-voice {"push-to-talk" if mode == "hold" else mode}" '
-                     'node.dont-reconnect = true node.dont-fallback = true }']
+                     f'{"" if MOVABLE else "node.dont-reconnect = true "}node.dont-fallback = true capri.capture = "{self._capture_tag()}" }}']
         if SOURCE:
             cmd += ['--target', SOURCE]
         self.rec_buf, self.rec_stop_at, self.cancelled = [], None, False
@@ -1350,16 +1353,22 @@ class Voice:
         threading.Thread(target=run, daemon=True).start()
         return dr
 
+    def _capture_tag(self):
+        """A name for this capture's stream, unique to it, so the watchdog finds it (and only it)."""
+        self.capture_n = getattr(self, 'capture_n', 0) + 1
+        self.capture_tag = f'{os.getpid()}-{self.capture_n}'
+        return self.capture_tag
+
     def _watchdog(self, p, cur):
         """The capture stays on the source it opened. If PipeWire moves it (a device removed, a
         default changed), the capture is killed at once and what it heard is dropped: it is never
         whatever the new source is."""
-        so = None
+        so, tag = None, self.capture_tag
         for _ in range(40):
             if p.poll() is not None:
                 return
             so = next((o for o in pactl_json('source-outputs') or []
-                       if o.get('properties', {}).get('application.process.id') == str(p.pid)), None)
+                       if o.get('properties', {}).get('capri.capture') == tag), None)
             if so:
                 break
             time.sleep(0.05)
