@@ -32,7 +32,7 @@ jobs:
 
       # The unit tests are pure (session link, packs' pure parts, effects, shapes): no display, no GPU.
       - name: Clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
       - name: Tests
-        run: cargo test --locked
+        run: cargo test --locked --workspace

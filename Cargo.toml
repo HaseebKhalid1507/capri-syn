@@ -6,15 +6,18 @@ edition = "2024"
 rust-version = "1.98"
 publish = false
 
+[workspace]
+members = ["crates/synaps-client"]
+
 [[bin]]
 name = "synaps-avatar"
 path = "src/main.rs"
 
 [dependencies]
-# The Synaps daemon client, from the public synaps-desk repo: an exact rev.
 # MPRIS playback (real "listening"): the zbus GPUI already builds, plus its blocking API.
 zbus = { version = "5.19", default-features = false, features = ["async-io", "blocking-api"] }
-synaps-client = { git = "https://github.com/HaseebKhalid1507/synaps-desk", rev = "4101e93483127d7b31e84b4aeaa21a678fbd2955" }
+# The Synaps daemon client, vendored (crates/synaps-client/VENDORED.md): no git deps, no tokens.
+synaps-client = { path = "crates/synaps-client" }
 # Longbridge's GPUI Kit pins Zed's GPUI snapshot exactly; both pins are spelled out so neither drifts.
 gpui-kit = { version = "=0.9.1", features = ["syntect", "profiler"] }
 gpui-pre = "=0.3.12"
