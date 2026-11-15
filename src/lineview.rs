@@ -43,6 +43,10 @@ impl Avatar {
             return "ok held".into();
         }
         self.talk_down = Some(now);
+        // A toggled mic is open: the talk key is a tap of the toggle (its release is ignored).
+        if self.voice.toggle.is_some() {
+            return self.voice_toggle_tap_key(cx);
+        }
         let hushed = self.voice_press(now, cx);
         self.brain_touch(crate::brain::Touch::Typing);
         if let Some(l) = &self.line {

@@ -1,4 +1,5 @@
-//! Voice, from the avatar's side: push-to-talk on the talk key, the `capri-voice` sidecar link,
+//! Voice, from the avatar's side: push-to-talk on the talk key, toggle-to-talk (`talk toggle`:
+//! one tap, the turn ends on his pause), the `capri-voice` sidecar link,
 //! the truthful `● MIC` tag, spoken replies (his spoken turns, and her replies to what arrives
 //! on its own) with captions and lip-sync, barge-in. A child module of `view`. The sidecar owns
 //! the mic and the models; nothing here touches audio.
@@ -15,6 +16,24 @@ const UP_DEBOUNCE: Duration = Duration::from_millis(60);
 const RESTORE_MS: u64 = 800;
 /// With voice on, a missing sidecar is looked for again this often (connecting opens no mic).
 const RECONNECT: Duration = Duration::from_secs(10);
+/// The toggle chord's key is polled this often until it is up: its auto-repeat is one toggle.
+const KEY_POLL: Duration = Duration::from_millis(30);
+/// No key state: this long without a toggle command counts as the key up.
+const REPEAT_QUIET: Duration = Duration::from_millis(300);
+/// While a toggled mic is open, the sidecar is asked this often whether it really is (it wins).
+const MIC_CHECK: Duration = Duration::from_secs(2);
+/// Not drawn this long for a reason other than hiding (a teleport): a hands-off mic closes.
+const HIDDEN_GRACE: Duration = Duration::from_secs(2);
+
+/// A toggled turn (`talk toggle`): open until his pause, a second tap, Esc or `talk cancel`.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Toggle {
+    pub at: Instant,
+    /// This tap opened (or summoned) the Line, so the keyboard goes back when the turn ends.
+    opened_line: bool,
+    /// The sidecar heard him start (`speech`): a second tap sends now; before it, cancels.
+    hearing: bool,
+}
 
 pub(super) struct Lips {
     t0: Instant,
@@ -64,6 +83,15 @@ pub(super) struct VoiceState {
     held: bool,
     /// A key-up waiting out the auto-repeat window.
     up_at: Option<Instant>,
+    /// A toggled turn, while its mic is asked for or open.
+    pub toggle: Option<Toggle>,
+    /// A toggle was taken and its key is not yet seen up: more toggles are its auto-repeat.
+    toggle_lock: bool,
+    toggles_ignored: u32,
+    toggle_last: Option<Instant>,
+    /// She isn't drawn (any reason), since.
+    hidden_since: Option<Instant>,
+    mic_check_at: Option<Instant>,
     /// Timings of the last turn (ms), for `voice stats`.
     keyup: Option<Instant>,
     heard_at: Option<Instant>,
@@ -285,13 +313,195 @@ impl Avatar {
         self.voice_changed(cx);
     }
 
-    /// Esc while holding: nothing is transcribed or sent.
+    // ---- toggle-to-talk --------------------------------------------------------------------
+
+    /// `talk toggle` (`$mod+Ctrl+c`, on press): open the mic, or end the turn (send now once he
+    /// has started, else cancel). One toggle per key-down: its auto-repeat is ignored until
+    /// the chord's key is seen up. Ignored while the talk key is held.
+    pub(super) fn voice_toggle(&mut self, cx: &mut Context<Self>) -> String {
+        self.voice.toggle_last = Some(Instant::now());
+        if self.voice.toggle_lock {
+            self.voice.toggles_ignored += 1;
+            return "ok held (one toggle per press)".into();
+        }
+        if self.talk_down.is_some() {
+            return "ok ignored (the talk key is held)".into();
+        }
+        self.voice_toggle_lock(cx);
+        if self.voice.toggle.is_some() {
+            return self.voice_toggle_tap(cx);
+        }
+        self.voice_toggle_start(cx)
+    }
+
+    /// Ignore toggles until the chord's key is up (polled; X has no key-up for i3's bindings).
+    /// If the key state can't be read, up = 300 ms without a toggle (auto-repeat sends ~30/s).
+    fn voice_toggle_lock(&mut self, cx: &mut Context<Self>) {
+        self.voice.toggle_lock = true;
+        let key = self.voice.cfg.toggle_key;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(KEY_POLL).await;
+                let up = this
+                    .update(cx, |a, _| match a.x11.char_key_down(key) {
+                        Ok(down) => !down,
+                        Err(_) => a.voice.toggle_last.is_none_or(|t| t.elapsed() >= REPEAT_QUIET),
+                    })
+                    .unwrap_or(true);
+                if up {
+                    this.update(cx, |a, _| a.voice.toggle_lock = false).ok();
+                    return;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Why the mic may not open now, if it may not (the reason, for her tag).
+    fn voice_mic_refusal(&self, hands_off: bool) -> Option<&'static str> {
+        if !self.voice_on() {
+            return Some("VOICE OFF · [voice] enabled = false");
+        }
+        // Approvals leave the mic usable (nothing spoken answers them); a secret never.
+        if self.prompt_ui.as_ref().is_some_and(|p| p.view.secret) || self.input.as_ref().is_some_and(|i| i.secret.is_some()) {
+            return Some("NO MIC · A SECRET IS ON SCREEN");
+        }
+        // Her tag must be on screen while a hands-off mic is open. A teleport (she moves; the
+        // Line's opening moves her too) is not hiding unless it lasts.
+        if hands_off {
+            match self.hidden_reason() {
+                Some("user" | "fullscreen") => return Some("NO MIC · SHE IS HIDDEN"),
+                Some(_) if self.voice.hidden_since.is_some_and(|t| t.elapsed() >= HIDDEN_GRACE) => return Some("NO MIC · SHE IS HIDDEN"),
+                _ => {}
+            }
+        }
+        None
+    }
+
+    fn voice_toggle_start(&mut self, cx: &mut Context<Self>) -> String {
+        let now = Instant::now();
+        if self.voice_speaking() {
+            self.voice_hush("talk toggle");
+        }
+        if let Some(why) = self.voice_mic_refusal(true) {
+            self.hint = Some((why.into(), now + Duration::from_secs(3)));
+            self.voice_changed(cx);
+            return format!("error: {why}");
+        }
+        if !self.voice_connect(cx) {
+            self.hint = Some(("VOICE OFF · START capri-voice".into(), now + Duration::from_secs(4)));
+            self.voice_changed(cx);
+            return "error: no sidecar".into();
+        }
+        // The Line opens (or comes back) with the keyboard, so Esc cancels; it goes back after.
+        let opened_line = match &self.line {
+            None => {
+                self.open_line(cx);
+                self.line.is_some()
+            }
+            Some(l) if l.parked => {
+                let (view, handle) = (l.view.clone(), l.handle);
+                cx.defer(move |cx| {
+                    handle.update(cx, |_, window, cx| view.update(cx, |l, cx| l.summon(window, cx))).ok();
+                });
+                true
+            }
+            Some(_) => false,
+        };
+        let mode = self.voice.cfg.duck.clone();
+        self.voice_send(serde_json::json!({ "op": "media-hold", "mode": mode }));
+        self.voice.held = true;
+        self.voice_send(serde_json::json!({ "op": "listen-start", "mode": "toggle", "silence_s": self.voice.cfg.silence_s }));
+        self.voice.asked = Some(now);
+        self.voice.keyup = None;
+        self.voice.toggle = Some(Toggle { at: now, opened_line, hearing: false });
+        self.voice.mic_check_at = Some(now + MIC_CHECK);
+        self.brain_touch(crate::brain::Touch::Typing);
+        elog!("synaps-avatar: voice: toggle: listening (ends on a {:.1} s pause)", self.voice.cfg.silence_s);
+        self.voice_changed(cx);
+        "ok toggle on".into()
+    }
+
+    /// The talk key pressed while a toggled mic is open: the same as a second tap.
+    pub(super) fn voice_toggle_tap_key(&mut self, cx: &mut Context<Self>) -> String {
+        self.voice_toggle_tap(cx)
+    }
+
+    /// The second tap: send now once he has started; before that, cancel.
+    fn voice_toggle_tap(&mut self, cx: &mut Context<Self>) -> String {
+        let Some(t) = self.voice.toggle else { return "ok".into() };
+        if !t.hearing {
+            self.voice_cancel(cx);
+            return "ok toggle cancelled".into();
+        }
+        self.voice.asked = None;
+        self.voice.keyup = Some(Instant::now());
+        self.voice.transcribing = true;
+        self.voice_send(serde_json::json!({ "op": "listen-stop" }));
+        self.voice_toggle_end(cx);
+        elog!("synaps-avatar: voice: toggle: second tap: sending");
+        self.voice_changed(cx);
+        "ok toggle sent".into()
+    }
+
+    /// The toggled turn is over: the keyboard goes back if its tap took it.
+    fn voice_toggle_end(&mut self, cx: &mut Context<Self>) {
+        let Some(t) = self.voice.toggle.take() else { return };
+        self.voice.mic_check_at = None;
+        if !t.opened_line {
+            return;
+        }
+        let Some(l) = &mut self.line else { return };
+        if l.parked {
+            return;
+        }
+        l.parked = true;
+        self.x11.arm_clicks(false);
+        if std::env::var_os("SA_READER_NO_RESTORE").is_none()
+            && let Some(p) = l.prev
+        {
+            self.x11.give_focus(p).ok();
+        }
+        let (view, handle) = (l.view.clone(), l.handle);
+        cx.defer(move |cx| {
+            handle.update(cx, |_, _, cx| view.update(cx, |l, cx| l.park(cx))).ok();
+        });
+    }
+
+    /// A secret on screen closes any open mic; hiding closes a toggled one. Each tick.
+    fn voice_mic_guard(&mut self, cx: &mut Context<Self>) {
+        match (self.hidden_reason(), self.voice.hidden_since) {
+            (Some(_), None) => self.voice.hidden_since = Some(Instant::now()),
+            (None, Some(_)) => self.voice.hidden_since = None,
+            _ => {}
+        }
+        if !self.voice_listening() {
+            return;
+        }
+        let hands_off = self.voice.toggle.is_some();
+        if let Some(why) = self.voice_mic_refusal(hands_off) {
+            let why = why.replace("NO MIC", "MIC CLOSED");
+            elog!("synaps-avatar: voice: {why}");
+            self.voice_cancel(cx);
+            self.hint = Some((why, Instant::now() + Duration::from_secs(3)));
+        }
+        // The sidecar is asked now and then whether a toggled mic is open; it wins.
+        if let Some(t) = self.voice.mic_check_at
+            && Instant::now() >= t
+        {
+            self.voice.mic_check_at = Some(Instant::now() + MIC_CHECK);
+            self.voice_send(serde_json::json!({ "op": "stats" }));
+        }
+    }
+
+    /// Esc while holding (or toggled), `talk cancel`: nothing is transcribed or sent.
     pub(super) fn voice_cancel(&mut self, cx: &mut Context<Self>) {
         if self.voice.asked.take().is_some() || self.voice.mic.is_some() {
             self.voice_send(serde_json::json!({ "op": "listen-cancel" }));
             self.voice_send(serde_json::json!({ "op": "media-release" }));
             self.voice.held = false;
             self.hint = Some(("CANCELLED · NOTHING SENT".into(), Instant::now() + Duration::from_secs(3)));
+            self.voice_toggle_end(cx);
             self.voice_changed(cx);
         }
     }
@@ -349,7 +559,40 @@ impl Avatar {
             "mic-closed" => {
                 self.voice.mic = None;
                 self.voice.level = 0.0;
+                // A toggled stream that ended on its own (refused, the lock, the hard cap): the
+                // sidecar's `heard` follows.
+                if self.voice.toggle.is_some() && self.voice.asked.take().is_some() {
+                    self.voice.transcribing = true;
+                    self.voice_toggle_end(cx);
+                }
                 self.voice_changed(cx);
+            }
+            "speech" => {
+                if let Some(t) = &mut self.voice.toggle {
+                    t.hearing = true;
+                }
+            }
+            // A toggled turn's end: his pause (or the cap) sends it; no speech in 8 s closes it.
+            "endpoint" => {
+                let why = v.get("why").and_then(|x| x.as_str()).unwrap_or("");
+                if self.voice.toggle.is_some() {
+                    self.voice.asked = None;
+                    if why != "nothing" {
+                        self.voice.keyup = Some(now);
+                        self.voice.transcribing = true;
+                    }
+                    if why == "cap" {
+                        self.hint = Some(("SENT AT 1:00 · MAX LENGTH".into(), now + Duration::from_secs(3)));
+                    }
+                    for k in ["speech_ms", "silence_ms"] {
+                        if let Some(x) = v.get(k) {
+                            self.voice.stats.insert(format!("endpoint_{k}"), x.clone());
+                        }
+                    }
+                    elog!("synaps-avatar: voice: toggle: endpoint ({why})");
+                    self.voice_toggle_end(cx);
+                    self.voice_changed(cx);
+                }
             }
             "heard" => {
                 self.voice.transcribing = false;
@@ -468,7 +711,20 @@ impl Avatar {
                 }
                 self.voice_changed(cx);
             }
-            "hushed" | "stats" => {}
+            "stats" => {
+                // The sidecar wins: a toggled mic it says is closed is closed here too.
+                if self.voice.toggle.is_some()
+                    && self.voice.mic.is_some()
+                    && v.get("mic_open").and_then(|x| x.as_bool()) == Some(false)
+                {
+                    elog!("synaps-avatar: voice: the sidecar says the mic is closed: so it is");
+                    self.voice.mic = None;
+                    self.voice.asked = None;
+                    self.voice_toggle_end(cx);
+                    self.voice_changed(cx);
+                }
+            }
+            "hushed" => {}
             "error" => elog!("synaps-avatar: voice: sidecar: {v}"),
             _ => {}
         }
@@ -681,8 +937,9 @@ impl Avatar {
     }
 
     /// Lips: the mouth follows the track. True if the frame changed.
-    pub(super) fn voice_tick(&mut self, now: Instant) -> bool {
+    pub(super) fn voice_tick(&mut self, now: Instant, cx: &mut Context<Self>) -> bool {
         self.voice_guard();
+        self.voice_mic_guard(cx);
         if self.voice.lips.is_none() && self.voice.mic.is_none() {
             return false;
         }
@@ -700,9 +957,10 @@ impl Avatar {
                 return Some(l.t0 + l.step * k as u32);
             }
         }
-        // The MIC timer counts seconds.
-        if let Some(m) = self.voice.mic {
-            return Some(m + Duration::from_secs(now.saturating_duration_since(m).as_secs() + 1));
+        // The MIC timer counts seconds; a toggled mic is checked with the sidecar.
+        let timer = self.voice.mic.map(|m| m + Duration::from_secs(now.saturating_duration_since(m).as_secs() + 1));
+        if let Some(t) = [timer, self.voice.mic_check_at].into_iter().flatten().min() {
+            return Some(t);
         }
         self.voice.retry_at.filter(|_| self.voice_on() && self.voice.link.is_none())
     }
@@ -712,7 +970,8 @@ impl Avatar {
         let bars = |v: f32| -> String { (0..5).map(|i| if v * 5.0 > i as f32 + 0.3 { '▮' } else { '▯' }).collect() };
         if let Some(m) = self.voice.mic {
             let s = m.elapsed().as_secs();
-            return Some(Status { label: format!("MIC {}:{:02} {}", s / 60, s % 60, bars(self.voice.level)), tone: 0xff3b62, invert: true, glyph: "rec".into() });
+            let auto = if self.voice.toggle.is_some() { " · AUTO" } else { "" };
+            return Some(Status { label: format!("MIC {}:{:02} {}{auto}", s / 60, s % 60, bars(self.voice.level)), tone: 0xff3b62, invert: true, glyph: "rec".into() });
         }
         if self.voice.asked.is_some() {
             return Some(Status { label: "MIC …".into(), tone: 0xff3b62, invert: false, glyph: "ring".into() });
@@ -730,7 +989,8 @@ impl Avatar {
     /// The Line's mic row: the tag's label while held, then what follows key-up.
     pub(super) fn voice_mic_row(&self) -> Option<String> {
         if self.voice_listening() {
-            return self.voice_status().map(|s| format!("● {}  ·  listening · release to send · esc to cancel", s.label));
+            let how = if self.voice.toggle.is_some() { "sends when you pause · tap again to send now · esc cancels" } else { "release to send · esc to cancel" };
+            return self.voice_status().map(|s| format!("● {}  ·  listening · {how}", s.label));
         }
         self.voice.transcribing.then(|| "◉ HEARD  ·  writing it down (nothing is kept)".to_string())
     }
@@ -749,6 +1009,14 @@ impl Avatar {
             "unprompted": self.voice.unprompted, "sent": self.voice.sent, "ended": self.voice.ended,
             "speak_unprompted": self.voice.cfg.speak_unprompted, "sidecar_unprompted": self.voice.can_unprompted,
             "shape": self.voice_shape(Instant::now()), "held": self.voice.held, "repeats_ignored": self.voice.repeats,
+            "mic": {
+                "open": self.voice.mic.is_some(),
+                "mode": if self.voice.toggle.is_some() { "toggle" } else if self.voice_listening() { "ptt" } else { "" },
+                "since_ms": self.voice.mic.map(|m| m.elapsed().as_millis() as u64),
+            },
+            "toggle": self.voice.toggle.map(|t| serde_json::json!({ "hearing": t.hearing, "opened_line": t.opened_line, "ms": t.at.elapsed().as_millis() as u64 })),
+            "hint": self.hint.as_ref().filter(|h| h.1 > Instant::now()).map(|h| h.0.clone()),
+            "toggle_lock": self.voice.toggle_lock, "toggles_ignored": self.voice.toggles_ignored, "silence_s": self.voice.cfg.silence_s,
             "stats": serde_json::Value::Object(self.voice.stats.clone()),
         })
     }

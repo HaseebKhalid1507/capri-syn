@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Voice: toggle-to-talk
+- `capri-ctl talk toggle` (proposed i3: `$mod+Ctrl+c`): one tap opens the mic, his pause sends it
+  (`[voice] silence_s`, 1.0 s; ×1.5 while he has said under 1 s). A second tap sends now (cancels before he
+  spoke); Esc or `talk cancel` cancel; no speech in 8 s closes it; 60 s sends. Holding the chord is one
+  toggle. Tag `● MIC 0:03 ▮▮▯ · AUTO`.
+- The mic refuses on a secret (not an approval), the lock, and for a toggle her hidden; a secret appearing
+  or the lock closes any open mic, hiding a toggled one. Hard caps in the sidecar: hold 120 s, toggle 65 s.
+  A test sidecar (`CAPRI_VOICE_TEST`) refuses a real or unset source.
+- `pw-record --latency 20ms` (was ~100 ms chunks).
+
 ### Voice: duck, don't pause; no more junk from near-silence
 - `[voice] duck = "duck"` is the default: browser video and music go down −18 dB (raw ×0.5 per channel)
   while he talks and while she answers, then back to exactly their old per-channel levels. Never her own

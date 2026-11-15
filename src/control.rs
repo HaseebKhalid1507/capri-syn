@@ -70,6 +70,10 @@ pub enum Command {
     Abort,
     /// The summon key went down (true) or up: open the Line (tap), voice later (hold).
     Talk(bool),
+    /// `talk toggle`: the mic opens on one tap and the turn ends on a pause (or a second tap).
+    TalkToggle,
+    /// `talk cancel`: an open mic closes, nothing is sent.
+    TalkCancel,
     /// Close the Line (as Esc).
     LineClose,
     /// Copy her last reply as written.
@@ -368,7 +372,9 @@ impl Command {
             "talk" => match rest {
                 "press" | "" => Command::Talk(true),
                 "release" => Command::Talk(false),
-                _ => bail!("usage: talk press|release"),
+                "toggle" => Command::TalkToggle,
+                "cancel" => Command::TalkCancel,
+                _ => bail!("usage: talk press|release|toggle|cancel"),
             },
             "line" => match rest {
                 "close" => Command::LineClose,
@@ -398,7 +404,7 @@ impl Command {
             "show" => Command::Show,
             "quit" => Command::Quit,
             _ => bail!(
-                "unknown command `{line}` (mood <name> | clip <id> | say <text> | pos <x> <y> [now] | perch [sit|stand] [win] | perch off | drop | stack | page next|prev | scroll <n> | reader open [focus]|close|copy [n]|scroll <px> | collapse | expand | music on|off | glitch | submit <text> | abort | prompt confirm|secret [text] | brain … | settings reload | tap head|body | state | hide | show | quit)"
+                "unknown command `{line}` (mood <name> | clip <id> | say <text> | talk press|release|toggle|cancel | pos <x> <y> [now] | perch [sit|stand] [win] | perch off | drop | stack | page next|prev | scroll <n> | reader open [focus]|close|copy [n]|scroll <px> | collapse | expand | music on|off | glitch | submit <text> | abort | prompt confirm|secret [text] | brain … | settings reload | tap head|body | state | hide | show | quit)"
             ),
         })
     }
@@ -508,5 +514,9 @@ mod tests {
         assert!(Command::parse("brain fly").is_err());
         assert!(matches!(Command::parse("tap head").unwrap(), Command::Tap { head: true }));
         assert!(matches!(Command::parse("settings reload").unwrap(), Command::SettingsReload));
+        assert!(matches!(Command::parse("talk toggle").unwrap(), Command::TalkToggle));
+        assert!(matches!(Command::parse("talk cancel").unwrap(), Command::TalkCancel));
+        assert!(matches!(Command::parse("talk").unwrap(), Command::Talk(true)));
+        assert!(Command::parse("talk twice").is_err());
     }
 }

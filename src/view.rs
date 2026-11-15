@@ -1608,7 +1608,7 @@ impl Avatar {
             self.lying_cut(before, now);
         }
         dirty |= self.step_kiss(now);
-        dirty |= self.voice_tick(now);
+        dirty |= self.voice_tick(now, cx);
         dirty |= self.step_turn(now);
         if let Some((at, m)) = self.mood_then
             && at <= now
@@ -2193,6 +2193,15 @@ impl Avatar {
                     self.talk_press(cx)
                 } else {
                     self.talk_release(cx)
+                }
+            }
+            Command::TalkToggle => self.voice_toggle(cx),
+            Command::TalkCancel => {
+                if self.voice_listening() {
+                    self.voice_cancel(cx);
+                    "ok cancelled".into()
+                } else {
+                    "ok (no mic)".into()
                 }
             }
             Command::LineClose => {

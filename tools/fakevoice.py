@@ -8,7 +8,11 @@ have said and when.
   drop id           -> that turn's queued sentences dropped (its playing one cut)
   hush              -> hushed (queued sentences dropped)
   listen-start      -> mic-open      listen-stop -> mic-closed, heard (FAKE_HEARD, default below)
-  listen-cancel     -> mic-closed    media-hold / media-release / stats -> printed only
+  listen-cancel     -> mic-closed    media-hold / media-release -> printed only
+  listen-start mode toggle -> mic-open {mode}, then as FAKE_TOGGLE (a JSON file, read at each
+                       start) says: {"speech_ms": 300, "end_ms": 1500, "why": "silence|cap|nothing"}
+                       -> speech, endpoint, mic-closed, heard; no file or {} -> open until stop/cancel
+  stats             -> stats {mic_open}
 Run the avatar with CAPRI_VOICE_SOCK=SOCK."""
 import json, os, socket, sys, threading, time
 
@@ -20,6 +24,8 @@ queue = []          # (gen, id, text)
 dropped = set()
 gen = [0]
 conn = [None]
+mic = {"open": False, "n": 0}
+TOGGLE = os.environ.get("FAKE_TOGGLE", "")
 
 
 def log(**v):
@@ -72,12 +78,49 @@ def handle(m):
             queue.clear()
         emit(ev="hushed")
     elif op == "listen-start":
-        emit(ev="mic-open")
+        mic["open"], mic["n"] = True, mic["n"] + 1
+        emit(ev="mic-open", mode=m.get("mode", "hold"))
+        if m.get("mode") == "toggle":
+            try:
+                plan = json.load(open(TOGGLE)) if TOGGLE else {}
+            except (OSError, ValueError):
+                plan = {}
+            if plan:
+                threading.Thread(target=toggle_run, args=(mic["n"], plan), daemon=True).start()
     elif op == "listen-stop":
-        emit(ev="mic-closed")
-        emit(ev="heard", text=HEARD, why="", ms={"stt": 1})
+        if mic["open"]:
+            mic["open"] = False
+            emit(ev="mic-closed")
+            emit(ev="heard", text=HEARD, why="", ms={"stt": 1})
     elif op == "listen-cancel":
-        emit(ev="mic-closed")
+        if mic["open"]:
+            mic["open"] = False
+            emit(ev="mic-closed")
+    elif op == "stats":
+        emit(ev="stats", mic_open=mic["open"])
+
+
+def toggle_run(n, plan):
+    """A toggled turn as the real sidecar plays it: speech, then the endpoint, unless stopped."""
+    t0 = time.time()
+    if plan.get("speech_ms") is not None:
+        time.sleep(plan["speech_ms"] / 1000)
+        if mic["n"] != n or not mic["open"]:
+            return
+        emit(ev="speech")
+        log(ev="speech")
+    time.sleep(max(0, plan.get("end_ms", 1500) / 1000 - (time.time() - t0)))
+    if mic["n"] != n or not mic["open"]:
+        return
+    why = plan.get("why", "silence")
+    mic["open"] = False
+    emit(ev="endpoint", why=why, speech_ms=800, silence_ms=1000)
+    emit(ev="mic-closed")
+    log(ev="endpoint", why=why)
+    if why == "nothing":
+        emit(ev="heard", text="", why="NOTHING HEARD · MIC CLOSED", ms={})
+    else:
+        emit(ev="heard", text=HEARD, why="", ms={"stt": 1})
 
 
 def main():
