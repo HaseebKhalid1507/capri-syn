@@ -34,6 +34,17 @@ struct StripDoc {
     bounds: Option<[i32; 4]>,
     #[serde(default)]
     mirror_art: Option<String>,
+    #[serde(default)]
+    contact: Option<ContactDoc>,
+}
+
+/// On a window top: the line the figure sits or lies on (cell px), and the columns whose
+/// pixels may hang below it (the lower legs). Everything else below the line is cut: the
+/// window's front face hides it.
+#[derive(Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct ContactDoc {
+    pub line: u32,
+    pub legs: [u32; 2],
 }
 
 #[derive(Deserialize, Clone, Debug, Default)]
@@ -95,6 +106,8 @@ pub struct Strip {
     pub faces_right: bool,
     /// The strip drawn to be mirrored when she faces the other way (`mirrorArt`).
     pub mirror_art: Option<String>,
+    /// Below `line` only the `legs` columns stay (cell px; see `ContactDoc`).
+    pub contact: Option<ContactDoc>,
 }
 
 impl Strip {
@@ -176,6 +189,11 @@ impl Anim {
             if bounds.x < 0 || bounds.y < 0 || bounds.right() > cw as i32 || bounds.bottom() > ch as i32 || b[2] <= 0 || b[3] <= 0 {
                 errors.push(format!("anim strip `{name}`: bounds {b:?} outside its {cw}x{ch} cell"));
             }
+            if let Some(c) = d.contact
+                && (c.line >= ch || c.legs[0] > c.legs[1] || c.legs[1] > cw)
+            {
+                errors.push(format!("anim strip `{name}`: contact {c:?} outside its {cw}x{ch} cell"));
+            }
             let x2 = root.join("x2").join(&d.file);
             anim.by_name.insert(name.clone(), anim.strips.len());
             anim.strips.push(Strip {
@@ -193,6 +211,7 @@ impl Anim {
                 k,
                 faces_right: !fam.faces.as_deref().is_some_and(|f| f.eq_ignore_ascii_case("left")),
                 mirror_art: d.mirror_art.clone(),
+                contact: d.contact,
             });
         }
         for s in &anim.strips {
@@ -269,7 +288,8 @@ pub mod tests {
                 "stand_flipped": {"file": "sprites/stand_flipped.png", "frames": 3, "cell": [4, 6], "fps": 10, "loop": true,
                                   "family": "stand", "anchor": {"name": "feet", "x": 2, "y": 5}, "bounds": [1, 1, 3, 4]},
                 "lie": {"file": "sprites/lie.png", "frames": 2, "cell": [6, 4], "fps": 4, "loop": true, "family": "lie",
-                        "anchor": {"name": "surface", "x": 3, "y": 2}, "bounds": [1, 1, 4, 2]},
+                        "anchor": {"name": "surface", "x": 3, "y": 2}, "bounds": [1, 1, 4, 2],
+                        "contact": {"line": 2, "legs": [4, 6]}},
                 "click": {"file": "sprites/click.png", "frames": 2, "cell": [4, 4], "fps": 30, "family": "fx"}
             },
             "files": {"sprites/stand.png": {"sha256": "ab"}}}});
@@ -302,6 +322,8 @@ pub mod tests {
         assert_eq!(s.mirror_art.as_deref(), Some("stand_flipped"));
         let l = a.strip("lie").unwrap();
         assert_eq!((l.anchor.0.as_str(), l.ms), ("seat", 250), "a surface sits on the seat line");
+        assert_eq!(l.contact, Some(ContactDoc { line: 2, legs: [4, 6] }));
+        assert_eq!(s.contact, None);
         let cells = a.cells(a.by_name["stand"], false);
         assert_eq!(cells.len(), 3);
         let (id, f) = &cells[2];
@@ -320,9 +342,11 @@ pub mod tests {
         v["lachy"]["strips"]["stand"]["mirrorArt"] = json!("nope");
         v["lachy"]["strips"]["lie"]["bounds"] = json!([0, 0, 9, 9]);
         v["lachy"]["strips"]["stand_flipped"]["file"] = json!("sprites/gone.png");
+        v["lachy"]["strips"]["stand"]["contact"] = json!({"line": 6, "legs": [0, 4]});
         std::fs::write(&p, v.to_string()).unwrap();
         let e = format!("{:#}", Anim::load(&d, 8).unwrap_err());
         assert!(e.contains("mirrorArt `nope`") && e.contains("outside its 6x4 cell") && e.contains("gone.png is missing"), "{e}");
+        assert!(e.contains("contact ContactDoc { line: 6, legs: [0, 4] } outside its 4x6 cell"), "{e}");
         std::fs::write(&p, json!({"schemaVersion": 2}).to_string()).unwrap();
         assert!(format!("{:#}", Anim::load(&d, 8).unwrap_err()).contains("schemaVersion 2"));
         std::fs::remove_dir_all(&d).ok();

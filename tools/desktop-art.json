@@ -1,6 +1,6 @@
 {
  "schemaVersion": 1,
- "about": "capri-syn's own measurements of the capri-desktop art (cell grid, anchors, loop/one-shot), taken from the PNGs at the pinned commits. Anchors and bounds are in cell px; x/y from the cell's top-left; bounds [x, y, w, h] = the union of every cell's opaque box. A laydown anchor's x is the figure's middle (edgeX: where her hanging leg leaves the surface). faces: the side her face looks to, unmirrored. fpsFrom 'clips.json' = lachy's quest clips.json lists the same frame count and cell width; 'guess' = ours. mirrorArt: the strip drawn for mirroring (same silhouette, the suit's asymmetric details swapped): when she faces the other way, draw mirror(mirrorArt), not mirror(strip).",
+ "about": "capri-syn's own measurements of the capri-desktop art (cell grid, anchors, loop/one-shot), taken from the PNGs at the pinned commits. Anchors and bounds are in cell px; x/y from the cell's top-left; bounds [x, y, w, h] = the union of every cell's opaque box. A laydown anchor's x is the figure's middle (edgeX: where her hanging leg leaves the surface). faces: the side her face looks to, unmirrored. fpsFrom 'clips.json' = lachy's quest clips.json lists the same frame count and cell width; 'guess' = ours. mirrorArt: the strip drawn for mirroring (same silhouette, the suit's asymmetric details swapped): when she faces the other way, draw mirror(mirrorArt), not mirror(strip). contact (seat and surface strips): on a window top, below cell row `line` only the columns `legs` [x0, x1) stay, the lower legs hanging over the edge; the window's front face hides the rest (a hand, the mane, an arm).",
  "lachy": {
   "repo": "https://github.com/lachydotmcg/capri-desktop",
   "commit": "156ed188a2ac00854eb1c9e932087eb5e824ccb9",
@@ -376,7 +376,14 @@
      364,
      245
     ],
-    "mirrorArt": "laydown_flipped"
+    "mirrorArt": "laydown_flipped",
+    "contact": {
+     "line": 142,
+     "legs": [
+      290,
+      372
+     ]
+    }
    },
    "laydown_blink": {
     "file": "sprites/laydown_blink.png",
@@ -401,7 +408,14 @@
      350,
      245
     ],
-    "mirrorArt": "laydown_blink_flipped"
+    "mirrorArt": "laydown_blink_flipped",
+    "contact": {
+     "line": 144,
+     "legs": [
+      290,
+      372
+     ]
+    }
    },
    "laydown_blink_flipped": {
     "file": "sprites/laydown_blink_flipped.png",
@@ -426,7 +440,14 @@
      350,
      245
     ],
-    "mirrorArtFor": "laydown_blink"
+    "mirrorArtFor": "laydown_blink",
+    "contact": {
+     "line": 144,
+     "legs": [
+      290,
+      372
+     ]
+    }
    },
    "laydown_blink_glitch": {
     "file": "sprites/laydown_blink_glitch.png",
@@ -451,7 +472,14 @@
      350,
      245
     ],
-    "mirrorArt": "laydown_blink_glitch_flipped"
+    "mirrorArt": "laydown_blink_glitch_flipped",
+    "contact": {
+     "line": 144,
+     "legs": [
+      290,
+      372
+     ]
+    }
    },
    "laydown_blink_glitch_flipped": {
     "file": "sprites/laydown_blink_glitch_flipped.png",
@@ -476,7 +504,14 @@
      350,
      245
     ],
-    "mirrorArtFor": "laydown_blink_glitch"
+    "mirrorArtFor": "laydown_blink_glitch",
+    "contact": {
+     "line": 144,
+     "legs": [
+      290,
+      372
+     ]
+    }
    },
    "laydown_flipped": {
     "file": "sprites/laydown_flipped.png",
@@ -501,7 +536,14 @@
      364,
      245
     ],
-    "mirrorArtFor": "laydown"
+    "mirrorArtFor": "laydown",
+    "contact": {
+     "line": 142,
+     "legs": [
+      290,
+      372
+     ]
+    }
    },
    "laydown_glitch": {
     "file": "sprites/laydown_glitch.png",
@@ -626,7 +668,14 @@
      357,
      246
     ],
-    "mirrorArt": "laydown_sleep_flipped"
+    "mirrorArt": "laydown_sleep_flipped",
+    "contact": {
+     "line": 142,
+     "legs": [
+      290,
+      372
+     ]
+    }
    },
    "laydown_sleep_flipped": {
     "file": "sprites/laydown_sleep_flipped.png",
@@ -651,7 +700,14 @@
      357,
      246
     ],
-    "mirrorArtFor": "laydown_sleep"
+    "mirrorArtFor": "laydown_sleep",
+    "contact": {
+     "line": 142,
+     "legs": [
+      290,
+      372
+     ]
+    }
    },
    "laydown_talk": {
     "file": "sprites/laydown_talk.png",
@@ -676,7 +732,14 @@
      364,
      245
     ],
-    "mirrorArt": "laydown_talk_flipped"
+    "mirrorArt": "laydown_talk_flipped",
+    "contact": {
+     "line": 142,
+     "legs": [
+      290,
+      372
+     ]
+    }
    },
    "laydown_talk_flipped": {
     "file": "sprites/laydown_talk_flipped.png",
@@ -701,7 +764,14 @@
      364,
      245
     ],
-    "mirrorArtFor": "laydown_talk"
+    "mirrorArtFor": "laydown_talk",
+    "contact": {
+     "line": 142,
+     "legs": [
+      290,
+      372
+     ]
+    }
    },
    "leave": {
     "file": "sprites/leave.png",
@@ -767,7 +837,14 @@
      186,
      349
     ],
-    "mirrorArt": "perch_flipped"
+    "mirrorArt": "perch_flipped",
+    "contact": {
+     "line": 270,
+     "legs": [
+      80,
+      196
+     ]
+    }
    },
    "perch_arrive": {
     "file": "sprites/perch_arrive.png",
@@ -839,7 +916,14 @@
      186,
      346
     ],
-    "mirrorArt": "perch_blink_flipped"
+    "mirrorArt": "perch_blink_flipped",
+    "contact": {
+     "line": 273,
+     "legs": [
+      80,
+      196
+     ]
+    }
    },
    "perch_blink_flipped": {
     "file": "sprites/perch_blink_flipped.png",
@@ -863,7 +947,14 @@
      188,
      346
     ],
-    "mirrorArtFor": "perch_blink"
+    "mirrorArtFor": "perch_blink",
+    "contact": {
+     "line": 273,
+     "legs": [
+      80,
+      196
+     ]
+    }
    },
    "perch_blink_glitch": {
     "file": "sprites/perch_blink_glitch.png",
@@ -887,7 +978,14 @@
      188,
      346
     ],
-    "mirrorArt": "perch_blink_glitch_flipped"
+    "mirrorArt": "perch_blink_glitch_flipped",
+    "contact": {
+     "line": 273,
+     "legs": [
+      80,
+      196
+     ]
+    }
    },
    "perch_blink_glitch_flipped": {
     "file": "sprites/perch_blink_glitch_flipped.png",
@@ -911,7 +1009,14 @@
      190,
      346
     ],
-    "mirrorArtFor": "perch_blink_glitch"
+    "mirrorArtFor": "perch_blink_glitch",
+    "contact": {
+     "line": 273,
+     "legs": [
+      80,
+      196
+     ]
+    }
    },
    "perch_flipped": {
     "file": "sprites/perch_flipped.png",
@@ -935,7 +1040,14 @@
      188,
      349
     ],
-    "mirrorArtFor": "perch"
+    "mirrorArtFor": "perch",
+    "contact": {
+     "line": 270,
+     "legs": [
+      80,
+      196
+     ]
+    }
    },
    "perch_glitch": {
     "file": "sprites/perch_glitch.png",
@@ -1055,7 +1167,14 @@
      182,
      353
     ],
-    "mirrorArt": "perch_music_flipped"
+    "mirrorArt": "perch_music_flipped",
+    "contact": {
+     "line": 270,
+     "legs": [
+      80,
+      196
+     ]
+    }
    },
    "perch_music_flipped": {
     "file": "sprites/perch_music_flipped.png",
@@ -1079,7 +1198,14 @@
      182,
      353
     ],
-    "mirrorArtFor": "perch_music"
+    "mirrorArtFor": "perch_music",
+    "contact": {
+     "line": 270,
+     "legs": [
+      80,
+      196
+     ]
+    }
    },
    "perch_talk": {
     "file": "sprites/perch_talk.png",
@@ -1103,7 +1229,14 @@
      186,
      349
     ],
-    "mirrorArt": "perch_talk_flipped"
+    "mirrorArt": "perch_talk_flipped",
+    "contact": {
+     "line": 270,
+     "legs": [
+      80,
+      196
+     ]
+    }
    },
    "perch_talk_flipped": {
     "file": "sprites/perch_talk_flipped.png",
@@ -1127,7 +1260,14 @@
      188,
      349
     ],
-    "mirrorArtFor": "perch_talk"
+    "mirrorArtFor": "perch_talk",
+    "contact": {
+     "line": 270,
+     "legs": [
+      80,
+      196
+     ]
+    }
    },
    "sleep": {
     "file": "sprites/sleep.png",

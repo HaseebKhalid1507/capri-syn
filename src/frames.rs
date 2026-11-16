@@ -439,6 +439,9 @@ fn cell_pixels(pack: &Pack, f: &FrameSource, c: &crate::art::CellSrc, geo: &Geom
         let s0 = (y * img.width() as usize + (c.i * cw) as usize) * 4;
         cell[y * row..(y + 1) * row].copy_from_slice(&raw[s0..s0 + row]);
     }
+    if let Some(k) = st.contact {
+        cut_below(&mut cell, cw, k.line * n, [k.legs[0] * n, k.legs[1] * n]);
+    }
     let k = dev / n as f32;
     let (rw, rh) = (((cw as f32 * k).round() as u32).max(1), ((ch as f32 * k).round() as u32).max(1));
     let src = Image::from_vec_u8(cw, ch, cell, PixelType::U8x4)?;
@@ -465,6 +468,17 @@ fn cell_pixels(pack: &Pack, f: &FrameSource, c: &crate::art::CellSrc, geo: &Geom
         px[d0..d0 + len].copy_from_slice(&small[s0..s0 + len]);
     }
     Ok(px)
+}
+
+/// On a window top, the window's front face hides what is below the contact line, except the
+/// columns `legs` (the lower legs hanging over its edge): cleared, straight RGBA.
+fn cut_below(cell: &mut [u8], w: u32, line: u32, legs: [u32; 2]) {
+    for (i, p) in cell.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        let (x, y) = (i as u32 % w, i as u32 / w);
+        if y > line && !(legs[0]..legs[1]).contains(&x) {
+            *p = [0; 4];
+        }
+    }
 }
 
 fn decode_one(pack: &Pack, f: &FrameSource, geo: &Geometry, verify: bool, resizer: &mut Resizer, strips: &Strips) -> Result<Frame> {
@@ -805,6 +819,15 @@ mod tests {
             // Mirroring the box moves it across the anchor's vertical.
             assert_eq!(m.at.0, geo.width as i32 - (cell.at.0 + w));
         });
+    }
+
+    #[test]
+    fn below_the_contact_line_only_the_legs_stay() {
+        // 4x3 cell, all opaque; line at row 0, legs in columns 2..4.
+        let mut cell: Vec<u8> = (0..12).flat_map(|_| [9, 9, 9, 255]).collect();
+        cut_below(&mut cell, 4, 0, [2, 4]);
+        let alpha: Vec<u8> = cell.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
+        assert_eq!(alpha, [255, 255, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255]);
     }
 
     #[test]
