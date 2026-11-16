@@ -167,7 +167,11 @@ Optional desktop art, into the pack's `anim/` (a pack without it loads as before
   URL and its credits.
 - `--upscale` adds `anim/lachy/x2/`: every strip at 2x (`tools/upscale_art.py`, Real-ESRGAN's anime video
   model on the CPU; needs `torch`), checked pixel-for-pixel against `tools/lachy-x2.sha256`
-  (`--record-upscale` writes that file once).
+  (`--record-upscale` writes that file once). Build her live pack with it: at the 340 px default on a
+  1.167 display lachy's standing strips draw at 1.16x and their edges go soft (alpha ramp 1.8 px against
+  CapriCore's 1.25-1.3); from the x2 strips they come out at 1.3 (perch and laydown at 0.95). The app uses
+  `x2/` when present and her pixels are above 1:1, else the strips as shipped. About 24 min of CPU
+  (recorded on an i5-13420H, 4 threads) and +220 MB on disk.
 
 With `anim/`, `moods.json` `variants` mixes that art in; she never swaps one set for the other:
 
