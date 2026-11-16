@@ -8,7 +8,7 @@ mod ipc;
 #[cfg(test)]
 mod testkit;
 
-use super::{Caps, Desktop, FxZ, Hint, Monitor, PointerRead, Role, ShapeRect, Stage, Visible, Win, WinId, WinRect};
+use super::{Caps, Desktop, FxZ, Hint, Monitor, Place, PointerRead, Role, ShapeRect, Stage, Visible, Win, WinId, WinRect};
 use anyhow::{Context as _, Result, bail};
 use gpui_kit::{Bounds, Pixels, Window, WindowKind, WindowOptions, point, px, size};
 use gpui_linux::layer_ctl::{self, Commit};
@@ -180,9 +180,13 @@ impl HyprDesktop {
         self.ids.lock().ok()?.key(w).map(str::to_string)
     }
 
+    /// Window `w` and the world it is in (monitors and clients: one request).
     fn client(&self, w: WinId) -> Option<(Snap, HClient)> {
         let addr = self.address(w)?;
-        let s = self.snap().ok()?;
+        let v = self.ipc.batch(&["j/monitors", "j/clients"]).ok()?;
+        let mons: Vec<HMon> = serde_json::from_value(v[0].clone()).ok()?;
+        let clients: Vec<HClient> = serde_json::from_value(v[1].clone()).ok()?;
+        let s = Snap { mons: mons.into_iter().filter(|m| !m.disabled).collect(), clients, layers: Vec::new() };
         let c = s.clients.iter().find(|c| c.address == addr)?.clone();
         Some((s, c))
     }
@@ -211,7 +215,8 @@ impl Desktop for HyprDesktop {
         // painted in her window (one surface, one commit with her pixels), so every effect
         // step is a redraw and a present. A layer surface loses the pointer when Hyprland
         // re-checks focus under it (her window moving at a drag's start), button held or not.
-        Caps { shape_mode: false, target_events: false, fx_layers: false, costly_redraw: true, implicit_grab: false }
+        // A window's `at`/`size` is its goal: the compositor slides it there.
+        Caps { shape_mode: false, target_events: false, fx_layers: false, costly_redraw: true, implicit_grab: false, goal_geometry: true }
     }
 
     fn root_size(&self) -> (i32, i32) {
@@ -281,8 +286,13 @@ impl Desktop for HyprDesktop {
     }
 
     fn toplevel_rect(&self, w: WinId) -> Option<WinRect> {
+        self.toplevel_place(w).map(|p| p.rect)
+    }
+
+    /// Its workspace is its space; a floating window moves without events.
+    fn toplevel_place(&self, w: WinId) -> Option<Place> {
         let (s, c) = self.client(w)?;
-        s.visible(&c).then(|| WinRect { id: w, x: c.at[0], y: c.at[1], w: c.size[0], h: c.size[1] })
+        s.visible(&c).then(|| Place { rect: WinRect { id: w, x: c.at[0], y: c.at[1], w: c.size[0], h: c.size[1] }, space: c.workspace.id, loose: c.floating })
     }
 
     fn window_exists(&self, w: WinId) -> bool {
@@ -324,14 +334,15 @@ impl Desktop for HyprDesktop {
         true
     }
 
-    /// socket2: focus and workspace changes as hints (the perch target is polled by the core).
+    /// socket2 events as hints; the core re-reads (and polls the perch target: no event
+    /// says a window moved or resized).
     fn watch(&self, hint: Box<dyn Fn(Hint) + Send>) -> Result<()> {
         let ipc = self.ipc.clone();
         std::thread::Builder::new().name("avatar-hypr-events".into()).spawn(move || {
-            ipc.events(|name, _| match name {
-                "activewindowv2" => hint(Hint::Focus),
-                "workspacev2" | "focusedmonv2" => hint(Hint::Desktop),
-                _ => {}
+            ipc.events(|name, data| {
+                if let Some(h) = event_hint(name, data) {
+                    hint(h);
+                }
             })
         })?;
         Ok(())
@@ -343,6 +354,20 @@ impl Desktop for HyprDesktop {
     }
 
     fn arm_clicks(&self, _on: bool) {}
+}
+
+/// What a socket2 event tells the core (names: the wiki's IPC page; `workspacev2` fires for
+/// the focused monitor only, so the core resolves workspaces from a fresh read).
+fn event_hint(name: &str, data: &str) -> Option<Hint> {
+    Some(match name {
+        // Her own layers come and go (the Line, the reader): nothing outside changed.
+        "openlayer" | "closelayer" if ours(data) => return None,
+        "activewindowv2" => Hint::Focus,
+        "workspacev2" | "focusedmonv2" | "moveworkspacev2" | "activespecialv2" => Hint::Desktop,
+        "openwindow" | "closewindow" | "movewindowv2" | "changefloatingmode" | "pin" | "minimized" | "togglegroup" | "moveintogroup" | "moveoutofgroup" | "fullscreen" => Hint::Changed,
+        "monitoraddedv2" | "monitorremovedv2" | "configreloaded" | "openlayer" | "closelayer" => Hint::Layout,
+        _ => return None,
+    })
 }
 
 /// An output's origin (root px) and scale.

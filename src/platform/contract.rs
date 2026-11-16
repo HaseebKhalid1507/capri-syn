@@ -41,6 +41,15 @@ pub trait Driver {
     /// Let the server catch up (its events go out, her pending surface state is committed,
     /// a frame is drawn).
     fn settle(&mut self) -> impl Future<Output = ()>;
+    /// With two monitors up: `w` onto the space (workspace) the second one shows, where it
+    /// stays visible. False: this desktop has no such spaces.
+    fn to_other_space(&mut self, _w: WinId) -> bool {
+        false
+    }
+    /// The second monitor switches to another space (nothing of hers on either).
+    fn flip_other_space(&mut self) -> bool {
+        false
+    }
 }
 
 /// Run a contract future to the end on a backend whose `settle` never waits on an event loop
@@ -77,6 +86,8 @@ pub async fn run<D: Driver>(os: &Os, d: &mut D) -> Result<Vec<&'static str>> {
     }
     scenario!("stack-and-seats", stack_and_seats);
     scenario!("perch-follow", perch_follow);
+    scenario!("perch-burst", perch_burst);
+    scenario!("perch-space", perch_space);
     scenario!("monitors-and-areas", monitors_and_areas);
     scenario!("fullscreen", fullscreen);
     scenario!("drag-pointer", drag_pointer);
@@ -180,6 +191,78 @@ async fn perch_follow<D: Driver>(os: &Os, d: &mut D, rx: &Receiver<WatchEvent>) 
     os.set_target(0);
     d.close(b);
     d.settle().await;
+    Ok(())
+}
+
+/// The target dragged along (a live move, no geometry events anywhere): once she has seen it
+/// move, every step reaches her, the last one within 150 ms.
+async fn perch_burst<D: Driver>(os: &Os, d: &mut D, rx: &Receiver<WatchEvent>) -> Result<()> {
+    let a = d.open(rect(100, 300, 500, 300), true);
+    d.settle().await;
+    os.set_target(a);
+    d.settle().await;
+    // A poller's first read is its baseline: let it happen before anything moves.
+    std::thread::sleep(Duration::from_millis(100));
+    drain(rx);
+    let step = |i: i32| rect(100 + 12 * i, 300 + 5 * i, 500, 300);
+    d.configure(a, step(1));
+    ensure!(wait(rx, 1500, |e| matches!(e, WatchEvent::TargetMoved(r) if same(r, &step(1)))).is_some(), "the first step never reached her");
+    let mut sent = Vec::new();
+    for i in 2..=10 {
+        d.configure(a, step(i));
+        sent.push((i, Instant::now()));
+        std::thread::sleep(Duration::from_millis(40));
+    }
+    let mut seen: Vec<(i32, Instant)> = Vec::new();
+    let end = Instant::now() + Duration::from_millis(400);
+    while let Some(left) = end.checked_duration_since(Instant::now()) {
+        let Ok(e) = rx.recv_timeout(left) else { break };
+        if let WatchEvent::TargetMoved(r) = e
+            && let Some(i) = (2..=10).find(|&i| same(&r, &step(i)))
+            && !seen.iter().any(|s| s.0 == i)
+        {
+            seen.push((i, Instant::now()));
+        }
+    }
+    // Earlier steps arrived while stepping: count them from what toplevel_rect says now.
+    let last = seen.iter().find(|s| s.0 == 10).map(|s| s.1.saturating_duration_since(sent[8].1));
+    ensure!(os.toplevel_rect(a).is_some_and(|r| same(&r, &step(10))), "toplevel_rect after the drag");
+    ensure!(last.is_some_and(|l| l <= Duration::from_millis(150)), "the last step reached her after {last:?}");
+    ensure!(seen.len() >= 6, "followed {} of 9 steps: {:?}", seen.len(), seen.iter().map(|s| s.0).collect::<Vec<_>>());
+    os.set_target(0);
+    d.close(a);
+    d.settle().await;
+    Ok(())
+}
+
+/// Workspaces per monitor: the target moved onto the other monitor's space has left hers (gone,
+/// not followed); back on hers it is back; the other monitor switching spaces is nothing to her.
+async fn perch_space<D: Driver>(os: &Os, d: &mut D, rx: &Receiver<WatchEvent>) -> Result<()> {
+    ensure!(d.split_monitors(true), "the driver can't make two monitors");
+    let a = d.open(rect(100, 300, 500, 300), true);
+    d.settle().await;
+    os.set_target(a);
+    d.settle().await;
+    std::thread::sleep(Duration::from_millis(100));
+    let home = os.toplevel_rect(a);
+    drain(rx);
+    if d.flip_other_space() {
+        d.settle().await;
+        ensure!(wait(rx, 700, target_event).is_none(), "the other monitor's switch reached her");
+    }
+    if d.to_other_space(a) {
+        ensure!(wait(rx, 1500, |e| matches!(e, WatchEvent::TargetGone(w) if *w == a)).is_some(), "no TargetGone when it left for the other space");
+        ensure!(wait(rx, 600, |e| matches!(e, WatchEvent::TargetMoved(_))).is_none(), "followed it onto the other space");
+        ensure!(os.toplevel_rect(a).is_none() && os.window_exists(a), "on another space: no rect for her, still exists");
+        d.show(a);
+        ensure!(wait(rx, 1500, |e| matches!(e, WatchEvent::TargetBack(w) if *w == a)).is_some(), "no TargetBack on her space");
+        ensure!(os.toplevel_rect(a).is_some() && home.is_some(), "back: a rect again");
+    }
+    os.set_target(0);
+    d.close(a);
+    d.split_monitors(false);
+    d.settle().await;
+    os.forget_layout();
     Ok(())
 }
 

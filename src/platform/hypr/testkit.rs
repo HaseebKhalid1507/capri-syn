@@ -138,6 +138,12 @@ impl HDriver {
         format!("window = \"class:^{}$\"", self.names[&w].0)
     }
 
+    /// The workspace HEADLESS-2 shows.
+    fn other_ws(&self) -> Option<i64> {
+        let v: serde_json::Value = serde_json::from_str(&hyprctl(&["-j", "monitors"])).ok()?;
+        v.as_array()?.iter().find(|m| m["name"] == "HEADLESS-2")?["activeWorkspace"]["id"].as_i64()
+    }
+
     fn outputs(&self) -> usize {
         serde_json::from_str::<serde_json::Value>(&hyprctl(&["-j", "monitors"])).ok().and_then(|v| v.as_array().map(Vec::len)).unwrap_or(0)
     }
@@ -245,6 +251,17 @@ impl Driver for HDriver {
         None
     }
     /// Commit her pending surface state, let a frame be drawn, let the compositor catch up.
+    fn to_other_space(&mut self, w: WinId) -> bool {
+        let Some(ws) = self.other_ws() else { return false };
+        dispatch(&format!("hl.dsp.window.move({{ workspace = {ws}, follow = false, {} }})", self.sel(w)));
+        true
+    }
+    /// HEADLESS-2 to another workspace, the focus staying where it is.
+    fn flip_other_space(&mut self) -> bool {
+        let Some(ws) = self.other_ws() else { return false };
+        let to = if ws == 7 { 2 } else { 7 };
+        hyprctl(&["eval", &format!("hl.get_monitor(\"HEADLESS-2\"):set_workspace({to})")]) == "ok"
+    }
     async fn settle(&mut self) {
         gpui_linux::layer_ctl::commit_pending(self.body_ptr);
         self.view.update(&mut self.cx, |_, cx| cx.notify()).ok();
@@ -303,5 +320,5 @@ fn contract_hypr() {
     let r = result.borrow_mut().take().expect("the suite ran");
     let passed = r.unwrap();
     eprintln!("contract_hypr: {} scenarios passed: {}", passed.len(), passed.join(", "));
-    assert_eq!(passed.len(), 9);
+    assert_eq!(passed.len(), 11);
 }

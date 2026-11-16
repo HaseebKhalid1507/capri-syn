@@ -6,14 +6,20 @@ use super::{Caps, Desktop, FxZ, Hint, Monitor, PointerCfg, PointerEv, Role, SEAT
 use anyhow::Result;
 use gpui_kit::{Bounds, Pixels, TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, fill, point, px, rgb, size};
 use std::cell::{Cell, RefCell};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// How long monitors and work areas are reused (work areas cost a stack walk).
 const AREAS_TTL: Duration = Duration::from_secs(3);
 /// Backends without target events: how often the perch target is re-read.
-const TARGET_POLL: Duration = Duration::from_millis(250);
+/// The target poller's rates: a window that can move without telling (floating), one that
+/// moves only with events the backend hints (tiled), and while it moves (a live drag).
+const TARGET_POLL_LOOSE: Duration = Duration::from_millis(250);
+const TARGET_POLL_TILED: Duration = Duration::from_millis(500);
+const TARGET_POLL_BURST: Duration = Duration::from_millis(16);
+/// How long the burst rate lasts after the target was last seen moving.
+const TARGET_BURST_FOR: Duration = Duration::from_millis(600);
 
 /// What the watcher threads share with the core.
 struct Shared {
@@ -23,9 +29,22 @@ struct Shared {
     composited: AtomicBool,
     /// The target poller (backends without target events), woken by a new target.
     poller: OnceLock<std::thread::Thread>,
+    /// The space the target was first seen on (`Place::space`; `NO_SPACE`: not yet).
+    space: AtomicI64,
 }
 
+const NO_SPACE: i64 = i64::MIN;
+
 impl Shared {
+    /// Wake the target poller (if any, and following something): re-read at once.
+    fn poll_now(&self) {
+        if self.target.load(Ordering::Relaxed) != 0
+            && let Some(p) = self.poller.get()
+        {
+            p.unpark();
+        }
+    }
+
     /// The one change-detection path: a backend's hint (or the poller's diff) → what the
     /// view hears.
     fn hint(&self, desk: &dyn Desktop, h: Hint, on: &dyn Fn(WatchEvent)) {
@@ -38,8 +57,19 @@ impl Shared {
             }
             Hint::Mapped(w) if t != 0 && w == t => on(WatchEvent::TargetBack(t)),
             Hint::Gone(w) if t != 0 && w == t => on(WatchEvent::TargetGone(t)),
-            Hint::Focus => on(WatchEvent::Focus),
-            Hint::Desktop => on(WatchEvent::Desktop),
+            Hint::Focus => {
+                self.poll_now();
+                on(WatchEvent::Focus);
+            }
+            Hint::Desktop => {
+                self.poll_now();
+                on(WatchEvent::Desktop);
+            }
+            Hint::Changed => self.poll_now(),
+            Hint::Layout => {
+                self.poll_now();
+                on(WatchEvent::Layout);
+            }
             Hint::Compositor(now) if self.composited.swap(now, Ordering::Relaxed) != now => on(WatchEvent::Compositor(now)),
             _ => {}
         }
@@ -58,6 +88,49 @@ struct PointerWatch {
 }
 
 type Cached = RefCell<Option<(Instant, Vec<Monitor>)>>;
+
+/// The target poller's memory: the window, the space it was first seen on (hers), its rect
+/// there at the last read (None: not visible there), when it last moved.
+#[derive(Default)]
+struct TargetTrack {
+    t: WinId,
+    read: bool,
+    space: Option<i64>,
+    rect: Option<WinRect>,
+    moved: Option<Instant>,
+}
+
+impl TargetTrack {
+    /// One read of target `t`: the hint it makes, and how long until the next read.
+    fn step(&mut self, t: WinId, place: Option<super::Place>, now: Instant) -> (Option<Hint>, Duration) {
+        if self.t != t {
+            *self = TargetTrack { t, ..Default::default() };
+        }
+        if self.space.is_none() {
+            self.space = place.map(|p| p.space);
+        }
+        let here = place.filter(|p| Some(p.space) == self.space).map(|p| p.rect);
+        let hint = match (self.read, self.rect, here) {
+            (false, ..) => None,
+            (_, Some(a), Some(b)) if a != b => {
+                self.moved = Some(now);
+                Some(Hint::Moved(t, Some(b)))
+            }
+            (_, Some(_), None) => Some(Hint::Gone(t)),
+            (_, None, Some(_)) => Some(Hint::Mapped(t)),
+            _ => None,
+        };
+        (self.read, self.rect) = (true, here);
+        let wait = if self.moved.is_some_and(|m| now.duration_since(m) < TARGET_BURST_FOR) {
+            TARGET_POLL_BURST
+        } else if place.is_none_or(|p| p.loose) {
+            TARGET_POLL_LOOSE
+        } else {
+            TARGET_POLL_TILED
+        };
+        (hint, wait)
+    }
+}
 
 /// The drag poller: its pointer track and its stop flag.
 type Poll = (Arc<Mutex<Track>>, Arc<AtomicBool>);
@@ -179,7 +252,7 @@ pub struct Os {
 impl Os {
     pub fn new(desk: Arc<dyn Desktop>, stage: Box<dyn Stage>) -> Os {
         let caps = desk.caps();
-        let shared = Shared { target: AtomicU32::new(0), composited: AtomicBool::new(desk.compositor_running()), poller: OnceLock::new() };
+        let shared = Shared { target: AtomicU32::new(0), composited: AtomicBool::new(desk.compositor_running()), poller: OnceLock::new(), space: AtomicI64::new(NO_SPACE) };
         Os {
             desk,
             stage,
@@ -404,6 +477,11 @@ impl Os {
         !self.caps.implicit_grab
     }
 
+    /// A perch that jumps glides after its window (`Caps::goal_geometry`).
+    pub fn perch_glides(&self) -> bool {
+        self.caps.goal_geometry
+    }
+
     /// Effect steps that can wait ride redraws that happen anyway: a redraw is a full present
     /// (`Caps::costly_redraw`), or the effects are painted in her window (`fx_in_scene`), so
     /// each step on its own would be a redraw of her.
@@ -572,8 +650,7 @@ impl Os {
         ms.iter().find(|m| m.primary).cloned().unwrap_or_else(|| ms[0].clone())
     }
 
-    /// Drop the cached layout (tests change monitors and panels under it).
-    #[cfg(test)]
+    /// Drop the cached layout (monitors or panels changed; tests change them under it).
     pub fn forget_layout(&self) {
         *self.mons.borrow_mut() = None;
         *self.areas.borrow_mut() = None;
@@ -622,7 +699,13 @@ impl Os {
         self.desk.toplevel_of(w)
     }
 
+    /// The perch target counts only on the space it was first seen on: elsewhere it has left
+    /// hers (`Place::space`).
     pub fn toplevel_rect(&self, w: WinId) -> Option<WinRect> {
+        let space = self.shared.space.load(Ordering::Relaxed);
+        if w != 0 && w == self.shared.target.load(Ordering::Relaxed) && space != NO_SPACE {
+            return self.desk.toplevel_place(w).filter(|p| p.space == space).map(|p| p.rect);
+        }
         self.desk.toplevel_rect(w)
     }
 
@@ -640,7 +723,9 @@ impl Os {
 
     /// Follow `w` (0 = nothing).
     pub fn set_target(&self, w: WinId) {
-        self.shared.target.store(w, Ordering::Relaxed);
+        if self.shared.target.swap(w, Ordering::Relaxed) != w {
+            self.shared.space.store(NO_SPACE, Ordering::Relaxed);
+        }
         if let Some(p) = self.shared.poller.get() {
             p.unpark();
         }
@@ -658,33 +743,29 @@ impl Os {
         Ok(())
     }
 
-    /// Re-read the target every `TARGET_POLL` while there is one (parked otherwise), diff,
-    /// and feed the differences through the same path as a backend's hints.
+    /// Re-read the target while there is one (parked otherwise; a hint wakes it), diff, and
+    /// feed the differences through the same path as a backend's hints. Every
+    /// `TARGET_POLL_TILED` (`_LOOSE` for a floating one), `_BURST` while it moves.
     fn spawn_target_poll(&self, on: Arc<dyn Fn(WatchEvent) + Send + Sync>) -> Result<()> {
         let (s, d) = (self.shared.clone(), self.desk.clone());
         let h = std::thread::Builder::new().name("avatar-target".into()).spawn(move || {
-            let mut last: (WinId, Option<WinRect>) = (0, None);
+            let mut track = TargetTrack::default();
             loop {
                 let t = s.target.load(Ordering::Relaxed);
                 if t == 0 {
-                    last = (0, None);
+                    track = TargetTrack::default();
                     std::thread::park();
                     continue;
                 }
-                let now = d.toplevel_rect(t);
-                if last.0 == t {
-                    let h = match (last.1, now) {
-                        (Some(a), Some(b)) if a != b => Some(Hint::Moved(t, Some(b))),
-                        (Some(_), None) => Some(Hint::Gone(t)),
-                        (None, Some(_)) => Some(Hint::Mapped(t)),
-                        _ => None,
-                    };
-                    if let Some(h) = h {
-                        s.hint(&*d, h, &*on);
-                    }
+                let now = Instant::now();
+                let (hint, wait) = track.step(t, d.toplevel_place(t), now);
+                if s.target.load(Ordering::Relaxed) == t {
+                    s.space.store(track.space.unwrap_or(NO_SPACE), Ordering::Relaxed);
                 }
-                last = (t, now);
-                std::thread::park_timeout(TARGET_POLL);
+                if let Some(h) = hint {
+                    s.hint(&*d, h, &*on);
+                }
+                std::thread::park_timeout(wait);
             }
         })?;
         self.shared.poller.set(h.thread().clone()).ok();

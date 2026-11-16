@@ -388,6 +388,9 @@ struct MusicOn {
 /// After a player pauses or stops, the headphones stay this long (a track change, a seek).
 const MUSIC_GRACE: Duration = Duration::from_secs(5);
 const FRAME_FAST: Duration = Duration::from_millis(16);
+/// A perch glide's length, and the least jump that glides (logical px; less snaps).
+const GLIDE: Duration = Duration::from_millis(450);
+const GLIDE_MIN: f32 = 24.0;
 const FRAME_FX: Duration = Duration::from_millis(33);
 /// A quiet arrival's sliver widens back into her over ~3 frames.
 const SLIVER: Duration = Duration::from_millis(100);
@@ -504,6 +507,8 @@ pub struct Avatar {
     bob_t0: Instant,
     hop: Option<Instant>,
     next_hop: Option<Instant>,
+    /// A perch glide: since, and the offset it started from (`glide_offset`).
+    glide: Option<(Instant, (i32, i32))>,
     glitch: Option<Glitch>,
     /// Frames drawn in the current glitch (keyed by its start): each gets a new pattern.
     glitch_step: Cell<(Option<Instant>, u64)>,
@@ -735,6 +740,7 @@ impl Avatar {
             bob_t0: now,
             hop: None,
             next_hop: None,
+            glide: None,
             glitch: None,
             glitch_step: Cell::new((None, 0)),
             glitch_at: Cell::new(None),
@@ -1715,6 +1721,9 @@ impl Avatar {
         if self.music.is_some() {
             take(Some(now + NOTE_TICK));
             take(self.music.as_ref().and_then(|m| m.until));
+        }
+        if self.glide.is_some() {
+            take(Some(now + FRAME_FAST));
         }
         if self.hop.is_some() {
             take(Some(now + FRAME_FAST));
@@ -3362,9 +3371,21 @@ impl Avatar {
         }
     }
 
+    /// What's left of a perch glide (`Caps::goal_geometry`): ease-out over `GLIDE`.
+    fn glide_offset(&self, now: Instant) -> (i32, i32) {
+        let Some((t0, (dx, dy))) = self.glide.filter(|_| matches!(self.placement, Placement::Perch { .. })) else { return (0, 0) };
+        let u = (now.saturating_duration_since(t0).as_secs_f32() / GLIDE.as_secs_f32()).min(1.0);
+        let k = (1.0 - u).powi(3);
+        ((dx as f32 * k).round() as i32, (dy as f32 * k).round() as i32)
+    }
+
     fn apply_offset(&mut self, now: Instant) {
         let hop = self.hop.and_then(|t| fx::hop(now.saturating_duration_since(t), 16.0 * self.layout.sf)).unwrap_or(0);
-        let pos = (self.origin.0, self.origin.1 - hop + self.drop_in_offset(now) + self.float_bob(now));
+        if self.glide.is_some() && self.glide_offset(now) == (0, 0) {
+            self.glide = None;
+        }
+        let g = self.glide_offset(now);
+        let pos = (self.origin.0 + g.0, self.origin.1 + g.1 - hop + self.drop_in_offset(now) + self.float_bob(now));
         if pos != self.applied {
             self.moves += 1;
             self.os.move_to(pos.0, pos.1).ok();
@@ -3653,6 +3674,12 @@ impl Avatar {
                 let o = self.perch_origin(&r, sit, dx);
                 if self.perch_fits(&r, o, sit) {
                     self.placement = Placement::Perch { win, sit, dx };
+                    // The window is animating to `r` (a goal, not where it is): she rides
+                    // along from where she shows now.
+                    let shown = self.glide_offset(now);
+                    let jump = (self.origin.0 + shown.0 - o.0, self.origin.1 + shown.1 - o.1);
+                    let far = (jump.0 * jump.0 + jump.1 * jump.1) as f32 > (GLIDE_MIN * self.layout.sf).powi(2);
+                    self.glide = (self.os.perch_glides() && far).then_some((now, jump));
                     self.set_origin(o);
                 } else {
                     self.fall("perch_no_room", now);
@@ -3671,6 +3698,13 @@ impl Avatar {
                 }
             }
             WatchEvent::Click(..) => {}
+            WatchEvent::Layout => {
+                self.os.forget_layout();
+                // Her monitor went away (or a panel took her floor): down onto the nearest.
+                if self.placement == Placement::Ground && self.rag.is_none() && self.teleport.is_none() && Self::clamp(&self.os, &self.layout, self.origin) != self.origin {
+                    self.fall("layout", now);
+                }
+            }
             WatchEvent::Focus | WatchEvent::Desktop | WatchEvent::Pointer(_) => self.brain_watch(ev, now),
         }
     }

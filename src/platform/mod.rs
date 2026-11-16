@@ -95,6 +95,20 @@ pub struct Caps {
     /// meanwhile (X's implicit grab). Without it the core holds her input region at her whole
     /// window while a press lasts: the window follows the pointer, so the pointer stays inside.
     pub implicit_grab: bool,
+    /// A window's rect is where it is going (the compositor animates it there): a perch that
+    /// jumps glides after it instead of snapping.
+    pub goal_geometry: bool,
+}
+
+/// Where a window is, for the target poller (`Desktop::toplevel_place`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Place {
+    pub rect: WinRect,
+    /// The space it is on (a workspace; 0 where there are none). A target that turns up on
+    /// another space has left hers: gone, never followed.
+    pub space: i64,
+    /// It can move without anything telling the backend (a floating window): polled faster.
+    pub loose: bool,
 }
 
 /// A cheap note from a backend's event source: "something changed". The core turns these
@@ -111,6 +125,10 @@ pub enum Hint {
     Focus,
     /// The workspace changed.
     Desktop,
+    /// Windows opened, closed, or changed space or mode: the core re-reads what it follows.
+    Changed,
+    /// Monitors or the areas panels reserve changed.
+    Layout,
     /// Whether a compositor runs now.
     Compositor(bool),
 }
@@ -131,6 +149,8 @@ pub enum WatchEvent {
     Focus,
     /// He switched workspace.
     Desktop,
+    /// Monitors or work areas changed (the cached layout is stale).
+    Layout,
     /// The pointer near her, swept past her, or resting on her (`Os::watch_pointer`).
     Pointer(PointerEv),
 }
@@ -203,6 +223,10 @@ pub trait Desktop: Send + Sync {
     fn toplevel_of(&self, w: WinId) -> Option<WinId>;
     /// Outer rect of a top-level window, if it is visible.
     fn toplevel_rect(&self, w: WinId) -> Option<WinRect>;
+    /// Where a top-level window is, if it is visible (one read: the target poller's).
+    fn toplevel_place(&self, w: WinId) -> Option<Place> {
+        self.toplevel_rect(w).map(|rect| Place { rect, space: 0, loose: true })
+    }
     /// The window still exists, visible or not (hidden is not closed).
     fn window_exists(&self, w: WinId) -> bool;
     /// `w` asks for fullscreen.

@@ -2,7 +2,7 @@
 //! `cargo test` (with and without target events, so both change-detection paths are covered).
 
 use super::contract::{self, Driver};
-use super::{Caps, Desktop, FxZ, Hint, Monitor, Os, PointerRead, Role, ShapeRect, Stage, Visible, Win, WinId, WinRect};
+use super::{Caps, Desktop, FxZ, Hint, Monitor, Os, Place, PointerRead, Role, ShapeRect, Stage, Visible, Win, WinId, WinRect};
 use anyhow::{Result, anyhow};
 use gpui_kit::{Window, WindowKind, WindowOptions};
 use std::collections::HashMap;
@@ -19,6 +19,8 @@ struct FWin {
     fullscreen: bool,
     /// Reserves this many px at the top of its monitor (a panel).
     reserve_top: i32,
+    /// Its workspace (1, or 2: the one the second monitor shows).
+    space: i64,
 }
 
 #[derive(Default)]
@@ -102,7 +104,10 @@ impl Desktop for FakeDesktop {
         self.window_exists(w).then_some(w)
     }
     fn toplevel_rect(&self, w: WinId) -> Option<WinRect> {
-        self.0.win(w, |f| f.visible.then_some(f.rect)).flatten()
+        self.toplevel_place(w).map(|p| p.rect)
+    }
+    fn toplevel_place(&self, w: WinId) -> Option<Place> {
+        self.0.win(w, |f| f.visible.then_some(Place { rect: f.rect, space: f.space, loose: true })).flatten()
     }
     fn window_exists(&self, w: WinId) -> bool {
         self.0.win(w, |_| ()).is_some()
@@ -207,7 +212,7 @@ impl FakeDriver {
             let mut w = self.0.w();
             w.next += 1;
             let id = w.next;
-            w.wins.push((id, FWin { rect: WinRect { id, ..rect }, managed, visible: true, fullscreen: false, reserve_top }));
+            w.wins.push((id, FWin { rect: WinRect { id, ..rect }, managed, visible: true, fullscreen: false, reserve_top, space: 1 }));
             id
         };
         self.0.hint(Hint::Mapped(id));
@@ -229,7 +234,7 @@ impl Driver for FakeDriver {
         self.0.hint(Hint::Gone(w));
     }
     fn show(&mut self, w: WinId) {
-        self.0.win(w, |f| f.visible = true);
+        self.0.win(w, |f| (f.visible, f.space) = (true, 1));
         self.0.hint(Hint::Mapped(w));
     }
     fn close(&mut self, w: WinId) {
@@ -273,11 +278,22 @@ impl Driver for FakeDriver {
         self.0.w().visible.clone()
     }
     async fn settle(&mut self) {}
+    /// Spaces only where target events are polled (a backend with events has none here).
+    fn to_other_space(&mut self, w: WinId) -> bool {
+        if self.0.caps.target_events {
+            return false;
+        }
+        self.0.win(w, |f| f.space = 2);
+        true
+    }
+    fn flip_other_space(&mut self) -> bool {
+        !self.0.caps.target_events
+    }
 }
 
 fn fake(target_events: bool) -> (Os, FakeDriver) {
     let world = World { root: (1600, 1000), monitors: vec![Monitor { primary: true, x: 0, y: 0, w: 1600, h: 1000 }], next: 100, ..World::default() };
-    let f = Arc::new(Fake { world: Mutex::new(world), hint: Mutex::new(None), caps: Caps { shape_mode: true, target_events, fx_layers: true, costly_redraw: false, implicit_grab: true } });
+    let f = Arc::new(Fake { world: Mutex::new(world), hint: Mutex::new(None), caps: Caps { shape_mode: true, target_events, fx_layers: true, costly_redraw: false, implicit_grab: true, goal_geometry: false } });
     (Os::new(Arc::new(FakeDesktop(f.clone())), Box::new(FakeStage(f.clone()))), FakeDriver(f))
 }
 
@@ -285,7 +301,7 @@ fn fake(target_events: bool) -> (Os, FakeDriver) {
 fn contract_fake_with_target_events() {
     let (os, mut d) = fake(true);
     let passed = contract::block_on(contract::run(&os, &mut d)).unwrap();
-    assert_eq!(passed.len(), 9);
+    assert_eq!(passed.len(), 11);
 }
 
 #[test]
