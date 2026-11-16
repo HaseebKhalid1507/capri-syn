@@ -8,7 +8,7 @@ mod ipc;
 #[cfg(test)]
 mod testkit;
 
-use super::{Caps, Desktop, FxZ, Hint, Monitor, PointerRead, Role, ShapeRect, Stage, Visible, Win, WinId, WinRect};
+use super::{Caps, Desktop, FxZ, Hint, Monitor, MoveAnim, Place, PointerRead, Role, ShapeRect, Stage, Visible, Win, WinId, WinRect};
 use anyhow::{Context as _, Result, bail};
 use gpui_kit::{Bounds, Pixels, Window, WindowKind, WindowOptions, point, px, size};
 use gpui_linux::layer_ctl::{self, Commit};
@@ -64,6 +64,9 @@ impl HMon {
 #[serde(default)]
 struct HClient {
     address: String,
+    /// Never reused (addresses are: a new window may get a closed one's).
+    #[serde(rename = "stableId")]
+    stable_id: String,
     mapped: bool,
     hidden: bool,
     at: [i32; 2],
@@ -118,11 +121,18 @@ impl Snap {
     }
 }
 
-/// Window identity: Hyprland's 64-bit addresses (and her own namespaces) as small ids, never reused.
+/// A client's identity: its stable id (its address where there is none).
+fn client_key(address: &str, stable: &str) -> String {
+    if stable.is_empty() { address.to_string() } else { format!("w:{stable}") }
+}
+
+/// Window identity: Hyprland's stable ids (layers' addresses, her own namespaces) as small ids,
+/// never reused; each client's last address (what dispatchers take).
 #[derive(Default)]
 struct Ids {
     by_key: HashMap<String, WinId>,
     keys: Vec<String>,
+    addr: HashMap<WinId, String>,
 }
 
 impl Ids {
@@ -176,27 +186,51 @@ impl HyprDesktop {
         self.ids.lock().map(|mut i| i.id(key)).unwrap_or(0)
     }
 
-    fn address(&self, w: WinId) -> Option<String> {
+    fn key(&self, w: WinId) -> Option<String> {
         self.ids.lock().ok()?.key(w).map(str::to_string)
     }
 
+    /// A client's id (and its address noted).
+    fn client_id(&self, address: &str, stable: &str) -> WinId {
+        let Ok(mut ids) = self.ids.lock() else { return 0 };
+        let id = ids.id(&client_key(address, stable));
+        ids.addr.insert(id, address.to_string());
+        id
+    }
+
+    /// The client a JSON reply describes (`j/activewindow`).
+    fn value_id(&self, v: &serde_json::Value) -> Option<WinId> {
+        let a = v.get("address")?.as_str().filter(|a| !a.is_empty())?;
+        Some(self.client_id(a, v.get("stableId").and_then(|s| s.as_str()).unwrap_or("")))
+    }
+
+    /// Window `w` and the world it is in (monitors and clients: one request).
     fn client(&self, w: WinId) -> Option<(Snap, HClient)> {
-        let addr = self.address(w)?;
-        let s = self.snap().ok()?;
-        let c = s.clients.iter().find(|c| c.address == addr)?.clone();
+        let key = self.key(w)?;
+        let v = self.ipc.batch(&["j/monitors", "j/clients"]).ok()?;
+        let mons: Vec<HMon> = serde_json::from_value(v[0].clone()).ok()?;
+        let clients: Vec<HClient> = serde_json::from_value(v[1].clone()).ok()?;
+        let s = Snap { mons: mons.into_iter().filter(|m| !m.disabled).collect(), clients, layers: Vec::new() };
+        let c = s.clients.iter().find(|c| client_key(&c.address, &c.stable_id) == key)?.clone();
+        self.client_id(&c.address, &c.stable_id);
         Some((s, c))
     }
 
-    /// The origin (root px) of the monitor the compositor puts a new layer surface on (the
-    /// focused one), and its scale.
-    fn focused_monitor(&self) -> ((i32, i32), f32) {
+    /// The origin (root px) and scale of the output holding logical point (x, y) (the
+    /// focused one if none does): where a layer surface with those bounds is made (the core
+    /// names that output in the window's `display_id`).
+    fn output_at(&self, x: f32, y: f32) -> Output {
         let ms = self.mons();
-        ms.iter().find(|m| m.focused).or(ms.first()).map_or(((0, 0), 1.0), |m| ((m.x, m.y), if m.scale > 0.0 { m.scale } else { 1.0 }))
+        let inside = |m: &&HMon| {
+            let r = m.monitor(false);
+            (r.x as f32..(r.x + r.w) as f32).contains(&x) && (r.y as f32..(r.y + r.h) as f32).contains(&y)
+        };
+        ms.iter().find(inside).or(ms.iter().find(|m| m.focused)).or(ms.first()).map_or(((0, 0), 1.0), |m| ((m.x, m.y), if m.scale > 0.0 { m.scale } else { 1.0 }))
     }
 
     /// Focus window `w` (an address id).
     fn focus(&self, w: WinId) -> Result<()> {
-        let addr = self.address(w).context("unknown window")?;
+        let addr = self.ids.lock().ok().and_then(|i| i.addr.get(&w).cloned()).context("unknown window")?;
         let r = self.ipc.request(&format!("dispatch hl.dsp.focus({{ window = \"address:{addr}\" }})"))?;
         if r.trim() != "ok" {
             bail!("hyprland: focus: {r}");
@@ -211,7 +245,8 @@ impl Desktop for HyprDesktop {
         // painted in her window (one surface, one commit with her pixels), so every effect
         // step is a redraw and a present. A layer surface loses the pointer when Hyprland
         // re-checks focus under it (her window moving at a drag's start), button held or not.
-        Caps { shape_mode: false, target_events: false, fx_layers: false, costly_redraw: true, implicit_grab: false }
+        // A window's `at`/`size` is its goal: the compositor slides it there.
+        Caps { shape_mode: false, target_events: false, fx_layers: false, costly_redraw: true, implicit_grab: false, goal_geometry: true, layout_events: true, host_per_output: true }
     }
 
     fn root_size(&self) -> (i32, i32) {
@@ -249,7 +284,7 @@ impl Desktop for HyprDesktop {
         let Ok(s) = self.snap() else { return Vec::new() };
         let mut cs: Vec<&HClient> = s.clients.iter().filter(|c| s.visible(c) && !ours(&c.class)).collect();
         cs.sort_by_key(|c| (s.special(c), c.fullscreen & 2 != 0, c.floating, -c.focus_history_id));
-        let mut out: Vec<Win> = cs.iter().map(|c| Win { rect: WinRect { id: self.id(&c.address), x: c.at[0], y: c.at[1], w: c.size[0], h: c.size[1] }, managed: true }).collect();
+        let mut out: Vec<Win> = cs.iter().map(|c| Win { rect: WinRect { id: self.client_id(&c.address, &c.stable_id), x: c.at[0], y: c.at[1], w: c.size[0], h: c.size[1] }, managed: true }).collect();
         let mut ls: Vec<&(String, u8, HLayer)> = s.layers.iter().filter(|(_, lvl, l)| *lvl >= 2 && !ours(&l.namespace) && l.w > 0 && l.h > 0).collect();
         ls.sort_by_key(|(_, lvl, _)| *lvl);
         out.extend(ls.iter().map(|(_, _, l)| Win { rect: WinRect { id: self.id(&l.address), x: l.x, y: l.y, w: l.w, h: l.h }, managed: false }));
@@ -258,22 +293,27 @@ impl Desktop for HyprDesktop {
 
     fn active_window(&self) -> Option<WinId> {
         let v: serde_json::Value = self.ipc.json("activewindow").ok()?;
-        let a = v.get("address")?.as_str()?;
-        (!a.is_empty() && !v.get("class").and_then(|c| c.as_str()).is_some_and(ours)).then(|| self.id(a))
+        if v.get("class").and_then(|c| c.as_str()).is_some_and(ours) {
+            return None;
+        }
+        self.value_id(&v)
     }
 
     /// A mapped top or overlay layer asking for the keyboard exclusively has it (hers or
     /// another's); else the active window.
     fn focused_window(&self) -> Option<WinId> {
-        let code = "local r = '' for _, l in ipairs(hl.get_layers()) do if l.mapped and l.keyboard_interactivity == 1 and l.layer >= 2 then r = l.namespace .. ' ' .. l.address end end return r";
+        let code = "local r = '' for _, l in ipairs(hl.get_layers()) do if l.mapped and l.keyboard_interactivity == 1 and l.layer >= 2 then r = l.namespace .. ' ' .. l.address .. ' ' .. l.x .. ' ' .. l.y end end return r";
         if let Ok(r) = self.ipc.lua(code)
-            && let Some((ns, addr)) = r.split_once(' ')
+            && let [ns, addr, x, y] = r.split(' ').collect::<Vec<_>>()[..]
         {
-            return Some(if ours(ns) { self.id(&format!("ours:{ns}")) } else { self.id(addr) });
+            if !ours(ns) {
+                return Some(self.id(addr));
+            }
+            let (x, y) = (x.parse().unwrap_or(0.0), y.parse().unwrap_or(0.0));
+            return Some(self.id(&our_key(ns, ns == namespace(Role::Body), self.output_at(x, y).0)));
         }
         let v: serde_json::Value = self.ipc.json("activewindow").ok()?;
-        let a = v.get("address")?.as_str()?;
-        (!a.is_empty()).then(|| self.id(a))
+        self.value_id(&v)
     }
 
     fn toplevel_of(&self, w: WinId) -> Option<WinId> {
@@ -281,8 +321,21 @@ impl Desktop for HyprDesktop {
     }
 
     fn toplevel_rect(&self, w: WinId) -> Option<WinRect> {
+        self.toplevel_place(w).map(|p| p.rect)
+    }
+
+    /// Its workspace is its space; a floating window moves without events.
+    /// `windowsMove` (inheriting from `windows`, then `global`). Read when asked: once per move
+    /// seen, nothing at rest. (A layout slid by a window opening starts on it too, measured in
+    /// the rig; its last ~5 % overshoot it doesn't have.)
+    fn move_anim(&self) -> Option<MoveAnim> {
+        let r = self.ipc.batch(&["j/getoption animations:enabled", "j/animations"]).ok()?;
+        move_anim(&r[0], &r[1])
+    }
+
+    fn toplevel_place(&self, w: WinId) -> Option<Place> {
         let (s, c) = self.client(w)?;
-        s.visible(&c).then(|| WinRect { id: w, x: c.at[0], y: c.at[1], w: c.size[0], h: c.size[1] })
+        s.visible(&c).then(|| Place { rect: WinRect { id: w, x: c.at[0], y: c.at[1], w: c.size[0], h: c.size[1] }, space: c.workspace.id, loose: c.floating })
     }
 
     fn window_exists(&self, w: WinId) -> bool {
@@ -324,14 +377,15 @@ impl Desktop for HyprDesktop {
         true
     }
 
-    /// socket2: focus and workspace changes as hints (the perch target is polled by the core).
+    /// socket2 events as hints; the core re-reads (and polls the perch target: no event
+    /// says a window moved or resized).
     fn watch(&self, hint: Box<dyn Fn(Hint) + Send>) -> Result<()> {
         let ipc = self.ipc.clone();
         std::thread::Builder::new().name("avatar-hypr-events".into()).spawn(move || {
-            ipc.events(|name, _| match name {
-                "activewindowv2" => hint(Hint::Focus),
-                "workspacev2" | "focusedmonv2" => hint(Hint::Desktop),
-                _ => {}
+            ipc.events(|name, data| {
+                if let Some(h) = event_hint(name, data) {
+                    hint(h);
+                }
             })
         })?;
         Ok(())
@@ -343,6 +397,41 @@ impl Desktop for HyprDesktop {
     }
 
     fn arm_clicks(&self, _on: bool) {}
+}
+
+/// The window-move animation from `getoption animations:enabled` and `animations` (a pair of
+/// lists: the leaves, a leaf not overridden inherits its parent's; the curves).
+fn move_anim(enabled: &serde_json::Value, v: &serde_json::Value) -> Option<MoveAnim> {
+    if enabled["bool"] == false || enabled["int"].as_i64() == Some(0) {
+        return Some(MoveAnim { ms: 0.0, bezier: [0.0, 0.0, 1.0, 1.0] });
+    }
+    let (leaves, curves) = (v.get(0)?.as_array()?, v.get(1)?.as_array()?);
+    let leaf = ["windowsMove", "windows", "global"].iter().find_map(|n| leaves.iter().find(|l| l["name"] == *n && l["overridden"] == true))?;
+    if leaf["enabled"] == false {
+        return Some(MoveAnim { ms: 0.0, bezier: [0.0, 0.0, 1.0, 1.0] });
+    }
+    let ms = leaf["speed"].as_f64()? as f32 * 100.0;
+    let name = leaf["bezier"].as_str().unwrap_or("default");
+    let bezier = curves.iter().find(|c| c["name"] == name).map_or([0.0, 0.0, 1.0, 1.0], |c| {
+        let f = |k: &str| c[k].as_f64().unwrap_or(0.0) as f32;
+        [f("X0"), f("Y0"), f("X1"), f("Y1")]
+    });
+    Some(MoveAnim { ms, bezier })
+}
+
+/// What a socket2 event tells the core (names: the wiki's IPC page; `workspacev2` fires for
+/// the focused monitor only, so the core resolves workspaces from a fresh read).
+fn event_hint(name: &str, data: &str) -> Option<Hint> {
+    Some(match name {
+        // Her own layers come and go (the Line, the reader): nothing outside changed.
+        "openlayer" | "closelayer" if ours(data) => return None,
+        "activewindowv2" => Hint::Focus,
+        "workspacev2" | "focusedmonv2" | "moveworkspacev2" | "activespecialv2" => Hint::Desktop,
+        "openwindow" | "closewindow" | "movewindowv2" | "changefloatingmode" | "pin" | "minimized" | "togglegroup" | "moveintogroup" | "moveoutofgroup" | "fullscreen" => Hint::Changed,
+        // Reserved areas change only with layers (their exclusive zones) and the config.
+        "monitoraddedv2" | "monitorremovedv2" | "configreloaded" | "openlayer" | "closelayer" | "(connected)" => Hint::Layout,
+        _ => return None,
+    })
 }
 
 /// An output's origin (root px) and scale.
@@ -366,12 +455,18 @@ pub struct LayerStage {
     body: std::cell::Cell<WinId>,
 }
 
+/// The id key of one of her surfaces: its namespace (body hosts: and their output).
+fn our_key(ns: &str, host: bool, output: (i32, i32)) -> String {
+    if host { format!("ours:{ns}@{},{}", output.0, output.1) } else { format!("ours:{ns}") }
+}
+
 fn namespace(role: Role) -> &'static str {
     match role {
         Role::Body => "capri-body",
         Role::Reader => "capri-reader",
         Role::Chip => "capri-chip",
         Role::Line => "capri-line",
+        Role::Fx => "capri-fx",
     }
 }
 
@@ -391,15 +486,16 @@ impl LayerStage {
 }
 
 impl Stage for LayerStage {
-    /// A layer surface, anchored top-left on the focused output and placed by margins. Her
-    /// body on Top (Hyprland hides it under a fullscreen window), the Line and the reader on
-    /// Overlay (never hidden while they may hold the keyboard), the chip on Top.
+    /// A layer surface on the output under its bounds' centre, anchored top-left and placed
+    /// by margins. Her body on Top (Hyprland hides it under a fullscreen window), the Line and
+    /// the reader on Overlay (never hidden while they may hold the keyboard), the chip on Top.
     fn dress(&self, role: Role, o: &mut WindowOptions) {
         use gpui_kit::layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions};
         let ns = namespace(role);
-        let (output, scale) = self.desk.focused_monitor();
+        let b = o.window_bounds.map(|b| b.get_bounds()).unwrap_or_default();
+        let at = b.origin;
+        let (output, scale) = self.desk.output_at(f32::from(b.center().x), f32::from(b.center().y));
         self.dressed.borrow_mut().insert(ns, (output, scale));
-        let at = o.window_bounds.map(|b| b.get_bounds().origin).unwrap_or_default();
         let m = |v: Pixels, o: i32| px(f32::from(v) - o as f32 / scale);
         o.kind = WindowKind::LayerShell(LayerShellOptions {
             namespace: ns.to_string(),
@@ -419,16 +515,34 @@ impl Stage for LayerStage {
         };
         let ns = namespace(role);
         let (output, scale) = self.dressed.borrow().get(ns).copied().unwrap_or(((0, 0), 1.0));
-        let id = self.desk.id(&format!("ours:{ns}"));
+        // One id per surface (body hosts share a namespace).
+        let id = self.desk.id(&our_key(ns, matches!(role, Role::Body | Role::Fx), output));
         self.surfaces.borrow_mut().insert(id, Surface { ptr, ns, output, scale });
+        if role == Role::Fx {
+            // Effects only: every click goes through.
+            layer_ctl::set_input_region(ptr, Some(&[]));
+        }
         if role == Role::Body {
-            self.body.set(id);
+            if self.body.get() == 0 {
+                self.body.set(id);
+            } else {
+                // A dormant host: nothing of hers, no input.
+                layer_ctl::set_input_region(ptr, Some(&[]));
+            }
         }
         Ok(id)
     }
 
     fn body(&self) -> WinId {
         self.body.get()
+    }
+
+    /// The host she left takes no input (its pixels go with the frame it draws empty).
+    fn set_body(&self, s: WinId) {
+        if let Some(old) = self.body_surface() {
+            layer_ctl::set_input_region(old.ptr, Some(&[]));
+        }
+        self.body.set(s);
     }
 
     /// Margins, committed with the next frame (or alone if none is coming): her pixels and
@@ -504,4 +618,39 @@ pub fn connect() -> Result<(Arc<HyprDesktop>, LayerStage)> {
     let desk = Arc::new(HyprDesktop { ipc, ids: Mutex::default(), pointer: Mutex::new(None) });
     let stage = LayerStage { desk: desk.clone(), surfaces: RefCell::default(), dressed: RefCell::default(), body: std::cell::Cell::new(0) };
     Ok((desk, stage))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::move_anim;
+    use serde_json::json;
+
+    #[test]
+    fn the_move_animation_inherits_and_takes_its_curve() {
+        let leaves = |move_over: bool| {
+            json!([[
+                { "name": "global", "overridden": true, "bezier": "default", "enabled": true, "speed": 8.0 },
+                { "name": "windows", "overridden": true, "bezier": "overshot", "enabled": true, "speed": 6.0 },
+                { "name": "windowsMove", "overridden": move_over, "bezier": if move_over { "wind" } else { "" }, "enabled": true, "speed": if move_over { 5.0 } else { 0.0 } }
+            ], [
+                { "name": "wind", "X0": 0.05, "Y0": 0.9, "X1": 0.1, "Y1": 1.05 },
+                { "name": "overshot", "X0": 0.13, "Y0": 0.99, "X1": 0.29, "Y1": 1.1 }
+            ]])
+        };
+        let on = json!({ "bool": true });
+        let a = move_anim(&on, &leaves(true)).unwrap();
+        assert_eq!((a.ms, a.bezier), (500.0, [0.05, 0.9, 0.1, 1.05]));
+        // windowsMove not set: windows' (the leaf's parent).
+        let a = move_anim(&on, &leaves(false)).unwrap();
+        assert_eq!((a.ms, a.bezier), (600.0, [0.13, 0.99, 0.29, 1.1]));
+        // Animations off: it jumps.
+        assert_eq!(move_anim(&json!({ "int": 0 }), &leaves(true)).unwrap().ms, 0.0);
+        assert_eq!(move_anim(&json!({ "option": "animations:enabled", "bool": false, "set": true }), &leaves(true)).unwrap().ms, 0.0);
+        assert_eq!(move_anim(&json!({ "option": "animations:enabled", "bool": true, "set": true }), &leaves(true)).unwrap().ms, 500.0);
+        // The curve: there at the end, early most of the way (wind), past it on the way (overshoot).
+        let a = move_anim(&on, &leaves(true)).unwrap();
+        assert!(a.progress(0.0).abs() < 1e-3 && (a.progress(1.0) - 1.0).abs() < 1e-3);
+        assert!(a.progress(0.2) > 0.6, "{}", a.progress(0.2));
+        assert!((0..=100).any(|i| a.progress(i as f32 / 100.0) > 1.0));
+    }
 }

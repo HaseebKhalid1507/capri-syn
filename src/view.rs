@@ -388,6 +388,10 @@ struct MusicOn {
 /// After a player pauses or stops, the headphones stay this long (a track change, a seek).
 const MUSIC_GRACE: Duration = Duration::from_secs(5);
 const FRAME_FAST: Duration = Duration::from_millis(16);
+/// The least jump that glides (logical px; less snaps).
+const GLIDE_MIN: f32 = 24.0;
+/// Moves closer together than this are a stream (a live drag): she snaps to each.
+const GLIDE_STREAM: Duration = Duration::from_millis(150);
 const FRAME_FX: Duration = Duration::from_millis(33);
 /// A quiet arrival's sliver widens back into her over ~3 frames.
 const SLIVER: Duration = Duration::from_millis(100);
@@ -504,6 +508,16 @@ pub struct Avatar {
     bob_t0: Instant,
     hop: Option<Instant>,
     next_hop: Option<Instant>,
+    /// A perch glide: since, the offset it started from, and the curve (`glide_offset`).
+    glide: Option<(Instant, (i32, i32), crate::platform::MoveAnim)>,
+    /// When the perch window last moved.
+    perch_moved: Option<Instant>,
+    /// Her body hosts (`Caps::host_per_output`): id, view, window. Empty: one window.
+    hosts: Vec<crate::host::Host>,
+    /// The monitors changed: hosts to open or close (`hosts_sync`).
+    hosts_stale: bool,
+    /// Effect hosts (`crate::host`): what reaches outside her window.
+    fx_hosts: Vec<crate::host::FxHost>,
     glitch: Option<Glitch>,
     /// Frames drawn in the current glitch (keyed by its start): each gets a new pattern.
     glitch_step: Cell<(Option<Instant>, u64)>,
@@ -631,13 +645,13 @@ pub struct Avatar {
     /// Renders and window moves since start (`brain state`, the perf meters).
     renders: u64,
     moves: u64,
-    /// The held drag's window follow (ragview::rag_follow): last move, its period, and the
-    /// pointer it followed.
+    /// The held drag's window follow (ragview::rag_follow, once a frame): last move, the
+    /// shortest gap between moves, and the pointer change it last saw (`Os::pointer_seq`).
     follow_at: Option<Instant>,
     follow_period: Duration,
-    follow_ptr: Option<(i32, i32)>,
-    /// A motion's follow booked for the next slot.
-    follow_due: Option<Instant>,
+    follow_seq: u64,
+    /// The grip it followed with (a turn moves the grip: the next frame follows at once).
+    follow_grip: Option<(i32, i32)>,
 }
 
 pub struct Init {
@@ -735,6 +749,11 @@ impl Avatar {
             bob_t0: now,
             hop: None,
             next_hop: None,
+            glide: None,
+            perch_moved: None,
+            hosts: Vec::new(),
+            hosts_stale: false,
+            fx_hosts: Vec::new(),
             glitch: None,
             glitch_step: Cell::new((None, 0)),
             glitch_at: Cell::new(None),
@@ -806,8 +825,8 @@ impl Avatar {
             moves: 0,
             follow_at: None,
             follow_period: Duration::from_millis(16),
-            follow_ptr: None,
-            follow_due: None,
+            follow_seq: 0,
+            follow_grip: None,
         };
         if std::env::var_os("SA_NO_BRAIN").is_none() {
             a.brain_start();
@@ -1716,6 +1735,12 @@ impl Avatar {
             take(Some(now + NOTE_TICK));
             take(self.music.as_ref().and_then(|m| m.until));
         }
+        if self.glide.is_some() {
+            take(Some(now + FRAME_FAST));
+        }
+        if self.hosts_stale {
+            take(Some(now + Duration::from_millis(250)));
+        }
         if self.hop.is_some() {
             take(Some(now + FRAME_FAST));
         } else if self.hop_allowed() {
@@ -1723,15 +1748,66 @@ impl Avatar {
         }
         take(self.brain_deadline(now));
         take(self.rag_deadline(now));
-        take(self.follow_deadline());
+        take(self.follow_deadline(now));
         if self.swing_on() {
             take(self.brain.as_ref().and_then(|h| h.swing.as_ref()).map_or(Some(now), |s| Some(s.due)));
         }
         t
     }
 
+    /// A body host of hers (`crate::host`).
+    pub fn add_host(&mut self, h: crate::host::Host) {
+        self.hosts.push(h);
+    }
+
+    pub fn set_fx_hosts(&mut self, fx: Vec<crate::host::FxHost>) {
+        self.fx_hosts = fx;
+    }
+
+    /// She moved to another host: it shows her, the others nothing. The monitors changed:
+    /// a dormant host for each new one, the hosts of the ones gone closed.
+    fn hosts_sync(&mut self, cx: &mut Context<Self>) {
+        crate::host::fx_hosts_sync(cx, &self.os, &mut self.fx_hosts);
+        if self.hosts.is_empty() {
+            return;
+        }
+        if std::mem::take(&mut self.hosts_stale) {
+            let gone = self.os.hosts_gone();
+            for (id, _, w) in self.hosts.iter().filter(|h| gone.contains(&h.0)) {
+                elog!("synaps-avatar: body host 0x{id:x} closed (its monitor went away)");
+                w.update(cx, |_, window, _| window.remove_window()).ok();
+            }
+            self.hosts.retain(|h| !gone.contains(&h.0));
+            let me = cx.entity();
+            let size = (self.layout.win_w, self.layout.win_h);
+            for m in self.os.hosts_wanted() {
+                match crate::host::open_dormant(cx, &self.os, &me, &m, size, self.layout.sf) {
+                    Some(h) => self.hosts.push(h),
+                    None => self.hosts_stale = true,
+                }
+            }
+            let fx = std::mem::take(&mut self.fx_hosts);
+            crate::host::close_fx_hosts(cx, fx);
+            self.fx_hosts = crate::host::open_fx_hosts(cx, &self.os, self.layout.sf);
+            // Where she is now picks the host (hers may be gone).
+            self.applied = (i32::MIN, i32::MIN);
+            self.apply_offset(Instant::now());
+        }
+        if let Some(active) = self.os.take_host_change() {
+            for (id, v, _) in &self.hosts {
+                v.update(cx, |h, cx| {
+                    h.active = *id == active;
+                    cx.notify();
+                })
+                .ok();
+            }
+            cx.notify();
+        }
+    }
+
     fn schedule(&mut self, cx: &mut Context<Self>) {
         let now = Instant::now();
+        self.hosts_sync(cx);
         // A pool in or out by a path that didn't relayer (a move along, a teleport's target).
         if self.art_sync(now) && self.loaded && self.layer(self.mood).0 != self.anim.base() {
             self.relayer(now);
@@ -1963,7 +2039,7 @@ impl Avatar {
             self.hop = None;
         }
         dirty |= self.check_perch_gone(now);
-        self.rag_follow(now, false);
+        dirty |= self.rag_follow_due();
         dirty |= self.rag_tick(now);
         dirty |= self.swing_tick(now);
         if self.loaded {
@@ -3362,9 +3438,21 @@ impl Avatar {
         }
     }
 
+    /// What's left of a perch glide (`Os::perch_glide`): on the compositor's move curve, so she
+    /// rides the window (an overshoot included).
+    fn glide_offset(&self, now: Instant) -> (i32, i32) {
+        let Some((t0, (dx, dy), a)) = self.glide.filter(|_| matches!(self.placement, Placement::Perch { .. })) else { return (0, 0) };
+        let k = 1.0 - a.progress(now.saturating_duration_since(t0).as_secs_f32() * 1000.0 / a.ms);
+        ((dx as f32 * k).round() as i32, (dy as f32 * k).round() as i32)
+    }
+
     fn apply_offset(&mut self, now: Instant) {
         let hop = self.hop.and_then(|t| fx::hop(now.saturating_duration_since(t), 16.0 * self.layout.sf)).unwrap_or(0);
-        let pos = (self.origin.0, self.origin.1 - hop + self.drop_in_offset(now) + self.float_bob(now));
+        if self.glide.is_some_and(|(t0, _, a)| now.saturating_duration_since(t0).as_secs_f32() * 1000.0 >= a.ms) {
+            self.glide = None;
+        }
+        let g = self.glide_offset(now);
+        let pos = (self.origin.0 + g.0, self.origin.1 + g.1 - hop + self.drop_in_offset(now) + self.float_bob(now));
         if pos != self.applied {
             self.moves += 1;
             self.os.move_to(pos.0, pos.1).ok();
@@ -3653,6 +3741,18 @@ impl Avatar {
                 let o = self.perch_origin(&r, sit, dx);
                 if self.perch_fits(&r, o, sit) {
                     self.placement = Placement::Perch { win, sit, dx };
+                    // A jump (not a stream of moves: a live drag) to a goal the compositor
+                    // animates the window to: she rides along from where she shows now.
+                    let shown = self.glide_offset(now);
+                    let jump = (self.origin.0 + shown.0 - o.0, self.origin.1 + shown.1 - o.1);
+                    let far = (jump.0 * jump.0 + jump.1 * jump.1) as f32 > (GLIDE_MIN * self.layout.sf).powi(2);
+                    let stream = self.perch_moved.is_some_and(|t| now.duration_since(t) < GLIDE_STREAM);
+                    self.perch_moved = Some(now);
+                    // On the curve from when the move began (the poller's stamp, not when this
+                    // runs: found late, or handled a frame later, she rides it from where the
+                    // window is by now).
+                    let since = self.os.target_moved_at().filter(|t| *t <= now && now.duration_since(*t) < Duration::from_secs(1)).unwrap_or(now);
+                    self.glide = self.os.perch_glide().filter(|_| far && !stream).map(|a| (since, jump, a));
                     self.set_origin(o);
                 } else {
                     self.fall("perch_no_room", now);
@@ -3671,6 +3771,24 @@ impl Avatar {
                 }
             }
             WatchEvent::Click(..) => {}
+            WatchEvent::Layout => {
+                self.os.forget_layout();
+                self.hosts_stale = true;
+                if self.rag.is_some() || self.teleport.is_some() {
+                    return;
+                }
+                let l = &self.layout;
+                let c = (self.origin.0 + l.avatar_x + l.geo.width as i32 / 2, self.origin.1 + l.avatar_y + l.geo.height as i32 / 2);
+                if !self.os.monitors().iter().any(|m| m.contains(c.0, c.1)) {
+                    // Her monitor went away: onto the floor of the nearest one, quietly.
+                    let o = Self::clamp(&self.os, &self.layout, (self.origin.0, self.origin.1 + 100_000));
+                    elog!("synaps-avatar: her monitor went away: to {},{}", o.0, o.1);
+                    self.start_teleport_q(o, Placement::Ground, now, true);
+                } else if self.placement == Placement::Ground && Self::clamp(&self.os, &self.layout, self.origin) != self.origin {
+                    // A panel took her floor.
+                    self.fall("layout", now);
+                }
+            }
             WatchEvent::Focus | WatchEvent::Desktop | WatchEvent::Pointer(_) => self.brain_watch(ev, now),
         }
     }
@@ -3774,11 +3892,9 @@ impl Avatar {
         }
         let Some(p) = &mut self.press else { return };
         if p.dragging {
-            // Held: the window follows the pointer now (capped at the monitor's refresh), the
-            // bands bend at the rag tick. No render here (each `notify` was a full repaint
-            // and present per motion event) and no X round trip per event.
-            self.rag_follow(Instant::now(), true);
-            self.schedule(cx);
+            // Held: the window follows the pointer in the next frame (`rag_follow`, in
+            // render): any number of motion events, one move a frame.
+            cx.notify();
             return;
         }
         // Before the drag starts the window hasn't moved since the press: the event's
@@ -4170,6 +4286,12 @@ impl Render for Avatar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.renders += 1;
         let now = Instant::now();
+        // Held: the window goes where the pointer was for this frame, and the next frame is
+        // asked for while the pointer moves.
+        self.rag_follow(now);
+        if self.rag_following(now) {
+            window.request_animation_frame();
+        }
         // This frame draws the current pose: a pending step rode on it.
         self.pose_last = self.pose_at(now);
         self.pose_wait = None;
@@ -4193,6 +4315,7 @@ impl Render for Avatar {
         // Carried: the rag's committed frame and plan on top, its next one underneath.
         let rag_shown = self.rag.as_ref().map(|r| (r.cur.clone().or_else(|| r.next.clone()), r.next.clone()));
         self.rag_painted();
+        self.log_drawn();
         let rag_flight = self.rag_json().get("phase").and_then(|p| p.as_str()).is_some_and(|p| p == "fling" || p == "drop");
         let shown_i = rag_shown.as_ref().and_then(|(c, _)| c.as_ref().map(|c| c.frame)).unwrap_or_else(|| self.anim.frame());
         let frame = self.frame_or_default(shown_i);

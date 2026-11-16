@@ -84,6 +84,8 @@ fn dispatch(code: &str) {
 
 struct HDriver {
     world: World,
+    os: Rc<Os>,
+    fx: Vec<crate::host::FxHost>,
     desk: Arc<HyprDesktop>,
     body_ptr: usize,
     body: WinId,
@@ -129,13 +131,20 @@ impl HDriver {
         None
     }
 
-    fn client_addr(&self, class: &str) -> Option<String> {
+    /// The window of this class, by the backend's id.
+    fn client_id(&self, class: &str) -> Option<WinId> {
         let v: serde_json::Value = serde_json::from_str(&hyprctl(&["-j", "clients"])).ok()?;
-        v.as_array()?.iter().find(|c| c["class"] == class).and_then(|c| c["address"].as_str().map(str::to_string))
+        v.as_array()?.iter().find(|c| c["class"] == class).and_then(|c| self.desk.value_id(c))
     }
 
     fn sel(&self, w: WinId) -> String {
         format!("window = \"class:^{}$\"", self.names[&w].0)
+    }
+
+    /// The workspace HEADLESS-2 shows.
+    fn other_ws(&self) -> Option<i64> {
+        let v: serde_json::Value = serde_json::from_str(&hyprctl(&["-j", "monitors"])).ok()?;
+        v.as_array()?.iter().find(|m| m["name"] == "HEADLESS-2")?["activeWorkspace"]["id"].as_i64()
     }
 
     fn outputs(&self) -> usize {
@@ -163,8 +172,7 @@ impl Driver for HDriver {
             let rule = format!("hl.window_rule({{ name = \"{name}\", match = {{ class = \"^{name}$\" }}, float = true, move = \"{} {}\", size = \"{} {}\" }})", r.x, r.y, r.w, r.h);
             assert_eq!(hyprctl(&["eval", &rule]), "ok");
             self.world.cmd(&format!("toplevel {name} {} {}", r.w, r.h));
-            let a = self.until(|| self.client_addr(&name)).expect("the window mapped");
-            self.desk.id(&a)
+            self.until(|| self.client_id(&name)).expect("the window mapped")
         } else {
             self.world.cmd(&format!("layer {name} {} {} {} {} top", r.x, r.y, r.w, r.h));
             let (a, _) = self.until(|| self.layer_addr(&name)).expect("the popup mapped");
@@ -219,9 +227,16 @@ impl Driver for HDriver {
     fn body_rect(&mut self) -> Option<WinRect> {
         self.layer_addr("capri-body").map(|(_, r)| WinRect { id: self.body, ..r })
     }
-    /// Her window's pixels: one extent per colour that isn't the backdrop.
+    /// Her window's pixels and her effect hosts': one extent per colour that isn't the backdrop.
     fn fx_rects(&mut self) -> Vec<WinRect> {
         let Some(b) = self.body_rect() else { return Vec::new() };
+        let b = match self.os.fx_staged_box() {
+            Some(f) => {
+                let (x0, y0) = (b.x.min(f.x), b.y.min(f.y));
+                WinRect::new(x0, y0, b.right().max(f.right()) - x0, b.bottom().max(f.bottom()) - y0)
+            }
+            None => b,
+        };
         let px = Self::grab(b);
         let mut ext: HashMap<u32, (i32, i32, i32, i32)> = HashMap::new();
         for (i, p) in px.as_chunks::<3>().0.iter().enumerate() {
@@ -245,9 +260,22 @@ impl Driver for HDriver {
         None
     }
     /// Commit her pending surface state, let a frame be drawn, let the compositor catch up.
+    fn to_other_space(&mut self, w: WinId) -> bool {
+        let Some(ws) = self.other_ws() else { return false };
+        dispatch(&format!("hl.dsp.window.move({{ workspace = {ws}, follow = false, {} }})", self.sel(w)));
+        true
+    }
+    /// HEADLESS-2 to another workspace, the focus staying where it is.
+    fn flip_other_space(&mut self) -> bool {
+        let Some(ws) = self.other_ws() else { return false };
+        let to = if ws == 7 { 2 } else { 7 };
+        hyprctl(&["eval", &format!("hl.get_monitor(\"HEADLESS-2\"):set_workspace({to})")]) == "ok"
+    }
     async fn settle(&mut self) {
         gpui_linux::layer_ctl::commit_pending(self.body_ptr);
         self.view.update(&mut self.cx, |_, cx| cx.notify()).ok();
+        let (os, fx) = (self.os.clone(), &mut self.fx);
+        self.cx.update(|cx| crate::host::fx_hosts_sync(cx, &os, fx));
         self.cx.background_executor().timer(Duration::from_millis(150)).await;
         self.world.cmd("hypr version");
     }
@@ -286,12 +314,13 @@ fn contract_hypr() {
             })
             .expect("her layer surface");
         let view = win.update(cx, |_, _, cx| cx.entity().downgrade()).expect("the stand-in");
+        let fx = crate::host::open_fx_hosts(cx, &os, 1.0);
         let os = os.clone();
         cx.spawn(async move |cx| {
             cx.background_executor().timer(Duration::from_millis(1500)).await;
             let mut world = World::start();
             world.cmd("under");
-            let mut d = HDriver { world, desk, body_ptr: ptr.get(), body: os.body(), view, cx: cx.clone(), names: HashMap::new(), n: 0 };
+            let mut d = HDriver { world, os: os.clone(), fx, desk, body_ptr: ptr.get(), body: os.body(), view, cx: cx.clone(), names: HashMap::new(), n: 0 };
             let two = d.outputs() == 2;
             let r = contract::run(&os, &mut d).await;
             d.split_monitors(two);
@@ -303,5 +332,5 @@ fn contract_hypr() {
     let r = result.borrow_mut().take().expect("the suite ran");
     let passed = r.unwrap();
     eprintln!("contract_hypr: {} scenarios passed: {}", passed.len(), passed.join(", "));
-    assert_eq!(passed.len(), 9);
+    assert_eq!(passed.len(), 11);
 }

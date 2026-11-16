@@ -1,18 +1,25 @@
 //! The core over whichever backend: every desktop decision, once. A backend's answers come
 //! in as plain data (`Desktop`) and go out as primitives (`Stage`); the rules live here.
 
-use super::{Caps, Desktop, FxZ, Hint, Monitor, PointerCfg, PointerEv, Role, SEAT_MIN, ShapeRect, Stage, Visible, WatchEvent, WinId, WinRect};
+use super::track::Track;
+use super::{Caps, Desktop, FxZ, Hint, Monitor, MoveAnim, PointerCfg, PointerEv, Role, SEAT_MIN, ShapeRect, Stage, Visible, WatchEvent, WinId, WinRect};
 use anyhow::Result;
 use gpui_kit::{Bounds, Pixels, TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, fill, point, px, rgb, size};
 use std::cell::{Cell, RefCell};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// How long monitors and work areas are reused (work areas cost a stack walk).
 const AREAS_TTL: Duration = Duration::from_secs(3);
 /// Backends without target events: how often the perch target is re-read.
-const TARGET_POLL: Duration = Duration::from_millis(250);
+/// The target poller's rates: a window that can move without telling (floating), one that
+/// moves only with events the backend hints (tiled), and while it moves (a live drag).
+const TARGET_POLL_LOOSE: Duration = Duration::from_millis(250);
+const TARGET_POLL_TILED: Duration = Duration::from_millis(500);
+const TARGET_POLL_BURST: Duration = Duration::from_millis(16);
+/// How long the burst rate lasts after the target was last seen moving.
+const TARGET_BURST_FOR: Duration = Duration::from_millis(600);
 
 /// What the watcher threads share with the core.
 struct Shared {
@@ -22,9 +29,27 @@ struct Shared {
     composited: AtomicBool,
     /// The target poller (backends without target events), woken by a new target.
     poller: OnceLock<std::thread::Thread>,
+    /// The space the target was first seen on (`Place::space`; `NO_SPACE`: not yet).
+    space: AtomicI64,
+    /// Bumped by every `Hint::Layout` (the cached layout is stale).
+    layout_gen: AtomicU64,
+    /// When the target's last move (as the poller found it) likely began: halfway through the
+    /// sleep it slept out, or when a hint woke it (the move had just happened).
+    moved_at: Mutex<Option<Instant>>,
 }
 
+const NO_SPACE: i64 = i64::MIN;
+
 impl Shared {
+    /// Wake the target poller (if any, and following something): re-read at once.
+    fn poll_now(&self) {
+        if self.target.load(Ordering::Relaxed) != 0
+            && let Some(p) = self.poller.get()
+        {
+            p.unpark();
+        }
+    }
+
     /// The one change-detection path: a backend's hint (or the poller's diff) → what the
     /// view hears.
     fn hint(&self, desk: &dyn Desktop, h: Hint, on: &dyn Fn(WatchEvent)) {
@@ -37,8 +62,20 @@ impl Shared {
             }
             Hint::Mapped(w) if t != 0 && w == t => on(WatchEvent::TargetBack(t)),
             Hint::Gone(w) if t != 0 && w == t => on(WatchEvent::TargetGone(t)),
-            Hint::Focus => on(WatchEvent::Focus),
-            Hint::Desktop => on(WatchEvent::Desktop),
+            Hint::Focus => {
+                self.poll_now();
+                on(WatchEvent::Focus);
+            }
+            Hint::Desktop => {
+                self.poll_now();
+                on(WatchEvent::Desktop);
+            }
+            Hint::Changed => self.poll_now(),
+            Hint::Layout => {
+                self.layout_gen.fetch_add(1, Ordering::Relaxed);
+                self.poll_now();
+                on(WatchEvent::Layout);
+            }
             Hint::Compositor(now) if self.composited.swap(now, Ordering::Relaxed) != now => on(WatchEvent::Compositor(now)),
             _ => {}
         }
@@ -56,7 +93,54 @@ struct PointerWatch {
     started: Mutex<Option<Instant>>,
 }
 
-type Cached = RefCell<Option<(Instant, Vec<Monitor>)>>;
+/// A cached layout: when it was read, the layout generation then, the monitors (or areas).
+type Cached = RefCell<Option<(Instant, u64, Vec<Monitor>)>>;
+
+/// The target poller's memory: the window, the space it was first seen on (hers), its rect
+/// there at the last read (None: not visible there), when it last moved.
+#[derive(Default)]
+struct TargetTrack {
+    t: WinId,
+    read: bool,
+    space: Option<i64>,
+    rect: Option<WinRect>,
+    moved: Option<Instant>,
+}
+
+impl TargetTrack {
+    /// One read of target `t`: the hint it makes, and how long until the next read.
+    fn step(&mut self, t: WinId, place: Option<super::Place>, now: Instant) -> (Option<Hint>, Duration) {
+        if self.t != t {
+            *self = TargetTrack { t, ..Default::default() };
+        }
+        if self.space.is_none() {
+            self.space = place.map(|p| p.space);
+        }
+        let here = place.filter(|p| Some(p.space) == self.space).map(|p| p.rect);
+        let hint = match (self.read, self.rect, here) {
+            (false, ..) => None,
+            (_, Some(a), Some(b)) if a != b => {
+                self.moved = Some(now);
+                Some(Hint::Moved(t, Some(b)))
+            }
+            (_, Some(_), None) => Some(Hint::Gone(t)),
+            (_, None, Some(_)) => Some(Hint::Mapped(t)),
+            _ => None,
+        };
+        (self.read, self.rect) = (true, here);
+        let wait = if self.moved.is_some_and(|m| now.duration_since(m) < TARGET_BURST_FOR) {
+            TARGET_POLL_BURST
+        } else if place.is_none_or(|p| p.loose) {
+            TARGET_POLL_LOOSE
+        } else {
+            TARGET_POLL_TILED
+        };
+        (hint, wait)
+    }
+}
+
+/// The drag poller: its pointer track and its stop flag.
+type Poll = (Arc<Mutex<Track>>, Arc<AtomicBool>);
 
 /// One effect layer as last set: solid `rgb` over `rects` (relative to `origin`, root px) in a
 /// `size` px box, and where it shows: on a surface of its own (`staged`: the backend paints
@@ -81,6 +165,8 @@ struct FxList {
     under: Vec<usize>,
     /// What her window shows changed since her view last took it.
     dirty: bool,
+    /// What shows outside her window changed (the core's effect hosts repaint).
+    staged_dirty: bool,
 }
 
 impl FxList {
@@ -107,7 +193,9 @@ impl FxList {
         }
         // Her window repaints only for what it shows: this layer is (or was) in it.
         let in_window = !staged || prev.as_ref().is_some_and(|p| !p.staged);
-        self.dirty |= in_window && (!same || before != (self.over.clone(), self.under.clone()));
+        let changed = !same || before != (self.over.clone(), self.under.clone());
+        self.dirty |= in_window && changed;
+        self.staged_dirty |= (staged || prev.as_ref().is_some_and(|p| p.staged)) && changed;
         prev.map(|p| p.staged)
     }
 
@@ -117,12 +205,25 @@ impl FxList {
         self.over.retain(|&k| k != layer);
         self.under.retain(|&k| k != layer);
         self.dirty |= !l.staged;
+        self.staged_dirty |= l.staged;
         Some(l.staged)
     }
 
     fn clear(&mut self) {
         let in_window = self.layers.values().any(|l| !l.staged);
-        *self = FxList { dirty: self.dirty || in_window, ..FxList::default() };
+        let staged = self.layers.values().any(|l| l.staged);
+        *self = FxList { dirty: self.dirty || in_window, staged_dirty: self.staged_dirty || staged, ..FxList::default() };
+    }
+
+    /// The staged layers' rects, root px, bottom → top, with colours.
+    fn staged(&self) -> Vec<((i32, i32, i32, i32), u32)> {
+        self.under
+            .iter()
+            .chain(&self.over)
+            .filter_map(|l| self.layers.get(l))
+            .filter(|l| l.staged)
+            .flat_map(|l| l.rects.iter().map(move |r| ((l.origin.0 + r.0 as i32, l.origin.1 + r.1 as i32, r.2 as i32, r.3 as i32), l.rgb)))
+            .collect()
     }
 
     /// Layers in the stacking order, bottom → top, with where each stacks when re-shown in
@@ -157,9 +258,9 @@ pub struct Os {
     /// While she's carried or flying: both caches stay as snapshotted at the grab (no round
     /// trip inside a 60 Hz tick).
     frozen: Cell<bool>,
-    /// The pointer polled on its own connection while she's held by the real mouse:
-    /// (x << 32 | y as u32, or u64::MAX before the first read; stop flag).
-    poll: RefCell<Option<(Arc<AtomicU64>, Arc<AtomicBool>)>>,
+    /// The pointer polled on its own connection while she's held by the real mouse: its
+    /// changes (`track.rs`), and the stop flag.
+    poll: RefCell<Option<Poll>>,
     /// Bounding shapes sent, and their rects (for the rag's meter).
     shape_sends: Cell<u64>,
     shape_rects: Cell<u64>,
@@ -170,12 +271,16 @@ pub struct Os {
     body_at: Cell<(i32, i32)>,
     /// Her body window's size, px ((0, 0) before `adopt`).
     body_size: Cell<(i32, i32)>,
+    /// Her body hosts, one per output (`Caps::host_per_output`): id and its monitor.
+    hosts: RefCell<Vec<(WinId, Monitor)>>,
+    /// She moved to another host: the view shows her in it (`take_host_change`).
+    host_changed: Cell<Option<WinId>>,
 }
 
 impl Os {
     pub fn new(desk: Arc<dyn Desktop>, stage: Box<dyn Stage>) -> Os {
         let caps = desk.caps();
-        let shared = Shared { target: AtomicU32::new(0), composited: AtomicBool::new(desk.compositor_running()), poller: OnceLock::new() };
+        let shared = Shared { target: AtomicU32::new(0), composited: AtomicBool::new(desk.compositor_running()), poller: OnceLock::new(), space: AtomicI64::new(NO_SPACE), layout_gen: AtomicU64::new(0), moved_at: Mutex::new(None) };
         Os {
             desk,
             stage,
@@ -192,6 +297,8 @@ impl Os {
             fx_list: RefCell::new(FxList::default()),
             body_at: Cell::new((0, 0)),
             body_size: Cell::new((0, 0)),
+            hosts: RefCell::new(Vec::new()),
+            host_changed: Cell::new(None),
         }
     }
 
@@ -204,6 +311,7 @@ impl Os {
             Role::Reader => ("synaps-avatar reader", WindowBackgroundAppearance::Opaque),
             Role::Chip => ("synaps-avatar chip", WindowBackgroundAppearance::Opaque),
             Role::Line => ("synaps-avatar line", WindowBackgroundAppearance::Opaque),
+            Role::Fx => ("synaps-avatar fx", WindowBackgroundAppearance::Transparent),
         };
         let mut o = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -231,7 +339,51 @@ impl Os {
             let (v, sf) = (window.viewport_size(), window.scale_factor());
             self.set_body_size((f32::from(v.width) * sf).round() as i32, (f32::from(v.height) * sf).round() as i32);
         }
-        self.stage.adopt(role, window)
+        let id = self.stage.adopt(role, window)?;
+        if role == Role::Body && self.caps.host_per_output {
+            let (b, k) = (window.bounds(), window.scale_factor());
+            let d = |v: Pixels| (f32::from(v) * k).round() as i32;
+            let (w, h) = self.body_size.get();
+            let m = self.monitor_at(d(b.origin.x) + w / 2, d(b.origin.y) + h / 2);
+            self.hosts.borrow_mut().push((id, m));
+        }
+        Ok(id)
+    }
+
+    /// Her body needs a host per output (`Caps::host_per_output`).
+    pub fn host_per_output(&self) -> bool {
+        self.caps.host_per_output
+    }
+
+    /// One body host per output (`Caps::host_per_output`): the monitors still without one.
+    pub fn hosts_wanted(&self) -> Vec<Monitor> {
+        if !self.caps.host_per_output {
+            return Vec::new();
+        }
+        let h = self.hosts.borrow();
+        self.monitors().into_iter().filter(|m| !h.iter().any(|(_, hm)| hm.rect() == m.rect())).collect()
+    }
+
+    /// Body hosts whose monitor is gone (dropped from the list: the view closes them).
+    pub fn hosts_gone(&self) -> Vec<WinId> {
+        let ms = self.monitors();
+        let mut h = self.hosts.borrow_mut();
+        let gone: Vec<WinId> = h.iter().filter(|(_, m)| !ms.iter().any(|x| x.rect() == m.rect())).map(|(id, _)| *id).collect();
+        h.retain(|(id, _)| !gone.contains(id));
+        gone
+    }
+
+    /// The body host she moved to since the last call, if any.
+    pub fn take_host_change(&self) -> Option<WinId> {
+        self.host_changed.take()
+    }
+
+    /// The host whose monitor holds the centre of her window at (x, y) (the nearest if none).
+    fn host_for(&self, x: i32, y: i32) -> Option<WinId> {
+        let h = self.hosts.borrow();
+        let (w, hh) = self.body_size.get();
+        let (cx, cy) = (x + w / 2, y + hh / 2);
+        h.iter().find(|(_, m)| m.contains(cx, cy)).or_else(|| h.iter().min_by_key(|(_, m)| m.distance2(cx, cy))).map(|(id, _)| *id)
     }
 
     /// Her body window's size, px (the effect layers inside it can show in it).
@@ -244,8 +396,15 @@ impl Os {
         self.stage.body()
     }
 
+    /// Body origin, root px; on another output's host when she crossed to it.
     pub fn move_to(&self, x: i32, y: i32) -> Result<()> {
         self.body_at.set((x, y));
+        if let Some(h) = self.host_for(x, y)
+            && h != self.stage.body()
+        {
+            self.stage.set_body(h);
+            self.host_changed.set(Some(h));
+        }
         self.stage.move_to(x, y)
     }
 
@@ -339,8 +498,10 @@ impl Os {
     /// her, and a compositor can then paint the desktop over their boxes when she redraws
     /// under them (dark boxes and bars around her glints). Only the layers reaching outside
     /// her window (the bolt) keep surfaces of their own.
+    /// Without surfaces from the backend, the core's effect hosts show what reaches outside
+    /// her window (`Caps::host_per_output`; else it's clipped to her window).
     fn fx_staged(&self, origin: (i32, i32), size: (i32, i32)) -> bool {
-        if !self.caps.fx_layers {
+        if !self.caps.fx_layers && !self.caps.host_per_output {
             return false;
         }
         if !self.composited() {
@@ -400,6 +561,27 @@ impl Os {
         !self.caps.implicit_grab
     }
 
+    /// A perch that jumps glides after its window (`Caps::goal_geometry`).
+    /// When the perch target's last move likely began (the poller's estimate; None where the
+    /// backend tells of every move: then, when it's handled).
+    pub fn target_moved_at(&self) -> Option<Instant> {
+        self.shared.moved_at.lock().ok().and_then(|m| *m)
+    }
+
+    /// How a perch that jumps follows its window (`Caps::goal_geometry`): on the compositor's
+    /// own animation for that move, so she rides the window instead of trailing it; a plain
+    /// ease-out where the backend can't say. None: she snaps (the window jumps too).
+    pub fn perch_glide(&self) -> Option<MoveAnim> {
+        if !self.caps.goal_geometry {
+            return None;
+        }
+        match self.desk.move_anim() {
+            Some(a) if a.ms <= 0.0 => None,
+            Some(a) => Some(a),
+            None => Some(MoveAnim::EASE_OUT),
+        }
+    }
+
     /// Effect steps that can wait ride redraws that happen anyway: a redraw is a full present
     /// (`Caps::costly_redraw`), or the effects are painted in her window (`fx_in_scene`), so
     /// each step on its own would be a redraw of her.
@@ -437,6 +619,27 @@ impl Os {
     }
 
     /// In-scene effect layers changed since the last call: her window needs a frame.
+    /// What the effect hosts show changed since the last call (`Caps::host_per_output`).
+    pub fn fx_take_staged(&self) -> bool {
+        !self.caps.fx_layers && std::mem::take(&mut self.fx_list.borrow_mut().staged_dirty)
+    }
+
+    /// The box of what the effect hosts show (root px), if anything.
+    pub fn fx_staged_box(&self) -> Option<WinRect> {
+        self.fx_list.borrow().staged().iter().map(|&((x, y, w, h), _)| WinRect::new(x, y, w, h)).reduce(|a, b| {
+            let (x0, y0) = (a.x.min(b.x), a.y.min(b.y));
+            WinRect::new(x0, y0, a.right().max(b.right()) - x0, a.bottom().max(b.bottom()) - y0)
+        })
+    }
+
+    /// Paint what the effect hosts show, in a host whose top-left is at `at` (root px).
+    pub fn paint_fx_staged(&self, window: &mut Window, at: (i32, i32), sf: f32) {
+        for ((x, y, w, h), c) in self.fx_list.borrow().staged() {
+            let b = Bounds::new(point(px((x - at.0) as f32 / sf), px((y - at.1) as f32 / sf)), size(px(w as f32 / sf), px(h as f32 / sf)));
+            window.paint_quad(fill(b, rgb(c)));
+        }
+    }
+
     pub fn fx_take_dirty(&self) -> bool {
         std::mem::take(&mut self.fx_list.borrow_mut().dirty)
     }
@@ -518,8 +721,16 @@ impl Os {
         self.desk.root_size()
     }
 
+    /// The cache, while it holds: for `AREAS_TTL`, until a `Hint::Layout` where they come
+    /// (`Caps::layout_events`), or while she's carried.
     fn cached(&self, c: &Cached) -> Option<Vec<Monitor>> {
-        c.borrow().as_ref().filter(|(t, _)| t.elapsed() < AREAS_TTL || self.frozen.get()).map(|(_, m)| m.clone())
+        let now_gen = self.shared.layout_gen.load(Ordering::Relaxed);
+        let holds = |t: &Instant, g: u64| if self.caps.layout_events { g == now_gen } else { t.elapsed() < AREAS_TTL };
+        c.borrow().as_ref().filter(|(t, g, _)| holds(t, *g) || self.frozen.get()).map(|(_, _, m)| m.clone())
+    }
+
+    fn layout_gen(&self) -> u64 {
+        self.shared.layout_gen.load(Ordering::Relaxed)
     }
 
     /// The monitors (cached for `AREAS_TTL`, or frozen while she's carried); at least one.
@@ -532,7 +743,7 @@ impl Os {
             let (w, h) = self.desk.root_size();
             out.push(Monitor { primary: true, x: 0, y: 0, w, h });
         }
-        *self.mons.borrow_mut() = Some((Instant::now(), out.clone()));
+        *self.mons.borrow_mut() = Some((Instant::now(), self.layout_gen(), out.clone()));
         out
     }
 
@@ -542,7 +753,7 @@ impl Os {
             return a;
         }
         let areas = self.desk.work_areas(&self.monitors());
-        *self.areas.borrow_mut() = Some((Instant::now(), areas.clone()));
+        *self.areas.borrow_mut() = Some((Instant::now(), self.layout_gen(), areas.clone()));
         areas
     }
 
@@ -568,8 +779,7 @@ impl Os {
         ms.iter().find(|m| m.primary).cloned().unwrap_or_else(|| ms[0].clone())
     }
 
-    /// Drop the cached layout (tests change monitors and panels under it).
-    #[cfg(test)]
+    /// Drop the cached layout (monitors or panels changed; tests change them under it).
     pub fn forget_layout(&self) {
         *self.mons.borrow_mut() = None;
         *self.areas.borrow_mut() = None;
@@ -580,7 +790,7 @@ impl Os {
     pub fn freeze_layout(&self, on: bool) {
         // A snapshot younger than ~1 s is fresh enough (the refresh walks the tree: a few ms
         // on the first dragged frame).
-        let fresh = |c: &Cached| c.borrow().as_ref().is_some_and(|(t, _)| t.elapsed() < Duration::from_secs(1));
+        let fresh = |c: &Cached| c.borrow().as_ref().is_some_and(|(t, g, _)| if self.caps.layout_events { *g == self.layout_gen() } else { t.elapsed() < Duration::from_secs(1) });
         if on && !(fresh(&self.mons) && fresh(&self.areas)) {
             self.frozen.set(false);
             *self.mons.borrow_mut() = None;
@@ -618,7 +828,13 @@ impl Os {
         self.desk.toplevel_of(w)
     }
 
+    /// The perch target counts only on the space it was first seen on: elsewhere it has left
+    /// hers (`Place::space`).
     pub fn toplevel_rect(&self, w: WinId) -> Option<WinRect> {
+        let space = self.shared.space.load(Ordering::Relaxed);
+        if w != 0 && w == self.shared.target.load(Ordering::Relaxed) && space != NO_SPACE {
+            return self.desk.toplevel_place(w).filter(|p| p.space == space).map(|p| p.rect);
+        }
         self.desk.toplevel_rect(w)
     }
 
@@ -636,7 +852,9 @@ impl Os {
 
     /// Follow `w` (0 = nothing).
     pub fn set_target(&self, w: WinId) {
-        self.shared.target.store(w, Ordering::Relaxed);
+        if self.shared.target.swap(w, Ordering::Relaxed) != w {
+            self.shared.space.store(NO_SPACE, Ordering::Relaxed);
+        }
         if let Some(p) = self.shared.poller.get() {
             p.unpark();
         }
@@ -654,33 +872,39 @@ impl Os {
         Ok(())
     }
 
-    /// Re-read the target every `TARGET_POLL` while there is one (parked otherwise), diff,
-    /// and feed the differences through the same path as a backend's hints.
+    /// Re-read the target while there is one (parked otherwise; a hint wakes it), diff, and
+    /// feed the differences through the same path as a backend's hints. Every
+    /// `TARGET_POLL_TILED` (`_LOOSE` for a floating one), `_BURST` while it moves.
     fn spawn_target_poll(&self, on: Arc<dyn Fn(WatchEvent) + Send + Sync>) -> Result<()> {
         let (s, d) = (self.shared.clone(), self.desk.clone());
         let h = std::thread::Builder::new().name("avatar-target".into()).spawn(move || {
-            let mut last: (WinId, Option<WinRect>) = (0, None);
+            let mut track = TargetTrack::default();
+            // The last sleep: (since, for how long).
+            let mut slept: Option<(Instant, Duration)> = None;
             loop {
                 let t = s.target.load(Ordering::Relaxed);
                 if t == 0 {
-                    last = (0, None);
+                    track = TargetTrack::default();
+                    slept = None;
                     std::thread::park();
                     continue;
                 }
-                let now = d.toplevel_rect(t);
-                if last.0 == t {
-                    let h = match (last.1, now) {
-                        (Some(a), Some(b)) if a != b => Some(Hint::Moved(t, Some(b))),
-                        (Some(_), None) => Some(Hint::Gone(t)),
-                        (None, Some(_)) => Some(Hint::Mapped(t)),
-                        _ => None,
-                    };
-                    if let Some(h) = h {
-                        s.hint(&*d, h, &*on);
-                    }
+                let now = Instant::now();
+                let (hint, wait) = track.step(t, d.toplevel_place(t), now);
+                if s.target.load(Ordering::Relaxed) == t {
+                    s.space.store(track.space.unwrap_or(NO_SPACE), Ordering::Relaxed);
                 }
-                last = (t, now);
-                std::thread::park_timeout(TARGET_POLL);
+                if let Some(h) = hint {
+                    // Slept it out: the move began somewhere in that sleep. Woken early (a
+                    // hint): just now.
+                    let age = slept.filter(|(at, w)| now.duration_since(*at) + Duration::from_millis(2) >= *w).map_or(Duration::ZERO, |(_, w)| w / 2);
+                    if let Ok(mut m) = s.moved_at.lock() {
+                        *m = Some(now.checked_sub(age).unwrap_or(now));
+                    }
+                    s.hint(&*d, h, &*on);
+                }
+                slept = Some((Instant::now(), wait));
+                std::thread::park_timeout(wait);
             }
         })?;
         self.shared.poller.set(h.thread().clone()).ok();
@@ -704,15 +928,29 @@ impl Os {
         self.desk.pointer()
     }
 
-    /// The polled pointer while polling (and read once), else a fresh read.
-    pub fn pointer_fast(&self) -> Result<(i32, i32)> {
-        if let Some((pos, _)) = self.poll.borrow().as_ref() {
-            let v = pos.load(Ordering::Relaxed);
-            if v != u64::MAX {
-                return Ok(((v >> 32) as u32 as i32, v as u32 as i32));
-            }
+    /// Where the pointer was for a frame drawn at `at` (`track.rs`: resampled from the
+    /// poller's changes), else a fresh read.
+    pub fn pointer_at(&self, at: Instant) -> Result<(f32, f32)> {
+        if let Some(p) = self.track(|t| t.at(at)).flatten() {
+            return Ok(p);
         }
-        self.pointer()
+        self.pointer().map(|p| (p.0 as f32, p.1 as f32))
+    }
+
+    /// Bumped by every pointer change the poller sees (0 when not polling).
+    pub fn pointer_seq(&self) -> u64 {
+        self.track(|t| t.seq()).unwrap_or(0)
+    }
+
+    /// The poller saw the pointer move within `d` before `now`.
+    pub fn pointer_moved_within(&self, now: Instant, d: Duration) -> bool {
+        self.track(|t| t.newest()).flatten().is_some_and(|(at, _)| now.saturating_duration_since(at) <= d)
+    }
+
+    fn track<T>(&self, f: impl FnOnce(&Track) -> T) -> Option<T> {
+        let g = self.poll.borrow();
+        let (t, _) = g.as_ref()?;
+        t.lock().ok().map(|t| f(&t))
     }
 
     /// Poll the pointer on a thread with its own connection (250 Hz) while on, so a held tick
@@ -728,21 +966,23 @@ impl Os {
         if g.is_some() {
             return;
         }
-        let pos = Arc::new(AtomicU64::new(u64::MAX));
+        let track = Arc::new(Mutex::new(Track::default()));
         let stop = Arc::new(AtomicBool::new(false));
-        let (p, s, d) = (pos.clone(), stop.clone(), self.desk.clone());
+        let (tr, s, d) = (track.clone(), stop.clone(), self.desk.clone());
         let spawned = std::thread::Builder::new().name("avatar-pointer".into()).spawn(move || {
             let Ok(mut read) = d.pointer_reader() else { return };
             while !s.load(Ordering::Relaxed) {
-                if let Some((x, y)) = read() {
-                    p.store(((x as u32 as u64) << 32) | y as u32 as u64, Ordering::Relaxed);
+                if let Some(p) = read()
+                    && let Ok(mut t) = tr.lock()
+                {
+                    t.push(Instant::now(), p);
                 }
-                // 2 ms: the window follows it at up to the monitor's refresh (see rag_follow).
+                // 2 ms: each change timed to within a read (the frame resamples them).
                 std::thread::sleep(Duration::from_millis(2));
             }
         });
         if spawned.is_ok() {
-            *g = Some((pos, stop));
+            *g = Some((track, stop));
         }
     }
 

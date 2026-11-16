@@ -227,6 +227,8 @@ pub(super) struct BrainHost {
     leap: Option<LeapMove>,
     /// The focused top-level last seen (a focus change is a different one).
     focus_seen: Option<u32>,
+    /// The focus at launch was read (once: with nothing focused, not again every tick).
+    focus_read: bool,
     /// He switched workspace at: and the check of where she is, a beat later (after a perch
     /// that went with it has had its grace).
     desk_at: Option<Instant>,
@@ -434,6 +436,7 @@ impl Avatar {
             sulk_sit: false,
             leap: None,
             focus_seen: None,
+            focus_read: false,
             desk_at: None,
             desk_check: None,
             desk_seen: None,
@@ -848,9 +851,10 @@ impl Avatar {
             }
         }
         // The focus at launch: the first change after it is a focus change.
-        if self.loaded && self.brain.as_ref().is_some_and(|h| h.focus_seen.is_none()) {
+        if self.loaded && self.brain.as_ref().is_some_and(|h| h.focus_seen.is_none() && !h.focus_read) {
             let f = self.brain_focused().map(|r| r.id);
             if let Some(h) = &mut self.brain {
+                h.focus_read = true;
                 h.focus_seen = f;
             }
         }

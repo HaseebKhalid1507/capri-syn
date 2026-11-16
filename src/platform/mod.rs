@@ -20,6 +20,7 @@ use gpui_kit::{Window, WindowOptions};
 mod hypr;
 mod linux;
 mod os;
+mod track;
 mod x11;
 
 #[cfg(test)]
@@ -85,7 +86,8 @@ pub struct Caps {
     /// polls the perch target and diffs the snapshots itself.
     pub target_events: bool,
     /// Effect layers are surfaces of their own (the server paints them). Without it the core
-    /// keeps them in a display list and her view paints them in her window.
+    /// keeps them in a display list and paints them itself: in her window, and the ones
+    /// reaching outside it in its effect hosts (`host_per_output`).
     pub fx_layers: bool,
     /// Every redraw of her window is a full present for the compositor to take in. Steps that
     /// can wait (glints) then ride redraws that happen anyway.
@@ -94,6 +96,53 @@ pub struct Caps {
     /// meanwhile (X's implicit grab). Without it the core holds her input region at her whole
     /// window while a press lasts: the window follows the pointer, so the pointer stays inside.
     pub implicit_grab: bool,
+    /// A window's rect is where it is going (the compositor animates it there): a perch that
+    /// jumps glides after it instead of snapping.
+    pub goal_geometry: bool,
+    /// Every change of the monitors or of what panels reserve comes as `Hint::Layout`: the
+    /// core keeps the layout until one (else it re-reads it every few seconds).
+    pub layout_events: bool,
+    /// A surface of hers shows on one output only: the core keeps a body host per output
+    /// and shows her in the one under her (else one window spans every monitor).
+    pub host_per_output: bool,
+}
+
+/// How the compositor animates a window to a new rect (`Caps::goal_geometry`): how long, and
+/// its timing curve, a cubic bezier through (0,0), (x0,y0), (x1,y1), (1,1) (y may pass 1: an
+/// overshoot). `ms` 0: it jumps.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MoveAnim {
+    pub ms: f32,
+    pub bezier: [f32; 4],
+}
+
+impl MoveAnim {
+    /// What a jump glides on where the backend can't say: a cubic ease-out over 450 ms.
+    pub const EASE_OUT: MoveAnim = MoveAnim { ms: 450.0, bezier: [0.33, 1.0, 0.68, 1.0] };
+
+    /// The fraction of the way there at `u` (of `ms`, clamped to 0..1).
+    pub fn progress(&self, u: f32) -> f32 {
+        let [x0, y0, x1, y1] = self.bezier;
+        let at = |a: f32, b: f32, s: f32| 3.0 * a * s * (1.0 - s) * (1.0 - s) + 3.0 * b * s * s * (1.0 - s) + s * s * s;
+        let u = u.clamp(0.0, 1.0);
+        let (mut lo, mut hi) = (0.0f32, 1.0f32);
+        for _ in 0..24 {
+            let m = 0.5 * (lo + hi);
+            if at(x0, x1, m) < u { lo = m } else { hi = m }
+        }
+        at(y0, y1, 0.5 * (lo + hi))
+    }
+}
+
+/// Where a window is, for the target poller (`Desktop::toplevel_place`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Place {
+    pub rect: WinRect,
+    /// The space it is on (a workspace; 0 where there are none). A target that turns up on
+    /// another space has left hers: gone, never followed.
+    pub space: i64,
+    /// It can move without anything telling the backend (a floating window): polled faster.
+    pub loose: bool,
 }
 
 /// A cheap note from a backend's event source: "something changed". The core turns these
@@ -110,6 +159,10 @@ pub enum Hint {
     Focus,
     /// The workspace changed.
     Desktop,
+    /// Windows opened, closed, or changed space or mode: the core re-reads what it follows.
+    Changed,
+    /// Monitors or the areas panels reserve changed.
+    Layout,
     /// Whether a compositor runs now.
     Compositor(bool),
 }
@@ -130,6 +183,8 @@ pub enum WatchEvent {
     Focus,
     /// He switched workspace.
     Desktop,
+    /// Monitors or work areas changed (the cached layout is stale).
+    Layout,
     /// The pointer near her, swept past her, or resting on her (`Os::watch_pointer`).
     Pointer(PointerEv),
 }
@@ -157,6 +212,9 @@ pub enum Role {
     Reader,
     Chip,
     Line,
+    /// An output's effect host (`Caps::host_per_output`): paints the effect layers that
+    /// reach outside her window (the bolt).
+    Fx,
 }
 
 /// Where an effect layer stacks.
@@ -188,6 +246,11 @@ pub trait Desktop: Send + Sync {
     fn root_size(&self) -> (i32, i32);
     /// The monitors, fresh (the core caches).
     fn monitors(&self) -> Vec<Monitor>;
+    /// How the compositor animates a window to a new rect (`Caps::goal_geometry`); None: it
+    /// can't say.
+    fn move_anim(&self) -> Option<MoveAnim> {
+        None
+    }
     /// Each of `mons` minus what panels and docks reserve, same order, fresh.
     fn work_areas(&self, mons: &[Monitor]) -> Vec<Monitor>;
     /// The refresh rate (Hz) of the output showing (x, y), if known.
@@ -202,6 +265,10 @@ pub trait Desktop: Send + Sync {
     fn toplevel_of(&self, w: WinId) -> Option<WinId>;
     /// Outer rect of a top-level window, if it is visible.
     fn toplevel_rect(&self, w: WinId) -> Option<WinRect>;
+    /// Where a top-level window is, if it is visible (one read: the target poller's).
+    fn toplevel_place(&self, w: WinId) -> Option<Place> {
+        self.toplevel_rect(w).map(|rect| Place { rect, space: 0, loose: true })
+    }
     /// The window still exists, visible or not (hidden is not closed).
     fn window_exists(&self, w: WinId) -> bool;
     /// `w` asks for fullscreen.
@@ -229,8 +296,11 @@ pub trait Stage {
     fn dress(&self, role: Role, o: &mut WindowOptions);
     /// After `open_window`: the backend's id for it (the body's is remembered).
     fn adopt(&self, role: Role, window: &Window) -> Result<WinId>;
-    /// Her body's id (0 before `adopt`).
+    /// Her body's id (0 before `adopt`): the host she shows in.
     fn body(&self) -> WinId;
+    /// She shows in body host `s` from now on (`Caps::host_per_output`): body moves, shapes
+    /// and the keyboard go to it; the one she left takes no input.
+    fn set_body(&self, _s: WinId) {}
     /// Body origin, root px.
     fn move_to(&self, x: i32, y: i32) -> Result<()>;
     fn raise(&self) -> Result<()>;

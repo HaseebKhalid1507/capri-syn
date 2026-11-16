@@ -11,7 +11,7 @@ phase is marked TAINT if the pointer isn't where we put it (he moved the mouse).
 On Wayland (the tools/wlrig rig only: WAYLAND_DISPLAY set, inside run.sh) the strips come from screencopy,
 one per composited frame, stamped with its presentation time, and the pointer is a virtual pointer.
 `--bg 0xRRGGBB`: the stage colour (default the X stage's 0x34404d). LAGMETER_PID: her pid (else `pgrep -x`). LAGMETER_CURSOR=0: recdrag without the pointer.
-LAGMETER_LIFT: the figure-eight's height above the grip (default 60 px).
+LAGMETER_LIFT: the figure-eight's height above the grip (default 60 px). LAGMETER_HZ: recdrag's motion rate (500).
 
 usage: lagmeter.py STAGE_X,STAGE_Y,W,H phase... [--out FILE] [--bg 0xRRGGBB]
 phases: idle:SECS  drag:SECS  steps:N  press:N  fling  watch:LABEL:SECS (no input, e.g. a teleport
@@ -41,6 +41,8 @@ ROWS = 6
 BG = 0x34404D
 # How far above the grip the figure-eight runs (drag, recdrag): far enough that her hanging feet stay off the floor.
 LIFT = int(os.environ.get("LAGMETER_LIFT", "60"))
+# recdrag: how often the pointer moves (XTEST / virtual pointer). A mouse reports at ~125 Hz.
+HZ = float(os.environ.get("LAGMETER_HZ", "500"))
 
 
 class Probe:
@@ -489,7 +491,7 @@ def main():
                 while time.perf_counter() - t0 < secs and not h.taint:
                     t = time.perf_counter() - t0
                     h.move(x0 + 160 * math.sin(t * math.pi), y0 - LIFT - 90 * math.sin(2 * t * math.pi) / 2)
-                    time.sleep(0.002)
+                    time.sleep(1 / HZ)
                 h.move(x0, y0 - LIFT)
                 time.sleep(0.4)
                 h.release()
