@@ -1,0 +1,1469 @@
+{
+ "schemaVersion": 1,
+ "about": "capri-syn's own measurements of the capri-desktop art (cell grid, anchors, loop/one-shot), taken from the PNGs at the pinned commits. Anchors and bounds are in cell px; x/y from the cell's top-left; bounds [x, y, w, h] = the union of every cell's opaque box. A laydown anchor's x is the figure's middle (edgeX: where her hanging leg leaves the surface). faces: the side her face looks to, unmirrored. fpsFrom 'clips.json' = lachy's quest clips.json lists the same frame count and cell width; 'guess' = ours. mirrorArt: the strip drawn for mirroring (same silhouette, the suit's asymmetric details swapped): when she faces the other way, draw mirror(mirrorArt), not mirror(strip). contact (seat and surface strips): on a window top, below cell row `line` only the columns `legs` [x0, x1) stay, the lower legs hanging over the edge; the window's front face hides the rest (a hand, the mane, an arm).",
+ "lachy": {
+  "repo": "https://github.com/lachydotmcg/capri-desktop",
+  "commit": "156ed188a2ac00854eb1c9e932087eb5e824ccb9",
+  "root": "assets",
+  "strips": {
+   "arrive": {
+    "file": "sprites/arrive.png",
+    "frames": 14,
+    "cell": [
+     240,
+     384
+    ],
+    "fps": 15,
+    "fpsFrom": "clips.json",
+    "loop": false,
+    "family": "stand",
+    "anchor": {
+     "name": "feet",
+     "x": 146,
+     "y": 366
+    },
+    "bounds": [
+     0,
+     15,
+     240,
+     355
+    ]
+   },
+   "blink": {
+    "file": "sprites/blink.png",
+    "frames": 4,
+    "cell": [
+     240,
+     384
+    ],
+    "fps": 8,
+    "fpsFrom": "clips.json",
+    "loop": false,
+    "family": "stand",
+    "anchor": {
+     "name": "feet",
+     "x": 146,
+     "y": 364
+    },
+    "bounds": [
+     31,
+     17,
+     181,
+     350
+    ]
+   },
+   "blink_glitch": {
+    "file": "sprites/blink_glitch.png",
+    "frames": 4,
+    "cell": [
+     240,
+     384
+    ],
+    "fps": 8,
+    "fpsFrom": "clips.json",
+    "loop": false,
+    "family": "stand",
+    "anchor": {
+     "name": "feet",
+     "x": 146,
+     "y": 364
+    },
+    "bounds": [
+     31,
+     17,
+     181,
+     350
+    ]
+   },
+   "dance": {
+    "file": "sprites/dance.png",
+    "frames": 16,
+    "cell": [
+     240,
+     384
+    ],
+    "fps": 16,
+    "fpsFrom": "clips.json",
+    "loop": true,
+    "family": "stand",
+    "anchor": {
+     "name": "feet",
+     "x": 143,
+     "y": 363
+    },
+    "bounds": [
+     27,
+     14,
+     213,
+     357
+    ]
+   },
+   "dangle": {
+    "file": "sprites/dangle.png",
+    "frames": 24,
+    "cell": [
+     240,
+     384
+    ],
+    "fps": 10,
+    "fpsFrom": "clips.json",
+    "loop": true,
+    "family": "dangle",
+    "anchor": {
+     "name": "grip",
+     "x": 143,
+     "y": 19
+    },
+    "bounds": [
+     15,
+     14,
+     214,
+     356
+    ]
+   },
+   "glitch": {
+    "file": "sprites/glitch.png",
+    "frames": 10,
+    "cell": [
+     240,
+     384
+    ],
+    "fps": 15,
+    "fpsFrom": "clips.json",
+    "loop": false,
+    "family": "stand",
+    "anchor": {
+     "name": "feet",
+     "x": 144,
+     "y": 366
+    },
+    "bounds": [
+     10,
+     0,
+     214,
+     384
+    ]
+   },
+   "grin": {
+    "file": "sprites/grin.png",
+    "frames": 16,
+    "cell": [
+     240,
+     384
+    ],
+    "fps": 8,
+    "fpsFrom": "clips.json",
+    "loop": true,
+    "family": "stand",
+    "anchor": {
+     "name": "feet",
+     "x": 146,
+     "y": 364
+    },
+    "bounds": [
+     31,
+     17,
+     181,
+     350
+    ]
+   },
+   "idle": {
+    "file": "sprites/idle.png",
+    "frames": 60,
+    "cell": [
+     116,
+     384
+    ],
+    "fps": 30,
+    "fpsFrom": "guess",
+    "loop": true,
+    "family": "stand",
+    "anchor": {
+     "name": "feet",
+     "x": 52,
+     "y": 363
+    },
+    "bounds": [
+     4,
+     20,
+     110,
+     347
+    ],
+    "mirrorArt": "idle_flipped"
+   },
+   "idle_blink": {
+    "file": "sprites/idle_blink.png",
+    "frames": 8,
+    "cell": [
+     116,
+     384
+    ],
+    "fps": 30,
+    "fpsFrom": "guess",
+    "loop": false,
+    "family": "stand",
+    "anchor": {
+     "name": "feet",
+     "x": 51,
+     "y": 363
+    },
+    "bounds": [
+     4,
+     29,
+     108,
+     337
+    ],
+    "mirrorArt": "idle_blink_flipped"
+   },
+   "idle_blink_flipped": {
+    "file": "sprites/idle_blink_flipped.png",
+    "frames": 8,
+    "cell": [
+     116,
+     384
+    ],
+    "fps": 30,
+    "fpsFrom": "guess",
+    "loop": false,
+    "family": "stand",
+    "anchor": {
+     "name": "feet",
+     "x": 51,
+     "y": 363
+    },
+    "bounds": [
+     4,
+     29,
+     108,
+     335
+    ],
+    "mirrorArtFor": "idle_blink"
+   },
+   "idle_blink_glitch": {
+    "file": "sprites/idle_blink_glitch.png",
+    "frames": 8,
+    "cell": [
+     116,
+     384
+    ],
+    "fps": 30,
+    "fpsFrom": "guess",
+    "loop": false,
+    "family": "stand",
+    "anchor": {
+     "name": "feet",
+     "x": 51,
+     "y": 363
+    },
+    "bounds": [
+     4,
+     29,
+     108,
+     337
+    ],
+    "mirrorArt": "idle_blink_glitch_flipped"
+   },
+   "idle_blink_glitch_flipped": {
+    "file": "sprites/idle_blink_glitch_flipped.png",
+    "frames": 8,
+    "cell": [
+     116,
+     384
+    ],
+    "fps": 30,
+    "fpsFrom": "guess",
+    "loop": false,
+    "family": "stand",
+    "anchor": {
+     "name": "feet",
+     "x": 51,
+     "y": 363
+    },
+    "bounds": [
+     4,
+     29,
+     108,
+     335
+    ],
+    "mirrorArtFor": "idle_blink_glitch"
+   },
+   "idle_flipped": {
+    "file": "sprites/idle_flipped.png",
+    "frames": 60,
+    "cell": [
+     116,
+     384
+    ],
+    "fps": 30,
+    "fpsFrom": "guess",
+    "loop": true,
+    "family": "stand",
+    "anchor": {
+     "name": "feet",
+     "x": 52,
+     "y": 363
+    },
+    "bounds": [
+     4,
+     20,
+     110,
+     345
+    ],
+    "mirrorArtFor": "idle"
+   },
+   "idle_legacy": {
+    "file": "sprites/idle_legacy.png",
+    "frames": 16,
+    "cell": [
+     240,
+     384
+    ],
+    "fps": 8,
+    "fpsFrom": "clips.json",
+    "loop": true,
+    "family": "stand",
+    "anchor": {
+     "name": "feet",
+     "x": 146,
+     "y": 364
+    },
+    "bounds": [
+     31,
+     17,
+     181,
+     350
+    ]
+   },
+   "idle_mouth": {
+    "file": "sprites/idle_mouth.png",
+    "frames": 5,
+    "cell": [
+     116,
+     384
+    ],
+    "fps": 12,
+    "fpsFrom": "guess",
+    "loop": false,
+    "family": "overlay",
+    "overlayOn": "idle",
+    "mouthBox": [
+     58,
+     118,
+     74,
+     129
+    ]
+   },
+   "laydown": {
+    "file": "sprites/laydown.png",
+    "frames": 60,
+    "cell": [
+     372,
+     250
+    ],
+    "fps": 30,
+    "fpsFrom": "guess",
+    "loop": true,
+    "family": "laydown",
+    "anchor": {
+     "name": "surface",
+     "x": 186,
+     "y": 142
+    },
+    "edgeX": 320,
+    "bounds": [
+     4,
+     2,
+     364,
+     245
+    ],
+    "mirrorArt": "laydown_flipped",
+    "contact": {
+     "line": 142,
+     "legs": [
+      290,
+      372
+     ]
+    }
+   },
+   "laydown_blink": {
+    "file": "sprites/laydown_blink.png",
+    "frames": 8,
+    "cell": [
+     372,
+     250
+    ],
+    "fps": 30,
+    "fpsFrom": "guess",
+    "loop": false,
+    "family": "laydown",
+    "anchor": {
+     "name": "surface",
+     "x": 187,
+     "y": 144
+    },
+    "edgeX": 321,
+    "bounds": [
+     4,
+     2,
+     350,
+     245
+    ],
+    "mirrorArt": "laydown_blink_flipped",
+    "contact": {
+     "line": 144,
+     "legs": [
+      290,
+      372
+     ]
+    }
+   },
+   "laydown_blink_flipped": {
+    "file": "sprites/laydown_blink_flipped.png",
+    "frames": 8,
+    "cell": [
+     372,
+     250
+    ],
+    "fps": 30,
+    "fpsFrom": "guess",
+    "loop": false,
+    "family": "laydown",
+    "anchor": {
+     "name": "surface",
+     "x": 187,
+     "y": 144
+    },
+    "edgeX": 321,
+    "bounds": [
+     4,
+     2,
+     350,
+     245
+    ],
+    "mirrorArtFor": "laydown_blink",
+    "contact": {
+     "line": 144,
+     "legs": [
+      290,
+      372
+     ]
+    }
+   },
+   "laydown_blink_glitch": {
+    "file": "sprites/laydown_blink_glitch.png",
+    "frames": 8,
+    "cell": [
+     372,
+     250
+    ],
+    "fps": 30,
+    "fpsFrom": "guess",
+    "loop": false,
+    "family": "laydown",
+    "anchor": {
+     "name": "surface",
+     "x": 187,
+     "y": 144
+    },
+    "edgeX": 321,
+    "bounds": [
+     4,
+     2,
+     350,
+     245
+    ],
+    "mirrorArt": "laydown_blink_glitch_flipped",
+    "contact": {
+     "line": 144,
+     "legs": [
+      290,
+      372
+     ]
+    }
+   },
+   "laydown_blink_glitch_flipped": {
+    "file": "sprites/laydown_blink_glitch_flipped.png",
+    "frames": 8,
+    "cell": [
+     372,
+     250
+    ],
+    "fps": 30,
+    "fpsFrom": "guess",
+    "loop": false,
+    "family": "laydown",
+    "anchor": {
+     "name": "surface",
+     "x": 187,
+     "y": 144
+    },
+    "edgeX": 321,
+    "bounds": [
+     4,
+     2,
+     350,
+     245
+    ],
+    "mirrorArtFor": "laydown_blink_glitch",
+    "contact": {
+     "line": 144,
+     "legs": [
+      290,
+      372
+     ]
+    }
+   },
+   "laydown_flipped": {
+    "file": "sprites/laydown_flipped.png",
+    "frames": 60,
+    "cell": [
+     372,
+     250
+    ],
+    "fps": 30,
+    "fpsFrom": "guess",
+    "loop": true,
+    "family": "laydown",
+    "anchor": {
+     "name": "surface",
+     "x": 186,
+     "y": 142
+    },
+    "edgeX": 320,
+    "bounds": [
+     4,
+     2,
+     364,
+     245
+    ],
+    "mirrorArtFor": "laydown",
+    "contact": {
+     "line": 142,
+     "legs": [
+      290,
+      372
+     ]
+    }
+   },
+   "laydown_glitch": {
+    "file": "sprites/laydown_glitch.png",
+    "frames": 10,
+    "cell": [
+     440,
+     250
+    ],
+    "fps": 15,
+    "fpsFrom": "guess",
+    "loop": false,
+    "family": "laydown",
+    "anchor": {
+     "name": "surface",
+     "x": 223,
+     "y": 144
+    },
+    "edgeX": 357,
+    "bounds": [
+     9,
+     2,
+     415,
+     247
+    ],
+    "mirrorArt": "laydown_glitch_flipped"
+   },
+   "laydown_glitch_flipped": {
+    "file": "sprites/laydown_glitch_flipped.png",
+    "frames": 10,
+    "cell": [
+     440,
+     250
+    ],
+    "fps": 15,
+    "fpsFrom": "guess",
+    "loop": false,
+    "family": "laydown",
+    "anchor": {
+     "name": "surface",
+     "x": 223,
+     "y": 144
+    },
+    "edgeX": 357,
+    "bounds": [
+     9,
+     2,
+     415,
+     247
+    ],
+    "mirrorArtFor": "laydown_glitch"
+   },
+   "laydown_leave": {
+    "file": "sprites/laydown_leave.png",
+    "frames": 12,
+    "cell": [
+     440,
+     250
+    ],
+    "fps": 15,
+    "fpsFrom": "guess",
+    "loop": false,
+    "family": "laydown",
+    "anchor": {
+     "name": "surface",
+     "x": 220,
+     "y": 142
+    },
+    "edgeX": 354,
+    "bounds": [
+     0,
+     2,
+     440,
+     243
+    ],
+    "mirrorArt": "laydown_leave_flipped"
+   },
+   "laydown_leave_flipped": {
+    "file": "sprites/laydown_leave_flipped.png",
+    "frames": 12,
+    "cell": [
+     440,
+     250
+    ],
+    "fps": 15,
+    "fpsFrom": "guess",
+    "loop": false,
+    "family": "laydown",
+    "anchor": {
+     "name": "surface",
+     "x": 219,
+     "y": 143
+    },
+    "edgeX": 353,
+    "bounds": [
+     0,
+     2,
+     440,
+     243
+    ],
+    "mirrorArtFor": "laydown_leave"
+   },
+   "laydown_sleep": {
+    "file": "sprites/laydown_sleep.png",
+    "frames": 60,
+    "cell": [
+     372,
+     250
+    ],
+    "fps": 30,
+    "fpsFrom": "guess",
+    "loop": true,
+    "family": "laydown",
+    "anchor": {
+     "name": "surface",
+     "x": 186,
+     "y": 142
+    },
+    "edgeX": 320,
+    "bounds": [
+     4,
+     2,
+     357,
+     246
+    ],
+    "mirrorArt": "laydown_sleep_flipped",
+    "contact": {
+     "line": 142,
+     "legs": [
+      290,
+      372
+     ]
+    }
+   },
+   "laydown_sleep_flipped": {
+    "file": "sprites/laydown_sleep_flipped.png",
+    "frames": 60,
+    "cell": [
+     372,
+     250
+    ],
+    "fps": 30,
+    "fpsFrom": "guess",
+    "loop": true,
+    "family": "laydown",
+    "anchor": {
+     "name": "surface",
+     "x": 186,
+     "y": 142
+    },
+    "edgeX": 320,
+    "bounds": [
+     4,
+     2,
+     357,
+     246
+    ],
+    "mirrorArtFor": "laydown_sleep",
+    "contact": {
+     "line": 142,
+     "legs": [
+      290,
+      372
+     ]
+    }
+   },
+   "laydown_talk": {
+    "file": "sprites/laydown_talk.png",
+    "frames": 60,
+    "cell": [
+     372,
+     250
+    ],
+    "fps": 30,
+    "fpsFrom": "guess",
+    "loop": true,
+    "family": "laydown",
+    "anchor": {
+     "name": "surface",
+     "x": 186,
+     "y": 142
+    },
+    "edgeX": 320,
+    "bounds": [
+     4,
+     2,
+     364,
+     245
+    ],
+    "mirrorArt": "laydown_talk_flipped",
+    "contact": {
+     "line": 142,
+     "legs": [
+      290,
+      372
+     ]
+    }
+   },
+   "laydown_talk_flipped": {
+    "file": "sprites/laydown_talk_flipped.png",
+    "frames": 60,
+    "cell": [
+     372,
+     250
+    ],
+    "fps": 30,
+    "fpsFrom": "guess",
+    "loop": true,
+    "family": "laydown",
+    "anchor": {
+     "name": "surface",
+     "x": 186,
+     "y": 142
+    },
+    "edgeX": 320,
+    "bounds": [
+     4,
+     2,
+     364,
+     245
+    ],
+    "mirrorArtFor": "laydown_talk",
+    "contact": {
+     "line": 142,
+     "legs": [
+      290,
+      372
+     ]
+    }
+   },
+   "leave": {
+    "file": "sprites/leave.png",
+    "frames": 12,
+    "cell": [
+     240,
+     384
+    ],
+    "fps": 15,
+    "fpsFrom": "clips.json",
+    "loop": false,
+    "family": "stand",
+    "anchor": {
+     "name": "feet",
+     "x": 144,
+     "y": 366
+    },
+    "bounds": [
+     0,
+     15,
+     240,
+     356
+    ]
+   },
+   "mouth": {
+    "file": "sprites/mouth.png",
+    "frames": 5,
+    "cell": [
+     240,
+     384
+    ],
+    "fps": 12,
+    "fpsFrom": "clips.json",
+    "loop": false,
+    "family": "overlay",
+    "overlayOn": "idle_legacy",
+    "mouthBox": [
+     123,
+     127,
+     140,
+     139
+    ]
+   },
+   "perch": {
+    "file": "sprites/perch.png",
+    "frames": 60,
+    "cell": [
+     196,
+     384
+    ],
+    "fps": 30,
+    "fpsFrom": "clips.json",
+    "loop": true,
+    "family": "perch",
+    "anchor": {
+     "name": "seat",
+     "x": 76,
+     "y": 270
+    },
+    "bounds": [
+     7,
+     33,
+     186,
+     349
+    ],
+    "mirrorArt": "perch_flipped",
+    "contact": {
+     "line": 270,
+     "legs": [
+      80,
+      196
+     ]
+    }
+   },
+   "perch_arrive": {
+    "file": "sprites/perch_arrive.png",
+    "frames": 14,
+    "cell": [
+     288,
+     384
+    ],
+    "fps": 15,
+    "fpsFrom": "clips.json",
+    "loop": false,
+    "family": "perch",
+    "anchor": {
+     "name": "seat",
+     "x": 122,
+     "y": 270
+    },
+    "bounds": [
+     10,
+     33,
+     273,
+     349
+    ],
+    "mirrorArt": "perch_arrive_flipped"
+   },
+   "perch_arrive_flipped": {
+    "file": "sprites/perch_arrive_flipped.png",
+    "frames": 14,
+    "cell": [
+     288,
+     384
+    ],
+    "fps": 15,
+    "fpsFrom": "clips.json",
+    "loop": false,
+    "family": "perch",
+    "anchor": {
+     "name": "seat",
+     "x": 122,
+     "y": 270
+    },
+    "bounds": [
+     10,
+     33,
+     273,
+     349
+    ],
+    "mirrorArtFor": "perch_arrive"
+   },
+   "perch_blink": {
+    "file": "sprites/perch_blink.png",
+    "frames": 8,
+    "cell": [
+     196,
+     384
+    ],
+    "fps": 30,
+    "fpsFrom": "clips.json",
+    "loop": false,
+    "family": "perch",
+    "anchor": {
+     "name": "seat",
+     "x": 75,
+     "y": 273
+    },
+    "bounds": [
+     7,
+     36,
+     186,
+     346
+    ],
+    "mirrorArt": "perch_blink_flipped",
+    "contact": {
+     "line": 273,
+     "legs": [
+      80,
+      196
+     ]
+    }
+   },
+   "perch_blink_flipped": {
+    "file": "sprites/perch_blink_flipped.png",
+    "frames": 8,
+    "cell": [
+     196,
+     384
+    ],
+    "fps": 30,
+    "fpsFrom": "clips.json",
+    "loop": false,
+    "family": "perch",
+    "anchor": {
+     "name": "seat",
+     "x": 75,
+     "y": 273
+    },
+    "bounds": [
+     5,
+     36,
+     188,
+     346
+    ],
+    "mirrorArtFor": "perch_blink",
+    "contact": {
+     "line": 273,
+     "legs": [
+      80,
+      196
+     ]
+    }
+   },
+   "perch_blink_glitch": {
+    "file": "sprites/perch_blink_glitch.png",
+    "frames": 8,
+    "cell": [
+     196,
+     384
+    ],
+    "fps": 30,
+    "fpsFrom": "clips.json",
+    "loop": false,
+    "family": "perch",
+    "anchor": {
+     "name": "seat",
+     "x": 75,
+     "y": 273
+    },
+    "bounds": [
+     7,
+     36,
+     188,
+     346
+    ],
+    "mirrorArt": "perch_blink_glitch_flipped",
+    "contact": {
+     "line": 273,
+     "legs": [
+      80,
+      196
+     ]
+    }
+   },
+   "perch_blink_glitch_flipped": {
+    "file": "sprites/perch_blink_glitch_flipped.png",
+    "frames": 8,
+    "cell": [
+     196,
+     384
+    ],
+    "fps": 30,
+    "fpsFrom": "clips.json",
+    "loop": false,
+    "family": "perch",
+    "anchor": {
+     "name": "seat",
+     "x": 75,
+     "y": 273
+    },
+    "bounds": [
+     5,
+     36,
+     190,
+     346
+    ],
+    "mirrorArtFor": "perch_blink_glitch",
+    "contact": {
+     "line": 273,
+     "legs": [
+      80,
+      196
+     ]
+    }
+   },
+   "perch_flipped": {
+    "file": "sprites/perch_flipped.png",
+    "frames": 60,
+    "cell": [
+     196,
+     384
+    ],
+    "fps": 30,
+    "fpsFrom": "clips.json",
+    "loop": true,
+    "family": "perch",
+    "anchor": {
+     "name": "seat",
+     "x": 76,
+     "y": 270
+    },
+    "bounds": [
+     5,
+     33,
+     188,
+     349
+    ],
+    "mirrorArtFor": "perch",
+    "contact": {
+     "line": 270,
+     "legs": [
+      80,
+      196
+     ]
+    }
+   },
+   "perch_glitch": {
+    "file": "sprites/perch_glitch.png",
+    "frames": 10,
+    "cell": [
+     288,
+     384
+    ],
+    "fps": 15,
+    "fpsFrom": "clips.json",
+    "loop": false,
+    "family": "perch",
+    "anchor": {
+     "name": "seat",
+     "x": 120,
+     "y": 274
+    },
+    "bounds": [
+     8,
+     33,
+     268,
+     350
+    ],
+    "mirrorArt": "perch_glitch_flipped"
+   },
+   "perch_glitch_flipped": {
+    "file": "sprites/perch_glitch_flipped.png",
+    "frames": 10,
+    "cell": [
+     288,
+     384
+    ],
+    "fps": 15,
+    "fpsFrom": "clips.json",
+    "loop": false,
+    "family": "perch",
+    "anchor": {
+     "name": "seat",
+     "x": 120,
+     "y": 274
+    },
+    "bounds": [
+     8,
+     33,
+     268,
+     350
+    ],
+    "mirrorArtFor": "perch_glitch"
+   },
+   "perch_leave": {
+    "file": "sprites/perch_leave.png",
+    "frames": 12,
+    "cell": [
+     288,
+     384
+    ],
+    "fps": 15,
+    "fpsFrom": "clips.json",
+    "loop": false,
+    "family": "perch",
+    "anchor": {
+     "name": "seat",
+     "x": 122,
+     "y": 270
+    },
+    "bounds": [
+     11,
+     33,
+     271,
+     346
+    ],
+    "mirrorArt": "perch_leave_flipped"
+   },
+   "perch_leave_flipped": {
+    "file": "sprites/perch_leave_flipped.png",
+    "frames": 12,
+    "cell": [
+     288,
+     384
+    ],
+    "fps": 15,
+    "fpsFrom": "clips.json",
+    "loop": false,
+    "family": "perch",
+    "anchor": {
+     "name": "seat",
+     "x": 122,
+     "y": 270
+    },
+    "bounds": [
+     11,
+     33,
+     271,
+     346
+    ],
+    "mirrorArtFor": "perch_leave"
+   },
+   "perch_music": {
+    "file": "sprites/perch_music.png",
+    "frames": 60,
+    "cell": [
+     196,
+     384
+    ],
+    "fps": 30,
+    "fpsFrom": "clips.json",
+    "loop": true,
+    "family": "perch",
+    "anchor": {
+     "name": "seat",
+     "x": 76,
+     "y": 270
+    },
+    "bounds": [
+     11,
+     29,
+     182,
+     353
+    ],
+    "mirrorArt": "perch_music_flipped",
+    "contact": {
+     "line": 270,
+     "legs": [
+      80,
+      196
+     ]
+    }
+   },
+   "perch_music_flipped": {
+    "file": "sprites/perch_music_flipped.png",
+    "frames": 60,
+    "cell": [
+     196,
+     384
+    ],
+    "fps": 30,
+    "fpsFrom": "clips.json",
+    "loop": true,
+    "family": "perch",
+    "anchor": {
+     "name": "seat",
+     "x": 76,
+     "y": 270
+    },
+    "bounds": [
+     11,
+     29,
+     182,
+     353
+    ],
+    "mirrorArtFor": "perch_music",
+    "contact": {
+     "line": 270,
+     "legs": [
+      80,
+      196
+     ]
+    }
+   },
+   "perch_talk": {
+    "file": "sprites/perch_talk.png",
+    "frames": 60,
+    "cell": [
+     196,
+     384
+    ],
+    "fps": 30,
+    "fpsFrom": "guess",
+    "loop": true,
+    "family": "perch",
+    "anchor": {
+     "name": "seat",
+     "x": 76,
+     "y": 270
+    },
+    "bounds": [
+     7,
+     33,
+     186,
+     349
+    ],
+    "mirrorArt": "perch_talk_flipped",
+    "contact": {
+     "line": 270,
+     "legs": [
+      80,
+      196
+     ]
+    }
+   },
+   "perch_talk_flipped": {
+    "file": "sprites/perch_talk_flipped.png",
+    "frames": 60,
+    "cell": [
+     196,
+     384
+    ],
+    "fps": 30,
+    "fpsFrom": "guess",
+    "loop": true,
+    "family": "perch",
+    "anchor": {
+     "name": "seat",
+     "x": 76,
+     "y": 270
+    },
+    "bounds": [
+     5,
+     33,
+     188,
+     349
+    ],
+    "mirrorArtFor": "perch_talk",
+    "contact": {
+     "line": 270,
+     "legs": [
+      80,
+      196
+     ]
+    }
+   },
+   "sleep": {
+    "file": "sprites/sleep.png",
+    "frames": 16,
+    "cell": [
+     240,
+     384
+    ],
+    "fps": 6,
+    "fpsFrom": "clips.json",
+    "loop": true,
+    "family": "stand",
+    "anchor": {
+     "name": "feet",
+     "x": 143,
+     "y": 355
+    },
+    "bounds": [
+     3,
+     22,
+     237,
+     336
+    ]
+   },
+   "wake": {
+    "file": "sprites/wake.png",
+    "frames": 13,
+    "cell": [
+     240,
+     384
+    ],
+    "fps": 15,
+    "fpsFrom": "clips.json",
+    "loop": false,
+    "family": "stand",
+    "anchor": {
+     "name": "feet",
+     "x": 146,
+     "y": 364
+    },
+    "bounds": [
+     6,
+     7,
+     234,
+     364
+    ]
+   },
+   "walk": {
+    "file": "sprites/walk.png",
+    "frames": 12,
+    "cell": [
+     240,
+     384
+    ],
+    "fps": 12,
+    "fpsFrom": "clips.json",
+    "loop": true,
+    "family": "stand",
+    "anchor": {
+     "name": "feet",
+     "x": 146,
+     "y": 362
+    },
+    "bounds": [
+     49,
+     15,
+     161,
+     350
+    ]
+   },
+   "click": {
+    "file": "sprites/click.png",
+    "frames": 20,
+    "cell": [
+     144,
+     144
+    ],
+    "fps": 30,
+    "fpsFrom": "guess",
+    "loop": false,
+    "family": "fx"
+   },
+   "form": {
+    "file": "sprites/form.png",
+    "frames": 9,
+    "cell": [
+     576,
+     516
+    ],
+    "fps": 15,
+    "fpsFrom": "guess",
+    "loop": false,
+    "family": "fx"
+   }
+  },
+  "stills": {
+   "face": {
+    "file": "sprites/face.png",
+    "size": [
+     400,
+     400
+    ]
+   },
+   "capri": {
+    "file": "capri.png",
+    "size": [
+     420,
+     420
+    ]
+   },
+   "perch": {
+    "file": "perch.png",
+    "size": [
+     960,
+     960
+    ]
+   },
+   "cursor": {
+    "file": "cursor.png",
+    "size": [
+     649,
+     666
+    ]
+   }
+  },
+  "emotes": {
+   "chair": {
+    "zip": "emotes/chair.zip",
+    "fps": 30,
+    "frames": 301,
+    "stage": [
+     960,
+     540
+    ],
+    "closeup": [
+     1920,
+     1080
+    ]
+   },
+   "heart": {
+    "zip": "emotes/heart.zip",
+    "fps": 30,
+    "frames": 105,
+    "stage": [
+     1920,
+     1080
+    ]
+   }
+  },
+  "families": {
+   "stand": {
+    "bodyPx": 343,
+    "base": "idle",
+    "faces": "right"
+   },
+   "perch": {
+    "base": "perch",
+    "unitsHighVsStand": 0.9009,
+    "unitsFrom": "clips.json (perch 1.0, idle 1.11)",
+    "faces": "right"
+   },
+   "laydown": {
+    "base": "laydown",
+    "scaleAsStand": true,
+    "faces": "right"
+   },
+   "dangle": {
+    "base": "dangle",
+    "scaleAsStand": true,
+    "faces": "right"
+   },
+   "standLegacy": {
+    "base": "idle_legacy",
+    "members": [
+     "idle_legacy",
+     "blink",
+     "blink_glitch",
+     "grin",
+     "mouth",
+     "walk",
+     "dance",
+     "arrive",
+     "leave",
+     "wake",
+     "glitch",
+     "sleep"
+    ],
+    "note": "same 240x384 cell and anchor as idle_legacy (arrive end, wake end, walk, blink, grin, glitch end overlay it at shift 0,0, IoU 0.90-0.99); idle (116 cell) is a newer, narrower drawing"
+   }
+  }
+ },
+ "mochi": {
+  "repo": "https://github.com/mochiiwuff/capri-desktop",
+  "commit": "c011764ca1fdbd191925321e3aaa8af5b84babe8",
+  "root": "assets/capri",
+  "localOnly": true,
+  "note": "Show frames, a fan cut-out and fan art: local personal use only. make-pack lists the copied files (name, sha256, kind by name: capri-cutout/capri-full = cutout, capri-face/face-* = face, cutin-* = cutin, intro-* = intro)."
+ }
+}

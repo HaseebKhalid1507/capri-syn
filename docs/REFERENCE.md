@@ -84,7 +84,7 @@ value rejects the whole file (the previous values stay). `avatarctl settings rel
 ```
 synaps-avatar [--profile P | --socket PATH] [--session NAME|ID | --new [--cwd DIR] [--model M]] [--no-session]
               [--sleepy-after MIN] [--pack DIR] [--height PX] [--name NAME] [--threads N] [--no-verify]
-              [--focus-probe] [--check]
+              [--focus-probe] [--check [--dump DIR]]
 ```
 
 | flag | |
@@ -98,6 +98,7 @@ synaps-avatar [--profile P | --socket PATH] [--session NAME|ID | --new [--cwd DI
 | `--pack DIR` | character pack (default `$XDG_DATA_HOME/synaps-avatar/packs/capri`) |
 | `--height PX` | standing body height in logical px (default 340) |
 | `--check` | load and decode the pack, print a summary, exit (no window) |
+| `--dump DIR` | with `--check`: every decoded frame as a PNG, the pixels she draws at `--height` (scale it by the display's sf to see the real render) |
 
 `synaps-avatar --help` lists the rest (`--name`, `--threads`, `--no-verify`, `--focus-probe`).
 
@@ -153,6 +154,39 @@ sha256. It's read from the checkout's git objects when they have it (`git fetch 
 from GitHub at that commit, or given with `--sleep FILE`. It needs `fonttools` for the Exo 2 instances.
 `python3 tools/test_make_pack.py` tests it on fake checkouts.
 
+Optional desktop art, into the pack's `anim/` (a pack without it loads as before):
+
+- `--lachy DIR|auto`: [lachydotmcg/capri-desktop](https://github.com/lachydotmcg/capri-desktop) at `156ed18`
+  (PolyForm Noncommercial 1.0.0): its sprite strips, stills and emotes, checked against
+  `tools/lachy-desktop-156ed18.sha256`. `auto` downloads exactly those files at that commit (cached).
+- `--mochi DIR|auto`: mochiiwuff/capri-desktop at `c011764`, checked against `tools/mochi-desktop-c011764.sha256`.
+  Its images are show frames and fan art that its licence does not cover: local personal use only, never
+  published.
+- `anim/anim.json` is `tools/desktop-art.json` (capri-syn's own measured cell grid, anchors and loop flags)
+  plus the sha256 of every copied file. `NOTICE.md` gains each source's `Required Notice:` lines, the licence
+  URL and its credits.
+- `--upscale` adds `anim/lachy/x2/`: every strip at 2x (`tools/upscale_art.py`, Real-ESRGAN's anime video
+  model on the CPU; needs `torch`), checked pixel-for-pixel against `tools/lachy-x2.sha256`
+  (`--record-upscale` writes that file once). Build her live pack with it: at the 340 px default on a
+  1.167 display lachy's standing strips draw at 1.16x and their edges go soft (alpha ramp 1.8 px against
+  CapriCore's 1.25-1.3); from the x2 strips they come out at 1.3 (perch and laydown at 0.95). The app uses
+  `x2/` when present and her pixels are above 1:1, else the strips as shipped. About 24 min of CPU
+  (recorded on an i5-13420H, 4 threads) and +220 MB on disk.
+
+With `anim/`, `moods.json` `variants` mixes that art in; she never swaps one set for the other:
+
+- `variants.pools` has a pool per state with more than one drawing: `perch` (sitting on a window top),
+  `sleepFloor`, `sleepWindow`. Each variant has an `id` and a `weight`; without `strip` it is the pack's own
+  art for that state, as before. With one it plays that strip's loop, anchored like the pack's frame
+  (seat, feet, surface), mirrored with the strip's `mirrorArt` twin when she faces the other way, with its
+  own `talk` and `music` loops and its `blinks` (weighted, every `blinkMs`). `lying` variants are picked
+  only where the figure fits on the window's exposed top. `every: n` plays every n-th cell.
+- Entering the state picks one: weighted, never the last pick again, seeded (`SA_ART_SEED`). A long stay
+  (`shiftMs`) shifts it in place. Every cut between CapriCore and a strip (or between two strip families)
+  goes through a glitch.
+- Strips decode when first wanted, off the main thread; `cacheMb` caps what is kept (least recently shown
+  first, never what is on screen). A pack without `anim/` keeps only the pack's own variants.
+
 ## Building
 
 Toolchain 1.100.0 (`rust-toolchain.toml`). GPUI is pinned exactly: `gpui-kit =0.9.1`,
@@ -176,6 +210,7 @@ sends one:
 mood <name> | clip <id> | say <text> | pos <x> <y> [now] | perch [sit|stand] [win] | perch off | drop | stack
 page next|prev | scroll <n> | reader open [focus]|close|copy [n]|scroll <px> | collapse | expand
 music on|off | glitch | face left|right|toggle | drag … | submit <text> | abort | copy
+art perch|sleepFloor|sleepWindow <variant id|next>
 talk press|release | line close | prompt confirm|secret [text] | prompt off
 brain … | settings reload | tap head|body | menu | shape | state | hide | show | quit
 ```

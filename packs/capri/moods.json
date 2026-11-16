@@ -747,6 +747,119 @@
       }
     ]
   },
+  "variants": {
+    "cacheMb": 24,
+    "pools": {
+      "perch": {
+        "shiftMs": [
+          240000,
+          720000
+        ],
+        "variants": [
+          {
+            "id": "sit",
+            "weight": 4
+          },
+          {
+            "id": "perch",
+            "strip": "perch",
+            "talk": "perch_talk",
+            "music": "perch_music",
+            "blinks": [
+              {
+                "strip": "perch_blink",
+                "weight": 7
+              },
+              {
+                "strip": "perch_blink_glitch",
+                "weight": 1
+              }
+            ],
+            "blinkMs": [
+              2500,
+              5000
+            ],
+            "weight": 1,
+            "every": 3,
+            "holdMs": [
+              3000,
+              6000
+            ]
+          },
+          {
+            "id": "laydown",
+            "strip": "laydown",
+            "talk": "laydown_talk",
+            "lying": true,
+            "blinks": [
+              {
+                "strip": "laydown_blink",
+                "weight": 7
+              },
+              {
+                "strip": "laydown_blink_glitch",
+                "weight": 1
+              }
+            ],
+            "blinkMs": [
+              2500,
+              5000
+            ],
+            "weight": 0,
+            "every": 3,
+            "holdMs": [
+              3000,
+              6000
+            ]
+          }
+        ]
+      },
+      "sleepFloor": {
+        "shiftMs": [
+          300000,
+          900000
+        ],
+        "variants": [
+          {
+            "id": "lie",
+            "weight": 3
+          },
+          {
+            "id": "doze",
+            "strip": "sleep",
+            "weight": 1,
+            "holdMs": [
+              3000,
+              6000
+            ]
+          }
+        ]
+      },
+      "sleepWindow": {
+        "shiftMs": [
+          300000,
+          900000
+        ],
+        "variants": [
+          {
+            "id": "lie",
+            "weight": 3
+          },
+          {
+            "id": "laydown",
+            "strip": "laydown_sleep",
+            "lying": true,
+            "weight": 0,
+            "every": 4,
+            "holdMs": [
+              4000,
+              8000
+            ]
+          }
+        ]
+      }
+    }
+  },
   "music": {
     "floor": "music-floor",
     "window": "music-window",
@@ -776,6 +889,16 @@
         [
           775,
           591
+        ]
+      ],
+      "perch_music": [
+        [
+          58,
+          150
+        ],
+        [
+          165,
+          118
         ]
       ]
     },

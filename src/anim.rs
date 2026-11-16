@@ -111,11 +111,14 @@ pub struct Animator {
     one_pos: usize,
     due: Option<Instant>,
     rng: Rng,
+    /// The loop ends on a rest: a one-shot over it (a blink) returns to that rest, not to
+    /// the start of the loop's motion.
+    rest_last: bool,
 }
 
 impl Animator {
     pub fn new(base: usize) -> Animator {
-        Animator { base, looping: None, loop_pos: 0, oneshot: None, one_pos: 0, due: None, rng: Rng::seeded() }
+        Animator { base, looping: None, loop_pos: 0, oneshot: None, one_pos: 0, due: None, rng: Rng::seeded(), rest_last: false }
     }
 
     pub fn frame(&self) -> usize {
@@ -148,9 +151,22 @@ impl Animator {
 
     fn start_loop(&mut self, now: Instant) {
         self.loop_pos = 0;
+        self.run_loop(now);
+    }
+
+    /// After a one-shot: the loop from its start, or back on its rest.
+    fn resume_loop(&mut self, now: Instant) {
+        self.loop_pos = match &self.looping {
+            Some(s) if self.rest_last => s.len() - 1,
+            _ => 0,
+        };
+        self.run_loop(now);
+    }
+
+    fn run_loop(&mut self, now: Instant) {
         self.due = match &self.looping {
             Some(s) => {
-                let ms = s[0].1;
+                let ms = s[self.loop_pos].1;
                 Some(now + Duration::from_millis(self.loop_ms(ms)))
             }
             None => None,
@@ -159,6 +175,12 @@ impl Animator {
 
     /// Mood layer: base frame + optional loop. A playing one-shot finishes first.
     pub fn set_layer(&mut self, base: usize, looping: Option<Seq>, now: Instant) {
+        self.set_layer_resting(base, looping, false, now);
+    }
+
+    /// `set_layer`, for a loop whose last step is a rest (`rest_last`): one-shots return to it.
+    pub fn set_layer_resting(&mut self, base: usize, looping: Option<Seq>, rest_last: bool, now: Instant) {
+        self.rest_last = rest_last;
         self.base = base;
         self.looping = looping.filter(|s| !s.is_empty());
         if self.oneshot.is_none() {
@@ -186,8 +208,13 @@ impl Animator {
 
     pub fn stop_oneshot(&mut self, now: Instant) {
         if self.oneshot.take().is_some() {
-            self.start_loop(now);
+            self.resume_loop(now);
         }
+    }
+
+    /// Showing the loop's rest (its last step) or the start of its motion.
+    pub fn at_rest(&self) -> bool {
+        self.oneshot.is_none() && self.looping.as_ref().is_some_and(|s| self.loop_pos == 0 || self.loop_pos + 1 == s.len())
     }
 
     /// Advance past every step that ended by `now`. True if the shown frame changed.
@@ -207,7 +234,7 @@ impl Animator {
                     self.due = Some(from + Duration::from_millis(s[self.one_pos].1 as u64));
                 } else {
                     self.oneshot = None;
-                    self.start_loop(from);
+                    self.resume_loop(from);
                 }
             } else if let Some(s) = &self.looping {
                 self.loop_pos = (self.loop_pos + 1) % s.len();
@@ -246,6 +273,35 @@ mod tests {
         a.tick(t + Duration::from_millis(200));
         assert_eq!(a.frame(), 0);
         assert!(!a.busy());
+    }
+
+    #[test]
+    fn a_blink_over_a_resting_loop_comes_back_to_the_rest() {
+        let t = Instant::now();
+        let mut a = Animator::new(0);
+        // A pass (1, 2), then the rest on 0 (300 ms; under the 400 ms that breathe).
+        a.set_layer_resting(0, Some(vec![(0, 100), (1, 100), (2, 100), (0, 300)]), true, t);
+        assert!(a.at_rest(), "it starts with the motion's first cell");
+        a.tick(t + Duration::from_millis(100));
+        assert_eq!(a.frame(), 1);
+        assert!(!a.at_rest(), "mid-sway");
+        a.tick(t + Duration::from_millis(300));
+        assert!(a.at_rest());
+        a.play(vec![(9, 50)], t + Duration::from_millis(350));
+        a.tick(t + Duration::from_millis(400));
+        assert_eq!(a.frame(), 0, "back on the rest");
+        a.tick(t + Duration::from_millis(650));
+        assert_eq!(a.frame(), 0, "the rest held out");
+        a.tick(t + Duration::from_millis(700));
+        assert_eq!(a.frame(), 0, "the next pass starts");
+        a.tick(t + Duration::from_millis(800));
+        assert_eq!(a.frame(), 1);
+        // A plain loop still restarts after a one-shot.
+        a.set_layer(0, Some(vec![(0, 100), (1, 100), (2, 100)]), t);
+        a.tick(t + Duration::from_millis(900));
+        a.play(vec![(9, 50)], t + Duration::from_millis(900));
+        a.tick(t + Duration::from_millis(950));
+        assert_eq!(a.frame(), 0);
     }
 
     #[test]
