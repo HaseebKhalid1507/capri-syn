@@ -1,0 +1,264 @@
+#!/usr/bin/env python3
+"""capri-wake-tune: his personal layer for the "Hey Capri" wake word (PR #22), from his own takes (capri-wake-record).
+
+    capri-wake-tune              # measure: the wake path on his takes, per condition (nothing is written)
+    capri-wake-tune --fit        # cross-validate a personal layer; if it helps, write wake-personal/personal.npz
+    capri-wake-tune --remove     # delete the personal layer
+
+What the layer is: his "hey capri" as stage 1 sees it (16 x 96 embedding windows around the end of "Capri", from his
+takes) plus a threshold. A hop that matches one of them closely enough is a candidate too, beside the stock head's.
+Every candidate still goes through the same Whisper check and sound-alike filter, so the layer can make her hear him
+in more places (far, fast) but can't wake her by itself.
+
+The threshold is set against ordinary speech that is not his: the AMI meetings ES2002a and ES2002b (CC BY 4.0, ~110 MB,
+fetched once to ~/.cache/capri-voice/wake-dev), or --negatives FILE ... (anything ffmpeg reads; never his mic).
+
+PRIVACY: local only. It reads ~/.local/share/capri-voice/wake-samples and writes ~/.local/share/capri-voice/wake-personal
+(mode 700). Nothing is uploaded, and nothing here is ever used to synthesize or clone a voice. It prints ids and
+numbers, never what was said. Delete the layer with --remove (the sidecar then runs without it).
+"""
+import argparse, importlib.machinery, json, os, subprocess, sys, time, wave
+from pathlib import Path
+import numpy as np
+
+HOME = Path.home()
+DATA = Path(os.environ.get('XDG_DATA_HOME', HOME / '.local/share')) / 'capri-voice'
+TAKES = DATA / 'wake-samples'
+OUT = DATA / 'wake-personal'
+CACHE = Path(os.environ.get('XDG_CACHE_HOME', HOME / '.cache')) / 'capri-voice' / 'wake-dev'
+AMI = 'https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/{m}/audio/{m}.Mix-Headset.wav'
+SR, HOP = 16000, 1280
+CONDS = ('quiet', 'media', 'far', 'casual', 'bare', 'near')
+DEV_RATE = 5.0          # personal candidates an hour allowed on the negatives (each is one Whisper check)
+
+
+def sidecar():
+    here = Path(__file__).resolve().parent
+    for p in (os.environ.get('CAPRI_VOICE_BIN'), here / 'capri-voice', HOME / '.local/bin/capri-voice'):
+        if p and Path(p).exists():
+            return importlib.machinery.SourceFileLoader('capri_voice', str(p)).load_module()
+    sys.exit('capri-wake-tune: no capri-voice next to it (or CAPRI_VOICE_BIN)')
+
+
+def read16(path):
+    with wave.open(str(path)) as w:
+        if w.getframerate() == SR and w.getnchannels() == 1 and w.getsampwidth() == 2:
+            return np.frombuffer(w.readframes(w.getnframes()), np.int16)
+    r = subprocess.run(['ffmpeg', '-nostdin', '-loglevel', 'error', '-i', str(path), '-ac', '1', '-ar', str(SR), '-f', 's16le', '-'],
+                       capture_output=True, check=True)
+    return np.frombuffer(r.stdout, np.int16)
+
+
+def room(x, secs, rng):
+    """His own room: quiet 200 ms pieces of the take, cross-faded (the stream has been open before he speaks)."""
+    w = 3200
+    st = np.arange(0, max(1, len(x) - w), 800)
+    rms = np.array([np.sqrt(np.mean(x[s:s + w].astype(np.float32) ** 2)) for s in st])
+    quiet = st[rms <= np.percentile(rms, 20)]
+    out, fade = np.zeros(0, np.float32), np.linspace(0, 1, 320, dtype=np.float32)
+    while len(out) < secs * SR:
+        s = int(rng.choice(quiet))
+        p = x[s:s + w].astype(np.float32)
+        if len(out):
+            out[-320:] = out[-320:] * fade[::-1] + p[:320] * fade
+            p = p[320:]
+        out = np.concatenate([out, p])
+    return out[:int(secs * SR)].astype(np.int16)
+
+
+class Tuner:
+    def __init__(self, cv):
+        self.cv = cv
+        self.stt = cv.Stt('small.en')
+        self.vad = cv.Vad.load()
+        self.ear, why = cv.WakeEar.load()
+        if self.ear is None or self.vad is None:
+            sys.exit(f'capri-wake-tune: {why or "no Silero VAD"} (capri-voice-setup)')
+        self.wf, why = cv.WakeForced.load(self.stt.m, 4)
+        if why:
+            print(f'note: {why}')
+
+    def windows(self, x):
+        """Stage-1 scores and normalised 16 x 96 windows per hop (row j ends at hop j)."""
+        st = self.cv.WakeEar.Stream(self.ear)
+        sc, Z = [], []
+        for i in range(0, len(x) - HOP + 1, HOP):
+            sc += [s for s, _ in st.push(x[i:i + HOP])]
+            if len(st.embs) == 16:
+                z = (np.stack(st.embs).reshape(-1) - self.ear.mu.reshape(-1)) / self.ear.sd.reshape(-1)
+                Z.append(z / (np.linalg.norm(z) + 1e-9))
+            else:
+                Z.append(np.zeros(1536, np.float32))
+        return np.array(sc), np.array(Z, np.float32)
+
+    def capri_end(self, x, cond):
+        """End of "Capri" in a take: his first stretch of speech (Silero) if it is 0.35..1.5 s, else onset + 0.75 s."""
+        pr = self.vad.probs(x.astype(np.float32) / 32768)
+        on = next((k for k, p in enumerate(pr) if p >= 0.5), 0)
+        k = on
+        while k < len(pr) and not all(p < 0.35 for p in pr[k:k + 3]):
+            k += 1
+        last = max([j for j in range(on, max(on + 1, k)) if pr[j] >= 0.5] or [on])
+        seg = (last + 1 - on) * 512 / SR
+        if 0.35 <= seg <= 1.5 and k < len(pr):
+            return (last + 1) * 512 / SR
+        return on * 512 / SR + (0.6 if cond == 'casual' else 0.75)
+
+    def check(self, x, tf):
+        """The sidecar's first look at a candidate at sample tf: (accepted, T, margin)."""
+        cv = self.cv
+        pcm = x[max(0, tf - int(cv.WAKE_RING_S * SR)):tf + int(cv.WAKE_CHECK_DELAY_S * SR)].astype(np.float32) / 32768
+        text = cv.wake_text(self.stt, pcm)
+        tm = self.wf() if self.wf else None
+        return cv.wake_accept(cv.wake_says(text), tm), tm
+
+    def replay(self, take, templates=None, tau=2.0, thr=None):
+        """The first look on one take: candidates from the head (or his templates), the Silero gate, the check."""
+        thr = self.ear.threshold(0.5) if thr is None else thr
+        sc, Z = take['sc'], take['Z']
+        ps = (Z @ templates.T).max(1) if templates is not None else np.zeros(len(sc))
+        hot = (sc >= thr) | (ps >= tau)
+        last = -1e9
+        for j in range(1, len(sc)):
+            t = (j + 1) * HOP / SR
+            if hot[j] and hot[j - 1] and t - last >= self.cv.WAKE_REFRACTORY_S:
+                last = t
+                tf = (j + 1) * HOP
+                a = take['x'][max(0, tf - SR):tf].astype(np.float32) / 32768
+                if sum(p >= self.cv.SPEECH_P for p in self.vad.probs(a)) < self.cv.WAKE_SPEECH_MIN:
+                    continue
+                ok, tm = self.check(take['x'], tf)
+                if ok:
+                    return True
+        return False
+
+
+def load_takes(tu):
+    rows = [json.loads(l) for l in open(TAKES / 'takes.jsonl')]
+    takes = []
+    for r in rows:
+        f = TAKES / f"{r['id']}.wav"
+        if not f.exists():
+            continue
+        x = read16(f)
+        rng = np.random.default_rng(int(r['id'][1:4]) + (1000 if r['label'] != 'pos' else 0))
+        s = np.concatenate([room(x, 2.0, rng), x, room(x, 3.0, rng)])
+        sc, Z = tu.windows(s)
+        te = 2.0 + tu.capri_end(x, r['cond'])
+        takes.append({'id': r['id'], 'cond': r['cond'], 'pos': r['label'] == 'pos', 'x': s, 'sc': sc, 'Z': Z, 'te': te})
+    return takes
+
+
+def templates_of(takes):
+    T = [t['Z'][j] for t in takes if t['pos'] for j in range(len(t['Z']))
+         if t['te'] - 0.16 <= (j + 1) * HOP / SR <= t['te'] + 0.32 and t['Z'][j].any()]
+    return np.array(T, np.float32)
+
+
+def negatives(paths):
+    if not paths:
+        CACHE.mkdir(parents=True, exist_ok=True)
+        paths = []
+        for m in ('ES2002a', 'ES2002b'):
+            f = CACHE / f'{m}.wav'
+            if not f.exists() or f.stat().st_size < 1e6:
+                print(f'fetching the AMI meeting {m} (CC BY 4.0) for the threshold ...', flush=True)
+                subprocess.run(['curl', '-sSfL', '-m', '900', '-o', str(f), AMI.format(m=m)], check=True)
+            paths.append(f)
+    return [read16(p) for p in paths]
+
+
+def tau_for(T, negs):
+    """The lowest threshold (0.40..0.95) with <= DEV_RATE personal candidates an hour on the negatives (their windows)."""
+    sims = [(Z @ T.T).max(1) for Z in negs]
+    hours = sum(len(Z) for Z in negs) * HOP / SR / 3600
+    for tau in np.arange(0.40, 0.96, 0.01):
+        n = 0
+        for s in sims:
+            hot = s >= tau
+            last = -1e9
+            for j in np.nonzero(hot[1:] & hot[:-1])[0] + 1:
+                if j - last >= 25:
+                    n, last = n + 1, j
+        if n / hours <= DEV_RATE:
+            return float(tau), n / hours
+    return 0.95, None
+
+
+def table(name, res):
+    print(f'  {name:34s}' + ''.join(f'{c:>10s}' for c in CONDS))
+    for k, v in res.items():
+        print(f'  {k:34s}' + ''.join(f"{f'{v[c][0]}/{v[c][1]}' if v[c][1] else '-':>10s}" for c in CONDS))
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
+    ap.add_argument('--fit', action='store_true', help='cross-validate, then write the personal layer if it helps')
+    ap.add_argument('--force', action='store_true', help='write it even if cross-validation shows no gain')
+    ap.add_argument('--remove', action='store_true', help='delete the personal layer')
+    ap.add_argument('--negatives', nargs='*', help='audio files of ordinary speech that is not his (default: two AMI meetings)')
+    ap.add_argument('--out', default=str(OUT / 'personal.npz'), help=argparse.SUPPRESS)
+    ap.add_argument('--cv-out', help=argparse.SUPPRESS)        # the two folds' layers (for an end-to-end replay of each)
+    a = ap.parse_args()
+    if a.remove:
+        p = Path(a.out)
+        if p.exists():
+            p.unlink()
+        print('personal layer removed' if not p.exists() else 'not removed')
+        return
+    if not (TAKES / 'takes.jsonl').exists():
+        sys.exit(f'capri-wake-tune: no takes in {TAKES} (capri-wake-record first)')
+    t0 = time.time()
+    tu = Tuner(sidecar())
+    takes = load_takes(tu)
+    base = {c: [0, 0] for c in CONDS}
+    for t in takes:
+        w = tu.replay(t)
+        base[t['cond']][0] += w
+        base[t['cond']][1] += 1
+    print(f'{sum(t["pos"] for t in takes)} takes + {sum(not t["pos"] for t in takes)} sound-alikes ({time.time() - t0:.0f} s); '
+          f'the first look woke on (near: should be 0):')
+    table('as shipped (stock voices only)', {'': base})
+    if not a.fit:
+        return
+    negs = [tu.windows(x)[1] for x in negatives(a.negatives)]
+    cvres = {c: [0, 0] for c in CONDS}
+    report = {'folds': []}
+    for fold in (1, 0):          # fit on the odd takes, test on the even ones; then swap
+        fit = [t for t in takes if t['pos'] and int(t['id'][1:4]) % 2 == fold]
+        test = [t for t in takes if (t['pos'] and int(t['id'][1:4]) % 2 != fold) or not t['pos']]
+        T = templates_of(fit)
+        tau, rate = tau_for(T, negs)
+        woke = {t['id']: tu.replay(t, T, tau) for t in test}
+        if a.cv_out:
+            os.makedirs(a.cv_out, mode=0o700, exist_ok=True)
+            np.savez(f'{a.cv_out}/fold-fit-{"odd" if fold else "even"}.npz', templates=T, tau=np.float32(tau))
+        for t in test:
+            if t['pos'] or fold == 1:            # the sound-alikes count once (the first fold)
+                cvres[t['cond']][0] += woke[t['id']]
+                cvres[t['cond']][1] += 1
+        report['folds'].append({'fit': 'odd' if fold else 'even', 'templates': len(T), 'tau': tau, 'negatives_per_h': rate,
+                                'woke': {k: bool(v) for k, v in woke.items()}})
+        print(f'  fold (fit on the {"odd" if fold else "even"} takes): {len(T)} template windows, tau {tau:.2f}', flush=True)
+    table('cross-validated, with the layer', {'': cvres})
+    gain = sum(cvres[c][0] for c in CONDS if c != 'near') - sum(base[c][0] for c in CONDS if c != 'near')
+    worse = cvres['near'][0] > base['near'][0]
+    print(f'  takes woken: {gain:+d} with the layer (cross-validated); sound-alikes: {base["near"][0]} -> {cvres["near"][0]}')
+    if (gain <= 0 or worse) and not a.force:
+        print('no gain: nothing written (--force writes it anyway)')
+        return
+    T = templates_of([t for t in takes if t['pos']])
+    tau, rate = tau_for(T, negs)
+    out = Path(a.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(out.parent, 0o700)
+    np.savez(out, templates=T, tau=np.float32(tau))
+    os.chmod(out, 0o600)
+    report.update(written=str(out), templates=len(T), tau=tau, negatives_per_h=rate, made=time.strftime('%Y-%m-%dT%H:%M:%S'))
+    with open(out.parent / 'report.json', 'w') as f:
+        json.dump(report, f, indent=1)
+    print(f'written: {out} ({len(T)} template windows, tau {tau:.2f}); the sidecar loads it the next time the wake word opens')
+
+
+if __name__ == '__main__':
+    main()

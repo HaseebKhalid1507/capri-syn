@@ -1,0 +1,204 @@
+#!/usr/bin/env python3
+"""capri-wake-record: record Haseeb saying "Hey Capri" so the wake word (PR #22) can be measured
+and tuned on his real voice.
+
+    capri-wake-record              # start, or carry on where you stopped
+    capri-wake-record --status     # how many takes are done
+    capri-wake-record --takes 20   # a shorter session (default 40, plus 10 optional sound-alikes)
+
+Per take: it shows what to say. Enter starts the recording, which stops by itself after a few seconds
+(a level bar shows it hears you). Then Enter keeps the take, r redoes it, p plays it back, q quits.
+Quitting at any point is safe. The next run picks up at the first missing take.
+
+PRIVACY: clips stay on this machine, in ~/.local/share/capri-voice/wake-samples (mode 700). No network.
+Nothing here uploads, and the clips are for measuring and tuning the wake detector, never for cloning or
+synthesizing his voice. Delete them all with: rm -rf ~/.local/share/capri-voice/wake-samples
+"""
+import argparse, json, os, random, shutil, subprocess, sys, time, wave
+from pathlib import Path
+
+RATE = 16000
+DIR = Path(os.environ.get('XDG_DATA_HOME', Path.home() / '.local/share')) / 'capri-voice' / 'wake-samples'
+
+REQ = ["what's spike doing", "pause the music", "is the build green", "remind me at nine", "read me the last reply",
+       "what time is it", "tell lynx to rebase", "open the reader", "how's the weather", "turn it down",
+       "any new messages", "what's on my calendar", "start hands-free", "go to sleep", "what's bella doing"]
+NEAR = ["hey caprese", "hey Capra", "hey cabbie", "hey Carrie", "hey copy", "hey Cappy", "hey Capricorn",
+        "hey, carry on", "tell Capri to wait", "Capri said the build passed"]
+
+
+def plan(takes):
+    """The fixed list of takes (same order every run, so resume works). Blocks scale with --takes."""
+    rng = random.Random(1507)
+    def n(frac):
+        return max(1, round(takes * frac))
+    blocks = [
+        ('quiet', 'Normal voice, room quiet.', n(0.35), 'req'),
+        ('media', 'Put MUSIC or a VIDEO on (normal volume), then say it.', n(0.25), 'req'),
+        ('far', 'Lean back or stand ~1-2 m from the mic.', n(0.15), 'req'),
+        ('casual', 'Fast and casual, like you would mid-thought.', n(0.10), 'req'),
+        ('bare', 'Just the wake phrase, then stop.', n(0.15), 'bare'),
+    ]
+    out = []
+    for cond, how, count, kind in blocks:
+        for _ in range(count):
+            say = 'Hey Capri' if kind == 'bare' else f'Hey Capri, {rng.choice(REQ)}'
+            out.append({'cond': cond, 'how': how, 'say': say, 'label': 'pos', 'secs': 3.0 if kind == 'bare' else 5.0})
+    for i, t in enumerate(out):
+        t['id'] = f'p{i + 1:03d}-{t["cond"]}'
+    neg = [{'id': f'n{i + 1:03d}-near', 'cond': 'near', 'label': 'near', 'secs': 4.0,
+            'how': 'A SOUND-ALIKE: say exactly this (it should NOT wake her).', 'say': s} for i, s in enumerate(NEAR)]
+    return out, neg
+
+
+def default_source():
+    try:
+        return subprocess.run(['pactl', 'get-default-source'], capture_output=True, text=True, timeout=5).stdout.strip() or None
+    except Exception:
+        return None
+
+
+def record(secs, source=None, meter=True):
+    """Exactly `secs` of 16 kHz mono s16 from `source` (default: the default source). Returns bytes."""
+    cmd = ['pw-record', '--rate', str(RATE), '--channels', '1', '--format', 's16', '--raw', '--latency', '20ms']
+    if source:
+        cmd += ['--target', source]
+    cmd.append('-')
+    need = int(secs * RATE) * 2
+    buf = bytearray()
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    try:
+        start = time.time()
+        while len(buf) < need:
+            chunk = p.stdout.read(min(3200, need - len(buf)))
+            if not chunk:
+                break
+            buf += chunk
+            if meter:
+                pk = peak(chunk)
+                bar = int(min(1.0, pk / 20000) * 30)
+                left = max(0.0, secs - (time.time() - start))
+                sys.stdout.write(f'\r  ● REC {left:4.1f}s [{"#" * bar}{"." * (30 - bar)}] ')
+                sys.stdout.flush()
+    finally:
+        p.terminate()
+        try:
+            p.wait(2)
+        except subprocess.TimeoutExpired:
+            p.kill()
+    if meter:
+        sys.stdout.write('\r' + ' ' * 60 + '\r')
+    if len(buf) < need // 2:
+        raise RuntimeError('the mic gave almost nothing (is it muted, or is the source wrong?)')
+    return bytes(buf)
+
+
+def peak(raw):
+    if len(raw) < 2:
+        return 0
+    import array
+    a = array.array('h')
+    a.frombytes(raw[: len(raw) // 2 * 2])
+    return max(abs(min(a)), abs(max(a)))
+
+
+def save_wav(path, raw):
+    tmp = path.with_suffix('.wav.part')
+    with wave.open(str(tmp), 'wb') as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(RATE)
+        w.writeframes(raw)
+    os.chmod(tmp, 0o600)
+    tmp.replace(path)
+
+
+def done_ids(d):
+    return {p.stem for p in d.glob('*.wav')}
+
+
+def ask(prompt):
+    try:
+        return input(prompt).strip().lower()
+    except EOFError:
+        return 'q'
+
+
+def main():
+    ap = argparse.ArgumentParser(description='Record "Hey Capri" takes for the wake word (local only).')
+    ap.add_argument('--takes', type=int, default=40, help='"Hey Capri" takes (default 40; 20-50 is plenty)')
+    ap.add_argument('--no-near', action='store_true', help="skip the 10 optional sound-alike takes at the end")
+    ap.add_argument('--source', help='PipeWire source to record from (default: the default source)')
+    ap.add_argument('--dir', type=Path, default=DIR, help=f'where clips go (default {DIR})')
+    ap.add_argument('--status', action='store_true', help='show progress and exit')
+    ap.add_argument('--auto', action='store_true', help=argparse.SUPPRESS)  # tests: no prompts, keep every take
+    a = ap.parse_args()
+
+    if not shutil.which('pw-record'):
+        sys.exit('capri-wake-record: needs pw-record (PipeWire)')
+    a.dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(a.dir, 0o700)
+    pos, neg = plan(max(5, min(80, a.takes)))
+    todo_all = pos + ([] if a.no_near else neg)
+    have = done_ids(a.dir)
+    npos = sum(t['id'] in have for t in pos)
+    nneg = sum(t['id'] in have for t in neg)
+
+    if a.status:
+        print(f'{npos}/{len(pos)} "Hey Capri" takes, {nneg}/{len(neg)} sound-alikes, in {a.dir}')
+        return
+    src = a.source or default_source()
+    print(__doc__.split('\n\n')[0].replace('capri-wake-record: ', ''))
+    print(f'\nMic: {src or "default"}   Clips: {a.dir}   (local only, never uploaded)')
+    print(f'Done so far: {npos}/{len(pos)} "Hey Capri", {nneg}/{len(neg)} sound-alikes. q quits any time; run it again to resume.\n')
+    meta = a.dir / 'takes.jsonl'
+    last_cond = None
+    for t in todo_all:
+        if t['id'] in have:
+            continue
+        if t['cond'] != last_cond:
+            if t['cond'] == 'near' and not a.auto:
+                print('\nThe "Hey Capri" takes are done.')
+                if ask('10 optional sound-alikes (they teach her what NOT to wake on). Do them? [Y/n] ') in ('n', 'no', 'q'):
+                    break
+            print(f'\n== {t["how"]}')
+            last_cond = t['cond']
+        while True:
+            print(f'\n[{t["id"]}]  say:  "{t["say"]}"')
+            if not a.auto:
+                k = ask('  Enter = record, q = quit: ')
+                if k == 'q':
+                    print(f'Stopped. Saved takes stay in {a.dir}; run capri-wake-record again to carry on.')
+                    return
+                time.sleep(0.15)
+            raw = record(t['secs'], a.source, meter=not a.auto)
+            pk = peak(raw)
+            warn = ' (very quiet: closer to the mic?)' if pk < 1500 else ' (clipped: a bit softer?)' if pk >= 32000 else ''
+            if a.auto:
+                k = ''
+            else:
+                k = ask(f'  got {t["secs"]:.0f}s, peak {pk}{warn}.  Enter = keep, r = redo, p = play, q = quit: ')
+                while k == 'p':
+                    tmpw = a.dir / '.playback.wav'
+                    save_wav(tmpw, raw)
+                    subprocess.run(['pw-play', str(tmpw)], stderr=subprocess.DEVNULL)
+                    tmpw.unlink(missing_ok=True)
+                    k = ask('  Enter = keep, r = redo, q = quit: ')
+            if k == 'r':
+                continue
+            if k == 'q':
+                print(f'Stopped (that take was not saved). Run capri-wake-record again to carry on.')
+                return
+            save_wav(a.dir / f'{t["id"]}.wav', raw)
+            with open(meta, 'a') as f:
+                f.write(json.dumps({'id': t['id'], 'label': t['label'], 'cond': t['cond'], 'say': t['say'],
+                                    'secs': t['secs'], 'peak': pk, 'at': time.strftime('%Y-%m-%dT%H:%M:%S')}) + '\n')
+            os.chmod(meta, 0o600)
+            break
+    have = done_ids(a.dir)
+    print(f'\nAll done: {sum(t["id"] in have for t in pos)} "Hey Capri" takes and '
+          f'{sum(t["id"] in have for t in neg)} sound-alikes in {a.dir}. Thanks, choom.')
+
+
+if __name__ == '__main__':
+    main()

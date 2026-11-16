@@ -15,6 +15,11 @@ have said and when.
   listen-start mode handsfree -> mic-open {mode}, then the steps of FAKE_HF (a JSON list, read at each
                        start): {"at": ms, "heard": "text"} (speech, endpoint, heard), {"at": ms, "ev": "...", ...}
                        (any event), {"at": ms, "die": true} (the stream dies: mic-closed)
+  listen-start mode wake -> (FAKE_WAKE_REFUSE, a file: if it holds a reason, refused: mic-closed, heard "" why)
+                       mic-open {mode}, then the steps of FAKE_WAKE (a JSON list, read at each start):
+                       {"at": ms, "wake": "text"} (wake, speech, endpoint, heard), {"at": ms, "wake": "", "handsfree": true}
+                       (wake, wake-handsfree), {"at": ms, "end": "call|lock|false starts|mic lost"} (mic-closed, wake-end).
+                       Any other listen-start closes an open wake stream first (mic-closed {mode: wake}), as the real one.
   listen-drop       -> printed only
   stats             -> stats {mic_open}
 Run the avatar with CAPRI_VOICE_SOCK=SOCK."""
@@ -31,6 +36,15 @@ conn = [None]
 mic = {"open": False, "n": 0}
 TOGGLE = os.environ.get("FAKE_TOGGLE", "")
 HF = os.environ.get("FAKE_HF", "")
+WAKE = os.environ.get("FAKE_WAKE", "")
+WAKE_REFUSE = os.environ.get("FAKE_WAKE_REFUSE", "")
+
+
+def readf(path, default):
+    try:
+        return json.load(open(path)) if path else default
+    except (OSError, ValueError):
+        return default
 
 
 def log(**v):
@@ -83,7 +97,19 @@ def handle(m):
             queue.clear()
         emit(ev="hushed")
     elif op == "listen-start":
+        if mic["open"] and mic.get("mode") == "wake" and m.get("mode", "hold") != "wake":
+            mic["open"] = False
+            emit(ev="mic-closed", mode="wake")
+        if m.get("mode") == "wake" and (why := readf(WAKE_REFUSE, "")):
+            emit(ev="mic-closed", mode="wake")
+            emit(ev="heard", text="", why=why, ms={})
+            log(ev="refused", why=why)
+            return
         mic["open"], mic["n"], mic["mode"] = True, mic["n"] + 1, m.get("mode", "hold")
+        if m.get("mode") == "wake":
+            emit(ev="mic-open", mode="wake", echo="headphones")
+            threading.Thread(target=wake_run, args=(mic["n"], readf(WAKE, [])), daemon=True).start()
+            return
         emit(ev="mic-open", mode=m.get("mode", "hold"))
         if m.get("mode") == "handsfree":
             try:
@@ -138,6 +164,35 @@ def hf_run(n, steps):
             if ev.get("ev") == "handsfree-end":
                 mic["open"] = False
                 return
+
+
+def wake_run(n, steps):
+    """The wake stream as scripted: "hey capri" turns, hands-free asked for, the stream ending."""
+    t0 = time.time()
+    for st in steps:
+        time.sleep(max(0, st.get("at", 0) / 1000 - (time.time() - t0)))
+        if mic["n"] != n or not mic["open"]:
+            return
+        if "wake" in st:
+            emit(ev="wake", ms={"fire_to_wake": 300, "verify": 280})
+            log(ev="wake")
+            if st.get("handsfree"):
+                time.sleep(0.4)
+                emit(ev="wake-handsfree", ms={})
+                log(ev="wake-handsfree")
+                continue
+            time.sleep(0.3)
+            emit(ev="speech")
+            time.sleep(st.get("speak_ms", 600) / 1000)
+            emit(ev="endpoint", why="silence" if st["wake"] else "nothing", speech_ms=900, silence_ms=1000)
+            emit(ev="heard", text=st["wake"], why="" if st["wake"] else "NOTHING HEARD · MIC CLOSED", ms={"stt": 1})
+            log(ev="heard", text=st["wake"])
+        elif "end" in st:
+            mic["open"] = False
+            emit(ev="mic-closed", mode="wake")
+            emit(ev="wake-end", why=st["end"], app="")
+            log(ev="wake-end", why=st["end"])
+            return
 
 
 def toggle_run(n, plan):
