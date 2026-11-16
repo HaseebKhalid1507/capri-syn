@@ -197,9 +197,10 @@ With `anim/`, `moods.json` `variants` mixes that art in; she never swaps one set
 
 The launch, with `[intro] cinematic` on:
 
-- If the pack has the close-ups (`anim/mochi/intro-*`, `--mochi` only), her close-up rises from the bottom
-  of her monitor (62 % of its height, centred on the work area) and plays its 2.6 s beat: grab, a whip into
-  a wave, "hi", a grin, then out: it sinks while its rows drop out, inside its own pixels. A click on it
+- If the pack has the close-ups (`anim/mochi/intro-*`, `--mochi` only), her close-up rises from below the
+  bottom of her monitor while a glitch builds it (62 % of its height, centred on the work area) and plays
+  its 2.7 s beat: grab, a whip into a wave, "hi", a grin, then out: it sinks while its rows drop out, inside
+  its own pixels; the bolt starts under its last rows. A click on it
   or Esc anywhere skips to the out beat. Clicks anywhere else go through to the window under it, and Esc
   reaches your window too.
 - It doesn't play while a fullscreen window is focused, within `cinematic_min_gap_min` of her last run
@@ -208,7 +209,8 @@ The launch, with `[intro] cinematic` on:
 - Then the plain red bolt from the top of the monitor, onto the floor or onto the window she sat on last
   time (`state.json` `perch`: the same window, same size, same place, with room on its top; else the
   floor). On the floor she lands once (`arrive.cinematic`; the close-up was the greeting) and is idle
-  ~3.2 s after the close-up's first frame. A launch without the close-up lands with `arrive.launch`.
+  ~3.1 s after the close-up's first frame. After any landing her idle life starts at once: a sparkle, a
+  breath step and a blink within half a second. A launch without the close-up lands with `arrive.launch`.
 - Without the close-ups, the launch is just that bolt. The close-ups are decoded for each launch and
   dropped after it.
 

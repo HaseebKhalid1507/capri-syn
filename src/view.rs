@@ -340,6 +340,10 @@ const HEARTS_MS: u64 = 1_150;
 const BOLT_LAYER: usize = 0;
 /// The bubble and tag come back this long after a loud teleport has reformed her.
 const HUD_AFTER_TELEPORT: Duration = Duration::from_millis(200);
+/// After a landing: her first sparkle, breath step and blink this soon.
+const LIFE_SPARKLE: Duration = Duration::from_millis(150);
+const LIFE_BREATH: Duration = Duration::from_millis(300);
+const LIFE_BLINK_MS: u32 = 500;
 /// First effect layer of the hearts: a rim and a fill per heart.
 const HEART_LAYER: usize = 6;
 /// The contact shadow under a perch, stacked right below the avatar window.
@@ -3545,11 +3549,25 @@ impl Avatar {
         let formed = self.arrive.formed.take().filter(|&t| t > now);
         self.teleport = None;
         self.arrive_reset();
+        self.life_after_landing(now);
         if !quiet {
             self.hud_after = Some((now + HUD_AFTER_TELEPORT).max(formed.unwrap_or(now)));
         } else if formed.is_some() {
             self.hud_after = formed;
         }
+    }
+
+    /// Landed: her idle life starts at once, not after a still hold: a sparkle, a breath step
+    /// and a blink within half a second.
+    fn life_after_landing(&mut self, now: Instant) {
+        self.next_glint = Some(now + LIFE_SPARKLE);
+        let period = self.pack.behaviour.life.bob_period_ms;
+        if period > 0 {
+            // The breath's first 1 px step (a sixth of its period in) lands LIFE_BREATH from now.
+            let back = Duration::from_millis(period / 6).saturating_sub(LIFE_BREATH);
+            self.bob_t0 = now.checked_sub(back).unwrap_or(now);
+        }
+        self.anim.rest_soon(LIFE_BLINK_MS, now);
     }
 
     /// Window origin that puts the seat (or the feet) on `r`'s top edge at `r.x + dx`.

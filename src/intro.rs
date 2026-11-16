@@ -13,29 +13,33 @@ const WAVE: [usize; 5] = [2, 3, 4, 3, 4];
 const MOUTH: [(usize, u64); 4] = [(5, 90), (6, 130), (7, 130), (5, 200)];
 const HAPPY: usize = 8;
 
-/// Beat starts, ms. With the bolt (~0.2 s to contact) and her one landing (`arrive.cinematic`)
-/// she is idle on her spot ~3.2 s after the close-up's first frame.
-pub const IMPACT_AT: u64 = 160;
+/// Beat starts, ms. The bolt starts `HANDOFF_MS` before the end (no empty frame between them);
+/// with it (~0.2 s to contact) and her one landing (`arrive.cinematic`) she is idle on her spot
+/// ~3.1 s after the close-up's first frame.
+pub const IMPACT_AT: u64 = 340;
 const RED_MS: u64 = 40;
 const SCALE_AT: u64 = IMPACT_AT + RED_MS;
 const SCALE_MS: u64 = 120;
-pub const GRAB_AT: u64 = 260;
+pub const GRAB_AT: u64 = 440;
 const JOLT_MS: u64 = 240;
-pub const WHIP_AT: u64 = 600;
-pub const WAVE_AT: u64 = 680;
+pub const WHIP_AT: u64 = 720;
+pub const WAVE_AT: u64 = 800;
 const WAVE_MS: u64 = 140;
 const BURST_MS: u64 = 280;
-pub const HI_AT: u64 = 1380;
-pub const HAPPY_AT: u64 = 1930;
-pub const OUT_AT: u64 = 2380;
+pub const HI_AT: u64 = 1500;
+pub const HAPPY_AT: u64 = 2050;
+pub const OUT_AT: u64 = 2450;
 pub const OUT_MS: u64 = 260;
 /// The bolt takes over.
 pub const END: u64 = OUT_AT + OUT_MS;
+/// The bolt starts this long before the close-up's end, under its last rows.
+pub const HANDOFF_MS: u64 = 100;
 
 /// The close-up's height, of her monitor's.
 pub const HEIGHT_OF_MONITOR: f32 = 0.62;
-/// It rises from the bottom edge this much of its height during the first beat.
-const RISE: f32 = 0.12;
+/// It rises from below the bottom edge (this much of its height) during the first beat, easing
+/// out, while the Appear glitch builds it.
+const RISE: f32 = 0.40;
 /// The out beat sinks it back toward the bottom edge this much of its height.
 const SINK: f32 = 0.10;
 /// Squash at the impact, and the grab's jolt (logical px).
@@ -96,9 +100,14 @@ impl Sheet {
         self.skip.is_some()
     }
 
-    /// When it ends (the bolt takes over).
+    /// When it ends (its window goes).
     pub fn end(&self) -> u64 {
         self.skip.map_or(END, |s| s + OUT_MS)
+    }
+
+    /// When the bolt starts (just before the end).
+    pub fn handoff(&self) -> u64 {
+        self.end().saturating_sub(HANDOFF_MS)
     }
 
     pub fn done(&self, t: u64) -> bool {
@@ -122,7 +131,7 @@ impl Sheet {
         let mut c = Cue { frame: GRAB, glitch: None, red: false, scale: 1.0, jolt: (0.0, 0.0), rise: 0.0, hi: false, out: None };
         if t < IMPACT_AT {
             let u = t as f32 / IMPACT_AT as f32;
-            c.rise = RISE * (1.0 - u) * (1.0 - u);
+            c.rise = RISE * (1.0 - u).powi(3);
             c.glitch = Some(GlitchCue { kind: GlitchKind::Appear, at: 0, ms: IMPACT_AT });
         } else if t < GRAB_AT {
             c.red = t < SCALE_AT;
@@ -248,30 +257,32 @@ mod tests {
     fn the_beats_in_order() {
         let s = Sheet::new(0);
         let f = |t| FRAMES[s.cue(t).frame];
-        assert_eq!((f(0), f(200), f(500), f(620)), ("grab", "grab", "grab", "smear"));
-        assert_eq!([680, 820, 960, 1100, 1240].map(f), ["wave1", "wave2", "wave3", "wave2", "wave3"]);
-        assert_eq!([1380, 1470, 1600, 1730, 1920].map(f), ["mouth1", "mouth2", "mouth3", "mouth1", "mouth1"]);
-        assert_eq!((f(1930), f(2500)), ("happy", "happy"));
-        assert_eq!(s.end(), 2640, "trimmed holds: every beat, 0.43 s shorter");
-        assert!(!s.done(2639) && s.done(2640));
-        // In: Appear while it rises; the impact is one red frame, then the squash eases back.
+        assert_eq!((f(0), f(400), f(600), f(740)), ("grab", "grab", "grab", "smear"));
+        assert_eq!([800, 940, 1080, 1220, 1360].map(f), ["wave1", "wave2", "wave3", "wave2", "wave3"]);
+        assert_eq!([1500, 1590, 1720, 1850, 2040].map(f), ["mouth1", "mouth2", "mouth3", "mouth1", "mouth1"]);
+        assert_eq!((f(2050), f(2400)), ("happy", "happy"));
+        assert_eq!(s.end(), 2710);
+        assert_eq!(s.handoff(), 2610, "the bolt starts under its last rows");
+        assert!(!s.done(2709) && s.done(2710));
+        // In: it rises from well below the edge while Appear builds it; the impact is one red
+        // frame, then the squash eases back.
         let c0 = s.cue(0);
-        assert_eq!(c0.glitch.map(|g| g.kind), Some(GlitchKind::Appear));
-        assert!(c0.rise > 0.1 && s.cue(150).rise < 0.01 && s.cue(160).rise == 0.0);
-        assert!(s.cue(170).red && !s.cue(200).red);
-        assert!((s.cue(200).scale - 1.06).abs() < 1e-3 && s.cue(319).scale < 1.001 && s.cue(320).scale == 1.0);
-        assert_ne!(s.cue(290).jolt, (0.0, 0.0), "the grab jolts");
-        assert!(s.cue(290).jolt.0.abs() <= 2.0 && s.cue(550).jolt == (0.0, 0.0));
-        assert!(s.cue(1450).hi && !s.cue(1300).hi && !s.cue(2000).hi);
+        assert_eq!(c0.glitch, Some(GlitchCue { kind: GlitchKind::Appear, at: 0, ms: IMPACT_AT }));
+        assert!(c0.rise > 0.35 && s.cue(170).rise > 0.04 && s.cue(330).rise < 0.001 && s.cue(340).rise == 0.0);
+        assert!(s.cue(350).red && !s.cue(380).red);
+        assert!((s.cue(380).scale - 1.06).abs() < 1e-3 && s.cue(499).scale < 1.001 && s.cue(500).scale == 1.0);
+        assert_ne!(s.cue(470).jolt, (0.0, 0.0), "the grab jolts");
+        assert!(s.cue(470).jolt.0.abs() <= 2.0 && s.cue(700).jolt == (0.0, 0.0));
+        assert!(s.cue(1600).hi && !s.cue(1450).hi && !s.cue(2100).hi);
         // Out: no glitch, no red; it sinks while its rows drop out.
-        let o = s.cue(2510);
+        let o = s.cue(2580);
         assert_eq!((o.glitch, o.red, o.hi), (None, false, false));
         assert!(o.out.is_some_and(|u| (u - 0.5).abs() < 0.01) && o.rise > 0.0 && o.rise <= SINK);
-        assert!(s.cue(2379).out.is_none());
+        assert!(s.cue(2449).out.is_none());
         // Held frames wake once, at the next change; the jolt moves every frame.
-        assert_eq!(s.next_change(550), 601);
-        assert_eq!(s.next_change(2000), 2381);
-        assert!(s.next_change(290) <= 300);
+        assert_eq!(s.next_change(700), 721);
+        assert_eq!(s.next_change(2100), 2451);
+        assert!(s.next_change(470) <= 480);
     }
 
     #[test]
@@ -279,7 +290,7 @@ mod tests {
         for roll in 0..5u64 {
             let s = Sheet::new(roll);
             let bursts: Vec<u64> = (0..s.end()).filter(|&t| s.cue(t).glitch.is_some_and(|g| g.kind == GlitchKind::Burst)).collect();
-            assert_eq!(bursts.first(), Some(&(680 + roll * 140)));
+            assert_eq!(bursts.first(), Some(&(800 + roll * 140)));
             assert_eq!(bursts.len(), 280);
             assert!(bursts.iter().all(|&t| t < OUT_AT), "never over the out beat");
         }
@@ -290,18 +301,18 @@ mod tests {
         let mut s = Sheet::new(2);
         s.skip(1000);
         assert!(s.skipped());
-        assert_eq!(s.end(), 1260);
+        assert_eq!((s.end(), s.handoff()), (1260, 1160));
         let c = s.cue(1130);
-        assert_eq!(FRAMES[c.frame], "wave3", "holds what showed at the click");
+        assert_eq!(FRAMES[c.frame], "wave2", "holds what showed at the click");
         assert_eq!((c.glitch, c.hi), (None, false));
         assert!(c.out.is_some_and(|u| (u - 0.5).abs() < 0.01));
         assert!(s.done(1260));
-        assert_eq!(s.cue(640).frame, 1, "before the skip, as planned");
+        assert_eq!(s.cue(760).frame, 1, "before the skip, as planned");
         // A second press changes nothing; one in the out beat isn't a skip.
         s.skip(1200);
         assert_eq!(s.end(), 1260);
         let mut late = Sheet::new(0);
-        late.skip(2400);
+        late.skip(2500);
         assert!(!late.skipped() && late.end() == END);
     }
 
