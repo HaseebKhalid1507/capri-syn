@@ -23,7 +23,7 @@ for speech. Setup: `tools/capri-voice-setup`, then `tools/systemd/capri-voice.se
 | `handsfree` | `true` | the double-tap, `talk handsfree on` and the menu item can start a hands-free conversation. It is always off at launch |
 | `handsfree_timeout` | `60` | 15 to 600 s: it ends after this long with no accepted turn of his |
 | `handsfree_max` | `30` | minutes, 0 = no cap: it ends after this long in all |
-| `wake_word` | `false` | **a draft, not for use yet**: "Hey Capri" opens a turn (below). On, a mic stream stays open, shown on her tag |
+| `wake_word` | `true` | "Hey Capri" opens a turn (below). While on (with voice on), a mic stream stays open, shown on her tag. `false` turns it off |
 | `wake_sensitivity` | `0.5` | 0.1 to 0.9: higher wakes more easily (and falsely more often) |
 | `echo` | `"auto"` | `"auto"` (the sink says headphones or speakers), `"headphones"` (talking over her stops her) or `"speakers"` (half-duplex) |
 
@@ -118,13 +118,13 @@ for speech. Setup: `tools/capri-voice-setup`, then `tools/systemd/capri-voice.se
 - Cap in the sidecar, whatever the avatar does: its `max_s` (from `handsfree_max`).
 - Measured on the virtual chain (bella, nothing played aloud): see the PR.
 
-## "Hey Capri": the wake word (a draft, off by default)
+## "Hey Capri": the wake word (on by default)
 
-**Still a draft.** Round 3 measured it on his own takes (recorded with `tools/capri-wake-record`; they stay on
+**On by default** (his call, 2026-11-16), with the known gaps below: far and fast/casual speech. Round 3 measured it on his own takes (recorded with `tools/capri-wake-record`; they stay on
 his machine and only ids and counts left it). Everything it ships with (stage 1's head, the filter's two
 thresholds) was fitted on stock synthetic voices only (Kokoro packs, espeak-ng), never on a recording of anyone.
 
-- **On** only with `wake_word = true` (and voice on). Nothing about it loads before that. Then one mic
+- **On** whenever voice is on, unless `wake_word = false` (then nothing about it loads). One mic
   stream stays open, and her tag says so all the time: `◌ MIC ON · SAY "HEY CAPRI"` (dim red outline, no
   timer, no meter, no level events). It keeps the tag's first slot.
 - **Stage 1, always on:** openWakeWord's front end (its v0.5.1 `melspectrogram.onnx` and

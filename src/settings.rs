@@ -142,8 +142,8 @@ pub struct Settings {
 /// launch); `handsfree_timeout`: it ends after this many seconds with no accepted turn (15..600,
 /// default 60); `handsfree_max`: and after this many minutes in all (0 = never, default 30);
 /// `echo`: "auto" (default: the sink's port says headphones or speakers), "headphones" (talking
-/// over her stops her) or "speakers" (the mic is deaf while she speaks); `wake_word`: a DRAFT,
-/// "hey capri" (default false: when on, a mic stream stays open, shown on her tag); `wake_sensitivity`:
+/// over her stops her) or "speakers" (the mic is deaf while she speaks); `wake_word`:
+/// "hey capri" (default true: while on, a mic stream stays open, shown on her tag; `false` turns it off); `wake_sensitivity`:
 /// 0.1..0.9 (default 0.5: tuned to ~0.5 false starts an hour on synthetic voices).
 #[derive(Clone, Debug, PartialEq)]
 pub struct VoiceSettings {
@@ -177,7 +177,7 @@ pub const SPEED: f32 = 1.2987;
 
 impl Default for VoiceSettings {
     fn default() -> Self {
-        VoiceSettings { enabled: false, stt_model: "small.en".into(), voice: VOICE.into(), speed: SPEED, pace: "stretch".into(), flow: "emphasis".into(), duck: "duck".into(), speak_unprompted: true, key: 'c', silence_s: 1.0, toggle_key: 'c', handsfree: true, handsfree_timeout: 60, handsfree_max: 30, echo: "auto".into(), wake_word: false, wake_sensitivity: 0.5 }
+        VoiceSettings { enabled: false, stt_model: "small.en".into(), voice: VOICE.into(), speed: SPEED, pace: "stretch".into(), flow: "emphasis".into(), duck: "duck".into(), speak_unprompted: true, key: 'c', silence_s: 1.0, toggle_key: 'c', handsfree: true, handsfree_timeout: 60, handsfree_max: 30, echo: "auto".into(), wake_word: true, wake_sensitivity: 0.5 }
     }
 }
 
@@ -761,9 +761,9 @@ mod tests {
         assert!(Settings::parse("[voice]\nsilence_s = 0.2\n").is_err() && Settings::parse("[voice]\nsilence_s = 9\n").is_err());
         assert!(Settings::parse("[voice]\ntoggle_key = \"ctrl+c\"\n").is_err());
         assert_eq!((v.handsfree, v.handsfree_timeout, v.handsfree_max, v.echo.as_str()), (true, 60, 30, "auto"));
-        assert!(!v.wake_word && v.wake_sensitivity == 0.5, "the wake word is off unless he turns it on");
-        let w = Settings::parse("[voice]\nwake_word = true\nwake_sensitivity = 0.3\n").unwrap().voice;
-        assert!(w.wake_word && (w.wake_sensitivity - 0.3).abs() < 1e-6);
+        assert!(v.wake_word && v.wake_sensitivity == 0.5, "the wake word is on by default");
+        let w = Settings::parse("[voice]\nwake_word = false\nwake_sensitivity = 0.3\n").unwrap().voice;
+        assert!(!w.wake_word && (w.wake_sensitivity - 0.3).abs() < 1e-6);
         assert!(Settings::parse("[voice]\nwake_sensitivity = 0.95\n").is_err());
         let h = Settings::parse("[voice]\nhandsfree = false\nhandsfree_timeout = 15\nhandsfree_max = 0\necho = \"Speakers\"\n").unwrap().voice;
         assert_eq!((h.handsfree, h.handsfree_timeout, h.handsfree_max, h.echo.as_str()), (false, 15, 0, "speakers"));

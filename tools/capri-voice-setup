@@ -20,7 +20,7 @@ for m in kokoro-v1.0.int8.onnx voices-v1.0.bin; do [ -s models/$m ] || curl -sSf
 S=https://raw.githubusercontent.com/snakers4/silero-vad/v5.1.2/src/silero_vad/data/silero_vad.onnx
 [ -s models/silero_vad.onnx ] || curl -sSfL -o models/silero_vad.onnx $S
 echo "2623a2953f6ff3d2c1e61740c6cdb7168133479b267dfef114a4a3cc5bdd788f  models/silero_vad.onnx" | sha256sum -c --quiet
-# The wake word (a draft; [voice] wake_word, off by default): openWakeWord v0.5.1's two feature models (its
+# The wake word ([voice] wake_word, on by default): openWakeWord v0.5.1's two feature models (its
 # README: code Apache-2.0, released models CC BY-NC-SA 4.0, so personal use; fetched here, not in the repo)
 # and our "hey capri" head (tools/wake), trained on stock TTS voices only.
 W=https://github.com/dscripka/openWakeWord/releases/download/v0.5.1

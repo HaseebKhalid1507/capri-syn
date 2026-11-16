@@ -11,8 +11,8 @@ newline-delimited JSON:
                                        one stream, many turns: speech/endpoint/heard per utterance;
                                        {"ev":"barge-in"} {"ev":"echo","mode":"speakers"} {"ev":"handsfree-end","why":"call|lock|max|mic lost"}
   {"op":"listen-drop"}                 (hands-free) what is being heard now is dropped; the stream stays
-  {"op":"listen-start","mode":"wake","sensitivity":0.5,"silence_s","echo"}   DRAFT, off unless his
-                                       [voice] wake_word: {"ev":"mic-open","mode":"wake"} (no level events while idle);
+  {"op":"listen-start","mode":"wake","sensitivity":0.5,"silence_s","echo"}   sent while his
+                                       [voice] wake_word is on (the default): {"ev":"mic-open","mode":"wake"} (no level events while idle);
                                        "hey capri" heard and checked by Whisper -> {"ev":"wake"}, the turn as a toggle's
                                        ({"ev":"heard"}; "let's talk" -> {"ev":"wake-handsfree"}); {"ev":"wake-end","why":
                                        "call|lock|false starts|mic lost"}. Any other listen-start closes it first.
@@ -125,7 +125,7 @@ ECHO_LAGS = 31                 # 20 ms frames: 0..600 ms after pw-play is launch
 ECHO_WORDS, ECHO_WINDOW_S = 0.7, 15.0   # a transcript this much made of what she said lately is her own voice
 
 
-# ---- the wake word ("hey capri"): a DRAFT, off by default -------------------------------------
+# ---- the wake word ("hey capri"): on by default ([voice] wake_word = false turns it off)
 #
 # Stage 1: openWakeWord's front end (its v0.5.1 melspectrogram + embedding onnx; its README: code
 # Apache-2.0, released models CC BY-NC-SA 4.0, so personal use; SHA-pinned), streamed: every 80 ms the mel of the last 110 ms, one 96-number embedding

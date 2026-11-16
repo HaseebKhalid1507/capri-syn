@@ -43,7 +43,7 @@ pub(super) struct HandsFree {
     closed: bool,
 }
 
-/// The wake word ("hey capri", a draft; `[voice] wake_word`): its standing stream, asked for while
+/// The wake word ("hey capri", on by default; `[voice] wake_word`): its standing stream, asked for while
 /// the setting is on and nothing keeps it closed. Its tag is static (no timer, no meter).
 #[derive(Clone, Debug, Default)]
 pub(super) struct Wake {
