@@ -1628,10 +1628,15 @@ impl Avatar {
     fn sync_shadow(&mut self) {
         let want = self.sitting() && self.loaded && !self.hidden && self.teleport.is_none() && !self.quitting && self.press.is_none() && self.rag.is_none();
         // The resting frame of the current layer (music swaps the pose), else the perch base.
-        // An arrival's touchdown (and its dissolve) is on the edge now: its frame, not the pose
-        // it ends in (whose planted hand left a dark dash beside her).
+        // An arrival's touchdown is on the edge until its dissolve is over: its frame's shadow,
+        // not the pose's (the sit's legs over the edge showed as a dark dash beside the crouch
+        // a frame before the sit itself).
         let now = Instant::now();
-        let shown = if self.arriving(now) { self.anim.frame() } else { self.anim.base() };
+        let shown = match self.arrive_blend(now) {
+            Some((f, _)) => f,
+            None if self.arriving(now) => self.anim.frame(),
+            None => self.anim.base(),
+        };
         let base = Some(shown)
             .filter(|&i| self.pack.frames.get(i).is_some_and(|f| f.anchor.name == "seat"))
             .or_else(|| self.perch_spec().and_then(|p| self.pack.index.get(&p.base).copied()));
@@ -1853,6 +1858,7 @@ impl Avatar {
     fn tick(&mut self, cx: &mut Context<Self>) {
         let now = Instant::now();
         self.view_ticks += 1;
+
         if self.sliver.is_some_and(|t| now.saturating_duration_since(t) > SLIVER) {
             self.sliver = None;
         }
@@ -2053,6 +2059,9 @@ impl Avatar {
             self.spawn_glints(now);
         }
         dirty |= self.step_teleport(now);
+        if let Some(Leg::Bolt(t0)) = self.teleport.as_ref().map(|t| t.leg) {
+            self.intro_bolt_drawn(now.saturating_duration_since(t0), cx);
+        }
         if self.music.as_ref().and_then(|m| m.until).is_some_and(|u| u <= now) {
             self.music_off(now);
             dirty = true;

@@ -424,9 +424,9 @@ enum Touchdown {
     Cut(u32),
 }
 
-/// Where in the landing glitch (`land_ms` long) the touchdown cuts to a drawn pose: well before
-/// it settles.
-const CUT_IN_LAND: f32 = 0.55;
+/// Where in the landing glitch (`land_ms` long) the touchdown cuts to a drawn pose: while she is
+/// still the red silhouette (`Glitch::tint`, its first 30 %).
+const CUT_IN_LAND: f32 = 0.25;
 
 /// The touchdown for a landing: sitting on a window top in a drawn pose, the first frame cut
 /// inside the landing glitch; else all of it.
@@ -459,8 +459,8 @@ mod tests {
         assert_eq!(perch_touchdown(true, false, 330.0), Touchdown::Whole, "her own pose: the whole touchdown");
         assert_eq!(perch_touchdown(false, true, 330.0), Touchdown::Whole, "on the floor");
         let Touchdown::Cut(ms) = perch_touchdown(true, true, 330.0) else { panic!() };
-        assert!(ms > 100 && ms < 330 * 2 / 3, "{ms}: inside the glitch, before it settles");
-        assert_eq!(perch_touchdown(true, true, 70.0), Touchdown::Cut(39), "a quiet landing's short glitch");
+        assert!(ms > 40 && (ms as f32) < 330.0 * 0.3, "{ms}: while she is still red");
+        assert_eq!(perch_touchdown(true, true, 70.0), Touchdown::Cut(18), "a quiet landing's short glitch");
         assert_eq!(perch_touchdown(true, true, 0.0), Touchdown::Cut(1), "no glitch: at once");
     }
 

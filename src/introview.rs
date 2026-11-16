@@ -21,6 +21,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// The held close-up's last rows stay over the bolt this long, at most this long.
+const BOLT_OVER_HOLD: Duration = Duration::from_millis(60);
+const HOLD_MAX: Duration = Duration::from_millis(500);
 /// Her frames are in but the close-ups aren't yet: the launch waits this long, then goes on
 /// without them.
 const WAIT_FOR_CLOSE_UPS: Duration = Duration::from_millis(1500);
@@ -399,8 +402,15 @@ impl Avatar {
         }
     }
 
+    /// Her tick, the bolt in flight: once it has been on screen a moment, the held close-up goes.
+    pub(super) fn intro_bolt_drawn(&mut self, bolt_age: Duration, cx: &mut Context<Self>) {
+        if self.intro.handed && self.intro.window.is_some() && bolt_age >= BOLT_OVER_HOLD {
+            self.intro_done(cx);
+        }
+    }
+
     /// The close-up is over: its window goes (and its pixels with it); the bolt is on its way.
-    fn intro_done(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn intro_done(&mut self, cx: &mut Context<Self>) {
         self.os.arm_escape(false);
         if let Some((h, v, _)) = self.intro.window.take() {
             let skipped = v.upgrade().and_then(|c| c.read(cx).skipped);
@@ -529,6 +539,8 @@ pub struct CloseUpView {
     sent: u64,
     on_handoff: Option<OnDone>,
     on_done: Option<OnDone>,
+    /// Held past `HOLD_MAX`: it goes by itself.
+    held_out: bool,
     /// Skipped by: "click", "esc", "ctl".
     pub skipped: Option<&'static str>,
     /// Frames painted; the wake-up asked for (ms into the intro) while nothing moves.
@@ -559,6 +571,7 @@ impl CloseUpView {
             sent: 0,
             on_handoff: Some(on_handoff),
             on_done: Some(on_done),
+            held_out: false,
             skipped: None,
             paints: 0,
             renders: 0,
@@ -615,13 +628,27 @@ impl Render for CloseUpView {
             window.request_animation_frame();
         }
         let now = Instant::now();
-        let t = self.t(now);
-        if t >= self.sheet.handoff()
+        let real = self.t(now);
+        // At the handoff it holds its last rows and stops drawing (a window drawing every frame
+        // keeps her own ticks waiting, and with them the bolt); she removes it once the bolt is
+        // on screen (`intro_bolt_drawn`), or it goes by itself `HOLD_MAX` later.
+        let hand = self.sheet.handoff();
+        let t = real.min(hand);
+        if real >= hand
             && let Some(f) = self.on_handoff.take()
         {
             cx.defer(f);
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(HOLD_MAX).await;
+                this.update(cx, |v, cx| {
+                    v.held_out = true;
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
         }
-        if self.sheet.done(t) {
+        if self.held_out || self.sheet.done(t) {
             if let Some(f) = self.on_done.take() {
                 self.os.shape_of(self.id, &[], &[]).ok();
                 let (n, gap, _) = self.glitch_paints;
@@ -632,9 +659,10 @@ impl Render for CloseUpView {
         }
         let cue = self.sheet.cue(t);
         // Moving (a glitch re-rolls every frame): every frame. Still: a wake-up at the next change.
-        let next = self.sheet.next_change(t);
-        let next = if t < self.sheet.handoff() { next.min(self.sheet.handoff()) } else { next };
-        if cue.glitch.is_some() || next <= t + 20 {
+        let next = self.sheet.next_change(t).min(hand);
+        if real >= hand {
+            // Held.
+        } else if cue.glitch.is_some() || next <= t + 20 {
             window.request_animation_frame();
         } else if self.timer_for != Some(next) {
             self.timer_for = Some(next);

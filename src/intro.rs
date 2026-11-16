@@ -32,8 +32,8 @@ pub const OUT_AT: u64 = 2450;
 pub const OUT_MS: u64 = 260;
 /// The bolt takes over.
 pub const END: u64 = OUT_AT + OUT_MS;
-/// The bolt starts this long before the close-up's end, under its last rows.
-pub const HANDOFF_MS: u64 = 100;
+/// The bolt starts this long before the close-up's end: it holds its last rows over the bolt.
+pub const HANDOFF_MS: u64 = 80;
 
 /// The close-up's height, of her monitor's.
 pub const HEIGHT_OF_MONITOR: f32 = 0.62;
@@ -262,7 +262,7 @@ mod tests {
         assert_eq!([1500, 1590, 1720, 1850, 2040].map(f), ["mouth1", "mouth2", "mouth3", "mouth1", "mouth1"]);
         assert_eq!((f(2050), f(2400)), ("happy", "happy"));
         assert_eq!(s.end(), 2710);
-        assert_eq!(s.handoff(), 2610, "the bolt starts under its last rows");
+        assert_eq!(s.handoff(), 2630, "the bolt starts under its last rows");
         assert!(!s.done(2709) && s.done(2710));
         // In: it rises from well below the edge while Appear builds it; the impact is one red
         // frame, then the squash eases back.
@@ -301,7 +301,7 @@ mod tests {
         let mut s = Sheet::new(2);
         s.skip(1000);
         assert!(s.skipped());
-        assert_eq!((s.end(), s.handoff()), (1260, 1160));
+        assert_eq!((s.end(), s.handoff()), (1260, 1180));
         let c = s.cue(1130);
         assert_eq!(FRAMES[c.frame], "wave2", "holds what showed at the click");
         assert_eq!((c.glitch, c.hi), (None, false));

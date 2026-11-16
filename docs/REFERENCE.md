@@ -200,7 +200,7 @@ The launch, with `[intro] cinematic` on:
 - If the pack has the close-ups (`anim/mochi/intro-*`, `--mochi` only), her close-up rises from below the
   bottom of her monitor while a glitch builds it (62 % of its height, centred on the work area) and plays
   its 2.7 s beat: grab, a whip into a wave, "hi", a grin, then out: it sinks while its rows drop out, inside
-  its own pixels; the bolt starts under its last rows. A click on it
+  its own pixels; it holds its last rows until the bolt is on screen, then goes. A click on it
   or Esc anywhere skips to the out beat. Clicks anywhere else go through to the window under it, and Esc
   reaches your window too.
 - It doesn't play while a fullscreen window is focused, within `cinematic_min_gap_min` of her last run
