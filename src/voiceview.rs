@@ -171,6 +171,11 @@ impl Avatar {
         self.voice.cfg.enabled
     }
 
+    /// The wake word's mic stream is open, idle (her tag's dot becomes a mic: the always-on mic stays visible).
+    pub(super) fn voice_wake_idle(&self) -> bool {
+        self.voice.wake.open.is_some()
+    }
+
     pub(super) fn voice_speaking(&self) -> bool {
         self.voice.turn.is_some() && (self.voice.sent > self.voice.ended || self.voice.prev_left > 0)
     }
@@ -1500,10 +1505,8 @@ impl Avatar {
         if self.voice.asked.is_some() {
             return Some(st("MIC …".into(), "mic", false, "ring", Plate::Slant));
         }
-        // The idle wake stream: open all along, so it keeps the first slot; static (no timer, no meter).
-        if self.voice.wake.open.is_some() {
-            return Some(st("MIC ON · SAY \"HEY CAPRI\"".into(), "wake", false, "mic", Plate::Slant));
-        }
+        // The idle wake stream (open all along) has no tag of its own: her usual tag (ONLINE, her
+        // mood, music) stays, with a mic glyph for its dot (Haseeb, 2026-11-16: "just ONLINE").
         if self.voice.transcribing {
             return Some(st("HEARD · …".into(), "heard", false, "dots", Plate::Arrow));
         }
