@@ -3584,10 +3584,8 @@ impl Avatar {
             self.schedule(cx);
         }
         let Some(head) = self.hit(ev.position) else { return };
-        // A click on her stops her talking (barge-in); the press goes on as usual.
-        if self.voice_speaking() {
-            self.voice_hush("click");
-        }
+        // A press alone never stops her talking: grabbing, dragging, flinging and catching her
+        // mid-flight leave her speech alone. Only a plain tap on her body stops her (mouse_up).
         // Tests drive her with synthetic taps only: a real press in a recording means a person
         // touched her (the clip is thrown away).
         elog!("synaps-avatar: real pointer press ({:?}, {})", ev.button, if head { "head" } else { "body" });
@@ -3666,6 +3664,11 @@ impl Avatar {
             cx.notify();
             self.schedule(cx);
             return;
+        }
+        // A plain tap on her body (no drag) stops her talking: the explicit "hush" a click has
+        // always been. A headpat doesn't: petting her while she talks isn't asking her to stop.
+        if !p.head && self.voice_speaking() {
+            self.voice_hush("click");
         }
         self.click_reaction(p.head, ev.position, now);
         // A tap on the body (not a headpat) opens the field to talk to the session.
