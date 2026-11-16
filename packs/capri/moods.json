@@ -805,7 +805,7 @@
               2500,
               5000
             ],
-            "weight": 1,
+            "weight": 0,
             "every": 3,
             "holdMs": [
               3000,
@@ -849,7 +849,7 @@
             "id": "laydown",
             "strip": "laydown_sleep",
             "lying": true,
-            "weight": 1,
+            "weight": 0,
             "every": 4,
             "holdMs": [
               4000,

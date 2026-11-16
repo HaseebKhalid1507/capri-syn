@@ -299,11 +299,16 @@ mod tests {
         }
         let perch: Vec<&str> = s.pools["perch"].variants.iter().map(|v| v.id.as_str()).collect();
         assert_eq!(perch, ["sit", "perch", "laydown"]);
-        // CapriCore leads (Haseeb, 2026-11-16): perch 4 : 1 : 1, both sleeps 3 : 1.
+        // CapriCore leads (Haseeb, 2026-11-16): perch 4 : 1, floor sleep 3 : 1. Laydown (perch and
+        // window sleep) ships at weight 0 after losing both blind critic rounds (r23, r24): it stays in
+        // the pack and in the pool, off until a weight turns it on.
+        let w = |k: &str, id: &str| s.pools[k].variants.iter().find(|v| v.id == id).map(|v| v.weight).unwrap();
         for (k, lead) in [("perch", 4.0), ("sleepFloor", 3.0), ("sleepWindow", 3.0)] {
             let own: f32 = s.pools[k].variants.iter().filter(|v| v.strip.is_none()).map(|v| v.weight).sum();
             assert_eq!(own, lead, "{k}");
-            assert!(s.pools[k].variants.iter().filter(|v| v.strip.is_some()).all(|v| v.weight == 1.0), "{k}");
         }
+        assert_eq!((w("perch", "perch"), w("perch", "laydown")), (1.0, 0.0));
+        assert_eq!(w("sleepFloor", "doze"), 1.0);
+        assert_eq!(w("sleepWindow", "laydown"), 0.0);
     }
 }
