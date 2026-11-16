@@ -535,8 +535,9 @@ pub struct Avatar {
     home: (i32, i32),
     /// What touches a perch edge, x relative to the seat (sitting) / feet (standing).
     contact: [Option<(i32, i32)>; 2],
-    /// Contact shadow: rects for the frame it was built from, and where it is shown.
-    shadow: Option<(usize, Vec<ShapeRect>)>,
+    /// Contact shadow: rects for the frame it was built from (and whether that frame was
+    /// mirrored: a turn mirrors the shadow with her), and where it is shown.
+    shadow: Option<((usize, bool), Vec<ShapeRect>)>,
     shadow_at: Option<(i32, i32)>,
     /// Last laid-out width of the status tag (logical px), to place the next one.
     tag_w: Rc<Cell<f32>>,
@@ -1572,8 +1573,9 @@ impl Avatar {
             }
             return;
         };
-        if self.shadow.as_ref().map(|s| s.0) != Some(base) {
-            self.shadow = Some((base, self.shadow_rects(base)));
+        let key = (base, self.mirrored(base));
+        if self.shadow.as_ref().map(|s| s.0) != Some(key) {
+            self.shadow = Some((key, self.shadow_rects(base)));
             if self.shadow_at.take().is_some() {
                 self.os.fx_unmap(SHADOW_LAYER);
             }
