@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### The new art about half the time
+- Window perch: CapriCore's sit and lachy's perch now come up 1 : 1 (was 4 : 1), and the pose shifts in
+  place every 2–6 min (was 4–12). Floor sleep: CapriCore's lie and lachy's doze 1 : 1 (was 3 : 1). Window
+  sleep stays CapriCore's (laydown is still at weight 0). Weights only, in `packs/capri/moods.json`.
+
 ### "Hey Capri" from across the desk
 - The check decodes the 2.8 s it was measured and documented with. It had decoded 2.0 s: a byte count
   read as samples.

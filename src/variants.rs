@@ -299,11 +299,12 @@ mod tests {
         }
         let perch: Vec<&str> = s.pools["perch"].variants.iter().map(|v| v.id.as_str()).collect();
         assert_eq!(perch, ["sit", "perch", "laydown"]);
-        // CapriCore leads (Haseeb, 2026-11-16): perch 4 : 1, floor sleep 3 : 1. Laydown (perch and
-        // window sleep) ships at weight 0 after losing both blind critic rounds (r23, r24): it stays in
-        // the pack and in the pool, off until a weight turns it on.
+        // Haseeb, 2026-11-16 (after the B1 deploy, "a"): the new art about half the time, perch 1 : 1
+        // and floor sleep 1 : 1 (was 4 : 1 and 3 : 1). Laydown (perch and window sleep) ships at
+        // weight 0 after losing both blind critic rounds (r23, r24): it stays in the pack and in the
+        // pool, off until a weight turns it on, so window sleep stays CapriCore's.
         let w = |k: &str, id: &str| s.pools[k].variants.iter().find(|v| v.id == id).map(|v| v.weight).unwrap();
-        for (k, lead) in [("perch", 4.0), ("sleepFloor", 3.0), ("sleepWindow", 3.0)] {
+        for (k, lead) in [("perch", 1.0), ("sleepFloor", 1.0), ("sleepWindow", 3.0)] {
             let own: f32 = s.pools[k].variants.iter().filter(|v| v.strip.is_none()).map(|v| v.weight).sum();
             assert_eq!(own, lead, "{k}");
         }
