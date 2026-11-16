@@ -404,6 +404,56 @@ pub struct Decoded {
     pub decode_ms: u128,
 }
 
+/// A still (lachy's face, capri.png, cursor) checked against its sha256 and cut to its opaque
+/// box, `h` px tall (Lanczos3): straight-alpha RGBA.
+pub fn still(path: &std::path::Path, sha: Option<&str>, h: u32) -> Result<image::RgbaImage> {
+    let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    if let Some(want) = sha
+        && sha_hex(&bytes) != want
+    {
+        anyhow::bail!("{}: sha256 differs from anim.json", path.display());
+    }
+    let img = image::load_from_memory(&bytes)?.to_rgba8();
+    let (w0, h0) = img.dimensions();
+    let opaque = |x: u32, y: u32| img.get_pixel(x, y)[3] > 8;
+    let ys: Vec<u32> = (0..h0).filter(|&y| (0..w0).any(|x| opaque(x, y))).collect();
+    let xs: Vec<u32> = (0..w0).filter(|&x| (0..h0).any(|y| opaque(x, y))).collect();
+    let (Some(&y0), Some(&y1), Some(&x0), Some(&x1)) = (ys.first(), ys.last(), xs.first(), xs.last()) else {
+        anyhow::bail!("{}: empty", path.display());
+    };
+    let cut = image::imageops::crop_imm(&img, x0, y0, x1 - x0 + 1, y1 - y0 + 1).to_image();
+    let w = ((cut.width() as f32 * h as f32 / cut.height() as f32).round() as u32).max(1);
+    let src = Image::from_vec_u8(cut.width(), cut.height(), cut.into_raw(), PixelType::U8x4)?;
+    let mut dst = Image::new(w, h.max(1), PixelType::U8x4);
+    Resizer::new().resize(&src, &mut dst, &ResizeOptions::new().resize_alg(ResizeAlg::Convolution(FilterType::Lanczos3)))?;
+    image::RgbaImage::from_raw(w, h.max(1), dst.into_vec()).context("still size")
+}
+
+/// A still as GPUI's image (BGRA).
+pub fn still_image(mut rgba: image::RgbaImage) -> Arc<RenderImage> {
+    for p in rgba.pixels_mut() {
+        p.0.swap(0, 2);
+    }
+    Arc::new(RenderImage::new(vec![image::Frame::new(rgba)]))
+}
+
+/// A still as a pointer image (premultiplied ARGB), its hotspot at `hot` (fractions of the
+/// opaque box).
+pub fn still_pointer(rgba: &image::RgbaImage, hot: (f32, f32), key: u64) -> crate::platform::PointerImage {
+    let (w, h) = rgba.dimensions();
+    let argb = rgba
+        .pixels()
+        .map(|p| {
+            let [r, g, b, a] = p.0;
+            let m = |c: u8| (c as u32 * a as u32 + 127) / 255;
+            (a as u32) << 24 | m(r) << 16 | m(g) << 8 | m(b)
+        })
+        .collect();
+    let hx = ((hot.0 * w as f32).round() as u32).min(w.saturating_sub(1)) as u16;
+    let hy = ((hot.1 * h as f32).round() as u32).min(h.saturating_sub(1)) as u16;
+    crate::platform::PointerImage { key, w: w as u16, h: h as u16, hot: (hx, hy), argb }
+}
+
 pub fn sha_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -801,6 +851,28 @@ pub fn decode_notes(pack: &Pack, files: &[String], size: u32) -> Result<Vec<Note
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_still_is_cut_to_its_opaque_box_scaled_and_sha_checked() {
+        let dir = std::env::temp_dir().join(format!("sa-still-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("s.png");
+        let mut img = image::RgbaImage::new(40, 40);
+        for y in 10..30 {
+            for x in 5..15 {
+                img.put_pixel(x, y, image::Rgba([200, 20, 40, 255]));
+            }
+        }
+        img.save(&p).unwrap();
+        let sha = sha_hex(&std::fs::read(&p).unwrap());
+        let s = still(&p, Some(&sha), 40).unwrap();
+        assert_eq!(s.dimensions(), (20, 40), "10x20 box, 40 px tall");
+        assert!(still(&p, Some("00"), 40).is_err(), "another file");
+        let ptr = still_pointer(&s, (0.0, 0.0), 7);
+        assert_eq!((ptr.w, ptr.h, ptr.hot, ptr.key), (20, 40, (0, 0), 7));
+        assert_eq!(ptr.argb[20 * 20 + 10] >> 24, 255);
+        std::fs::remove_dir_all(&dir).ok();
+    }
     use super::*;
 
     #[test]

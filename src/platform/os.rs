@@ -935,6 +935,11 @@ impl Os {
         self.desk.arm_escape(on);
     }
 
+    /// The pointer's image over her body (None: the desktop's).
+    pub fn pointer_image(&self, img: Option<&super::PointerImage>) {
+        self.desk.pointer_image(self.body(), img);
+    }
+
     pub fn arm_clicks(&self, on: bool) {
         self.desk.arm_clicks(on);
     }

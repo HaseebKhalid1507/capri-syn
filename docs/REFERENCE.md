@@ -166,6 +166,9 @@ Optional desktop art, into the pack's `anim/` (a pack without it loads as before
   Its images are show frames and fan art that its licence does not cover: local personal use only, never
   published. Only this flag puts them in a pack (into your local pack directory); nothing in this repo
   ships or fetches them otherwise. They give her the launch close-up (below).
+- lachy's stills, when the pack has them: her portrait beside her rows in the Line (`face`), `capri.png` over
+  the right-click menu and as the image of the one notification she sends (NEEDS YOU while a fullscreen window
+  hides her; org.freedesktop.Notifications), and its cursor while the pointer is over her head (X11).
 - `anim/anim.json` is `tools/desktop-art.json` (capri-syn's own measured cell grid, anchors and loop flags)
   plus the sha256 of every copied file. `NOTICE.md` gains each source's `Required Notice:` lines, the licence
   URL and its credits.

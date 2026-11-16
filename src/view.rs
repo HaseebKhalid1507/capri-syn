@@ -38,6 +38,41 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use synaps_client::{Client, ClientOptions};
 
+/// lachy's stills at her size: her portrait (the Line), capri.png (the menu header), the cursor
+/// over her head. Each optional: a pack without `anim/` (or a file that failed) has none.
+pub struct Stills {
+    pub face: Option<Arc<RenderImage>>,
+    pub capri: Option<Arc<RenderImage>>,
+    pub capri_path: Option<std::path::PathBuf>,
+    pub cursor: Option<crate::platform::PointerImage>,
+}
+
+/// The menu header's height (logical px) and the cursor's (her head-hover pointer).
+const MENU_HEADER_PX: f32 = 96.0;
+const CURSOR_PX: f32 = 32.0;
+
+impl Stills {
+    fn decode(st: &std::collections::HashMap<String, (std::path::PathBuf, Option<String>)>, sf: f32) -> Stills {
+        let get = |name: &str, h: f32| {
+            let (p, sha) = st.get(name)?;
+            match crate::frames::still(p, sha.as_deref(), (h * sf).round() as u32) {
+                Ok(i) => Some(i),
+                Err(e) => {
+                    elog!("synaps-avatar: still `{name}`: {e:#}");
+                    None
+                }
+            }
+        };
+        Stills {
+            face: get("face", crate::line::FACE_PX).map(crate::frames::still_image),
+            capri: get("capri", MENU_HEADER_PX).map(crate::frames::still_image),
+            capri_path: st.get("capri").map(|s| std::fs::canonicalize(&s.0).unwrap_or_else(|_| s.0.clone())),
+            // Its tip is the opaque box's top-left corner.
+            cursor: get("cursor", CURSOR_PX).map(|i| crate::frames::still_pointer(&i, (0.0, 0.0), 1)),
+        }
+    }
+}
+
 /// Window layout in device pixels (the display server works in these; GPUI gets them / scale factor).
 #[derive(Clone, Copy, Debug)]
 pub struct Layout {
@@ -514,6 +549,9 @@ pub struct Avatar {
     focus: FocusHandle,
     focus_probe: Option<String>,
     warmed: bool,
+    /// lachy's stills, decoded after the frames (`Stills`); her head-hover pointer is on.
+    pub(super) stills: Option<Rc<Stills>>,
+    pointer_on: bool,
     /// Horizontal device-px range of the window that is on the avatar's monitor.
     vis: (i32, i32),
     // Life and effects.
@@ -758,6 +796,8 @@ impl Avatar {
             focus: cx.focus_handle(),
             focus_probe: init.focus_probe.then(String::new),
             warmed: false,
+            stills: None,
+            pointer_on: false,
             vis,
             bob_t0: now,
             hop: None,
@@ -1201,6 +1241,7 @@ impl Avatar {
                 self.glitch = Some(Glitch::new(GlitchKind::Appear, now, self.rng.next()));
             }
             self.heartbeat_start(cx);
+            self.stills_decode(cx);
             let win = self.os.body();
             self.set_icon_on(win);
             self.next_glint = Some(now + Duration::from_millis(700));
@@ -1213,6 +1254,36 @@ impl Avatar {
         }
         cx.notify();
         self.schedule(cx);
+    }
+
+    /// lachy's stills, off the main thread (a few ms each).
+    fn stills_decode(&mut self, cx: &mut Context<Self>) {
+        let Some(st) = self.pack.anim.as_ref().map(|a| a.stills.clone()).filter(|s| !s.is_empty()) else { return };
+        let sf = self.layout.sf;
+        cx.spawn(async move |this, cx| {
+            let s = crate::off_thread(move || Ok(Stills::decode(&st, sf))).await;
+            this.update(cx, |v, cx| {
+                if let Ok(s) = s {
+                    v.stills = Some(Rc::new(s));
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Her head under the pointer: lachy's cursor (a headpat waiting to happen). Applied on every
+    /// move over it (GPUI sets its own when a HUD element's changes).
+    fn hover_pointer(&mut self, p: Point<Pixels>) {
+        let Some(c) = self.stills.as_ref().and_then(|s| s.cursor.as_ref()) else { return };
+        let on = self.hit(p) == Some(true) && self.press.is_none() && self.rag.is_none();
+        if on {
+            self.os.pointer_image(Some(c));
+        } else if self.pointer_on {
+            self.os.pointer_image(None);
+        }
+        self.pointer_on = on;
     }
 
     /// A speech panel is open: the text field, a pending prompt, or a reply.
@@ -1433,6 +1504,16 @@ impl Avatar {
             self.music = None;
         }
         let prev = self.mood;
+        // NEEDS YOU while she's hidden under a fullscreen window: a desktop notification with
+        // lachy's capri.png (he can't see her tag).
+        if m == Mood::NeedsYou
+            && prev != m
+            && self.loaded
+            && self.brain.as_ref().is_some_and(|h| h.fs != brainview::FsHide::Shown)
+        {
+            let image = self.stills.as_ref().and_then(|s| s.capri_path.clone());
+            crate::notify::send(format!("{} // NEEDS YOU", self.name.to_uppercase()), "Waiting on you behind the fullscreen window.".into(), image);
+        }
         // NEEDS YOU: she looks at him (his pointer).
         if m == Mood::NeedsYou && prev != m && self.mirror_cfg.own && self.loaded {
             let x = self.origin.0 + self.layout.ground_x;
@@ -4003,6 +4084,9 @@ impl Avatar {
     }
 
     fn mouse_move(&mut self, ev: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if ev.pressed_button.is_none() {
+            self.hover_pointer(ev.position);
+        }
         if ev.pressed_button != Some(MouseButton::Left) {
             return;
         }
@@ -5807,6 +5891,12 @@ impl Render for Avatar {
             };
             let item = |label: &'static str| item_as(label, false);
             let max_x = l.lp(self.vis.1) - px(220.0);
+            // lachy's capri.png over the items: who this menu is.
+            let header = self.stills.as_ref().and_then(|s| s.capri.clone()).map(|i| {
+                let s = i.size(0);
+                let w = MENU_HEADER_PX * u32::from(s.width) as f32 / (u32::from(s.height) as f32).max(1.0);
+                div().flex().justify_center().pt(px(6.0)).pb(px(2.0)).child(img(ImageSource::Render(i)).w(px(w)).h(px(MENU_HEADER_PX)))
+            });
             let menu = div()
                 .relative()
                 .w(px(210.0))
@@ -5814,6 +5904,7 @@ impl Render for Avatar {
                 .flex_col()
                 .py(px(4.0))
                 .child(theme::backdrop(MENU_CUT, Fill::framed(pal.panel, pal.accent, 2.0).ringed(pal.ring)))
+                .children(header)
                 .child(item("RESET POSITION").id("reset").on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, _: &MouseDownEvent, _, cx| {

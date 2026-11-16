@@ -43,6 +43,7 @@ mod reader;
 mod line;
 mod chip;
 mod mpris;
+mod notify;
 mod session;
 mod settings;
 mod shape;

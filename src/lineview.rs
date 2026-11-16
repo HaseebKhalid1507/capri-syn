@@ -226,6 +226,7 @@ impl Avatar {
         let draft = std::mem::take(&mut self.draft);
         let sent = self.sent.clone();
         let max_thread = area.h as f32 / sf / 3.0;
+        let face = self.stills.as_ref().and_then(|s| s.face.clone());
         let xid = Rc::new(Cell::new(0u32));
         let (xid2, os) = (xid.clone(), self.os.clone());
         let built: Rc<RefCell<Option<Entity<Line>>>> = Rc::default();
@@ -234,7 +235,7 @@ impl Avatar {
         let opened = cx.open_window(options, move |window, cx| {
             xid2.set(os.adopt(Role::Line, window).unwrap_or(0));
             let on_ask: crate::line::OnAsk = Box::new(move |ask, cx: &mut App| me.update(cx, |a, cx| a.line_ask(ask, cx)).unwrap_or_else(|_| Err("she is gone".into())));
-            let view = cx.new(|cx| Line::new(snap, draft, sent, name, font, pal, max_thread, on_ask, window, cx));
+            let view = cx.new(|cx| Line::new(snap, draft, sent, name, font, pal, max_thread, face, on_ask, window, cx));
             *built2.borrow_mut() = Some(view.clone());
             cx.new(|cx| gpui_kit::base::Root::new(view, window, cx))
         });

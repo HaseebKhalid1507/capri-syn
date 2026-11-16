@@ -4,7 +4,7 @@
 //! monitors, struts, compositor detection, focus. Every rule built on it is the core's
 //! (`platform/os.rs`).
 
-use super::{Caps, Desktop, FxZ, Hint, Monitor, PointerRead, Role, SEAT_MIN, ShapeRect, Stage, Visible, Win, WinId, WinRect};
+use super::{Caps, Desktop, FxZ, Hint, Monitor, PointerImage, PointerRead, Role, SEAT_MIN, ShapeRect, Stage, Visible, Win, WinId, WinRect};
 use crate::edges::{self, Strut};
 use anyhow::{Context as _, Result, bail};
 use gpui_kit::{Window, WindowKind, WindowOptions};
@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 use x11rb::connection::{Connection as _, RequestConnection as _};
 use x11rb::protocol::Event;
 use x11rb::protocol::randr::ConnectionExt as _;
+use x11rb::protocol::render::{self, ConnectionExt as _};
 use x11rb::protocol::shape::{self, ConnectionExt as _};
 use x11rb::protocol::xfixes::{self, ConnectionExt as _};
 use x11rb::protocol::xproto::{self, ConnectionExt as _};
@@ -42,6 +43,8 @@ pub struct X11 {
     /// Escape presses are reported (`arm_escape`), to this.
     escape: Arc<AtomicBool>,
     on_escape: Escapes,
+    /// The pointer image made last (its key, the X cursor).
+    cursor: Mutex<Option<(u64, u32)>>,
 }
 
 type Escapes = Arc<Mutex<Option<Box<dyn Fn() + Send>>>>;
@@ -219,6 +222,7 @@ impl X11 {
             click_conn: Mutex::new(None),
             escape: Arc::new(AtomicBool::new(false)),
             on_escape: Arc::new(Mutex::new(None)),
+            cursor: Mutex::new(None),
         })
     }
 
@@ -573,6 +577,61 @@ impl Desktop for X11 {
         if self.escape.swap(on, Ordering::Relaxed) != on {
             self.select_raw();
         }
+    }
+
+    fn pointer_image(&self, s: WinId, img: Option<&PointerImage>) {
+        if s == 0 {
+            return;
+        }
+        let cursor = match img {
+            None => x11rb::NONE,
+            Some(i) => match self.make_cursor(i) {
+                Ok(c) => c,
+                Err(e) => {
+                    elog!("synaps-avatar: x11: pointer image: {e:#}");
+                    return;
+                }
+            },
+        };
+        self.conn.change_window_attributes(s, &xproto::ChangeWindowAttributesAux::new().cursor(cursor)).ok();
+        self.conn.flush().ok();
+    }
+}
+
+impl X11 {
+    /// An ARGB cursor from `i` (RENDER), made once per image.
+    fn make_cursor(&self, i: &PointerImage) -> Result<u32> {
+        let mut g = self.cursor.lock().map_err(|_| anyhow::anyhow!("cursor lock"))?;
+        if let Some((k, c)) = *g
+            && k == i.key
+        {
+            return Ok(c);
+        }
+        let c = &self.conn;
+        let formats = c.render_query_pict_formats()?.reply()?;
+        let fmt = formats
+            .formats
+            .iter()
+            .find(|f| f.depth == 32 && f.type_ == render::PictType::DIRECT && f.direct.alpha_mask == 0xff && f.direct.alpha_shift == 24 && f.direct.red_shift == 16)
+            .context("no ARGB32 picture format")?
+            .id;
+        let pix = c.generate_id()?;
+        c.create_pixmap(32, pix, self.root, i.w, i.h)?;
+        let gc = c.generate_id()?;
+        c.create_gc(gc, pix, &xproto::CreateGCAux::new())?;
+        let bytes: Vec<u8> = i.argb.iter().flat_map(|p| p.to_le_bytes()).collect();
+        c.put_image(xproto::ImageFormat::Z_PIXMAP, pix, gc, i.w, i.h, 0, 0, 0, 32, &bytes)?;
+        let pic = c.generate_id()?;
+        c.render_create_picture(pic, pix, fmt, &render::CreatePictureAux::new())?;
+        let cur = c.generate_id()?;
+        c.render_create_cursor(cur, pic, i.hot.0, i.hot.1)?;
+        c.render_free_picture(pic)?;
+        c.free_gc(gc)?;
+        c.free_pixmap(pix)?;
+        if let Some((_, old)) = g.replace((i.key, cur)) {
+            c.free_cursor(old).ok();
+        }
+        Ok(cur)
     }
 }
 
