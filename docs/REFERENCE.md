@@ -204,9 +204,10 @@ With `anim/`, `moods.json` `variants` mixes that art in; she never swaps one set
   bloom a drawn floor arrival starts from, `formChance` of the time; 3/4 of her size, cut to her window).
   The travel bolt stays plain red. A quiet (passive) teleport never plays them.
 - Landing on a window top she touches down with the pack's `arrive.perch` (Capri: her crouch on the
-  edge). Before the pack's own sit its last frame dissolves into the sit over `arrive.perchBlendMs`
-  (rows drop out where they are). Before a drawn pose (lachy's perch) only that first frame plays, cut
-  inside the landing glitch, so the art changes before she's solid and nothing is cut after the contact.
+  edge), then her sit inside a dip at contact: the squash starts `arrive.perchDipMs` before the change,
+  so the swap falls near its trough (no dissolve, no double image). Before a drawn pose (lachy's perch)
+  only that first frame plays, cut inside the landing glitch, so the art changes before she's solid; the
+  dip is then the settle at the glitch's end. The landing glitch never shifts her legs below the edge.
 
 The launch, with `[intro] cinematic` on:
 

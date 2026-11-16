@@ -251,7 +251,12 @@ fn add_rim_rows(px: &mut [u8], w: u32, h: u32, from: i32, to: i32, rgb: u32) {
 }
 
 /// Head x and glint candidates from the hit mask (pack-agnostic: no colour rules).
-fn head_and_glints(mask: &Mask, top: i32, height: i32) -> (i32, Vec<(i16, i16)>) {
+/// Her hair's red (CapriCore's and lachy's), opaque: where sparkles may sit.
+fn is_hair(p: &[u8; 4]) -> bool {
+    p[3] >= 200 && p[0] >= 150 && p[1] <= 110 && p[0] as i32 - p[2] as i32 >= 40
+}
+
+fn head_and_glints(mask: &Mask, hair: &Mask, top: i32, height: i32) -> (i32, Vec<(i16, i16)>) {
     let band = (height as f32 * 0.3) as i32;
     let (mut sum, mut n) = (0i64, 0i64);
     for y in top.max(0)..(top + band).min(mask.h as i32) {
@@ -263,13 +268,14 @@ fn head_and_glints(mask: &Mask, top: i32, height: i32) -> (i32, Vec<(i16, i16)>)
         }
     }
     let head_x = if n > 0 { (sum / n) as i32 } else { mask.w as i32 / 2 };
-    // Candidates: pixels in the top 40 % whose 9x9 neighbourhood is all body, on a grid.
-    let r = 4;
+    // Candidates: pixels in the top 40 % whose 13x13 neighbourhood is hair (never her face, eyes
+    // or clothes: a sparkle and its drift stay on the hair), on a grid.
+    let r = 6;
     let mut cands = Vec::new();
     let y1 = (top + (height as f32 * 0.4) as i32).min(mask.h as i32 - r);
     for y in ((top + r).max(r)..y1).step_by(3) {
         for x in (r..mask.w as i32 - r).step_by(3) {
-            if [(-r, -r), (r, -r), (-r, r), (r, r), (0, 0), (0, -r), (0, r), (-r, 0), (r, 0)].iter().all(|&(dx, dy)| mask.get(x + dx, y + dy)) {
+            if [(-r, -r), (r, -r), (-r, r), (r, r), (0, 0), (0, -r), (0, r), (-r, 0), (r, 0)].iter().all(|&(dx, dy)| mask.get(x + dx, y + dy) && hair.get(x + dx, y + dy)) {
                 cands.push((x as i16, y as i16));
             }
         }
@@ -650,9 +656,14 @@ fn finish(pack: &Pack, f: &FrameSource, geo: &Geometry, mut px: Vec<u8>) -> Resu
     let face = face_band(&px, geo.width, top.round() as i32, (vb.height as f32 * geo.scale) as i32);
 
     let mut mask = Mask::new(geo.width, geo.height);
+    let mut hair = Mask::new(geo.width, geo.height);
     for (i, p) in px.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        let (x, y) = (i as u32 % geo.width, i as u32 / geo.width);
         if p[3] >= HIT_ALPHA {
-            mask.set(i as u32 % geo.width, i as u32 / geo.width);
+            mask.set(x, y);
+        }
+        if is_hair(p) {
+            hair.set(x, y);
         }
         p.swap(0, 2); // RGBA → BGRA (GPUI's sprite atlas format), straight alpha.
     }
@@ -661,7 +672,7 @@ fn finish(pack: &Pack, f: &FrameSource, geo: &Geometry, mut px: Vec<u8>) -> Resu
     let head_line = (top + vb.height as f32 * geo.scale * head_fraction).round() as i32;
     // A strip's cell keeps only its opaque box (most of the rect is empty).
     let (at, rgba) = if f.cell.is_some() { crop_opaque(px, geo.width, geo.height) } else { ((0, 0), image::RgbaImage::from_raw(geo.width, geo.height, px).expect("buffer size")) };
-    let (head_x, glints) = head_and_glints(&mask, top.round() as i32, (vb.height as f32 * geo.scale) as i32);
+    let (head_x, glints) = head_and_glints(&mask, &hair, top.round() as i32, (vb.height as f32 * geo.scale) as i32);
     let profile = Arc::new(top_profile(&mask));
     let bottom = (0..mask.h as i32).rev().find(|&y| (0..mask.w as i32).any(|x| mask.get(x, y))).map_or(top.round() as i32 + 1, |y| y + 1);
     Ok(Frame {

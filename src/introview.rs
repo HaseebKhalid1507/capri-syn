@@ -340,8 +340,14 @@ impl Avatar {
         let seed = self.rng.next();
         let mut view = None;
         let mut id = 0;
+        // Its shape before its first frame (that one uploads every close-up: slow): mapped
+        // without one, the whole window showed as a black box for two frames.
+        let first: Vec<ShapeRect> = frames.first().map(|c| moved(&c.rects, p.at.0, p.at.1)).unwrap_or_default();
         let opened = cx.open_window(options, |window, cx| {
             id = os.adopt(Role::Intro, window).unwrap_or(0);
+            if id != 0 && !first.is_empty() {
+                os.shape_of(id, &first, &first).ok();
+            }
             let me2 = me.clone();
             let on_handoff: OnDone = Box::new(move |cx: &mut App| {
                 me2.update(cx, |a, cx| a.intro_handoff(cx)).ok();
@@ -688,7 +694,6 @@ impl Render for CloseUpView {
         let (iw, ih) = self.place.image;
         let sf = self.sf;
         let mut plan = BodyPlan::plain();
-        plan.sx = cue.scale;
         plan.sy = cue.scale;
         plan.pivot = (iw as f32 / 2.0, ih as f32);
         if let Some(gc) = cue.glitch {
@@ -708,11 +713,9 @@ impl Render for CloseUpView {
                 tag: None,
                 sf,
                 calm: false,
+                still_from: None,
             });
             plan.tint = g.tint(now);
-        }
-        if cue.red {
-            plan.tint = Some(fx::BOLT_RED);
         }
         if let Some(u) = cue.out {
             plan.slices = Some(intro::out_bands(ih, u, self.seed, (10.0 * sf).round() as i32));
@@ -738,6 +741,10 @@ impl Render for CloseUpView {
         let tint = plan.tint.map(|c| (c, plan.body_rects(&f.rects)));
         let bars = if plan.tint.is_some() { Vec::new() } else { plan.bar_rects(&f.rects) };
         let img = f.image.clone();
+        // The entrance: a red tint and scanlines over its own pixels (its rects), settling off.
+        let settle = cue.settle.map(intro::settle).filter(|&(a, b)| a > 0.01 || b > 0.01);
+        let rects_now = f.rects.clone();
+        let squashed = plan.sy < 1.0;
         let warm: Vec<Arc<RenderImage>> = if std::mem::replace(&mut self.warmed, true) { Vec::new() } else { self.frames.iter().map(|c| c.image.clone()).collect() };
         let plan = Rc::new(plan);
         let entity = cx.entity();
@@ -761,8 +768,9 @@ impl Render for CloseUpView {
                     };
                     let full = rect(0.0, 0.0, iw as f32, ih as f32);
                     // Without a compositor the bounding shape lands a frame late: the plain
-                    // close-up underneath, so wherever it grows there is art, not black.
-                    if !alpha && plan.slices.is_some() {
+                    // close-up underneath, so wherever it grows there is art, not black (the
+                    // out beat's rows, the impact's squash easing back).
+                    if !alpha && (plan.slices.is_some() || squashed) {
                         window.paint_image(full, full, Corners::default(), img.clone(), 0, false).ok();
                     }
                     for (r, c) in ghost.iter().chain(&solid) {
@@ -792,6 +800,24 @@ impl Render for CloseUpView {
                     }
                     for (r, c) in &bars {
                         quad(window, r, *c);
+                    }
+                    if let Some((tint, scan)) = settle {
+                        let red = rgba((fx::BOLT_RED << 8) | (tint * 255.0).round() as u32);
+                        let dark = rgba((0x02040a << 8) | (scan * 255.0).round() as u32);
+                        let (step, lh) = ((3.0 * sf).round().max(3.0) as i32, sf.round().max(1.0) as i32);
+                        for &(x, y, w, h) in rects_now.iter() {
+                            let (x, y, w, h) = (x as f32, y as i32, w as f32, h as i32);
+                            if tint > 0.01 {
+                                window.paint_quad(fill(rect(x, y as f32, w, h as f32), red));
+                            }
+                            if scan > 0.01 {
+                                let mut yy = y + (step - y.rem_euclid(step)) % step;
+                                while yy < y + h {
+                                    window.paint_quad(fill(rect(x, yy as f32, w, lh.min(y + h - yy) as f32), dark));
+                                    yy += step;
+                                }
+                            }
+                        }
                     }
                     let e = entity.clone();
                     window.on_mouse_event(move |_: &MouseDownEvent, phase, _, cx| {

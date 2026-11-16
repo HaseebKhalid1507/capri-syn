@@ -387,6 +387,8 @@ const LEAVE_CUT_IN: usize = 2;
 const HEART_LAYER: usize = 6;
 /// The contact shadow under a perch, stacked right below the avatar window.
 const SHADOW_LAYER: usize = 14;
+/// It comes this long after an arrival's last frame (the pose's present lands a frame later).
+const SHADOW_AFTER_ARRIVAL: Duration = Duration::from_millis(50);
 /// Music notes: an outline and a fill layer each, at most seven notes.
 const NOTE_LAYER: usize = 15;
 const NOTES_MAX: usize = 7;
@@ -1675,11 +1677,11 @@ impl Avatar {
 
     // ---- perch shadow ---------------------------------------------------------------
 
-    /// Contact sliver for a perch: a solid dark band a few px thick on the window face right
-    /// under the edge, under every column where the figure touches the edge (seat, thighs,
-    /// the planted hand: opaque in the rows just above the line), widened by a pixel each
-    /// side, minus the legs hanging in front. 1-bit friendly: no dither. Avatar-local
-    /// device px.
+    /// Contact sliver for a perch: a dark band a few px thick on the window face right under
+    /// the edge, under every column where the figure touches the edge (seat, thighs, the
+    /// planted hand: opaque in the rows just above the line), widened by a pixel each side,
+    /// minus the legs hanging in front. Each stretch tapers to 1 px at its ends (a soft
+    /// contact, not a hard bar). 1-bit friendly: no dither. Avatar-local device px.
     fn shadow_rects(&self, frame: usize) -> Vec<ShapeRect> {
         let l = &self.layout;
         let Some(p) = self.perch_spec() else { return Vec::new() };
@@ -1700,16 +1702,35 @@ impl Avatar {
                 }
             }
         }
+        // Thickness per column: 1 px at a stretch's ends, `thick` from `ramp` px in.
+        let ramp = (4.0 * l.sf).round().max(1.0) as i32;
+        let mut depth = vec![0i32; w as usize];
+        let mut x = 0;
+        while x < w {
+            if !under[x as usize] {
+                x += 1;
+                continue;
+            }
+            let a = x;
+            while x < w && under[x as usize] {
+                x += 1;
+            }
+            for c in a..x {
+                let d = (c - a).min(x - 1 - c);
+                depth[c as usize] = (1 + d * (thick - 1) / ramp).min(thick);
+            }
+        }
         let mut out = Vec::new();
         for y in line.max(0)..(line + thick).min(h) {
             let mut x = 0;
+            let on = |x: i32| depth[x as usize] > (y - line) && !f.mask.get(x, y);
             while x < w {
-                if !under[x as usize] || f.mask.get(x, y) {
+                if !on(x) {
                     x += 1;
                     continue;
                 }
                 let s0 = x;
-                while x < w && under[x as usize] && !f.mask.get(x, y) {
+                while x < w && on(x) {
                     x += 1;
                 }
                 out.push((s0 as i16, y as i16, (x - s0) as u16, 1));
@@ -1720,17 +1741,13 @@ impl Avatar {
 
     /// Show, move or hide the contact shadow to match the placement.
     fn sync_shadow(&mut self) {
-        let want = self.sitting() && self.loaded && !self.hidden && self.teleport.is_none() && !self.quitting && self.press.is_none() && self.rag.is_none();
-        // The resting frame of the current layer (music swaps the pose), else the perch base.
-        // An arrival's touchdown is on the edge until its dissolve is over: its frame's shadow,
-        // not the pose's (the sit's legs over the edge showed as a dark dash beside the crouch
-        // a frame before the sit itself).
         let now = Instant::now();
-        let shown = match self.arrive_blend(now) {
-            Some((f, _)) => f,
-            None if self.arriving(now) => self.anim.frame(),
-            None => self.anim.base(),
-        };
+        // None under an arrival's touchdown (a dark bar under the crouch's hand right after the
+        // contact): it comes a beat after her pose is on screen, the pose's own.
+        let settled = self.arrive.until.is_none_or(|t| now >= t + SHADOW_AFTER_ARRIVAL);
+        let want = self.sitting() && self.loaded && !self.hidden && self.teleport.is_none() && settled && !self.quitting && self.press.is_none() && self.rag.is_none();
+        // The resting frame of the current layer (music swaps the pose), else the perch base.
+        let shown = self.anim.base();
         let base = Some(shown)
             .filter(|&i| self.pack.frames.get(i).is_some_and(|f| f.anchor.name == "seat"))
             .or_else(|| self.perch_spec().and_then(|p| self.pack.index.get(&p.base).copied()));
@@ -1844,9 +1861,7 @@ impl Avatar {
         }
         take(self.teleport.as_ref().and_then(|t| t.leave_until));
         take(self.arrive.red_until.filter(|&t| t > now));
-        if let Some((_, t0, _)) = self.arrive.blend {
-            take(Some((now + FRAME_FX).max(t0)));
-        }
+        take(self.arrive.until.map(|t| t + SHADOW_AFTER_ARRIVAL).filter(|&t| t > now));
         // Glints: at their slice centres (fx::GLINT_STEPS per life), not a free-running tick;
         // a step waiting for company (GLINT_SLACK) at the end of its wait.
         let life_ms = self.pack.behaviour.life.sparkle_ms;
@@ -1960,14 +1975,6 @@ impl Avatar {
         }
         let before = self.anim.frame();
         let mut dirty = self.anim.tick(now);
-        if let Some((_, t0, ms)) = self.arrive.blend
-            && t0 <= now
-        {
-            dirty = true;
-            if now >= t0 + Duration::from_millis(ms as u64) {
-                self.arrive.blend = None;
-            }
-        }
         self.voice_keepalive(now, cx);
         if dirty {
             self.lying_cut(before, now);
@@ -4634,6 +4641,12 @@ impl Render for Avatar {
             };
             self.glitch_step.set((Some(g.t0), step + 1));
             let base = plan.clone();
+            // Landing on a window top: the rows at the edge and below stay put (her legs never
+            // tear across the edge line, the touchdown's dark parts never smear along it).
+            let still_legs = (g.kind == GlitchKind::Land && self.sitting())
+                .then_some(l.seat_y)
+                .flatten()
+                .map(|s| s - l.avatar_y - (24.0 * sf).round() as i32);
             // Carried or landing, the next frame is the rag's next plan: the pattern goes
             // underneath on that (its squash and frame), not on this one.
             let rag_next = rag_shown.as_ref().and_then(|(_, n)| n.clone());
@@ -4652,6 +4665,7 @@ impl Render for Avatar {
                     tag,
                     sf,
                     calm: g.kind == GlitchKind::Land,
+                    still_from: still_legs,
                 });
                 p.tint = g.tint(at);
                 p
@@ -4689,6 +4703,24 @@ impl Render for Avatar {
             }
             if n.frame != shown_i {
                 next_img = self.frame_or_default(n.frame).map(|f| (f.image.clone(), (f.at, f.image_size())));
+            }
+        }
+        // The frame changes before the next one (an arrival's cut, a blink): that frame goes
+        // underneath, its silhouette in the tint when tinted (where it grows past this one, the
+        // window showed what it hadn't drawn: a dark slab of her new legs at a perch cut).
+        let mut next_rects: Option<Arc<Vec<ShapeRect>>> = None;
+        if self.rag.is_none() && !hidden {
+            let nf = self.anim.frame_at(now + FRAME_FX);
+            if nf != shown_i
+                && let Some(f) = self.frame_or_default(nf)
+            {
+                next_img = Some((f.image.clone(), (f.at, f.image_size())));
+                next_rects = Some(f.rects.clone());
+                if next.is_none() {
+                    let mut n = plan.clone();
+                    n.slices = None;
+                    next = Some(n);
+                }
             }
         }
         // Alpha mode (a compositor shows the window's own alpha): nothing is clipped by a
@@ -4741,15 +4773,17 @@ impl Render for Avatar {
         if !turning && next.as_ref().is_some_and(|n| n.slices.is_none()) {
             under = (POSE_REACH * sf).ceil();
         }
-        let next_ghosts = next.as_ref().filter(|n| n.has_ghosts() && !hidden).map(|n| n.ghost_rects(&rects)).unwrap_or_default();
+        let nrects: &[ShapeRect] = next_rects.as_deref().map_or(&rects[..], |v| &v[..]);
+        let next_ghosts = next.as_ref().filter(|n| n.has_ghosts() && !hidden).map(|n| n.ghost_rects(nrects)).unwrap_or_default();
         let next_fill: Vec<(ShapeRect, u32)> = next
             .as_ref()
             .filter(|_| !hidden)
             .map(|n| match n.tint {
-                Some(c) => n.body_rects(&rects).into_iter().map(|r| (r, c)).collect(),
-                None => n.solid_rects(&rects),
+                Some(c) => n.body_rects(nrects).into_iter().map(|r| (r, c)).collect(),
+                None => n.solid_rects(nrects),
             })
             .unwrap_or_default();
+
         let next = next.filter(|_| !hidden).map(Rc::new);
         let next_tag = next.clone();
         let plan = Rc::new(plan);
@@ -4760,26 +4794,6 @@ impl Render for Avatar {
         } else {
             plan.shape(&rects)
         };
-        // An arrival's last frame dissolving into her pose: its rows drop out over the pose,
-        // each where it is (1-bit friendly: no alpha).
-        let blend = self.arrive_blend(now).filter(|_| !hidden && self.glitch.is_none() && plan.tint.is_none()).and_then(|(fi, u)| {
-            let f = self.frame_or_default(fi)?;
-            let rows = crate::intro::out_bands(ah, u, self.t_start.elapsed().as_millis() as u64 | 1, (6.0 * sf).round() as i32);
-            let keep: Vec<ShapeRect> = f
-                .rects
-                .iter()
-                .flat_map(|&(x, y, w, h)| {
-                    rows.iter().filter_map(move |&(y0, y1, ..)| {
-                        let (a, b) = ((y as i32).max(y0), (y as i32 + h as i32).min(y1));
-                        (b > a).then_some((x, a as i16, w, (b - a) as u16))
-                    })
-                })
-                .collect();
-            Some((f.image.clone(), (f.at, f.image_size()), rows, keep))
-        });
-        if let Some((.., keep)) = &blend {
-            body_shape.extend(keep.iter().copied());
-        }
         // Shape mode turn: the art as it is (it's on screen already), shown through a band
         // about her feet (`facing::turn_band`); only the shape moves, so nothing lands late.
         if turning && !alpha {
@@ -4945,12 +4959,6 @@ impl Render for Avatar {
                         }
                         for &(r, c) in &bar_rects {
                             window.paint_quad(fill(rect(r.0 as f32, r.1 as f32, r.2 as f32, r.3 as f32), rgb(c)));
-                        }
-                        if let Some((img, at, rows, _)) = &blend {
-                            let whole = put(*at, 0.0, 0.0, aw as f32, ah as f32);
-                            for &(y0, y1, ..) in rows {
-                                window.paint_image(rect(0.0, y0 as f32, aw as f32, (y1 - y0) as f32), whole, Corners::default(), img.clone(), 0, false).ok();
-                            }
                         }
                     }
                     let e = entity.clone();

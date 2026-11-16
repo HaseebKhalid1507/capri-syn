@@ -1278,7 +1278,7 @@
         "ms": 340
       }
     ],
-    "perchBlendMs": 160,
+    "perchDipMs": 60,
     "teleportChance": 0.5
   },
   "kiss": {

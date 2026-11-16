@@ -103,6 +103,7 @@ impl Rng {
     }
 }
 
+#[derive(Clone)]
 pub struct Animator {
     base: usize,
     looping: Option<Seq>,
@@ -134,6 +135,16 @@ impl Animator {
     }
 
     /// The mood layer's resting frame (stable while loops and one-shots play).
+    /// The frame that shows at `t` (a copy steps there; this one doesn't move).
+    pub fn frame_at(&self, t: Instant) -> usize {
+        if self.due.is_none_or(|d| d > t) {
+            return self.frame();
+        }
+        let mut a = self.clone();
+        a.tick(t);
+        a.frame()
+    }
+
     pub fn base(&self) -> usize {
         self.base
     }

@@ -333,8 +333,9 @@ pub struct ArriveSpec {
     pub teleport: Vec<Step>,
     /// Onto a window top (seat-anchored frames only).
     pub perch: Vec<Step>,
-    /// Its last frame dissolves into her sitting pose over this long (ms; 0: a cut).
-    pub perch_blend_ms: u32,
+    /// A dip at the touchdown: the squash starts this long (ms) before the change to her
+    /// sitting pose (0: none).
+    pub perch_dip_ms: u32,
     /// The chance a passive or bid teleport lands with `teleport` / `perch` when the last one
     /// didn't (never twice running: 0.5 gives 1 in 3).
     pub teleport_chance: f32,
@@ -1507,10 +1508,10 @@ pub mod tests {
         // Her plain red bolt replaces the intro's first frame (Haseeb 08:06 §6.1); 07 is neutral.
         assert_eq!(ids(&a.launch), ["intro-gaze", "intro-arrival", "intro-landing", "intro-greeting", "intro-wink", "neutral"]);
         assert!(!ids(&a.summon).contains(&"intro-wink".to_string()), "no wink on a summon");
-        // r29: the touchdown is the crouch, dissolving into the sit (no frame with her legs
-        // through the edge).
+        // r30: the touchdown is the crouch, then the sit inside a dip (no frame with her legs
+        // through the edge, no dissolve: no double image).
         assert_eq!(ids(&a.perch), ["intro-landing-seat"]);
-        assert!(a.perch_blend_ms > 0);
+        assert!(a.perch_dip_ms > 0 && a.perch_dip_ms < 80, "the swap near the squash's trough (80 ms)");
         // One perch frame (§6.2): no per-mood or activity swaps while perched.
         let p = b.perch.as_ref().unwrap();
         assert!(p.moods.is_empty() && p.activities.is_empty() && p.click.is_empty());

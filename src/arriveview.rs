@@ -31,8 +31,6 @@ pub(super) struct ArriveState {
     on_appear: Option<Seq>,
     /// An arrival sequence is playing until then: a relayer doesn't cut it.
     pub until: Option<Instant>,
-    /// The arrival's last frame dissolves into her pose: (that frame, from, ms).
-    pub blend: Option<(usize, Instant, u32)>,
     /// A drawn arrival shows as the red land silhouette until then.
     pub red_until: Option<Instant>,
     /// A drawn arrival forms her until then (its first cells are the forming): the HUD waits.
@@ -93,10 +91,11 @@ impl Avatar {
     }
 
     /// She reappears from a teleport (the landing glitch starts now): its arrival sequence, if
-    /// it has one. On a window top it is the pack's touchdown (`arrive.perch`): before the pack's
-    /// own pose its last frame dissolves into the pose (`perchBlendMs`); before a drawn pose
-    /// only its first frame plays, cut inside the landing glitch, so the change of art happens
-    /// before she is solid and nothing is cut after the contact.
+    /// it has one. On a window top it is the pack's touchdown (`arrive.perch`), then a dip at
+    /// contact (`perchDipMs`: the squash, its trough on the change to her pose: no double
+    /// image, the pose's legs only with the pose). Before a drawn pose only the touchdown's
+    /// first frame plays, cut inside the landing glitch, so the change of art happens before
+    /// she is solid; the dip is then the settle at the glitch's end.
     pub(super) fn arrive_appeared(&mut self, now: Instant) {
         let own = self.arrive.on_appear.take();
         if let Some(seq) = self.drawn_floor_arrival() {
@@ -115,7 +114,7 @@ impl Avatar {
         }
         let Some(own) = own else { return };
         let land_ms = self.glitch.filter(|g| g.kind == GlitchKind::Land).map_or(0.0, |g| g.ms);
-        let blend_ms = self.pack.behaviour.arrive.as_ref().map_or(0, |a| a.perch_blend_ms);
+        let dip_ms = self.pack.behaviour.arrive.as_ref().map_or(0, |a| a.perch_dip_ms);
         let drawn = self.sitting() && {
             self.art_sync(now);
             self.art_strip().is_some()
@@ -124,10 +123,14 @@ impl Avatar {
             Touchdown::Whole => own,
             Touchdown::Cut(ms) => own.first().map(|&(f, _)| vec![(f, ms)]).unwrap_or_default(),
         };
-        let Some(&(last, _)) = seq.last() else { return };
+        if seq.is_empty() {
+            return;
+        }
         let ms: u64 = seq.iter().map(|s| s.1 as u64).sum();
-        if self.sitting() && !drawn && blend_ms > 0 {
-            self.arrive.blend = Some((last, now + Duration::from_millis(ms), blend_ms));
+        if self.sitting() && dip_ms > 0 {
+            // A squash scheduled ahead (`fx::squash` holds 1.0 until it starts).
+            let contact = (ms as f32).max(land_ms) as u64;
+            self.squash = Some(now + Duration::from_millis(contact.saturating_sub(dip_ms as u64)));
         }
         self.anim.play(seq, now);
         self.arrive.until = Some(now + Duration::from_millis(ms));
@@ -148,13 +151,6 @@ impl Avatar {
             seq = form;
         }
         Some(seq)
-    }
-
-    /// The arrival's dissolve into her pose at `now`: (the frame dissolving, 0..1).
-    pub(super) fn arrive_blend(&self, now: Instant) -> Option<(usize, f32)> {
-        let (f, t0, ms) = self.arrive.blend?;
-        let u = now.checked_duration_since(t0)?.as_secs_f32() * 1000.0 / ms.max(1) as f32;
-        (u < 1.0 && self.anim.frame() != f).then_some((f, u))
     }
 
     /// A new teleport, or one that ended before she appeared: nothing pending.
