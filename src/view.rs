@@ -19,6 +19,7 @@ mod artview;
 pub(crate) mod introview;
 
 use crate::anim::{Animator, Mood, Rng, Seq};
+use crate::variants::PoolKey;
 use crate::control::Command;
 use crate::edges;
 use crate::frames::{Frame, Geometry, NoteMasks};
@@ -122,6 +123,7 @@ impl Layout {
         let min_top = pack
             .frames
             .iter()
+            .filter(|f| !pack.fx_frame(f))
             .map(|f| geo.to_device(0, f.bounds.y + pack.offset(f).1).1)
             .fold(f32::MAX, f32::min);
         let avatar_y = d(TOP_MARGIN + PANEL_MAX_H + TAIL_H + TIP_GAP) - min_top.round() as i32;
@@ -344,6 +346,8 @@ const HUD_AFTER_TELEPORT: Duration = Duration::from_millis(200);
 const LIFE_SPARKLE: Duration = Duration::from_millis(150);
 const LIFE_BREATH: Duration = Duration::from_millis(300);
 const LIFE_BLINK_MS: u32 = 500;
+/// A drawn floor leave from another stand drawing starts this many cells in (inside its tear).
+const LEAVE_CUT_IN: usize = 2;
 /// First effect layer of the hearts: a rim and a fill per heart.
 const HEART_LAYER: usize = 6;
 /// The contact shadow under a perch, stacked right below the avatar window.
@@ -440,6 +444,8 @@ struct Teleport {
     /// A passive move: a shorter dissolve, a ~150 ms rebuild with little fringing, and the
     /// tag back with the body.
     quiet: bool,
+    /// A drawn leave (`perchLeave` / `floorLeave`) plays until then; then the bolt.
+    leave_until: Option<Instant>,
 }
 
 pub struct Avatar {
@@ -1438,8 +1444,11 @@ impl Avatar {
         // The pools see the new mood (a sleep pool in or out). A strip variant has its own way
         // in and out: the mood's CapriCore entry/exit don't play over it.
         let was_strip = self.art_strip().is_some();
+        let floor_strip_sleep = prev == Mood::Sleepy && m != prev && was_strip && self.placement == Placement::Ground;
         self.mood = m;
         self.art_sync(now);
+        // Out of a lachy floor sleep: its drawn wake (it stands her in the bridge drawing).
+        let drawn_wake = floor_strip_sleep && self.art.floor_strip && self.art_transition("wake").is_some();
         self.mood = prev;
         let to_strip = self.art_strip().is_some();
         // An arrival sequence (the launch intro) plays through; the mood's entry follows it.
@@ -1479,7 +1488,7 @@ impl Avatar {
         // Capri's state bursts.
         // Speaking comes and goes with every reply; that alone is not worth a burst.
         let chatter = m == Mood::Talking || prev == Mood::Talking;
-        if m != prev && !chatter && self.loaded && self.teleport.is_none() && self.status_of(m).key != self.status_of(prev).key {
+        if m != prev && !chatter && !drawn_wake && self.loaded && self.teleport.is_none() && self.status_of(m).key != self.status_of(prev).key {
             let big = self.spec(m).is_some_and(|s| s.big) || self.spec(prev).is_some_and(|s| s.big);
             let kind = if big { GlitchKind::Big } else { GlitchKind::Burst };
             match &mut self.rag {
@@ -1489,6 +1498,10 @@ impl Avatar {
             }
         }
         self.mood = m;
+        if drawn_wake {
+            self.art.floor_strip = false;
+            self.play_drawn_wake(now);
+        }
         let spec = self.spec(m).cloned();
         self.mood_then = spec
             .as_ref()
@@ -1748,6 +1761,8 @@ impl Avatar {
         if self.squash.is_some() || self.sliver.is_some() || self.turn.is_some() {
             take(Some(now + FRAME_FAST));
         }
+        take(self.teleport.as_ref().and_then(|t| t.leave_until));
+        take(self.arrive.red_until.filter(|&t| t > now));
         if let Some((_, t0, _)) = self.arrive.blend {
             take(Some((now + FRAME_FX).max(t0)));
         }
@@ -2058,6 +2073,10 @@ impl Avatar {
         {
             self.spawn_glints(now);
         }
+        if self.teleport.as_ref().is_some_and(|t| matches!(t.leg, Leg::Vanish) && t.leave_until.is_some_and(|u| u <= now)) {
+            self.vanish_done(now);
+            dirty = true;
+        }
         dirty |= self.step_teleport(now);
         if let Some(Leg::Bolt(t0)) = self.teleport.as_ref().map(|t| t.leg) {
             self.intro_bolt_drawn(now.saturating_duration_since(t0), cx);
@@ -2181,6 +2200,33 @@ impl Avatar {
         }
     }
 
+    /// The vanish is over (its glitch, or a drawn leave): the bolt, or straight there.
+    fn vanish_done(&mut self, now: Instant) {
+        let Some(tp) = &mut self.teleport else { return };
+        tp.leave_until = None;
+        let (to, place, seed, no_bolt) = (tp.to, tp.place, tp.seed, tp.no_bolt);
+        if no_bolt {
+            // Vanished: appear there at once, the landing glitch reassembles her.
+            self.arrive(to, place, now);
+            self.hidden = false;
+            self.glitch = Some(self.land_glitch(now, seed));
+            self.arrive_appeared(now);
+            if let Some(tp) = &mut self.teleport {
+                tp.moved = true;
+                tp.leg = Leg::Appear;
+            }
+            return;
+        }
+        self.hidden = true;
+        let from = self.center_root(self.origin);
+        let to = self.center_root(to);
+        let bolt = Bolt::new(from, to, seed ^ 0xb017_5eed, 220.0 * self.layout.sf);
+        if let Some(tp) = &mut self.teleport {
+            tp.bolt = Some(bolt);
+            tp.leg = Leg::Bolt(now);
+        }
+    }
+
     fn glitch_done(&mut self, now: Instant, cx: &mut Context<Self>) {
         if self.quitting {
             self.quit(cx);
@@ -2190,31 +2236,9 @@ impl Avatar {
             self.parked_done(cx);
             return;
         }
-        let Some((leg, to)) = self.teleport.as_ref().map(|t| (t.leg, t.to)) else { return };
+        let Some(leg) = self.teleport.as_ref().map(|t| t.leg) else { return };
         match leg {
-            Leg::Vanish if self.teleport.as_ref().is_some_and(|t| t.no_bolt) => {
-                // Vanished: appear there at once, the landing glitch reassembles her.
-                let (to, place, seed) = self.teleport.as_ref().map(|t| (t.to, t.place, t.seed)).unwrap_or((self.origin, self.placement, 0));
-                self.arrive(to, place, now);
-                self.hidden = false;
-                self.glitch = Some(self.land_glitch(now, seed));
-                self.arrive_appeared(now);
-                if let Some(tp) = &mut self.teleport {
-                    tp.moved = true;
-                    tp.leg = Leg::Appear;
-                }
-            }
-            Leg::Vanish => {
-                self.hidden = true;
-                let from = self.center_root(self.origin);
-                let to = self.center_root(to);
-                let seed = self.teleport.as_ref().map_or(0, |t| t.seed) ^ 0xb017_5eed;
-                let bolt = Bolt::new(from, to, seed, 220.0 * self.layout.sf);
-                if let Some(tp) = &mut self.teleport {
-                    tp.bolt = Some(bolt);
-                    tp.leg = Leg::Bolt(now);
-                }
-            }
+            Leg::Vanish => self.vanish_done(now),
             Leg::Appear => {
                 self.teleport_done(now);
                 if self.placement == Placement::Ground {
@@ -3530,14 +3554,39 @@ impl Avatar {
         let seed = self.rng.next();
         self.glitch = Some(Glitch::new(GlitchKind::Vanish, now, seed));
         self.arrive_reset();
-        self.teleport = Some(Teleport { seed, leg: Leg::Vanish, to, place, bolt: None, moved: false, no_bolt: false, quiet: false });
+        // Leaving the art on screen with its own drawn leave: that, then the bolt (no glitch).
+        let leave = self.drawn_leave();
+        let leave_until = leave.as_ref().map(|s| now + Duration::from_millis(s.iter().map(|x| x.1 as u64).sum()));
+        if let Some(seq) = leave {
+            self.glitch = None;
+            self.anim.play(seq, now);
+        }
+        self.teleport = Some(Teleport { seed, leg: Leg::Vanish, to, place, bolt: None, moved: false, no_bolt: false, quiet: false, leave_until });
     }
 
-    /// A teleport, quiet (passive moves) or not.
+    /// The drawn leave for the art on screen: lachy's perch → `perchLeave`; a lachy stand →
+    /// `floorLeave` (from its first frame on the legacy drawing it starts from, else cut into
+    /// its tear). None: the glitch's vanish.
+    fn drawn_leave(&self) -> Option<Seq> {
+        if self.sitting() && self.art_strip_is(PoolKey::Perch) {
+            return self.art_transition("perchLeave");
+        }
+        if self.placement != Placement::Ground || !self.standing() || !self.art_strip_is(PoolKey::Stand) {
+            return None;
+        }
+        let seq = self.art_transition("floorLeave")?;
+        let same = self.pack.art_of(self.shown_frame()) == self.pack.art_of(seq[0].0);
+        Some(if same { seq } else { seq.into_iter().skip(LEAVE_CUT_IN).collect() })
+    }
+
+    /// A teleport, quiet (passive moves) or not. A quiet one never has a drawn leave.
     fn start_teleport_q(&mut self, to: (i32, i32), place: Placement, now: Instant, quiet: bool) {
         self.start_teleport(to, place, now);
         if quiet && let Some(tp) = &mut self.teleport {
             tp.quiet = true;
+            if tp.leave_until.take().is_some() {
+                self.anim.stop_oneshot(now);
+            }
             self.glitch = Some(Glitch::soft(GlitchKind::Vanish, now, tp.seed));
         }
     }
@@ -4454,6 +4503,11 @@ impl Render for Avatar {
         }
         if let Some((Some(c), _)) = &rag_shown {
             plan = c.plan.clone();
+        }
+        // A drawn arrival's first frames: the plain red land silhouette (its window's old
+        // pixels would show through the new shape for a frame).
+        if self.arrive.red_until.is_some_and(|t| now < t) {
+            plan.tint = Some(fx::BOLT_RED);
         }
         let sliver_px = (l.ground_x - l.avatar_x) as f32;
         if let Some(sx) = self.sliver_sx(now) {

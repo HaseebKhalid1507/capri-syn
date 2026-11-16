@@ -190,6 +190,16 @@ With `anim/`, `moods.json` `variants` mixes that art in; she never swaps one set
   goes through a glitch (the body's; her tag stays whole).
 - Strips decode when first wanted, off the main thread; `cacheMb` caps what is kept (least recently shown
   first, never what is on screen). A pack without `anim/` keeps only the pack's own variants.
+- `stand` (standing idle on the floor, the Idle mood only: every other mood keeps the pack's poses) shifts
+  in place every `shiftMs`; with `shiftStays` a shift may keep the pack's own pose, so each variant holds
+  about its weight's share of the time (Capri: 6 : 1 : 1, CapriCore ~75 %). A drawn arrival or wake ends
+  in its `bridge` variant's drawing, held `bridgeMs` before the next shift.
+- `transitions` names drawn in-betweens by change (one-shots with the anchor the change needs):
+  `perchLeave` (off a lachy perch into the bolt), `floorLeave` / `floorArrive` (a loud teleport from / onto
+  the floor while the stand pick is lachy's; the arrival is the materialisation, no landing glitch over
+  it, its first frames the plain red silhouette), `wake` (up from a lachy floor sleep) and `form` (the
+  bloom a drawn floor arrival starts from, `formChance` of the time; 3/4 of her size, cut to her window).
+  The travel bolt stays plain red. A quiet (passive) teleport never plays them.
 - Landing on a window top she touches down with the pack's `arrive.perch` (Capri: her crouch on the
   edge). Before the pack's own sit its last frame dissolves into the sit over `arrive.perchBlendMs`
   (rows drop out where they are). Before a drawn pose (lachy's perch) only that first frame plays, cut
@@ -237,7 +247,7 @@ sends one:
 mood <name> | clip <id> | say <text> | pos <x> <y> [now] | perch [sit|stand] [win] | perch off | drop | stack
 page next|prev | scroll <n> | reader open [focus]|close|copy [n]|scroll <px> | collapse | expand
 music on|off | glitch | face left|right|toggle | drag … | submit <text> | abort | copy
-art perch|sleepFloor|sleepWindow <variant id|next> | intro [skip]
+art stand|perch|sleepFloor|sleepWindow <variant id|next> | intro [skip]
 talk press|release | line close | prompt confirm|secret [text] | prompt off
 brain … | settings reload | tap head|body | menu | shape | state | hide | show | quit
 ```

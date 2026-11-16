@@ -1,6 +1,6 @@
 //! Variant pools (Haseeb, 2026-11-16: "mix, don't replace"). A state with more than one art
-//! option keeps a weighted pool: a window perch (CapriCore's sit, lachy's perch, lachy's laydown),
-//! sleep on the floor, sleep on a window. Entering the state picks one: weighted, from a seeded
+//! option keeps a weighted pool: standing idle on the floor (CapriCore's, lachy's two), a window
+//! perch (CapriCore's sit, lachy's perch, lachy's laydown), sleep on the floor, sleep on a window. Entering the state picks one: weighted, from a seeded
 //! rng (tests stay deterministic), never the same strip variant twice running. The pack's own
 //! art may follow itself: it leads every pool, and with two variants a strict no-repeat would
 //! make any weights 50/50. A long stay shifts it in place now and then (always to another).
@@ -15,6 +15,8 @@ use std::time::Duration;
 /// The states with a pool.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum PoolKey {
+    /// Standing idle on the floor (the Idle mood only: the other moods' poses are the pack's).
+    Stand,
     /// Sitting on a window top.
     Perch,
     /// Asleep on the floor.
@@ -24,10 +26,11 @@ pub enum PoolKey {
 }
 
 impl PoolKey {
-    pub const ALL: [PoolKey; 3] = [PoolKey::Perch, PoolKey::SleepFloor, PoolKey::SleepWindow];
+    pub const ALL: [PoolKey; 4] = [PoolKey::Stand, PoolKey::Perch, PoolKey::SleepFloor, PoolKey::SleepWindow];
 
     pub fn key(self) -> &'static str {
         match self {
+            PoolKey::Stand => "stand",
             PoolKey::Perch => "perch",
             PoolKey::SleepFloor => "sleepFloor",
             PoolKey::SleepWindow => "sleepWindow",
@@ -58,6 +61,13 @@ pub struct VariantsSpec {
 pub struct PoolSpec {
     /// A long stay shifts the pose in place after `shiftMs[0]..[1]` ms (absent: never).
     pub shift_ms: Option<[u64; 2]>,
+    /// A shift may keep the pack's own art (then nothing changes): over time each variant holds
+    /// about its weight's share. Without it a shift always changes the pose.
+    pub shift_stays: bool,
+    /// After a drawn arrival or wake (which end in this variant's drawing), she stands in it
+    /// `bridgeMs` before the next shift.
+    pub bridge: Option<String>,
+    pub bridge_ms: Option<[u64; 2]>,
     pub variants: Vec<VariantSpec>,
 }
 
@@ -130,12 +140,12 @@ pub fn weighted(rng: &mut Rng, weights: &[f32]) -> Option<usize> {
 /// is the only one left).
 pub struct Picker {
     rng: Rng,
-    last: [Option<usize>; 3],
+    last: [Option<usize>; 4],
 }
 
 impl Picker {
     pub fn new(seed: u64) -> Picker {
-        Picker { rng: Rng::new(seed), last: [None; 3] }
+        Picker { rng: Rng::new(seed), last: [None; 4] }
     }
 
     pub fn rng(&mut self) -> &mut Rng {
@@ -286,6 +296,31 @@ mod tests {
         assert!(seam(Art::Family(0), Art::Family(1)), "perch to laydown has no drawn in-between yet");
         assert!(!seam(Art::Family(1), Art::Family(1)));
         assert!(!seam(Art::Pack, Art::Pack));
+    }
+
+    #[test]
+    fn the_stand_pool_keeps_capricore_about_three_quarters_of_the_time() {
+        let v: serde_json::Value = serde_json::from_str(include_str!("../packs/capri/moods.json")).unwrap();
+        let s: VariantsSpec = serde_json::from_value(v["variants"].clone()).unwrap();
+        let p = &s.pools["stand"];
+        assert!(p.shift_stays && p.bridge.as_deref() == Some("legacy"));
+        let ids: Vec<&str> = p.variants.iter().map(|v| v.id.as_str()).collect();
+        assert_eq!(ids, ["neutral", "idle", "legacy"], "lachy idle + idle_legacy for neutral/idle only");
+        let w: Vec<f32> = p.variants.iter().map(|v| v.weight).collect();
+        let own: Vec<bool> = p.variants.iter().map(|v| v.strip.is_none()).collect();
+        // Shifts in place, each stint the same length: the share of stints is the share of time.
+        let mut pk = Picker::new(11);
+        let all = [true; 3];
+        let mut n = [0u32; 3];
+        let mut prev = None;
+        for _ in 0..20_000 {
+            let i = pk.pick(PoolKey::Stand, &w, &all, &own).unwrap();
+            assert!(!(prev == Some(i) && !own[i]), "a lachy drawing never follows itself");
+            prev = Some(i);
+            n[i] += 1;
+        }
+        let cc = n[0] as f32 / 20_000.0;
+        assert!((0.72..0.82).contains(&cc), "{cc}");
     }
 
     #[test]

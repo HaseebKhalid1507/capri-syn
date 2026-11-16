@@ -469,12 +469,16 @@ pub struct Behaviour {
     /// `anim/` they don't exist and the pack's own frames play.
     #[serde(default)]
     pub transitions: BTreeMap<String, String>,
+    /// How often a drawn floor arrival starts from the `form` bloom (0..1).
+    #[serde(default)]
+    pub form_chance: f32,
 }
 
 /// The transitions a pack may name, and the anchor each needs.
 /// `perchLeave`: off a window top into the bolt; `floorArrive` / `floorLeave`: a teleport's
-/// landing on / leaving from the floor; `wake`: up from her sleep on the floor.
-pub const TRANSITIONS: [(&str, &str); 4] = [("perchLeave", "seat"), ("floorArrive", "ground"), ("floorLeave", "ground"), ("wake", "ground")];
+/// landing on / leaving from the floor; `wake`: up from her sleep on the floor; `form`: the rare
+/// bloom she forms from before `floorArrive` (`formChance`).
+pub const TRANSITIONS: [(&str, &str); 5] = [("perchLeave", "seat"), ("floorArrive", "ground"), ("floorLeave", "ground"), ("wake", "ground"), ("form", "ground")];
 
 impl Behaviour {
     /// The art faces right unmirrored (`faces`, default right).
@@ -576,12 +580,12 @@ fn resolve_pools(b: &Behaviour, anim: Option<&crate::art::Anim>, errors: &mut Ve
     let Some(spec) = &b.variants else { return out };
     for (key, ps) in &spec.pools {
         let Some(k) = PoolKey::parse(key) else {
-            errors.push(format!("moods.json variants.pools: unknown pool `{key}` (perch|sleepFloor|sleepWindow)"));
+            errors.push(format!("moods.json variants.pools: unknown pool `{key}` (stand|perch|sleepFloor|sleepWindow)"));
             continue;
         };
         // A window top takes seat strips, the floor standing ones.
-        let want = if k == PoolKey::SleepFloor { "ground" } else { "seat" };
-        let mut pool = Pool { shift_ms: ps.shift_ms, variants: Vec::new() };
+        let want = if matches!(k, PoolKey::SleepFloor | PoolKey::Stand) { "ground" } else { "seat" };
+        let mut pool = Pool { shift_ms: ps.shift_ms, shift_stays: ps.shift_stays, bridge: None, bridge_ms: ps.bridge_ms.unwrap_or([4000, 10000]), variants: Vec::new() };
         for v in &ps.variants {
             let at = format!("moods.json variants.pools.{key} `{}`", v.id);
             if v.weight.is_nan() || v.weight < 0.0 || pool.variants.iter().any(|x: &Variant| x.id == v.id) {
@@ -618,6 +622,14 @@ fn resolve_pools(b: &Behaviour, anim: Option<&crate::art::Anim>, errors: &mut Ve
                 }
             };
             pool.variants.push(Variant { id: v.id.clone(), weight: v.weight, lying: v.lying, art });
+        }
+        if let Some(b) = &ps.bridge {
+            match pool.by_id(b) {
+                Some(i) if pool.variants[i].art.is_some() => pool.bridge = Some(i),
+                Some(_) => errors.push(format!("moods.json variants.pools.{key}: bridge `{b}` is the pack's own art")),
+                None if anim.is_some() => errors.push(format!("moods.json variants.pools.{key}: bridge `{b}` is not a variant")),
+                None => {}
+            }
         }
         if !pool.variants.is_empty() {
             out.insert(k, pool);
@@ -687,6 +699,10 @@ pub struct VariantArt {
 #[derive(Clone, Debug, Default)]
 pub struct Pool {
     pub shift_ms: Option<[u64; 2]>,
+    pub shift_stays: bool,
+    /// The variant a drawn arrival or wake ends in, held `bridge_ms` (`PoolSpec::bridge`).
+    pub bridge: Option<usize>,
+    pub bridge_ms: [u64; 2],
     pub variants: Vec<Variant>,
 }
 
@@ -722,7 +738,6 @@ pub struct Pack {
     /// has no `anim/`, so an old pack's pool is its own art alone.
     pub pools: HashMap<crate::variants::PoolKey, Pool>,
     /// `moods.json` `transitions`, resolved: strip indices into `anim`.
-    #[allow(dead_code)] // played from the §6.2 transitions commit on
     pub transitions: HashMap<String, usize>,
     pub cache_bytes: usize,
 }
@@ -756,11 +771,16 @@ impl Pack {
         (dx, dy)
     }
 
-    /// Union of every body frame's visible bounds after anchor registration. Every
-    /// frame is cropped to this one rect so they stay aligned.
+    /// A cell of an effect strip (the form bloom): it never sizes her window.
+    pub fn fx_frame(&self, f: &FrameSource) -> bool {
+        f.cell.as_ref().zip(self.anim.as_ref()).is_some_and(|(c, a)| a.strips[c.strip].fx)
+    }
+
+    /// Union of every body frame's visible bounds after anchor registration (not an effect's:
+    /// it is cut to them). Every frame is cropped to this one rect so they stay aligned.
     pub fn crop_rect(&self) -> Rect {
         let mut r: Option<Rect> = None;
-        for f in &self.frames {
+        for f in self.frames.iter().filter(|f| !self.fx_frame(f)) {
             let (dx, dy) = self.offset(f);
             let b = f.bounds.offset(dx, dy);
             r = Some(r.map_or(b, |r| r.union(&b)));
@@ -1041,6 +1061,9 @@ impl Pack {
                 check_steps(&format!("arrive.{k}"), st, &mut errors, &pack);
             }
             seat_only("arrive.perch", &a.perch, &mut errors, &pack);
+            if !(0.0..=1.0).contains(&pack.behaviour.form_chance) {
+                errors.push(format!("moods.json formChance: {} (0..1)", pack.behaviour.form_chance));
+            }
             if !(0.0..=1.0).contains(&a.teleport_chance) {
                 errors.push(format!("moods.json arrive.teleportChance: {} (0..1)", a.teleport_chance));
             }
@@ -1411,7 +1434,7 @@ pub mod tests {
         assert!(with(json!({"perchLeave": "stand"}), true).unwrap_err().contains("needs a seat anchor"));
         assert!(with(json!({"wake": "perch_in"}), true).unwrap_err().contains("needs a ground anchor"));
         assert!(with(json!({"perchLeave": "gone"}), true).unwrap_err().contains("`gone` is not in anim/anim.json"));
-        assert!(with(json!({"perchArrive": "perch_in"}), true).unwrap_err().contains("unknown change `perchArrive` (perchLeave|floorArrive|floorLeave|wake)"));
+        assert!(with(json!({"perchArrive": "perch_in"}), true).unwrap_err().contains("unknown change `perchArrive` (perchLeave|floorArrive|floorLeave|wake|form)"));
         // A pack without anim/: none, and no error.
         assert!(with(json!({"perchLeave": "perch_in"}), false).unwrap().0.is_empty());
     }

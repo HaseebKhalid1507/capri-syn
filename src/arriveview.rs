@@ -8,6 +8,7 @@ use super::{Avatar, Leg, Placement, Teleport};
 use crate::anim::Seq;
 use crate::fx::{Bolt, Glitch, GlitchKind};
 use crate::pack::Step;
+use crate::variants::PoolKey;
 use std::time::{Duration, Instant};
 
 /// How far along a window top she shifts to lie down on it (logical px).
@@ -32,6 +33,8 @@ pub(super) struct ArriveState {
     pub until: Option<Instant>,
     /// The arrival's last frame dissolves into her pose: (that frame, from, ms).
     pub blend: Option<(usize, Instant, u32)>,
+    /// A drawn arrival shows as the red land silhouette until then.
+    pub red_until: Option<Instant>,
     /// A drawn arrival forms her until then (its first cells are the forming): the HUD waits.
     pub formed: Option<Instant>,
     /// The last passive/bid teleport landed with the sequence.
@@ -95,7 +98,22 @@ impl Avatar {
     /// only its first frame plays, cut inside the landing glitch, so the change of art happens
     /// before she is solid and nothing is cut after the contact.
     pub(super) fn arrive_appeared(&mut self, now: Instant) {
-        let Some(own) = self.arrive.on_appear.take() else { return };
+        let own = self.arrive.on_appear.take();
+        if let Some(seq) = self.drawn_floor_arrival() {
+            // The drawing is the materialisation: no landing glitch over it. She then stands in
+            // the drawing it ends in a few seconds (the stand pool's bridge).
+            let ms: u64 = seq.iter().map(|s| s.1 as u64).sum();
+            self.glitch = None;
+            self.arrive.red_until = Some(now + DRAWN_RED);
+            if self.art_bridge(now + Duration::from_millis(ms), now) {
+                self.relayer(now);
+            }
+            self.anim.play(seq, now);
+            self.arrive.until = Some(now + Duration::from_millis(ms));
+            self.arrive.formed = Some(now + Duration::from_millis(ms));
+            return;
+        }
+        let Some(own) = own else { return };
         let land_ms = self.glitch.filter(|g| g.kind == GlitchKind::Land).map_or(0.0, |g| g.ms);
         let blend_ms = self.pack.behaviour.arrive.as_ref().map_or(0, |a| a.perch_blend_ms);
         let drawn = self.sitting() && {
@@ -113,6 +131,23 @@ impl Avatar {
         }
         self.anim.play(seq, now);
         self.arrive.until = Some(now + Duration::from_millis(ms));
+    }
+
+    /// A loud teleport onto the floor where her stand pick is lachy's: its drawn arrival
+    /// (`floorArrive`), now and then from the `form` bloom (`formChance`). None: the pack's own.
+    fn drawn_floor_arrival(&mut self) -> Option<Seq> {
+        let loud = self.teleport.as_ref().is_some_and(|t| !t.quiet);
+        if !loud || self.arrive.launching || self.placement != Placement::Ground || !self.standing() || !self.art_strip_is(PoolKey::Stand) {
+            return None;
+        }
+        let mut seq = self.art_transition("floorArrive")?;
+        if self.rng.range(0.0, 1.0) < self.pack.behaviour.form_chance
+            && let Some(mut form) = self.art_transition("form")
+        {
+            form.append(&mut seq);
+            seq = form;
+        }
+        Some(seq)
     }
 
     /// The arrival's dissolve into her pose at `now`: (the frame dissolving, 0..1).
@@ -170,7 +205,7 @@ impl Avatar {
         self.hidden = true;
         self.glitch = None;
         let moved = to == self.origin && place == self.placement;
-        self.teleport = Some(Teleport { seed, leg: Leg::Bolt(now), to, place, bolt: Some(bolt), moved, no_bolt: false, quiet: false });
+        self.teleport = Some(Teleport { seed, leg: Leg::Bolt(now), to, place, bolt: Some(bolt), moved, no_bolt: false, quiet: false, leave_until: None });
         elog!("synaps-avatar: arrival Launch: {} frames after the bolt", seq.len());
         self.arrive.on_appear = Some(seq);
         self.arrive.launching = true;
@@ -231,8 +266,10 @@ impl Avatar {
 
     /// The nap's stand-up (on the floor), moves held until it ends.
     pub(super) fn play_nap_wake(&mut self, now: Instant) {
-        // A strip's floor sleep has its own way out (the seam's glitch): no CapriCore stand-up.
+        // A strip's floor sleep has its own way out: its drawn wake (then she stands in the
+        // drawing it ends in a few seconds), else the seam's glitch. No CapriCore stand-up.
         if std::mem::take(&mut self.art.floor_strip) {
+            self.play_drawn_wake(now);
             return;
         }
         let wake = self.pack.flatten(&self.pack.behaviour.brain.nap_wake.clone());
@@ -242,6 +279,22 @@ impl Avatar {
         let ms: u64 = wake.iter().map(|s| s.1 as u64).sum();
         self.anim.play(wake, now);
         self.waking_until = Some(now + Duration::from_millis(ms));
+    }
+
+    /// Up from a lachy floor sleep: `wake` (a white flash, a glitch, standing), if it's in.
+    pub(super) fn play_drawn_wake(&mut self, now: Instant) -> bool {
+        if self.placement != Placement::Ground {
+            return false;
+        }
+        let Some(seq) = self.art_transition("wake") else { return false };
+        let ms: u64 = seq.iter().map(|s| s.1 as u64).sum();
+        let until = now + Duration::from_millis(ms);
+        if self.art_bridge(until, now) {
+            self.relayer(now);
+        }
+        self.anim.play(seq, now);
+        self.waking_until = Some(until);
+        true
     }
 
     // ---- the deep nap -----------------------------------------------------------------------
@@ -423,6 +476,9 @@ enum Touchdown {
     /// Its first frame only, this long: the cut into drawn art falls inside the landing glitch.
     Cut(u32),
 }
+
+/// A drawn arrival's first frames are the plain red land silhouette this long.
+const DRAWN_RED: Duration = Duration::from_millis(70);
 
 /// Where in the landing glitch (`land_ms` long) the touchdown cuts to a drawn pose: while she is
 /// still the red silhouette (`Glitch::tint`, its first 30 %).

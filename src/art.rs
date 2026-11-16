@@ -129,6 +129,8 @@ pub struct Strip {
     pub mirror_art: Option<String>,
     /// Below `line` only the `legs` columns stay (cell px; see `ContactDoc`).
     pub contact: Option<ContactDoc>,
+    /// An effect drawn as frames (the form bloom): it doesn't size her window (cut to it).
+    pub fx: bool,
 }
 
 impl Strip {
@@ -253,6 +255,7 @@ impl Anim {
                 faces_right: !fam.faces.as_deref().is_some_and(|f| f.eq_ignore_ascii_case("left")),
                 mirror_art: d.mirror_art.clone(),
                 contact: d.contact,
+                fx: d.family == "fx",
             });
         }
         for s in &anim.strips {
