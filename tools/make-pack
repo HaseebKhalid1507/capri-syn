@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""make-pack CAPRICORE_DIR [OUT_DIR] [--moods FILE] [--sleep FILE]
+"""make-pack CAPRICORE_DIR [OUT_DIR] [--moods FILE] [--sleep FILE] [--lachy DIR|auto] [--mochi DIR|auto]
+          [--upscale [--record-upscale]]
 
 Build the Capri character pack from a CapriCore checkout (https://github.com/CapriChooms/CapriCore).
 The artwork is third-party (see the pack's NOTICE.md): it is never committed to this repo; this
@@ -26,8 +27,23 @@ Layout produced:
   fonts/Exo2-*.ttf      <- static instances of assets/fonts/exo2/Exo2-Variable.ttf (fontTools), + OFL.txt
   NOTICE.md             <- docs/character-assets.md + one line naming the CapriCore versions
   moods.json            <- --moods
+
+Optional desktop art (anim/; a pack without it still loads):
+  --lachy DIR|auto   lachydotmcg/capri-desktop at 156ed18 (PolyForm Noncommercial 1.0.0): a checkout, or
+                     `auto` to download the pinned files from GitHub at that commit (cached). Every file is
+                     checked against tools/lachy-desktop-156ed18.sha256.
+                     anim/lachy/sprites/*.png, capri.png, perch.png, cursor.png, emotes/<name>/ (unzipped),
+                     LICENSE.md
+  --mochi DIR|auto   mochiiwuff/capri-desktop at c011764, checked against tools/mochi-desktop-c011764.sha256.
+                     anim/mochi/*.png|webp, LICENSE. Show frames and fan art: LOCAL PERSONAL USE ONLY; never
+                     commit, publish or screenshot them anywhere public.
+  anim/anim.json     <- tools/desktop-art.json (our measured geometry) + the sha256 of every file copied
+  NOTICE.md          + each source's Required Notice lines, licence URL and credits
+  --upscale          + anim/lachy/x2/sprites/*.png: every strip x2 (tools/upscale_art.py, Real-ESRGAN
+                     anime video model, CPU, needs torch); pixels checked against tools/lachy-x2.sha256.
+                     --record-upscale writes that pin file instead (once, on the machine that sets it).
 Then run `synaps-avatar --pack OUT_DIR --check` to verify it (sha256 of every frame)."""
-import hashlib, json, os, shutil, subprocess, sys, urllib.request
+import hashlib, json, os, shutil, subprocess, sys, urllib.request, zipfile
 from pathlib import Path
 
 WEIGHTS = {"Regular": 400, "Medium": 500, "SemiBold": 600, "Bold": 700}
@@ -36,6 +52,19 @@ SLEEP_COMMIT = "bb0c2d71e751db6e7cab4926b4f251b1b2c05f5a"
 SLEEP_PATH = "assets/capri/sprites/poses-v2/PNG/capri-sleep.png"
 SLEEP_SHA = "f76c310daa7ebd0cc683b01d03ff84bb02d9c51985f38a7e1adaabc2b2a734d5"
 SLEEP_URL = f"https://raw.githubusercontent.com/CapriChooms/CapriCore/{SLEEP_COMMIT}/{SLEEP_PATH}"
+SIDES = {
+    "lachy": {"repo": "lachydotmcg/capri-desktop", "commit": "156ed188a2ac00854eb1c9e932087eb5e824ccb9",
+              "pins": "tools/lachy-desktop-156ed18.sha256", "license": "LICENSE.md", "root": "assets/"},
+    "mochi": {"repo": "mochiiwuff/capri-desktop", "commit": "c011764ca1fdbd191925321e3aaa8af5b84babe8",
+              "pins": "tools/mochi-desktop-c011764.sha256", "license": "LICENSE", "root": "assets/capri/",
+              "readme": "README.md"},
+}
+POLYFORM_NC = "https://polyformproject.org/licenses/noncommercial/1.0.0"
+UPSCALE_PINS = "tools/lachy-x2.sha256"
+GEOMETRY = "tools/desktop-art.json"
+LACHY_CREDITS = ("Window perch and music perch animations: her artist, who prefers to stay private. Click effect: "
+                 "mixmix312352. Transformation animation she forms from when she teleports, and her two secret emotes: "
+                 "Qewiw (mix_qewiw1412_86144).")
 NOTICE_LINE = ("Assembled by capri-syn's tools/make-pack from CapriCore v1.0.4 (bc93892), "
                "plus one frame (pose-sleep) from CapriCore v1.1.2 (bb0c2d7).")
 
@@ -73,6 +102,179 @@ def check_source(src, pinned):
                  + "\n  ".join(bad[:10]) + ("\n  ..." if len(bad) > 10 else ""))
 
 
+def side_pins(repo, side):
+    out = {}
+    for line in (repo / SIDES[side]["pins"]).read_text().splitlines():
+        if line.strip() and not line.startswith("#"):
+            h, p = line.split(None, 1)
+            out[p.strip()] = h
+    return out
+
+
+def fetch_url(url):
+    with urllib.request.urlopen(url, timeout=60) as f:
+        return f.read()
+
+
+def side_dir(side, arg, pinned):
+    """--lachy/--mochi DIR, or `auto`: the pinned files downloaded at the pinned commit into a cache."""
+    if arg != "auto":
+        return Path(arg)
+    s = SIDES[side]
+    cache = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / f"synaps-avatar/capri-desktop/{side}-{s['commit'][:7]}"
+    for rel, want in pinned.items():
+        p = cache / rel
+        if p.is_file() and sha(p.read_bytes()) == want:
+            continue
+        url = f"https://raw.githubusercontent.com/{s['repo']}/{s['commit']}/{rel}"
+        try:
+            b = fetch_url(url)
+        except OSError as e:
+            sys.exit(f"make-pack: --{side} auto: cannot download {url} ({e})")
+        if sha(b) != want:
+            sys.exit(f"make-pack: --{side} auto: {url} does not match {s['pins']} (sha256 {sha(b)[:12]}…)")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b)
+    return cache
+
+
+def check_side(side, d, pinned):
+    """Refuse anything but the pinned commit: the git HEAD if it's a checkout, and every pinned file."""
+    s = SIDES[side]
+    if (d / ".git").exists():
+        r = subprocess.run(["git", "-C", str(d), "rev-parse", "HEAD"], capture_output=True, text=True)
+        head = r.stdout.strip()
+        if r.returncode == 0 and head != s["commit"]:
+            sys.exit(f"make-pack: --{side} {d} is at {head[:7]}, not {s['repo']} {s['commit'][:7]}. "
+                     f"Run `git -C {d} checkout {s['commit'][:7]}`, or pass --{side} auto.")
+    bad = []
+    for rel, want in pinned.items():
+        p = d / rel
+        if not p.is_file():
+            bad.append(f"missing {rel}")
+        elif sha(p.read_bytes()) != want:
+            bad.append(f"changed {rel}")
+    if bad:
+        sys.exit(f"make-pack: --{side} {d} is not {s['repo']} {s['commit'][:7]} ({len(bad)} file(s) differ from {s['pins']}):\n  "
+                 + "\n  ".join(bad[:10]) + ("\n  ..." if len(bad) > 10 else ""))
+
+
+def required_notices(text):
+    return [l.strip() for l in text.splitlines() if l.startswith("Required Notice:")]
+
+
+def readme_section(text, heading):
+    """The first paragraph under `## heading`, joined to one line."""
+    lines = text.splitlines()
+    i = next((n for n, l in enumerate(lines) if l.strip() == f"## {heading}"), None)
+    if i is None:
+        sys.exit(f"make-pack: README has no '## {heading}' section")
+    para = []
+    for l in lines[i + 1:]:
+        if l.strip():
+            para.append(l.strip())
+        elif para:
+            break
+    return " ".join(para)
+
+
+MOCHI_KINDS = {"capri-cutout": "cutout", "capri-full": "cutout", "capri-face": "face", "face-": "face",
+               "cutin-": "cutin", "intro-": "intro"}
+
+
+def mochi_kind(name):
+    return next((k for pre, k in MOCHI_KINDS.items() if name.startswith(pre)), "other")
+
+
+def unzip_emote(zpath, dest):
+    with zipfile.ZipFile(zpath) as z:
+        for name in z.namelist():
+            if "/" in name or "\\" in name or name.startswith(".") or not name:
+                sys.exit(f"make-pack: {zpath.name}: unexpected member {name!r}")
+        dest.mkdir(parents=True, exist_ok=True)
+        for name in z.namelist():
+            (dest / name).write_bytes(z.read(name))
+        return len(z.namelist())
+
+
+def add_sides(out, srcs, pinned, geometry):
+    """Copy the pinned desktop art into anim/<side>/, write anim/anim.json and the NOTICE sections."""
+    anim = out / "anim"
+    doc = {k: v for k, v in geometry.items() if k not in SIDES}
+    notice = []
+    for side, d in srcs.items():
+        s, root = SIDES[side], SIDES[side]["root"]
+        dst = anim / side
+        dst.mkdir(parents=True, exist_ok=True)
+        files = {}
+        for rel, h in sorted(pinned[side].items()):
+            if rel in (s["license"], s.get("readme")):
+                if rel == s["license"]:
+                    shutil.copy2(d / rel, dst / rel)
+                continue
+            assert rel.startswith(root), rel
+            short = rel[len(root):]
+            if short.startswith("emotes/") and short.endswith(".zip"):
+                n = unzip_emote(d / rel, dst / short[:-4])
+                files[short] = {"sha256": h, "unzippedTo": short[:-4], "files": n}
+                continue
+            (dst / short).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(d / rel, dst / short)
+            files[short] = {"sha256": h} if side == "lachy" else {"sha256": h, "kind": mochi_kind(short)}
+        doc[side] = {**geometry[side], "files": files}
+        lic = (d / s["license"]).read_text()
+        rn = "\n".join(required_notices(lic))
+        if side == "lachy":
+            notice.append(f"## Desktop art: Capri (https://github.com/lachydotmcg/capri-desktop)\n\n"
+                          f"`anim/lachy/` holds art and animations from Capri, https://github.com/lachydotmcg/capri-desktop "
+                          f"(commit {s['commit'][:7]}), under the PolyForm Noncommercial License 1.0.0: {POLYFORM_NC} "
+                          f"(full terms: `anim/lachy/{s['license']}`). Assembled locally; not redistributed.\n\n{rn}\n\n"
+                          f"Credits (its README): {LACHY_CREDITS}\n")
+        else:
+            rights = readme_section((d / s["readme"]).read_text(), "Credits and rights")
+            notice.append(f"## Images from mochiiwuff/capri-desktop: LOCAL PERSONAL USE ONLY\n\n"
+                          f"`anim/mochi/` holds images from https://github.com/mochiiwuff/capri-desktop (commit {s['commit'][:7]}). "
+                          f"Its licence (PolyForm Noncommercial 1.0.0, {POLYFORM_NC}) covers its code only, not these "
+                          f"images. Its README, \"Credits and rights\":\n\n> {rights}\n\n{rn}\n\n"
+                          f"Never share, publish or commit these images (README, docs, screenshots, PRs).\n")
+    (anim / "anim.json").write_text(json.dumps(doc, indent=1) + "\n")
+    return notice
+
+
+def upscale(out, repo, record, cache):
+    """anim/lachy/x2/: every lachy strip x2, pixels pinned in tools/lachy-x2.sha256."""
+    pin_path = repo / UPSCALE_PINS
+    pins = {}
+    if pin_path.is_file():
+        for line in pin_path.read_text().splitlines():
+            if line.strip() and not line.startswith("#"):
+                h, p = line.split(None, 1)
+                pins[p.strip()] = h
+    sys.path.insert(0, str(repo / "tools"))
+    import upscale_art as up
+    net = up.load_net(cache)
+    geo = json.loads((out / "anim/anim.json").read_text())["lachy"]["strips"]
+    got, bad = {}, []
+    for name, g in sorted(geo.items()):
+        im = up.upscale_strip(net, out / "anim/lachy" / g["file"], g["cell"][0], g["frames"])
+        rel = f"x2/{g['file']}"
+        h = up.pixel_sha(im)
+        got[rel] = h
+        if not record and pins.get(rel) != h:
+            bad.append(rel)
+            continue
+        (out / "anim/lachy" / rel).parent.mkdir(parents=True, exist_ok=True)
+        im.save(out / "anim/lachy" / rel)
+    if bad:
+        sys.exit(f"make-pack: --upscale: {len(bad)} strip(s) differ from {UPSCALE_PINS} (another torch or CPU?): "
+                 + ", ".join(bad[:6]) + ". Pass --record-upscale to accept these pixels as the new pins.")
+    if record:
+        pin_path.write_text(f"# x{up.FACTOR} of lachy's strips (tools/upscale_art.py, model sha256 {up.MODEL_SHA[:12]}…): "
+                            "sha256 of the decoded pixels (WxH + RGBA).\n"
+                            + "".join(f"{h}  {rel}\n" for rel, h in sorted(got.items())))
+    return len(got)
+
+
 def sleep_frame(src, given):
     """pose-sleep (v1.1.2), checksum-pinned: --sleep FILE, the checkout's git objects, or GitHub."""
     tried = []
@@ -103,12 +305,23 @@ def main(argv):
         print(__doc__.strip())
         return 2
     repo = Path(__file__).resolve().parent.parent
-    opts = {"--moods": repo / "packs/capri/moods.json", "--sleep": None}
+    flags = {"--upscale": False, "--record-upscale": False}
+    for k in flags:
+        if k in argv:
+            flags[k] = True
+            argv.remove(k)
+    opts = {"--moods": repo / "packs/capri/moods.json", "--sleep": None, "--lachy": None, "--mochi": None}
     for k in list(opts):
         if k in argv:
             i = argv.index(k)
-            opts[k] = Path(argv[i + 1])
+            if i + 1 >= len(argv):
+                sys.exit(f"make-pack: {k} needs a value")
+            opts[k] = argv[i + 1] if k in ("--lachy", "--mochi") else Path(argv[i + 1])
             del argv[i:i + 2]
+    if flags["--record-upscale"]:
+        flags["--upscale"] = True
+    if flags["--upscale"] and not opts["--lachy"]:
+        sys.exit("make-pack: --upscale needs --lachy")
     moods = opts["--moods"]
     src = Path(argv[0])
     data = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))
@@ -118,6 +331,23 @@ def main(argv):
     pinned = pins(repo)
     check_source(src, pinned)
     sleep = sleep_frame(src, opts["--sleep"])
+    side_srcs, side_pinned = {}, {}
+    for side in SIDES:
+        arg = opts[f"--{side}"]
+        if arg:
+            side_pinned[side] = side_pins(repo, side)
+            d = side_dir(side, arg, side_pinned[side])
+            check_side(side, d, side_pinned[side])
+            side_srcs[side] = d
+    geometry = json.loads((repo / GEOMETRY).read_text()) if side_srcs else None
+    if flags["--upscale"]:
+        if not (repo / UPSCALE_PINS).is_file() and not flags["--record-upscale"]:
+            sys.exit(f"make-pack: --upscale: no {UPSCALE_PINS} yet. Run once with --record-upscale on the machine "
+                     "that sets the pins, and commit the file.")
+        try:
+            import numpy, scipy, torch, PIL  # noqa: F401
+        except ImportError as e:
+            sys.exit(f"make-pack: --upscale needs torch, numpy, scipy and Pillow ({e})")
 
     out.mkdir(parents=True, exist_ok=True)
     for sub in ("poses", "music", "fonts", "intro"):
@@ -147,7 +377,8 @@ def main(argv):
         copy(rel, f"music/{Path(rel).name}")
     copy("assets/default/icon-source.png", "icon.png")
     notice = (src / "docs/character-assets.md").read_text().rstrip("\n")
-    (out / "NOTICE.md").write_text(f"{notice}\n\n{NOTICE_LINE}\n")
+    extra = add_sides(out, side_srcs, side_pinned, geometry) if side_srcs else []
+    (out / "NOTICE.md").write_text(f"{notice}\n\n{NOTICE_LINE}\n" + "".join(f"\n{x}" for x in extra))
     shutil.copy2(moods, out / "moods.json")
 
     exo = "assets/fonts/exo2"
@@ -163,6 +394,14 @@ def main(argv):
     print(f"make-pack: {cat.get('character')} (CapriCore v1.0.4 + pose-sleep v1.1.2) -> {out}: {n + 1} frames, "
           f"{len(list((out / 'poses').glob('*.png')))} poses, {len(list((out / 'intro').glob('*.png')))} intro frames, "
           f"{len(list((out / 'music').glob('*.png')))} music sprites, {len(WEIGHTS)} font weights, icon")
+    for side in side_srcs:
+        n = sum(1 for _ in (out / "anim" / side).rglob("*") if _.is_file())
+        print(f"make-pack: + {SIDES[side]['repo']} @ {SIDES[side]['commit'][:7]} -> {out}/anim/{side}: {n} files"
+              + (" (LOCAL PERSONAL USE ONLY)" if side == "mochi" else ""))
+    if flags["--upscale"]:
+        cache = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "synaps-avatar/models"
+        n = upscale(out, repo, flags["--record-upscale"], cache)
+        print(f"make-pack: + x2 strips: {n}" + (f" (pins recorded in {UPSCALE_PINS})" if flags["--record-upscale"] else ""))
     print(f"make-pack: verify with  synaps-avatar --pack {out} --check")
     return 0
 

@@ -153,6 +153,21 @@ sha256. It's read from the checkout's git objects when they have it (`git fetch 
 from GitHub at that commit, or given with `--sleep FILE`. It needs `fonttools` for the Exo 2 instances.
 `python3 tools/test_make_pack.py` tests it on fake checkouts.
 
+Optional desktop art, into the pack's `anim/` (a pack without it loads as before):
+
+- `--lachy DIR|auto`: [lachydotmcg/capri-desktop](https://github.com/lachydotmcg/capri-desktop) at `156ed18`
+  (PolyForm Noncommercial 1.0.0): its sprite strips, stills and emotes, checked against
+  `tools/lachy-desktop-156ed18.sha256`. `auto` downloads exactly those files at that commit (cached).
+- `--mochi DIR|auto`: mochiiwuff/capri-desktop at `c011764`, checked against `tools/mochi-desktop-c011764.sha256`.
+  Its images are show frames and fan art that its licence does not cover: local personal use only, never
+  published.
+- `anim/anim.json` is `tools/desktop-art.json` (capri-syn's own measured cell grid, anchors and loop flags)
+  plus the sha256 of every copied file. `NOTICE.md` gains each source's `Required Notice:` lines, the licence
+  URL and its credits.
+- `--upscale` adds `anim/lachy/x2/`: every strip at 2x (`tools/upscale_art.py`, Real-ESRGAN's anime video
+  model on the CPU; needs `torch`), checked pixel-for-pixel against `tools/lachy-x2.sha256`
+  (`--record-upscale` writes that file once).
+
 ## Building
 
 Toolchain 1.100.0 (`rust-toolchain.toml`). GPUI is pinned exactly: `gpui-kit =0.9.1`,

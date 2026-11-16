@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Tests for tools/make-pack: the v1.0.4 pin, the pinned pose-sleep, what gets copied.
+"""Tests for tools/make-pack: the v1.0.4 pin, the pinned pose-sleep, what gets copied, the optional
+capri-desktop art (--lachy/--mochi: pins, auto-fetch, anim.json, NOTICE) and the --upscale pins.
 
 python3 tools/test_make_pack.py   (stdlib only; fake checkouts, no CapriCore art needed)"""
-import hashlib, importlib.machinery, importlib.util, io, json, subprocess, sys, tempfile, unittest
+import hashlib, importlib.machinery, importlib.util, io, json, os, subprocess, sys, tempfile, types, unittest, zipfile
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
@@ -38,7 +39,7 @@ class Fake:
         self.sleep.write_bytes(b"sleep frame")
 
 
-class MakePack(unittest.TestCase):
+class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
@@ -62,6 +63,8 @@ class MakePack(unittest.TestCase):
                 return (1 if isinstance(e.code, str) else e.code), f"{e.code}" + err.getvalue()
         return rc, out.getvalue()
 
+
+class MakePack(Base):
     def test_builds_the_pack_from_pinned_files_only(self):
         out = self.root / "pack"
         rc, msg = self.run_mp(str(self.fake.src), str(out), "--sleep", str(self.fake.sleep))
@@ -116,6 +119,276 @@ class MakePack(unittest.TestCase):
         for skip in ["01-signal", "07-ready", "screenshot-capture", "avatar.png", "brand/", "app.ico", "capri-sleep"]:
             self.assertNotIn(skip, names)
         self.assertEqual(mp.PIN_COMMIT[:7], "bc93892")
+
+
+def zip_bytes(members):
+    b = io.BytesIO()
+    with zipfile.ZipFile(b, "w") as z:
+        for name, data in members.items():
+            z.writestr(name, data)
+    return b.getvalue()
+
+
+LACHY_LICENSE = ("Required Notice: fake notice one\n"
+                 "Required Notice: fake notice two (credit the project)\n\n# PolyForm Noncommercial License 1.0.0\n")
+MOCHI_README = ("# Fake\n\n## Credits and rights\n\nThe rights paragraph,\nover two lines.\n\n"
+                "**License:** not part of it.\n")
+MOCHI_LICENSE = "Required Notice: fake notice three\n\nThis license covers the source code.\n"
+
+
+class FakeSide:
+    """A fake capri-desktop checkout holding a small pinned set."""
+
+    def __init__(self, root, side):
+        self.dir = root / side
+        self.files = {}
+        if side == "lachy":
+            self.files = {"LICENSE.md": LACHY_LICENSE.encode(), "assets/sprites/idle.png": b"idle strip",
+                          "assets/sprites/idle_flipped.png": b"idle mirror art", "assets/perch.png": b"perch still",
+                          "assets/emotes/heart.zip": zip_bytes({"frames.txt": b"emote heart\nfps 30\n", "006.png": b"f6"})}
+        else:
+            self.files = {"LICENSE": MOCHI_LICENSE.encode(), "README.md": MOCHI_README.encode(),
+                          "assets/capri/face-calm.png": b"face", "assets/capri/intro-wave1.webp": b"wave"}
+        for rel, b in self.files.items():
+            (self.dir / rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.dir / rel).write_bytes(b)
+        (self.dir / "app").mkdir(exist_ok=True)
+        (self.dir / "app/Capri.cs").write_text("code never leaves")
+        self.pinned = {rel: sha(b) for rel, b in self.files.items()}
+
+
+GEOMETRY = {"schemaVersion": 1, "about": "test",
+            "lachy": {"commit": "156ed18", "strips": {"idle": {"file": "sprites/idle.png", "frames": 2, "cell": [4, 4]}}},
+            "mochi": {"commit": "c011764", "localOnly": True, "images": {}}}
+
+
+class SidesBase(Base):
+    def setUp(self):
+        super().setUp()
+        self.sides = {s: FakeSide(self.root, s) for s in ("lachy", "mochi")}
+        self.saved_side = (mp.side_pins, mp.fetch_url, mp.GEOMETRY)
+        mp.side_pins = lambda repo, side: dict(self.sides[side].pinned)
+        geo = self.root / "desktop-art.json"
+        geo.write_text(json.dumps(GEOMETRY))
+        mp.GEOMETRY = str(geo)
+        self.env = os.environ.get("XDG_CACHE_HOME")
+        os.environ["XDG_CACHE_HOME"] = str(self.root / "cache")
+
+    def tearDown(self):
+        mp.side_pins, mp.fetch_url, mp.GEOMETRY = self.saved_side
+        if self.env is None:
+            os.environ.pop("XDG_CACHE_HOME", None)
+        else:
+            os.environ["XDG_CACHE_HOME"] = self.env
+        super().tearDown()
+
+    def build(self, *extra, out="pack"):
+        return self.run_mp(str(self.fake.src), str(self.root / out), "--sleep", str(self.fake.sleep), *extra)
+
+
+class DesktopArt(SidesBase):
+    def test_lachy_and_mochi_are_copied_with_anim_json_and_notice(self):
+        rc, msg = self.build("--lachy", str(self.sides["lachy"].dir), "--mochi", str(self.sides["mochi"].dir))
+        self.assertEqual(rc, 0, msg)
+        a = self.root / "pack/anim"
+        self.assertEqual((a / "lachy/sprites/idle.png").read_bytes(), b"idle strip")
+        self.assertEqual((a / "lachy/perch.png").read_bytes(), b"perch still")
+        self.assertEqual(sorted(p.name for p in (a / "lachy/emotes/heart").iterdir()), ["006.png", "frames.txt"])
+        self.assertFalse((a / "lachy/emotes/heart.zip").exists(), "emotes are unzipped")
+        self.assertTrue((a / "lachy/LICENSE.md").is_file() and (a / "mochi/LICENSE").is_file())
+        self.assertEqual((a / "mochi/intro-wave1.webp").read_bytes(), b"wave")
+        self.assertFalse(list(self.root.joinpath("pack").rglob("*.cs")), "no code is copied")
+        doc = json.loads((a / "anim.json").read_text())
+        self.assertEqual(doc["lachy"]["strips"]["idle"]["frames"], 2)
+        self.assertEqual(doc["lachy"]["files"]["sprites/idle.png"]["sha256"], sha(b"idle strip"))
+        self.assertEqual(doc["lachy"]["files"]["emotes/heart.zip"]["unzippedTo"], "emotes/heart")
+        self.assertEqual(doc["mochi"]["files"]["face-calm.png"], {"sha256": sha(b"face"), "kind": "face"})
+        self.assertEqual(doc["mochi"]["files"]["intro-wave1.webp"]["kind"], "intro")
+        self.assertFalse((a / "mochi/README.md").exists(), "the README is read for the notice, not copied")
+        n = (self.root / "pack/NOTICE.md").read_text()
+        self.assertTrue(n.startswith("# Character notice"), "CapriCore's notice stays first")
+        for line in LACHY_LICENSE.splitlines()[:2] + MOCHI_LICENSE.splitlines()[:1]:
+            self.assertIn(line, n, "Required Notice lines verbatim")
+        self.assertIn(mp.POLYFORM_NC, n)
+        self.assertIn("Click effect: mixmix312352", n)
+        self.assertIn("Qewiw (mix_qewiw1412_86144)", n)
+        self.assertIn("> The rights paragraph, over two lines.\n", n, "its rights statement, read from its README")
+        self.assertNotIn("not part of it", n)
+        self.assertIn("LOCAL PERSONAL USE ONLY", n)
+
+    def test_without_the_flags_the_pack_is_as_before(self):
+        rc, msg = self.build()
+        self.assertEqual(rc, 0, msg)
+        self.assertFalse((self.root / "pack/anim").exists())
+        self.assertNotIn("capri-desktop", (self.root / "pack/NOTICE.md").read_text())
+
+    def test_lachy_only(self):
+        rc, msg = self.build("--lachy", str(self.sides["lachy"].dir))
+        self.assertEqual(rc, 0, msg)
+        doc = json.loads((self.root / "pack/anim/anim.json").read_text())
+        self.assertIn("lachy", doc)
+        self.assertNotIn("mochi", doc)
+        self.assertFalse((self.root / "pack/anim/mochi").exists())
+        self.assertNotIn("mochiiwuff", (self.root / "pack/NOTICE.md").read_text())
+
+    def test_refuses_a_changed_or_missing_side_file_and_writes_nothing(self):
+        d = self.sides["lachy"].dir
+        (d / "assets/sprites/idle.png").write_bytes(b"redrawn")
+        rc, msg = self.build("--lachy", str(d))
+        self.assertNotEqual(rc, 0)
+        self.assertIn("changed assets/sprites/idle.png", msg)
+        (d / "assets/sprites/idle.png").unlink()
+        rc, msg = self.build("--lachy", str(d), out="p2")
+        self.assertIn("missing assets/sprites/idle.png", msg)
+        self.assertFalse((self.root / "pack").exists() or (self.root / "p2").exists(), "nothing written")
+
+    def test_refuses_another_commit(self):
+        d = self.sides["mochi"].dir
+        g = ["git", "-C", str(d)]
+        subprocess.run(g + ["init", "-q"], check=True)
+        subprocess.run(g + ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "x"], check=True)
+        rc, msg = self.build("--mochi", str(d))
+        self.assertNotEqual(rc, 0)
+        self.assertIn("not mochiiwuff/capri-desktop c011764", msg)
+
+    def test_refuses_a_zip_with_paths(self):
+        d = self.sides["lachy"].dir
+        bad = zip_bytes({"../escape.png": b"x"})
+        (d / "assets/emotes/heart.zip").write_bytes(bad)
+        self.sides["lachy"].pinned["assets/emotes/heart.zip"] = sha(bad)
+        rc, msg = self.build("--lachy", str(d))
+        self.assertNotEqual(rc, 0)
+        self.assertIn("unexpected member", msg)
+        self.assertFalse((self.root / "escape.png").exists() or (self.root / "pack/anim/lachy/escape.png").exists())
+
+    def test_auto_downloads_the_pinned_files_once(self):
+        files = self.sides["mochi"].files
+        got = []
+
+        def fetch(url):
+            got.append(url)
+            rel = url.split("/c011764ca1fdbd191925321e3aaa8af5b84babe8/", 1)[1]
+            return files[rel]
+        mp.fetch_url = fetch
+        rc, msg = self.build("--mochi", "auto")
+        self.assertEqual(rc, 0, msg)
+        self.assertEqual(len(got), 4)
+        self.assertTrue(all(u.startswith("https://raw.githubusercontent.com/mochiiwuff/capri-desktop/c011764ca1fdbd191925321e3aaa8af5b84babe8/") for u in got))
+        rc, msg = self.build("--mochi", "auto", out="p2")
+        self.assertEqual(rc, 0, msg)
+        self.assertEqual(len(got), 4, "cached: no second download")
+
+    def test_auto_refuses_a_download_that_doesnt_match(self):
+        mp.fetch_url = lambda url: b"something else"
+        rc, msg = self.build("--mochi", "auto")
+        self.assertNotEqual(rc, 0)
+        self.assertIn("does not match tools/mochi-desktop-c011764.sha256", msg)
+
+
+class FakeUpscaler(types.ModuleType):
+    """Stands in for tools/upscale_art.py (no torch): x2 nearest of a 1x1 strip."""
+    FACTOR, MODEL_SHA = 2, "0" * 64
+
+    def __init__(self):
+        super().__init__("upscale_art")
+        self.calls = 0
+
+    def load_net(self, cache):
+        return None
+
+    def upscale_strip(self, net, path, cell_w, frames):
+        self.calls += 1
+        return path.read_bytes() * 2
+
+    def pixel_sha(self, im):
+        return sha(im)
+
+
+class Upscale(SidesBase):
+    def setUp(self):
+        super().setUp()
+        self.fakeup = FakeUpscaler()
+        self.saved_mod = sys.modules.get("upscale_art")
+        sys.modules["upscale_art"] = self.fakeup
+        self.saved_pins = mp.UPSCALE_PINS
+        mp.UPSCALE_PINS = str(self.root / "x2.sha256")
+
+    def tearDown(self):
+        mp.UPSCALE_PINS = self.saved_pins
+        if self.saved_mod is None:
+            sys.modules.pop("upscale_art", None)
+        else:
+            sys.modules["upscale_art"] = self.saved_mod
+        super().tearDown()
+
+    def run_up(self, record):
+        out = self.root / "pack"
+        out.joinpath("anim/lachy/sprites").mkdir(parents=True, exist_ok=True)
+        out.joinpath("anim/lachy/sprites/idle.png").write_bytes(b"ab")
+        out.joinpath("anim/anim.json").write_text(json.dumps(GEOMETRY))
+
+        class Img(bytes):
+            def save(s, p):
+                Path(p).write_bytes(s)
+        orig = self.fakeup.upscale_strip
+        self.fakeup.upscale_strip = lambda net, path, cw, n: Img(orig(net, path, cw, n))
+        try:
+            return mp.upscale(out, HERE.parent, record, self.root / "models")
+        except SystemExit as e:
+            return str(e.code)
+
+    def test_upscale_needs_lachy_and_pins(self):
+        rc, msg = self.build("--upscale")
+        self.assertIn("--upscale needs --lachy", msg)
+        rc, msg = self.build("--lachy", str(self.sides["lachy"].dir), "--upscale")
+        self.assertNotEqual(rc, 0)
+        self.assertIn("no ", msg)
+        self.assertIn("--record-upscale", msg)
+        self.assertFalse((self.root / "pack").exists(), "nothing written")
+
+    def test_record_then_verify(self):
+        self.assertEqual(self.run_up(record=True), 1)
+        pins = Path(mp.UPSCALE_PINS).read_text()
+        self.assertIn(f"{sha(b'abab')}  x2/sprites/idle.png", pins)
+        self.assertEqual((self.root / "pack/anim/lachy/x2/sprites/idle.png").read_bytes(), b"abab")
+        self.assertEqual(self.run_up(record=False), 1)
+        Path(mp.UPSCALE_PINS).write_text(f"{'1' * 64}  x2/sprites/idle.png\n")
+        msg = self.run_up(record=False)
+        self.assertIn("differ from", msg)
+        self.assertIn("x2/sprites/idle.png", msg)
+
+
+class RealPins(unittest.TestCase):
+    def test_the_desktop_pin_lists_and_geometry_agree(self):
+        repo = HERE.parent
+        geo = json.loads((repo / "tools/desktop-art.json").read_text())
+        lachy, mochi = mp.side_pins(repo, "lachy"), mp.side_pins(repo, "mochi")
+        self.assertEqual(len(lachy), 59)
+        self.assertEqual(len(mochi), 26)
+        self.assertTrue(all(len(h) == 64 for h in {**lachy, **mochi}.values()))
+        self.assertIn("LICENSE.md", lachy)
+        self.assertIn("LICENSE", mochi)
+        self.assertIn("README.md", mochi)
+        for rel in lachy:
+            self.assertTrue(rel == "LICENSE.md" or rel.startswith("assets/"), rel)
+            self.assertFalse(rel.endswith((".cs", ".wav", ".ttf", ".mp3", ".js")), rel)
+        strips = geo["lachy"]["strips"]
+        pinned_sprites = {r[len("assets/"):] for r in lachy if r.startswith("assets/sprites/")}
+        self.assertEqual({s["file"] for s in strips.values()} | {"sprites/face.png"}, pinned_sprites,
+                         "every pinned strip has our geometry, and nothing unpinned is described")
+        for name, s in strips.items():
+            if "mirrorArt" in s:
+                self.assertEqual(strips[s["mirrorArt"]]["mirrorArtFor"], name)
+                self.assertEqual(strips[s["mirrorArt"]]["cell"], s["cell"])
+            if "anchor" in s:
+                a, (w, h) = s["anchor"], s["cell"]
+                self.assertTrue(0 <= a["x"] < w and 0 <= a["y"] < h, (name, a))
+        for rel in mochi:
+            self.assertTrue(rel in ("LICENSE", "README.md") or rel.startswith("assets/capri/"), rel)
+            if rel.startswith("assets/"):
+                self.assertNotEqual(mp.mochi_kind(rel.rsplit("/", 1)[1]), "other", rel)
+        self.assertTrue(geo["mochi"]["localOnly"])
+        self.assertNotIn("images", geo["mochi"], "no listing of that repo's files beyond the pin file")
 
 
 if __name__ == "__main__":
