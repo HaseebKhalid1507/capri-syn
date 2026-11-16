@@ -202,6 +202,12 @@ pub fn end_phrase(text: &str) -> bool {
     ["that's all", "that is all", "that'll be all", "we're done", "we are done", "stop listening", "goodbye", "bye", "bye bye"].contains(&p.as_str())
 }
 
+/// The sidecar's reason for refusing the wake stream (`heard`, no text, right after `listen-start wake`):
+/// not an utterance's (DIDN'T CATCH THAT, ECHO, PHRASE ONLY from a hands-free that just ended).
+pub fn wake_refusal(why: &str) -> bool {
+    why.starts_with("WAKE ") || why.starts_with("NO MIC") || why.starts_with("TEST SIDECAR")
+}
+
 /// His words, if `user_text` is a spoken turn (the hint stripped).
 pub fn spoken(user_text: &str) -> Option<&str> {
     let t = user_text.strip_prefix("[voice")?;
@@ -403,6 +409,16 @@ fn sentences(s: &str, finished: bool) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wake_refusals_are_told_from_an_utterance() {
+        for r in ["WAKE PAUSED · IN A CALL", "WAKE OFF · NO MODEL (capri-voice-setup)", "NO MIC · SCREEN LOCKED", "NO MIC · ITS SOURCE IS GONE", "TEST SIDECAR · NO REAL MIC"] {
+            assert!(wake_refusal(r), "{r}");
+        }
+        for u in ["", "ECHO", "PHRASE ONLY", "DIDN'T CATCH THAT", "NOTHING HEARD · MIC CLOSED"] {
+            assert!(!wake_refusal(u), "{u}");
+        }
+    }
 
     #[test]
     fn hands_free_ends_on_a_whole_end_phrase_only() {

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### "Hey Capri" starts a conversation
+- "Hey Capri" now starts hands-free (`[voice] wake_handsfree`, default true, with `handsfree` on): the
+  wake stream goes on as the hands-free one in the same capture (no gap), so "Hey Capri, what's spike
+  doing?" is the conversation's first turn (the phrase cut) and "Hey Capri" alone just listens. Every
+  hands-free rule holds: each pause sends, spoken replies, half-duplex/barge-in, the end phrases.
+- Quiet for `handsfree_timeout` (60 s, counted down on her tag for the last 10), it ends and the wake
+  word listens again at once (`◌ MIC ON · SAY "HEY CAPRI"`), as after every other way hands-free ends.
+- `wake_handsfree = false` (or `handsfree = false`): one turn per "Hey Capri", as before.
+
 ### Asleep, she stays put
 - While Sleepy (no turn for `--sleepy-after`) or in the away nap, nothing moves her on her own: no
   roam, explore, micro-hop, bid, focus hop, workspace follow, dodge, startle, look or lean, and her

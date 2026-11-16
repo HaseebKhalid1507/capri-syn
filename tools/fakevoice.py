@@ -19,6 +19,9 @@ have said and when.
                        mic-open {mode}, then the steps of FAKE_WAKE (a JSON list, read at each start):
                        {"at": ms, "wake": "text"} (wake, speech, endpoint, heard), {"at": ms, "wake": "", "handsfree": true}
                        (wake, wake-handsfree), {"at": ms, "end": "call|lock|false starts|mic lost"} (mic-closed, wake-end).
+                       With "handsfree": true on the listen-start (wake_handsfree): a "wake" step is {"ev":"wake","handsfree":true}
+                       and the stream goes on as hands-free: its text (if any) the first utterance ("let's talk": heard ""
+                       PHRASE ONLY), then the steps of FAKE_HF, timed from the wake.
                        Any other listen-start closes an open wake stream first (mic-closed {mode: wake}), as the real one.
   listen-drop       -> printed only
   stats             -> stats {mic_open}
@@ -108,7 +111,7 @@ def handle(m):
         mic["open"], mic["n"], mic["mode"] = True, mic["n"] + 1, m.get("mode", "hold")
         if m.get("mode") == "wake":
             emit(ev="mic-open", mode="wake", echo="headphones")
-            threading.Thread(target=wake_run, args=(mic["n"], readf(WAKE, [])), daemon=True).start()
+            threading.Thread(target=wake_run, args=(mic["n"], readf(WAKE, []), bool(m.get("handsfree"))), daemon=True).start()
             return
         emit(ev="mic-open", mode=m.get("mode", "hold"))
         if m.get("mode") == "handsfree":
@@ -166,12 +169,28 @@ def hf_run(n, steps):
                 return
 
 
-def wake_run(n, steps):
+def wake_run(n, steps, hf=False):
     """The wake stream as scripted: "hey capri" turns, hands-free asked for, the stream ending."""
     t0 = time.time()
     for st in steps:
         time.sleep(max(0, st.get("at", 0) / 1000 - (time.time() - t0)))
         if mic["n"] != n or not mic["open"]:
+            return
+        if "wake" in st and hf:
+            # wake_handsfree: the same stream goes on as a hands-free one
+            emit(ev="wake", handsfree=True, ms={"fire_to_wake": 300, "verify": 280})
+            mic["mode"] = "handsfree"
+            log(ev="wake", handsfree=True)
+            if st["wake"] or st.get("handsfree"):
+                emit(ev="speech")
+                time.sleep(st.get("speak_ms", 600) / 1000)
+                emit(ev="endpoint", why="silence", speech_ms=900, silence_ms=1000)
+                if st.get("handsfree"):
+                    emit(ev="heard", text="", why="PHRASE ONLY", ms={"stt": 1})
+                else:
+                    emit(ev="heard", text=st["wake"], why="", ms={"stt": 1})
+                log(ev="heard", text=st["wake"], first=True)
+            hf_run(n, readf(HF, []))
             return
         if "wake" in st:
             emit(ev="wake", ms={"fire_to_wake": 300, "verify": 280})
