@@ -216,6 +216,7 @@ impl Avatar {
             self.fx_hide_bolt();
         }
         self.brain_cancel_move();
+        self.fetch_after = None;
         self.hop = None;
         self.next_activity = None;
         self.menu = None;
@@ -732,7 +733,8 @@ impl Avatar {
                         self.glitch = Some(Glitch::new(k, now, self.rng.next()));
                     }
                 }
-                self.brain_feed(crate::brain::BrainEvent::Landed { hard }, now);
+                self.arrive_placed();
+                self.brain_feed(crate::brain::BrainEvent::Landed { hard, ground: true }, now);
             }
             Contact::Perch { win, x, speed } => {
                 r.landed = Some("perch");
@@ -749,7 +751,8 @@ impl Avatar {
                     let fl = Self::clamp(&self.x11, &self.layout, (o.0, o.1 + 100_000));
                     self.home = (fl.0 + l.ground_x, fl.1 + l.ground_y);
                 }
-                self.brain_feed(crate::brain::BrainEvent::Landed { hard: false }, now);
+                self.arrive_placed();
+                self.brain_feed(crate::brain::BrainEvent::Landed { hard: false, ground: false }, now);
             }
             Contact::None => {}
         }
@@ -819,8 +822,9 @@ impl Avatar {
             p.dismissed = false;
             p.shown_at = now;
         }
-        // The session moved on while she was carried: play that mood's entry now.
-        if landed && self.mood != r.mood_at_grab {
+        // The session moved on while she was carried: play that mood's entry now. Still
+        // asleep: she lies back down where he put her (Sleepy's entry again).
+        if landed && (self.mood != r.mood_at_grab || self.mood == Mood::Sleepy) {
             let m = self.mood;
             self.set_mood(m, now);
         }
