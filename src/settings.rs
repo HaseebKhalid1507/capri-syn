@@ -130,16 +130,18 @@ pub struct Settings {
 /// bolt, when the pack has the local close-up frames (`make-pack --mochi`), and the bolt onto
 /// the window she sat on last time; false: the launch as before (the bolt onto the floor).
 /// `cinematic_min_gap_min` (default 10): no close-up when she was running less than this many
-/// minutes ago (a crash restart or `systemctl restart` isn't a greeting).
+/// minutes ago (a crash restart or `systemctl restart` isn't a greeting). `cinematic_when`
+/// (default `"every"`): every launch, or `"daily"`: the first launch of the day only.
 #[derive(Clone, Debug, PartialEq)]
 pub struct IntroSettings {
     pub cinematic: bool,
     pub cinematic_min_gap_min: f64,
+    pub cinematic_daily: bool,
 }
 
 impl Default for IntroSettings {
     fn default() -> Self {
-        IntroSettings { cinematic: true, cinematic_min_gap_min: 10.0 }
+        IntroSettings { cinematic: true, cinematic_min_gap_min: 10.0, cinematic_daily: false }
     }
 }
 
@@ -148,6 +150,7 @@ impl Default for IntroSettings {
 struct IntroRaw {
     cinematic: Option<bool>,
     cinematic_min_gap_min: Option<toml::Value>,
+    cinematic_when: Option<String>,
 }
 
 /// `[voice]`: push-to-talk (hold the talk key) and spoken replies, through the `capri-voice`
@@ -606,6 +609,13 @@ impl Settings {
                 let g = weight(&g).filter(|g| *g <= 1440.0).context("intro.cinematic_min_gap_min must be 0..1440 (minutes)")?;
                 intro.cinematic_min_gap_min = g;
             }
+            if let Some(w) = i.cinematic_when {
+                intro.cinematic_daily = match w.as_str() {
+                    "every" => false,
+                    "daily" => true,
+                    _ => anyhow::bail!("intro.cinematic_when must be \"every\" or \"daily\""),
+                };
+            }
         }
         let Some(r) = raw.brain else { return Ok(Settings { brain: b, ragdoll, session, music, display, mirror, voice, intro }) };
         if let Some(v) = r.enabled {
@@ -832,7 +842,10 @@ mod tests {
 
     #[test]
     fn intro_cinematic_and_its_gap() {
-        assert_eq!(Settings::parse("").unwrap().intro, IntroSettings { cinematic: true, cinematic_min_gap_min: 10.0 });
+        assert_eq!(Settings::parse("").unwrap().intro, IntroSettings { cinematic: true, cinematic_min_gap_min: 10.0, cinematic_daily: false });
+        assert!(Settings::parse("[intro]\ncinematic_when = \"daily\"\n").unwrap().intro.cinematic_daily);
+        assert!(!Settings::parse("[intro]\ncinematic_when = \"every\"\n").unwrap().intro.cinematic_daily);
+        assert!(Settings::parse("[intro]\ncinematic_when = \"weekly\"\n").is_err());
         let i = Settings::parse("[intro]\ncinematic = false\ncinematic_min_gap_min = 2.5\n").unwrap().intro;
         assert_eq!((i.cinematic, i.cinematic_min_gap_min), (false, 2.5));
         assert_eq!(Settings::parse("[intro]\ncinematic_min_gap_min = 0\n").unwrap().intro.cinematic_min_gap_min, 0.0);

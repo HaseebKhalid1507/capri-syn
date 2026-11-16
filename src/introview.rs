@@ -102,6 +102,8 @@ pub(super) struct IntroState {
     pub cfg: crate::settings::IntroSettings,
     /// Her last sign of life and her perch then, read at start (before the heartbeat writes).
     seen: Option<f64>,
+    /// When the close-up last played (`cinematic_when = "daily"`).
+    played: Option<f64>,
     saved_perch: Option<SavedPerch>,
     /// Decoded close-ups, a decode in flight, or failed.
     frames: Option<Arc<Vec<CloseUp>>>,
@@ -122,12 +124,33 @@ pub(super) struct IntroState {
 impl IntroState {
     pub fn new() -> IntroState {
         let cfg = crate::settings::Settings::load().map(|s| s.intro).unwrap_or_default();
-        IntroState { cfg, seen: state::load_seen(), saved_perch: state::load_perch(), last: "none".into(), ..IntroState::default() }
+        IntroState {
+            cfg,
+            seen: state::load_seen(),
+            played: state::load_intro_played(),
+            saved_perch: state::load_perch(),
+            last: "none".into(),
+            ..IntroState::default()
+        }
     }
 }
 
 fn unix_now() -> f64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64())
+}
+
+/// The local calendar day of a unix time (year, day of the year).
+fn local_day(unix: f64) -> Option<(i32, i32)> {
+    let t = unix as libc::time_t;
+    // SAFETY: localtime_r only writes the tm we own; a null return is checked.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    let r = unsafe { libc::localtime_r(&t, &mut tm) };
+    (!r.is_null()).then_some((tm.tm_year, tm.tm_yday))
+}
+
+/// It played on the local day of `now` already.
+fn played_today(played: Option<f64>, now: f64) -> bool {
+    played.is_some_and(|p| local_day(p).is_some() && local_day(p) == local_day(now))
 }
 
 impl Avatar {
@@ -138,12 +161,16 @@ impl Avatar {
     /// The close-up may play at this launch (it's checked again for fullscreen when it starts).
     fn intro_allowed(&self, why: &mut String) -> bool {
         let c = &self.intro.cfg;
-        let ok = intro::plays(c.cinematic, !self.intro_files().is_empty(), false, self.intro.seen, unix_now(), c.cinematic_min_gap_min);
+        let now = unix_now();
+        let today = c.cinematic_daily && played_today(self.intro.played, now);
+        let ok = intro::plays(c.cinematic, !self.intro_files().is_empty(), false, self.intro.seen, now, c.cinematic_min_gap_min, today);
         if !ok {
             *why = if !c.cinematic {
                 "no: off".into()
             } else if self.intro_files().is_empty() {
                 "no: no close-ups in the pack".into()
+            } else if today {
+                "no: played today (daily)".into()
             } else {
                 "no: relaunch within the gap".into()
             };
@@ -203,7 +230,7 @@ impl Avatar {
                 self.intro.failed = true;
                 self.intro.last = "no: decode failed".into();
                 if self.intro.waiting.take().is_some() {
-                    self.intro_chain(Instant::now(), cx);
+                    self.intro_chain(false, Instant::now(), cx);
                 }
             }
         }
@@ -260,7 +287,7 @@ impl Avatar {
                 self.intro.last = why;
             }
             self.intro.frames = None;
-            return self.launch_bolt(target, now);
+            return self.launch_bolt(target, false, now);
         }
         self.intro.target = Some(target);
         self.hidden = true;
@@ -275,7 +302,7 @@ impl Avatar {
                     if v.intro.waiting.take().is_some() {
                         elog!("synaps-avatar: intro: the close-ups took too long; launching without them");
                         v.intro.last = "no: close-ups late".into();
-                        v.intro_chain(Instant::now(), cx);
+                        v.intro_chain(false, Instant::now(), cx);
                     }
                 })
                 .ok();
@@ -324,6 +351,8 @@ impl Avatar {
                 }
                 self.intro.window = Some((handle.into(), v, id));
                 self.intro.plays += 1;
+                self.intro.played = Some(unix_now());
+                state::save_intro_played(unix_now());
                 let play = self.intro.plays;
                 // A close-up that never gets to its end (no frames for it) doesn't hold her launch.
                 cx.spawn(async move |this, cx| {
@@ -343,9 +372,9 @@ impl Avatar {
             (Err(e), _) => {
                 elog!("synaps-avatar: intro: cannot open its window: {e:#}");
                 self.intro.last = "no: window".into();
-                self.intro_chain(Instant::now(), cx);
+                self.intro_chain(false, Instant::now(), cx);
             }
-            _ => self.intro_chain(Instant::now(), cx),
+            _ => self.intro_chain(false, Instant::now(), cx),
         }
     }
 
@@ -371,13 +400,14 @@ impl Avatar {
         }
         // Played once per launch; a dev replay decodes them again.
         self.intro.frames = None;
-        self.intro_chain(Instant::now(), cx);
+        self.intro_chain(true, Instant::now(), cx);
     }
 
-    /// After the close-up (or without it): the launch bolt to the target.
-    fn intro_chain(&mut self, now: Instant, cx: &mut Context<Self>) {
+    /// After the close-up (`greeted`: it was on screen) or without it: the launch bolt to the
+    /// target.
+    fn intro_chain(&mut self, greeted: bool, now: Instant, cx: &mut Context<Self>) {
         let target = self.intro.target.take().unwrap_or((self.origin, self.placement));
-        if !self.launch_bolt(target, now) && self.parked.is_none() {
+        if !self.launch_bolt(target, greeted, now) && self.parked.is_none() {
             self.hidden = false;
             self.glitch = Some(Glitch::new(fx::GlitchKind::Appear, now, self.rng.next()));
         }
@@ -428,6 +458,8 @@ impl Avatar {
             "last": self.intro.last,
             "plays": self.intro.plays,
             "seenAgoS": self.intro.seen.map(|t| (unix_now() - t).round()),
+            "daily": self.intro.cfg.cinematic_daily,
+            "playedToday": played_today(self.intro.played, unix_now()),
             "savedPerch": self.intro.saved_perch.map(|p| format!("0x{:x}", p.win)),
         })
     }
@@ -627,6 +659,9 @@ impl Render for CloseUpView {
         if cue.red {
             plan.tint = Some(fx::BOLT_RED);
         }
+        if let Some(u) = cue.out {
+            plan.slices = Some(intro::out_bands(ih, u, self.seed, (10.0 * sf).round() as i32));
+        }
         let ox = self.place.at.0 + (cue.jolt.0 * sf).round() as i32;
         let oy = self.place.at.1 + (cue.jolt.1 * sf).round() as i32 + (cue.rise * ih as f32).round() as i32;
         let alpha = self.os.composited();
@@ -698,14 +733,6 @@ impl Render for CloseUpView {
                                 let clip = rect(ix + dx as f32, (y0 + dy) as f32, sw, (y1 - y0) as f32);
                                 window.paint_image(clip, shifted, Corners::default(), img.clone(), 0, false).ok();
                             }
-                        }
-                    }
-                    if plan.scan > 0.02 && tint.is_none() {
-                        let c = theme::alpha(0x02040a, plan.scan);
-                        let mut y = 0;
-                        while y < ih {
-                            window.paint_quad(fill(rect(-40.0 * sf, y as f32, iw as f32 + 80.0 * sf, sf.max(1.0)), c));
-                            y += (3.0 * sf).round() as i32;
                         }
                     }
                     for (r, c) in &bars {

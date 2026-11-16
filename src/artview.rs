@@ -120,6 +120,11 @@ impl Avatar {
         sw.or_else(|| self.art_on(PoolKey::SleepFloor)).or_else(|| self.art_on(PoolKey::Perch))
     }
 
+    /// The art family of the strip variant on screen; None: the pack's own art.
+    pub(super) fn art_strip_family(&self) -> Option<u16> {
+        self.art_strip().and_then(|a| self.pack.strip_family(a.base))
+    }
+
     /// Pools in or out as she moves, sleeps and wakes; a pick on the way in. True if a pick changed.
     pub(super) fn art_sync(&mut self, now: Instant) -> bool {
         if self.pack.pools.is_empty() {
@@ -433,7 +438,10 @@ impl Avatar {
             && self.teleport.is_none()
             && self.rag.is_none()
         {
-            self.glitch = Some(Glitch::new(GlitchKind::Burst, now, self.rng.next()));
+            // A cover for the body's cut: the tag stays whole.
+            let mut g = Glitch::new(GlitchKind::Burst, now, self.rng.next());
+            g.tears_tag = false;
+            self.glitch = Some(g);
             self.art.seams += 1;
         }
     }

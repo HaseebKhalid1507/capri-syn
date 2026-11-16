@@ -326,6 +326,9 @@ pub struct Patch {
 #[serde(rename_all = "camelCase", default)]
 pub struct ArriveSpec {
     pub launch: Vec<Step>,
+    /// After the cinematic close-up (it was the greeting): one landing, then her idle. Empty:
+    /// `launch`.
+    pub cinematic: Vec<Step>,
     pub summon: Vec<Step>,
     pub teleport: Vec<Step>,
     /// Onto a window top (seat-anchored frames only).
@@ -1029,7 +1032,7 @@ impl Pack {
             seat_only("perch.headpat", &p.headpat, &mut errors, &pack);
         }
         if let Some(a) = &pack.behaviour.arrive {
-            for (k, st) in [("launch", &a.launch), ("summon", &a.summon), ("teleport", &a.teleport), ("perch", &a.perch)] {
+            for (k, st) in [("launch", &a.launch), ("cinematic", &a.cinematic), ("summon", &a.summon), ("teleport", &a.teleport), ("perch", &a.perch)] {
                 check_steps(&format!("arrive.{k}"), st, &mut errors, &pack);
             }
             seat_only("arrive.perch", &a.perch, &mut errors, &pack);
@@ -1210,6 +1213,11 @@ impl Pack {
             bail!("pack {} failed validation:\n  - {}", dir.display(), errors.join("\n  - "));
         }
         Ok(pack)
+    }
+
+    /// Strip `si`'s art family (`anim.json` families: a cut within one flows, no seam).
+    pub fn strip_family(&self, si: usize) -> Option<u16> {
+        self.anim.as_ref()?.strips.get(si).map(|s| s.family_id)
     }
 
     /// A strip's cells as a sequence, every `every`-th cell held `every` times as long.

@@ -1026,10 +1026,16 @@ impl Avatar {
         let l = self.layout;
         let base = ((self.applied.0 + l.avatar_x) as f32, (self.applied.1 + l.avatar_y) as f32);
         let mut used = 0;
+        // Only on her: a glint picked on one frame's hair isn't left in the air when the
+        // frame changes under it (a landing's crouch, a pose).
+        let body = self.frame_or_default(self.shown_frame()).map(|f| &f.mask);
         if show {
             for g in &self.glints {
                 if used >= GLINTS_MAX {
                     break;
+                }
+                if !body.is_some_and(|m| m.get(g.x as i32, g.y as i32)) {
+                    continue;
                 }
                 let Some(sc) = g.scale(now, life_ms).filter(|&v| v > 0.02) else { continue };
                 let (dx, dy) = g.offset(now, life_ms);
@@ -2121,10 +2127,10 @@ impl Avatar {
         }
         let gap = (self.rng.range(lo as f32, hi.max(lo) as f32) as u64).max(250);
         self.next_glint = Some(now + Duration::from_millis(gap));
-        if !self.loaded || self.hidden || self.teleport.is_some() || self.rag.is_some() {
+        if !self.loaded || self.hidden || self.teleport.is_some() || self.rag.is_some() || self.arriving(now) {
             return;
         }
-        let Some(f) = self.frame_or_default(self.anim.frame()) else { return };
+        let Some(f) = self.frame_or_default(self.shown_frame()) else { return };
         if f.glints.is_empty() {
             return;
         }
@@ -3517,13 +3523,17 @@ impl Avatar {
         }
     }
 
-    /// The HUD comes back a beat after a loud teleport has fully reformed her.
+    /// The HUD comes back a beat after a loud teleport has fully reformed her, and never
+    /// before a drawn arrival has formed her (`arrive.formed`).
     fn teleport_done(&mut self, now: Instant) {
         let quiet = self.teleport.as_ref().is_some_and(|t| t.quiet);
+        let formed = self.arrive.formed.take().filter(|&t| t > now);
         self.teleport = None;
         self.arrive_reset();
         if !quiet {
-            self.hud_after = Some(now + HUD_AFTER_TELEPORT);
+            self.hud_after = Some((now + HUD_AFTER_TELEPORT).max(formed.unwrap_or(now)));
+        } else if formed.is_some() {
+            self.hud_after = formed;
         }
     }
 
@@ -4434,7 +4444,7 @@ impl Render for Avatar {
                 (f.top, g.keeps_face().then_some(f.face), x0, x1.max(x0 + 1))
             });
             // Last frame's tag rows (avatar-local device px), so a cut tears the plate.
-            let tag = self.tag_box.get().map(|b| {
+            let tag = self.tag_box.get().filter(|_| g.tears_tag).map(|b| {
                 let y = f32::from(b.origin.y) * sf - l.avatar_y as f32;
                 (y as i32, (y + f32::from(b.size.height) * sf) as i32)
             });
@@ -4766,7 +4776,12 @@ impl Render for Avatar {
 
         let hud = !hidden && self.teleport.is_none() && self.rag.is_none() && !self.quitting && self.hud_after.is_none_or(|t| t <= now);
         // A quiet (passive) teleport brings the tag back with the body as it reforms.
-        let tag_hud = hud || (!hidden && !self.quitting && self.rag.is_none() && self.teleport.as_ref().is_some_and(|t| t.quiet && matches!(t.leg, Leg::Appear)));
+        let tag_hud = hud
+            || (!hidden
+                && !self.quitting
+                && self.rag.is_none()
+                && self.arrive.formed.is_none_or(|t| t <= now)
+                && self.teleport.as_ref().is_some_and(|t| t.quiet && matches!(t.leg, Leg::Appear)));
         let Status { label, tone, invert, glyph: glyph_kind, plate: plate_kind, key: tone_key } = self.status();
         // A summon's NEEDS YOU pulses for a few seconds after she lands (the plate's bone half).
         let pulse = self.summon_pulse_on(now);
@@ -4801,7 +4816,7 @@ impl Render for Avatar {
         let show_tag = tag_hud && self.frames.iter().any(Option::is_some) && !bubble_open && self.reaction_until.is_none() && !posed_quiet;
         // In a glitch the tag tears with the body: strips of it, shifted by the same bands.
         let mut tag_strips: Vec<ShapeRect> = Vec::new();
-        let torn = show_tag && !collapsed && self.glitch.is_some();
+        let torn = show_tag && !collapsed && self.glitch.is_some_and(|g| g.tears_tag);
         // The tag's cut and its trailing slivers' step (for the shape), and the HUD's next
         // motion step.
         let mut tag_cut: Option<(Cut, Option<u64>)> = None;

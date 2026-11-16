@@ -10,23 +10,24 @@ pub const FRAMES: [&str; 9] = ["grab", "smear", "wave1", "wave2", "wave3", "mout
 const GRAB: usize = 0;
 const SMEAR: usize = 1;
 const WAVE: [usize; 5] = [2, 3, 4, 3, 4];
-const MOUTH: [(usize, u64); 4] = [(5, 90), (6, 140), (7, 140), (5, 230)];
+const MOUTH: [(usize, u64); 4] = [(5, 90), (6, 130), (7, 130), (5, 200)];
 const HAPPY: usize = 8;
 
-/// Beat starts, ms.
-pub const IMPACT_AT: u64 = 180;
+/// Beat starts, ms. With the bolt (~0.2 s to contact) and her one landing (`arrive.cinematic`)
+/// she is idle on her spot ~3.2 s after the close-up's first frame.
+pub const IMPACT_AT: u64 = 160;
 const RED_MS: u64 = 40;
 const SCALE_AT: u64 = IMPACT_AT + RED_MS;
 const SCALE_MS: u64 = 120;
-pub const GRAB_AT: u64 = 300;
+pub const GRAB_AT: u64 = 260;
 const JOLT_MS: u64 = 240;
-pub const WHIP_AT: u64 = 820;
-pub const WAVE_AT: u64 = 910;
+pub const WHIP_AT: u64 = 600;
+pub const WAVE_AT: u64 = 680;
 const WAVE_MS: u64 = 140;
 const BURST_MS: u64 = 280;
-pub const HI_AT: u64 = 1610;
-pub const HAPPY_AT: u64 = 2210;
-pub const OUT_AT: u64 = 2810;
+pub const HI_AT: u64 = 1380;
+pub const HAPPY_AT: u64 = 1930;
+pub const OUT_AT: u64 = 2380;
 pub const OUT_MS: u64 = 260;
 /// The bolt takes over.
 pub const END: u64 = OUT_AT + OUT_MS;
@@ -35,6 +36,8 @@ pub const END: u64 = OUT_AT + OUT_MS;
 pub const HEIGHT_OF_MONITOR: f32 = 0.62;
 /// It rises from the bottom edge this much of its height during the first beat.
 const RISE: f32 = 0.12;
+/// The out beat sinks it back toward the bottom edge this much of its height.
+const SINK: f32 = 0.10;
 /// Squash at the impact, and the grab's jolt (logical px).
 const IMPACT_SCALE: f32 = 1.06;
 const JOLT_PX: f32 = 2.0;
@@ -65,6 +68,9 @@ pub struct Cue {
     pub rise: f32,
     /// The "hi" beat: her tag shows it.
     pub hi: bool,
+    /// The out beat, 0..1: rows of the close-up drop out where they are (`out_bands`) as it
+    /// sinks; nothing is drawn outside its own pixels.
+    pub out: Option<f32>,
 }
 
 /// One play of the intro. `burst`: which of the five wave frames the Burst glitch hits.
@@ -110,9 +116,10 @@ impl Sheet {
             && t >= s
         {
             let shown = Sheet { skip: None, ..*self }.cue(s);
-            return Cue { glitch: Some(GlitchCue { kind: GlitchKind::Vanish, at: s, ms: OUT_MS }), red: false, hi: false, ..shown };
+            let u = (t - s) as f32 / OUT_MS as f32;
+            return Cue { glitch: None, red: false, hi: false, scale: 1.0, jolt: (0.0, 0.0), out: Some(u), rise: shown.rise + SINK * u * u, ..shown };
         }
-        let mut c = Cue { frame: GRAB, glitch: None, red: false, scale: 1.0, jolt: (0.0, 0.0), rise: 0.0, hi: false };
+        let mut c = Cue { frame: GRAB, glitch: None, red: false, scale: 1.0, jolt: (0.0, 0.0), rise: 0.0, hi: false, out: None };
         if t < IMPACT_AT {
             let u = t as f32 / IMPACT_AT as f32;
             c.rise = RISE * (1.0 - u) * (1.0 - u);
@@ -145,7 +152,9 @@ impl Sheet {
         } else {
             c.frame = HAPPY;
             if t >= OUT_AT {
-                c.glitch = Some(GlitchCue { kind: GlitchKind::Vanish, at: OUT_AT, ms: OUT_MS });
+                let u = (t - OUT_AT) as f32 / OUT_MS as f32;
+                c.out = Some(u);
+                c.rise = SINK * u * u;
             }
         }
         // One Burst, from a wave frame (it may run on into "hi").
@@ -162,11 +171,47 @@ impl Sheet {
     }
 }
 
-/// Plays at all: the setting, the pack's close-ups, nothing fullscreen focused, and not a
-/// relaunch within `min_gap_min` of her last sign of life (`seen`, unix s; a clock that went
-/// back counts as long ago).
-pub fn plays(on: bool, has_frames: bool, fullscreen: bool, seen: Option<f64>, now_unix: f64, min_gap_min: f64) -> bool {
-    on && has_frames && !fullscreen && seen.is_none_or(|t| now_unix < t || now_unix - t >= min_gap_min * 60.0)
+/// Plays at all: the setting, the pack's close-ups, nothing fullscreen focused, not a relaunch
+/// within `min_gap_min` of her last sign of life (`seen`, unix s; a clock that went back counts
+/// as long ago), and (`cinematic_when = "daily"`) not played yet today (`played_today`).
+pub fn plays(on: bool, has_frames: bool, fullscreen: bool, seen: Option<f64>, now_unix: f64, min_gap_min: f64, played_today: bool) -> bool {
+    on && has_frames && !fullscreen && !played_today && seen.is_none_or(|t| now_unix < t || now_unix - t >= min_gap_min * 60.0)
+}
+
+/// The out beat's rows at `u` (0..1) for a close-up `h` px tall: `(y0, y1, 0, 0)` bands that
+/// are still drawn, each where it was (no sideways shift: nothing outside its own pixels). Rows
+/// go in a fixed random order (`seed`), a few at first, all by the end. `band`: a row's height.
+pub fn out_bands(h: i32, u: f32, seed: u64, band: i32) -> Vec<(i32, i32, i32, i32)> {
+    let band = band.max(1);
+    let mut out: Vec<(i32, i32, i32, i32)> = Vec::new();
+    let mut y = 0;
+    let mut k = 0u64;
+    // The last row to go stays until the very end (an empty window stops being drawn).
+    let mut last = (-1.0f32, (0, 0));
+    while y < h {
+        let y1 = (y + band).min(h);
+        // Its turn to go, 0..1 (eased: slow at first).
+        let mut x = seed ^ k.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        x ^= x >> 33;
+        x = x.wrapping_mul(0xff51_afd7_ed55_8ccd);
+        x ^= x >> 29;
+        let goes = (x >> 40) as f32 / (1u64 << 24) as f32;
+        if goes > last.0 {
+            last = (goes, (y, y1));
+        }
+        if goes >= u * u * (3.0 - 2.0 * u) {
+            match out.last_mut() {
+                Some(l) if l.1 == y => l.1 = y1,
+                _ => out.push((y, y1, 0, 0)),
+            }
+        }
+        y = y1;
+        k += 1;
+    }
+    if out.is_empty() && u < 1.0 && last.0 >= 0.0 {
+        out.push((last.1.0, last.1.1, 0, 0));
+    }
+    out
 }
 
 /// Where the close-up goes on a monitor (all root/device px): `image` its size, `window` the
@@ -203,35 +248,40 @@ mod tests {
     fn the_beats_in_order() {
         let s = Sheet::new(0);
         let f = |t| FRAMES[s.cue(t).frame];
-        assert_eq!((f(0), f(200), f(500), f(850)), ("grab", "grab", "grab", "smear"));
-        assert_eq!([910, 1050, 1190, 1330, 1470].map(f), ["wave1", "wave2", "wave3", "wave2", "wave3"]);
-        assert_eq!([1610, 1700, 1840, 1980, 2200].map(f), ["mouth1", "mouth2", "mouth3", "mouth1", "mouth1"]);
-        assert_eq!((f(2210), f(2900)), ("happy", "happy"));
-        assert_eq!(s.end(), 3070);
-        assert!(!s.done(3069) && s.done(3070));
+        assert_eq!((f(0), f(200), f(500), f(620)), ("grab", "grab", "grab", "smear"));
+        assert_eq!([680, 820, 960, 1100, 1240].map(f), ["wave1", "wave2", "wave3", "wave2", "wave3"]);
+        assert_eq!([1380, 1470, 1600, 1730, 1920].map(f), ["mouth1", "mouth2", "mouth3", "mouth1", "mouth1"]);
+        assert_eq!((f(1930), f(2500)), ("happy", "happy"));
+        assert_eq!(s.end(), 2640, "trimmed holds: every beat, 0.43 s shorter");
+        assert!(!s.done(2639) && s.done(2640));
         // In: Appear while it rises; the impact is one red frame, then the squash eases back.
         let c0 = s.cue(0);
         assert_eq!(c0.glitch.map(|g| g.kind), Some(GlitchKind::Appear));
-        assert!(c0.rise > 0.1 && s.cue(170).rise < 0.01 && s.cue(180).rise == 0.0);
-        assert!(s.cue(190).red && !s.cue(220).red);
-        assert!((s.cue(220).scale - 1.06).abs() < 1e-3 && s.cue(339).scale < 1.001 && s.cue(340).scale == 1.0);
-        assert_ne!(s.cue(330).jolt, (0.0, 0.0), "the grab jolts");
-        assert!(s.cue(330).jolt.0.abs() <= 2.0 && s.cue(600).jolt == (0.0, 0.0));
-        assert!(s.cue(1700).hi && !s.cue(1500).hi && !s.cue(2300).hi);
-        assert_eq!(s.cue(2900).glitch, Some(GlitchCue { kind: GlitchKind::Vanish, at: 2810, ms: 260 }));
+        assert!(c0.rise > 0.1 && s.cue(150).rise < 0.01 && s.cue(160).rise == 0.0);
+        assert!(s.cue(170).red && !s.cue(200).red);
+        assert!((s.cue(200).scale - 1.06).abs() < 1e-3 && s.cue(319).scale < 1.001 && s.cue(320).scale == 1.0);
+        assert_ne!(s.cue(290).jolt, (0.0, 0.0), "the grab jolts");
+        assert!(s.cue(290).jolt.0.abs() <= 2.0 && s.cue(550).jolt == (0.0, 0.0));
+        assert!(s.cue(1450).hi && !s.cue(1300).hi && !s.cue(2000).hi);
+        // Out: no glitch, no red; it sinks while its rows drop out.
+        let o = s.cue(2510);
+        assert_eq!((o.glitch, o.red, o.hi), (None, false, false));
+        assert!(o.out.is_some_and(|u| (u - 0.5).abs() < 0.01) && o.rise > 0.0 && o.rise <= SINK);
+        assert!(s.cue(2379).out.is_none());
         // Held frames wake once, at the next change; the jolt moves every frame.
-        assert_eq!(s.next_change(600), 821);
-        assert_eq!(s.next_change(2300), 2811);
-        assert!(s.next_change(330) <= 340);
+        assert_eq!(s.next_change(550), 601);
+        assert_eq!(s.next_change(2000), 2381);
+        assert!(s.next_change(290) <= 300);
     }
 
     #[test]
     fn one_burst_on_the_rolled_wave_frame() {
         for roll in 0..5u64 {
             let s = Sheet::new(roll);
-            let bursts: Vec<u64> = (0..3070).filter(|&t| s.cue(t).glitch.is_some_and(|g| g.kind == GlitchKind::Burst)).collect();
-            assert_eq!(bursts.first(), Some(&(910 + roll * 140)));
+            let bursts: Vec<u64> = (0..s.end()).filter(|&t| s.cue(t).glitch.is_some_and(|g| g.kind == GlitchKind::Burst)).collect();
+            assert_eq!(bursts.first(), Some(&(680 + roll * 140)));
             assert_eq!(bursts.len(), 280);
+            assert!(bursts.iter().all(|&t| t < OUT_AT), "never over the out beat");
         }
     }
 
@@ -241,30 +291,51 @@ mod tests {
         s.skip(1000);
         assert!(s.skipped());
         assert_eq!(s.end(), 1260);
-        let c = s.cue(1100);
-        assert_eq!(FRAMES[c.frame], "wave1", "holds what showed at the click");
-        assert_eq!(c.glitch, Some(GlitchCue { kind: GlitchKind::Vanish, at: 1000, ms: 260 }));
-        assert!(!c.hi && s.done(1260));
-        assert_eq!(s.cue(900).frame, 1, "before the skip, as planned");
+        let c = s.cue(1130);
+        assert_eq!(FRAMES[c.frame], "wave3", "holds what showed at the click");
+        assert_eq!((c.glitch, c.hi), (None, false));
+        assert!(c.out.is_some_and(|u| (u - 0.5).abs() < 0.01));
+        assert!(s.done(1260));
+        assert_eq!(s.cue(640).frame, 1, "before the skip, as planned");
         // A second press changes nothing; one in the out beat isn't a skip.
         s.skip(1200);
         assert_eq!(s.end(), 1260);
         let mut late = Sheet::new(0);
-        late.skip(2900);
+        late.skip(2400);
         assert!(!late.skipped() && late.end() == END);
+    }
+
+    #[test]
+    fn the_out_beat_drops_rows_where_they_are() {
+        let h = 893;
+        let all = out_bands(h, 0.0, 7, 12);
+        assert_eq!(all, vec![(0, h, 0, 0)], "nothing gone yet");
+        assert!(out_bands(h, 1.0, 7, 12).is_empty(), "all gone at the end");
+        assert_eq!(out_bands(h, 0.999, 7, 12).len(), 1, "one row left until then");
+        let mut prev = h;
+        for k in 1..10 {
+            let b = out_bands(h, k as f32 / 10.0, 7, 12);
+            let rows: i32 = b.iter().map(|r| r.1 - r.0).sum();
+            assert!(rows <= prev, "rows only go");
+            prev = rows;
+            assert!(b.iter().all(|&(y0, y1, dx, dy)| 0 <= y0 && y0 < y1 && y1 <= h && dx == 0 && dy == 0), "inside, unshifted");
+        }
+        let half: i32 = out_bands(h, 0.5, 7, 12).iter().map(|r| r.1 - r.0).sum();
+        assert!((h / 4..h * 3 / 4).contains(&half), "{half}");
     }
 
     #[test]
     fn it_plays_unless_told_or_too_soon() {
         let now = 1_000_000.0;
-        assert!(plays(true, true, false, None, now, 10.0), "first launch ever");
-        assert!(plays(true, true, false, Some(now - 601.0), now, 10.0));
-        assert!(!plays(true, true, false, Some(now - 120.0), now, 10.0), "a restart two minutes later");
-        assert!(plays(true, true, false, Some(now + 50.0), now, 10.0), "the clock went back");
-        assert!(plays(true, true, false, Some(now - 1.0), now, 0.0), "gap 0: always");
-        assert!(!plays(false, true, false, None, now, 10.0), "setting off");
-        assert!(!plays(true, false, false, None, now, 10.0), "a pack without the close-ups");
-        assert!(!plays(true, true, true, None, now, 10.0), "fullscreen focused");
+        assert!(plays(true, true, false, None, now, 10.0, false), "first launch ever");
+        assert!(plays(true, true, false, Some(now - 601.0), now, 10.0, false));
+        assert!(!plays(true, true, false, Some(now - 120.0), now, 10.0, false), "a restart two minutes later");
+        assert!(plays(true, true, false, Some(now + 50.0), now, 10.0, false), "the clock went back");
+        assert!(plays(true, true, false, Some(now - 1.0), now, 0.0, false), "gap 0: always");
+        assert!(!plays(false, true, false, None, now, 10.0, false), "setting off");
+        assert!(!plays(true, false, false, None, now, 10.0, false), "a pack without the close-ups");
+        assert!(!plays(true, true, true, None, now, 10.0, false), "fullscreen focused");
+        assert!(!plays(true, true, false, Some(now - 7200.0), now, 10.0, true), "daily, and it played today");
     }
 
     #[test]

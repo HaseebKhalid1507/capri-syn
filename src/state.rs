@@ -76,6 +76,15 @@ pub fn load_seen() -> Option<f64> {
     read(&path()).get("seenUnix").and_then(serde_json::Value::as_f64)
 }
 
+/// When her cinematic close-up last played (unix s): `[intro] cinematic_when = "daily"`.
+pub fn load_intro_played() -> Option<f64> {
+    read(&path()).get("introPlayedUnix").and_then(serde_json::Value::as_f64)
+}
+
+pub fn save_intro_played(unix: f64) {
+    merge(&path(), "introPlayedUnix", serde_json::json!(unix));
+}
+
 /// Where she sat at her last sign of life, if on a window top: restored at the next launch if
 /// that window is still there, the same size in the same place.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -160,7 +169,9 @@ mod tests {
         assert_eq!(perch_at(&p), Some(s));
         assert_eq!(read(&p)["seenUnix"], 1234.5);
         assert_eq!(ground_at(&p), Some((10, 20)));
+        merge(&p, "introPlayedUnix", serde_json::json!(1200.0));
         seen_at(&p, 1300.0, None);
+        assert_eq!(read(&p)["introPlayedUnix"], 1200.0, "the heartbeat keeps it");
         assert_eq!(perch_at(&p), None, "on the floor: no perch to restore");
         std::fs::remove_dir_all(&dir).ok();
     }
