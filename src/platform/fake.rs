@@ -176,6 +176,9 @@ impl Stage for FakeStage {
         }
         Ok(())
     }
+    fn shape_of(&self, _s: WinId, _input: &[ShapeRect], _visible: Visible<'_>) -> Result<()> {
+        Ok(())
+    }
     fn set_icon(&self, _s: WinId, _data: &[u32]) -> Result<()> {
         Ok(())
     }

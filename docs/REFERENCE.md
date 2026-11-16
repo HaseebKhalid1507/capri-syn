@@ -63,6 +63,9 @@ value rejects the whole file (the previous values stay). `avatarctl settings rel
 | `[mirror] self` | `true` | her own turns: travel, what she cares about, an idle look-around |
 | `[mirror] idle_every_min` | `[1, 4]` | minutes between idle look-arounds |
 | `[mirror] turn_ms` | `150` | the turn's squeeze (0 = an instant flip, at most 400) |
+| `[intro] cinematic` | `true` | the launch: her close-up over the desktop first (only with a pack built with `--mochi`), and the bolt back onto the window she sat on last time. `false`: the launch as before |
+| `[intro] cinematic_min_gap_min` | `10` | no close-up if she was running less than this many minutes ago (a crash or `systemctl restart` isn't a greeting) |
+| `[intro] cinematic_when` | `"every"` | `"every"` launch, or `"daily"`: the close-up on the first launch of the day only (`state.json` `introPlayedUnix`) |
 | `[display] composited` | `"auto"` | `"auto"` (alpha while a compositor runs, the X shape otherwise), `"on"`, `"off"` |
 | `[music] detect` | `true` | headphones on while an MPRIS player is playing |
 | `[music] ignore` | `["discord", "vesktop"]` | player bus-name substrings that never count |
@@ -134,7 +137,7 @@ A pack is a directory:
 | `icon.png` | her icon (`_NET_WM_ICON` on her window and the Line) |
 | `music/*.png` | headphones frames and note sprites for the music idle |
 | `fonts/*.ttf` | the HUD font (Exo 2 static instances; OFL) |
-| `moods.json` | **the avatar's behaviour sidecar**, our file: HUD tones (overrides of the theme's tokens by name: `accent`, `text`, `danger`, …; empty for Capri), each mood's nameplate shape (`plate`: slant / arrow / flag / square / split), idle life (bob, sway, sparkles, activity timing), the mood table (frames, entry clips, labels, glyphs), idle activities, extra frames (an extra frame may paint another file's face onto it: `patch`), click reactions (head pat / body / annoyed streak), perch rules (one frame, plus the headpat face), music, arrivals (`arrive`: launch / summon / teleport / perch sequences, `teleportChance`), the deep nap (`brain.napDeep`, `napPerch`, `napDeepAfterMs`, `napWake`), the startle and big-leap crouch, the look straight ahead (`brain.lookFront`), the rare air kiss (`kiss`) and the icon. The code ships no character ids: everything character-specific is in here |
+| `moods.json` | **the avatar's behaviour sidecar**, our file: HUD tones (overrides of the theme's tokens by name: `accent`, `text`, `danger`, …; empty for Capri), each mood's nameplate shape (`plate`: slant / arrow / flag / square / split), idle life (bob, sway, sparkles, activity timing), the mood table (frames, entry clips, labels, glyphs), idle activities, extra frames (an extra frame may paint another file's face onto it: `patch`), click reactions (head pat / body / annoyed streak), perch rules (one frame, plus the headpat face), music, arrivals (`arrive`: launch / cinematic (the landing after the close-up) / summon / teleport / perch sequences, `teleportChance`), the deep nap (`brain.napDeep`, `napPerch`, `napDeepAfterMs`, `napWake`), the startle and big-leap crouch, the look straight ahead (`brain.lookFront`), the rare air kiss (`kiss`) and the icon. The code ships no character ids: everything character-specific is in here |
 | `persona.md` | optional: her session's system prompt (`[session] persona`) |
 | `NOTICE.md` | the art's notice, plus a line naming the CapriCore versions it came from |
 
@@ -161,7 +164,8 @@ Optional desktop art, into the pack's `anim/` (a pack without it loads as before
   `tools/lachy-desktop-156ed18.sha256`. `auto` downloads exactly those files at that commit (cached).
 - `--mochi DIR|auto`: mochiiwuff/capri-desktop at `c011764`, checked against `tools/mochi-desktop-c011764.sha256`.
   Its images are show frames and fan art that its licence does not cover: local personal use only, never
-  published.
+  published. Only this flag puts them in a pack (into your local pack directory); nothing in this repo
+  ships or fetches them otherwise. They give her the launch close-up (below).
 - `anim/anim.json` is `tools/desktop-art.json` (capri-syn's own measured cell grid, anchors and loop flags)
   plus the sha256 of every copied file. `NOTICE.md` gains each source's `Required Notice:` lines, the licence
   URL and its credits.
@@ -183,9 +187,30 @@ With `anim/`, `moods.json` `variants` mixes that art in; she never swaps one set
   only where the figure fits on the window's exposed top. `every: n` plays every n-th cell.
 - Entering the state picks one: weighted, never the last pick again, seeded (`SA_ART_SEED`). A long stay
   (`shiftMs`) shifts it in place. Every cut between CapriCore and a strip (or between two strip families)
-  goes through a glitch.
+  goes through a glitch (the body's; her tag stays whole).
 - Strips decode when first wanted, off the main thread; `cacheMb` caps what is kept (least recently shown
   first, never what is on screen). A pack without `anim/` keeps only the pack's own variants.
+- `transitions` names drawn in-betweens by change: `perchArrive` (a one-shot seat strip). Landing on a
+  window top, the arrival is the art she lands in, so nothing is cut after the contact: her perch pick is
+  the pack's own pose → `arrive.perch`; a drawn pose → its family's `perchArrive` (none if its cells
+  aren't in: the landing glitch covers the cut). Her tag comes back once the drawn arrival has formed her.
+
+The launch, with `[intro] cinematic` on:
+
+- If the pack has the close-ups (`anim/mochi/intro-*`, `--mochi` only), her close-up rises from the bottom
+  of her monitor (62 % of its height, centred on the work area) and plays its 2.6 s beat: grab, a whip into
+  a wave, "hi", a grin, then out: it sinks while its rows drop out, inside its own pixels. A click on it
+  or Esc anywhere skips to the out beat. Clicks anywhere else go through to the window under it, and Esc
+  reaches your window too.
+- It doesn't play while a fullscreen window is focused, within `cinematic_min_gap_min` of her last run
+  (`state.json` `seenUnix`, written every minute and at a quit), or (`cinematic_when = "daily"`) if it
+  already played today.
+- Then the plain red bolt from the top of the monitor, onto the floor or onto the window she sat on last
+  time (`state.json` `perch`: the same window, same size, same place, with room on its top; else the
+  floor). On the floor she lands once (`arrive.cinematic`; the close-up was the greeting) and is idle
+  ~3.2 s after the close-up's first frame. A launch without the close-up lands with `arrive.launch`.
+- Without the close-ups, the launch is just that bolt. The close-ups are decoded for each launch and
+  dropped after it.
 
 ## Building
 
@@ -210,7 +235,7 @@ sends one:
 mood <name> | clip <id> | say <text> | pos <x> <y> [now] | perch [sit|stand] [win] | perch off | drop | stack
 page next|prev | scroll <n> | reader open [focus]|close|copy [n]|scroll <px> | collapse | expand
 music on|off | glitch | face left|right|toggle | drag … | submit <text> | abort | copy
-art perch|sleepFloor|sleepWindow <variant id|next>
+art perch|sleepFloor|sleepWindow <variant id|next> | intro [skip]
 talk press|release | line close | prompt confirm|secret [text] | prompt off
 brain … | settings reload | tap head|body | menu | shape | state | hide | show | quit
 ```

@@ -72,13 +72,34 @@ struct SideDoc {
     files: BTreeMap<String, FileDoc>,
 }
 
+#[derive(Deserialize, Clone, Debug)]
+struct MochiFile {
+    #[serde(default)]
+    sha256: Option<String>,
+    #[serde(default)]
+    kind: Option<String>,
+}
+
+/// `mochi`: the local-only images (`make-pack --mochi`): a file list, no geometry.
+#[derive(Deserialize, Debug, Default)]
+#[serde(default)]
+struct MochiDoc {
+    files: BTreeMap<String, MochiFile>,
+}
+
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 struct AnimDoc {
     schema_version: u32,
     #[serde(default)]
     lachy: Option<SideDoc>,
+    #[serde(default)]
+    mochi: Option<MochiDoc>,
 }
+
+/// The cinematic intro's close-ups, in `crate::intro::FRAMES` order: `anim/mochi/intro-<name>.*`.
+/// Local only: a pack built without `--mochi` has none, and the intro is just the bolt.
+pub const INTRO_KIND: &str = "intro";
 
 /// One strip, resolved: where its cells come from and how they register.
 #[derive(Clone, Debug)]
@@ -132,6 +153,25 @@ pub struct CellSrc {
 pub struct Anim {
     pub strips: Vec<Strip>,
     pub by_name: HashMap<String, usize>,
+    /// The close-ups for the cinematic intro (path, sha256), all of them or none.
+    pub intro: Vec<(PathBuf, Option<String>)>,
+}
+
+/// Every close-up the intro needs, from `mochi.files` (kind `intro`), in order; empty unless all
+/// are listed and on disk.
+fn intro_files(dir: &Path, m: Option<&MochiDoc>) -> Vec<(PathBuf, Option<String>)> {
+    let Some(m) = m else { return Vec::new() };
+    let root = dir.join("anim/mochi");
+    let mut out = Vec::new();
+    for name in crate::intro::FRAMES {
+        let stem = format!("intro-{name}.");
+        let hit = m.files.iter().find(|(f, d)| f.starts_with(&stem) && !f.contains('/') && d.kind.as_deref() == Some(INTRO_KIND));
+        match hit {
+            Some((f, d)) if root.join(f).is_file() => out.push((root.join(f), d.sha256.clone())),
+            _ => return Vec::new(),
+        }
+    }
+    out
 }
 
 impl Anim {
@@ -152,11 +192,12 @@ impl Anim {
         if doc.schema_version != 1 {
             bail!("pack: anim/anim.json schemaVersion {} (expected 1)", doc.schema_version);
         }
-        let Some(side) = doc.lachy else { return Ok(Some(Anim::default())) };
+        let intro = intro_files(dir, doc.mochi.as_ref());
+        let Some(side) = doc.lachy else { return Ok(Some(Anim { intro, ..Anim::default() })) };
         let root = dir.join("anim/lachy");
         let mut errors = Vec::new();
         let stand = side.families.get("stand").and_then(|f| f.body_px).filter(|&b| b > 0.0);
-        let mut anim = Anim::default();
+        let mut anim = Anim { intro, ..Anim::default() };
         for (name, d) in &side.strips {
             // Effects and overlays have no anchor: not body frames (later phases).
             let Some(a) = &d.anchor else { continue };
@@ -280,6 +321,7 @@ pub mod tests {
         strip("stand.png", 4, 6, 3);
         strip("stand_flipped.png", 4, 6, 3);
         strip("lie.png", 6, 4, 2);
+        strip("perch_in.png", 4, 6, 2);
         let doc = json!({"schemaVersion": 1, "lachy": {
             "families": {"stand": {"bodyPx": 4, "faces": "right"}, "lie": {"faces": "right"}},
             "strips": {
@@ -287,6 +329,8 @@ pub mod tests {
                           "anchor": {"name": "feet", "x": 2, "y": 5}, "bounds": [1, 1, 3, 4], "mirrorArt": "stand_flipped"},
                 "stand_flipped": {"file": "sprites/stand_flipped.png", "frames": 3, "cell": [4, 6], "fps": 10, "loop": true,
                                   "family": "stand", "anchor": {"name": "feet", "x": 2, "y": 5}, "bounds": [1, 1, 3, 4]},
+                "perch_in": {"file": "sprites/perch_in.png", "frames": 2, "cell": [4, 6], "fps": 10, "family": "lie",
+                             "anchor": {"name": "seat", "x": 2, "y": 4}, "bounds": [1, 1, 3, 4]},
                 "lie": {"file": "sprites/lie.png", "frames": 2, "cell": [6, 4], "fps": 4, "loop": true, "family": "lie",
                         "anchor": {"name": "surface", "x": 3, "y": 2}, "bounds": [1, 1, 4, 2],
                         "contact": {"line": 2, "legs": [4, 6]}},
@@ -330,6 +374,38 @@ pub mod tests {
         assert_eq!(id, "stand#2");
         assert_eq!((f.anchor.x, f.anchor.y, f.bounds.x, f.bounds.width, f.bounds.height), (4, 10, 2, 6, 8));
         assert_eq!(a.cells(a.by_name["stand_flipped"], true)[0].0, "~stand_flipped#0");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn the_intro_close_ups_are_all_or_nothing() {
+        let d = tmp("intro");
+        write_anim(&d);
+        let p = d.join("anim/anim.json");
+        let mut v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        std::fs::create_dir_all(d.join("anim/mochi")).unwrap();
+        let mut files = serde_json::Map::new();
+        for n in crate::intro::FRAMES {
+            let f = format!("intro-{n}.webp");
+            std::fs::write(d.join("anim/mochi").join(&f), b"x").unwrap();
+            files.insert(f, json!({"sha256": "00", "kind": "intro"}));
+        }
+        files.insert("face-calm.png".into(), json!({"sha256": "01", "kind": "face"}));
+        v["mochi"] = json!({"files": files});
+        std::fs::write(&p, v.to_string()).unwrap();
+        let a = Anim::load(&d, 8).unwrap().unwrap();
+        assert_eq!(a.intro.len(), 9);
+        assert!(a.intro[0].0.ends_with("anim/mochi/intro-grab.webp") && a.intro[8].0.ends_with("intro-happy.webp"));
+        assert_eq!(a.intro[0].1.as_deref(), Some("00"));
+        // One missing on disk: no intro at all (it silently doesn't exist).
+        std::fs::remove_file(d.join("anim/mochi/intro-smear.webp")).unwrap();
+        assert!(Anim::load(&d, 8).unwrap().unwrap().intro.is_empty());
+        // Without lachy's art the intro still loads.
+        v.as_object_mut().unwrap().remove("lachy");
+        std::fs::write(d.join("anim/mochi/intro-smear.webp"), b"x").unwrap();
+        std::fs::write(&p, v.to_string()).unwrap();
+        let a = Anim::load(&d, 8).unwrap().unwrap();
+        assert!(a.strips.is_empty() && a.intro.len() == 9);
         std::fs::remove_dir_all(&d).ok();
     }
 

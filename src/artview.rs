@@ -120,6 +120,11 @@ impl Avatar {
         sw.or_else(|| self.art_on(PoolKey::SleepFloor)).or_else(|| self.art_on(PoolKey::Perch))
     }
 
+    /// The art family of the strip variant on screen; None: the pack's own art.
+    pub(super) fn art_strip_family(&self) -> Option<u16> {
+        self.art_strip().and_then(|a| self.pack.strip_family(a.base))
+    }
+
     /// Pools in or out as she moves, sleeps and wakes; a pick on the way in. True if a pick changed.
     pub(super) fn art_sync(&mut self, now: Instant) -> bool {
         if self.pack.pools.is_empty() {
@@ -234,7 +239,7 @@ impl Avatar {
     }
 
     /// Ask for `si`'s cells (as she faces now); fetched at the next schedule.
-    fn art_need(&self, si: usize) {
+    pub(super) fn art_need(&self, si: usize) {
         let u = self.art_unit(si);
         if !self.art.ready.contains_key(&u) && !self.art.pending.contains(&u) && !self.art.failed.contains(&u) {
             self.art.want.borrow_mut().push(u);
@@ -243,7 +248,7 @@ impl Avatar {
 
     /// Strip `si` can show: the cells as she faces now (asked for if not), or the other set
     /// (mirrored on the fly) meanwhile.
-    fn art_ready(&self, si: usize) -> bool {
+    pub(super) fn art_ready(&self, si: usize) -> bool {
         let u = self.art_unit(si);
         if self.art.ready.contains_key(&u) {
             return true;
@@ -433,7 +438,10 @@ impl Avatar {
             && self.teleport.is_none()
             && self.rag.is_none()
         {
-            self.glitch = Some(Glitch::new(GlitchKind::Burst, now, self.rng.next()));
+            // A cover for the body's cut: the tag stays whole.
+            let mut g = Glitch::new(GlitchKind::Burst, now, self.rng.next());
+            g.tears_tag = false;
+            self.glitch = Some(g);
             self.art.seams += 1;
         }
     }

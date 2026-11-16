@@ -345,6 +345,16 @@ Reference (session rules, every setting and flag, pack format, dev control, test
   `tools/make-pack` assembles the pack on your machine from your own CapriCore checkout. The clips on
   this page show the app running with that pack. The banner and the cards are composed from those
   captures. The artwork in all of them remains CapriChooms's.
+- **Desktop art.** Her perch, sleep and transition animations come from Capri,
+  [lachydotmcg/capri-desktop](https://github.com/lachydotmcg/capri-desktop), under the
+  [PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0).
+  They are not included in this repository either: `tools/make-pack --lachy` adds them to your local pack.
+  Window perch and music perch animations: her artist, who prefers to stay private. Click effect: mixmix312352.
+  Transformation animation and emotes: Qewiw (mix_qewiw1412_86144).
+
+  > Required Notice: Copyright 2026 Lachy (https://github.com/lachydotmcg)
+  >
+  > Required Notice: Anyone who uses Capri's code, art, animations or any of its other assets must credit the Capri project (https://github.com/lachydotmcg/capri-desktop). Capri's art and animations are by her artist, who prefers to stay private. Parts made by others keep their own licences, listed in its README.
 - **Unofficial.** This is a fan project. It is not affiliated with or endorsed by CD PROJEKT RED,
   R. Talsorian Games, Studio Trigger or Netflix. All trademarks belong to their owners.
 - **Her voice.** Speech uses stock Kokoro voices, blended, with light DSP. Nothing is cloned and nobody's voice

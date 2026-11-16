@@ -1147,6 +1147,12 @@
     "hardGlitch": "land"
   },
   "arrive": {
+    "cinematic": [
+      {
+        "frame": "intro-landing",
+        "ms": 300
+      }
+    ],
     "launch": [
       {
         "frame": "intro-gaze",
@@ -1208,6 +1214,9 @@
       }
     ],
     "teleportChance": 0.5
+  },
+  "transitions": {
+    "perchArrive": "perch_arrive"
   },
   "kiss": {
     "steps": [

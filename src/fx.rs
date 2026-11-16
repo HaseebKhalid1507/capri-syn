@@ -67,6 +67,8 @@ pub struct Glitch {
     seed: u64,
     /// The quiet passive-teleport legs: short, small offsets, little fringing.
     pub soft: bool,
+    /// The status tag tears with the body (a mood's burst); an art seam's cover leaves it be.
+    pub tears_tag: bool,
 }
 
 impl Glitch {
@@ -78,7 +80,7 @@ impl Glitch {
             GlitchKind::Land => 330.0,
             GlitchKind::Vanish => 300.0,
         };
-        Glitch { t0: now, kind, ms, seed, soft: false }
+        Glitch { t0: now, kind, ms, seed, soft: false, tears_tag: true }
     }
 
     /// A quiet teleport leg (passive moves): a shorter dissolve, and a ~150 ms rebuild
@@ -89,7 +91,7 @@ impl Glitch {
             GlitchKind::Vanish => 200.0,
             _ => Glitch::new(kind, now, seed).ms,
         };
-        Glitch { t0: now, kind, ms, seed, soft: true }
+        Glitch { t0: now, kind, ms, seed, soft: true, tears_tag: true }
     }
 
     pub fn done(&self, now: Instant) -> bool {

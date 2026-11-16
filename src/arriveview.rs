@@ -18,7 +18,6 @@ pub(super) const SIT_UP: Duration = Duration::from_millis(600);
 /// Which arrival sequence a teleport lands with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ArriveKind {
-    Launch,
     /// A passive or bid teleport (its share is `arrive.teleportChance`, never twice running).
     Teleport,
     /// Her perch closed: the rescue teleport onto another window's top (LOCKED #18).
@@ -29,8 +28,13 @@ pub(super) enum ArriveKind {
 pub(super) struct ArriveState {
     /// Played as she appears from the teleport in flight.
     on_appear: Option<Seq>,
+    /// A drawn arrival onto a window top (`perchArrive`): it plays instead when the perch pick
+    /// is drawn art of its family (`arrive_appeared`).
+    on_appear_strip: Option<usize>,
     /// An arrival sequence is playing until then: a relayer doesn't cut it.
     pub until: Option<Instant>,
+    /// A drawn arrival forms her until then (its first cells are the forming): the HUD waits.
+    pub formed: Option<Instant>,
     /// The last passive/bid teleport landed with the sequence.
     last_variant: bool,
     /// The pack has a launch intro: hidden until the frames are in, then the bolt.
@@ -51,7 +55,6 @@ impl Avatar {
     fn arrive_steps(&self, k: ArriveKind) -> Vec<Step> {
         let Some(a) = &self.pack.behaviour.arrive else { return Vec::new() };
         match k {
-            ArriveKind::Launch => a.launch.clone(),
             ArriveKind::Teleport | ArriveKind::Rescue if self.sitting_at(self.teleport_place()) => a.perch.clone(),
             ArriveKind::Teleport | ArriveKind::Rescue if self.teleport_place() == Some(Placement::Ground) => a.teleport.clone(),
             _ => Vec::new(),
@@ -85,11 +88,42 @@ impl Avatar {
             elog!("synaps-avatar: arrival {k:?}: {} frames", seq.len());
         }
         self.arrive.on_appear = (!seq.is_empty()).then_some(seq);
+        self.arrive.on_appear_strip = self.perch_arrive_strip(self.teleport_place());
     }
 
-    /// She reappears from a teleport: its arrival sequence, if it has one.
+    /// `perchArrive` for a landing on `place` (sitting on a window top): asked for now, so its
+    /// cells are in by the contact.
+    fn perch_arrive_strip(&self, place: Option<Placement>) -> Option<usize> {
+        let si = self.pack.transitions.get("perchArrive").copied().filter(|_| self.sitting_at(place))?;
+        self.art_need(si);
+        Some(si)
+    }
+
+    /// She reappears from a teleport: its arrival sequence, if it has one. On a window top the
+    /// arrival is the art she lands in (no cut, so no seam glitch, after the contact): the
+    /// pack's own sequence before its own pose; before a drawn pose, its family's drawn arrival
+    /// (`perchArrive`), or none if that isn't in (the landing glitch covers the cut).
     pub(super) fn arrive_appeared(&mut self, now: Instant) {
-        let Some(seq) = self.arrive.on_appear.take() else { return };
+        let own = self.arrive.on_appear.take();
+        let strip = self.arrive.on_appear_strip.take();
+        let drawn = if self.sitting() {
+            self.art_sync(now);
+            self.art_strip_family()
+        } else {
+            None
+        };
+        let drawn_in = strip.and_then(|si| Some((si, self.pack.strip_family(si)?, self.art_ready(si))));
+        let seq = match (perch_arrival(drawn, drawn_in.map(|d| (d.1, d.2))), drawn_in) {
+            (PerchArrival::Own, _) => own,
+            (PerchArrival::Drawn, Some((si, ..))) => {
+                let seq = self.pack.strip_seq(si, 1);
+                let ms: u64 = seq.iter().map(|s| s.1 as u64).sum();
+                self.arrive.formed = Some(now + Duration::from_millis(ms));
+                Some(seq)
+            }
+            _ => None,
+        };
+        let Some(seq) = seq.filter(|s| !s.is_empty()) else { return };
         let ms: u64 = seq.iter().map(|s| s.1 as u64).sum();
         self.anim.play(seq, now);
         self.arrive.until = Some(now + Duration::from_millis(ms));
@@ -98,6 +132,8 @@ impl Avatar {
     /// A new teleport, or one that ended before she appeared: nothing pending.
     pub(super) fn arrive_reset(&mut self) {
         self.arrive.on_appear = None;
+        self.arrive.on_appear_strip = None;
+        self.arrive.formed = None;
         self.arrive.launching = false;
     }
 
@@ -106,35 +142,55 @@ impl Avatar {
         self.arrive.until.is_some_and(|t| t > now) && self.anim.busy()
     }
 
-    /// The frames are in: the launch intro (a plain red bolt from the top of her monitor down
-    /// to her, then the intro frames), standing on the floor only. False: no intro.
-    pub(super) fn launch_intro(&mut self, now: Instant) -> bool {
-        if !std::mem::take(&mut self.arrive.launch_wait) {
+    /// The frames are in: the launch (`introview`: the close-up if it plays, then the bolt).
+    /// False: no launch sequence, she just appears.
+    pub(super) fn launch_intro(&mut self, now: Instant, cx: &mut gpui_kit::Context<Self>) -> bool {
+        if !std::mem::take(&mut self.arrive.launch_wait) || self.parked.is_some() {
             return false;
         }
-        let standing = self.placement == Placement::Ground && self.parked.is_none();
-        let seq = self.pack.flatten(&self.arrive_steps(ArriveKind::Launch));
-        if !standing || seq.is_empty() {
+        if !self.intro.cfg.cinematic {
+            return self.launch_bolt((self.origin, self.placement), false, now);
+        }
+        self.launch_cinematic(now, cx)
+    }
+
+    /// The launch bolt: a plain red bolt from the top of the monitor down to `to`, then the
+    /// launch frames on the floor (after the close-up, `greeted`: just the landing,
+    /// `arrive.cinematic`), or the arrival matching her perch pick on a window top
+    /// (`arrive_appeared`). False: nothing to play (an old pack on a window top).
+    pub(super) fn launch_bolt(&mut self, (to, place): ((i32, i32), Placement), greeted: bool, now: Instant) -> bool {
+        let perch = self.sitting_at(Some(place));
+        let steps = match &self.pack.behaviour.arrive {
+            Some(a) if perch => a.perch.clone(),
+            Some(a) if place == Placement::Ground && greeted && !a.cinematic.is_empty() => a.cinematic.clone(),
+            Some(a) if place == Placement::Ground => a.launch.clone(),
+            _ => Vec::new(),
+        };
+        let seq = self.pack.flatten(&steps);
+        let strip = self.pack.transitions.get("perchArrive").copied().filter(|_| perch);
+        if seq.is_empty() && strip.is_none() {
             return false;
         }
-        let to = self.center_root(self.origin);
+        let at = self.center_root(to);
         let (gx, gy) = self.ground();
-        let top = self.os.area_at(gx, gy - 1).y as f32;
+        let top = self.os.area_at(at.0 as i32, at.1 as i32).y.min(self.os.area_at(gx, gy - 1).y) as f32;
         let seed = self.rng.next();
-        let bolt = Bolt::new((to.0, top), to, seed, 220.0 * self.layout.sf);
+        let bolt = Bolt::new((at.0, top), at, seed, 220.0 * self.layout.sf);
         self.hidden = true;
         self.glitch = None;
-        self.teleport = Some(Teleport { seed, leg: Leg::Bolt(now), to: self.origin, place: self.placement, bolt: Some(bolt), moved: true, no_bolt: false, quiet: false });
-        elog!("synaps-avatar: arrival Launch: {} frames after the bolt", seq.len());
-        self.arrive.on_appear = Some(seq);
+        let moved = to == self.origin && place == self.placement;
+        self.teleport = Some(Teleport { seed, leg: Leg::Bolt(now), to, place, bolt: Some(bolt), moved, no_bolt: false, quiet: false });
+        elog!("synaps-avatar: arrival Launch: {} frames after the bolt{}", seq.len(), if strip.is_some() { " (or perchArrive)" } else { "" });
+        self.arrive.on_appear = (!seq.is_empty()).then_some(seq);
+        self.arrive.on_appear_strip = self.perch_arrive_strip(Some(place));
         self.arrive.launching = true;
         true
     }
 
-    /// The first frame is in: with a launch intro she stays hidden until the bolt.
+    /// The first frame is in: with a launch sequence she stays hidden until the bolt.
     pub(super) fn launch_hold(&mut self) -> bool {
         let has = self.pack.behaviour.arrive.as_ref().is_some_and(|a| !a.launch.is_empty());
-        if has && self.placement == Placement::Ground {
+        if (has && self.placement == Placement::Ground) || self.intro.cfg.cinematic {
             self.arrive.launch_wait = true;
             self.hidden = true;
         }
@@ -370,6 +426,26 @@ impl Avatar {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PerchArrival {
+    /// The pack's own sequence (she lands in its own pose).
+    Own,
+    /// The drawn arrival, its family's.
+    Drawn,
+    /// Nothing: the landing glitch covers the cut into her drawn pose.
+    None,
+}
+
+/// The arrival onto a window top that matches the art she lands in (`lands_in`: a drawn
+/// family, None: the pack's own), given the drawn arrival's family and whether its cells are in.
+fn perch_arrival(lands_in: Option<u16>, drawn: Option<(u16, bool)>) -> PerchArrival {
+    match (lands_in, drawn) {
+        (None, _) => PerchArrival::Own,
+        (Some(f), Some((g, true))) if f == g => PerchArrival::Drawn,
+        (Some(_), _) => PerchArrival::None,
+    }
+}
+
 /// A passive/bid teleport lands with the arrival sequence: chance `p`, never twice running
 /// (so about p / (1 + p) of them: 0.5 gives 1 in 3).
 fn variant(last: bool, roll: f32, p: f32) -> bool {
@@ -385,6 +461,18 @@ fn rare(last: Option<Instant>, now: Instant, gap: Duration, roll: f32, p: f32) -
 mod tests {
     use super::*;
     use crate::anim::Rng;
+
+    #[test]
+    fn a_perch_arrival_is_the_art_she_lands_in() {
+        // Her own pose: the pack's own sequence, whatever drawn arrival there is.
+        assert_eq!(perch_arrival(None, Some((2, true))), PerchArrival::Own);
+        assert_eq!(perch_arrival(None, None), PerchArrival::Own);
+        // A drawn pose: its family's drawn arrival, never the pack's frames before it.
+        assert_eq!(perch_arrival(Some(2), Some((2, true))), PerchArrival::Drawn);
+        assert_eq!(perch_arrival(Some(2), Some((2, false))), PerchArrival::None, "not in yet");
+        assert_eq!(perch_arrival(Some(3), Some((2, true))), PerchArrival::None, "another family (a lying pick)");
+        assert_eq!(perch_arrival(Some(2), None), PerchArrival::None, "a pack without one");
+    }
 
     #[test]
     fn teleport_variant_one_in_three_never_twice_running() {
