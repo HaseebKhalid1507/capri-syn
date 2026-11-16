@@ -11,11 +11,15 @@ newline-delimited JSON:
                                        one stream, many turns: speech/endpoint/heard per utterance;
                                        {"ev":"barge-in"} {"ev":"echo","mode":"speakers"} {"ev":"handsfree-end","why":"call|lock|max|mic lost"}
   {"op":"listen-drop"}                 (hands-free) what is being heard now is dropped; the stream stays
-  {"op":"listen-start","mode":"wake","sensitivity":0.5,"silence_s","echo"}   sent while his
+  {"op":"listen-start","mode":"wake","sensitivity":0.5,"silence_s","echo","handsfree":true,"max_s"}   sent while his
                                        [voice] wake_word is on (the default): {"ev":"mic-open","mode":"wake"} (no level events while idle);
-                                       "hey capri" heard and checked by Whisper -> {"ev":"wake"}, the turn as a toggle's
-                                       ({"ev":"heard"}; "let's talk" -> {"ev":"wake-handsfree"}); {"ev":"wake-end","why":
-                                       "call|lock|false starts|mic lost"}. Any other listen-start closes it first.
+                                       "hey capri" heard and checked by Whisper -> with "handsfree" ([voice] wake_handsfree, the
+                                       default): {"ev":"wake","handsfree":true} and the same stream goes on as a hands-free one
+                                       (mode handsfree from here: its request, if he said one, is the first utterance, the phrase
+                                       cut; the phrase alone or "let's talk" -> {"ev":"heard","text":"","why":"PHRASE ONLY"});
+                                       without: {"ev":"wake"}, the turn as a toggle's ({"ev":"heard"}; "let's talk" ->
+                                       {"ev":"wake-handsfree"}); {"ev":"wake-end","why":"call|lock|false starts|mic lost"}.
+                                       Any other listen-start closes it first.
   {"op":"listen-start","mode":"toggle","silence_s":1.0}   {"ev":"mic-open","mode"} ... {"ev":"speech"} (he started)
                                        ... {"ev":"endpoint","why":"silence|cap|nothing","speech_ms","silence_ms"}
                                        (the toggle stops itself on a pause; "nothing": no speech in 8 s, nothing sent)
@@ -185,6 +189,14 @@ def wake_rest(text):
     while words and words[-1] in ('please', 'capri'):
         words.pop()
     return rest, ' '.join(words) in WAKE_HF
+
+
+WAKE_HF_LEAD_S = 1.8      # hands-free from the phrase: this much of the ring before the fire (stage 1 fires near the end of "Capri")
+def wake_first(text):
+    """The first utterance of a hands-free that "hey capri" began: what is sent (the phrase cut), or '' when it is the
+    phrase alone or "let's talk" (it is hands-free already)."""
+    rest, hf = wake_rest(text)
+    return '' if hf else rest
 
 
 WAKE_STT_FLOOR = int(os.environ.get('CAPRI_VOICE_WAKE_CTX', '256'))   # Whisper's window for the check: 5.1 s for 2.8 s of audio (see the PR)
@@ -1396,7 +1408,7 @@ def sink_inputs():
 
 # ---- unprompted replies: when she stays silent -----------------------------------------------
 
-FEATURES = ['unprompted']
+FEATURES = ['unprompted', 'wake-handsfree']
 # Screen lockers (their /proc comm, cut to 15 chars). bella locks with a bare `i3lock`, which sets no
 # logind LockedHint, so the process is the signal; LockedHint is the second one.
 LOCKERS = [n[:15] for n in (os.environ.get('CAPRI_VOICE_LOCKERS') or
@@ -1623,7 +1635,7 @@ class Voice:
         self.wake_personal = None
         self.wake_paused_until = 0.0
         self.wake_checks = collections.deque(maxlen=WAKE_VERIFY_N)   # times of the last Whisper checks
-        self.wake_n = {'candidates': 0, 'rejected': 0, 'woke': 0, 'second': 0, 'paused': 0, 'no_speech': 0, 'verify_ms': []}
+        self.wake_n = {'candidates': 0, 'rejected': 0, 'woke': 0, 'second': 0, 'paused': 0, 'no_speech': 0, 'handsfree': 0, 'verify_ms': []}
         self.tts = Tts()
         self.media = Media()
         self.release_timer = None
@@ -1654,7 +1666,7 @@ class Voice:
             pass
 
     # -- mic
-    def listen_start(self, mode='hold', silence_s=1.0, max_s=0.0, echo='auto', sensitivity=0.5):
+    def listen_start(self, mode='hold', silence_s=1.0, max_s=0.0, echo='auto', sensitivity=0.5, handsfree=False):
         if self.rec is not None and self.cur.get('mode') == 'wake' and mode != 'wake' and self.rec_stop_at is None:
             self.listen_cancel()          # his act wins over the standing wake stream; the avatar re-arms it after
         # A capture that is closing (the toggle giving way to hands-free) is waited for, briefly.
@@ -1716,7 +1728,9 @@ class Voice:
             thr = self.wake.threshold(sensitivity)
             if TEST and os.environ.get('CAPRI_VOICE_TEST_WAKE_THR'):
                 thr = float(os.environ['CAPRI_VOICE_TEST_WAKE_THR'])   # tests only: every hop a candidate (the limiter's test)
-            self.cur.update(echo=echo, thr=thr)
+            # "hey capri" goes on as hands-free in this same stream (no gap, so nothing he says right after is lost)
+            hf = {'max_s': float(max_s) if max_s and max_s > 0 else CAP_S_MODE['handsfree']} if handsfree else None
+            self.cur.update(echo=echo, thr=thr, hf=hf)
             threading.Thread(target=self._wake_loop, args=(self.rec, silence_s, self.cur), daemon=True).start()
         elif mode == 'handsfree':
             cap = float(max_s) if max_s and max_s > 0 else CAP_S_MODE['handsfree']
@@ -1858,6 +1872,7 @@ class Voice:
         opened, last_lock, last_lvl, prev, last_fire, quiet_until = False, now_ms(), 0.0, False, 0.0, 0.0
         cand, turn, end_why, call = None, None, None, {'app': None}
         follow = []                      # a bare "Hey Capri." found at the second look: his turn starts now
+        hf_on, go = bool(cur.get('hf')), {}   # hands-free after the phrase: go = {'seed': audio after it (None: the ring), 'cut'}
         sub = self._watch_calls(call)
 
         def check(c, pcm):
@@ -1911,10 +1926,19 @@ class Voice:
                 log(f"wake: heard at the second look ({dur:.1f} s, {c['stt_ms']:.0f} ms)")
                 if self.player is not None or self.play_q or self.say_q:
                     self.hush(why='wake')
+                rest, hf = wake_rest(text)
+                if hf_on:
+                    # Hands-free from here: his request (if any) is its first turn; what he says next, the next ones.
+                    self.emit(ev='wake', second=True, handsfree=True, ms={'fire_to_wake': now_ms() - c['t_start'], 'verify': round(c['stt_ms'])})
+                    if rest and not hf:
+                        c['t_endpoint'] = c['t_keyup'] = now_ms()
+                        self.emit(ev='endpoint', why=why, speech_ms=round(speech_ms), silence_ms=round(e.trail * FRAME_S * 1000))
+                        self._sent(rest, speech_ms, dur, c)
+                    go.update(seed=None, cut=not (rest and not hf))
+                    return
                 self.emit(ev='wake', second=True, ms={'fire_to_wake': now_ms() - c['t_start'], 'verify': round(c['stt_ms'])})
                 c['t_endpoint'] = c['t_keyup'] = now_ms()
                 self.emit(ev='endpoint', why=why, speech_ms=round(speech_ms), silence_ms=round(e.trail * FRAME_S * 1000))
-                rest, hf = wake_rest(text)
                 if hf:
                     c['t_heard'] = now_ms()
                     self.emit(ev='wake-handsfree', ms=self._ms(c))
@@ -1955,6 +1979,8 @@ class Voice:
             threading.Thread(target=out, daemon=True).start()
 
         while True:
+            if go:
+                break
             if self.rec_stop_at is not None and now_ms() >= self.rec_stop_at:
                 break
             if call['app']:
@@ -2036,12 +2062,20 @@ class Voice:
                         if self.player is not None or self.play_q or self.say_q:
                             self.hush(why='wake')
                         c = {'t_start': cand['t'], 't_mic_open': cand['t'], 'mode': 'wake'}
-                        self.emit(ev='wake', ms={'fire_to_wake': now_ms() - cand['t'], 'verify': round(cand['ms'])})
                         # The check heard more than the phrase: the turn is the phrase and what follows (the phrase is
                         # cut from its words). Only the phrase ("Hey Capri." then a pause): the turn starts after the
                         # checked audio, so his pause isn't taken as the end of the turn; 5 s for him to start.
                         bare = not wake_rest(cand.get('text', ''))[0]
                         cut = int(WAKE_CHECK_DELAY_S * MIC_RATE) * 2
+                        if hf_on:
+                            # Hands-free: the same stream goes on as one, from the phrase (its first utterance cut) or after it.
+                            self.emit(ev='wake', handsfree=True, ms={'fire_to_wake': now_ms() - cand['t'], 'verify': round(cand['ms'])})
+                            # (from the phrase: the ring's last WAKE_HF_LEAD_S, so words before it can't end a turn of their own)
+                            lead = cand['pre'][-int(WAKE_HF_LEAD_S * MIC_RATE) * 2:]
+                            go.update(seed=bytes(cand['post'][cut:]) if bare else lead + bytes(cand['post']), cut=True)
+                            cand = None
+                            break
+                        self.emit(ev='wake', ms={'fire_to_wake': now_ms() - cand['t'], 'verify': round(cand['ms'])})
                         turn = {'buf': bytearray() if bare else bytearray(cand['pre']), 'vs': VadStream(self.vad), 'seen': 0, 'c': c,
                                 'ep': Endpointer(float(np.clip(silence_s, 0.5, 5.0)), max_s=WAKE_TURN_S, wait_s=WAKE_WAIT_S,
                                                  min_frames=MIN_FRAMES['wake'])}
@@ -2089,6 +2123,15 @@ class Voice:
                 prev = hot
             if end_why:
                 break
+        if go and not end_why and not self.cancelled and self.rec_stop_at is None:
+            seed = go['seed'] if go['seed'] is not None else bytes(ring)
+            t = now_ms()
+            cur.update(mode='handsfree', cap_s=cur['hf']['max_s'], t_start=t, t_mic_open=t)
+            self.wake_n['handsfree'] += 1
+            log(f"mic: the wake stream goes on as hands-free ({len(seed) / 2 / MIC_RATE:.1f} s of him already in it"
+                + (', the phrase cut from its first words' if go['cut'] else '') + ')')
+            return self._hf_loop(p, VadStream(self.vad), float(np.clip(silence_s, 0.5, 5.0)), cur,
+                                 seed=seed[:len(seed) // 2 * 2], cut_first=go['cut'], calls=(sub, call))
         sub.terminate()
         p.terminate()
         try:
@@ -2104,14 +2147,17 @@ class Voice:
         if not cancelled and end_why:
             self.emit(ev='wake-end', why=end_why, app=call['app'] or '')
 
-    def _hf_loop(self, p, vs, silence_s, cur):
+    def _hf_loop(self, p, vs, silence_s, cur, seed=None, cut_first=False, calls=None):
         """Hands-free: one stream, many turns. Each utterance ends on his pause (draft-decoded, held on
         after dangling words) and is sent; the stream stays open. On speakers the mic is deaf while
         she speaks (+0.25 s); on headphones his voice over hers stops her (not in her first sentence,
         which checks that her voice isn't coming back through the mic). It ends on listen-cancel, the
-        lock, a call, its cap, or the stream dying; the avatar times out the quiet."""
+        lock, a call, its cap, or the stream dying; the avatar times out the quiet.
+        From the wake stream ("hey capri"): the same capture goes on here, already open (seed: what of him it holds
+        after the phrase, or from it with cut_first: the phrase is cut from the first utterance's words), its call
+        watch too (calls)."""
         fd = p.stdout.fileno()
-        opened, last_lvl, last_lock, seen = False, 0.0, now_ms(), 0
+        opened, last_lvl, last_lock, seen = seed is not None, 0.0, now_ms(), 0
         echo, observe = cur['echo'], cur['echo'] == 'headphones'
         tb = bytearray()                     # this turn's audio: frame k of vs.p = tb[k*1024:(k+1)*1024]
         new_ep = lambda: Endpointer(silence_s, max_s=HF_TURN_S, wait_s=1e9, min_frames=MIN_FRAMES['hands-free'])
@@ -2121,7 +2167,8 @@ class Voice:
         quiet_until, end_why, call = 0.0, None, {'app': None}
         sink_id, last_t0 = (sink_kind(True)[1] if echo == 'headphones' else None), None
         self.hf_drop = False
-        sub = self._watch_calls(call)
+        sub, call = calls if calls else (self._watch_calls(call), call)
+        first = {'cut': cut_first}
 
         def reset_turn():
             nonlocal ep, dr, seen
@@ -2141,6 +2188,7 @@ class Voice:
             if d is None:
                 d = self._draft(vs, ep.speech, tb, 'hands-free')
             said = [w for t, ws in list(self.said) if t > time.time() - ECHO_WINDOW_S for w in ws]
+            cut = first.pop('cut', False)        # the first utterance after "hey capri": the phrase is cut, as a wake turn's
 
             def out():
                 d['done'].wait(10.0)
@@ -2153,6 +2201,14 @@ class Voice:
                     c['t_heard'] = now_ms()
                     self.emit(ev='heard', text='', why='ECHO', ms=self._ms(c))
                     return
+                if cut and text:
+                    rest = wake_first(text)
+                    if not rest:
+                        log(f'heard: the phrase alone ({len(text)} chars): hands-free goes on')
+                        c['t_heard'] = now_ms()
+                        self.emit(ev='heard', text='', why='PHRASE ONLY', ms=self._ms(c))
+                        return
+                    text = rest
                 self._sent(text, d.get('speech_ms', 0), d.get('clip_s', 0), c)
             threading.Thread(target=out, daemon=True).start()
 
@@ -2173,16 +2229,19 @@ class Voice:
                 if screen_locked():
                     end_why = 'lock'
                     break
-            r, _, _ = select.select([fd], [], [], 0.02)
-            if not r:
-                if p.poll() is not None:
+            if seed:
+                chunk, seed = seed[:3200], seed[3200:]   # what the wake stream already holds of him, first, as it came
+            else:
+                r, _, _ = select.select([fd], [], [], 0.02)
+                if not r:
+                    if p.poll() is not None:
+                        end_why = 'mic lost'
+                        break
+                    continue
+                chunk = os.read(fd, 3200)
+                if not chunk:
                     end_why = 'mic lost'
                     break
-                continue
-            chunk = os.read(fd, 3200)
-            if not chunk:
-                end_why = 'mic lost'
-                break
             t = now_ms()
             if not opened:
                 opened = True
@@ -2634,7 +2693,7 @@ class Voice:
             self.emit(ev='ready', cfg=self.cfg, features=FEATURES)
         elif op == 'listen-start':
             self.listen_start(msg.get('mode', 'hold'), float(msg.get('silence_s', 1.0)), float(msg.get('max_s', 0) or 0), msg.get('echo', 'auto'),
-                              float(msg.get('sensitivity', 0.5)))
+                              float(msg.get('sensitivity', 0.5)), bool(msg.get('handsfree')))
         elif op == 'listen-drop':
             self.hf_drop = True
         elif op == 'listen-stop':
@@ -2669,7 +2728,7 @@ class Voice:
             self.emit(ev='stats', mic_open=self.rec is not None, mic_mode=self.cur.get('mode') if self.rec is not None else None,
                       speaking=self.player is not None, cfg=self.cfg, vad='silero' if self.vad else 'energy',
                       wake={'loaded': self.wake is not None, 'candidates': w['candidates'], 'rejected': w['rejected'], 'woke': w['woke'],
-                            'second': w['second'], 'paused': w['paused'], 'no_speech': w['no_speech'], 'paused_s': max(0, round(self.wake_paused_until - time.time())),
+                            'second': w['second'], 'paused': w['paused'], 'no_speech': w['no_speech'], 'handsfree': w['handsfree'], 'paused_s': max(0, round(self.wake_paused_until - time.time())),
                             'verify_ms_p50': round(float(np.median(w['verify_ms']))) if w['verify_ms'] else None,
                             'filter': None if self.wake_forced is None else bool(self.wake_forced), 'personal': bool(self.wake_personal)})
         else:
@@ -2865,6 +2924,10 @@ def selftest_wake():
     assert wake_rest('Hey Capri. Pause the music.') == ('Pause the music.', False)
     assert wake_rest("Hey Capri, let's talk.")[1] and wake_rest("hey capri let's chat please")[1] and wake_rest('Hey Capri, hands-free.')[1]
     assert wake_rest('Hey Capri.') == ('', False) and not wake_rest("Hey Capri, let's talk about the build.")[1]
+    # hands-free from "hey capri": its first utterance, the phrase cut; the phrase alone or "let's talk" sends nothing
+    assert wake_first("Hey Capri, what's spike doing?") == "What's spike doing?" and wake_first('Haikapri, pause the music.') == 'Pause the music.'
+    assert wake_first('Hey Capri.') == '' and wake_first("Hey Capri, let's talk.") == '' and wake_first("let's chat please") == ''
+    assert wake_first("what's next on the list") == "What's next on the list" and wake_first("Hey Capri, let's talk about the build.")
     if all(os.path.exists(f'{MODELS}/{f}') for f in WAKE_FILES):
         ear, why = WakeEar.load()
         assert ear is not None, why

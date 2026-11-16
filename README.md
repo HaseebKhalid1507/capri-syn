@@ -104,9 +104,10 @@ you're doing.
   <kbd>A</kbd> held for about half a second, so a stray keypress can't approve it.
 - **Long replies and code open in a reader** beside her, with copy buttons, instead of a speech bubble.
 - **Voice is opt-in and local.** Hold the key to talk and let go to send. Speech-to-text is whisper.cpp
-  and her voice is Kokoro, both on the CPU. Say **"Hey Capri"** to start a turn hands-off: that keeps one mic
-  stream open, always shown on her tag (`wake_word = false` turns it off). Audio stays in memory, and
-  nothing is written to disk.
+  and her voice is Kokoro, both on the CPU. Say **"Hey Capri"** to start a hands-free conversation: each
+  pause sends, she answers aloud, and after a minute of quiet she goes back to waiting for "Hey Capri"
+  (`wake_handsfree = false`: one turn). That keeps one mic stream open, always shown on her tag
+  (`wake_word = false` turns it off). Audio stays in memory, and nothing is written to disk.
 
 ## How it works
 

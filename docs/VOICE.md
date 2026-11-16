@@ -23,8 +23,9 @@ for speech. Setup: `tools/capri-voice-setup`, then `tools/systemd/capri-voice.se
 | `handsfree` | `true` | the double-tap, `talk handsfree on` and the menu item can start a hands-free conversation. It is always off at launch |
 | `handsfree_timeout` | `60` | 15 to 600 s: it ends after this long with no accepted turn of his |
 | `handsfree_max` | `30` | minutes, 0 = no cap: it ends after this long in all |
-| `wake_word` | `true` | "Hey Capri" opens a turn (below). While on (with voice on), a mic stream stays open, shown on her tag. `false` turns it off |
+| `wake_word` | `true` | "Hey Capri" starts a conversation (below). While on (with voice on), a mic stream stays open, shown on her tag. `false` turns it off |
 | `wake_sensitivity` | `0.5` | 0.1 to 0.9: higher wakes more easily (and falsely more often) |
+| `wake_handsfree` | `true` | "Hey Capri" starts hands-free (with `handsfree` on): quiet for `handsfree_timeout`, it ends and the wake word listens again. `false`: one turn, as before |
 | `echo` | `"auto"` | `"auto"` (the sink says headphones or speakers), `"headphones"` (talking over her stops her) or `"speakers"` (half-duplex) |
 
 `avatarctl settings reload` re-sends changed voice settings to a connected sidecar.
@@ -66,8 +67,9 @@ for speech. Setup: `tools/capri-voice-setup`, then `tools/systemd/capri-voice.se
 
 ## Hands-free: a conversation
 
-- **On:** double-tap the toggle chord (the second tap within 400 ms, before he has said anything), the
-  menu's HANDS-FREE TALK, or `capri-ctl talk handsfree on`. Always off at launch, never restored.
+- **On:** "Hey Capri" (the wake word, below; `wake_handsfree`), double-tap the toggle chord (the second tap
+  within 400 ms, before he has said anything), the menu's HANDS-FREE TALK, or `capri-ctl talk handsfree on`.
+  Always off at launch, never restored.
   Refused, with the reason on her tag, when voice is off, `handsfree = false`, a secret is on screen,
   the screen is locked, he is in a call, she is hidden, or there is no sidecar.
 - **One stream, many turns.** Each utterance ends on his pause exactly as a toggle does (Silero, the
@@ -87,7 +89,9 @@ for speech. Setup: `tools/capri-voice-setup`, then `tools/systemd/capri-voice.se
   | she is hidden | `HANDS-FREE OFF · HIDDEN` |
   | the stream dies, or PipeWire moves it to another source | `HANDS-FREE OFF · MIC LOST` |
 
-  A lost stream is never reopened on whatever the new default source is.
+  A lost stream is never reopened on whatever the new default source is. After any of these the wake word
+  (if on) listens again at once: `◌ MIC ON · SAY "HEY CAPRI"`. One that "Hey Capri" began and that lost its
+  mic leaves the wake word off too (`WAKE OFF · MIC LOST`), as the wake stream's own rule says.
 - **The quiet clock** restarts on an accepted turn of his and while she thinks, speaks or writes his
   words down. His voice alone doesn't restart it: a TV that Whisper turns into junk (dropped) doesn't
   keep the mic open. It never ends mid-utterance.
@@ -152,10 +156,22 @@ thresholds) was fitted on stock synthetic voices only (Kokoro packs, espeak-ng),
   (a bare "Hey Capri." opens his turn then). Else it is dropped, words never logged. Whisper reads
   the phrase far better with the request after it; the price is no early `● MIC` on that path, and up to
   12.5 s of audio in RAM (not 2.5 s) while it is looked at.
-- **A pass** flips the tag to `● MIC`, holds other audio, and takes his turn as a toggle does (it ends on
-  his pause). "Hey Capri, what's spike doing?" is one turn, and the phrase is cut from it. "Hey Capri" then
-  a pause: the mic waits 5 s for speech, then `NOTHING HEARD`. "Hey Capri, let's talk" (`let's chat`,
-  `hands free`) starts hands-free. A turn is sent at 30 s.
+- **A pass starts a hands-free conversation** (`wake_handsfree = true`, the default, with `handsfree` on).
+  The same stream goes on as the hands-free one (no gap: nothing he says right after the phrase is lost),
+  other audio is held, the tag reads `● MIC LIVE · HANDS-FREE`, and every hands-free rule above applies: each
+  pause sends, her replies are spoken, half-duplex or barge-in by `echo`, the end phrases, the refusals.
+  - "Hey Capri, what's spike doing?": the request is the conversation's first turn, the phrase cut from it.
+  - "Hey Capri" alone (or "Hey Capri, let's talk"): she just listens; nothing is sent until he speaks.
+  - **Quiet for `handsfree_timeout`** (60 s; the last 10 s count down on the tag): `HANDS-FREE OFF · 60 S
+    QUIET`, and the wake stream reopens at once: back to `◌ MIC ON · SAY "HEY CAPRI"`. So does every other
+    way it ends (an end phrase, the chord, a lock, a call…), each with its reason first.
+  - Where hands-free may not open (a secret on screen, she is hidden, a lock, a call), the wake stream is
+    closed too, so the phrase can't be heard there at all.
+- **One turn instead** (`wake_handsfree = false`, or `handsfree = false`): a pass flips the tag to `● MIC`,
+  holds other audio, and takes his turn as a toggle does (it ends on his pause). "Hey Capri, what's spike
+  doing?" is one turn, and the phrase is cut from it. "Hey Capri" then a pause: the mic waits 5 s for
+  speech, then `NOTHING HEARD`. "Hey Capri, let's talk" (`let's chat`, `hands free`) starts hands-free. A
+  turn is sent at 30 s. Then the idle wake stream goes on.
 - **She can't wake herself:** on speakers her voice is dropped at the reader while she speaks (+0.25 s).
   On headphones the phrase cuts in and stops her.
 - **Closed** (no stream, the reason on her tag) while: a secret is on screen (`WAKE PAUSED · A SECRET IS ON

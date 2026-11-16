@@ -144,7 +144,9 @@ pub struct Settings {
 /// `echo`: "auto" (default: the sink's port says headphones or speakers), "headphones" (talking
 /// over her stops her) or "speakers" (the mic is deaf while she speaks); `wake_word`:
 /// "hey capri" (default true: while on, a mic stream stays open, shown on her tag; `false` turns it off); `wake_sensitivity`:
-/// 0.1..0.9 (default 0.5: tuned to ~0.5 false starts an hour on synthetic voices).
+/// 0.1..0.9 (default 0.5: tuned to ~0.5 false starts an hour on synthetic voices); `wake_handsfree`: "hey capri"
+/// starts a hands-free conversation (default true, with `handsfree` on; its request is the first turn; quiet for
+/// `handsfree_timeout`, it ends and the wake word listens again); false: one turn, as before.
 #[derive(Clone, Debug, PartialEq)]
 pub struct VoiceSettings {
     pub enabled: bool,
@@ -166,6 +168,7 @@ pub struct VoiceSettings {
     pub echo: String,
     pub wake_word: bool,
     pub wake_sensitivity: f32,
+    pub wake_handsfree: bool,
 }
 
 /// Her voice (Haseeb's picks, LOCKED 13 + 14): W3, the bright blend (timbre af_heart/af_bella/
@@ -177,7 +180,7 @@ pub const SPEED: f32 = 1.2987;
 
 impl Default for VoiceSettings {
     fn default() -> Self {
-        VoiceSettings { enabled: false, stt_model: "small.en".into(), voice: VOICE.into(), speed: SPEED, pace: "stretch".into(), flow: "emphasis".into(), duck: "duck".into(), speak_unprompted: true, key: 'c', silence_s: 1.0, toggle_key: 'c', handsfree: true, handsfree_timeout: 60, handsfree_max: 30, echo: "auto".into(), wake_word: true, wake_sensitivity: 0.5 }
+        VoiceSettings { enabled: false, stt_model: "small.en".into(), voice: VOICE.into(), speed: SPEED, pace: "stretch".into(), flow: "emphasis".into(), duck: "duck".into(), speak_unprompted: true, key: 'c', silence_s: 1.0, toggle_key: 'c', handsfree: true, handsfree_timeout: 60, handsfree_max: 30, echo: "auto".into(), wake_word: true, wake_sensitivity: 0.5, wake_handsfree: true }
     }
 }
 
@@ -201,6 +204,7 @@ struct VoiceRaw {
     echo: Option<String>,
     wake_word: Option<bool>,
     wake_sensitivity: Option<f64>,
+    wake_handsfree: Option<bool>,
 }
 
 /// `[mirror]`: she faces where she goes. `drag`: turn while dragged (and flung), looking back
@@ -562,6 +566,9 @@ impl Settings {
                 anyhow::ensure!(s.is_finite() && (0.1..=0.9).contains(&s), "voice.wake_sensitivity must be 0.1..0.9");
                 voice.wake_sensitivity = s as f32;
             }
+            if let Some(h) = v.wake_handsfree {
+                voice.wake_handsfree = h;
+            }
         }
         let Some(r) = raw.brain else { return Ok(Settings { brain: b, ragdoll, session, music, display, mirror, voice }) };
         if let Some(v) = r.enabled {
@@ -765,6 +772,9 @@ mod tests {
         let w = Settings::parse("[voice]\nwake_word = false\nwake_sensitivity = 0.3\n").unwrap().voice;
         assert!(!w.wake_word && (w.wake_sensitivity - 0.3).abs() < 1e-6);
         assert!(Settings::parse("[voice]\nwake_sensitivity = 0.95\n").is_err());
+        assert!(v.wake_handsfree, "\"hey capri\" starts hands-free by default (Haseeb, 00:57)");
+        assert!(!Settings::parse("[voice]\nwake_handsfree = false\n").unwrap().voice.wake_handsfree);
+        assert!(Settings::parse("[voice]\nwake_handsfree = \"yes\"\n").is_err());
         let h = Settings::parse("[voice]\nhandsfree = false\nhandsfree_timeout = 15\nhandsfree_max = 0\necho = \"Speakers\"\n").unwrap().voice;
         assert_eq!((h.handsfree, h.handsfree_timeout, h.handsfree_max, h.echo.as_str()), (false, 15, 0, "speakers"));
         assert!(Settings::parse("[voice]\nhandsfree_timeout = 5\n").is_err() && Settings::parse("[voice]\nhandsfree_max = 9999\n").is_err());
