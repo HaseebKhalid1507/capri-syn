@@ -171,6 +171,14 @@ pub fn wrap(text: &str) -> String {
     format!("{HINT} {text}")
 }
 
+/// A reply she starts saying is one he hears in a hands-free conversation (seen once spoken,
+/// no unread strip after): any while hands-free is on, and the reply to his hands-free turn
+/// even once hands-free has ended (he ended it, the cap, the mic). Else (push-to-talk, typed,
+/// an event outside hands-free) the unread strip works as ever.
+pub fn heard_handsfree(handsfree_on: bool, handsfree_turn: Option<u64>, turn: u64) -> bool {
+    handsfree_on || handsfree_turn == Some(turn)
+}
+
 /// A hands-free utterance that ends the conversation ("that's all", "goodbye"): the whole of it,
 /// after a leading ok/okay/alright/thanks and a trailing capri/thanks/for now; never over 6 words.
 pub fn end_phrase(text: &str) -> bool {
@@ -409,6 +417,18 @@ fn sentences(s: &str, finished: bool) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_replies_heard_in_handsfree_are_seen_when_spoken() {
+        // Hands-free on: his turn's reply, and an event's she speaks then.
+        assert!(heard_handsfree(true, Some(7), 7));
+        assert!(heard_handsfree(true, Some(7), 8));
+        // Hands-free over before her reply was said (he ended it, the cap): still his hands-free turn.
+        assert!(heard_handsfree(false, Some(7), 7));
+        // Outside hands-free: push-to-talk, typed, events: as ever.
+        assert!(!heard_handsfree(false, Some(7), 8));
+        assert!(!heard_handsfree(false, None, 9));
+    }
 
     #[test]
     fn wake_refusals_are_told_from_an_utterance() {

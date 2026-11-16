@@ -98,6 +98,9 @@ pub(super) struct VoiceState {
     transcribing: bool,
     /// The next new turn is the one he spoke.
     pending: bool,
+    /// ...in hands-free; and the last turn he spoke there (its reply is heard, not unread).
+    hf_pending: bool,
+    hf_turn: Option<u64>,
     /// The spoken turn, and what of it is said.
     turn: Option<u64>,
     /// It arrived on its own (not his): what keeps her quiet is checked all along.
@@ -1066,13 +1069,15 @@ impl Avatar {
                     } else {
                         elog!("synaps-avatar: voice: hands-free: heard {} chars", text.chars().count());
                         self.voice.pending = true;
+                        self.voice.hf_pending = true;
                         self.voice.submit_at = Some(now);
                         if let Some(h) = &mut self.voice.hf {
                             h.quiet_since = now;
                         }
                         if let Err(e) = self.send(voice::wrap(&text)) {
                             self.voice.pending = false;
-                            self.unread = Some(lineview::Unread { n: 1, text: format!("NOT SENT ({e}) · \"{text}\""), refused: true });
+                            self.voice.hf_pending = false;
+                            self.unseen.refused(format!("NOT SENT ({e}) · \"{text}\""));
                         } else {
                             self.ack_unread();
                         }
@@ -1088,6 +1093,7 @@ impl Avatar {
                 } else {
                     elog!("synaps-avatar: voice: heard {} chars", text.chars().count());
                     self.voice.pending = true;
+                    self.voice.hf_pending = false;
                     self.voice.submit_at = Some(now);
                     match self.send(voice::wrap(&text)) {
                         Ok(()) => self.ack_unread(),
@@ -1095,7 +1101,7 @@ impl Avatar {
                             self.voice.pending = false;
                             self.voice_send(serde_json::json!({ "op": "media-release" }));
                             self.voice.held = false;
-                            self.unread = Some(lineview::Unread { n: 1, text: format!("NOT SENT ({e}) · \"{text}\""), refused: true });
+                            self.unseen.refused(format!("NOT SENT ({e}) · \"{text}\""));
                         }
                     }
                 }
@@ -1125,6 +1131,9 @@ impl Avatar {
                         }
                     }
                     elog!("timing: voice: {}", serde_json::Value::Object(self.voice.stats.clone()));
+                }
+                if voice::heard_handsfree(self.voice.hf.is_some(), self.voice.hf_turn, id) {
+                    self.unseen.heard(id);
                 }
                 let step = Duration::from_millis(v.get("step_ms").and_then(|x| x.as_u64()).unwrap_or(90));
                 let shapes: Vec<u8> = v.get("shapes").and_then(|x| x.as_array()).map(|a| a.iter().map(|s| s.as_u64().unwrap_or(0) as u8).collect()).unwrap_or_default();
@@ -1280,7 +1289,11 @@ impl Avatar {
             } else if self.voice.turn.is_some() && !wait {
                 self.voice_hush("new turn");
             }
+            if his && self.voice.hf_pending {
+                self.voice.hf_turn = Some(b.turn);
+            }
             self.voice.pending = false;
+            self.voice.hf_pending = false;
             if !spoken {
                 return false;
             }

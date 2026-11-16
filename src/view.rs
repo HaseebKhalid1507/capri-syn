@@ -534,10 +534,7 @@ pub struct Avatar {
     /// What he sent this run, oldest first (the Line's ↑).
     sent: Vec<String>,
     /// A missed reply (or a refused message): one line on her tag until he acknowledges it.
-    unread: Option<lineview::Unread>,
-    /// The last turn he has seen, and the turn the strip is about.
-    seen_turn: u64,
-    unread_turn: u64,
+    unseen: lineview::Unseen,
     /// A refused message to hand back to the open Line.
     line_restore_text: Option<String>,
     /// How long the last Line took to open (ms).
@@ -721,9 +718,7 @@ impl Avatar {
             talk_down: None,
             tap_closes: false,
             sent: Vec::new(),
-            unread: None,
-            seen_turn: 0,
-            unread_turn: 0,
+            unseen: Default::default(),
             line_restore_text: None,
             line_opened_ms: None,
             perch_gone: None,
@@ -2137,7 +2132,7 @@ impl Avatar {
                 match serde_json::from_str::<serde_json::Value>(&s) {
                     Ok(mut v) => {
                         v["line"] = line;
-                        v["unread"] = serde_json::json!(self.unread.as_ref().map(|u| serde_json::json!({ "n": u.n, "text": u.text, "refused": u.refused })));
+                        v["unread"] = serde_json::json!(self.unseen.strip.as_ref().map(|u| serde_json::json!({ "n": u.n, "text": u.text, "refused": u.refused, "shown": self.unread_shown().is_some() })));
                         v["voice"] = self.voice_state_json();
                         v.to_string()
                     }
@@ -2930,7 +2925,7 @@ impl Avatar {
                             _ => self.draft = t,
                         }
                         // Seen where he looks: her tag, until he acknowledges it.
-                        self.unread = Some(lineview::Unread { n: 1, text: "NOT SENT · draft kept · $mod+c".into(), refused: true });
+                        self.unseen.refused("NOT SENT · draft kept · $mod+c".into());
                     }
                     self.hint = Some(("NOT SENT · TEXT KEPT".into(), now + Duration::from_secs(4)));
                 }
@@ -3763,7 +3758,7 @@ impl Avatar {
     fn chip_click(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let now = Instant::now();
         // An unread reply (or a refused draft): the plate opens the Line, at that reply.
-        if self.unread.is_some() && self.session.is_some() {
+        if self.unread_shown().is_some() && self.session.is_some() {
             self.brain_touch(crate::brain::Touch::Chip);
             let r = self.open_line(cx);
             elog!("synaps-avatar: unread plate clicked: {r}");
@@ -4569,7 +4564,8 @@ impl Render for Avatar {
         if show_tag {
             // An unread reply is a notification, not a status: her name-yellow, a filled
             // "N NEW" badge, the reply's first words; the whole plate opens the Line there.
-            let fresh = self.unread.as_ref().is_some_and(|u| !u.refused);
+            let unread = self.unread_shown();
+            let fresh = unread.is_some_and(|u| !u.refused);
             let (bg, fg, border) = if fresh {
                 (pal.surface, pal.text, pal.name)
             } else if invert {
@@ -4577,8 +4573,8 @@ impl Render for Avatar {
             } else {
                 (pal.surface, tone, tone)
             };
-            let badge = self.unread.as_ref().filter(|u| !u.refused).map(|u| format!("{} NEW", u.n));
-            let text = match &self.unread {
+            let badge = unread.filter(|u| !u.refused).map(|u| format!("{} NEW", u.n));
+            let text = match unread {
                 Some(u) if u.refused => format!("{} // {}", self.name, u.text),
                 Some(u) => {
                     // Inside her window: the plate is centred on her.
@@ -4669,7 +4665,7 @@ impl Render for Avatar {
             }
             let ring = make_ring();
             let mut row = div().id("tag").flex().items_end().gap(px(3.0)).cursor_pointer();
-            if collapsed || self.session.is_some() || self.unread.is_some() {
+            if collapsed || self.session.is_some() || self.unread_shown().is_some() {
                 row = row.on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, _: &MouseDownEvent, window, cx| {

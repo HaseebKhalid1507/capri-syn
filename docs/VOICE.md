@@ -75,6 +75,10 @@ for speech. Setup: `tools/capri-voice-setup`, then `tools/systemd/capri-voice.se
 - **One stream, many turns.** Each utterance ends on his pause exactly as a toggle does (Silero, the
   draft decode, the hold after a dangling word) and is sent; the mic stays open. Her reply is spoken. The
   tag reads `● MIC LIVE · HANDS-FREE 0:42 ▮▯▯▯▯`; the Line's mic row says how to end it.
+- **No unread strip** (`CAPRI // N NEW`) while it's on: he hears her. A reply she says to his hands-free
+  turn (or any she says while it's on) is seen once she starts saying it, so no strip shows after it ends
+  either, even if it ended before the bubble's hold ran out. A strip from before hands-free comes back when
+  it ends (unless he spoke in it: sending a turn reads it, as ever). A refused message still shows.
 - **Off**, the stream closed by the sidecar, the reason on her tag:
 
   | cause | tag |
