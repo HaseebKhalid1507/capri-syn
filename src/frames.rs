@@ -109,6 +109,11 @@ impl Frame {
         self.mirror.get().map(|b| &**b)
     }
 
+    /// Drop the mirrored copy (it stood in for a twin that is in now): its image, to free.
+    pub fn forget_mirror(&mut self) -> Option<Arc<RenderImage>> {
+        self.mirror.take().map(|m| m.image.clone())
+    }
+
     /// The image's size, device px.
     pub fn image_size(&self) -> (i32, i32) {
         let s = self.image.size(0);

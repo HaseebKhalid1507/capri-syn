@@ -600,7 +600,7 @@ fn resolve_pools(b: &Behaviour, anim: Option<&crate::art::Anim>, errors: &mut Ve
                             errors.push(format!("{at}: strip `{}` is a one-shot, not a loop", a.strips[si].name));
                         }
                     }
-                    Some(VariantArt { base: bi, talk, music, blinks, blink_ms: v.blink_ms.unwrap_or([3000, 6000]), every: v.every.unwrap_or(1).max(1) })
+                    Some(VariantArt { base: bi, talk, music, blinks, blink_ms: v.blink_ms.unwrap_or([3000, 6000]), every: v.every.unwrap_or(1).max(1), hold_ms: v.hold_ms })
                 }
             };
             pool.variants.push(Variant { id: v.id.clone(), weight: v.weight, lying: v.lying, art });
@@ -645,6 +645,7 @@ pub struct VariantArt {
     pub blinks: Vec<(usize, f32)>,
     pub blink_ms: [u64; 2],
     pub every: u32,
+    pub hold_ms: Option<[u64; 2]>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -678,6 +679,9 @@ pub struct Pack {
     /// `mirrorArt` twin's cells, stored mirrored.
     pub strip_first: Vec<Option<usize>>,
     pub mirror_first: Vec<Option<usize>>,
+    /// Per strip: only every n-th cell is ever played (the `every` of the variants using it),
+    /// so only those are decoded.
+    pub strip_every: Vec<u32>,
     /// The variant pools (`moods.json` `variants`); a strip variant is dropped when the pack
     /// has no `anim/`, so an old pack's pool is its own art alone.
     pub pools: HashMap<crate::variants::PoolKey, Pool>,
@@ -868,6 +872,13 @@ impl Pack {
         let n_strips = anim.as_ref().map_or(0, |a| a.strips.len());
         let (mut strip_first, mut mirror_first) = (vec![None; n_strips], vec![None; n_strips]);
         let pools = resolve_pools(&behaviour, anim.as_ref(), &mut errors);
+        let mut strip_every = vec![u32::MAX; n_strips];
+        for v in pools.values().flat_map(|p| &p.variants).filter_map(|v| v.art.as_ref()) {
+            for si in std::iter::once(v.base).chain(v.talk).chain(v.music).chain(v.blinks.iter().map(|b| b.0)) {
+                strip_every[si] = strip_every[si].min(v.every);
+            }
+        }
+        let strip_every: Vec<u32> = strip_every.into_iter().map(|e| if e == u32::MAX { 1 } else { e }).collect();
         if let Some(a) = &anim {
             // Every strip a pool uses (and its mirrorArt twin, stored mirrored), as frames.
             let mut used: Vec<usize> = pools.values().flat_map(|p| &p.variants).filter_map(|v| v.art.as_ref()).flat_map(|v| {
@@ -912,6 +923,7 @@ impl Pack {
             anim,
             strip_first,
             mirror_first,
+            strip_every,
             pools,
             cache_bytes,
         };
@@ -1174,6 +1186,14 @@ impl Pack {
         (0..s.frames).step_by(e as usize).map(|c| (first + c as usize, s.ms * e)).collect()
     }
 
+    /// The cells of strip `si` (or its twin's) that are ever played: the ones to decode.
+    pub fn strip_cells(&self, si: usize, twin: bool) -> Vec<usize> {
+        let first = if twin { self.mirror_first.get(si) } else { self.strip_first.get(si) };
+        let (Some(Some(f)), Some(a)) = (first, &self.anim) else { return Vec::new() };
+        let e = self.strip_every.get(si).copied().unwrap_or(1).max(1) as usize;
+        (*f..*f + a.strips[si].frames as usize).step_by(e).collect()
+    }
+
     /// The pre-mirrored twin of cell frame `fi` (its strip's `mirrorArt`), if the pack has it.
     pub fn twin(&self, fi: usize) -> Option<usize> {
         let c = self.frames.get(fi)?.cell.as_ref()?;
@@ -1267,7 +1287,7 @@ pub mod tests {
     pub fn pooled() -> serde_json::Value {
         json!({"perch": {"base": "sit"}, "variants": {"cacheMb": 2, "pools": {
             "perch": {"shiftMs": [1000, 2000], "variants": [{"id": "sit", "weight": 2}, {"id": "lie", "strip": "lie", "lying": true}]},
-            "sleepFloor": {"variants": [{"id": "pack"}, {"id": "doze", "strip": "stand", "every": 2}]}}}})
+            "sleepFloor": {"variants": [{"id": "pack"}, {"id": "doze", "strip": "stand", "every": 2, "holdMs": [500, 900]}]}}}})
     }
 
     #[test]
@@ -1295,6 +1315,12 @@ pub mod tests {
             assert_eq!(p.frames[t1].id, "~stand_flipped#1");
             assert!(p.frames[t1].cell.as_ref().unwrap().mirror && p.twin(t1).is_none() && p.twin(l0).is_none());
             assert_eq!(p.strip_seq(stand, 2), vec![(s0, 200), (s0 + 2, 200)], "every 2nd cell, held twice as long");
+            // Only the cells it plays are decoded (its twin's too); a strip no variant thins keeps all.
+            let tw = p.mirror_first[stand].unwrap();
+            assert_eq!((p.strip_cells(stand, false), p.strip_cells(stand, true)), (vec![s0, s0 + 2], vec![tw, tw + 2]));
+            assert_eq!(p.strip_cells(lie, false), vec![l0, l0 + 1]);
+            let doze = &p.pools[&PoolKey::SleepFloor].variants[1];
+            assert_eq!(doze.art.as_ref().unwrap().hold_ms, Some([500, 900]));
             assert_eq!(p.art_of(s0), p.art_of(t1));
             assert_ne!(p.art_of(s0), p.art_of(l0));
             assert_eq!(p.art_of(p.index["neutral"]), crate::variants::Art::Pack);

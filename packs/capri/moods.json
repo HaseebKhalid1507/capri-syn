@@ -748,7 +748,7 @@
     ]
   },
   "variants": {
-    "cacheMb": 64,
+    "cacheMb": 24,
     "pools": {
       "perch": {
         "shiftMs": [
@@ -758,7 +758,7 @@
         "variants": [
           {
             "id": "sit",
-            "weight": 2
+            "weight": 4
           },
           {
             "id": "perch",
@@ -776,6 +776,12 @@
               }
             ],
             "blinkMs": [
+              2500,
+              5000
+            ],
+            "weight": 1,
+            "every": 3,
+            "holdMs": [
               3000,
               6000
             ]
@@ -796,6 +802,12 @@
               }
             ],
             "blinkMs": [
+              2500,
+              5000
+            ],
+            "weight": 1,
+            "every": 3,
+            "holdMs": [
               3000,
               6000
             ]
@@ -809,11 +821,17 @@
         ],
         "variants": [
           {
-            "id": "lie"
+            "id": "lie",
+            "weight": 3
           },
           {
             "id": "doze",
-            "strip": "sleep"
+            "strip": "sleep",
+            "weight": 1,
+            "holdMs": [
+              3000,
+              6000
+            ]
           }
         ]
       },
@@ -824,12 +842,19 @@
         ],
         "variants": [
           {
-            "id": "laydown",
-            "strip": "laydown_sleep",
-            "lying": true
+            "id": "lie",
+            "weight": 3
           },
           {
-            "id": "lie"
+            "id": "laydown",
+            "strip": "laydown_sleep",
+            "lying": true,
+            "weight": 1,
+            "every": 4,
+            "holdMs": [
+              4000,
+              8000
+            ]
           }
         ]
       }

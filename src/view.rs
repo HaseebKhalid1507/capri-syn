@@ -1406,7 +1406,8 @@ impl Avatar {
             }
         }
         let (base, looping) = self.layer(m);
-        self.anim.set_layer(base, looping, now);
+        let rests = self.art_rests(m);
+        self.anim.set_layer_resting(base, looping, rests, now);
         if !seq.is_empty() && arriving {
             self.anim.then(seq, now);
         } else if !seq.is_empty() {
@@ -1452,7 +1453,8 @@ impl Avatar {
         self.art_sync(now);
         let before = self.anim.frame();
         let (base, looping) = self.layer(self.mood);
-        self.anim.set_layer(base, looping, now);
+        let rests = self.art_rests(self.mood);
+        self.anim.set_layer_resting(base, looping, rests, now);
         // An arrival sequence plays through the landing's relayer.
         if !self.arriving(now) {
             self.anim.stop_oneshot(now);

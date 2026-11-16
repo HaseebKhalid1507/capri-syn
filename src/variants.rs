@@ -1,9 +1,11 @@
 //! Variant pools (Haseeb, 2026-11-16: "mix, don't replace"). A state with more than one art
 //! option keeps a weighted pool: a window perch (CapriCore's sit, lachy's perch, lachy's laydown),
-//! sleep on the floor, sleep on a window. Entering the state picks one: weighted, never the last
-//! pick again, from a seeded rng (tests stay deterministic). A long stay shifts it in place now
-//! and then. Every switch between CapriCore and lachy art (or between two lachy drawings without
-//! a drawn transition) goes through a glitch: `seam`. Pure: no OS, no view, no pixels.
+//! sleep on the floor, sleep on a window. Entering the state picks one: weighted, from a seeded
+//! rng (tests stay deterministic), never the same strip variant twice running. The pack's own
+//! art may follow itself: it leads every pool, and with two variants a strict no-repeat would
+//! make any weights 50/50. A long stay shifts it in place now and then (always to another).
+//! Every switch between CapriCore and lachy art (or between two lachy drawings without a drawn
+//! transition) goes through a glitch: `seam`. Pure: no OS, no view, no pixels.
 
 use crate::anim::Rng;
 use serde::Deserialize;
@@ -79,9 +81,14 @@ pub struct VariantSpec {
     pub blinks: Vec<Weighted>,
     #[serde(default)]
     pub blink_ms: Option<[u64; 2]>,
-    /// Play every n-th cell of the strips (each held n times as long): halves frames and redraws.
+    /// Play every n-th cell of the strips (each held n times as long): fewer cells decoded and
+    /// fewer redraws (anime "on twos" / "on threes").
     #[serde(default)]
     pub every: Option<u32>,
+    /// After each pass of the base loop she rests on its first cell for `holdMs[0]..[1]` ms
+    /// (drawn once per pick): a sway now and then, not a constant one, and no redraws meanwhile.
+    #[serde(default)]
+    pub hold_ms: Option<[u64; 2]>,
     /// Lies along the window top: only where the whole figure fits on its exposed stretch.
     #[serde(default)]
     pub lying: bool,
@@ -119,7 +126,7 @@ pub fn weighted(rng: &mut Rng, weights: &[f32]) -> Option<usize> {
     last
 }
 
-/// The picks, per pool: weighted, eligible only, never the last pick twice running (unless it
+/// The picks, per pool: weighted, eligible only; the last pick again only if it `may_repeat` (or
 /// is the only one left).
 pub struct Picker {
     rng: Rng,
@@ -140,10 +147,11 @@ impl Picker {
         self.last[k.slot()]
     }
 
-    /// Pick a variant of pool `k`: `weights[i]`, `eligible[i]`.
-    pub fn pick(&mut self, k: PoolKey, weights: &[f32], eligible: &[bool]) -> Option<usize> {
+    /// Pick a variant of pool `k`: `weights[i]`, `eligible[i]`, `may_repeat[i]` (it may follow
+    /// itself).
+    pub fn pick(&mut self, k: PoolKey, weights: &[f32], eligible: &[bool], may_repeat: &[bool]) -> Option<usize> {
         let ok = |i: usize| eligible.get(i).copied().unwrap_or(false) && weights[i] > 0.0;
-        let last = self.last[k.slot()];
+        let last = self.last[k.slot()].filter(|&l| !may_repeat.get(l).copied().unwrap_or(false));
         let others = (0..weights.len()).any(|i| ok(i) && Some(i) != last);
         let w: Vec<f32> = (0..weights.len()).map(|i| if ok(i) && (!others || Some(i) != last) { weights[i] } else { 0.0 }).collect();
         let i = weighted(&mut self.rng, &w)?;
@@ -185,10 +193,11 @@ mod tests {
         let mut p = Picker::new(7);
         let w = [2.0, 1.0, 1.0];
         let all = [true; 3];
+        let never = [false; 3];
         let mut n = [0u32; 3];
         let mut prev = None;
         for _ in 0..3000 {
-            let i = p.pick(PoolKey::Perch, &w, &all).unwrap();
+            let i = p.pick(PoolKey::Perch, &w, &all, &never).unwrap();
             assert_ne!(Some(i), prev, "no repeat");
             prev = Some(i);
             n[i] += 1;
@@ -197,29 +206,55 @@ mod tests {
         assert!(n[0] > n[1] && n[0] > n[2] && n[0] <= 1500, "{n:?}");
         // Ineligible never wins; the only one left may repeat.
         let only = [false, true, false];
-        assert_eq!(p.pick(PoolKey::Perch, &w, &only), Some(1));
-        assert_eq!(p.pick(PoolKey::Perch, &w, &only), Some(1));
-        assert_eq!(p.pick(PoolKey::Perch, &w, &[false; 3]), None);
-        assert_eq!(p.pick(PoolKey::Perch, &[0.0, 0.0, 0.0], &all), None);
+        assert_eq!(p.pick(PoolKey::Perch, &w, &only, &never), Some(1));
+        assert_eq!(p.pick(PoolKey::Perch, &w, &only, &never), Some(1));
+        assert_eq!(p.pick(PoolKey::Perch, &w, &[false; 3], &never), None);
+        assert_eq!(p.pick(PoolKey::Perch, &[0.0, 0.0, 0.0], &all, &never), None);
+    }
+
+    #[test]
+    fn the_packs_own_art_leads_by_its_weight() {
+        // Capri's perch, 4 : 1 : 1, CapriCore (0) may follow itself, the strips never do.
+        let mut p = Picker::new(21);
+        let (w, all, rep) = ([4.0, 1.0, 1.0], [true; 3], [true, false, false]);
+        let mut n = [0u32; 3];
+        let mut prev = None;
+        for _ in 0..6000 {
+            let i = p.pick(PoolKey::Perch, &w, &all, &rep).unwrap();
+            assert!(i == 0 || Some(i) != prev, "a strip twice running");
+            prev = Some(i);
+            n[i] += 1;
+        }
+        let share = n[0] as f32 / 6000.0;
+        // Stationary share: x = 4/6 x + 4/5 (1 - x), x = 0.706.
+        assert!((0.67..0.74).contains(&share), "CapriCore {share} of the picks ({n:?})");
+        // Two variants, 3 : 1: the weights hold (a strict no-repeat would make it 50/50).
+        let mut m = [0u32; 2];
+        for _ in 0..4000 {
+            m[p.pick(PoolKey::SleepFloor, &[3.0, 1.0], &[true, true], &[true, false]).unwrap()] += 1;
+        }
+        let share = m[0] as f32 / 4000.0;
+        assert!((0.75..0.85).contains(&share), "lie {share} ({m:?})");
     }
 
     #[test]
     fn two_variants_alternate_and_pools_keep_their_own_last() {
         let mut p = Picker::new(3);
-        let seq: Vec<usize> = (0..6).map(|_| p.pick(PoolKey::SleepFloor, &[1.0, 1.0], &[true, true]).unwrap()).collect();
+        let never = [false; 2];
+        let seq: Vec<usize> = (0..6).map(|_| p.pick(PoolKey::SleepFloor, &[1.0, 1.0], &[true, true], &never).unwrap()).collect();
         assert!(seq.windows(2).all(|w| w[0] != w[1]), "{seq:?}");
         let f = p.last(PoolKey::SleepFloor);
-        p.pick(PoolKey::Perch, &[1.0, 1.0], &[true, true]);
+        p.pick(PoolKey::Perch, &[1.0, 1.0], &[true, true], &never);
         assert_eq!(p.last(PoolKey::SleepFloor), f);
         p.force(PoolKey::SleepWindow, 1);
-        assert_eq!(p.pick(PoolKey::SleepWindow, &[1.0, 1.0], &[true, true]), Some(0));
+        assert_eq!(p.pick(PoolKey::SleepWindow, &[1.0, 1.0], &[true, true], &never), Some(0));
     }
 
     #[test]
     fn seeded_picks_repeat() {
         let run = |s| {
             let mut p = Picker::new(s);
-            (0..20).map(|_| p.pick(PoolKey::Perch, &[2.0, 1.0, 1.0], &[true; 3]).unwrap()).collect::<Vec<_>>()
+            (0..20).map(|_| p.pick(PoolKey::Perch, &[2.0, 1.0, 1.0], &[true; 3], &[true, false, false]).unwrap()).collect::<Vec<_>>()
         };
         assert_eq!(run(11), run(11));
         assert_ne!(run(11), run(12));
@@ -264,5 +299,11 @@ mod tests {
         }
         let perch: Vec<&str> = s.pools["perch"].variants.iter().map(|v| v.id.as_str()).collect();
         assert_eq!(perch, ["sit", "perch", "laydown"]);
+        // CapriCore leads (Haseeb, 2026-11-16): perch 4 : 1 : 1, both sleeps 3 : 1.
+        for (k, lead) in [("perch", 4.0), ("sleepFloor", 3.0), ("sleepWindow", 3.0)] {
+            let own: f32 = s.pools[k].variants.iter().filter(|v| v.strip.is_none()).map(|v| v.weight).sum();
+            assert_eq!(own, lead, "{k}");
+            assert!(s.pools[k].variants.iter().filter(|v| v.strip.is_some()).all(|v| v.weight == 1.0), "{k}");
+        }
     }
 }

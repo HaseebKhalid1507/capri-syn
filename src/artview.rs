@@ -32,6 +32,8 @@ pub(super) struct ArtState {
     pub floor_strip: bool,
     shift_at: Option<Instant>,
     next_blink: Option<Instant>,
+    /// The rest after each pass of the base loop (`holdMs`), drawn per pick.
+    hold_ms: u32,
     /// Decoded units and when they were last on screen; decodes in flight; failed ones.
     ready: HashMap<Unit, Instant>,
     pending: HashSet<Unit>,
@@ -55,6 +57,7 @@ impl ArtState {
             floor_strip: false,
             shift_at: None,
             next_blink: None,
+            hold_ms: 0,
             ready: HashMap::new(),
             pending: HashSet::new(),
             failed: HashSet::new(),
@@ -146,7 +149,8 @@ impl Avatar {
                 (true, false) => {
                     let eligible: Vec<bool> = self.pack.pools[&k].variants.iter().map(|v| self.art_eligible(v, place)).collect();
                     let weights: Vec<f32> = self.pack.pools[&k].variants.iter().map(|v| v.weight).collect();
-                    if let Some(i) = self.art.picker.pick(k, &weights, &eligible) {
+                    let own: Vec<bool> = self.pack.pools[&k].variants.iter().map(|v| v.art.is_none()).collect();
+                    if let Some(i) = self.art.picker.pick(k, &weights, &eligible, &own) {
                         self.art_set(k, i);
                         changed = true;
                     }
@@ -179,6 +183,8 @@ impl Avatar {
         self.art.shift_at = range.map(|r| now + self.art.picker.shift_in(r));
         let blink = self.art.picks.iter().filter_map(|(&k, &i)| self.pack.pools[&k].variants[i].art.as_ref()).find(|a| !a.blinks.is_empty()).map(|a| a.blink_ms);
         self.art.next_blink = blink.map(|r| now + self.art.picker.shift_in(r));
+        let hold = self.art_strip().and_then(|a| a.hold_ms);
+        self.art.hold_ms = hold.map_or(0, |r| self.art.picker.shift_in(r).as_millis() as u32);
         let arts: Vec<VariantArt> = self.art.picks.iter().filter_map(|(&k, &i)| self.pack.pools[&k].variants[i].art.clone()).collect();
         for a in arts {
             self.art_need(a.base);
@@ -259,9 +265,18 @@ impl Avatar {
         if !self.art_ready(si) {
             return None;
         }
-        let seq = self.pack.strip_seq(si, a.every);
+        let mut seq = self.pack.strip_seq(si, a.every);
         let base = seq.first()?.0;
+        // At rest (the base loop): a pass, then a rest on its first cell (blinks come back to it).
+        if si == a.base && self.art.hold_ms > 0 {
+            seq.push((base, self.art.hold_ms));
+        }
         Some((base, Some(seq)))
+    }
+
+    /// The layer for mood `m` is a strip's base loop with a rest at its end.
+    pub(super) fn art_rests(&self, m: Mood) -> bool {
+        self.art.hold_ms > 0 && self.art_layer(m).is_some_and(|(b, _)| self.art_strip().is_some_and(|a| self.pack.strip_first.get(a.base).copied().flatten() == Some(b)))
     }
 
     /// The music strip on screen (its first cell): notes and the music pose key off it.
@@ -286,7 +301,7 @@ impl Avatar {
     fn art_blink_seq(&mut self, a: &VariantArt) -> Option<Seq> {
         let w: Vec<f32> = a.blinks.iter().map(|b| if self.art_ready(b.0) { b.1 } else { 0.0 }).collect();
         let i = weighted(self.art.picker.rng(), &w)?;
-        Some(self.pack.strip_seq(a.blinks[i].0, 1))
+        Some(self.pack.strip_seq(a.blinks[i].0, a.every))
     }
 
     // ---- time -------------------------------------------------------------------------------
@@ -299,15 +314,20 @@ impl Avatar {
         {
             let a = self.art_strip().cloned();
             let quiet = !self.anim.busy() && self.music.is_none() && self.mood != Mood::Talking && !self.asleep();
-            if let (Some(a), true) = (&a, quiet)
-                && let Some(seq) = self.art_blink_seq(a)
-                && !seq.is_empty()
-            {
-                self.anim.play(seq, now);
-                dirty = true;
+            // A blink comes from her rest, never in the middle of a sway.
+            if quiet && a.as_ref().is_some_and(|a| a.hold_ms.is_some()) && !self.anim.at_rest() {
+                self.art.next_blink = Some(now + Duration::from_millis(250));
+            } else {
+                if let (Some(a), true) = (&a, quiet)
+                    && let Some(seq) = self.art_blink_seq(a)
+                    && !seq.is_empty()
+                {
+                    self.anim.play(seq, now);
+                    dirty = true;
+                }
+                let range = a.map_or([3000, 6000], |a| a.blink_ms);
+                self.art.next_blink = Some(now + self.art.picker.shift_in(range));
             }
-            let range = a.map_or([3000, 6000], |a| a.blink_ms);
-            self.art.next_blink = Some(now + self.art.picker.shift_in(range));
         }
         if let Some(at) = self.art.shift_at
             && at <= now
@@ -337,7 +357,7 @@ impl Avatar {
         let eligible: Vec<bool> = self.pack.pools[&k].variants.iter().map(|v| self.art_eligible(v, place)).collect();
         let weights: Vec<f32> = self.pack.pools[&k].variants.iter().map(|v| v.weight).collect();
         let before = self.art.picks.get(&k).copied();
-        let picked = self.art.picker.pick(k, &weights, &eligible);
+        let picked = self.art.picker.pick(k, &weights, &eligible, &vec![false; weights.len()]);
         if let Some(i) = picked {
             self.art_set(k, i);
         }
@@ -421,9 +441,7 @@ impl Avatar {
     // ---- pixels -------------------------------------------------------------------------------
 
     fn unit_frames(&self, u: Unit) -> Vec<usize> {
-        let first = if u.1 { self.pack.mirror_first.get(u.0) } else { self.pack.strip_first.get(u.0) };
-        let (Some(Some(f)), Some(a)) = (first, &self.pack.anim) else { return Vec::new() };
-        (*f..*f + a.strips[u.0].frames as usize).collect()
+        self.pack.strip_cells(u.0, u.1)
     }
 
     fn art_bytes(&self) -> usize {
@@ -464,6 +482,12 @@ impl Avatar {
                 }
                 let now = Instant::now();
                 self.art.ready.insert(u, now);
+                // The other way round's cells stood in, mirrored on the fly: not needed now.
+                for i in self.unit_frames((u.0, !u.1)) {
+                    if let Some(m) = self.frames[i].as_mut().and_then(|f| f.forget_mirror()) {
+                        cx.drop_image(m, None);
+                    }
+                }
                 let bytes = self.art_evict(cx);
                 elog!(
                     "synaps-avatar: art: strip `{name}`{} in: {n} cells, decoded in {} ms ({} ms after asked), art {:.1} MB",
