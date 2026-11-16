@@ -40,8 +40,9 @@ pub(super) struct Rag {
     /// The chain's band offsets, held (no 1 px back-and-forth between ticks).
     hold: ragdoll::BandHold,
     /// Each drawn row's ink centre at the last plan, relative to the grip: (source row, x)
-    /// (`cap_lean`).
+    /// (`cap_lean`), and the rag's time then.
     drawn: Vec<(i32, f32)>,
+    drawn_t: f32,
     /// The ink centre of each source row of the art as shown, for (frame, mirrored).
     centres: Option<((usize, bool), Centres)>,
     /// She turned this tick: the plan committed before it belongs to the other facing.
@@ -106,10 +107,12 @@ fn tick_period() -> Duration {
     Duration::from_secs_f64(ms / 1000.0)
 }
 
-/// The most a drawn row turns about the grip in one tick (a frame), degrees (`cap_lean`). Her
+/// The most a drawn row turns about the grip in a 60 Hz frame, degrees (`cap_lean`). Her
 /// lean read off the screen (hips to feet, `tools/dragpace.py`) then changes by ≤ ~6° a frame
-/// (at 5.5 the rows' bends added up to 7.4).
+/// (at 5.5 the rows' bends added up to 7.4). By time, not per plan: where ticks outrun the
+/// compositor's frames (Hyprland: two plans in one frame) a frame still turns this much.
 const LEAN_STEP: f32 = 4.5;
+const LEAN_FRAME: f32 = 1.0 / 60.0;
 
 /// Her lean changes by `LEAN_STEP` a frame at most, whatever moved it (the chain, a turn that
 /// mirrors a leaning pose, a chain rebuilt straight for it): each band's ink centre, relative
@@ -335,6 +338,7 @@ impl Avatar {
             chain,
             hold: ragdoll::BandHold::default(),
             drawn: Vec::new(),
+            drawn_t: 0.0,
             centres: None,
             turned: false,
             wobble: self.rag_wobble(),
@@ -1022,7 +1026,9 @@ impl Avatar {
                 if r.flight.is_none() {
                     ragdoll::Wobble::apply(r.wobble.px(), &mut b, top, bottom);
                 }
-                r.drawn = cap_lean(&mut b, centres.as_deref().unwrap_or(&[]), r.grip, &r.drawn, bp, LEAN_STEP.to_radians().tan());
+                let step = LEAN_STEP * ((r.t - r.drawn_t) / LEAN_FRAME).clamp(0.0, 1.0);
+                r.drawn = cap_lean(&mut b, centres.as_deref().unwrap_or(&[]), r.grip, &r.drawn, bp, step.to_radians().tan());
+                r.drawn_t = r.t;
                 Some(b)
             }
             _ => None,

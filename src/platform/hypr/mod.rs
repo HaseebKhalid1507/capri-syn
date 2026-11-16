@@ -324,10 +324,10 @@ impl Desktop for HyprDesktop {
         self.toplevel_place(w).map(|p| p.rect)
     }
 
-    /// Its workspace is its space; a floating window moves without events.
+    /// Its workspace is its space; no event says it moved (the core polls it).
     fn toplevel_place(&self, w: WinId) -> Option<Place> {
         let (s, c) = self.client(w)?;
-        s.visible(&c).then(|| Place { rect: WinRect { id: w, x: c.at[0], y: c.at[1], w: c.size[0], h: c.size[1] }, space: c.workspace.id, loose: c.floating })
+        s.visible(&c).then(|| Place { rect: WinRect { id: w, x: c.at[0], y: c.at[1], w: c.size[0], h: c.size[1] }, space: c.workspace.id })
     }
 
     fn window_exists(&self, w: WinId) -> bool {

@@ -12,11 +12,11 @@ use std::time::{Duration, Instant};
 
 /// How long monitors and work areas are reused (work areas cost a stack walk).
 const AREAS_TTL: Duration = Duration::from_secs(3);
-/// Backends without target events: how often the perch target is re-read.
-/// The target poller's rates: a window that can move without telling (floating), one that
-/// moves only with events the backend hints (tiled), and while it moves (a live drag).
-const TARGET_POLL_LOOSE: Duration = Duration::from_millis(250);
-const TARGET_POLL_TILED: Duration = Duration::from_millis(500);
+/// Backends without target events: how often the perch target is re-read, and while it moves
+/// (a live drag). Tiled windows move without events too (Hyprland: a split turned or swapped,
+/// a resize): at 500 ms she sat in the air ~0.47 s after the window slid (r26 rig); a read
+/// costs little (perched idle 0.24 % at 2 Hz, measured in the rig).
+const TARGET_POLL: Duration = Duration::from_millis(150);
 const TARGET_POLL_BURST: Duration = Duration::from_millis(16);
 /// How long the burst rate lasts after the target was last seen moving.
 const TARGET_BURST_FOR: Duration = Duration::from_millis(600);
@@ -127,10 +127,8 @@ impl TargetTrack {
         (self.read, self.rect) = (true, here);
         let wait = if self.moved.is_some_and(|m| now.duration_since(m) < TARGET_BURST_FOR) {
             TARGET_POLL_BURST
-        } else if place.is_none_or(|p| p.loose) {
-            TARGET_POLL_LOOSE
         } else {
-            TARGET_POLL_TILED
+            TARGET_POLL
         };
         (hint, wait)
     }
@@ -855,7 +853,7 @@ impl Os {
 
     /// Re-read the target while there is one (parked otherwise; a hint wakes it), diff, and
     /// feed the differences through the same path as a backend's hints. Every
-    /// `TARGET_POLL_TILED` (`_LOOSE` for a floating one), `_BURST` while it moves.
+    /// `TARGET_POLL`, `_BURST` while it moves.
     fn spawn_target_poll(&self, on: Arc<dyn Fn(WatchEvent) + Send + Sync>) -> Result<()> {
         let (s, d) = (self.shared.clone(), self.desk.clone());
         let h = std::thread::Builder::new().name("avatar-target".into()).spawn(move || {
