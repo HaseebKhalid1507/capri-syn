@@ -22,6 +22,7 @@ macro_rules! olog {
 }
 
 mod anim;
+mod beside;
 mod brain;
 mod control;
 mod drag;

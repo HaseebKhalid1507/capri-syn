@@ -3,12 +3,17 @@
 //! a missed reply leaves on her tag, and copy. A child module of `view`.
 
 use super::*;
+use crate::beside::{self, Panel, Place};
 use crate::line::{Ask, Line, Row, Snap, Who};
-use crate::platform::x11::Monitor;
 
 /// A press held this long is a hold (voice, later); shorter is a tap (type).
 pub(super) const TAP_MS: u128 = 250;
 const LINE_W: f32 = 780.0;
+/// Squeezed beside her, down to this wide (logical px); narrower, it goes above her or over.
+const LINE_MIN_W: f32 = 480.0;
+/// The least the Line is tall (logical px), and its gap to her.
+const LINE_MIN_H: f32 = 60.0;
+const LINE_GAP: f32 = 12.0;
 /// The Line's first height (logical px), until it measures itself.
 const LINE_H0: f32 = 120.0;
 /// Rows the Line holds (the transcript's tail).
@@ -23,6 +28,9 @@ pub(super) struct LineWin {
     /// Device px: x, bottom edge, width, height.
     pub at: (i32, i32, i32, i32),
     pub parked: bool,
+    /// Her body box it was placed beside (she moves: it follows), and its side of her.
+    pub her: WinRect,
+    pub tail: Option<(beside::Side, i32)>,
 }
 
 /// A reply he didn't see before its bubble went: one line on her tag until he acknowledges
@@ -93,42 +101,55 @@ impl Avatar {
         }
     }
 
-    /// The Line's place (device px) on the monitor he works on (his focused window's, else
-    /// the pointer's), at the bottom of its work area with her standing at one edge:
-    /// (x, bottom, w, h, area, her ground x, her side).
-    fn line_place(&self, h: i32) -> (i32, i32, i32, i32, Monitor, i32, i8) {
+    /// The Line's place (device px), `h` tall: beside her on her monitor (`beside::place`).
+    /// Its work area and her body box come along.
+    fn line_place(&self, h: i32) -> (Place, WinRect, WinRect) {
         let sf = self.layout.sf;
-        let ours = self.x11.win;
-        let focused = self
-            .x11
-            .active_window()
-            .or_else(|| self.x11.focused_window().ok())
-            .filter(|&w| w > 1 && w != ours && self.line.as_ref().is_none_or(|l| l.xid != w))
-            .and_then(|w| self.x11.toplevel_rect(w));
-        let at = focused.map(|r| r.center()).or_else(|| self.x11.pointer().ok()).unwrap_or_else(|| {
-            let g = self.ground();
-            (g.0, g.1 - 1)
+        let her = self.her_body();
+        let area = self.her_area().unwrap_or_else(|| {
+            let m = self.x11.area_at(her.center().0, her.center().1);
+            WinRect::new(m.x, m.y, m.w, m.h)
         });
-        let area = self.x11.area_at(at.0, at.1);
-        let l = self.layout;
-        let body = (l.geo.width as f32 * 0.62) as i32;
-        let margin = (12.0 * sf) as i32;
-        let w = ((LINE_W * sf) as i32).min(area.w - body - 3 * margin).max(1);
-        let bottom = area.y + area.h - (6.0 * sf) as i32;
-        let h = h.min(area.h - 2 * margin).max(1);
-        // Where she stands now, if that's on this floor (she stays put if the Line fits there).
-        let (gx, gy) = self.ground();
-        let on_floor = matches!(self.placement, Placement::Ground) && gy > area.y + area.h * 2 / 3 && gx >= area.x && gx < area.x + area.w;
-        let est_h = h.max(area.h / 3 + (90.0 * sf) as i32);
-        let p = place_line((area.x, area.y, area.w, area.h), focused.map(|r| (r.x, r.y, r.w, r.h)), on_floor.then_some(gx), w, body, est_h, margin);
-        (p.0, bottom, w, h, area, p.1, p.2)
+        let d = |v: f32| (v * sf) as i32;
+        // Above her only with room for what it grows to (the thread is a third of the area).
+        let grown = h.max(area.h / 3 + d(90.0));
+        let p = Panel { w: d(LINE_W), min_w: d(LINE_MIN_W), h, min_h: grown };
+        (beside::place(area, her, p, d(LINE_GAP), self.placement == Placement::Ground, None), area, her)
+    }
+
+    /// Place the open Line again beside her (she moved, or it measured `h` tall): its window
+    /// and its tail follow.
+    pub(super) fn line_follow(&mut self, h: Option<i32>, cx: &mut Context<Self>) {
+        let Some(l) = &self.line else { return };
+        let h = h.unwrap_or(l.at.3);
+        let (p, _, her) = self.line_place(h);
+        let sf = self.layout.sf;
+        let Some(l) = &mut self.line else { return };
+        let r = p.rect;
+        l.her = her;
+        let at = (r.x, r.bottom(), r.w, r.h);
+        if at != l.at {
+            l.at = at;
+            self.x11.configure(l.xid, r.x, r.y, r.w, r.h).ok();
+        }
+        let tail = Some((p.side, p.tail));
+        if tail != l.tail {
+            l.tail = tail;
+            let (v, hd) = (l.view.clone(), l.handle);
+            let t = Some((p.side, p.tail as f32 / sf));
+            cx.defer(move |cx| {
+                hd.update(cx, |_, _, cx| v.update(cx, |l, cx| l.set_tail(t, cx))).ok();
+            });
+        }
     }
 
     pub(super) fn open_line(&mut self, cx: &mut Context<Self>) -> String {
         let now = Instant::now();
         let sf = self.layout.sf;
         let h0 = (LINE_H0 * sf) as i32;
-        let (x, bottom, w, h, area, her_x, side) = self.line_place(h0);
+        let (place, area, her) = self.line_place(h0);
+        let (x, w, h) = (place.rect.x, place.rect.w, place.rect.h);
+        let bottom = place.rect.bottom();
         let ours = self.x11.win;
         let prev = self.x11.active_window().or_else(|| self.x11.focused_window().ok()).filter(|&w| w > 1 && w != ours);
         // The bubble's field gives way: one place to type.
@@ -182,7 +203,7 @@ impl Avatar {
         if xid != 0 && std::env::var_os("SA_LINE_NOFOCUS").is_none() {
             self.x11.give_focus(xid).ok();
         }
-        self.line = Some(LineWin { view: view.clone(), handle: handle.into(), xid, prev, at: (x, bottom, w, h), parked: false });
+        self.line = Some(LineWin { view: view.clone(), handle: handle.into(), xid, prev, at: (x, bottom, w, h), parked: false, her, tail: Some((place.side, place.tail)) });
         self.x11.arm_clicks(true);
         self.line_opened_ms = Some(now.elapsed().as_millis());
         // He is reading the thread now: nothing is unread, and the bubble gives way. Opened
@@ -198,47 +219,23 @@ impl Avatar {
             b.collapsed = true;
             b.hide_at = None;
         }
-        let side = if self.line_fetch_her(area, her_x, now) { side } else { 0 };
+        // She stays where she is (asleep too): the Line is beside her, its tail at her.
         if let Some(l) = &self.line {
             let (v, hd) = (l.view.clone(), l.handle);
+            let t = Some((place.side, place.tail as f32 / sf));
             cx.defer(move |cx| {
-                hd.update(cx, |_, _, cx| v.update(cx, |l, cx| l.set_side(side, cx))).ok();
+                hd.update(cx, |_, _, cx| v.update(cx, |l, cx| l.set_tail(t, cx))).ok();
             });
         }
-        elog!("synaps-avatar: line open at {x},{} {w}x{h} (0x{xid:x}) in {} ms", bottom - h, now.elapsed().as_millis());
+        elog!(
+            "synaps-avatar: line open at {x},{} {w}x{h} (0x{xid:x}) in {} ms, {} of her",
+            bottom - h,
+            now.elapsed().as_millis(),
+            crate::line::side_key(place.side)
+        );
         cx.notify();
         self.schedule(cx);
         format!("ok line {x},{} {w}x{h}", bottom - h)
-    }
-
-    /// She stands at the Line's edge (on its floor, at `her_x`): a teleport if she is
-    /// anywhere else (another monitor: LOCKED #11.2). False if she can't come.
-    fn line_fetch_her(&mut self, area: Monitor, her_x: i32, now: Instant) -> bool {
-        if self.rag.is_some() || self.hidden || !self.loaded {
-            return false;
-        }
-        let (gx, gy) = self.ground();
-        let floor = area.y + area.h;
-        let l = self.layout;
-        if matches!(self.placement, Placement::Ground) && (gx - her_x).abs() <= (8.0 * l.sf) as i32 && (gy - floor).abs() <= (8.0 * l.sf) as i32 {
-            return true;
-        }
-        let (here, there) = (self.x11.monitor_at(gx, gy - 1), self.x11.monitor_at(area.x + area.w / 2, area.y + area.h / 2));
-        let other = (here.x, here.y) != (there.x, there.y);
-        let o = Self::clamp(&self.x11, &self.layout, (her_x - l.ground_x, floor - l.ground_y));
-        self.brain_cancel_move();
-        if let Some(w) = self.waking_until.filter(|&w| w > now) {
-            // Just woken: she stands up, then comes.
-            self.fetch_after = Some((w, o));
-            self.home = (o.0 + l.ground_x, o.1 + l.ground_y);
-            elog!("synaps-avatar: line: she stands up, then comes to its edge at {},{}", self.home.0, self.home.1);
-            return true;
-        }
-        self.start_teleport(o, Placement::Ground, now);
-        self.arrive_with(super::arriveview::ArriveKind::Summon);
-        self.home = (o.0 + l.ground_x, o.1 + l.ground_y);
-        elog!("synaps-avatar: line: she comes {}to its edge at {},{}", if other { "over from another monitor " } else { "" }, self.home.0, self.home.1);
-        true
     }
 
     /// The thread, from the session's transcript (thinking left out).
@@ -405,17 +402,12 @@ impl Avatar {
             }
             Ask::Height(h) => {
                 let sf = self.layout.sf;
-                if let Some(l) = &mut self.line {
-                    let (_, _, _, _, area) = {
-                        let (x, b, w, _) = l.at;
-                        let a = self.x11.area_at(x + w / 2, b - 1);
-                        (x, b, w, 0, a)
-                    };
-                    let hd = ((h * sf) as i32).min(area.h - (36.0 * sf) as i32).max((60.0 * sf) as i32);
+                if let Some(l) = &self.line {
+                    // No taller than her work area allows (it scrolls inside).
+                    let area_h = self.her_area().map_or(i32::MAX / 2, |a| a.h);
+                    let hd = ((h * sf) as i32).min(area_h - (36.0 * sf) as i32).max((LINE_MIN_H * sf) as i32);
                     if hd != l.at.3 {
-                        let (x, bottom, w, _) = l.at;
-                        l.at.3 = hd;
-                        self.x11.configure(l.xid, x, bottom - hd, w, hd).ok();
+                        self.line_follow(Some(hd), cx);
                     }
                 }
                 Ok(())
@@ -556,87 +548,5 @@ pub(super) fn copy_text(t: String, cx: &mut App) {
             std::fs::write(p, &t).ok();
         }
         None => cx.write_to_clipboard(ClipboardItem::new_string(t)),
-    }
-}
-
-/// Where the Line goes along the floor of `area` (x, y, w, h): the spot that covers the least
-/// of his focused window `fw`, then the one that moves her least (`her`: her ground x if she
-/// stands on this floor), with her `body` px wide at one edge. (Line x, her ground x, her
-/// side: -1 left of the Line, 1 right.)
-pub fn place_line(area: (i32, i32, i32, i32), fw: Option<(i32, i32, i32, i32)>, her: Option<i32>, w: i32, body: i32, h: i32, margin: i32) -> (i32, i32, i8) {
-    let (ax, ay, aw, ah) = area;
-    let top = ay + ah - h;
-    let gap = margin / 2;
-    let fits = |lx: i32, side: i8| {
-        let (bx0, bx1) = if side < 0 { (lx - gap - body, lx + w) } else { (lx, lx + w + gap + body) };
-        bx0 >= ax + margin && bx1 <= ax + aw - margin
-    };
-    let her_x = |lx: i32, side: i8| if side < 0 { lx - gap - body / 2 } else { lx + w + gap + body / 2 };
-    let mut cands: Vec<(i32, i8)> = Vec::new();
-    for side in [-1i8, 1] {
-        if let Some(g) = her {
-            cands.push((if side < 0 { g + body / 2 + gap } else { g - body / 2 - gap - w }, side));
-        }
-        let left = if side < 0 { ax + margin + body + gap } else { ax + margin };
-        let right = if side < 0 { ax + aw - margin - w } else { ax + aw - margin - body - gap - w };
-        cands.push((left, side));
-        cands.push((right, side));
-        cands.push(((left + right) / 2, side));
-    }
-    let cover = |lx: i32| {
-        fw.map_or(0i64, |(fx, fy, fwid, fh)| {
-            let ox = (lx + w).min(fx + fwid) - lx.max(fx);
-            let oy = (ay + ah).min(fy + fh) - top.max(fy);
-            if ox > 0 && oy > 0 { ox as i64 * oy as i64 } else { 0 }
-        })
-    };
-    let best = cands
-        .into_iter()
-        .filter(|&(lx, side)| fits(lx, side))
-        .min_by_key(|&(lx, side)| {
-            let moved = her.map_or(0, |g| (her_x(lx, side) - g).abs() as i64);
-            // Covering his work outweighs any walk: 1 % of the Line over his window ~ 2 m.
-            (cover(lx) * 100 / (w as i64 * h as i64).max(1)) * 4000 + moved
-        });
-    match best {
-        Some((lx, side)) => (lx, her_x(lx, side), side),
-        None => {
-            let lx = ax + (aw - w) / 2;
-            (lx, (ax + body / 2).max(lx - gap - body / 2), -1)
-        }
-    }
-}
-
-#[cfg(test)]
-mod place_tests {
-    use super::place_line;
-
-    const AREA: (i32, i32, i32, i32) = (0, 28, 1920, 1052);
-
-    #[test]
-    fn she_stays_put_and_the_line_opens_beside_her() {
-        // His editor fills the work area (tiled): every spot covers the same; she doesn't move.
-        let (lx, her, side) = place_line(AREA, Some(AREA), Some(1500), 700, 200, 420, 12);
-        assert_eq!(her, 1500);
-        assert!(lx + 700 <= 1400 || lx >= 1600, "the Line is beside her, not over her: {lx} {side}");
-    }
-
-    #[test]
-    fn free_space_beats_covering_his_window() {
-        // A floating editor on the left half: the Line goes right, she comes along.
-        let ed = (0, 28, 960, 1052);
-        let (lx, _, _) = place_line(AREA, Some(ed), Some(300), 700, 200, 420, 12);
-        assert!(lx >= 960, "{lx}");
-    }
-
-    #[test]
-    fn she_is_at_its_edge_and_both_fit_the_monitor() {
-        for her in [None, Some(40), Some(1900), Some(960)] {
-            let (lx, h, side) = place_line(AREA, None, her, 700, 200, 420, 12);
-            assert!(lx >= 0 && lx + 700 <= 1920);
-            let edge = if side < 0 { lx } else { lx + 700 };
-            assert!((h - edge).abs() <= 6 + 100 + 1, "{her:?}: her {h} edge {edge}");
-            assert!(h - 100 >= 0 && h + 100 <= 1920, "{her:?}: {h}");
-        }
     }
 }

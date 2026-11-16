@@ -210,6 +210,8 @@ pub struct Reader {
     _active: Option<Subscription>,
     /// Laid-out buttons (window px), for test clicks via `state`.
     buttons: Probes,
+    /// Its side of her and where its tail points (logical px along that edge).
+    tail: Option<(crate::beside::Side, f32)>,
 }
 
 type Probes = Rc<RefCell<Vec<(SharedString, Bounds<Pixels>)>>>;
@@ -243,6 +245,15 @@ impl Reader {
             on_close: Some(on_close),
             _active: Some(sub),
             buttons: Rc::default(),
+            tail: None,
+        }
+    }
+
+    /// Where it is beside her (from the avatar, each time it is placed).
+    pub fn set_tail(&mut self, tail: Option<(crate::beside::Side, f32)>, cx: &mut Context<Reader>) {
+        if self.tail != tail {
+            self.tail = tail;
+            cx.notify();
         }
     }
 
@@ -484,9 +495,11 @@ impl Render for Reader {
             .bg(rgb(pal.surface))
             .border_2()
             .border_color(rgb(pal.frame))
+            .relative()
             .child(div().absolute().top_0().left(px(26.0)).w(px(48.0)).h(px(2.0)).bg(rgb(pal.accent)))
             .child(header)
             .child(body)
+            .children(self.tail.map(|(side, at)| crate::line::tail_overlay(side, at, pal.frame)))
     }
 }
 

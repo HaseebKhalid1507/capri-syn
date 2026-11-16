@@ -19,7 +19,6 @@ pub(super) const SIT_UP: Duration = Duration::from_millis(600);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ArriveKind {
     Launch,
-    Summon,
     /// A passive or bid teleport (its share is `arrive.teleportChance`, never twice running).
     Teleport,
     /// Her perch closed: the rescue teleport onto another window's top (LOCKED #18).
@@ -53,7 +52,6 @@ impl Avatar {
         let Some(a) = &self.pack.behaviour.arrive else { return Vec::new() };
         match k {
             ArriveKind::Launch => a.launch.clone(),
-            ArriveKind::Summon => a.summon.clone(),
             ArriveKind::Teleport | ArriveKind::Rescue if self.sitting_at(self.teleport_place()) => a.perch.clone(),
             ArriveKind::Teleport | ArriveKind::Rescue if self.teleport_place() == Some(Placement::Ground) => a.teleport.clone(),
             _ => Vec::new(),
@@ -194,22 +192,6 @@ impl Avatar {
         let ms: u64 = wake.iter().map(|s| s.1 as u64).sum();
         self.anim.play(wake, now);
         self.waking_until = Some(now + Duration::from_millis(ms));
-    }
-
-    /// $mod+c woke her: she comes to the Line's edge once she stands.
-    pub(super) fn step_fetch(&mut self, now: Instant) -> bool {
-        let Some((at, o)) = self.fetch_after else { return false };
-        if at > now {
-            return false;
-        }
-        self.fetch_after = None;
-        if self.rag.is_some() || self.hidden || self.line.is_none() || self.teleport.is_some() {
-            return false;
-        }
-        self.brain_cancel_move();
-        self.start_teleport(o, Placement::Ground, now);
-        self.arrive_with(ArriveKind::Summon);
-        true
     }
 
     // ---- the deep nap -----------------------------------------------------------------------

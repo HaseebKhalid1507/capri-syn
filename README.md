@@ -229,8 +229,8 @@ bindsym $mod+c           exec --no-startup-id avatarctl talk press
 bindsym --release $mod+c exec --no-startup-id avatarctl talk release
 ```
 
-A tap opens the Line on the monitor you're working on and she teleports over. A hold is push-to-talk,
-if voice is on.
+A tap opens the Line right beside her, wherever she is (floor, a window top, an edge; asleep too): she
+stays put, it goes on her roomier side and follows her if she moves. A hold is push-to-talk, if voice is on.
 
 **Voice (optional).** A sidecar, `capri-voice`, owns the mic and the speech models. The setup script
 uses `uv` for a user-local venv and expects `pywhispercpp` from your distribution
@@ -311,7 +311,7 @@ flags and debug knobs is in [docs/REFERENCE.md](docs/REFERENCE.md).
 | Drag her | Goes limp and swings; drop her on a window edge to perch her there |
 | Fling her | Flies, lands, and may take it personally |
 | Right-click | Menu: reset position, DND 1 hour, attention mix / hang only / off, copy last reply, hide, quit (asks twice) |
-| <kbd>$mod</kbd>+<kbd>c</kbd>, tap | Opens the Line where you're working; she teleports over. Tap again to close |
+| <kbd>$mod</kbd>+<kbd>c</kbd>, tap | Opens the Line beside her (she stays put). Tap again to close |
 | <kbd>$mod</kbd>+<kbd>c</kbd>, hold | Push-to-talk. Release sends (voice on) |
 | <kbd>Enter</kbd> | Send, or steer a running turn |
 | <kbd>Shift</kbd>+<kbd>Enter</kbd> | New line |

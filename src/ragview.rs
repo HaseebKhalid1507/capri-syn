@@ -216,7 +216,6 @@ impl Avatar {
             self.fx_hide_bolt();
         }
         self.brain_cancel_move();
-        self.fetch_after = None;
         self.hop = None;
         self.next_activity = None;
         self.menu = None;
