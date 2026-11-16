@@ -58,30 +58,43 @@ struct PointerWatch {
 
 type Cached = RefCell<Option<(Instant, Vec<Monitor>)>>;
 
-/// Effect layers kept by the core when the backend can't show them as surfaces of their own
-/// (`Caps::fx_layers` off): her view paints them in her window (`Os::paint_fx`), in the same
-/// stacking order a server would.
-/// rgb, origin (root px), rects relative to it.
-type FxLayer = (u32, (i32, i32), Vec<ShapeRect>);
+/// One effect layer as last set: solid `rgb` over `rects` (relative to `origin`, root px) in a
+/// `size` px box, and where it shows: on a surface of its own (`staged`: the backend paints
+/// it) or in her window (her view paints it, `Os::paint_fx`).
+#[derive(Clone, Debug, PartialEq)]
+struct FxLayer {
+    rgb: u32,
+    origin: (i32, i32),
+    size: (i32, i32),
+    rects: Vec<ShapeRect>,
+    staged: bool,
+}
 
+/// Every effect layer that is up, in the stacking order a server keeps, wherever each one
+/// shows (`Os::fx_staged` decides). Her view paints the ones in her window from it.
 #[derive(Default)]
 struct FxList {
-    /// Layer → (rgb, origin root px, rects relative to it).
     layers: std::collections::HashMap<usize, FxLayer>,
     /// Above her body, bottom → top.
     over: Vec<usize>,
     /// Below her body, bottom → top.
     under: Vec<usize>,
-    /// Changed since her view last took it.
+    /// What her window shows changed since her view last took it.
     dirty: bool,
 }
 
 impl FxList {
-    fn show(&mut self, layer: usize, rgb: u32, origin: (i32, i32), rects: Option<&[ShapeRect]>, z: FxZ) {
-        let rects = rects.map(<[ShapeRect]>::to_vec).or_else(|| self.layers.get(&layer).map(|l| l.2.clone())).unwrap_or_default();
-        // The same layer set again (another tick, nothing new): no frame for it.
+    /// Set layer `layer` (`rects: None` keeps its rects). Returns where it showed before:
+    /// `Some(staged)`, or `None` if it wasn't up.
+    #[allow(clippy::too_many_arguments)]
+    fn show(&mut self, layer: usize, rgb: u32, origin: (i32, i32), size: (i32, i32), rects: Option<&[ShapeRect]>, z: FxZ, staged: bool) -> Option<bool> {
+        let prev = self.layers.get(&layer).cloned();
+        let rects = rects.map(<[ShapeRect]>::to_vec).or_else(|| prev.as_ref().map(|l| l.rects.clone())).unwrap_or_default();
         let before = (self.over.clone(), self.under.clone());
-        let same = self.layers.insert(layer, (rgb, origin, rects)) == self.layers.get(&layer).cloned();
+        let now = FxLayer { rgb, origin, size, rects, staged };
+        // The same layer set again (another tick, nothing new): no frame for it.
+        let same = prev.as_ref() == Some(&now);
+        self.layers.insert(layer, now);
         self.over.retain(|&l| l != layer);
         self.under.retain(|&l| l != layer);
         match z {
@@ -92,30 +105,41 @@ impl FxList {
             },
             FxZ::UnderBody => self.under.push(layer),
         }
-        self.dirty |= !same || before != (self.over.clone(), self.under.clone());
+        // Her window repaints only for what it shows: this layer is (or was) in it.
+        let in_window = !staged || prev.as_ref().is_some_and(|p| !p.staged);
+        self.dirty |= in_window && (!same || before != (self.over.clone(), self.under.clone()));
+        prev.map(|p| p.staged)
     }
 
-    fn hide(&mut self, layer: usize) {
-        if self.layers.remove(&layer).is_some() {
-            self.over.retain(|&l| l != layer);
-            self.under.retain(|&l| l != layer);
-            self.dirty = true;
-        }
+    /// Take layer `layer` down. Returns where it showed (`Some(staged)`), `None` if it wasn't up.
+    fn hide(&mut self, layer: usize) -> Option<bool> {
+        let l = self.layers.remove(&layer)?;
+        self.over.retain(|&k| k != layer);
+        self.under.retain(|&k| k != layer);
+        self.dirty |= !l.staged;
+        Some(l.staged)
     }
 
     fn clear(&mut self) {
-        if !self.layers.is_empty() {
-            *self = FxList { dirty: true, ..FxList::default() };
-        }
+        let in_window = self.layers.values().any(|l| !l.staged);
+        *self = FxList { dirty: self.dirty || in_window, ..FxList::default() };
     }
 
-    /// The rects to paint, window-local px (her window at `win`), bottom → top, with colours.
+    /// Layers in the stacking order, bottom → top, with where each stacks when re-shown in
+    /// that order (`Top` / `UnderBody` each, so the order comes out the same).
+    fn order(&self) -> Vec<(usize, FxZ)> {
+        self.under.iter().map(|&l| (l, FxZ::UnderBody)).chain(self.over.iter().map(|&l| (l, FxZ::Top))).collect()
+    }
+
+    /// The rects her window paints (the layers not staged), window-local px (her window at
+    /// `win`), bottom → top, with colours.
     fn scene(&self, under: bool, win: (i32, i32)) -> Vec<((i32, i32, i32, i32), u32)> {
         let order = if under { &self.under } else { &self.over };
         order
             .iter()
             .filter_map(|l| self.layers.get(l))
-            .flat_map(|(rgb, o, rects)| rects.iter().map(move |r| ((o.0 - win.0 + r.0 as i32, o.1 - win.1 + r.1 as i32, r.2 as i32, r.3 as i32), *rgb)))
+            .filter(|l| !l.staged)
+            .flat_map(|l| l.rects.iter().map(move |r| ((l.origin.0 - win.0 + r.0 as i32, l.origin.1 - win.1 + r.1 as i32, r.2 as i32, r.3 as i32), l.rgb)))
             .collect()
     }
 }
@@ -140,10 +164,12 @@ pub struct Os {
     shape_sends: Cell<u64>,
     shape_rects: Cell<u64>,
     pointer_watch: Arc<PointerWatch>,
-    /// In-scene effect layers (`Caps::fx_layers` off).
+    /// Every effect layer that is up, and where each shows.
     fx_list: RefCell<FxList>,
     /// Where her body was last put (root px).
     body_at: Cell<(i32, i32)>,
+    /// Her body window's size, px ((0, 0) before `adopt`).
+    body_size: Cell<(i32, i32)>,
 }
 
 impl Os {
@@ -165,6 +191,7 @@ impl Os {
             pointer_watch: Arc::new(PointerWatch { moved_ms: AtomicU64::new(u64::MAX), ..PointerWatch::default() }),
             fx_list: RefCell::new(FxList::default()),
             body_at: Cell::new((0, 0)),
+            body_size: Cell::new((0, 0)),
         }
     }
 
@@ -200,7 +227,16 @@ impl Os {
     }
 
     pub fn adopt(&self, role: Role, window: &Window) -> Result<WinId> {
+        if role == Role::Body {
+            let (v, sf) = (window.viewport_size(), window.scale_factor());
+            self.set_body_size((f32::from(v.width) * sf).round() as i32, (f32::from(v.height) * sf).round() as i32);
+        }
         self.stage.adopt(role, window)
+    }
+
+    /// Her body window's size, px (the effect layers inside it can show in it).
+    pub(super) fn set_body_size(&self, w: i32, h: i32) {
+        self.body_size.set((w, h));
     }
 
     /// Her body's window id.
@@ -277,28 +313,86 @@ impl Os {
             self.fx_unmap(layer);
             return Ok(());
         }
-        if !self.caps.fx_layers {
-            self.fx_list.borrow_mut().show(layer, rgb, origin, rects, z);
-            return Ok(());
+        let staged = self.fx_staged(origin, size);
+        let mut l = self.fx_list.borrow_mut();
+        match (l.show(layer, rgb, origin, size, rects, z, staged), staged) {
+            // Into her window: its surface goes.
+            (Some(true), false) => {
+                self.stage.fx_hide(layer);
+                Ok(())
+            }
+            (_, false) => Ok(()),
+            // Out of her window onto a surface: that surface needs the rects.
+            (Some(false), true) => {
+                let rects = l.layers.get(&layer).map(|f| f.rects.clone()).unwrap_or_default();
+                self.stage.fx_show(layer, rgb, origin, size, Some(&rects), z)
+            }
+            (_, true) => self.stage.fx_show(layer, rgb, origin, size, rects, z),
         }
-        self.stage.fx_show(layer, rgb, origin, size, rects, z)
+    }
+
+    /// Where an effect layer shows: on a surface of its own (the backend paints it), or in her
+    /// window (her view paints it). Without a compositor her window shows only her figure's
+    /// shape, so every layer needs its own surface. When a compositor blends her, a layer
+    /// that fits in her window is part of her picture: it composites with her in one surface.
+    /// Small opaque surfaces stacked over her translucent window are composited apart from
+    /// her, and a compositor can then paint the desktop over their boxes when she redraws
+    /// under them (dark boxes and bars around her glints). Only the layers reaching outside
+    /// her window (the bolt) keep surfaces of their own.
+    fn fx_staged(&self, origin: (i32, i32), size: (i32, i32)) -> bool {
+        if !self.caps.fx_layers {
+            return false;
+        }
+        if !self.composited() {
+            return true;
+        }
+        let ((bx, by), (bw, bh)) = (self.body_at.get(), self.body_size.get());
+        let inside = origin.0 >= bx && origin.1 >= by && origin.0 + size.0 <= bx + bw && origin.1 + size.1 <= by + bh;
+        !inside
     }
 
     /// Hide one effect layer if it is up.
     pub fn fx_unmap(&self, layer: usize) {
+        self.fx_list.borrow_mut().hide(layer);
         if self.caps.fx_layers {
             self.stage.fx_hide(layer);
-        } else {
-            self.fx_list.borrow_mut().hide(layer);
         }
     }
 
     pub fn fx_hide(&self) {
+        self.fx_list.borrow_mut().clear();
         if self.caps.fx_layers {
             self.stage.fx_hide_all();
-        } else {
-            self.fx_list.borrow_mut().clear();
         }
+    }
+
+    /// The compositor mode changed: every layer that is up shows where the new mode puts it
+    /// (in her window or on a surface of its own), in the same stacking order.
+    pub fn fx_reroute(&self) {
+        let mut l = self.fx_list.borrow_mut();
+        let mut moved = false;
+        for (&layer, f) in l.layers.iter_mut() {
+            let staged = self.fx_staged(f.origin, f.size);
+            if staged != f.staged {
+                if f.staged {
+                    self.stage.fx_hide(layer);
+                }
+                f.staged = staged;
+                moved = true;
+            }
+        }
+        if !moved {
+            return;
+        }
+        l.dirty = true;
+        // Show every surface again bottom → top: those that moved out of her window land in
+        // their place among the ones already up (a mode switch is rare).
+        for (layer, z) in l.order() {
+            if let Some(f) = l.layers.get(&layer).filter(|f| f.staged) {
+                self.stage.fx_show(layer, f.rgb, f.origin, f.size, Some(&f.rects), z).ok();
+            }
+        }
+        self.stage.flush();
     }
 
     /// While a press lasts her input region must cover her window (`Caps::implicit_grab` off).
@@ -306,21 +400,24 @@ impl Os {
         !self.caps.implicit_grab
     }
 
-    /// A redraw is a full present (`Caps::costly_redraw`): steps that can wait ride other redraws.
+    /// Effect steps that can wait ride redraws that happen anyway: a redraw is a full present
+    /// (`Caps::costly_redraw`), or the effects are painted in her window (`fx_in_scene`), so
+    /// each step on its own would be a redraw of her.
     pub fn redraw_costly(&self) -> bool {
-        self.caps.costly_redraw
+        self.caps.costly_redraw || self.fx_in_scene()
     }
 
-    /// Effect layers are painted in her window (by her view, from `fx_scene`), not by the server.
+    /// Effect layers may show in her window (her view paints them, `paint_fx`): the backend
+    /// has no surfaces for them, or a compositor blends her (`fx_staged`).
     pub fn fx_in_scene(&self) -> bool {
-        !self.caps.fx_layers
+        !self.caps.fx_layers || self.composited()
     }
 
     /// Paint the in-scene effect layers below her body (`under`) or above it, bottom → top,
     /// in her window (where `move_to` put it; `sf` device px per logical px). Nothing when the
     /// server paints them. Painting the ones above her marks the list clean.
     pub fn paint_fx(&self, window: &mut Window, under: bool, sf: f32) {
-        if self.caps.fx_layers {
+        if !self.fx_in_scene() {
             return;
         }
         let mut l = self.fx_list.borrow_mut();
@@ -331,6 +428,12 @@ impl Os {
         if !under {
             l.dirty = false;
         }
+    }
+
+    /// What her window paints of the effect layers (window-local px, bottom → top).
+    #[cfg(test)]
+    pub(super) fn fx_scene(&self, under: bool) -> Vec<((i32, i32, i32, i32), u32)> {
+        self.fx_list.borrow().scene(under, self.body_at.get())
     }
 
     /// In-scene effect layers changed since the last call: her window needs a frame.
@@ -745,29 +848,55 @@ mod tests {
     #[test]
     fn fx_list_stacks_like_a_server() {
         let mut l = FxList::default();
-        l.show(1, 0xff0000, (100, 100), Some(&[(0, 0, 4, 10)]), FxZ::Top);
-        l.show(2, 0x660000, (100, 100), Some(&[(0, 0, 8, 10)]), FxZ::Below(1));
-        l.show(3, 0x111111, (90, 120), Some(&[(0, 0, 50, 3)]), FxZ::UnderBody);
-        l.show(4, 0x00ff00, (0, 0), Some(&[(1, 1, 1, 1)]), FxZ::Below(9));
+        let show = |l: &mut FxList, layer, rgb, o, r: Option<&[ShapeRect]>, z| l.show(layer, rgb, o, (60, 60), r, z, false);
+        show(&mut l, 1, 0xff0000, (100, 100), Some(&[(0, 0, 4, 10)]), FxZ::Top);
+        show(&mut l, 2, 0x660000, (100, 100), Some(&[(0, 0, 8, 10)]), FxZ::Below(1));
+        show(&mut l, 3, 0x111111, (90, 120), Some(&[(0, 0, 50, 3)]), FxZ::UnderBody);
+        show(&mut l, 4, 0x00ff00, (0, 0), Some(&[(1, 1, 1, 1)]), FxZ::Below(9));
         let over: Vec<u32> = l.scene(false, (100, 100)).iter().map(|q| q.1).collect();
         assert_eq!(over, [0x660000, 0xff0000, 0x00ff00], "glow below the line; below a missing layer = on top");
         assert_eq!(l.scene(true, (100, 100)), [((-10, 20, 50, 3), 0x111111)], "window-local, under her body");
-        l.show(1, 0xff0000, (110, 100), None, FxZ::Top);
+        show(&mut l, 1, 0xff0000, (110, 100), None, FxZ::Top);
         assert_eq!(l.scene(false, (100, 100)).last(), Some(&((10, 0, 4, 10), 0xff0000)), "None keeps the rects, moves the layer");
         // A tick sets the same pair again (the core on top, its glow below it): no frame.
-        l.show(2, 0x660000, (100, 100), Some(&[(0, 0, 8, 10)]), FxZ::Below(1));
+        show(&mut l, 2, 0x660000, (100, 100), Some(&[(0, 0, 8, 10)]), FxZ::Below(1));
         l.dirty = false;
-        l.show(1, 0xff0000, (110, 100), None, FxZ::Top);
-        l.show(2, 0x660000, (100, 100), Some(&[(0, 0, 8, 10)]), FxZ::Below(1));
+        show(&mut l, 1, 0xff0000, (110, 100), None, FxZ::Top);
+        show(&mut l, 2, 0x660000, (100, 100), Some(&[(0, 0, 8, 10)]), FxZ::Below(1));
         assert!(!l.dirty, "the same layers set again need no frame");
-        l.show(2, 0x660000, (101, 100), None, FxZ::Below(1));
+        show(&mut l, 2, 0x660000, (101, 100), None, FxZ::Below(1));
         assert!(l.dirty, "moved");
         l.dirty = false;
-        l.hide(7);
+        assert_eq!(l.hide(7), None);
         assert!(!l.dirty, "hiding a layer that isn't up changes nothing");
-        l.hide(2);
+        assert_eq!(l.hide(2), Some(false));
         assert!(l.dirty && l.scene(false, (0, 0)).len() == 2);
         l.clear();
         assert!(l.scene(false, (0, 0)).is_empty() && l.scene(true, (0, 0)).is_empty());
+    }
+
+    /// Layers on surfaces of their own are kept in the stacking order but never paint in her
+    /// window, and never cost her a frame; one moving into or out of her window does.
+    #[test]
+    fn fx_list_staged_layers_stay_out_of_her_window() {
+        let mut l = FxList::default();
+        assert_eq!(l.show(0, 0xff0000, (0, 0), (900, 40), Some(&[(0, 0, 900, 4)]), FxZ::Top, true), None);
+        assert_eq!(l.show(1, 0xffc2e2, (120, 130), (10, 10), Some(&[(4, 0, 2, 10), (0, 4, 10, 2)]), FxZ::Top, true), None);
+        assert!(!l.dirty && l.scene(false, (100, 100)).is_empty(), "staged: nothing for her window");
+        assert_eq!(l.show(1, 0xffc2e2, (121, 130), (10, 10), None, FxZ::Top, true), Some(true));
+        assert!(!l.dirty, "a staged layer moving costs her no frame");
+        // Into her window (a compositor came): its rects come along, and she needs a frame.
+        assert_eq!(l.show(1, 0xffc2e2, (121, 130), (10, 10), None, FxZ::Top, false), Some(true));
+        assert!(l.dirty);
+        assert_eq!(l.scene(false, (100, 100)), [((25, 30, 2, 10), 0xffc2e2), ((21, 34, 10, 2), 0xffc2e2)]);
+        l.dirty = false;
+        // Out again: gone from her window, and she needs a frame to drop it.
+        assert_eq!(l.show(1, 0xffc2e2, (121, 130), (10, 10), None, FxZ::Top, true), Some(false));
+        assert!(l.dirty && l.scene(false, (100, 100)).is_empty());
+        assert_eq!(l.order(), [(0, FxZ::Top), (1, FxZ::Top)], "the order is kept across where they show");
+        l.dirty = false;
+        assert_eq!(l.hide(0), Some(true));
+        l.clear();
+        assert!(!l.dirty, "dropping staged layers costs her no frame");
     }
 }
