@@ -12,6 +12,8 @@ use std::time::{Duration, Instant};
 
 /// How far along a window top she shifts to lie down on it (logical px).
 const LIE_SLIDE: f32 = 260.0;
+/// Woken lying on a window top: she sits up there this long before any move.
+pub(super) const SIT_UP: Duration = Duration::from_millis(600);
 
 /// Which arrival sequence a teleport lands with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,6 +41,8 @@ pub(super) struct ArriveState {
     /// Napping since (the brain's `napping`), and asleep on her side.
     nap_since: Option<Instant>,
     pub deep: bool,
+    /// He put her down while she slept: no slide along the top when the nap deepens.
+    placed: bool,
     /// The last air kiss, and its hearts' start.
     kissed: Option<Instant>,
     hearts_at: Option<Instant>,
@@ -139,6 +143,75 @@ impl Avatar {
         self.arrive.launch_wait
     }
 
+    // ---- asleep ------------------------------------------------------------------------------
+
+    /// Asleep: the session's Sleepy, or the brain's away nap. Nothing moves her on her own
+    /// (the brain's `asleep`); he can still carry her, and she sleeps where he puts her.
+    pub(super) fn asleep(&self) -> bool {
+        self.mood == crate::anim::Mood::Sleepy || self.brain.as_ref().is_some_and(|h| h.brain.mode_key() == "napping")
+    }
+
+    /// He woke her (the field, the Line, $mod+c, talking; a summon): out of Sleepy, the
+    /// stand-up first (`set_mood` plays Sleepy's exit and holds moves until it ends). The
+    /// session's quiet clock starts again. Compacting keeps her Sleepy (the session's own).
+    pub(super) fn wake_up(&mut self, why: &str, now: Instant) {
+        use crate::anim::Mood;
+        if self.mood != Mood::Sleepy {
+            return;
+        }
+        if let Some(s) = &mut self.session {
+            s.link.wake(now);
+        }
+        self.sync_body(now);
+        let held = self.session.as_ref().and_then(|s| s.shown.as_ref()).is_some_and(|b| b.mood == Mood::Sleepy);
+        if self.mood == Mood::Sleepy && !held {
+            // A mood set by hand (`mood sleepy`, no session): Idle.
+            self.set_mood(Mood::Idle, now);
+        }
+        if self.mood != Mood::Sleepy {
+            elog!("synaps-avatar: woken ({why}) at {} ms", self.t_start.elapsed().as_millis());
+        }
+    }
+
+    /// The stand-up is still playing.
+    pub(super) fn waking(&self, now: Instant) -> bool {
+        self.waking_until.is_some_and(|w| w > now)
+    }
+
+    /// Landed from a drop or a throw: asleep, she stays there (no slide when the nap deepens).
+    pub(super) fn arrive_placed(&mut self) {
+        if self.asleep() {
+            self.arrive.placed = true;
+        }
+    }
+
+    /// The nap's stand-up (on the floor), moves held until it ends.
+    pub(super) fn play_nap_wake(&mut self, now: Instant) {
+        let wake = self.pack.flatten(&self.pack.behaviour.brain.nap_wake.clone());
+        if wake.is_empty() {
+            return;
+        }
+        let ms: u64 = wake.iter().map(|s| s.1 as u64).sum();
+        self.anim.play(wake, now);
+        self.waking_until = Some(now + Duration::from_millis(ms));
+    }
+
+    /// $mod+c woke her: she comes to the Line's edge once she stands.
+    pub(super) fn step_fetch(&mut self, now: Instant) -> bool {
+        let Some((at, o)) = self.fetch_after else { return false };
+        if at > now {
+            return false;
+        }
+        self.fetch_after = None;
+        if self.rag.is_some() || self.hidden || self.line.is_none() || self.teleport.is_some() {
+            return false;
+        }
+        self.brain_cancel_move();
+        self.start_teleport(o, Placement::Ground, now);
+        self.arrive_with(ArriveKind::Summon);
+        true
+    }
+
     // ---- the deep nap -----------------------------------------------------------------------
 
     fn nap_deep_after(&self) -> Option<Duration> {
@@ -162,21 +235,26 @@ impl Avatar {
                 false
             }
             (false, Some(_)) => {
+                // (On the floor the nap's pose ended with the brain's Pose(None): the
+                // stand-up played there, before any move in the same decision.)
                 self.arrive.nap_since = None;
+                self.arrive.placed = false;
                 if std::mem::take(&mut self.arrive.deep) {
+                    let lying = self.perch_sleep_frame(crate::anim::Mood::Sleepy).is_some();
                     self.relayer(now);
                     if self.standing() {
-                        let wake = self.pack.flatten(&self.pack.behaviour.brain.nap_wake.clone());
-                        if !wake.is_empty() {
-                            self.anim.play(wake, now);
-                        }
+                        self.play_nap_wake(now);
+                    } else if lying {
+                        self.waking_until = Some(now + SIT_UP);
                     }
                 }
                 true
             }
             (true, Some(t0)) if !self.arrive.deep && self.nap_deep_after().is_some_and(|d| now >= t0 + d) => {
                 self.arrive.deep = true;
-                self.slide_to_lie();
+                if !self.arrive.placed {
+                    self.slide_to_lie();
+                }
                 self.relayer(now);
                 true
             }

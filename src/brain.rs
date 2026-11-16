@@ -94,6 +94,14 @@ pub enum Touch {
     Menu,
 }
 
+impl Touch {
+    /// Him handling her (a pat, a drag, the menu) doesn't wake her; talking to her does (the
+    /// field, the Line, the chip, $mod+c, an answer).
+    pub fn wakes(self) -> bool {
+        !matches!(self, Touch::Headpat | Touch::DragStart | Touch::Menu)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SummonKind {
     Prompt(u64),
@@ -204,8 +212,8 @@ pub enum BrainEvent {
     /// Released as a fling (ragdoll, R-P3: the view sends these in round B).
     #[cfg_attr(not(test), allow(dead_code))]
     Flung { speed: f32 },
-    #[allow(dead_code)]
-    Landed { hard: bool },
+    /// A drop or a throw settled; `ground`: on the floor (else a window top).
+    Landed { hard: bool, ground: bool },
     Arrived(Arrived),
     /// The view couldn't do the move: nothing fits, or it is busy/gated right now. `why`:
     /// the plan's rule.
@@ -320,6 +328,8 @@ pub struct Senses {
     pub placement: PlaceKind,
     /// He is typing fast (input every second or so, the pointer still): only micro-hops.
     pub typing: bool,
+    /// She is asleep (the session's Sleepy): nothing moves her on her own until she wakes.
+    pub asleep: bool,
 }
 
 // ---- tuning ------------------------------------------------------------------------------
@@ -390,6 +400,11 @@ pub struct Tuning {
     pub follow_delay_s: (f64, f64),
     /// Idle this long: her roams explore (any monitor).
     pub explore_idle_s: f64,
+    /// Woken (Sleepy over, the nap over): no move of her own for this long (she just stood up).
+    pub wake_grace_s: f64,
+    /// Input this soon after he handled her while she naps (a drag, a pat) is that handling,
+    /// not him being back.
+    pub handled_s: f64,
 }
 
 impl Tuning {
@@ -439,6 +454,8 @@ impl Tuning {
             close_teleport_p: 0.55,
             follow_delay_s: (0.8, 2.0),
             explore_idle_s: 120.0,
+            wake_grace_s: 20.0,
+            handled_s: 10.0,
         }
     }
 }
@@ -651,6 +668,10 @@ pub struct Brain {
     force_seek: bool,
     hidden: bool,
     napping_pose: bool,
+    /// The last wake-up (Sleepy or the nap over): the grace runs from here.
+    woke_at: Option<f64>,
+    /// The last time he handled her while she slept (a drag, a pat, a landing).
+    handled_at: Option<f64>,
     pub approaches: Bag<Approach>,
     pub arrivals: Bag<Arrival>,
     pub emotes: Bag<usize>,
@@ -712,6 +733,8 @@ impl Brain {
             force_seek: false,
             hidden: false,
             napping_pose: false,
+            woke_at: None,
+            handled_at: None,
             approaches: Bag::default(),
             arrivals: Bag::default(),
             emotes: Bag::default(),
@@ -760,12 +783,12 @@ impl Brain {
     // ---- drives ----------------------------------------------------------------------
 
     fn attn_rate(&self) -> f64 {
-        let grows = self.present && !self.mode.active() && self.mode != Mode::Napping;
+        let grows = self.present && !self.mode.active() && self.mode != Mode::Napping && !self.sensed.asleep;
         if grows { 1.0 / self.tuning.attn_fill_s } else { 0.0 }
     }
 
     fn roam_rate(&self) -> f64 {
-        if self.present && self.mode == Mode::Passive { 1.0 / self.t_roam } else { 0.0 }
+        if self.present && self.mode == Mode::Passive && !self.sensed.asleep { 1.0 / self.t_roam } else { 0.0 }
     }
 
     fn attn_at(&self, t: f64) -> f64 {
@@ -805,6 +828,38 @@ impl Brain {
     /// Moves may happen (rules 1, 6, 7 and on/off; Busy separately).
     fn gate_open(&self, t: f64) -> bool {
         self.enabled && !self.dnd(t) && !self.sensed.fullscreen && !self.hidden && self.present
+    }
+
+    /// Asleep: the session's Sleepy or the away nap. Nothing moves her on her own.
+    fn asleep(&self) -> bool {
+        self.sensed.asleep || self.mode == Mode::Napping
+    }
+
+    /// Asleep, or just woken (the grace): her own moves wait.
+    fn resting(&self, t: f64) -> bool {
+        self.asleep() || self.woke_at.is_some_and(|w| t + EPS < w + self.tuning.wake_grace_s)
+    }
+
+    /// Just woken: the grace from now (the stand-up plays first, then she stays a moment).
+    fn woke(&mut self, t: f64, why: &str) {
+        self.woke_at = Some(t);
+        self.next_micro = self.next_micro.max(t + self.tuning.wake_grace_s);
+        self.note(t, format!("awake ({why})"));
+    }
+
+    /// The nap is over (he is back, he talked to her): up, and the grace.
+    fn end_nap(&mut self, t: f64, why: &str) {
+        if self.mode != Mode::Napping {
+            return;
+        }
+        self.mode = Mode::Passive;
+        self.handled_at = None;
+        if std::mem::take(&mut self.napping_pose) {
+            self.emit(t, Intent::Pose(None));
+        }
+        if !self.sensed.asleep {
+            self.woke(t, why);
+        }
     }
 
     /// The moves of the rolling hour, weighted (a small hop counts `hop_weight`).
@@ -890,6 +945,9 @@ impl Brain {
                 }
                 if self.roam >= 1.0 - EPS {
                     take(self.cap_free_at(t, 1.0));
+                }
+                if let Some(w) = self.woke_at {
+                    take(w + self.tuning.wake_grace_s);
                 }
                 if self.present {
                     take(self.next_micro);
@@ -977,6 +1035,21 @@ impl Brain {
         if let Some(s) = senses {
             self.sensed.fullscreen = s.fullscreen;
             self.sensed.fullscreen_here = s.fullscreen_here;
+            // Asleep too: a roam due between two polls must not walk her off in her sleep.
+            if self.sensed.asleep != s.asleep {
+                self.sensed.asleep = s.asleep;
+                if s.asleep {
+                    self.note(t, "asleep".into());
+                    self.focus_at = None;
+                    self.follow_at = None;
+                    // A visit of her own ends (a summon still goes: the session wakes her).
+                    if matches!(self.mode, Mode::Bidding { .. } | Mode::Seeking { why: Why::Attention, .. }) {
+                        self.end_episode(t, false);
+                    }
+                } else if self.mode != Mode::Napping {
+                    self.woke(t, "sleepy over");
+                }
+            }
         }
         // Poll: the only place the other senses are read.
         if self.next_poll <= t + EPS
@@ -1002,6 +1075,8 @@ impl Brain {
         {
             self.end_episode(t, false);
             self.mode = Mode::Napping;
+            self.focus_at = None;
+            self.follow_at = None;
             if self.sensed.placement == PlaceKind::Ground {
                 self.napping_pose = true;
                 self.emit(t, Intent::Pose(Some(RestPose::Nap)));
@@ -1015,6 +1090,11 @@ impl Brain {
 
     fn poll(&mut self, t: f64) {
         let idle = self.sensed.idle_s;
+        // Carrying her while she naps is handling her, not him being back.
+        if self.asleep() && self.sensed.busy.contains(&"drag") {
+            self.handled_at = Some(t);
+        }
+        let handled = self.mode == Mode::Napping && self.handled_at.is_some_and(|h| t - idle <= h + self.tuning.handled_s);
         if self.present && idle >= self.tuning.away_after_s {
             self.advance(t);
             self.present = false;
@@ -1023,19 +1103,14 @@ impl Brain {
             if self.mode.active() {
                 self.end_episode(t, true);
             }
-        } else if !self.present && idle < self.tuning.back_idle_s {
+        } else if !self.present && idle < self.tuning.back_idle_s && !handled {
             self.advance(t);
             self.present = true;
             self.away_since = None;
             self.no_bid_before = self.no_bid_before.max(t + self.tuning.back_grace_s);
             self.next_micro = t + self.micro_gap();
             self.note(t, "back".into());
-            if self.mode == Mode::Napping {
-                self.mode = Mode::Passive;
-                if std::mem::take(&mut self.napping_pose) {
-                    self.emit(t, Intent::Pose(None));
-                }
-            }
+            self.end_nap(t, "he is back");
         }
         // Fullscreen on her monitor, hide mode.
         let want = self.settings.fullscreen == Fullscreen::Hide && self.sensed.fullscreen_here;
@@ -1111,7 +1186,7 @@ impl Brain {
                     // She left his window to sulk and sits it out: no move now.
                     self.far_next = true;
                     self.note(t, "sulk over: stays low, the next roam goes far".into());
-                } else if self.gate_open(t) {
+                } else if self.gate_open(t) && !self.asleep() {
                     self.record_move(t, "sulk_far");
                     let arrivals = self.passive_arrivals();
                     self.emit(t, Intent::Move(MovePlan { goal: Goal::Passive { far: true }, why: "sulk_far", arrivals }));
@@ -1158,7 +1233,8 @@ impl Brain {
         // Stale reaction beats (she was busy elsewhere meanwhile) are dropped.
         let focus_due = self.focus_at.filter(|&f| t + EPS >= f).inspect(|_| self.focus_at = None);
         let follow_due = self.follow_at.filter(|&f| t + EPS >= f).inspect(|_| self.follow_at = None);
-        if self.mode != Mode::Passive || !self.gate_open(t) {
+        // Asleep (or just up): none of her own moves (summons above still go).
+        if self.mode != Mode::Passive || !self.gate_open(t) || self.resting(t) {
             return;
         }
         let busy = !self.sensed.busy.is_empty();
@@ -1326,8 +1402,9 @@ impl Brain {
         if !self.covering {
             return true;
         }
-        // Busy (a reaction, a bubble) doesn't hold it: the view runs it right after.
-        if self.sensed.fullscreen || self.hidden {
+        // Busy (a reaction, a bubble) doesn't hold it: the view runs it right after. Asleep
+        // does: she isn't walked off in her sleep.
+        if self.sensed.fullscreen || self.hidden || self.asleep() {
             return false;
         }
         self.covering = false;
@@ -1407,16 +1484,14 @@ impl Brain {
             BrainEvent::Interaction(touch) => {
                 self.note(t, format!("touch {touch:?}"));
                 self.last_interaction = Some(t);
-                if !self.present || self.mode == Mode::Napping {
+                if self.asleep() && !touch.wakes() {
+                    // A pat, a drag, the menu: she sleeps on (wherever he puts her).
+                    self.handled_at = Some(t);
+                } else if !self.present || self.mode == Mode::Napping {
                     // He is obviously here.
                     self.present = true;
                     self.away_since = None;
-                    if self.mode == Mode::Napping {
-                        self.mode = Mode::Passive;
-                        if std::mem::take(&mut self.napping_pose) {
-                            self.emit(t, Intent::Pose(None));
-                        }
-                    }
+                    self.end_nap(t, "touch");
                 }
                 let answered = matches!(touch, Touch::Typing | Touch::Submit | Touch::PromptAnswer);
                 if self.mode.active() || matches!(self.mode, Mode::Sulking { .. }) {
@@ -1443,6 +1518,11 @@ impl Brain {
                 }
                 self.roam *= 0.5;
             }
+            BrainEvent::Flung { speed } if self.asleep() => {
+                // Thrown in her sleep: she sleeps where she lands (no sulk, no far move).
+                self.note(t, format!("flung {speed:.0} px/s (asleep)"));
+                self.handled_at = Some(t);
+            }
             BrainEvent::Flung { speed } => {
                 let offended = self.last_active_arrival.is_some_and(|a| t - a <= self.tuning.offense_window_s);
                 self.note(t, format!("flung {speed:.0} px/s{}", if offended { " (offended)" } else { "" }));
@@ -1455,7 +1535,21 @@ impl Brain {
                 }
                 self.emit(t, Intent::Save);
             }
-            BrainEvent::Landed { hard } => self.note(t, format!("landed{}", if hard { " hard" } else { "" })),
+            BrainEvent::Landed { hard, ground } => {
+                self.note(t, format!("landed{}{}", if hard { " hard" } else { "" }, if ground { "" } else { " on a window" }));
+                if self.asleep() {
+                    // He put her there: she sleeps there (never moved off his window for it).
+                    self.handled_at = Some(t);
+                    self.covering = false;
+                    if self.mode == Mode::Napping {
+                        // Carrying her stood her up: the nap's pose again on the floor.
+                        self.napping_pose = ground;
+                        if ground {
+                            self.emit(t, Intent::Pose(Some(RestPose::Nap)));
+                        }
+                    }
+                }
+            }
             BrainEvent::Arrived(a) => {
                 self.note(
                     t,
@@ -1550,13 +1644,16 @@ impl Brain {
         let typing = self.sensed.typing;
         self.note(t, format!("screen {s:?}{}{}", if busy { " busy" } else { "" }, if typing { " typing" } else { "" }));
         let calm = self.gate_open(t) && !busy;
+        // Asleep (or just up): no reaction to the screen; only her perch closing (or leaving
+        // with the workspace) still moves her, as when awake.
+        let awake = !self.resting(t);
         let passive = self.mode == Mode::Passive;
         let since = |l: Option<f64>, gap: f64| l.is_none_or(|l| t - l >= gap - EPS);
         match s {
             Screen::Focus => {
                 // A newer focus change replaces the hop waiting for the last one.
                 self.focus_at = None;
-                if calm && passive && !typing && since(self.last_focus, self.tuning.focus_gap_s) && (self.rng.range(0.0, 1.0) as f64) < self.tuning.focus_p {
+                if calm && awake && passive && !typing && since(self.last_focus, self.tuning.focus_gap_s) && (self.rng.range(0.0, 1.0) as f64) < self.tuning.focus_p {
                     let (lo, hi) = self.tuning.focus_delay_s;
                     let at = t + self.rng.range(lo as f32, hi as f32) as f64;
                     self.focus_at = Some(at);
@@ -1565,7 +1662,7 @@ impl Brain {
             }
             Screen::PerchDragged { speed } => {
                 let w = self.tuning.hop_weight;
-                if speed >= self.tuning.drag_speed && calm && passive && self.hops_on() && since(self.last_drag, self.tuning.drag_gap_s) && self.cap_ok(t, w) {
+                if speed >= self.tuning.drag_speed && calm && awake && passive && self.hops_on() && since(self.last_drag, self.tuning.drag_gap_s) && self.cap_ok(t, w) {
                     self.last_drag = Some(t);
                     self.record_move(t, "startle_drag");
                     self.emit(t, Intent::Move(MovePlan { goal: Goal::Hop { kind: HopKind::Startle, away: false }, why: "startle_drag", arrivals: vec![Arrival::Hop] }));
@@ -1585,13 +1682,13 @@ impl Brain {
                 }
             }
             Screen::CursorNear => {
-                if calm && self.mode != Mode::Napping && since(self.last_look, self.tuning.look_gap_s) {
+                if calm && awake && since(self.last_look, self.tuning.look_gap_s) {
                     self.last_look = Some(t);
                     self.emit(t, Intent::React(React::Look));
                 }
             }
             Screen::CursorSwipe { speed } => {
-                if speed >= self.tuning.swipe_speed && calm && !self.mode.active() && since(self.last_startle, self.tuning.startle_gap_s) {
+                if speed >= self.tuning.swipe_speed && calm && awake && !self.mode.active() && since(self.last_startle, self.tuning.startle_gap_s) {
                     self.last_startle = Some(t);
                     // A startle counts as a look too (no look right after).
                     self.last_look = Some(t);
@@ -1599,7 +1696,7 @@ impl Brain {
                 }
             }
             Screen::CursorHover => {
-                if calm && self.mode != Mode::Napping && since(self.last_hover, self.tuning.hover_gap_s) {
+                if calm && awake && since(self.last_hover, self.tuning.hover_gap_s) {
                     self.last_hover = Some(t);
                     let w = self.tuning.hop_weight;
                     let dodge = passive && self.hops_on() && self.out_of_the_way() && self.cap_ok(t, w) && (self.rng.range(0.0, 1.0) as f64) < self.tuning.dodge_p;
@@ -1621,7 +1718,7 @@ impl Brain {
                     } else {
                         self.emit(t, Intent::React(React::Fall));
                     }
-                } else if away && calm && passive {
+                } else if away && calm && awake && passive {
                     let (lo, hi) = self.tuning.follow_delay_s;
                     self.follow_at = Some(t + self.rng.range(lo as f32, hi as f32) as f64);
                 }
@@ -1724,6 +1821,8 @@ impl Brain {
             "suppressed_by": suppressed,
             "busy": self.sensed.busy,
             "present": self.present,
+            "asleep": self.asleep(),
+            "wake_grace_left_s": self.woke_at.map(|w| r(w + self.tuning.wake_grace_s - now)).filter(|&g| g > 0.0),
             "idle_s": r(self.sensed.idle_s),
             "near": self.sensed.near,
             "covering": self.covering,
@@ -2685,5 +2784,181 @@ mod tests {
                 assert!(w[1].0 - w[0].0 >= 480.0 - 1e-6, "seed {seed}: visits {:.0} s apart", w[1].0 - w[0].0);
             }
         }
+    }
+
+    // ---- asleep (Haseeb: "when she sleeps, she still walks"; "if I place her somewhere, she
+    // stays there till she isn't sleeping") --------------------------------------------------
+
+    /// He works on while she sleeps: focus changes, workspace switches, the pointer at her,
+    /// her perch dragged.
+    fn busy_screen(from: f64, to: f64) -> Vec<(f64, BrainEvent)> {
+        let mut ev = Vec::new();
+        let mut t = from;
+        while t < to {
+            ev.push(screen(t, Screen::Focus));
+            ev.push(screen(t + 5.0, Screen::CursorHover));
+            ev.push(screen(t + 10.0, Screen::CursorNear));
+            ev.push(screen(t + 15.0, Screen::CursorSwipe { speed: 5000.0 }));
+            ev.push(screen(t + 20.0, Screen::Workspace { away: true, stranded: false }));
+            ev.push(screen(t + 25.0, Screen::PerchDragged { speed: 5000.0 }));
+            t += 60.0;
+        }
+        ev
+    }
+
+    #[test]
+    fn asleep_an_hour_without_a_move_of_her_own() {
+        let sleepy = |t: f64| Senses { asleep: true, placement: PlaceKind::Ground, ..here(t) };
+        let awake = |t: f64| Senses { placement: PlaceKind::Ground, ..here(t) };
+        for seed in 0..40 {
+            // Awake, the same hour has roams, hops, bids and reactions (the test means something).
+            let mut b = brain(seed);
+            let r = run(&mut b, 0.0, 3600.0, true, &awake, &busy_screen(30.0, 3600.0));
+            assert!(moves(&r).len() >= 5 && !reacts(&r).is_empty(), "seed {seed}: awake {:?}", whys(&r));
+            // Asleep (from the first tick): nothing at all, ticked every second.
+            let mut b = brain(seed);
+            let r = run(&mut b, 0.0, 3600.0, true, &sleepy, &busy_screen(30.0, 3600.0));
+            assert!(moves(&r).is_empty(), "seed {seed}: moved in her sleep {:?}", whys(&r));
+            assert!(reacts(&r).is_empty() && !r.log.iter().any(|(_, i)| matches!(i, Intent::Emote(_))), "seed {seed}: {:?}", r.log);
+            // The drives slept too: no visit stored up for the moment she wakes.
+            assert!(b.attn_at(3600.0) < 1e-9 && b.roam_at(3600.0) < 1.0, "seed {seed}");
+            assert_eq!(b.snapshot(3600.0)["asleep"], true);
+        }
+    }
+
+    #[test]
+    fn asleep_a_due_roam_waits_even_between_polls() {
+        // She falls asleep 1 s before her roam is due (polls 15 s apart): it doesn't go.
+        for seed in 0..40 {
+            let mut b = calm(seed);
+            let due = b.t + (1.0 - b.roam) * b.t_roam;
+            let s = move |t: f64| Senses { asleep: t >= due - 1.0, placement: PlaceKind::Ground, ..here(t) };
+            let r = run(&mut b, 0.0, due + 600.0, false, &s, &[]);
+            assert!(moves(&r).iter().all(|m| m.0 < due - 1.0), "seed {seed}: {:?} (due {due:.1})", whys(&r));
+        }
+    }
+
+    #[test]
+    fn asleep_a_closed_perch_still_rescues_or_falls() {
+        let perch = |t: f64| Senses { asleep: true, placement: PlaceKind::Perch, ..here(t) };
+        let mut tele = 0;
+        for seed in 0..400 {
+            let mut b = calm(seed);
+            let r = run(&mut b, 0.0, 41.0, false, &perch, &[screen(40.0, Screen::PerchClosed { target: true })]);
+            match (whys(&r).as_slice(), reacts(&r).as_slice()) {
+                ([(40.0, "perch_closed")], []) => tele += 1,
+                ([], [(40.0, React::Fall)]) => {}
+                other => panic!("seed {seed}: {other:?}"),
+            }
+            // Her perch left with the workspace: she follows him (or falls), asleep or not.
+            let mut b = calm(seed);
+            let r = run(&mut b, 0.0, 41.0, false, &perch, &[screen(40.0, Screen::Workspace { away: true, stranded: true })]);
+            assert_eq!(whys(&r), vec![(40.0, "workspace")], "seed {seed}");
+        }
+        assert!((150..=290).contains(&tele), "teleports {tele}/400");
+    }
+
+    #[test]
+    fn asleep_a_summon_still_goes() {
+        // The session's news wakes her (the view stands her up first); the brain doesn't hold it,
+        // even on senses a poll old.
+        let sleepy = |t: f64| Senses { asleep: true, ..here(t) };
+        for seed in 0..40 {
+            for sig in [SessionSignal::Done, SessionSignal::Prompt(7), SessionSignal::Error { own_abort: false }] {
+                let mut b = calm(seed);
+                let r = run(&mut b, 0.0, 700.0, false, &sleepy, &[(650.0, BrainEvent::Session(sig))]);
+                assert_eq!(whys(&r), vec![(650.0, "summon")], "seed {seed} {sig:?}");
+            }
+            // A forced one too (`brain force summon`).
+            let mut b = calm(seed);
+            let r = run(&mut b, 0.0, 100.0, false, &sleepy, &[(50.0, BrainEvent::Control(Ctl::Force(Force::Summon)))]);
+            assert_eq!(whys(&r), vec![(50.0, "summon")], "seed {seed}");
+        }
+    }
+
+    #[test]
+    fn woken_she_stays_a_moment_then_lives_again() {
+        // Asleep until 1000, then awake: nothing of her own for the grace, then life.
+        for seed in 0..40 {
+            let mut b = brain(seed);
+            let s = |t: f64| Senses { asleep: t < 1000.0, placement: PlaceKind::Ground, ..here(t) };
+            let r = run(&mut b, 0.0, 2600.0, true, &s, &busy_screen(1000.0, 1100.0));
+            let m = whys(&r);
+            let grace = b.tuning.wake_grace_s;
+            assert!(m.iter().all(|x| x.0 >= 1000.0 + grace - 1e-6), "seed {seed}: {m:?}");
+            assert!(!m.is_empty(), "seed {seed}: life again after the grace");
+        }
+        // The decision log says so.
+        let mut b = brain(1);
+        let s = |t: f64| Senses { asleep: t < 100.0, ..here(t) };
+        run(&mut b, 0.0, 130.0, true, &s, &[]);
+        assert!(b.log().1.iter().any(|l| l.what == "asleep") && b.log().1.iter().any(|l| l.what == "awake (sleepy over)"));
+    }
+
+    #[test]
+    fn asleep_where_he_puts_her() {
+        // Sleepy: he carries her onto his window and throws her once more. No sulk, no far
+        // move, never moved off his window, not even after she wakes.
+        for seed in 0..40 {
+            let mut b = calm(seed);
+            b.last_active_arrival = Some(0.0);
+            let s = |t: f64| Senses { asleep: t < 600.0, placement: PlaceKind::Perch, busy: if (300.0..304.0).contains(&t) { vec!["drag"] } else { vec![] }, ..here(t) };
+            let ev = [
+                (300.0, BrainEvent::Interaction(Touch::DragStart)),
+                (303.0, BrainEvent::Flung { speed: 4000.0 }),
+                (304.0, BrainEvent::Landed { hard: true, ground: false }),
+            ];
+            b.covering = true;
+            let r = run(&mut b, 0.0, 600.0, false, &s, &ev);
+            assert!(moves(&r).is_empty() && b.mode_key() == "passive" && !b.far_next && !b.covering(), "seed {seed}: {:?}", whys(&r));
+            let r = run(&mut b, 600.0, 1400.0, false, &s, &[]);
+            assert!(whys(&r).iter().all(|x| !matches!(x.1, "covering" | "sulk_far")), "seed {seed}: {:?}", whys(&r));
+        }
+    }
+
+    #[test]
+    fn napping_where_he_puts_her() {
+        // Away from 100 s (idle), the nap at ~1005. At 1100 he carries her 4 s and walks off
+        // again; at 1500 he's back for real. Carrying her isn't him being back: she naps on,
+        // in the nap's pose where she landed, and nothing moves her until 1500.
+        for seed in 0..40 {
+            let mut b = brain(seed);
+            let idle = |t: f64| match t {
+                t if t < 100.0 => 0.0,
+                t if t < 1100.0 => t - 100.0,
+                t if t < 1106.0 => 0.0,
+                t if t < 1500.0 => t - 1106.0,
+                _ => 0.0,
+            };
+            let s = move |t: f64| Senses { idle_s: idle(t), placement: PlaceKind::Ground, busy: if (1100.0..1104.0).contains(&t) { vec!["drag"] } else { vec![] }, ..here(t) };
+            let ev = [
+                (1100.0, BrainEvent::Interaction(Touch::DragStart)),
+                (1104.0, BrainEvent::Landed { hard: false, ground: true }),
+                (1200.0, BrainEvent::Interaction(Touch::Headpat)),
+                (1250.0, BrainEvent::Interaction(Touch::Menu)),
+            ];
+            let mut ev = ev.to_vec();
+            ev.extend(busy_screen(1100.0, 1500.0));
+            let r = run(&mut b, 0.0, 1499.0, true, &s, &ev);
+            let poses: Vec<_> = r.log.iter().filter_map(|(t, i)| if let Intent::Pose(p) = i { Some((*t, *p)) } else { None }).collect();
+            assert_eq!(poses.iter().map(|p| p.1).collect::<Vec<_>>(), vec![Some(RestPose::Nap), Some(RestPose::Nap)], "seed {seed}: {poses:?}");
+            assert_eq!(poses[1].0, 1104.0, "the nap's pose again where she landed");
+            assert_eq!(b.mode_key(), "napping", "seed {seed}");
+            // (Away from the first poll with idle >= 300, t = 405: her life until then.)
+            assert!(moves(&r).iter().all(|m| m.0 <= 405.0), "seed {seed}: {:?}", whys(&r));
+            assert!(reacts(&r).is_empty(), "seed {seed}");
+            // Back for real: up at the next poll, then the grace.
+            let r = run(&mut b, 1499.0, 1700.0, true, &s, &[]);
+            let up = r.log.iter().find(|(_, i)| *i == Intent::Pose(None)).expect("up").0;
+            assert!((1500.0..=1515.0).contains(&up), "seed {seed}: up at {up}");
+            assert!(moves(&r).iter().all(|m| m.0 >= up + b.tuning.wake_grace_s - 1e-6), "seed {seed}: {:?}", whys(&r));
+        }
+        // Talking to her wakes her from the nap at once (a pat doesn't).
+        let mut b = brain(3);
+        let s = |t: f64| Senses { idle_s: if t < 100.0 { 0.0 } else { t - 100.0 }, placement: PlaceKind::Ground, ..here(t) };
+        let ev = [(1100.0, BrainEvent::Interaction(Touch::Headpat)), (1150.0, BrainEvent::Interaction(Touch::Typing))];
+        let r = run(&mut b, 0.0, 1151.0, false, &s, &ev);
+        let up: Vec<_> = r.log.iter().filter(|(_, i)| *i == Intent::Pose(None)).map(|x| x.0).collect();
+        assert_eq!(up, vec![1150.0]);
     }
 }

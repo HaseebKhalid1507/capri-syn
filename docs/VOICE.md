@@ -99,7 +99,7 @@ for speech. Setup: `tools/capri-voice-setup`, then `tools/systemd/capri-voice.se
   form factor says headphone/headset/earbud/hands-free) or speakers.
   - **Speakers: half-duplex.** The mic stays open but hears nothing from her first sentence of a reply to
     0.25 s after her last one (the gaps between her sentences included), so she can't answer herself.
-    `$mod+c`, the chord or a click stop her.
+    `$mod+c`, the chord or a tap on her body stop her (dragging, flinging or a headpat never does).
   - **Headphones: talking over her stops her** (Silero p ≥ 0.50 on 7 of the last 9 frames, ~0.3 s of
     his voice).
   - **The echo check** (a jack labelled Headphones may feed desk speakers): her first sentence is
@@ -108,7 +108,11 @@ for speech. Setup: `tools/capri-voice-setup`, then `tools/systemd/capri-voice.se
     the conversation (`HEARING MYSELF · TALK-OVER OFF`), and what the mic held is dropped. The sink and its
     port are read again at each of her sentences: one that changed and isn't headphones is speakers at
     once; another headphone one is observed again.
-  - **The echo guard**, both modes: an utterance whose words are ≥ 70 % what she said in the last 15 s
+  - **What stops her talking:** `$mod+c`, the toggle chord, Esc, a tap on her body, his voice over hers on
+  headphones, a new turn of his, or a guard (music, a prompt, a secret, his mic, fullscreen). Being
+  grabbed, dragged, flung, caught mid-air, petted on the head, startled, teleported or landing never
+  does: she keeps talking while she's moved.
+- **The echo guard**, both modes: an utterance whose words are ≥ 70 % what she said in the last 15 s
     is dropped (logged by length only).
 - **Replies to what arrives on its own** are spoken while he is quiet, and stay text while he is
   mid-utterance (`speak_unprompted`, below).
@@ -243,7 +247,7 @@ thresholds) was fitted on stock synthetic voices only (Kokoro packs, espeak-ng),
     unprompted speech in the last 60 s, or a reply that waited over 15 s for its turn;
   - voice is off, no sidecar is running, or the sidecar is too old to gate (fail closed).
 - Never a monologue: a reply to an event never cuts her off. It waits behind her last sentences, and at
-  most one waits: a newer one replaces it (the replaced one stays text). Hushing her (click, talk key, Esc)
+  most one waits: a newer one replaces it (the replaced one stays text). Hushing her (a tap on her body, talk key, Esc)
   drops the waiting one too. A new turn of his stops her at once.
 - These replies never pause or duck other audio, and there is no chime. **Events never open the mic.**
 - **Nothing she says is heard** (his spoken turns included) **with the screen locked or in a call**: the
