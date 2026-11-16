@@ -1885,6 +1885,8 @@ mod tests {
         seen: Vec<(u32, usize)>,
         rng: Rng,
         hops: Vec<Hop>,
+        /// What happened, in the live log's words (`brain move why=… goal=… spot=… a -> b`).
+        log: Vec<String>,
     }
 
     impl Desk {
@@ -1909,7 +1911,7 @@ mod tests {
                 }
             };
             let seen = i3.desk();
-            Desk { i3, b, her, asleep: false, t: 0.0, seen, rng: Rng::new(seed ^ 0x5157), hops: Vec::new() }
+            Desk { i3, b, her, asleep: false, t: 0.0, seen, rng: Rng::new(seed ^ 0x5157), hops: Vec::new(), log: Vec::new() }
         }
 
         fn senses(&self) -> crate::brain::Senses {
@@ -1969,12 +1971,32 @@ mod tests {
                         };
                         match resolve(&p.goal, &w, &mut self.rng) {
                             Ok(s) => {
+                                let mon = ["eDP", "DP-3"];
+                                self.log.push(format!(
+                                    "t={:6.2} brain move why={} goal={} spot={} {},{} -> {},{}  ({} -> {})",
+                                    self.t,
+                                    p.why,
+                                    match p.goal {
+                                        Goal::Follow => "follow",
+                                        Goal::FocusEdge => "focus_edge",
+                                        Goal::Rescue => "rescue",
+                                        _ => "other",
+                                    },
+                                    s.kind.key(),
+                                    self.her.anchor.0,
+                                    self.her.anchor.1,
+                                    s.anchor.0,
+                                    s.anchor.1,
+                                    mon[self.her.area],
+                                    mon[s.area]
+                                ));
                                 self.hops.push(Hop { t: self.t, why: p.why, from: (self.her.area, self.her.anchor), to: (s.area, s.anchor), kind: s.kind });
                                 self.her = s;
                                 let a = Arrived { approach: None, arrival: p.arrivals[0], covering: false, why: p.why };
                                 self.b.on_event(BrainEvent::Arrived(a), self.t);
                             }
                             Err(_) => {
+                                self.log.push(format!("t={:6.2} brain move why={} found no spot: stays", self.t, p.why));
                                 self.b.on_event(BrainEvent::MoveFailed { busy: false, why: p.why }, self.t);
                                 if self.perch_gone() {
                                     self.fall();
@@ -1982,7 +2004,10 @@ mod tests {
                             }
                         }
                     }
-                    Intent::React(React::Fall) => self.fall(),
+                    Intent::React(React::Fall) => {
+                        self.log.push(format!("t={:6.2} fall", self.t));
+                        self.fall();
+                    }
                     _ => {}
                 }
             }
@@ -2002,9 +2027,12 @@ mod tests {
             self.decide();
         }
 
-        /// He focuses another window on the monitor he is on (no switch).
+        /// He focuses another window on the monitor he is on (no switch: across monitors i3
+        /// would change the workspace too).
         fn focus(&mut self, id: u32) {
-            let w = self.i3.wins.iter().find(|w| w.1.id == id).unwrap().1;
+            self.log.push(format!("t={:6.2} he focuses window {id}", self.t));
+            let (ws, w) = *self.i3.wins.iter().find(|w| w.1.id == id).unwrap();
+            assert_eq!(usize::from(ws != 2), self.i3.on, "a focus change on his monitor");
             self.i3.cursor = w.center();
             self.feed(crate::brain::Screen::Focus);
             self.seen = self.i3.desk();
@@ -2014,6 +2042,7 @@ mod tests {
         /// (`PERCH_GONE_GRACE`), else the switch is looked at 450 ms on.
         fn switch(&mut self, ws: u8) {
             self.i3.switch(ws);
+            self.log.push(format!("t={:6.2} $mod+{ws}: eDP shows {}, DP-3 shows {}, he is on {}", self.t, self.i3.shown[0], self.i3.shown[1], ["eDP", "DP-3"][self.i3.on]));
             let until = self.t + 0.3;
             self.run_to(until);
             let after = self.i3.desk();
@@ -2115,6 +2144,47 @@ mod tests {
             d.assert_no_chain(seed);
             assert!(d.hops.iter().all(|h| h.from.0 == 0 && h.to.0 == 0), "seed {seed}: she stays on eDP {:?}", d.hops);
             assert!(d.relocations().iter().all(|h| h.why != "workspace"), "seed {seed}: {:?}", d.hops);
+        }
+    }
+
+    #[test]
+    fn i3_replay_his_session() {
+        // His evening as a script, through the real decision path; `cargo test i3_replay --
+        // --nocapture` prints the move log. She sits on eDP's lower tile (1437,818); he hops
+        // between the monitors; then he puts her on DP-3's floor and switches DP-3 under her.
+        for seed in 0..60 {
+            let mut d = Desk::new(seed, I3::bella(), Some(22), 1437);
+            for (t, ws) in [(50.0, 3), (80.0, 2), (95.0, 4), (105.0, 2)] {
+                d.run_to(t);
+                d.switch(ws);
+            }
+            d.run_to(110.0);
+            d.focus(21);
+            d.run_to(110.6);
+            d.switch(3);
+            d.run_to(140.0);
+            d.switch(2);
+            d.run_to(160.0);
+            let y = AREAS[1].bottom() - 12;
+            d.her = Spot { kind: SpotKind::Floor, anchor: (3300, y), body: boxes().stand.offset(3300, y), area: 1, approach: None, cover_pct: 0.0 };
+            d.log.push(format!("t={:6.2} he drops her on DP-3's floor at 3300,{y}", d.t));
+            for (t, ws) in [(170.0, 4), (190.0, 3), (210.0, 1), (230.0, 2), (245.0, 4)] {
+                d.run_to(t);
+                d.switch(ws);
+            }
+            d.run_to(270.0);
+            if seed == 0 {
+                println!("{}", d.log.join("\n"));
+            }
+            d.assert_no_chain(seed);
+            // On eDP until he moved her: not one move. On DP-3: moves only when DP-3 switched,
+            // and only on DP-3.
+            assert!(d.hops.iter().all(|h| h.t > 160.0 && h.why == "workspace" && h.from.0 == 1 && h.to.0 == 1), "seed {seed}: {:#?}", d.log);
+            // DP-3 to workspace 1 (a free window top there): she goes up on it in 0.8–2 s.
+            assert!(d.hops.iter().any(|h| (210.8..212.5).contains(&h.t) && h.kind == SpotKind::Edge { win: 12 }), "seed {seed}: {:#?}", d.log);
+            // Back on eDP, then DP-3 to 4 from there: her window top went with 1, she lands on
+            // DP-3's floor at once (4 has no free top).
+            assert!(d.hops.iter().any(|h| (245.0..245.5).contains(&h.t) && matches!(h.kind, SpotKind::Floor | SpotKind::FloorSit)), "seed {seed}: {:#?}", d.log);
         }
     }
 
