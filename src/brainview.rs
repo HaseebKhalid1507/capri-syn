@@ -546,7 +546,7 @@ impl Avatar {
         if self.reaction_until.is_some_and(|t| t > now) {
             v.push("reaction");
         }
-        if (self.teleport.is_some() && !self.arrive.launching) || self.fetch_after.is_some() || self.brain.as_ref().is_some_and(|h| h.flight.is_some() || h.moving()) {
+        if (self.teleport.is_some() && !self.arrive.launching) || self.brain.as_ref().is_some_and(|h| h.flight.is_some() || h.moving()) {
             v.push("teleport");
         }
         if self.music.is_some() {
@@ -598,6 +598,12 @@ impl Avatar {
     }
 
     /// Her work area (cut to the test arena), for clamping effects.
+    /// Her body box now (device px; the pose's mask box, as `places` sees her): what a panel
+    /// opens beside (`beside::place`).
+    pub(super) fn her_body(&self) -> WinRect {
+        self.her_spot(&[], &[]).body
+    }
+
     pub(super) fn her_area(&self) -> Option<WinRect> {
         let (areas, monitors) = self.arena_filter(
             self.x11.work_areas().iter().map(crate::platform::x11::Monitor::rect).collect(),
@@ -760,7 +766,6 @@ impl Avatar {
         if h.next_plan.is_some() {
             take(Some(now + Duration::from_millis(100)));
         }
-        take(self.fetch_after.map(|f| f.0));
         if h.fs == FsHide::Hiding {
             take(Some(now + FRAME_FAST));
         }
@@ -829,7 +834,6 @@ impl Avatar {
             self.play_emote(e, now);
             dirty = true;
         }
-        dirty |= self.step_fetch(now);
         let free = self.teleport.is_none() && self.rag.is_none() && !self.anim.busy() && !self.waking(now) && self.brain.as_ref().is_some_and(|h| h.flight.is_none() && !h.moving());
         if free && let Some(p) = self.brain.as_mut().and_then(|h| h.next_plan.take()) {
             self.brain_move(p, now);

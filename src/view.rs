@@ -402,8 +402,6 @@ pub struct Avatar {
     hud_after: Option<Instant>,
     /// Woken: the stand-up plays until then, and no move starts before it ends.
     waking_until: Option<Instant>,
-    /// $mod+c woke her: the teleport to the Line's edge once she stands (when, where).
-    fetch_after: Option<(Instant, (i32, i32))>,
     /// The work-area top (root px) for the hearts burst that started at the key.
     hearts_area: (Option<Instant>, Option<i32>),
     /// The bubble panel and tag as last painted: a part of the HUD only goes into the X shape
@@ -523,6 +521,8 @@ pub struct Avatar {
     buttons: Buttons,
     /// The READER window (a long reply), its X id, and who had the keyboard before it.
     reader: Option<(WindowHandle<crate::reader::Reader>, u32, Option<u32>)>,
+    /// Her body box the reader was placed beside (she moves: it follows), and its place.
+    reader_at: Option<(WinRect, crate::beside::Place)>,
     /// The LINE (the conversation window), when open.
     line: Option<lineview::LineWin>,
     /// The summon key went down then (`talk press`): a tap or a hold at release.
@@ -642,7 +642,6 @@ impl Avatar {
             hearts: None,
             hud_after: None,
             waking_until: None,
-            fetch_after: None,
             hearts_area: (None, None),
             panel_last: Rc::new(Cell::new(None)),
             tag_last: Rc::new(Cell::new((None, 0))),
@@ -717,6 +716,7 @@ impl Avatar {
             _subs: vec![activation],
             buttons: Rc::default(),
             reader: None,
+            reader_at: None,
             line: None,
             talk_down: None,
             tap_closes: false,
@@ -1829,6 +1829,7 @@ impl Avatar {
             dirty |= self.brain_tick(now);
         }
         self.apply_offset(now);
+        self.panels_follow(cx);
         self.update_notes(now);
         self.update_glints(now);
         self.update_marker(now);
@@ -2346,12 +2347,13 @@ impl Avatar {
         }
     }
 
-    /// Where the reader goes (device px): beside her, inside her work area, clear of the
-    /// cursor; up to 40 % of the monitor wide and 60 % tall.
-    fn reader_rect(&self, raw: &str) -> (i32, i32, i32, i32) {
+    /// Where the reader goes (device px): beside her and her bubble (`beside::place`: the
+    /// roomier side of her monitor, whole inside her work area), clear of the cursor if the
+    /// other side has room; up to 40 % of the monitor wide and 60 % tall.
+    fn reader_rect(&self, raw: &str) -> crate::beside::Place {
         let l = self.layout;
         let sf = l.sf;
-        let mut body = WinRect { id: 0, x: self.applied.0 + l.avatar_x, y: self.applied.1 + l.avatar_y, w: l.geo.width as i32, h: l.geo.height as i32 };
+        let mut body = self.her_body();
         // Her and her bubble: the reader goes beside both.
         if let Some((px_, py_, pw, ph)) = self.panel_rect.get() {
             let (x0, y0) = (self.applied.0 + (px_ * sf) as i32, self.applied.1 + (py_ * sf) as i32);
@@ -2366,38 +2368,44 @@ impl Avatar {
         let m = self.x11.monitor_at(bcx, bcy);
         let area = self.her_area().unwrap_or(WinRect { id: 0, x: m.x, y: m.y, w: m.w, h: m.h });
         let gap = (12.0 * sf) as i32;
-        let w0 = ((0.40 * m.w as f32) as i32).max((420.0 * sf) as i32).min(area.w);
-        // Not enough room beside her and her bubble at 40 %: the roomier side's room (down to
-        // 420 px), so it sits beside them rather than over the bubble.
-        let room = (area.right() - body.right() - gap).max(body.x - gap - area.x);
-        let w = if room >= w0 { w0 } else { room.max((420.0 * sf) as i32).min(area.w) };
-        let est = (crate::reader::estimate_height(&crate::reader::parse(raw), w as f32 / sf) * sf) as i32;
-        let h = est.clamp((180.0 * sf) as i32, (0.60 * m.h as f32) as i32).min(area.h);
+        let min_w = (420.0 * sf) as i32;
+        let w = ((0.40 * m.w as f32) as i32).max(min_w).min(area.w);
         let cursor = self.x11.pointer().ok();
-        let y0 = body.y.clamp(area.y, (area.bottom() - h).max(area.y));
-        let right = (body.right() + gap, y0);
-        let left = (body.x - gap - w, y0);
-        let fits = |p: (i32, i32)| p.0 >= area.x && p.0 + w <= area.right();
-        let clear = |p: (i32, i32)| cursor.is_none_or(|c| !(c.0 >= p.0 && c.0 < p.0 + w && c.1 >= p.1 && c.1 < p.1 + h));
-        let roomier = if area.right() - body.right() >= body.x - area.x { right } else { left };
-        let pick = [right, left].into_iter().filter(|&p| fits(p)).find(|&p| clear(p)).or_else(|| [right, left].into_iter().find(|&p| fits(p))).unwrap_or(roomier);
-        let mut x = pick.0.clamp(area.x, (area.right() - w).max(area.x));
-        let mut y = pick.1;
-        // Still under the cursor (no room on either side): above or below it, whichever fits.
-        if !clear((x, y))
-            && let Some(c) = cursor
-        {
-            let above = c.1 - gap - h;
-            let below = c.1 + gap;
-            if above >= area.y {
-                y = above;
-            } else if below + h <= area.bottom() {
-                y = below;
-            } else {
-                x = if c.0 - area.x > area.right() - c.0 { (c.0 - gap - w).max(area.x) } else { (c.0 + gap).min(area.right() - w) };
-            }
+        let floor = self.placement == Placement::Ground;
+        let at = |w: i32| {
+            let est = (crate::reader::estimate_height(&crate::reader::parse(raw), w as f32 / sf) * sf) as i32;
+            let h = est.clamp((180.0 * sf) as i32, (0.60 * m.h as f32) as i32).min(area.h);
+            crate::beside::place(area, body, crate::beside::Panel { w, min_w, h, min_h: (180.0 * sf) as i32 }, gap, floor, cursor)
+        };
+        // Squeezed narrower beside her: measured again at that width.
+        let p = at(w);
+        if p.rect.w < w { at(p.rect.w) } else { p }
+    }
+
+    /// The open reader and Line follow her (a drag, a summon, a fall), once she has landed.
+    fn panels_follow(&mut self, cx: &mut Context<Self>) {
+        if (self.line.is_none() && self.reader.is_none()) || self.teleport.is_some() || self.rag.is_some() || self.press.is_some() || self.brain_in_flight() {
+            return;
         }
-        (x, y, w, h)
+        let her = self.her_body();
+        if self.line.as_ref().is_some_and(|l| l.her != her) {
+            self.line_follow(None, cx);
+        }
+        if let Some((was, _)) = self.reader_at
+            && was != her
+            && let Some((h, xid, _)) = &self.reader
+        {
+            let (h, xid) = (*h, *xid);
+            let raw = self.bubble.as_ref().map(|b| if b.raw.trim().is_empty() { b.text.iter().collect::<String>() } else { b.raw.clone() }).unwrap_or_default();
+            let p = self.reader_rect(&raw);
+            let r = p.rect;
+            if self.reader_at.is_none_or(|(_, q)| q.rect != r) {
+                self.x11.configure(xid, r.x, r.y, r.w, r.h).ok();
+            }
+            self.reader_at = Some((her, p));
+            let t = Some((p.side, p.tail as f32 / self.layout.sf));
+            h.update(cx, |rd, _, cx| rd.set_tail(t, cx)).ok();
+        }
     }
 
     /// Open the reader on the current reply (or bring the open one up to date).
@@ -2411,7 +2419,8 @@ impl Avatar {
         // Tests on the live desktop never take the keyboard (SA_READER_NOFOCUS).
         let take_focus = take_focus && std::env::var_os("SA_READER_NOFOCUS").is_none();
         let sf = self.layout.sf;
-        let (x, y, w, h) = self.reader_rect(&raw);
+        let place = self.reader_rect(&raw);
+        let (x, y, w, h) = (place.rect.x, place.rect.y, place.rect.w, place.rect.h);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds::new(point(px(x as f32 / sf), px(y as f32 / sf)), size(px(w as f32 / sf), px(h as f32 / sf))))),
             titlebar: Some(TitlebarOptions { title: Some("synaps-avatar reader".into()), ..Default::default() }),
@@ -2449,6 +2458,9 @@ impl Avatar {
                     self.x11.give_focus(xid).ok();
                 }
                 self.reader = Some((handle, xid, prev));
+                self.reader_at = Some((self.her_body(), place));
+                let t = Some((place.side, place.tail as f32 / sf));
+                handle.update(cx, |r, _, cx| r.set_tail(t, cx)).ok();
                 if let Some(b) = &mut self.bubble {
                     b.hide_at = None;
                 }
@@ -2462,6 +2474,7 @@ impl Avatar {
     /// The reader closed (Esc, ✕, a click elsewhere): `restore` hands the keyboard back.
     fn reader_closed(&mut self, restore: bool, cx: &mut Context<Self>) {
         let Some((_, _, prev)) = self.reader.take() else { return };
+        self.reader_at = None;
         if restore
             && std::env::var_os("SA_READER_NO_RESTORE").is_none()
             && let Some(w) = prev

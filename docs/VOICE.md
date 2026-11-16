@@ -60,8 +60,8 @@ for speech. Setup: `tools/capri-voice-setup`, then `tools/systemd/capri-voice.se
   open. If no new speech came by the end, its words are sent with no second decode (speech end → sent:
   ~1.1 s instead of ~1.7 s). If they end on a dangling word ("and", "the", "because"…) or on `,` `…` `—`,
   she waits 1.5 s more.
-- **The one exception to "her tag on screen":** when a toggle opens the Line, the Line moves her (a
-  teleport), so for a moment she isn't drawn. The Line and its mic row are on screen the whole time, so a
+- **The one exception to "her tag on screen":** a teleport while the Line is open (a summon; the Line
+  itself opens beside her and never moves her), so for a moment she isn't drawn. The Line and its mic row are on screen the whole time, so a
   teleport closes a toggled mic only if she stays undrawn for more than 2 s. Hiding (user, fullscreen)
   closes it at once.
 
@@ -120,7 +120,7 @@ for speech. Setup: `tools/capri-voice-setup`, then `tools/systemd/capri-voice.se
     is dropped (logged by length only).
 - **Replies to what arrives on its own** are spoken while he is quiet, and stay text while he is
   mid-utterance (`speak_unprompted`, below).
-- **The one exception to "her tag on screen"** holds here too: the Line's opening moves her, and a
+- **The one exception to "her tag on screen"** holds here too: a teleport while the Line is open, and a
   hands-free stream closes only if she stays undrawn for more than 2 s. Hidden for a fullscreen window
   ends it at once, so hands-free can't run under a fullscreen app.
 - Cap in the sidecar, whatever the avatar does: its `max_s` (from `handsfree_max`).

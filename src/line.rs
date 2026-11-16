@@ -151,8 +151,9 @@ pub struct Line {
     /// A is down (from a press on a prompt): its key repeats never reach the field, even
     /// after the prompt it allowed has gone.
     a_down: bool,
-    /// Which side of the Line she stands on (-1 left, 1 right, 0 not beside it).
-    side: i8,
+    /// Its side of her (`beside::place`) and where along the edge facing her its tail points
+    /// (logical px); None: not beside her.
+    tail: Option<(crate::beside::Side, f32)>,
     on_ask: OnAsk,
     _subs: Vec<Subscription>,
 }
@@ -311,7 +312,7 @@ impl Line {
             open: Default::default(),
             hold_at: None,
             a_down: false,
-            side: 0,
+            tail: None,
             on_ask,
             _subs: subs,
         };
@@ -399,7 +400,8 @@ impl Line {
             "rows": self.snap.rows.len(),
             "draft_chars": self.input.read(cx).value().chars().count(),
             "renders": self.renders.get(),
-            "side": self.side,
+            "side": self.tail.map(|t| side_key(t.0)),
+            "tail": self.tail.map(|t| t.1),
             "holding": self.hold_at.is_some(),
             "allow": self.allow_box.get().map(|b| [f32::from(b.origin.x), f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height)]),
             "risky": self.prompt().is_some_and(risky),
@@ -712,40 +714,16 @@ impl Line {
         }
     }
 
-    /// Her side of the Line: a thick edge and a pointer at her feet, so it reads as hers.
+    /// Her side of the Line: a thick edge and a pointer at her, so it reads as hers.
     fn tail(&self) -> Option<AnyElement> {
-        if self.side == 0 {
-            return None;
-        }
-        let (tone, left) = (if self.parked { self.pal.dim } else { self.pal.frame }, self.side < 0);
-        let edge = div().absolute().top_0().bottom_0().w(px(5.0)).bg(rgb(tone));
-        let edge = if left { edge.left_0() } else { edge.right_0() };
-        let arrow = canvas(
-            |_, _, _| {},
-            move |b, _, window, _| {
-                let (h, w) = (px(26.0), px(12.0));
-                let y = b.bottom() - px(14.0) - h;
-                let x = if left { b.left() + px(5.0) } else { b.right() - px(5.0) };
-                let dx = if left { w } else { -w };
-                let mut p = PathBuilder::fill();
-                p.move_to(point(x, y));
-                p.line_to(point(x + dx, y + h / 2.0));
-                p.line_to(point(x, y + h));
-                p.close();
-                if let Ok(path) = p.build() {
-                    window.paint_path(path, rgb(tone));
-                }
-            },
-        )
-        .absolute()
-        .size_full();
-        Some(div().absolute().top_0().left_0().size_full().child(edge).child(arrow).into_any_element())
+        let (side, at) = self.tail?;
+        Some(tail_overlay(side, at, if self.parked { self.pal.dim } else { self.pal.frame }))
     }
 
-    /// Which side she stands on (from the avatar, after placing the Line).
-    pub fn set_side(&mut self, side: i8, cx: &mut Context<Line>) {
-        if self.side != side {
-            self.side = side;
+    /// Where it is beside her (from the avatar, each time it is placed).
+    pub fn set_tail(&mut self, tail: Option<(crate::beside::Side, f32)>, cx: &mut Context<Line>) {
+        if self.tail != tail {
+            self.tail = tail;
             cx.notify();
         }
     }
@@ -1297,6 +1275,60 @@ impl Render for Line {
             .child(content)
             .children(self.tail())
     }
+}
+
+
+/// `state`'s word for a panel's side of her.
+pub fn side_key(s: crate::beside::Side) -> &'static str {
+    match s {
+        crate::beside::Side::Left => "left",
+        crate::beside::Side::Right => "right",
+        crate::beside::Side::Above => "above",
+    }
+}
+
+/// A panel's edge facing her, thick, with a pointer at her `at` along it (logical px): the
+/// Line's and the reader's. `side`: the panel's side of her (Right: she is at its left edge).
+pub fn tail_overlay(side: crate::beside::Side, at: f32, tone: u32) -> AnyElement {
+    use crate::beside::Side;
+    let edge = div().absolute().bg(rgb(tone));
+    let edge = match side {
+        Side::Right => edge.top_0().bottom_0().left_0().w(px(5.0)),
+        Side::Left => edge.top_0().bottom_0().right_0().w(px(5.0)),
+        Side::Above => edge.left_0().right_0().bottom_0().h(px(5.0)),
+    };
+    let arrow = canvas(
+        |_, _, _| {},
+        move |b, _, window, _| {
+            // A notch whose tip sits on the edge, pointing out at her.
+            let (l, t, r, bt) = (f32::from(b.left()), f32::from(b.top()), f32::from(b.right()), f32::from(b.bottom()));
+            let (half, depth) = (13.0f32, 12.0f32);
+            let mut p = PathBuilder::fill();
+            match side {
+                Side::Right | Side::Left => {
+                    let y = (t + at).min(bt - half).max(t + half);
+                    let (tip, base) = if side == Side::Right { (l, l + 5.0 + depth) } else { (r, r - 5.0 - depth) };
+                    p.move_to(point(px(base), px(y - half)));
+                    p.line_to(point(px(tip), px(y)));
+                    p.line_to(point(px(base), px(y + half)));
+                }
+                Side::Above => {
+                    let x = (l + at).min(r - half).max(l + half);
+                    let base = bt - 5.0 - depth;
+                    p.move_to(point(px(x - half), px(base)));
+                    p.line_to(point(px(x), px(bt)));
+                    p.line_to(point(px(x + half), px(base)));
+                }
+            }
+            p.close();
+            if let Ok(path) = p.build() {
+                window.paint_path(path, rgb(tone));
+            }
+        },
+    )
+    .absolute()
+    .size_full();
+    div().absolute().top_0().left_0().size_full().child(edge).child(arrow).into_any_element()
 }
 
 #[cfg(test)]
