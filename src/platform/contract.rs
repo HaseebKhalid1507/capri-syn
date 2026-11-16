@@ -369,6 +369,12 @@ async fn body_and_fx<D: Driver>(os: &Os, d: &mut D, _rx: &Receiver<WatchEvent>) 
     os.fx_under(3, 0x2266aa, (b.x + 30, b.y + b.h - 20), (100, 6), None)?;
     d.settle().await;
     ensure!(d.fx_rects().iter().any(|r| extent(r) == (b.x + 30, b.y + b.h - 20, 100, 3)), "the moved shadow: {:?}", d.fx_rects());
+    // The bolt reaching out of her window (to where she lands): all of it shows.
+    let (lx, ly) = (b.x + b.w - 40, b.y + 60);
+    os.fx_set(5, 0xff2200, (lx, ly), (300, 8), &[(0, 0, 300, 4)])?;
+    os.flush();
+    d.settle().await;
+    ensure!(d.fx_rects().iter().any(|r| extent(r) == (lx, ly, 300, 4)), "a layer reaching out of her window: {:?}", d.fx_rects());
     os.fx_hide();
     d.settle().await;
     let fx = d.fx_rects();

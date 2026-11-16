@@ -86,7 +86,8 @@ pub struct Caps {
     /// polls the perch target and diffs the snapshots itself.
     pub target_events: bool,
     /// Effect layers are surfaces of their own (the server paints them). Without it the core
-    /// keeps them in a display list and her view paints them in her window.
+    /// keeps them in a display list and paints them itself: in her window, and the ones
+    /// reaching outside it in its effect hosts (`host_per_output`).
     pub fx_layers: bool,
     /// Every redraw of her window is a full present for the compositor to take in. Steps that
     /// can wait (glints) then ride redraws that happen anyway.
@@ -184,6 +185,9 @@ pub enum Role {
     Reader,
     Chip,
     Line,
+    /// An output's effect host (`Caps::host_per_output`): paints the effect layers that
+    /// reach outside her window (the bolt).
+    Fx,
 }
 
 /// Where an effect layer stacks.

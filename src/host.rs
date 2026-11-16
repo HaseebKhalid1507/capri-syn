@@ -28,11 +28,12 @@ pub fn display_for(cx: &App, bounds: Bounds<Pixels>) -> Option<DisplayId> {
 /// A host's id, view and window (`Avatar::add_host`).
 pub type Host = (WinId, WeakEntity<HostView>, AnyWindowHandle);
 
-/// Open a dormant host on monitor `m` (her window's size, at the monitor's origin).
+/// Open a dormant host on monitor `m` (her window's size, at the monitor's origin). None
+/// when GPUI doesn't know that output yet (a new one: try again later).
 pub fn open_dormant(cx: &mut App, os: &Rc<Os>, avatar: &Entity<Avatar>, m: &Monitor, size: (i32, i32), sf: f32) -> Option<Host> {
     let bounds = Bounds::new(point(px(m.x as f32 / sf), px(m.y as f32 / sf)), gpui_kit::size(px(size.0 as f32 / sf), px(size.1 as f32 / sf)));
     let mut options = os.window_options(Role::Body, bounds, false);
-    options.display_id = display_for(cx, bounds);
+    options.display_id = Some(display_for(cx, bounds)?);
     let mut id = 0;
     let mut view = None;
     let av = avatar.clone();
@@ -49,5 +50,102 @@ pub fn open_dormant(cx: &mut App, os: &Rc<Os>, avatar: &Entity<Avatar>, m: &Moni
             None
         }
         _ => None,
+    }
+}
+
+/// An output's effect host: the effect layers reaching outside her window (`Os::fx_staged`),
+/// clipped to its output. Dormant at 1×1 (nothing to show); woken to the layers' box.
+pub struct FxHostView {
+    pub os: Rc<Os>,
+    /// Its top-left, root px (None: dormant).
+    pub at: Option<(i32, i32)>,
+    pub sf: f32,
+}
+
+impl Render for FxHostView {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let (os, at, sf) = (self.os.clone(), self.at, self.sf);
+        div().size_full().child(
+            canvas(
+                |_, _, _| (),
+                move |_, _, window, _| {
+                    if let Some(at) = at {
+                        os.paint_fx_staged(window, at, sf);
+                    }
+                },
+            )
+            .size_full(),
+        )
+    }
+}
+
+/// An effect host: its id, view, window, monitor, and the box it covers when awake.
+pub struct FxHost {
+    id: WinId,
+    view: WeakEntity<FxHostView>,
+    window: AnyWindowHandle,
+    mon: Monitor,
+    awake: Option<crate::platform::WinRect>,
+}
+
+/// Close effect hosts (the monitors changed: they are opened again).
+pub fn close_fx_hosts(cx: &mut App, hosts: Vec<FxHost>) {
+    for h in hosts {
+        h.window.update(cx, |_, window, _| window.remove_window()).ok();
+    }
+}
+
+/// One effect host per monitor (`Caps::host_per_output`), dormant. Open them after her body
+/// hosts: they stack above her.
+pub fn open_fx_hosts(cx: &mut App, os: &Rc<Os>, sf: f32) -> Vec<FxHost> {
+    if !os.host_per_output() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for m in os.monitors() {
+        let bounds = Bounds::new(point(px(m.x as f32 / sf), px(m.y as f32 / sf)), gpui_kit::size(px(1.0), px(1.0)));
+        let mut options = os.window_options(Role::Fx, bounds, false);
+        let Some(d) = display_for(cx, bounds) else { continue };
+        options.display_id = Some(d);
+        let (mut id, mut view) = (0, None);
+        let os2 = os.clone();
+        if let Ok(w) = cx.open_window(options, |window, cx| {
+            id = os2.adopt(Role::Fx, window).unwrap_or(0);
+            let v = cx.new(|_| FxHostView { os: os2.clone(), at: None, sf });
+            view = Some(v.downgrade());
+            v
+        }) && let Some(view) = view
+        {
+            out.push(FxHost { id, view, window: w.into(), mon: m, awake: None });
+        }
+    }
+    out
+}
+
+/// What the effect hosts show changed: each wakes to the part of it on its monitor (growing
+/// only while awake: a resize is a configure round trip), or goes dormant.
+pub fn fx_hosts_sync(cx: &mut App, os: &Os, hosts: &mut [FxHost]) {
+    if hosts.is_empty() || !os.fx_take_staged() {
+        return;
+    }
+    let bbox = os.fx_staged_box();
+    for h in hosts.iter_mut() {
+        let want = bbox.and_then(|b| b.intersect(&h.mon.rect()));
+        let ext = |r: Option<crate::platform::WinRect>| r.map(|r| (r.x, r.y, r.w, r.h));
+        let keep = matches!((want, h.awake), (Some(w), Some(a)) if a.x <= w.x && a.y <= w.y && a.right() >= w.right() && a.bottom() >= w.bottom());
+        let sf = h.view.update(cx, |v, _| v.sf).unwrap_or(1.0);
+        if !keep && ext(want) != ext(h.awake) {
+            let r = want.unwrap_or(crate::platform::WinRect::new(h.mon.x, h.mon.y, 1, 1));
+            h.window.update(cx, |_, window, _| window.resize(gpui_kit::size(px(r.w as f32 / sf), px(r.h as f32 / sf)))).ok();
+            os.place(h.id, r.x, r.y, r.w, r.h).ok();
+            h.awake = want;
+        }
+        let at = h.awake.map(|r| (r.x, r.y));
+        h.view
+            .update(cx, |v, cx| {
+                v.at = at;
+                cx.notify();
+            })
+            .ok();
     }
 }

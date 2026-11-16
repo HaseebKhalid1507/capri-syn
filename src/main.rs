@@ -422,8 +422,12 @@ fn run(t_start: Instant) -> Result<()> {
             for m in os.hosts_wanted() {
                 all.extend(host::open_dormant(cx, &os, &view, &m, size, sf));
             }
-            elog!("synaps-avatar: {} body hosts (one per output)", all.len());
-            view.update(cx, |v, _| all.into_iter().for_each(|h| v.add_host(h)));
+            let fx = host::open_fx_hosts(cx, &os, sf);
+            elog!("synaps-avatar: {} body hosts, {} effect hosts (one each per output)", all.len(), fx.len());
+            view.update(cx, |v, _| {
+                all.into_iter().for_each(|h| v.add_host(h));
+                v.set_fx_hosts(fx);
+            });
         }
 
         // Decode: the default frame first so something shows quickly, then the rest.

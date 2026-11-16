@@ -438,6 +438,7 @@ fn namespace(role: Role) -> &'static str {
         Role::Reader => "capri-reader",
         Role::Chip => "capri-chip",
         Role::Line => "capri-line",
+        Role::Fx => "capri-fx",
     }
 }
 
@@ -487,8 +488,12 @@ impl Stage for LayerStage {
         let ns = namespace(role);
         let (output, scale) = self.dressed.borrow().get(ns).copied().unwrap_or(((0, 0), 1.0));
         // One id per surface (body hosts share a namespace).
-        let id = self.desk.id(&our_key(ns, role == Role::Body, output));
+        let id = self.desk.id(&our_key(ns, matches!(role, Role::Body | Role::Fx), output));
         self.surfaces.borrow_mut().insert(id, Surface { ptr, ns, output, scale });
+        if role == Role::Fx {
+            // Effects only: every click goes through.
+            layer_ctl::set_input_region(ptr, Some(&[]));
+        }
         if role == Role::Body {
             if self.body.get() == 0 {
                 self.body.set(id);

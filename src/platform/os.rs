@@ -162,6 +162,8 @@ struct FxList {
     under: Vec<usize>,
     /// What her window shows changed since her view last took it.
     dirty: bool,
+    /// What shows outside her window changed (the core's effect hosts repaint).
+    staged_dirty: bool,
 }
 
 impl FxList {
@@ -188,7 +190,9 @@ impl FxList {
         }
         // Her window repaints only for what it shows: this layer is (or was) in it.
         let in_window = !staged || prev.as_ref().is_some_and(|p| !p.staged);
-        self.dirty |= in_window && (!same || before != (self.over.clone(), self.under.clone()));
+        let changed = !same || before != (self.over.clone(), self.under.clone());
+        self.dirty |= in_window && changed;
+        self.staged_dirty |= (staged || prev.as_ref().is_some_and(|p| p.staged)) && changed;
         prev.map(|p| p.staged)
     }
 
@@ -198,12 +202,25 @@ impl FxList {
         self.over.retain(|&k| k != layer);
         self.under.retain(|&k| k != layer);
         self.dirty |= !l.staged;
+        self.staged_dirty |= l.staged;
         Some(l.staged)
     }
 
     fn clear(&mut self) {
         let in_window = self.layers.values().any(|l| !l.staged);
-        *self = FxList { dirty: self.dirty || in_window, ..FxList::default() };
+        let staged = self.layers.values().any(|l| l.staged);
+        *self = FxList { dirty: self.dirty || in_window, staged_dirty: self.staged_dirty || staged, ..FxList::default() };
+    }
+
+    /// The staged layers' rects, root px, bottom → top, with colours.
+    fn staged(&self) -> Vec<((i32, i32, i32, i32), u32)> {
+        self.under
+            .iter()
+            .chain(&self.over)
+            .filter_map(|l| self.layers.get(l))
+            .filter(|l| l.staged)
+            .flat_map(|l| l.rects.iter().map(move |r| ((l.origin.0 + r.0 as i32, l.origin.1 + r.1 as i32, r.2 as i32, r.3 as i32), l.rgb)))
+            .collect()
     }
 
     /// Layers in the stacking order, bottom → top, with where each stacks when re-shown in
@@ -291,6 +308,7 @@ impl Os {
             Role::Reader => ("synaps-avatar reader", WindowBackgroundAppearance::Opaque),
             Role::Chip => ("synaps-avatar chip", WindowBackgroundAppearance::Opaque),
             Role::Line => ("synaps-avatar line", WindowBackgroundAppearance::Opaque),
+            Role::Fx => ("synaps-avatar fx", WindowBackgroundAppearance::Transparent),
         };
         let mut o = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -477,8 +495,10 @@ impl Os {
     /// her, and a compositor can then paint the desktop over their boxes when she redraws
     /// under them (dark boxes and bars around her glints). Only the layers reaching outside
     /// her window (the bolt) keep surfaces of their own.
+    /// Without surfaces from the backend, the core's effect hosts show what reaches outside
+    /// her window (`Caps::host_per_output`; else it's clipped to her window).
     fn fx_staged(&self, origin: (i32, i32), size: (i32, i32)) -> bool {
-        if !self.caps.fx_layers {
+        if !self.caps.fx_layers && !self.caps.host_per_output {
             return false;
         }
         if !self.composited() {
@@ -580,6 +600,27 @@ impl Os {
     }
 
     /// In-scene effect layers changed since the last call: her window needs a frame.
+    /// What the effect hosts show changed since the last call (`Caps::host_per_output`).
+    pub fn fx_take_staged(&self) -> bool {
+        !self.caps.fx_layers && std::mem::take(&mut self.fx_list.borrow_mut().staged_dirty)
+    }
+
+    /// The box of what the effect hosts show (root px), if anything.
+    pub fn fx_staged_box(&self) -> Option<WinRect> {
+        self.fx_list.borrow().staged().iter().map(|&((x, y, w, h), _)| WinRect::new(x, y, w, h)).reduce(|a, b| {
+            let (x0, y0) = (a.x.min(b.x), a.y.min(b.y));
+            WinRect::new(x0, y0, a.right().max(b.right()) - x0, a.bottom().max(b.bottom()) - y0)
+        })
+    }
+
+    /// Paint what the effect hosts show, in a host whose top-left is at `at` (root px).
+    pub fn paint_fx_staged(&self, window: &mut Window, at: (i32, i32), sf: f32) {
+        for ((x, y, w, h), c) in self.fx_list.borrow().staged() {
+            let b = Bounds::new(point(px((x - at.0) as f32 / sf), px((y - at.1) as f32 / sf)), size(px(w as f32 / sf), px(h as f32 / sf)));
+            window.paint_quad(fill(b, rgb(c)));
+        }
+    }
+
     pub fn fx_take_dirty(&self) -> bool {
         std::mem::take(&mut self.fx_list.borrow_mut().dirty)
     }

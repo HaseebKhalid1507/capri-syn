@@ -84,6 +84,8 @@ fn dispatch(code: &str) {
 
 struct HDriver {
     world: World,
+    os: Rc<Os>,
+    fx: Vec<crate::host::FxHost>,
     desk: Arc<HyprDesktop>,
     body_ptr: usize,
     body: WinId,
@@ -225,9 +227,16 @@ impl Driver for HDriver {
     fn body_rect(&mut self) -> Option<WinRect> {
         self.layer_addr("capri-body").map(|(_, r)| WinRect { id: self.body, ..r })
     }
-    /// Her window's pixels: one extent per colour that isn't the backdrop.
+    /// Her window's pixels and her effect hosts': one extent per colour that isn't the backdrop.
     fn fx_rects(&mut self) -> Vec<WinRect> {
         let Some(b) = self.body_rect() else { return Vec::new() };
+        let b = match self.os.fx_staged_box() {
+            Some(f) => {
+                let (x0, y0) = (b.x.min(f.x), b.y.min(f.y));
+                WinRect::new(x0, y0, b.right().max(f.right()) - x0, b.bottom().max(f.bottom()) - y0)
+            }
+            None => b,
+        };
         let px = Self::grab(b);
         let mut ext: HashMap<u32, (i32, i32, i32, i32)> = HashMap::new();
         for (i, p) in px.as_chunks::<3>().0.iter().enumerate() {
@@ -265,6 +274,8 @@ impl Driver for HDriver {
     async fn settle(&mut self) {
         gpui_linux::layer_ctl::commit_pending(self.body_ptr);
         self.view.update(&mut self.cx, |_, cx| cx.notify()).ok();
+        let (os, fx) = (self.os.clone(), &mut self.fx);
+        self.cx.update(|cx| crate::host::fx_hosts_sync(cx, &os, fx));
         self.cx.background_executor().timer(Duration::from_millis(150)).await;
         self.world.cmd("hypr version");
     }
@@ -303,12 +314,13 @@ fn contract_hypr() {
             })
             .expect("her layer surface");
         let view = win.update(cx, |_, _, cx| cx.entity().downgrade()).expect("the stand-in");
+        let fx = crate::host::open_fx_hosts(cx, &os, 1.0);
         let os = os.clone();
         cx.spawn(async move |cx| {
             cx.background_executor().timer(Duration::from_millis(1500)).await;
             let mut world = World::start();
             world.cmd("under");
-            let mut d = HDriver { world, desk, body_ptr: ptr.get(), body: os.body(), view, cx: cx.clone(), names: HashMap::new(), n: 0 };
+            let mut d = HDriver { world, os: os.clone(), fx, desk, body_ptr: ptr.get(), body: os.body(), view, cx: cx.clone(), names: HashMap::new(), n: 0 };
             let two = d.outputs() == 2;
             let r = contract::run(&os, &mut d).await;
             d.split_monitors(two);

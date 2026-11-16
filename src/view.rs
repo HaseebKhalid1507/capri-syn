@@ -517,6 +517,8 @@ pub struct Avatar {
     hosts: Vec<crate::host::Host>,
     /// The monitors changed: hosts to open or close (`hosts_sync`).
     hosts_stale: bool,
+    /// Effect hosts (`crate::host`): what reaches outside her window.
+    fx_hosts: Vec<crate::host::FxHost>,
     glitch: Option<Glitch>,
     /// Frames drawn in the current glitch (keyed by its start): each gets a new pattern.
     glitch_step: Cell<(Option<Instant>, u64)>,
@@ -752,6 +754,7 @@ impl Avatar {
             perch_moved: None,
             hosts: Vec::new(),
             hosts_stale: false,
+            fx_hosts: Vec::new(),
             glitch: None,
             glitch_step: Cell::new((None, 0)),
             glitch_at: Cell::new(None),
@@ -1736,6 +1739,9 @@ impl Avatar {
         if self.glide.is_some() {
             take(Some(now + FRAME_FAST));
         }
+        if self.hosts_stale {
+            take(Some(now + Duration::from_millis(250)));
+        }
         if self.hop.is_some() {
             take(Some(now + FRAME_FAST));
         } else if self.hop_allowed() {
@@ -1755,9 +1761,14 @@ impl Avatar {
         self.hosts.push(h);
     }
 
+    pub fn set_fx_hosts(&mut self, fx: Vec<crate::host::FxHost>) {
+        self.fx_hosts = fx;
+    }
+
     /// She moved to another host: it shows her, the others nothing. The monitors changed:
     /// a dormant host for each new one, the hosts of the ones gone closed.
     fn hosts_sync(&mut self, cx: &mut Context<Self>) {
+        crate::host::fx_hosts_sync(cx, &self.os, &mut self.fx_hosts);
         if self.hosts.is_empty() {
             return;
         }
@@ -1771,10 +1782,14 @@ impl Avatar {
             let me = cx.entity();
             let size = (self.layout.win_w, self.layout.win_h);
             for m in self.os.hosts_wanted() {
-                if let Some(h) = crate::host::open_dormant(cx, &self.os, &me, &m, size, self.layout.sf) {
-                    self.hosts.push(h);
+                match crate::host::open_dormant(cx, &self.os, &me, &m, size, self.layout.sf) {
+                    Some(h) => self.hosts.push(h),
+                    None => self.hosts_stale = true,
                 }
             }
+            let fx = std::mem::take(&mut self.fx_hosts);
+            crate::host::close_fx_hosts(cx, fx);
+            self.fx_hosts = crate::host::open_fx_hosts(cx, &self.os, self.layout.sf);
             // Where she is now picks the host (hers may be gone).
             self.applied = (i32::MIN, i32::MIN);
             self.apply_offset(Instant::now());
@@ -3756,8 +3771,18 @@ impl Avatar {
             WatchEvent::Layout => {
                 self.os.forget_layout();
                 self.hosts_stale = true;
-                // Her monitor went away (or a panel took her floor): down onto the nearest.
-                if self.placement == Placement::Ground && self.rag.is_none() && self.teleport.is_none() && Self::clamp(&self.os, &self.layout, self.origin) != self.origin {
+                if self.rag.is_some() || self.teleport.is_some() {
+                    return;
+                }
+                let l = &self.layout;
+                let c = (self.origin.0 + l.avatar_x + l.geo.width as i32 / 2, self.origin.1 + l.avatar_y + l.geo.height as i32 / 2);
+                if !self.os.monitors().iter().any(|m| m.contains(c.0, c.1)) {
+                    // Her monitor went away: onto the floor of the nearest one, quietly.
+                    let o = Self::clamp(&self.os, &self.layout, (self.origin.0, self.origin.1 + 100_000));
+                    elog!("synaps-avatar: her monitor went away: to {},{}", o.0, o.1);
+                    self.start_teleport_q(o, Placement::Ground, now, true);
+                } else if self.placement == Placement::Ground && Self::clamp(&self.os, &self.layout, self.origin) != self.origin {
+                    // A panel took her floor.
                     self.fall("layout", now);
                 }
             }
