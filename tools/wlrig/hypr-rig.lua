@@ -19,7 +19,9 @@ hl.config({
     },
     animations = { enabled = true },
     dwindle = { preserve_split = true },
-    misc = { force_default_wallpaper = 1, disable_hyprland_logo = true },
+    -- enable_anr_dialog: the rig's test toplevels (wlworld.py) answer pings only while a script dispatches,
+    -- and the "not responding" overlay would land in captures.
+    misc = { force_default_wallpaper = 1, disable_hyprland_logo = true, enable_anr_dialog = false },
     render = { direct_scanout = false },
 })
 
