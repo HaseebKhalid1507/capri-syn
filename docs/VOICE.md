@@ -94,7 +94,7 @@ for speech. Setup: `tools/capri-voice-setup`, then `tools/systemd/capri-voice.se
   | the stream dies, or PipeWire moves it to another source | `HANDS-FREE OFF · MIC LOST` |
 
   A lost stream is never reopened on whatever the new default source is. After any of these the wake word
-  (if on) listens again at once: `◌ MIC ON · SAY "HEY CAPRI"`. One that "Hey Capri" began and that lost its
+  (if on) listens again at once (her usual tag, a mic for its dot). One that "Hey Capri" began and that lost its
   mic leaves the wake word off too (`WAKE OFF · MIC LOST`), as the wake stream's own rule says.
 - **The quiet clock** restarts on an accepted turn of his and while she thinks, speaks or writes his
   words down. His voice alone doesn't restart it: a TV that Whisper turns into junk (dropped) doesn't
@@ -137,8 +137,9 @@ his machine and only ids and counts left it). Everything it ships with (stage 1'
 thresholds) was fitted on stock synthetic voices only (Kokoro packs, espeak-ng), never on a recording of anyone.
 
 - **On** whenever voice is on, unless `wake_word = false` (then nothing about it loads). One mic
-  stream stays open, and her tag says so all the time: `◌ MIC ON · SAY "HEY CAPRI"` (dim red outline, no
-  timer, no meter, no level events). It keeps the tag's first slot.
+  stream stays open. Her tag stays her usual one (`ONLINE`, her mood, music) with a mic glyph in place of
+  its dot while the stream is open (no timer, no meter, no level events). Until 2026-11-16 it read
+  `◌ MIC ON · SAY "HEY CAPRI"`; Haseeb asked for just `ONLINE`.
 - **Stage 1, always on:** openWakeWord's front end (its v0.5.1 `melspectrogram.onnx` and
   `embedding_model.onnx`, SHA-pinned; its README puts its released models under CC BY-NC-SA 4.0, so
   personal use) and our head (`tools/wake/hey-capri-v1.npz`: 16 embeddings of 96 → 64 → 1, numpy). Every
@@ -170,7 +171,7 @@ thresholds) was fitted on stock synthetic voices only (Kokoro packs, espeak-ng),
   - "Hey Capri, what's spike doing?": the request is the conversation's first turn, the phrase cut from it.
   - "Hey Capri" alone (or "Hey Capri, let's talk"): she just listens; nothing is sent until he speaks.
   - **Quiet for `handsfree_timeout`** (60 s; the last 10 s count down on the tag): `HANDS-FREE OFF · 60 S
-    QUIET`, and the wake stream reopens at once: back to `◌ MIC ON · SAY "HEY CAPRI"`. So does every other
+    QUIET`, and the wake stream reopens at once: back to her usual tag with the mic glyph. So does every other
     way it ends (an end phrase, the chord, a lock, a call…), each with its reason first.
   - Where hands-free may not open (a secret on screen, she is hidden, a lock, a call), the wake stream is
     closed too, so the phrase can't be heard there at all.

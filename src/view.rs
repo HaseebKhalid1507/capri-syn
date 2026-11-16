@@ -1555,6 +1555,9 @@ impl Avatar {
         {
             s.label = l.clone();
         }
+        if self.voice_wake_idle() && s.glyph == "dot" {
+            s.glyph = "mic".into();
+        }
         s
     }
 

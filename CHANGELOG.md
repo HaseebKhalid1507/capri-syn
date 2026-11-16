@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Her tag says ONLINE while the wake word listens
+- The idle wake stream no longer replaces her tag with `MIC ON · SAY "HEY CAPRI"`. Her usual tag stays
+  (`ONLINE`, her mood, `LISTENING` for music), and while the wake word's mic is open its dot is a mic glyph,
+  so the always-open mic is still visible. Live mic, hands-free, heard and speaking tags are unchanged; a
+  side effect: `SPEAKING` and `HEARD` now show while the wake word listens (the wake tag used to hide them).
+
 ### The new art about half the time
 - Window perch: CapriCore's sit and lachy's perch now come up 1 : 1 (was 4 : 1), and the pose shifts in
   place every 2–6 min (was 4–12). Floor sleep: CapriCore's lie and lachy's doze 1 : 1 (was 3 : 1). Window
