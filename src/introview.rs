@@ -324,6 +324,19 @@ impl Avatar {
                 }
                 self.intro.window = Some((handle.into(), v, id));
                 self.intro.plays += 1;
+                let play = self.intro.plays;
+                // A close-up that never gets to its end (no frames for it) doesn't hold her launch.
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(Duration::from_millis(intro::END + 2500)).await;
+                    this.update(cx, |v, cx| {
+                        if v.intro.plays == play && v.intro.window.is_some() {
+                            elog!("synaps-avatar: intro: the close-up stalled; on with the launch");
+                            v.intro_done(cx);
+                        }
+                    })
+                    .ok();
+                })
+                .detach();
                 self.os.arm_escape(true);
                 elog!("synaps-avatar: intro: close-up {}x{} at {x},{y} (window {w}x{h})", p.image.0, p.image.1);
             }
@@ -543,27 +556,7 @@ fn moved(r: &[ShapeRect], dx: i32, dy: i32) -> Vec<ShapeRect> {
 
 impl Render for CloseUpView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if !std::mem::replace(&mut self.warmed, true) {
-            // First every close-up into the atlas, unseen (an empty shape): no upload stall in the
-            // first beat. The clock starts at the next frame.
-            self.os.shape_of(self.id, &[], &[]).ok();
-            window.request_animation_frame();
-            let warm: Vec<Arc<RenderImage>> = self.frames.iter().map(|c| c.image.clone()).collect();
-            return div().size_full().child(
-                canvas(
-                    |_, _, _| (),
-                    move |bounds, _, window, _| {
-                        let off = ContentMask { bounds: Bounds::new(point(px(-8.0), px(-8.0)), gpui_kit::size(px(1.0), px(1.0))) };
-                        window.with_content_mask(Some(off), |window| {
-                            for w in warm {
-                                window.paint_image(bounds, bounds, Corners::default(), w, 0, false).ok();
-                            }
-                        });
-                    },
-                )
-                .size_full(),
-            );
-        }
+        // The clock starts at the first frame (it uploads every close-up: the slow one).
         if !self.started {
             self.started = true;
             self.t0 = Instant::now();
@@ -644,7 +637,9 @@ impl Render for CloseUpView {
             visible.push(self.hi_rect(ox, oy));
         }
         let h = hash_rects(&input, if alpha { &[] } else { &visible });
-        if h != self.sent {
+        // Never an empty shape: GPUI stops drawing a fully obscured X window (and this one
+        // would never get to its end).
+        if h != self.sent && !input.is_empty() {
             self.sent = h;
             self.os.shape_of(self.id, &input, &visible).ok();
         }
@@ -653,12 +648,22 @@ impl Render for CloseUpView {
         let tint = plan.tint.map(|c| (c, plan.body_rects(&f.rects)));
         let bars = if plan.tint.is_some() { Vec::new() } else { plan.bar_rects(&f.rects) };
         let img = f.image.clone();
+        let warm: Vec<Arc<RenderImage>> = if std::mem::replace(&mut self.warmed, true) { Vec::new() } else { self.frames.iter().map(|c| c.image.clone()).collect() };
         let plan = Rc::new(plan);
         let entity = cx.entity();
         let mut root = div().size_full().relative().font_family(self.font.clone()).child(
             canvas(
                 |_, _, _| (),
                 move |bounds, _, window, _| {
+                    if !warm.is_empty() {
+                        // Every close-up into the atlas now, unseen: no upload stall in a later beat.
+                        let off = ContentMask { bounds: Bounds::new(point(px(-8.0), px(-8.0)), gpui_kit::size(px(1.0), px(1.0))) };
+                        window.with_content_mask(Some(off), |window| {
+                            for w in warm {
+                                window.paint_image(bounds, bounds, Corners::default(), w, 0, false).ok();
+                            }
+                        });
+                    }
                     let (bx, by) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
                     let rect = |x: f32, y: f32, w: f32, h: f32| Bounds::new(point(px(bx + (ox as f32 + x) / sf), px(by + (oy as f32 + y) / sf)), gpui_kit::size(px(w / sf), px(h / sf)));
                     let quad = |window: &mut Window, r: &ShapeRect, c: u32| {
