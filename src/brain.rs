@@ -188,9 +188,10 @@ pub enum Screen {
     CursorSwipe { speed: f32 },
     /// The pointer has rested on her a while.
     CursorHover,
-    /// He switched workspace. `away`: she isn't on the monitor he works on; `stranded`: her
-    /// perch went with the old workspace (she'd fall).
-    Workspace { away: bool, stranded: bool },
+    /// He switched workspace (`places::workspace_switch`). `here`: on her monitor (i3 switches
+    /// one monitor at a time; a switch on another one changed nothing under her); `stranded`:
+    /// her perch went with the old workspace (she'd fall).
+    Workspace { here: bool, stranded: bool },
 }
 
 /// A reaction in place (no move): the view plays it.
@@ -248,7 +249,8 @@ pub enum Goal {
     FocusEdge,
     /// Her perch closed: the top of another visible window (a teleport).
     Rescue,
-    /// He switched workspace: a spot (a window top first) on the monitor he works on.
+    /// He switched workspace on her monitor: a spot there, a window top of the new workspace
+    /// first, else the floor (`places::follow`). Never another monitor.
     Follow,
 }
 
@@ -396,8 +398,11 @@ pub struct Tuning {
     /// Her perch closed and another window has room on top: she teleports there this often
     /// (Haseeb 22:55: 50–60 %), else she falls.
     pub close_teleport_p: f64,
-    /// He switched workspace and she isn't on his monitor: she follows this long after.
+    /// He switched workspace on her monitor (her perch stayed): she moves this long after.
     pub follow_delay_s: (f64, f64),
+    /// After a relocation (a workspace switch, a focus hop, a closed perch): no other move of
+    /// her own this long (no teleport chained on it, no ping-pong; a summon still goes).
+    pub relocate_gap_s: f64,
     /// Idle this long: her roams explore (any monitor).
     pub explore_idle_s: f64,
     /// Woken (Sleepy over, the nap over): no move of her own for this long (she just stood up).
@@ -453,6 +458,7 @@ impl Tuning {
             drag_gap_s: 5.0,
             close_teleport_p: 0.55,
             follow_delay_s: (0.8, 2.0),
+            relocate_gap_s: 10.0,
             explore_idle_s: 120.0,
             wake_grace_s: 20.0,
             handled_s: 10.0,
@@ -645,6 +651,8 @@ pub struct Brain {
     /// A focus hop and a workspace follow waiting for their beat.
     focus_at: Option<f64>,
     follow_at: Option<f64>,
+    /// The last relocation (`relocated`): the next waits `relocate_gap_s`.
+    last_relocated: Option<f64>,
     /// Rate limits of the reactions (when each last went).
     last_focus: Option<f64>,
     last_look: Option<f64>,
@@ -715,6 +723,7 @@ impl Brain {
             next_micro: now + micro,
             focus_at: None,
             follow_at: None,
+            last_relocated: None,
             last_focus: None,
             last_look: None,
             last_startle: None,
@@ -948,6 +957,9 @@ impl Brain {
                 }
                 if let Some(w) = self.woke_at {
                     take(w + self.tuning.wake_grace_s);
+                }
+                if let Some(l) = self.last_relocated {
+                    take(l + self.tuning.relocate_gap_s);
                 }
                 if self.present {
                     take(self.next_micro);
@@ -1240,10 +1252,13 @@ impl Brain {
         let busy = !self.sensed.busy.is_empty();
         // He is typing fast: only micro-hops (roams and visits wait for a pause).
         let typing = self.sensed.typing;
+        // Just relocated: nothing of her own chains on it (the beats waiting were dropped).
+        let settling = self.settling(t);
         // Reactions first: they are about what he just did.
         if let Some(f) = follow_due
             && t - f < 10.0
             && !busy
+            && !settling
             && self.cap_ok(t, 1.0)
         {
             self.relocated(t, "workspace", Goal::Follow, vec![Arrival::Glitch, Arrival::Teleport]);
@@ -1253,6 +1268,7 @@ impl Brain {
             && t - f < 10.0
             && !busy
             && !typing
+            && !settling
             && self.cap_ok(t, 1.0)
         {
             self.last_focus = Some(t);
@@ -1263,7 +1279,7 @@ impl Brain {
         // Attention bid.
         // A bid keeps one slot of the hour free for leaving his window after it.
         let room = self.cap_ok(t, 2.0);
-        let rules = self.force_seek || (t + EPS >= self.bid_allowed_at() && room && !typing);
+        let rules = self.force_seek || (t + EPS >= self.bid_allowed_at() && room && !typing && !settling);
         if self.settings.attention != Attention::Off && self.attn >= self.theta - EPS && rules && !busy {
             self.force_seek = false;
             self.prev_bid = self.last_bid;
@@ -1275,7 +1291,7 @@ impl Brain {
             return;
         }
         // Roam: the bigger hops, in his pauses.
-        if self.roam >= 1.0 - EPS && self.cap_ok(t, 1.0) && !busy && !typing {
+        if self.roam >= 1.0 - EPS && self.cap_ok(t, 1.0) && !busy && !typing && !settling {
             let far = std::mem::take(&mut self.far_next);
             let explore = !far && self.sensed.idle_s >= self.tuning.explore_idle_s;
             self.redraw_roam();
@@ -1307,13 +1323,22 @@ impl Brain {
     }
 
     /// A reaction that moves her somewhere new (focus, workspace, a closed perch): a full move,
-    /// and the roam clock halves (she just went somewhere).
+    /// and the roam clock halves (she just went somewhere). The beats still waiting (a focus
+    /// hop, a workspace move) are about where she was: dropped.
     fn relocated(&mut self, t: f64, why: &'static str, goal: Goal, arrivals: Vec<Arrival>) {
+        self.last_relocated = Some(t);
+        self.focus_at = None;
+        self.follow_at = None;
         self.record_move(t, why);
         self.roam *= 0.5;
         self.next_micro = self.next_micro.max(t + self.micro_gap());
         self.emit(t, Intent::Move(MovePlan { goal, why, arrivals }));
         self.emit(t, Intent::Save);
+    }
+
+    /// Within `relocate_gap_s` of the last relocation.
+    fn settling(&self, t: f64) -> bool {
+        self.last_relocated.is_some_and(|l| t - l < self.tuning.relocate_gap_s - EPS)
     }
 
     /// A hop if it's close, else the arrival bag's order (a teleport last).
@@ -1670,7 +1695,7 @@ impl Brain {
             }
             Screen::PerchClosed { target } => {
                 // No target, a gate shut, something up, a visit under way: she falls as before.
-                let go = target && calm && !self.mode.active() && self.cap_ok(t, 1.0) && (self.rng.range(0.0, 1.0) as f64) < self.tuning.close_teleport_p;
+                let go = target && calm && !self.mode.active() && !self.settling(t) && self.cap_ok(t, 1.0) && (self.rng.range(0.0, 1.0) as f64) < self.tuning.close_teleport_p;
                 if go {
                     if !passive {
                         // A linger or a sulk is over: she went somewhere else.
@@ -1708,20 +1733,24 @@ impl Brain {
                     }
                 }
             }
-            Screen::Workspace { away, stranded } => {
+            Screen::Workspace { here, stranded } => {
+                // The focus change that came with the switch is this rule's, not a focus hop.
                 self.follow_at = None;
+                self.focus_at = None;
                 if stranded {
-                    // Her perch went with the old workspace: follow him now, else fall.
-                    if calm && !self.mode.active() && self.cap_ok(t, 1.0) {
+                    // Her perch went with the old workspace: a spot on her monitor now, else fall.
+                    if calm && !self.mode.active() && !self.settling(t) && self.cap_ok(t, 1.0) {
                         self.mode = Mode::Passive;
                         self.relocated(t, "workspace", Goal::Follow, vec![Arrival::Glitch, Arrival::Teleport]);
                     } else {
                         self.emit(t, Intent::React(React::Fall));
                     }
-                } else if away && calm && awake && passive {
+                } else if here && calm && awake && passive {
+                    // Her monitor shows another workspace: a window top there, a beat later.
                     let (lo, hi) = self.tuning.follow_delay_s;
                     self.follow_at = Some(t + self.rng.range(lo as f32, hi as f32) as f64);
                 }
+                // Not here: another monitor switched, hers didn't change. She stays put.
             }
         }
     }
@@ -2169,7 +2198,7 @@ mod tests {
                 3 => Screen::CursorHover,
                 4 => Screen::CursorSwipe { speed: rng.range(800.0, 3000.0) },
                 5 => Screen::PerchClosed { target: rng.pick(4) > 0 },
-                _ => Screen::Workspace { away: rng.pick(2) == 0, stranded: rng.pick(3) == 0 },
+                _ => Screen::Workspace { here: rng.pick(2) == 0, stranded: rng.pick(3) == 0 },
             };
             ev.push(((t / 15.0).floor() * 15.0 + 11.0, BrainEvent::Screen(sc)));
         }
@@ -2624,27 +2653,81 @@ mod tests {
     }
 
     #[test]
-    fn workspace_follow_within_two_seconds() {
+    fn workspace_on_her_monitor_within_two_seconds() {
         for seed in 0..200 {
-            // On another monitor than his: she follows 0.8–2 s later.
+            // Her monitor shows another workspace: she moves there 0.8–2 s later.
             let mut b = calm(seed);
-            let r = run(&mut b, 0.0, 45.0, false, &here, &[screen(40.0, Screen::Workspace { away: true, stranded: false })]);
+            let r = run(&mut b, 0.0, 45.0, false, &here, &[screen(40.0, Screen::Workspace { here: true, stranded: false })]);
             let f: Vec<_> = moves(&r).into_iter().filter(|x| x.1.why == "workspace").collect();
             assert_eq!(f.len(), 1, "seed {seed}");
             assert!((40.8 - 1e-6..=42.0 + 1e-6).contains(&f[0].0) && f[0].1.goal == Goal::Follow, "seed {seed}: {f:?}");
-            // Her perch went with the old workspace: she follows right away.
+            // Her perch went with the old workspace: right away.
             let mut b = calm(seed);
-            let r = run(&mut b, 0.0, 41.0, false, &here, &[screen(40.0, Screen::Workspace { away: true, stranded: true })]);
+            let r = run(&mut b, 0.0, 41.0, false, &here, &[screen(40.0, Screen::Workspace { here: true, stranded: true })]);
             assert!(moves(&r).iter().any(|x| x.0 == 40.0 && x.1.goal == Goal::Follow));
-            // On his monitor already: nothing.
+            // Another monitor switched (i3: one at a time): hers didn't change, nothing.
             let mut b = calm(seed);
-            let r = run(&mut b, 0.0, 45.0, false, &here, &[screen(40.0, Screen::Workspace { away: false, stranded: false })]);
+            let r = run(&mut b, 0.0, 45.0, false, &here, &[screen(40.0, Screen::Workspace { here: false, stranded: false })]);
             assert!(whys(&r).iter().all(|x| x.1 != "workspace"));
-            // DND: stranded falls, away stays.
+            // DND: stranded falls, here stays.
             let mut b = calm(seed);
-            let ev = [(10.0, BrainEvent::Control(Ctl::Dnd(600.0))), screen(40.0, Screen::Workspace { away: true, stranded: true }), screen(42.0, Screen::Workspace { away: true, stranded: false })];
+            let ev = [(10.0, BrainEvent::Control(Ctl::Dnd(600.0))), screen(40.0, Screen::Workspace { here: true, stranded: true }), screen(42.0, Screen::Workspace { here: true, stranded: false })];
             let r = run(&mut b, 0.0, 45.0, false, &here, &ev);
             assert!(moves(&r).is_empty() && reacts(&r) == vec![(40.0, React::Fall)]);
+        }
+    }
+
+    /// Every focus change hops (focus_p 1), no roams or micro-hops in the way.
+    fn jumpy(seed: u64) -> Brain {
+        let s = BrainSettings { attention: Attention::Off, ..Default::default() };
+        let mut tu = Tuning::new(&s);
+        (tu.roam_s, tu.micro_s, tu.first_roam_min_s, tu.focus_p) = ((1e7, 1e7), (1e7, 1e7), 1e7, 1.0);
+        Brain::new(2 * seed + 1, s, tu, None, 0.0)
+    }
+
+    #[test]
+    fn workspace_on_another_monitor_drops_the_focus_hop() {
+        // His focus change set a hop (2–5 s); then a switch on the other monitor: the switch's
+        // rule has it, hers didn't change. No move at all.
+        for seed in 0..200 {
+            let mut b = jumpy(seed);
+            let ev = [screen(40.0, Screen::Focus), screen(40.6, Screen::Workspace { here: false, stranded: false })];
+            let r = run(&mut b, 0.0, 60.0, false, &here, &ev);
+            assert!(moves(&r).is_empty(), "seed {seed}: {:?}", whys(&r));
+        }
+    }
+
+    #[test]
+    fn no_relocation_chained_on_a_relocation() {
+        let perch = |t: f64| Senses { placement: PlaceKind::Perch, ..here(t) };
+        for seed in 0..200 {
+            // His log: a workspace move and at once a focus hop. The hop waiting from before
+            // the switch is dropped; a focus change right after the move doesn't hop either.
+            let mut b = jumpy(seed);
+            let ev = [screen(40.0, Screen::Focus), screen(40.6, Screen::Workspace { here: true, stranded: false }), screen(43.0, Screen::Focus), screen(44.0, Screen::Focus)];
+            let r = run(&mut b, 0.0, 60.0, false, &here, &ev);
+            let m = whys(&r);
+            assert_eq!(m.len(), 1, "seed {seed}: {m:?}");
+            assert!(m[0].1 == "workspace" && (41.4 - 1e-6..=42.6 + 1e-6).contains(&m[0].0), "seed {seed}: {m:?}");
+            // A focus hop (42–45 s), then at 46 s his switch strands her new perch, or it
+            // closes: she falls (no second teleport).
+            for sc in [Screen::Workspace { here: true, stranded: true }, Screen::PerchClosed { target: true }] {
+                let mut b = jumpy(seed);
+                let r = run(&mut b, 0.0, 60.0, false, &perch, &[screen(40.0, Screen::Focus), screen(46.0, sc)]);
+                let m = whys(&r);
+                assert!(m.len() == 1 && m[0].1 == "focus" && (42.0 - 1e-6..=45.0 + 1e-6).contains(&m[0].0), "seed {seed} {sc:?}: {m:?}");
+                assert_eq!(reacts(&r), vec![(46.0, React::Fall)], "seed {seed} {sc:?}");
+            }
+            // 10 s on, a focus change hops again; a summon never waits for the gap.
+            let mut b = jumpy(seed);
+            let ev = [screen(40.0, Screen::Workspace { here: true, stranded: true }), screen(51.0, Screen::Focus)];
+            let r = run(&mut b, 0.0, 60.0, false, &here, &ev);
+            let m = whys(&r);
+            assert!(m.len() == 2 && m[0] == (40.0, "workspace") && m[1].1 == "focus" && m[1].0 >= 53.0 - 1e-6, "seed {seed}: {m:?}");
+            let mut b = jumpy(seed);
+            let ev = [screen(40.0, Screen::Workspace { here: true, stranded: true }), (41.0, BrainEvent::Session(SessionSignal::Done))];
+            let m = whys(&run(&mut b, 0.0, 45.0, false, &here, &ev));
+            assert_eq!(m, vec![(40.0, "workspace"), (41.0, "summon")], "seed {seed}");
         }
     }
 
@@ -2799,7 +2882,7 @@ mod tests {
             ev.push(screen(t + 5.0, Screen::CursorHover));
             ev.push(screen(t + 10.0, Screen::CursorNear));
             ev.push(screen(t + 15.0, Screen::CursorSwipe { speed: 5000.0 }));
-            ev.push(screen(t + 20.0, Screen::Workspace { away: true, stranded: false }));
+            ev.push(screen(t + 20.0, Screen::Workspace { here: true, stranded: false }));
             ev.push(screen(t + 25.0, Screen::PerchDragged { speed: 5000.0 }));
             t += 60.0;
         }
@@ -2850,9 +2933,9 @@ mod tests {
                 ([], [(40.0, React::Fall)]) => {}
                 other => panic!("seed {seed}: {other:?}"),
             }
-            // Her perch left with the workspace: she follows him (or falls), asleep or not.
+            // Her perch left with the workspace: a spot on her monitor (or the fall), asleep or not.
             let mut b = calm(seed);
-            let r = run(&mut b, 0.0, 41.0, false, &perch, &[screen(40.0, Screen::Workspace { away: true, stranded: true })]);
+            let r = run(&mut b, 0.0, 41.0, false, &perch, &[screen(40.0, Screen::Workspace { here: true, stranded: true })]);
             assert_eq!(whys(&r), vec![(40.0, "workspace")], "seed {seed}");
         }
         assert!((150..=290).contains(&tele), "teleports {tele}/400");

@@ -183,6 +183,45 @@ pub fn follow_area(monitors: &[WinRect], focused: Option<WinRect>, cursor: (i32,
     by_focus.or_else(|| monitors.iter().position(|m| m.contains(cursor.0, cursor.1)))
 }
 
+/// The windows she may sit on (`eligible`), each with the monitor (area index) its centre is
+/// on: what a workspace switch changes. Off every monitor: left out.
+pub fn desk_windows(stack: &[WinRect], eligible: &[bool], areas: &[WinRect], monitors: &[WinRect]) -> Vec<(u32, usize)> {
+    stack
+        .iter()
+        .zip(eligible)
+        .filter(|(_, e)| **e)
+        .filter_map(|(r, _)| {
+            let (x, y) = r.center();
+            areas.iter().position(|a| a.contains(x, y)).or_else(|| monitors.iter().position(|m| m.contains(x, y))).map(|i| (r.id, i))
+        })
+        .collect()
+}
+
+/// A workspace switch, a beat after it, as the brain hears it. i3 switches one monitor at a
+/// time, the one he works on after it (the focus, else the pointer, which i3 warps there).
+/// It happened on her monitor if he works there now and its windows aren't the ones from
+/// before (`before`: `desk_windows` before the switch, None: not known; `after`: now), or if
+/// her perch went with the old workspace (`stranded`). A switch on another monitor, or focus
+/// moving over to hers, changed nothing under her.
+pub fn workspace_switch(
+    monitors: &[WinRect],
+    focused: Option<WinRect>,
+    cursor: (i32, i32),
+    her_area: usize,
+    stranded: bool,
+    before: Option<&[(u32, usize)]>,
+    after: &[(u32, usize)],
+) -> crate::brain::Screen {
+    let on_hers = |d: &[(u32, usize)]| {
+        let mut v: Vec<u32> = d.iter().filter(|w| w.1 == her_area).map(|w| w.0).collect();
+        v.sort_unstable();
+        v
+    };
+    let his = follow_area(monitors, focused, cursor);
+    let changed = before.is_some_and(|b| on_hers(b) != on_hers(after));
+    crate::brain::Screen::Workspace { here: stranded || (changed && his == Some(her_area)), stranded }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Block {
     Fullscreen,
@@ -349,9 +388,25 @@ pub fn resolve(goal: &Goal, w: &World, rng: &mut Rng) -> Result<Spot, Vec<(Strin
         Goal::FocusEdge => focus_edge(w),
         // Any other window's top (not his, not the one that closed: it's gone from the stack).
         Goal::Rescue => by_monitor(w, CURSOR_MONITOR_P, rng, |w, rng| passive(w, &Roam { min_move: 0, skip_recent: false, kinds: &[(0, 1.0)], retry_last: false, ..roam }, rng)),
-        // Follow him: his monitor first, a window top first.
-        Goal::Follow => by_monitor(w, 1.0, rng, |w, rng| passive(w, &Roam { min_move: 0, kinds: &[(0, 0.8), (1, 0.1), (2, 0.1)], retry_last: false, ..roam }, rng)),
+        Goal::Follow => follow(w, &roam, rng),
     }
+}
+
+/// He switched workspace on her monitor: on that monitor, a window top of the new workspace
+/// (her favourite), else the floor. Already on the floor, the floor is where she is: no move.
+fn follow(w: &World, roam: &Roam, rng: &mut Rng) -> Result<Spot, Vec<(String, Block)>> {
+    let w = World { only: Some(w.her.area.min(w.areas.len().saturating_sub(1))), ..w.clone() };
+    let tops = Roam { min_move: 0, skip_recent: false, kinds: &[(0, 1.0)], retry_last: false, ..*roam };
+    passive(&w, &tops, rng).or_else(|mut why| {
+        if matches!(w.her.kind, SpotKind::Floor | SpotKind::FloorSit | SpotKind::Beside) {
+            why.push(("floor".into(), Block::NoSpot));
+            return Err(why);
+        }
+        passive(&w, &Roam { kinds: &[(1, 0.5), (2, 0.5)], ..tops }, rng).map_err(|more| {
+            why.extend(more);
+            why
+        })
+    })
 }
 
 /// A rescue target exists: another visible window has room on top for her (the window-close
@@ -891,7 +946,11 @@ fn beside_spots(w: &World, f: &WinRect) -> Vec<Spot> {
     let sides = if left_first { [true, false] } else { [false, true] };
     for left in sides {
         let x = if left { f.x - gap - (rel.x + rel.w) } else { f.right() + gap - rel.x };
-        out.push(w.spot(SpotKind::Beside, (x, w.floor_y(i)), rel, Some(Approach::Beside)));
+        let s = w.spot(SpotKind::Beside, (x, w.floor_y(i)), rel, Some(Approach::Beside));
+        // Past its monitor's side that floor is in mid-air: the seam spot below has the other's.
+        if s.area == i {
+            out.push(s);
+        }
     }
     // Spans its monitor's width: the adjacent monitor, next to the seam.
     if f.w >= a.w - w.d(48.0) {
@@ -1035,6 +1094,53 @@ mod tests {
             if let Some(o) = s.body.intersect(&f) {
                 assert!(matches!(s.kind, SpotKind::Floor | SpotKind::FloorSit), "{s:?}");
                 assert!(o.y >= f.y + f.h / 2 && s.cover_pct <= 12.0, "{s:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn follow_stays_on_her_monitor() {
+        // A workspace switch on her monitor: a window top there (her favourite), whatever the
+        // pointer's monitor; on its floor if none; already on the floor, she stays.
+        let mut fx = tiled();
+        fx.stack.push(r(4, 300, 900, 900, 500));
+        fx.eligible.push(true);
+        fx.focused = Some(fx.stack[2]);
+        fx.cursor = (3000, 700);
+        fx.her = (1500, 1588);
+        let base = fx.world();
+        let perched = Spot { kind: SpotKind::Edge { win: 9 }, anchor: (1500, 700), body: boxes().sit.offset(1500, 700), area: 0, ..base.her };
+        for seed in 0..300 {
+            let w = World { her: perched, prefer: Some(1), ..base.clone() };
+            let s = resolve(&Goal::Follow, &w, &mut Rng::new(seed)).unwrap();
+            assert_eq!((s.area, s.kind), (0, SpotKind::Edge { win: 4 }), "seed {seed}");
+            let s = resolve(&Goal::Follow, &World { prefer: Some(1), ..base.clone() }, &mut Rng::new(seed)).unwrap();
+            assert_eq!((s.area, s.kind), (0, SpotKind::Edge { win: 4 }), "seed {seed}: from the floor");
+        }
+        // No window top on her monitor (only i3 tiles under the bar): perched, her monitor's
+        // floor; on the floor, no move.
+        let fx = tiled();
+        let base = fx.world();
+        for seed in 0..300 {
+            let w = World { her: perched, prefer: Some(1), ..base.clone() };
+            let s = resolve(&Goal::Follow, &w, &mut Rng::new(seed)).unwrap();
+            assert!(s.area == 0 && matches!(s.kind, SpotKind::Floor | SpotKind::FloorSit) && s.anchor.1 == 1588, "seed {seed}: {s:?}");
+            assert!(resolve(&Goal::Follow, &World { prefer: Some(1), ..base.clone() }, &mut Rng::new(seed)).is_err(), "seed {seed}");
+        }
+    }
+
+    #[test]
+    fn beside_never_past_its_monitor() {
+        // His log: `focus_edge spot=beside 4595,738 -> 2388,1430`. A tile at DP-3's left side
+        // (no room on top): the spot left of it is on eDP, and DP-3's floor there is mid-air.
+        let tile = r(31, 2560, 29, 2560, 709);
+        for cursor in [(3000, 400), (4800, 400)] {
+            let fx = Fixture { stack: vec![tile], eligible: vec![true], focused: Some(tile), cursor, fs: [false; 2], her: (1842, 1588) };
+            let w = fx.world();
+            let s = resolve(&Goal::FocusEdge, &w, &mut Rng::new(1)).unwrap();
+            assert_eq!(s.anchor.1, AREAS[s.area].bottom() - 12, "on the floor of the monitor it is on: {s:?}");
+            for b in beside_spots(&w, &tile) {
+                assert_eq!(b.anchor.1, AREAS[b.area].bottom() - 12, "{b:?}");
             }
         }
     }
@@ -1689,6 +1795,352 @@ mod tests {
             // After reactions the top wins whenever one is in reach (the test above); on this
             // sparse desk a startled hop off a dragged window often has none within 300 px.
             assert!(react_n >= 20 && react_tops * 20 >= react_n * 7, "seed {seed}: after reactions {react_tops}/{react_n} on a window top ({goals:?})");
+        }
+    }
+
+    // ---- i3 on bella: a workspace switch changes one monitor ---------------------------------
+    // Haseeb: "whenever I change workspaces she tends to go to my other monitor, especially when
+    // sitting"; "she bugs out when I change workspaces". His live log: `why=workspace
+    // goal=follow spot=edge 1842,818 -> 4595,738` and at once `why=focus goal=focus_edge
+    // spot=beside 4595,738 -> 2388,1430`: eDP, DP-3, eDP again, in mid-air at DP-3's floor.
+
+    /// i3 as on bella: eDP-1-1 (monitor 0) has workspace 2, DP-3 (monitor 1) has 1, 3 and 4.
+    /// A switch shows the workspace on its own monitor and focuses it; the pointer warps there
+    /// when the monitor changes (mouse_warping output). The other monitor keeps what it shows.
+    struct I3 {
+        wins: Vec<(u8, WinRect)>,
+        shown: [u8; 2],
+        on: usize,
+        cursor: (i32, i32),
+    }
+
+    impl I3 {
+        fn bella() -> I3 {
+            I3 {
+                wins: vec![
+                    // 2 (eDP): a vertical split, the lower tile's top at 818 (her perch in the log).
+                    (2, r(21, 0, 29, 2560, 789)),
+                    (2, r(22, 0, 818, 2560, 782)),
+                    // 3 (DP-3): a vertical split, the lower tile's top at 738.
+                    (3, r(31, 2560, 29, 2560, 709)),
+                    (3, r(32, 2560, 738, 2560, 702)),
+                    // 4 (DP-3): one tile under the bar (no room on top).
+                    (4, r(41, 2560, 29, 2560, 1411)),
+                    // 1 (DP-3): a tile on the left half, a floating window with room on top.
+                    (1, r(11, 2560, 29, 1280, 1411)),
+                    (1, r(12, 4000, 600, 1000, 600)),
+                ],
+                shown: [2, 4],
+                on: 0,
+                cursor: (1300, 400),
+            }
+        }
+
+        fn switch(&mut self, ws: u8) {
+            let o = usize::from(ws != 2);
+            self.shown[o] = ws;
+            if o != self.on {
+                self.cursor = MONS[o].center();
+            }
+            self.on = o;
+        }
+
+        fn stack(&self) -> Vec<WinRect> {
+            self.wins.iter().filter(|(ws, _)| self.shown.contains(ws)).map(|w| w.1).collect()
+        }
+
+        /// The window under the pointer on the focused workspace, else its first.
+        fn focused(&self) -> Option<WinRect> {
+            let mine: Vec<WinRect> = self.wins.iter().filter(|(ws, _)| *ws == self.shown[self.on]).map(|w| w.1).collect();
+            mine.iter().copied().find(|w| w.contains(self.cursor.0, self.cursor.1)).or(mine.first().copied())
+        }
+
+        fn desk(&self) -> Vec<(u32, usize)> {
+            let st = self.stack();
+            desk_windows(&st, &vec![true; st.len()], &AREAS, &MONS)
+        }
+    }
+
+    /// A move as the test saw it: when, why, from and to (monitor, anchor), the spot kind.
+    #[derive(Clone, Copy, Debug)]
+    struct Hop {
+        t: f64,
+        why: &'static str,
+        from: (usize, (i32, i32)),
+        to: (usize, (i32, i32)),
+        kind: SpotKind,
+    }
+
+    /// Capri on top of `I3`, as brainview runs her: a switch is looked at a beat later
+    /// (`desk_settled`); her perch unmapped by it is `stranded` (`brain_perch_gone`); the focus
+    /// change a switch makes is the workspace rule's (no `Screen::Focus`); every move resolves on
+    /// that moment's world (`world_buf`, monitor = follow) and lands at once.
+    struct Desk {
+        i3: I3,
+        b: crate::brain::Brain,
+        her: Spot,
+        asleep: bool,
+        t: f64,
+        /// `desk_windows` at the last look (before a switch).
+        seen: Vec<(u32, usize)>,
+        rng: Rng,
+        hops: Vec<Hop>,
+    }
+
+    impl Desk {
+        /// She sits on `win`'s top at x, else stands on the floor of x's monitor.
+        fn new(seed: u64, i3: I3, win: Option<u32>, x: i32) -> Desk {
+            use crate::brain::{Brain, Tuning};
+            use crate::settings::{Attention, BrainSettings};
+            let st = BrainSettings { attention: Attention::Off, ..Default::default() };
+            let mut tu = Tuning::new(&st);
+            // Only the screen moves her here (no roams, no micro-hops); every focus change hops.
+            (tu.roam_s, tu.micro_s, tu.first_roam_min_s, tu.focus_p) = ((1e7, 1e7), (1e7, 1e7), 1e7, 1.0);
+            let b = Brain::new(2 * seed + 1, st, tu, None, 0.0);
+            let area = usize::from(x >= 2560);
+            let her = match win {
+                Some(id) => {
+                    let w = i3.wins.iter().find(|w| w.1.id == id).unwrap().1;
+                    Spot { kind: SpotKind::Edge { win: id }, anchor: (x, w.y), body: boxes().sit.offset(x, w.y), area, approach: None, cover_pct: 0.0 }
+                }
+                None => {
+                    let y = AREAS[area].bottom() - 12;
+                    Spot { kind: SpotKind::Floor, anchor: (x, y), body: boxes().stand.offset(x, y), area, approach: None, cover_pct: 0.0 }
+                }
+            };
+            let seen = i3.desk();
+            Desk { i3, b, her, asleep: false, t: 0.0, seen, rng: Rng::new(seed ^ 0x5157), hops: Vec::new() }
+        }
+
+        fn senses(&self) -> crate::brain::Senses {
+            use crate::brain::PlaceKind;
+            let placement = match self.her.kind {
+                SpotKind::Edge { .. } | SpotKind::SitEdge { .. } => PlaceKind::Perch,
+                SpotKind::Float | SpotKind::FloatBeside => PlaceKind::Float,
+                SpotKind::Hang { .. } | SpotKind::Cling { .. } | SpotKind::Peek => PlaceKind::Hang,
+                _ => PlaceKind::Ground,
+            };
+            crate::brain::Senses { now: self.t, placement, asleep: self.asleep, ..Default::default() }
+        }
+
+        /// Tick (every 50 ms, as often as the view could) and land what she decides.
+        fn run_to(&mut self, until: f64) {
+            while self.t < until - 1e-9 {
+                self.t = (self.t + 0.05).min(until);
+                self.decide();
+            }
+        }
+
+        fn decide(&mut self) {
+            use crate::brain::{Arrived, BrainEvent, Intent, React};
+            let d = self.b.tick(&self.senses());
+            for (_, i) in d.intents {
+                match i {
+                    Intent::Move(p) => {
+                        let stack = self.i3.stack();
+                        let eligible = vec![true; stack.len()];
+                        let cursor = self.i3.cursor;
+                        let focused = self.i3.focused();
+                        // world_buf: monitor = "follow".
+                        let cursor_area = AREAS.iter().position(|a| a.contains(cursor.0, cursor.1));
+                        let only = if p.goal == Goal::Leave { follow_area(&MONS, focused, cursor) } else { None };
+                        let prefer = if matches!(p.goal, Goal::Passive { .. } | Goal::Explore | Goal::Rescue | Goal::Follow) { cursor_area } else { None };
+                        let fs = [false; 2];
+                        let w = World {
+                            stack: &stack,
+                            eligible: &eligible,
+                            focused,
+                            areas: &AREAS,
+                            monitors: &MONS,
+                            fullscreen: &fs,
+                            cursor,
+                            her: self.her,
+                            boxes: boxes(),
+                            contact: (-110, 130),
+                            margin: 65,
+                            floor_pad: 12,
+                            sf: 1.0,
+                            cover_max_pct: 12.0,
+                            last_wins: &[],
+                            last_kind: None,
+                            hud_h: 0,
+                            only,
+                            prefer,
+                        };
+                        match resolve(&p.goal, &w, &mut self.rng) {
+                            Ok(s) => {
+                                self.hops.push(Hop { t: self.t, why: p.why, from: (self.her.area, self.her.anchor), to: (s.area, s.anchor), kind: s.kind });
+                                self.her = s;
+                                let a = Arrived { approach: None, arrival: p.arrivals[0], covering: false, why: p.why };
+                                self.b.on_event(BrainEvent::Arrived(a), self.t);
+                            }
+                            Err(_) => {
+                                self.b.on_event(BrainEvent::MoveFailed { busy: false, why: p.why }, self.t);
+                                if self.perch_gone() {
+                                    self.fall();
+                                }
+                            }
+                        }
+                    }
+                    Intent::React(React::Fall) => self.fall(),
+                    _ => {}
+                }
+            }
+        }
+
+        fn perch_gone(&self) -> bool {
+            self.her.win().is_some_and(|w| !self.i3.stack().iter().any(|r| r.id == w))
+        }
+
+        fn fall(&mut self) {
+            let y = AREAS[self.her.area].bottom() - 12;
+            self.her = Spot { kind: SpotKind::Floor, anchor: (self.her.anchor.0, y), body: boxes().stand.offset(self.her.anchor.0, y), ..self.her };
+        }
+
+        fn feed(&mut self, s: crate::brain::Screen) {
+            self.b.on_event(crate::brain::BrainEvent::Screen(s), self.t);
+            self.decide();
+        }
+
+        /// He focuses another window on the monitor he is on (no switch).
+        fn focus(&mut self, id: u32) {
+            let w = self.i3.wins.iter().find(|w| w.1.id == id).unwrap().1;
+            self.i3.cursor = w.center();
+            self.feed(crate::brain::Screen::Focus);
+            self.seen = self.i3.desk();
+        }
+
+        /// `$mod+N`: i3 switches; her perch, if it went with it, is reported 300 ms on
+        /// (`PERCH_GONE_GRACE`), else the switch is looked at 450 ms on.
+        fn switch(&mut self, ws: u8) {
+            self.i3.switch(ws);
+            let until = self.t + 0.3;
+            self.run_to(until);
+            let after = self.i3.desk();
+            if self.perch_gone() {
+                let s = workspace_switch(&MONS, self.i3.focused(), self.i3.cursor, self.her.area, true, Some(&self.seen), &after);
+                self.feed(s);
+            } else {
+                let until = self.t + 0.15;
+                self.run_to(until);
+                let s = workspace_switch(&MONS, self.i3.focused(), self.i3.cursor, self.her.area, false, Some(&self.seen), &after);
+                self.feed(s);
+            }
+            self.seen = after;
+        }
+
+        /// The moves the screen made (a workspace switch, a focus change, a closed perch).
+        fn relocations(&self) -> Vec<Hop> {
+            self.hops.iter().copied().filter(|h| matches!(h.why, "workspace" | "focus" | "perch_closed")).collect()
+        }
+
+        /// Never two of her own moves within 10 s of a relocation (no chain, no ping-pong), and
+        /// on the floor only at her monitor's floor (never in mid-air).
+        fn assert_no_chain(&self, seed: u64) {
+            for (i, h) in self.hops.iter().enumerate() {
+                if matches!(h.kind, SpotKind::Floor | SpotKind::FloorSit | SpotKind::Beside) {
+                    assert_eq!(h.to.1.1, AREAS[h.to.0].bottom() - 12, "seed {seed}: mid-air {h:?}");
+                }
+                if matches!(h.why, "workspace" | "focus" | "perch_closed")
+                    && let Some(n) = self.hops.get(i + 1)
+                {
+                    assert!(n.t - h.t >= 10.0 - 1e-6, "seed {seed}: {h:?} then {n:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn i3_switch_on_the_other_monitor_leaves_her_be() {
+        // She is on eDP (workspace 2): sitting on the lower tile like in his log, or on the
+        // floor. He goes to DP-3 and back and around there: eDP never changed, she stays put.
+        for seed in 0..60 {
+            for (win, x) in [(Some(22), 1437), (Some(22), 1842), (None, 1437)] {
+                let mut d = Desk::new(seed, I3::bella(), win, x);
+                let start = d.her;
+                d.run_to(50.0);
+                d.switch(3); // eDP -> DP-3 (DP-3: 4 -> 3)
+                d.run_to(80.0);
+                d.switch(4); // on DP-3 (3 -> 4)
+                d.run_to(110.0);
+                d.switch(2); // back to eDP (it showed 2 all along)
+                d.run_to(140.0);
+                d.switch(1); // DP-3 (4 -> 1)
+                d.run_to(170.0);
+                assert!(d.hops.is_empty(), "seed {seed} {win:?}: {:?}", d.hops);
+                assert_eq!(d.her, start, "seed {seed}");
+            }
+        }
+    }
+
+    #[test]
+    fn i3_switch_on_her_monitor_moves_her_on_it() {
+        for seed in 0..60 {
+            // She sits on workspace 3's lower tile (DP-3), he works there.
+            let mut i3 = I3::bella();
+            i3.switch(3);
+            i3.cursor = (3000, 300);
+            let mut d = Desk::new(seed, i3, Some(32), 4595);
+            d.run_to(50.0);
+            // DP-3: 3 -> 4. Her perch went with 3: she lands on DP-3 at once (4 has no window
+            // top: the floor), never on eDP.
+            d.switch(4);
+            d.run_to(70.0);
+            let r = d.relocations();
+            assert_eq!(r.len(), 1, "seed {seed}: {r:?}");
+            assert!(r[0].why == "workspace" && r[0].t < 51.0 && r[0].to.0 == 1, "seed {seed}: {r:?}");
+            // DP-3: 4 -> 1 while she stands on its floor: a window top on 1 there (not his
+            // focused tile), in 0.8–2 s.
+            d.switch(1);
+            d.run_to(100.0);
+            let r = d.relocations();
+            assert_eq!(r.len(), 2, "seed {seed}: {r:?}");
+            assert!(r[1].why == "workspace" && r[1].to.0 == 1 && r[1].kind == SpotKind::Edge { win: 12 }, "seed {seed}: {r:?}");
+            assert!((70.8..=72.5).contains(&r[1].t), "seed {seed}: {r:?}");
+            d.assert_no_chain(seed);
+        }
+    }
+
+    #[test]
+    fn i3_focus_then_switch_is_one_move_at_most() {
+        // His log's pair: a focus change (the hop waits 2–5 s), then a switch to DP-3 within a
+        // second. Not two teleports back to back, not over to DP-3 and back, never mid-air.
+        for seed in 0..60 {
+            let mut d = Desk::new(seed, I3::bella(), Some(22), 1842);
+            d.run_to(50.0);
+            d.focus(21);
+            d.run_to(50.6);
+            d.switch(3);
+            d.run_to(80.0);
+            d.assert_no_chain(seed);
+            assert!(d.hops.iter().all(|h| h.from.0 == 0 && h.to.0 == 0), "seed {seed}: she stays on eDP {:?}", d.hops);
+            assert!(d.relocations().iter().all(|h| h.why != "workspace"), "seed {seed}: {:?}", d.hops);
+        }
+    }
+
+    #[test]
+    fn i3_asleep_she_stays_put() {
+        for seed in 0..60 {
+            // On eDP's tile top, asleep: he works around on DP-3.
+            let mut d = Desk::new(seed, I3::bella(), Some(22), 1437);
+            d.asleep = true;
+            let start = d.her;
+            for (t, ws) in [(50.0, 3), (80.0, 4), (110.0, 2), (140.0, 1)] {
+                d.run_to(t);
+                d.switch(ws);
+            }
+            d.run_to(170.0);
+            assert!(d.hops.is_empty() && d.her == start, "seed {seed}: {:?}", d.hops);
+            // On DP-3's floor, asleep: DP-3 itself switches (4 -> 1, a window top there).
+            let mut i3 = I3::bella();
+            i3.switch(4);
+            let mut d = Desk::new(seed, i3, None, 3300);
+            d.asleep = true;
+            let start = d.her;
+            d.run_to(50.0);
+            d.switch(1);
+            d.run_to(80.0);
+            assert!(d.hops.is_empty() && d.her == start, "seed {seed}: {:?}", d.hops);
         }
     }
 }

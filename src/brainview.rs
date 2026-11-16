@@ -230,6 +230,10 @@ pub(super) struct BrainHost {
     /// that went with it has had its grace).
     desk_at: Option<Instant>,
     desk_check: Option<Instant>,
+    /// The windows she may sit on, by monitor (`places::desk_windows`), at the last look, and
+    /// as they were before the switch under way: did it change her monitor?
+    desk_seen: Option<Vec<(u32, usize)>>,
+    desk_before: Option<Vec<(u32, usize)>>,
     /// Her perch window's last position and when (a fast drag startles her), and the drag
     /// already reported.
     perch_seen: Option<(u32, Instant, i32, i32)>,
@@ -431,6 +435,8 @@ impl Avatar {
             focus_seen: None,
             desk_at: None,
             desk_check: None,
+            desk_seen: None,
+            desk_before: None,
             perch_seen: None,
             drag_told: None,
             watch_box: None,
@@ -829,6 +835,13 @@ impl Avatar {
             self.brain_move(p, now);
             dirty = true;
         }
+        // The desk at launch: the first switch is told from it.
+        if self.loaded && self.brain.as_ref().is_some_and(|h| h.desk_seen.is_none() && h.desk_check.is_none()) {
+            let d = self.desk_windows();
+            if let Some(h) = &mut self.brain {
+                h.desk_seen = Some(d);
+            }
+        }
         // The focus at launch: the first change after it is a focus change.
         if self.loaded && self.brain.as_ref().is_some_and(|h| h.focus_seen.is_none()) {
             let f = self.brain_focused().map(|r| r.id);
@@ -889,7 +902,7 @@ impl Avatar {
         let follow = h.settings.brain.monitor == crate::settings::MonitorPolicy::Follow;
         let cursor_area = areas.iter().position(|a| a.contains(cursor.0, cursor.1)).or_else(|| monitors.iter().position(|m| m.contains(cursor.0, cursor.1)));
         let only = if follow && *goal == Goal::Leave { places::follow_area(&monitors, focused, cursor) } else { None };
-        let prefer = if follow && matches!(goal, Goal::Passive { .. } | Goal::Explore | Goal::Rescue | Goal::Follow) { cursor_area } else { None };
+        let prefer = if follow && matches!(goal, Goal::Passive { .. } | Goal::Explore | Goal::Rescue) { cursor_area } else { None };
         Some(WorldBuf { stack, eligible, areas, monitors, fullscreen, focused, cursor, her, senses_fs, hud_h, only, prefer })
     }
 
@@ -1616,8 +1629,13 @@ impl Avatar {
         }
         match ev {
             WatchEvent::Focus => {
+                // A look at the desk (not while a switch is being looked at: that one is "before").
+                let desk = self.brain.as_ref().is_some_and(|h| h.desk_check.is_none()).then(|| self.desk_windows());
                 let f = self.brain_focused().map(|r| r.id);
                 let Some(h) = &mut self.brain else { return };
+                if desk.is_some() {
+                    h.desk_seen = desk;
+                }
                 if f.is_none() || f == h.focus_seen {
                     return;
                 }
@@ -1631,6 +1649,10 @@ impl Avatar {
             }
             WatchEvent::Desktop => {
                 if let Some(h) = &mut self.brain {
+                    // The desk before it (a second switch within the beat keeps the first's).
+                    if h.desk_check.is_none() {
+                        h.desk_before = h.desk_seen.take();
+                    }
                     h.desk_at = Some(now);
                     // Where she is, once a perch that went with the old workspace has had its
                     // grace (edges::PERCH_GONE_GRACE) and the WM has settled.
@@ -1649,11 +1671,23 @@ impl Avatar {
         }
     }
 
-    /// A beat after a workspace switch: she follows if she isn't on the monitor he works on.
+    /// The windows she may sit on now, by monitor (the test's arena and window list applied).
+    fn desk_windows(&self) -> Vec<(u32, usize)> {
+        let (areas, monitors) = self.rag_areas();
+        let allowed = self.brain_allowed_windows();
+        let (stack, eligible): (Vec<WinRect>, Vec<bool>) =
+            self.x11.stack().into_iter().map(|(r, e)| (r, e && r.id != self.x11.win && allowed.as_ref().is_none_or(|w| w.contains(&r.id)))).unzip();
+        places::desk_windows(&stack, &eligible, &areas, &monitors)
+    }
+
+    /// A beat after a workspace switch: did it change her monitor (`places::workspace_switch`)?
     fn desk_settled(&mut self, now: Instant) {
-        if let Some(h) = &mut self.brain {
+        let after = self.desk_windows();
+        let before = self.brain.as_mut().and_then(|h| {
             h.desk_check = None;
-        }
+            h.desk_seen = Some(after.clone());
+            h.desk_before.take()
+        });
         // Mid-move, carried, or her perch's own verdict is still out: that decides.
         if self.teleport.is_some() || self.rag.is_some() || self.press.is_some() || self.brain_in_flight() || self.perch_gone.is_some() {
             return;
@@ -1661,13 +1695,16 @@ impl Avatar {
         let (areas, monitors) = self.rag_areas();
         let her = self.her_spot(&areas, &monitors);
         let cursor = self.brain_cursor();
-        let his = areas.iter().position(|a| a.contains(cursor.0, cursor.1)).or_else(|| places::follow_area(&monitors, self.brain_focused(), cursor));
-        let away = his.is_some_and(|i| i != her.area);
+        let focused = self.brain_focused();
+        let s = places::workspace_switch(&monitors, focused, cursor, her.area, false, before.as_deref(), &after);
+        let here = matches!(s, crate::brain::Screen::Workspace { here: true, .. });
+        elog!("synaps-avatar: workspace switch {} (her monitor {})", if here { "on her monitor: she moves on it" } else { "not on her monitor: she stays put" }, her.area);
         if let Some(h) = &mut self.brain {
             let t = h.bnow(now) - h.brain.start();
-            h.write(serde_json::json!({ "t": t, "k": "desk", "her_area": her.area, "his_area": his, "cursor": [cursor.0, cursor.1], "away": away }));
+            h.write(serde_json::json!({ "t": t, "k": "desk", "her_area": her.area, "cursor": [cursor.0, cursor.1], "focus": focused.as_ref().map(rect_json),
+                                        "before": before.map(|b| b.len()), "after": after.len(), "here": here }));
         }
-        self.brain_feed(BrainEvent::Screen(crate::brain::Screen::Workspace { away, stranded: false }), now);
+        self.brain_feed(BrainEvent::Screen(s), now);
     }
 
     /// Her perch went away for good (past the grace): closed (another window's top or the
@@ -1680,11 +1717,16 @@ impl Avatar {
         let switched = h.desk_at.is_some_and(|d| now.duration_since(d) < Duration::from_millis(1500));
         let exists = self.x11.window_exists(win);
         let s = if switched && exists {
-            elog!("synaps-avatar: perch 0x{win:x} left with the workspace: she follows");
-            if let Some(h) = &mut self.brain {
+            elog!("synaps-avatar: perch 0x{win:x} left with the workspace: she moves on her monitor");
+            let after = self.desk_windows();
+            let before = self.brain.as_mut().and_then(|h| {
                 h.desk_check = None;
-            }
-            crate::brain::Screen::Workspace { away: true, stranded: true }
+                h.desk_seen = Some(after.clone());
+                h.desk_before.take()
+            });
+            let (areas, monitors) = self.rag_areas();
+            let her = self.her_spot(&areas, &monitors);
+            places::workspace_switch(&monitors, self.brain_focused(), self.brain_cursor(), her.area, true, before.as_deref(), &after)
         } else {
             let wb = self.world_buf(&Goal::Rescue);
             let res = wb.as_ref().and_then(|b| self.world(b)).map(|w| places::rescue_target(&w));
