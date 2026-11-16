@@ -320,3 +320,65 @@ fn caches_hold_and_freeze() {
     assert_eq!(os.work_areas().len(), 2, "stale areas: freezing takes a fresh snapshot");
     os.freeze_layout(false);
 }
+
+/// Where effect layers show, on a backend with surfaces for them: on those surfaces without a
+/// compositor (her window shows only her figure's shape); in her window when a compositor
+/// blends her and the layer fits in it (separate surfaces over her translucent window got
+/// dark boxes from the compositor around every glint); on surfaces again for what leaves her window
+/// (the bolt). A compositor coming or going moves the layers that are up.
+#[test]
+fn effects_fit_in_her_window_when_composited() {
+    let (os, mut d) = fake(true);
+    let staged = |d: &mut FakeDriver| {
+        let mut v: Vec<_> = d.fx_rects().iter().map(|r| (r.x, r.y, r.w, r.h)).collect();
+        v.sort();
+        v
+    };
+    let star: Vec<ShapeRect> = vec![(4, 0, 2, 10), (0, 4, 10, 2)];
+    os.set_body_size(BODY_SIZE.0, BODY_SIZE.1);
+    os.move_to(100, 100).unwrap();
+    // Shape mode: every layer on a surface of its own, her window paints none.
+    os.force_composited(Some(false));
+    os.fx_set(30, 0xffc2e2, (150, 160), (10, 10), &star).unwrap();
+    os.fx_set_below(29, 30, 0xffc2e2, (149, 159), (12, 12), &[(5, 0, 2, 12), (0, 5, 12, 2)]).unwrap();
+    os.fx_set(0, 0xff0000, (100, 300), (900, 40), &[(0, 0, 900, 4)]).unwrap();
+    os.fx_under(14, 0x05060a, (110, 480), (200, 6), Some(&[(0, 0, 200, 3)])).unwrap();
+    assert!(!os.fx_in_scene() && !os.fx_take_dirty());
+    assert!(!os.redraw_costly(), "server-painted steps are free: no need to ride other redraws");
+    assert_eq!(staged(&mut d), [(100, 300, 900, 4), (110, 480, 200, 3), (149, 159, 12, 12), (150, 160, 10, 10)]);
+    // The shadow follows her with its rects kept (`None`), still on its surface.
+    os.fx_under(14, 0x05060a, (112, 480), (200, 6), None).unwrap();
+    assert!(staged(&mut d).contains(&(112, 480, 200, 3)) && os.fx_scene(true).is_empty());
+    // A compositor comes: what fits in her window moves into it (no surface left over), the bolt
+    // reaching past her stays on its own.
+    os.force_composited(Some(true));
+    os.fx_reroute();
+    assert!(os.fx_in_scene() && os.fx_take_dirty(), "her window needs a frame for them");
+    assert!(os.redraw_costly(), "each step in her window is a redraw of her: steps ride redraws");
+    assert_eq!(staged(&mut d), [(100, 300, 900, 4)], "only the bolt keeps a surface");
+    assert_eq!(os.fx_scene(false), [((54, 59, 2, 12), 0xffc2e2), ((49, 64, 12, 2), 0xffc2e2), ((54, 60, 2, 10), 0xffc2e2), ((50, 64, 10, 2), 0xffc2e2)], "glow below its core, window-local");
+    assert_eq!(os.fx_scene(true), [((12, 380, 200, 3), 0x05060a)], "the shadow under her body");
+    // The next glint step lands in her window too; a layer leaving it gets a surface, rects and all.
+    os.fx_set(30, 0xffffff, (151, 160), (10, 10), &star).unwrap();
+    assert!(os.fx_take_dirty() && os.fx_scene(false).last() == Some(&((51, 64, 10, 2), 0xffffff)));
+    assert_eq!(staged(&mut d).len(), 1, "a glint step never maps a surface over her");
+    os.fx_under(14, 0x05060a, (350, 480), (200, 6), None).unwrap();
+    assert!(staged(&mut d).contains(&(350, 480, 200, 3)) && os.fx_scene(true).is_empty() && os.fx_take_dirty());
+    // Without her size (before `adopt`) nothing is known to fit: surfaces, as before.
+    os.set_body_size(0, 0);
+    os.fx_set(31, 0xffc2e2, (150, 160), (10, 10), &star).unwrap();
+    assert!(staged(&mut d).contains(&(150, 160, 10, 10)));
+    os.fx_unmap(31);
+    os.set_body_size(BODY_SIZE.0, BODY_SIZE.1);
+    // The compositor goes: everything back on surfaces, her window paints nothing.
+    os.force_composited(Some(false));
+    os.fx_reroute();
+    assert!(!os.fx_in_scene() && os.fx_scene(false).is_empty() && os.fx_scene(true).is_empty());
+    assert_eq!(staged(&mut d), [(100, 300, 900, 4), (149, 159, 12, 12), (151, 160, 10, 10), (350, 480, 200, 3)]);
+    os.fx_unmap(30);
+    assert_eq!(staged(&mut d).len(), 3);
+    os.force_composited(Some(true));
+    os.fx_reroute();
+    os.fx_hide();
+    assert!(staged(&mut d).is_empty() && os.fx_scene(false).is_empty() && os.fx_scene(true).is_empty());
+}

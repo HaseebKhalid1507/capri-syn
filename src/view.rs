@@ -355,10 +355,11 @@ const NOTE_SCALE: f32 = 1.15;
 const POSE_REACH: f32 = 5.0;
 /// Notes fade toward this tint (no alpha without a compositor).
 const NOTE_TINT: u32 = 0x3a4656;
-/// Note animation rate (shaped X windows; no GPUI redraw).
+/// Note animation rate (shaped X windows without a compositor: no GPUI redraw).
 const NOTE_TICK: Duration = Duration::from_millis(40);
-/// Hair glints: a glow and a core layer each, at most four at once. Shaped X windows like
-/// the hearts, so a glint costs no GPUI redraw.
+/// Hair glints: a glow and a core layer each, at most four at once. Effect layers like the
+/// hearts: without a compositor shaped X windows (a glint costs no GPUI redraw), else painted
+/// in her window (`Os::fx_staged`).
 const GLINT_LAYER: usize = NOTE_LAYER + 2 * NOTES_MAX;
 const GLINTS_MAX: usize = 4;
 /// A bob or sway step (1-2 px) alone waits this long for another redraw to ride on (a
@@ -2009,7 +2010,7 @@ impl Avatar {
             self.glint_wait = None;
         }
         // Notes ride the frames drawn anyway too, and move at least every fourth note tick
-        // (6 fps; X11 moves them at 25 without a redraw). Measured in the rig: music at 12 fps
+        // (6 fps; X11 without a compositor moves them at 25 without a redraw). Measured in the rig: music at 12 fps
         // drew 500 frames a minute (1.3 % CPU), the same idle without it 186.
         if costly && !dirty && self.music.is_some() && now.saturating_duration_since(self.notes_at) + Duration::from_millis(5) >= 4 * NOTE_TICK {
             dirty = true;
@@ -3603,9 +3604,11 @@ impl Avatar {
     }
 
     /// Alpha <-> shape mode changed: send both shapes again on the next paint (the bounding
-    /// one is the mode: none in alpha mode, the figure's rects in shape mode).
+    /// one is the mode: none in alpha mode, the figure's rects in shape mode), and show each
+    /// effect layer where the mode puts it.
     pub(super) fn alpha_switched(&mut self) {
         *self.last_shape.borrow_mut() = (vec![(0, 0, 0, 0)], vec![(0, 0, 0, 0)]);
+        self.os.fx_reroute();
     }
 
     fn watch(&mut self, ev: WatchEvent, now: Instant) {
