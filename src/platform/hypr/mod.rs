@@ -325,7 +325,9 @@ impl Desktop for HyprDesktop {
     }
 
     /// Its workspace is its space; a floating window moves without events.
-    /// `windowsMove` (inheriting from `windows`, then `global`), its curve from the same list.
+    /// `windowsMove` (inheriting from `windows`, then `global`). Read when asked: once per move
+    /// seen, nothing at rest. (A layout slid by a window opening starts on it too, measured in
+    /// the rig; its last ~5 % overshoot it doesn't have.)
     fn move_anim(&self) -> Option<MoveAnim> {
         let r = self.ipc.batch(&["j/getoption animations:enabled", "j/animations"]).ok()?;
         move_anim(&r[0], &r[1])
@@ -400,7 +402,7 @@ impl Desktop for HyprDesktop {
 /// The window-move animation from `getoption animations:enabled` and `animations` (a pair of
 /// lists: the leaves, a leaf not overridden inherits its parent's; the curves).
 fn move_anim(enabled: &serde_json::Value, v: &serde_json::Value) -> Option<MoveAnim> {
-    if enabled["int"].as_i64() == Some(0) {
+    if enabled["bool"] == false || enabled["int"].as_i64() == Some(0) {
         return Some(MoveAnim { ms: 0.0, bezier: [0.0, 0.0, 1.0, 1.0] });
     }
     let (leaves, curves) = (v.get(0)?.as_array()?, v.get(1)?.as_array()?);
@@ -635,7 +637,7 @@ mod tests {
                 { "name": "overshot", "X0": 0.13, "Y0": 0.99, "X1": 0.29, "Y1": 1.1 }
             ]])
         };
-        let on = json!({ "int": 1 });
+        let on = json!({ "bool": true });
         let a = move_anim(&on, &leaves(true)).unwrap();
         assert_eq!((a.ms, a.bezier), (500.0, [0.05, 0.9, 0.1, 1.05]));
         // windowsMove not set: windows' (the leaf's parent).
@@ -643,6 +645,8 @@ mod tests {
         assert_eq!((a.ms, a.bezier), (600.0, [0.13, 0.99, 0.29, 1.1]));
         // Animations off: it jumps.
         assert_eq!(move_anim(&json!({ "int": 0 }), &leaves(true)).unwrap().ms, 0.0);
+        assert_eq!(move_anim(&json!({ "option": "animations:enabled", "bool": false, "set": true }), &leaves(true)).unwrap().ms, 0.0);
+        assert_eq!(move_anim(&json!({ "option": "animations:enabled", "bool": true, "set": true }), &leaves(true)).unwrap().ms, 500.0);
         // The curve: there at the end, early most of the way (wind), past it on the way (overshoot).
         let a = move_anim(&on, &leaves(true)).unwrap();
         assert!(a.progress(0.0).abs() < 1e-3 && (a.progress(1.0) - 1.0).abs() < 1e-3);

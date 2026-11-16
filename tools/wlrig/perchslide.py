@@ -41,14 +41,16 @@ def measure(frames, R, xs):
     return out
 
 
-def run(name, setup, move):
+def run(name, setup, move, seat):
     setup()
     print(f"{name}: perch", ctl("perch")[:60], flush=True)
     time.sleep(3.0)
     st = json.loads(ctl("state"))
     w, g = st["window"], st["ground"]
     R = (max(0, g[0] - 500), 0, 1000, 1600)
-    xs = (g[0] - R[0], min(R[2] - 1, g[0] - R[0] + 380))
+    # The seat's colour in a column of it clear of her (she's ~300 px wide about her ground x).
+    cols = [x for x in range(max(seat[0] + 20, R[0]), min(seat[1] - 20, R[0] + R[2])) if abs(x - g[0]) > 200]
+    xs = (g[0] - R[0], max(cols, key=lambda x: abs(x - g[0])) - R[0])
     stop, frames = threading.Event(), []
     th = threading.Thread(target=lambda: frames.extend(record_frames(Grab(), R, 0, stop)))
     th.start()
@@ -89,13 +91,13 @@ with RigApp(BIN, PACK, os.path.join(OUT, "perchslide-app.log")) as r:
 
     def tiled_move():
         dsp('hl.dsp.layout("preselect u")')
-        w.toplevel("ps-b", 800, 600, OTHER)
+        w.toplevel("ps-n", 800, 600, OTHER)
 
     cases = os.environ.get("CASES", "tiled,float").split(",")
     if "tiled" in cases:
-        run("tiled", tiled, tiled_move)
+        run("tiled", tiled, tiled_move, (14, 2546))
         w.destroy("ps-a")
-        w.destroy("ps-b")
+        w.destroy("ps-n")
         ev('hl.config({ general = { gaps_out = 14 } })')
         ctl("perch off")
         time.sleep(2.5)
@@ -107,5 +109,5 @@ with RigApp(BIN, PACK, os.path.join(OUT, "perchslide-app.log")) as r:
         dsp('hl.dsp.focus({ window = "class:^ps-f$" })')
 
     if "float" in cases:
-        run("float", floating, lambda: dsp('hl.dsp.window.move({ x = 700, y = 820, window = "class:^ps-f$" })'))
+        run("float", floating, lambda: dsp('hl.dsp.window.move({ x = 700, y = 820, window = "class:^ps-f$" })'), (700, 1800))
         w.destroy("ps-f")

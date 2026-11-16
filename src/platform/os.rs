@@ -255,8 +255,6 @@ pub struct Os {
     force: Cell<u8>,
     mons: Cached,
     areas: Cached,
-    /// The compositor's window-move animation, as read at a layout generation (`perch_glide`).
-    move_anim: Cell<Option<(u64, Option<MoveAnim>)>>,
     /// While she's carried or flying: both caches stay as snapshotted at the grab (no round
     /// trip inside a 60 Hz tick).
     frozen: Cell<bool>,
@@ -291,7 +289,6 @@ impl Os {
             force: Cell::new(0),
             mons: RefCell::new(None),
             areas: RefCell::new(None),
-            move_anim: Cell::new(None),
             frozen: Cell::new(false),
             poll: RefCell::new(None),
             shape_sends: Cell::new(0),
@@ -572,25 +569,16 @@ impl Os {
     }
 
     /// How a perch that jumps follows its window (`Caps::goal_geometry`): on the compositor's
-    /// own move animation (read again after a layout change: a config reload is one), so she
-    /// rides the window instead of trailing it; a plain ease-out where the backend can't say.
-    /// None: she snaps (the window jumps too).
+    /// own animation for that move, so she rides the window instead of trailing it; a plain
+    /// ease-out where the backend can't say. None: she snaps (the window jumps too).
     pub fn perch_glide(&self) -> Option<MoveAnim> {
         if !self.caps.goal_geometry {
             return None;
         }
-        let g = self.layout_gen();
-        match self.move_anim.get() {
-            Some((at, a)) if at == g => a,
-            _ => {
-                let a = match self.desk.move_anim() {
-                    Some(a) if a.ms <= 0.0 => None,
-                    Some(a) => Some(a),
-                    None => Some(MoveAnim::EASE_OUT),
-                };
-                self.move_anim.set(Some((g, a)));
-                a
-            }
+        match self.desk.move_anim() {
+            Some(a) if a.ms <= 0.0 => None,
+            Some(a) => Some(a),
+            None => Some(MoveAnim::EASE_OUT),
         }
     }
 
