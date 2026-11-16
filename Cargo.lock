@@ -6227,6 +6227,7 @@ dependencies = [
  "fast_image_resize",
  "gpui-kit",
  "gpui-pre",
+ "gpui-pre-linux",
  "image",
  "libc",
  "log",

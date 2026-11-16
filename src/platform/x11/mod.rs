@@ -272,7 +272,7 @@ impl X11 {
 
 impl Desktop for X11 {
     fn caps(&self) -> Caps {
-        Caps { shape_mode: true, target_events: true }
+        Caps { shape_mode: true, target_events: true, fx_layers: true }
     }
 
     fn root_size(&self) -> (i32, i32) {

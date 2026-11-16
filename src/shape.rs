@@ -120,6 +120,12 @@ pub fn merge_tol(rects: &[ShapeRect], tol: i32) -> Vec<ShapeRect> {
     out
 }
 
+/// Whether (x, y) is inside any of the rects.
+#[cfg(test)]
+pub fn hit(rects: &[ShapeRect], x: i32, y: i32) -> bool {
+    rects.iter().any(|&(rx, ry, rw, rh)| x >= i32::from(rx) && y >= i32::from(ry) && x < i32::from(rx) + i32::from(rw) && y < i32::from(ry) + i32::from(rh))
+}
+
 /// One rect around all of `rects`.
 pub fn bbox(rects: &[ShapeRect]) -> Option<ShapeRect> {
     let x0 = rects.iter().map(|r| r.0 as i32).min()?;

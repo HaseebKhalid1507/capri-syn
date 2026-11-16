@@ -552,6 +552,8 @@ pub struct WaylandWindowStatePtr {
     frame_loop: Rc<Cell<FrameLoop>>,
     frame_ping: Ping,
     scheduled_frame_at: Rc<Cell<Option<Instant>>>,
+    // synaps-avatar patch (PATCHES.md, PL-1..PL-4)
+    ctl: Rc<layer_ctl::Ctl>,
 }
 
 impl WaylandWindowState {
@@ -775,6 +777,7 @@ pub enum ImeInput {
 impl Drop for WaylandWindow {
     fn drop(&mut self) {
         self.0.frame_loop.set(FrameLoop::Parked);
+        layer_ctl::unregister(&self.0);
 
         let mut state = self.0.state.borrow_mut();
         let surface_id = state.surface.id();
@@ -888,7 +891,9 @@ impl WaylandWindow {
             frame_loop: Rc::new(Cell::new(FrameLoop::Unconfigured)),
             frame_ping,
             scheduled_frame_at: Rc::new(Cell::new(None)),
+            ctl: Rc::new(layer_ctl::Ctl::default()),
         });
+        layer_ctl::register(&this.0);
 
         // Kick things off
         surface.commit();
@@ -960,12 +965,16 @@ impl WaylandWindowStatePtr {
             self.frame_loop.set(FrameLoop::Parked);
             return;
         };
+        // PL-1/PL-3: layer state set while GPUI paints rides on this frame's present.
+        self.ctl.in_frame.set(true);
         request_frame_callback(RequestFrameOptions {
             force_render,
             require_presentation,
             signal_at,
             signal_source,
         });
+        self.ctl.in_frame.set(false);
+        layer_ctl::frame_done(self);
         self.update_ime_enabled();
         drop(callbacks);
 
@@ -2057,6 +2066,8 @@ impl PlatformWindow for WaylandWindow {
             state.pending_frame_callback = Some(callback);
         }
         if renderer.draw(scene) {
+            // The present committed the surface: pending layer state (PL-1) went with it.
+            self.0.ctl.pending.set(false);
             state.presentation = PresentationState::Presented;
             self.0.frame_loop.set(FrameLoop::AwaitingCallback);
         } else {
@@ -2146,34 +2157,13 @@ impl PlatformWindow for WaylandWindow {
 
     fn set_input_region(&self, region: Option<&[Bounds<Pixels>]>) {
         let state = self.borrow();
-        match region {
-            // No region means the whole surface receives input.
-            None => state.surface.set_input_region(None),
-            // A region restricts input to its rectangles. An empty region
-            // receives no input at all.
-            Some(rects) => {
-                let wl_region = state
-                    .globals
-                    .compositor
-                    .create_region(&state.globals.qh, ());
-                for rect in rects {
-                    let rect = rect.map(|pixels| f32::from(pixels) as i32);
-                    wl_region.add(
-                        rect.origin.x,
-                        rect.origin.y,
-                        rect.size.width,
-                        rect.size.height,
-                    );
-                }
-                state.surface.set_input_region(Some(&wl_region));
-                wl_region.destroy();
-            }
+        apply_input_region(&state, region);
+        // PL-3: inside a frame the present carries it (the region lands with the pixels it
+        // belongs to); otherwise commit so it applies at once (it may be the very click to
+        // pass through).
+        if !self.0.ctl.in_frame.get() {
+            state.surface.commit();
         }
-
-        // Commit so the new input region applies immediately. Otherwise it
-        // waits for the next frame, which could be the very click we want to
-        // allow passing through.
-        state.surface.commit();
     }
 
     fn window_decorations(&self) -> Decorations {
@@ -2598,4 +2588,189 @@ fn inset_by_tiling(mut bounds: Bounds<Pixels>, inset: Pixels, tiling: Tiling) ->
     }
 
     bounds
+}
+
+/// The input region of a surface, set (not committed).
+fn apply_input_region(state: &WaylandWindowState, region: Option<&[Bounds<Pixels>]>) {
+    match region {
+        // No region means the whole surface receives input.
+        None => state.surface.set_input_region(None),
+        // A region restricts input to its rectangles. An empty region
+        // receives no input at all.
+        Some(rects) => {
+            let wl_region = state
+                .globals
+                .compositor
+                .create_region(&state.globals.qh, ());
+            for rect in rects {
+                let rect = rect.map(|pixels| f32::from(pixels) as i32);
+                wl_region.add(
+                    rect.origin.x,
+                    rect.origin.y,
+                    rect.size.width,
+                    rect.size.height,
+                );
+            }
+            state.surface.set_input_region(Some(&wl_region));
+            wl_region.destroy();
+        }
+    }
+}
+
+/// synaps-avatar patch (PATCHES.md, PL-1..PL-4): change a layer-shell window at run time.
+///
+/// Keyed by the `wl_surface` pointer its raw window handle gives
+/// (`RawWindowHandle::Wayland(h).surface`). Main thread only, like every GPUI window.
+/// `Commit::WithFrame` (margins, anchor, input region): a change made while GPUI paints the
+/// window is committed by that frame's present, atomically with its pixels. Made outside a
+/// frame, it is committed on the next turn of the event loop, unless a frame is scheduled by
+/// then: that frame's present carries it (and if GPUI skips the draw, the frame commits it).
+pub mod layer_ctl {
+    use super::*;
+
+    pub use gpui::layer_shell::{Anchor, KeyboardInteractivity, Layer};
+
+    /// When a change reaches the compositor.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Commit {
+        /// With the next present (see the module doc).
+        WithFrame,
+        /// Committed and flushed now.
+        Now,
+    }
+
+    #[derive(Default)]
+    pub(super) struct Ctl {
+        /// Inside `frame()`: GPUI is painting, its present commits what is set now.
+        pub(super) in_frame: Cell<bool>,
+        /// Set outside a frame, not committed yet.
+        pub(super) pending: Cell<bool>,
+        /// An idle check is queued.
+        queued: Cell<bool>,
+    }
+
+    thread_local! {
+        static LAYERS: RefCell<HashMap<usize, WaylandWindowStatePtr>> = RefCell::new(HashMap::default());
+    }
+
+    fn key(w: &WaylandWindowStatePtr) -> usize {
+        w.state.borrow().surface.id().as_ptr() as usize
+    }
+
+    pub(super) fn register(w: &WaylandWindowStatePtr) {
+        if w.layer_surface().is_some() {
+            LAYERS.with(|l| l.borrow_mut().insert(key(w), w.clone()));
+        }
+    }
+
+    pub(super) fn unregister(w: &WaylandWindowStatePtr) {
+        let k = key(w);
+        LAYERS.with(|l| l.borrow_mut().remove(&k));
+    }
+
+    fn with<R>(surface: usize, f: impl FnOnce(&WaylandWindowStatePtr, &zwlr_layer_surface_v1::ZwlrLayerSurfaceV1) -> R) -> Option<R> {
+        let w = LAYERS.with(|l| l.borrow().get(&surface).cloned())?;
+        let ls = w.layer_surface()?;
+        Some(f(&w, &ls))
+    }
+
+    fn commit_now(w: &WaylandWindowStatePtr) {
+        w.ctl.pending.set(false);
+        let state = w.state.borrow();
+        state.surface.commit();
+        if let Some(b) = state.surface.backend().upgrade() {
+            b.flush().ok();
+        }
+    }
+
+    fn commit(w: &WaylandWindowStatePtr, c: Commit) {
+        if c == Commit::Now {
+            commit_now(w);
+            return;
+        }
+        if w.ctl.in_frame.get() {
+            return;
+        }
+        w.ctl.pending.set(true);
+        if w.ctl.queued.replace(true) {
+            return;
+        }
+        let this = w.clone();
+        let executor = w.state.borrow().globals.executor.clone();
+        executor
+            .spawn(async move {
+                this.ctl.queued.set(false);
+                let coming = matches!(
+                    this.frame_loop.get(),
+                    FrameLoop::Scheduled | FrameLoop::RescheduleRequested | FrameLoop::RetryScheduled
+                );
+                if this.ctl.pending.get() && !coming {
+                    commit_now(&this);
+                }
+            })
+            .detach();
+    }
+
+    /// End of a frame: whatever is still pending (GPUI didn't draw) is committed now.
+    pub(super) fn frame_done(w: &WaylandWindowStatePtr) {
+        if w.ctl.pending.get() {
+            commit_now(w);
+        }
+    }
+
+    /// PL-1: margins (top, right, bottom, left), logical px. False: not a layer window.
+    pub fn set_margin(surface: usize, m: [i32; 4], c: Commit) -> bool {
+        with(surface, |w, ls| {
+            ls.set_margin(m[0], m[1], m[2], m[3]);
+            commit(w, c);
+        })
+        .is_some()
+    }
+
+    /// PL-1: the anchor.
+    pub fn set_anchor(surface: usize, a: Anchor, c: Commit) -> bool {
+        with(surface, |w, ls| {
+            ls.set_anchor(super::super::layer_shell::wayland_anchor(a));
+            commit(w, c);
+        })
+        .is_some()
+    }
+
+    /// PL-3: the input region (None: all of it; empty: none), logical px, committed as
+    /// `Commit::WithFrame` (GPUI's own `Window::set_input_region` commits at once outside a frame).
+    pub fn set_input_region(surface: usize, rects: Option<&[Bounds<Pixels>]>) -> bool {
+        with(surface, |w, _| {
+            apply_input_region(&w.state.borrow(), rects);
+            commit(w, Commit::WithFrame);
+        })
+        .is_some()
+    }
+
+    /// PL-2: keyboard interactivity, committed now (the compositor gives an Exclusive surface
+    /// the keyboard in that commit).
+    pub fn set_keyboard_interactivity(surface: usize, k: KeyboardInteractivity) -> bool {
+        with(surface, |w, ls| {
+            ls.set_keyboard_interactivity(super::super::layer_shell::wayland_keyboard_interactivity(k));
+            commit_now(w);
+        })
+        .is_some()
+    }
+
+    /// PL-4: the layer (zwlr_layer_surface_v1 v2+), committed now.
+    pub fn set_layer(surface: usize, l: Layer) -> bool {
+        with(surface, |w, ls| {
+            if ls.version() < 2 {
+                return false;
+            }
+            ls.set_layer(super::super::layer_shell::wayland_layer(l));
+            commit_now(w);
+            true
+        })
+        .unwrap_or(false)
+    }
+
+    /// Commit whatever is pending on the surface now, and flush.
+    pub fn commit_pending(surface: usize) -> bool {
+        with(surface, |w, _| commit_now(w)).is_some()
+    }
 }

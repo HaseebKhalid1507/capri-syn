@@ -21,6 +21,9 @@ synaps-client = { path = "crates/synaps-client" }
 # Longbridge's GPUI Kit pins Zed's GPUI snapshot exactly; both pins are spelled out so neither drifts.
 gpui-kit = { version = "=0.9.1", features = ["syntect", "profiler"] }
 gpui-pre = "=0.3.12"
+# Its Linux platform, vendored and patched (vendor/gpui-pre-linux/PATCHES.md): `layer_ctl`, her
+# layer surfaces' margins, input region and keyboard at run time (the Hyprland backend).
+gpui-pre-linux = "=0.3.12"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 async-channel = "2"

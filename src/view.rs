@@ -1713,6 +1713,9 @@ impl Avatar {
         self.art_fetch(cx);
         self.sync_shadow();
         self.sync_pointer_watch();
+        if self.os.fx_take_dirty() {
+            cx.notify();
+        }
         self.ticker.set(self.next_deadline());
     }
 
@@ -1966,7 +1969,8 @@ impl Avatar {
             self.pose_last = pose;
             self.pose_wait = None;
         }
-        if dirty {
+        // Effects painted in her own window (no effect surfaces on this desktop) need a frame.
+        if dirty || self.os.fx_take_dirty() {
             cx.notify();
         }
         self.schedule(cx);
@@ -4409,6 +4413,11 @@ impl Render for Avatar {
         let menu_cell: Cell2 = Rc::new(Cell::new(None));
         let tag_cell: Cell2 = Rc::new(Cell::new(None));
         let mut root = div().size_full().relative().font_family(self.font.clone()).text_color(rgb(pal.text));
+        // Effect layers under her (the perch shadow), when her window paints them.
+        if self.os.fx_in_scene() {
+            let os = self.os.clone();
+            root = root.child(canvas(|_, _, _| (), move |_, _, window, _| os.paint_fx(window, true, sf)).absolute().top_0().left_0().size_full());
+        }
 
         // The body.
         let plan2 = plan.clone();
@@ -5737,6 +5746,8 @@ impl Render for Avatar {
                         }
                     }
                     os.flush();
+                    // When her window paints the effects: the ones over her, last.
+                    os.paint_fx(window, false, sf);
                     // Never an empty bounding shape: X then reports the window fully obscured
                     // and GPUI stops drawing it for good.
                     if visible.is_empty() {
