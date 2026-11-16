@@ -2732,6 +2732,50 @@ mod tests {
     }
 
     #[test]
+    fn workspace_focus_workspace_never_chains() {
+        // His log, 02:52: `why=workspace follow 1356,818 -> 4058,1430 teleport`, `why=focus
+        // focus_edge 4058,1430 -> 2360,1590 teleport`, `why=workspace follow 2360,1590 ->
+        // 3004,1430 glitch`: three relocations back to back across both monitors.
+        let perch = |t: f64| Senses { placement: PlaceKind::Perch, ..here(t) };
+        let ws = |here: bool, stranded: bool| Screen::Workspace { here, stranded };
+        let thirds = [ws(true, false), ws(false, false), ws(true, true)];
+        for seed in 0..200 {
+            // Seconds apart, as in the log: the first moves her; the focus change and the
+            // second switch inside its gap don't (a switch that strands her perch: she falls).
+            for sc in thirds {
+                let mut b = jumpy(seed);
+                let r = run(&mut b, 0.0, 70.0, false, &perch, &[screen(40.0, ws(true, false)), screen(42.7, Screen::Focus), screen(44.0, sc)]);
+                let m = whys(&r);
+                assert!(m.len() == 1 && m[0].1 == "workspace", "seed {seed} {sc:?}: {m:?}");
+                let fall = if sc == ws(true, true) { vec![(44.0, React::Fall)] } else { vec![] };
+                assert_eq!(reacts(&r), fall, "seed {seed} {sc:?}");
+            }
+            // Spread out: the workspace move, a focus move once its gap is over, then a switch
+            // anywhere inside the focus move's gap: no move inside it, no teleport chained on it.
+            let pilot = [screen(40.0, ws(true, false)), screen(53.0, Screen::Focus)];
+            let m = whys(&run(&mut jumpy(seed), 0.0, 70.0, false, &perch, &pilot));
+            assert!(m.len() == 2 && m[0].1 == "workspace" && m[1].1 == "focus" && m[1].0 - m[0].0 >= 10.0 - 1e-6, "seed {seed}: {m:?}");
+            let f = m[1].0;
+            for k in 0..10 {
+                let at = f + 0.3 + k as f64;
+                for sc in thirds {
+                    let mut b = jumpy(seed);
+                    let r = run(&mut b, 0.0, f + 30.0, false, &perch, &[pilot[0], pilot[1], screen(at, sc)]);
+                    let m = whys(&r);
+                    assert!(m[..2] == [(m[0].0, "workspace"), (f, "focus")], "seed {seed} {sc:?} at f+{:.1}: {m:?}", at - f);
+                    // A switch on her monitor late in the gap may still move her once it's over.
+                    assert!(m[2..].iter().all(|x| x.0 >= f + 10.0 - 1e-6 && x.1 == "workspace" && sc == ws(true, false)), "seed {seed} {sc:?} at f+{:.1}: {m:?}", at - f);
+                    if at + 2.0 < f + 10.0 {
+                        assert_eq!(m.len(), 2, "seed {seed} {sc:?} at f+{:.1}: {m:?}", at - f);
+                    }
+                    let fall = if sc == ws(true, true) { vec![(at, React::Fall)] } else { vec![] };
+                    assert_eq!(reacts(&r), fall, "seed {seed} {sc:?} at f+{:.1}", at - f);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn protected_summons_win_over_reactions() {
         // A focus hop waits for its beat; a prompt summon comes first and the hop is dropped.
         for seed in 0..200 {

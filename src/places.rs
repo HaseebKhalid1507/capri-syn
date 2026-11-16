@@ -2189,6 +2189,62 @@ mod tests {
     }
 
     #[test]
+    fn i3_replay_0252_workspace_focus_workspace() {
+        // His log, 02:52: `why=workspace 1356,818 -> 4058,1430 teleport`, `why=focus 4058,1430
+        // -> 2360,1590 teleport`, `why=workspace 2360,1590 -> 3004,1430 glitch`, back to back.
+        let mon = |d: &Desk| d.her.area;
+        for seed in 0..60 {
+            // As it began: she sits on eDP's lower tile at 1356,818. He goes to DP-3, clicks a
+            // window there, comes back to eDP, switches DP-3: seconds apart.
+            let mut d = Desk::new(seed, I3::bella(), Some(22), 1356);
+            d.run_to(50.0);
+            d.switch(3);
+            d.run_to(51.6);
+            d.focus(31);
+            d.run_to(53.0);
+            d.switch(2);
+            d.run_to(54.0);
+            d.switch(4);
+            d.run_to(80.0);
+            if seed == 0 {
+                println!("{}", d.log.join("\n"));
+            }
+            d.assert_no_chain(seed);
+            // No switch moved her (eDP never changed while she was on it); his click on DP-3
+            // may take her there once; nothing brings her back: one monitor change at most.
+            assert!(d.hops.iter().all(|h| h.why == "focus"), "seed {seed}: {:#?}", d.log);
+            assert!(d.hops.len() <= 1, "seed {seed}: {:#?}", d.log);
+            // The switch first on her monitor (she is on DP-3's floor, DP-3 goes 4 -> 1): she
+            // moves on DP-3; his click, his trip to eDP and DP-3's next switch inside the gap
+            // don't move her again (her window top went with 1: she drops to DP-3's floor).
+            let mut d = Desk::new(seed, I3::bella(), None, 3300);
+            d.run_to(50.0);
+            d.switch(1);
+            d.run_to(53.0);
+            let first = d.hops.clone();
+            assert!(first.len() == 1 && first[0].why == "workspace" && first[0].to.0 == 1, "seed {seed}: {:#?}", d.log);
+            d.run_to(first[0].t + 1.0);
+            d.focus(11);
+            d.run_to(first[0].t + 2.5);
+            d.switch(2);
+            d.run_to(first[0].t + 4.0);
+            d.switch(4);
+            d.run_to(first[0].t + 9.5);
+            assert_eq!(d.hops.len(), 1, "seed {seed}: {:#?}", d.log);
+            assert_eq!(mon(&d), 1, "seed {seed}: still on DP-3 {:#?}", d.log);
+            // Past the gap, DP-3 switching again moves her once more, on DP-3.
+            d.run_to(first[0].t + 15.0);
+            d.switch(1);
+            d.run_to(first[0].t + 30.0);
+            d.assert_no_chain(seed);
+            assert!(d.hops.iter().all(|h| h.from.0 == 1 && h.to.0 == 1), "seed {seed}: only on DP-3 {:#?}", d.log);
+            if seed == 0 {
+                println!("--\n{}", d.log.join("\n"));
+            }
+        }
+    }
+
+    #[test]
     fn i3_asleep_she_stays_put() {
         for seed in 0..60 {
             // On eDP's tile top, asleep: he works around on DP-3.
