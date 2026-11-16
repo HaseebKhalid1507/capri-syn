@@ -20,7 +20,7 @@ use crate::edges;
 use crate::frames::{Frame, Geometry, NoteMasks};
 use crate::fx::{self, BodyPlan, Bolt, Glint, Glitch, GlitchKind};
 use crate::pack::{MoodSpec, MusicSpec, Pack, PerchSpec, Steps};
-use crate::platform::x11::{WatchEvent, WinRect, X11};
+use crate::platform::{Os, Role, WatchEvent, WinRect};
 use crate::session::{Act, Body, Link, Once, PromptView};
 use crate::shape::{self, ShapeRect};
 use crate::state;
@@ -31,10 +31,9 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use synaps_client::{Client, ClientOptions};
 
-/// Window layout in device pixels (X11 works in these; GPUI gets them / scale factor).
+/// Window layout in device pixels (the display server works in these; GPUI gets them / scale factor).
 #[derive(Clone, Copy, Debug)]
 pub struct Layout {
     pub sf: f32,
@@ -385,7 +384,7 @@ struct Teleport {
 pub struct Avatar {
     pack: Arc<Pack>,
     pub layout: Layout,
-    x11: Arc<X11>,
+    os: Rc<Os>,
     name: SharedString,
     font: SharedString,
     frames: Vec<Option<Frame>>,
@@ -581,7 +580,7 @@ pub struct Avatar {
 pub struct Init {
     pub pack: Arc<Pack>,
     pub layout: Layout,
-    pub x11: Arc<X11>,
+    pub os: Rc<Os>,
     pub name: String,
     pub origin: (i32, i32),
     pub t_start: Instant,
@@ -600,7 +599,7 @@ impl Avatar {
         let flippable = pack.frames.iter().map(|f| matches!(f.anchor.name.as_str(), "ground" | "seat")).collect();
         let default = pack.frame(&pack.catalog.default_sprite).unwrap_or(0);
         let font = pack.behaviour.font.clone().unwrap_or_else(|| "Fira Sans".into());
-        let vis = Self::visible_range(&init.x11, &init.layout, init.origin);
+        let vis = Self::visible_range(&init.os, &init.layout, init.origin);
         let (ticker, wake) = Ticker::start();
         let tick_loop = cx.spawn(async move |this, cx| {
             while wake.recv().await.is_ok() {
@@ -628,7 +627,7 @@ impl Avatar {
             font: font.into(),
             pack,
             layout: l,
-            x11: init.x11,
+            os: init.os,
             loaded: false,
             mood: Mood::Idle,
             mood_then: None,
@@ -890,17 +889,17 @@ impl Avatar {
                 };
                 let (ro, rf) = (runs(outline), runs(fill));
                 let (lo, lf) = (NOTE_LAYER + 2 * used, NOTE_LAYER + 2 * used + 1);
-                self.x11.fx_set(lf, mix_rgb(NOTE_TINT, sprite.fill_rgb, k), o, (size, size), &rf).ok();
-                self.x11.fx_set_below(lo, lf, mix_rgb(NOTE_TINT, sprite.outline_rgb, k), o, (size, size), &ro).ok();
+                self.os.fx_set(lf, mix_rgb(NOTE_TINT, sprite.fill_rgb, k), o, (size, size), &rf).ok();
+                self.os.fx_set_below(lo, lf, mix_rgb(NOTE_TINT, sprite.outline_rgb, k), o, (size, size), &ro).ok();
                 used += 1;
             }
         }
         for k in used..self.notes_shown {
-            self.x11.fx_unmap(NOTE_LAYER + 2 * k);
-            self.x11.fx_unmap(NOTE_LAYER + 2 * k + 1);
+            self.os.fx_unmap(NOTE_LAYER + 2 * k);
+            self.os.fx_unmap(NOTE_LAYER + 2 * k + 1);
         }
         if used > 0 || self.notes_shown > 0 {
-            self.x11.flush();
+            self.os.flush();
         }
         self.notes_shown = used;
     }
@@ -941,18 +940,18 @@ impl Avatar {
                 // The same curve fades it: the core goes pink -> white -> pink and the halo
                 // grows out of it (1-bit windows: no alpha).
                 let (o, sz, rows) = place(fx::star(cx, cy, r, g.spin + 0.04));
-                self.x11.fx_set(core, mix_rgb(0xffc2e2, 0xffffff, sc), o, sz, &rows).ok();
+                self.os.fx_set(core, mix_rgb(0xffc2e2, 0xffffff, sc), o, sz, &rows).ok();
                 let (o, sz, rows) = place(fx::star(cx, cy, r * (1.0 + 0.32 * sc), g.spin));
-                self.x11.fx_set_below(glow, core, 0xffc2e2, o, sz, &rows).ok();
+                self.os.fx_set_below(glow, core, 0xffc2e2, o, sz, &rows).ok();
                 used += 1;
             }
         }
         for k in used..self.glints_shown {
-            self.x11.fx_unmap(GLINT_LAYER + 2 * k);
-            self.x11.fx_unmap(GLINT_LAYER + 2 * k + 1);
+            self.os.fx_unmap(GLINT_LAYER + 2 * k);
+            self.os.fx_unmap(GLINT_LAYER + 2 * k + 1);
         }
         if used > 0 || self.glints_shown > 0 {
-            self.x11.flush();
+            self.os.flush();
         }
         self.glints_shown = used;
     }
@@ -1072,7 +1071,7 @@ impl Avatar {
                 self.hidden = false;
                 self.glitch = Some(Glitch::new(GlitchKind::Appear, now, self.rng.next()));
             }
-            let win = self.x11.win;
+            let win = self.os.body();
             self.set_icon_on(win);
             self.next_glint = Some(now + Duration::from_millis(700));
             self.bob_t0 = now;
@@ -1175,7 +1174,7 @@ impl Avatar {
 
     /// The turn's (sx, sy) at `at` (`facing::turn_shape` over `turn_ms`), and the flip shown then.
     fn turn_at(&self, at: Instant) -> Option<((f32, f32), bool)> {
-        if !self.x11.composited() {
+        if !self.os.composited() {
             return None;
         }
         let (t0, to) = self.turn?;
@@ -1199,7 +1198,7 @@ impl Avatar {
             self.set_flip(to);
             return true;
         }
-        if !self.x11.composited() {
+        if !self.os.composited() {
             match crate::facing::turn_band(self.turn_frame) {
                 Some((_, new)) => {
                     let shown = if new { to } else { !to };
@@ -1470,15 +1469,15 @@ impl Avatar {
             .or_else(|| self.perch_spec().and_then(|p| self.pack.index.get(&p.base).copied()));
         let (Some(base), true) = (base, want) else {
             if self.shadow_at.take().is_some() {
-                self.x11.fx_unmap(SHADOW_LAYER);
-                self.x11.flush();
+                self.os.fx_unmap(SHADOW_LAYER);
+                self.os.flush();
             }
             return;
         };
         if self.shadow.as_ref().map(|s| s.0) != Some(base) {
             self.shadow = Some((base, self.shadow_rects(base)));
             if self.shadow_at.take().is_some() {
-                self.x11.fx_unmap(SHADOW_LAYER);
+                self.os.fx_unmap(SHADOW_LAYER);
             }
         }
         let l = self.layout;
@@ -1488,25 +1487,25 @@ impl Avatar {
             let reshape = self.shadow_at.is_none();
             // Cut off at the window's bottom edge: the shadow falls on the window, not past it.
             let win = match self.placement {
-                Placement::Perch { win, .. } => self.x11.toplevel_rect(win),
+                Placement::Perch { win, .. } => self.os.toplevel_rect(win),
                 _ => None,
             };
             let h = win.map_or(l.geo.height as i32, |r| (r.y + r.h - at.1).clamp(1, l.geo.height as i32));
             let rgb = self.perch_spec().and_then(|p| u32::from_str_radix(p.sliver.trim_start_matches('#'), 16).ok()).unwrap_or(0x05060a);
-            self.x11.fx_under(SHADOW_LAYER, rgb, at, (l.geo.width as i32, h), reshape.then_some(&rects[..])).ok();
+            self.os.fx_under(SHADOW_LAYER, rgb, at, (l.geo.width as i32, h), reshape.then_some(&rects[..])).ok();
             self.shadow_at = Some(at);
         }
     }
 
     /// Unmap every effect layer (the shadow too).
     fn fx_hide_all(&mut self) {
-        self.x11.fx_hide();
+        self.os.fx_hide();
         self.shadow_at = None;
     }
 
     fn fx_hide_bolt(&self) {
-        self.x11.fx_unmap(BOLT_LAYER);
-        self.x11.flush();
+        self.os.fx_unmap(BOLT_LAYER);
+        self.os.flush();
     }
 
     // ---- timing -------------------------------------------------------------------
@@ -1979,8 +1978,8 @@ impl Avatar {
             // One plain red layer, nothing else (LOCKED #1). A passive move draws a short
             // thin shard instead of the full strike (r7: the zig-zag was the loudest frame).
             let poly = if tp.quiet { b.streak(u, 90.0 * self.layout.sf, 6.0 * self.layout.sf) } else { b.frame(u) };
-            self.x11.fx_set(BOLT_LAYER, fx::BOLT_LINE, o, (bw, bh), &fx::bolt_rects(&poly, o)).ok();
-            self.x11.flush();
+            self.os.fx_set(BOLT_LAYER, fx::BOLT_LINE, o, (bw, bh), &fx::bolt_rects(&poly, o)).ok();
+            self.os.flush();
         }
         if u >= fx::BOLT_ARRIVE && !moved {
             if let Some(tp) = &mut self.teleport {
@@ -1997,8 +1996,8 @@ impl Avatar {
         self.placement = place;
         self.set_origin(to);
         match place {
-            Placement::Perch { win, .. } => self.x11.set_target(win),
-            _ => self.x11.set_target(0),
+            Placement::Perch { win, .. } => self.os.set_target(win),
+            _ => self.os.set_target(0),
         }
         if was_sitting != self.sitting() || self.brain.is_some() {
             self.relayer(now);
@@ -2009,9 +2008,9 @@ impl Avatar {
             let l = self.layout;
             let (x, y) = (to.0 + l.ground_x, to.1 + l.ground_y);
             let dead = (crate::facing::DEAD_PX * l.sf) as i32;
-            let m = self.x11.monitor_at(x, y - 1);
+            let m = self.os.monitor_at(x, y - 1);
             let face = crate::facing::inward(x, m.x, m.w).or_else(|| match place {
-                Placement::Perch { win, .. } => self.x11.toplevel_rect(win).and_then(|r| crate::facing::toward(x, r.x + r.w / 2, dead)),
+                Placement::Perch { win, .. } => self.os.toplevel_rect(win).and_then(|r| crate::facing::toward(x, r.x + r.w / 2, dead)),
                 _ => None,
             });
             if let Some(r) = face {
@@ -2066,7 +2065,7 @@ impl Avatar {
                 "ok".into()
             }
             Command::Pos(x, y, instant) => {
-                let o = Self::clamp(&self.x11, &self.layout, (x - self.layout.ground_x, y - self.layout.ground_y));
+                let o = Self::clamp(&self.os, &self.layout, (x - self.layout.ground_x, y - self.layout.ground_y));
                 let (dx, dy) = (o.0 - self.origin.0, o.1 - self.origin.1);
                 self.home = (o.0 + self.layout.ground_x, o.1 + self.layout.ground_y);
                 if instant || !self.loaded || dx * dx + dy * dy < 48 * 48 {
@@ -2096,7 +2095,7 @@ impl Avatar {
                     if matches!(self.placement, Placement::Perch { .. }) {
                         let was_sitting = self.sitting();
                         self.placement = Placement::Ground;
-                        self.x11.set_target(0);
+                        self.os.set_target(0);
                         if was_sitting {
                             self.relayer(now);
                         }
@@ -2109,8 +2108,8 @@ impl Avatar {
                 }
             }
             Command::Stack => {
-                let stack: Vec<_> = self.x11.stack().into_iter().map(|(r, e)| serde_json::json!([format!("0x{:x}", r.id), r.x, r.y, r.w, r.h, e])).collect();
-                let areas: Vec<_> = self.x11.work_areas().into_iter().map(|m| serde_json::json!([m.x, m.y, m.w, m.h])).collect();
+                let stack: Vec<_> = self.os.stack().into_iter().map(|(r, e)| serde_json::json!([format!("0x{:x}", r.id), r.x, r.y, r.w, r.h, e])).collect();
+                let areas: Vec<_> = self.os.work_areas().into_iter().map(|m| serde_json::json!([m.x, m.y, m.w, m.h])).collect();
                 serde_json::json!({ "stack": stack, "areas": areas }).to_string()
             }
             Command::Unperch => {
@@ -2123,7 +2122,7 @@ impl Avatar {
             }
             Command::Shape => {
                 let h = self.shape_hist.borrow();
-                serde_json::json!({ "composited": self.x11.composited(), "bounding": self.last_shape.borrow().1, "before": [h[0], h[1]] }).to_string()
+                serde_json::json!({ "composited": self.os.composited(), "bounding": self.last_shape.borrow().1, "before": [h[0], h[1]] }).to_string()
             }
             Command::State => {
                 let reader = self.reader.as_ref().and_then(|(h, xid, _)| h.read_with(cx, |r, _| (*xid, r.scroll_info(), r.buttons())).ok());
@@ -2360,12 +2359,12 @@ impl Avatar {
             body.h = by1 - body.y;
         }
         let (bcx, bcy) = body.center();
-        let m = self.x11.monitor_at(bcx, bcy);
+        let m = self.os.monitor_at(bcx, bcy);
         let area = self.her_area().unwrap_or(WinRect { id: 0, x: m.x, y: m.y, w: m.w, h: m.h });
         let gap = (12.0 * sf) as i32;
         let min_w = (420.0 * sf) as i32;
         let w = ((0.40 * m.w as f32) as i32).max(min_w).min(area.w);
-        let cursor = self.x11.pointer().ok();
+        let cursor = self.os.pointer().ok();
         let floor = self.placement == Placement::Ground;
         let at = |w: i32| {
             let est = (crate::reader::estimate_height(&crate::reader::parse(raw), w as f32 / sf) * sf) as i32;
@@ -2395,7 +2394,7 @@ impl Avatar {
             let p = self.reader_rect(&raw);
             let r = p.rect;
             if self.reader_at.is_none_or(|(_, q)| q.rect != r) {
-                self.x11.configure(xid, r.x, r.y, r.w, r.h).ok();
+                self.os.place(xid, r.x, r.y, r.w, r.h).ok();
             }
             self.reader_at = Some((her, p));
             let t = Some((p.side, p.tail as f32 / self.layout.sf));
@@ -2416,31 +2415,15 @@ impl Avatar {
         let sf = self.layout.sf;
         let place = self.reader_rect(&raw);
         let (x, y, w, h) = (place.rect.x, place.rect.y, place.rect.w, place.rect.h);
-        let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(Bounds::new(point(px(x as f32 / sf), px(y as f32 / sf)), size(px(w as f32 / sf), px(h as f32 / sf))))),
-            titlebar: Some(TitlebarOptions { title: Some("synaps-avatar reader".into()), ..Default::default() }),
-            focus: take_focus,
-            show: true,
-            kind: WindowKind::PopUp,
-            is_movable: false,
-            is_resizable: false,
-            is_minimizable: false,
-            window_background: WindowBackgroundAppearance::Opaque,
-            app_id: Some("synaps-avatar".into()),
-            ..Default::default()
-        };
-        let ours = self.x11.win;
-        let prev = if take_focus { self.x11.active_window().or_else(|| self.x11.focused_window().ok()).filter(|&w| w > 1 && w != ours) } else { None };
+        let bounds = Bounds::new(point(px(x as f32 / sf), px(y as f32 / sf)), size(px(w as f32 / sf), px(h as f32 / sf)));
+        let options = self.os.window_options(Role::Reader, bounds, take_focus);
+        let prev = if take_focus { self.os.prev_focus() } else { None };
         let me = cx.entity().downgrade();
         let (title, font, pal) = (self.name.to_uppercase(), self.font.clone(), self.reader_pal());
         let xid = Rc::new(Cell::new(0u32));
-        let xid2 = xid.clone();
+        let (xid2, os) = (xid.clone(), self.os.clone());
         let opened = cx.open_window(options, move |window, cx| {
-            if let Ok(RawWindowHandle::Xcb(h)) = HasWindowHandle::window_handle(&*window).map(|h| h.as_raw()) {
-                xid2.set(h.window.get());
-            } else if let Ok(RawWindowHandle::Xlib(h)) = HasWindowHandle::window_handle(&*window).map(|h| h.as_raw()) {
-                xid2.set(h.window as u32);
-            }
+            xid2.set(os.adopt(Role::Reader, window).unwrap_or(0));
             let on_close: crate::reader::OnClose = Box::new(move |restore, cx: &mut App| {
                 me.update(cx, |a, cx| a.reader_closed(restore, cx)).ok();
             });
@@ -2450,7 +2433,7 @@ impl Avatar {
             Ok(handle) => {
                 let xid = xid.get();
                 if take_focus && xid != 0 {
-                    self.x11.give_focus(xid).ok();
+                    self.os.grab_keyboard(xid).ok();
                 }
                 self.reader = Some((handle, xid, prev));
                 self.reader_at = Some((self.her_body(), place));
@@ -2468,13 +2451,13 @@ impl Avatar {
 
     /// The reader closed (Esc, ✕, a click elsewhere): `restore` hands the keyboard back.
     fn reader_closed(&mut self, restore: bool, cx: &mut Context<Self>) {
-        let Some((_, _, prev)) = self.reader.take() else { return };
+        let Some((_, xid, prev)) = self.reader.take() else { return };
         self.reader_at = None;
         if restore
             && std::env::var_os("SA_READER_NO_RESTORE").is_none()
             && let Some(w) = prev
         {
-            self.x11.give_focus(w).ok();
+            self.os.release_keyboard(xid, Some(w)).ok();
         }
         if let Some(b) = &mut self.bubble
             && b.next_char.is_none()
@@ -2602,34 +2585,21 @@ impl Avatar {
         let l = self.layout;
         let sf = l.sf;
         let (gx, gy) = self.ground();
-        let m = self.x11.monitor_at(gx, gy.saturating_sub(10));
+        let m = self.os.monitor_at(gx, gy.saturating_sub(10));
         let area = self.her_area().unwrap_or(WinRect { id: 0, x: m.x, y: m.y, w: m.w, h: m.h });
         let (cw, ch) = ((crate::chip::SIZE.0 * sf) as i32, (crate::chip::SIZE.1 * sf) as i32);
         let pad = (14.0 * sf) as i32;
         let right = gx >= area.x + area.w / 2;
         let x = if right { area.right() - cw - pad } else { area.x + pad };
         let y = area.bottom() - ch - pad;
-        let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(Bounds::new(point(px(x as f32 / sf), px(y as f32 / sf)), size(px(crate::chip::SIZE.0), px(crate::chip::SIZE.1))))),
-            titlebar: Some(TitlebarOptions { title: Some("synaps-avatar chip".into()), ..Default::default() }),
-            focus: false,
-            show: true,
-            kind: WindowKind::PopUp,
-            is_movable: false,
-            is_resizable: false,
-            is_minimizable: false,
-            window_background: WindowBackgroundAppearance::Opaque,
-            app_id: Some("synaps-avatar".into()),
-            ..Default::default()
-        };
+        let bounds = Bounds::new(point(px(x as f32 / sf), px(y as f32 / sf)), size(px(crate::chip::SIZE.0), px(crate::chip::SIZE.1)));
+        let options = self.os.window_options(Role::Chip, bounds, false);
         let me = cx.entity().downgrade();
         let (name, font, pal) = (self.name.clone(), self.font.clone(), self.reader_pal());
         let xid = Rc::new(Cell::new(0u32));
-        let xid2 = xid.clone();
+        let (xid2, os) = (xid.clone(), self.os.clone());
         match cx.open_window(options, move |window, cx| {
-            if let Ok(RawWindowHandle::Xcb(h)) = HasWindowHandle::window_handle(&*window).map(|h| h.as_raw()) {
-                xid2.set(h.window.get());
-            }
+            xid2.set(os.adopt(Role::Chip, window).unwrap_or(0));
             let on_click: crate::chip::OnClick = Box::new(move |cx: &mut App| {
                 me.update(cx, |a, cx| {
                     a.unpark("chip", Instant::now(), cx);
@@ -2702,7 +2672,7 @@ impl Avatar {
         let sf = self.layout.sf;
         let frame = self.frame_or_default(self.shown_frame()).map(|f| f.id.clone()).unwrap_or_default();
         let (gx, gy) = self.ground();
-        let m = self.x11.monitor_at(gx, gy - 1);
+        let m = self.os.monitor_at(gx, gy - 1);
         let (page, pages) = self.bubble.as_ref().map_or((0, 0), |b| {
             let (p, n) = b.pages();
             (p + 1, n)
@@ -2716,7 +2686,7 @@ impl Avatar {
         let facing = serde_json::json!({ "right": self.facing_right(), "mirrored": self.flip, "turns": self.turns, "why": self.turn_why });
         serde_json::json!({
             "mood": self.mood.key(),
-            "xid": self.x11.win,
+            "xid": self.os.body(),
             "monitor": { "x": m.x, "y": m.y, "w": m.w, "h": m.h },
             "frame": frame,
             "rag": self.rag_json(),
@@ -2735,7 +2705,7 @@ impl Avatar {
             "hidden_cover": self.brain.as_ref().filter(|h| h.fs != brainview::FsHide::Shown).and_then(|h| h.fs_cover).map(|w| format!("0x{w:x}")),
             "chip": self.chip_rect.map(|r| [r.0 as i64, r.1 as i64, r.2 as i64, r.3 as i64, r.4 as i64]),
             "reader": reader.map(|(xid, (scroll, max), buttons)| {
-                let g = self.x11.toplevel_rect(xid).map_or((0, 0, 0, 0), |r| (r.x, r.y, r.w, r.h));
+                let g = self.os.toplevel_rect(xid).map_or((0, 0, 0, 0), |r| (r.x, r.y, r.w, r.h));
                 let b: serde_json::Map<String, serde_json::Value> = buttons
                     .into_iter()
                     .map(|(id, r)| (id, serde_json::json!([g.0 + (r[0] * sf) as i32, g.1 + (r[1] * sf) as i32, (r[2] * sf) as i32, (r[3] * sf) as i32])))
@@ -2746,10 +2716,10 @@ impl Avatar {
             "placement": placement,
             "teleporting": self.teleport.is_some(),
             "glitch": self.glitch.is_some(),
-            "composited": self.x11.composited(),
+            "composited": self.os.composited(),
             "facing": facing,
-            "compositor": self.x11.compositor_running(),
-            "composited_forced": self.x11.forced_mode(),
+            "compositor": self.os.compositor_running(),
+            "composited_forced": self.os.forced_mode(),
             "loaded": self.loaded,
             "counters": { "ticks": self.view_ticks, "renders": self.renders, "moves": self.moves },
             "scale_factor": self.layout.sf,
@@ -3031,8 +3001,7 @@ impl Avatar {
             self.close_input(false);
         }
         if self.input.is_none() {
-            let ours = self.x11.win;
-            let prev = self.x11.active_window().or_else(|| self.x11.focused_window().ok()).filter(|&w| w > 1 && w != ours);
+            let prev = self.os.prev_focus();
             let text = if secret.is_some() { String::new() } else { std::mem::take(&mut self.draft) };
             self.input = Some(InputBox { text, prev, esc_at: None, secret });
             if let Some(s) = &mut self.session {
@@ -3040,7 +3009,7 @@ impl Avatar {
                 self.run_acts(acts);
             }
         }
-        if let Err(e) = self.x11.take_focus() {
+        if let Err(e) = self.os.grab_keyboard(self.os.body()) {
             elog!("synaps-avatar: cannot take the keyboard: {e:#}");
         }
         window.focus(&self.focus, cx);
@@ -3060,7 +3029,7 @@ impl Avatar {
             self.run_acts(acts);
         }
         if restore && let Some(w) = i.prev {
-            self.x11.give_focus(w).ok();
+            self.os.release_keyboard(self.os.body(), Some(w)).ok();
         }
     }
 
@@ -3189,10 +3158,10 @@ impl Avatar {
 
     /// Keep the avatar (not the bubble area) in the work area under it (the monitor minus
     /// docks); feet no lower than its bottom edge.
-    pub fn clamp(x11: &X11, l: &Layout, (x, y): (i32, i32)) -> (i32, i32) {
+    pub fn clamp(os: &Os, l: &Layout, (x, y): (i32, i32)) -> (i32, i32) {
         let (aw, ah) = (l.geo.width as i32, l.geo.height as i32);
         let (cx, cy) = (x + l.avatar_x + aw / 2, y + l.avatar_y + ah / 2);
-        let m = x11.area_at(cx, cy);
+        let m = os.area_at(cx, cy);
         let ax = (x + l.avatar_x).clamp(m.x, (m.x + m.w - aw).max(m.x));
         let gy = (y + l.ground_y).min(m.y + m.h - l.foot_pad - GROUND_ROOM);
         let top = gy - l.ground_y + l.avatar_y;
@@ -3200,28 +3169,28 @@ impl Avatar {
         (ax - l.avatar_x, gy - l.ground_y)
     }
 
-    pub fn default_origin(x11: &X11, l: &Layout) -> (i32, i32) {
-        let m = x11.primary_area();
+    pub fn default_origin(os: &Os, l: &Layout) -> (i32, i32) {
+        let m = os.primary_area();
         let x = m.x + m.w - (l.avatar_x + l.geo.width as i32) - (24.0 * l.sf) as i32;
         let y = m.y + m.h - l.foot_pad - GROUND_ROOM - l.ground_y;
         (x, y)
     }
 
     /// Which part of the window is on the avatar's monitor; the bubble stays inside it.
-    fn visible_range(x11: &X11, l: &Layout, o: (i32, i32)) -> (i32, i32) {
-        let m = x11.monitor_at(o.0 + l.avatar_x + l.geo.width as i32 / 2, o.1 + l.avatar_y + l.geo.height as i32 / 2);
+    fn visible_range(os: &Os, l: &Layout, o: (i32, i32)) -> (i32, i32) {
+        let m = os.monitor_at(o.0 + l.avatar_x + l.geo.width as i32 / 2, o.1 + l.avatar_y + l.geo.height as i32 / 2);
         ((m.x - o.0).max(0), (m.x + m.w - o.0).min(l.win_w))
     }
 
     /// Move the window (origin without offsets) and keep the bob/hop offset on top.
     fn set_origin(&mut self, o: (i32, i32)) {
         self.origin = o;
-        self.vis = Self::visible_range(&self.x11, &self.layout, o);
+        self.vis = Self::visible_range(&self.os, &self.layout, o);
         self.apply_offset(Instant::now());
     }
 
     fn move_to(&mut self, o: (i32, i32), persist: bool) {
-        let o = Self::clamp(&self.x11, &self.layout, o);
+        let o = Self::clamp(&self.os, &self.layout, o);
         self.set_origin(o);
         if persist {
             state::save_ground(self.ground());
@@ -3233,7 +3202,7 @@ impl Avatar {
         let pos = (self.origin.0, self.origin.1 - hop + self.drop_in_offset(now) + self.float_bob(now));
         if pos != self.applied {
             self.moves += 1;
-            self.x11.move_to(pos.0, pos.1).ok();
+            self.os.move_to(pos.0, pos.1).ok();
             self.applied = pos;
         }
     }
@@ -3246,7 +3215,7 @@ impl Avatar {
                 self.face(r, "travel", now, true);
             }
         }
-        self.x11.set_target(0);
+        self.os.set_target(0);
         self.menu = None;
         self.hop = None;
         self.fold_reply();
@@ -3343,11 +3312,11 @@ impl Avatar {
     /// Whether a perch on `r` keeps the figure in its work area (under the docks) and
     /// `r` is not fullscreen.
     fn perch_fits(&self, r: &WinRect, o: (i32, i32), sit: bool) -> bool {
-        let m = self.x11.monitor_at(r.x + r.w / 2, r.y + 1);
+        let m = self.os.monitor_at(r.x + r.w / 2, r.y + 1);
         if r.x == m.x && r.y == m.y && r.w == m.w && r.h == m.h {
             return false; // fullscreen
         }
-        let a = self.x11.area_at(r.x + r.w / 2, r.y + 1);
+        let a = self.os.area_at(r.x + r.w / 2, r.y + 1);
         let base = if sit { self.perch_spec().map(|p| p.base.clone()) } else { None }.unwrap_or_else(|| self.pack.catalog.default_sprite.clone());
         let top = self.pack.index.get(&base).and_then(|&i| self.frames[i].as_ref()).map_or(0, |f| f.top);
         o.1 + self.layout.avatar_y + top >= a.y && r.y > a.y
@@ -3366,7 +3335,7 @@ impl Avatar {
     /// The exposed parts of `r`'s top edge and the seat (or feet) x ranges on them, root px.
     /// `r` may be newer than the stack's copy of it (a window that just moved).
     fn exposed_seats(&self, r: &WinRect, sit: bool) -> (Ranges, Ranges) {
-        let (mut stack, _): (Vec<WinRect>, Vec<bool>) = self.x11.stack().into_iter().unzip();
+        let (mut stack, _): (Vec<WinRect>, Vec<bool>) = self.os.stack().into_iter().unzip();
         let i = match stack.iter().position(|w| w.id == r.id) {
             Some(i) => {
                 stack[i] = *r;
@@ -3384,13 +3353,13 @@ impl Avatar {
         let sit = sit && self.layout.seat_y.is_some();
         let id = match win {
             Some(w) => w,
-            None => self.x11.active_window().ok_or_else(|| anyhow::anyhow!("no focused window (_NET_ACTIVE_WINDOW)"))?,
+            None => self.os.active_window().ok_or_else(|| anyhow::anyhow!("no focused window (_NET_ACTIVE_WINDOW)"))?,
         };
-        let top = self.x11.toplevel_of(id).ok_or_else(|| anyhow::anyhow!("window 0x{id:x} not found"))?;
-        if top == self.x11.win {
+        let top = self.os.toplevel_of(id).ok_or_else(|| anyhow::anyhow!("window 0x{id:x} not found"))?;
+        if top == self.os.body() {
             anyhow::bail!("that's me");
         }
-        let r = self.x11.toplevel_rect(top).ok_or_else(|| anyhow::anyhow!("window 0x{top:x} is not visible"))?;
+        let r = self.os.toplevel_rect(top).ok_or_else(|| anyhow::anyhow!("window 0x{top:x} is not visible"))?;
         self.perch_dx(&r, sit, None).ok_or_else(|| anyhow::anyhow!("window 0x{top:x} is too narrow to sit on"))?;
         // PERCH_AT across, moved to the nearest seat on an exposed stretch of the edge.
         let want = r.x + (r.w as f32 * PERCH_AT) as i32;
@@ -3416,7 +3385,7 @@ impl Avatar {
     /// that monitor's floor. Never a teleport to `home` (it may be on another monitor).
     fn fall(&mut self, why: &'static str, now: Instant) {
         self.perch_gone = None;
-        self.x11.set_target(0);
+        self.os.set_target(0);
         if self.teleport.is_some() || self.rag.is_some() {
             return;
         }
@@ -3435,7 +3404,7 @@ impl Avatar {
             h.rest = None;
         }
         self.placement = Placement::Ground;
-        let o = Self::clamp(&self.x11, &self.layout, (self.origin.0, self.origin.1 + 100_000));
+        let o = Self::clamp(&self.os, &self.layout, (self.origin.0, self.origin.1 + 100_000));
         self.move_to(o, true);
         self.home = self.ground();
         state::save_ground(self.ground());
@@ -3445,7 +3414,7 @@ impl Avatar {
     /// The perch window's grace ran out (or it came back): fall, or stay.
     fn check_perch_gone(&mut self, now: Instant) -> bool {
         let Some(g) = self.perch_gone else { return false };
-        let back = matches!(g.verdict(now, false), edges::GoneVerdict::Fall) && self.x11.toplevel_rect(g.win).is_some();
+        let back = matches!(g.verdict(now, false), edges::GoneVerdict::Fall) && self.os.toplevel_rect(g.win).is_some();
         match g.verdict(now, back) {
             edges::GoneVerdict::Wait => false,
             edges::GoneVerdict::Stay => {
@@ -3478,8 +3447,8 @@ impl Avatar {
                 elog!(
                     "synaps-avatar: compositor {}: {} mode{}",
                     if c { "appeared" } else { "went away" },
-                    if self.x11.composited() { "alpha" } else { "shape" },
-                    if self.x11.forced_mode().is_some() { " (forced)" } else { "" }
+                    if self.os.composited() { "alpha" } else { "shape" },
+                    if self.os.forced_mode().is_some() { " (forced)" } else { "" }
                 );
                 self.alpha_switched();
             }
@@ -3543,7 +3512,7 @@ impl Avatar {
         let (gx, gy) = self.ground();
         let sy = l.seat_y.map_or(gy, |s| self.origin.1 + s);
         let tol = (36.0 * l.sf) as i32;
-        let (stack, eligible): (Vec<WinRect>, Vec<bool>) = self.x11.stack().into_iter().unzip();
+        let (stack, eligible): (Vec<WinRect>, Vec<bool>) = self.os.stack().into_iter().unzip();
         let fits = |i: usize, x: i32| {
             let r = &stack[i];
             self.perch_fits(r, self.perch_origin(r, true, x - r.x), true)
@@ -3560,7 +3529,7 @@ impl Avatar {
             let o = self.perch_origin(&r, true, dx);
             self.placement = Placement::Perch { win: r.id, sit: self.layout.seat_y.is_some(), dx };
             self.set_origin(o);
-            self.x11.set_target(r.id);
+            self.os.set_target(r.id);
             self.relayer(now);
             self.glitch = Some(Glitch::new(GlitchKind::Burst, now, self.rng.next()));
         } else {
@@ -3603,7 +3572,7 @@ impl Avatar {
         }
         match ev.button {
             MouseButton::Left => {
-                let root = self.x11.pointer().unwrap_or((0, 0));
+                let root = self.os.pointer().unwrap_or((0, 0));
                 // Caught mid-flight: held again at once.
                 let now = Instant::now();
                 let caught = self.rag_catch(self.local(ev.position), now);
@@ -3784,7 +3753,7 @@ impl Avatar {
     fn reset_position(&mut self, cx: &mut Context<Self>) {
         self.menu = None;
         let now = Instant::now();
-        let o = Self::default_origin(&self.x11, &self.layout);
+        let o = Self::default_origin(&self.os, &self.layout);
         self.home = (o.0 + self.layout.ground_x, o.1 + self.layout.ground_y);
         if self.loaded {
             self.start_teleport(o, Placement::Ground, now);
@@ -4273,7 +4242,7 @@ impl Render for Avatar {
         // Every underlay below (the next plan, the 8-way smear under posed bands, the
         // unsquashed frame, the tag's next strips) would show as stacked offset copies of her
         // edges: none of them in alpha mode.
-        let alpha = self.x11.composited();
+        let alpha = self.os.composited();
         if alpha {
             next = None;
             next_img = None;
@@ -5175,11 +5144,11 @@ impl Render for Avatar {
                         MouseButton::Left,
                         cx.listener(|this, _: &MouseDownEvent, window, cx| {
                             cx.stop_propagation();
-                            let r = this.x11.take_focus();
+                            let r = this.os.grab_keyboard(this.os.body());
                             window.focus(&this.focus, cx);
                             if this.focus_probe.is_some() {
-                                let fw = this.x11.focused_window().unwrap_or(0);
-                                elog!("focus-probe: SetInputFocus err={:?}; X focus now 0x{fw:x} (ours 0x{:x})", r.err(), this.x11.win);
+                                let fw = this.os.focused_window().unwrap_or(0);
+                                elog!("focus-probe: SetInputFocus err={:?}; X focus now 0x{fw:x} (ours 0x{:x})", r.err(), this.os.body());
                             }
                             cx.notify();
                         }),
@@ -5341,7 +5310,7 @@ impl Render for Avatar {
 
         // Last: hearts, then the X input/bounding shape for exactly what this frame draws.
         let (ax, ay) = (l.avatar_x as i16, l.avatar_y as i16);
-        let x11 = self.x11.clone();
+        let os = self.os.clone();
         let last = self.last_shape.clone();
         let hist = self.shape_hist.clone();
         let first = self.first_frame.clone();
@@ -5449,8 +5418,8 @@ impl Render for Avatar {
                         let mut r = Vec::new();
                         shape::poly_rows(&local, &mut r);
                         match over {
-                            Some(j) => x11.fx_set_below(layer, j, rgb, (x0, y0), (x1 - x0, y1 - y0), &r).ok(),
-                            None => x11.fx_set(layer, rgb, (x0, y0), (x1 - x0, y1 - y0), &r).ok(),
+                            Some(j) => os.fx_set_below(layer, j, rgb, (x0, y0), (x1 - x0, y1 - y0), &r).ok(),
+                            None => os.fx_set(layer, rgb, (x0, y0), (x1 - x0, y1 - y0), &r).ok(),
                         };
                     };
                     // Rise from the click to clear air above the hair, never past the work area's
@@ -5482,12 +5451,12 @@ impl Render for Avatar {
                                 heart_win(rim, Some(fill), 0xffffff, &shape::heart(x, y, s + 5.0));
                             }
                             None => {
-                                x11.fx_unmap(rim);
-                                x11.fx_unmap(fill);
+                                os.fx_unmap(rim);
+                                os.fx_unmap(fill);
                             }
                         }
                     }
-                    x11.flush();
+                    os.flush();
                     // Never an empty bounding shape: X then reports the window fully obscured
                     // and GPUI stops drawing it for good.
                     if visible.is_empty() {
@@ -5504,7 +5473,7 @@ impl Render for Avatar {
                     let mut last = last.borrow_mut();
                     let (di, dv) = (last.0 != input, last.1 != visible);
                     if di || dv {
-                        x11.set_shapes(di.then_some(&input[..]), dv.then_some(&visible[..])).ok();
+                        os.set_shapes(di.then_some(&input[..]), dv.then_some(&visible[..])).ok();
                         if dv {
                             let mut h = hist.borrow_mut();
                             h.swap(0, 1);

@@ -76,10 +76,7 @@ pub(super) fn follow_log() -> bool {
 }
 
 pub(super) fn mono_s() -> f64 {
-    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
-    // SAFETY: a plain clock read into a local.
-    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
-    ts.tv_sec as f64 + ts.tv_nsec as f64 * 1e-9
+    crate::platform::monotonic_s()
 }
 
 pub(super) fn lockstep() -> bool {
@@ -225,7 +222,7 @@ impl Avatar {
         }
         if self.placement != Placement::Ground {
             self.placement = Placement::Ground;
-            self.x11.set_target(0);
+            self.os.set_target(0);
             self.relayer(now);
         }
         // The HUD goes down like in a teleport; what was open comes back after the landing.
@@ -253,7 +250,7 @@ impl Avatar {
         let chain = self.rag_chain(frame, local, zone, anchor);
         let p0 = match &feed {
             Feed::Script { grab, .. } => *grab,
-            Feed::Real => self.x11.pointer().map_or(anchor, |p| (p.0 as f32, p.1 as f32)),
+            Feed::Real => self.os.pointer().map_or(anchor, |p| (p.0 as f32, p.1 as f32)),
         };
         let mut ptr = Pointer::default();
         ptr.push(0.0, p0.0, p0.1);
@@ -303,14 +300,14 @@ impl Avatar {
         rag.next = Some(shown);
         // No X round trips inside her 60 Hz ticks: monitors and work areas as of now, and
         // the real pointer from its own thread.
-        self.x11.freeze_layout(true);
-        self.x11.take_shape_stats();
-        self.x11.poll_pointer(matches!(rag.feed, Feed::Real));
+        self.os.freeze_layout(true);
+        self.os.take_shape_stats();
+        self.os.poll_pointer(matches!(rag.feed, Feed::Real));
         // The follow runs at her monitor's refresh, halved above 170 Hz (240 -> 120: each
         // move exposes the windows below her; 144 stays 144). SA_FOLLOW_HZ overrides.
         let hz = std::env::var("SA_FOLLOW_HZ").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or_else(|| {
             let (cx, cy) = (self.applied.0 + self.layout.avatar_x + self.layout.geo.width as i32 / 2, self.applied.1 + self.layout.avatar_y);
-            let r = self.x11.refresh_at(cx, cy);
+            let r = self.os.refresh_at(cx, cy);
             r / (r / 170.0).ceil().max(1.0)
         });
         self.follow_period = Duration::from_secs_f32(1.0 / hz.clamp(30.0, 500.0));
@@ -412,7 +409,7 @@ impl Avatar {
         // A fresh QueryPointer (at most once per follow period, drags only): the motion event
         // that called us usually beats the 2 ms poller to the new position, and a stale
         // read left the move to the next rag tick (step lag p50 15.9 ms).
-        let Ok(p) = self.x11.pointer().or_else(|_| self.x11.pointer_fast()) else { return false };
+        let Ok(p) = self.os.pointer().or_else(|_| self.os.pointer_fast()) else { return false };
         let l = self.layout;
         let (rigid, offset, grip) = (r.rigid, r.offset, r.grip);
         self.follow_at = Some(now);
@@ -440,7 +437,7 @@ impl Avatar {
             return self.follow_due;
         }
         // Only while the pointer is somewhere the window hasn't followed yet.
-        let p = self.x11.pointer_fast().ok()?;
+        let p = self.os.pointer_fast().ok()?;
         (Some(p) != self.follow_ptr).then(|| self.follow_at.map_or_else(Instant::now, |t| t + self.follow_period))
     }
 
@@ -450,7 +447,7 @@ impl Avatar {
                 let o = s.at(r.t);
                 (grab.0 + o.0, grab.1 + o.1)
             }
-            Feed::Real => self.x11.pointer_fast().map_or_else(|_| r.ptr_last(), |p| (p.0 as f32, p.1 as f32)),
+            Feed::Real => self.os.pointer_fast().map_or_else(|_| r.ptr_last(), |p| (p.0 as f32, p.1 as f32)),
         }
     }
 
@@ -639,7 +636,7 @@ impl Avatar {
     fn rag_platforms(&self) -> Vec<crate::edges::Platform> {
         let l = &self.layout;
         let Some(seat_y) = l.seat_y else { return Vec::new() };
-        let (stack, mut eligible): (Vec<WinRect>, Vec<bool>) = self.x11.stack().into_iter().unzip();
+        let (stack, mut eligible): (Vec<WinRect>, Vec<bool>) = self.os.stack().into_iter().unzip();
         if let Some(allowed) = self.brain_allowed_windows() {
             for (i, w) in stack.iter().enumerate() {
                 eligible[i] &= allowed.contains(&w.id);
@@ -718,7 +715,7 @@ impl Avatar {
                         r.squash = Some((ragdoll::squash_spring(speed / l.sf, self.rag_strength), feet_local, false));
                 r.chain.set_gravity(0.0);
                 self.placement = Placement::Ground;
-                self.x11.set_target(0);
+                self.os.set_target(0);
                 self.home = self.ground();
                 state::save_ground(self.ground());
                 if hard && out.glitch {
@@ -740,14 +737,14 @@ impl Avatar {
                 r.flight = None;
                         let seat = l.seat_y.map_or(feet_local, |s| (feet_local.0, (s - l.avatar_y) as f32));
                 r.squash = Some((ragdoll::squash_spring(speed / l.sf, self.rag_strength), seat, false));
-                if let Some(rect) = self.x11.toplevel_rect(win) {
+                if let Some(rect) = self.os.toplevel_rect(win) {
                     let dx = x.round() as i32 - rect.x;
                     let o = self.perch_origin(&rect, true, dx);
                     self.placement = Placement::Perch { win, sit: l.seat_y.is_some(), dx };
                     self.set_origin(o);
-                    self.x11.set_target(win);
+                    self.os.set_target(win);
                     // Home is the floor point below her.
-                    let fl = Self::clamp(&self.x11, &self.layout, (o.0, o.1 + 100_000));
+                    let fl = Self::clamp(&self.os, &self.layout, (o.0, o.1 + 100_000));
                     self.home = (fl.0 + l.ground_x, fl.1 + l.ground_y);
                 }
                 self.arrive_placed();
@@ -795,12 +792,12 @@ impl Avatar {
     }
 
     fn rag_restore_with(&mut self, r: Rag, now: Instant, landed: bool) {
-        self.x11.freeze_layout(false);
-        self.x11.poll_pointer(false);
+        self.os.freeze_layout(false);
+        self.os.poll_pointer(false);
         if let Some(mut p) = r.prof.clone().filter(|p| !p.is_empty()) {
             p.sort_unstable();
             let q = |f: f32| p[((p.len() - 1) as f32 * f) as usize];
-            let (sends, rects) = self.x11.take_shape_stats();
+            let (sends, rects) = self.os.take_shape_stats();
             elog!(
                 "rag-prof: {} ticks, sim+plan p50 {} µs, p95 {} µs, max {} µs; bounding shapes sent {sends}, {} rects each",
                 p.len(),
@@ -987,7 +984,7 @@ impl Avatar {
         let (top, bottom) = self.frame_or_default(frame).map_or((0, 1), |f| (f.top, f.bottom.max(f.top + 1)));
         let u = ((local.1 - top) as f32 / (bottom - top) as f32).clamp(0.0, 1.0);
         let anchor = self.grip_root(self.origin, local);
-        let p0 = self.x11.pointer().map_or(anchor, |p| (p.0 as f32, p.1 as f32));
+        let p0 = self.os.pointer().map_or(anchor, |p| (p.0 as f32, p.1 as f32));
         let Some(r) = &mut self.rag else { return false };
         let zone = r.m.spec.zone(u).min_torso();
         let t = r.t;
@@ -996,7 +993,7 @@ impl Avatar {
         r.squash = None;
         r.landed = None;
         r.feed = Feed::Real;
-        self.x11.poll_pointer(true);
+        self.os.poll_pointer(true);
         r.grip = local;
         r.zone = zone;
         r.ptr = Pointer::default();

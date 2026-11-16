@@ -170,7 +170,7 @@ impl Avatar {
         let sf = self.layout.sf;
         let her = self.her_body();
         let area = self.her_area().unwrap_or_else(|| {
-            let m = self.x11.area_at(her.center().0, her.center().1);
+            let m = self.os.area_at(her.center().0, her.center().1);
             WinRect::new(m.x, m.y, m.w, m.h)
         });
         let d = |v: f32| (v * sf) as i32;
@@ -193,7 +193,7 @@ impl Avatar {
         let at = (r.x, r.bottom(), r.w, r.h);
         if at != l.at {
             l.at = at;
-            self.x11.configure(l.xid, r.x, r.y, r.w, r.h).ok();
+            self.os.place(l.xid, r.x, r.y, r.w, r.h).ok();
         }
         let tail = Some((p.side, p.tail));
         if tail != l.tail {
@@ -213,25 +213,13 @@ impl Avatar {
         let (place, area, her) = self.line_place(h0);
         let (x, w, h) = (place.rect.x, place.rect.w, place.rect.h);
         let bottom = place.rect.bottom();
-        let ours = self.x11.win;
-        let prev = self.x11.active_window().or_else(|| self.x11.focused_window().ok()).filter(|&w| w > 1 && w != ours);
+        let prev = self.os.prev_focus();
         // The bubble's field gives way: one place to type.
         if self.input.as_ref().is_some_and(|i| i.secret.is_none()) {
             self.close_input(false);
         }
-        let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(Bounds::new(point(px(x as f32 / sf), px((bottom - h) as f32 / sf)), size(px(w as f32 / sf), px(h as f32 / sf))))),
-            titlebar: Some(TitlebarOptions { title: Some("synaps-avatar line".into()), ..Default::default() }),
-            focus: true,
-            show: true,
-            kind: WindowKind::PopUp,
-            is_movable: false,
-            is_resizable: false,
-            is_minimizable: false,
-            window_background: WindowBackgroundAppearance::Opaque,
-            app_id: Some("synaps-avatar".into()),
-            ..Default::default()
-        };
+        let bounds = Bounds::new(point(px(x as f32 / sf), px((bottom - h) as f32 / sf)), size(px(w as f32 / sf), px(h as f32 / sf)));
+        let options = self.os.window_options(Role::Line, bounds, true);
         let snap = self.line_snap();
         let me = cx.entity().downgrade();
         let (name, font, pal) = (self.name.to_string(), self.font.clone(), self.reader_pal());
@@ -239,16 +227,12 @@ impl Avatar {
         let sent = self.sent.clone();
         let max_thread = area.h as f32 / sf / 3.0;
         let xid = Rc::new(Cell::new(0u32));
-        let xid2 = xid.clone();
+        let (xid2, os) = (xid.clone(), self.os.clone());
         let built: Rc<RefCell<Option<Entity<Line>>>> = Rc::default();
         let built2 = built.clone();
         crate::line::kit_init(cx);
         let opened = cx.open_window(options, move |window, cx| {
-            if let Ok(RawWindowHandle::Xcb(h)) = HasWindowHandle::window_handle(&*window).map(|h| h.as_raw()) {
-                xid2.set(h.window.get());
-            } else if let Ok(RawWindowHandle::Xlib(h)) = HasWindowHandle::window_handle(&*window).map(|h| h.as_raw()) {
-                xid2.set(h.window as u32);
-            }
+            xid2.set(os.adopt(Role::Line, window).unwrap_or(0));
             let on_ask: crate::line::OnAsk = Box::new(move |ask, cx: &mut App| me.update(cx, |a, cx| a.line_ask(ask, cx)).unwrap_or_else(|_| Err("she is gone".into())));
             let view = cx.new(|cx| Line::new(snap, draft, sent, name, font, pal, max_thread, on_ask, window, cx));
             *built2.borrow_mut() = Some(view.clone());
@@ -264,10 +248,10 @@ impl Avatar {
             self.set_icon_on(xid);
         }
         if xid != 0 && std::env::var_os("SA_LINE_NOFOCUS").is_none() {
-            self.x11.give_focus(xid).ok();
+            self.os.grab_keyboard(xid).ok();
         }
         self.line = Some(LineWin { view: view.clone(), handle: handle.into(), xid, prev, at: (x, bottom, w, h), parked: false, her, tail: Some((place.side, place.tail)) });
-        self.x11.arm_clicks(true);
+        self.os.arm_clicks(true);
         self.line_opened_ms = Some(now.elapsed().as_millis());
         // He is reading the thread now: nothing is unread, and the bubble gives way. Opened
         // with a reply unread (her strip, the summon key): the thread starts at that reply.
@@ -429,7 +413,7 @@ impl Avatar {
                 Ok(())
             }
             Ask::Closed { restore, draft, sent } => {
-                self.x11.arm_clicks(false);
+                self.os.arm_clicks(false);
                 if let Some(l) = self.line.take() {
                     self.draft = draft;
                     self.sent = sent;
@@ -441,7 +425,7 @@ impl Avatar {
                         && std::env::var_os("SA_READER_NO_RESTORE").is_none()
                         && let Some(w) = l.prev
                     {
-                        self.x11.give_focus(w).ok();
+                        self.os.release_keyboard(l.xid, Some(w)).ok();
                     }
                     // A reply still coming finishes in her bubble.
                     if let Some(b) = &mut self.bubble
@@ -454,11 +438,11 @@ impl Avatar {
                 Ok(())
             }
             Ask::Parked(p) => {
-                self.x11.arm_clicks(!p && self.line.is_some());
+                self.os.arm_clicks(!p && self.line.is_some());
                 if let Some(l) = &mut self.line {
                     l.parked = p;
                     if !p && l.xid != 0 && std::env::var_os("SA_LINE_NOFOCUS").is_none() {
-                        self.x11.give_focus(l.xid).ok();
+                        self.os.grab_keyboard(l.xid).ok();
                     }
                 }
                 Ok(())
@@ -504,10 +488,10 @@ impl Avatar {
             return;
         }
         l.parked = true;
-        self.x11.arm_clicks(false);
-        let back = l.prev.filter(|&p| self.x11.toplevel_rect(p).is_some_and(|r| x >= r.x && x < r.right() && y >= r.y && y < r.bottom()));
+        self.os.arm_clicks(false);
+        let back = l.prev.filter(|&p| self.os.toplevel_rect(p).is_some_and(|r| x >= r.x && x < r.right() && y >= r.y && y < r.bottom()));
         if let Some(p) = back {
-            self.x11.give_focus(p).ok();
+            self.os.release_keyboard(l.xid, Some(p)).ok();
         }
         let (view, handle) = (l.view.clone(), l.handle);
         cx.defer(move |cx| {
@@ -542,7 +526,7 @@ impl Avatar {
                 let mut v = l.view.read(cx).state_json(cx);
                 v["xid"] = serde_json::json!(l.xid);
                 v["at"] = serde_json::json!([l.at.0, l.at.1 - l.at.3, l.at.2, l.at.3]);
-                v["focused"] = serde_json::json!(self.x11.focused_window().ok() == Some(l.xid));
+                v["focused"] = serde_json::json!(self.os.focused_window() == Some(l.xid));
                 v["open_ms"] = serde_json::json!(self.line_opened_ms);
                 v
             }

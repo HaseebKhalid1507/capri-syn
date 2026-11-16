@@ -63,7 +63,7 @@ pub enum Command {
     /// Collapse the bubble to the status tag (true) or expand it again.
     Collapse(bool),
     /// Internal: from the X watcher thread.
-    Watch(crate::platform::x11::WatchEvent),
+    Watch(crate::platform::WatchEvent),
     /// Send text to the session, as if typed (submit, or steer while a turn runs).
     Submit(String),
     /// Abort the running turn.

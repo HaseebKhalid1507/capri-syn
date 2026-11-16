@@ -49,7 +49,6 @@ mod voice;
 
 use anyhow::{Context as _, Result, bail};
 use gpui_kit::*;
-use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::borrow::Cow;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -203,84 +202,6 @@ impl log::Log for StderrLog {
     fn flush(&self) {}
 }
 
-/// Process setup that has to happen before any other thread exists. Each knob was
-/// measured on bella (release, `ps` RSS 6 s after start, see LOG.md):
-///
-/// * Render on the boot VGA device (the iGPU on a hybrid laptop) unless `ZED_DEVICE_ID` is
-///   set. On bella every vkQueuePresent to this 32-bit override-redirect window
-///   busy-waited ~2.3 s on the NVIDIA dGPU (0.4 fps); the Intel iGPU presents at once. A
-///   desktop pet belongs on the low-power GPU anyway.
-/// * Keep GPUI's GL fallback from probing EGL when a Vulkan driver is installed. The probe
-///   loads every EGL vendor (NVIDIA's, Mesa's llvmpipe with LLVM) and 50 threads that stay
-///   for the life of the process: 371 → 226 MB RSS. `SA_GL=1` keeps it.
-/// * glibc malloc: two arenas and a 1 MiB trim threshold, so the full-size PNG decode
-///   buffers go back to the OS after scaling: 226 → 84 MB.
-fn process_setup() {
-    if std::env::var_os("SA_GL").is_none() && has_vulkan_driver() {
-        // SAFETY (all set_var calls here): first thing in main, single-threaded.
-        unsafe { std::env::set_var("__EGL_VENDOR_LIBRARY_DIRS", "/nonexistent") };
-    }
-    #[cfg(target_env = "gnu")]
-    // SAFETY: plain libc calls with valid parameters.
-    unsafe {
-        libc::mallopt(libc::M_ARENA_MAX, 2);
-        libc::mallopt(libc::M_TRIM_THRESHOLD, 1 << 20);
-    }
-    if std::env::var_os("ZED_DEVICE_ID").is_some() || std::env::var_os("SA_ANY_GPU").is_some() {
-        return;
-    }
-    let read = |p: std::path::PathBuf| std::fs::read_to_string(p).map(|s| s.trim().to_string()).unwrap_or_default();
-    let mut cards = Vec::new();
-    for e in std::fs::read_dir("/sys/class/drm").into_iter().flatten().flatten() {
-        let name = e.file_name().to_string_lossy().into_owned();
-        if !name.starts_with("card") || name.contains('-') {
-            continue;
-        }
-        let dev = e.path().join("device");
-        cards.push((read(dev.join("device")), read(dev.join("boot_vga")) == "1", read(dev.join("vendor"))));
-    }
-    if cards.len() < 2 {
-        return;
-    }
-    if let Some((id, _, vendor)) = cards.iter().find(|c| c.1 && !c.0.is_empty()) {
-        elog!("synaps-avatar: {} GPUs, rendering on the boot VGA device {id} (SA_ANY_GPU=1 to let GPUI pick)", cards.len());
-        unsafe { std::env::set_var("ZED_DEVICE_ID", id) };
-        // Only that vendor's Vulkan driver: the loader otherwise maps every ICD, and the
-        // unused NVIDIA one alone was ~52 MB of RSS (libnvidia-gpucomp/rtcore/glcore).
-        if std::env::var_os("VK_DRIVER_FILES").is_none()
-            && std::env::var_os("VK_ICD_FILENAMES").is_none()
-            && let Some(files) = vendor_icds(vendor)
-        {
-            unsafe { std::env::set_var("VK_DRIVER_FILES", &files) };
-        }
-    }
-}
-
-/// The Vulkan driver manifests of a PCI vendor (`0x8086` …), joined for `VK_DRIVER_FILES`.
-fn vendor_icds(vendor: &str) -> Option<String> {
-    let prefixes: &[&str] = match vendor {
-        "0x8086" => &["intel"],
-        "0x1002" => &["radeon", "amd"],
-        "0x10de" => &["nvidia"],
-        _ => return None,
-    };
-    let data_dirs = std::env::var("XDG_DATA_DIRS").unwrap_or_else(|_| "/usr/local/share:/usr/share".into());
-    let mut dirs: Vec<std::path::PathBuf> = data_dirs.split(':').map(|d| std::path::Path::new(d).join("vulkan/icd.d")).collect();
-    dirs.push("/etc/vulkan/icd.d".into());
-    let mut files: Vec<String> = Vec::new();
-    for d in dirs {
-        for e in std::fs::read_dir(d).into_iter().flatten().flatten() {
-            let name = e.file_name().to_string_lossy().into_owned();
-            if name.ends_with(".json") && prefixes.iter().any(|p| name.starts_with(p)) {
-                files.push(e.path().to_string_lossy().into_owned());
-            }
-        }
-    }
-    files.sort();
-    files.dedup();
-    (!files.is_empty()).then(|| files.join(":"))
-}
-
 /// `SA_COMPOSITED=1` (alpha) or `0` (the X shape) forces the mode over settings.toml;
 /// `auto` or unset: None (the settings key decides, then the compositor).
 pub fn env_composited() -> Option<Option<bool>> {
@@ -291,23 +212,9 @@ pub fn env_composited() -> Option<Option<bool>> {
     }
 }
 
-/// Whether the Vulkan loader will find at least one driver manifest.
-fn has_vulkan_driver() -> bool {
-    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
-    for var in ["VK_DRIVER_FILES", "VK_ICD_FILENAMES"] {
-        if let Some(v) = std::env::var_os(var) {
-            return std::env::split_paths(&v).any(|p| p.exists());
-        }
-    }
-    let data_dirs = std::env::var("XDG_DATA_DIRS").unwrap_or_else(|_| "/usr/local/share:/usr/share".into());
-    dirs.extend(data_dirs.split(':').map(|d| std::path::Path::new(d).join("vulkan/icd.d")));
-    dirs.push("/etc/vulkan/icd.d".into());
-    dirs.iter().any(|d| std::fs::read_dir(d).into_iter().flatten().flatten().any(|e| e.path().extension().is_some_and(|x| x == "json")))
-}
-
 fn main() {
     let t_start = Instant::now();
-    process_setup();
+    platform::process_setup();
     if let Ok(level) = std::env::var("SA_LOG")
         && let Ok(level) = level.parse::<log::LevelFilter>()
     {
@@ -355,7 +262,7 @@ fn run(t_start: Instant) -> Result<()> {
 
     let sock = control::socket_path();
     let listener = control::bind(&sock)?;
-    let mut x11 = platform::x11::X11::connect()?;
+    let os = std::rc::Rc::new(platform::connect()?);
     let fonts: Vec<Cow<'static, [u8]>> = pack
         .behaviour
         .font_files
@@ -370,81 +277,60 @@ fn run(t_start: Instant) -> Result<()> {
         {
             elog!("synaps-avatar: pack fonts not loaded: {e:#}");
         }
-        // GPUI's X11 displays are the root size divided by its scale factor.
+        // GPUI's displays are the root size divided by its scale factor.
         let display_w = cx.primary_display().map(|d| f32::from(d.bounds().size.width)).unwrap_or(0.0);
-        let sf = if display_w > 0.0 { x11.screen_w as f32 / display_w } else { 1.0 };
+        let sf = if display_w > 0.0 { os.root_size().0 as f32 / display_w } else { 1.0 };
         let layout = view::Layout::new(&pack, sf, args.height);
         let origin = state::load_ground()
-            .map(|(gx, gy)| view::Avatar::clamp(&x11, &layout, (gx - layout.ground_x, gy - layout.ground_y)))
-            .unwrap_or_else(|| view::Avatar::default_origin(&x11, &layout));
+            .map(|(gx, gy)| view::Avatar::clamp(&os, &layout, (gx - layout.ground_x, gy - layout.ground_y)))
+            .unwrap_or_else(|| view::Avatar::default_origin(&os, &layout));
 
-        let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(Bounds::new(
-                point(px(origin.0 as f32 / sf), px(origin.1 as f32 / sf)),
-                size(px(layout.win_w as f32 / sf), px(layout.win_h as f32 / sf)),
-            ))),
-            titlebar: Some(TitlebarOptions { title: Some("synaps-avatar".into()), ..Default::default() }),
-            focus: false,
-            show: true,
-            kind: WindowKind::PopUp,
-            is_movable: false,
-            is_resizable: false,
-            is_minimizable: false,
-            window_background: WindowBackgroundAppearance::Transparent,
-            app_id: Some("synaps-avatar".into()),
-            // She is never the active window: GPUI's default caps inactive windows at 30 fps
-            // (a drag then ran ~40 ticks/s). Our own deadlines decide when she draws.
-            inactive_frame_interval: None,
-            ..Default::default()
-        };
+        let bounds = Bounds::new(point(px(origin.0 as f32 / sf), px(origin.1 as f32 / sf)), size(px(layout.win_w as f32 / sf), px(layout.win_h as f32 / sf)));
+        let options = os.window_options(platform::Role::Body, bounds, false);
 
         let (tx, rx) = async_channel::unbounded::<(control::Command, control::Reply)>();
         let mut built = None;
         let pack2 = pack.clone();
         let tx2 = tx.clone();
         let opened = cx.open_window(options, |window, cx| {
-            let win = match HasWindowHandle::window_handle(&*window).map(|h| h.as_raw()) {
-                Ok(RawWindowHandle::Xcb(h)) => h.window.get(),
-                Ok(RawWindowHandle::Xlib(h)) => h.window as u32,
-                other => {
-                    elog!("synaps-avatar: not an X11 window ({other:?}); phase 1 supports X11 only");
+            let win = match os.adopt(platform::Role::Body, window) {
+                Ok(w) => w,
+                Err(e) => {
+                    elog!("synaps-avatar: {e:#}");
                     std::process::exit(1);
                 }
             };
-            x11.win = win;
-            let x11 = Arc::new(x11);
-            x11.force_composited(env_composited().unwrap_or_else(|| settings::Settings::load().ok().and_then(|s| s.display.composited)));
+            os.force_composited(env_composited().unwrap_or_else(|| settings::Settings::load().ok().and_then(|s| s.display.composited)));
             // Nothing clickable until the first frame is decoded. Keep one pixel visible:
             // an empty bounding shape makes X report the window fully obscured, and GPUI
             // stops drawing a window it thinks is hidden.
-            x11.set_compositor_hints().ok();
             let px1 = (layout.ground_x as i16, (layout.ground_y - 1) as i16, 1, 1);
-            x11.set_shape(&[], &[px1]).ok();
-            x11.move_to(origin.0, origin.1).ok();
-            x11.raise().ok();
+            os.set_shapes(Some(&[]), Some(&[px1])).ok();
+            os.move_to(origin.0, origin.1).ok();
+            os.raise().ok();
             let tx = tx2.clone();
-            x11.spawn_watcher(move |ev| {
+            os.spawn_watcher(move |ev| {
                 let (r, _) = std::sync::mpsc::channel();
                 tx.send_blocking((control::Command::Watch(ev), r)).ok();
             })
-            .map_err(|e| elog!("synaps-avatar: x11 watcher: {e:#}"))
+            .map_err(|e| elog!("synaps-avatar: watcher: {e:#}"))
             .ok();
-            // A click outside the Line parks it (an override-redirect window keeps the
-            // keyboard when he clicks back into the window i3 already thinks is focused).
+            // A click outside the Line parks it (her window keeps the keyboard when he clicks
+            // back into the window the WM already thinks is focused).
             let tx = tx2.clone();
-            x11.watch_clicks(move |x, y| {
+            os.watch_clicks(move |x, y| {
                 let (r, _) = std::sync::mpsc::channel();
-                tx.send_blocking((control::Command::Watch(platform::x11::WatchEvent::Click(x, y)), r)).ok();
+                tx.send_blocking((control::Command::Watch(platform::WatchEvent::Click(x, y)), r)).ok();
             })
-            .map_err(|e| elog!("synaps-avatar: click watcher (XInput2): {e:#}; a click elsewhere won't park the Line"))
+            .map_err(|e| elog!("synaps-avatar: click watcher: {e:#}; a click elsewhere won't park the Line"))
             .ok();
             // The pointer near her, swiping past, resting on her (her lively reactions).
             let tx = tx2.clone();
             let sf = layout.sf;
-            let cfg = platform::x11::PointerCfg { near_px: 150.0 * sf, swipe_px: 120.0 * sf, swipe_speed: 1500.0 * sf, hover: std::time::Duration::from_millis(1500) };
-            x11.watch_pointer(cfg, move |p| {
+            let cfg = platform::PointerCfg { near_px: 150.0 * sf, swipe_px: 120.0 * sf, swipe_speed: 1500.0 * sf, hover: std::time::Duration::from_millis(1500) };
+            os.watch_pointer(cfg, move |p| {
                 let (r, _) = std::sync::mpsc::channel();
-                tx.send_blocking((control::Command::Watch(platform::x11::WatchEvent::Pointer(p)), r)).ok();
+                tx.send_blocking((control::Command::Watch(platform::WatchEvent::Pointer(p)), r)).ok();
             })
             .map_err(|e| elog!("synaps-avatar: pointer watcher: {e:#}"))
             .ok();
@@ -471,9 +357,9 @@ fn run(t_start: Instant) -> Result<()> {
                 layout.win_h,
                 origin.0,
                 origin.1,
-                x11.composited()
+                os.composited()
             );
-            let init = view::Init { pack: pack2.clone(), layout, x11, name, origin, t_start, focus_probe: args.focus_probe };
+            let init = view::Init { pack: pack2.clone(), layout, os: os.clone(), name, origin, t_start, focus_probe: args.focus_probe };
             let view = cx.new(|cx| view::Avatar::new(init, window, cx));
             built = Some(view.clone());
             view
@@ -522,11 +408,8 @@ fn run(t_start: Instant) -> Result<()> {
                     Err(e) => elog!("synaps-avatar: music notes unavailable: {e:#}"),
                 }
             }
-            #[cfg(target_env = "gnu")]
-            // SAFETY: plain libc call; hands freed decode buffers back to the OS.
-            unsafe {
-                libc::malloc_trim(0);
-            }
+            // Hands freed decode buffers back to the OS.
+            platform::trim_heap();
         })
         .detach();
 

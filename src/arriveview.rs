@@ -119,7 +119,7 @@ impl Avatar {
         }
         let to = self.center_root(self.origin);
         let (gx, gy) = self.ground();
-        let top = self.x11.area_at(gx, gy - 1).y as f32;
+        let top = self.os.area_at(gx, gy - 1).y as f32;
         let seed = self.rng.next();
         let bolt = Bolt::new((to.0, top), to, seed, 220.0 * self.layout.sf);
         self.hidden = true;
@@ -264,7 +264,7 @@ impl Avatar {
         }
         let (i, a, b) = self.lying_span()?;
         let Placement::Perch { win, dx, .. } = self.placement else { return None };
-        let r = self.x11.toplevel_rect(win)?;
+        let r = self.os.toplevel_rect(win)?;
         let x = r.x + dx;
         let (spans, _) = self.exposed_seats(&r, true);
         spans.iter().any(|&(lo, hi)| lo <= x + a && x + b < hi).then_some(i)
@@ -278,7 +278,7 @@ impl Avatar {
         }
         let Some((_, a, b)) = self.lying_span() else { return };
         let Placement::Perch { win, sit, dx } = self.placement else { return };
-        let Some(r) = self.x11.toplevel_rect(win) else { return };
+        let Some(r) = self.os.toplevel_rect(win) else { return };
         let x = r.x + dx;
         let (spans, _) = self.exposed_seats(&r, sit);
         let fits: Vec<(i32, i32)> = spans.iter().filter(|(lo, hi)| hi - lo > b - a).map(|&(lo, hi)| (lo - a, hi - 1 - b)).collect();
@@ -360,7 +360,7 @@ impl Avatar {
             data.extend([n, n]);
             data.extend(s.pixels().map(|p| (p[3] as u32) << 24 | (p[0] as u32) << 16 | (p[1] as u32) << 8 | p[2] as u32));
         }
-        if let Err(e) = self.x11.set_icon(xid, &data) {
+        if let Err(e) = self.os.set_icon(xid, &data) {
             elog!("synaps-avatar: icon on 0x{xid:x}: {e:#}");
         }
     }
