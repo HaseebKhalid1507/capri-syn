@@ -1,6 +1,6 @@
 {
  "schemaVersion": 1,
- "about": "capri-syn's own measurements of the capri-desktop art (cell grid, anchors, loop/one-shot), taken from the PNGs at the pinned commits. Anchors are in cell px; x/y from the cell's top-left. fpsFrom 'clips.json' = lachy's quest clips.json lists the same frame count and cell width; 'guess' = ours. mirrorArt: the strip drawn for mirroring (same silhouette, the suit's asymmetric details swapped): when she faces the other way, draw mirror(mirrorArt), not mirror(strip).",
+ "about": "capri-syn's own measurements of the capri-desktop art (cell grid, anchors, loop/one-shot), taken from the PNGs at the pinned commits. Anchors and bounds are in cell px; x/y from the cell's top-left; bounds [x, y, w, h] = the union of every cell's opaque box. A laydown anchor's x is the figure's middle (edgeX: where her hanging leg leaves the surface). faces: the side her face looks to, unmirrored. fpsFrom 'clips.json' = lachy's quest clips.json lists the same frame count and cell width; 'guess' = ours. mirrorArt: the strip drawn for mirroring (same silhouette, the suit's asymmetric details swapped): when she faces the other way, draw mirror(mirrorArt), not mirror(strip).",
  "lachy": {
   "repo": "https://github.com/lachydotmcg/capri-desktop",
   "commit": "156ed188a2ac00854eb1c9e932087eb5e824ccb9",
@@ -21,7 +21,13 @@
      "name": "feet",
      "x": 146,
      "y": 366
-    }
+    },
+    "bounds": [
+     0,
+     15,
+     240,
+     355
+    ]
    },
    "blink": {
     "file": "sprites/blink.png",
@@ -38,7 +44,13 @@
      "name": "feet",
      "x": 146,
      "y": 364
-    }
+    },
+    "bounds": [
+     31,
+     17,
+     181,
+     350
+    ]
    },
    "blink_glitch": {
     "file": "sprites/blink_glitch.png",
@@ -55,7 +67,13 @@
      "name": "feet",
      "x": 146,
      "y": 364
-    }
+    },
+    "bounds": [
+     31,
+     17,
+     181,
+     350
+    ]
    },
    "dance": {
     "file": "sprites/dance.png",
@@ -72,7 +90,13 @@
      "name": "feet",
      "x": 143,
      "y": 363
-    }
+    },
+    "bounds": [
+     27,
+     14,
+     213,
+     357
+    ]
    },
    "dangle": {
     "file": "sprites/dangle.png",
@@ -89,7 +113,13 @@
      "name": "grip",
      "x": 143,
      "y": 19
-    }
+    },
+    "bounds": [
+     15,
+     14,
+     214,
+     356
+    ]
    },
    "glitch": {
     "file": "sprites/glitch.png",
@@ -106,7 +136,13 @@
      "name": "feet",
      "x": 144,
      "y": 366
-    }
+    },
+    "bounds": [
+     10,
+     0,
+     214,
+     384
+    ]
    },
    "grin": {
     "file": "sprites/grin.png",
@@ -123,7 +159,13 @@
      "name": "feet",
      "x": 146,
      "y": 364
-    }
+    },
+    "bounds": [
+     31,
+     17,
+     181,
+     350
+    ]
    },
    "idle": {
     "file": "sprites/idle.png",
@@ -141,6 +183,12 @@
      "x": 52,
      "y": 363
     },
+    "bounds": [
+     4,
+     20,
+     110,
+     347
+    ],
     "mirrorArt": "idle_flipped"
    },
    "idle_blink": {
@@ -159,6 +207,12 @@
      "x": 51,
      "y": 363
     },
+    "bounds": [
+     4,
+     29,
+     108,
+     337
+    ],
     "mirrorArt": "idle_blink_flipped"
    },
    "idle_blink_flipped": {
@@ -177,6 +231,12 @@
      "x": 51,
      "y": 363
     },
+    "bounds": [
+     4,
+     29,
+     108,
+     335
+    ],
     "mirrorArtFor": "idle_blink"
    },
    "idle_blink_glitch": {
@@ -195,6 +255,12 @@
      "x": 51,
      "y": 363
     },
+    "bounds": [
+     4,
+     29,
+     108,
+     337
+    ],
     "mirrorArt": "idle_blink_glitch_flipped"
    },
    "idle_blink_glitch_flipped": {
@@ -213,6 +279,12 @@
      "x": 51,
      "y": 363
     },
+    "bounds": [
+     4,
+     29,
+     108,
+     335
+    ],
     "mirrorArtFor": "idle_blink_glitch"
    },
    "idle_flipped": {
@@ -231,6 +303,12 @@
      "x": 52,
      "y": 363
     },
+    "bounds": [
+     4,
+     20,
+     110,
+     345
+    ],
     "mirrorArtFor": "idle"
    },
    "idle_legacy": {
@@ -248,7 +326,13 @@
      "name": "feet",
      "x": 146,
      "y": 364
-    }
+    },
+    "bounds": [
+     31,
+     17,
+     181,
+     350
+    ]
    },
    "idle_mouth": {
     "file": "sprites/idle_mouth.png",
@@ -282,9 +366,16 @@
     "family": "laydown",
     "anchor": {
      "name": "surface",
-     "x": 320,
+     "x": 186,
      "y": 142
     },
+    "edgeX": 320,
+    "bounds": [
+     4,
+     2,
+     364,
+     245
+    ],
     "mirrorArt": "laydown_flipped"
    },
    "laydown_blink": {
@@ -300,9 +391,16 @@
     "family": "laydown",
     "anchor": {
      "name": "surface",
-     "x": 321,
+     "x": 187,
      "y": 144
     },
+    "edgeX": 321,
+    "bounds": [
+     4,
+     2,
+     350,
+     245
+    ],
     "mirrorArt": "laydown_blink_flipped"
    },
    "laydown_blink_flipped": {
@@ -318,9 +416,16 @@
     "family": "laydown",
     "anchor": {
      "name": "surface",
-     "x": 321,
+     "x": 187,
      "y": 144
     },
+    "edgeX": 321,
+    "bounds": [
+     4,
+     2,
+     350,
+     245
+    ],
     "mirrorArtFor": "laydown_blink"
    },
    "laydown_blink_glitch": {
@@ -336,9 +441,16 @@
     "family": "laydown",
     "anchor": {
      "name": "surface",
-     "x": 321,
+     "x": 187,
      "y": 144
     },
+    "edgeX": 321,
+    "bounds": [
+     4,
+     2,
+     350,
+     245
+    ],
     "mirrorArt": "laydown_blink_glitch_flipped"
    },
    "laydown_blink_glitch_flipped": {
@@ -354,9 +466,16 @@
     "family": "laydown",
     "anchor": {
      "name": "surface",
-     "x": 321,
+     "x": 187,
      "y": 144
     },
+    "edgeX": 321,
+    "bounds": [
+     4,
+     2,
+     350,
+     245
+    ],
     "mirrorArtFor": "laydown_blink_glitch"
    },
    "laydown_flipped": {
@@ -372,9 +491,16 @@
     "family": "laydown",
     "anchor": {
      "name": "surface",
-     "x": 320,
+     "x": 186,
      "y": 142
     },
+    "edgeX": 320,
+    "bounds": [
+     4,
+     2,
+     364,
+     245
+    ],
     "mirrorArtFor": "laydown"
    },
    "laydown_glitch": {
@@ -390,9 +516,16 @@
     "family": "laydown",
     "anchor": {
      "name": "surface",
-     "x": 357,
+     "x": 223,
      "y": 144
     },
+    "edgeX": 357,
+    "bounds": [
+     9,
+     2,
+     415,
+     247
+    ],
     "mirrorArt": "laydown_glitch_flipped"
    },
    "laydown_glitch_flipped": {
@@ -408,9 +541,16 @@
     "family": "laydown",
     "anchor": {
      "name": "surface",
-     "x": 357,
+     "x": 223,
      "y": 144
     },
+    "edgeX": 357,
+    "bounds": [
+     9,
+     2,
+     415,
+     247
+    ],
     "mirrorArtFor": "laydown_glitch"
    },
    "laydown_leave": {
@@ -426,9 +566,16 @@
     "family": "laydown",
     "anchor": {
      "name": "surface",
-     "x": 354,
+     "x": 220,
      "y": 142
     },
+    "edgeX": 354,
+    "bounds": [
+     0,
+     2,
+     440,
+     243
+    ],
     "mirrorArt": "laydown_leave_flipped"
    },
    "laydown_leave_flipped": {
@@ -444,9 +591,16 @@
     "family": "laydown",
     "anchor": {
      "name": "surface",
-     "x": 353,
+     "x": 219,
      "y": 143
     },
+    "edgeX": 353,
+    "bounds": [
+     0,
+     2,
+     440,
+     243
+    ],
     "mirrorArtFor": "laydown_leave"
    },
    "laydown_sleep": {
@@ -462,9 +616,16 @@
     "family": "laydown",
     "anchor": {
      "name": "surface",
-     "x": 320,
+     "x": 186,
      "y": 142
     },
+    "edgeX": 320,
+    "bounds": [
+     4,
+     2,
+     357,
+     246
+    ],
     "mirrorArt": "laydown_sleep_flipped"
    },
    "laydown_sleep_flipped": {
@@ -480,9 +641,16 @@
     "family": "laydown",
     "anchor": {
      "name": "surface",
-     "x": 320,
+     "x": 186,
      "y": 142
     },
+    "edgeX": 320,
+    "bounds": [
+     4,
+     2,
+     357,
+     246
+    ],
     "mirrorArtFor": "laydown_sleep"
    },
    "laydown_talk": {
@@ -498,9 +666,16 @@
     "family": "laydown",
     "anchor": {
      "name": "surface",
-     "x": 320,
+     "x": 186,
      "y": 142
     },
+    "edgeX": 320,
+    "bounds": [
+     4,
+     2,
+     364,
+     245
+    ],
     "mirrorArt": "laydown_talk_flipped"
    },
    "laydown_talk_flipped": {
@@ -516,9 +691,16 @@
     "family": "laydown",
     "anchor": {
      "name": "surface",
-     "x": 320,
+     "x": 186,
      "y": 142
     },
+    "edgeX": 320,
+    "bounds": [
+     4,
+     2,
+     364,
+     245
+    ],
     "mirrorArtFor": "laydown_talk"
    },
    "leave": {
@@ -536,7 +718,13 @@
      "name": "feet",
      "x": 144,
      "y": 366
-    }
+    },
+    "bounds": [
+     0,
+     15,
+     240,
+     356
+    ]
    },
    "mouth": {
     "file": "sprites/mouth.png",
@@ -573,6 +761,12 @@
      "x": 76,
      "y": 270
     },
+    "bounds": [
+     7,
+     33,
+     186,
+     349
+    ],
     "mirrorArt": "perch_flipped"
    },
    "perch_arrive": {
@@ -591,6 +785,12 @@
      "x": 122,
      "y": 270
     },
+    "bounds": [
+     10,
+     33,
+     273,
+     349
+    ],
     "mirrorArt": "perch_arrive_flipped"
    },
    "perch_arrive_flipped": {
@@ -609,6 +809,12 @@
      "x": 122,
      "y": 270
     },
+    "bounds": [
+     10,
+     33,
+     273,
+     349
+    ],
     "mirrorArtFor": "perch_arrive"
    },
    "perch_blink": {
@@ -627,6 +833,12 @@
      "x": 75,
      "y": 273
     },
+    "bounds": [
+     7,
+     36,
+     186,
+     346
+    ],
     "mirrorArt": "perch_blink_flipped"
    },
    "perch_blink_flipped": {
@@ -645,6 +857,12 @@
      "x": 75,
      "y": 273
     },
+    "bounds": [
+     5,
+     36,
+     188,
+     346
+    ],
     "mirrorArtFor": "perch_blink"
    },
    "perch_blink_glitch": {
@@ -663,6 +881,12 @@
      "x": 75,
      "y": 273
     },
+    "bounds": [
+     7,
+     36,
+     188,
+     346
+    ],
     "mirrorArt": "perch_blink_glitch_flipped"
    },
    "perch_blink_glitch_flipped": {
@@ -681,6 +905,12 @@
      "x": 75,
      "y": 273
     },
+    "bounds": [
+     5,
+     36,
+     190,
+     346
+    ],
     "mirrorArtFor": "perch_blink_glitch"
    },
    "perch_flipped": {
@@ -699,6 +929,12 @@
      "x": 76,
      "y": 270
     },
+    "bounds": [
+     5,
+     33,
+     188,
+     349
+    ],
     "mirrorArtFor": "perch"
    },
    "perch_glitch": {
@@ -717,6 +953,12 @@
      "x": 120,
      "y": 274
     },
+    "bounds": [
+     8,
+     33,
+     268,
+     350
+    ],
     "mirrorArt": "perch_glitch_flipped"
    },
    "perch_glitch_flipped": {
@@ -735,6 +977,12 @@
      "x": 120,
      "y": 274
     },
+    "bounds": [
+     8,
+     33,
+     268,
+     350
+    ],
     "mirrorArtFor": "perch_glitch"
    },
    "perch_leave": {
@@ -753,6 +1001,12 @@
      "x": 122,
      "y": 270
     },
+    "bounds": [
+     11,
+     33,
+     271,
+     346
+    ],
     "mirrorArt": "perch_leave_flipped"
    },
    "perch_leave_flipped": {
@@ -771,6 +1025,12 @@
      "x": 122,
      "y": 270
     },
+    "bounds": [
+     11,
+     33,
+     271,
+     346
+    ],
     "mirrorArtFor": "perch_leave"
    },
    "perch_music": {
@@ -789,6 +1049,12 @@
      "x": 76,
      "y": 270
     },
+    "bounds": [
+     11,
+     29,
+     182,
+     353
+    ],
     "mirrorArt": "perch_music_flipped"
    },
    "perch_music_flipped": {
@@ -807,6 +1073,12 @@
      "x": 76,
      "y": 270
     },
+    "bounds": [
+     11,
+     29,
+     182,
+     353
+    ],
     "mirrorArtFor": "perch_music"
    },
    "perch_talk": {
@@ -825,6 +1097,12 @@
      "x": 76,
      "y": 270
     },
+    "bounds": [
+     7,
+     33,
+     186,
+     349
+    ],
     "mirrorArt": "perch_talk_flipped"
    },
    "perch_talk_flipped": {
@@ -843,6 +1121,12 @@
      "x": 76,
      "y": 270
     },
+    "bounds": [
+     5,
+     33,
+     188,
+     349
+    ],
     "mirrorArtFor": "perch_talk"
    },
    "sleep": {
@@ -860,7 +1144,13 @@
      "name": "feet",
      "x": 143,
      "y": 355
-    }
+    },
+    "bounds": [
+     3,
+     22,
+     237,
+     336
+    ]
    },
    "wake": {
     "file": "sprites/wake.png",
@@ -877,7 +1167,13 @@
      "name": "feet",
      "x": 146,
      "y": 364
-    }
+    },
+    "bounds": [
+     6,
+     7,
+     234,
+     364
+    ]
    },
    "walk": {
     "file": "sprites/walk.png",
@@ -894,7 +1190,13 @@
      "name": "feet",
      "x": 146,
      "y": 362
-    }
+    },
+    "bounds": [
+     49,
+     15,
+     161,
+     350
+    ]
    },
    "click": {
     "file": "sprites/click.png",
@@ -978,16 +1280,24 @@
   "families": {
    "stand": {
     "bodyPx": 343,
-    "base": "idle"
+    "base": "idle",
+    "faces": "right"
    },
    "perch": {
     "base": "perch",
     "unitsHighVsStand": 0.9009,
-    "unitsFrom": "clips.json (perch 1.0, idle 1.11)"
+    "unitsFrom": "clips.json (perch 1.0, idle 1.11)",
+    "faces": "right"
    },
    "laydown": {
     "base": "laydown",
-    "scaleAsStand": true
+    "scaleAsStand": true,
+    "faces": "right"
+   },
+   "dangle": {
+    "base": "dangle",
+    "scaleAsStand": true,
+    "faces": "right"
    },
    "standLegacy": {
     "base": "idle_legacy",

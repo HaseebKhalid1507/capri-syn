@@ -46,6 +46,8 @@ pub enum Command {
     Quit,
     /// Dev: a glitch burst.
     Glitch,
+    /// Dev: show variant `id` of a pool she is in now (or `next`: an in-place shift).
+    Art { pool: String, id: String },
     /// Dev: turn her (`None`: the other way), with the turn's squeeze.
     Face(Option<bool>),
     /// Bubble paging: +1 / -1.
@@ -358,6 +360,10 @@ impl Command {
             "collapse" => Command::Collapse(true),
             "expand" => Command::Collapse(false),
             "glitch" => Command::Glitch,
+            "art" => match rest.split_whitespace().collect::<Vec<_>>().as_slice() {
+                [pool, id] => Command::Art { pool: pool.to_string(), id: id.to_string() },
+                _ => bail!("usage: art <perch|sleepFloor|sleepWindow> <variant id|next>"),
+            },
             "face" => Command::Face(match rest.trim() {
                 "left" => Some(false),
                 "right" => Some(true),

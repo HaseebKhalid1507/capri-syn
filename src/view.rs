@@ -13,6 +13,8 @@ mod lineview;
 mod voiceview;
 #[path = "arriveview.rs"]
 mod arriveview;
+#[path = "artview.rs"]
+mod artview;
 
 use crate::anim::{Animator, Mood, Rng, Seq};
 use crate::control::Command;
@@ -159,6 +161,9 @@ impl Layout {
         px(d as f32 / self.sf)
     }
 }
+
+/// An image's offset and size inside the avatar rect (device px).
+type ImageBox = ((i32, i32), (i32, i32));
 
 #[derive(Clone, Debug)]
 struct Wrapped {
@@ -509,6 +514,8 @@ pub struct Avatar {
     teleport: Option<Teleport>,
     /// Arrival sequences, the deep nap, the air kiss (arriveview).
     arrive: arriveview::ArriveState,
+    /// The variant pools on screen and the strips' pixels (artview).
+    art: artview::ArtState,
     /// Body not drawn (between dematerialise and materialise).
     hidden: bool,
     quitting: bool,
@@ -726,6 +733,7 @@ impl Avatar {
             next_glint: None,
             teleport: None,
             arrive: Default::default(),
+            art: artview::ArtState::new(std::env::var("SA_ART_SEED").ok().and_then(|s| s.parse().ok()).unwrap_or_else(|| Rng::seeded().next())),
             hidden: false,
             quitting: false,
             fatal: false,
@@ -805,6 +813,9 @@ impl Avatar {
     /// The music pose for the current placement, if music is on and the pack has it.
     fn music_frame(&self) -> Option<usize> {
         self.music.as_ref()?;
+        if let Some(i) = self.art_music_frame() {
+            return Some(i);
+        }
         let spec = self.music_spec()?;
         let idx = |id: &str| self.pack.index.get(id).copied();
         if self.sitting() {
@@ -884,7 +895,13 @@ impl Avatar {
         let show = self.loaded && !self.hidden && !self.quitting && self.teleport.is_none() && !self.notes.is_empty();
         if let (true, Some(m), Some(fi), Some(spec)) = (show, self.music.as_ref(), self.music_frame(), self.music_spec()) {
             let src = &self.pack.frames[fi];
-            let emitters = spec.emitters.get(&src.id).map(Vec::as_slice).unwrap_or(&[]);
+            // A strip's emitters are keyed by the strip, in cell px.
+            let strip = src.cell.as_ref().zip(self.pack.anim.as_ref()).map(|(c, a)| &a.strips[c.strip]);
+            let scaled: Vec<[i32; 2]> = strip
+                .and_then(|s| Some((s, spec.emitters.get(&s.name)?)))
+                .map(|(s, e)| e.iter().map(|p| [(p[0] as f32 * s.k).round() as i32, (p[1] as f32 * s.k).round() as i32]).collect())
+                .unwrap_or_default();
+            let emitters = if strip.is_some() { scaled.as_slice() } else { spec.emitters.get(&src.id).map(Vec::as_slice).unwrap_or(&[]) };
             let (ox, oy) = self.pack.offset(src);
             let l = self.layout;
             let beat = 60.0 / self.music.as_ref().and_then(|m| m.bpm).unwrap_or(spec.bpm).clamp(40.0, 240.0);
@@ -1011,6 +1028,7 @@ impl Avatar {
             && self.press.is_none()
             && self.squash.is_none()
             && self.glitch.is_none()
+            && !self.art_shows_strip()
     }
 
     fn pose_at(&self, now: Instant) -> fx::Pose {
@@ -1153,13 +1171,24 @@ impl Avatar {
 
     /// Frame `i` as shown: mirrored while she faces the other way (if it may mirror).
     pub(super) fn fr(&self, i: usize) -> Option<&Frame> {
-        let f = self.frames.get(i)?.as_ref()?;
-        Some(if self.mirrored(i) { f.mirrored() } else { f })
+        let own = self.frames.get(i).and_then(Option::as_ref);
+        // A strip's cell mirrored: its mirrorArt twin (decoded mirrored). Either way round, the
+        // other set mirrored on the fly stands in until the right one is in.
+        let twin = self.pack.twin(i).and_then(|t| self.frames.get(t)).and_then(Option::as_ref);
+        if self.mirrored(i) {
+            return twin.or_else(|| own.map(Frame::mirrored));
+        }
+        own.or_else(|| twin.map(Frame::mirrored))
     }
 
-    /// Frame `i` is shown mirrored.
+    /// Frame `i` is shown mirrored: she faces the other way from the way it was drawn (a
+    /// strip may be drawn facing the other way from the pack's art).
     pub(super) fn mirrored(&self, i: usize) -> bool {
-        self.flip && self.flippable.get(i).copied().unwrap_or(false)
+        let drawn_other = match (self.pack.frames.get(i).and_then(|f| f.cell.as_ref()), &self.pack.anim) {
+            (Some(c), Some(a)) => a.strips[c.strip].faces_right != self.art_right,
+            _ => false,
+        };
+        self.flippable.get(i).copied().unwrap_or(false) && self.flip != drawn_other
     }
 
     /// She faces right (or will, once a turn in progress is through).
@@ -1231,7 +1260,11 @@ impl Avatar {
 
     /// Frame `i` as drawn in the pack (never mirrored), else the default sprite.
     fn raw_frame_or_default(&self, i: usize) -> Option<&Frame> {
-        self.frames.get(i).and_then(|f| f.as_ref()).or_else(|| self.frames.get(self.pack.frame(&self.pack.catalog.default_sprite).ok()?)?.as_ref())
+        self.frames
+            .get(i)
+            .and_then(|f| f.as_ref())
+            .or_else(|| self.fr(i))
+            .or_else(|| self.frames.get(self.pack.frame(&self.pack.catalog.default_sprite).ok()?)?.as_ref())
     }
 
     /// Advance a turn: the art swaps edge-on (`facing::TURN_SWAP_U`), it ends at `turn_ms`.
@@ -1290,6 +1323,10 @@ impl Avatar {
     /// Base frame and loop for a mood, given where the avatar is (standing or perched).
     fn layer(&self, m: Mood) -> (usize, Option<Seq>) {
         let default = self.pack.frame(&self.pack.catalog.default_sprite).unwrap_or(0);
+        // A strip variant on screen (a perch, a sleep): its own loops for every mood.
+        if let Some(l) = self.art_layer(m) {
+            return l;
+        }
         if let Some(i) = self.music_frame() {
             return (i, None);
         }
@@ -1314,8 +1351,8 @@ impl Avatar {
     }
 
     fn activities(&self) -> &[Vec<crate::pack::Step>] {
-        // Standing clips would break a hang or a floor sit.
-        if self.posed() || (!self.sitting() && !self.standing()) {
+        // Standing clips would break a hang or a floor sit; a strip variant blinks on its own.
+        if self.posed() || (!self.sitting() && !self.standing()) || self.art_strip().is_some() {
             return &[];
         }
         match self.perch_spec() {
@@ -1337,6 +1374,13 @@ impl Avatar {
             }
         }
         let mut seq: Seq = Vec::new();
+        // The pools see the new mood (a sleep pool in or out). A strip variant has its own way
+        // in and out: the mood's CapriCore entry/exit don't play over it.
+        let was_strip = self.art_strip().is_some();
+        self.mood = m;
+        self.art_sync(now);
+        self.mood = prev;
+        let to_strip = self.art_strip().is_some();
         // An arrival sequence (the launch intro) plays through; the mood's entry follows it.
         let arriving = self.arriving(now);
         // Out of her sleep lying on a window top: she sits up there a beat before anything
@@ -1346,6 +1390,7 @@ impl Avatar {
         }
         if !self.sitting() && !self.posed() {
             if m != prev
+                && !was_strip
                 && let Some(exit) = self.spec(prev).and_then(|s| s.exit.clone())
             {
                 seq.extend(self.pack.flatten(&exit));
@@ -1355,7 +1400,7 @@ impl Avatar {
                     self.waking_until = Some(now + Duration::from_millis(ms));
                 }
             }
-            if let Some(entry) = self.spec(m).and_then(|s| s.entry.clone()) {
+            if !to_strip && let Some(entry) = self.spec(m).and_then(|s| s.entry.clone()) {
                 seq.extend(self.pack.flatten(&entry));
             }
         }
@@ -1402,6 +1447,8 @@ impl Avatar {
 
     /// Re-apply the current mood's layer after the placement changed (no entry/exit).
     fn relayer(&mut self, now: Instant) {
+        self.art.fits.borrow_mut().clear();
+        self.art_sync(now);
         let before = self.anim.frame();
         let (base, looping) = self.layer(self.mood);
         self.anim.set_layer(base, looping, now);
@@ -1580,6 +1627,7 @@ impl Avatar {
         };
         take(self.anim.deadline());
         take(self.kiss_deadline());
+        take(self.art.deadline());
         take(self.voice_deadline(now));
         if !self.anim.busy() {
             take(self.next_activity);
@@ -1651,7 +1699,14 @@ impl Avatar {
         t
     }
 
-    fn schedule(&mut self, _cx: &mut Context<Self>) {
+    fn schedule(&mut self, cx: &mut Context<Self>) {
+        let now = Instant::now();
+        // A pool in or out by a path that didn't relayer (a move along, a teleport's target).
+        if self.art_sync(now) && self.loaded && self.layer(self.mood).0 != self.anim.base() {
+            self.relayer(now);
+        }
+        self.art_seam(now);
+        self.art_fetch(cx);
         self.sync_shadow();
         self.sync_pointer_watch();
         self.ticker.set(self.next_deadline());
@@ -1670,6 +1725,7 @@ impl Avatar {
             self.lying_cut(before, now);
         }
         dirty |= self.step_kiss(now);
+        dirty |= self.art_tick(now);
         dirty |= self.voice_tick(now, cx);
         dirty |= self.step_turn(now);
         if let Some((at, m)) = self.mood_then
@@ -2219,6 +2275,7 @@ impl Avatar {
                 "ok".into()
             }
             Command::Drag(ops) => self.drag_cmd(ops, now),
+            Command::Art { pool, id } => self.art_force(&pool, &id, now),
             Command::Music(on) => {
                 if on {
                     match self.music_on(now, None) {
@@ -2733,7 +2790,7 @@ impl Avatar {
             Placement::Pose { frame } => serde_json::json!({ "kind": "pose", "frame": self.pack.frames.get(frame).map(|f| f.id.clone()) }),
         };
         let facing = serde_json::json!({ "right": self.facing_right(), "mirrored": self.flip, "turns": self.turns, "why": self.turn_why });
-        serde_json::json!({
+        let mut v = serde_json::json!({
             "mood": self.mood.key(),
             "xid": self.os.body(),
             "monitor": { "x": m.x, "y": m.y, "w": m.w, "h": m.h },
@@ -2789,8 +2846,9 @@ impl Avatar {
                 let (x, y) = (self.origin.0 as f32 + f32::from(b.origin.x) * sf, self.origin.1 as f32 + f32::from(b.origin.y) * sf);
                 (id.to_string(), serde_json::json!([x.round() as i32, y.round() as i32, (f32::from(b.size.width) * sf) as i32, (f32::from(b.size.height) * sf) as i32]))
             }).collect::<serde_json::Map<_, _>>(),
-        })
-        .to_string()
+        });
+        v["art"] = self.art_json();
+        v.to_string()
     }
 
 
@@ -3725,7 +3783,14 @@ impl Avatar {
         };
         let click = self.pack.behaviour.click.clone();
         let perch_click = self.perch_spec().filter(|_| self.sitting()).map(|p| if head && !p.headpat.is_empty() { p.headpat.clone() } else { p.click.clone() });
-        let steps = if (!self.sitting() && !self.standing()) || self.asleep() {
+        // On a strip variant: one of its own blinks (the pack's reactions are another drawing).
+        let art_click = if self.asleep() { None } else { self.art_click() };
+        let steps = if art_click.is_some() {
+            if head {
+                self.hearts = Some((now, at));
+            }
+            Vec::new()
+        } else if (!self.sitting() && !self.standing()) || self.asleep() {
             // Hanging, sitting on the floor or asleep (a pat doesn't wake her): no standing
             // clip, hearts on the head.
             if head {
@@ -3755,7 +3820,7 @@ impl Avatar {
         } else {
             Vec::new()
         };
-        let seq = self.pack.flatten(&steps);
+        let seq = art_click.unwrap_or_else(|| self.pack.flatten(&steps));
         let len: u64 = seq.iter().map(|s| s.1 as u64).sum();
         if !seq.is_empty() {
             self.anim.play(seq, now);
@@ -4111,6 +4176,8 @@ impl Render for Avatar {
             under(raw_base).into_iter().chain(under(raw_frame)).min().unwrap_or(base_top)
         };
         let image = frame.map(|f| f.image.clone());
+        // Where the image sits in the avatar rect (a strip's cell is its opaque box).
+        let image_at = frame.map(|f| (f.at, f.image_size()));
         let rects = frame.map(|f| f.rects.clone()).unwrap_or_default();
         let hidden = self.hidden || frame.is_none();
         let has_frame = frame.is_some() && !hidden;
@@ -4220,14 +4287,14 @@ impl Render for Avatar {
             n.pivot.0 = sliver_px;
         }
         // The rag's next plan (and frame) goes underneath (§4: commit one frame ahead).
-        let mut next_img: Option<Arc<RenderImage>> = None;
+        let mut next_img: Option<(Arc<RenderImage>, ImageBox)> = None;
         if let Some((_, Some(n))) = &rag_shown {
             // Under a glitch, `next` is already the pattern laid on this plan.
             if self.glitch.is_none() {
                 next = Some(n.plan.clone());
             }
             if n.frame != shown_i {
-                next_img = self.frame_or_default(n.frame).map(|f| f.image.clone());
+                next_img = self.frame_or_default(n.frame).map(|f| (f.image.clone(), (f.at, f.image_size())));
             }
         }
         // Alpha mode (a compositor shows the window's own alpha): nothing is clipped by a
@@ -4356,6 +4423,12 @@ impl Render for Avatar {
                     let (ax, ay) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
                     let lp = |v: f32| v / sf;
                     let rect = |x: f32, y: f32, w: f32, h: f32| Bounds::new(point(px(ax + lp(x)), px(ay + lp(y))), size(px(lp(w)), px(lp(h))));
+                    // The image's bounds when the whole avatar rect is drawn at (x, y, w, h).
+                    let cur_at = image_at.unwrap_or(((0, 0), (aw, ah)));
+                    let put = |at: ((i32, i32), (i32, i32)), x: f32, y: f32, w: f32, h: f32| {
+                        let (a, b, c, d) = crate::frames::place_in(at, (x, y, w, h), aw, ah);
+                        rect(a, b, c, d)
+                    };
                     if let (Some(img), false) = (image, hidden) {
                         // Underlays first: invisible outside this frame's shape and covered
                         // inside it, they fill the strips the next shape grows into.
@@ -4363,7 +4436,7 @@ impl Render for Avatar {
                             let (ix, iy, iw, ih) = plan2.image_rect(aw, ah);
                             for k in [1.0, 0.5] {
                                 for (ox, oy) in [(-1.0, -1.0), (0.0, -1.0), (1.0, -1.0), (-1.0, 0.0), (1.0, 0.0), (-1.0, 1.0), (0.0, 1.0), (1.0, 1.0)] {
-                                    let r = rect(ix + ox * under * k, iy + oy * under * k, iw, ih);
+                                    let r = put(cur_at, ix + ox * under * k, iy + oy * under * k, iw, ih);
                                     window.paint_image(r, r, Corners::default(), img.clone(), 0, false).ok();
                                 }
                             }
@@ -4373,11 +4446,11 @@ impl Render for Avatar {
                                 window.paint_quad(fill(rect(r.0 as f32, r.1 as f32, r.2 as f32, r.3 as f32), rgb(c)));
                             }
                             let (nx, ny, nw, nh) = n.image_rect(aw, ah);
-                            let img = next_img.clone().unwrap_or_else(|| img.clone());
+                            let (img, n_at) = next_img.clone().unwrap_or_else(|| (img.clone(), cur_at));
                             match (&n.slices, n.tint) {
                                 (_, Some(_)) => {}
                                 (None, None) => {
-                                    let r = rect(nx, ny, nw, nh);
+                                    let r = put(n_at, nx, ny, nw, nh);
                                     window.paint_image(r, r, Corners::default(), img.clone(), 0, false).ok();
                                 }
                                 (Some(bands), None) => {
@@ -4385,7 +4458,7 @@ impl Render for Avatar {
                                         if n.solid.get(i).is_some_and(Option::is_some) {
                                             continue;
                                         }
-                                        let shifted = rect(nx + dx as f32, ny + dy as f32, nw, nh);
+                                        let shifted = put(n_at, nx + dx as f32, ny + dy as f32, nw, nh);
                                         let clip = rect(nx + dx as f32, (y0 + dy) as f32, nw, (y1 - y0) as f32);
                                         window.paint_image(clip, shifted, Corners::default(), img.clone(), 0, false).ok();
                                     }
@@ -4411,9 +4484,9 @@ impl Render for Avatar {
                                 // back into on the rebound shows hair, not stale black.
                                 if (plan2.sy < 1.0 || plan2.sx < 1.0) && !alpha && !turning {
                                     let full = rect(0.0, 0.0, aw as f32, ah as f32);
-                                    window.paint_image(full, full, Corners::default(), img.clone(), 0, false).ok();
+                                    window.paint_image(full, put(cur_at, 0.0, 0.0, aw as f32, ah as f32), Corners::default(), img.clone(), 0, false).ok();
                                 }
-                                window.paint_image(ib, ib, Corners::default(), img, 0, false).ok();
+                                window.paint_image(ib, put(cur_at, ix, iy, iw, ih), Corners::default(), img, 0, false).ok();
                             }
                             Some(bands) => {
                                 for (r, c) in &solid_rects {
@@ -4429,13 +4502,13 @@ impl Render for Avatar {
                                         let s = l.split as f32;
                                         let (still, moving) = if l.right { ((ix, s - ix), (s, ix + iw - s)) } else { ((s, ix + iw - s), (ix, s - ix)) };
                                         for ((x0, w), d) in [(still, dx), (moving, dx + e)] {
-                                            let shifted = rect(ix + d as f32, iy + dy as f32, iw, ih);
+                                            let shifted = put(cur_at, ix + d as f32, iy + dy as f32, iw, ih);
                                             let clip = rect(x0 + d as f32, (y0 + dy) as f32, w, (y1 - y0) as f32);
                                             window.paint_image(clip, shifted, Corners::default(), img.clone(), 0, false).ok();
                                         }
                                         continue;
                                     }
-                                    let shifted = rect(ix + dx as f32, iy + dy as f32, iw, ih);
+                                    let shifted = put(cur_at, ix + dx as f32, iy + dy as f32, iw, ih);
                                     let clip = rect(ix + dx as f32, (y0 + dy) as f32, iw, (y1 - y0) as f32);
                                     window.paint_image(clip, shifted, Corners::default(), img.clone(), 0, false).ok();
                                 }

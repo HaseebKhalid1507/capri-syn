@@ -1,0 +1,520 @@
+//! The variant pools on screen (`crate::variants` decides, this shows): which pooled state she is
+//! in, the pick, the strip's loop for it (talk, music and blinks follow the variant on screen),
+//! the glitch over every seam, the in-place shift on a long stay, and the strips' pixels:
+//! decoded off the main thread when a pick needs them, dropped least-recently-used past the
+//! pack's budget (`variants.cacheMb`). A pack without pools or `anim/` never gets here.
+
+use super::{Avatar, Placement};
+use crate::anim::{Mood, Seq};
+use crate::brain::RestPose;
+use crate::frames::Decoded;
+use crate::fx::{Glitch, GlitchKind};
+use crate::pack::{Variant, VariantArt};
+use crate::variants::{Art, Picker, PoolKey, seam, weighted};
+use gpui_kit::Context;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
+
+/// A strip's cells as decoded together: (strip, the mirrorArt twin's mirrored cells).
+type Unit = (usize, bool);
+
+/// Not now (a reply, music, a one-shot): the shift waits this long and asks again.
+const SHIFT_RETRY: Duration = Duration::from_secs(20);
+
+pub(super) struct ArtState {
+    picker: Picker,
+    /// The variant in effect per pooled state she is in (or is teleporting into).
+    picks: HashMap<PoolKey, usize>,
+    /// The window the perch pick belongs to: it holds through a sleep on that window.
+    perch_of: Option<u32>,
+    /// The floor sleep picked last was a strip: it has its own way out (no CapriCore stand-up).
+    pub floor_strip: bool,
+    shift_at: Option<Instant>,
+    next_blink: Option<Instant>,
+    /// Decoded units and when they were last on screen; decodes in flight; failed ones.
+    ready: HashMap<Unit, Instant>,
+    pending: HashSet<Unit>,
+    failed: HashSet<Unit>,
+    /// Asked for from `&self` code (the layer), fetched at the next schedule.
+    want: RefCell<Vec<Unit>>,
+    /// The art family on screen last schedule: a change is a seam.
+    seam_last: Option<Art>,
+    /// A lying variant fits on its window top (per strip): asked once per relayer, like the
+    /// pack's own lying frame.
+    pub fits: RefCell<HashMap<usize, bool>>,
+    pub seams: u32,
+}
+
+impl ArtState {
+    pub fn new(seed: u64) -> ArtState {
+        ArtState {
+            picker: Picker::new(seed),
+            picks: HashMap::new(),
+            perch_of: None,
+            floor_strip: false,
+            shift_at: None,
+            next_blink: None,
+            ready: HashMap::new(),
+            pending: HashSet::new(),
+            failed: HashSet::new(),
+            want: RefCell::new(Vec::new()),
+            seam_last: None,
+            fits: RefCell::new(HashMap::new()),
+            seams: 0,
+        }
+    }
+
+    pub fn deadline(&self) -> Option<Instant> {
+        [self.shift_at, self.next_blink].into_iter().flatten().min()
+    }
+}
+
+impl Avatar {
+    // ---- which pools ------------------------------------------------------------------------
+
+    /// Where she is, or where the teleport in flight lands (picked early, decoded during the flight).
+    fn art_place(&self) -> Placement {
+        self.teleport.as_ref().map_or(self.placement, |t| t.place)
+    }
+
+    fn floor_asleep(&self) -> bool {
+        let rest = self.brain.as_ref().and_then(|h| h.rest);
+        rest == Some(RestPose::Nap) || (self.mood == Mood::Sleepy && rest.is_none())
+    }
+
+    fn art_variant(&self, k: PoolKey) -> Option<&Variant> {
+        self.pack.pools.get(&k)?.variants.get(*self.art.picks.get(&k)?)
+    }
+
+    /// The strip variant of `k` she shows now (its placement is hers, not a teleport's target).
+    fn art_on(&self, k: PoolKey) -> Option<&VariantArt> {
+        let here = match k {
+            PoolKey::Perch | PoolKey::SleepWindow => self.sitting(),
+            PoolKey::SleepFloor => self.placement == Placement::Ground,
+        };
+        if !here {
+            return None;
+        }
+        let v = self.art_variant(k)?;
+        let a = v.art.as_ref()?;
+        if !v.lying {
+            return Some(a);
+        }
+        let fits = *self.art.fits.borrow_mut().entry(a.base).or_insert_with(|| self.art_fits(a.base, self.placement));
+        fits.then_some(a)
+    }
+
+    /// The strip variant on screen, if any (the sleep pools over the perch).
+    pub(super) fn art_strip(&self) -> Option<&VariantArt> {
+        let sleeping_window = self.art.picks.contains_key(&PoolKey::SleepWindow);
+        let sw = self.art_on(PoolKey::SleepWindow);
+        // Asleep on a window with the pack's own sleep: the perch variant shows only if that
+        // sleep isn't lying (it sits asleep where the lying frame doesn't fit).
+        if sleeping_window && sw.is_none() && self.perch_sleep_frame(Mood::Sleepy).is_some() {
+            return None;
+        }
+        sw.or_else(|| self.art_on(PoolKey::SleepFloor)).or_else(|| self.art_on(PoolKey::Perch))
+    }
+
+    /// Pools in or out as she moves, sleeps and wakes; a pick on the way in. True if a pick changed.
+    pub(super) fn art_sync(&mut self, now: Instant) -> bool {
+        if self.pack.pools.is_empty() {
+            return false;
+        }
+        let place = self.art_place();
+        let on = match place {
+            Placement::Perch { win, sit: true, .. } => Some(win),
+            _ => None,
+        };
+        let sleepy = self.arrive.deep || self.mood == Mood::Sleepy;
+        let want = [
+            (PoolKey::Perch, on.is_some()),
+            (PoolKey::SleepWindow, on.is_some() && sleepy),
+            (PoolKey::SleepFloor, place == Placement::Ground && self.floor_asleep()),
+        ];
+        let mut changed = false;
+        if on != self.art.perch_of {
+            self.art.perch_of = on;
+            changed |= self.art_drop(PoolKey::Perch);
+        }
+        for (k, active) in want {
+            if !self.pack.pools.contains_key(&k) {
+                continue;
+            }
+            match (active, self.art.picks.contains_key(&k)) {
+                (true, false) => {
+                    let eligible: Vec<bool> = self.pack.pools[&k].variants.iter().map(|v| self.art_eligible(v, place)).collect();
+                    let weights: Vec<f32> = self.pack.pools[&k].variants.iter().map(|v| v.weight).collect();
+                    if let Some(i) = self.art.picker.pick(k, &weights, &eligible) {
+                        self.art_set(k, i);
+                        changed = true;
+                    }
+                }
+                (false, true) => changed |= self.art_drop(k),
+                _ => {}
+            }
+        }
+        if changed {
+            self.art_after_pick(now);
+        }
+        changed
+    }
+
+    fn art_set(&mut self, k: PoolKey, i: usize) {
+        self.art.picks.insert(k, i);
+        if k == PoolKey::SleepFloor {
+            self.art.floor_strip = self.pack.pools[&k].variants[i].art.is_some();
+        }
+    }
+
+    fn art_drop(&mut self, k: PoolKey) -> bool {
+        self.art.picks.remove(&k).is_some()
+    }
+
+    /// After a pick: the next shift and blink, and the strips it needs.
+    fn art_after_pick(&mut self, now: Instant) {
+        let top = [PoolKey::SleepWindow, PoolKey::SleepFloor, PoolKey::Perch].into_iter().find(|k| self.art.picks.contains_key(k));
+        let range = top.and_then(|k| self.pack.pools[&k].shift_ms).filter(|_| top.is_some_and(|k| self.pack.pools[&k].variants.len() > 1));
+        self.art.shift_at = range.map(|r| now + self.art.picker.shift_in(r));
+        let blink = self.art.picks.iter().filter_map(|(&k, &i)| self.pack.pools[&k].variants[i].art.as_ref()).find(|a| !a.blinks.is_empty()).map(|a| a.blink_ms);
+        self.art.next_blink = blink.map(|r| now + self.art.picker.shift_in(r));
+        let arts: Vec<VariantArt> = self.art.picks.iter().filter_map(|(&k, &i)| self.pack.pools[&k].variants[i].art.clone()).collect();
+        for a in arts {
+            self.art_need(a.base);
+            for (b, _) in &a.blinks {
+                self.art_need(*b);
+            }
+        }
+    }
+
+    /// A lying variant only where the whole figure is on the window top's exposed stretch.
+    fn art_eligible(&self, v: &Variant, place: Placement) -> bool {
+        match &v.art {
+            Some(a) if v.lying => self.art_fits(a.base, place),
+            _ => true,
+        }
+    }
+
+    /// Strip `si`'s figure (its registered bounds) lies on the exposed top at the seat of `place`.
+    fn art_fits(&self, si: usize, place: Placement) -> bool {
+        let Placement::Perch { win, dx, .. } = place else { return false };
+        let Some(r) = self.os.toplevel_rect(win) else { return false };
+        let (a, b) = self.art_span(si);
+        let x = r.x + dx;
+        let (spans, _) = self.exposed_seats(&r, true);
+        spans.iter().any(|&(lo, hi)| lo <= x + a && x + b < hi)
+    }
+
+    /// Strip `si`'s x extent about the seat (device px), as she faces now.
+    fn art_span(&self, si: usize) -> (i32, i32) {
+        let Some(fi) = self.pack.strip_first.get(si).copied().flatten() else { return (0, 0) };
+        let f = &self.pack.frames[fi];
+        let (dx, _) = self.pack.offset(f);
+        let l = &self.layout;
+        let (x0, _) = l.geo.to_device(f.bounds.x + dx, 0);
+        let (x1, _) = l.geo.to_device(f.bounds.right() + dx, 0);
+        let g = l.ground_x - l.avatar_x;
+        let (lo, hi) = (x0.floor() as i32 - g, x1.ceil() as i32 - g);
+        if self.mirrored(fi) { (-hi, -lo) } else { (lo, hi) }
+    }
+
+    // ---- what shows -------------------------------------------------------------------------
+
+    /// The strip unit for `si` as she faces now: its twin's mirrored cells if it has them.
+    fn art_unit(&self, si: usize) -> Unit {
+        let Some(fi) = self.pack.strip_first.get(si).copied().flatten() else { return (si, false) };
+        (si, self.mirrored(fi) && self.pack.mirror_first.get(si).copied().flatten().is_some())
+    }
+
+    /// Ask for `si`'s cells (as she faces now); fetched at the next schedule.
+    fn art_need(&self, si: usize) {
+        let u = self.art_unit(si);
+        if !self.art.ready.contains_key(&u) && !self.art.pending.contains(&u) && !self.art.failed.contains(&u) {
+            self.art.want.borrow_mut().push(u);
+        }
+    }
+
+    /// Strip `si` can show: the cells as she faces now (asked for if not), or the other set
+    /// (mirrored on the fly) meanwhile.
+    fn art_ready(&self, si: usize) -> bool {
+        let u = self.art_unit(si);
+        if self.art.ready.contains_key(&u) {
+            return true;
+        }
+        self.art_need(si);
+        // The other set (mirrored on the fly) stands in meanwhile.
+        self.art.ready.contains_key(&(si, !u.1))
+    }
+
+    /// The layer for mood `m` from the strip variant on screen: the music, talk or base loop.
+    /// None: the pack's own frames (no pool here, its own variant, or the cells aren't in yet).
+    pub(super) fn art_layer(&self, m: Mood) -> Option<(usize, Option<Seq>)> {
+        let a = self.art_strip()?;
+        let si = match (self.music.is_some(), m) {
+            (true, _) => a.music?,
+            (false, Mood::Talking) => a.talk.filter(|&t| self.art_ready(t)).unwrap_or(a.base),
+            _ => a.base,
+        };
+        if !self.art_ready(si) {
+            return None;
+        }
+        let seq = self.pack.strip_seq(si, a.every);
+        let base = seq.first()?.0;
+        Some((base, Some(seq)))
+    }
+
+    /// The music strip on screen (its first cell): notes and the music pose key off it.
+    pub(super) fn art_music_frame(&self) -> Option<usize> {
+        self.music.as_ref()?;
+        let si = self.art_strip()?.music?;
+        self.art_ready(si).then(|| self.pack.strip_first.get(si).copied().flatten()).flatten()
+    }
+
+    /// A strip's frame shows (or is about to): it breathes on its own, no procedural pose.
+    pub(super) fn art_shows_strip(&self) -> bool {
+        self.pack.frames.get(self.shown_frame()).is_some_and(|f| f.cell.is_some())
+    }
+
+    /// A click on a strip variant: one of its blinks (the pack's perch reactions are another
+    /// drawing). None: not on a strip variant.
+    pub(super) fn art_click(&mut self) -> Option<Seq> {
+        let a = self.art_strip()?.clone();
+        Some(self.art_blink_seq(&a).unwrap_or_default())
+    }
+
+    fn art_blink_seq(&mut self, a: &VariantArt) -> Option<Seq> {
+        let w: Vec<f32> = a.blinks.iter().map(|b| if self.art_ready(b.0) { b.1 } else { 0.0 }).collect();
+        let i = weighted(self.art.picker.rng(), &w)?;
+        Some(self.pack.strip_seq(a.blinks[i].0, 1))
+    }
+
+    // ---- time -------------------------------------------------------------------------------
+
+    /// Per tick: blinks over a strip loop, the in-place shift. True: redraw.
+    pub(super) fn art_tick(&mut self, now: Instant) -> bool {
+        let mut dirty = false;
+        if let Some(at) = self.art.next_blink
+            && at <= now
+        {
+            let a = self.art_strip().cloned();
+            let quiet = !self.anim.busy() && self.music.is_none() && self.mood != Mood::Talking && !self.asleep();
+            if let (Some(a), true) = (&a, quiet)
+                && let Some(seq) = self.art_blink_seq(a)
+                && !seq.is_empty()
+            {
+                self.anim.play(seq, now);
+                dirty = true;
+            }
+            let range = a.map_or([3000, 6000], |a| a.blink_ms);
+            self.art.next_blink = Some(now + self.art.picker.shift_in(range));
+        }
+        if let Some(at) = self.art.shift_at
+            && at <= now
+        {
+            let calm = matches!(self.mood, Mood::Idle | Mood::Sleepy)
+                && !self.anim.busy()
+                && self.music.is_none()
+                && self.teleport.is_none()
+                && self.rag.is_none()
+                && self.glitch.is_none();
+            if calm {
+                dirty |= self.art_shift(now);
+            } else {
+                self.art.shift_at = Some(now + SHIFT_RETRY);
+            }
+        }
+        dirty
+    }
+
+    /// A long stay: the top pool re-picks (never the same), on the same spot.
+    fn art_shift(&mut self, now: Instant) -> bool {
+        let Some(k) = [PoolKey::SleepWindow, PoolKey::SleepFloor, PoolKey::Perch].into_iter().find(|k| self.art.picks.contains_key(k)) else {
+            self.art.shift_at = None;
+            return false;
+        };
+        let place = self.placement;
+        let eligible: Vec<bool> = self.pack.pools[&k].variants.iter().map(|v| self.art_eligible(v, place)).collect();
+        let weights: Vec<f32> = self.pack.pools[&k].variants.iter().map(|v| v.weight).collect();
+        let before = self.art.picks.get(&k).copied();
+        let picked = self.art.picker.pick(k, &weights, &eligible);
+        if let Some(i) = picked {
+            self.art_set(k, i);
+        }
+        self.art_after_pick(now);
+        if picked.is_some() && picked != before {
+            self.relayer(now);
+            return true;
+        }
+        false
+    }
+
+    /// Dev: `art <pool> <variant id|next>`.
+    pub(super) fn art_force(&mut self, pool: &str, id: &str, now: Instant) -> String {
+        let Some(k) = PoolKey::parse(pool) else { return format!("error: pool `{pool}` (perch|sleepFloor|sleepWindow)") };
+        let Some(p) = self.pack.pools.get(&k) else { return format!("error: this pack has no `{pool}` pool") };
+        if !self.art.picks.contains_key(&k) {
+            return format!("error: not in the `{pool}` state now");
+        }
+        if id == "next" {
+            self.art.shift_at = Some(now);
+            return if self.art_shift(now) { "ok".into() } else { "error: no other eligible variant".into() };
+        }
+        let Some(i) = p.by_id(id) else { return format!("error: no variant `{id}` in `{pool}`") };
+        self.art.picker.force(k, i);
+        self.art_set(k, i);
+        self.art_after_pick(now);
+        self.relayer(now);
+        "ok".into()
+    }
+
+    pub(super) fn art_json(&self) -> serde_json::Value {
+        let picks: serde_json::Map<String, serde_json::Value> =
+            self.art.picks.iter().map(|(k, &i)| (k.key().to_string(), self.pack.pools[k].variants[i].id.clone().into())).collect();
+        let name = |u: &Unit| {
+            let n = self.pack.anim.as_ref().map_or("?", |a| a.strips[u.0].name.as_str());
+            if u.1 { format!("{n} (mirrorArt)") } else { n.to_string() }
+        };
+        let mut ready: Vec<String> = self.art.ready.keys().map(name).collect();
+        ready.sort();
+        serde_json::json!({
+            "picks": picks,
+            "strip": self.art_shows_strip(),
+            "ready": ready,
+            "pending": self.art.pending.len(),
+            "bytes": self.art_bytes(),
+            "seams": self.art.seams,
+            "shift_in_ms": self.art.shift_at.map(|t| t.saturating_duration_since(Instant::now()).as_millis() as u64),
+        })
+    }
+
+    // ---- the seam -----------------------------------------------------------------------------
+
+    /// Every schedule: the art family on screen changed (CapriCore ↔ lachy, or one lachy drawing
+    /// to another): a glitch over the cut, unless something else already covers it.
+    pub(super) fn art_seam(&mut self, now: Instant) {
+        if self.pack.anim.is_none() {
+            return;
+        }
+        let shown = self.shown_frame();
+        // Turned on a strip: its cells for this way round (the other set stands in until then).
+        if let Some(c) = self.pack.frames.get(shown).and_then(|f| f.cell.as_ref())
+            && !c.mirror
+        {
+            self.art_ready(c.strip);
+        }
+        let art = self.pack.art_of(shown);
+        let prev = self.art.seam_last.replace(art);
+        if let Some(prev) = prev
+            && seam(prev, art)
+            && self.loaded
+            && !self.hidden
+            && self.glitch.is_none()
+            && self.teleport.is_none()
+            && self.rag.is_none()
+        {
+            self.glitch = Some(Glitch::new(GlitchKind::Burst, now, self.rng.next()));
+            self.art.seams += 1;
+        }
+    }
+
+    // ---- pixels -------------------------------------------------------------------------------
+
+    fn unit_frames(&self, u: Unit) -> Vec<usize> {
+        let first = if u.1 { self.pack.mirror_first.get(u.0) } else { self.pack.strip_first.get(u.0) };
+        let (Some(Some(f)), Some(a)) = (first, &self.pack.anim) else { return Vec::new() };
+        (*f..*f + a.strips[u.0].frames as usize).collect()
+    }
+
+    fn art_bytes(&self) -> usize {
+        self.art.ready.keys().flat_map(|&u| self.unit_frames(u)).filter_map(|i| self.frames[i].as_ref()).map(|f| f.bytes()).sum()
+    }
+
+    /// From `schedule`: decode what the layer asked for, off the main thread.
+    pub(super) fn art_fetch(&mut self, cx: &mut Context<Self>) {
+        let want: Vec<Unit> = self.art.want.borrow_mut().drain(..).collect();
+        for u in want {
+            if self.art.ready.contains_key(&u) || !self.art.pending.insert(u) {
+                continue;
+            }
+            let idx = self.unit_frames(u);
+            let (p, geo) = (self.pack.clone(), self.layout.geo);
+            let which = idx.clone();
+            cx.spawn(async move |this, cx| {
+                let t0 = Instant::now();
+                let r = crate::off_thread(move || crate::frames::decode(&p, &geo, &which, false, 2)).await;
+                this.update(cx, |v, cx| v.art_loaded(u, idx, r, t0, cx)).ok();
+            })
+            .detach();
+        }
+    }
+
+    fn art_loaded(&mut self, u: Unit, idx: Vec<usize>, r: anyhow::Result<Decoded>, t0: Instant, cx: &mut Context<Self>) {
+        self.art.pending.remove(&u);
+        let name = self.pack.anim.as_ref().map_or(String::new(), |a| a.strips[u.0].name.clone());
+        match r {
+            Err(e) => {
+                elog!("synaps-avatar: art: strip `{name}` unavailable: {e:#}");
+                self.art.failed.insert(u);
+            }
+            Ok(d) => {
+                let n = d.frames.len();
+                for (i, f) in idx.into_iter().zip(d.frames) {
+                    self.frames[i] = Some(f);
+                }
+                let now = Instant::now();
+                self.art.ready.insert(u, now);
+                let bytes = self.art_evict(cx);
+                elog!(
+                    "synaps-avatar: art: strip `{name}`{} in: {n} cells, decoded in {} ms ({} ms after asked), art {:.1} MB",
+                    if u.1 { " (mirrorArt)" } else { "" },
+                    d.decode_ms,
+                    t0.elapsed().as_millis(),
+                    bytes as f64 / 1e6
+                );
+                // What the layer wanted is in: show it (the seam glitches over the cut).
+                if self.loaded && self.layer(self.mood).0 != self.anim.base() {
+                    self.relayer(now);
+                }
+            }
+        }
+        cx.notify();
+        self.schedule(cx);
+    }
+
+    /// Past the budget: drop the least recently shown strips that aren't in use (their atlas
+    /// tiles too). The bytes held after.
+    fn art_evict(&mut self, cx: &mut Context<Self>) -> usize {
+        let now = Instant::now();
+        let mut in_use: HashSet<Unit> = HashSet::new();
+        let arts: Vec<VariantArt> = self.art.picks.iter().filter_map(|(&k, &i)| self.pack.pools[&k].variants[i].art.clone()).collect();
+        let (talking, music) = (self.mood == Mood::Talking, self.music.is_some());
+        for a in &arts {
+            let now_on = a.talk.filter(|_| talking).into_iter().chain(a.music.filter(|_| music));
+            for si in std::iter::once(a.base).chain(now_on).chain(a.blinks.iter().map(|b| b.0)) {
+                in_use.insert(self.art_unit(si));
+            }
+        }
+        for u in &in_use {
+            if let Some(t) = self.art.ready.get_mut(u) {
+                *t = now;
+            }
+        }
+        let mut bytes = self.art_bytes();
+        let budget = self.pack.cache_bytes;
+        while bytes > budget {
+            let Some((&u, _)) = self.art.ready.iter().filter(|(u, _)| !in_use.contains(u)).min_by_key(|(_, t)| **t) else { break };
+            self.art.ready.remove(&u);
+            for i in self.unit_frames(u) {
+                if let Some(f) = self.frames[i].take() {
+                    bytes = bytes.saturating_sub(f.bytes());
+                    if let Some(m) = f.mirror_built() {
+                        cx.drop_image(m.image.clone(), None);
+                    }
+                    cx.drop_image(f.image.clone(), None);
+                }
+            }
+        }
+        bytes
+    }
+}

@@ -185,6 +185,10 @@ impl Avatar {
 
     /// The nap's stand-up (on the floor), moves held until it ends.
     pub(super) fn play_nap_wake(&mut self, now: Instant) {
+        // A strip's floor sleep has its own way out (the seam's glitch): no CapriCore stand-up.
+        if std::mem::take(&mut self.art.floor_strip) {
+            return;
+        }
         let wake = self.pack.flatten(&self.pack.behaviour.brain.nap_wake.clone());
         if wake.is_empty() {
             return;

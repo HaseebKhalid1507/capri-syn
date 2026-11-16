@@ -71,7 +71,10 @@ impl Mask {
 
 pub struct Frame {
     pub id: String,
+    /// The pixels, `at` (device px) inside the avatar rect: the whole rect for the pack's
+    /// frames, the opaque box for a strip's cells (they would be mostly empty).
     pub image: Arc<RenderImage>,
+    pub at: (i32, i32),
     pub mask: Mask,
     pub rects: Arc<Vec<(i16, i16, u16, u16)>>,
     /// Device-pixel y (inside the avatar rect) above which a click is a head click.
@@ -101,6 +104,24 @@ impl Frame {
         self.mirror.get_or_init(|| Box::new(self.build_mirror()))
     }
 
+    /// The mirror, if it has been built (its pixels have to be released with the frame's).
+    pub fn mirror_built(&self) -> Option<&Frame> {
+        self.mirror.get().map(|b| &**b)
+    }
+
+    /// The image's size, device px.
+    pub fn image_size(&self) -> (i32, i32) {
+        let s = self.image.size(0);
+        (i32::from(s.width), i32::from(s.height))
+    }
+
+    /// Pixel bytes held (the image and a built mirror).
+    pub fn bytes(&self) -> usize {
+        let (w, h) = self.image_size();
+        let own = (w * h * 4) as usize;
+        own + self.mirror.get().map_or(0, |_| own)
+    }
+
     fn build_mirror(&self) -> Frame {
         let (w, h) = (self.mask.w, self.mask.h);
         let mut mask = Mask::new(w, h);
@@ -112,18 +133,20 @@ impl Frame {
             }
         }
         let src = self.image.as_bytes(0).unwrap_or(&[]);
+        let (iw, ih) = self.image_size();
         let mut px = vec![0u8; src.len()];
-        let row = w as usize * 4;
+        let row = iw.max(1) as usize * 4;
         for (d, s) in px.chunks_exact_mut(row).zip(src.chunks_exact(row)) {
             for (dp, sp) in d.as_chunks_mut::<4>().0.iter_mut().zip(s.as_chunks::<4>().0.iter().rev()) {
                 *dp = *sp;
             }
         }
-        let rgba = image::RgbaImage::from_raw(w, h, px).unwrap_or_else(|| image::RgbaImage::new(w, h));
+        let rgba = image::RgbaImage::from_raw(iw as u32, ih as u32, px).unwrap_or_else(|| image::RgbaImage::new(iw as u32, ih as u32));
         let mx = |x: i32| w as i32 - 1 - x;
         Frame {
             id: self.id.clone(),
             image: Arc::new(RenderImage::new(vec![image::Frame::new(rgba)])),
+            at: (w as i32 - (self.at.0 + iw), self.at.1),
             rects: Arc::new(mask.rects()),
             mask,
             head_line: self.head_line,
@@ -318,6 +341,17 @@ pub fn face_patch(dst: &mut [u8], src: &[u8], w: u32, h: u32, rect: Rect, d: (i3
     }
 }
 
+/// Where an image sits (`at`, its size) when the whole `aw`×`ah` avatar rect is drawn at `r`
+/// (x, y, w, h; any scale): the pack's frames fill it, a strip's cell is its opaque box.
+pub fn place_in(at: ((i32, i32), (i32, i32)), r: (f32, f32, f32, f32), aw: i32, ah: i32) -> (f32, f32, f32, f32) {
+    let ((x, y), (w, h)) = at;
+    if (x, y, w, h) == (0, 0, aw, ah) {
+        return r;
+    }
+    let (kx, ky) = (r.2 / aw.max(1) as f32, r.3 / ah.max(1) as f32);
+    (r.0 + x as f32 * kx, r.1 + y as f32 * ky, w as f32 * kx, h as f32 * ky)
+}
+
 /// Display geometry shared by all frames.
 #[derive(Clone, Copy, Debug)]
 pub struct Geometry {
@@ -358,7 +392,92 @@ fn sha_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn decode_one(pack: &Pack, f: &FrameSource, geo: &Geometry, verify: bool, resizer: &mut Resizer) -> Result<Frame> {
+/// Strips decoded once per `decode` call, shared by their cells (and its threads).
+type Strips = std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, Arc<std::sync::OnceLock<Result<Arc<image::RgbaImage>, String>>>>>;
+
+fn strip_image(strips: &Strips, path: &std::path::Path, sha: Option<&str>, verify: bool) -> Result<Arc<image::RgbaImage>> {
+    let slot = strips.lock().unwrap().entry(path.to_owned()).or_default().clone();
+    slot.get_or_init(|| {
+        let load = || -> Result<Arc<image::RgbaImage>> {
+            let bytes = std::fs::read(path).with_context(|| format!("strip {}: cannot read", path.display()))?;
+            if verify && let Some(want) = sha {
+                let got = sha_hex(&bytes);
+                if !got.eq_ignore_ascii_case(want) {
+                    bail!("strip {}: sha256 mismatch (anim.json {want}, file {got})", path.display());
+                }
+            }
+            let img = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)
+                .with_context(|| format!("strip {}: not a valid PNG", path.display()))?;
+            Ok(Arc::new(img.into_rgba8()))
+        };
+        load().map_err(|e| format!("{e:#}"))
+    })
+    .clone()
+    .map_err(|e| anyhow::anyhow!(e))
+}
+
+/// A strip's cell, scaled to device px and laid into an avatar-rect buffer at its registration:
+/// cell px (0, 0) is canvas (dx, dy) of `pack.offset` (the cell's anchor on the canonical point
+/// or the seat line). The x2 strip (`make-pack --upscale`) serves when the cell would be enlarged.
+fn cell_pixels(pack: &Pack, f: &FrameSource, c: &crate::art::CellSrc, geo: &Geometry, verify: bool, resizer: &mut Resizer, strips: &Strips) -> Result<Vec<u8>> {
+    let a = pack.anim.as_ref().context("a strip cell without anim/")?;
+    let st = &a.strips[c.strip];
+    let dev = geo.scale * st.k;
+    let (path, n, sha) = match &st.x2 {
+        Some(p) if dev > 1.0 => (p, 2u32, None),
+        _ => (&st.path, 1, st.sha256.as_deref()),
+    };
+    let img = strip_image(strips, path, sha, verify)?;
+    let (cw, ch) = (st.cell.0 * n, st.cell.1 * n);
+    if img.width() != cw * st.frames || img.height() != ch {
+        bail!("strip `{}`: {} is {}x{}, anim.json says {} cells of {cw}x{ch}", st.name, path.display(), img.width(), img.height(), st.frames);
+    }
+    let mut cell = vec![0u8; (cw * ch * 4) as usize];
+    let raw = img.as_raw();
+    let row = cw as usize * 4;
+    for y in 0..ch as usize {
+        let s0 = (y * img.width() as usize + (c.i * cw) as usize) * 4;
+        cell[y * row..(y + 1) * row].copy_from_slice(&raw[s0..s0 + row]);
+    }
+    let k = dev / n as f32;
+    let (rw, rh) = (((cw as f32 * k).round() as u32).max(1), ((ch as f32 * k).round() as u32).max(1));
+    let src = Image::from_vec_u8(cw, ch, cell, PixelType::U8x4)?;
+    let mut dst = Image::new(rw, rh, PixelType::U8x4);
+    resizer.resize(&src, &mut dst, &ResizeOptions::new().resize_alg(ResizeAlg::Convolution(FilterType::Lanczos3)))?;
+    let small = dst.into_vec();
+    let (dx, dy) = pack.offset(f);
+    let (tx, ty) = geo.to_device(dx, dy);
+    let (tx, ty) = (tx.round() as i32, ty.round() as i32);
+    let (w, h) = (geo.width as i32, geo.height as i32);
+    let mut px = vec![0u8; (w * h * 4) as usize];
+    for y in 0..rh as i32 {
+        let yy = ty + y;
+        if yy < 0 || yy >= h {
+            continue;
+        }
+        let (x0, x1) = ((-tx).max(0), (w - tx).min(rw as i32));
+        if x0 >= x1 {
+            continue;
+        }
+        let s0 = ((y * rw as i32 + x0) * 4) as usize;
+        let d0 = ((yy * w + tx + x0) * 4) as usize;
+        let len = ((x1 - x0) * 4) as usize;
+        px[d0..d0 + len].copy_from_slice(&small[s0..s0 + len]);
+    }
+    Ok(px)
+}
+
+fn decode_one(pack: &Pack, f: &FrameSource, geo: &Geometry, verify: bool, resizer: &mut Resizer, strips: &Strips) -> Result<Frame> {
+    let px = match &f.cell {
+        Some(c) => cell_pixels(pack, f, c, geo, verify, resizer, strips)?,
+        None => canvas_pixels(pack, f, geo, verify, resizer)?,
+    };
+    let frame = finish(pack, f, geo, px)?;
+    Ok(if f.cell.as_ref().is_some_and(|c| c.mirror) { frame.build_mirror() } else { frame })
+}
+
+/// A catalog sprite or sidecar extra: registered into the shared crop rect, scaled to device px.
+fn canvas_pixels(pack: &Pack, f: &FrameSource, geo: &Geometry, verify: bool, resizer: &mut Resizer) -> Result<Vec<u8>> {
     let bytes = std::fs::read(&f.path).with_context(|| format!("frame `{}`: cannot read {}", f.id, f.path.display()))?;
     if verify
         && let Some(want) = &f.sha256
@@ -422,7 +541,12 @@ fn decode_one(pack: &Pack, f: &FrameSource, geo: &Geometry, verify: bool, resize
     let mut dst = Image::new(geo.width, geo.height, PixelType::U8x4);
     // Lanczos3 on premultiplied alpha (fast_image_resize premultiplies for U8x4).
     resizer.resize(&src, &mut dst, &ResizeOptions::new().resize_alg(ResizeAlg::Convolution(FilterType::Lanczos3)))?;
-    let mut px = dst.into_vec();
+    Ok(dst.into_vec())
+}
+
+/// Rims, hit mask, head, glints, profile, face band of an avatar-rect RGBA buffer.
+fn finish(pack: &Pack, f: &FrameSource, geo: &Geometry, mut px: Vec<u8>) -> Result<Frame> {
+    let (dx, dy) = pack.offset(f);
     if pack.perch_frames.contains(&f.id)
         && let Some(rim) = pack.behaviour.perch.as_ref().and_then(|p| u32::from_str_radix(p.rim.trim_start_matches('#'), 16).ok())
     {
@@ -455,7 +579,8 @@ fn decode_one(pack: &Pack, f: &FrameSource, geo: &Geometry, verify: bool, resize
     let rects = Arc::new(mask.rects());
     let head_fraction = pack.behaviour.click.head_fraction;
     let head_line = (top + vb.height as f32 * geo.scale * head_fraction).round() as i32;
-    let rgba = image::RgbaImage::from_raw(geo.width, geo.height, px).expect("buffer size");
+    // A strip's cell keeps only its opaque box (most of the rect is empty).
+    let (at, rgba) = if f.cell.is_some() { crop_opaque(px, geo.width, geo.height) } else { ((0, 0), image::RgbaImage::from_raw(geo.width, geo.height, px).expect("buffer size")) };
     let (head_x, glints) = head_and_glints(&mask, top.round() as i32, (vb.height as f32 * geo.scale) as i32);
     let profile = Arc::new(top_profile(&mask));
     let bottom = (0..mask.h as i32).rev().find(|&y| (0..mask.w as i32).any(|x| mask.get(x, y))).map_or(top.round() as i32 + 1, |y| y + 1);
@@ -465,6 +590,7 @@ fn decode_one(pack: &Pack, f: &FrameSource, geo: &Geometry, verify: bool, resize
         face,
         id: f.id.clone(),
         image: Arc::new(RenderImage::new(vec![image::Frame::new(rgba)])),
+        at,
         mask,
         rects,
         head_line,
@@ -475,12 +601,37 @@ fn decode_one(pack: &Pack, f: &FrameSource, geo: &Geometry, verify: bool, resize
     })
 }
 
+/// The opaque box of a `w`×`h` buffer: its top-left and pixels (1×1 transparent if empty).
+fn crop_opaque(px: Vec<u8>, w: u32, h: u32) -> ((i32, i32), image::RgbaImage) {
+    let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0u32, 0u32);
+    for (i, p) in px.as_chunks::<4>().0.iter().enumerate() {
+        if p[3] > 0 {
+            let (x, y) = (i as u32 % w, i as u32 / w);
+            x0 = x0.min(x);
+            y0 = y0.min(y);
+            x1 = x1.max(x + 1);
+            y1 = y1.max(y + 1);
+        }
+    }
+    if x0 >= x1 || y0 >= y1 {
+        return ((0, 0), image::RgbaImage::new(1, 1));
+    }
+    let (cw, ch) = (x1 - x0, y1 - y0);
+    let mut out = Vec::with_capacity((cw * ch * 4) as usize);
+    for y in y0..y1 {
+        let s0 = ((y * w + x0) * 4) as usize;
+        out.extend_from_slice(&px[s0..s0 + (cw * 4) as usize]);
+    }
+    ((x0 as i32, y0 as i32), image::RgbaImage::from_raw(cw, ch, out).expect("buffer size"))
+}
+
 /// Decode the frames at `which` (indices into `pack.frames`) on up to `threads` threads.
 pub fn decode(pack: &Pack, geo: &Geometry, which: &[usize], verify: bool, threads: usize) -> Result<Decoded> {
     let t0 = std::time::Instant::now();
     let next = AtomicUsize::new(0);
     let slots: std::sync::Mutex<Vec<Option<Result<Frame>>>> =
         std::sync::Mutex::new((0..which.len()).map(|_| None).collect());
+    let strips = Strips::default();
     std::thread::scope(|s| {
         for _ in 0..threads.max(1).min(which.len().max(1)) {
             s.spawn(|| {
@@ -490,7 +641,7 @@ pub fn decode(pack: &Pack, geo: &Geometry, which: &[usize], verify: bool, thread
                     if i >= which.len() {
                         break;
                     }
-                    let r = decode_one(pack, &pack.frames[which[i]], geo, verify, &mut resizer);
+                    let r = decode_one(pack, &pack.frames[which[i]], geo, verify, &mut resizer, &strips);
                     slots.lock().unwrap()[i] = Some(r);
                 }
             });
@@ -621,6 +772,59 @@ pub fn decode_notes(pack: &Pack, files: &[String], size: u32) -> Result<Vec<Note
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_strip_cell_decodes_to_its_opaque_box_and_its_twin_mirrored() {
+        crate::pack::tests::pack_in("cells", crate::pack::tests::pooled(), true, |p| {
+            let p = p.unwrap();
+            let geo = Geometry::new(&p, 60.0);
+            let a = p.anim.as_ref().unwrap();
+            let s1 = p.strip_first[a.by_name["stand"]].unwrap() + 1;
+            let t1 = p.twin(s1).unwrap();
+            let n = p.index["neutral"];
+            let d = decode(&p, &geo, &[n, s1, t1], false, 2).unwrap();
+            // Verified against anim.json's sha256 (the fixture's is wrong on purpose).
+            let e = format!("{:#}", decode(&p, &geo, &[s1], true, 1).err().unwrap());
+            assert!(e.contains("sha256 mismatch"), "{e}");
+            let (full, cell, twin) = (&d.frames[0], &d.frames[1], &d.frames[2]);
+            assert_eq!((full.at, full.image_size()), ((0, 0), (geo.width as i32, geo.height as i32)), "the pack's frames fill the rect");
+            let (w, h) = cell.image_size();
+            assert!(w < geo.width as i32 && h < geo.height as i32, "{w}x{h} of {}x{}", geo.width, geo.height);
+            // The opaque box is the mask's box.
+            let cols: Vec<i32> = (0..cell.mask.w as i32).filter(|&x| (0..cell.mask.h as i32).any(|y| cell.mask.get(x, y))).collect();
+            assert!(cell.at.0 <= cols[0] && cols[cols.len() - 1] < cell.at.0 + w);
+            // Feet on the ground point: the lowest opaque row sits just above the canonical y.
+            let (_, gy) = geo.to_device(p.catalog.canonical_anchor.x, p.catalog.canonical_anchor.y);
+            assert!((cell.bottom as f32 - gy).abs() <= 2.0 * geo.scale, "bottom {} ground {gy}", cell.bottom);
+            // The twin strip is pixel-identical here: its cell, stored mirrored, is the cell mirrored.
+            let m = cell.mirrored();
+            assert_eq!((twin.at, twin.image_size()), (m.at, m.image_size()));
+            assert_eq!(twin.rects, m.rects);
+            assert_eq!(twin.image.as_bytes(0), m.image.as_bytes(0));
+            assert!(cell.mirror_built().is_some() && cell.bytes() == 2 * (w * h * 4) as usize);
+            // Mirroring the box moves it across the anchor's vertical.
+            assert_eq!(m.at.0, geo.width as i32 - (cell.at.0 + w));
+        });
+    }
+
+    #[test]
+    fn a_strip_of_the_wrong_size_is_refused() {
+        crate::pack::tests::pack_in("cellsize", crate::pack::tests::pooled(), true, |p| {
+            let p = p.unwrap();
+            let a = p.anim.as_ref().unwrap();
+            image::RgbaImage::new(5, 6).save(&a.strips[a.by_name["lie"]].path).unwrap();
+            let geo = Geometry::new(&p, 60.0);
+            let l0 = p.strip_first[a.by_name["lie"]].unwrap();
+            let e = format!("{:#}", decode(&p, &geo, &[l0], false, 1).err().unwrap());
+            assert!(e.contains("anim.json says 2 cells of 6x4"), "{e}");
+        });
+    }
+
+    #[test]
+    fn place_in_maps_a_box_through_any_scale() {
+        assert_eq!(place_in(((0, 0), (10, 20)), (5.0, 6.0, 10.0, 20.0), 10, 20), (5.0, 6.0, 10.0, 20.0));
+        assert_eq!(place_in(((2, 4), (3, 5)), (0.0, 0.0, 20.0, 40.0), 10, 20), (4.0, 8.0, 6.0, 10.0));
+    }
 
     #[test]
     fn face_patch_moves_the_green_face_with_its_eyes_and_nothing_else() {

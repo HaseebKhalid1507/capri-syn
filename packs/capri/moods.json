@@ -747,6 +747,94 @@
       }
     ]
   },
+  "variants": {
+    "cacheMb": 64,
+    "pools": {
+      "perch": {
+        "shiftMs": [
+          240000,
+          720000
+        ],
+        "variants": [
+          {
+            "id": "sit",
+            "weight": 2
+          },
+          {
+            "id": "perch",
+            "strip": "perch",
+            "talk": "perch_talk",
+            "music": "perch_music",
+            "blinks": [
+              {
+                "strip": "perch_blink",
+                "weight": 7
+              },
+              {
+                "strip": "perch_blink_glitch",
+                "weight": 1
+              }
+            ],
+            "blinkMs": [
+              3000,
+              6000
+            ]
+          },
+          {
+            "id": "laydown",
+            "strip": "laydown",
+            "talk": "laydown_talk",
+            "lying": true,
+            "blinks": [
+              {
+                "strip": "laydown_blink",
+                "weight": 7
+              },
+              {
+                "strip": "laydown_blink_glitch",
+                "weight": 1
+              }
+            ],
+            "blinkMs": [
+              3000,
+              6000
+            ]
+          }
+        ]
+      },
+      "sleepFloor": {
+        "shiftMs": [
+          300000,
+          900000
+        ],
+        "variants": [
+          {
+            "id": "lie"
+          },
+          {
+            "id": "doze",
+            "strip": "sleep"
+          }
+        ]
+      },
+      "sleepWindow": {
+        "shiftMs": [
+          300000,
+          900000
+        ],
+        "variants": [
+          {
+            "id": "laydown",
+            "strip": "laydown_sleep",
+            "lying": true
+          },
+          {
+            "id": "lie"
+          }
+        ]
+      }
+    }
+  },
   "music": {
     "floor": "music-floor",
     "window": "music-window",
@@ -776,6 +864,16 @@
         [
           775,
           591
+        ]
+      ],
+      "perch_music": [
+        [
+          58,
+          150
+        ],
+        [
+          165,
+          118
         ]
       ]
     },

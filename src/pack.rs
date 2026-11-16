@@ -3,6 +3,8 @@
 //! and `moods.json` (the pack's behaviour sidecar: mood table, idle activities, click
 //! reactions, HUD labels). The code ships no character ids; everything comes from here.
 
+use crate::anim::Seq;
+use crate::variants::PoolKey;
 use anyhow::{Context as _, Result, anyhow, bail};
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap};
@@ -455,6 +457,9 @@ pub struct Behaviour {
     pub icon: Option<String>,
     #[serde(default)]
     pub kiss: Option<KissSpec>,
+    /// Variant pools: more than one art option per state (`crate::variants`).
+    #[serde(default)]
+    pub variants: Option<crate::variants::VariantsSpec>,
 }
 
 impl Behaviour {
@@ -550,6 +555,63 @@ pub struct SatisfiedSpec {
     pub other: Vec<Step>,
 }
 
+/// `moods.json` `variants` → the pools, resolved against `anim/`. A strip variant needs the pack's
+/// desktop art: without it the variant is dropped, so an old pack's pool is its own art alone.
+fn resolve_pools(b: &Behaviour, anim: Option<&crate::art::Anim>, errors: &mut Vec<String>) -> HashMap<PoolKey, Pool> {
+    let mut out = HashMap::new();
+    let Some(spec) = &b.variants else { return out };
+    for (key, ps) in &spec.pools {
+        let Some(k) = PoolKey::parse(key) else {
+            errors.push(format!("moods.json variants.pools: unknown pool `{key}` (perch|sleepFloor|sleepWindow)"));
+            continue;
+        };
+        // A window top takes seat strips, the floor standing ones.
+        let want = if k == PoolKey::SleepFloor { "ground" } else { "seat" };
+        let mut pool = Pool { shift_ms: ps.shift_ms, variants: Vec::new() };
+        for v in &ps.variants {
+            let at = format!("moods.json variants.pools.{key} `{}`", v.id);
+            if v.weight.is_nan() || v.weight < 0.0 || pool.variants.iter().any(|x: &Variant| x.id == v.id) {
+                errors.push(format!("{at}: weight {} (>= 0) and ids unique", v.weight));
+                continue;
+            }
+            let art = match (&v.strip, anim) {
+                (None, _) => None,
+                (Some(_), None) => continue,
+                (Some(base), Some(a)) => {
+                    let mut get = |what: &str, name: &str| -> Option<usize> {
+                        match a.by_name.get(name) {
+                            Some(&i) if a.strips[i].anchor.0 == want => Some(i),
+                            Some(_) => {
+                                errors.push(format!("{at}: {what} strip `{name}` needs a {want} anchor"));
+                                None
+                            }
+                            None => {
+                                errors.push(format!("{at}: {what} strip `{name}` is not in anim/anim.json"));
+                                None
+                            }
+                        }
+                    };
+                    let Some(bi) = get("strip", base) else { continue };
+                    let talk = v.talk.as_deref().and_then(|t| get("talk", t));
+                    let music = v.music.as_deref().and_then(|t| get("music", t));
+                    let blinks = v.blinks.iter().filter_map(|w| Some((get("blink", &w.strip)?, w.weight))).collect();
+                    for si in std::iter::once(bi).chain(talk).chain(music) {
+                        if !a.strips[si].looping {
+                            errors.push(format!("{at}: strip `{}` is a one-shot, not a loop", a.strips[si].name));
+                        }
+                    }
+                    Some(VariantArt { base: bi, talk, music, blinks, blink_ms: v.blink_ms.unwrap_or([3000, 6000]), every: v.every.unwrap_or(1).max(1) })
+                }
+            };
+            pool.variants.push(Variant { id: v.id.clone(), weight: v.weight, lying: v.lying, art });
+        }
+        if !pool.variants.is_empty() {
+            out.insert(k, pool);
+        }
+    }
+    out
+}
+
 /// A frame to decode: catalog sprite or sidecar extra.
 #[derive(Clone, Debug)]
 pub struct FrameSource {
@@ -560,6 +622,41 @@ pub struct FrameSource {
     pub sha256: Option<String>,
     /// A face painted on at decode (file, rect, dx, dy, sha256).
     pub patch: Option<(PathBuf, Rect, i32, i32, Option<String>)>,
+    /// A cell of a desktop-art strip (`anim/`): cut from `path` at decode.
+    pub cell: Option<crate::art::CellSrc>,
+}
+
+/// A variant of a pooled state, resolved (`crate::variants`).
+#[derive(Clone, Debug)]
+pub struct Variant {
+    pub id: String,
+    pub weight: f32,
+    pub lying: bool,
+    /// None: the pack's own art for the state, as it behaves without pools.
+    pub art: Option<VariantArt>,
+}
+
+/// A strip variant: strip indices into `Pack::anim`.
+#[derive(Clone, Debug)]
+pub struct VariantArt {
+    pub base: usize,
+    pub talk: Option<usize>,
+    pub music: Option<usize>,
+    pub blinks: Vec<(usize, f32)>,
+    pub blink_ms: [u64; 2],
+    pub every: u32,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Pool {
+    pub shift_ms: Option<[u64; 2]>,
+    pub variants: Vec<Variant>,
+}
+
+impl Pool {
+    pub fn by_id(&self, id: &str) -> Option<usize> {
+        self.variants.iter().position(|v| v.id == id)
+    }
 }
 
 pub struct Pack {
@@ -575,6 +672,16 @@ pub struct Pack {
     /// edge line. Other seat frames keep their own canvas registration.
     pub seat_ref: Option<i32>,
     pub perch_frames: std::collections::HashSet<String>,
+    /// The desktop art (`anim/anim.json`), if the pack has it.
+    pub anim: Option<crate::art::Anim>,
+    /// Per strip of `anim`: the frame index of its cell 0, if a pool uses it; and of its
+    /// `mirrorArt` twin's cells, stored mirrored.
+    pub strip_first: Vec<Option<usize>>,
+    pub mirror_first: Vec<Option<usize>>,
+    /// The variant pools (`moods.json` `variants`); a strip variant is dropped when the pack
+    /// has no `anim/`, so an old pack's pool is its own art alone.
+    pub pools: HashMap<crate::variants::PoolKey, Pool>,
+    pub cache_bytes: usize,
 }
 
 impl Pack {
@@ -669,6 +776,7 @@ impl Pack {
                 bounds: b,
                 sha256: s.sha256.clone(),
                 patch: None,
+                cell: None,
             });
         }
         for x in &behaviour.extra_frames {
@@ -696,7 +804,9 @@ impl Pack {
                         continue;
                     }
                 },
-                (None, Some(a), Some(b)) => FrameSource { id: x.id.clone(), path, anchor: a.clone(), bounds: b, sha256: x.sha256.clone(), patch },
+                (None, Some(a), Some(b)) => {
+                    FrameSource { id: x.id.clone(), path, anchor: a.clone(), bounds: b, sha256: x.sha256.clone(), patch, cell: None }
+                }
                 _ => {
                     errors.push(format!("moods.json extraFrames `{}`: needs `like` or `anchor` + `visibleBounds`", x.id));
                     continue;
@@ -753,8 +863,58 @@ impl Pack {
             }
         }
         perch_frames.extend(behaviour.brain.nap_perch.clone());
-        let mut pack =
-            Pack { dir: dir.to_owned(), name: pack_name, catalog, behaviour, frames, index, poses: Vec::new(), seat_ref, perch_frames };
+        let ref_h = index.get(&catalog.default_sprite).map_or(1000, |&i| frames[i].bounds.height);
+        let anim = crate::art::Anim::load(dir, ref_h)?;
+        let n_strips = anim.as_ref().map_or(0, |a| a.strips.len());
+        let (mut strip_first, mut mirror_first) = (vec![None; n_strips], vec![None; n_strips]);
+        let pools = resolve_pools(&behaviour, anim.as_ref(), &mut errors);
+        if let Some(a) = &anim {
+            // Every strip a pool uses (and its mirrorArt twin, stored mirrored), as frames.
+            let mut used: Vec<usize> = pools.values().flat_map(|p| &p.variants).filter_map(|v| v.art.as_ref()).flat_map(|v| {
+                std::iter::once(v.base).chain(v.talk).chain(v.music).chain(v.blinks.iter().map(|b| b.0))
+            })
+            .collect();
+            used.sort_unstable();
+            used.dedup();
+            for si in used {
+                let twin = a.strips[si].mirror_art.as_ref().and_then(|m| a.by_name.get(m).copied());
+                for (ti, mirror) in std::iter::once((si, false)).chain(twin.map(|t| (t, true))) {
+                    let first = frames.len();
+                    for (id, src) in a.cells(ti, mirror) {
+                        if src.anchor.name == "seat" {
+                            if seat_ref.is_none() {
+                                errors.push(format!("anim strip `{}`: a seat strip needs the pack's perch base", a.strips[ti].name));
+                            }
+                            perch_frames.insert(id.clone());
+                        }
+                        index.insert(id, frames.len());
+                        frames.push(src);
+                    }
+                    if mirror {
+                        mirror_first[si] = Some(first);
+                    } else {
+                        strip_first[si] = Some(first);
+                    }
+                }
+            }
+        }
+        let cache_bytes = behaviour.variants.as_ref().and_then(|v| v.cache_mb).unwrap_or(64) as usize * 1_000_000;
+        let mut pack = Pack {
+            dir: dir.to_owned(),
+            name: pack_name,
+            catalog,
+            behaviour,
+            frames,
+            index,
+            poses: Vec::new(),
+            seat_ref,
+            perch_frames,
+            anim,
+            strip_first,
+            mirror_first,
+            pools,
+            cache_bytes,
+        };
 
         // Behaviour references.
         let check_steps = |what: &str, steps: &[Step], errors: &mut Vec<String>, pack: &Pack| {
@@ -990,6 +1150,7 @@ impl Pack {
                             bounds: s.visible_bounds,
                             sha256: s.sha256,
                             patch: None,
+                            cell: None,
                         });
                     }
                 }
@@ -1003,6 +1164,31 @@ impl Pack {
             bail!("pack {} failed validation:\n  - {}", dir.display(), errors.join("\n  - "));
         }
         Ok(pack)
+    }
+
+    /// A strip's cells as a sequence, every `every`-th cell held `every` times as long.
+    pub fn strip_seq(&self, si: usize, every: u32) -> Seq {
+        let (Some(a), Some(Some(first))) = (&self.anim, self.strip_first.get(si)) else { return Vec::new() };
+        let s = &a.strips[si];
+        let e = every.max(1);
+        (0..s.frames).step_by(e as usize).map(|c| (first + c as usize, s.ms * e)).collect()
+    }
+
+    /// The pre-mirrored twin of cell frame `fi` (its strip's `mirrorArt`), if the pack has it.
+    pub fn twin(&self, fi: usize) -> Option<usize> {
+        let c = self.frames.get(fi)?.cell.as_ref()?;
+        if c.mirror {
+            return None;
+        }
+        Some(self.mirror_first.get(c.strip).copied().flatten()? + c.i as usize)
+    }
+
+    /// The seam family of frame `fi`: the pack's own art, or a strip family.
+    pub fn art_of(&self, fi: usize) -> crate::variants::Art {
+        match (self.frames.get(fi).and_then(|f| f.cell.as_ref()), &self.anim) {
+            (Some(c), Some(a)) => crate::variants::Art::Family(a.strips[c.strip].family_id),
+            _ => crate::variants::Art::Pack,
+        }
     }
 
     /// Flatten steps into (frame index, ms) pairs.
@@ -1043,14 +1229,24 @@ impl Pack {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
     use serde_json::json;
 
     /// A tiny pack on disk: 8×8 PNGs, a ground `neutral`, a seat `sit`, `moods` as given.
     fn pack_with(name: &str, moods: serde_json::Value) -> Result<Pack> {
+        pack_in(name, moods, false, |p| p)
+    }
+
+    /// `pack_with`, optionally with `crate::art`'s test strips in `anim/`; `keep` sees the pack
+    /// before its directory goes (decode tests read the files).
+    pub fn pack_in<T>(name: &str, moods: serde_json::Value, anim: bool, keep: impl FnOnce(Result<Pack>) -> T) -> T {
         let dir = std::env::temp_dir().join(format!("sa-pack-{name}-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
+        if anim {
+            crate::art::tests::write_anim(&dir);
+        }
         let png = |f: &str| image::RgbaImage::from_pixel(8, 8, image::Rgba([0, 255, 0, 255])).save(dir.join(f)).unwrap();
         for f in ["n.png", "s.png", "l.png"] {
             png(f);
@@ -1062,9 +1258,74 @@ mod tests {
             "canonicalAnchor": {"x": 4, "y": 7}, "sprites": [sprite("neutral", "n.png", "ground"), sprite("sit", "s.png", "seat")]});
         std::fs::write(dir.join("sprites.json"), cat.to_string()).unwrap();
         std::fs::write(dir.join("moods.json"), moods.to_string()).unwrap();
-        let p = Pack::load(&dir);
+        let out = keep(Pack::load(&dir));
         std::fs::remove_dir_all(&dir).ok();
-        p
+        out
+    }
+
+    /// Two pools over the test strips (`crate::art::tests::write_anim`).
+    pub fn pooled() -> serde_json::Value {
+        json!({"perch": {"base": "sit"}, "variants": {"cacheMb": 2, "pools": {
+            "perch": {"shiftMs": [1000, 2000], "variants": [{"id": "sit", "weight": 2}, {"id": "lie", "strip": "lie", "lying": true}]},
+            "sleepFloor": {"variants": [{"id": "pack"}, {"id": "doze", "strip": "stand", "every": 2}]}}}})
+    }
+
+    #[test]
+    fn pools_resolve_and_their_strips_become_registered_frames() {
+        pack_in("pools", pooled(), true, |p| {
+            let p = p.unwrap();
+            let a = p.anim.as_ref().unwrap();
+            let (stand, lie) = (a.by_name["stand"], a.by_name["lie"]);
+            let perch = &p.pools[&PoolKey::Perch];
+            assert_eq!(perch.variants.iter().map(|v| v.id.as_str()).collect::<Vec<_>>(), ["sit", "lie"]);
+            assert!(perch.variants[0].art.is_none() && perch.variants[1].lying);
+            assert_eq!(perch.variants[1].art.as_ref().unwrap().base, lie);
+            assert_eq!(p.cache_bytes, 2_000_000);
+            // Cells: lie ×2 on the seat line, stand ×3 on the ground, stand's twin ×3 mirrored.
+            let l0 = p.strip_first[lie].unwrap();
+            assert_eq!(p.frames[l0].id, "lie#0");
+            assert!(p.perch_frames.contains("lie#1") && !p.perch_frames.contains("stand#0"));
+            let (_, dy) = p.offset(&p.frames[l0]);
+            assert_eq!(p.frames[l0].anchor.y + dy, p.seat_ref.unwrap(), "her surface on the seat line");
+            let s0 = p.strip_first[stand].unwrap();
+            let c = p.catalog.canonical_anchor;
+            let (dx, dy) = p.offset(&p.frames[s0]);
+            assert_eq!((p.frames[s0].anchor.x + dx, p.frames[s0].anchor.y + dy), (c.x, c.y), "feet on the ground point");
+            let t1 = p.twin(s0 + 1).unwrap();
+            assert_eq!(p.frames[t1].id, "~stand_flipped#1");
+            assert!(p.frames[t1].cell.as_ref().unwrap().mirror && p.twin(t1).is_none() && p.twin(l0).is_none());
+            assert_eq!(p.strip_seq(stand, 2), vec![(s0, 200), (s0 + 2, 200)], "every 2nd cell, held twice as long");
+            assert_eq!(p.art_of(s0), p.art_of(t1));
+            assert_ne!(p.art_of(s0), p.art_of(l0));
+            assert_eq!(p.art_of(p.index["neutral"]), crate::variants::Art::Pack);
+            assert_eq!(p.frames.iter().filter(|f| f.cell.is_some()).count(), 8);
+        });
+    }
+
+    #[test]
+    fn without_anim_a_pool_is_the_packs_own_art() {
+        let p = pack_with("noanim", pooled()).unwrap();
+        assert!(p.anim.is_none() && p.frames.iter().all(|f| f.cell.is_none()));
+        assert_eq!(p.pools[&PoolKey::Perch].variants.len(), 1);
+        assert_eq!(p.pools[&PoolKey::SleepFloor].variants[0].id, "pack");
+        // No `variants` at all: no pools.
+        assert!(pack_with("novariants", json!({})).unwrap().pools.is_empty());
+    }
+
+    #[test]
+    fn a_pool_takes_the_right_anchor_and_loops_only() {
+        let bad = |pool: &str, v: serde_json::Value| {
+            let mut m = pooled();
+            m["variants"]["pools"][pool]["variants"] = v;
+            pack_in("badpool", m, true, |p| p.err().map(|e| format!("{e:#}")).unwrap_or_default())
+        };
+        assert!(bad("perch", json!([{"id": "x", "strip": "stand"}])).contains("strip `stand` needs a seat anchor"));
+        assert!(bad("sleepFloor", json!([{"id": "x", "strip": "lie"}])).contains("needs a ground anchor"));
+        assert!(bad("perch", json!([{"id": "x", "strip": "nope"}])).contains("strip `nope` is not in anim/anim.json"));
+        assert!(bad("perch", json!([{"id": "x"}, {"id": "x"}])).contains("ids unique"));
+        let mut m = pooled();
+        m["variants"]["pools"]["nap"] = json!({"variants": [{"id": "a"}]});
+        assert!(pack_in("badkey", m, true, |p| format!("{:#}", p.err().unwrap())).contains("unknown pool `nap`"));
     }
 
     fn extra(id: &str, anchor: &str) -> serde_json::Value {

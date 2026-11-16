@@ -31,6 +31,8 @@ mod facing;
 mod frames;
 mod fx;
 mod pack;
+mod art;
+mod variants;
 mod places;
 mod moves;
 mod platform;
@@ -63,6 +65,8 @@ struct Args {
     name: Option<String>,
     threads: usize,
     check: bool,
+    /// With --check: write every decoded frame here as PNG (what she draws at that size).
+    dump: Option<PathBuf>,
     /// Daemon profile (`None`: `$SYNAPS_PROFILE`, else the default daemon).
     profile: Option<String>,
     /// A daemon socket path instead of a profile (fake daemons in tests).
@@ -76,7 +80,7 @@ struct Args {
 
 const USAGE: &str = "usage: synaps-avatar [--profile P | --socket PATH] [--session NAME|ID | --new [--cwd DIR] [--model M]] [--no-session]
                      [--sleepy-after MIN] [--pack DIR] [--height PX] [--name NAME] [--threads N] [--no-verify]
-                     [--focus-probe] [--check]
+                     [--focus-probe] [--check [--dump DIR]]
 
 Session (one Synaps daemon session drives the body):
   --profile P     daemon profile (default $SYNAPS_PROFILE, else the default daemon)
@@ -98,12 +102,14 @@ Session (one Synaps daemon session drives the body):
   --no-verify     skip the sha256 pass over the pack's frames
   --focus-probe   dev: show a text field in the bubble to test keyboard focus
   --check         validate and decode the pack, print stats, exit (no window)
+  --dump DIR      with --check: every decoded frame as a PNG in DIR (her pixels at --height)
 
 Dev control: newline commands on $XDG_RUNTIME_DIR/synaps-avatar.sock
   mood <idle|thinking|working|talking|needs_you|done|annoyed|sleepy|away>
   clip <clip, action or frame id>   say <text>   page next|prev   collapse   expand
   pos <x> <y> [now]   perch [sit|stand] [window id]   perch off   drop
   music on|off   glitch   state   hide   quit
+  art <perch|sleepFloor|sleepWindow> <variant id|next>   (a variant pool she is in)
   submit <text>   abort   prompt confirm|secret [text]   (session / dev)";
 
 fn parse_args() -> Result<Args> {
@@ -124,6 +130,7 @@ fn parse_args_from(argv: impl IntoIterator<Item = String>) -> Result<Args> {
         name: None,
         threads: (cores / 2).clamp(1, 8),
         check: false,
+        dump: None,
         profile: None,
         socket: None,
         target: session::Target::Default,
@@ -144,6 +151,7 @@ fn parse_args_from(argv: impl IntoIterator<Item = String>) -> Result<Args> {
             "--no-verify" => a.verify = false,
             "--focus-probe" => a.focus_probe = true,
             "--check" => a.check = true,
+            "--dump" => a.dump = Some(PathBuf::from(val("a directory")?)),
             "--profile" => a.profile = Some(val("a profile name")?),
             "--socket" => a.socket = Some(PathBuf::from(val("a socket path")?)),
             "--session" => session = Some(val("a session name or id")?),
@@ -240,13 +248,32 @@ fn run(t_start: Instant) -> Result<()> {
         let layout = view::Layout::new(&pack, 1.0, args.height);
         let all: Vec<usize> = (0..pack.frames.len()).collect();
         let d = frames::decode(&pack, &layout.geo, &all, args.verify, args.threads)?;
-        let bytes: usize = d.frames.len() * (layout.geo.width * layout.geo.height * 4) as usize;
+        let bytes: usize = d.frames.iter().map(|f| f.bytes()).sum();
+        let cells = pack.frames.iter().filter(|f| f.cell.is_some()).count();
         let rects: Vec<usize> = d.frames.iter().map(|f| f.rects.len()).collect();
+        if let Some(dir) = &args.dump {
+            std::fs::create_dir_all(dir).with_context(|| format!("--dump: cannot create {}", dir.display()))?;
+            for f in &d.frames {
+                let (w, h) = f.image_size();
+                // BGRA (GPUI's atlas order) back to RGBA, in the whole avatar rect.
+                let mut px = image::RgbaImage::new(layout.geo.width, layout.geo.height);
+                let src = f.image.as_bytes(0).unwrap_or(&[]);
+                for (i, p) in src.as_chunks::<4>().0.iter().enumerate() {
+                    let (x, y) = (f.at.0 + i as i32 % w.max(1), f.at.1 + i as i32 / w.max(1));
+                    if x >= 0 && y >= 0 && (x as u32) < px.width() && (y as u32) < px.height() && y - f.at.1 < h {
+                        px.put_pixel(x as u32, y as u32, image::Rgba([p[2], p[1], p[0], p[3]]));
+                    }
+                }
+                let name: String = f.id.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '+' }).collect();
+                px.save(dir.join(format!("{name}.png"))).with_context(|| format!("--dump: cannot write {name}.png"))?;
+            }
+        }
         olog!(
-            "pack `{}` ok: {} frames + {} poses, crop {:?}, frame {}x{} px, {:.1} MB scaled RGBA, \
+            "pack `{}` ok: {} frames ({} strip cells) + {} poses, crop {:?}, frame {}x{} px, {:.1} MB scaled RGBA, \
              shape rects/frame {}..{}, load {t_pack} ms, decode {} ms ({} threads, verify={})",
             pack.name,
             pack.frames.len(),
+            cells,
             pack.poses.len(),
             pack.crop_rect(),
             layout.geo.width,
@@ -386,7 +413,8 @@ fn run(t_start: Instant) -> Result<()> {
                 Err(e) => fatal(e),
             };
             decode_view.update(cx, |v, cx| v.add_frames(vec![(default, first.frames.into_iter().next().unwrap())], false, cx));
-            let rest: Vec<usize> = (0..p.frames.len()).filter(|&i| i != default).collect();
+            // A strip's cells are decoded when a pool shows them (the view asks).
+            let rest: Vec<usize> = (0..p.frames.len()).filter(|&i| i != default && p.frames[i].cell.is_none()).collect();
             let p2 = p.clone();
             let rest2 = rest.clone();
             let all = off_thread(move || frames::decode(&p2, &geo, &rest2, verify, threads)).await;
