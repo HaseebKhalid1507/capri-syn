@@ -25,6 +25,10 @@ fn read(p: &Path) -> serde_json::Value {
 fn merge(p: &Path, key: &str, val: serde_json::Value) {
     let mut v = read(p);
     v[key] = val;
+    write(p, &v);
+}
+
+fn write(p: &Path, v: &serde_json::Value) {
     if let Some(dir) = p.parent() {
         std::fs::create_dir_all(dir).ok();
     }
@@ -66,6 +70,49 @@ pub fn save_brain(v: serde_json::Value) {
     merge(&path(), "brain", v);
 }
 
+/// Her last sign of life (unix s): written every minute while she runs and at a quit, so a
+/// crash or a `systemctl restart` counts as an exit too (`[intro] cinematic_min_gap_min`).
+pub fn load_seen() -> Option<f64> {
+    read(&path()).get("seenUnix").and_then(serde_json::Value::as_f64)
+}
+
+/// Where she sat at her last sign of life, if on a window top: restored at the next launch if
+/// that window is still there, the same size in the same place.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SavedPerch {
+    pub win: u32,
+    pub sit: bool,
+    pub dx: i32,
+    pub rect: (i32, i32, i32, i32),
+}
+
+pub fn load_perch() -> Option<SavedPerch> {
+    perch_at(&path())
+}
+
+fn perch_at(p: &Path) -> Option<SavedPerch> {
+    let v = read(p);
+    let q = v.get("perch")?;
+    let i = |k: &str| q.get(k).and_then(serde_json::Value::as_i64);
+    let r = q.get("rect")?.as_array()?;
+    let r = |n: usize| r.get(n).and_then(serde_json::Value::as_i64).map(|v| v as i32);
+    Some(SavedPerch { win: i("win")? as u32, sit: q.get("sit")?.as_bool()?, dx: i("dx")? as i32, rect: (r(0)?, r(1)?, r(2)?, r(3)?) })
+}
+
+fn seen_at(p: &Path, unix: f64, perch: Option<SavedPerch>) {
+    let mut v = read(p);
+    v["seenUnix"] = serde_json::json!(unix);
+    v["perch"] = match perch {
+        Some(s) => serde_json::json!({"win": s.win, "sit": s.sit, "dx": s.dx, "rect": [s.rect.0, s.rect.1, s.rect.2, s.rect.3]}),
+        None => serde_json::Value::Null,
+    };
+    write(p, &v);
+}
+
+pub fn save_seen(unix: f64, perch: Option<SavedPerch>) {
+    seen_at(&path(), unix, perch);
+}
+
 fn sessions_path() -> PathBuf {
     path().with_file_name("sessions.json")
 }
@@ -99,6 +146,22 @@ mod tests {
         std::fs::write(&p, "{not json").unwrap();
         merge(&p, "ground", serde_json::json!([1, 2]));
         assert_eq!(ground_at(&p), Some((1, 2)));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn seen_and_perch_round_trip_and_keep_the_rest() {
+        let dir = std::env::temp_dir().join(format!("sa-state-seen-{}", std::process::id()));
+        let p = dir.join("state.json");
+        std::fs::remove_dir_all(&dir).ok();
+        merge(&p, "ground", serde_json::json!([10, 20]));
+        let s = SavedPerch { win: 0x2600001, sit: true, dx: 140, rect: (100, 200, 800, 600) };
+        seen_at(&p, 1234.5, Some(s));
+        assert_eq!(perch_at(&p), Some(s));
+        assert_eq!(read(&p)["seenUnix"], 1234.5);
+        assert_eq!(ground_at(&p), Some((10, 20)));
+        seen_at(&p, 1300.0, None);
+        assert_eq!(perch_at(&p), None, "on the floor: no perch to restore");
         std::fs::remove_dir_all(&dir).ok();
     }
 }

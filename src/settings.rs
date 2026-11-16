@@ -123,6 +123,31 @@ pub struct Settings {
     pub display: DisplaySettings,
     pub mirror: MirrorSettings,
     pub voice: VoiceSettings,
+    pub intro: IntroSettings,
+}
+
+/// `[intro]`: the launch. `cinematic` (default true): her close-up over the desktop before the
+/// bolt, when the pack has the local close-up frames (`make-pack --mochi`), and the bolt onto
+/// the window she sat on last time; false: the launch as before (the bolt onto the floor).
+/// `cinematic_min_gap_min` (default 10): no close-up when she was running less than this many
+/// minutes ago (a crash restart or `systemctl restart` isn't a greeting).
+#[derive(Clone, Debug, PartialEq)]
+pub struct IntroSettings {
+    pub cinematic: bool,
+    pub cinematic_min_gap_min: f64,
+}
+
+impl Default for IntroSettings {
+    fn default() -> Self {
+        IntroSettings { cinematic: true, cinematic_min_gap_min: 10.0 }
+    }
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct IntroRaw {
+    cinematic: Option<bool>,
+    cinematic_min_gap_min: Option<toml::Value>,
 }
 
 /// `[voice]`: push-to-talk (hold the talk key) and spoken replies, through the `capri-voice`
@@ -359,6 +384,8 @@ struct FileRaw {
     drag: Option<DragRaw>,
     #[serde(default)]
     voice: Option<VoiceRaw>,
+    #[serde(default)]
+    intro: Option<IntroRaw>,
 }
 
 #[derive(Deserialize, Default)]
@@ -570,7 +597,17 @@ impl Settings {
                 voice.wake_handsfree = h;
             }
         }
-        let Some(r) = raw.brain else { return Ok(Settings { brain: b, ragdoll, session, music, display, mirror, voice }) };
+        let mut intro = IntroSettings::default();
+        if let Some(i) = raw.intro {
+            if let Some(c) = i.cinematic {
+                intro.cinematic = c;
+            }
+            if let Some(g) = i.cinematic_min_gap_min {
+                let g = weight(&g).filter(|g| *g <= 1440.0).context("intro.cinematic_min_gap_min must be 0..1440 (minutes)")?;
+                intro.cinematic_min_gap_min = g;
+            }
+        }
+        let Some(r) = raw.brain else { return Ok(Settings { brain: b, ragdoll, session, music, display, mirror, voice, intro }) };
         if let Some(v) = r.enabled {
             b.enabled = v;
         }
@@ -625,7 +662,7 @@ impl Settings {
         }
         // Drift is a transport (by distance), never drawn from the pool.
         b.arrivals.retain(|p| p.0 != Arrival::Drift);
-        Ok(Settings { brain: b, ragdoll, session, music, display, mirror, voice })
+        Ok(Settings { brain: b, ragdoll, session, music, display, mirror, voice, intro })
     }
 
     /// The file's settings (defaults when there is none). Err: a bad file (keep the old values).
@@ -791,6 +828,16 @@ mod tests {
         assert_eq!(Settings::parse("[display]\ncomposited = false\n").unwrap().display.composited, Some(false));
         assert!(Settings::parse("[display]\ncomposited = \"maybe\"\n").is_err());
         assert!(Settings::parse("[display]\nblur = 1\n").is_err());
+    }
+
+    #[test]
+    fn intro_cinematic_and_its_gap() {
+        assert_eq!(Settings::parse("").unwrap().intro, IntroSettings { cinematic: true, cinematic_min_gap_min: 10.0 });
+        let i = Settings::parse("[intro]\ncinematic = false\ncinematic_min_gap_min = 2.5\n").unwrap().intro;
+        assert_eq!((i.cinematic, i.cinematic_min_gap_min), (false, 2.5));
+        assert_eq!(Settings::parse("[intro]\ncinematic_min_gap_min = 0\n").unwrap().intro.cinematic_min_gap_min, 0.0);
+        assert!(Settings::parse("[intro]\ncinematic_min_gap_min = -1\n").is_err());
+        assert!(Settings::parse("[intro]\nloud = true\n").is_err());
     }
 
     #[test]

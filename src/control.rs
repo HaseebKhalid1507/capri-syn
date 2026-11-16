@@ -48,6 +48,9 @@ pub enum Command {
     Glitch,
     /// Dev: show variant `id` of a pool she is in now (or `next`: an in-place shift).
     Art { pool: String, id: String },
+    /// Dev: play the launch again (`intro`: the close-up if the pack has it, then the bolt;
+    /// `intro skip`: skip the one playing, as a click on it does).
+    Intro { skip: bool },
     /// Dev: turn her (`None`: the other way), with the turn's squeeze.
     Face(Option<bool>),
     /// Bubble paging: +1 / -1.
@@ -360,6 +363,11 @@ impl Command {
             "collapse" => Command::Collapse(true),
             "expand" => Command::Collapse(false),
             "glitch" => Command::Glitch,
+            "intro" => match rest.trim() {
+                "" => Command::Intro { skip: false },
+                "skip" => Command::Intro { skip: true },
+                _ => bail!("usage: intro [skip]"),
+            },
             "art" => match rest.split_whitespace().collect::<Vec<_>>().as_slice() {
                 [pool, id] => Command::Art { pool: pool.to_string(), id: id.to_string() },
                 _ => bail!("usage: art <perch|sleepFloor|sleepWindow> <variant id|next>"),

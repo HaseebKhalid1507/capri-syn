@@ -460,7 +460,14 @@ pub struct Behaviour {
     /// Variant pools: more than one art option per state (`crate::variants`).
     #[serde(default)]
     pub variants: Option<crate::variants::VariantsSpec>,
+    /// Drawn in-betweens from the desktop art (`anim/`), by change: `perchArrive` (landing on a
+    /// window top). Without `anim/` they don't exist and the pack's own frames play.
+    #[serde(default)]
+    pub transitions: BTreeMap<String, String>,
 }
+
+/// The transitions a pack may name, and the anchor each needs.
+pub const TRANSITIONS: [(&str, &str); 1] = [("perchArrive", "seat")];
 
 impl Behaviour {
     /// The art faces right unmirrored (`faces`, default right).
@@ -612,6 +619,28 @@ fn resolve_pools(b: &Behaviour, anim: Option<&crate::art::Anim>, errors: &mut Ve
     out
 }
 
+/// `moods.json` `transitions` → strip indices. Each must be a one-shot with the anchor its change
+/// needs. A pack without `anim/` has none.
+fn resolve_transitions(b: &Behaviour, anim: Option<&crate::art::Anim>, errors: &mut Vec<String>) -> HashMap<String, usize> {
+    let mut out = HashMap::new();
+    for (key, name) in &b.transitions {
+        let Some(&(_, want)) = TRANSITIONS.iter().find(|t| t.0 == key) else {
+            let known: Vec<&str> = TRANSITIONS.iter().map(|t| t.0).collect();
+            errors.push(format!("moods.json transitions: unknown change `{key}` ({})", known.join("|")));
+            continue;
+        };
+        let Some(a) = anim else { continue };
+        match a.by_name.get(name).map(|&i| (i, &a.strips[i])) {
+            Some((i, s)) if s.anchor.0 == want && !s.looping => {
+                out.insert(key.clone(), i);
+            }
+            Some(_) => errors.push(format!("moods.json transitions.{key}: strip `{name}` needs a {want} anchor and to be a one-shot")),
+            None => errors.push(format!("moods.json transitions.{key}: strip `{name}` is not in anim/anim.json")),
+        }
+    }
+    out
+}
+
 /// A frame to decode: catalog sprite or sidecar extra.
 #[derive(Clone, Debug)]
 pub struct FrameSource {
@@ -685,6 +714,8 @@ pub struct Pack {
     /// The variant pools (`moods.json` `variants`); a strip variant is dropped when the pack
     /// has no `anim/`, so an old pack's pool is its own art alone.
     pub pools: HashMap<crate::variants::PoolKey, Pool>,
+    /// `moods.json` `transitions`, resolved: strip indices into `anim`.
+    pub transitions: HashMap<String, usize>,
     pub cache_bytes: usize,
 }
 
@@ -872,6 +903,7 @@ impl Pack {
         let n_strips = anim.as_ref().map_or(0, |a| a.strips.len());
         let (mut strip_first, mut mirror_first) = (vec![None; n_strips], vec![None; n_strips]);
         let pools = resolve_pools(&behaviour, anim.as_ref(), &mut errors);
+        let transitions = resolve_transitions(&behaviour, anim.as_ref(), &mut errors);
         let mut strip_every = vec![u32::MAX; n_strips];
         for v in pools.values().flat_map(|p| &p.variants).filter_map(|v| v.art.as_ref()) {
             for si in std::iter::once(v.base).chain(v.talk).chain(v.music).chain(v.blinks.iter().map(|b| b.0)) {
@@ -884,6 +916,7 @@ impl Pack {
             let mut used: Vec<usize> = pools.values().flat_map(|p| &p.variants).filter_map(|v| v.art.as_ref()).flat_map(|v| {
                 std::iter::once(v.base).chain(v.talk).chain(v.music).chain(v.blinks.iter().map(|b| b.0))
             })
+            .chain(transitions.values().copied())
             .collect();
             used.sort_unstable();
             used.dedup();
@@ -925,6 +958,7 @@ impl Pack {
             mirror_first,
             strip_every,
             pools,
+            transitions,
             cache_bytes,
         };
 
@@ -1352,6 +1386,25 @@ pub mod tests {
         let mut m = pooled();
         m["variants"]["pools"]["nap"] = json!({"variants": [{"id": "a"}]});
         assert!(pack_in("badkey", m, true, |p| format!("{:#}", p.err().unwrap())).contains("unknown pool `nap`"));
+    }
+
+    #[test]
+    fn transitions_name_one_shot_strips_with_their_anchor() {
+        let with = |t: serde_json::Value, anim: bool| {
+            let mut m = pooled();
+            m["transitions"] = t;
+            pack_in("trans", m, anim, |p| p.map_err(|e| format!("{e:#}")).map(|p| (p.transitions.clone(), p.strip_first.clone(), p.anim.as_ref().map(|a| a.by_name.clone()))))
+        };
+        let (t, first, names) = with(json!({"perchArrive": "perch_in"}), true).unwrap();
+        let si = names.unwrap()["perch_in"];
+        assert_eq!(t.get("perchArrive"), Some(&si));
+        assert!(first[si].is_some(), "its cells are frames");
+        assert!(with(json!({"perchArrive": "lie"}), true).unwrap_err().contains("needs a seat anchor and to be a one-shot"), "a loop");
+        assert!(with(json!({"perchArrive": "stand"}), true).unwrap_err().contains("needs a seat anchor"));
+        assert!(with(json!({"perchArrive": "gone"}), true).unwrap_err().contains("`gone` is not in anim/anim.json"));
+        assert!(with(json!({"teleportOut": "lie"}), true).unwrap_err().contains("unknown change `teleportOut` (perchArrive)"));
+        // A pack without anim/: none, and no error.
+        assert!(with(json!({"perchArrive": "perch_in"}), false).unwrap().0.is_empty());
     }
 
     fn extra(id: &str, anchor: &str) -> serde_json::Value {

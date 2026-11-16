@@ -39,6 +39,21 @@ pub struct X11 {
     /// Clicks are reported (`arm_clicks`).
     clicks: Arc<AtomicBool>,
     click_conn: Mutex<Option<(Arc<RustConnection>, u32)>>,
+    /// Escape presses are reported (`arm_escape`), to this.
+    escape: Arc<AtomicBool>,
+    on_escape: Escapes,
+}
+
+type Escapes = Arc<Mutex<Option<Box<dyn Fn() + Send>>>>;
+
+/// The keycodes that type Escape (keysym 0xff1b).
+fn escape_codes(c: &RustConnection) -> Vec<u8> {
+    let setup = c.setup();
+    let (min, max) = (setup.min_keycode, setup.max_keycode);
+    let Ok(Ok(map)) = c.get_keyboard_mapping(min, max - min + 1).map(|k| k.reply()) else { return vec![9] };
+    let per = map.keysyms_per_keycode.max(1) as usize;
+    let codes: Vec<u8> = map.keysyms.chunks(per).enumerate().filter(|(_, s)| s.first() == Some(&0xff1b)).map(|(i, _)| min + i as u8).collect();
+    if codes.is_empty() { vec![9] } else { codes }
 }
 
 /// One viewable root child, as `children()` sees it.
@@ -131,6 +146,41 @@ fn strut_from_dock(d: &WinRect, monitors: &[WinRect], root: (i32, i32)) -> Optio
 }
 
 impl X11 {
+    /// Input and bounding shape of one of her windows; each `None` stays as it is.
+    fn shape_win(&self, win: u32, input: Option<&[ShapeRect]>, visible: Option<Visible<'_>>) -> Result<()> {
+        if let Some(input) = input {
+            self.conn.shape_rectangles(shape::SO::SET, shape::SK::INPUT, xproto::ClipOrdering::UNSORTED, win, 0, 0, &xrects(input))?;
+        }
+        match visible {
+            Some(Visible::All) => {
+                self.conn.shape_mask(shape::SO::SET, shape::SK::BOUNDING, win, 0, 0, x11rb::NONE)?;
+            }
+            Some(Visible::Rects(r)) => {
+                self.conn.shape_rectangles(shape::SO::SET, shape::SK::BOUNDING, xproto::ClipOrdering::UNSORTED, win, 0, 0, &xrects(r))?;
+            }
+            None => {}
+        }
+        self.conn.flush()?;
+        Ok(())
+    }
+
+    /// The raw events armed now: button presses (clicks) and key presses (Escape).
+    fn select_raw(&self) {
+        use x11rb::protocol::xinput::{self, ConnectionExt as _};
+        let Ok(g) = self.click_conn.lock() else { return };
+        let Some((c, root)) = g.as_ref() else { return };
+        let mut bits = 0u32;
+        if self.clicks.load(Ordering::Relaxed) {
+            bits |= u32::from(xinput::XIEventMask::RAW_BUTTON_PRESS);
+        }
+        if self.escape.load(Ordering::Relaxed) {
+            bits |= u32::from(xinput::XIEventMask::RAW_KEY_PRESS);
+        }
+        let m = xinput::EventMask { deviceid: xinput::Device::ALL_MASTER.into(), mask: vec![xinput::XIEventMask::from(bits)] };
+        c.xinput_xi_select_events(*root, &[m]).ok();
+        c.flush().ok();
+    }
+
     pub fn connect() -> Result<X11> {
         let (conn, screen) = x11rb::connect(None).context("x11: cannot connect to the X server")?;
         if conn.extension_information(shape::X11_EXTENSION_NAME)?.is_none() {
@@ -167,6 +217,8 @@ impl X11 {
             fx: Mutex::new(Vec::new()),
             clicks: Arc::new(AtomicBool::new(false)),
             click_conn: Mutex::new(None),
+            escape: Arc::new(AtomicBool::new(false)),
+            on_escape: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -478,15 +530,24 @@ impl Desktop for X11 {
         let root = c.setup().roots[screen].root;
         c.xinput_xi_query_version(2, 2)?.reply()?;
         let c = Arc::new(c);
-        let armed = self.clicks.clone();
-        let (c2, armed2) = (c.clone(), armed.clone());
+        let esc_codes = escape_codes(&c);
+        let (c2, armed2, esc, on_esc): (_, _, _, Escapes) = (c.clone(), self.clicks.clone(), self.escape.clone(), self.on_escape.clone());
         std::thread::Builder::new().name("avatar-clicks".into()).spawn(move || {
             while let Ok(ev) = c2.wait_for_event() {
-                if let x11rb::protocol::Event::XinputRawButtonPress(_) = ev
-                    && armed2.load(Ordering::Relaxed)
-                    && let Ok(Ok(r)) = c2.query_pointer(root).map(|k| k.reply())
-                {
-                    on_click(r.root_x as i32, r.root_y as i32);
+                match ev {
+                    x11rb::protocol::Event::XinputRawButtonPress(_) if armed2.load(Ordering::Relaxed) => {
+                        if let Ok(Ok(r)) = c2.query_pointer(root).map(|k| k.reply()) {
+                            on_click(r.root_x as i32, r.root_y as i32);
+                        }
+                    }
+                    x11rb::protocol::Event::XinputRawKeyPress(e) if esc.load(Ordering::Relaxed) && esc_codes.contains(&(e.detail as u8)) => {
+                        if let Ok(f) = on_esc.lock()
+                            && let Some(f) = f.as_ref()
+                        {
+                            f();
+                        }
+                    }
+                    _ => {}
                 }
             }
         })?;
@@ -497,16 +558,21 @@ impl Desktop for X11 {
     }
 
     fn arm_clicks(&self, on: bool) {
-        use x11rb::protocol::xinput::{self, ConnectionExt as _};
-        if self.clicks.swap(on, Ordering::Relaxed) == on {
-            return;
+        if self.clicks.swap(on, Ordering::Relaxed) != on {
+            self.select_raw();
         }
-        let Ok(g) = self.click_conn.lock() else { return };
-        let Some((c, root)) = g.as_ref() else { return };
-        let mask = if on { vec![xinput::XIEventMask::RAW_BUTTON_PRESS] } else { vec![xinput::XIEventMask::from(0u32)] };
-        let m = xinput::EventMask { deviceid: xinput::Device::ALL_MASTER.into(), mask };
-        c.xinput_xi_select_events(*root, &[m]).ok();
-        c.flush().ok();
+    }
+
+    fn watch_escape(&self, on: Box<dyn Fn() + Send>) {
+        if let Ok(mut g) = self.on_escape.lock() {
+            *g = Some(on);
+        }
+    }
+
+    fn arm_escape(&self, on: bool) {
+        if self.escape.swap(on, Ordering::Relaxed) != on {
+            self.select_raw();
+        }
     }
 }
 
@@ -556,21 +622,11 @@ impl Stage for Arc<X11> {
 
     /// SHAPE input; SHAPE bounding for the visible region (none: the whole window).
     fn set_shapes(&self, input: Option<&[ShapeRect]>, visible: Option<Visible<'_>>) -> Result<()> {
-        let win = self.win();
-        if let Some(input) = input {
-            self.conn.shape_rectangles(shape::SO::SET, shape::SK::INPUT, xproto::ClipOrdering::UNSORTED, win, 0, 0, &xrects(input))?;
-        }
-        match visible {
-            Some(Visible::All) => {
-                self.conn.shape_mask(shape::SO::SET, shape::SK::BOUNDING, win, 0, 0, x11rb::NONE)?;
-            }
-            Some(Visible::Rects(r)) => {
-                self.conn.shape_rectangles(shape::SO::SET, shape::SK::BOUNDING, xproto::ClipOrdering::UNSORTED, win, 0, 0, &xrects(r))?;
-            }
-            None => {}
-        }
-        self.conn.flush()?;
-        Ok(())
+        self.shape_win(self.win(), input, visible)
+    }
+
+    fn shape_of(&self, s: WinId, input: &[ShapeRect], visible: Visible<'_>) -> Result<()> {
+        self.shape_win(s, Some(input), Some(visible))
     }
 
     /// `_NET_WM_ICON`: (w, h, ARGB pixels…) per size.

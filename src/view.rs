@@ -15,6 +15,8 @@ mod voiceview;
 mod arriveview;
 #[path = "artview.rs"]
 mod artview;
+#[path = "introview.rs"]
+pub(crate) mod introview;
 
 use crate::anim::{Animator, Mood, Rng, Seq};
 use crate::control::Command;
@@ -535,6 +537,7 @@ pub struct Avatar {
     arrive: arriveview::ArriveState,
     /// The variant pools on screen and the strips' pixels (artview).
     art: artview::ArtState,
+    intro: introview::IntroState,
     /// Body not drawn (between dematerialise and materialise).
     hidden: bool,
     quitting: bool,
@@ -764,6 +767,7 @@ impl Avatar {
             next_glint: None,
             teleport: None,
             arrive: Default::default(),
+            intro: introview::IntroState::new(),
             art: artview::ArtState::new(std::env::var("SA_ART_SEED").ok().and_then(|s| s.parse().ok()).unwrap_or_else(|| Rng::seeded().next())),
             hidden: false,
             quitting: false,
@@ -1161,6 +1165,9 @@ impl Avatar {
         if first && !self.launch_hold() {
             self.glitch = Some(Glitch::new(GlitchKind::Appear, now, self.rng.next()));
         }
+        if first && self.arrive.launch_wait && !state::load_hidden() {
+            self.intro_prepare(cx);
+        }
         if complete && !self.loaded && state::load_hidden() {
             // Hidden last time (HIDE): stay hidden, the chip shows where she is.
             self.parked = Some(true);
@@ -1173,10 +1180,11 @@ impl Avatar {
             self.contact = [self.measure_contact(true), self.measure_contact(false)];
             self.set_mood(Mood::Idle, now);
             let held = self.arrive.launch_wait;
-            if held && !self.launch_intro(now) && self.parked.is_none() {
+            if held && !self.launch_intro(now, cx) && self.parked.is_none() {
                 self.hidden = false;
                 self.glitch = Some(Glitch::new(GlitchKind::Appear, now, self.rng.next()));
             }
+            self.heartbeat_start(cx);
             let win = self.os.body();
             self.set_icon_on(win);
             self.next_glint = Some(now + Duration::from_millis(700));
@@ -2413,6 +2421,7 @@ impl Avatar {
             }
             Command::Drag(ops) => self.drag_cmd(ops, now),
             Command::Art { pool, id } => self.art_force(&pool, &id, now),
+            Command::Intro { skip } => self.intro_command(skip, now, cx),
             Command::Music(on) => {
                 if on {
                     match self.music_on(now, None) {
@@ -2440,6 +2449,10 @@ impl Avatar {
             },
             Command::Watch(WatchEvent::Click(x, y)) => {
                 self.line_click_elsewhere(x, y, cx);
+                "ok".into()
+            }
+            Command::Watch(WatchEvent::Escape) => {
+                self.intro_skip("esc", cx);
                 "ok".into()
             }
             Command::Watch(ev) => {
@@ -2903,6 +2916,7 @@ impl Avatar {
         if self.placement == Placement::Ground && self.teleport.is_none() {
             state::save_ground(self.ground());
         }
+        self.save_seen();
         self.fx_hide_all();
         std::fs::remove_file(crate::control::socket_path()).ok();
         if self.fatal {
@@ -2985,6 +2999,7 @@ impl Avatar {
             }).collect::<serde_json::Map<_, _>>(),
         });
         v["art"] = self.art_json();
+        v["intro"] = self.intro_json();
         v.to_string()
     }
 
@@ -3773,7 +3788,7 @@ impl Avatar {
                     self.perch_gone = None;
                 }
             }
-            WatchEvent::Click(..) => {}
+            WatchEvent::Click(..) | WatchEvent::Escape => {}
             WatchEvent::Layout => {
                 self.os.forget_layout();
                 self.hosts_stale = true;

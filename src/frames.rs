@@ -166,6 +166,17 @@ impl Frame {
     }
 }
 
+/// The hit mask of a `w`×`h` RGBA buffer (alpha >= `HIT_ALPHA`).
+pub fn alpha_mask(px: &[u8], w: u32, h: u32) -> Mask {
+    let mut mask = Mask::new(w, h);
+    for (i, p) in px.as_chunks::<4>().0.iter().enumerate() {
+        if p[3] >= HIT_ALPHA {
+            mask.set(i as u32 % w, i as u32 / w);
+        }
+    }
+    mask
+}
+
 /// Topmost opaque row per column.
 fn top_profile(mask: &Mask) -> Vec<i16> {
     (0..mask.w as i32)
@@ -393,7 +404,7 @@ pub struct Decoded {
     pub decode_ms: u128,
 }
 
-fn sha_hex(bytes: &[u8]) -> String {
+pub fn sha_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 

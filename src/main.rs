@@ -31,6 +31,7 @@ mod facing;
 mod frames;
 mod fx;
 mod host;
+mod intro;
 mod pack;
 mod art;
 mod variants;
@@ -286,6 +287,12 @@ fn run(t_start: Instant) -> Result<()> {
             args.threads,
             args.verify
         );
+        if let Some(files) = pack.anim.as_ref().map(|a| &a.intro).filter(|f| !f.is_empty()) {
+            // The size she shows them at on a 1440 px monitor.
+            let t0 = std::time::Instant::now();
+            let c = view::introview::decode(files, (1587, 893), args.threads)?;
+            olog!("intro: {} close-ups ok (sha256 checked), 1587x893, decode {} ms", c.len(), t0.elapsed().as_millis());
+        }
         return Ok(());
     }
 
@@ -357,6 +364,12 @@ fn run(t_start: Instant) -> Result<()> {
             })
             .map_err(|e| elog!("synaps-avatar: click watcher: {e:#}; a click elsewhere won't park the Line"))
             .ok();
+            // Escape while the intro plays skips it.
+            let tx = tx2.clone();
+            os.watch_escape(move || {
+                let (r, _) = std::sync::mpsc::channel();
+                tx.send_blocking((control::Command::Watch(platform::WatchEvent::Escape), r)).ok();
+            });
             // The pointer near her, swiping past, resting on her (her lively reactions).
             let tx = tx2.clone();
             let sf = layout.sf;

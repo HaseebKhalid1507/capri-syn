@@ -467,6 +467,7 @@ fn namespace(role: Role) -> &'static str {
         Role::Chip => "capri-chip",
         Role::Line => "capri-line",
         Role::Fx => "capri-fx",
+        Role::Intro => "capri-intro",
     }
 }
 
@@ -571,6 +572,18 @@ impl Stage for LayerStage {
     /// her window, always (a compositor blends her alpha).
     fn set_shapes(&self, input: Option<&[ShapeRect]>, _visible: Option<Visible<'_>>) -> Result<()> {
         let (Some(s), Some(input)) = (self.body_surface(), input) else { return Ok(()) };
+        let k = 1.0 / s.scale;
+        let rects: Vec<Bounds<Pixels>> = input
+            .iter()
+            .map(|r| Bounds::new(point(px(r.0 as f32 * k), px(r.1 as f32 * k)), size(px(r.2 as f32 * k), px(r.3 as f32 * k))))
+            .collect();
+        layer_ctl::set_input_region(s.ptr, Some(&rects));
+        Ok(())
+    }
+
+    /// The input region of surface `s` (a compositor blends the rest).
+    fn shape_of(&self, s: WinId, input: &[ShapeRect], _visible: Visible<'_>) -> Result<()> {
+        let s = self.surface(s).context("not one of her surfaces")?;
         let k = 1.0 / s.scale;
         let rects: Vec<Bounds<Pixels>> = input
             .iter()

@@ -312,6 +312,7 @@ impl Os {
             Role::Chip => ("synaps-avatar chip", WindowBackgroundAppearance::Opaque),
             Role::Line => ("synaps-avatar line", WindowBackgroundAppearance::Opaque),
             Role::Fx => ("synaps-avatar fx", WindowBackgroundAppearance::Transparent),
+            Role::Intro => ("synaps-avatar intro", WindowBackgroundAppearance::Transparent),
         };
         let mut o = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -325,7 +326,7 @@ impl Os {
             app_id: Some("synaps-avatar".into()),
             ..Default::default()
         };
-        if role == Role::Body {
+        if matches!(role, Role::Body | Role::Intro) {
             // She is never the active window: GPUI's default caps inactive windows at 30 fps
             // (a drag then ran ~40 ticks/s). Our own deadlines decide when she draws.
             o.inactive_frame_interval = None;
@@ -436,6 +437,13 @@ impl Os {
             }
         });
         self.stage.set_shapes(input, visible)
+    }
+
+    /// Another surface's input region = `input`; visible: all of it under a compositor, else
+    /// `visible` (as `set_shapes`).
+    pub fn shape_of(&self, s: WinId, input: &[ShapeRect], visible: &[ShapeRect]) -> Result<()> {
+        let v = if self.composited() { Visible::All } else { Visible::Rects(visible) };
+        self.stage.shape_of(s, input, v)
     }
 
     /// Bounding shapes sent and their total rects since the last call (the rag's meter).
@@ -918,6 +926,15 @@ impl Os {
     }
 
     /// Report clicks (the Line holds the keyboard) or not.
+    /// Escape presses anywhere while armed (`arm_escape`): `on` runs on the click thread.
+    pub fn watch_escape(&self, on: impl Fn() + Send + 'static) {
+        self.desk.watch_escape(Box::new(on));
+    }
+
+    pub fn arm_escape(&self, on: bool) {
+        self.desk.arm_escape(on);
+    }
+
     pub fn arm_clicks(&self, on: bool) {
         self.desk.arm_clicks(on);
     }

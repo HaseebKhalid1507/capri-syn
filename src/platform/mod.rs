@@ -179,6 +179,8 @@ pub enum WatchEvent {
     TargetBack(u32),
     /// A click anywhere, at root (x, y), while the Line holds the keyboard.
     Click(i32, i32),
+    /// Escape pressed anywhere, while the intro plays.
+    Escape,
     /// He focused another window.
     Focus,
     /// He switched workspace.
@@ -215,6 +217,8 @@ pub enum Role {
     /// An output's effect host (`Caps::host_per_output`): paints the effect layers that
     /// reach outside her window (the bolt).
     Fx,
+    /// The launch's close-up (`crate::intro`): shaped like her body, input on its pixels only.
+    Intro,
 }
 
 /// Where an effect layer stacks.
@@ -287,6 +291,10 @@ pub trait Desktop: Send + Sync {
     /// Start reporting clicks anywhere (root px) while armed; `on` runs on its thread.
     fn watch_clicks(&self, on: Box<dyn Fn(i32, i32) + Send>) -> Result<()>;
     fn arm_clicks(&self, on: bool);
+    /// While armed, an Escape press anywhere runs `on` (on the click thread). Nothing is
+    /// grabbed: the focused window gets it too. Backends without it never call `on`.
+    fn watch_escape(&self, _on: Box<dyn Fn() + Send>) {}
+    fn arm_escape(&self, _on: bool) {}
 }
 
 /// Primitive commands on her own surfaces. Main thread only (a backend may hold GPUI
@@ -308,6 +316,8 @@ pub trait Stage {
     fn place(&self, s: WinId, x: i32, y: i32, w: i32, h: i32) -> Result<()>;
     /// Body input region and visible region; each `None` stays as it is.
     fn set_shapes(&self, input: Option<&[ShapeRect]>, visible: Option<Visible<'_>>) -> Result<()>;
+    /// The same for another of her surfaces (the intro's close-up).
+    fn shape_of(&self, s: WinId, input: &[ShapeRect], visible: Visible<'_>) -> Result<()>;
     fn set_icon(&self, s: WinId, data: &[u32]) -> Result<()>;
     /// Show effect layer `layer`: solid `rgb` over `rects` (relative to `origin`; `None`
     /// keeps the last ones), `size` px, stacked `z`. Input passes through. Not flushed.

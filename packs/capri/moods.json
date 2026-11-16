@@ -1209,6 +1209,9 @@
     ],
     "teleportChance": 0.5
   },
+  "transitions": {
+    "perchArrive": "perch_arrive"
+  },
   "kiss": {
     "steps": [
       "air_kiss"

@@ -63,6 +63,8 @@ value rejects the whole file (the previous values stay). `avatarctl settings rel
 | `[mirror] self` | `true` | her own turns: travel, what she cares about, an idle look-around |
 | `[mirror] idle_every_min` | `[1, 4]` | minutes between idle look-arounds |
 | `[mirror] turn_ms` | `150` | the turn's squeeze (0 = an instant flip, at most 400) |
+| `[intro] cinematic` | `true` | the launch: her close-up over the desktop first (only with a pack built with `--mochi`), and the bolt back onto the window she sat on last time. `false`: the launch as before |
+| `[intro] cinematic_min_gap_min` | `10` | no close-up if she was running less than this many minutes ago (a crash or `systemctl restart` isn't a greeting) |
 | `[display] composited` | `"auto"` | `"auto"` (alpha while a compositor runs, the X shape otherwise), `"on"`, `"off"` |
 | `[music] detect` | `true` | headphones on while an MPRIS player is playing |
 | `[music] ignore` | `["discord", "vesktop"]` | player bus-name substrings that never count |
@@ -161,7 +163,8 @@ Optional desktop art, into the pack's `anim/` (a pack without it loads as before
   `tools/lachy-desktop-156ed18.sha256`. `auto` downloads exactly those files at that commit (cached).
 - `--mochi DIR|auto`: mochiiwuff/capri-desktop at `c011764`, checked against `tools/mochi-desktop-c011764.sha256`.
   Its images are show frames and fan art that its licence does not cover: local personal use only, never
-  published.
+  published. Only this flag puts them in a pack (into your local pack directory); nothing in this repo
+  ships or fetches them otherwise. They give her the launch close-up (below).
 - `anim/anim.json` is `tools/desktop-art.json` (capri-syn's own measured cell grid, anchors and loop flags)
   plus the sha256 of every copied file. `NOTICE.md` gains each source's `Required Notice:` lines, the licence
   URL and its credits.
@@ -186,6 +189,22 @@ With `anim/`, `moods.json` `variants` mixes that art in; she never swaps one set
   goes through a glitch.
 - Strips decode when first wanted, off the main thread; `cacheMb` caps what is kept (least recently shown
   first, never what is on screen). A pack without `anim/` keeps only the pack's own variants.
+- `transitions` names drawn in-betweens by change: `perchArrive` (a one-shot seat strip) plays when she
+  lands on a window top at launch, in place of the pack's `arrive.perch`, once its cells are in.
+
+The launch, with `[intro] cinematic` on:
+
+- If the pack has the close-ups (`anim/mochi/intro-*`, `--mochi` only), her close-up rises from the bottom
+  of her monitor (62 % of its height, centred on the work area) and plays its 3 s beat: grab, a whip into a
+  wave, "hi", a grin, then a glitch out. A click on it or Esc anywhere skips to the glitch out. Clicks
+  anywhere else go through to the window under it, and Esc reaches your window too.
+- It doesn't play while a fullscreen window is focused, or within `cinematic_min_gap_min` of her last
+  run (`state.json` `seenUnix`, written every minute and at a quit).
+- Then the plain red bolt from the top of the monitor, onto the floor (`arrive.launch`) or onto the window
+  she sat on last time (`state.json` `perch`: the same window, same size, same place, with room on its top;
+  else the floor).
+- Without the close-ups, the launch is just that bolt. The close-ups are decoded for each launch and
+  dropped after it.
 
 ## Building
 
@@ -210,7 +229,7 @@ sends one:
 mood <name> | clip <id> | say <text> | pos <x> <y> [now] | perch [sit|stand] [win] | perch off | drop | stack
 page next|prev | scroll <n> | reader open [focus]|close|copy [n]|scroll <px> | collapse | expand
 music on|off | glitch | face left|right|toggle | drag … | submit <text> | abort | copy
-art perch|sleepFloor|sleepWindow <variant id|next>
+art perch|sleepFloor|sleepWindow <variant id|next> | intro [skip]
 talk press|release | line close | prompt confirm|secret [text] | prompt off
 brain … | settings reload | tap head|body | menu | shape | state | hide | show | quit
 ```
