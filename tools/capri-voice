@@ -135,7 +135,7 @@ ECHO_WORDS, ECHO_WINDOW_S = 0.7, 15.0   # a transcript this much made of what sh
 # Apache-2.0, released models CC BY-NC-SA 4.0, so personal use; SHA-pinned), streamed: every 80 ms the mel of the last 110 ms, one 96-number embedding
 # from the last 76 mel frames; our head (1536 -> 64 -> 1, numpy) scores the last 16 embeddings (~2 s).
 # Two hops in a row over the threshold = a candidate. Stage 2: the loaded Whisper decodes the last
-# 2 s, 0.3 s after the candidate; it must say a hey-like word, then capri-like, loosely spelled ("Copry",
+# 2.8 s, 0.3 s after the candidate; it must say a hey-like word, then capri-like, loosely spelled ("Copry",
 # "Haikapri"), never "Capricorn". Trained on stock
 # TTS voices only (Kokoro packs and blends, espeak-ng): no recording of anyone. Detection on his
 # voice is unmeasured; wake_sensitivity is the remedy.
@@ -208,7 +208,11 @@ WAKE_CHECK_DELAY_S = float(os.environ.get('CAPRI_VOICE_WAKE_DELAY', '0.3'))   # 
 # and it beats the best sound-alike by > MARGIN_MIN. Fitted on stock TTS voices only (Kokoro packs, espeak-ng; the
 # held-out voices and his own takes never fitted it). A personal file (wake_personal(), local, optional) may move both.
 WAKE_T_MIN, WAKE_MARGIN_MIN = -10.0, 0.0
-WAKE_SECOND_MARGIN = -2.0         # a reject gets the second look only when its margin is over this ("hey Cappy" is far under)
+WAKE_SECOND_MARGIN = -8.0         # a reject gets the second look when its margin is over this: his far and casual takes are
+                                  # all over -6 (his own sound-alikes "hey Cabby", "hey copy", "hey carry" are under -8)
+WAKE_LOOK_T_MIN, WAKE_LOOK_MARGIN_MIN = -10.0, -3.0   # the second look's filter, on the decode of his whole turn: there
+                                  # Whisper reads the phrase better (the request after it), and his far takes land at -0.5..-2.8
+WAKE_CHECK_S = 2.8                # the check decodes this much: the ring (2.5 s) and the 0.3 s after the candidate
 WAKE_PERSONAL = os.path.join(os.path.dirname(MODELS), 'wake-personal', 'personal.npz')
 WAKE_SPEECH_MIN = 3                # a candidate needs >= 3 Silero speech frames (~0.1 s) in the last second: music, a door, a cough don't
 
@@ -235,12 +239,21 @@ def wake_personal(path=None):
     return None
 
 
-def wake_accept(says, tm, personal=None):
-    """The check's verdict: the filter's (T, margin) when it is on, else Whisper's text ("says hey capri")."""
+def wake_accept(says, tm, personal=None, look=False):
+    """The check's verdict: the filter's (T, margin) when it is on, else Whisper's text ("says hey capri"). The second look
+    (look=True) needs both: the words of his whole turn say "hey capri" and the filter passes at the look's own thresholds."""
     if tm is None:
         return says
+    if look:
+        return says and tm[0] > WAKE_LOOK_T_MIN and tm[1] > WAKE_LOOK_MARGIN_MIN
     p = personal or {}
     return tm[0] > p.get('t_min', WAKE_T_MIN) and tm[1] > p.get('margin_min', WAKE_MARGIN_MIN)
+
+
+def wake_check_pcm(pre, post):
+    """The audio the check decodes: the last WAKE_CHECK_S of the ring and what came after the candidate (s16 bytes)."""
+    b = (pre + bytes(post))[-int(WAKE_CHECK_S * MIC_RATE) * 2:]
+    return np.frombuffer(b[:len(b) // 2 * 2], np.int16).astype(np.float32) / 32768.0
 
 
 def wake_text(stt, pcm, floor=None):
@@ -1918,12 +1931,14 @@ class Voice:
                     text = self.stt(pcm, speech_ms)
                     tm = self._wake_filter()                # the turn starts where the check's window did
                 c['stt_ms'] = now_ms() - t0
-                if not (wake_says(text) and wake_accept(True, tm, self.wake_personal)):
-                    log(f"wake: the second look rejected it too ({dur:.1f} s, {c['stt_ms']:.0f} ms)")
+                says = wake_says(text)
+                ft = f", filter {tm[0]:.1f} / {tm[1]:+.1f}" if tm else ''
+                if not wake_accept(says, tm, self.wake_personal, look=True):
+                    log(f"wake: the second look rejected it too ({dur:.1f} s, {c['stt_ms']:.0f} ms{ft}{'' if says else ', no phrase in the words'})")
                     return
                 self.wake_n['woke'] += 1
                 self.wake_n['second'] += 1
-                log(f"wake: heard at the second look ({dur:.1f} s, {c['stt_ms']:.0f} ms)")
+                log(f"wake: heard at the second look ({dur:.1f} s, {c['stt_ms']:.0f} ms{ft})")
                 if self.player is not None or self.play_q or self.say_q:
                     self.hush(why='wake')
                 rest, hf = wake_rest(text)
@@ -2052,7 +2067,7 @@ class Voice:
                 cand['post'] += chunk
                 if not cand['started'] and len(cand['post']) >= int(WAKE_CHECK_DELAY_S * MIC_RATE) * 2:
                     cand['started'] = True
-                    pcm = np.frombuffer((cand['pre'] + bytes(cand['post']))[-4 * MIC_RATE:], np.int16).astype(np.float32) / 32768.0
+                    pcm = wake_check_pcm(cand['pre'], cand['post'])
                     threading.Thread(target=check, args=(cand, pcm), daemon=True).start()
                 if cand['done'].is_set():
                     if cand['ok']:
@@ -2946,6 +2961,13 @@ def selftest_wake():
     assert wake_accept(True, None) and not wake_accept(False, None), 'the filter off: the text decides'
     assert wake_accept(False, (-3.0, 2.0)) and not wake_accept(True, (-3.0, -0.5)) and not wake_accept(True, (-12.0, 3.0))
     assert wake_accept(True, (-12.0, 3.0), {'t_min': -13.0}) and not wake_accept(True, (-3.0, 0.5), {'margin_min': 1.0})
+    # the second look: his words must say it, and its own thresholds (T > -10, margin > -3) on the whole turn's decode
+    assert wake_accept(True, (-9.5, -2.6), look=True) and wake_accept(True, (-1.6, 2.2), look=True) and wake_accept(True, None, look=True)
+    assert not wake_accept(False, (-3.0, 3.0), look=True) and not wake_accept(True, (-10.6, -1.0), look=True)
+    assert not wake_accept(True, (-7.4, -4.7), look=True) and not wake_accept(True, (-9.5, -2.6)), 'the first look keeps its own'
+    # the check decodes the last 2.8 s (ring + 0.3 s), not 2.0 (a byte count read as samples)
+    ring, post = bytes(int(WAKE_RING_S * MIC_RATE) * 2), bytearray(int(WAKE_CHECK_DELAY_S * MIC_RATE) * 2)
+    assert len(wake_check_pcm(ring, post)) == int(2.8 * MIC_RATE) and len(wake_check_pcm(ring[:32000], post)) == int(1.3 * MIC_RATE)
     import tempfile
     d = tempfile.mkdtemp()
     t = np.eye(3, 1536, dtype=np.float32)
@@ -3071,7 +3093,20 @@ def selftest():
                            ('Hey Capra.', False), ('Tell Capri to wait.', False), ('Hey Capricorn.', False)):
             tm = check(text)
             assert wake_accept(False, tm) == want, (text, tm)
-        print('selftest: the sound-alike filter ok (the phrase passes on stock TTS; Cappy, Capra, Capricorn, "tell Capri" do not)')
+
+        def look(text):
+            """The second look: the whole turn (1 s before it, as the ring holds), decoded as any turn is, then the filter."""
+            a = tts(text, 'af_heart', 1.0, 'off', 0.0, 'model')
+            n = int(len(a) * MIC_RATE / TTS_RATE)
+            x = np.interp(np.linspace(0, len(a) - 1, n), np.arange(len(a)), a).astype(np.float32)
+            pcm = np.concatenate([np.zeros(16000, np.float32), x, np.zeros(16000, np.float32)])
+            words = stt(pcm, len(x) / MIC_RATE * 1000)
+            return wake_accept(wake_says(words), wf(), look=True)
+        for text, want in (("Hey Capri, what's spike doing?", True), ('Hey Cappy, what time is it?', False), ('Hey Capra, pause the music.', False),
+                           ('Tell Capri to wait.', False), ('Hey Capricorn, is the build green?', False)):
+            assert look(text) == want, text
+        print('selftest: the sound-alike filter ok (the phrase passes on stock TTS; Cappy, Capra, Capricorn, "tell Capri" do not; '
+              'the second look too)')
     assert tts.flow, 'the flow patch did not load'
     k, f = tts.k, tts.flow
     st = tts.style('af_heart')

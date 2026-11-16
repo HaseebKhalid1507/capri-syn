@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### "Hey Capri" from across the desk
+- The check decodes the 2.8 s it was measured and documented with. It had decoded 2.0 s: a byte count
+  read as samples.
+- The second look (his whole turn, decoded once he pauses) now gets every rejected candidate whose margin
+  is over −8 (was −2), and it passes at its own thresholds: the words say "hey capri", `T > −10` and
+  `margin > −3` (was `> 0`). With the request after the phrase, Whisper reads far and casual speech much
+  better. On his own takes: 29 → 35 of 40 woken (far and casual 1 → 6 of 10), none of his 10 sound-alikes.
+- The log gets the second look's two scores (never words), and says when its words held no "hey capri".
+
 ### "Hey Capri" starts a conversation
 - "Hey Capri" now starts hands-free (`[voice] wake_handsfree`, default true, with `handsfree` on): the
   wake stream goes on as the hands-free one in the same capture (no gap), so "Hey Capri, what's spike
