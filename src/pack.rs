@@ -161,9 +161,13 @@ pub struct MoodSpec {
     /// Status tag text (upper-case HUD label).
     #[serde(default)]
     pub status: Option<String>,
-    /// Key into `tones` for the status colour.
+    /// The state's tone key (online, think, busy, speak, music, alert, done, error, sleep,
+    /// offline): its colour (`theme::Pal::tone`, or the pack's `tones`) and its look.
     #[serde(default)]
     pub tone: Option<String>,
+    /// The nameplate's silhouette: slant, arrow, flag, square or split (`theme::Plate`).
+    #[serde(default)]
+    pub plate: Option<String>,
     /// Automatically switch to another mood after `afterMs`.
     #[serde(default)]
     pub then: Option<Then>,
@@ -359,6 +363,8 @@ pub struct MusicSpec {
     pub status: Option<String>,
     #[serde(default)]
     pub tone: Option<String>,
+    #[serde(default)]
+    pub plate: Option<String>,
     #[serde(default)]
     pub glyph: Option<String>,
     /// Autonomy may start a session: chance per activity pick, and how long it lasts.
@@ -1019,17 +1025,20 @@ impl Pack {
         out
     }
 
+    /// A state's colour: the pack's `tones` entry for `key`, else the theme's.
     pub fn tone(&self, key: Option<&str>) -> u32 {
-        key.map_or(0x8ef5ed, |k| self.tone_or(k, 0x8ef5ed))
+        let pal = self.palette();
+        key.map_or(pal.accent, |k| self.tone_hex(k).unwrap_or_else(|| pal.tone(k)))
     }
 
-    /// A `#rrggbb` colour from the sidecar's `tones`, or `fallback`.
-    pub fn tone_or(&self, key: &str, fallback: u32) -> u32 {
-        self.behaviour
-            .tones
-            .get(key)
-            .and_then(|hex| u32::from_str_radix(hex.trim_start_matches('#'), 16).ok())
-            .unwrap_or(fallback)
+    /// A `#rrggbb` colour from the sidecar's `tones`.
+    pub fn tone_hex(&self, key: &str) -> Option<u32> {
+        self.behaviour.tones.get(key).and_then(|hex| u32::from_str_radix(hex.trim_start_matches('#'), 16).ok())
+    }
+
+    /// The UI's tokens: SHARD, with any the pack's `tones` name overridden.
+    pub fn palette(&self) -> crate::theme::Pal {
+        crate::theme::Pal::SHARD.with(|k| self.tone_hex(k))
     }
 }
 

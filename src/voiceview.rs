@@ -1470,6 +1470,17 @@ impl Avatar {
 
     /// The tag while the mic is open, he waits for the words, or she speaks.
     pub(super) fn voice_status(&self) -> Option<Status> {
+        use crate::theme::Plate;
+        // Live mic: the red swallowtail (its rec dot blinks); the wake word: a dashed slant
+        // with a mic; heard and speaking: arrows (doing); paused: a grey dashed square.
+        let st = |label: String, key: &str, invert: bool, glyph: &str, plate: Plate| Status {
+            label,
+            tone: self.pack.tone(Some(key)),
+            invert,
+            glyph: glyph.into(),
+            plate,
+            key: key.into(),
+        };
         let bars = |v: f32| -> String { (0..5).map(|i| if v * 5.0 > i as f32 + 0.3 { '▮' } else { '▯' }).collect() };
         if let (Some(h), Some(_)) = (self.voice.hf, self.voice.mic) {
             let label = match self.voice_hf_left() {
@@ -1479,29 +1490,29 @@ impl Avatar {
                     format!("MIC LIVE · HANDS-FREE {}:{:02} {}", s / 60, s % 60, bars(self.voice.level))
                 }
             };
-            return Some(Status { label, tone: 0xff3b62, invert: true, glyph: "rec".into() });
+            return Some(st(label, "mic", true, "hf", Plate::Flag));
         }
         if let Some(m) = self.voice.mic {
             let s = m.elapsed().as_secs();
             let auto = if self.voice.toggle.is_some() { " · AUTO" } else { "" };
-            return Some(Status { label: format!("MIC {}:{:02} {}{auto}", s / 60, s % 60, bars(self.voice.level)), tone: 0xff3b62, invert: true, glyph: "rec".into() });
+            return Some(st(format!("MIC {}:{:02} {}{auto}", s / 60, s % 60, bars(self.voice.level)), "mic", true, "rec", Plate::Flag));
         }
         if self.voice.asked.is_some() {
-            return Some(Status { label: "MIC …".into(), tone: 0xff3b62, invert: false, glyph: "ring".into() });
+            return Some(st("MIC …".into(), "mic", false, "ring", Plate::Slant));
         }
         // The idle wake stream: open all along, so it keeps the first slot; static (no timer, no meter).
         if self.voice.wake.open.is_some() {
-            return Some(Status { label: "MIC ON · SAY \"HEY CAPRI\"".into(), tone: 0xb8435c, invert: false, glyph: "ring".into() });
+            return Some(st("MIC ON · SAY \"HEY CAPRI\"".into(), "wake", false, "mic", Plate::Slant));
         }
         if self.voice.transcribing {
-            return Some(Status { label: "HEARD · …".into(), tone: self.pack.tone(Some("think")), invert: false, glyph: "dots".into() });
+            return Some(st("HEARD · …".into(), "heard", false, "dots", Plate::Arrow));
         }
         if let Some(p) = self.voice.wake.paused.as_ref().filter(|_| self.voice.cfg.wake_word && !self.voice_speaking()) {
-            return Some(Status { label: p.clone(), tone: 0x8a5a66, invert: false, glyph: String::new() });
+            return Some(st(p.clone(), "paused", false, "ring", Plate::Square));
         }
         if self.voice_speaking() {
             let s = self.voice_shape(Instant::now()).unwrap_or(0);
-            return Some(Status { label: format!("SPEAKING {}", bars(s as f32 / 3.0)), tone: self.pack.tone(Some("speak")), invert: false, glyph: "play".into() });
+            return Some(st(format!("SPEAKING {}", bars(s as f32 / 3.0)), "speak", false, "play", Plate::Arrow));
         }
         None
     }

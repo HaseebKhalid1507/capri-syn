@@ -51,6 +51,8 @@ pub struct Layout {
     pub foot_pad: i32,
 }
 
+use crate::theme::{self, Cut, Fill, Pal, Plate, glyph, tracked};
+
 // Logical px. The HUD follows Capri's CSS (cyberpunk.css, avatar-detach.css).
 const MARGIN: f32 = 8.0;
 const TOP_MARGIN: f32 = 6.0;
@@ -64,7 +66,7 @@ const OPENING_LINES: usize = 3;
 const TYPE_MAX_CHARS: usize = 160;
 const PAD_T: f32 = 11.0;
 const PAD_B: f32 = 8.0;
-const PAD_L: f32 = 21.0;
+const PAD_L: f32 = 20.0;
 const PAD_R: f32 = 15.0;
 const HEADER_H: f32 = 12.0;
 const HEADER_GAP: f32 = 8.0;
@@ -73,8 +75,11 @@ const FOOTER_H: f32 = 21.0;
 const PANEL_MIN_W: f32 = 340.0;
 const PANEL_MAX_W: f32 = 470.0;
 const PANEL_MAX_H: f32 = PAD_T + HEADER_H + HEADER_GAP + LINES_PER_PAGE as f32 * LINE_H + FOOTER_GAP + FOOTER_H + PAD_B;
-const CUT: f32 = 12.0;
-const TAIL_W: f32 = 26.0;
+const CUT: f32 = 18.0;
+/// The menu's chamfers.
+const MENU_CUT: Cut = Cut::Corners(12.0);
+/// The mane slivers' height over the bubble's top edge.
+const SLIVER_H: f32 = 8.0;
 const TAIL_H: f32 = 16.0;
 const TIP_GAP: f32 = 2.0;
 const TAG_FONT: f32 = 13.0;
@@ -496,6 +501,9 @@ pub struct Avatar {
     hud_top: Cell<Option<(usize, i32)>>,
     /// Last laid-out box of the status tag (window logical px), to tear it in a glitch.
     tag_box: Cell2,
+    /// The HUD's next motion step (the flag's flip, the thinking slivers, the rec dot's blink,
+    /// the unread pill's nudge), set by the frame that shows it.
+    motion_at: Cell<Option<Instant>>,
     music: Option<MusicOn>,
     notes: Vec<NoteMasks>,
     notes_shown: usize,
@@ -696,6 +704,7 @@ impl Avatar {
             tag_w: Rc::new(Cell::new(150.0)),
             hud_top: Cell::new(None),
             tag_box: Rc::new(Cell::new(None)),
+            motion_at: Cell::new(None),
             music: None,
             notes: Vec::new(),
             notes_shown: 0,
@@ -1323,10 +1332,11 @@ impl Avatar {
         } else if m != prev && !arriving {
             self.anim.stop_oneshot(now);
         }
-        // A change of signal colour glitches, like Capri's state bursts.
+        // A change of signal (its tone key: the colours are one red now) glitches, like
+        // Capri's state bursts.
         // Speaking comes and goes with every reply; that alone is not worth a burst.
         let chatter = m == Mood::Talking || prev == Mood::Talking;
-        if m != prev && !chatter && self.loaded && self.teleport.is_none() && self.status_of(m).tone != self.status_of(prev).tone {
+        if m != prev && !chatter && self.loaded && self.teleport.is_none() && self.status_of(m).key != self.status_of(prev).key {
             let big = self.spec(m).is_some_and(|s| s.big) || self.spec(prev).is_some_and(|s| s.big);
             let kind = if big { GlitchKind::Big } else { GlitchKind::Burst };
             match &mut self.rag {
@@ -1372,11 +1382,14 @@ impl Avatar {
 
     fn status_of(&self, m: Mood) -> Status {
         let spec = self.spec(m);
+        let key = spec.and_then(|s| s.tone.clone()).unwrap_or_default();
         Status {
             label: spec.and_then(|s| s.status.clone()).unwrap_or_else(|| m.default_status().into()),
             tone: self.pack.tone(spec.and_then(|s| s.tone.as_deref())),
             invert: spec.is_some_and(|s| s.invert),
             glyph: spec.and_then(|s| s.glyph.clone()).unwrap_or_else(|| "dot".into()),
+            plate: spec.and_then(|s| s.plate.as_deref()).and_then(Plate::parse).unwrap_or_default(),
+            key,
         }
     }
 
@@ -1404,6 +1417,8 @@ impl Avatar {
                 tone: self.pack.tone(spec.tone.as_deref()),
                 invert: false,
                 glyph: spec.glyph.clone().unwrap_or_else(|| "note".into()),
+                plate: spec.plate.as_deref().and_then(Plate::parse).unwrap_or(Plate::Arrow),
+                key: spec.tone.clone().unwrap_or_else(|| "music".into()),
             };
         }
         let mut s = self.status_of(self.mood);
@@ -2328,17 +2343,9 @@ impl Avatar {
         format!("ok line {}/{}", next + 1, total)
     }
 
-    /// The pack's palette (for panels drawn elsewhere: the reader).
-    fn reader_pal(&self) -> crate::reader::Pal {
-        crate::reader::Pal {
-            frame: self.pack.tone_or("frame", 0x8ef5ed),
-            accent: self.pack.tone_or("accent", 0xc6fcf0),
-            surface: self.pack.tone_or("surface", 0x0b131a),
-            text: self.pack.tone_or("text", 0xf1f7f9),
-            dim: self.pack.tone_or("dim", 0xc4d6df),
-            name: self.pack.tone_or("name", 0xf4ed75),
-            slash: self.pack.tone_or("slash", 0xff3c68),
-        }
+    /// The UI's palette (for panels drawn elsewhere: the reader, the Line, the chip).
+    fn reader_pal(&self) -> Pal {
+        self.pack.palette()
     }
 
     /// Where the reader goes (device px): beside her and her bubble (`beside::place`: the
@@ -3863,12 +3870,12 @@ fn with_alpha(rgb: u32, a: f32) -> Rgba {
     rgba((rgb << 8) | (a.clamp(0.0, 1.0) * 255.0).round() as u32)
 }
 
-/// HUD lettering with CSS-style letter-spacing (GPUI has none): one box per glyph.
-fn tracked(s: &str, spacing: f32) -> Div {
-    div()
-        .flex()
-        .flex_none()
-        .children(s.chars().map(|c| div().mr(px(spacing)).child(if c == ' ' { "\u{00A0}".to_string() } else { c.to_string() })))
+/// A bubble button's kind: DENY (bone, the focus ring), a go key (solid red), a plain one.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Key {
+    Deny,
+    Go,
+    Plain,
 }
 
 #[derive(Clone, Copy)]
@@ -3905,97 +3912,44 @@ struct Status {
     tone: u32,
     invert: bool,
     glyph: String,
+    /// The nameplate's silhouette.
+    plate: Plate,
+    /// Its tone key (moods.json): what kind of state it is.
+    key: String,
 }
 
-/// A small status glyph drawn as shapes (crisp at any size, no font fallback). 11 px box;
-/// `bg` paints cut-outs.
-fn glyph(kind: &str, fg: u32, bg: u32) -> impl IntoElement {
-    let kind = kind.to_string();
-    canvas(
-        |_, _, _| (),
-        move |b, _, window, _| {
-            let (ox, oy) = (f32::from(b.origin.x), f32::from(b.origin.y));
-            let p = |x: f32, y: f32| point(px(ox + x), px(oy + y));
-            let fill_poly = |window: &mut Window, pts: &[(f32, f32)], c: u32| {
-                let mut pb = PathBuilder::fill();
-                pb.add_polygon(&pts.iter().map(|&(x, y)| p(x, y)).collect::<Vec<_>>(), true);
-                if let Ok(path) = pb.build() {
-                    window.paint_path(path, rgb(c));
-                }
-            };
-            let circle = |cx: f32, cy: f32, r: f32| (0..20).map(|i| {
-                let a = i as f32 / 20.0 * std::f32::consts::TAU;
-                (cx + r * a.cos(), cy + r * a.sin())
-            }).collect::<Vec<_>>();
-            let stroke = |window: &mut Window, pts: &[(f32, f32)], w: f32, c: u32| {
-                let mut pb = PathBuilder::stroke(px(w));
-                pb.move_to(p(pts[0].0, pts[0].1));
-                for &(x, y) in &pts[1..] {
-                    pb.line_to(p(x, y));
-                }
-                if let Ok(path) = pb.build() {
-                    window.paint_path(path, rgb(c));
-                }
-            };
-            match kind.as_str() {
-                "ring" => {
-                    fill_poly(window, &circle(5.5, 5.5, 4.6), fg);
-                    fill_poly(window, &circle(5.5, 5.5, 2.6), bg);
-                }
-                // The mic is open: a filled dot.
-                "rec" => fill_poly(window, &circle(5.5, 5.5, 4.4), fg),
-                "gear" => {
-                    let pts: Vec<(f32, f32)> = (0..32)
-                        .map(|i| {
-                            let a = (i as f32 + 0.5) / 32.0 * std::f32::consts::TAU;
-                            let r = if (i / 2) % 2 == 0 { 5.6 } else { 4.1 };
-                            (5.5 + r * a.cos(), 5.5 + r * a.sin())
-                        })
-                        .collect();
-                    fill_poly(window, &pts, fg);
-                    fill_poly(window, &circle(5.5, 5.5, 1.9), bg);
-                }
-                "play" => fill_poly(window, &[(2.0, 1.0), (10.0, 5.5), (2.0, 10.0)], fg),
-                "check" => stroke(window, &[(1.2, 5.8), (4.3, 8.9), (10.0, 2.0)], 2.2, fg),
-                "bang" => {
-                    fill_poly(window, &[(4.4, 0.5), (6.6, 0.5), (6.2, 7.0), (4.8, 7.0)], fg);
-                    fill_poly(window, &[(4.5, 8.4), (6.5, 8.4), (6.5, 10.5), (4.5, 10.5)], fg);
-                }
-                "cross" => {
-                    stroke(window, &[(1.5, 1.5), (9.5, 9.5)], 2.2, fg);
-                    stroke(window, &[(9.5, 1.5), (1.5, 9.5)], 2.2, fg);
-                }
-                "moon" => {
-                    fill_poly(window, &circle(5.2, 5.5, 4.8), fg);
-                    fill_poly(window, &circle(7.6, 3.9, 3.9), bg);
-                }
-                "dots" => {
-                    for x in [0.8, 4.3, 7.8] {
-                        fill_poly(window, &[(x, 6.5), (x + 2.4, 6.5), (x + 2.4, 8.9), (x, 8.9)], fg);
-                    }
-                }
-                "note" => {
-                    fill_poly(window, &circle(3.2, 8.3, 2.4), fg);
-                    fill_poly(window, &[(4.4, 1.0), (5.8, 1.0), (5.8, 8.3), (4.4, 8.3)], fg);
-                    fill_poly(window, &[(5.8, 1.0), (9.8, 3.2), (9.8, 5.0), (5.8, 2.9)], fg);
-                }
-                _ => fill_poly(window, &circle(5.5, 5.5, 4.0), fg),
+/// The tag's outline at `b` (its ring, and the thinking slivers at `trail`'s step) as X shape
+/// rows, device px.
+fn tag_rows(cut: Cut, trail: Option<u64>, b: Bounds<Pixels>, sf: f32) -> Vec<ShapeRect> {
+    let (x0, y0, x1, y1) = (f32::from(b.left()), f32::from(b.top()), f32::from(b.right()), f32::from(b.bottom()));
+    let dev = |pts: &[(f32, f32)]| pts.iter().map(|&(x, y)| (x * sf, y * sf)).collect::<Vec<_>>();
+    let mut out = Vec::new();
+    for p in theme::outline(cut, x0, y0, x1, y1) {
+        shape::poly_rows(&dev(&theme::offset(&p, theme::RING)), &mut out);
+    }
+    for (p, _) in trail.map(|s| theme::trail(x1, y0, y1, s)).unwrap_or_default() {
+        shape::poly_rows(&dev(&p), &mut out);
+    }
+    out
+}
+
+/// The rows both `a` and `b` cover (1 px tall rows, as `shape::poly_rows` makes them).
+fn rows_and(a: &[ShapeRect], b: &[ShapeRect]) -> Vec<ShapeRect> {
+    let mut by_y: std::collections::HashMap<i16, Vec<(i32, i32)>> = std::collections::HashMap::new();
+    for r in b {
+        by_y.entry(r.1).or_default().push((r.0 as i32, r.0 as i32 + r.2 as i32));
+    }
+    let mut out = Vec::new();
+    for r in a {
+        let (a0, a1) = (r.0 as i32, r.0 as i32 + r.2 as i32);
+        for &(b0, b1) in by_y.get(&r.1).map_or(&[][..], |v| &v[..]) {
+            let (x0, x1) = (a0.max(b0), a1.min(b1));
+            if x1 > x0 {
+                out.push((x0 as i16, r.1, (x1 - x0) as u16, r.3));
             }
-        },
-    )
-    .flex_none()
-    .w(px(11.0))
-    .h(px(11.0))
-}
-
-struct Palette {
-    frame: u32,
-    accent: u32,
-    surface: u32,
-    text: u32,
-    dim: u32,
-    name: u32,
-    slash: u32,
+        }
+    }
+    out
 }
 
 /// Bubble panel geometry, logical px in window coordinates.
@@ -4010,22 +3964,22 @@ struct PanelGeom {
 }
 
 impl PanelGeom {
-    /// The outline: cut corners top-left and bottom-right, the tail on the bottom edge.
+    /// The outline: SHARD's cuts (18 top-left and bottom-right, 6 on the others) and the
+    /// blade of a tail on the bottom edge, leaning out at her.
     fn poly(&self) -> Vec<(f32, f32)> {
-        let (x, y, w, h, c) = (self.x, self.y, self.w, self.h, CUT);
-        let b = y + h;
-        let half = TAIL_W / 2.0;
-        vec![
-            (x + c, y),
-            (x + w, y),
-            (x + w, b - c),
-            (x + w - c, b),
-            (self.tail_x + half, b),
-            self.tip,
-            (self.tail_x - half, b),
-            (x, b),
-            (x, y + c),
-        ]
+        theme::bubble(self.x, self.y, self.x + self.w, self.y + self.h, self.tail_x, self.tip)
+    }
+
+    /// The mane slivers over its top edge, near the left end.
+    fn slivers(&self) -> Vec<Vec<(f32, f32)>> {
+        theme::slivers(self.x + 30.0, self.y - SLIVER_H, 36.0, SLIVER_H)
+    }
+
+    /// Everything it puts on screen: the panel with its dark ring, and the slivers.
+    fn outline(&self) -> Vec<Vec<(f32, f32)>> {
+        let mut v = vec![theme::offset(&self.poly(), theme::RING)];
+        v.extend(self.slivers());
+        v
     }
 }
 
@@ -4046,15 +4000,7 @@ impl Render for Avatar {
         self.pose_wait = None;
         let l = self.layout;
         let sf = l.sf;
-        let pal = Palette {
-            frame: self.pack.tone_or("frame", 0x8ef5ed),
-            accent: self.pack.tone_or("accent", 0xc6fcf0),
-            surface: self.pack.tone_or("surface", 0x0b131a),
-            text: self.pack.tone_or("text", 0xf1f7f9),
-            dim: self.pack.tone_or("dim", 0xc4d6df),
-            name: self.pack.tone_or("name", 0xf4ed75),
-            slash: self.pack.tone_or("slash", 0xff3c68),
-        };
+        let pal = self.pack.palette();
         if let Some(Some((t0, true))) = self.timing
             && self.bubble.as_ref().is_some_and(|b| b.stream && b.shown > 0 && !b.collapsed)
         {
@@ -4492,12 +4438,9 @@ impl Render for Avatar {
         let hud = !hidden && self.teleport.is_none() && self.rag.is_none() && !self.quitting && self.hud_after.is_none_or(|t| t <= now);
         // A quiet (passive) teleport brings the tag back with the body as it reforms.
         let tag_hud = hud || (!hidden && !self.quitting && self.rag.is_none() && self.teleport.as_ref().is_some_and(|t| t.quiet && matches!(t.leg, Leg::Appear)));
-        let Status { label, tone, mut invert, glyph: glyph_kind } = self.status();
-        // A summon's NEEDS YOU pulses for a few seconds after she lands.
+        let Status { label, tone, invert, glyph: glyph_kind, plate: plate_kind, key: tone_key } = self.status();
+        // A summon's NEEDS YOU pulses for a few seconds after she lands (the plate's bone half).
         let pulse = self.summon_pulse_on(now);
-        if pulse {
-            invert = !invert;
-        }
         let glow = self.summon_glow(now);
         // What the bubble shows: the text field, a pending prompt, the reply, or the probe.
         let mode = if !hud {
@@ -4530,18 +4473,33 @@ impl Render for Avatar {
         // In a glitch the tag tears with the body: strips of it, shifted by the same bands.
         let mut tag_strips: Vec<ShapeRect> = Vec::new();
         let torn = show_tag && !collapsed && self.glitch.is_some();
+        // The tag's cut and its trailing slivers' step (for the shape), and the HUD's next
+        // motion step.
+        let mut tag_cut: Option<(Cut, Option<u64>)> = None;
+        let mut motion: Option<Instant> = None;
         if show_tag {
-            // An unread reply is a notification, not a status: her name-yellow, a filled
-            // "N NEW" badge, the reply's first words; the whole plate opens the Line there.
+            // An unread reply is a notification, not a status: a red blade with a bone "N NEW"
+            // badge, her name, the reply's first words and READ; the whole plate opens the
+            // Line there. It nudges toward her every 2.2 s.
             let unread = self.unread_shown();
             let fresh = unread.is_some_and(|u| !u.refused);
-            let (bg, fg, border) = if fresh {
-                (pal.surface, pal.text, pal.name)
-            } else if invert {
-                (tone, pal.surface, tone)
-            } else {
-                (pal.surface, tone, tone)
-            };
+            // The beat: NEEDS YOU's flag turns bone and the rec dot dims on its second half
+            // (1 Hz), the thinking slivers step every 400 ms.
+            let ms = now.saturating_duration_since(self.t_start).as_millis() as u64;
+            let look = pal.look(plate_kind, &tone_key, tone, invert, (ms / 500) % 2 == 1 || pulse);
+            let step = ms / 400;
+            let nudge = if fresh && ms % 2200 < 240 { 5.0 } else { 0.0 };
+            let beats = invert && matches!(look.plate, Plate::Flag);
+            let next_ms = [
+                beats.then_some((ms / 500 + 1) * 500),
+                look.trail.then_some((ms / 400 + 1) * 400),
+                fresh.then_some(if ms % 2200 < 240 { ms - ms % 2200 + 240 } else { ms - ms % 2200 + 2200 }),
+            ]
+            .into_iter()
+            .flatten()
+            .min();
+            motion = next_ms.map(|m| self.t_start + Duration::from_millis(m));
+            tag_cut = Some(if fresh { (Cut::Unread, None) } else { (Cut::Tag(look.plate), look.trail.then_some(step)) });
             let badge = unread.filter(|u| !u.refused).map(|u| format!("{} NEW", u.n));
             let text = match unread {
                 Some(u) if u.refused => format!("{} // {}", self.name, u.text),
@@ -4555,40 +4513,78 @@ impl Render for Avatar {
                 None => format!("{} // {}", self.name, label),
             };
             let name_up = self.name.to_uppercase();
-            let make_ring = || {
-                let plate = div()
+            let shade = [pal.accent, theme::mix(pal.accent, pal.bg, 0.45), pal.accent_dim];
+            let make_ring = || -> Div {
+                if let Some(b) = badge.clone() {
+                    return theme::plate(Cut::Unread, Fill::framed(pal.panel, pal.accent, 2.0).ringed(pal.ring))
+                        .h(px(28.0))
+                        .gap(px(9.0))
+                        .pr(px(22.0))
+                        .text_size(px(TAG_FONT))
+                        .line_height(px(TAG_FONT + 1.0))
+                        .font_weight(FontWeight::BOLD)
+                        .child(
+                            theme::plate(Cut::Badge, Fill::solid(pal.text))
+                                .h_full()
+                                .gap(px(6.0))
+                                .pl(px(11.0))
+                                .pr(px(14.0))
+                                .text_color(rgb(pal.ink))
+                                .child(glyph("dot", pal.accent, pal.text))
+                                .child(tracked(&b, 1.0)),
+                        )
+                        .child(div().text_color(rgb(pal.accent)).child(tracked(&name_up, 1.5)))
+                        .child(div().text_color(rgb(pal.text)).font_weight(FontWeight::SEMIBOLD).child(tracked(&text, 0.2)))
+                        // It opens: say so, inside the plate.
+                        .child(theme::plate(Cut::Slant(6.0), Fill::solid(pal.accent)).h(px(18.0)).px(px(8.0)).text_color(rgb(pal.ink)).child(tracked("READ ▸", 1.2)));
+                }
+                let (pad_l, pad_r) = look.plate.pad();
+                let fill = Fill::framed(look.fill, look.edge, 1.5).dashed(look.dash).ringed(pal.ring);
+                let split = look.plate == Plate::Split;
+                let mark = if split && glyph_kind == "cross" { "shard".to_string() } else { glyph_kind.clone() };
+                div()
+                    .relative()
                     .flex()
                     .items_center()
                     .gap(px(7.0))
-                    .pl(px(8.0))
-                    .pr(px(10.0))
-                    .py(px(5.0))
-                    .border_1()
-                    .border_color(rgb(border))
-                    .bg(rgb(bg))
-                    .text_color(rgb(fg))
+                    .h(px(25.0))
+                    .pl(px(pad_l))
+                    .pr(px(pad_r))
                     .text_size(px(TAG_FONT))
                     .line_height(px(TAG_FONT + 1.0))
                     .font_weight(FontWeight::BOLD)
-                    .child(glyph(&glyph_kind, if fresh { pal.name } else { fg }, bg))
-                    .when_some(badge.clone(), |d, b| {
-                        d.child(div().text_color(rgb(pal.name)).child(tracked(&name_up, 1.5)))
-                            .child(div().px(px(5.0)).bg(rgb(pal.name)).text_color(rgb(pal.surface)).child(tracked(&b, 1.0)))
-                    })
-                    .child(tracked(&text, if fresh { 0.4 } else { 1.5 }))
-                    // It opens: say so, inside the plate.
-                    .when(fresh, |d| {
-                        d.child(div().pl(px(7.0)).border_l_1().border_color(rgb(pal.name)).text_color(rgb(pal.name)).child(tracked("READ ▸", 1.2)))
-                    })
+                    .text_color(rgb(look.ink))
+                    .child(
+                        canvas(
+                            |_, _, _| (),
+                            move |b, _, window, _| {
+                                let (x0, y0, x1, y1) = (f32::from(b.left()), f32::from(b.top()), f32::from(b.right()), f32::from(b.bottom()));
+                                theme::paint(window, &theme::outline(Cut::Tag(look.plate), x0, y0, x1, y1), fill);
+                                if look.trail {
+                                    for (p, lvl) in theme::trail(x1, y0, y1, step) {
+                                        theme::fill_poly(window, &p, rgb(shade[lvl as usize]));
+                                    }
+                                }
+                            },
+                        )
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full(),
+                    )
+                    // The ✕'s shard broken off with the plate's piece.
+                    .child(div().when(split, |d| d.relative().left(px(-3.0)).top(px(3.0))).child(glyph(&mark, look.mark, look.fill)))
+                    .child(theme::metered(&text, 1.5, look.ink))
                     // A reply put away behind the plate: a small up-chevron inside it.
-                    .when(collapsed && !fresh, |d| d.child(chevron(Chevron::Up, rgb(fg))));
-                // A dark ring keeps the plate legible on busy backgrounds.
-                div().p(px(1.0)).bg(rgb(0x02060a)).child(plate)
+                    .when(collapsed, |d| d.child(chevron(Chevron::Up, rgb(look.ink))))
             };
             if let (true, Some(b), Some(bands)) = (torn, self.tag_box.get(), plan.slices.as_ref()) {
                 let (bx, by) = (f32::from(b.origin.x), f32::from(b.origin.y));
                 let (bw, bh) = (f32::from(b.size.width), f32::from(b.size.height));
-                let t0 = by * sf - l.avatar_y as f32;
+                // The strips reach past the box: the ring, a point or swallowtail, the slivers.
+                let (ml, mr, mt, mb) = (4.0, 34.0, 2.0, 6.0);
+                let t0 = (by - mt) * sf - l.avatar_y as f32;
+                let th = bh + mt + mb;
                 // Next frame's strips first (underneath, same reason as the body's underlay),
                 // then this frame's on top. Only this frame's go into the shape.
                 let under_bands: Vec<(i32, i32, i32, i32)> = if alpha {
@@ -4596,40 +4592,36 @@ impl Render for Avatar {
                 } else {
                     next_tag.as_ref().and_then(|n| n.slices.clone()).unwrap_or_else(|| vec![(i32::MIN / 2, i32::MAX / 2, 0, 0)])
                 };
+                let strip = |s0: f32, s1: f32, dx: f32| {
+                    div()
+                        .absolute()
+                        .left(px(bx + dx - ml))
+                        .top(px(by - mt + s0))
+                        .w(px(bw + ml + mr))
+                        .h(px(s1 - s0))
+                        .overflow_hidden()
+                        .child(div().absolute().left(px(ml)).top(px(mt - s0)).w(px(bw)).h(px(bh)).child(make_ring()))
+                };
                 for &(y0, y1, dx, _) in &under_bands {
-                    let (a, c) = ((y0 as f32).max(t0), (y1 as f32).min(t0 + bh * sf));
+                    let (a, c) = ((y0 as f32).max(t0), (y1 as f32).min(t0 + th * sf));
                     if c <= a {
                         continue;
                     }
                     let (s0, s1, dx) = ((a - t0) / sf, (c - t0) / sf, dx as f32 / sf);
-                    root = root.child(
-                        div()
-                            .absolute()
-                            .left(px(bx + dx))
-                            .top(px(by + s0))
-                            .w(px(bw))
-                            .h(px(s1 - s0))
-                            .overflow_hidden()
-                            .child(div().absolute().left_0().top(px(-s0)).w(px(bw)).h(px(bh)).child(make_ring())),
-                    );
+                    root = root.child(strip(s0, s1, dx));
                 }
+                let (cut, trail) = tag_cut.unwrap_or((Cut::Tag(Plate::Slant), None));
                 for &(y0, y1, dx, _) in bands {
-                    let (a, c) = ((y0 as f32).max(t0), (y1 as f32).min(t0 + bh * sf));
+                    let (a, c) = ((y0 as f32).max(t0), (y1 as f32).min(t0 + th * sf));
                     if c <= a {
                         continue;
                     }
-                    let (s0, s1, dx) = ((a - t0) / sf, (c - t0) / sf, dx as f32 / sf);
-                    tag_strips.push(to_device(Bounds::new(point(px(bx + dx), px(by + s0)), size(px(bw), px(s1 - s0))), sf));
-                    root = root.child(
-                        div()
-                            .absolute()
-                            .left(px(bx + dx))
-                            .top(px(by + s0))
-                            .w(px(bw))
-                            .h(px(s1 - s0))
-                            .overflow_hidden()
-                            .child(div().absolute().left_0().top(px(-s0)).w(px(bw)).h(px(bh)).child(make_ring())),
-                    );
+                    let (s0, s1, dxl) = ((a - t0) / sf, (c - t0) / sf, dx as f32 / sf);
+                    let moved = Bounds::new(point(px(bx + dxl), px(by)), b.size);
+                    let rows = tag_rows(cut, trail, moved, sf);
+                    let (d0, d1) = (((by - mt + s0) * sf).round() as i16, ((by - mt + s1) * sf).round() as i16);
+                    tag_strips.extend(rows.into_iter().filter(|r| r.1 >= d0 && r.1 < d1));
+                    root = root.child(strip(s0, s1, dxl));
                 }
             }
             let ring = make_ring();
@@ -4644,8 +4636,9 @@ impl Render for Avatar {
                 );
             }
             row = row.child(ring);
-            let centre = head_l;
-            let tag_bottom = (l.avatar_y + tag_hair) as f32 / sf - TAG_GAP;
+            let centre = head_l + nudge;
+            // Asleep, the plate sits a little lower.
+            let tag_bottom = (l.avatar_y + tag_hair) as f32 / sf - TAG_GAP + look.drop;
             let mut holder = div()
                 .absolute()
                 .left_0()
@@ -4660,6 +4653,10 @@ impl Render for Avatar {
                 holder = holder.invisible();
             }
             root = root.child(holder.child(probed(row, &tag_cell)));
+        }
+        if motion != self.motion_at.get() {
+            self.motion_at.set(motion);
+            self.ticker.set(self.next_deadline());
         }
 
         // Speech bubble: the text field, a pending prompt, the reply (or the focus probe).
@@ -4738,12 +4735,12 @@ impl Render for Avatar {
             let probe = mode == PanelMode::Probe;
             let (vis_l, vis_r) = (self.vis.0 as f32 / sf, self.vis.1 as f32 / sf);
             let max_w = (vis_r - vis_l - 2.0 * MARGIN).min(PANEL_MAX_W);
-            // Never narrower than the header line (name / label .. glyph status).
+            // Never narrower than the header line (name plate, label .. glyph status).
             let header_w = PAD_L
                 + PAD_R
                 + self.tracked_width(&self.name, 10.5, FontWeight::BOLD, 1.8, window)
-                + 4.0
-                + self.tracked_width("/", 10.5, FontWeight::BOLD, 0.0, window)
+                + 16.0
+                + 15.0
                 + self.tracked_width(&header_label, 9.5, FontWeight::SEMIBOLD, 1.5, window)
                 + self.tracked_width(&label, 9.5, FontWeight::BOLD, 1.5, window)
                 + 3.0 * 8.0
@@ -4791,39 +4788,30 @@ impl Render for Avatar {
             };
             self.panel_bottom = Some(bottom);
             let y = (bottom - h).max(TOP_MARGIN);
-            let lo = x + CUT + TAIL_W / 2.0 + 6.0;
-            let hi = x + w - CUT - TAIL_W / 2.0 - 6.0;
+            // The blade's root: 28 px, offset toward the bubble's end it is nearer.
+            let lo = x + CUT + 16.0;
+            let hi = x + w - CUT - 26.0;
             let tail_x = head_l.clamp(lo, hi.max(lo));
             let g = PanelGeom { x, y, w, h, tail_x, tip: (head_l.clamp(tail_x - 9.0, tail_x + 9.0), y + h + TAIL_H) };
             self.panel_rect.set(Some((x, y, w, h + TAIL_H)));
             panel_geom = Some(g);
-            // Settled after a summon: the border breathes between a warm mix and the tone.
+            // Settled after a summon: the border breathes toward bone; the pulse turns it bone.
             let frame_c = match glow {
-                _ if pulse => tone,
-                Some(k) => mix_rgb(mix_rgb(pal.frame, tone, 0.5), tone, k as f32 / 6.0),
-                None => pal.frame,
+                _ if pulse => pal.focus,
+                Some(k) => theme::mix(pal.border, pal.focus, k as f32 / 12.0),
+                None => pal.border,
             };
             let warm = pulse || glow.is_some();
-            let (accent_c, bar_c, surface_c) = (pal.accent, pal.slash, pal.surface);
+            let (panel_c, ring_c, sliver_c) = (pal.panel, pal.ring, pal.accent);
             let bg = canvas(
                 |_, _, _| (),
                 move |_, _, window, _| {
-                    let pts: Vec<Point<Pixels>> = g.poly().iter().map(|&(x, y)| point(px(x), px(y))).collect();
-                    let mut surface = PathBuilder::fill();
-                    surface.add_polygon(&pts, true);
-                    if let Ok(p) = surface.build() {
-                        window.paint_path(p, rgb(surface_c));
+                    // The dark ring outside the outline (the X shape is the ringed outline), the
+                    // 2 px red edge inside it, then the mane slivers over the top edge.
+                    theme::paint(window, &[g.poly()], Fill::framed(panel_c, frame_c, if warm { 3.0 } else { 2.0 }).ringed(ring_c));
+                    for p in g.slivers() {
+                        theme::fill_poly(window, &p, rgb(sliver_c));
                     }
-                    // Centred on the edge: the outer half falls outside the X shape, so
-                    // 1.5 px shows.
-                    let mut edge = PathBuilder::stroke(px(if warm { 5.0 } else { 3.0 }));
-                    edge.add_polygon(&pts, true);
-                    if let Ok(p) = edge.build() {
-                        window.paint_path(p, with_alpha(frame_c, 0.85));
-                    }
-                    let x0 = g.x + CUT + 27.0;
-                    window.paint_quad(fill(Bounds::new(point(px(x0), px(g.y)), size(px(42.0), px(2.0))), rgb(accent_c)));
-                    window.paint_quad(fill(Bounds::new(point(px(g.x + 8.0), px(g.y + 17.0)), size(px(2.0), px(g.h - 30.0))), rgb(bar_c)));
                 },
             )
             .absolute()
@@ -4846,32 +4834,42 @@ impl Render for Avatar {
                 .items_center()
                 .gap(px(8.0))
                 .line_height(px(HEADER_H))
+                // Her name on a red blade, ink type.
                 .child(
-                    div()
-                        .flex()
+                    theme::plate(Cut::Tab(5.0), Fill::solid(pal.accent))
+                        .h(px(14.0))
+                        .pl(px(7.0))
+                        .pr(px(9.0))
                         .text_size(px(10.5))
                         .font_weight(FontWeight::BOLD)
-                        .child(tracked(&self.name, 1.8).text_color(rgb(pal.name)))
-                        .child(div().ml(px(4.0)).text_color(rgb(pal.slash)).child("/")),
+                        .text_color(rgb(pal.ink))
+                        .child(tracked(&self.name, 1.8)),
                 )
                 .child(tracked(&header_label, 1.5).text_size(px(9.5)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(if prompt_mode { pal.text } else { pal.dim })))
                 .child(div().flex_1())
-                .child({
-                    // Pulsing (a summon just landed): the status chip inverts.
-                    let (fg, bg) = if pulse { (pal.surface, tone) } else { (tone, pal.surface) };
+                .child(if invert || pulse {
+                    // A solid plate (NEEDS YOU: a swallowtail); a summon's pulse turns it bone.
+                    let fill_c = if pulse && invert { pal.text } else { tone };
+                    let cut = if plate_kind == Plate::Flag || pulse { Cut::Swallow(4.0) } else { Cut::Tab(4.0) };
+                    theme::plate(cut, Fill::solid(fill_c))
+                        .h(px(14.0))
+                        .pl(px(6.0))
+                        .pr(px(9.0))
+                        .gap(px(5.0))
+                        .child(glyph(&glyph_kind, pal.ink, fill_c))
+                        .child(tracked(&label, 1.5).text_size(px(9.5)).font_weight(FontWeight::BOLD).text_color(rgb(pal.ink)))
+                } else {
                     div()
                         .flex()
                         .items_center()
                         .gap(px(5.0))
-                        .px(px(if pulse { 4.0 } else { 0.0 }))
-                        .when(pulse, |d| d.bg(rgb(bg)))
-                        .child(glyph(&glyph_kind, fg, bg))
-                        .child(tracked(&label, 1.5).text_size(px(9.5)).font_weight(FontWeight::BOLD).text_color(rgb(fg)))
+                        .child(glyph(&glyph_kind, tone, pal.panel))
+                        .child(theme::metered(&label, 1.5, tone).text_size(px(9.5)).font_weight(FontWeight::BOLD).text_color(rgb(tone)))
                 });
             let caret = matches!(mode, PanelMode::Input { .. });
             let body_weight = if prompt_mode { FontWeight::BOLD } else { FontWeight::SEMIBOLD };
             let n_lines = lines.len();
-            let text_c = pal.text;
+            let caret_c = pal.focus;
             let mut body = div()
                 .absolute()
                 .top(px(PAD_T + HEADER_H + HEADER_GAP))
@@ -4883,13 +4881,13 @@ impl Render for Avatar {
                 .line_height(px(LINE_H))
                 .font_weight(body_weight)
                 .text_color(rgb(pal.text));
-            let caret_bar = move || div().ml(px(1.0)).w(px(2.0)).h(px(BODY_FONT)).bg(rgb(text_c));
+            let caret_bar = move || div().ml(px(1.0)).w(px(2.0)).h(px(BODY_FONT)).bg(rgb(caret_c));
             if let Some(ph) = &placeholder {
                 let mut row = div().h(px(LINE_H)).flex().items_center();
                 if caret {
                     row = row.child(caret_bar());
                 }
-                body = body.child(row.child(div().ml(px(4.0)).text_color(with_alpha(pal.dim, 0.55)).whitespace_nowrap().child(ph.clone())));
+                body = body.child(row.child(div().ml(px(4.0)).text_color(rgb(pal.dim)).whitespace_nowrap().child(ph.clone())));
             } else {
                 for (k, t) in lines.into_iter().enumerate() {
                     let mut row = div().h(px(LINE_H)).flex().items_center().whitespace_nowrap().child(t);
@@ -4900,39 +4898,60 @@ impl Render for Avatar {
                 }
             }
             let mut panel = div().id("bubble").absolute().left(px(x)).top(px(y)).w(px(w)).h(px(h)).child(bg).child(header).child(body);
-            let line_c = |on: bool| with_alpha(frame_c, if on { 0.7 } else { 0.22 });
+            // Slanted keys: a hollow red chevron key, DENY bone with the focus ring, the rest
+            // (ALLOW, REVIEW, ANSWER) solid red with ink type. Unarmed, they sit back.
             let btn = |id: &'static str, dir: Chevron, on: bool| {
-                div()
+                let edge = if on { pal.accent } else { theme::mix(pal.accent, pal.panel, 0.7) };
+                theme::plate(Cut::Slant(6.0), Fill::line(edge, 1.25))
                     .id(id)
                     .w(px(24.0))
                     .h(px(19.0))
-                    .flex()
-                    .items_center()
                     .justify_center()
-                    .border_1()
-                    .border_color(line_c(on))
                     .child(chevron(dir, with_alpha(pal.text, if on { 0.95 } else { 0.3 })))
             };
             let probes = self.buttons.clone();
-            let tbtn = |id: &'static str, text: &str, colour: u32, on: bool| {
+            let tbtn = |id: &'static str, text: &str, kind: Key, on: bool| {
                 let probes = probes.clone();
+                let back = |c: u32| if on { c } else { theme::mix(c, pal.panel, 0.6) };
+                let (fill, ink) = match kind {
+                    Key::Deny => (Fill::line(back(pal.focus), 1.5), back(pal.focus)),
+                    Key::Go => (Fill::solid(back(pal.accent)), pal.ink),
+                    Key::Plain => (Fill::line(back(pal.accent), 1.5), back(pal.accent)),
+                };
+                let ring_c = pal.focus;
                 div()
                     .child(canvas(move |b, _, _| probes.borrow_mut().push((id, b)), |_, _, _, _| {}).absolute().top_0().left_0().size_full())
+                    .child(theme::backdrop(Cut::Slant(6.0), fill))
+                    .when(kind == Key::Deny && on, |d| {
+                        // The focus ring: DENY is where a stray Enter lands.
+                        d.child(
+                            canvas(
+                                |_, _, _| (),
+                                move |b, _, window, _| {
+                                    for p in theme::outline(Cut::Slant(6.0), f32::from(b.left()), f32::from(b.top()), f32::from(b.right()), f32::from(b.bottom())) {
+                                        theme::paint(window, &[theme::offset(&p, 3.0)], Fill::line(ring_c, 1.25));
+                                    }
+                                },
+                            )
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .size_full(),
+                        )
+                    })
                     .relative()
                     .id(id)
                     .h(px(19.0))
-                    .px(px(8.0))
+                    .px(px(12.0))
                     .flex()
                     .items_center()
-                    .border_1()
-                    .border_color(with_alpha(colour, if on { 0.85 } else { 0.3 }))
                     .text_size(px(10.0))
                     .font_weight(FontWeight::BOLD)
-                    .text_color(with_alpha(colour, if on { 1.0 } else { 0.4 }))
+                    .text_color(rgb(ink))
                     .child(tracked(text, 1.2))
             };
             let abort_btn = |cx: &mut Context<Self>| {
-                tbtn("abort", "✕ ABORT", pal.slash, true).on_mouse_down(
+                tbtn("abort", "✕ ABORT", Key::Plain, true).on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, _: &MouseDownEvent, _, cx| {
                         cx.stop_propagation();
@@ -4961,34 +4980,76 @@ impl Render for Avatar {
             let mut row = div().absolute().bottom(px(PAD_B)).right(px(PAD_R - 4.0)).h(px(FOOTER_H)).flex().items_center().gap(px(4.0));
             match mode {
                 PanelMode::Reply => {
-                    let _ = pages;
+                    // More than a page: where it is (‹ 2/3 ›), bottom left; the arrows page.
+                    let rows_shown = self.bubble.as_ref().map_or(1, |b| b.rows().max(1));
+                    if let Some((top, total)) = pages.filter(|_| !stub)
+                        && total > rows_shown
+                    {
+                        let n = total.div_ceil(rows_shown);
+                        let cur = if top + rows_shown >= total { n } else { top / rows_shown + 1 };
+                        let arrow = |id: &'static str, glyph_s: &'static str, live: bool, d: i32| {
+                            div()
+                                .id(id)
+                                .min_w(px(19.0))
+                                .h(px(19.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_size(px(15.0))
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(if live { rgb(pal.accent) } else { with_alpha(pal.dim, 0.45) })
+                                .child(glyph_s)
+                                .when(live, |e| {
+                                    e.cursor_pointer().on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                                            cx.stop_propagation();
+                                            this.page(d, Instant::now());
+                                            cx.notify();
+                                            this.schedule(cx);
+                                        }),
+                                    )
+                                })
+                        };
+                        panel = panel.child(
+                            div()
+                                .absolute()
+                                .bottom(px(PAD_B))
+                                .left(px(PAD_L - 4.0))
+                                .h(px(FOOTER_H))
+                                .flex()
+                                .items_center()
+                                .gap(px(2.0))
+                                .child(arrow("page-up", "‹", cur > 1, -1))
+                                .child(div().px(px(4.0)).text_size(px(12.5)).text_color(rgb(pal.text)).child(format!("{cur}/{n}")))
+                                .child(arrow("page-down", "›", cur < n, 1)),
+                        );
+                    }
                     if busy {
                         row = row.child(abort_btn(cx)).child(div().w(px(4.0)));
                     }
                     let open = self.reader.is_some();
                     if let Some(b) = self.bubble.as_ref().filter(|b| b.long()) {
-                        // A filled chip in her name colour, dark bold type: it reads as a
-                        // button on any frame (the outlined 10 px one nearly vanished).
-                        // While the reader is open the bubble is just this, full width: the
-                        // control for the panel beside her, no empty body.
+                        // A solid red slanted pill, ink type: it reads as a button on any
+                        // frame (the outlined 10 px one nearly vanished). While the reader is
+                        // open the bubble is just this, full width: the control for the panel
+                        // beside her, no empty body.
                         let label = if open { format!("◂ CLOSE READER · {} LINES", b.read_lines()) } else { format!("▸ READ ({} LINES)", b.read_lines()) };
                         let read_probes = self.buttons.clone();
-                        let (fill_c, ink_c) = (pal.name, pal.surface);
+                        let (fill_c, ink_c) = (pal.accent, pal.ink);
                         if open {
                             row = row.left(px(PAD_L));
                         }
                         let chip = div()
                             .when(open, |d| d.flex_1().justify_center())
                             .child(canvas(move |b, _, _| read_probes.borrow_mut().push(("read", b)), |_, _, _, _| {}).absolute().top_0().left_0().size_full())
+                            .child(theme::backdrop(Cut::Slant(7.0), Fill::solid(fill_c)))
                             .relative()
                             .id("read")
                             .h(px(FOOTER_H))
-                            .px(px(11.0))
+                            .px(px(14.0))
                             .flex()
                             .items_center()
-                            .bg(rgb(fill_c))
-                            .border_1()
-                            .border_color(rgb(pal.name))
                             .text_size(px(11.5))
                             .font_weight(FontWeight::EXTRA_BOLD)
                             .text_color(rgb(ink_c))
@@ -5031,7 +5092,7 @@ impl Render for Avatar {
                             .h(px(FOOTER_H))
                             .flex()
                             .items_center()
-                            .child(tracked(&note, 1.3).text_size(px(9.5)).font_weight(FontWeight::BOLD).text_color(rgb(if warn { pal.slash } else { pal.dim }))),
+                            .child(tracked(&note, 1.3).text_size(px(9.5)).font_weight(FontWeight::BOLD).text_color(rgb(if warn { pal.accent } else { pal.dim }))),
                     );
                     if busy && !secret {
                         row = row.child(abort_btn(cx));
@@ -5045,7 +5106,7 @@ impl Render for Avatar {
                     // things) has no one-click ALLOW here: REVIEW opens the Line, where it
                     // takes Shift+A or a held A.
                     if !secret {
-                        row = row.child(tbtn("deny", "DENY", pal.slash, armed).on_mouse_down(
+                        row = row.child(tbtn("deny", "DENY", Key::Deny, armed).on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, _: &MouseDownEvent, _, cx| {
                                 cx.stop_propagation();
@@ -5058,7 +5119,7 @@ impl Render for Avatar {
                         ));
                     }
                     if secret {
-                        row = row.child(tbtn("answer", "ANSWER", pal.frame, armed).on_mouse_down(
+                        row = row.child(tbtn("answer", "ANSWER", Key::Go, armed).on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, _: &MouseDownEvent, window, cx| {
                                 cx.stop_propagation();
@@ -5070,7 +5131,7 @@ impl Render for Avatar {
                             }),
                         ));
                     } else if risky {
-                        row = row.child(tbtn("review", "REVIEW ▸", pal.frame, armed).on_mouse_down(
+                        row = row.child(tbtn("review", "REVIEW ▸", Key::Go, armed).on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, _: &MouseDownEvent, _, cx| {
                                 cx.stop_propagation();
@@ -5081,7 +5142,7 @@ impl Render for Avatar {
                             }),
                         ));
                     } else {
-                        row = row.child(tbtn("allow", "ALLOW", pal.frame, armed).on_mouse_down(
+                        row = row.child(tbtn("allow", "ALLOW", Key::Go, armed).on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, _: &MouseDownEvent, _, cx| {
                                 cx.stop_propagation();
@@ -5094,7 +5155,7 @@ impl Render for Avatar {
                         ));
                     }
                     if secret {
-                        row = row.child(tbtn("deny", "DENY", pal.slash, armed).on_mouse_down(
+                        row = row.child(tbtn("deny", "DENY", Key::Deny, armed).on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, _: &MouseDownEvent, _, cx| {
                                 cx.stop_propagation();
@@ -5180,26 +5241,33 @@ impl Render for Avatar {
 
         // Context menu.
         if let Some((at, _)) = self.menu.filter(|_| hud) {
-            let frame_c = pal.frame;
-            let item = |label: &'static str| {
+            // Red items; the hovered one on a red blade with ink type. QUIT? (armed) is a bone
+            // blade: danger.
+            let (accent_c, ink_c, danger_c) = (pal.accent, pal.ink, pal.danger);
+            let blade = |c: u32| div().absolute().top_0().left_0().size_full().child(theme::backdrop(Cut::Tab(8.0), Fill::solid(c)));
+            let item_as = |label: &'static str, armed: bool| {
+                let group = SharedString::from(format!("menu-{label}"));
                 div()
+                    .group(group.clone())
+                    .relative()
                     .px(px(10.0))
                     .py(px(5.0))
                     .text_size(px(11.0))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(frame_c))
-                    .hover(|s| s.bg(with_alpha(frame_c, 0.2)))
+                    .font_weight(if armed { FontWeight::BOLD } else { FontWeight::SEMIBOLD })
+                    .text_color(rgb(if armed { ink_c } else { accent_c }))
+                    .when(armed, |d| d.child(blade(danger_c)))
+                    .when(!armed, |d| d.hover(|s| s.text_color(rgb(ink_c))).child(blade(accent_c).invisible().group_hover(group, |s| s.visible())))
                     .child(tracked(label, 1.2))
             };
+            let item = |label: &'static str| item_as(label, false);
             let max_x = l.lp(self.vis.1) - px(220.0);
             let menu = div()
+                .relative()
                 .w(px(210.0))
                 .flex()
                 .flex_col()
                 .py(px(4.0))
-                .bg(rgb(pal.surface))
-                .border_1()
-                .border_color(with_alpha(pal.frame, 0.62))
+                .child(theme::backdrop(MENU_CUT, Fill::framed(pal.panel, pal.border, 2.0).ringed(pal.ring)))
                 .child(item("RESET POSITION").id("reset").on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, _: &MouseDownEvent, _, cx| {
@@ -5277,9 +5345,9 @@ impl Render for Avatar {
                         this.schedule(cx);
                     }),
                 ))
-                .child(div().h(px(1.0)).mx(px(8.0)).my(px(3.0)).bg(with_alpha(pal.frame, 0.3)))
+                .child(div().h(px(1.0)).mx(px(10.0)).my(px(3.0)).bg(rgb(pal.rule)))
                 .child(
-                    item(if self.quit_armed.is_some() { "QUIT? CLICK AGAIN" } else { "QUIT" }).id("quit").on_mouse_down(
+                    item_as(if self.quit_armed.is_some() { "QUIT? CLICK AGAIN" } else { "QUIT" }, self.quit_armed.is_some()).id("quit").on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _: &MouseDownEvent, _, cx| {
                             cx.stop_propagation();
@@ -5358,7 +5426,11 @@ impl Render for Avatar {
                             _ => None,
                         };
                         match shown {
-                            Some(s) => shape::poly_rows(&dev(&s.poly()), &mut visible),
+                            Some(s) => {
+                                for p in s.outline() {
+                                    shape::poly_rows(&dev(&p), &mut visible);
+                                }
+                            }
                             None => window.request_animation_frame(),
                         }
                         if shown != Some(g) {
@@ -5367,7 +5439,9 @@ impl Render for Avatar {
                     }
                     if let Some(b) = menu_cell.get() {
                         input.push(to_device(b, sf));
-                        visible.push(to_device(b, sf));
+                        for p in theme::outline(MENU_CUT, f32::from(b.left()), f32::from(b.top()), f32::from(b.right()), f32::from(b.bottom())) {
+                            shape::poly_rows(&dev(&theme::offset(&p, theme::RING)), &mut visible);
+                        }
                     }
                     let (prev_tag, run) = tag_last.get();
                     let run = if prev_tag.is_some() && prev_tag == tag_cell.get() { run.saturating_add(1) } else { 0 };
@@ -5386,16 +5460,18 @@ impl Render for Avatar {
                             if !torn
                                 && let Some(p) = prev_tag
                                 && p.size == b.size
+                                && let Some((cut, trail)) = tag_cut
                             {
                                 let i = p.intersect(&b);
                                 if f32::from(i.size.height) >= f32::from(b.size.height) * 0.5 && f32::from(i.size.width) > 0.0 {
-                                    visible.push(to_device(i, sf));
+                                    visible.extend(rows_and(&tag_rows(cut, trail, p, sf), &tag_rows(cut, trail, b, sf)));
                                 }
                             }
                         } else if torn {
                             visible.extend(tag_strips.iter().copied());
-                        } else {
-                            visible.push(to_device(b, sf));
+                        } else if let Some((cut, trail)) = tag_cut {
+                            // The plate's own outline (a slant, a point, a swallowtail), not its box.
+                            visible.extend(tag_rows(cut, trail, b, sf));
                         }
                         if tag_clickable {
                             input.push(to_device(b, sf));

@@ -287,8 +287,9 @@ impl Avatar {
 
     /// The thread, from the session's transcript (thinking left out).
     pub(super) fn line_snap(&self) -> Snap {
-        let status = self.status().label;
-        let Some(s) = &self.session else { return Snap { status, live: false, ..Default::default() } };
+        let st = self.status();
+        let (status, glyph, flag) = (st.label, st.glyph, st.invert && st.plate == crate::theme::Plate::Flag);
+        let Some(s) = &self.session else { return Snap { status, glyph, flag, live: false, ..Default::default() } };
         let items = s.link.transcript().items();
         let mut rows = Vec::new();
         for it in items.iter().rev() {
@@ -337,6 +338,8 @@ impl Avatar {
         Snap {
             rows,
             status,
+            glyph,
+            flag,
             busy: s.link.busy(),
             live: b.is_some_and(|b| b.live),
             prompts: b.map(|b| b.prompts.clone()).unwrap_or_default(),

@@ -179,17 +179,9 @@ pub fn estimate_height(blocks: &[Block], width: f32) -> f32 {
     h
 }
 
-/// The colours (the pack's tones).
-#[derive(Clone, Copy)]
-pub struct Pal {
-    pub frame: u32,
-    pub accent: u32,
-    pub surface: u32,
-    pub text: u32,
-    pub dim: u32,
-    pub name: u32,
-    pub slash: u32,
-}
+/// The colours: the theme's tokens.
+pub use crate::theme::Pal;
+use crate::theme::{self, Cut, Fill, tracked};
 
 /// Told when the reader closes: `restore` hands the keyboard back.
 pub type OnClose = Box<dyn Fn(bool, &mut App)>;
@@ -349,7 +341,7 @@ fn styled(text: &str, pal: Pal) -> StyledText {
         .map(|(r, m)| {
             let s = match m {
                 Mark::Bold => HighlightStyle { font_weight: Some(FontWeight::BOLD), color: Some(rgb(pal.text).into()), ..Default::default() },
-                Mark::Code => HighlightStyle { color: Some(rgb(pal.accent).into()), background_color: Some(rgb(0x18242e).into()), ..Default::default() },
+                Mark::Code => HighlightStyle { color: Some(rgb(pal.text).into()), background_color: Some(rgb(pal.raise).into()), ..Default::default() },
                 Mark::Em => HighlightStyle { font_style: Some(FontStyle::Italic), color: Some(rgb(pal.text).into()), ..Default::default() },
             };
             (r, s)
@@ -363,39 +355,51 @@ impl Render for Reader {
         let pal = self.pal;
         self.buttons.borrow_mut().clear();
         let probes = self.buttons.clone();
+        // Slanted keys: a red outline with red type; on (COPIED), solid red with ink type.
         let btn = |id: SharedString, label: &str, on: bool| {
             let probes = probes.clone();
             let pid = id.clone();
             div()
                 .relative()
                 .child(canvas(move |b, _, _| probes.borrow_mut().push((pid.clone(), b)), |_, _, _, _| {}).absolute().top_0().left_0().size_full())
+                .child(theme::backdrop(Cut::Slant(7.0), if on { Fill::solid(pal.accent) } else { Fill::line(pal.accent, 1.5) }))
                 .id(id)
                 .h(px(22.0))
-                .px(px(9.0))
+                .px(px(12.0))
                 .flex()
                 .items_center()
-                .border_1()
-                .border_color(rgba((pal.frame << 8) | if on { 0xff } else { 0x99 }))
-                .bg(rgb(if on { pal.frame } else { pal.surface }))
-                .text_color(rgb(if on { pal.surface } else { pal.frame }))
+                .text_color(rgb(if on { pal.ink } else { pal.accent }))
                 .text_size(px(11.0))
                 .font_weight(FontWeight::BOLD)
                 .cursor_pointer()
-                .child(label.to_string())
+                .child(tracked(label, 1.2))
         };
+        let lines = self.raw.lines().count();
         let header = div()
             .h(px(HEADER))
             .px(px(PAD))
             .flex()
+            .flex_none()
             .items_center()
             .gap(px(8.0))
             .border_b_1()
-            .border_color(rgba((pal.frame << 8) | 0x55))
-            .child(div().text_size(px(12.0)).font_weight(FontWeight::BOLD).text_color(rgb(pal.name)).child(self.title.clone()))
-            .child(div().text_size(px(12.0)).font_weight(FontWeight::BOLD).text_color(rgb(pal.slash)).child("/"))
-            .child(div().text_size(px(11.0)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(pal.dim)).child("READER"))
+            .border_color(rgb(pal.rule))
+            // Her name on a red blade, ink type.
+            .child(
+                theme::plate(Cut::Tab(7.0), Fill::solid(pal.accent))
+                    .ml(px(6.0))
+                    .h(px(18.0))
+                    .pl(px(10.0))
+                    .pr(px(12.0))
+                    .text_size(px(12.0))
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(rgb(pal.ink))
+                    .child(tracked(&self.title, 1.6)),
+            )
+            .child(tracked("READER", 1.6).text_size(px(11.0)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(pal.dim)))
+            .child(div().ml(px(6.0)).text_size(px(11.0)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(pal.dim)).child(format!("{lines} LINE{}", if lines == 1 { "" } else { "S" })))
             .child(div().flex_1())
-            .child(btn("copy-all".into(), if self.copied == Some(usize::MAX) { "COPIED" } else { "COPY ALL" }, self.copied == Some(usize::MAX)).on_mouse_down(
+            .child(btn("copy-all".into(), if self.copied == Some(usize::MAX) { "COPIED ✓" } else { "COPY ALL" }, self.copied == Some(usize::MAX)).on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseDownEvent, _, cx| {
                     cx.stop_propagation();
@@ -414,11 +418,19 @@ impl Render for Reader {
         let mut code_n = 0usize;
         for b in &self.blocks {
             let el: AnyElement = match b {
+                // h1: bone, over a red blade; the rest: red.
+                Block::Heading(level, t) if *level <= 1 => div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.0))
+                    .child(div().text_size(px(FONT * 1.3)).line_height(px(LINE * 1.15)).font_weight(FontWeight::BOLD).text_color(rgb(pal.text)).child(styled(t, pal)))
+                    .child(div().w(px(120.0)).h(px(4.0)).relative().child(theme::backdrop(Cut::Tab(4.0), Fill::solid(pal.accent))))
+                    .into_any_element(),
                 Block::Heading(level, t) => div()
-                    .text_size(px(FONT * if *level <= 1 { 1.3 } else if *level == 2 { 1.18 } else { 1.06 }))
+                    .text_size(px(FONT * if *level == 2 { 1.18 } else { 1.06 }))
                     .line_height(px(LINE * 1.15))
                     .font_weight(FontWeight::BOLD)
-                    .text_color(rgb(pal.name))
+                    .text_color(rgb(pal.accent))
                     .child(styled(t, pal))
                     .into_any_element(),
                 Block::Para(t) => div().text_size(px(FONT)).line_height(px(LINE)).text_color(rgb(pal.text)).child(styled(t, pal)).into_any_element(),
@@ -429,33 +441,43 @@ impl Render for Reader {
                     .text_size(px(FONT))
                     .line_height(px(LINE))
                     .text_color(rgb(pal.text))
-                    .child(div().flex_none().min_w(px(14.0)).text_color(rgb(pal.frame)).font_weight(FontWeight::BOLD).child(marker.clone()))
+                    .child(div().flex_none().min_w(px(14.0)).text_color(rgb(pal.accent)).font_weight(FontWeight::BOLD).child(marker.clone()))
                     // min_w(0): a flex item's min width is its content's, so without it a long
                     // item never wraps and runs off the panel's right edge.
                     .child(div().flex_1().min_w(px(0.0)).child(styled(t, pal)))
                     .into_any_element(),
-                Block::Rule => div().h(px(1.0)).my(px(6.0)).bg(rgba((pal.frame << 8) | 0x44)).into_any_element(),
+                Block::Rule => div().h(px(1.0)).my(px(6.0)).bg(rgb(pal.rule)).into_any_element(),
                 Block::Code { lang, text } => {
                     let n = code_n;
                     code_n += 1;
                     let copied = self.copied == Some(n);
                     let text_c = text.clone();
+                    // Cut 9 px, a dark-red hairline; the language on a red blade.
                     div()
+                        .relative()
                         .flex()
                         .flex_col()
-                        .border_1()
-                        .border_color(rgba((pal.frame << 8) | 0x44))
-                        .bg(rgb(0x070b10))
+                        .child(theme::backdrop(Cut::Corners(9.0), Fill::framed(pal.code, pal.rule, 1.5)))
                         .child(
                             div()
                                 .h(px(28.0))
                                 .px(px(10.0))
                                 .flex()
                                 .items_center()
-                                .bg(rgb(0x0e161d))
-                                .child(div().text_size(px(11.0)).font_weight(FontWeight::BOLD).text_color(rgb(pal.dim)).child(if lang.is_empty() { "CODE".to_string() } else { lang.to_uppercase() }))
+                                .border_b(px(1.5))
+                                .border_color(rgb(pal.rule))
+                                .child(
+                                    theme::plate(Cut::Tab(5.0), Fill::solid(pal.accent))
+                                        .h(px(16.0))
+                                        .pl(px(7.0))
+                                        .pr(px(10.0))
+                                        .text_size(px(11.0))
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(rgb(pal.ink))
+                                        .child(tracked(&if lang.is_empty() { "CODE".to_string() } else { lang.to_uppercase() }, 1.4)),
+                                )
                                 .child(div().flex_1())
-                                .child(btn(format!("copy-{n}").into(), if copied { "COPIED" } else { "COPY" }, copied).on_mouse_down(
+                                .child(btn(format!("copy-{n}").into(), if copied { "COPIED ✓" } else { "COPY" }, copied).on_mouse_down(
                                     MouseButton::Left,
                                     cx.listener(move |this, _: &MouseDownEvent, _, cx| {
                                         cx.stop_propagation();
@@ -469,7 +491,7 @@ impl Render for Reader {
                                 .font_family(MONO)
                                 .text_size(px(CODE_FONT))
                                 .line_height(px(CODE_LINE))
-                                .text_color(rgb(0xd8e6ee))
+                                .text_color(rgb(pal.text))
                                 .flex()
                                 .flex_col()
                                 .children(text.split('\n').map(|l| div().whitespace_nowrap().child(if l.is_empty() { " ".to_string() } else { l.replace('\t', "    ") }))),
@@ -479,6 +501,26 @@ impl Render for Reader {
             };
             body = body.child(el);
         }
+        // Where it is: a 4 px red bar on the right (read at paint time: the wheel scrolls
+        // without a render).
+        let (scroll, bar_c) = (self.scroll.clone(), pal.accent);
+        let bar = canvas(
+            |_, _, _| (),
+            move |b, _, window, _| {
+                let (off, max) = (-f32::from(scroll.offset().y), f32::from(scroll.max_offset().y));
+                let track = f32::from(b.size.height) - 12.0;
+                if max <= 0.5 || track <= 20.0 {
+                    return;
+                }
+                let h = (track * track / (track + max)).max(24.0);
+                let y = f32::from(b.top()) + 6.0 + (track - h) * (off / max).clamp(0.0, 1.0);
+                window.paint_quad(fill(Bounds::new(point(b.right() - px(8.0), px(y)), size(px(4.0), px(h))), rgb(bar_c)));
+            },
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full();
         div()
             .id("reader")
             .track_focus(&self.focus)
@@ -492,14 +534,14 @@ impl Render for Reader {
             .flex()
             .flex_col()
             .font_family(self.font.clone())
-            .bg(rgb(pal.surface))
-            .border_2()
-            .border_color(rgb(pal.frame))
+            // Outside the panel's cuts: the dark ring.
+            .bg(rgb(pal.ring))
+            .p(px(3.0))
             .relative()
-            .child(div().absolute().top_0().left(px(26.0)).w(px(48.0)).h(px(2.0)).bg(rgb(pal.accent)))
+            .child(crate::line::panel_backdrop(pal, false))
             .child(header)
-            .child(body)
-            .children(self.tail.map(|(side, at)| crate::line::tail_overlay(side, at, pal.frame)))
+            .child(div().flex_1().min_h(px(0.0)).relative().flex().flex_col().child(body).child(bar))
+            .children(self.tail.map(|(side, at)| crate::line::tail_overlay(side, at, pal.border)))
     }
 }
 

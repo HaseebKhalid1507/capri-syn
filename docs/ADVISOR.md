@@ -39,6 +39,7 @@ by AI sessions, and (round B) can be grabbed, dragged, shaken and flung like a r
 | `platform/x11.rs` | x11rb: `set_shape`, `move_to` (ConfigureWindow), fx windows, `stack()`, `work_areas()` (struts), focus/idle/fullscreen senses |
 | `brain.rs` / `places.rs` / `moves.rs` / `settings.rs` | the cat brain (pure): modes, bids, sulks, summons, spot choice, settings.toml |
 | `brainview.rs` | brain → view wiring: approaches (hang/cling/…), bid marker, `swing_tick`/`swing_bands` (the bid chain swing), `hang_swing` |
+| `theme.rs` | the UI's look, one place: the SHARD tokens (`Pal`, a pack's `tones` may override any by name), the cuts (`Cut`: panel, chamfers, slants, tabs, the nameplate's slant/arrow/flag/square/split, the unread blade, the danger plate's teeth) as polygons, the HUD glyphs, `tracked` / `metered` labels. No other UI file holds a colour |
 | `edges.rs` | exposed top-edge spans of windows (occlusion) for perches/platforms |
 | `session.rs`, `control.rs`, `state.rs`, `anim.rs`, `pack.rs`, `shape.rs`, `ticker.rs` | daemon session client, `avatarctl` socket, persisted state, frame sequencing, pack schema, small shape helpers, timers |
 | `tools/` | `abuild` (the only build path, on bella), `shoot.py` (stage + recorder + `cpu:` meter + taint guard), `sheet.py`/`onion.py` (contact sheets, onion composites), `slabcheck.py`, `lockcheck.py`, `rag/*.drag` scripts |
