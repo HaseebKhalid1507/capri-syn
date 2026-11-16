@@ -154,12 +154,15 @@ thresholds) was fitted on stock synthetic voices only (Kokoro packs, espeak-ng),
   never words. **At most 12 checks in any 10 minutes**; the 13th candidate pauses it for 10 minutes
   (`WAKE PAUSED · TOO MANY FALSE STARTS`). `CAPRI_VOICE_WAKE_FILTER=0` turns the filter off.
 - **A second look** (`CAPRI_VOICE_WAKE_SECOND=0` turns it off): a candidate the check rejects with a
-  margin over −2 (a near miss, not a sound-alike) is not dropped at once. His turn is taken quietly (no
-  tag, no meter, no media hold) until his pause, 10 s at most, and decoded once as any turn is. If those
-  words say "hey capri" **and** the filter passes on that decode, it is a wake and the request goes at once
-  (a bare "Hey Capri." opens his turn then). Else it is dropped, words never logged. Whisper reads
-  the phrase far better with the request after it; the price is no early `● MIC` on that path, and up to
-  12.5 s of audio in RAM (not 2.5 s) while it is looked at.
+  margin over −8 (his far or casual "hey capri" lands at −6 or above; clear sound-alikes like "hey Cabby",
+  "hey copy" fall under −8) is not dropped at once. His turn is taken quietly (no tag, no meter, no media
+  hold) until his pause, 10 s at most, and decoded once as any turn is. If those words say "hey capri"
+  **and** the filter passes on that decode at the second look's own thresholds (`T > −10`, `margin > −3`),
+  it is a wake and the request goes at once (a bare "Hey Capri." opens his turn then). Else it is dropped,
+  words never logged; the log gets the look's two scores. Whisper reads the phrase far better with the
+  request after it (his far and casual takes: `T` −9 to −22 at the check, mostly −2 to −10 at the look), so
+  the look gets the looser margin. The price: no early `● MIC` on that path, up to 12.5 s of audio in RAM
+  (not 2.5 s) while it is looked at, and no new candidate until his turn ends.
 - **A pass starts a hands-free conversation** (`wake_handsfree = true`, the default, with `handsfree` on).
   The same stream goes on as the hands-free one (no gap: nothing he says right after the phrase is lost),
   other audio is held, the tag reads `● MIC LIVE · HANDS-FREE`, and every hands-free rule above applies: each
@@ -198,6 +201,16 @@ thresholds) was fitted on stock synthetic voices only (Kokoro packs, espeak-ng),
   57 % far (−40 dBFS, 8 dB, reverb); sound-alikes 0.6 %. False wakes: 0 in 8.2 h of ordinary audio
   (LibriSpeech test-clean 5.4 h, AMI meetings 1.6 h, music 1.1 h); a meeting or music still makes 20–30
   stage-1 candidates an hour, so the 12-in-10-minutes limit can pause it.
+- **Round 4** (his misses at the desk, 2026-11-16 03:35: every rejection had a filter score like his far and
+  casual takes, `T` −11 to −21, margin −1 to −7). The live path, with his personal layer, file-fed through
+  the sidecar's own wake loop: 29 of his 40 takes (quiet 14/14, media 8/10, far 1/6, casual 0/4, bare 6/6).
+  With the 2.8 s check and the wider second look: 35/40 (media 9/10, far 4/6, casual 2/4), his 10
+  sound-alikes still 0, held-out stock sound-alikes 3/225 (was 2/225; "hey Capri Sun" not counted, it says
+  the phrase), no ordinary-speech candidate near a pass (46 from an AMI meeting, `T` −21 or lower). Not
+  done, measured: a personal-layer match overriding the filter (it matches his "hey caprese" as closely as
+  his far "hey capri", and woke on "Capri said the build passed"), a looser first-look margin on
+  headphones (the wake word records the same built-in mic either way), thresholds refitted on his takes
+  (no gain held out).
 - `avatarctl state` → `voice.wake = {on, sensitivity, open, turn, paused, lost}`; `voice.mic.mode` is
   `"wake"` while it listens and `"wake-turn"` during his turn. The sidecar's `stats` count candidates,
   rejections, wakes and pauses.
