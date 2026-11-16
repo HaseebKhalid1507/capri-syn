@@ -107,7 +107,7 @@ impl Desktop for FakeDesktop {
         self.toplevel_place(w).map(|p| p.rect)
     }
     fn toplevel_place(&self, w: WinId) -> Option<Place> {
-        self.0.win(w, |f| f.visible.then_some(Place { rect: f.rect, space: f.space })).flatten()
+        self.0.win(w, |f| f.visible.then_some(Place { rect: f.rect, space: f.space, loose: true })).flatten()
     }
     fn window_exists(&self, w: WinId) -> bool {
         self.0.win(w, |_| ()).is_some()

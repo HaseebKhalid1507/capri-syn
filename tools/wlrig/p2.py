@@ -145,7 +145,7 @@ with RigApp(BIN, PACK, LOG, env={"SA_IPC_LOG": "1"}) as app:
         n0 = ipc_count()
         time.sleep(REST_S)
         n1 = ipc_count()
-        line("ipc-rest-perched-floating", (n1 - n0) * 60 / REST_S <= 450, f"{n1 - n0} requests in {REST_S} s perched on a floating window")
+        line("ipc-rest-perched-floating", (n1 - n0) * 60 / REST_S <= 300, f"{n1 - n0} requests in {REST_S} s perched on a floating window")
         ctl("perch off")
         until(lambda: state()["placement"]["kind"] == "ground", 4)
     w.destroy("kit")
@@ -162,7 +162,7 @@ with RigApp(BIN, PACK, LOG, env={"SA_IPC_LOG": "1"}) as app:
         n0 = ipc_count()
         time.sleep(REST_S)
         n1 = ipc_count()
-        line("ipc-rest-perched-tiled", (n1 - n0) * 60 / REST_S <= 450, f"{n1 - n0} requests in {REST_S} s perched on a tiled window")
+        line("ipc-rest-perched-tiled", (n1 - n0) * 60 / REST_S <= 150, f"{n1 - n0} requests in {REST_S} s perched on a tiled window")
         a0 = client("tila")
         hang = state()["ground"][1] - a0["at"][1]
         for msg in ("togglesplit", "swapsplit"):
