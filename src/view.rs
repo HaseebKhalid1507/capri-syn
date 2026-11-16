@@ -400,6 +400,10 @@ pub struct Avatar {
     hearts: Option<(Instant, Point<Pixels>)>,
     /// The HUD stays down until then (a beat after a teleport).
     hud_after: Option<Instant>,
+    /// Woken: the stand-up plays until then, and no move starts before it ends.
+    waking_until: Option<Instant>,
+    /// $mod+c woke her: the teleport to the Line's edge once she stands (when, where).
+    fetch_after: Option<(Instant, (i32, i32))>,
     /// The work-area top (root px) for the hearts burst that started at the key.
     hearts_area: (Option<Instant>, Option<i32>),
     /// The bubble panel and tag as last painted: a part of the HUD only goes into the X shape
@@ -637,6 +641,8 @@ impl Avatar {
             bubble: None,
             hearts: None,
             hud_after: None,
+            waking_until: None,
+            fetch_after: None,
             hearts_area: (None, None),
             panel_last: Rc::new(Cell::new(None)),
             tag_last: Rc::new(Cell::new((None, 0))),
@@ -1294,11 +1300,21 @@ impl Avatar {
         let mut seq: Seq = Vec::new();
         // An arrival sequence (the launch intro) plays through; the mood's entry follows it.
         let arriving = self.arriving(now);
+        // Out of her sleep lying on a window top: she sits up there a beat before anything
+        // moves her.
+        if prev == Mood::Sleepy && m != prev && self.perch_sleep_frame(prev).is_some() {
+            self.waking_until = Some(now + arriveview::SIT_UP);
+        }
         if !self.sitting() && !self.posed() {
             if m != prev
                 && let Some(exit) = self.spec(prev).and_then(|s| s.exit.clone())
             {
                 seq.extend(self.pack.flatten(&exit));
+                // Out of her sleep: she stands up before anything moves her.
+                if prev == Mood::Sleepy {
+                    let ms: u64 = seq.iter().map(|s| s.1 as u64).sum();
+                    self.waking_until = Some(now + Duration::from_millis(ms));
+                }
             }
             if let Some(entry) = self.spec(m).and_then(|s| s.entry.clone()) {
                 seq.extend(self.pack.flatten(&entry));
@@ -3680,8 +3696,9 @@ impl Avatar {
         };
         let click = self.pack.behaviour.click.clone();
         let perch_click = self.perch_spec().filter(|_| self.sitting()).map(|p| if head && !p.headpat.is_empty() { p.headpat.clone() } else { p.click.clone() });
-        let steps = if !self.sitting() && !self.standing() {
-            // Hanging or sitting on the floor: no standing clip, hearts on the head.
+        let steps = if (!self.sitting() && !self.standing()) || self.asleep() {
+            // Hanging, sitting on the floor or asleep (a pat doesn't wake her): no standing
+            // clip, hearts on the head.
             if head {
                 self.hearts = Some((now, at));
             }

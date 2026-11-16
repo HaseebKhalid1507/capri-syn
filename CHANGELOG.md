@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Asleep, she stays put
+- While Sleepy (no turn for `--sleepy-after`) or in the away nap, nothing moves her on her own: no
+  roam, explore, micro-hop, bid, focus hop, workspace follow, dodge, startle, look or lean, and her
+  drives (attention, the roam clock) stop. A move already due between two polls is held too.
+- He can still carry or throw her: she sleeps where she lands (lying if it fits, else sitting; on
+  the floor Sleepy's entry plays again, the nap's pose comes back). A drop on his window is never
+  "left" for covering it; a throw in her sleep is no offence (no sulk, no far move). A pat, a drag
+  or the menu don't wake her; while she naps, input within 10 s of handling her isn't "he is back".
+- She wakes for a new turn or a prompt (the mood leaves Sleepy), $mod+c, the Line, the field or
+  typing to her, a summon, or him being back after the nap. Waking restarts the session's quiet
+  clock, plays the stand-up (`sit_floor-neutral` → `floor_stand`; on a window top a 0.6 s sit-up)
+  before any move ($mod+c's teleport to the Line waits for it), then 20 s of grace before her own
+  moves resume.
+- Still allowed asleep: her window closing (rescue or fall), her perch leaving with the workspace,
+  riding a moved window, falling off a covered one.
+
 ### Voice: toggle-to-talk
 - `capri-ctl talk toggle` (proposed i3: `$mod+Ctrl+c`): one tap opens the mic, his pause sends it
   (`[voice] silence_s`, 1.0 s; ×1.5 while he has said under 1 s). A second tap sends now (cancels before he

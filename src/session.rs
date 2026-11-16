@@ -425,6 +425,12 @@ impl Link {
         self.input(Input::Abort, now)
     }
 
+    /// He woke her (the field, the Line, $mod+c, a summon): the quiet clock starts again, so
+    /// Sleepy ends now and comes back after `sleepy_after` more of quiet.
+    pub fn wake(&mut self, now: Instant) {
+        self.last_active = self.last_active.max(now);
+    }
+
     /// The text field opened (switch to Mirror ahead of Enter) or closed.
     pub fn set_typing(&mut self, on: bool, now: Instant) -> Vec<Act> {
         self.typing = on;

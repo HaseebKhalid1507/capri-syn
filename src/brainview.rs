@@ -540,7 +540,7 @@ impl Avatar {
         if self.reaction_until.is_some_and(|t| t > now) {
             v.push("reaction");
         }
-        if (self.teleport.is_some() && !self.arrive.launching) || self.brain.as_ref().is_some_and(|h| h.flight.is_some() || h.moving()) {
+        if (self.teleport.is_some() && !self.arrive.launching) || self.fetch_after.is_some() || self.brain.as_ref().is_some_and(|h| h.flight.is_some() || h.moving()) {
             v.push("teleport");
         }
         if self.music.is_some() {
@@ -638,7 +638,8 @@ impl Avatar {
             Some((_, v)) => v < 0.0,
             None => idle_s < 1.5 * h.scale && self.x11.pointer_still_ms().is_some_and(|ms| ms >= 3000),
         };
-        Senses { now: b, idle_s, fullscreen, fullscreen_here, busy: self.brain_busy(), near, placement: self.placement_kind(), typing }
+        let asleep = self.mood == Mood::Sleepy;
+        Senses { now: b, idle_s, fullscreen, fullscreen_here, busy: self.brain_busy(), near, placement: self.placement_kind(), typing, asleep }
     }
 
     // ---- the loop -----------------------------------------------------------------------------
@@ -680,10 +681,19 @@ impl Avatar {
                 Intent::Move(p) => self.brain_move(p, now),
                 Intent::Emote(e) => self.brain_emote(e, now),
                 Intent::Pose(p) => {
+                    // The nap's pose ends (he is back, he talked to her): she stands up first,
+                    // before any move decided with it.
+                    let up = p.is_none() && self.brain.as_ref().is_some_and(|h| h.rest == Some(RestPose::Nap));
                     if let Some(h) = &mut self.brain {
                         h.rest = p;
                     }
+                    if up {
+                        self.arrive.deep = false;
+                    }
                     self.relayer(now);
+                    if up && self.standing() {
+                        self.play_nap_wake(now);
+                    }
                 }
                 Intent::Hide(hide) => self.brain_hide(hide, now),
                 Intent::React(r) => self.brain_react(r, now),
@@ -744,6 +754,7 @@ impl Avatar {
         if h.next_plan.is_some() {
             take(Some(now + Duration::from_millis(100)));
         }
+        take(self.fetch_after.map(|f| f.0));
         if h.fs == FsHide::Hiding {
             take(Some(now + FRAME_FAST));
         }
@@ -812,7 +823,8 @@ impl Avatar {
             self.play_emote(e, now);
             dirty = true;
         }
-        let free = self.teleport.is_none() && self.rag.is_none() && !self.anim.busy() && self.brain.as_ref().is_some_and(|h| h.flight.is_none() && !h.moving());
+        dirty |= self.step_fetch(now);
+        let free = self.teleport.is_none() && self.rag.is_none() && !self.anim.busy() && !self.waking(now) && self.brain.as_ref().is_some_and(|h| h.flight.is_none() && !h.moving());
         if free && let Some(p) = self.brain.as_mut().and_then(|h| h.next_plan.take()) {
             self.brain_move(p, now);
             dirty = true;
@@ -913,7 +925,12 @@ impl Avatar {
         // A passive move waits for the emote on screen to finish (the sulk plays out first);
         // a closed perch or a lost workspace can't wait (she'd hang in the air).
         let urgent = matches!(plan.goal, Goal::Rescue | Goal::Follow);
-        let emoting = !matches!(plan.goal, Goal::Active { .. }) && !urgent && self.anim.busy();
+        // A summon wakes her (one she sleeps through only by a mood set by hand); nothing
+        // but a rescue starts while she stands up.
+        if matches!(plan.goal, Goal::Active { why: Why::Summon(_), .. }) {
+            self.wake_up("summon", now);
+        }
+        let emoting = !urgent && ((!matches!(plan.goal, Goal::Active { .. }) && self.anim.busy()) || self.waking(now));
         if (moving || emoting) && self.press.is_none() && !self.quitting {
             // Still landing from the last one: this one goes next (a sulk's far move after
             // the leave, a summon after a passive hop).
@@ -1787,6 +1804,7 @@ impl Avatar {
             || self.glitch.is_some()
             || self.press.is_some()
             || self.turn_busy()
+            || self.asleep()
             || matches!(self.mood, Mood::Talking | Mood::Thinking | Mood::Working | Mood::NeedsYou)
             || !self.can_mirror_now();
         let Some(h) = &mut self.brain else { return false };
@@ -2290,6 +2308,10 @@ impl Avatar {
 
     pub(super) fn brain_touch(&mut self, t: Touch) {
         let now = Instant::now();
+        // Talking to her wakes her; a pat or a drag doesn't (she sleeps where he puts her).
+        if t.wakes() {
+            self.wake_up(&format!("{t:?}").to_lowercase(), now);
+        }
         if t == Touch::Typing
             && let Some(h) = &mut self.brain
         {

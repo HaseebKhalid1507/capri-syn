@@ -227,6 +227,13 @@ impl Avatar {
         let other = (here.x, here.y) != (there.x, there.y);
         let o = Self::clamp(&self.x11, &self.layout, (her_x - l.ground_x, floor - l.ground_y));
         self.brain_cancel_move();
+        if let Some(w) = self.waking_until.filter(|&w| w > now) {
+            // Just woken: she stands up, then comes.
+            self.fetch_after = Some((w, o));
+            self.home = (o.0 + l.ground_x, o.1 + l.ground_y);
+            elog!("synaps-avatar: line: she stands up, then comes to its edge at {},{}", self.home.0, self.home.1);
+            return true;
+        }
         self.start_teleport(o, Placement::Ground, now);
         self.arrive_with(super::arriveview::ArriveKind::Summon);
         self.home = (o.0 + l.ground_x, o.1 + l.ground_y);
