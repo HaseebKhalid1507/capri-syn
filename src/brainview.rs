@@ -472,10 +472,10 @@ impl Avatar {
         let h = self.brain.as_ref()?;
         let id = match h.ov.focus {
             Some(f) => f?,
-            None => self.x11.active_window()?,
+            None => self.os.active_window()?,
         };
-        let top = self.x11.toplevel_of(id)?;
-        if top == self.x11.win {
+        let top = self.os.toplevel_of(id)?;
+        if top == self.os.body() {
             return None;
         }
         if let Some(w) = &h.ov.windows
@@ -483,7 +483,7 @@ impl Avatar {
         {
             return None;
         }
-        self.x11.toplevel_rect(top)
+        self.os.toplevel_rect(top)
     }
 
     /// A brain move is under way (its landing decides which way she faces).
@@ -494,7 +494,7 @@ impl Avatar {
     pub(super) fn brain_cursor(&self) -> (i32, i32) {
         match self.brain.as_ref().and_then(|h| h.ov.cursor) {
             Some(c) => c,
-            None => self.x11.pointer().unwrap_or((0, 0)),
+            None => self.os.pointer().unwrap_or((0, 0)),
         }
     }
 
@@ -577,8 +577,8 @@ impl Avatar {
     /// release, never per frame.
     pub(super) fn rag_areas(&self) -> (Vec<WinRect>, Vec<WinRect>) {
         self.arena_filter(
-            self.x11.work_areas().iter().map(crate::platform::x11::Monitor::rect).collect(),
-            self.x11.monitors().iter().map(crate::platform::x11::Monitor::rect).collect(),
+            self.os.work_areas().iter().map(crate::platform::Monitor::rect).collect(),
+            self.os.monitors().iter().map(crate::platform::Monitor::rect).collect(),
         )
     }
 
@@ -606,8 +606,8 @@ impl Avatar {
 
     pub(super) fn her_area(&self) -> Option<WinRect> {
         let (areas, monitors) = self.arena_filter(
-            self.x11.work_areas().iter().map(crate::platform::x11::Monitor::rect).collect(),
-            self.x11.monitors().iter().map(crate::platform::x11::Monitor::rect).collect(),
+            self.os.work_areas().iter().map(crate::platform::Monitor::rect).collect(),
+            self.os.monitors().iter().map(crate::platform::Monitor::rect).collect(),
         );
         let her = self.her_spot(&areas, &monitors);
         areas.get(her.area).copied()
@@ -620,12 +620,12 @@ impl Avatar {
             // Negative: he is busy at the keyboard (idle stays 0).
             Some((_, v)) if v < 0.0 => 0.0,
             Some((t0, v)) => v + (b - t0).max(0.0),
-            None => self.x11.idle_ms().map_or(0.0, |ms| ms as f64 / 1000.0 * h.scale),
+            None => self.os.idle_ms().map_or(0.0, |ms| ms as f64 / 1000.0 * h.scale),
         };
         let focused = self.brain_focused();
         let (areas, monitors) = self.arena_filter(
-            self.x11.work_areas().iter().map(crate::platform::x11::Monitor::rect).collect(),
-            self.x11.monitors().iter().map(crate::platform::x11::Monitor::rect).collect(),
+            self.os.work_areas().iter().map(crate::platform::Monitor::rect).collect(),
+            self.os.monitors().iter().map(crate::platform::Monitor::rect).collect(),
         );
         let her = self.her_spot(&areas, &monitors);
         let her_mon = monitors.get(her.area).copied();
@@ -633,8 +633,8 @@ impl Avatar {
             Some(f) => (f, f),
             None => {
                 let fs = focused.is_some_and(|f| {
-                    let client = h.ov.focus.flatten().or_else(|| self.x11.active_window()).unwrap_or(f.id);
-                    self.x11.is_fullscreen(client) || monitors.iter().any(|m| m.x == f.x && m.y == f.y && m.w == f.w && m.h == f.h)
+                    let client = h.ov.focus.flatten().or_else(|| self.os.active_window()).unwrap_or(f.id);
+                    self.os.is_fullscreen(client) || monitors.iter().any(|m| m.x == f.x && m.y == f.y && m.w == f.w && m.h == f.h)
                 });
                 let here = fs && focused.zip(her_mon).is_some_and(|(f, m)| m.intersect(&f).is_some());
                 (fs, here)
@@ -648,7 +648,7 @@ impl Avatar {
         // sees the pointer; keys are never read). A test's negative idle means "typing".
         let typing = match h.ov.idle {
             Some((_, v)) => v < 0.0,
-            None => idle_s < 1.5 * h.scale && self.x11.pointer_still_ms().is_some_and(|ms| ms >= 3000),
+            None => idle_s < 1.5 * h.scale && self.os.pointer_still_ms().is_some_and(|ms| ms >= 3000),
         };
         let asleep = self.mood == Mood::Sleepy;
         Senses { now: b, idle_s, fullscreen, fullscreen_here, busy: self.brain_busy(), near, placement: self.placement_kind(), typing, asleep }
@@ -866,10 +866,10 @@ impl Avatar {
     /// window list applied), work areas, his focus, the pointer, where she is.
     fn world_buf(&self, goal: &Goal) -> Option<WorldBuf> {
         let h = self.brain.as_ref()?;
-        let (mut stack, mut eligible): (Vec<WinRect>, Vec<bool>) = self.x11.stack().into_iter().unzip();
+        let (mut stack, mut eligible): (Vec<WinRect>, Vec<bool>) = self.os.stack().into_iter().unzip();
         let (areas, monitors) = self.arena_filter(
-            self.x11.work_areas().iter().map(crate::platform::x11::Monitor::rect).collect(),
-            self.x11.monitors().iter().map(crate::platform::x11::Monitor::rect).collect(),
+            self.os.work_areas().iter().map(crate::platform::Monitor::rect).collect(),
+            self.os.monitors().iter().map(crate::platform::Monitor::rect).collect(),
         );
         if areas.is_empty() {
             return None;
@@ -885,7 +885,7 @@ impl Avatar {
             }
         }
         // Not her own layers (the stage backdrop isn't eligible: the arena's windows list).
-        let keep: Vec<bool> = stack.iter().map(|r| r.id != self.x11.win).collect();
+        let keep: Vec<bool> = stack.iter().map(|r| r.id != self.os.body()).collect();
         let mut k = keep.iter();
         stack.retain(|_| *k.next().unwrap_or(&true));
         let mut k = keep.iter();
@@ -895,7 +895,7 @@ impl Avatar {
         let her = self.her_spot(&areas, &monitors);
         let senses_fs = match h.ov.fullscreen {
             Some(f) => f,
-            None => focused.is_some_and(|f| self.x11.is_fullscreen(h.ov.focus.flatten().unwrap_or(f.id))),
+            None => focused.is_some_and(|f| self.os.is_fullscreen(h.ov.focus.flatten().unwrap_or(f.id))),
         };
         let fullscreen: Vec<bool> = monitors.iter().map(|m| senses_fs && (focused.is_none_or(|f| m.intersect(&f).is_some()))).collect();
         let l = self.layout;
@@ -1206,7 +1206,7 @@ impl Avatar {
         };
         match s.kind {
             SpotKind::Edge { win } | SpotKind::SitEdge { win } => {
-                let rx = self.x11.toplevel_rect(win).map_or(s.anchor.0, |r| r.x);
+                let rx = self.os.toplevel_rect(win).map_or(s.anchor.0, |r| r.x);
                 let sit = l.seat_y.is_some();
                 let o = (s.anchor.0 - l.ground_x, s.anchor.1 - l.seat_y.unwrap_or(l.ground_y));
                 (o, Placement::Perch { win, sit, dx: s.anchor.0 - rx })
@@ -1239,7 +1239,7 @@ impl Avatar {
             let top = to.1 + l.avatar_y + self.frame_or_default(self.anim.base()).map_or(0, |f| f.top);
             h = h.min((top - a.y).max(0) as f32);
         }
-        self.x11.set_target(0);
+        self.os.set_target(0);
         self.arrive(to, place, now);
         if let Some(hb) = &mut self.brain {
             hb.drop_in = Some((now, h, posed));
@@ -1487,7 +1487,7 @@ impl Avatar {
     fn move_failed_fallback(&mut self, plan: &MovePlan, now: Instant) {
         if matches!(plan.why, "perch_closed" | "workspace")
             && let Placement::Perch { win, .. } = self.placement
-            && self.x11.toplevel_rect(win).is_none()
+            && self.os.toplevel_rect(win).is_none()
         {
             self.fall("perch_gone", now);
         }
@@ -1498,7 +1498,7 @@ impl Avatar {
     fn start_leap(&mut self, from: (i32, i32), spot: &Spot, origin: (i32, i32), place: Placement, startled: bool, now: Instant) {
         let l = self.layout;
         let sf = l.sf;
-        self.x11.set_target(0);
+        self.os.set_target(0);
         self.hop = None;
         self.menu = None;
         let to = spot.anchor;
@@ -1665,9 +1665,9 @@ impl Avatar {
             }
             WatchEvent::Pointer(p) => {
                 let s = match p {
-                    crate::platform::x11::PointerEv::Near => Screen::CursorNear,
-                    crate::platform::x11::PointerEv::Swipe(v) => Screen::CursorSwipe { speed: v / self.layout.sf },
-                    crate::platform::x11::PointerEv::Hover => Screen::CursorHover,
+                    crate::platform::PointerEv::Near => Screen::CursorNear,
+                    crate::platform::PointerEv::Swipe(v) => Screen::CursorSwipe { speed: v / self.layout.sf },
+                    crate::platform::PointerEv::Hover => Screen::CursorHover,
                 };
                 self.brain_feed(BrainEvent::Screen(s), now);
             }
@@ -1680,7 +1680,7 @@ impl Avatar {
         let (areas, monitors) = self.rag_areas();
         let allowed = self.brain_allowed_windows();
         let (stack, eligible): (Vec<WinRect>, Vec<bool>) =
-            self.x11.stack().into_iter().map(|(r, e)| (r, e && r.id != self.x11.win && allowed.as_ref().is_none_or(|w| w.contains(&r.id)))).unzip();
+            self.os.stack().into_iter().map(|(r, e)| (r, e && r.id != self.os.body() && allowed.as_ref().is_none_or(|w| w.contains(&r.id)))).unzip();
         places::desk_windows(&stack, &eligible, &areas, &monitors)
     }
 
@@ -1719,7 +1719,7 @@ impl Avatar {
             return;
         };
         let switched = h.desk_at.is_some_and(|d| now.duration_since(d) < Duration::from_millis(1500));
-        let exists = self.x11.window_exists(win);
+        let exists = self.os.window_exists(win);
         let s = if switched && exists {
             elog!("synaps-avatar: perch 0x{win:x} left with the workspace: she moves on her monitor");
             let after = self.desk_windows();
@@ -1795,7 +1795,7 @@ impl Avatar {
             return;
         }
         h.watch_box = Some((bx, armed));
-        self.x11.set_pointer_watch(bx, armed);
+        self.os.set_pointer_watch(bx, armed);
     }
 
     // ---- emotes, hide ---------------------------------------------------------------------------
@@ -2039,7 +2039,7 @@ impl Avatar {
     fn brain_hide(&mut self, hide: bool, now: Instant) {
         let cover = if hide {
             let ov = self.brain.as_ref().and_then(|h| h.ov.focus.flatten());
-            ov.or_else(|| self.x11.active_window()).or_else(|| self.x11.focused_window().ok()).filter(|&w| w > 1)
+            ov.or_else(|| self.os.active_window()).or_else(|| self.os.focused_window()).filter(|&w| w > 1)
         } else {
             None
         };
@@ -2265,9 +2265,9 @@ impl Avatar {
         h.marker_shown = key;
         let Some((c, head, sc, away)) = geo else {
             for k in 0..3 {
-                self.x11.fx_unmap(MARK_LAYER + k);
+                self.os.fx_unmap(MARK_LAYER + k);
             }
-            self.x11.flush();
+            self.os.flush();
             return;
         };
         let r = MARK_R * self.layout.sf * sc;
@@ -2319,12 +2319,12 @@ impl Avatar {
         };
         let _ = away;
         let (o, sz, rows) = place(&glyph);
-        self.x11.fx_set(MARK_LAYER + 2, MARK_GLYPH, o, sz, &rows).ok();
+        self.os.fx_set(MARK_LAYER + 2, MARK_GLYPH, o, sz, &rows).ok();
         let (o, sz, rows) = place(&[disc(r), tail(r)]);
-        self.x11.fx_set_below(MARK_LAYER + 1, MARK_LAYER + 2, MARK_FILL, o, sz, &rows).ok();
+        self.os.fx_set_below(MARK_LAYER + 1, MARK_LAYER + 2, MARK_FILL, o, sz, &rows).ok();
         let (o, sz, rows) = place(&[disc(r + edge), tail(r + edge)]);
-        self.x11.fx_set_below(MARK_LAYER, MARK_LAYER + 1, MARK_RIM, o, sz, &rows).ok();
-        self.x11.flush();
+        self.os.fx_set_below(MARK_LAYER, MARK_LAYER + 1, MARK_RIM, o, sz, &rows).ok();
+        self.os.flush();
     }
 
     // ---- layer ----------------------------------------------------------------------------------
@@ -2447,7 +2447,7 @@ impl Avatar {
                         Sense::Near(n) => h.ov.near = n,
                         Sense::Arena(a) => h.ov.arena = a.map(|(x, y, w, hh)| WinRect::new(x, y, w, hh)),
                         Sense::Windows(w) => {
-                            h.ov.windows = w.map(|ids| ids.into_iter().map(|id| self.x11.toplevel_of(id).unwrap_or(id)).collect())
+                            h.ov.windows = w.map(|ids| ids.into_iter().map(|id| self.os.toplevel_of(id).unwrap_or(id)).collect())
                         }
                         Sense::Real => h.ov = Overrides::default(),
                     }
@@ -2472,8 +2472,8 @@ impl Avatar {
                     self.voice.cfg = s.voice.clone();
                     self.voice_config();
                 }
-                if crate::env_composited().is_none() && self.x11.force_composited(s.display.composited) {
-                    elog!("synaps-avatar: settings: {} mode", if self.x11.composited() { "alpha" } else { "shape" });
+                if crate::env_composited().is_none() && self.os.force_composited(s.display.composited) {
+                    elog!("synaps-avatar: settings: {} mode", if self.os.composited() { "alpha" } else { "shape" });
                     self.alpha_switched();
                 }
                 // Her own session's persona, compared (and set) again if it changed.
@@ -2507,7 +2507,7 @@ impl Avatar {
                     s.brain.attention.key(),
                     s.brain.fullscreen,
                     s.ragdoll.strength,
-                    self.x11.composited()
+                    self.os.composited()
                 )
             }
             Err(e) => format!("error: {e:#} (kept the old settings)"),

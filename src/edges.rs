@@ -1,5 +1,5 @@
-//! Window edges she can sit on, and the work areas she stands in. Pure (no X): the view
-//! feeds it `X11::stack()` (bottom → top) and the dock struts.
+//! Window edges she can sit on, and the work areas she stands in. Pure (no display server): the view
+//! feeds it `Os::stack()` (bottom → top) and the dock struts.
 //!
 //! An edge is only usable where nothing stacked above the window hides it: a seat behind
 //! another window would look like she sits in the middle of that window.
@@ -149,8 +149,8 @@ pub fn platforms(stack: &[WinRect], eligible: &[bool], contact: (i32, i32), marg
 
 // ---- work areas ---------------------------------------------------------------------
 
-/// A dock's reserved space, `_NET_WM_STRUT_PARTIAL` semantics: `top` rows from the top of
-/// the ROOT window, for x in `top_x` (inclusive), and so on.
+/// Space a panel reserves along the root's edges: `top` rows from the top of the ROOT window,
+/// for x in `top_x` (inclusive), and so on (a backend translates its own panels into these).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct Strut {
     pub left: i32,
@@ -163,59 +163,11 @@ pub struct Strut {
     pub bottom_x: (i32, i32),
 }
 
-impl Strut {
-    /// From `_NET_WM_STRUT_PARTIAL` (12 values).
-    pub fn partial(v: &[u32]) -> Option<Strut> {
-        if v.len() < 12 {
-            return None;
-        }
-        let g = |i: usize| v[i].min(i32::MAX as u32) as i32;
-        Some(Strut {
-            left: g(0),
-            right: g(1),
-            top: g(2),
-            bottom: g(3),
-            left_y: (g(4), g(5)),
-            right_y: (g(6), g(7)),
-            top_x: (g(8), g(9)),
-            bottom_x: (g(10), g(11)),
-        })
-    }
-
-    /// From the older `_NET_WM_STRUT` (4 values): the whole root edge.
-    pub fn plain(v: &[u32], root: (i32, i32)) -> Option<Strut> {
-        if v.len() < 4 {
-            return None;
-        }
-        let g = |i: usize| v[i].min(i32::MAX as u32) as i32;
-        let (w, h) = (root.0 - 1, root.1 - 1);
-        Some(Strut { left: g(0), right: g(1), top: g(2), bottom: g(3), left_y: (0, h), right_y: (0, h), top_x: (0, w), bottom_x: (0, w) })
-    }
-
-    /// A dock without strut properties: its geometry, if it hugs one edge of a monitor.
-    pub fn from_dock(d: &WinRect, monitors: &[WinRect], root: (i32, i32)) -> Option<Strut> {
-        let m = monitors.iter().find(|m| m.contains(d.center().0, d.center().1))?;
-        let (x1, y1) = (d.right() - 1, d.bottom() - 1);
-        let wide = d.w >= d.h;
-        if wide && d.y <= m.y + 2 {
-            Some(Strut { top: d.bottom(), top_x: (d.x, x1), ..Strut::default() })
-        } else if wide && d.bottom() >= m.bottom() - 2 {
-            Some(Strut { bottom: root.1 - d.y, bottom_x: (d.x, x1), ..Strut::default() })
-        } else if !wide && d.x <= m.x + 2 {
-            Some(Strut { left: d.right(), left_y: (d.y, y1), ..Strut::default() })
-        } else if !wide && d.right() >= m.right() - 2 {
-            Some(Strut { right: root.0 - d.x, right_y: (d.y, y1), ..Strut::default() })
-        } else {
-            None
-        }
-    }
-}
-
 fn overlaps(a: (i32, i32), lo: i32, hi_excl: i32) -> bool {
     a.0 < hi_excl && a.1 >= lo
 }
 
-/// Each monitor minus the struts that reach into it (i3 sets no usable `_NET_WORKAREA`).
+/// Each monitor minus the struts that reach into it.
 /// A strut that would leave a monitor less than half its size is ignored.
 pub fn work_areas(monitors: &[WinRect], root: (i32, i32), struts: &[Strut]) -> Vec<WinRect> {
     monitors
@@ -407,28 +359,5 @@ mod tests {
         assert_eq!(p.len(), 2);
         assert!(p.iter().all(|p| p.win == 1 && p.y == 500));
         assert!(p.iter().all(|p| p.seat_x.1 + C.1 + M <= 400 || p.seat_x.0 + C.0 - M >= 600));
-    }
-
-    #[test]
-    fn work_area_from_top_struts() {
-        // bella: two monitors side by side, polybar (29 px) at the top of each.
-        let mons = [w(0, 0, 0, 2560, 1600), w(1, 2560, 0, 2560, 1440)];
-        let root = (5120, 1600);
-        let s1 = Strut::partial(&[0, 0, 29, 0, 0, 0, 0, 0, 2560, 5119, 0, 0]).unwrap();
-        let s2 = Strut::partial(&[0, 0, 29, 0, 0, 0, 0, 0, 0, 2559, 0, 0]).unwrap();
-        let a = work_areas(&mons, root, &[s1, s2]);
-        assert_eq!(a[0], w(0, 0, 29, 2560, 1571));
-        assert_eq!(a[1], w(1, 2560, 29, 2560, 1411));
-        // Only one bar: the other monitor keeps its top.
-        let a = work_areas(&mons, root, &[s1]);
-        assert_eq!(a[0].y, 0);
-        assert_eq!(a[1].y, 29);
-        // A dock with geometry only.
-        let d = Strut::from_dock(&w(9, 2560, 0, 2560, 29), &mons, root).unwrap();
-        assert_eq!(work_areas(&mons, root, &[d])[1].y, 29);
-        // A bottom bar on the shorter monitor (struts count from the root's bottom).
-        let b = Strut::partial(&[0, 0, 0, 160 + 30, 0, 0, 0, 0, 0, 0, 2560, 5119]).unwrap();
-        assert_eq!(work_areas(&mons, root, &[b])[1].bottom(), 1410);
-        assert_eq!(work_areas(&mons, root, &[b])[0].bottom(), 1600);
     }
 }

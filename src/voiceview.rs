@@ -339,7 +339,7 @@ impl Avatar {
     /// Key-up, after the auto-repeat window: a hold stops listening (and sends what was heard).
     /// False if the key is still down (an X auto-repeat's release): ignored.
     pub(super) fn voice_up(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.talk_down.is_some() && self.x11.char_key_down(self.voice.cfg.key).unwrap_or(false) {
+        if self.talk_down.is_some() && self.os.char_key_down(self.voice.cfg.key).unwrap_or(false) {
             self.voice.repeats += 1;
             return false;
         }
@@ -590,7 +590,7 @@ impl Avatar {
             loop {
                 cx.background_executor().timer(KEY_POLL).await;
                 let up = this
-                    .update(cx, |a, _| match a.x11.char_key_down(key) {
+                    .update(cx, |a, _| match a.os.char_key_down(key) {
                         Ok(down) => !down,
                         Err(_) => a.voice.toggle_last.is_none_or(|t| t.elapsed() >= REPEAT_QUIET),
                     })
@@ -703,11 +703,11 @@ impl Avatar {
             return;
         }
         l.parked = true;
-        self.x11.arm_clicks(false);
+        self.os.arm_clicks(false);
         if std::env::var_os("SA_READER_NO_RESTORE").is_none()
             && let Some(p) = l.prev
         {
-            self.x11.give_focus(p).ok();
+            self.os.release_keyboard(l.xid, Some(p)).ok();
         }
         let (view, handle) = (l.view.clone(), l.handle);
         cx.defer(move |cx| {
