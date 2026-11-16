@@ -26,6 +26,9 @@ const ESC_AGAIN: Duration = Duration::from_millis(1000);
 const PAD: f32 = 14.0;
 const FONT: f32 = 16.0;
 const LINE_H: f32 = 23.0;
+/// The › prompt's drop in the field: its middle on the first line's x-height (r21: it sat
+/// 2 px high of the type).
+const PROMPT_DROP: f32 = 11.0;
 const MONO: &str = "DejaVu Sans Mono";
 /// The panel inside its window: the 1 px ring, then the 2 px frame.
 const INSET: f32 = 3.0;
@@ -55,9 +58,11 @@ pub struct Row {
 pub struct Snap {
     pub rows: Vec<Row>,
     pub status: String,
-    /// The status's glyph, and whether it is a solid swallowtail (NEEDS YOU, the mic live).
+    /// The status's glyph, and whether it is a solid swallowtail (NEEDS YOU, the mic live)
+    /// and a bone one (NEEDS YOU).
     pub glyph: String,
     pub flag: bool,
+    pub alarm: bool,
     pub busy: bool,
     pub live: bool,
     pub prompts: Vec<PromptView>,
@@ -733,7 +738,8 @@ impl Line {
     /// Her side of the Line: a thick edge and a pointer at her, so it reads as hers.
     fn tail(&self) -> Option<AnyElement> {
         let (side, at) = self.tail?;
-        Some(tail_overlay(side, at, if self.parked { self.pal.dim } else { self.pal.border }))
+        let p = self.pal;
+        Some(if self.parked { tail_overlay(side, at, p.dim, p.dim) } else { tail_overlay(side, at, p.border, p.accent) })
     }
 
     /// Where it is beside her (from the avatar, each time it is placed).
@@ -904,7 +910,7 @@ impl Line {
                     .cursor_pointer()
                     .text_size(px(13.0))
                     .text_color(rgb(pal.dim))
-                    .child(div().flex_none().text_color(rgb(pal.accent)).child(if open { "▾" } else { "▸" }))
+                    .child(div().flex_none().child(if open { "▾" } else { "▸" }))
                     .child(div().flex_none().font_weight(FontWeight::BOLD).text_color(rgb(pal.text)).child(r.text.clone()))
                     .child(detail)
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -952,7 +958,15 @@ impl Line {
             }
             Who::Sys | Who::Error => div().flex_1().min_w(px(0.0)).text_size(px(13.5)).text_color(rgb(tone)).child(r.text.clone()).into_any_element(),
         };
-        div().flex().gap(px(10.0)).child(head).child(body).into_any_element()
+        // His turns sit on a faint bar, so a run of them doesn't read as one (r21).
+        let you = matches!(r.who, Who::You);
+        div()
+            .flex()
+            .gap(px(10.0))
+            .when(you, |d| d.relative().mx(px(-8.0)).px(px(8.0)).py(px(5.0)).child(theme::backdrop(Cut::Corners(6.0), Fill::solid(pal.you_bar))))
+            .child(head)
+            .child(body)
+            .into_any_element()
     }
 
     fn prompt_el(&self, window: &mut Window, cx: &mut Context<Line>) -> Option<Div> {
@@ -998,13 +1012,14 @@ impl Line {
                     .text_size(px(12.0))
                     .font_weight(FontWeight::BOLD)
                     .child(
-                        theme::plate(Cut::Swallow(6.0), Fill::solid(pal.accent))
+                        // NEEDS YOU: the bone swallowtail, deep-red type, as on her nameplate.
+                        theme::plate(Cut::Swallow(6.0), Fill::solid(pal.text))
                             .h(px(18.0))
                             .pl(px(8.0))
                             .pr(px(14.0))
                             .gap(px(5.0))
-                            .text_color(rgb(pal.ink))
-                            .child(glyph("bang", pal.ink, pal.accent))
+                            .text_color(rgb(pal.deep))
+                            .child(glyph("bang", pal.deep, pal.text))
                             .child(tracked("NEEDS YOU", 1.2)),
                     )
                     .child(div().text_color(rgb(pal.text)).child(tracked(&p.title.to_uppercase(), 1.2)))
@@ -1155,24 +1170,27 @@ impl Render for Line {
         // Her name on a red blade, LINE, and her state at the right: NEEDS YOU (and the live
         // mic) on a red swallowtail; parked, all text-dim.
         let state: AnyElement = if self.snap.flag && !self.parked {
-            theme::plate(Cut::Swallow(6.0), Fill::solid(pal.accent))
+            // NEEDS YOU: the bone swallowtail, deep-red type (the nameplate's first beat); the
+            // mic live: red, ink.
+            let (fill_c, ink_c) = if self.snap.alarm { (pal.text, pal.deep) } else { (pal.accent, pal.ink) };
+            theme::plate(Cut::Swallow(6.0), Fill::solid(fill_c))
                 .h(px(18.0))
                 .pl(px(8.0))
                 .pr(px(14.0))
                 .gap(px(6.0))
-                .text_color(rgb(pal.ink))
-                .child(glyph(&self.snap.glyph, pal.ink, pal.accent))
-                .child(theme::metered(&status, 1.4, pal.ink))
+                .text_color(rgb(ink_c))
+                .child(glyph(&self.snap.glyph, ink_c, fill_c))
+                .child(theme::metered(&status, 1.4, ink_c))
                 .into_any_element()
         } else {
-            let tone = if self.parked { pal.dim } else { pal.accent };
+            // Her dot red, the word text-dim (r21: red on red on red; nothing stood out).
             div()
                 .flex()
                 .items_center()
                 .gap(px(6.0))
-                .text_color(rgb(tone))
-                .when(!self.parked, |d| d.child(glyph(&self.snap.glyph, tone, pal.panel)))
-                .child(theme::metered(&status, 1.4, tone))
+                .text_color(rgb(pal.dim))
+                .when(!self.parked, |d| d.child(glyph(&self.snap.glyph, pal.accent, pal.panel)))
+                .child(theme::metered(&status, 1.4, pal.dim))
                 .into_any_element()
         };
         let header = div()
@@ -1278,7 +1296,7 @@ impl Render for Line {
                             },
                         )
                         .flex_none()
-                        .mt(px(8.0))
+                        .mt(px(PROMPT_DROP))
                         .w(px(10.0))
                         .h(px(LINE_H))
                     })
@@ -1453,17 +1471,18 @@ pub fn side_key(s: crate::beside::Side) -> &'static str {
 }
 
 /// The panel cut inside its window (the Line's, the reader's): the dark ring left round it,
-/// the 2 px frame (text-dim when parked), the blade notch with three mane slivers in it.
+/// the 1 px dark-red frame (text-dim when parked; r21: a 2 px red one made everything red, so
+/// nothing stood out), the blade notch with three mane slivers in her red.
 pub fn panel_backdrop(pal: Pal, parked: bool) -> AnyElement {
     canvas(
         |_, _, _| (),
         move |b, _, window, _| {
             let (x0, y0, x1, y1) = (f32::from(b.left()) + 1.0, f32::from(b.top()) + 1.0, f32::from(b.right()) - 1.0, f32::from(b.bottom()) - 1.0);
-            let frame = if parked { pal.dim } else { pal.border };
-            theme::paint(window, &theme::outline(Cut::Panel, x0, y0, x1, y1), Fill::framed(pal.panel, frame, 2.0));
+            let (frame, sliver) = if parked { (pal.dim, pal.dim) } else { (pal.border, pal.accent) };
+            theme::paint(window, &theme::outline(Cut::Panel, x0, y0, x1, y1), Fill::framed(pal.panel, frame, 1.0));
             if x1 - x0 >= 300.0 {
                 for p in theme::slivers(x1 - 100.0, y0, 52.0, theme::NOTCH) {
-                    theme::fill_poly(window, &p, rgb(frame));
+                    theme::fill_poly(window, &p, rgb(sliver));
                 }
             }
         },
@@ -1475,10 +1494,10 @@ pub fn panel_backdrop(pal: Pal, parked: bool) -> AnyElement {
     .into_any_element()
 }
 
-/// A panel's edge facing her, thick along its straight run (between the cuts), with a pointer
-/// at her `at` along it (logical px): the Line's and the reader's. `side`: the panel's side of
-/// her (Right: she is at its left edge).
-pub fn tail_overlay(side: crate::beside::Side, at: f32, tone: u32) -> AnyElement {
+/// A panel's edge facing her, thick along its straight run (between the cuts, in `edge_c`),
+/// with a pointer at her `at` along it (logical px, in `point_c`): the Line's and the
+/// reader's. `side`: the panel's side of her (Right: she is at its left edge).
+pub fn tail_overlay(side: crate::beside::Side, at: f32, edge_c: u32, point_c: u32) -> AnyElement {
     use crate::beside::Side;
     canvas(
         |_, _, _| {},
@@ -1487,7 +1506,7 @@ pub fn tail_overlay(side: crate::beside::Side, at: f32, tone: u32) -> AnyElement
             let (l, t, r, bt) = (f32::from(b.left()) + 1.0, f32::from(b.top()) + 1.0, f32::from(b.right()) - 1.0, f32::from(b.bottom()) - 1.0);
             let big = theme::BIG_CUT.min((bt - t) * 0.2);
             let sm = theme::SMALL_CUT;
-            let (w, half, depth) = (4.0f32, 13.0f32, 12.0f32);
+            let (w, half, depth) = (3.0f32, 13.0f32, 12.0f32);
             let (edge, notch): (Vec<theme::Pt>, Vec<theme::Pt>) = match side {
                 Side::Right | Side::Left => {
                     // Left edge: from the big cut down to the small one; right: the other way.
@@ -1505,8 +1524,8 @@ pub fn tail_overlay(side: crate::beside::Side, at: f32, tone: u32) -> AnyElement
                     (vec![(a, bt), (a + w, bt - w), (z - w, bt - w), (z, bt)], vec![(x - half, bt - w - depth), (x, bt), (x + half, bt - w - depth)])
                 }
             };
-            theme::fill_poly(window, &edge, rgb(tone));
-            theme::fill_poly(window, &notch, rgb(tone));
+            theme::fill_poly(window, &edge, rgb(edge_c));
+            theme::fill_poly(window, &notch, rgb(point_c));
         },
     )
     .absolute()

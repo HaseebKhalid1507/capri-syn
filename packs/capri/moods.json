@@ -197,7 +197,7 @@
       ],
       "status": "DONE",
       "tone": "done",
-      "plate": "square",
+      "plate": "check",
       "then": {
         "mood": "idle",
         "afterMs": 4500

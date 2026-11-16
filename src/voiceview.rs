@@ -1471,7 +1471,7 @@ impl Avatar {
     /// The tag while the mic is open, he waits for the words, or she speaks.
     pub(super) fn voice_status(&self) -> Option<Status> {
         use crate::theme::Plate;
-        // Live mic: the red swallowtail (its rec dot blinks); the wake word: a dashed slant
+        // Live mic: the solid red swallowtail, its bone mic pulsing; the wake word: a dashed slant
         // with a mic; heard and speaking: arrows (doing); paused: a grey dashed square.
         let st = |label: String, key: &str, invert: bool, glyph: &str, plate: Plate| Status {
             label,
@@ -1495,7 +1495,7 @@ impl Avatar {
         if let Some(m) = self.voice.mic {
             let s = m.elapsed().as_secs();
             let auto = if self.voice.toggle.is_some() { " · AUTO" } else { "" };
-            return Some(st(format!("MIC {}:{:02} {}{auto}", s / 60, s % 60, bars(self.voice.level)), "mic", true, "rec", Plate::Flag));
+            return Some(st(format!("MIC {}:{:02} {}{auto}", s / 60, s % 60, bars(self.voice.level)), "mic", true, "mic", Plate::Flag));
         }
         if self.voice.asked.is_some() {
             return Some(st("MIC …".into(), "mic", false, "ring", Plate::Slant));

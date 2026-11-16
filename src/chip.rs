@@ -40,7 +40,7 @@ impl Render for Chip {
                     |_, _, _| (),
                     move |b, _, window, _| {
                         let (x0, y0, x1, y1) = (f32::from(b.left()) + 1.0, f32::from(b.top()) + 1.0, f32::from(b.right()) - 1.0, f32::from(b.bottom()) - 1.0);
-                        theme::paint(window, &theme::outline(Cut::Slant(7.0), x0, y0, x1, y1), Fill::framed(pal.panel, pal.border, 2.0));
+                        theme::paint(window, &theme::outline(Cut::Slant(7.0), x0, y0, x1, y1), Fill::framed(pal.panel, pal.accent, 2.0));
                     },
                 )
                 .absolute()

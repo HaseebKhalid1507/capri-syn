@@ -541,7 +541,7 @@ impl Render for Reader {
             .child(crate::line::panel_backdrop(pal, false))
             .child(header)
             .child(div().flex_1().min_h(px(0.0)).relative().flex().flex_col().child(body).child(bar))
-            .children(self.tail.map(|(side, at)| crate::line::tail_overlay(side, at, pal.border)))
+            .children(self.tail.map(|(side, at)| crate::line::tail_overlay(side, at, pal.border, pal.accent)))
     }
 }
 

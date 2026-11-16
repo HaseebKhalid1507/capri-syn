@@ -1,9 +1,10 @@
 //! SHARD: Akira red over jet black (Haseeb's pick, 2026-11-16). Every colour the UI paints
 //! comes from [`Pal`], and every shape it is cut into from [`outline`]: 26 px chamfers on the
 //! panels, 9 px on fields and code, slanted plates, a blade of a tail, mane slivers. Two
-//! colours plus bone: bone is the text, and it is also "done" and "danger" (told apart by
-//! fill, glyph and shape). Ink on red, never bone on red (bone on her red is 3.4:1). The
-//! nameplate's outline carries the state, so it reads in greyscale and on the 1-bit X shape.
+//! colours plus bone: bone is the text, the approval's danger plate and NEEDS YOU (the only
+//! bone nameplate). Ink on red, never bone on red (bone on her red is 3.4:1). A nameplate's
+//! state is its fill, its outline and its motion together, so it reads in greyscale and in
+//! the corner of an eye (r21 critics: outline alone was not enough).
 
 use gpui_kit::*;
 
@@ -19,12 +20,15 @@ pub struct Pal {
     pub panel: u32,
     /// Folds, inline code.
     pub raise: u32,
-    /// The panel frame (2 px).
+    /// The big panels' frame (the Line, the reader): 1 px, a dark red that sits back so her
+    /// red (name plates, the field, her dot) stands out on it.
     pub border: u32,
     /// Her: mane red, turned 10° from Akira's so the UI and her hair read as one red.
     pub accent: u32,
-    /// Decorative red (the dimmest trailing sliver).
+    /// Decorative red (the dimmest trailing sliver, the selection).
     pub accent_dim: u32,
+    /// Red type on bone (NEEDS YOU): her red is 3.4:1 there.
+    pub deep: u32,
     /// Bone: body copy.
     pub text: u32,
     /// Labels, hints, LATER, offline.
@@ -33,7 +37,7 @@ pub struct Pal {
     pub focus: u32,
     /// The risk banner, ERROR, QUIT?: a bone plate with ink type.
     pub danger: u32,
-    /// DONE: a bone outline.
+    /// DONE: a hollow red plate with a big tick.
     pub success: u32,
     /// Type on red and bone fills.
     pub ink: u32,
@@ -45,7 +49,9 @@ pub struct Pal {
     pub code: u32,
     /// His own words in the Line (a step under bone).
     pub you: u32,
-    /// The sleeping plate's edge.
+    /// The faint bar behind his turns in the Line.
+    pub you_bar: u32,
+    /// The sleeping plate's fill.
     pub asleep: u32,
     /// The 1 px dark ring around everything that sits on the desktop (the red frame alone is
     /// 2.6:1 on a light desktop; the ring carries the edge there).
@@ -57,19 +63,21 @@ impl Pal {
         bg: 0x0a0a0b,
         panel: 0x0e0e10,
         raise: 0x18181b,
-        border: 0xff1438,
+        border: 0x8a0f24,
         accent: 0xff1438,
         accent_dim: 0x6a0b1c,
+        deep: 0xb80e2a,
         text: 0xf4f0ea,
         dim: 0xa8a09b,
         focus: 0xf4f0ea,
         danger: 0xf4f0ea,
-        success: 0xf4f0ea,
+        success: 0xff1438,
         ink: 0x0a0a0b,
         rule: 0x3a0e16,
         field: 0x121215,
         code: 0x0b0b0d,
         you: 0xd9d3cc,
+        you_bar: 0x18171a,
         asleep: 0x2e2e33,
         ring: 0x02060a,
     };
@@ -83,6 +91,7 @@ impl Pal {
             ("border", &mut self.border),
             ("accent", &mut self.accent),
             ("accent-dim", &mut self.accent_dim),
+            ("deep", &mut self.deep),
             ("text", &mut self.text),
             ("text-dim", &mut self.dim),
             ("focus", &mut self.focus),
@@ -98,27 +107,57 @@ impl Pal {
     }
 
     /// A state's colour, by its tone key (a mood's `tone`): online, think, busy, speak, music,
-    /// alert and mic are her red; done is success, error danger; asleep, offline and a paused
-    /// wake word are text-dim.
+    /// alert, error, done and mic are her red (fill and shape tell them apart); asleep, offline
+    /// and a paused wake word are text-dim.
     pub fn tone(&self, key: &str) -> u32 {
         match key {
             "done" => self.success,
-            "error" => self.danger,
             "sleep" | "offline" | "paused" => self.dim,
             _ => self.accent,
         }
     }
 
-    /// A nameplate's paint. `key`: the state's tone key; `tone`: its colour; `invert`: a solid
-    /// plate; `blink`: the second half of the 1 Hz beat (NEEDS YOU turns bone, the rec dot
-    /// dims).
+    /// A nameplate's paint: the state is its fill, outline and motion together. `key`: the
+    /// state's tone key; `tone`: its colour; `invert`: a solid plate (a pack's own states);
+    /// `blink`: the second half of the 1 Hz beat.
+    ///
+    /// | state | fill | outline | motion |
+    /// |---|---|---|---|
+    /// | online | hollow | slant | |
+    /// | thinking | hollow | slant | three slivers step behind it |
+    /// | working, heard | half: her name on red | arrow | a light sweep crosses the red |
+    /// | speaking | solid red | arrow | |
+    /// | mic live | solid red | swallowtail | its mic pulses in a bone disc |
+    /// | NEEDS YOU | bone, deep-red type | swallowtail | flips bone / black at 1 Hz |
+    /// | done | hollow | square, a big tick through its corner | |
+    /// | error | black, red type | toothed, its ✕ shard dropped | |
+    /// | offline | hollow, grey | square, dashed | |
+    /// | sleeping | dim grey | square, 5 px lower | |
     pub fn look(&self, plate: Plate, key: &str, tone: u32, invert: bool, blink: bool) -> Look {
-        let mut l = Look { plate, fill: self.panel, edge: tone, ink: tone, mark: tone, dash: None, drop: 0.0, trail: false };
+        let mut l = Look { plate, fill: self.panel, edge: tone, ink: tone, mark: tone, dash: None, drop: 0.0, trail: false, half: false, halo: None };
         match key {
-            // The split bone plate, a red ✕ shard broken off.
-            "error" => return Look { fill: self.danger, edge: self.danger, ink: self.ink, mark: self.accent, ..l },
+            "error" => return Look { fill: self.bg, edge: self.accent, ink: self.accent, mark: self.accent, ..l },
+            // The only bone plate; its other beat is black with a bone edge.
+            "alert" => {
+                return if blink {
+                    Look { fill: self.bg, edge: self.text, ink: self.text, mark: self.text, ..l }
+                } else {
+                    Look { fill: self.text, edge: self.text, ink: self.deep, mark: self.deep, ..l }
+                };
+            }
+            // The mic pulses: a deep-red mic in a bone disc, then an ink one on the red.
+            "mic" if invert => {
+                let (mark, halo) = if blink { (self.ink, None) } else { (self.deep, Some(self.text)) };
+                return Look { fill: tone, edge: tone, ink: self.ink, mark, halo, ..l };
+            }
+            "speak" => return Look { fill: tone, edge: tone, ink: self.ink, mark: self.ink, ..l },
+            "busy" | "heard" => {
+                l.half = true;
+                l.mark = self.ink;
+            }
             "offline" | "paused" => l.dash = Some([3.0, 2.5]),
             "sleep" => {
+                l.fill = self.asleep;
                 l.edge = self.asleep;
                 l.drop = 5.0;
             }
@@ -130,21 +169,10 @@ impl Pal {
             _ => {}
         }
         if invert {
-            let mic = key == "mic";
             l.fill = tone;
             l.edge = tone;
             l.ink = self.ink;
-            l.mark = if mic { self.text } else { self.ink };
-            if blink {
-                if mic {
-                    l.mark = mix(self.text, tone, 0.85);
-                } else {
-                    l.fill = self.text;
-                    l.edge = self.text;
-                }
-            }
-        } else if plate == Plate::Arrow {
-            l.mark = self.text;
+            l.mark = self.ink;
         }
         l
     }
@@ -160,9 +188,11 @@ pub enum Plate {
     Arrow,
     /// ⫸ swallowtail: NEEDS YOU, the mic live / hands-free.
     Flag,
-    /// ▢ settled or away: done, offline, sleeping.
+    /// ▢ away: offline, sleeping.
     Square,
-    /// The split plate: ERROR.
+    /// ☑ done: square, a big tick through its top-left corner.
+    Check,
+    /// The split, toothed plate: ERROR.
     Split,
 }
 
@@ -173,6 +203,7 @@ impl Plate {
             "arrow" => Plate::Arrow,
             "flag" => Plate::Flag,
             "square" => Plate::Square,
+            "check" => Plate::Check,
             "split" => Plate::Split,
             _ => return None,
         })
@@ -182,9 +213,10 @@ impl Plate {
     pub fn pad(self) -> (f32, f32) {
         match self {
             Plate::Slant | Plate::Square => (12.0, 14.0),
+            Plate::Check => (16.0, 14.0),
             Plate::Arrow => (12.0, 20.0),
             Plate::Flag => (12.0, 22.0),
-            Plate::Split => (10.0, 12.0),
+            Plate::Split => (10.0, 14.0),
         }
     }
 }
@@ -204,6 +236,10 @@ pub struct Look {
     pub drop: f32,
     /// Three slivers trail it (thinking).
     pub trail: bool,
+    /// Its name on a red block, the rest hollow (working); a light sweep crosses the block.
+    pub half: bool,
+    /// A disc behind its glyph (the live mic's pulse).
+    pub halo: Option<u32>,
 }
 
 /// `a` toward `b` by `k` (0 = a).
@@ -314,23 +350,8 @@ pub fn outline(cut: Cut, x0: f32, y0: f32, x1: f32, y1: f32) -> Vec<Vec<Pt>> {
             one(vec![(x0 + s, y0), (x1 - 10.0, y0), (x1, mid), (x1 - 10.0, y1), (x0, y1)])
         }
         Cut::Teeth => {
-            let (tw, td) = (10.0, 4.0);
-            let mut p = Vec::new();
-            let mut x = x0;
-            while x < x1 - 0.1 {
-                p.push((x, y0 + td));
-                p.push(((x + tw / 2.0).min(x1), y0));
-                x += tw;
-            }
-            p.push((x1, y0 + td));
-            p.push((x1, y1 - td));
-            let mut x = x1;
-            while x > x0 + 0.1 {
-                p.push((x, y1 - td));
-                p.push(((x - tw / 2.0).max(x0), y1));
-                x -= tw;
-            }
-            p.push((x0, y1 - td));
+            let mut p = teeth(x0, x1, y0, 10.0, 4.0);
+            p.extend(teeth(x1, x0, y1, 10.0, 4.0));
             one(p)
         }
         Cut::Tag(plate) => {
@@ -339,18 +360,106 @@ pub fn outline(cut: Cut, x0: f32, y0: f32, x1: f32, y1: f32) -> Vec<Vec<Pt>> {
                 Plate::Slant => one(vec![(x0 + s, y0), (x1, y0), (x1 - s, y1), (x0, y1)]),
                 Plate::Arrow => one(vec![(x0 + s, y0), (x1 - 4.0, y0), (x1 + 6.0, mid), (x1 - 4.0, y1), (x0, y1)]),
                 Plate::Flag => one(vec![(x0 + s, y0), (x1 + 4.0, y0), (x1 - 5.0, mid), (x1 + 4.0, y1), (x0, y1)]),
-                Plate::Square => one(vec![(x0, y0), (x1, y0), (x1, y1), (x0, y1)]),
+                Plate::Square | Plate::Check => one(vec![(x0, y0), (x1, y0), (x1, y1), (x0, y1)]),
                 Plate::Split => {
-                    // The glyph's shard breaks off and drops.
+                    // The glyph's shard breaks off and drops; the rest wears hazard teeth top
+                    // and bottom, pointing out (danger's serration, in her red; the plate
+                    // inside them is `tag_inner`).
                     let gx = x0 + 25.0;
-                    vec![
-                        vec![(x0 + s, y0 + 3.0), (gx + 2.0, y0 + 3.0), (gx - 3.0, y1 + 3.0), (x0, y1 + 3.0)],
-                        vec![(gx + 5.0, y0), (x1, y0), (x1 - s, y1), (gx, y1)],
-                    ]
+                    let mut body = teeth(gx + 6.0, x1, y0 - SPLIT_TD, SPLIT_TOOTH, SPLIT_TD);
+                    body.extend(teeth(x1 - s, gx + 1.0, y1 + SPLIT_TD, SPLIT_TOOTH, SPLIT_TD));
+                    vec![vec![(x0 + s, y0 + 3.0), (gx + 2.0, y0 + 3.0), (gx - 3.0, y1 + 3.0), (x0, y1 + 3.0)], body]
                 }
             }
         }
     }
+}
+
+/// ERROR's hazard teeth: width and height (outside the plate box).
+const SPLIT_TOOTH: f32 = 8.0;
+const SPLIT_TD: f32 = 3.5;
+
+/// Where a plate's fill goes when it is not simply its outline inset by the edge: ERROR's
+/// teeth stay solid (red crests above and below), its black is the plain plate inside them.
+pub fn tag_inner(plate: Plate, x0: f32, y0: f32, x1: f32, y1: f32, edge: f32) -> Option<Vec<Vec<Pt>>> {
+    if plate != Plate::Split {
+        return None;
+    }
+    let s = 9.0f32.min((y1 - y0) * 0.38);
+    let gx = x0 + 25.0;
+    let shard = offset(&[(x0 + s, y0 + 3.0), (gx + 2.0, y0 + 3.0), (gx - 3.0, y1 + 3.0), (x0, y1 + 3.0)], -edge);
+    let (t, b) = (y0 + edge, y1 - edge);
+    // The body's slanted sides (as `outline` cuts them), each moved in by the edge.
+    let f = |y: f32| (y - y0) / (y1 - y0);
+    let (left, right) = (|y: f32| gx + 6.0 - 5.0 * f(y) + edge, |y: f32| x1 - s * f(y) - edge);
+    let body = vec![(left(t), t), (right(t), t), (right(b), b), (left(b), b)];
+    Some(vec![shard, body])
+}
+
+/// A serrated edge from xa to xb (either way), tips on y: valleys `td` toward the plate (down
+/// walking right, up walking left), a tip every `tw` or so.
+fn teeth(xa: f32, xb: f32, y: f32, tw: f32, td: f32) -> Vec<Pt> {
+    let dir = if xb >= xa { 1.0 } else { -1.0 };
+    // Tips point out: up on a top edge (walked left to right), down on a bottom one.
+    let inside = y + dir * td;
+    let n = ((xb - xa).abs() / tw).round().max(1.0) as usize;
+    let step = (xb - xa) / n as f32;
+    let mut p = Vec::with_capacity(2 * n + 1);
+    for i in 0..n {
+        let x = xa + step * i as f32;
+        p.push((x, inside));
+        p.push((x + step / 2.0, y));
+    }
+    p.push((xb, inside));
+    p
+}
+
+/// Solid marks a nameplate carries outside its outline, in its mark colour: DONE's big tick
+/// (it breaks out through the top edge). Part of the X shape.
+pub fn tag_marks(plate: Plate, x0: f32, y0: f32, _x1: f32, y1: f32) -> Vec<Vec<Pt>> {
+    match plate {
+        Plate::Check => vec![stroke_poly_pts(&[(x0 + 6.0, y0 + 12.5), (x0 + 12.5, y1 - 5.0), (x0 + 27.0, y0 - 6.0)], 1.9)],
+        _ => Vec::new(),
+    }
+}
+
+/// A polyline as a filled outline `half` px each side (mitred joints, square ends).
+fn stroke_poly_pts(line: &[Pt], half: f32) -> Vec<Pt> {
+    let n = line.len();
+    let normal = |a: Pt, b: Pt| {
+        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+        let l = (dx * dx + dy * dy).sqrt().max(1e-6);
+        (-dy / l, dx / l)
+    };
+    let side = |sgn: f32| -> Vec<Pt> {
+        (0..n)
+            .map(|i| {
+                let (p, c, nx) = (line[i.saturating_sub(1)], line[i], line[(i + 1).min(n - 1)]);
+                let n1 = if i == 0 { normal(c, nx) } else { normal(p, c) };
+                let n2 = if i + 1 == n { n1 } else { normal(c, nx) };
+                let k = (1.0 + n1.0 * n2.0 + n1.1 * n2.1).max(0.25);
+                (c.0 + sgn * half * (n1.0 + n2.0) / k, c.1 + sgn * half * (n1.1 + n2.1) / k)
+            })
+            .collect()
+    };
+    let mut out = side(1.0);
+    out.extend(side(-1.0).into_iter().rev());
+    out
+}
+
+/// WORKING's red block (its name), a slant on the box, and the light sweep's piece of it at
+/// `phase` (0..1 across, `None` resting).
+pub fn half_block(x0: f32, y0: f32, x1: f32, y1: f32, phase: Option<f32>) -> (Vec<Pt>, Option<Vec<Pt>>) {
+    let s = 9.0f32.min((y1 - y0) * 0.38);
+    let block = vec![(x0 + s, y0), (x1, y0), (x1 - s, y1), (x0, y1)];
+    // In slant coordinates (u = x at the bottom edge) the block is x0..x1 - s.
+    let sweep = phase.and_then(|ph| {
+        let w = 9.0;
+        let u = x0 - w + ph * (x1 - s - x0 + w);
+        let (a, b) = (u.max(x0), (u + w).min(x1 - s));
+        (b > a).then(|| vec![(a + s, y0), (b + s, y0), (b, y1), (a, y1)])
+    });
+    (block, sweep)
 }
 
 fn corners(x0: f32, y0: f32, x1: f32, y1: f32, big: f32, sm: f32) -> Vec<Pt> {
@@ -570,8 +679,8 @@ pub fn metered(s: &str, spacing: f32, fg: u32) -> Div {
 }
 
 /// A small status glyph drawn as shapes (crisp at any size, no font fallback). 11 px box;
-/// `bg` paints cut-outs. Kinds: dot, dots, gear, play, bang, check, cross (and `shard`: the
-/// ✕ broken off, tilted), moon, ring, rec, note, mic, hf, warn.
+/// `bg` paints cut-outs. Kinds: dot, dots, gear, play (and back), bang, check, cross (and `shard`: the
+/// ✕ broken off, tilted), moon, ring, rec, disc, note, mic, hf, warn.
 pub fn glyph(kind: &str, fg: u32, bg: u32) -> impl IntoElement + use<> {
     glyph_at(kind, fg, bg, 11.0)
 }
@@ -621,6 +730,7 @@ pub fn glyph_at(kind: &str, fg: u32, bg: u32, size: f32) -> impl IntoElement + u
                 }
                 // The mic is open: a filled dot.
                 "rec" => fill(window, &circle(5.5, 5.5, 4.4), fg),
+                "disc" => fill(window, &circle(5.5, 5.5, 5.5), fg),
                 // Hands-free: the dot in a ring.
                 "hf" => {
                     fill(window, &circle(5.5, 5.5, 5.45), fg);
@@ -667,6 +777,7 @@ pub fn glyph_at(kind: &str, fg: u32, bg: u32, size: f32) -> impl IntoElement + u
                     fill(window, &circle(5.5, 5.5, 1.8), bg);
                 }
                 "play" => fill(window, &[(2.0, 0.8), (10.0, 5.5), (2.0, 10.2)], fg),
+                "back" => fill(window, &[(9.0, 0.8), (1.0, 5.5), (9.0, 10.2)], fg),
                 "check" => stroke(window, &[(1.0, 5.8), (4.3, 9.1), (10.2, 1.8)], 2.2, fg),
                 "bang" => {
                     fill(window, &[(4.1, 0.0), (6.9, 0.0), (6.9, 7.2), (4.1, 7.2)], fg);
@@ -702,7 +813,7 @@ pub fn glyph_at(kind: &str, fg: u32, bg: u32, size: f32) -> impl IntoElement + u
 
 #[cfg(test)]
 mod tests {
-    use super::{Cut, Pal, Plate, Pt, bubble, contrast, offset, outline};
+    use super::{Cut, Pal, Plate, Pt, bubble, contrast, half_block, offset, outline, tag_marks};
 
     const P: Pal = Pal::SHARD;
 
@@ -723,6 +834,12 @@ mod tests {
             ("text-dim on raise", P.dim, P.raise),
             ("accent on raise (fold lang)", P.accent, P.raise),
             ("accent on field (the › prompt)", P.accent, P.field),
+            ("deep on bone (NEEDS YOU)", P.deep, P.text),
+            ("bone on black (NEEDS YOU's other beat)", P.text, P.bg),
+            ("text-dim on the sleeping plate", P.dim, P.asleep),
+            ("ink on bone (READ)", P.ink, P.text),
+            ("his words on his bar", P.you, P.you_bar),
+            ("ink on WORKING's sweep", P.ink, super::mix(P.accent, P.text, 0.45)),
         ];
         for (what, fg, bg) in pairs {
             let c = contrast(fg, bg);
@@ -744,43 +861,101 @@ mod tests {
 
     #[test]
     fn tones_collapse() {
-        for k in ["online", "think", "busy", "speak", "music", "alert", "mic", "wake"] {
+        for k in ["online", "think", "busy", "speak", "music", "alert", "mic", "wake", "error", "done"] {
             assert_eq!(P.tone(k), P.accent, "{k}");
         }
-        assert_eq!(P.tone("done"), P.success);
-        assert_eq!(P.tone("error"), P.danger);
         assert_eq!(P.tone("sleep"), P.dim);
         assert_eq!(P.tone("offline"), P.dim);
     }
 
+    /// Every state's (plate, key, invert) as the pack and the voice set them.
+    const STATES: [(&str, Plate, &str, bool); 13] = [
+        ("online", Plate::Slant, "online", false),
+        ("thinking", Plate::Slant, "think", false),
+        ("working", Plate::Arrow, "busy", false),
+        ("heard", Plate::Arrow, "heard", false),
+        ("speaking", Plate::Arrow, "speak", false),
+        ("music", Plate::Arrow, "music", false),
+        ("mic live", Plate::Flag, "mic", true),
+        ("needs you", Plate::Flag, "alert", true),
+        ("done", Plate::Check, "done", false),
+        ("error", Plate::Split, "error", true),
+        ("offline", Plate::Square, "offline", false),
+        ("sleeping", Plate::Square, "sleep", false),
+        ("wake word", Plate::Slant, "wake", false),
+    ];
+
     #[test]
-    fn needs_you_flips_bone_and_keeps_ink() {
-        let red = P.look(Plate::Flag, "alert", P.accent, true, false);
-        let bone = P.look(Plate::Flag, "alert", P.accent, true, true);
-        assert_eq!((red.fill, red.ink), (P.accent, P.ink));
-        assert_eq!((bone.fill, bone.ink), (P.text, P.ink));
-        // Error: the bone plate, ink type, a red shard.
-        let e = P.look(Plate::Split, "error", P.danger, true, false);
-        assert_eq!((e.fill, e.ink, e.mark), (P.danger, P.ink, P.accent));
-        // Never bone type on red.
-        for blink in [false, true] {
-            for key in ["alert", "mic"] {
-                let l = P.look(Plate::Flag, key, P.accent, true, blink);
-                assert!(contrast(l.ink, l.fill) >= 4.5, "{key}");
+    fn needs_you_is_the_only_bone_plate() {
+        let bone = P.look(Plate::Flag, "alert", P.accent, true, false);
+        let black = P.look(Plate::Flag, "alert", P.accent, true, true);
+        assert_eq!((bone.fill, bone.ink), (P.text, P.deep));
+        assert_eq!((black.fill, black.edge, black.ink), (P.bg, P.text, P.text));
+        for (what, plate, key, invert) in STATES {
+            for blink in [false, true] {
+                let l = P.look(plate, key, P.tone(key), invert, blink);
+                assert!(contrast(l.ink, l.fill) >= 4.5, "{what} {blink}: {:.2}", contrast(l.ink, l.fill));
+                if key != "alert" {
+                    assert!(l.fill != P.text && l.edge != P.text, "{what} uses bone");
+                }
+            }
+        }
+        // Error: black, red type and edge (r21: not bone).
+        let e = P.look(Plate::Split, "error", P.accent, true, false);
+        assert_eq!((e.fill, e.edge, e.ink), (P.bg, P.accent, P.accent));
+    }
+
+    #[test]
+    fn states_differ_by_fill_and_shape_in_greyscale() {
+        // Luma of a plate's fill, its edge, and whether it carries a mark or moves.
+        let luma = |c: u32| {
+            let (r, g, b) = (((c >> 16) & 0xff) as f32, ((c >> 8) & 0xff) as f32, (c & 0xff) as f32);
+            (0.299 * r + 0.587 * g + 0.114 * b).round() as i32
+        };
+        let sig: Vec<(&str, String)> = STATES
+            .iter()
+            .filter(|s| s.2 != "heard" && s.2 != "wake" && s.2 != "music")
+            .map(|&(what, plate, key, invert)| {
+                let l = P.look(plate, key, P.tone(key), invert, false);
+                let o = outline(Cut::Tag(plate), 0.0, 0.0, 120.0, 25.0);
+                let marks = tag_marks(plate, 0.0, 0.0, 120.0, 25.0).len();
+                (what, format!("{:?} fill{} edge{} dash{} half{} trail{} marks{} drop{}", o, luma(l.fill) / 24, luma(l.edge) / 24, l.dash.is_some(), l.half, l.trail, marks, l.drop))
+            })
+            .collect();
+        for i in 0..sig.len() {
+            for j in i + 1..sig.len() {
+                assert_ne!(sig[i].1, sig[j].1, "{} and {} look alike in grey", sig[i].0, sig[j].0);
+            }
+        }
+    }
+
+    #[test]
+    fn the_sweep_stays_on_the_block() {
+        let (blk, _) = half_block(10.0, 0.0, 80.0, 25.0, None);
+        for ph in [0.0, 0.3, 0.7, 1.0] {
+            if let (_, Some(sw)) = half_block(10.0, 0.0, 80.0, 25.0, Some(ph)) {
+                for (x, y) in sw {
+                    // Inside the parallelogram: left of the right edge, right of the left one.
+                    let lean = 9.0 * (25.0 - y) / 25.0;
+                    assert!(x >= 10.0 + lean - 0.01 && x <= 80.0 - 9.0 + lean + 0.01, "{ph}: {x},{y} vs {blk:?}");
+                }
             }
         }
     }
 
     #[test]
     fn silhouettes_differ() {
-        let o = |p| outline(Cut::Tag(p), 0.0, 0.0, 120.0, 25.0);
-        let all = [Plate::Slant, Plate::Arrow, Plate::Flag, Plate::Square, Plate::Split].map(o);
+        let o = |p| (outline(Cut::Tag(p), 0.0, 0.0, 120.0, 25.0), tag_marks(p, 0.0, 0.0, 120.0, 25.0));
+        let all = [Plate::Slant, Plate::Arrow, Plate::Flag, Plate::Square, Plate::Check, Plate::Split].map(o);
         for i in 0..all.len() {
             for j in i + 1..all.len() {
                 assert_ne!(all[i], all[j]);
             }
         }
-        assert_eq!(all[4].len(), 2, "the split plate is two pieces");
+        assert_eq!(all[5].0.len(), 2, "the split plate is two pieces");
+        assert!(all[4].1[0].iter().any(|p| p.1 < -4.0), "the tick breaks out of the top edge");
+        assert!(all[5].0[1].len() > 20, "the error plate is toothed");
+        assert!(all[5].0[1].iter().any(|p| p.1 < -3.0) && all[5].0[1].iter().any(|p| p.1 > 28.0), "its teeth point out");
     }
 
     #[test]

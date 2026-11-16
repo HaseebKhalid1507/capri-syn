@@ -83,6 +83,11 @@ const SLIVER_H: f32 = 8.0;
 const TAIL_H: f32 = 16.0;
 const TIP_GAP: f32 = 2.0;
 const TAG_FONT: f32 = 13.0;
+/// WORKING's sweep: it crosses the red block in `SWEEP_STEPS` steps of `SWEEP_STEP_MS`, once
+/// every `SWEEP_EVERY_MS` (no redraws between).
+const SWEEP_EVERY_MS: u64 = 2_400;
+const SWEEP_STEPS: u64 = 10;
+const SWEEP_STEP_MS: u64 = 70;
 /// Clear air between the status tag and the hair right under it (logical px).
 const TAG_GAP: f32 = 13.0;
 const MIN_WIDTH: f32 = 500.0;
@@ -283,12 +288,43 @@ impl Bubble {
             .collect()
     }
 
+    /// The page's lines, its last one ending "…" when the text goes on past the page (r21: it
+    /// was cut mid-sentence with no sign).
+    fn page_lines_marked(&self) -> Vec<String> {
+        let mut lines = self.page_lines();
+        let (top, total) = self.pages();
+        if top + self.rows() < total
+            && self.shown >= self.text.len()
+            && let Some(last) = lines.last_mut()
+        {
+            *last = goes_on(last);
+        }
+        lines
+    }
+
     /// Type out short text only; anything longer appears at once.
     fn reveal_all_if_long(&mut self) {
         if self.text.len() >= TYPE_MAX_CHARS {
             self.shown = self.text.len();
         }
     }
+}
+
+/// `line` with "…" in place of its last word(s): at least three characters give way, so it is
+/// never wider than the wrapped line it replaces.
+fn goes_on(line: &str) -> String {
+    let mut t = line.trim_end();
+    let full = t.chars().count();
+    while full - t.chars().count() < 3 {
+        match t.trim_end().rfind(' ') {
+            Some(i) if i > 0 => t = t[..i].trim_end(),
+            _ => {
+                let keep = full.saturating_sub(3);
+                return format!("{}…", line.chars().take(keep).collect::<String>().trim_end());
+            }
+        }
+    }
+    format!("{}…", t.trim_end_matches([',', ';', ':', '-', '—']))
 }
 
 const TYPE_TICK: Duration = Duration::from_millis(35);
@@ -1564,6 +1600,7 @@ impl Avatar {
             take(Some(now));
         }
         take(self.hud_after.filter(|&t| t > now));
+        take(self.motion_at.get());
         take(self.menu.map(|m| m.1));
         if let Some(s) = &self.session {
             take(s.link.deadline(now));
@@ -1766,6 +1803,11 @@ impl Avatar {
         }
         if self.quit_armed.is_some_and(|t| now >= t) {
             self.quit_armed = None;
+            dirty = true;
+        }
+        // The HUD's next motion step (render books the next one).
+        if self.motion_at.get().is_some_and(|t| now >= t) {
+            self.motion_at.set(None);
             dirty = true;
         }
         if let Some(acts) = self.session.as_mut().map(|s| s.link.tick(now)) {
@@ -3930,6 +3972,11 @@ fn tag_rows(cut: Cut, trail: Option<u64>, b: Bounds<Pixels>, sf: f32) -> Vec<Sha
     for (p, _) in trail.map(|s| theme::trail(x1, y0, y1, s)).unwrap_or_default() {
         shape::poly_rows(&dev(&p), &mut out);
     }
+    if let Cut::Tag(plate) = cut {
+        for p in theme::tag_marks(plate, x0, y0, x1, y1) {
+            shape::poly_rows(&dev(&theme::offset(&p, theme::RING)), &mut out);
+        }
+    }
     out
 }
 
@@ -4483,16 +4530,20 @@ impl Render for Avatar {
             // Line there. It nudges toward her every 2.2 s.
             let unread = self.unread_shown();
             let fresh = unread.is_some_and(|u| !u.refused);
-            // The beat: NEEDS YOU's flag turns bone and the rec dot dims on its second half
-            // (1 Hz), the thinking slivers step every 400 ms.
+            // The beat: NEEDS YOU's bone plate turns black and the rec dot dims on its second
+            // half (1 Hz; a summon's pulse holds it bone), the thinking slivers step every
+            // 400 ms, WORKING's sweep crosses its red block every 2.4 s.
             let ms = now.saturating_duration_since(self.t_start).as_millis() as u64;
-            let look = pal.look(plate_kind, &tone_key, tone, invert, (ms / 500) % 2 == 1 || pulse);
+            let look = pal.look(plate_kind, &tone_key, tone, invert, (ms / 500) % 2 == 1 && !pulse);
             let step = ms / 400;
             let nudge = if fresh && ms % 2200 < 240 { 5.0 } else { 0.0 };
             let beats = invert && matches!(look.plate, Plate::Flag);
+            let in_sweep = ms % SWEEP_EVERY_MS < SWEEP_STEPS * SWEEP_STEP_MS;
+            let sweep = (look.half && in_sweep).then(|| ((ms % SWEEP_EVERY_MS) / SWEEP_STEP_MS) as f32 / (SWEEP_STEPS - 1) as f32);
             let next_ms = [
                 beats.then_some((ms / 500 + 1) * 500),
                 look.trail.then_some((ms / 400 + 1) * 400),
+                look.half.then_some(if in_sweep { (ms / SWEEP_STEP_MS + 1) * SWEEP_STEP_MS } else { ms - ms % SWEEP_EVERY_MS + SWEEP_EVERY_MS }),
                 fresh.then_some(if ms % 2200 < 240 { ms - ms % 2200 + 240 } else { ms - ms % 2200 + 2200 }),
             ]
             .into_iter()
@@ -4513,6 +4564,8 @@ impl Render for Avatar {
                 None => format!("{} // {}", self.name, label),
             };
             let name_up = self.name.to_uppercase();
+            // WORKING: her name on the red block (ink), the rest hollow.
+            let (name_part, rest) = if look.half && unread.is_none() { (Some(self.name.clone()), format!("// {label}")) } else { (None, text.clone()) };
             let shade = [pal.accent, theme::mix(pal.accent, pal.bg, 0.45), pal.accent_dim];
             let make_ring = || -> Div {
                 if let Some(b) = badge.clone() {
@@ -4541,7 +4594,45 @@ impl Render for Avatar {
                 let (pad_l, pad_r) = look.plate.pad();
                 let fill = Fill::framed(look.fill, look.edge, 1.5).dashed(look.dash).ringed(pal.ring);
                 let split = look.plate == Plate::Split;
-                let mark = if split && glyph_kind == "cross" { "shard".to_string() } else { glyph_kind.clone() };
+                // DONE's tick is drawn through the plate's corner, not as a glyph.
+                let mark = match look.plate {
+                    Plate::Split if glyph_kind == "cross" => "shard".to_string(),
+                    Plate::Check => String::new(),
+                    _ => glyph_kind.clone(),
+                };
+                let (ring_c, block_c, sweep_c) = (pal.ring, pal.accent, theme::mix(pal.accent, pal.text, 0.45));
+                let block = name_part.clone().map(|n| {
+                    div()
+                        .relative()
+                        .h_full()
+                        .ml(px(-pad_l))
+                        .pl(px(pad_l))
+                        .pr(px(13.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(7.0))
+                        .text_color(rgb(pal.ink))
+                        .child(
+                            canvas(
+                                |_, _, _| (),
+                                move |b, _, window, _| {
+                                    let (x0, y0, x1, y1) = (f32::from(b.left()), f32::from(b.top()), f32::from(b.right()), f32::from(b.bottom()));
+                                    let (blk, sw) = theme::half_block(x0, y0, x1, y1, sweep);
+                                    theme::fill_poly(window, &blk, rgb(block_c));
+                                    if let Some(sw) = sw {
+                                        theme::fill_poly(window, &sw, rgb(sweep_c));
+                                    }
+                                },
+                            )
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .size_full(),
+                        )
+                        .child(glyph(&mark, pal.ink, pal.accent))
+                        .child(tracked(&n, 1.5))
+                });
+                let half = block.is_some();
                 div()
                     .relative()
                     .flex()
@@ -4559,11 +4650,24 @@ impl Render for Avatar {
                             |_, _, _| (),
                             move |b, _, window, _| {
                                 let (x0, y0, x1, y1) = (f32::from(b.left()), f32::from(b.top()), f32::from(b.right()), f32::from(b.bottom()));
-                                theme::paint(window, &theme::outline(Cut::Tag(look.plate), x0, y0, x1, y1), fill);
+                                let polys = theme::outline(Cut::Tag(look.plate), x0, y0, x1, y1);
+                                match theme::tag_inner(look.plate, x0, y0, x1, y1, 1.5) {
+                                    Some(inner) => {
+                                        theme::paint(window, &polys, Fill::solid(look.edge).ringed(ring_c));
+                                        for p in inner {
+                                            theme::fill_poly(window, &p, rgb(look.fill));
+                                        }
+                                    }
+                                    None => theme::paint(window, &polys, fill),
+                                }
                                 if look.trail {
                                     for (p, lvl) in theme::trail(x1, y0, y1, step) {
                                         theme::fill_poly(window, &p, rgb(shade[lvl as usize]));
                                     }
+                                }
+                                for p in theme::tag_marks(look.plate, x0, y0, x1, y1) {
+                                    theme::fill_poly(window, &theme::offset(&p, theme::RING), rgb(ring_c));
+                                    theme::fill_poly(window, &p, rgb(look.mark));
                                 }
                             },
                         )
@@ -4572,9 +4676,25 @@ impl Render for Avatar {
                         .left_0()
                         .size_full(),
                     )
+                    .children(block)
                     // The ✕'s shard broken off with the plate's piece.
-                    .child(div().when(split, |d| d.relative().left(px(-3.0)).top(px(3.0))).child(glyph(&mark, look.mark, look.fill)))
-                    .child(theme::metered(&text, 1.5, look.ink))
+                    .when(!half, |d| {
+                        d.child(match look.halo {
+                            // The disc: 15 px, the glyph centred in it.
+                            Some(h) => div()
+                                .relative()
+                                .size(px(15.0))
+                                .mx(px(-2.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(div().absolute().top_0().left_0().child(theme::glyph_at("disc", h, h, 15.0)))
+                                .child(glyph(&mark, look.mark, h)),
+                            None => div().when(split, |d| d.relative().left(px(-3.0)).top(px(3.0))).child(glyph(&mark, look.mark, look.fill)),
+                        })
+                    })
+                    // ERROR: the type starts inside the toothed piece, clear of the break.
+                    .child(theme::metered(&rest, 1.5, look.ink).when(split, |d| d.ml(px(8.0))))
                     // A reply put away behind the plate: a small up-chevron inside it.
                     .when(collapsed, |d| d.child(chevron(Chevron::Up, rgb(look.ink))))
             };
@@ -4582,7 +4702,7 @@ impl Render for Avatar {
                 let (bx, by) = (f32::from(b.origin.x), f32::from(b.origin.y));
                 let (bw, bh) = (f32::from(b.size.width), f32::from(b.size.height));
                 // The strips reach past the box: the ring, a point or swallowtail, the slivers.
-                let (ml, mr, mt, mb) = (4.0, 34.0, 2.0, 6.0);
+                let (ml, mr, mt, mb) = (4.0, 34.0, 9.0, 6.0);
                 let t0 = (by - mt) * sf - l.avatar_y as f32;
                 let th = bh + mt + mb;
                 // Next frame's strips first (underneath, same reason as the body's underlay),
@@ -4678,7 +4798,7 @@ impl Render for Avatar {
                     let b = self.bubble.as_ref().expect("reply mode has a bubble");
                     // The reader open: the bubble is a stub (header + CLOSE READER), not a
                     // second copy of the text.
-                    let lines = if self.reader.is_some() { Vec::new() } else { b.page_lines() };
+                    let lines = if self.reader.is_some() { Vec::new() } else { b.page_lines_marked() };
                     if lines.is_empty() && self.reader.is_none() {
                         placeholder = Some("…".into());
                     }
@@ -4798,8 +4918,8 @@ impl Render for Avatar {
             // Settled after a summon: the border breathes toward bone; the pulse turns it bone.
             let frame_c = match glow {
                 _ if pulse => pal.focus,
-                Some(k) => theme::mix(pal.border, pal.focus, k as f32 / 12.0),
-                None => pal.border,
+                Some(k) => theme::mix(pal.accent, pal.focus, k as f32 / 12.0),
+                None => pal.accent,
             };
             let warm = pulse || glow.is_some();
             let (panel_c, ring_c, sliver_c) = (pal.panel, pal.ring, pal.accent);
@@ -4848,23 +4968,27 @@ impl Render for Avatar {
                 .child(tracked(&header_label, 1.5).text_size(px(9.5)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(if prompt_mode { pal.text } else { pal.dim })))
                 .child(div().flex_1())
                 .child(if invert || pulse {
-                    // A solid plate (NEEDS YOU: a swallowtail); a summon's pulse turns it bone.
-                    let fill_c = if pulse && invert { pal.text } else { tone };
+                    // The nameplate's own paint, on its first beat (NEEDS YOU: the bone
+                    // swallowtail; ERROR: black, red type).
+                    let hl = pal.look(plate_kind, &tone_key, tone, true, false);
                     let cut = if plate_kind == Plate::Flag || pulse { Cut::Swallow(4.0) } else { Cut::Tab(4.0) };
-                    theme::plate(cut, Fill::solid(fill_c))
+                    theme::plate(cut, Fill::framed(hl.fill, hl.edge, 1.5))
                         .h(px(14.0))
                         .pl(px(6.0))
                         .pr(px(9.0))
                         .gap(px(5.0))
-                        .child(glyph(&glyph_kind, pal.ink, fill_c))
-                        .child(tracked(&label, 1.5).text_size(px(9.5)).font_weight(FontWeight::BOLD).text_color(rgb(pal.ink)))
+                        .child(glyph(&glyph_kind, hl.mark, hl.fill))
+                        .child(tracked(&label, 1.5).text_size(px(9.5)).font_weight(FontWeight::BOLD).text_color(rgb(hl.ink)))
                 } else {
+                    // Calm: a bone glyph, the state in text-dim (r21: a red dot read as
+                    // "recording" or "offline").
+                    let glyph_c = if tone == pal.accent { pal.text } else { tone };
                     div()
                         .flex()
                         .items_center()
                         .gap(px(5.0))
-                        .child(glyph(&glyph_kind, tone, pal.panel))
-                        .child(theme::metered(&label, 1.5, tone).text_size(px(9.5)).font_weight(FontWeight::BOLD).text_color(rgb(tone)))
+                        .child(glyph(&glyph_kind, glyph_c, pal.panel))
+                        .child(theme::metered(&label, 1.5, pal.dim).text_size(px(9.5)).font_weight(FontWeight::BOLD).text_color(rgb(pal.dim)))
                 });
             let caret = matches!(mode, PanelMode::Input { .. });
             let body_weight = if prompt_mode { FontWeight::BOLD } else { FontWeight::SEMIBOLD };
@@ -4995,9 +5119,9 @@ impl Render for Avatar {
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .text_size(px(15.0))
+                                .text_size(px(14.0))
                                 .font_weight(FontWeight::BOLD)
-                                .text_color(if live { rgb(pal.accent) } else { with_alpha(pal.dim, 0.45) })
+                                .text_color(if live { rgb(pal.dim) } else { with_alpha(pal.dim, 0.3) })
                                 .child(glyph_s)
                                 .when(live, |e| {
                                     e.cursor_pointer().on_mouse_down(
@@ -5021,7 +5145,7 @@ impl Render for Avatar {
                                 .items_center()
                                 .gap(px(2.0))
                                 .child(arrow("page-up", "‹", cur > 1, -1))
-                                .child(div().px(px(4.0)).text_size(px(12.5)).text_color(rgb(pal.text)).child(format!("{cur}/{n}")))
+                                .child(div().px(px(3.0)).text_size(px(11.5)).text_color(rgb(pal.dim)).child(format!("{cur}/{n}")))
                                 .child(arrow("page-down", "›", cur < n, 1)),
                         );
                     }
@@ -5030,13 +5154,14 @@ impl Render for Avatar {
                     }
                     let open = self.reader.is_some();
                     if let Some(b) = self.bubble.as_ref().filter(|b| b.long()) {
-                        // A solid red slanted pill, ink type: it reads as a button on any
-                        // frame (the outlined 10 px one nearly vanished). While the reader is
-                        // open the bubble is just this, full width: the control for the panel
-                        // beside her, no empty body.
-                        let label = if open { format!("◂ CLOSE READER · {} LINES", b.read_lines()) } else { format!("▸ READ ({} LINES)", b.read_lines()) };
+                        // The bubble's one primary control: a bone slanted pill, ink type and a
+                        // red arrow (17:1; r21: ink on red was too weak, and the red pager
+                        // beside it read as a second way on; the pager is text-dim now). While
+                        // the reader is open the bubble is just this, full width: the control
+                        // for the panel beside her, no empty body.
+                        let label = if open { format!("CLOSE READER · {} LINES", b.read_lines()) } else { format!("READ · {} LINES", b.read_lines()) };
                         let read_probes = self.buttons.clone();
-                        let (fill_c, ink_c) = (pal.accent, pal.ink);
+                        let (fill_c, ink_c, arrow_c) = (pal.text, pal.ink, pal.deep);
                         if open {
                             row = row.left(px(PAD_L));
                         }
@@ -5050,9 +5175,11 @@ impl Render for Avatar {
                             .px(px(14.0))
                             .flex()
                             .items_center()
+                            .gap(px(7.0))
                             .text_size(px(11.5))
                             .font_weight(FontWeight::EXTRA_BOLD)
                             .text_color(rgb(ink_c))
+                            .child(glyph(if open { "back" } else { "play" }, arrow_c, fill_c))
                             .child(tracked(&label, 1.3));
                         row = row
                             .child(chip.on_mouse_down(
@@ -5267,7 +5394,7 @@ impl Render for Avatar {
                 .flex()
                 .flex_col()
                 .py(px(4.0))
-                .child(theme::backdrop(MENU_CUT, Fill::framed(pal.panel, pal.border, 2.0).ringed(pal.ring)))
+                .child(theme::backdrop(MENU_CUT, Fill::framed(pal.panel, pal.accent, 2.0).ringed(pal.ring)))
                 .child(item("RESET POSITION").id("reset").on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, _: &MouseDownEvent, _, cx| {
