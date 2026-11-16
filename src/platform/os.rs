@@ -251,6 +251,10 @@ pub struct Os {
     body_at: Cell<(i32, i32)>,
     /// Her body window's size, px ((0, 0) before `adopt`).
     body_size: Cell<(i32, i32)>,
+    /// Her body hosts, one per output (`Caps::host_per_output`): id and its monitor.
+    hosts: RefCell<Vec<(WinId, Monitor)>>,
+    /// She moved to another host: the view shows her in it (`take_host_change`).
+    host_changed: Cell<Option<WinId>>,
 }
 
 impl Os {
@@ -273,6 +277,8 @@ impl Os {
             fx_list: RefCell::new(FxList::default()),
             body_at: Cell::new((0, 0)),
             body_size: Cell::new((0, 0)),
+            hosts: RefCell::new(Vec::new()),
+            host_changed: Cell::new(None),
         }
     }
 
@@ -312,7 +318,51 @@ impl Os {
             let (v, sf) = (window.viewport_size(), window.scale_factor());
             self.set_body_size((f32::from(v.width) * sf).round() as i32, (f32::from(v.height) * sf).round() as i32);
         }
-        self.stage.adopt(role, window)
+        let id = self.stage.adopt(role, window)?;
+        if role == Role::Body && self.caps.host_per_output {
+            let (b, k) = (window.bounds(), window.scale_factor());
+            let d = |v: Pixels| (f32::from(v) * k).round() as i32;
+            let (w, h) = self.body_size.get();
+            let m = self.monitor_at(d(b.origin.x) + w / 2, d(b.origin.y) + h / 2);
+            self.hosts.borrow_mut().push((id, m));
+        }
+        Ok(id)
+    }
+
+    /// Her body needs a host per output (`Caps::host_per_output`).
+    pub fn host_per_output(&self) -> bool {
+        self.caps.host_per_output
+    }
+
+    /// One body host per output (`Caps::host_per_output`): the monitors still without one.
+    pub fn hosts_wanted(&self) -> Vec<Monitor> {
+        if !self.caps.host_per_output {
+            return Vec::new();
+        }
+        let h = self.hosts.borrow();
+        self.monitors().into_iter().filter(|m| !h.iter().any(|(_, hm)| hm.rect() == m.rect())).collect()
+    }
+
+    /// Body hosts whose monitor is gone (dropped from the list: the view closes them).
+    pub fn hosts_gone(&self) -> Vec<WinId> {
+        let ms = self.monitors();
+        let mut h = self.hosts.borrow_mut();
+        let gone: Vec<WinId> = h.iter().filter(|(_, m)| !ms.iter().any(|x| x.rect() == m.rect())).map(|(id, _)| *id).collect();
+        h.retain(|(id, _)| !gone.contains(id));
+        gone
+    }
+
+    /// The body host she moved to since the last call, if any.
+    pub fn take_host_change(&self) -> Option<WinId> {
+        self.host_changed.take()
+    }
+
+    /// The host whose monitor holds the centre of her window at (x, y) (the nearest if none).
+    fn host_for(&self, x: i32, y: i32) -> Option<WinId> {
+        let h = self.hosts.borrow();
+        let (w, hh) = self.body_size.get();
+        let (cx, cy) = (x + w / 2, y + hh / 2);
+        h.iter().find(|(_, m)| m.contains(cx, cy)).or_else(|| h.iter().min_by_key(|(_, m)| m.distance2(cx, cy))).map(|(id, _)| *id)
     }
 
     /// Her body window's size, px (the effect layers inside it can show in it).
@@ -325,8 +375,15 @@ impl Os {
         self.stage.body()
     }
 
+    /// Body origin, root px; on another output's host when she crossed to it.
     pub fn move_to(&self, x: i32, y: i32) -> Result<()> {
         self.body_at.set((x, y));
+        if let Some(h) = self.host_for(x, y)
+            && h != self.stage.body()
+        {
+            self.stage.set_body(h);
+            self.host_changed.set(Some(h));
+        }
         self.stage.move_to(x, y)
     }
 

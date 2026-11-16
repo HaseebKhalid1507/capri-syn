@@ -101,6 +101,9 @@ pub struct Caps {
     /// Every change of the monitors or of what panels reserve comes as `Hint::Layout`: the
     /// core keeps the layout until one (else it re-reads it every few seconds).
     pub layout_events: bool,
+    /// A surface of hers shows on one output only: the core keeps a body host per output
+    /// and shows her in the one under her (else one window spans every monitor).
+    pub host_per_output: bool,
 }
 
 /// Where a window is, for the target poller (`Desktop::toplevel_place`).
@@ -257,8 +260,11 @@ pub trait Stage {
     fn dress(&self, role: Role, o: &mut WindowOptions);
     /// After `open_window`: the backend's id for it (the body's is remembered).
     fn adopt(&self, role: Role, window: &Window) -> Result<WinId>;
-    /// Her body's id (0 before `adopt`).
+    /// Her body's id (0 before `adopt`): the host she shows in.
     fn body(&self) -> WinId;
+    /// She shows in body host `s` from now on (`Caps::host_per_output`): body moves, shapes
+    /// and the keyboard go to it; the one she left takes no input.
+    fn set_body(&self, _s: WinId) {}
     /// Body origin, root px.
     fn move_to(&self, x: i32, y: i32) -> Result<()>;
     fn raise(&self) -> Result<()>;

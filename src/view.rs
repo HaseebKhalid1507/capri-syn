@@ -513,6 +513,10 @@ pub struct Avatar {
     glide: Option<(Instant, (i32, i32))>,
     /// When the perch window last moved.
     perch_moved: Option<Instant>,
+    /// Her body hosts (`Caps::host_per_output`): id, view, window. Empty: one window.
+    hosts: Vec<crate::host::Host>,
+    /// The monitors changed: hosts to open or close (`hosts_sync`).
+    hosts_stale: bool,
     glitch: Option<Glitch>,
     /// Frames drawn in the current glitch (keyed by its start): each gets a new pattern.
     glitch_step: Cell<(Option<Instant>, u64)>,
@@ -746,6 +750,8 @@ impl Avatar {
             next_hop: None,
             glide: None,
             perch_moved: None,
+            hosts: Vec::new(),
+            hosts_stale: false,
             glitch: None,
             glitch_step: Cell::new((None, 0)),
             glitch_at: Cell::new(None),
@@ -1744,8 +1750,50 @@ impl Avatar {
         t
     }
 
+    /// A body host of hers (`crate::host`).
+    pub fn add_host(&mut self, h: crate::host::Host) {
+        self.hosts.push(h);
+    }
+
+    /// She moved to another host: it shows her, the others nothing. The monitors changed:
+    /// a dormant host for each new one, the hosts of the ones gone closed.
+    fn hosts_sync(&mut self, cx: &mut Context<Self>) {
+        if self.hosts.is_empty() {
+            return;
+        }
+        if std::mem::take(&mut self.hosts_stale) {
+            let gone = self.os.hosts_gone();
+            for (id, _, w) in self.hosts.iter().filter(|h| gone.contains(&h.0)) {
+                elog!("synaps-avatar: body host 0x{id:x} closed (its monitor went away)");
+                w.update(cx, |_, window, _| window.remove_window()).ok();
+            }
+            self.hosts.retain(|h| !gone.contains(&h.0));
+            let me = cx.entity();
+            let size = (self.layout.win_w, self.layout.win_h);
+            for m in self.os.hosts_wanted() {
+                if let Some(h) = crate::host::open_dormant(cx, &self.os, &me, &m, size, self.layout.sf) {
+                    self.hosts.push(h);
+                }
+            }
+            // Where she is now picks the host (hers may be gone).
+            self.applied = (i32::MIN, i32::MIN);
+            self.apply_offset(Instant::now());
+        }
+        if let Some(active) = self.os.take_host_change() {
+            for (id, v, _) in &self.hosts {
+                v.update(cx, |h, cx| {
+                    h.active = *id == active;
+                    cx.notify();
+                })
+                .ok();
+            }
+            cx.notify();
+        }
+    }
+
     fn schedule(&mut self, cx: &mut Context<Self>) {
         let now = Instant::now();
+        self.hosts_sync(cx);
         // A pool in or out by a path that didn't relayer (a move along, a teleport's target).
         if self.art_sync(now) && self.loaded && self.layer(self.mood).0 != self.anim.base() {
             self.relayer(now);
@@ -3707,6 +3755,7 @@ impl Avatar {
             WatchEvent::Click(..) => {}
             WatchEvent::Layout => {
                 self.os.forget_layout();
+                self.hosts_stale = true;
                 // Her monitor went away (or a panel took her floor): down onto the nearest.
                 if self.placement == Placement::Ground && self.rag.is_none() && self.teleport.is_none() && Self::clamp(&self.os, &self.layout, self.origin) != self.origin {
                     self.fall("layout", now);

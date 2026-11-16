@@ -30,6 +30,7 @@ mod edges;
 mod facing;
 mod frames;
 mod fx;
+mod host;
 mod pack;
 mod art;
 mod variants;
@@ -314,13 +315,17 @@ fn run(t_start: Instant) -> Result<()> {
             .unwrap_or_else(|| view::Avatar::default_origin(&os, &layout));
 
         let bounds = Bounds::new(point(px(origin.0 as f32 / sf), px(origin.1 as f32 / sf)), size(px(layout.win_w as f32 / sf), px(layout.win_h as f32 / sf)));
-        let options = os.window_options(platform::Role::Body, bounds, false);
+        let mut options = os.window_options(platform::Role::Body, bounds, false);
+        let hosts = os.host_per_output();
+        if hosts {
+            options.display_id = host::display_for(cx, bounds);
+        }
 
         let (tx, rx) = async_channel::unbounded::<(control::Command, control::Reply)>();
         let mut built = None;
         let pack2 = pack.clone();
         let tx2 = tx.clone();
-        let opened = cx.open_window(options, |window, cx| {
+        let build = |window: &mut Window, cx: &mut App| {
             let win = match os.adopt(platform::Role::Body, window) {
                 Ok(w) => w,
                 Err(e) => {
@@ -391,13 +396,35 @@ fn run(t_start: Instant) -> Result<()> {
             let view = cx.new(|cx| view::Avatar::new(init, window, cx));
             built = Some(view.clone());
             view
-        });
+        };
+        // One window, or (`Caps::host_per_output`) her host on this output, the others dormant.
+        let mut first = None;
+        let opened: Result<AnyWindowHandle> = if hosts {
+            cx.open_window(options, |window, cx| {
+                let v = build(window, cx);
+                let h = cx.new(|_| host::HostView { avatar: v, active: true });
+                first = Some(h.downgrade());
+                h
+            })
+            .map(Into::into)
+        } else {
+            cx.open_window(options, build).map(Into::into)
+        };
         if let Err(e) = opened {
             elog!("synaps-avatar: cannot open the window: {e:#}");
             std::fs::remove_file(control::socket_path()).ok();
             std::process::exit(1);
         }
         let view = built.expect("window built");
+        if let (Ok(w), Some(h)) = (&opened, first) {
+            let size = (layout.win_w, layout.win_h);
+            let mut all = vec![(os.body(), h, *w)];
+            for m in os.hosts_wanted() {
+                all.extend(host::open_dormant(cx, &os, &view, &m, size, sf));
+            }
+            elog!("synaps-avatar: {} body hosts (one per output)", all.len());
+            view.update(cx, |v, _| all.into_iter().for_each(|h| v.add_host(h)));
+        }
 
         // Decode: the default frame first so something shows quickly, then the rest.
         let geo = layout.geo;

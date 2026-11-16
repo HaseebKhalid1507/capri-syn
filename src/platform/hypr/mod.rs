@@ -216,11 +216,16 @@ impl HyprDesktop {
         Some((s, c))
     }
 
-    /// The origin (root px) of the monitor the compositor puts a new layer surface on (the
-    /// focused one), and its scale.
-    fn focused_monitor(&self) -> ((i32, i32), f32) {
+    /// The origin (root px) and scale of the output holding logical point (x, y) (the
+    /// focused one if none does): where a layer surface with those bounds is made (the core
+    /// names that output in the window's `display_id`).
+    fn output_at(&self, x: f32, y: f32) -> Output {
         let ms = self.mons();
-        ms.iter().find(|m| m.focused).or(ms.first()).map_or(((0, 0), 1.0), |m| ((m.x, m.y), if m.scale > 0.0 { m.scale } else { 1.0 }))
+        let inside = |m: &&HMon| {
+            let r = m.monitor(false);
+            (r.x as f32..(r.x + r.w) as f32).contains(&x) && (r.y as f32..(r.y + r.h) as f32).contains(&y)
+        };
+        ms.iter().find(inside).or(ms.iter().find(|m| m.focused)).or(ms.first()).map_or(((0, 0), 1.0), |m| ((m.x, m.y), if m.scale > 0.0 { m.scale } else { 1.0 }))
     }
 
     /// Focus window `w` (an address id).
@@ -241,7 +246,7 @@ impl Desktop for HyprDesktop {
         // step is a redraw and a present. A layer surface loses the pointer when Hyprland
         // re-checks focus under it (her window moving at a drag's start), button held or not.
         // A window's `at`/`size` is its goal: the compositor slides it there.
-        Caps { shape_mode: false, target_events: false, fx_layers: false, costly_redraw: true, implicit_grab: false, goal_geometry: true, layout_events: true }
+        Caps { shape_mode: false, target_events: false, fx_layers: false, costly_redraw: true, implicit_grab: false, goal_geometry: true, layout_events: true, host_per_output: true }
     }
 
     fn root_size(&self) -> (i32, i32) {
@@ -297,11 +302,15 @@ impl Desktop for HyprDesktop {
     /// A mapped top or overlay layer asking for the keyboard exclusively has it (hers or
     /// another's); else the active window.
     fn focused_window(&self) -> Option<WinId> {
-        let code = "local r = '' for _, l in ipairs(hl.get_layers()) do if l.mapped and l.keyboard_interactivity == 1 and l.layer >= 2 then r = l.namespace .. ' ' .. l.address end end return r";
+        let code = "local r = '' for _, l in ipairs(hl.get_layers()) do if l.mapped and l.keyboard_interactivity == 1 and l.layer >= 2 then r = l.namespace .. ' ' .. l.address .. ' ' .. l.x .. ' ' .. l.y end end return r";
         if let Ok(r) = self.ipc.lua(code)
-            && let Some((ns, addr)) = r.split_once(' ')
+            && let [ns, addr, x, y] = r.split(' ').collect::<Vec<_>>()[..]
         {
-            return Some(if ours(ns) { self.id(&format!("ours:{ns}")) } else { self.id(addr) });
+            if !ours(ns) {
+                return Some(self.id(addr));
+            }
+            let (x, y) = (x.parse().unwrap_or(0.0), y.parse().unwrap_or(0.0));
+            return Some(self.id(&our_key(ns, ns == namespace(Role::Body), self.output_at(x, y).0)));
         }
         let v: serde_json::Value = self.ipc.json("activewindow").ok()?;
         self.value_id(&v)
@@ -418,6 +427,11 @@ pub struct LayerStage {
     body: std::cell::Cell<WinId>,
 }
 
+/// The id key of one of her surfaces: its namespace (body hosts: and their output).
+fn our_key(ns: &str, host: bool, output: (i32, i32)) -> String {
+    if host { format!("ours:{ns}@{},{}", output.0, output.1) } else { format!("ours:{ns}") }
+}
+
 fn namespace(role: Role) -> &'static str {
     match role {
         Role::Body => "capri-body",
@@ -443,15 +457,16 @@ impl LayerStage {
 }
 
 impl Stage for LayerStage {
-    /// A layer surface, anchored top-left on the focused output and placed by margins. Her
-    /// body on Top (Hyprland hides it under a fullscreen window), the Line and the reader on
-    /// Overlay (never hidden while they may hold the keyboard), the chip on Top.
+    /// A layer surface on the output under its bounds' centre, anchored top-left and placed
+    /// by margins. Her body on Top (Hyprland hides it under a fullscreen window), the Line and
+    /// the reader on Overlay (never hidden while they may hold the keyboard), the chip on Top.
     fn dress(&self, role: Role, o: &mut WindowOptions) {
         use gpui_kit::layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions};
         let ns = namespace(role);
-        let (output, scale) = self.desk.focused_monitor();
+        let b = o.window_bounds.map(|b| b.get_bounds()).unwrap_or_default();
+        let at = b.origin;
+        let (output, scale) = self.desk.output_at(f32::from(b.center().x), f32::from(b.center().y));
         self.dressed.borrow_mut().insert(ns, (output, scale));
-        let at = o.window_bounds.map(|b| b.get_bounds().origin).unwrap_or_default();
         let m = |v: Pixels, o: i32| px(f32::from(v) - o as f32 / scale);
         o.kind = WindowKind::LayerShell(LayerShellOptions {
             namespace: ns.to_string(),
@@ -471,16 +486,30 @@ impl Stage for LayerStage {
         };
         let ns = namespace(role);
         let (output, scale) = self.dressed.borrow().get(ns).copied().unwrap_or(((0, 0), 1.0));
-        let id = self.desk.id(&format!("ours:{ns}"));
+        // One id per surface (body hosts share a namespace).
+        let id = self.desk.id(&our_key(ns, role == Role::Body, output));
         self.surfaces.borrow_mut().insert(id, Surface { ptr, ns, output, scale });
         if role == Role::Body {
-            self.body.set(id);
+            if self.body.get() == 0 {
+                self.body.set(id);
+            } else {
+                // A dormant host: nothing of hers, no input.
+                layer_ctl::set_input_region(ptr, Some(&[]));
+            }
         }
         Ok(id)
     }
 
     fn body(&self) -> WinId {
         self.body.get()
+    }
+
+    /// The host she left takes no input (its pixels go with the frame it draws empty).
+    fn set_body(&self, s: WinId) {
+        if let Some(old) = self.body_surface() {
+            layer_ctl::set_input_region(old.ptr, Some(&[]));
+        }
+        self.body.set(s);
     }
 
     /// Margins, committed with the next frame (or alone if none is coming): her pixels and
