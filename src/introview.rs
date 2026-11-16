@@ -1,8 +1,8 @@
 //! The cinematic intro on screen (`crate::intro` decides what shows when): the pack's local
 //! close-ups decoded off the main thread at the launch's size, her close-up window over the
 //! desktop (shaped like the art, input on its pixels only: a click there or Esc anywhere skips
-//! to the out beat), then the launch bolt onto the floor or the window she sat on last time
-//! (`perchArrive`). The launch heartbeat (`state::save_seen`) lives here too: it's what tells
+//! to the out beat), then the launch bolt onto the floor or the window she sat on last time.
+//! The launch heartbeat (`state::save_seen`) lives here too: it's what tells
 //! a relaunch from a greeting.
 
 use super::{Avatar, Placement};

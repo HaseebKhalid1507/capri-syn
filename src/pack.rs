@@ -333,6 +333,8 @@ pub struct ArriveSpec {
     pub teleport: Vec<Step>,
     /// Onto a window top (seat-anchored frames only).
     pub perch: Vec<Step>,
+    /// Its last frame dissolves into her sitting pose over this long (ms; 0: a cut).
+    pub perch_blend_ms: u32,
     /// The chance a passive or bid teleport lands with `teleport` / `perch` when the last one
     /// didn't (never twice running: 0.5 gives 1 in 3).
     pub teleport_chance: f32,
@@ -463,14 +465,16 @@ pub struct Behaviour {
     /// Variant pools: more than one art option per state (`crate::variants`).
     #[serde(default)]
     pub variants: Option<crate::variants::VariantsSpec>,
-    /// Drawn in-betweens from the desktop art (`anim/`), by change: `perchArrive` (landing on a
-    /// window top). Without `anim/` they don't exist and the pack's own frames play.
+    /// Drawn in-betweens from the desktop art (`anim/`), by change (`TRANSITIONS`). Without
+    /// `anim/` they don't exist and the pack's own frames play.
     #[serde(default)]
     pub transitions: BTreeMap<String, String>,
 }
 
 /// The transitions a pack may name, and the anchor each needs.
-pub const TRANSITIONS: [(&str, &str); 1] = [("perchArrive", "seat")];
+/// `perchLeave`: off a window top into the bolt; `floorArrive` / `floorLeave`: a teleport's
+/// landing on / leaving from the floor; `wake`: up from her sleep on the floor.
+pub const TRANSITIONS: [(&str, &str); 4] = [("perchLeave", "seat"), ("floorArrive", "ground"), ("floorLeave", "ground"), ("wake", "ground")];
 
 impl Behaviour {
     /// The art faces right unmirrored (`faces`, default right).
@@ -718,6 +722,7 @@ pub struct Pack {
     /// has no `anim/`, so an old pack's pool is its own art alone.
     pub pools: HashMap<crate::variants::PoolKey, Pool>,
     /// `moods.json` `transitions`, resolved: strip indices into `anim`.
+    #[allow(dead_code)] // played from the §6.2 transitions commit on
     pub transitions: HashMap<String, usize>,
     pub cache_bytes: usize,
 }
@@ -1215,11 +1220,6 @@ impl Pack {
         Ok(pack)
     }
 
-    /// Strip `si`'s art family (`anim.json` families: a cut within one flows, no seam).
-    pub fn strip_family(&self, si: usize) -> Option<u16> {
-        self.anim.as_ref()?.strips.get(si).map(|s| s.family_id)
-    }
-
     /// A strip's cells as a sequence, every `every`-th cell held `every` times as long.
     pub fn strip_seq(&self, si: usize, every: u32) -> Seq {
         let (Some(a), Some(Some(first))) = (&self.anim, self.strip_first.get(si)) else { return Vec::new() };
@@ -1403,16 +1403,17 @@ pub mod tests {
             m["transitions"] = t;
             pack_in("trans", m, anim, |p| p.map_err(|e| format!("{e:#}")).map(|p| (p.transitions.clone(), p.strip_first.clone(), p.anim.as_ref().map(|a| a.by_name.clone()))))
         };
-        let (t, first, names) = with(json!({"perchArrive": "perch_in"}), true).unwrap();
+        let (t, first, names) = with(json!({"perchLeave": "perch_in"}), true).unwrap();
         let si = names.unwrap()["perch_in"];
-        assert_eq!(t.get("perchArrive"), Some(&si));
+        assert_eq!(t.get("perchLeave"), Some(&si));
         assert!(first[si].is_some(), "its cells are frames");
-        assert!(with(json!({"perchArrive": "lie"}), true).unwrap_err().contains("needs a seat anchor and to be a one-shot"), "a loop");
-        assert!(with(json!({"perchArrive": "stand"}), true).unwrap_err().contains("needs a seat anchor"));
-        assert!(with(json!({"perchArrive": "gone"}), true).unwrap_err().contains("`gone` is not in anim/anim.json"));
-        assert!(with(json!({"teleportOut": "lie"}), true).unwrap_err().contains("unknown change `teleportOut` (perchArrive)"));
+        assert!(with(json!({"perchLeave": "lie"}), true).unwrap_err().contains("needs a seat anchor and to be a one-shot"), "a loop");
+        assert!(with(json!({"perchLeave": "stand"}), true).unwrap_err().contains("needs a seat anchor"));
+        assert!(with(json!({"wake": "perch_in"}), true).unwrap_err().contains("needs a ground anchor"));
+        assert!(with(json!({"perchLeave": "gone"}), true).unwrap_err().contains("`gone` is not in anim/anim.json"));
+        assert!(with(json!({"perchArrive": "perch_in"}), true).unwrap_err().contains("unknown change `perchArrive` (perchLeave|floorArrive|floorLeave|wake)"));
         // A pack without anim/: none, and no error.
-        assert!(with(json!({"perchArrive": "perch_in"}), false).unwrap().0.is_empty());
+        assert!(with(json!({"perchLeave": "perch_in"}), false).unwrap().0.is_empty());
     }
 
     fn extra(id: &str, anchor: &str) -> serde_json::Value {
@@ -1483,7 +1484,10 @@ pub mod tests {
         // Her plain red bolt replaces the intro's first frame (Haseeb 08:06 §6.1); 07 is neutral.
         assert_eq!(ids(&a.launch), ["intro-gaze", "intro-arrival", "intro-landing", "intro-greeting", "intro-wink", "neutral"]);
         assert!(!ids(&a.summon).contains(&"intro-wink".to_string()), "no wink on a summon");
-        assert_eq!(ids(&a.perch).last().map(String::as_str), Some("transition-edge_perch"));
+        // r29: the touchdown is the crouch, dissolving into the sit (no frame with her legs
+        // through the edge).
+        assert_eq!(ids(&a.perch), ["intro-landing-seat"]);
+        assert!(a.perch_blend_ms > 0);
         // One perch frame (§6.2): no per-mood or activity swaps while perched.
         let p = b.perch.as_ref().unwrap();
         assert!(p.moods.is_empty() && p.activities.is_empty() && p.click.is_empty());

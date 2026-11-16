@@ -28,11 +28,10 @@ pub(super) enum ArriveKind {
 pub(super) struct ArriveState {
     /// Played as she appears from the teleport in flight.
     on_appear: Option<Seq>,
-    /// A drawn arrival onto a window top (`perchArrive`): it plays instead when the perch pick
-    /// is drawn art of its family (`arrive_appeared`).
-    on_appear_strip: Option<usize>,
     /// An arrival sequence is playing until then: a relayer doesn't cut it.
     pub until: Option<Instant>,
+    /// The arrival's last frame dissolves into her pose: (that frame, from, ms).
+    pub blend: Option<(usize, Instant, u32)>,
     /// A drawn arrival forms her until then (its first cells are the forming): the HUD waits.
     pub formed: Option<Instant>,
     /// The last passive/bid teleport landed with the sequence.
@@ -88,51 +87,44 @@ impl Avatar {
             elog!("synaps-avatar: arrival {k:?}: {} frames", seq.len());
         }
         self.arrive.on_appear = (!seq.is_empty()).then_some(seq);
-        self.arrive.on_appear_strip = self.perch_arrive_strip(self.teleport_place());
     }
 
-    /// `perchArrive` for a landing on `place` (sitting on a window top): asked for now, so its
-    /// cells are in by the contact.
-    fn perch_arrive_strip(&self, place: Option<Placement>) -> Option<usize> {
-        let si = self.pack.transitions.get("perchArrive").copied().filter(|_| self.sitting_at(place))?;
-        self.art_need(si);
-        Some(si)
-    }
-
-    /// She reappears from a teleport: its arrival sequence, if it has one. On a window top the
-    /// arrival is the art she lands in (no cut, so no seam glitch, after the contact): the
-    /// pack's own sequence before its own pose; before a drawn pose, its family's drawn arrival
-    /// (`perchArrive`), or none if that isn't in (the landing glitch covers the cut).
+    /// She reappears from a teleport (the landing glitch starts now): its arrival sequence, if
+    /// it has one. On a window top it is the pack's touchdown (`arrive.perch`): before the pack's
+    /// own pose its last frame dissolves into the pose (`perchBlendMs`); before a drawn pose
+    /// only its first frame plays, cut inside the landing glitch, so the change of art happens
+    /// before she is solid and nothing is cut after the contact.
     pub(super) fn arrive_appeared(&mut self, now: Instant) {
-        let own = self.arrive.on_appear.take();
-        let strip = self.arrive.on_appear_strip.take();
-        let drawn = if self.sitting() {
+        let Some(own) = self.arrive.on_appear.take() else { return };
+        let land_ms = self.glitch.filter(|g| g.kind == GlitchKind::Land).map_or(0.0, |g| g.ms);
+        let blend_ms = self.pack.behaviour.arrive.as_ref().map_or(0, |a| a.perch_blend_ms);
+        let drawn = self.sitting() && {
             self.art_sync(now);
-            self.art_strip_family()
-        } else {
-            None
+            self.art_strip().is_some()
         };
-        let drawn_in = strip.and_then(|si| Some((si, self.pack.strip_family(si)?, self.art_ready(si))));
-        let seq = match (perch_arrival(drawn, drawn_in.map(|d| (d.1, d.2))), drawn_in) {
-            (PerchArrival::Own, _) => own,
-            (PerchArrival::Drawn, Some((si, ..))) => {
-                let seq = self.pack.strip_seq(si, 1);
-                let ms: u64 = seq.iter().map(|s| s.1 as u64).sum();
-                self.arrive.formed = Some(now + Duration::from_millis(ms));
-                Some(seq)
-            }
-            _ => None,
+        let seq = match perch_touchdown(self.sitting(), drawn, land_ms) {
+            Touchdown::Whole => own,
+            Touchdown::Cut(ms) => own.first().map(|&(f, _)| vec![(f, ms)]).unwrap_or_default(),
         };
-        let Some(seq) = seq.filter(|s| !s.is_empty()) else { return };
+        let Some(&(last, _)) = seq.last() else { return };
         let ms: u64 = seq.iter().map(|s| s.1 as u64).sum();
+        if self.sitting() && !drawn && blend_ms > 0 {
+            self.arrive.blend = Some((last, now + Duration::from_millis(ms), blend_ms));
+        }
         self.anim.play(seq, now);
         self.arrive.until = Some(now + Duration::from_millis(ms));
+    }
+
+    /// The arrival's dissolve into her pose at `now`: (the frame dissolving, 0..1).
+    pub(super) fn arrive_blend(&self, now: Instant) -> Option<(usize, f32)> {
+        let (f, t0, ms) = self.arrive.blend?;
+        let u = now.checked_duration_since(t0)?.as_secs_f32() * 1000.0 / ms.max(1) as f32;
+        (u < 1.0 && self.anim.frame() != f).then_some((f, u))
     }
 
     /// A new teleport, or one that ended before she appeared: nothing pending.
     pub(super) fn arrive_reset(&mut self) {
         self.arrive.on_appear = None;
-        self.arrive.on_appear_strip = None;
         self.arrive.formed = None;
         self.arrive.launching = false;
     }
@@ -167,8 +159,7 @@ impl Avatar {
             _ => Vec::new(),
         };
         let seq = self.pack.flatten(&steps);
-        let strip = self.pack.transitions.get("perchArrive").copied().filter(|_| perch);
-        if seq.is_empty() && strip.is_none() {
+        if seq.is_empty() {
             return false;
         }
         let at = self.center_root(to);
@@ -180,9 +171,8 @@ impl Avatar {
         self.glitch = None;
         let moved = to == self.origin && place == self.placement;
         self.teleport = Some(Teleport { seed, leg: Leg::Bolt(now), to, place, bolt: Some(bolt), moved, no_bolt: false, quiet: false });
-        elog!("synaps-avatar: arrival Launch: {} frames after the bolt{}", seq.len(), if strip.is_some() { " (or perchArrive)" } else { "" });
-        self.arrive.on_appear = (!seq.is_empty()).then_some(seq);
-        self.arrive.on_appear_strip = self.perch_arrive_strip(Some(place));
+        elog!("synaps-avatar: arrival Launch: {} frames after the bolt", seq.len());
+        self.arrive.on_appear = Some(seq);
         self.arrive.launching = true;
         true
     }
@@ -426,23 +416,25 @@ impl Avatar {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PerchArrival {
-    /// The pack's own sequence (she lands in its own pose).
-    Own,
-    /// The drawn arrival, its family's.
-    Drawn,
-    /// Nothing: the landing glitch covers the cut into her drawn pose.
-    None,
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Touchdown {
+    /// The whole sequence.
+    Whole,
+    /// Its first frame only, this long: the cut into drawn art falls inside the landing glitch.
+    Cut(u32),
 }
 
-/// The arrival onto a window top that matches the art she lands in (`lands_in`: a drawn
-/// family, None: the pack's own), given the drawn arrival's family and whether its cells are in.
-fn perch_arrival(lands_in: Option<u16>, drawn: Option<(u16, bool)>) -> PerchArrival {
-    match (lands_in, drawn) {
-        (None, _) => PerchArrival::Own,
-        (Some(f), Some((g, true))) if f == g => PerchArrival::Drawn,
-        (Some(_), _) => PerchArrival::None,
+/// Where in the landing glitch (`land_ms` long) the touchdown cuts to a drawn pose: well before
+/// it settles.
+const CUT_IN_LAND: f32 = 0.55;
+
+/// The touchdown for a landing: sitting on a window top in a drawn pose, the first frame cut
+/// inside the landing glitch; else all of it.
+fn perch_touchdown(sitting: bool, drawn: bool, land_ms: f32) -> Touchdown {
+    if sitting && drawn {
+        Touchdown::Cut((land_ms * CUT_IN_LAND).round().max(1.0) as u32)
+    } else {
+        Touchdown::Whole
     }
 }
 
@@ -463,15 +455,13 @@ mod tests {
     use crate::anim::Rng;
 
     #[test]
-    fn a_perch_arrival_is_the_art_she_lands_in() {
-        // Her own pose: the pack's own sequence, whatever drawn arrival there is.
-        assert_eq!(perch_arrival(None, Some((2, true))), PerchArrival::Own);
-        assert_eq!(perch_arrival(None, None), PerchArrival::Own);
-        // A drawn pose: its family's drawn arrival, never the pack's frames before it.
-        assert_eq!(perch_arrival(Some(2), Some((2, true))), PerchArrival::Drawn);
-        assert_eq!(perch_arrival(Some(2), Some((2, false))), PerchArrival::None, "not in yet");
-        assert_eq!(perch_arrival(Some(3), Some((2, true))), PerchArrival::None, "another family (a lying pick)");
-        assert_eq!(perch_arrival(Some(2), None), PerchArrival::None, "a pack without one");
+    fn a_drawn_perch_pose_is_cut_to_inside_the_landing_glitch() {
+        assert_eq!(perch_touchdown(true, false, 330.0), Touchdown::Whole, "her own pose: the whole touchdown");
+        assert_eq!(perch_touchdown(false, true, 330.0), Touchdown::Whole, "on the floor");
+        let Touchdown::Cut(ms) = perch_touchdown(true, true, 330.0) else { panic!() };
+        assert!(ms > 100 && ms < 330 * 2 / 3, "{ms}: inside the glitch, before it settles");
+        assert_eq!(perch_touchdown(true, true, 70.0), Touchdown::Cut(39), "a quiet landing's short glitch");
+        assert_eq!(perch_touchdown(true, true, 0.0), Touchdown::Cut(1), "no glitch: at once");
     }
 
     #[test]

@@ -1624,7 +1624,11 @@ impl Avatar {
     fn sync_shadow(&mut self) {
         let want = self.sitting() && self.loaded && !self.hidden && self.teleport.is_none() && !self.quitting && self.press.is_none() && self.rag.is_none();
         // The resting frame of the current layer (music swaps the pose), else the perch base.
-        let base = Some(self.anim.base())
+        // An arrival's touchdown (and its dissolve) is on the edge now: its frame, not the pose
+        // it ends in (whose planted hand left a dark dash beside her).
+        let now = Instant::now();
+        let shown = if self.arriving(now) { self.anim.frame() } else { self.anim.base() };
+        let base = Some(shown)
             .filter(|&i| self.pack.frames.get(i).is_some_and(|f| f.anchor.name == "seat"))
             .or_else(|| self.perch_spec().and_then(|p| self.pack.index.get(&p.base).copied()));
         let (Some(base), true) = (base, want) else {
@@ -1734,6 +1738,9 @@ impl Avatar {
         take(self.next_glitch);
         if self.squash.is_some() || self.sliver.is_some() || self.turn.is_some() {
             take(Some(now + FRAME_FAST));
+        }
+        if let Some((_, t0, _)) = self.arrive.blend {
+            take(Some((now + FRAME_FX).max(t0)));
         }
         // Glints: at their slice centres (fx::GLINT_STEPS per life), not a free-running tick;
         // a step waiting for company (GLINT_SLACK) at the end of its wait.
@@ -1847,6 +1854,14 @@ impl Avatar {
         }
         let before = self.anim.frame();
         let mut dirty = self.anim.tick(now);
+        if let Some((_, t0, ms)) = self.arrive.blend
+            && t0 <= now
+        {
+            dirty = true;
+            if now >= t0 + Duration::from_millis(ms as u64) {
+                self.arrive.blend = None;
+            }
+        }
         self.voice_keepalive(now, cx);
         if dirty {
             self.lying_cut(before, now);
@@ -4580,6 +4595,26 @@ impl Render for Avatar {
         } else {
             plan.shape(&rects)
         };
+        // An arrival's last frame dissolving into her pose: its rows drop out over the pose,
+        // each where it is (1-bit friendly: no alpha).
+        let blend = self.arrive_blend(now).filter(|_| !hidden && self.glitch.is_none() && plan.tint.is_none()).and_then(|(fi, u)| {
+            let f = self.frame_or_default(fi)?;
+            let rows = crate::intro::out_bands(ah, u, self.t_start.elapsed().as_millis() as u64 | 1, (6.0 * sf).round() as i32);
+            let keep: Vec<ShapeRect> = f
+                .rects
+                .iter()
+                .flat_map(|&(x, y, w, h)| {
+                    rows.iter().filter_map(move |&(y0, y1, ..)| {
+                        let (a, b) = ((y as i32).max(y0), (y as i32 + h as i32).min(y1));
+                        (b > a).then_some((x, a as i16, w, (b - a) as u16))
+                    })
+                })
+                .collect();
+            Some((f.image.clone(), (f.at, f.image_size()), rows, keep))
+        });
+        if let Some((.., keep)) = &blend {
+            body_shape.extend(keep.iter().copied());
+        }
         // Shape mode turn: the art as it is (it's on screen already), shown through a band
         // about her feet (`facing::turn_band`); only the shape moves, so nothing lands late.
         if turning && !alpha {
@@ -4745,6 +4780,12 @@ impl Render for Avatar {
                         }
                         for &(r, c) in &bar_rects {
                             window.paint_quad(fill(rect(r.0 as f32, r.1 as f32, r.2 as f32, r.3 as f32), rgb(c)));
+                        }
+                        if let Some((img, at, rows, _)) = &blend {
+                            let whole = put(*at, 0.0, 0.0, aw as f32, ah as f32);
+                            for &(y0, y1, ..) in rows {
+                                window.paint_image(rect(0.0, y0 as f32, aw as f32, (y1 - y0) as f32), whole, Corners::default(), img.clone(), 0, false).ok();
+                            }
                         }
                     }
                     let e = entity.clone();

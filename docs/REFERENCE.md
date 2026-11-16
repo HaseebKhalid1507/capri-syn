@@ -190,10 +190,10 @@ With `anim/`, `moods.json` `variants` mixes that art in; she never swaps one set
   goes through a glitch (the body's; her tag stays whole).
 - Strips decode when first wanted, off the main thread; `cacheMb` caps what is kept (least recently shown
   first, never what is on screen). A pack without `anim/` keeps only the pack's own variants.
-- `transitions` names drawn in-betweens by change: `perchArrive` (a one-shot seat strip). Landing on a
-  window top, the arrival is the art she lands in, so nothing is cut after the contact: her perch pick is
-  the pack's own pose → `arrive.perch`; a drawn pose → its family's `perchArrive` (none if its cells
-  aren't in: the landing glitch covers the cut). Her tag comes back once the drawn arrival has formed her.
+- Landing on a window top she touches down with the pack's `arrive.perch` (Capri: her crouch on the
+  edge). Before the pack's own sit its last frame dissolves into the sit over `arrive.perchBlendMs`
+  (rows drop out where they are). Before a drawn pose (lachy's perch) only that first frame plays, cut
+  inside the landing glitch, so the art changes before she's solid and nothing is cut after the contact.
 
 The launch, with `[intro] cinematic` on:
 
