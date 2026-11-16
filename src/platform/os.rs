@@ -33,9 +33,9 @@ struct Shared {
     space: AtomicI64,
     /// Bumped by every `Hint::Layout` (the cached layout is stale).
     layout_gen: AtomicU64,
-    /// How long ago the target's last move (as the poller found it) likely began, ms: half the
-    /// wait it slept through; 0 when a hint woke it (the move just happened).
-    moved_age_ms: AtomicU64,
+    /// When the target's last move (as the poller found it) likely began: halfway through the
+    /// sleep it slept out, or when a hint woke it (the move had just happened).
+    moved_at: Mutex<Option<Instant>>,
 }
 
 const NO_SPACE: i64 = i64::MIN;
@@ -280,7 +280,7 @@ pub struct Os {
 impl Os {
     pub fn new(desk: Arc<dyn Desktop>, stage: Box<dyn Stage>) -> Os {
         let caps = desk.caps();
-        let shared = Shared { target: AtomicU32::new(0), composited: AtomicBool::new(desk.compositor_running()), poller: OnceLock::new(), space: AtomicI64::new(NO_SPACE), layout_gen: AtomicU64::new(0), moved_age_ms: AtomicU64::new(0) };
+        let shared = Shared { target: AtomicU32::new(0), composited: AtomicBool::new(desk.compositor_running()), poller: OnceLock::new(), space: AtomicI64::new(NO_SPACE), layout_gen: AtomicU64::new(0), moved_at: Mutex::new(None) };
         Os {
             desk,
             stage,
@@ -562,10 +562,10 @@ impl Os {
     }
 
     /// A perch that jumps glides after its window (`Caps::goal_geometry`).
-    /// How long ago the perch target's last move likely began (the poller's estimate; zero
-    /// where the backend tells of every move).
-    pub fn target_move_age(&self) -> Duration {
-        Duration::from_millis(self.shared.moved_age_ms.load(Ordering::Relaxed))
+    /// When the perch target's last move likely began (the poller's estimate; None where the
+    /// backend tells of every move: then, when it's handled).
+    pub fn target_moved_at(&self) -> Option<Instant> {
+        self.shared.moved_at.lock().ok().and_then(|m| *m)
     }
 
     /// How a perch that jumps follows its window (`Caps::goal_geometry`): on the compositor's
@@ -897,8 +897,10 @@ impl Os {
                 if let Some(h) = hint {
                     // Slept it out: the move began somewhere in that sleep. Woken early (a
                     // hint): just now.
-                    let age = slept.filter(|(at, w)| now.duration_since(*at) + Duration::from_millis(2) >= *w).map_or(0, |(_, w)| w.as_millis() as u64 / 2);
-                    s.moved_age_ms.store(age, Ordering::Relaxed);
+                    let age = slept.filter(|(at, w)| now.duration_since(*at) + Duration::from_millis(2) >= *w).map_or(Duration::ZERO, |(_, w)| w / 2);
+                    if let Ok(mut m) = s.moved_at.lock() {
+                        *m = Some(now.checked_sub(age).unwrap_or(now));
+                    }
                     s.hint(&*d, h, &*on);
                 }
                 slept = Some((Instant::now(), wait));

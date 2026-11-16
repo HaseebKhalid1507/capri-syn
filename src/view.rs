@@ -3748,9 +3748,10 @@ impl Avatar {
                     let far = (jump.0 * jump.0 + jump.1 * jump.1) as f32 > (GLIDE_MIN * self.layout.sf).powi(2);
                     let stream = self.perch_moved.is_some_and(|t| now.duration_since(t) < GLIDE_STREAM);
                     self.perch_moved = Some(now);
-                    // Found late (the poller slept through the move's start): on the curve from
-                    // where the window is by now, so she rides it from the next frame.
-                    let since = now.checked_sub(self.os.target_move_age()).unwrap_or(now);
+                    // On the curve from when the move began (the poller's stamp, not when this
+                    // runs: found late, or handled a frame later, she rides it from where the
+                    // window is by now).
+                    let since = self.os.target_moved_at().filter(|t| *t <= now && now.duration_since(*t) < Duration::from_secs(1)).unwrap_or(now);
                     self.glide = self.os.perch_glide().filter(|_| far && !stream).map(|a| (since, jump, a));
                     self.set_origin(o);
                 } else {
