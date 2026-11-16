@@ -2,7 +2,7 @@
 //! in as plain data (`Desktop`) and go out as primitives (`Stage`); the rules live here.
 
 use super::track::Track;
-use super::{Caps, Desktop, FxZ, Hint, Monitor, PointerCfg, PointerEv, Role, SEAT_MIN, ShapeRect, Stage, Visible, WatchEvent, WinId, WinRect};
+use super::{Caps, Desktop, FxZ, Hint, Monitor, MoveAnim, PointerCfg, PointerEv, Role, SEAT_MIN, ShapeRect, Stage, Visible, WatchEvent, WinId, WinRect};
 use anyhow::Result;
 use gpui_kit::{Bounds, Pixels, TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, fill, point, px, rgb, size};
 use std::cell::{Cell, RefCell};
@@ -33,6 +33,9 @@ struct Shared {
     space: AtomicI64,
     /// Bumped by every `Hint::Layout` (the cached layout is stale).
     layout_gen: AtomicU64,
+    /// How long ago the target's last move (as the poller found it) likely began, ms: half the
+    /// wait it slept through; 0 when a hint woke it (the move just happened).
+    moved_age_ms: AtomicU64,
 }
 
 const NO_SPACE: i64 = i64::MIN;
@@ -252,6 +255,8 @@ pub struct Os {
     force: Cell<u8>,
     mons: Cached,
     areas: Cached,
+    /// The compositor's window-move animation, as read at a layout generation (`perch_glide`).
+    move_anim: Cell<Option<(u64, Option<MoveAnim>)>>,
     /// While she's carried or flying: both caches stay as snapshotted at the grab (no round
     /// trip inside a 60 Hz tick).
     frozen: Cell<bool>,
@@ -277,7 +282,7 @@ pub struct Os {
 impl Os {
     pub fn new(desk: Arc<dyn Desktop>, stage: Box<dyn Stage>) -> Os {
         let caps = desk.caps();
-        let shared = Shared { target: AtomicU32::new(0), composited: AtomicBool::new(desk.compositor_running()), poller: OnceLock::new(), space: AtomicI64::new(NO_SPACE), layout_gen: AtomicU64::new(0) };
+        let shared = Shared { target: AtomicU32::new(0), composited: AtomicBool::new(desk.compositor_running()), poller: OnceLock::new(), space: AtomicI64::new(NO_SPACE), layout_gen: AtomicU64::new(0), moved_age_ms: AtomicU64::new(0) };
         Os {
             desk,
             stage,
@@ -286,6 +291,7 @@ impl Os {
             force: Cell::new(0),
             mons: RefCell::new(None),
             areas: RefCell::new(None),
+            move_anim: Cell::new(None),
             frozen: Cell::new(false),
             poll: RefCell::new(None),
             shape_sends: Cell::new(0),
@@ -559,8 +565,33 @@ impl Os {
     }
 
     /// A perch that jumps glides after its window (`Caps::goal_geometry`).
-    pub fn perch_glides(&self) -> bool {
-        self.caps.goal_geometry
+    /// How long ago the perch target's last move likely began (the poller's estimate; zero
+    /// where the backend tells of every move).
+    pub fn target_move_age(&self) -> Duration {
+        Duration::from_millis(self.shared.moved_age_ms.load(Ordering::Relaxed))
+    }
+
+    /// How a perch that jumps follows its window (`Caps::goal_geometry`): on the compositor's
+    /// own move animation (read again after a layout change: a config reload is one), so she
+    /// rides the window instead of trailing it; a plain ease-out where the backend can't say.
+    /// None: she snaps (the window jumps too).
+    pub fn perch_glide(&self) -> Option<MoveAnim> {
+        if !self.caps.goal_geometry {
+            return None;
+        }
+        let g = self.layout_gen();
+        match self.move_anim.get() {
+            Some((at, a)) if at == g => a,
+            _ => {
+                let a = match self.desk.move_anim() {
+                    Some(a) if a.ms <= 0.0 => None,
+                    Some(a) => Some(a),
+                    None => Some(MoveAnim::EASE_OUT),
+                };
+                self.move_anim.set(Some((g, a)));
+                a
+            }
+        }
     }
 
     /// Effect steps that can wait ride redraws that happen anyway: a redraw is a full present
@@ -860,10 +891,13 @@ impl Os {
         let (s, d) = (self.shared.clone(), self.desk.clone());
         let h = std::thread::Builder::new().name("avatar-target".into()).spawn(move || {
             let mut track = TargetTrack::default();
+            // The last sleep: (since, for how long).
+            let mut slept: Option<(Instant, Duration)> = None;
             loop {
                 let t = s.target.load(Ordering::Relaxed);
                 if t == 0 {
                     track = TargetTrack::default();
+                    slept = None;
                     std::thread::park();
                     continue;
                 }
@@ -873,8 +907,13 @@ impl Os {
                     s.space.store(track.space.unwrap_or(NO_SPACE), Ordering::Relaxed);
                 }
                 if let Some(h) = hint {
+                    // Slept it out: the move began somewhere in that sleep. Woken early (a
+                    // hint): just now.
+                    let age = slept.filter(|(at, w)| now.duration_since(*at) + Duration::from_millis(2) >= *w).map_or(0, |(_, w)| w.as_millis() as u64 / 2);
+                    s.moved_age_ms.store(age, Ordering::Relaxed);
                     s.hint(&*d, h, &*on);
                 }
+                slept = Some((Instant::now(), wait));
                 std::thread::park_timeout(wait);
             }
         })?;

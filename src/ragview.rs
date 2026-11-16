@@ -39,9 +39,9 @@ pub(super) struct Rag {
     wobble: ragdoll::Wobble,
     /// The chain's band offsets, held (no 1 px back-and-forth between ticks).
     hold: ragdoll::BandHold,
-    /// Each drawn row's ink centre at the last plan, relative to the grip: (source row, x)
-    /// (`cap_lean`), and the rag's time then.
-    drawn: Vec<(i32, f32)>,
+    /// The lean the last plan drew (degrees, `plan_lean`; None: none yet, she was upright), and
+    /// the rag's time then (`cap_lean`).
+    drawn: Option<f32>,
     drawn_t: f32,
     /// The ink centre of each source row of the art as shown, for (frame, mirrored).
     centres: Option<((usize, bool), Centres)>,
@@ -107,40 +107,41 @@ fn tick_period() -> Duration {
     Duration::from_secs_f64(ms / 1000.0)
 }
 
-/// The most a drawn row turns about the grip in a 60 Hz frame, degrees (`cap_lean`). Her
-/// lean read off the screen (hips to feet, `tools/dragpace.py`) then changes by ≤ ~6° a frame
-/// (at 5.5 the rows' bends added up to 7.4). By time, not per plan: where ticks outrun the
-/// compositor's frames (Hyprland: two plans in one frame) a frame still turns this much.
-const LEAN_STEP: f32 = 4.5;
+/// The most her lean (`plan_lean`) turns in a 60 Hz tick, degrees (`cap_lean`). By time, not
+/// per plan (two plans in one compositor frame turned twice as far). 3, not 6: a captured frame
+/// can hold two ticks (render jitter against the refresh), and showed ~8° at 4.5 (bella, X11).
+const LEAN_STEP: f32 = 3.0;
 const LEAN_FRAME: f32 = 1.0 / 60.0;
 
-/// Her lean changes by `LEAN_STEP` a frame at most, whatever moved it (the chain, a turn that
-/// mirrors a leaning pose, a chain rebuilt straight for it): each band's ink centre, relative
-/// to the grip, moves at most `tan_step` × its distance from the grip row (+1 px) from where
-/// the band nearest its source row was drawn last plan; its dx is clamped to that. `centres`:
-/// the art's ink centre per source row (as shown). Returns this plan's centres, for the next.
-fn cap_lean(bands: &mut [(i32, i32, i32, i32)], centres: &[Option<f32>], grip: (i32, i32), last: &[(i32, f32)], bp: i32, tan_step: f32) -> Vec<(i32, f32)> {
-    let mut out = Vec::with_capacity(bands.len());
-    for b in bands.iter_mut() {
-        let (y0, y1) = (b.0.max(0) as usize, (b.1.max(0) as usize).min(centres.len()));
-        let cs: Vec<f32> = centres.get(y0..y1).unwrap_or(&[]).iter().flatten().copied().collect();
-        if cs.is_empty() {
-            continue;
+/// The lean comes in from upright over this long at the grab (then follows the chain).
+const LEAN_IN: f32 = 0.12;
+
+/// The lean to draw (degrees) toward `want` from `last` (None: the art upright, `up`): at most
+/// `step` from it, and at `t` seconds into the grab no further from upright than the ramp-in.
+fn lean_to(want: f32, up: f32, last: Option<f32>, step: f32, t: f32) -> f32 {
+    let k = (t / LEAN_IN).clamp(0.0, 1.0);
+    let ramp = up + (want - up) * k * k * (3.0 - 2.0 * k);
+    ramp.clamp(last.unwrap_or(up) - step, last.unwrap_or(up) + step)
+}
+
+/// Her lean (`plan_lean`) changes by `step` degrees at most, whatever moved it (the chain, a
+/// turn that mirrors a leaning pose, the grab itself): if the plan leans more, the whole figure
+/// is sheared back about the grip row, one straight line through every band, so the bands stay
+/// registered with each other. (Clamping each band to where its own ink centre was drew the
+/// mirrored art at a turn as shifted strips.) Returns the lean drawn.
+#[allow(clippy::too_many_arguments)]
+fn cap_lean(bands: &mut [(i32, i32, i32, i32)], centres: &[Option<f32>], grip: (i32, i32), top: i32, bottom: i32, last: Option<f32>, step: f32, t: f32) -> Option<f32> {
+    let want = plan_lean(bands, centres, top, bottom)?;
+    let upright: Vec<_> = bands.iter().map(|b| (b.0, b.1, 0, 0)).collect();
+    let up = plan_lean(&upright, centres, top, bottom).unwrap_or(want);
+    let to = lean_to(want, up, last, step, t);
+    if (to - want).abs() > 0.05 {
+        let s = to.to_radians().tan() - want.to_radians().tan();
+        for b in bands.iter_mut() {
+            b.2 += (s * ((b.0 + b.1) / 2 + b.3 - grip.1) as f32).round() as i32;
         }
-        let ym = (b.0 + b.1) / 2;
-        let art = cs.iter().sum::<f32>() / cs.len() as f32;
-        let mut c = art + b.2 as f32 - grip.0 as f32;
-        if let Some(&(_, prev)) = last.iter().filter(|(y, _)| (y - ym).abs() <= bp).min_by_key(|(y, _)| (y - ym).abs()) {
-            let lim = tan_step * ((ym + b.3 - grip.1).abs() as f32) + 1.0;
-            let to = c.clamp(prev - lim, prev + lim);
-            if to != c {
-                b.2 = (to - art + grip.0 as f32).round() as i32;
-                c = art + b.2 as f32 - grip.0 as f32;
-            }
-        }
-        out.push((ym, c));
     }
-    out
+    plan_lean(bands, centres, top, bottom)
 }
 
 /// The lean a plan draws (degrees, feet to the right positive): from the ink centre of its
@@ -337,7 +338,7 @@ impl Avatar {
             rigid,
             chain,
             hold: ragdoll::BandHold::default(),
-            drawn: Vec::new(),
+            drawn: None,
             drawn_t: 0.0,
             centres: None,
             turned: false,
@@ -460,12 +461,11 @@ impl Avatar {
         }
         self.rag_plan_next();
         // A turn: the committed plan was banded for the other facing, and drawn on the
-        // mirrored art it leaned the wrong way for a frame (~20°). Composited (no shape to
-        // lag behind), the new plan shows at once.
-        let alpha = self.os.composited();
+        // mirrored art it leaned the wrong way for a frame (~18°): the new plan shows at once.
+        // (Shaped, the art's silhouette mirrors at a turn anyway: nothing painted underneath
+        // last frame matched it either.)
         if let Some(r) = &mut self.rag
             && std::mem::take(&mut r.turned)
-            && alpha
         {
             r.cur = r.next.clone();
         }
@@ -1027,7 +1027,8 @@ impl Avatar {
                     ragdoll::Wobble::apply(r.wobble.px(), &mut b, top, bottom);
                 }
                 let step = LEAN_STEP * ((r.t - r.drawn_t) / LEAN_FRAME).clamp(0.0, 1.0);
-                r.drawn = cap_lean(&mut b, centres.as_deref().unwrap_or(&[]), r.grip, &r.drawn, bp, step.to_radians().tan());
+                let cs = centres.as_deref().unwrap_or(&[]);
+                r.drawn = cap_lean(&mut b, cs, r.grip, top, bottom, r.drawn, step, r.t).or(r.drawn);
                 r.drawn_t = r.t;
                 Some(b)
             }
@@ -1302,31 +1303,53 @@ fn scale_contact(c: Contact, sf: f32) -> Contact {
 
 #[cfg(test)]
 mod tests {
-    use super::cap_lean;
+    use super::{cap_lean, plan_lean};
 
     #[test]
-    fn a_mirrored_lean_swings_over_at_the_cap() {
+    fn a_mirrored_lean_swings_over_at_the_cap_in_one_piece() {
         // A pose whose legs lean right (each row 0.2 px further right per row below the grip
-        // at row 100), then mirrored about x = 100 (the grip mirrors with it).
-        let lean = |y: i32, k: f32| Some(100.0 + k * 0.2 * (y - 100) as f32);
+        // at row 100), then mirrored about x = 100 (the grip mirrors with it). Hair-like noise
+        // per row: the bands' own ink centres jump about.
+        let noise = |y: i32| ((y * 7919) % 23) as f32 - 11.0;
+        let lean = |y: i32, k: f32| Some(100.0 + k * (0.2 * (y - 100) as f32 + noise(y)));
         let right: Vec<Option<f32>> = (0..300).map(|y| lean(y, 1.0)).collect();
         let left: Vec<Option<f32>> = (0..300).map(|y| lean(y, -1.0)).collect();
         let bands = |n: i32| (0..n).map(|i| (100 + 20 * i, 120 + 20 * i, 0, 0)).collect::<Vec<_>>();
-        let tan = 5.5f32.to_radians().tan();
+        let (top, bottom) = (0, 300);
         let mut b = bands(10);
-        let last = cap_lean(&mut b, &right, (100, 100), &[], 20, tan);
-        assert!(b.iter().all(|b| b.2 == 0), "nothing to cap from");
-        // Mirrored: the legs would jump to the other side (22.6° at once); they turn by the cap.
+        let last = cap_lean(&mut b, &right, (100, 100), top, bottom, None, 4.5, 1.0);
+        assert!(b.iter().all(|b| b.2 == 0), "upright art at rest: nothing to cap");
+        // Mirrored: the legs would jump to the other side at once; the lean turns by the cap.
         let mut b = bands(10);
-        let now = cap_lean(&mut b, &left, (100, 100), &last, 20, tan);
-        for ((y, c0), (_, c1)) in last.iter().zip(&now) {
-            let lim = tan * (y - 100) as f32 + 1.0;
-            assert!((c1 - c0).abs() <= lim + 0.5, "row {y}: {c0} -> {c1} (cap {lim})");
+        let want = plan_lean(&b, &left, top, bottom).unwrap();
+        let now = cap_lean(&mut b, &left, (100, 100), top, bottom, last, 4.5, 1.0).unwrap();
+        assert!((now - last.unwrap()).abs() <= 4.5 + 0.6, "{last:?} -> {now} (wanted {want})");
+        // One shear: neighbouring bands differ by its slope only (no strips).
+        let slope = (b[9].2 - b[0].2) as f32 / 180.0;
+        for w in b.windows(2) {
+            assert!(((w[1].2 - w[0].2) as f32 - 20.0 * slope).abs() <= 1.0, "bands {:?}", b);
         }
-        assert!(b.last().unwrap().2 > 0, "the mirrored legs are drawn shifted back toward where they were");
         // Unchanged art: unchanged bands.
         let mut b = bands(10);
-        let again = cap_lean(&mut b, &right, (100, 100), &last, 20, tan);
+        let again = cap_lean(&mut b, &right, (100, 100), top, bottom, last, 4.5, 1.0);
         assert!(b.iter().all(|b| b.2 == 0) && again == last);
+    }
+
+    #[test]
+    fn the_lean_comes_in_from_upright_at_the_grab() {
+        let bent = |i: i32| (100 + 20 * i, 120 + 20 * i, 3 * i, 0);
+        let straight: Vec<Option<f32>> = (0..300).map(|_| Some(100.0)).collect();
+        let (mut last, mut t, mut prev) = (None, 0.0f32, 0.0f32);
+        while t < 0.3 {
+            let mut b: Vec<_> = (0..10).map(bent).collect();
+            let l = cap_lean(&mut b, &straight, (100, 100), 0, 300, last, 4.5, t).unwrap();
+            assert!((l - prev).abs() <= 4.5 + 0.6, "t {t}: {prev} -> {l}");
+            if t == 0.0 {
+                assert!(l.abs() < 0.6, "upright at the grab: {l}");
+            }
+            (last, prev, t) = (Some(l), l, t + 1.0 / 60.0);
+        }
+        let full = plan_lean(&(0..10).map(bent).collect::<Vec<_>>(), &straight, 0, 300).unwrap();
+        assert!((prev - full).abs() < 0.6, "the full lean after the ramp: {prev} vs {full}");
     }
 }

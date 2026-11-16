@@ -388,8 +388,7 @@ struct MusicOn {
 /// After a player pauses or stops, the headphones stay this long (a track change, a seek).
 const MUSIC_GRACE: Duration = Duration::from_secs(5);
 const FRAME_FAST: Duration = Duration::from_millis(16);
-/// A perch glide's length, and the least jump that glides (logical px; less snaps).
-const GLIDE: Duration = Duration::from_millis(450);
+/// The least jump that glides (logical px; less snaps).
 const GLIDE_MIN: f32 = 24.0;
 /// Moves closer together than this are a stream (a live drag): she snaps to each.
 const GLIDE_STREAM: Duration = Duration::from_millis(150);
@@ -509,8 +508,8 @@ pub struct Avatar {
     bob_t0: Instant,
     hop: Option<Instant>,
     next_hop: Option<Instant>,
-    /// A perch glide: since, and the offset it started from (`glide_offset`).
-    glide: Option<(Instant, (i32, i32))>,
+    /// A perch glide: since, the offset it started from, and the curve (`glide_offset`).
+    glide: Option<(Instant, (i32, i32), crate::platform::MoveAnim)>,
     /// When the perch window last moved.
     perch_moved: Option<Instant>,
     /// Her body hosts (`Caps::host_per_output`): id, view, window. Empty: one window.
@@ -3439,17 +3438,17 @@ impl Avatar {
         }
     }
 
-    /// What's left of a perch glide (`Caps::goal_geometry`): ease-out over `GLIDE`.
+    /// What's left of a perch glide (`Os::perch_glide`): on the compositor's move curve, so she
+    /// rides the window (an overshoot included).
     fn glide_offset(&self, now: Instant) -> (i32, i32) {
-        let Some((t0, (dx, dy))) = self.glide.filter(|_| matches!(self.placement, Placement::Perch { .. })) else { return (0, 0) };
-        let u = (now.saturating_duration_since(t0).as_secs_f32() / GLIDE.as_secs_f32()).min(1.0);
-        let k = (1.0 - u).powi(3);
+        let Some((t0, (dx, dy), a)) = self.glide.filter(|_| matches!(self.placement, Placement::Perch { .. })) else { return (0, 0) };
+        let k = 1.0 - a.progress(now.saturating_duration_since(t0).as_secs_f32() * 1000.0 / a.ms);
         ((dx as f32 * k).round() as i32, (dy as f32 * k).round() as i32)
     }
 
     fn apply_offset(&mut self, now: Instant) {
         let hop = self.hop.and_then(|t| fx::hop(now.saturating_duration_since(t), 16.0 * self.layout.sf)).unwrap_or(0);
-        if self.glide.is_some() && self.glide_offset(now) == (0, 0) {
+        if self.glide.is_some_and(|(t0, _, a)| now.saturating_duration_since(t0).as_secs_f32() * 1000.0 >= a.ms) {
             self.glide = None;
         }
         let g = self.glide_offset(now);
@@ -3749,7 +3748,10 @@ impl Avatar {
                     let far = (jump.0 * jump.0 + jump.1 * jump.1) as f32 > (GLIDE_MIN * self.layout.sf).powi(2);
                     let stream = self.perch_moved.is_some_and(|t| now.duration_since(t) < GLIDE_STREAM);
                     self.perch_moved = Some(now);
-                    self.glide = (self.os.perch_glides() && far && !stream).then_some((now, jump));
+                    // Found late (the poller slept through the move's start): on the curve from
+                    // where the window is by now, so she rides it from the next frame.
+                    let since = now.checked_sub(self.os.target_move_age()).unwrap_or(now);
+                    self.glide = self.os.perch_glide().filter(|_| far && !stream).map(|a| (since, jump, a));
                     self.set_origin(o);
                 } else {
                     self.fall("perch_no_room", now);

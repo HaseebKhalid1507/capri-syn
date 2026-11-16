@@ -107,6 +107,33 @@ pub struct Caps {
     pub host_per_output: bool,
 }
 
+/// How the compositor animates a window to a new rect (`Caps::goal_geometry`): how long, and
+/// its timing curve, a cubic bezier through (0,0), (x0,y0), (x1,y1), (1,1) (y may pass 1: an
+/// overshoot). `ms` 0: it jumps.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MoveAnim {
+    pub ms: f32,
+    pub bezier: [f32; 4],
+}
+
+impl MoveAnim {
+    /// What a jump glides on where the backend can't say: a cubic ease-out over 450 ms.
+    pub const EASE_OUT: MoveAnim = MoveAnim { ms: 450.0, bezier: [0.33, 1.0, 0.68, 1.0] };
+
+    /// The fraction of the way there at `u` (of `ms`, clamped to 0..1).
+    pub fn progress(&self, u: f32) -> f32 {
+        let [x0, y0, x1, y1] = self.bezier;
+        let at = |a: f32, b: f32, s: f32| 3.0 * a * s * (1.0 - s) * (1.0 - s) + 3.0 * b * s * s * (1.0 - s) + s * s * s;
+        let u = u.clamp(0.0, 1.0);
+        let (mut lo, mut hi) = (0.0f32, 1.0f32);
+        for _ in 0..24 {
+            let m = 0.5 * (lo + hi);
+            if at(x0, x1, m) < u { lo = m } else { hi = m }
+        }
+        at(y0, y1, 0.5 * (lo + hi))
+    }
+}
+
 /// Where a window is, for the target poller (`Desktop::toplevel_place`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Place {
@@ -219,6 +246,11 @@ pub trait Desktop: Send + Sync {
     fn root_size(&self) -> (i32, i32);
     /// The monitors, fresh (the core caches).
     fn monitors(&self) -> Vec<Monitor>;
+    /// How the compositor animates a window to a new rect (`Caps::goal_geometry`); None: it
+    /// can't say.
+    fn move_anim(&self) -> Option<MoveAnim> {
+        None
+    }
     /// Each of `mons` minus what panels and docks reserve, same order, fresh.
     fn work_areas(&self, mons: &[Monitor]) -> Vec<Monitor>;
     /// The refresh rate (Hz) of the output showing (x, y), if known.

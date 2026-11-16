@@ -8,7 +8,7 @@ mod ipc;
 #[cfg(test)]
 mod testkit;
 
-use super::{Caps, Desktop, FxZ, Hint, Monitor, Place, PointerRead, Role, ShapeRect, Stage, Visible, Win, WinId, WinRect};
+use super::{Caps, Desktop, FxZ, Hint, Monitor, MoveAnim, Place, PointerRead, Role, ShapeRect, Stage, Visible, Win, WinId, WinRect};
 use anyhow::{Context as _, Result, bail};
 use gpui_kit::{Bounds, Pixels, Window, WindowKind, WindowOptions, point, px, size};
 use gpui_linux::layer_ctl::{self, Commit};
@@ -325,6 +325,12 @@ impl Desktop for HyprDesktop {
     }
 
     /// Its workspace is its space; a floating window moves without events.
+    /// `windowsMove` (inheriting from `windows`, then `global`), its curve from the same list.
+    fn move_anim(&self) -> Option<MoveAnim> {
+        let r = self.ipc.batch(&["j/getoption animations:enabled", "j/animations"]).ok()?;
+        move_anim(&r[0], &r[1])
+    }
+
     fn toplevel_place(&self, w: WinId) -> Option<Place> {
         let (s, c) = self.client(w)?;
         s.visible(&c).then(|| Place { rect: WinRect { id: w, x: c.at[0], y: c.at[1], w: c.size[0], h: c.size[1] }, space: c.workspace.id, loose: c.floating })
@@ -389,6 +395,26 @@ impl Desktop for HyprDesktop {
     }
 
     fn arm_clicks(&self, _on: bool) {}
+}
+
+/// The window-move animation from `getoption animations:enabled` and `animations` (a pair of
+/// lists: the leaves, a leaf not overridden inherits its parent's; the curves).
+fn move_anim(enabled: &serde_json::Value, v: &serde_json::Value) -> Option<MoveAnim> {
+    if enabled["int"].as_i64() == Some(0) {
+        return Some(MoveAnim { ms: 0.0, bezier: [0.0, 0.0, 1.0, 1.0] });
+    }
+    let (leaves, curves) = (v.get(0)?.as_array()?, v.get(1)?.as_array()?);
+    let leaf = ["windowsMove", "windows", "global"].iter().find_map(|n| leaves.iter().find(|l| l["name"] == *n && l["overridden"] == true))?;
+    if leaf["enabled"] == false {
+        return Some(MoveAnim { ms: 0.0, bezier: [0.0, 0.0, 1.0, 1.0] });
+    }
+    let ms = leaf["speed"].as_f64()? as f32 * 100.0;
+    let name = leaf["bezier"].as_str().unwrap_or("default");
+    let bezier = curves.iter().find(|c| c["name"] == name).map_or([0.0, 0.0, 1.0, 1.0], |c| {
+        let f = |k: &str| c[k].as_f64().unwrap_or(0.0) as f32;
+        [f("X0"), f("Y0"), f("X1"), f("Y1")]
+    });
+    Some(MoveAnim { ms, bezier })
 }
 
 /// What a socket2 event tells the core (names: the wiki's IPC page; `workspacev2` fires for
@@ -590,4 +616,37 @@ pub fn connect() -> Result<(Arc<HyprDesktop>, LayerStage)> {
     let desk = Arc::new(HyprDesktop { ipc, ids: Mutex::default(), pointer: Mutex::new(None) });
     let stage = LayerStage { desk: desk.clone(), surfaces: RefCell::default(), dressed: RefCell::default(), body: std::cell::Cell::new(0) };
     Ok((desk, stage))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::move_anim;
+    use serde_json::json;
+
+    #[test]
+    fn the_move_animation_inherits_and_takes_its_curve() {
+        let leaves = |move_over: bool| {
+            json!([[
+                { "name": "global", "overridden": true, "bezier": "default", "enabled": true, "speed": 8.0 },
+                { "name": "windows", "overridden": true, "bezier": "overshot", "enabled": true, "speed": 6.0 },
+                { "name": "windowsMove", "overridden": move_over, "bezier": if move_over { "wind" } else { "" }, "enabled": true, "speed": if move_over { 5.0 } else { 0.0 } }
+            ], [
+                { "name": "wind", "X0": 0.05, "Y0": 0.9, "X1": 0.1, "Y1": 1.05 },
+                { "name": "overshot", "X0": 0.13, "Y0": 0.99, "X1": 0.29, "Y1": 1.1 }
+            ]])
+        };
+        let on = json!({ "int": 1 });
+        let a = move_anim(&on, &leaves(true)).unwrap();
+        assert_eq!((a.ms, a.bezier), (500.0, [0.05, 0.9, 0.1, 1.05]));
+        // windowsMove not set: windows' (the leaf's parent).
+        let a = move_anim(&on, &leaves(false)).unwrap();
+        assert_eq!((a.ms, a.bezier), (600.0, [0.13, 0.99, 0.29, 1.1]));
+        // Animations off: it jumps.
+        assert_eq!(move_anim(&json!({ "int": 0 }), &leaves(true)).unwrap().ms, 0.0);
+        // The curve: there at the end, early most of the way (wind), past it on the way (overshoot).
+        let a = move_anim(&on, &leaves(true)).unwrap();
+        assert!(a.progress(0.0).abs() < 1e-3 && (a.progress(1.0) - 1.0).abs() < 1e-3);
+        assert!(a.progress(0.2) > 0.6, "{}", a.progress(0.2));
+        assert!((0..=100).any(|i| a.progress(i as f32 / 100.0) > 1.0));
+    }
 }
