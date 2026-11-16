@@ -87,6 +87,13 @@ pub struct Caps {
     /// Effect layers are surfaces of their own (the server paints them). Without it the core
     /// keeps them in a display list and her view paints them in her window.
     pub fx_layers: bool,
+    /// Every redraw of her window is a full present for the compositor to take in. Steps that
+    /// can wait (glints) then ride redraws that happen anyway.
+    pub costly_redraw: bool,
+    /// A press on her keeps the pointer until the release, whatever her input region does
+    /// meanwhile (X's implicit grab). Without it the core holds her input region at her whole
+    /// window while a press lasts: the window follows the pointer, so the pointer stays inside.
+    pub implicit_grab: bool,
 }
 
 /// A cheap note from a backend's event source: "something changed". The core turns these

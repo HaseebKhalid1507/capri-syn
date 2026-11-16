@@ -208,8 +208,10 @@ impl HyprDesktop {
 impl Desktop for HyprDesktop {
     fn caps(&self) -> Caps {
         // No geometry events on socket2: the core polls the perch target. Her effects are
-        // painted in her window (one surface, one commit with her pixels).
-        Caps { shape_mode: false, target_events: false, fx_layers: false }
+        // painted in her window (one surface, one commit with her pixels), so every effect
+        // step is a redraw and a present. A layer surface loses the pointer when Hyprland
+        // re-checks focus under it (her window moving at a drag's start), button held or not.
+        Caps { shape_mode: false, target_events: false, fx_layers: false, costly_redraw: true, implicit_grab: false }
     }
 
     fn root_size(&self) -> (i32, i32) {

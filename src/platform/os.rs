@@ -301,6 +301,16 @@ impl Os {
         }
     }
 
+    /// While a press lasts her input region must cover her window (`Caps::implicit_grab` off).
+    pub fn press_takes_window(&self) -> bool {
+        !self.caps.implicit_grab
+    }
+
+    /// A redraw is a full present (`Caps::costly_redraw`): steps that can wait ride other redraws.
+    pub fn redraw_costly(&self) -> bool {
+        self.caps.costly_redraw
+    }
+
     /// Effect layers are painted in her window (by her view, from `fx_scene`), not by the server.
     pub fn fx_in_scene(&self) -> bool {
         !self.caps.fx_layers

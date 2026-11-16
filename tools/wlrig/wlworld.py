@@ -4,6 +4,7 @@
   wlworld.py serve            line commands on stdin, one reply line each (the contract's Hyprland driver)
   wlworld.py poke move X Y | click X Y [BTN] | press [BTN] | release [BTN] | drag X0 Y0 X1 Y1 [STEPS] [HZ]
                               the virtual pointer (zwlr_virtual_pointer_v1), root (global layout) px
+  wlworld.py record X Y W H FPS SECS OUT.mp4   a lossless clip of a region (zwlr_screencopy_manager_v1)
 
 serve commands (names are app ids / layer namespaces; rects are root px):
   toplevel NAME W H [RGB]     an xdg_toplevel (placement: the caller's window rules / dispatches)
@@ -312,6 +313,127 @@ class World:
         return f"world {name}" if name else "other"
 
 
+class Grab:
+    """Screen regions through zwlr_screencopy_manager_v1, one compositor frame per capture (what was
+    composited, with its presentation time on CLOCK_MONOTONIC, the clock of time.monotonic()). Root px; the
+    region must lie on one output."""
+
+    def __init__(self, w=None):
+        self.w = w or Wl()
+        names = [n for n, (i, _) in self.w.globals.items() if i == "wl_output"]
+        if not any(i == "zwlr_screencopy_manager_v1" for i, _ in self.w.globals.values()):
+            raise SystemExit("wlworld: compositor lacks zwlr_screencopy_manager_v1")
+        self.mgr = self.w.bind("zwlr_screencopy_manager_v1", 3)
+        self.outputs = {}  # wl_output id -> name
+        for n in names:
+            v = min(self.w.globals[n][1], 4)
+            oid = self.w.new("wl_output")
+            e = b"wl_output\0"
+            body = struct.pack("<I", n) + struct.pack("<I", len(e)) + e + b"\0" * ((4 - len(e) % 4) % 4) + struct.pack("<II", v, oid)
+            self.w.s.sendmsg([struct.pack("<II", self.w.registry, ((8 + len(body)) << 16) | 0) + body])
+            self.w.handlers[oid] = lambda op, b, oid=oid: op == 4 and self.outputs.__setitem__(oid, b[4:4 + struct.unpack_from("<I", b)[0] - 1].decode())
+        self.w.roundtrip()
+        self.w.roundtrip()
+        self.mon = {m["name"]: m for m in json.loads(hyprctl("-j", "monitors"))}
+        self.pool = None  # (key, wl_buffer, mmap)
+
+    def _buffer(self, fmt, w, h, stride):
+        key = (fmt, w, h, stride)
+        if self.pool and self.pool[0] == key:
+            return self.pool[1], self.pool[2]
+        size = stride * h
+        fd = os.memfd_create("wlgrab")
+        os.ftruncate(fd, size)
+        m = mmap.mmap(fd, size)
+        # (wl_shm first: new ids must arrive in the order they were made)
+        self.shm = getattr(self, "shm", None) or self.w.bind("wl_shm", 1)
+        pool = self.w.new("wl_shm_pool")
+        self.w.send(self.shm, 0, "ni", pool, size, fds=[fd])
+        os.close(fd)
+        buf = self.w.new("wl_buffer")
+        self.w.send(pool, 0, "niiiiu", buf, 0, w, h, stride, fmt)
+        self.w.send(pool, 1, "")
+        self.pool = (key, buf, m)
+        return buf, m
+
+    def grab(self, x, y, w, h):
+        """(monotonic seconds of the frame, RGB bytes w*h*3) or None if the compositor refused."""
+        name, m = next((n, m) for n, m in self.mon.items() if m["x"] <= x < m["x"] + m["width"] and m["y"] <= y < m["y"] + m["height"])
+        out = next(o for o, n in self.outputs.items() if n == name)
+        fr = self.w.new("zwlr_screencopy_frame_v1")
+        st = {}
+
+        def ev(op, b):
+            if op == 0:
+                st["fmt"] = struct.unpack_from("<IIII", b)
+            elif op == 1:
+                st["flags"] = struct.unpack_from("<I", b)[0]
+            elif op == 2:
+                hi, lo, ns = struct.unpack_from("<III", b)
+                st["t"] = ((hi << 32) | lo) + ns / 1e9
+            elif op == 3:
+                st["failed"] = True
+            elif op == 6:
+                st["done"] = True
+
+        self.w.handlers[fr] = ev
+        self.w.send(self.mgr, 1, "niniiii", fr, 0, out, x - m["x"], y - m["y"], w, h)
+        end = time.monotonic() + 2
+        while "done" not in st and "failed" not in st and time.monotonic() < end:
+            self.w.dispatch(0.05)
+        if "fmt" not in st or "failed" in st:
+            self.w.handlers.pop(fr, None)
+            return None
+        fmt, bw, bh, stride = st["fmt"]
+        buf, mm = self._buffer(fmt, bw, bh, stride)
+        self.w.send(fr, 0, "u", buf)
+        while "t" not in st and "failed" not in st and time.monotonic() < end:
+            self.w.dispatch(0.05)
+        self.w.send(fr, 1, "")
+        self.w.handlers.pop(fr, None)
+        if "t" not in st:
+            return None
+        import numpy as np
+        a = np.frombuffer(mm, dtype=np.uint8).reshape(bh, stride)[:, :bw * 4].reshape(bh, bw, 4)
+        if st.get("flags", 0) & 1:
+            a = a[::-1]
+        return st["t"], np.ascontiguousarray(a[:, :, 2::-1]).tobytes()
+
+
+def record_frames(g, r, fps, stop):
+    """[(presentation time, RGB bytes)] of region r at `fps` until `stop` (a threading.Event) is set."""
+    frames, t0, k = [], time.monotonic(), 0
+    while not stop.is_set():
+        time.sleep(max(0.0, t0 + k / fps - time.monotonic()))
+        k += 1
+        f = g.grab(*r)
+        if f:
+            frames.append(f)
+    return frames
+
+
+def encode(frames, w, h, fps, out):
+    """Frames into a lossless RGB clip (libx264rgb -qp 0) at `fps`, and OUT.times (each frame's presentation time)."""
+    enc = subprocess.Popen(["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{w}x{h}",
+                            "-r", str(fps), "-i", "-", "-c:v", "libx264rgb", "-qp", "0", "-preset", "ultrafast", out], stdin=subprocess.PIPE)
+    for _, px in frames:
+        enc.stdin.write(px)
+    enc.stdin.close()
+    enc.wait()
+    open(out + ".times", "w").write("".join(f"{t:.6f}\n" for t, _ in frames))
+
+
+def record(a):
+    """record X Y W H FPS SECS OUT.mp4: a lossless clip of the region (frames repeat while nothing changes)."""
+    r, fps, secs, out = tuple(int(v) for v in a[:4]), float(a[4]), float(a[5]), a[6]
+    import threading
+    stop = threading.Event()
+    threading.Timer(secs, stop.set).start()
+    frames = record_frames(Grab(), r, fps, stop)
+    encode(frames, r[2], r[3], fps, out)
+    print(f"recorded {len(frames)} frames to {out}", flush=True)
+
+
 def serve():
     world = World()
     out = sys.stdout
@@ -398,5 +520,7 @@ if __name__ == "__main__":
         serve()
     elif len(sys.argv) > 2 and sys.argv[1] == "poke":
         poke(sys.argv[2:])
+    elif len(sys.argv) > 2 and sys.argv[1] == "record":
+        record(sys.argv[2:])
     else:
         raise SystemExit(__doc__)

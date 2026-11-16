@@ -364,6 +364,10 @@ const GLINTS_MAX: usize = 4;
 /// A bob or sway step (1-2 px) alone waits this long for another redraw to ride on (a
 /// blink, the other axis): at rest every pose step was a render of its own.
 const POSE_SLACK: Duration = Duration::from_millis(250);
+/// How long a glint step waits for a frame drawn anyway, where every redraw is a full present
+/// (`Os::redraw_costly`). Idle draws a breath or blink step every ~260 ms, so a glint's 560 ms life
+/// shows on two or three of those; alone (a still pose) it steps at this pace.
+const GLINT_SLACK: Duration = Duration::from_millis(600);
 
 /// Device px of the largest note sprite for this geometry.
 pub fn note_px(geo: &Geometry) -> u32 {
@@ -552,10 +556,16 @@ pub struct Avatar {
     notes: Vec<NoteMasks>,
     notes_shown: usize,
     glints_shown: usize,
+    /// When the note layers last moved.
+    notes_at: Instant,
+    /// When the glint layers last moved to their samples, and how many glints there were.
+    glints_at: (Instant, usize),
     /// Breath/sway/nod as last drawn.
     pose_last: fx::Pose,
     /// A pose step not drawn yet, since (POSE_SLACK).
     pose_wait: Option<Instant>,
+    /// A glint step not drawn yet, since (GLINT_SLACK; only where a redraw is costly).
+    glint_wait: Option<Instant>,
     session: Option<SessionLink>,
     input: Option<InputBox>,
     /// Text typed but not sent (closed field, refused input).
@@ -754,8 +764,11 @@ impl Avatar {
             notes: Vec::new(),
             notes_shown: 0,
             glints_shown: 0,
+            glints_at: (Instant::now(), 0),
+            notes_at: Instant::now(),
             pose_last: fx::Pose::default(),
             pose_wait: None,
+            glint_wait: None,
             session: None,
             input: None,
             draft: String::new(),
@@ -965,6 +978,14 @@ impl Avatar {
             self.os.flush();
         }
         self.notes_shown = used;
+        self.notes_at = now;
+    }
+
+    /// A glint sample (or a glint's end) has passed since the layers last moved.
+    fn glint_step_due(&self, now: Instant) -> bool {
+        let life_ms = self.pack.behaviour.life.sparkle_ms;
+        let (at, n) = self.glints_at;
+        self.glints.len() != n || self.glints.iter().any(|g| g.next_sample(at, life_ms).is_some_and(|t| t <= now))
     }
 
     /// Move the glint layers to `now`; unmap the ones not in use.
@@ -1017,6 +1038,7 @@ impl Avatar {
             self.os.flush();
         }
         self.glints_shown = used;
+        self.glints_at = (now, self.glints.len());
     }
 
     // ---- idle/music body motion --------------------------------------------------------
@@ -1676,9 +1698,13 @@ impl Avatar {
         if self.squash.is_some() || self.sliver.is_some() || self.turn.is_some() {
             take(Some(now + FRAME_FAST));
         }
-        // Glints: at their slice centres (fx::GLINT_STEPS per life), not a free-running tick.
+        // Glints: at their slice centres (fx::GLINT_STEPS per life), not a free-running tick;
+        // a step waiting for company (GLINT_SLACK) at the end of its wait.
         let life_ms = self.pack.behaviour.life.sparkle_ms;
-        take(self.glints.iter().filter_map(|g| g.next_sample(now, life_ms)).min());
+        match self.glint_wait {
+            Some(t) => take(Some(t + GLINT_SLACK)),
+            None => take(self.glints.iter().filter_map(|g| g.next_sample(now, life_ms)).min()),
+        }
         take(self.next_glint);
         // One wake per pose step, at its slack's end (not one at the step and one after).
         match self.pose_wait {
@@ -1944,8 +1970,11 @@ impl Avatar {
         }
         self.apply_offset(now);
         self.panels_follow(cx);
-        self.update_notes(now);
-        self.update_glints(now);
+        let costly = self.os.redraw_costly();
+        if !costly {
+            self.update_notes(now);
+            self.update_glints(now);
+        }
         self.update_marker(now);
         // Any redraw draws the current pose (render latches it); a pose step alone waits
         // POSE_SLACK for company.
@@ -1963,11 +1992,31 @@ impl Avatar {
             let since = self.pose_wait.unwrap_or(now);
             dirty = now.saturating_duration_since(since) + Duration::from_millis(20) >= POSE_SLACK;
         }
+        // Where every redraw is a full present, a glint step rides the next frame drawn anyway
+        // (the breath and blink steps) and waits GLINT_SLACK at most.
+        let glint_step = costly && self.glint_step_due(now);
+        if glint_step && !dirty {
+            let since = *self.glint_wait.get_or_insert(now);
+            dirty = now.saturating_duration_since(since) + Duration::from_millis(20) >= GLINT_SLACK;
+        }
         // Latched here, not in render: a wait left set until GPUI got round to rendering
         // was a past deadline (it spun ~900 ticks/s).
         if dirty || pose == self.pose_last {
             self.pose_last = pose;
             self.pose_wait = None;
+        }
+        if dirty || !glint_step {
+            self.glint_wait = None;
+        }
+        // Notes ride the frames drawn anyway too, and move at least every fourth note tick
+        // (6 fps; X11 moves them at 25 without a redraw). Measured in the rig: music at 12 fps
+        // drew 500 frames a minute (1.3 % CPU), the same idle without it 186.
+        if costly && !dirty && self.music.is_some() && now.saturating_duration_since(self.notes_at) + Duration::from_millis(5) >= 4 * NOTE_TICK {
+            dirty = true;
+        }
+        if costly && dirty {
+            self.update_notes(now);
+            self.update_glints(now);
         }
         // Effects painted in her own window (no effect surfaces on this desktop) need a frame.
         if dirty || self.os.fx_take_dirty() {
@@ -2243,7 +2292,7 @@ impl Avatar {
             }
             Command::Shape => {
                 let h = self.shape_hist.borrow();
-                serde_json::json!({ "composited": self.os.composited(), "bounding": self.last_shape.borrow().1, "before": [h[0], h[1]] }).to_string()
+                serde_json::json!({ "composited": self.os.composited(), "input": self.last_shape.borrow().0, "bounding": self.last_shape.borrow().1, "before": [h[0], h[1]] }).to_string()
             }
             Command::State => {
                 let reader = self.reader.as_ref().and_then(|(h, xid, _)| h.read_with(cx, |r, _| (*xid, r.scroll_info(), r.buttons())).ok());
@@ -3319,6 +3368,9 @@ impl Avatar {
             self.moves += 1;
             self.os.move_to(pos.0, pos.1).ok();
             self.applied = pos;
+            if ragview::atomic_log() {
+                elog!("atomic move {:.6} {},{}", ragview::mono_s(), pos.0, pos.1);
+            }
         }
     }
 
@@ -5607,6 +5659,10 @@ impl Render for Avatar {
         let hearts_ceiling = self.hearts_area.1.map(|y| (y - self.origin.1) as f32 / sf);
         let (panel_last, tag_last) = (self.panel_last.clone(), self.tag_last.clone());
         let worigin = self.origin;
+        let applied = self.applied;
+        // A press on her: the whole window takes the pointer until the release (`press_takes_window`).
+        let held_all = self.press.is_some() && self.os.press_takes_window();
+        let win_wh = (l.win_w, l.win_h);
         let tag_clickable = collapsed || self.session.is_some();
         let tag_w = self.tag_w.clone();
         let tag_box = self.tag_box.clone();
@@ -5618,6 +5674,8 @@ impl Render for Avatar {
                     // In the air she can be caught where she is drawn.
                     let mut input: Vec<ShapeRect> = if hidden {
                         Vec::new()
+                    } else if held_all {
+                        vec![(0, 0, win_wh.0 as u16, win_wh.1 as u16)]
                     } else if rag_flight {
                         visible.clone()
                     } else {
@@ -5746,6 +5804,10 @@ impl Render for Avatar {
                         }
                     }
                     os.flush();
+                    if ragview::atomic_log() {
+                        let b = shape::bbox(&visible).unwrap_or_default();
+                        elog!("atomic paint {:.6} {},{} {},{},{},{}", ragview::mono_s(), applied.0, applied.1, b.0, b.1, b.2, b.3);
+                    }
                     // When her window paints the effects: the ones over her, last.
                     os.paint_fx(window, false, sf);
                     // Never an empty bounding shape: X then reports the window fully obscured

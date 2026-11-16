@@ -69,6 +69,13 @@ pub(super) struct Rag {
     prof: Option<Vec<u32>>,
 }
 
+/// SA_ATOMIC_LOG=1: one line per window move and per painted frame (its origin and the bbox of what
+/// it draws), CLOCK_MONOTONIC seconds: `tools/wlrig/atomic.py` matches them against the screen.
+pub(super) fn atomic_log() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("SA_ATOMIC_LOG").is_some())
+}
+
 /// SA_FOLLOW_LOG=1: one line per follow (CLOCK_MONOTONIC seconds, as Python's perf_counter).
 pub(super) fn follow_log() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();

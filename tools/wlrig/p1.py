@@ -2,14 +2,15 @@
 """p1.py BIN PACK: P1 acceptance in the rig (BRIEF-wayland §5 P1): she appears (first frame, her layer on Top,
 no client of hers), idles (CPU over 3 × 60 s, view ticks), clicks through (follow_mouse = 0), drags (400 px in
 40 steps at 120 Hz). Inside the sandbox only (run.sh python3 p1.py ...). One line per check."""
-import json, os, socket, subprocess, sys, time
+import json, os, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from wlworld import World, hyprctl
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+from rigapp import RigApp  # noqa: E402
+from shoot import ctl  # noqa: E402
+from wlworld import hyprctl  # noqa: E402
 
-assert os.path.exists(os.path.join(os.environ["XDG_RUNTIME_DIR"], "rig.ready")), "inside the rig only"
 BIN, PACK = sys.argv[1], sys.argv[2]
 IDLE_S = int(os.environ.get("IDLE_S", "60"))
-SOCK = os.path.join(os.environ["XDG_RUNTIME_DIR"], "synaps-avatar.sock")
 LOG = os.path.join(os.environ["RIG"], "out", "p1-app.log")
 fails = 0
 
@@ -18,20 +19,6 @@ def line(name, ok, detail):
     global fails
     fails += not ok
     print(f"{name} {'PASS' if ok else 'FAIL'} {detail}", flush=True)
-
-
-def ctl(cmd):
-    c = socket.socket(socket.AF_UNIX)
-    c.settimeout(5)
-    c.connect(SOCK)
-    c.sendall((cmd + "\n").encode())
-    r = b""
-    while not r.endswith(b"\n"):
-        k = c.recv(65536)
-        if not k:
-            break
-        r += k
-    return r.decode().strip()
 
 
 def state():
@@ -52,27 +39,12 @@ def cpu_ticks(pid):
 
 
 hyprctl("eval", "hl.config({ input = { follow_mouse = 0 } })")
-w = World()
-w.layer("under", 0, 0, 2560, 1600, "bottom", 0, 0x203040)
-os.makedirs(os.path.join(os.environ["XDG_STATE_HOME"], "synaps-avatar"), exist_ok=True)
-open(os.path.join(os.environ["XDG_STATE_HOME"], "synaps-avatar", "state.json"), "w").write('{"ground":[1200,1590]}')
-t0 = time.time()
-app = subprocess.Popen([BIN, "--pack", PACK, "--no-session"], stdout=open(LOG, "w"), stderr=subprocess.STDOUT)
-try:
-    first = None
-    while time.time() - t0 < 10 and first is None:
-        first = next((l.strip() for l in open(LOG) if l.startswith("first-frame")), None)
-        time.sleep(0.02)
+with RigApp(BIN, PACK, LOG) as r:
+    app, w = r.app, r.world
+    first = r.first_frame()
     ms = int(first.split()[2]) if first else None
     line("P1.2a", ms is not None and ms < 1000, f"first frame: {first}")
-    for _ in range(100):
-        if os.path.exists(SOCK) and any(l.startswith("all frames ready") or "frames ready" in l for l in open(LOG)):
-            break
-        time.sleep(0.1)
-    time.sleep(1)
-    ctl("brain off")
     ls = ours()
-    body = [l for ns, lvl, l in ls if ns == "capri-body"]
     line("P1.2b", any(ns == "capri-body" and lvl == 2 for ns, lvl, _ in ls), f"her layers: {[(ns, lvl) for ns, lvl, _ in ls]}")
     cl = [c["class"] for c in json.loads(hyprctl("-j", "clients"))]
     line("P1.2c", not any("capri" in c or "synaps" in c for c in cl), f"clients: {cl}")
@@ -123,13 +95,4 @@ try:
     line("P1.5", held.get("rag") is not None and abs(st["ground"][0] - (g0[0] + 400)) <= 60,
          f"ground {g0} -> {st['ground']} (pointer +400); while held: rag {json.dumps(held.get('rag'))[:120]}")
     print("app log tail:", [l.strip() for l in open(LOG)][-6:], flush=True)
-finally:
-    try:
-        ctl("quit")
-    except Exception:
-        pass
-    try:
-        app.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        app.kill()
 print(f"P1 done, {fails} failed", flush=True)
