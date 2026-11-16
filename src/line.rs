@@ -2,12 +2,14 @@
 //! real text field: Enter sends and the Line stays, Shift+Enter is a newline, ↑ recalls,
 //! Esc closes (Esc Esc aborts a running turn), losing the keyboard parks it. A pending
 //! prompt shows whole, answered with A / D (armed after 400 ms) or a masked field for a
-//! secret. A plain opaque rectangle, like the reader: no shape, nothing to slab.
+//! secret. An opaque window, like the reader (no shape, nothing to slab): the panel is cut
+//! inside it, the dark ring outside its cuts.
 //!
 //! The avatar owns the session; the Line gets snapshots ([`Snap`]) and asks for things
 //! ([`Ask`]).
 
 use crate::reader::{Block, Mark, Pal, inline, parse};
+use crate::theme::{self, Cut, Fill, glyph, tracked};
 use crate::session::PromptView;
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::prelude::*;
@@ -24,7 +26,12 @@ const ESC_AGAIN: Duration = Duration::from_millis(1000);
 const PAD: f32 = 14.0;
 const FONT: f32 = 16.0;
 const LINE_H: f32 = 23.0;
+/// The › prompt's drop in the field: its middle on the first line's x-height (r21: it sat
+/// 2 px high of the type).
+const PROMPT_DROP: f32 = 11.0;
 const MONO: &str = "DejaVu Sans Mono";
+/// The panel inside its window: the 1 px ring, then the 2 px frame.
+const INSET: f32 = 3.0;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Who {
@@ -51,6 +58,11 @@ pub struct Row {
 pub struct Snap {
     pub rows: Vec<Row>,
     pub status: String,
+    /// The status's glyph, and whether it is a solid swallowtail (NEEDS YOU, the mic live)
+    /// and a bone one (NEEDS YOU).
+    pub glyph: String,
+    pub flag: bool,
+    pub alarm: bool,
     pub busy: bool,
     pub live: bool,
     pub prompts: Vec<PromptView>,
@@ -154,6 +166,9 @@ pub struct Line {
     /// Its side of her (`beside::place`) and where along the edge facing her its tail points
     /// (logical px); None: not beside her.
     tail: Option<(crate::beside::Side, f32)>,
+    /// The mic row's rec dot blinks at 1 Hz from here; a wake-up is pending.
+    born: Instant,
+    blink_armed: bool,
     on_ask: OnAsk,
     _subs: Vec<Subscription>,
 }
@@ -226,8 +241,12 @@ impl Line {
             title = c.to_uppercase() + &title[1..];
         }
         let placeholder = format!("talk to {title}…");
-        // The caret in her accent (1 px wide in the kit: the colour has to carry it).
-        gpui_kit::component::Theme::global_mut(cx).colors.caret = rgb(pal.frame).into();
+        // The caret in bone, the focus colour (1 px wide in the kit: the colour has to carry it).
+        // The placeholder in text-dim, a selection in accent-dim (bone stays readable on it).
+        let colors = &mut gpui_kit::component::Theme::global_mut(cx).colors;
+        colors.caret = rgb(pal.focus).into();
+        colors.muted_foreground = rgb(pal.dim).into();
+        colors.selection = rgb(pal.accent_dim).into();
         let input = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 6).submit_on_enter(true).placeholder(placeholder).default_value(draft));
         let focus = cx.focus_handle();
         // Before the field's own bindings (↑ moves its caret, Ctrl+Y is its redo): the
@@ -313,6 +332,8 @@ impl Line {
             hold_at: None,
             a_down: false,
             tail: None,
+            born: Instant::now(),
+            blink_armed: false,
             on_ask,
             _subs: subs,
         };
@@ -717,7 +738,8 @@ impl Line {
     /// Her side of the Line: a thick edge and a pointer at her, so it reads as hers.
     fn tail(&self) -> Option<AnyElement> {
         let (side, at) = self.tail?;
-        Some(tail_overlay(side, at, if self.parked { self.pal.dim } else { self.pal.frame }))
+        let p = self.pal;
+        Some(if self.parked { tail_overlay(side, at, p.dim, p.dim) } else { tail_overlay(side, at, p.border, p.accent) })
     }
 
     /// Where it is beside her (from the avatar, each time it is placed).
@@ -739,12 +761,12 @@ impl Line {
     fn plate(&self, who: &Who) -> (String, u32) {
         let p = self.pal;
         match who {
-            Who::You => ("YOU".into(), p.frame),
-            Who::Her => (self.name.to_uppercase(), p.name),
-            Who::Relay(c, _) => (format!("⇄ {c}"), 0x9fd2ff),
-            Who::Tool => ("⚙".into(), p.frame),
+            Who::You => ("YOU".into(), p.text),
+            Who::Her => (self.name.to_uppercase(), p.accent),
+            Who::Relay(c, _) => (format!("⇄ {c}"), p.dim),
+            Who::Tool => ("⚙".into(), p.dim),
             Who::Sys => ("SYS".into(), p.dim),
-            Who::Error => ("SYS".into(), p.slash),
+            Who::Error => ("SYS".into(), p.danger),
         }
     }
 
@@ -756,7 +778,7 @@ impl Line {
             .map(|(r, m)| {
                 let s = match m {
                     Mark::Bold => HighlightStyle { font_weight: Some(FontWeight::BOLD), color: Some(rgb(pal.text).into()), ..Default::default() },
-                    Mark::Code => HighlightStyle { color: Some(rgb(pal.accent).into()), background_color: Some(rgb(0x18242e).into()), ..Default::default() },
+                    Mark::Code => HighlightStyle { color: Some(rgb(pal.text).into()), background_color: Some(rgb(pal.raise).into()), ..Default::default() },
                     Mark::Em => HighlightStyle { font_style: Some(FontStyle::Italic), color: Some(rgb(pal.text).into()), ..Default::default() },
                 };
                 (r, s)
@@ -768,38 +790,39 @@ impl Line {
     fn her_body(&self, row: usize, md: &str, cx: &mut Context<Line>) -> Div {
         let pal = self.pal;
         let mut col = div().flex().flex_col().gap(px(6.0)).min_w(px(0.0)).flex_1();
+        let lang_of = |lang: &str| if lang.is_empty() { "CODE".to_string() } else { lang.to_uppercase() };
         for (bi, b) in parse(md).into_iter().enumerate() {
             col = col.child(match b {
-                Block::Heading(_, t) => div().font_weight(FontWeight::BOLD).text_color(rgb(pal.name)).child(self.styled(&t)).into_any_element(),
+                Block::Heading(_, t) => div().font_weight(FontWeight::BOLD).text_color(rgb(pal.accent)).child(self.styled(&t)).into_any_element(),
                 Block::Para(t) => div().text_color(rgb(pal.text)).child(self.styled(&t)).into_any_element(),
                 Block::Bullet(indent, marker, t) => div()
                     .pl(px(indent as f32 * 16.0))
                     .flex()
                     .gap(px(6.0))
                     .text_color(rgb(pal.text))
-                    .child(div().flex_none().text_color(rgb(pal.frame)).child(marker))
+                    .child(div().flex_none().text_color(rgb(pal.accent)).child(marker))
                     .child(div().flex_1().min_w(px(0.0)).child(self.styled(&t)))
                     .into_any_element(),
-                Block::Rule => div().h(px(1.0)).bg(rgba((pal.frame << 8) | 0x44)).into_any_element(),
+                Block::Rule => div().h(px(1.0)).bg(rgb(pal.rule)).into_any_element(),
                 Block::Code { lang, text } if !self.open.contains(&(row, bi)) => {
-                    // One line until clicked: the language, the first line, the size.
+                    // One line until clicked: the language, the first line, the size. A
+                    // raised strip, cut 5 px, a dark-red hairline.
                     let n = text.lines().count();
                     let first = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim().to_string();
                     div()
                         .id(SharedString::from(format!("code-{row}-{bi}")))
+                        .relative()
                         .flex()
                         .items_center()
                         .gap(px(8.0))
                         .px(px(8.0))
                         .py(px(2.0))
-                        .border_1()
-                        .border_color(rgba((pal.frame << 8) | 0x44))
-                        .bg(rgb(0x070b10))
+                        .child(theme::backdrop(Cut::Corners(5.0), Fill::framed(pal.raise, pal.rule, 1.0)))
                         .cursor_pointer()
                         .text_size(px(12.5))
-                        .child(div().flex_none().text_color(rgb(pal.frame)).child("▸"))
-                        .child(div().flex_none().font_weight(FontWeight::BOLD).text_color(rgb(pal.dim)).child(if lang.is_empty() { "CODE".to_string() } else { lang.to_uppercase() }))
-                        .child(div().flex_1().min_w(px(0.0)).overflow_hidden().whitespace_nowrap().font_family(MONO).text_color(rgb(0xd8e6ee)).child(one(&first, 70)))
+                        .child(div().flex_none().text_color(rgb(pal.accent)).child("▸"))
+                        .child(div().flex_none().font_weight(FontWeight::BOLD).text_color(rgb(pal.accent)).child(tracked(&lang_of(&lang), 1.0)))
+                        .child(div().flex_1().min_w(px(0.0)).overflow_hidden().whitespace_nowrap().font_family(MONO).text_color(rgb(pal.text)).child(one(&first, 70)))
                         .child(div().flex_none().text_color(rgb(pal.dim)).child(format!("{n} line{}", if n == 1 { "" } else { "s" })))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.open.insert((row, bi));
@@ -814,21 +837,27 @@ impl Line {
                         this.open.remove(&(row, bi));
                         cx.notify();
                     }))
-                    .border_1()
-                    .border_color(rgba((pal.frame << 8) | 0x44))
-                    .bg(rgb(0x070b10))
-                    .child(div().px(px(8.0)).py(px(2.0)).bg(rgb(0x0e161d)).text_size(px(11.0)).font_weight(FontWeight::BOLD).text_color(rgb(pal.dim)).child(if lang.is_empty() {
-                        "CODE".to_string()
-                    } else {
-                        lang.to_uppercase()
-                    }))
+                    .relative()
+                    .child(theme::backdrop(Cut::Corners(9.0), Fill::framed(pal.code, pal.rule, 1.5)))
+                    .child(
+                        div().px(px(8.0)).py(px(3.0)).border_b(px(1.5)).border_color(rgb(pal.rule)).flex().child(
+                            theme::plate(Cut::Tab(5.0), Fill::solid(pal.accent))
+                                .h(px(16.0))
+                                .pl(px(7.0))
+                                .pr(px(10.0))
+                                .text_size(px(11.0))
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(rgb(pal.ink))
+                                .child(tracked(&lang_of(&lang), 1.4)),
+                        ),
+                    )
                     .child(
                         div()
                             .p(px(8.0))
                             .font_family(MONO)
                             .text_size(px(13.5))
                             .line_height(px(19.0))
-                            .text_color(rgb(0xd8e6ee))
+                            .text_color(rgb(pal.text))
                             .children(text.split('\n').map(|l| div().whitespace_nowrap().child(if l.is_empty() { " ".to_string() } else { l.replace('\t', "    ") }))),
                     )
                     .into_any_element(),
@@ -858,12 +887,12 @@ impl Line {
     fn row_el(&self, ix: usize, r: &Row, cx: &mut Context<Line>) -> AnyElement {
         let pal = self.pal;
         let (plate, tone) = self.plate(&r.who);
-        let head = div().flex_none().w(px(74.0)).text_size(px(11.5)).font_weight(FontWeight::BOLD).text_color(rgb(tone)).pt(px(3.0)).child(plate);
+        let head = div().flex_none().w(px(74.0)).text_size(px(11.5)).font_weight(FontWeight::BOLD).text_color(rgb(tone)).pt(px(3.0)).child(tracked(&plate, 1.4));
         let body: AnyElement = match &r.who {
             Who::Her => {
                 let mut b = self.her_body(ix, &r.text, cx);
                 if r.streaming {
-                    b = b.child(div().w(px(9.0)).h(px(3.0)).bg(rgb(pal.frame)));
+                    b = b.child(div().w(px(9.0)).h(px(3.0)).bg(rgb(pal.accent)));
                 }
                 b.into_any_element()
             }
@@ -881,8 +910,8 @@ impl Line {
                     .cursor_pointer()
                     .text_size(px(13.0))
                     .text_color(rgb(pal.dim))
-                    .child(div().flex_none().text_color(rgb(pal.frame)).child(if open { "▾" } else { "▸" }))
-                    .child(div().flex_none().font_weight(FontWeight::BOLD).child(r.text.clone()))
+                    .child(div().flex_none().child(if open { "▾" } else { "▸" }))
+                    .child(div().flex_none().font_weight(FontWeight::BOLD).text_color(rgb(pal.text)).child(r.text.clone()))
                     .child(detail)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if !this.open.remove(&(ix, 0)) {
@@ -892,27 +921,52 @@ impl Line {
                     }))
                     .into_any_element()
             }
+            // Another session's words: a text-dim bar.
             Who::Relay(_, kind) => div()
                 .flex()
                 .flex_col()
                 .flex_1()
                 .min_w(px(0.0))
                 .child(div().text_size(px(11.0)).text_color(rgb(pal.dim)).child(kind.clone()))
-                .child(div().border_l_2().border_color(rgb(0x9fd2ff)).pl(px(8.0)).text_color(rgb(pal.text)).child(r.text.clone()))
+                .child(div().border_l_2().border_color(rgb(pal.dim)).pl(px(8.0)).text_color(rgb(pal.text)).child(r.text.clone()))
                 .into_any_element(),
-            Who::You => div()
-                .flex_1()
-                .min_w(px(0.0))
-                .border_l_2()
-                .border_color(rgb(pal.frame))
-                .bg(rgba((pal.frame << 8) | 0x14))
-                .pl(px(8.0))
-                .text_color(rgb(pal.text))
-                .child(r.text.clone())
-                .into_any_element(),
+            // His words: a slanted text-dim sliver, a step under bone.
+            Who::You => {
+                let bar_c = pal.dim;
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .relative()
+                    .pl(px(12.0))
+                    .text_color(rgb(pal.you))
+                    .child(
+                        canvas(
+                            |_, _, _| (),
+                            move |b, _, window, _| {
+                                let (x, t, bt) = (f32::from(b.left()), f32::from(b.top()) + 4.0, f32::from(b.bottom()) - 4.0);
+                                let lean = 0.249 * (bt - t) / 2.0;
+                                theme::fill_poly(window, &[(x + lean, t), (x + 3.0 + lean, t), (x + 3.0 - lean, bt), (x - lean, bt)], rgb(bar_c));
+                            },
+                        )
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full(),
+                    )
+                    .child(r.text.clone())
+                    .into_any_element()
+            }
             Who::Sys | Who::Error => div().flex_1().min_w(px(0.0)).text_size(px(13.5)).text_color(rgb(tone)).child(r.text.clone()).into_any_element(),
         };
-        div().flex().gap(px(10.0)).child(head).child(body).into_any_element()
+        // His turns sit on a faint bar, so a run of them doesn't read as one (r21).
+        let you = matches!(r.who, Who::You);
+        div()
+            .flex()
+            .gap(px(10.0))
+            .when(you, |d| d.relative().mx(px(-8.0)).px(px(8.0)).py(px(5.0)).child(theme::backdrop(Cut::Corners(6.0), Fill::solid(pal.you_bar))))
+            .child(head)
+            .child(body)
+            .into_any_element()
     }
 
     fn prompt_el(&self, window: &mut Window, cx: &mut Context<Line>) -> Option<Div> {
@@ -920,31 +974,57 @@ impl Line {
         let p = self.prompt()?;
         let n = self.snap.prompts.len();
         let armed = Instant::now() >= self.prompt_at + ARM;
+        // A key: its letter on a slanted plate, then what it does. DENY is bone, ALLOW red,
+        // LATER and TAB text-dim.
         let key = |k: &str, label: &str, tone: u32| {
             div()
                 .flex()
                 .items_center()
                 .gap(px(6.0))
-                .child(div().px(px(6.0)).border_1().border_color(rgb(tone)).text_color(rgb(tone)).font_weight(FontWeight::BOLD).child(k.to_string()))
-                .child(div().text_color(rgb(if armed { tone } else { pal.dim })).font_weight(FontWeight::BOLD).child(label.to_string()))
+                .child(theme::plate(Cut::Slant(6.6), Fill::line(tone, 1.5)).h(px(20.0)).px(px(9.0)).text_color(rgb(tone)).font_weight(FontWeight::BOLD).child(k.to_string()))
+                .child(div().text_color(rgb(if armed { tone } else { pal.dim })).font_weight(FontWeight::BOLD).child(tracked(label, 1.0)))
         };
+        let focus_c = pal.focus;
+        // DENY first, with the focus ring on it.
+        let focus_ring = canvas(
+            |_, _, _| (),
+            move |b, _, window, _| {
+                let (x0, y0, x1, y1) = (f32::from(b.left()) - 6.0, f32::from(b.top()) - 6.0, f32::from(b.right()) + 6.0, f32::from(b.bottom()) + 6.0);
+                theme::paint(window, &theme::outline(Cut::Tag(theme::Plate::Square), x0, y0, x1, y1), Fill::line(focus_c, 2.0));
+            },
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full();
         let mut col = div()
             .flex()
             .flex_col()
             .gap(px(8.0))
             .p(px(PAD))
-            .border_t_1()
-            .border_color(rgba((pal.slash << 8) | 0x99))
+            .border_t_2()
+            .border_color(rgb(pal.accent))
             .child(
                 div()
                     .flex()
+                    .items_center()
                     .gap(px(10.0))
                     .text_size(px(12.0))
                     .font_weight(FontWeight::BOLD)
-                    .child(div().text_color(rgb(pal.slash)).child("! NEEDS YOU"))
-                    .child(div().text_color(rgb(pal.name)).child(p.title.to_uppercase()))
+                    .child(
+                        // NEEDS YOU: the bone swallowtail, deep-red type, as on her nameplate.
+                        theme::plate(Cut::Swallow(6.0), Fill::solid(pal.text))
+                            .h(px(18.0))
+                            .pl(px(8.0))
+                            .pr(px(14.0))
+                            .gap(px(5.0))
+                            .text_color(rgb(pal.deep))
+                            .child(glyph("bang", pal.deep, pal.text))
+                            .child(tracked("NEEDS YOU", 1.2)),
+                    )
+                    .child(div().text_color(rgb(pal.text)).child(tracked(&p.title.to_uppercase(), 1.2)))
                     .child(div().flex_1())
-                    .child(div().text_color(rgb(pal.dim)).child(if n > 1 { format!("{} OF {n}  ←/→", self.prompt_ix + 1) } else { "1 OF 1".into() })),
+                    .child(tracked(&if n > 1 { format!("{} OF {n}  ←/→", self.prompt_ix + 1) } else { "1 OF 1".into() }, 1.2).flex_none().whitespace_nowrap().text_color(rgb(pal.dim))),
             )
             .child(
                 div()
@@ -959,36 +1039,48 @@ impl Line {
             );
         if let Some((_, s)) = &self.secret {
             col = col
-                .child(div().border_1().border_color(rgb(pal.frame)).px(px(8.0)).py(px(4.0)).child(Input::new(s).appearance(false)))
+                .child(div().relative().child(theme::backdrop(Cut::Corners(9.0), Fill::framed(pal.field, pal.accent, 2.0))).px(px(10.0)).py(px(6.0)).child(Input::new(s).appearance(false)))
                 .child(div().text_size(px(11.5)).text_color(rgb(pal.dim)).child("⏎ answer · esc later · never spoken, never logged"));
         } else {
             let id = p.id;
             let risky = risky(p);
-            // Deny first; a risky allow says how it's held, and fills while A is down.
+            // Deny first; a risky allow says how it's held, and fills while A is down: red
+            // from the left, its label ink under the fill, ALLOWED ✓ when it's done.
             let allow = if risky {
                 let fill = self.hold_at.map_or(0.0, |t| (t.elapsed().as_secs_f32() / HOLD.as_secs_f32()).min(1.0));
                 if self.hold_at.is_some() {
                     window.request_animation_frame();
                 }
+                let tone = if armed { pal.accent } else { pal.dim };
+                let done = fill >= 1.0;
+                let word = if done { "ALLOWED ✓" } else { "ALLOW" };
                 div()
                     .relative()
                     .flex()
                     .items_center()
                     .gap(px(6.0))
-                    .child(div().px(px(6.0)).border_1().border_color(rgb(pal.frame)).text_color(rgb(pal.frame)).font_weight(FontWeight::BOLD).child("HOLD A"))
+                    .child(theme::plate(Cut::Slant(6.6), Fill::line(pal.accent, 1.5)).h(px(20.0)).px(px(9.0)).text_color(rgb(pal.accent)).font_weight(FontWeight::BOLD).child("HOLD A"))
                     .child(div().text_color(rgb(pal.text)).child(format!("· {:.2} s", HOLD.as_secs_f32())))
                     .child(
-                        div()
-                            .relative()
-                            .px(px(6.0))
-                            .border_1()
-                            .border_color(rgb(if armed { pal.frame } else { pal.dim }))
+                        theme::plate(Cut::Slant(6.6), Fill::line(tone, 1.5))
+                            .h(px(20.0))
+                            .px(px(12.0))
                             .font_weight(FontWeight::BOLD)
-                            .child(div().absolute().left_0().top_0().bottom_0().w(relative(fill)).bg(rgba((pal.frame << 8) | 0x88)))
-                            .child(div().relative().text_color(rgb(if armed { pal.frame } else { pal.dim })).child("ALLOW")),
+                            .child(div().text_color(rgb(tone)).child(tracked(word, 1.0)))
+                            .child(
+                                div()
+                                    .absolute()
+                                    .left_0()
+                                    .top_0()
+                                    .bottom_0()
+                                    .w(relative(fill))
+                                    .overflow_hidden()
+                                    .child(theme::backdrop(if done { Cut::Slant(6.6) } else { Cut::Tab(7.0) }, Fill::solid(pal.accent)))
+                                    .child(div().absolute().left(px(12.0)).top_0().bottom_0().flex().items_center().text_color(rgb(pal.ink)).child(tracked(word, 1.0))),
+                            ),
                     )
             } else {
-                key("A", "ALLOW", pal.frame)
+                key("A", "ALLOW", pal.accent)
             };
             col = col.child(
                 div()
@@ -996,7 +1088,15 @@ impl Line {
                     .items_center()
                     .gap(px(22.0))
                     .text_size(px(12.5))
-                    .child(div().id("deny").cursor_pointer().child(key("D", "DENY", pal.slash)).on_click(cx.listener(move |this, _, window, cx| this.answer(id, None, window, cx))))
+                    .child(
+                        div()
+                            .id("deny")
+                            .relative()
+                            .cursor_pointer()
+                            .child(focus_ring)
+                            .child(key("D", "DENY", pal.text))
+                            .on_click(cx.listener(move |this, _, window, cx| this.answer(id, None, window, cx))),
+                    )
                     .child(
                         div()
                             .id("allow")
@@ -1025,18 +1125,21 @@ impl Line {
                     .child(key("TAB", "SAY SOMETHING INSTEAD", pal.dim)),
             );
             if risky {
+                // Danger: the bone plate with teeth, ink type, a red ⚠.
                 col = col.child(
-                    div()
-                        .mt(px(2.0))
-                        .px(px(8.0))
-                        .py(px(4.0))
-                        .border_l_2()
-                        .border_color(rgb(pal.slash))
-                        .bg(rgba((pal.slash << 8) | 0x1c))
+                    theme::plate(Cut::Teeth, Fill::solid(pal.danger).ringed(pal.ring))
+                        .mt(px(4.0))
+                        .py(px(9.0))
+                        .items_center()
                         .text_size(px(14.0))
+                        .line_height(px(19.0))
                         .font_weight(FontWeight::BOLD)
-                        .text_color(rgb(pal.slash))
-                        .child(format!("This one can run or change things on your machine. Hold A (or hold the click) for {:.2} s to allow; a tap does nothing.", HOLD.as_secs_f32())),
+                        .text_color(rgb(pal.ink))
+                        .child(div().flex_none().pl(px(14.0)).pr(px(6.0)).child(theme::glyph_at("warn", pal.accent, pal.danger, 16.0)))
+                        .child(div().flex_1().min_w(px(0.0)).pl(px(8.0)).pr(px(14.0)).child(format!(
+                            "This one can run or change things on your machine. Hold A (or hold the click) for {:.2} s to allow; a tap does nothing.",
+                            HOLD.as_secs_f32()
+                        ))),
                 );
             }
         }
@@ -1064,21 +1167,55 @@ impl Render for Line {
             elog!("timing: line: first word of her reply drawn {} ms after Enter", t0.elapsed().as_millis());
         }
         let status = if self.parked { "PARKED · $MOD+C TO RESUME".to_string() } else { self.snap.status.clone() };
+        // Her name on a red blade, LINE, and her state at the right: NEEDS YOU (and the live
+        // mic) on a red swallowtail; parked, all text-dim.
+        let state: AnyElement = if self.snap.flag && !self.parked {
+            // NEEDS YOU: the bone swallowtail, deep-red type (the nameplate's first beat); the
+            // mic live: red, ink.
+            let (fill_c, ink_c) = if self.snap.alarm { (pal.text, pal.deep) } else { (pal.accent, pal.ink) };
+            theme::plate(Cut::Swallow(6.0), Fill::solid(fill_c))
+                .h(px(18.0))
+                .pl(px(8.0))
+                .pr(px(14.0))
+                .gap(px(6.0))
+                .text_color(rgb(ink_c))
+                .child(glyph(&self.snap.glyph, ink_c, fill_c))
+                .child(theme::metered(&status, 1.4, ink_c))
+                .into_any_element()
+        } else {
+            // Her dot red, the word text-dim (r21: red on red on red; nothing stood out).
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .text_color(rgb(pal.dim))
+                .when(!self.parked, |d| d.child(glyph(&self.snap.glyph, pal.accent, pal.panel)))
+                .child(theme::metered(&status, 1.4, pal.dim))
+                .into_any_element()
+        };
         let header = div()
             .flex()
+            .flex_none()
             .items_center()
             .gap(px(8.0))
             .px(px(PAD))
             .h(px(30.0))
             .border_b_1()
-            .border_color(rgba((pal.frame << 8) | 0x55))
+            .border_color(rgb(pal.rule))
             .text_size(px(12.0))
             .font_weight(FontWeight::BOLD)
-            .child(div().text_color(rgb(pal.name)).child(self.name.to_uppercase()))
-            .child(div().text_color(rgb(pal.slash)).child("/"))
-            .child(div().text_color(rgb(pal.dim)).child("LINE"))
+            .child(
+                theme::plate(Cut::Tab(7.0), Fill::solid(if self.parked { pal.dim } else { pal.accent }))
+                    .ml(px(6.0))
+                    .h(px(18.0))
+                    .pl(px(10.0))
+                    .pr(px(12.0))
+                    .text_color(rgb(pal.ink))
+                    .child(tracked(&self.name.to_uppercase(), 1.6)),
+            )
+            .child(div().text_color(rgb(pal.dim)).child(tracked("LINE", 1.6)))
             .child(div().flex_1())
-            .child(div().text_color(rgb(if self.parked { pal.dim } else { pal.frame })).child(status));
+            .child(state);
         let rows: Vec<AnyElement> = self.snap.rows.iter().enumerate().map(|(i, r)| self.row_el(i, r, cx)).collect();
         // At the bottom the thread starts at a whole row: its height is cut to the rows that
         // fit (measured on the last layout; one more frame when that changes).
@@ -1103,7 +1240,7 @@ impl Render for Line {
         let at_bottom = self.scroll.offset().y <= -self.scroll.max_offset().y + px(1.0);
         let scrolled = self.scroll.offset().y < px(-1.0) && !at_bottom;
         let thread = (!rows.is_empty()).then(|| {
-            let fade = linear_gradient(180.0, linear_color_stop(rgb(pal.surface), 0.0), linear_color_stop(rgba(pal.surface << 8), 1.0));
+            let fade = linear_gradient(180.0, linear_color_stop(rgb(pal.panel), 0.0), linear_color_stop(theme::alpha(pal.panel, 0.0), 1.0));
             div()
                 .relative()
                 .child(
@@ -1124,30 +1261,45 @@ impl Render for Line {
         let prompt = (self.mode == Mode::Prompt).then(|| self.prompt_el(window, cx)).flatten();
         let pending = (self.mode == Mode::Text && !self.snap.prompts.is_empty()).then(|| {
             div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
                 .px(px(PAD))
                 .py(px(4.0))
-                .bg(rgb(pal.slash))
-                .text_color(rgb(pal.surface))
+                .bg(rgb(pal.accent))
+                .text_color(rgb(pal.ink))
                 .text_size(px(12.0))
                 .font_weight(FontWeight::BOLD)
-                .child(format!("! {} PROMPT{} WAITING · TAB TO ANSWER", self.snap.prompts.len(), if self.snap.prompts.len() > 1 { "S" } else { "" }))
+                .child(glyph("bang", pal.ink, pal.accent))
+                .child(tracked(&format!("{} PROMPT{} WAITING · TAB TO ANSWER", self.snap.prompts.len(), if self.snap.prompts.len() > 1 { "S" } else { "" }), 1.0))
         });
-        // A text box you can't miss: filled, outlined, lit in her colour while it has the keyboard.
+        // A text box you can't miss: filled, cut 9 px, edged in her red while it has the keyboard.
         let typing = self.mode == Mode::Text && !self.parked;
         let input = (self.mode == Mode::Text).then(|| {
-            div().px(px(PAD)).pt(px(10.0)).border_t_1().border_color(rgba((pal.frame << 8) | 0x55)).child(
+            div().px(px(PAD)).pt(px(10.0)).border_t_1().border_color(rgb(pal.rule)).child(
                 div()
-                    .p(px(if typing { 0.0 } else { 1.0 }))
-                    .border_color(rgb(if typing { pal.frame } else { pal.dim }))
-                    .when(typing, |d| d.border_2())
-                    .when(!typing, |d| d.border_1())
-                    .bg(rgb(0x0c1a24))
+                    .relative()
+                    .child(theme::backdrop(Cut::Corners(9.0), if typing { Fill::framed(pal.field, pal.accent, 2.0) } else { Fill::framed(pal.field, pal.dim, 1.0) }))
                     .flex()
                     .items_start()
                     .gap(px(8.0))
                     .px(px(10.0))
                     .py(px(7.0))
-                    .child(div().flex_none().text_color(rgb(if typing { pal.frame } else { pal.dim })).font_weight(FontWeight::BOLD).child("›"))
+                    .child({
+                        // The prompt mark: a drawn chevron (the font's › sits small and high).
+                        let c = if typing { pal.accent } else { pal.dim };
+                        canvas(
+                            |_, _, _| (),
+                            move |b, _, window, _| {
+                                let (x, y) = (f32::from(b.left()) + 1.0, f32::from(b.top()) + f32::from(b.size.height) / 2.0);
+                                theme::fill_poly(window, &[(x, y - 6.0), (x + 3.5, y - 6.0), (x + 9.0, y), (x + 3.5, y + 6.0), (x, y + 6.0), (x + 5.5, y)], rgb(c));
+                            },
+                        )
+                        .flex_none()
+                        .mt(px(PROMPT_DROP))
+                        .w(px(10.0))
+                        .h(px(LINE_H))
+                    })
                     .child(
                         div().flex_1().min_w(px(0.0)).child(
                             Textarea::new(&self.input).appearance(false).text_size(px(FONT)).line_height(px(LINE_H)).text_color(rgb(pal.text)),
@@ -1155,21 +1307,52 @@ impl Render for Line {
                     ),
             )
         });
-        // Voice: the mic row while he holds the key; the caption while she speaks.
+        // Voice: the mic row while he holds the key (a solid red plate, ink type, its bone rec
+        // dot blinking at 1 Hz); the caption while she speaks (a red bar, bone words).
+        let blink = self.snap.mic.is_some() && (self.born.elapsed().as_millis() / 500) % 2 == 1;
+        if self.snap.mic.is_some() && !self.blink_armed {
+            self.blink_armed = true;
+            let left = 500 - (self.born.elapsed().as_millis() % 500) as u64;
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(Duration::from_millis(left + 2)).await;
+                this.update(cx, |l, cx| {
+                    l.blink_armed = false;
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+        }
         let voice_row = self.snap.mic.clone().map(|m| {
+            // `● MIC 0:04 ▮▮▯▯▯  ·  listening · release to send`: the dot is drawn, the rest
+            // says what follows key-up.
+            let m = m.trim_start_matches(['●', '◉']).trim_start().to_string();
+            let (label, hint) = m.split_once("  ·  ").map_or((m.clone(), String::new()), |(a, b)| (a.to_string(), b.to_string()));
+            let mark = if label.starts_with("HEARD") {
+                "dots"
+            } else if label.contains("HANDS-FREE") {
+                "hf"
+            } else {
+                "rec"
+            };
+            let mark_c = if blink && mark != "dots" { theme::mix(pal.text, pal.accent, 0.85) } else { pal.text };
             div()
                 .mx(px(PAD))
                 .mt(px(6.0))
                 .px(px(10.0))
                 .py(px(7.0))
-                .border_2()
-                .border_color(rgb(0xff3b62))
-                .bg(rgba(0xff3b6222))
+                .relative()
+                .child(theme::backdrop(Cut::Corners(8.0), Fill::solid(pal.accent).ringed(pal.ring)))
                 .flex()
-                .gap(px(14.0))
+                .items_center()
+                .gap(px(10.0))
                 .text_size(px(14.0))
+                .line_height(px(18.0))
                 .font_weight(FontWeight::BOLD)
-                .child(div().text_color(rgb(0xff3b62)).child(m))
+                .text_color(rgb(pal.ink))
+                .child(glyph(mark, mark_c, pal.accent))
+                .child(theme::metered(&label, 0.6, pal.ink))
+                .child(div().flex_1().min_w(px(0.0)).flex().justify_end().text_size(px(12.5)).font_weight(FontWeight::SEMIBOLD).overflow_hidden().whitespace_nowrap().child(hint))
         });
         let caption = self.snap.caption.clone().map(|c| {
             div()
@@ -1177,13 +1360,12 @@ impl Render for Line {
                 .mt(px(6.0))
                 .px(px(10.0))
                 .py(px(6.0))
-                .border_l_2()
-                .border_color(rgb(0xff6fd8))
-                .bg(rgba(0xff6fd818))
+                .border_l_3()
+                .border_color(rgb(pal.accent))
                 .flex()
                 .gap(px(10.0))
                 .text_size(px(FONT))
-                .child(div().flex_none().text_color(rgb(0xff6fd8)).font_weight(FontWeight::BOLD).child("▶"))
+                .child(div().flex_none().pt(px(6.0)).child(glyph("play", pal.accent, pal.panel)))
                 .child(div().flex_1().text_color(rgb(pal.text)).child(c))
         });
         let hint = if self.mode == Mode::Prompt {
@@ -1204,7 +1386,7 @@ impl Render for Line {
             .pt(px(4.0))
             .pb(px(8.0))
             .text_size(px(11.5))
-            .children(self.note.clone().map(|n| div().text_color(rgb(pal.slash)).font_weight(FontWeight::BOLD).child(n)))
+            .children(self.note.clone().map(|n| div().text_color(rgb(pal.accent)).font_weight(FontWeight::BOLD).child(n)))
             .children(hint.map(|h| div().text_color(rgb(pal.dim)).child(h)));
         // Laid out at its natural height (absolute, unconstrained) and measured: the window
         // follows it, bottom edge fixed.
@@ -1234,7 +1416,8 @@ impl Render for Line {
                             cx.defer(move |cx| {
                                 me.update(cx, |l, cx| {
                                     l.height = h;
-                                    (l.on_ask)(Ask::Height(h + 4.0), cx).ok();
+                                    // The ring and the frame, top and bottom.
+                                    (l.on_ask)(Ask::Height(h + 2.0 * INSET), cx).ok();
                                 })
                                 .ok();
                             });
@@ -1269,10 +1452,10 @@ impl Render for Line {
             .font_family(self.font.clone())
             .text_size(px(FONT))
             .line_height(px(LINE_H))
-            .bg(rgb(pal.surface))
-            .border_2()
-            .border_color(rgb(if self.parked { pal.dim } else { pal.frame }))
-            .child(content)
+            // Outside the panel's cuts: the dark ring. Parked: a text-dim frame.
+            .bg(rgb(pal.ring))
+            .child(panel_backdrop(pal, self.parked))
+            .child(div().absolute().top(px(INSET)).left(px(INSET)).right(px(INSET)).bottom(px(INSET)).overflow_hidden().child(content))
             .children(self.tail())
     }
 }
@@ -1287,48 +1470,69 @@ pub fn side_key(s: crate::beside::Side) -> &'static str {
     }
 }
 
-/// A panel's edge facing her, thick, with a pointer at her `at` along it (logical px): the
-/// Line's and the reader's. `side`: the panel's side of her (Right: she is at its left edge).
-pub fn tail_overlay(side: crate::beside::Side, at: f32, tone: u32) -> AnyElement {
-    use crate::beside::Side;
-    let edge = div().absolute().bg(rgb(tone));
-    let edge = match side {
-        Side::Right => edge.top_0().bottom_0().left_0().w(px(5.0)),
-        Side::Left => edge.top_0().bottom_0().right_0().w(px(5.0)),
-        Side::Above => edge.left_0().right_0().bottom_0().h(px(5.0)),
-    };
-    let arrow = canvas(
-        |_, _, _| {},
+/// The panel cut inside its window (the Line's, the reader's): the dark ring left round it,
+/// the 1 px dark-red frame (text-dim when parked; r21: a 2 px red one made everything red, so
+/// nothing stood out), the blade notch with three mane slivers in her red.
+pub fn panel_backdrop(pal: Pal, parked: bool) -> AnyElement {
+    canvas(
+        |_, _, _| (),
         move |b, _, window, _| {
-            // A notch whose tip sits on the edge, pointing out at her.
-            let (l, t, r, bt) = (f32::from(b.left()), f32::from(b.top()), f32::from(b.right()), f32::from(b.bottom()));
-            let (half, depth) = (13.0f32, 12.0f32);
-            let mut p = PathBuilder::fill();
-            match side {
-                Side::Right | Side::Left => {
-                    let y = (t + at).min(bt - half).max(t + half);
-                    let (tip, base) = if side == Side::Right { (l, l + 5.0 + depth) } else { (r, r - 5.0 - depth) };
-                    p.move_to(point(px(base), px(y - half)));
-                    p.line_to(point(px(tip), px(y)));
-                    p.line_to(point(px(base), px(y + half)));
+            let (x0, y0, x1, y1) = (f32::from(b.left()) + 1.0, f32::from(b.top()) + 1.0, f32::from(b.right()) - 1.0, f32::from(b.bottom()) - 1.0);
+            let (frame, sliver) = if parked { (pal.dim, pal.dim) } else { (pal.border, pal.accent) };
+            theme::paint(window, &theme::outline(Cut::Panel, x0, y0, x1, y1), Fill::framed(pal.panel, frame, 1.0));
+            if x1 - x0 >= 300.0 {
+                for p in theme::slivers(x1 - 100.0, y0, 52.0, theme::NOTCH) {
+                    theme::fill_poly(window, &p, rgb(sliver));
                 }
-                Side::Above => {
-                    let x = (l + at).min(r - half).max(l + half);
-                    let base = bt - 5.0 - depth;
-                    p.move_to(point(px(x - half), px(base)));
-                    p.line_to(point(px(x), px(bt)));
-                    p.line_to(point(px(x + half), px(base)));
-                }
-            }
-            p.close();
-            if let Ok(path) = p.build() {
-                window.paint_path(path, rgb(tone));
             }
         },
     )
     .absolute()
-    .size_full();
-    div().absolute().top_0().left_0().size_full().child(edge).child(arrow).into_any_element()
+    .top_0()
+    .left_0()
+    .size_full()
+    .into_any_element()
+}
+
+/// A panel's edge facing her, thick along its straight run (between the cuts, in `edge_c`),
+/// with a pointer at her `at` along it (logical px, in `point_c`): the Line's and the
+/// reader's. `side`: the panel's side of her (Right: she is at its left edge).
+pub fn tail_overlay(side: crate::beside::Side, at: f32, edge_c: u32, point_c: u32) -> AnyElement {
+    use crate::beside::Side;
+    canvas(
+        |_, _, _| {},
+        move |b, _, window, _| {
+            // The panel inside the ring.
+            let (l, t, r, bt) = (f32::from(b.left()) + 1.0, f32::from(b.top()) + 1.0, f32::from(b.right()) - 1.0, f32::from(b.bottom()) - 1.0);
+            let big = theme::BIG_CUT.min((bt - t) * 0.2);
+            let sm = theme::SMALL_CUT;
+            let (w, half, depth) = (3.0f32, 13.0f32, 12.0f32);
+            let (edge, notch): (Vec<theme::Pt>, Vec<theme::Pt>) = match side {
+                Side::Right | Side::Left => {
+                    // Left edge: from the big cut down to the small one; right: the other way.
+                    let (a, z) = if side == Side::Right { (t + big, bt - sm) } else { (t + sm, bt - big) };
+                    let y = (t + at).min(z - half).max(a + half);
+                    let (x, inward) = if side == Side::Right { (l, 1.0) } else { (r, -1.0) };
+                    (
+                        vec![(x, a), (x + inward * w, a + w), (x + inward * w, z - w), (x, z)],
+                        vec![(x + inward * (w + depth), y - half), (x, y), (x + inward * (w + depth), y + half)],
+                    )
+                }
+                Side::Above => {
+                    let (a, z) = (l + sm, r - big);
+                    let x = (l + at).min(z - half).max(a + half);
+                    (vec![(a, bt), (a + w, bt - w), (z - w, bt - w), (z, bt)], vec![(x - half, bt - w - depth), (x, bt), (x + half, bt - w - depth)])
+                }
+            };
+            theme::fill_poly(window, &edge, rgb(edge_c));
+            theme::fill_poly(window, &notch, rgb(point_c));
+        },
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
+    .into_any_element()
 }
 
 #[cfg(test)]

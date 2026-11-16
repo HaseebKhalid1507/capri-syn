@@ -24,10 +24,11 @@ const NEAR_PX: f32 = 250.0;
 const SAVE_EVERY: Duration = Duration::from_secs(10);
 /// The bid marker (a "!" badge by her head): effect layers after the glints.
 const MARK_LAYER: usize = GLINT_LAYER + 2 * GLINTS_MAX;
-const MARK_RIM: u32 = 0x0b0e14;
-/// r7 critics: the white badge was lost in her hair. Warning yellow, a black "!".
-const MARK_FILL: u32 = 0xffd83a;
-const MARK_GLYPH: u32 = 0x0b0e14;
+/// SHARD: a bone disc in a dark rim, an ink "!" (the bone block is the brightest thing in her
+/// corner; her red mane would swallow a red one).
+const MARK_RIM: u32 = crate::theme::Pal::SHARD.ring;
+const MARK_FILL: u32 = crate::theme::Pal::SHARD.danger;
+const MARK_GLYPH: u32 = crate::theme::Pal::SHARD.ink;
 /// Badge radius, logical px.
 const MARK_R: f32 = 19.0;
 /// How long a summon's NEEDS YOU pulses after she lands, and its half period.

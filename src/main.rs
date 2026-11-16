@@ -44,6 +44,7 @@ mod settings;
 mod shape;
 mod ticker;
 mod state;
+mod theme;
 mod view;
 mod voice;
 
