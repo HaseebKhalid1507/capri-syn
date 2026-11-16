@@ -187,9 +187,48 @@ def wake_rest(text):
     return rest, ' '.join(words) in WAKE_HF
 
 
-WAKE_STT_FLOOR = int(os.environ.get('CAPRI_VOICE_WAKE_CTX', '512'))   # Whisper's window for the check (see the PR)
+WAKE_STT_FLOOR = int(os.environ.get('CAPRI_VOICE_WAKE_CTX', '256'))   # Whisper's window for the check: 5.1 s for 2.8 s of audio (see the PR)
 WAKE_CHECK_DELAY_S = float(os.environ.get('CAPRI_VOICE_WAKE_DELAY', '0.3'))   # the check waits this much more audio: stage 1
                                                                           # often fires inside "-pri", and a cut word fails
+
+
+# The sound-alike filter (WakeForced): a candidate passes when Whisper's forced log P("Hey Capri" + a word end) > T_MIN
+# and it beats the best sound-alike by > MARGIN_MIN. Fitted on stock TTS voices only (Kokoro packs, espeak-ng; the
+# held-out voices and his own takes never fitted it). A personal file (wake_personal(), local, optional) may move both.
+WAKE_T_MIN, WAKE_MARGIN_MIN = -10.0, 0.0
+WAKE_SECOND_MARGIN = -2.0         # a reject gets the second look only when its margin is over this ("hey Cappy" is far under)
+WAKE_PERSONAL = os.path.join(os.path.dirname(MODELS), 'wake-personal', 'personal.npz')
+WAKE_SPEECH_MIN = 3                # a candidate needs >= 3 Silero speech frames (~0.1 s) in the last second: music, a door, a cough don't
+
+
+def wake_personal(path=None):
+    """His personal layer, if he made one (tools/capri-wake-tune, from his own takes; local, never committed): a dict
+    with 'templates' (n x 1536, normalised stage-1 windows of his "hey capri") and 'tau' (a hop is his phrase when its
+    best cosine to them is >= tau), and/or the filter's 't_min' / 'margin_min'. None when absent or not valid."""
+    try:
+        z = np.load(path or WAKE_PERSONAL, allow_pickle=False)
+        out = {k: float(z[k]) for k in ('t_min', 'margin_min', 'tau') if k in z.files}
+        if 'templates' in z.files:
+            t = np.asarray(z['templates'], np.float32)
+            if t.ndim != 2 or t.shape[1] != 1536 or not 1 <= len(t) <= 4000 or not np.isfinite(t).all() or not 0.3 <= out.get('tau', 0) <= 0.99:
+                raise ValueError('templates / tau')
+            out['templates'] = t
+        if not out or not all(-40.0 <= out[k] <= 10.0 for k in ('t_min', 'margin_min') if k in out):
+            raise ValueError('nothing usable')
+        return out
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        log(f'wake: the personal file did not load ({e}); not used')
+    return None
+
+
+def wake_accept(says, tm, personal=None):
+    """The check's verdict: the filter's (T, margin) when it is on, else Whisper's text ("says hey capri")."""
+    if tm is None:
+        return says
+    p = personal or {}
+    return tm[0] > p.get('t_min', WAKE_T_MIN) and tm[1] > p.get('margin_min', WAKE_MARGIN_MIN)
 
 
 def wake_text(stt, pcm, floor=None):
@@ -239,12 +278,19 @@ class WakeEar:
         h = np.maximum(0, x @ self.W1 + self.b1)
         return float(1 / (1 + np.exp(-(h @ self.W2 + self.b2)[0, 0])))
 
-    class Stream:
-        """Incremental: push int16 samples, get a head score per 80 ms hop (0 until 16 embeddings)."""
+    def personal_sim(self, e16, templates):
+        """The best cosine of this window (normalised as the head does) to his templates."""
+        z = (e16.reshape(-1) - self.mu.reshape(-1)) / self.sd.reshape(-1)
+        return float((templates @ (z / (np.linalg.norm(z) + 1e-9))).max())
 
-        def __init__(self, ear):
+    class Stream:
+        """Incremental: push int16 samples, get (head score, personal cosine) per 80 ms hop (0 until 16 embeddings;
+        the cosine is 0 without a personal layer)."""
+
+        def __init__(self, ear, templates=None):
             self.ear, self.raw, self.pend = ear, np.zeros(WAKE_CTX, np.int16), np.zeros(0, np.int16)
             self.melbuf, self.embs = np.ones((76, 32), np.float32), collections.deque(maxlen=16)
+            self.templates = templates
 
         def push(self, x):
             self.pend = np.concatenate([self.pend, x])
@@ -255,8 +301,107 @@ class WakeEar:
                 self.melbuf = np.concatenate([self.melbuf, self.ear.mels(self.raw)])[-76:]
                 e = self.ear.emb.run(None, {self.ear.ei: self.melbuf[None, :, :, None]})[0].reshape(96)
                 self.embs.append(e)
-                out.append(self.ear.score(np.stack(self.embs)) if len(self.embs) == 16 else 0.0)
+                if len(self.embs) < 16:
+                    out.append((0.0, 0.0))
+                    continue
+                e16 = np.stack(self.embs)
+                out.append((self.ear.score(e16), self.ear.personal_sim(e16, self.templates) if self.templates is not None else 0.0))
             return out
+
+
+class WakeForced:
+    """The sound-alike filter: Whisper's own log-probability that the check window starts "Hey Capri" (then a word end),
+    and how far that beats the best sound-alike ("Hey Cappy", "Hey caprese", "Hey Capricorn", ...), scored on the
+    encoder pass the check already made (about 20 one-token decoder calls, ~80 ms on small.en). pywhispercpp binds
+    whisper_decode/whisper_get_logits for one int / one float only, so they are called through ctypes on the same loaded
+    libwhisper, with the context pointer read out of pywhispercpp's holder. load() checks that pointer (vocabulary size,
+    end token, the tokenizer) and returns None on any doubt: the check is then Whisper's text alone, as before."""
+
+    HEYS = (' Hey', ' Hey,', ' Hi')
+    RIVALS = (' Cappy', ' Capra', ' caprese', ' Caprese', ' cabbie', ' Cabby', ' Carrie', ' Kerry', ' copy', ' Capricorn', ' capricious',
+              ' Capris', ' Caprice', ' Cupra', ' Cathy', ' Katie', ' Corey', ' coffee', ' Kafka', ' Gary', ' carry', ' Caitlin', ' Cali',
+              ' Carly', ' crappy', ' happy')
+
+    def __init__(self, model, threads):
+        import ctypes, glob
+        import _pywhispercpp as pw
+        self.ct, self.threads = ctypes, threads
+        d = os.path.dirname(pw.__file__)
+        libs = sorted(glob.glob(f'{d}/pywhispercpp.libs/libwhisper*.so*')) or sorted(glob.glob(f'{d}/libwhisper.so*'))
+        L = self.L = ctypes.CDLL(libs[0])
+        # pybind11's instance: PyObject_HEAD (16 bytes on a GIL build), then the value pointer, then the holder (a
+        # unique_ptr: the same pointer). The value is pywhispercpp's wrapper, whose first field is the whisper_context*.
+        import sysconfig
+        if sysconfig.get_config_var('Py_GIL_DISABLED') or ctypes.sizeof(ctypes.c_void_p) != 8:
+            raise RuntimeError('not a 64-bit GIL build')
+        value = ctypes.c_void_p.from_address(id(model._ctx) + 16).value
+        if not value or value % 8 or value != ctypes.c_void_p.from_address(id(model._ctx) + 24).value:
+            raise RuntimeError("pywhispercpp's object is not laid out as expected")
+        self.ctx = ctypes.c_void_p.from_address(value).value
+        if not self.ctx or self.ctx % 8:
+            raise RuntimeError("pywhispercpp's object is not laid out as expected")
+        V, I = ctypes.c_void_p, ctypes.c_int
+        for f, a, r in (('whisper_n_vocab', [V], I), ('whisper_token_eot', [V], I), ('whisper_token_sot', [V], I), ('whisper_token_not', [V], I),
+                        ('whisper_decode', [V, ctypes.POINTER(I), I, I, I], I), ('whisper_get_logits', [V], ctypes.POINTER(ctypes.c_float)),
+                        ('whisper_tokenize', [V, ctypes.c_char_p, ctypes.POINTER(I), I], I), ('whisper_token_to_str', [V, I], ctypes.c_char_p)):
+            getattr(L, f).argtypes, getattr(L, f).restype = a, r
+        self.nv = L.whisper_n_vocab(self.ctx)
+        if self.nv != pw.whisper_n_vocab(model._ctx) or L.whisper_token_eot(self.ctx) != pw.whisper_token_eot(model._ctx):
+            raise RuntimeError('not the context pywhispercpp holds')
+        self.sot, self.nt, self.eot = L.whisper_token_sot(self.ctx), L.whisper_token_not(self.ctx), L.whisper_token_eot(self.ctx)
+        t = self.tok(' Hey Capri')
+        if len(t) < 3 or ''.join(pw.whisper_token_to_str(model._ctx, x) for x in t) != ' Hey Capri':
+            raise RuntimeError('tokenizer')
+        self.bound = np.zeros(self.nv, bool)        # a word ends here: the next token starts a word, is punctuation, or the end
+        for t in range(self.eot):
+            b = L.whisper_token_to_str(self.ctx, t)
+            self.bound[t] = bool(b) and b[:1] in (b' ', b',', b'.', b'!', b'?', b';', b':', b'-')
+        self.bound[self.eot] = True
+        self.seqs, self.ends, tg = {}, set(), []
+        for h in self.HEYS:
+            n = 'T' + h; self.seqs[n] = self.tok(h + ' Capri'); self.ends.add(n); tg.append(self.seqs[n])
+        for r in self.RIVALS:                          # a rival that is a prefix of the phrase ("Hey Cap") is none
+            t = self.tok(' Hey' + r)
+            if not any(x[:len(t)] == t for x in tg):
+                self.seqs['R' + r] = t
+
+    @staticmethod
+    def load(model, threads):
+        try:
+            return WakeForced(model, threads), None
+        except Exception as e:
+            return None, f'the sound-alike filter is off ({e}): the check reads Whisper\'s text alone'
+
+    def tok(self, s):
+        a = (self.ct.c_int * 64)()
+        n = self.L.whisper_tokenize(self.ctx, s.encode(), a, 64)
+        return list(a[:max(0, n)])
+
+    def _logp(self, rows):
+        x = np.ctypeslib.as_array(self.L.whisper_get_logits(self.ctx), shape=(rows, self.nv))[-1].astype(np.float64)
+        m = x.max()
+        return x - (m + np.log(np.exp(x - m).sum()))
+
+    def __call__(self):
+        """(T, margin) on the audio of the last whisper_full: T = log P("Hey Capri" + a word end), the best of " Hey",
+        " Hey,", " Hi"; margin = log P(" Hey Capri" + end) - max log P(" Hey <rival>"). Call it under the stt lock,
+        right after the check's decode."""
+        a = (self.ct.c_int * 2)(self.sot, self.nt)
+        if self.L.whisper_decode(self.ctx, a, 2, 0, self.threads) != 0:
+            raise RuntimeError('whisper_decode')
+        cache = {(): self._logp(2)}
+        for node in sorted({tuple(t[:k]) for n, t in self.seqs.items() for k in range(1, len(t) + (n in self.ends))}):
+            x = (self.ct.c_int * 1)(node[-1])        # sorted: each node right after its ancestors, so the KV cache holds its path
+            if self.L.whisper_decode(self.ctx, x, 1, 1 + len(node), self.threads) != 0:
+                raise RuntimeError('whisper_decode')
+            cache[node] = self._logp(1)
+        lp = {}
+        for n, t in self.seqs.items():
+            lp[n] = sum(cache[tuple(t[:k])][t[k]] for k in range(len(t)))
+            if n in self.ends:
+                lp[n] += float(np.log(np.exp(cache[tuple(t)][self.bound]).sum()))
+        T = max(v for n, v in lp.items() if n[0] == 'T')
+        return float(T), float(lp['T Hey'] - max(v for n, v in lp.items() if n[0] == 'R'))
 
 
 class Vad:
@@ -1474,9 +1619,11 @@ class Voice:
         self.said = collections.deque(maxlen=40)   # (t_end, words) of her sentences: the echo guard
         self.hf_drop = False
         self.wake = None         # the wake word's stage 1: loaded when first turned on
+        self.wake_forced, self.wake_forced_for = None, None    # its sound-alike filter (False: off), for that Stt
+        self.wake_personal = None
         self.wake_paused_until = 0.0
         self.wake_checks = collections.deque(maxlen=WAKE_VERIFY_N)   # times of the last Whisper checks
-        self.wake_n = {'candidates': 0, 'rejected': 0, 'woke': 0, 'second': 0, 'paused': 0, 'verify_ms': []}
+        self.wake_n = {'candidates': 0, 'rejected': 0, 'woke': 0, 'second': 0, 'paused': 0, 'no_speech': 0, 'verify_ms': []}
         self.tts = Tts()
         self.media = Media()
         self.release_timer = None
@@ -1540,6 +1687,11 @@ class Voice:
                     self.wake, why = WakeEar.load()      # loaded the first time it is asked for, never before
                     if why:
                         log(f'wake: {why}')
+                    self.wake_personal = wake_personal()
+                    if self.wake_personal:
+                        p = self.wake_personal
+                        log(f"wake: his personal layer is on ({WAKE_PERSONAL}: {len(p.get('templates', []))} templates"
+                            + (f", tau {p['tau']:.2f}" if 'templates' in p else '') + ')')
                 if self.wake is None:
                     refuse = 'WAKE OFF · NO MODEL (capri-voice-setup)'
         if refuse:
@@ -1665,6 +1817,32 @@ class Voice:
         threading.Thread(target=watch, daemon=True).start()
         return sub
 
+    def _wake_speech(self, ring):
+        """Silero hears speech in the last second of the ring (>= WAKE_SPEECH_MIN frames), or there is no Silero."""
+        if not self.vad:
+            return True
+        x = np.frombuffer(bytes(ring[-2 * MIC_RATE:]), np.int16).astype(np.float32) / 32768.0
+        return sum(p >= SPEECH_P for p in self.vad.probs(x)) >= WAKE_SPEECH_MIN
+
+    def _wake_filter(self):
+        """(T, margin) of the decode just made, or None: the filter off (CAPRI_VOICE_WAKE_FILTER=0) or not loadable.
+        Call it under stt_lock, right after the decode."""
+        if self.wake_forced is False or os.environ.get('CAPRI_VOICE_WAKE_FILTER', '1') == '0':
+            return None
+        if self.wake_forced is None or self.wake_forced_for is not self.stt:
+            self.wake_forced, why = WakeForced.load(self.stt.m, min(4, THREADS))
+            self.wake_forced_for = self.stt
+            if why:
+                log(f'wake: {why}')
+                self.wake_forced = False
+                return None
+        try:
+            return self.wake_forced()
+        except Exception as e:
+            log(f'wake: the sound-alike filter failed ({e}); the text alone from now on')
+            self.wake_forced = False
+            return None
+
     def _wake_loop(self, p, silence_s, cur):
         """The wake word: one standing stream. Idle, the last 2.5 s stay in RAM and are scored every
         80 ms; no level events. A candidate goes to Whisper (at most 12 in 10 min, else 10 min off);
@@ -1674,8 +1852,10 @@ class Voice:
         fd = p.stdout.fileno()
         ear, thr, echo = self.wake, cur['thr'], cur['echo']
         ring, ring_max = bytearray(), int(WAKE_RING_S * MIC_RATE) * 2
-        ws = WakeEar.Stream(ear)
-        opened, last_lock, last_lvl, prev, last_fire, quiet_until = False, now_ms(), 0.0, 0.0, 0.0, 0.0
+        pers = self.wake_personal or {}
+        tpl, tau = pers.get('templates'), pers.get('tau', 2.0)
+        ws = WakeEar.Stream(ear, tpl)
+        opened, last_lock, last_lvl, prev, last_fire, quiet_until = False, now_ms(), 0.0, False, 0.0, 0.0
         cand, turn, end_why, call = None, None, None, {'app': None}
         follow = []                      # a bare "Hey Capri." found at the second look: his turn starts now
         sub = self._watch_calls(call)
@@ -1685,7 +1865,8 @@ class Voice:
             try:
                 with self.stt_lock:
                     c['text'] = wake_text(self.stt, pcm)      # kept in RAM for the turn below, never logged
-                    c['ok'] = wake_says(c['text'])
+                    c['tm'] = self._wake_filter()             # the sound-alike filter on the same encoder pass
+                    c['ok'] = wake_accept(wake_says(c['text']), c['tm'], self.wake_personal)
             except Exception as e:
                 log(f'wake: the check failed ({e})')
             c['ms'] = now_ms() - t0
@@ -1720,8 +1901,9 @@ class Voice:
                 t0 = now_ms()
                 with self.stt_lock:
                     text = self.stt(pcm, speech_ms)
+                    tm = self._wake_filter()                # the turn starts where the check's window did
                 c['stt_ms'] = now_ms() - t0
-                if not wake_says(text):
+                if not (wake_says(text) and wake_accept(True, tm, self.wake_personal)):
                     log(f"wake: the second look rejected it too ({dur:.1f} s, {c['stt_ms']:.0f} ms)")
                     return
                 self.wake_n['woke'] += 1
@@ -1819,7 +2001,7 @@ class Voice:
             if turn is not None and turn.get('quiet') and echo == 'speakers' and (self.player is not None or self.play_q or self.say_q):
                 turn, cand = None, None          # she started speaking on speakers: the second look is dropped
                 ring.clear()
-                ws, prev, last_fire = WakeEar.Stream(ear), 0.0, time.time()
+                ws, prev, last_fire = WakeEar.Stream(ear, tpl), False, time.time()
                 continue
             if turn is not None:
                 if t - last_lvl >= 200 and not turn.get('quiet'):
@@ -1831,7 +2013,7 @@ class Voice:
                     finish(turn, why)
                     turn, cand = None, None
                     ring.clear()
-                    ws, prev, last_fire = WakeEar.Stream(ear), 0.0, time.time()
+                    ws, prev, last_fire = WakeEar.Stream(ear, tpl), False, time.time()
                 continue
             replying = self.player is not None or bool(self.play_q) or bool(self.say_q)
             if replying:
@@ -1849,7 +2031,8 @@ class Voice:
                 if cand['done'].is_set():
                     if cand['ok']:
                         self.wake_n['woke'] += 1
-                        log(f"wake: heard (score {cand['score']:.2f}, checked in {cand['ms']:.0f} ms)")
+                        tm = cand.get('tm')
+                        log(f"wake: heard (score {cand['score']:.2f}, checked in {cand['ms']:.0f} ms" + (f", filter {tm[0]:.1f} / {tm[1]:+.1f})" if tm else ')'))
                         if self.player is not None or self.play_q or self.say_q:
                             self.hush(why='wake')
                         c = {'t_start': cand['t'], 't_mic_open': cand['t'], 'mode': 'wake'}
@@ -1868,9 +2051,11 @@ class Voice:
                             turn = None
                     else:
                         self.wake_n['rejected'] += 1
-                        log(f"wake: a candidate rejected by the check (score {cand['score']:.2f}, {cand['ms']:.0f} ms)"
-                            + ('; a second look at his turn' if WAKE_SECOND else ''))
-                        if WAKE_SECOND:
+                        tm = cand.get('tm')
+                        look = WAKE_SECOND and (tm is None or tm[1] > WAKE_SECOND_MARGIN)
+                        log(f"wake: a candidate rejected by the check (score {cand['score']:.2f}, {cand['ms']:.0f} ms"
+                            + (f", filter {tm[0]:.1f} / {tm[1]:+.1f}" if tm else '') + ')' + ('; a second look at his turn' if look else ''))
+                        if look:
                             c = {'t_start': cand['t'], 't_mic_open': cand['t'], 'mode': 'wake'}
                             turn = {'buf': bytearray(), 'vs': VadStream(self.vad), 'seen': 0, 'c': c, 'quiet': True,
                                     'ep': Endpointer(float(np.clip(silence_s, 0.5, 5.0)), max_s=WAKE_SECOND_S, wait_s=WAKE_WAIT_S,
@@ -1881,9 +2066,14 @@ class Voice:
                                 turn = None
                     cand = None
                 continue
-            for sc in ws.push(np.frombuffer(chunk, np.int16)):
-                if sc >= thr and prev >= thr and time.time() - last_fire >= WAKE_REFRACTORY_S:
+            for sc, ps in ws.push(np.frombuffer(chunk, np.int16)):
+                hot = sc >= thr or ps >= tau        # the head's, or his personal layer's (if he made one)
+                if hot and prev and time.time() - last_fire >= WAKE_REFRACTORY_S:
                     last_fire = now = time.time()
+                    if not self._wake_speech(ring):
+                        self.wake_n['no_speech'] += 1    # no speech in the last second (music, a door): no check, no count
+                        prev = hot
+                        continue
                     while self.wake_checks and now - self.wake_checks[0] > WAKE_VERIFY_S:
                         self.wake_checks.popleft()
                     if len(self.wake_checks) >= WAKE_VERIFY_N:
@@ -1894,9 +2084,9 @@ class Voice:
                     self.wake_checks.append(now)
                     self.wake_n['candidates'] += 1
                     cand = {'pre': bytes(ring), 'post': bytearray(), 'done': threading.Event(), 'ok': False, 'ms': 0,
-                            't': now_ms(), 'score': sc, 'started': False}
+                            't': now_ms(), 'score': sc, 'personal': ps, 'started': False}
                     break
-                prev = sc
+                prev = hot
             if end_why:
                 break
         sub.terminate()
@@ -2479,8 +2669,9 @@ class Voice:
             self.emit(ev='stats', mic_open=self.rec is not None, mic_mode=self.cur.get('mode') if self.rec is not None else None,
                       speaking=self.player is not None, cfg=self.cfg, vad='silero' if self.vad else 'energy',
                       wake={'loaded': self.wake is not None, 'candidates': w['candidates'], 'rejected': w['rejected'], 'woke': w['woke'],
-                            'second': w['second'], 'paused': w['paused'], 'paused_s': max(0, round(self.wake_paused_until - time.time())),
-                            'verify_ms_p50': round(float(np.median(w['verify_ms']))) if w['verify_ms'] else None})
+                            'second': w['second'], 'paused': w['paused'], 'no_speech': w['no_speech'], 'paused_s': max(0, round(self.wake_paused_until - time.time())),
+                            'verify_ms_p50': round(float(np.median(w['verify_ms']))) if w['verify_ms'] else None,
+                            'filter': None if self.wake_forced is None else bool(self.wake_forced), 'personal': bool(self.wake_personal)})
         else:
             self.emit(ev='error', why=f'unknown op {op!r}')
 
@@ -2679,12 +2870,33 @@ def selftest_wake():
         assert ear is not None, why
         st = WakeEar.Stream(ear)
         x = (np.random.default_rng(4).standard_normal(16000 * 3) * 300).astype(np.int16)
-        sc = [v for i in range(0, len(x), 320) for v in st.push(x[i:i + 320])]
+        sc = [v for i in range(0, len(x), 320) for v, _ in st.push(x[i:i + 320])]
         assert len(sc) == 37 and sc[14] == 0.0 and 0.0 <= sc[15] <= 1.0 and max(sc) < 0.5, sc
+        tpl = np.eye(4, 1536, dtype=np.float32)
+        st2 = WakeEar.Stream(ear, tpl)
+        ps = [p for i in range(0, len(x), 320) for _, p in st2.push(x[i:i + 320])]
+        assert len(ps) == 37 and ps[14] == 0.0 and all(-1.0 <= p <= 1.0 for p in ps), ps
         assert ear.threshold(0.1) >= ear.threshold(0.5) >= ear.threshold(0.9)
         print('selftest: wake word ok (phrase check, stage 1 loads, SHA-pinned, room noise scores low)')
     else:
         print('selftest: wake word phrase check ok (no wake models)')
+    assert wake_accept(True, None) and not wake_accept(False, None), 'the filter off: the text decides'
+    assert wake_accept(False, (-3.0, 2.0)) and not wake_accept(True, (-3.0, -0.5)) and not wake_accept(True, (-12.0, 3.0))
+    assert wake_accept(True, (-12.0, 3.0), {'t_min': -13.0}) and not wake_accept(True, (-3.0, 0.5), {'margin_min': 1.0})
+    import tempfile
+    d = tempfile.mkdtemp()
+    t = np.eye(3, 1536, dtype=np.float32)
+    np.savez(f'{d}/a.npz', t_min=-12.5, margin_min=0.5)
+    assert wake_personal(f'{d}/a.npz') == {'t_min': -12.5, 'margin_min': 0.5}
+    np.savez(f'{d}/b.npz', templates=t, tau=0.5)
+    b = wake_personal(f'{d}/b.npz')
+    assert b['tau'] == 0.5 and b['templates'].shape == (3, 1536)
+    for bad in ({'t_min': 99.0}, {'templates': t, 'tau': 0.1}, {'templates': t[:, :100], 'tau': 0.5}, {'templates': t}):
+        np.savez(f'{d}/c.npz', **bad)
+        assert wake_personal(f'{d}/c.npz') is None, bad
+    open(f'{d}/d.npz', 'w').write('not a zip')
+    assert wake_personal(f'{d}/d.npz') is None and wake_personal(f'{d}/none.npz') is None
+    shutil.rmtree(d)
 
 
 def selftest_hf():
@@ -2778,6 +2990,25 @@ def selftest():
             x = np.concatenate([np.zeros(8000, np.float32), x, np.zeros(8000, np.float32)])
             assert speech_span(vad.probs(x)), f'{word!r} (stock TTS) did not pass the gate'
         print('selftest: vad ok (silence, a click, noise gated; stock-TTS stop/no/yes pass)')
+    stt_path = f"{MODELS}/{STT_FILES['small.en']}"
+    if os.path.exists(stt_path):
+        # the sound-alike filter on stock TTS (af_heart): the phrase passes; sound-alikes and "Capri" without "hey" don't
+        stt = Stt('small.en')
+        wf, why = WakeForced.load(stt.m, 4)
+        assert wf is not None, why
+
+        def check(text):
+            a = tts(text, 'af_heart', 1.0, 'off', 0.0, 'model')
+            n = int(len(a) * MIC_RATE / TTS_RATE)
+            x = np.interp(np.linspace(0, len(a) - 1, n), np.arange(len(a)), a).astype(np.float32)
+            pcm = np.concatenate([np.zeros(6400, np.float32), x])[:int(2.8 * MIC_RATE)]
+            wake_text(stt, pcm)
+            return wf()
+        for text, want in (('Hey Capri, what time is it?', True), ('Hey Capri.', True), ('Hey Cappy, what time is it?', False),
+                           ('Hey Capra.', False), ('Tell Capri to wait.', False), ('Hey Capricorn.', False)):
+            tm = check(text)
+            assert wake_accept(False, tm) == want, (text, tm)
+        print('selftest: the sound-alike filter ok (the phrase passes on stock TTS; Cappy, Capra, Capricorn, "tell Capri" do not)')
     assert tts.flow, 'the flow patch did not load'
     k, f = tts.k, tts.flow
     st = tts.style('af_heart')
