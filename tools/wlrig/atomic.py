@@ -19,6 +19,8 @@ from wlworld import Grab, encode, record_frames  # noqa: E402
 
 BIN, PACK, OUT = sys.argv[1], sys.argv[2], sys.argv[3]
 LIFT = int(sys.argv[4]) if len(sys.argv) > 4 else 200  # the figure-eight above the grip (lagmeter's, lifted)
+FPS = float(os.environ.get("ATOMIC_FPS", "30"))  # the capture (0: back to back, every frame the output shows)
+HZ = float(os.environ.get("ATOMIC_HZ", "120"))  # the virtual pointer's motion rate (a mouse: 125)
 TOL = 3
 os.makedirs(OUT, exist_ok=True)
 LOG = os.path.join(OUT, "atomic-app.log")
@@ -32,7 +34,7 @@ with RigApp(BIN, PACK, LOG, env={"SA_ATOMIC_LOG": "1"}) as r:
     R = (max(0, win["x"] - 260), max(0, win["y"] - LIFT - 120), win["w"] + 520, min(win["h"] + LIFT + 180, 1600 - max(0, win["y"] - LIFT - 120)))
     g = Grab()
     frames, stop = [], threading.Event()
-    th = threading.Thread(target=lambda: frames.extend(record_frames(g, R, 30, stop)), daemon=True)
+    th = threading.Thread(target=lambda: frames.extend(record_frames(g, R, FPS, stop)), daemon=True)
     w.warp(x0, y0)
     time.sleep(0.3)
     th.start()
@@ -43,7 +45,7 @@ with RigApp(BIN, PACK, LOG, env={"SA_ATOMIC_LOG": "1"}) as r:
     while time.monotonic() - t0 < 4.0:
         t = time.monotonic() - t0
         w.warp(round(x0 + 160 * math.sin(t * math.pi)), round(y0 - LIFT - 90 * math.sin(2 * t * math.pi) / 2))
-        time.sleep(1 / 120)
+        time.sleep(1 / HZ)
     w.warp(x0, y0 - LIFT)
     time.sleep(0.4)
     w.button(False)
@@ -58,10 +60,11 @@ def png(path, rgb, w, h):
 
 
 H, W = R[3], R[2]
-encode(frames, W, H, 30, os.path.join(OUT, "drag.mp4"))
+encode(frames, W, H, FPS or 60, os.path.join(OUT, "drag.mp4"))
 bg = np.array([(BG >> 16) & 255, (BG >> 8) & 255, BG & 255], dtype=np.int16)
 bad = checked = 0
 edge_only = []
+shown = []  # per frame: (presentation time, the window origin of the state it shows)
 strip = []  # the first 24 checked frames (0.8 s at 30 fps), her state's box drawn over the pixels
 held = (t0, t0 + 4.0)
 # Per frame: the state she put up (in the 100 ms before it, or the last one before that) whose
@@ -75,7 +78,8 @@ for t, px in frames:
         continue
     box = (R[0] + int(xs.min()), R[1] + int(ys.min()), int(xs.max() - xs.min()) + 1, int(ys.max() - ys.min()) + 1)
     checked += 1
-    cands = around(states, t)
+    cands_o = around(states, t, origins=True)
+    cands = [b for b, _ in cands_o]
     if not cands:
         bad += 1
         print(f"frame t={t:.4f} bbox {box}: no state to compare", flush=True)
@@ -90,6 +94,8 @@ for t, px in frames:
         return max(sx, sy), max(ex, ey)
     near = min(cands, key=off)
     pos, ext = off(near)
+    if pos <= TOL:
+        shown.append((t, dict(cands_o)[near] if near in dict(cands_o) else None))
     if len(strip) < 24:
         o = a.astype(np.uint8).copy()
         x, y, w, h = near[0] - R[0], near[1] - R[1], near[2], near[3]
@@ -104,6 +110,17 @@ for t, px in frames:
         edge_only.append(ext)
         print(f"frame t={t:.4f} bbox {box}: nearest state {near}: position within {pos} px, one edge off by {ext} px", flush=True)
         png(os.path.join(OUT, f"edge-{len(edge_only)}.png"), a.astype(np.uint8), W, H)
+# Pacing as presented: the window origin of the state each frame shows, per frame (dragpace.py's report).
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import dragpace  # noqa: E402
+rows = []
+for t, o in shown:
+    # One per composited frame (a capture that got the same frame twice has its time); a frame
+    # that shows the same place as the one before is a step of 0.
+    if o is not None and (not rows or t - t0 > rows[-1][0] + 0.002):
+        rows.append((t - t0, o[1], o[0], None))
+if len(rows) > 3:
+    dragpace.report("presented window origin", rows)
 if strip:
     # One strip: the frames cropped to where she went, 8 wide.
     ink = [(np.abs(o.astype(np.int16) - bg) > 8).any(axis=2) for _, o in strip]
@@ -118,4 +135,4 @@ if strip:
     print(f"strip: {len(strip)} consecutive frames from t={strip[0][0]:.3f} to {strip[-1][0]:.3f}, green = her state's box", flush=True)
 print(f"atomic: {checked} frames checked during the held drag, position disagrees in {bad} (tolerance {TOL} px); "
       f"one edge only (extent) in {len(edge_only)} {sorted(edge_only)}; {n_paints} paints, "
-      f"{n_moves} moves logged; {len(frames)} frames captured at 30 fps", flush=True)
+      f"{n_moves} moves logged; {len(frames)} frames captured at {FPS or "every frame"} fps", flush=True)

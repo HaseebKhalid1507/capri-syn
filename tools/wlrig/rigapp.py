@@ -15,8 +15,8 @@ GROUND = (1200, 1590)
 
 
 def drawn(log):
-    """Her box on screen over time from an SA_ATOMIC_LOG=1 log: [(t, (x, y, w, h))], sorted. Each painted frame's
-    body box, and each move not painted with the frame after it (the last frame's box, moved)."""
+    """Her box on screen over time from an SA_ATOMIC_LOG=1 log: [(t, (x, y, w, h), window origin)], sorted. Each
+    painted frame's body box, and each move not painted with the frame after it (the last frame's box, moved)."""
     paints, moves = [], []
     for l in open(log):
         p = l.split()
@@ -26,7 +26,7 @@ def drawn(log):
             paints.append((float(p[2]), (ox + bx, oy + by, bw, bh), (ox, oy)))
         elif l.startswith("atomic move"):
             moves.append((float(p[2]), tuple(map(int, p[3].split(",")))))
-    states = [(t, b) for t, b, _ in paints]
+    states = list(paints)
     for t, o in moves:
         nxt = next((q for q in paints if q[0] >= t), None)
         if nxt and nxt[2] == o and nxt[0] - t < 0.005:
@@ -34,14 +34,15 @@ def drawn(log):
         prev = next((q for q in reversed(paints) if q[0] <= t), None)
         if prev:
             b, po = prev[1], prev[2]
-            states.append((t, (b[0] - po[0] + o[0], b[1] - po[1] + o[1], b[2], b[3])))
+            states.append((t, (b[0] - po[0] + o[0], b[1] - po[1] + o[1], b[2], b[3]), o))
     return sorted(states), len(paints), len(moves)
 
 
-def around(states, t, lag=0.1):
+def around(states, t, lag=0.1, origins=False):
     """The boxes she may show in a frame presented at t: what she put up in the `lag` s before it, and the last
-    one before that."""
-    return [b for ts, b in states if ts <= t - lag][-1:] + [b for ts, b in states if t - lag < ts <= t]
+    one before that (with origins: (box, window origin) pairs)."""
+    c = [s for s in states if s[0] <= t - lag][-1:] + [s for s in states if t - lag < s[0] <= t]
+    return [(b, o) for _, b, o in c] if origins else [b for _, b, _ in c]
 
 
 class RigApp:

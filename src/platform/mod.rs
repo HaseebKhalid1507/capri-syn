@@ -20,6 +20,7 @@ use gpui_kit::{Window, WindowOptions};
 mod hypr;
 mod linux;
 mod os;
+mod track;
 mod x11;
 
 #[cfg(test)]

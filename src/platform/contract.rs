@@ -239,13 +239,18 @@ async fn drag_pointer<D: Driver>(os: &Os, d: &mut D, _rx: &Receiver<WatchEvent>)
     ensure!(os.pointer()? == (300, 400), "pointer {:?}", os.pointer()?);
     os.freeze_layout(true);
     os.poll_pointer(true);
+    let seq = os.pointer_seq();
     d.warp(420, 380);
     d.settle().await;
+    // The poller saw the move, and a frame after it (at rest past the resampler's reach)
+    // puts her where the pointer is.
+    let at = |os: &Os| os.pointer_at(Instant::now() + Duration::from_millis(40)).ok();
     let end = Instant::now() + Duration::from_millis(500);
-    while os.pointer_fast()? != (420, 380) && Instant::now() < end {
+    while (os.pointer_seq() == seq || at(os) != Some((420.0, 380.0))) && Instant::now() < end {
         std::thread::sleep(Duration::from_millis(5));
     }
-    ensure!(os.pointer_fast()? == (420, 380), "polled pointer {:?}", os.pointer_fast()?);
+    ensure!(at(os) == Some((420.0, 380.0)), "polled pointer {:?}", at(os));
+    ensure!(os.pointer_seq() > seq, "the poller saw no change");
     os.poll_pointer(false);
     os.freeze_layout(false);
     ensure!(os.refresh_at(300, 400) >= 20.0, "refresh rate");

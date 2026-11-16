@@ -631,13 +631,13 @@ pub struct Avatar {
     /// Renders and window moves since start (`brain state`, the perf meters).
     renders: u64,
     moves: u64,
-    /// The held drag's window follow (ragview::rag_follow): last move, its period, and the
-    /// pointer it followed.
+    /// The held drag's window follow (ragview::rag_follow, once a frame): last move, the
+    /// shortest gap between moves, and the pointer change it last saw (`Os::pointer_seq`).
     follow_at: Option<Instant>,
     follow_period: Duration,
-    follow_ptr: Option<(i32, i32)>,
-    /// A motion's follow booked for the next slot.
-    follow_due: Option<Instant>,
+    follow_seq: u64,
+    /// The grip it followed with (a turn moves the grip: the next frame follows at once).
+    follow_grip: Option<(i32, i32)>,
 }
 
 pub struct Init {
@@ -806,8 +806,8 @@ impl Avatar {
             moves: 0,
             follow_at: None,
             follow_period: Duration::from_millis(16),
-            follow_ptr: None,
-            follow_due: None,
+            follow_seq: 0,
+            follow_grip: None,
         };
         if std::env::var_os("SA_NO_BRAIN").is_none() {
             a.brain_start();
@@ -1723,7 +1723,7 @@ impl Avatar {
         }
         take(self.brain_deadline(now));
         take(self.rag_deadline(now));
-        take(self.follow_deadline());
+        take(self.follow_deadline(now));
         if self.swing_on() {
             take(self.brain.as_ref().and_then(|h| h.swing.as_ref()).map_or(Some(now), |s| Some(s.due)));
         }
@@ -1963,7 +1963,7 @@ impl Avatar {
             self.hop = None;
         }
         dirty |= self.check_perch_gone(now);
-        self.rag_follow(now, false);
+        dirty |= self.rag_follow_due();
         dirty |= self.rag_tick(now);
         dirty |= self.swing_tick(now);
         if self.loaded {
@@ -3774,11 +3774,9 @@ impl Avatar {
         }
         let Some(p) = &mut self.press else { return };
         if p.dragging {
-            // Held: the window follows the pointer now (capped at the monitor's refresh), the
-            // bands bend at the rag tick. No render here (each `notify` was a full repaint
-            // and present per motion event) and no X round trip per event.
-            self.rag_follow(Instant::now(), true);
-            self.schedule(cx);
+            // Held: the window follows the pointer in the next frame (`rag_follow`, in
+            // render): any number of motion events, one move a frame.
+            cx.notify();
             return;
         }
         // Before the drag starts the window hasn't moved since the press: the event's
@@ -4170,6 +4168,12 @@ impl Render for Avatar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.renders += 1;
         let now = Instant::now();
+        // Held: the window goes where the pointer was for this frame, and the next frame is
+        // asked for while the pointer moves.
+        self.rag_follow(now);
+        if self.rag_following(now) {
+            window.request_animation_frame();
+        }
         // This frame draws the current pose: a pending step rode on it.
         self.pose_last = self.pose_at(now);
         self.pose_wait = None;
@@ -4193,6 +4197,7 @@ impl Render for Avatar {
         // Carried: the rag's committed frame and plan on top, its next one underneath.
         let rag_shown = self.rag.as_ref().map(|r| (r.cur.clone().or_else(|| r.next.clone()), r.next.clone()));
         self.rag_painted();
+        self.log_drawn();
         let rag_flight = self.rag_json().get("phase").and_then(|p| p.as_str()).is_some_and(|p| p == "fling" || p == "drop");
         let shown_i = rag_shown.as_ref().and_then(|(c, _)| c.as_ref().map(|c| c.frame)).unwrap_or_else(|| self.anim.frame());
         let frame = self.frame_or_default(shown_i);

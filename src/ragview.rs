@@ -22,6 +22,9 @@ pub(super) enum Feed {
 }
 
 /// A frame and its plan, committed one frame ahead.
+/// The ink centre (x) of each source row, None where the row is empty.
+type Centres = Vec<Option<f32>>;
+
 #[derive(Clone, PartialEq)]
 pub(super) struct Shown {
     pub frame: usize,
@@ -36,6 +39,13 @@ pub(super) struct Rag {
     wobble: ragdoll::Wobble,
     /// The chain's band offsets, held (no 1 px back-and-forth between ticks).
     hold: ragdoll::BandHold,
+    /// Each drawn row's ink centre at the last plan, relative to the grip: (source row, x)
+    /// (`cap_lean`).
+    drawn: Vec<(i32, f32)>,
+    /// The ink centre of each source row of the art as shown, for (frame, mirrored).
+    centres: Option<((usize, bool), Centres)>,
+    /// She turned this tick: the plan committed before it belongs to the other facing.
+    turned: bool,
     zone: Zone,
     /// The frame the chain was built for and the grip in it (avatar-local device px).
     frame: usize,
@@ -94,6 +104,63 @@ pub(super) fn lockstep() -> bool {
 fn tick_period() -> Duration {
     let ms = std::env::var("SA_RAG_TICK_MS").ok().and_then(|v| v.parse::<f64>().ok()).filter(|v| *v >= 4.0).unwrap_or(1000.0 / 60.0);
     Duration::from_secs_f64(ms / 1000.0)
+}
+
+/// The most a drawn row turns about the grip in one tick (a frame), degrees (`cap_lean`). Her
+/// lean read off the screen (hips to feet, `tools/dragpace.py`) then changes by ≤ ~6° a frame
+/// (at 5.5 the rows' bends added up to 7.4).
+const LEAN_STEP: f32 = 4.5;
+
+/// Her lean changes by `LEAN_STEP` a frame at most, whatever moved it (the chain, a turn that
+/// mirrors a leaning pose, a chain rebuilt straight for it): each band's ink centre, relative
+/// to the grip, moves at most `tan_step` × its distance from the grip row (+1 px) from where
+/// the band nearest its source row was drawn last plan; its dx is clamped to that. `centres`:
+/// the art's ink centre per source row (as shown). Returns this plan's centres, for the next.
+fn cap_lean(bands: &mut [(i32, i32, i32, i32)], centres: &[Option<f32>], grip: (i32, i32), last: &[(i32, f32)], bp: i32, tan_step: f32) -> Vec<(i32, f32)> {
+    let mut out = Vec::with_capacity(bands.len());
+    for b in bands.iter_mut() {
+        let (y0, y1) = (b.0.max(0) as usize, (b.1.max(0) as usize).min(centres.len()));
+        let cs: Vec<f32> = centres.get(y0..y1).unwrap_or(&[]).iter().flatten().copied().collect();
+        if cs.is_empty() {
+            continue;
+        }
+        let ym = (b.0 + b.1) / 2;
+        let art = cs.iter().sum::<f32>() / cs.len() as f32;
+        let mut c = art + b.2 as f32 - grip.0 as f32;
+        if let Some(&(_, prev)) = last.iter().filter(|(y, _)| (y - ym).abs() <= bp).min_by_key(|(y, _)| (y - ym).abs()) {
+            let lim = tan_step * ((ym + b.3 - grip.1).abs() as f32) + 1.0;
+            let to = c.clamp(prev - lim, prev + lim);
+            if to != c {
+                b.2 = (to - art + grip.0 as f32).round() as i32;
+                c = art + b.2 as f32 - grip.0 as f32;
+            }
+        }
+        out.push((ym, c));
+    }
+    out
+}
+
+/// The lean a plan draws (degrees, feet to the right positive): from the ink centre of its
+/// hip rows (45-65 % of the art's height) to that of its feet rows (80-100 %), as
+/// `tools/dragpace.py` reads it off the screen. For the follow log.
+fn plan_lean(bands: &[(i32, i32, i32, i32)], centres: &[Option<f32>], top: i32, bottom: i32) -> Option<f32> {
+    let h = (bottom - top) as f32;
+    let at = |a: f32, b: f32| {
+        let (mut n, mut sx, mut sy) = (0f32, 0f32, 0f32);
+        for &(y0, y1, dx, dy) in bands {
+            for y in y0..y1 {
+                let u = (y + dy - top) as f32 / h;
+                if let Some(Some(c)) = centres.get(y.max(0) as usize)
+                    && (a..=b).contains(&u)
+                {
+                    (n, sx, sy) = (n + 1.0, sx + c + dx as f32, sy + (y + dy) as f32);
+                }
+            }
+        }
+        (n > 0.0).then(|| (sx / n, sy / n))
+    };
+    let (hip, feet) = (at(0.45, 0.65)?, at(0.80, 1.0)?);
+    Some((feet.0 - hip.0).atan2(feet.1 - hip.1).to_degrees())
 }
 
 /// The band chain is on unless SA_RAG=0 (today's rigid drag, the gauntlet baseline).
@@ -267,6 +334,9 @@ impl Avatar {
             rigid,
             chain,
             hold: ragdoll::BandHold::default(),
+            drawn: Vec::new(),
+            centres: None,
+            turned: false,
             wobble: self.rag_wobble(),
             zone,
             frame,
@@ -319,8 +389,8 @@ impl Avatar {
         });
         self.follow_period = Duration::from_secs_f32(1.0 / hz.clamp(30.0, 500.0));
         self.follow_at = None;
-        self.follow_ptr = None;
-        self.follow_due = None;
+        self.follow_seq = 0;
+        self.follow_grip = None;
         self.rag = Some(rag);
         if touch {
             self.brain_touch(crate::brain::Touch::DragStart);
@@ -378,7 +448,23 @@ impl Avatar {
             Phase::Land(_) => self.rag_land_step(now, t, dt),
             Phase::Idle => self.rag_end(now),
         }
+        if follow_log()
+            && let Some(r) = &self.rag
+        {
+            let id = self.pack.frames.get(self.rag_frame(r, None)).map_or("?", |f| f.id.as_str());
+            elog!("ragtick {:.6} frame {id} mirrored {} grip {},{}", mono_s(), self.flip, r.grip.0, r.grip.1);
+        }
         self.rag_plan_next();
+        // A turn: the committed plan was banded for the other facing, and drawn on the
+        // mirrored art it leaned the wrong way for a frame (~20°). Composited (no shape to
+        // lag behind), the new plan shows at once.
+        let alpha = self.os.composited();
+        if let Some(r) = &mut self.rag
+            && std::mem::take(&mut r.turned)
+            && alpha
+        {
+            r.cur = r.next.clone();
+        }
         if let Some(p) = self.rag.as_mut().and_then(|r| r.prof.as_mut()) {
             p.push(t0.elapsed().as_micros() as u32);
         }
@@ -394,33 +480,64 @@ impl Avatar {
         true
     }
 
-    /// Between rag ticks, the held window follows the pointer at the monitor's refresh
-    /// (capped; `follow_period`): the window origin is `pointer - grip` whatever the bands
-    /// do, so it can move without a render. The bands still bend at the tick rate. True: moved.
-    pub(super) fn rag_follow(&mut self, now: Instant, motion: bool) -> bool {
+    /// The ink centre of each source row of the art she shows (as drawn: mirrored when she
+    /// faces the other way), cached per (frame, mirrored).
+    fn rag_centres(&mut self) -> Option<Vec<Option<f32>>> {
+        let r = self.rag.as_ref()?;
+        let frame = if r.rigid { self.rag_frame(r, None) } else { r.frame };
+        let key = (frame, self.mirrored(frame));
+        if let Some((k, c)) = &r.centres
+            && *k == key
+        {
+            return Some(c.clone());
+        }
+        let m = &self.frame_or_default(frame)?.mask;
+        let c: Vec<Option<f32>> = (0..m.h as i32)
+            .map(|y| {
+                let (n, sx) = (0..m.w as i32).filter(|&x| m.get(x, y)).fold((0u32, 0f32), |(n, s), x| (n + 1, s + x as f32));
+                (n > 0).then(|| sx / n as f32)
+            })
+            .collect();
+        self.rag.as_mut()?.centres = Some((key, c.clone()));
+        Some(c)
+    }
+
+    /// The follow log's line for a render: the window's place and the lean it draws.
+    pub(super) fn log_drawn(&mut self) {
+        if !follow_log() {
+            return;
+        }
+        let centres = self.rag_centres();
+        let Some(r) = &self.rag else { return };
+        let Some(c) = r.cur.as_ref().or(r.next.as_ref()) else { return };
+        let (top, bottom) = self.frame_or_default(c.frame).map_or((0, 1), |f| (f.top, f.bottom));
+        let lean = c.plan.slices.as_ref().zip(centres.as_ref()).and_then(|(b, cs)| plan_lean(b, cs, top, bottom));
+        elog!("drawn {:.6} at {},{} lean {:.1}", mono_s(), self.applied.0, self.applied.1, lean.unwrap_or(f32::NAN));
+    }
+
+    /// Held by the real mouse (not scripted, not lockstep).
+    fn rag_real_held(&self) -> bool {
+        self.rag.as_ref().is_some_and(|r| matches!(r.m.phase(), Phase::Held { .. }) && matches!(r.feed, Feed::Real)) && !lockstep()
+    }
+
+    /// The held window follows the pointer once a frame (render calls this): the origin is
+    /// `pointer - grip` (rigid: `pointer + offset`), the pointer where it was for this frame
+    /// (`Os::pointer_at`, resampled), so a steady drag moves as far every frame whatever the
+    /// input rate. Every frame (a compositor may ask for two in one refresh: each shows where
+    /// the pointer was at its own time); never twice in half a `follow_period`. True: it moved.
+    pub(super) fn rag_follow(&mut self, now: Instant) -> bool {
+        let regrip = self.rag.as_ref().is_some_and(|r| Some(r.grip) != self.follow_grip);
+        if !self.rag_real_held() || (!regrip && self.follow_at.is_some_and(|t| now < t + self.follow_period / 2)) {
+            return false;
+        }
+        let Ok(p) = self.os.pointer_at(now) else { return false };
+        let p = (p.0.round() as i32, p.1.round() as i32);
         let Some(r) = &self.rag else { return false };
-        if !matches!(r.m.phase(), Phase::Held { .. }) || !matches!(r.feed, Feed::Real) || lockstep() {
-            return false;
-        }
-        if let Some(t) = self.follow_at.filter(|&t| now < t + self.follow_period - Duration::from_micros(500)) {
-            // Too soon after the last move: a motion books the next slot itself (the poller
-            // often hasn't seen it yet, and the follow then waited for the next rag tick).
-            // A booking refused (a rag tick moved her since) moves on with the slot: left in
-            // the past it was a deadline that spun until the cap let it through.
-            if motion || self.follow_due.is_some() {
-                self.follow_due = Some(t + self.follow_period);
-            }
-            return false;
-        }
-        self.follow_due = None;
-        // A fresh QueryPointer (at most once per follow period, drags only): the motion event
-        // that called us usually beats the 2 ms poller to the new position, and a stale
-        // read left the move to the next rag tick (step lag p50 15.9 ms).
-        let Ok(p) = self.os.pointer().or_else(|_| self.os.pointer_fast()) else { return false };
         let l = self.layout;
         let (rigid, offset, grip) = (r.rigid, r.offset, r.grip);
         self.follow_at = Some(now);
-        self.follow_ptr = Some(p);
+        self.follow_seq = self.os.pointer_seq();
+        self.follow_grip = Some(grip);
         let before = self.applied;
         if rigid {
             self.move_to((p.0 + offset.0, p.1 + offset.1), false);
@@ -434,27 +551,33 @@ impl Avatar {
         self.applied != before
     }
 
-    /// When the follow may move the window again (a held drag only).
-    pub(super) fn follow_deadline(&self) -> Option<Instant> {
-        let r = self.rag.as_ref()?;
-        if !matches!(r.m.phase(), Phase::Held { .. }) || !matches!(r.feed, Feed::Real) || lockstep() {
-            return None;
-        }
-        if self.follow_due.is_some() {
-            return self.follow_due;
-        }
-        // Only while the pointer is somewhere the window hasn't followed yet.
-        let p = self.os.pointer_fast().ok()?;
-        (Some(p) != self.follow_ptr).then(|| self.follow_at.map_or_else(Instant::now, |t| t + self.follow_period))
+    /// Frames keep coming while the pointer moved lately (the resampler's reach), and once
+    /// after a change the last frame hasn't followed.
+    pub(super) fn rag_following(&self, now: Instant) -> bool {
+        self.rag_real_held() && (self.os.pointer_moved_within(now, Duration::from_millis(40)) || self.os.pointer_seq() != self.follow_seq)
     }
 
-    fn rag_pointer(&self, r: &Rag) -> (f32, f32) {
+    /// A tick: the pointer moved since the last frame followed it (no motion event reached
+    /// her, or none yet): ask for a frame.
+    pub(super) fn rag_follow_due(&self) -> bool {
+        self.rag_real_held() && self.os.pointer_seq() != self.follow_seq
+    }
+
+    /// Held by the real mouse: a tick every follow period, so a pointer that moves without
+    /// her hearing it still gets a frame (`rag_follow_due`).
+    pub(super) fn follow_deadline(&self, now: Instant) -> Option<Instant> {
+        self.rag_real_held().then(|| self.follow_at.map_or(now, |t| t + self.follow_period).max(now + Duration::from_millis(2)))
+    }
+
+    /// The pointer for the chain at a tick: the script's, or where the mouse was then
+    /// (resampled, like the window's follow).
+    fn rag_pointer(&self, r: &Rag, now: Instant) -> (f32, f32) {
         match &r.feed {
             Feed::Script { s, grab } => {
                 let o = s.at(r.t);
                 (grab.0 + o.0, grab.1 + o.1)
             }
-            Feed::Real => self.os.pointer_fast().map_or_else(|_| r.ptr_last(), |p| (p.0 as f32, p.1 as f32)),
+            Feed::Real => self.os.pointer_at(now).unwrap_or_else(|_| r.ptr_last()),
         }
     }
 
@@ -477,17 +600,14 @@ impl Avatar {
         let Some(r) = &mut self.rag else { return };
         r.grip = grip;
         r.chain = chain;
+        r.turned = true;
     }
 
     fn rag_held_step(&mut self, now: Instant, t: f32, dt: f32) {
         let Some(r) = &self.rag else { return };
-        let p = self.rag_pointer(r);
+        let p = self.rag_pointer(r, now);
         let release = matches!(&r.feed, Feed::Script { s, .. } if s.release_at.is_some_and(|at| t + 1e-4 >= at));
         let l = self.layout;
-        // The tick's own move counts against the follow's rate (moves cost Xorg a region
-        // recompute of her ~570-rect shape each).
-        self.follow_ptr = Some((p.0 as i32, p.1 as i32));
-        self.follow_at = Some(now);
         let Some(r) = &mut self.rag else { return };
         r.ptr.push(t, p.0, p.1);
         // She turns with the drag (back where she's pulled from, by default): the same pointer
@@ -500,9 +620,11 @@ impl Avatar {
         }
         let Some(r) = &mut self.rag else { return };
         if r.rigid {
-            let o = (p.0 as i32 + r.offset.0, p.1 as i32 + r.offset.1);
-            let _ = dt;
-            self.move_to(o, false);
+            // The real mouse's rigid drag moves at the frame (`rag_follow`); a script's here.
+            if !matches!(r.feed, Feed::Real) {
+                let o = (p.0 as i32 + r.offset.0, p.1 as i32 + r.offset.1);
+                self.move_to(o, false);
+            }
         } else {
             // The flip-card: at the bottom of the fold the frame swaps to the upside-down
             // hang and the grip moves to its feet.
@@ -542,7 +664,10 @@ impl Avatar {
                 r.frame = fi;
             }
             let o = (p.0.round() as i32 - l.avatar_x - r.grip.0, p.1.round() as i32 - l.avatar_y - r.grip.1);
-            self.set_origin(o);
+            // The real mouse's window moves at the frame (`rag_follow`), not at the tick too.
+            if !self.rag_real_held() {
+                self.set_origin(o);
+            }
         }
         if release {
             self.rag_release(now);
@@ -890,12 +1015,14 @@ impl Avatar {
             }
         };
         let bp = ((4.0 * self.layout.sf).round() as i32).max(2);
+        let centres = self.rag_centres();
         let slices = match (held, self.rag.as_mut()) {
             (Some((top, bottom)), Some(r)) => {
                 let mut b = r.chain.bands_held(&mut r.hold, bp, top, bottom, r.grip.1.clamp(top, bottom - 1));
                 if r.flight.is_none() {
                     ragdoll::Wobble::apply(r.wobble.px(), &mut b, top, bottom);
                 }
+                r.drawn = cap_lean(&mut b, centres.as_deref().unwrap_or(&[]), r.grip, &r.drawn, bp, LEAN_STEP.to_radians().tan());
                 Some(b)
             }
             _ => None,
@@ -1164,5 +1291,36 @@ fn scale_contact(c: Contact, sf: f32) -> Contact {
         Contact::Floor { speed } => Contact::Floor { speed: speed / sf },
         Contact::Perch { win, x, speed } => Contact::Perch { win, x, speed: speed / sf },
         Contact::None => Contact::None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cap_lean;
+
+    #[test]
+    fn a_mirrored_lean_swings_over_at_the_cap() {
+        // A pose whose legs lean right (each row 0.2 px further right per row below the grip
+        // at row 100), then mirrored about x = 100 (the grip mirrors with it).
+        let lean = |y: i32, k: f32| Some(100.0 + k * 0.2 * (y - 100) as f32);
+        let right: Vec<Option<f32>> = (0..300).map(|y| lean(y, 1.0)).collect();
+        let left: Vec<Option<f32>> = (0..300).map(|y| lean(y, -1.0)).collect();
+        let bands = |n: i32| (0..n).map(|i| (100 + 20 * i, 120 + 20 * i, 0, 0)).collect::<Vec<_>>();
+        let tan = 5.5f32.to_radians().tan();
+        let mut b = bands(10);
+        let last = cap_lean(&mut b, &right, (100, 100), &[], 20, tan);
+        assert!(b.iter().all(|b| b.2 == 0), "nothing to cap from");
+        // Mirrored: the legs would jump to the other side (22.6° at once); they turn by the cap.
+        let mut b = bands(10);
+        let now = cap_lean(&mut b, &left, (100, 100), &last, 20, tan);
+        for ((y, c0), (_, c1)) in last.iter().zip(&now) {
+            let lim = tan * (y - 100) as f32 + 1.0;
+            assert!((c1 - c0).abs() <= lim + 0.5, "row {y}: {c0} -> {c1} (cap {lim})");
+        }
+        assert!(b.last().unwrap().2 > 0, "the mirrored legs are drawn shifted back toward where they were");
+        // Unchanged art: unchanged bands.
+        let mut b = bands(10);
+        let again = cap_lean(&mut b, &right, (100, 100), &last, 20, tan);
+        assert!(b.iter().all(|b| b.2 == 0) && again == last);
     }
 }

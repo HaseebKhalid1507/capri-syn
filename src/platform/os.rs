@@ -1,6 +1,7 @@
 //! The core over whichever backend: every desktop decision, once. A backend's answers come
 //! in as plain data (`Desktop`) and go out as primitives (`Stage`); the rules live here.
 
+use super::track::Track;
 use super::{Caps, Desktop, FxZ, Hint, Monitor, PointerCfg, PointerEv, Role, SEAT_MIN, ShapeRect, Stage, Visible, WatchEvent, WinId, WinRect};
 use anyhow::Result;
 use gpui_kit::{Bounds, Pixels, TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, fill, point, px, rgb, size};
@@ -57,6 +58,9 @@ struct PointerWatch {
 }
 
 type Cached = RefCell<Option<(Instant, Vec<Monitor>)>>;
+
+/// The drag poller: its pointer track and its stop flag.
+type Poll = (Arc<Mutex<Track>>, Arc<AtomicBool>);
 
 /// One effect layer as last set: solid `rgb` over `rects` (relative to `origin`, root px) in a
 /// `size` px box, and where it shows: on a surface of its own (`staged`: the backend paints
@@ -157,9 +161,9 @@ pub struct Os {
     /// While she's carried or flying: both caches stay as snapshotted at the grab (no round
     /// trip inside a 60 Hz tick).
     frozen: Cell<bool>,
-    /// The pointer polled on its own connection while she's held by the real mouse:
-    /// (x << 32 | y as u32, or u64::MAX before the first read; stop flag).
-    poll: RefCell<Option<(Arc<AtomicU64>, Arc<AtomicBool>)>>,
+    /// The pointer polled on its own connection while she's held by the real mouse: its
+    /// changes (`track.rs`), and the stop flag.
+    poll: RefCell<Option<Poll>>,
     /// Bounding shapes sent, and their rects (for the rag's meter).
     shape_sends: Cell<u64>,
     shape_rects: Cell<u64>,
@@ -704,15 +708,29 @@ impl Os {
         self.desk.pointer()
     }
 
-    /// The polled pointer while polling (and read once), else a fresh read.
-    pub fn pointer_fast(&self) -> Result<(i32, i32)> {
-        if let Some((pos, _)) = self.poll.borrow().as_ref() {
-            let v = pos.load(Ordering::Relaxed);
-            if v != u64::MAX {
-                return Ok(((v >> 32) as u32 as i32, v as u32 as i32));
-            }
+    /// Where the pointer was for a frame drawn at `at` (`track.rs`: resampled from the
+    /// poller's changes), else a fresh read.
+    pub fn pointer_at(&self, at: Instant) -> Result<(f32, f32)> {
+        if let Some(p) = self.track(|t| t.at(at)).flatten() {
+            return Ok(p);
         }
-        self.pointer()
+        self.pointer().map(|p| (p.0 as f32, p.1 as f32))
+    }
+
+    /// Bumped by every pointer change the poller sees (0 when not polling).
+    pub fn pointer_seq(&self) -> u64 {
+        self.track(|t| t.seq()).unwrap_or(0)
+    }
+
+    /// The poller saw the pointer move within `d` before `now`.
+    pub fn pointer_moved_within(&self, now: Instant, d: Duration) -> bool {
+        self.track(|t| t.newest()).flatten().is_some_and(|(at, _)| now.saturating_duration_since(at) <= d)
+    }
+
+    fn track<T>(&self, f: impl FnOnce(&Track) -> T) -> Option<T> {
+        let g = self.poll.borrow();
+        let (t, _) = g.as_ref()?;
+        t.lock().ok().map(|t| f(&t))
     }
 
     /// Poll the pointer on a thread with its own connection (250 Hz) while on, so a held tick
@@ -728,21 +746,23 @@ impl Os {
         if g.is_some() {
             return;
         }
-        let pos = Arc::new(AtomicU64::new(u64::MAX));
+        let track = Arc::new(Mutex::new(Track::default()));
         let stop = Arc::new(AtomicBool::new(false));
-        let (p, s, d) = (pos.clone(), stop.clone(), self.desk.clone());
+        let (tr, s, d) = (track.clone(), stop.clone(), self.desk.clone());
         let spawned = std::thread::Builder::new().name("avatar-pointer".into()).spawn(move || {
             let Ok(mut read) = d.pointer_reader() else { return };
             while !s.load(Ordering::Relaxed) {
-                if let Some((x, y)) = read() {
-                    p.store(((x as u32 as u64) << 32) | y as u32 as u64, Ordering::Relaxed);
+                if let Some(p) = read()
+                    && let Ok(mut t) = tr.lock()
+                {
+                    t.push(Instant::now(), p);
                 }
-                // 2 ms: the window follows it at up to the monitor's refresh (see rag_follow).
+                // 2 ms: each change timed to within a read (the frame resamples them).
                 std::thread::sleep(Duration::from_millis(2));
             }
         });
         if spawned.is_ok() {
-            *g = Some((pos, stop));
+            *g = Some((track, stop));
         }
     }
 

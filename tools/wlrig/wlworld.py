@@ -401,10 +401,12 @@ class Grab:
 
 
 def record_frames(g, r, fps, stop):
-    """[(presentation time, RGB bytes)] of region r at `fps` until `stop` (a threading.Event) is set."""
+    """[(presentation time, RGB bytes)] of region r at `fps` until `stop` (a threading.Event) is set. fps 0: back
+    to back, each grab asking for the next composited frame (every frame the output shows, while it changes)."""
     frames, t0, k = [], time.monotonic(), 0
     while not stop.is_set():
-        time.sleep(max(0.0, t0 + k / fps - time.monotonic()))
+        if fps > 0:
+            time.sleep(max(0.0, t0 + k / fps - time.monotonic()))
         k += 1
         f = g.grab(*r)
         if f:
