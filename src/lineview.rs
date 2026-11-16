@@ -42,6 +42,69 @@ pub(super) struct Unread {
     pub refused: bool,
 }
 
+/// What he hasn't seen: her strip, the last turn he has seen, and the turn the strip is about.
+#[derive(Clone, Debug, Default)]
+pub(super) struct Unseen {
+    pub strip: Option<Unread>,
+    seen: u64,
+    turn: u64,
+}
+
+impl Unseen {
+    /// He has seen up to the shown turn (the Line showed it, he clicked the strip, he sent the
+    /// next message).
+    pub fn ack(&mut self, shown: Option<u64>) {
+        self.strip = None;
+        self.seen = self.seen.max(shown.unwrap_or(0));
+    }
+
+    /// A reply's bubble went: if he never saw it (and the Line isn't open), it leaves a strip,
+    /// counting the replies missed in a row.
+    pub fn missed(&mut self, turn: u64, text: &[char], line_open: bool) {
+        if line_open || turn <= self.seen {
+            return;
+        }
+        let first: String = text.iter().collect::<String>().lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").to_string();
+        if first.is_empty() {
+            return;
+        }
+        let n = match &self.strip {
+            Some(u) if !u.refused && self.turn != turn => u.n + 1,
+            Some(u) if !u.refused => u.n,
+            _ => 1,
+        };
+        self.turn = turn;
+        self.strip = Some(Unread { n, text: first, refused: false });
+    }
+
+    /// A reply he heard in a hands-free conversation: seen once spoken, whenever its bubble
+    /// goes. A strip already about it (it went behind the chip mid-speech) drops it; one about
+    /// replies before it stays.
+    pub fn heard(&mut self, turn: u64) {
+        self.seen = self.seen.max(turn);
+        if let Some(u) = &mut self.strip
+            && !u.refused
+            && self.turn == turn
+        {
+            if u.n > 1 {
+                u.n -= 1;
+            } else {
+                self.strip = None;
+            }
+        }
+    }
+
+    /// The strip on her tag: no "N NEW" while hands-free is on (he hears her replies; one
+    /// from before comes back when it ends). A refused message always shows.
+    pub fn shown(&self, handsfree: bool) -> Option<&Unread> {
+        self.strip.as_ref().filter(|u| u.refused || !handsfree)
+    }
+
+    pub fn refused(&mut self, text: String) {
+        self.strip = Some(Unread { n: 1, text, refused: true });
+    }
+}
+
 impl Avatar {
     /// `talk press`: open the Line (or resume it parked, or close it).
     pub(super) fn talk_press(&mut self, cx: &mut Context<Self>) -> String {
@@ -208,7 +271,7 @@ impl Avatar {
         self.line_opened_ms = Some(now.elapsed().as_millis());
         // He is reading the thread now: nothing is unread, and the bubble gives way. Opened
         // with a reply unread (her strip, the summon key): the thread starts at that reply.
-        if self.unread.as_ref().is_some_and(|u| !u.refused) {
+        if self.unseen.strip.as_ref().is_some_and(|u| !u.refused) {
             let (v, hd) = (view, handle);
             cx.defer(move |cx| {
                 hd.update(cx, |_, _, cx| v.update(cx, |l, cx| l.show_last_reply(cx))).ok();
@@ -490,8 +553,7 @@ impl Avatar {
     /// The turn whose reply he has seen (the Line showed it, he hovered or clicked the strip,
     /// he sent the next message).
     pub(super) fn ack_unread(&mut self) {
-        self.unread = None;
-        self.seen_turn = self.session.as_ref().and_then(|s| s.shown.as_ref()).map_or(self.seen_turn, |b| b.turn);
+        self.unseen.ack(self.session.as_ref().and_then(|s| s.shown.as_ref()).map(|b| b.turn));
     }
 
     /// The bubble goes behind the chip before its hold ran out (she teleports, hides): a
@@ -510,20 +572,12 @@ impl Avatar {
     /// The bubble's hold ran out: if he never saw this reply, it leaves a strip.
     pub(super) fn reply_missed(&mut self, text: &[char]) {
         let turn = self.session.as_ref().and_then(|s| s.shown.as_ref()).map_or(0, |b| b.turn);
-        if self.line.is_some() || turn <= self.seen_turn {
-            return;
-        }
-        let first: String = text.iter().collect::<String>().lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").to_string();
-        if first.is_empty() {
-            return;
-        }
-        let n = match &self.unread {
-            Some(u) if !u.refused && self.unread_turn != turn => u.n + 1,
-            Some(u) if !u.refused => u.n,
-            _ => 1,
-        };
-        self.unread_turn = turn;
-        self.unread = Some(Unread { n, text: first, refused: false });
+        self.unseen.missed(turn, text, self.line.is_some());
+    }
+
+    /// Her strip as drawn on her tag (none of "N NEW" while hands-free is on).
+    pub(super) fn unread_shown(&self) -> Option<&Unread> {
+        self.unseen.shown(self.voice.hf.is_some())
     }
 
     /// Copy the last reply as written (the reader's or not): `avatarctl copy`, the menu.
@@ -548,5 +602,84 @@ pub(super) fn copy_text(t: String, cx: &mut App) {
             std::fs::write(p, &t).ok();
         }
         None => cx.write_to_clipboard(ClipboardItem::new_string(t)),
+    }
+}
+
+#[cfg(test)]
+mod unseen_tests {
+    use super::{Unread, Unseen};
+
+    fn chars(s: &str) -> Vec<char> {
+        s.chars().collect()
+    }
+
+    #[test]
+    fn outside_handsfree_the_strip_is_as_ever() {
+        let mut u = Unseen::default();
+        u.missed(5, &chars("\n  First line\nmore"), false);
+        assert_eq!(u.shown(false), Some(&Unread { n: 1, text: "First line".into(), refused: false }));
+        // The same reply again (it folded, then its hold ran out): still one.
+        u.missed(5, &chars("First line"), false);
+        u.missed(6, &chars("Second"), false);
+        assert_eq!(u.shown(false).map(|s| (s.n, s.text.as_str())), Some((2, "Second")));
+        // He saw them: gone, and a seen turn leaves none.
+        u.ack(Some(6));
+        assert_eq!(u.shown(false), None);
+        u.missed(6, &chars("Second"), false);
+        assert_eq!(u.strip, None);
+        // The Line open: he is reading it.
+        u.missed(7, &chars("Third"), true);
+        assert_eq!(u.strip, None);
+        // A push-to-talk / typed / event reply (never `heard`): a strip.
+        u.missed(8, &chars("Fourth"), false);
+        assert_eq!(u.shown(false).map(|s| s.n), Some(1));
+    }
+
+    #[test]
+    fn no_new_pill_while_handsfree_is_on() {
+        let mut u = Unseen::default();
+        u.missed(5, &chars("A reply"), false);
+        assert!(u.strip.is_some() && u.shown(true).is_none(), "kept, not shown");
+        assert_eq!(u.shown(false).map(|s| s.n), Some(1));
+        // A refused message is no "N NEW": it shows, hands-free or not.
+        u.refused("NOT SENT (no session) · \"hi\"".into());
+        assert!(u.shown(true).is_some_and(|s| s.refused));
+    }
+
+    #[test]
+    fn a_handsfree_reply_is_seen_once_spoken_even_after_handsfree_ends() {
+        let mut u = Unseen::default();
+        u.ack(Some(6)); // his hands-free turn 7 went out
+        u.heard(7); // her reply to it is said
+        // Hands-free timed out (60 s quiet) before the bubble's hold ran out: no pill after.
+        u.missed(7, &chars("Her spoken reply"), false);
+        assert_eq!((u.strip.as_ref(), u.shown(false)), (None, None));
+        // It went behind the chip mid-speech (a teleport) before it was said: dropped when said.
+        u.missed(8, &chars("Folded early"), false);
+        u.heard(8);
+        assert_eq!(u.strip, None);
+        // ...and only it, when others were missed before it.
+        let mut u = Unseen::default();
+        u.missed(3, &chars("Older"), false);
+        u.missed(4, &chars("Folded early"), false);
+        u.heard(4);
+        assert_eq!(u.shown(false).map(|s| s.n), Some(1));
+    }
+
+    #[test]
+    fn unread_from_before_handsfree_comes_back_when_it_ends() {
+        let mut u = Unseen::default();
+        u.missed(5, &chars("Before hands-free"), false);
+        // Hands-free: hidden; her replies there (turns 6, 7) are heard, the count doesn't grow.
+        assert_eq!(u.shown(true), None);
+        for t in [6, 7] {
+            u.heard(t);
+            u.missed(t, &chars("Spoken"), false);
+        }
+        // It ends: the one from before is back, as it was.
+        assert_eq!(u.shown(false), Some(&Unread { n: 1, text: "Before hands-free".into(), refused: false }));
+        // A reply after it, not heard (typed): counted on top.
+        u.missed(8, &chars("Typed reply"), false);
+        assert_eq!(u.shown(false).map(|s| (s.n, s.text.as_str())), Some((2, "Typed reply")));
     }
 }
