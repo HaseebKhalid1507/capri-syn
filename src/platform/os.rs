@@ -3,7 +3,7 @@
 
 use super::{Caps, Desktop, FxZ, Hint, Monitor, PointerCfg, PointerEv, Role, SEAT_MIN, ShapeRect, Stage, Visible, WatchEvent, WinId, WinRect};
 use anyhow::Result;
-use gpui_kit::{Bounds, Pixels, TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions};
+use gpui_kit::{Bounds, Pixels, TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, fill, point, px, rgb, size};
 use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -58,6 +58,68 @@ struct PointerWatch {
 
 type Cached = RefCell<Option<(Instant, Vec<Monitor>)>>;
 
+/// Effect layers kept by the core when the backend can't show them as surfaces of their own
+/// (`Caps::fx_layers` off): her view paints them in her window (`Os::paint_fx`), in the same
+/// stacking order a server would.
+/// rgb, origin (root px), rects relative to it.
+type FxLayer = (u32, (i32, i32), Vec<ShapeRect>);
+
+#[derive(Default)]
+struct FxList {
+    /// Layer → (rgb, origin root px, rects relative to it).
+    layers: std::collections::HashMap<usize, FxLayer>,
+    /// Above her body, bottom → top.
+    over: Vec<usize>,
+    /// Below her body, bottom → top.
+    under: Vec<usize>,
+    /// Changed since her view last took it.
+    dirty: bool,
+}
+
+impl FxList {
+    fn show(&mut self, layer: usize, rgb: u32, origin: (i32, i32), rects: Option<&[ShapeRect]>, z: FxZ) {
+        let rects = rects.map(<[ShapeRect]>::to_vec).or_else(|| self.layers.get(&layer).map(|l| l.2.clone())).unwrap_or_default();
+        // The same layer set again (another tick, nothing new): no frame for it.
+        let before = (self.over.clone(), self.under.clone());
+        let same = self.layers.insert(layer, (rgb, origin, rects)) == self.layers.get(&layer).cloned();
+        self.over.retain(|&l| l != layer);
+        self.under.retain(|&l| l != layer);
+        match z {
+            FxZ::Top => self.over.push(layer),
+            FxZ::Below(j) => match self.over.iter().position(|&l| l == j) {
+                Some(i) => self.over.insert(i, layer),
+                None => self.over.push(layer),
+            },
+            FxZ::UnderBody => self.under.push(layer),
+        }
+        self.dirty |= !same || before != (self.over.clone(), self.under.clone());
+    }
+
+    fn hide(&mut self, layer: usize) {
+        if self.layers.remove(&layer).is_some() {
+            self.over.retain(|&l| l != layer);
+            self.under.retain(|&l| l != layer);
+            self.dirty = true;
+        }
+    }
+
+    fn clear(&mut self) {
+        if !self.layers.is_empty() {
+            *self = FxList { dirty: true, ..FxList::default() };
+        }
+    }
+
+    /// The rects to paint, window-local px (her window at `win`), bottom → top, with colours.
+    fn scene(&self, under: bool, win: (i32, i32)) -> Vec<((i32, i32, i32, i32), u32)> {
+        let order = if under { &self.under } else { &self.over };
+        order
+            .iter()
+            .filter_map(|l| self.layers.get(l))
+            .flat_map(|(rgb, o, rects)| rects.iter().map(move |r| ((o.0 - win.0 + r.0 as i32, o.1 - win.1 + r.1 as i32, r.2 as i32, r.3 as i32), *rgb)))
+            .collect()
+    }
+}
+
 pub struct Os {
     desk: Arc<dyn Desktop>,
     stage: Box<dyn Stage>,
@@ -78,6 +140,10 @@ pub struct Os {
     shape_sends: Cell<u64>,
     shape_rects: Cell<u64>,
     pointer_watch: Arc<PointerWatch>,
+    /// In-scene effect layers (`Caps::fx_layers` off).
+    fx_list: RefCell<FxList>,
+    /// Where her body was last put (root px).
+    body_at: Cell<(i32, i32)>,
 }
 
 impl Os {
@@ -97,6 +163,8 @@ impl Os {
             shape_sends: Cell::new(0),
             shape_rects: Cell::new(0),
             pointer_watch: Arc::new(PointerWatch { moved_ms: AtomicU64::new(u64::MAX), ..PointerWatch::default() }),
+            fx_list: RefCell::new(FxList::default()),
+            body_at: Cell::new((0, 0)),
         }
     }
 
@@ -141,8 +209,10 @@ impl Os {
     }
 
     pub fn move_to(&self, x: i32, y: i32) -> Result<()> {
+        self.body_at.set((x, y));
         self.stage.move_to(x, y)
     }
+
 
     pub fn raise(&self) -> Result<()> {
         self.stage.raise()
@@ -204,7 +274,11 @@ impl Os {
 
     fn fx(&self, layer: usize, rgb: u32, origin: (i32, i32), size: (i32, i32), rects: Option<&[ShapeRect]>, z: FxZ) -> Result<()> {
         if rects.is_some_and(|r| r.is_empty()) {
-            self.stage.fx_hide(layer);
+            self.fx_unmap(layer);
+            return Ok(());
+        }
+        if !self.caps.fx_layers {
+            self.fx_list.borrow_mut().show(layer, rgb, origin, rects, z);
             return Ok(());
         }
         self.stage.fx_show(layer, rgb, origin, size, rects, z)
@@ -212,11 +286,56 @@ impl Os {
 
     /// Hide one effect layer if it is up.
     pub fn fx_unmap(&self, layer: usize) {
-        self.stage.fx_hide(layer);
+        if self.caps.fx_layers {
+            self.stage.fx_hide(layer);
+        } else {
+            self.fx_list.borrow_mut().hide(layer);
+        }
     }
 
     pub fn fx_hide(&self) {
-        self.stage.fx_hide_all();
+        if self.caps.fx_layers {
+            self.stage.fx_hide_all();
+        } else {
+            self.fx_list.borrow_mut().clear();
+        }
+    }
+
+    /// While a press lasts her input region must cover her window (`Caps::implicit_grab` off).
+    pub fn press_takes_window(&self) -> bool {
+        !self.caps.implicit_grab
+    }
+
+    /// A redraw is a full present (`Caps::costly_redraw`): steps that can wait ride other redraws.
+    pub fn redraw_costly(&self) -> bool {
+        self.caps.costly_redraw
+    }
+
+    /// Effect layers are painted in her window (by her view, from `fx_scene`), not by the server.
+    pub fn fx_in_scene(&self) -> bool {
+        !self.caps.fx_layers
+    }
+
+    /// Paint the in-scene effect layers below her body (`under`) or above it, bottom → top,
+    /// in her window (where `move_to` put it; `sf` device px per logical px). Nothing when the
+    /// server paints them. Painting the ones above her marks the list clean.
+    pub fn paint_fx(&self, window: &mut Window, under: bool, sf: f32) {
+        if self.caps.fx_layers {
+            return;
+        }
+        let mut l = self.fx_list.borrow_mut();
+        for ((x, y, w, h), c) in l.scene(under, self.body_at.get()) {
+            let b = Bounds::new(point(px(x as f32 / sf), px(y as f32 / sf)), size(px(w as f32 / sf), px(h as f32 / sf)));
+            window.paint_quad(fill(b, rgb(c)));
+        }
+        if !under {
+            l.dirty = false;
+        }
+    }
+
+    /// In-scene effect layers changed since the last call: her window needs a frame.
+    pub fn fx_take_dirty(&self) -> bool {
+        std::mem::take(&mut self.fx_list.borrow_mut().dirty)
     }
 
     pub fn flush(&self) {
@@ -272,6 +391,9 @@ impl Os {
 
     /// Force a mode (`None`: follow the compositor). True if the effective mode changed.
     pub fn force_composited(&self, mode: Option<bool>) -> bool {
+        if !self.caps.shape_mode && mode == Some(false) && self.force.get() != 1 {
+            elog!("synaps-avatar: [display] composited = false ignored: this desktop always blends her alpha");
+        }
         let before = self.composited();
         self.force.set(mode.map_or(0, |m| if m { 2 } else { 1 }));
         before != self.composited()
@@ -614,4 +736,38 @@ fn rect_dist(r: &WinRect, x: f32, y: f32) -> f32 {
 /// Closest distance from the segment a→b to the rect (sampled: 24 points, enough at 60 ms).
 fn seg_rect_dist(r: &WinRect, a: (f32, f32), b: (f32, f32)) -> f32 {
     (0..=24).map(|k| k as f32 / 24.0).map(|u| rect_dist(r, a.0 + (b.0 - a.0) * u, a.1 + (b.1 - a.1) * u)).fold(f32::MAX, f32::min)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fx_list_stacks_like_a_server() {
+        let mut l = FxList::default();
+        l.show(1, 0xff0000, (100, 100), Some(&[(0, 0, 4, 10)]), FxZ::Top);
+        l.show(2, 0x660000, (100, 100), Some(&[(0, 0, 8, 10)]), FxZ::Below(1));
+        l.show(3, 0x111111, (90, 120), Some(&[(0, 0, 50, 3)]), FxZ::UnderBody);
+        l.show(4, 0x00ff00, (0, 0), Some(&[(1, 1, 1, 1)]), FxZ::Below(9));
+        let over: Vec<u32> = l.scene(false, (100, 100)).iter().map(|q| q.1).collect();
+        assert_eq!(over, [0x660000, 0xff0000, 0x00ff00], "glow below the line; below a missing layer = on top");
+        assert_eq!(l.scene(true, (100, 100)), [((-10, 20, 50, 3), 0x111111)], "window-local, under her body");
+        l.show(1, 0xff0000, (110, 100), None, FxZ::Top);
+        assert_eq!(l.scene(false, (100, 100)).last(), Some(&((10, 0, 4, 10), 0xff0000)), "None keeps the rects, moves the layer");
+        // A tick sets the same pair again (the core on top, its glow below it): no frame.
+        l.show(2, 0x660000, (100, 100), Some(&[(0, 0, 8, 10)]), FxZ::Below(1));
+        l.dirty = false;
+        l.show(1, 0xff0000, (110, 100), None, FxZ::Top);
+        l.show(2, 0x660000, (100, 100), Some(&[(0, 0, 8, 10)]), FxZ::Below(1));
+        assert!(!l.dirty, "the same layers set again need no frame");
+        l.show(2, 0x660000, (101, 100), None, FxZ::Below(1));
+        assert!(l.dirty, "moved");
+        l.dirty = false;
+        l.hide(7);
+        assert!(!l.dirty, "hiding a layer that isn't up changes nothing");
+        l.hide(2);
+        assert!(l.dirty && l.scene(false, (0, 0)).len() == 2);
+        l.clear();
+        assert!(l.scene(false, (0, 0)).is_empty() && l.scene(true, (0, 0)).is_empty());
+    }
 }

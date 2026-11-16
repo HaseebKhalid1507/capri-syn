@@ -34,8 +34,9 @@ HOME = os.path.expanduser("~")
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SHOTS = os.environ.get("SA_SHOTS", os.path.join(REPO, "shots"))
 SOCK = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "synaps-avatar.sock")
-os.environ.setdefault("DISPLAY", ":0")
-os.environ.setdefault("XAUTHORITY", "/run/user/1000/lyxauth")
+if not os.environ.get("WAYLAND_DISPLAY"):  # the Wayland rig (tools/wlrig) uses ctl only
+    os.environ.setdefault("DISPLAY", ":0")
+    os.environ.setdefault("XAUTHORITY", "/run/user/1000/lyxauth")
 
 
 _disp = None
@@ -218,10 +219,12 @@ def wait_user_idle(need_ms=4000, max_s=12):
 
 def input_rects():
     """The avatar window's X input shape in root coords: where a click reaches it (anywhere
-    else goes through to the window below)."""
-    from Xlib.ext import shape
+    else goes through to the window below). On Wayland (the rig): the input region she last set."""
     st = json.loads(ctl("state"))
     w = st["window"]
+    if os.environ.get("WAYLAND_DISPLAY"):
+        return [(w["x"] + r[0], w["y"] + r[1], r[2], r[3]) for r in json.loads(ctl("shape"))["input"]]
+    from Xlib.ext import shape
     win = xdisp().create_resource_object("window", st["xid"])
     r = win.shape_get_rectangles(shape.SK.Input)
     return [(w["x"] + q.x, w["y"] + q.y, q.width, q.height) for q in r.rectangles]

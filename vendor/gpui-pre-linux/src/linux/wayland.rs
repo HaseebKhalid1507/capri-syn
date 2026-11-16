@@ -10,6 +10,8 @@ mod window;
 pub mod layer_shell;
 
 pub(crate) use client::*;
+/// synaps-avatar patch (PATCHES.md): runtime layer-shell control.
+pub use window::layer_ctl;
 
 use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape;
 

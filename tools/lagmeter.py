@@ -8,7 +8,12 @@ synthetic input gives the input lag. Pointer actions are XTEST, only on the avat
 input shape, only once the user has been idle 4 s; the pointer goes back where it was, and a
 phase is marked TAINT if the pointer isn't where we put it (he moved the mouse).
 
-usage: lagmeter.py STAGE_X,STAGE_Y,W,H phase... [--out FILE]
+On Wayland (the tools/wlrig rig only: WAYLAND_DISPLAY set, inside run.sh) the strips come from screencopy,
+one per composited frame, stamped with its presentation time, and the pointer is a virtual pointer.
+`--bg 0xRRGGBB`: the stage colour (default the X stage's 0x34404d). LAGMETER_PID: her pid (else `pgrep -x`). LAGMETER_CURSOR=0: recdrag without the pointer.
+LAGMETER_LIFT: the figure-eight's height above the grip (default 60 px).
+
+usage: lagmeter.py STAGE_X,STAGE_Y,W,H phase... [--out FILE] [--bg 0xRRGGBB]
 phases: idle:SECS  drag:SECS  steps:N  press:N  fling  watch:LABEL:SECS (no input, e.g. a teleport
 started by the caller)"""
 import json
@@ -22,10 +27,20 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import shoot  # noqa: E402  (ctl, xroot, on_avatar, user_idle_ms, body_point)
 
-from Xlib import X, display  # noqa: E402
-from Xlib.ext import xtest  # noqa: E402
+WAYLAND = bool(os.environ.get("WAYLAND_DISPLAY"))
+if WAYLAND:
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "wlrig"))
+    assert os.path.exists(os.path.join(os.environ["XDG_RUNTIME_DIR"], "rig.ready")), "Wayland: the rig only"
+    import numpy as np  # noqa: E402
+    from wlworld import Grab, World  # noqa: E402
+else:
+    from Xlib import X, display  # noqa: E402
+    from Xlib.ext import xtest  # noqa: E402
 
 ROWS = 6
+BG = 0x34404D
+# How far above the grip the figure-eight runs (drag, recdrag): far enough that her hanging feet stay off the floor.
+LIFT = int(os.environ.get("LAGMETER_LIFT", "60"))
 
 
 class Probe:
@@ -33,17 +48,31 @@ class Probe:
 
     def __init__(self, stage):
         self.x, self.y, self.w, self.h = stage
-        self.d = display.Display()
-        self.r = self.d.screen().root
         self.ys = [self.y + int(self.h * (0.25 + 0.6 * i / (ROWS - 1))) for i in range(ROWS)]
         self.changes, self.moves = [], []
         self.run = False
         self.off = False
         self.polls = 0
-        self.bg = 0x34404D
+        self.bg = BG
+        self.at = None  # Wayland: the presentation time of the last strip
+        if WAYLAND:
+            self.g = Grab()
+        else:
+            self.d = display.Display()
+            self.r = self.d.screen().root
 
     def grab(self):
-        return b"".join(self.r.get_image(self.x, y, self.w, 2, X.ZPixmap, 0xFFFFFFFF).data for y in self.ys)
+        if not WAYLAND:
+            return b"".join(self.r.get_image(self.x, y, self.w, 2, X.ZPixmap, 0xFFFFFFFF).data for y in self.ys)
+        # One composited frame of the band the strips span, as the X image's 32-bit pixels.
+        y0 = self.ys[0]
+        f = self.g.grab(self.x, y0, self.w, self.ys[-1] + 2 - y0)
+        if f is None:
+            return b""
+        self.at = f[0]
+        a = np.frombuffer(f[1], dtype=np.uint8).reshape(-1, self.w, 3).astype(np.uint32)
+        px = (a[:, :, 0] << 16) | (a[:, :, 1] << 8) | a[:, :, 2]
+        return b"".join(px[y - y0:y - y0 + 2].astype("<u4").tobytes() for y in self.ys)
 
     def extents(self, data):
         """Leftmost/rightmost non-stage pixel of the first line of each strip: where she is."""
@@ -65,8 +94,9 @@ class Probe:
                 continue
             cur = self.grab()
             self.polls += 1
-            if cur != last:
-                t = time.perf_counter()
+            if cur and cur != last:
+                # X: when the poll saw it; Wayland: when the compositor presented it (same clock).
+                t = self.at if WAYLAND else time.perf_counter()
                 self.changes.append(t)
                 ex = self.extents(cur)
                 if ex != lastx:
@@ -89,8 +119,8 @@ class Probe:
 class Cpu:
     """CPU % of one core for a process over a phase, from /proc."""
 
-    def __init__(self, name):
-        p = subprocess.run(["pgrep", "-x", name], capture_output=True, text=True).stdout.split()
+    def __init__(self, name, pid=None):
+        p = [pid] if pid else subprocess.run(["pgrep", "-x", name], capture_output=True, text=True).stdout.split()
         self.pid = p[0] if p else None
         self.gone = False
 
@@ -136,6 +166,37 @@ class Gpu:
         self.run = False
         self.t.join()
         return round(statistics.mean(self.samples)) if self.samples else None
+
+
+class WlHand:
+    """The rig's virtual pointer (no user there: never tainted)."""
+
+    def __init__(self):
+        self.w = World()
+        self.home = self.at = (1280, 800)
+        self.taint = False
+        self.down = False
+
+    def check(self):
+        return True
+
+    def move(self, x, y):
+        self.w.warp(int(x), int(y))
+        self.at = (int(x), int(y))
+        return True
+
+    def press(self):
+        self.w.button(True)
+        self.down = True
+
+    def release(self):
+        if self.down:
+            self.w.button(False)
+            self.down = False
+
+    def restore(self):
+        self.release()
+        self.w.warp(*self.home)
 
 
 class Hand:
@@ -219,8 +280,14 @@ def main():
     noprobe = "--noprobe" in args
     if noprobe:
         args.remove("--noprobe")
+    if "--bg" in args:
+        i = args.index("--bg")
+        global BG
+        BG = int(args[i + 1], 16)
+        del args[i:i + 2]
     stage = [int(v) for v in args.pop(0).split(",")][:4]
-    probe, xorg, us, gpu = Probe(stage), Cpu("Xorg"), Cpu("synaps-avatar"), Gpu()
+    # The rig's compositor runs in another pid namespace: no server CPU there.
+    probe, xorg, us, gpu = Probe(stage), Cpu("Hyprland" if WAYLAND else "Xorg"), Cpu("synaps-avatar", os.environ.get("LAGMETER_PID")), Gpu()
     probe.off = noprobe
     results = []
 
@@ -235,9 +302,9 @@ def main():
         time.sleep(1.0)
 
     def phase1(label, body):
-        if not shoot.wait_user_idle(4000, 60):
+        if not WAYLAND and not shoot.wait_user_idle(4000, 60):
             return {"phase": label, "skipped": "user active"}
-        hand = Hand()
+        hand = WlHand() if WAYLAND else Hand()
         c0 = counters()
         probe.start()
         xorg.start()
@@ -293,10 +360,10 @@ def main():
                 while time.perf_counter() - t0 < secs and not h.taint:
                     t = time.perf_counter() - t0
                     # Figure-eight, 160 x 90 px at 0.5 Hz, pointer updates at ~500 Hz.
-                    h.move(x0 + 160 * math.sin(t * math.pi), y0 - 60 - 90 * math.sin(2 * t * math.pi) / 2)
+                    h.move(x0 + 160 * math.sin(t * math.pi), y0 - LIFT - 90 * math.sin(2 * t * math.pi) / 2)
                     time.sleep(0.002)
                 t1 = time.perf_counter()
-                h.move(x0, y0 - 60)
+                h.move(x0, y0 - LIFT)
                 time.sleep(0.4)
                 h.release()
                 time.sleep(1.5)
@@ -412,7 +479,7 @@ def main():
                 if not shoot.on_avatar(x0, y0) or not h.move(x0, y0):
                     return {"error": "no grip"}
                 X0, Y0, W, H = stage
-                rec = subprocess.Popen(["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-f", "x11grab", "-draw_mouse", "1",
+                rec = subprocess.Popen(["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-f", "x11grab", "-draw_mouse", os.environ.get("LAGMETER_CURSOR", "1"),
                                         "-framerate", "60", "-video_size", f"{W}x{H}", "-i", f"{os.environ['DISPLAY']}+{X0},{Y0}",
                                         "-t", str(secs + 2.0), "-c:v", "libx264rgb", "-qp", "0", "-preset", "ultrafast", path])
                 time.sleep(0.6)
@@ -421,9 +488,9 @@ def main():
                 t0 = time.perf_counter()
                 while time.perf_counter() - t0 < secs and not h.taint:
                     t = time.perf_counter() - t0
-                    h.move(x0 + 160 * math.sin(t * math.pi), y0 - 60 - 90 * math.sin(2 * t * math.pi) / 2)
+                    h.move(x0 + 160 * math.sin(t * math.pi), y0 - LIFT - 90 * math.sin(2 * t * math.pi) / 2)
                     time.sleep(0.002)
-                h.move(x0, y0 - 60)
+                h.move(x0, y0 - LIFT)
                 time.sleep(0.4)
                 h.release()
                 rec.wait(timeout=20)

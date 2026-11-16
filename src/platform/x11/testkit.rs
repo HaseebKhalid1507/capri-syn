@@ -137,14 +137,21 @@ impl Driver for XDriver {
                 up && class.starts_with(b"synaps-avatar-fx\0")
             })
             .filter_map(|w| {
+                // What the server paints: the bounding shape, at the window's place.
                 let g = self.c.get_geometry(w).ok()?.reply().ok()?;
-                Some(WinRect { id: w, x: g.x as i32, y: g.y as i32, w: g.width as i32, h: g.height as i32 })
+                let r = self.c.shape_get_rectangles(w, shape::SK::BOUNDING).ok()?.reply().ok()?;
+                let rects: Vec<ShapeRect> = r.rectangles.iter().map(|r| (r.x, r.y, r.width, r.height)).collect();
+                let b = crate::shape::bbox(&rects)?;
+                Some(WinRect { id: w, x: g.x as i32 + b.0 as i32, y: g.y as i32 + b.1 as i32, w: b.2 as i32, h: b.3 as i32 })
             })
             .collect()
     }
-    fn input_region(&mut self) -> Vec<ShapeRect> {
+    /// The server's input shape, at the window's place.
+    fn hits(&mut self, x: i32, y: i32) -> bool {
+        let Some(b) = self.body_rect() else { return false };
         let r = self.c.shape_get_rectangles(self.body, shape::SK::INPUT).unwrap().reply().unwrap();
-        r.rectangles.iter().map(|r| (r.x, r.y, r.width, r.height)).collect()
+        let rects: Vec<ShapeRect> = r.rectangles.iter().map(|r| (r.x, r.y, r.width, r.height)).collect();
+        crate::shape::hit(&rects, x - b.x, y - b.y)
     }
     /// The bounding shape; the window's own rect (no shape) is None.
     fn visible_region(&mut self) -> Option<Vec<ShapeRect>> {
@@ -152,7 +159,7 @@ impl Driver for XDriver {
         let r = self.c.shape_get_rectangles(self.body, shape::SK::BOUNDING).unwrap().reply().unwrap();
         shaped.then(|| r.rectangles.iter().map(|r| (r.x, r.y, r.width, r.height)).collect())
     }
-    fn settle(&mut self) {
+    async fn settle(&mut self) {
         self.sync();
         std::thread::sleep(std::time::Duration::from_millis(40));
     }
@@ -166,7 +173,7 @@ fn contract_x11() {
     let x = Arc::new(X11::connect().unwrap());
     let mut d = XDriver::new(&x);
     let os = Os::new(x.clone(), Box::new(x));
-    let passed = contract::run(&os, &mut d).unwrap();
+    let passed = contract::block_on(contract::run(&os, &mut d)).unwrap();
     eprintln!("contract_x11 on {disp}: {} scenarios passed: {}", passed.len(), passed.join(", "));
     assert_eq!(passed.len(), 9);
 }

@@ -1,5 +1,5 @@
 //! The Linux process: what has to be set before GPUI starts (GPU choice, the allocator).
-//! Shared by every Linux backend (X11 now, Wayland later).
+//! Shared by every Linux backend (X11, Hyprland).
 
 /// Process setup that has to happen before any other thread exists. Each knob was
 /// measured on bella (release, `ps` RSS 6 s after start, see LOG.md):
@@ -14,6 +14,14 @@
 /// * glibc malloc: two arenas and a 1 MiB trim threshold, so the full-size PNG decode
 ///   buffers go back to the OS after scaling: 226 → 84 MB.
 pub fn process_setup() {
+    // SA_BACKEND=x11 on a Wayland desktop: GPUI and we both take X11 (XWayland).
+    if std::env::var("SA_BACKEND").is_ok_and(|v| v == "x11") && std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some() {
+            elog!("synaps-avatar: SA_BACKEND=x11 on Hyprland: through XWayland she sees X clients only, and can't stay above native windows");
+        }
+        // SAFETY: first thing in main, single-threaded.
+        unsafe { std::env::remove_var("WAYLAND_DISPLAY") };
+    }
     if std::env::var_os("SA_GL").is_none() && has_vulkan_driver() {
         // SAFETY (all set_var calls here): first thing in main, single-threaded.
         unsafe { std::env::set_var("__EGL_VENDOR_LIBRARY_DIRS", "/nonexistent") };

@@ -9,7 +9,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 const BODY: WinId = 1;
-const FX_BASE: WinId = 50_000;
+/// Her body's size here (the contract places effects inside it).
+const BODY_SIZE: (i32, i32) = (300, 400);
 
 struct FWin {
     rect: WinRect,
@@ -33,7 +34,8 @@ struct World {
     input: Vec<ShapeRect>,
     /// None: all of the window.
     visible: Option<Vec<ShapeRect>>,
-    fx: HashMap<usize, WinRect>,
+    /// Effect layers: origin and rects.
+    fx: HashMap<usize, ((i32, i32), Vec<ShapeRect>)>,
 }
 
 type HintFn = Box<dyn Fn(Hint) + Send>;
@@ -172,8 +174,10 @@ impl Stage for FakeStage {
     fn set_icon(&self, _s: WinId, _data: &[u32]) -> Result<()> {
         Ok(())
     }
-    fn fx_show(&self, layer: usize, _rgb: u32, origin: (i32, i32), size: (i32, i32), _rects: Option<&[ShapeRect]>, _z: FxZ) -> Result<()> {
-        self.0.w().fx.insert(layer, WinRect { id: FX_BASE + layer as WinId, x: origin.0, y: origin.1, w: size.0, h: size.1 });
+    fn fx_show(&self, layer: usize, _rgb: u32, origin: (i32, i32), _size: (i32, i32), rects: Option<&[ShapeRect]>, _z: FxZ) -> Result<()> {
+        let mut w = self.0.w();
+        let rects = rects.map(<[ShapeRect]>::to_vec).or_else(|| w.fx.get(&layer).map(|l| l.1.clone())).unwrap_or_default();
+        w.fx.insert(layer, (origin, rects));
         Ok(())
     }
     fn fx_hide(&self, layer: usize) {
@@ -254,37 +258,40 @@ impl Driver for FakeDriver {
     }
     fn body_rect(&mut self) -> Option<WinRect> {
         let (x, y) = self.0.w().body_at;
-        Some(WinRect { id: BODY, x, y, w: 1, h: 1 })
+        Some(WinRect { id: BODY, x, y, w: BODY_SIZE.0, h: BODY_SIZE.1 })
     }
+    /// What a server would paint: each layer's rects, at its origin.
     fn fx_rects(&mut self) -> Vec<WinRect> {
-        self.0.w().fx.values().copied().collect()
+        let w = self.0.w();
+        w.fx.values().filter_map(|((x, y), r)| crate::shape::bbox(r).map(|b| WinRect::new(x + b.0 as i32, y + b.1 as i32, b.2 as i32, b.3 as i32))).collect()
     }
-    fn input_region(&mut self) -> Vec<ShapeRect> {
-        self.0.w().input.clone()
+    fn hits(&mut self, x: i32, y: i32) -> bool {
+        let w = self.0.w();
+        crate::shape::hit(&w.input, x - w.body_at.0, y - w.body_at.1)
     }
     fn visible_region(&mut self) -> Option<Vec<ShapeRect>> {
         self.0.w().visible.clone()
     }
-    fn settle(&mut self) {}
+    async fn settle(&mut self) {}
 }
 
 fn fake(target_events: bool) -> (Os, FakeDriver) {
     let world = World { root: (1600, 1000), monitors: vec![Monitor { primary: true, x: 0, y: 0, w: 1600, h: 1000 }], next: 100, ..World::default() };
-    let f = Arc::new(Fake { world: Mutex::new(world), hint: Mutex::new(None), caps: Caps { shape_mode: true, target_events } });
+    let f = Arc::new(Fake { world: Mutex::new(world), hint: Mutex::new(None), caps: Caps { shape_mode: true, target_events, fx_layers: true, costly_redraw: false, implicit_grab: true } });
     (Os::new(Arc::new(FakeDesktop(f.clone())), Box::new(FakeStage(f.clone()))), FakeDriver(f))
 }
 
 #[test]
 fn contract_fake_with_target_events() {
     let (os, mut d) = fake(true);
-    let passed = contract::run(&os, &mut d).unwrap();
+    let passed = contract::block_on(contract::run(&os, &mut d)).unwrap();
     assert_eq!(passed.len(), 9);
 }
 
 #[test]
 fn contract_fake_polled_target() {
     let (os, mut d) = fake(false);
-    contract::run(&os, &mut d).unwrap();
+    contract::block_on(contract::run(&os, &mut d)).unwrap();
 }
 
 #[test]

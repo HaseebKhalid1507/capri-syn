@@ -9,12 +9,15 @@
 //! on her own surfaces. Nothing outside `src/platform/` names an OS, a display server or a
 //! window system, and nothing inside the core does either: it reads [`Caps`].
 //!
-//! Backends: `x11/` (today's). Hyprland and Windows come later and must pass the same
-//! contract suite (`contract.rs`, run on the in-memory `fake.rs` in every `cargo test`).
+//! Backends: `x11/`, `hypr/` (Hyprland: its IPC sockets, and layer-shell surfaces through the
+//! vendored GPUI's `layer_ctl`). Windows comes later. Each passes the same contract suite
+//! (`contract.rs`: on the in-memory `fake.rs` in every `cargo test`, on Xvfb for X11, in the
+//! `tools/wlrig` sandbox for Hyprland).
 
 use anyhow::Result;
 use gpui_kit::{Window, WindowOptions};
 
+mod hypr;
 mod linux;
 mod os;
 mod x11;
@@ -81,6 +84,16 @@ pub struct Caps {
     /// The backend hints every move, unmap and map of other windows. Without it the core
     /// polls the perch target and diffs the snapshots itself.
     pub target_events: bool,
+    /// Effect layers are surfaces of their own (the server paints them). Without it the core
+    /// keeps them in a display list and her view paints them in her window.
+    pub fx_layers: bool,
+    /// Every redraw of her window is a full present for the compositor to take in. Steps that
+    /// can wait (glints) then ride redraws that happen anyway.
+    pub costly_redraw: bool,
+    /// A press on her keeps the pointer until the release, whatever her input region does
+    /// meanwhile (X's implicit grab). Without it the core holds her input region at her whole
+    /// window while a press lasts: the window follows the pointer, so the pointer stays inside.
+    pub implicit_grab: bool,
 }
 
 /// A cheap note from a backend's event source: "something changed". The core turns these
@@ -240,9 +253,16 @@ pub trait Stage {
     fn release_keyboard(&self, s: WinId, to: Option<WinId>) -> Result<()>;
 }
 
-/// Connect to the desktop she runs on. One backend for now; the choice (and, later, the
-/// Wayland and Windows arms) stays in here.
+/// Connect to the desktop she runs on, the same one GPUI picks: Wayland when
+/// `WAYLAND_DISPLAY` is set (`SA_BACKEND=x11` unsets it first, in `process_setup`, for
+/// XWayland), else X11. On Wayland only Hyprland is supported so far.
 pub fn connect() -> Result<Os> {
+    if std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty()) {
+        let (desk, stage) = hypr::connect().map_err(|e| {
+            anyhow::anyhow!("{e:#}; on another Wayland desktop run SA_BACKEND=x11 (through XWayland)")
+        })?;
+        return Ok(Os::new(desk, Box::new(stage)));
+    }
     let x = std::sync::Arc::new(x11::X11::connect()?);
     Ok(Os::new(x.clone(), Box::new(x)))
 }
