@@ -293,7 +293,7 @@ impl Driver for FakeDriver {
 
 fn fake(target_events: bool) -> (Os, FakeDriver) {
     let world = World { root: (1600, 1000), monitors: vec![Monitor { primary: true, x: 0, y: 0, w: 1600, h: 1000 }], next: 100, ..World::default() };
-    let f = Arc::new(Fake { world: Mutex::new(world), hint: Mutex::new(None), caps: Caps { shape_mode: true, target_events, fx_layers: true, costly_redraw: false, implicit_grab: true, goal_geometry: false } });
+    let f = Arc::new(Fake { world: Mutex::new(world), hint: Mutex::new(None), caps: Caps { shape_mode: true, target_events, fx_layers: true, costly_redraw: false, implicit_grab: true, goal_geometry: false, layout_events: false } });
     (Os::new(Arc::new(FakeDesktop(f.clone())), Box::new(FakeStage(f.clone()))), FakeDriver(f))
 }
 

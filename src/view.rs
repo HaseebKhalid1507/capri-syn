@@ -391,6 +391,8 @@ const FRAME_FAST: Duration = Duration::from_millis(16);
 /// A perch glide's length, and the least jump that glides (logical px; less snaps).
 const GLIDE: Duration = Duration::from_millis(450);
 const GLIDE_MIN: f32 = 24.0;
+/// Moves closer together than this are a stream (a live drag): she snaps to each.
+const GLIDE_STREAM: Duration = Duration::from_millis(150);
 const FRAME_FX: Duration = Duration::from_millis(33);
 /// A quiet arrival's sliver widens back into her over ~3 frames.
 const SLIVER: Duration = Duration::from_millis(100);
@@ -509,6 +511,8 @@ pub struct Avatar {
     next_hop: Option<Instant>,
     /// A perch glide: since, and the offset it started from (`glide_offset`).
     glide: Option<(Instant, (i32, i32))>,
+    /// When the perch window last moved.
+    perch_moved: Option<Instant>,
     glitch: Option<Glitch>,
     /// Frames drawn in the current glitch (keyed by its start): each gets a new pattern.
     glitch_step: Cell<(Option<Instant>, u64)>,
@@ -741,6 +745,7 @@ impl Avatar {
             hop: None,
             next_hop: None,
             glide: None,
+            perch_moved: None,
             glitch: None,
             glitch_step: Cell::new((None, 0)),
             glitch_at: Cell::new(None),
@@ -3674,12 +3679,14 @@ impl Avatar {
                 let o = self.perch_origin(&r, sit, dx);
                 if self.perch_fits(&r, o, sit) {
                     self.placement = Placement::Perch { win, sit, dx };
-                    // The window is animating to `r` (a goal, not where it is): she rides
-                    // along from where she shows now.
+                    // A jump (not a stream of moves: a live drag) to a goal the compositor
+                    // animates the window to: she rides along from where she shows now.
                     let shown = self.glide_offset(now);
                     let jump = (self.origin.0 + shown.0 - o.0, self.origin.1 + shown.1 - o.1);
                     let far = (jump.0 * jump.0 + jump.1 * jump.1) as f32 > (GLIDE_MIN * self.layout.sf).powi(2);
-                    self.glide = (self.os.perch_glides() && far).then_some((now, jump));
+                    let stream = self.perch_moved.is_some_and(|t| now.duration_since(t) < GLIDE_STREAM);
+                    self.perch_moved = Some(now);
+                    self.glide = (self.os.perch_glides() && far && !stream).then_some((now, jump));
                     self.set_origin(o);
                 } else {
                     self.fall("perch_no_room", now);

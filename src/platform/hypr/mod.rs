@@ -64,6 +64,9 @@ impl HMon {
 #[serde(default)]
 struct HClient {
     address: String,
+    /// Never reused (addresses are: a new window may get a closed one's).
+    #[serde(rename = "stableId")]
+    stable_id: String,
     mapped: bool,
     hidden: bool,
     at: [i32; 2],
@@ -118,11 +121,18 @@ impl Snap {
     }
 }
 
-/// Window identity: Hyprland's 64-bit addresses (and her own namespaces) as small ids, never reused.
+/// A client's identity: its stable id (its address where there is none).
+fn client_key(address: &str, stable: &str) -> String {
+    if stable.is_empty() { address.to_string() } else { format!("w:{stable}") }
+}
+
+/// Window identity: Hyprland's stable ids (layers' addresses, her own namespaces) as small ids,
+/// never reused; each client's last address (what dispatchers take).
 #[derive(Default)]
 struct Ids {
     by_key: HashMap<String, WinId>,
     keys: Vec<String>,
+    addr: HashMap<WinId, String>,
 }
 
 impl Ids {
@@ -176,18 +186,33 @@ impl HyprDesktop {
         self.ids.lock().map(|mut i| i.id(key)).unwrap_or(0)
     }
 
-    fn address(&self, w: WinId) -> Option<String> {
+    fn key(&self, w: WinId) -> Option<String> {
         self.ids.lock().ok()?.key(w).map(str::to_string)
+    }
+
+    /// A client's id (and its address noted).
+    fn client_id(&self, address: &str, stable: &str) -> WinId {
+        let Ok(mut ids) = self.ids.lock() else { return 0 };
+        let id = ids.id(&client_key(address, stable));
+        ids.addr.insert(id, address.to_string());
+        id
+    }
+
+    /// The client a JSON reply describes (`j/activewindow`).
+    fn value_id(&self, v: &serde_json::Value) -> Option<WinId> {
+        let a = v.get("address")?.as_str().filter(|a| !a.is_empty())?;
+        Some(self.client_id(a, v.get("stableId").and_then(|s| s.as_str()).unwrap_or("")))
     }
 
     /// Window `w` and the world it is in (monitors and clients: one request).
     fn client(&self, w: WinId) -> Option<(Snap, HClient)> {
-        let addr = self.address(w)?;
+        let key = self.key(w)?;
         let v = self.ipc.batch(&["j/monitors", "j/clients"]).ok()?;
         let mons: Vec<HMon> = serde_json::from_value(v[0].clone()).ok()?;
         let clients: Vec<HClient> = serde_json::from_value(v[1].clone()).ok()?;
         let s = Snap { mons: mons.into_iter().filter(|m| !m.disabled).collect(), clients, layers: Vec::new() };
-        let c = s.clients.iter().find(|c| c.address == addr)?.clone();
+        let c = s.clients.iter().find(|c| client_key(&c.address, &c.stable_id) == key)?.clone();
+        self.client_id(&c.address, &c.stable_id);
         Some((s, c))
     }
 
@@ -200,7 +225,7 @@ impl HyprDesktop {
 
     /// Focus window `w` (an address id).
     fn focus(&self, w: WinId) -> Result<()> {
-        let addr = self.address(w).context("unknown window")?;
+        let addr = self.ids.lock().ok().and_then(|i| i.addr.get(&w).cloned()).context("unknown window")?;
         let r = self.ipc.request(&format!("dispatch hl.dsp.focus({{ window = \"address:{addr}\" }})"))?;
         if r.trim() != "ok" {
             bail!("hyprland: focus: {r}");
@@ -216,7 +241,7 @@ impl Desktop for HyprDesktop {
         // step is a redraw and a present. A layer surface loses the pointer when Hyprland
         // re-checks focus under it (her window moving at a drag's start), button held or not.
         // A window's `at`/`size` is its goal: the compositor slides it there.
-        Caps { shape_mode: false, target_events: false, fx_layers: false, costly_redraw: true, implicit_grab: false, goal_geometry: true }
+        Caps { shape_mode: false, target_events: false, fx_layers: false, costly_redraw: true, implicit_grab: false, goal_geometry: true, layout_events: true }
     }
 
     fn root_size(&self) -> (i32, i32) {
@@ -254,7 +279,7 @@ impl Desktop for HyprDesktop {
         let Ok(s) = self.snap() else { return Vec::new() };
         let mut cs: Vec<&HClient> = s.clients.iter().filter(|c| s.visible(c) && !ours(&c.class)).collect();
         cs.sort_by_key(|c| (s.special(c), c.fullscreen & 2 != 0, c.floating, -c.focus_history_id));
-        let mut out: Vec<Win> = cs.iter().map(|c| Win { rect: WinRect { id: self.id(&c.address), x: c.at[0], y: c.at[1], w: c.size[0], h: c.size[1] }, managed: true }).collect();
+        let mut out: Vec<Win> = cs.iter().map(|c| Win { rect: WinRect { id: self.client_id(&c.address, &c.stable_id), x: c.at[0], y: c.at[1], w: c.size[0], h: c.size[1] }, managed: true }).collect();
         let mut ls: Vec<&(String, u8, HLayer)> = s.layers.iter().filter(|(_, lvl, l)| *lvl >= 2 && !ours(&l.namespace) && l.w > 0 && l.h > 0).collect();
         ls.sort_by_key(|(_, lvl, _)| *lvl);
         out.extend(ls.iter().map(|(_, _, l)| Win { rect: WinRect { id: self.id(&l.address), x: l.x, y: l.y, w: l.w, h: l.h }, managed: false }));
@@ -263,8 +288,10 @@ impl Desktop for HyprDesktop {
 
     fn active_window(&self) -> Option<WinId> {
         let v: serde_json::Value = self.ipc.json("activewindow").ok()?;
-        let a = v.get("address")?.as_str()?;
-        (!a.is_empty() && !v.get("class").and_then(|c| c.as_str()).is_some_and(ours)).then(|| self.id(a))
+        if v.get("class").and_then(|c| c.as_str()).is_some_and(ours) {
+            return None;
+        }
+        self.value_id(&v)
     }
 
     /// A mapped top or overlay layer asking for the keyboard exclusively has it (hers or
@@ -277,8 +304,7 @@ impl Desktop for HyprDesktop {
             return Some(if ours(ns) { self.id(&format!("ours:{ns}")) } else { self.id(addr) });
         }
         let v: serde_json::Value = self.ipc.json("activewindow").ok()?;
-        let a = v.get("address")?.as_str()?;
-        (!a.is_empty()).then(|| self.id(a))
+        self.value_id(&v)
     }
 
     fn toplevel_of(&self, w: WinId) -> Option<WinId> {
@@ -365,7 +391,8 @@ fn event_hint(name: &str, data: &str) -> Option<Hint> {
         "activewindowv2" => Hint::Focus,
         "workspacev2" | "focusedmonv2" | "moveworkspacev2" | "activespecialv2" => Hint::Desktop,
         "openwindow" | "closewindow" | "movewindowv2" | "changefloatingmode" | "pin" | "minimized" | "togglegroup" | "moveintogroup" | "moveoutofgroup" | "fullscreen" => Hint::Changed,
-        "monitoraddedv2" | "monitorremovedv2" | "configreloaded" | "openlayer" | "closelayer" => Hint::Layout,
+        // Reserved areas change only with layers (their exclusive zones) and the config.
+        "monitoraddedv2" | "monitorremovedv2" | "configreloaded" | "openlayer" | "closelayer" | "(connected)" => Hint::Layout,
         _ => return None,
     })
 }

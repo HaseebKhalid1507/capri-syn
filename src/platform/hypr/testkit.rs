@@ -129,9 +129,10 @@ impl HDriver {
         None
     }
 
-    fn client_addr(&self, class: &str) -> Option<String> {
+    /// The window of this class, by the backend's id.
+    fn client_id(&self, class: &str) -> Option<WinId> {
         let v: serde_json::Value = serde_json::from_str(&hyprctl(&["-j", "clients"])).ok()?;
-        v.as_array()?.iter().find(|c| c["class"] == class).and_then(|c| c["address"].as_str().map(str::to_string))
+        v.as_array()?.iter().find(|c| c["class"] == class).and_then(|c| self.desk.value_id(c))
     }
 
     fn sel(&self, w: WinId) -> String {
@@ -169,8 +170,7 @@ impl Driver for HDriver {
             let rule = format!("hl.window_rule({{ name = \"{name}\", match = {{ class = \"^{name}$\" }}, float = true, move = \"{} {}\", size = \"{} {}\" }})", r.x, r.y, r.w, r.h);
             assert_eq!(hyprctl(&["eval", &rule]), "ok");
             self.world.cmd(&format!("toplevel {name} {} {}", r.w, r.h));
-            let a = self.until(|| self.client_addr(&name)).expect("the window mapped");
-            self.desk.id(&a)
+            self.until(|| self.client_id(&name)).expect("the window mapped")
         } else {
             self.world.cmd(&format!("layer {name} {} {} {} {} top", r.x, r.y, r.w, r.h));
             let (a, _) = self.until(|| self.layer_addr(&name)).expect("the popup mapped");

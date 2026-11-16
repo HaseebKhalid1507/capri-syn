@@ -1,6 +1,7 @@
 //! Hyprland's two sockets (`$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/`): requests on
 //! `.socket.sock` (one connection per request, never kept open: Hyprland answers them
-//! synchronously), events on `.socket2.sock` (`EVENT>>DATA` lines).
+//! synchronously), events on `.socket2.sock` (`EVENT>>DATA` lines). `SA_IPC_LOG=1` logs each
+//! request (the rig counts them).
 
 use anyhow::{Context as _, Result, bail};
 use serde::de::DeserializeOwned;
@@ -31,6 +32,10 @@ impl Ipc {
     }
 
     pub(super) fn request(&self, req: &str) -> Result<String> {
+        static LOG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *LOG.get_or_init(|| std::env::var_os("SA_IPC_LOG").is_some()) {
+            eprintln!("ipc-request {} {:.3}", req.split_whitespace().next().unwrap_or(""), crate::platform::monotonic_s());
+        }
         let mut s = UnixStream::connect(self.dir.join(".socket.sock")).context("hyprland: request socket")?;
         s.set_read_timeout(Some(TIMEOUT))?;
         s.set_write_timeout(Some(TIMEOUT))?;
@@ -60,12 +65,14 @@ impl Ipc {
         Ok(self.request(&format!("/repl {code}"))?.trim().to_string())
     }
 
-    /// Read event lines (`name`, `data`) until the socket closes; reconnects with backoff.
+    /// Read event lines (`name`, `data`) until the socket closes; reconnects with backoff. Each
+    /// connection starts with a `(connected)` line of its own (what came between was missed).
     pub(super) fn events(&self, mut on: impl FnMut(&str, &str)) {
         let mut wait = Duration::from_millis(200);
         loop {
             if let Ok(s) = UnixStream::connect(self.dir.join(".socket2.sock")) {
                 wait = Duration::from_millis(200);
+                on("(connected)", "");
                 for line in BufReader::new(s).lines() {
                     let Ok(line) = line else { break };
                     if let Some((name, data)) = line.split_once(">>") {

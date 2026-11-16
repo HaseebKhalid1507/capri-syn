@@ -31,6 +31,8 @@ struct Shared {
     poller: OnceLock<std::thread::Thread>,
     /// The space the target was first seen on (`Place::space`; `NO_SPACE`: not yet).
     space: AtomicI64,
+    /// Bumped by every `Hint::Layout` (the cached layout is stale).
+    layout_gen: AtomicU64,
 }
 
 const NO_SPACE: i64 = i64::MIN;
@@ -67,6 +69,7 @@ impl Shared {
             }
             Hint::Changed => self.poll_now(),
             Hint::Layout => {
+                self.layout_gen.fetch_add(1, Ordering::Relaxed);
                 self.poll_now();
                 on(WatchEvent::Layout);
             }
@@ -87,7 +90,8 @@ struct PointerWatch {
     started: Mutex<Option<Instant>>,
 }
 
-type Cached = RefCell<Option<(Instant, Vec<Monitor>)>>;
+/// A cached layout: when it was read, the layout generation then, the monitors (or areas).
+type Cached = RefCell<Option<(Instant, u64, Vec<Monitor>)>>;
 
 /// The target poller's memory: the window, the space it was first seen on (hers), its rect
 /// there at the last read (None: not visible there), when it last moved.
@@ -252,7 +256,7 @@ pub struct Os {
 impl Os {
     pub fn new(desk: Arc<dyn Desktop>, stage: Box<dyn Stage>) -> Os {
         let caps = desk.caps();
-        let shared = Shared { target: AtomicU32::new(0), composited: AtomicBool::new(desk.compositor_running()), poller: OnceLock::new(), space: AtomicI64::new(NO_SPACE) };
+        let shared = Shared { target: AtomicU32::new(0), composited: AtomicBool::new(desk.compositor_running()), poller: OnceLock::new(), space: AtomicI64::new(NO_SPACE), layout_gen: AtomicU64::new(0) };
         Os {
             desk,
             stage,
@@ -600,8 +604,16 @@ impl Os {
         self.desk.root_size()
     }
 
+    /// The cache, while it holds: for `AREAS_TTL`, until a `Hint::Layout` where they come
+    /// (`Caps::layout_events`), or while she's carried.
     fn cached(&self, c: &Cached) -> Option<Vec<Monitor>> {
-        c.borrow().as_ref().filter(|(t, _)| t.elapsed() < AREAS_TTL || self.frozen.get()).map(|(_, m)| m.clone())
+        let now_gen = self.shared.layout_gen.load(Ordering::Relaxed);
+        let holds = |t: &Instant, g: u64| if self.caps.layout_events { g == now_gen } else { t.elapsed() < AREAS_TTL };
+        c.borrow().as_ref().filter(|(t, g, _)| holds(t, *g) || self.frozen.get()).map(|(_, _, m)| m.clone())
+    }
+
+    fn layout_gen(&self) -> u64 {
+        self.shared.layout_gen.load(Ordering::Relaxed)
     }
 
     /// The monitors (cached for `AREAS_TTL`, or frozen while she's carried); at least one.
@@ -614,7 +626,7 @@ impl Os {
             let (w, h) = self.desk.root_size();
             out.push(Monitor { primary: true, x: 0, y: 0, w, h });
         }
-        *self.mons.borrow_mut() = Some((Instant::now(), out.clone()));
+        *self.mons.borrow_mut() = Some((Instant::now(), self.layout_gen(), out.clone()));
         out
     }
 
@@ -624,7 +636,7 @@ impl Os {
             return a;
         }
         let areas = self.desk.work_areas(&self.monitors());
-        *self.areas.borrow_mut() = Some((Instant::now(), areas.clone()));
+        *self.areas.borrow_mut() = Some((Instant::now(), self.layout_gen(), areas.clone()));
         areas
     }
 
@@ -661,7 +673,7 @@ impl Os {
     pub fn freeze_layout(&self, on: bool) {
         // A snapshot younger than ~1 s is fresh enough (the refresh walks the tree: a few ms
         // on the first dragged frame).
-        let fresh = |c: &Cached| c.borrow().as_ref().is_some_and(|(t, _)| t.elapsed() < Duration::from_secs(1));
+        let fresh = |c: &Cached| c.borrow().as_ref().is_some_and(|(t, g, _)| if self.caps.layout_events { *g == self.layout_gen() } else { t.elapsed() < Duration::from_secs(1) });
         if on && !(fresh(&self.mons) && fresh(&self.areas)) {
             self.frozen.set(false);
             *self.mons.borrow_mut() = None;

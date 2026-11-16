@@ -98,6 +98,9 @@ pub struct Caps {
     /// A window's rect is where it is going (the compositor animates it there): a perch that
     /// jumps glides after it instead of snapping.
     pub goal_geometry: bool,
+    /// Every change of the monitors or of what panels reserve comes as `Hint::Layout`: the
+    /// core keeps the layout until one (else it re-reads it every few seconds).
+    pub layout_events: bool,
 }
 
 /// Where a window is, for the target poller (`Desktop::toplevel_place`).
