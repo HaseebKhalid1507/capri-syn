@@ -9,22 +9,28 @@
 # bella:~/.cache/cargo-target-synaps-avatar. Blocking; the output also goes to
 # ~/.cache/synaps-avatar-abuild.log here. Never run cargo on bella by hand.
 #   ABUILD_HOST=bella   build host        ABUILD_JOBS=6   cargo -j (the lane caps memory either way)
+#   ABUILD_TREE=NAME    a mirror of its own, for a second worker next to one using the default:
+#                       bella:~/Projects/synaps-avatar-NAME, target ~/.cache/cargo-target-synaps-avatar-NAME
+#                       (remove both when done: they are not cleaned up for you)
 set -euo pipefail
 [ $# -ge 1 ] || { sed -n '2,4p' "$0"; exit 2; }
 repo="$(cd "$(dirname "$0")/.." && pwd)"
 host="${ABUILD_HOST:-bella}"
 jobs="${ABUILD_JOBS:-6}"
+tree="${ABUILD_TREE:-}"
+[[ "$tree" =~ ^[A-Za-z0-9._-]*$ ]] || { echo "abuild: ABUILD_TREE must be letters, digits, . _ -" >&2; exit 2; }
+name="synaps-avatar${tree:+-$tree}"
 [ -f "$repo/Cargo.toml" ] || { echo "abuild: no Cargo.toml at $repo" >&2; exit 2; }
 ssh -o ConnectTimeout=10 "$host" 'test -f ~/.cache/bbuild-lane' \
   || { echo "abuild: $host has no ~/.cache/bbuild-lane (it comes with lynx's dbuild)" >&2; exit 2; }
 rsync -a --no-times --checksum --delete --exclude '/.git' --exclude '/target' --exclude '/shots' \
-  "$repo/" "$host:Projects/synaps-avatar/"
+  "$repo/" "$host:Projects/$name/"
 sub="$1"; shift
 args=("$sub")
 case "$sub" in build|test|clippy|check|run) args+=(-j "$jobs") ;; esac
 args+=("$@")
-remote="cd ~/Projects/synaps-avatar && exec bash ~/.cache/bbuild-lane one \"\$HOME/.cache/cargo-target-synaps-avatar\" cargo $(printf '%q ' "${args[@]}")"
-log="${XDG_CACHE_HOME:-$HOME/.cache}/synaps-avatar-abuild.log"
+remote="cd ~/Projects/$name && exec bash ~/.cache/bbuild-lane one \"\$HOME/.cache/cargo-target-$name\" cargo $(printf '%q ' "${args[@]}")"
+log="${XDG_CACHE_HOME:-$HOME/.cache}/$name-abuild.log"
 mkdir -p "$(dirname "$log")"
 set +e
 ssh -o ConnectTimeout=10 "$host" "bash -c $(printf '%q' "$remote")" < /dev/null 2>&1 | tee "$log"
