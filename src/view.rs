@@ -5064,19 +5064,19 @@ impl Render for Avatar {
             tag_cut = Some(if fresh { (Cut::Unread, None) } else { (Cut::Tag(look.plate), look.trail.then_some(step)) });
             let badge = unread.filter(|u| !u.refused).map(|u| format!("{} NEW", u.n));
             let text = match unread {
-                Some(u) if u.refused => format!("{} // {}", self.name, u.text),
+                Some(u) if u.refused => u.text.clone(),
                 Some(u) => {
                     // Inside her window: the plate is centred on her.
-                    let head = format!("{} {} NEW  READ ▸  ", self.name, u.n);
+                    let head = format!("{} NEW  READ ▸  ", u.n);
                     let per = TAG_FONT * 0.62 + 1.5;
                     let fit = ((l.win_w as f32 / sf - 80.0) / per) as usize;
                     crate::session::one_line(&u.text, fit.saturating_sub(head.chars().count()).clamp(8, 44))
                 }
-                None => format!("{} // {}", self.name, label),
+                // Her state only, no name (Haseeb, 2026-11-16: "just online, sleeping etc").
+                None => label.clone(),
             };
-            let name_up = self.name.to_uppercase();
-            // WORKING: her name on the red block (ink), the rest hollow.
-            let (name_part, rest) = if look.half && unread.is_none() { (Some(self.name.clone()), format!("// {label}")) } else { (None, text.clone()) };
+            // WORKING: the label on the red block (ink).
+            let (name_part, rest) = if look.half && unread.is_none() { (Some(label.clone()), String::new()) } else { (None, text.clone()) };
             let shade = [pal.accent, theme::mix(pal.accent, pal.bg, 0.45), pal.accent_dim];
             let make_ring = || -> Div {
                 if let Some(b) = badge.clone() {
@@ -5097,7 +5097,6 @@ impl Render for Avatar {
                                 .child(glyph("dot", pal.accent, pal.text))
                                 .child(tracked(&b, 1.0)),
                         )
-                        .child(div().text_color(rgb(pal.accent)).child(tracked(&name_up, 1.5)))
                         .child(div().text_color(rgb(pal.text)).font_weight(FontWeight::SEMIBOLD).child(tracked(&text, 0.2)))
                         // It opens: say so, inside the plate.
                         .child(theme::plate(Cut::Slant(6.0), Fill::solid(pal.accent)).h(px(18.0)).px(px(8.0)).text_color(rgb(pal.ink)).child(tracked("READ ▸", 1.2)));
