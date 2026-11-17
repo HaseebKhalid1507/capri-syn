@@ -306,6 +306,90 @@ fn notes_survive_refolds() {
     assert_eq!(texts(&t), rows);
 }
 
+/// A turn's error or abort that arrives before the history holding the turn
+/// (a daemon that publishes it late, or never before a re-attach) stays
+/// after the turn's own prompt and replies when a refold brings them: a
+/// re-attach (`load_attached`) or a resync (`Replace`). Before, it was
+/// anchored to the history length it arrived at and landed above the prompt.
+#[test]
+fn a_turns_error_stays_after_its_turn_on_a_refold() {
+    use serde_json::json;
+    let user = |t: &str| json!({"role": "user", "content": t});
+    let said = |t: &str| json!({"role": "assistant", "content": [{"type": "text", "text": t}]});
+    let ev = |e: SessionStreamEvent| SessionEvent::Stream { event: StreamEvent::Session(e) };
+    let turn = |t: &mut Transcript, text: &str| t.apply(&SessionEvent::TurnStarted { turn_baseline: 0, trigger: "user".into(), user_text: Some(text.into()) });
+    // Her session as attached, with `messages` in its history.
+    let snap = |messages: Vec<serde_json::Value>| {
+        let mut a = attached("attached_create.json");
+        a.conversation.messages_len = messages.len();
+        a.conversation.api_messages = messages;
+        a
+    };
+    let start = || {
+        let mut t = Transcript::new();
+        t.load_attached(&snap(vec![user("earlier"), said("ok")])).unwrap();
+        t
+    };
+    // Turn 1 fails before any of its history arrives; turn 2 runs, with a tool.
+    let live = || {
+        let mut t = start();
+        turn(&mut t, "hi");
+        t.apply(&ev(SessionStreamEvent::Error { message: "No Anthropic credentials.".into() }));
+        t.apply(&SessionEvent::Idle);
+        turn(&mut t, "again");
+        t.apply(&SessionEvent::Stream { event: StreamEvent::Llm(LlmEvent::Text { text: "there".into() }) });
+        t.apply(&SessionEvent::Idle);
+        t
+    };
+    let t = live();
+    let want = vec![
+        (ItemKind::User, "earlier".to_string()),
+        (ItemKind::Assistant, "ok".into()),
+        (ItemKind::User, "hi".into()),
+        (ItemKind::Error, "No Anthropic credentials.".into()),
+        (ItemKind::User, "again".into()),
+        (ItemKind::Assistant, "there".into()),
+    ];
+    assert_eq!(texts(&t), want, "live");
+    let full = vec![
+        user("earlier"),
+        said("ok"),
+        user("hi"),
+        user("again"),
+        json!({"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "bash", "input": {}}]}),
+        json!({"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "fine"}]}),
+        said("there"),
+    ];
+    // A re-attach to the same session (the Line's Mirror and back) refolds everything.
+    let a = snap(full.clone());
+    let mut re = live();
+    re.load_attached(&a).unwrap();
+    let mut with_tool = want.clone();
+    with_tool.insert(5, (ItemKind::Tool, String::new()));
+    assert_eq!(texts(&re), with_tool, "re-attach");
+    // The placed note stays put across another refold.
+    re.load_attached(&a).unwrap();
+    assert_eq!(texts(&re), with_tool, "second re-attach");
+    // A resync does the same; so does an abort's note.
+    let mut rs = live();
+    rs.apply_update(&HistoryUpdate::Replace { messages: full.clone() }).unwrap();
+    assert_eq!(texts(&rs), with_tool, "resync");
+    let mut ab = start();
+    turn(&mut ab, "hi");
+    ab.apply(&SessionEvent::Aborted { context_saved: true });
+    ab.load_attached(&snap(vec![user("earlier"), said("ok"), user("hi")])).unwrap();
+    assert_eq!(texts(&ab).last(), Some(&(ItemKind::Notice, "turn aborted".to_string())), "{:?}", texts(&ab));
+    // The daemon's own order (the prompt published at the round checkpoint, before the
+    // provider call fails) was right already, and stays right.
+    let mut d = start();
+    turn(&mut d, "hi");
+    d.apply_history(&[user("earlier"), said("ok"), user("hi")]);
+    d.apply(&ev(SessionStreamEvent::Error { message: "No Anthropic credentials.".into() }));
+    d.apply(&SessionEvent::Idle);
+    d.load_attached(&snap(vec![user("earlier"), said("ok"), user("hi")])).unwrap();
+    assert_eq!(texts(&d), want[..4].to_vec());
+}
+
 /// M4: an abort leaves no tool "running" and nothing streaming.
 #[test]
 fn abort_settles_tools() {

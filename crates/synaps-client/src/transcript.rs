@@ -9,7 +9,10 @@
 //!
 //! Notices and errors (turn errors, "turn aborted", subagent start/done,
 //! system notices) are not part of the history; they are kept across
-//! refolds, anchored to the history position they arrived at.
+//! refolds, anchored to the history position they arrived at. A turn's
+//! error or abort is anchored to the end of its turn instead: when it comes
+//! before the history that holds the turn's own prompt (the prompt shows
+//! live, from `TurnStarted`), a refold must not put it ahead of the prompt.
 //!
 //! Change tracking is splice-shaped for a virtual list: after a batch of
 //! updates, [`Transcript::take_splice`] reports the first changed index and
@@ -200,6 +203,11 @@ pub struct Item {
     /// `Some(n)`: a client-side row (notice, error), not part of the
     /// history, shown after the first `n` history messages.
     anchor: Option<usize>,
+    /// A turn's error or abort that came before its turn was folded: shown
+    /// before the `k+1`-th message from `anchor` on that opens a turn (the
+    /// first `k` are its own turn and turns before it, not folded yet).
+    /// Resolved (None) once a fold places it.
+    after_turns: Option<usize>,
 }
 
 impl Item {
@@ -261,6 +269,9 @@ pub struct Transcript {
     /// The conversation was swapped (clear, resume, compaction): the next
     /// replacement drops the notes of the old one.
     swapped: bool,
+    /// Turns started (and steers) since the last fold: their messages are
+    /// not in the history yet.
+    turns_unfolded: usize,
     dirty_from: Option<usize>,
     clean_len: usize,
 }
@@ -343,7 +354,7 @@ impl Transcript {
         if let Some(t) = &tool {
             self.tools.insert(t.tool_id.clone(), ix);
         }
-        self.items.push(Item { id, rev, kind, text, tool, streaming, anchor: None });
+        self.items.push(Item { id, rev, kind, text, tool, streaming, anchor: None, after_turns: None });
         self.mark(ix);
         ix
     }
@@ -356,6 +367,7 @@ impl Transcript {
     fn push_note(&mut self, mut item: Item, anchor: usize) {
         let ix = self.items.len();
         item.anchor = Some(anchor);
+        item.after_turns = None;
         item.rev += 1;
         self.items.push(item);
         self.mark(ix);
@@ -450,6 +462,7 @@ impl Transcript {
             self.push_note(n, self.history_len);
         }
         self.history_end = self.items.len();
+        self.turns_unfolded = 0;
         self.response_start = None;
         if !self.busy {
             self.settle();
@@ -460,9 +473,12 @@ impl Transcript {
     fn replace_history(&mut self, messages: &[Value]) {
         // This turn's notes (after the last fold) go at the end; after a
         // conversation swap they are the only ones that still apply.
+        // A turn's error or abort finds its own turn's end instead, unless
+        // the conversation was swapped (its positions mean nothing now).
         let live_from = self.history_end.min(self.items.len());
+        let swapped = self.swapped;
         for it in &mut self.items[live_from..] {
-            if it.anchor.is_some() {
+            if it.anchor.is_some() && (swapped || it.after_turns.is_none()) {
                 it.anchor = Some(usize::MAX);
             }
         }
@@ -478,20 +494,32 @@ impl Transcript {
     }
 
     /// Fold a whole history from empty, interleaving `notes` by anchor.
-    fn fold_with_notes(&mut self, messages: &[Value], mut notes: Vec<Item>, reuse: &mut Reuse) {
-        notes.sort_by_key(|n| n.anchor);
+    fn fold_with_notes(&mut self, messages: &[Value], notes: Vec<Item>, reuse: &mut Reuse) {
+        let starts: Vec<usize> = messages.iter().enumerate().filter(|(_, m)| opens_turn(m)).map(|(i, _)| i).collect();
+        let mut notes: Vec<(usize, Item)> = notes
+            .into_iter()
+            .map(|n| {
+                let at = match (n.anchor.unwrap_or(0), n.after_turns) {
+                    (a, Some(k)) => starts.iter().copied().filter(|&i| i >= a).nth(k).unwrap_or(messages.len()),
+                    (a, None) => a,
+                };
+                (at, n)
+            })
+            .collect();
+        notes.sort_by_key(|n| n.0);
         let mut notes = notes.into_iter().peekable();
         for (i, m) in messages.iter().enumerate() {
-            while let Some(n) = notes.next_if(|n| n.anchor.unwrap_or(0) <= i) {
+            while let Some((_, n)) = notes.next_if(|n| n.0 <= i) {
                 self.push_note(n, i);
             }
             self.fold_message(m, reuse);
         }
-        for n in notes {
+        for (_, n) in notes {
             self.push_note(n, messages.len());
         }
         self.history_len = messages.len();
         self.history_end = self.items.len();
+        self.turns_unfolded = 0;
     }
 
     /// No turn runs: nothing streams and no tool is still pending. Tools
@@ -622,11 +650,20 @@ impl Transcript {
         self.items[ix].anchor = Some(self.history_len);
     }
 
+    /// A row that ends a turn (its error, an abort): kept across refolds,
+    /// after the turn's own messages wherever they land.
+    fn turn_notice(&mut self, kind: ItemKind, text: impl Into<String>) {
+        self.notice(kind, text);
+        let ix = self.items.len() - 1;
+        self.items[ix].after_turns = Some(self.turns_unfolded);
+    }
+
     /// Apply one live session event.
     pub fn apply(&mut self, ev: &SessionEvent) {
         match ev {
             SessionEvent::TurnStarted { user_text, .. } => {
                 self.busy = true;
+                self.turns_unfolded += 1;
                 if let Some(t) = user_text {
                     self.push_new(ItemKind::User, t.clone(), None, false);
                 }
@@ -644,12 +681,15 @@ impl Transcript {
             }
             SessionEvent::Prompt { request } => self.pending_prompts.push(request.clone()),
             SessionEvent::PromptResolved { prompt_id } => self.pending_prompts.retain(|p| p.id != *prompt_id),
-            SessionEvent::Steered { text, .. } => self.notice(ItemKind::Notice, format!("steered: {text}")),
+            SessionEvent::Steered { text, .. } => {
+                self.turns_unfolded += 1;
+                self.notice(ItemKind::Notice, format!("steered: {text}"));
+            }
             SessionEvent::SystemNotice { text } => self.notice(ItemKind::Notice, text.clone()),
             SessionEvent::Aborted { .. } => {
                 self.busy = false;
                 self.settle();
-                self.notice(ItemKind::Notice, "turn aborted");
+                self.turn_notice(ItemKind::Notice, "turn aborted");
             }
             SessionEvent::Ended { reason } => self.notice(ItemKind::Notice, format!("session ended ({reason})")),
             SessionEvent::Cleared { .. } => {
@@ -763,7 +803,7 @@ impl Transcript {
             },
             StreamEvent::Session(s) => match s {
                 SessionStreamEvent::MessageHistory { messages } => self.apply_history(messages),
-                SessionStreamEvent::Error { message } => self.notice(ItemKind::Error, message.clone()),
+                SessionStreamEvent::Error { message } => self.turn_notice(ItemKind::Error, message.clone()),
                 SessionStreamEvent::Notice { text, .. } => self.notice(ItemKind::Notice, text.clone()),
                 SessionStreamEvent::Done => self.end_streaming_text(),
                 _ => {}
@@ -811,6 +851,19 @@ fn preview(s: &str) -> String {
         end -= 1;
     }
     format!("{}…", &s[..end])
+}
+
+/// A history message that opens a turn (a prompt, an event, a steer): a
+/// user message that isn't only tool results.
+fn opens_turn(m: &Value) -> bool {
+    if m.get("role").and_then(Value::as_str) != Some("user") {
+        return false;
+    }
+    match m.get("content") {
+        Some(Value::String(_)) => true,
+        Some(Value::Array(blocks)) => blocks.iter().any(|b| b.get("type").and_then(Value::as_str) != Some("tool_result")),
+        _ => false,
+    }
 }
 
 #[cfg(test)]
