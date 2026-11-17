@@ -39,17 +39,22 @@ Reference for `synaps-avatar`, the crate behind capri-syn. The [README](../READM
   annoyed (abort or error), needs-you (a pending prompt), sleepy, compacting, and away (no daemon).
 - **A failed turn she can name** is said in her words instead of the daemon's (`session::Trouble`,
   matched on the daemon's own wording): the bubble and her row in the Line get her line, her tag the
-  name for 10 s, the Line's note the fix and `↑ BRINGS YOUR MESSAGE BACK`. The raw text stays in the log.
+  name for 10 s, the Line's footer a quiet `↑ resends your message`. A login fix ends on the command in
+  a monospace chip (`$ synaps login`); a click copies it. The raw text stays in the log.
 
   | trouble | she says | tag | mood |
   |---|---|---|---|
-  | no credentials (`synaps login` + no credential) | No brain yet, choom. Open a terminal, run synaps login, pick a model. Then ask me again. | `NO BRAIN YET` | idle |
-  | a lapsed or rejected login | My login ran out. synaps login in a terminal and I'm back. | `LOGGED OUT` | idle |
+  | no credentials (`synaps login` + no credential) | No brain yet, choom. I'm set to Claude, and Synaps has no login for it. In a terminal: `$ synaps login` | `NO BRAIN YET` | idle |
+  | a lapsed or rejected login | My login ran out. In a terminal: `$ synaps login` | `LOGGED OUT` | idle |
   | rate or usage limit, billing | Hit my model's limit for now. Give it a bit, then ask me again. | `AT THE LIMIT` | annoyed |
   | overloaded, a 5xx | My model's swamped right now. Try me again in a minute. | `MODEL BUSY` | annoyed |
   | unreachable, timed out, a dropped stream | Can't reach my model. Check the connection, then ask me again. | `NO CONNECTION` | annoyed |
 
-  Anything else: `‹error: …›` (cut at 90 characters), annoyed, as before.
+  The provider is read off the error (`No Anthropic credentials`: Claude; `no credential configured
+  for 'kimi-code'`: Kimi); `synaps login` picks a provider, not a model. Anything else: `‹error: …›`
+  (cut at 90 characters), annoyed, as before.
+- **A turn shows as started** (THINKING, the busy bubble with ABORT) only once it has run 400 ms with
+  no word, or its first word comes: one that fails at once never promises a reply.
 - **Sleep follows you, not the chat**: while you're at the desk she stays up,
   however long the session is quiet. She naps 10 min after your last input (5 min at night, 22:00 to
   06:00 local), and at once when the screen locks or the machine sleeps (logind's `LockedHint` and
