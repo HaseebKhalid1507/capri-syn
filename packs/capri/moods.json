@@ -392,35 +392,148 @@
   "energy": {
     "low": {
       "gapMs": [
-        12000,
-        25000
+        6000,
+        12000
       ],
+      "bobPx": 3,
+      "bobPeriodMs": 6500,
+      "swayPx": 2,
+      "droopPx": 10,
+      "leanPx": 8,
       "idle": {
         "base": "sleepy",
         "loop": [
           {
             "frame": "sleepy",
-            "ms": 3800
+            "ms": 2600
           },
           {
             "frame": "idle-blink_half",
-            "ms": 220
+            "ms": 400
           },
           {
             "frame": "idle-blink_closed",
-            "ms": 650
+            "ms": 1100
           },
           {
             "frame": "idle-blink_half",
-            "ms": 260
+            "ms": 500
           },
           {
             "frame": "sleepy",
-            "ms": 1500
+            "ms": 1800
           }
         ]
       },
       "activities": [
+        [
+          {
+            "frame": "transition-crouch_floor",
+            "ms": 250
+          },
+          {
+            "frame": "sit_floor-sleepy",
+            "ms": 30000
+          },
+          {
+            "frame": "sit_floor-neutral",
+            "ms": 400
+          },
+          {
+            "frame": "transition-crouch_floor",
+            "ms": 250
+          }
+        ],
+        [
+          {
+            "frame": "transition-crouch_floor",
+            "ms": 250
+          },
+          {
+            "frame": "sit_floor-sleepy",
+            "ms": 35000
+          },
+          {
+            "frame": "sit_floor-neutral",
+            "ms": 400
+          },
+          {
+            "frame": "transition-crouch_floor",
+            "ms": 250
+          }
+        ],
+        [
+          {
+            "frame": "transition-crouch_floor",
+            "ms": 250
+          },
+          {
+            "frame": "sit_floor-sleepy",
+            "ms": 40000
+          },
+          {
+            "frame": "sit_floor-neutral",
+            "ms": 400
+          },
+          {
+            "frame": "transition-crouch_floor",
+            "ms": 250
+          }
+        ],
+        [
+          {
+            "frame": "transition-crouch_floor",
+            "ms": 250
+          },
+          {
+            "frame": "sit_floor-sleepy",
+            "ms": 45000
+          },
+          {
+            "frame": "sit_floor-neutral",
+            "ms": 400
+          },
+          {
+            "frame": "transition-crouch_floor",
+            "ms": 250
+          }
+        ],
+        [
+          {
+            "frame": "transition-crouch_floor",
+            "ms": 250
+          },
+          {
+            "frame": "sit_floor-sleepy",
+            "ms": 50000
+          },
+          {
+            "frame": "sit_floor-neutral",
+            "ms": 400
+          },
+          {
+            "frame": "transition-crouch_floor",
+            "ms": 250
+          }
+        ],
+        [
+          {
+            "frame": "transition-crouch_floor",
+            "ms": 250
+          },
+          {
+            "frame": "sit_floor-sleepy",
+            "ms": 60000
+          },
+          {
+            "frame": "sit_floor-neutral",
+            "ms": 400
+          },
+          {
+            "frame": "transition-crouch_floor",
+            "ms": 250
+          }
+        ],
         [
           {
             "frame": "sleepy",
@@ -432,7 +545,7 @@
           },
           {
             "frame": "idle-blink_closed",
-            "ms": 250
+            "ms": 400
           },
           {
             "frame": "sleepy",
@@ -441,80 +554,214 @@
         ],
         [
           {
-            "frame": "idle-blink_half",
-            "ms": 1200
-          },
-          {
-            "frame": "idle-blink_closed",
-            "ms": 900
-          },
-          {
-            "frame": "idle-blink_half",
-            "ms": 400
-          },
-          {
-            "frame": "sleepy",
-            "ms": 800
-          }
-        ],
-        [
-          {
             "frame": "idle-look_down",
-            "ms": 2200
+            "ms": 2600
           },
           {
             "frame": "sleepy",
             "ms": 600
-          }
-        ],
-        [
-          "floor_sit",
-          {
-            "frame": "sit_floor-sleepy",
-            "ms": 8000
-          },
-          "floor_stand"
-        ],
-        [
-          "floor_sit",
-          {
-            "frame": "recline-neutral",
-            "ms": 1500
-          },
-          {
-            "frame": "recline-sleepy",
-            "ms": 6000
-          },
-          {
-            "frame": "recline-neutral",
-            "ms": 600
-          },
-          "floor_stand"
-        ],
-        [
-          {
-            "frame": "arms_crossed-neutral",
-            "ms": 1800
-          },
-          {
-            "frame": "sleepy",
-            "ms": 900
           }
         ]
       ]
     },
     "mid": {
       "gapMs": [
-        7000,
-        12000
+        4000,
+        7000
+      ],
+      "bobPx": 3,
+      "bobPeriodMs": 1100,
+      "activities": [
+        [
+          {
+            "frame": "idle-look_left",
+            "ms": 1800
+          }
+        ],
+        [
+          {
+            "frame": "idle-look_right",
+            "ms": 1800
+          }
+        ],
+        [
+          {
+            "frame": "idle-look_up",
+            "ms": 1400
+          }
+        ],
+        [
+          {
+            "frame": "idle-look_left",
+            "ms": 1300
+          },
+          {
+            "frame": "neutral",
+            "ms": 150
+          },
+          {
+            "frame": "idle-look_right",
+            "ms": 1300
+          }
+        ],
+        [
+          {
+            "frame": "idle-look_right",
+            "ms": 1300
+          },
+          {
+            "frame": "neutral",
+            "ms": 150
+          },
+          {
+            "frame": "idle-look_left",
+            "ms": 1300
+          }
+        ],
+        [
+          "shrug"
+        ],
+        [
+          "wink",
+          {
+            "frame": "flirty",
+            "ms": 900
+          }
+        ],
+        [
+          {
+            "frame": "hand_on_hip-neutral",
+            "ms": 2400
+          },
+          {
+            "frame": "hand_on_hip-smirk",
+            "ms": 1400
+          }
+        ],
+        [
+          {
+            "frame": "arms_crossed-neutral",
+            "ms": 3000
+          }
+        ],
+        [
+          "point_right",
+          {
+            "frame": "smirk",
+            "ms": 900
+          }
+        ],
+        [
+          "point_left",
+          {
+            "frame": "happy",
+            "ms": 900
+          }
+        ],
+        [
+          {
+            "frame": "smirk",
+            "ms": 2000
+          }
+        ],
+        [
+          {
+            "frame": "hand_on_hip-flirty",
+            "ms": 2200
+          },
+          {
+            "frame": "hand_on_hip-neutral",
+            "ms": 900
+          }
+        ],
+        [
+          {
+            "frame": "skeptical",
+            "ms": 1800
+          }
+        ]
       ]
     },
     "high": {
       "gapMs": [
-        5000,
-        9000
+        4000,
+        7000
       ],
       "activities": [
+        [
+          {
+            "frame": "idle-look_left",
+            "ms": 1800
+          }
+        ],
+        [
+          {
+            "frame": "idle-look_right",
+            "ms": 1800
+          }
+        ],
+        [
+          {
+            "frame": "idle-look_up",
+            "ms": 1400
+          }
+        ],
+        [
+          {
+            "frame": "idle-look_left",
+            "ms": 1300
+          },
+          {
+            "frame": "neutral",
+            "ms": 150
+          },
+          {
+            "frame": "idle-look_right",
+            "ms": 1300
+          }
+        ],
+        [
+          {
+            "frame": "idle-look_right",
+            "ms": 1300
+          },
+          {
+            "frame": "neutral",
+            "ms": 150
+          },
+          {
+            "frame": "idle-look_left",
+            "ms": 1300
+          }
+        ],
+        [
+          {
+            "frame": "idle-look_left",
+            "ms": 700
+          },
+          {
+            "frame": "neutral",
+            "ms": 150
+          },
+          {
+            "frame": "idle-look_right",
+            "ms": 700
+          }
+        ],
+        [
+          {
+            "frame": "idle-look_right",
+            "ms": 700
+          },
+          {
+            "frame": "neutral",
+            "ms": 150
+          },
+          {
+            "frame": "idle-look_left",
+            "ms": 700
+          }
+        ],
         [
           "excited"
         ],
@@ -574,7 +821,9 @@
             "ms": 600
           }
         ]
-      ]
+      ],
+      "bobPx": 4,
+      "bobPeriodMs": 1000
     }
   },
   "extraFrames": [

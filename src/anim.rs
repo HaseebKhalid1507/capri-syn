@@ -225,6 +225,16 @@ impl Animator {
         self.one_pos = 0;
     }
 
+    /// Hold `frame` for `ms` first, then whatever was showing goes on (a cut a frame late: the
+    /// new drawing goes underneath while the old one still shows).
+    pub fn hold_first(&mut self, frame: usize, ms: u32, now: Instant) {
+        let mut seq = vec![(frame, ms)];
+        if let Some(s) = self.oneshot.take() {
+            seq.extend(s[self.one_pos..].iter().copied());
+        }
+        self.play(seq, now);
+    }
+
     /// Play `seq` after the one-shot in progress (or now, if none).
     pub fn then(&mut self, seq: Seq, now: Instant) {
         match &mut self.oneshot {
@@ -363,5 +373,24 @@ mod tests {
         assert!(!a.busy());
         a.then(vec![(3, 100)], t + Duration::from_millis(300));
         assert_eq!(a.frame(), 3, "nothing playing: now");
+    }
+
+    #[test]
+    fn hold_first_shows_the_old_frame_then_the_rest() {
+        let t = Instant::now();
+        let mut a = Animator::new(0);
+        a.play(vec![(5, 100), (6, 100)], t);
+        a.hold_first(9, 66, t);
+        assert_eq!(a.frame(), 9, "the old drawing holds");
+        a.tick(t + Duration::from_millis(66));
+        assert_eq!(a.frame(), 5, "then the sequence from its start");
+        a.tick(t + Duration::from_millis(166));
+        assert_eq!(a.frame(), 6);
+        a.tick(t + Duration::from_millis(266));
+        assert!(!a.busy());
+        a.hold_first(4, 33, t + Duration::from_millis(300));
+        assert_eq!(a.frame(), 4, "nothing playing: the hold, then the loop");
+        a.tick(t + Duration::from_millis(333));
+        assert_eq!(a.frame(), 0);
     }
 }

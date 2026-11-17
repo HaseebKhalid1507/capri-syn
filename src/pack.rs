@@ -944,6 +944,14 @@ pub struct EnergyBand {
     pub gap_ms: Option<[u64; 2]>,
     /// The idle mood's base and loop in this band (a tired face at night).
     pub idle: Option<MoodSpec>,
+    /// Her breath in this band (absent: `life.bobPx`, `life.bobPeriodMs`, `life.swayPx`): a
+    /// quick small bounce by day, slow and deep at night.
+    pub bob_px: Option<i32>,
+    pub bob_period_ms: Option<u64>,
+    pub sway_px: Option<i32>,
+    /// Standing, her head hangs this far (px at 1x) and leans this far (the hair's top): tired.
+    pub droop_px: i32,
+    pub lean_px: i32,
 }
 
 impl EnergySpec {
