@@ -81,6 +81,17 @@ class MakePack(Base):
         self.assertIn("v1.0.4 (bc93892)", mp.NOTICE_LINE)
         self.assertIn("v1.1.2 (bb0c2d7)", mp.NOTICE_LINE)
         self.assertEqual(json.loads((out / "moods.json").read_text())["icon"], "icon.png")
+        self.assertEqual((out / "persona.md").read_bytes(), (HERE.parent / "packs/capri/persona.md").read_bytes())
+
+    def test_persona_is_the_one_given(self):
+        out, persona = self.root / "pack", self.root / "mine.md"
+        persona.write_text("You are someone else.\n")
+        rc, msg = self.run_mp(str(self.fake.src), str(out), "--sleep", str(self.fake.sleep), "--persona", str(persona))
+        self.assertEqual(rc, 0, msg)
+        self.assertEqual((out / "persona.md").read_text(), "You are someone else.\n")
+        rc, msg = self.run_mp(str(self.fake.src), str(out), "--sleep", str(self.fake.sleep), "--persona", str(self.root / "none.md"))
+        self.assertEqual(rc, 1)
+        self.assertIn("missing", msg)
 
     def test_refuses_a_changed_or_missing_file(self):
         p = self.fake.src / "assets/capri/sprites/v1/capri-neutral.png"

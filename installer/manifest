@@ -1,0 +1,58 @@
+# The installer's pins and URLs, read by install.sh (Linux) and install.ps1 (Windows): from the
+# checkout or release they run in, else from GitHub at the same ref. One `key=value` per line, no
+# quotes, `#` comments. The steps and flags are in docs/INSTALL.md.
+
+repo=HaseebKhalid1507/capri-syn
+
+# 1. Synaps. Installed with its own release installer when `synaps` is missing or older than
+# synaps_min. The latest release is used, its installer checked against GitHub's sha256 of the asset.
+# If GitHub's API doesn't answer, the pinned release and hashes below are used instead.
+# synaps_min: her client speaks protocol 3, exact match (0.10.0 on); she's been run against 0.11.x.
+synaps_repo=HaseebKhalid1507/SynapsCLI
+synaps_min=0.11.0
+synaps_protocol=3
+synaps_pin=0.12.0
+synaps_installer_sh_sha256=ade35fed4b6fac8e0906d65f819534f136f2222f33cee466c21badc9c24404c9
+synaps_installer_ps1_sha256=3364165f483fdcab78d8e52d021dd302389ed4dc60f8e738ea2d93d9e54835aa
+
+# 2. Her binary. A release's assets (stable names, made by .github/workflows/release.yml), each with
+# a `.sha256` beside it, from releases/latest. With no release: built from source.
+asset_linux=synaps-avatar-x86_64-unknown-linux-gnu.tar.gz
+asset_windows=synaps-avatar-setup-x86_64.exe
+asset_windows_voice=synaps-avatar-voice-setup-x86_64.exe
+# The Linux tarball is built on ubuntu-22.04: older glibc builds from source.
+linux_glibc_min=2.35
+# rustup-init for source builds, checked against the .sha256 beside it.
+rustup_dist=https://static.rust-lang.org/rustup/dist
+
+# System packages. Source builds: the compiler and GPUI's -dev libraries (CI's list). Prebuilt:
+# the libraries she links. Both: Python with venv (her art pack). `a|b`: the first one the
+# package manager knows.
+build_apt=build-essential pkg-config libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev libx11-xcb-dev libxcb1-dev libxcb-shape0-dev libxcb-randr0-dev libxcb-xfixes0-dev libfontconfig-dev libfreetype-dev libasound2-dev libssl-dev libzstd-dev
+build_pacman=base-devel pkgconf libxkbcommon libxkbcommon-x11 wayland vulkan-icd-loader libx11 libxcb fontconfig freetype2 alsa-lib openssl zstd
+build_dnf=gcc gcc-c++ make pkgconf-pkg-config libxkbcommon-devel libxkbcommon-x11-devel wayland-devel vulkan-loader-devel libX11-devel libxcb-devel fontconfig-devel freetype-devel alsa-lib-devel openssl-devel libzstd-devel
+build_zypper=gcc gcc-c++ make pkg-config libxkbcommon-devel libxkbcommon-x11-devel wayland-devel vulkan-devel libX11-devel libxcb-devel fontconfig-devel freetype2-devel alsa-devel libopenssl-devel libzstd-devel
+run_apt=libxkbcommon0 libxkbcommon-x11-0 libwayland-client0 libvulkan1 libx11-xcb1 libxcb1 libxcb-shape0 libxcb-randr0 libxcb-xfixes0 libfontconfig1 libfreetype6 libasound2t64|libasound2 libzstd1
+run_pacman=libxkbcommon libxkbcommon-x11 wayland vulkan-icd-loader libx11 libxcb fontconfig freetype2 alsa-lib zstd
+run_dnf=libxkbcommon libxkbcommon-x11 libwayland-client vulkan-loader libX11-xcb libxcb fontconfig freetype alsa-lib libzstd
+run_zypper=libxkbcommon0 libxkbcommon-x11-0 libwayland-client0 libvulkan1 libX11-xcb1 libxcb1 fontconfig libfreetype6 libasound2 libzstd1
+base_apt=curl ca-certificates python3 python3-venv
+base_pacman=curl python
+base_dnf=curl python3
+base_zypper=curl python3
+# A Vulkan driver (she renders through Vulkan; checked, never installed).
+vulkan_apt=mesa-vulkan-drivers
+vulkan_pacman=vulkan-radeon, vulkan-intel or nvidia-utils
+vulkan_dnf=mesa-vulkan-drivers
+vulkan_zypper=libvulkan_radeon or libvulkan_intel
+
+# 3. Her art pack: tools/make-pack checks every file against its pins (tools/*.sha256).
+# CapriCore v1.0.4 comes as GitHub's tarball of the commit; lachy at the commit make-pack pins.
+capricore_repo=CapriChooms/CapriCore
+capricore_commit=bc93892c751a73fdce14355b477dcdc775e46fd9
+# make-pack's Python dependencies, in a venv of the installer's own (never system-wide).
+pip_pack=fonttools==4.68.0
+# --with-local-art: mochi's hair recolour (tools/mochi_hair.py) needs these too.
+pip_local_art=numpy>=1.26,<3 Pillow>=10,<14
+# --voice on Linux: tools/capri-voice-setup uses uv; installed in that venv when it's missing.
+pip_uv=uv==0.13.9
