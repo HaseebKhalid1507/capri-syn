@@ -1016,7 +1016,7 @@ impl Avatar {
                 }
             }
             self.dance_decide(now);
-            "ok listening".into()
+            if p.video { "ok listening (video)".into() } else { "ok listening".into() }
         } else {
             if self.music.as_ref().is_some_and(|m| m.auto) {
                 self.music_stop_at = Some(now + MUSIC_GRACE);
@@ -1743,7 +1743,17 @@ impl Avatar {
         }
     }
 
+    /// Her tag. While the Line waits for his key or a click (the desktop didn't hand her the
+    /// keyboard), it says how to type.
     fn status(&self) -> Status {
+        let mut s = self.status_now();
+        if self.line.as_ref().is_some_and(|l| l.waiting) {
+            s.label = format!("{} · {} TO TYPE", s.label, self.summon_label());
+        }
+        s
+    }
+
+    fn status_now(&self) -> Status {
         if let Some(s) = self.voice_status() {
             return s;
         }

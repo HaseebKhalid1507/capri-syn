@@ -246,7 +246,7 @@ impl Desktop for HyprDesktop {
         // step is a redraw and a present. A layer surface loses the pointer when Hyprland
         // re-checks focus under it (her window moving at a drag's start), button held or not.
         // A window's `at`/`size` is its goal: the compositor slides it there.
-        Caps { shape_mode: false, target_events: false, fx_layers: false, costly_redraw: true, implicit_grab: false, goal_geometry: true, layout_events: true, host_per_output: true }
+        Caps { shape_mode: false, target_events: false, fx_layers: false, costly_redraw: true, implicit_grab: false, goal_geometry: true, layout_events: true, host_per_output: true, keyboard_on_input: false }
     }
 
     fn root_size(&self) -> (i32, i32) {

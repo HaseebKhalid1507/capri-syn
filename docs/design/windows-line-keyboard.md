@@ -1,6 +1,32 @@
-# The Line's keyboard on Windows, under the foreground lock (design note, undecided)
+# The Line's keyboard on Windows, under the foreground lock (design note)
 
-**Status:** options only. Haseeb or Jawz picks. Nothing here is built yet.
+**Status:** decided (Jawz, for Haseeb): **A, plus the honest half of D.** Built in P1b; the [VM] checks
+are pending. The options below are kept as the record of why.
+
+## The decision
+
+- **His key and his click take the keyboard at once.** Her hotkey (`WM_HOTKEY` on her keys' thread) and
+  his press on one of her windows (the input poller sees the press over her) are *his input to her*. For
+  `GRANT_MS` (1 s) after it, `Stage::keyboard_granted` is true, and the Line opens with the keyboard
+  (`SetForegroundWindow`, which Windows allows then: her process received the last input).
+- **Every other opening waits.** A summon from the brain, `capri-ctl`, a voice turn: the Line opens
+  without the keyboard and without activation (`focus: false`, so PW-2 keeps a click from activating
+  it too), parked. Her tag says how to type (`ONLINE · WIN+ALT+C TO TYPE`), and so does the Line's own
+  status (`WIN+ALT+C TO TYPE`). His next press of her key, or his click on the Line, takes the
+  keyboard (`Ask::Parked(false)`, granted by that very input).
+- **Never steal focus.** A grab without his input is refused (`grab_keyboard` is Err, nothing moves),
+  and giving the keyboard back only happens while one of hers still has it: if he clicked elsewhere,
+  the keyboard stays where he put it. GPUI's own activation trick (a synthetic Alt press, option C)
+  is patched out (PW-4).
+- **No taskbar button, no `FlashWindowEx`.** She stays out of the taskbar and Alt+Tab: D's flash would
+  need a taskbar button, so only D's "wait for his click, with a visible cue" half is taken.
+- **B stays a note**, not built: no setting reaches the backend today, and plumbing one in for an
+  off-by-default workaround isn't worth it before the [VM] check shows A's extra key press bothers him.
+- **No C.**
+- **The contract:** `Caps::keyboard_on_input` is set on Windows. The `keyboard` scenario first checks
+  that a grab without his input is refused and the keyboard stays put, then clicks on her for real
+  (`SendInput` in the Windows driver), then grabs and gives back. The fake runs that path in every
+  `cargo test` (`contract_fake_keyboard_on_his_input`); on Windows it is [VM] pending.
 
 ## The problem
 
@@ -69,7 +95,7 @@ on his first click or key. Combine with A for her key: that path focuses immedia
   hold-to-talk isn't built on Windows. Rejected.
 - UI Automation `SetFocus`: it ends in the same foreground rules for another process's top-level window.
 
-## Suggestion, if one is wanted
+## The suggestion this note made before the decision
 
 A + D: her key and her body take the keyboard at once (the input is his). Everything else opens the
 Line unfocused, with a one-key hint, and never steals focus. B stays in reserve behind a setting if the

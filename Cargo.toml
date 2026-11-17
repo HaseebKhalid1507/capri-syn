@@ -32,7 +32,7 @@ log = "0.4"
 toml = "0.8"
 toml_edit = "0.22"
 
-# The Linux desktops (src/platform/x11, src/platform/hypr, src/platform/linux.rs) and services.
+# The Linux desktops (src/platform/x11, src/platform/hypr) and services (src/platform/linux).
 [target.'cfg(target_os = "linux")'.dependencies]
 # MPRIS playback (real "listening"): the zbus GPUI already builds, plus its blocking API.
 zbus = { version = "5.19", default-features = false, features = ["async-io", "blocking-api"] }
@@ -47,17 +47,26 @@ libc = "0.2"
 # The Windows backend (src/platform/windows). Both already in the lock through GPUI and zbus.
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
+    # WinRT: the media flyout's sessions (SMTC) and toasts.
+    "Data_Xml_Dom",
+    "Foundation",
+    "Media_Control",
+    "UI_Notifications",
     "Win32_Foundation",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_System_Com",
     "Win32_System_Console",
     "Win32_System_LibraryLoader",
     "Win32_System_Performance",
+    "Win32_System_Registry",
     "Win32_System_RemoteDesktop",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
     "Win32_System_Time",
     "Win32_UI_Accessibility",
+    "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",

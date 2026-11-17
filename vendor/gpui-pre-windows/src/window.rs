@@ -104,6 +104,8 @@ pub(crate) struct WindowsWindowInner {
     pub(crate) is_movable: bool,
     /// synaps-avatar PW-2: a click activates it (`WM_MOUSEACTIVATE`).
     pub(crate) click_activates: bool,
+    /// synaps-avatar PW-5: it keeps one scale (`WM_DPICHANGED` changes nothing).
+    pub(crate) keeps_scale: bool,
     pub(crate) is_resizable: bool,
     pub(crate) is_minimizable: bool,
     pub(crate) executor: ForegroundExecutor,
@@ -126,11 +128,13 @@ impl WindowsWindowState {
         disable_direct_composition: bool,
         invalidate_devices: Arc<AtomicBool>,
         draw_coordinator: Rc<DrawCoordinator>,
+        fixed_scale: Option<f32>,
     ) -> Result<Self> {
-        let scale_factor = {
+        // synaps-avatar PW-5: a pop-up keeps its display's scale (stock: the monitor's it is on).
+        let scale_factor = fixed_scale.unwrap_or_else(|| {
             let monitor_dpi = unsafe { GetDpiForWindow(hwnd) } as f32;
             monitor_dpi / USER_DEFAULT_SCREEN_DPI as f32
-        };
+        });
         let origin = logical_point(window_params.x as f32, window_params.y as f32, scale_factor);
         let logical_size = {
             let physical_size = size(
@@ -284,6 +288,7 @@ impl WindowsWindowInner {
             context.disable_direct_composition,
             context.invalidate_devices.clone(),
             context.draw_coordinator.clone(),
+            context.fixed_scale,
         )?;
 
         Ok(Rc::new(Self {
@@ -295,6 +300,7 @@ impl WindowsWindowInner {
             hide_title_bar: context.hide_title_bar,
             is_movable: context.is_movable,
             click_activates: context.click_activates,
+            keeps_scale: context.fixed_scale.is_some(),
             is_resizable: context.is_resizable,
             is_minimizable: context.is_minimizable,
             executor: context.executor.clone(),
@@ -422,6 +428,8 @@ struct WindowCreateContext {
     display: WindowsDisplay,
     is_movable: bool,
     click_activates: bool,
+    /// synaps-avatar PW-5.
+    fixed_scale: Option<f32>,
     is_resizable: bool,
     is_minimizable: bool,
     min_size: Option<Size<Pixels>>,
@@ -537,6 +545,7 @@ impl WindowsWindow {
             display,
             is_movable: params.is_movable,
             click_activates: crate::synaps_patches::click_activates(params.kind == WindowKind::PopUp, params.focus),
+            fixed_scale: crate::synaps_patches::keeps_one_scale(params.kind == WindowKind::PopUp).then(|| display.scale_factor()),
             is_resizable: params.is_resizable,
             is_minimizable: params.is_minimizable,
             min_size: params.window_min_size,
@@ -843,29 +852,32 @@ impl PlatformWindow for WindowsWindow {
                 // so let's just simulate user input as that seems to be the most reliable way
                 // some more info: https://gist.github.com/Aetopia/1581b40f00cc0cadc93a0e8ccb65dc8c
                 // bonus: this bug also doesn't manifest if you have vs attached to the process
-                let inputs = [
-                    INPUT {
-                        r#type: INPUT_KEYBOARD,
-                        Anonymous: INPUT_0 {
-                            ki: KEYBDINPUT {
-                                wVk: VK_MENU,
-                                dwFlags: KEYBD_EVENT_FLAGS(0),
-                                ..Default::default()
+                // synaps-avatar PW-4: no synthetic input (it lands in his session).
+                if crate::synaps_patches::activate_injects_input() {
+                    let inputs = [
+                        INPUT {
+                            r#type: INPUT_KEYBOARD,
+                            Anonymous: INPUT_0 {
+                                ki: KEYBDINPUT {
+                                    wVk: VK_MENU,
+                                    dwFlags: KEYBD_EVENT_FLAGS(0),
+                                    ..Default::default()
+                                },
                             },
                         },
-                    },
-                    INPUT {
-                        r#type: INPUT_KEYBOARD,
-                        Anonymous: INPUT_0 {
-                            ki: KEYBDINPUT {
-                                wVk: VK_MENU,
-                                dwFlags: KEYEVENTF_KEYUP,
-                                ..Default::default()
+                        INPUT {
+                            r#type: INPUT_KEYBOARD,
+                            Anonymous: INPUT_0 {
+                                ki: KEYBDINPUT {
+                                    wVk: VK_MENU,
+                                    dwFlags: KEYEVENTF_KEYUP,
+                                    ..Default::default()
+                                },
                             },
                         },
-                    },
-                ];
-                unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
+                    ];
+                    unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
+                }
 
                 // todo(windows)
                 // crate `windows 0.56` reports true as Err

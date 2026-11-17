@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Windows: the Line's keyboard, music, toasts, desktops, effects, DPI (not shipped)
+- The Line's keyboard follows Windows' rule: her key (Win+Alt+C) or a click on her takes it at once; any
+  other opening (a summon, `capri-ctl`, voice) shows the Line without it, and her tag says
+  `WIN+ALT+C TO TYPE` until he presses her key or clicks the Line. She never takes the keyboard from his
+  window, never flashes, never injects input (GPUI's Alt trick patched out: PW-4).
+- Music from the media flyout (SMTC): playing or quiet, and whether he's watching a video.
+- Notifications are toasts (her AppUserModelID registered under HKCU; `docs/WINDOWS.md` lists what a
+  package must provide).
+- Perch targets on another virtual desktop are left out; a desktop switch is noticed at once.
+- Effect layers reaching outside her window get windows of their own (click-through, never activated).
+- Per-monitor DPI aware (v2); her windows keep one scale on every monitor (PW-5). Monitor, DPI and
+  work-area changes are noticed at once.
+- Linux: unchanged, except that a `talk tap` while the talk key is held is ignored (it ended the hold
+  early), the MPRIS error line says `mpris:` again, and the Line's hint names the summon letter you set.
+
 ### Windows: the groundwork (draft, not shipped)
 - She builds and runs on Windows 11 (x86_64-pc-windows-msvc): `src/platform/windows`, a Windows CI job
   (build, unit tests, the fake contract suite, clippy). GPUI's Windows crate is vendored with three

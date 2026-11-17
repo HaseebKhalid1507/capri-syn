@@ -317,9 +317,9 @@ fn run(t_start: Instant) -> Result<()> {
         {
             elog!("synaps-avatar: pack fonts not loaded: {e:#}");
         }
-        // GPUI's displays are the root size divided by its scale factor.
+        // GPUI's primary display is its device px divided by its scale factor.
         let display_w = cx.primary_display().map(|d| f32::from(d.bounds().size.width)).unwrap_or(0.0);
-        let sf = if display_w > 0.0 { os.root_size().0 as f32 / display_w } else { 1.0 };
+        let sf = if display_w > 0.0 { os.primary_display_px() as f32 / display_w } else { 1.0 };
         let layout = view::Layout::new(&pack, sf, args.height);
         let origin = state::load_ground()
             .map(|(gx, gy)| view::Avatar::clamp(&os, &layout, (gx - layout.ground_x, gy - layout.ground_y)))
@@ -424,7 +424,8 @@ fn run(t_start: Instant) -> Result<()> {
                     let (r, _) = std::sync::mpsc::channel();
                     tx.send_blocking((control::Command::Playback(p), r)).ok();
                 }) {
-                    elog!("synaps-avatar: media players: {e:#} (no music detection)");
+                    // The platform's watcher names itself (`mpris: ...`, `smtc: ...`).
+                    elog!("synaps-avatar: {e:#} (no music detection)");
                 }
             }
             elog!(

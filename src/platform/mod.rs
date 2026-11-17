@@ -10,8 +10,8 @@
 //! window system, and nothing inside the core does either: it reads [`Caps`].
 //!
 //! Backends: `x11/`, `hypr/` (Hyprland: its IPC sockets, and layer-shell surfaces through the
-//! vendored GPUI's `layer_ctl`), `windows/` (Win32 + DWM; P0: no hotkeys, voice or the Line's
-//! keyboard yet). Each passes the same contract suite (`contract.rs`: on the in-memory `fake.rs`
+//! vendored GPUI's `layer_ctl`), `windows/` (Win32 + DWM, through the vendored GPUI's Windows
+//! crate). Each passes the same contract suite (`contract.rs`: on the in-memory `fake.rs`
 //! in every `cargo test`, on Xvfb for X11, in the `tools/wlrig` sandbox for Hyprland, on the
 //! interactive desktop for Windows).
 //!
@@ -41,11 +41,10 @@ pub use crate::edges::WinRect;
 pub use crate::shape::ShapeRect;
 pub use os::Os;
 
-/// The process-wide setup that must run before any other thread exists (GPU choice,
-/// allocator). See `linux.rs`.
-// The process and the OS's services beside the desktop: the clock, the calendar, the media
-// players (`watch_media`: `on_change` gets the sum whenever it changes, first call now) and
-// notifications (`notify`: blocking, Ok is its id).
+// The process and the OS's services beside the desktop: `process_setup`, what must run before
+// any other thread exists (Linux: the GPU choice and the allocator, `linux/mod.rs`; Windows: DPI
+// awareness), the clock, the calendar, the media players (`watch_media`: `on_change` gets the
+// sum whenever it changes, first call now) and notifications (`notify`: blocking, Ok is its id).
 #[cfg(target_os = "linux")]
 pub use linux::{local_day, monotonic_s, notify, process_setup, trim_heap, utc_offset_s, watch_media};
 #[cfg(windows)]
@@ -133,6 +132,11 @@ pub struct Caps {
     /// A surface of hers shows on one output only: the core keeps a body host per output
     /// and shows her in the one under her (else one window spans every monitor).
     pub host_per_output: bool,
+    /// The desktop hands her the keyboard only right after his own input to her (her key, a
+    /// click on one of her windows: Windows' foreground lock). Anything else that opens the Line
+    /// shows it waiting for him (`Stage::keyboard_granted`); she never takes the keyboard from
+    /// the window he works in.
+    pub keyboard_on_input: bool,
 }
 
 /// How the compositor animates a window to a new rect (`Caps::goal_geometry`): how long, and
@@ -186,17 +190,15 @@ pub enum Hint {
     /// The focused window changed.
     Focus,
     /// The workspace changed.
-    // Not sent by the Windows backend yet (virtual desktops, display and work-area changes come
-    // with multi-monitor; DWM always composites): the core re-reads on its own timers there.
-    #[cfg_attr(windows, allow(dead_code))]
     Desktop,
     /// Windows opened, closed, or changed space or mode: the core re-reads what it follows.
+    // Not sent on Windows: its hooks report each window's own change.
     #[cfg_attr(windows, allow(dead_code))]
     Changed,
     /// Monitors or the areas panels reserve changed.
-    #[cfg_attr(windows, allow(dead_code))]
     Layout,
     /// Whether a compositor runs now.
+    // Not sent on Windows: DWM always composites.
     #[cfg_attr(windows, allow(dead_code))]
     Compositor(bool),
 }
@@ -249,7 +251,8 @@ pub struct Keys {
 }
 
 /// A press of one of her global keys (a backend that grabs them reports presses only).
-// Only a backend that grabs keys sends these (Windows; on Linux his desktop binds them).
+// Only a backend that grabs keys sends these (Windows; on Linux his desktop binds them and the
+// toggle chord is never named).
 #[cfg_attr(not(windows), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeyEv {
@@ -314,8 +317,14 @@ pub type PointerRead = Box<dyn FnMut() -> Option<(i32, i32)> + Send>;
 /// rule built on these answers is the core's. Thread-safe: watchers call it.
 pub trait Desktop: Send + Sync {
     fn caps(&self) -> Caps;
-    /// The root's size, px (GPUI's displays are this divided by the scale factor).
+    /// The root's size, px.
     fn root_size(&self) -> (i32, i32);
+    /// Device px across what GPUI calls its primary display (her scale `sf` is this ÷ that
+    /// display's width in GPUI px): the root where that display is the whole screen (X11), the
+    /// primary monitor's width where it is one monitor (Windows).
+    fn primary_display_px(&self) -> i32 {
+        self.root_size().0
+    }
     /// The monitors, fresh (the core caches).
     fn monitors(&self) -> Vec<Monitor>;
     /// How the compositor animates a window to a new rect (`Caps::goal_geometry`); None: it
@@ -364,6 +373,11 @@ pub trait Desktop: Send + Sync {
     /// backend grabs none; the desktop's own bindings drive her (`capri-ctl talk ...`).
     fn watch_keys(&self, _keys: Keys, _on: Box<dyn Fn(KeyEv) + Send>) -> Result<bool> {
         Ok(false)
+    }
+    /// How he presses her key `ev` (its letter `key`) here, for a hint (`WIN+ALT+C`). None: his
+    /// desktop binds it (the core's words for it then).
+    fn key_label(&self, _ev: KeyEv, _key: char) -> Option<String> {
+        None
     }
     /// Start reporting clicks anywhere (root px) while armed; `on` runs on its thread.
     fn watch_clicks(&self, on: Box<dyn Fn(i32, i32) + Send>) -> Result<()>;
@@ -420,8 +434,14 @@ pub trait Stage {
     /// Hide every layer (flushed).
     fn fx_hide_all(&self);
     fn flush(&self);
-    /// Keyboard to her surface `s`.
+    /// Keyboard to her surface `s`. Where `Caps::keyboard_on_input`: Err without a grant
+    /// (`keyboard_granted`), and the keyboard stays where it is.
     fn grab_keyboard(&self, s: WinId) -> Result<()>;
+    /// The desktop would hand her the keyboard now: one of her windows holds it, or he just
+    /// gave her his input (her key, a click on her). Only asked where `Caps::keyboard_on_input`.
+    fn keyboard_granted(&self) -> bool {
+        true
+    }
     /// Her surface `s` lets the keyboard go, to `to` when given.
     fn release_keyboard(&self, s: WinId, to: Option<WinId>) -> Result<()>;
 }
