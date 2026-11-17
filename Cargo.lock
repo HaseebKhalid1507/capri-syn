@@ -6238,6 +6238,8 @@ dependencies = [
  "synaps-client",
  "toml 0.8.23",
  "toml_edit 0.22.27",
+ "uds_windows",
+ "windows 0.62.2",
  "x11rb",
  "zbus 5.19.0",
 ]

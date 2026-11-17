@@ -10,17 +10,26 @@
 //! window system, and nothing inside the core does either: it reads [`Caps`].
 //!
 //! Backends: `x11/`, `hypr/` (Hyprland: its IPC sockets, and layer-shell surfaces through the
-//! vendored GPUI's `layer_ctl`). Windows comes later. Each passes the same contract suite
-//! (`contract.rs`: on the in-memory `fake.rs` in every `cargo test`, on Xvfb for X11, in the
-//! `tools/wlrig` sandbox for Hyprland).
+//! vendored GPUI's `layer_ctl`), `windows/` (Win32 + DWM; P0: no hotkeys, voice or the Line's
+//! keyboard yet). Each passes the same contract suite (`contract.rs`: on the in-memory `fake.rs`
+//! in every `cargo test`, on Xvfb for X11, in the `tools/wlrig` sandbox for Hyprland, on the
+//! interactive desktop for Windows).
+//!
+//! The OS services the core uses outside the desktop (the local socket, the clock, the
+//! calendar day) are re-exported here too, so nothing outside `src/platform/` picks an OS.
 
 use anyhow::Result;
 use gpui_kit::{Window, WindowOptions};
 
+#[cfg(target_os = "linux")]
 mod hypr;
+#[cfg(target_os = "linux")]
 mod linux;
 mod os;
 mod track;
+#[cfg(windows)]
+mod windows;
+#[cfg(target_os = "linux")]
 mod x11;
 
 #[cfg(test)]
@@ -34,7 +43,17 @@ pub use os::Os;
 
 /// The process-wide setup that must run before any other thread exists (GPU choice,
 /// allocator). See `linux.rs`.
-pub use linux::{monotonic_s, process_setup, trim_heap, utc_offset_s};
+#[cfg(target_os = "linux")]
+pub use linux::{local_day, monotonic_s, process_setup, trim_heap, utc_offset_s};
+#[cfg(windows)]
+pub use self::windows::{local_day, monotonic_s, process_setup, trim_heap, utc_offset_s};
+
+/// The local stream socket (the control channel, the voice sidecar's link): a Unix socket on
+/// every OS (AF_UNIX on Windows 10 1803+).
+#[cfg(unix)]
+pub use std::os::unix::net::{UnixListener as LocalListener, UnixStream as LocalStream};
+#[cfg(windows)]
+pub use uds_windows::{UnixListener as LocalListener, UnixStream as LocalStream};
 
 /// A window she may sit on is at least this big (and managed).
 pub(crate) const SEAT_MIN: (i32, i32) = (120, 60);
@@ -368,6 +387,7 @@ pub trait Stage {
 /// Connect to the desktop she runs on, the same one GPUI picks: Wayland when
 /// `WAYLAND_DISPLAY` is set (`SA_BACKEND=x11` unsets it first, in `process_setup`, for
 /// XWayland), else X11. On Wayland only Hyprland is supported so far.
+#[cfg(target_os = "linux")]
 pub fn connect() -> Result<Os> {
     if std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty()) {
         let (desk, stage) = hypr::connect().map_err(|e| {
@@ -377,4 +397,11 @@ pub fn connect() -> Result<Os> {
     }
     let x = std::sync::Arc::new(x11::X11::connect()?);
     Ok(Os::new(x.clone(), Box::new(x)))
+}
+
+/// Connect to the Windows desktop (DWM always composites).
+#[cfg(windows)]
+pub fn connect() -> Result<Os> {
+    let w = std::sync::Arc::new(self::windows::Win32::connect()?);
+    Ok(Os::new(w.clone(), Box::new(w)))
 }

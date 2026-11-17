@@ -1,17 +1,28 @@
 //! Real "listening": MPRIS players on the session bus. Two threads block on D-Bus signals
 //! (NameOwnerChanged for players coming and going, PropertiesChanged for PlaybackStatus and
 //! Metadata); nothing polls. The view hears only when the sum changes.
+//!
+//! The session bus is Linux's: elsewhere `spawn` says so and nothing listens (Windows: SMTC, later).
 
+#[cfg(target_os = "linux")]
 use std::collections::HashMap;
+#[cfg(target_os = "linux")]
 use std::sync::{Arc, Mutex};
 
+#[cfg(target_os = "linux")]
 use zbus::MatchRule;
+#[cfg(target_os = "linux")]
 use zbus::blocking::{Connection, MessageIterator};
+#[cfg(target_os = "linux")]
 use zbus::message::Type;
+#[cfg(target_os = "linux")]
 use zbus::zvariant::{OwnedValue, Value};
 
+#[cfg(target_os = "linux")]
 const PREFIX: &str = "org.mpris.MediaPlayer2.";
+#[cfg(target_os = "linux")]
 const PATH: &str = "/org/mpris/MediaPlayer2";
+#[cfg(target_os = "linux")]
 const PLAYER: &str = "org.mpris.MediaPlayer2.Player";
 
 /// What the players add up to.
@@ -37,6 +48,7 @@ impl Filter {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[derive(Clone, Debug)]
 struct Player {
     name: String,
@@ -56,6 +68,7 @@ pub fn aggregate<'a>(players: impl Iterator<Item = (&'a str, &'a str, Option<f32
     out
 }
 
+#[cfg(target_os = "linux")]
 fn unwrap_variant(v: OwnedValue) -> OwnedValue {
     match &*v {
         Value::Value(inner) => OwnedValue::try_from(&**inner).unwrap_or(v),
@@ -63,6 +76,7 @@ fn unwrap_variant(v: OwnedValue) -> OwnedValue {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn number(v: &Value) -> Option<f32> {
     match v {
         Value::I32(n) => Some(*n as f32),
@@ -75,16 +89,19 @@ fn number(v: &Value) -> Option<f32> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn bpm_of(meta: &HashMap<String, OwnedValue>) -> Option<f32> {
     meta.get("xesam:audioBPM").and_then(|v| number(v)).filter(|b| (40.0..=240.0).contains(b))
 }
 
+#[cfg(target_os = "linux")]
 fn get(conn: &Connection, dest: &str, prop: &str) -> Option<OwnedValue> {
     let m = conn.call_method(Some(dest), PATH, Some("org.freedesktop.DBus.Properties"), "Get", &(PLAYER, prop)).ok()?;
     m.body().deserialize::<OwnedValue>().ok().map(unwrap_variant)
 }
 
 /// A player that doesn't count (ignored, or not the test's) is never asked anything.
+#[cfg(target_os = "linux")]
 fn query(conn: &Connection, name: &str, f: &Filter) -> Player {
     if !f.counts(name) {
         return Player { name: name.to_string(), status: String::new(), bpm: None };
@@ -94,12 +111,14 @@ fn query(conn: &Connection, name: &str, f: &Filter) -> Player {
     Player { name: name.to_string(), status, bpm }
 }
 
+#[cfg(target_os = "linux")]
 fn owner(conn: &Connection, name: &str) -> Option<String> {
     let m = conn.call_method(Some("org.freedesktop.DBus"), "/org/freedesktop/DBus", Some("org.freedesktop.DBus"), "GetNameOwner", &(name,)).ok()?;
     m.body().deserialize::<String>().ok()
 }
 
 /// Every player on the bus now, by unique owner.
+#[cfg(target_os = "linux")]
 fn scan(conn: &Connection, f: &Filter) -> HashMap<String, Player> {
     let mut out = HashMap::new();
     let Ok(m) = conn.call_method(Some("org.freedesktop.DBus"), "/org/freedesktop/DBus", Some("org.freedesktop.DBus"), "ListNames", &()) else { return out };
@@ -112,12 +131,14 @@ fn scan(conn: &Connection, f: &Filter) -> HashMap<String, Player> {
     out
 }
 
+#[cfg(target_os = "linux")]
 struct Shared {
     players: HashMap<String, Player>,
     last: Playback,
 }
 
 /// Watch the session bus; `on_change` gets the sum whenever it changes (first call: now).
+#[cfg(target_os = "linux")]
 pub fn spawn(filter: Filter, on_change: impl Fn(Playback) + Send + Sync + 'static) -> anyhow::Result<()> {
     let conn = Connection::session()?;
     let owners = MatchRule::builder()
@@ -203,6 +224,12 @@ pub fn spawn(filter: Filter, on_change: impl Fn(Playback) + Send + Sync + 'stati
     Ok(())
 }
 
+/// No session bus here: nothing to watch yet.
+#[cfg(not(target_os = "linux"))]
+pub fn spawn(_filter: Filter, _on_change: impl Fn(Playback) + Send + Sync + 'static) -> anyhow::Result<()> {
+    anyhow::bail!("media players: no watch on this OS yet")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,6 +253,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn bpm_from_metadata() {
         let mut m = HashMap::new();
         m.insert("xesam:audioBPM".to_string(), OwnedValue::from(124i32));

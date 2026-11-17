@@ -134,6 +134,15 @@ pub fn utc_offset_s(unix: i64) -> i32 {
     tm.tm_gmtoff as i32
 }
 
+/// The local calendar day of a unix time (years since 1900, day of the year).
+pub fn local_day(unix: f64) -> Option<(i32, i32)> {
+    let t = unix as libc::time_t;
+    // SAFETY: localtime_r only writes the tm we own; a null return is checked.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    let r = unsafe { libc::localtime_r(&t, &mut tm) };
+    (!r.is_null()).then_some((tm.tm_year, tm.tm_yday))
+}
+
 const LOGIND: &str = "org.freedesktop.login1";
 const LOGIND_SESSION: &str = "org.freedesktop.login1.Session";
 const LOGIND_MANAGER: &str = "org.freedesktop.login1.Manager";

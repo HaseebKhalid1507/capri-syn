@@ -620,6 +620,7 @@ mod tests {
     /// stderr a closed pipe (the reader of `2>&1 | head -1` gone): `elog!` carries on where
     /// `eprintln!` panicked (and the release build aborted).
     #[test]
+    #[cfg(unix)]
     fn logging_survives_a_closed_stderr() {
         use std::io::Write as _;
         let mut fds = [0; 2];

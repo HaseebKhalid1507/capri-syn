@@ -5,10 +5,10 @@
 //! the mic and the models; nothing here touches audio.
 
 use super::*;
+use crate::platform::LocalStream as UnixStream;
 use crate::settings::VoiceSettings;
 use crate::voice::{self, Speech};
 use std::io::{BufRead, Write};
-use std::os::unix::net::UnixStream;
 
 /// Key-up waits this long before it counts: X auto-repeat sends release/press pairs.
 const UP_DEBOUNCE: Duration = Duration::from_millis(60);

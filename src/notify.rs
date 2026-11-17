@@ -1,8 +1,10 @@
 //! Desktop notifications (org.freedesktop.Notifications on the session bus), sent off the main
-//! thread: fire and forget, a failure is logged.
+//! thread: fire and forget, a failure is logged. Linux only so far (elsewhere: logged as missing).
 
+#[cfg(target_os = "linux")]
 use std::collections::HashMap;
 use std::path::PathBuf;
+#[cfg(target_os = "linux")]
 use zbus::zvariant::Value;
 
 /// Notify: `summary`, `body`, `image` (a file) as the notification's image.
@@ -16,6 +18,12 @@ pub fn send(summary: String, body: String, image: Option<PathBuf>) {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
+fn send_now(_summary: &str, _body: &str, _image: Option<PathBuf>) -> anyhow::Result<u32> {
+    anyhow::bail!("no notification service on this OS yet")
+}
+
+#[cfg(target_os = "linux")]
 fn send_now(summary: &str, body: &str, image: Option<PathBuf>) -> anyhow::Result<u32> {
     let c = zbus::blocking::Connection::session()?;
     // The spec's image-path: a file:// URI (an absolute path).
