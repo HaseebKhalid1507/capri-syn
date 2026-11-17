@@ -78,6 +78,31 @@ run() {
     printf '   %s$ %s%s\n' "$D" "$(q "$@")" "$N"
     [ "$DRY" = 1 ] || "$@"
 }
+# A long, chatty command: printed, its output into LOG; on a terminal one line shows it's alive
+# (time, the last line of the log); on failure the log's tail, then out.
+run_logged() {
+    local log=$1 pid rc t0=$SECONDS last
+    shift
+    printf '   %s$ %s%s\n' "$D" "$(q "$@")" "$N"
+    [ "$DRY" = 1 ] && return 0
+    mkdir -p "$(dirname "$log")"
+    "$@" >"$log" 2>&1 &
+    pid=$!
+    if [ -t 1 ]; then
+        while kill -0 "$pid" 2>/dev/null; do
+            last=$(tail -n1 "$log" 2>/dev/null | tr -d '\r' | sed 's/^ *//' | cut -c1-60)
+            printf '\r\033[K     %s%dm%02ds  %s%s' "$D" $(((SECONDS - t0) / 60)) $(((SECONDS - t0) % 60)) "$last" "$N"
+            sleep 1
+        done
+        printf '\r\033[K'
+    fi
+    rc=0
+    wait "$pid" || rc=$?
+    if [ "$rc" != 0 ]; then
+        tail -n 25 "$log" | sed 's/^/     /' >&2
+        die "that failed (exit $rc); the whole log: $log"
+    fi
+}
 # Yes with --yes; else asked on the terminal (curl | bash too); no terminal: no.
 confirm() {
     if [ "$YES" = 1 ]; then return 0; fi
@@ -365,15 +390,18 @@ pkgs_install() {
         esac
         die "run that (or this script with --yes), then run this again"
     fi
+    # The password prompt, if any, in the foreground; the logged commands reuse it.
+    if [ ${#SUDO[@]} -gt 0 ]; then run sudo -v; fi
     case $PM in
         apt)
-            run "${SUDO[@]}" apt-get update -q
-            run "${SUDO[@]}" env DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends "${pk[@]}"
+            run_logged "$TMP/apt.log" "${SUDO[@]}" apt-get update -q
+            run_logged "$TMP/apt.log" "${SUDO[@]}" env DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends "${pk[@]}"
             ;;
-        pacman) run "${SUDO[@]}" pacman -S --needed --noconfirm "${pk[@]}" ;;
-        dnf) run "${SUDO[@]}" dnf install -y "${pk[@]}" ;;
-        zypper) run "${SUDO[@]}" zypper --non-interactive install "${pk[@]}" ;;
+        pacman) run_logged "$TMP/pacman.log" "${SUDO[@]}" pacman -S --needed --noconfirm "${pk[@]}" ;;
+        dnf) run_logged "$TMP/dnf.log" "${SUDO[@]}" dnf install -y "${pk[@]}" ;;
+        zypper) run_logged "$TMP/zypper.log" "${SUDO[@]}" zypper --non-interactive install "${pk[@]}" ;;
     esac
+    [ "$DRY" = 1 ] || good "installed: ${pk[*]}"
 }
 packages() {
     if [ -z "$PM" ]; then
@@ -456,6 +484,11 @@ glibc() { ldd --version 2>&1 | head -n1 | grep -o '[0-9]\+\.[0-9]\+$' || true; }
 # Copy an unpacked layout (installer/stage.sh's) into the prefix.
 install_tree() {
     local d=$1
+    if [ "$DRY" = 0 ] && cmp -s "$d/bin/synaps-avatar" "$BIN/synaps-avatar" && cmp -s "$d/bin/avatarctl" "$BIN/avatarctl" &&
+        diff -rq "$d/lib/synaps-avatar" "$LIB" >/dev/null 2>&1; then
+        good "up to date: $(tilde "$BIN/synaps-avatar") and $(tilde "$LIB") are this build's"
+        return 0
+    fi
     if [ ! -d "$BIN" ]; then
         run mkdir -p "$BIN"
         rec rmdir "$BIN"
@@ -563,7 +596,7 @@ build_from_source() {
             verify "$TMP/rustup-init" "$want"
         fi
         run chmod +x "$TMP/rustup-init"
-        run "$TMP/rustup-init" -y -q --no-modify-path --profile minimal --default-toolchain none
+        run_logged "$TMP/rustup-init.log" "$TMP/rustup-init" -y -q --no-modify-path --profile minimal --default-toolchain none
         rustup=$CARGO_BIN/rustup
     fi
 
@@ -577,22 +610,23 @@ build_from_source() {
     cargo=$(dirname "$rustup")/cargo
     info "in $(tilde "$src"): the toolchain rust-toolchain.toml pins, then her build"
     if [ "$DRY" = 0 ]; then
-        (cd "$src" && "$rustup" show active-toolchain >/dev/null 2>&1) || (cd "$src" && run "$rustup" toolchain install)
+        (cd "$src" && "$rustup" show active-toolchain >/dev/null 2>&1) || (cd "$src" && run_logged "$TMP/toolchain.log" "$rustup" toolchain install)
         good "toolchain $(cd "$src" && "$rustup" show active-toolchain | cut -d' ' -f1)"
     else
         run "$rustup" toolchain install
     fi
     info "building (release; the first build takes a while, later ones only what changed)"
     local t0=$SECONDS
+    local blog=$CACHE/build.log
     if [ "$DRY" = 1 ]; then
-        run env CARGO_TARGET_DIR="$target" nice -n 10 "$cargo" build --release --locked --bin synaps-avatar
+        run_logged "$blog" env CARGO_TARGET_DIR="$target" nice -n 10 "$cargo" build --release --locked --bin synaps-avatar
     else
-        (cd "$src" && run env CARGO_TARGET_DIR="$target" nice -n 10 "$cargo" build --release --locked --bin synaps-avatar)
+        (cd "$src" && run_logged "$blog" env CARGO_TARGET_DIR="$target" nice -n 10 "$cargo" build --release --locked --bin synaps-avatar)
     fi
     [ "$DRY" = 1 ] || good "built in $(((SECONDS - t0) / 60)) min $(((SECONDS - t0) % 60)) s"
     local ver
     ver=$(git -C "$src" describe --tags --always --dirty 2>/dev/null || echo "${sha:0:12}")
-    run bash "$src/installer/stage.sh" "$src" "$target/release/synaps-avatar" "$TMP/stage" "${ver:-source}"
+    run bash "$src/installer/stage.sh" "$src" "$target/release/synaps-avatar" "$TMP/stage" "${ver:-source}" >/dev/null
     install_tree "$TMP/stage"
     BIN_VER=${ver:-source}
     rec_meta binary "$BIN_VER"
