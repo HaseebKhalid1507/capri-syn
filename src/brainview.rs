@@ -202,9 +202,9 @@ pub(super) struct Follow {
 
 /// A pat makes up a sulk: she starts up this soon, with its hearts still up.
 const MAKE_UP_UNDER_HEARTS: Duration = Duration::from_millis(350);
-/// A linger's bend toward the pointer (px at 1x at her neck: the head and hair go along), and the
-/// longest she holds it.
-const LINGER_BEND: f32 = 12.0;
+/// A linger's bend toward the pointer (px at 1x at her neck: the head and hair go along; r44: 12
+/// was too small to see), and the longest she holds it.
+const LINGER_BEND: f32 = 24.0;
 const LINGER_HOLD: Duration = Duration::from_secs(20);
 /// A wiggle's bend (px at 1x) steps between these with its turns, and the longest she follows one.
 const WIGGLE_BEND: (f32, f32) = (7.0, 13.0);

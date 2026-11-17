@@ -511,6 +511,8 @@ fn gesture(steps: &[crate::pack::Step]) -> bool {
 /// A bend toward the pointer eases in over this, and back upright over `BEND_OUT` (r43).
 const BEND_IN: Duration = Duration::from_millis(600);
 pub(super) const BEND_OUT: Duration = Duration::from_millis(900);
+/// The hair above her brow trails a bend by this much (r44: 1-2 frames of a 10 fps look).
+const HAIR_LAG: Duration = Duration::from_millis(140);
 /// ONLINE at night: its red this far toward the panel.
 const NIGHT_TAG_DIM: f32 = 0.45;
 /// Into a drawn sleep whose cells are still decoding: the drawing before holds this long.
@@ -1282,7 +1284,7 @@ impl Avatar {
     }
 
     fn bending(&self, now: Instant) -> bool {
-        self.bend.1 != 0.0 || now < self.bend.2 + BEND_OUT
+        self.bend.1 != 0.0 || now < self.bend.2 + BEND_OUT + HAIR_LAG
     }
 
     fn pose_at(&self, now: Instant) -> fx::Pose {
@@ -1290,7 +1292,8 @@ impl Avatar {
         // Bent toward the pointer: on any art, on her feet on the floor (feet planted).
         if self.loaded && !self.hidden && self.teleport.is_none() && self.rag.is_none() && self.placement == Placement::Ground && self.standing() {
             p.bend = (self.bend_px(now) * self.layout.sf).round() as i32;
-            if p.bend != 0 {
+            p.bend_hair = (self.bend_px(now.checked_sub(HAIR_LAG).unwrap_or(now)) * self.layout.sf).round() as i32;
+            if p.bend != 0 || p.bend_hair != 0 {
                 p.swing = 0;
                 p.kick = 0;
             }
@@ -1433,6 +1436,7 @@ impl Avatar {
             top: f.top,
             shear_end: if music { waist } else { f.face.0 },
             neck,
+            brow: f.face.0,
             waist,
             grip,
             knee,
@@ -2574,7 +2578,7 @@ impl Avatar {
         let pose = self.pose_at(now);
         // Her bend toward the pointer eases over 0.6-0.9 s: every step is drawn (waiting for
         // company held it back until it was over, r42).
-        if pose.bend != self.pose_last.bend {
+        if pose.bend != self.pose_last.bend || pose.bend_hair != self.pose_last.bend_hair {
             dirty = true;
         }
         if pose != self.pose_last && !dirty {

@@ -1607,7 +1607,39 @@
     "greet": [
       {
         "frame": "idle-wave_raise",
-        "ms": 1500
+        "ms": 180
+      },
+      {
+        "frame": "idle-wave_a",
+        "ms": 240
+      },
+      {
+        "frame": "idle-wave_b",
+        "ms": 220
+      },
+      {
+        "frame": "idle-wave_a",
+        "ms": 240
+      },
+      {
+        "frame": "idle-wave_b",
+        "ms": 220
+      },
+      {
+        "frame": "idle-wave_a",
+        "ms": 240
+      },
+      {
+        "frame": "idle-wave_b",
+        "ms": 220
+      },
+      {
+        "frame": "idle-wave_a",
+        "ms": 320
+      },
+      {
+        "frame": "idle-wave_raise",
+        "ms": 160
       },
       {
         "frame": "happy",
@@ -1617,7 +1649,39 @@
     "greetMorning": [
       {
         "frame": "idle-wave_raise",
-        "ms": 1500
+        "ms": 180
+      },
+      {
+        "frame": "idle-wave_a",
+        "ms": 240
+      },
+      {
+        "frame": "idle-wave_b",
+        "ms": 220
+      },
+      {
+        "frame": "idle-wave_a",
+        "ms": 240
+      },
+      {
+        "frame": "idle-wave_b",
+        "ms": 220
+      },
+      {
+        "frame": "idle-wave_a",
+        "ms": 240
+      },
+      {
+        "frame": "idle-wave_b",
+        "ms": 220
+      },
+      {
+        "frame": "idle-wave_a",
+        "ms": 320
+      },
+      {
+        "frame": "idle-wave_raise",
+        "ms": 160
       },
       {
         "frame": "idle-excited",

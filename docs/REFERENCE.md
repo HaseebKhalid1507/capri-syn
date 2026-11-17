@@ -63,9 +63,10 @@ Reference for `synaps-avatar`, the crate behind capri-syn. The [README](../READM
 - **The cursor game** (her pointer watcher's samples, no other reads): the pointer still beside her
   for 2.5 s (within 150 px, not on her) makes her curious: a look (`brain.curious`, held 3 s) and
   her upper body bent toward it, feet planted: the torso curves from the waist (nothing at the hips)
-  and her head and hair go along in one piece, 12 px at her neck, eased in over 0.6 s, held while it
-  stays, eased back over 0.9 s when it moves on (every 20 s at most, 30 an hour). Her eyes lead: the
-  pointer coming near already gets a look. No idle beat while she watches it (4 s after a look, a
+  and her head and hair go along in one piece, 24 px at her neck, eased in over 0.6 s (the hair above
+  her brow trails 0.14 s behind and catches up), held while it stays, eased back over 0.9 s when it
+  moves on (every 20 s at most, 30 an hour). Her eyes lead: the pointer coming near already gets a
+  look. No idle beat while she watches it (4 s after a look, a
   linger's whole bend and 1.5 s after), and a look cuts an idle beat short. A quick left-right
   wiggle near her (2 turns of 30 px within 0.6 s) gets a point at it (`brain.bat`, every 20 s at
   most); while it goes on she re-aims (turning if it crosses her, pointing again, her bend stepping

@@ -680,6 +680,9 @@ pub struct Pose {
     /// curves from the waist (nothing at the hips, most at the neck), the head and hair go along
     /// as one piece (no slant), the legs stay planted.
     pub bend: i32,
+    /// The bend a moment ago (`bend` lagged): the hair above her brow trails toward it, more the
+    /// higher it is, and catches up once the bend holds.
+    pub bend_hair: i32,
 }
 
 /// Rows (avatar-local) a pose acts on.
@@ -694,6 +697,8 @@ pub struct PoseRows {
     pub shear_end: i32,
     /// Rows above this nod.
     pub neck: i32,
+    /// Her brow: the hair above it trails a bend (`Pose::bend_hair`).
+    pub brow: i32,
     /// Rows above this breathe.
     pub waist: i32,
     /// The grip row of a hanging pose (`swing`).
@@ -723,8 +728,9 @@ pub fn pose_leg(p: Pose, r: PoseRows, bands: &[(i32, i32, i32, i32)]) -> Option<
 }
 
 /// A bend's curve up the torso (`Pose::bend`): the share of the neck's shift at a height
-/// over the waist is that height's fraction to this power (the hips barely move).
-const BEND_CURVE: f32 = 1.8;
+/// over the waist is that height's fraction to this power (the hips barely move; r44: softer
+/// than 1.8, which put a kink under the neck at twice the bend).
+const BEND_CURVE: f32 = 1.4;
 
 /// Bands `(y0, y1, dx, dy)` in paint order (legs, torso, head) for a pose. The waist rows
 /// repeat over the breath height, so nothing opens up between torso and legs.
@@ -754,10 +760,15 @@ pub fn pose_bands(p: Pose, r: PoseRows) -> Vec<(i32, i32, i32, i32)> {
     let shear_end = r.shear_end.clamp(r.y0, waist);
     let span = (shear_end - r.top).max(1) as f32;
     let torso = (waist - neck).max(1) as f32;
+    let bent = p.bend != 0 || p.bend_hair != 0;
+    let lag = p.bend_hair - p.bend;
+    let brow = r.brow.clamp(r.y0, neck);
+    let crown = (brow - r.top).max(1) as f32;
     let shear = |y: i32| {
         let f = ((shear_end - y) as f32 / span).clamp(0.0, 1.0);
         let bend = p.bend as f32 * ((waist - y) as f32 / torso).clamp(0.0, 1.0).powf(BEND_CURVE);
-        (p.sway as f32 * f.powf(1.2) + bend).round() as i32
+        let hair = lag as f32 * ((brow - y) as f32 / crown).clamp(0.0, 1.0);
+        (p.sway as f32 * f.powf(1.2) + bend + hair).round() as i32
     };
     // Legs first, then the torso, then the head on top (a nod overlaps the collar).
     let mut out = vec![(waist - b, r.h, 0, 0)];
@@ -765,9 +776,13 @@ pub fn pose_bands(p: Pose, r: PoseRows) -> Vec<(i32, i32, i32, i32)> {
         let first = out.len();
         let mut y = from;
         while y < to {
-            let (y1, dx) = if p.bend != 0 && y >= neck {
-                // The torso curves, 2 rows a band.
-                ((y + 2).min(to), shear(y))
+            let (y1, dx) = if bent && y >= neck {
+                // The torso curves, a row a band (r44: 2-row steps of 2 px serrated her coat's
+                // slanted edges).
+                ((y + 1).min(to), shear(y))
+            } else if lag != 0 && y < brow {
+                // The hair above her brow trails, 2 rows a band.
+                ((y + 2).min(brow).min(to), shear(y))
             } else if p.sway != 0 && y < shear_end {
                 ((y + 2).min(shear_end).min(to), shear(y))
             } else {
@@ -1441,7 +1456,7 @@ mod tests {
 
     #[test]
     fn pose_bands_cover_without_gaps() {
-        let r = PoseRows { y0: -50, h: 400, top: 10, shear_end: 80, neck: 120, waist: 220, grip: 0, knee: 400, split: 100 };
+        let r = PoseRows { y0: -50, h: 400, top: 10, shear_end: 80, neck: 120, brow: 80, waist: 220, grip: 0, knee: 400, split: 100 };
         let bands = pose_bands(Pose { breath: 2, nod: 0, sway: 3, ..Pose::default() }, r);
         // Every destination row from the top to the bottom is painted by some band.
         for y in 10..400 {
@@ -1461,7 +1476,7 @@ mod tests {
         assert!(still.iter().all(|b| b.2 == 0 && b.3 == 0));
         // Bent 20 px right (r43, a linger): the legs stay planted, the torso curves (little at
         // the hips, most at the neck), the head and hair move as one piece (no slant), no gaps.
-        let bent = pose_bands(Pose { bend: 20, ..Pose::default() }, r);
+        let bent = pose_bands(Pose { bend: 20, bend_hair: 20, ..Pose::default() }, r);
         for y in 10..400 {
             assert!(bent.iter().any(|&(a, b, _, dy)| y >= a + dy && y < b + dy), "row {y}");
         }
@@ -1469,9 +1484,18 @@ mod tests {
         let at = |y: i32| bent.iter().find(|b| y >= b.0 && y < b.1).unwrap().2;
         assert!((r.y0..r.neck).all(|y| at(y) == 20), "the head in one piece: {bent:?}");
         let mid = (r.neck + r.waist) / 2;
-        assert!(at(mid) > 0 && at(mid) < 8 && at(r.waist - 4) <= 1, "a curve, not a slant: {bent:?}");
-        let left = pose_bands(Pose { bend: -12, ..Pose::default() }, r);
+        assert!(at(mid) > 0 && at(mid) < 10 && at(r.waist - 4) <= 1, "a curve, not a slant: {bent:?}");
+        let left = pose_bands(Pose { bend: -12, bend_hair: -12, ..Pose::default() }, r);
         assert_eq!(left.iter().find(|b| 10 >= b.0 && 10 < b.1).unwrap().2, -12, "the other way");
+        // Easing in (r44): the hair above the brow trails, more the higher, the face doesn't.
+        let easing = pose_bands(Pose { bend: 20, bend_hair: 12, ..Pose::default() }, r);
+        for y in 10..400 {
+            assert!(easing.iter().any(|&(a, b, _, dy)| y >= a + dy && y < b + dy), "row {y}");
+        }
+        let at = |y: i32| easing.iter().find(|b| y >= b.0 && y < b.1).unwrap().2;
+        assert!((r.brow..r.neck).all(|y| at(y) == 20), "the face in one piece: {easing:?}");
+        assert!(at(r.top) == 12 && at(45) > 12 && at(45) < 20, "the crown trails: {easing:?}");
+        assert!((r.top..r.brow).all(|y| at(y) <= at(y + 1)), "no step back: {easing:?}");
         // Hanging: the grip row and above stay, the bottom swings the full amount, no gaps.
         let hang = pose_bands(Pose { swing: -9, ..Pose::default() }, PoseRows { grip: 30, ..r });
         for y in -50..400 {
