@@ -1024,7 +1024,8 @@ step_extras() {
             [ -d "$d" ] || rec rmdir "$d"
         done
         [ -d "$CACHE_BASE/Microsoft/DeveloperTools/.onnxruntime" ] || rec dir "$CACHE_BASE/Microsoft/DeveloperTools/.onnxruntime"
-        run env PATH="$path" bash "$LIB/tools/capri-voice-setup"
+        # uv's downloads in a throwaway cache: nothing of the setup's outside its own folder.
+        run env PATH="$path" UV_NO_CACHE=1 bash "$LIB/tools/capri-voice-setup"
         run install -m 755 "$LIB/tools/capri-voice" "$BIN/capri-voice"
         rec file "$BIN/capri-voice"
         user_unit "$LIB/tools/systemd/capri-voice.service" capri-voice.service
