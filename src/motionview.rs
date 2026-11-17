@@ -4,7 +4,6 @@
 //! brain move (`brainview`). Each is rate-capped and falls back to what she did before.
 
 use super::*;
-use crate::fx::{Glitch, GlitchKind};
 use crate::motion::{BurstCell, Gap};
 
 /// The click burst's colour layers (red, green, the ring's light inner edge), over everything.
@@ -67,10 +66,7 @@ impl Avatar {
             m.dance_until = Some(now + Duration::from_millis(len));
             self.motion.dance_gap.mark(now);
             self.motion.dances += 1;
-            // The music's own burst would run over her setting off: the light seam instead.
-            if self.glitch.is_some_and(|g| g.kind == GlitchKind::Burst && g.t0 == now) {
-                self.glitch = Some(Glitch::new(GlitchKind::Seam, now, self.rng.next()));
-            }
+            // The music's own seam stands for her setting off.
         }
     }
 

@@ -42,8 +42,10 @@ pub const HOP_UP_MAX: f32 = 1400.0;
 pub const TYPING_CLEAR: f32 = 200.0;
 /// A dodge ends at least this much farther from the pointer (logical px).
 pub const DODGE_GAIN: f32 = 100.0;
-/// A pounce ends with her body this close to the pointer (beside it).
-pub const POUNCE_NEAR: f32 = 220.0;
+/// A pounce ends with her body this far beside the pointer's tip (r42: 40-80 px), level
+/// with it within `POUNCE_LEVEL`.
+pub const POUNCE_GAP: (f32, f32) = (40.0, 80.0);
+pub const POUNCE_LEVEL: f32 = 40.0;
 /// A pounce's reach: farther than a hop (she may leap past it, "missed!") and shorter (the
 /// pointer is within a lean of her when it lingers; her body, hair included, is wide).
 pub const POUNCE_MAX: f32 = 450.0;
@@ -721,16 +723,22 @@ fn hop(w: &World, kind: HopKind, away: bool, rng: &mut Rng) -> Result<Spot, Vec<
     Err(why)
 }
 
-/// A pounce at the still pointer: a hop toward it (`POUNCE_MIN`..`POUNCE_MAX` across) that ends beside it (her body
-/// within `POUNCE_NEAR`), never on it (the guard's `CURSOR_CLEAR`). A window top
-/// in reach (any but his: its interior is his) beats the floor; then the nearest the pointer.
+/// A pounce at the still pointer: a leap toward it (`POUNCE_MIN`..`POUNCE_MAX` across, never
+/// away; she may land past it) that ends with her body `POUNCE_GAP` beside its tip: level
+/// with it (within `POUNCE_LEVEL`), never on it. A window top only when it is that close
+/// (any but his: its interior is his); else the floor. The nearest to the middle of the gap.
 fn pounce(w: &World) -> Result<Spot, Vec<(String, Block)>> {
     let her = w.her;
     let (lo, hi) = (w.d(POUNCE_MIN) as i64, w.d(POUNCE_MAX) as i64);
     let c = w.cursor;
-    let cursor_d = |b: &WinRect| (dist2(b, c.0, c.1) as f64).sqrt();
-    // Every seat in her reach, a step apart: the checks below pick the one beside it.
-    let step = w.d(24.0).max(1) as usize;
+    let (g0, g1) = (w.d(POUNCE_GAP.0), w.d(POUNCE_GAP.1));
+    // The gap beside it and how far off level (0: the tip is level with her body).
+    let gap = |b: &WinRect| ((b.x - c.0).max(c.0 - b.right()), (b.y - c.1).max(c.1 - b.bottom()).max(0));
+    let fit = |b: &WinRect| {
+        let (gx, gy) = gap(b);
+        (gx - (g0 + g1) / 2).abs() + gy
+    };
+    let step = w.d(8.0).max(1) as usize;
     let reach = (her.anchor.0 - hi as i32, her.anchor.0 + hi as i32);
     let mut tops = Vec::new();
     for p in edges::platforms(w.stack, w.eligible, w.contact, w.margin) {
@@ -744,11 +752,13 @@ fn pounce(w: &World) -> Result<Spot, Vec<(String, Block)>> {
     }
     let i = her.area.min(w.areas.len().saturating_sub(1));
     let floor: Vec<Spot> = (reach.0..=reach.1).step_by(step).map(|x| w.spot(SpotKind::Floor, (x, w.floor_y(i)), w.boxes.stand, None)).collect();
+    // The guard's cursor rule is the gap here (it would keep her CURSOR_CLEAR off).
+    let off = World { cursor: (i32::MIN / 4, i32::MIN / 4), ..w.clone() };
     let ok = |s: &Spot| -> Result<(), Block> {
         if s.area != her.area {
             return Err(Block::OtherMonitor);
         }
-        guard(w, s)?;
+        guard(&off, s)?;
         if s.covers_focus() && !w.focused.is_some_and(|f| w.floor_strip_ok(s, &f)) {
             return Err(Block::FocusedInterior);
         }
@@ -761,16 +771,15 @@ fn pounce(w: &World) -> Result<Spot, Vec<(String, Block)>> {
         if toward != 0 && dx.signum() != toward {
             return Err(Block::NoSpot);
         }
-        // Beside it (she may overshoot: "missed!").
-        if cursor_d(&s.body) > w.d(POUNCE_NEAR) as f64 {
+        let (gx, gy) = gap(&s.body);
+        if !(g0..=g1).contains(&gx) || gy > w.d(POUNCE_LEVEL) {
             return Err(Block::Cursor);
         }
         Ok(())
     };
     let mut why = Vec::new();
     for (name, mut cands) in [("pounce_top", tops), ("pounce_floor", floor)] {
-        cands.sort_by(|a, b| cursor_d(&a.body).total_cmp(&cursor_d(&b.body)));
-        // The nearest one's block says why (the farthest ones are only far).
+        cands.sort_by_key(|s| fit(&s.body));
         let mut first = None;
         for s in cands {
             match ok(&s) {
@@ -1745,46 +1754,52 @@ mod tests {
     }
 
     #[test]
-    fn a_pounce_lands_beside_the_pointer_never_on_it_and_prefers_a_top() {
+    fn a_pounce_lands_40_to_80_px_beside_the_tip_level_with_it_never_on_it() {
         let mut fx = desk();
         // Nothing focused (his window's interior is never covered: that rule has its own tests).
         fx.focused = None;
         let base = fx.world();
-        // On the floor under window 12 (top at y 300 is out of reach: 1100+ up is fine, 300 px
-        // across is the limit): the pointer still near window 16's top (y 1180).
         let her = base.spot(SpotKind::Floor, (1600, base.floor_y(0)), base.boxes.stand, None);
+        let beside = |w: &World, s: &Spot, c: (i32, i32)| {
+            let b = s.body;
+            let gx = (b.x - c.0).max(c.0 - b.right());
+            let gy = (b.y - c.1).max(c.1 - b.bottom()).max(0);
+            assert!((w.d(POUNCE_GAP.0)..=w.d(POUNCE_GAP.1)).contains(&gx) && gy <= w.d(POUNCE_LEVEL), "40-80 px beside it: {s:?} {c:?}");
+            assert!(!b.contains(c.0, c.1), "never on it");
+            assert!((s.anchor.0 - her.anchor.0).abs() <= w.d(POUNCE_MAX), "a pounce's reach");
+            assert!((s.anchor.0 - her.anchor.0).signum() == (c.0 - her.anchor.0).signum() || c.0 == her.anchor.0, "toward it");
+        };
+        // Near window 16's top (y 1180), level with a seat on it: the top.
         let (mut tops, mut n) = (0, 0);
         for k in 0..40 {
             let c = (1560 + k * 5, 1130 + (k % 4) * 10);
             let w = World { her, cursor: c, ..base.clone() };
             let Ok(s) = resolve(&Goal::Hop { kind: HopKind::Pounce, away: false }, &w, &mut Rng::new(3)) else { continue };
             n += 1;
-            assert!(!s.body.grow(w.d(CURSOR_CLEAR)).contains(c.0, c.1), "never on the pointer: {s:?} {c:?}");
-            let d = |b: &WinRect| (dist2(b, c.0, c.1) as f64).sqrt();
-            assert!(d(&s.body) <= w.d(POUNCE_NEAR) as f64, "beside it");
-            assert!((s.anchor.0 - her.anchor.0).abs() <= w.d(POUNCE_MAX), "a pounce's reach");
-            assert!((s.anchor.0 - her.anchor.0).signum() == (c.0 - her.anchor.0).signum() || c.0 == her.anchor.0, "toward it");
+            beside(&w, &s, c);
             tops += usize::from(s.win().is_some());
         }
-        assert!(n >= 30, "{n} pounces of 40");
-        // A top in reach beats the floor; the floor where every top seat toward it would cover it.
-        assert!(tops * 2 >= n, "{tops} tops of {n}");
-        // No top in reach: the floor beside it.
-        let w = World { her, cursor: (1350, 1500), ..base.clone() };
-        let s = resolve(&Goal::Hop { kind: HopKind::Pounce, away: false }, &w, &mut Rng::new(3)).expect("floor");
-        assert!(s.win().is_none() && !s.body.grow(w.d(CURSOR_CLEAR)).contains(1350, 1500));
-        assert_eq!((s.anchor.0 - her.anchor.0).signum(), (1350 - her.anchor.0).signum(), "toward it");
-        // Lingering just past her hair (the rig's r41 case): she still gets there, short or past it.
+        // (Over her head, not beside her: some have no spot 40-80 px off toward it.)
+        assert!(n >= 15, "{n} pounces of 40");
+        assert!(tops > 0, "a top that close counts");
+        // Level with her on the floor, a window top in reach but not beside it: the floor.
+        for c in [(1350, base.floor_y(0) - 150), (1900, base.floor_y(0) - 60)] {
+            let w = World { her, cursor: c, ..base.clone() };
+            let s = resolve(&Goal::Hop { kind: HopKind::Pounce, away: false }, &w, &mut Rng::new(3)).expect("floor");
+            assert!(s.win().is_none(), "{s:?}");
+            beside(&w, &s, c);
+        }
+        // Lingering just past her hair (the rig's case): past it or short of it, 40-80 px off.
         for g in [20, 60, 110, 140] {
             let c = (her.body.right() + g, her.anchor.1 - 100);
             let w = World { her, cursor: c, ..base.clone() };
             let s = resolve(&Goal::Hop { kind: HopKind::Pounce, away: false }, &w, &mut Rng::new(3)).unwrap_or_else(|e| panic!("{g}: {e:?}"));
-            assert!(s.anchor.0 > her.anchor.0 && !s.body.grow(w.d(CURSOR_CLEAR)).contains(c.0, c.1), "{g}: {s:?}");
+            beside(&w, &s, c);
         }
-        // Already beside her with nothing farther on its side in reach: no pounce (never a hop away).
-        let w = World { her, cursor: (her.anchor.0 + 150, her.anchor.1 - 100), ..base.clone() };
+        // High over the floor with no top level with it: no pounce.
+        let w = World { her, cursor: (1800, base.floor_y(0) - 700), ..base.clone() };
         if let Ok(s) = resolve(&Goal::Hop { kind: HopKind::Pounce, away: false }, &w, &mut Rng::new(3)) {
-            assert!(s.anchor.0 > her.anchor.0, "toward it: {s:?}");
+            beside(&w, &s, w.cursor);
         }
     }
 

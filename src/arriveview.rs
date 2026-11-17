@@ -6,7 +6,7 @@
 
 use super::{Avatar, Leg, Placement, Teleport};
 use crate::anim::Seq;
-use crate::fx::{Bolt, Glitch, GlitchKind};
+use crate::fx::{Bolt, Glitch, GlitchKind, Transition};
 use crate::pack::Step;
 use crate::variants::PoolKey;
 use std::time::{Duration, Instant};
@@ -558,7 +558,7 @@ impl Avatar {
         let lying: Vec<usize> = b.nap_deep.iter().chain(b.nap_perch.iter()).filter_map(|id| self.pack.index.get(id).copied()).collect();
         let after = self.anim.frame();
         if lying.contains(&before) != lying.contains(&after) && self.glitch.is_none() && !self.hidden {
-            self.glitch = Some(Glitch::soft(GlitchKind::Burst, now, self.rng.next()));
+            self.glitch = Glitch::for_cut(Transition::Pose, now, self.rng.next());
         }
     }
 

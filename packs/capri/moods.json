@@ -1585,6 +1585,20 @@
           "frame": "sit_floor-sleepy",
           "ms": 3500
         }
+      ],
+      "exit": [
+        {
+          "frame": "transition-crouch_floor",
+          "ms": 300
+        },
+        {
+          "frame": "crouch-neutral",
+          "ms": 260
+        },
+        {
+          "frame": "transition-stand_crouch",
+          "ms": 260
+        }
       ]
     },
     "wave": [
@@ -1593,27 +1607,23 @@
     "greet": [
       {
         "frame": "idle-wave_raise",
-        "ms": 180
+        "ms": 260
       },
       {
         "frame": "idle-wave_a",
-        "ms": 220
-      },
-      {
-        "frame": "idle-wave_b",
-        "ms": 220
-      },
-      {
-        "frame": "idle-wave_a",
-        "ms": 220
-      },
-      {
-        "frame": "idle-wave_b",
-        "ms": 220
+        "ms": 200
       },
       {
         "frame": "idle-wave_raise",
-        "ms": 160
+        "ms": 220
+      },
+      {
+        "frame": "idle-wave_b",
+        "ms": 200
+      },
+      {
+        "frame": "idle-wave_raise",
+        "ms": 700
       },
       {
         "frame": "happy",
@@ -1623,31 +1633,27 @@
     "greetMorning": [
       {
         "frame": "idle-wave_raise",
-        "ms": 180
+        "ms": 260
       },
       {
         "frame": "idle-wave_a",
-        "ms": 220
-      },
-      {
-        "frame": "idle-wave_b",
-        "ms": 220
-      },
-      {
-        "frame": "idle-wave_a",
-        "ms": 220
-      },
-      {
-        "frame": "idle-wave_b",
-        "ms": 220
+        "ms": 200
       },
       {
         "frame": "idle-wave_raise",
-        "ms": 160
+        "ms": 220
+      },
+      {
+        "frame": "idle-wave_b",
+        "ms": 200
+      },
+      {
+        "frame": "idle-wave_raise",
+        "ms": 700
       },
       {
         "frame": "idle-excited",
-        "ms": 900
+        "ms": 700
       },
       {
         "frame": "happy",
@@ -1732,25 +1738,17 @@
       "peek": "crouch-attentive"
     },
     "curious": [
-      {
-        "frame": "lean_in-neutral",
-        "ms": 1800
-      },
       "@look"
     ],
     "bat": [
-      {
-        "frame": "pose-crouch",
-        "ms": 140
-      },
+      "@point"
+    ],
+    "missed": [
       "@point",
       {
         "frame": "smirk",
-        "ms": 700
+        "ms": 600
       }
-    ],
-    "missed": [
-      "laugh"
     ],
     "makeUp": [
       {
@@ -1790,7 +1788,12 @@
         "frame": "transition-stand_crouch",
         "ms": 160
       }
-    ]
+    ],
+    "sulkStatus": {
+      "status": "SULKING",
+      "tone": "offline",
+      "glyph": "ring"
+    }
   },
   "drag": {
     "grab": [

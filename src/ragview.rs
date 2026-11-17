@@ -685,9 +685,7 @@ impl Avatar {
                     r.grip = grip;
                     r.chain = chain;
                     r.dangle = Some(Dangle { on: true, ..d });
-                    let mut g = Glitch::new(GlitchKind::Seam, now, seed);
-                    g.tears_tag = false;
-                    self.glitch = Some(g);
+                    self.glitch = Glitch::for_cut(Transition::Motion, now, seed);
                 }
             }
             let Some(r) = &mut self.rag else { return };
@@ -771,9 +769,7 @@ impl Avatar {
         let Some(r) = &mut self.rag else { return };
         // Out of the dangle drawing into the fall's: a glitch over the seam.
         if r.dangle.take().is_some_and(|d| d.on) {
-            let mut g = Glitch::new(GlitchKind::Seam, now, self.rng.next());
-            g.tears_tag = false;
-            self.glitch = Some(g);
+            self.glitch = Glitch::for_cut(Transition::Motion, now, self.rng.next());
         }
         let Some(r) = &mut self.rag else { return };
         // The pointer is in device px; the machine's thresholds are logical.
@@ -1013,7 +1009,7 @@ impl Avatar {
         if let Some(k) = r.pending_glitch
             && self.glitch.is_none()
         {
-            self.glitch = Some(Glitch::new(k, now, self.rng.next()));
+            self.glitch = if k == GlitchKind::Seam { Glitch::for_cut(Transition::Mood, now, self.rng.next()) } else { Some(Glitch::new(k, now, self.rng.next())) };
         }
         if let Some(until) = r.music_until
             && until.is_none_or(|u| u > now)

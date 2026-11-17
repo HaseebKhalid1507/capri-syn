@@ -40,8 +40,9 @@ Reference for `synaps-avatar`, the crate behind capri-syn. The [README](../READM
   without a brain at all (`SA_NO_BRAIN`, tests) the old rule holds: sleepy after `--sleepy-after`
   minutes without a turn. On Hyprland there's no idle time yet (ext-idle-notify isn't
   wired): your presence is the pointer moving, so typing alone for 5 min reads as away.
-- **Her energy shows**: its band (high from 0.65, low under 0.35) picks her idle activities and their
-  gaps (`energy.high|mid|low` in moods.json: 1.2-3 / 1.5-3.5 / 2-4 s), her breath (`bobPx`,
+- **Her energy shows**: its band (high from 0.65, low under 0.35) picks her idle activities (a
+  gesture that changes her outline and a face beat take turns, each from its own shuffled round) and
+  their gaps (`energy.high|mid|low` in moods.json: 1.2-3 / 1.5-3.5 / 2-4 s), her breath (`bobPx`,
   `bobPeriodMs`, `swayPx`: a quick 3-4 px bounce about once a second by day, a slow deep one at night),
   her own roams' pace (×1.2 / 1 / 0.5), her sparkles (`sparkleEveryMs`: fewer at night), and at low
   energy her idle face and stance (`energy.low.idle`: the sleepy face, slow heavy blinks; `droopPx`,
@@ -60,17 +61,22 @@ Reference for `synaps-avatar`, the crate behind capri-syn. The [README](../READM
   `stretchAfterMs`, at most 4 an hour). With a greeting due she gets up quicker (`brain.napWakeGreet`)
   and waves instead of stretching.
 - **The cursor game** (her pointer watcher's samples, no other reads): the pointer still beside her
-  for 2.5 s (within 150 px, not on her) makes her curious, a lean toward it and a look
-  (`brain.curious`, every 20 s at most, 30 an hour); a quick left-right wiggle near her gets a paw-bat
-  (`brain.bat`: a crouch, a point at it, a smirk; every 20 s at most). When the pointer goes still
-  right after a wiggle (or now and then) she pounces: a leap toward it (30-450 px) that lands beside it, never on
-  it, on a window top if one is in reach (not his), then laughs ("missed!", `brain.missed`); once in
-  2 min at most, never while you type, a hop in the hourly cap. None of it under DND, fullscreen, with
+  for 2.5 s (within 150 px, not on her) makes her curious: a look (`brain.curious`) and her upper body
+  bent 8° toward it, feet planted, eased in over 0.4 s, held while it stays, eased back when it moves
+  on (every 20 s at most, 30 an hour). A quick left-right wiggle near her (2 turns of 30 px within
+  0.6 s) gets a point at it (`brain.bat`, every 20 s at most); while it goes on she re-aims (turning
+  if it crosses her, pointing again, her bend stepping 4°/8° with the turns), and 0.45 s after it
+  stops she smirks and settles. When the pointer goes still right after a wiggle (0.6 s, or now and
+  then after 2.5 s) she pounces: a 0.3 s crouch, then a 0.3-0.5 s leap with an 80 px arc toward it
+  (30-450 px) that lands with her body 40-80 px beside its tip, level with it, never on it (a window
+  top only that close, not his; else the floor), a squash, then she turns to it and points
+  (`brain.missed`); once in 2 min at most, never while you type, a hop in the hourly cap. None of it under DND, fullscreen, with
   a bubble, the Line, a prompt, the menu or a drag up, asleep, with a summon waiting, in a visit or a
   sulk.
 - **A sulk** turns her back to your window for the sulk and 2 min after it (the cold shoulder:
-  `brain.cold`); a pat in that time makes up (`brain.makeUp`: embarrassed, happy, heart hands; she
-  gets up first if she sat down to sulk), and she stays put.
+  `brain.cold`), her tag reading `brain.sulkStatus` (SULKING) instead of ONLINE; a pat in that time
+  makes up (`brain.makeUp`: embarrassed, happy, heart hands; she gets up first if she sat down to
+  sulk, starting under the pat's hearts), and she stays put.
 - **Where she goes**: a floor spot clear of windows' content (empty desktop, below a title bar) beats
   one over it, and over a window its edges beat the middle of the text; perches, hops and teleports
   rank their spots the same way, by her whole outline (her hair's reach included). Sitting on a window
@@ -250,7 +256,10 @@ With `anim/`, `moods.json` `variants` mixes that art in; she never swaps one set
   comes back whole at its new place. A strip that lands after its pick cuts the same way.
 - Entering the state picks one: weighted, never the last pick again, seeded (`SA_ART_SEED`). A long stay
   (`shiftMs`) shifts it in place. Every cut between CapriCore and a strip (or between two strip families)
-  goes through a glitch (the body's; her tag stays whole).
+  goes through a light seam (one light step on the cut frame; her tag stays whole). Every pose or
+  family change that isn't a teleport gets that seam (`fx::Transition`: a mood change, music, a sleep
+  or wake, a drop onto a window, a startle); the heavy glitch is for teleports and a summon (into or
+  out of NEEDS YOU) only.
 - Strips decode when first wanted, off the main thread; `cacheMb` caps what is kept (least recently shown
   first, never what is on screen), and one out of use for 45 s goes (a dance, a dangle, a walk are back
   to disk a minute after). Pixel buffers live in maps of their own and go back to the system when freed.
@@ -318,8 +327,9 @@ With `anim/`, `moods.json` `variants` mixes that art in; she never swaps one set
     `anim.json`: cells with a chroma ghost drawn in), so nothing glitches inside the loop.
   - `dangle` (grip): carried by the head, `chance` of the time (at most once per `gapMs`) she hangs as
     that drawing from its grip after `afterMs`, instead of the ragdoll, on its clean cells only. A cut
-    into or out of any motion's drawing is a light seam (~130 ms: a few tall bands shifted a few px
-    inside her body, no colour split, bars or scanlines, the tag left whole), never the burst; and the
+    into or out of any motion's drawing is a light seam (one light step on the cut frame: a few tall
+    bands shifted a few px inside her body, no colour split, bars or scanlines, the tag left whole),
+    never the burst; and the
     drawing before a cut goes under the first frame after it, so the screen never shows the old
     drawing clipped to the new outline.
   - `click` (an effect strip): a click on her bursts under the pointer, at most one per `gapMs`, drawn

@@ -16,11 +16,15 @@ pub struct Sense {
     /// Still beside her since (where it stopped); reported once per stop.
     still: Option<(Instant, i32, i32)>,
     lingered: bool,
+    /// A linger was reported and still holds (its end is reported).
+    lingered_at: Option<Instant>,
     /// The wiggle's zigzag: the last extreme x, the way it heads (0: not yet), the turns.
     ext: Option<i32>,
     dir: i8,
     turns: VecDeque<Instant>,
-    wiggled: Option<Instant>,
+    /// In a reported burst: its last turn.
+    burst: Option<Instant>,
+    last_turn: Option<Instant>,
 }
 
 impl Sense {
@@ -71,9 +75,10 @@ impl Sense {
                             self.lingered = false;
                         }
                     }
+                    let need = if self.last_turn.is_some_and(|t| now.duration_since(t) <= cfg.after_wiggle) { cfg.linger_after_wiggle } else { cfg.linger };
                     if let Some((since, ..)) = self.still
                         && !self.lingered
-                        && now.duration_since(since) >= cfg.linger
+                        && now.duration_since(since) >= need
                     {
                         self.lingered = true;
                         out.push(PointerEv::Linger);
@@ -82,16 +87,26 @@ impl Sense {
                     self.still = None;
                     self.lingered = false;
                 }
+                // A reported linger, then the pointer moves on.
+                if self.lingered_at.is_some() && !self.lingered {
+                    self.lingered_at = None;
+                    out.push(PointerEv::LingerEnd);
+                }
+                if self.lingered {
+                    self.lingered_at = Some(now);
+                }
                 // A wiggle: `wiggle_turns` reversals of x, each `wiggle_amp` back from the last
                 // extreme, within `wiggle_window`, within `wiggle_px` of her (on her too).
                 if d <= cfg.wiggle_px {
-                    self.zigzag(cfg, now, x);
+                    let turned = self.zigzag(cfg, now, x);
                     while self.turns.front().is_some_and(|&t| now.duration_since(t) > cfg.wiggle_window) {
                         self.turns.pop_front();
                     }
-                    let quiet = self.wiggled.is_none_or(|w| now.duration_since(w) >= cfg.wiggle_window);
-                    if self.turns.len() >= cfg.wiggle_turns as usize && quiet {
-                        self.wiggled = Some(now);
+                    if turned && self.burst.is_some() {
+                        self.burst = Some(now);
+                        out.push(PointerEv::WiggleAt(x, y));
+                    } else if self.burst.is_none() && self.turns.len() >= cfg.wiggle_turns as usize {
+                        self.burst = Some(now);
                         self.turns.clear();
                         out.push(PointerEv::Wiggle);
                     }
@@ -100,11 +115,17 @@ impl Sense {
                     self.dir = 0;
                     self.turns.clear();
                 }
+                if self.burst.is_some_and(|t| now.duration_since(t) >= cfg.wiggle_end) {
+                    self.burst = None;
+                    out.push(PointerEv::WiggleEnd(x, y));
+                }
             }
             None => {
                 self.was_near = false;
                 self.hover_since = None;
                 self.still = None;
+                self.burst = None;
+                self.lingered_at = None;
                 self.ext = None;
                 self.dir = 0;
                 self.turns.clear();
@@ -114,12 +135,14 @@ impl Sense {
         (out, far)
     }
 
-    fn zigzag(&mut self, cfg: &PointerCfg, now: Instant, x: i32) {
+    /// One sample of the zigzag; true: it turned.
+    fn zigzag(&mut self, cfg: &PointerCfg, now: Instant, x: i32) -> bool {
         let amp = cfg.wiggle_amp as i32;
         let Some(e) = self.ext else {
             self.ext = Some(x);
-            return;
+            return false;
         };
+        let n = self.turns.len();
         match self.dir {
             0 if (x - e).abs() >= amp => {
                 self.dir = if x > e { 1 } else { -1 };
@@ -140,6 +163,11 @@ impl Sense {
             }
             _ => {}
         }
+        let turned = self.turns.len() > n;
+        if turned {
+            self.last_turn = Some(now);
+        }
+        turned
     }
 }
 
@@ -166,8 +194,12 @@ pub fn cfg(sf: f32) -> PointerCfg {
         linger: Duration::from_millis(2500),
         wiggle_px: 200.0 * sf,
         wiggle_amp: 30.0 * sf,
-        wiggle_window: Duration::from_millis(1200),
-        wiggle_turns: 3,
+        // Two turns inside 600 ms: a wiggle is caught in ~300 ms (r42), a slow sweep never.
+        wiggle_window: Duration::from_millis(600),
+        wiggle_turns: 2,
+        wiggle_end: Duration::from_millis(450),
+        after_wiggle: Duration::from_millis(3000),
+        linger_after_wiggle: Duration::from_millis(600),
     }
 }
 
@@ -226,6 +258,39 @@ mod tests {
         let w: Vec<_> = ev.iter().filter(|e| e.1 == PointerEv::Wiggle).collect();
         assert_eq!(w.len(), 1, "{ev:?}");
         assert!(w[0].0 <= 1000, "{ev:?}");
+    }
+
+    #[test]
+    fn a_wiggle_is_caught_fast_followed_and_ended_and_a_still_pointer_after_it_lingers_soon() {
+        // 120 px right of her: still, then 80 px turns every 120 ms from 1000 ms to 2900 ms
+        // (the r42 rig's), then still.
+        let mut tr = still(0, 1000, 820, 420);
+        tr.extend((0..16).map(|k| (1000 + k * 120, 820 - if k % 2 == 1 { 80 } else { 0 }, 420)));
+        tr.extend(still(2940, 6000, 820, 420));
+        let ev = run(&tr);
+        let w: Vec<_> = ev.iter().filter(|e| e.1 == PointerEv::Wiggle).collect();
+        assert_eq!(w.len(), 1, "{ev:?}");
+        // Its first move is at 1120.
+        assert!(w[0].0 <= 1120 + 300, "caught within 300 ms: {ev:?}");
+        let at = ev.iter().filter(|e| matches!(e.1, PointerEv::WiggleAt(..))).count();
+        assert!(at >= 10, "followed turn by turn: {ev:?}");
+        let end: Vec<_> = ev.iter().filter(|e| matches!(e.1, PointerEv::WiggleEnd(..))).collect();
+        assert_eq!(end.len(), 1, "{ev:?}");
+        let last = ev.iter().filter(|e| matches!(e.1, PointerEv::WiggleAt(..))).map(|e| e.0).max().unwrap();
+        assert!((last + 450..=last + 600).contains(&end[0].0), "{ev:?}");
+        let l: Vec<_> = ev.iter().filter(|e| e.1 == PointerEv::Linger).collect();
+        assert_eq!(l.len(), 1, "{ev:?}");
+        assert!(l[0].0 <= 2800 + 800, "a quick linger after the wiggle: {ev:?}");
+    }
+
+    #[test]
+    fn a_linger_ends_when_the_pointer_moves_on() {
+        let mut tr = still(0, 3000, 780, 400);
+        tr.extend(still(3000, 3200, 900, 400));
+        let ev = run(&tr);
+        let i = ev.iter().position(|e| e.1 == PointerEv::Linger).expect("linger");
+        let j = ev.iter().position(|e| e.1 == PointerEv::LingerEnd).expect("its end");
+        assert!(j > i && ev[j].0 == 3000, "{ev:?}");
     }
 
     #[test]

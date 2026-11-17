@@ -88,40 +88,54 @@ pub fn scoot_until(hops: &[Hop], ok: impl Fn(f32) -> bool) -> Vec<Hop> {
 pub struct Leap {
     pub from: (f32, f32),
     pub to: (f32, f32),
+    /// A pounce: a longer windup, a higher arc, 0.3-0.5 s in the air (r42).
+    pub pounce: bool,
 }
 
 pub const LEAP_H: f32 = 36.0;
+/// A pounce: the windup (the crouch), the arc's height over the higher end, its air time.
+pub const POUNCE_WINDUP_MS: u32 = 300;
+pub const POUNCE_H: f32 = 80.0;
+pub const POUNCE_AIR_MS: (f32, f32) = (300.0, 500.0);
 
 impl Leap {
+    pub fn crouch_ms(&self) -> u32 {
+        if self.pounce { POUNCE_WINDUP_MS } else { HOP_CROUCH_MS }
+    }
+
     pub fn air_ms(&self) -> u32 {
         let d = ((self.to.0 - self.from.0).powi(2) + (self.to.1 - self.from.1).powi(2)).sqrt();
+        if self.pounce {
+            return (POUNCE_AIR_MS.0 + 0.45 * d).clamp(POUNCE_AIR_MS.0, POUNCE_AIR_MS.1) as u32;
+        }
         (HOP_AIR_MS as f32 + 0.3 * d).clamp(HOP_AIR_MS as f32, 760.0) as u32
     }
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn ms(&self) -> u32 {
-        HOP_CROUCH_MS + self.air_ms() + HOP_LAND_MS
+        self.crouch_ms() + self.air_ms() + HOP_LAND_MS
     }
 
     /// Where she is `ms` into the leap (y down). Still in the crouch and the landing.
     pub fn at(&self, ms: u32) -> (f32, f32) {
-        if ms < HOP_CROUCH_MS {
+        let crouch = self.crouch_ms();
+        if ms < crouch {
             return self.from;
         }
         let air = self.air_ms();
-        let a = ms - HOP_CROUCH_MS;
+        let a = ms - crouch;
         if a >= air {
             return self.to;
         }
         let u = a as f32 / air as f32;
-        // A parabola with its apex LEAP_H above the higher end.
+        // A parabola with its apex LEAP_H (a pounce's POUNCE_H) above the higher end.
         let (y0, y1) = (self.from.1, self.to.1);
-        let b = bump(y0, y1, y0.min(y1) - LEAP_H);
+        let b = bump(y0, y1, y0.min(y1) - if self.pounce { POUNCE_H } else { LEAP_H });
         (self.from.0 + (self.to.0 - self.from.0) * u, y0 + (y1 - y0) * u - b * u * (1.0 - u))
     }
 
     /// Landed (`at` holds `to` from here on).
     pub fn done(&self, ms: u32) -> bool {
-        ms >= HOP_CROUCH_MS + self.air_ms()
+        ms >= self.crouch_ms() + self.air_ms()
     }
 }
 
@@ -214,7 +228,7 @@ mod tests {
         for _ in 0..300 {
             let from = (rng.range(0.0, 2000.0), rng.range(200.0, 1500.0));
             let to = (from.0 + rng.range(-300.0, 300.0), rng.range(200.0, 1500.0));
-            let l = Leap { from, to };
+            let l = Leap { from, to, pounce: false };
             assert_eq!(l.at(0), from);
             assert_eq!(l.at(l.ms()), to);
             assert!(l.done(l.ms()) && !l.done(HOP_CROUCH_MS));
@@ -226,6 +240,19 @@ mod tests {
             let xs: Vec<f32> = (0..l.ms()).step_by(5).map(|ms| l.at(ms).0).collect();
             assert!(xs.windows(2).all(|w| (w[1] - w[0]) * (to.0 - from.0) >= -1e-3));
             assert!(l.ms() <= HOP_CROUCH_MS + 760 + HOP_LAND_MS);
+        }
+    }
+
+    #[test]
+    fn a_pounce_winds_up_0_3_s_then_arcs_0_3_to_0_5_s_well_over_the_ground() {
+        for dx in [40.0, 150.0, 300.0, 450.0, -380.0] {
+            let (from, to) = ((1000.0, 1400.0), (1000.0 + dx, 1400.0));
+            let l = Leap { from, to, pounce: true };
+            assert_eq!((l.crouch_ms(), l.at(POUNCE_WINDUP_MS - 1)), (POUNCE_WINDUP_MS, from), "the windup: in place");
+            assert!((300..=500).contains(&l.air_ms()), "{dx}: {}", l.air_ms());
+            let top = (0..l.ms()).map(|ms| l.at(ms).1).fold(f32::MAX, f32::min);
+            assert!((top - (1400.0 - POUNCE_H)).abs() < 2.0, "a visible arc: {top}");
+            assert!(l.done(POUNCE_WINDUP_MS + l.air_ms()) && l.at(l.ms()) == to);
         }
     }
 

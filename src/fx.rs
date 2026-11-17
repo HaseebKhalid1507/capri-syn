@@ -62,6 +62,48 @@ fn stutter(table: &[(f32, f32)], u: f32, seed: u64) -> f32 {
     level
 }
 
+/// Every kind of cut on her body, for `Glitch::for_cut`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Transition {
+    /// Gone here, back there (the teleport legs, `Vanish` and `Land`, are its cover).
+    #[allow(dead_code)]
+    Teleport,
+    /// Into or out of a summon's attention mood (NEEDS YOU).
+    Summon,
+    /// A bid in place: she flags him down where she is.
+    Bid,
+    /// One drawing to another in place (CapriCore <-> lachy, a crouch, a sit, a point).
+    Pose,
+    /// Into or out of a motion's drawing (a walk, a dance, a leap, a dangle).
+    Motion,
+    /// Into or out of her sleep, and the wake's family changes.
+    Sleep,
+    /// A perch <-> laydown swap, a drop onto a window.
+    Perch,
+    /// Any other mood change (the tag's status word changes; the body only seams).
+    Mood,
+    /// Music on or off.
+    Music,
+    /// A startle's jolt and an emote's fx beat.
+    Jolt,
+}
+
+#[cfg(test)]
+impl Transition {
+    pub const ALL: [Transition; 10] = [
+        Transition::Teleport,
+        Transition::Summon,
+        Transition::Bid,
+        Transition::Pose,
+        Transition::Motion,
+        Transition::Sleep,
+        Transition::Perch,
+        Transition::Mood,
+        Transition::Music,
+        Transition::Jolt,
+    ];
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Glitch {
     pub t0: Instant,
@@ -92,6 +134,18 @@ impl Glitch {
     /// the cut tore her hanging leg and threw bars), smaller shifts, the tag left whole.
     pub fn swap(at: Instant, seed: u64) -> Glitch {
         Glitch { t0: at, kind: GlitchKind::Seam, ms: SWAP_MS, seed, soft: true, tears_tag: false }
+    }
+
+    /// The glitch a cut gets (r42: the heavy glitch is for teleports and summons only; every
+    /// other pose or family change gets the swap's light seam, the tag whole). `None`: the
+    /// teleport's own legs (`Vanish`, `Land`) cover it.
+    pub fn for_cut(t: Transition, at: Instant, seed: u64) -> Option<Glitch> {
+        match t {
+            Transition::Teleport => None,
+            Transition::Summon => Some(Glitch::new(GlitchKind::Big, at, seed)),
+            Transition::Bid => Some(Glitch::new(GlitchKind::Burst, at, seed)),
+            _ => Some(Glitch::swap(at, seed)),
+        }
     }
 
     /// A quiet teleport leg (passive moves): a shorter dissolve, and a ~150 ms rebuild
@@ -622,6 +676,9 @@ pub struct Pose {
     pub kick: i32,
     /// The kicking leg is the one right of `PoseRows::split` on screen.
     pub kick_right: bool,
+    /// Her upper body bent toward the pointer (r42), tenths of a degree, + = right: the rows
+    /// above the waist shift with their height over it (the head most), the legs stay planted.
+    pub bend: i32,
 }
 
 /// Rows (avatar-local) a pose acts on.
@@ -691,9 +748,12 @@ pub fn pose_bands(p: Pose, r: PoseRows) -> Vec<(i32, i32, i32, i32)> {
     let neck = r.neck.clamp(r.y0, waist);
     let shear_end = r.shear_end.clamp(r.y0, waist);
     let span = (shear_end - r.top).max(1) as f32;
+    let tan = (p.bend as f32 / 10.0).to_radians().tan();
+    let top = r.top.clamp(r.y0, waist);
     let shear = |y: i32| {
         let f = ((shear_end - y) as f32 / span).clamp(0.0, 1.0);
-        (p.sway as f32 * f.powf(1.2)).round() as i32
+        let bend = tan * (waist - y.max(top)) as f32;
+        (p.sway as f32 * f.powf(1.2) + bend).round() as i32
     };
     // Legs first, then the torso, then the head on top (a nod overlaps the collar).
     let mut out = vec![(waist - b, r.h, 0, 0)];
@@ -701,7 +761,16 @@ pub fn pose_bands(p: Pose, r: PoseRows) -> Vec<(i32, i32, i32, i32)> {
         let first = out.len();
         let mut y = from;
         while y < to {
-            let (y1, dx) = if p.sway != 0 && y < shear_end { ((y + 2).min(shear_end).min(to), shear(y)) } else { (to, 0) };
+            let (y1, dx) = if p.bend != 0 && y < top {
+                // Above her: one band at the top row's shift.
+                (top.min(to), shear(top))
+            } else if p.bend != 0 {
+                ((y + 2).min(to), shear(y))
+            } else if p.sway != 0 && y < shear_end {
+                ((y + 2).min(shear_end).min(to), shear(y))
+            } else {
+                (to, 0)
+            };
             let n = out.len();
             match out.last_mut() {
                 Some(last) if n > first && last.1 == y && last.2 == dx && last.3 == dy => last.1 = y1,
@@ -805,6 +874,8 @@ pub fn bob(elapsed: Duration, px: i32, period_ms: u64) -> i32 {
 
 /// The attention hop: up and down once, device px upward.
 pub const HOP_MS: f32 = 440.0;
+/// Where in it the big beat lands (the little one after it is a rebound).
+pub const HOP_LAND_AT: f32 = 0.68;
 pub fn hop(age: Duration, height: f32) -> Option<i32> {
     let t = ms(age);
     if t >= HOP_MS {
@@ -812,11 +883,11 @@ pub fn hop(age: Duration, height: f32) -> Option<i32> {
     }
     let u = t / HOP_MS;
     // Two beats: a full hop, then a little one.
-    let y = if u < 0.68 {
-        let v = u / 0.68;
+    let y = if u < HOP_LAND_AT {
+        let v = u / HOP_LAND_AT;
         4.0 * v * (1.0 - v)
     } else {
-        let v = (u - 0.68) / 0.32;
+        let v = (u - HOP_LAND_AT) / (1.0 - HOP_LAND_AT);
         0.3 * 4.0 * v * (1.0 - v)
     };
     Some((y * height).round() as i32)
@@ -1113,6 +1184,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn every_cut_but_a_teleport_or_summon_gets_the_light_seam() {
+        let t0 = std::time::Instant::now();
+        for t in Transition::ALL {
+            let g = Glitch::for_cut(t, t0, 9);
+            match t {
+                Transition::Teleport => assert!(g.is_none(), "the teleport legs cover it"),
+                Transition::Summon => assert_eq!(g.map(|g| g.kind), Some(GlitchKind::Big)),
+                Transition::Bid => assert_eq!(g.map(|g| g.kind), Some(GlitchKind::Burst)),
+                _ => {
+                    let g = g.unwrap();
+                    assert!(!g.tears_tag, "{t:?}: the tag whole");
+                    assert_eq!((g.kind, g.ms), (GlitchKind::Seam, SWAP_MS), "{t:?}: the swap's seam");
+                    // One light frame at most (~60 Hz), then clean.
+                    let lit: Vec<f32> = (0..400).map(|ms| g.strength(t0 + std::time::Duration::from_millis(ms))).filter(|&v| v > 0.0).collect();
+                    assert!(lit.len() <= 20 && lit.iter().all(|&v| v <= 0.6), "{t:?}: lit {} ms", lit.len());
+                }
+            }
+        }
+    }
+
+    #[test]
     fn scaled_bands_tile_and_cover() {
         // Destination-tiling bands with uneven source windows (a chain mid-swing).
         let b = vec![(10, 30, 0, 0), (31, 35, 3, -1), (33, 38, 5, 1), (40, 90, 8, -1)];
@@ -1364,6 +1456,17 @@ mod tests {
         assert!(music.iter().any(|b| b.0 >= 120 && b.1 <= 220 && b.2 != 0));
         let still = pose_bands(Pose::default(), r);
         assert!(still.iter().all(|b| b.2 == 0 && b.3 == 0));
+        // Bent 8° right (r42, a linger): the legs stay planted, the rows above the waist lean
+        // with their height over it (the top of her head tan 8° x 210 rows ≈ 30 px), no gaps.
+        let bent = pose_bands(Pose { bend: 80, ..Pose::default() }, r);
+        for y in 10..400 {
+            assert!(bent.iter().any(|&(a, b, _, dy)| y >= a + dy && y < b + dy), "row {y}");
+        }
+        assert!(bent.iter().filter(|b| b.0 >= 220).all(|b| b.2 == 0), "feet planted");
+        let at = |y: i32| bent.iter().find(|b| y >= b.0 && y < b.1).unwrap().2;
+        assert!((at(10) - 30).abs() <= 1 && at(10) > at(120) && at(120) > at(200) && at(200) >= 0, "{bent:?}");
+        let left = pose_bands(Pose { bend: -60, ..Pose::default() }, r);
+        assert!(left.iter().find(|b| 10 >= b.0 && 10 < b.1).unwrap().2 < -15, "the other way");
         // Hanging: the grip row and above stay, the bottom swings the full amount, no gaps.
         let hang = pose_bands(Pose { swing: -9, ..Pose::default() }, PoseRows { grip: 30, ..r });
         for y in -50..400 {
