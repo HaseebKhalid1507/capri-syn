@@ -433,7 +433,7 @@ step_synaps() {
     fi
     local url=https://github.com/$M_synaps_repo/releases/download/$tag/synaps-installer.sh
     get "$url" "$TMP/synaps-installer.sh"
-    [ "$DRY" = 1 ] || verify "$TMP/synaps-installer.sh" "$sha"
+    if [ "$DRY" = 1 ]; then info "(checks its sha256: $sha)"; else verify "$TMP/synaps-installer.sh" "$sha"; fi
     run sh "$TMP/synaps-installer.sh" --quiet
     SYNAPS=$CARGO_BIN/synaps SYNAPS_V=${tag#v}
     rec_meta synaps "$SYNAPS"
@@ -523,7 +523,7 @@ step_binary() {
         fi
         packages run
         get "$rel/$M_asset_linux" "$TMP/$M_asset_linux"
-        [ "$DRY" = 1 ] || verify "$TMP/$M_asset_linux" "$sum"
+        if [ "$DRY" = 1 ]; then info "(checks its sha256: $sum)"; else verify "$TMP/$M_asset_linux" "$sum"; fi
         install_tarball "$TMP/$M_asset_linux"
         rec_meta tarball "$sum"
         good "synaps-avatar $BIN_VER, the latest release ($(tilde "$BIN/synaps-avatar"))"
@@ -546,7 +546,7 @@ build_from_source() {
         src=$CACHE/src/capri-syn-${sha:0:12} target=$CACHE/target
         info "source: $M_repo @ ${sha:0:12} ($REF)"
     fi
-    packages base build
+    packages build
     vulkan_check
 
     # rustup (user-local, ~/.cargo and ~/.rustup), then the toolchain rust-toolchain.toml pins.
@@ -575,6 +575,7 @@ build_from_source() {
     fi
     local cargo
     cargo=$(dirname "$rustup")/cargo
+    info "in $(tilde "$src"): the toolchain rust-toolchain.toml pins, then her build"
     if [ "$DRY" = 0 ]; then
         (cd "$src" && "$rustup" show active-toolchain >/dev/null 2>&1) || (cd "$src" && run "$rustup" toolchain install)
         good "toolchain $(cd "$src" && "$rustup" show active-toolchain | cut -d' ' -f1)"
@@ -583,8 +584,11 @@ build_from_source() {
     fi
     info "building (release; the first build takes a while, later ones only what changed)"
     local t0=$SECONDS
-    info "in $(tilde "$src")"
-    (cd "$src" && run env CARGO_TARGET_DIR="$target" nice -n 10 "$cargo" build --release --locked --bin synaps-avatar)
+    if [ "$DRY" = 1 ]; then
+        run env CARGO_TARGET_DIR="$target" nice -n 10 "$cargo" build --release --locked --bin synaps-avatar
+    else
+        (cd "$src" && run env CARGO_TARGET_DIR="$target" nice -n 10 "$cargo" build --release --locked --bin synaps-avatar)
+    fi
     [ "$DRY" = 1 ] || good "built in $(((SECONDS - t0) / 60)) min $(((SECONDS - t0) % 60)) s"
     local ver
     ver=$(git -C "$src" describe --tags --always --dirty 2>/dev/null || echo "${sha:0:12}")
