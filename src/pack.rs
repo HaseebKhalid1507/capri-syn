@@ -431,6 +431,10 @@ pub struct Behaviour {
     pub moods: BTreeMap<String, MoodSpec>,
     #[serde(default)]
     pub activities: Vec<Vec<Step>>,
+    /// Her energy's bands (BRIEF-alive S11): their own activities, gaps and idle; absent, the
+    /// defaults (`activities`, `life.activityGapMs`, the idle mood).
+    #[serde(default)]
+    pub energy: EnergySpec,
     #[serde(default)]
     pub extra_frames: Vec<ExtraFrame>,
     #[serde(default)]
@@ -776,6 +780,10 @@ pub struct BrainSpec {
     /// Empty: the wave.
     pub greet: Vec<Step>,
     pub greet_morning: Vec<Step>,
+    /// Up after a long nap (`stretchAfterMs`, brain time): this inside the stand-up, on the
+    /// floor only, at most 4 an hour.
+    pub stretch: Vec<Step>,
+    pub stretch_after_ms: Option<u64>,
     pub floor_sit: Option<MoodSpec>,
     /// After a sulk she sits down where she landed and stays low: this base and loop.
     pub sulk_sit: Option<MoodSpec>,
@@ -854,7 +862,18 @@ fn resolve_pools(b: &Behaviour, anim: Option<&crate::art::Anim>, errors: &mut Ve
                     Some(VariantArt { base: bi, talk, music, blinks, blink_ms: v.blink_ms.unwrap_or([3000, 6000]), every: v.every.unwrap_or(1).max(1), hold_ms: v.hold_ms })
                 }
             };
-            pool.variants.push(Variant { id: v.id.clone(), weight: v.weight, lying: v.lying, after_ms: v.after_ms, stay_ms: v.stay_ms, art });
+            let energy = v
+                .energy
+                .iter()
+                .filter_map(|b| {
+                    let band = crate::life::Band::parse(b);
+                    if band.is_none() {
+                        errors.push(format!("moods.json variants.pools.{key}: variant `{}` energy `{b}` (low|mid|high)", v.id));
+                    }
+                    band
+                })
+                .collect();
+            pool.variants.push(Variant { id: v.id.clone(), weight: v.weight, lying: v.lying, after_ms: v.after_ms, stay_ms: v.stay_ms, energy, art });
         }
         if let Some(b) = &ps.bridge {
             match pool.by_id(b) {
@@ -907,6 +926,36 @@ pub struct FrameSource {
     pub cell: Option<crate::art::CellSrc>,
 }
 
+/// Her energy bands (`crate::life::Band`).
+#[derive(Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct EnergySpec {
+    pub low: EnergyBand,
+    pub mid: EnergyBand,
+    pub high: EnergyBand,
+}
+
+#[derive(Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct EnergyBand {
+    /// Instead of `activities` (empty: those).
+    pub activities: Vec<Vec<Step>>,
+    /// The gap between activities [min, max] (absent: `life.activityGapMs`).
+    pub gap_ms: Option<[u64; 2]>,
+    /// The idle mood's base and loop in this band (a tired face at night).
+    pub idle: Option<MoodSpec>,
+}
+
+impl EnergySpec {
+    pub fn band(&self, b: crate::life::Band) -> &EnergyBand {
+        match b {
+            crate::life::Band::Low => &self.low,
+            crate::life::Band::Mid => &self.mid,
+            crate::life::Band::High => &self.high,
+        }
+    }
+}
+
 /// A variant of a pooled state, resolved (`crate::variants`).
 #[derive(Clone, Debug)]
 pub struct Variant {
@@ -917,6 +966,8 @@ pub struct Variant {
     pub after_ms: Option<u64>,
     /// Its own length when picked (`VariantSpec::stay_ms`).
     pub stay_ms: Option<[u64; 2]>,
+    /// Only in these energy bands (`VariantSpec::energy`; empty: any).
+    pub energy: Vec<crate::life::Band>,
     /// None: the pack's own art for the state, as it behaves without pools.
     pub art: Option<VariantArt>,
 }
@@ -1284,6 +1335,22 @@ impl Pack {
         for (i, a) in pack.behaviour.activities.iter().enumerate() {
             check_steps(&format!("activity #{i}"), a, &mut errors, &pack);
         }
+        for (name, band) in [("low", &pack.behaviour.energy.low), ("mid", &pack.behaviour.energy.mid), ("high", &pack.behaviour.energy.high)] {
+            for (i, a) in band.activities.iter().enumerate() {
+                check_steps(&format!("energy.{name}.activities #{i}"), a, &mut errors, &pack);
+            }
+            if let Some(m) = &band.idle {
+                if !pack.index.contains_key(&m.base) {
+                    errors.push(format!("moods.json energy.{name}.idle: base `{}` does not resolve", m.base));
+                }
+                if let Some(l) = &m.r#loop {
+                    check_steps(&format!("energy.{name}.idle loop"), &l.as_steps(), &mut errors, &pack);
+                }
+            }
+            if band.gap_ms.is_some_and(|[a, b]| a == 0 || a > b) {
+                errors.push(format!("moods.json energy.{name}.gapMs: [min, max], min > 0"));
+            }
+        }
         if let Some(p) = &pack.behaviour.perch {
             for (what, id) in std::iter::once(("base".to_string(), &p.base)).chain(p.moods.iter().map(|(k, v)| (format!("moods.{k}"), v))) {
                 match pack.index.get(id.as_str()) {
@@ -1334,6 +1401,9 @@ impl Pack {
             check_steps("brain.satisfied.other", &b.satisfied.other, &mut errors, &pack);
             check_steps("brain.sulk", &b.sulk, &mut errors, &pack);
             check_steps("brain.wave", &b.wave, &mut errors, &pack);
+            check_steps("brain.greet", &b.greet, &mut errors, &pack);
+            check_steps("brain.greetMorning", &b.greet_morning, &mut errors, &pack);
+            check_steps("brain.stretch", &b.stretch, &mut errors, &pack);
             if let Some(fs) = &b.floor_sit {
                 if !pack.index.contains_key(&fs.base) {
                     errors.push(format!("moods.json brain.floorSit: base `{}` does not resolve", fs.base));

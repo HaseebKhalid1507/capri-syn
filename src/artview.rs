@@ -59,6 +59,10 @@ pub(super) struct ArtState {
     /// A swap in place holds the drawing before it until then (`relayer_cut_ahead`): no tag on
     /// those frames (it would jump before her, and its pixels showed in her new outline).
     pub cut_hold: Option<Instant>,
+    /// Until then a change of art family is a swap (one light glitch on the cut frame, the tag
+    /// whole): falling asleep, waking, the greeting and the stretch after it (r38: a burst
+    /// there read as a rendering failure).
+    pub quiet_seams: Option<Instant>,
 }
 
 impl ArtState {
@@ -82,6 +86,7 @@ impl ArtState {
             fits: RefCell::new(HashMap::new()),
             seams: 0,
             cut_hold: None,
+            quiet_seams: None,
         }
     }
 
@@ -249,7 +254,8 @@ impl Avatar {
     /// with `afterMs` only that long into her stay on this window.
     fn art_eligible(&self, v: &Variant, place: Placement, now: Instant) -> bool {
         let long = v.after_ms.is_none_or(|ms| self.art.perch_since.is_some_and(|t| now.saturating_duration_since(t) >= Duration::from_millis(ms)));
-        long && match &v.art {
+        let band = v.energy.is_empty() || v.energy.contains(&self.band());
+        long && band && match &v.art {
             Some(a) if v.lying => self.art_fits(a.base, place),
             _ => true,
         }
@@ -319,6 +325,14 @@ impl Avatar {
             return None;
         }
         let mut seq = self.pack.strip_seq(si, a.every);
+        // A loop she holds skips the cells with a chroma ghost drawn in (`glitchCells`: the
+        // sleep's green scan lines).
+        if let (Some(an), Some(Some(first))) = (&self.pack.anim, self.pack.strip_first.get(si)) {
+            let skip = &an.strips[si].glitch_cells;
+            if seq.iter().any(|(fi, _)| !skip.contains(&((fi - first) as u32))) {
+                seq.retain(|(fi, _)| !skip.contains(&((fi - first) as u32)));
+            }
+        }
         let base = seq.first()?.0;
         // At rest (the base loop): a pass, then a rest on its first cell (blinks come back to it).
         if si == a.base && self.art.hold_ms > 0 {
@@ -360,6 +374,16 @@ impl Avatar {
     // ---- time -------------------------------------------------------------------------------
 
     /// Per tick: blinks over a strip loop, the in-place shift. True: redraw.
+    /// Her energy's band changed: a pick it no longer allows (a lively drawing at night)
+    /// shifts at the next calm moment.
+    pub(super) fn art_band_changed(&mut self, now: Instant) {
+        let place = self.placement;
+        let stale = self.art.picks.iter().any(|(k, &i)| self.pack.pools.get(k).and_then(|p| p.variants.get(i)).is_some_and(|v| !self.art_eligible(v, place, now)));
+        if stale {
+            self.art.shift_at = Some(now);
+        }
+    }
+
     pub(super) fn art_tick(&mut self, now: Instant) -> bool {
         let mut dirty = false;
         if let Some(at) = self.art.next_blink
@@ -468,6 +492,22 @@ impl Avatar {
         self.art_ready(si).then(|| self.pack.strip_seq(si, 1))
     }
 
+    /// Transition `key` without its drawn glitch cells (`glitchCells`): the wake's own flash
+    /// and RGB slices read as a rendering failure (r38/r39). What's left holds at least 300 ms
+    /// (one clean cell isn't a blink).
+    pub(super) fn art_transition_clean(&self, key: &str) -> Option<Seq> {
+        let si = *self.pack.transitions.get(key)?;
+        let skip = self.pack.anim.as_ref().map(|a| a.strips[si].glitch_cells.clone()).unwrap_or_default();
+        let seq = self.art_transition(key)?;
+        let first = self.pack.strip_first.get(si).copied().flatten()?;
+        let mut seq: Seq = seq.into_iter().filter(|(fi, _)| !skip.contains(&(fi.saturating_sub(first) as u32))).collect();
+        let ms: u32 = seq.iter().map(|s| s.1).sum();
+        if let Some(last) = seq.last_mut() {
+            last.1 += 300u32.saturating_sub(ms);
+        }
+        Some(seq)
+    }
+
     /// Ask for transition `key`'s cells now (they decode in ~10-30 ms).
     pub(super) fn art_want(&self, key: &str) {
         if let Some(&si) = self.pack.transitions.get(key) {
@@ -542,11 +582,16 @@ impl Avatar {
             && self.rag.is_none()
         {
             // A cover for the body's cut: the tag stays whole. In or out of a motion, a light
-            // one (r32: the full burst read as a teleport, smeared her hair).
-            let kind = if motion || was_motion { GlitchKind::Seam } else { GlitchKind::Burst };
-            let mut g = Glitch::new(kind, now, self.rng.next());
-            g.tears_tag = false;
-            self.glitch = Some(g);
+            // one (r32: the full burst read as a teleport, smeared her hair); around her sleep,
+            // the swap's (one light step on the cut frame).
+            if self.asleep() || self.art.quiet_seams.is_some_and(|t| now < t) {
+                self.glitch = Some(Glitch::swap(now, self.rng.next()));
+            } else {
+                let kind = if motion || was_motion { GlitchKind::Seam } else { GlitchKind::Burst };
+                let mut g = Glitch::new(kind, now, self.rng.next());
+                g.tears_tag = false;
+                self.glitch = Some(g);
+            }
             self.art.seams += 1;
         }
     }
@@ -641,6 +686,14 @@ impl Avatar {
         if let Some(c) = self.pack.frames.get(shown).and_then(|f| f.cell.as_ref()) {
             in_use.insert((c.strip, c.mirror));
             in_use.insert(self.art_unit(c.strip));
+        }
+        // Asleep on a floor strip: its drawn wake stays ready (r39: dropped after 45 s, the
+        // wake had no stand-up at all).
+        if self.art.floor_strip
+            && self.asleep()
+            && let Some(&si) = self.pack.transitions.get("wake")
+        {
+            in_use.insert(self.art_unit(si));
         }
         let m = &self.pack.motions;
         let motions = [(m.walk, self.brain_walking()), (m.dance, self.dance_strip().is_some()), (m.dangle, self.rag.is_some())];

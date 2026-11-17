@@ -110,6 +110,10 @@ pub struct VariantSpec {
     /// shifts on (never the same twice running).
     #[serde(default)]
     pub stay_ms: Option<[u64; 2]>,
+    /// Only in these energy bands ("low", "mid", "high"; empty: any): a lively drawing isn't
+    /// her tired night idle.
+    #[serde(default)]
+    pub energy: Vec<String>,
 }
 
 #[derive(Deserialize, Clone, Debug)]
