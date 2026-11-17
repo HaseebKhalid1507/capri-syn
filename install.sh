@@ -743,13 +743,14 @@ ours() { [ -f "$1" ] && head -n3 "$1" | grep -q "capri-syn's install.sh wrote th
 
 daemon_unit() {
     cat <<EOF
-# capri-syn's install.sh wrote this (install.sh --uninstall removes it): the Synaps daemon, started
-# at login, so Capri finds her session when she starts. A daemon already running (one that
-# \`synaps --attach\` started) is left alone.
+# capri-syn's install.sh wrote this (install.sh --uninstall removes it): SynapsCLI's
+# deploy/synaps-daemon.service, so Capri finds her session when she starts. One change: a daemon
+# already running (one \`synaps --attach\` started) makes this a clean skip, not a failed unit.
+# Start it at boot, not only at login: loginctl enable-linger "\$USER"
 [Unit]
-Description=Synaps session daemon
-StartLimitIntervalSec=300
-StartLimitBurst=5
+Description=synaps daemon (sessions; pinned sessions come back on start)
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
@@ -757,11 +758,13 @@ WorkingDirectory=%h
 # The user manager's PATH is short: sessions' tools want the user's own bin dirs.
 Environment=PATH=%h/.local/bin:%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin
 ExecCondition=/bin/sh -c '! "$SYNAPS" daemon status >/dev/null 2>&1'
-ExecStart="$SYNAPS" daemon --foreground
-KillSignal=SIGTERM
-TimeoutStopSec=90
+ExecStart="$SYNAPS" daemon start --foreground
 Restart=on-failure
-RestartSec=10
+RestartSec=5
+RestartPreventExitStatus=3
+# Ending sessions saves them: the daemon's own shutdown budget.
+TimeoutStopSec=45
+KillMode=mixed
 
 [Install]
 WantedBy=default.target
