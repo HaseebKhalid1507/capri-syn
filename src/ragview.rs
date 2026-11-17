@@ -78,6 +78,15 @@ pub(super) struct Rag {
     offset: (i32, i32),
     /// SA_RAG_PROF: sim + plan time per tick (µs).
     prof: Option<Vec<u32>>,
+    /// Carried by the head, the dangle drawing instead of the ragdoll's poses (B2c, A/B):
+    /// from rag time `at` (after the grab's own frames); `on` once it shows.
+    dangle: Option<Dangle>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Dangle {
+    at: f32,
+    on: bool,
 }
 
 /// SA_ATOMIC_LOG=1: one line per window move and per painted frame (its origin and the bbox of what
@@ -369,7 +378,11 @@ impl Avatar {
             vel: (0.0, 0.0),
             offset: (self.origin.0 - p0.0 as i32, self.origin.1 - p0.1 as i32),
             prof: std::env::var("SA_RAG_PROF").is_ok_and(|v| v == "1").then(Vec::new),
+            dangle: None,
         };
+        if !rigid && touch && zone == Zone::Head {
+            rag.dangle = self.dangle_pick(now).map(|at| Dangle { at, on: false });
+        }
         if !rigid && touch {
             rag.chain.kick((0.0, -400.0 * self.layout.sf));
             if out.flip
@@ -648,6 +661,36 @@ impl Avatar {
             if r.flip.is_some_and(|(t0, _)| t - t0 >= FLIP_DOWN + FLIP_UP) {
                 r.flip = None;
             }
+            // The dangle: its drawing from its grip (a chain of its own, like the flip-card's),
+            // in over a glitch; then its cells round and round.
+            if let Some(d) = r.dangle
+                && t >= d.at
+                && (d.on || self.dangle_ready())
+            {
+                let cell = self.dangle_cell(t - d.at);
+                if d.on {
+                    if let Some(r) = &mut self.rag {
+                        r.frame = cell;
+                    }
+                } else {
+                    let aw = l.geo.width as i32;
+                    let mut grip = self.pack_anchor_local(cell);
+                    if self.mirrored(cell) {
+                        grip.0 = aw - 1 - grip.0;
+                    }
+                    let chain = self.rag_chain(cell, grip, Zone::Head, p);
+                    let seed = self.rng.next();
+                    let Some(r) = &mut self.rag else { return };
+                    r.frame = cell;
+                    r.grip = grip;
+                    r.chain = chain;
+                    r.dangle = Some(Dangle { on: true, ..d });
+                    let mut g = Glitch::new(GlitchKind::Burst, now, seed);
+                    g.tears_tag = false;
+                    self.glitch = Some(g);
+                }
+            }
+            let Some(r) = &mut self.rag else { return };
             r.chain.step(p, dt);
             r.wobble.step(p.0, dt);
             let feet = r.chain.feet_offset();
@@ -664,7 +707,7 @@ impl Avatar {
             let fi = self.rag_frame(self.rag.as_ref().expect("rag"), out.frame.as_deref());
             let Some(r) = &mut self.rag else { return };
             // Standing frames share the canonical registration: the grip stays put.
-            if r.flip.is_none() && r.zone != Zone::Legs {
+            if r.flip.is_none() && r.zone != Zone::Legs && !r.dangle.is_some_and(|d| d.on) {
                 r.frame = fi;
             }
             let o = (p.0.round() as i32 - l.avatar_x - r.grip.0, p.1.round() as i32 - l.avatar_y - r.grip.1);
@@ -725,6 +768,13 @@ impl Avatar {
         let l = self.layout;
         let (areas, _) = self.rag_areas();
         let plats = self.rag_platforms();
+        let Some(r) = &mut self.rag else { return };
+        // Out of the dangle drawing into the fall's: a glitch over the seam.
+        if r.dangle.take().is_some_and(|d| d.on) {
+            let mut g = Glitch::new(GlitchKind::Burst, now, self.rng.next());
+            g.tears_tag = false;
+            self.glitch = Some(g);
+        }
         let Some(r) = &mut self.rag else { return };
         // The pointer is in device px; the machine's thresholds are logical.
         r.m.update(t, &RagInput { event: Some(RagEvent::Release { vel: (vel.0 / l.sf, vel.1 / l.sf) }), ..Default::default() });
@@ -1013,8 +1063,9 @@ impl Avatar {
         let held = {
             let Some(r) = &self.rag else { return };
             let frame = if r.rigid { self.rag_frame(r, None) } else { r.frame };
+            // The dangle drawing sways on its own: no bands over it.
             match self.frame_or_default(frame) {
-                Some(f) if !r.rigid && r.landed.is_none() => Some((f.top, f.bottom)),
+                Some(f) if !r.rigid && r.landed.is_none() && !r.dangle.is_some_and(|d| d.on) => Some((f.top, f.bottom)),
                 _ => None,
             }
         };
@@ -1270,6 +1321,7 @@ impl Avatar {
             "landed": r.landed,
             "hard": r.hard,
             "asleep": r.chain.asleep(),
+            "dangle": r.dangle.map(|d| if d.on { "on" } else { "soon" }),
         })
     }
 }

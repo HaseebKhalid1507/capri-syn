@@ -755,6 +755,36 @@
     "form": "form"
   },
   "formChance": 0.15,
+  "motions": {
+    "walk": {
+      "strip": "walk",
+      "chance": 0.6,
+      "pxPerS": 70,
+      "minPx": 90,
+      "gapMs": 30000,
+      "edges": true
+    },
+    "dance": {
+      "strip": "dance",
+      "minBpm": 100,
+      "chance": 0.5,
+      "ms": [
+        40000,
+        90000
+      ],
+      "gapMs": 600000
+    },
+    "dangle": {
+      "strip": "dangle",
+      "chance": 0.5,
+      "afterMs": 260,
+      "gapMs": 20000
+    },
+    "click": {
+      "strip": "click",
+      "gapMs": 250
+    }
+  },
   "variants": {
     "cacheMb": 24,
     "pools": {
@@ -968,6 +998,16 @@
         [
           165,
           118
+        ]
+      ],
+      "dance": [
+        [
+          44,
+          96
+        ],
+        [
+          200,
+          84
         ]
       ]
     },

@@ -15,6 +15,8 @@ mod voiceview;
 mod arriveview;
 #[path = "artview.rs"]
 mod artview;
+#[path = "motionview.rs"]
+mod motionview;
 #[path = "introview.rs"]
 pub(crate) mod introview;
 
@@ -430,6 +432,9 @@ struct MusicOn {
     bpm: Option<f32>,
     /// Started by a playing media player (it stops with it).
     auto: bool,
+    /// She dances until then (B2c: music with energy, on the floor); rolled once a session.
+    dance_until: Option<Instant>,
+    dance_rolled: bool,
 }
 
 /// After a player pauses or stops, the headphones stay this long (a track change, a seek).
@@ -621,6 +626,8 @@ pub struct Avatar {
     /// the unread pill's nudge), set by the frame that shows it.
     motion_at: Cell<Option<Instant>>,
     music: Option<MusicOn>,
+    /// The desktop art's motions (`motionview`).
+    motion: motionview::MotionState,
     notes: Vec<NoteMasks>,
     notes_shown: usize,
     glints_shown: usize,
@@ -726,7 +733,7 @@ impl Avatar {
     pub fn new(init: Init, window: &mut Window, cx: &mut Context<Self>) -> Avatar {
         let pack = init.pack;
         let art_right = pack.behaviour.art_faces_right();
-        let flippable = pack.frames.iter().map(|f| matches!(f.anchor.name.as_str(), "ground" | "seat")).collect();
+        let flippable = pack.frames.iter().map(|f| matches!(f.anchor.name.as_str(), "ground" | "seat" | "grip")).collect();
         let default = pack.frame(&pack.catalog.default_sprite).unwrap_or(0);
         let font = pack.behaviour.font.clone().unwrap_or_else(|| "Fira Sans".into());
         let vis = Self::visible_range(&init.os, &init.layout, init.origin);
@@ -837,6 +844,7 @@ impl Avatar {
             tag_box: Rc::new(Cell::new(None)),
             motion_at: Cell::new(None),
             music: None,
+            motion: Default::default(),
             notes: Vec::new(),
             notes_shown: 0,
             glints_shown: 0,
@@ -903,6 +911,9 @@ impl Avatar {
     /// The music pose for the current placement, if music is on and the pack has it.
     fn music_frame(&self) -> Option<usize> {
         self.music.as_ref()?;
+        if let Some(i) = self.dance_frame() {
+            return Some(i);
+        }
         if let Some(i) = self.art_music_frame() {
             return Some(i);
         }
@@ -923,7 +934,7 @@ impl Avatar {
         if self.mood != Mood::Idle {
             self.set_mood(Mood::Idle, now);
         }
-        let was = self.music.replace(MusicOn { t0: now, until, bpm: None, auto: false });
+        let was = self.music.replace(MusicOn { t0: now, until, bpm: None, auto: false, dance_until: None, dance_rolled: false });
         self.relayer(now);
         if was.is_none() && self.loaded && self.teleport.is_none() {
             self.glitch = Some(Glitch::new(GlitchKind::Burst, now, self.rng.next()));
@@ -959,6 +970,7 @@ impl Avatar {
                     }
                 }
             }
+            self.dance_decide(now);
             "ok listening".into()
         } else {
             if self.music.as_ref().is_some_and(|m| m.auto) {
@@ -1244,6 +1256,7 @@ impl Avatar {
             }
             self.heartbeat_start(cx);
             self.stills_decode(cx);
+            self.burst_decode(cx);
             let win = self.os.body();
             self.set_icon_on(win);
             self.next_glint = Some(now + Duration::from_millis(700));
@@ -1467,6 +1480,9 @@ impl Avatar {
         if let Some(l) = self.art_layer(m) {
             return l;
         }
+        if let Some(l) = self.dance_layer() {
+            return l;
+        }
         if let Some(i) = self.music_frame() {
             return (i, None);
         }
@@ -1611,8 +1627,9 @@ impl Avatar {
         let (base, looping) = self.layer(self.mood);
         let rests = self.art_rests(self.mood);
         self.anim.set_layer_resting(base, looping, rests, now);
-        // An arrival sequence plays through the landing's relayer.
-        if !self.arriving(now) {
+        // An arrival sequence plays through the landing's relayer, a walk through its pool's
+        // art coming in.
+        if !self.arriving(now) && !self.brain_walking() {
             self.anim.stop_oneshot(now);
         }
         self.lying_cut(before, now);
@@ -1815,6 +1832,8 @@ impl Avatar {
         take(self.anim.deadline());
         take(self.kiss_deadline());
         take(self.art.deadline());
+        take(self.dance_deadline());
+        take(self.burst_deadline());
         take(self.voice_deadline(now));
         if !self.anim.busy() {
             take(self.next_activity);
@@ -1856,7 +1875,7 @@ impl Avatar {
             take(Some(now + FRAME_FAST));
         }
         take(self.next_glitch);
-        if self.squash.is_some() || self.sliver.is_some() || self.turn.is_some() {
+        if self.squash.is_some() || self.sliver.is_some() || self.turn.is_some() || self.arrive.unfold.is_some() {
             take(Some(now + FRAME_FAST));
         }
         take(self.teleport.as_ref().and_then(|t| t.leave_until));
@@ -1981,6 +2000,8 @@ impl Avatar {
         }
         dirty |= self.step_kiss(now);
         dirty |= self.art_tick(now);
+        dirty |= self.dance_tick(now);
+        self.burst_tick(now);
         dirty |= self.voice_tick(now, cx);
         dirty |= self.step_turn(now);
         if let Some((at, m)) = self.mood_then
@@ -2568,10 +2589,17 @@ impl Avatar {
             Command::Drag(ops) => self.drag_cmd(ops, now),
             Command::Art { pool, id } => self.art_force(&pool, &id, now),
             Command::Intro { skip } => self.intro_command(skip, now, cx),
-            Command::Music(on) => {
+            Command::Walk(x, scoot) => self.walk_to(x, scoot, now),
+            Command::Music(on, bpm) => {
                 if on {
                     match self.music_on(now, None) {
-                        Ok(()) => "ok".into(),
+                        Ok(()) => {
+                            if let Some(m) = &mut self.music {
+                                m.bpm = bpm.or(m.bpm);
+                            }
+                            self.dance_decide(now);
+                            "ok".into()
+                        }
                         Err(e) => format!("error: {e}"),
                     }
                 } else {
@@ -3145,6 +3173,7 @@ impl Avatar {
             }).collect::<serde_json::Map<_, _>>(),
         });
         v["art"] = self.art_json();
+        v["motion"] = self.motion_json();
         v["intro"] = self.intro_json();
         v.to_string()
     }
@@ -4072,6 +4101,9 @@ impl Avatar {
                 let now = Instant::now();
                 let caught = self.rag_catch(self.local(ev.position), now);
                 self.press = Some(Press { root, origin: self.origin, head, dragging: caught });
+                if head {
+                    self.dangle_want();
+                }
                 if !caught && self.rag.is_none() && self.teleport.is_none() {
                     // Felt at once: she gives under the press (it went unanswered until the
                     // release or 5 px of drag).
@@ -4165,6 +4197,7 @@ impl Avatar {
 
     /// A click on her (real or `tap`): the reaction clip, hearts on a headpat, the squash.
     fn click_reaction(&mut self, head: bool, at: Point<Pixels>, now: Instant) {
+        self.burst_start(at, now);
         self.streak = if now.duration_since(self.streak.1) < Duration::from_millis(self.pack.behaviour.click.streak_ms) {
             (self.streak.0 + 1, now)
         } else {
@@ -4528,6 +4561,9 @@ impl Render for Avatar {
         self.log_drawn();
         let rag_flight = self.rag_json().get("phase").and_then(|p| p.as_str()).is_some_and(|p| p == "fling" || p == "drop");
         let shown_i = rag_shown.as_ref().and_then(|(c, _)| c.as_ref().map(|c| c.frame)).unwrap_or_else(|| self.anim.frame());
+        if self.arrive.unfold.is_some_and(|t0| now.saturating_duration_since(t0).as_millis() as u64 >= arriveview::UNFOLD_MS) {
+            self.arrive.unfold = None;
+        }
         let frame = self.frame_or_default(shown_i);
         // HUD placement follows the mood's resting frame, so loops don't make it jitter.
         let base = self.frame_or_default(self.anim.base()).or(frame);
@@ -4595,6 +4631,21 @@ impl Render for Avatar {
         if let Some((Some(c), _)) = &rag_shown {
             plan = c.plan.clone();
         }
+        // The sit's legs unfolding over the edge (a CapriCore perch arrival): rows below the
+        // seat line come in top-down.
+        if let (Some(t0), Some(f), Some(sy)) = (self.arrive.unfold, frame, l.seat_y)
+            && self.sitting()
+            && self.rag.is_none()
+            && now >= t0
+        {
+            let ms = now.saturating_duration_since(t0).as_millis() as u64;
+            {
+                let seat = sy - l.avatar_y;
+                let cut = seat + ((f.bottom - seat).max(0) as f32 * arriveview::unfold_depth(ms)).round() as i32;
+                let band = vec![(f.top.min(0), cut, 0, 0)];
+                plan.slices = Some(if plan.sx != 1.0 || plan.sy != 1.0 { fx::scale_bands(&band, plan.pivot, plan.sx, plan.sy) } else { band });
+            }
+        }
         // A drawn arrival's first frames: the plain red land silhouette (its window's old
         // pixels would show through the new shape for a frame).
         if self.arrive.red_until.is_some_and(|t| now < t) {
@@ -4643,6 +4694,7 @@ impl Render for Avatar {
             let base = plan.clone();
             // Landing on a window top: the rows at the edge and below stay put (her legs never
             // tear across the edge line, the touchdown's dark parts never smear along it).
+            let drawn_land = g.kind == GlitchKind::Land && self.sitting() && self.pack.frames.get(shown_i).is_some_and(|f| f.cell.is_some());
             let still_legs = (g.kind == GlitchKind::Land && self.sitting())
                 .then_some(l.seat_y)
                 .flatten()
@@ -4668,6 +4720,12 @@ impl Render for Avatar {
                     still_from: still_legs,
                 });
                 p.tint = g.tint(at);
+                // Touching down into a drawn pose (lachy's art): no red/blue ghosts, they
+                // fringed her hair tips blue at the swap.
+                if drawn_land {
+                    p.split.iter_mut().for_each(|d| *d = 0);
+                    p.solid.iter_mut().for_each(|c| *c = None);
+                }
                 p
             };
             // Out of a still figure, the first frame stays still and lays the first pattern
