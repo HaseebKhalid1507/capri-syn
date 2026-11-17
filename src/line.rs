@@ -1480,9 +1480,12 @@ impl Render for Line {
         } else {
             Some("⏎ send · ⇧⏎ newline · ↑ last message · ctrl+y copy reply · ctrl+o open link · esc close".into())
         };
+        // A long note (NO MODEL YET · …) puts the hints on a row of their own, not past the edge.
         let footer = div()
             .flex()
-            .gap(px(10.0))
+            .flex_wrap()
+            .gap_x(px(10.0))
+            .gap_y(px(2.0))
             .px(px(PAD))
             .pt(px(4.0))
             .pb(px(8.0))
