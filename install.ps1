@@ -37,7 +37,8 @@ usage: install.ps1 [--yes] [--dry-run] [--uninstall [--purge]] [--voice] [--watc
   --yes             don't ask: Visual Studio's C++ build tools (admin) for a source build, Python
                     from winget for her pack
   --dry-run         print every action, touch nothing
-  --uninstall       remove what this script installed; your settings, her state and log stay
+  --uninstall       remove what this script installed; your settings stay, and her state and log
+                    (her installer's own uninstaller takes those when it runs)
   --purge           with --uninstall: remove those too (only her own files in those folders)
   --voice           also her voice: the voice installer (or bundle), ~320 MB of models
   --watch           capri-watch (Linux only: skipped here)
@@ -50,7 +51,8 @@ usage: install.ps1 [--yes] [--dry-run] [--uninstall [--purge]] [--voice] [--watc
 
 Each flag also has PowerShell's spelling: -Yes, -DryRun, -Uninstall, -Purge, -Voice, -Watch,
 -NoAutostart, -FromSource, -Prefix DIR, -WithLocalArt, -Artifact FILE, -AllowRoot.
-With no flags (irm | iex can't pass any), $env:CAPRI_INSTALL_FLAGS is read instead (space-separated).
+With no flags (irm | iex can't pass any), $env:CAPRI_INSTALL_FLAGS is read instead (space-separated),
+said in the banner, then cleared from your session: it applies to one run only.
 Steps and details: docs/INSTALL.md (https://github.com/HaseebKhalid1507/capri-syn)
 '@
 
@@ -144,7 +146,7 @@ function Add-Receipt([string[]]$Fields) {
     if ($script:Dry) { return }
     $line = $Fields -join "`t"
     New-Item -ItemType Directory -Force (Split-Path -Parent $script:Receipt) | Out-Null
-    if (-not (Test-Path $script:Receipt) -or -not (Select-String -LiteralPath $script:Receipt -SimpleMatch -Pattern $line -Quiet)) {
+    if (-not (Test-Path $script:Receipt) -or -not (@(Get-Content -LiteralPath $script:Receipt) -contains $line)) {
         Add-Content -LiteralPath $script:Receipt -Value $line -Encoding UTF8
     }
 }
@@ -184,8 +186,8 @@ function New-RecordedPath([string]$Path) {
 }
 # May --uninstall remove PATH? Rooted, one line, no `..`, never a drive's root, his profile, LocalAppData
 # or AppData; inside one of her folders (each prefix, her data and settings, capri-voice's models
-# folder), or her Start-menu shortcut. An rmdir (only ever an empty folder) may also be one of those
-# folders, or one on the way to one.
+# folder), or her Start-menu shortcut. A dir (removed whole) must be one of the folders this makes. An
+# rmdir (only ever an empty folder) may also be one of her folders, or one on the way to one.
 function Test-Removable([string]$Path, [string]$Kind) {
     if (-not $Path -or $Path -match "[`r`n]" -or -not [IO.Path]::IsPathRooted($Path) -or $Path -match '(^|[\\/])\.\.?([\\/]|$)') { return $false }
     $p = $Path.TrimEnd('\', '/')
@@ -193,7 +195,11 @@ function Test-Removable([string]$Path, [string]$Kind) {
     if (-not $p -or $never -contains $p) { return $false }
     if ($p -eq $script:Lnk) { return $true }
     $voice = Join-Path $env:LOCALAPPDATA 'capri-voice'
-    if ($Kind -eq 'dir' -and $p -eq $voice) { return $true }
+    if ($Kind -eq 'dir') {
+        # Removed whole: only the folders this script makes (her pack, its cache, a voice bundle, the models).
+        $known = @((Join-Path $script:Data 'packs\capri'), (Join-Path $script:Data 'installer'), $voice) + @($script:Prefixes | Where-Object { $_ } | ForEach-Object { Join-Path "$_".TrimEnd('\', '/') 'voice' })
+        return [bool]($known | Where-Object { [string]::Equals("$_".TrimEnd('\', '/'), $p, [StringComparison]::OrdinalIgnoreCase) })
+    }
     foreach ($r in (@($script:Prefixes) + @($script:Data, $script:Conf, $voice))) {
         $r = "$r".TrimEnd('\', '/')
         if (-not $r) { continue }
@@ -202,10 +208,13 @@ function Test-Removable([string]$Path, [string]$Kind) {
     }
     return $false
 }
+# A Run value: set and recorded, unless one of that name is there that this script didn't set (his:
+# left as it is, never recorded, so --uninstall leaves it too).
 function Set-RunValue([string]$Name, [string]$Value) {
     $run = $script:RunKey
     $cur = (Get-ItemProperty -Path $run -Name $Name -ErrorAction SilentlyContinue).$Name
     if ($cur -eq $Value) { Write-Good "already set: Run\$Name"; return }
+    if ($null -ne $cur -and -not (Test-Recorded 'reg' "$run`t$Name")) { Write-Good "your own Run\$Name ($cur): left as it is"; return }
     Invoke-Action "reg add HKCU\...\Run /v $Name /d $Value" { New-ItemProperty -Path $run -Name $Name -Value $Value -PropertyType String -Force | Out-Null }
     Add-Receipt @('reg', $run, $Name)
 }
@@ -248,7 +257,8 @@ function Read-Flags([string[]]$ArgList) {
     }
     if ($script:Purge -and -not $script:Uninstall) { Stop-Install '--purge goes with --uninstall' }
     if ($script:Prefix -match "[`r`n]") { Stop-Install '--prefix: a folder name with a newline in it' }
-    $script:Prefix = [IO.Path]::GetFullPath($script:Prefix).TrimEnd('\', '/')
+    # Relative to PowerShell's location (not the process's), `~` expanded; then `..` resolved.
+    $script:Prefix = [IO.Path]::GetFullPath($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($script:Prefix)).TrimEnd('\', '/')
     if ($script:Prefix -eq [IO.Path]::GetPathRoot($script:Prefix).TrimEnd('\', '/')) { Stop-Install "--prefix $($script:Prefix): give her a folder of her own" }
     if ($script:Artifact) {
         if (-not (Test-Path -LiteralPath $script:Artifact)) { Stop-Install "--artifact: no file $($script:Artifact)" }
@@ -304,6 +314,8 @@ function Write-Banner {
     Write-Host " > $what" -ForegroundColor DarkGray -NoNewline
     if ($script:Dry) { Write-Host '  (dry run: nothing is touched)' -ForegroundColor Red } else { Write-Host '' }
     if ($script:Checkout) { Write-Info "from the checkout $(Get-Tilde $script:Checkout)" }
+    if ($script:FlagsEnv -like 'used:*') { Write-Info "flags from CAPRI_INSTALL_FLAGS: $($script:FlagsEnv.Substring(5)) (cleared: it applies to this run only)" }
+    elseif ($script:FlagsEnv -like 'ignored:*') { Write-Info "CAPRI_INSTALL_FLAGS ($($script:FlagsEnv.Substring(8))) ignored: flags were given (cleared)" }
 }
 
 # Her source tree: this checkout, else GitHub's tarball of a ref (her make-pack and its pins, and
@@ -369,8 +381,16 @@ function Install-Synaps {
         $tag = "v$($script:M.synaps_pin)"; $sha = $script:M.synaps_installer_ps1_sha256
         Write-Info "GitHub's API didn't answer: the pinned $tag"
     }
+    $url = "https://github.com/$($script:M.synaps_repo)/releases/download/$tag/synaps-installer.ps1"
+    $edit = Get-SynapsPathEdit
+    if ($edit) { Write-Info "its installer puts $(Get-Tilde $script:CargoBin) on your user Path (HKCU\Environment, at the front)" }
+    else { Write-Info 'its installer leaves your user Path as it is' }
+    if (-not (Confirm-Action "install Synaps $($tag.TrimStart('v')) with its installer$(if ($edit) { ' (and that Path edit)' })")) {
+        Write-Info "or install it yourself, your Path untouched: `$env:SYNAPS_NO_MODIFY_PATH = '1'; irm $url | iex"
+        Stop-Install 'she needs Synaps: say yes (or --yes), or install it as above, then run this again'
+    }
     $file = Join-Path $script:Tmp 'synaps-installer.ps1'
-    Get-Download "https://github.com/$($script:M.synaps_repo)/releases/download/$tag/synaps-installer.ps1" $file
+    Get-Download $url $file
     Test-Sha256 $file $sha
     $ps = (Get-Process -Id $PID).Path
     Invoke-Native $ps @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $file)
@@ -381,7 +401,17 @@ function Install-Synaps {
         $script:SynapsV = Get-SynapsVersion $mine
         Write-Good "synaps $($script:SynapsV) ($(Get-Tilde $mine))"
     }
-    Set-ReceiptMeta 'synaps' $mine
+    # Hers to mention removing only if there was none: an upgrade of his stays his.
+    if ($script:SynapsNew -eq 1) { Set-ReceiptMeta 'synaps' $mine; Set-ReceiptMeta 'synaps_path' $(if ($edit) { 'yes' } else { 'no' }) }
+}
+
+# Whether Synaps' installer (cargo-dist) will add its bin folder to his user Path: not when it's there
+# already, or SYNAPS_NO_MODIFY_PATH / SYNAPS_UNMANAGED_INSTALL / INSTALLER_NO_MODIFY_PATH say so.
+function Get-SynapsPathEdit {
+    if ($env:SYNAPS_NO_MODIFY_PATH -or $env:SYNAPS_UNMANAGED_INSTALL -or $env:INSTALLER_NO_MODIFY_PATH) { return $false }
+    try { $cur = @((Get-Item -LiteralPath 'registry::HKEY_CURRENT_USER\Environment').GetValue('Path', '', 'DoNotExpandEnvironmentNames') -split ';' | Where-Object { $_ }) }
+    catch { return $true }
+    return -not ($cur -contains $script:CargoBin)
 }
 
 # ---- 2. her binary ----------------------------------------------------------------------------
@@ -775,7 +805,7 @@ function Test-Brain {
 }
 
 # The brain step: she talks through Synaps, and Synaps needs a model (`synaps login`, a picker).
-# Run here only with a console to pick on; a daemon already running picks the login up on her next
+# Run here only with a console to pick on, and never with --yes; a daemon already running picks the login up on her next
 # turn (Synaps reads auth.json per request).
 function Invoke-Brain {
     $cmd = "& `"$(Get-Tilde $script:Synaps)`" login"
@@ -790,16 +820,16 @@ function Invoke-Brain {
     Write-Host "   `$ $cmd" -ForegroundColor White -NoNewline
     Write-Host '        a subscription you already pay for, an API key, or a local model' -ForegroundColor DarkGray
     Write-Info 'skip it and she still perches, naps and plays. she just can''t answer yet.'
-    if ($script:Dry) { Write-Info '(asks: pick one now [Y/n]; with a console, --yes runs it)'; return }
+    # A picker waits for him: --yes (unattended) never opens it.
+    if ($script:Yes) { Write-Info '--yes: not opened here (it waits for you to pick): run that line when you want her to answer'; return }
+    if ($script:Dry) { Write-Info '(asks: pick one now [Y/n], with a console)'; return }
     if (-not [Environment]::UserInteractive -or [Console]::IsInputRedirected -or [Console]::IsOutputRedirected) {
         Write-Info 'no console to pick on: run that line when you want her to answer'
         return
     }
-    if (-not $script:Yes) {
-        Write-Host '   ? pick one now [Y/n] ' -ForegroundColor Red -NoNewline
-        $a = Read-Host
-        if ($a -and $a -notmatch '^(y|yes)$') { Write-Info 'later, then: run that line when you want her to answer'; return }
-    }
+    Write-Host '   ? pick one now [Y/n] ' -ForegroundColor Red -NoNewline
+    $a = Read-Host
+    if ($a -and $a -notmatch '^(y|yes)$') { Write-Info 'later, then: run that line when you want her to answer'; return }
     $ErrorActionPreference = 'Continue'
     & $script:Synaps login
     if ($LASTEXITCODE -eq 0 -and (Test-Brain)) { Write-Good 'her brain: logged in (no restart: the daemon reads it on her next turn)' }
@@ -807,22 +837,22 @@ function Invoke-Brain {
 }
 
 # What stays of Synaps after --uninstall, where his login lives, and how to remove it too.
-# Synaps' own installer (this one ran it, or he did) leaves a receipt: then what it added is known.
-function Write-SynapsStays([string]$Mine, [string]$Rustup) {
+# Mine: the synaps this script installed (there was none before); PathEdit: whether its installer put
+# its folder on his user Path. A Synaps he had (or one it upgraded) is his: only a pointer.
+function Write-SynapsStays([string]$Mine, [string]$PathEdit, [string]$Rustup) {
     $s = if ($Mine) { $Mine } else { (Get-Command synaps -ErrorAction SilentlyContinue | Select-Object -First 1).Source }
     $cargoSynaps = Join-Path $script:CargoBin 'synaps.exe'
     if (-not $s -and (Test-Path -LiteralPath $cargoSynaps)) { $s = $cargoSynaps }
-    $theirs = Join-Path $(if ($env:XDG_CONFIG_HOME) { $env:XDG_CONFIG_HOME } else { $env:LOCALAPPDATA }) 'synaps\synaps-receipt.json'
-    $own = $Mine -or ($s -eq $cargoSynaps -and (Test-Path -LiteralPath $theirs))
+    $theirs = Join-Path $(if ($env:XDG_CONFIG_HOME) { $env:XDG_CONFIG_HOME } else { $env:LOCALAPPDATA }) 'synaps'
     $h = Get-Tilde (Get-SynapsHome)
     if ($s) {
         Write-Info "synaps stays installed (her daemon's other clients may use it): $(Get-Tilde $s)"
         Write-Info "your Synaps login and sessions live in $h"
-        if ($own) {
-            Write-Info "to remove Synaps too: & `"$(Get-Tilde $s)`" daemon stop, then delete $(Get-Tilde $s), $h and $(Get-Tilde (Split-Path -Parent $theirs))"
-            Write-Info "  its installer also put $(Get-Tilde (Split-Path -Parent $s)) on your user Path (keep it if you use Rust)"
+        if ($Mine) {
+            Write-Info "to remove Synaps too (this installed it): & `"$(Get-Tilde $s)`" daemon stop, then delete $(Get-Tilde $s) and $(Get-Tilde $theirs) ($h only if you want your login and sessions gone)"
+            if ($PathEdit -ne 'no') { Write-Info "  its installer also put $(Get-Tilde (Split-Path -Parent $s)) on your user Path (keep it if you use Rust)" }
         } else {
-            Write-Info "to remove Synaps too: synaps daemon stop, then uninstall it the way you installed it ($h is its data)"
+            Write-Info 'to remove Synaps too: synaps daemon stop, then uninstall it the way you installed it'
         }
     }
     if ($Rustup) { Write-Info 'rustup stays too (this installed it for her build): `rustup self uninstall` removes it' }
@@ -842,17 +872,26 @@ function Write-Summary {
     }
     if ($script:VoiceHow) { $rows['voice'] = $script:VoiceHow }
     foreach ($k in $rows.Keys) { Write-Host ('   {0,-14} {1}' -f $k, $rows[$k]) }
-    Invoke-Brain
     Write-Host ''
     Write-Host '   start her: ' -ForegroundColor White -NoNewline
     Write-Host "& `"$($script:Exe)`"" -NoNewline
     Write-Host '      then tap Win+Alt+C (or click her) to talk' -ForegroundColor DarkGray
-    Write-Info 'remove her: install.ps1 --uninstall   (synaps stays)'
+    Write-Info "remove her: $(Get-SelfCommand) --uninstall   (synaps stays)"
+    Invoke-Brain
+}
+
+# This script as he'd run it again with flags: the checkout's file, else the piped form (iex can't
+# pass flags; a scriptblock can).
+function Get-SelfCommand {
+    if ($script:Checkout) { return "& `"$(Join-Path $script:Checkout 'install.ps1')`"" }
+    $ref = if ($script:Ref) { $script:Ref } else { 'main' }
+    return "& ([scriptblock]::Create((irm https://raw.githubusercontent.com/$RepoDefault/$ref/install.ps1)))"
 }
 
 # ---- uninstall --------------------------------------------------------------------------------
 
-# --purge: her own files in her folders, and only those (another pack, his own files stay).
+# --purge: her own files in her folders, and only those (another pack, his own files stay). Her pack
+# isn't one: the receipt's `dir` entry removes it when this script made it, never otherwise.
 function Remove-Hers {
     foreach ($f in @((Join-Path $script:Conf 'settings.toml'), (Join-Path $script:Conf 'settings.toml.tmp'),
             (Join-Path $script:Data 'state.json'), (Join-Path $script:Data 'state.json.tmp'),
@@ -860,16 +899,16 @@ function Remove-Hers {
             (Join-Path $script:Data 'synaps-avatar.log'), (Join-Path $script:Data 'synaps-avatar.old.log'))) {
         if (Test-Path -LiteralPath $f) { Invoke-Action "Remove-Item $f" { Remove-Item -Force -LiteralPath $f } }
     }
-    foreach ($d in @($script:Pack, $script:Cache)) {
-        if (Test-Path -LiteralPath $d) { Invoke-Action "Remove-Item -Recurse $d" { Remove-Item -Recurse -Force -LiteralPath $d } }
-    }
+    if (Test-Path -LiteralPath $script:Cache) { Invoke-Action "Remove-Item -Recurse $($script:Cache)" { Remove-Item -Recurse -Force -LiteralPath $script:Cache } }
 }
 
 function Invoke-Uninstall {
     $script:StepCount = 1
     Write-Step 'Remove what install.ps1 installed'
     $rmdirs = @()
+    $innoRan = $false
     $synapsMine = Get-ReceiptMeta 'synaps'
+    $synapsPathMine = Get-ReceiptMeta 'synaps_path'
     $rustupMine = Get-ReceiptMeta 'rustup'
     if (Test-Path $script:Receipt) {
         Stop-Her
@@ -884,6 +923,7 @@ function Invoke-Uninstall {
                     if ($f[1] -notin @($script:InnoKey, $script:VoiceKey)) { & $skip $f[1] }
                     else {
                         $u = (Get-ItemProperty -Path $f[1] -ErrorAction SilentlyContinue).UninstallString
+                        if ($u -and $f[1] -eq $script:InnoKey) { $innoRan = $true }
                         if ($u) {
                             $exe = $u.Trim('"')
                             Write-Action "$exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART"
@@ -926,6 +966,7 @@ function Invoke-Uninstall {
     Get-ChildItem -Directory -Path (Split-Path -Parent $script:Pack) -Filter "$(Split-Path -Leaf $script:Pack).pre-install-*" -ErrorAction SilentlyContinue |
         ForEach-Object { Write-Info "kept: the pack that was there before she was installed, $(Get-Tilde $_.FullName) (yours)" }
     if ($script:Purge) { Remove-Hers }
+    elseif ($innoRan) { Write-Info "kept: your settings ($(Get-Tilde $script:Conf)); her installer's uninstaller took her state and log; --purge removes the settings too" }
     else { Write-Info "kept: your settings ($(Get-Tilde $script:Conf)) and her state and log ($(Get-Tilde $script:Data)); --purge removes them" }
     # Her folders if they're empty now, then the ones this made (innermost first) if they are.
     foreach ($d in (@($script:Conf, (Split-Path -Parent $script:Pack), $script:Data) + $rmdirs)) {
@@ -936,7 +977,7 @@ function Invoke-Uninstall {
             if (Test-Path -LiteralPath $d) { Write-Info "left in $(Get-Tilde $d), not hers: $((Get-ChildItem -Force -LiteralPath $d | Select-Object -First 5 | ForEach-Object { $_.Name }) -join ' ')" }
         }
     }
-    Write-SynapsStays $synapsMine $rustupMine
+    Write-SynapsStays $synapsMine $synapsPathMine $rustupMine
     Write-Host ''
     Write-Host " $($Bar)removed" -ForegroundColor Red -NoNewline
     if ($script:Dry) { Write-Host '  (dry run: nothing was)' -ForegroundColor Red } else { Write-Host '' }
@@ -947,7 +988,16 @@ function Invoke-CapriInstall([string[]]$ArgList) {
     $ErrorActionPreference = 'Stop'
     $ProgressPreference = 'SilentlyContinue'
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-    if ((-not $ArgList -or $ArgList.Count -eq 0) -and $env:CAPRI_INSTALL_FLAGS) { $ArgList = @($env:CAPRI_INSTALL_FLAGS -split '\s+' | Where-Object { $_ }) }
+    # Read once, said in the banner, then cleared: under `irm | iex` this is his session, and a flag
+    # left there (--uninstall) would apply to his next bare `irm | iex` too.
+    $script:FlagsEnv = ''
+    if ($env:CAPRI_INSTALL_FLAGS) {
+        if (-not $ArgList -or $ArgList.Count -eq 0) {
+            $ArgList = @($env:CAPRI_INSTALL_FLAGS -split '\s+' | Where-Object { $_ })
+            $script:FlagsEnv = "used:$($ArgList -join ' ')"
+        } else { $script:FlagsEnv = "ignored:$($env:CAPRI_INSTALL_FLAGS)" }
+        Remove-Item Env:\CAPRI_INSTALL_FLAGS -ErrorAction SilentlyContinue
+    }
     $script:StepN = 0
     $script:Checkout = ''
     $script:SynapsNew = 0

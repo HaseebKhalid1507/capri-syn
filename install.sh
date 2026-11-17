@@ -35,7 +35,8 @@ usage: install.sh [--yes] [--dry-run] [--uninstall [--purge]] [--voice] [--watch
   --artifact FILE   install this release asset (the Linux tarball) instead of downloading one
   --allow-root      install her for root (as root, with root's own HOME); otherwise root is refused
 
-With no flags, $CAPRI_INSTALL_FLAGS is read instead (space-separated).
+With no flags, $CAPRI_INSTALL_FLAGS is read instead (space-separated, said in the banner); this
+script never passes it on. Prefer `bash -s -- FLAGS`: an exported one would go on applying.
 Steps and details: docs/INSTALL.md (https://github.com/HaseebKhalid1507/capri-syn)
 EOF
 }
@@ -197,6 +198,15 @@ removable() {
     done
     return 1
 }
+# The folders this script makes whole (`dir`, removed recursively): only these, by name.
+known_dir() {
+    local p=${1%/} r
+    for r in "${PREFIXES[@]}"; do [ "$p" != "${r%/}/lib/synaps-avatar" ] || return 0; done
+    case $p in
+        "$PACK" | "$CACHE" | "$CACHE_ROOT/capri-desktop" | "$DATA/capri-voice" | "${CACHE_BASE%/}/Microsoft/DeveloperTools/.onnxruntime") return 0 ;;
+    esac
+    return 1
+}
 # mkdir -p, each folder it makes under $HOME recorded: --uninstall removes it if it's empty then.
 mkp() {
     local d=$1 todo=()
@@ -323,8 +333,11 @@ args() {
     done
     [ "$PURGE" = 0 ] || [ "$UNINSTALL" = 1 ] || die "--purge goes with --uninstall"
     PREFIX=${PREFIX/#\~/$HOME}
-    case $PREFIX in /*) ;; *) PREFIX=$(pwd)/$PREFIX ;; esac
     case $PREFIX in *$'\n'*) die "--prefix: a folder name with a newline in it" ;; esac
+    case $PREFIX in /*) ;; *) PREFIX=$(pwd)/$PREFIX ;; esac
+    # `..` and `.` resolved as written (symlinks kept): the receipt's paths never carry them.
+    if have realpath; then PREFIX=$(realpath -ms -- "$PREFIX") || die "--prefix: can't resolve $PREFIX"; fi
+    case /$PREFIX/ in */../* | */./*) die "--prefix: give it without .. or . ($PREFIX)" ;; esac
     while [ "${PREFIX%/}" != "$PREFIX" ]; do PREFIX=${PREFIX%/}; done
     [ -n "$PREFIX" ] || die "--prefix /: give her a folder of her own (/opt/capri, ~/.local)"
     if [ -n "$ARTIFACT" ]; then
@@ -399,6 +412,10 @@ banner() {
     elif [ -n "$BUNDLE" ]; then
         info "from the release in $(tilde "$BUNDLE")"
     fi
+    case ${FLAGS_ENV:-} in
+        used:*) info "flags from CAPRI_INSTALL_FLAGS: ${FLAGS_ENV#used:}" ;;
+        ignored:*) info "CAPRI_INSTALL_FLAGS (${FLAGS_ENV#ignored:}) ignored: flags were given" ;;
+    esac
 }
 
 preflight() {
@@ -507,6 +524,19 @@ vulkan_check() {
 # ---- 1. synaps --------------------------------------------------------------------------------
 
 synaps_version() { "$1" --version 2>/dev/null | awk '{print $2; exit}'; }
+# The shell files Synaps' installer (cargo-dist) adds its PATH line to: none when its bin folder is
+# on PATH already (or its NO_MODIFY_PATH / UNMANAGED_INSTALL say so); else ~/.profile, the bash
+# ones that exist, a zsh one, and fish's conf.d.
+synaps_rc_edits() {
+    case ":$PATH:" in *":$CARGO_BIN:"*) return 0 ;; esac
+    [ -z "${SYNAPS_UNMANAGED_INSTALL:-}" ] || return 0
+    [ "${SYNAPS_NO_MODIFY_PATH:-${INSTALLER_NO_MODIFY_PATH:-0}}" = 0 ] || return 0
+    local f l z=.zshrc
+    l=$(tilde "$HOME/.profile")
+    for f in .bashrc .bash_profile .bash_login; do if [ -f "$HOME/$f" ]; then l+=", $(tilde "$HOME/$f")"; fi; done
+    if [ ! -f "$HOME/.zshrc" ] && [ -f "$HOME/.zshenv" ]; then z=.zshenv; fi
+    printf '%s, %s, %s' "$l" "$(tilde "$HOME/$z")" "$(tilde "$HOME/.config/fish/conf.d/synaps.env.fish")"
+}
 
 step_synaps() {
     step "Synaps"
@@ -538,12 +568,26 @@ step_synaps() {
         tag=v$M_synaps_pin sha=$M_synaps_installer_sh_sha256
         info "GitHub's API didn't answer: the pinned $tag"
     fi
-    local url=https://github.com/$M_synaps_repo/releases/download/$tag/synaps-installer.sh
+    local url=https://github.com/$M_synaps_repo/releases/download/$tag/synaps-installer.sh rc
+    rc=$(synaps_rc_edits)
+    if [ -n "$rc" ]; then
+        info "its installer puts $(tilde "$CARGO_BIN") on your PATH: it adds \`. \"\$HOME/.cargo/env\"\` (where it isn't already) to $rc"
+    else
+        info "its installer edits none of your shell files"
+    fi
+    if ! confirm "install Synaps ${tag#v} with its installer${rc:+ (and those edits)}"; then
+        info "or install it yourself, your shell files untouched: curl -fsSL $url | SYNAPS_NO_MODIFY_PATH=1 sh"
+        die "she needs Synaps: say yes (or --yes), or install it as above, then run this again"
+    fi
     get "$url" "$TMP/synaps-installer.sh"
     if [ "$DRY" = 1 ]; then info "(checks its sha256: $sha)"; else verify "$TMP/synaps-installer.sh" "$sha"; fi
     run sh "$TMP/synaps-installer.sh" --quiet
     SYNAPS=$CARGO_BIN/synaps SYNAPS_V=${tag#v}
-    rec_meta synaps "$SYNAPS"
+    # Hers to mention removing only if there was none: an upgrade of his stays his.
+    if [ "$SYNAPS_NEW" = 1 ]; then
+        rec_meta synaps "$SYNAPS"
+        rec_meta synaps_rc "${rc:-none}"
+    fi
     if [ "$DRY" = 0 ]; then
         [ -x "$SYNAPS" ] || die "the synaps installer ran, but there's no $SYNAPS"
         SYNAPS_V=$(synaps_version "$SYNAPS")
@@ -1234,7 +1278,7 @@ has_brain() {
 }
 
 # The brain step: she talks through Synaps, and Synaps needs a model (`synaps login`, a picker).
-# Run here only with a terminal to pick on; a daemon already running picks the login up on her next
+# Run here only with a terminal to pick on, and never with --yes; a daemon already running picks the login up on her next
 # turn (Synaps reads auth.json per request).
 brain() {
     local cmd a=''
@@ -1247,23 +1291,26 @@ brain() {
     info "she talks through Synaps, and Synaps needs a model."
     printf '   %s$ %s%s        %sa subscription you already pay for, an API key, or a local model%s\n' "$T" "$cmd" "$N" "$D" "$N"
     info "skip it and she still perches, naps and plays. she just can't answer yet."
+    # A picker waits for him: --yes (unattended) never opens it.
+    if [ "$YES" = 1 ]; then
+        info "--yes: not opened here (it waits for you to pick): run that line when you want her to answer"
+        return 0
+    fi
     if [ "$DRY" = 1 ]; then
-        info "(asks: pick one now [Y/n]; with a terminal, --yes runs it)"
+        info "(asks: pick one now [Y/n], with a terminal)"
         return 0
     fi
     if ! (: </dev/tty) 2>/dev/null; then
         info "no terminal to pick on: run that line when you want her to answer"
         return 0
     fi
-    if [ "$YES" = 0 ]; then
-        printf '   %s?%s pick one now [Y/n] ' "$R$B" "$N" >/dev/tty
-        read -r a </dev/tty || a=n
-        case $a in '' | y | Y | yes | YES) ;; *)
-            info "later, then: run that line when you want her to answer"
-            return 0
-            ;;
-        esac
-    fi
+    printf '   %s?%s pick one now [Y/n] ' "$R$B" "$N" >/dev/tty
+    read -r a </dev/tty || a=n
+    case $a in '' | y | Y | yes | YES) ;; *)
+        info "later, then: run that line when you want her to answer"
+        return 0
+        ;;
+    esac
     if "$SYNAPS" login </dev/tty >/dev/tty 2>&1 && has_brain; then
         good "her brain: logged in (no restart: the daemon reads it on her next turn)"
     else
@@ -1272,22 +1319,23 @@ brain() {
 }
 
 # What stays of Synaps after --uninstall, where his login lives, and how to remove it too.
-# MINE: the synaps this script installed (the receipt says), RUSTUP: the rustup it installed.
-# Synaps' own installer (this one ran it, or he did) leaves a receipt: then what it added is known.
+# MINE: the synaps this script installed (there was none before), RC: the shell files its installer
+# edited, RUSTUP: the rustup it installed. A Synaps he had (or one it upgraded) is his: only a pointer.
 synaps_stays() {
-    local mine=$1 rustup=$2 s h own=0
+    local mine=$1 rc=$2 rustup=$3 s h
     s=${mine:-$(command -v synaps 2>/dev/null || true)}
     [ -n "$s" ] || { [ -x "$CARGO_BIN/synaps" ] && s=$CARGO_BIN/synaps; } || true
     h=$(tilde "$(synaps_home)")
-    if [ -n "$mine" ] || { [ "$s" = "$CARGO_BIN/synaps" ] && [ -f "$CONF/synaps/synaps-receipt.json" ]; }; then own=1; fi
     if [ -n "$s" ]; then
         info "synaps stays installed (her daemon's other clients may use it): $(tilde "$s")"
         info "your Synaps login and sessions live in $h"
-        if [ "$own" = 1 ]; then
-            info "to remove Synaps too: $(q "$(tilde "$s")") daemon stop, then delete $(tilde "$s"), $h and $(tilde "$CONF/synaps")"
-            info "  its installer also added $(tilde "$CONF/fish/conf.d/synaps.env.fish") and a \`. \"\$HOME/.cargo/env\"\` line to ~/.profile, ~/.bashrc and ~/.zshrc (keep that line if you use Rust)"
+        if [ -n "$mine" ]; then
+            info "to remove Synaps too (this installed it): $(q "$(tilde "$s")") daemon stop, then delete $(tilde "$s") and $(tilde "$CONF/synaps") ($h only if you want your login and sessions gone)"
+            if [ -n "$rc" ] && [ "$rc" != none ]; then
+                info "  its installer also added a \`. \"\$HOME/.cargo/env\"\` line to $rc (keep it if you use Rust)"
+            fi
         else
-            info "to remove Synaps too: synaps daemon stop, then uninstall it the way you installed it ($h is its data)"
+            info "to remove Synaps too: synaps daemon stop, then uninstall it the way you installed it"
         fi
     fi
     if [ -n "$rustup" ]; then info "rustup stays too (this installed it for her build): \`rustup self uninstall\` removes it"; fi
@@ -1307,15 +1355,27 @@ summary() {
     local how='click her to talk'
     if [ -n "${SUMMON_KEY:-}" ]; then how="tap $SUMMON_KEY (or click her) to talk"; fi
     case ${SUMMON:-} in 'your own'*) how='your key summons her' ;; esac
-    brain
     printf '\n   %sstart her:%s %s &      %sthen %s%s\n' "$B$T" "$N" "$(q "$(tilde "$BIN/synaps-avatar")")" "$D" "$how" "$N"
     case ":$PATH:" in *":$BIN:"*) ;; *) info "$(tilde "$BIN") isn't on your PATH: add it to use \`synaps-avatar\` and \`avatarctl\` by name" ;; esac
-    info "remove her: install.sh --uninstall   (synaps stays)"
+    info "remove her: $(self_cmd) --uninstall   (synaps stays)"
+    brain
+}
+
+# This script as he'd run it again: the checkout's or the tarball's file, else the piped form.
+self_cmd() {
+    if [ -n "$CHECKOUT" ]; then
+        q "$(tilde "$CHECKOUT/install.sh")"
+    elif [ -n "$BUNDLE" ]; then
+        q "$(tilde "$BUNDLE/install.sh")"
+    else
+        printf 'curl -fsSL https://raw.githubusercontent.com/%s/%s/install.sh | bash -s --' "$REPO_DEFAULT" "${REF:-main}"
+    fi
 }
 
 # ---- uninstall --------------------------------------------------------------------------------
 
-# --purge: her own files in those folders, and only those (another pack, his own files stay).
+# --purge: her own files in those folders, and only those (another pack, his own files stay). Her
+# pack isn't one: the receipt's `dir` entry removes it when this script made it, never otherwise.
 purge() {
     local f
     for f in "$CONF/synaps-avatar/settings.toml" "$CONF/synaps-avatar/settings.toml.tmp" \
@@ -1323,7 +1383,7 @@ purge() {
         "$STATE/synaps-avatar/sessions.json" "$STATE/synaps-avatar/sessions.json.tmp"; do
         if [ -f "$f" ]; then run rm -f "$f"; fi
     done
-    for f in "$PACK" "$CACHE_ROOT/installer" "$CACHE_ROOT/capri-desktop"; do
+    for f in "$CACHE_ROOT/installer" "$CACHE_ROOT/capri-desktop"; do
         if [ -d "$f" ]; then run rm -rf "$f"; fi
     done
 }
@@ -1359,6 +1419,15 @@ uninstall() {
                 block) if editable "$f"; then block_rm "$f" "$tag"; else skipped "$f"; fi ;;
                 unit)
                     case $tag in synaps-daemon.service | capri-voice.service | capri-watch.service) ;; *) skipped "$tag"; continue ;; esac
+                    if ! removable "$f" || [ "$(basename "$f")" != "$tag" ]; then
+                        skipped "$f"
+                        continue
+                    fi
+                    # His now (rewritten without our header), or gone: not disabled, not removed.
+                    if ! ours "$f"; then
+                        if [ -f "$f" ]; then info "$(tilde "$f") isn't the one this wrote any more: left as it is"; fi
+                        continue
+                    fi
                     if systemd_user; then
                         if [ "$tag" = synaps-daemon.service ]; then
                             # The daemon keeps running (other clients may use it); it just no longer starts at login.
@@ -1367,12 +1436,8 @@ uninstall() {
                             run systemctl --user disable --now "$tag" || true
                         fi
                     fi
-                    if ! removable "$f"; then
-                        skipped "$f"
-                    elif ours "$f"; then
-                        run rm -f "$f"
-                        reload=1
-                    fi
+                    run rm -f "$f"
+                    reload=1
                     ;;
                 file)
                     if ! removable "$f"; then
@@ -1382,7 +1447,7 @@ uninstall() {
                     fi
                     ;;
                 dir)
-                    if ! removable "$f"; then
+                    if ! removable "$f" || ! known_dir "$f"; then
                         skipped "$f"
                     elif [ -d "$f" ]; then
                         run rm -rf "$f"
@@ -1414,18 +1479,26 @@ uninstall() {
             if [ -d "$d" ]; then info "left in $(tilde "$d"), not hers: $(cd "$d" && find . -mindepth 1 -maxdepth 1 | sed 's#^\./##' | head -n5 | tr '\n' ' ')"; fi
         done
     fi
-    synaps_stays "$syn_mine" "$rust_mine"
+    synaps_stays "$syn_mine" "$(meta synaps_rc)" "$rust_mine"
     printf '\n %s▌removed%s%s\n' "$R$B" "$N" "$([ "$DRY" = 1 ] && printf '  %s(dry run: nothing was)%s' "$R" "$N")"
 }
 
 main() {
     STEP_N=0
     # `irm | iex` can't pass flags (install.ps1 reads them from here too); `curl | bash -s --` can.
-    if [ $# -eq 0 ] && [ -n "${CAPRI_INSTALL_FLAGS:-}" ]; then
-        local -a fl
-        read -r -a fl <<<"$CAPRI_INSTALL_FLAGS"
-        set -- "${fl[@]}"
+    # Read once, said in the banner, and not passed on to anything this runs.
+    FLAGS_ENV=''
+    if [ -n "${CAPRI_INSTALL_FLAGS:-}" ]; then
+        if [ $# -eq 0 ]; then
+            local -a fl
+            read -r -a fl <<<"$CAPRI_INSTALL_FLAGS"
+            set -- "${fl[@]}"
+            FLAGS_ENV="used:${fl[*]}"
+        else
+            FLAGS_ENV="ignored:$CAPRI_INSTALL_FLAGS"
+        fi
     fi
+    unset CAPRI_INSTALL_FLAGS
     args "$@"
     ui
     root_check

@@ -67,7 +67,7 @@ if ($Ref) {
         "'iex-after: EAP=' + `$ErrorActionPreference + ' PP=' + `$ProgressPreference + " +
         "' vars=' + @(Get-Variable -Scope Global -Name Dry, Yes, Prefix, Prefixes, M, Tmp, Data, Steps, RepoDefault, Usage -ErrorAction SilentlyContinue).Count + " +
         "' fns=' + @(Get-Command Invoke-CapriInstall, Write-Info, Test-Removable -ErrorAction SilentlyContinue).Count + " +
-        "' mods=' + @(Get-Module capri-install).Count"
+        "' mods=' + @(Get-Module capri-install).Count + ' env=[' + `$env:CAPRI_INSTALL_FLAGS + ']'"
     $log = Join-Path $logs 'dry-run-iex.log'
     & $Shell -NoProfile -ExecutionPolicy Bypass -Command $probe *> $log
     $code = $LASTEXITCODE
@@ -76,7 +76,9 @@ if ($Ref) {
     $text = Get-Content -Raw $log
     Check ($code -eq 0) "irm | iex (CAPRI_INSTALL_FLAGS=--dry-run --voice) exits 0 ($code)"
     Check ($text -match 'dry run: nothing was') 'it gets to the summary'
-    Check ($text -match 'iex-after: EAP=Continue PP=Continue vars=0 fns=0 mods=0') "his session is as it was ($([regex]::Match($text, 'iex-after:[^\r\n]*').Value))"
+    Check ($text -match 'iex-after: EAP=Continue PP=Continue vars=0 fns=0 mods=0 env=\[\]') "his session is as it was, CAPRI_INSTALL_FLAGS cleared ($([regex]::Match($text, 'iex-after:[^\r\n]*').Value))"
+    Check ($text -match 'flags from CAPRI_INSTALL_FLAGS: --dry-run --voice') 'the banner says where its flags came from'
+    Check ($text -match [regex]::Escape("remove her: & ([scriptblock]::Create((irm https://raw.githubusercontent.com/HaseebKhalid1507/capri-syn/$Ref/install.ps1))) --uninstall")) 'piped: the remove-her line is the piped form'
 }
 $code = Invoke-Installer 'dry-run' @('--dry-run', '--artifact', $Setup)
 Check ($code -eq 0) "--dry-run exits 0 ($code)"
@@ -140,6 +142,9 @@ $own = Join-Path $pack 'made-by-hand.txt'
 New-Item -ItemType Directory -Force $pack | Out-Null
 Set-Content -LiteralPath $own 'his own pack'
 $spaced = Join-Path $env:LOCALAPPDATA 'Programs\My Apps\synaps-avatar'
+# ...and his own Run\synaps-daemon: never overwritten, never recorded, still there after --uninstall.
+$hisRun = '"C:\his\synaps.exe" daemon --detach --his'
+New-ItemProperty -Path $runKey -Name 'synaps-daemon' -Value $hisRun -PropertyType String -Force | Out-Null
 $code = Invoke-Installer 'install-spaced' @('--yes', '--no-autostart', '--artifact', $Setup, '--prefix', $spaced)
 Check ($code -eq 0) "install --prefix '$spaced' exits 0 ($code)"
 Check (Test-Path -LiteralPath (Join-Path $spaced 'synaps-avatar.exe')) "her exe in $spaced"
@@ -154,6 +159,9 @@ Check (-not (Test-Path -LiteralPath (Split-Path -Parent $spaced))) 'and My Apps 
 Check (-not (Test-Path $pack)) 'her pack is gone'
 Check ($aside.Count -eq 1 -and (Test-Path -LiteralPath (Join-Path "$($aside[0])" 'made-by-hand.txt'))) 'his pack stays'
 Check ((Get-Content -Raw (Join-Path $logs 'uninstall-spaced.log')) -notmatch 'left alone') 'every receipt entry was hers to remove'
+Check ((Get-Content -Raw (Join-Path $logs 'install-spaced.log')) -match 'your own Run\\synaps-daemon') 'it said his Run\synaps-daemon is his'
+Check ((Get-RunValue 'synaps-daemon') -eq $hisRun) "his own Run\synaps-daemon is as it was ($(Get-RunValue 'synaps-daemon'))"
+Remove-ItemProperty -Path $runKey -Name 'synaps-daemon'
 
 # 5. --purge: her settings, state and log; another pack, and his from before, stay.
 $conf = Join-Path $env:APPDATA 'synaps-avatar'

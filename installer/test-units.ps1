@@ -36,6 +36,12 @@ $cases = @(
     @('C:\', 'rmdir', $false),
     @("$env:USERPROFILE\Documents", 'dir', $false),
     @("$env:LOCALAPPDATA\synaps-avatar\packs\capri", 'dir', $true),
+    @("$env:LOCALAPPDATA\synaps-avatar\installer", 'dir', $true),
+    @("$prefix\voice", 'dir', $true),
+    @("$env:LOCALAPPDATA\synaps-avatar\packs\mine", 'dir', $false),
+    @("$env:LOCALAPPDATA\synaps-avatar\packs", 'dir', $false),
+    @("$prefix\anything", 'dir', $false),
+    @("$prefix\anything", 'file', $true),
     @("$env:LOCALAPPDATA\synaps-avatar\..\..\Roaming", 'dir', $false),
     @("$env:LOCALAPPDATA\capri-voice", 'dir', $true),
     @("$env:LOCALAPPDATA\capri-voice", 'file', $false),
@@ -58,6 +64,14 @@ New-RecordedPath $prefix
 Check (@(Get-Content -LiteralPath $script:Receipt).Count -eq 2) 'nothing more when it is there'
 Check (Test-Recorded 'rmdir' $prefix) 'Test-Recorded finds an entry'
 Check (-not (Test-Recorded 'rmdir' $tmp)) 'and not one that is not there'
+
+# Add-Receipt's dedup compares whole lines: a path that is the start of one already there still goes in.
+Remove-Item -LiteralPath $script:Receipt
+Add-Receipt @('file', "$prefix\a b.exe")
+Add-Receipt @('file', "$prefix\a")
+Add-Receipt @('file', "$prefix\a")
+$r = @(Get-Content -LiteralPath $script:Receipt)
+Check (($r -join '|') -eq "file`t$prefix\a b.exe|file`t$prefix\a") "Add-Receipt: whole lines, once each ($($r -join ' | '))"
 
 Remove-Item -Recurse -Force -LiteralPath $tmp
 if ($fails.Count) { throw "$($fails.Count) check(s) failed: $($fails -join '; ')" }
