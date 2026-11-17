@@ -72,8 +72,8 @@ impl Mask {
 pub struct Frame {
     pub id: String,
     /// The pixels, `at` (device px) inside the avatar rect: the frame's opaque box (the rest of
-    /// the rect is empty; kept whole, the pack's 84 frames held ~117 MB of transparent rect in
-    /// RAM and as much again in GPUI's atlas, r36).
+    /// the rect is empty; kept whole, the pack's 84 frames packed worse into GPUI's 1024 px atlas
+    /// textures: r36 on the rig, 44.4 -> 38.4 MB of pixels but 32 MB less GPU memory).
     pub image: Arc<RenderImage>,
     pub at: (i32, i32),
     pub mask: Mask,
