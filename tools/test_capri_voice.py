@@ -287,6 +287,25 @@ class WindowsSmoke(unittest.TestCase):
         self.assertIn(win.sink_kind(), ('speakers', 'headphones'))
         self.assertTrue(win.node_missing('sources', 'capri-no-such-device'))
 
+    def test_the_bindings(self):
+        """With the bundle's packages installed (CI's wheel step), each call is shaped right. A box
+        without audio or media may refuse (COM, PortAudio, no service); a wrong name may not."""
+        import importlib.util
+        if not all(importlib.util.find_spec(m) for m in ('pycaw', 'winrt', 'sounddevice')):
+            self.skipTest('the bundle packages are not installed')
+        for name, call in (('SMTC players', lambda: win.Smtc().players()), ('sessions', lambda: win.Sessions().list()),
+                           ('mic', lambda: win.Mic(16000).terminate()), ('speaker', lambda: win.Player(24000).kill())):
+            try:
+                r = call()
+            except (AttributeError, TypeError, NameError, ImportError):
+                raise
+            except Exception as e:
+                print(f'  {name}: refused here ({type(e).__name__}: {e})', file=sys.stderr)
+            else:
+                print(f'  {name}: {r!r}', file=sys.stderr)
+                if r is not None:
+                    self.assertIsInstance(r, list)
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

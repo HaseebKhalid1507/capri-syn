@@ -92,15 +92,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 3.13: what the Windows bundle would ship (kokoro-onnx wants < 3.14).
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.13"
 
-      - name: Packages (numpy; Windows also sounddevice, for the smoke checks)
-        shell: bash
+      - name: Packages (numpy)
+        run: python -m pip install --disable-pip-version-check -q numpy
+
+      # Windows: the bundle's whole set from wheels only (none may need a compiler), then imported,
+      # so the binding checks in the unit tests run against the real packages.
+      - name: The Windows bundle's wheels (binary only) and their imports
+        if: runner.os == 'Windows'
         run: |
-          python -m pip install --disable-pip-version-check -q numpy
-          if [ "$RUNNER_OS" = Windows ]; then python -m pip install --disable-pip-version-check -q sounddevice; fi
+          python -m pip install --disable-pip-version-check -q --only-binary :all: -r tools/capri-voice-win-requirements.txt
+          python -c "import kokoro_onnx, pywhispercpp.model, onnxruntime, sounddevice, pycaw.pycaw, winrt.windows.media.control; print('imports ok, onnxruntime', onnxruntime.__version__, onnxruntime.get_available_providers())"
 
       - name: Unit tests
         run: python tools/test_capri_voice.py

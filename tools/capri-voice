@@ -361,6 +361,8 @@ class WakeForced:
         self.ct, self.threads = ctypes, threads
         d = os.path.dirname(pw.__file__)
         libs = sorted(glob.glob(f'{d}/pywhispercpp.libs/libwhisper*.so*')) or sorted(glob.glob(f'{d}/libwhisper.so*'))
+        if WIN:   # its wheel's DLL (delvewheel puts it in pywhispercpp.libs, or beside the module) [VM]
+            libs = sorted(glob.glob(f'{d}/pywhispercpp.libs/whisper*.dll')) or sorted(glob.glob(f'{d}/whisper*.dll'))
         L = self.L = ctypes.CDLL(libs[0])
         # pybind11's instance: PyObject_HEAD (16 bytes on a GIL build), then the value pointer, then the holder (a
         # unique_ptr: the same pointer). The value is pywhispercpp's wrapper, whose first field is the whisper_context*.
