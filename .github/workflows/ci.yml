@@ -165,9 +165,52 @@ jobs:
         shell: pwsh
         run: ./packaging/windows/test-install.ps1 -Setup (Get-ChildItem packaging/windows/Output/synaps-avatar-setup-*.exe | Select-Object -First 1).FullName
 
+      # Voice is its own download (windows-voice-installer): hers must stay small.
+      - name: Her installer stays small (no voice in it)
+        shell: pwsh
+        run: |
+          $s = (Get-ChildItem packaging/windows/Output/synaps-avatar-setup-*.exe | Select-Object -First 1).Length
+          Write-Output "her installer: $([math]::Round($s / 1MB, 1)) MB"
+          if ($s -gt 20MB) { throw "her installer is $([math]::Round($s / 1MB, 1)) MB: over 20 MB" }
+
       - uses: actions/upload-artifact@v4
         with:
           name: synaps-avatar-setup-${{ github.sha }}
           path: packaging/windows/Output/synaps-avatar-setup-*.exe
+          retention-days: 14
+          if-no-files-found: error
+
+  # Her voice installer (packaging/windows/synaps-avatar-voice.iss): the bundle beside her, as its
+  # own download. Built, installed, checked and uninstalled unattended (without the models); then
+  # the model fetch on its small files (resume, a bad hash). An artifact, never released.
+  windows-voice-installer:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Build the voice installer
+        shell: pwsh
+        run: ./packaging/windows/build-voice.ps1
+
+      - name: Install, check, uninstall (unattended)
+        timeout-minutes: 15
+        shell: pwsh
+        run: ./packaging/windows/test-voice-install.ps1 -Setup (Get-ChildItem packaging/windows/Output/synaps-avatar-voice-setup-*.exe | Select-Object -First 1).FullName
+
+      - name: The model fetch (small files; resume, a bad hash)
+        if: ${{ !cancelled() }}
+        timeout-minutes: 10
+        shell: pwsh
+        run: ./packaging/windows/test-voice-models.ps1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: synaps-avatar-voice-setup-${{ github.sha }}
+          path: packaging/windows/Output/synaps-avatar-voice-setup-*.exe
           retention-days: 14
           if-no-files-found: error
