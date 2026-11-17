@@ -363,13 +363,21 @@ impl Avatar {
 
     /// The nap's stand-up (on the floor), moves held until it ends.
     pub(super) fn play_nap_wake(&mut self, now: Instant) {
+        self.play_nap_wake_for(false, now);
+    }
+
+    /// `greet`: a greeting follows, so the quicker get-up (`napWakeGreet`) if the pack has one
+    /// (r40: she sat low ~1.8 s before the wave).
+    pub(super) fn play_nap_wake_for(&mut self, greet: bool, now: Instant) {
         // A strip's floor sleep has its own way out: its drawn wake (then she stands in the
         // drawing it ends in a few seconds), else the seam's glitch. No CapriCore stand-up.
         if std::mem::take(&mut self.art.floor_strip) {
             self.play_drawn_wake(now);
             return;
         }
-        let wake = self.pack.flatten(&self.pack.behaviour.brain.nap_wake.clone());
+        let b = &self.pack.behaviour.brain;
+        let steps = if greet && !b.nap_wake_greet.is_empty() { b.nap_wake_greet.clone() } else { b.nap_wake.clone() };
+        let wake = self.pack.flatten(&steps);
         if wake.is_empty() {
             return;
         }

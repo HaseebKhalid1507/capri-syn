@@ -161,6 +161,9 @@ pub enum HopKind {
     Startle,
     /// The pointer hovered on her a while: a playful hop away from it.
     Dodge,
+    /// The pointer stopped beside her (after a wiggle, or now and then): a hop toward it,
+    /// landing beside it (never on it), on a window top if one is in reach (BRIEF-alive S2).
+    Pounce,
 }
 
 impl HopKind {
@@ -169,6 +172,7 @@ impl HopKind {
             HopKind::Micro => "micro",
             HopKind::Startle => "startle",
             HopKind::Dodge => "dodge",
+            HopKind::Pounce => "pounce",
         }
     }
 }
@@ -188,6 +192,10 @@ pub enum Screen {
     CursorSwipe { speed: f32 },
     /// The pointer has rested on her a while.
     CursorHover,
+    /// The pointer has stayed still beside her (not on her) a while.
+    CursorLinger,
+    /// A quick left-right wiggle of the pointer near her.
+    CursorWiggle,
     /// He switched workspace (`places::workspace_switch`). `here`: on her monitor (i3 switches
     /// one monitor at a time; a switch on another one changed nothing under her); `stranded`:
     /// her perch went with the old workspace (she'd fall).
@@ -203,6 +211,12 @@ pub enum React {
     Startle,
     /// Lean in for a headpat.
     Lean,
+    /// The pointer lingers beside her: she leans in toward it, then looks at it (S1).
+    Curious,
+    /// A wiggle near her: a paw-bat at it (standing), a startle elsewhere (S2).
+    Bat,
+    /// After a sulk (on) she keeps her back to his window; off: over (a pat made up, or time).
+    Cold(bool),
     /// Her perch closed and she doesn't teleport: she falls (as before).
     Fall,
 }
@@ -278,6 +292,10 @@ pub enum EmoteKey {
     Wave,
     /// He's back (an unlock, a long absence): the morning one the first of a day before noon.
     Greet { morning: bool },
+    /// A pat during a sulk or its cold shoulder: embarrassed, happy, heart hands (S14).
+    MakeUp,
+    /// Landed from a pounce beside the pointer: "missed!".
+    Missed,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -404,6 +422,20 @@ pub struct Tuning {
     pub startle_gap_s: f64,
     /// The pointer resting on her: a dodge (`dodge_p`) or a lean, at most this often.
     pub hover_gap_s: f64,
+    /// The pointer still beside her: curious (a lean toward it) at most this often, and so
+    /// many an hour; it counts as a look.
+    pub curious_gap_s: f64,
+    pub curious_per_h: usize,
+    /// A wiggle near her: a bat at most this often.
+    pub bat_gap_s: f64,
+    /// A pounce at the still pointer: this likely within `pounce_after_wiggle_s` of a wiggle,
+    /// `pounce_p` otherwise; at most once in `pounce_gap_s` (a hop under the hourly cap).
+    pub pounce_p: f64,
+    pub pounce_after_wiggle_p: f64,
+    pub pounce_after_wiggle_s: f64,
+    pub pounce_gap_s: f64,
+    /// After a sulk she keeps her back to him this long; a pat in the sulk or this makes up.
+    pub cold_shoulder_s: f64,
     pub dodge_p: f64,
     /// Her perch dragged this fast (device px/s): a startled hop off it, at most this often.
     pub drag_speed: f32,
@@ -469,6 +501,14 @@ impl Tuning {
             swipe_speed: 1500.0,
             startle_gap_s: 30.0,
             hover_gap_s: 45.0,
+            curious_gap_s: 20.0,
+            curious_per_h: 30,
+            bat_gap_s: 20.0,
+            pounce_p: 0.2,
+            pounce_after_wiggle_p: 0.8,
+            pounce_after_wiggle_s: 8.0,
+            pounce_gap_s: 120.0,
+            cold_shoulder_s: 120.0,
             dodge_p: 0.5,
             drag_speed: 1800.0,
             drag_gap_s: 5.0,
@@ -484,7 +524,7 @@ impl Tuning {
 
 /// Moves that count fully against the hourly cap and those that count `hop_weight`.
 fn weight_of(why: &str, hop: f64) -> f64 {
-    if matches!(why, "micro" | "dodge" | "startle_drag") { hop } else { 1.0 }
+    if matches!(why, "micro" | "dodge" | "startle_drag" | "pounce") { hop } else { 1.0 }
 }
 
 /// Rules whose arrival restarts the roam clock when the view held the move back.
@@ -675,6 +715,13 @@ pub struct Brain {
     last_startle: Option<f64>,
     last_hover: Option<f64>,
     last_drag: Option<f64>,
+    /// The curious leans of the last hour, the last bat, wiggle and pounce (S1, S2).
+    curious: VecDeque<f64>,
+    last_bat: Option<f64>,
+    last_wiggle: Option<f64>,
+    last_pounce: Option<f64>,
+    /// The cold shoulder after a sulk lasts until then (S14).
+    cold_until: Option<f64>,
     /// Screen things waiting for the next tick's senses.
     screen_q: Vec<Screen>,
     pending: Option<Pending>,
@@ -753,6 +800,11 @@ impl Brain {
             last_look: None,
             last_startle: None,
             last_hover: None,
+            curious: VecDeque::new(),
+            last_bat: None,
+            last_wiggle: None,
+            last_pounce: None,
+            cold_until: None,
             last_drag: None,
             screen_q: Vec::new(),
             pending: None,
@@ -1071,6 +1123,9 @@ impl Brain {
         if let Some(u) = self.doze_until {
             take(u);
         }
+        if let Some(u) = self.cold_until {
+            take(u);
+        }
         match &self.mode {
             Mode::Seeking { since, .. } => take(since + self.tuning.seek_timeout_s),
             Mode::Bidding { stage, since, next_emote, .. } => {
@@ -1294,6 +1349,11 @@ impl Brain {
     }
 
     fn timers(&mut self, t: f64) {
+        if self.cold_until.is_some_and(|u| t + EPS >= u) {
+            self.cold_until = None;
+            self.note(t, "cold shoulder over".into());
+            self.emit(t, Intent::React(React::Cold(false)));
+        }
         match self.mode.clone() {
             Mode::Seeking { since, .. } if t + EPS >= since + self.tuning.seek_timeout_s => {
                 self.note(t, "seek timed out".into());
@@ -1597,6 +1657,32 @@ impl Brain {
         self.emit(t, Intent::Save);
     }
 
+    /// The cursor game may play: no summon waiting, no episode (a bid, a summon, a sulk) and
+    /// not her cold shoulder.
+    fn playful(&self, t: f64) -> bool {
+        self.pending.is_none()
+            && !self.mode.active()
+            && !matches!(self.mode, Mode::Sulking { .. })
+            && self.cold_until.is_none_or(|u| t >= u)
+    }
+
+    /// He patted her through the sulk: over at once (no far move), her back no longer to him.
+    fn make_up(&mut self, t: f64) {
+        self.note(t, "make-up".into());
+        if matches!(self.mode, Mode::Sulking { .. }) {
+            self.mode = Mode::Passive;
+            self.redraw_roam();
+        }
+        // Made up: no far move off him.
+        self.far_next = false;
+        self.attn = 0.0;
+        self.redraw_theta(0.0);
+        self.cold_until = None;
+        self.emit(t, Intent::React(React::Cold(false)));
+        self.emit(t, Intent::Emote(EmoteKey::MakeUp));
+        self.emit(t, Intent::Save);
+    }
+
     /// `ignored`: the bid ran out (θ raised, then a far move); else offended (fling).
     fn sulk(&mut self, t: f64, ignored: bool) {
         self.attn = if ignored { 0.0 } else { -0.8 };
@@ -1604,6 +1690,8 @@ impl Brain {
         // Offended (a fling) or sulking on his window: the far move at the end.
         let far = !ignored || (self.covering && !self.sulk_leaves);
         self.mode = Mode::Sulking { until: t + self.tuning.sulk_s, far };
+        // Her back to him through the sulk and a while after it (a facing rule, no art).
+        self.cold_until = Some(t + self.tuning.sulk_s + self.tuning.cold_shoulder_s);
         if ignored {
             // Off his window first (a hang can't sulk with its arms crossed): the sulk plays
             // where she lands, and she stays down there.
@@ -1614,6 +1702,7 @@ impl Brain {
         } else {
             self.note(t, "offended (the ragdoll's hard landing plays the sulk)".into());
         }
+        self.emit(t, Intent::React(React::Cold(true)));
         // A covered window is left with the far move at the end of the sulk.
         self.covering = false;
     }
@@ -1621,7 +1710,7 @@ impl Brain {
     fn move_failed(&mut self, t: f64, busy: bool, why: &'static str) {
         // Hops and reactions that couldn't go simply didn't happen (the view falls for a
         // closed perch).
-        if matches!(why, "micro" | "dodge" | "startle_drag" | "focus" | "workspace" | "perch_closed") {
+        if matches!(why, "micro" | "dodge" | "pounce" | "startle_drag" | "focus" | "workspace" | "perch_closed") {
             self.unrecord(why);
             return;
         }
@@ -1671,6 +1760,12 @@ impl Brain {
                     self.end_nap(t, "touch");
                 }
                 let answered = matches!(touch, Touch::Typing | Touch::Submit | Touch::PromptAnswer);
+                // A pat in her sulk or its cold shoulder makes up (S14).
+                let cold = matches!(self.mode, Mode::Sulking { .. }) || self.cold_until.is_some_and(|u| t < u);
+                if touch == Touch::Headpat && cold && !self.asleep() {
+                    self.make_up(t);
+                    return;
+                }
                 if self.mode.active() || matches!(self.mode, Mode::Sulking { .. }) {
                     if answered {
                         self.prompt_open = None;
@@ -1733,6 +1828,10 @@ impl Brain {
                     format!("arrived {} by {}{}", a.approach.map_or("passive", Approach::key), a.arrival.key(), if a.covering { " (covering)" } else { "" }),
                 );
                 self.covering = a.covering;
+                // Landed beside the pointer she pounced at: "missed!".
+                if a.why == "pounce" {
+                    self.emit(t, Intent::Emote(EmoteKey::Missed));
+                }
                 // Only the visit's or the summon's own landing ends the seek (a hop decided
                 // just before it may land first).
                 if let Mode::Seeking { why, .. } = self.mode
@@ -1907,6 +2006,41 @@ impl Brain {
                     } else {
                         self.emit(t, Intent::React(React::Lean));
                     }
+                }
+            }
+            // The cursor game (S1, S2): none of it with a summon waiting, in an episode, or with
+            // her back to him (the cold shoulder).
+            Screen::CursorLinger | Screen::CursorWiggle if !(calm && awake && self.playful(t)) => {}
+            Screen::CursorLinger => {
+                let w = self.tuning.hop_weight;
+                let wiggled = self.last_wiggle.is_some_and(|l| t - l <= self.tuning.pounce_after_wiggle_s);
+                let p = if wiggled { self.tuning.pounce_after_wiggle_p } else { self.tuning.pounce_p };
+                let pounce = passive
+                    && !typing
+                    && self.hops_on()
+                    && self.sensed.placement == PlaceKind::Ground
+                    && since(self.last_pounce, self.tuning.pounce_gap_s)
+                    && self.cap_ok(t, w)
+                    && (self.rng.range(0.0, 1.0) as f64) < p;
+                self.curious.retain(|&c| t - c < 3600.0);
+                if pounce {
+                    self.last_pounce = Some(t);
+                    self.last_look = Some(t);
+                    self.record_move(t, "pounce");
+                    self.emit(t, Intent::Move(MovePlan { goal: Goal::Hop { kind: HopKind::Pounce, away: false }, why: "pounce", arrivals: vec![Arrival::Hop] }));
+                } else if since(self.curious.back().copied(), self.tuning.curious_gap_s) && self.curious.len() < self.tuning.curious_per_h {
+                    self.curious.push_back(t);
+                    // A curious lean counts as a look.
+                    self.last_look = Some(t);
+                    self.emit(t, Intent::React(React::Curious));
+                }
+            }
+            Screen::CursorWiggle => {
+                self.last_wiggle = Some(t);
+                if since(self.last_bat, self.tuning.bat_gap_s) {
+                    self.last_bat = Some(t);
+                    self.last_look = Some(t);
+                    self.emit(t, Intent::React(React::Bat));
                 }
             }
             Screen::Workspace { here, stranded } => {
@@ -2788,6 +2922,99 @@ mod tests {
     }
 
     #[test]
+    fn the_cursor_game_curious_bat_and_pounce_rate_limited() {
+        let linger = |t: f64| screen(t, Screen::CursorLinger);
+        let wiggle = |t: f64| screen(t, Screen::CursorWiggle);
+        // Lingers every 5 s for 3 min: curious at most every 20 s, a pounce at most once in
+        // 2 min; each counts as a look.
+        for seed in 0..200u64 {
+            let mut b = calm(seed);
+            let ev: Vec<_> = (0..36).map(|k| linger(31.0 + 5.0 * k as f64)).collect();
+            let r = run(&mut b, 0.0, 215.0, false, &here, &ev);
+            let cur: Vec<f64> = reacts(&r).into_iter().filter(|x| x.1 == React::Curious).map(|x| x.0).collect();
+            assert!(cur.windows(2).all(|w| w[1] - w[0] >= 20.0 - 1e-6), "seed {seed}: {cur:?}");
+            let p: Vec<f64> = whys(&r).into_iter().filter(|x| x.1 == "pounce").map(|x| x.0).collect();
+            assert!(p.windows(2).all(|w| w[1] - w[0] >= 120.0 - 1e-6), "seed {seed}: {p:?}");
+            assert!(!cur.is_empty(), "seed {seed}");
+        }
+        // A wiggle: a bat (at most every 20 s); the pointer still beside her right after: a
+        // pounce most of the time (a hop toward it, a quarter move).
+        let (mut pounces, n) = (0, 400u64);
+        for seed in 0..n {
+            let mut b = calm(seed);
+            let r = run(&mut b, 0.0, 41.0, false, &here, &[wiggle(31.0), wiggle(33.0), linger(36.0)]);
+            let bats: Vec<f64> = reacts(&r).into_iter().filter(|x| x.1 == React::Bat).map(|x| x.0).collect();
+            assert_eq!(bats, vec![31.0], "seed {seed}");
+            let m: Vec<_> = moves(&r).into_iter().filter(|x| x.1.why == "pounce").collect();
+            if let Some((t, plan)) = m.first() {
+                assert_eq!((*t, plan.goal.clone(), plan.arrivals.clone()), (36.0, Goal::Hop { kind: HopKind::Pounce, away: false }, vec![Arrival::Hop]));
+                pounces += 1;
+            }
+        }
+        assert!((pounces as f64 / n as f64 - 0.8).abs() <= 0.06, "{pounces} of {n}");
+        // Typing: never a pounce (the lean still).
+        for seed in 0..100u64 {
+            let mut b = calm(seed);
+            let typing = |t: f64| Senses { typing: true, ..here(t) };
+            let r = run(&mut b, 0.0, 41.0, false, &typing, &[wiggle(31.0), linger(36.0)]);
+            assert!(whys(&r).iter().all(|x| x.1 != "pounce"), "seed {seed}");
+        }
+    }
+
+    #[test]
+    fn the_cursor_game_waits_for_every_gate() {
+        let ev = |t: f64| vec![screen(t, Screen::CursorWiggle), screen(t + 3.0, Screen::CursorLinger), screen(t + 30.0, Screen::CursorLinger)];
+        let quiet = |r: &Run| reacts(r).iter().all(|x| !matches!(x.1, React::Curious | React::Bat)) && whys(r).iter().all(|x| x.1 != "pounce");
+        // DND, fullscreen, asleep, each holder.
+        let fs: fn(f64) -> Senses = |t| Senses { fullscreen: true, ..here(t) };
+        let asleep: fn(f64) -> Senses = |t| Senses { asleep: true, ..here(t) };
+        for (i, s) in [fs, asleep].into_iter().enumerate() {
+            let mut b = calm(4);
+            assert!(quiet(&run(&mut b, 0.0, 80.0, false, &s, &ev(31.0))), "gate {i}");
+        }
+        let mut b = calm(4);
+        let mut e = vec![(10.0, BrainEvent::Control(Ctl::Dnd(600.0)))];
+        e.extend(ev(31.0));
+        assert!(quiet(&run(&mut b, 0.0, 80.0, false, &here, &e)), "dnd");
+        for h in HOLDERS {
+            let mut b = calm(4);
+            let held = move |t: f64| Senses { busy: vec![h], ..here(t) };
+            assert!(quiet(&run(&mut b, 0.0, 80.0, false, &held, &ev(31.0))), "{h}");
+        }
+        // A summon waiting (the session finished a turn).
+        let mut b = calm(4);
+        let mut e = vec![(30.0, BrainEvent::Control(Ctl::Force(Force::Summon)))];
+        e.extend(ev(31.0));
+        assert!(quiet(&run(&mut b, 0.0, 33.5, false, &here, &e)), "summon");
+        // Open, the same events play.
+        let mut b = calm(4);
+        assert!(!quiet(&run(&mut b, 0.0, 80.0, false, &here, &ev(31.0))));
+    }
+
+    #[test]
+    fn a_sulk_turns_her_back_and_a_pat_makes_up() {
+        let mut b = brain(5);
+        let r = run(&mut b, 0.0, 600.0, false, &here, &[(500.0, BrainEvent::Control(Ctl::Force(Force::Seek)))]);
+        let sulk = r.log.iter().find(|(_, i)| *i == Intent::Emote(EmoteKey::Sulk)).expect("sulk").0;
+        assert!(reacts(&r).contains(&(sulk, React::Cold(true))), "her back to him with the sulk");
+        // The cursor game is off through it.
+        let ev = [screen(sulk + 40.0, Screen::CursorWiggle), screen(sulk + 44.0, Screen::CursorLinger)];
+        let r2 = run(&mut b, 600.0, sulk + 50.0, false, &here, &ev);
+        assert!(reacts(&r2).iter().all(|x| !matches!(x.1, React::Bat | React::Curious)), "{:?}", reacts(&r2));
+        // A pat inside the cold shoulder: make-up, her back no longer turned, no far move after.
+        let r3 = run(&mut b, sulk + 50.0, sulk + 400.0, false, &here, &[(sulk + 60.0, BrainEvent::Interaction(Touch::Headpat))]);
+        assert!(r3.log.contains(&(sulk + 60.0, Intent::Emote(EmoteKey::MakeUp))), "{:?}", r3.log);
+        assert!(reacts(&r3).contains(&(sulk + 60.0, React::Cold(false))));
+        assert!(moves(&r3).iter().all(|m| m.1.goal != Goal::Passive { far: true }), "made up: no far move");
+        // Unpatted, it ends on its own (the sulk's 6 s plus 2 min).
+        let mut b = brain(5);
+        let r = run(&mut b, 0.0, 800.0, false, &here, &[(500.0, BrainEvent::Control(Ctl::Force(Force::Seek)))]);
+        let off: Vec<f64> = reacts(&r).into_iter().filter(|x| x.1 == React::Cold(false)).map(|x| x.0).collect();
+        assert!(off.len() == 1 && (off[0] - (sulk + 126.0)).abs() < 1.5, "{off:?}");
+        assert!(r.log.iter().all(|(_, i)| *i != Intent::Emote(EmoteKey::MakeUp)));
+    }
+
+    #[test]
     fn perch_close_teleport_or_fall_split() {
         // A window she sits on closes: 55 % a teleport to another window's top, else the fall.
         let perch = |t: f64| Senses { placement: PlaceKind::Perch, ..here(t) };
@@ -2978,7 +3205,7 @@ mod tests {
                 let quiet = (3600.0..10800.0).contains(t) || s(*t).fullscreen;
                 if quiet {
                     let leave = matches!(i, Intent::Move(p) if p.goal == Goal::Leave);
-                    assert!(leave || matches!(i, Intent::React(React::Fall) | Intent::Hide(_) | Intent::Pose(_) | Intent::Emote(_)), "seed {seed}: {i:?} at {t}");
+                    assert!(leave || matches!(i, Intent::React(React::Fall | React::Cold(_)) | Intent::Hide(_) | Intent::Pose(_) | Intent::Emote(_)), "seed {seed}: {i:?} at {t}");
                 }
             }
         }

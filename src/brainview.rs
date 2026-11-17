@@ -234,6 +234,8 @@ pub(super) struct BrainHost {
     kick: Option<(Instant, f32)>,
     /// An insist beat's leg kick while hanging (start, direction).
     leg_kick: Option<(Instant, f32)>,
+    /// Her cold shoulder after a sulk (`React::Cold`): her back to his window.
+    pub cold: bool,
     /// Hanging or clinging: the ragdoll chain she swings on (a gentle pumped pendulum).
     pub swing: Option<BidSwing>,
     /// Float to float: an eased drift in short bursts (moves only, no redraw).
@@ -366,6 +368,18 @@ impl Avatar {
         });
         let floor_sit = self.pack.behaviour.brain.floor_sit.as_ref().and_then(|f| self.pack.index.get(&f.base)).map_or(stand, |&i| self.box_rel(i));
         let pose = |k: &str| self.brain_pose(k).map(|i| self.box_rel(i));
+        // Her whole outline standing: the decoded frame's opaque extent (the hair's reach).
+        let outline = self.frame_or_default(default).and_then(|f| {
+            let l = &self.layout;
+            let cols: Vec<usize> = f.profile.iter().enumerate().filter(|(_, y)| **y != i16::MAX).map(|(x, _)| x).collect();
+            let (c0, c1) = (*cols.first()? as i32, *cols.last()? as i32);
+            let (ax, ay) = self.anchor_px(default);
+            Some(WinRect::new(l.avatar_x + c0 - ax, l.avatar_y + f.top - ay, c1 - c0 + 1, f.bottom - f.top))
+        });
+        let outline = outline.map_or(stand, |o| {
+            let (x0, y0) = (o.x.min(stand.x), o.y.min(stand.y));
+            WinRect::new(x0, y0, o.right().max(stand.right()) - x0, o.bottom().max(stand.bottom()) - y0)
+        });
         Boxes {
             stand,
             sit,
@@ -375,6 +389,7 @@ impl Avatar {
             cling_l: pose("cling_left"),
             cling_r: pose("cling_right"),
             peek: pose("peek"),
+            outline,
         }
     }
 
@@ -466,6 +481,7 @@ impl Avatar {
             drift: None,
             drop_in: None,
             leg_kick: None,
+            cold: false,
             marker: None,
             marker_shown: None,
             pulse: None,
@@ -770,10 +786,9 @@ impl Avatar {
     }
 
     fn brain_apply(&mut self, intents: Vec<(f64, Intent)>, now: Instant) {
-        // Up out of a nap with a greeting due: the greeting first (a wave reads at once), the
-        // stretch after it (r39: the stretch's arms out first read as a shrug, "what?").
+        // Up out of a nap with a greeting due: a quick get-up and the greeting, no stretch (r39:
+        // the stretch's arms out first read as a shrug; r40: after the wave too).
         let greets = intents.iter().any(|(_, i)| matches!(i, Intent::Emote(EmoteKey::Greet { .. })));
-        let mut stretch_after = None;
         for (_, i) in intents {
             match i {
                 Intent::Move(p) => self.brain_move(p, now),
@@ -813,14 +828,12 @@ impl Avatar {
                     let drawn = self.art.floor_strip;
                     self.art.floor_strip = drawn && !stretch;
                     if up && self.standing() && !self.waking(now) {
-                        self.play_nap_wake(now);
+                        self.play_nap_wake_for(greets, now);
                     }
-                    if stretch && let Some(s) = napped {
-                        if greets {
-                            stretch_after = Some(s);
-                        } else {
-                            self.stretch_after_nap(s, now);
-                        }
+                    // A greeting due takes the stretch's place (r40: its arms out after the wave
+                    // read as a shrug).
+                    if stretch && !greets && let Some(s) = napped {
+                        self.stretch_after_nap(s, now);
                     }
                     // Out of the drawn sleep the cut is a frame late: the curl holds while the
                     // get-up goes underneath (r39: the curl's pixels and the sleeping plate's
@@ -855,9 +868,6 @@ impl Avatar {
                     }
                 }
             }
-        }
-        if let Some(s) = stretch_after {
-            self.stretch_after_nap(s, now);
         }
         self.brain_save(now, false);
     }
@@ -1146,11 +1156,12 @@ impl Avatar {
         let (dx, dy) = (spot.anchor.0 - her.anchor.0, spot.anchor.1 - her.anchor.1);
         let dist = ((dx * dx + dy * dy) as f32).sqrt() / l.sf;
         let ground_kind = |k: SpotKind| matches!(k, SpotKind::Floor | SpotKind::Beside | SpotKind::FloorSit);
-        // A leap: a small hop between any two spots (edge, floor) within reach.
+        // A leap: a small hop between any two spots (edge, floor) within reach (a pounce's is longer).
+        let reach = if plan.why == "pounce" { places::POUNCE_MAX } else { places::HOP_MAX };
         let can_leap = h.rest != Some(RestPose::Nap)
             && matches!(self.placement, Placement::Ground | Placement::Perch { .. })
             && matches!(spot.kind, SpotKind::Edge { .. } | SpotKind::SitEdge { .. } | SpotKind::Floor | SpotKind::Beside)
-            && (dx.abs() as f32) / l.sf <= places::HOP_MAX + 1.0
+            && (dx.abs() as f32) / l.sf <= reach + 1.0
             && (-dy as f32) / l.sf <= places::HOP_UP_MAX + 1.0;
         let can_hop = self.placement == Placement::Ground
             && h.rest.is_none()
@@ -2004,6 +2015,60 @@ impl Avatar {
                 }
                 "lean"
             }
+            React::Curious => {
+                // Toward the pointer, a lean in, then a look at it (over a look or an idle beat).
+                let standing = self.standing();
+                if self.mirror_cfg.own {
+                    self.face(right, "look", now, false);
+                }
+                let steps = self.pack.behaviour.brain.curious.clone();
+                if standing && !steps.is_empty() {
+                    let seq = self.pack.flatten(&self.resolve_steps(&steps));
+                    if !seq.is_empty() {
+                        self.anim.play(seq, now);
+                    }
+                }
+                "curious"
+            }
+            React::Bat => {
+                let standing = self.standing();
+                if self.mirror_cfg.own {
+                    self.face(right, "look", now, false);
+                }
+                let steps = self.pack.behaviour.brain.bat.clone();
+                if standing && !steps.is_empty() {
+                    let seq = self.pack.flatten(&self.resolve_steps(&steps));
+                    if !seq.is_empty() {
+                        self.anim.play(seq, now);
+                    }
+                    "bat"
+                } else {
+                    // Sitting or hanging: a flinch.
+                    self.squash = Some(now);
+                    "flinch"
+                }
+            }
+            React::Cold(on) => {
+                if let Some(h) = &mut self.brain {
+                    h.cold = on;
+                }
+                if on {
+                    if let Some(away) = self.cold_away() {
+                        self.face(away, "cold", now, false);
+                    }
+                    let steps = self.pack.behaviour.brain.cold.clone();
+                    if standing && !steps.is_empty() {
+                        let seq = self.pack.flatten(&steps);
+                        self.anim.then(seq, now);
+                    }
+                    "cold"
+                } else {
+                    if self.mirror_cfg.own {
+                        self.face(right, "look", now, false);
+                    }
+                    "warm"
+                }
+            }
             React::Fall => unreachable!(),
         };
         if let Some(h) = &mut self.brain {
@@ -2070,6 +2135,8 @@ impl Avatar {
                     crate::platform::PointerEv::Near => Screen::CursorNear,
                     crate::platform::PointerEv::Swipe(v) => Screen::CursorSwipe { speed: v / self.layout.sf },
                     crate::platform::PointerEv::Hover => Screen::CursorHover,
+                    crate::platform::PointerEv::Linger => Screen::CursorLinger,
+                    crate::platform::PointerEv::Wiggle => Screen::CursorWiggle,
                 };
                 self.brain_feed(BrainEvent::Screen(s), now);
             }
@@ -2271,7 +2338,7 @@ impl Avatar {
     }
 
     /// `@look` / `@point` toward the cursor.
-    fn resolve_steps(&self, steps: &[crate::pack::Step]) -> Vec<crate::pack::Step> {
+    pub(super) fn resolve_steps(&self, steps: &[crate::pack::Step]) -> Vec<crate::pack::Step> {
         use crate::pack::Step;
         let c = self.brain_cursor();
         let (gx, gy) = self.ground();
@@ -2305,6 +2372,16 @@ impl Avatar {
             .collect()
     }
 
+    /// Her cold shoulder (after a sulk): the way that turns her back to his window (or the
+    /// pointer, with nothing focused).
+    pub(super) fn cold_away(&self) -> Option<bool> {
+        if !self.brain.as_ref().is_some_and(|h| h.cold) {
+            return None;
+        }
+        let x = self.brain_focused().map_or(self.brain_cursor().0, |f| f.center().0);
+        Some(x < self.ground().0)
+    }
+
     pub(super) fn head_point(&self) -> Point<Pixels> {
         let f = self.frame_or_default(self.anim.frame());
         let (x, y) = f.map_or((self.layout.geo.width as i32 / 2, 40), |f| (f.mask.w as i32 / 2, f.head_line / 2));
@@ -2328,6 +2405,8 @@ impl Avatar {
                 (_, false) => spec.greet.clone(),
                 _ => spec.wave.clone(),
             }),
+            EmoteKey::MakeUp => Some(spec.make_up.clone()),
+            EmoteKey::Missed => Some(spec.missed.clone()),
         }
         .unwrap_or_default();
         let standing = self.standing();
@@ -2343,7 +2422,8 @@ impl Avatar {
             EmoteKey::Sulk => 2,
             EmoteKey::Wave => 0,
             // Perched or on the floor without the frames: hearts.
-            EmoteKey::Greet { .. } => 1,
+            EmoteKey::Greet { .. } | EmoteKey::MakeUp => 1,
+            EmoteKey::Missed => 0,
         };
         let mut played = "fx";
         // The bid marker: up on a bid, a pop on every beat, gone when it's over.
@@ -2355,7 +2435,7 @@ impl Avatar {
                     h.marker = Some(Marker { t0, pop: now, double, area });
                 }
                 EmoteKey::Satisfied { .. } | EmoteKey::Sulk => h.marker = None,
-                EmoteKey::Wave | EmoteKey::Greet { .. } => {}
+                EmoteKey::Wave | EmoteKey::Greet { .. } | EmoteKey::MakeUp | EmoteKey::Missed => {}
             }
         }
         if self.brain.as_ref().and_then(|h| h.marker).is_some_and(|m| m.area.is_none()) {
@@ -2369,7 +2449,23 @@ impl Avatar {
             && self.placement == Placement::Ground
             && self.pack.behaviour.brain.floor_sit.is_some()
             && self.pack.behaviour.brain.sulk_sit.is_some();
-        if sulk_sit {
+        // Made up out of the sulk sit: she gets up (the sit's exit), then the make-up.
+        let up_to_make_up = e == EmoteKey::MakeUp && self.placement == Placement::Ground && self.brain.as_ref().is_some_and(|h| h.sulk_sit && h.rest == Some(RestPose::FloorSit));
+        if up_to_make_up {
+            if let Some(h) = &mut self.brain {
+                h.rest = None;
+                h.sulk_sit = false;
+            }
+            self.relayer(now);
+            let b = &self.pack.behaviour.brain;
+            let exit = b.sulk_sit.as_ref().and_then(|s| s.exit.clone()).or_else(|| b.floor_sit.as_ref().and_then(|s| s.exit.clone())).unwrap_or_default();
+            let mut seq = self.pack.flatten(&exit);
+            seq.extend(self.pack.flatten(&self.resolve_steps(&steps)));
+            if !seq.is_empty() {
+                self.anim.play(seq, now);
+            }
+            played = "stand+clip";
+        } else if sulk_sit {
             // Arms crossed, sad, then down onto the floor, and she stays low.
             if let Some(h) = &mut self.brain {
                 h.rest = Some(RestPose::FloorSit);
@@ -2427,8 +2523,8 @@ impl Avatar {
                 EmoteKey::Insist(s) => (if s >= 2 { 18.0 } else { 15.0 }, if s >= 2 { 2 } else { 0 }),
                 EmoteKey::Satisfied { .. } => (6.0, 1),
                 EmoteKey::Sulk => (-12.0, 2),
-                EmoteKey::Wave => (12.0, 0),
-                EmoteKey::Greet { .. } => (12.0, 1),
+                EmoteKey::Wave | EmoteKey::Missed => (12.0, 0),
+                EmoteKey::Greet { .. } | EmoteKey::MakeUp => (12.0, 1),
             };
             let sign = if self.rng.pick(2) == 0 { 1.0 } else { -1.0 };
             if let Some(h) = &mut self.brain {

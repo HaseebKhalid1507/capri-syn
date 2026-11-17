@@ -26,6 +26,7 @@ mod hypr;
 #[cfg(target_os = "linux")]
 mod linux;
 mod os;
+pub mod pointer;
 mod track;
 #[cfg(windows)]
 mod windows;
@@ -309,14 +310,28 @@ pub enum PointerEv {
     Near,
     Swipe(f32),
     Hover,
+    /// Still beside her (not on her) a while.
+    Linger,
+    /// A quick left-right wiggle near her.
+    Wiggle,
 }
 
-/// Pointer watcher tuning (device px at sf 1, scaled by the caller's sf).
+/// Pointer watcher tuning (device px; `pointer::cfg` scales the defaults by sf).
 pub struct PointerCfg {
     pub near_px: f32,
     pub swipe_px: f32,
     pub swipe_speed: f32,
     pub hover: std::time::Duration,
+    /// Linger: within this of her body, moving under `still_px`, for `linger`.
+    pub linger_px: f32,
+    pub still_px: f32,
+    pub linger: std::time::Duration,
+    /// Wiggle: `wiggle_turns` x-reversals of `wiggle_amp` within `wiggle_window`, within
+    /// `wiggle_px` of her.
+    pub wiggle_px: f32,
+    pub wiggle_amp: f32,
+    pub wiggle_window: std::time::Duration,
+    pub wiggle_turns: u8,
 }
 
 /// Which of her windows.

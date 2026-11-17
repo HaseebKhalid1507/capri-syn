@@ -41,24 +41,41 @@ Reference for `synaps-avatar`, the crate behind capri-syn. The [README](../READM
   minutes without a turn. On Hyprland there's no idle time yet (ext-idle-notify isn't
   wired): your presence is the pointer moving, so typing alone for 5 min reads as away.
 - **Her energy shows**: its band (high from 0.65, low under 0.35) picks her idle activities and their
-  gaps (`energy.high|mid|low` in moods.json: 4-7 / 4-7 / 6-12 s), her breath (`bobPx`, `bobPeriodMs`,
-  `swayPx`: a quick 3-4 px bounce about once a second by day, a slow deep one at night), her own roams'
-  pace (×1.2 / 1 / 0.5), and at low energy her idle face and stance (`energy.low.idle`: the sleepy
-  face, slow heavy blinks; `droopPx`, `leanPx`: standing, her head hangs and leans a few px, a
-  transform of the drawing, no new art). By day she looks around between gestures; at night she sits
-  on the floor most of the time (30-60 s at a go, the crouch only as a quarter-second beat), yawns,
-  looks down, and her ONLINE tag is dimmed. A pool variant with `energy` (the lively lachy idle
-  drawings: mid and high) shifts out when the band leaves it. Falling asleep and waking are one light
-  glitch on the swap frame (the tag whole), straight into the drawn sleep (the drawing before holds
-  while it decodes); the drawn wake keeps only its clean last cell, and the sleep loop skips the cells
-  with green scan lines drawn in (`glitchCells`). Up after a nap of 20 min or more on the floor she
-  gets up through CapriCore's floor sit and crouch (the curl holds a frame or two while it goes
-  underneath), greets you if that's due, then stretches (`brain.stretch`, `stretchAfterMs`, at most
-  4 an hour). No stretch is drawn in the packs: it is her look up, arms out (the shrug) and a yawn,
-  from CapriCore's frames.
+  gaps (`energy.high|mid|low` in moods.json: 1.2-3 / 1.5-3.5 / 2-4 s), her breath (`bobPx`,
+  `bobPeriodMs`, `swayPx`: a quick 3-4 px bounce about once a second by day, a slow deep one at night),
+  her own roams' pace (×1.2 / 1 / 0.5), her sparkles (`sparkleEveryMs`: fewer at night), and at low
+  energy her idle face and stance (`energy.low.idle`: the sleepy face, slow heavy blinks; `droopPx`,
+  `leanPx`: standing, her head hangs and leans a few px; `nodPx`, `nodPeriodMs`: a slow nod; all
+  transforms of the drawing, no new art). By day her beats mostly change her outline: hand on hip, arms
+  crossed, points, a shrug, a chin rest, and two transforms an activity can ask for, `@hop` (a small
+  hop in place, a squash as she lands) and `@lean` (a weight shift for the beat's length). The
+  CapriCore stand stays home. At night she sits on the floor most of the time, in chains of two long
+  sits joined by a hunched crouch, standing only a few seconds between them; her ONLINE tag is dimmed.
+  A pool variant with `energy` (the lively lachy idle drawings: mid and high) shifts out when the band
+  leaves it. Falling asleep and waking are one light glitch on the swap frame (the tag whole), straight
+  into the drawn sleep (the drawing before holds while it decodes); the drawn wake keeps only its clean
+  last cell, and the sleep loop skips the cells with green scan lines drawn in (`glitchCells`). Up
+  after a nap of 20 min or more on the floor she gets up through CapriCore's floor sit and crouch (the
+  curl holds a frame or two while it goes underneath), then stretches (`brain.stretch`,
+  `stretchAfterMs`, at most 4 an hour). With a greeting due she gets up quicker (`brain.napWakeGreet`)
+  and waves instead of stretching.
+- **The cursor game** (her pointer watcher's samples, no other reads): the pointer still beside her
+  for 2.5 s (within 150 px, not on her) makes her curious, a lean toward it and a look
+  (`brain.curious`, every 20 s at most, 30 an hour); a quick left-right wiggle near her gets a paw-bat
+  (`brain.bat`: a crouch, a point at it, a smirk; every 20 s at most). When the pointer goes still
+  right after a wiggle (or now and then) she pounces: a leap toward it (30-450 px) that lands beside it, never on
+  it, on a window top if one is in reach (not his), then laughs ("missed!", `brain.missed`); once in
+  2 min at most, never while you type, a hop in the hourly cap. None of it under DND, fullscreen, with
+  a bubble, the Line, a prompt, the menu or a drag up, asleep, with a summon waiting, in a visit or a
+  sulk.
+- **A sulk** turns her back to your window for the sulk and 2 min after it (the cold shoulder:
+  `brain.cold`); a pat in that time makes up (`brain.makeUp`: embarrassed, happy, heart hands; she
+  gets up first if she sat down to sulk), and she stays put.
 - **Where she goes**: a floor spot clear of windows' content (empty desktop, below a title bar) beats
   one over it, and over a window its edges beat the middle of the text; perches, hops and teleports
-  rank their spots the same way. On a tiled desk that's a preference, not a rule.
+  rank their spots the same way, by her whole outline (her hair's reach included). Sitting on a window
+  top, her legs over that window are the pose, not a cost. On a tiled desk that's a preference, not a
+  rule.
 - **The Line** (the summon key, tapped) is the way to write to her session: a thread with the
   conversation so far, a text field, prompts answered from the keyboard. It stays open after Enter;
   Esc closes it and keeps the draft. A reply that lands while it's closed leaves a one-line strip on her

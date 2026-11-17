@@ -392,8 +392,8 @@
   "energy": {
     "low": {
       "gapMs": [
-        6000,
-        12000
+        2000,
+        4000
       ],
       "bobPx": 3,
       "bobPeriodMs": 6500,
@@ -428,59 +428,9 @@
       "activities": [
         [
           {
-            "frame": "transition-crouch_floor",
+            "frame": "transition-stand_crouch",
             "ms": 250
           },
-          {
-            "frame": "sit_floor-sleepy",
-            "ms": 30000
-          },
-          {
-            "frame": "sit_floor-neutral",
-            "ms": 400
-          },
-          {
-            "frame": "transition-crouch_floor",
-            "ms": 250
-          }
-        ],
-        [
-          {
-            "frame": "transition-crouch_floor",
-            "ms": 250
-          },
-          {
-            "frame": "sit_floor-sleepy",
-            "ms": 35000
-          },
-          {
-            "frame": "sit_floor-neutral",
-            "ms": 400
-          },
-          {
-            "frame": "transition-crouch_floor",
-            "ms": 250
-          }
-        ],
-        [
-          {
-            "frame": "transition-crouch_floor",
-            "ms": 250
-          },
-          {
-            "frame": "sit_floor-sleepy",
-            "ms": 40000
-          },
-          {
-            "frame": "sit_floor-neutral",
-            "ms": 400
-          },
-          {
-            "frame": "transition-crouch_floor",
-            "ms": 250
-          }
-        ],
-        [
           {
             "frame": "transition-crouch_floor",
             "ms": 250
@@ -491,14 +441,16 @@
           },
           {
             "frame": "sit_floor-neutral",
-            "ms": 400
+            "ms": 500
           },
           {
             "frame": "transition-crouch_floor",
             "ms": 250
-          }
-        ],
-        [
+          },
+          {
+            "frame": "crouch-neutral",
+            "ms": 1800
+          },
           {
             "frame": "transition-crouch_floor",
             "ms": 250
@@ -514,9 +466,129 @@
           {
             "frame": "transition-crouch_floor",
             "ms": 250
+          },
+          {
+            "frame": "transition-stand_crouch",
+            "ms": 250
           }
         ],
         [
+          {
+            "frame": "transition-stand_crouch",
+            "ms": 250
+          },
+          {
+            "frame": "transition-crouch_floor",
+            "ms": 250
+          },
+          {
+            "frame": "sit_floor-sleepy",
+            "ms": 55000
+          },
+          {
+            "frame": "sit_floor-neutral",
+            "ms": 500
+          },
+          {
+            "frame": "transition-crouch_floor",
+            "ms": 250
+          },
+          {
+            "frame": "crouch-neutral",
+            "ms": 1800
+          },
+          {
+            "frame": "transition-crouch_floor",
+            "ms": 250
+          },
+          {
+            "frame": "sit_floor-sleepy",
+            "ms": 40000
+          },
+          {
+            "frame": "sit_floor-neutral",
+            "ms": 400
+          },
+          {
+            "frame": "transition-crouch_floor",
+            "ms": 250
+          },
+          {
+            "frame": "transition-stand_crouch",
+            "ms": 250
+          }
+        ],
+        [
+          {
+            "frame": "transition-stand_crouch",
+            "ms": 250
+          },
+          {
+            "frame": "transition-crouch_floor",
+            "ms": 250
+          },
+          {
+            "frame": "sit_floor-sleepy",
+            "ms": 60000
+          },
+          {
+            "frame": "sit_floor-neutral",
+            "ms": 500
+          },
+          {
+            "frame": "transition-crouch_floor",
+            "ms": 250
+          },
+          {
+            "frame": "crouch-neutral",
+            "ms": 1800
+          },
+          {
+            "frame": "transition-crouch_floor",
+            "ms": 250
+          },
+          {
+            "frame": "sit_floor-sleepy",
+            "ms": 45000
+          },
+          {
+            "frame": "sit_floor-neutral",
+            "ms": 400
+          },
+          {
+            "frame": "transition-crouch_floor",
+            "ms": 250
+          },
+          {
+            "frame": "transition-stand_crouch",
+            "ms": 250
+          }
+        ],
+        [
+          {
+            "frame": "transition-stand_crouch",
+            "ms": 250
+          },
+          {
+            "frame": "transition-crouch_floor",
+            "ms": 250
+          },
+          {
+            "frame": "sit_floor-sleepy",
+            "ms": 40000
+          },
+          {
+            "frame": "sit_floor-neutral",
+            "ms": 500
+          },
+          {
+            "frame": "transition-crouch_floor",
+            "ms": 250
+          },
+          {
+            "frame": "crouch-neutral",
+            "ms": 1800
+          },
           {
             "frame": "transition-crouch_floor",
             "ms": 250
@@ -531,6 +603,10 @@
           },
           {
             "frame": "transition-crouch_floor",
+            "ms": 250
+          },
+          {
+            "frame": "transition-stand_crouch",
             "ms": 250
           }
         ],
@@ -551,23 +627,19 @@
             "frame": "sleepy",
             "ms": 700
           }
-        ],
-        [
-          {
-            "frame": "idle-look_down",
-            "ms": 2600
-          },
-          {
-            "frame": "sleepy",
-            "ms": 600
-          }
         ]
+      ],
+      "nodPx": 4,
+      "nodPeriodMs": 5200,
+      "sparkleEveryMs": [
+        4500,
+        8000
       ]
     },
     "mid": {
       "gapMs": [
-        4000,
-        7000
+        1500,
+        3500
       ],
       "bobPx": 3,
       "bobPeriodMs": 1100,
@@ -575,25 +647,7 @@
         [
           {
             "frame": "idle-look_left",
-            "ms": 1800
-          }
-        ],
-        [
-          {
-            "frame": "idle-look_right",
-            "ms": 1800
-          }
-        ],
-        [
-          {
-            "frame": "idle-look_up",
-            "ms": 1400
-          }
-        ],
-        [
-          {
-            "frame": "idle-look_left",
-            "ms": 1300
+            "ms": 900
           },
           {
             "frame": "neutral",
@@ -601,67 +655,57 @@
           },
           {
             "frame": "idle-look_right",
-            "ms": 1300
-          }
-        ],
-        [
-          {
-            "frame": "idle-look_right",
-            "ms": 1300
-          },
-          {
-            "frame": "neutral",
-            "ms": 150
-          },
-          {
-            "frame": "idle-look_left",
-            "ms": 1300
-          }
-        ],
-        [
-          "shrug"
-        ],
-        [
-          "wink",
-          {
-            "frame": "flirty",
             "ms": 900
           }
         ],
         [
+          "@lean",
           {
             "frame": "hand_on_hip-neutral",
-            "ms": 2400
+            "ms": 3400
           },
           {
             "frame": "hand_on_hip-smirk",
-            "ms": 1400
-          }
-        ],
-        [
-          {
-            "frame": "arms_crossed-neutral",
-            "ms": 3000
-          }
-        ],
-        [
-          "point_right",
-          {
-            "frame": "smirk",
             "ms": 900
           }
         ],
         [
-          "point_left",
+          "@lean",
+          {
+            "frame": "arms_crossed-neutral",
+            "ms": 4000
+          }
+        ],
+        [
+          "@hop",
           {
             "frame": "happy",
             "ms": 900
           }
         ],
         [
+          "@hop",
+          "point_right"
+        ],
+        [
+          "@hop",
+          "point_left"
+        ],
+        [
+          "shrug"
+        ],
+        [
+          "@lean",
           {
-            "frame": "smirk",
-            "ms": 2000
+            "frame": "skeptical",
+            "ms": 2400
+          }
+        ],
+        [
+          "wink",
+          {
+            "frame": "flirty",
+            "ms": 900
           }
         ],
         [
@@ -675,106 +719,58 @@
           }
         ],
         [
-          {
-            "frame": "skeptical",
-            "ms": 1800
-          }
-        ]
-      ]
-    },
-    "high": {
-      "gapMs": [
-        4000,
-        7000
-      ],
-      "activities": [
-        [
+          "@lean",
           {
             "frame": "idle-look_left",
-            "ms": 1800
+            "ms": 2200
           }
         ],
         [
+          "@lean",
           {
             "frame": "idle-look_right",
-            "ms": 1800
-          }
-        ],
-        [
-          {
-            "frame": "idle-look_up",
-            "ms": 1400
-          }
-        ],
-        [
-          {
-            "frame": "idle-look_left",
-            "ms": 1300
-          },
-          {
-            "frame": "neutral",
-            "ms": 150
-          },
-          {
-            "frame": "idle-look_right",
-            "ms": 1300
-          }
-        ],
-        [
-          {
-            "frame": "idle-look_right",
-            "ms": 1300
-          },
-          {
-            "frame": "neutral",
-            "ms": 150
-          },
-          {
-            "frame": "idle-look_left",
-            "ms": 1300
-          }
-        ],
-        [
-          {
-            "frame": "idle-look_left",
-            "ms": 700
-          },
-          {
-            "frame": "neutral",
-            "ms": 150
-          },
-          {
-            "frame": "idle-look_right",
-            "ms": 700
-          }
-        ],
-        [
-          {
-            "frame": "idle-look_right",
-            "ms": 700
-          },
-          {
-            "frame": "neutral",
-            "ms": 150
-          },
-          {
-            "frame": "idle-look_left",
-            "ms": 700
+            "ms": 2200
           }
         ],
         [
           "excited"
         ],
         [
-          "point_right"
-        ],
-        [
-          "point_left"
+          "laugh"
         ],
         [
           {
-            "frame": "hand_on_hip-happy",
-            "ms": 1500
+            "frame": "chin_rest-neutral",
+            "ms": 3200
+          }
+        ]
+      ]
+    },
+    "high": {
+      "gapMs": [
+        1200,
+        3000
+      ],
+      "activities": [
+        [
+          {
+            "frame": "idle-look_left",
+            "ms": 900
+          },
+          {
+            "frame": "neutral",
+            "ms": 150
+          },
+          {
+            "frame": "idle-look_right",
+            "ms": 900
+          }
+        ],
+        [
+          "@lean",
+          {
+            "frame": "hand_on_hip-neutral",
+            "ms": 3400
           },
           {
             "frame": "hand_on_hip-smirk",
@@ -782,44 +778,90 @@
           }
         ],
         [
+          "@lean",
           {
-            "frame": "smirk",
-            "ms": 1200
+            "frame": "arms_crossed-neutral",
+            "ms": 4000
+          }
+        ],
+        [
+          "@hop",
+          {
+            "frame": "happy",
+            "ms": 900
+          }
+        ],
+        [
+          "@hop",
+          "point_right"
+        ],
+        [
+          "@hop",
+          "point_left"
+        ],
+        [
+          "shrug"
+        ],
+        [
+          "@lean",
+          {
+            "frame": "skeptical",
+            "ms": 2400
           }
         ],
         [
           "wink",
           {
             "frame": "flirty",
-            "ms": 400
+            "ms": 900
           }
+        ],
+        [
+          {
+            "frame": "hand_on_hip-flirty",
+            "ms": 2200
+          },
+          {
+            "frame": "hand_on_hip-neutral",
+            "ms": 900
+          }
+        ],
+        [
+          "@lean",
+          {
+            "frame": "idle-look_left",
+            "ms": 2200
+          }
+        ],
+        [
+          "@lean",
+          {
+            "frame": "idle-look_right",
+            "ms": 2200
+          }
+        ],
+        [
+          "excited"
         ],
         [
           "laugh"
         ],
         [
           {
-            "frame": "idle-look_left",
-            "ms": 700
-          },
-          {
-            "frame": "neutral",
-            "ms": 150
-          },
-          {
-            "frame": "idle-look_right",
-            "ms": 700
+            "frame": "chin_rest-neutral",
+            "ms": 3200
           }
         ],
         [
+          "@hop",
           {
-            "frame": "hand_on_hip-flirty",
-            "ms": 1500
-          },
-          {
-            "frame": "hand_on_hip-neutral",
-            "ms": 600
+            "frame": "idle-excited",
+            "ms": 900
           }
+        ],
+        [
+          "@hop",
+          "laugh"
         ]
       ],
       "bobPx": 4,
@@ -1688,7 +1730,67 @@
       "cling_left": "pose-dock-left",
       "cling_right": "pose-dock-right",
       "peek": "crouch-attentive"
-    }
+    },
+    "curious": [
+      {
+        "frame": "lean_in-neutral",
+        "ms": 1800
+      },
+      "@look"
+    ],
+    "bat": [
+      {
+        "frame": "pose-crouch",
+        "ms": 140
+      },
+      "@point",
+      {
+        "frame": "smirk",
+        "ms": 700
+      }
+    ],
+    "missed": [
+      "laugh"
+    ],
+    "makeUp": [
+      {
+        "frame": "embarrassed",
+        "ms": 900
+      },
+      {
+        "frame": "happy",
+        "ms": 600
+      },
+      "heart_hands"
+    ],
+    "cold": [
+      {
+        "frame": "sad",
+        "ms": 1600
+      },
+      {
+        "frame": "arms_crossed-neutral",
+        "ms": 2500
+      }
+    ],
+    "napWakeGreet": [
+      {
+        "frame": "sit_floor-neutral",
+        "ms": 200
+      },
+      {
+        "frame": "transition-crouch_floor",
+        "ms": 160
+      },
+      {
+        "frame": "crouch-neutral",
+        "ms": 160
+      },
+      {
+        "frame": "transition-stand_crouch",
+        "ms": 160
+      }
+    ]
   },
   "drag": {
     "grab": [
