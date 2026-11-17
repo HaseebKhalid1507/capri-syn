@@ -429,6 +429,22 @@ fn menu_at(click: (f32, f32), (w, h): (f32, f32), (min_x, max_x): (f32, f32), (m
     (x, y)
 }
 
+/// An open menu at `at` that her face (after a pose change) is now under: the place across the
+/// face (its far side), same height, else the near side, whichever is in `x` first; else None
+/// (it stays).
+fn menu_reflow(at: (f32, f32), (w, h): (f32, f32), (min_x, max_x): (f32, f32), face: Option<(f32, f32, f32, f32)>) -> Option<(f32, f32)> {
+    const GAP: f32 = 8.0;
+    let (f0, f1, f2, f3) = face?;
+    let over = at.0 < f2 && at.0 + w > f0 && at.1 < f3 && at.1 + h > f1;
+    if !over {
+        return None;
+    }
+    let (right, left) = (f2 + GAP, f0 - GAP - w);
+    // The face in the menu's right half: across it is its right.
+    let sides = if (f0 + f2) / 2.0 > at.0 + w / 2.0 { [right, left] } else { [left, right] };
+    sides.into_iter().find(|x| (min_x..=max_x).contains(x)).map(|x| (x, at.1))
+}
+
 /// `line` with "…" in place of its last word(s): at least three characters give way, so it is
 /// never wider than the wrapped line it replaces.
 fn goes_on(line: &str) -> String {
@@ -753,7 +769,7 @@ pub struct Avatar {
     menu_h: Rc<Cell<(u32, f32)>>,
     /// Where the open menu goes (the click, x, y), decided once: its side never changes while
     /// it is open, whatever her pose does.
-    menu_place: Option<(Point<Pixels>, f32, f32)>,
+    menu_place: Option<(Point<Pixels>, f32, f32, bool)>,
     /// The HUD's top while a bubble is up: (resting frame, avatar-local device px).
     hud_top: Cell<Option<(usize, i32)>>,
     /// Last laid-out box of the status tag (window logical px), to tear it in a glitch.
@@ -6626,27 +6642,36 @@ impl Render for Avatar {
             // never painted with these rows is laid out unseen for a frame and measured).
             let sig = (rows as u32) << 2 | u32::from(mark.is_some()) << 1 | u32::from(header_on);
             let measured = self.menu_h.get().0 == sig;
+            // Her work area (under the bar, on her monitor), window-local logical px: the menu's
+            // top left stays within it less the menu's size.
+            let o = self.origin;
+            let (mut x0, mut y0) = (f32::from(l.lp(self.vis.0)), 0.0f32);
+            let (mut x1, mut y1) = (f32::from(l.lp(self.vis.1)), f32::from(l.lp(l.win_h)));
+            if let Some(a) = self.her_area() {
+                x0 = x0.max((a.x - o.0) as f32 / sf);
+                y0 = y0.max((a.y - o.1) as f32 / sf);
+                x1 = x1.min((a.x + a.w - o.0) as f32 / sf);
+                y1 = y1.min((a.y + a.h - o.1) as f32 / sf);
+            }
+            let h = self.menu_h.get().1;
+            let (xr, yr) = ((x0 + 4.0, x1 - MENU_W - 4.0), (y0 + 4.0, y1 - h - 4.0));
+            // Her face as drawn now: the menu keeps off it.
+            let face = self.frame_or_default(self.anim.frame()).and_then(|f| f.face_box).map(|(fx0, fy0, fx1, fy1)| {
+                let (ax, ay) = (l.avatar_x as f32, l.avatar_y as f32);
+                ((ax + fx0 as f32) / sf, (ay + fy0 as f32) / sf, (ax + fx1 as f32) / sf, (ay + fy1 as f32) / sf)
+            });
             let place = match self.menu_place {
-                Some((a, x, y)) if a == at => Some((x, y)),
-                _ if measured => {
-                    let h = self.menu_h.get().1;
-                    // Her work area (under the bar, on her monitor), window-local logical px.
-                    let o = self.origin;
-                    let (mut x0, mut y0) = (f32::from(l.lp(self.vis.0)), 0.0f32);
-                    let (mut x1, mut y1) = (f32::from(l.lp(self.vis.1)), f32::from(l.lp(l.win_h)));
-                    if let Some(a) = self.her_area() {
-                        x0 = x0.max((a.x - o.0) as f32 / sf);
-                        y0 = y0.max((a.y - o.1) as f32 / sf);
-                        x1 = x1.min((a.x + a.w - o.0) as f32 / sf);
-                        y1 = y1.min((a.y + a.h - o.1) as f32 / sf);
+                // Placed; a pose change that put her face under it moves it once, to the far side.
+                Some((a, x, y, moved)) if a == at => match menu_reflow((x, y), (MENU_W, h), xr, face).filter(|_| !moved) {
+                    Some(p) => {
+                        self.menu_place = Some((at, p.0, p.1, true));
+                        Some(p)
                     }
-                    // Her face as drawn now: the menu keeps off it.
-                    let face = self.frame_or_default(self.anim.frame()).and_then(|f| f.face_box).map(|(fx0, fy0, fx1, fy1)| {
-                        let (ax, ay) = (l.avatar_x as f32, l.avatar_y as f32);
-                        ((ax + fx0 as f32) / sf, (ay + fy0 as f32) / sf, (ax + fx1 as f32) / sf, (ay + fy1 as f32) / sf)
-                    });
-                    let p = menu_at((f32::from(at.x), f32::from(at.y)), (MENU_W, h), (x0 + 4.0, x1 - MENU_W - 4.0), (y0 + 4.0, y1 - h - 4.0), face);
-                    self.menu_place = Some((at, p.0, p.1));
+                    None => Some((x, y)),
+                },
+                _ if measured => {
+                    let p = menu_at((f32::from(at.x), f32::from(at.y)), (MENU_W, h), xr, yr, face);
+                    self.menu_place = Some((at, p.0, p.1, false));
                     Some(p)
                 }
                 _ => None,
@@ -7088,6 +7113,22 @@ mod menu_tests {
         assert_eq!(menu_at((140.0, 200.0), SIZE, narrow, (0.0, 600.0), FACE), (140.0, 348.0), "under her face");
         assert_eq!(menu_at((140.0, 700.0), (210.0, 200.0), narrow, (0.0, 300.0), FACE), (140.0, 92.0), "moved up over it, above it");
         assert_eq!(menu_at((140.0, 200.0), SIZE, narrow, (0.0, 300.0), FACE), (140.0, 200.0), "over it: nothing else fits");
+    }
+
+    #[test]
+    fn a_face_that_moves_under_it_sends_it_to_the_far_side() {
+        use super::menu_reflow;
+        // Placed left of her face (at 30); her pose moves the face onto its right half.
+        let moved = Some((200.0, 300.0, 230.0, 330.0));
+        assert_eq!(menu_reflow((30.0, 200.0), SIZE, X, moved), Some((238.0, 200.0)), "to the face's right, same height");
+        // Onto its left half: across it is its left, if the work area has room; else its right.
+        let left = Some((60.0, 300.0, 90.0, 330.0));
+        assert_eq!(menu_reflow((40.0, 200.0), SIZE, (-200.0, 280.0), left), Some((-158.0, 200.0)));
+        assert_eq!(menu_reflow((40.0, 200.0), SIZE, X, left), Some((98.0, 200.0)), "no room across: the near side");
+        assert_eq!(menu_reflow((40.0, 200.0), SIZE, (0.0, 50.0), left), None, "no room either side: it stays");
+        // Not under it, or no face: it stays.
+        assert_eq!(menu_reflow((250.0, 200.0), SIZE, X, FACE), None);
+        assert_eq!(menu_reflow((30.0, 200.0), SIZE, X, None), None);
     }
 
     #[test]
