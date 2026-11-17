@@ -51,6 +51,31 @@ published. Locally, on a machine with Rust, Inno Setup and ImageMagick: `.\packa
 
 Unattended: `synaps-avatar-setup-….exe /VERYSILENT /SUPPRESSMSGBOXES [/PACK="C:\packs\capri"] [/TASKS=autostart]`.
 
+## Her voice: a second installer
+
+`synaps-avatar-voice-setup-….exe` (`packaging/windows/synaps-avatar-voice.iss`, built by
+`build-voice.ps1`; CI's `windows-voice-installer` job, an artifact). **Its own download, not a
+component of hers:** an Inno component sits inside `setup.exe` even unchecked, so every download of
+her would carry the 143 MB bundle (~45 MB compressed). As a second installer, her default download
+stays ~9 MB (CI fails hers past 20 MB), and only he who wants voice gets the rest.
+
+- **Per user, no admin**: the bundle goes to `voice\` in her install folder (read from her installer's
+  record, else its default), where she looks for it.
+- **The models are never in it.** The "models" task (checked) runs `voice-models.ps1`: Whisper small.en and
+  base.en, Kokoro int8 and its voices, Silero, the wake word's two feature models (~320 MB, each SHA-256
+  pinned; "hey capri" itself comes with the bundle) into `%LOCALAPPDATA%\capri-voice\models`. A cut
+  download resumes (`curl.exe -C -`); a wrong hash is deleted and the run fails. A Start-menu entry,
+  "synaps-avatar voice models", runs it again.
+- She starts the sidecar once the models are there (her log says so until then).
+- **Uninstall** stops the sidecar (only the `python.exe` in that folder), removes the bundle, Python's
+  caches, and `%LOCALAPPDATA%\capri-voice` (models, log, link, media state).
+- CI installs, checks and uninstalls it unattended without the models (`test-voice-install.ps1`: the
+  files, the selftest run by the installed interpreter, the folder beside her in both cases, nothing
+  left), and runs the model fetch on its small files (`test-voice-models.ps1`: resume, a bad hash, a
+  kept file).
+
+Unattended: `synaps-avatar-voice-setup-….exe /VERYSILENT /SUPPRESSMSGBOXES [/MERGETASKS="!models"]`.
+
 ## What she does here
 
 | | how | status |
@@ -68,8 +93,10 @@ Unattended: `synaps-avatar-setup-….exe /VERYSILENT /SUPPRESSMSGBOXES [/PACK="C
 | notifications | toasts, see below | **[VM] pending** |
 | lock, sleep, idle | WTS session notifications, power broadcasts, `GetLastInputInfo` | P0 [VM] |
 | voice: the link | her end of the sidecar's link: loopback TCP after a two-token handshake (`endpoint.json` in `%LOCALAPPDATA%\capri-voice`); Linux keeps the Unix socket | CI (both ends, Rust and Python) |
-| voice: the sidecar | `tools/capri_voice_win.py`: PortAudio (WASAPI) capture and playback, SMTC pause, session-volume duck with Linux's crash repair, lock, calls (the mic privacy store), DND. A bundle (embeddable CPython 3.13 + wheels, `packaging/windows/voice-bundle.ps1`) runs it with no Python installed. Not started by her yet, not in the installer: `docs/design/windows-voice.md` | CI; **[VM] pending** (live audio: item 13) |
-| hold-to-talk | not yet (tap and toggle work); options in `docs/design/windows-voice.md` §6 | — |
+| voice: the sidecar | `tools/capri_voice_win.py`: PortAudio (WASAPI) capture and playback, SMTC pause, session-volume duck with Linux's crash repair, lock, calls (the mic privacy store), DND. The voice installer (below) puts its bundle (embeddable CPython 3.13 + wheels) beside her: `docs/design/windows-voice.md` | CI; **[VM] pending** (live audio: item 13) |
+| voice: she runs it | while `[voice] enabled`: `python.exe capri-voice` from `voice\` beside her exe (or `CAPRI_VOICE_BUNDLE`), no console window, in a job object that kills it with her (however she ends); restarted after 1, 2, 4 … 60 s; its log `%LOCALAPPDATA%\capri-voice\capri-voice.log`. Not before the models are there. `CAPRI_VOICE_SPAWN=0`: he runs it himself | CI (job, backoff, bundle lookup); **[VM] pending** (item 14) |
+| voice: connecting | on a thread (a stale endpoint can't freeze her: up to ~2 s); Linux connects inline, as before | CI (a silent listener) |
+| hold-to-talk | opt-in, `[voice] hold_to_talk = true`: the summon key's press is `talk press`; her key thread then reads the key every 25 ms (`GetAsyncKeyState`, as OBS does) and its release is `talk release`. No keyboard hook. Off: the summon key is a tap, as before | CI (the state machine); **[VM] pending** (item 14) |
 
 ## The Line's keyboard
 
@@ -127,3 +154,11 @@ desktop to try it on.
     - whether Windows 11's Do not disturb shows in `SHQueryUserNotificationState`;
     - headphones told from speakers;
     - Whisper and Kokoro speed on his CPU.
+14. Voice, her side (V1b):
+    - the voice installer interactively, the models task's window, then the sidecar started by her
+      (`voice: sidecar started` in her log), and gone when she is killed (Task Manager);
+    - voice off in settings stops it; on starts it again;
+    - an uninstall of voice while she runs (she restarts it after 1 s: the uninstaller may race her);
+    - `hold_to_talk = true`: holding Win+Alt+C talks and the release sends; a quick tap opens the Line;
+      Win+L mid-hold ends it; no stuck hold after a release in another app's window;
+    - no firewall prompt for the sidecar's loopback port.

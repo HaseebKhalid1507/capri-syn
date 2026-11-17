@@ -383,16 +383,18 @@ fn run(t_start: Instant) -> Result<()> {
             .map_err(|e| elog!("synaps-avatar: pointer watcher: {e:#}"))
             .ok();
             // Her global keys, where the backend grabs them itself (else his desktop binds them
-            // to `capri-ctl talk ...`). A grabbed key reports its press only: the summon key is
-            // a tap, never a hold. Never under test.
+            // to `capri-ctl talk ...`). A grabbed key reports its press only (the summon key is a
+            // tap), or with `[voice] hold_to_talk` its press and release too. Never under test.
             if std::env::var_os("SA_BRAIN_SYNTH").is_none() {
                 let tx = tx2.clone();
                 let v = settings::Settings::load().map(|s| s.voice).unwrap_or_default();
-                let keys = platform::Keys { summon: v.key, toggle: v.toggle_key };
+                let keys = platform::Keys { summon: v.key, toggle: v.toggle_key, hold: v.hold_to_talk };
                 os.watch_keys(keys, move |k| {
                     let cmd = match k {
                         platform::KeyEv::Summon => control::Command::TalkTap,
                         platform::KeyEv::TalkToggle => control::Command::TalkToggle,
+                        platform::KeyEv::TalkPress => control::Command::Talk(true),
+                        platform::KeyEv::TalkRelease => control::Command::Talk(false),
                     };
                     let (r, _) = std::sync::mpsc::channel();
                     tx.send_blocking((cmd, r)).ok();

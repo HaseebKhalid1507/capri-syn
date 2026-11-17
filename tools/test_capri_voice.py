@@ -6,7 +6,7 @@ crash repair on fake sessions, the call check's reading of the privacy store, an
 the sidecar wires it all in. What needs a real desktop is [VM] (docs/WINDOWS.md).
 
 python3 tools/test_capri_voice.py   (needs numpy; on Windows also sounddevice, for the smoke checks)"""
-import importlib.machinery, importlib.util, io, json, os, socket, sys, tempfile, threading, time, unittest
+import atexit, importlib.machinery, importlib.util, io, json, os, shutil, socket, sys, tempfile, threading, time, unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
@@ -16,8 +16,12 @@ import capri_voice_win as win  # noqa: E402
 
 WIN = sys.platform == 'win32'
 TMP = tempfile.mkdtemp(prefix='capri-voice-test-')
+atexit.register(shutil.rmtree, TMP, ignore_errors=True)
+# The sidecar's paths, forced: nothing of his (models, state, his running sidecar's link) is touched.
 os.environ['CAPRI_VOICE_MODELS'] = os.path.join(TMP, 'no-models')
 os.environ['CAPRI_VOICE_STATE'] = os.path.join(TMP, 'media.json')
+for k in ('CAPRI_VOICE_SOCK', 'CAPRI_VOICE_ENDPOINT'):
+    os.environ.pop(k, None)
 win.log = lambda *a: None
 
 

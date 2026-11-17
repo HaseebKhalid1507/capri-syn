@@ -45,6 +45,24 @@ pub fn voice_link() -> (String, std::io::Result<VoiceLink>) {
     (p.display().to_string(), s)
 }
 
+/// `voice_link` doesn't block here (a local socket: it is there or not), so she calls it inline.
+pub const VOICE_LINK_BLOCKS: bool = false;
+
+/// `voice_link` on a thread of its own (unused here: `VOICE_LINK_BLOCKS` is false).
+pub fn voice_link_bg(done: impl FnOnce(String, std::io::Result<VoiceLink>) + Send + 'static) -> std::io::Result<()> {
+    std::thread::Builder::new()
+        .name("voice-connect".into())
+        .spawn(move || {
+            let (p, s) = voice_link();
+            done(p, s)
+        })
+        .map(|_| ())
+}
+
+/// A systemd user unit runs the sidecar here (`tools/systemd/capri-voice.service`): she starts
+/// nothing.
+pub fn voice_sidecar(_on: bool) {}
+
 /// Process setup that has to happen before any other thread exists. Each knob was
 /// measured on bella (release, `ps` RSS 6 s after start, see LOG.md):
 ///

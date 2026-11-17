@@ -15,6 +15,9 @@ const UP_DEBOUNCE: Duration = Duration::from_millis(60);
 const RESTORE_MS: u64 = 800;
 /// With voice on, a missing sidecar is looked for again this often (connecting opens no mic).
 const RECONNECT: Duration = Duration::from_secs(10);
+/// Where connecting runs on a thread: after a failed one, the next waits this long (a stale
+/// endpoint costs ~2 s of a thread each time; the wake word asks every tick).
+const CONNECT_AGAIN: Duration = Duration::from_secs(2);
 /// The toggle chord's key is polled this often until it is up: its auto-repeat is one toggle.
 const KEY_POLL: Duration = Duration::from_millis(30);
 /// No key state: this long without a toggle command counts as the key up.
@@ -117,6 +120,10 @@ pub(super) struct VoiceState {
     /// The next look for a missing sidecar; its first miss is logged, not every retry.
     retry_at: Option<Instant>,
     missed: bool,
+    /// Where connecting can block (`platform::VOICE_LINK_BLOCKS`: Windows), it runs on a thread:
+    /// one at a time, and not again before `connect_after` once one failed.
+    connecting: bool,
+    connect_after: Option<Instant>,
     speech: Speech,
     sent: u32,
     ended: u32,
@@ -175,12 +182,55 @@ impl Avatar {
         self.voice.asked.is_some() || self.voice.mic.is_some()
     }
 
-    /// Connect to the sidecar if not yet (it is started on its own: a systemd user unit).
+    /// Connect to the sidecar if not yet (Linux: a systemd user unit runs it; Windows: she does,
+    /// `voice_keepalive`). Where connecting can block (Windows: a connect and a hello, up to ~2 s on a
+    /// stale endpoint), it goes to a thread and this answers false until it is through; Linux
+    /// connects here, inline, as before.
     pub(super) fn voice_connect(&mut self, cx: &mut Context<Self>) -> bool {
         if self.voice.link.is_some() {
             return true;
         }
+        if crate::platform::VOICE_LINK_BLOCKS {
+            self.voice_connect_bg(cx);
+            return false;
+        }
         let (path, s) = crate::platform::voice_link();
+        self.voice_linked(path, s, cx)
+    }
+
+    /// The blocking connect on a thread; its answer comes back here (`voice_linked`).
+    fn voice_connect_bg(&mut self, cx: &mut Context<Self>) {
+        let now = Instant::now();
+        if self.voice.connecting || self.voice.connect_after.is_some_and(|t| now < t) {
+            return;
+        }
+        let (tx, rx) = async_channel::bounded(1);
+        if let Err(e) = crate::platform::voice_link_bg(move |path, s| {
+            tx.send_blocking((path, s)).ok();
+        }) {
+            elog!("synaps-avatar: voice: no connect thread ({e})");
+            self.voice.connect_after = Some(now + CONNECT_AGAIN);
+            return;
+        }
+        self.voice.connecting = true;
+        cx.spawn(async move |this, cx| {
+            let Ok((path, s)) = rx.recv().await else { return };
+            this.update(cx, |a, cx| {
+                a.voice.connecting = false;
+                if a.voice.link.is_none() {
+                    if !a.voice_linked(path, s, cx) {
+                        a.voice.connect_after = Some(Instant::now() + CONNECT_AGAIN);
+                    }
+                    a.voice_changed(cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// A connect's answer: the link set up (true), or the miss logged once.
+    fn voice_linked(&mut self, path: String, s: std::io::Result<crate::platform::VoiceLink>, cx: &mut Context<Self>) -> bool {
         let s = match s {
             Ok(s) => s,
             Err(e) => {
@@ -226,6 +276,8 @@ impl Avatar {
     /// With voice on, the sidecar is kept connected (at start, and after it went away), so a
     /// reply to an event can be heard before he ever pressed the talk key.
     pub(super) fn voice_keepalive(&mut self, now: Instant, cx: &mut Context<Self>) {
+        // Windows: she runs the sidecar while voice is on (Linux: systemd does; nothing here).
+        crate::platform::voice_sidecar(self.voice_on());
         if !self.voice_on() || self.voice.link.is_some() || self.voice.retry_at.is_some_and(|t| now < t) {
             return;
         }

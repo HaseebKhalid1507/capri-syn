@@ -109,6 +109,7 @@ value rejects the whole file (the previous values stay). `avatarctl settings rel
 | `[voice] speed` | `1.05` | 0.5..2 |
 | `[voice] duck` | `"pause"` | other audio while she listens or speaks: `"pause"` (MPRIS), `"duck"` (PipeWire) or `"off"` |
 | `[voice] key` | `"c"` | the talk key's letter, so an X auto-repeat isn't taken for a release. Match your binding |
+| `[voice] hold_to_talk` | `false` | Windows: her summon key (Win+Alt+C) talks while held; a tap opens the Line either way. Linux: unused (the binding sends `talk press` / `talk release`) |
 
 `[session]` applies only to her own session, never to one she rides with `--session`.
 

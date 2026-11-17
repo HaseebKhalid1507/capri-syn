@@ -6,9 +6,11 @@
 #                          python313._pth pointing at ..\site-packages
 #   <Out>\site-packages\   tools\capri-voice-win-requirements.txt, wheels only (nothing compiled)
 #   <Out>\capri-voice, <Out>\capri_voice_win.py
+#   <Out>\voice-models.ps1, <Out>\wake\hey-capri-v1.npz   (the model fetch, and the one model in the repo)
 #
 # Run it:  <Out>\python\pythonw.exe <Out>\capri-voice      (no console; python.exe for one)
-# Models are never in it: %LOCALAPPDATA%\capri-voice\models (what capri-voice-setup fetches on Linux).
+# Models are never in it: %LOCALAPPDATA%\capri-voice\models, fetched by voice-models.ps1 (what
+# capri-voice-setup fetches on Linux). The voice installer (synaps-avatar-voice.iss) carries it.
 #
 #   .\packaging\windows\voice-bundle.ps1 [-Out DIR] [-Python python]
 # -Python: a CPython 3.13 x64 that runs pip (the wheels it picks must match the embedded 3.13).
@@ -52,6 +54,9 @@ Get-ChildItem -Path $site -Directory -Filter 'bin' | Remove-Item -Recurse -Force
 
 Copy-Item (Join-Path $repo 'tools\capri-voice') $Out
 Copy-Item (Join-Path $repo 'tools\capri_voice_win.py') $Out
+Copy-Item (Join-Path $PSScriptRoot 'voice-models.ps1') $Out
+New-Item -ItemType Directory -Force (Join-Path $Out 'wake') | Out-Null
+Copy-Item (Join-Path $repo 'tools\wake\hey-capri-v1.npz') (Join-Path $Out 'wake')
 & $Python -m pip freeze --path $site | Set-Content -Encoding utf8 (Join-Path $Out 'versions.txt')
 
 $mb = [math]::Round(((Get-ChildItem -Recurse -File $Out | Measure-Object Length -Sum).Sum / 1MB), 1)
