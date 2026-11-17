@@ -860,6 +860,12 @@ impl Os {
         self.desk.idle_ms().or_else(|| self.pointer_still_ms().map(|ms| ms.min(u32::MAX as u64) as u32))
     }
 
+    /// Grab her global keys, if this backend does (`Desktop::watch_keys`): Ok(false) when the
+    /// desktop's bindings drive her instead.
+    pub fn watch_keys(&self, keys: super::Keys, on: impl Fn(super::KeyEv) + Send + 'static) -> Result<bool> {
+        self.desk.watch_keys(keys, Box::new(on))
+    }
+
     /// Report the session's lock and sleep (`WatchEvent::Session`).
     pub fn watch_session(&self, on: impl Fn(WatchEvent) + Send + 'static) -> Result<()> {
         self.desk.watch_session(Box::new(move |e| on(WatchEvent::Session(e))))

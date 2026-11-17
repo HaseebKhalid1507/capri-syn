@@ -334,7 +334,7 @@ mood <name> | clip <id> | say <text> | pos <x> <y> [now] | perch [sit|stand] [wi
 page next|prev | scroll <n> | reader open [focus]|close|copy [n]|scroll <px> | collapse | expand
 music on [BPM]|off | walk <x> [scoot] | glitch | face left|right|toggle | drag … | submit <text> | abort | copy
 art stand|perch|sleepFloor|sleepWindow <variant id|next> | intro [skip]
-talk press|release | line close | prompt confirm|secret [text] | prompt off
+talk press|release|tap|toggle | line close | prompt confirm|secret [text] | prompt off
 brain … | settings reload | tap head|body | menu | shape | state | hide | show | quit
 ```
 

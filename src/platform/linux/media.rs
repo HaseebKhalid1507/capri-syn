@@ -1,10 +1,10 @@
-//! Real "listening": MPRIS players on the session bus. Two threads block on D-Bus signals
+//! His music on Linux: MPRIS players on the session bus. Two threads block on D-Bus signals
 //! (NameOwnerChanged for players coming and going, PropertiesChanged for PlaybackStatus and
-//! Metadata); nothing polls. The view hears only when the sum changes.
+//! Metadata); nothing polls. The view hears only when the sum (`media::aggregate`) changes.
 
+use crate::media::{Filter, Playback, aggregate};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-
 use zbus::MatchRule;
 use zbus::blocking::{Connection, MessageIterator};
 use zbus::message::Type;
@@ -14,46 +14,11 @@ const PREFIX: &str = "org.mpris.MediaPlayer2.";
 const PATH: &str = "/org/mpris/MediaPlayer2";
 const PLAYER: &str = "org.mpris.MediaPlayer2.Player";
 
-/// What the players add up to.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Playback {
-    pub playing: bool,
-    /// `xesam:audioBPM` of the first playing player that has it.
-    pub bpm: Option<f32>,
-}
-
-/// Which players count: none whose bus name contains an `ignore` substring (calls, voice);
-/// with `only` (tests), just the ones containing it.
-#[derive(Clone, Debug, Default)]
-pub struct Filter {
-    pub ignore: Vec<String>,
-    pub only: Option<String>,
-}
-
-impl Filter {
-    pub fn counts(&self, name: &str) -> bool {
-        let n = name.to_lowercase();
-        !self.ignore.iter().any(|i| !i.is_empty() && n.contains(&i.to_lowercase())) && self.only.as_ref().is_none_or(|o| n.contains(&o.to_lowercase()))
-    }
-}
-
 #[derive(Clone, Debug)]
 struct Player {
     name: String,
     status: String,
     bpm: Option<f32>,
-}
-
-/// The sum: playing if any counted player is Playing.
-pub fn aggregate<'a>(players: impl Iterator<Item = (&'a str, &'a str, Option<f32>)>, f: &Filter) -> Playback {
-    let mut out = Playback::default();
-    for (name, status, bpm) in players {
-        if f.counts(name) && status == "Playing" {
-            out.playing = true;
-            out.bpm = out.bpm.or(bpm);
-        }
-    }
-    out
 }
 
 fn unwrap_variant(v: OwnedValue) -> OwnedValue {
@@ -118,7 +83,7 @@ struct Shared {
 }
 
 /// Watch the session bus; `on_change` gets the sum whenever it changes (first call: now).
-pub fn spawn(filter: Filter, on_change: impl Fn(Playback) + Send + Sync + 'static) -> anyhow::Result<()> {
+pub fn watch_media(filter: Filter, on_change: impl Fn(Playback) + Send + Sync + 'static) -> anyhow::Result<()> {
     let conn = Connection::session()?;
     let owners = MatchRule::builder()
         .msg_type(Type::Signal)
@@ -206,24 +171,6 @@ pub fn spawn(filter: Filter, on_change: impl Fn(Playback) + Send + Sync + 'stati
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn playing_counts_unless_ignored() {
-        let f = Filter { ignore: vec!["discord".into(), "vesktop".into()], only: None };
-        let p = |v: &[(&'static str, &'static str, Option<f32>)]| aggregate(v.iter().copied(), &f);
-        assert_eq!(p(&[]), Playback { playing: false, bpm: None });
-        assert!(p(&[("org.mpris.MediaPlayer2.spotify", "Playing", None)]).playing);
-        assert!(!p(&[("org.mpris.MediaPlayer2.spotify", "Paused", None)]).playing);
-        // A call or voice chat doesn't count; a paused one next to a playing one doesn't matter.
-        assert!(!p(&[("org.mpris.MediaPlayer2.Discord", "Playing", None)]).playing);
-        assert!(!p(&[("org.mpris.MediaPlayer2.vesktop.instance2", "Playing", None), ("org.mpris.MediaPlayer2.mpv", "Stopped", None)]).playing);
-        let both = p(&[("org.mpris.MediaPlayer2.mpv", "Paused", Some(90.0)), ("org.mpris.MediaPlayer2.zen", "Playing", Some(128.0))]);
-        assert_eq!(both, Playback { playing: true, bpm: Some(128.0) });
-        // Tests: only the fake player.
-        let only = Filter { ignore: vec![], only: Some("satest".into()) };
-        assert!(!aggregate([("org.mpris.MediaPlayer2.spotify", "Playing", None)].into_iter(), &only).playing);
-        assert!(aggregate([("org.mpris.MediaPlayer2.satest", "Playing", None)].into_iter(), &only).playing);
-    }
 
     #[test]
     fn bpm_from_metadata() {

@@ -4,8 +4,10 @@
 //! monitors, struts, compositor detection, focus. Every rule built on it is the core's
 //! (`platform/os.rs`).
 
+mod struts;
+
 use super::{Caps, Desktop, FxZ, Hint, Monitor, PointerImage, PointerRead, Role, SEAT_MIN, ShapeRect, Stage, Visible, Win, WinId, WinRect};
-use crate::edges::{self, Strut};
+use struts::{Strut, work_areas};
 use anyhow::{Context as _, Result, bail};
 use gpui_kit::{Window, WindowKind, WindowOptions};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -348,7 +350,7 @@ impl Desktop for X11 {
         let rects: Vec<WinRect> = mons.iter().map(Monitor::rect).collect();
         let root = self.root_size();
         let struts = self.struts(&rects, root);
-        edges::work_areas(&rects, root, &struts)
+        work_areas(&rects, root, &struts)
             .into_iter()
             .zip(mons)
             .map(|(a, m)| Monitor { primary: m.primary, x: a.x, y: a.y, w: a.w, h: a.h })
@@ -835,20 +837,20 @@ mod tests {
         let root = (5120, 1600);
         let s1 = strut_partial(&[0, 0, 29, 0, 0, 0, 0, 0, 2560, 5119, 0, 0]).unwrap();
         let s2 = strut_partial(&[0, 0, 29, 0, 0, 0, 0, 0, 0, 2559, 0, 0]).unwrap();
-        let a = edges::work_areas(&mons, root, &[s1, s2]);
+        let a = work_areas(&mons, root, &[s1, s2]);
         assert_eq!(a[0], w(0, 0, 29, 2560, 1571));
         assert_eq!(a[1], w(1, 2560, 29, 2560, 1411));
         // Only one bar: the other monitor keeps its top.
-        let a = edges::work_areas(&mons, root, &[s1]);
+        let a = work_areas(&mons, root, &[s1]);
         assert_eq!(a[0].y, 0);
         assert_eq!(a[1].y, 29);
         // A dock with geometry only.
         let d = strut_from_dock(&w(9, 2560, 0, 2560, 29), &mons, root).unwrap();
-        assert_eq!(edges::work_areas(&mons, root, &[d])[1].y, 29);
+        assert_eq!(work_areas(&mons, root, &[d])[1].y, 29);
         // A bottom bar on the shorter monitor (struts count from the root's bottom).
         let b = strut_partial(&[0, 0, 0, 160 + 30, 0, 0, 0, 0, 0, 0, 2560, 5119]).unwrap();
-        assert_eq!(edges::work_areas(&mons, root, &[b])[1].bottom(), 1410);
-        assert_eq!(edges::work_areas(&mons, root, &[b])[0].bottom(), 1600);
+        assert_eq!(work_areas(&mons, root, &[b])[1].bottom(), 1410);
+        assert_eq!(work_areas(&mons, root, &[b])[0].bottom(), 1600);
         assert_eq!(strut_plain(&[0, 0, 29, 0], root).unwrap().top_x, (0, 5119));
     }
 }

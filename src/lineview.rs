@@ -140,9 +140,23 @@ impl Avatar {
     /// `talk release`: a tap typed (the Line is open); a hold sends what she heard (voice
     /// on), after the auto-repeat window.
     pub(super) fn talk_release(&mut self, cx: &mut Context<Self>) -> String {
+        self.talk_release_as(true, cx)
+    }
+
+    /// `talk tap`: the press and its release now (a grabbed key reports its press only). The
+    /// key is never asked whether it is still down, so this is never a hold.
+    pub(super) fn talk_tap(&mut self, cx: &mut Context<Self>) -> String {
+        let press = self.talk_press(cx);
+        let release = self.talk_release_as(false, cx);
+        format!("{press}; {release}")
+    }
+
+    /// `physical`: the release came from the key itself, which may still be down (an
+    /// auto-repeat pair); a tap's release didn't.
+    fn talk_release_as(&mut self, physical: bool, cx: &mut Context<Self>) -> String {
         let Some(t0) = self.talk_down else { return "ok (no press)".into() };
         let ms = t0.elapsed().as_millis();
-        if !self.voice_up(cx) {
+        if !self.voice_up(physical, cx) {
             return "ok repeat (key still down)".into();
         }
         if std::mem::take(&mut self.tap_closes)

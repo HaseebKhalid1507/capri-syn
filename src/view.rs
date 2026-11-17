@@ -722,7 +722,7 @@ pub struct Avatar {
     /// The player stopped: the headphones come off at this time (MUSIC_GRACE).
     music_stop_at: Option<Instant>,
     /// What the media players add up to, last heard.
-    player: crate::mpris::Playback,
+    player: crate::media::Playback,
     /// HIDE from her menu: vanishing (false) or hidden (true); the process keeps running.
     parked: Option<bool>,
     /// The restore chip's window while she is hidden, and where (device px).
@@ -919,7 +919,7 @@ impl Avatar {
             perch_gone: None,
             parked: None,
             music_stop_at: None,
-            player: crate::mpris::Playback::default(),
+            player: crate::media::Playback::default(),
             chip: None,
             chip_rect: None,
             unpark_req: None,
@@ -988,7 +988,7 @@ impl Avatar {
     }
 
     /// A media player started (`playing`) or stopped: real LISTENING, off after a grace.
-    fn playback(&mut self, p: crate::mpris::Playback, now: Instant) -> String {
+    fn playback(&mut self, p: crate::media::Playback, now: Instant) -> String {
         self.player = p;
         // Music started under an unprompted reply: she stops.
         self.voice_guard();
@@ -2781,6 +2781,7 @@ impl Avatar {
                     self.talk_release(cx)
                 }
             }
+            Command::TalkTap => self.talk_tap(cx),
             Command::TalkToggle => self.voice_toggle(cx),
             Command::TalkHandsfree(on) => {
                 if on {

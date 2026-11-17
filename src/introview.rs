@@ -146,11 +146,7 @@ fn unix_now() -> f64 {
 
 /// The local calendar day of a unix time (year, day of the year).
 fn local_day(unix: f64) -> Option<(i32, i32)> {
-    let t = unix as libc::time_t;
-    // SAFETY: localtime_r only writes the tm we own; a null return is checked.
-    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    let r = unsafe { libc::localtime_r(&t, &mut tm) };
-    (!r.is_null()).then_some((tm.tm_year, tm.tm_yday))
+    crate::platform::local_day(unix)
 }
 
 /// It played on the local day of `now` already.

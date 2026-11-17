@@ -36,3 +36,42 @@ jobs:
 
       - name: Tests
         run: cargo test --locked --workspace
+
+  # The compile gate for Windows (x86_64-pc-windows-msvc, the runner's host): build, the unit tests
+  # (the fake contract suite in both modes among them) and clippy. The Windows contract suite proper
+  # needs a desktop (`contract_windows`, ignored here: run it in the capri-win VM).
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 75
+    env:
+      CARGO_INCREMENTAL: "0"
+      # No PDBs for the dev/test builds: a smaller cache and faster links.
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain (rust-toolchain.toml)
+        shell: bash
+        run: rustup show active-toolchain || rustup toolchain install
+
+      # The registry and the dependencies' build (the workspace's own crates pruned); saved on a
+      # failed run too, so a red run still warms the next.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Build
+        run: cargo build --locked --bin synaps-avatar
+
+      - name: Tests
+        if: ${{ !cancelled() }}
+        run: cargo test --locked --workspace
+
+      - name: Fake contract suite (target events, polled)
+        if: ${{ !cancelled() }}
+        run: cargo test --locked --bin synaps-avatar contract_fake -- --nocapture
+
+      - name: Clippy
+        if: ${{ !cancelled() }}
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings

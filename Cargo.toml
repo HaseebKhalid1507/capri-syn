@@ -14,16 +14,11 @@ name = "synaps-avatar"
 path = "src/main.rs"
 
 [dependencies]
-# MPRIS playback (real "listening"): the zbus GPUI already builds, plus its blocking API.
-zbus = { version = "5.19", default-features = false, features = ["async-io", "blocking-api"] }
 # The Synaps daemon client, vendored (crates/synaps-client/VENDORED.md): no git deps, no tokens.
 synaps-client = { path = "crates/synaps-client" }
 # Longbridge's GPUI Kit pins Zed's GPUI snapshot exactly; both pins are spelled out so neither drifts.
 gpui-kit = { version = "=0.9.1", features = ["syntect", "profiler"] }
 gpui-pre = "=0.3.12"
-# Its Linux platform, vendored and patched (vendor/gpui-pre-linux/PATCHES.md): `layer_ctl`, her
-# layer surfaces' margins, input region and keyboard at run time (the Hyprland backend).
-gpui-pre-linux = "=0.3.12"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 async-channel = "2"
@@ -33,11 +28,42 @@ fast_image_resize = "6"
 sha2 = "0.10"
 raw-window-handle = "0.6"
 log = "0.4"
-libc = "0.2"
-x11rb = { version = "0.13", features = ["shape", "randr", "xfixes", "screensaver", "xinput", "render"] }
 # settings.toml (both already in the lock through GPUI).
 toml = "0.8"
 toml_edit = "0.22"
+
+# The Linux desktops (src/platform/x11, src/platform/hypr, src/platform/linux.rs) and services.
+[target.'cfg(target_os = "linux")'.dependencies]
+# MPRIS playback (real "listening"): the zbus GPUI already builds, plus its blocking API.
+zbus = { version = "5.19", default-features = false, features = ["async-io", "blocking-api"] }
+# Its Linux platform, vendored and patched (vendor/gpui-pre-linux/PATCHES.md): `layer_ctl`, her
+# layer surfaces' margins, input region and keyboard at run time (the Hyprland backend).
+gpui-pre-linux = "=0.3.12"
+x11rb = { version = "0.13", features = ["shape", "randr", "xfixes", "screensaver", "xinput", "render"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# The Windows backend (src/platform/windows). Both already in the lock through GPUI and zbus.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Console",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Performance",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_System_Time",
+    "Win32_UI_Accessibility",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+# AF_UNIX on Windows (10 1803+): the control socket and the voice link stay Unix sockets.
+uds_windows = "1.2"
 
 [profile.release]
 opt-level = 3
@@ -66,3 +92,6 @@ opt-level = 3
 # re-renders and presents the whole window, nor does a GetGeometry round trip.
 [patch.crates-io]
 gpui-pre-linux = { path = "vendor/gpui-pre-linux" }
+# GPUI's Windows backend, patched (vendor/gpui-pre-windows/PATCHES.md): pop-ups without a title
+# bar, a click on her doesn't activate her, a pure move doesn't re-render.
+gpui-pre-windows = { path = "vendor/gpui-pre-windows" }

@@ -73,6 +73,22 @@ pub fn block_on<F: Future>(f: F) -> F::Output {
 
 /// Every scenario; the first failure stops the run. Returns the names that passed.
 pub async fn run<D: Driver>(os: &Os, d: &mut D) -> Result<Vec<&'static str>> {
+    let mut passed = Vec::new();
+    for (name, r) in scenarios(os, d, true).await? {
+        r.map_err(|e| anyhow!("{name}: {e:#}"))?;
+        passed.push(name);
+    }
+    Ok(passed)
+}
+
+/// Every scenario, a failure doesn't stop the run: each one's result (a backend still
+/// partial lists what it passes).
+#[allow(dead_code)]
+pub async fn run_each<D: Driver>(os: &Os, d: &mut D) -> Result<Vec<(&'static str, Result<()>)>> {
+    scenarios(os, d, false).await
+}
+
+async fn scenarios<D: Driver>(os: &Os, d: &mut D, stop: bool) -> Result<Vec<(&'static str, Result<()>)>> {
     let (tx, rx) = channel();
     let tx2 = tx.clone();
     os.spawn_watcher(move |e| {
@@ -82,12 +98,16 @@ pub async fn run<D: Driver>(os: &Os, d: &mut D) -> Result<Vec<&'static str>> {
     os.watch_pointer(cfg, move |p| {
         tx2.send(WatchEvent::Pointer(p)).ok();
     })?;
-    let mut passed = Vec::new();
+    let mut out = Vec::new();
     macro_rules! scenario {
         ($name:literal, $f:ident) => {
             drain(&rx);
-            $f(os, d, &rx).await.map_err(|e| anyhow!("{}: {e:#}", $name))?;
-            passed.push($name);
+            let r = $f(os, d, &rx).await;
+            let failed = r.is_err();
+            out.push(($name, r));
+            if failed && stop {
+                return Ok(out);
+            }
         };
     }
     scenario!("stack-and-seats", stack_and_seats);
@@ -102,7 +122,7 @@ pub async fn run<D: Driver>(os: &Os, d: &mut D) -> Result<Vec<&'static str>> {
     scenario!("keyboard", keyboard);
     scenario!("pointer-near", pointer_near);
     scenario!("presence", presence);
-    Ok(passed)
+    Ok(out)
 }
 
 /// The extent `(x, y, w, h)` of a painted layer, with the id dropped.

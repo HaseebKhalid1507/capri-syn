@@ -231,6 +231,8 @@ bindsym --release $mod+c exec --no-startup-id avatarctl talk release
 
 A tap opens the Line right beside her, wherever she is (floor, a window top, an edge; asleep too): she
 stays put, it goes on her roomier side and follows her if she moves. A hold is push-to-talk, if voice is on.
+On Windows (in progress) she registers Win+Alt+C (a tap) and Win+Alt+Ctrl+C (toggle-to-talk) herself; see
+[docs/VOICE.md](docs/VOICE.md).
 
 **Voice (optional).** A sidecar, `capri-voice`, owns the mic and the speech models. The setup script
 uses `uv` for a user-local venv and expects `pywhispercpp` from your distribution

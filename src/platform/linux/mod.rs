@@ -1,5 +1,12 @@
-//! The Linux process: what has to be set before GPUI starts (GPU choice, the allocator).
-//! Shared by every Linux backend (X11, Hyprland).
+//! The Linux process: what has to be set before GPUI starts (GPU choice, the allocator), and
+//! the session bus's services (media players, notifications, logind). Shared by every Linux
+//! backend (X11, Hyprland).
+
+mod media;
+mod notifications;
+
+pub use media::watch_media;
+pub use notifications::notify;
 
 /// Process setup that has to happen before any other thread exists. Each knob was
 /// measured on bella (release, `ps` RSS 6 s after start, see LOG.md):
@@ -123,6 +130,25 @@ pub fn monotonic_s() -> f64 {
     ts.tv_sec as f64 + ts.tv_nsec as f64 * 1e-9
 }
 
+/// Tests: run `f` with stderr (fd 2) going into a pipe whose reader is gone; fd 2 is put back
+/// after.
+#[cfg(test)]
+pub fn stderr_into_closed_pipe<R>(f: impl FnOnce() -> R) -> R {
+    use std::os::fd::AsRawFd as _;
+    let (reader, writer) = std::io::pipe().expect("a pipe");
+    drop(reader);
+    // SAFETY: plain fd juggling on this process's own descriptors; fd 2 is restored.
+    let saved = unsafe { libc::dup(2) };
+    assert!(saved >= 0 && unsafe { libc::dup2(writer.as_raw_fd(), 2) } == 2, "stderr into the pipe");
+    let out = f();
+    unsafe {
+        libc::dup2(saved, 2);
+        libc::close(saved);
+    }
+    drop(writer);
+    out
+}
+
 /// The UTC offset (seconds east) of local time at unix second `unix` (DST included).
 pub fn utc_offset_s(unix: i64) -> i32 {
     let t: libc::time_t = unix as libc::time_t;
@@ -132,6 +158,15 @@ pub fn utc_offset_s(unix: i64) -> i32 {
         return 0;
     }
     tm.tm_gmtoff as i32
+}
+
+/// The local calendar day of a unix time (years since 1900, day of the year).
+pub fn local_day(unix: f64) -> Option<(i32, i32)> {
+    let t = unix as libc::time_t;
+    // SAFETY: localtime_r only writes the tm we own; a null return is checked.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    let r = unsafe { libc::localtime_r(&t, &mut tm) };
+    (!r.is_null()).then_some((tm.tm_year, tm.tm_yday))
 }
 
 const LOGIND: &str = "org.freedesktop.login1";

@@ -3,9 +3,9 @@
 //! command → state boundary stays in `view::Avatar::apply`.
 
 use crate::anim::Mood;
+use crate::platform::{LocalListener as UnixListener, LocalStream as UnixStream};
 use anyhow::{Context as _, Result, bail};
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -57,8 +57,8 @@ pub enum Command {
     Page(i32),
     /// Back from HIDE (the restore chip's click).
     Show,
-    /// Internal: a media player started or stopped (MPRIS).
-    Playback(crate::mpris::Playback),
+    /// Internal: a media player started or stopped.
+    Playback(crate::media::Playback),
     /// Scroll the bubble by n lines (the wheel's path).
     Scroll(i32),
     /// The reader panel.
@@ -80,6 +80,9 @@ pub enum Command {
     Abort,
     /// The summon key went down (true) or up: open the Line (tap), voice later (hold).
     Talk(bool),
+    /// `talk tap`: a press and its release at once, from a key that reports only its press (a
+    /// grabbed global key): opens or closes the Line, never a hold (no push-to-talk).
+    TalkTap,
     /// `talk toggle`: the mic opens on one tap and the turn ends on a pause (or a second tap).
     TalkToggle,
     /// `talk cancel`: an open mic closes, nothing is sent.
@@ -416,11 +419,12 @@ impl Command {
             "talk" => match rest {
                 "press" | "" => Command::Talk(true),
                 "release" => Command::Talk(false),
+                "tap" => Command::TalkTap,
                 "toggle" => Command::TalkToggle,
                 "cancel" => Command::TalkCancel,
                 "handsfree on" => Command::TalkHandsfree(true),
                 "handsfree off" => Command::TalkHandsfree(false),
-                _ => bail!("usage: talk press|release|toggle|cancel|handsfree on|off"),
+                _ => bail!("usage: talk press|release|tap|toggle|cancel|handsfree on|off"),
             },
             "line" => match rest {
                 "close" => Command::LineClose,
@@ -573,6 +577,7 @@ mod tests {
         assert!(matches!(Command::parse("tap head").unwrap(), Command::Tap { head: true }));
         assert!(matches!(Command::parse("settings reload").unwrap(), Command::SettingsReload));
         assert!(matches!(Command::parse("talk toggle").unwrap(), Command::TalkToggle));
+        assert!(matches!(Command::parse("talk tap").unwrap(), Command::TalkTap));
         assert!(matches!(Command::parse("talk cancel").unwrap(), Command::TalkCancel));
         assert!(matches!(Command::parse("talk").unwrap(), Command::Talk(true)));
         assert!(Command::parse("talk twice").is_err());
