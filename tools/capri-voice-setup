@@ -7,11 +7,12 @@
 #                                     kokoro-v1.0.int8.onnx (92 MB), kokoro-v1.0.onnx (326 MB), voices-v1.0.bin (28 MB),
 #                                     silero_vad.onnx (2.3 MB); the wake word's melspectrogram.onnx,
 #                                     embedding_model.onnx (2.4 MB) and hey-capri-v1.npz (from tools/wake)
-# pywhispercpp itself comes from the distro (python-pywhispercpp-cpu on bella).
+# pywhispercpp comes from the distro when it has one (python-pywhispercpp-cpu on bella), else PyPI's wheel.
 set -eu
 V=~/.local/share/capri-voice; mkdir -p $V/models; cd $V
 [ -d venv ] || uv venv -q --system-site-packages -p /usr/bin/python3 venv
 VIRTUAL_ENV=$V/venv uv pip install -q kokoro-onnx
+venv/bin/python -c 'import pywhispercpp' 2>/dev/null || VIRTUAL_ENV=$V/venv uv pip install -q pywhispercpp
 B=https://huggingface.co/ggerganov/whisper.cpp/resolve/main
 for m in ggml-small.en-q5_1.bin ggml-base.en-q5_1.bin; do [ -s models/$m ] || curl -sSfL -o models/$m $B/$m; done
 K=https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0
