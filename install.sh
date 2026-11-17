@@ -218,11 +218,10 @@ backup() {
     run cp -p "$1" "$b"
     if [ "$UNINSTALL" = 1 ]; then info "backup: $(tilde "$b")"; else rec backup "$b"; fi
 }
-# Put BODY (stdin) in FILE between our markers: the old block replaced, a backup first. Written
-# through (a symlinked dotfile stays a symlink).
+# Put BODY in FILE between our markers: the old block replaced, a backup first. Written through
+# (a symlinked dotfile stays a symlink). Not in a pipeline: the backup bookkeeping is this shell's.
 block_put() {
-    local f=$1 tag=$2 body cur
-    body=$(cat)
+    local f=$1 tag=$2 body=$3 cur
     cur=$(block_get "$f" "$tag")
     if [ "$cur" = "$body" ]; then
         good "already in $(tilde "$f")"
@@ -904,7 +903,7 @@ step_summon() {
         return 0
     fi
     if confirm "add the summon key (Super+C) to $(tilde "$WMCONF") (a backup first)"; then
-        printf '%s\n' "$lines" | block_put "$WMCONF" summon
+        block_put "$WMCONF" summon "$lines"
         SUMMON="Super+C ($DESKTOP)"
         wm_reload
     else
@@ -962,7 +961,7 @@ step_autostart() {
                 hyprland) line="exec-once = $cmd" ;;
             esac
             if confirm "start her at login from $(tilde "$WMCONF") (a backup first)"; then
-                printf '%s\n' "$line" | block_put "$WMCONF" autostart
+                block_put "$WMCONF" autostart "$line"
                 AUTOSTART_HOW="$DESKTOP config"
             else
                 info "add it yourself: $line"
