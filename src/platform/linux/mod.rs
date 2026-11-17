@@ -31,6 +31,20 @@ pub fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
+/// Her end of the voice sidecar's link.
+pub type VoiceLink = std::os::unix::net::UnixStream;
+
+/// The sidecar's socket (`$CAPRI_VOICE_SOCK`, else `$XDG_RUNTIME_DIR/capri-voice.sock`, else in
+/// the temp dir) and a link to it.
+pub fn voice_link() -> (String, std::io::Result<VoiceLink>) {
+    let p = match std::env::var_os("CAPRI_VOICE_SOCK") {
+        Some(p) => PathBuf::from(p),
+        None => std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join("capri-voice.sock"),
+    };
+    let s = VoiceLink::connect(&p);
+    (p.display().to_string(), s)
+}
+
 /// Process setup that has to happen before any other thread exists. Each knob was
 /// measured on bella (release, `ps` RSS 6 s after start, see LOG.md):
 ///
@@ -316,8 +330,27 @@ mod tests {
         assert_eq!(base_dir_in(BaseDir::Config, env(home)), Some(PathBuf::from("/home/h/.config")));
         assert_eq!(base_dir_in(BaseDir::Data, env(home)), Some(PathBuf::from("/home/h/.local/share")));
         assert_eq!(base_dir_in(BaseDir::State, env(home)), Some(PathBuf::from("/home/h/.local/state")));
-        let xdg: &'static [(&str, &str)] = &[("HOME", "/home/h"), ("XDG_DATA_HOME", "/data")];
+        // Each kind's own XDG variable wins over $HOME, and only for that kind.
+        let xdg: &'static [(&str, &str)] =
+            &[("HOME", "/home/h"), ("XDG_CONFIG_HOME", "/cfg"), ("XDG_DATA_HOME", "/data"), ("XDG_STATE_HOME", "/state")];
+        assert_eq!(base_dir_in(BaseDir::Config, env(xdg)), Some(PathBuf::from("/cfg")));
         assert_eq!(base_dir_in(BaseDir::Data, env(xdg)), Some(PathBuf::from("/data")));
+        assert_eq!(base_dir_in(BaseDir::State, env(xdg)), Some(PathBuf::from("/state")));
+        let data_only: &'static [(&str, &str)] = &[("HOME", "/home/h"), ("XDG_DATA_HOME", "/data")];
+        assert_eq!(base_dir_in(BaseDir::Config, env(data_only)), Some(PathBuf::from("/home/h/.config")));
+        assert_eq!(base_dir_in(BaseDir::State, env(data_only)), Some(PathBuf::from("/home/h/.local/state")));
+        // XDG set, HOME unset: the XDG path; the kinds without one have none.
+        let no_home: &'static [(&str, &str)] = &[("XDG_CONFIG_HOME", "/cfg"), ("XDG_STATE_HOME", "/state")];
+        assert_eq!(base_dir_in(BaseDir::Config, env(no_home)), Some(PathBuf::from("/cfg")));
+        assert_eq!(base_dir_in(BaseDir::State, env(no_home)), Some(PathBuf::from("/state")));
+        assert_eq!(base_dir_in(BaseDir::Data, env(no_home)), None);
+        // Pinned as it is (the pre-P1c lookup did the same): a SET but EMPTY XDG value is taken
+        // as given, an empty path (her files then resolve against the working directory), not as
+        // unset. The XDG spec says to treat it as unset; changing that is a behaviour change.
+        let empty: &'static [(&str, &str)] = &[("HOME", "/home/h"), ("XDG_CONFIG_HOME", ""), ("XDG_STATE_HOME", "")];
+        assert_eq!(base_dir_in(BaseDir::Config, env(empty)), Some(PathBuf::new()));
+        assert_eq!(base_dir_in(BaseDir::State, env(empty)), Some(PathBuf::new()));
+        assert_eq!(base_dir_in(BaseDir::Data, env(empty)), Some(PathBuf::from("/home/h/.local/share")));
         assert_eq!(base_dir_in(BaseDir::State, env(&[])), None);
     }
     use std::collections::HashMap;

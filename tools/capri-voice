@@ -2,7 +2,8 @@
 """capri-voice: Capri's voice sidecar. It owns the mic, the speech models and the speaker.
 
 The avatar connects to a unix socket ($XDG_RUNTIME_DIR/capri-voice.sock) and talks
-newline-delimited JSON:
+newline-delimited JSON (Windows: loopback TCP after a token handshake, see capri_voice_win.py;
+every OS-facing part there is that module's, next to this file):
 
   avatar -> here                       here -> avatar
   {"op":"config", stt_model, voice, speed, flow, pace, duck_ignore}
@@ -50,11 +51,18 @@ import collections, json, math, os, re, select, shutil, signal, socket, subproce
 
 import numpy as np
 
+WIN = sys.platform == 'win32'   # Windows: capri_voice_win (bottom of this file); Linux never loads it
 HOME = os.path.expanduser('~')
-MODELS = os.environ.get('CAPRI_VOICE_MODELS', f'{HOME}/.local/share/capri-voice/models')
-RUNTIME = os.environ.get('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}')
-SOCK = os.environ.get('CAPRI_VOICE_SOCK', f'{RUNTIME}/capri-voice.sock')
-STATE = os.environ.get('CAPRI_VOICE_STATE', f'{HOME}/.local/state/capri-voice/media.json')
+if WIN:
+    _LOCAL = os.path.join(os.environ.get('LOCALAPPDATA') or HOME, 'capri-voice')
+    MODELS = os.environ.get('CAPRI_VOICE_MODELS', os.path.join(_LOCAL, 'models'))
+    RUNTIME = SOCK = None       # the link is capri_voice_win.serve's
+    STATE = os.environ.get('CAPRI_VOICE_STATE', os.path.join(_LOCAL, 'media.json'))
+else:
+    MODELS = os.environ.get('CAPRI_VOICE_MODELS', f'{HOME}/.local/share/capri-voice/models')
+    RUNTIME = os.environ.get('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}')
+    SOCK = os.environ.get('CAPRI_VOICE_SOCK', f'{RUNTIME}/capri-voice.sock')
+    STATE = os.environ.get('CAPRI_VOICE_STATE', f'{HOME}/.local/state/capri-voice/media.json')
 SOURCE = os.environ.get('CAPRI_VOICE_SOURCE') or None
 SINK = os.environ.get('CAPRI_VOICE_SINK') or None
 PLAYERS = [p for p in os.environ.get('CAPRI_VOICE_PLAYERS', '').split(',') if p]
@@ -1397,6 +1405,14 @@ class Media:
             self._save()
 
 
+def mic_chunk(p, fd, wait=0.02):
+    """The capture's next chunk: None (nothing within `wait`), b'' (it ended) or the bytes."""
+    if WIN:
+        return p.read(wait)
+    r, _, _ = select.select([fd], [], [], wait)
+    return os.read(fd, 3200) if r else None
+
+
 def feed(p, data):
     try:
         p.stdin.write(data)
@@ -1735,7 +1751,17 @@ class Voice:
         vs = VadStream(self.vad) if self.vad else None
         silence_s = float(np.clip(silence_s, 0.5, 5.0))
         ep = Endpointer(silence_s) if mode == 'toggle' and vs else None
-        self.rec = subprocess.Popen(cmd + ['-'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
+        if WIN:
+            try:
+                self.rec = _win.Mic(MIC_RATE, SOURCE)
+            except Exception as e:
+                log(f'mic: no capture ({e})')
+                self.cur['t_heard'] = now_ms()
+                self.emit(ev='mic-closed', mode=mode)
+                self.emit(ev='heard', text='', why='NO MIC · CAPTURE FAILED', ms=self._ms())
+                return
+        else:
+            self.rec = subprocess.Popen(cmd + ['-'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
         if mode == 'wake':
             echo = echo if echo in ('headphones', 'speakers') else sink_kind()
             thr = self.wake.threshold(sensitivity)
@@ -1786,7 +1812,9 @@ class Voice:
     def _watchdog(self, p, cur, hf=False):
         """The capture stays on the source it opened. If PipeWire moves it (a device removed, a
         default changed), the capture is killed at once and what it heard is dropped: it is never
-        whatever the new source is."""
+        whatever the new source is. Windows: the stream itself stays on its device (capri_voice_win.Mic)."""
+        if WIN:
+            return
         so, tag = None, self.capture_tag
         for _ in range(40):
             if p.poll() is not None:
@@ -1823,9 +1851,7 @@ class Voice:
     def _watch_calls(self, call):
         """While a hands-off stream is open, a capture that appears re-checks for a call (no polling).
         A new capture isn't linked to its source when announced: look again on its 'change' events
-        and 0.3 s later. Unknown counts as a call (an open mic fails closed)."""
-        sub = subprocess.Popen(['pactl', 'subscribe'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
-
+        and 0.3 s later. Unknown counts as a call (an open mic fails closed). Windows: a poll."""
         def check():
             app = in_call()
             if app is None:
@@ -1833,6 +1859,10 @@ class Voice:
             if app:
                 call['app'] = app
             return bool(app)
+
+        if WIN:
+            return _win.CallWatch(check)
+        sub = subprocess.Popen(['pactl', 'subscribe'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
 
         def watch():
             for line in sub.stdout:
@@ -2009,13 +2039,12 @@ class Voice:
                 if screen_locked():
                     end_why = 'lock'
                     break
-            r, _, _ = select.select([fd], [], [], 0.02)
-            if not r:
+            chunk = mic_chunk(p, fd)
+            if chunk is None:
                 if p.poll() is not None:
                     end_why = 'mic lost'
                     break
                 continue
-            chunk = os.read(fd, 3200)
             if not chunk:
                 end_why = 'mic lost'
                 break
@@ -2247,13 +2276,12 @@ class Voice:
             if seed:
                 chunk, seed = seed[:3200], seed[3200:]   # what the wake stream already holds of him, first, as it came
             else:
-                r, _, _ = select.select([fd], [], [], 0.02)
-                if not r:
+                chunk = mic_chunk(p, fd)
+                if chunk is None:
                     if p.poll() is not None:
                         end_why = 'mic lost'
                         break
                     continue
-                chunk = os.read(fd, 3200)
                 if not chunk:
                     end_why = 'mic lost'
                     break
@@ -2403,12 +2431,11 @@ class Voice:
                     log('mic: the screen locked: capture cancelled')
                     cur['refused'] = 'NO MIC · SCREEN LOCKED'
                     self.listen_cancel()
-            r, _, _ = select.select([fd], [], [], 0.02)
-            if not r:
+            chunk = mic_chunk(p, fd)
+            if chunk is None:
                 if p.poll() is not None:
                     break
                 continue
-            chunk = os.read(fd, 3200)
             if not chunk:
                 break
             if not opened:
@@ -2652,8 +2679,20 @@ class Voice:
                        '-P', '{ application.name = "capri-voice" media.name = "capri-voice speech" node.dont-reconnect = true node.dont-fallback = true }']
                 if SINK:
                     cmd += ['--target', SINK]
-                p = subprocess.Popen(cmd + ['-'], stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                if WIN:
+                    try:
+                        p = _win.Player(TTS_RATE, SINK)
+                    except Exception as e:
+                        log(f'say {sid}: no output ({e})')
+                        p = None
+                else:
+                    p = subprocess.Popen(cmd + ['-'], stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
                 self.player, self.playing = p, sid
+            if p is None:
+                with self.cv:
+                    self.player, self.playing = None, None
+                self.skip(sid, 'no audio output')
+                continue
             data = (np.clip(pcm, -1, 1) * 32767).astype(np.int16).tobytes()
             t0 = now_ms()
             # For hands-free: her level on a 20 ms grid (the echo check) and her words (the echo guard).
@@ -2750,6 +2789,8 @@ class Voice:
             self.emit(ev='error', why=f'unknown op {op!r}')
 
     def serve(self):
+        if WIN:
+            return _win.serve(self._accepted)
         if os.path.exists(SOCK):
             os.remove(SOCK)
         srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -2759,13 +2800,17 @@ class Voice:
         log('listening on', SOCK)
         while True:
             c, _ = srv.accept()
-            old, self.conn = self.conn, c
-            if old is not None:
-                try:
-                    old.close()
-                except OSError:
-                    pass
-            threading.Thread(target=self._client, args=(c,), daemon=True).start()
+            self._accepted(c)
+
+    def _accepted(self, c):
+        """Her link: the one before it is dropped."""
+        old, self.conn = self.conn, c
+        if old is not None:
+            try:
+                old.close()
+            except OSError:
+                pass
+        threading.Thread(target=self._client, args=(c,), daemon=True).start()
 
     def _client(self, c):
         log('avatar connected')
@@ -2822,12 +2867,13 @@ def selftest_gate():
     assert other_capture([out('capri-voice', 68)], mic) is None, 'her own push-to-talk is not a call'
     assert other_capture([out('obs', 49), out('pavucontrol', 68, **{'media.name': 'Peak detect'})], mic) is None
     assert other_capture([out('capri-voice', 68), out('Discord', 68)], mic) == 'Discord'
-    saved = LOCKERS
-    LOCKERS = [open('/proc/self/comm').read().strip()]
-    assert screen_locked(), 'a locker process is the lock'
-    LOCKERS = ['capri-no-such-locker'[:15]]
-    assert not screen_locked()
-    LOCKERS = saved
+    if not WIN:       # (Windows: the lock is the input desktop's, tested in test_capri_voice.py)
+        saved = LOCKERS
+        LOCKERS = [open('/proc/self/comm').read().strip()]
+        assert screen_locked(), 'a locker process is the lock'
+        LOCKERS = ['capri-no-such-locker'[:15]]
+        assert not screen_locked()
+        LOCKERS = saved
     assert 'betterlockscree' in LOCKERS, 'comm is cut to 15 chars'
 
     class Quiet(Gate):
@@ -2857,6 +2903,8 @@ def selftest_gate():
     g.played(1.0)
     g.reset_ids()
     assert not g.skipped and not g.dropped and not g.spent and g.heard, 'a new avatar: ids start again, the budget stays'
+    if WIN:
+        return
     import shutil as _sh
     real = os.environ.get('PATH', '')
     shim = '/tmp/capri-voice-selftest-shim'
@@ -3048,8 +3096,11 @@ def selftest():
     print('selftest: unprompted gate ok (call, lock, budget, cap, too late)')
     selftest_junk()
     print('selftest: junk filter ok')
-    selftest_duck()
-    print('selftest: duck rules ok')
+    if WIN:
+        print('selftest: duck rules: Windows', _win.__name__, '(test_capri_voice.py)')
+    else:
+        selftest_duck()
+        print('selftest: duck rules ok')
     selftest_endpoint()
     print('selftest: endpointer ok')
     selftest_hf()
@@ -3151,6 +3202,17 @@ def selftest():
         nm = len(tts('Need your okay on something.', VOICE, SPEED, FLOW, pace='model'))
         assert abs(n1 / ns - SPEED) < 0.02 and nm < n1 * 0.9, (n1, ns, nm)
     print('selftest: flow ok (neutral patch == stock, stress spans exact, speed linear, local stress, question rise, pace)')
+
+
+# ---- Windows ---------------------------------------------------------------------------------
+# The OS-facing names above get capri_voice_win's, same contracts (Linux never imports it).
+if WIN:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import capri_voice_win as _win
+    _win.setup(log=log, STATE=STATE, PLAYERS=PLAYERS, DUCK_MATCH=DUCK_MATCH, VANISHED_S=VANISHED_S)
+    screen_locked, locked_hint, in_call, dnd_on, sink_kind, node_missing = (
+        _win.screen_locked, _win.locked_hint, _win.in_call, _win.dnd_on, _win.sink_kind, _win.node_missing)
+    Media = _win.Media
 
 
 def main():

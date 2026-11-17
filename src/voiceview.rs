@@ -5,7 +5,6 @@
 //! the mic and the models; nothing here touches audio.
 
 use super::*;
-use crate::platform::LocalStream as UnixStream;
 use crate::settings::VoiceSettings;
 use crate::voice::{self, Speech};
 use std::io::{BufRead, Write};
@@ -88,7 +87,7 @@ pub(super) struct Lips {
 #[derive(Default)]
 pub(super) struct VoiceState {
     pub cfg: VoiceSettings,
-    link: Option<UnixStream>,
+    link: Option<crate::platform::VoiceLink>,
     generation: u64,
     /// listen-start sent (the hold), not yet stopped.
     asked: Option<Instant>,
@@ -158,14 +157,6 @@ impl VoiceState {
     }
 }
 
-fn sock_path() -> std::path::PathBuf {
-    if let Some(p) = std::env::var_os("CAPRI_VOICE_SOCK") {
-        return p.into();
-    }
-    let rt = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir);
-    rt.join("capri-voice.sock")
-}
-
 impl Avatar {
     pub(super) fn voice_on(&self) -> bool {
         self.voice.cfg.enabled
@@ -189,12 +180,12 @@ impl Avatar {
         if self.voice.link.is_some() {
             return true;
         }
-        let path = sock_path();
-        let s = match UnixStream::connect(&path) {
+        let (path, s) = crate::platform::voice_link();
+        let s = match s {
             Ok(s) => s,
             Err(e) => {
                 if !std::mem::replace(&mut self.voice.missed, true) {
-                    elog!("synaps-avatar: voice: no sidecar at {} ({e}); looking again every {} s", path.display(), RECONNECT.as_secs());
+                    elog!("synaps-avatar: voice: no sidecar at {path} ({e}); looking again every {} s", RECONNECT.as_secs());
                 }
                 return false;
             }
@@ -228,7 +219,7 @@ impl Avatar {
         .detach();
         self.voice.link = Some(s);
         self.voice_config();
-        elog!("synaps-avatar: voice: sidecar connected ({})", path.display());
+        elog!("synaps-avatar: voice: sidecar connected ({path})");
         self.voice.link.is_some()
     }
 

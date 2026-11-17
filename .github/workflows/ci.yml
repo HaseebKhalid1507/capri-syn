@@ -66,6 +66,9 @@ jobs:
 
       - name: Tests
         if: ${{ !cancelled() }}
+        # The voice link's test against the real Python end (capri_voice_win.serve).
+        env:
+          CAPRI_VOICE_TEST_PY: python
         run: cargo test --locked --workspace
 
       - name: Fake contract suite (target events, polled)
@@ -75,6 +78,38 @@ jobs:
       - name: Clippy
         if: ${{ !cancelled() }}
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+  # capri-voice's checks that need no mic, speaker or model, on both OSes: its --selftest rules and
+  # tools/test_capri_voice.py (the capture seam; the Windows layer: the link's handshake, duck/pause
+  # rules and crash repair on fake sessions, the call check). Mic, speaker and model checks: [VM].
+  voice:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Packages (numpy; Windows also sounddevice, for the smoke checks)
+        shell: bash
+        run: |
+          python -m pip install --disable-pip-version-check -q numpy
+          if [ "$RUNNER_OS" = Windows ]; then python -m pip install --disable-pip-version-check -q sounddevice; fi
+
+      - name: Unit tests
+        run: python tools/test_capri_voice.py
+
+      - name: Selftest (no models)
+        if: ${{ !cancelled() }}
+        env:
+          CAPRI_VOICE_MODELS: ${{ runner.temp }}/no-models
+        run: python tools/capri-voice --selftest
 
   # Her per-user installer (Inno Setup, packaging/windows): the windowed release build, the
   # installer as an artifact (never released or published), then an unattended install, check
