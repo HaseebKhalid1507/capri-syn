@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Her tag shows her state only
+- The tag over her head drops her name: `ONLINE`, `SLEEPING`, `THINKING`, `NEEDS YOU`… instead of
+  `CAPRI // ONLINE`. The unread pill drops it too (`1 NEW  <first words>  READ ▸`). WORKING keeps its red
+  block, with the label on it. Notifications, the Line and the reader keep her name.
+
 ### Her tag says ONLINE while the wake word listens
 - The idle wake stream no longer replaces her tag with `MIC ON · SAY "HEY CAPRI"`. Her usual tag stays
   (`ONLINE`, her mood, `LISTENING` for music), and while the wake word's mic is open its dot is a mic glyph,
