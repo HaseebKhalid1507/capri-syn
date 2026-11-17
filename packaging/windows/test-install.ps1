@@ -25,10 +25,23 @@ Set-Content (Join-Path $pack 'poses\stand-in.txt') 'not art'
 $notPack = Join-Path ([IO.Path]::GetTempPath()) "sa-not-a-pack-$PID"
 New-Item -ItemType Directory -Force $notPack | Out-Null
 
+# Runs `exe` and waits at most `secs`: a stuck one (a dialog nobody sees) fails instead of hanging.
+function RunFor([string]$exe, [string[]]$argv, [int]$secs = 180) {
+    $p = Start-Process $exe -ArgumentList $argv -PassThru
+    $null = $p.Handle   # kept now, or ExitCode is lost once it exits
+    if (-not $p.WaitForExit($secs * 1000)) {
+        Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+        Write-Host "FAIL $(Split-Path $exe -Leaf) still running after $secs s: killed"
+        return -1
+    }
+    return $p.ExitCode
+}
+
 function Install([string[]]$more) {
     $log = Join-Path ([IO.Path]::GetTempPath()) "sa-setup-$PID.log"
-    $p = Start-Process $Setup -ArgumentList (@('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=`"$log`"") + $more) -Wait -PassThru
-    return $p.ExitCode
+    $code = RunFor $Setup (@('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=`"$log`"") + $more)
+    if (Test-Path $log) { Get-Content $log -Tail 15 | ForEach-Object { Write-Host "  setup: $_" } }
+    return $code
 }
 
 # A folder that isn't a pack is refused, and nothing is installed.
@@ -54,22 +67,22 @@ Check ($item -and $item.ExtendedProperty('System.AppUserModel.ID') -eq 'Synaps.A
 $exe = Join-Path $app 'synaps-avatar.exe'
 $pe = [IO.File]::ReadAllBytes($exe)
 Check ([BitConverter]::ToUInt16($pe, [BitConverter]::ToInt32($pe, 0x3C) + 0x5C) -eq 2) 'her exe is windowed (subsystem 2)'
-$p = Start-Process $exe -ArgumentList '--check' -Wait -PassThru
+$code = RunFor $exe @('--check') 60
 $log = Join-Path $data 'synaps-avatar.log'
 $text = if (Test-Path $log) { Get-Content -Raw $log } else { '' }
 Write-Output "--- her log ---`n$text---"
-Check ($p.ExitCode -eq 1) "--check on the stand-in pack fails (exit $($p.ExitCode))"
+Check ($code -eq 1) "--check on the stand-in pack fails (exit $code)"
 Check ($text -match 'no console, logging here') 'without a console she logs to %LOCALAPPDATA%\synaps-avatar\synaps-avatar.log'
 # She joins `synaps-avatar/packs/capri` onto %LOCALAPPDATA% as is.
 Check ($text.Contains("$env:LOCALAPPDATA\synaps-avatar/packs/capri") -or $text.Contains("$packTo")) 'her default pack is the installed one'
 
 # Uninstall: everything the installer and she made goes; nothing of hers is left running.
-$u = Start-Process (Join-Path $app 'unins000.exe') -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait -PassThru
+$ucode = RunFor (Join-Path $app 'unins000.exe') @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART')
 # The uninstaller re-runs itself from %TEMP%: wait for it to finish.
 $deadline = (Get-Date).AddSeconds(90)
 while ((Test-Path (Join-Path $app 'unins000.exe')) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
 Start-Sleep -Seconds 2
-Check ($u.ExitCode -eq 0) "uninstalls unattended (exit $($u.ExitCode))"
+Check ($ucode -eq 0) "uninstalls unattended (exit $ucode)"
 Check (-not (Test-Path $app)) "$app is gone"
 Check (-not (Test-Path $data)) "$data is gone (pack, log, state)"
 Check (-not (Test-Path $aumid)) 'her AUMID key is gone'

@@ -103,6 +103,7 @@ jobs:
         run: ./packaging/windows/build.ps1
 
       - name: Install, check, uninstall (unattended)
+        timeout-minutes: 15
         shell: pwsh
         run: ./packaging/windows/test-install.ps1 -Setup (Get-ChildItem packaging/windows/Output/synaps-avatar-setup-*.exe | Select-Object -First 1).FullName
 

@@ -164,6 +164,8 @@ begin
   Browse.OnClick := @BrowseClick;
 end;
 
+{ Silent installs "click" Next too: a False here then ends Setup. The box is suppressible
+  (/SUPPRESSMSGBOXES), or an unattended install would wait on it for ever. }
 function NextButtonClick(CurPageID: Integer): Boolean;
 var
   E: String;
@@ -172,13 +174,14 @@ begin
   if CurPageID = PackPage.ID then begin
     E := PackError(PackSource(''));
     if E <> '' then begin
-      MsgBox(E, mbError, MB_OK);
+      Log('pack: ' + E);
+      SuppressibleMsgBox(E, mbError, MB_OK, IDOK);
       Result := False;
     end;
   end;
 end;
 
-{ Unattended installs skip the page: the same check, as Setup's error. }
+{ The same check before anything is installed, whatever the page did. }
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   Result := PackError(PackSource(''));
