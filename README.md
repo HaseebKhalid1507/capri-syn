@@ -89,7 +89,7 @@ and she acts when one of them wins.
   </tr>
   <tr>
     <td width="50%" align="center"><img src="docs/media/tour-walk.webp" width="100%" alt="Capri walks across the floor to the right, turns, and walks back"><br><b>Walks</b><br><sub>Sometimes she just walks over.</sub></td>
-    <td width="50%" align="center"><img src="docs/media/tour-music.webp" width="100%" alt="Music is playing: Capri dances in front of a terminal, her tag reading LISTENING"><br><b>Music</b><br><sub>Something's playing? She dances.</sub></td>
+    <td width="50%" align="center"><img src="docs/media/tour-music.webp" width="100%" alt="Music is playing: Capri dances in front of a terminal, her tag reading LISTENING"><br><b>Music</b><br><sub>Something's playing? Headphones on. Sometimes she dances.</sub></td>
   </tr>
 </table>
 
@@ -251,7 +251,7 @@ drag_facing = "back"         # dragged, she looks "back" where she came from, or
 composited = "auto"          # "auto" | "on" (alpha) | "off" (X shape, no compositor needed)
 
 [music]
-detect = true                # she dances while an MPRIS player is playing
+detect = true                # headphones on (now and then a dance) while an MPRIS player plays
 ignore = ["discord", "vesktop"]
 
 [voice]
