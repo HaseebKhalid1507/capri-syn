@@ -28,6 +28,21 @@
 - `tools/make-pack` copies `persona.md` into the pack. `capri-voice-setup` takes PyPI's
   pywhispercpp wheel where the distro has none.
 
+### Synaps, when they ask or need it (funnel 1)
+- **Her persona is everyone's.** `packs/capri/persona.md` no longer names anyone or any machine ("your
+  user", they/them), and it says what runs her only when asked: one plain sentence, no pitch, no links;
+  for a job too big for a bubble she mentions once that `synaps --attach capri` opens the same
+  conversation in a terminal. A personal persona goes in `[session] persona_file`.
+- **No brain yet, in her words.** A turn that fails for want of model credentials shows "No brain yet,
+  choom. Open a terminal, run synaps login, pick a model. Then ask me again." (tag `NO BRAIN YET`, calm)
+  instead of the daemon's text cut at 90 characters. A lapsed login, a rate limit, an overloaded
+  provider and an unreachable model get their own lines; the Line's note gives the fix and
+  `↑ BRINGS YOUR MESSAGE BACK`. Anything else is shown raw, as before.
+- **Her first words**, once in her life: "Hey. I'm Capri. Tap $MOD+C when you want me. Headpats also
+  accepted." Nothing about what runs her. Not for anyone who ran her before (`state.json` `met`).
+- **Her maker's mark**: one dim row under QUIT, `SYNAPS 0.12.0 · CLAUDE-OPUS-5`. Not a button.
+- The right-click menu opens upward when it wouldn't fit under the click; the Line's footer wraps.
+
 ### The talk key's fine print (Linux and Windows)
 - A `talk tap` no longer waits out a press that lost its `talk release`. A tap is ignored only while a hold
   is his: the press is under 1 s old (its mic may still be opening), or its mic is asked for or open (up
