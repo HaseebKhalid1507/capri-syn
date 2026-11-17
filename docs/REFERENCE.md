@@ -61,11 +61,15 @@ Reference for `synaps-avatar`, the crate behind capri-syn. The [README](../READM
   `stretchAfterMs`, at most 4 an hour). With a greeting due she gets up quicker (`brain.napWakeGreet`)
   and waves instead of stretching.
 - **The cursor game** (her pointer watcher's samples, no other reads): the pointer still beside her
-  for 2.5 s (within 150 px, not on her) makes her curious: a look (`brain.curious`) and her upper body
-  bent 8° toward it, feet planted, eased in over 0.4 s, held while it stays, eased back when it moves
-  on (every 20 s at most, 30 an hour). A quick left-right wiggle near her (2 turns of 30 px within
-  0.6 s) gets a point at it (`brain.bat`, every 20 s at most); while it goes on she re-aims (turning
-  if it crosses her, pointing again, her bend stepping 4°/8° with the turns), and 0.45 s after it
+  for 2.5 s (within 150 px, not on her) makes her curious: a look (`brain.curious`, held 3 s) and
+  her upper body bent toward it, feet planted: the torso curves from the waist (nothing at the hips)
+  and her head and hair go along in one piece, 12 px at her neck, eased in over 0.6 s, held while it
+  stays, eased back over 0.9 s when it moves on (every 20 s at most, 30 an hour). Her eyes lead: the
+  pointer coming near already gets a look. No idle beat while she watches it (4 s after a look, a
+  linger's whole bend and 1.5 s after), and a look cuts an idle beat short. A quick left-right
+  wiggle near her (2 turns of 30 px within 0.6 s) gets a point at it (`brain.bat`, every 20 s at
+  most); while it goes on she re-aims (turning if it crosses her, pointing again, her bend stepping
+  7/13 px with the turns), and 0.45 s after it
   stops she smirks and settles. When the pointer goes still right after a wiggle (0.6 s, or now and
   then after 2.5 s) she pounces: a 0.3 s crouch, then a 0.3-0.5 s leap with an 80 px arc toward it
   (30-450 px) that lands with her body 40-80 px beside its tip, level with it, never on it (a window
@@ -253,7 +257,10 @@ With `anim/`, `moods.json` `variants` mixes that art in; she never swaps one set
   lying drawing (`sleepWindow`'s `laydown`, weight 0: it only follows the lounge). A shift in place cuts a
   frame late: the new drawing goes underneath first, so its first frame is whole. Its one light seam is on
   the cut frame itself (small shifts, no bars, nothing after it); the tag sits out the held frame and
-  comes back whole at its new place. A strip that lands after its pick cuts the same way.
+  comes back whole at its new place. A strip that lands after its pick cuts the same way. Without a
+  compositor every cut of her frames gets a render a frame ahead with the next drawing underneath, so
+  a cut's new outline never shows pixels the window hasn't drawn (r43: stale bits of the SLEEPING tag
+  and dashed edges at a wave's cuts).
 - Entering the state picks one: weighted, never the last pick again, seeded (`SA_ART_SEED`). A long stay
   (`shiftMs`) shifts it in place. Every cut between CapriCore and a strip (or between two strip families)
   goes through a light seam (one light step on the cut frame; her tag stays whole). Every pose or

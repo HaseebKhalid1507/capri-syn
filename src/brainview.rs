@@ -202,12 +202,17 @@ pub(super) struct Follow {
 
 /// A pat makes up a sulk: she starts up this soon, with its hearts still up.
 const MAKE_UP_UNDER_HEARTS: Duration = Duration::from_millis(350);
-/// A linger's bend toward the pointer, and the longest she holds it.
-const LINGER_BEND: f32 = 8.0;
+/// A linger's bend toward the pointer (px at 1x at her neck: the head and hair go along), and the
+/// longest she holds it.
+const LINGER_BEND: f32 = 12.0;
 const LINGER_HOLD: Duration = Duration::from_secs(20);
-/// A wiggle's bend steps between these with its turns, and the longest she follows one.
-const WIGGLE_BEND: (f32, f32) = (4.0, 8.0);
+/// A wiggle's bend (px at 1x) steps between these with its turns, and the longest she follows one.
+const WIGGLE_BEND: (f32, f32) = (7.0, 13.0);
 const WIGGLE_FOLLOW: Duration = Duration::from_secs(8);
+/// A linger's look at the pointer holds at least this long.
+const LINGER_LOOK_MS: u32 = 3000;
+/// After a look at the pointer (or a bat at it), no idle beat for this long.
+const POINTER_QUIET: Duration = Duration::from_secs(4);
 /// A point at the pointer (`@point`) holds this long.
 const POINT_MS: u32 = 1100;
 /// Her settle when a wiggle stops: this face, this long, then her idle.
@@ -2008,7 +2013,10 @@ impl Avatar {
         let c = self.brain_cursor();
         let (gx, _) = self.ground();
         let right = c.0 > gx;
-        let standing = self.standing() && !self.anim.busy();
+        // An idle beat gives way (r42: a chin-on-hand beat that came with the pointer read as
+        // a first lean, the look and the bend after it as a second).
+        let beat = self.beat_until.is_some_and(|t| now < t);
+        let standing = self.standing() && (!self.anim.busy() || beat);
         let what = match r {
             React::Look => {
                 if self.mirror_cfg.own {
@@ -2066,7 +2074,16 @@ impl Avatar {
                 }
                 let steps = self.pack.behaviour.brain.curious.clone();
                 if standing && !steps.is_empty() {
-                    let seq = self.pack.flatten(&self.resolve_steps(&steps));
+                    // Her eyes stay on it while the bend comes (and a while after).
+                    let steps: Vec<_> = self
+                        .resolve_steps(&steps)
+                        .into_iter()
+                        .map(|s| match s {
+                            crate::pack::Step::Hold { frame, ms } => crate::pack::Step::Hold { frame, ms: ms.max(LINGER_LOOK_MS) },
+                            s => s,
+                        })
+                        .collect();
+                    let seq = self.pack.flatten(&steps);
                     if !seq.is_empty() {
                         self.anim.play(seq, now);
                     }
@@ -2119,7 +2136,10 @@ impl Avatar {
                     }
                     "cold"
                 } else {
-                    if self.mirror_cfg.own {
+                    // Out of the sulk sit she makes up as she sits (r42: the squeeze turn clipped
+                    // her sit to a hard-edged box); she faces him at her next look.
+                    let sitting = self.brain.as_ref().is_some_and(|h| h.sulk_sit && h.rest == Some(RestPose::FloorSit));
+                    if self.mirror_cfg.own && !sitting {
                         self.face(right, "look", now, false);
                     }
                     "warm"
@@ -2127,6 +2147,11 @@ impl Avatar {
             }
             React::Fall => unreachable!(),
         };
+        if matches!(what, "look" | "curious" | "bat") {
+            // No idle beat while she watches it (a linger's follow holds them off till its end).
+            self.beat_until = None;
+            self.beats_after(now + POINTER_QUIET);
+        }
         if let Some(h) = &mut self.brain {
             let t = h.bnow(now) - h.brain.start();
             h.write(serde_json::json!({ "t": t, "k": "react", "what": what, "cursor": [c.0, c.1] }));
@@ -2454,10 +2479,26 @@ impl Avatar {
     }
 
     fn follow_stop(&mut self, now: Instant) {
-        if let Some(h) = &mut self.brain {
-            h.follow = None;
-        }
+        let was = self.brain.as_mut().and_then(|h| h.follow.take()).is_some();
         self.bend_to(0.0, now);
+        if was {
+            // Upright again before the next idle beat.
+            self.beats_after(now + super::BEND_OUT + Duration::from_millis(600));
+        }
+    }
+
+    /// A reaction that keeps up with the pointer is on (no idle beats meanwhile).
+    pub(super) fn following(&self) -> bool {
+        self.brain.as_ref().is_some_and(|h| h.follow.is_some())
+    }
+
+    /// The next idle beat no sooner than `t`.
+    fn beats_after(&mut self, t: Instant) {
+        if let Some(n) = self.next_activity
+            && n < t
+        {
+            self.next_activity = Some(t);
+        }
     }
 
     /// On her feet on the floor, not moving, carried or hidden.
@@ -2476,7 +2517,7 @@ impl Avatar {
         let Some(f) = self.brain.as_ref().and_then(|h| h.follow) else { return };
         if !self.follow_ok() {
             self.follow_stop(now);
-            self.bend = (0.0, 0.0, now - BEND_EASE);
+            self.bend = (0.0, 0.0, now - super::BEND_OUT);
         } else if now >= f.until {
             self.follow_stop(now);
         }
@@ -2606,12 +2647,18 @@ impl Avatar {
                 h.rest = None;
                 h.sulk_sit = false;
             }
+            // The sit holds a frame more while the get-up's first drawing goes underneath (the
+            // look-ahead): r42's first pat frame showed her standing outline of before the sit.
+            let before = self.anim.frame();
             self.relayer(now);
             let b = &self.pack.behaviour.brain;
             let exit = b.sulk_sit.as_ref().and_then(|s| s.exit.clone()).or_else(|| b.floor_sit.as_ref().and_then(|s| s.exit.clone())).unwrap_or_default();
             let mut seq = self.pack.flatten(&exit);
             seq.extend(self.pack.flatten(&self.resolve_steps(&steps)));
             if !seq.is_empty() {
+                if !self.hidden {
+                    seq.insert(0, (before, super::FRAME_FX.as_millis() as u32));
+                }
                 self.anim.play(seq, now);
             }
             played = "stand+clip";

@@ -1607,23 +1607,7 @@
     "greet": [
       {
         "frame": "idle-wave_raise",
-        "ms": 260
-      },
-      {
-        "frame": "idle-wave_a",
-        "ms": 200
-      },
-      {
-        "frame": "idle-wave_raise",
-        "ms": 220
-      },
-      {
-        "frame": "idle-wave_b",
-        "ms": 200
-      },
-      {
-        "frame": "idle-wave_raise",
-        "ms": 700
+        "ms": 1500
       },
       {
         "frame": "happy",
@@ -1633,23 +1617,7 @@
     "greetMorning": [
       {
         "frame": "idle-wave_raise",
-        "ms": 260
-      },
-      {
-        "frame": "idle-wave_a",
-        "ms": 200
-      },
-      {
-        "frame": "idle-wave_raise",
-        "ms": 220
-      },
-      {
-        "frame": "idle-wave_b",
-        "ms": 200
-      },
-      {
-        "frame": "idle-wave_raise",
-        "ms": 700
+        "ms": 1500
       },
       {
         "frame": "idle-excited",

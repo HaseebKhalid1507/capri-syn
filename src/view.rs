@@ -508,8 +508,9 @@ fn gesture(steps: &[crate::pack::Step]) -> bool {
     })
 }
 
-/// A bend toward the pointer eases in and out over this (r42: ~0.4 s).
-const BEND_EASE: Duration = Duration::from_millis(400);
+/// A bend toward the pointer eases in over this, and back upright over `BEND_OUT` (r43).
+const BEND_IN: Duration = Duration::from_millis(600);
+pub(super) const BEND_OUT: Duration = Duration::from_millis(900);
 /// ONLINE at night: its red this far toward the panel.
 const NIGHT_TAG_DIM: f32 = 0.45;
 /// Into a drawn sleep whose cells are still decoding: the drawing before holds this long.
@@ -608,6 +609,10 @@ pub struct Avatar {
     /// The drawing the last render painted (a change not laid underneath ahead lays it
     /// underneath once).
     drawn_last: Option<DrawnLast>,
+    /// The cut of her frames (`anim`'s deadline) a render has already laid underneath ahead.
+    precut: Option<Instant>,
+    /// An idle beat (an activity) plays until then: a reaction to the pointer may cut it short.
+    beat_until: Option<Instant>,
     /// Shown mirrored (ground and seat frames only: grip poses are side-specific).
     pub(super) flip: bool,
     /// A turn's squeeze in progress: (start, the flip it turns to). The art swaps halfway.
@@ -665,8 +670,8 @@ pub struct Avatar {
     lean_beat: Option<(Instant, Duration, i32)>,
     /// Her idle beats' rounds (`activity_pick`).
     beats: crate::life::Beats,
-    /// Her upper body bent toward the pointer (r42, a linger or a wiggle): degrees from, to,
-    /// since (eased over `BEND_EASE`).
+    /// Her upper body bent toward the pointer (r42, a linger or a wiggle): px at 1x at her neck
+    /// from, to, since (eased over `BEND_IN` / `BEND_OUT`).
     bend: (f32, f32, Instant),
     glints: Vec<Glint>,
     next_glint: Option<Instant>,
@@ -877,6 +882,8 @@ impl Avatar {
             last_shape: Rc::new(RefCell::new((vec![(0, 0, 1, 1)], vec![]))),
             shape_hist: Rc::new(RefCell::new([Vec::new(), Vec::new()])),
             drawn_last: None,
+            precut: None,
+            beat_until: None,
             flip: false,
             turn: None,
             turn_frame: 0,
@@ -1258,30 +1265,31 @@ impl Avatar {
             && !self.art_shows_strip()
     }
 
-    /// Her bend toward the pointer now (degrees), eased in and out over `BEND_EASE`.
-    pub(super) fn bend_deg(&self, now: Instant) -> f32 {
+    /// Her bend toward the pointer now (px at 1x), eased.
+    pub(super) fn bend_px(&self, now: Instant) -> f32 {
         let (from, to, t0) = self.bend;
-        let k = (now.saturating_duration_since(t0).as_secs_f32() / BEND_EASE.as_secs_f32()).min(1.0);
+        let ease = if to == 0.0 { BEND_OUT } else { BEND_IN };
+        let k = (now.saturating_duration_since(t0).as_secs_f32() / ease.as_secs_f32()).min(1.0);
         from + (to - from) * k * k * (3.0 - 2.0 * k)
     }
 
     /// Bend toward the pointer (0: straighten up), from wherever she is now.
-    pub(super) fn bend_to(&mut self, deg: f32, now: Instant) {
-        if (self.bend.1 - deg).abs() < 0.05 {
+    pub(super) fn bend_to(&mut self, px: f32, now: Instant) {
+        if (self.bend.1 - px).abs() < 0.05 {
             return;
         }
-        self.bend = (self.bend_deg(now), deg, now);
+        self.bend = (self.bend_px(now), px, now);
     }
 
     fn bending(&self, now: Instant) -> bool {
-        self.bend.1 != 0.0 || now < self.bend.2 + BEND_EASE
+        self.bend.1 != 0.0 || now < self.bend.2 + BEND_OUT
     }
 
     fn pose_at(&self, now: Instant) -> fx::Pose {
         let mut p = self.pose_at_body(now);
         // Bent toward the pointer: on any art, on her feet on the floor (feet planted).
         if self.loaded && !self.hidden && self.teleport.is_none() && self.rag.is_none() && self.placement == Placement::Ground && self.standing() {
-            p.bend = (self.bend_deg(now) * 10.0).round() as i32;
+            p.bend = (self.bend_px(now) * self.layout.sf).round() as i32;
             if p.bend != 0 {
                 p.swing = 0;
                 p.kick = 0;
@@ -2139,6 +2147,13 @@ impl Avatar {
             }
         };
         take(self.anim.deadline());
+        // A frame before each cut of her frames: a render that lays the next drawing
+        // underneath (the look-ahead), so the cut's new outline never shows pixels the window
+        // hasn't drawn (r43: a held wave frame cut to the next showed the SLEEPING tag of
+        // seconds before and dashed edges along her arm for a frame).
+        if let Some(d) = self.anim.deadline().filter(|&d| self.precut != Some(d) && !self.hidden) {
+            take(Some(d.checked_sub(FRAME_FX).unwrap_or(d).max(now)));
+        }
         take(self.kiss_deadline());
         take(self.art.deadline());
         take(self.dance_deadline());
@@ -2305,6 +2320,13 @@ impl Avatar {
         }
         let before = self.anim.frame();
         let mut dirty = self.anim.tick(now);
+        if let Some(d) = self.anim.deadline()
+            && self.precut != Some(d)
+            && now + FRAME_FX >= d
+        {
+            self.precut = Some(d);
+            dirty |= now < d && !self.hidden && self.anim.frame_at(d) != self.anim.frame();
+        }
         self.voice_keepalive(now, cx);
         if dirty {
             self.lying_cut(before, now);
@@ -2330,6 +2352,7 @@ impl Avatar {
             && at <= now
             && !self.anim.busy()
             && !self.activities().is_empty()
+            && !self.following()
         {
             let music = self
                 .music_spec()
@@ -2348,6 +2371,7 @@ impl Avatar {
                 let len: u64 = seq.iter().map(|s| s.1 as u64).sum();
                 self.activity_beats(&steps, Duration::from_millis(len), now);
                 self.anim.play(seq, now);
+                self.beat_until = Some(now + Duration::from_millis(len));
                 self.autonomy_started = true;
                 self.next_activity = Some(now + Duration::from_millis(len) + self.autonomy_gap());
             }
@@ -2548,7 +2572,7 @@ impl Avatar {
         // Any redraw draws the current pose (render latches it); a pose step alone waits
         // POSE_SLACK for company.
         let pose = self.pose_at(now);
-        // Her bend toward the pointer eases over 0.4 s: every step is drawn (waiting for
+        // Her bend toward the pointer eases over 0.6-0.9 s: every step is drawn (waiting for
         // company held it back until it was over, r42).
         if pose.bend != self.pose_last.bend {
             dirty = true;

@@ -676,8 +676,9 @@ pub struct Pose {
     pub kick: i32,
     /// The kicking leg is the one right of `PoseRows::split` on screen.
     pub kick_right: bool,
-    /// Her upper body bent toward the pointer (r42), tenths of a degree, + = right: the rows
-    /// above the waist shift with their height over it (the head most), the legs stay planted.
+    /// Her upper body bent toward the pointer (r43), device px at the neck, + = right: the torso
+    /// curves from the waist (nothing at the hips, most at the neck), the head and hair go along
+    /// as one piece (no slant), the legs stay planted.
     pub bend: i32,
 }
 
@@ -721,6 +722,10 @@ pub fn pose_leg(p: Pose, r: PoseRows, bands: &[(i32, i32, i32, i32)]) -> Option<
     Some(LegKick { split: r.split, right: p.kick_right, dx })
 }
 
+/// A bend's curve up the torso (`Pose::bend`): the share of the neck's shift at a height
+/// over the waist is that height's fraction to this power (the hips barely move).
+const BEND_CURVE: f32 = 1.8;
+
 /// Bands `(y0, y1, dx, dy)` in paint order (legs, torso, head) for a pose. The waist rows
 /// repeat over the breath height, so nothing opens up between torso and legs.
 pub fn pose_bands(p: Pose, r: PoseRows) -> Vec<(i32, i32, i32, i32)> {
@@ -748,11 +753,10 @@ pub fn pose_bands(p: Pose, r: PoseRows) -> Vec<(i32, i32, i32, i32)> {
     let neck = r.neck.clamp(r.y0, waist);
     let shear_end = r.shear_end.clamp(r.y0, waist);
     let span = (shear_end - r.top).max(1) as f32;
-    let tan = (p.bend as f32 / 10.0).to_radians().tan();
-    let top = r.top.clamp(r.y0, waist);
+    let torso = (waist - neck).max(1) as f32;
     let shear = |y: i32| {
         let f = ((shear_end - y) as f32 / span).clamp(0.0, 1.0);
-        let bend = tan * (waist - y.max(top)) as f32;
+        let bend = p.bend as f32 * ((waist - y) as f32 / torso).clamp(0.0, 1.0).powf(BEND_CURVE);
         (p.sway as f32 * f.powf(1.2) + bend).round() as i32
     };
     // Legs first, then the torso, then the head on top (a nod overlaps the collar).
@@ -761,15 +765,14 @@ pub fn pose_bands(p: Pose, r: PoseRows) -> Vec<(i32, i32, i32, i32)> {
         let first = out.len();
         let mut y = from;
         while y < to {
-            let (y1, dx) = if p.bend != 0 && y < top {
-                // Above her: one band at the top row's shift.
-                (top.min(to), shear(top))
-            } else if p.bend != 0 {
+            let (y1, dx) = if p.bend != 0 && y >= neck {
+                // The torso curves, 2 rows a band.
                 ((y + 2).min(to), shear(y))
             } else if p.sway != 0 && y < shear_end {
                 ((y + 2).min(shear_end).min(to), shear(y))
             } else {
-                (to, 0)
+                // The head (bent: all of it at the neck's shift).
+                (to, shear(y))
             };
             let n = out.len();
             match out.last_mut() {
@@ -1456,17 +1459,19 @@ mod tests {
         assert!(music.iter().any(|b| b.0 >= 120 && b.1 <= 220 && b.2 != 0));
         let still = pose_bands(Pose::default(), r);
         assert!(still.iter().all(|b| b.2 == 0 && b.3 == 0));
-        // Bent 8° right (r42, a linger): the legs stay planted, the rows above the waist lean
-        // with their height over it (the top of her head tan 8° x 210 rows ≈ 30 px), no gaps.
-        let bent = pose_bands(Pose { bend: 80, ..Pose::default() }, r);
+        // Bent 20 px right (r43, a linger): the legs stay planted, the torso curves (little at
+        // the hips, most at the neck), the head and hair move as one piece (no slant), no gaps.
+        let bent = pose_bands(Pose { bend: 20, ..Pose::default() }, r);
         for y in 10..400 {
             assert!(bent.iter().any(|&(a, b, _, dy)| y >= a + dy && y < b + dy), "row {y}");
         }
-        assert!(bent.iter().filter(|b| b.0 >= 220).all(|b| b.2 == 0), "feet planted");
+        assert!(bent.iter().filter(|b| b.0 >= r.waist).all(|b| b.2 == 0), "feet planted");
         let at = |y: i32| bent.iter().find(|b| y >= b.0 && y < b.1).unwrap().2;
-        assert!((at(10) - 30).abs() <= 1 && at(10) > at(120) && at(120) > at(200) && at(200) >= 0, "{bent:?}");
-        let left = pose_bands(Pose { bend: -60, ..Pose::default() }, r);
-        assert!(left.iter().find(|b| 10 >= b.0 && 10 < b.1).unwrap().2 < -15, "the other way");
+        assert!((r.y0..r.neck).all(|y| at(y) == 20), "the head in one piece: {bent:?}");
+        let mid = (r.neck + r.waist) / 2;
+        assert!(at(mid) > 0 && at(mid) < 8 && at(r.waist - 4) <= 1, "a curve, not a slant: {bent:?}");
+        let left = pose_bands(Pose { bend: -12, ..Pose::default() }, r);
+        assert_eq!(left.iter().find(|b| 10 >= b.0 && 10 < b.1).unwrap().2, -12, "the other way");
         // Hanging: the grip row and above stay, the bottom swings the full amount, no gaps.
         let hang = pose_bands(Pose { swing: -9, ..Pose::default() }, PoseRows { grip: 30, ..r });
         for y in -50..400 {
