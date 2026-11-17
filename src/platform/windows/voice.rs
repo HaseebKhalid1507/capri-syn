@@ -36,6 +36,26 @@ pub fn voice_link() -> (String, io::Result<VoiceLink>) {
     (p.display().to_string(), s)
 }
 
+/// `voice_link` can block here: the connect and the hello take up to `HELLO_WAIT` each (a stale
+/// endpoint whose port another program holds and never answers on). She runs it off her UI thread.
+pub const VOICE_LINK_BLOCKS: bool = true;
+
+/// `voice_link` on a thread of its own: `done` gets its answer there. Err: no thread (then `done`
+/// is never called).
+pub fn voice_link_bg(done: impl FnOnce(String, io::Result<VoiceLink>) + Send + 'static) -> io::Result<()> {
+    connect_bg(endpoint_path(), done)
+}
+
+fn connect_bg(p: PathBuf, done: impl FnOnce(String, io::Result<VoiceLink>) + Send + 'static) -> io::Result<()> {
+    std::thread::Builder::new()
+        .name("voice-connect".into())
+        .spawn(move || {
+            let s = connect(&p);
+            done(p.display().to_string(), s)
+        })
+        .map(|_| ())
+}
+
 #[derive(serde::Deserialize)]
 struct Endpoint {
     port: u16,
@@ -148,6 +168,24 @@ mod tests {
         h.join().unwrap();
         std::fs::remove_dir_all(&d).ok();
         assert_eq!(connect(&d.join("endpoint.json")).unwrap_err().kind(), io::ErrorKind::NotFound, "no sidecar: no file");
+    }
+
+    /// A stale endpoint on a port that never answers: the call returns at once (her UI thread
+    /// never waits on it); the answer, a timeout, comes on the connect thread.
+    #[test]
+    fn a_silent_sidecar_never_blocks_the_caller() {
+        let d = tmp("bg");
+        let (p, h) = sidecar(&d, None);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let t0 = std::time::Instant::now();
+        connect_bg(p, move |where_, s| tx.send((where_, s.map(|_| ()).map_err(|e| e.kind()), t0.elapsed())).unwrap()).unwrap();
+        assert!(t0.elapsed() < Duration::from_millis(100), "the caller waited {:?}", t0.elapsed());
+        let (where_, got, after) = rx.recv_timeout(Duration::from_secs(5)).expect("the connect thread answers");
+        assert!(where_.ends_with("endpoint.json"), "{where_}");
+        assert!(matches!(got, Err(io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock)), "{got:?}");
+        assert!(after >= HELLO_WAIT, "it did wait out the hello there ({after:?})");
+        h.join().unwrap();
+        std::fs::remove_dir_all(&d).ok();
     }
 
     /// Both real ends: `capri_voice_win.serve` (Python) and this. Runs when `CAPRI_VOICE_TEST_PY`

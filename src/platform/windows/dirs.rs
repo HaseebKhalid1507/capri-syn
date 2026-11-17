@@ -64,7 +64,7 @@ pub fn log_without_console() {
 }
 
 /// The log at start is `len` bytes (None: there is none): start a new one?
-fn starts_over(len: Option<u64>) -> bool {
+pub(super) fn starts_over(len: Option<u64>) -> bool {
     len.is_some_and(|n| n > LOG_KEEP)
 }
 

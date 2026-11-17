@@ -55,12 +55,15 @@ mod media;
 mod notifications;
 #[cfg(test)]
 mod testkit;
+mod hold;
+mod sidecar;
 mod voice;
 
 pub use dirs::{base_dir, home_dir};
 pub use media::watch_media;
 pub use notifications::notify;
-pub use voice::{VoiceLink, voice_link};
+pub use sidecar::voice_sidecar;
+pub use voice::{VOICE_LINK_BLOCKS, VoiceLink, voice_link, voice_link_bg};
 
 /// How long his input to her (her key, a press on one of her windows) lets her take the
 /// keyboard: the Line opening on it takes well under this.
@@ -752,7 +755,8 @@ impl Desktop for Win32 {
 
     /// RegisterHotKey on a thread of its own (presses only, `MOD_NOREPEAT`): the summon key and
     /// the toggle chord (`chord`). A chord another app holds is skipped with its name logged. A
-    /// press is his input to her: the keyboard is hers to take for `GRANT_MS`.
+    /// press is his input to her: the keyboard is hers to take for `GRANT_MS`. With `keys.hold`
+    /// the summon key is a press and, polled from here until it is up, a release (`hold.rs`).
     fn watch_keys(&self, keys: Keys, on: Box<dyn Fn(KeyEv) + Send>) -> Result<bool> {
         let wanted = [(KeyEv::Summon, chord(keys.summon, false)), (KeyEv::TalkToggle, chord(keys.toggle, true))];
         let grant = self.grant_at.clone();
@@ -775,13 +779,43 @@ impl Desktop for Win32 {
             if !any {
                 return;
             }
+            // The summon key's letter, polled while a hold is down.
+            let hold_vk = wanted[0].1.filter(|_| keys.hold).map(|(_, vk)| vk);
+            let mut hold = hold::Hold::default();
             let mut msg = MSG::default();
-            while unsafe { GetMessageW(&mut msg, None, 0, 0) }.as_bool() {
+            let hotkey = |msg: &MSG, hold: &mut hold::Hold| {
                 if msg.message == WM_HOTKEY
                     && let Some((_, ev)) = held.iter().find(|(n, _)| *n as usize == msg.wParam.0)
                 {
                     grant.store(tick(), Ordering::Relaxed);
-                    on(*ev);
+                    match ev {
+                        KeyEv::Summon if hold_vk.is_some() => {
+                            if let Some(e) = hold.pressed() {
+                                on(e);
+                            }
+                        }
+                        ev => on(*ev),
+                    }
+                }
+            };
+            loop {
+                if let (true, Some(vk)) = (hold.held(), hold_vk) {
+                    // Held: a look every POLL, the messages in between.
+                    std::thread::sleep(hold::POLL);
+                    while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE) }.as_bool() {
+                        if msg.message == WM_QUIT {
+                            return;
+                        }
+                        hotkey(&msg, &mut hold);
+                    }
+                    if let Some(e) = hold.poll(unsafe { GetAsyncKeyState(vk as i32) } < 0) {
+                        on(e);
+                    }
+                } else {
+                    if !unsafe { GetMessageW(&mut msg, None, 0, 0) }.as_bool() {
+                        return;
+                    }
+                    hotkey(&msg, &mut hold);
                 }
             }
         })?;

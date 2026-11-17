@@ -52,10 +52,13 @@ pub use self::windows::{base_dir, home_dir, local_day, monotonic_s, notify, proc
 /// The voice sidecar's link (capri-voice; newline-delimited JSON both ways) and where it is, for
 /// her log. Linux: its Unix socket. Windows: loopback TCP after a token handshake (the sidecar is
 /// Python, and stock CPython has no AF_UNIX there).
+/// `VOICE_LINK_BLOCKS`: whether `voice_link` can block (Windows: a connect and a hello), so she
+/// calls `voice_link_bg` instead. `voice_sidecar(on)`: whether the sidecar should run, every tick;
+/// Windows starts and keeps it (a job object, dying with her), Linux leaves it to systemd.
 #[cfg(target_os = "linux")]
-pub use linux::{VoiceLink, voice_link};
+pub use linux::{VOICE_LINK_BLOCKS, VoiceLink, voice_link, voice_link_bg, voice_sidecar};
 #[cfg(windows)]
-pub use self::windows::{VoiceLink, voice_link};
+pub use self::windows::{VOICE_LINK_BLOCKS, VoiceLink, voice_link, voice_link_bg, voice_sidecar};
 
 /// Where her files go, per user (`base_dir`): the core adds `synaps-avatar/…`. `$XDG_<KIND>_HOME`
 /// wins on every OS; else Linux: under `$HOME` (`.config`, `.local/share`, `.local/state`),
@@ -87,8 +90,8 @@ pub use linux::stderr_into_closed_pipe;
 #[cfg(windows)]
 pub use self::windows::stderr_into_closed_pipe;
 
-/// The local stream socket (the control channel, the voice sidecar's link): a Unix socket on
-/// every OS (AF_UNIX on Windows 10 1803+).
+/// The local stream socket (the control channel `capri-ctl` and the brain use): a Unix socket on
+/// every OS (AF_UNIX on Windows 10 1803+). The voice sidecar's link is `VoiceLink`.
 #[cfg(unix)]
 pub use std::os::unix::net::{UnixListener as LocalListener, UnixStream as LocalStream};
 #[cfg(windows)]
@@ -279,6 +282,9 @@ pub enum SessionEv {
 pub struct Keys {
     pub summon: char,
     pub toggle: char,
+    /// `[voice] hold_to_talk`: the summon key reports its press and its release (`TalkPress`,
+    /// `TalkRelease`: a hold talks, a tap opens the Line) instead of a bare tap.
+    pub hold: bool,
 }
 
 /// A press of one of her global keys (a backend that grabs them reports presses only).
@@ -287,10 +293,14 @@ pub struct Keys {
 #[cfg_attr(not(windows), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeyEv {
-    /// The summon key: a tap (never a hold: no push-to-talk from a grabbed key).
+    /// The summon key: a tap.
     Summon,
     /// The toggle-to-talk chord.
     TalkToggle,
+    /// With `Keys::hold`: the summon key went down ...
+    TalkPress,
+    /// ... and up again.
+    TalkRelease,
 }
 
 /// What the pointer watcher reports (device px, px/s).

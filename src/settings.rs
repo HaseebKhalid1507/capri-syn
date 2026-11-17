@@ -197,6 +197,9 @@ pub struct VoiceSettings {
     pub wake_word: bool,
     pub wake_sensitivity: f32,
     pub wake_handsfree: bool,
+    /// Windows: her summon key talks while held (opt-in; a tap opens the Line either way). Linux:
+    /// unused (his desktop's binding sends `talk press` and `talk release` itself).
+    pub hold_to_talk: bool,
 }
 
 /// Her voice (Haseeb's picks, LOCKED 13 + 14): W3, the bright blend (timbre af_heart/af_bella/
@@ -208,7 +211,7 @@ pub const SPEED: f32 = 1.2987;
 
 impl Default for VoiceSettings {
     fn default() -> Self {
-        VoiceSettings { enabled: false, stt_model: "small.en".into(), voice: VOICE.into(), speed: SPEED, pace: "stretch".into(), flow: "emphasis".into(), duck: "duck".into(), speak_unprompted: true, key: 'c', silence_s: 1.0, toggle_key: 'c', handsfree: true, handsfree_timeout: 60, handsfree_max: 30, echo: "auto".into(), wake_word: true, wake_sensitivity: 0.5, wake_handsfree: true }
+        VoiceSettings { enabled: false, stt_model: "small.en".into(), voice: VOICE.into(), speed: SPEED, pace: "stretch".into(), flow: "emphasis".into(), duck: "duck".into(), speak_unprompted: true, key: 'c', silence_s: 1.0, toggle_key: 'c', handsfree: true, handsfree_timeout: 60, handsfree_max: 30, echo: "auto".into(), wake_word: true, wake_sensitivity: 0.5, wake_handsfree: true, hold_to_talk: false }
     }
 }
 
@@ -233,6 +236,7 @@ struct VoiceRaw {
     wake_word: Option<bool>,
     wake_sensitivity: Option<f64>,
     wake_handsfree: Option<bool>,
+    hold_to_talk: Option<bool>,
 }
 
 /// `[mirror]`: she faces where she goes. `drag`: turn while dragged (and flung), looking back
@@ -593,6 +597,9 @@ impl Settings {
                 anyhow::ensure!(s.is_finite() && (0.1..=0.9).contains(&s), "voice.wake_sensitivity must be 0.1..0.9");
                 voice.wake_sensitivity = s as f32;
             }
+            if let Some(h) = v.hold_to_talk {
+                voice.hold_to_talk = h;
+            }
             if let Some(h) = v.wake_handsfree {
                 voice.wake_handsfree = h;
             }
@@ -819,6 +826,9 @@ mod tests {
         assert!(v.wake_handsfree, "\"hey capri\" starts hands-free by default (Haseeb, 00:57)");
         assert!(!Settings::parse("[voice]\nwake_handsfree = false\n").unwrap().voice.wake_handsfree);
         assert!(Settings::parse("[voice]\nwake_handsfree = \"yes\"\n").is_err());
+        assert!(!v.hold_to_talk, "a tap is the default: holding to talk is opt-in");
+        assert!(Settings::parse("[voice]\nhold_to_talk = true\n").unwrap().voice.hold_to_talk);
+        assert!(Settings::parse("[voice]\nhold_to_talk = 1\n").is_err());
         let h = Settings::parse("[voice]\nhandsfree = false\nhandsfree_timeout = 15\nhandsfree_max = 0\necho = \"Speakers\"\n").unwrap().voice;
         assert_eq!((h.handsfree, h.handsfree_timeout, h.handsfree_max, h.echo.as_str()), (false, 15, 0, "speakers"));
         assert!(Settings::parse("[voice]\nhandsfree_timeout = 5\n").is_err() && Settings::parse("[voice]\nhandsfree_max = 9999\n").is_err());

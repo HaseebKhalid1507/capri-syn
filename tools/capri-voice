@@ -94,7 +94,7 @@ class Stt:
     def __init__(self, name):
         from pywhispercpp.model import Model
         path = STT_FILES.get(name, STT_FILES['small.en'])
-        path = path if path.startswith('/') else f'{MODELS}/{path}'
+        path = path if os.path.isabs(path) else f'{MODELS}/{path}'
         t = now_ms()
         self.name = name
         self.m = Model(path, n_threads=THREADS, print_progress=False, print_realtime=False, redirect_whispercpp_logs_to=None)

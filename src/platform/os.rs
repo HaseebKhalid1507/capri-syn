@@ -685,7 +685,7 @@ impl Os {
     pub fn key_label(&self, ev: super::KeyEv, key: char) -> String {
         let k = key.to_ascii_uppercase();
         self.desk.key_label(ev, key).unwrap_or_else(|| match ev {
-            super::KeyEv::Summon => format!("$MOD+{k}"),
+            super::KeyEv::Summon | super::KeyEv::TalkPress | super::KeyEv::TalkRelease => format!("$MOD+{k}"),
             super::KeyEv::TalkToggle => format!("$MOD+CTRL+{k}"),
         })
     }
