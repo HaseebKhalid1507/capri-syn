@@ -491,10 +491,15 @@ step_synaps() {
 glibc() { ldd --version 2>&1 | head -n1 | grep -o '[0-9]\+\.[0-9]\+$' || true; }
 
 # Copy an unpacked layout (installer/stage.sh's) into the prefix.
+# Every file's sha256 under a folder (no diff or cmp on a minimal system).
+tree_sum() { (cd "$1" 2>/dev/null && find . -type f -exec sha256sum {} + | sort) || true; }
+
 install_tree() {
     local d=$1
-    if [ "$DRY" = 0 ] && cmp -s "$d/bin/synaps-avatar" "$BIN/synaps-avatar" && cmp -s "$d/bin/avatarctl" "$BIN/avatarctl" &&
-        diff -rq "$d/lib/synaps-avatar" "$LIB" >/dev/null 2>&1; then
+    if [ "$DRY" = 0 ] && [ -x "$BIN/synaps-avatar" ] && [ -d "$LIB" ] &&
+        [ "$(sha256 "$d/bin/synaps-avatar")" = "$(sha256 "$BIN/synaps-avatar")" ] &&
+        [ "$(sha256 "$d/bin/avatarctl")" = "$(sha256 "$BIN/avatarctl" 2>/dev/null)" ] &&
+        [ "$(tree_sum "$d/lib/synaps-avatar")" = "$(tree_sum "$LIB")" ]; then
         good "up to date: $(tilde "$BIN/synaps-avatar") and $(tilde "$LIB") are this build's"
         return 0
     fi
