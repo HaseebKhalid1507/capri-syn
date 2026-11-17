@@ -126,7 +126,9 @@ def serve(accepted, path=None, ready=None, stop=None):
     finally:
         srv.close()
         try:
-            if json.load(open(path)).get('token') == token:
+            with open(path) as f:
+                ours = json.load(f).get('token') == token
+            if ours:
                 os.remove(path)
         except (OSError, ValueError):
             pass
@@ -521,7 +523,8 @@ class Media:
 
     def restore_saved(self):
         try:
-            st = json.load(open(self.state))
+            with open(self.state) as f:
+                st = json.load(f)
         except FileNotFoundError:
             return
         except Exception as e:

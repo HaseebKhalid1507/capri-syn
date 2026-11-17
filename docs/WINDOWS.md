@@ -67,7 +67,9 @@ Unattended: `synaps-avatar-setup-….exe /VERYSILENT /SUPPRESSMSGBOXES [/PACK="C
 | music | SMTC (the media flyout's sessions): playing or quiet, and whether every playing session is a video | **[VM] pending** |
 | notifications | toasts, see below | **[VM] pending** |
 | lock, sleep, idle | WTS session notifications, power broadcasts, `GetLastInputInfo` | P0 [VM] |
-| hold-to-talk, voice | not yet: voice isn't ported. The options, sized: `docs/design/windows-voice.md` | — |
+| voice: the link | her end of the sidecar's link: loopback TCP after a two-token handshake (`endpoint.json` in `%LOCALAPPDATA%\capri-voice`); Linux keeps the Unix socket | CI (both ends, Rust and Python) |
+| voice: the sidecar | `tools/capri_voice_win.py`: PortAudio (WASAPI) capture and playback, SMTC pause, session-volume duck with Linux's crash repair, lock, calls (the mic privacy store), DND. A bundle (embeddable CPython 3.13 + wheels, `packaging/windows/voice-bundle.ps1`) runs it with no Python installed. Not started by her yet, not in the installer: `docs/design/windows-voice.md` | CI; **[VM] pending** (live audio: item 13) |
+| hold-to-talk | not yet (tap and toggle work); options in `docs/design/windows-voice.md` §6 | — |
 
 ## The Line's keyboard
 
@@ -114,3 +116,14 @@ desktop to try it on.
 12. The installer, interactively: the pack page (Browse, a non-pack refused, empty allowed); the
     Start-menu shortcut starts her with no console window; a toast after install shows her icon;
     autostart starts her at sign-in; uninstall from Settings → Apps leaves nothing but his settings.
+13. Voice (his machine for the audio; the VM for the rest), the [VM] column of
+    `docs/design/windows-voice.md` → V1a:
+    - the bundle on a clean Windows (does onnxruntime want the VC++ runtime?);
+    - mic and speaker end to end: hold, toggle, hands-free, the wake word, a hush;
+    - unplugging a headset mid-hold;
+    - the duck by ear, and pause with Spotify, Edge and Media Player;
+    - a call (Teams, Discord, the Sound Recorder) closing the hands-off mic;
+    - Win+L mid-hold;
+    - whether Windows 11's Do not disturb shows in `SHQueryUserNotificationState`;
+    - headphones told from speakers;
+    - Whisper and Kokoro speed on his CPU.

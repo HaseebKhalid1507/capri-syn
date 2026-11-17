@@ -1,9 +1,131 @@
-# Voice on Windows: how the capri-voice sidecar could run there (design note, undecided)
+# Voice on Windows: the capri-voice sidecar there
 
-**Status:** options only. **Nothing here is decided or built**: Haseeb or Jawz picks. Sizes are agent-days
-and are guesses **[G]**. **[checked]** marks a fact read from a source (named). **[unverified]** marks
-what still needs a look on a real Windows box. The capri-win VM has no real audio and no GPU (WARP), so
-most of this needs his machine, not the VM.
+**Status:** decided: **A, the bundled Python sidecar** (Jawz, for Haseeb). **V1a** (VM-free, CI-checked)
+built the link and the sidecar's Windows layer, and a script that builds the bundle; what it is, and what
+is left, comes first below. The options as written before the decision follow, for the record. Sizes are
+agent-days and guesses **[G]**. **[checked]** marks a fact read from a source (named). **[VM]** marks
+what needs a real Windows desktop with audio (his machine: the capri-win VM has no real audio and no GPU).
+
+## V1a: what is built
+
+### The link: loopback TCP with two tokens
+- **Linux: unchanged.** The Unix socket (`$CAPRI_VOICE_SOCK`, else `$XDG_RUNTIME_DIR/capri-voice.sock`),
+  no hello. The Rust side moved behind `platform::voice_link()`; the log lines read the same.
+- **Windows: loopback TCP, picked over a named pipe.** A pipe would carry his ACL by itself, but the
+  sidecar's server is sockets and threads, and stock CPython has no pipe server without pywin32 (DLLs
+  and a post-install step in the bundle) or an asyncio rewrite of its loop. TCP keeps one code path,
+  so the link's tests run on Linux too.
+- **The handshake:**
+  - The sidecar binds `127.0.0.1` on a port the OS picks. It writes `endpoint.json` (the port, `token`,
+    `reply`: fresh 256-bit hex each start) atomically to `%LOCALAPPDATA%\capri-voice`, which only he and
+    the admins can read.
+  - She sends `{"op":"hello","token"}` first. The sidecar answers `{"ev":"hello","token": reply}`, and
+    only then takes her as its avatar, dropping the one before (as on Linux).
+  - A connection without the right hello within 2 s is closed and never displaces her. She drops a peer
+    whose reply is wrong or missing within 1 s, so a stale file whose port another program took leads
+    nowhere: that program gets a dead token and can't send the reply.
+  - The file is removed on a clean exit. `CAPRI_VOICE_ENDPOINT` overrides its path on both ends.
+- **The trust boundary is Linux's:** anything running as him can read the file, as it can open the 0600
+  socket there.
+- **Tests:**
+  - Rust (Windows CI): the handshake both ways; a wrong reply; a silent listener; no file; and against
+    the real Python end (`capri_voice_win.py --test-serve`).
+  - Python (both OSes): right, wrong, silent and oversized hellos; the file going with the sidecar.
+
+### The sidecar's Windows layer: `tools/capri_voice_win.py`
+Linux never imports it. On Windows `capri-voice` takes these names in place of its Linux ones, with
+the same contracts:
+
+| piece | Windows | CI | [VM] |
+|---|---|---|---|
+| capture | sounddevice (PortAudio) WASAPI shared mode, auto-converted to 16 kHz mono s16, 20 ms blocks, shaped like the `pw-record` process (`mic_chunk` is the read seam on both OSes) | the seam; the call's shape (no device on the runner) | his mic: open latency, the level, a hold end to end |
+| source moved | none needed: a PortAudio stream never follows a new default; a removed device ends it (`mic lost`) | — | unplug a headset mid-hold |
+| playback | `RawOutputStream` 24 kHz, shaped like `pw-play` (stdin write/close, `wait` with timeout, `kill`) | the call's shape | her voice; a hush mid-sentence |
+| duck | WASAPI session volume (pycaw) × 0.125 (−18 dB, if session volume is a linear gain). Linux's rules: never her own process, system sounds, the `[music]` ignore list, or anything at all in a call; inactive sessions are ducked when they start (a 0.5 s poll while held); his change wins; the same state file and crash repair; a session that died ducked and comes back at our level gets its original | the rules and the crash repair on fake sessions | **by ear**; Spotify, a browser, Discord ignored |
+| pause | SMTC (winrt): pause what plays; on release, play only what she paused that is still paused | the rules on a fake; the real SMTC call answers `[]` on the runner | Spotify, Edge, the Media Player app |
+| "in a call" | the mic privacy store: `HKCU\…\CapabilityAccessManager\ConsentStore\microphone`, an app whose last use started and hasn't stopped (her own Python excluded); re-read every 0.5 s while a hands-off stream is open | the reading (packaged, desktop, hers, stopped) | Teams, Discord, the Sound Recorder |
+| screen locked | the input desktop isn't `Default` (`OpenInputDesktop`; a UAC prompt counts too). No new protocol: the avatar's WTS events aren't needed | answers on the runner | lock with Win+L mid-hold |
+| do not disturb | `SHQueryUserNotificationState`: busy, D3D full-screen, presentation | answers | **whether Windows 11's Do not disturb shows there** (no documented API) |
+| headphones | the default output's name (`Headphones (…)`, `Headset Earphone (…)`). The form factor property is the better answer: a later refinement | the names | his devices |
+| test devices | `CAPRI_VOICE_SOURCE` / `SINK` match device names; a missing one is never the default | `node_missing` | — |
+| wake filter | `WakeForced` loads the wheel's `whisper-<hash>.dll` (pywhispercpp 1.5.1's file list) | — | the wake word end to end |
+
+In `capri-voice` itself only seams changed:
+- `WIN` and the Windows paths (`%LOCALAPPDATA%\capri-voice\{models,media.json}`);
+- `mic_chunk` at the three read sites, and `_accepted` for the link;
+- `WIN` branches where the capture and the player start, in the watchdog, and in the call watch.
+
+On Linux every branch takes the old path, with the same commands in the same order (the `--selftest`
+and the unit tests run on both OSes).
+
+### CI: the `voice` job (ubuntu-24.04 and windows-latest, CPython 3.13)
+- `tools/test_capri_voice.py` (18 tests) and `capri-voice --selftest` (no models: its rule checks).
+- **Windows also:**
+  - the bundle's whole wheel set, `--only-binary :all:`, imported;
+  - the binding smoke checks;
+  - `packaging/windows/voice-bundle.ps1` builds the bundle, and the bundled interpreter runs the imports,
+    the selftest and the unit tests again.
+
+## Packaging
+
+### The bundle: `packaging/windows/voice-bundle.ps1` (built and run in CI; not in the installer yet)
+
+```
+voice\python\          CPython 3.13.17 embeddable (python.org, SHA-256 pinned), python313._pth → ..\site-packages
+voice\site-packages\   tools\capri-voice-win-requirements.txt, wheels only (versions.txt: what was installed)
+voice\capri-voice, voice\capri_voice_win.py
+run: voice\python\pythonw.exe voice\capri-voice
+```
+
+The models are never in it. They go to `%LOCALAPPDATA%\capri-voice\models`, as `capri-voice-setup` fetches them on
+Linux (≈ 320–370 MB: Kokoro int8 92 + voices 28 + Whisper small.en 190 or base.en 60 + Silero 2.3 +
+the wake word's 2.4).
+
+### Wheels for Windows (win_amd64, CPython 3.13) **[checked: PyPI, and CI installs them binary-only]**
+
+| package | version (latest) | Windows wheel | notes |
+|---|---|---|---|
+| numpy | 2.5.5 | cp313 win_amd64 (12.6 MB) | |
+| onnxruntime | 1.32.0 | cp313 win_amd64 (16.7 MB) | CPU provider. `onnxruntime-directml` 1.24.4 / `onnxruntime-windowsml` 1.30 exist as opt-ins |
+| kokoro-onnx | 0.6.1 | py3-none-any | **Python < 3.14**: the bundle is 3.13 |
+| phonemizer | 3.6.0 | py3-none-any | kokoro-onnx's (not `phonemizer-fork`) |
+| espeakng-loader | 0.2.4 | py3-none-win_amd64 (9.4 MB) | carries espeak-ng's DLL and data (GPL-3.0: as on Linux, a separate library) |
+| pywhispercpp | 1.5.1 | cp313 win_amd64 (1.4 MB) | whisper/ggml DLLs and msvcp140 inside |
+| sounddevice | 0.5.6 | py3-none-win_amd64 (1.0 MB) | carries PortAudio |
+| pycaw / comtypes / psutil | 20260927 / 1.5.0 / 7.2.2 | any / any / cp313 win_amd64 | |
+| winrt-runtime + Windows.Foundation(.Collections) + Windows.Media.Control | 4.1.0 / 10.0.28000 | cp313 win_amd64 / any | |
+
+**Nothing is missing:** every package has a Windows x64 wheel for CPython 3.13. **Missing for ARM64 Windows:**
+pywhispercpp has no win_arm64 wheel; numpy, onnxruntime, espeakng-loader, sounddevice and winrt do.
+**[VM]:** onnxruntime on a clean Windows may want the VC++ runtime (the runners have it installed): run
+the bundle on the capri-win VM before shipping it.
+
+### Into the installer: not wired (documented instead)
+Two reasons it isn't cheap:
+1. **Size.** An Inno component still sits inside `setup.exe` when unchecked, so every download would grow
+   from 9 MB to about 9 + 45 MB: the bundle is 143 MB installed, and the wheels alone are ~42 MB compressed.
+2. **Nothing starts the sidecar on Windows yet** (V1b).
+
+The choices, for Haseeb:
+- (1) a second, per-user `synaps-avatar-voice-setup.exe` into `{localappdata}\Programs\synaps-avatar\voice`;
+  the main installer stays small;
+- (2) a component in the one installer;
+- (3) the installer downloads the bundle (its first download).
+
+Wiring (2): `[Components] voice` (unchecked) → `[Files] Source: "build\voice\*"; DestDir: "{app}\voice";
+Components: voice; Flags: recursesubdirs`, `build.ps1 -Voice` runs `voice-bundle.ps1` first, and
+`test-install.ps1` checks `/COMPONENTS=voice`. About ½ day with (1) or (2).
+
+## What is left for voice on Windows [G]
+
+| | agent-days |
+|---|---|
+| V1b: she starts the sidecar (a job object with kill-on-close, following `[voice] enabled`; its log beside hers) | 1 |
+| the models: a PowerShell `capri-voice-setup` (the same pinned URLs and SHA-256s) | ½ |
+| the installer: (1), (2) or (3) above | ½ |
+| the [VM] / his-machine pass: every [VM] cell above, plus Whisper and Kokoro speed on his CPU, and the fixes | 1–2 |
+| hold-to-talk beyond tap and toggle (§6) | ½–1 |
+| **total** | **3½–5**, on top of V1a's ~2 (inside the 6–9 of option A) |
 
 ## What there is today (Linux)
 
@@ -204,7 +326,7 @@ These combine: (a) for the keyboard plus (c) for the mouse, with tap and toggle 
 | hold-to-talk: a / b / c | 0.5 / 1 / 0.5 (each + VM) |
 | the installer's Voice component (+ model fetch) | 1 |
 
-## For the decision (not decided here)
+## For the decision (1 is decided: A)
 1. A, B, or A now and B later?
 2. Hold-to-talk beyond tap and toggle: none, (a), (b), (c), and which key?
 3. Models: fetched by the installer, by a separate step, or from a folder?

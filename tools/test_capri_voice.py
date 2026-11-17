@@ -91,7 +91,8 @@ class Link(unittest.TestCase):
         self.t = threading.Thread(target=win.serve, args=(self.got.append, self.path, lambda port: ready.set(), self.stop), daemon=True)
         self.t.start()
         self.assertTrue(ready.wait(5))
-        self.ep = json.load(open(self.path))
+        with open(self.path) as f:
+            self.ep = json.load(f)
 
     def tearDown(self):
         self.stop.set()
