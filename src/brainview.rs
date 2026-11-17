@@ -1498,6 +1498,7 @@ impl Avatar {
             h.pulse = Some(now);
             h.glow = Some(now);
         }
+        self.cutin(crate::cutin::Beat::Summon, now);
     }
 
     /// The settled summon's warm border: 0..=6 on a slow ~1.8 s breath, once the landing

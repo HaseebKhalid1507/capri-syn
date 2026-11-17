@@ -476,6 +476,52 @@ pub struct Behaviour {
     /// The desktop art's motions (`MotionsSpec`). Without `anim/` none of them exists.
     #[serde(default)]
     pub motions: MotionsSpec,
+    /// Cut-ins beside her for big moments (`CutInSpec`): local images only (`anim/mochi`).
+    #[serde(default)]
+    pub cutins: Option<CutInSpec>,
+    /// Her face in the Line per mood (`moods` names to `anim/mochi` stems; local only). A mood
+    /// without one, or a pack without the image, keeps the portrait (lachy's face.png).
+    #[serde(default)]
+    pub line_faces: BTreeMap<String, String>,
+}
+
+/// `moods.json` `cutins`: a show still beside her for a beat (`anim/mochi` stems by beat:
+/// `needsYou`, `done`, `laugh`, `summon`, `annoyed`). A beat without its image doesn't show.
+#[derive(Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct CutInSpec {
+    pub beats: BTreeMap<String, String>,
+    /// On screen this long, its entrance and exit included.
+    #[serde(default = "cutin_ms")]
+    pub ms: u64,
+    /// At most one per this long.
+    #[serde(default = "cutin_gap")]
+    pub gap_ms: u64,
+    /// `done` only after a turn at least this long.
+    #[serde(default = "cutin_done_after")]
+    pub done_after_ms: u64,
+    /// `laugh`: the share of her laugh reactions to a click that get it.
+    #[serde(default = "cutin_laugh")]
+    pub laugh_chance: f32,
+    /// Its height, logical px.
+    #[serde(default = "cutin_h")]
+    pub height: f32,
+}
+
+fn cutin_ms() -> u64 {
+    1200
+}
+fn cutin_gap() -> u64 {
+    12_000
+}
+fn cutin_done_after() -> u64 {
+    120_000
+}
+fn cutin_laugh() -> f32 {
+    0.34
+}
+fn cutin_h() -> f32 {
+    150.0
 }
 
 /// `moods.json` `motions` (B2c): lachy's motion strips and how often they may play. Each one is

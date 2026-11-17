@@ -52,6 +52,15 @@ pub(super) struct ArriveState {
     /// The sit's legs unfold over the edge from then (`UNFOLD_MS`): the in-between from the
     /// crouch (r31: the crouch popped into the sit).
     pub unfold: Option<Instant>,
+    /// A drawn touchdown is painted a frame before it shows (outside her shape).
+    pub prepaint: bool,
+}
+
+impl ArriveState {
+    /// An arrival sequence waits for her to appear.
+    pub(super) fn pending(&self) -> bool {
+        self.on_appear.is_some()
+    }
 }
 
 /// The legs unfolding below the edge as the sit comes in.
@@ -152,6 +161,23 @@ impl Avatar {
             self.art_sync(now);
             self.art_strip().is_some()
         };
+        // The drawn pose itself as the red silhouette (its own outline, legs over the edge),
+        // then the drawing: the art never changes shape at the cut (r34: the crouch's
+        // silhouette jumped into the sit, and the strip in between floated off the edge).
+        // A quiet teleport's soft landing has no red: the drawing at once.
+        if drawn && self.drawn_ready() {
+            let quiet = self.teleport.as_ref().is_some_and(|t| t.quiet);
+            let red = if quiet { Duration::ZERO } else { DRAWN_PERCH_RED };
+            let ms = red.as_millis() as u64;
+            self.arrive.red_until = Some(now + red);
+            self.arrive.until = Some(now + red);
+            if dip_ms > 0 {
+                // The settle at the landing glitch's end, as before.
+                let contact = (ms as f32).max(land_ms) as u64;
+                self.squash = Some(now + Duration::from_millis(contact.saturating_sub(dip_ms as u64)));
+            }
+            return;
+        }
         let seq = match perch_touchdown(self.sitting(), drawn, land_ms) {
             Touchdown::Whole => own,
             Touchdown::Cut(ms) => own.first().map(|&(f, _)| vec![(f, ms)]).unwrap_or_default(),
@@ -189,10 +215,25 @@ impl Avatar {
         Some(seq)
     }
 
+    /// Touching down onto a window top in a drawn pose whose cell is in: she can form as it.
+    pub(super) fn drawn_touchdown(&mut self, now: Instant) -> bool {
+        self.sitting() && self.arrive.pending() && {
+            self.art_sync(now);
+            self.art_strip().is_some()
+        } && self.drawn_ready()
+    }
+
+    /// The frame she shows now is a strip's cell, decoded.
+    fn drawn_ready(&self) -> bool {
+        let i = self.anim.frame();
+        self.pack.frames.get(i).is_some_and(|f| f.cell.is_some()) && self.fr(i).is_some()
+    }
+
     /// A new teleport, or one that ended before she appeared: nothing pending.
     pub(super) fn arrive_reset(&mut self) {
         self.arrive.on_appear = None;
         self.arrive.formed = None;
+        self.arrive.prepaint = false;
         self.arrive.launching = false;
     }
 
@@ -511,6 +552,9 @@ enum Touchdown {
 
 /// A drawn arrival's first frames are the plain red land silhouette this long.
 const DRAWN_RED: Duration = Duration::from_millis(70);
+
+/// A touchdown into a drawn perch: its own red silhouette this long, from the bolt's arrival.
+const DRAWN_PERCH_RED: Duration = Duration::from_millis(130);
 
 /// Where in the landing glitch (`land_ms` long) the touchdown cuts to a drawn pose: while she is
 /// still the red silhouette (`Glitch::tint`, its first 30 %).

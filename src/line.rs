@@ -76,6 +76,27 @@ pub struct Snap {
     pub mic: Option<String>,
     /// The sentence she is saying now (the caption, paced by her voice).
     pub caption: Option<String>,
+    /// Her face now (her mood's, `moods.json` `lineFaces`): on her latest row; the portrait on
+    /// the others.
+    pub face: Option<Face>,
+}
+
+/// A face image in the snapshot: the same face is the same image.
+#[derive(Clone)]
+pub struct Face(pub std::sync::Arc<RenderImage>);
+
+impl PartialEq for Face {
+    fn eq(&self, o: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &o.0)
+    }
+}
+
+impl Eq for Face {}
+
+impl std::fmt::Debug for Face {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Face")
+    }
 }
 
 /// The kit's components (the Line's text field), its dark theme and caret policy: set up
@@ -894,9 +915,12 @@ impl Line {
         let pal = self.pal;
         let (plate, tone) = self.plate(&r.who);
         let mut head = div().flex_none().w(px(74.0)).text_size(px(11.5)).font_weight(FontWeight::BOLD).text_color(rgb(tone)).pt(px(3.0));
-        // Her portrait over her name (lachy's face.png, cut to its opaque box).
+        // Her portrait over her name (lachy's face.png, cut to its opaque box); on her latest
+        // row, her face now (her mood's), if the pack has one.
+        let latest = self.snap.rows.iter().rposition(|r| r.who == Who::Her) == Some(ix);
+        let face = if latest { self.snap.face.as_ref().map(|f| &f.0).or(self.face.as_ref()) } else { self.face.as_ref() };
         if r.who == Who::Her
-            && let Some(f) = &self.face
+            && let Some(f) = face
         {
             let s = f.size(0);
             let h = FACE_PX;

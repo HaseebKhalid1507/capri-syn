@@ -22,6 +22,10 @@ type Unit = (usize, bool);
 /// Not now (a reply, music, a one-shot): the shift waits this long and asks again.
 const SHIFT_RETRY: Duration = Duration::from_secs(20);
 
+/// A strip off screen and out of use this long goes (a dance after the music, a walk's): its
+/// pixels and atlas tiles, decoded again when it next plays (~15 ms).
+const UNUSED_DROP: Duration = Duration::from_secs(45);
+
 pub(super) struct ArtState {
     picker: Picker,
     /// The variant in effect per pooled state she is in (or is teleporting into).
@@ -40,6 +44,8 @@ pub(super) struct ArtState {
     failed: HashSet<Unit>,
     /// Asked for from `&self` code (the layer), fetched at the next schedule.
     want: RefCell<Vec<Unit>>,
+    /// The next check for strips out of use (`UNUSED_DROP`).
+    expire_at: Option<Instant>,
     /// The art family on screen last schedule: a change is a seam. And whether it was a
     /// motion's drawing (a walk, a dance, a dangle): a seam into or out of one is light.
     seam_last: Option<Art>,
@@ -64,6 +70,7 @@ impl ArtState {
             pending: HashSet::new(),
             failed: HashSet::new(),
             want: RefCell::new(Vec::new()),
+            expire_at: None,
             seam_last: None,
             seam_motion: false,
             fits: RefCell::new(HashMap::new()),
@@ -72,7 +79,7 @@ impl ArtState {
     }
 
     pub fn deadline(&self) -> Option<Instant> {
-        [self.shift_at, self.next_blink].into_iter().flatten().min()
+        [self.shift_at, self.next_blink, self.expire_at].into_iter().flatten().min()
     }
 }
 
@@ -512,6 +519,9 @@ impl Avatar {
 
     /// From `schedule`: decode what the layer asked for, off the main thread.
     pub(super) fn art_fetch(&mut self, cx: &mut Context<Self>) {
+        if self.art.expire_at.is_some_and(|t| t <= Instant::now()) {
+            self.art_evict(cx);
+        }
         let want: Vec<Unit> = self.art.want.borrow_mut().drain(..).collect();
         for u in want {
             if self.art.ready.contains_key(&u) || !self.art.pending.insert(u) {
@@ -601,8 +611,15 @@ impl Avatar {
         }
         let mut bytes = self.art_bytes();
         let budget = self.pack.cache_bytes;
-        while bytes > budget {
-            let Some((&u, _)) = self.art.ready.iter().filter(|(u, _)| !in_use.contains(u)).min_by_key(|(_, t)| **t) else { break };
+        let mut dropped = false;
+        loop {
+            let lru = self.art.ready.iter().filter(|(u, _)| !in_use.contains(u)).min_by_key(|(_, t)| **t).map(|(&u, &t)| (u, t));
+            let Some((u, _)) = lru.filter(|&(_, t)| bytes > budget || now.saturating_duration_since(t) >= UNUSED_DROP) else {
+                // The next one to go out of use, or (all in use) a look again later.
+                self.art.expire_at = (!self.art.ready.is_empty()).then(|| lru.map_or(now, |(_, t)| t) + UNUSED_DROP);
+                break;
+            };
+            dropped = true;
             self.art.ready.remove(&u);
             for i in self.unit_frames(u) {
                 if let Some(f) = self.frames[i].take() {
@@ -613,6 +630,9 @@ impl Avatar {
                     cx.drop_image(f.image.clone(), None);
                 }
             }
+        }
+        if dropped {
+            crate::platform::trim_heap();
         }
         bytes
     }

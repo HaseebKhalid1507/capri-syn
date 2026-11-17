@@ -1329,5 +1329,30 @@
     "heartsAtMs": 810,
     "gapMs": 600000
   },
-  "icon": "icon.png"
+  "icon": "icon.png",
+  "cutins": {
+    "beats": {
+      "needsYou": "cutin-eyes",
+      "done": "cutin-grin",
+      "laugh": "cutin-laugh",
+      "summon": "cutin-look",
+      "annoyed": "cutin-many"
+    },
+    "ms": 1200,
+    "gapMs": 12000,
+    "doneAfterMs": 120000,
+    "laughChance": 0.34,
+    "height": 150
+  },
+  "lineFaces": {
+    "idle": "face-calm",
+    "talking": "face-calm",
+    "thinking": "face-look",
+    "working": "face-aside",
+    "needs_you": "face-wide",
+    "done": "face-smug",
+    "annoyed": "face-many",
+    "sleepy": "capri-face",
+    "away": "capri-face"
+  }
 }

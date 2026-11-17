@@ -19,6 +19,8 @@ mod artview;
 mod motionview;
 #[path = "introview.rs"]
 pub(crate) mod introview;
+#[path = "cutinview.rs"]
+mod cutinview;
 
 use crate::anim::{Animator, Mood, Rng, Seq};
 use crate::variants::PoolKey;
@@ -44,6 +46,8 @@ use synaps_client::{Client, ClientOptions};
 /// over her head. Each optional: a pack without `anim/` (or a file that failed) has none.
 pub struct Stills {
     pub face: Option<Arc<RenderImage>>,
+    /// Her face in the Line per mood (`moods.json` `lineFaces`, local images), by mood key.
+    pub moods: std::collections::HashMap<String, Arc<RenderImage>>,
     pub capri: Option<Arc<RenderImage>>,
     pub capri_path: Option<std::path::PathBuf>,
     pub cursor: Option<crate::platform::PointerImage>,
@@ -54,7 +58,18 @@ const MENU_HEADER_PX: f32 = 96.0;
 const CURSOR_PX: f32 = 32.0;
 
 impl Stills {
-    fn decode(st: &std::collections::HashMap<String, (std::path::PathBuf, Option<String>)>, sf: f32) -> Stills {
+    fn decode(
+        st: &std::collections::HashMap<String, (std::path::PathBuf, Option<String>)>,
+        moods: &[(String, (std::path::PathBuf, Option<String>))],
+        sf: f32,
+    ) -> Stills {
+        let at = |name: &str, (p, sha): &(std::path::PathBuf, Option<String>), h: f32| match crate::frames::still(p, sha.as_deref(), (h * sf).round() as u32) {
+            Ok(i) => Some(i),
+            Err(e) => {
+                elog!("synaps-avatar: still `{name}`: {e:#}");
+                None
+            }
+        };
         let get = |name: &str, h: f32| {
             let (p, sha) = st.get(name)?;
             match crate::frames::still(p, sha.as_deref(), (h * sf).round() as u32) {
@@ -71,6 +86,7 @@ impl Stills {
             capri_path: st.get("capri").map(|s| std::fs::canonicalize(&s.0).unwrap_or_else(|_| s.0.clone())),
             // Its tip is the opaque box's top-left corner.
             cursor: get("cursor", CURSOR_PX).map(|i| crate::frames::still_pointer(&i, (0.0, 0.0), 1)),
+            moods: moods.iter().filter_map(|(m, f)| Some((m.clone(), crate::frames::still_image(at(m, f, crate::line::FACE_PX)?)))).collect(),
         }
     }
 }
@@ -389,6 +405,8 @@ const LEAVE_CUT_IN: usize = 2;
 const HEART_LAYER: usize = 6;
 /// The contact shadow under a perch, stacked right below the avatar window.
 const SHADOW_LAYER: usize = 14;
+/// Over her while a drawn touchdown is its red silhouette (`sync_cover`).
+const COVER_LAYER: usize = GLINT_LAYER + 2 * GLINTS_MAX + 3;
 /// It comes this long after an arrival's last frame (the pose's present lands a frame later).
 const SHADOW_AFTER_ARRIVAL: Duration = Duration::from_millis(50);
 /// Music notes: an outline and a fill layer each, at most seven notes.
@@ -411,8 +429,9 @@ const NOTE_TICK: Duration = Duration::from_millis(40);
 /// in her window (`Os::fx_staged`).
 const GLINT_LAYER: usize = NOTE_LAYER + 2 * NOTES_MAX;
 const GLINTS_MAX: usize = 4;
-/// A glint's smallest size, of its full size.
+/// A glint's smallest size, of its full size, and how far its core goes toward white.
 const GLINT_MIN: f32 = 0.4;
+const GLINT_WHITE: f32 = 0.55;
 /// When a glint can't show (a glitch, a turn, a frame without hair), the next try.
 const GLINT_RETRY_MS: u64 = 300;
 /// A bob or sway step (1-2 px) alone waits this long for another redraw to ride on (a
@@ -600,6 +619,7 @@ pub struct Avatar {
     /// The variant pools on screen and the strips' pixels (artview).
     art: artview::ArtState,
     intro: introview::IntroState,
+    cutins: cutinview::CutInState,
     /// Body not drawn (between dematerialise and materialise).
     hidden: bool,
     quitting: bool,
@@ -623,6 +643,11 @@ pub struct Avatar {
     /// mirrored: a turn mirrors the shadow with her), and where it is shown.
     shadow: Option<((usize, bool), Vec<ShapeRect>)>,
     shadow_at: Option<(i32, i32)>,
+    /// The red cover over a drawn touchdown's silhouette is up (`sync_cover`).
+    cover_on: bool,
+    /// Her shape the last two frames while the sit's legs unfold (they join it only where
+    /// both painted them).
+    unfold_hist: [Vec<ShapeRect>; 2],
     /// Last laid-out width of the status tag (logical px), to place the next one.
     tag_w: Rc<Cell<f32>>,
     /// The HUD's top while a bubble is up: (resting frame, avatar-local device px).
@@ -835,6 +860,7 @@ impl Avatar {
             teleport: None,
             arrive: Default::default(),
             intro: introview::IntroState::new(),
+            cutins: cutinview::CutInState::default(),
             art: artview::ArtState::new(std::env::var("SA_ART_SEED").ok().and_then(|s| s.parse().ok()).unwrap_or_else(|| Rng::seeded().next())),
             hidden: false,
             quitting: false,
@@ -847,6 +873,8 @@ impl Avatar {
             contact: [None, None],
             shadow: None,
             shadow_at: None,
+            cover_on: false,
+            unfold_hist: [Vec::new(), Vec::new()],
             tag_w: Rc::new(Cell::new(150.0)),
             hud_top: Cell::new(None),
             tag_box: Rc::new(Cell::new(None)),
@@ -1102,13 +1130,22 @@ impl Avatar {
         let mut used = 0;
         // Only on her: a glint picked on one frame's hair isn't left in the air when the
         // frame changes under it (a landing's crouch, a pose).
+        // A glint that couldn't show yet (a dip, a glitch) starts its life now: it never pops in
+        // grown, a lone white cross (r34).
+        if show {
+            for g in self.glints.iter_mut().filter(|g| !g.live) {
+                g.live = true;
+                g.t0 = g.t0.max(now);
+            }
+        }
         let body = self.frame_or_default(self.shown_frame()).map(|f| &f.mask);
         if show {
             for g in &self.glints {
                 if used >= GLINTS_MAX {
                     break;
                 }
-                if !body.is_some_and(|m| m.get(g.x as i32, g.y as i32)) {
+                // All of it on her hair, or not at all.
+                if !body.is_some_and(|m| g.reach().iter().all(|&(x, y)| m.get(x.round() as i32, y.round() as i32))) {
                     continue;
                 }
                 let Some(sc) = g.scale(now, life_ms).filter(|&v| v > 0.02) else { continue };
@@ -1129,7 +1166,8 @@ impl Avatar {
                 // The same curve fades it: the core goes pink -> white -> pink and the halo
                 // grows out of it (1-bit windows: no alpha).
                 let (o, sz, rows) = place(fx::star(cx, cy, r, g.spin + 0.04));
-                self.os.fx_set(core, mix_rgb(0xffc2e2, 0xffffff, sc), o, sz, &rows).ok();
+                // Never quite white: a pink glint on her hair, not a white cross on it (r34).
+                self.os.fx_set(core, mix_rgb(0xffc2e2, 0xffffff, sc * GLINT_WHITE), o, sz, &rows).ok();
                 let (o, sz, rows) = place(fx::star(cx, cy, r * (1.0 + 0.32 * sc), g.spin));
                 self.os.fx_set_below(glow, core, 0xffc2e2, o, sz, &rows).ok();
                 used += 1;
@@ -1293,10 +1331,17 @@ impl Avatar {
 
     /// lachy's stills, off the main thread (a few ms each).
     fn stills_decode(&mut self, cx: &mut Context<Self>) {
-        let Some(st) = self.pack.anim.as_ref().map(|a| a.stills.clone()).filter(|s| !s.is_empty()) else { return };
+        let Some(anim) = self.pack.anim.as_ref() else { return };
+        let st = anim.stills.clone();
+        // The Line's faces per mood: those whose image the pack has.
+        let moods: Vec<(String, (std::path::PathBuf, Option<String>))> =
+            self.pack.behaviour.line_faces.iter().filter_map(|(m, stem)| Some((m.clone(), anim.mochi.get(stem)?.clone()))).collect();
+        if st.is_empty() && moods.is_empty() {
+            return;
+        }
         let sf = self.layout.sf;
         cx.spawn(async move |this, cx| {
-            let s = crate::off_thread(move || Ok(Stills::decode(&st, sf))).await;
+            let s = crate::off_thread(move || Ok(Stills::decode(&st, &moods, sf))).await;
             this.update(cx, |v, cx| {
                 if let Ok(s) = s {
                     v.stills = Some(Rc::new(s));
@@ -1542,6 +1587,7 @@ impl Avatar {
             self.music = None;
         }
         let prev = self.mood;
+        self.cutin_mood(prev, m, now);
         // NEEDS YOU while she's hidden under a fullscreen window: a desktop notification with
         // lachy's capri.png (he can't see her tag).
         if m == Mood::NeedsYou
@@ -1823,6 +1869,25 @@ impl Avatar {
     fn fx_hide_all(&mut self) {
         self.os.fx_hide();
         self.shadow_at = None;
+        self.cover_on = false;
+    }
+
+    /// A drawn touchdown's red silhouette, server-painted over her as well: her window shows
+    /// its old pixels inside a shape that grows until its present lands (r34: the bolt's
+    /// stretch onto a lachy perch read as an empty edge, then a smear). Shape mode only.
+    fn sync_cover(&mut self, shape: &[ShapeRect], size: (i32, i32), red: bool) {
+        if !red {
+            if std::mem::take(&mut self.cover_on) {
+                self.os.fx_unmap(COVER_LAYER);
+                self.os.flush();
+            }
+            return;
+        }
+        let l = self.layout;
+        let at = (self.applied.0 + l.avatar_x, self.applied.1 + l.avatar_y);
+        self.os.fx_set(COVER_LAYER, fx::BOLT_RED, at, size, shape).ok();
+        self.os.flush();
+        self.cover_on = true;
     }
 
     fn fx_hide_bolt(&self) {
@@ -1900,6 +1965,7 @@ impl Avatar {
         }
         take(self.teleport.as_ref().and_then(|t| t.leave_until));
         take(self.arrive.red_until.filter(|&t| t > now));
+        take(self.cutins.due());
         take(self.arrive.until.map(|t| t + SHADOW_AFTER_ARRIVAL).filter(|&t| t > now));
         // Glints: at their slice centres (fx::GLINT_STEPS per life), not a free-running tick;
         // a step waiting for company (GLINT_SLACK) at the end of its wait.
@@ -1997,6 +2063,7 @@ impl Avatar {
         }
         self.art_seam(now);
         self.art_fetch(cx);
+        self.cutin_fetch(cx);
         self.sync_shadow();
         self.sync_pointer_watch();
         if self.os.fx_take_dirty() {
@@ -2308,22 +2375,40 @@ impl Avatar {
         if !self.loaded || self.hidden || self.teleport.is_some() || self.rag.is_some() || self.arriving(now) || self.glitch.is_some() || self.turn.is_some() {
             return;
         }
-        let Some(pts) = self.frame_or_default(self.shown_frame()).map(|f| f.glints.clone()).filter(|g| !g.is_empty()) else { return };
-        self.next_glint = Some(now + Duration::from_millis(gap));
-        let (x, y) = pts[self.rng.pick(pts.len())];
-        let spin = self.rng.range(-0.25, 0.25);
-        let travel = self.rng.range(6.0, 10.0) * self.layout.sf;
-        let dir = if self.rng.range(0.0, 1.0) < 0.5 { -1.0 } else { 1.0 };
-        self.glints.push(Glint {
-            t0: now,
-            x: x as f32,
-            y: y as f32,
-            // Big enough to read over her hair's own glitter.
-            size: self.rng.range(10.0, 13.0) * self.layout.sf,
-            spin,
-            // A little travel along its long arm (the strand it sits on).
-            drift: (spin.cos() * travel * dir, spin.sin() * travel * dir),
+        let n = self.frame_or_default(self.shown_frame()).map_or(0, |f| f.glints.len());
+        if n == 0 {
+            return;
+        }
+        // A point where all of it stays on the hair (a few tries; else none this beat).
+        let sf = self.layout.sf;
+        let tries: Vec<(usize, f32, f32, f32)> = (0..6)
+            .map(|_| {
+                let (i, spin) = (self.rng.pick(n), self.rng.range(-0.25, 0.25));
+                let travel = self.rng.range(6.0, 10.0) * sf;
+                let dir = if self.rng.range(0.0, 1.0) < 0.5 { -1.0 } else { 1.0 };
+                (i, spin, travel * dir, self.rng.range(9.0, 11.0) * sf)
+            })
+            .collect();
+        let Some(f) = self.frame_or_default(self.shown_frame()) else { return };
+        let pick = tries.into_iter().map(|(i, spin, travel, size)| {
+            let (x, y) = f.glints[i];
+            Glint {
+                t0: now,
+                x: x as f32,
+                y: y as f32,
+                // Big enough to read over her hair's own glitter.
+                size,
+                spin,
+                // A little travel along its long arm (the strand it sits on).
+                drift: (spin.cos() * travel, spin.sin() * travel),
+                live: false,
+            }
         });
+        let fits = |g: &Glint| g.reach().iter().all(|&(x, y)| f.mask.get(x.round() as i32, y.round() as i32));
+        if let Some(g) = pick.into_iter().find(fits) {
+            self.next_glint = Some(now + Duration::from_millis(gap));
+            self.glints.push(g);
+        }
     }
 
     /// The vanish is over (its glitch, or a drawn leave): the bolt, or straight there.
@@ -2382,9 +2467,31 @@ impl Avatar {
         let u = now.duration_since(t0).as_secs_f32() * 1000.0 / fx::BOLT_MS;
         let (to, place, mut moved, seed) = (tp.to, tp.place, tp.moved, tp.seed);
         let mut redraw = false;
+        // Onto a window top in a drawn pose (lachy's perch): she is there, its red silhouette,
+        // from the moment the bolt reaches her (no stretch of bare trail before she forms).
+        // A frame before, it is painted (still outside her shape): when the shape takes it in,
+        // the screen has it already (no dark first frame).
+        let mut early = false;
+        let quiet = self.teleport.as_ref().is_some_and(|t| t.quiet);
+        let pre = FRAME_FX.as_secs_f32() * 1000.0 / fx::BOLT_MS;
+        if (fx::BOLT_ARRIVE - pre..fx::BOLT_LAND).contains(&u) && self.hidden && !quiet && self.arrive.pending() && matches!(place, Placement::Perch { sit: true, .. }) {
+            if !moved {
+                moved = true;
+                if let Some(tp) = &mut self.teleport {
+                    tp.moved = true;
+                }
+                self.arrive(to, place, now);
+            }
+            if self.drawn_touchdown(now) {
+                early = u >= fx::BOLT_ARRIVE;
+                self.arrive.prepaint = !early;
+                redraw = true;
+            }
+        }
         // The trail is short and closing in: the landing glitch starts under it.
-        if u >= fx::BOLT_LAND && self.hidden {
+        if (u >= fx::BOLT_LAND || early) && self.hidden {
             self.hidden = false;
+            self.arrive.prepaint = false;
             self.glitch = Some(self.land_glitch(now, seed));
             if self.teleport.as_ref().is_some_and(|t| t.quiet) {
                 self.sliver = Some(now);
@@ -4256,6 +4363,9 @@ impl Avatar {
             steps
         } else if !click.body.is_empty() {
             let i = self.rng.pick(click.body.len());
+            if matches!(click.body[i].as_slice(), [crate::pack::Step::Clip(c)] if c == "laugh") {
+                self.cutin_laugh(now);
+            }
             click.body[i].clone()
         } else {
             Vec::new()
@@ -4486,6 +4596,11 @@ fn tag_rows(cut: Cut, trail: Option<u64>, b: Bounds<Pixels>, sf: f32) -> Vec<Sha
 }
 
 /// The rows both `a` and `b` cover (1 px tall rows, as `shape::poly_rows` makes them).
+/// The rects split into one-row rects (for `rows_and`).
+fn unit_rows(rects: &[ShapeRect]) -> Vec<ShapeRect> {
+    rects.iter().flat_map(|r| (0..r.3 as i16).map(move |k| (r.0, r.1 + k, r.2, 1))).collect()
+}
+
 fn rows_and(a: &[ShapeRect], b: &[ShapeRect]) -> Vec<ShapeRect> {
     let mut by_y: std::collections::HashMap<i16, Vec<(i32, i32)>> = std::collections::HashMap::new();
     for r in b {
@@ -4630,6 +4745,9 @@ impl Render for Avatar {
         let image_at = frame.map(|f| (f.at, f.image_size()));
         let rects = frame.map(|f| f.rects.clone()).unwrap_or_default();
         let hidden = self.hidden || frame.is_none();
+        // Painted while still outside her shape (a drawn touchdown, the frame before it shows).
+        let prepaint = hidden && frame.is_some() && self.arrive.prepaint && self.teleport.is_some();
+        let unpainted = hidden && !prepaint;
         let has_frame = frame.is_some() && !hidden;
         // P6: while she's carried or flying, the bounding shape's rows merged within 1 px
         // (inward only): Xorg's per-move cost scales with the shape's rects (1,220 -> ~570).
@@ -4651,19 +4769,27 @@ impl Render for Avatar {
         }
         // The sit's legs unfolding over the edge (a CapriCore perch arrival): rows below the
         // seat line come in top-down.
-        if let (Some(t0), Some(f), Some(sy)) = (self.arrive.unfold, frame, l.seat_y)
-            && self.sitting()
-            && self.rag.is_none()
-            && now >= t0
-        {
-            let ms = now.saturating_duration_since(t0).as_millis() as u64;
+        let unfold_at = |at: Instant| {
+            let (Some(t0), Some(f), Some(sy)) = (self.arrive.unfold, frame, l.seat_y) else { return None };
+            if !self.sitting() || self.rag.is_some() || at < t0 {
+                return None;
+            }
+            let ms = at.saturating_duration_since(t0).as_millis() as u64;
             let seat = sy - l.avatar_y;
-            let bands = arriveview::unfold_bands(f.top.min(seat), seat, f.bottom, arriveview::unfold_depth(ms));
+            Some(arriveview::unfold_bands(f.top.min(seat), seat, f.bottom, arriveview::unfold_depth(ms)))
+        };
+        let unfolding = unfold_at(now).is_some();
+        if let Some(bands) = unfold_at(now) {
             plan.slices = Some(if plan.sx != 1.0 || plan.sy != 1.0 { fx::scale_bands(&bands, plan.pivot, plan.sx, plan.sy) } else { bands });
         }
+        // Its next steps go underneath: the legs reach further down each frame, and where they
+        // grow past this frame's, last frame's paint shows until this one lands (r34: a faint
+        // dark copy of the lower legs). Every step up to two frames ahead, so there's no gap
+        // between where they are and where they'll be.
+        let unfold_next = unfolding.then(|| [4, 2, 1].iter().filter_map(|&k| unfold_at(now + FRAME_FAST * k)).flatten().collect::<Vec<_>>());
         // A drawn arrival's first frames: the plain red land silhouette (its window's old
         // pixels would show through the new shape for a frame).
-        if self.arrive.red_until.is_some_and(|t| now < t) {
+        if self.arrive.red_until.is_some_and(|t| now < t) || prepaint {
             plan.tint = Some(fx::BOLT_RED);
         }
         let sliver_px = (l.ground_x - l.avatar_x) as f32;
@@ -4756,6 +4882,13 @@ impl Render for Avatar {
             self.glitch_at.set(Some(at));
             let next_base = rag_next.as_ref().map_or(base, |n| n.plan.clone());
             next = Some(if g.done(at) || drawn_land { next_base.clone() } else { lay_on(&next_base, at, step + 1) });
+        }
+        if let Some(bands) = unfold_next
+            && next.is_none()
+        {
+            let mut n = plan.clone();
+            n.slices = Some(if n.sx != 1.0 || n.sy != 1.0 { fx::scale_bands(&bands, n.pivot, n.sx, n.sy) } else { bands });
+            next = Some(n);
         }
         // The sliver widens next frame: that width goes underneath.
         if let Some(sx) = self.sliver_sx(now + FRAME_FX).or(self.sliver.map(|_| 1.0)) {
@@ -4896,6 +5029,19 @@ impl Render for Avatar {
         } else {
             plan.shape(&rects)
         };
+        // The legs unfolding over the edge: below the seat, only rows the last two frames had
+        // too (GPUI presents up to two frames late: rows new to the shape showed the window's
+        // old pixels, a faint dark copy of her lower legs, r34). They show solid or not at all.
+        if unfolding && !alpha && !hidden {
+            let seat = l.seat_y.map_or(0, |s| s - l.avatar_y) as i16;
+            let [h1, h2] = std::mem::take(&mut self.unfold_hist);
+            let (above, below): (Vec<ShapeRect>, Vec<ShapeRect>) = unit_rows(&body_shape).into_iter().partition(|r| r.1 < seat);
+            let kept = rows_and(&rows_and(&below, &h1), &h2);
+            self.unfold_hist = [above.iter().chain(&below).copied().collect(), h1];
+            body_shape = above.into_iter().chain(kept).collect();
+        } else if !self.unfold_hist[0].is_empty() {
+            self.unfold_hist = [Vec::new(), Vec::new()];
+        }
         // Shape mode turn: the art as it is (it's on screen already), shown through a band
         // about her feet (`facing::turn_band`); only the shape moves, so nothing lands late.
         if turning && !alpha {
@@ -4920,9 +5066,14 @@ impl Render for Avatar {
             }
             self.turn_frame += 1;
         }
+        if !alpha {
+            let red = self.arrive.red_until.is_some_and(|t| now < t) && !hidden && self.teleport.is_some();
+            let shape = body_shape.clone();
+            self.sync_cover(&shape, (aw, ah), red);
+        }
         let ghost_rects = if !plan.has_ghosts() || hidden { Vec::new() } else { plan.ghost_rects(&rects) };
         let solid_rects = if plan.solid.iter().all(Option::is_none) || hidden { Vec::new() } else { plan.solid_rects(&rects) };
-        let tint_rects = if plan.tint.is_some() && !hidden { plan.body_rects(&rects) } else { Vec::new() };
+        let tint_rects = if plan.tint.is_some() && !unpainted { plan.body_rects(&rects) } else { Vec::new() };
         let bar_rects = if hidden || plan.tint.is_some() { Vec::new() } else { plan.bar_rects(&rects) };
         let entity = cx.entity();
         let warm: Vec<Arc<RenderImage>> = if self.loaded && !self.warmed {
@@ -4964,7 +5115,7 @@ impl Render for Avatar {
                         let (a, b, c, d) = crate::frames::place_in(at, (x, y, w, h), aw, ah);
                         rect(a, b, c, d)
                     };
-                    if let (Some(img), false) = (image, hidden) {
+                    if let (Some(img), false) = (image, unpainted) {
                         // Underlays first: invisible outside this frame's shape and covered
                         // inside it, they fill the strips the next shape grows into.
                         if under > 0.0 {

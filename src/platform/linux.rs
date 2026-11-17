@@ -31,6 +31,10 @@ pub fn process_setup() {
     unsafe {
         libc::mallopt(libc::M_ARENA_MAX, 2);
         libc::mallopt(libc::M_TRIM_THRESHOLD, 1 << 20);
+        // Pixel buffers (a frame, a strip's cells, the intro's close-ups) in maps of their own,
+        // handed back whole when freed: a fixed threshold (glibc's moving one put them in the
+        // heap after the first free, where they stayed after an intro replay).
+        libc::mallopt(libc::M_MMAP_THRESHOLD, 256 << 10);
     }
     if std::env::var_os("ZED_DEVICE_ID").is_some() || std::env::var_os("SA_ANY_GPU").is_some() {
         return;

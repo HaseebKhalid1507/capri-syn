@@ -225,9 +225,16 @@ impl Avatar {
             Ok(f) => {
                 let s = f.first().map(|c| c.image.size(0)).map_or((0, 0), |s| (i32::from(s.width), i32::from(s.height)));
                 elog!("synaps-avatar: intro: {} close-ups {}x{} decoded in {} ms", f.len(), s.0, s.1, t0.elapsed().as_millis());
-                self.intro.frames = Some(Arc::new(f));
                 if self.intro.waiting.take().is_some() {
+                    self.intro.frames = Some(Arc::new(f));
                     self.intro_open(cx);
+                } else if self.arrive.launch_wait {
+                    // Ahead of the launch: it takes them.
+                    self.intro.frames = Some(Arc::new(f));
+                } else {
+                    // Too late (the launch went on without them): not kept.
+                    drop(f);
+                    crate::platform::trim_heap();
                 }
             }
             Err(e) => {
@@ -428,8 +435,10 @@ impl Avatar {
             }
             h.update(cx, |_, window, _| window.remove_window()).ok();
         }
-        // Played once per launch; a dev replay decodes them again.
+        // Played once per launch; a dev replay decodes them again. The heap they were in goes
+        // back to the system (tens of MB at a 1080p+ monitor).
         self.intro.frames = None;
+        crate::platform::trim_heap();
         if !std::mem::replace(&mut self.intro.handed, true) {
             self.intro_chain(true, Instant::now(), cx);
         }
