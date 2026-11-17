@@ -826,8 +826,10 @@ impl Brain {
         if grows { 1.0 / self.tuning.attn_fill_s } else { 0.0 }
     }
 
+    /// Her own roams' pace: by her energy's band at the last step (×1.2 / 1 / 0.5).
     fn roam_rate(&self) -> f64 {
-        if self.present && self.mode == Mode::Passive && !self.sensed.asleep { 1.0 / self.t_roam } else { 0.0 }
+        let k = self.band(self.t).map_or(1.0, crate::life::Band::roam_factor);
+        if self.present && self.mode == Mode::Passive && !self.sensed.asleep { k / self.t_roam } else { 0.0 }
     }
 
     fn attn_at(&self, t: f64) -> f64 {
@@ -996,6 +998,7 @@ impl Brain {
             "fatigue": r(self.energy.fatigue),
             "excite": r(self.energy.excite),
             "local_h": l.map(|l| r(crate::life::hour(l))),
+            "band": self.band(now).map(|b| format!("{b:?}").to_lowercase()),
             "greets_today": l.map(|l| self.greets.iter().filter(|&&g| crate::life::day_of(g) == crate::life::day_of(l)).count()),
         })
     }
@@ -1004,6 +1007,11 @@ impl Brain {
     /// (Sleepy, BRIEF-alive Q1).
     pub fn napping(&self) -> bool {
         self.mode == Mode::Napping
+    }
+
+    /// Her energy's band at brain time `t` (None: no time of day).
+    pub fn band(&self, t: f64) -> Option<crate::life::Band> {
+        self.local_at(t).map(|l| crate::life::band(self.energy.value(l)))
     }
 
     /// The moves of the rolling hour, weighted (a small hop counts `hop_weight`).
@@ -3401,6 +3409,25 @@ mod tests {
         run(&mut b, 10.0, 20.0, false, &s, &[(11.0, BrainEvent::Interaction(Touch::Headpat))]);
         let up = b.snapshot(20.0)["day"]["energy"].as_f64().unwrap();
         assert!(up > low + 0.1, "{low} -> {up}");
+    }
+
+    #[test]
+    fn she_roams_less_at_night_and_more_by_day() {
+        let roams = |h: f64| -> usize {
+            (0..6)
+                .map(|seed| {
+                    let mut b = calm(30 + seed);
+                    let l0 = clock(h, 0.0);
+                    let s = move |t: f64| Senses { idle_s: working(t), local: Some(l0 + t), ..here(t) };
+                    let r = run(&mut b, 0.0, 2.0 * 3600.0, false, &s, &[]);
+                    assert!(b.band(2.0 * 3600.0).is_some());
+                    moves(&r).iter().filter(|(_, p)| p.why == "roam").count()
+                })
+                .sum()
+        };
+        let (night, day) = (roams(2.0), roams(10.0));
+        eprintln!("roams in 2 h x 6: 02:00 {night}, 10:00 {day}");
+        assert!((night as f64) < day as f64 * 0.6, "night {night} day {day}");
     }
 
     /// A day, time-scaled: he works 09-12, lunch away, works 13-18, locks 18-19, works till

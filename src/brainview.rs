@@ -225,6 +225,11 @@ pub(super) struct BrainHost {
     /// The login session (logind): locked, the machine asleep.
     locked: bool,
     sleeping: bool,
+    /// Her energy's band at the last decision (a change re-lays her idle and pools).
+    last_band: Option<crate::life::Band>,
+    /// The nap's pose since (brain time), and her stretches of the last hour (S9).
+    pub(super) nap_since: Option<f64>,
+    pub(super) stretches: Vec<f64>,
     /// A bid's swing kick while hanging: (start, px at the bottom).
     kick: Option<(Instant, f32)>,
     /// An insist beat's leg kick while hanging (start, direction).
@@ -453,6 +458,9 @@ impl Avatar {
             typed_at: None,
             locked: false,
             sleeping: false,
+            last_band: None,
+            nap_since: None,
+            stretches: Vec::new(),
             kick: None,
             swing: None,
             drift: None,
@@ -728,6 +736,18 @@ impl Avatar {
         // Asleep by her day (away, locked, a doze), shown as the session's Sleepy.
         let napping = self.brain.as_ref().is_some_and(|h| h.brain.napping());
         self.rest_sync(napping, now);
+        // Her energy's band moved: the night idle and pools in (or out).
+        let band = self.brain.as_ref().and_then(|h| h.brain.band(h.bnow(now)));
+        if let Some(h) = &mut self.brain
+            && std::mem::replace(&mut h.last_band, band) != band
+            && h.last_band.is_some()
+        {
+            self.art_band_changed(now);
+            self.band_relayer = true;
+            if self.next_activity.is_some() {
+                self.next_activity = Some(now + self.autonomy_gap());
+            }
+        }
         // Woken (or fallen asleep) by this decision: the nap's frames follow at once.
         self.step_nap(now);
     }
@@ -772,8 +792,24 @@ impl Avatar {
                         self.arrive.deep = false;
                     }
                     self.relayer(now);
-                    if up && self.standing() && !self.waking(now) {
+                    // A stretch due replaces a drawn wake's last cell (one seam, not two).
+                    let b = self.brain.as_ref().map(|h| h.bnow(now));
+                    let mut napped = None;
+                    if let (Some(h), Some(b)) = (&mut self.brain, b) {
+                        if p == Some(RestPose::Nap) {
+                            h.nap_since.get_or_insert(b);
+                        } else if up && let Some(since) = h.nap_since.take() {
+                            napped = Some(b - since);
+                        }
+                    }
+                    let stretch = up && napped.is_some_and(|s| self.stretch_due(s, now));
+                    let drawn = self.art.floor_strip;
+                    self.art.floor_strip = drawn && !stretch;
+                    if up && self.standing() && !self.waking(now) && !(stretch && drawn) {
                         self.play_nap_wake(now);
+                    }
+                    if stretch && let Some(s) = napped {
+                        self.stretch_after_nap(s, now);
                     }
                 }
                 Intent::Hide(hide) => self.brain_hide(hide, now),
@@ -2322,9 +2358,19 @@ impl Avatar {
         } else if standing && !steps.is_empty() {
             let seq = self.pack.flatten(&self.resolve_steps(&steps));
             if !seq.is_empty() {
-                // A greeting out of her sleep comes after the stand-up.
-                if matches!(e, EmoteKey::Greet { .. }) && self.anim.busy() {
-                    self.anim.then(seq, now);
+                // A greeting out of her sleep comes after the stand-up (and a stretch), held
+                // like it: nothing cuts it short (r38: a relayer after the wake dropped it).
+                if matches!(e, EmoteKey::Greet { .. }) {
+                    let ms: u64 = seq.iter().map(|s| s.1 as u64).sum();
+                    let from = if self.anim.busy() { self.waking_until.filter(|&w| w > now).unwrap_or(now) } else { now };
+                    if self.anim.busy() {
+                        self.anim.then(seq, now);
+                    } else {
+                        self.anim.play(seq, now);
+                    }
+                    let until = from + Duration::from_millis(ms);
+                    self.waking_until = Some(self.waking_until.map_or(until, |w| w.max(until)));
+                    self.art.quiet_seams = Some(self.art.quiet_seams.map_or(until, |q| q.max(until)) + Duration::from_millis(500));
                 } else {
                     self.anim.play(seq, now);
                 }

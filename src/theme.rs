@@ -132,7 +132,7 @@ impl Pal {
     /// | done | hollow | square, a big tick through its corner | |
     /// | error | black, red type | toothed, its ✕ shard dropped | |
     /// | offline | hollow, grey | square, dashed | |
-    /// | sleeping | dim grey | square, 5 px lower | |
+    /// | sleeping | grey, bone type, text-dim outline | square, 5 px lower | |
     pub fn look(&self, plate: Plate, key: &str, tone: u32, invert: bool, blink: bool) -> Look {
         let mut l = Look { plate, fill: self.panel, edge: tone, ink: tone, mark: tone, dash: None, drop: 0.0, trail: false, half: false, halo: None };
         match key {
@@ -156,9 +156,13 @@ impl Pal {
                 l.mark = self.ink;
             }
             "offline" | "paused" => l.dash = Some([3.0, 2.5]),
+            // Asleep: a grey plate, its outline text-dim, its type bone (r38: dim on grey read
+            // as a smudge next to ONLINE).
             "sleep" => {
                 l.fill = self.asleep;
-                l.edge = self.asleep;
+                l.edge = self.dim;
+                l.ink = self.text;
+                l.mark = self.text;
                 l.drop = 5.0;
             }
             "wake" => {
@@ -836,7 +840,8 @@ mod tests {
             ("accent on field (the › prompt)", P.accent, P.field),
             ("deep on bone (NEEDS YOU)", P.deep, P.text),
             ("bone on black (NEEDS YOU's other beat)", P.text, P.bg),
-            ("text-dim on the sleeping plate", P.dim, P.asleep),
+            ("bone on the sleeping plate", P.text, P.asleep),
+            ("the sleeping plate's outline on panel", P.dim, P.panel),
             ("ink on bone (READ)", P.ink, P.text),
             ("his words on his bar", P.you, P.you_bar),
             ("ink on WORKING's sweep", P.ink, super::mix(P.accent, P.text, 0.45)),

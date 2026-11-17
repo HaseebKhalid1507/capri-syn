@@ -124,6 +124,15 @@ use crate::theme::{self, Cut, Fill, Pal, Plate, glyph, tracked};
 
 // Logical px. The HUD follows Capri's CSS (cyberpunk.css, avatar-detach.css).
 const MARGIN: f32 = 8.0;
+/// `SA_FRAME_LOG`: every change of the frame on screen goes to the log (critic timing).
+fn frame_log() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("SA_FRAME_LOG").is_some())
+}
+
+/// After falling asleep or waking, a change of art family is the light swap this long (the
+/// wake, a stretch and the greeting fit in it).
+const QUIET_SEAMS: Duration = Duration::from_secs(8);
 const TOP_MARGIN: f32 = 6.0;
 const BODY_FONT: f32 = 20.0;
 const LINE_H: f32 = 27.0;
@@ -481,6 +490,8 @@ const GLIDE_MIN: f32 = 24.0;
 /// Moves closer together than this are a stream (a live drag): she snaps to each.
 const GLIDE_STREAM: Duration = Duration::from_millis(150);
 const FRAME_FX: Duration = Duration::from_millis(33);
+/// Into a drawn sleep whose cells are still decoding: the drawing before holds this long.
+const SLEEP_DECODE_HOLD: Duration = Duration::from_millis(100);
 /// A quiet arrival's sliver widens back into her over ~3 frames.
 const SLIVER: Duration = Duration::from_millis(100);
 
@@ -538,6 +549,10 @@ pub struct Avatar {
     mood: Mood,
     mood_then: Option<(Instant, Mood)>,
     next_activity: Option<Instant>,
+    /// `SA_FRAME_LOG`: the frame last logged (each change is a line).
+    frame_logged: usize,
+    /// Her energy's band changed: her idle layer follows at the next calm moment.
+    band_relayer: bool,
     autonomy_started: bool,
     rng: Rng,
     bubble: Option<Bubble>,
@@ -811,6 +826,8 @@ impl Avatar {
             mood: Mood::Idle,
             mood_then: None,
             next_activity: None,
+            frame_logged: usize::MAX,
+            band_relayer: false,
             autonomy_started: false,
             rng: Rng::seeded(),
             bubble: None,
@@ -1539,6 +1556,12 @@ impl Avatar {
     }
 
     fn autonomy_gap(&mut self) -> Duration {
+        // Her energy's own gaps (BRIEF-alive S11: 5-9 / 7-12 / 12-25 s), after the first.
+        if self.autonomy_started
+            && let Some([lo, hi]) = self.pack.behaviour.energy.band(self.band()).gap_ms
+        {
+            return Duration::from_millis(self.rng.range(lo as f32, hi.max(lo) as f32) as u64);
+        }
         let a = &self.pack.catalog.autonomy;
         let life = &self.pack.behaviour.life;
         let base = if self.autonomy_started {
@@ -1577,6 +1600,13 @@ impl Avatar {
         if let Some(l) = self.brain_layer(m) {
             return l;
         }
+        // Idle, low on energy: her tired face (the band's idle), else the mood's own.
+        if m == Mood::Idle
+            && let Some(t) = &self.pack.behaviour.energy.band(self.band()).idle
+            && let Some(&b) = self.pack.index.get(&t.base)
+        {
+            return (b, self.loop_seq(t.r#loop.as_ref()));
+        }
         let spec = self.spec(m);
         let base = spec.and_then(|s| self.pack.index.get(&s.base).copied()).unwrap_or(default);
         (base, self.loop_seq(spec.and_then(|s| s.r#loop.as_ref())))
@@ -1589,8 +1619,16 @@ impl Avatar {
         }
         match self.perch_spec() {
             Some(p) if self.sitting() => &p.activities,
-            _ => &self.pack.behaviour.activities,
+            _ => {
+                let own = &self.pack.behaviour.energy.band(self.band()).activities;
+                if own.is_empty() { &self.pack.behaviour.activities } else { own }
+            }
         }
+    }
+
+    /// Her energy's band now (mid without a brain or a time of day).
+    pub(super) fn band(&self) -> crate::life::Band {
+        self.brain.as_ref().and_then(|h| h.brain.band(h.bnow(Instant::now()))).unwrap_or(crate::life::Band::Mid)
     }
 
     pub fn set_mood(&mut self, m: Mood, now: Instant) {
@@ -1598,6 +1636,7 @@ impl Avatar {
             self.music = None;
         }
         let prev = self.mood;
+        let shown_before = self.anim.frame();
         self.cutin_mood(prev, m, now);
         // NEEDS YOU while she's hidden under a fullscreen window: a desktop notification with
         // lachy's capri.png (he can't see her tag).
@@ -1624,7 +1663,8 @@ impl Avatar {
         self.mood = m;
         self.art_sync(now);
         // Out of a lachy floor sleep: its drawn wake (it stands her in the bridge drawing).
-        let drawn_wake = floor_strip_sleep && self.art.floor_strip && self.art_transition("wake").is_some();
+        // A stretch due after the nap replaces it (one seam into the stretch, not two).
+        let drawn_wake = floor_strip_sleep && self.art.floor_strip && self.art_transition("wake").is_some() && !self.stretch_pending(now);
         self.mood = prev;
         let to_strip = self.art_strip().is_some();
         // An arrival sequence (the launch intro) plays through; the mood's entry follows it.
@@ -1664,7 +1704,24 @@ impl Avatar {
         // Capri's state bursts.
         // Speaking comes and goes with every reply; that alone is not worth a burst.
         let chatter = m == Mood::Talking || prev == Mood::Talking;
-        if m != prev && !chatter && !drawn_wake && self.loaded && self.teleport.is_none() && self.status_of(m).key != self.status_of(prev).key {
+        // Into or out of her sleep: one light glitch on the swap frame, the tag whole, and the
+        // family changes right after it (the wake, a stretch, the greeting) the same.
+        let sleep_cut = m != prev && (m == Mood::Sleepy || prev == Mood::Sleepy);
+        if sleep_cut && self.loaded && self.teleport.is_none() {
+            self.art.quiet_seams = Some(now + QUIET_SEAMS);
+            // Into a drawn sleep still decoding (~20-40 ms): the drawing before holds until it's
+            // in, so the cut is straight into it (r39: a frame of the pack's floor sit first).
+            let mut at = now;
+            if m == Mood::Sleepy && to_strip && self.art_layer(m).is_none() && self.rag.is_none() && !arriving {
+                self.anim.play(vec![(shown_before, SLEEP_DECODE_HOLD.as_millis() as u32)], now);
+                self.art.cut_hold = Some(now + SLEEP_DECODE_HOLD);
+                at = now + SLEEP_DECODE_HOLD;
+            }
+            match &mut self.rag {
+                Some(r) => r.pending_glitch = r.pending_glitch.or(Some(GlitchKind::Seam)),
+                None => self.glitch = Some(Glitch::swap(at, self.rng.next())),
+            }
+        } else if m != prev && !chatter && !drawn_wake && self.loaded && self.teleport.is_none() && self.status_of(m).key != self.status_of(prev).key {
             let big = self.spec(m).is_some_and(|s| s.big) || self.spec(prev).is_some_and(|s| s.big);
             let kind = if big { GlitchKind::Big } else { GlitchKind::Burst };
             match &mut self.rag {
@@ -1705,8 +1762,9 @@ impl Avatar {
         let rests = self.art_rests(self.mood);
         self.anim.set_layer_resting(base, looping, rests, now);
         // An arrival sequence plays through the landing's relayer, a walk through its pool's
-        // art coming in, a stand-up out of her sleep through the nap's end.
-        if !self.arriving(now) && !self.brain_walking() && !self.waking(now) {
+        // art coming in, a stand-up out of her sleep through the nap's end, a cut's hold.
+        let holding = self.art.cut_hold.is_some_and(|t| now < t);
+        if !self.arriving(now) && !self.brain_walking() && !self.waking(now) && !holding {
             self.anim.stop_oneshot(now);
         }
         self.lying_cut(before, now);
@@ -2116,6 +2174,11 @@ impl Avatar {
             && at <= now
         {
             self.set_mood(m, now);
+            dirty = true;
+        }
+        if self.band_relayer && self.mood == Mood::Idle && !self.anim.busy() && !self.asleep() && self.rag.is_none() && self.teleport.is_none() {
+            self.band_relayer = false;
+            self.relayer(now);
             dirty = true;
         }
         if let Some(at) = self.next_activity
@@ -4722,6 +4785,10 @@ impl Render for Avatar {
         self.log_drawn();
         let rag_flight = self.rag_json().get("phase").and_then(|p| p.as_str()).is_some_and(|p| p == "fling" || p == "drop");
         let shown_i = rag_shown.as_ref().and_then(|(c, _)| c.as_ref().map(|c| c.frame)).unwrap_or_else(|| self.anim.frame());
+        if frame_log() && std::mem::replace(&mut self.frame_logged, shown_i) != shown_i {
+            let id = self.pack.frames.get(shown_i).map_or("?", |f| f.id.as_str());
+            elog!("frame {} {id}{}", self.t_start.elapsed().as_millis(), self.glitch.as_ref().map_or(String::new(), |g| format!(" glitch {:?}", g.kind)));
+        }
         if self.arrive.unfold.is_some_and(|t0| now.saturating_duration_since(t0).as_millis() as u64 >= arriveview::UNFOLD_MS) {
             self.arrive.unfold = None;
         }

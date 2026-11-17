@@ -121,6 +121,26 @@ pub enum Band {
     High,
 }
 
+impl Band {
+    pub fn parse(s: &str) -> Option<Band> {
+        Some(match s {
+            "low" => Band::Low,
+            "mid" => Band::Mid,
+            "high" => Band::High,
+            _ => return None,
+        })
+    }
+
+    /// Her own moves' pace in this band (roams ×1.2 / 1 / 0.5).
+    pub fn roam_factor(self) -> f64 {
+        match self {
+            Band::Low => 0.5,
+            Band::Mid => 1.0,
+            Band::High => 1.2,
+        }
+    }
+}
+
 pub fn band(e: f64) -> Band {
     if e >= HIGH {
         Band::High

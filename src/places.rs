@@ -42,6 +42,8 @@ pub const HOP_UP_MAX: f32 = 1400.0;
 pub const TYPING_CLEAR: f32 = 200.0;
 /// A dodge ends at least this much farther from the pointer (logical px).
 pub const DODGE_GAIN: f32 = 100.0;
+/// A window's title bar (logical px): standing in front of it isn't over its content.
+const TITLE_PX: f32 = 32.0;
 
 /// Body boxes (relative to each pose's anchor point) of every pose she can be placed in.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -559,7 +561,30 @@ fn floor_spots(w: &World, sit: bool, rng: &mut Rng) -> Vec<Spot> {
         let x = a.x + (a.w as f32 * rng.range(0.1, 0.9)) as i32;
         out.push(w.spot(if sit { SpotKind::FloorSit } else { SpotKind::Floor }, (x, w.floor_y(i)), rel, None));
     }
+    clear_first(w, &mut out);
     out
+}
+
+/// How much of `body` stands over windows' content (below their title bars), the middle half
+/// of a window's width counted twice: 0 is empty desktop or a title bar; a corner beats the
+/// middle of the text.
+fn content_cost(w: &World, body: &WinRect) -> f64 {
+    let title = w.d(TITLE_PX);
+    let mut cost = 0;
+    for (r, _) in w.stack.iter().zip(w.eligible).filter(|(_, e)| **e) {
+        let h = (r.h - title).max(0);
+        let content = WinRect::new(r.x, r.y + title, r.w, h);
+        let middle = WinRect::new(r.x + r.w / 4, r.y + title, r.w / 2, h);
+        cost += [content, middle].iter().filter_map(|c| c.intersect(body)).map(|o| area_of(&o)).sum::<i64>();
+    }
+    cost as f64 / area_of(body).max(1) as f64
+}
+
+/// Floor spots clear of windows' content first, then over their margins, the middle of the
+/// text last (a preference: on a tiled desk every spot is over something). Ties keep their
+/// (random) order.
+fn clear_first(w: &World, spots: &mut [Spot]) {
+    spots.sort_by_cached_key(|s| (content_cost(w, &s.body) * 5.0).floor() as i64);
 }
 
 /// Empty air: 24 seeded samples, clear of every eligible window (24 px) and the cursor.
@@ -725,6 +750,7 @@ fn near_floor_spots(w: &World, from_edge: bool, rng: &mut Rng) -> Vec<Spot> {
         let x = if rng.pick(2) == 0 { x0 - d } else { x0 + d };
         out.push(w.spot(SpotKind::Floor, (x, w.floor_y(i)), w.boxes.stand, None));
     }
+    clear_first(w, &mut out);
     out
 }
 
@@ -2268,5 +2294,67 @@ mod tests {
             d.run_to(80.0);
             assert!(d.hops.is_empty() && d.her == start, "seed {seed}: {:?}", d.hops);
         }
+    }
+
+    /// The share of floor picks over windows' content (> 20 % of her body over it), and their
+    /// mean cost, from `kinds` floor roams over many seeds. `sorted: false`: the first sample
+    /// that passes, as before (r38 desk: she parked over the editor's text).
+    fn floor_over_content(fx: &Fixture, sorted: bool) -> (f64, f64) {
+        let w = fx.world();
+        let roam = Roam { far: false, leaving: false, min_move: 0, skip_recent: false, kinds: &[(1, 1.0)], retry_last: false };
+        let (mut over, mut sum, n) = (0, 0.0, 600);
+        for seed in 0..n {
+            let mut rng = Rng::new(seed);
+            let s = if sorted {
+                passive(&w, &roam, &mut rng).expect("a floor spot")
+            } else {
+                let mut cands = Vec::new();
+                for _ in 0..16 {
+                    let i = w.pick_area(&mut rng);
+                    let a = w.areas[i];
+                    let x = a.x + (a.w as f32 * rng.range(0.1, 0.9)) as i32;
+                    cands.push(w.spot(SpotKind::Floor, (x, w.floor_y(i)), w.boxes.stand, None));
+                }
+                cands.into_iter().find(|s| guard(&w, s).is_ok()).expect("a floor spot")
+            };
+            let c = content_cost(&w, &s.body);
+            sum += c;
+            if c > 0.2 {
+                over += 1;
+            }
+        }
+        (over as f64 / n as f64, sum / n as f64)
+    }
+
+    #[test]
+    fn floor_spots_keep_off_window_content_when_they_can() {
+        // The r38 desk: one editor window over the floor's middle; nothing focused.
+        let fx = Fixture {
+            stack: vec![r(11, 1100, 760, 1100, 560)],
+            eligible: vec![true],
+            focused: None,
+            cursor: (2550, 40),
+            fs: [false; 2],
+            her: (600, 1588),
+        };
+        let (before, cb) = floor_over_content(&fx, false);
+        let (after, ca) = floor_over_content(&fx, true);
+        eprintln!("desk: over content {:.0} % -> {:.0} %, mean cost {cb:.2} -> {ca:.2}", before * 100.0, after * 100.0);
+        assert!(before > 0.15, "the fixture means something: {before}");
+        assert!(after < 0.02, "{after}");
+        // Tiled (i3): windows over the whole floor. Still a spot (a preference, not a rule),
+        // and over margins rather than the middle of the text.
+        let tiled = Fixture {
+            stack: vec![r(11, 0, 29, 1280, 1571), r(12, 1280, 29, 1280, 1571), r(13, 2560, 29, 2560, 1411)],
+            eligible: vec![true; 3],
+            focused: None,
+            cursor: (2550, 40),
+            fs: [false; 2],
+            her: (600, 1588),
+        };
+        let (_, cb) = floor_over_content(&tiled, false);
+        let (_, ca) = floor_over_content(&tiled, true);
+        eprintln!("tiled: mean cost {cb:.2} -> {ca:.2}");
+        assert!(ca < cb - 0.3, "{cb} -> {ca}");
     }
 }

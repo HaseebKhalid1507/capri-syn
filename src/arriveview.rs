@@ -378,12 +378,56 @@ impl Avatar {
         self.waking_until = Some(now + Duration::from_millis(ms));
     }
 
+    /// Up after a long nap on the floor (BRIEF-alive S9): the pack's stretch inside the
+    /// stand-up, before anything moves her (and before a greeting); at most 4 an hour.
+    pub(super) fn stretch_due(&self, napped_s: f64, now: Instant) -> bool {
+        self.standing() && self.stretch_earned(napped_s, now)
+    }
+
+    /// The nap was long enough, on the floor, and she has stretched under 4 times this hour.
+    fn stretch_earned(&self, napped_s: f64, now: Instant) -> bool {
+        let b = &self.pack.behaviour.brain;
+        let Some(after) = b.stretch_after_ms else { return false };
+        if b.stretch.is_empty() || napped_s * 1000.0 < after as f64 || self.placement != Placement::Ground {
+            return false;
+        }
+        let Some(h) = &self.brain else { return false };
+        let t = h.bnow(now);
+        h.stretches.iter().filter(|&&s| t - s < 3600.0).count() < 4
+    }
+
+    /// Out of a nap now, a stretch would follow (the nap's length so far).
+    pub(super) fn stretch_pending(&self, now: Instant) -> bool {
+        let Some(h) = &self.brain else { return false };
+        h.nap_since.is_some_and(|since| self.stretch_earned(h.bnow(now) - since, now))
+    }
+
+    pub(super) fn stretch_after_nap(&mut self, napped_s: f64, now: Instant) {
+        let steps = self.pack.behaviour.brain.stretch.clone();
+        let Some(h) = &mut self.brain else { return };
+        let t = h.bnow(now);
+        h.stretches.retain(|&s| t - s < 3600.0);
+        h.stretches.push(t);
+        h.write(serde_json::json!({ "t": t - h.brain.start(), "k": "stretch", "napped_s": napped_s.round() }));
+        let seq = self.pack.flatten(&steps);
+        let ms: u64 = seq.iter().map(|s| s.1 as u64).sum();
+        let from = if self.anim.busy() { self.waking_until.filter(|&w| w > now).unwrap_or(now) } else { now };
+        if self.anim.busy() {
+            self.anim.then(seq, now);
+        } else {
+            self.anim.play(seq, now);
+        }
+        let until = from + Duration::from_millis(ms);
+        self.waking_until = Some(self.waking_until.map_or(until, |w| w.max(until)));
+        self.art.quiet_seams = Some(self.art.quiet_seams.map_or(until, |q| q.max(until)) + Duration::from_millis(500));
+    }
+
     /// Up from a lachy floor sleep: `wake` (a white flash, a glitch, standing), if it's in.
     pub(super) fn play_drawn_wake(&mut self, now: Instant) -> bool {
         if self.placement != Placement::Ground {
             return false;
         }
-        let Some(seq) = self.art_transition("wake") else { return false };
+        let Some(seq) = self.art_transition_clean("wake") else { return false };
         let ms: u64 = seq.iter().map(|s| s.1 as u64).sum();
         let until = now + Duration::from_millis(ms);
         if self.art_bridge(until, now) {
