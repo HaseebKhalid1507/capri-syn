@@ -603,7 +603,10 @@ build_from_source() {
 
 step_pack() {
     step "Her art pack"
-    have python3 || die "python3 is needed for her pack (install it, then run this again)"
+    if ! have python3; then
+        [ "$DRY" = 1 ] || die "python3 is needed for her pack (install it, then run this again)"
+        info "(python3: from the system packages above)"
+    fi
     # make-pack's dependencies in the installer's own venv.
     if [ ! -x "$VENV/bin/python" ]; then
         mkdir_rec "$CACHE"
