@@ -312,8 +312,14 @@ pub enum PointerEv {
     Hover,
     /// Still beside her (not on her) a while.
     Linger,
-    /// A quick left-right wiggle near her.
+    /// The lingering pointer moved off.
+    LingerEnd,
+    /// A quick left-right wiggle near her (once a burst).
     Wiggle,
+    /// The burst goes on: each later turn, where.
+    WiggleAt(i32, i32),
+    /// The burst stopped (no turn for `wiggle_end`), where.
+    WiggleEnd(i32, i32),
 }
 
 /// Pointer watcher tuning (device px; `pointer::cfg` scales the defaults by sf).
@@ -332,6 +338,11 @@ pub struct PointerCfg {
     pub wiggle_amp: f32,
     pub wiggle_window: std::time::Duration,
     pub wiggle_turns: u8,
+    /// A burst ends this long after its last turn.
+    pub wiggle_end: std::time::Duration,
+    /// Within `after_wiggle` of a burst's last turn, a linger is this quick (a pounce's cue).
+    pub after_wiggle: std::time::Duration,
+    pub linger_after_wiggle: std::time::Duration,
 }
 
 /// Which of her windows.

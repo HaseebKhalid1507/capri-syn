@@ -187,8 +187,10 @@ pub struct MoodSpec {
     /// dots, note.
     #[serde(default)]
     pub glyph: Option<String>,
-    /// A mood change into or out of this mood is a big one (long glitch).
+    /// Was: a mood change into or out of this mood is a big one (long glitch). Since r42 only a
+    /// summon (NEEDS YOU) gets the big burst; still parsed, so older packs load.
     #[serde(default)]
+    #[allow(dead_code)]
     pub big: bool,
 }
 
@@ -815,9 +817,20 @@ pub struct BrainSpec {
     pub nap_wake_greet: Vec<Step>,
     /// The pointer right in front of her (or on her): this frame instead of a side look.
     pub look_front: Option<String>,
+    /// Her tag through a sulk and its cold shoulder (r42: not a cheerful ONLINE): a status
+    /// word, tone and glyph, like a mood's.
+    pub sulk_status: Option<SulkStatus>,
     /// Approach → frame: `hang`, `hang_upside_down`, `cling_left`, `cling_right`, `peek`. A
     /// missing one gives that approach weight 0.
     pub poses: BTreeMap<String, String>,
+}
+
+#[derive(Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SulkStatus {
+    pub status: String,
+    pub tone: Option<String>,
+    pub glyph: Option<String>,
 }
 
 #[derive(Deserialize, Clone, Debug, Default)]

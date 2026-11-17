@@ -8,7 +8,7 @@ use super::{Avatar, Placement};
 use crate::anim::{Mood, Seq};
 use crate::brain::RestPose;
 use crate::frames::Decoded;
-use crate::fx::{Glitch, GlitchKind};
+use crate::fx::{Glitch, Transition};
 use crate::pack::{Variant, VariantArt};
 use crate::variants::{Art, Picker, PoolKey, seam, weighted};
 use gpui_kit::Context;
@@ -462,7 +462,7 @@ impl Avatar {
             // frame shows it (r36: the burst after the cut shredded her leg, threw bars, tore
             // the tag).
             if seam(self.pack.art_of(before), self.pack.art_of(after)) && self.loaded && self.glitch.is_none() && self.teleport.is_none() && self.rag.is_none() {
-                self.glitch = Some(Glitch::swap(now + super::FRAME_FX, self.rng.next()));
+                self.glitch = Glitch::for_cut(Transition::Pose, now + super::FRAME_FX, self.rng.next());
                 self.art.seams += 1;
             }
         }
@@ -581,17 +581,16 @@ impl Avatar {
             && self.teleport.is_none()
             && self.rag.is_none()
         {
-            // A cover for the body's cut: the tag stays whole. In or out of a motion, a light
-            // one (r32: the full burst read as a teleport, smeared her hair); around her sleep,
-            // the swap's (one light step on the cut frame).
-            if self.asleep() || self.art.quiet_seams.is_some_and(|t| now < t) {
-                self.glitch = Some(Glitch::swap(now, self.rng.next()));
+            // A cover for the body's cut: the swap's light seam, one step on the cut frame, the
+            // tag whole (r42: the burst tore her legs in a wiggle and a pounce).
+            let t = if motion || was_motion {
+                Transition::Motion
+            } else if self.asleep() || self.art.quiet_seams.is_some_and(|t| now < t) {
+                Transition::Sleep
             } else {
-                let kind = if motion || was_motion { GlitchKind::Seam } else { GlitchKind::Burst };
-                let mut g = Glitch::new(kind, now, self.rng.next());
-                g.tears_tag = false;
-                self.glitch = Some(g);
-            }
+                Transition::Pose
+            };
+            self.glitch = Glitch::for_cut(t, now, self.rng.next());
             self.art.seams += 1;
         }
     }

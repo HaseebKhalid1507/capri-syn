@@ -187,6 +187,37 @@ pub(super) struct Scoot {
     crouched: bool,
 }
 
+/// A reaction that keeps up with the pointer (r42): a linger's bend toward it, held while it
+/// lingers; a wiggle's paw, re-aimed at each turn and settled when it stops.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Follow {
+    wiggle: bool,
+    /// The side (on screen) she points or leans to.
+    right: bool,
+    /// The wiggle's turns since (her bend steps with them).
+    n: u32,
+    /// Over by then whatever the pointer does.
+    until: Instant,
+}
+
+/// A pat makes up a sulk: she starts up this soon, with its hearts still up.
+const MAKE_UP_UNDER_HEARTS: Duration = Duration::from_millis(350);
+/// A linger's bend toward the pointer (px at 1x at her neck: the head and hair go along; r44: 12
+/// was too small to see), and the longest she holds it.
+const LINGER_BEND: f32 = 24.0;
+const LINGER_HOLD: Duration = Duration::from_secs(20);
+/// A wiggle's bend (px at 1x) steps between these with its turns, and the longest she follows one.
+const WIGGLE_BEND: (f32, f32) = (7.0, 13.0);
+const WIGGLE_FOLLOW: Duration = Duration::from_secs(8);
+/// A linger's look at the pointer holds at least this long.
+const LINGER_LOOK_MS: u32 = 3000;
+/// After a look at the pointer (or a bat at it), no idle beat for this long.
+const POINTER_QUIET: Duration = Duration::from_secs(4);
+/// A point at the pointer (`@point`) holds this long.
+const POINT_MS: u32 = 1100;
+/// Her settle when a wiggle stops: this face, this long, then her idle.
+const WIGGLE_SETTLE_MS: u32 = 500;
+
 pub(super) struct BrainHost {
     pub brain: Brain,
     pub settings: Settings,
@@ -254,6 +285,8 @@ pub(super) struct BrainHost {
     glow_last: Option<u8>,
     /// Sitting low after a sulk (the floor sit uses the sulk loop).
     sulk_sit: bool,
+    /// Keeping up with the pointer (a linger, a wiggle).
+    follow: Option<Follow>,
     // ---- lively (LOCKED #17) ----
     /// A small hop in the air.
     leap: Option<LeapMove>,
@@ -289,6 +322,11 @@ fn rect_json(r: &WinRect) -> serde_json::Value {
 }
 
 impl BrainHost {
+    /// Sulking, or her cold shoulder after it: her tag says so.
+    pub fn sulky(&self) -> bool {
+        self.cold || self.sulk_sit
+    }
+
     pub fn queued_mut(&mut self) -> &mut Vec<EmoteKey> {
         &mut self.queued
     }
@@ -489,6 +527,7 @@ impl Avatar {
             glow: None,
             glow_last: None,
             sulk_sit: false,
+            follow: None,
             leap: None,
             walk: None,
             focus_seen: None,
@@ -907,6 +946,7 @@ impl Avatar {
         }
         take(self.float_bob_next(now));
         take(h.later.iter().map(|l| l.0).min());
+        take(h.follow.map(|f| f.until));
         take(h.look_b.map(|b| h.instant(b)));
         if h.next_plan.is_some() {
             take(Some(now + Duration::from_millis(100)));
@@ -1000,6 +1040,7 @@ impl Avatar {
                 h.focus_seen = f;
             }
         }
+        self.follow_tick(now);
         self.brain_run(now, false);
         dirty |= self.step_nap(now);
         dirty |= self.idle_look(now);
@@ -1192,7 +1233,8 @@ impl Avatar {
             self.brain_feed(BrainEvent::MoveFailed { busy: false, why: plan.why }, now);
             return;
         }
-        let leap = arrival == Arrival::Hop && !can_hop && can_leap;
+        // A pounce always leaps (its windup and arc), never the hop-scoot (r42).
+        let leap = arrival == Arrival::Hop && (!can_hop || plan.why == "pounce") && can_leap;
         // Passive transports by distance (§4.1): float to float drifts; along the same floor
         // within SCOOT_MAX she hop-scoots half the time, and always under MIN_TELEPORT.
         // `hop = 0` in settings: she never hops (no scoot either).
@@ -1276,7 +1318,7 @@ impl Avatar {
         h.sulk_sit = false;
         if spot.kind == SpotKind::InPlace {
             // Bid right where she is.
-            self.glitch = Some(Glitch::new(GlitchKind::Burst, now, self.rng.next()));
+            self.glitch = Glitch::for_cut(Transition::Bid, now, self.rng.next());
             return;
         }
         let (origin, place) = self.spot_origin(&spot);
@@ -1289,7 +1331,7 @@ impl Avatar {
             return;
         }
         if leap {
-            self.start_leap(her_anchor, &spot, origin, place, plan.why == "startle_drag", now);
+            self.start_leap(her_anchor, &spot, origin, place, plan.why == "startle_drag", plan.why == "pounce", now);
             return;
         }
         // Passive moves (roams, leaving his window) teleport quietly; bids, summons and a
@@ -1821,7 +1863,7 @@ impl Avatar {
             let spot = Spot { kind: SpotKind::Edge { win }, anchor: (to_x, r.y), body: WinRect::new(to_x, r.y, 1, 1), area: 0, approach: None, cover_pct: 0.0 };
             let (origin, place) = (self.perch_origin(&r, true, to_x - r.x), Placement::Perch { win, sit: true, dx: to_x - r.x });
             self.face(to_x > her.0, "walk", now, true);
-            self.start_leap((her.0, r.y), &spot, origin, place, false, now);
+            self.start_leap((her.0, r.y), &spot, origin, place, false, false, now);
             return "ok".into();
         }
         if scoot {
@@ -1893,22 +1935,23 @@ impl Avatar {
 
     /// Start a small hop from `from` (her anchor: feet or seat) to the spot: standing frames
     /// in the air, her feet along the arc, then she settles into the spot's pose.
-    fn start_leap(&mut self, from: (i32, i32), spot: &Spot, origin: (i32, i32), place: Placement, startled: bool, now: Instant) {
+    #[allow(clippy::too_many_arguments)]
+    fn start_leap(&mut self, from: (i32, i32), spot: &Spot, origin: (i32, i32), place: Placement, startled: bool, pounce: bool, now: Instant) {
         let l = self.layout;
         let sf = l.sf;
         self.os.set_target(0);
         self.hop = None;
         self.menu = None;
         let to = spot.anchor;
-        let leap = moves::Leap { from: (from.0 as f32 / sf, from.1 as f32 / sf), to: (to.0 as f32 / sf, to.1 as f32 / sf) };
+        let leap = moves::Leap { from: (from.0 as f32 / sf, from.1 as f32 / sf), to: (to.0 as f32 / sf, to.1 as f32 / sf), pounce };
         self.placement = Placement::Ground;
         if let Some(h) = &mut self.brain {
             h.leap = Some(LeapMove { leap, t0: now, origin, place, crouched: false, startled });
         }
         self.set_origin((from.0 - l.ground_x, from.1 - l.ground_y));
         self.relayer(now);
-        if startled {
-            self.glitch.get_or_insert(Glitch::new(GlitchKind::Burst, now, self.rng.next()));
+        if startled && self.glitch.is_none() {
+            self.glitch = Glitch::for_cut(Transition::Jolt, now, self.rng.next());
         }
     }
 
@@ -1920,13 +1963,13 @@ impl Avatar {
         if !lp.crouched {
             lp.crouched = true;
             let startled = lp.startled;
-            // A big leap (well up, or far) or a startled one: the deeper crouch.
-            let big = startled || lp.leap.from.1 - lp.leap.to.1 > BIG_LEAP_UP || (lp.leap.to.0 - lp.leap.from.0).abs() > BIG_LEAP_DX;
+            // A big leap (well up, or far), a startled one or a pounce: the deeper crouch.
+            let big = startled || lp.leap.pounce || lp.leap.from.1 - lp.leap.to.1 > BIG_LEAP_UP || (lp.leap.to.0 - lp.leap.from.0).abs() > BIG_LEAP_DX;
             let b = &self.pack.behaviour.brain;
             let id = if big { b.big_hop_crouch.as_ref().or(b.hop_crouch.as_ref()) } else { b.hop_crouch.as_ref() };
             let crouch = id.and_then(|c| self.pack.index.get(c)).copied();
             let air = lp.leap.air_ms();
-            let mut seq: Vec<(usize, u32)> = crouch.map(|c| vec![(c, moves::HOP_CROUCH_MS)]).unwrap_or_default();
+            let mut seq: Vec<(usize, u32)> = crouch.map(|c| vec![(c, lp.leap.crouch_ms())]).unwrap_or_default();
             // Startled: wide-eyed in the air.
             if startled {
                 seq.extend(self.pack.flatten(&[crate::pack::Step::Hold { frame: "surprised".into(), ms: air + moves::HOP_LAND_MS }]));
@@ -1970,7 +2013,10 @@ impl Avatar {
         let c = self.brain_cursor();
         let (gx, _) = self.ground();
         let right = c.0 > gx;
-        let standing = self.standing() && !self.anim.busy();
+        // An idle beat gives way (r42: a chin-on-hand beat that came with the pointer read as
+        // a first lean, the look and the bend after it as a second).
+        let beat = self.beat_until.is_some_and(|t| now < t);
+        let standing = self.standing() && (!self.anim.busy() || beat);
         let what = match r {
             React::Look => {
                 if self.mirror_cfg.own {
@@ -1985,7 +2031,9 @@ impl Avatar {
                 "look"
             }
             React::Startle => {
-                self.glitch.get_or_insert(Glitch::new(GlitchKind::Burst, now, self.rng.next()));
+                if self.glitch.is_none() {
+                    self.glitch = Glitch::for_cut(Transition::Jolt, now, self.rng.next());
+                }
                 if self.hop_allowed() {
                     self.hop_or_squash(now);
                 } else {
@@ -2016,16 +2064,34 @@ impl Avatar {
                 "lean"
             }
             React::Curious => {
-                // Toward the pointer, a lean in, then a look at it (over a look or an idle beat).
+                // Toward the pointer: a look at it, and her upper body bent its way (feet
+                // planted), held while it lingers (r42: the drawn lean tilted all of her).
+                // Turned on the cut to the look's drawing (a squeeze over it picked the
+                // drawing for the side she was turning from).
                 let standing = self.standing();
                 if self.mirror_cfg.own {
-                    self.face(right, "look", now, false);
+                    self.face(right, "look", now, standing);
                 }
                 let steps = self.pack.behaviour.brain.curious.clone();
                 if standing && !steps.is_empty() {
-                    let seq = self.pack.flatten(&self.resolve_steps(&steps));
+                    // Her eyes stay on it while the bend comes (and a while after).
+                    let steps: Vec<_> = self
+                        .resolve_steps(&steps)
+                        .into_iter()
+                        .map(|s| match s {
+                            crate::pack::Step::Hold { frame, ms } => crate::pack::Step::Hold { frame, ms: ms.max(LINGER_LOOK_MS) },
+                            s => s,
+                        })
+                        .collect();
+                    let seq = self.pack.flatten(&steps);
                     if !seq.is_empty() {
                         self.anim.play(seq, now);
+                    }
+                }
+                if standing && self.placement == Placement::Ground {
+                    self.bend_to(if right { LINGER_BEND } else { -LINGER_BEND }, now);
+                    if let Some(h) = &mut self.brain {
+                        h.follow = Some(Follow { wiggle: false, right, n: 0, until: now + LINGER_HOLD });
                     }
                 }
                 "curious"
@@ -2033,13 +2099,20 @@ impl Avatar {
             React::Bat => {
                 let standing = self.standing();
                 if self.mirror_cfg.own {
-                    self.face(right, "look", now, false);
+                    self.face(right, "look", now, standing);
                 }
                 let steps = self.pack.behaviour.brain.bat.clone();
                 if standing && !steps.is_empty() {
                     let seq = self.pack.flatten(&self.resolve_steps(&steps));
                     if !seq.is_empty() {
                         self.anim.play(seq, now);
+                    }
+                    // She keeps up with it while it goes on (`follow_turn`).
+                    if self.placement == Placement::Ground {
+                        self.bend_to(if right { WIGGLE_BEND.0 } else { -WIGGLE_BEND.0 }, now);
+                        if let Some(h) = &mut self.brain {
+                            h.follow = Some(Follow { wiggle: true, right, n: 0, until: now + WIGGLE_FOLLOW });
+                        }
                     }
                     "bat"
                 } else {
@@ -2063,7 +2136,10 @@ impl Avatar {
                     }
                     "cold"
                 } else {
-                    if self.mirror_cfg.own {
+                    // Out of the sulk sit she makes up as she sits (r42: the squeeze turn clipped
+                    // her sit to a hard-edged box); she faces him at her next look.
+                    let sitting = self.brain.as_ref().is_some_and(|h| h.sulk_sit && h.rest == Some(RestPose::FloorSit));
+                    if self.mirror_cfg.own && !sitting {
                         self.face(right, "look", now, false);
                     }
                     "warm"
@@ -2071,6 +2147,11 @@ impl Avatar {
             }
             React::Fall => unreachable!(),
         };
+        if matches!(what, "look" | "curious" | "bat") {
+            // No idle beat while she watches it (a linger's follow holds them off till its end).
+            self.beat_until = None;
+            self.beats_after(now + POINTER_QUIET);
+        }
         if let Some(h) = &mut self.brain {
             let t = h.bnow(now) - h.brain.start();
             h.write(serde_json::json!({ "t": t, "k": "react", "what": what, "cursor": [c.0, c.1] }));
@@ -2131,12 +2212,17 @@ impl Avatar {
                 }
             }
             WatchEvent::Pointer(p) => {
+                use crate::platform::PointerEv;
                 let s = match p {
-                    crate::platform::PointerEv::Near => Screen::CursorNear,
-                    crate::platform::PointerEv::Swipe(v) => Screen::CursorSwipe { speed: v / self.layout.sf },
-                    crate::platform::PointerEv::Hover => Screen::CursorHover,
-                    crate::platform::PointerEv::Linger => Screen::CursorLinger,
-                    crate::platform::PointerEv::Wiggle => Screen::CursorWiggle,
+                    PointerEv::Near => Screen::CursorNear,
+                    PointerEv::Swipe(v) => Screen::CursorSwipe { speed: v / self.layout.sf },
+                    PointerEv::Hover => Screen::CursorHover,
+                    PointerEv::Linger => Screen::CursorLinger,
+                    PointerEv::Wiggle => Screen::CursorWiggle,
+                    // Hers alone: the reaction on screen keeps up (no new decision).
+                    PointerEv::LingerEnd => return self.follow_end(false, now),
+                    PointerEv::WiggleAt(x, _) => return self.follow_turn(x, now),
+                    PointerEv::WiggleEnd(..) => return self.follow_end(true, now),
                 };
                 self.brain_feed(BrainEvent::Screen(s), now);
             }
@@ -2277,6 +2363,8 @@ impl Avatar {
             return;
         }
         if let Some(r) = self.reaction_until.filter(|&r| r > now) {
+            // Made up: she starts getting up under the pat's hearts (r42), not after them.
+            let r = if e == EmoteKey::MakeUp { r.min(now + MAKE_UP_UNDER_HEARTS) } else { r };
             h.later.push((r, e));
             return;
         }
@@ -2337,6 +2425,104 @@ impl Avatar {
         true
     }
 
+    /// A point to a side (the drawing's): the point frame itself, so it shows on the next frame
+    /// (r42: the clip's lead-in held her neutral first), else the pack's clip.
+    fn point_step(&self, art_right: bool) -> crate::pack::Step {
+        let side = if art_right { "right" } else { "left" };
+        let frame = format!("idle-point_{side}");
+        if self.pack.index.contains_key(&frame) {
+            crate::pack::Step::Hold { frame, ms: POINT_MS }
+        } else {
+            crate::pack::Step::Clip(format!("point_{side}"))
+        }
+    }
+
+    /// A wiggle goes on (a turn at `x`): she re-aims at it, turning to its side if it crossed
+    /// her, pointing again once the last point is done, her bend stepping with the turns.
+    fn follow_turn(&mut self, x: i32, now: Instant) {
+        let Some(f) = self.brain.as_ref().and_then(|h| h.follow).filter(|f| f.wiggle) else { return };
+        if !self.follow_ok() {
+            return self.follow_stop(now);
+        }
+        let right = x > self.ground().0;
+        let n = f.n + 1;
+        let crossed = right != f.right;
+        if crossed && self.mirror_cfg.own {
+            self.face(right, "look", now, true);
+        }
+        if crossed || !self.anim.busy() {
+            let art_right = right != self.turn_target();
+            let seq = self.pack.flatten(&[self.point_step(art_right)]);
+            if !seq.is_empty() {
+                self.anim.play(seq, now);
+            }
+        }
+        let d = if n % 2 == 0 { WIGGLE_BEND.0 } else { WIGGLE_BEND.1 };
+        self.bend_to(if right { d } else { -d }, now);
+        if let Some(h) = &mut self.brain {
+            h.follow = Some(Follow { right, n, ..f });
+        }
+    }
+
+    /// The pointer moved off (a linger) or stopped (a wiggle): she straightens up; out of a
+    /// wiggle, a short smirk and back to her idle (no statue hold of the point).
+    fn follow_end(&mut self, wiggle: bool, now: Instant) {
+        let Some(f) = self.brain.as_ref().and_then(|h| h.follow).filter(|f| f.wiggle == wiggle) else { return };
+        let ok = self.follow_ok();
+        self.follow_stop(now);
+        if f.wiggle && ok {
+            let seq = self.pack.flatten(&[crate::pack::Step::Hold { frame: "smirk".into(), ms: WIGGLE_SETTLE_MS }]);
+            if !seq.is_empty() {
+                self.anim.play(seq, now);
+            }
+        }
+    }
+
+    fn follow_stop(&mut self, now: Instant) {
+        let was = self.brain.as_mut().and_then(|h| h.follow.take()).is_some();
+        self.bend_to(0.0, now);
+        if was {
+            // Upright again before the next idle beat.
+            self.beats_after(now + super::BEND_OUT + Duration::from_millis(600));
+        }
+    }
+
+    /// A reaction that keeps up with the pointer is on (no idle beats meanwhile).
+    pub(super) fn following(&self) -> bool {
+        self.brain.as_ref().is_some_and(|h| h.follow.is_some())
+    }
+
+    /// The next idle beat no sooner than `t`.
+    fn beats_after(&mut self, t: Instant) {
+        if let Some(n) = self.next_activity
+            && n < t
+        {
+            self.next_activity = Some(t);
+        }
+    }
+
+    /// On her feet on the floor, not moving, carried or hidden.
+    fn follow_ok(&self) -> bool {
+        self.placement == Placement::Ground
+            && self.standing()
+            && !self.hidden
+            && self.teleport.is_none()
+            && self.rag.is_none()
+            && !self.brain_in_flight()
+            && self.brain.as_ref().is_some_and(|h| h.leap.is_none() && h.walk.is_none() && h.scoot.is_none())
+    }
+
+    /// Every brain tick: a follow past its time or no longer on her feet ends; moving, at once.
+    fn follow_tick(&mut self, now: Instant) {
+        let Some(f) = self.brain.as_ref().and_then(|h| h.follow) else { return };
+        if !self.follow_ok() {
+            self.follow_stop(now);
+            self.bend = (0.0, 0.0, now - super::BEND_OUT);
+        } else if now >= f.until {
+            self.follow_stop(now);
+        }
+    }
+
     /// `@look` / `@point` toward the cursor.
     pub(super) fn resolve_steps(&self, steps: &[crate::pack::Step]) -> Vec<crate::pack::Step> {
         use crate::pack::Step;
@@ -2366,7 +2552,7 @@ impl Avatar {
                     };
                     Step::Hold { frame: f.into(), ms: 1400 }
                 }
-                Step::Clip(id) if id == "@point" => Step::Clip(if right { "point_right" } else { "point_left" }.into()),
+                Step::Clip(id) if id == "@point" => self.point_step(right),
                 s => s.clone(),
             })
             .collect()
@@ -2410,6 +2596,11 @@ impl Avatar {
         }
         .unwrap_or_default();
         let standing = self.standing();
+        // Landed from a pounce: she turns to the pointer before the bat at it.
+        if e == EmoteKey::Missed && self.mirror_cfg.own {
+            let right = self.brain_cursor().0 > self.ground().0;
+            self.face(right, "look", now, standing);
+        }
         // Rarely, a headpat that settled a bid gets the air kiss instead.
         let steps = match e {
             EmoteKey::Satisfied { pat: true } if standing => self.maybe_kiss(0, now).unwrap_or(steps),
@@ -2456,12 +2647,18 @@ impl Avatar {
                 h.rest = None;
                 h.sulk_sit = false;
             }
+            // The sit holds a frame more while the get-up's first drawing goes underneath (the
+            // look-ahead): r42's first pat frame showed her standing outline of before the sit.
+            let before = self.anim.frame();
             self.relayer(now);
             let b = &self.pack.behaviour.brain;
             let exit = b.sulk_sit.as_ref().and_then(|s| s.exit.clone()).or_else(|| b.floor_sit.as_ref().and_then(|s| s.exit.clone())).unwrap_or_default();
             let mut seq = self.pack.flatten(&exit);
             seq.extend(self.pack.flatten(&self.resolve_steps(&steps)));
             if !seq.is_empty() {
+                if !self.hidden {
+                    seq.insert(0, (before, super::FRAME_FX.as_millis() as u32));
+                }
                 self.anim.play(seq, now);
             }
             played = "stand+clip";
@@ -2533,22 +2730,20 @@ impl Avatar {
             self.swing_push(amp * sign);
             match extra {
                 1 => self.hearts = Some((now, self.head_point())),
-                2 => {
-                    self.glitch.get_or_insert(Glitch::new(GlitchKind::Burst, now, self.rng.next()));
-                }
+                2 if self.glitch.is_none() => self.glitch = Glitch::for_cut(Transition::Jolt, now, self.rng.next()),
                 _ => {}
             }
         } else if played == "fx" || matches!(e, EmoteKey::Satisfied { pat: true }) {
             // No standing frames (a floor sit): the emote is the body's effects.
             match fx_kind % 4 {
-                0 => {
+                // A jolt: the squash and the light seam (r42: no burst over her body).
+                0 | 2 => {
                     self.squash = Some(now);
-                    self.glitch.get_or_insert(Glitch::new(GlitchKind::Burst, now, self.rng.next()));
+                    if self.glitch.is_none() {
+                        self.glitch = Glitch::for_cut(Transition::Jolt, now, self.rng.next());
+                    }
                 }
                 1 => self.hearts = Some((now, self.head_point())),
-                2 => {
-                    self.glitch.get_or_insert(Glitch::new(GlitchKind::Big, now, self.rng.next()));
-                }
                 _ => self.squash = Some(now),
             }
         }

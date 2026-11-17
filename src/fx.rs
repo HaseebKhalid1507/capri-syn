@@ -62,6 +62,48 @@ fn stutter(table: &[(f32, f32)], u: f32, seed: u64) -> f32 {
     level
 }
 
+/// Every kind of cut on her body, for `Glitch::for_cut`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Transition {
+    /// Gone here, back there (the teleport legs, `Vanish` and `Land`, are its cover).
+    #[allow(dead_code)]
+    Teleport,
+    /// Into or out of a summon's attention mood (NEEDS YOU).
+    Summon,
+    /// A bid in place: she flags him down where she is.
+    Bid,
+    /// One drawing to another in place (CapriCore <-> lachy, a crouch, a sit, a point).
+    Pose,
+    /// Into or out of a motion's drawing (a walk, a dance, a leap, a dangle).
+    Motion,
+    /// Into or out of her sleep, and the wake's family changes.
+    Sleep,
+    /// A perch <-> laydown swap, a drop onto a window.
+    Perch,
+    /// Any other mood change (the tag's status word changes; the body only seams).
+    Mood,
+    /// Music on or off.
+    Music,
+    /// A startle's jolt and an emote's fx beat.
+    Jolt,
+}
+
+#[cfg(test)]
+impl Transition {
+    pub const ALL: [Transition; 10] = [
+        Transition::Teleport,
+        Transition::Summon,
+        Transition::Bid,
+        Transition::Pose,
+        Transition::Motion,
+        Transition::Sleep,
+        Transition::Perch,
+        Transition::Mood,
+        Transition::Music,
+        Transition::Jolt,
+    ];
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Glitch {
     pub t0: Instant,
@@ -92,6 +134,18 @@ impl Glitch {
     /// the cut tore her hanging leg and threw bars), smaller shifts, the tag left whole.
     pub fn swap(at: Instant, seed: u64) -> Glitch {
         Glitch { t0: at, kind: GlitchKind::Seam, ms: SWAP_MS, seed, soft: true, tears_tag: false }
+    }
+
+    /// The glitch a cut gets (r42: the heavy glitch is for teleports and summons only; every
+    /// other pose or family change gets the swap's light seam, the tag whole). `None`: the
+    /// teleport's own legs (`Vanish`, `Land`) cover it.
+    pub fn for_cut(t: Transition, at: Instant, seed: u64) -> Option<Glitch> {
+        match t {
+            Transition::Teleport => None,
+            Transition::Summon => Some(Glitch::new(GlitchKind::Big, at, seed)),
+            Transition::Bid => Some(Glitch::new(GlitchKind::Burst, at, seed)),
+            _ => Some(Glitch::swap(at, seed)),
+        }
     }
 
     /// A quiet teleport leg (passive moves): a shorter dissolve, and a ~150 ms rebuild
@@ -622,6 +676,13 @@ pub struct Pose {
     pub kick: i32,
     /// The kicking leg is the one right of `PoseRows::split` on screen.
     pub kick_right: bool,
+    /// Her upper body bent toward the pointer (r43), device px at the neck, + = right: the torso
+    /// curves from the waist (nothing at the hips, most at the neck), the head and hair go along
+    /// as one piece (no slant), the legs stay planted.
+    pub bend: i32,
+    /// The bend a moment ago (`bend` lagged): the hair above her brow trails toward it, more the
+    /// higher it is, and catches up once the bend holds.
+    pub bend_hair: i32,
 }
 
 /// Rows (avatar-local) a pose acts on.
@@ -636,6 +697,8 @@ pub struct PoseRows {
     pub shear_end: i32,
     /// Rows above this nod.
     pub neck: i32,
+    /// Her brow: the hair above it trails a bend (`Pose::bend_hair`).
+    pub brow: i32,
     /// Rows above this breathe.
     pub waist: i32,
     /// The grip row of a hanging pose (`swing`).
@@ -664,6 +727,11 @@ pub fn pose_leg(p: Pose, r: PoseRows, bands: &[(i32, i32, i32, i32)]) -> Option<
     Some(LegKick { split: r.split, right: p.kick_right, dx })
 }
 
+/// A bend's curve up the torso (`Pose::bend`): the share of the neck's shift at a height
+/// over the waist is that height's fraction to this power (the hips barely move; r44: softer
+/// than 1.8, which put a kink under the neck at twice the bend).
+const BEND_CURVE: f32 = 1.4;
+
 /// Bands `(y0, y1, dx, dy)` in paint order (legs, torso, head) for a pose. The waist rows
 /// repeat over the breath height, so nothing opens up between torso and legs.
 pub fn pose_bands(p: Pose, r: PoseRows) -> Vec<(i32, i32, i32, i32)> {
@@ -691,9 +759,16 @@ pub fn pose_bands(p: Pose, r: PoseRows) -> Vec<(i32, i32, i32, i32)> {
     let neck = r.neck.clamp(r.y0, waist);
     let shear_end = r.shear_end.clamp(r.y0, waist);
     let span = (shear_end - r.top).max(1) as f32;
+    let torso = (waist - neck).max(1) as f32;
+    let bent = p.bend != 0 || p.bend_hair != 0;
+    let lag = p.bend_hair - p.bend;
+    let brow = r.brow.clamp(r.y0, neck);
+    let crown = (brow - r.top).max(1) as f32;
     let shear = |y: i32| {
         let f = ((shear_end - y) as f32 / span).clamp(0.0, 1.0);
-        (p.sway as f32 * f.powf(1.2)).round() as i32
+        let bend = p.bend as f32 * ((waist - y) as f32 / torso).clamp(0.0, 1.0).powf(BEND_CURVE);
+        let hair = lag as f32 * ((brow - y) as f32 / crown).clamp(0.0, 1.0);
+        (p.sway as f32 * f.powf(1.2) + bend + hair).round() as i32
     };
     // Legs first, then the torso, then the head on top (a nod overlaps the collar).
     let mut out = vec![(waist - b, r.h, 0, 0)];
@@ -701,7 +776,19 @@ pub fn pose_bands(p: Pose, r: PoseRows) -> Vec<(i32, i32, i32, i32)> {
         let first = out.len();
         let mut y = from;
         while y < to {
-            let (y1, dx) = if p.sway != 0 && y < shear_end { ((y + 2).min(shear_end).min(to), shear(y)) } else { (to, 0) };
+            let (y1, dx) = if bent && y >= neck {
+                // The torso curves, a row a band (r44: 2-row steps of 2 px serrated her coat's
+                // slanted edges).
+                ((y + 1).min(to), shear(y))
+            } else if lag != 0 && y < brow {
+                // The hair above her brow trails, 2 rows a band.
+                ((y + 2).min(brow).min(to), shear(y))
+            } else if p.sway != 0 && y < shear_end {
+                ((y + 2).min(shear_end).min(to), shear(y))
+            } else {
+                // The head (bent: all of it at the neck's shift).
+                (to, shear(y))
+            };
             let n = out.len();
             match out.last_mut() {
                 Some(last) if n > first && last.1 == y && last.2 == dx && last.3 == dy => last.1 = y1,
@@ -805,6 +892,8 @@ pub fn bob(elapsed: Duration, px: i32, period_ms: u64) -> i32 {
 
 /// The attention hop: up and down once, device px upward.
 pub const HOP_MS: f32 = 440.0;
+/// Where in it the big beat lands (the little one after it is a rebound).
+pub const HOP_LAND_AT: f32 = 0.68;
 pub fn hop(age: Duration, height: f32) -> Option<i32> {
     let t = ms(age);
     if t >= HOP_MS {
@@ -812,11 +901,11 @@ pub fn hop(age: Duration, height: f32) -> Option<i32> {
     }
     let u = t / HOP_MS;
     // Two beats: a full hop, then a little one.
-    let y = if u < 0.68 {
-        let v = u / 0.68;
+    let y = if u < HOP_LAND_AT {
+        let v = u / HOP_LAND_AT;
         4.0 * v * (1.0 - v)
     } else {
-        let v = (u - 0.68) / 0.32;
+        let v = (u - HOP_LAND_AT) / (1.0 - HOP_LAND_AT);
         0.3 * 4.0 * v * (1.0 - v)
     };
     Some((y * height).round() as i32)
@@ -1113,6 +1202,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn every_cut_but_a_teleport_or_summon_gets_the_light_seam() {
+        let t0 = std::time::Instant::now();
+        for t in Transition::ALL {
+            let g = Glitch::for_cut(t, t0, 9);
+            match t {
+                Transition::Teleport => assert!(g.is_none(), "the teleport legs cover it"),
+                Transition::Summon => assert_eq!(g.map(|g| g.kind), Some(GlitchKind::Big)),
+                Transition::Bid => assert_eq!(g.map(|g| g.kind), Some(GlitchKind::Burst)),
+                _ => {
+                    let g = g.unwrap();
+                    assert!(!g.tears_tag, "{t:?}: the tag whole");
+                    assert_eq!((g.kind, g.ms), (GlitchKind::Seam, SWAP_MS), "{t:?}: the swap's seam");
+                    // One light frame at most (~60 Hz), then clean.
+                    let lit: Vec<f32> = (0..400).map(|ms| g.strength(t0 + std::time::Duration::from_millis(ms))).filter(|&v| v > 0.0).collect();
+                    assert!(lit.len() <= 20 && lit.iter().all(|&v| v <= 0.6), "{t:?}: lit {} ms", lit.len());
+                }
+            }
+        }
+    }
+
+    #[test]
     fn scaled_bands_tile_and_cover() {
         // Destination-tiling bands with uneven source windows (a chain mid-swing).
         let b = vec![(10, 30, 0, 0), (31, 35, 3, -1), (33, 38, 5, 1), (40, 90, 8, -1)];
@@ -1346,7 +1456,7 @@ mod tests {
 
     #[test]
     fn pose_bands_cover_without_gaps() {
-        let r = PoseRows { y0: -50, h: 400, top: 10, shear_end: 80, neck: 120, waist: 220, grip: 0, knee: 400, split: 100 };
+        let r = PoseRows { y0: -50, h: 400, top: 10, shear_end: 80, neck: 120, brow: 80, waist: 220, grip: 0, knee: 400, split: 100 };
         let bands = pose_bands(Pose { breath: 2, nod: 0, sway: 3, ..Pose::default() }, r);
         // Every destination row from the top to the bottom is painted by some band.
         for y in 10..400 {
@@ -1364,6 +1474,28 @@ mod tests {
         assert!(music.iter().any(|b| b.0 >= 120 && b.1 <= 220 && b.2 != 0));
         let still = pose_bands(Pose::default(), r);
         assert!(still.iter().all(|b| b.2 == 0 && b.3 == 0));
+        // Bent 20 px right (r43, a linger): the legs stay planted, the torso curves (little at
+        // the hips, most at the neck), the head and hair move as one piece (no slant), no gaps.
+        let bent = pose_bands(Pose { bend: 20, bend_hair: 20, ..Pose::default() }, r);
+        for y in 10..400 {
+            assert!(bent.iter().any(|&(a, b, _, dy)| y >= a + dy && y < b + dy), "row {y}");
+        }
+        assert!(bent.iter().filter(|b| b.0 >= r.waist).all(|b| b.2 == 0), "feet planted");
+        let at = |y: i32| bent.iter().find(|b| y >= b.0 && y < b.1).unwrap().2;
+        assert!((r.y0..r.neck).all(|y| at(y) == 20), "the head in one piece: {bent:?}");
+        let mid = (r.neck + r.waist) / 2;
+        assert!(at(mid) > 0 && at(mid) < 10 && at(r.waist - 4) <= 1, "a curve, not a slant: {bent:?}");
+        let left = pose_bands(Pose { bend: -12, bend_hair: -12, ..Pose::default() }, r);
+        assert_eq!(left.iter().find(|b| 10 >= b.0 && 10 < b.1).unwrap().2, -12, "the other way");
+        // Easing in (r44): the hair above the brow trails, more the higher, the face doesn't.
+        let easing = pose_bands(Pose { bend: 20, bend_hair: 12, ..Pose::default() }, r);
+        for y in 10..400 {
+            assert!(easing.iter().any(|&(a, b, _, dy)| y >= a + dy && y < b + dy), "row {y}");
+        }
+        let at = |y: i32| easing.iter().find(|b| y >= b.0 && y < b.1).unwrap().2;
+        assert!((r.brow..r.neck).all(|y| at(y) == 20), "the face in one piece: {easing:?}");
+        assert!(at(r.top) == 12 && at(45) > 12 && at(45) < 20, "the crown trails: {easing:?}");
+        assert!((r.top..r.brow).all(|y| at(y) <= at(y + 1)), "no step back: {easing:?}");
         // Hanging: the grip row and above stay, the bottom swings the full amount, no gaps.
         let hang = pose_bands(Pose { swing: -9, ..Pose::default() }, PoseRows { grip: 30, ..r });
         for y in -50..400 {

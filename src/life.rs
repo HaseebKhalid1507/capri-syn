@@ -232,9 +232,78 @@ pub fn day_of(l: f64) -> i64 {
     ((l - DAY_STARTS_H * HOUR) / DAY).floor() as i64
 }
 
+/// Her idle beats, spread evenly (r42: random picks bunched the face-only ones into 30-40 s
+/// with no change of outline): a gesture (`gesture[i]`: a hop, a hand on her hip, arms crossed,
+/// a point) and a face beat take turns, each kind from its own shuffled round (each once
+/// before any again), never the same beat twice running.
+#[derive(Default)]
+pub struct Beats {
+    bags: [Vec<usize>; 2],
+    last: Option<usize>,
+    gesture_next: bool,
+    n: usize,
+}
+
+impl Beats {
+    pub fn pick(&mut self, gesture: &[bool], rng: &mut crate::anim::Rng) -> usize {
+        let n = gesture.len();
+        if n <= 1 {
+            return 0;
+        }
+        if n != self.n {
+            *self = Beats { n, gesture_next: true, ..Beats::default() };
+        }
+        let has = |g: bool| gesture.contains(&g);
+        let g = if has(self.gesture_next) { self.gesture_next } else { !self.gesture_next };
+        let k = usize::from(g);
+        if self.bags[k].is_empty() {
+            let mut bag: Vec<usize> = (0..n).filter(|&i| gesture[i] == g).collect();
+            for j in (1..bag.len()).rev() {
+                bag.swap(j, rng.pick(j + 1));
+            }
+            if bag.len() > 1 && bag.last() == self.last.as_ref() {
+                let m = bag.len() - 1;
+                bag.swap(0, m);
+            }
+            self.bags[k] = bag;
+        }
+        let i = self.bags[k].pop().unwrap_or(0);
+        self.last = Some(i);
+        self.gesture_next = !g;
+        i
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn idle_beats_take_turns_and_come_round_evenly() {
+        let mut rng = crate::anim::Rng::new(7);
+        let gesture = [false, true, true, true, true, true, false, false, false, true, false, false, false, false, true];
+        let mut b = Beats::default();
+        let mut seen = vec![0i32; gesture.len()];
+        let picks: Vec<usize> = (0..600).map(|_| b.pick(&gesture, &mut rng)).collect();
+        for w in picks.windows(2) {
+            assert_ne!(w[0], w[1], "no beat twice running");
+            assert_ne!(gesture[w[0]], gesture[w[1]], "a gesture, a face, a gesture: {w:?}");
+        }
+        for &i in &picks {
+            seen[i] += 1;
+        }
+        // 300 of each kind: 7 gestures and 8 faces, each once a round.
+        for (i, &c) in seen.iter().enumerate() {
+            let per: i32 = if gesture[i] { 300 / 7 } else { 300 / 8 };
+            assert!((c - per).abs() <= 1, "{i}: {c} {seen:?}");
+        }
+        // All one kind: a plain shuffled round.
+        let mut b = Beats::default();
+        let one = [false; 5];
+        let p: Vec<usize> = (0..50).map(|_| b.pick(&one, &mut rng)).collect();
+        assert!(p.windows(2).all(|w| w[0] != w[1]));
+        assert!((0..5).all(|i| p.iter().filter(|&&x| x == i).count() == 10));
+    }
 
     /// Local seconds at `h:m` on day `d`.
     fn at(d: f64, h: f64, m: f64) -> f64 {

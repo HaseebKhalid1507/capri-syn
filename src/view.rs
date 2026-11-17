@@ -27,7 +27,7 @@ use crate::variants::PoolKey;
 use crate::control::Command;
 use crate::edges;
 use crate::frames::{Frame, Geometry, NoteMasks};
-use crate::fx::{self, BodyPlan, Bolt, Glint, Glitch, GlitchKind};
+use crate::fx::{self, BodyPlan, Bolt, Glint, Glitch, GlitchKind, Transition};
 use crate::pack::{MoodSpec, MusicSpec, Pack, PerchSpec, Steps};
 use crate::platform::{Os, Role, WatchEvent, WinRect};
 use crate::session::{Act, Body, Link, Once, PromptView};
@@ -497,6 +497,22 @@ fn now_ms(t0: Instant, now: Instant) -> f32 {
 
 /// An idle weight shift (`@lean`): the upper body this far (px at 1x).
 const LEAN_BEAT_PX: i32 = 14;
+/// An idle beat that changes her outline (a hop, a hand on her hip, arms crossed, her chin on
+/// her hand, a point, a shrug), not just her face.
+fn gesture(steps: &[crate::pack::Step]) -> bool {
+    use crate::pack::Step;
+    const BODY: [&str; 7] = ["hand_on_hip", "arms_crossed", "chin_rest", "idle-point", "idle-shrug", "point_", "shrug"];
+    steps.iter().any(|s| match s {
+        Step::Clip(id) => id == "@hop" || BODY.iter().any(|b| id.starts_with(b)),
+        Step::Hold { frame, .. } => BODY.iter().any(|b| frame.starts_with(b)),
+    })
+}
+
+/// A bend toward the pointer eases in over this, and back upright over `BEND_OUT` (r43).
+const BEND_IN: Duration = Duration::from_millis(600);
+pub(super) const BEND_OUT: Duration = Duration::from_millis(900);
+/// The hair above her brow trails a bend by this much (r44: 1-2 frames of a 10 fps look).
+const HAIR_LAG: Duration = Duration::from_millis(140);
 /// ONLINE at night: its red this far toward the panel.
 const NIGHT_TAG_DIM: f32 = 0.45;
 /// Into a drawn sleep whose cells are still decoding: the drawing before holds this long.
@@ -595,6 +611,10 @@ pub struct Avatar {
     /// The drawing the last render painted (a change not laid underneath ahead lays it
     /// underneath once).
     drawn_last: Option<DrawnLast>,
+    /// The cut of her frames (`anim`'s deadline) a render has already laid underneath ahead.
+    precut: Option<Instant>,
+    /// An idle beat (an activity) plays until then: a reaction to the pointer may cut it short.
+    beat_until: Option<Instant>,
     /// Shown mirrored (ground and seat frames only: grip poses are side-specific).
     pub(super) flip: bool,
     /// A turn's squeeze in progress: (start, the flip it turns to). The art swaps halfway.
@@ -650,6 +670,11 @@ pub struct Avatar {
     squash: Option<Instant>,
     /// An idle beat's weight shift (`@lean` in an activity): from, how long, which way.
     lean_beat: Option<(Instant, Duration, i32)>,
+    /// Her idle beats' rounds (`activity_pick`).
+    beats: crate::life::Beats,
+    /// Her upper body bent toward the pointer (r42, a linger or a wiggle): px at 1x at her neck
+    /// from, to, since (eased over `BEND_IN` / `BEND_OUT`).
+    bend: (f32, f32, Instant),
     glints: Vec<Glint>,
     next_glint: Option<Instant>,
     teleport: Option<Teleport>,
@@ -859,6 +884,8 @@ impl Avatar {
             last_shape: Rc::new(RefCell::new((vec![(0, 0, 1, 1)], vec![]))),
             shape_hist: Rc::new(RefCell::new([Vec::new(), Vec::new()])),
             drawn_last: None,
+            precut: None,
+            beat_until: None,
             flip: false,
             turn: None,
             turn_frame: 0,
@@ -894,6 +921,8 @@ impl Avatar {
             sliver: None,
             squash: None,
             lean_beat: None,
+            beats: crate::life::Beats::default(),
+            bend: (0.0, 0.0, Instant::now()),
             glints: Vec::new(),
             next_glint: None,
             teleport: None,
@@ -1011,7 +1040,7 @@ impl Avatar {
         let was = self.music.replace(MusicOn { t0: now, until, bpm: None, auto: false, dance_until: None, dance_rolled: false });
         self.relayer(now);
         if was.is_none() && self.loaded && self.teleport.is_none() {
-            self.glitch = Some(Glitch::new(GlitchKind::Burst, now, self.rng.next()));
+            self.glitch = Glitch::for_cut(Transition::Music, now, self.rng.next());
         }
         Ok(())
     }
@@ -1058,11 +1087,11 @@ impl Avatar {
         self.music_stop_at = None;
         if self.music.take().is_some() {
             // Out of a dance: the light seam (a burst over a moving drawing smeared her legs).
-            let kind = if self.motion_cell(self.shown_frame()) { GlitchKind::Seam } else { GlitchKind::Burst };
+            let t = if self.motion_cell(self.shown_frame()) { Transition::Motion } else { Transition::Music };
             self.relayer(now);
             self.update_notes(now);
             if self.loaded && self.teleport.is_none() {
-                self.glitch = Some(Glitch::new(kind, now, self.rng.next()));
+                self.glitch = Glitch::for_cut(t, now, self.rng.next());
             }
         }
     }
@@ -1238,7 +1267,41 @@ impl Avatar {
             && !self.art_shows_strip()
     }
 
+    /// Her bend toward the pointer now (px at 1x), eased.
+    pub(super) fn bend_px(&self, now: Instant) -> f32 {
+        let (from, to, t0) = self.bend;
+        let ease = if to == 0.0 { BEND_OUT } else { BEND_IN };
+        let k = (now.saturating_duration_since(t0).as_secs_f32() / ease.as_secs_f32()).min(1.0);
+        from + (to - from) * k * k * (3.0 - 2.0 * k)
+    }
+
+    /// Bend toward the pointer (0: straighten up), from wherever she is now.
+    pub(super) fn bend_to(&mut self, px: f32, now: Instant) {
+        if (self.bend.1 - px).abs() < 0.05 {
+            return;
+        }
+        self.bend = (self.bend_px(now), px, now);
+    }
+
+    fn bending(&self, now: Instant) -> bool {
+        self.bend.1 != 0.0 || now < self.bend.2 + BEND_OUT + HAIR_LAG
+    }
+
     fn pose_at(&self, now: Instant) -> fx::Pose {
+        let mut p = self.pose_at_body(now);
+        // Bent toward the pointer: on any art, on her feet on the floor (feet planted).
+        if self.loaded && !self.hidden && self.teleport.is_none() && self.rag.is_none() && self.placement == Placement::Ground && self.standing() {
+            p.bend = (self.bend_px(now) * self.layout.sf).round() as i32;
+            p.bend_hair = (self.bend_px(now.checked_sub(HAIR_LAG).unwrap_or(now)) * self.layout.sf).round() as i32;
+            if p.bend != 0 || p.bend_hair != 0 {
+                p.swing = 0;
+                p.kick = 0;
+            }
+        }
+        p
+    }
+
+    fn pose_at_body(&self, now: Instant) -> fx::Pose {
         // Before and after a walk: her lean (on any art; feet planted).
         if let Some(sway) = self.motion.lean.and_then(|l| l.px(now, self.layout.sf))
             && self.loaded
@@ -1324,8 +1387,10 @@ impl Avatar {
         let has = |id: &str| steps.iter().any(|s| matches!(s, Step::Clip(c) if c == id));
         let standing = self.placement == Placement::Ground && self.standing();
         if has("@hop") && standing && self.hop_allowed() && self.hop.is_none() {
+            // The squash on the big beat's landing; the little beat after it is the rebound
+            // (r42: a squash at the end read as a slump).
             self.hop = Some(now);
-            self.squash = Some(now + Duration::from_millis(fx::HOP_MS as u64));
+            self.squash = Some(now + Duration::from_millis((fx::HOP_MS * fx::HOP_LAND_AT) as u64));
         }
         if has("@lean") && standing {
             let dir = if self.rng.pick(2) == 0 { 1 } else { -1 };
@@ -1333,9 +1398,16 @@ impl Avatar {
         }
     }
 
+    /// The next idle beat (`life::Beats`): a gesture and a face beat take turns.
+    fn activity_pick(&mut self, n: usize) -> usize {
+        let gesture: Vec<bool> = self.activities().iter().take(n).map(|a| gesture(a)).collect();
+        self.beats.pick(&gesture, &mut self.rng)
+    }
+
     fn pose_next_change(&self, now: Instant) -> Option<Instant> {
         let (bob_px, _, sway_px, droop, lean) = self.breath_now(now);
-        if !self.pose_active() || (self.music_frame().is_none() && bob_px <= 0 && sway_px <= 0 && droop == 0 && lean == 0 && !self.posed()) {
+        let bend = self.bending(now);
+        if !bend && (!self.pose_active() || (self.music_frame().is_none() && bob_px <= 0 && sway_px <= 0 && droop == 0 && lean == 0 && !self.posed())) {
             return None;
         }
         let cur = self.pose_at(now);
@@ -1364,6 +1436,7 @@ impl Avatar {
             top: f.top,
             shear_end: if music { waist } else { f.face.0 },
             neck,
+            brow: f.face.0,
             waist,
             grip,
             knee,
@@ -1520,7 +1593,8 @@ impl Avatar {
         self.turns += 1;
         self.turn_why = why;
         self.last_turn = Some(now);
-        let still = self.loaded && !self.hidden && self.rag.is_none() && self.teleport.is_none() && self.glitch.is_none();
+        // (A light seam is one frame: the squeeze turn goes on over it, r42.)
+        let still = self.loaded && !self.hidden && self.rag.is_none() && self.teleport.is_none() && self.glitch.is_none_or(|g| g.kind == GlitchKind::Seam);
         // Grip poses don't mirror: nothing to squeeze, the art swaps when she next stands.
         let shows = self.flippable.get(self.anim.frame()).copied().unwrap_or(false);
         if snap || self.mirror_cfg.turn_ms == 0 || !still || !shows {
@@ -1786,15 +1860,17 @@ impl Avatar {
             }
             match &mut self.rag {
                 Some(r) => r.pending_glitch = r.pending_glitch.or(Some(GlitchKind::Seam)),
-                None => self.glitch = Some(Glitch::swap(at, self.rng.next())),
+                None => self.glitch = Glitch::for_cut(Transition::Sleep, at, self.rng.next()),
             }
         } else if m != prev && !chatter && !drawn_wake && self.loaded && self.teleport.is_none() && self.status_of(m).key != self.status_of(prev).key {
-            let big = self.spec(m).is_some_and(|s| s.big) || self.spec(prev).is_some_and(|s| s.big);
-            let kind = if big { GlitchKind::Big } else { GlitchKind::Burst };
+            // A summon (into or out of NEEDS YOU): the big burst. Any other: the light seam (r42),
+            // the tag's new word says it.
+            let summon = m == Mood::NeedsYou || prev == Mood::NeedsYou;
+            let t = if summon { Transition::Summon } else { Transition::Mood };
             match &mut self.rag {
                 // Carried: kept (the strongest) and fired after the landing.
-                Some(r) => r.pending_glitch = Some(if big || r.pending_glitch == Some(GlitchKind::Big) { GlitchKind::Big } else { kind }),
-                None => self.glitch = Some(Glitch::new(kind, now, self.rng.next())),
+                Some(r) => r.pending_glitch = Some(if summon || r.pending_glitch == Some(GlitchKind::Big) { GlitchKind::Big } else { GlitchKind::Seam }),
+                None => self.glitch = Glitch::for_cut(t, now, self.rng.next()),
             }
         }
         self.mood = m;
@@ -1890,6 +1966,20 @@ impl Avatar {
                 glyph: spec.glyph.clone().unwrap_or_else(|| "note".into()),
                 plate: spec.plate.as_deref().and_then(Plate::parse).unwrap_or(Plate::Arrow),
                 key: spec.tone.clone().unwrap_or_else(|| "music".into()),
+            };
+        }
+        // Sulking (and her cold shoulder after it): the pack's sulk word, not ONLINE.
+        if self.mood == Mood::Idle
+            && self.brain.as_ref().is_some_and(|h| h.sulky())
+            && let Some(ss) = &self.pack.behaviour.brain.sulk_status
+        {
+            return Status {
+                label: ss.status.clone(),
+                tone: self.pack.tone(ss.tone.as_deref()),
+                invert: false,
+                glyph: ss.glyph.clone().unwrap_or_else(|| "dot".into()),
+                plate: Plate::default(),
+                key: ss.tone.clone().unwrap_or_default(),
             };
         }
         let mut s = self.status_of(self.mood);
@@ -2061,6 +2151,13 @@ impl Avatar {
             }
         };
         take(self.anim.deadline());
+        // A frame before each cut of her frames: a render that lays the next drawing
+        // underneath (the look-ahead), so the cut's new outline never shows pixels the window
+        // hasn't drawn (r43: a held wave frame cut to the next showed the SLEEPING tag of
+        // seconds before and dashed edges along her arm for a frame).
+        if let Some(d) = self.anim.deadline().filter(|&d| self.precut != Some(d) && !self.hidden) {
+            take(Some(d.checked_sub(FRAME_FX).unwrap_or(d).max(now)));
+        }
         take(self.kiss_deadline());
         take(self.art.deadline());
         take(self.dance_deadline());
@@ -2227,6 +2324,13 @@ impl Avatar {
         }
         let before = self.anim.frame();
         let mut dirty = self.anim.tick(now);
+        if let Some(d) = self.anim.deadline()
+            && self.precut != Some(d)
+            && now + FRAME_FX >= d
+        {
+            self.precut = Some(d);
+            dirty |= now < d && !self.hidden && self.anim.frame_at(d) != self.anim.frame();
+        }
         self.voice_keepalive(now, cx);
         if dirty {
             self.lying_cut(before, now);
@@ -2252,6 +2356,7 @@ impl Avatar {
             && at <= now
             && !self.anim.busy()
             && !self.activities().is_empty()
+            && !self.following()
         {
             let music = self
                 .music_spec()
@@ -2264,12 +2369,13 @@ impl Avatar {
                 self.autonomy_started = true;
             } else {
                 let n = self.activities().len();
-                let i = self.rng.pick(n);
+                let i = self.activity_pick(n);
                 let steps = self.activities()[i].clone();
                 let seq = self.pack.flatten(&self.resolve_steps(&steps));
                 let len: u64 = seq.iter().map(|s| s.1 as u64).sum();
                 self.activity_beats(&steps, Duration::from_millis(len), now);
                 self.anim.play(seq, now);
+                self.beat_until = Some(now + Duration::from_millis(len));
                 self.autonomy_started = true;
                 self.next_activity = Some(now + Duration::from_millis(len) + self.autonomy_gap());
             }
@@ -2470,6 +2576,11 @@ impl Avatar {
         // Any redraw draws the current pose (render latches it); a pose step alone waits
         // POSE_SLACK for company.
         let pose = self.pose_at(now);
+        // Her bend toward the pointer eases over 0.6-0.9 s: every step is drawn (waiting for
+        // company held it back until it was over, r42).
+        if pose.bend != self.pose_last.bend || pose.bend_hair != self.pose_last.bend_hair {
+            dirty = true;
+        }
         if pose != self.pose_last && !dirty {
             // Since when this pose has held (20 ms steps back): the step's time, even when
             // this tick is the first to see it.
@@ -4335,7 +4446,7 @@ impl Avatar {
             self.set_origin(o);
             self.os.set_target(r.id);
             self.relayer(now);
-            self.glitch = Some(Glitch::new(GlitchKind::Burst, now, self.rng.next()));
+            self.glitch = Glitch::for_cut(Transition::Perch, now, self.rng.next());
         } else {
             self.home = self.ground();
             state::save_ground(self.ground());
