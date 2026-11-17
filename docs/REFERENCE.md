@@ -211,25 +211,38 @@ With `anim/`, `moods.json` `variants` mixes that art in; she never swaps one set
 - Landing on a window top she touches down with the pack's `arrive.perch` (Capri: her crouch on the
   edge), then her sit inside a dip at contact: the squash starts `arrive.perchDipMs` before the change,
   so the swap falls near its trough (no dissolve, no double image), and the sit's legs unfold down over
-  the edge in 140 ms. Before a drawn pose (lachy's perch) only that first frame plays, cut inside the
+  the edge in 170 ms, telescoping down from the seat in six strips (her feet first), never a straight cut
+  across the shins. Before a drawn pose (lachy's perch) only that first frame plays, cut inside the
   landing glitch, so the art changes before she's solid; the dip is then the settle at the glitch's end.
-  The landing glitch never shifts her legs below the edge, and into a drawn pose it has no red/blue split.
+  The landing glitch never shifts her legs below the edge, and a drawn pose lands as itself on the cut
+  frame: no tint, tears or split after it.
+- Sparkles: one at a time on hair only, every `life.sparkleEveryMs` [min, max] (Capri: 1.5-1.8 s, an even
+  beat); never smaller than 40 % of full size (10-13 px), so none vanish into her hair's own glitter. When
+  one can't show (a glitch, a turn, a frame without hair) she tries again 300 ms later.
 - `motions` (each optional, each its strip from `anim/` with the anchor it needs; a pack without them
   does what it did before):
   - `walk` (feet, looping): a short calm move she makes on the floor or along the window top she sits on
     is walked `chance` of the time instead of hopped (`minPx` up to the hop's reach, `pxPerS`, at most one
     per `gapMs`, `edges` for window tops). Every step of the way keeps out of his window and clear of the
     pointer, in her work area, and on a window top only where nothing covers it. A summon, a panel, the
-    menu, a fullscreen window or a hide stops it where she is. She sits back in the same drawing.
+    menu, a fullscreen window or a hide stops it where she is. She sits back in the same drawing. On the
+    floor she leans back 170 ms before setting off and her momentum settles forward 260 ms after she stops
+    (her feet stay put; she stops facing the way she walked).
   - `dance` (feet, looping): music with energy (a tempo at or over `minBpm`; without one, a `chance`
     roll) gets a dance on the floor for `ms` [min, max], once a session and at most once per `gapMs`;
     else the headphones as before. With a tempo it takes two beats a loop. Only standing idle on the
-    floor, no panel open, no DND.
+    floor, no panel open, no DND. It plays the strip's clean cells only (`glitchCells` in the art's
+    `anim.json`: cells with a chroma ghost drawn in), so nothing glitches inside the loop.
   - `dangle` (grip): carried by the head, `chance` of the time (at most once per `gapMs`) she hangs as
-    that drawing from its grip after `afterMs`, instead of the ragdoll; a glitch covers the cut in and
-    the one out at the release.
+    that drawing from its grip after `afterMs`, instead of the ragdoll, on its clean cells only. A cut
+    into or out of any motion's drawing is a light seam (~130 ms: a few tall bands shifted a few px
+    inside her body, no colour split, bars or scanlines, the tag left whole), never the burst; and the
+    drawing before a cut goes under the first frame after it, so the screen never shows the old
+    drawing clipped to the new outline.
   - `click` (an effect strip): a click on her bursts under the pointer, at most one per `gapMs`, drawn
-    as two server-painted colour layers (no alpha without a compositor).
+    as three server-painted colour layers (no alpha without a compositor): her red, the green, and a
+    light inner edge on the ring so it reads over her red. Its specks (pieces under 40 cell px) are cut
+    to her body; the ring shows whole.
 
 The launch, with `[intro] cinematic` on:
 

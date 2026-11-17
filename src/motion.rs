@@ -22,6 +22,34 @@ impl Gap {
     }
 }
 
+/// Before a walk she leans back this long (the anticipation); after it her momentum carries
+/// her forward and back over `SETTLE_MS`.
+pub const ANTICIPATE: Duration = Duration::from_millis(170);
+pub const SETTLE_MS: u32 = 260;
+/// The lean at its widest, logical px at the top of her hair (her feet stay put).
+pub const LEAN_PX: f32 = 4.0;
+
+/// A lean of her upper body toward `right` (or away), out and back over `ms`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Lean {
+    pub t0: Instant,
+    pub right: bool,
+    pub ms: u32,
+}
+
+impl Lean {
+    /// The shift at the top of her hair now (device px, + = right), in 2 px steps; None once
+    /// it's over.
+    pub fn px(&self, now: Instant, sf: f32) -> Option<i32> {
+        let u = now.saturating_duration_since(self.t0).as_secs_f32() * 1000.0 / self.ms.max(1) as f32;
+        if u >= 1.0 {
+            return None;
+        }
+        let v = LEAN_PX * sf * (std::f32::consts::PI * u).sin() * if self.right { 1.0 } else { -1.0 };
+        Some(((v / 2.0).round() * 2.0) as i32)
+    }
+}
+
 /// A walk along a line (the floor, a window top): device px, constant pace, eased over its
 /// first and last `EASE_S`.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -112,34 +140,52 @@ pub fn dance_ms(bpm: Option<f32>, strip_ms: u32, cells: u32) -> u32 {
 pub struct BurstCell {
     pub w: i32,
     pub h: i32,
-    pub layers: Vec<(u32, Vec<ShapeRect>)>,
+    /// Per colour: the ring and other large pieces (shown whole), and the specks (cut to her
+    /// body by the view: r32, specks flew off her at the click).
+    pub layers: Vec<(u32, Vec<ShapeRect>, Vec<ShapeRect>)>,
 }
 
-/// The click strip (`frames` cells of `cell` px in a row), scaled by `scale`, split into two
-/// colours (her red and the green): (cells, the burst's centre in scaled px). A pixel counts
-/// from `ALPHA_MIN`; its colour class is whichever of red and green is stronger, drawn in that
-/// class's mean colour over the whole strip.
+/// A piece of the burst smaller than this (cell px) is a speck.
+const SPECK_PX: usize = 40;
+
+/// The light inner edge of the burst's ring (its dark red alone vanished over her red body).
+pub const BURST_EDGE: u32 = 0xfff2f5;
+
+/// The click strip (`frames` cells of `cell` px in a row), scaled by `scale`, split into its
+/// colours: her red, the green, and a light edge on the red's inner side (toward the burst's
+/// centre): (cells, the burst's centre in scaled px). A pixel counts from `ALPHA_MIN`; red and
+/// green are each class's mean colour over the whole strip.
 pub fn burst_cells(img: &image::RgbaImage, frames: u32, cell: (u32, u32), scale: f32) -> (Vec<BurstCell>, (i32, i32)) {
     const ALPHA_MIN: u8 = 96;
+    const NONE: u8 = 0;
+    const RED: u8 = 1;
+    const GREEN: u8 = 2;
+    const EDGE: u8 = 3;
     let (cw, ch) = cell;
     let (w, h) = (((cw as f32 * scale).round() as i32).max(1), ((ch as f32 * scale).round() as i32).max(1));
+    let px = |i: u32, x: u32, y: u32| {
+        let gx = i * cw + x;
+        (gx < img.width() && y < img.height()).then(|| img.get_pixel(gx, y))
+    };
+    let class = |p: Option<&image::Rgba<u8>>| match p {
+        Some(p) if p[3] >= ALPHA_MIN => if p[1] > p[0] { GREEN } else { RED },
+        _ => NONE,
+    };
     let mut sum = [[0u64; 3]; 2];
     let mut cnt = [0u64; 2];
     let (mut cx, mut cy, mut cn) = (0f64, 0f64, 0f64);
-    let class = |p: &image::Rgba<u8>| (p[3] >= ALPHA_MIN).then_some(usize::from(p[1] > p[0]));
     for i in 0..frames {
         for y in 0..ch {
             for x in 0..cw {
-                let gx = i * cw + x;
-                if gx >= img.width() || y >= img.height() {
-                    continue;
-                }
-                let p = img.get_pixel(gx, y);
-                if let Some(c) = class(p) {
-                    for k in 0..3 {
-                        sum[c][k] += p[k] as u64;
+                let p = px(i, x, y);
+                let c = class(p);
+                if c != NONE {
+                    let p = p.expect("opaque");
+                    let k = (c - 1) as usize;
+                    for j in 0..3 {
+                        sum[k][j] += p[j] as u64;
                     }
-                    cnt[c] += 1;
+                    cnt[k] += 1;
                     cx += x as f64;
                     cy += y as f64;
                     cn += 1.0;
@@ -151,39 +197,117 @@ pub fn burst_cells(img: &image::RgbaImage, frames: u32, cell: (u32, u32), scale:
         let n = cnt[c].max(1);
         ((sum[c][0] / n) as u32) << 16 | ((sum[c][1] / n) as u32) << 8 | (sum[c][2] / n) as u32
     };
-    let centre = if cn > 0.0 { (((cx / cn) as f32 * scale).round() as i32, ((cy / cn) as f32 * scale).round() as i32) } else { (w / 2, h / 2) };
+    let (ox, oy) = if cn > 0.0 { ((cx / cn) as f32, (cy / cn) as f32) } else { (cw as f32 / 2.0, ch as f32 / 2.0) };
+    let centre = ((ox * scale).round() as i32, (oy * scale).round() as i32);
     let mut out = Vec::with_capacity(frames as usize);
     for i in 0..frames {
-        let mut layers = Vec::new();
-        for c in 0..2 {
-            let mut rows = Vec::new();
-            for y in 0..h {
-                let sy = ((y as f32 + 0.5) / scale) as u32;
-                let mut x = 0;
-                let on = |x: i32| {
-                    let sx = ((x as f32 + 0.5) / scale) as u32;
-                    let gx = i * cw + sx.min(cw - 1);
-                    gx < img.width() && sy < img.height() && class(img.get_pixel(gx, sy.min(ch - 1))) == Some(c)
-                };
-                while x < w {
-                    if on(x) {
-                        let x0 = x;
-                        while x < w && on(x) {
-                            x += 1;
-                        }
-                        rows.push((x0 as i16, y as i16, (x - x0) as u16, 1u16));
-                    } else {
-                        x += 1;
+        // Cell classes, the red's inner edge marked: 2 px toward the centre is empty.
+        let mut map = vec![NONE; (cw * ch) as usize];
+        for y in 0..ch {
+            for x in 0..cw {
+                map[(y * cw + x) as usize] = class(px(i, x, y));
+            }
+        }
+        // Pieces: 8-connected runs of one class; small ones are specks.
+        let mut speck = vec![false; map.len()];
+        let mut seen = vec![false; map.len()];
+        for k0 in 0..map.len() {
+            if seen[k0] || map[k0] == NONE {
+                continue;
+            }
+            let c = map[k0];
+            let (mut stack, mut piece) = (vec![k0], Vec::new());
+            seen[k0] = true;
+            while let Some(k) = stack.pop() {
+                piece.push(k);
+                let (x, y) = ((k as u32 % cw) as i32, (k as u32 / cw) as i32);
+                for (dx, dy) in [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)] {
+                    let (nx, ny) = (x + dx, y + dy);
+                    if nx < 0 || ny < 0 || nx >= cw as i32 || ny >= ch as i32 {
+                        continue;
+                    }
+                    let n = (ny as u32 * cw + nx as u32) as usize;
+                    if !seen[n] && map[n] == c {
+                        seen[n] = true;
+                        stack.push(n);
                     }
                 }
             }
-            if !rows.is_empty() {
-                layers.push((rgb(c), crate::shape::merge_tol(&rows, 0)));
+            if piece.len() < SPECK_PX {
+                piece.into_iter().for_each(|k| speck[k] = true);
+            }
+        }
+        let edge: Vec<bool> = (0..cw * ch)
+            .map(|k| {
+                let (x, y) = ((k % cw) as f32, (k / cw) as f32);
+                if map[k as usize] != RED {
+                    return false;
+                }
+                let (dx, dy) = (ox - x, oy - y);
+                let d = (dx * dx + dy * dy).sqrt();
+                if d < 3.0 {
+                    return false;
+                }
+                if speck[k as usize] {
+                    return false;
+                }
+                let (sx, sy) = ((x + dx / d).round(), (y + dy / d).round());
+                sx < 0.0 || sy < 0.0 || sx >= cw as f32 || sy >= ch as f32 || map[(sy as u32 * cw + sx as u32) as usize] == NONE
+            })
+            .collect();
+        for (k, e) in edge.into_iter().enumerate() {
+            if e {
+                map[k] = EDGE;
+            }
+        }
+        let mut layers = Vec::new();
+        for (c, colour) in [(RED, rgb(0)), (GREEN, rgb(1)), (EDGE, BURST_EDGE)] {
+            let mut rows = [Vec::new(), Vec::new()];
+            for y in 0..h {
+                let sy = (((y as f32 + 0.5) / scale) as u32).min(ch - 1);
+                let at = |x: i32| {
+                    let sx = (((x as f32 + 0.5) / scale) as u32).min(cw - 1);
+                    let k = (sy * cw + sx) as usize;
+                    (map[k] == c).then_some(speck[k] as usize)
+                };
+                let mut x = 0;
+                while x < w {
+                    match at(x) {
+                        Some(s) => {
+                            let x0 = x;
+                            while x < w && at(x) == Some(s) {
+                                x += 1;
+                            }
+                            rows[s].push((x0 as i16, y as i16, (x - x0) as u16, 1u16));
+                        }
+                        None => x += 1,
+                    }
+                }
+            }
+            if rows.iter().any(|r| !r.is_empty()) {
+                layers.push((colour, crate::shape::merge_tol(&rows[0], 0), crate::shape::merge_tol(&rows[1], 0)));
             }
         }
         out.push(BurstCell { w, h, layers });
     }
     (out, centre)
+}
+
+/// `rows` (cell-local) cut to her body: `body` (her shape's rects) placed at `at` in the
+/// cell's coordinates. Nothing of the burst lands off her.
+pub fn clip_to(rows: &[ShapeRect], body: &[ShapeRect], at: (i32, i32)) -> Vec<ShapeRect> {
+    let mut out = Vec::new();
+    for &(x, y, w, h) in rows {
+        let (rx0, ry0, rx1, ry1) = (x as i32, y as i32, x as i32 + w as i32, y as i32 + h as i32);
+        for &(bx, by, bw, bh) in body {
+            let (bx0, by0) = (bx as i32 + at.0, by as i32 + at.1);
+            let (x0, y0, x1, y1) = (rx0.max(bx0), ry0.max(by0), rx1.min(bx0 + bw as i32), ry1.min(by0 + bh as i32));
+            if x1 > x0 && y1 > y0 {
+                out.push((x0 as i16, y0 as i16, (x1 - x0) as u16, (y1 - y0) as u16));
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -243,6 +367,17 @@ mod tests {
     }
 
     #[test]
+    fn a_lean_goes_out_and_back_its_way() {
+        let t = Instant::now();
+        let back = Lean { t0: t, right: false, ms: 170 };
+        assert_eq!(back.px(t, 1.0), Some(0));
+        assert_eq!(back.px(t + Duration::from_millis(85), 1.0), Some(-4), "widest at the middle, away from the walk");
+        assert_eq!(back.px(t + Duration::from_millis(170), 1.0), None);
+        let fwd = Lean { t0: t, right: true, ms: SETTLE_MS };
+        assert!((0..SETTLE_MS as u64).step_by(10).all(|m| fwd.px(t + Duration::from_millis(m), 2.0).is_some_and(|v| (0..=8).contains(&v) && v % 2 == 0)));
+    }
+
+    #[test]
     fn gaps_cap_the_rate() {
         let t = Instant::now();
         let mut g = Gap::default();
@@ -271,13 +406,44 @@ mod tests {
         assert_eq!(cells.len(), 2);
         assert_eq!((cells[0].w, cells[0].h), (16, 16));
         assert_eq!(cells[0].layers.len(), 1);
-        let (rgb, rows) = &cells[0].layers[0];
+        let (rgb, whole, specks) = &cells[0].layers[0];
         assert_eq!(*rgb, 0xfa0a3c);
-        let area: u32 = rows.iter().map(|r| r.2 as u32 * r.3 as u32).sum();
+        assert!(whole.is_empty(), "16 px: a speck");
+        let area: u32 = specks.iter().map(|r| r.2 as u32 * r.3 as u32).sum();
         assert_eq!(area, 64, "4x4 at 2x");
         assert_eq!(cells[1].layers.len(), 1);
         assert_eq!(cells[1].layers[0].0, 0x0af064);
         // The centre of everything drawn (cell px 3.5,3.5 and 3.5,3.5 -> about 7,7 scaled).
         assert!((centre.0 - 7).abs() <= 1 && (centre.1 - 7).abs() <= 1, "{centre:?}");
+    }
+
+    #[test]
+    fn the_rings_inner_edge_is_light_and_the_burst_stays_on_her() {
+        // A red ring (radius 6..9) around the middle of a 24x24 cell.
+        let mut img = image::RgbaImage::new(24, 24);
+        for y in 0..24 {
+            for x in 0..24 {
+                let d = ((x as f32 - 11.5).powi(2) + (y as f32 - 11.5).powi(2)).sqrt();
+                if (6.0..9.0).contains(&d) {
+                    img.put_pixel(x, y, image::Rgba([200, 20, 50, 255]));
+                }
+            }
+        }
+        let (cells, _) = burst_cells(&img, 1, (24, 24), 1.0);
+        let layers = &cells[0].layers;
+        assert_eq!(layers.len(), 2, "red and its edge");
+        assert!(layers.iter().all(|l| l.2.is_empty()), "the ring is whole, no specks");
+        let (edge_rgb, edge, _) = &layers[1];
+        assert_eq!(*edge_rgb, BURST_EDGE);
+        for &(x, y, w, _) in edge {
+            for x in x..x + w as i16 {
+                let d = ((x as f32 + 0.5 - 12.0).powi(2) + (y as f32 + 0.5 - 12.0).powi(2)).sqrt();
+                assert!(d < 8.0, "({x},{y}) d {d}: the inner side only");
+            }
+        }
+        // Cut to her: only what overlaps her body survives, in the cell's coordinates.
+        let body = [(0, 0, 10, 100)];
+        let clipped = clip_to(&[(5, 5, 20, 2), (40, 5, 4, 4)], &body, (8, 0));
+        assert_eq!(clipped, vec![(8, 5, 10, 2)]);
     }
 }

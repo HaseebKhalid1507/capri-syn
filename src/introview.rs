@@ -713,6 +713,7 @@ impl Render for CloseUpView {
                 tag: None,
                 sf,
                 calm: false,
+                light: false,
                 still_from: None,
             });
             plan.tint = g.tint(now);

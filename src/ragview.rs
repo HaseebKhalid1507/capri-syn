@@ -685,7 +685,7 @@ impl Avatar {
                     r.grip = grip;
                     r.chain = chain;
                     r.dangle = Some(Dangle { on: true, ..d });
-                    let mut g = Glitch::new(GlitchKind::Burst, now, seed);
+                    let mut g = Glitch::new(GlitchKind::Seam, now, seed);
                     g.tears_tag = false;
                     self.glitch = Some(g);
                 }
@@ -771,7 +771,7 @@ impl Avatar {
         let Some(r) = &mut self.rag else { return };
         // Out of the dangle drawing into the fall's: a glitch over the seam.
         if r.dangle.take().is_some_and(|d| d.on) {
-            let mut g = Glitch::new(GlitchKind::Burst, now, self.rng.next());
+            let mut g = Glitch::new(GlitchKind::Seam, now, self.rng.next());
             g.tears_tag = false;
             self.glitch = Some(g);
         }

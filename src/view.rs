@@ -411,6 +411,10 @@ const NOTE_TICK: Duration = Duration::from_millis(40);
 /// in her window (`Os::fx_staged`).
 const GLINT_LAYER: usize = NOTE_LAYER + 2 * NOTES_MAX;
 const GLINTS_MAX: usize = 4;
+/// A glint's smallest size, of its full size.
+const GLINT_MIN: f32 = 0.4;
+/// When a glint can't show (a glitch, a turn, a frame without hair), the next try.
+const GLINT_RETRY_MS: u64 = 300;
 /// A bob or sway step (1-2 px) alone waits this long for another redraw to ride on (a
 /// blink, the other axis): at rest every pose step was a render of its own.
 const POSE_SLACK: Duration = Duration::from_millis(250);
@@ -532,6 +536,9 @@ pub struct Avatar {
     /// The bounding rects of the 2 paints before the last (dev `shape`: a present lands up to
     /// two frames after its paint).
     shape_hist: Rc<RefCell<[Vec<ShapeRect>; 2]>>,
+    /// The drawing the last render painted (a change not laid underneath ahead lays it
+    /// underneath once).
+    drawn_last: Option<DrawnLast>,
     /// Shown mirrored (ground and seat frames only: grip poses are side-specific).
     pub(super) flip: bool,
     /// A turn's squeeze in progress: (start, the flip it turns to). The art swaps halfway.
@@ -788,6 +795,7 @@ impl Avatar {
             _tick_loop: tick_loop,
             last_shape: Rc::new(RefCell::new((vec![(0, 0, 1, 1)], vec![]))),
             shape_hist: Rc::new(RefCell::new([Vec::new(), Vec::new()])),
+            drawn_last: None,
             flip: false,
             turn: None,
             turn_frame: 0,
@@ -983,10 +991,12 @@ impl Avatar {
     fn music_off(&mut self, now: Instant) {
         self.music_stop_at = None;
         if self.music.take().is_some() {
+            // Out of a dance: the light seam (a burst over a moving drawing smeared her legs).
+            let kind = if self.motion_cell(self.shown_frame()) { GlitchKind::Seam } else { GlitchKind::Burst };
             self.relayer(now);
             self.update_notes(now);
             if self.loaded && self.teleport.is_none() {
-                self.glitch = Some(Glitch::new(GlitchKind::Burst, now, self.rng.next()));
+                self.glitch = Some(Glitch::new(kind, now, self.rng.next()));
             }
         }
     }
@@ -1103,7 +1113,8 @@ impl Avatar {
                 }
                 let Some(sc) = g.scale(now, life_ms).filter(|&v| v > 0.02) else { continue };
                 let (dx, dy) = g.offset(now, life_ms);
-                let (cx, cy, r) = (base.0 + g.x + dx, base.1 + g.y + dy, g.size * sc);
+                // Never smaller than ~40 % (a 1-3 px star vanished into her hair's glitter).
+                let (cx, cy, r) = (base.0 + g.x + dx, base.1 + g.y + dy, g.size * (GLINT_MIN + (1.0 - GLINT_MIN) * sc));
                 let place = |pts: Vec<(f32, f32)>| {
                     let x0 = pts.iter().map(|p| p.0).fold(f32::MAX, f32::min).floor() as i32;
                     let y0 = pts.iter().map(|p| p.1).fold(f32::MAX, f32::min).floor() as i32;
@@ -1149,6 +1160,15 @@ impl Avatar {
     }
 
     fn pose_at(&self, now: Instant) -> fx::Pose {
+        // Before and after a walk: her lean (on any art; feet planted).
+        if let Some(sway) = self.motion.lean.and_then(|l| l.px(now, self.layout.sf))
+            && self.loaded
+            && !self.hidden
+            && self.teleport.is_none()
+            && self.rag.is_none()
+        {
+            return fx::Pose { sway, ..fx::Pose::default() };
+        }
         if !self.pose_active() {
             return fx::Pose::default();
         }
@@ -1875,7 +1895,7 @@ impl Avatar {
             take(Some(now + FRAME_FAST));
         }
         take(self.next_glitch);
-        if self.squash.is_some() || self.sliver.is_some() || self.turn.is_some() || self.arrive.unfold.is_some() {
+        if self.squash.is_some() || self.sliver.is_some() || self.turn.is_some() || self.arrive.unfold.is_some() || self.motion.lean.is_some() {
             take(Some(now + FRAME_FAST));
         }
         take(self.teleport.as_ref().and_then(|t| t.leave_until));
@@ -2281,32 +2301,29 @@ impl Avatar {
             self.next_glint = None;
             return;
         }
+        // One at a time on an even beat (r32: pairs and long random gaps left dead stretches);
+        // when she can't show one now, soon again rather than a whole gap later.
         let gap = (self.rng.range(lo as f32, hi.max(lo) as f32) as u64).max(250);
+        self.next_glint = Some(now + Duration::from_millis(GLINT_RETRY_MS));
+        if !self.loaded || self.hidden || self.teleport.is_some() || self.rag.is_some() || self.arriving(now) || self.glitch.is_some() || self.turn.is_some() {
+            return;
+        }
+        let Some(pts) = self.frame_or_default(self.shown_frame()).map(|f| f.glints.clone()).filter(|g| !g.is_empty()) else { return };
         self.next_glint = Some(now + Duration::from_millis(gap));
-        if !self.loaded || self.hidden || self.teleport.is_some() || self.rag.is_some() || self.arriving(now) {
-            return;
-        }
-        let Some(f) = self.frame_or_default(self.shown_frame()) else { return };
-        if f.glints.is_empty() {
-            return;
-        }
-        let pts = f.glints.clone();
-        let n = if self.rng.range(0.0, 1.0) < 0.3 { 2 } else { 1 };
-        for k in 0..n {
-            let (x, y) = pts[self.rng.pick(pts.len())];
-            let spin = self.rng.range(-0.25, 0.25);
-            let travel = self.rng.range(6.0, 10.0) * self.layout.sf;
-            let dir = if self.rng.range(0.0, 1.0) < 0.5 { -1.0 } else { 1.0 };
-            self.glints.push(Glint {
-                t0: now + Duration::from_millis(k * 140),
-                x: x as f32,
-                y: y as f32,
-                size: self.rng.range(7.0, 12.0) * self.layout.sf,
-                spin,
-                // A little travel along its long arm (the strand it sits on).
-                drift: (spin.cos() * travel * dir, spin.sin() * travel * dir),
-            });
-        }
+        let (x, y) = pts[self.rng.pick(pts.len())];
+        let spin = self.rng.range(-0.25, 0.25);
+        let travel = self.rng.range(6.0, 10.0) * self.layout.sf;
+        let dir = if self.rng.range(0.0, 1.0) < 0.5 { -1.0 } else { 1.0 };
+        self.glints.push(Glint {
+            t0: now,
+            x: x as f32,
+            y: y as f32,
+            // Big enough to read over her hair's own glitter.
+            size: self.rng.range(10.0, 13.0) * self.layout.sf,
+            spin,
+            // A little travel along its long arm (the strand it sits on).
+            drift: (spin.cos() * travel * dir, spin.sin() * travel * dir),
+        });
     }
 
     /// The vanish is over (its glitch, or a drawn leave): the bolt, or straight there.
@@ -2427,9 +2444,10 @@ impl Avatar {
         if was_sitting != self.sitting() || self.brain.is_some() {
             self.relayer(now);
         }
-        // Set down somewhere (not by a brain move: its landing knows what she came for):
+        // Set down somewhere (not by a brain move: its landing knows what she came for; not at
+        // a walk's end: she stops facing the way she walked):
         // near a monitor's edge she faces into the screen; perched, the window's middle.
-        if self.mirror_cfg.own && self.loaded && !self.brain_in_flight() {
+        if self.mirror_cfg.own && self.loaded && !self.brain_in_flight() && !self.brain_walking() {
             let l = self.layout;
             let (x, y) = (to.0 + l.ground_x, to.1 + l.ground_y);
             let dead = (crate::facing::DEAD_PX * l.sf) as i32;
@@ -4639,12 +4657,9 @@ impl Render for Avatar {
             && now >= t0
         {
             let ms = now.saturating_duration_since(t0).as_millis() as u64;
-            {
-                let seat = sy - l.avatar_y;
-                let cut = seat + ((f.bottom - seat).max(0) as f32 * arriveview::unfold_depth(ms)).round() as i32;
-                let band = vec![(f.top.min(0), cut, 0, 0)];
-                plan.slices = Some(if plan.sx != 1.0 || plan.sy != 1.0 { fx::scale_bands(&band, plan.pivot, plan.sx, plan.sy) } else { band });
-            }
+            let seat = sy - l.avatar_y;
+            let bands = arriveview::unfold_bands(f.top.min(seat), seat, f.bottom, arriveview::unfold_depth(ms));
+            plan.slices = Some(if plan.sx != 1.0 || plan.sy != 1.0 { fx::scale_bands(&bands, plan.pivot, plan.sx, plan.sy) } else { bands });
         }
         // A drawn arrival's first frames: the plain red land silhouette (its window's old
         // pixels would show through the new shape for a frame).
@@ -4694,8 +4709,10 @@ impl Render for Avatar {
             let base = plan.clone();
             // Landing on a window top: the rows at the edge and below stay put (her legs never
             // tear across the edge line, the touchdown's dark parts never smear along it).
+            // Touching down into a drawn pose (lachy's art): it lands clean on the cut frame (the
+            // red silhouette before it is the touchdown's; tears after it frayed her hair).
             let drawn_land = g.kind == GlitchKind::Land && self.sitting() && self.pack.frames.get(shown_i).is_some_and(|f| f.cell.is_some());
-            let still_legs = (g.kind == GlitchKind::Land && self.sitting())
+            let still_legs = (matches!(g.kind, GlitchKind::Land | GlitchKind::Seam) && self.sitting())
                 .then_some(l.seat_y)
                 .flatten()
                 .map(|s| s - l.avatar_y - (24.0 * sf).round() as i32);
@@ -4718,20 +4735,18 @@ impl Render for Avatar {
                     sf,
                     calm: g.kind == GlitchKind::Land,
                     still_from: still_legs,
+                    light: g.kind == GlitchKind::Seam,
                 });
-                p.tint = g.tint(at);
-                // Touching down into a drawn pose (lachy's art): no red/blue ghosts, they
-                // fringed her hair tips blue at the swap.
-                if drawn_land {
-                    p.split.iter_mut().for_each(|d| *d = 0);
-                    p.solid.iter_mut().for_each(|c| *c = None);
-                }
+                // The drawn pose lands as itself on the cut frame (no red silhouette of it).
+                p.tint = if drawn_land { None } else { g.tint(at) };
                 p
             };
             // Out of a still figure, the first frame stays still and lays the first pattern
             // underneath (one frame late, no black slabs on the onset).
-            let pre_roll = step == 0 && matches!(g.kind, GlitchKind::Burst | GlitchKind::Big | GlitchKind::Vanish);
-            if !pre_roll {
+            let pre_roll = step == 0 && matches!(g.kind, GlitchKind::Burst | GlitchKind::Big | GlitchKind::Vanish | GlitchKind::Seam);
+            if drawn_land {
+                // Clean from the cut on: this frame and the next as they are.
+            } else if !pre_roll {
                 // At the time it was laid underneath last frame (the frame came later or
                 // sooner than planned: a pattern laid at `now` instead would grow the shape
                 // where nothing was painted, a black slab without a compositor).
@@ -4740,7 +4755,7 @@ impl Render for Avatar {
             let at = (now + FRAME_FX).max(g.t0);
             self.glitch_at.set(Some(at));
             let next_base = rag_next.as_ref().map_or(base, |n| n.plan.clone());
-            next = Some(if g.done(at) { next_base.clone() } else { lay_on(&next_base, at, step + 1) });
+            next = Some(if g.done(at) || drawn_land { next_base.clone() } else { lay_on(&next_base, at, step + 1) });
         }
         // The sliver widens next frame: that width goes underneath.
         if let Some(sx) = self.sliver_sx(now + FRAME_FX).or(self.sliver.map(|_| 1.0)) {
@@ -4780,6 +4795,35 @@ impl Render for Avatar {
                     next = Some(n);
                 }
             }
+        }
+        // A drawing changed without warning (a snap turn, a walk setting off): the last one goes
+        // underneath for this paint. The screen holds the last present until this one lands (a
+        // frame late): clipped to the new outline at once, that was the old drawing cut to the
+        // new one's shape (a shredded frame). One frame of the old outline around the new
+        // drawing instead. A change laid underneath ahead (the look-ahead above) needs none; on
+        // the cut frame this one wins over laying the next cell ahead (a strip's next cell is
+        // about the same outline).
+        let prev_drawn = self.drawn_last.take();
+        if let Some(img) = &image {
+            self.drawn_last = Some(DrawnLast {
+                img: img.clone(),
+                at: image_at.unwrap_or_default(),
+                rects: rects.clone(),
+                next: next_img.as_ref().map(|n| n.0.clone()),
+            });
+        }
+        if self.rag.is_none()
+            && !hidden
+            && let (Some(p), Some(img)) = (prev_drawn, &image)
+            && !Arc::ptr_eq(&p.img, img)
+            && !p.next.as_ref().is_some_and(|n| Arc::ptr_eq(n, img))
+        {
+            // As it was (a seam's next pattern on it would only fray it).
+            next_img = Some((p.img, p.at));
+            next_rects = Some(p.rects);
+            let mut n = plan.clone();
+            n.slices = None;
+            next = Some(n);
         }
         // Alpha mode (a compositor shows the window's own alpha): nothing is clipped by a
         // bounding shape, so everything painted shows, and there is no shape lag to cover.
@@ -6283,6 +6327,14 @@ impl Render for Avatar {
             .size_full(),
         )
     }
+}
+
+/// The drawing a render painted, and the one it laid underneath ahead (see `drawn_last`).
+struct DrawnLast {
+    img: Arc<RenderImage>,
+    at: ImageBox,
+    rects: Arc<Vec<ShapeRect>>,
+    next: Option<Arc<RenderImage>>,
 }
 
 /// Index of the pre-rotated note variant nearest `deg`.

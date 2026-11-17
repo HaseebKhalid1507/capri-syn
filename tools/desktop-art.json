@@ -1,6 +1,6 @@
 {
  "schemaVersion": 1,
- "about": "capri-syn's own measurements of the capri-desktop art (cell grid, anchors, loop/one-shot), taken from the PNGs at the pinned commits. Anchors and bounds are in cell px; x/y from the cell's top-left; bounds [x, y, w, h] = the union of every cell's opaque box. A laydown anchor's x is the figure's middle (edgeX: where her hanging leg leaves the surface). faces: the side her face looks to, unmirrored. fpsFrom 'clips.json' = lachy's quest clips.json lists the same frame count and cell width; 'guess' = ours. mirrorArt: the strip drawn for mirroring (same silhouette, the suit's asymmetric details swapped): when she faces the other way, draw mirror(mirrorArt), not mirror(strip). contact (seat and surface strips): on a window top, below cell row `line` only the columns `legs` [x0, x1) stay, the lower legs hanging over the edge; the window's front face hides the rest (a hand, the mane, an arm).",
+ "about": "capri-syn's own measurements of the capri-desktop art (cell grid, anchors, loop/one-shot), taken from the PNGs at the pinned commits. Anchors and bounds are in cell px; x/y from the cell's top-left; bounds [x, y, w, h] = the union of every cell's opaque box. A laydown anchor's x is the figure's middle (edgeX: where her hanging leg leaves the surface). faces: the side her face looks to, unmirrored. fpsFrom 'clips.json' = lachy's quest clips.json lists the same frame count and cell width; 'guess' = ours. mirrorArt: the strip drawn for mirroring (same silhouette, the suit's asymmetric details swapped): when she faces the other way, draw mirror(mirrorArt), not mirror(strip). contact (seat and surface strips): on a window top, below cell row `line` only the columns `legs` [x0, x1) stay, the lower legs hanging over the edge; the window's front face hides the rest (a hand, the mane, an arm). glitchCells: cells with a chroma ghost drawn in (violet px > 2.5x the strip's median and > 1500 over it, measured on the pinned PNGs); a loop she holds skips them.",
  "lachy": {
   "repo": "https://github.com/lachydotmcg/capri-desktop",
   "commit": "156ed188a2ac00854eb1c9e932087eb5e824ccb9",
@@ -96,6 +96,10 @@
      14,
      213,
      357
+    ],
+    "glitchCells": [
+     0,
+     8
     ]
    },
    "dangle": {
@@ -119,6 +123,14 @@
      14,
      214,
      356
+    ],
+    "glitchCells": [
+     2,
+     3,
+     13,
+     14,
+     15,
+     22
     ]
    },
    "glitch": {
@@ -618,7 +630,13 @@
      440,
      243
     ],
-    "mirrorArt": "laydown_leave_flipped"
+    "mirrorArt": "laydown_leave_flipped",
+    "glitchCells": [
+     1,
+     2,
+     3,
+     4
+    ]
    },
    "laydown_leave_flipped": {
     "file": "sprites/laydown_leave_flipped.png",
@@ -643,7 +661,13 @@
      440,
      243
     ],
-    "mirrorArtFor": "laydown_leave"
+    "mirrorArtFor": "laydown_leave",
+    "glitchCells": [
+     1,
+     2,
+     3,
+     4
+    ]
    },
    "laydown_sleep": {
     "file": "sprites/laydown_sleep.png",
@@ -794,6 +818,13 @@
      15,
      240,
      356
+    ],
+    "glitchCells": [
+     0,
+     1,
+     2,
+     3,
+     4
     ]
    },
    "mouth": {
@@ -1119,7 +1150,13 @@
      271,
      346
     ],
-    "mirrorArt": "perch_leave_flipped"
+    "mirrorArt": "perch_leave_flipped",
+    "glitchCells": [
+     1,
+     2,
+     3,
+     4
+    ]
    },
    "perch_leave_flipped": {
     "file": "sprites/perch_leave_flipped.png",
@@ -1143,7 +1180,13 @@
      271,
      346
     ],
-    "mirrorArtFor": "perch_leave"
+    "mirrorArtFor": "perch_leave",
+    "glitchCells": [
+     1,
+     2,
+     3,
+     4
+    ]
    },
    "perch_music": {
     "file": "sprites/perch_music.png",

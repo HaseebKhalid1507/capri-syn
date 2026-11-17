@@ -55,7 +55,28 @@ pub(super) struct ArriveState {
 }
 
 /// The legs unfolding below the edge as the sit comes in.
-pub(super) const UNFOLD_MS: u64 = 140;
+pub(super) const UNFOLD_MS: u64 = 170;
+
+/// The sit drawn with its legs `d` (0..1) of the way down: everything above the seat line as
+/// it is; below it the legs in `UNFOLD_BANDS` strips, each lifted toward the seat by what's
+/// still to come, so they telescope down from under her (her feet first, right below the
+/// edge), never a straight cut across the shins.
+pub(super) fn unfold_bands(top: i32, seat: i32, bottom: i32, d: f32) -> Vec<(i32, i32, i32, i32)> {
+    let mut out = vec![(top, seat, 0, 0)];
+    let legs = (bottom - seat).max(0);
+    if legs == 0 {
+        return out;
+    }
+    let n = UNFOLD_BANDS.min(legs);
+    for k in 0..n {
+        let (y0, y1) = (seat + legs * k / n, seat + legs * (k + 1) / n);
+        let lift = ((y0 - seat) as f32 * (1.0 - d.clamp(0.0, 1.0))).round() as i32;
+        out.push((y0, y1, 0, -lift));
+    }
+    out
+}
+
+const UNFOLD_BANDS: i32 = 6;
 
 /// How far down the sit's legs show `ms` into the unfold, 0..1 (eased out: they drop, then settle).
 pub(super) fn unfold_depth(ms: u64) -> f32 {
@@ -520,6 +541,19 @@ fn rare(last: Option<Instant>, now: Instant, gap: Duration, roll: f32, p: f32) -
 mod tests {
     use super::*;
     use crate::anim::Rng;
+
+    #[test]
+    fn the_legs_telescope_down_from_the_seat() {
+        // Seat at 100, feet at 160: six strips of 10 rows.
+        let b = unfold_bands(0, 100, 160, 0.0);
+        assert_eq!(b[0], (0, 100, 0, 0), "above the seat as drawn");
+        assert!(b[1..].iter().all(|&(y0, _, _, dy)| y0 + dy == 100), "folded: every strip starts at the seat");
+        let b = unfold_bands(0, 100, 160, 0.5);
+        assert_eq!(b.last(), Some(&(150, 160, 0, -25)));
+        let b = unfold_bands(0, 100, 160, 1.0);
+        assert!(b.iter().all(|&(_, _, dx, dy)| dx == 0 && dy == 0), "down: the drawing as it is");
+        assert_eq!(b.iter().map(|b| b.1 - b.0).sum::<i32>(), 160);
+    }
 
     #[test]
     fn the_sits_legs_unfold_top_down_and_settle() {

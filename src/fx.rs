@@ -30,6 +30,9 @@ pub enum GlitchKind {
     Land,
     /// Dematerialise: bands drop out while the interference rises.
     Vanish,
+    /// The cut in or out of a motion's drawing (a walk, a dance, a dangle): ~130 ms, a few
+    /// small shifts inside the body, no colour split, bars or cells, the tag left whole.
+    Seam,
 }
 
 /// Glitch envelopes: `(start, strength)` steps over 0..1. Build-up (small offsets), a
@@ -79,8 +82,9 @@ impl Glitch {
             GlitchKind::Appear => 900.0,
             GlitchKind::Land => 330.0,
             GlitchKind::Vanish => 300.0,
+            GlitchKind::Seam => SEAM_MS,
         };
-        Glitch { t0: now, kind, ms, seed, soft: false, tears_tag: true }
+        Glitch { t0: now, kind, ms, seed, soft: false, tears_tag: kind != GlitchKind::Seam }
     }
 
     /// A quiet teleport leg (passive moves): a shorter dissolve, and a ~150 ms rebuild
@@ -128,6 +132,16 @@ impl Glitch {
                     1.0
                 }
             }
+            // Two steps, then settled: the cut is on its first frame.
+            GlitchKind::Seam => {
+                if u < 0.5 {
+                    1.0
+                } else if u < 0.8 {
+                    0.45
+                } else {
+                    0.0
+                }
+            }
         }
     }
 
@@ -135,7 +149,7 @@ impl Glitch {
     pub fn coverage(&self, now: Instant) -> f32 {
         let u = self.u(now);
         match self.kind {
-            GlitchKind::Burst | GlitchKind::Big | GlitchKind::Appear => 1.0,
+            GlitchKind::Burst | GlitchKind::Big | GlitchKind::Appear | GlitchKind::Seam => 1.0,
             // Starts a quarter in, so the body never blinks out between bolt and arrival.
             GlitchKind::Land if self.soft => 1.0,
             GlitchKind::Land => 0.25 + 0.75 * (u / 0.4).min(1.0),
@@ -216,7 +230,13 @@ pub struct GlitchStep {
     /// Bands reaching this row and below stay where they are, with no split (a landing on a
     /// window top: her legs at the edge never tear across it).
     pub still_from: Option<i32>,
+    /// A motion's seam (`GlitchKind::Seam`): shifts of a few px, no split, bars, cells or
+    /// scanlines, a few tall bands.
+    pub light: bool,
 }
+
+/// A motion seam's length.
+pub const SEAM_MS: f32 = 130.0;
 
 /// How the body is drawn this frame. Device px, relative to the avatar rect.
 #[derive(Clone, Debug, PartialEq)]
@@ -301,9 +321,10 @@ impl BodyPlan {
             _ if top - g.y0 > 8 => cuts.push(g.y0 + (top - g.y0) * rng.range(30.0, 70.0) as i32 / 100),
             _ => {}
         }
-        // Some steps tear into a few tall blocks, others into many thin strips.
-        let n = 6 + rng.pick(9);
-        let min_h = (rng.range(6.0, 14.0) * g.sf) as i32;
+        // Some steps tear into a few tall blocks, others into many thin strips (a seam: a few
+        // tall blocks only).
+        let n = if g.light { 3 + rng.pick(3) } else { 6 + rng.pick(9) };
+        let min_h = (if g.light { rng.range(24.0, 40.0) } else { rng.range(6.0, 14.0) } * g.sf) as i32;
         for _ in 1..n {
             cuts.push(rng.range(top as f32, g.h as f32) as i32);
         }
@@ -342,6 +363,8 @@ impl BodyPlan {
             let still = g.still_from.is_some_and(|s| y1 > s);
             let (dx, d) = if still {
                 (0, 0)
+            } else if g.light {
+                ((sign * rng.range(1.5, 5.0) * g.sf * amp).round() as i32, 0)
             } else if face {
                 ((sign * rng.range(0.0, 3.0) * g.sf * amp).round() as i32, 0)
             } else if rng.range(0.0, 1.0) < 0.85 {
@@ -370,7 +393,7 @@ impl BodyPlan {
         let palette = [YELLOW, VIOLET, CYAN, PINK];
         // Chroma bars: 1 in the build-up and the aftershocks, 1–3 at the peak; 4–10 px tall,
         // thicker with the strength; anywhere from below the face to the knees.
-        if s > 0.2 && !g.calm {
+        if s > 0.2 && !g.calm && !g.light {
             let bars = if s > 0.8 { 1 + rng.pick(3) } else { 1 };
             let t0 = g.face.map_or(by + bh / 5, |f| f.1 + (4.0 * g.sf) as i32);
             let t1 = (by + bh * 4 / 5).max(t0 + 1);
@@ -384,7 +407,7 @@ impl BodyPlan {
             }
         }
         // Corruption cells, 2–4 px tall (never on the face).
-        for i in 0..if g.calm { 0 } else { (s * 7.0) as usize } {
+        for i in 0..if g.calm || g.light { 0 } else { (s * 7.0) as usize } {
             let cw = (rng.range(8.0, 30.0) * g.sf) as u16;
             let ch = rng.range(2.0, 4.99) as u16;
             let x = bx + (rng.range(0.0, 1.0) * bw as f32) as i32;
@@ -394,7 +417,13 @@ impl BodyPlan {
             }
             self.bars.push(((x as i16, y as i16, cw, ch), palette[(i + 1) % palette.len()]));
         }
-        self.scan = if g.calm { 0.14 } else { 0.32 } * s;
+        self.scan = if g.light {
+            0.0
+        } else if g.calm {
+            0.14 * s
+        } else {
+            0.32 * s
+        };
     }
 
     /// Squash/stretch a rect about the pivot without opening gaps between bands.
@@ -1052,6 +1081,7 @@ mod tests {
             tag: None,
             sf: 1.0,
             calm: false,
+            light: false,
             still_from: None,
         };
         let mut plan = BodyPlan::plain();
@@ -1087,6 +1117,7 @@ mod tests {
                     tag: Some((-40, -14)),
                     sf: 1.0,
                     calm: false,
+                    light: false,
                     still_from: None,
                 });
                 let bands = plan.slices.clone().unwrap();
@@ -1165,6 +1196,7 @@ mod tests {
                 tag: None,
                 sf: 1.0,
                 calm: true,
+                light: false,
                 still_from: Some(200),
             });
             let bands = plan.slices.clone().unwrap();
@@ -1199,6 +1231,7 @@ mod tests {
                 tag: None,
                 sf: 1.0,
                 calm: false,
+                light: false,
                 still_from: None,
             });
             let bands = plan.slices.clone().unwrap();

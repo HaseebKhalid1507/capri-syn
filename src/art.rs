@@ -36,6 +36,8 @@ struct StripDoc {
     mirror_art: Option<String>,
     #[serde(default)]
     contact: Option<ContactDoc>,
+    #[serde(default)]
+    glitch_cells: Vec<u32>,
 }
 
 /// On a window top: the line the figure sits or lies on (cell px), and the columns whose
@@ -137,9 +139,18 @@ pub struct Strip {
     pub contact: Option<ContactDoc>,
     /// An effect drawn as frames (the form bloom): it doesn't size her window (cut to it).
     pub fx: bool,
+    /// Cells with a chroma ghost drawn into them (`glitchCells`): a loop she holds (a dance,
+    /// a dangle) skips them, so no glitch runs inside it.
+    pub glitch_cells: Vec<u32>,
 }
 
 impl Strip {
+    /// The cells a loop plays: all but the glitched ones (all of them if that's every cell).
+    pub fn clean_cells(&self) -> Vec<u32> {
+        let v: Vec<u32> = (0..self.frames).filter(|c| !self.glitch_cells.contains(c)).collect();
+        if v.is_empty() { (0..self.frames).collect() } else { v }
+    }
+
     /// Frame id of cell `i` (the twin's cells are stored mirrored: `~` marks them).
     pub fn cell_id(&self, i: u32) -> String {
         format!("{}#{i}", self.name)
@@ -308,6 +319,7 @@ impl Anim {
                 mirror_art: d.mirror_art.clone(),
                 contact: d.contact,
                 fx: d.family == "fx",
+                glitch_cells: d.glitch_cells.iter().copied().filter(|&c| c < d.frames).collect(),
             });
         }
         for s in &anim.strips {
