@@ -107,11 +107,11 @@ value rejects the whole file (the previous values stay). `avatarctl settings rel
 | `[brain] enabled` | `true` | the cat brain (roam, bids, summons). Off: she stays where she's put |
 | `[brain] attention` | `"mix"` | `"mix"`, `"hang_only"` or `"off"` (no bids). Also in the right-click menu |
 | `[brain] approaches` | hang 2, hang_upside_down 1, cling 3, sit_edge 3, peek 1, beside 1 | bid approach weights; 0 turns one off |
-| `[brain] arrivals` | teleport 3, glitch 1, drop_in 2, hop 1 | how she gets there |
+| `[brain] arrivals` | hop 4, teleport 2, drop_in 2, glitch 1 | how she gets there |
 | `[brain] no_repeat` | `2` | her approach, arrival and emote each avoid her last N picks (while another is left) |
-| `[brain] passive_every_min` | `[3, 10]` | minutes between her own moves |
-| `[brain] bid_every_min` | `[20, 30]` | minutes between attention bids |
-| `[brain] max_moves_per_hour` | `15` | her own moves per hour, at most |
+| `[brain] passive_every_min` | `[0.75, 3]` | minutes between her own roams (small hops in between) |
+| `[brain] bid_every_min` | `[8, 15]` | minutes between attention bids |
+| `[brain] max_moves_per_hour` | `45` | her own moves per hour, at most (a small hop counts a quarter) |
 | `[brain] cover_max_pct` | `12` | how much of a window she may cover when she picks a spot (0..50 %) |
 | `[brain] fullscreen` | `"hide"` | `"hide"` while a window is fullscreen on her monitor, or `"stay"` (and never move) |
 | `[brain] monitor` | `"follow"` | `"follow"` the monitor you work on, or `"any"` |
@@ -134,9 +134,10 @@ value rejects the whole file (the previous values stay). `avatarctl settings rel
 | `[voice] enabled` | `false` | push-to-talk and spoken replies, through `capri-voice` |
 | `[voice] stt_model` | `"small.en"` | `"small.en"`, `"base.en"` or `"medium.en"` |
 | `[voice] voice` | a stock Kokoro blend | a Kokoro voice or a blend (`"af_bella:0.6,af_nicole:0.4"`); `+glitch` adds the trace |
-| `[voice] speed` | `1.05` | 0.5..2 |
-| `[voice] duck` | `"pause"` | other audio while she listens or speaks: `"pause"` (MPRIS), `"duck"` (PipeWire) or `"off"` |
+| `[voice] speed` | `1.2987` (1 / 0.77, her pace) | 0.5..2 |
+| `[voice] duck` | `"duck"` | other audio while she listens or speaks: `"duck"` (PipeWire, −18 dB), `"pause"` (MPRIS) or `"off"` |
 | `[voice] key` | `"c"` | the talk key's letter, so an X auto-repeat isn't taken for a release. Match your binding |
+| `[voice] wake_word` | `true` | "Hey Capri" starts a hands-free conversation. While on (with voice on) one mic stream stays open, shown on her tag. The rest of `[voice]` (toggle, hands-free, echo, pace): [VOICE.md](VOICE.md) |
 | `[voice] hold_to_talk` | `false` | Windows: her summon key (Win+Alt+C) talks while held; a tap opens the Line either way. Linux: unused (the binding sends `talk press` / `talk release`) |
 
 `[session]` applies only to her own session, never to one she rides with `--session`.
