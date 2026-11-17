@@ -370,7 +370,7 @@ impl Command {
             },
             "art" => match rest.split_whitespace().collect::<Vec<_>>().as_slice() {
                 [pool, id] => Command::Art { pool: pool.to_string(), id: id.to_string() },
-                _ => bail!("usage: art <perch|sleepFloor|sleepWindow> <variant id|next>"),
+                _ => bail!("usage: art <stand|perch|sleepFloor|sleepWindow> <variant id|next>"),
             },
             "face" => Command::Face(match rest.trim() {
                 "left" => Some(false),

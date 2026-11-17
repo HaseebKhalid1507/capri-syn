@@ -295,6 +295,20 @@ pub trait Desktop: Send + Sync {
     /// grabbed: the focused window gets it too. Backends without it never call `on`.
     fn watch_escape(&self, _on: Box<dyn Fn() + Send>) {}
     fn arm_escape(&self, _on: bool) {}
+    /// The pointer's image over her surface `s` (None: the desktop's). Backends without it keep
+    /// the desktop's.
+    fn pointer_image(&self, _s: WinId, _img: Option<&PointerImage>) {}
+}
+
+/// A pointer image: premultiplied ARGB, `w`×`h`, its hotspot. `key` tells images apart (a backend
+/// may keep the one it made).
+#[derive(Clone, Debug)]
+pub struct PointerImage {
+    pub key: u64,
+    pub w: u16,
+    pub h: u16,
+    pub hot: (u16, u16),
+    pub argb: Vec<u32>,
 }
 
 /// Primitive commands on her own surfaces. Main thread only (a backend may hold GPUI

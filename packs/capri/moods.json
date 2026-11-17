@@ -747,9 +747,78 @@
       }
     ]
   },
+  "transitions": {
+    "perchLeave": "perch_leave",
+    "floorArrive": "arrive",
+    "floorLeave": "leave",
+    "wake": "wake",
+    "form": "form"
+  },
+  "formChance": 0.15,
   "variants": {
     "cacheMb": 24,
     "pools": {
+      "stand": {
+        "shiftMs": [
+          20000,
+          60000
+        ],
+        "shiftStays": true,
+        "bridge": "legacy",
+        "bridgeMs": [
+          4000,
+          10000
+        ],
+        "variants": [
+          {
+            "id": "neutral",
+            "weight": 6
+          },
+          {
+            "id": "idle",
+            "strip": "idle",
+            "blinks": [
+              {
+                "strip": "idle_blink",
+                "weight": 7
+              },
+              {
+                "strip": "idle_blink_glitch",
+                "weight": 1
+              }
+            ],
+            "blinkMs": [
+              3000,
+              6000
+            ],
+            "weight": 1,
+            "every": 2,
+            "holdMs": [
+              2500,
+              5000
+            ]
+          },
+          {
+            "id": "legacy",
+            "strip": "idle_legacy",
+            "blinks": [
+              {
+                "strip": "blink",
+                "weight": 7
+              },
+              {
+                "strip": "blink_glitch",
+                "weight": 1
+              }
+            ],
+            "blinkMs": [
+              3000,
+              6000
+            ],
+            "weight": 1
+          }
+        ]
+      },
       "perch": {
         "shiftMs": [
           120000,
@@ -1206,17 +1275,11 @@
     "perch": [
       {
         "frame": "intro-landing-seat",
-        "ms": 300
-      },
-      {
-        "frame": "transition-edge_perch",
-        "ms": 160
+        "ms": 340
       }
     ],
+    "perchDipMs": 60,
     "teleportChance": 0.5
-  },
-  "transitions": {
-    "perchArrive": "perch_arrive"
   },
   "kiss": {
     "steps": [

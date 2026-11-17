@@ -16,7 +16,7 @@
     "fps": 15,
     "fpsFrom": "clips.json",
     "loop": false,
-    "family": "stand",
+    "family": "standLegacy",
     "anchor": {
      "name": "feet",
      "x": 146,
@@ -39,7 +39,7 @@
     "fps": 8,
     "fpsFrom": "clips.json",
     "loop": false,
-    "family": "stand",
+    "family": "standLegacy",
     "anchor": {
      "name": "feet",
      "x": 146,
@@ -62,7 +62,7 @@
     "fps": 8,
     "fpsFrom": "clips.json",
     "loop": false,
-    "family": "stand",
+    "family": "standLegacy",
     "anchor": {
      "name": "feet",
      "x": 146,
@@ -85,7 +85,7 @@
     "fps": 16,
     "fpsFrom": "clips.json",
     "loop": true,
-    "family": "stand",
+    "family": "standLegacy",
     "anchor": {
      "name": "feet",
      "x": 143,
@@ -131,7 +131,7 @@
     "fps": 15,
     "fpsFrom": "clips.json",
     "loop": false,
-    "family": "stand",
+    "family": "standLegacy",
     "anchor": {
      "name": "feet",
      "x": 144,
@@ -154,7 +154,7 @@
     "fps": 8,
     "fpsFrom": "clips.json",
     "loop": true,
-    "family": "stand",
+    "family": "standLegacy",
     "anchor": {
      "name": "feet",
      "x": 146,
@@ -321,7 +321,7 @@
     "fps": 8,
     "fpsFrom": "clips.json",
     "loop": true,
-    "family": "stand",
+    "family": "standLegacy",
     "anchor": {
      "name": "feet",
      "x": 146,
@@ -783,7 +783,7 @@
     "fps": 15,
     "fpsFrom": "clips.json",
     "loop": false,
-    "family": "stand",
+    "family": "standLegacy",
     "anchor": {
      "name": "feet",
      "x": 144,
@@ -1279,7 +1279,7 @@
     "fps": 6,
     "fpsFrom": "clips.json",
     "loop": true,
-    "family": "stand",
+    "family": "standLegacy",
     "anchor": {
      "name": "feet",
      "x": 143,
@@ -1302,7 +1302,7 @@
     "fps": 15,
     "fpsFrom": "clips.json",
     "loop": false,
-    "family": "stand",
+    "family": "standLegacy",
     "anchor": {
      "name": "feet",
      "x": 146,
@@ -1325,7 +1325,7 @@
     "fps": 12,
     "fpsFrom": "clips.json",
     "loop": true,
-    "family": "stand",
+    "family": "standLegacy",
     "anchor": {
      "name": "feet",
      "x": 146,
@@ -1360,7 +1360,18 @@
     "fps": 15,
     "fpsFrom": "guess",
     "loop": false,
-    "family": "fx"
+    "family": "fx",
+    "anchor": {
+     "name": "feet",
+     "x": 329,
+     "y": 586
+    },
+    "bounds": [
+     0,
+     0,
+     576,
+     516
+    ]
    }
   },
   "stills": {
@@ -1441,21 +1452,12 @@
    },
    "standLegacy": {
     "base": "idle_legacy",
-    "members": [
-     "idle_legacy",
-     "blink",
-     "blink_glitch",
-     "grin",
-     "mouth",
-     "walk",
-     "dance",
-     "arrive",
-     "leave",
-     "wake",
-     "glitch",
-     "sleep"
-    ],
-    "note": "same 240x384 cell and anchor as idle_legacy (arrive end, wake end, walk, blink, grin, glitch end overlay it at shift 0,0, IoU 0.90-0.99); idle (116 cell) is a newer, narrower drawing"
+    "note": "the 240x384 cell and anchor of idle_legacy (arrive end, wake end, walk, blink, grin, glitch end overlay it at shift 0,0, IoU 0.90-0.99): its own seam family, since idle (116 cell) is a newer, narrower drawing"
+   },
+   "fx": {
+    "unitsHighVsStand": 0.75,
+    "faces": "right",
+    "note": "form: the landing bloom, at 3/4 of her size so it fits her window; anchored so its last scribble lands where arrive's first line is (scribble centre 294,362 + arrive line -26,-168 from the feet, / 0.75)"
    }
   }
  },

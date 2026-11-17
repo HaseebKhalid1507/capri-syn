@@ -68,8 +68,14 @@ struct FileDoc {
 #[serde(default)]
 struct SideDoc {
     strips: BTreeMap<String, StripDoc>,
+    stills: BTreeMap<String, StillDoc>,
     families: BTreeMap<String, FamilyDoc>,
     files: BTreeMap<String, FileDoc>,
+}
+
+#[derive(Deserialize, Clone, Debug, Default)]
+struct StillDoc {
+    file: String,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -129,6 +135,8 @@ pub struct Strip {
     pub mirror_art: Option<String>,
     /// Below `line` only the `legs` columns stay (cell px; see `ContactDoc`).
     pub contact: Option<ContactDoc>,
+    /// An effect drawn as frames (the form bloom): it doesn't size her window (cut to it).
+    pub fx: bool,
 }
 
 impl Strip {
@@ -155,6 +163,8 @@ pub struct Anim {
     pub by_name: HashMap<String, usize>,
     /// The close-ups for the cinematic intro (path, sha256), all of them or none.
     pub intro: Vec<(PathBuf, Option<String>)>,
+    /// lachy's stills on disk, by name (`face`, `capri`, `cursor`): (path, sha256).
+    pub stills: HashMap<String, (PathBuf, Option<String>)>,
 }
 
 /// Every close-up the intro needs, from `mochi.files` (kind `intro`), in order; empty unless all
@@ -198,6 +208,12 @@ impl Anim {
         let mut errors = Vec::new();
         let stand = side.families.get("stand").and_then(|f| f.body_px).filter(|&b| b > 0.0);
         let mut anim = Anim { intro, ..Anim::default() };
+        for (name, s) in &side.stills {
+            let path = root.join(&s.file);
+            if path.is_file() {
+                anim.stills.insert(name.clone(), (path, side.files.get(&s.file).and_then(|f| f.sha256.clone())));
+            }
+        }
         for (name, d) in &side.strips {
             // Effects and overlays have no anchor: not body frames (later phases).
             let Some(a) = &d.anchor else { continue };
@@ -253,6 +269,7 @@ impl Anim {
                 faces_right: !fam.faces.as_deref().is_some_and(|f| f.eq_ignore_ascii_case("left")),
                 mirror_art: d.mirror_art.clone(),
                 contact: d.contact,
+                fx: d.family == "fx",
             });
         }
         for s in &anim.strips {

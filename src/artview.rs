@@ -95,6 +95,7 @@ impl Avatar {
         let here = match k {
             PoolKey::Perch | PoolKey::SleepWindow => self.sitting(),
             PoolKey::SleepFloor => self.placement == Placement::Ground,
+            PoolKey::Stand => self.placement == Placement::Ground && self.standing(),
         };
         if !here {
             return None;
@@ -117,12 +118,13 @@ impl Avatar {
         if sleeping_window && sw.is_none() && self.perch_sleep_frame(Mood::Sleepy).is_some() {
             return None;
         }
-        sw.or_else(|| self.art_on(PoolKey::SleepFloor)).or_else(|| self.art_on(PoolKey::Perch))
+        sw.or_else(|| self.art_on(PoolKey::SleepFloor)).or_else(|| self.art_on(PoolKey::Perch)).or_else(|| self.art_on(PoolKey::Stand))
     }
 
-    /// The art family of the strip variant on screen; None: the pack's own art.
-    pub(super) fn art_strip_family(&self) -> Option<u16> {
-        self.art_strip().and_then(|a| self.pack.strip_family(a.base))
+    /// The strip variant on screen is `k`'s.
+    pub(super) fn art_strip_is(&self, k: PoolKey) -> bool {
+        let Some(on) = self.art_strip() else { return false };
+        self.art_variant(k).and_then(|v| v.art.as_ref()).is_some_and(|a| a.base == on.base)
     }
 
     /// Pools in or out as she moves, sleeps and wakes; a pick on the way in. True if a pick changed.
@@ -136,7 +138,9 @@ impl Avatar {
             _ => None,
         };
         let sleepy = self.arrive.deep || self.mood == Mood::Sleepy;
+        let idle = self.mood == Mood::Idle && self.music.is_none() && self.brain.as_ref().is_none_or(|h| h.rest.is_none());
         let want = [
+            (PoolKey::Stand, place == Placement::Ground && idle && !self.floor_asleep()),
             (PoolKey::Perch, on.is_some()),
             (PoolKey::SleepWindow, on.is_some() && sleepy),
             (PoolKey::SleepFloor, place == Placement::Ground && self.floor_asleep()),
@@ -183,18 +187,28 @@ impl Avatar {
 
     /// After a pick: the next shift and blink, and the strips it needs.
     fn art_after_pick(&mut self, now: Instant) {
-        let top = [PoolKey::SleepWindow, PoolKey::SleepFloor, PoolKey::Perch].into_iter().find(|k| self.art.picks.contains_key(k));
+        let top = [PoolKey::SleepWindow, PoolKey::SleepFloor, PoolKey::Perch, PoolKey::Stand].into_iter().find(|k| self.art.picks.contains_key(k));
         let range = top.and_then(|k| self.pack.pools[&k].shift_ms).filter(|_| top.is_some_and(|k| self.pack.pools[&k].variants.len() > 1));
         self.art.shift_at = range.map(|r| now + self.art.picker.shift_in(r));
         let blink = self.art.picks.iter().filter_map(|(&k, &i)| self.pack.pools[&k].variants[i].art.as_ref()).find(|a| !a.blinks.is_empty()).map(|a| a.blink_ms);
         self.art.next_blink = blink.map(|r| now + self.art.picker.shift_in(r));
         let hold = self.art_strip().and_then(|a| a.hold_ms);
         self.art.hold_ms = hold.map_or(0, |r| self.art.picker.shift_in(r).as_millis() as u32);
-        let arts: Vec<VariantArt> = self.art.picks.iter().filter_map(|(&k, &i)| self.pack.pools[&k].variants[i].art.clone()).collect();
-        for a in arts {
+        let arts: Vec<(PoolKey, VariantArt)> = self.art.picks.iter().filter_map(|(&k, &i)| Some((k, self.pack.pools[&k].variants[i].art.clone()?))).collect();
+        for (k, a) in arts {
             self.art_need(a.base);
             for (b, _) in &a.blinks {
                 self.art_need(*b);
+            }
+            // Its family's drawn ways in and out, in by the time they play.
+            let keys: &[&str] = match k {
+                PoolKey::Stand => &["floorArrive", "floorLeave", "form"],
+                PoolKey::Perch => &["perchLeave"],
+                PoolKey::SleepFloor => &["wake"],
+                PoolKey::SleepWindow => &[],
+            };
+            for key in keys {
+                self.art_want(key);
             }
         }
     }
@@ -354,7 +368,7 @@ impl Avatar {
 
     /// A long stay: the top pool re-picks (never the same), on the same spot.
     fn art_shift(&mut self, now: Instant) -> bool {
-        let Some(k) = [PoolKey::SleepWindow, PoolKey::SleepFloor, PoolKey::Perch].into_iter().find(|k| self.art.picks.contains_key(k)) else {
+        let Some(k) = [PoolKey::SleepWindow, PoolKey::SleepFloor, PoolKey::Perch, PoolKey::Stand].into_iter().find(|k| self.art.picks.contains_key(k)) else {
             self.art.shift_at = None;
             return false;
         };
@@ -362,7 +376,8 @@ impl Avatar {
         let eligible: Vec<bool> = self.pack.pools[&k].variants.iter().map(|v| self.art_eligible(v, place)).collect();
         let weights: Vec<f32> = self.pack.pools[&k].variants.iter().map(|v| v.weight).collect();
         let before = self.art.picks.get(&k).copied();
-        let picked = self.art.picker.pick(k, &weights, &eligible, &vec![false; weights.len()]);
+        let stays: Vec<bool> = self.pack.pools[&k].variants.iter().map(|v| self.pack.pools[&k].shift_stays && v.art.is_none()).collect();
+        let picked = self.art.picker.pick(k, &weights, &eligible, &stays);
         if let Some(i) = picked {
             self.art_set(k, i);
         }
@@ -374,9 +389,40 @@ impl Avatar {
         false
     }
 
+    /// A drawn arrival or wake ended in the stand pool's bridge drawing: she stands in it a few
+    /// seconds before the next shift (a glitch over to her pose then). False: no stand pool
+    /// here now (another mood: the layer's cut is the seam).
+    pub(super) fn art_bridge(&mut self, from: Instant, now: Instant) -> bool {
+        let k = PoolKey::Stand;
+        let Some((i, range)) = self.pack.pools.get(&k).and_then(|p| Some((p.bridge?, p.bridge_ms))) else { return false };
+        self.art_sync(now);
+        if !self.art.picks.contains_key(&k) {
+            return false;
+        }
+        self.art.picker.force(k, i);
+        self.art_set(k, i);
+        self.art_after_pick(now);
+        self.art.shift_at = Some(from + self.art.picker.shift_in(range));
+        true
+    }
+
+    /// A drawn transition `key` (`moods.json transitions`) whose cells are in (as she faces):
+    /// its frames. Asked for if not.
+    pub(super) fn art_transition(&self, key: &str) -> Option<Seq> {
+        let si = *self.pack.transitions.get(key)?;
+        self.art_ready(si).then(|| self.pack.strip_seq(si, 1))
+    }
+
+    /// Ask for transition `key`'s cells now (they decode in ~10-30 ms).
+    pub(super) fn art_want(&self, key: &str) {
+        if let Some(&si) = self.pack.transitions.get(key) {
+            self.art_need(si);
+        }
+    }
+
     /// Dev: `art <pool> <variant id|next>`.
     pub(super) fn art_force(&mut self, pool: &str, id: &str, now: Instant) -> String {
-        let Some(k) = PoolKey::parse(pool) else { return format!("error: pool `{pool}` (perch|sleepFloor|sleepWindow)") };
+        let Some(k) = PoolKey::parse(pool) else { return format!("error: pool `{pool}` (stand|perch|sleepFloor|sleepWindow)") };
         let Some(p) = self.pack.pools.get(&k) else { return format!("error: this pack has no `{pool}` pool") };
         if !self.art.picks.contains_key(&k) {
             return format!("error: not in the `{pool}` state now");

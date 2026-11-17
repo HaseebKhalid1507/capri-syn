@@ -213,6 +213,9 @@ pub struct GlitchStep {
     /// A teleport landing: bands come back top-down in one piece (no loose chunks), no
     /// chroma bars or corruption cells, lighter scanlines.
     pub calm: bool,
+    /// Bands reaching this row and below stay where they are, with no split (a landing on a
+    /// window top: her legs at the edge never tear across it).
+    pub still_from: Option<i32>,
 }
 
 /// How the body is drawn this frame. Device px, relative to the avatar rect.
@@ -336,7 +339,10 @@ impl BodyPlan {
             if rng.range(0.0, 1.0) < 0.75 {
                 sign = -sign;
             }
-            let (dx, d) = if face {
+            let still = g.still_from.is_some_and(|s| y1 > s);
+            let (dx, d) = if still {
+                (0, 0)
+            } else if face {
                 ((sign * rng.range(0.0, 3.0) * g.sf * amp).round() as i32, 0)
             } else if rng.range(0.0, 1.0) < 0.85 {
                 ((sign * rng.range(lo, 40.0) * g.sf * amp).round() as i32, (rng.range(4.0, 8.0) * g.sf * amp).round() as i32)
@@ -350,7 +356,7 @@ impl BodyPlan {
             if !keep {
                 continue;
             }
-            let channel = (!face && g.solid > 0.0 && hash01(k as u32 + 17, g.order as u32 ^ 0x5a5a) < g.solid)
+            let channel = (!face && !still && g.solid > 0.0 && hash01(k as u32 + 17, g.order as u32 ^ 0x5a5a) < g.solid)
                 .then_some(if k % 2 == 0 { SPLIT_RED } else { SPLIT_BLUE });
             slices.push((y0, y1, dx, 0));
             split.push(d);
@@ -1046,6 +1052,7 @@ mod tests {
             tag: None,
             sf: 1.0,
             calm: false,
+            still_from: None,
         };
         let mut plan = BodyPlan::plain();
         plan.glitch(step(t));
@@ -1080,6 +1087,7 @@ mod tests {
                     tag: Some((-40, -14)),
                     sf: 1.0,
                     calm: false,
+                    still_from: None,
                 });
                 let bands = plan.slices.clone().unwrap();
                 // Every row from the HUD to the feet is in exactly one band: nothing dropped.
@@ -1138,6 +1146,37 @@ mod tests {
     }
 
     #[test]
+    fn a_perch_landing_never_tears_her_legs_across_the_edge() {
+        let t = Instant::now();
+        let g = Glitch::new(GlitchKind::Land, t, 5);
+        for f in 0..10u64 {
+            let at = t + Duration::from_millis(f * 33);
+            let mut plan = BodyPlan::plain();
+            plan.glitch(GlitchStep {
+                strength: g.strength(at),
+                coverage: g.coverage(at),
+                seed: g.step_seed(f),
+                order: g.seed(),
+                y0: -40,
+                h: 300,
+                body: (50, 0, 200, 300),
+                face: Some((40, 70)),
+                solid: 0.3,
+                tag: None,
+                sf: 1.0,
+                calm: true,
+                still_from: Some(200),
+            });
+            let bands = plan.slices.clone().unwrap();
+            for (i, &(_, y1, dx, _)) in bands.iter().enumerate() {
+                if y1 > 200 {
+                    assert_eq!((dx, plan.split[i], plan.solid[i]), (0, 0, None), "frame {f}: a band at the edge moved");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn glitch_pattern_changes_every_frame_and_bars_stay_inside() {
         let t = Instant::now();
         let g = Glitch::new(GlitchKind::Big, t, 9);
@@ -1160,6 +1199,7 @@ mod tests {
                 tag: None,
                 sf: 1.0,
                 calm: false,
+                still_from: None,
             });
             let bands = plan.slices.clone().unwrap();
             if g.strength(at) > 0.05 {

@@ -166,6 +166,9 @@ Optional desktop art, into the pack's `anim/` (a pack without it loads as before
   Its images are show frames and fan art that its licence does not cover: local personal use only, never
   published. Only this flag puts them in a pack (into your local pack directory); nothing in this repo
   ships or fetches them otherwise. They give her the launch close-up (below).
+- lachy's stills, when the pack has them: her portrait beside her rows in the Line (`face`), `capri.png` over
+  the right-click menu and as the image of the one notification she sends (NEEDS YOU while a fullscreen window
+  hides her; org.freedesktop.Notifications), and its cursor while the pointer is over her head (X11).
 - `anim/anim.json` is `tools/desktop-art.json` (capri-syn's own measured cell grid, anchors and loop flags)
   plus the sha256 of every copied file. `NOTICE.md` gains each source's `Required Notice:` lines, the licence
   URL and its credits.
@@ -190,16 +193,28 @@ With `anim/`, `moods.json` `variants` mixes that art in; she never swaps one set
   goes through a glitch (the body's; her tag stays whole).
 - Strips decode when first wanted, off the main thread; `cacheMb` caps what is kept (least recently shown
   first, never what is on screen). A pack without `anim/` keeps only the pack's own variants.
-- `transitions` names drawn in-betweens by change: `perchArrive` (a one-shot seat strip). Landing on a
-  window top, the arrival is the art she lands in, so nothing is cut after the contact: her perch pick is
-  the pack's own pose → `arrive.perch`; a drawn pose → its family's `perchArrive` (none if its cells
-  aren't in: the landing glitch covers the cut). Her tag comes back once the drawn arrival has formed her.
+- `stand` (standing idle on the floor, the Idle mood only: every other mood keeps the pack's poses) shifts
+  in place every `shiftMs`; with `shiftStays` a shift may keep the pack's own pose, so each variant holds
+  about its weight's share of the time (Capri: 6 : 1 : 1, CapriCore ~75 %). A drawn arrival or wake ends
+  in its `bridge` variant's drawing, held `bridgeMs` before the next shift.
+- `transitions` names drawn in-betweens by change (one-shots with the anchor the change needs):
+  `perchLeave` (off a lachy perch into the bolt), `floorLeave` / `floorArrive` (a loud teleport from / onto
+  the floor while the stand pick is lachy's; the arrival is the materialisation, no landing glitch over
+  it, its first frames the plain red silhouette), `wake` (up from a lachy floor sleep) and `form` (the
+  bloom a drawn floor arrival starts from, `formChance` of the time; 3/4 of her size, cut to her window).
+  The travel bolt stays plain red. A quiet (passive) teleport never plays them.
+- Landing on a window top she touches down with the pack's `arrive.perch` (Capri: her crouch on the
+  edge), then her sit inside a dip at contact: the squash starts `arrive.perchDipMs` before the change,
+  so the swap falls near its trough (no dissolve, no double image). Before a drawn pose (lachy's perch)
+  only that first frame plays, cut inside the landing glitch, so the art changes before she's solid; the
+  dip is then the settle at the glitch's end. The landing glitch never shifts her legs below the edge.
 
 The launch, with `[intro] cinematic` on:
 
-- If the pack has the close-ups (`anim/mochi/intro-*`, `--mochi` only), her close-up rises from the bottom
-  of her monitor (62 % of its height, centred on the work area) and plays its 2.6 s beat: grab, a whip into
-  a wave, "hi", a grin, then out: it sinks while its rows drop out, inside its own pixels. A click on it
+- If the pack has the close-ups (`anim/mochi/intro-*`, `--mochi` only), her close-up rises from below the
+  bottom of her monitor while a glitch builds it (62 % of its height, centred on the work area) and plays
+  its 2.7 s beat: grab, a whip into a wave, "hi", a grin, then out: it sinks while its rows drop out, inside
+  its own pixels; it holds its last rows until the bolt is on screen, then goes. A click on it
   or Esc anywhere skips to the out beat. Clicks anywhere else go through to the window under it, and Esc
   reaches your window too.
 - It doesn't play while a fullscreen window is focused, within `cinematic_min_gap_min` of her last run
@@ -208,7 +223,8 @@ The launch, with `[intro] cinematic` on:
 - Then the plain red bolt from the top of the monitor, onto the floor or onto the window she sat on last
   time (`state.json` `perch`: the same window, same size, same place, with room on its top; else the
   floor). On the floor she lands once (`arrive.cinematic`; the close-up was the greeting) and is idle
-  ~3.2 s after the close-up's first frame. A launch without the close-up lands with `arrive.launch`.
+  ~3.1 s after the close-up's first frame. After any landing her idle life starts at once: a sparkle, a
+  breath step and a blink within half a second. A launch without the close-up lands with `arrive.launch`.
 - Without the close-ups, the launch is just that bolt. The close-ups are decoded for each launch and
   dropped after it.
 
@@ -235,7 +251,7 @@ sends one:
 mood <name> | clip <id> | say <text> | pos <x> <y> [now] | perch [sit|stand] [win] | perch off | drop | stack
 page next|prev | scroll <n> | reader open [focus]|close|copy [n]|scroll <px> | collapse | expand
 music on|off | glitch | face left|right|toggle | drag … | submit <text> | abort | copy
-art perch|sleepFloor|sleepWindow <variant id|next> | intro [skip]
+art stand|perch|sleepFloor|sleepWindow <variant id|next> | intro [skip]
 talk press|release | line close | prompt confirm|secret [text] | prompt off
 brain … | settings reload | tap head|body | menu | shape | state | hide | show | quit
 ```

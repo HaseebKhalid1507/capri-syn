@@ -43,6 +43,7 @@ mod reader;
 mod line;
 mod chip;
 mod mpris;
+mod notify;
 mod session;
 mod settings;
 mod shape;
@@ -111,7 +112,7 @@ Dev control: newline commands on $XDG_RUNTIME_DIR/synaps-avatar.sock
   clip <clip, action or frame id>   say <text>   page next|prev   collapse   expand
   pos <x> <y> [now]   perch [sit|stand] [window id]   perch off   drop
   music on|off   glitch   state   hide   quit
-  art <perch|sleepFloor|sleepWindow> <variant id|next>   (a variant pool she is in)
+  art <stand|perch|sleepFloor|sleepWindow> <variant id|next>   (a variant pool she is in)
   submit <text>   abort   prompt confirm|secret [text]   (session / dev)";
 
 fn parse_args() -> Result<Args> {

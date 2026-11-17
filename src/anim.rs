@@ -103,6 +103,7 @@ impl Rng {
     }
 }
 
+#[derive(Clone)]
 pub struct Animator {
     base: usize,
     looping: Option<Seq>,
@@ -114,11 +115,13 @@ pub struct Animator {
     /// The loop ends on a rest: a one-shot over it (a blink) returns to that rest, not to
     /// the start of the loop's motion.
     rest_last: bool,
+    /// The next hold the loop starts or resumes on ends within this (ms), once.
+    soon: Option<u32>,
 }
 
 impl Animator {
     pub fn new(base: usize) -> Animator {
-        Animator { base, looping: None, loop_pos: 0, oneshot: None, one_pos: 0, due: None, rng: Rng::seeded(), rest_last: false }
+        Animator { base, looping: None, loop_pos: 0, oneshot: None, one_pos: 0, due: None, rng: Rng::seeded(), rest_last: false, soon: None }
     }
 
     pub fn frame(&self) -> usize {
@@ -132,6 +135,16 @@ impl Animator {
     }
 
     /// The mood layer's resting frame (stable while loops and one-shots play).
+    /// The frame that shows at `t` (a copy steps there; this one doesn't move).
+    pub fn frame_at(&self, t: Instant) -> usize {
+        if self.due.is_none_or(|d| d > t) {
+            return self.frame();
+        }
+        let mut a = self.clone();
+        a.tick(t);
+        a.frame()
+    }
+
     pub fn base(&self) -> usize {
         self.base
     }
@@ -167,10 +180,24 @@ impl Animator {
         self.due = match &self.looping {
             Some(s) => {
                 let ms = s[self.loop_pos].1;
-                Some(now + Duration::from_millis(self.loop_ms(ms)))
+                let d = self.loop_ms(ms);
+                let d = if ms >= 400 { self.soon.take().map_or(d, |c| d.min(c as u64)) } else { d };
+                Some(now + Duration::from_millis(d))
             }
             None => None,
         };
+    }
+
+    /// The hold she is on (or the next one the loop starts or resumes on, after a one-shot) ends
+    /// within `ms`: life right after a landing (a blink), not a still hold first.
+    pub fn rest_soon(&mut self, ms: u32, now: Instant) {
+        let held = self.looping.as_ref().is_some_and(|s| s[self.loop_pos].1 >= 400);
+        if self.oneshot.is_none() && held {
+            let t = now + Duration::from_millis(ms as u64);
+            self.due = Some(self.due.map_or(t, |d| d.min(t)));
+        } else {
+            self.soon = Some(ms);
+        }
     }
 
     /// Mood layer: base frame + optional loop. A playing one-shot finishes first.
@@ -259,6 +286,25 @@ mod tests {
         assert_eq!(Mood::parse("NeedsYou"), Some(Mood::NeedsYou));
         assert_eq!(Mood::parse("idle"), Some(Mood::Idle));
         assert_eq!(Mood::parse("nope"), None);
+    }
+
+    #[test]
+    fn rest_soon_shortens_the_next_hold_once() {
+        let t = Instant::now();
+        let mut a = Animator::new(0);
+        a.set_layer(0, Some(vec![(0, 3000), (1, 80), (0, 700)]), t);
+        a.rest_soon(500, t);
+        assert!(a.deadline().is_some_and(|d| d <= t + Duration::from_millis(500)), "on the hold now");
+        // Over a one-shot: the hold it resumes on.
+        let mut b = Animator::new(0);
+        b.set_layer(0, Some(vec![(0, 3000), (1, 80), (0, 700)]), t);
+        b.play(vec![(5, 300)], t);
+        b.rest_soon(450, t);
+        b.tick(t + Duration::from_millis(300));
+        assert_eq!(b.frame(), 0);
+        assert!(b.deadline().is_some_and(|d| d <= t + Duration::from_millis(750)));
+        // Once: used up, the next pass holds as long as ever.
+        assert!(b.soon.is_none());
     }
 
     #[test]

@@ -19,6 +19,7 @@ mod artview;
 pub(crate) mod introview;
 
 use crate::anim::{Animator, Mood, Rng, Seq};
+use crate::variants::PoolKey;
 use crate::control::Command;
 use crate::edges;
 use crate::frames::{Frame, Geometry, NoteMasks};
@@ -36,6 +37,41 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use synaps_client::{Client, ClientOptions};
+
+/// lachy's stills at her size: her portrait (the Line), capri.png (the menu header), the cursor
+/// over her head. Each optional: a pack without `anim/` (or a file that failed) has none.
+pub struct Stills {
+    pub face: Option<Arc<RenderImage>>,
+    pub capri: Option<Arc<RenderImage>>,
+    pub capri_path: Option<std::path::PathBuf>,
+    pub cursor: Option<crate::platform::PointerImage>,
+}
+
+/// The menu header's height (logical px) and the cursor's (her head-hover pointer).
+const MENU_HEADER_PX: f32 = 96.0;
+const CURSOR_PX: f32 = 32.0;
+
+impl Stills {
+    fn decode(st: &std::collections::HashMap<String, (std::path::PathBuf, Option<String>)>, sf: f32) -> Stills {
+        let get = |name: &str, h: f32| {
+            let (p, sha) = st.get(name)?;
+            match crate::frames::still(p, sha.as_deref(), (h * sf).round() as u32) {
+                Ok(i) => Some(i),
+                Err(e) => {
+                    elog!("synaps-avatar: still `{name}`: {e:#}");
+                    None
+                }
+            }
+        };
+        Stills {
+            face: get("face", crate::line::FACE_PX).map(crate::frames::still_image),
+            capri: get("capri", MENU_HEADER_PX).map(crate::frames::still_image),
+            capri_path: st.get("capri").map(|s| std::fs::canonicalize(&s.0).unwrap_or_else(|_| s.0.clone())),
+            // Its tip is the opaque box's top-left corner.
+            cursor: get("cursor", CURSOR_PX).map(|i| crate::frames::still_pointer(&i, (0.0, 0.0), 1)),
+        }
+    }
+}
 
 /// Window layout in device pixels (the display server works in these; GPUI gets them / scale factor).
 #[derive(Clone, Copy, Debug)]
@@ -122,6 +158,7 @@ impl Layout {
         let min_top = pack
             .frames
             .iter()
+            .filter(|f| !pack.fx_frame(f))
             .map(|f| geo.to_device(0, f.bounds.y + pack.offset(f).1).1)
             .fold(f32::MAX, f32::min);
         let avatar_y = d(TOP_MARGIN + PANEL_MAX_H + TAIL_H + TIP_GAP) - min_top.round() as i32;
@@ -340,10 +377,18 @@ const HEARTS_MS: u64 = 1_150;
 const BOLT_LAYER: usize = 0;
 /// The bubble and tag come back this long after a loud teleport has reformed her.
 const HUD_AFTER_TELEPORT: Duration = Duration::from_millis(200);
+/// After a landing: her first sparkle, breath step and blink this soon.
+const LIFE_SPARKLE: Duration = Duration::from_millis(150);
+const LIFE_BREATH: Duration = Duration::from_millis(300);
+const LIFE_BLINK_MS: u32 = 500;
+/// A drawn floor leave from another stand drawing starts this many cells in (inside its tear).
+const LEAVE_CUT_IN: usize = 2;
 /// First effect layer of the hearts: a rim and a fill per heart.
 const HEART_LAYER: usize = 6;
 /// The contact shadow under a perch, stacked right below the avatar window.
 const SHADOW_LAYER: usize = 14;
+/// It comes this long after an arrival's last frame (the pose's present lands a frame later).
+const SHADOW_AFTER_ARRIVAL: Duration = Duration::from_millis(50);
 /// Music notes: an outline and a fill layer each, at most seven notes.
 const NOTE_LAYER: usize = 15;
 const NOTES_MAX: usize = 7;
@@ -436,6 +481,8 @@ struct Teleport {
     /// A passive move: a shorter dissolve, a ~150 ms rebuild with little fringing, and the
     /// tag back with the body.
     quiet: bool,
+    /// A drawn leave (`perchLeave` / `floorLeave`) plays until then; then the bolt.
+    leave_until: Option<Instant>,
 }
 
 pub struct Avatar {
@@ -504,6 +551,9 @@ pub struct Avatar {
     focus: FocusHandle,
     focus_probe: Option<String>,
     warmed: bool,
+    /// lachy's stills, decoded after the frames (`Stills`); her head-hover pointer is on.
+    pub(super) stills: Option<Rc<Stills>>,
+    pointer_on: bool,
     /// Horizontal device-px range of the window that is on the avatar's monitor.
     vis: (i32, i32),
     // Life and effects.
@@ -748,6 +798,8 @@ impl Avatar {
             focus: cx.focus_handle(),
             focus_probe: init.focus_probe.then(String::new),
             warmed: false,
+            stills: None,
+            pointer_on: false,
             vis,
             bob_t0: now,
             hop: None,
@@ -1191,6 +1243,7 @@ impl Avatar {
                 self.glitch = Some(Glitch::new(GlitchKind::Appear, now, self.rng.next()));
             }
             self.heartbeat_start(cx);
+            self.stills_decode(cx);
             let win = self.os.body();
             self.set_icon_on(win);
             self.next_glint = Some(now + Duration::from_millis(700));
@@ -1203,6 +1256,36 @@ impl Avatar {
         }
         cx.notify();
         self.schedule(cx);
+    }
+
+    /// lachy's stills, off the main thread (a few ms each).
+    fn stills_decode(&mut self, cx: &mut Context<Self>) {
+        let Some(st) = self.pack.anim.as_ref().map(|a| a.stills.clone()).filter(|s| !s.is_empty()) else { return };
+        let sf = self.layout.sf;
+        cx.spawn(async move |this, cx| {
+            let s = crate::off_thread(move || Ok(Stills::decode(&st, sf))).await;
+            this.update(cx, |v, cx| {
+                if let Ok(s) = s {
+                    v.stills = Some(Rc::new(s));
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Her head under the pointer: lachy's cursor (a headpat waiting to happen). Applied on every
+    /// move over it (GPUI sets its own when a HUD element's changes).
+    fn hover_pointer(&mut self, p: Point<Pixels>) {
+        let Some(c) = self.stills.as_ref().and_then(|s| s.cursor.as_ref()) else { return };
+        let on = self.hit(p) == Some(true) && self.press.is_none() && self.rag.is_none();
+        if on {
+            self.os.pointer_image(Some(c));
+        } else if self.pointer_on {
+            self.os.pointer_image(None);
+        }
+        self.pointer_on = on;
     }
 
     /// A speech panel is open: the text field, a pending prompt, or a reply.
@@ -1423,6 +1506,16 @@ impl Avatar {
             self.music = None;
         }
         let prev = self.mood;
+        // NEEDS YOU while she's hidden under a fullscreen window: a desktop notification with
+        // lachy's capri.png (he can't see her tag).
+        if m == Mood::NeedsYou
+            && prev != m
+            && self.loaded
+            && self.brain.as_ref().is_some_and(|h| h.fs != brainview::FsHide::Shown)
+        {
+            let image = self.stills.as_ref().and_then(|s| s.capri_path.clone());
+            crate::notify::send(format!("{} // NEEDS YOU", self.name.to_uppercase()), "Waiting on you behind the fullscreen window.".into(), image);
+        }
         // NEEDS YOU: she looks at him (his pointer).
         if m == Mood::NeedsYou && prev != m && self.mirror_cfg.own && self.loaded {
             let x = self.origin.0 + self.layout.ground_x;
@@ -1434,8 +1527,11 @@ impl Avatar {
         // The pools see the new mood (a sleep pool in or out). A strip variant has its own way
         // in and out: the mood's CapriCore entry/exit don't play over it.
         let was_strip = self.art_strip().is_some();
+        let floor_strip_sleep = prev == Mood::Sleepy && m != prev && was_strip && self.placement == Placement::Ground;
         self.mood = m;
         self.art_sync(now);
+        // Out of a lachy floor sleep: its drawn wake (it stands her in the bridge drawing).
+        let drawn_wake = floor_strip_sleep && self.art.floor_strip && self.art_transition("wake").is_some();
         self.mood = prev;
         let to_strip = self.art_strip().is_some();
         // An arrival sequence (the launch intro) plays through; the mood's entry follows it.
@@ -1475,7 +1571,7 @@ impl Avatar {
         // Capri's state bursts.
         // Speaking comes and goes with every reply; that alone is not worth a burst.
         let chatter = m == Mood::Talking || prev == Mood::Talking;
-        if m != prev && !chatter && self.loaded && self.teleport.is_none() && self.status_of(m).key != self.status_of(prev).key {
+        if m != prev && !chatter && !drawn_wake && self.loaded && self.teleport.is_none() && self.status_of(m).key != self.status_of(prev).key {
             let big = self.spec(m).is_some_and(|s| s.big) || self.spec(prev).is_some_and(|s| s.big);
             let kind = if big { GlitchKind::Big } else { GlitchKind::Burst };
             match &mut self.rag {
@@ -1485,6 +1581,10 @@ impl Avatar {
             }
         }
         self.mood = m;
+        if drawn_wake {
+            self.art.floor_strip = false;
+            self.play_drawn_wake(now);
+        }
         let spec = self.spec(m).cloned();
         self.mood_then = spec
             .as_ref()
@@ -1577,11 +1677,11 @@ impl Avatar {
 
     // ---- perch shadow ---------------------------------------------------------------
 
-    /// Contact sliver for a perch: a solid dark band a few px thick on the window face right
-    /// under the edge, under every column where the figure touches the edge (seat, thighs,
-    /// the planted hand: opaque in the rows just above the line), widened by a pixel each
-    /// side, minus the legs hanging in front. 1-bit friendly: no dither. Avatar-local
-    /// device px.
+    /// Contact sliver for a perch: a dark band a few px thick on the window face right under
+    /// the edge, under every column where the figure touches the edge (seat, thighs, the
+    /// planted hand: opaque in the rows just above the line), widened by a pixel each side,
+    /// minus the legs hanging in front. Each stretch tapers to 1 px at its ends (a soft
+    /// contact, not a hard bar). 1-bit friendly: no dither. Avatar-local device px.
     fn shadow_rects(&self, frame: usize) -> Vec<ShapeRect> {
         let l = &self.layout;
         let Some(p) = self.perch_spec() else { return Vec::new() };
@@ -1602,16 +1702,35 @@ impl Avatar {
                 }
             }
         }
+        // Thickness per column: 1 px at a stretch's ends, `thick` from `ramp` px in.
+        let ramp = (4.0 * l.sf).round().max(1.0) as i32;
+        let mut depth = vec![0i32; w as usize];
+        let mut x = 0;
+        while x < w {
+            if !under[x as usize] {
+                x += 1;
+                continue;
+            }
+            let a = x;
+            while x < w && under[x as usize] {
+                x += 1;
+            }
+            for c in a..x {
+                let d = (c - a).min(x - 1 - c);
+                depth[c as usize] = (1 + d * (thick - 1) / ramp).min(thick);
+            }
+        }
         let mut out = Vec::new();
         for y in line.max(0)..(line + thick).min(h) {
             let mut x = 0;
+            let on = |x: i32| depth[x as usize] > (y - line) && !f.mask.get(x, y);
             while x < w {
-                if !under[x as usize] || f.mask.get(x, y) {
+                if !on(x) {
                     x += 1;
                     continue;
                 }
                 let s0 = x;
-                while x < w && under[x as usize] && !f.mask.get(x, y) {
+                while x < w && on(x) {
                     x += 1;
                 }
                 out.push((s0 as i16, y as i16, (x - s0) as u16, 1));
@@ -1622,9 +1741,14 @@ impl Avatar {
 
     /// Show, move or hide the contact shadow to match the placement.
     fn sync_shadow(&mut self) {
-        let want = self.sitting() && self.loaded && !self.hidden && self.teleport.is_none() && !self.quitting && self.press.is_none() && self.rag.is_none();
+        let now = Instant::now();
+        // None under an arrival's touchdown (a dark bar under the crouch's hand right after the
+        // contact): it comes a beat after her pose is on screen, the pose's own.
+        let settled = self.arrive.until.is_none_or(|t| now >= t + SHADOW_AFTER_ARRIVAL);
+        let want = self.sitting() && self.loaded && !self.hidden && self.teleport.is_none() && settled && !self.quitting && self.press.is_none() && self.rag.is_none();
         // The resting frame of the current layer (music swaps the pose), else the perch base.
-        let base = Some(self.anim.base())
+        let shown = self.anim.base();
+        let base = Some(shown)
             .filter(|&i| self.pack.frames.get(i).is_some_and(|f| f.anchor.name == "seat"))
             .or_else(|| self.perch_spec().and_then(|p| self.pack.index.get(&p.base).copied()));
         let (Some(base), true) = (base, want) else {
@@ -1735,6 +1859,9 @@ impl Avatar {
         if self.squash.is_some() || self.sliver.is_some() || self.turn.is_some() {
             take(Some(now + FRAME_FAST));
         }
+        take(self.teleport.as_ref().and_then(|t| t.leave_until));
+        take(self.arrive.red_until.filter(|&t| t > now));
+        take(self.arrive.until.map(|t| t + SHADOW_AFTER_ARRIVAL).filter(|&t| t > now));
         // Glints: at their slice centres (fx::GLINT_STEPS per life), not a free-running tick;
         // a step waiting for company (GLINT_SLACK) at the end of its wait.
         let life_ms = self.pack.behaviour.life.sparkle_ms;
@@ -1842,6 +1969,7 @@ impl Avatar {
     fn tick(&mut self, cx: &mut Context<Self>) {
         let now = Instant::now();
         self.view_ticks += 1;
+
         if self.sliver.is_some_and(|t| now.saturating_duration_since(t) > SLIVER) {
             self.sliver = None;
         }
@@ -2033,7 +2161,14 @@ impl Avatar {
         {
             self.spawn_glints(now);
         }
+        if self.teleport.as_ref().is_some_and(|t| matches!(t.leg, Leg::Vanish) && t.leave_until.is_some_and(|u| u <= now)) {
+            self.vanish_done(now);
+            dirty = true;
+        }
         dirty |= self.step_teleport(now);
+        if let Some(Leg::Bolt(t0)) = self.teleport.as_ref().map(|t| t.leg) {
+            self.intro_bolt_drawn(now.saturating_duration_since(t0), cx);
+        }
         if self.music.as_ref().and_then(|m| m.until).is_some_and(|u| u <= now) {
             self.music_off(now);
             dirty = true;
@@ -2153,6 +2288,33 @@ impl Avatar {
         }
     }
 
+    /// The vanish is over (its glitch, or a drawn leave): the bolt, or straight there.
+    fn vanish_done(&mut self, now: Instant) {
+        let Some(tp) = &mut self.teleport else { return };
+        tp.leave_until = None;
+        let (to, place, seed, no_bolt) = (tp.to, tp.place, tp.seed, tp.no_bolt);
+        if no_bolt {
+            // Vanished: appear there at once, the landing glitch reassembles her.
+            self.arrive(to, place, now);
+            self.hidden = false;
+            self.glitch = Some(self.land_glitch(now, seed));
+            self.arrive_appeared(now);
+            if let Some(tp) = &mut self.teleport {
+                tp.moved = true;
+                tp.leg = Leg::Appear;
+            }
+            return;
+        }
+        self.hidden = true;
+        let from = self.center_root(self.origin);
+        let to = self.center_root(to);
+        let bolt = Bolt::new(from, to, seed ^ 0xb017_5eed, 220.0 * self.layout.sf);
+        if let Some(tp) = &mut self.teleport {
+            tp.bolt = Some(bolt);
+            tp.leg = Leg::Bolt(now);
+        }
+    }
+
     fn glitch_done(&mut self, now: Instant, cx: &mut Context<Self>) {
         if self.quitting {
             self.quit(cx);
@@ -2162,31 +2324,9 @@ impl Avatar {
             self.parked_done(cx);
             return;
         }
-        let Some((leg, to)) = self.teleport.as_ref().map(|t| (t.leg, t.to)) else { return };
+        let Some(leg) = self.teleport.as_ref().map(|t| t.leg) else { return };
         match leg {
-            Leg::Vanish if self.teleport.as_ref().is_some_and(|t| t.no_bolt) => {
-                // Vanished: appear there at once, the landing glitch reassembles her.
-                let (to, place, seed) = self.teleport.as_ref().map(|t| (t.to, t.place, t.seed)).unwrap_or((self.origin, self.placement, 0));
-                self.arrive(to, place, now);
-                self.hidden = false;
-                self.glitch = Some(self.land_glitch(now, seed));
-                self.arrive_appeared(now);
-                if let Some(tp) = &mut self.teleport {
-                    tp.moved = true;
-                    tp.leg = Leg::Appear;
-                }
-            }
-            Leg::Vanish => {
-                self.hidden = true;
-                let from = self.center_root(self.origin);
-                let to = self.center_root(to);
-                let seed = self.teleport.as_ref().map_or(0, |t| t.seed) ^ 0xb017_5eed;
-                let bolt = Bolt::new(from, to, seed, 220.0 * self.layout.sf);
-                if let Some(tp) = &mut self.teleport {
-                    tp.bolt = Some(bolt);
-                    tp.leg = Leg::Bolt(now);
-                }
-            }
+            Leg::Vanish => self.vanish_done(now),
             Leg::Appear => {
                 self.teleport_done(now);
                 if self.placement == Placement::Ground {
@@ -3502,14 +3642,39 @@ impl Avatar {
         let seed = self.rng.next();
         self.glitch = Some(Glitch::new(GlitchKind::Vanish, now, seed));
         self.arrive_reset();
-        self.teleport = Some(Teleport { seed, leg: Leg::Vanish, to, place, bolt: None, moved: false, no_bolt: false, quiet: false });
+        // Leaving the art on screen with its own drawn leave: that, then the bolt (no glitch).
+        let leave = self.drawn_leave();
+        let leave_until = leave.as_ref().map(|s| now + Duration::from_millis(s.iter().map(|x| x.1 as u64).sum()));
+        if let Some(seq) = leave {
+            self.glitch = None;
+            self.anim.play(seq, now);
+        }
+        self.teleport = Some(Teleport { seed, leg: Leg::Vanish, to, place, bolt: None, moved: false, no_bolt: false, quiet: false, leave_until });
     }
 
-    /// A teleport, quiet (passive moves) or not.
+    /// The drawn leave for the art on screen: lachy's perch → `perchLeave`; a lachy stand →
+    /// `floorLeave` (from its first frame on the legacy drawing it starts from, else cut into
+    /// its tear). None: the glitch's vanish.
+    fn drawn_leave(&self) -> Option<Seq> {
+        if self.sitting() && self.art_strip_is(PoolKey::Perch) {
+            return self.art_transition("perchLeave");
+        }
+        if self.placement != Placement::Ground || !self.standing() || !self.art_strip_is(PoolKey::Stand) {
+            return None;
+        }
+        let seq = self.art_transition("floorLeave")?;
+        let same = self.pack.art_of(self.shown_frame()) == self.pack.art_of(seq[0].0);
+        Some(if same { seq } else { seq.into_iter().skip(LEAVE_CUT_IN).collect() })
+    }
+
+    /// A teleport, quiet (passive moves) or not. A quiet one never has a drawn leave.
     fn start_teleport_q(&mut self, to: (i32, i32), place: Placement, now: Instant, quiet: bool) {
         self.start_teleport(to, place, now);
         if quiet && let Some(tp) = &mut self.teleport {
             tp.quiet = true;
+            if tp.leave_until.take().is_some() {
+                self.anim.stop_oneshot(now);
+            }
             self.glitch = Some(Glitch::soft(GlitchKind::Vanish, now, tp.seed));
         }
     }
@@ -3530,11 +3695,25 @@ impl Avatar {
         let formed = self.arrive.formed.take().filter(|&t| t > now);
         self.teleport = None;
         self.arrive_reset();
+        self.life_after_landing(now);
         if !quiet {
             self.hud_after = Some((now + HUD_AFTER_TELEPORT).max(formed.unwrap_or(now)));
         } else if formed.is_some() {
             self.hud_after = formed;
         }
+    }
+
+    /// Landed: her idle life starts at once, not after a still hold: a sparkle, a breath step
+    /// and a blink within half a second.
+    fn life_after_landing(&mut self, now: Instant) {
+        self.next_glint = Some(now + LIFE_SPARKLE);
+        let period = self.pack.behaviour.life.bob_period_ms;
+        if period > 0 {
+            // The breath's first 1 px step (a sixth of its period in) lands LIFE_BREATH from now.
+            let back = Duration::from_millis(period / 6).saturating_sub(LIFE_BREATH);
+            self.bob_t0 = now.checked_sub(back).unwrap_or(now);
+        }
+        self.anim.rest_soon(LIFE_BLINK_MS, now);
     }
 
     /// Window origin that puts the seat (or the feet) on `r`'s top edge at `r.x + dx`.
@@ -3912,6 +4091,9 @@ impl Avatar {
     }
 
     fn mouse_move(&mut self, ev: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if ev.pressed_button.is_none() {
+            self.hover_pointer(ev.position);
+        }
         if ev.pressed_button != Some(MouseButton::Left) {
             return;
         }
@@ -4413,6 +4595,11 @@ impl Render for Avatar {
         if let Some((Some(c), _)) = &rag_shown {
             plan = c.plan.clone();
         }
+        // A drawn arrival's first frames: the plain red land silhouette (its window's old
+        // pixels would show through the new shape for a frame).
+        if self.arrive.red_until.is_some_and(|t| now < t) {
+            plan.tint = Some(fx::BOLT_RED);
+        }
         let sliver_px = (l.ground_x - l.avatar_x) as f32;
         if let Some(sx) = self.sliver_sx(now) {
             plan.sx = sx;
@@ -4454,6 +4641,12 @@ impl Render for Avatar {
             };
             self.glitch_step.set((Some(g.t0), step + 1));
             let base = plan.clone();
+            // Landing on a window top: the rows at the edge and below stay put (her legs never
+            // tear across the edge line, the touchdown's dark parts never smear along it).
+            let still_legs = (g.kind == GlitchKind::Land && self.sitting())
+                .then_some(l.seat_y)
+                .flatten()
+                .map(|s| s - l.avatar_y - (24.0 * sf).round() as i32);
             // Carried or landing, the next frame is the rag's next plan: the pattern goes
             // underneath on that (its squash and frame), not on this one.
             let rag_next = rag_shown.as_ref().and_then(|(_, n)| n.clone());
@@ -4472,6 +4665,7 @@ impl Render for Avatar {
                     tag,
                     sf,
                     calm: g.kind == GlitchKind::Land,
+                    still_from: still_legs,
                 });
                 p.tint = g.tint(at);
                 p
@@ -4509,6 +4703,24 @@ impl Render for Avatar {
             }
             if n.frame != shown_i {
                 next_img = self.frame_or_default(n.frame).map(|f| (f.image.clone(), (f.at, f.image_size())));
+            }
+        }
+        // The frame changes before the next one (an arrival's cut, a blink): that frame goes
+        // underneath, its silhouette in the tint when tinted (where it grows past this one, the
+        // window showed what it hadn't drawn: a dark slab of her new legs at a perch cut).
+        let mut next_rects: Option<Arc<Vec<ShapeRect>>> = None;
+        if self.rag.is_none() && !hidden {
+            let nf = self.anim.frame_at(now + FRAME_FX);
+            if nf != shown_i
+                && let Some(f) = self.frame_or_default(nf)
+            {
+                next_img = Some((f.image.clone(), (f.at, f.image_size())));
+                next_rects = Some(f.rects.clone());
+                if next.is_none() {
+                    let mut n = plan.clone();
+                    n.slices = None;
+                    next = Some(n);
+                }
             }
         }
         // Alpha mode (a compositor shows the window's own alpha): nothing is clipped by a
@@ -4561,15 +4773,17 @@ impl Render for Avatar {
         if !turning && next.as_ref().is_some_and(|n| n.slices.is_none()) {
             under = (POSE_REACH * sf).ceil();
         }
-        let next_ghosts = next.as_ref().filter(|n| n.has_ghosts() && !hidden).map(|n| n.ghost_rects(&rects)).unwrap_or_default();
+        let nrects: &[ShapeRect] = next_rects.as_deref().map_or(&rects[..], |v| &v[..]);
+        let next_ghosts = next.as_ref().filter(|n| n.has_ghosts() && !hidden).map(|n| n.ghost_rects(nrects)).unwrap_or_default();
         let next_fill: Vec<(ShapeRect, u32)> = next
             .as_ref()
             .filter(|_| !hidden)
             .map(|n| match n.tint {
-                Some(c) => n.body_rects(&rects).into_iter().map(|r| (r, c)).collect(),
-                None => n.solid_rects(&rects),
+                Some(c) => n.body_rects(nrects).into_iter().map(|r| (r, c)).collect(),
+                None => n.solid_rects(nrects),
             })
             .unwrap_or_default();
+
         let next = next.filter(|_| !hidden).map(Rc::new);
         let next_tag = next.clone();
         let plan = Rc::new(plan);
@@ -5685,6 +5899,12 @@ impl Render for Avatar {
             };
             let item = |label: &'static str| item_as(label, false);
             let max_x = l.lp(self.vis.1) - px(220.0);
+            // lachy's capri.png over the items: who this menu is.
+            let header = self.stills.as_ref().and_then(|s| s.capri.clone()).map(|i| {
+                let s = i.size(0);
+                let w = MENU_HEADER_PX * u32::from(s.width) as f32 / (u32::from(s.height) as f32).max(1.0);
+                div().flex().justify_center().pt(px(6.0)).pb(px(2.0)).child(img(ImageSource::Render(i)).w(px(w)).h(px(MENU_HEADER_PX)))
+            });
             let menu = div()
                 .relative()
                 .w(px(210.0))
@@ -5692,6 +5912,7 @@ impl Render for Avatar {
                 .flex_col()
                 .py(px(4.0))
                 .child(theme::backdrop(MENU_CUT, Fill::framed(pal.panel, pal.accent, 2.0).ringed(pal.ring)))
+                .children(header)
                 .child(item("RESET POSITION").id("reset").on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, _: &MouseDownEvent, _, cx| {

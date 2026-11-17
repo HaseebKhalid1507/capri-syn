@@ -1,8 +1,8 @@
 //! The cinematic intro on screen (`crate::intro` decides what shows when): the pack's local
 //! close-ups decoded off the main thread at the launch's size, her close-up window over the
 //! desktop (shaped like the art, input on its pixels only: a click there or Esc anywhere skips
-//! to the out beat), then the launch bolt onto the floor or the window she sat on last time
-//! (`perchArrive`). The launch heartbeat (`state::save_seen`) lives here too: it's what tells
+//! to the out beat), then the launch bolt onto the floor or the window she sat on last time.
+//! The launch heartbeat (`state::save_seen`) lives here too: it's what tells
 //! a relaunch from a greeting.
 
 use super::{Avatar, Placement};
@@ -21,6 +21,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// The held close-up's last rows stay over the bolt this long, at most this long.
+const BOLT_OVER_HOLD: Duration = Duration::from_millis(60);
+const HOLD_MAX: Duration = Duration::from_millis(500);
 /// Her frames are in but the close-ups aren't yet: the launch waits this long, then goes on
 /// without them.
 const WAIT_FOR_CLOSE_UPS: Duration = Duration::from_millis(1500);
@@ -115,6 +118,8 @@ pub(super) struct IntroState {
     waiting: Option<Instant>,
     /// Where the bolt goes once the close-up is over.
     target: Option<((i32, i32), Placement)>,
+    /// The bolt started (`intro_handoff`), before the close-up's window went.
+    handed: bool,
     /// What the last launch did (state dump): "played", "skipped click", "no: gap" …
     pub last: String,
     plays: u32,
@@ -335,12 +340,22 @@ impl Avatar {
         let seed = self.rng.next();
         let mut view = None;
         let mut id = 0;
+        // Its shape before its first frame (that one uploads every close-up: slow): mapped
+        // without one, the whole window showed as a black box for two frames.
+        let first: Vec<ShapeRect> = frames.first().map(|c| moved(&c.rects, p.at.0, p.at.1)).unwrap_or_default();
         let opened = cx.open_window(options, |window, cx| {
             id = os.adopt(Role::Intro, window).unwrap_or(0);
+            if id != 0 && !first.is_empty() {
+                os.shape_of(id, &first, &first).ok();
+            }
+            let me2 = me.clone();
+            let on_handoff: OnDone = Box::new(move |cx: &mut App| {
+                me2.update(cx, |a, cx| a.intro_handoff(cx)).ok();
+            });
             let on_done: OnDone = Box::new(move |cx: &mut App| {
                 me.update(cx, |a, cx| a.intro_done(cx)).ok();
             });
-            let v = cx.new(|_| CloseUpView::new(os.clone(), frames, p, sf, seed, font, pal, on_done));
+            let v = cx.new(|_| CloseUpView::new(os.clone(), frames, p, sf, seed, font, pal, on_handoff, on_done));
             view = Some(v.downgrade());
             v
         });
@@ -350,6 +365,7 @@ impl Avatar {
                     c.update(cx, |c, _| c.id = id);
                 }
                 self.intro.window = Some((handle.into(), v, id));
+                self.intro.handed = false;
                 self.intro.plays += 1;
                 self.intro.played = Some(unix_now());
                 state::save_intro_played(unix_now());
@@ -385,8 +401,22 @@ impl Avatar {
         }
     }
 
-    /// The close-up is over: its window goes (and its pixels with it), the bolt comes.
-    fn intro_done(&mut self, cx: &mut Context<Self>) {
+    /// The close-up's last rows: the bolt starts under them (no empty frame between the two).
+    fn intro_handoff(&mut self, cx: &mut Context<Self>) {
+        if self.intro.window.is_some() && !std::mem::replace(&mut self.intro.handed, true) {
+            self.intro_chain(true, Instant::now(), cx);
+        }
+    }
+
+    /// Her tick, the bolt in flight: once it has been on screen a moment, the held close-up goes.
+    pub(super) fn intro_bolt_drawn(&mut self, bolt_age: Duration, cx: &mut Context<Self>) {
+        if self.intro.handed && self.intro.window.is_some() && bolt_age >= BOLT_OVER_HOLD {
+            self.intro_done(cx);
+        }
+    }
+
+    /// The close-up is over: its window goes (and its pixels with it); the bolt is on its way.
+    pub(super) fn intro_done(&mut self, cx: &mut Context<Self>) {
         self.os.arm_escape(false);
         if let Some((h, v, _)) = self.intro.window.take() {
             let skipped = v.upgrade().and_then(|c| c.read(cx).skipped);
@@ -400,7 +430,9 @@ impl Avatar {
         }
         // Played once per launch; a dev replay decodes them again.
         self.intro.frames = None;
-        self.intro_chain(true, Instant::now(), cx);
+        if !std::mem::replace(&mut self.intro.handed, true) {
+            self.intro_chain(true, Instant::now(), cx);
+        }
     }
 
     /// After the close-up (`greeted`: it was on screen) or without it: the launch bolt to the
@@ -511,12 +543,16 @@ pub struct CloseUpView {
     step: u64,
     warmed: bool,
     sent: u64,
+    on_handoff: Option<OnDone>,
     on_done: Option<OnDone>,
+    /// Held past `HOLD_MAX`: it goes by itself.
+    held_out: bool,
     /// Skipped by: "click", "esc", "ctl".
     pub skipped: Option<&'static str>,
     /// Frames painted; the wake-up asked for (ms into the intro) while nothing moves.
     paints: u32,
-    started: bool,
+    /// Renders so far: the clock starts again at the second (the first uploads every close-up).
+    renders: u32,
     timer_for: Option<u64>,
     /// Under a glitch (every frame): frames, and the longest gap between two (ms).
     glitch_paints: (u32, u64, Option<u64>),
@@ -524,7 +560,7 @@ pub struct CloseUpView {
 
 impl CloseUpView {
     #[allow(clippy::too_many_arguments)]
-    fn new(os: Rc<Os>, frames: Arc<Vec<CloseUp>>, place: Place, sf: f32, seed: u64, font: SharedString, pal: theme::Pal, on_done: OnDone) -> Self {
+    fn new(os: Rc<Os>, frames: Arc<Vec<CloseUp>>, place: Place, sf: f32, seed: u64, font: SharedString, pal: theme::Pal, on_handoff: OnDone, on_done: OnDone) -> Self {
         CloseUpView {
             os,
             id: 0,
@@ -539,10 +575,12 @@ impl CloseUpView {
             step: 0,
             warmed: false,
             sent: 0,
+            on_handoff: Some(on_handoff),
             on_done: Some(on_done),
+            held_out: false,
             skipped: None,
             paints: 0,
-            started: false,
+            renders: 0,
             timer_for: None,
             glitch_paints: (0, 0, None),
         }
@@ -588,14 +626,35 @@ fn moved(r: &[ShapeRect], dx: i32, dy: i32) -> Vec<ShapeRect> {
 
 impl Render for CloseUpView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // The clock starts at the first frame (it uploads every close-up: the slow one).
-        if !self.started {
-            self.started = true;
+        // The clock starts at the first frame, and again at the second: the first uploads every
+        // close-up (the slow one), so the entrance plays on frames that are seen.
+        if self.renders < 2 {
+            self.renders += 1;
             self.t0 = Instant::now();
+            window.request_animation_frame();
         }
         let now = Instant::now();
-        let t = self.t(now);
-        if self.sheet.done(t) {
+        let real = self.t(now);
+        // At the handoff it holds its last rows and stops drawing (a window drawing every frame
+        // keeps her own ticks waiting, and with them the bolt); she removes it once the bolt is
+        // on screen (`intro_bolt_drawn`), or it goes by itself `HOLD_MAX` later.
+        let hand = self.sheet.handoff();
+        let t = real.min(hand);
+        if real >= hand
+            && let Some(f) = self.on_handoff.take()
+        {
+            cx.defer(f);
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(HOLD_MAX).await;
+                this.update(cx, |v, cx| {
+                    v.held_out = true;
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+        }
+        if self.held_out || self.sheet.done(t) {
             if let Some(f) = self.on_done.take() {
                 self.os.shape_of(self.id, &[], &[]).ok();
                 let (n, gap, _) = self.glitch_paints;
@@ -606,8 +665,10 @@ impl Render for CloseUpView {
         }
         let cue = self.sheet.cue(t);
         // Moving (a glitch re-rolls every frame): every frame. Still: a wake-up at the next change.
-        let next = self.sheet.next_change(t);
-        if cue.glitch.is_some() || next <= t + 20 {
+        let next = self.sheet.next_change(t).min(hand);
+        if real >= hand {
+            // Held.
+        } else if cue.glitch.is_some() || next <= t + 20 {
             window.request_animation_frame();
         } else if self.timer_for != Some(next) {
             self.timer_for = Some(next);
@@ -633,7 +694,6 @@ impl Render for CloseUpView {
         let (iw, ih) = self.place.image;
         let sf = self.sf;
         let mut plan = BodyPlan::plain();
-        plan.sx = cue.scale;
         plan.sy = cue.scale;
         plan.pivot = (iw as f32 / 2.0, ih as f32);
         if let Some(gc) = cue.glitch {
@@ -653,11 +713,9 @@ impl Render for CloseUpView {
                 tag: None,
                 sf,
                 calm: false,
+                still_from: None,
             });
             plan.tint = g.tint(now);
-        }
-        if cue.red {
-            plan.tint = Some(fx::BOLT_RED);
         }
         if let Some(u) = cue.out {
             plan.slices = Some(intro::out_bands(ih, u, self.seed, (10.0 * sf).round() as i32));
@@ -683,6 +741,10 @@ impl Render for CloseUpView {
         let tint = plan.tint.map(|c| (c, plan.body_rects(&f.rects)));
         let bars = if plan.tint.is_some() { Vec::new() } else { plan.bar_rects(&f.rects) };
         let img = f.image.clone();
+        // The entrance: a red tint and scanlines over its own pixels (its rects), settling off.
+        let settle = cue.settle.map(intro::settle).filter(|&(a, b)| a > 0.01 || b > 0.01);
+        let rects_now = f.rects.clone();
+        let squashed = plan.sy < 1.0;
         let warm: Vec<Arc<RenderImage>> = if std::mem::replace(&mut self.warmed, true) { Vec::new() } else { self.frames.iter().map(|c| c.image.clone()).collect() };
         let plan = Rc::new(plan);
         let entity = cx.entity();
@@ -706,8 +768,9 @@ impl Render for CloseUpView {
                     };
                     let full = rect(0.0, 0.0, iw as f32, ih as f32);
                     // Without a compositor the bounding shape lands a frame late: the plain
-                    // close-up underneath, so wherever it grows there is art, not black.
-                    if !alpha && plan.slices.is_some() {
+                    // close-up underneath, so wherever it grows there is art, not black (the
+                    // out beat's rows, the impact's squash easing back).
+                    if !alpha && (plan.slices.is_some() || squashed) {
                         window.paint_image(full, full, Corners::default(), img.clone(), 0, false).ok();
                     }
                     for (r, c) in ghost.iter().chain(&solid) {
@@ -737,6 +800,24 @@ impl Render for CloseUpView {
                     }
                     for (r, c) in &bars {
                         quad(window, r, *c);
+                    }
+                    if let Some((tint, scan)) = settle {
+                        let red = rgba((fx::BOLT_RED << 8) | (tint * 255.0).round() as u32);
+                        let dark = rgba((0x02040a << 8) | (scan * 255.0).round() as u32);
+                        let (step, lh) = ((3.0 * sf).round().max(3.0) as i32, sf.round().max(1.0) as i32);
+                        for &(x, y, w, h) in rects_now.iter() {
+                            let (x, y, w, h) = (x as f32, y as i32, w as f32, h as i32);
+                            if tint > 0.01 {
+                                window.paint_quad(fill(rect(x, y as f32, w, h as f32), red));
+                            }
+                            if scan > 0.01 {
+                                let mut yy = y + (step - y.rem_euclid(step)) % step;
+                                while yy < y + h {
+                                    window.paint_quad(fill(rect(x, yy as f32, w, lh.min(y + h - yy) as f32), dark));
+                                    yy += step;
+                                }
+                            }
+                        }
                     }
                     let e = entity.clone();
                     window.on_mouse_event(move |_: &MouseDownEvent, phase, _, cx| {

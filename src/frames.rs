@@ -251,7 +251,12 @@ fn add_rim_rows(px: &mut [u8], w: u32, h: u32, from: i32, to: i32, rgb: u32) {
 }
 
 /// Head x and glint candidates from the hit mask (pack-agnostic: no colour rules).
-fn head_and_glints(mask: &Mask, top: i32, height: i32) -> (i32, Vec<(i16, i16)>) {
+/// Her hair's red (CapriCore's and lachy's), opaque: where sparkles may sit.
+fn is_hair(p: &[u8; 4]) -> bool {
+    p[3] >= 200 && p[0] >= 150 && p[1] <= 110 && p[0] as i32 - p[2] as i32 >= 40
+}
+
+fn head_and_glints(mask: &Mask, hair: &Mask, top: i32, height: i32) -> (i32, Vec<(i16, i16)>) {
     let band = (height as f32 * 0.3) as i32;
     let (mut sum, mut n) = (0i64, 0i64);
     for y in top.max(0)..(top + band).min(mask.h as i32) {
@@ -263,13 +268,14 @@ fn head_and_glints(mask: &Mask, top: i32, height: i32) -> (i32, Vec<(i16, i16)>)
         }
     }
     let head_x = if n > 0 { (sum / n) as i32 } else { mask.w as i32 / 2 };
-    // Candidates: pixels in the top 40 % whose 9x9 neighbourhood is all body, on a grid.
-    let r = 4;
+    // Candidates: pixels in the top 40 % whose 13x13 neighbourhood is hair (never her face, eyes
+    // or clothes: a sparkle and its drift stay on the hair), on a grid.
+    let r = 6;
     let mut cands = Vec::new();
     let y1 = (top + (height as f32 * 0.4) as i32).min(mask.h as i32 - r);
     for y in ((top + r).max(r)..y1).step_by(3) {
         for x in (r..mask.w as i32 - r).step_by(3) {
-            if [(-r, -r), (r, -r), (-r, r), (r, r), (0, 0), (0, -r), (0, r), (-r, 0), (r, 0)].iter().all(|&(dx, dy)| mask.get(x + dx, y + dy)) {
+            if [(-r, -r), (r, -r), (-r, r), (r, r), (0, 0), (0, -r), (0, r), (-r, 0), (r, 0)].iter().all(|&(dx, dy)| mask.get(x + dx, y + dy) && hair.get(x + dx, y + dy)) {
                 cands.push((x as i16, y as i16));
             }
         }
@@ -402,6 +408,56 @@ impl Geometry {
 pub struct Decoded {
     pub frames: Vec<Frame>,
     pub decode_ms: u128,
+}
+
+/// A still (lachy's face, capri.png, cursor) checked against its sha256 and cut to its opaque
+/// box, `h` px tall (Lanczos3): straight-alpha RGBA.
+pub fn still(path: &std::path::Path, sha: Option<&str>, h: u32) -> Result<image::RgbaImage> {
+    let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    if let Some(want) = sha
+        && sha_hex(&bytes) != want
+    {
+        anyhow::bail!("{}: sha256 differs from anim.json", path.display());
+    }
+    let img = image::load_from_memory(&bytes)?.to_rgba8();
+    let (w0, h0) = img.dimensions();
+    let opaque = |x: u32, y: u32| img.get_pixel(x, y)[3] > 8;
+    let ys: Vec<u32> = (0..h0).filter(|&y| (0..w0).any(|x| opaque(x, y))).collect();
+    let xs: Vec<u32> = (0..w0).filter(|&x| (0..h0).any(|y| opaque(x, y))).collect();
+    let (Some(&y0), Some(&y1), Some(&x0), Some(&x1)) = (ys.first(), ys.last(), xs.first(), xs.last()) else {
+        anyhow::bail!("{}: empty", path.display());
+    };
+    let cut = image::imageops::crop_imm(&img, x0, y0, x1 - x0 + 1, y1 - y0 + 1).to_image();
+    let w = ((cut.width() as f32 * h as f32 / cut.height() as f32).round() as u32).max(1);
+    let src = Image::from_vec_u8(cut.width(), cut.height(), cut.into_raw(), PixelType::U8x4)?;
+    let mut dst = Image::new(w, h.max(1), PixelType::U8x4);
+    Resizer::new().resize(&src, &mut dst, &ResizeOptions::new().resize_alg(ResizeAlg::Convolution(FilterType::Lanczos3)))?;
+    image::RgbaImage::from_raw(w, h.max(1), dst.into_vec()).context("still size")
+}
+
+/// A still as GPUI's image (BGRA).
+pub fn still_image(mut rgba: image::RgbaImage) -> Arc<RenderImage> {
+    for p in rgba.pixels_mut() {
+        p.0.swap(0, 2);
+    }
+    Arc::new(RenderImage::new(vec![image::Frame::new(rgba)]))
+}
+
+/// A still as a pointer image (premultiplied ARGB), its hotspot at `hot` (fractions of the
+/// opaque box).
+pub fn still_pointer(rgba: &image::RgbaImage, hot: (f32, f32), key: u64) -> crate::platform::PointerImage {
+    let (w, h) = rgba.dimensions();
+    let argb = rgba
+        .pixels()
+        .map(|p| {
+            let [r, g, b, a] = p.0;
+            let m = |c: u8| (c as u32 * a as u32 + 127) / 255;
+            (a as u32) << 24 | m(r) << 16 | m(g) << 8 | m(b)
+        })
+        .collect();
+    let hx = ((hot.0 * w as f32).round() as u32).min(w.saturating_sub(1)) as u16;
+    let hy = ((hot.1 * h as f32).round() as u32).min(h.saturating_sub(1)) as u16;
+    crate::platform::PointerImage { key, w: w as u16, h: h as u16, hot: (hx, hy), argb }
 }
 
 pub fn sha_hex(bytes: &[u8]) -> String {
@@ -600,9 +656,14 @@ fn finish(pack: &Pack, f: &FrameSource, geo: &Geometry, mut px: Vec<u8>) -> Resu
     let face = face_band(&px, geo.width, top.round() as i32, (vb.height as f32 * geo.scale) as i32);
 
     let mut mask = Mask::new(geo.width, geo.height);
+    let mut hair = Mask::new(geo.width, geo.height);
     for (i, p) in px.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        let (x, y) = (i as u32 % geo.width, i as u32 / geo.width);
         if p[3] >= HIT_ALPHA {
-            mask.set(i as u32 % geo.width, i as u32 / geo.width);
+            mask.set(x, y);
+        }
+        if is_hair(p) {
+            hair.set(x, y);
         }
         p.swap(0, 2); // RGBA → BGRA (GPUI's sprite atlas format), straight alpha.
     }
@@ -611,7 +672,7 @@ fn finish(pack: &Pack, f: &FrameSource, geo: &Geometry, mut px: Vec<u8>) -> Resu
     let head_line = (top + vb.height as f32 * geo.scale * head_fraction).round() as i32;
     // A strip's cell keeps only its opaque box (most of the rect is empty).
     let (at, rgba) = if f.cell.is_some() { crop_opaque(px, geo.width, geo.height) } else { ((0, 0), image::RgbaImage::from_raw(geo.width, geo.height, px).expect("buffer size")) };
-    let (head_x, glints) = head_and_glints(&mask, top.round() as i32, (vb.height as f32 * geo.scale) as i32);
+    let (head_x, glints) = head_and_glints(&mask, &hair, top.round() as i32, (vb.height as f32 * geo.scale) as i32);
     let profile = Arc::new(top_profile(&mask));
     let bottom = (0..mask.h as i32).rev().find(|&y| (0..mask.w as i32).any(|x| mask.get(x, y))).map_or(top.round() as i32 + 1, |y| y + 1);
     Ok(Frame {
@@ -801,6 +862,28 @@ pub fn decode_notes(pack: &Pack, files: &[String], size: u32) -> Result<Vec<Note
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_still_is_cut_to_its_opaque_box_scaled_and_sha_checked() {
+        let dir = std::env::temp_dir().join(format!("sa-still-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("s.png");
+        let mut img = image::RgbaImage::new(40, 40);
+        for y in 10..30 {
+            for x in 5..15 {
+                img.put_pixel(x, y, image::Rgba([200, 20, 40, 255]));
+            }
+        }
+        img.save(&p).unwrap();
+        let sha = sha_hex(&std::fs::read(&p).unwrap());
+        let s = still(&p, Some(&sha), 40).unwrap();
+        assert_eq!(s.dimensions(), (20, 40), "10x20 box, 40 px tall");
+        assert!(still(&p, Some("00"), 40).is_err(), "another file");
+        let ptr = still_pointer(&s, (0.0, 0.0), 7);
+        assert_eq!((ptr.w, ptr.h, ptr.hot, ptr.key), (20, 40, (0, 0), 7));
+        assert_eq!(ptr.argb[20 * 20 + 10] >> 24, 255);
+        std::fs::remove_dir_all(&dir).ok();
+    }
     use super::*;
 
     #[test]

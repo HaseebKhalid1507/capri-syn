@@ -380,9 +380,12 @@ class RealPins(unittest.TestCase):
             if "mirrorArt" in s:
                 self.assertEqual(strips[s["mirrorArt"]]["mirrorArtFor"], name)
                 self.assertEqual(strips[s["mirrorArt"]]["cell"], s["cell"])
-            if "anchor" in s:
+            if "anchor" in s and s["family"] != "fx":
                 a, (w, h) = s["anchor"], s["cell"]
                 self.assertTrue(0 <= a["x"] < w and 0 <= a["y"] < h, (name, a))
+            elif "anchor" in s:
+                # An effect (the form bloom) is placed by where her feet will be: below its cell.
+                self.assertEqual(s["anchor"]["name"], "feet", name)
         for rel in mochi:
             self.assertTrue(rel in ("LICENSE", "README.md") or rel.startswith("assets/capri/"), rel)
             if rel.startswith("assets/"):

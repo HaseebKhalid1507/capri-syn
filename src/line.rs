@@ -30,6 +30,8 @@ const LINE_H: f32 = 23.0;
 /// 2 px high of the type).
 const PROMPT_DROP: f32 = 11.0;
 const MONO: &str = "DejaVu Sans Mono";
+/// Her portrait beside her rows, logical px tall.
+pub const FACE_PX: f32 = 30.0;
 /// The panel inside its window: the 1 px ring, then the 2 px frame.
 const INSET: f32 = 3.0;
 
@@ -124,6 +126,8 @@ enum Mode {
 
 pub struct Line {
     snap: Snap,
+    /// Her face beside her rows (lachy's portrait), if the pack has it.
+    face: Option<std::sync::Arc<RenderImage>>,
     pal: Pal,
     font: SharedString,
     name: String,
@@ -232,6 +236,7 @@ impl Line {
         font: SharedString,
         pal: Pal,
         max_thread: f32,
+        face: Option<std::sync::Arc<RenderImage>>,
         on_ask: OnAsk,
         window: &mut Window,
         cx: &mut Context<Line>,
@@ -301,6 +306,7 @@ impl Line {
         ];
         let mode = if snap.prompts.is_empty() { Mode::Text } else { Mode::Prompt };
         let mut line = Line {
+            face,
             snap,
             pal,
             font,
@@ -887,7 +893,17 @@ impl Line {
     fn row_el(&self, ix: usize, r: &Row, cx: &mut Context<Line>) -> AnyElement {
         let pal = self.pal;
         let (plate, tone) = self.plate(&r.who);
-        let head = div().flex_none().w(px(74.0)).text_size(px(11.5)).font_weight(FontWeight::BOLD).text_color(rgb(tone)).pt(px(3.0)).child(tracked(&plate, 1.4));
+        let mut head = div().flex_none().w(px(74.0)).text_size(px(11.5)).font_weight(FontWeight::BOLD).text_color(rgb(tone)).pt(px(3.0));
+        // Her portrait over her name (lachy's face.png, cut to its opaque box).
+        if r.who == Who::Her
+            && let Some(f) = &self.face
+        {
+            let s = f.size(0);
+            let h = FACE_PX;
+            let w = h * u32::from(s.width) as f32 / (u32::from(s.height) as f32).max(1.0);
+            head = head.flex().flex_col().gap(px(4.0)).child(img(ImageSource::Render(f.clone())).w(px(w)).h(px(h)));
+        }
+        let head = head.child(tracked(&plate, 1.4));
         let body: AnyElement = match &r.who {
             Who::Her => {
                 let mut b = self.her_body(ix, &r.text, cx);
