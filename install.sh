@@ -1273,14 +1273,17 @@ brain() {
 
 # What stays of Synaps after --uninstall, where his login lives, and how to remove it too.
 # MINE: the synaps this script installed (the receipt says), RUSTUP: the rustup it installed.
+# Synaps' own installer (this one ran it, or he did) leaves a receipt: then what it added is known.
 synaps_stays() {
-    local mine=$1 rustup=$2 s h
+    local mine=$1 rustup=$2 s h own=0
     s=${mine:-$(command -v synaps 2>/dev/null || true)}
+    [ -n "$s" ] || { [ -x "$CARGO_BIN/synaps" ] && s=$CARGO_BIN/synaps; } || true
     h=$(tilde "$(synaps_home)")
+    if [ -n "$mine" ] || { [ "$s" = "$CARGO_BIN/synaps" ] && [ -f "$CONF/synaps/synaps-receipt.json" ]; }; then own=1; fi
     if [ -n "$s" ]; then
         info "synaps stays installed (her daemon's other clients may use it): $(tilde "$s")"
         info "your Synaps login and sessions live in $h"
-        if [ -n "$mine" ]; then
+        if [ "$own" = 1 ]; then
             info "to remove Synaps too: $(q "$(tilde "$s")") daemon stop, then delete $(tilde "$s"), $h and $(tilde "$CONF/synaps")"
             info "  its installer also added $(tilde "$CONF/fish/conf.d/synaps.env.fish") and a \`. \"\$HOME/.cargo/env\"\` line to ~/.profile, ~/.bashrc and ~/.zshrc (keep that line if you use Rust)"
         else

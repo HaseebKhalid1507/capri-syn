@@ -807,14 +807,19 @@ function Invoke-Brain {
 }
 
 # What stays of Synaps after --uninstall, where his login lives, and how to remove it too.
+# Synaps' own installer (this one ran it, or he did) leaves a receipt: then what it added is known.
 function Write-SynapsStays([string]$Mine, [string]$Rustup) {
     $s = if ($Mine) { $Mine } else { (Get-Command synaps -ErrorAction SilentlyContinue | Select-Object -First 1).Source }
+    $cargoSynaps = Join-Path $script:CargoBin 'synaps.exe'
+    if (-not $s -and (Test-Path -LiteralPath $cargoSynaps)) { $s = $cargoSynaps }
+    $theirs = Join-Path $(if ($env:XDG_CONFIG_HOME) { $env:XDG_CONFIG_HOME } else { $env:LOCALAPPDATA }) 'synaps\synaps-receipt.json'
+    $own = $Mine -or ($s -eq $cargoSynaps -and (Test-Path -LiteralPath $theirs))
     $h = Get-Tilde (Get-SynapsHome)
     if ($s) {
         Write-Info "synaps stays installed (her daemon's other clients may use it): $(Get-Tilde $s)"
         Write-Info "your Synaps login and sessions live in $h"
-        if ($Mine) {
-            Write-Info "to remove Synaps too: & `"$(Get-Tilde $s)`" daemon stop, then delete $(Get-Tilde $s), $h and $(Get-Tilde (Join-Path $env:LOCALAPPDATA 'synaps'))"
+        if ($own) {
+            Write-Info "to remove Synaps too: & `"$(Get-Tilde $s)`" daemon stop, then delete $(Get-Tilde $s), $h and $(Get-Tilde (Split-Path -Parent $theirs))"
             Write-Info "  its installer also put $(Get-Tilde (Split-Path -Parent $s)) on your user Path (keep it if you use Rust)"
         } else {
             Write-Info "to remove Synaps too: synaps daemon stop, then uninstall it the way you installed it ($h is its data)"
