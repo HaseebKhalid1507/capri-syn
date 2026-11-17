@@ -535,7 +535,7 @@ function Install-Pack {
     if ((Test-Path $stamp) -and ((Get-Content -Raw $stamp).Trim() -eq ($want -join ' '))) {
         Write-Good "make-pack's Python: $($want -join ' ')"
     } else {
-        Invoke-Native $vpy (@('-m', 'pip', 'install', '-q', '--disable-pip-version-check') + $want)
+        Invoke-Native $vpy (@('-m', 'pip', 'install', '-q', '--disable-pip-version-check', '--no-cache-dir') + $want)
         if (-not $script:Dry) { Set-Content -LiteralPath $stamp -Value ($want -join ' ') }
     }
     $src = Get-Source $(if ($script:ReleaseTag) { $script:ReleaseTag } else { $script:Ref })

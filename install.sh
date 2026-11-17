@@ -149,7 +149,7 @@ put() {
         printf '%s\n' "$body" | sed "s/^/       $D│$N /"
         return 0
     fi
-    mkdir -p "$(dirname "$f")"
+    mkp "$(dirname "$f")" >/dev/null
     printf '%s\n' "$body" >"$f"
 }
 
@@ -166,12 +166,37 @@ rec_meta() {
     mv "$RECEIPT.tmp" "$RECEIPT"
 }
 meta() { sed -n "s/^meta $1 //p" "$RECEIPT" 2>/dev/null | tail -n1; }
-# A directory we create: recorded (for --uninstall) only if it wasn't there before.
+# mkdir -p, each folder it makes under $HOME recorded: --uninstall removes it if it's empty then.
+mkp() {
+    local d=$1 todo=()
+    while [ ! -d "$d" ] && [ "$d" != / ] && [ "$d" != "$HOME" ]; do
+        todo=("$d" "${todo[@]}")
+        d=$(dirname "$d")
+    done
+    [ ${#todo[@]} -gt 0 ] || return 0
+    run mkdir -p "$1"
+    for d in "${todo[@]}"; do rec rmdir "$d"; done
+}
+# A folder that is all ours: --uninstall removes it whole (only if this made it).
 mkdir_rec() {
     if [ ! -d "$1" ]; then
+        mkp "$(dirname "$1")"
         run mkdir -p "$1"
         rec dir "$1"
     fi
+}
+# The receipt's own folder, before the first line goes in.
+receipt_init() {
+    local d x todo=()
+    d=$(dirname "$RECEIPT")
+    if [ "$DRY" = 1 ] || [ -d "$d" ]; then return 0; fi
+    x=$d
+    while [ ! -d "$x" ] && [ "$x" != / ] && [ "$x" != "$HOME" ]; do
+        todo=("$x" "${todo[@]}")
+        x=$(dirname "$x")
+    done
+    mkdir -p "$d"
+    for x in "${todo[@]}"; do rec rmdir "$x"; done
 }
 
 # ---- marked blocks in someone else's config file ----------------------------------------------
@@ -489,18 +514,12 @@ install_tree() {
         good "up to date: $(tilde "$BIN/synaps-avatar") and $(tilde "$LIB") are this build's"
         return 0
     fi
-    if [ ! -d "$BIN" ]; then
-        run mkdir -p "$BIN"
-        rec rmdir "$BIN"
-    fi
+    mkp "$BIN"
     run install -m 755 "$d/bin/synaps-avatar" "$BIN/synaps-avatar"
     run install -m 755 "$d/bin/avatarctl" "$BIN/avatarctl"
     rec file "$BIN/synaps-avatar"
     rec file "$BIN/avatarctl"
-    if [ ! -d "$(dirname "$LIB")" ]; then
-        run mkdir -p "$(dirname "$LIB")"
-        rec rmdir "$(dirname "$LIB")"
-    fi
+    mkp "$(dirname "$LIB")"
     run rm -rf "$LIB.new"
     run cp -R "$d/lib/synaps-avatar" "$LIB.new"
     run rm -rf "$LIB"
@@ -602,7 +621,7 @@ build_from_source() {
 
     if [ -z "$CHECKOUT" ] && [ ! -f "$src/Cargo.toml" ]; then
         mkdir_rec "$CACHE"
-        run mkdir -p "$src"
+        mkp "$src"
         get "https://codeload.github.com/$M_repo/tar.gz/$sha" "$TMP/src.tar.gz"
         run tar -xzf "$TMP/src.tar.gz" -C "$src" --strip-components=1
     fi
@@ -626,7 +645,7 @@ build_from_source() {
     [ "$DRY" = 1 ] || good "built in $(((SECONDS - t0) / 60)) min $(((SECONDS - t0) % 60)) s"
     local ver
     ver=$(git -C "$src" describe --tags --always --dirty 2>/dev/null || echo "${sha:0:12}")
-    run bash "$src/installer/stage.sh" "$src" "$target/release/synaps-avatar" "$TMP/stage" "${ver:-source}" >/dev/null
+    run bash "$src/installer/stage.sh" "$src" "$target/release/synaps-avatar" "$TMP/stage" "${ver:-source}"
     install_tree "$TMP/stage"
     BIN_VER=${ver:-source}
     rec_meta binary "$BIN_VER"
@@ -655,7 +674,7 @@ step_pack() {
     if [ "$(cat "$VENV/.capri-pip" 2>/dev/null)" = "${want[*]}" ]; then
         good "make-pack's Python: ${want[*]} (venv $(tilde "$VENV"))"
     else
-        run "$VENV/bin/python" -m pip install -q --disable-pip-version-check "${want[@]}"
+        run "$VENV/bin/python" -m pip install -q --disable-pip-version-check --no-cache-dir "${want[@]}"
         [ "$DRY" = 1 ] || printf '%s\n' "${want[*]}" >"$VENV/.capri-pip"
     fi
 
@@ -664,7 +683,7 @@ step_pack() {
     if [ ! -f "$cc/docs/character-assets.md" ]; then
         mkdir_rec "$CACHE"
         get "https://codeload.github.com/$M_capricore_repo/tar.gz/$M_capricore_commit" "$TMP/capricore.tar.gz"
-        run mkdir -p "$cc"
+        mkp "$cc"
         run tar -xzf "$TMP/capricore.tar.gz" -C "$cc" --strip-components=1
     else
         good "CapriCore ${M_capricore_commit:0:7} (cached)"
@@ -686,7 +705,7 @@ step_pack() {
         warn "--with-local-art: mochi's art is for LOCAL PERSONAL USE ONLY: never commit, publish or share it"
     fi
     [ -d "$CACHE_ROOT/capri-desktop" ] || rec dir "$CACHE_ROOT/capri-desktop"
-    run mkdir -p "$(dirname "$PACK")"
+    mkp "$(dirname "$PACK")"
     run rm -rf "$PACK.new"
     run "$VENV/bin/python" "$LIB/tools/make-pack" "$cc" "$PACK.new" "${side[@]}"
     run rm -rf "$PACK.old"
@@ -994,7 +1013,7 @@ step_extras() {
         local path=$PATH
         if ! have uv; then
             read -r -a uvp <<<"${M_pip_uv:-uv}"
-            run "$VENV/bin/python" -m pip install -q --disable-pip-version-check "${uvp[@]}"
+            run "$VENV/bin/python" -m pip install -q --disable-pip-version-check --no-cache-dir "${uvp[@]}"
             path=$VENV/bin:$PATH
         fi
         [ -d "$DATA/capri-voice" ] || rec dir "$DATA/capri-voice"
@@ -1054,7 +1073,7 @@ uninstall() {
         if pgrep -u "$(id -u)" -x synaps-avatar >/dev/null 2>&1; then
             if [ -x "$BIN/avatarctl" ]; then run "$BIN/avatarctl" quit || true; else run pkill -u "$(id -u)" -x synaps-avatar || true; fi
         fi
-        local kind a b d reload=0
+        local kind a b d reload=0 rmdirs=()
         while read -r kind a b; do
             case $kind in
                 block) block_rm "$a" "$b" ;;
@@ -1074,14 +1093,15 @@ uninstall() {
                     ;;
                 file) if [ -e "$a" ]; then run rm -f "$a"; fi ;;
                 dir) if [ -d "$a" ]; then run rm -rf "$a"; fi ;;
-                rmdir) if [ -d "$a" ] && [ -z "$(ls -A "$a")" ]; then run rmdir "$a"; fi ;;
+                rmdir) rmdirs+=("$a") ;;
                 backup) if [ -f "$a" ]; then info "kept your config's backup: $(tilde "$a")"; fi ;;
             esac
         done < <(tac "$RECEIPT")
         if [ "$reload" = 1 ] && systemd_user; then run systemctl --user daemon-reload; fi
         run rm -f "$RECEIPT"
         # Folders left empty.
-        for d in "$(dirname "$PACK")" "$DATA/synaps-avatar" "$CACHE_ROOT"; do
+        # Folders this made, now empty (innermost first), and her own if they're empty.
+        for d in "$(dirname "$PACK")" "$DATA/synaps-avatar" "$CACHE_ROOT" "${rmdirs[@]}"; do
             if [ -d "$d" ] && [ -z "$(ls -A "$d")" ]; then run rmdir "$d"; fi
         done
     else
@@ -1114,6 +1134,7 @@ main() {
         return 0
     fi
     preflight
+    receipt_init
     step_synaps
     step_binary
     step_pack
