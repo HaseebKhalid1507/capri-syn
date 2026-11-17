@@ -1390,7 +1390,7 @@ purge() {
 
 # A WM config a block may be taken out of.
 editable() { case $1 in "${CONF%/}"/* | "$HOME/.i3/config" | "$HOME/.sway/config") [ -f "$1" ] ;; *) return 1 ;; esac; }
-skipped() { warn "left alone: $1 (not in her folders: the receipt is wrong there)"; }
+skipped() { warn "left alone: $1 (not hers to remove: the receipt is wrong there)"; }
 
 uninstall() {
     STEPS=1 STEP_N=0
