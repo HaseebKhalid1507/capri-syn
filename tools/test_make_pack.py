@@ -162,11 +162,25 @@ GEOMETRY = {"schemaVersion": 1, "about": "test",
             "mochi": {"commit": "c011764", "localOnly": True, "images": {}}}
 
 
+class FakeHair(types.ModuleType):
+    """Stands in for tools/mochi_hair.py (no numpy/Pillow): prefixes the bytes with the mode."""
+
+    def __init__(self):
+        super().__init__("mochi_hair")
+        self.calls = []
+
+    def recolor_file(self, src, dst, mode):
+        self.calls.append((Path(src).name, mode))
+        Path(dst).write_bytes(f"{mode}:".encode() + Path(src).read_bytes())
+
+
 class SidesBase(Base):
     def setUp(self):
         super().setUp()
         self.sides = {s: FakeSide(self.root, s) for s in ("lachy", "mochi")}
-        self.saved_side = (mp.side_pins, mp.fetch_url, mp.GEOMETRY)
+        self.saved_side = (mp.side_pins, mp.fetch_url, mp.GEOMETRY, mp.mochi_hair)
+        self.hair = FakeHair()
+        mp.mochi_hair = lambda repo, mode: None if mode == "original" else self.hair
         mp.side_pins = lambda repo, side: dict(self.sides[side].pinned)
         geo = self.root / "desktop-art.json"
         geo.write_text(json.dumps(GEOMETRY))
@@ -175,7 +189,7 @@ class SidesBase(Base):
         os.environ["XDG_CACHE_HOME"] = str(self.root / "cache")
 
     def tearDown(self):
-        mp.side_pins, mp.fetch_url, mp.GEOMETRY = self.saved_side
+        mp.side_pins, mp.fetch_url, mp.GEOMETRY, mp.mochi_hair = self.saved_side
         if self.env is None:
             os.environ.pop("XDG_CACHE_HOME", None)
         else:
@@ -196,14 +210,18 @@ class DesktopArt(SidesBase):
         self.assertEqual(sorted(p.name for p in (a / "lachy/emotes/heart").iterdir()), ["006.png", "frames.txt"])
         self.assertFalse((a / "lachy/emotes/heart.zip").exists(), "emotes are unzipped")
         self.assertTrue((a / "lachy/LICENSE.md").is_file() and (a / "mochi/LICENSE").is_file())
-        self.assertEqual((a / "mochi/intro-wave1.webp").read_bytes(), b"wave")
+        self.assertEqual((a / "mochi/intro-wave1.webp").read_bytes(), b"red:wave", "her hair is red by default")
+        self.assertEqual(self.hair.calls, [("intro-wave1.webp", "red")], "only the intro close-ups")
+        self.assertEqual((a / "mochi/face-calm.png").read_bytes(), b"face")
         self.assertFalse(list(self.root.joinpath("pack").rglob("*.cs")), "no code is copied")
         doc = json.loads((a / "anim.json").read_text())
         self.assertEqual(doc["lachy"]["strips"]["idle"]["frames"], 2)
         self.assertEqual(doc["lachy"]["files"]["sprites/idle.png"]["sha256"], sha(b"idle strip"))
         self.assertEqual(doc["lachy"]["files"]["emotes/heart.zip"]["unzippedTo"], "emotes/heart")
         self.assertEqual(doc["mochi"]["files"]["face-calm.png"], {"sha256": sha(b"face"), "kind": "face"})
-        self.assertEqual(doc["mochi"]["files"]["intro-wave1.webp"]["kind"], "intro")
+        self.assertEqual(doc["mochi"]["files"]["intro-wave1.webp"],
+                         {"sha256": sha(b"red:wave"), "kind": "intro", "hair": "red", "sourceSha256": sha(b"wave")},
+                         "the recoloured frame is pinned by its own bytes; the source sha stays alongside")
         self.assertFalse((a / "mochi/README.md").exists(), "the README is read for the notice, not copied")
         n = (self.root / "pack/NOTICE.md").read_text()
         self.assertTrue(n.startswith("# Character notice"), "CapriCore's notice stays first")
@@ -215,6 +233,29 @@ class DesktopArt(SidesBase):
         self.assertIn("> The rights paragraph, over two lines.\n", n, "its rights statement, read from its README")
         self.assertNotIn("not part of it", n)
         self.assertIn("LOCAL PERSONAL USE ONLY", n)
+
+    def test_mochi_hair_flat_and_original(self):
+        d = str(self.sides["mochi"].dir)
+        rc, msg = self.build("--mochi", d, "--mochi-hair", "flat")
+        self.assertEqual(rc, 0, msg)
+        doc = json.loads((self.root / "pack/anim/anim.json").read_text())
+        self.assertEqual(doc["mochi"]["files"]["intro-wave1.webp"]["sha256"], sha(b"flat:wave"))
+        self.assertIn("intro hair: flat", msg)
+        rc, msg = self.build("--mochi", d, "--mochi-hair", "original", out="p2")
+        self.assertEqual(rc, 0, msg)
+        self.assertEqual((self.root / "p2/anim/mochi/intro-wave1.webp").read_bytes(), b"wave", "untouched")
+        doc = json.loads((self.root / "p2/anim/anim.json").read_text())
+        self.assertEqual(doc["mochi"]["files"]["intro-wave1.webp"], {"sha256": sha(b"wave"), "kind": "intro"})
+        self.assertEqual(self.hair.calls, [("intro-wave1.webp", "flat")])
+        rc, msg = self.build("--mochi", d, "--mochi-hair", "blue", out="p3")
+        self.assertNotEqual(rc, 0)
+        self.assertIn("red, flat or original", msg)
+        self.assertFalse((self.root / "p3").exists())
+
+    def test_lachy_only_never_loads_the_recolor(self):
+        mp.mochi_hair = lambda repo, mode: self.fail("no mochi, no recolor")
+        rc, msg = self.build("--lachy", str(self.sides["lachy"].dir))
+        self.assertEqual(rc, 0, msg)
 
     def test_without_the_flags_the_pack_is_as_before(self):
         rc, msg = self.build()

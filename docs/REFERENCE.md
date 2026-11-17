@@ -166,6 +166,11 @@ Optional desktop art, into the pack's `anim/` (a pack without it loads as before
   Its images are show frames and fan art that its licence does not cover: local personal use only, never
   published. Only this flag puts them in a pack (into your local pack directory); nothing in this repo
   ships or fetches them otherwise. They give her the launch close-up (below).
+- `--mochi-hair red|flat|original` (default `red`): those close-ups draw her hair black; make-pack repaints it
+  as it copies them (`tools/mochi_hair.py`: a measured head region minus her face, times the black ink;
+  arms, hands, body and the linework stay as drawn). `red` is her avatar's red with its shadow red and a
+  starfield, `flat` one red, `original` leaves them untouched. Deterministic; the recoloured frames are
+  lossless WebP and `anim.json` pins their own sha256 (with the source's as `sourceSha256`).
 - lachy's stills, when the pack has them: her portrait beside her rows in the Line (`face`), `capri.png` over
   the right-click menu and as the image of the one notification she sends (NEEDS YOU while a fullscreen window
   hides her; org.freedesktop.Notifications), and its cursor while the pointer is over her head (X11).

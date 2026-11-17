@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """make-pack CAPRICORE_DIR [OUT_DIR] [--moods FILE] [--sleep FILE] [--lachy DIR|auto] [--mochi DIR|auto]
+          [--mochi-hair red|flat|original]
           [--upscale [--record-upscale]]
 
 Build the Capri character pack from a CapriCore checkout (https://github.com/CapriChooms/CapriCore).
@@ -37,6 +38,10 @@ Optional desktop art (anim/; a pack without it still loads):
   --mochi DIR|auto   mochiiwuff/capri-desktop at c011764, checked against tools/mochi-desktop-c011764.sha256.
                      anim/mochi/*.png|webp, LICENSE. Show frames and fan art: LOCAL PERSONAL USE ONLY; never
                      commit, publish or screenshot them anywhere public.
+  --mochi-hair MODE  her hair in the intro close-ups (anim/mochi/intro-*), which mochi drew black: `red`
+                     (default: her avatar's red, shadow and starfield), `flat` (one red) or `original`.
+                     tools/mochi_hair.py, deterministic, lossless WebP; anim.json pins the written bytes
+                     (+ "hair" and the source's "sourceSha256"). Needs numpy and Pillow unless `original`.
   anim/anim.json     <- tools/desktop-art.json (our measured geometry) + the sha256 of every file copied
   NOTICE.md          + each source's Required Notice lines, licence URL and credits
   --upscale          + anim/lachy/x2/sprites/*.png: every strip x2 (tools/upscale_art.py, Real-ESRGAN
@@ -197,8 +202,21 @@ def unzip_emote(zpath, dest):
         return len(z.namelist())
 
 
-def add_sides(out, srcs, pinned, geometry):
-    """Copy the pinned desktop art into anim/<side>/, write anim/anim.json and the NOTICE sections."""
+def mochi_hair(repo, mode):
+    """tools/mochi_hair.py, or None for `original`."""
+    if mode == "original":
+        return None
+    sys.path.insert(0, str(repo / "tools"))
+    try:
+        import mochi_hair as mh
+    except ImportError as e:
+        sys.exit(f"make-pack: --mochi-hair {mode} needs numpy and Pillow ({e}); or pass --mochi-hair original")
+    return mh
+
+
+def add_sides(out, srcs, pinned, geometry, hair=None, hair_mode="original"):
+    """Copy the pinned desktop art into anim/<side>/, write anim/anim.json and the NOTICE sections.
+    hair: tools/mochi_hair (or None): repaints her hair in the intro close-ups as they are copied."""
     anim = out / "anim"
     doc = {k: v for k, v in geometry.items() if k not in SIDES}
     notice = []
@@ -219,6 +237,11 @@ def add_sides(out, srcs, pinned, geometry):
                 files[short] = {"sha256": h, "unzippedTo": short[:-4], "files": n}
                 continue
             (dst / short).parent.mkdir(parents=True, exist_ok=True)
+            if hair and side == "mochi" and mochi_kind(short) == "intro":
+                hair.recolor_file(d / rel, dst / short, hair_mode)
+                files[short] = {"sha256": sha((dst / short).read_bytes()), "kind": "intro", "hair": hair_mode,
+                                "sourceSha256": h}
+                continue
             shutil.copy2(d / rel, dst / short)
             files[short] = {"sha256": h} if side == "lachy" else {"sha256": h, "kind": mochi_kind(short)}
         doc[side] = {**geometry[side], "files": files}
@@ -310,16 +333,19 @@ def main(argv):
         if k in argv:
             flags[k] = True
             argv.remove(k)
-    opts = {"--moods": repo / "packs/capri/moods.json", "--sleep": None, "--lachy": None, "--mochi": None}
+    opts = {"--moods": repo / "packs/capri/moods.json", "--sleep": None, "--lachy": None, "--mochi": None,
+            "--mochi-hair": "red"}
     for k in list(opts):
         if k in argv:
             i = argv.index(k)
             if i + 1 >= len(argv):
                 sys.exit(f"make-pack: {k} needs a value")
-            opts[k] = argv[i + 1] if k in ("--lachy", "--mochi") else Path(argv[i + 1])
+            opts[k] = argv[i + 1] if k in ("--lachy", "--mochi", "--mochi-hair") else Path(argv[i + 1])
             del argv[i:i + 2]
     if flags["--record-upscale"]:
         flags["--upscale"] = True
+    if opts["--mochi-hair"] not in ("red", "flat", "original"):
+        sys.exit(f"make-pack: --mochi-hair is red, flat or original, not {opts['--mochi-hair']!r}")
     if flags["--upscale"] and not opts["--lachy"]:
         sys.exit("make-pack: --upscale needs --lachy")
     moods = opts["--moods"]
@@ -377,7 +403,8 @@ def main(argv):
         copy(rel, f"music/{Path(rel).name}")
     copy("assets/default/icon-source.png", "icon.png")
     notice = (src / "docs/character-assets.md").read_text().rstrip("\n")
-    extra = add_sides(out, side_srcs, side_pinned, geometry) if side_srcs else []
+    hair = mochi_hair(repo, opts["--mochi-hair"]) if "mochi" in side_srcs else None
+    extra = add_sides(out, side_srcs, side_pinned, geometry, hair, opts["--mochi-hair"]) if side_srcs else []
     (out / "NOTICE.md").write_text(f"{notice}\n\n{NOTICE_LINE}\n" + "".join(f"\n{x}" for x in extra))
     shutil.copy2(moods, out / "moods.json")
 
@@ -397,7 +424,7 @@ def main(argv):
     for side in side_srcs:
         n = sum(1 for _ in (out / "anim" / side).rglob("*") if _.is_file())
         print(f"make-pack: + {SIDES[side]['repo']} @ {SIDES[side]['commit'][:7]} -> {out}/anim/{side}: {n} files"
-              + (" (LOCAL PERSONAL USE ONLY)" if side == "mochi" else ""))
+              + (f" (LOCAL PERSONAL USE ONLY; intro hair: {opts['--mochi-hair']})" if side == "mochi" else ""))
     if flags["--upscale"]:
         cache = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "synaps-avatar/models"
         n = upscale(out, repo, flags["--record-upscale"], cache)
