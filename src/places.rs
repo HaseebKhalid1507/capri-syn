@@ -465,11 +465,16 @@ struct Roam<'k> {
     retry_last: bool,
 }
 
+/// Passive spot families by `SpotKind::family()`.
+const PASSIVE_NAMES: [&str; 4] = ["edge", "floor", "floor_sit", "float"];
+
 fn passive(w: &World, o: &Roam, rng: &mut Rng) -> Result<Spot, Vec<(String, Block)>> {
     let (far, leaving, min_move) = (o.far, o.leaving, o.min_move);
     let mut why = Vec::new();
-    // The kind she just had isn't repeated, except the window top (another window's).
-    let last = w.last_kind.map(|k| k.family());
+    // The kind she just had isn't repeated, except the window top (another window's). Only the
+    // passive families (0..=3) count: an active spot (beside, hang, cling…) is family 9, which
+    // passive can't retry and has no name for (11-17 crash: `beside`, then nothing fit).
+    let last = w.last_kind.map(|k| k.family()).filter(|f| (*f as usize) < PASSIVE_NAMES.len());
     let mut pool: Vec<(u8, f64)> = o.kinds.iter().copied().filter(|k| k.0 == 0 || Some(k.0) != last).collect();
     if leaving {
         // Off his window to stand on the floor (a sulk or the satisfied beat plays there).
@@ -523,7 +528,7 @@ fn passive(w: &World, o: &Roam, rng: &mut Rng) -> Result<Spot, Vec<(String, Bloc
                 Err(b) => last_block = b,
             }
         }
-        why.push((["edge", "floor", "floor_sit", "float"][kind as usize].to_string(), last_block));
+        why.push((PASSIVE_NAMES.get(kind as usize).copied().unwrap_or("other").to_string(), last_block));
         if leaving && pool.is_empty() && why.len() == 1 {
             pool = vec![(0, 0.5), (3, 0.5)];
         } else if pool.is_empty()
@@ -2458,6 +2463,24 @@ mod tests {
             d.switch(1);
             d.run_to(80.0);
             assert!(d.hops.is_empty() && d.her == start, "seed {seed}: {:?}", d.hops);
+        }
+    }
+
+    /// 11-17 crash: her last spot was an active one (`beside`, family 9) and no passive spot fit,
+    /// so the retry-last fallback indexed the family names with 9. Now it's skipped, no panic.
+    #[test]
+    fn passive_retry_after_active_spot_does_not_panic() {
+        let fx = tiled();
+        let kinds = [SpotKind::Beside, SpotKind::FloatBeside, SpotKind::InPlace, SpotKind::Peek, SpotKind::Hang { upside_down: false }, SpotKind::Cling { left: true }, SpotKind::SitEdge { win: 1 }];
+        for k in kinds {
+            let mut w = fx.world();
+            w.last_kind = Some(k);
+            // Nothing can fit: every spot is closer than this.
+            let roam = Roam { far: false, leaving: false, min_move: 1_000_000, skip_recent: true, kinds: &PASSIVE_KINDS, retry_last: true };
+            for seed in 0..50 {
+                let r = passive(&w, &roam, &mut Rng::new(seed));
+                assert!(r.is_err(), "{k:?} seed {seed}: nothing should fit");
+            }
         }
     }
 
