@@ -59,6 +59,7 @@ const MENU_HEADER_PX: f32 = 96.0;
 /// look again this often until nothing else is on.
 const FIRST_WORDS_AFTER: Duration = Duration::from_millis(1_500);
 const FIRST_WORDS_RETRY: Duration = Duration::from_millis(700);
+const FIRST_WORDS_WITHIN: Duration = Duration::from_secs(180);
 /// Her right-click menu's width, and its maker's mark's type size (logical px).
 const MENU_W: f32 = 210.0;
 const MARK_PX: f32 = 9.0;
@@ -778,8 +779,9 @@ pub struct Avatar {
     line_restore_text: Option<String>,
     /// Her first launch ever (`state::first_meeting`, read before the heartbeat writes).
     first_meeting: bool,
-    /// When to try her first words (once she has landed and nothing else is on).
-    first_words: Option<Instant>,
+    /// When to try her first words (once she has landed and nothing else is on), and when to
+    /// give up for this launch (she tries again at the next).
+    first_words: Option<(Instant, Instant)>,
     /// How long the last Line took to open (ms).
     line_opened_ms: Option<u128>,
     /// The perch window unmapped; she falls if it isn't back within the grace.
@@ -1494,7 +1496,7 @@ impl Avatar {
             }
             self.heartbeat_start(cx);
             if self.first_meeting {
-                self.first_words = Some(now + FIRST_WORDS_AFTER);
+                self.first_words = Some((now + FIRST_WORDS_AFTER, now + FIRST_WORDS_WITHIN));
             }
             self.stills_decode(cx);
             self.burst_decode(cx);
@@ -2197,7 +2199,7 @@ impl Avatar {
         take(self.reaction_until);
         take(self.perch_gone.map(|g| g.due()));
         take(self.quit_armed);
-        take(self.first_words);
+        take(self.first_words.map(|f| f.0));
         take(self.music_stop_at);
         if self.unpark_req.is_some() {
             take(Some(now));
@@ -2586,7 +2588,7 @@ impl Avatar {
         if self.loaded {
             dirty |= self.brain_tick(now);
         }
-        if self.first_words.is_some_and(|t| t <= now) {
+        if self.first_words.is_some_and(|f| f.0 <= now) {
             dirty |= self.first_words_try(now);
         }
         self.apply_offset(now);
@@ -3148,14 +3150,17 @@ impl Avatar {
             || self.intro_playing()
             || self.arriving(now)
             || self.rag.is_some()
-            || self.bubble.is_some()
+            || self.bubble.as_ref().is_some_and(|b| !b.collapsed)
             || self.input.is_some()
             || self.prompt_ui.is_some()
             || self.menu.is_some()
             || self.session.as_ref().is_some_and(|s| s.link.busy())
             || self.brain_moving();
         if busy {
-            self.first_words = Some(now + FIRST_WORDS_RETRY);
+            self.first_words = self.first_words.filter(|f| now < f.1).map(|f| (now + FIRST_WORDS_RETRY, f.1));
+            if self.first_words.is_none() {
+                elog!("synaps-avatar: first words: never a quiet moment; next launch");
+            }
             return false;
         }
         self.first_words = None;
