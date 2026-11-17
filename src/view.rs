@@ -57,17 +57,28 @@ pub struct Stills {
 const MENU_HEADER_PX: f32 = 96.0;
 const CURSOR_PX: f32 = 32.0;
 
+/// A mood's face for the Line: the mood, its image (path, sha256), and its square (centre, size).
+type MoodFace = (String, (std::path::PathBuf, Option<String>), Option<((u32, u32), u32)>);
+
 impl Stills {
     fn decode(
         st: &std::collections::HashMap<String, (std::path::PathBuf, Option<String>)>,
-        moods: &[(String, (std::path::PathBuf, Option<String>))],
+        moods: &[MoodFace],
         sf: f32,
     ) -> Stills {
-        let at = |name: &str, (p, sha): &(std::path::PathBuf, Option<String>), h: f32| match crate::frames::still(p, sha.as_deref(), (h * sf).round() as u32) {
-            Ok(i) => Some(i),
-            Err(e) => {
-                elog!("synaps-avatar: still `{name}`: {e:#}");
-                None
+        // A mood's face: its square (eyes and mouth) at a whole-number scale, or all of it.
+        let at = |name: &str, (p, sha): &(std::path::PathBuf, Option<String>), crop: Option<((u32, u32), u32)>, h: f32| {
+            let px = (h * sf).round() as u32;
+            let r = match crop {
+                Some((c, s)) => crate::frames::face_tile(p, sha.as_deref(), c, s, px),
+                None => crate::frames::still(p, sha.as_deref(), px),
+            };
+            match r {
+                Ok(i) => Some(i),
+                Err(e) => {
+                    elog!("synaps-avatar: still `{name}`: {e:#}");
+                    None
+                }
             }
         };
         let get = |name: &str, h: f32| {
@@ -86,7 +97,7 @@ impl Stills {
             capri_path: st.get("capri").map(|s| std::fs::canonicalize(&s.0).unwrap_or_else(|_| s.0.clone())),
             // Its tip is the opaque box's top-left corner.
             cursor: get("cursor", CURSOR_PX).map(|i| crate::frames::still_pointer(&i, (0.0, 0.0), 1)),
-            moods: moods.iter().filter_map(|(m, f)| Some((m.clone(), crate::frames::still_image(at(m, f, crate::line::FACE_PX)?)))).collect(),
+            moods: moods.iter().filter_map(|(m, f, c)| Some((m.clone(), crate::frames::still_image(at(m, f, *c, crate::line::FACE_PX)?)))).collect(),
         }
     }
 }
@@ -429,9 +440,11 @@ const NOTE_TICK: Duration = Duration::from_millis(40);
 /// in her window (`Os::fx_staged`).
 const GLINT_LAYER: usize = NOTE_LAYER + 2 * NOTES_MAX;
 const GLINTS_MAX: usize = 4;
-/// A glint's smallest size, of its full size, and how far its core goes toward white.
+/// A glint's smallest size, of its full size; its core's pink, and how far it goes toward the
+/// halo's pale pink at its peak.
 const GLINT_MIN: f32 = 0.4;
-const GLINT_WHITE: f32 = 0.55;
+const GLINT_CORE: u32 = 0xff6fb4;
+const GLINT_WHITE: f32 = 0.35;
 /// When a glint can't show (a glitch, a turn, a frame without hair), the next try.
 const GLINT_RETRY_MS: u64 = 300;
 /// A bob or sway step (1-2 px) alone waits this long for another redraw to ride on (a
@@ -645,9 +658,6 @@ pub struct Avatar {
     shadow_at: Option<(i32, i32)>,
     /// The red cover over a drawn touchdown's silhouette is up (`sync_cover`).
     cover_on: bool,
-    /// Her shape the last two frames while the sit's legs unfold (they join it only where
-    /// both painted them).
-    unfold_hist: [Vec<ShapeRect>; 2],
     /// Last laid-out width of the status tag (logical px), to place the next one.
     tag_w: Rc<Cell<f32>>,
     /// The HUD's top while a bubble is up: (resting frame, avatar-local device px).
@@ -874,7 +884,6 @@ impl Avatar {
             shadow: None,
             shadow_at: None,
             cover_on: false,
-            unfold_hist: [Vec::new(), Vec::new()],
             tag_w: Rc::new(Cell::new(150.0)),
             hud_top: Cell::new(None),
             tag_box: Rc::new(Cell::new(None)),
@@ -1166,10 +1175,11 @@ impl Avatar {
                 // The same curve fades it: the core goes pink -> white -> pink and the halo
                 // grows out of it (1-bit windows: no alpha).
                 let (o, sz, rows) = place(fx::star(cx, cy, r, g.spin + 0.04));
-                // Never quite white: a pink glint on her hair, not a white cross on it (r34).
-                self.os.fx_set(core, mix_rgb(0xffc2e2, 0xffffff, sc * GLINT_WHITE), o, sz, &rows).ok();
-                let (o, sz, rows) = place(fx::star(cx, cy, r * (1.0 + 0.32 * sc), g.spin));
-                self.os.fx_set_below(glow, core, 0xffc2e2, o, sz, &rows).ok();
+                // A pink centre all its life, a pale halo around it: never a white cross on her
+                // hair (r34, r35: at its peak it still read as a stray white pixel).
+                self.os.fx_set(core, mix_rgb(GLINT_CORE, 0xffc2e2, sc * GLINT_WHITE), o, sz, &rows).ok();
+                let (o, sz, rows) = place(fx::star(cx, cy, r * (1.0 + 0.3 * sc), g.spin));
+                self.os.fx_set_below(glow, core, 0xffd6ec, o, sz, &rows).ok();
                 used += 1;
             }
         }
@@ -1334,8 +1344,7 @@ impl Avatar {
         let Some(anim) = self.pack.anim.as_ref() else { return };
         let st = anim.stills.clone();
         // The Line's faces per mood: those whose image the pack has.
-        let moods: Vec<(String, (std::path::PathBuf, Option<String>))> =
-            self.pack.behaviour.line_faces.iter().filter_map(|(m, stem)| Some((m.clone(), anim.mochi.get(stem)?.clone()))).collect();
+        let moods: Vec<MoodFace> = self.pack.behaviour.line_faces.iter().filter_map(|(m, f)| Some((m.clone(), anim.mochi.get(f.image())?.clone(), f.crop()))).collect();
         if st.is_empty() && moods.is_empty() {
             return;
         }
@@ -2386,7 +2395,7 @@ impl Avatar {
                 let (i, spin) = (self.rng.pick(n), self.rng.range(-0.25, 0.25));
                 let travel = self.rng.range(6.0, 10.0) * sf;
                 let dir = if self.rng.range(0.0, 1.0) < 0.5 { -1.0 } else { 1.0 };
-                (i, spin, travel * dir, self.rng.range(9.0, 11.0) * sf)
+                (i, spin, travel * dir, self.rng.range(7.5, 9.0) * sf)
             })
             .collect();
         let Some(f) = self.frame_or_default(self.shown_frame()) else { return };
@@ -4596,11 +4605,6 @@ fn tag_rows(cut: Cut, trail: Option<u64>, b: Bounds<Pixels>, sf: f32) -> Vec<Sha
 }
 
 /// The rows both `a` and `b` cover (1 px tall rows, as `shape::poly_rows` makes them).
-/// The rects split into one-row rects (for `rows_and`).
-fn unit_rows(rects: &[ShapeRect]) -> Vec<ShapeRect> {
-    rects.iter().flat_map(|r| (0..r.3 as i16).map(move |k| (r.0, r.1 + k, r.2, 1))).collect()
-}
-
 fn rows_and(a: &[ShapeRect], b: &[ShapeRect]) -> Vec<ShapeRect> {
     let mut by_y: std::collections::HashMap<i16, Vec<(i32, i32)>> = std::collections::HashMap::new();
     for r in b {
@@ -4776,7 +4780,7 @@ impl Render for Avatar {
             }
             let ms = at.saturating_duration_since(t0).as_millis() as u64;
             let seat = sy - l.avatar_y;
-            Some(arriveview::unfold_bands(f.top.min(seat), seat, f.bottom, arriveview::unfold_depth(ms)))
+            Some(arriveview::unfold_bands(f.top.min(seat), seat, f.bottom, arriveview::unfold_depth(ms), arriveview::UNFOLD_SEED))
         };
         let unfolding = unfold_at(now).is_some();
         if let Some(bands) = unfold_at(now) {
@@ -4786,7 +4790,10 @@ impl Render for Avatar {
         // grow past this frame's, last frame's paint shows until this one lands (r34: a faint
         // dark copy of the lower legs). Every step up to two frames ahead, so there's no gap
         // between where they are and where they'll be.
-        let unfold_next = unfolding.then(|| [4, 2, 1].iter().filter_map(|&k| unfold_at(now + FRAME_FAST * k)).flatten().collect::<Vec<_>>());
+        // All of the sit underneath while it does (and the frames before it starts: a present
+        // lands up to two frames late), so every row that comes in shows her legs at once.
+        let unfold_next = unfolding || self.arrive.unfold.is_some_and(|t0| t0 > now && t0 <= now + FRAME_FX * 2);
+        let unfold_first = self.arrive.unfold.filter(|&t0| t0 > now && t0 <= now + FRAME_FX * 2).map(|t0| self.anim.frame_at(t0));
         // A drawn arrival's first frames: the plain red land silhouette (its window's old
         // pixels would show through the new shape for a frame).
         if self.arrive.red_until.is_some_and(|t| now < t) || prepaint {
@@ -4883,11 +4890,9 @@ impl Render for Avatar {
             let next_base = rag_next.as_ref().map_or(base, |n| n.plan.clone());
             next = Some(if g.done(at) || drawn_land { next_base.clone() } else { lay_on(&next_base, at, step + 1) });
         }
-        if let Some(bands) = unfold_next
-            && next.is_none()
-        {
+        if unfold_next && unfold_first.is_none() && next.is_none() {
             let mut n = plan.clone();
-            n.slices = Some(if n.sx != 1.0 || n.sy != 1.0 { fx::scale_bands(&bands, n.pivot, n.sx, n.sy) } else { bands });
+            n.slices = None;
             next = Some(n);
         }
         // The sliver widens next frame: that width goes underneath.
@@ -4916,14 +4921,14 @@ impl Render for Avatar {
         // window showed what it hadn't drawn: a dark slab of her new legs at a perch cut).
         let mut next_rects: Option<Arc<Vec<ShapeRect>>> = None;
         if self.rag.is_none() && !hidden {
-            let nf = self.anim.frame_at(now + FRAME_FX);
+            let nf = unfold_first.unwrap_or_else(|| self.anim.frame_at(now + FRAME_FX));
             if nf != shown_i
                 && let Some(f) = self.frame_or_default(nf)
             {
                 next_img = Some((f.image.clone(), (f.at, f.image_size())));
                 next_rects = Some(f.rects.clone());
-                if next.is_none() {
-                    let mut n = plan.clone();
+                if next.is_none() || unfold_first.is_some() {
+                    let mut n = next.take().unwrap_or_else(|| plan.clone());
                     n.slices = None;
                     next = Some(n);
                 }
@@ -5029,19 +5034,6 @@ impl Render for Avatar {
         } else {
             plan.shape(&rects)
         };
-        // The legs unfolding over the edge: below the seat, only rows the last two frames had
-        // too (GPUI presents up to two frames late: rows new to the shape showed the window's
-        // old pixels, a faint dark copy of her lower legs, r34). They show solid or not at all.
-        if unfolding && !alpha && !hidden {
-            let seat = l.seat_y.map_or(0, |s| s - l.avatar_y) as i16;
-            let [h1, h2] = std::mem::take(&mut self.unfold_hist);
-            let (above, below): (Vec<ShapeRect>, Vec<ShapeRect>) = unit_rows(&body_shape).into_iter().partition(|r| r.1 < seat);
-            let kept = rows_and(&rows_and(&below, &h1), &h2);
-            self.unfold_hist = [above.iter().chain(&below).copied().collect(), h1];
-            body_shape = above.into_iter().chain(kept).collect();
-        } else if !self.unfold_hist[0].is_empty() {
-            self.unfold_hist = [Vec::new(), Vec::new()];
-        }
         // Shape mode turn: the art as it is (it's on screen already), shown through a band
         // about her feet (`facing::turn_band`); only the shape moves, so nothing lands late.
         if turning && !alpha {

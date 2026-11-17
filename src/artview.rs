@@ -30,8 +30,10 @@ pub(super) struct ArtState {
     picker: Picker,
     /// The variant in effect per pooled state she is in (or is teleporting into).
     picks: HashMap<PoolKey, usize>,
-    /// The window the perch pick belongs to: it holds through a sleep on that window.
+    /// The window the perch pick belongs to: it holds through a sleep on that window. Since
+    /// when she has been on it (for `afterMs`).
     perch_of: Option<u32>,
+    perch_since: Option<Instant>,
     /// The floor sleep picked last was a strip: it has its own way out (no CapriCore stand-up).
     pub floor_strip: bool,
     shift_at: Option<Instant>,
@@ -62,6 +64,7 @@ impl ArtState {
             picker: Picker::new(seed),
             picks: HashMap::new(),
             perch_of: None,
+            perch_since: None,
             floor_strip: false,
             shift_at: None,
             next_blink: None,
@@ -159,6 +162,7 @@ impl Avatar {
         let mut changed = false;
         if on != self.art.perch_of {
             self.art.perch_of = on;
+            self.art.perch_since = on.map(|_| now);
             changed |= self.art_drop(PoolKey::Perch);
         }
         for (k, active) in want {
@@ -167,10 +171,21 @@ impl Avatar {
             }
             match (active, self.art.picks.contains_key(&k)) {
                 (true, false) => {
-                    let eligible: Vec<bool> = self.pack.pools[&k].variants.iter().map(|v| self.art_eligible(v, place)).collect();
+                    let eligible: Vec<bool> = self.pack.pools[&k].variants.iter().map(|v| self.art_eligible(v, place, now)).collect();
                     let weights: Vec<f32> = self.pack.pools[&k].variants.iter().map(|v| v.weight).collect();
                     let own: Vec<bool> = self.pack.pools[&k].variants.iter().map(|v| v.art.is_none()).collect();
-                    if let Some(i) = self.art.picker.pick(k, &weights, &eligible, &own) {
+                    // Asleep where she was lounging: the same lying pose, asleep (its weight
+                    // may be 0: it only ever follows the lounge).
+                    let follow = (k == PoolKey::SleepWindow)
+                        .then(|| self.art.picks.get(&PoolKey::Perch).map(|&i| &self.pack.pools[&PoolKey::Perch].variants[i]))
+                        .flatten()
+                        .filter(|v| v.lying)
+                        .and_then(|v| self.pack.pools[&k].by_id(&v.id))
+                        .filter(|&i| eligible[i]);
+                    if let Some(i) = follow {
+                        self.art.picker.force(k, i);
+                    }
+                    if let Some(i) = follow.or_else(|| self.art.picker.pick(k, &weights, &eligible, &own)) {
                         self.art_set(k, i);
                         changed = true;
                     }
@@ -200,7 +215,9 @@ impl Avatar {
     fn art_after_pick(&mut self, now: Instant) {
         let top = [PoolKey::SleepWindow, PoolKey::SleepFloor, PoolKey::Perch, PoolKey::Stand].into_iter().find(|k| self.art.picks.contains_key(k));
         let range = top.and_then(|k| self.pack.pools[&k].shift_ms).filter(|_| top.is_some_and(|k| self.pack.pools[&k].variants.len() > 1));
-        self.art.shift_at = range.map(|r| now + self.art.picker.shift_in(r));
+        // A beat with its own length (the lounge): that long, then on.
+        let stay = top.and_then(|k| self.pack.pools[&k].variants[self.art.picks[&k]].stay_ms);
+        self.art.shift_at = stay.or(range).map(|r| now + self.art.picker.shift_in(r));
         let blink = self.art.picks.iter().filter_map(|(&k, &i)| self.pack.pools[&k].variants[i].art.as_ref()).find(|a| !a.blinks.is_empty()).map(|a| a.blink_ms);
         self.art.next_blink = blink.map(|r| now + self.art.picker.shift_in(r));
         let hold = self.art_strip().and_then(|a| a.hold_ms);
@@ -224,9 +241,11 @@ impl Avatar {
         }
     }
 
-    /// A lying variant only where the whole figure is on the window top's exposed stretch.
-    fn art_eligible(&self, v: &Variant, place: Placement) -> bool {
-        match &v.art {
+    /// A lying variant only where the whole figure is on the window top's exposed stretch; one
+    /// with `afterMs` only that long into her stay on this window.
+    fn art_eligible(&self, v: &Variant, place: Placement, now: Instant) -> bool {
+        let long = v.after_ms.is_none_or(|ms| self.art.perch_since.is_some_and(|t| now.saturating_duration_since(t) >= Duration::from_millis(ms)));
+        long && match &v.art {
             Some(a) if v.lying => self.art_fits(a.base, place),
             _ => true,
         }
@@ -384,7 +403,7 @@ impl Avatar {
             return false;
         };
         let place = self.placement;
-        let eligible: Vec<bool> = self.pack.pools[&k].variants.iter().map(|v| self.art_eligible(v, place)).collect();
+        let eligible: Vec<bool> = self.pack.pools[&k].variants.iter().map(|v| self.art_eligible(v, place, now)).collect();
         let weights: Vec<f32> = self.pack.pools[&k].variants.iter().map(|v| v.weight).collect();
         let before = self.art.picks.get(&k).copied();
         let stays: Vec<bool> = self.pack.pools[&k].variants.iter().map(|v| self.pack.pools[&k].shift_stays && v.art.is_none()).collect();
@@ -394,10 +413,22 @@ impl Avatar {
         }
         self.art_after_pick(now);
         if picked.is_some() && picked != before {
-            self.relayer(now);
+            self.relayer_cut_ahead(now);
             return true;
         }
         false
+    }
+
+    /// Relayer for a pose change in place, its cut a frame late: the drawing on screen holds one
+    /// more frame while the new one goes underneath (the look-ahead), so her new outline never
+    /// shows the window's pixels before they are drawn (r36: a shift into a lying pose had a
+    /// shredded first frame, the old sit's pixels in the new outline).
+    fn relayer_cut_ahead(&mut self, now: Instant) {
+        let before = self.anim.frame();
+        self.relayer(now);
+        if self.anim.frame() != before && !self.anim.busy() && !self.hidden {
+            self.anim.play(vec![(before, super::FRAME_FX.as_millis() as u32)], now);
+        }
     }
 
     /// A drawn arrival or wake ended in the stand pool's bridge drawing: she stands in it a few
@@ -446,7 +477,7 @@ impl Avatar {
         self.art.picker.force(k, i);
         self.art_set(k, i);
         self.art_after_pick(now);
-        self.relayer(now);
+        self.relayer_cut_ahead(now);
         "ok".into()
     }
 

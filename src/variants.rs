@@ -102,6 +102,14 @@ pub struct VariantSpec {
     /// Lies along the window top: only where the whole figure fits on its exposed stretch.
     #[serde(default)]
     pub lying: bool,
+    /// Only once she has been on this window (or floor) this long: a beat for a long stay
+    /// (getting comfy on a window she's sat on for a while), never on arrival.
+    #[serde(default)]
+    pub after_ms: Option<u64>,
+    /// Picked, it lasts `stayMs[0]..[1]` ms (instead of the pool's `shiftMs`), then the pool
+    /// shifts on (never the same twice running).
+    #[serde(default)]
+    pub stay_ms: Option<[u64; 2]>,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -336,14 +344,18 @@ mod tests {
         assert_eq!(perch, ["sit", "perch", "laydown"]);
         // Haseeb, 2026-11-16 (after the B1 deploy, "a"): the new art about half the time, perch 1 : 1
         // and floor sleep 1 : 1 (was 4 : 1 and 3 : 1). Laydown (perch and window sleep) ships at
-        // weight 0 after losing both blind critic rounds (r23, r24): it stays in the pack and in the
-        // pool, off until a weight turns it on, so window sleep stays CapriCore's.
+        // weight 0 after losing both blind critic rounds (r23, r24). B2c-2b re-trials it as the
+        // brief's "getting comfy" beat only: on a window she has sat on 4+ min, for 1-3 min, then
+        // back to sitting. Its window sleep only follows it (weight 0: never picked on its own).
         let w = |k: &str, id: &str| s.pools[k].variants.iter().find(|v| v.id == id).map(|v| v.weight).unwrap();
         for (k, lead) in [("perch", 1.0), ("sleepFloor", 1.0), ("sleepWindow", 3.0)] {
             let own: f32 = s.pools[k].variants.iter().filter(|v| v.strip.is_none()).map(|v| v.weight).sum();
             assert_eq!(own, lead, "{k}");
         }
-        assert_eq!((w("perch", "perch"), w("perch", "laydown")), (1.0, 0.0));
+        assert_eq!((w("perch", "perch"), w("perch", "laydown")), (1.0, 1.0));
+        let lay = s.pools["perch"].variants.iter().find(|v| v.id == "laydown").unwrap();
+        assert_eq!((lay.after_ms, lay.stay_ms), (Some(240_000), Some([60_000, 180_000])));
+        assert!(s.pools["perch"].variants.iter().filter(|v| v.id != "laydown").all(|v| v.after_ms.is_none() && v.stay_ms.is_none()));
         assert_eq!(w("sleepFloor", "doze"), 1.0);
         assert_eq!(w("sleepWindow", "laydown"), 0.0);
     }

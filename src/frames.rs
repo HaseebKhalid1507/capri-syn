@@ -71,8 +71,9 @@ impl Mask {
 
 pub struct Frame {
     pub id: String,
-    /// The pixels, `at` (device px) inside the avatar rect: the whole rect for the pack's
-    /// frames, the opaque box for a strip's cells (they would be mostly empty).
+    /// The pixels, `at` (device px) inside the avatar rect: the frame's opaque box (the rest of
+    /// the rect is empty; kept whole, the pack's 84 frames held ~117 MB of transparent rect in
+    /// RAM and as much again in GPUI's atlas, r36).
     pub image: Arc<RenderImage>,
     pub at: (i32, i32),
     pub mask: Mask,
@@ -395,7 +396,7 @@ pub fn face_patch(dst: &mut [u8], src: &[u8], w: u32, h: u32, rect: Rect, d: (i3
 }
 
 /// Where an image sits (`at`, its size) when the whole `aw`×`ah` avatar rect is drawn at `r`
-/// (x, y, w, h; any scale): the pack's frames fill it, a strip's cell is its opaque box.
+/// (x, y, w, h; any scale): a frame is its opaque box.
 pub fn place_in(at: ((i32, i32), (i32, i32)), r: (f32, f32, f32, f32), aw: i32, ah: i32) -> (f32, f32, f32, f32) {
     let ((x, y), (w, h)) = at;
     if (x, y, w, h) == (0, 0, aw, ah) {
@@ -464,6 +465,49 @@ pub fn still(path: &std::path::Path, sha: Option<&str>, h: u32) -> Result<image:
     let mut dst = Image::new(w, h.max(1), PixelType::U8x4);
     Resizer::new().resize(&src, &mut dst, &ResizeOptions::new().resize_alg(ResizeAlg::Convolution(FilterType::Lanczos3)))?;
     image::RgbaImage::from_raw(w, h.max(1), dst.into_vec()).context("still size")
+}
+
+/// A face tile `px` square from a still: the square of it at `centre` about `size` px across,
+/// rounded to a whole multiple of `px` (inside the image), averaged down by that whole number:
+/// sharp, no resampling blur.
+pub fn face_tile(path: &std::path::Path, sha: Option<&str>, centre: (u32, u32), size: u32, px: u32) -> Result<image::RgbaImage> {
+    let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    if let Some(want) = sha
+        && sha_hex(&bytes) != want
+    {
+        anyhow::bail!("{}: sha256 differs from anim.json", path.display());
+    }
+    let img = image::load_from_memory(&bytes)?.to_rgba8();
+    Ok(tile_of(&img, centre, size, px))
+}
+
+/// `face_tile` on decoded pixels.
+pub fn tile_of(img: &image::RgbaImage, centre: (u32, u32), size: u32, px: u32) -> image::RgbaImage {
+    let px = px.max(1);
+    let (w0, h0) = img.dimensions();
+    let most = (w0.min(h0) / px).max(1);
+    let k = ((size as f32 / px as f32).round() as u32).clamp(1, most);
+    let side = (k * px).min(w0.min(h0));
+    let x0 = (centre.0 as i64 - side as i64 / 2).clamp(0, (w0 - side) as i64) as u32;
+    let y0 = (centre.1 as i64 - side as i64 / 2).clamp(0, (h0 - side) as i64) as u32;
+    let n = side / k;
+    let mut out = image::RgbaImage::new(n, n);
+    for ty in 0..n {
+        for tx in 0..n {
+            let mut acc = [0u32; 4];
+            for y in 0..k {
+                for x in 0..k {
+                    let p = img.get_pixel(x0 + tx * k + x, y0 + ty * k + y).0;
+                    for c in 0..4 {
+                        acc[c] += u32::from(p[c]);
+                    }
+                }
+            }
+            let kk = k * k;
+            out.put_pixel(tx, ty, image::Rgba(acc.map(|v| ((v + kk / 2) / kk) as u8)));
+        }
+    }
+    out
 }
 
 /// A still as GPUI's image (BGRA).
@@ -702,8 +746,8 @@ fn finish(pack: &Pack, f: &FrameSource, geo: &Geometry, mut px: Vec<u8>) -> Resu
     let rects = Arc::new(mask.rects());
     let head_fraction = pack.behaviour.click.head_fraction;
     let head_line = (top + vb.height as f32 * geo.scale * head_fraction).round() as i32;
-    // A strip's cell keeps only its opaque box (most of the rect is empty).
-    let (at, rgba) = if f.cell.is_some() { crop_opaque(px, geo.width, geo.height) } else { ((0, 0), image::RgbaImage::from_raw(geo.width, geo.height, px).expect("buffer size")) };
+    // Only its opaque box (most of the rect is empty).
+    let (at, rgba) = crop_opaque(px, geo.width, geo.height);
     let (head_x, glints) = head_and_glints(&mask, &hair, top.round() as i32, (vb.height as f32 * geo.scale) as i32, face_glints);
     let profile = Arc::new(top_profile(&mask));
     let bottom = (0..mask.h as i32).rev().find(|&y| (0..mask.w as i32).any(|x| mask.get(x, y))).map_or(top.round() as i32 + 1, |y| y + 1);
@@ -896,6 +940,24 @@ pub fn decode_notes(pack: &Pack, files: &[String], size: u32) -> Result<Vec<Note
 mod tests {
 
     #[test]
+    fn a_face_tile_is_a_whole_number_reduction_of_its_square() {
+        // 256 px: left half red, right half blue; a 2x2 checker at (100..104, 100..104).
+        let mut img = image::RgbaImage::from_fn(256, 256, |x, _| if x < 128 { image::Rgba([255, 0, 0, 255]) } else { image::Rgba([0, 0, 255, 255]) });
+        img.put_pixel(100, 100, image::Rgba([0, 255, 0, 255]));
+        // About 140 px for a 35 px tile: 4x (140 px), centred, inside the image.
+        let t = super::tile_of(&img, (130, 128), 140, 35);
+        assert_eq!(t.dimensions(), (35, 35));
+        assert_eq!(t.get_pixel(0, 17).0, [255, 0, 0, 255], "left: red, unblurred");
+        assert_eq!(t.get_pixel(34, 17).0, [0, 0, 255, 255], "right: blue");
+        assert_eq!(t.get_pixel(17, 17).0, [0, 0, 255, 255], "x 128..132 averages blue only (a whole 4 px cell)");
+        // Near an edge: moved in, never cut.
+        let t = super::tile_of(&img, (10, 250), 140, 35);
+        assert_eq!(t.dimensions(), (35, 35));
+        // Bigger than the image: the largest whole multiple that fits.
+        assert_eq!(super::tile_of(&img, (128, 128), 900, 35).dimensions(), (35, 35));
+    }
+
+    #[test]
     fn sparkles_sit_only_on_the_hair_clear_of_her_face() {
         // A 200x300 figure, all hair; her face box at x 80..120, y 60..100.
         let (w, h) = (200u32, 300u32);
@@ -967,7 +1029,14 @@ mod tests {
             let e = format!("{:#}", decode(&p, &geo, &[s1], true, 1).err().unwrap());
             assert!(e.contains("sha256 mismatch"), "{e}");
             let (full, cell, twin) = (&d.frames[0], &d.frames[1], &d.frames[2]);
-            assert_eq!((full.at, full.image_size()), ((0, 0), (geo.width as i32, geo.height as i32)), "the pack's frames fill the rect");
+            // The pack's frames too: their opaque box (`crop_opaque`; here the 15x upscale's
+            // faint ringing reaches the rect's edges), always around all of the figure.
+            let (fw, fh) = full.image_size();
+            let fcols: Vec<i32> = (0..full.mask.w as i32).filter(|&x| (0..full.mask.h as i32).any(|y| full.mask.get(x, y))).collect();
+            let frows: Vec<i32> = (0..full.mask.h as i32).filter(|&y| (0..full.mask.w as i32).any(|x| full.mask.get(x, y))).collect();
+            assert!(full.at.0 <= fcols[0] && fcols[fcols.len() - 1] < full.at.0 + fw);
+            assert!(full.at.1 <= frows[0] && frows[frows.len() - 1] < full.at.1 + fh);
+            assert!(full.at.0 + fw <= geo.width as i32 && full.at.1 + fh <= geo.height as i32);
             let (w, h) = cell.image_size();
             assert!(w < geo.width as i32 && h < geo.height as i32, "{w}x{h} of {}x{}", geo.width, geo.height);
             // The opaque box is the mask's box.
@@ -1007,6 +1076,20 @@ mod tests {
             let e = format!("{:#}", decode(&p, &geo, &[l0], false, 1).err().unwrap());
             assert!(e.contains("anim.json says 2 cells of 6x4"), "{e}");
         });
+    }
+
+    #[test]
+    fn a_frame_keeps_only_its_opaque_box() {
+        // 10x6, opaque at x 3..5, y 2..4 (one half-transparent pixel counts).
+        let mut px = vec![0u8; 10 * 6 * 4];
+        for (x, y, a) in [(3, 2, 255), (4, 3, 255), (5, 4, 40)] {
+            px[(y * 10 + x) * 4 + 3] = a;
+        }
+        let (at, img) = super::crop_opaque(px, 10, 6);
+        assert_eq!((at, img.dimensions()), ((3, 2), (3, 3)));
+        assert_eq!(img.get_pixel(2, 2).0[3], 40);
+        let (at, img) = super::crop_opaque(vec![0u8; 4 * 4 * 4], 4, 4);
+        assert_eq!((at, img.dimensions()), ((0, 0), (1, 1)), "empty: 1x1 transparent");
     }
 
     #[test]

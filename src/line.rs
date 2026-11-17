@@ -925,7 +925,14 @@ impl Line {
             let s = f.size(0);
             let h = FACE_PX;
             let w = h * u32::from(s.width) as f32 / (u32::from(s.height) as f32).max(1.0);
-            head = head.flex().flex_col().gap(px(4.0)).child(img(ImageSource::Render(f.clone())).w(px(w)).h(px(h)));
+            let tile = img(ImageSource::Render(f.clone())).w(px(w)).h(px(h));
+            // Her mood's face: a hairline of her red around it (its art fills the tile).
+            let tile = if latest && self.snap.face.is_some() {
+                div().flex_none().w(px(w + 2.0)).h(px(h + 2.0)).p(px(1.0)).bg(rgb(pal.accent_dim)).child(tile).into_any_element()
+            } else {
+                tile.into_any_element()
+            };
+            head = head.flex().flex_col().gap(px(4.0)).child(tile);
         }
         let head = head.child(tracked(&plate, 1.4));
         let body: AnyElement = match &r.who {
@@ -1546,7 +1553,8 @@ pub fn tail_overlay(side: crate::beside::Side, at: f32, edge_c: u32, point_c: u3
             let (l, t, r, bt) = (f32::from(b.left()) + 1.0, f32::from(b.top()) + 1.0, f32::from(b.right()) - 1.0, f32::from(b.bottom()) - 1.0);
             let big = theme::BIG_CUT.min((bt - t) * 0.2);
             let sm = theme::SMALL_CUT;
-            let (w, half, depth) = (3.0f32, 13.0f32, 12.0f32);
+            // Its point stops short of the rows' padding (r35: it lay over her face tile).
+            let (w, half, depth) = (3.0f32, 12.0f32, 8.0f32);
             let (edge, notch): (Vec<theme::Pt>, Vec<theme::Pt>) = match side {
                 Side::Right | Side::Left => {
                     // Left edge: from the big cut down to the small one; right: the other way.

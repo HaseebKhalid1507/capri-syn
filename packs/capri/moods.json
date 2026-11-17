@@ -904,11 +904,16 @@
               2500,
               5000
             ],
-            "weight": 0,
+            "weight": 1,
             "every": 3,
             "holdMs": [
               3000,
               6000
+            ],
+            "afterMs": 240000,
+            "stayMs": [
+              60000,
+              180000
             ]
           }
         ]
@@ -1345,14 +1350,77 @@
     "height": 150
   },
   "lineFaces": {
-    "idle": "face-calm",
-    "talking": "face-calm",
-    "thinking": "face-look",
-    "working": "face-aside",
-    "needs_you": "face-wide",
-    "done": "face-smug",
-    "annoyed": "face-many",
-    "sleepy": "capri-face",
-    "away": "capri-face"
+    "idle": {
+      "image": "face-calm",
+      "centre": [
+        130,
+        168
+      ],
+      "size": 140
+    },
+    "talking": {
+      "image": "capri-face",
+      "centre": [
+        132,
+        140
+      ],
+      "size": 205
+    },
+    "thinking": {
+      "image": "face-wide",
+      "centre": [
+        106,
+        152
+      ],
+      "size": 140
+    },
+    "working": {
+      "image": "face-aside",
+      "centre": [
+        132,
+        165
+      ],
+      "size": 140
+    },
+    "needs_you": {
+      "image": "face-look",
+      "centre": [
+        132,
+        160
+      ],
+      "size": 175
+    },
+    "done": {
+      "image": "face-smug",
+      "centre": [
+        100,
+        160
+      ],
+      "size": 140
+    },
+    "annoyed": {
+      "image": "face-aside",
+      "centre": [
+        132,
+        165
+      ],
+      "size": 140
+    },
+    "sleepy": {
+      "image": "face-aside",
+      "centre": [
+        132,
+        165
+      ],
+      "size": 140
+    },
+    "away": {
+      "image": "face-calm",
+      "centre": [
+        130,
+        168
+      ],
+      "size": 140
+    }
   }
 }
