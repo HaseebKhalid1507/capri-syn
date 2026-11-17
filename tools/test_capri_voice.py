@@ -18,10 +18,12 @@ WIN = sys.platform == 'win32'
 TMP = tempfile.mkdtemp(prefix='capri-voice-test-')
 atexit.register(shutil.rmtree, TMP, ignore_errors=True)
 # The sidecar's paths, forced: nothing of his (models, state, his running sidecar's link) is touched.
+# The socket points into TMP, never at the default $XDG_RUNTIME_DIR/capri-voice.sock: serve() starts
+# by removing SOCK, so a future test that calls it must not be able to delete his live socket.
 os.environ['CAPRI_VOICE_MODELS'] = os.path.join(TMP, 'no-models')
 os.environ['CAPRI_VOICE_STATE'] = os.path.join(TMP, 'media.json')
-for k in ('CAPRI_VOICE_SOCK', 'CAPRI_VOICE_ENDPOINT'):
-    os.environ.pop(k, None)
+os.environ['CAPRI_VOICE_SOCK'] = os.path.join(TMP, 'capri-voice.sock')
+os.environ.pop('CAPRI_VOICE_ENDPOINT', None)
 win.log = lambda *a: None
 
 
@@ -58,7 +60,7 @@ class Sidecar(unittest.TestCase):
         else:
             self.assertFalse(hasattr(CV, '_win'), 'Linux never loads the Windows layer')
             self.assertEqual(CV.Media.__module__, 'capri_voice')
-            self.assertTrue(CV.SOCK.endswith('/capri-voice.sock'))
+            self.assertEqual(CV.SOCK, os.path.join(TMP, 'capri-voice.sock'))
 
     def test_mic_chunk(self):
         """The capture seam: None while nothing came, the bytes, b'' at its end (as os.read)."""
