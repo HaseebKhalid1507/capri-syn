@@ -354,9 +354,11 @@ function Install-Binary {
     if ($script:Artifact) {
         Write-Info "from $(Get-Tilde $script:Artifact)"
         Install-Setup $script:Artifact
-        $script:BinVer = 'artifact'
+        # Her installer records its version (Cargo.toml's) in her Apps entry.
+        $v = (Get-ItemProperty -Path $script:InnoKey -ErrorAction SilentlyContinue).DisplayVersion
+        $script:BinVer = if ($v) { "$v (artifact)" } else { 'artifact' }
         Set-ReceiptMeta 'binary' 'artifact'
-        Write-Good "synaps-avatar ($(Get-Tilde $script:Exe))"
+        Write-Good "synaps-avatar $($script:BinVer) ($(Get-Tilde $script:Exe))"
         return
     }
     $rel = "https://github.com/$($script:M.repo)/releases/latest/download"
@@ -400,7 +402,10 @@ function Build-FromSource {
             '--override', '--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended')
         Write-Info "Rust on Windows links with Visual Studio's C++ build tools (not installed; ~3 GB, admin):"
         Write-Info "  winget $(Format-Command $wg)"
-        if (-not (Get-Command winget -ErrorAction SilentlyContinue)) { Stop-Install 'no winget: install the C++ build tools from https://visualstudio.microsoft.com/visual-cpp-build-tools/, then run this again' }
+        if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+            if ($script:Dry) { Write-Warn 'no winget: a real run stops here (install the C++ build tools by hand)' }
+            else { Stop-Install 'no winget: install the C++ build tools from https://visualstudio.microsoft.com/visual-cpp-build-tools/, then run this again' }
+        }
         if (-not (Confirm-Action 'install them with winget (a UAC prompt)')) { Stop-Install 'run that (or this script with --yes), then run this again' }
         Invoke-Native 'winget' $wg
     } else {
@@ -516,7 +521,10 @@ function Install-Pack {
     if (-not $py) {
         $wg = @('install', '-e', '--id', 'Python.Python.3.13', '--scope', 'user', '--accept-package-agreements', '--accept-source-agreements')
         Write-Info "her pack is assembled by a Python script (make-pack); no Python here: winget $(Format-Command $wg)"
-        if (-not (Get-Command winget -ErrorAction SilentlyContinue)) { Stop-Install 'no winget: install Python 3 from https://www.python.org, then run this again' }
+        if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+            if ($script:Dry) { Write-Warn 'no winget: a real run stops here (install Python 3 from https://www.python.org)' }
+            else { Stop-Install 'no winget: install Python 3 from https://www.python.org, then run this again' }
+        }
         if (-not (Confirm-Action 'install Python 3.13 for you (no admin) with winget')) { Stop-Install 'run that (or this script with --yes), then run this again' }
         Invoke-Native 'winget' $wg
         $p313 = Join-Path $env:LOCALAPPDATA 'Programs\Python\Python313\python.exe'
@@ -552,7 +560,10 @@ function Install-Pack {
     # Up to date: same make-pack, pins, moods, persona and flags as last time, and it still checks.
     $parts = @(Get-ChildItem (Join-Path $src 'tools') -Filter '*.sha256' -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
     $parts += @('tools\make-pack', 'tools\desktop-art.json', 'packs\capri\moods.json', 'packs\capri\persona.md' | ForEach-Object { Join-Path $src $_ })
-    $fp = (($parts | Where-Object { Test-Path $_ } | ForEach-Object { Get-Sha256 $_ }) -join '').Substring(0, 16) + "-$([int]$script:LocalArt)"
+    # One sha256 over every part's (a dry run from GitHub has none of them: the hash of nothing).
+    $joined = ($parts | Where-Object { Test-Path $_ } | ForEach-Object { Get-Sha256 $_ }) -join ''
+    $sha = [Security.Cryptography.SHA256]::Create()
+    $fp = (-join ($sha.ComputeHash([Text.Encoding]::ASCII.GetBytes($joined)) | ForEach-Object { $_.ToString('x2') })).Substring(0, 16) + "-$([int]$script:LocalArt)"
     if (-not $script:Dry -and (Get-ReceiptMeta 'pack') -eq $fp -and (Test-Path (Join-Path $script:Pack 'sprites.json'))) {
         $c = Test-Pack
         if ($c.Code -eq 0) { Write-Good "up to date ($(Get-Tilde $script:Pack))"; Show-Notices; return }
@@ -597,7 +608,7 @@ function Start-Daemon {
     $s = ''
     if (-not $script:Dry) { $s = (& $script:Synaps daemon status 2>&1 | Out-String); $up = ($LASTEXITCODE -eq 0) } else { $up = $false }
     if (-not $up) { Invoke-Native $script:Synaps @('daemon', '--detach') }
-    # At sign-in: Synaps has no service on Windows; a Run value starts it (a console flashes briefly).
+    # At sign-in: Synaps has no service on Windows; a Run value starts it (whether a console flashes: docs/WINDOWS.md item 15).
     $run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
     $theirs = (Get-ItemProperty -Path $run -ErrorAction SilentlyContinue).PSObject.Properties |
         Where-Object { $_.Name -ne 'synaps-daemon' -and "$($_.Value)" -match 'synaps' -and "$($_.Value)" -match 'daemon' } | Select-Object -First 1

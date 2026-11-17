@@ -50,8 +50,9 @@ vulkan_zypper=libvulkan_radeon or libvulkan_intel
 # CapriCore v1.0.4 comes as GitHub's tarball of the commit; lachy at the commit make-pack pins.
 capricore_repo=CapriChooms/CapriCore
 capricore_commit=bc93892c751a73fdce14355b477dcdc775e46fd9
-# make-pack's Python dependencies, in a venv of the installer's own (never system-wide).
-pip_pack=fonttools==4.68.0
+# make-pack's Python dependencies, in a venv of the installer's own (never system-wide). 4.65.0: the
+# last fonttools for Python 3.10 (Ubuntu 22.04, the prebuilt's oldest); wheels up to 3.14.
+pip_pack=fonttools==4.65.0
 # --with-local-art: mochi's hair recolour (tools/mochi_hair.py) needs these too.
 pip_local_art=numpy>=1.26,<3 Pillow>=10,<14
 # --voice on Linux: tools/capri-voice-setup uses uv; installed in that venv when it's missing.
