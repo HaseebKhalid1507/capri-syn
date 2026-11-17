@@ -117,6 +117,23 @@ jobs:
           CAPRI_VOICE_MODELS: ${{ runner.temp }}/no-models
         run: python tools/capri-voice --selftest
 
+      # The Windows bundle (packaging/windows/voice-bundle.ps1: CPython's embeddable package + the
+      # wheels), then the selftest and the unit tests again, run by the bundled interpreter.
+      - name: The voice bundle, run by its own interpreter
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
+        env:
+          CAPRI_VOICE_MODELS: ${{ runner.temp }}/no-models
+        run: |
+          ./packaging/windows/voice-bundle.ps1 -Out "$env:RUNNER_TEMP\voice"
+          $py = "$env:RUNNER_TEMP\voice\python\python.exe"
+          & $py -c "import sys, kokoro_onnx, pywhispercpp.model, onnxruntime, sounddevice, pycaw.pycaw, winrt.windows.media.control; print('bundle imports ok:', sys.version.split()[0], sys.path)"
+          if ($LASTEXITCODE) { throw "imports: $LASTEXITCODE" }
+          & $py "$env:RUNNER_TEMP\voice\capri-voice" --selftest
+          if ($LASTEXITCODE) { throw "selftest: $LASTEXITCODE" }
+          & $py tools/test_capri_voice.py
+          if ($LASTEXITCODE) { throw "unit tests: $LASTEXITCODE" }
+          Get-Content "$env:RUNNER_TEMP\voice\versions.txt"
+
   # Her per-user installer (Inno Setup, packaging/windows): the windowed release build, the
   # installer as an artifact (never released or published), then an unattended install, check
   # and uninstall on the runner. No art in it: packs stay his.

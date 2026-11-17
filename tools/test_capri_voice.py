@@ -31,6 +31,7 @@ def load_sidecar():
 
 
 CV = load_sidecar()
+win.log = lambda *a: None       # (on Windows the sidecar's setup gave it its own)
 
 
 class Sidecar(unittest.TestCase):
