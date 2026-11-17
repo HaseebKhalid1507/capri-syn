@@ -15,6 +15,16 @@
 - The summon key on a parked Line counts as `waiting` only when the desktop refused the keyboard. Any
   other failure (she is gone) is logged as itself (`line: summoned, but she is gone`), not as a wait.
 
+### Windows: an installer, her files in the right places (not shipped)
+- A per-user installer (Inno Setup, no admin), built by CI as an artifact only: her windowed exe (no
+  console window), her AUMID with an icon and a Start-menu shortcut carrying it, opt-in autostart, a
+  clean uninstall. Her pack is never in it: the wizard (or `/PACK=`) copies one from his disk to where
+  she looks by default. `docs/WINDOWS.md` → The installer.
+- Settings go to `%APPDATA%\synaps-avatar`, packs and state to `%LOCALAPPDATA%\synaps-avatar` (they were
+  in `%TEMP%`, and the default pack path was relative). `$XDG_*_HOME` still wins. Linux: unchanged.
+- Without a console she logs to `%LOCALAPPDATA%\synaps-avatar\synaps-avatar.log`.
+- How voice could come to Windows, options sized and nothing decided: `docs/design/windows-voice.md`.
+
 ### Windows: the Line's keyboard, music, toasts, desktops, effects, DPI (not shipped)
 - The Line's keyboard follows Windows' rule: her key (Win+Alt+C) or a click on her takes it at once; any
   other opening (a summon, `capri-ctl`, voice) shows the Line without it, and her tag says

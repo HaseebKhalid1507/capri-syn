@@ -770,7 +770,9 @@ fn press_holds(age: Duration, listening: bool) -> bool {
 
 #[cfg(test)]
 mod tap_tests {
-    use super::*;
+    // Not `super::*`: view's globs bring GPUI's own `test` macro, which `#[test]` would resolve to.
+    use super::{TALK_STALE, press_holds};
+    use std::time::Duration;
 
     #[test]
     fn a_tap_clears_a_press_that_lost_its_release() {

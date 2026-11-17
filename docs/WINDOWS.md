@@ -9,10 +9,47 @@ monitors) is checked in the capri-win VM: those items are marked **[VM] pending*
 
 ```powershell
 cargo build --release --bin synaps-avatar
-.\target\release\synaps-avatar.exe      # packs as on Linux (~/.config/synaps-avatar, SA_PACK, ...)
+.\target\release\synaps-avatar.exe      # a console build: her log in the terminal
 ```
 
 `capri-ctl` and the brain talk to her over the same local socket (AF_UNIX, Windows 10 1803+).
+
+Her files (`platform::base_dir`; `$XDG_*_HOME` still wins, as on Linux):
+
+| | where |
+|---|---|
+| settings | `%APPDATA%\synaps-avatar\settings.toml` (roams with him) |
+| her pack (default `--pack`) | `%LOCALAPPDATA%\synaps-avatar\packs\capri` |
+| state | `%LOCALAPPDATA%\synaps-avatar\state.json`, `sessions.json` |
+| her log, without a console | `%LOCALAPPDATA%\synaps-avatar\synaps-avatar.log` (appended; over 4 MB at start, kept as `.old.log`) |
+
+## The installer
+
+`packaging/windows` (Inno Setup 6). CI's `windows-installer` job builds it on every PR and push to
+main and uploads it as an artifact (`synaps-avatar-setup-<sha>`, kept 14 days): never released or
+published. Locally, on a machine with Rust, Inno Setup and ImageMagick: `.\packaging\windows\build.ps1`.
+
+- **Per user, no admin**: she goes to `%LOCALAPPDATA%\Programs\synaps-avatar`.
+- **Her exe is the windowed build** (`cargo rustc … /SUBSYSTEM:WINDOWS`, her binary only): no
+  console window from the Start menu or at sign-in. Without a console she logs to the file above.
+  `--check` from a terminal therefore prints nothing there: read the log, or use a cargo build.
+- **Her pack is never in it.** The wizard's "Her pack" page (unattended: `/PACK="C:\dir"`) takes a
+  pack folder on his disk (one with `sprites.json`) and copies it to the default pack location; a
+  folder that isn't a pack is refused. Empty: the location is made for him to fill. Nothing is
+  downloaded. A new pack replaces the old one whole.
+- **Her AUMID** `Synaps.Avatar`: registered under `HKCU\Software\Classes\AppUserModelId` with
+  `DisplayName` and `IconUri`, and set on the Start-menu shortcut, so toasts show under her name
+  and icon. The icon is a mark in her colours (her red bolt on black), drawn at build time: no art.
+- **Autostart, opt-in** (a task, unchecked): the `HKCU\…\Run` value.
+- **Uninstall** (Settings → Apps, or `unins000.exe /VERYSILENT`): stops her, then removes her exe,
+  the shortcut, the AUMID key, the Run value, the pack it copied, her log and state, and her folders
+  if empty. His settings (`%APPDATA%\synaps-avatar`) and any pack he put there himself stay.
+- **Upgrades** close her (Restart Manager) and don't restart her.
+- CI installs, checks and uninstalls it unattended (`test-install.ps1`, a stand-in pack, no art):
+  the files, keys, shortcut AUMID, the windowed exe, her log and default pack path, and that
+  nothing is left after.
+
+Unattended: `synaps-avatar-setup-….exe /VERYSILENT /SUPPRESSMSGBOXES [/PACK="C:\packs\capri"] [/TASKS=autostart]`.
 
 ## What she does here
 
@@ -30,7 +67,7 @@ cargo build --release --bin synaps-avatar
 | music | SMTC (the media flyout's sessions): playing or quiet, and whether every playing session is a video | **[VM] pending** |
 | notifications | toasts, see below | **[VM] pending** |
 | lock, sleep, idle | WTS session notifications, power broadcasts, `GetLastInputInfo` | P0 [VM] |
-| hold-to-talk, voice | not yet (no key-up without a low-level hook, which she won't install; voice isn't ported) | — |
+| hold-to-talk, voice | not yet: voice isn't ported. The options, sized: `docs/design/windows-voice.md` | — |
 
 ## The Line's keyboard
 
@@ -42,22 +79,20 @@ Windows hands a process the foreground only right after the user's own input to 
   keyboard, and her tag says `WIN+ALT+C TO TYPE`; his key or a click on the Line then takes it;
 - she never takes the keyboard from the window he works in, never flashes, never injects input.
 
-## Toasts and what packaging must provide
+## Toasts
 
-Unpackaged, she registers her AppUserModelID herself, once, under
-`HKCU\Software\Classes\AppUserModelId\Synaps.Avatar` (`DisplayName`): no admin, no Start-menu
-shortcut. Windows then shows her toasts in the Action Center under that name, with the image as
-the logo. A click on a toast does nothing yet.
+Without the installer she registers her AppUserModelID herself, once, under
+`HKCU\Software\Classes\AppUserModelId\Synaps.Avatar` (`DisplayName`): no admin, no shortcut.
+Windows then shows her toasts in the Action Center under that name, with the image as the logo.
+The installer adds the icon (`IconUri`) and the shortcut's AUMID. The id has to stay
+`Synaps.Avatar` (`notifications.rs` and `synaps-avatar.iss` share it).
 
-A package (MSIX, or an installer) must provide:
-
-- **the AUMID**: MSIX gives one from the manifest; an installer writes a Start-menu shortcut with
-  `System.AppUserModel.ID = Synaps.Avatar` (or keeps the registry entry above). Either way the id
-  has to stay `Synaps.Avatar`, or `notifications.rs` changes with it;
-- **an icon** for the toast header (`IconUri` under the same key, or the shortcut's/manifest's);
-- **toast activation**, if a click should open the Line: a COM activator (`ToastActivatorCLSID`
-  on the shortcut, or the manifest's `com:Extension`) and a handler in her process;
-- **her autostart**, if wanted: a Run key or a startup task (nothing registers one now).
+**A click on a toast does nothing**, as on Linux (her notifications there carry no action). Making
+it open the Line was left out: it needs a COM activator, a `ToastActivatorCLSID` on the shortcut
+(Inno: `AppUserModelToastActivatorCLSID`), the CLSID's `LocalServer32` under HKCU, and in her process
+a class factory and `INotificationActivationCallback` registered at start (`CoRegisterClassObject`),
+plus a cold start when she isn't running. About half a day plus a VM check; not cheap without a
+desktop to try it on.
 
 ## [VM] pending (one VM day)
 
@@ -76,3 +111,6 @@ A package (MSIX, or an installer) must provide:
 10. SMTC: Spotify or a browser playing → `smtc playing (…)` in the log and LISTENING; a video →
     `ok listening (video)`; a Discord call (ignored) doesn't count.
 11. Toasts: one shows under "synaps-avatar" with her face; the registry key is there.
+12. The installer, interactively: the pack page (Browse, a non-pack refused, empty allowed); the
+    Start-menu shortcut starts her with no console window; a toast after install shows her icon;
+    autostart starts her at sign-in; uninstall from Settings → Apps leaves nothing but his settings.
