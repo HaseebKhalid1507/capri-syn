@@ -741,7 +741,10 @@ step_daemon() {
         fi
         DAEMON_HOW="started with her"
     fi
-    [ "$DRY" = 1 ] && return 0
+    if [ "$DRY" = 1 ]; then
+        DAEMON_STATE="(dry run)"
+        return 0
+    fi
     local s=''
     for _ in $(seq 1 20); do
         s=$("$SYNAPS" daemon status 2>&1) && break
@@ -1001,7 +1004,9 @@ summary() {
     printf '   %-*s %s\n' $w autostart "${AUTOSTART_HOW:-?}"
     if [ -n "${VOICE_HOW:-}" ]; then printf '   %-*s %s\n' $w voice "$VOICE_HOW"; fi
     if [ -n "${WATCH_HOW:-}" ]; then printf '   %-*s %s\n' $w watch "$WATCH_HOW"; fi
-    printf '\n   %sstart her:%s %s &      %sthen tap Super+C (or click her) to talk%s\n' "$B$T" "$N" "$(tilde "$BIN/synaps-avatar")" "$D" "$N"
+    local how='click her to talk'
+    case ${SUMMON:-} in Super+C*) how='tap Super+C (or click her) to talk' ;; 'your own'*) how='your key summons her' ;; esac
+    printf '\n   %sstart her:%s %s &      %sthen %s%s\n' "$B$T" "$N" "$(tilde "$BIN/synaps-avatar")" "$D" "$how" "$N"
     case ":$PATH:" in *":$BIN:"*) ;; *) info "$(tilde "$BIN") isn't on your PATH: add it to use \`synaps-avatar\` and \`avatarctl\` by name" ;; esac
     info "remove her: install.sh --uninstall   (synaps stays)"
 }
