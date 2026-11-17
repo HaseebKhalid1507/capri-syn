@@ -93,6 +93,12 @@ class Mask(unittest.TestCase):
         self.assertLess(star, 0.05, "a subtle one")
         self.assertTrue((self.out["original"] == self.src).all(), "original is untouched")
 
+    def test_stars_thicken_at_the_crown(self):
+        flat = np.ones((mh.SIZE[1], mh.SIZE[0]), bool)
+        st = mh._stars(flat) > 0.5
+        crown, low = st[:mh.CROWN_Y // 2].mean(), st[mh.CROWN_Y:].mean()
+        self.assertGreater(crown, low * 1.5, (crown, low))
+
     def test_any_size(self):
         small = synthetic((836, 470))
         m = mh.hair_mask(small)
@@ -107,8 +113,8 @@ class Mask(unittest.TestCase):
 
 # pixel_sha of recolor(synthetic(), mode): a fixed input gives these pixels (numpy + Pillow, no RNG).
 PINNED = {
-    "flat": "e9b110100a5a3ef3845da8d9a8132a18ae59a870eaaf59f4de9ddad2d5f55b80",
-    "red": "14ad75b7aa911cd92995980e426e8917a2fcf51355d0cd84116fdf46140b1235",
+    "flat": "4c31da0258db953e1d0423c4e7b8b121ecda0a046186188258781bd71905f252",
+    "red": "36b52874ce6d34f1edebae5d32717cc84626539076adcfd2882173831b21fbb6",
 }
 
 

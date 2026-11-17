@@ -6,11 +6,13 @@ the hair only, at pack-build time, on the local copy: nothing here contains or d
 beyond the numbers below.
 
 The mask: a measured head region (HEAD, close-up px; the nine share one framing) that leaves out the jaw,
-the arms and the waving hand, minus her face (FACE: the eyes' black stays), times the ink (max(R,G,B) < INK). Ink within LINE px of anything else
-opaque (her face, the white and purple linework) stays dark: that is the outline between hair and face.
-Edges against the background keep their alpha, so the anti-aliasing survives.
+the arms and the waving hand, minus her face (FACE: the eyes' black stays), times the ink
+(max(R,G,B) < INK). Ink within LINE px of anything that is not ink (her face, the white and purple
+linework, the rim light, the background) stays dark: that is her outline, kept to the spike tips, and
+smoothed a little (SMOOTH). Alpha is never changed, so the anti-aliasing survives.
 
-  red   (default) her lit red, the back spikes in her shadow red, and a starfield like the avatar's
+  red   (default) her lit red, the low right spike in her shadow red, and a starfield like the avatar's,
+        denser at the crown
   flat  one flat red, outline kept
   original   untouched
 
@@ -30,7 +32,9 @@ SHADOW = (182, 0, 20)
 STAR = (255, 168, 200)
 INK = 60          # max(R,G,B) below this is ink (her black)
 LIT = 180         # max(R,G,B) at or above this is drawn colour (face, white, linework); between: halo/AA
+EDGE = 80         # max(R,G,B) at or above this (or alpha < 128) is where the outline is measured from
 LINE = 3          # px of outline kept dark around the hair (next to the face, the linework, the background)
+SMOOTH = 1.5      # blur radius (px) the painted area is thresholded at: evens out the outline's wobble
 INK_RGB = (2, 1, 7)  # her black (the median of the hair ink)
 # Her hair: the spikes above and beside the face, down to the jaw line and above the arms and the
 # waving hand (close-up px, measured on all nine frames).
@@ -38,14 +42,16 @@ HEAD = [(380, 0), (1250, 0), (1342, 72), (1305, 125), (1100, 372), (1020, 362), 
         (500, 445), (440, 430), (380, 300)]
 # Her face (the outer edge of its green, eyes inside): never hair.
 FACE = [(604, 357), (626, 326), (634, 312), (662, 296), (755, 249), (760, 262), (778, 357), (828, 222),
-        (980, 151), (1002, 207), (1017, 356), (920, 394), (764, 457), (678, 491)]
-# The spikes behind the face take her shadow red: the far left one (soft edge), the low right one (a cel
-# edge from the notch between the right spikes to its base).
-BACK_SOFT = [(380, 150), (545, 150), (545, 470), (380, 470)]
+        (980, 151), (1000, 204), (1006, 216), (1010, 228), (1014, 240), (1018, 252),
+        (1020, 262), (1017, 356), (920, 394), (764, 457), (678, 491)]
+# The low right spike, behind her face, takes her shadow red (a cel edge from the notch between the right
+# spikes to its base).
 BACK_CEL = [(1107, 213), (1345, 66), (1345, 140), (1100, 380), (1045, 372)]
 # Starfield (avatar: ~25 specks per 10k hair px, most 1-2 px, a few up to ~50 px, some near white).
 STARS_PER_PX = 0.0025
 DUST_PER_PX = 0.004
+CROWN_Y = 260     # above this (close-up px) the stars thicken, up to CROWN x at the top
+CROWN = 2.5
 
 
 def pixel_sha(im):
@@ -100,9 +106,12 @@ def _stars(mask):
     ys, xs = np.nonzero(mask)
     if not len(xs):
         return s
-    k = _hash(xs, ys, 0x51A2)
-    star = k < np.uint32(STARS_PER_PX * 2**32)
-    dust = (k >= np.uint32(STARS_PER_PX * 2**32)) & (k < np.uint32((STARS_PER_PX + DUST_PER_PX) * 2**32))
+    k = _hash(xs, ys, 0x51A2).astype(np.float64)
+    top = CROWN_Y * h / SIZE[1]
+    gain = 1 + (CROWN - 1) * np.clip((top - ys) / top, 0, 1)
+    star = k < STARS_PER_PX * gain * 2**32
+    dust = ~star & (k < (STARS_PER_PX + DUST_PER_PX) * gain * 2**32)
+    k = k.astype(np.uint32)
     s[ys[dust], xs[dust]] = 0.25 + (k[dust] % 64).astype(np.float32) / 256
     img = Image.fromarray(np.zeros((h, w), np.uint8))
     d = ImageDraw.Draw(img)
@@ -133,7 +142,9 @@ def recolor(im, mode="red"):
     region = (a[..., 3] > 0) & _poly(size, [HEAD]) & ~_poly(size, [FACE])
     hair = region & (mx < LIT) & _dilate(hair_mask(im), 2)
     lit = (a[..., 3] > 128) & (mx >= LIT)
-    paint = hair_mask(im) & ~_dilate(lit | (a[..., 3] < 128), LINE)
+    edge = ((a[..., 3] > 128) & (mx >= EDGE)) | (a[..., 3] < 128)
+    paint = hair_mask(im) & ~_dilate(edge, LINE)
+    paint = (_blur(paint.astype(np.float32), SMOOTH) > 0.5) & paint
     w = _blur(paint.astype(np.float32), 1.0) * hair
     # The outline: halo greys inside it go to ink; the 1 px next to drawn colour keeps its anti-aliasing.
     base = a[..., :3].copy()
@@ -141,8 +152,7 @@ def recolor(im, mode="red"):
     fill = np.empty(a.shape[:2] + (3,), np.float32)
     fill[:] = RED
     if mode == "red":
-        back = np.maximum(_blur(_poly(size, [BACK_SOFT]).astype(np.float32), 6.0),
-                          _blur(_poly(size, [BACK_CEL]).astype(np.float32), 1.0))[..., None]
+        back = _blur(_poly(size, [BACK_CEL]).astype(np.float32), 1.0)[..., None]
         fill = fill * (1 - back) + np.array(SHADOW, np.float32) * back
         st = _stars(paint)[..., None]
         fill = fill * (1 - st) + np.array(STAR, np.float32) * st
