@@ -6205,6 +6205,8 @@ impl Render for Avatar {
                         body = body.child(div().h(px(LINE_H)).flex().items_center().child(chip));
                         continue;
                     }
+                    // A chip's opening backtick, typed out before its first letter: not shown.
+                    let t = if mode == PanelMode::Reply && t.trim() == "`" { String::new() } else { t };
                     let mut row = div().h(px(LINE_H)).flex().items_center().whitespace_nowrap().child(t);
                     if caret && k + 1 == n_lines {
                         row = row.child(caret_bar());
