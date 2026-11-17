@@ -1132,9 +1132,11 @@ impl Trouble {
     pub fn says(self) -> String {
         match self {
             // `synaps login` picks a provider and signs in; it doesn't pick a model. Her model
-            // is the daemon's default (Claude) or her `[session] model`: say which it is on.
-            Trouble::NoBrain { on: Some(p) } => format!("No brain yet, choom. I'm set to {p}, and Synaps has no login for it. In a terminal:\n`{LOGIN_CMD}`"),
-            Trouble::NoBrain { on: None } => format!("No brain yet, choom. Synaps has no login for my model. In a terminal:\n`{LOGIN_CMD}`"),
+            // is the daemon's default (Claude) or her `[session] model` (applied live on a
+            // settings reload): the other way out. Not `/model`: the daemon takes no slash
+            // commands, and the Line would send it to the model as words.
+            Trouble::NoBrain { on: Some(p) } => format!("No brain yet, choom. Synaps has no {p} login. Log in, or set another model ([session] model in my settings):\n`{LOGIN_CMD}`"),
+            Trouble::NoBrain { on: None } => format!("No brain yet, choom. Synaps has no login for my model. Log in, or set another model ([session] model in my settings):\n`{LOGIN_CMD}`"),
             Trouble::LoggedOut => format!("My login ran out. In a terminal:\n`{LOGIN_CMD}`"),
             Trouble::Limited => "Hit my model's limit for now. Give it a bit, then ask me again.".into(),
             Trouble::Swamped => "My model's swamped right now. Try me again in a minute.".into(),
@@ -1755,7 +1757,7 @@ mod tests {
         }
         for t in [Trouble::NoBrain { on: Some("Claude") }, Trouble::NoBrain { on: None }, Trouble::LoggedOut, Trouble::Limited, Trouble::Swamped, Trouble::Offline] {
             let says = t.says();
-            assert!(says.chars().count() <= 120, "{}: a short bubble", t.key());
+            assert!(says.chars().count() <= 150, "{}: a short bubble", t.key());
             // A login fix ends on the command alone, in backticks (the chip); the rest has none.
             let login = matches!(t, Trouble::NoBrain { .. } | Trouble::LoggedOut);
             assert_eq!(says.ends_with(&format!("\n`{LOGIN_CMD}`")), login, "{says}");
@@ -1772,7 +1774,7 @@ mod tests {
         failed_turn(&mut l, "No Anthropic credentials. Run `synaps login`, or switch to a provider model with `/model groq/llama-3.3-70b-versatile`.", t0);
         let b = l.body(t0);
         assert_eq!(b.trouble, Some(Trouble::NoBrain { on: Some("Claude") }));
-        assert_eq!(b.reply, "No brain yet, choom. I'm set to Claude, and Synaps has no login for it. In a terminal:\n`synaps login`");
+        assert_eq!(b.reply, "No brain yet, choom. Synaps has no Claude login. Log in, or set another model ([session] model in my settings):\n`synaps login`");
         assert_eq!((b.mood, b.label.as_deref()), (Mood::Idle, Some("NO BRAIN YET")), "calm, not ERROR / annoyed; no Done flash over it");
         let later = l.body(t0 + TROUBLE_FOR);
         assert_eq!((later.mood, later.label), (Mood::Idle, None));

@@ -39,19 +39,21 @@ Reference for `synaps-avatar`, the crate behind capri-syn. The [README](../READM
   annoyed (abort or error), needs-you (a pending prompt), sleepy, compacting, and away (no daemon).
 - **A failed turn she can name** is said in her words instead of the daemon's (`session::Trouble`,
   matched on the daemon's own wording): the bubble and her row in the Line get her line, her tag the
-  name for 10 s, the Line's footer a quiet `↑ resends your message`. A login fix ends on the command in
+  name for 10 s, the Line's footer a quiet `↑ resends your message` (in place of the key legend). A login fix ends on the command in
   a monospace chip (`$ synaps login`); a click copies it. The raw text stays in the log.
 
   | trouble | she says | tag | mood |
   |---|---|---|---|
-  | no credentials (`synaps login` + no credential) | No brain yet, choom. I'm set to Claude, and Synaps has no login for it. In a terminal: `$ synaps login` | `NO BRAIN YET` | idle |
+  | no credentials (`synaps login` + no credential) | No brain yet, choom. Synaps has no Claude login. Log in, or set another model ([session] model in my settings): `$ synaps login` | `NO BRAIN YET` | idle |
   | a lapsed or rejected login | My login ran out. In a terminal: `$ synaps login` | `LOGGED OUT` | idle |
   | rate or usage limit, billing | Hit my model's limit for now. Give it a bit, then ask me again. | `AT THE LIMIT` | annoyed |
   | overloaded, a 5xx | My model's swamped right now. Try me again in a minute. | `MODEL BUSY` | annoyed |
   | unreachable, timed out, a dropped stream | Can't reach my model. Check the connection, then ask me again. | `NO CONNECTION` | annoyed |
 
   The provider is read off the error (`No Anthropic credentials`: Claude; `no credential configured
-  for 'kimi-code'`: Kimi); `synaps login` picks a provider, not a model. Anything else: `‹error: …›`
+  for 'kimi-code'`: Kimi); `synaps login` picks a provider, not a model. The other way out is
+  `[session] model` (applied on `avatarctl settings reload`); not `/model`, which the daemon doesn't
+  take (the Line would send it to the model as words). Anything else: `‹error: …›`
   (cut at 90 characters), annoyed, as before.
 - **A turn shows as started** (THINKING, the busy bubble with ABORT) only once it has run 400 ms with
   no word, or its first word comes: one that fails at once never promises a reply.

@@ -34,7 +34,7 @@
   for a job too big for a bubble she mentions once that `synaps --attach capri` opens the same
   conversation in a terminal. A personal persona goes in `[session] persona_file`.
 - **No brain yet, in her words.** A turn that fails for want of model credentials shows "No brain yet,
-  choom. I'm set to Claude, and Synaps has no login for it. In a terminal:" and `$ synaps login` as a
+  choom. Synaps has no Claude login. Log in, or set another model ([session] model in my settings):" and `$ synaps login` as a
   copyable chip (tag `NO BRAIN YET`, calm) instead of the daemon's text cut at 90 characters. A lapsed
   login, a rate limit, an overloaded provider and an unreachable model get their own lines; the
   Line's footer adds `↑ resends your message`. Anything else is shown raw, as before. A turn that
@@ -42,8 +42,8 @@
 - **Her first words**, once in her life: "Hey. I'm Capri. Tap $MOD+C when you want me. Headpats also
   accepted." Nothing about what runs her. Not for anyone who ran her before (`state.json` `met`).
 - **Her maker's mark**: one dim row under QUIT, `SYNAPS 0.12.0 · CLAUDE-OPUS-5`. Not a button.
-- The right-click menu moves up when it wouldn't fit under the click, and keeps off her face; the
-  Line's footer wraps.
+- The right-click menu stays in her work area and keeps off her face, placed once before it shows (it
+  never jumps); the Line's footer wraps.
 - **Fixed: the Line put her answer above his question** after a failed turn (a refold kept the error
   note ahead of the turn's prompt; `synaps-client`'s `Transcript` anchors it to its turn now).
 

@@ -903,7 +903,17 @@ impl Line {
                                 .child(theme::backdrop(Cut::Corners(5.0), Fill::framed(pal.code, pal.accent_dim, 1.0)))
                                 .cursor_pointer()
                                 .child(div().flex_none().font_family(MONO).text_color(rgb(pal.text)).child(format!("$ {c}")))
-                                .child(div().flex_none().text_size(px(11.0)).text_color(rgb(pal.dim)).child(if copied { "copied" } else { "copy" }))
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .pl(px(8.0))
+                                        .border_l_1()
+                                        .border_color(rgb(pal.rule))
+                                        .text_size(px(12.5))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(rgb(if copied { pal.accent } else { pal.text }))
+                                        .child(if copied { "copied ✓" } else { "copy" }),
+                                )
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     (this.on_ask)(Ask::Copy(c.clone()), cx).ok();
                                     this.copied_cmd = Some(c.clone());
@@ -1510,7 +1520,9 @@ impl Render for Line {
                 .child(div().flex_none().pt(px(6.0)).child(glyph("play", pal.accent, pal.panel)))
                 .child(div().flex_1().text_color(rgb(pal.text)).child(c))
         });
-        let hint = if self.mode == Mode::Prompt {
+        // A failed turn's tip stands alone: the legend would bury it.
+        let tip = self.tip.clone().filter(|_| self.note.is_none());
+        let hint = if self.mode == Mode::Prompt || tip.is_some() {
             None
         } else if self.snap.caption.is_some() {
             Some("esc or $mod+c hush · the whole reply is in the thread".into())
@@ -1532,7 +1544,7 @@ impl Render for Line {
             .pb(px(8.0))
             .text_size(px(11.5))
             .children(self.note.clone().map(|n| div().text_color(rgb(pal.accent)).font_weight(FontWeight::BOLD).child(n)))
-            .children(self.tip.clone().filter(|_| self.note.is_none()).map(|n| div().text_size(px(13.0)).text_color(rgb(pal.text)).child(n)))
+            .children(tip.map(|n| div().text_size(px(13.0)).text_color(rgb(pal.text)).child(n)))
             .children(hint.map(|h| div().text_color(rgb(pal.dim)).child(h)));
         // Laid out at its natural height (absolute, unconstrained) and measured: the window
         // follows it, bottom edge fixed.

@@ -402,13 +402,14 @@ impl Bubble {
     }
 }
 
-/// Where her menu goes (window-local logical px): under the click, moved left or up as far as
-/// it must to fit, and then off her face (`face`: x0, y0, x1, y1) if that put it over it: beside
-/// the face (the click's side first), else under it, else above it; over it only when none fits.
-fn menu_at(click: (f32, f32), (w, h): (f32, f32), (min_x, max_x): (f32, f32), max_y: f32, face: Option<(f32, f32, f32, f32)>) -> (f32, f32) {
+/// Where her menu's top left goes (window-local logical px, `x` and `y` its allowed ranges: her
+/// work area less its size): under the click, moved as far as it must to fit, and then off her
+/// face (`face`: x0, y0, x1, y1) if that put it over it: beside the face (the click's side
+/// first), else under it, else above it; over it only when none fits.
+fn menu_at(click: (f32, f32), (w, h): (f32, f32), (min_x, max_x): (f32, f32), (min_y, max_y): (f32, f32), face: Option<(f32, f32, f32, f32)>) -> (f32, f32) {
     const GAP: f32 = 8.0;
     let x = click.0.min(max_x).max(min_x);
-    let y = click.1.min(max_y).max(0.0);
+    let y = click.1.min(max_y).max(min_y);
     let Some((f0, f1, f2, f3)) = face else { return (x, y) };
     let over = |x: f32, y: f32| x < f2 + GAP && x + w > f0 - GAP && y < f3 + GAP && y + h > f1 - GAP;
     if !over(x, y) {
@@ -422,7 +423,7 @@ fn menu_at(click: (f32, f32), (w, h): (f32, f32), (min_x, max_x): (f32, f32), ma
     if f3 + GAP <= max_y {
         return (x, f3 + GAP);
     }
-    if f1 - GAP - h >= 0.0 {
+    if f1 - GAP - h >= min_y {
         return (x, f1 - GAP - h);
     }
     (x, y)
@@ -749,7 +750,10 @@ pub struct Avatar {
     tag_w: Rc<Cell<f32>>,
     /// Her menu's height as last painted (logical px; 0: not yet): it opens upward when it
     /// wouldn't fit under the click.
-    menu_h: Rc<Cell<f32>>,
+    menu_h: Rc<Cell<(u32, f32)>>,
+    /// Where the open menu goes (the click, x, y), decided once: its side never changes while
+    /// it is open, whatever her pose does.
+    menu_place: Option<(Point<Pixels>, f32, f32)>,
     /// The HUD's top while a bubble is up: (resting frame, avatar-local device px).
     hud_top: Cell<Option<(usize, i32)>>,
     /// Last laid-out box of the status tag (window logical px), to tear it in a glitch.
@@ -991,7 +995,8 @@ impl Avatar {
             shadow_at: None,
             cover_on: false,
             tag_w: Rc::new(Cell::new(150.0)),
-            menu_h: Rc::new(Cell::new(0.0)),
+            menu_h: Rc::new(Cell::new((0, 0.0))),
+            menu_place: None,
             hud_top: Cell::new(None),
             tag_box: Rc::new(Cell::new(None)),
             motion_at: Cell::new(None),
@@ -5467,6 +5472,8 @@ impl Render for Avatar {
         };
 
         let menu_cell: Cell2 = Rc::new(Cell::new(None));
+        // The menu laid out unseen this frame (to be measured), and its rows' signature.
+        let (mut menu_unseen, mut menu_sig) = (false, 0u32);
         let tag_cell: Cell2 = Rc::new(Cell::new(None));
         let mut root = div().size_full().relative().font_family(self.font.clone()).text_color(rgb(pal.text));
         // Effect layers under her (the perch shadow), when her window paints them.
@@ -6042,7 +6049,19 @@ impl Render for Avatar {
                 (PanelMode::Reply, Some(b)) => b.rows().max(1),
                 _ => total_lines.clamp(1, LINES_PER_PAGE),
             };
-            let footer = !probe;
+            // A reply ending on a command chip with nothing else for the footer: the collapse key
+            // sits on the chip's row, no empty band under it.
+            let chip_last = mode == PanelMode::Reply
+                && !stub
+                && !busy
+                && self.bubble.as_ref().is_some_and(|b| {
+                    !b.long()
+                        && b.wrap.as_ref().and_then(|w| w.lines.last()).is_some_and(|&(a, e)| {
+                            let t: String = b.text[a.min(b.text.len())..e.min(b.text.len())].iter().collect();
+                            crate::line::command(&t).is_some()
+                        })
+                });
+            let footer = !probe && !chip_last;
             let mut h = PAD_T + HEADER_H + HEADER_GAP + rows as f32 * LINE_H + if footer { FOOTER_GAP + FOOTER_H } else { 0.0 } + PAD_B;
             if mode == PanelMode::Prompt
                 && let Some(key) = self.prompt_ui.as_ref().map(|p| p.shown_at)
@@ -6192,7 +6211,18 @@ impl Render for Avatar {
                             .font_weight(FontWeight::NORMAL)
                             .child(div().text_color(rgb(pal.dim)).child("$"))
                             .child(div().text_color(rgb(pal.text)).child(c.clone()))
-                            .child(div().pl(px(4.0)).text_size(px(11.0)).font_family(self.font.clone()).font_weight(FontWeight::BOLD).text_color(rgb(pal.dim)).child(tracked(if copied { "COPIED" } else { "COPY" }, 1.2)))
+                            .child(
+                                div()
+                                    .ml(px(2.0))
+                                    .pl(px(8.0))
+                                    .border_l_1()
+                                    .border_color(rgb(pal.rule))
+                                    .text_size(px(12.5))
+                                    .font_family(self.font.clone())
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(if copied { pal.accent } else { pal.text }))
+                                    .child(if copied { "copied ✓" } else { "copy" }),
+                            )
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |this, _: &MouseDownEvent, _, cx| {
@@ -6560,6 +6590,9 @@ impl Render for Avatar {
         }
 
         // Context menu.
+        if self.menu.is_none() {
+            self.menu_place = None;
+        }
         if let Some((at, _)) = self.menu.filter(|_| hud) {
             // Red items; the hovered one on a red blade with ink type. QUIT? (armed) is a bone
             // blade: danger.
@@ -6581,26 +6614,40 @@ impl Render for Avatar {
             };
             let item = |label: &'static str| item_as(label, false);
             let mark = self.menu_mark(window);
-            let max_x = l.lp(self.vis.1) - px(220.0);
             // Under the click if it fits in her window, else as far up as it must (a perched
             // her: a click low on her body cut the menu's bottom rows off). Before its first
             // paint, its height is estimated from its rows.
             let rows = 6 + usize::from(self.attention_label().is_some()) * 2 + usize::from(self.voice_on() && self.voice.cfg.handsfree);
-            let est = rows as f32 * 23.0 + if self.stills.as_ref().is_some_and(|s| s.capri.is_some()) { MENU_HEADER_PX + 8.0 } else { 0.0 } + 16.0;
-            let h = if self.menu_h.get() > 0.0 { self.menu_h.get() } else { est };
-            let max_y = (l.lp(l.win_h) - px(h + 4.0)).max(px(0.0));
-            // Her face as drawn now (window-local logical px): the menu keeps off it.
-            let face = self.frame_or_default(self.anim.frame()).and_then(|f| f.face_box).map(|(x0, y0, x1, y1)| {
-                let (ax, ay) = (l.avatar_x as f32, l.avatar_y as f32);
-                ((ax + x0 as f32) / sf, (ay + y0 as f32) / sf, (ax + x1 as f32) / sf, (ay + y1 as f32) / sf)
-            });
-            let (menu_x, menu_y) = menu_at(
-                (f32::from(at.x), f32::from(at.y)),
-                (MENU_W, h),
-                (f32::from(l.lp(self.vis.0)), f32::from(max_x)),
-                f32::from(max_y),
-                face,
-            );
+            let header_on = self.stills.as_ref().is_some_and(|s| s.capri.is_some());
+            // Its height as painted for this set of rows: placed once that is known (a menu
+            // never painted with these rows is laid out unseen for a frame and measured).
+            let sig = (rows as u32) << 2 | u32::from(mark.is_some()) << 1 | u32::from(header_on);
+            let measured = self.menu_h.get().0 == sig;
+            let place = match self.menu_place {
+                Some((a, x, y)) if a == at => Some((x, y)),
+                _ if measured => {
+                    let h = self.menu_h.get().1;
+                    // Her work area (under the bar, on her monitor), window-local logical px.
+                    let o = self.origin;
+                    let (mut x0, mut y0) = (f32::from(l.lp(self.vis.0)), 0.0f32);
+                    let (mut x1, mut y1) = (f32::from(l.lp(self.vis.1)), f32::from(l.lp(l.win_h)));
+                    if let Some(a) = self.her_area() {
+                        x0 = x0.max((a.x - o.0) as f32 / sf);
+                        y0 = y0.max((a.y - o.1) as f32 / sf);
+                        x1 = x1.min((a.x + a.w - o.0) as f32 / sf);
+                        y1 = y1.min((a.y + a.h - o.1) as f32 / sf);
+                    }
+                    // Her face as drawn now: the menu keeps off it.
+                    let face = self.frame_or_default(self.anim.frame()).and_then(|f| f.face_box).map(|(fx0, fy0, fx1, fy1)| {
+                        let (ax, ay) = (l.avatar_x as f32, l.avatar_y as f32);
+                        ((ax + fx0 as f32) / sf, (ay + fy0 as f32) / sf, (ax + fx1 as f32) / sf, (ay + fy1 as f32) / sf)
+                    });
+                    let p = menu_at((f32::from(at.x), f32::from(at.y)), (MENU_W, h), (x0 + 4.0, x1 - MENU_W - 4.0), (y0 + 4.0, y1 - h - 4.0), face);
+                    self.menu_place = Some((at, p.0, p.1));
+                    Some(p)
+                }
+                _ => None,
+            };
             // lachy's capri.png over the items: who this menu is.
             let header = self.stills.as_ref().and_then(|s| s.capri.clone()).map(|i| {
                 let s = i.size(0);
@@ -6729,7 +6776,10 @@ impl Render for Avatar {
                             .child(tracked(&mark, 0.8)),
                     )
                 });
-            root = root.child(div().absolute().left(px(menu_x)).top(px(menu_y)).child(probed(menu, &menu_cell)));
+            let (menu_x, menu_y) = place.unwrap_or((f32::from(at.x), f32::from(at.y)));
+            menu_unseen = place.is_none();
+            menu_sig = sig;
+            root = root.child(div().absolute().left(px(menu_x)).top(px(menu_y)).when(menu_unseen, |d| d.invisible()).child(probed(menu, &menu_cell)));
         }
 
         // Last: hearts, then the X input/bounding shape for exactly what this frame draws.
@@ -6801,7 +6851,12 @@ impl Render for Avatar {
                         }
                     }
                     if let Some(b) = menu_cell.get() {
-                        menu_h.set(f32::from(b.size.height));
+                        menu_h.set((menu_sig, f32::from(b.size.height)));
+                    }
+                    if menu_unseen {
+                        // Measured: placed and shown next frame.
+                        window.request_animation_frame();
+                    } else if let Some(b) = menu_cell.get() {
                         input.push(to_device(b, sf));
                         for p in theme::outline(MENU_CUT, f32::from(b.left()), f32::from(b.top()), f32::from(b.right()), f32::from(b.bottom())) {
                             shape::poly_rows(&dev(&theme::offset(&p, theme::RING)), &mut visible);
@@ -7005,30 +7060,41 @@ mod menu_tests {
     const FACE: Option<(f32, f32, f32, f32)> = Some((190.0, 300.0, 240.0, 340.0));
     const SIZE: (f32, f32) = (210.0, 300.0);
     const X: (f32, f32) = (0.0, 280.0);
-    const MAX_Y: f32 = 391.0;
+    const Y: (f32, f32) = (0.0, 391.0);
 
     #[test]
     fn under_the_click_when_it_fits_and_misses_her_face() {
-        assert_eq!(menu_at((60.0, 360.0), SIZE, X, 500.0, FACE), (60.0, 360.0), "under her face: as clicked");
-        assert_eq!(menu_at((100.0, 50.0), SIZE, X, MAX_Y, None), (100.0, 50.0));
+        assert_eq!(menu_at((60.0, 360.0), SIZE, X, (0.0, 500.0), FACE), (60.0, 360.0), "under her face: as clicked");
+        assert_eq!(menu_at((100.0, 50.0), SIZE, X, Y, None), (100.0, 50.0));
     }
 
     #[test]
     fn moved_up_over_her_face_it_goes_beside_it() {
         // Clicked on her face's right half: at the click it would cover it.
-        let (x, y) = menu_at((220.0, 200.0), SIZE, X, MAX_Y, FACE);
+        let (x, y) = menu_at((220.0, 200.0), SIZE, X, Y, FACE);
         assert_eq!((x, y), (248.0, 200.0), "right of her face, the click's side");
         // Clicked left of her face with no room left of it: the right side.
-        assert_eq!(menu_at((150.0, 200.0), SIZE, X, MAX_Y, FACE), (248.0, 200.0));
+        assert_eq!(menu_at((150.0, 200.0), SIZE, X, Y, FACE), (248.0, 200.0));
         // Room on the left (a wide window): the click's side.
-        assert_eq!(menu_at((150.0, 200.0), SIZE, (-100.0, 280.0), MAX_Y, FACE), (-28.0, 200.0));
+        assert_eq!(menu_at((150.0, 200.0), SIZE, (-100.0, 280.0), Y, FACE), (-28.0, 200.0));
     }
 
     #[test]
     fn no_room_beside_it_goes_under_then_above_then_over() {
         let narrow = (0.0, 150.0);
-        assert_eq!(menu_at((140.0, 200.0), SIZE, narrow, 600.0, FACE), (140.0, 348.0), "under her face");
-        assert_eq!(menu_at((140.0, 700.0), (210.0, 200.0), narrow, 300.0, FACE), (140.0, 92.0), "moved up over it, above it");
-        assert_eq!(menu_at((140.0, 200.0), SIZE, narrow, 300.0, FACE), (140.0, 200.0), "over it: nothing else fits");
+        assert_eq!(menu_at((140.0, 200.0), SIZE, narrow, (0.0, 600.0), FACE), (140.0, 348.0), "under her face");
+        assert_eq!(menu_at((140.0, 700.0), (210.0, 200.0), narrow, (0.0, 300.0), FACE), (140.0, 92.0), "moved up over it, above it");
+        assert_eq!(menu_at((140.0, 200.0), SIZE, narrow, (0.0, 300.0), FACE), (140.0, 200.0), "over it: nothing else fits");
+    }
+
+    #[test]
+    fn it_stays_in_her_work_area() {
+        // The window reaches off the screen's left edge and above the bar: the menu doesn't.
+        let (x, y) = menu_at((5.0, 2.0), (210.0, 200.0), (40.0, 280.0), (76.0, 391.0), None);
+        assert_eq!((x, y), (40.0, 76.0));
+        // Beside her face only where the work area has room: left is off it, so right.
+        assert_eq!(menu_at((200.0, 300.0), SIZE, (40.0, 280.0), Y, FACE), (248.0, 300.0));
+        // Nothing beside, nothing under: above her face, not above the bar.
+        assert_eq!(menu_at((140.0, 300.0), (210.0, 200.0), (0.0, 150.0), (120.0, 300.0), FACE), (140.0, 300.0), "above would cross the bar: over it");
     }
 }
