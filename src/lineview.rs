@@ -399,7 +399,8 @@ impl Avatar {
                 // One she can name is said in her words, as in the bubble (the daemon's text
                 // names slash commands the Line doesn't have).
                 K::Error => match crate::session::Trouble::of(&it.text) {
-                    Some(t) => Row { who: Who::Her, text: t.says().to_string(), detail: String::new(), streaming: false },
+                    // The command on a paragraph of its own: a chip.
+                    Some(t) => Row { who: Who::Her, text: t.says().replace("\n`", "\n\n`"), detail: String::new(), streaming: false },
                     None => Row { who: Who::Error, text: it.text.trim().to_string(), detail: String::new(), streaming: false },
                 },
                 _ => continue,
@@ -417,7 +418,7 @@ impl Avatar {
             glyph,
             flag,
             alarm,
-            busy: s.link.busy(),
+            busy: s.shown.as_ref().is_some_and(|b| b.busy),
             live: b.is_some_and(|b| b.live),
             prompts: b.map(|b| b.prompts.clone()).unwrap_or_default(),
             speaking: self.voice_speaking(),
@@ -426,7 +427,7 @@ impl Avatar {
             mic: self.voice_mic_row(),
             caption: self.voice_caption_now(),
             face,
-            trouble: b.and_then(|b| b.trouble).map(|t| t.note().to_string()),
+            trouble: b.and_then(|b| b.trouble).map(|t| t.tip().to_string()),
         }
     }
 

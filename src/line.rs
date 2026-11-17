@@ -81,8 +81,8 @@ pub struct Snap {
     /// Her face now (her mood's, `moods.json` `lineFaces`): on her latest row; the portrait on
     /// the others.
     pub face: Option<Face>,
-    /// The last turn failed for a reason with a fix (`session::Trouble::note`): shown as the
-    /// note when it comes up.
+    /// The last turn failed for a reason with a fix (`session::Trouble::tip`): a quiet line in
+    /// the footer when it comes up.
     pub trouble: Option<String>,
 }
 
@@ -142,6 +142,14 @@ pub enum Ask {
     CancelListen,
 }
 
+/// The command a paragraph (or a bubble line) is, when it is nothing but one `` `inline code` ``
+/// span: whole, or still typing out (no closing backtick yet).
+pub fn command(t: &str) -> Option<&str> {
+    let c = t.trim().strip_prefix('`')?;
+    let c = c.strip_suffix('`').unwrap_or(c).trim();
+    (!c.is_empty() && !c.contains('`')).then_some(c)
+}
+
 pub type OnAsk = Box<dyn Fn(Ask, &mut App) -> Result<(), String>>;
 
 /// How the avatar's refusal of `Ask::Parked(false)` starts: the desktop kept the keyboard with
@@ -185,6 +193,10 @@ pub struct Line {
     recall: Option<usize>,
     esc_at: Option<Instant>,
     note: Option<String>,
+    /// A quiet tip under a failed turn (`Trouble::tip`): not a warning, so not the note's style.
+    tip: Option<String>,
+    /// The command chip last copied (its label reads `copied`).
+    copied_cmd: Option<String>,
     parked: bool,
     /// Opened without the keyboard and never had it (`wait`): its hint says how to type.
     waiting: bool,
@@ -361,6 +373,8 @@ impl Line {
             recall: None,
             esc_at: None,
             note: None,
+            tip: None,
+            copied_cmd: None,
             parked: false,
             waiting: false,
             was_active: false,
@@ -429,10 +443,8 @@ impl Line {
             return;
         }
         let grew = snap.rows.len() != self.snap.rows.len() || snap.rows.last() != self.snap.rows.last();
-        if snap.trouble != self.snap.trouble
-            && let Some(n) = &snap.trouble
-        {
-            self.note = Some(n.clone());
+        if snap.trouble != self.snap.trouble {
+            self.tip = snap.trouble.clone();
         }
         let had_prompts = !self.snap.prompts.is_empty();
         let ids: Vec<u64> = self.snap.prompts.iter().map(|p| p.id).collect();
@@ -478,6 +490,7 @@ impl Line {
             "allow": self.allow_box.get().map(|b| [f32::from(b.origin.x), f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height)]),
             "risky": self.prompt().is_some_and(risky),
             "note": self.note,
+            "tip": self.tip,
             "prompts": self.snap.prompts.len(),
             "prompt_ix": self.prompt_ix,
             "height": self.height,
@@ -560,6 +573,7 @@ impl Line {
                 }
                 self.recall = None;
                 self.note = None;
+                self.tip = None;
                 self.pinned_up = false;
                 self.scroll.scroll_to_bottom();
             }
@@ -871,6 +885,33 @@ impl Line {
         for (bi, b) in parse(md).into_iter().enumerate() {
             col = col.child(match b {
                 Block::Heading(_, t) => div().font_weight(FontWeight::BOLD).text_color(rgb(pal.accent)).child(self.styled(&t)).into_any_element(),
+                // A paragraph that is one command (`synaps login`): a chip, its text copied on a click.
+                Block::Para(t) if command(&t).is_some() => {
+                    let c = command(&t).unwrap_or_default().to_string();
+                    let copied = self.copied_cmd.as_deref() == Some(c.as_str());
+                    div()
+                        .flex()
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("cmd-{row}-{bi}")))
+                                .relative()
+                                .flex()
+                                .items_center()
+                                .gap(px(10.0))
+                                .px(px(10.0))
+                                .py(px(3.0))
+                                .child(theme::backdrop(Cut::Corners(5.0), Fill::framed(pal.code, pal.accent_dim, 1.0)))
+                                .cursor_pointer()
+                                .child(div().flex_none().font_family(MONO).text_color(rgb(pal.text)).child(format!("$ {c}")))
+                                .child(div().flex_none().text_size(px(11.0)).text_color(rgb(pal.dim)).child(if copied { "copied" } else { "copy" }))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    (this.on_ask)(Ask::Copy(c.clone()), cx).ok();
+                                    this.copied_cmd = Some(c.clone());
+                                    cx.notify();
+                                })),
+                        )
+                        .into_any_element()
+                }
                 Block::Para(t) => div().text_color(rgb(pal.text)).child(self.styled(&t)).into_any_element(),
                 Block::Bullet(indent, marker, t) => div()
                     .pl(px(indent as f32 * 16.0))
@@ -1480,7 +1521,7 @@ impl Render for Line {
         } else {
             Some("⏎ send · ⇧⏎ newline · ↑ last message · ctrl+y copy reply · ctrl+o open link · esc close".into())
         };
-        // A long note (NO MODEL YET · …) puts the hints on a row of their own, not past the edge.
+        // A long note puts the hints on a row of their own, not past the edge.
         let footer = div()
             .flex()
             .flex_wrap()
@@ -1491,6 +1532,7 @@ impl Render for Line {
             .pb(px(8.0))
             .text_size(px(11.5))
             .children(self.note.clone().map(|n| div().text_color(rgb(pal.accent)).font_weight(FontWeight::BOLD).child(n)))
+            .children(self.tip.clone().filter(|_| self.note.is_none()).map(|n| div().text_size(px(13.0)).text_color(rgb(pal.text)).child(n)))
             .children(hint.map(|h| div().text_color(rgb(pal.dim)).child(h)));
         // Laid out at its natural height (absolute, unconstrained) and measured: the window
         // follows it, bottom edge fixed.
@@ -1640,11 +1682,21 @@ pub fn tail_overlay(side: crate::beside::Side, at: f32, edge_c: u32, point_c: u3
 
 #[cfg(test)]
 mod tests {
-    use super::{GONE, NO_KEYBOARD, keyboard_refused, links, risky};
+    use super::{GONE, NO_KEYBOARD, command, keyboard_refused, links, risky};
     use crate::session::PromptView;
 
     fn confirm(title: &str, text: &str) -> PromptView {
         PromptView { id: 1, title: title.into(), text: text.into(), secret: false }
+    }
+
+    #[test]
+    fn a_line_that_is_one_command_is_a_chip() {
+        assert_eq!(command("`synaps login`"), Some("synaps login"));
+        assert_eq!(command("`synaps lo"), Some("synaps lo"), "typing out");
+        assert_eq!(command("Run `synaps login` now"), None);
+        assert_eq!(command("`a` and `b`"), None);
+        assert_eq!(command("``"), None);
+        assert_eq!(command("`"), None);
     }
 
     #[test]

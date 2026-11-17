@@ -143,6 +143,8 @@ fn frame_log() -> bool {
 const QUIET_SEAMS: Duration = Duration::from_secs(8);
 const TOP_MARGIN: f32 = 6.0;
 const BODY_FONT: f32 = 20.0;
+/// The command chip's face (the Line's and the reader's).
+const MONO: &str = "DejaVu Sans Mono";
 const LINE_H: f32 = 27.0;
 /// The bubble grows to this many lines (and scrolls with the wheel past them).
 const LINES_PER_PAGE: usize = 8;
@@ -398,6 +400,32 @@ impl Bubble {
             self.shown = self.text.len();
         }
     }
+}
+
+/// Where her menu goes (window-local logical px): under the click, moved left or up as far as
+/// it must to fit, and then off her face (`face`: x0, y0, x1, y1) if that put it over it: beside
+/// the face (the click's side first), else under it, else above it; over it only when none fits.
+fn menu_at(click: (f32, f32), (w, h): (f32, f32), (min_x, max_x): (f32, f32), max_y: f32, face: Option<(f32, f32, f32, f32)>) -> (f32, f32) {
+    const GAP: f32 = 8.0;
+    let x = click.0.min(max_x).max(min_x);
+    let y = click.1.min(max_y).max(0.0);
+    let Some((f0, f1, f2, f3)) = face else { return (x, y) };
+    let over = |x: f32, y: f32| x < f2 + GAP && x + w > f0 - GAP && y < f3 + GAP && y + h > f1 - GAP;
+    if !over(x, y) {
+        return (x, y);
+    }
+    let (right, left) = (f2 + GAP, f0 - GAP - w);
+    let sides = if click.0 >= (f0 + f2) / 2.0 { [right, left] } else { [left, right] };
+    if let Some(sx) = sides.into_iter().find(|&sx| sx >= min_x && sx <= max_x) {
+        return (sx, y);
+    }
+    if f3 + GAP <= max_y {
+        return (x, f3 + GAP);
+    }
+    if f1 - GAP - h >= 0.0 {
+        return (x, f1 - GAP - h);
+    }
+    (x, y)
 }
 
 /// `line` with "…" in place of its last word(s): at least three characters give way, so it is
@@ -799,6 +827,8 @@ pub struct Avatar {
     unpark_req: Option<&'static str>,
     /// QUIT in the menu was clicked once: a second click before this exits.
     quit_armed: Option<Instant>,
+    /// The bubble's command chip (`synaps login`) was clicked: copied.
+    cmd_copied: Option<String>,
     /// The wheel's fractional lines over the bubble.
     wheel: Cell<f32>,
     /// The speech panel as last laid out (window logical px): the reader keeps clear of it.
@@ -1001,6 +1031,7 @@ impl Avatar {
             chip_rect: None,
             unpark_req: None,
             quit_armed: None,
+            cmd_copied: None,
             wheel: Cell::new(0.0),
             panel_rect: Cell::new(None),
             brain: None,
@@ -3829,6 +3860,7 @@ impl Avatar {
     /// attach, goes straight behind the chip); growing text types on from what is shown.
     fn stream_reply(&mut self, b: &Body, new_turn: bool, now: Instant) {
         if new_turn {
+            self.cmd_copied = None;
             if b.reply.is_empty() && !b.busy {
                 self.bubble = self.bubble.take().filter(|x| !x.stream);
                 return;
@@ -3866,13 +3898,15 @@ impl Avatar {
         if same != bb.text.len() || text.len() != bb.text.len() {
             bb.wrap = None;
         }
-        bb.shown = if new_turn && !b.busy { text.len() } else { bb.shown.min(same) };
+        // An old reply (on attach) shows whole; a failed turn's line (it never showed as busy:
+        // `session::QUIET_START`) types out like any reply.
+        bb.shown = if new_turn && !b.busy && b.trouble.is_none() { text.len() } else { bb.shown.min(same) };
         bb.text = text;
         bb.raw = b.raw.clone();
         bb.reveal_all_if_long();
         bb.more = b.busy;
-        if annoyed && !b.busy {
-            // The reason (aborted, error) must be seen.
+        if (annoyed || b.trouble.is_some()) && !b.busy {
+            // The reason (aborted, error, no login) must be seen.
             bb.collapsed = false;
         }
         if bb.shown < bb.text.len() {
@@ -5901,7 +5935,8 @@ impl Render for Avatar {
         // Speech bubble: the text field, a pending prompt, the reply (or the focus probe).
         let mut panel_geom: Option<PanelGeom> = None;
         self.buttons.borrow_mut().clear();
-        let busy = self.session.as_ref().is_some_and(|sess| sess.link.busy());
+        // As shown: a turn in its quiet start (`session::QUIET_START`) offers no ABORT yet.
+        let busy = self.session.as_ref().and_then(|sess| sess.shown.as_ref()).is_some_and(|b| b.busy);
         if mode.is_none() {
             self.panel_bottom = None;
             self.panel_rect.set(None);
@@ -6133,6 +6168,43 @@ impl Render for Avatar {
                 body = body.child(row.child(div().ml(px(4.0)).text_color(rgb(pal.dim)).whitespace_nowrap().child(ph.clone())));
             } else {
                 for (k, t) in lines.into_iter().enumerate() {
+                    // A line that is one command (`synaps login`, typed out or whole): a chip,
+                    // copied on a click.
+                    if mode == PanelMode::Reply
+                        && let Some(c) = crate::line::command(&t)
+                    {
+                        let copied = self.cmd_copied.as_deref() == Some(c);
+                        let c = c.to_string();
+                        let cmd_probes = self.buttons.clone();
+                        let chip = div()
+                            .child(canvas(move |b, _, _| cmd_probes.borrow_mut().push(("cmd", b)), |_, _, _, _| {}).absolute().top_0().left_0().size_full())
+                            .child(theme::backdrop(Cut::Corners(4.0), Fill::framed(pal.code, pal.accent, 1.0)))
+                            .relative()
+                            .id("cmd")
+                            .h(px(LINE_H - 4.0))
+                            .px(px(10.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .cursor_pointer()
+                            .font_family(MONO)
+                            .text_size(px(BODY_FONT - 3.0))
+                            .font_weight(FontWeight::NORMAL)
+                            .child(div().text_color(rgb(pal.dim)).child("$"))
+                            .child(div().text_color(rgb(pal.text)).child(c.clone()))
+                            .child(div().pl(px(4.0)).text_size(px(11.0)).font_family(self.font.clone()).font_weight(FontWeight::BOLD).text_color(rgb(pal.dim)).child(tracked(if copied { "COPIED" } else { "COPY" }, 1.2)))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                                    cx.stop_propagation();
+                                    lineview::copy_text(c.clone(), cx);
+                                    this.cmd_copied = Some(c.clone());
+                                    cx.notify();
+                                }),
+                            );
+                        body = body.child(div().h(px(LINE_H)).flex().items_center().child(chip));
+                        continue;
+                    }
                     let mut row = div().h(px(LINE_H)).flex().items_center().whitespace_nowrap().child(t);
                     if caret && k + 1 == n_lines {
                         row = row.child(caret_bar());
@@ -6515,6 +6587,18 @@ impl Render for Avatar {
             let est = rows as f32 * 23.0 + if self.stills.as_ref().is_some_and(|s| s.capri.is_some()) { MENU_HEADER_PX + 8.0 } else { 0.0 } + 16.0;
             let h = if self.menu_h.get() > 0.0 { self.menu_h.get() } else { est };
             let max_y = (l.lp(l.win_h) - px(h + 4.0)).max(px(0.0));
+            // Her face as drawn now (window-local logical px): the menu keeps off it.
+            let face = self.frame_or_default(self.anim.frame()).and_then(|f| f.face_box).map(|(x0, y0, x1, y1)| {
+                let (ax, ay) = (l.avatar_x as f32, l.avatar_y as f32);
+                ((ax + x0 as f32) / sf, (ay + y0 as f32) / sf, (ax + x1 as f32) / sf, (ay + y1 as f32) / sf)
+            });
+            let (menu_x, menu_y) = menu_at(
+                (f32::from(at.x), f32::from(at.y)),
+                (MENU_W, h),
+                (f32::from(l.lp(self.vis.0)), f32::from(max_x)),
+                f32::from(max_y),
+                face,
+            );
             // lachy's capri.png over the items: who this menu is.
             let header = self.stills.as_ref().and_then(|s| s.capri.clone()).map(|i| {
                 let s = i.size(0);
@@ -6628,12 +6712,14 @@ impl Render for Avatar {
                         }),
                     ),
                 )
-                // Her maker's mark: what runs her, for whoever wonders. Dim, small, not a button.
+                // Her maker's mark: what runs her, for whoever wonders. Dim, small, not a button;
+                // under a gap and a hairline, a footer.
                 .when_some(mark, |m, mark| {
-                    m.child(
+                    m.child(div().h(px(1.0)).mx(px(10.0)).mt(px(6.0)).bg(rgb(theme::mix(pal.rule, pal.panel, 0.4))))
+                    .child(
                         div()
                             .px(px(10.0))
-                            .pt(px(4.0))
+                            .pt(px(5.0))
                             .pb(px(3.0))
                             .text_size(px(MARK_PX))
                             .font_weight(FontWeight::MEDIUM)
@@ -6641,13 +6727,7 @@ impl Render for Avatar {
                             .child(tracked(&mark, 0.8)),
                     )
                 });
-            root = root.child(
-                div()
-                    .absolute()
-                    .left(if at.x > max_x { max_x } else { at.x })
-                    .top(if at.y > max_y { max_y } else { at.y })
-                    .child(probed(menu, &menu_cell)),
-            );
+            root = root.child(div().absolute().left(px(menu_x)).top(px(menu_y)).child(probed(menu, &menu_cell)));
         }
 
         // Last: hearts, then the X input/bounding shape for exactly what this frame draws.
@@ -6912,5 +6992,41 @@ impl std::future::Future for YieldNow {
         }
         cx.waker().wake_by_ref();
         std::task::Poll::Pending
+    }
+}
+
+#[cfg(test)]
+mod menu_tests {
+    use super::menu_at;
+
+    // A 500×695 window, her face at 190..240 × 300..340, a 210×300 menu.
+    const FACE: Option<(f32, f32, f32, f32)> = Some((190.0, 300.0, 240.0, 340.0));
+    const SIZE: (f32, f32) = (210.0, 300.0);
+    const X: (f32, f32) = (0.0, 280.0);
+    const MAX_Y: f32 = 391.0;
+
+    #[test]
+    fn under_the_click_when_it_fits_and_misses_her_face() {
+        assert_eq!(menu_at((60.0, 360.0), SIZE, X, 500.0, FACE), (60.0, 360.0), "under her face: as clicked");
+        assert_eq!(menu_at((100.0, 50.0), SIZE, X, MAX_Y, None), (100.0, 50.0));
+    }
+
+    #[test]
+    fn moved_up_over_her_face_it_goes_beside_it() {
+        // Clicked on her face's right half: at the click it would cover it.
+        let (x, y) = menu_at((220.0, 200.0), SIZE, X, MAX_Y, FACE);
+        assert_eq!((x, y), (248.0, 200.0), "right of her face, the click's side");
+        // Clicked left of her face with no room left of it: the right side.
+        assert_eq!(menu_at((150.0, 200.0), SIZE, X, MAX_Y, FACE), (248.0, 200.0));
+        // Room on the left (a wide window): the click's side.
+        assert_eq!(menu_at((150.0, 200.0), SIZE, (-100.0, 280.0), MAX_Y, FACE), (-28.0, 200.0));
+    }
+
+    #[test]
+    fn no_room_beside_it_goes_under_then_above_then_over() {
+        let narrow = (0.0, 150.0);
+        assert_eq!(menu_at((140.0, 200.0), SIZE, narrow, 600.0, FACE), (140.0, 348.0), "under her face");
+        assert_eq!(menu_at((140.0, 700.0), (210.0, 200.0), narrow, 300.0, FACE), (140.0, 92.0), "moved up over it, above it");
+        assert_eq!(menu_at((140.0, 200.0), SIZE, narrow, 300.0, FACE), (140.0, 200.0), "over it: nothing else fits");
     }
 }

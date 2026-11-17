@@ -28,6 +28,10 @@ const DONE_FOR: Duration = Duration::from_secs(3);
 const ANNOYED_FOR: Duration = Duration::from_secs(5);
 /// A turn that failed for a reason she can name (no model, a lapsed login): its tag shows this long.
 const TROUBLE_FOR: Duration = Duration::from_secs(10);
+/// A turn shows as started (THINKING, the bubble with ABORT) only once it has run this long
+/// with no word yet, or a word comes: one that fails at once (no login) goes straight to
+/// her saying so, never promising a reply first.
+const QUIET_START: Duration = Duration::from_millis(400);
 /// Before the first attach, stay as we are this long instead of flashing Away.
 const BOOT_GRACE: Duration = Duration::from_millis(2_500);
 /// After a detach, look for the session again this soon; while it is missing, this often.
@@ -214,6 +218,10 @@ pub struct Link {
     trouble: Option<Trouble>,
     /// The daemon's version (`Welcome`), for her maker's mark.
     daemon_version: Option<String>,
+    /// When the running turn started (`QUIET_START`), and the last turn's reply, raw text and
+    /// trigger, shown until it does.
+    turn_at: Instant,
+    before: (String, String, String),
     turn: u64,
     echo: Option<String>,
     trigger: String,
@@ -280,6 +288,8 @@ impl Link {
             notice: None,
             trouble: None,
             daemon_version: None,
+            turn_at: now,
+            before: Default::default(),
             turn: 0,
             echo: None,
             trigger: String::new(),
@@ -760,6 +770,7 @@ impl Link {
     fn session_event(&mut self, ev: SessionEvent, now: Instant) {
         match ev {
             SessionEvent::TurnStarted { user_text, trigger, .. } => {
+                self.before = (self.reply_text(), self.raw.trim().to_string(), std::mem::take(&mut self.trigger));
                 self.trigger = trigger;
                 self.busy = true;
                 self.phase = Phase::Thinking;
@@ -769,6 +780,7 @@ impl Link {
                 self.trouble = None;
                 self.flash = None;
                 self.turn += 1;
+                self.turn_at = now;
                 self.echo = user_text.map(|t| one_line(&t, 200)).filter(|t| !t.is_empty());
                 self.pending_input = None;
                 self.last_active = now;
@@ -806,7 +818,7 @@ impl Link {
                     Some(t) => {
                         elog!("synaps-avatar: turn error ({}): {}", t.key(), one_line(&message, 300));
                         self.trouble = Some(t);
-                        self.notice = Some(t.says().into());
+                        self.notice = Some(t.says());
                         self.flash = Some((t.mood(), now + TROUBLE_FOR));
                     }
                     None => {
@@ -975,14 +987,35 @@ impl Link {
         if let Some((_, until)) = self.flash {
             t.push(until);
         }
+        if self.quiet_start(now) {
+            t.push(self.turn_at + QUIET_START);
+        }
         if self.live() && !self.busy && self.resting.is_none() {
             t.push(self.last_active + self.opts.sleepy_after);
         }
         t.into_iter().filter(|&d| d > now).min()
     }
 
+    /// The turn's reply as the bubble shows it: the text cleaned, then the notice.
+    fn reply_text(&self) -> String {
+        let mut reply = clean(&self.raw);
+        if let Some(n) = &self.notice {
+            if !reply.is_empty() {
+                reply.push('\n');
+            }
+            reply.push_str(n);
+        }
+        reply
+    }
+
+    /// A turn that has just started with no word yet: shown as not started (`QUIET_START`).
+    fn quiet_start(&self, now: Instant) -> bool {
+        self.busy && self.raw.is_empty() && self.phase == Phase::Thinking && self.prompts.is_empty() && now < self.turn_at + QUIET_START
+    }
+
     pub fn body(&self, now: Instant) -> Body {
         let mut label = None;
+        let quiet = self.quiet_start(now);
         let mood = if !self.live() {
             if !self.ever_live && now < self.started + BOOT_GRACE { Mood::Idle } else { Mood::Away }
         } else if !self.prompts.is_empty() {
@@ -990,7 +1023,7 @@ impl Link {
         } else if self.compacting {
             label = Some("COMPACTING".into());
             Mood::Sleepy
-        } else if self.busy {
+        } else if self.busy && !quiet {
             match &self.phase {
                 Phase::Thinking => Mood::Thinking,
                 Phase::Talking => Mood::Talking,
@@ -1009,13 +1042,6 @@ impl Link {
         } else {
             Mood::Idle
         };
-        let mut reply = clean(&self.raw);
-        if let Some(n) = &self.notice {
-            if !reply.is_empty() {
-                reply.push('\n');
-            }
-            reply.push_str(n);
-        }
         // Whole: a security decision is made on the full text (the bubble cuts its own copy).
         let prompts: Vec<PromptView> = self
             .prompts
@@ -1023,15 +1049,20 @@ impl Link {
             .map(|p| PromptView { id: p.id, title: p.title.trim().to_string(), text: p.prompt.trim_end().to_string(), secret: p.kind.as_str() != Some("confirm") })
             .collect();
         let prompt = prompts.first().cloned();
+        let (reply, raw, trigger) = if quiet {
+            self.before.clone()
+        } else {
+            (self.reply_text(), self.raw.trim().to_string(), self.trigger.clone())
+        };
         Body {
             mood,
             label,
             reply,
-            raw: self.raw.trim().to_string(),
-            turn: self.turn,
-            busy: self.busy,
-            echo: self.echo.clone().filter(|_| self.busy),
-            trigger: self.trigger.clone(),
+            raw,
+            turn: if quiet { self.turn.saturating_sub(1) } else { self.turn },
+            busy: self.busy && !quiet,
+            echo: self.echo.clone().filter(|_| self.busy && !quiet),
+            trigger,
             prompt,
             prompts,
             live: self.live(),
@@ -1046,8 +1077,9 @@ impl Link {
 /// `synaps login` too). Anything else keeps the raw `‹error: …›`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Trouble {
-    /// No model credentials at all: a fresh install before `synaps login`.
-    NoBrain,
+    /// No model credentials: a fresh install before `synaps login`. `on`: the provider her
+    /// model is on, when the daemon names it (`No Anthropic credentials`: Claude).
+    NoBrain { on: Option<&'static str> },
     /// A login that lapsed or was rejected.
     LoggedOut,
     /// The provider's rate or usage limit.
@@ -1058,16 +1090,21 @@ pub enum Trouble {
     Offline,
 }
 
+/// The command a no-brain line ends on, on a line of its own (the bubble draws it as a chip).
+pub const LOGIN_CMD: &str = "synaps login";
+
 impl Trouble {
     pub fn of(message: &str) -> Option<Trouble> {
         let m = message.to_ascii_lowercase();
         let any = |keys: &[&str]| keys.iter().any(|k| m.contains(k));
         if m.contains("synaps login") || m.contains("(authentication_error)") {
-            return Some(if any(&["no anthropic credentials", "no api key or oauth token", "no credential configured"]) {
-                Trouble::NoBrain
-            } else {
-                Trouble::LoggedOut
-            });
+            if any(&["no anthropic credentials", "no api key or oauth token"]) {
+                return Some(Trouble::NoBrain { on: Some("Claude") });
+            }
+            if let Some(rest) = m.split("no credential configured for '").nth(1) {
+                return Some(Trouble::NoBrain { on: provider_name(rest.split('\'').next().unwrap_or("")) });
+            }
+            return Some(Trouble::LoggedOut);
         }
         if any(&["rate limit", "(http 429", "usage limit", "quota", "(billing_error)"]) {
             Some(Trouble::Limited)
@@ -1082,7 +1119,7 @@ impl Trouble {
 
     pub fn key(self) -> &'static str {
         match self {
-            Trouble::NoBrain => "no_brain",
+            Trouble::NoBrain { .. } => "no_brain",
             Trouble::LoggedOut => "logged_out",
             Trouble::Limited => "limited",
             Trouble::Swamped => "swamped",
@@ -1090,21 +1127,25 @@ impl Trouble {
         }
     }
 
-    /// What she says (the bubble, and her row in the Line).
-    pub fn says(self) -> &'static str {
+    /// What she says (the bubble, and her row in the Line). A login fix ends on the command,
+    /// on its own line, in backticks.
+    pub fn says(self) -> String {
         match self {
-            Trouble::NoBrain => "No brain yet, choom. Open a terminal, run synaps login, pick a model. Then ask me again.",
-            Trouble::LoggedOut => "My login ran out. synaps login in a terminal and I'm back.",
-            Trouble::Limited => "Hit my model's limit for now. Give it a bit, then ask me again.",
-            Trouble::Swamped => "My model's swamped right now. Try me again in a minute.",
-            Trouble::Offline => "Can't reach my model. Check the connection, then ask me again.",
+            // `synaps login` picks a provider and signs in; it doesn't pick a model. Her model
+            // is the daemon's default (Claude) or her `[session] model`: say which it is on.
+            Trouble::NoBrain { on: Some(p) } => format!("No brain yet, choom. I'm set to {p}, and Synaps has no login for it. In a terminal:\n`{LOGIN_CMD}`"),
+            Trouble::NoBrain { on: None } => format!("No brain yet, choom. Synaps has no login for my model. In a terminal:\n`{LOGIN_CMD}`"),
+            Trouble::LoggedOut => format!("My login ran out. In a terminal:\n`{LOGIN_CMD}`"),
+            Trouble::Limited => "Hit my model's limit for now. Give it a bit, then ask me again.".into(),
+            Trouble::Swamped => "My model's swamped right now. Try me again in a minute.".into(),
+            Trouble::Offline => "Can't reach my model. Check the connection, then ask me again.".into(),
         }
     }
 
     /// Her tag while it shows.
     pub fn tag(self) -> &'static str {
         match self {
-            Trouble::NoBrain => "NO BRAIN YET",
+            Trouble::NoBrain { .. } => "NO BRAIN YET",
             Trouble::LoggedOut => "LOGGED OUT",
             Trouble::Limited => "AT THE LIMIT",
             Trouble::Swamped => "MODEL BUSY",
@@ -1112,24 +1153,35 @@ impl Trouble {
         }
     }
 
-    /// The Line's note: the fix, and that his message isn't lost.
-    pub fn note(self) -> &'static str {
+    /// The Line's quiet footer tip: that his message isn't lost (her row says the fix).
+    pub fn tip(self) -> &'static str {
         match self {
-            Trouble::NoBrain => "NO MODEL YET · RUN synaps login IN A TERMINAL · ↑ BRINGS YOUR MESSAGE BACK",
-            Trouble::LoggedOut => "LOGIN RAN OUT · RUN synaps login IN A TERMINAL · ↑ BRINGS YOUR MESSAGE BACK",
-            Trouble::Limited => "RATE LIMITED · TRY AGAIN IN A BIT · ↑ BRINGS YOUR MESSAGE BACK",
-            Trouble::Swamped => "MODEL OVERLOADED · TRY AGAIN IN A MINUTE · ↑ BRINGS YOUR MESSAGE BACK",
-            Trouble::Offline => "COULDN'T REACH THE MODEL · ↑ BRINGS YOUR MESSAGE BACK",
+            Trouble::NoBrain { .. } | Trouble::LoggedOut => "after synaps login, ↑ resends your message",
+            _ => "↑ resends your message",
         }
     }
 
     /// Not her fault and not his: no login is calm; a provider's trouble annoys her.
     fn mood(self) -> Mood {
         match self {
-            Trouble::NoBrain | Trouble::LoggedOut => Mood::Idle,
+            Trouble::NoBrain { .. } | Trouble::LoggedOut => Mood::Idle,
             _ => Mood::Annoyed,
         }
     }
+}
+
+/// A provider key as Synaps names it (`no credential configured for 'kimi-code'`), as she'd say it.
+fn provider_name(key: &str) -> Option<&'static str> {
+    Some(match key {
+        "anthropic" => "Claude",
+        "openai-codex" => "Codex",
+        "xai-auth" => "Grok",
+        "kimi-code" => "Kimi",
+        "github-copilot" => "Copilot",
+        "google-gemini" => "Gemini",
+        "muse" => "Muse",
+        _ => return None,
+    })
 }
 
 /// A tool name for the tag: short and safe (never arguments).
@@ -1459,7 +1511,8 @@ mod tests {
         let mut seen: Vec<(Mood, Option<String>)> = Vec::new();
         for ev in turn(1) {
             l.on_event(ev, t0);
-            let b = l.body(t0);
+            // Each step as it shows once the turn is past its quiet start.
+            let b = l.body(t0 + QUIET_START);
             if seen.last() != Some(&(b.mood, b.label.clone())) {
                 seen.push((b.mood, b.label));
             }
@@ -1509,7 +1562,7 @@ mod tests {
         let evs = turn(1);
         l.on_event(evs[0].clone(), t0); // client_joined
         l.on_event(evs[1].clone(), t0); // turn_started
-        let b = l.body(t0);
+        let b = l.body(t0 + QUIET_START);
         assert!(b.busy);
         assert!(b.echo.as_deref().unwrap().starts_with("Think briefly, then write"));
         assert_eq!(b.reply, "");
@@ -1538,7 +1591,7 @@ mod tests {
             Event::Session { attach_seq: 1, session_id: "s".into(), seq: env.seq, event, raw: Arc::new(env.event.clone()) }
         };
         l.on_event(ev(serde_json::json!({"ev": "turn_started", "turn_baseline": 2, "trigger": "event_auto"})), t0);
-        let b = l.body(t0);
+        let b = l.body(t0 + QUIET_START);
         assert_eq!((b.trigger.as_str(), b.busy, b.echo.as_deref()), ("event_auto", true, None));
         l.on_event(ev(serde_json::json!({"ev": "cleared", "session_id": "s"})), t0);
         assert_eq!(l.body(t0).trigger, "");
@@ -1682,9 +1735,10 @@ mod tests {
     #[test]
     fn troubles_are_read_off_the_daemons_words() {
         let cases = [
-            ("No Anthropic credentials. Run `synaps login`, or switch to a provider model with `/model groq/llama-3.3-70b-versatile`.", Some(Trouble::NoBrain)),
-            ("Auth error: No API key or OAuth token found. Run `synaps login` to authenticate.", Some(Trouble::NoBrain)),
-            ("Config error: openai provider: no credential configured for 'kimi-code'. Run `synaps login` to add one.", Some(Trouble::NoBrain)),
+            ("No Anthropic credentials. Run `synaps login`, or switch to a provider model with `/model groq/llama-3.3-70b-versatile`.", Some(Trouble::NoBrain { on: Some("Claude") })),
+            ("Auth error: No API key or OAuth token found. Run `synaps login` to authenticate.", Some(Trouble::NoBrain { on: Some("Claude") })),
+            ("Config error: openai provider: no credential configured for 'kimi-code'. Run `synaps login` to add one.", Some(Trouble::NoBrain { on: Some("Kimi") })),
+            ("Config error: openai provider: no credential configured for 'acme-ai'. Run `synaps login` to add one.", Some(Trouble::NoBrain { on: None })),
             ("API error: Authentication rejected. Run `synaps login` to re-authenticate.", Some(Trouble::LoggedOut)),
             ("Token refresh failed for account 'work': expired. Run `synaps login` (or `synaps login --account work`) to re-authenticate, or check auth.remote_endpoint / broker reachability.", Some(Trouble::LoggedOut)),
             ("API stream error (authentication_error). Provider error details withheld — they can echo request content.", Some(Trouble::LoggedOut)),
@@ -1699,9 +1753,14 @@ mod tests {
         for (m, want) in cases {
             assert_eq!(Trouble::of(m), want, "{m}");
         }
-        for t in [Trouble::NoBrain, Trouble::LoggedOut, Trouble::Limited, Trouble::Swamped, Trouble::Offline] {
-            assert!(t.says().chars().count() <= 100 && !t.says().contains('`'), "{}: a short bubble, no markdown", t.key());
-            assert!(t.note().ends_with("↑ BRINGS YOUR MESSAGE BACK"));
+        for t in [Trouble::NoBrain { on: Some("Claude") }, Trouble::NoBrain { on: None }, Trouble::LoggedOut, Trouble::Limited, Trouble::Swamped, Trouble::Offline] {
+            let says = t.says();
+            assert!(says.chars().count() <= 120, "{}: a short bubble", t.key());
+            // A login fix ends on the command alone, in backticks (the chip); the rest has none.
+            let login = matches!(t, Trouble::NoBrain { .. } | Trouble::LoggedOut);
+            assert_eq!(says.ends_with(&format!("\n`{LOGIN_CMD}`")), login, "{says}");
+            assert_eq!(says.matches('`').count(), if login { 2 } else { 0 }, "{says}");
+            assert!(t.tip().ends_with("↑ resends your message") && t.tip() == t.tip().to_lowercase(), "a quiet tip, not all-caps");
         }
     }
 
@@ -1712,12 +1771,12 @@ mod tests {
         let mut l = live_link(t0);
         failed_turn(&mut l, "No Anthropic credentials. Run `synaps login`, or switch to a provider model with `/model groq/llama-3.3-70b-versatile`.", t0);
         let b = l.body(t0);
-        assert_eq!(b.trouble, Some(Trouble::NoBrain));
-        assert_eq!(b.reply, "No brain yet, choom. Open a terminal, run synaps login, pick a model. Then ask me again.");
+        assert_eq!(b.trouble, Some(Trouble::NoBrain { on: Some("Claude") }));
+        assert_eq!(b.reply, "No brain yet, choom. I'm set to Claude, and Synaps has no login for it. In a terminal:\n`synaps login`");
         assert_eq!((b.mood, b.label.as_deref()), (Mood::Idle, Some("NO BRAIN YET")), "calm, not ERROR / annoyed; no Done flash over it");
         let later = l.body(t0 + TROUBLE_FOR);
         assert_eq!((later.mood, later.label), (Mood::Idle, None));
-        assert_eq!(later.trouble, Some(Trouble::NoBrain), "kept for the Line until the next turn");
+        assert_eq!(later.trouble, Some(Trouble::NoBrain { on: Some("Claude") }), "kept for the Line until the next turn");
         l.on_event(wire(1, serde_json::json!({"ev": "turn_started", "turn_baseline": 1, "trigger": "user", "user_text": "hi"})), t0);
         assert_eq!(l.body(t0).trouble, None);
         // Anything else: the raw text, cut, annoyed (as before).
@@ -1725,6 +1784,35 @@ mod tests {
         let b = l.body(t0);
         assert_eq!((b.mood, b.trouble), (Mood::Annoyed, None));
         assert_eq!(b.reply, "‹error: tool registry: unknown tool `frobnicate`›");
+    }
+
+    /// A turn that fails at once never shows as started: no THINKING, no busy bubble (ABORT)
+    /// promising a reply. One that runs on shows as started after `QUIET_START`, or at its
+    /// first word.
+    #[test]
+    fn a_turn_shows_as_started_only_once_it_runs() {
+        let t0 = Instant::now();
+        let mut l = live_link(t0);
+        let before = l.body(t0);
+        l.on_event(wire(1, serde_json::json!({"ev": "turn_started", "turn_baseline": 1, "trigger": "user", "user_text": "hi"})), t0);
+        let quiet = l.body(t0 + Duration::from_millis(100));
+        assert_eq!((quiet.busy, quiet.turn, quiet.mood, quiet.echo.as_deref()), (false, before.turn, before.mood, None), "not started yet");
+        assert_eq!(l.deadline(t0 + Duration::from_millis(100)), Some(t0 + QUIET_START), "woken when it shows");
+        let on = l.body(t0 + QUIET_START);
+        assert_eq!((on.busy, on.turn, on.mood, on.echo.as_deref()), (true, before.turn + 1, Mood::Thinking, Some("hi")));
+        // Fails within the quiet start: straight to her line, never busy.
+        l.on_event(wire(1, serde_json::json!({"ev": "stream", "event": {"kind": "session", "session": "error", "message": "No Anthropic credentials. Run `synaps login`."}})), t0);
+        l.on_event(wire(1, serde_json::json!({"ev": "idle"})), t0);
+        let failed = l.body(t0 + Duration::from_millis(50));
+        assert_eq!((failed.busy, failed.turn, failed.label.as_deref()), (false, before.turn + 1, Some("NO BRAIN YET")));
+        assert!(failed.reply.starts_with("No brain yet"));
+        // A first word shows the turn at once.
+        let t1 = t0 + Duration::from_secs(20);
+        l.on_event(wire(1, serde_json::json!({"ev": "turn_started", "turn_baseline": 1, "trigger": "user", "user_text": "again"})), t1);
+        assert_eq!(l.body(t1).reply, failed.reply, "the last reply holds meanwhile");
+        l.on_event(wire(1, serde_json::json!({"ev": "stream", "event": {"kind": "llm", "llm": "text", "text": "Hey"}})), t1);
+        let b = l.body(t1);
+        assert_eq!((b.busy, b.turn, b.reply.as_str()), (true, before.turn + 2, "Hey"));
     }
 
     /// Touchpoint 8: the daemon's version and her session's model, without the provider.

@@ -92,6 +92,9 @@ pub struct Frame {
     pub profile: Arc<Vec<i16>>,
     /// Device-px rows of the face (brows to mouth): glitches keep it readable.
     pub face: (i32, i32),
+    /// Her face's box (x0, y0, x1, y1), device px in the avatar rect: the eyes and visor.
+    /// None: no face drawn. Her menu keeps off it.
+    pub face_box: Option<(i32, i32, i32, i32)>,
     /// This frame mirrored left-right, built on first use (`mirrored`).
     mirror: std::sync::OnceLock<Box<Frame>>,
 }
@@ -162,6 +165,7 @@ impl Frame {
             glints: self.glints.iter().map(|&(x, y)| (mx(x as i32) as i16, y)).collect(),
             profile: Arc::new(self.profile.iter().rev().copied().collect()),
             face: self.face,
+            face_box: self.face_box.map(|(x0, y0, x1, y1)| (mx(x1), y0, mx(x0), y1)),
             mirror: std::sync::OnceLock::new(),
         }
     }
@@ -755,6 +759,7 @@ fn finish(pack: &Pack, f: &FrameSource, geo: &Geometry, mut px: Vec<u8>) -> Resu
         bottom,
         profile,
         face,
+        face_box: face_glints,
         id: f.id.clone(),
         image: Arc::new(RenderImage::new(vec![image::Frame::new(rgba)])),
         at,
