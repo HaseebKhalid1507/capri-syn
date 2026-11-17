@@ -770,6 +770,10 @@ impl Avatar {
     }
 
     fn brain_apply(&mut self, intents: Vec<(f64, Intent)>, now: Instant) {
+        // Up out of a nap with a greeting due: the greeting first (a wave reads at once), the
+        // stretch after it (r39: the stretch's arms out first read as a shrug, "what?").
+        let greets = intents.iter().any(|(_, i)| matches!(i, Intent::Emote(EmoteKey::Greet { .. })));
+        let mut stretch_after = None;
         for (_, i) in intents {
             match i {
                 Intent::Move(p) => self.brain_move(p, now),
@@ -778,6 +782,7 @@ impl Avatar {
                     // The nap's pose ends (he is back, he talked to her): she stands up first,
                     // before any move decided with it.
                     let up = p.is_none() && self.brain.as_ref().is_some_and(|h| h.rest == Some(RestPose::Nap));
+                    let shown_before = self.anim.frame();
                     // Out of Sleepy while still posed (its drawn wake, if any, is the stand-up),
                     // into it before the pose (the sleep's drawing comes with the pose's frame).
                     if up {
@@ -792,7 +797,9 @@ impl Avatar {
                         self.arrive.deep = false;
                     }
                     self.relayer(now);
-                    // A stretch due replaces a drawn wake's last cell (one seam, not two).
+                    // A stretch due replaces a drawn wake: the pack's own get-up (a floor sit, the
+                    // crouch) comes between the curl and standing (r39: the curl cut straight to
+                    // upright, like a teleport).
                     let b = self.brain.as_ref().map(|h| h.bnow(now));
                     let mut napped = None;
                     if let (Some(h), Some(b)) = (&mut self.brain, b) {
@@ -805,11 +812,31 @@ impl Avatar {
                     let stretch = up && napped.is_some_and(|s| self.stretch_due(s, now));
                     let drawn = self.art.floor_strip;
                     self.art.floor_strip = drawn && !stretch;
-                    if up && self.standing() && !self.waking(now) && !(stretch && drawn) {
+                    if up && self.standing() && !self.waking(now) {
                         self.play_nap_wake(now);
                     }
                     if stretch && let Some(s) = napped {
-                        self.stretch_after_nap(s, now);
+                        if greets {
+                            stretch_after = Some(s);
+                        } else {
+                            self.stretch_after_nap(s, now);
+                        }
+                    }
+                    // Out of the drawn sleep the cut is a frame late: the curl holds while the
+                    // get-up goes underneath (r39: the curl's pixels and the sleeping plate's
+                    // showed inside the new outline on the swap frame).
+                    if up && drawn && self.loaded && !self.hidden && self.anim.frame() != shown_before {
+                        let hold = super::FRAME_FX * 2;
+                        self.anim.hold_first(shown_before, hold.as_millis() as u32, now);
+                        self.art.cut_hold = Some(now + hold);
+                        if let Some(g) = &mut self.glitch
+                            && g.t0 == now
+                        {
+                            g.t0 = now + hold;
+                        }
+                        if let Some(w) = &mut self.waking_until {
+                            *w += hold;
+                        }
                     }
                 }
                 Intent::Hide(hide) => self.brain_hide(hide, now),
@@ -828,6 +855,9 @@ impl Avatar {
                     }
                 }
             }
+        }
+        if let Some(s) = stretch_after {
+            self.stretch_after_nap(s, now);
         }
         self.brain_save(now, false);
     }

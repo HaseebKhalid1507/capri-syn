@@ -498,11 +498,14 @@ fn passive(w: &World, o: &Roam, rng: &mut Rng) -> Result<Spot, Vec<(String, Bloc
             r -= p.1;
         }
         let kind = pool.remove(k).0;
-        let cands = match kind {
+        let mut cands = match kind {
             0 => edge_spots(w, o.skip_recent, rng),
             1 | 2 => floor_spots(w, kind == 2, rng),
             _ => float_spots(w, rng),
         };
+        // Every kind by the floor's content score: a perch's legs, a teleport's landing keep
+        // off windows' text too (r39: a hop landed her over the editor's text).
+        clear_first(w, &mut cands);
         let mut last_block = Block::NoSpot;
         for s in cands {
             match ok(&s) {
@@ -678,9 +681,12 @@ fn hop(w: &World, kind: HopKind, away: bool, rng: &mut Rng) -> Result<Spot, Vec<
             1 => near_edge_spots(w, rng),
             _ => near_floor_spots(w, on_edge, rng),
         };
-        // A dodge takes the farthest from the pointer; the rest are already shuffled.
+        // A dodge takes the farthest from the pointer; the rest are already shuffled, then
+        // sorted by the floor's content score (off windows' text first).
         if kind == HopKind::Dodge {
             cands.sort_by(|a, b| cursor_d(&b.body).total_cmp(&cursor_d(&a.body)));
+        } else {
+            clear_first(w, &mut cands);
         }
         let mut last = Block::NoSpot;
         for s in cands {

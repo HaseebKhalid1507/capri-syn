@@ -490,6 +490,8 @@ const GLIDE_MIN: f32 = 24.0;
 /// Moves closer together than this are a stream (a live drag): she snaps to each.
 const GLIDE_STREAM: Duration = Duration::from_millis(150);
 const FRAME_FX: Duration = Duration::from_millis(33);
+/// ONLINE at night: its red this far toward the panel.
+const NIGHT_TAG_DIM: f32 = 0.45;
 /// Into a drawn sleep whose cells are still decoding: the drawing before holds this long.
 const SLEEP_DECODE_HOLD: Duration = Duration::from_millis(100);
 /// A quiet arrival's sliver widens back into her over ~3 frames.
@@ -1259,22 +1261,39 @@ impl Avatar {
             return fx::Pose { swing, kick, kick_right, ..fx::Pose::default() };
         }
         let life = &self.pack.behaviour.life;
+        let (bob_px, bob_period_ms, sway_px, droop, lean) = self.breath_now();
         let t = now.saturating_duration_since(self.bob_t0);
-        let breath = fx::bob(t, life.bob_px, life.bob_period_ms);
+        let breath = fx::bob(t, bob_px, bob_period_ms);
         // In 2 px steps once it's wide enough: every step is a redraw.
-        let sway = if life.sway_px > 0 && life.sway_period_ms > 0 {
-            let step = if life.sway_px >= 4 { 2.0 } else { 1.0 };
-            let v = life.sway_px as f32 * (t.as_secs_f32() * 1000.0 / life.sway_period_ms as f32 * std::f32::consts::TAU).sin();
+        let sway = if sway_px > 0 && life.sway_period_ms > 0 {
+            let step = if sway_px >= 4 { 2.0 } else { 1.0 };
+            let v = sway_px as f32 * (t.as_secs_f32() * 1000.0 / life.sway_period_ms as f32 * std::f32::consts::TAU).sin();
             ((v / step).round() * step) as i32
         } else {
             0
         };
-        fx::Pose { breath, nod: 0, sway, ..fx::Pose::default() }
+        fx::Pose { breath, nod: droop, sway: sway + lean, ..fx::Pose::default() }
+    }
+
+    /// Her breath now (bob px, period ms, sway px) and, tired and standing on the floor, her
+    /// head's droop and lean (device px): her energy band's, else `life`'s.
+    fn breath_now(&self) -> (i32, u64, i32, i32, i32) {
+        let life = &self.pack.behaviour.life;
+        let e = self.pack.behaviour.energy.band(self.band());
+        let standing = self.placement == Placement::Ground && self.standing();
+        let px = |v: i32| if standing { (v as f32 * self.layout.sf).round() as i32 } else { 0 };
+        (
+            e.bob_px.unwrap_or(life.bob_px),
+            e.bob_period_ms.unwrap_or(life.bob_period_ms),
+            e.sway_px.unwrap_or(life.sway_px),
+            px(e.droop_px),
+            px(e.lean_px),
+        )
     }
 
     fn pose_next_change(&self, now: Instant) -> Option<Instant> {
-        let life = &self.pack.behaviour.life;
-        if !self.pose_active() || (self.music_frame().is_none() && life.bob_px <= 0 && life.sway_px <= 0 && !self.posed()) {
+        let (bob_px, _, sway_px, droop, lean) = self.breath_now();
+        if !self.pose_active() || (self.music_frame().is_none() && bob_px <= 0 && sway_px <= 0 && droop == 0 && lean == 0 && !self.posed()) {
             return None;
         }
         let cur = self.pose_at(now);
@@ -5384,7 +5403,12 @@ impl Render for Avatar {
             // half (1 Hz; a summon's pulse holds it bone), the thinking slivers step every
             // 400 ms, WORKING's sweep crosses its red block every 2.4 s.
             let ms = now.saturating_duration_since(self.t_start).as_millis() as u64;
-            let look = pal.look(plate_kind, &tone_key, tone, invert, (ms / 500) % 2 == 1 && !pulse);
+            let mut look = pal.look(plate_kind, &tone_key, tone, invert, (ms / 500) % 2 == 1 && !pulse);
+            // Her night (low energy): ONLINE dimmed, a screen turned down.
+            if tone_key == "online" && self.band() == crate::life::Band::Low {
+                let dim = |c: u32| theme::mix(c, pal.panel, NIGHT_TAG_DIM);
+                (look.edge, look.ink, look.mark) = (dim(look.edge), dim(look.ink), dim(look.mark));
+            }
             let step = ms / 400;
             let nudge = if fresh && ms % 2200 < 240 { 5.0 } else { 0.0 };
             let beats = invert && matches!(look.plate, Plate::Flag);
