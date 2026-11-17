@@ -400,9 +400,9 @@ struct SessionRaw {
     persona_file: Option<String>,
 }
 
-/// `~/…` and `$HOME/…` in a path setting.
+/// `~/…` and `$HOME/…` in a path setting (Windows: his profile folder).
 fn expand_home(p: &str) -> PathBuf {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = crate::platform::home_dir();
     match (p.strip_prefix("~/").or_else(|| p.strip_prefix("$HOME/")), home) {
         (Some(rest), Some(h)) => h.join(rest),
         _ => PathBuf::from(p),
@@ -442,10 +442,7 @@ fn range(name: &str, r: [f64; 2], min: f64) -> Result<(f64, f64)> {
 
 impl Settings {
     pub fn path() -> PathBuf {
-        let base = std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-            .unwrap_or_else(std::env::temp_dir);
+        let base = crate::platform::base_dir(crate::platform::BaseDir::Config).unwrap_or_else(std::env::temp_dir);
         base.join("synaps-avatar/settings.toml")
     }
 

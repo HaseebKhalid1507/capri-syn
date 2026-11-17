@@ -8,6 +8,29 @@ mod notifications;
 pub use media::watch_media;
 pub use notifications::notify;
 
+use super::BaseDir;
+use std::ffi::OsString;
+use std::path::PathBuf;
+
+/// XDG's base directories: `$XDG_<KIND>_HOME`, else under `$HOME`.
+pub fn base_dir(d: BaseDir) -> Option<PathBuf> {
+    base_dir_in(d, |k| std::env::var_os(k))
+}
+
+fn base_dir_in(d: BaseDir, var: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    let under = match d {
+        BaseDir::Config => ".config",
+        BaseDir::Data => ".local/share",
+        BaseDir::State => ".local/state",
+    };
+    var(d.xdg_var()).map(PathBuf::from).or_else(|| var("HOME").map(|h| PathBuf::from(h).join(under)))
+}
+
+/// `$HOME`.
+pub fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
 /// Process setup that has to happen before any other thread exists. Each knob was
 /// measured on bella (release, `ps` RSS 6 s after start, see LOG.md):
 ///
@@ -283,6 +306,20 @@ fn session_event(m: &zbus::Message, session: &zbus::zvariant::OwnedObjectPath) -
 mod tests {
     use super::*;
     use crate::platform::SessionEv;
+
+    #[test]
+    fn base_dirs_are_xdgs() {
+        fn env(vars: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<OsString> {
+            move |k: &str| vars.iter().find(|(n, _)| *n == k).map(|(_, v)| OsString::from(v))
+        }
+        let home: &'static [(&str, &str)] = &[("HOME", "/home/h")];
+        assert_eq!(base_dir_in(BaseDir::Config, env(home)), Some(PathBuf::from("/home/h/.config")));
+        assert_eq!(base_dir_in(BaseDir::Data, env(home)), Some(PathBuf::from("/home/h/.local/share")));
+        assert_eq!(base_dir_in(BaseDir::State, env(home)), Some(PathBuf::from("/home/h/.local/state")));
+        let xdg: &'static [(&str, &str)] = &[("HOME", "/home/h"), ("XDG_DATA_HOME", "/data")];
+        assert_eq!(base_dir_in(BaseDir::Data, env(xdg)), Some(PathBuf::from("/data")));
+        assert_eq!(base_dir_in(BaseDir::State, env(&[])), None);
+    }
     use std::collections::HashMap;
     use zbus::zvariant::{OwnedObjectPath, Value};
 

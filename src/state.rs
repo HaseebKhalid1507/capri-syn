@@ -6,10 +6,7 @@
 use std::path::{Path, PathBuf};
 
 fn path() -> PathBuf {
-    let base = std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
-        .unwrap_or_else(std::env::temp_dir);
+    let base = crate::platform::base_dir(crate::platform::BaseDir::State).unwrap_or_else(std::env::temp_dir);
     base.join("synaps-avatar/state.json")
 }
 

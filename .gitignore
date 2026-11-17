@@ -7,3 +7,5 @@
 /packs/*/sprites.json
 /packs/*/NOTICE.md
 __pycache__/
+/packaging/windows/build
+/packaging/windows/Output

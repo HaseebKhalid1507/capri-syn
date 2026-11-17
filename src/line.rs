@@ -141,6 +141,18 @@ pub enum Ask {
 
 pub type OnAsk = Box<dyn Fn(Ask, &mut App) -> Result<(), String>>;
 
+/// How the avatar's refusal of `Ask::Parked(false)` starts: the desktop kept the keyboard with
+/// his window (it hands it over only on his input). The Line waits for his key or click.
+pub const NO_KEYBOARD: &str = "no keyboard";
+/// What an ask gets once the avatar is gone.
+pub const GONE: &str = "she is gone";
+
+/// A failed `Ask::Parked(false)` that leaves the Line waiting for him: the desktop refused
+/// the keyboard. Any other failure (she is gone) is no wait.
+fn keyboard_refused(e: &str) -> bool {
+    e.starts_with(NO_KEYBOARD)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
     Text,
@@ -312,7 +324,7 @@ impl Line {
                 if active {
                     this.was_active = true;
                     if this.parked && !this.closing {
-                        this.unpark(window, cx);
+                        this.unpark(window, cx).ok();
                     }
                 } else if this.was_active && !this.parked && !this.closing {
                     // Focus went elsewhere: park (never destroy); an empty idle Line closes.
@@ -480,26 +492,34 @@ impl Line {
     }
 
     /// Back from parked, if the avatar can take the keyboard for it (it can't on a summon from
-    /// elsewhere where the desktop hands it over only on his input). False: still parked.
-    fn unpark(&mut self, window: &mut Window, cx: &mut Context<Line>) -> bool {
-        if (self.on_ask)(Ask::Parked(false), cx).is_err() {
-            return false;
+    /// elsewhere where the desktop hands it over only on his input: `keyboard_refused`).
+    fn unpark(&mut self, window: &mut Window, cx: &mut Context<Line>) -> Result<(), String> {
+        let r = (self.on_ask)(Ask::Parked(false), cx);
+        if r.is_ok() {
+            self.parked = false;
+            self.waiting = false;
+            self.refocus(window, cx);
         }
-        self.parked = false;
-        self.waiting = false;
-        self.refocus(window, cx);
-        true
+        r
     }
 
-    /// The summon key on an open Line: back to it (parked), or close it.
-    pub fn summon(&mut self, window: &mut Window, cx: &mut Context<Line>) -> &'static str {
+    /// The summon key on an open Line: back to it (parked), or close it. Only a refusal of
+    /// the keyboard leaves it waiting; an avatar that is gone says so.
+    pub fn summon(&mut self, window: &mut Window, cx: &mut Context<Line>) -> String {
         if self.parked || !window.is_window_active() {
-            let back = self.unpark(window, cx);
+            let r = self.unpark(window, cx);
             cx.notify();
-            if back { "resumed" } else { "waiting" }
+            match r {
+                Ok(()) => "resumed".into(),
+                Err(e) if keyboard_refused(&e) => "waiting".into(),
+                Err(e) => {
+                    elog!("synaps-avatar: line: summoned, but {e}");
+                    format!("error: {e}")
+                }
+            }
         } else {
             self.close(true, window, cx);
-            "closed"
+            "closed".into()
         }
     }
 
@@ -1512,7 +1532,7 @@ impl Render for Line {
                 cx.listener(|this, _: &MouseDownEvent, window, cx| {
                     // A click on the parked Line brings it back.
                     if this.parked {
-                        this.unpark(window, cx);
+                        this.unpark(window, cx).ok();
                         cx.notify();
                     }
                 }),
@@ -1609,11 +1629,18 @@ pub fn tail_overlay(side: crate::beside::Side, at: f32, edge_c: u32, point_c: u3
 
 #[cfg(test)]
 mod tests {
-    use super::{links, risky};
+    use super::{GONE, NO_KEYBOARD, keyboard_refused, links, risky};
     use crate::session::PromptView;
 
     fn confirm(title: &str, text: &str) -> PromptView {
         PromptView { id: 1, title: title.into(), text: text.into(), secret: false }
+    }
+
+    #[test]
+    fn only_a_refused_keyboard_leaves_the_line_waiting() {
+        assert!(keyboard_refused(&format!("{NO_KEYBOARD}: SetForegroundWindow: the foreground lock")));
+        assert!(!keyboard_refused(GONE), "she is gone: no wait, its own reply");
+        assert!(!keyboard_refused(""));
     }
 
     #[test]
