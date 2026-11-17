@@ -304,6 +304,10 @@ manifest() {
         f=$CHECKOUT/installer/manifest
     elif [ -n "$BUNDLE" ]; then
         f=$BUNDLE/lib/synaps-avatar/installer/manifest
+    elif [ "$UNINSTALL" = 1 ]; then
+        # Uninstalling needs no network: the installed copy, else nothing (the receipt is enough).
+        f=$PREFIX/lib/synaps-avatar/installer/manifest
+        [ -f "$f" ] || return 0
     else
         f=$TMP/manifest
         fetch "https://raw.githubusercontent.com/$REPO_DEFAULT/$REF/installer/manifest" "$f" ||
@@ -326,7 +330,8 @@ paths() {
     DATA=${XDG_DATA_HOME:-$HOME/.local/share}
     CONF=${XDG_CONFIG_HOME:-$HOME/.config}
     STATE=${XDG_STATE_HOME:-$HOME/.local/state}
-    CACHE_ROOT=${XDG_CACHE_HOME:-$HOME/.cache}/synaps-avatar
+    CACHE_BASE=${XDG_CACHE_HOME:-$HOME/.cache}
+    CACHE_ROOT=$CACHE_BASE/synaps-avatar
     CACHE=$CACHE_ROOT/installer
     BIN=$PREFIX/bin
     LIB=$PREFIX/lib/synaps-avatar
@@ -993,7 +998,7 @@ user_unit() { # SRC NAME: a tools/systemd unit with our bin dir, marked as ours
     local src=$1 name=$2
     {
         printf "# capri-syn's install.sh wrote this (install.sh --uninstall removes it), from tools/systemd/%s.\n" "$name"
-        sed "s#%h/.local/bin/#$BIN/#g" "$src" | grep -v '^# .*NOT installed by anything'
+        sed -n '/^\[Unit\]/,$p' "$src" | sed "s#%h/.local/bin/#$BIN/#g"
     } | put "$UNITS/$name"
     rec unit "$name" "$UNITS/$name"
     if [ "$SYSTEMD" = 1 ]; then run systemctl --user daemon-reload; fi
@@ -1013,6 +1018,12 @@ step_extras() {
             path=$VENV/bin:$PATH
         fi
         [ -d "$DATA/capri-voice" ] || rec dir "$DATA/capri-voice"
+        # onnxruntime's telemetry id, written by the setup's import check (outermost recorded first).
+        local d
+        for d in "$CACHE_BASE/Microsoft" "$CACHE_BASE/Microsoft/DeveloperTools"; do
+            [ -d "$d" ] || rec rmdir "$d"
+        done
+        [ -d "$CACHE_BASE/Microsoft/DeveloperTools/.onnxruntime" ] || rec dir "$CACHE_BASE/Microsoft/DeveloperTools/.onnxruntime"
         run env PATH="$path" bash "$LIB/tools/capri-voice-setup"
         run install -m 755 "$LIB/tools/capri-voice" "$BIN/capri-voice"
         rec file "$BIN/capri-voice"
