@@ -571,7 +571,7 @@ step_synaps() {
     local url=https://github.com/$M_synaps_repo/releases/download/$tag/synaps-installer.sh rc
     rc=$(synaps_rc_edits)
     if [ -n "$rc" ]; then
-        info "its installer puts $(tilde "$CARGO_BIN") on your PATH: it adds \`. \"\$HOME/.cargo/env\"\` (where it isn't already) to $rc"
+        info "its installer puts $(tilde "$CARGO_BIN") on your PATH, with a line sourcing ~/.cargo/env (where there isn't one) in: $rc"
     else
         info "its installer edits none of your shell files"
     fi
@@ -1332,7 +1332,7 @@ synaps_stays() {
         if [ -n "$mine" ]; then
             info "to remove Synaps too (this installed it): $(q "$(tilde "$s")") daemon stop, then delete $(tilde "$s") and $(tilde "$CONF/synaps") ($h only if you want your login and sessions gone)"
             if [ -n "$rc" ] && [ "$rc" != none ]; then
-                info "  its installer also added a \`. \"\$HOME/.cargo/env\"\` line to $rc (keep it if you use Rust)"
+                info "  its installer also added a line sourcing ~/.cargo/env to: $rc (keep it if you use Rust)"
             fi
         else
             info "to remove Synaps too: synaps daemon stop, then uninstall it the way you installed it"
@@ -1395,8 +1395,9 @@ skipped() { warn "left alone: $1 (not in her folders: the receipt is wrong there
 uninstall() {
     STEPS=1 STEP_N=0
     step "Remove what install.sh installed"
-    local d rmdirs=() syn_mine rust_mine
-    syn_mine=$(meta synaps) rust_mine=$(meta rustup)
+    local d rmdirs=() syn_mine syn_rc rust_mine
+    # Read now: the receipt is gone by the end.
+    syn_mine=$(meta synaps) syn_rc=$(meta synaps_rc) rust_mine=$(meta rustup)
     if [ -f "$RECEIPT" ]; then
         if pgrep -u "$(id -u)" -x synaps-avatar >/dev/null 2>&1; then
             if [ -x "$BIN/avatarctl" ]; then run "$BIN/avatarctl" quit || true; else run pkill -u "$(id -u)" -x synaps-avatar || true; fi
@@ -1479,7 +1480,7 @@ uninstall() {
             if [ -d "$d" ]; then info "left in $(tilde "$d"), not hers: $(cd "$d" && find . -mindepth 1 -maxdepth 1 | sed 's#^\./##' | head -n5 | tr '\n' ' ')"; fi
         done
     fi
-    synaps_stays "$syn_mine" "$(meta synaps_rc)" "$rust_mine"
+    synaps_stays "$syn_mine" "$syn_rc" "$rust_mine"
     printf '\n %s▌removed%s%s\n' "$R$B" "$N" "$([ "$DRY" = 1 ] && printf '  %s(dry run: nothing was)%s' "$R" "$N")"
 }
 
