@@ -49,6 +49,7 @@ the same contracts:
 | headphones | the default output's name (`Headphones (…)`, `Headset Earphone (…)`). The form factor property is the better answer: a later refinement | the names | his devices |
 | test devices | `CAPRI_VOICE_SOURCE` / `SINK` match device names; a missing one is never the default | `node_missing` | — |
 | wake filter | `WakeForced` loads the wheel's `whisper-<hash>.dll` (pywhispercpp 1.5.1's file list) | — | the wake word end to end |
+| pitch shift | **not bundled:** without the `rubberband` CLI on PATH, her pitch shift is Kokoro's in-model one (as on a Linux box without rubberband), so her voice is close to Linux's but not the same. Rubberband has Windows builds (a GPL CLI, run as its own process, as now) | — | by ear: bundle it or not |
 
 In `capri-voice` itself only seams changed:
 - `WIN` and the Windows paths (`%LOCALAPPDATA%\capri-voice\{models,media.json}`);
