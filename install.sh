@@ -364,14 +364,6 @@ preflight() {
 
 # ---- system packages --------------------------------------------------------------------------
 
-pkg_known() {
-    case $PM in
-        apt) apt-cache show "$1" >/dev/null 2>&1 ;;
-        pacman) pacman -Si "$1" >/dev/null 2>&1 || pacman -Qq "$1" >/dev/null 2>&1 ;;
-        dnf) dnf -q list --available "$1" >/dev/null 2>&1 || rpm -q "$1" >/dev/null 2>&1 ;;
-        zypper) zypper -q info "$1" >/dev/null 2>&1 ;;
-    esac
-}
 pkg_installed() {
     case $PM in
         apt) dpkg-query -W -f='${db:Status-Abbrev}' "$1" 2>/dev/null | grep -q '^ii' ;;
@@ -379,22 +371,14 @@ pkg_installed() {
         dnf | zypper) rpm -q --whatprovides "$1" >/dev/null 2>&1 ;;
     esac
 }
-# The packages of these manifest lists (base, build, run) that aren't installed. `a|b`: the first known.
+# The packages of these manifest lists (base, build, run) that aren't installed.
 pkgs_missing() {
-    local list='' k v p alt
+    local list='' k v p
     for k in "$@"; do
         v=M_${k}_$PM
         list+=" ${!v:-}"
     done
     for p in $list; do
-        if [[ $p == *'|'* ]]; then
-            local pick=''
-            for alt in ${p//|/ }; do
-                if pkg_installed "$alt"; then pick=; continue 2; fi
-                [ -z "$pick" ] && pkg_known "$alt" && pick=$alt
-            done
-            p=${pick:-${p%%|*}}
-        fi
         pkg_installed "$p" || printf '%s ' "$p"
     done
 }
