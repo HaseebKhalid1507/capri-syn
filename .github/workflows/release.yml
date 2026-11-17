@@ -1,0 +1,188 @@
+name: release
+
+# A `v*` tag builds her release assets and attaches them to that tag's release (made as a DRAFT when
+# there is none: publishing is Haseeb's call). install.sh and install.ps1 take them from
+# releases/latest by these stable names (installer/manifest), each checked against the `.sha256`
+# beside it:
+#
+#   synaps-avatar-x86_64-unknown-linux-gnu.tar.gz   her binary, avatarctl, tools, the user units, install.sh
+#   synaps-avatar-setup-x86_64.exe                  her Windows installer (packaging/windows)
+#   synaps-avatar-voice-setup-x86_64.exe            her Windows voice installer (its own download)
+#
+# A pull request that touches the packaging runs the same builds and smoke tests, and releases
+# nothing. Nothing here pushes a tag or publishes a release.
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - installer/**
+      - install.sh
+      - install.ps1
+      - packaging/windows/**
+
+permissions:
+  contents: read
+
+jobs:
+  # The tag says the version: Cargo.toml must agree (her Windows installer's version comes from it).
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        run: |
+          cargo=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "${GITHUB_REF_TYPE}" = tag ]; then
+            tag=${GITHUB_REF_NAME#v}
+            [ "$tag" = "$cargo" ] || { echo "::error::tag v$tag but Cargo.toml says $cargo: bump Cargo.toml (and CHANGELOG), then tag"; exit 1; }
+            echo "version=v$tag" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=v$cargo-pr.$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          fi
+
+  # Built on 22.04 for its older glibc (2.35, installer/manifest's linux_glibc_min): it runs on
+  # 22.04 and newer, Debian 12+, Fedora 36+, Arch. Older systems build from source.
+  linux:
+    needs: version
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_TERM_COLOR: always
+      NAME: synaps-avatar-x86_64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: System libraries (GPUI on Linux)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev \
+            libx11-xcb-dev libxcb1-dev libxcb-shape0-dev libxcb-randr0-dev libxcb-xfixes0-dev \
+            libfontconfig-dev libfreetype-dev libasound2-dev libssl-dev libzstd-dev
+
+      - name: Toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-linux
+          cache-on-failure: true
+
+      - name: Build
+        run: cargo build --release --locked --bin synaps-avatar
+
+      - name: The tarball and its sha256
+        run: |
+          mkdir -p dist
+          bash installer/stage.sh . target/release/synaps-avatar "dist/$NAME" "${{ needs.version.outputs.version }}"
+          tar -C dist -czf "dist/$NAME.tar.gz" "$NAME"
+          (cd dist && sha256sum "$NAME.tar.gz" > "$NAME.tar.gz.sha256" && cat "$NAME.tar.gz.sha256")
+          ls -l dist
+          objdump -T "dist/$NAME/bin/synaps-avatar" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1
+
+      # The tarball as a user gets it: its own install.sh, from the unpacked folder (the art pack from
+      # CapriCore and lachy, Synaps from its release), then her --check. No display needed.
+      - name: Install it, check her, uninstall
+        timeout-minutes: 20
+        run: |
+          cd "$(mktemp -d)" && tar -xzf "$GITHUB_WORKSPACE/dist/$NAME.tar.gz"
+          "./$NAME/install.sh" --yes --no-autostart --artifact "$GITHUB_WORKSPACE/dist/$NAME.tar.gz"
+          ~/.cargo/bin/synaps --version
+          ~/.local/bin/synaps-avatar --check
+          "./$NAME/install.sh" --uninstall
+          test ! -e ~/.local/bin/synaps-avatar
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-linux
+          path: |
+            dist/${{ env.NAME }}.tar.gz
+            dist/${{ env.NAME }}.tar.gz.sha256
+          if-no-files-found: error
+
+  windows:
+    needs: version
+    runs-on: windows-latest
+    timeout-minutes: 75
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain (rust-toolchain.toml)
+        shell: bash
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release
+          cache-on-failure: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Her installer
+        shell: pwsh
+        run: ./packaging/windows/build.ps1
+
+      - name: Her voice installer
+        shell: pwsh
+        run: ./packaging/windows/build-voice.ps1
+
+      # Stable names (the version is inside each: Apps shows it), and their sha256s.
+      - name: Stable names and sha256s
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          $out = 'packaging/windows/Output'
+          Copy-Item (Get-ChildItem "$out/synaps-avatar-setup-*.exe" | Select-Object -First 1).FullName dist/synaps-avatar-setup-x86_64.exe
+          Copy-Item (Get-ChildItem "$out/synaps-avatar-voice-setup-*.exe" | Select-Object -First 1).FullName dist/synaps-avatar-voice-setup-x86_64.exe
+          foreach ($f in Get-ChildItem dist/*.exe) {
+            $h = (Get-FileHash -Algorithm SHA256 $f.FullName).Hash.ToLowerInvariant()
+            [IO.File]::WriteAllText("$($f.FullName).sha256", "$h  $($f.Name)`n")
+            Write-Output "$h  $($f.Name)  $([math]::Round($f.Length / 1MB, 1)) MB"
+          }
+
+      # The installer as a user gets it: install.ps1 with this release's installer, then the checks
+      # (synaps --version, her --check, the daemon, a rerun, --uninstall).
+      - name: install.ps1 with it
+        timeout-minutes: 20
+        shell: pwsh
+        run: ./installer/test-windows.ps1 -Setup dist/synaps-avatar-setup-x86_64.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          path: dist/*
+          if-no-files-found: error
+
+  # Only for a tag: the assets onto its release (a draft when there is none yet; never published here).
+  publish:
+    if: github.ref_type == 'tag'
+    needs: [version, linux, windows]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Attach to the release
+        run: |
+          ls -l dist
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --verify-tag --title "$TAG" --generate-notes
+          fi
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber dist/*

@@ -26,7 +26,8 @@ $data = Join-Path $env:LOCALAPPDATA 'synaps-avatar'
 $pack = Join-Path $data 'packs\capri'
 $receipt = Join-Path $data 'install.receipt'
 $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-$synaps = Join-Path $env:USERPROFILE '.cargo\bin\synaps.exe'
+# Where synaps' own installer (cargo-dist) puts it, as install.ps1 looks.
+$synaps = Join-Path $(if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }) 'bin\synaps.exe'
 $logs = Join-Path ([IO.Path]::GetTempPath()) "capri-install-test-$PID"
 New-Item -ItemType Directory -Force $logs | Out-Null
 if (Test-Path $app) { throw "$app exists already: not a clean machine" }

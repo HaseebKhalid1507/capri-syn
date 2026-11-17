@@ -173,6 +173,14 @@ jobs:
           Write-Output "her installer: $([math]::Round($s / 1MB, 1)) MB"
           if ($s -gt 20MB) { throw "her installer is $([math]::Round($s / 1MB, 1)) MB: over 20 MB" }
 
+      # install.ps1 end to end with the installer this job built, as his own user: a dry run (also
+      # fetched from GitHub at this commit, as `irm` users get it) that touches nothing, the install
+      # (--yes --no-autostart), synaps --version, her --check, the daemon, a rerun, --uninstall.
+      - name: install.ps1 with this installer
+        timeout-minutes: 25
+        shell: pwsh
+        run: ./installer/test-windows.ps1 -Setup (Get-ChildItem packaging/windows/Output/synaps-avatar-setup-*.exe | Select-Object -First 1).FullName -Ref ${{ github.event.pull_request.head.sha || github.sha }}
+
       - uses: actions/upload-artifact@v4
         with:
           name: synaps-avatar-setup-${{ github.sha }}
@@ -214,3 +222,42 @@ jobs:
           path: packaging/windows/Output/synaps-avatar-voice-setup-*.exe
           retention-days: 14
           if-no-files-found: error
+
+  # The installers (docs/INSTALL.md): shellcheck and PSScriptAnalyzer, the two kept in step (flags,
+  # steps, manifest keys), and install.sh's dry runs (from the checkout, and from GitHub at this
+  # commit as `curl | bash` users get it) touching nothing.
+  installer:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      CAPRI_INSTALL_REF: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: shellcheck
+        run: |
+          shellcheck --version | sed -n 2p
+          shellcheck -x install.sh installer/stage.sh
+
+      - name: PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          if (-not (Get-Module -ListAvailable PSScriptAnalyzer)) { Install-Module PSScriptAnalyzer -Force -Scope CurrentUser }
+          $found = foreach ($f in 'install.ps1', 'installer/test-windows.ps1') { Invoke-ScriptAnalyzer -Path $f -Severity Warning, Error }
+          $found | Format-Table -AutoSize ScriptName, Line, RuleName, Message | Out-String -Width 220
+          if ($found) { throw "PSScriptAnalyzer: $(@($found).Count) finding(s)" }
+          Write-Output 'PSScriptAnalyzer: clean'
+
+      - name: The two installers in step
+        run: python3 installer/test_parity.py -v
+
+      - name: install.sh --dry-run touches nothing
+        run: |
+          touch /tmp/marker && sleep 1
+          bash install.sh --dry-run
+          bash install.sh --dry-run --from-source --voice --watch
+          curl -fsSL "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${CAPRI_INSTALL_REF}/install.sh" | bash -s -- --dry-run --with-local-art
+          bash install.sh --dry-run --uninstall --purge
+          changed=$( { find ~/.local ~/.config ~/.cache ~/.cargo/bin ~/.synaps-cli -newer /tmp/marker 2>/dev/null || true; } | head -20)
+          if [ -n "$changed" ]; then echo "::error::the dry runs changed:"; echo "$changed"; exit 1; fi
+          echo "the dry runs changed nothing in ~/.local ~/.config ~/.cache ~/.cargo/bin ~/.synaps-cli"
