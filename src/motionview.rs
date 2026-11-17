@@ -4,11 +4,12 @@
 //! brain move (`brainview`). Each is rate-capped and falls back to what she did before.
 
 use super::*;
+use crate::fx::{Glitch, GlitchKind};
 use crate::motion::{BurstCell, Gap};
 
-/// The click burst's colour layers (two), over everything.
+/// The click burst's colour layers (red, green, the ring's light inner edge), over everything.
 const CLICK_LAYER: usize = GLINT_LAYER + 2 * GLINTS_MAX;
-const CLICK_LAYERS: usize = 2;
+const CLICK_LAYERS: usize = 3;
 
 /// The click burst, decoded after the frames: its cells, its centre (cell px at her size) and
 /// the time per cell.
@@ -31,12 +32,20 @@ pub(super) struct MotionState {
     click: Option<(Instant, (i32, i32))>,
     click_cell: Option<usize>,
     pub walks: u32,
+    /// Her lean before and after a walk.
+    pub lean: Option<crate::motion::Lean>,
     dances: u32,
     dangles: u32,
     clicks: u32,
 }
 
 impl Avatar {
+    /// Frame `i` is a cell of a motion's strip (a walk, a dance, a dangle).
+    pub(super) fn motion_cell(&self, i: usize) -> bool {
+        let m = &self.pack.motions;
+        self.pack.frames.get(i).and_then(|f| f.cell.as_ref()).is_some_and(|c| [m.walk, m.dance, m.dangle].contains(&Some(c.strip)))
+    }
+
     // ---- the dance -----------------------------------------------------------------------------
 
     /// Music started (or its tempo came in): with energy, and not too soon after the last one,
@@ -58,6 +67,10 @@ impl Avatar {
             m.dance_until = Some(now + Duration::from_millis(len));
             self.motion.dance_gap.mark(now);
             self.motion.dances += 1;
+            // The music's own burst would run over her setting off: the light seam instead.
+            if self.glitch.is_some_and(|g| g.kind == GlitchKind::Burst && g.t0 == now) {
+                self.glitch = Some(Glitch::new(GlitchKind::Seam, now, self.rng.next()));
+            }
         }
     }
 
@@ -81,8 +94,10 @@ impl Avatar {
         let si = self.dance_strip()?;
         let first = self.pack.strip_first.get(si).copied().flatten()?;
         let s = &self.pack.anim.as_ref()?.strips[si];
-        let ms = crate::motion::dance_ms(self.music.as_ref().and_then(|m| m.bpm), s.ms, s.frames);
-        Some((first, Some((0..s.frames as usize).map(|c| (first + c, ms)).collect())))
+        // Its clean cells only: two of lachy's have a chroma ghost drawn in (a flash on the beat).
+        let cells = s.clean_cells();
+        let ms = crate::motion::dance_ms(self.music.as_ref().and_then(|m| m.bpm), s.ms, cells.len() as u32);
+        Some((first, Some(cells.iter().map(|&c| (first + c as usize, ms)).collect())))
     }
 
     /// The dance's cell on screen (for the notes' emitters), or its first.
@@ -96,6 +111,14 @@ impl Avatar {
     /// Per tick: the dance comes in or goes (its time is up, she was moved, a panel opened):
     /// a relayer, the seam's glitch covers the cut. Waits for a one-shot on screen.
     pub(super) fn dance_tick(&mut self, now: Instant) -> bool {
+        let leaning = self.motion.lean.is_some_and(|l| l.px(now, self.layout.sf).is_some());
+        if !leaning {
+            self.motion.lean = None;
+        }
+        leaning | self.dance_tick_inner(now)
+    }
+
+    fn dance_tick_inner(&mut self, now: Instant) -> bool {
         if let Some(m) = &mut self.music
             && m.dance_until.is_some_and(|u| u <= now)
         {
@@ -152,7 +175,9 @@ impl Avatar {
         let (Some(first), Some(s)) = (self.pack.strip_first.get(si).copied().flatten(), self.pack.anim.as_ref().map(|a| &a.strips[si])) else {
             return self.anim.frame();
         };
-        first + ((secs.max(0.0) * 1000.0 / s.ms.max(1) as f32) as usize % s.frames.max(1) as usize)
+        // Its clean cells, round and round (six have a chroma ghost drawn in).
+        let cells = s.clean_cells();
+        first + cells[(secs.max(0.0) * 1000.0 / s.ms.max(1) as f32) as usize % cells.len()] as usize
     }
 
     // ---- the click burst -----------------------------------------------------------------------
@@ -217,10 +242,19 @@ impl Avatar {
         self.motion.click_cell = Some(i);
         let c = &b.cells[i];
         let o = (root.0 - b.centre.0, root.1 - b.centre.1);
+        // On her only (r32: specks flew off her body): cut to the shape she shows.
+        let l = self.layout;
+        let body = self.frame_or_default(self.shown_frame()).map(|f| f.rects.clone()).unwrap_or_default();
+        let at = (self.applied.0 + l.avatar_x - o.0, self.applied.1 + l.avatar_y - o.1);
         for j in 0..CLICK_LAYERS {
-            match c.layers.get(j) {
+            let rows = c
+                .layers
+                .get(j)
+                .map(|(rgb, whole, specks)| (*rgb, whole.iter().copied().chain(crate::motion::clip_to(specks, &body, at)).collect::<Vec<_>>()))
+                .filter(|(_, r)| !r.is_empty());
+            match rows {
                 Some((rgb, rows)) => {
-                    self.os.fx_set(CLICK_LAYER + j, *rgb, o, (c.w, c.h), rows).ok();
+                    self.os.fx_set(CLICK_LAYER + j, rgb, o, (c.w, c.h), &rows).ok();
                 }
                 None => self.os.fx_unmap(CLICK_LAYER + j),
             }

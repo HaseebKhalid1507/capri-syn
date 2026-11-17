@@ -12,8 +12,8 @@
     "bobPx": 2,
     "bobPeriodMs": 4400,
     "sparkleEveryMs": [
-      900,
-      2200
+      1500,
+      1800
     ],
     "sparkleMs": 560,
     "firstActivityMs": 6000,

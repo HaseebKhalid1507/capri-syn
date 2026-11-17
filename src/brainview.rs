@@ -161,7 +161,9 @@ pub(super) struct LeapMove {
 /// (the floor, or a window's top she stands on), then she settles into `place` at `origin`.
 pub(super) struct WalkMove {
     walk: crate::motion::Walk,
+    /// She sets off then (after the anticipation); the strip and the travel start there.
     t0: Instant,
+    started: bool,
     feet_y: i32,
     origin: (i32, i32),
     place: Placement,
@@ -1604,23 +1606,47 @@ impl Avatar {
     fn start_walk(&mut self, w: WalkPlan, origin: (i32, i32), place: Placement, now: Instant) {
         let l = self.layout;
         let (Some(si), Some(spec)) = (self.pack.motions.walk, self.pack.behaviour.motions.walk.clone()) else { return };
-        let Some((n, ms)) = self.pack.anim.as_ref().map(|a| (a.strips[si].frames, a.strips[si].ms)) else { return };
-        let Some(first) = self.pack.strip_first.get(si).copied().flatten() else { return };
-        self.os.set_target(0);
+        if self.pack.strip_first.get(si).copied().flatten().is_none() {
+            return;
+        }
         self.hop = None;
         self.menu = None;
-        self.placement = Placement::Ground;
-        self.set_origin((w.from_x - l.ground_x, w.feet_y - l.ground_y));
         let walk = crate::motion::Walk::new(w.from_x as f32, w.to_x as f32, spec.px_per_s * l.sf);
-        self.face(w.to_x > w.from_x, "walk", now, true);
-        // The walk is on before the relayer: a window top's pick holds through it.
-        if let Some(h) = &mut self.brain {
-            h.walk = Some(WalkMove { walk, t0: now, feet_y: w.feet_y, origin, place });
+        let right = w.to_x > w.from_x;
+        // Standing, she leans back a moment first (the anticipation), then sets off.
+        let standing = self.placement == Placement::Ground;
+        let wait = if standing { crate::motion::ANTICIPATE } else { Duration::ZERO };
+        if standing {
+            self.face(right, "walk", now, true);
+            self.motion.lean = Some(crate::motion::Lean { t0: now, right: !right, ms: crate::motion::ANTICIPATE.as_millis() as u32 });
         }
-        self.relayer(now);
-        self.anim.play(crate::motion::walk_seq(first, n, ms, walk.secs), now);
+        if let Some(h) = &mut self.brain {
+            h.walk = Some(WalkMove { walk, t0: now + wait, started: false, feet_y: w.feet_y, origin, place });
+        }
         self.motion.walk_gap.mark(now);
         self.motion.walks += 1;
+        if !standing {
+            self.walk_go(now);
+        }
+    }
+
+    /// She sets off: on her feet on the walk's line, its cells round and round.
+    fn walk_go(&mut self, now: Instant) {
+        let l = self.layout;
+        let Some(si) = self.pack.motions.walk else { return };
+        let Some((n, ms)) = self.pack.anim.as_ref().map(|a| (a.strips[si].frames, a.strips[si].ms)) else { return };
+        let Some(first) = self.pack.strip_first.get(si).copied().flatten() else { return };
+        let Some(wm) = self.brain.as_mut().and_then(|h| h.walk.as_mut()) else { return };
+        wm.started = true;
+        wm.t0 = now;
+        let (walk, feet_y) = (wm.walk, wm.feet_y);
+        self.os.set_target(0);
+        self.placement = Placement::Ground;
+        self.set_origin((walk.from_x.round() as i32 - l.ground_x, feet_y - l.ground_y));
+        self.face(walk.to_x > walk.from_x, "walk", now, true);
+        // The walk is on before the relayer: a window top's pick holds through it.
+        self.relayer(now);
+        self.anim.play(crate::motion::walk_seq(first, n, ms, walk.secs), now);
     }
 
     fn step_walk(&mut self, now: Instant) -> bool {
@@ -1628,17 +1654,28 @@ impl Avatar {
         let Some(h) = &mut self.brain else { return false };
         let Some(wm) = &h.walk else { return false };
         let l = self.layout;
-        let t = now.saturating_duration_since(wm.t0).as_secs_f32();
         if interrupted {
             self.walk_stop(now);
             return true;
         }
+        if !wm.started {
+            if now >= wm.t0 {
+                self.walk_go(now);
+                return true;
+            }
+            return false;
+        }
+        let t = now.saturating_duration_since(wm.t0).as_secs_f32();
         if wm.walk.done(t) {
-            let (origin, place) = (wm.origin, wm.place);
-            h.walk = None;
+            let (origin, place, right) = (wm.origin, wm.place, wm.walk.to_x > wm.walk.from_x);
+            // She stops facing the way she walked (no turn), her momentum settling forward.
             self.anim.stop_oneshot(now);
             self.arrive(origin, place, now);
+            if let Some(h) = &mut self.brain {
+                h.walk = None;
+            }
             if place == Placement::Ground {
+                self.motion.lean = Some(crate::motion::Lean { t0: now, right, ms: crate::motion::SETTLE_MS });
                 self.home = self.ground();
                 state::save_ground(self.ground());
             }
@@ -1718,6 +1755,11 @@ impl Avatar {
     /// sitting on the window top she walked along.
     fn walk_stop(&mut self, now: Instant) {
         let Some(wm) = self.brain.as_mut().and_then(|h| h.walk.take()) else { return };
+        self.motion.lean = None;
+        if !wm.started {
+            // Still where she was: nothing to undo.
+            return;
+        }
         let l = self.layout;
         let x = wm.walk.x_at(now.saturating_duration_since(wm.t0).as_secs_f32()).round() as i32;
         self.anim.stop_oneshot(now);

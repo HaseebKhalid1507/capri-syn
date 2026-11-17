@@ -40,8 +40,10 @@ pub(super) struct ArtState {
     failed: HashSet<Unit>,
     /// Asked for from `&self` code (the layer), fetched at the next schedule.
     want: RefCell<Vec<Unit>>,
-    /// The art family on screen last schedule: a change is a seam.
+    /// The art family on screen last schedule: a change is a seam. And whether it was a
+    /// motion's drawing (a walk, a dance, a dangle): a seam into or out of one is light.
     seam_last: Option<Art>,
+    seam_motion: bool,
     /// A lying variant fits on its window top (per strip): asked once per relayer, like the
     /// pack's own lying frame.
     pub fits: RefCell<HashMap<usize, bool>>,
@@ -63,6 +65,7 @@ impl ArtState {
             failed: HashSet::new(),
             want: RefCell::new(Vec::new()),
             seam_last: None,
+            seam_motion: false,
             fits: RefCell::new(HashMap::new()),
             seams: 0,
         }
@@ -477,6 +480,8 @@ impl Avatar {
         }
         let art = self.pack.art_of(shown);
         let prev = self.art.seam_last.replace(art);
+        let motion = self.motion_cell(shown);
+        let was_motion = std::mem::replace(&mut self.art.seam_motion, motion);
         if let Some(prev) = prev
             && seam(prev, art)
             && self.loaded
@@ -485,8 +490,10 @@ impl Avatar {
             && self.teleport.is_none()
             && self.rag.is_none()
         {
-            // A cover for the body's cut: the tag stays whole.
-            let mut g = Glitch::new(GlitchKind::Burst, now, self.rng.next());
+            // A cover for the body's cut: the tag stays whole. In or out of a motion, a light
+            // one (r32: the full burst read as a teleport, smeared her hair).
+            let kind = if motion || was_motion { GlitchKind::Seam } else { GlitchKind::Burst };
+            let mut g = Glitch::new(kind, now, self.rng.next());
             g.tears_tag = false;
             self.glitch = Some(g);
             self.art.seams += 1;
