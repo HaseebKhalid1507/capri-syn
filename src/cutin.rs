@@ -62,9 +62,9 @@ pub fn phase(t: u64, ms: u64) -> Phase {
     }
 }
 
-/// The rows torn in at `u` (`IN_FROM`..1): `(y0, y1, dx, 0)` bands in a random order (`seed`),
-/// each a little off sideways (`jolt` px at most) until it settles, all of them in place at 1.
-pub fn in_bands(h: i32, u: f32, seed: u64, band: i32, jolt: i32) -> Vec<(i32, i32, i32, i32)> {
+/// The rows torn in at `u` (`IN_FROM`..1): `(y0, y1, 0, 0)` bands in a random order (`seed`),
+/// each in place (r36: rows coming in off sideways showed as smeared streaks past its edges).
+pub fn in_bands(h: i32, u: f32, seed: u64, band: i32) -> Vec<(i32, i32, i32, i32)> {
     let (band, u) = (band.max(1), u.clamp(0.0, 1.0));
     let mut out = Vec::new();
     let (mut y, mut k) = (0, 0u64);
@@ -73,10 +73,7 @@ pub fn in_bands(h: i32, u: f32, seed: u64, band: i32, jolt: i32) -> Vec<(i32, i3
         let r = mix(seed ^ k.wrapping_mul(0x9e37_79b9_7f4a_7c15));
         let at = (r >> 40) as f32 / (1u64 << 24) as f32;
         if at <= u {
-            // Settling: off by up to `jolt` when it comes in, in place by the end.
-            let left = 1.0 - u;
-            let dx = (((r >> 8) & 0xff) as f32 / 127.5 - 1.0) * jolt as f32 * left * 2.0;
-            out.push((y, y1, dx.round() as i32, 0));
+            out.push((y, y1, 0, 0));
         }
         y = y1;
         k += 1;
@@ -193,16 +190,16 @@ mod tests {
     }
 
     #[test]
-    fn its_rows_come_in_settling_and_all_are_in_at_the_end() {
-        let first = in_bands(160, IN_FROM, 7, 8, 6);
+    fn its_rows_come_in_in_place_and_all_are_in_at_the_end() {
+        let first = in_bands(160, IN_FROM, 7, 8);
         let n = first.iter().map(|b| b.1 - b.0).sum::<i32>();
         assert!(n > 20 && n < 100, "{n} of 160 rows on the first frame");
-        let all = in_bands(160, 1.0, 7, 8, 6);
+        let all = in_bands(160, 1.0, 7, 8);
         assert_eq!(all.iter().map(|b| b.1 - b.0).sum::<i32>(), 160);
         assert!(all.iter().all(|b| b.2 == 0 && b.3 == 0), "in place at the end");
-        assert!(first.iter().all(|b| b.2.abs() <= 8));
+        assert!(first.iter().all(|b| b.2 == 0 && b.3 == 0), "never past its edges");
         // Rows only ever come in.
-        let mid = in_bands(160, 0.6, 7, 8, 6);
+        let mid = in_bands(160, 0.6, 7, 8);
         assert!(first.iter().all(|f| mid.iter().any(|m| m.0 == f.0)));
     }
 

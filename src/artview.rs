@@ -56,6 +56,9 @@ pub(super) struct ArtState {
     /// pack's own lying frame.
     pub fits: RefCell<HashMap<usize, bool>>,
     pub seams: u32,
+    /// A swap in place holds the drawing before it until then (`relayer_cut_ahead`): no tag on
+    /// those frames (it would jump before her, and its pixels showed in her new outline).
+    pub cut_hold: Option<Instant>,
 }
 
 impl ArtState {
@@ -78,6 +81,7 @@ impl ArtState {
             seam_motion: false,
             fits: RefCell::new(HashMap::new()),
             seams: 0,
+            cut_hold: None,
         }
     }
 
@@ -426,8 +430,17 @@ impl Avatar {
     fn relayer_cut_ahead(&mut self, now: Instant) {
         let before = self.anim.frame();
         self.relayer(now);
-        if self.anim.frame() != before && !self.anim.busy() && !self.hidden {
+        let after = self.anim.frame();
+        if after != before && !self.anim.busy() && !self.hidden {
             self.anim.play(vec![(before, super::FRAME_FX.as_millis() as u32)], now);
+            self.art.cut_hold = Some(now + super::FRAME_FX);
+            // Its seam on the cut: the frames before it lay its one step underneath, the cut
+            // frame shows it (r36: the burst after the cut shredded her leg, threw bars, tore
+            // the tag).
+            if seam(self.pack.art_of(before), self.pack.art_of(after)) && self.loaded && self.glitch.is_none() && self.teleport.is_none() && self.rag.is_none() {
+                self.glitch = Some(Glitch::swap(now + super::FRAME_FX, self.rng.next()));
+                self.art.seams += 1;
+            }
         }
     }
 
@@ -599,9 +612,10 @@ impl Avatar {
                     t0.elapsed().as_millis(),
                     bytes as f64 / 1e6
                 );
-                // What the layer wanted is in: show it (the seam glitches over the cut).
+                // What the layer wanted is in: show it, cut a frame late like any swap in place
+                // (r37: a lounge's strip came in after its pick, and its cut got the full burst).
                 if self.loaded && self.layer(self.mood).0 != self.anim.base() {
-                    self.relayer(now);
+                    self.relayer_cut_ahead(now);
                 }
             }
         }

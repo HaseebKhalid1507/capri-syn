@@ -33,6 +33,8 @@ pub(super) struct ArriveState {
     pub until: Option<Instant>,
     /// A drawn arrival shows as the red land silhouette until then.
     pub red_until: Option<Instant>,
+    /// Its contact squash ends there (the cut to the drawing: no step at the cut).
+    pub squash_end: Option<Instant>,
     /// A drawn arrival forms her until then (its first cells are the forming): the HUD waits.
     pub formed: Option<Instant>,
     /// The last passive/bid teleport landed with the sequence.
@@ -191,10 +193,12 @@ impl Avatar {
             let red = if quiet { Duration::ZERO } else { DRAWN_PERCH_RED };
             self.arrive.red_until = Some(now + red);
             self.arrive.until = Some(now + red);
-            if dip_ms > 0 {
-                // Contact: the silhouette itself settles (a squash about the seat, its trough
-                // inside the red), not a cut-out held still (r35), and on into the drawing.
+            if dip_ms > 0 && !red.is_zero() {
+                // Contact: the silhouette itself settles (a squash about the seat), not a
+                // cut-out held still (r35), easing into rest on the cut: the drawing comes in at
+                // the silhouette's own height (r36: still rising at the cut, she hopped up 3 px).
                 self.squash = Some(now);
+                self.arrive.squash_end = Some(now + red);
             }
             return;
         }

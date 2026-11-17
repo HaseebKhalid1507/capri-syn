@@ -160,7 +160,16 @@ impl Avatar {
             return;
         }
         let sf = self.layout.sf;
-        let body = self.her_body();
+        let mut body = self.her_body();
+        // The gap is from her outline as drawn (r36: her hair's spikes reach past her box, and
+        // read as red shards at the plate's edge).
+        if let Some(f) = self.frame_or_default(self.shown_frame())
+            && let Some((x0, x1)) = f.rects.iter().map(|r| (r.0 as i32, r.0 as i32 + r.2 as i32)).reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)))
+        {
+            let ox = self.applied.0 + self.layout.avatar_x;
+            let (l, r) = (body.x.min(ox + x0), (body.x + body.w).max(ox + x1));
+            body = crate::edges::WinRect::new(l, body.y, r - l, body.h);
+        }
         let (gx, gy) = self.ground();
         let a = self.os.area_at(gx, gy - 1);
         // His windows (not hers, not popups), and her bubble's room above her head.
@@ -182,7 +191,7 @@ impl Avatar {
         // Its first frame's rows (a full shape before anything is painted showed black).
         let first = {
             let mut p = BodyPlan::plain();
-            p.slices = Some(cutin::in_bands(still.size.1, cutin::IN_FROM, seed, band_px(sf), jolt_px(sf)));
+            p.slices = Some(cutin::in_bands(still.size.1, cutin::IN_FROM, seed, band_px(sf)));
             p.shape(&still.rects)
         };
         let mut view = None;
@@ -258,10 +267,6 @@ fn band_px(sf: f32) -> i32 {
     (8.0 * sf).round() as i32
 }
 
-fn jolt_px(sf: f32) -> i32 {
-    (6.0 * sf).round() as i32
-}
-
 /// The cut-in's window: its still, from its own clock (`cutin::phase`).
 struct CutInView {
     os: Rc<Os>,
@@ -319,7 +324,7 @@ impl Render for CutInView {
         let mut plan = BodyPlan::plain();
         let band = band_px(sf);
         match ph {
-            Phase::In(u) => plan.slices = Some(cutin::in_bands(h, u, self.seed, band, jolt_px(sf))),
+            Phase::In(u) => plan.slices = Some(cutin::in_bands(h, u, self.seed, band)),
             Phase::Out(u) => plan.slices = Some(crate::intro::out_bands(h, u, self.seed, band)),
             Phase::Hold | Phase::Gone => {}
         }

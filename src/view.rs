@@ -440,11 +440,11 @@ const NOTE_TICK: Duration = Duration::from_millis(40);
 /// in her window (`Os::fx_staged`).
 const GLINT_LAYER: usize = NOTE_LAYER + 2 * NOTES_MAX;
 const GLINTS_MAX: usize = 4;
-/// A glint's smallest size, of its full size; its core's pink, and how far it goes toward the
-/// halo's pale pink at its peak.
+/// A glint's smallest size, of its full size; its hot centre (a 3 px core, the arms' inner
+/// half), and its pink edge (the arms' outer half).
 const GLINT_MIN: f32 = 0.4;
-const GLINT_CORE: u32 = 0xff6fb4;
-const GLINT_WHITE: f32 = 0.35;
+const GLINT_HOT: u32 = 0xfff6fa;
+const GLINT_EDGE: u32 = 0xff7ab8;
 /// When a glint can't show (a glitch, a turn, a frame without hair), the next try.
 const GLINT_RETRY_MS: u64 = 300;
 /// A bob or sway step (1-2 px) alone waits this long for another redraw to ride on (a
@@ -1172,14 +1172,16 @@ impl Avatar {
                     ((x0, y0), (x1 - x0, y1 - y0), rows)
                 };
                 let (core, glow) = (GLINT_LAYER + 2 * used + 1, GLINT_LAYER + 2 * used);
-                // The same curve fades it: the core goes pink -> white -> pink and the halo
-                // grows out of it (1-bit windows: no alpha).
-                let (o, sz, rows) = place(fx::star(cx, cy, r, g.spin + 0.04));
-                // A pink centre all its life, a pale halo around it: never a white cross on her
-                // hair (r34, r35: at its peak it still read as a stray white pixel).
-                self.os.fx_set(core, mix_rgb(GLINT_CORE, 0xffc2e2, sc * GLINT_WHITE), o, sz, &rows).ok();
-                let (o, sz, rows) = place(fx::star(cx, cy, r * (1.0 + 0.3 * sc), g.spin));
-                self.os.fx_set_below(glow, core, 0xffd6ec, o, sz, &rows).ok();
+                // A solid near-white core (3 px) with arms 2 px at the base tapering to points,
+                // pink only on their outer half: a hot centre fading into her hair (r36: a 1 px
+                // pink cross vanished into it; main's flat white star read as a stamp). 1-bit
+                // windows, no alpha: two layers.
+                let sf = l.sf;
+                let (k, b) = (1.5 * sf, 1.6 * sf);
+                let (o, sz, rows) = place(fx::glint_star(cx, cy, (r * 0.5).max(2.6 * sf), k, b, g.spin));
+                self.os.fx_set(core, GLINT_HOT, o, sz, &rows).ok();
+                let (o, sz, rows) = place(fx::glint_star(cx, cy, r, k, b, g.spin));
+                self.os.fx_set_below(glow, core, GLINT_EDGE, o, sz, &rows).ok();
                 used += 1;
             }
         }
@@ -2265,8 +2267,9 @@ impl Avatar {
         }
         if let Some(t0) = self.squash {
             dirty = true;
-            if fx::squash(now.duration_since(t0)).is_none() {
+            if self.squash_at(t0, now).is_none() {
                 self.squash = None;
+                self.arrive.squash_end = None;
             }
         }
         let life_ms = self.pack.behaviour.life.sparkle_ms;
@@ -2395,7 +2398,7 @@ impl Avatar {
                 let (i, spin) = (self.rng.pick(n), self.rng.range(-0.25, 0.25));
                 let travel = self.rng.range(6.0, 10.0) * sf;
                 let dir = if self.rng.range(0.0, 1.0) < 0.5 { -1.0 } else { 1.0 };
-                (i, spin, travel * dir, self.rng.range(7.5, 9.0) * sf)
+                (i, spin, travel * dir, self.rng.range(8.0, 9.5) * sf)
             })
             .collect();
         let Some(f) = self.frame_or_default(self.shown_frame()) else { return };
@@ -2405,7 +2408,7 @@ impl Avatar {
                 t0: now,
                 x: x as f32,
                 y: y as f32,
-                // Big enough to read over her hair's own glitter.
+                // Big enough to read over her hair's own glitter, a quarter under main's.
                 size,
                 spin,
                 // A little travel along its long arm (the strand it sits on).
@@ -4444,6 +4447,16 @@ impl Avatar {
         (t < 1.0).then_some(0.06 + 0.94 * (t * t * (3.0 - 2.0 * t)))
     }
 
+    /// The squash begun at `t0`, now: a drawn perch's contact settle (to rest at its cut), else
+    /// the landing squash.
+    fn squash_at(&self, t0: Instant, now: Instant) -> Option<(f32, f32)> {
+        match self.arrive.squash_end {
+            // (One left from an earlier settle is before this squash: not this one's.)
+            Some(end) if end > t0 => fx::settle(now.saturating_duration_since(t0), end.saturating_duration_since(t0)),
+            _ => fx::squash(now.saturating_duration_since(t0)),
+        }
+    }
+
     fn pivot(&self) -> (f32, f32) {
         let l = &self.layout;
         let y = match (self.sitting(), l.seat_y) {
@@ -4762,7 +4775,7 @@ impl Render for Avatar {
         let mut plan = BodyPlan::plain();
         plan.pivot = self.pivot();
         if let Some(t0) = self.squash
-            && let Some((sx, sy)) = fx::squash(now.saturating_duration_since(t0))
+            && let Some((sx, sy)) = self.squash_at(t0, now)
             && self.rag.is_none()
         {
             plan.sx = sx;
@@ -4876,7 +4889,8 @@ impl Render for Avatar {
             };
             // Out of a still figure, the first frame stays still and lays the first pattern
             // underneath (one frame late, no black slabs on the onset).
-            let pre_roll = step == 0 && matches!(g.kind, GlitchKind::Burst | GlitchKind::Big | GlitchKind::Vanish | GlitchKind::Seam);
+            // A swap's frames before its cut: the same (its step goes on the cut frame).
+            let pre_roll = (step == 0 && matches!(g.kind, GlitchKind::Burst | GlitchKind::Big | GlitchKind::Vanish | GlitchKind::Seam)) || now < g.t0;
             if drawn_land {
                 // Clean from the cut on: this frame and the next as they are.
             } else if !pre_roll {
@@ -5272,7 +5286,9 @@ impl Render for Avatar {
         // Hanging from the bar or clinging to a window side, the tag would sit in the bar or
         // over his window: it comes back when she lands (a prompt or reply still shows it).
         let posed_quiet = self.posed() && self.prompt_ui.is_none() && !self.bubble.as_ref().is_some_and(|b| b.collapsed);
-        let show_tag = tag_hud && self.frames.iter().any(Option::is_some) && !bubble_open && self.reaction_until.is_none() && !posed_quiet;
+        // A swap in place's held frame: the tag sits it out, and comes back at its new place.
+        let swap_hold = self.art.cut_hold.is_some_and(|t| now < t);
+        let show_tag = tag_hud && self.frames.iter().any(Option::is_some) && !bubble_open && self.reaction_until.is_none() && !posed_quiet && !swap_hold;
         // In a glitch the tag tears with the body: strips of it, shifted by the same bands.
         let mut tag_strips: Vec<ShapeRect> = Vec::new();
         let torn = show_tag && !collapsed && self.glitch.is_some_and(|g| g.tears_tag);
@@ -6352,9 +6368,13 @@ impl Render for Avatar {
                             // Moved a little (her bob steps it a pixel): where it was and is now
                             // both painted it, so that stays (the whole tag blinked out for two
                             // frames on every bob step).
+                            // Only a step of a px or two: a swap's move (a lounge) left the old
+                            // plate's pixels in the new rows, a doubled, torn tag (r36).
                             if !torn
                                 && let Some(p) = prev_tag
                                 && p.size == b.size
+                                && (f32::from(p.origin.x) - f32::from(b.origin.x)).abs() <= 2.0
+                                && (f32::from(p.origin.y) - f32::from(b.origin.y)).abs() <= 2.0
                                 && let Some((cut, trail)) = tag_cut
                             {
                                 let i = p.intersect(&b);

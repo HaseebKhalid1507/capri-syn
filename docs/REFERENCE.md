@@ -197,7 +197,9 @@ With `anim/`, `moods.json` `variants` mixes that art in; she never swaps one set
   pool shifts on. Capri's `laydown` is the "getting comfy" beat: on a window she has sat on 4 min or more,
   she lies down along its top for 1-3 min, then sits again; asleep there meanwhile, she sleeps in the same
   lying drawing (`sleepWindow`'s `laydown`, weight 0: it only follows the lounge). A shift in place cuts a
-  frame late: the new drawing goes underneath first, so its first frame is whole.
+  frame late: the new drawing goes underneath first, so its first frame is whole. Its one light seam is on
+  the cut frame itself (small shifts, no bars, nothing after it); the tag sits out the held frame and
+  comes back whole at its new place. A strip that lands after its pick cuts the same way.
 - Entering the state picks one: weighted, never the last pick again, seeded (`SA_ART_SEED`). A long stay
   (`shiftMs`) shifts it in place. Every cut between CapriCore and a strip (or between two strip families)
   goes through a glitch (the body's; her tag stays whole).
@@ -229,17 +231,19 @@ With `anim/`, `moods.json` `variants` mixes that art in; she never swaps one set
   lands as itself on the cut frame: no tint, tears or split after it.
 - Sparkles: one at a time on hair only, every `life.sparkleEveryMs` [min, max] (Capri: 1.5-1.8 s, an even
   beat); never smaller than 40 % of full size (10-13 px), so none vanish into her hair's own glitter. Every
-  point a grown one reaches over its life is on her hair (7.5-9 px across), its core stays a deep pink
-  inside a pale pink halo (never a white cross), and one
-  that couldn't show yet starts its life when it does (it swells from nothing). When one can't show (a
-  glitch, a turn, a frame without hair) she tries again 300 ms later.
+  point a grown one reaches over its life is on her hair (8-9.5 px arms), wherever on it (a new spot each
+  time). It is a solid near-white 3 px core with four arms, 3 px across where they leave it and tapering to
+  1 px points, pink on their outer half: a hot centre fading into her hair. One that couldn't show yet
+  starts its life when it does (it swells from nothing). When one can't show (a glitch, a turn, a frame
+  without hair) she tries again 300 ms later.
 - `cutins` (local images, `--mochi` only; a beat without its image, or a pack without them, shows
   nothing): a show still beside her for a big moment, `ms` long (Capri 1.2 s): `needsYou` (NEEDS YOU,
   600 ms after it; a summon landing in that time shows `summon` instead), `done` (a turn of at least
   `doneAfterMs`), `laugh` (`laughChance` of her laughs at a click), `summon` (a summon for his prompt
   landed), `annoyed` (an error or abort). At most one per `gapMs`. It comes in torn in, a third of its
-  rows on its first frame and all of them, settled, by 200 ms (the still itself from frame one, no flat
-  plate), holds, and leaves row by row, its last rows together (no line left behind). It goes beside her
+  rows on its first frame and all of them by 200 ms, each in place (the still itself from frame one, no
+  flat plate, nothing past its edges), holds, and leaves row by row, its last rows together (no line left
+  behind). It goes beside her, 14 px clear of her outline as drawn (her hair included),
   where it covers the least of his windows (either side, level with her head or a step up or down; else
   over her head), among equals her roomier side; `height` px tall, a plate cut and rimmed in her red;
   clicks pass through it. Never while the Line or the reader is open, a fullscreen window hides her, DND
@@ -248,6 +252,8 @@ With `anim/`, `moods.json` `variants` mixes that art in; she never swaps one set
   `size` in source px): her face on her latest row in the Line follows her mood (thinking, working, NEEDS
   YOU, done, annoyed, sleepy...), the square reduced by a whole number to the tile (sharp, no resampling
   blur) in a 1 px border of her red; older rows keep the portrait. A mood without one keeps the portrait.
+  Capri's squares take her eyes and mouth with ~15 % around them, inside the image (never wrapped), one
+  supplied frame per mood where the art has one (sleepy and away share the drowsy one).
 - `motions` (each optional, each its strip from `anim/` with the anchor it needs; a pack without them
   does what it did before):
   - `walk` (feet, looping): a short calm move she makes on the floor or along the window top she sits on
