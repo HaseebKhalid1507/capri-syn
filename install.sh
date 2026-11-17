@@ -998,7 +998,19 @@ EOF
 # ---- 7. voice and watch -----------------------------------------------------------------------
 
 user_unit() { # SRC NAME: a tools/systemd unit with our bin dir, marked as ours
-    local src=$1 name=$2
+    local src=$1 name=$2 t
+    # A dry run hasn't installed $LIB: the checkout's or the tarball's copy, else just where it goes.
+    if [ ! -f "$src" ]; then
+        for t in "$CHECKOUT/tools/systemd/$name" "$BUNDLE/lib/synaps-avatar/tools/systemd/$name" ''; do
+            [ -n "$t" ] && [ -f "$t" ] && break
+        done
+        if [ -z "$t" ]; then
+            [ "$DRY" = 1 ] || die "no $src"
+            printf '   %s> %s%s (tools/systemd/%s)\n' "$D" "$(tilde "$UNITS/$name")" "$N" "$name"
+            return 0
+        fi
+        src=$t
+    fi
     {
         printf "# capri-syn's install.sh wrote this (install.sh --uninstall removes it), from tools/systemd/%s.\n" "$name"
         sed -n '/^\[Unit\]/,$p' "$src" | sed "s#%h/.local/bin/#$BIN/#g"
