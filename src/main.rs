@@ -393,8 +393,8 @@ fn run(t_start: Instant) -> Result<()> {
                     let cmd = match k {
                         platform::KeyEv::Summon => control::Command::TalkTap,
                         platform::KeyEv::TalkToggle => control::Command::TalkToggle,
-                        platform::KeyEv::TalkPress => control::Command::TalkPress,
-                        platform::KeyEv::TalkRelease => control::Command::TalkRelease,
+                        platform::KeyEv::TalkPress => control::Command::Talk(true),
+                        platform::KeyEv::TalkRelease => control::Command::Talk(false),
                     };
                     let (r, _) = std::sync::mpsc::channel();
                     tx.send_blocking((cmd, r)).ok();
