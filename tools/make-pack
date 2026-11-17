@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""make-pack CAPRICORE_DIR [OUT_DIR] [--moods FILE] [--sleep FILE] [--lachy DIR|auto] [--mochi DIR|auto]
+"""make-pack CAPRICORE_DIR [OUT_DIR] [--moods FILE] [--persona FILE] [--sleep FILE] [--lachy DIR|auto] [--mochi DIR|auto]
           [--mochi-hair red|flat|original]
           [--upscale [--record-upscale]]
 
@@ -15,6 +15,7 @@ from --sleep FILE, else downloaded from GitHub at that commit.
 
 OUT_DIR defaults to $XDG_DATA_HOME/synaps-avatar/packs/capri (~/.local/share/...).
 --moods defaults to packs/capri/moods.json in this repo (the avatar's own behaviour file).
+--persona defaults to packs/capri/persona.md in this repo: her session's system prompt (`[session] persona`).
 
 Layout produced:
   sprites.json          <- assets/capri/sprites/v1/runtime-sprite-set.json
@@ -28,6 +29,7 @@ Layout produced:
   fonts/Exo2-*.ttf      <- static instances of assets/fonts/exo2/Exo2-Variable.ttf (fontTools), + OFL.txt
   NOTICE.md             <- docs/character-assets.md + one line naming the CapriCore versions
   moods.json            <- --moods
+  persona.md            <- --persona
 
 Optional desktop art (anim/; a pack without it still loads):
   --lachy DIR|auto   lachydotmcg/capri-desktop at 156ed18 (PolyForm Noncommercial 1.0.0): a checkout, or
@@ -333,8 +335,8 @@ def main(argv):
         if k in argv:
             flags[k] = True
             argv.remove(k)
-    opts = {"--moods": repo / "packs/capri/moods.json", "--sleep": None, "--lachy": None, "--mochi": None,
-            "--mochi-hair": "red"}
+    opts = {"--moods": repo / "packs/capri/moods.json", "--persona": repo / "packs/capri/persona.md", "--sleep": None,
+            "--lachy": None, "--mochi": None, "--mochi-hair": "red"}
     for k in list(opts):
         if k in argv:
             i = argv.index(k)
@@ -354,6 +356,9 @@ def main(argv):
     out = Path(argv[1]) if len(argv) > 1 else data / "synaps-avatar/packs/capri"
     if not moods.exists():
         sys.exit(f"make-pack: missing {moods}")
+    persona = opts["--persona"]
+    if not persona.is_file():
+        sys.exit(f"make-pack: missing {persona}")
     pinned = pins(repo)
     check_source(src, pinned)
     sleep = sleep_frame(src, opts["--sleep"])
@@ -407,6 +412,7 @@ def main(argv):
     extra = add_sides(out, side_srcs, side_pinned, geometry, hair, opts["--mochi-hair"]) if side_srcs else []
     (out / "NOTICE.md").write_text(f"{notice}\n\n{NOTICE_LINE}\n" + "".join(f"\n{x}" for x in extra))
     shutil.copy2(moods, out / "moods.json")
+    shutil.copy2(persona, out / "persona.md")
 
     exo = "assets/fonts/exo2"
     copy(f"{exo}/OFL.txt", "fonts/OFL.txt")

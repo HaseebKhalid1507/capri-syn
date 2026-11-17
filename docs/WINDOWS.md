@@ -76,6 +76,32 @@ stays ~9 MB (CI fails hers past 20 MB), and only he who wants voice gets the res
 
 Unattended: `synaps-avatar-voice-setup-….exe /VERYSILENT /SUPPRESSMSGBOXES [/MERGETASKS="!models"]`.
 
+## install.ps1: one script (Synaps too)
+
+`irm https://raw.githubusercontent.com/HaseebKhalid1507/capri-syn/main/install.ps1 | iex` runs
+`install.sh`'s seven steps the Windows way (`docs/INSTALL.md`):
+1. Synaps through its own `synaps-installer.ps1`, sha256-checked;
+2. her installer from the latest release, or a windowed source build (rustup, and Visual Studio's
+   C++ build tools via winget behind a UAC prompt, asked first);
+3. her pack through `tools/make-pack` in a venv of its own (Python from winget if there's none,
+   asked first);
+4. `synaps daemon --detach` now, and a Run value for sign-in;
+5. Win+Alt+C (she registers it herself);
+6. a Run value for her (default on);
+7. `--voice`: her voice installer and the models.
+
+Per user. A receipt in `%LOCALAPPDATA%\synaps-avatar` drives `--uninstall`.
+
+CI (`windows-installer`, every PR) runs it end to end on windows-latest with the installer that
+job built (`installer/test-windows.ps1`):
+- a dry run (also fetched with `irm`) that changes nothing;
+- `--yes --no-autostart`;
+- `synaps --version`, her `--check`, the daemon and its Run value;
+- a rerun (up to date);
+- `--uninstall`, which leaves nothing of hers.
+
+What CI can't show is item 15 below.
+
 ## What she does here
 
 | | how | status |
@@ -162,3 +188,14 @@ desktop to try it on.
     - `hold_to_talk = true`: holding Win+Alt+C talks and the release sends; a quick tap opens the Line;
       Win+L mid-hold ends it; no stuck hold after a release in another app's window;
     - no firewall prompt for the sidecar's loopback port.
+15. install.ps1 on a clean Windows 11, interactively (CI covers the unattended run):
+    - `irm … | iex` in Windows PowerShell 5.1, with no Python: the winget prompt, Python installed
+      per user, the pack built (or "open a new terminal" when PATH isn't refreshed);
+    - `--from-source` with no build tools: winget's Visual Studio Build Tools behind UAC (~3 GB),
+      then the build;
+    - after a sign-out and back in: the Run values start the daemon and her, and she finds her
+      session. Whether `synaps.exe daemon --detach` (a console program) flashes a console window;
+      if it does, a hidden start (`conhost --headless` or a tiny launcher) is the fix;
+    - `--voice` against a real release (the voice installer, the models);
+    - SmartScreen and Defender on the unsigned installers it downloads and runs;
+    - `--uninstall` while she runs.

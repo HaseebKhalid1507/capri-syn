@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+### One installer: `install.sh` (Linux), `install.ps1` (Windows)
+- `curl -fsSL …/install.sh | bash`, `irm …/install.ps1 | iex`, or either from a checkout. Seven steps, the
+  same on both, each one checks first, so a rerun is an upgrade:
+  1. Synaps, when it's missing or older than 0.11.0, through SynapsCLI's own release installer
+     (sha256-checked);
+  2. her binary (a release asset, else a source build: rustup, the pinned toolchain, the distro's
+     packages printed and asked for, never a silent sudo);
+  3. her art pack (CapriCore v1.0.4 + lachy through `tools/make-pack`, in a venv of its own;
+     lachy's Required Notice shown);
+  4. the Synaps daemon at login and her session;
+  5. the summon key (i3/sway/Hyprland, with consent, backed up, between markers; Windows:
+     Win+Alt+C);
+  6. autostart (default on);
+  7. `--voice` / `--watch`.
+- Flags: `--yes`, `--dry-run`, `--uninstall [--purge]`, `--voice`, `--watch`, `--no-autostart`,
+  `--from-source`, `--prefix`, `--with-local-art` (mochi, local personal use only), `--artifact`.
+  Pins in `installer/manifest`.
+- `--uninstall` walks a receipt of everything it added, and leaves Synaps, settings and state.
+- `.github/workflows/release.yml`: a `v*` tag builds the Linux tarball and the two Windows
+  installers, each with a `.sha256`, smoke-tests them through the installers, and attaches them to
+  a draft release. Nothing is released until a tag is pushed.
+- `docs/INSTALL.md`; CI: shellcheck, PSScriptAnalyzer, the two scripts kept in step, dry runs, and
+  `install.ps1` end to end on windows-latest.
+- `tools/make-pack` copies `persona.md` into the pack. `capri-voice-setup` takes PyPI's
+  pywhispercpp wheel where the distro has none.
+
 ### The talk key's fine print (Linux and Windows)
 - A `talk tap` no longer waits out a press that lost its `talk release`. A tap is ignored only while a hold
   is his: the press is under 1 s old (its mic may still be opening), or its mic is asked for or open (up
