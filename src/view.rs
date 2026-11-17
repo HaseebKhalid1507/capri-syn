@@ -6523,6 +6523,9 @@ impl Render for Avatar {
             }
             if footer {
                 panel = panel.child(row);
+            } else if chip_last {
+                // The collapse key on the chip's row, at its right.
+                panel = panel.child(div().absolute().bottom(px(PAD_B + 2.0)).right(px(PAD_R - 4.0)).h(px(LINE_H - 4.0)).flex().items_center().child(collapse_btn(cx)));
             }
             if mode == PanelMode::Reply {
                 panel = panel
