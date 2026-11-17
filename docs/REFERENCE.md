@@ -192,7 +192,14 @@ With `anim/`, `moods.json` `variants` mixes that art in; she never swaps one set
   art for that state, as before. With one it plays that strip's loop, anchored like the pack's frame
   (seat, feet, surface), mirrored with the strip's `mirrorArt` twin when she faces the other way, with its
   own `talk` and `music` loops and its `blinks` (weighted, every `blinkMs`). `lying` variants are picked
-  only where the figure fits on the window's exposed top. `every: n` plays every n-th cell.
+  only where the figure fits on the window's exposed top. `every: n` plays every n-th cell. `afterMs`: only
+  once she has been on that window that long; `stayMs` [min, max]: picked, it lasts that long, then the
+  pool shifts on. Capri's `laydown` is the "getting comfy" beat: on a window she has sat on 4 min or more,
+  she lies down along its top for 1-3 min, then sits again; asleep there meanwhile, she sleeps in the same
+  lying drawing (`sleepWindow`'s `laydown`, weight 0: it only follows the lounge). A shift in place cuts a
+  frame late: the new drawing goes underneath first, so its first frame is whole. Its one light seam is on
+  the cut frame itself (small shifts, no bars, nothing after it); the tag sits out the held frame and
+  comes back whole at its new place. A strip that lands after its pick cuts the same way.
 - Entering the state picks one: weighted, never the last pick again, seeded (`SA_ART_SEED`). A long stay
   (`shiftMs`) shifts it in place. Every cut between CapriCore and a strip (or between two strip families)
   goes through a glitch (the body's; her tag stays whole).
@@ -213,30 +220,40 @@ With `anim/`, `moods.json` `variants` mixes that art in; she never swaps one set
 - Landing on a window top she touches down with the pack's `arrive.perch` (Capri: her crouch on the
   edge), then her sit inside a dip at contact: the squash starts `arrive.perchDipMs` before the change,
   so the swap falls near its trough (no dissolve, no double image), and the sit's legs unfold down over
-  the edge in 170 ms, telescoping down from the seat in six strips (her feet first), never a straight cut
-  across the shins. A leg row shows only once the last two frames had it too (GPUI presents up to two
-  frames late, and a row new to the shape showed the window's old pixels: a faint dark copy of the legs),
-  so the legs are solid or not there. Into a drawn pose (lachy's perch) she forms as that pose: from the
-  moment the bolt reaches the edge, its own red silhouette (the seated drawing's alpha, legs over the
-  edge, painted a frame before it shows), then the drawing on the cut frame, so the outline never jumps
-  and the edge is never bare. The landing glitch never shifts her legs below the edge, and a drawn pose
+  the edge in 170 ms: 40 % of them already hang over on the cut frame, the rest come in 2 px row by row
+  where they are drawn (nearest the seat first), never a straight cut across the shins, and nothing
+  moves, so her shape only grows. All of the sit is painted underneath from two frames before the cut,
+  so a row that comes in shows her legs at once (no dark copy of them, no streak under her feet). Into a
+  drawn pose (lachy's perch) she forms as that pose: from the moment the bolt reaches the edge, its own
+  red silhouette (the seated drawing's alpha, legs over the edge, painted a frame before it shows),
+  settling on contact (a squash of that silhouette about the seat), then the drawing on the cut frame,
+  so the outline never jumps and the edge is never bare. The landing glitch never shifts her legs below the edge, and a drawn pose
   lands as itself on the cut frame: no tint, tears or split after it.
 - Sparkles: one at a time on hair only, every `life.sparkleEveryMs` [min, max] (Capri: 1.5-1.8 s, an even
   beat); never smaller than 40 % of full size (10-13 px), so none vanish into her hair's own glitter. Every
-  point a grown one reaches over its life is on her hair, its core stays pink (never a white cross), and one
-  that couldn't show yet starts its life when it does (it swells from nothing). When one can't show (a
-  glitch, a turn, a frame without hair) she tries again 300 ms later.
+  point a grown one reaches over its life is on her hair (8-9.5 px arms), wherever on it (a new spot each
+  time). It is a solid near-white 3 px core with four arms, 3 px across where they leave it and tapering to
+  1 px points, pink on their outer half: a hot centre fading into her hair. One that couldn't show yet
+  starts its life when it does (it swells from nothing). When one can't show (a glitch, a turn, a frame
+  without hair) she tries again 300 ms later.
 - `cutins` (local images, `--mochi` only; a beat without its image, or a pack without them, shows
   nothing): a show still beside her for a big moment, `ms` long (Capri 1.2 s): `needsYou` (NEEDS YOU,
   600 ms after it; a summon landing in that time shows `summon` instead), `done` (a turn of at least
   `doneAfterMs`), `laugh` (`laughChance` of her laughs at a click), `summon` (a summon for his prompt
-  landed), `annoyed` (an error or abort). At most one per `gapMs`. It comes in on a red flash and a tear,
-  holds, and leaves row by row; on her roomier side, `height` px tall, a plate cut and rimmed in her red;
+  landed), `annoyed` (an error or abort). At most one per `gapMs`. It comes in torn in, a third of its
+  rows on its first frame and all of them by 200 ms, each in place (the still itself from frame one, no
+  flat plate, nothing past its edges), holds, and leaves row by row, its last rows together (no line left
+  behind). It goes beside her, 14 px clear of her outline as drawn (her hair included),
+  where it covers the least of his windows (either side, level with her head or a step up or down; else
+  over her head), among equals her roomier side; `height` px tall, a plate cut and rimmed in her red;
   clicks pass through it. Never while the Line or the reader is open, a fullscreen window hides her, DND
   is on, or the intro plays; she moves off and it leaves at once. The window and its pixels go with it.
-- `lineFaces` (mood → `anim/mochi` image, local only): her face on her latest row in the Line follows her
-  mood (thinking, working, NEEDS YOU, done, annoyed, sleepy...); older rows keep the portrait. A mood
-  without one keeps the portrait.
+- `lineFaces` (mood → `anim/mochi` image, local only, with the square of it that is her face: `centre`,
+  `size` in source px): her face on her latest row in the Line follows her mood (thinking, working, NEEDS
+  YOU, done, annoyed, sleepy...), the square reduced by a whole number to the tile (sharp, no resampling
+  blur) in a 1 px border of her red; older rows keep the portrait. A mood without one keeps the portrait.
+  Capri's squares take her eyes and mouth with ~15 % around them, inside the image (never wrapped), one
+  supplied frame per mood where the art has one (sleepy and away share the drowsy one).
 - `motions` (each optional, each its strip from `anim/` with the anchor it needs; a pack without them
   does what it did before):
   - `walk` (feet, looping): a short calm move she makes on the floor or along the window top she sits on

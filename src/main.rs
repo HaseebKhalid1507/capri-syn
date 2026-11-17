@@ -470,8 +470,9 @@ fn run(t_start: Instant) -> Result<()> {
                 Err(e) => fatal(e),
             };
             elog!(
-                "synaps-avatar: decoded {} frames in {} ms on {threads} threads; all frames ready {} ms after start",
+                "synaps-avatar: decoded {} frames ({:.1} MB) in {} ms on {threads} threads; all frames ready {} ms after start",
                 all.frames.len(),
+                all.frames.iter().map(|f| f.bytes()).sum::<usize>() as f64 / 1e6,
                 all.decode_ms,
                 t_start.elapsed().as_millis()
             );

@@ -6,7 +6,7 @@
 use super::Avatar;
 use crate::cutin::{self, Beat, Phase};
 use crate::frames::{HIT_ALPHA, alpha_mask};
-use crate::fx::{self, BodyPlan, Glitch, GlitchKind, GlitchStep};
+use crate::fx::BodyPlan;
 use crate::platform::{Os, Role, WinId};
 use crate::shape::ShapeRect;
 use gpui_kit::*;
@@ -160,10 +160,26 @@ impl Avatar {
             return;
         }
         let sf = self.layout.sf;
-        let body = self.her_body();
+        let mut body = self.her_body();
+        // The gap is from her outline as drawn (r36: her hair's spikes reach past her box, and
+        // read as red shards at the plate's edge).
+        if let Some(f) = self.frame_or_default(self.shown_frame())
+            && let Some((x0, x1)) = f.rects.iter().map(|r| (r.0 as i32, r.0 as i32 + r.2 as i32)).reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)))
+        {
+            let ox = self.applied.0 + self.layout.avatar_x;
+            let (l, r) = (body.x.min(ox + x0), (body.x + body.w).max(ox + x1));
+            body = crate::edges::WinRect::new(l, body.y, r - l, body.h);
+        }
         let (gx, gy) = self.ground();
         let a = self.os.area_at(gx, gy - 1);
-        let Some((x, y)) = cutin::place((body.x, body.y, body.w, body.h), (a.x, a.y, a.w, a.h), still.size, (GAP * sf).round() as i32, !self.panel_up()) else {
+        // His windows (not hers, not popups), and her bubble's room above her head.
+        let mut windows: Vec<(i32, i32, i32, i32)> =
+            self.os.stack().into_iter().filter(|(r, big)| *big && r.id != self.os.body()).map(|(r, _)| (r.x, r.y, r.w, r.h)).collect();
+        if self.panel_up() {
+            let (w, _) = (self.layout.geo.width as i32, self.layout.geo.height as i32);
+            windows.push((self.origin.0, self.origin.1, w, (body.y - self.origin.1).max(0)));
+        }
+        let Some((x, y)) = cutin::place((body.x, body.y, body.w, body.h), (a.x, a.y, a.w, a.h), still.size, (GAP * sf).round() as i32, &windows, !self.panel_up()) else {
             return;
         };
         let (w, h) = still.size;
@@ -172,7 +188,12 @@ impl Avatar {
         let me = cx.entity().downgrade();
         let os = self.os.clone();
         let seed = self.rng.next();
-        let first = still.rects.clone();
+        // Its first frame's rows (a full shape before anything is painted showed black).
+        let first = {
+            let mut p = BodyPlan::plain();
+            p.slices = Some(cutin::in_bands(still.size.1, cutin::IN_FROM, seed, band_px(sf)));
+            p.shape(&still.rects)
+        };
         let mut view = None;
         let opened = cx.open_window(options, |window, cx| {
             let id = os.adopt(Role::Intro, window).unwrap_or(0);
@@ -183,7 +204,7 @@ impl Avatar {
             let on_done: Done = Box::new(move |cx: &mut App| {
                 me.update(cx, |a, cx| a.cutin_done(cx)).ok();
             });
-            let v = cx.new(|_| CutInView { os: os.clone(), id, still, ms, seed, sf, t0: Instant::now(), renders: 0, sent: 0, step: 0, timer_for: None, on_done: Some(on_done) });
+            let v = cx.new(|_| CutInView { os: os.clone(), id, still, ms, seed, sf, t0: Instant::now(), renders: 0, sent: 0, timer_for: None, on_done: Some(on_done) });
             view = Some(v.downgrade());
             v
         });
@@ -241,6 +262,11 @@ impl Avatar {
 
 type Done = Box<dyn FnOnce(&mut App)>;
 
+/// Its rows' height and how far they come in off sideways, device px.
+fn band_px(sf: f32) -> i32 {
+    (8.0 * sf).round() as i32
+}
+
 /// The cut-in's window: its still, from its own clock (`cutin::phase`).
 struct CutInView {
     os: Rc<Os>,
@@ -253,7 +279,6 @@ struct CutInView {
     /// The clock starts again at the second render (the first uploads the still).
     renders: u32,
     sent: u64,
-    step: u64,
     timer_for: Option<u64>,
     on_done: Option<Done>,
 }
@@ -297,31 +322,10 @@ impl Render for CutInView {
         let (w, h) = self.still.size;
         let sf = self.sf;
         let mut plan = BodyPlan::plain();
+        let band = band_px(sf);
         match ph {
-            Phase::Red => plan.tint = Some(fx::BOLT_RED),
-            Phase::Tear(_) => {
-                let at = self.t0 + Duration::from_millis(cutin::RED_MS);
-                let mut g = Glitch::new(GlitchKind::Burst, at, self.seed);
-                g.ms = cutin::TEAR_MS as f32;
-                self.step += 1;
-                plan.glitch(GlitchStep {
-                    strength: g.strength(now),
-                    coverage: 1.0,
-                    seed: g.step_seed(self.step),
-                    order: g.seed(),
-                    y0: 0,
-                    h,
-                    body: (0, 0, w, h),
-                    face: None,
-                    solid: 0.0,
-                    tag: None,
-                    sf,
-                    calm: false,
-                    light: false,
-                    still_from: None,
-                });
-            }
-            Phase::Out(u) => plan.slices = Some(crate::intro::out_bands(h, u, self.seed, (8.0 * sf).round() as i32)),
+            Phase::In(u) => plan.slices = Some(cutin::in_bands(h, u, self.seed, band)),
+            Phase::Out(u) => plan.slices = Some(crate::intro::out_bands(h, u, self.seed, band)),
             Phase::Hold | Phase::Gone => {}
         }
         // Moving: every frame. Held: a wake-up when it starts to go.
@@ -341,16 +345,13 @@ impl Render for CutInView {
         }
         let rects = self.still.rects.clone();
         let alpha = self.os.composited();
-        let shape = if plan.is_plain() && plan.tint.is_none() { rects.to_vec() } else { plan.shape(&rects) };
+        let shape = if plan.is_plain() { rects.to_vec() } else { plan.shape(&rects) };
         let hsh = hash_rects(&shape);
         // Never an empty shape (GPUI stops drawing a fully obscured X window).
         if hsh != self.sent && !shape.is_empty() {
             self.sent = hsh;
             self.os.shape_of(self.id, &[], &shape).ok();
         }
-        let ghost = plan.ghost_rects(&rects);
-        let tint = plan.tint.map(|c| (c, plan.body_rects(&rects)));
-        let bars = if plan.tint.is_some() { Vec::new() } else { plan.bar_rects(&rects) };
         let img = self.still.image.clone();
         let plan = Rc::new(plan);
         div().size_full().child(
@@ -359,39 +360,25 @@ impl Render for CutInView {
                 move |bounds, _, window, _| {
                     let (bx, by) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
                     let rect = |x: f32, y: f32, w: f32, h: f32| Bounds::new(point(px(bx + x / sf), px(by + y / sf)), size(px(w / sf), px(h / sf)));
-                    let quad = |window: &mut Window, r: &ShapeRect, c: u32| {
-                        window.paint_quad(fill(rect(r.0 as f32, r.1 as f32, r.2 as f32, r.3 as f32), rgb(c)));
-                    };
                     let full = rect(0.0, 0.0, w as f32, h as f32);
                     // The shape lands a frame late without a compositor: the still underneath,
                     // so where it grows there is the still, not black.
                     if !alpha && plan.slices.is_some() {
                         window.paint_image(full, full, Corners::default(), img.clone(), 0, false).ok();
                     }
-                    for (r, c) in &ghost {
-                        quad(window, r, *c);
-                    }
                     let (ix, iy, iw, ih) = plan.image_rect(w, h);
-                    match (&tint, &plan.slices) {
-                        (Some((c, rs)), _) => {
-                            for r in rs {
-                                quad(window, r, *c);
-                            }
-                        }
-                        (None, None) => {
+                    match &plan.slices {
+                        None => {
                             let r = rect(ix, iy, iw, ih);
                             window.paint_image(r, r, Corners::default(), img.clone(), 0, false).ok();
                         }
-                        (None, Some(bands)) => {
+                        Some(bands) => {
                             for &(y0, y1, dx, dy) in bands {
                                 let shifted = rect(ix + dx as f32, iy + dy as f32, iw, ih);
                                 let clip = rect(ix + dx as f32, (y0 + dy) as f32, iw, (y1 - y0) as f32);
                                 window.paint_image(clip, shifted, Corners::default(), img.clone(), 0, false).ok();
                             }
                         }
-                    }
-                    for (r, c) in &bars {
-                        quad(window, r, *c);
                     }
                 },
             )

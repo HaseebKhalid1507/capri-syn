@@ -904,11 +904,16 @@
               2500,
               5000
             ],
-            "weight": 0,
+            "weight": 1,
             "every": 3,
             "holdMs": [
               3000,
               6000
+            ],
+            "afterMs": 240000,
+            "stayMs": [
+              60000,
+              180000
             ]
           }
         ]
@@ -1336,7 +1341,7 @@
       "done": "cutin-grin",
       "laugh": "cutin-laugh",
       "summon": "cutin-look",
-      "annoyed": "cutin-many"
+      "annoyed": "face-many"
     },
     "ms": 1200,
     "gapMs": 12000,
@@ -1345,14 +1350,77 @@
     "height": 150
   },
   "lineFaces": {
-    "idle": "face-calm",
-    "talking": "face-calm",
-    "thinking": "face-look",
-    "working": "face-aside",
-    "needs_you": "face-wide",
-    "done": "face-smug",
-    "annoyed": "face-many",
-    "sleepy": "capri-face",
-    "away": "capri-face"
+    "idle": {
+      "image": "face-calm",
+      "centre": [
+        128,
+        153
+      ],
+      "size": 156
+    },
+    "talking": {
+      "image": "capri-face",
+      "centre": [
+        115,
+        128
+      ],
+      "size": 220
+    },
+    "thinking": {
+      "image": "face-wide",
+      "centre": [
+        110,
+        125
+      ],
+      "size": 186
+    },
+    "working": {
+      "image": "cutin-look",
+      "centre": [
+        130,
+        130
+      ],
+      "size": 240
+    },
+    "needs_you": {
+      "image": "face-look",
+      "centre": [
+        130,
+        130
+      ],
+      "size": 232
+    },
+    "done": {
+      "image": "face-laugh",
+      "centre": [
+        100,
+        130
+      ],
+      "size": 240
+    },
+    "annoyed": {
+      "image": "face-smug",
+      "centre": [
+        105,
+        148
+      ],
+      "size": 160
+    },
+    "sleepy": {
+      "image": "face-aside",
+      "centre": [
+        110,
+        150
+      ],
+      "size": 160
+    },
+    "away": {
+      "image": "face-aside",
+      "centre": [
+        110,
+        150
+      ],
+      "size": 160
+    }
   }
 }

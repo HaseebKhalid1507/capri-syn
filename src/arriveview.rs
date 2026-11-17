@@ -33,6 +33,8 @@ pub(super) struct ArriveState {
     pub until: Option<Instant>,
     /// A drawn arrival shows as the red land silhouette until then.
     pub red_until: Option<Instant>,
+    /// Its contact squash ends there (the cut to the drawing: no step at the cut).
+    pub squash_end: Option<Instant>,
     /// A drawn arrival forms her until then (its first cells are the forming): the HUD waits.
     pub formed: Option<Instant>,
     /// The last passive/bid teleport landed with the sequence.
@@ -66,31 +68,52 @@ impl ArriveState {
 /// The legs unfolding below the edge as the sit comes in.
 pub(super) const UNFOLD_MS: u64 = 170;
 
-/// The sit drawn with its legs `d` (0..1) of the way down: everything above the seat line as
-/// it is; below it the legs in `UNFOLD_BANDS` strips, each lifted toward the seat by what's
-/// still to come, so they telescope down from under her (her feet first, right below the
-/// edge), never a straight cut across the shins.
-pub(super) fn unfold_bands(top: i32, seat: i32, bottom: i32, d: f32) -> Vec<(i32, i32, i32, i32)> {
+/// The sit drawn with its legs `d` (0..1) in: everything above the seat line as it is; below
+/// it the legs' rows come in where they are drawn (2 px rows, the ones near the seat first,
+/// the rest scattered toward her feet: `seed`), never a straight cut across the shins. A row
+/// in stays in and nothing moves, so her shape only grows (r35: legs that slid down changed
+/// her shape every frame, and each change showed the window under her repainting, a dark
+/// streak under her feet).
+pub(super) fn unfold_bands(top: i32, seat: i32, bottom: i32, d: f32, seed: u64) -> Vec<(i32, i32, i32, i32)> {
     let mut out = vec![(top, seat, 0, 0)];
     let legs = (bottom - seat).max(0);
-    if legs == 0 {
-        return out;
-    }
-    let n = UNFOLD_BANDS.min(legs);
-    for k in 0..n {
-        let (y0, y1) = (seat + legs * k / n, seat + legs * (k + 1) / n);
-        let lift = ((y0 - seat) as f32 * (1.0 - d.clamp(0.0, 1.0))).round() as i32;
-        out.push((y0, y1, 0, -lift));
+    let d = d.clamp(0.0, 1.0);
+    let (mut y, mut k) = (seat, 0u64);
+    while y < bottom {
+        let y1 = (y + UNFOLD_ROW).min(bottom);
+        let mut x = seed ^ k.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        x ^= x >> 33;
+        x = x.wrapping_mul(0xff51_afd7_ed55_8ccd);
+        x ^= x >> 29;
+        let r = (x >> 40) as f32 / (1u64 << 24) as f32;
+        // Its turn: down the legs, give or take.
+        let at = 0.85 * (y - seat) as f32 / legs.max(1) as f32 + 0.15 * r;
+        if at <= d || d >= 1.0 {
+            match out.last_mut() {
+                Some(l) if l.1 == y && l.2 == 0 && l.3 == 0 => l.1 = y1,
+                _ => out.push((y, y1, 0, 0)),
+            }
+        }
+        y = y1;
+        k += 1;
     }
     out
 }
 
-const UNFOLD_BANDS: i32 = 6;
+/// The legs' rows (device px).
+const UNFOLD_ROW: i32 = 2;
+/// Their order (the same every landing).
+pub(super) const UNFOLD_SEED: u64 = 0x5eed_1e95;
 
-/// How far down the sit's legs show `ms` into the unfold, 0..1 (eased out: they drop, then settle).
+/// How far down the legs already are on the sit's first frame (r35: on the cut frame they were
+/// cut flat at the edge, nothing hanging over).
+const UNFOLD_FROM: f32 = 0.4;
+
+/// How far down the sit's legs show `ms` into the unfold, `UNFOLD_FROM`..1 (eased out: they
+/// drop, then settle).
 pub(super) fn unfold_depth(ms: u64) -> f32 {
     let u = (ms as f32 / UNFOLD_MS as f32).clamp(0.0, 1.0);
-    1.0 - (1.0 - u) * (1.0 - u)
+    UNFOLD_FROM + (1.0 - UNFOLD_FROM) * (1.0 - (1.0 - u) * (1.0 - u))
 }
 
 impl Avatar {
@@ -168,13 +191,14 @@ impl Avatar {
         if drawn && self.drawn_ready() {
             let quiet = self.teleport.as_ref().is_some_and(|t| t.quiet);
             let red = if quiet { Duration::ZERO } else { DRAWN_PERCH_RED };
-            let ms = red.as_millis() as u64;
             self.arrive.red_until = Some(now + red);
             self.arrive.until = Some(now + red);
-            if dip_ms > 0 {
-                // The settle at the landing glitch's end, as before.
-                let contact = (ms as f32).max(land_ms) as u64;
-                self.squash = Some(now + Duration::from_millis(contact.saturating_sub(dip_ms as u64)));
+            if dip_ms > 0 && !red.is_zero() {
+                // Contact: the silhouette itself settles (a squash about the seat), not a
+                // cut-out held still (r35), easing into rest on the cut: the drawing comes in at
+                // the silhouette's own height (r36: still rising at the cut, she hopped up 3 px).
+                self.squash = Some(now);
+                self.arrive.squash_end = Some(now + red);
             }
             return;
         }
@@ -587,21 +611,27 @@ mod tests {
     use crate::anim::Rng;
 
     #[test]
-    fn the_legs_telescope_down_from_the_seat() {
-        // Seat at 100, feet at 160: six strips of 10 rows.
-        let b = unfold_bands(0, 100, 160, 0.0);
-        assert_eq!(b[0], (0, 100, 0, 0), "above the seat as drawn");
-        assert!(b[1..].iter().all(|&(y0, _, _, dy)| y0 + dy == 100), "folded: every strip starts at the seat");
-        let b = unfold_bands(0, 100, 160, 0.5);
-        assert_eq!(b.last(), Some(&(150, 160, 0, -25)));
-        let b = unfold_bands(0, 100, 160, 1.0);
-        assert!(b.iter().all(|&(_, _, dx, dy)| dx == 0 && dy == 0), "down: the drawing as it is");
-        assert_eq!(b.iter().map(|b| b.1 - b.0).sum::<i32>(), 160);
+    fn the_legs_come_in_row_by_row_where_they_are_drawn() {
+        // Seat at 100, feet at 160.
+        let rows = |d: f32| -> Vec<i32> { unfold_bands(0, 100, 160, d, 9).iter().flat_map(|b| b.0..b.1).filter(|&y| y >= 100).collect() };
+        assert!(rows(0.0).len() <= 4, "folded: (almost) nothing below the seat");
+        let half = rows(0.5);
+        assert!(half.len() > 20 && half.len() < 45, "{}", half.len());
+        assert!(half.contains(&100) && half.contains(&101), "the rows at the seat first");
+        assert_eq!(rows(1.0).len(), 60, "all of them");
+        // Never moved, and a row in stays in: her shape only grows.
+        assert!(unfold_bands(0, 100, 160, 0.5, 9).iter().all(|b| b.2 == 0 && b.3 == 0));
+        let mut last = Vec::new();
+        for k in 0..=20 {
+            let now = rows(k as f32 / 20.0);
+            assert!(last.iter().all(|y| now.contains(y)));
+            last = now;
+        }
     }
 
     #[test]
     fn the_sits_legs_unfold_top_down_and_settle() {
-        assert_eq!(unfold_depth(0), 0.0);
+        assert_eq!(unfold_depth(0), UNFOLD_FROM, "something hangs over the edge on the first frame");
         assert_eq!(unfold_depth(UNFOLD_MS), 1.0);
         let d: Vec<f32> = (0..=UNFOLD_MS).step_by(10).map(unfold_depth).collect();
         assert!(d.windows(2).all(|w| w[1] >= w[0]), "only ever further down");

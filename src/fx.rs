@@ -87,6 +87,13 @@ impl Glitch {
         Glitch { t0: now, kind, ms, seed, soft: false, tears_tag: kind != GlitchKind::Seam }
     }
 
+    /// A pose swap in place (perch <-> laydown) cut at `at`: a light seam whose one step is the
+    /// cut frame itself (the frames before it stay clean and lay it underneath; r36: a burst after
+    /// the cut tore her hanging leg and threw bars), smaller shifts, the tag left whole.
+    pub fn swap(at: Instant, seed: u64) -> Glitch {
+        Glitch { t0: at, kind: GlitchKind::Seam, ms: SWAP_MS, seed, soft: true, tears_tag: false }
+    }
+
     /// A quiet teleport leg (passive moves): a shorter dissolve, and a ~150 ms rebuild
     /// with little RGB fringing.
     pub fn soft(kind: GlitchKind, now: Instant, seed: u64) -> Glitch {
@@ -132,7 +139,15 @@ impl Glitch {
                     1.0
                 }
             }
-            // Two steps, then settled: the cut is on its first frame.
+            // Two steps, then settled: the cut is on its first frame. A swap's: one, smaller
+            // (a limb never comes off).
+            GlitchKind::Seam if self.soft => {
+                if u < 0.6 {
+                    0.6
+                } else {
+                    0.0
+                }
+            }
             GlitchKind::Seam => {
                 if u < 0.5 {
                     1.0
@@ -237,6 +252,8 @@ pub struct GlitchStep {
 
 /// A motion seam's length.
 pub const SEAM_MS: f32 = 130.0;
+/// A pose swap's seam (a lounge in or out): one step, on the cut frame, then clean.
+pub const SWAP_MS: f32 = 30.0;
 
 /// How the body is drawn this frame. Device px, relative to the avatar rect.
 #[derive(Clone, Debug, PartialEq)]
@@ -572,6 +589,24 @@ pub fn squash(age: Duration) -> Option<(f32, f32)> {
     Some((1.0, sy.min(1.0)))
 }
 
+/// A contact settle that comes to rest exactly at `total` (a cut there has no step): down 7 %
+/// over its first 30 %, then eased back up, slowing into rest (r36: a cut in the middle of the
+/// squash's rise hopped her up 3 px; one at rest after a still hold read as a pasted cut-out).
+pub fn settle(age: Duration, total: Duration) -> Option<(f32, f32)> {
+    let (t, n) = (ms(age), ms(total).max(1.0));
+    if t >= n {
+        return None;
+    }
+    let u = t / n;
+    let d = if u < 0.3 {
+        let k = u / 0.3;
+        1.0 - (1.0 - k) * (1.0 - k)
+    } else {
+        (1.0 - (u - 0.3) / 0.7).powi(3)
+    };
+    Some((1.0, 1.0 - 0.07 * d))
+}
+
 /// Idle and music body motion, device px: `breath` lifts everything above the waist,
 /// `nod` drops the head, `sway` shears the top of the figure sideways (full at the top
 /// row, nothing at the shear line).
@@ -851,15 +886,22 @@ impl Glint {
     }
 }
 
-/// Four-point star, `r` arm length.
-pub fn star(cx: f32, cy: f32, r: f32, spin: f32) -> Vec<(f32, f32)> {
-    (0..8)
-        .map(|i| {
-            let a = spin + i as f32 * PI / 4.0;
-            let rr = if i % 2 == 0 { r } else { r * 0.2 };
-            (cx + a.cos() * rr, cy + a.sin() * rr)
-        })
-        .collect()
+/// A glint's outline: a solid core `core` px out from its centre each way, and four arms `r`
+/// long, `base` px half-wide where they leave the core, tapering to a point.
+pub fn glint_star(cx: f32, cy: f32, r: f32, core: f32, base: f32, spin: f32) -> Vec<(f32, f32)> {
+    let r = r.max(core + 0.5);
+    let mut pts = Vec::with_capacity(16);
+    for k in 0..4 {
+        let a = spin + k as f32 * PI / 2.0;
+        let (ux, uy) = (a.cos(), a.sin());
+        let (nx, ny) = (-uy, ux);
+        pts.push((cx + ux * core - nx * base, cy + uy * core - ny * base));
+        pts.push((cx + ux * r, cy + uy * r));
+        pts.push((cx + ux * core + nx * base, cy + uy * core + ny * base));
+        let b = a + PI / 4.0;
+        pts.push((cx + b.cos() * core * std::f32::consts::SQRT_2, cy + b.sin() * core * std::f32::consts::SQRT_2));
+    }
+    pts
 }
 
 // ---- teleport bolt ------------------------------------------------------------------
@@ -1036,6 +1078,38 @@ pub fn bolt_rects(poly: &[(f32, f32)], origin: (i32, i32)) -> Vec<ShapeRect> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_glint_has_a_solid_core_and_arms_that_taper_to_points() {
+        let mut rows = Vec::new();
+        crate::shape::poly_rows(&super::glint_star(10.5, 10.5, 9.0, 1.5, 1.6, 0.0), &mut rows);
+        let on = |x: i32, y: i32| rows.iter().any(|r| r.1 as i32 == y && (r.0 as i32..r.0 as i32 + r.2 as i32).contains(&x));
+        assert!((9..12).all(|y| (9..12).all(|x| on(x, y))), "a 3x3 core");
+        // The arm up: 3 px across where it leaves the core, 1 px at its point, nothing past it.
+        let across = |y: i32| (0..21).filter(|&x| on(x, y)).count();
+        assert_eq!((across(8), across(6), across(3), across(1)), (3, 3, 1, 0));
+    }
+
+    #[test]
+    fn a_settle_dips_and_comes_to_rest_at_its_end_without_a_step() {
+        let ms = std::time::Duration::from_millis;
+        let sy = |t: u64| super::settle(ms(t), ms(130)).map_or(1.0, |v| v.1);
+        assert!(sy(39) < 0.931, "{}", sy(39));
+        // Its last frame (16 ms before the end) is within 0.1 % of rest: under a px on her.
+        assert!(1.0 - sy(114) < 0.001, "{}", sy(114));
+        assert!((1..130).all(|t| sy(t) >= sy(t - 1) || t <= 39), "never back down after the trough");
+        assert_eq!(super::settle(ms(130), ms(130)), None);
+    }
+
+    #[test]
+    fn a_swap_seam_has_one_small_step_and_leaves_the_tag_whole() {
+        let t0 = std::time::Instant::now();
+        let g = super::Glitch::swap(t0, 7);
+        assert!(!g.tears_tag);
+        let at = |ms: u64| g.strength(t0 + std::time::Duration::from_millis(ms));
+        assert_eq!((at(0), at(16), at(20)), (0.6, 0.6, 0.0), "one step: the cut frame's");
+        assert!(g.done(t0 + std::time::Duration::from_millis(31)));
+    }
+
     use super::*;
 
     #[test]

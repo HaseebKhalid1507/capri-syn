@@ -479,10 +479,35 @@ pub struct Behaviour {
     /// Cut-ins beside her for big moments (`CutInSpec`): local images only (`anim/mochi`).
     #[serde(default)]
     pub cutins: Option<CutInSpec>,
-    /// Her face in the Line per mood (`moods` names to `anim/mochi` stems; local only). A mood
+    /// Her face in the Line per mood (`moods` names to `anim/mochi` images; local only). A mood
     /// without one, or a pack without the image, keeps the portrait (lachy's face.png).
     #[serde(default)]
-    pub line_faces: BTreeMap<String, String>,
+    pub line_faces: BTreeMap<String, LineFace>,
+}
+
+/// A face for the Line: an `anim/mochi` stem, and the square of it that is her face (eyes and
+/// mouth: `centre` and `size`, source px). Without them, the whole image.
+#[derive(Deserialize, Clone, Debug, PartialEq)]
+#[serde(untagged)]
+pub enum LineFace {
+    Whole(String),
+    Crop { image: String, centre: (u32, u32), size: u32 },
+}
+
+impl LineFace {
+    pub fn image(&self) -> &str {
+        match self {
+            LineFace::Whole(s) | LineFace::Crop { image: s, .. } => s,
+        }
+    }
+
+    /// (centre, size) in source px.
+    pub fn crop(&self) -> Option<((u32, u32), u32)> {
+        match *self {
+            LineFace::Whole(_) => None,
+            LineFace::Crop { centre, size, .. } => Some((centre, size)),
+        }
+    }
 }
 
 /// `moods.json` `cutins`: a show still beside her for a beat (`anim/mochi` stems by beat:
@@ -825,7 +850,7 @@ fn resolve_pools(b: &Behaviour, anim: Option<&crate::art::Anim>, errors: &mut Ve
                     Some(VariantArt { base: bi, talk, music, blinks, blink_ms: v.blink_ms.unwrap_or([3000, 6000]), every: v.every.unwrap_or(1).max(1), hold_ms: v.hold_ms })
                 }
             };
-            pool.variants.push(Variant { id: v.id.clone(), weight: v.weight, lying: v.lying, art });
+            pool.variants.push(Variant { id: v.id.clone(), weight: v.weight, lying: v.lying, after_ms: v.after_ms, stay_ms: v.stay_ms, art });
         }
         if let Some(b) = &ps.bridge {
             match pool.by_id(b) {
@@ -884,6 +909,10 @@ pub struct Variant {
     pub id: String,
     pub weight: f32,
     pub lying: bool,
+    /// Eligible only this long into a stay (`VariantSpec::after_ms`).
+    pub after_ms: Option<u64>,
+    /// Its own length when picked (`VariantSpec::stay_ms`).
+    pub stay_ms: Option<[u64; 2]>,
     /// None: the pack's own art for the state, as it behaves without pools.
     pub art: Option<VariantArt>,
 }
@@ -1563,7 +1592,7 @@ pub mod tests {
     /// Two pools over the test strips (`crate::art::tests::write_anim`).
     pub fn pooled() -> serde_json::Value {
         json!({"perch": {"base": "sit"}, "variants": {"cacheMb": 2, "pools": {
-            "perch": {"shiftMs": [1000, 2000], "variants": [{"id": "sit", "weight": 2}, {"id": "lie", "strip": "lie", "lying": true}]},
+            "perch": {"shiftMs": [1000, 2000], "variants": [{"id": "sit", "weight": 2}, {"id": "lie", "strip": "lie", "lying": true, "afterMs": 240000, "stayMs": [60000, 180000]}]},
             "sleepFloor": {"variants": [{"id": "pack"}, {"id": "doze", "strip": "stand", "every": 2, "holdMs": [500, 900]}]}}}})
     }
 
@@ -1576,6 +1605,9 @@ pub mod tests {
             let perch = &p.pools[&PoolKey::Perch];
             assert_eq!(perch.variants.iter().map(|v| v.id.as_str()).collect::<Vec<_>>(), ["sit", "lie"]);
             assert!(perch.variants[0].art.is_none() && perch.variants[1].lying);
+            // A beat for a long stay, with its own length.
+            assert_eq!((perch.variants[0].after_ms, perch.variants[1].after_ms), (None, Some(240000)));
+            assert_eq!(perch.variants[1].stay_ms, Some([60000, 180000]));
             assert_eq!(perch.variants[1].art.as_ref().unwrap().base, lie);
             assert_eq!(p.cache_bytes, 2_000_000);
             // Cells: lie ×2 on the seat line, stand ×3 on the ground, stand's twin ×3 mirrored.
@@ -1748,6 +1780,10 @@ pub mod tests {
         // Her plain red bolt replaces the intro's first frame (Haseeb 08:06 §6.1); 07 is neutral.
         assert_eq!(ids(&a.launch), ["intro-gaze", "intro-arrival", "intro-landing", "intro-greeting", "intro-wink", "neutral"]);
         assert!(!ids(&a.summon).contains(&"intro-wink".to_string()), "no wink on a summon");
+        // Every mood has a face cropped to her eyes and mouth (r35: whole images read as hair).
+        assert!(crate::anim::Mood::ALL.iter().all(|m| b.line_faces.get(m.key()).is_some_and(|f| f.crop().is_some())));
+        let w: LineFace = serde_json::from_str("\"face-calm\"").unwrap();
+        assert_eq!((w.image(), w.crop()), ("face-calm", None));
         // r30: the touchdown is the crouch, then the sit inside a dip (no dissolve: no double
         // image, and not `transition-edge_perch`: r29 had it as legs through the edge). r31's
         // pop is answered by the sit's legs unfolding over the edge (`arriveview::UNFOLD_MS`).
