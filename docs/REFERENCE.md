@@ -20,7 +20,15 @@ Reference for `synaps-avatar`, the crate behind capri-syn. The [README](../READM
   (she detaches and exits with status 2).
 - **Hide and quit.** HIDE (right-click menu) parks her: she glitches out and a small chip with her name
   sits at the edge of her monitor; a click on it brings her back, as does `avatarctl show`. QUIT exits
-  and asks for a second click first.
+  and asks for a second click first. Under QUIT, one dim row that isn't a button: the daemon's version
+  and her session's model (`SYNAPS 0.12.0 · CLAUDE-OPUS-5`, the provider left off), once the daemon has
+  said them.
+- **Her first words.** On her first launch ever (`state.json` has no `met` and nothing else of hers:
+  no `ground`, `seenUnix`, `brain` or `perch`), once she has landed and nothing else is on, she says
+  "Hey. I'm Capri. Tap $MOD+C when you want me. Headpats also accepted." (the key as the Line's hints
+  write it), then `met` is set. Not a word about what runs her. If the Line opens first she skips it.
+  Anyone who ran her before is marked met without it. `tools/shoot.py` writes `met` (`--first-run`:
+  not).
 - She shows up in `/clients` as `capri` (the pack's character name). If the daemon is gone or the
   tunnel is down, she shows Away and comes back by herself. The client is re-created if it stops, or
   after 90 s offline.
@@ -29,6 +37,19 @@ Reference for `synaps-avatar`, the crate behind capri-syn. The [README](../READM
 
 - **Moods** come from the session's turn events: thinking, talking, `WORKING · <tool>`, done,
   annoyed (abort or error), needs-you (a pending prompt), sleepy, compacting, and away (no daemon).
+- **A failed turn she can name** is said in her words instead of the daemon's (`session::Trouble`,
+  matched on the daemon's own wording): the bubble and her row in the Line get her line, her tag the
+  name for 10 s, the Line's note the fix and `↑ BRINGS YOUR MESSAGE BACK`. The raw text stays in the log.
+
+  | trouble | she says | tag | mood |
+  |---|---|---|---|
+  | no credentials (`synaps login` + no credential) | No brain yet, choom. Open a terminal, run synaps login, pick a model. Then ask me again. | `NO BRAIN YET` | idle |
+  | a lapsed or rejected login | My login ran out. synaps login in a terminal and I'm back. | `LOGGED OUT` | idle |
+  | rate or usage limit, billing | Hit my model's limit for now. Give it a bit, then ask me again. | `AT THE LIMIT` | annoyed |
+  | overloaded, a 5xx | My model's swamped right now. Try me again in a minute. | `MODEL BUSY` | annoyed |
+  | unreachable, timed out, a dropped stream | Can't reach my model. Check the connection, then ask me again. | `NO CONNECTION` | annoyed |
+
+  Anything else: `‹error: …›` (cut at 90 characters), annoyed, as before.
 - **Sleep follows you, not the chat**: while you're at the desk she stays up,
   however long the session is quiet. She naps 10 min after your last input (5 min at night, 22:00 to
   06:00 local), and at once when the screen locks or the machine sleeps (logind's `LockedHint` and

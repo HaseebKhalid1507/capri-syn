@@ -119,6 +119,30 @@ pub fn save_seen(unix: f64, perch: Option<SavedPerch>) {
     seen_at(&path(), unix, perch);
 }
 
+/// Her first launch ever: she hasn't introduced herself, and nothing of hers is in the file
+/// yet (no spot, no heartbeat, no drives). Someone who ran her before the first words existed
+/// is marked met here, quietly: she never greets an old friend as a stranger.
+pub fn first_meeting() -> bool {
+    first_meeting_at(&path())
+}
+
+fn first_meeting_at(p: &Path) -> bool {
+    let v = read(p);
+    if v.get("met").and_then(serde_json::Value::as_bool) == Some(true) {
+        return false;
+    }
+    if ["ground", "seenUnix", "brain", "perch"].iter().any(|k| v.get(*k).is_some_and(|x| !x.is_null())) {
+        merge(p, "met", serde_json::json!(true));
+        return false;
+    }
+    true
+}
+
+/// She said her first words (once in her life).
+pub fn save_met() {
+    merge(&path(), "met", serde_json::json!(true));
+}
+
 fn sessions_path() -> PathBuf {
     path().with_file_name("sessions.json")
 }
@@ -152,6 +176,24 @@ mod tests {
         std::fs::write(&p, "{not json").unwrap();
         merge(&p, "ground", serde_json::json!([1, 2]));
         assert_eq!(ground_at(&p), Some((1, 2)));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn first_meeting_once_and_never_for_an_old_friend() {
+        let dir = std::env::temp_dir().join(format!("sa-state-met-{}", std::process::id()));
+        let p = dir.join("state.json");
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(first_meeting_at(&p), "no file: a new user");
+        assert!(first_meeting_at(&p), "asking doesn't use it up");
+        merge(&p, "met", serde_json::json!(true));
+        assert!(!first_meeting_at(&p));
+        // Ran her before (a heartbeat, a spot): met, quietly, and the rest kept.
+        std::fs::remove_dir_all(&dir).ok();
+        seen_at(&p, 99.0, None);
+        assert!(!first_meeting_at(&p));
+        assert_eq!(read(&p)["met"], true);
+        assert_eq!(read(&p)["seenUnix"], 99.0);
         std::fs::remove_dir_all(&dir).ok();
     }
 

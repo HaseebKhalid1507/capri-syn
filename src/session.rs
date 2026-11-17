@@ -26,6 +26,8 @@ const MIRROR_LINGER: Duration = Duration::from_secs(3);
 const DONE_FOR: Duration = Duration::from_secs(3);
 /// Annoyed (abort, error) shows this long.
 const ANNOYED_FOR: Duration = Duration::from_secs(5);
+/// A turn that failed for a reason she can name (no model, a lapsed login): its tag shows this long.
+const TROUBLE_FOR: Duration = Duration::from_secs(10);
 /// Before the first attach, stay as we are this long instead of flashing Away.
 const BOOT_GRACE: Duration = Duration::from_millis(2_500);
 /// After a detach, look for the session again this soon; while it is missing, this often.
@@ -156,6 +158,8 @@ pub struct Body {
     pub prompts: Vec<PromptView>,
     /// Attached and connected: input can go out.
     pub live: bool,
+    /// The last turn failed for a reason she says in her own words.
+    pub trouble: Option<Trouble>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,6 +210,10 @@ pub struct Link {
     /// Where the current response's text starts in `raw` (a reset drops it).
     response_at: usize,
     notice: Option<String>,
+    /// The last turn's failure, when she can name it (cleared by the next turn).
+    trouble: Option<Trouble>,
+    /// The daemon's version (`Welcome`), for her maker's mark.
+    daemon_version: Option<String>,
     turn: u64,
     echo: Option<String>,
     trigger: String,
@@ -270,6 +278,8 @@ impl Link {
             raw: String::new(),
             response_at: 0,
             notice: None,
+            trouble: None,
+            daemon_version: None,
             turn: 0,
             echo: None,
             trigger: String::new(),
@@ -351,6 +361,19 @@ impl Link {
     /// The `--model` she was started with.
     pub fn cli_model(&self) -> Option<String> {
         self.opts.model.clone()
+    }
+
+    /// Her maker's mark for the menu: `SYNAPS 0.12.0 · claude-opus-5` (the daemon's version and
+    /// her session's model, without its provider). None until the daemon has said either.
+    pub fn mark(&self) -> Option<String> {
+        let model = self.view.as_ref().and_then(|v| v.get("model")).and_then(|m| m.as_str()).map(str::trim).filter(|m| !m.is_empty());
+        let model = model.map(|m| m.rsplit('/').next().unwrap_or(m));
+        match (self.daemon_version.as_deref(), model) {
+            (None, None) => None,
+            (Some(v), None) => Some(format!("SYNAPS {v}")),
+            (None, Some(m)) => Some(format!("SYNAPS · {m}")),
+            (Some(v), Some(m)) => Some(format!("SYNAPS {v} · {m}")),
+        }
     }
 
     /// Riding someone else's session (`--session`): no persona, ever.
@@ -535,6 +558,9 @@ impl Link {
         match ev {
             Event::Status(s) => {
                 let up = matches!(s, Status::Connected { .. });
+                if let Status::Connected { daemon_version, .. } = &s {
+                    self.daemon_version = Some(daemon_version.trim().to_string()).filter(|v| !v.is_empty());
+                }
                 if self.connected && !up && matches!(self.attach, Attach::Live(_)) {
                     self.lost = true;
                 }
@@ -740,6 +766,7 @@ impl Link {
                 self.raw.clear();
                 self.response_at = 0;
                 self.notice = None;
+                self.trouble = None;
                 self.flash = None;
                 self.turn += 1;
                 self.echo = user_text.map(|t| one_line(&t, 200)).filter(|t| !t.is_empty());
@@ -775,10 +802,18 @@ impl Link {
                     LlmEvent::ToolResult { .. } => self.phase = Phase::Thinking,
                     _ => {}
                 },
-                StreamEvent::Session(SessionStreamEvent::Error { message }) => {
-                    self.notice = Some(format!("‹error: {}›", one_line(&message, 90)));
-                    self.flash = Some((Mood::Annoyed, now + ANNOYED_FOR));
-                }
+                StreamEvent::Session(SessionStreamEvent::Error { message }) => match Trouble::of(&message) {
+                    Some(t) => {
+                        elog!("synaps-avatar: turn error ({}): {}", t.key(), one_line(&message, 300));
+                        self.trouble = Some(t);
+                        self.notice = Some(t.says().into());
+                        self.flash = Some((t.mood(), now + TROUBLE_FOR));
+                    }
+                    None => {
+                        self.notice = Some(format!("‹error: {}›", one_line(&message, 90)));
+                        self.flash = Some((Mood::Annoyed, now + ANNOYED_FOR));
+                    }
+                },
                 _ => {}
             },
             SessionEvent::Idle => {
@@ -786,7 +821,7 @@ impl Link {
                 self.echo = None;
                 self.last_active = now;
                 self.touched = now;
-                if !self.flash.is_some_and(|f| f.0 == Mood::Annoyed) {
+                if !self.flash.is_some_and(|f| f.0 == Mood::Annoyed) && self.trouble.is_none() {
                     self.flash = Some((Mood::Done, now + DONE_FOR));
                 }
             }
@@ -967,6 +1002,7 @@ impl Link {
         } else if let Some((m, until)) = self.flash
             && now < until
         {
+            label = self.trouble.map(|t| t.tag().to_string());
             m
         } else if self.resting.unwrap_or(now >= self.last_active + self.opts.sleepy_after) {
             Mood::Sleepy
@@ -999,6 +1035,99 @@ impl Link {
             prompt,
             prompts,
             live: self.live(),
+            trouble: self.trouble,
+        }
+    }
+}
+
+/// A failed turn she can explain in her own words. The daemon's text is written for a terminal
+/// (it names slash commands the Line doesn't have, and the bubble cut it mid-word); these are
+/// the common ones, matched on the daemon's own wording (Synaps classifies its auth errors on
+/// `synaps login` too). Anything else keeps the raw `‹error: …›`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Trouble {
+    /// No model credentials at all: a fresh install before `synaps login`.
+    NoBrain,
+    /// A login that lapsed or was rejected.
+    LoggedOut,
+    /// The provider's rate or usage limit.
+    Limited,
+    /// The provider is overloaded or erroring (5xx).
+    Swamped,
+    /// The model can't be reached (network, timeout, a dropped stream).
+    Offline,
+}
+
+impl Trouble {
+    pub fn of(message: &str) -> Option<Trouble> {
+        let m = message.to_ascii_lowercase();
+        let any = |keys: &[&str]| keys.iter().any(|k| m.contains(k));
+        if m.contains("synaps login") || m.contains("(authentication_error)") {
+            return Some(if any(&["no anthropic credentials", "no api key or oauth token", "no credential configured"]) {
+                Trouble::NoBrain
+            } else {
+                Trouble::LoggedOut
+            });
+        }
+        if any(&["rate limit", "(http 429", "usage limit", "quota", "(billing_error)"]) {
+            Some(Trouble::Limited)
+        } else if any(&["overloaded", "server error (http 5"]) {
+            Some(Trouble::Swamped)
+        } else if any(&["could not reach", "timed out", "connection failed", "connection lost"]) {
+            Some(Trouble::Offline)
+        } else {
+            None
+        }
+    }
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Trouble::NoBrain => "no_brain",
+            Trouble::LoggedOut => "logged_out",
+            Trouble::Limited => "limited",
+            Trouble::Swamped => "swamped",
+            Trouble::Offline => "offline",
+        }
+    }
+
+    /// What she says (the bubble, and her row in the Line).
+    pub fn says(self) -> &'static str {
+        match self {
+            Trouble::NoBrain => "No brain yet, choom. Open a terminal, run synaps login, pick a model. Then ask me again.",
+            Trouble::LoggedOut => "My login ran out. synaps login in a terminal and I'm back.",
+            Trouble::Limited => "Hit my model's limit for now. Give it a bit, then ask me again.",
+            Trouble::Swamped => "My model's swamped right now. Try me again in a minute.",
+            Trouble::Offline => "Can't reach my model. Check the connection, then ask me again.",
+        }
+    }
+
+    /// Her tag while it shows.
+    pub fn tag(self) -> &'static str {
+        match self {
+            Trouble::NoBrain => "NO BRAIN YET",
+            Trouble::LoggedOut => "LOGGED OUT",
+            Trouble::Limited => "AT THE LIMIT",
+            Trouble::Swamped => "MODEL BUSY",
+            Trouble::Offline => "NO CONNECTION",
+        }
+    }
+
+    /// The Line's note: the fix, and that his message isn't lost.
+    pub fn note(self) -> &'static str {
+        match self {
+            Trouble::NoBrain => "NO MODEL YET · RUN synaps login IN A TERMINAL · ↑ BRINGS YOUR MESSAGE BACK",
+            Trouble::LoggedOut => "LOGIN RAN OUT · RUN synaps login IN A TERMINAL · ↑ BRINGS YOUR MESSAGE BACK",
+            Trouble::Limited => "RATE LIMITED · TRY AGAIN IN A BIT · ↑ BRINGS YOUR MESSAGE BACK",
+            Trouble::Swamped => "MODEL OVERLOADED · TRY AGAIN IN A MINUTE · ↑ BRINGS YOUR MESSAGE BACK",
+            Trouble::Offline => "COULDN'T REACH THE MODEL · ↑ BRINGS YOUR MESSAGE BACK",
+        }
+    }
+
+    /// Not her fault and not his: no login is calm; a provider's trouble annoys her.
+    fn mood(self) -> Mood {
+        match self {
+            Trouble::NoBrain | Trouble::LoggedOut => Mood::Idle,
+            _ => Mood::Annoyed,
         }
     }
 }
@@ -1533,6 +1662,82 @@ mod tests {
         assert_eq!(b.mood, Mood::Annoyed);
         assert_eq!(b.reply, "Here's a simple Python hello world:\n‹code›\n‹aborted›");
         assert_eq!(l.body(t0 + ANNOYED_FOR).mood, Mood::Idle);
+    }
+
+    /// A live event from its wire JSON (`ev`), as the daemon sends it.
+    fn wire(seq: u64, ev: serde_json::Value) -> Event {
+        let line = serde_json::json!({"type": "event", "session_id": "s", "seq": 900, "ts": "t", "event": ev}).to_string();
+        let DaemonFrame::Event(env) = decode_frame(&line).unwrap() else { panic!() };
+        let event = env.decode().unwrap();
+        Event::Session { attach_seq: seq, session_id: "s".into(), seq: env.seq, event, raw: Arc::new(env.event.clone()) }
+    }
+
+    fn failed_turn(l: &mut Link, message: &str, t: Instant) {
+        l.on_event(wire(1, serde_json::json!({"ev": "turn_started", "turn_baseline": 1, "trigger": "user", "user_text": "hi"})), t);
+        l.on_event(wire(1, serde_json::json!({"ev": "stream", "event": {"kind": "session", "session": "error", "message": message}})), t);
+        l.on_event(wire(1, serde_json::json!({"ev": "idle"})), t);
+    }
+
+    /// The daemon's own texts (SynapsCLI 3072a25: runtime/api.rs, auth.rs, session_driver.rs).
+    #[test]
+    fn troubles_are_read_off_the_daemons_words() {
+        let cases = [
+            ("No Anthropic credentials. Run `synaps login`, or switch to a provider model with `/model groq/llama-3.3-70b-versatile`.", Some(Trouble::NoBrain)),
+            ("Auth error: No API key or OAuth token found. Run `synaps login` to authenticate.", Some(Trouble::NoBrain)),
+            ("Config error: openai provider: no credential configured for 'kimi-code'. Run `synaps login` to add one.", Some(Trouble::NoBrain)),
+            ("API error: Authentication rejected. Run `synaps login` to re-authenticate.", Some(Trouble::LoggedOut)),
+            ("Token refresh failed for account 'work': expired. Run `synaps login` (or `synaps login --account work`) to re-authenticate, or check auth.remote_endpoint / broker reachability.", Some(Trouble::LoggedOut)),
+            ("API stream error (authentication_error). Provider error details withheld — they can echo request content.", Some(Trouble::LoggedOut)),
+            ("Rate limited by Anthropic (HTTP 429). Retry after 30 s.", Some(Trouble::Limited)),
+            ("Rate limit exhausted — retries used up while waiting for reset (next window in 4 min).", Some(Trouble::Limited)),
+            ("Anthropic is overloaded right now. Retries exhausted — wait a minute and try again.", Some(Trouble::Swamped)),
+            ("Anthropic server error (HTTP 502). Try again.", Some(Trouble::Swamped)),
+            ("Could not reach api.anthropic.com (connection failed). Check your network, DNS, or proxy settings.", Some(Trouble::Offline)),
+            ("Connection lost mid-response. Partial reply kept — send again to continue.", Some(Trouble::Offline)),
+            ("tool registry: unknown tool `frobnicate`", None),
+        ];
+        for (m, want) in cases {
+            assert_eq!(Trouble::of(m), want, "{m}");
+        }
+        for t in [Trouble::NoBrain, Trouble::LoggedOut, Trouble::Limited, Trouble::Swamped, Trouble::Offline] {
+            assert!(t.says().chars().count() <= 100 && !t.says().contains('`'), "{}: a short bubble, no markdown", t.key());
+            assert!(t.note().ends_with("↑ BRINGS YOUR MESSAGE BACK"));
+        }
+    }
+
+    /// Touchpoint 2: a fresh install's first "hi" gets her words, not a cut-off raw error.
+    #[test]
+    fn no_model_yet_is_said_in_her_words() {
+        let t0 = Instant::now();
+        let mut l = live_link(t0);
+        failed_turn(&mut l, "No Anthropic credentials. Run `synaps login`, or switch to a provider model with `/model groq/llama-3.3-70b-versatile`.", t0);
+        let b = l.body(t0);
+        assert_eq!(b.trouble, Some(Trouble::NoBrain));
+        assert_eq!(b.reply, "No brain yet, choom. Open a terminal, run synaps login, pick a model. Then ask me again.");
+        assert_eq!((b.mood, b.label.as_deref()), (Mood::Idle, Some("NO BRAIN YET")), "calm, not ERROR / annoyed; no Done flash over it");
+        let later = l.body(t0 + TROUBLE_FOR);
+        assert_eq!((later.mood, later.label), (Mood::Idle, None));
+        assert_eq!(later.trouble, Some(Trouble::NoBrain), "kept for the Line until the next turn");
+        l.on_event(wire(1, serde_json::json!({"ev": "turn_started", "turn_baseline": 1, "trigger": "user", "user_text": "hi"})), t0);
+        assert_eq!(l.body(t0).trouble, None);
+        // Anything else: the raw text, cut, annoyed (as before).
+        failed_turn(&mut l, "tool registry: unknown tool `frobnicate`", t0);
+        let b = l.body(t0);
+        assert_eq!((b.mood, b.trouble), (Mood::Annoyed, None));
+        assert_eq!(b.reply, "‹error: tool registry: unknown tool `frobnicate`›");
+    }
+
+    /// Touchpoint 8: the daemon's version and her session's model, without the provider.
+    #[test]
+    fn her_mark_names_the_daemon_and_model() {
+        let t0 = Instant::now();
+        assert_eq!(Link::new(opts(), t0).mark(), None);
+        let mut l = live_link(t0);
+        assert_eq!(l.mark().as_deref(), Some("SYNAPS 0.11.1 · claude-haiku-4-5"));
+        let mut p = persona();
+        p.model = Some("local/llama3.2".into());
+        l.on_event(applied(1, "model", &p), t0);
+        assert_eq!(l.mark().as_deref(), Some("SYNAPS 0.11.1 · llama3.2"));
     }
 
     #[test]

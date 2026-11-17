@@ -55,6 +55,13 @@ pub struct Stills {
 
 /// The menu header's height (logical px) and the cursor's (her head-hover pointer).
 const MENU_HEADER_PX: f32 = 96.0;
+/// Her first words wait this long after the frames are in (the launch lands first), then
+/// look again this often until nothing else is on.
+const FIRST_WORDS_AFTER: Duration = Duration::from_millis(1_500);
+const FIRST_WORDS_RETRY: Duration = Duration::from_millis(700);
+/// Her right-click menu's width, and its maker's mark's type size (logical px).
+const MENU_W: f32 = 210.0;
+const MARK_PX: f32 = 9.0;
 const CURSOR_PX: f32 = 32.0;
 
 /// A mood's face for the Line: the mood, its image (path, sha256), and its square (centre, size).
@@ -766,6 +773,10 @@ pub struct Avatar {
     unseen: lineview::Unseen,
     /// A refused message to hand back to the open Line.
     line_restore_text: Option<String>,
+    /// Her first launch ever (`state::first_meeting`, read before the heartbeat writes).
+    first_meeting: bool,
+    /// When to try her first words (once she has landed and nothing else is on).
+    first_words: Option<Instant>,
     /// How long the last Line took to open (ms).
     line_opened_ms: Option<u128>,
     /// The perch window unmapped; she falls if it isn't back within the grace.
@@ -928,6 +939,8 @@ impl Avatar {
             teleport: None,
             arrive: Default::default(),
             intro: introview::IntroState::new(),
+            first_words: None,
+            first_meeting: state::first_meeting(),
             cutins: cutinview::CutInState::default(),
             art: artview::ArtState::new(std::env::var("SA_ART_SEED").ok().and_then(|s| s.parse().ok()).unwrap_or_else(|| Rng::seeded().next())),
             hidden: false,
@@ -1476,6 +1489,9 @@ impl Avatar {
                 self.glitch = Some(Glitch::new(GlitchKind::Appear, now, self.rng.next()));
             }
             self.heartbeat_start(cx);
+            if self.first_meeting {
+                self.first_words = Some(now + FIRST_WORDS_AFTER);
+            }
             self.stills_decode(cx);
             self.burst_decode(cx);
             let win = self.os.body();
@@ -2177,6 +2193,7 @@ impl Avatar {
         take(self.reaction_until);
         take(self.perch_gone.map(|g| g.due()));
         take(self.quit_armed);
+        take(self.first_words);
         take(self.music_stop_at);
         if self.unpark_req.is_some() {
             take(Some(now));
@@ -2564,6 +2581,9 @@ impl Avatar {
         dirty |= self.swing_tick(now);
         if self.loaded {
             dirty |= self.brain_tick(now);
+        }
+        if self.first_words.is_some_and(|t| t <= now) {
+            dirty |= self.first_words_try(now);
         }
         self.apply_offset(now);
         self.panels_follow(cx);
@@ -3105,6 +3125,44 @@ impl Avatar {
         cx.notify();
         self.schedule(cx);
         reply
+    }
+
+    /// Her first words, once in her life (touchpoint 7): who she is and how to call her. Not a
+    /// word about what runs her: the first minute is hers. Waits until she has landed and
+    /// nothing else is on; if he found the Line first, he knows the key and she skips it.
+    fn first_words_try(&mut self, now: Instant) -> bool {
+        if self.line.is_some() {
+            self.first_words = None;
+            state::save_met();
+            elog!("synaps-avatar: first words: skipped (he opened the Line first)");
+            return false;
+        }
+        let busy = self.hidden
+            || self.parked.is_some()
+            || self.teleport.is_some()
+            || self.glitch.is_some()
+            || self.intro_playing()
+            || self.arriving(now)
+            || self.rag.is_some()
+            || self.bubble.is_some()
+            || self.input.is_some()
+            || self.prompt_ui.is_some()
+            || self.menu.is_some()
+            || self.session.as_ref().is_some_and(|s| s.link.busy())
+            || self.brain_moving();
+        if busy {
+            self.first_words = Some(now + FIRST_WORDS_RETRY);
+            return false;
+        }
+        self.first_words = None;
+        state::save_met();
+        let name = self.pack.name.trim();
+        let mut c = name.chars();
+        let name = c.next().map_or_else(|| "Capri".to_string(), |f| f.to_uppercase().chain(c).collect());
+        let text = format!("Hey. I'm {name}. Tap {} when you want me. Headpats also accepted.", self.summon_label());
+        elog!("synaps-avatar: first words: {text}");
+        self.say(text, now);
+        true
     }
 
     fn say(&mut self, text: String, now: Instant) {
@@ -4718,6 +4776,24 @@ impl Avatar {
             _ => l.ground_y,
         };
         ((l.ground_x - l.avatar_x) as f32, (y - l.avatar_y) as f32)
+    }
+
+    /// The menu's last row: `SYNAPS 0.12.0 · CLAUDE-OPUS-5`, the model cut to fit the menu.
+    fn menu_mark(&self, window: &Window) -> Option<String> {
+        let mark = self.session.as_ref()?.link.mark()?.to_uppercase();
+        let fits = |s: &str| self.tracked_width(s, MARK_PX, FontWeight::MEDIUM, 0.8, window) <= MENU_W - 20.0;
+        if fits(&mark) {
+            return Some(mark);
+        }
+        let mut c: Vec<char> = mark.chars().collect();
+        while c.len() > 8 {
+            c.pop();
+            let s = format!("{}…", c.iter().collect::<String>().trim_end());
+            if fits(&s) {
+                return Some(s);
+            }
+        }
+        None
     }
 
     /// Laid-out width of `tracked(s, spacing)` at `size`/`weight` (logical px).
@@ -6421,6 +6497,7 @@ impl Render for Avatar {
                     .child(tracked(label, 1.2))
             };
             let item = |label: &'static str| item_as(label, false);
+            let mark = self.menu_mark(window);
             let max_x = l.lp(self.vis.1) - px(220.0);
             // lachy's capri.png over the items: who this menu is.
             let header = self.stills.as_ref().and_then(|s| s.capri.clone()).map(|i| {
@@ -6430,7 +6507,7 @@ impl Render for Avatar {
             });
             let menu = div()
                 .relative()
-                .w(px(210.0))
+                .w(px(MENU_W))
                 .flex()
                 .flex_col()
                 .py(px(4.0))
@@ -6534,7 +6611,20 @@ impl Render for Avatar {
                             this.schedule(cx);
                         }),
                     ),
-                );
+                )
+                // Her maker's mark: what runs her, for whoever wonders. Dim, small, not a button.
+                .when_some(mark, |m, mark| {
+                    m.child(
+                        div()
+                            .px(px(10.0))
+                            .pt(px(4.0))
+                            .pb(px(3.0))
+                            .text_size(px(MARK_PX))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(pal.dim))
+                            .child(tracked(&mark, 0.8)),
+                    )
+                });
             root = root.child(
                 div()
                     .absolute()

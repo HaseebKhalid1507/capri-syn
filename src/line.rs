@@ -81,6 +81,9 @@ pub struct Snap {
     /// Her face now (her mood's, `moods.json` `lineFaces`): on her latest row; the portrait on
     /// the others.
     pub face: Option<Face>,
+    /// The last turn failed for a reason with a fix (`session::Trouble::note`): shown as the
+    /// note when it comes up.
+    pub trouble: Option<String>,
 }
 
 /// A face image in the snapshot: the same face is the same image.
@@ -426,6 +429,11 @@ impl Line {
             return;
         }
         let grew = snap.rows.len() != self.snap.rows.len() || snap.rows.last() != self.snap.rows.last();
+        if snap.trouble != self.snap.trouble
+            && let Some(n) = &snap.trouble
+        {
+            self.note = Some(n.clone());
+        }
         let had_prompts = !self.snap.prompts.is_empty();
         let ids: Vec<u64> = self.snap.prompts.iter().map(|p| p.id).collect();
         self.snap = snap;

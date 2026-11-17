@@ -768,6 +768,11 @@ impl Avatar {
 
     // ---- the loop -----------------------------------------------------------------------------
 
+    /// She's mid-move of her own (a flight, a scoot, a drift).
+    pub(super) fn brain_moving(&self) -> bool {
+        self.brain.as_ref().is_some_and(|h| h.flight.is_some() || h.moving())
+    }
+
     /// Run the brain if it is due (or `force`: after an event), and apply what it decided.
     pub(super) fn brain_run(&mut self, now: Instant, force: bool) {
         let Some(h) = &self.brain else { return };
