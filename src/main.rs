@@ -44,7 +44,7 @@ mod ragdoll;
 mod reader;
 mod line;
 mod chip;
-mod mpris;
+mod media;
 mod notify;
 mod session;
 mod settings;
@@ -384,6 +384,24 @@ fn run(t_start: Instant) -> Result<()> {
             })
             .map_err(|e| elog!("synaps-avatar: pointer watcher: {e:#}"))
             .ok();
+            // Her global keys, where the backend grabs them itself (else his desktop binds them
+            // to `capri-ctl talk ...`). A grabbed key reports its press only: the summon key is
+            // a tap, never a hold. Never under test.
+            if std::env::var_os("SA_BRAIN_SYNTH").is_none() {
+                let tx = tx2.clone();
+                let v = settings::Settings::load().map(|s| s.voice).unwrap_or_default();
+                let keys = platform::Keys { summon: v.key, toggle: v.toggle_key };
+                os.watch_keys(keys, move |k| {
+                    let cmd = match k {
+                        platform::KeyEv::Summon => control::Command::TalkTap,
+                        platform::KeyEv::TalkToggle => control::Command::TalkToggle,
+                    };
+                    let (r, _) = std::sync::mpsc::channel();
+                    tx.send_blocking((cmd, r)).ok();
+                })
+                .map_err(|e| elog!("synaps-avatar: global keys: {e:#}"))
+                .ok();
+            }
             // His presence: the screen locked, the machine asleep (logind; never under test).
             if std::env::var_os("SA_BRAIN_SYNTH").is_none() {
                 let tx = tx2.clone();
@@ -394,19 +412,19 @@ fn run(t_start: Instant) -> Result<()> {
                 .map_err(|e| elog!("synaps-avatar: session watcher: {e:#}; a lock won't put her to sleep at once"))
                 .ok();
             }
-            // Real LISTENING: media players on the session bus (signals only). Tests see only
-            // their own fake player (SA_MPRIS_ONLY), never his.
+            // Real LISTENING: his media players, as the OS reports them. Tests see only their
+            // own fake player (SA_MPRIS_ONLY), never his.
             let music = settings::Settings::load().map(|s| s.music).unwrap_or_default();
             let only = std::env::var("SA_MPRIS_ONLY").ok().filter(|s| !s.is_empty());
             let synth = std::env::var_os("SA_BRAIN_SYNTH").is_some();
             if music.detect && (only.is_some() || !synth) {
                 let tx = tx2.clone();
-                let filter = mpris::Filter { ignore: music.ignore, only };
-                if let Err(e) = mpris::spawn(filter, move |p| {
+                let filter = media::Filter { ignore: music.ignore, only };
+                if let Err(e) = platform::watch_media(filter, move |p| {
                     let (r, _) = std::sync::mpsc::channel();
                     tx.send_blocking((control::Command::Playback(p), r)).ok();
                 }) {
-                    elog!("synaps-avatar: mpris: {e:#} (no music detection)");
+                    elog!("synaps-avatar: media players: {e:#} (no music detection)");
                 }
             }
             elog!(
@@ -620,24 +638,15 @@ mod tests {
     /// stderr a closed pipe (the reader of `2>&1 | head -1` gone): `elog!` carries on where
     /// `eprintln!` panicked (and the release build aborted).
     #[test]
-    #[cfg(unix)]
     fn logging_survives_a_closed_stderr() {
         use std::io::Write as _;
-        let mut fds = [0; 2];
-        // SAFETY: plain fd juggling on this process's own descriptors; fd 2 is restored.
-        unsafe {
-            assert_eq!(libc::pipe(fds.as_mut_ptr()), 0);
-            libc::close(fds[0]);
-            let saved = libc::dup(2);
-            libc::dup2(fds[1], 2);
+        let broken = crate::platform::stderr_into_closed_pipe(|| {
             let broken = std::io::stderr().write_all(b"x\n").is_err();
             elog!("synaps-avatar: into a closed pipe {}", 42);
             elog!("and again");
-            libc::dup2(saved, 2);
-            libc::close(saved);
-            libc::close(fds[1]);
-            assert!(broken, "the pipe was not closed: the test proves nothing");
-        }
+            broken
+        });
+        assert!(broken, "the pipe was not closed: the test proves nothing");
     }
 
     #[test]

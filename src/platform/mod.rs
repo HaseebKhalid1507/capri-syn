@@ -43,10 +43,19 @@ pub use os::Os;
 
 /// The process-wide setup that must run before any other thread exists (GPU choice,
 /// allocator). See `linux.rs`.
+// The process and the OS's services beside the desktop: the clock, the calendar, the media
+// players (`watch_media`: `on_change` gets the sum whenever it changes, first call now) and
+// notifications (`notify`: blocking, Ok is its id).
 #[cfg(target_os = "linux")]
-pub use linux::{local_day, monotonic_s, process_setup, trim_heap, utc_offset_s};
+pub use linux::{local_day, monotonic_s, notify, process_setup, trim_heap, utc_offset_s, watch_media};
 #[cfg(windows)]
-pub use self::windows::{local_day, monotonic_s, process_setup, trim_heap, utc_offset_s};
+pub use self::windows::{local_day, monotonic_s, notify, process_setup, trim_heap, utc_offset_s, watch_media};
+#[cfg(test)]
+#[cfg(target_os = "linux")]
+pub use linux::stderr_into_closed_pipe;
+#[cfg(test)]
+#[cfg(windows)]
+pub use self::windows::stderr_into_closed_pipe;
 
 /// The local stream socket (the control channel, the voice sidecar's link): a Unix socket on
 /// every OS (AF_UNIX on Windows 10 1803+).
@@ -177,12 +186,18 @@ pub enum Hint {
     /// The focused window changed.
     Focus,
     /// The workspace changed.
+    // Not sent by the Windows backend yet (virtual desktops, display and work-area changes come
+    // with multi-monitor; DWM always composites): the core re-reads on its own timers there.
+    #[cfg_attr(windows, allow(dead_code))]
     Desktop,
     /// Windows opened, closed, or changed space or mode: the core re-reads what it follows.
+    #[cfg_attr(windows, allow(dead_code))]
     Changed,
     /// Monitors or the areas panels reserve changed.
+    #[cfg_attr(windows, allow(dead_code))]
     Layout,
     /// Whether a compositor runs now.
+    #[cfg_attr(windows, allow(dead_code))]
     Compositor(bool),
 }
 
@@ -222,6 +237,26 @@ pub enum SessionEv {
     Sleeping,
     /// Back from sleep.
     Resumed,
+}
+
+/// Her global keys, as letters (settings `[voice]`: `key`, `toggle_key`): the summon key (a
+/// tap opens the Line) and the toggle-to-talk chord's. A backend that grabs keys itself
+/// (`Desktop::watch_keys`) turns them into its OS's chords.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Keys {
+    pub summon: char,
+    pub toggle: char,
+}
+
+/// A press of one of her global keys (a backend that grabs them reports presses only).
+// Only a backend that grabs keys sends these (Windows; on Linux his desktop binds them).
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyEv {
+    /// The summon key: a tap (never a hold: no push-to-talk from a grabbed key).
+    Summon,
+    /// The toggle-to-talk chord.
+    TalkToggle,
 }
 
 /// What the pointer watcher reports (device px, px/s).
@@ -325,6 +360,11 @@ pub trait Desktop: Send + Sync {
     /// Start reporting the session's lock and sleep (`on` runs on its thread). Linux: logind,
     /// shared by both backends.
     fn watch_session(&self, on: Box<dyn Fn(SessionEv) + Send>) -> Result<()>;
+    /// Grab her global keys and report each press (`on` runs on its thread). Ok(false): this
+    /// backend grabs none; the desktop's own bindings drive her (`capri-ctl talk ...`).
+    fn watch_keys(&self, _keys: Keys, _on: Box<dyn Fn(KeyEv) + Send>) -> Result<bool> {
+        Ok(false)
+    }
     /// Start reporting clicks anywhere (root px) while armed; `on` runs on its thread.
     fn watch_clicks(&self, on: Box<dyn Fn(i32, i32) + Send>) -> Result<()>;
     fn arm_clicks(&self, on: bool);
@@ -339,6 +379,8 @@ pub trait Desktop: Send + Sync {
 
 /// A pointer image: premultiplied ARGB, `w`×`h`, its hotspot. `key` tells images apart (a backend
 /// may keep the one it made).
+// The Windows backend keeps the system pointer for now (`Stage::pointer_image`'s default).
+#[cfg_attr(windows, allow(dead_code))]
 #[derive(Clone, Debug)]
 pub struct PointerImage {
     pub key: u64,

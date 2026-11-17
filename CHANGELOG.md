@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Windows: the groundwork (draft, not shipped)
+- She builds and runs on Windows 11 (x86_64-pc-windows-msvc): `src/platform/windows`, a Windows CI job
+  (build, unit tests, the fake contract suite, clippy). GPUI's Windows crate is vendored with three
+  small patches (`vendor/gpui-pre-windows/PATCHES.md`).
+- On Windows she registers her own keys: Win+Alt+C is a tap (`talk tap`: the Line, never a hold) and
+  Win+Alt+Ctrl+C is toggle-to-talk. No music detection or notifications there yet.
+- `capri-ctl talk tap`: a press and its release at once, for a key that only reports its press.
+
 ### Her tag shows her state only
 - The tag over her head drops her name: `ONLINE`, `SLEEPING`, `THINKING`, `NEEDS YOU`… instead of
   `CAPRI // ONLINE`. The unread pill drops it too (`1 NEW  <first words>  READ ▸`). WORKING keeps its red

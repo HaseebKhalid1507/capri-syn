@@ -1,17 +1,17 @@
-//! The Windows backend: plain translation between Win32/DWM and the core's types (P0: what her
-//! body, her idle loop and perching need; hotkeys, voice, the Line's keyboard and server-painted
-//! effect layers come later). Every rule built on these answers is the core's (`os.rs`).
+//! The Windows backend: plain translation between Win32/DWM and the core's types (her body, her
+//! idle loop, perching, her global keys; voice, the Line's keyboard and server-painted effect
+//! layers come later). Every rule built on these answers is the core's (`os.rs`).
 //!
-//! What gpui-pre 0.3.12 doesn't do on Windows lives here. Its `PopUp` is a `WS_OVERLAPPED`
-//! window (Windows adds a caption: DWM then draws a frame and a shadow around the whole rect), so
-//! `adopt` makes it a bare `WS_POPUP` tool window, topmost, with DWM's frame, border and corner
-//! rounding off. GPUI composites through DirectComposition (`WS_EX_NOREDIRECTIONBITMAP`, a
+//! GPUI's Windows crate is vendored and patched (vendor/gpui-pre-windows/PATCHES.md): a `PopUp`
+//! is a bare `WS_POPUP` (PW-1), a click on a window opened without focus doesn't activate it
+//! (PW-2), a pure move doesn't re-render (PW-3). `adopt` adds the rest: topmost tool window, DWM's
+//! frame, border and corner rounding off, and click-through. GPUI composites through DirectComposition (`WS_EX_NOREDIRECTIONBITMAP`, a
 //! premultiplied swap chain): per-pixel alpha with no layered-window bitmap. Click-through:
 //! `WS_EX_LAYERED` + `WS_EX_TRANSPARENT`, the latter toggled by a pointer poller from her input
 //! region (`WM_NCHITTEST` → `HTTRANSPARENT` only passes clicks to windows of the same thread,
 //! measured in the P0 probe). Coordinates: root px are the virtual screen's, from its top-left.
 
-use super::{Caps, Desktop, FxZ, Hint, Monitor, PointerRead, Role, SessionEv, ShapeRect, Stage, Visible, Win, WinId, WinRect};
+use super::{Caps, Desktop, FxZ, Hint, KeyEv, Keys, Monitor, PointerRead, Role, SessionEv, ShapeRect, Stage, Visible, Win, WinId, WinRect};
 use ::windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use ::windows::Win32::Graphics::Dwm::{
     DWMNCRP_DISABLED, DWMWA_BORDER_COLOR, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DWMWA_NCRENDERING_POLICY, DWMWA_WINDOW_CORNER_PREFERENCE,
@@ -22,8 +22,11 @@ use ::windows::Win32::Graphics::Gdi::{
     HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFO, MONITORINFOEXW, MonitorFromPoint, MonitorFromWindow, RGN_OR, SetWindowRgn,
 };
 use ::windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook};
-use ::windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, GetLastInputInfo, LASTINPUTINFO, VK_ESCAPE, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON, VkKeyScanW};
-use ::windows::Win32::UI::Shell::{DefSubclassProc, QUNS_PRESENTATION_MODE, QUNS_RUNNING_D3D_FULL_SCREEN, SHQueryUserNotificationState, SetWindowSubclass};
+use ::windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetAsyncKeyState, GetLastInputInfo, HOT_KEY_MODIFIERS, LASTINPUTINFO, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, RegisterHotKey, VK_ESCAPE,
+    VK_LBUTTON, VK_MBUTTON, VK_RBUTTON, VkKeyScanW,
+};
+use ::windows::Win32::UI::Shell::{QUNS_PRESENTATION_MODE, QUNS_RUNNING_D3D_FULL_SCREEN, SHQueryUserNotificationState};
 use ::windows::Win32::UI::WindowsAndMessaging::*;
 use ::windows::core::{BOOL, PCWSTR};
 use anyhow::{Result, bail};
@@ -165,7 +168,7 @@ pub struct Win32 {
 
 thread_local! {
     /// The watcher's hint sink (WinEvent callbacks run on the thread that set the hooks).
-    static HINT: std::cell::RefCell<Option<Box<dyn Fn(Hint) + Send>>> = const { std::cell::RefCell::new(None) };
+    static HINT: std::cell::RefCell<Option<HintFn>> = const { std::cell::RefCell::new(None) };
 }
 
 unsafe extern "system" fn win_event(_h: HWINEVENTHOOK, ev: u32, w: HWND, obj: i32, child: i32, _tid: u32, _t: u32) {
@@ -187,9 +190,12 @@ unsafe extern "system" fn win_event(_h: HWINEVENTHOOK, ev: u32, w: HWND, obj: i3
     });
 }
 
+type HintFn = Box<dyn Fn(Hint) + Send>;
+type SessionFn = Box<dyn Fn(SessionEv) + Send>;
+
 thread_local! {
     /// The session watcher's sink, and whether the machine is asleep (resume comes twice).
-    static SESSION: std::cell::RefCell<Option<(Box<dyn Fn(SessionEv) + Send>, bool)>> = const { std::cell::RefCell::new(None) };
+    static SESSION: std::cell::RefCell<Option<(SessionFn, bool)>> = const { std::cell::RefCell::new(None) };
 }
 
 unsafe extern "system" fn session_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
@@ -222,15 +228,6 @@ unsafe extern "system" fn session_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM
     unsafe { DefWindowProcW(h, msg, wp, lp) }
 }
 
-/// Her surfaces never take the activation from a click (an X override-redirect window doesn't
-/// either): GPUI answers `WM_MOUSEACTIVATE` with `MA_ACTIVATE`.
-unsafe extern "system" fn no_activate(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM, _id: usize, _data: usize) -> LRESULT {
-    if msg == WM_MOUSEACTIVATE {
-        return LRESULT(MA_NOACTIVATE as isize);
-    }
-    unsafe { DefSubclassProc(h, msg, wp, lp) }
-}
-
 impl Win32 {
     pub fn connect() -> Result<Win32> {
         if unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) } <= 0 {
@@ -258,7 +255,8 @@ impl Win32 {
 
     /// Make `h` one of her surfaces: a bare topmost tool window. Click-through surfaces (body,
     /// intro, effect hosts) are layered and let the pointer through until their input region
-    /// says otherwise; none of them takes the activation.
+    /// says otherwise; none of them takes the activation from a click (GPUI PW-2: they open
+    /// without focus).
     fn adopt_hwnd(&self, role: Role, h: HWND) -> Result<WinId> {
         let through = matches!(role, Role::Body | Role::Intro | Role::Fx);
         unsafe {
@@ -266,8 +264,12 @@ impl Win32 {
             let (mut c, mut at) = (RECT::default(), POINT::default());
             GetClientRect(h, &mut c)?;
             let _ = ::windows::Win32::Graphics::Gdi::ClientToScreen(h, &mut at);
-            let visible = GetWindowLongPtrW(h, GWL_STYLE) as u32 & WS_VISIBLE.0;
-            SetWindowLongPtrW(h, GWL_STYLE, (WS_POPUP.0 | visible) as isize);
+            // GPUI PW-1 creates a pop-up as a bare WS_POPUP; one with a caption (an unpatched
+            // GPUI) is made one here.
+            let style = GetWindowLongPtrW(h, GWL_STYLE) as u32;
+            if style & WS_CAPTION.0 != 0 {
+                SetWindowLongPtrW(h, GWL_STYLE, (WS_POPUP.0 | (style & WS_VISIBLE.0)) as isize);
+            }
             let mut ex = (ex_style(h) | WS_EX_TOOLWINDOW.0 | WS_EX_TOPMOST.0) & !WS_EX_APPWINDOW.0;
             if through {
                 ex |= WS_EX_LAYERED.0 | WS_EX_TRANSPARENT.0 | WS_EX_NOACTIVATE.0;
@@ -277,7 +279,6 @@ impl Win32 {
                 // A layered window shows nothing until it has attributes; DirectComposition's
                 // per-pixel alpha still applies under a constant 255.
                 SetLayeredWindowAttributes(h, ::windows::Win32::Foundation::COLORREF(0), 255, LWA_ALPHA)?;
-                let _ = SetWindowSubclass(h, Some(no_activate), 1, 0);
             }
             let set = |attr, v: u32| DwmSetWindowAttribute(h, attr, &v as *const u32 as *const _, 4).ok();
             set(DWMWA_NCRENDERING_POLICY, DWMNCRP_DISABLED.0 as u32);
@@ -548,6 +549,42 @@ impl Desktop for Win32 {
 
     /// One thread: out-of-context WinEvent hooks (moves, shows, hides, minimise, cloak,
     /// foreground) on every window but hers, and its message loop.
+    /// RegisterHotKey on a thread of its own (presses only, `MOD_NOREPEAT`): the summon key and
+    /// the toggle chord (`chord`). A chord another app holds is skipped with its name logged.
+    fn watch_keys(&self, keys: Keys, on: Box<dyn Fn(KeyEv) + Send>) -> Result<bool> {
+        let wanted = [(KeyEv::Summon, chord(keys.summon, false)), (KeyEv::TalkToggle, chord(keys.toggle, true))];
+        let (tx, rx) = std::sync::mpsc::channel::<Result<()>>();
+        std::thread::Builder::new().name("avatar-keys".into()).spawn(move || {
+            let mut held = Vec::new();
+            for (i, (ev, c)) in wanted.iter().enumerate() {
+                let Some((mods, vk)) = *c else {
+                    elog!("synaps-avatar: global keys: {ev:?}: no key types that letter here");
+                    continue;
+                };
+                // A null HWND: WM_HOTKEY comes to this thread's queue.
+                match unsafe { RegisterHotKey(None, i as i32 + 1, mods, vk) } {
+                    Ok(()) => held.push((i as i32 + 1, *ev)),
+                    Err(e) => elog!("synaps-avatar: global keys: {} is taken ({e}); `capri-ctl talk ...` still works", chord_name(mods, vk)),
+                }
+            }
+            let any = !held.is_empty();
+            tx.send(if any { Ok(()) } else { Err(anyhow::anyhow!("none registered")) }).ok();
+            if !any {
+                return;
+            }
+            let mut msg = MSG::default();
+            while unsafe { GetMessageW(&mut msg, None, 0, 0) }.as_bool() {
+                if msg.message == WM_HOTKEY
+                    && let Some((_, ev)) = held.iter().find(|(n, _)| *n as usize == msg.wParam.0)
+                {
+                    on(*ev);
+                }
+            }
+        })?;
+        rx.recv()??;
+        Ok(true)
+    }
+
     fn watch(&self, hint: Box<dyn Fn(Hint) + Send>) -> Result<()> {
         let (tx, rx) = std::sync::mpsc::channel::<Result<()>>();
         let mine = self.mine.clone();
@@ -735,6 +772,68 @@ impl Stage for Arc<Win32> {
 
 /// Per-monitor DPI awareness before GPUI starts (its manifest may already have set it): root px
 /// are device px on every monitor.
+/// Her chords on Windows: `$mod` is Win+Alt (Win alone is the shell's: Win+C is taken), the
+/// toggle adds Ctrl, as i3's `$mod+c` / `$mod+Ctrl+c`. None: no key types `ch` here.
+fn chord(ch: char, toggle: bool) -> Option<(HOT_KEY_MODIFIERS, u32)> {
+    let vk = if ch.is_ascii_alphanumeric() {
+        ch.to_ascii_uppercase() as u32
+    } else {
+        let v = unsafe { VkKeyScanW(ch as u16) };
+        if v == -1 {
+            return None;
+        }
+        (v & 0xff) as u32
+    };
+    let mods = MOD_WIN | MOD_ALT | MOD_NOREPEAT;
+    Some((if toggle { mods | MOD_CONTROL } else { mods }, vk))
+}
+
+/// "Win+Alt+Ctrl+C", for the log.
+fn chord_name(mods: HOT_KEY_MODIFIERS, vk: u32) -> String {
+    let mut s = String::new();
+    for (m, name) in [(MOD_WIN, "Win+"), (MOD_ALT, "Alt+"), (MOD_CONTROL, "Ctrl+"), (MOD_SHIFT, "Shift+")] {
+        if mods.0 & m.0 != 0 {
+            s.push_str(name);
+        }
+    }
+    match char::from_u32(vk).filter(|c| c.is_ascii_alphanumeric()) {
+        Some(c) => s.push(c),
+        None => s.push_str(&format!("VK 0x{vk:02X}")),
+    }
+    s
+}
+
+/// His media players: not read on Windows yet (SMTC, the system media transport controls, comes
+/// later). A watcher's first report is the sum now; here that's the sum of none (quiet), and Err:
+/// no change will follow (the core then has no music detection).
+pub fn watch_media(filter: crate::media::Filter, on_change: impl Fn(crate::media::Playback) + Send + Sync + 'static) -> Result<()> {
+    on_change(crate::media::aggregate(std::iter::empty(), &filter));
+    bail!("no media watch on Windows yet (SMTC later)")
+}
+
+/// Notifications: none on Windows yet (a toast needs an AppUserModelID, which comes with
+/// packaging).
+pub fn notify(_summary: &str, _body: &str, _image: Option<std::path::PathBuf>) -> Result<u32> {
+    bail!("no notifications on Windows yet (toasts come with packaging)")
+}
+
+/// Tests: run `f` with stderr going into a pipe whose reader is gone; stderr is put back after.
+#[cfg(test)]
+pub fn stderr_into_closed_pipe<R>(f: impl FnOnce() -> R) -> R {
+    use ::windows::Win32::Foundation::HANDLE;
+    use ::windows::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, SetStdHandle};
+    use std::os::windows::io::AsRawHandle as _;
+    let (reader, writer) = std::io::pipe().expect("a pipe");
+    drop(reader);
+    // SAFETY: this process's own std handle, swapped and put back; the pipe outlives the swap.
+    let saved = unsafe { GetStdHandle(STD_ERROR_HANDLE) }.expect("stderr");
+    unsafe { SetStdHandle(STD_ERROR_HANDLE, HANDLE(writer.as_raw_handle())) }.expect("stderr into the pipe");
+    let out = f();
+    unsafe { SetStdHandle(STD_ERROR_HANDLE, saved) }.ok();
+    drop(writer);
+    out
+}
+
 pub fn process_setup() {
     unsafe {
         let _ = ::windows::Win32::UI::HiDpi::SetProcessDpiAwarenessContext(::windows::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -800,9 +899,58 @@ pub fn local_day(unix: f64) -> Option<(i32, i32)> {
     Some((y - 1900, yday))
 }
 
+/// GPUI's patches (vendor/gpui-pre-windows/PATCHES.md): their decisions, checked here.
+#[cfg(test)]
+#[path = "../../../vendor/gpui-pre-windows/src/synaps_patches.rs"]
+mod gpui_patches;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gpui_pw1_a_popup_is_a_bare_popup() {
+        let (ex, style) = gpui_patches::popup_styles();
+        assert_eq!(style, WS_POPUP, "no caption, no frame: the window is its client area");
+        assert_eq!(style.0 & (WS_CAPTION.0 | WS_THICKFRAME.0 | WS_SYSMENU.0), 0);
+        assert_eq!(ex, WS_EX_TOOLWINDOW | WS_EX_TOPMOST, "no taskbar button, not in Alt+Tab, on top");
+    }
+
+    #[test]
+    fn gpui_pw2_a_click_activates_only_what_opened_with_focus() {
+        use gpui_patches::{click_activates, mouse_activate_reply};
+        assert!(!click_activates(true, false), "her body, intro, effects, the chip");
+        assert!(click_activates(true, true), "the Line");
+        assert!(click_activates(false, false) && click_activates(false, true), "other kinds as stock");
+        assert_eq!(mouse_activate_reply(false), MA_NOACTIVATE as isize);
+        assert_eq!(mouse_activate_reply(true), MA_ACTIVATE as isize);
+    }
+
+    #[test]
+    fn gpui_pw3_a_pure_move_skips_the_moved_callback() {
+        assert!(!gpui_patches::move_runs_moved_callback());
+    }
+
+    #[test]
+    fn chords_are_win_alt_and_the_toggle_adds_ctrl() {
+        let (m, vk) = chord('c', false).unwrap();
+        assert_eq!((m, vk), (MOD_WIN | MOD_ALT | MOD_NOREPEAT, 0x43));
+        assert_eq!(chord_name(m, vk), "Win+Alt+C");
+        let (m, vk) = chord('c', true).unwrap();
+        assert_eq!((m, vk), (MOD_WIN | MOD_ALT | MOD_CONTROL | MOD_NOREPEAT, 0x43));
+        assert_eq!(chord_name(m, vk), "Win+Alt+Ctrl+C");
+        assert_eq!(chord('7', false).map(|c| c.1), Some(0x37));
+        assert_eq!(chord('V', true).map(|c| c.1), Some(0x56), "a capital is the same key");
+    }
+
+    #[test]
+    fn media_and_notifications_say_they_are_missing() {
+        let quiet = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let q = quiet.clone();
+        assert!(watch_media(crate::media::Filter::default(), move |p| q.lock().unwrap().push(p)).is_err());
+        assert_eq!(*quiet.lock().unwrap(), vec![crate::media::Playback::default()], "one report: quiet");
+        assert!(notify("s", "b", None).is_err());
+    }
 
     #[test]
     fn calendar_day_counts_from_zero() {

@@ -50,6 +50,7 @@ windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
+    "Win32_System_Console",
     "Win32_System_LibraryLoader",
     "Win32_System_Performance",
     "Win32_System_RemoteDesktop",
@@ -91,3 +92,6 @@ opt-level = 3
 # re-renders and presents the whole window, nor does a GetGeometry round trip.
 [patch.crates-io]
 gpui-pre-linux = { path = "vendor/gpui-pre-linux" }
+# GPUI's Windows backend, patched (vendor/gpui-pre-windows/PATCHES.md): pop-ups without a title
+# bar, a click on her doesn't activate her, a pure move doesn't re-render.
+gpui-pre-windows = { path = "vendor/gpui-pre-windows" }

@@ -342,9 +342,10 @@ impl Avatar {
     }
 
     /// Key-up, after the auto-repeat window: a hold stops listening (and sends what was heard).
-    /// False if the key is still down (an X auto-repeat's release): ignored.
-    pub(super) fn voice_up(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.talk_down.is_some() && self.os.char_key_down(self.voice.cfg.key).unwrap_or(false) {
+    /// False if the key is still down (an X auto-repeat's release): ignored. `physical` false
+    /// (a tap's release, `talk tap`): the key isn't asked.
+    pub(super) fn voice_up(&mut self, physical: bool, cx: &mut Context<Self>) -> bool {
+        if physical && self.talk_down.is_some() && self.os.char_key_down(self.voice.cfg.key).unwrap_or(false) {
             self.voice.repeats += 1;
             return false;
         }

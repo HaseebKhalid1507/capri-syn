@@ -45,6 +45,12 @@ for speech. Setup: `tools/capri-voice-setup`, then `tools/systemd/capri-voice.se
   - A toggle while the talk key is held is ignored.
   - The Line opens with the keyboard, so Esc works. If the tap opened it, the keyboard goes back to his
     window when the turn ends.
+- **Windows** has no key release to listen to without a low-level keyboard hook (which game anti-cheat
+  can dislike), so the avatar registers two hotkeys itself and toggle is how you talk there:
+  - **Win+Alt+`key`** (Win+Alt+C) is a tap (`talk tap`): it opens or closes the Line and never holds.
+  - **Win+Alt+Ctrl+`toggle_key`** (Win+Alt+Ctrl+C) is the toggle above.
+  - Win alone is the shell's (Win+C is taken). A chord another app holds is logged at start, and
+    `capri-ctl talk tap|toggle` still work.
 - **The mic refuses**, with the reason on her tag: a secret on screen (an approval doesn't: nothing
   spoken answers one), the screen locked, voice off, no speech detector (toggle), and for a toggle,
   her hidden (her tag must be on screen). A secret appearing or the screen locking closes any open
