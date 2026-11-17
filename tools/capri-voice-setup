@@ -1,33 +1,56 @@
 #!/bin/bash
-# capri-voice-setup: the sidecar's user-local venv and models (no sudo, nothing system-wide).
-#   ~/.local/share/capri-voice/venv   kokoro-onnx (+ onnxruntime CPU), system site-packages for pywhispercpp
+# capri-voice-setup [DIR]: the sidecar's user-local venv and models (no sudo, nothing system-wide), in
+# DIR (default $CAPRI_VOICE_HOME, else ${XDG_DATA_HOME:-~/.local/share}/capri-voice; install.sh passes
+# its own). capri-voice reads the models from DIR/models ($CAPRI_VOICE_MODELS when it isn't the default).
+#   DIR/venv    kokoro-onnx (+ onnxruntime CPU), system site-packages for pywhispercpp
+#   DIR/models  ggml-small.en-q5_1 (190 MB), ggml-base.en-q5_1 (60 MB), kokoro-v1.0.int8.onnx (92 MB),
+#               voices-v1.0.bin (28 MB), silero_vad.onnx (2.3 MB); the wake word's melspectrogram.onnx,
+#               embedding_model.onnx (2.4 MB) and hey-capri-v1.npz (from tools/wake)
 # The voice's pitch shift uses the rubberband CLI if it is installed (pacman -S rubberband); without it
 # the shift is done inside the model.
-#   ~/.local/share/capri-voice/models ggml-small.en-q5_1 (190 MB), ggml-base.en-q5_1 (60 MB),
-#                                     kokoro-v1.0.int8.onnx (92 MB), kokoro-v1.0.onnx (326 MB), voices-v1.0.bin (28 MB),
-#                                     silero_vad.onnx (2.3 MB); the wake word's melspectrogram.onnx,
-#                                     embedding_model.onnx (2.4 MB) and hey-capri-v1.npz (from tools/wake)
-# pywhispercpp comes from the distro when it has one (python-pywhispercpp-cpu on bella), else PyPI's wheel.
+# pywhispercpp comes from the distro when it has one (python-pywhispercpp-cpu on Arch), else PyPI's wheel.
+# Every model is pinned by sha256 (packaging/windows/voice-models.ps1 pins the same files); one already
+# there with another hash is fetched again.
 set -eu
-V=~/.local/share/capri-voice; mkdir -p $V/models; cd $V
+V=${1:-${CAPRI_VOICE_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/capri-voice}}
+case $V in /*) ;; *) echo "capri-voice-setup: $V isn't an absolute path" >&2; exit 2 ;; esac
+mkdir -p "$V/models"
+cd "$V"
+# The versions CI and the Windows bundle run (kokoro-onnx 0.6.1, pywhispercpp 1.5.1's wheel).
 [ -d venv ] || uv venv -q --system-site-packages -p /usr/bin/python3 venv
-VIRTUAL_ENV=$V/venv uv pip install -q kokoro-onnx
-venv/bin/python -c 'import pywhispercpp' 2>/dev/null || VIRTUAL_ENV=$V/venv uv pip install -q pywhispercpp
-B=https://huggingface.co/ggerganov/whisper.cpp/resolve/main
-for m in ggml-small.en-q5_1.bin ggml-base.en-q5_1.bin; do [ -s models/$m ] || curl -sSfL -o models/$m $B/$m; done
+VIRTUAL_ENV=$V/venv uv pip install -q kokoro-onnx==0.6.1
+venv/bin/python -c 'import pywhispercpp' 2>/dev/null || VIRTUAL_ENV=$V/venv uv pip install -q pywhispercpp==1.5.1
+
+sha() { sha256sum <"$1" | cut -d' ' -f1; }
+# get NAME URL SHA256: into models/, checked; a cut or wrong download is deleted, and this fails.
+get() {
+    local f=models/$1
+    if [ -s "$f" ] && [ "$(sha "$f")" = "$3" ]; then return 0; fi
+    curl -sSfL --retry 3 --retry-delay 2 -o "$f.part" "$2"
+    if [ "$(sha "$f.part")" != "$3" ]; then
+        rm -f "$f.part"
+        echo "capri-voice-setup: $1 from $2 isn't the pinned sha256 $3 (deleted; run this again)" >&2
+        exit 1
+    fi
+    mv "$f.part" "$f"
+}
+# Whisper at a fixed revision of ggerganov/whisper.cpp (the sha256s are Hugging Face's own LFS ids).
+H=https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1
+get ggml-small.en-q5_1.bin $H/ggml-small.en-q5_1.bin bfdff4894dcb76bbf647d56263ea2a96645423f1669176f4844a1bf8e478ad30
+get ggml-base.en-q5_1.bin $H/ggml-base.en-q5_1.bin 4baf70dd0d7c4247ba2b81fafd9c01005ac77c2f9ef064e00dcf195d0e2fdd2f
+# Kokoro v1.0 (its release publishes no hashes: these are of the files it served, sizes as listed).
 K=https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0
-for m in kokoro-v1.0.int8.onnx voices-v1.0.bin; do [ -s models/$m ] || curl -sSfL -o models/$m $K/$m; done
+get kokoro-v1.0.int8.onnx $K/kokoro-v1.0.int8.onnx 6e742170d309016e5891a994e1ce1559c702a2ccd0075e67ef7157974f6406cb
+get voices-v1.0.bin $K/voices-v1.0.bin bca610b8308e8d99f32e6fe4197e7ec01679264efed0cac9140fe9c29f1fbf7d
 # Silero VAD v5.1.2 (MIT): what counts as speech, before Whisper runs.
-S=https://raw.githubusercontent.com/snakers4/silero-vad/v5.1.2/src/silero_vad/data/silero_vad.onnx
-[ -s models/silero_vad.onnx ] || curl -sSfL -o models/silero_vad.onnx $S
-echo "2623a2953f6ff3d2c1e61740c6cdb7168133479b267dfef114a4a3cc5bdd788f  models/silero_vad.onnx" | sha256sum -c --quiet
+get silero_vad.onnx https://raw.githubusercontent.com/snakers4/silero-vad/v5.1.2/src/silero_vad/data/silero_vad.onnx \
+    2623a2953f6ff3d2c1e61740c6cdb7168133479b267dfef114a4a3cc5bdd788f
 # The wake word ([voice] wake_word, on by default): openWakeWord v0.5.1's two feature models (its
 # README: code Apache-2.0, released models CC BY-NC-SA 4.0, so personal use; fetched here, not in the repo)
 # and our "hey capri" head (tools/wake), trained on stock TTS voices only.
 W=https://github.com/dscripka/openWakeWord/releases/download/v0.5.1
-for m in melspectrogram.onnx embedding_model.onnx; do [ -s models/$m ] || curl -sSfL -o models/$m $W/$m; done
-printf '%s  %s\n' ba2b0e0f8b7b875369a2c89cb13360ff53bac436f2895cced9f479fa65eb176f models/melspectrogram.onnx \
-  70d164290c1d095d1d4ee149bc5e00543250a7316b59f31d056cff7bd3075c1f models/embedding_model.onnx | sha256sum -c --quiet
+get melspectrogram.onnx $W/melspectrogram.onnx ba2b0e0f8b7b875369a2c89cb13360ff53bac436f2895cced9f479fa65eb176f
+get embedding_model.onnx $W/embedding_model.onnx 70d164290c1d095d1d4ee149bc5e00543250a7316b59f31d056cff7bd3075c1f
 install -m 644 "$(dirname "$(readlink -f "$0")")/wake/hey-capri-v1.npz" models/hey-capri-v1.npz
 venv/bin/python -c "import kokoro_onnx, pywhispercpp; print('capri-voice: ok')"
 du -sh venv models

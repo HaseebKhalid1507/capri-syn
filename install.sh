@@ -19,13 +19,13 @@ STEPS=7
 usage() {
     cat <<'EOF'
 usage: install.sh [--yes] [--dry-run] [--uninstall [--purge]] [--voice] [--watch] [--no-autostart]
-                  [--from-source] [--prefix DIR] [--with-local-art] [--artifact FILE]
+                  [--from-source] [--prefix DIR] [--with-local-art] [--artifact FILE] [--allow-root]
 
   --yes             don't ask: sudo for system packages, edits to your window manager's config,
                     enabling capri-watch
   --dry-run         print every action, touch nothing
-  --uninstall       remove what this script installed; your settings, state and log stay
-  --purge           with --uninstall: remove those too
+  --uninstall       remove what this script installed; your settings and her state stay
+  --purge           with --uninstall: remove those too (only her own files in those folders)
   --voice           also her voice: capri-voice (a user venv, ~320 MB of models, its user unit)
   --watch           also capri-watch (its user unit; enabled only with --yes)
   --no-autostart    don't start her at login
@@ -33,7 +33,9 @@ usage: install.sh [--yes] [--dry-run] [--uninstall [--purge]] [--voice] [--watch
   --prefix DIR      where bin/ and lib/synaps-avatar/ go (default ~/.local)
   --with-local-art  also mochi's art: LOCAL PERSONAL USE ONLY, never publish or share it
   --artifact FILE   install this release asset (the Linux tarball) instead of downloading one
+  --allow-root      install her for root (as root, with root's own HOME); otherwise root is refused
 
+With no flags, $CAPRI_INSTALL_FLAGS is read instead (space-separated).
 Steps and details: docs/INSTALL.md (https://github.com/HaseebKhalid1507/capri-syn)
 EOF
 }
@@ -153,19 +155,48 @@ put() {
     printf '%s\n' "$body" >"$f"
 }
 
-# The receipt: what this script installed, one `kind value…` per line; --uninstall reads it backwards.
+# The receipt: what this script installed, one entry per line, its fields tab-separated and the path
+# last: `prefix PATH` (each --prefix she went to), `file PATH`, `dir PATH`, `rmdir PATH`, `backup PATH`,
+# `block TAG FILE`, `unit NAME FILE`, `meta KEY VALUE`. --uninstall reads it backwards (and removes only paths in her folders: removable).
 rec() {
     [ "$DRY" = 1 ] && return 0
+    local IFS=$'\t' line
+    line="$*"
+    case $line in *$'\n'*) die "a path with a newline can't go in the receipt: $line" ;; esac
     mkdir -p "$(dirname "$RECEIPT")"
-    grep -qxF -- "$*" "$RECEIPT" 2>/dev/null || printf '%s\n' "$*" >>"$RECEIPT"
+    grep -qxF -- "$line" "$RECEIPT" 2>/dev/null || printf '%s\n' "$line" >>"$RECEIPT"
 }
 rec_meta() {
     [ "$DRY" = 1 ] && return 0
     mkdir -p "$(dirname "$RECEIPT")"
-    { grep -v "^meta $1 " "$RECEIPT" 2>/dev/null || true; printf 'meta %s %s\n' "$1" "$2"; } >"$RECEIPT.tmp"
+    { awk -F'\t' -v k="$1" '!($1 == "meta" && $2 == k)' "$RECEIPT" 2>/dev/null || true; printf 'meta\t%s\t%s\n' "$1" "$2"; } >"$RECEIPT.tmp"
     mv "$RECEIPT.tmp" "$RECEIPT"
 }
-meta() { sed -n "s/^meta $1 //p" "$RECEIPT" 2>/dev/null | tail -n1; }
+meta() { awk -F'\t' -v k="$1" '$1 == "meta" && $2 == k { sub(/^[^\t]*\t[^\t]*\t/, ""); v = $0 } END { printf "%s", v }' "$RECEIPT" 2>/dev/null || true; }
+# Whether the receipt has this entry (KIND PATH).
+recorded() { [ -f "$RECEIPT" ] && grep -qxF -- "$1"$'\t'"$2" "$RECEIPT"; }
+# May --uninstall remove PATH? Absolute, no newline and no `..`, not / or $HOME, and in one of her
+# folders (each prefix, $DATA, $CACHE_ROOT, $CONF), or onnxruntime's id folder (--voice's import check
+# makes it). An rmdir (only ever an empty folder) may also be a folder on the way to one of them
+# (one this script made: `--prefix /opt/x/y` made /opt/x).
+removable() {
+    local p=${1%/} kind=${2:-} r ort=${CACHE_BASE%/}/Microsoft/DeveloperTools/.onnxruntime
+    case $p in /*) ;; *) return 1 ;; esac
+    case $p in *$'\n'* | */../* | */.. | */./* | */.) return 1 ;; esac
+    [ -n "$p" ] && [ "$p" != "${HOME%/}" ] || return 1
+    [ "$p" = "$ort" ] && return 0
+    for r in "${PREFIXES[@]}" "$DATA" "$CACHE_ROOT" "$CONF" "$ort"; do
+        r=${r%/}
+        [ -n "$r" ] || continue
+        if [ "$r" != "$ort" ]; then
+            case $p in "$r"/*) return 0 ;; esac
+        fi
+        if [ "$kind" = rmdir ]; then
+            case $r/ in "$p"/*) return 0 ;; esac
+        fi
+    done
+    return 1
+}
 # mkdir -p, each folder it makes under $HOME recorded: --uninstall removes it if it's empty then.
 mkp() {
     local d=$1 todo=()
@@ -227,10 +258,14 @@ block_put() {
         good "already in $(tilde "$f")"
         return 0
     fi
+    if [ -z "$(printf '%s' "$body" | tr -d '[:space:]')" ]; then
+        warn "nothing to put in $(tilde "$f") ($tag): left as it is"
+        return 0
+    fi
     backup "$f"
     printf '   %s> %s (%s)%s\n' "$D" "$(tilde "$f")" "$tag" "$N"
     printf '%s\n' "$body" | sed "s/^/       $D│$N /"
-    rec block "$f" "$tag"
+    rec block "$tag" "$f"
     [ "$DRY" = 1 ] && return 0
     {
         block_drop "$f" "$tag"
@@ -239,23 +274,32 @@ block_put() {
         bmark '<<<' "$tag"
         printf '\n'
     } >"$TMP/block"
-    cat "$TMP/block" >"$f"
+    block_write "$f"
 }
 block_rm() {
     local f=$1 tag=$2
     [ -f "$f" ] && grep -qxF "$(bmark '>>>' "$tag")" "$f" || return 0
+    if [ -z "$(block_drop "$f" "$tag" | tr -d '[:space:]')" ]; then
+        warn "$(tilde "$f") would be empty without her block ($tag): left as it is (take it out by hand)"
+        return 0
+    fi
     backup "$f"
     printf '   %s- %s (%s)%s\n' "$D" "$(tilde "$f")" "$tag" "$N"
     [ "$DRY" = 1 ] && return 0
     block_drop "$f" "$tag" >"$TMP/block"
-    cat "$TMP/block" >"$f"
+    block_write "$f"
+}
+# $TMP/block over FILE, never an empty one (a config is never written blank).
+block_write() {
+    [ -n "$(tr -d '[:space:]' <"$TMP/block")" ] || die "refusing to write an empty $(tilde "$1") (it is as it was; its backup is beside it)"
+    cat "$TMP/block" >"$1"
 }
 
 # ---- setup ------------------------------------------------------------------------------------
 
 args() {
-    YES=0 DRY=0 UNINSTALL=0 PURGE=0 VOICE=0 WATCH=0 AUTOSTART=1 FROM_SOURCE=0 LOCAL_ART=0
-    PREFIX=$HOME/.local ARTIFACT=''
+    YES=0 DRY=0 UNINSTALL=0 PURGE=0 VOICE=0 WATCH=0 AUTOSTART=1 FROM_SOURCE=0 LOCAL_ART=0 ALLOW_ROOT=0
+    PREFIX=$HOME/.local ARTIFACT='' PREFIX_GIVEN=0
     while [ $# -gt 0 ]; do
         case $1 in
             -y | --yes) YES=1 ;;
@@ -267,8 +311,9 @@ args() {
             --no-autostart) AUTOSTART=0 ;;
             --from-source) FROM_SOURCE=1 ;;
             --with-local-art) LOCAL_ART=1 ;;
-            --prefix) [ $# -ge 2 ] || die "--prefix needs a directory"; PREFIX=$2; shift ;;
-            --prefix=*) PREFIX=${1#*=} ;;
+            --allow-root) ALLOW_ROOT=1 ;;
+            --prefix) [ $# -ge 2 ] || die "--prefix needs a directory"; PREFIX=$2 PREFIX_GIVEN=1; shift ;;
+            --prefix=*) PREFIX=${1#*=} PREFIX_GIVEN=1 ;;
             --artifact) [ $# -ge 2 ] || die "--artifact needs a file"; ARTIFACT=$2; shift ;;
             --artifact=*) ARTIFACT=${1#*=} ;;
             -h | --help) usage; exit 0 ;;
@@ -279,6 +324,9 @@ args() {
     [ "$PURGE" = 0 ] || [ "$UNINSTALL" = 1 ] || die "--purge goes with --uninstall"
     PREFIX=${PREFIX/#\~/$HOME}
     case $PREFIX in /*) ;; *) PREFIX=$(pwd)/$PREFIX ;; esac
+    case $PREFIX in *$'\n'*) die "--prefix: a folder name with a newline in it" ;; esac
+    while [ "${PREFIX%/}" != "$PREFIX" ]; do PREFIX=${PREFIX%/}; done
+    [ -n "$PREFIX" ] || die "--prefix /: give her a folder of her own (/opt/capri, ~/.local)"
     if [ -n "$ARTIFACT" ]; then
         [ -f "$ARTIFACT" ] || die "--artifact: no file $ARTIFACT"
         ARTIFACT=$(cd "$(dirname "$ARTIFACT")" && pwd)/$(basename "$ARTIFACT")
@@ -304,10 +352,6 @@ manifest() {
         f=$CHECKOUT/installer/manifest
     elif [ -n "$BUNDLE" ]; then
         f=$BUNDLE/lib/synaps-avatar/installer/manifest
-    elif [ "$UNINSTALL" = 1 ]; then
-        # Uninstalling needs no network: the installed copy, else nothing (the receipt is enough).
-        f=$PREFIX/lib/synaps-avatar/installer/manifest
-        [ -f "$f" ] || return 0
     else
         f=$TMP/manifest
         fetch "https://raw.githubusercontent.com/$REPO_DEFAULT/$REF/installer/manifest" "$f" ||
@@ -366,12 +410,23 @@ preflight() {
     for p in apt-get pacman dnf zypper; do
         if have $p; then PM=${p%-get}; break; fi
     done
-    if [ "$(id -u)" = 0 ]; then
-        SUDO=()
-        warn "running as root: she is installed for root"
-    else
-        SUDO=(sudo)
+    if [ "$(id -u)" = 0 ]; then SUDO=(); else SUDO=(sudo); fi
+}
+
+# Root: never with someone else's HOME (sudo keeps it: what went there would be root's), and only
+# with --allow-root (she'd be root's companion, not his).
+root_check() {
+    [ "$(id -u)" = 0 ] || return 0
+    local rh
+    rh=$(getent passwd 0 2>/dev/null | cut -d: -f6 || true)
+    [ -n "$rh" ] || rh=$(awk -F: '$3 == 0 { print $6; exit }' /etc/passwd 2>/dev/null || true)
+    [ -n "$rh" ] || rh=/root
+    if [ "${HOME%/}" != "${rh%/}" ]; then
+        die "running as root with HOME=$HOME, which is not root's home ($rh): what went there would be owned by root. Run it as that user, without sudo (it asks for sudo itself, for system packages only)"
     fi
+    [ "$ALLOW_ROOT" = 1 ] ||
+        die "running as root: she'd be installed for root, not for you. Run it as yourself, without sudo (it asks for sudo itself, for system packages only); --allow-root if she is really for root"
+    warn "running as root (--allow-root): she is installed for root"
 }
 
 # ---- system packages --------------------------------------------------------------------------
@@ -466,8 +521,11 @@ step_synaps() {
             return 0
         fi
         info "synaps ${v:-?} at $(tilde "$cur") is older than $M_synaps_min: installing the latest"
+        SYNAPS_NEW=2
     else
-        info "no synaps: installing the latest with its own installer"
+        info "her brain runs on Synaps, an open-source agent runtime (github.com/$M_synaps_repo)"
+        info "not installed yet: installing the latest with its own installer (yours to keep; --uninstall says how to remove it)"
+        SYNAPS_NEW=1
     fi
     # The latest release, and GitHub's sha256 of its installer; else the manifest's pin.
     local j tag='' sha=''
@@ -595,9 +653,19 @@ build_from_source() {
         info "source: the checkout $(tilde "$src")"
     else
         sha=$(fetch_text -H 'Accept: application/vnd.github.sha' "https://api.github.com/repos/$M_repo/commits/$REF" 2>/dev/null || true)
-        [[ $sha =~ ^[0-9a-f]{40}$ ]] || sha=$REF
-        src=$CACHE/src/capri-syn-${sha:0:12} target=$CACHE/target
-        info "source: $M_repo @ ${sha:0:12} ($REF)"
+        if ! [[ $sha =~ ^[0-9a-f]{40}$ ]]; then
+            sha=''
+            if [[ $REF =~ ^[0-9a-f]{40}$ ]]; then sha=$REF; fi
+        fi
+        target=$CACHE/target
+        if [ -n "$sha" ]; then
+            src=$CACHE/src/capri-syn-${sha:0:12}
+            info "source: $M_repo @ ${sha:0:12} ($REF)"
+        else
+            # Not a commit (GitHub's API didn't answer): this run's own copy, never reused.
+            sha=$REF src=$TMP/src
+            info "source: $M_repo @ $REF (which commit, GitHub's API didn't say: not cached)"
+        fi
     fi
     packages build
     vulkan_check
@@ -618,11 +686,12 @@ build_from_source() {
         run chmod +x "$TMP/rustup-init"
         run_logged "$TMP/rustup-init.log" "$TMP/rustup-init" -y -q --no-modify-path --profile minimal --default-toolchain none
         rustup=$CARGO_BIN/rustup
+        rec_meta rustup "$rustup"
     fi
 
     if [ -z "$CHECKOUT" ] && [ ! -f "$src/Cargo.toml" ]; then
         mkdir_rec "$CACHE"
-        mkp "$src"
+        if [ "$src" = "$TMP/src" ]; then run mkdir -p "$src"; else mkp "$src"; fi
         get "https://codeload.github.com/$M_repo/tar.gz/$sha" "$TMP/src.tar.gz"
         run tar -xzf "$TMP/src.tar.gz" -C "$src" --strip-components=1
     fi
@@ -707,6 +776,13 @@ step_pack() {
     fi
     [ -d "$CACHE_ROOT/capri-desktop" ] || rec dir "$CACHE_ROOT/capri-desktop"
     mkp "$(dirname "$PACK")"
+    # A pack there that this script didn't make (his own build): moved aside, and never recorded.
+    if [ -d "$PACK" ] && ! recorded dir "$PACK"; then
+        local aside
+        aside=$PACK.pre-install-$(date +%Y%m%d-%H%M%S)
+        warn "$(tilde "$PACK") is a pack this script didn't make: it goes to $(tilde "$aside") (yours: --uninstall leaves it)"
+        run mv "$PACK" "$aside"
+    fi
     run rm -rf "$PACK.new"
     run "$VENV/bin/python" "$LIB/tools/make-pack" "$cc" "$PACK.new" "${side[@]}"
     run rm -rf "$PACK.old"
@@ -856,15 +932,32 @@ desktop() {
 # Lines in WMCONF, outside our blocks, that match a regex.
 wm_grep() { [ -n "$WMCONF" ] && block_drop "$WMCONF" summon | block_drop /dev/stdin autostart | grep -Ei -- "$1"; }
 
+# The summon key's modifier: MOD_WORD as the lines write it ($mod when the config sets one),
+# MOD_RAW its value, MOD_NAME what he presses (Super, Alt...).
+wm_mod() {
+    local v=''
+    MOD_WORD=Mod4 MOD_RAW=Mod4 MOD_NAME=Super
+    case $DESKTOP in i3 | sway) ;; *) return 0 ;; esac
+    v=$(grep -E '^\s*set\s+\$mod\s' "$WMCONF" 2>/dev/null | tail -n1 | awk '{print $3}' || true)
+    [ -n "$v" ] || return 0
+    MOD_WORD='$mod' MOD_RAW=$v
+    case $(printf '%s' "$v" | tr '[:upper:]' '[:lower:]') in
+        mod4 | super) MOD_NAME=Super ;;
+        mod1 | alt) MOD_NAME=Alt ;;
+        control | ctrl) MOD_NAME=Ctrl ;;
+        shift) MOD_NAME=Shift ;;
+        *) MOD_NAME=$v ;;
+    esac
+}
+
 summon_lines() {
-    local ctl=$BIN/avatarctl mod
+    local ctl
+    ctl=$(q "$BIN/avatarctl")
     case $DESKTOP in
         i3 | sway)
-            mod=Mod4
-            if grep -Eq '^\s*set\s+\$mod\s' "$WMCONF" 2>/dev/null; then mod='$mod'; fi
-            printf 'bindsym %s+c exec --no-startup-id %s talk press\n' "$mod" "$ctl"
-            printf 'bindsym --release %s+c exec --no-startup-id %s talk release' "$mod" "$ctl"
-            if [ "$VOICE" = 1 ]; then printf '\nbindsym %s+Ctrl+c exec --no-startup-id %s talk toggle' "$mod" "$ctl"; fi
+            printf 'bindsym %s+c exec --no-startup-id %s talk press\n' "$MOD_WORD" "$ctl"
+            printf 'bindsym --release %s+c exec --no-startup-id %s talk release' "$MOD_WORD" "$ctl"
+            if [ "$VOICE" = 1 ]; then printf '\nbindsym %s+Ctrl+c exec --no-startup-id %s talk toggle' "$MOD_WORD" "$ctl"; fi
             ;;
         hyprland)
             printf 'bind = SUPER, C, exec, %s talk press\n' "$ctl"
@@ -885,6 +978,7 @@ step_summon() {
         return 0
     fi
     local lines
+    wm_mod
     lines=$(summon_lines)
     if [ -z "$WMCONF" ]; then
         info "$DESKTOP runs its system-wide config (no user config to add to). Add these to your own:"
@@ -900,19 +994,19 @@ step_summon() {
     fi
     local clash
     case $DESKTOP in
-        i3 | sway) clash=$(wm_grep '^\s*bindsym\s+(--\S+\s+)*(\$mod|mod4)\+c\s' || true) ;;
+        i3 | sway) clash=$(wm_grep "^\\s*bindsym\\s+(--\\S+\\s+)*(\\\$mod|$MOD_RAW)\\+c\\s" || true) ;;
         hyprland) clash=$(wm_grep '^\s*bind[a-z]*\s*=\s*(\$mainmod|\$mod|super)\s*,\s*c\s*,' || true) ;;
     esac
     if [ -n "$clash" ]; then
-        warn "Super+C is taken: $(printf '%s' "$clash" | head -n1 | sed 's/^\s*//')"
+        warn "$MOD_NAME+C is taken: $(printf '%s' "$clash" | head -n1 | sed 's/^\s*//')"
         info "pick another key and add these to $(tilde "$WMCONF") with it:"
         printf '%s\n' "$lines" | sed "s/^/       $D│$N /"
-        SUMMON="not bound (Super+C is taken)"
+        SUMMON="not bound ($MOD_NAME+C is taken)"
         return 0
     fi
-    if confirm "add the summon key (Super+C) to $(tilde "$WMCONF") (a backup first)"; then
+    if confirm "add the summon key ($MOD_NAME+C) to $(tilde "$WMCONF") (a backup first)"; then
         block_put "$WMCONF" summon "$lines"
-        SUMMON="Super+C ($DESKTOP)"
+        SUMMON="$MOD_NAME+C ($DESKTOP)" SUMMON_KEY="$MOD_NAME+C"
         wm_reload
     else
         info "add these yourself:"
@@ -930,13 +1024,28 @@ wm_reload() {
 
 # ---- 6. autostart -----------------------------------------------------------------------------
 
+# A path for a desktop entry's Exec: double quotes when it needs any (its spec has no single ones).
+xq() {
+    local a=$1
+    case $a in
+        *[!A-Za-z0-9_./:=@+,~-]*)
+            a=${a//\"/\\\"} a=${a//\`/\\\`} a=${a//\$/\\\$}
+            printf '"%s"' "$a"
+            ;;
+        *) printf '%s' "$a" ;;
+    esac
+}
+# Her start command, for a WM config's exec (sh -c reads it) or a desktop entry's Exec (FORM xdg).
 launch_cmd() {
-    local cmd=$BIN/synaps-avatar
+    local form=${1:-sh} cmd syn
+    if [ "$form" = xdg ] && [ "$SYSTEMD" = 1 ]; then cmd=$(xq "$BIN/synaps-avatar"); else cmd=$(q "$BIN/synaps-avatar"); fi
     # Off Hyprland, Wayland desktops run her through XWayland (a no-op on X11).
     case $DESKTOP in hyprland | i3) ;; *) cmd="env SA_BACKEND=x11 $cmd" ;; esac
     if [ "$SYSTEMD" = 0 ]; then
-        cmd="sh -c \"$SYNAPS daemon status >/dev/null 2>&1 || $SYNAPS daemon --detach; exec $cmd\""
+        syn=$(q "$SYNAPS")
+        cmd="sh -c \"$syn daemon status >/dev/null 2>&1 || $syn daemon --detach; exec $cmd\""
     fi
+    if [ "$form" = xdg ]; then cmd=${cmd//%/%%}; fi
     printf '%s' "$cmd"
 }
 
@@ -969,6 +1078,7 @@ step_autostart() {
                 hyprland) line="exec-once = $cmd" ;;
             esac
             if confirm "start her at login from $(tilde "$WMCONF") (a backup first)"; then
+                info "she starts at login from your $DESKTOP config (--no-autostart to skip)"
                 block_put "$WMCONF" autostart "$line"
                 AUTOSTART_HOW="$DESKTOP config"
             else
@@ -978,6 +1088,8 @@ step_autostart() {
             ;;
         *)
             local f=$CONF/autostart/synaps-avatar.desktop
+            cmd=$(launch_cmd xdg)
+            info "she starts at login: an XDG autostart entry (--no-autostart to skip)"
             put "$f" <<EOF
 [Desktop Entry]
 # capri-syn's install.sh wrote this (install.sh --uninstall removes it).
@@ -997,7 +1109,49 @@ EOF
 
 # ---- 7. voice and watch -----------------------------------------------------------------------
 
-user_unit() { # SRC NAME: a tools/systemd unit with our bin dir, marked as ours
+# A path in a unit file: `%` doubled (systemd's specifiers), in double quotes when it has a space.
+uq() {
+    local a=${1//%/%%}
+    case $a in
+        *[[:space:]\"\\]*) a=${a//\\/\\\\} a=${a//\"/\\\"}; printf '"%s"' "$a" ;;
+        *) printf '%s' "$a" ;;
+    esac
+}
+# A line of a tools/systemd unit, with her real folders: %h/.local/bin is $BIN, capri-voice's
+# venv and models are in $DATA/capri-voice.
+unit_line() {
+    local l=$1 t out='' b
+    local -a words
+    case $l in
+        ExecStart=*)
+            read -r -a words <<<"${l#ExecStart=}"
+            for t in "${words[@]}"; do
+                case $t in
+                    %h/.local/bin/*) t=$(uq "$BIN/${t#%h/.local/bin/}") ;;
+                    %h/.local/share/capri-voice/*) t=$(uq "$DATA/capri-voice/${t#%h/.local/share/capri-voice/}") ;;
+                esac
+                out+=" $t"
+            done
+            printf 'ExecStart=%s\n' "${out# }"
+            ;;
+        Environment=PATH=%h/.local/bin:*)
+            b=${BIN//%/%%}
+            case $b in
+                *[[:space:]]*) printf 'Environment="PATH=%s:%s"\n' "$b" "${l#Environment=PATH=%h/.local/bin:}" ;;
+                *) printf 'Environment=PATH=%s:%s\n' "$b" "${l#Environment=PATH=%h/.local/bin:}" ;;
+            esac
+            ;;
+        '[Service]')
+            printf '%s\n' "$l"
+            if [ "$DATA" != "$HOME/.local/share" ] && [ "$UNIT_NAME" = capri-voice.service ]; then
+                printf 'Environment=%s\n' "$(uq "CAPRI_VOICE_MODELS=$DATA/capri-voice/models")"
+            fi
+            ;;
+        *) printf '%s\n' "$l" ;;
+    esac
+}
+
+user_unit() { # SRC NAME: a tools/systemd unit with her folders, marked as ours
     local src=$1 name=$2 t
     # A dry run hasn't installed $LIB: the checkout's or the tarball's copy, else just where it goes.
     if [ ! -f "$src" ]; then
@@ -1011,9 +1165,11 @@ user_unit() { # SRC NAME: a tools/systemd unit with our bin dir, marked as ours
         fi
         src=$t
     fi
+    local l
+    UNIT_NAME=$name
     {
         printf "# capri-syn's install.sh wrote this (install.sh --uninstall removes it), from tools/systemd/%s.\n" "$name"
-        sed -n '/^\[Unit\]/,$p' "$src" | sed "s#%h/.local/bin/#$BIN/#g"
+        sed -n '/^\[Unit\]/,$p' "$src" | while IFS= read -r l || [ -n "$l" ]; do unit_line "$l"; done
     } | put "$UNITS/$name"
     rec unit "$name" "$UNITS/$name"
     if [ "$SYSTEMD" = 1 ]; then run systemctl --user daemon-reload; fi
@@ -1040,7 +1196,7 @@ step_extras() {
         done
         [ -d "$CACHE_BASE/Microsoft/DeveloperTools/.onnxruntime" ] || rec dir "$CACHE_BASE/Microsoft/DeveloperTools/.onnxruntime"
         # uv's downloads in a throwaway cache: nothing of the setup's outside its own folder.
-        run env PATH="$path" UV_NO_CACHE=1 bash "$LIB/tools/capri-voice-setup"
+        run env PATH="$path" UV_NO_CACHE=1 bash "$LIB/tools/capri-voice-setup" "$DATA/capri-voice"
         run install -m 755 "$LIB/tools/capri-voice" "$BIN/capri-voice"
         rec file "$BIN/capri-voice"
         user_unit "$LIB/tools/systemd/capri-voice.service" capri-voice.service
@@ -1069,6 +1225,71 @@ step_extras() {
 
 # ---- summary ----------------------------------------------------------------------------------
 
+synaps_home() { printf '%s' "${SYNAPS_BASE_DIR:-$HOME/.synaps-cli}"; }
+# A model to talk through: a login (OAuth or API key, both in auth.json) or a local model.
+has_brain() {
+    local h
+    h=$(synaps_home)
+    [ -s "$h/auth.json" ] || grep -Eq '^\s*model\s*=\s*local/' "$h/config" 2>/dev/null
+}
+
+# The brain step: she talks through Synaps, and Synaps needs a model (`synaps login`, a picker).
+# Run here only with a terminal to pick on; a daemon already running picks the login up on her next
+# turn (Synaps reads auth.json per request).
+brain() {
+    local cmd a=''
+    cmd="$(q "$(tilde "$SYNAPS")") login"
+    if has_brain; then
+        if [ "${SYNAPS_NEW:-0}" = 0 ]; then info "she found your Synaps. her session is \`capri\`: it'll show up in /sessions."; fi
+        return 0
+    fi
+    printf '\n %s▌%s%s one thing left: her brain%s\n' "$R" "$N" "$B$T" "$N"
+    info "she talks through Synaps, and Synaps needs a model."
+    printf '   %s$ %s%s        %sa subscription you already pay for, an API key, or a local model%s\n' "$T" "$cmd" "$N" "$D" "$N"
+    info "skip it and she still perches, naps and plays. she just can't answer yet."
+    if [ "$DRY" = 1 ]; then
+        info "(asks: pick one now [Y/n]; with a terminal, --yes runs it)"
+        return 0
+    fi
+    if ! (: </dev/tty) 2>/dev/null; then
+        info "no terminal to pick on: run that line when you want her to answer"
+        return 0
+    fi
+    if [ "$YES" = 0 ]; then
+        printf '   %s?%s pick one now [Y/n] ' "$R$B" "$N" >/dev/tty
+        read -r a </dev/tty || a=n
+        case $a in '' | y | Y | yes | YES) ;; *)
+            info "later, then: run that line when you want her to answer"
+            return 0
+            ;;
+        esac
+    fi
+    if "$SYNAPS" login </dev/tty >/dev/tty 2>&1 && has_brain; then
+        good "her brain: logged in (no restart: the daemon reads it on her next turn)"
+    else
+        warn "no login yet: run \`$cmd\` when you want her to answer"
+    fi
+}
+
+# What stays of Synaps after --uninstall, where his login lives, and how to remove it too.
+# MINE: the synaps this script installed (the receipt says), RUSTUP: the rustup it installed.
+synaps_stays() {
+    local mine=$1 rustup=$2 s h
+    s=${mine:-$(command -v synaps 2>/dev/null || true)}
+    h=$(tilde "$(synaps_home)")
+    if [ -n "$s" ]; then
+        info "synaps stays installed (her daemon's other clients may use it): $(tilde "$s")"
+        info "your Synaps login and sessions live in $h"
+        if [ -n "$mine" ]; then
+            info "to remove Synaps too: $(q "$(tilde "$s")") daemon stop, then delete $(tilde "$s"), $h and $(tilde "$CONF/synaps")"
+            info "  its installer also added $(tilde "$CONF/fish/conf.d/synaps.env.fish") and a \`. \"\$HOME/.cargo/env\"\` line to ~/.profile, ~/.bashrc and ~/.zshrc (keep that line if you use Rust)"
+        else
+            info "to remove Synaps too: synaps daemon stop, then uninstall it the way you installed it ($h is its data)"
+        fi
+    fi
+    if [ -n "$rustup" ]; then info "rustup stays too (this installed it for her build): \`rustup self uninstall\` removes it"; fi
+}
+
 summary() {
     local w=14
     printf '\n %s▌installed%s%s\n' "$R$B" "$N" "$([ "$DRY" = 1 ] && printf '  %s(dry run: nothing was)%s' "$R" "$N")"
@@ -1081,83 +1302,160 @@ summary() {
     if [ -n "${VOICE_HOW:-}" ]; then printf '   %-*s %s\n' $w voice "$VOICE_HOW"; fi
     if [ -n "${WATCH_HOW:-}" ]; then printf '   %-*s %s\n' $w watch "$WATCH_HOW"; fi
     local how='click her to talk'
-    case ${SUMMON:-} in Super+C*) how='tap Super+C (or click her) to talk' ;; 'your own'*) how='your key summons her' ;; esac
-    printf '\n   %sstart her:%s %s &      %sthen %s%s\n' "$B$T" "$N" "$(tilde "$BIN/synaps-avatar")" "$D" "$how" "$N"
+    if [ -n "${SUMMON_KEY:-}" ]; then how="tap $SUMMON_KEY (or click her) to talk"; fi
+    case ${SUMMON:-} in 'your own'*) how='your key summons her' ;; esac
+    brain
+    printf '\n   %sstart her:%s %s &      %sthen %s%s\n' "$B$T" "$N" "$(q "$(tilde "$BIN/synaps-avatar")")" "$D" "$how" "$N"
     case ":$PATH:" in *":$BIN:"*) ;; *) info "$(tilde "$BIN") isn't on your PATH: add it to use \`synaps-avatar\` and \`avatarctl\` by name" ;; esac
     info "remove her: install.sh --uninstall   (synaps stays)"
 }
 
 # ---- uninstall --------------------------------------------------------------------------------
 
+# --purge: her own files in those folders, and only those (another pack, his own files stay).
+purge() {
+    local f
+    for f in "$CONF/synaps-avatar/settings.toml" "$CONF/synaps-avatar/settings.toml.tmp" \
+        "$STATE/synaps-avatar/state.json" "$STATE/synaps-avatar/state.json.tmp" \
+        "$STATE/synaps-avatar/sessions.json" "$STATE/synaps-avatar/sessions.json.tmp"; do
+        if [ -f "$f" ]; then run rm -f "$f"; fi
+    done
+    for f in "$PACK" "$CACHE_ROOT/installer" "$CACHE_ROOT/capri-desktop"; do
+        if [ -d "$f" ]; then run rm -rf "$f"; fi
+    done
+}
+
+# A WM config a block may be taken out of.
+editable() { case $1 in "${CONF%/}"/* | "$HOME/.i3/config" | "$HOME/.sway/config") [ -f "$1" ] ;; *) return 1 ;; esac; }
+skipped() { warn "left alone: $1 (not in her folders: the receipt is wrong there)"; }
+
 uninstall() {
     STEPS=1 STEP_N=0
     step "Remove what install.sh installed"
+    local d rmdirs=() syn_mine rust_mine
+    syn_mine=$(meta synaps) rust_mine=$(meta rustup)
     if [ -f "$RECEIPT" ]; then
         if pgrep -u "$(id -u)" -x synaps-avatar >/dev/null 2>&1; then
             if [ -x "$BIN/avatarctl" ]; then run "$BIN/avatarctl" quit || true; else run pkill -u "$(id -u)" -x synaps-avatar || true; fi
         fi
-        local kind a b d reload=0 rmdirs=()
-        while read -r kind a b; do
+        local line kind rest tag f reload=0
+        while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            kind=${line%%$'\t'*} rest=${line#*$'\t'}
+            if [ "$rest" = "$line" ]; then
+                warn "a receipt line this script can't read (left alone): $line"
+                continue
+            fi
             case $kind in
-                block) block_rm "$a" "$b" ;;
+                block | unit) tag=${rest%%$'\t'*} f=${rest#*$'\t'} ;;
+                *) tag='' f=$rest ;;
+            esac
+            case $kind in
+                prefix | meta) ;;
+                backup) if [ -f "$f" ]; then info "kept your config's backup: $(tilde "$f")"; fi ;;
+                block) if editable "$f"; then block_rm "$f" "$tag"; else skipped "$f"; fi ;;
                 unit)
+                    case $tag in synaps-daemon.service | capri-voice.service | capri-watch.service) ;; *) skipped "$tag"; continue ;; esac
                     if systemd_user; then
-                        if [ "$a" = synaps-daemon.service ]; then
+                        if [ "$tag" = synaps-daemon.service ]; then
                             # The daemon keeps running (other clients may use it); it just no longer starts at login.
-                            run systemctl --user disable "$a" || true
+                            run systemctl --user disable "$tag" || true
                         else
-                            run systemctl --user disable --now "$a" || true
+                            run systemctl --user disable --now "$tag" || true
                         fi
                     fi
-                    if ours "$b"; then
-                        run rm -f "$b"
+                    if ! removable "$f"; then
+                        skipped "$f"
+                    elif ours "$f"; then
+                        run rm -f "$f"
                         reload=1
                     fi
                     ;;
-                file) if [ -e "$a" ]; then run rm -f "$a"; fi ;;
-                dir) if [ -d "$a" ]; then run rm -rf "$a"; fi ;;
-                rmdir) rmdirs+=("$a") ;;
-                backup) if [ -f "$a" ]; then info "kept your config's backup: $(tilde "$a")"; fi ;;
+                file)
+                    if ! removable "$f"; then
+                        skipped "$f"
+                    elif [ -e "$f" ] || [ -L "$f" ]; then
+                        run rm -f "$f"
+                    fi
+                    ;;
+                dir)
+                    if ! removable "$f"; then
+                        skipped "$f"
+                    elif [ -d "$f" ]; then
+                        run rm -rf "$f"
+                    fi
+                    ;;
+                rmdir) if removable "$f" rmdir; then rmdirs+=("$f"); else skipped "$f"; fi ;;
+                *) warn "a receipt entry this script doesn't know (left alone): $line" ;;
             esac
         done < <(tac "$RECEIPT")
         if [ "$reload" = 1 ] && systemd_user; then run systemctl --user daemon-reload; fi
         run rm -f "$RECEIPT"
-        # Folders left empty.
-        # Folders this made, now empty (innermost first), and her own if they're empty.
-        for d in "$(dirname "$PACK")" "$DATA/synaps-avatar" "$CACHE_ROOT" "${rmdirs[@]}"; do
-            if [ -d "$d" ] && [ -z "$(ls -A "$d")" ]; then run rmdir "$d"; fi
-        done
     else
         info "no receipt ($(tilde "$RECEIPT")): nothing installed by this script"
     fi
+    for d in "$PACK".pre-install-*; do
+        if [ -d "$d" ]; then info "kept: the pack that was there before she was installed, $(tilde "$d") (yours)"; fi
+    done
     if [ "$PURGE" = 1 ]; then
-        local d
-        for d in "$CONF/synaps-avatar" "$DATA/synaps-avatar" "$STATE/synaps-avatar" "$CACHE_ROOT"; do
-            [ -e "$d" ] && run rm -rf "$d"
-        done
+        purge
     else
-        info "kept: your settings ($(tilde "$CONF/synaps-avatar")) and her state and log ($(tilde "$DATA/synaps-avatar")); --purge removes them"
+        info "kept: your settings ($(tilde "$CONF/synaps-avatar")) and her state ($(tilde "$STATE/synaps-avatar")); --purge removes them"
     fi
-    info "synaps stays (her daemon's other clients may need it); rustup too, if this installed it"
+    # Her folders if they're empty now, then the ones this made (innermost first) if they are.
+    for d in "$CONF/synaps-avatar" "$STATE/synaps-avatar" "$(dirname "$PACK")" "$DATA/synaps-avatar" "$CACHE_ROOT" "${rmdirs[@]}"; do
+        if [ -d "$d" ] && [ -z "$(ls -A "$d")" ]; then run rmdir "$d"; fi
+    done
+    if [ "$PURGE" = 1 ] && [ "$DRY" = 0 ]; then
+        for d in "$CONF/synaps-avatar" "$STATE/synaps-avatar" "$DATA/synaps-avatar" "$CACHE_ROOT"; do
+            if [ -d "$d" ]; then info "left in $(tilde "$d"), not hers: $(cd "$d" && find . -mindepth 1 -maxdepth 1 | sed 's#^\./##' | head -n5 | tr '\n' ' ')"; fi
+        done
+    fi
+    synaps_stays "$syn_mine" "$rust_mine"
     printf '\n %s▌removed%s%s\n' "$R$B" "$N" "$([ "$DRY" = 1 ] && printf '  %s(dry run: nothing was)%s' "$R" "$N")"
 }
 
 main() {
     STEP_N=0
+    # `irm | iex` can't pass flags (install.ps1 reads them from here too); `curl | bash -s --` can.
+    if [ $# -eq 0 ] && [ -n "${CAPRI_INSTALL_FLAGS:-}" ]; then
+        local -a fl
+        read -r -a fl <<<"$CAPRI_INSTALL_FLAGS"
+        set -- "${fl[@]}"
+    fi
     args "$@"
     ui
+    root_check
     TMP=$(mktemp -d "${TMPDIR:-/tmp}/capri-install.XXXXXX")
     trap 'rm -rf "$TMP"' EXIT
     locate
-    manifest
     paths
-    banner
     if [ "$UNINSTALL" = 1 ]; then
+        # Uninstalling needs no network (no manifest), and works where the installs went.
+        local p
+        PREFIXES=()
+        while IFS= read -r p; do
+            case $p in /?*) PREFIXES+=("$p") ;; *) warn "the receipt's prefix isn't an absolute path: $p (ignored)" ;; esac
+        done < <(awk -F'\t' '$1 == "prefix" { sub(/^[^\t]*\t/, ""); print }' "$RECEIPT" 2>/dev/null || true)
+        if [ ${#PREFIXES[@]} -gt 0 ]; then
+            p=${PREFIXES[${#PREFIXES[@]} - 1]}
+            if [ "$p" != "$PREFIX" ]; then
+                [ "$PREFIX_GIVEN" = 0 ] || warn "--prefix $PREFIX: the receipt says she went to $p; she is removed from there"
+                PREFIX=$p
+                paths
+            fi
+        else
+            PREFIXES=("$PREFIX")
+        fi
+        banner
         uninstall
         return 0
     fi
+    manifest
+    banner
     preflight
     receipt_init
+    rec prefix "$PREFIX"
     step_synaps
     step_binary
     step_pack

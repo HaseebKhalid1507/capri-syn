@@ -1,8 +1,10 @@
 # install.ps1 end to end on Windows, as his own user: CI's windows-installer job runs it with the
 # installer it just built; it also runs as is in the capri-win VM. A dry run (from GitHub when -Ref
-# is given, as `irm | iex` users get it) that touches nothing; the install; what it installed works
-# (synaps --version, her --check, the daemon); again (idempotent); --uninstall leaves nothing of hers
-# (Synaps stays, as install.ps1 says).
+# is given: as a scriptblock, and as `irm | iex` itself, which must leave his session as it was) that
+# touches nothing; the install; what it installed works (synaps --version, her --check, the daemon);
+# again (idempotent); --uninstall leaves nothing of hers (Synaps stays, as install.ps1 says). Then a
+# --prefix with spaces over a pack he made himself (moved aside, never removed), and --purge (her
+# files only).
 #
 #   .\installer\test-windows.ps1 -Setup .\packaging\windows\Output\synaps-avatar-setup-....exe [-Ref SHA]
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'The logs are echoed beside the checks; the functions return exit codes.')]
@@ -56,6 +58,25 @@ if ($Ref) {
     Get-Content $log | ForEach-Object { Write-Host "    $_" }
     Check ($code -eq 0) "the remote dry run (scriptblock, --dry-run --voice) exits 0 ($code)"
     Check ((Get-Content -Raw $log) -match 'dry run: nothing was') 'it gets to the summary'
+
+    # `irm | iex` itself: it runs in the caller's scope, takes its flags from CAPRI_INSTALL_FLAGS,
+    # and leaves his session as it was (preferences; none of its variables or functions).
+    $env:CAPRI_INSTALL_FLAGS = '--dry-run --voice'
+    $probe = "`$ErrorActionPreference = 'Continue'; `$ProgressPreference = 'Continue'; " +
+        "irm 'https://raw.githubusercontent.com/HaseebKhalid1507/capri-syn/$Ref/install.ps1' | iex; " +
+        "'iex-after: EAP=' + `$ErrorActionPreference + ' PP=' + `$ProgressPreference + " +
+        "' vars=' + @(Get-Variable -Scope Global -Name Dry, Yes, Prefix, Prefixes, M, Tmp, Data, Steps, RepoDefault, Usage -ErrorAction SilentlyContinue).Count + " +
+        "' fns=' + @(Get-Command Invoke-CapriInstall, Write-Info, Test-Removable -ErrorAction SilentlyContinue).Count + " +
+        "' mods=' + @(Get-Module capri-install).Count"
+    $log = Join-Path $logs 'dry-run-iex.log'
+    & $Shell -NoProfile -ExecutionPolicy Bypass -Command $probe *> $log
+    $code = $LASTEXITCODE
+    Remove-Item Env:\CAPRI_INSTALL_FLAGS
+    Get-Content $log | ForEach-Object { Write-Host "    $_" }
+    $text = Get-Content -Raw $log
+    Check ($code -eq 0) "irm | iex (CAPRI_INSTALL_FLAGS=--dry-run --voice) exits 0 ($code)"
+    Check ($text -match 'dry run: nothing was') 'it gets to the summary'
+    Check ($text -match 'iex-after: EAP=Continue PP=Continue vars=0 fns=0 mods=0') "his session is as it was ($([regex]::Match($text, 'iex-after:[^\r\n]*').Value))"
 }
 $code = Invoke-Installer 'dry-run' @('--dry-run', '--artifact', $Setup)
 Check ($code -eq 0) "--dry-run exits 0 ($code)"
@@ -88,6 +109,9 @@ Check ($status -match 'daemon: running') 'the Synaps daemon runs'
 Check ($status -match 'protocol: 3') 'protocol 3 (her client)'
 Check ((Get-RunValue 'synaps-daemon') -match 'synaps\.exe" daemon --detach$') 'the daemon starts at sign-in (Run\synaps-daemon)'
 Check (-not (Get-RunValue 'synaps-avatar')) 'no autostart for her (--no-autostart)'
+$r = Get-Content $receipt
+Check (($r | Where-Object { $_ -like "prefix`t*" }) -contains "prefix`t$app") 'the receipt records her prefix'
+Check (-not ($r | Where-Object { $_ -eq "dir`t$app" })) 'and never as a folder to remove whole'
 
 # 2. Again: idempotent.
 $code = Invoke-Installer 'rerun' @('--yes', '--no-autostart', '--artifact', $Setup)
@@ -107,8 +131,46 @@ Check (-not (Get-RunValue 'synaps-daemon')) 'Run\synaps-daemon is gone'
 Check (-not (Test-Path 'HKCU:\Software\Classes\AppUserModelId\Synaps.Avatar')) 'her AUMID is gone'
 Check (-not (Test-Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{2147942F-E90C-4536-BEA2-8AB4B7F51734}_is1')) 'her Apps entry is gone'
 Check (Test-Path $synaps) 'synaps stays'
+Check ((Get-Content -Raw (Join-Path $logs 'uninstall.log')) -notmatch 'left alone') 'every receipt entry was hers to remove'
 $left = if (Test-Path $data) { @(Get-ChildItem -Recurse -Force $data | ForEach-Object { $_.FullName }) } else { @() }
 Write-Output "left in ${data}: $(if ($left) { $left -join ', ' } else { 'nothing (the folder is gone)' })"
+
+# 4. A --prefix with spaces, over a pack he made himself: his is moved aside, never replaced or removed.
+$own = Join-Path $pack 'made-by-hand.txt'
+New-Item -ItemType Directory -Force $pack | Out-Null
+Set-Content -LiteralPath $own 'his own pack'
+$spaced = Join-Path $env:LOCALAPPDATA 'Programs\My Apps\synaps-avatar'
+$code = Invoke-Installer 'install-spaced' @('--yes', '--no-autostart', '--artifact', $Setup, '--prefix', $spaced)
+Check ($code -eq 0) "install --prefix '$spaced' exits 0 ($code)"
+Check (Test-Path -LiteralPath (Join-Path $spaced 'synaps-avatar.exe')) "her exe in $spaced"
+$aside = @(Get-ChildItem -Directory -Path (Split-Path -Parent $pack) -Filter 'capri.pre-install-*' | ForEach-Object { $_.FullName })
+Check ($aside.Count -eq 1 -and (Test-Path -LiteralPath (Join-Path "$($aside[0])" 'made-by-hand.txt'))) "his pack went aside, whole ($($aside -join ', '))"
+Check (Test-Path (Join-Path $pack 'sprites.json')) 'and hers is in its place'
+Check (-not (Select-String -LiteralPath $receipt -SimpleMatch -Pattern 'pre-install' -Quiet)) 'the receipt has nothing of his pack'
+$code = Invoke-Installer 'uninstall-spaced' @('--uninstall')
+Check ($code -eq 0) "--uninstall exits 0 ($code)"
+Check (-not (Test-Path -LiteralPath $spaced)) "$spaced is gone"
+Check (-not (Test-Path -LiteralPath (Split-Path -Parent $spaced))) 'and My Apps (made for her)'
+Check (-not (Test-Path $pack)) 'her pack is gone'
+Check ($aside.Count -eq 1 -and (Test-Path -LiteralPath (Join-Path "$($aside[0])" 'made-by-hand.txt'))) 'his pack stays'
+Check ((Get-Content -Raw (Join-Path $logs 'uninstall-spaced.log')) -notmatch 'left alone') 'every receipt entry was hers to remove'
+
+# 5. --purge: her settings, state and log; another pack, and his from before, stay.
+$conf = Join-Path $env:APPDATA 'synaps-avatar'
+$other = Join-Path $data 'packs\mine'
+New-Item -ItemType Directory -Force $other, $conf | Out-Null
+Set-Content (Join-Path $other 'pack.txt') 'his'
+Set-Content (Join-Path $conf 'settings.toml') '[voice]'
+Set-Content (Join-Path $data 'state.json') '{}'
+$code = Invoke-Installer 'purge' @('--uninstall', '--purge')
+Check ($code -eq 0) "--uninstall --purge exits 0 ($code)"
+Check (-not (Test-Path (Join-Path $conf 'settings.toml'))) 'her settings are gone'
+Check (-not (Test-Path (Join-Path $data 'state.json'))) 'her state is gone'
+Check (-not (Test-Path (Join-Path $data 'synaps-avatar.log'))) 'her log is gone'
+Check (Test-Path (Join-Path $other 'pack.txt')) 'another pack stays (packs\mine)'
+Check ($aside.Count -eq 1 -and (Test-Path -LiteralPath "$($aside[0])")) 'his pack from before stays'
+Remove-Item -Recurse -Force -LiteralPath $other
+foreach ($a in $aside) { Remove-Item -Recurse -Force -LiteralPath $a }
 
 & $synaps daemon stop *> $null
 if ($fails.Count) { throw "$($fails.Count) check(s) failed: $($fails -join '; ')" }

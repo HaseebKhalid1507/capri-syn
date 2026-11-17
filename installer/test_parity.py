@@ -27,8 +27,8 @@ class Parity(unittest.TestCase):
         sh = flags(block(SH, "usage: install.sh", "EOF"))
         ps = flags(block(PS, "usage: install.ps1", "'@"))
         self.assertEqual(sh, ps)
-        self.assertEqual(sh, ["--artifact", "--dry-run", "--from-source", "--no-autostart", "--prefix", "--purge",
-                              "--uninstall", "--voice", "--watch", "--with-local-art", "--yes"])
+        self.assertEqual(sh, ["--allow-root", "--artifact", "--dry-run", "--from-source", "--no-autostart", "--prefix",
+                              "--purge", "--uninstall", "--voice", "--watch", "--with-local-art", "--yes"])
 
     def test_every_flag_is_parsed(self):
         sh_args = block(SH, "args() {", "\n}\n")
@@ -78,9 +78,27 @@ class Parity(unittest.TestCase):
         self.assertEqual(bad, [])
 
     def test_both_run_whole_or_not_at_all(self):
-        # A cut-off download must not run half: everything is in functions until the last line.
+        # A cut-off download must not run half: install.sh is all functions until its last line;
+        # install.ps1 is one module whose closing brace is its last line.
         self.assertEqual(SH.rstrip().splitlines()[-1], 'main "$@"')
-        self.assertEqual(PS.rstrip().splitlines()[-1], "Invoke-CapriInstall $args")
+        self.assertEqual(PS.rstrip().splitlines()[-2:], ["Invoke-CapriInstall $CliArgs", "}"])
+
+    def test_install_ps1_leaves_nothing_in_the_callers_scope(self):
+        # `irm | iex` runs it in his session's scope: above the module only comments, the analyzer's
+        # attributes and param(); the preferences are set inside Invoke-CapriInstall.
+        top = PS[:PS.index("New-Module -Name capri-install")]
+        code = [l for l in top.splitlines() if l.strip() and not l.lstrip().startswith(("#", "[Diagnostics."))]
+        self.assertEqual(code, ["param()"])
+        self.assertIn("-ArgumentList (, [string[]]$args)", PS)
+        self.assertIn("Export-ModuleMember -Function @()", PS)
+        body = block(PS, "function Invoke-CapriInstall", "\n}\n")
+        for pref in ("$ErrorActionPreference = 'Stop'", "$ProgressPreference = 'SilentlyContinue'"):
+            self.assertIn(pref, body)
+
+    def test_both_read_flags_from_the_environment(self):
+        # `irm | iex` can't pass flags: both take CAPRI_INSTALL_FLAGS when given none.
+        self.assertIn("CAPRI_INSTALL_FLAGS", block(SH, "main() {", "\n}\n"))
+        self.assertIn("CAPRI_INSTALL_FLAGS", block(PS, "function Invoke-CapriInstall", "\n}\n"))
 
 
 if __name__ == "__main__":

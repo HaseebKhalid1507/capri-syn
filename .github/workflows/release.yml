@@ -182,7 +182,15 @@ jobs:
       - name: Attach to the release
         run: |
           ls -l dist
-          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          # A published release is never changed: its assets and their .sha256 are what people
+          # checked. A draft (this workflow's own, re-run) takes the new build's assets.
+          if draft=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [ "$draft" != true ]; then
+              echo "::error::$TAG is already published: its assets stay as they are (tag a new version)"
+              exit 1
+            fi
+            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber dist/*
+          else
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --verify-tag --title "$TAG" --generate-notes
+            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" dist/*
           fi
-          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber dist/*

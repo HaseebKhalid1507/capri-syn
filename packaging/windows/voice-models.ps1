@@ -20,7 +20,8 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
-$hf = 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main'
+# Whisper at a fixed revision of ggerganov/whisper.cpp (tools/capri-voice-setup pins the same).
+$hf = 'https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1'
 $kokoro = 'https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0'
 $oww = 'https://github.com/dscripka/openWakeWord/releases/download/v0.5.1'
 # name, url, SHA-256, bytes. Whisper's hashes are Hugging Face's own (its LFS ids); Kokoro's
