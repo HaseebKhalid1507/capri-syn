@@ -224,6 +224,8 @@ pub enum BrainCmd {
     Force(crate::brain::Force),
     Event(crate::brain::SessionSignal),
     Sense(Sense),
+    /// The login session as logind would report it (the screen locked, the machine asleep).
+    Desk(crate::platform::SessionEv),
 }
 
 /// Test senses. `None` = back to the real one.
@@ -241,6 +243,8 @@ pub enum Sense {
     Arena(Option<(i32, i32, i32, i32)>),
     /// Only these windows may be sat on, hung over or focused.
     Windows(Option<Vec<u32>>),
+    /// Her local time of day (seconds after midnight), running from now with the brain's clock.
+    Clock(Option<f64>),
     /// Every sense back to real.
     Real,
 }
@@ -298,11 +302,24 @@ fn parse_brain(rest: &str) -> Result<BrainCmd> {
             BrainCmd::Sense(Sense::Arena(Some((num(2)? as i32, num(3)? as i32, num(4)? as i32, num(5)? as i32))))
         }
         ["sense", "windows", "any"] => BrainCmd::Sense(Sense::Windows(None)),
+        ["sense", "clock", "real"] => BrainCmd::Sense(Sense::Clock(None)),
+        ["sense", "clock", hm] => {
+            let (h, m) = hm.split_once(':').context("clock HH:MM")?;
+            let (h, m): (f64, f64) = (h.parse().context("clock HH:MM")?, m.parse().context("clock HH:MM")?);
+            if !(0.0..24.0).contains(&h) || !(0.0..60.0).contains(&m) {
+                bail!("clock HH:MM");
+            }
+            BrainCmd::Sense(Sense::Clock(Some(h * 3600.0 + m * 60.0)))
+        }
+        ["session", "lock"] => BrainCmd::Desk(crate::platform::SessionEv::Locked),
+        ["session", "unlock"] => BrainCmd::Desk(crate::platform::SessionEv::Unlocked),
+        ["session", "sleep"] => BrainCmd::Desk(crate::platform::SessionEv::Sleeping),
+        ["session", "resume"] => BrainCmd::Desk(crate::platform::SessionEv::Resumed),
         ["sense", "windows", ids @ ..] if !ids.is_empty() => {
             BrainCmd::Sense(Sense::Windows(Some(ids.iter().map(|i| win_id(i)).collect::<Result<_>>()?)))
         }
         _ => bail!(
-            "usage: brain on|off|state|dnd [MIN|off]|scale K|seed N|force roam|seek|summon|sulk|nap|event prompt [ID]|done|error|abort|cleared|sense real|focus ID|none|real|cursor X Y|real|idle S|active|real|fullscreen on|off|real|near on|off|real|arena X Y W H|off|windows ID..|any"
+            "usage: brain on|off|state|dnd [MIN|off]|scale K|seed N|force roam|seek|summon|sulk|nap|event prompt [ID]|done|error|abort|cleared|sense real|focus ID|none|real|cursor X Y|real|idle S|active|real|fullscreen on|off|real|near on|off|real|arena X Y W H|off|windows ID..|any|clock HH:MM|real|session lock|unlock|sleep|resume"
         ),
     })
 }

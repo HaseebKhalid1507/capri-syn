@@ -63,6 +63,8 @@ pub(super) struct Overrides {
     cursor: Option<(i32, i32)>,
     /// (brain time it was set, idle seconds then)
     idle: Option<(f64, f64)>,
+    /// (brain time it was set, local seconds then): her day runs on the brain's clock.
+    clock: Option<(f64, f64)>,
     fullscreen: Option<bool>,
     near: Option<bool>,
     arena: Option<WinRect>,
@@ -220,6 +222,9 @@ pub(super) struct BrainHost {
     last_abort: Option<Instant>,
     last_senses: Option<serde_json::Value>,
     typed_at: Option<Instant>,
+    /// The login session (logind): locked, the machine asleep.
+    locked: bool,
+    sleeping: bool,
     /// A bid's swing kick while hanging: (start, px at the bottom).
     kick: Option<(Instant, f32)>,
     /// An insist beat's leg kick while hanging (start, direction).
@@ -410,6 +415,8 @@ impl Avatar {
             ov.cursor = Some(ov.arena.map_or((0, 0), |a| (a.right() - 10, a.y + 10)));
             ov.idle = Some((0.0, 0.0));
             ov.fullscreen = Some(false);
+            // And no time of day unless the test sets one (`brain sense clock`).
+            ov.clock = Some((0.0, f64::NAN));
         }
         let boxes = self.brain_boxes();
         let rng = Rng::new(seed ^ 0x9e37_79b9);
@@ -444,6 +451,8 @@ impl Avatar {
             last_abort: None,
             last_senses: None,
             typed_at: None,
+            locked: false,
+            sleeping: false,
             kick: None,
             swing: None,
             drift: None,
@@ -684,7 +693,14 @@ impl Avatar {
             None => idle_s < 1.5 * h.scale && self.os.pointer_still_ms().is_some_and(|ms| ms >= 3000),
         };
         let asleep = self.mood == Mood::Sleepy;
-        Senses { now: b, idle_s, fullscreen, fullscreen_here, busy: self.brain_busy(), near, placement: self.placement_kind(), typing, asleep }
+        let local = match h.ov.clock {
+            Some((t0, l0)) => Some(l0 + (b - t0)).filter(|l| l.is_finite()),
+            None => {
+                let unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64());
+                Some(crate::life::local_s(unix, crate::platform::utc_offset_s(unix as i64)))
+            }
+        };
+        Senses { now: b, idle_s, fullscreen, fullscreen_here, busy: self.brain_busy(), near, placement: self.placement_kind(), typing, asleep, local }
     }
 
     // ---- the loop -----------------------------------------------------------------------------
@@ -709,8 +725,21 @@ impl Avatar {
         }
         h.sync_log();
         self.brain_apply(d.intents, now);
+        // Asleep by her day (away, locked, a doze), shown as the session's Sleepy.
+        let napping = self.brain.as_ref().is_some_and(|h| h.brain.napping());
+        self.rest_sync(napping, now);
         // Woken (or fallen asleep) by this decision: the nap's frames follow at once.
         self.step_nap(now);
+    }
+
+    /// The session's Sleepy follows her day (BRIEF-alive Q1), not the chat's quiet.
+    fn rest_sync(&mut self, on: bool, now: Instant) {
+        let Some(s) = &mut self.session else { return };
+        if s.link.resting() == Some(on) {
+            return;
+        }
+        s.link.set_resting(on);
+        self.sync_body(now);
     }
 
     pub(super) fn brain_feed(&mut self, ev: BrainEvent, now: Instant) {
@@ -729,6 +758,13 @@ impl Avatar {
                     // The nap's pose ends (he is back, he talked to her): she stands up first,
                     // before any move decided with it.
                     let up = p.is_none() && self.brain.as_ref().is_some_and(|h| h.rest == Some(RestPose::Nap));
+                    // Out of Sleepy while still posed (its drawn wake, if any, is the stand-up),
+                    // into it before the pose (the sleep's drawing comes with the pose's frame).
+                    if up {
+                        self.rest_sync(false, now);
+                    } else if p == Some(RestPose::Nap) {
+                        self.rest_sync(true, now);
+                    }
                     if let Some(h) = &mut self.brain {
                         h.rest = p;
                     }
@@ -736,7 +772,7 @@ impl Avatar {
                         self.arrive.deep = false;
                     }
                     self.relayer(now);
-                    if up && self.standing() {
+                    if up && self.standing() && !self.waking(now) {
                         self.play_nap_wake(now);
                     }
                 }
@@ -1913,6 +1949,21 @@ impl Avatar {
     /// Focus, workspace and pointer events from the X watchers.
     pub(super) fn brain_watch(&mut self, ev: WatchEvent, now: Instant) {
         use crate::brain::Screen;
+        // Locked or asleep is one thing to her (a resume behind the locker stays locked).
+        if let WatchEvent::Session(e) = ev {
+            use crate::platform::SessionEv;
+            let Some(h) = &mut self.brain else { return };
+            match e {
+                SessionEv::Locked => h.locked = true,
+                SessionEv::Unlocked => h.locked = false,
+                SessionEv::Sleeping => h.sleeping = true,
+                SessionEv::Resumed => h.sleeping = false,
+            }
+            let on = h.locked || h.sleeping;
+            elog!("synaps-avatar: session {e:?} (her desk {})", if on { "locked" } else { "open" });
+            self.brain_feed(BrainEvent::Locked(on), now);
+            return;
+        }
         if self.brain.is_none() || !self.loaded {
             return;
         }
@@ -2205,6 +2256,12 @@ impl Avatar {
             EmoteKey::Satisfied { pat: false } => Some(spec.satisfied.other.clone()),
             EmoteKey::Sulk => Some(spec.sulk.clone()),
             EmoteKey::Wave => Some(spec.wave.clone()),
+            // He's back: the pack's greeting (a wave and a happy face; the morning one livelier).
+            EmoteKey::Greet { morning } => Some(match (morning, spec.greet.is_empty()) {
+                (true, _) if !spec.greet_morning.is_empty() => spec.greet_morning.clone(),
+                (_, false) => spec.greet.clone(),
+                _ => spec.wave.clone(),
+            }),
         }
         .unwrap_or_default();
         let standing = self.standing();
@@ -2219,6 +2276,8 @@ impl Avatar {
             EmoteKey::Satisfied { .. } => 1,
             EmoteKey::Sulk => 2,
             EmoteKey::Wave => 0,
+            // Perched or on the floor without the frames: hearts.
+            EmoteKey::Greet { .. } => 1,
         };
         let mut played = "fx";
         // The bid marker: up on a bid, a pop on every beat, gone when it's over.
@@ -2230,7 +2289,7 @@ impl Avatar {
                     h.marker = Some(Marker { t0, pop: now, double, area });
                 }
                 EmoteKey::Satisfied { .. } | EmoteKey::Sulk => h.marker = None,
-                EmoteKey::Wave => {}
+                EmoteKey::Wave | EmoteKey::Greet { .. } => {}
             }
         }
         if self.brain.as_ref().and_then(|h| h.marker).is_some_and(|m| m.area.is_none()) {
@@ -2263,7 +2322,12 @@ impl Avatar {
         } else if standing && !steps.is_empty() {
             let seq = self.pack.flatten(&self.resolve_steps(&steps));
             if !seq.is_empty() {
-                self.anim.play(seq, now);
+                // A greeting out of her sleep comes after the stand-up.
+                if matches!(e, EmoteKey::Greet { .. }) && self.anim.busy() {
+                    self.anim.then(seq, now);
+                } else {
+                    self.anim.play(seq, now);
+                }
                 played = "clip";
             }
         }
@@ -2288,6 +2352,7 @@ impl Avatar {
                 EmoteKey::Satisfied { .. } => (6.0, 1),
                 EmoteKey::Sulk => (-12.0, 2),
                 EmoteKey::Wave => (12.0, 0),
+                EmoteKey::Greet { .. } => (12.0, 1),
             };
             let sign = if self.rng.pick(2) == 0 { 1.0 } else { -1.0 };
             if let Some(h) = &mut self.brain {
@@ -2721,6 +2786,7 @@ impl Avatar {
                 }
                 self.brain_feed(BrainEvent::Session(s), now)
             }
+            BrainCmd::Desk(ev) => self.brain_watch(crate::platform::WatchEvent::Session(ev), now),
             BrainCmd::Sense(s) => {
                 if let Some(h) = &mut self.brain {
                     let b = h.bnow(now);
@@ -2734,10 +2800,12 @@ impl Avatar {
                         Sense::Windows(w) => {
                             h.ov.windows = w.map(|ids| ids.into_iter().map(|id| self.os.toplevel_of(id).unwrap_or(id)).collect())
                         }
+                        // A fixed day (so greetings count per day), at that time, on the brain's clock.
+                        Sense::Clock(c) => h.ov.clock = c.map(|s| (b, 20_000.0 * 86_400.0 + s)),
                         Sense::Real => h.ov = Overrides::default(),
                     }
                     let v = serde_json::json!({ "t": b - h.brain.start(), "k": "sense", "focus": format!("{:?}", h.ov.focus), "cursor": h.ov.cursor,
-                                                "idle": h.ov.idle.map(|i| i.1), "fs": h.ov.fullscreen });
+                                                "idle": h.ov.idle.map(|i| i.1), "fs": h.ov.fullscreen, "clock": h.ov.clock.map(|c| c.1) });
                     h.write(v);
                     // Read now (a real change waits for the next poll; a test wants it in order).
                     h.brain.poll_now();

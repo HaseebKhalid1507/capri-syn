@@ -34,7 +34,7 @@ pub use os::Os;
 
 /// The process-wide setup that must run before any other thread exists (GPU choice,
 /// allocator). See `linux.rs`.
-pub use linux::{monotonic_s, process_setup, trim_heap};
+pub use linux::{monotonic_s, process_setup, trim_heap, utc_offset_s};
 
 /// A window she may sit on is at least this big (and managed).
 pub(crate) const SEAT_MIN: (i32, i32) = (120, 60);
@@ -189,6 +189,20 @@ pub enum WatchEvent {
     Layout,
     /// The pointer near her, swept past her, or resting on her (`Os::watch_pointer`).
     Pointer(PointerEv),
+    /// The login session: the screen locked or unlocked, the machine asleep or back
+    /// (`Os::watch_session`).
+    Session(SessionEv),
+}
+
+/// The login session, as the session manager has it (booleans only, BRIEF-alive §4.7).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionEv {
+    Locked,
+    Unlocked,
+    /// Going to sleep (suspend, hibernate).
+    Sleeping,
+    /// Back from sleep.
+    Resumed,
 }
 
 /// What the pointer watcher reports (device px, px/s).
@@ -280,7 +294,8 @@ pub trait Desktop: Send + Sync {
     fn pointer(&self) -> Result<(i32, i32)>;
     /// A pointer reader with its own connection, for a watcher thread.
     fn pointer_reader(&self) -> Result<PointerRead>;
-    /// Milliseconds since the last keyboard or mouse input anywhere.
+    /// Milliseconds since the last keyboard or mouse input anywhere. None: the backend can't
+    /// tell (the core then counts from the pointer's last move).
     fn idle_ms(&self) -> Option<u32>;
     /// A key that types `ch` is physically down now.
     fn char_key_down(&self, ch: char) -> Result<bool>;
@@ -288,6 +303,9 @@ pub trait Desktop: Send + Sync {
     fn compositor_running(&self) -> bool;
     /// Start the event source; `hint` runs on its thread.
     fn watch(&self, hint: Box<dyn Fn(Hint) + Send>) -> Result<()>;
+    /// Start reporting the session's lock and sleep (`on` runs on its thread). Linux: logind,
+    /// shared by both backends.
+    fn watch_session(&self, on: Box<dyn Fn(SessionEv) + Send>) -> Result<()>;
     /// Start reporting clicks anywhere (root px) while armed; `on` runs on its thread.
     fn watch_clicks(&self, on: Box<dyn Fn(i32, i32) + Send>) -> Result<()>;
     fn arm_clicks(&self, on: bool);

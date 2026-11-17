@@ -10,7 +10,7 @@
 //! extent of each effect layer as painted. `settle` is async: a backend that paints effects
 //! in her own window (Wayland) needs its event loop to turn between steps.
 
-use super::{Os, PointerCfg, PointerEv, ShapeRect, WatchEvent, WinId, WinRect};
+use super::{Os, PointerCfg, PointerEv, SessionEv, ShapeRect, WatchEvent, WinId, WinRect};
 use anyhow::{Result, anyhow, ensure};
 use std::future::Future;
 use std::sync::mpsc::{Receiver, channel};
@@ -48,6 +48,12 @@ pub trait Driver {
     }
     /// The second monitor switches to another space (nothing of hers on either).
     fn flip_other_space(&mut self) -> bool {
+        false
+    }
+    /// The login session as the session manager would report it (locked, asleep, ...).
+    /// False: this rig can't (a real session isn't the test's to lock); the scenario then
+    /// checks presence only.
+    fn session(&mut self, _ev: SessionEv) -> bool {
         false
     }
 }
@@ -95,6 +101,7 @@ pub async fn run<D: Driver>(os: &Os, d: &mut D) -> Result<Vec<&'static str>> {
     scenario!("shapes", shapes);
     scenario!("keyboard", keyboard);
     scenario!("pointer-near", pointer_near);
+    scenario!("presence", presence);
     Ok(passed)
 }
 
@@ -430,6 +437,26 @@ async fn keyboard<D: Driver>(os: &Os, d: &mut D, _rx: &Receiver<WatchEvent>) -> 
 }
 
 /// The pointer coming near her body reports once.
+/// His presence: how long since his last input (every backend can tell, if only from the
+/// pointer), and the session's lock and sleep, in order.
+async fn presence<D: Driver>(os: &Os, d: &mut D, _rx: &Receiver<WatchEvent>) -> Result<()> {
+    ensure!(os.idle_ms().is_some(), "no idle time (input or the pointer's)");
+    let (tx, rx) = channel();
+    if !d.session(SessionEv::Unlocked) {
+        return Ok(());
+    }
+    os.watch_session(move |e| {
+        tx.send(e).ok();
+    })?;
+    for ev in [SessionEv::Locked, SessionEv::Unlocked, SessionEv::Sleeping, SessionEv::Resumed] {
+        ensure!(d.session(ev), "the rig lost the session");
+        d.settle().await;
+        let got = wait(&rx, 2000, |e| matches!(e, WatchEvent::Session(_)));
+        ensure!(matches!(got, Some(WatchEvent::Session(e)) if e == ev), "{ev:?}: got {got:?}");
+    }
+    Ok(())
+}
+
 async fn pointer_near<D: Driver>(os: &Os, d: &mut D, rx: &Receiver<WatchEvent>) -> Result<()> {
     let her = rect(600, 300, 100, 200);
     d.warp(1200, 900);

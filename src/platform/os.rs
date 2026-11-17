@@ -854,8 +854,15 @@ impl Os {
         self.desk.is_fullscreen(w)
     }
 
+    /// Milliseconds since his last input; a backend that can't tell: since the pointer last
+    /// moved (presence while the pointer moves; typing alone then reads as idle).
     pub fn idle_ms(&self) -> Option<u32> {
-        self.desk.idle_ms()
+        self.desk.idle_ms().or_else(|| self.pointer_still_ms().map(|ms| ms.min(u32::MAX as u64) as u32))
+    }
+
+    /// Report the session's lock and sleep (`WatchEvent::Session`).
+    pub fn watch_session(&self, on: impl Fn(WatchEvent) + Send + 'static) -> Result<()> {
+        self.desk.watch_session(Box::new(move |e| on(WatchEvent::Session(e))))
     }
 
     /// Follow `w` (0 = nothing).

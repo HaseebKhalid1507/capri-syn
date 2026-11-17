@@ -29,6 +29,17 @@ Reference for `synaps-avatar`, the crate behind capri-syn. The [README](../READM
 
 - **Moods** come from the session's turn events: thinking, talking, `WORKING · <tool>`, done,
   annoyed (abort or error), needs-you (a pending prompt), sleepy, compacting, and away (no daemon).
+- **Sleep follows you, not the chat**: while you're at the desk she stays up,
+  however long the session is quiet. She naps 10 min after your last input (5 min at night, 22:00 to
+  06:00 local), and at once when the screen locks or the machine sleeps (logind's `LockedHint` and
+  `PrepareForSleep`). Late at night her energy runs low (`src/life.rs`: a curve over the local hour,
+  tiredness from hours awake, a pat lifts it) and she dozes off for 4 to 8 min now and then even while
+  you're there; news from the session wakes her. Back after an unlock, a resume or 30 min away she
+  greets you once (`brain.greet`, the first of a morning `brain.greetMorning`), at most 3 a day, never
+  under DND or behind a fullscreen window. `[brain] enabled = false` stops her moves, not this. Only
+  without a brain at all (`SA_NO_BRAIN`, tests) the old rule holds: sleepy after `--sleepy-after`
+  minutes without a turn. On Hyprland there's no idle time yet (ext-idle-notify isn't
+  wired): your presence is the pointer moving, so typing alone for 5 min reads as away.
 - **The Line** (the summon key, tapped) is the way to write to her session: a thread with the
   conversation so far, a text field, prompts answered from the keyboard. It stays open after Enter;
   Esc closes it and keeps the draft. A reply that lands while it's closed leaves a one-line strip on her
@@ -97,7 +108,7 @@ synaps-avatar [--profile P | --socket PATH] [--session NAME|ID | --new [--cwd DI
 | `--session S` | ride this live session (name or id; never `subconscious`) |
 | `--new` | create a new session (`--cwd`: absolute, on the daemon's machine; `--model`) and follow it |
 | `--no-session` | the body alone (dev control only) |
-| `--sleepy-after MIN` | sleepy after this many minutes without a turn (default 10) |
+| `--sleepy-after MIN` | under `SA_NO_BRAIN` only: sleepy after this many minutes without a turn (default 10). Otherwise sleep follows you (see above) |
 | `--pack DIR` | character pack (default `$XDG_DATA_HOME/synaps-avatar/packs/capri`) |
 | `--height PX` | standing body height in logical px (default 340) |
 | `--check` | load and decode the pack, print a summary, exit (no window) |
@@ -137,7 +148,7 @@ A pack is a directory:
 | `icon.png` | her icon (`_NET_WM_ICON` on her window and the Line) |
 | `music/*.png` | headphones frames and note sprites for the music idle |
 | `fonts/*.ttf` | the HUD font (Exo 2 static instances; OFL) |
-| `moods.json` | **the avatar's behaviour sidecar**, our file: HUD tones (overrides of the theme's tokens by name: `accent`, `text`, `danger`, …; empty for Capri), each mood's nameplate shape (`plate`: slant / arrow / flag / square / split), idle life (bob, sway, sparkles, activity timing), the mood table (frames, entry clips, labels, glyphs), idle activities, extra frames (an extra frame may paint another file's face onto it: `patch`), click reactions (head pat / body / annoyed streak), perch rules (one frame, plus the headpat face), music, arrivals (`arrive`: launch / cinematic (the landing after the close-up) / summon / teleport / perch sequences, `teleportChance`), the deep nap (`brain.napDeep`, `napPerch`, `napDeepAfterMs`, `napWake`), the startle and big-leap crouch, the look straight ahead (`brain.lookFront`), the rare air kiss (`kiss`) and the icon. The code ships no character ids: everything character-specific is in here |
+| `moods.json` | **the avatar's behaviour sidecar**, our file: HUD tones (overrides of the theme's tokens by name: `accent`, `text`, `danger`, …; empty for Capri), each mood's nameplate shape (`plate`: slant / arrow / flag / square / split), idle life (bob, sway, sparkles, activity timing), the mood table (frames, entry clips, labels, glyphs), idle activities, extra frames (an extra frame may paint another file's face onto it: `patch`), click reactions (head pat / body / annoyed streak), perch rules (one frame, plus the headpat face), music, arrivals (`arrive`: launch / cinematic (the landing after the close-up) / summon / teleport / perch sequences, `teleportChance`), the deep nap (`brain.napDeep`, `napPerch`, `napDeepAfterMs`, `napWake`), the greeting when he's back (`brain.greet`, `greetMorning`), the startle and big-leap crouch, the look straight ahead (`brain.lookFront`), the rare air kiss (`kiss`) and the icon. The code ships no character ids: everything character-specific is in here |
 | `persona.md` | optional: her session's system prompt (`[session] persona`) |
 | `NOTICE.md` | the art's notice, plus a line naming the CapriCore versions it came from |
 
@@ -328,8 +339,10 @@ brain … | settings reload | tap head|body | menu | shape | state | hide | show
 ```
 
 `brain` takes `on|off|state|dnd [min]|dnd off|scale <x>|seed <n>`, `force roam|seek|summon|sulk|nap`,
-`event prompt [id]|done|error|abort|cleared` and `sense …` (focus, cursor, idle, fullscreen, near, arena,
-windows, each with `real` to go back to the real senses).
+`event prompt [id]|done|error|abort|cleared`, `session lock|unlock|sleep|resume` (what logind would say)
+and `sense …` (focus, cursor, idle, fullscreen, near, arena, windows, `clock HH:MM` (her local time,
+running on the brain's clock), each with `real` to go back to the real senses). Under `SA_BRAIN_SYNTH`
+she has no time of day until `sense clock` sets one, and logind isn't read.
 
 - `tools/shoot.py` runs one short scenario on a desktop: launch, steps, screenshots, recordings,
   then always kills the app. Its guards matter because someone else may be using that desktop:

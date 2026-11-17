@@ -1705,8 +1705,8 @@ impl Avatar {
         let rests = self.art_rests(self.mood);
         self.anim.set_layer_resting(base, looping, rests, now);
         // An arrival sequence plays through the landing's relayer, a walk through its pool's
-        // art coming in.
-        if !self.arriving(now) && !self.brain_walking() {
+        // art coming in, a stand-up out of her sleep through the nap's end.
+        if !self.arriving(now) && !self.brain_walking() && !self.waking(now) {
             self.anim.stop_oneshot(now);
         }
         self.lying_cut(before, now);
@@ -4162,7 +4162,7 @@ impl Avatar {
                     self.fall("layout", now);
                 }
             }
-            WatchEvent::Focus | WatchEvent::Desktop | WatchEvent::Pointer(_) => self.brain_watch(ev, now),
+            WatchEvent::Focus | WatchEvent::Desktop | WatchEvent::Pointer(_) | WatchEvent::Session(_) => self.brain_watch(ev, now),
         }
     }
 

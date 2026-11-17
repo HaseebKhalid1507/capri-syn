@@ -364,9 +364,14 @@ impl Desktop for HyprDesktop {
         Ok(Box::new(move || d.pointer().ok()))
     }
 
-    /// ext-idle-notify comes with P2.
+    /// Not yet (ext-idle-notify on a connection of its own, BRIEF-alive §4.0): the core counts
+    /// from the pointer's last move meanwhile.
     fn idle_ms(&self) -> Option<u32> {
         None
+    }
+
+    fn watch_session(&self, on: Box<dyn Fn(super::SessionEv) + Send>) -> Result<()> {
+        super::linux::watch_logind(on)
     }
 
     fn char_key_down(&self, _ch: char) -> Result<bool> {
