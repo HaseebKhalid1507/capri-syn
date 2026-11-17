@@ -718,6 +718,9 @@ pub struct Avatar {
     cover_on: bool,
     /// Last laid-out width of the status tag (logical px), to place the next one.
     tag_w: Rc<Cell<f32>>,
+    /// Her menu's height as last painted (logical px; 0: not yet): it opens upward when it
+    /// wouldn't fit under the click.
+    menu_h: Rc<Cell<f32>>,
     /// The HUD's top while a bubble is up: (resting frame, avatar-local device px).
     hud_top: Cell<Option<(usize, i32)>>,
     /// Last laid-out box of the status tag (window logical px), to tear it in a glitch.
@@ -956,6 +959,7 @@ impl Avatar {
             shadow_at: None,
             cover_on: false,
             tag_w: Rc::new(Cell::new(150.0)),
+            menu_h: Rc::new(Cell::new(0.0)),
             hud_top: Cell::new(None),
             tag_box: Rc::new(Cell::new(None)),
             motion_at: Cell::new(None),
@@ -6499,6 +6503,13 @@ impl Render for Avatar {
             let item = |label: &'static str| item_as(label, false);
             let mark = self.menu_mark(window);
             let max_x = l.lp(self.vis.1) - px(220.0);
+            // Under the click if it fits in her window, else as far up as it must (a perched
+            // her: a click low on her body cut the menu's bottom rows off). Before its first
+            // paint, its height is estimated from its rows.
+            let rows = 6 + usize::from(self.attention_label().is_some()) * 2 + usize::from(self.voice_on() && self.voice.cfg.handsfree);
+            let est = rows as f32 * 23.0 + if self.stills.as_ref().is_some_and(|s| s.capri.is_some()) { MENU_HEADER_PX + 8.0 } else { 0.0 } + 16.0;
+            let h = if self.menu_h.get() > 0.0 { self.menu_h.get() } else { est };
+            let max_y = (l.lp(l.win_h) - px(h + 4.0)).max(px(0.0));
             // lachy's capri.png over the items: who this menu is.
             let header = self.stills.as_ref().and_then(|s| s.capri.clone()).map(|i| {
                 let s = i.size(0);
@@ -6629,7 +6640,7 @@ impl Render for Avatar {
                 div()
                     .absolute()
                     .left(if at.x > max_x { max_x } else { at.x })
-                    .top(at.y)
+                    .top(if at.y > max_y { max_y } else { at.y })
                     .child(probed(menu, &menu_cell)),
             );
         }
@@ -6658,6 +6669,7 @@ impl Render for Avatar {
         let win_wh = (l.win_w, l.win_h);
         let tag_clickable = collapsed || self.session.is_some();
         let tag_w = self.tag_w.clone();
+        let menu_h = self.menu_h.clone();
         let tag_box = self.tag_box.clone();
         root.child(
             canvas(
@@ -6702,6 +6714,7 @@ impl Render for Avatar {
                         }
                     }
                     if let Some(b) = menu_cell.get() {
+                        menu_h.set(f32::from(b.size.height));
                         input.push(to_device(b, sf));
                         for p in theme::outline(MENU_CUT, f32::from(b.left()), f32::from(b.top()), f32::from(b.right()), f32::from(b.bottom())) {
                             shape::poly_rows(&dev(&theme::offset(&p, theme::RING)), &mut visible);
