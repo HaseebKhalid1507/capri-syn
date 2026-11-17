@@ -1103,6 +1103,24 @@
     "wave": [
       "wave"
     ],
+    "greet": [
+      "wave",
+      {
+        "frame": "happy",
+        "ms": 700
+      }
+    ],
+    "greetMorning": [
+      "wave",
+      {
+        "frame": "idle-excited",
+        "ms": 900
+      },
+      {
+        "frame": "happy",
+        "ms": 600
+      }
+    ],
     "floorSit": {
       "entry": [
         "floor_sit"

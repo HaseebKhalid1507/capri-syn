@@ -220,6 +220,8 @@ pub enum BrainEvent {
     /// the plan's rule.
     MoveFailed { busy: bool, why: &'static str },
     Session(SessionSignal),
+    /// The screen locked or the machine went to sleep (true), and back (false).
+    Locked(bool),
     Control(Ctl),
     /// Something on screen (focus, a window, the pointer, a workspace): decided at the next
     /// tick, on fresh senses (busy, typing, fullscreen, where she is).
@@ -274,6 +276,8 @@ pub enum EmoteKey {
     Sulk,
     /// A summon for a finished turn or an error landed: one wave.
     Wave,
+    /// He's back (an unlock, a long absence): the morning one the first of a day before noon.
+    Greet { morning: bool },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -332,6 +336,9 @@ pub struct Senses {
     pub typing: bool,
     /// She is asleep (the session's Sleepy): nothing moves her on her own until she wakes.
     pub asleep: bool,
+    /// Local wall seconds now (unix + UTC offset; `crate::life`): her day. None: no time of
+    /// day (no night, no dozes, no greetings).
+    pub local: Option<f64>,
 }
 
 // ---- tuning ------------------------------------------------------------------------------
@@ -350,7 +357,13 @@ pub struct Tuning {
     pub first_roam_min_s: f64,
     pub away_after_s: f64,
     pub back_idle_s: f64,
+    /// The away nap this long after he left (at night `nap_night_s`; `crate::life`).
     pub nap_after_s: f64,
+    pub nap_night_s: f64,
+    /// Low on energy (late at night), she dozes off now and then while he's there.
+    pub dozes: bool,
+    /// He's back (an unlock, a long absence): she greets him.
+    pub greets: bool,
     pub bid_stage_s: f64,
     pub bid_emote_s: (f64, f64),
     pub escalations: u8,
@@ -426,7 +439,10 @@ impl Tuning {
             first_roam_min_s: 30.0,
             away_after_s: 300.0,
             back_idle_s: 3.0,
-            nap_after_s: 600.0,
+            nap_after_s: crate::life::NAP_AWAY_S,
+            nap_night_s: crate::life::NAP_AWAY_NIGHT_S,
+            dozes: true,
+            greets: true,
             bid_stage_s: 20.0,
             bid_emote_s: (6.0, 10.0),
             escalations: 2,
@@ -676,6 +692,15 @@ pub struct Brain {
     force_seek: bool,
     hidden: bool,
     napping_pose: bool,
+    /// The screen is locked (or the machine asleep): napping, and his input doesn't count.
+    locked: bool,
+    /// The last senses' local time, at that brain time (`local_at`).
+    clock: Option<(f64, f64)>,
+    energy: crate::life::Energy,
+    /// A doze (him there, her energy low) ends then.
+    doze_until: Option<f64>,
+    /// Local times of the greetings (a few a day).
+    greets: Vec<f64>,
     /// The last wake-up (Sleepy or the nap over): the grace runs from here.
     woke_at: Option<f64>,
     /// The last time he handled her while she slept (a drag, a pat, a landing).
@@ -742,6 +767,11 @@ impl Brain {
             force_seek: false,
             hidden: false,
             napping_pose: false,
+            locked: false,
+            clock: None,
+            energy: crate::life::Energy::default(),
+            doze_until: None,
+            greets: Vec::new(),
             woke_at: None,
             handled_at: None,
             approaches: Bag::default(),
@@ -810,6 +840,15 @@ impl Brain {
 
     /// Integrate the drives to `t` (rates are constant between steps).
     fn advance(&mut self, t: f64) {
+        use crate::life::Spent;
+        let spent = if self.asleep() {
+            Spent::Asleep
+        } else if self.present {
+            Spent::Awake
+        } else {
+            Spent::Idle
+        };
+        self.energy.advance(t, spent);
         if t > self.t {
             self.attn = self.attn_at(t);
             self.roam = self.roam_at(t);
@@ -863,12 +902,108 @@ impl Brain {
         }
         self.mode = Mode::Passive;
         self.handled_at = None;
+        self.doze_until = None;
         if std::mem::take(&mut self.napping_pose) {
             self.emit(t, Intent::Pose(None));
         }
         if !self.sensed.asleep {
             self.woke(t, why);
         }
+    }
+
+    /// Asleep now (`why`: away, locked, a doze): the nap's pose on the floor, else in place.
+    fn nap(&mut self, t: f64, why: &str) {
+        self.end_episode(t, false);
+        self.mode = Mode::Napping;
+        self.focus_at = None;
+        self.follow_at = None;
+        if self.sensed.placement == PlaceKind::Ground {
+            self.napping_pose = true;
+            self.emit(t, Intent::Pose(Some(RestPose::Nap)));
+            self.note(t, format!("nap ({why})"));
+        } else {
+            self.note(t, format!("nap ({why}, in place)"));
+        }
+    }
+
+    /// He's here again: present, the grace before a bid, up from a nap.
+    fn back(&mut self, t: f64, why: &str) {
+        self.advance(t);
+        self.present = true;
+        self.away_since = None;
+        self.no_bid_before = self.no_bid_before.max(t + self.tuning.back_grace_s);
+        self.next_micro = t + self.micro_gap();
+        self.note(t, why.into());
+        self.end_nap(t, why);
+    }
+
+    /// Local wall seconds at brain time `t` (from the last senses that had them).
+    fn local_at(&self, t: f64) -> Option<f64> {
+        self.clock.map(|(t0, l0)| l0 + (t - t0))
+    }
+
+    /// The away nap for an absence from `away`: sooner at night.
+    fn nap_due(&self, away: f64) -> f64 {
+        match self.clock {
+            Some((t0, l0)) => crate::life::nap_due(away, self.tuning.nap_after_s, self.tuning.nap_night_s, |t| l0 + (t - t0)),
+            None => away + self.tuning.nap_after_s,
+        }
+    }
+
+    /// She may doze off now: him here and calm (no holder, no turn, not typing, no gate shut),
+    /// her energy low, awake a good while.
+    fn doze_ok(&self, t: f64) -> bool {
+        let Some(l) = self.local_at(t) else { return false };
+        let awake_for = t - self.woke_at.unwrap_or(self.start).max(self.start);
+        self.tuning.dozes
+            && self.present
+            && !self.locked
+            && self.mode == Mode::Passive
+            && self.pending.is_none()
+            && !self.sensed.asleep
+            && !self.sensed.typing
+            && self.sensed.busy.is_empty()
+            && !self.dnd(t)
+            && !self.sensed.fullscreen
+            && !self.hidden
+            && crate::life::may_doze(self.energy.value(l), awake_for)
+    }
+
+    /// He came back: one greeting if the day's rules allow (`life::greeting`).
+    fn greet(&mut self, t: f64, r: crate::life::Return) {
+        let Some(l) = self.local_at(t) else { return };
+        let quiet = !self.tuning.greets || self.dnd(t) || self.sensed.fullscreen || self.hidden;
+        let day = crate::life::day_of(l);
+        self.greets.retain(|&g| crate::life::day_of(g) >= day - 1);
+        let today = self.greets.iter().filter(|&&g| crate::life::day_of(g) == day).count();
+        match crate::life::greeting(r, quiet, today, l) {
+            Some(g) => {
+                self.greets.push(l);
+                self.emit(t, Intent::Emote(EmoteKey::Greet { morning: g.morning }));
+            }
+            None => self.note(t, format!("no greeting ({r:?}{})", if quiet { ", quiet" } else { "" })),
+        }
+    }
+
+    /// Her day in the snapshot: locked, a doze, her energy, the local hour, the greetings.
+    fn day_snapshot(&self, now: f64) -> serde_json::Value {
+        let r = |v: f64| (v * 1000.0).round() / 1000.0;
+        let l = self.local_at(now);
+        serde_json::json!({
+            "locked": self.locked,
+            "dozing_left_s": self.doze_until.map(|u| r(u - now)),
+            "energy": l.map(|l| r(self.energy.value(l))),
+            "fatigue": r(self.energy.fatigue),
+            "excite": r(self.energy.excite),
+            "local_h": l.map(|l| r(crate::life::hour(l))),
+            "greets_today": l.map(|l| self.greets.iter().filter(|&&g| crate::life::day_of(g) == crate::life::day_of(l)).count()),
+        })
+    }
+
+    /// Asleep in the brain's own sense (the away nap, a doze, the lock): the session shows it
+    /// (Sleepy, BRIEF-alive Q1).
+    pub fn napping(&self) -> bool {
+        self.mode == Mode::Napping
     }
 
     /// The moves of the rolling hour, weighted (a small hop counts `hop_weight`).
@@ -923,7 +1058,10 @@ impl Brain {
         if let (false, Some(a)) = (self.present, self.away_since)
             && self.mode != Mode::Napping
         {
-            take(a + self.tuning.nap_after_s);
+            take(self.nap_due(a));
+        }
+        if let Some(u) = self.doze_until {
+            take(u);
         }
         match &self.mode {
             Mode::Seeking { since, .. } => take(since + self.tuning.seek_timeout_s),
@@ -1045,6 +1183,9 @@ impl Brain {
         // The fullscreen gate is read at every tick that brings senses (a timer between two
         // polls must not move her onto a fullscreen app that came up since the last poll).
         if let Some(s) = senses {
+            if let Some(l) = s.local {
+                self.clock = Some((t, l - (s.now - t)));
+            }
             self.sensed.fullscreen = s.fullscreen;
             self.sensed.fullscreen_here = s.fullscreen_here;
             // Asleep too: a roam due between two polls must not walk her off in her sleep.
@@ -1083,18 +1224,17 @@ impl Brain {
         }
         if let (false, Some(a)) = (self.present, self.away_since)
             && self.mode != Mode::Napping
-            && t + EPS >= a + self.tuning.nap_after_s
+            && t + EPS >= self.nap_due(a)
         {
-            self.end_episode(t, false);
-            self.mode = Mode::Napping;
-            self.focus_at = None;
-            self.follow_at = None;
-            if self.sensed.placement == PlaceKind::Ground {
-                self.napping_pose = true;
-                self.emit(t, Intent::Pose(Some(RestPose::Nap)));
-            } else {
-                self.note(t, "nap (in place)".into());
-            }
+            self.nap(t, "away");
+        }
+        if self.doze_until.is_some_and(|u| t + EPS >= u) {
+            self.end_nap(t, "doze over");
+        } else if self.doze_ok(t) {
+            let (lo, hi) = crate::life::DOZE_S;
+            let d = self.rng.range(lo as f32, hi as f32) as f64;
+            self.nap(t, "doze");
+            self.doze_until = Some(t + d);
         }
         self.timers(t);
         self.triggers(t);
@@ -1107,7 +1247,9 @@ impl Brain {
             self.handled_at = Some(t);
         }
         let handled = self.mode == Mode::Napping && self.handled_at.is_some_and(|h| t - idle <= h + self.tuning.handled_s);
-        if self.present && idle >= self.tuning.away_after_s {
+        if self.locked {
+            // Behind the locker: typing his password isn't him back (the unlock is).
+        } else if self.present && idle >= self.tuning.away_after_s {
             self.advance(t);
             self.present = false;
             self.away_since = Some(t);
@@ -1116,13 +1258,9 @@ impl Brain {
                 self.end_episode(t, true);
             }
         } else if !self.present && idle < self.tuning.back_idle_s && !handled {
-            self.advance(t);
-            self.present = true;
-            self.away_since = None;
-            self.no_bid_before = self.no_bid_before.max(t + self.tuning.back_grace_s);
-            self.next_micro = t + self.micro_gap();
-            self.note(t, "back".into());
-            self.end_nap(t, "he is back");
+            let away_s = self.away_since.map_or(0.0, |a| t - a);
+            self.back(t, "he is back");
+            self.greet(t, crate::life::Return::Back { away_s });
         }
         // Fullscreen on her monitor, hide mode.
         let want = self.settings.fullscreen == Fullscreen::Hide && self.sensed.fullscreen_here;
@@ -1229,7 +1367,8 @@ impl Brain {
                         let e = self.prompt_summons.entry(id).or_insert((0, t));
                         *e = (e.0 + 1, t);
                     }
-                    // A summon preempts whatever she was doing (a bid included).
+                    // A summon preempts whatever she was doing (a bid included; a doze: up).
+                    self.end_nap(t, "summon");
                     self.mode = Mode::Passive;
                     self.seek(t, Why::Summon(p.kind));
                     return;
@@ -1509,9 +1648,14 @@ impl Brain {
             BrainEvent::Interaction(touch) => {
                 self.note(t, format!("touch {touch:?}"));
                 self.last_interaction = Some(t);
+                if touch == Touch::Headpat {
+                    self.energy.excite(crate::life::PAT);
+                }
                 if self.asleep() && !touch.wakes() {
                     // A pat, a drag, the menu: she sleeps on (wherever he puts her).
                     self.handled_at = Some(t);
+                } else if self.locked {
+                    // Behind the locker (a test's touch): the unlock brings him back.
                 } else if !self.present || self.mode == Mode::Napping {
                     // He is obviously here.
                     self.present = true;
@@ -1625,8 +1769,32 @@ impl Brain {
                 self.screen_q.push(s);
                 self.next_poll = self.next_poll.min(t);
             }
+            BrainEvent::Locked(on) if on != self.locked => {
+                self.locked = on;
+                if on {
+                    // Napping at once, wherever she is (a summon waits for the unlock).
+                    self.note(t, "locked".into());
+                    self.advance(t);
+                    self.present = false;
+                    self.away_since.get_or_insert(t);
+                    if self.mode == Mode::Napping {
+                        // A doze becomes the nap.
+                        self.doze_until = None;
+                    } else {
+                        self.nap(t, "locked");
+                    }
+                } else {
+                    self.back(t, "unlocked");
+                    self.greet(t, crate::life::Return::Unlock);
+                }
+            }
+            BrainEvent::Locked(_) => {}
             BrainEvent::Session(sig) => {
                 self.note(t, format!("session {sig:?}"));
+                // News wakes a doze (he's here); an away nap waits for him.
+                if self.present && matches!(sig, SessionSignal::Prompt(_) | SessionSignal::Done | SessionSignal::Error { own_abort: false }) {
+                    self.end_nap(t, "news");
+                }
                 match sig {
                     SessionSignal::Prompt(id) => {
                         self.prompt_open = Some(id);
@@ -1851,6 +2019,7 @@ impl Brain {
             "busy": self.sensed.busy,
             "present": self.present,
             "asleep": self.asleep(),
+            "day": self.day_snapshot(now),
             "wake_grace_left_s": self.woke_at.map(|w| r(w + self.tuning.wake_grace_s - now)).filter(|&g| g > 0.0),
             "idle_s": r(self.sensed.idle_s),
             "near": self.sensed.near,
@@ -3087,5 +3256,206 @@ mod tests {
         let r = run(&mut b, 0.0, 1151.0, false, &s, &ev);
         let up: Vec<_> = r.log.iter().filter(|(_, i)| *i == Intent::Pose(None)).map(|x| x.0).collect();
         assert_eq!(up, vec![1150.0]);
+    }
+
+    // ---- her day (BRIEF-alive S11, S12, Q1) -------------------------------------------------
+
+    /// Local seconds at `h:mm` on a fixed day.
+    fn clock(h: f64, m: f64) -> f64 {
+        20_000.0 * 86_400.0 + h * 3600.0 + m * 60.0
+    }
+    /// He's at the desk: input every couple of minutes, never 5 min idle.
+    fn working(t: f64) -> f64 {
+        t.rem_euclid(120.0)
+    }
+    fn naps(r: &Run) -> Vec<f64> {
+        r.log.iter().filter(|(_, i)| *i == Intent::Pose(Some(RestPose::Nap))).map(|x| x.0).collect()
+    }
+    fn ups(r: &Run) -> Vec<f64> {
+        r.log.iter().filter(|(_, i)| *i == Intent::Pose(None)).map(|x| x.0).collect()
+    }
+    fn greets(r: &Run) -> Vec<(f64, bool)> {
+        r.log.iter().filter_map(|(t, i)| if let Intent::Emote(EmoteKey::Greet { morning }) = i { Some((*t, *morning)) } else { None }).collect()
+    }
+
+    #[test]
+    fn at_his_desk_she_stays_awake_by_day() {
+        // Today she'd sleep 10 min after his last chat; now, hours of quiet work keep her up.
+        for (h, seed) in [(9.0, 1), (14.0, 2), (19.0, 3)] {
+            let mut b = brain(seed);
+            let l0 = clock(h, 0.0);
+            let s = move |t: f64| Senses { idle_s: working(t), local: Some(l0 + t), ..here(t) };
+            let r = run(&mut b, 0.0, 3.0 * 3600.0, false, &s, &[]);
+            assert!(naps(&r).is_empty(), "{h}:00: napped at {:?}", naps(&r));
+            assert!(!b.napping());
+            assert!(!moves(&r).is_empty(), "{h}:00: she lives (moves) meanwhile");
+        }
+    }
+
+    #[test]
+    fn late_at_night_she_dozes_with_him_there() {
+        let mut b = brain(7);
+        let l0 = clock(0.0, 40.0);
+        let s = move |t: f64| Senses { idle_s: working(t), local: Some(l0 + t), ..here(t) };
+        let r = run(&mut b, 0.0, 3.0 * 3600.0, false, &s, &[]);
+        let (down, up) = (naps(&r), ups(&r));
+        assert!(!down.is_empty(), "no doze at 00:40-03:40");
+        assert!(down[0] >= crate::life::DOZE_GAP_S, "awake a while first: {down:?}");
+        for (d, u) in down.iter().zip(&up) {
+            let len = u - d;
+            assert!((crate::life::DOZE_S.0 - 1.0..=crate::life::DOZE_S.1 + 1.0).contains(&len), "doze {d}..{u}");
+            assert!(moves(&r).iter().all(|(t, _)| t < d || t >= u), "no moves while dozing");
+        }
+        for w in down.windows(2) {
+            assert!(w[1] - w[0] >= crate::life::DOZE_GAP_S, "dozes apart: {down:?}");
+        }
+        // News wakes a doze (he's there).
+        let mut b = brain(7);
+        let r = run(&mut b, 0.0, 1600.0, false, &s, &[]);
+        let d = naps(&r)[0];
+        let r = run(&mut b, 1600.0, 1700.0, false, &s, &[(d + 30.0, BrainEvent::Session(SessionSignal::Done))]);
+        assert_eq!(ups(&r).first().copied(), Some(d + 30.0));
+    }
+
+    #[test]
+    fn a_lock_naps_at_once_and_the_unlock_greets_once() {
+        let mut b = brain(11);
+        let l0 = clock(14.0, 0.0);
+        // He types his password behind the locker: input, but not him back.
+        let s = move |t: f64| Senses { idle_s: working(t), local: Some(l0 + t), ..here(t) };
+        let ev = [(100.0, BrainEvent::Locked(true)), (110.0, BrainEvent::Locked(true)), (900.0, BrainEvent::Locked(false))];
+        let r = run(&mut b, 0.0, 1200.0, false, &s, &ev);
+        assert_eq!(naps(&r), vec![100.0], "a lock: the nap at once");
+        assert_eq!(ups(&r), vec![900.0]);
+        assert_eq!(greets(&r), vec![(900.0, false)], "one greeting");
+        assert!(moves(&r).iter().all(|(t, _)| *t < 100.0 || *t >= 900.0), "no moves while locked");
+        // A few a day: the fourth unlock just wakes her.
+        let mut ev = Vec::new();
+        for k in 0..4 {
+            ev.push((1300.0 + k as f64 * 1000.0, BrainEvent::Locked(true)));
+            ev.push((1800.0 + k as f64 * 1000.0, BrainEvent::Locked(false)));
+        }
+        let r = run(&mut b, 1200.0, 5400.0, false, &s, &ev);
+        assert_eq!(ups(&r).len(), 4);
+        assert_eq!(greets(&r).len(), crate::life::GREETS_PER_DAY - 1);
+    }
+
+    #[test]
+    fn no_greeting_under_dnd_or_hidden() {
+        for dnd in [true, false] {
+            let mut b = brain(12);
+            let l0 = clock(14.0, 0.0);
+            // Not DND: a fullscreen window on her monitor (she's hidden).
+            let s = move |t: f64| Senses { idle_s: working(t), local: Some(l0 + t), fullscreen: !dnd, fullscreen_here: !dnd, ..here(t) };
+            let mut ev = vec![(100.0, BrainEvent::Locked(true)), (900.0, BrainEvent::Locked(false))];
+            if dnd {
+                ev.push((50.0, BrainEvent::Control(Ctl::Dnd(3600.0))));
+            }
+            let r = run(&mut b, 0.0, 1000.0, false, &s, &ev);
+            assert_eq!(ups(&r), vec![900.0], "dnd {dnd}: she still wakes");
+            assert!(greets(&r).is_empty(), "dnd {dnd}: no greeting");
+        }
+    }
+
+    #[test]
+    fn the_first_greeting_of_a_morning_is_the_morning_one() {
+        let mut b = brain(13);
+        let l0 = clock(8.0, 0.0);
+        let s = move |t: f64| Senses { idle_s: working(t), local: Some(l0 + t), ..here(t) };
+        let ev = [(100.0, BrainEvent::Locked(true)), (700.0, BrainEvent::Locked(false)), (800.0, BrainEvent::Locked(true)), (1400.0, BrainEvent::Locked(false))];
+        let r = run(&mut b, 0.0, 1500.0, false, &s, &ev);
+        assert_eq!(greets(&r), vec![(700.0, true), (1400.0, false)]);
+    }
+
+    #[test]
+    fn back_after_a_long_absence_greets_a_short_one_doesnt() {
+        for (away, want) in [(900.0, 0), (2700.0, 1)] {
+            let mut b = brain(14);
+            let l0 = clock(15.0, 0.0);
+            let s = move |t: f64| Senses { idle_s: if (100.0..100.0 + away).contains(&t) { t - 100.0 } else { working(t) }, local: Some(l0 + t), ..here(t) };
+            let r = run(&mut b, 0.0, 100.0 + away + 300.0, false, &s, &[]);
+            assert_eq!(greets(&r).len(), want, "away {away} s");
+        }
+    }
+
+    #[test]
+    fn the_away_nap_comes_sooner_at_night() {
+        for (h, after) in [(15.0, 600.0), (23.0, 300.0)] {
+            let mut b = brain(15);
+            let l0 = clock(h, 0.0);
+            let s = move |t: f64| Senses { idle_s: if t < 100.0 { 0.0 } else { t - 100.0 }, local: Some(l0 + t), ..here(t) };
+            let r = run(&mut b, 0.0, 2000.0, false, &s, &[]);
+            // Away from the first poll with idle >= 300 (t ~ 405).
+            let nap = naps(&r)[0];
+            assert!((400.0 + after..=410.0 + after).contains(&nap), "{h}:00: nap at {nap}");
+        }
+    }
+
+    #[test]
+    fn a_pat_lifts_her_energy_a_while() {
+        let mut b = brain(16);
+        let l0 = clock(1.0, 0.0);
+        let s = move |t: f64| Senses { idle_s: working(t), local: Some(l0 + t), ..here(t) };
+        run(&mut b, 0.0, 10.0, false, &s, &[]);
+        let low = b.snapshot(10.0)["day"]["energy"].as_f64().unwrap();
+        run(&mut b, 10.0, 20.0, false, &s, &[(11.0, BrainEvent::Interaction(Touch::Headpat))]);
+        let up = b.snapshot(20.0)["day"]["energy"].as_f64().unwrap();
+        assert!(up > low + 0.1, "{low} -> {up}");
+    }
+
+    /// A day, time-scaled: he works 09-12, lunch away, works 13-18, locks 18-19, works till
+    /// 01:30 and leaves. Awake while he works by day, the lunch nap, the lock nap, one
+    /// greeting per return, dozes only late, the overnight nap, and the moves cap holds.
+    #[test]
+    fn a_day_gauntlet() {
+        let h = |x: f64| (x - 7.0) * 3600.0;
+        let l0 = clock(7.0, 0.0);
+        let present = |t: f64| (h(9.0)..h(12.0)).contains(&t) || (h(13.0)..h(25.5)).contains(&t);
+        let s = move |t: f64| {
+            let idle = if present(t) {
+                working(t)
+            } else {
+                // Since he left (07:00 counts as the night before).
+                let left = [h(7.0), h(12.0), h(25.5)].into_iter().filter(|&x| x <= t).fold(f64::NEG_INFINITY, f64::max);
+                t - left + if t < h(9.0) { 3600.0 } else { 0.0 }
+            };
+            Senses { idle_s: idle, local: Some(l0 + t), ..here(t) }
+        };
+        let ev = [(h(18.0), BrainEvent::Locked(true)), (h(19.0), BrainEvent::Locked(false))];
+        for seed in [21, 22, 23] {
+            let mut b = brain(seed);
+            let r = run(&mut b, 0.0, 24.0 * 3600.0, false, &s, &ev);
+            // Nap intervals from the poses.
+            let (down, up) = (naps(&r), ups(&r));
+            let asleep = |t: f64| down.iter().any(|&d| d <= t && up.iter().find(|&&u| u > d).is_none_or(|&u| t < u));
+            let at = |x: f64| asleep(h(x));
+            assert!(at(8.5), "{seed}: asleep before he comes in");
+            for x in [9.5, 10.5, 11.5, 13.5, 15.0, 17.5, 19.5, 21.0] {
+                assert!(!at(x), "{seed}: asleep at {x} while he works");
+            }
+            assert!(at(12.5), "{seed}: the lunch nap");
+            assert!(down.iter().any(|&d| d == h(18.0)), "{seed}: the lock naps at once");
+            assert!(up.iter().any(|&u| u == h(19.0)), "{seed}: the unlock");
+            assert!(at(27.0) && at(30.5), "{seed}: the overnight nap");
+            // Dozes only late (22:00 on), him there.
+            for &d in &down {
+                if present(d) && d != h(18.0) {
+                    assert!(d >= h(22.0), "{seed}: a doze at {:.2} h", d / 3600.0 + 7.0);
+                }
+            }
+            assert!(down.iter().any(|&d| present(d) && d >= h(22.0)), "{seed}: no doze late with him there");
+            // A greeting at 09 (back from the night), 13 (lunch) and 19 (unlock): at most 3.
+            let g = greets(&r);
+            assert!(!g.is_empty() && g.len() <= crate::life::GREETS_PER_DAY, "{seed}: greets {g:?}");
+            assert!(g.iter().any(|&(t, _)| t == h(19.0)) || g.len() == crate::life::GREETS_PER_DAY, "{seed}: {g:?}");
+            // Moves: none while asleep, the hourly cap everywhere.
+            let m = moves(&r);
+            assert!(m.iter().all(|(t, p)| !asleep(*t) || p.why == "rescue"), "{seed}: a move asleep");
+            let hop = b.tuning.hop_weight;
+            for (t0, _) in &m {
+                let load: f64 = m.iter().filter(|(t, _)| t >= t0 && *t < t0 + 3600.0).map(|(_, p)| weight_of(p.why, hop)).sum();
+                assert!(load <= b.tuning.move_cap_per_hour as f64 + 1.0, "{seed}: load {load} in the hour from {t0}");
+            }
+        }
     }
 }

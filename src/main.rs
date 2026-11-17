@@ -32,6 +32,7 @@ mod frames;
 mod fx;
 mod host;
 mod intro;
+mod life;
 mod pack;
 mod art;
 mod variants;
@@ -383,6 +384,16 @@ fn run(t_start: Instant) -> Result<()> {
             })
             .map_err(|e| elog!("synaps-avatar: pointer watcher: {e:#}"))
             .ok();
+            // His presence: the screen locked, the machine asleep (logind; never under test).
+            if std::env::var_os("SA_BRAIN_SYNTH").is_none() {
+                let tx = tx2.clone();
+                os.watch_session(move |ev| {
+                    let (r, _) = std::sync::mpsc::channel();
+                    tx.send_blocking((control::Command::Watch(ev), r)).ok();
+                })
+                .map_err(|e| elog!("synaps-avatar: session watcher: {e:#}; a lock won't put her to sleep at once"))
+                .ok();
+            }
             // Real LISTENING: media players on the session bus (signals only). Tests see only
             // their own fake player (SA_MPRIS_ONLY), never his.
             let music = settings::Settings::load().map(|s| s.music).unwrap_or_default();

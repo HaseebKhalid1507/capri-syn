@@ -772,6 +772,10 @@ pub struct BrainSpec {
     pub satisfied: SatisfiedSpec,
     pub sulk: Vec<Step>,
     pub wave: Vec<Step>,
+    /// He's back (an unlock, a long absence): this; the first of a morning `greetMorning`.
+    /// Empty: the wave.
+    pub greet: Vec<Step>,
+    pub greet_morning: Vec<Step>,
     pub floor_sit: Option<MoodSpec>,
     /// After a sulk she sits down where she landed and stays low: this base and loop.
     pub sulk_sit: Option<MoodSpec>,

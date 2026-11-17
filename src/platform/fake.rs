@@ -2,7 +2,7 @@
 //! `cargo test` (with and without target events, so both change-detection paths are covered).
 
 use super::contract::{self, Driver};
-use super::{Caps, Desktop, FxZ, Hint, Monitor, Os, Place, PointerRead, Role, ShapeRect, Stage, Visible, Win, WinId, WinRect};
+use super::{Caps, Desktop, FxZ, Hint, Monitor, Os, Place, PointerRead, Role, SessionEv, ShapeRect, Stage, Visible, Win, WinId, WinRect};
 use anyhow::{Result, anyhow};
 use gpui_kit::{Window, WindowKind, WindowOptions};
 use std::collections::HashMap;
@@ -38,13 +38,18 @@ struct World {
     visible: Option<Vec<ShapeRect>>,
     /// Effect layers: origin and rects.
     fx: HashMap<usize, ((i32, i32), Vec<ShapeRect>)>,
+    /// Like Hyprland today: no idle time of its own (the core counts from the pointer).
+    no_idle: bool,
 }
 
 type HintFn = Box<dyn Fn(Hint) + Send>;
 
+type SessionFn = Box<dyn Fn(SessionEv) + Send>;
+
 struct Fake {
     world: Mutex<World>,
     hint: Mutex<Option<HintFn>>,
+    session: Mutex<Option<SessionFn>>,
     caps: Caps,
 }
 
@@ -123,7 +128,11 @@ impl Desktop for FakeDesktop {
         Ok(Box::new(move || Some(f.w().pointer)))
     }
     fn idle_ms(&self) -> Option<u32> {
-        Some(0)
+        (!self.0.w().no_idle).then_some(0)
+    }
+    fn watch_session(&self, on: Box<dyn Fn(SessionEv) + Send>) -> Result<()> {
+        *self.0.session.lock().map_err(|_| anyhow!("fake session"))? = Some(on);
+        Ok(())
     }
     fn char_key_down(&self, _ch: char) -> Result<bool> {
         Ok(false)
@@ -281,6 +290,12 @@ impl Driver for FakeDriver {
         self.0.w().visible.clone()
     }
     async fn settle(&mut self) {}
+    fn session(&mut self, ev: SessionEv) -> bool {
+        if let Some(f) = self.0.session.lock().expect("fake session").as_ref() {
+            f(ev);
+        }
+        true
+    }
     /// Spaces only where target events are polled (a backend with events has none here).
     fn to_other_space(&mut self, w: WinId) -> bool {
         if self.0.caps.target_events {
@@ -296,7 +311,7 @@ impl Driver for FakeDriver {
 
 fn fake(target_events: bool) -> (Os, FakeDriver) {
     let world = World { root: (1600, 1000), monitors: vec![Monitor { primary: true, x: 0, y: 0, w: 1600, h: 1000 }], next: 100, ..World::default() };
-    let f = Arc::new(Fake { world: Mutex::new(world), hint: Mutex::new(None), caps: Caps { shape_mode: true, target_events, fx_layers: true, costly_redraw: false, implicit_grab: true, goal_geometry: false, layout_events: false, host_per_output: false } });
+    let f = Arc::new(Fake { world: Mutex::new(world), hint: Mutex::new(None), session: Mutex::new(None), caps: Caps { shape_mode: true, target_events, fx_layers: true, costly_redraw: false, implicit_grab: true, goal_geometry: false, layout_events: false, host_per_output: false } });
     (Os::new(Arc::new(FakeDesktop(f.clone())), Box::new(FakeStage(f.clone()))), FakeDriver(f))
 }
 
@@ -304,7 +319,25 @@ fn fake(target_events: bool) -> (Os, FakeDriver) {
 fn contract_fake_with_target_events() {
     let (os, mut d) = fake(true);
     let passed = contract::block_on(contract::run(&os, &mut d)).unwrap();
-    assert_eq!(passed.len(), 11);
+    assert_eq!(passed.len(), 12);
+}
+
+#[test]
+fn without_idle_time_presence_is_the_pointer() {
+    let (os, mut d) = fake(true);
+    d.0.w().no_idle = true;
+    assert_eq!(os.idle_ms(), None, "nothing seen yet");
+    let cfg = super::PointerCfg { near_px: 150.0, swipe_px: 120.0, swipe_speed: 1500.0, hover: std::time::Duration::from_millis(1500) };
+    os.watch_pointer(cfg, |_| {}).unwrap();
+    os.set_pointer_watch(Some(WinRect::new(600, 300, 100, 200)), true);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    d.warp(560, 400);
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    let ms = os.idle_ms().expect("the pointer's");
+    assert!(ms < 1000, "{ms} ms since it moved");
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    assert!(os.idle_ms().unwrap() >= ms + 500, "and growing while it's still");
+    os.set_pointer_watch(None, false);
 }
 
 #[test]

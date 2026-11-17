@@ -211,6 +211,9 @@ pub struct Link {
     trigger: String,
     flash: Option<(Mood, Instant)>,
     last_active: Instant,
+    /// Asleep, as her day has it (`brain::Brain::napping`: away, locked, a doze; BRIEF-alive
+    /// Q1). None (no brain): the old rule, Sleepy after `sleepy_after` of quiet.
+    resting: Option<bool>,
     retry_at: Option<Instant>,
     /// Sent but not yet seen as a turn or steer: comes back if refused.
     pending_input: Option<String>,
@@ -272,6 +275,7 @@ impl Link {
             trigger: String::new(),
             flash: None,
             last_active: now,
+            resting: None,
             retry_at: None,
             pending_input: None,
             once: Vec::new(),
@@ -425,10 +429,23 @@ impl Link {
         self.input(Input::Abort, now)
     }
 
-    /// He woke her (the field, the Line, $mod+c, a summon): the quiet clock starts again, so
-    /// Sleepy ends now and comes back after `sleepy_after` more of quiet.
+    /// He woke her (the field, the Line, $mod+c, a summon): Sleepy ends now (her day's nap
+    /// ends with it; without one, it comes back after `sleepy_after` more of quiet).
     pub fn wake(&mut self, now: Instant) {
         self.last_active = self.last_active.max(now);
+        if let Some(r) = &mut self.resting {
+            *r = false;
+        }
+    }
+
+    /// Whether she's asleep by her day (present and quiet is awake). The view sets it from the
+    /// brain at every decision; until then (or without one) the quiet clock decides.
+    pub fn set_resting(&mut self, on: bool) {
+        self.resting = Some(on);
+    }
+
+    pub fn resting(&self) -> Option<bool> {
+        self.resting
     }
 
     /// The text field opened (switch to Mirror ahead of Enter) or closed.
@@ -923,7 +940,7 @@ impl Link {
         if let Some((_, until)) = self.flash {
             t.push(until);
         }
-        if self.live() && !self.busy {
+        if self.live() && !self.busy && self.resting.is_none() {
             t.push(self.last_active + self.opts.sleepy_after);
         }
         t.into_iter().filter(|&d| d > now).min()
@@ -951,7 +968,7 @@ impl Link {
             && now < until
         {
             m
-        } else if now >= self.last_active + self.opts.sleepy_after {
+        } else if self.resting.unwrap_or(now >= self.last_active + self.opts.sleepy_after) {
             Mood::Sleepy
         } else {
             Mood::Idle
@@ -1337,6 +1354,23 @@ mod tests {
         assert_eq!(l.body(t0 + Duration::from_millis(3_100)).mood, Mood::Idle);
         assert_eq!(l.body(t0 + Duration::from_secs(601)).mood, Mood::Sleepy);
         assert_eq!(l.deadline(t0), Some(t0 + DONE_FOR));
+    }
+
+    #[test]
+    fn with_her_day_present_and_quiet_is_awake() {
+        // BRIEF-alive Q1: once her day decides, the quiet clock doesn't put her to sleep.
+        let t0 = Instant::now();
+        let mut l = live_link(t0);
+        l.set_resting(false);
+        assert_eq!(l.body(t0 + Duration::from_secs(3 * 3600)).mood, Mood::Idle, "hours of quiet, him at the desk");
+        assert_ne!(l.deadline(t0), Some(t0 + Duration::from_secs(600)), "no sleepy wake-up");
+        // Her day says asleep (away, locked, a doze): Sleepy, whatever the chat.
+        l.set_resting(true);
+        assert_eq!(l.body(t0 + Duration::from_secs(5)).mood, Mood::Sleepy);
+        // He talks to her: up at once.
+        l.wake(t0 + Duration::from_secs(6));
+        assert_eq!(l.body(t0 + Duration::from_secs(6)).mood, Mood::Idle);
+        assert_eq!(l.resting(), Some(false));
     }
 
     #[test]

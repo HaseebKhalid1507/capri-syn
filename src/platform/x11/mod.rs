@@ -437,6 +437,10 @@ impl Desktop for X11 {
         }))
     }
 
+    fn watch_session(&self, on: Box<dyn Fn(super::SessionEv) + Send>) -> Result<()> {
+        super::linux::watch_logind(on)
+    }
+
     /// MIT-SCREEN-SAVER.
     fn idle_ms(&self) -> Option<u32> {
         use x11rb::protocol::screensaver::ConnectionExt as _;
