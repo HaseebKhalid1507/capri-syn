@@ -15,6 +15,25 @@
 - The summon key on a parked Line counts as `waiting` only when the desktop refused the keyboard. Any
   other failure (she is gone) is logged as itself (`line: summoned, but she is gone`), not as a wait.
 
+### Windows: she runs her voice, a voice installer, the models, hold-to-talk (not shipped)
+- **She starts the sidecar on Windows** while `[voice] enabled` is on: the bundle beside her, in a job
+  object that kills it when she ends however she ends, restarted after 1, 2, 4 … 60 s, its log in
+  `%LOCALAPPDATA%\capri-voice`. Linux: unchanged (systemd runs it; she starts nothing).
+- **Connecting to it on Windows runs on a thread:** a stale endpoint on a silent port no longer
+  freezes her for up to ~2 s. Linux connects inline, as before.
+- **A voice installer of its own** (`synaps-avatar-voice-setup-….exe`). Her own installer stays ~9 MB.
+  Its "models" task fetches Whisper, Kokoro, Silero and the wake word's models (~320 MB, SHA-256
+  pinned, resumable) with `voice-models.ps1`.
+- **`[voice] hold_to_talk`** (Windows, opt-in): the summon key talks while held. The release is read
+  every 25 ms from her key thread, with no keyboard hook. A tap opens the Line as before.
+- `tools/test_capri_voice.py` no longer reads his `CAPRI_VOICE_SOCK` / `CAPRI_VOICE_ENDPOINT`, and
+  removes its temp folder.
+
+### Known issues
+- With `XDG_RUNTIME_DIR` unset, she and the sidecar look for the Linux socket in different places:
+  she in the temp dir (`$TMPDIR`, else `/tmp`), the sidecar in `/run/user/<uid>`. Set it, or set
+  `CAPRI_VOICE_SOCK` for both. It isn't aligned yet because that would change how she behaves.
+
 ### Windows: the voice sidecar's link and its Windows layer (not shipped)
 - Her link to `capri-voice` goes through the platform layer. Linux: unchanged (the same Unix socket, the
   same log lines). Windows: loopback TCP after a two-token handshake (`endpoint.json` in

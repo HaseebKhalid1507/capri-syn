@@ -1,8 +1,9 @@
 # Voice on Windows: the capri-voice sidecar there
 
 **Status:** decided: **A, the bundled Python sidecar** (Jawz, for Haseeb). **V1a** (VM-free, CI-checked)
-built the link and the sidecar's Windows layer, and a script that builds the bundle; what it is, and what
-is left, comes first below. The options as written before the decision follow, for the record. Sizes are
+built the link and the sidecar's Windows layer, and a script that builds the bundle. **V1b** (VM-free,
+CI-checked): she starts the sidecar, connects off her UI thread, the voice installer with the model
+fetch, hold-to-talk. What they are, and what is left, comes first below. The options as written before the decision follow, for the record. Sizes are
 agent-days and guesses **[G]**. **[checked]** marks a fact read from a source (named). **[VM]** marks
 what needs a real Windows desktop with audio (his machine: the capri-win VM has no real audio and no GPU).
 
@@ -101,32 +102,63 @@ pywhispercpp has no win_arm64 wheel; numpy, onnxruntime, espeakng-loader, soundd
 **[VM]:** onnxruntime on a clean Windows may want the VC++ runtime (the runners have it installed): run
 the bundle on the capri-win VM before shipping it.
 
-### Into the installer: not wired (documented instead)
-Two reasons it isn't cheap:
-1. **Size.** An Inno component still sits inside `setup.exe` when unchecked, so every download would grow
-   from 9 MB to about 9 + 45 MB: the bundle is 143 MB installed, and the wheels alone are ~42 MB compressed.
-2. **Nothing starts the sidecar on Windows yet** (V1b).
+### Into the installer: picked in V1b, a separate download (option (1))
+The options were:
+- (1) a second, per-user voice installer;
+- (2) a component in hers;
+- (3) her installer downloading the bundle.
 
-The choices, for Haseeb:
-- (1) a second, per-user `synaps-avatar-voice-setup.exe` into `{localappdata}\Programs\synaps-avatar\voice`;
-  the main installer stays small;
-- (2) a component in the one installer;
-- (3) the installer downloads the bundle (its first download).
+An Inno component sits inside `setup.exe` even unchecked, so (2) would make every download of her
+grow from ~9 MB to ~55 MB (the bundle is 143 MB installed, ~45 MB compressed). (1) keeps her
+default download at ~9 MB and needs nothing fetched by her installer, which is what (3) would add.
+See "V1b" below.
 
-Wiring (2): `[Components] voice` (unchecked) → `[Files] Source: "build\voice\*"; DestDir: "{app}\voice";
-Components: voice; Flags: recursesubdirs`, `build.ps1 -Voice` runs `voice-bundle.ps1` first, and
-`test-install.ps1` checks `/COMPONENTS=voice`. About ½ day with (1) or (2).
+## V1b: what is built
+
+- **She runs the sidecar** (`src/platform/windows/sidecar.rs`). While `[voice] enabled` is on, a
+  supervisor thread starts `python.exe capri-voice` from the bundle:
+  - **Where:** `voice\` beside her exe (the voice installer's place), or `CAPRI_VOICE_BUNDLE`.
+  - **How:** no console window, `PYTHONUTF8`, in a job object with `KILL_ON_JOB_CLOSE`. The job's only
+    handle is hers, so the sidecar dies with her however she ends.
+  - **Restarts:** after 1, 2, 4 … 60 s, back to 1 s after a minute's run. Voice off kills it.
+  - **Not before the models are there:** her log says where to get them.
+  - **Its stdout and stderr:** `%LOCALAPPDATA%\capri-voice\capri-voice.log`, started over past 4 MB.
+  - `CAPRI_VOICE_SPAWN=0` leaves it to him; never under test. Linux: `voice_sidecar` does nothing
+    (systemd).
+  - **Tests (Windows CI):** a `ping` in the job dies when the job's handle closes; the supervisor's
+    restarts, backoff and stop; the bundle lookup.
+- **Connecting off her UI thread.** `platform::VOICE_LINK_BLOCKS` is true on Windows: `voice_connect`
+  hands the connect and the hello to a thread (`voice_link_bg`), one at a time, at most every 2 s after
+  a failure. Linux connects inline as before (the constant is false; the same calls in the same
+  order). Test: a silent listener; the caller returns in under 100 ms, and the thread gets the timeout.
+- **The model fetch** (`packaging/windows/voice-models.ps1`): `capri-voice-setup`'s files and URLs.
+  - **The pins:** Whisper's SHA-256s are Hugging Face's LFS ids. Kokoro's release publishes none: its
+    pins are the files `capri-voice-setup` fetched, and the sizes match the release. Silero's and the
+    wake word's are `capri-voice-setup`'s own.
+  - **How it fetches:** `curl.exe -C -` resumes a `.part`; a wrong hash is deleted and the run fails;
+    no admin.
+  - **CI:** the small files, a resume from half, a bad hash, a kept file.
+- **The voice installer: a separate download, not a component.** Of the two, it is the one with the
+  smaller default download: an Inno component sits inside `setup.exe` even unchecked (+~45 MB for
+  everyone), so hers stays ~9 MB (CI fails it past 20 MB).
+  - It installs the bundle beside her (her install folder from her installer's record).
+  - It runs the model fetch as a checked task, and adds a Start-menu entry to run it again.
+  - **Uninstall** removes the bundle and `%LOCALAPPDATA%\capri-voice`.
+  - **CI:** installed, checked and uninstalled unattended without the models, including the selftest
+    run by the installed interpreter, and her install folder elsewhere.
+- **Hold-to-talk, opt-in** (`[voice] hold_to_talk`, §6 (a)): the summon key's `WM_HOTKEY` is
+  `talk press`. Her key thread then reads the key every 25 ms (`GetAsyncKeyState`, OBS's pattern) and
+  its release is `talk release`. The avatar tells a hold from a tap, as for the Linux binding. No hook.
+  The state machine is unit-tested.
 
 ## What is left for voice on Windows [G]
 
 | | agent-days |
 |---|---|
-| V1b: she starts the sidecar (a job object with kill-on-close, following `[voice] enabled`; its log beside hers) | 1 |
-| the models: a PowerShell `capri-voice-setup` (the same pinned URLs and SHA-256s) | ½ |
-| the installer: (1), (2) or (3) above | ½ |
-| the [VM] / his-machine pass: every [VM] cell above, plus Whisper and Kokoro speed on his CPU, and the fixes | 1–2 |
-| hold-to-talk beyond tap and toggle (§6) | ½–1 |
-| **total** | **3½–5**, on top of V1a's ~2 (inside the 6–9 of option A) |
+| the [VM] / his-machine pass: every [VM] cell above and WINDOWS.md items 13–14, Whisper and Kokoro speed on his CPU, and the fixes | 1–2 |
+| the duck's level by ear, headphones by form factor (not name), rubberband bundled or not | ½ |
+| a signed build (SmartScreen will warn on both unsigned installers) | his call |
+| **total** | **1½–2½** (V1a ~2 and V1b ~2 done: inside the 6–9 of option A) |
 
 ## What there is today (Linux)
 
