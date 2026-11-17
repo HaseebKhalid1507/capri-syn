@@ -157,6 +157,24 @@ pub(super) struct LeapMove {
     startled: bool,
 }
 
+/// A walk under way (lachy's walk strip, B2c): her feet along `walk` on the line `feet_y`
+/// (the floor, or a window's top she stands on), then she settles into `place` at `origin`.
+pub(super) struct WalkMove {
+    walk: crate::motion::Walk,
+    t0: Instant,
+    feet_y: i32,
+    origin: (i32, i32),
+    place: Placement,
+}
+
+/// A move she may walk: from her feet (device root px) to `to_x` on the line `feet_y`.
+#[derive(Clone, Copy, Debug)]
+struct WalkPlan {
+    from_x: i32,
+    to_x: i32,
+    feet_y: i32,
+}
+
 pub(super) struct Scoot {
     hops: Vec<moves::Hop>,
     i: usize,
@@ -225,6 +243,8 @@ pub(super) struct BrainHost {
     // ---- lively (LOCKED #17) ----
     /// A small hop in the air.
     leap: Option<LeapMove>,
+    /// A walk (B2c).
+    walk: Option<WalkMove>,
     /// The focused top-level last seen (a focus change is a different one).
     focus_seen: Option<u32>,
     /// The focus at launch was read (once: with nothing focused, not again every tick).
@@ -261,7 +281,7 @@ impl BrainHost {
 
     /// A move's own motion is running (a scoot, a drift, a drop): the landing waits for it.
     fn moving(&self) -> bool {
-        self.scoot.is_some() || self.drift.is_some() || self.drop_in.is_some() || self.leap.is_some()
+        self.scoot.is_some() || self.drift.is_some() || self.drop_in.is_some() || self.leap.is_some() || self.walk.is_some()
     }
 
     pub(super) fn bnow(&self, now: Instant) -> f64 {
@@ -435,6 +455,7 @@ impl Avatar {
             glow_last: None,
             sulk_sit: false,
             leap: None,
+            walk: None,
             focus_seen: None,
             focus_read: false,
             desk_at: None,
@@ -601,6 +622,9 @@ impl Avatar {
             h.scoot = None;
             h.leap = None;
             h.next_plan = None;
+            if h.walk.take().is_some() {
+                self.anim.stop_oneshot(Instant::now());
+            }
         }
     }
 
@@ -760,7 +784,7 @@ impl Avatar {
                 t = Some(t.map_or(d, |t| t.min(d)));
             }
         };
-        if h.scoot.is_some() || h.leap.is_some() || h.drop_in.is_some() || (h.flight.is_some() && self.teleport.is_none() && h.drift.is_none()) {
+        if h.scoot.is_some() || h.leap.is_some() || h.walk.is_some() || h.drop_in.is_some() || (h.flight.is_some() && self.teleport.is_none() && h.drift.is_none()) {
             take(Some(now + FRAME_FAST));
         }
         take(h.desk_check);
@@ -827,6 +851,7 @@ impl Avatar {
         }
         dirty |= self.step_scoot(now);
         dirty |= self.step_leap(now);
+        dirty |= self.step_walk(now);
         dirty |= self.step_drift(now);
         if self.brain.as_ref().and_then(|h| h.desk_check).is_some_and(|d| d <= now) {
             self.desk_settled(now);
@@ -946,6 +971,10 @@ impl Avatar {
 
     fn brain_move(&mut self, plan: MovePlan, now: Instant) {
         let t = self.brain.as_ref().map_or(0.0, |h| h.bnow(now) - h.brain.start());
+        // A summon wins over a walk: she stops where she is and goes.
+        if matches!(plan.goal, Goal::Active { why: Why::Summon(_), .. }) && self.brain.as_ref().is_some_and(|h| h.walk.is_some()) {
+            self.walk_stop(now);
+        }
         let moving = self.teleport.is_some() || self.rag.is_some() || self.brain.as_ref().is_some_and(|h| h.moving() || h.flight.is_some());
         // A passive move waits for the emote on screen to finish (the sulk plays out first);
         // a closed perch or a lost workspace can't wait (she'd hang in the air).
@@ -1070,9 +1099,19 @@ impl Avatar {
         } else {
             arrival
         };
+        // A short calm move may be walked instead (B2c): a floor scoot or micro hop, or a hop
+        // along the window top she sits on, where there's room to stand.
+        let micro = matches!(plan.goal, Goal::Hop { kind: crate::brain::HopKind::Micro, .. });
+        let walk = if arrival == Arrival::Hop && !active && !reactive && (micro || matches!(plan.goal, Goal::Passive { .. })) {
+            self.walk_choice(&spot, her.anchor, cursor, focused, stack, areas, now).filter(|_| {
+                rng.range(0.0, 1.0) < self.pack.behaviour.motions.walk.as_ref().map_or(0.0, |w| w.chance)
+            })
+        } else {
+            None
+        };
         let cover_ok = |s: &Spot| s.cover_pct <= world.cover_max_pct + 1e-9;
         let line = serde_json::json!({
-            "t": t, "k": "move", "goal": goal_s, "approach": spot.approach.map(Approach::key), "arrival": if leap { "leap" } else { arrival.key() },
+            "t": t, "k": "move", "goal": goal_s, "approach": spot.approach.map(Approach::key), "arrival": if walk.is_some() { "walk" } else if leap { "leap" } else { arrival.key() },
             "spot": spot.kind.key(), "anchor": [spot.anchor.0, spot.anchor.1], "body": rect_json(&spot.body),
             "cursor": [cursor.0, cursor.1], "focus": focused.as_ref().map(rect_json), "cover_pct": (spot.cover_pct * 100.0).round() / 100.0,
             "cover_ok": cover_ok(&spot), "fs": senses_fs, "dnd": dnd, "enabled": enabled, "area": rect_json(&areas[spot.area.min(areas.len() - 1)]),
@@ -1088,7 +1127,7 @@ impl Avatar {
             her.anchor.1,
             spot.anchor.0,
             spot.anchor.1,
-            if leap { "leap" } else { arrival.key() }
+            if walk.is_some() { "walk" } else if leap { "leap" } else { arrival.key() }
         );
         // Facing (`[mirror] self`): the way she goes, then what she cares about once there.
         let own = self.mirror_cfg.own;
@@ -1129,6 +1168,10 @@ impl Avatar {
         // Leaving a floor sit or a pose.
         if let Some(h) = &mut self.brain {
             h.rest = None;
+        }
+        if let Some(w) = walk {
+            self.start_walk(w, origin, place, now);
+            return;
         }
         if leap {
             self.start_leap(her_anchor, &spot, origin, place, plan.why == "startle_drag", now);
@@ -1498,6 +1541,197 @@ impl Avatar {
             && self.os.toplevel_rect(win).is_none()
         {
             self.fall("perch_gone", now);
+        }
+    }
+
+    /// The walk for a move to `spot`, if it may be walked: the pack has the walk and its cells
+    /// are in, the rate cap and the roll allow it, she stands on the floor (or sits on the
+    /// window top it goes along), it is neither too short nor too long, and every step of the
+    /// way keeps clear of the pointer and his window, in her work area, on a window top that
+    /// shows (nothing over it) with room above it to stand. The roll is the caller's.
+    #[allow(clippy::too_many_arguments)]
+    fn walk_choice(&self, spot: &Spot, her: (i32, i32), cursor: (i32, i32), focused: Option<WinRect>, stack: &[WinRect], areas: &[WinRect], now: Instant) -> Option<WalkPlan> {
+        let spec = self.pack.behaviour.motions.walk.clone()?;
+        let si = self.pack.motions.walk?;
+        let l = self.layout;
+        let h = self.brain.as_ref()?;
+        if h.rest.is_some() || !self.motion.walk_gap.ready(now, Duration::from_millis(spec.gap_ms)) || self.panel_up() || self.line.is_some() {
+            return None;
+        }
+        let stand = h.boxes.stand;
+        let (plan, win) = match (self.placement, spot.kind) {
+            (Placement::Ground, SpotKind::Floor | SpotKind::Beside | SpotKind::FloorSit) if (spot.anchor.1 - her.1).abs() <= 4 => {
+                (WalkPlan { from_x: her.0, to_x: spot.anchor.0, feet_y: spot.anchor.1 }, None)
+            }
+            (Placement::Perch { win, sit: true, .. }, SpotKind::Edge { win: to } | SpotKind::SitEdge { win: to }) if spec.edges && to == win => {
+                let r = self.os.toplevel_rect(win)?;
+                (WalkPlan { from_x: her.0, to_x: spot.anchor.0, feet_y: r.y }, Some(win))
+            }
+            _ => return None,
+        };
+        let d = (plan.to_x - plan.from_x).abs() as f32 / l.sf;
+        let max = if win.is_some() { places::HOP_MAX } else { moves::SCOOT_MAX };
+        if d < spec.min_px || d > max {
+            return None;
+        }
+        // Its cells: asked for now, walked next time if they aren't in yet.
+        if !self.art_ready(si) {
+            return None;
+        }
+        let area = areas.get(spot.area).copied()?;
+        let clear = places::CURSOR_CLEAR * l.sf;
+        let above: Vec<WinRect> = match win {
+            Some(w) => stack.iter().skip_while(|r| r.id != w).skip(1).copied().collect(),
+            None => Vec::new(),
+        };
+        let ok = |x: f32| {
+            let x = x.round() as i32;
+            let b = WinRect { x: x + stand.x, y: plan.feet_y + stand.y, ..stand };
+            let inside = b.x >= area.x && b.right() <= area.right() && b.y >= area.y;
+            let pointer = !b.grow(clear.round() as i32).contains(cursor.0, cursor.1);
+            let his = focused.is_none_or(|f| f.intersect(&b).is_none());
+            let shows = above.iter().all(|r| !r.contains(x, plan.feet_y) && !r.contains(x, plan.feet_y - 2));
+            inside && pointer && his && shows
+        };
+        if !crate::motion::path_clear(plan.from_x as f32, plan.to_x as f32, 16.0 * l.sf, ok) {
+            return None;
+        }
+        Some(plan)
+    }
+
+    /// Walk to the spot: her feet on its line, the walk strip's cells round and round (the
+    /// art seam's glitch covers the cut in and out of it), then she settles into `place`.
+    fn start_walk(&mut self, w: WalkPlan, origin: (i32, i32), place: Placement, now: Instant) {
+        let l = self.layout;
+        let (Some(si), Some(spec)) = (self.pack.motions.walk, self.pack.behaviour.motions.walk.clone()) else { return };
+        let Some((n, ms)) = self.pack.anim.as_ref().map(|a| (a.strips[si].frames, a.strips[si].ms)) else { return };
+        let Some(first) = self.pack.strip_first.get(si).copied().flatten() else { return };
+        self.os.set_target(0);
+        self.hop = None;
+        self.menu = None;
+        self.placement = Placement::Ground;
+        self.set_origin((w.from_x - l.ground_x, w.feet_y - l.ground_y));
+        let walk = crate::motion::Walk::new(w.from_x as f32, w.to_x as f32, spec.px_per_s * l.sf);
+        self.face(w.to_x > w.from_x, "walk", now, true);
+        // The walk is on before the relayer: a window top's pick holds through it.
+        if let Some(h) = &mut self.brain {
+            h.walk = Some(WalkMove { walk, t0: now, feet_y: w.feet_y, origin, place });
+        }
+        self.relayer(now);
+        self.anim.play(crate::motion::walk_seq(first, n, ms, walk.secs), now);
+        self.motion.walk_gap.mark(now);
+        self.motion.walks += 1;
+    }
+
+    fn step_walk(&mut self, now: Instant) -> bool {
+        let interrupted = self.hidden || self.panel_up() || self.line.is_some() || self.menu.is_some() || self.brain.as_ref().is_some_and(|h| h.fs != FsHide::Shown);
+        let Some(h) = &mut self.brain else { return false };
+        let Some(wm) = &h.walk else { return false };
+        let l = self.layout;
+        let t = now.saturating_duration_since(wm.t0).as_secs_f32();
+        if interrupted {
+            self.walk_stop(now);
+            return true;
+        }
+        if wm.walk.done(t) {
+            let (origin, place) = (wm.origin, wm.place);
+            h.walk = None;
+            self.anim.stop_oneshot(now);
+            self.arrive(origin, place, now);
+            if place == Placement::Ground {
+                self.home = self.ground();
+                state::save_ground(self.ground());
+            }
+            return true;
+        }
+        let x = wm.walk.x_at(t).round() as i32;
+        let feet_y = wm.feet_y;
+        self.set_origin((x - l.ground_x, feet_y - l.ground_y));
+        true
+    }
+
+    /// `walk X` (a test hook): to root x on her line now, if nothing holds her.
+    pub(super) fn walk_to(&mut self, to_x: i32, scoot: bool, now: Instant) -> String {
+        let l = self.layout;
+        if self.pack.motions.walk.is_none() && !scoot {
+            return "error: no walk art".into();
+        }
+        let Some(h) = &self.brain else { return "error: no brain".into() };
+        if h.rest.is_some() || h.moving() || h.flight.is_some() || self.teleport.is_some() || self.rag.is_some() {
+            return "busy".into();
+        }
+        if self.hidden || self.panel_up() || self.line.is_some() || self.dnd_on() || h.fs != FsHide::Shown {
+            return "held".into();
+        }
+        let her = self.ground();
+        if scoot && let Placement::Perch { win, sit: true, .. } = self.placement {
+            // Along a window top: the hop along it.
+            let Some(r) = self.os.toplevel_rect(win) else { return "error: no window".into() };
+            let spot = Spot { kind: SpotKind::Edge { win }, anchor: (to_x, r.y), body: WinRect::new(to_x, r.y, 1, 1), area: 0, approach: None, cover_pct: 0.0 };
+            let (origin, place) = (self.perch_origin(&r, true, to_x - r.x), Placement::Perch { win, sit: true, dx: to_x - r.x });
+            self.face(to_x > her.0, "walk", now, true);
+            self.start_leap((her.0, r.y), &spot, origin, place, false, now);
+            return "ok".into();
+        }
+        if scoot {
+            if self.placement != Placement::Ground {
+                return "error: a scoot is on the floor".into();
+            }
+            let mut rng = Rng::new(self.rng.next());
+            let Some(hops) = moves::plan_scoot(her.0 as f32 / l.sf, to_x as f32 / l.sf, &mut rng) else { return "error: no scoot there".into() };
+            let hops = hops.into_iter().map(|hp| moves::Hop { from_x: hp.from_x * l.sf, to_x: hp.to_x * l.sf }).collect();
+            if let Some(h) = &mut self.brain {
+                h.scoot = Some(Scoot { hops, i: 0, t0: now, feet_y: her.1, crouched: false });
+            }
+            self.face(to_x > her.0, "walk", now, true);
+            self.relayer(now);
+            return "ok".into();
+        }
+        let (plan, origin, place) = match self.placement {
+            Placement::Ground => (WalkPlan { from_x: her.0, to_x, feet_y: her.1 }, (to_x - l.ground_x, her.1 - l.ground_y), Placement::Ground),
+            Placement::Perch { win, sit: true, .. } => {
+                let Some(r) = self.os.toplevel_rect(win) else { return "error: no window".into() };
+                if to_x < r.x || to_x >= r.right() {
+                    return "error: off the window top".into();
+                }
+                (WalkPlan { from_x: her.0, to_x, feet_y: r.y }, self.perch_origin(&r, true, to_x - r.x), Placement::Perch { win, sit: true, dx: to_x - r.x })
+            }
+            _ => return "error: not on the floor or a window top".into(),
+        };
+        if !self.pack.motions.walk.is_some_and(|si| self.art_ready(si)) {
+            return "loading".into();
+        }
+        self.start_walk(plan, origin, place, now);
+        "ok".into()
+    }
+
+    /// Where the walk under way ends.
+    pub(super) fn brain_walk_place(&self) -> Option<Placement> {
+        self.brain.as_ref()?.walk.as_ref().map(|w| w.place)
+    }
+
+    pub(super) fn brain_walking(&self) -> bool {
+        self.brain.as_ref().is_some_and(|h| h.walk.is_some())
+    }
+
+    /// The walk ends where she is now (a summon, a panel opened, a hide): on the floor, or
+    /// sitting on the window top she walked along.
+    fn walk_stop(&mut self, now: Instant) {
+        let Some(wm) = self.brain.as_mut().and_then(|h| h.walk.take()) else { return };
+        let l = self.layout;
+        let x = wm.walk.x_at(now.saturating_duration_since(wm.t0).as_secs_f32()).round() as i32;
+        self.anim.stop_oneshot(now);
+        let (origin, place) = match wm.place {
+            Placement::Perch { win, sit, .. } => match self.os.toplevel_rect(win) {
+                Some(r) => (self.perch_origin(&r, sit, x - r.x), Placement::Perch { win, sit, dx: x - r.x }),
+                None => ((x - l.ground_x, wm.feet_y - l.ground_y), Placement::Ground),
+            },
+            _ => ((x - l.ground_x, wm.feet_y - l.ground_y), Placement::Ground),
+        };
+        self.arrive(origin, place, now);
+        if place == Placement::Ground {
+            self.home = self.ground();
+            state::save_ground(self.ground());
         }
     }
 

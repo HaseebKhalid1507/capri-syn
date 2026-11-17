@@ -37,6 +37,7 @@ mod art;
 mod variants;
 mod places;
 mod moves;
+mod motion;
 mod platform;
 mod ragdoll;
 mod reader;

@@ -256,7 +256,28 @@ fn is_hair(p: &[u8; 4]) -> bool {
     p[3] >= 200 && p[0] >= 150 && p[1] <= 110 && p[0] as i32 - p[2] as i32 >= 40
 }
 
-fn head_and_glints(mask: &Mask, hair: &Mask, top: i32, height: i32) -> (i32, Vec<(i16, i16)>) {
+/// Her face's box (x0, y0, x1, y1) inside the face band rows: the eyes' blue and the visor's
+/// green there. None: no face drawn (she faces away, a pose without one).
+fn face_box(px: &[u8], w: u32, band: (i32, i32)) -> Option<(i32, i32, i32, i32)> {
+    let h = (px.len() / 4 / w as usize) as i32;
+    let (mut x0, mut y0, mut x1, mut y1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+    let mut n = 0;
+    for y in band.0.max(0)..band.1.min(h) {
+        for x in 0..w as i32 {
+            let i = (y as usize * w as usize + x as usize) * 4;
+            let (r, g, b, a) = (px[i], px[i + 1], px[i + 2], px[i + 3]);
+            let eye = a > 200 && b > 190 && r < 100 && g > 50 && g < 200;
+            let visor = a > 200 && g > 170 && r < 140 && b < 170;
+            if eye || visor {
+                (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+                n += 1;
+            }
+        }
+    }
+    (n >= 12).then_some((x0, y0, x1, y1))
+}
+
+fn head_and_glints(mask: &Mask, hair: &Mask, top: i32, height: i32, face: Option<(i32, i32, i32, i32)>) -> (i32, Vec<(i16, i16)>) {
     let band = (height as f32 * 0.3) as i32;
     let (mut sum, mut n) = (0i64, 0i64);
     for y in top.max(0)..(top + band).min(mask.h as i32) {
@@ -269,13 +290,23 @@ fn head_and_glints(mask: &Mask, hair: &Mask, top: i32, height: i32) -> (i32, Vec
     }
     let head_x = if n > 0 { (sum / n) as i32 } else { mask.w as i32 / 2 };
     // Candidates: pixels in the top 40 % whose 13x13 neighbourhood is hair (never her face, eyes
-    // or clothes: a sparkle and its drift stay on the hair), on a grid.
+    // or clothes: a sparkle and its drift stay on the hair), on a grid, and only the upper and
+    // outer hair: clear of her face's box by more than a full-grown star and its drift (the
+    // hair right over an eye flashed on her face).
     let r = 6;
+    let clear = ((height as f32 * 0.095).round() as i32).max(24);
+    let off_face = |x: i32, y: i32| {
+        face.is_none_or(|(fx0, fy0, fx1, fy1)| {
+            let dx = (fx0 - x).max(x - fx1).max(0);
+            let dy = (fy0 - y).max(y - fy1).max(0);
+            dx >= clear || dy >= clear
+        })
+    };
     let mut cands = Vec::new();
     let y1 = (top + (height as f32 * 0.4) as i32).min(mask.h as i32 - r);
     for y in ((top + r).max(r)..y1).step_by(3) {
         for x in (r..mask.w as i32 - r).step_by(3) {
-            if [(-r, -r), (r, -r), (-r, r), (r, r), (0, 0), (0, -r), (0, r), (-r, 0), (r, 0)].iter().all(|&(dx, dy)| mask.get(x + dx, y + dy) && hair.get(x + dx, y + dy)) {
+            if off_face(x, y) && [(-r, -r), (r, -r), (-r, r), (r, r), (0, 0), (0, -r), (0, r), (-r, 0), (r, 0)].iter().all(|&(dx, dy)| mask.get(x + dx, y + dy) && hair.get(x + dx, y + dy)) {
                 cands.push((x as i16, y as i16));
             }
         }
@@ -654,6 +685,7 @@ fn finish(pack: &Pack, f: &FrameSource, geo: &Geometry, mut px: Vec<u8>) -> Resu
         }
     }
     let face = face_band(&px, geo.width, top.round() as i32, (vb.height as f32 * geo.scale) as i32);
+    let face_glints = face_box(&px, geo.width, face);
 
     let mut mask = Mask::new(geo.width, geo.height);
     let mut hair = Mask::new(geo.width, geo.height);
@@ -672,7 +704,7 @@ fn finish(pack: &Pack, f: &FrameSource, geo: &Geometry, mut px: Vec<u8>) -> Resu
     let head_line = (top + vb.height as f32 * geo.scale * head_fraction).round() as i32;
     // A strip's cell keeps only its opaque box (most of the rect is empty).
     let (at, rgba) = if f.cell.is_some() { crop_opaque(px, geo.width, geo.height) } else { ((0, 0), image::RgbaImage::from_raw(geo.width, geo.height, px).expect("buffer size")) };
-    let (head_x, glints) = head_and_glints(&mask, &hair, top.round() as i32, (vb.height as f32 * geo.scale) as i32);
+    let (head_x, glints) = head_and_glints(&mask, &hair, top.round() as i32, (vb.height as f32 * geo.scale) as i32, face_glints);
     let profile = Arc::new(top_profile(&mask));
     let bottom = (0..mask.h as i32).rev().find(|&y| (0..mask.w as i32).any(|x| mask.get(x, y))).map_or(top.round() as i32 + 1, |y| y + 1);
     Ok(Frame {
@@ -862,6 +894,41 @@ pub fn decode_notes(pack: &Pack, files: &[String], size: u32) -> Result<Vec<Note
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn sparkles_sit_only_on_the_hair_clear_of_her_face() {
+        // A 200x300 figure, all hair; her face box at x 80..120, y 60..100.
+        let (w, h) = (200u32, 300u32);
+        let mut mask = super::Mask::new(w, h);
+        let mut hair = super::Mask::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                mask.set(x, y);
+                hair.set(x, y);
+            }
+        }
+        let face = (80, 60, 120, 100);
+        let (_, g) = super::head_and_glints(&mask, &hair, 0, 300, Some(face));
+        assert!(!g.is_empty());
+        let clear = 28;
+        for &(x, y) in &g {
+            let (x, y) = (x as i32, y as i32);
+            let dx = (face.0 - x).max(x - face.2).max(0);
+            let dy = (face.1 - y).max(y - face.3).max(0);
+            assert!(dx >= clear || dy >= clear, "({x},{y}) is on her face");
+        }
+        // The face box from pixels: eyes (blue) and visor (green) in the band.
+        let mut px = vec![0u8; (w * h * 4) as usize];
+        let mut put = |x: u32, y: u32, c: [u8; 4]| px[((y * w + x) * 4) as usize..][..4].copy_from_slice(&c);
+        for y in 70..80 {
+            for x in 90..110 {
+                put(x, y, [40, 230, 90, 255]);
+            }
+        }
+        put(95, 75, [30, 120, 230, 255]);
+        assert_eq!(super::face_box(&px, w, (50, 120)), Some((90, 70, 109, 79)));
+        assert_eq!(super::face_box(&px, w, (0, 50)), None);
+    }
 
     #[test]
     fn a_still_is_cut_to_its_opaque_box_scaled_and_sha_checked() {

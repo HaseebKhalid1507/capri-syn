@@ -473,6 +473,163 @@ pub struct Behaviour {
     /// How often a drawn floor arrival starts from the `form` bloom (0..1).
     #[serde(default)]
     pub form_chance: f32,
+    /// The desktop art's motions (`MotionsSpec`). Without `anim/` none of them exists.
+    #[serde(default)]
+    pub motions: MotionsSpec,
+}
+
+/// `moods.json` `motions` (B2c): lachy's motion strips and how often they may play. Each one is
+/// rate-capped (`gapMs`) and each falls back to what she did before (a hop-scoot, the
+/// headphones, the ragdoll, nothing) when it can't.
+#[derive(Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct MotionsSpec {
+    pub walk: Option<WalkSpec>,
+    pub dance: Option<DanceSpec>,
+    pub dangle: Option<DangleSpec>,
+    pub click: Option<ClickFxSpec>,
+}
+
+/// Short moves walked instead of hop-scooted (the floor) or leapt (along a window top).
+#[derive(Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct WalkSpec {
+    pub strip: String,
+    /// Chance a move that may be walked is.
+    #[serde(default = "half")]
+    pub chance: f32,
+    /// Logical px per second.
+    #[serde(default = "walk_pace")]
+    pub px_per_s: f32,
+    /// Shorter moves hop (logical px).
+    #[serde(default = "walk_min")]
+    pub min_px: f32,
+    #[serde(default = "walk_gap")]
+    pub gap_ms: u64,
+    /// Along a window top too (where there's room to stand).
+    #[serde(default = "yes")]
+    pub edges: bool,
+}
+
+/// Music on the floor with energy: she dances a while, then the headphones.
+#[derive(Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct DanceSpec {
+    pub strip: String,
+    /// The tempo with energy (a player's `xesam:audioBPM`).
+    #[serde(default = "dance_bpm")]
+    pub min_bpm: f32,
+    /// Without a tempo: the chance a song gets a dance.
+    #[serde(default = "half")]
+    pub chance: f32,
+    /// How long a dance lasts (ms), then the headphones for the rest.
+    #[serde(default = "dance_ms")]
+    pub ms: [u64; 2],
+    /// The least time from one dance's start to the next.
+    #[serde(default = "dance_gap")]
+    pub gap_ms: u64,
+}
+
+/// Carried by the head: now and then she dangles by her hair instead of the ragdoll's poses.
+#[derive(Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct DangleSpec {
+    pub strip: String,
+    #[serde(default = "half")]
+    pub chance: f32,
+    /// The grab's own frames play this long first.
+    #[serde(default = "dangle_after")]
+    pub after_ms: u32,
+    #[serde(default = "dangle_gap")]
+    pub gap_ms: u64,
+}
+
+/// A click on her: the burst under the pointer.
+#[derive(Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ClickFxSpec {
+    pub strip: String,
+    #[serde(default = "click_gap")]
+    pub gap_ms: u64,
+}
+
+fn half() -> f32 {
+    0.5
+}
+fn walk_pace() -> f32 {
+    70.0
+}
+fn walk_min() -> f32 {
+    90.0
+}
+fn walk_gap() -> u64 {
+    30_000
+}
+fn dance_bpm() -> f32 {
+    100.0
+}
+fn dance_ms() -> [u64; 2] {
+    [40_000, 90_000]
+}
+fn dance_gap() -> u64 {
+    600_000
+}
+fn dangle_after() -> u32 {
+    260
+}
+fn dangle_gap() -> u64 {
+    20_000
+}
+fn click_gap() -> u64 {
+    250
+}
+
+/// `motions`, resolved: strip indices into `anim` (the click: an effect's name).
+#[derive(Clone, Debug, Default)]
+pub struct Motions {
+    pub walk: Option<usize>,
+    pub dance: Option<usize>,
+    pub dangle: Option<usize>,
+    pub click: Option<String>,
+}
+
+impl Motions {
+    fn strips(&self) -> impl Iterator<Item = usize> + '_ {
+        [self.walk, self.dance, self.dangle].into_iter().flatten()
+    }
+}
+
+/// `moods.json` `motions` -> strips: walk and dance loop on her feet, dangle loops from its grip,
+/// the click is an effect. A pack without `anim/` has none.
+fn resolve_motions(b: &Behaviour, anim: Option<&crate::art::Anim>, errors: &mut Vec<String>) -> Motions {
+    let mut out = Motions::default();
+    let Some(a) = anim else { return out };
+    let m = &b.motions;
+    let mut strip = |key: &str, name: Option<&String>, want: &str| -> Option<usize> {
+        let name = name?;
+        match a.by_name.get(name).map(|&i| (i, &a.strips[i])) {
+            Some((i, s)) if s.anchor.0 == want && s.looping => Some(i),
+            Some(_) => {
+                errors.push(format!("moods.json motions.{key}: strip `{name}` needs a {want} anchor and to loop"));
+                None
+            }
+            None => {
+                errors.push(format!("moods.json motions.{key}: strip `{name}` is not in anim/anim.json"));
+                None
+            }
+        }
+    };
+    out.walk = strip("walk", m.walk.as_ref().map(|w| &w.strip), "ground");
+    out.dance = strip("dance", m.dance.as_ref().map(|d| &d.strip), "ground");
+    out.dangle = strip("dangle", m.dangle.as_ref().map(|d| &d.strip), "grip");
+    if let Some(c) = &m.click {
+        if a.effects.contains_key(&c.strip) {
+            out.click = Some(c.strip.clone());
+        } else {
+            errors.push(format!("moods.json motions.click: `{}` is not an effect strip (family fx, no anchor) in anim/anim.json", c.strip));
+        }
+    }
+    out
 }
 
 /// The transitions a pack may name, and the anchor each needs.
@@ -740,6 +897,8 @@ pub struct Pack {
     pub pools: HashMap<crate::variants::PoolKey, Pool>,
     /// `moods.json` `transitions`, resolved: strip indices into `anim`.
     pub transitions: HashMap<String, usize>,
+    /// `moods.json` `motions`, resolved.
+    pub motions: Motions,
     pub cache_bytes: usize,
 }
 
@@ -761,12 +920,15 @@ impl Pack {
         let dy = match (f.anchor.name.as_str(), self.seat_ref) {
             ("ground", _) => c.y - f.anchor.y,
             ("seat", Some(s)) if self.perch_frames.contains(&f.id) => s - f.anchor.y,
+            // Hanging from its grip (lachy's dangle): its feet where hers are, so the body
+            // hangs where she stood and a drop lands without a jump.
+            ("grip", _) => c.y - (f.bounds.y + f.bounds.height),
             _ => 0,
         };
         // Grip anchors (ceiling, dock-left/right) keep their canvas registration: centring a
         // wall grip at x would push the body off the canvas.
         let dx = match f.anchor.name.as_str() {
-            "ground" | "seat" => c.x - f.anchor.x,
+            "ground" | "seat" | "grip" => c.x - f.anchor.x,
             _ => 0,
         };
         (dx, dy)
@@ -933,6 +1095,7 @@ impl Pack {
         let (mut strip_first, mut mirror_first) = (vec![None; n_strips], vec![None; n_strips]);
         let pools = resolve_pools(&behaviour, anim.as_ref(), &mut errors);
         let transitions = resolve_transitions(&behaviour, anim.as_ref(), &mut errors);
+        let motions = resolve_motions(&behaviour, anim.as_ref(), &mut errors);
         let mut strip_every = vec![u32::MAX; n_strips];
         for v in pools.values().flat_map(|p| &p.variants).filter_map(|v| v.art.as_ref()) {
             for si in std::iter::once(v.base).chain(v.talk).chain(v.music).chain(v.blinks.iter().map(|b| b.0)) {
@@ -946,6 +1109,7 @@ impl Pack {
                 std::iter::once(v.base).chain(v.talk).chain(v.music).chain(v.blinks.iter().map(|b| b.0))
             })
             .chain(transitions.values().copied())
+            .chain(motions.strips())
             .collect();
             used.sort_unstable();
             used.dedup();
@@ -988,6 +1152,7 @@ impl Pack {
             strip_every,
             pools,
             transitions,
+            motions,
             cache_bytes,
         };
 
@@ -1421,6 +1586,35 @@ pub mod tests {
     }
 
     #[test]
+    fn motions_name_looping_strips_with_their_anchor_and_the_click_an_effect() {
+        let with = |mo: serde_json::Value, anim: bool| {
+            let mut m = pooled();
+            m["motions"] = mo;
+            pack_in("motions", m, anim, |p| {
+                p.map_err(|e| format!("{e:#}")).map(|p| {
+                    let grip = p.anim.as_ref().and_then(|a| a.by_name.get("hang").copied()).and_then(|si| p.strip_first[si]).map(|i| p.offset(&p.frames[i]));
+                    (p.motions.clone(), p.strip_first.clone(), p.anim.as_ref().map(|a| a.by_name.clone()), grip, p.catalog.canonical_anchor)
+                })
+            })
+        };
+        let (mo, first, names, grip, c) = with(json!({"walk": {"strip": "stand"}, "dance": {"strip": "stand"}, "dangle": {"strip": "hang"}, "click": {"strip": "click"}}), true).unwrap();
+        let names = names.unwrap();
+        assert_eq!((mo.walk, mo.dance, mo.dangle), (Some(names["stand"]), Some(names["stand"]), Some(names["hang"])));
+        assert_eq!(mo.click.as_deref(), Some("click"));
+        assert!(first[names["stand"]].is_some() && first[names["hang"]].is_some(), "their cells are frames");
+        // The dangle hangs where she stands: its grip on her x, its feet on her ground line.
+        let (dx, dy) = grip.unwrap();
+        assert!(dx != 0 || dy != 0, "registered on the canonical anchor ({c:?}), not the canvas corner");
+        assert!(with(json!({"walk": {"strip": "perch_in"}}), true).unwrap_err().contains("motions.walk: strip `perch_in` needs a ground anchor and to loop"));
+        assert!(with(json!({"dangle": {"strip": "stand"}}), true).unwrap_err().contains("needs a grip anchor"));
+        assert!(with(json!({"dance": {"strip": "nope"}}), true).unwrap_err().contains("is not in anim/anim.json"));
+        assert!(with(json!({"click": {"strip": "stand"}}), true).unwrap_err().contains("not an effect strip"));
+        // Without anim/: none of them, and no error.
+        let (mo, ..) = with(json!({"walk": {"strip": "walk"}, "click": {"strip": "click"}}), false).unwrap();
+        assert!(mo.walk.is_none() && mo.click.is_none());
+    }
+
+    #[test]
     fn transitions_name_one_shot_strips_with_their_anchor() {
         let with = |t: serde_json::Value, anim: bool| {
             let mut m = pooled();
@@ -1508,9 +1702,18 @@ pub mod tests {
         // Her plain red bolt replaces the intro's first frame (Haseeb 08:06 §6.1); 07 is neutral.
         assert_eq!(ids(&a.launch), ["intro-gaze", "intro-arrival", "intro-landing", "intro-greeting", "intro-wink", "neutral"]);
         assert!(!ids(&a.summon).contains(&"intro-wink".to_string()), "no wink on a summon");
-        // r30: the touchdown is the crouch, then the sit inside a dip (no frame with her legs
-        // through the edge, no dissolve: no double image).
+        // r30: the touchdown is the crouch, then the sit inside a dip (no dissolve: no double
+        // image, and not `transition-edge_perch`: r29 had it as legs through the edge). r31's
+        // pop is answered by the sit's legs unfolding over the edge (`arriveview::UNFOLD_MS`).
         assert_eq!(ids(&a.perch), ["intro-landing-seat"]);
+        // B2c: every motion is in, rate-capped, and the walk never outpaces its drawing.
+        let m = &b.motions;
+        let (w, d, g, c) = (m.walk.as_ref().unwrap(), m.dance.as_ref().unwrap(), m.dangle.as_ref().unwrap(), m.click.as_ref().unwrap());
+        assert!((w.strip.as_str(), d.strip.as_str(), g.strip.as_str(), c.strip.as_str()) == ("walk", "dance", "dangle", "click"));
+        assert!(w.gap_ms >= 10_000 && d.gap_ms >= 300_000 && g.gap_ms >= 10_000 && c.gap_ms >= 150);
+        assert!(w.px_per_s <= 90.0 && w.min_px >= 60.0 && (0.0..=1.0).contains(&w.chance));
+        assert!(d.ms[1] <= 120_000 && d.min_bpm >= 90.0, "a dance is a while, not the song");
+        assert!((0.0..=1.0).contains(&g.chance), "the dangle is an A/B with the ragdoll");
         assert!(a.perch_dip_ms > 0 && a.perch_dip_ms < 80, "the swap near the squash's trough (80 ms)");
         // One perch frame (§6.2): no per-mood or activity swaps while perched.
         let p = b.perch.as_ref().unwrap();

@@ -205,9 +205,26 @@ With `anim/`, `moods.json` `variants` mixes that art in; she never swaps one set
   The travel bolt stays plain red. A quiet (passive) teleport never plays them.
 - Landing on a window top she touches down with the pack's `arrive.perch` (Capri: her crouch on the
   edge), then her sit inside a dip at contact: the squash starts `arrive.perchDipMs` before the change,
-  so the swap falls near its trough (no dissolve, no double image). Before a drawn pose (lachy's perch)
-  only that first frame plays, cut inside the landing glitch, so the art changes before she's solid; the
-  dip is then the settle at the glitch's end. The landing glitch never shifts her legs below the edge.
+  so the swap falls near its trough (no dissolve, no double image), and the sit's legs unfold down over
+  the edge in 140 ms. Before a drawn pose (lachy's perch) only that first frame plays, cut inside the
+  landing glitch, so the art changes before she's solid; the dip is then the settle at the glitch's end.
+  The landing glitch never shifts her legs below the edge, and into a drawn pose it has no red/blue split.
+- `motions` (each optional, each its strip from `anim/` with the anchor it needs; a pack without them
+  does what it did before):
+  - `walk` (feet, looping): a short calm move she makes on the floor or along the window top she sits on
+    is walked `chance` of the time instead of hopped (`minPx` up to the hop's reach, `pxPerS`, at most one
+    per `gapMs`, `edges` for window tops). Every step of the way keeps out of his window and clear of the
+    pointer, in her work area, and on a window top only where nothing covers it. A summon, a panel, the
+    menu, a fullscreen window or a hide stops it where she is. She sits back in the same drawing.
+  - `dance` (feet, looping): music with energy (a tempo at or over `minBpm`; without one, a `chance`
+    roll) gets a dance on the floor for `ms` [min, max], once a session and at most once per `gapMs`;
+    else the headphones as before. With a tempo it takes two beats a loop. Only standing idle on the
+    floor, no panel open, no DND.
+  - `dangle` (grip): carried by the head, `chance` of the time (at most once per `gapMs`) she hangs as
+    that drawing from its grip after `afterMs`, instead of the ragdoll; a glitch covers the cut in and
+    the one out at the release.
+  - `click` (an effect strip): a click on her bursts under the pointer, at most one per `gapMs`, drawn
+    as two server-painted colour layers (no alpha without a compositor).
 
 The launch, with `[intro] cinematic` on:
 
@@ -250,7 +267,7 @@ sends one:
 ```
 mood <name> | clip <id> | say <text> | pos <x> <y> [now] | perch [sit|stand] [win] | perch off | drop | stack
 page next|prev | scroll <n> | reader open [focus]|close|copy [n]|scroll <px> | collapse | expand
-music on|off | glitch | face left|right|toggle | drag … | submit <text> | abort | copy
+music on [BPM]|off | walk <x> [scoot] | glitch | face left|right|toggle | drag … | submit <text> | abort | copy
 art stand|perch|sleepFloor|sleepWindow <variant id|next> | intro [skip]
 talk press|release | line close | prompt confirm|secret [text] | prompt off
 brain … | settings reload | tap head|body | menu | shape | state | hide | show | quit

@@ -64,7 +64,12 @@ pub enum Command {
     /// The reader panel.
     Reader(ReaderOp),
     /// Music mode (headphones, notes, head-bob to the pack's BPM).
-    Music(bool),
+    /// On (with a tempo: the dance's energy) or off.
+    Music(bool, Option<f32>),
+    /// Test hook: walk to root x now (on the floor, or along the window top she sits on),
+    /// past the roll and the rate cap; everything else that holds a walk still does. `scoot`:
+    /// the floor's hop-scoot there instead (what she did before the walk).
+    Walk(i32, bool),
     /// Collapse the bubble to the status tag (true) or expand it again.
     Collapse(bool),
     /// Internal: from the X watcher thread.
@@ -378,10 +383,16 @@ impl Command {
                 "toggle" => None,
                 _ => bail!("usage: face left|right|toggle"),
             }),
-            "music" => match rest {
-                "on" | "" => Command::Music(true),
-                "off" => Command::Music(false),
-                _ => bail!("usage: music on|off"),
+            "walk" => match rest.split_whitespace().collect::<Vec<_>>().as_slice() {
+                [x] => Command::Walk(x.parse().context("usage: walk X [scoot]")?, false),
+                [x, "scoot"] => Command::Walk(x.parse().context("usage: walk X [scoot]")?, true),
+                _ => bail!("usage: walk X [scoot]"),
+            },
+            "music" => match rest.split_whitespace().collect::<Vec<_>>().as_slice() {
+                ["on"] | [] => Command::Music(true, None),
+                ["on", bpm] => Command::Music(true, Some(bpm.parse::<f32>().ok().filter(|b| (20.0..=300.0).contains(b)).context("music on BPM (20-300)")?)),
+                ["off"] => Command::Music(false, None),
+                _ => bail!("usage: music on [BPM]|off"),
             },
             "submit" if !rest.is_empty() => Command::Submit(rest.to_owned()),
             "abort" => Command::Abort,
@@ -512,6 +523,18 @@ mod tests {
         assert!(Command::parse("drag path").is_err());
         assert!(Command::parse("drag wiggle").is_err());
         assert!(Command::parse("drag grab nan,3").is_err());
+    }
+
+    #[test]
+    fn music_takes_a_tempo() {
+        assert!(matches!(Command::parse("music on").unwrap(), Command::Music(true, None)));
+        assert!(matches!(Command::parse("music on 128").unwrap(), Command::Music(true, Some(b)) if b == 128.0));
+        assert!(matches!(Command::parse("music off").unwrap(), Command::Music(false, None)));
+        assert!(Command::parse("music on fast").is_err());
+        assert!(Command::parse("music on 900").is_err());
+        assert!(matches!(Command::parse("walk 1200").unwrap(), Command::Walk(1200, false)));
+        assert!(matches!(Command::parse("walk 1200 scoot").unwrap(), Command::Walk(1200, true)));
+        assert!(Command::parse("walk").is_err());
     }
 
     #[test]

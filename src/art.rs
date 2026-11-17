@@ -157,9 +157,25 @@ pub struct CellSrc {
     pub mirror: bool,
 }
 
+/// An effect strip without an anchor (the click burst): drawn over her as solid-colour layers,
+/// never one of her frames.
+#[derive(Clone, Debug)]
+pub struct Effect {
+    pub path: PathBuf,
+    pub sha256: Option<String>,
+    pub frames: u32,
+    pub cell: (u32, u32),
+    /// Per cell, from the strip's fps.
+    pub ms: u32,
+    /// Canvas px per cell px.
+    pub k: f32,
+}
+
 #[derive(Debug, Default)]
 pub struct Anim {
     pub strips: Vec<Strip>,
+    /// Effect strips by name (`Effect`).
+    pub effects: HashMap<String, Effect>,
     pub by_name: HashMap<String, usize>,
     /// The close-ups for the cinematic intro (path, sha256), all of them or none.
     pub intro: Vec<(PathBuf, Option<String>)>,
@@ -215,8 +231,30 @@ impl Anim {
             }
         }
         for (name, d) in &side.strips {
-            // Effects and overlays have no anchor: not body frames (later phases).
-            let Some(a) = &d.anchor else { continue };
+            // Effects and overlays have no anchor: not body frames. An effect is kept as such.
+            let Some(a) = &d.anchor else {
+                let fam = side.families.get(&d.family).cloned().unwrap_or_default();
+                if d.family == "fx"
+                    && let Some(body) = stand
+                    && d.frames > 0
+                    && d.cell[0] > 0
+                    && d.cell[1] > 0
+                    && d.fps > 0.0
+                {
+                    let path = root.join(&d.file);
+                    if path.is_file() {
+                        anim.effects.insert(name.clone(), Effect {
+                            path,
+                            sha256: side.files.get(&d.file).and_then(|f| f.sha256.clone()),
+                            frames: d.frames,
+                            cell: (d.cell[0], d.cell[1]),
+                            ms: (1000.0 / d.fps).round().max(1.0) as u32,
+                            k: ref_h as f32 / body * fam.units_high_vs_stand.unwrap_or(1.0),
+                        });
+                    }
+                }
+                continue;
+            };
             let kind = match a.name.as_str() {
                 "feet" => "ground",
                 "seat" | "surface" => "seat",
@@ -339,6 +377,8 @@ pub mod tests {
         strip("stand_flipped.png", 4, 6, 3);
         strip("lie.png", 6, 4, 2);
         strip("perch_in.png", 4, 6, 2);
+        strip("click.png", 4, 4, 2);
+        strip("hang.png", 4, 6, 2);
         let doc = json!({"schemaVersion": 1, "lachy": {
             "families": {"stand": {"bodyPx": 4, "faces": "right"}, "lie": {"faces": "right"}},
             "strips": {
@@ -351,7 +391,9 @@ pub mod tests {
                 "lie": {"file": "sprites/lie.png", "frames": 2, "cell": [6, 4], "fps": 4, "loop": true, "family": "lie",
                         "anchor": {"name": "surface", "x": 3, "y": 2}, "bounds": [1, 1, 4, 2],
                         "contact": {"line": 2, "legs": [4, 6]}},
-                "click": {"file": "sprites/click.png", "frames": 2, "cell": [4, 4], "fps": 30, "family": "fx"}
+                "click": {"file": "sprites/click.png", "frames": 2, "cell": [4, 4], "fps": 30, "family": "fx"},
+                "hang": {"file": "sprites/hang.png", "frames": 2, "cell": [4, 6], "fps": 10, "loop": true, "family": "dangle",
+                         "anchor": {"name": "grip", "x": 2, "y": 1}, "bounds": [1, 1, 3, 4]}
             },
             "files": {"sprites/stand.png": {"sha256": "ab"}}}});
         std::fs::write(dir.join("anim/anim.json"), doc.to_string()).unwrap();
@@ -377,6 +419,8 @@ pub mod tests {
         write_anim(&d);
         let a = Anim::load(&d, 8).unwrap().unwrap();
         assert!(a.strip("click").is_none(), "no anchor: not a body strip");
+        let e = &a.effects["click"];
+        assert_eq!((e.frames, e.cell, e.ms), (2, (4, 4), 33), "an effect: drawn over her, never a frame");
         let s = a.strip("stand").unwrap();
         assert_eq!((s.k, s.ms, s.anchor.0.as_str(), s.looping), (2.0, 100, "ground", true), "bodyPx 4 against 8 canvas px");
         assert_eq!(s.sha256.as_deref(), Some("ab"));

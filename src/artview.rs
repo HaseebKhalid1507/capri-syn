@@ -133,8 +133,9 @@ impl Avatar {
             return false;
         }
         let place = self.art_place();
-        let on = match place {
-            Placement::Perch { win, sit: true, .. } => Some(win),
+        // Walking along a window top she keeps its pick: she sits back in the same drawing.
+        let on = match (place, self.brain_walk_place()) {
+            (Placement::Perch { win, sit: true, .. }, _) | (_, Some(Placement::Perch { win, sit: true, .. })) => Some(win),
             _ => None,
         };
         let sleepy = self.arrive.deep || self.mood == Mood::Sleepy;
@@ -570,6 +571,19 @@ impl Avatar {
         for a in &arts {
             let now_on = a.talk.filter(|_| talking).into_iter().chain(a.music.filter(|_| music));
             for si in std::iter::once(a.base).chain(now_on).chain(a.blinks.iter().map(|b| b.0)) {
+                in_use.insert(self.art_unit(si));
+            }
+        }
+        // A motion's strip while it plays (a walk, a dance, a dangle).
+        let shown = self.shown_frame();
+        if let Some(c) = self.pack.frames.get(shown).and_then(|f| f.cell.as_ref()) {
+            in_use.insert((c.strip, c.mirror));
+            in_use.insert(self.art_unit(c.strip));
+        }
+        let m = &self.pack.motions;
+        let motions = [(m.walk, self.brain_walking()), (m.dance, self.dance_strip().is_some()), (m.dangle, self.rag.is_some())];
+        for (si, on) in motions {
+            if let (Some(si), true) = (si, on) {
                 in_use.insert(self.art_unit(si));
             }
         }

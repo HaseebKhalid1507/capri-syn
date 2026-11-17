@@ -49,6 +49,18 @@ pub(super) struct ArriveState {
     /// The last air kiss, and its hearts' start.
     kissed: Option<Instant>,
     hearts_at: Option<Instant>,
+    /// The sit's legs unfold over the edge from then (`UNFOLD_MS`): the in-between from the
+    /// crouch (r31: the crouch popped into the sit).
+    pub unfold: Option<Instant>,
+}
+
+/// The legs unfolding below the edge as the sit comes in.
+pub(super) const UNFOLD_MS: u64 = 140;
+
+/// How far down the sit's legs show `ms` into the unfold, 0..1 (eased out: they drop, then settle).
+pub(super) fn unfold_depth(ms: u64) -> f32 {
+    let u = (ms as f32 / UNFOLD_MS as f32).clamp(0.0, 1.0);
+    1.0 - (1.0 - u) * (1.0 - u)
 }
 
 impl Avatar {
@@ -92,10 +104,10 @@ impl Avatar {
 
     /// She reappears from a teleport (the landing glitch starts now): its arrival sequence, if
     /// it has one. On a window top it is the pack's touchdown (`arrive.perch`), then a dip at
-    /// contact (`perchDipMs`: the squash, its trough on the change to her pose: no double
-    /// image, the pose's legs only with the pose). Before a drawn pose only the touchdown's
-    /// first frame plays, cut inside the landing glitch, so the change of art happens before
-    /// she is solid; the dip is then the settle at the glitch's end.
+    /// contact (`perchDipMs`: the squash, its trough where the crouch ends: no double image),
+    /// and the sit's legs unfold over the edge from there (`UNFOLD_MS`). Before a drawn pose
+    /// only the touchdown's first frame plays, cut inside the landing glitch, so the change of
+    /// art happens before she is solid; the dip is then the settle at the glitch's end.
     pub(super) fn arrive_appeared(&mut self, now: Instant) {
         let own = self.arrive.on_appear.take();
         if let Some(seq) = self.drawn_floor_arrival() {
@@ -131,6 +143,9 @@ impl Avatar {
             // A squash scheduled ahead (`fx::squash` holds 1.0 until it starts).
             let contact = (ms as f32).max(land_ms) as u64;
             self.squash = Some(now + Duration::from_millis(contact.saturating_sub(dip_ms as u64)));
+            if !drawn {
+                self.arrive.unfold = Some(now + Duration::from_millis(ms));
+            }
         }
         self.anim.play(seq, now);
         self.arrive.until = Some(now + Duration::from_millis(ms));
@@ -505,6 +520,16 @@ fn rare(last: Option<Instant>, now: Instant, gap: Duration, roll: f32, p: f32) -
 mod tests {
     use super::*;
     use crate::anim::Rng;
+
+    #[test]
+    fn the_sits_legs_unfold_top_down_and_settle() {
+        assert_eq!(unfold_depth(0), 0.0);
+        assert_eq!(unfold_depth(UNFOLD_MS), 1.0);
+        let d: Vec<f32> = (0..=UNFOLD_MS).step_by(10).map(unfold_depth).collect();
+        assert!(d.windows(2).all(|w| w[1] >= w[0]), "only ever further down");
+        assert!(unfold_depth(UNFOLD_MS / 2) > 0.6, "most of the drop early, then the settle");
+        const { assert!(UNFOLD_MS <= 200, "an in-between, not a slow reveal") };
+    }
 
     #[test]
     fn a_drawn_perch_pose_is_cut_to_inside_the_landing_glitch() {
