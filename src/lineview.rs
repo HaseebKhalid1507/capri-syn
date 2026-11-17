@@ -11,6 +11,8 @@ pub(super) const TAP_MS: u128 = 250;
 /// A press without its release for this long is stale (the release went missing): the next
 /// press or tap starts afresh.
 const TALK_STALE: Duration = Duration::from_secs(120);
+/// A press this young may still open its mic (at `TAP_MS`): a tap leaves it be.
+const TAP_GUARD: Duration = Duration::from_secs(1);
 const LINE_W: f32 = 780.0;
 /// Squeezed beside her, down to this wide (logical px); narrower, it goes above her or over.
 const LINE_MIN_W: f32 = 480.0;
@@ -154,13 +156,24 @@ impl Avatar {
         self.talk_down.is_some_and(|t| t.elapsed() < TALK_STALE)
     }
 
+    /// A `talk tap` waits out a press still waiting for its release only while that press
+    /// is a hold worth keeping: its mic is asked for or open (up to `TALK_STALE`, the sidecar's
+    /// own hold cap), or it is too young to have opened one (`TAP_GUARD`). Any other
+    /// press lost its release (a binding that never sent it): the tap clears it.
+    fn tap_waits(&self) -> bool {
+        self.talk_down.is_some_and(|t| press_holds(t.elapsed(), self.voice_listening()))
+    }
+
     /// `talk tap`: the press and its release now (a grabbed key reports its press only). The
-    /// key is never asked whether it is still down, so this is never a hold. While the talk key
-    /// is held (`talk press` without its release) a tap is ignored: its release would end that
-    /// hold early.
+    /// key is never asked whether it is still down, so this is never a hold. While a hold
+    /// listens (`talk press` without its release yet) a tap is ignored: its release would end
+    /// that hold early (`tap_waits`).
     pub(super) fn talk_tap(&mut self, cx: &mut Context<Self>) -> String {
-        if self.talk_held() {
+        if self.tap_waits() {
             return "ok held (tap ignored)".into();
+        }
+        if let Some(t) = self.talk_down.take() {
+            elog!("synaps-avatar: talk: a press {} s old never had its release: the tap clears it", t.elapsed().as_secs());
         }
         let press = self.talk_press(cx);
         let release = self.talk_release_as(false, cx);
@@ -268,7 +281,7 @@ impl Avatar {
         crate::line::kit_init(cx);
         let opened = cx.open_window(options, move |window, cx| {
             xid2.set(os.adopt(Role::Line, window).unwrap_or(0));
-            let on_ask: crate::line::OnAsk = Box::new(move |ask, cx: &mut App| me.update(cx, |a, cx| a.line_ask(ask, cx)).unwrap_or_else(|_| Err("she is gone".into())));
+            let on_ask: crate::line::OnAsk = Box::new(move |ask, cx: &mut App| me.update(cx, |a, cx| a.line_ask(ask, cx)).unwrap_or_else(|_| Err(crate::line::GONE.into())));
             let view = cx.new(|cx| Line::new(snap, draft, sent, name, font, pal, max_thread, face, on_ask, window, cx));
             *built2.borrow_mut() = Some(view.clone());
             cx.new(|cx| gpui_kit::base::Root::new(view, window, cx))
@@ -516,7 +529,7 @@ impl Avatar {
                 match refused {
                     Some(e) => {
                         elog!("synaps-avatar: line: stays parked, the keyboard stayed with his window: {e}");
-                        Err(format!("no keyboard: {e}"))
+                        Err(format!("{}: {e}", crate::line::NO_KEYBOARD))
                     }
                     None => {
                         self.os.arm_clicks(!p && self.line.is_some());
@@ -746,5 +759,29 @@ mod unseen_tests {
         // A reply after it, not heard (typed): counted on top.
         u.missed(8, &chars("Typed reply"), false);
         assert_eq!(u.shown(false).map(|s| (s.n, s.text.as_str())), Some((2, "Typed reply")));
+    }
+}
+
+/// A press `age` old, still without its release, is a hold a tap must not end: too young to
+/// have opened its mic yet, or its mic (`listening`) is asked for or open, until `TALK_STALE`.
+fn press_holds(age: Duration, listening: bool) -> bool {
+    age < TAP_GUARD || (listening && age < TALK_STALE)
+}
+
+#[cfg(test)]
+mod tap_tests {
+    use super::*;
+
+    #[test]
+    fn a_tap_clears_a_press_that_lost_its_release() {
+        let s = Duration::from_secs;
+        // Its mic may still open (at TAP_MS): the tap waits.
+        assert!(press_holds(Duration::from_millis(300), false));
+        // No mic past that: the release went missing (voice off, the sidecar away, a lost
+        // `--release`). The tap goes ahead instead of being ignored for TALK_STALE.
+        assert!(!press_holds(s(2), false));
+        // A hold that listens is his: the tap waits, up to TALK_STALE.
+        assert!(press_holds(s(90), true));
+        assert!(!press_holds(TALK_STALE, true));
     }
 }

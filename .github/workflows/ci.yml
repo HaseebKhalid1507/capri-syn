@@ -75,3 +75,40 @@ jobs:
       - name: Clippy
         if: ${{ !cancelled() }}
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+  # Her per-user installer (Inno Setup, packaging/windows): the windowed release build, the
+  # installer as an artifact (never released or published), then an unattended install, check
+  # and uninstall on the runner. No art in it: packs stay his.
+  windows-installer:
+    runs-on: windows-latest
+    timeout-minutes: 75
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain (rust-toolchain.toml)
+        shell: bash
+        run: rustup show active-toolchain || rustup toolchain install
+
+      # The release build's own cache (the `windows` job's is a dev build).
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release
+          cache-on-failure: true
+
+      - name: Build the installer
+        shell: pwsh
+        run: ./packaging/windows/build.ps1
+
+      - name: Install, check, uninstall (unattended)
+        shell: pwsh
+        run: ./packaging/windows/test-install.ps1 -Setup (Get-ChildItem packaging/windows/Output/synaps-avatar-setup-*.exe | Select-Object -First 1).FullName
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: synaps-avatar-setup-${{ github.sha }}
+          path: packaging/windows/Output/synaps-avatar-setup-*.exe
+          retention-days: 14
+          if-no-files-found: error

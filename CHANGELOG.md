@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### The talk key's fine print (Linux and Windows)
+- A `talk tap` no longer waits out a press that lost its `talk release`. A tap is ignored only while a hold
+  is his: the press is under 1 s old (its mic may still be opening), or its mic is asked for or open (up
+  to 120 s, the sidecar's hold cap). Any other unreleased press (voice off, no sidecar, a binding that
+  never sent `talk release`) is cleared by the tap, which then opens or closes the Line as usual. Before, the
+  tap was ignored for 120 s.
+- Unchanged: a press or a tap within 60 ms of a release is taken for an X auto-repeat (one key-down);
+  a `talk press` while one waits for its release still waits out 120 s.
+- `avatarctl state` → `line.waiting` (`false` unless the Line opened without the keyboard and is
+  waiting for his key or click; Windows only today), beside `line.parked`.
+- The summon key on a parked Line counts as `waiting` only when the desktop refused the keyboard. Any
+  other failure (she is gone) is logged as itself (`line: summoned, but she is gone`), not as a wait.
+
 ### Windows: the Line's keyboard, music, toasts, desktops, effects, DPI (not shipped)
 - The Line's keyboard follows Windows' rule: her key (Win+Alt+C) or a click on her takes it at once; any
   other opening (a summon, `capri-ctl`, voice) shows the Line without it, and her tag says

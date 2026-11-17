@@ -34,6 +34,9 @@ for speech. Setup: `tools/capri-voice-setup`, then `tools/systemd/capri-voice.se
 
 - **Hold** (`$mod+c` → `capri-ctl talk press|release`): the mic is open while the key is down; the
   release sends. A tap (under 250 ms) opens the Line for typing.
+  - A `talk tap` (Windows' key, `capri-ctl`) while a hold listens is ignored: it would end the hold. A
+    press with no mic that has gone over 1 s without its `talk release` lost it: a tap clears it and goes
+    ahead.
 - **Toggle** (`$mod+Ctrl+c` → `capri-ctl talk toggle`, on press): one tap opens the mic, and his pause
   sends: `silence_s` (1.0 s) of silence after he has spoken, ×1.5 while he has said less than 1 s ("so…",
   "um, Capri…" often stop for a breath). The tag reads `● MIC 0:03 ▮▮▯ · AUTO`.

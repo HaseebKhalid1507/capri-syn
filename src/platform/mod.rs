@@ -46,9 +46,33 @@ pub use os::Os;
 // awareness), the clock, the calendar, the media players (`watch_media`: `on_change` gets the
 // sum whenever it changes, first call now) and notifications (`notify`: blocking, Ok is its id).
 #[cfg(target_os = "linux")]
-pub use linux::{local_day, monotonic_s, notify, process_setup, trim_heap, utc_offset_s, watch_media};
+pub use linux::{base_dir, home_dir, local_day, monotonic_s, notify, process_setup, trim_heap, utc_offset_s, watch_media};
 #[cfg(windows)]
-pub use self::windows::{local_day, monotonic_s, notify, process_setup, trim_heap, utc_offset_s, watch_media};
+pub use self::windows::{base_dir, home_dir, local_day, monotonic_s, notify, process_setup, trim_heap, utc_offset_s, watch_media};
+
+/// Where her files go, per user (`base_dir`): the core adds `synaps-avatar/…`. `$XDG_<KIND>_HOME`
+/// wins on every OS; else Linux: under `$HOME` (`.config`, `.local/share`, `.local/state`),
+/// Windows: `%APPDATA%` (config, it roams) and `%LOCALAPPDATA%` (data, state).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BaseDir {
+    /// `settings.toml`.
+    Config,
+    /// Packs.
+    Data,
+    /// `state.json`, logs.
+    State,
+}
+
+impl BaseDir {
+    /// Its `XDG_*_HOME` variable.
+    pub fn xdg_var(self) -> &'static str {
+        match self {
+            BaseDir::Config => "XDG_CONFIG_HOME",
+            BaseDir::Data => "XDG_DATA_HOME",
+            BaseDir::State => "XDG_STATE_HOME",
+        }
+    }
+}
 #[cfg(test)]
 #[cfg(target_os = "linux")]
 pub use linux::stderr_into_closed_pipe;

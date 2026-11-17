@@ -49,12 +49,14 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+mod dirs;
 mod fx;
 mod media;
 mod notifications;
 #[cfg(test)]
 mod testkit;
 
+pub use dirs::{base_dir, home_dir};
 pub use media::watch_media;
 pub use notifications::notify;
 
@@ -1102,9 +1104,12 @@ pub fn stderr_into_closed_pipe<R>(f: impl FnOnce() -> R) -> R {
     out
 }
 
-/// Per-monitor DPI awareness v2 before GPUI starts: root px are device px on every monitor, and
-/// Windows never bitmap-scales her. Already set (an embedded manifest) is fine if it is the same.
+/// First thing in main: without a console (the installed, windowed build), her log goes to a
+/// file (`dirs::log_without_console`). Then per-monitor DPI awareness v2 before GPUI starts: root
+/// px are device px on every monitor, and Windows never bitmap-scales her. Already set (an
+/// embedded manifest) is fine if it is the same.
 pub fn process_setup() {
+    dirs::log_without_console();
     use ::windows::Win32::UI::HiDpi::{AreDpiAwarenessContextsEqual, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetThreadDpiAwarenessContext, SetProcessDpiAwarenessContext};
     let set = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
     let v2 = unsafe { AreDpiAwarenessContextsEqual(GetThreadDpiAwarenessContext(), DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) }.as_bool();

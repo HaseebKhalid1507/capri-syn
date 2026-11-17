@@ -101,7 +101,8 @@ Session (one Synaps daemon session drives the body):
   She watches in Observe and attaches Mirror only to send, answer or abort.
   --sleepy-after MIN   sleepy after this many minutes without a turn (default 10)
 
-  --pack DIR      character pack (default $XDG_DATA_HOME/synaps-avatar/packs/capri)
+  --pack DIR      character pack (default $XDG_DATA_HOME/synaps-avatar/packs/capri;
+                  Windows: %LOCALAPPDATA%\\synaps-avatar\\packs\\capri)
   --height PX     standing body height in logical pixels (default 340)
   --name NAME     name shown in the HUD (default: the pack's character name)
   --threads N     decode threads (default min(8, cores/2))
@@ -123,10 +124,7 @@ fn parse_args() -> Result<Args> {
 }
 
 fn parse_args_from(argv: impl IntoIterator<Item = String>) -> Result<Args> {
-    let data = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
-        .unwrap_or_default();
+    let data = platform::base_dir(platform::BaseDir::Data).unwrap_or_default();
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
     let mut a = Args {
         pack: data.join("synaps-avatar/packs/capri"),
