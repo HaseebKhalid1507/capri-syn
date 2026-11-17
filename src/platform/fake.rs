@@ -347,7 +347,7 @@ fn fake_with(target_events: bool, keyboard_on_input: bool) -> (Os, FakeDriver) {
 fn contract_fake_with_target_events() {
     let (os, mut d) = fake(true);
     let passed = contract::block_on(contract::run(&os, &mut d)).unwrap();
-    assert_eq!(passed.len(), 12);
+    assert_eq!(passed.len(), 13);
 }
 
 #[test]
@@ -355,7 +355,7 @@ fn without_idle_time_presence_is_the_pointer() {
     let (os, mut d) = fake(true);
     d.0.w().no_idle = true;
     assert_eq!(os.idle_ms(), None, "nothing seen yet");
-    let cfg = super::PointerCfg { near_px: 150.0, swipe_px: 120.0, swipe_speed: 1500.0, hover: std::time::Duration::from_millis(1500) };
+    let cfg = super::pointer::cfg(1.0);
     os.watch_pointer(cfg, |_| {}).unwrap();
     os.set_pointer_watch(Some(WinRect::new(600, 300, 100, 200)), true);
     std::thread::sleep(std::time::Duration::from_millis(300));
@@ -380,7 +380,7 @@ fn contract_fake_polled_target() {
 fn contract_fake_keyboard_on_his_input() {
     let (os, mut d) = fake_with(true, true);
     let passed = contract::block_on(contract::run(&os, &mut d)).unwrap();
-    assert_eq!(passed.len(), 12);
+    assert_eq!(passed.len(), 13);
     // Nothing of his since the keyboard went back: none to take.
     assert!(!os.may_take_keyboard());
     assert!(os.grab_keyboard(os.body()).is_err());

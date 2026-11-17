@@ -1056,54 +1056,21 @@ impl Os {
             *g = Some(t0);
         }
         std::thread::Builder::new().name("avatar-pointer-watch".into()).spawn(move || {
-            let mut last: Option<(Instant, i32, i32)> = None;
-            let (mut was_near, mut hover_since): (bool, Option<Instant>) = (false, None);
-            let mut hovered = false;
+            let mut last: Option<(i32, i32)> = None;
+            let mut sense = super::pointer::Sense::default();
             loop {
                 let armed = pw.armed.load(Ordering::Relaxed);
                 let Some((x, y)) = read() else { return };
                 let now = Instant::now();
-                if last.is_none_or(|l| (l.1, l.2) != (x, y)) {
+                if last != Some((x, y)) {
                     pw.moved_ms.store(now.duration_since(t0).as_millis() as u64, Ordering::Relaxed);
                 }
+                last = Some((x, y));
                 let her = pw.her.lock().map(|g| *g).unwrap_or_default();
-                let mut far = true;
-                if armed && her.w > 0 {
-                    let d = rect_dist(&her, x as f32, y as f32);
-                    far = d > 700.0;
-                    let near = d <= cfg.near_px;
-                    if near && !was_near && d > 0.0 {
-                        on(PointerEv::Near);
-                    }
-                    was_near = near;
-                    // Resting on her a while (once per visit of the pointer).
-                    if d <= 0.0 {
-                        let since = *hover_since.get_or_insert(now);
-                        if !hovered && now.duration_since(since) >= cfg.hover {
-                            hovered = true;
-                            on(PointerEv::Hover);
-                        }
-                    } else {
-                        hover_since = None;
-                        hovered = false;
-                    }
-                    // A fast swipe past her: the segment since the last sample comes close,
-                    // both ends outside her.
-                    if let Some((lt, lx, ly)) = last {
-                        let dt = now.duration_since(lt).as_secs_f32();
-                        let len = (((x - lx).pow(2) + (y - ly).pow(2)) as f32).sqrt();
-                        if dt > 0.0 && dt < 0.4 && len / dt >= cfg.swipe_speed && d > 0.0 && rect_dist(&her, lx as f32, ly as f32) > 0.0 {
-                            let seg = seg_rect_dist(&her, (lx as f32, ly as f32), (x as f32, y as f32));
-                            if seg <= cfg.swipe_px {
-                                on(PointerEv::Swipe(len / dt));
-                            }
-                        }
-                    }
-                } else {
-                    was_near = false;
-                    hover_since = None;
+                let (evs, far) = sense.sample(&cfg, now, x, y, Some(her), armed);
+                for e in evs {
+                    on(e);
                 }
-                last = Some((now, x, y));
                 let wait = if !armed { 500 } else if far { 200 } else { 60 };
                 std::thread::sleep(Duration::from_millis(wait));
             }
@@ -1128,17 +1095,6 @@ impl Os {
 }
 
 /// Distance from (x, y) to the rect (0 inside).
-fn rect_dist(r: &WinRect, x: f32, y: f32) -> f32 {
-    let dx = (r.x as f32 - x).max(x - r.right() as f32).max(0.0);
-    let dy = (r.y as f32 - y).max(y - r.bottom() as f32).max(0.0);
-    (dx * dx + dy * dy).sqrt()
-}
-
-/// Closest distance from the segment a→b to the rect (sampled: 24 points, enough at 60 ms).
-fn seg_rect_dist(r: &WinRect, a: (f32, f32), b: (f32, f32)) -> f32 {
-    (0..=24).map(|k| k as f32 / 24.0).map(|u| rect_dist(r, a.0 + (b.0 - a.0) * u, a.1 + (b.1 - a.1) * u)).fold(f32::MAX, f32::min)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

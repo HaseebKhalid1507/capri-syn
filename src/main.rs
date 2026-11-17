@@ -375,7 +375,7 @@ fn run(t_start: Instant) -> Result<()> {
             // The pointer near her, swiping past, resting on her (her lively reactions).
             let tx = tx2.clone();
             let sf = layout.sf;
-            let cfg = platform::PointerCfg { near_px: 150.0 * sf, swipe_px: 120.0 * sf, swipe_speed: 1500.0 * sf, hover: std::time::Duration::from_millis(1500) };
+            let cfg = platform::pointer::cfg(sf);
             os.watch_pointer(cfg, move |p| {
                 let (r, _) = std::sync::mpsc::channel();
                 tx.send_blocking((control::Command::Watch(platform::WatchEvent::Pointer(p)), r)).ok();

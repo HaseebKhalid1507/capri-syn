@@ -490,6 +490,13 @@ const GLIDE_MIN: f32 = 24.0;
 /// Moves closer together than this are a stream (a live drag): she snaps to each.
 const GLIDE_STREAM: Duration = Duration::from_millis(150);
 const FRAME_FX: Duration = Duration::from_millis(33);
+/// Milliseconds since `t0` (0 before it).
+fn now_ms(t0: Instant, now: Instant) -> f32 {
+    now.saturating_duration_since(t0).as_secs_f32() * 1000.0
+}
+
+/// An idle weight shift (`@lean`): the upper body this far (px at 1x).
+const LEAN_BEAT_PX: i32 = 14;
 /// ONLINE at night: its red this far toward the panel.
 const NIGHT_TAG_DIM: f32 = 0.45;
 /// Into a drawn sleep whose cells are still decoding: the drawing before holds this long.
@@ -641,6 +648,8 @@ pub struct Avatar {
     /// A quiet teleport's arrival: a sliver widening back into her (from this time).
     sliver: Option<Instant>,
     squash: Option<Instant>,
+    /// An idle beat's weight shift (`@lean` in an activity): from, how long, which way.
+    lean_beat: Option<(Instant, Duration, i32)>,
     glints: Vec<Glint>,
     next_glint: Option<Instant>,
     teleport: Option<Teleport>,
@@ -884,6 +893,7 @@ impl Avatar {
             next_glitch: None,
             sliver: None,
             squash: None,
+            lean_beat: None,
             glints: Vec::new(),
             next_glint: None,
             teleport: None,
@@ -1261,7 +1271,7 @@ impl Avatar {
             return fx::Pose { swing, kick, kick_right, ..fx::Pose::default() };
         }
         let life = &self.pack.behaviour.life;
-        let (bob_px, bob_period_ms, sway_px, droop, lean) = self.breath_now();
+        let (bob_px, bob_period_ms, sway_px, droop, lean) = self.breath_now(now);
         let t = now.saturating_duration_since(self.bob_t0);
         let breath = fx::bob(t, bob_px, bob_period_ms);
         // In 2 px steps once it's wide enough: every step is a redraw.
@@ -1277,22 +1287,54 @@ impl Avatar {
 
     /// Her breath now (bob px, period ms, sway px) and, tired and standing on the floor, her
     /// head's droop and lean (device px): her energy band's, else `life`'s.
-    fn breath_now(&self) -> (i32, u64, i32, i32, i32) {
+    fn breath_now(&self, now: Instant) -> (i32, u64, i32, i32, i32) {
         let life = &self.pack.behaviour.life;
         let e = self.pack.behaviour.energy.band(self.band());
         let standing = self.placement == Placement::Ground && self.standing();
-        let px = |v: i32| if standing { (v as f32 * self.layout.sf).round() as i32 } else { 0 };
+        let sf = self.layout.sf;
+        let px = |v: i32| if standing { (v as f32 * sf).round() as i32 } else { 0 };
+        // A slow nod, on her feet or on the floor (dozing).
+        let nod = if self.placement == Placement::Ground && e.nod_px > 0 && e.nod_period_ms > 0 {
+            let t = now_ms(self.bob_t0, now) / e.nod_period_ms as f32;
+            let u = (0.5 - 0.5 * (t * std::f32::consts::TAU).cos()).powf(3.0);
+            (e.nod_px as f32 * sf * u).round() as i32
+        } else {
+            0
+        };
+        // An idle beat's weight shift: eased in and out, in 2 px steps.
+        let lean = self.lean_beat.filter(|_| standing).map_or(0, |(t0, d, px)| {
+            let (t, n) = (now_ms(t0, now), d.as_secs_f32() * 1000.0);
+            let k = (t / 260.0).min(1.0).min(((n - t) / 260.0).max(0.0));
+            let v = px as f32 * sf * k * k * (3.0 - 2.0 * k);
+            ((v / 2.0).round() * 2.0) as i32
+        });
         (
             e.bob_px.unwrap_or(life.bob_px),
             e.bob_period_ms.unwrap_or(life.bob_period_ms),
             e.sway_px.unwrap_or(life.sway_px),
-            px(e.droop_px),
-            px(e.lean_px),
+            px(e.droop_px) + nod,
+            px(e.lean_px) + lean,
         )
     }
 
+    /// An activity's `@hop` (a small hop in place, a squash as she lands) and `@lean` (a
+    /// weight shift for the activity's length), by day: no new art.
+    fn activity_beats(&mut self, steps: &[crate::pack::Step], len: Duration, now: Instant) {
+        use crate::pack::Step;
+        let has = |id: &str| steps.iter().any(|s| matches!(s, Step::Clip(c) if c == id));
+        let standing = self.placement == Placement::Ground && self.standing();
+        if has("@hop") && standing && self.hop_allowed() && self.hop.is_none() {
+            self.hop = Some(now);
+            self.squash = Some(now + Duration::from_millis(fx::HOP_MS as u64));
+        }
+        if has("@lean") && standing {
+            let dir = if self.rng.pick(2) == 0 { 1 } else { -1 };
+            self.lean_beat = Some((now, len.max(Duration::from_millis(1600)), dir * LEAN_BEAT_PX));
+        }
+    }
+
     fn pose_next_change(&self, now: Instant) -> Option<Instant> {
-        let (bob_px, _, sway_px, droop, lean) = self.breath_now();
+        let (bob_px, _, sway_px, droop, lean) = self.breath_now(now);
         if !self.pose_active() || (self.music_frame().is_none() && bob_px <= 0 && sway_px <= 0 && droop == 0 && lean == 0 && !self.posed()) {
             return None;
         }
@@ -1464,6 +1506,12 @@ impl Avatar {
     /// Turn to face `right`. `snap`: at once (a drag, a departure); else the turn's squeeze
     /// (`[mirror] turn_ms`), where the art swaps edge-on.
     pub(super) fn face(&mut self, right: bool, why: &'static str, now: Instant, snap: bool) {
+        // Her cold shoulder holds her back to him through every turn she makes on her own
+        // (moves face their way; a drag or a fling is his).
+        let right = match self.cold_away() {
+            Some(away) if matches!(why, "look" | "arrive" | "needs_you" | "cold") => away,
+            _ => right,
+        };
         // In the air or landing she keeps the way she was flung (and her chain its grip).
         if self.facing_right() == right || (self.rag.is_some() && !self.rag_held()) {
             return;
@@ -2217,8 +2265,10 @@ impl Avatar {
             } else {
                 let n = self.activities().len();
                 let i = self.rng.pick(n);
-                let seq = self.pack.flatten(&self.activities()[i]);
+                let steps = self.activities()[i].clone();
+                let seq = self.pack.flatten(&self.resolve_steps(&steps));
                 let len: u64 = seq.iter().map(|s| s.1 as u64).sum();
+                self.activity_beats(&steps, Duration::from_millis(len), now);
                 self.anim.play(seq, now);
                 self.autonomy_started = true;
                 self.next_activity = Some(now + Duration::from_millis(len) + self.autonomy_gap());
@@ -2467,7 +2517,7 @@ impl Avatar {
     }
 
     fn spawn_glints(&mut self, now: Instant) {
-        let [lo, hi] = self.pack.behaviour.life.sparkle_every_ms;
+        let [lo, hi] = self.pack.behaviour.energy.band(self.band()).sparkle_every_ms.unwrap_or(self.pack.behaviour.life.sparkle_every_ms);
         if hi == 0 || self.pack.behaviour.life.sparkle_ms == 0 {
             self.next_glint = None;
             return;

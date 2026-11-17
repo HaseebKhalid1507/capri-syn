@@ -175,5 +175,5 @@ fn contract_x11() {
     let os = Os::new(x.clone(), Box::new(x));
     let passed = contract::block_on(contract::run(&os, &mut d)).unwrap();
     eprintln!("contract_x11 on {disp}: {} scenarios passed: {}", passed.len(), passed.join(", "));
-    assert_eq!(passed.len(), 12);
+    assert_eq!(passed.len(), 13);
 }

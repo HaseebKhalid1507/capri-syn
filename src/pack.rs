@@ -800,6 +800,19 @@ pub struct BrainSpec {
     pub big_hop_crouch: Option<String>,
     /// A startle in place (the pointer swiped past her).
     pub startle: Vec<Step>,
+    /// The pointer still beside her (BRIEF-alive S1): a lean toward it, then a look
+    /// (`@lookAt`). Its frames are drawn facing the pointer.
+    pub curious: Vec<Step>,
+    /// A wiggle near her (S2): a crouch, a paw-bat (`@point`), a smirk.
+    pub bat: Vec<Step>,
+    /// Landed beside the pointer she pounced at: "missed!".
+    pub missed: Vec<Step>,
+    /// Patted through a sulk or its cold shoulder (S14).
+    pub make_up: Vec<Step>,
+    /// The cold shoulder's start (after the sulk's own chain): her face, her back to him.
+    pub cold: Vec<Step>,
+    /// Up out of a nap with a greeting due: a quicker get-up than `napWake`.
+    pub nap_wake_greet: Vec<Step>,
     /// The pointer right in front of her (or on her): this frame instead of a side look.
     pub look_front: Option<String>,
     /// Approach → frame: `hang`, `hang_upside_down`, `cling_left`, `cling_right`, `peek`. A
@@ -952,6 +965,11 @@ pub struct EnergyBand {
     /// Standing, her head hangs this far (px at 1x) and leans this far (the hair's top): tired.
     pub droop_px: i32,
     pub lean_px: i32,
+    /// A slow head nod (px at 1x, ms a nod): dozing off on her feet or sitting.
+    pub nod_px: i32,
+    pub nod_period_ms: u64,
+    /// Sparkles in this band (absent: `life.sparkleEveryMs`).
+    pub sparkle_every_ms: Option<[u64; 2]>,
 }
 
 impl EnergySpec {
@@ -1345,7 +1363,8 @@ impl Pack {
         }
         for (name, band) in [("low", &pack.behaviour.energy.low), ("mid", &pack.behaviour.energy.mid), ("high", &pack.behaviour.energy.high)] {
             for (i, a) in band.activities.iter().enumerate() {
-                check_steps(&format!("energy.{name}.activities #{i}"), a, &mut errors, &pack);
+                let a: Vec<Step> = a.iter().filter(|x| !matches!(x, Step::Clip(id) if id.starts_with('@'))).cloned().collect();
+                check_steps(&format!("energy.{name}.activities #{i}"), &a, &mut errors, &pack);
             }
             if let Some(m) = &band.idle {
                 if !pack.index.contains_key(&m.base) {
@@ -1412,6 +1431,10 @@ impl Pack {
             check_steps("brain.greet", &b.greet, &mut errors, &pack);
             check_steps("brain.greetMorning", &b.greet_morning, &mut errors, &pack);
             check_steps("brain.stretch", &b.stretch, &mut errors, &pack);
+            for (k, st) in [("curious", &b.curious), ("bat", &b.bat), ("missed", &b.missed), ("makeUp", &b.make_up), ("cold", &b.cold), ("napWakeGreet", &b.nap_wake_greet)] {
+                let st: Vec<Step> = st.iter().filter(|x| !matches!(x, Step::Clip(id) if id.starts_with('@'))).cloned().collect();
+                check_steps(&format!("brain.{k}"), &st, &mut errors, &pack);
+            }
             if let Some(fs) = &b.floor_sit {
                 if !pack.index.contains_key(&fs.base) {
                     errors.push(format!("moods.json brain.floorSit: base `{}` does not resolve", fs.base));

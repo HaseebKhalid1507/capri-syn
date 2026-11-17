@@ -42,6 +42,12 @@ pub const HOP_UP_MAX: f32 = 1400.0;
 pub const TYPING_CLEAR: f32 = 200.0;
 /// A dodge ends at least this much farther from the pointer (logical px).
 pub const DODGE_GAIN: f32 = 100.0;
+/// A pounce ends with her body this close to the pointer (beside it).
+pub const POUNCE_NEAR: f32 = 220.0;
+/// A pounce's reach: farther than a hop (she may leap past it, "missed!") and shorter (the
+/// pointer is within a lean of her when it lingers; her body, hair included, is wide).
+pub const POUNCE_MAX: f32 = 450.0;
+pub const POUNCE_MIN: f32 = 30.0;
 /// A window's title bar (logical px): standing in front of it isn't over its content.
 const TITLE_PX: f32 = 32.0;
 
@@ -62,6 +68,8 @@ pub struct Boxes {
     pub cling_r: Option<WinRect>,
     /// Crouched (feet).
     pub peek: Option<WinRect>,
+    /// Standing, her whole outline (the hair's reach included; `stand` is the figure's box).
+    pub outline: WinRect,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -571,10 +579,19 @@ fn floor_spots(w: &World, sit: bool, rng: &mut Rng) -> Vec<Spot> {
 /// How much of `body` stands over windows' content (below their title bars), the middle half
 /// of a window's width counted twice: 0 is empty desktop or a title bar; a corner beats the
 /// middle of the text.
-fn content_cost(w: &World, body: &WinRect) -> f64 {
+fn content_cost(w: &World, s: &Spot) -> f64 {
     let title = w.d(TITLE_PX);
+    // Her whole outline, the hair's reach included (r40: her hair over the editor's text).
+    let (st, o) = (w.boxes.stand, w.boxes.outline);
+    let (l, t, r, b) = ((st.x - o.x).max(0), (st.y - o.y).max(0), (o.right() - st.right()).max(0), (o.bottom() - st.bottom()).max(0));
+    let body = &WinRect::new(s.body.x - l, s.body.y - t, s.body.w + l + r, s.body.h + t + b);
+    // Sitting on a window's top, her legs over that window are the pose (Haseeb's favourite).
+    let perch = match s.kind {
+        SpotKind::Edge { win } | SpotKind::SitEdge { win } => Some(win),
+        _ => None,
+    };
     let mut cost = 0;
-    for (r, _) in w.stack.iter().zip(w.eligible).filter(|(_, e)| **e) {
+    for (r, _) in w.stack.iter().zip(w.eligible).filter(|(r, e)| **e && Some(r.id) != perch) {
         let h = (r.h - title).max(0);
         let content = WinRect::new(r.x, r.y + title, r.w, h);
         let middle = WinRect::new(r.x + r.w / 4, r.y + title, r.w / 2, h);
@@ -587,7 +604,7 @@ fn content_cost(w: &World, body: &WinRect) -> f64 {
 /// text last (a preference: on a tiled desk every spot is over something). Ties keep their
 /// (random) order.
 fn clear_first(w: &World, spots: &mut [Spot]) {
-    spots.sort_by_cached_key(|s| (content_cost(w, &s.body) * 5.0).floor() as i64);
+    spots.sort_by_cached_key(|s| (content_cost(w, s) * 5.0).floor() as i64);
 }
 
 /// Empty air: 24 seeded samples, clear of every eligible window (24 px) and the cursor.
@@ -618,6 +635,9 @@ fn float_spots(w: &World, rng: &mut Rng) -> Vec<Spot> {
 /// her window (the next one or the floor). Dodge: anywhere close, farther from the pointer.
 /// `away`: he is typing, keep away from his window.
 fn hop(w: &World, kind: HopKind, away: bool, rng: &mut Rng) -> Result<Spot, Vec<(String, Block)>> {
+    if kind == HopKind::Pounce {
+        return pounce(w);
+    }
     let her = w.her;
     let (lo, hi) = (w.d(HOP_MIN) as i64, w.d(HOP_MAX) as i64);
     let her_win = her.win();
@@ -661,6 +681,7 @@ fn hop(w: &World, kind: HopKind, away: bool, rng: &mut Rng) -> Result<Spot, Vec<
         (HopKind::Startle, _) => vec![(1, 0.65), (2, 0.35)],
         (HopKind::Dodge, true) => vec![(0, 0.4), (1, 0.4), (2, 0.2)],
         (HopKind::Dodge, false) => vec![(1, 0.65), (2, 0.35)],
+        (HopKind::Pounce, _) => unreachable!("pounce() above"),
     };
     let mut pool = fams;
     let mut why = Vec::new();
@@ -696,6 +717,70 @@ fn hop(w: &World, kind: HopKind, away: bool, rng: &mut Rng) -> Result<Spot, Vec<
             }
         }
         why.push((["along", "next_window", "floor"][fam as usize].to_string(), last));
+    }
+    Err(why)
+}
+
+/// A pounce at the still pointer: a hop toward it (`POUNCE_MIN`..`POUNCE_MAX` across) that ends beside it (her body
+/// within `POUNCE_NEAR`), never on it (the guard's `CURSOR_CLEAR`). A window top
+/// in reach (any but his: its interior is his) beats the floor; then the nearest the pointer.
+fn pounce(w: &World) -> Result<Spot, Vec<(String, Block)>> {
+    let her = w.her;
+    let (lo, hi) = (w.d(POUNCE_MIN) as i64, w.d(POUNCE_MAX) as i64);
+    let c = w.cursor;
+    let cursor_d = |b: &WinRect| (dist2(b, c.0, c.1) as f64).sqrt();
+    // Every seat in her reach, a step apart: the checks below pick the one beside it.
+    let step = w.d(24.0).max(1) as usize;
+    let reach = (her.anchor.0 - hi as i32, her.anchor.0 + hi as i32);
+    let mut tops = Vec::new();
+    for p in edges::platforms(w.stack, w.eligible, w.contact, w.margin) {
+        if w.focused.is_some_and(|f| f.id == p.win) {
+            continue;
+        }
+        let (a, b) = (p.seat_x.0.max(reach.0), p.seat_x.1.min(reach.1));
+        for x in (a..=b).step_by(step) {
+            tops.push(w.spot(SpotKind::Edge { win: p.win }, (x, p.y), w.boxes.sit, None));
+        }
+    }
+    let i = her.area.min(w.areas.len().saturating_sub(1));
+    let floor: Vec<Spot> = (reach.0..=reach.1).step_by(step).map(|x| w.spot(SpotKind::Floor, (x, w.floor_y(i)), w.boxes.stand, None)).collect();
+    let ok = |s: &Spot| -> Result<(), Block> {
+        if s.area != her.area {
+            return Err(Block::OtherMonitor);
+        }
+        guard(w, s)?;
+        if s.covers_focus() && !w.focused.is_some_and(|f| w.floor_strip_ok(s, &f)) {
+            return Err(Block::FocusedInterior);
+        }
+        let (dx, dy) = ((s.anchor.0 - her.anchor.0) as i64, (s.anchor.1 - her.anchor.1) as i64);
+        if dx * dx + dy * dy < lo * lo || dx.abs() > hi || -dy > w.d(HOP_UP_MAX) as i64 {
+            return Err(Block::NoSpot);
+        }
+        // Toward it, never away (r41: beside the pointer on her far side read as a dodge).
+        let toward = (c.0 - her.anchor.0).signum() as i64;
+        if toward != 0 && dx.signum() != toward {
+            return Err(Block::NoSpot);
+        }
+        // Beside it (she may overshoot: "missed!").
+        if cursor_d(&s.body) > w.d(POUNCE_NEAR) as f64 {
+            return Err(Block::Cursor);
+        }
+        Ok(())
+    };
+    let mut why = Vec::new();
+    for (name, mut cands) in [("pounce_top", tops), ("pounce_floor", floor)] {
+        cands.sort_by(|a, b| cursor_d(&a.body).total_cmp(&cursor_d(&b.body)));
+        // The nearest one's block says why (the farthest ones are only far).
+        let mut first = None;
+        for s in cands {
+            match ok(&s) {
+                Ok(()) => return Ok(s),
+                Err(b) => {
+                    first.get_or_insert(b);
+                }
+            }
+        }
+        why.push((name.to_string(), first.unwrap_or(Block::NoSpot)));
     }
     Err(why)
 }
@@ -1043,6 +1128,7 @@ mod tests {
             cling_l: Some(r(0, -10, -130, 300, 372)),
             cling_r: Some(r(0, -290, -130, 300, 372)),
             peek: Some(r(0, -130, -260, 260, 265)),
+            outline: r(0, -170, -390, 340, 395),
         }
     }
 
@@ -1656,6 +1742,64 @@ mod tests {
                 assert!(gap(&s.body) >= 200.0f64.min(gap(&seat.body)) - 1.0, "{s:?}");
             }
         }
+    }
+
+    #[test]
+    fn a_pounce_lands_beside_the_pointer_never_on_it_and_prefers_a_top() {
+        let mut fx = desk();
+        // Nothing focused (his window's interior is never covered: that rule has its own tests).
+        fx.focused = None;
+        let base = fx.world();
+        // On the floor under window 12 (top at y 300 is out of reach: 1100+ up is fine, 300 px
+        // across is the limit): the pointer still near window 16's top (y 1180).
+        let her = base.spot(SpotKind::Floor, (1600, base.floor_y(0)), base.boxes.stand, None);
+        let (mut tops, mut n) = (0, 0);
+        for k in 0..40 {
+            let c = (1560 + k * 5, 1130 + (k % 4) * 10);
+            let w = World { her, cursor: c, ..base.clone() };
+            let Ok(s) = resolve(&Goal::Hop { kind: HopKind::Pounce, away: false }, &w, &mut Rng::new(3)) else { continue };
+            n += 1;
+            assert!(!s.body.grow(w.d(CURSOR_CLEAR)).contains(c.0, c.1), "never on the pointer: {s:?} {c:?}");
+            let d = |b: &WinRect| (dist2(b, c.0, c.1) as f64).sqrt();
+            assert!(d(&s.body) <= w.d(POUNCE_NEAR) as f64, "beside it");
+            assert!((s.anchor.0 - her.anchor.0).abs() <= w.d(POUNCE_MAX), "a pounce's reach");
+            assert!((s.anchor.0 - her.anchor.0).signum() == (c.0 - her.anchor.0).signum() || c.0 == her.anchor.0, "toward it");
+            tops += usize::from(s.win().is_some());
+        }
+        assert!(n >= 30, "{n} pounces of 40");
+        // A top in reach beats the floor; the floor where every top seat toward it would cover it.
+        assert!(tops * 2 >= n, "{tops} tops of {n}");
+        // No top in reach: the floor beside it.
+        let w = World { her, cursor: (1350, 1500), ..base.clone() };
+        let s = resolve(&Goal::Hop { kind: HopKind::Pounce, away: false }, &w, &mut Rng::new(3)).expect("floor");
+        assert!(s.win().is_none() && !s.body.grow(w.d(CURSOR_CLEAR)).contains(1350, 1500));
+        assert_eq!((s.anchor.0 - her.anchor.0).signum(), (1350 - her.anchor.0).signum(), "toward it");
+        // Lingering just past her hair (the rig's r41 case): she still gets there, short or past it.
+        for g in [20, 60, 110, 140] {
+            let c = (her.body.right() + g, her.anchor.1 - 100);
+            let w = World { her, cursor: c, ..base.clone() };
+            let s = resolve(&Goal::Hop { kind: HopKind::Pounce, away: false }, &w, &mut Rng::new(3)).unwrap_or_else(|e| panic!("{g}: {e:?}"));
+            assert!(s.anchor.0 > her.anchor.0 && !s.body.grow(w.d(CURSOR_CLEAR)).contains(c.0, c.1), "{g}: {s:?}");
+        }
+        // Already beside her with nothing farther on its side in reach: no pounce (never a hop away).
+        let w = World { her, cursor: (her.anchor.0 + 150, her.anchor.1 - 100), ..base.clone() };
+        if let Ok(s) = resolve(&Goal::Hop { kind: HopKind::Pounce, away: false }, &w, &mut Rng::new(3)) {
+            assert!(s.anchor.0 > her.anchor.0, "toward it: {s:?}");
+        }
+    }
+
+    #[test]
+    fn content_cost_counts_her_whole_outline_but_not_her_perch() {
+        let fx = desk();
+        let w = fx.world();
+        // Standing just right of window 15 (700..1400, content from y 1150 + title): her body
+        // box clears it, her hair's reach doesn't.
+        let s = w.spot(SpotKind::Floor, (1400 + 125, w.floor_y(0)), w.boxes.stand, None);
+        assert!(s.body.x >= 1400);
+        assert!(content_cost(&w, &s) > 0.0, "the hair over its text counts");
+        // Sitting on window 11's top: her legs over it are the pose, not a cost.
+        let seat = w.spot(SpotKind::Edge { win: 11 }, (600, 420), w.boxes.sit, None);
+        assert_eq!(content_cost(&w, &seat), 0.0);
     }
 
     #[test]
@@ -2323,7 +2467,7 @@ mod tests {
                 }
                 cands.into_iter().find(|s| guard(&w, s).is_ok()).expect("a floor spot")
             };
-            let c = content_cost(&w, &s.body);
+            let c = content_cost(&w, &s);
             sum += c;
             if c > 0.2 {
                 over += 1;

@@ -10,7 +10,7 @@
 //! extent of each effect layer as painted. `settle` is async: a backend that paints effects
 //! in her own window (Wayland) needs its event loop to turn between steps.
 
-use super::{Os, PointerCfg, PointerEv, SessionEv, ShapeRect, WatchEvent, WinId, WinRect};
+use super::{Os, PointerEv, SessionEv, ShapeRect, WatchEvent, WinId, WinRect};
 use anyhow::{Result, anyhow, ensure};
 use std::future::Future;
 use std::sync::mpsc::{Receiver, channel};
@@ -99,7 +99,7 @@ async fn scenarios<D: Driver>(os: &Os, d: &mut D, stop: bool) -> Result<Vec<(&'s
     os.spawn_watcher(move |e| {
         tx.send(e).ok();
     })?;
-    let cfg = PointerCfg { near_px: 150.0, swipe_px: 120.0, swipe_speed: 1500.0, hover: Duration::from_millis(1500) };
+    let cfg = super::pointer::cfg(1.0);
     os.watch_pointer(cfg, move |p| {
         tx2.send(WatchEvent::Pointer(p)).ok();
     })?;
@@ -126,6 +126,7 @@ async fn scenarios<D: Driver>(os: &Os, d: &mut D, stop: bool) -> Result<Vec<(&'s
     scenario!("shapes", shapes);
     scenario!("keyboard", keyboard);
     scenario!("pointer-near", pointer_near);
+    scenario!("pointer-linger-wiggle", pointer_linger_wiggle);
     scenario!("presence", presence);
     Ok(out)
 }
@@ -491,6 +492,29 @@ async fn presence<D: Driver>(os: &Os, d: &mut D, _rx: &Receiver<WatchEvent>) -> 
         let got = wait(&rx, 2000, |e| matches!(e, WatchEvent::Session(_)));
         ensure!(matches!(got, Some(WatchEvent::Session(e)) if e == ev), "{ev:?}: got {got:?}");
     }
+    Ok(())
+}
+
+/// The pointer resting beside her lingers (once), a quick left-right beside her wiggles.
+async fn pointer_linger_wiggle<D: Driver>(os: &Os, d: &mut D, rx: &Receiver<WatchEvent>) -> Result<()> {
+    let her = rect(600, 300, 100, 200);
+    d.warp(1200, 900);
+    d.settle().await;
+    os.set_pointer_watch(Some(her), true);
+    std::thread::sleep(Duration::from_millis(600));
+    d.warp(780, 400);
+    d.settle().await;
+    drain(rx);
+    let e = wait(rx, 4500, |e| matches!(e, WatchEvent::Pointer(PointerEv::Linger)));
+    ensure!(e.is_some(), "no Linger");
+    for k in 0..12 {
+        d.warp(if k % 2 == 0 { 860 } else { 780 }, 420);
+        d.settle().await;
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    let e = wait(rx, 1500, |e| matches!(e, WatchEvent::Pointer(PointerEv::Wiggle)));
+    os.set_pointer_watch(None, false);
+    ensure!(e.is_some(), "no Wiggle");
     Ok(())
 }
 
