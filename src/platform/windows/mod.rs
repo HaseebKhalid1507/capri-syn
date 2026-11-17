@@ -1,17 +1,29 @@
 //! The Windows backend: plain translation between Win32/DWM and the core's types (her body, her
-//! idle loop, perching, her global keys; voice, the Line's keyboard and server-painted effect
-//! layers come later). Every rule built on these answers is the core's (`os.rs`).
+//! idle loop, perching, her global keys, the Line's keyboard, effect layers, the media flyout's
+//! players, toasts; voice comes later). Every rule built on these answers is the core's
+//! (`os.rs`).
 //!
 //! GPUI's Windows crate is vendored and patched (vendor/gpui-pre-windows/PATCHES.md): a `PopUp`
 //! is a bare `WS_POPUP` (PW-1), a click on a window opened without focus doesn't activate it
-//! (PW-2), a pure move doesn't re-render (PW-3). `adopt` adds the rest: topmost tool window, DWM's
-//! frame, border and corner rounding off, and click-through. GPUI composites through DirectComposition (`WS_EX_NOREDIRECTIONBITMAP`, a
-//! premultiplied swap chain): per-pixel alpha with no layered-window bitmap. Click-through:
-//! `WS_EX_LAYERED` + `WS_EX_TRANSPARENT`, the latter toggled by a pointer poller from her input
-//! region (`WM_NCHITTEST` → `HTTRANSPARENT` only passes clicks to windows of the same thread,
-//! measured in the P0 probe). Coordinates: root px are the virtual screen's, from its top-left.
+//! (PW-2), a pure move doesn't re-render (PW-3), `activate` injects no input (PW-4), a pop-up
+//! keeps one scale on every monitor (PW-5). `adopt` adds the rest: topmost tool window, DWM's
+//! frame, border and corner rounding off, and click-through. GPUI composites through
+//! DirectComposition (`WS_EX_NOREDIRECTIONBITMAP`, a premultiplied swap chain): per-pixel alpha
+//! with no layered-window bitmap. Click-through: `WS_EX_LAYERED` + `WS_EX_TRANSPARENT`, the
+//! latter toggled by a pointer poller from her input region (`WM_NCHITTEST` → `HTTRANSPARENT`
+//! only passes clicks to windows of the same thread, measured in the P0 probe).
+//!
+//! The keyboard: Windows hands a process the foreground only right after input of his to it
+//! (the foreground lock). She takes it only then: her key (`WM_HOTKEY`) or his press on one of
+//! her windows, within `GRANT_MS`, or while hers have it (`Caps::keyboard_on_input`). Nothing
+//! else moves it (no synthetic input, no `AttachThreadInput`).
+//!
+//! Coordinates: root px are device px (per-monitor DPI aware v2), from the virtual screen's
+//! top-left.
 
 use super::{Caps, Desktop, FxZ, Hint, KeyEv, Keys, Monitor, PointerRead, Role, SessionEv, ShapeRect, Stage, Visible, Win, WinId, WinRect};
+use ::windows::Win32::System::Com::{CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx};
+use ::windows::Win32::System::Registry::{HKEY, HKEY_CURRENT_USER, KEY_READ, REG_NOTIFY_CHANGE_LAST_SET, RRF_RT_REG_BINARY, RegGetValueW, RegNotifyChangeKeyValue, RegOpenKeyExW};
 use ::windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use ::windows::Win32::Graphics::Dwm::{
     DWMNCRP_DISABLED, DWMWA_BORDER_COLOR, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DWMWA_NCRENDERING_POLICY, DWMWA_WINDOW_CORNER_PREFERENCE,
@@ -19,26 +31,56 @@ use ::windows::Win32::Graphics::Dwm::{
 };
 use ::windows::Win32::Graphics::Gdi::{
     CombineRgn, CreateRectRgn, DEVMODEW, DeleteObject, ENUM_CURRENT_SETTINGS, EnumDisplayMonitors, EnumDisplaySettingsW, GetMonitorInfoW, HDC,
-    HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFO, MONITORINFOEXW, MonitorFromPoint, MonitorFromWindow, RGN_OR, SetWindowRgn,
+    HMONITOR, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MONITORINFOEXW, MonitorFromPoint, MonitorFromWindow, RGN_OR, SetWindowRgn,
 };
 use ::windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook};
 use ::windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, GetLastInputInfo, HOT_KEY_MODIFIERS, LASTINPUTINFO, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, RegisterHotKey, VK_ESCAPE,
     VK_LBUTTON, VK_MBUTTON, VK_RBUTTON, VkKeyScanW,
 };
-use ::windows::Win32::UI::Shell::{QUNS_PRESENTATION_MODE, QUNS_RUNNING_D3D_FULL_SCREEN, SHQueryUserNotificationState};
+use ::windows::Win32::UI::Shell::{IVirtualDesktopManager, QUNS_PRESENTATION_MODE, QUNS_RUNNING_D3D_FULL_SCREEN, SHQueryUserNotificationState, VirtualDesktopManager};
 use ::windows::Win32::UI::WindowsAndMessaging::*;
 use ::windows::core::{BOOL, PCWSTR};
 use anyhow::{Result, bail};
 use gpui_kit::{TitlebarOptions, Window, WindowKind, WindowOptions};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+mod fx;
+mod media;
+mod notifications;
 #[cfg(test)]
 mod testkit;
+
+pub use media::watch_media;
+pub use notifications::notify;
+
+/// How long his input to her (her key, a press on one of her windows) lets her take the
+/// keyboard: the Line opening on it takes well under this.
+const GRANT_MS: u64 = 1000;
+
+/// Milliseconds since boot (the clock `GRANT_MS` is counted on).
+fn tick() -> u64 {
+    unsafe { ::windows::Win32::System::SystemInformation::GetTickCount64() }
+}
+
+fn buttons_down() -> bool {
+    unsafe { [VK_LBUTTON, VK_RBUTTON, VK_MBUTTON].iter().any(|k| GetAsyncKeyState(k.0 as i32) < 0) }
+}
+
+/// The window under the pointer is one of hers (a press there is his click on her). A
+/// click-through surface letting the pointer by is not under it.
+fn hers_at_pointer(mine: &Mutex<HashSet<WinId>>) -> bool {
+    let mut p = POINT::default();
+    if unsafe { GetCursorPos(&mut p) }.is_err() {
+        return false;
+    }
+    let h = unsafe { WindowFromPoint(p) };
+    !h.0.is_null() && mine.lock().is_ok_and(|m| m.contains(&id(unsafe { GetAncestor(h, GA_ROOT) })))
+}
 
 /// HWNDs are 32-bit values sign-extended (they cross 32/64-bit processes): a `WinId` holds one.
 fn hwnd(w: WinId) -> HWND {
@@ -52,6 +94,80 @@ fn id(h: HWND) -> WinId {
 /// The virtual screen's top-left (root px are counted from it).
 fn origin() -> (i32, i32) {
     unsafe { (GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN)) }
+}
+
+/// The primary monitor's scale (effective DPI ÷ 96): GPUI's primary display's, so her `sf`, and
+/// the one her pop-ups keep on every monitor (PW-5).
+fn primary_scale() -> f32 {
+    use ::windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+    let m = unsafe { MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) };
+    let (mut x, mut y) = (0u32, 0u32);
+    match unsafe { GetDpiForMonitor(m, MDT_EFFECTIVE_DPI, &mut x, &mut y) } {
+        Ok(()) if x > 0 => x as f32 / 96.0,
+        _ => 1.0,
+    }
+}
+
+thread_local! {
+    /// The shell's virtual desktop manager, made once per thread that asks (None: there is none).
+    static VDM: std::cell::OnceCell<Option<IVirtualDesktopManager>> = const { std::cell::OnceCell::new() };
+}
+
+/// On the virtual desktop he sees. A window on another one is cloaked as well (`showing` leaves
+/// it out already); the shell's own answer settles a window it is moving. Unknown: yes.
+fn on_current_desktop(h: HWND) -> bool {
+    VDM.with(|v| {
+        let m = v.get_or_init(|| unsafe {
+            // COM on this thread if nothing set it up (GPUI's main thread already has it).
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+            CoCreateInstance::<_, IVirtualDesktopManager>(&VirtualDesktopManager, None, CLSCTX_ALL).ok()
+        });
+        m.as_ref().is_none_or(|m| !matches!(unsafe { m.IsWindowOnCurrentVirtualDesktop(h) }, Ok(b) if !b.as_bool()))
+    })
+}
+
+/// Where the shell keeps the current virtual desktop: Windows 11's key, then Windows 10's (per
+/// session).
+fn desktops_key() -> Option<HKEY> {
+    let mut sid = 0u32;
+    let _ = unsafe { ::windows::Win32::System::RemoteDesktop::ProcessIdToSessionId(::windows::Win32::System::Threading::GetCurrentProcessId(), &mut sid) };
+    let paths = [
+        r"Software\Microsoft\Windows\CurrentVersion\Explorer\VirtualDesktops".to_string(),
+        format!(r"Software\Microsoft\Windows\CurrentVersion\Explorer\SessionInfo\{sid}\VirtualDesktops"),
+    ];
+    paths.iter().find_map(|p| {
+        let mut key = HKEY::default();
+        let path = ::windows::core::HSTRING::from(p.as_str());
+        unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, &path, None, KEY_READ, &mut key) }.ok().ok()?;
+        if current_desktop(key).is_some() {
+            return Some(key);
+        }
+        unsafe {
+            let _ = ::windows::Win32::System::Registry::RegCloseKey(key);
+        }
+        None
+    })
+}
+
+/// The current virtual desktop's id, as the shell stores it.
+fn current_desktop(key: HKEY) -> Option<[u8; 16]> {
+    let (mut buf, mut n) = ([0u8; 16], 16u32);
+    unsafe { RegGetValueW(key, PCWSTR::null(), ::windows::core::w!("CurrentVirtualDesktop"), RRF_RT_REG_BINARY, None, Some(buf.as_mut_ptr() as *mut _), Some(&mut n as *mut u32)) }
+        .is_ok()
+        .then_some(buf)
+}
+
+/// Monitors added, removed, rearranged or set to another mode, the work area changed (the
+/// taskbar moved or resized), a DPI changed: `Hint::Layout`, on the watcher's thread.
+unsafe extern "system" fn layout_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    if msg == WM_DISPLAYCHANGE || msg == WM_DPICHANGED || (msg == WM_SETTINGCHANGE && wp.0 as u32 == SPI_SETWORKAREA.0) {
+        HINT.with(|f| {
+            if let Some(f) = f.borrow().as_ref() {
+                f(Hint::Layout);
+            }
+        });
+    }
+    unsafe { DefWindowProcW(h, msg, wp, lp) }
 }
 
 fn root_rect(r: &RECT, w: WinId) -> WinRect {
@@ -151,6 +267,8 @@ struct Surface {
 }
 
 type Escapes = Arc<Mutex<Option<Box<dyn Fn() + Send>>>>;
+/// A window and where it goes (screen px: x, y, w, h).
+type Placer = std::sync::mpsc::Sender<(WinId, [i32; 4])>;
 
 pub struct Win32 {
     /// Her body's window (0 until adopted).
@@ -164,6 +282,17 @@ pub struct Win32 {
     escape: Arc<AtomicBool>,
     on_escape: Escapes,
     click_thread: Mutex<Option<std::thread::Thread>>,
+    /// When he last gave her his input (`tick` ms; 0: not since the keyboard went back).
+    grant_at: Arc<AtomicU64>,
+    /// Her effect layers' windows, by layer.
+    fx: Mutex<Vec<fx::FxWin>>,
+    /// The box (GPUI logical px, root px ÷ her scale: x, y, w, h) in the window options `dress`
+    /// saw last, per role. GPUI opens a window whose box isn't on the primary monitor in the
+    /// middle of it at a default size, and counts from the primary's top-left, not the virtual
+    /// screen's: `adopt` puts it where it was asked for, at its size.
+    asked_at: Mutex<Vec<(Role, [f32; 4])>>,
+    /// The thread that resizes her GPUI windows (`place_later`).
+    later: Mutex<Option<Placer>>,
 }
 
 thread_local! {
@@ -242,6 +371,10 @@ impl Win32 {
             escape: Arc::new(AtomicBool::new(false)),
             on_escape: Arc::new(Mutex::new(None)),
             click_thread: Mutex::new(None),
+            grant_at: Arc::new(AtomicU64::new(0)),
+            fx: Mutex::new(Vec::new()),
+            asked_at: Mutex::new(Vec::new()),
+            later: Mutex::new(None),
         })
     }
 
@@ -259,11 +392,18 @@ impl Win32 {
     /// without focus).
     fn adopt_hwnd(&self, role: Role, h: HWND) -> Result<WinId> {
         let through = matches!(role, Role::Body | Role::Intro | Role::Fx);
+        let asked = self.asked_at.lock().ok().and_then(|mut a| a.iter().position(|e| e.0 == role).map(|i| a.swap_remove(i).1));
         unsafe {
-            // Keep the client area where GPUI put it, at its size: it becomes the whole window.
+            // The client area becomes the whole window: where and as big as the core asked for it
+            // (else as GPUI put it).
             let (mut c, mut at) = (RECT::default(), POINT::default());
             GetClientRect(h, &mut c)?;
             let _ = ::windows::Win32::Graphics::Gdi::ClientToScreen(h, &mut at);
+            if let Some([lx, ly, lw, lh]) = asked {
+                let (s, (ox, oy)) = (primary_scale(), origin());
+                at = POINT { x: (lx * s).round() as i32 + ox, y: (ly * s).round() as i32 + oy };
+                c = RECT { left: 0, top: 0, right: (lw * s).round().max(1.0) as i32, bottom: (lh * s).round().max(1.0) as i32 };
+            }
             // GPUI PW-1 creates a pop-up as a bare WS_POPUP; one with a caption (an unpatched
             // GPUI) is made one here.
             let style = GetWindowLongPtrW(h, GWL_STYLE) as u32;
@@ -284,7 +424,14 @@ impl Win32 {
             set(DWMWA_NCRENDERING_POLICY, DWMNCRP_DISABLED.0 as u32);
             set(DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND.0 as u32);
             set(DWMWA_BORDER_COLOR, 0xFFFF_FFFE);
-            SetWindowPos(h, Some(HWND_TOPMOST), at.x, at.y, c.right, c.bottom, SWP_NOACTIVATE | SWP_FRAMECHANGED)?;
+            SetWindowPos(h, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED)?;
+            let mut wr = RECT::default();
+            GetWindowRect(h, &mut wr)?;
+            if (wr.right - wr.left, wr.bottom - wr.top) != (c.right, c.bottom) {
+                self.place_later(id(h), at.x, at.y, c.right, c.bottom);
+            } else if (wr.left, wr.top) != (at.x, at.y) {
+                SetWindowPos(h, None, at.x, at.y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)?;
+            }
         }
         let w = id(h);
         if let Ok(mut m) = self.mine.lock() {
@@ -310,12 +457,18 @@ impl Win32 {
         if g.is_some() {
             return;
         }
-        let surfaces = self.surfaces.clone();
+        let (surfaces, mine, grant) = (self.surfaces.clone(), self.mine.clone(), self.grant_at.clone());
         let trace = std::env::var_os("SA_WIN_TRACE").is_some();
         let t = std::thread::Builder::new().name("win-input".into()).spawn(move || {
+            let mut was_pressed = false;
             loop {
                 let mut p = POINT::default();
-                let pressed = unsafe { [VK_LBUTTON, VK_RBUTTON, VK_MBUTTON].iter().any(|k| GetAsyncKeyState(k.0 as i32) < 0) };
+                let pressed = buttons_down();
+                // His press on one of her windows (the Line too): the keyboard is his to give.
+                if pressed && !was_pressed && hers_at_pointer(&mine) {
+                    grant.store(tick(), Ordering::Relaxed);
+                }
+                was_pressed = pressed;
                 if unsafe { GetCursorPos(&mut p) }.is_ok() && !pressed {
                     let Ok(mut s) = surfaces.lock() else { return };
                     for (&w, surf) in s.iter_mut() {
@@ -345,6 +498,29 @@ impl Win32 {
         }
     }
 
+    /// Place her GPUI window `s` (screen px) from another thread, `SWP_ASYNCWINDOWPOS`: her
+    /// window's thread takes it from its queue between GPUI's updates, as GPUI's own `resize`
+    /// does. A synchronous resize comes back into GPUI while the core's update holds it, and GPUI
+    /// would keep laying her out at the old size. In order, per window.
+    fn place_later(&self, s: WinId, x: i32, y: i32, w: i32, h: i32) {
+        let Ok(mut g) = self.later.lock() else { return };
+        let tx = g.get_or_insert_with(|| {
+            let (tx, rx) = std::sync::mpsc::channel::<(WinId, [i32; 4])>();
+            let spawned = std::thread::Builder::new().name("win-place".into()).spawn(move || {
+                for (s, [x, y, w, h]) in rx {
+                    unsafe {
+                        let _ = SetWindowPos(hwnd(s), None, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
+                    }
+                }
+            });
+            if let Err(e) = spawned {
+                elog!("synaps-avatar: windows: no placing thread: {e}");
+            }
+            tx
+        });
+        tx.send((s, [x, y, w.max(1), h.max(1)])).ok();
+    }
+
     fn set_input(&self, s: WinId, input: &[ShapeRect]) {
         if let Ok(mut g) = self.surfaces.lock() {
             match g.get_mut(&s) {
@@ -364,6 +540,12 @@ impl Win32 {
         unsafe { SetWindowRgn(hwnd(s), rgn, true) };
     }
 
+    /// One of her windows has the foreground (her process may then move it among them).
+    fn hers_in_front(&self) -> bool {
+        let fg = unsafe { GetForegroundWindow() };
+        !fg.0.is_null() && self.mine(unsafe { GetAncestor(fg, GA_ROOT) })
+    }
+
     fn arm(&self) {
         if let Ok(g) = self.click_thread.lock()
             && let Some(t) = g.as_ref()
@@ -375,10 +557,27 @@ impl Win32 {
 
 impl Desktop for Win32 {
     /// DWM always composites; GPUI presents every redraw through DirectComposition. Effect
-    /// layers are painted in her window for now (server-painted ones: layered tool windows,
-    /// later). The WinEvent hook reports moves, hides and shows of every window.
+    /// layers reaching out of her window get windows of their own (`fx.rs`). The WinEvent hook
+    /// reports moves, hides and shows of every window. Display and work-area changes are hinted,
+    /// and the core still re-reads the layout on its timer (a missed broadcast heals). The
+    /// keyboard comes only on his input (the foreground lock).
     fn caps(&self) -> Caps {
-        Caps { shape_mode: false, target_events: true, fx_layers: false, costly_redraw: true, implicit_grab: true, goal_geometry: false, layout_events: false, host_per_output: false }
+        Caps {
+            shape_mode: false,
+            target_events: true,
+            fx_layers: true,
+            costly_redraw: true,
+            implicit_grab: true,
+            goal_geometry: false,
+            layout_events: false,
+            host_per_output: false,
+            keyboard_on_input: true,
+        }
+    }
+
+    /// GPUI's primary display is the primary monitor (not the virtual screen).
+    fn primary_display_px(&self) -> i32 {
+        unsafe { GetSystemMetrics(SM_CXSCREEN) }
     }
 
     fn root_size(&self) -> (i32, i32) {
@@ -424,7 +623,7 @@ impl Desktop for Win32 {
     fn windows(&self) -> Vec<Win> {
         let mut out: Vec<Win> = toplevels()
             .into_iter()
-            .filter(|&h| showing(h) && !self.mine(h) && !is_shell(h))
+            .filter(|&h| showing(h) && !self.mine(h) && !is_shell(h) && on_current_desktop(h))
             .filter_map(|h| {
                 let r = root_rect(&frame_rect(h)?, id(h));
                 if r.w <= 0 || r.h <= 0 {
@@ -456,7 +655,7 @@ impl Desktop for Win32 {
 
     fn toplevel_rect(&self, w: WinId) -> Option<WinRect> {
         let h = hwnd(w);
-        if !showing(h) {
+        if !showing(h) || !on_current_desktop(h) {
             return None;
         }
         frame_rect(h).map(|r| root_rect(&r, w))
@@ -547,12 +746,12 @@ impl Desktop for Win32 {
         rx.recv()?
     }
 
-    /// One thread: out-of-context WinEvent hooks (moves, shows, hides, minimise, cloak,
-    /// foreground) on every window but hers, and its message loop.
     /// RegisterHotKey on a thread of its own (presses only, `MOD_NOREPEAT`): the summon key and
-    /// the toggle chord (`chord`). A chord another app holds is skipped with its name logged.
+    /// the toggle chord (`chord`). A chord another app holds is skipped with its name logged. A
+    /// press is his input to her: the keyboard is hers to take for `GRANT_MS`.
     fn watch_keys(&self, keys: Keys, on: Box<dyn Fn(KeyEv) + Send>) -> Result<bool> {
         let wanted = [(KeyEv::Summon, chord(keys.summon, false)), (KeyEv::TalkToggle, chord(keys.toggle, true))];
+        let grant = self.grant_at.clone();
         let (tx, rx) = std::sync::mpsc::channel::<Result<()>>();
         std::thread::Builder::new().name("avatar-keys".into()).spawn(move || {
             let mut held = Vec::new();
@@ -577,6 +776,7 @@ impl Desktop for Win32 {
                 if msg.message == WM_HOTKEY
                     && let Some((_, ev)) = held.iter().find(|(n, _)| *n as usize == msg.wParam.0)
                 {
+                    grant.store(tick(), Ordering::Relaxed);
                     on(*ev);
                 }
             }
@@ -585,10 +785,20 @@ impl Desktop for Win32 {
         Ok(true)
     }
 
+    /// `WIN+ALT+C` for the summon key (`chord`).
+    fn key_label(&self, ev: KeyEv, key: char) -> Option<String> {
+        key_label(ev, key)
+    }
+
+    /// One thread: out-of-context WinEvent hooks (moves, shows, hides, minimise, cloak,
+    /// foreground) on every window but hers, a hidden top-level window for the display
+    /// broadcasts (`layout_proc`), and their message loop. Another blocks on the registry for
+    /// virtual desktop switches (`Hint::Desktop`; the windows of the desktop he left are cloaked,
+    /// which the hooks report as hidden).
     fn watch(&self, hint: Box<dyn Fn(Hint) + Send>) -> Result<()> {
         let (tx, rx) = std::sync::mpsc::channel::<Result<()>>();
         let mine = self.mine.clone();
-        let hint: Box<dyn Fn(Hint) + Send> = Box::new(move |h: Hint| {
+        let not_hers: HintFn = Box::new(move |h: Hint| {
             let w = match h {
                 Hint::Moved(w, _) | Hint::Mapped(w) | Hint::Gone(w) => w,
                 _ => 0,
@@ -597,8 +807,41 @@ impl Desktop for Win32 {
                 hint(h);
             }
         });
+        let hint = Arc::new(Mutex::new(not_hers));
+        let call = move |h: Hint| {
+            if let Ok(f) = hint.lock() {
+                f(h);
+            }
+        };
+        let desks = call.clone();
+        std::thread::Builder::new().name("win-desktops".into()).spawn(move || {
+            let Some(key) = desktops_key() else {
+                elog!("synaps-avatar: windows: no virtual desktop in the registry; a switch shows as his windows hidden");
+                return;
+            };
+            let mut now = current_desktop(key);
+            // Blocks until a value under the key changes (his switch writes the current one).
+            while unsafe { RegNotifyChangeKeyValue(key, false, REG_NOTIFY_CHANGE_LAST_SET, None, false) }.is_ok() {
+                let next = current_desktop(key);
+                if next != now {
+                    now = next;
+                    desks(Hint::Desktop);
+                }
+            }
+        })?;
         std::thread::Builder::new().name("win-watch".into()).spawn(move || {
-            HINT.with(|h| *h.borrow_mut() = Some(hint));
+            HINT.with(|h| *h.borrow_mut() = Some(Box::new(call)));
+            // A real top-level window, never shown: broadcasts skip message-only ones.
+            unsafe {
+                if let Ok(inst) = ::windows::Win32::System::LibraryLoader::GetModuleHandleW(None) {
+                    let class = ::windows::core::w!("SynapsAvatarLayout");
+                    let wc = WNDCLASSW { lpfnWndProc: Some(layout_proc), hInstance: inst.into(), lpszClassName: class, ..Default::default() };
+                    RegisterClassW(&wc);
+                    if CreateWindowExW(WS_EX_TOOLWINDOW, class, class, WS_POPUP, 0, 0, 0, 0, None, None, Some(inst.into()), None).is_err() {
+                        elog!("synaps-avatar: windows: no display-change window; the layout is re-read on its timer only");
+                    }
+                }
+            }
             let flags = WINEVENT_OUTOFCONTEXT;
             let ranges = [
                 (EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND),
@@ -681,11 +924,16 @@ impl Desktop for Win32 {
 /// The Stage handle shares the state (and the body id) with the Desktop.
 impl Stage for Arc<Win32> {
     /// GPUI's pop-up (topmost, a tool window: no taskbar button, not in Alt+Tab), its title bar
-    /// hidden; `adopt` finishes the job.
-    fn dress(&self, _role: Role, o: &mut WindowOptions) {
+    /// hidden; `adopt` finishes the job, at the origin asked for here.
+    fn dress(&self, role: Role, o: &mut WindowOptions) {
         o.kind = WindowKind::PopUp;
         let title = o.titlebar.take().and_then(|t| t.title);
         o.titlebar = Some(TitlebarOptions { title, appears_transparent: true, ..Default::default() });
+        let at = o.window_bounds.map(|b| b.get_bounds()).map(|b| [f32::from(b.origin.x), f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height)]);
+        if let Ok(mut a) = self.asked_at.lock() {
+            a.retain(|e| e.0 != role);
+            a.extend(at.map(|p| (role, p)));
+        }
     }
 
     /// The HWND from GPUI's raw handle, made one of her surfaces (`Win32::adopt_hwnd`).
@@ -712,9 +960,10 @@ impl Stage for Arc<Win32> {
         Ok(())
     }
 
+    /// Through `place_later`: a place often resizes (the Line grows as it fills).
     fn place(&self, s: WinId, x: i32, y: i32, w: i32, h: i32) -> Result<()> {
         let (ox, oy) = origin();
-        unsafe { SetWindowPos(hwnd(s), None, x + ox, y + oy, w.max(1), h.max(1), SWP_NOZORDER | SWP_NOACTIVATE)? };
+        self.place_later(s, x + ox, y + oy, w, h);
         Ok(())
     }
 
@@ -741,37 +990,65 @@ impl Stage for Arc<Win32> {
         Ok(())
     }
 
-    /// Not called: `Caps::fx_layers` is off (the core paints the layers in her window).
-    fn fx_show(&self, _layer: usize, _rgb: u32, _origin: (i32, i32), _size: (i32, i32), _rects: Option<&[ShapeRect]>, _z: FxZ) -> Result<()> {
-        Ok(())
+    /// A window of its own per layer (`fx.rs`).
+    fn fx_show(&self, layer: usize, rgb: u32, origin: (i32, i32), size: (i32, i32), rects: Option<&[ShapeRect]>, z: FxZ) -> Result<()> {
+        Win32::fx_show(self, layer, rgb, origin, size, rects, z)
     }
 
-    fn fx_hide(&self, _layer: usize) {}
+    fn fx_hide(&self, layer: usize) {
+        Win32::fx_hide(self, layer);
+    }
 
-    fn fx_hide_all(&self) {}
+    fn fx_hide_all(&self) {
+        Win32::fx_hide_all(self);
+    }
 
+    /// Every call above is done when it returns.
     fn flush(&self) {}
 
-    /// The foreground (Windows hands a process the keyboard only through it).
+    /// The foreground (Windows hands a process the keyboard only through it), only when it is
+    /// his doing (`keyboard_granted`): nothing is ever taken from the window he works in. Err
+    /// when refused, by that rule or by Windows (the foreground lock).
     fn grab_keyboard(&self, s: WinId) -> Result<()> {
+        if !self.keyboard_granted() {
+            bail!("windows: no input of his to her just now");
+        }
+        let h = hwnd(s);
         unsafe {
-            let _ = SetForegroundWindow(hwnd(s));
+            let _ = SetForegroundWindow(h);
+        }
+        let fg = unsafe { GetForegroundWindow() };
+        if fg != h {
+            bail!("windows: the foreground stayed with 0x{:x}", id(fg));
         }
         Ok(())
     }
 
+    /// One of hers has the foreground, or he gave her his input within `GRANT_MS` (her key,
+    /// his press on one of her windows: the poller's, or one that is down now and the poller
+    /// hasn't seen yet).
+    fn keyboard_granted(&self) -> bool {
+        let at = self.grant_at.load(Ordering::Relaxed);
+        self.hers_in_front() || (at != 0 && tick().saturating_sub(at) <= GRANT_MS) || (buttons_down() && hers_at_pointer(&self.mine))
+    }
+
+    /// Back to `to` only while hers have the foreground: anywhere else he has moved on, and the
+    /// keyboard stays where he put it. His input is spent.
     fn release_keyboard(&self, _s: WinId, to: Option<WinId>) -> Result<()> {
-        if let Some(to) = to {
-            self.grab_keyboard(to)?;
+        if let Some(to) = to
+            && self.hers_in_front()
+        {
+            unsafe {
+                let _ = SetForegroundWindow(hwnd(to));
+            }
         }
+        self.grant_at.store(0, Ordering::Relaxed);
         Ok(())
     }
 }
 
 // ---- the process ----
 
-/// Per-monitor DPI awareness before GPUI starts (its manifest may already have set it): root px
-/// are device px on every monitor.
 /// Her chords on Windows: `$mod` is Win+Alt (Win alone is the shell's: Win+C is taken), the
 /// toggle adds Ctrl, as i3's `$mod+c` / `$mod+Ctrl+c`. None: no key types `ch` here.
 fn chord(ch: char, toggle: bool) -> Option<(HOT_KEY_MODIFIERS, u32)> {
@@ -803,18 +1080,9 @@ fn chord_name(mods: HOT_KEY_MODIFIERS, vk: u32) -> String {
     s
 }
 
-/// His media players: not read on Windows yet (SMTC, the system media transport controls, comes
-/// later). A watcher's first report is the sum now; here that's the sum of none (quiet), and Err:
-/// no change will follow (the core then has no music detection).
-pub fn watch_media(filter: crate::media::Filter, on_change: impl Fn(crate::media::Playback) + Send + Sync + 'static) -> Result<()> {
-    on_change(crate::media::aggregate(std::iter::empty(), &filter));
-    bail!("no media watch on Windows yet (SMTC later)")
-}
-
-/// Notifications: none on Windows yet (a toast needs an AppUserModelID, which comes with
-/// packaging).
-pub fn notify(_summary: &str, _body: &str, _image: Option<std::path::PathBuf>) -> Result<u32> {
-    bail!("no notifications on Windows yet (toasts come with packaging)")
+/// How he presses her key `ev` here: `WIN+ALT+C`, `WIN+ALT+CTRL+C` (`chord`).
+fn key_label(ev: KeyEv, key: char) -> Option<String> {
+    chord(key, ev == KeyEv::TalkToggle).map(|(m, vk)| chord_name(m, vk).to_uppercase())
 }
 
 /// Tests: run `f` with stderr going into a pipe whose reader is gone; stderr is put back after.
@@ -834,9 +1102,14 @@ pub fn stderr_into_closed_pipe<R>(f: impl FnOnce() -> R) -> R {
     out
 }
 
+/// Per-monitor DPI awareness v2 before GPUI starts: root px are device px on every monitor, and
+/// Windows never bitmap-scales her. Already set (an embedded manifest) is fine if it is the same.
 pub fn process_setup() {
-    unsafe {
-        let _ = ::windows::Win32::UI::HiDpi::SetProcessDpiAwarenessContext(::windows::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    use ::windows::Win32::UI::HiDpi::{AreDpiAwarenessContextsEqual, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetThreadDpiAwarenessContext, SetProcessDpiAwarenessContext};
+    let set = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+    let v2 = unsafe { AreDpiAwarenessContextsEqual(GetThreadDpiAwarenessContext(), DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) }.as_bool();
+    if let (Err(e), false) = (set, v2) {
+        elog!("synaps-avatar: windows: not per-monitor DPI aware (v2): {e}; Windows may scale her on some monitors");
     }
 }
 
@@ -944,12 +1217,20 @@ mod tests {
     }
 
     #[test]
-    fn media_and_notifications_say_they_are_missing() {
-        let quiet = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let q = quiet.clone();
-        assert!(watch_media(crate::media::Filter::default(), move |p| q.lock().unwrap().push(p)).is_err());
-        assert_eq!(*quiet.lock().unwrap(), vec![crate::media::Playback::default()], "one report: quiet");
-        assert!(notify("s", "b", None).is_err());
+    fn gpui_pw4_activate_injects_no_input() {
+        assert!(!gpui_patches::activate_injects_input());
+    }
+
+    #[test]
+    fn gpui_pw5_only_popups_keep_one_scale() {
+        assert!(gpui_patches::keeps_one_scale(true), "her windows: the primary's scale everywhere");
+        assert!(!gpui_patches::keeps_one_scale(false), "other kinds follow each monitor, as stock");
+    }
+
+    #[test]
+    fn her_key_reads_as_he_presses_it() {
+        assert_eq!(key_label(KeyEv::Summon, 'c').as_deref(), Some("WIN+ALT+C"));
+        assert_eq!(key_label(KeyEv::TalkToggle, 'c').as_deref(), Some("WIN+ALT+CTRL+C"));
     }
 
     #[test]

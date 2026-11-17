@@ -668,6 +668,28 @@ impl Os {
         self.stage.release_keyboard(s, to)
     }
 
+    /// The desktop hands her the keyboard only right after his own input to her
+    /// (`Caps::keyboard_on_input`).
+    pub fn keyboard_on_input(&self) -> bool {
+        self.caps.keyboard_on_input
+    }
+
+    /// Taking the keyboard now is his doing (his key, his click on her, or hers have it). Always
+    /// where the desktop hands it over freely.
+    pub fn may_take_keyboard(&self) -> bool {
+        !self.caps.keyboard_on_input || self.stage.keyboard_granted()
+    }
+
+    /// How he presses her key `ev` (letter `key`): the backend's chord where it grabs the keys,
+    /// else the binding the docs give his desktop (`$MOD+C`).
+    pub fn key_label(&self, ev: super::KeyEv, key: char) -> String {
+        let k = key.to_ascii_uppercase();
+        self.desk.key_label(ev, key).unwrap_or_else(|| match ev {
+            super::KeyEv::Summon => format!("$MOD+{k}"),
+            super::KeyEv::TalkToggle => format!("$MOD+CTRL+{k}"),
+        })
+    }
+
     /// Whatever holds the keyboard.
     pub fn focused_window(&self) -> Option<WinId> {
         self.desk.focused_window()
@@ -723,11 +745,6 @@ impl Os {
     }
 
     // ---- monitors and work areas ---------------------------------------------------------
-
-    /// The root's size, px.
-    pub fn root_size(&self) -> (i32, i32) {
-        self.desk.root_size()
-    }
 
     /// The cache, while it holds: for `AREAS_TTL`, until a `Hint::Layout` where they come
     /// (`Caps::layout_events`), or while she's carried.
@@ -806,6 +823,12 @@ impl Os {
             self.work_areas();
         }
         self.frozen.set(on);
+    }
+
+    /// Device px across GPUI's primary display (`Desktop::primary_display_px`): her scale is
+    /// this ÷ its GPUI width.
+    pub fn primary_display_px(&self) -> i32 {
+        self.desk.primary_display_px()
     }
 
     /// Refresh rate (Hz) of the output showing (x, y); 60 when unknown or implausible.

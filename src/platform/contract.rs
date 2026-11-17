@@ -50,6 +50,11 @@ pub trait Driver {
     fn flip_other_space(&mut self) -> bool {
         false
     }
+    /// His click on her surface `s` (real input, as a desktop that hands her the keyboard only
+    /// after his input sees it: `Caps::keyboard_on_input`). False: this rig can't click.
+    fn his_click(&mut self, _s: WinId) -> bool {
+        false
+    }
     /// The login session as the session manager would report it (locked, asleep, ...).
     /// False: this rig can't (a real session isn't the test's to lock); the scenario then
     /// checks presence only.
@@ -440,10 +445,22 @@ async fn shapes<D: Driver>(os: &Os, d: &mut D, _rx: &Receiver<WatchEvent>) -> Re
     Ok(())
 }
 
-/// The keyboard to her, and back to the window that had it.
+/// The keyboard to her, and back to the window that had it. Where the desktop hands it over
+/// only after his own input to her (`Caps::keyboard_on_input`), a grab without it is refused and
+/// the keyboard stays where it was (she never steals it); his click on her grants it.
 async fn keyboard<D: Driver>(os: &Os, d: &mut D, _rx: &Receiver<WatchEvent>) -> Result<()> {
     let a = d.open(rect(100, 300, 500, 300), true);
     d.settle().await;
+    if os.keyboard_on_input() {
+        let before = os.focused_window();
+        ensure!(!os.may_take_keyboard(), "she may take the keyboard with no input of his");
+        ensure!(os.grab_keyboard(os.body()).is_err(), "a grab without his input went through");
+        d.settle().await;
+        ensure!(os.focused_window() == before, "focus {:?} after a refused grab (was {before:?})", os.focused_window());
+        ensure!(d.his_click(os.body()), "this rig can't click on her");
+        d.settle().await;
+        ensure!(os.may_take_keyboard(), "his click on her granted nothing");
+    }
     os.grab_keyboard(os.body())?;
     d.settle().await;
     ensure!(os.focused_window() == Some(os.body()), "focus {:?} after the grab", os.focused_window());

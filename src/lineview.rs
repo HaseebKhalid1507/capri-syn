@@ -8,6 +8,9 @@ use crate::line::{Ask, Line, Row, Snap, Who};
 
 /// A press held this long is a hold (voice, later); shorter is a tap (type).
 pub(super) const TAP_MS: u128 = 250;
+/// A press without its release for this long is stale (the release went missing): the next
+/// press or tap starts afresh.
+const TALK_STALE: Duration = Duration::from_secs(120);
 const LINE_W: f32 = 780.0;
 /// Squeezed beside her, down to this wide (logical px); narrower, it goes above her or over.
 const LINE_MIN_W: f32 = 480.0;
@@ -28,6 +31,9 @@ pub(super) struct LineWin {
     /// Device px: x, bottom edge, width, height.
     pub at: (i32, i32, i32, i32),
     pub parked: bool,
+    /// Opened without the keyboard and never had it (the desktop hands it over only on his
+    /// input: `Caps::keyboard_on_input`): parked, and her tag says how to type.
+    pub waiting: bool,
     /// Her body box it was placed beside (she moves: it follows), and its side of her.
     pub her: WinRect,
     pub tail: Option<(beside::Side, i32)>,
@@ -110,7 +116,7 @@ impl Avatar {
     pub(super) fn talk_press(&mut self, cx: &mut Context<Self>) -> String {
         let now = Instant::now();
         // Held keys repeat: a press while down, or inside the key-up window, is the same press.
-        if self.voice_repeat() || self.talk_down.is_some_and(|t| t.elapsed() < Duration::from_secs(120)) {
+        if self.voice_repeat() || self.talk_held() {
             return "ok held".into();
         }
         self.talk_down = Some(now);
@@ -143,9 +149,19 @@ impl Avatar {
         self.talk_release_as(true, cx)
     }
 
+    /// The talk key is down: a press without its release yet (and not stale).
+    fn talk_held(&self) -> bool {
+        self.talk_down.is_some_and(|t| t.elapsed() < TALK_STALE)
+    }
+
     /// `talk tap`: the press and its release now (a grabbed key reports its press only). The
-    /// key is never asked whether it is still down, so this is never a hold.
+    /// key is never asked whether it is still down, so this is never a hold. While the talk key
+    /// is held (`talk press` without its release) a tap is ignored: its release would end that
+    /// hold early.
     pub(super) fn talk_tap(&mut self, cx: &mut Context<Self>) -> String {
+        if self.talk_held() {
+            return "ok held (tap ignored)".into();
+        }
         let press = self.talk_press(cx);
         let release = self.talk_release_as(false, cx);
         format!("{press}; {release}")
@@ -233,7 +249,11 @@ impl Avatar {
             self.close_input(false);
         }
         let bounds = Bounds::new(point(px(x as f32 / sf), px((bottom - h) as f32 / sf)), size(px(w as f32 / sf), px(h as f32 / sf)));
-        let options = self.os.window_options(Role::Line, bounds, true);
+        // The keyboard comes with the Line when this opening is his doing (his key, his click
+        // on her: `Os::may_take_keyboard`). Else the Line opens waiting for him, never taking
+        // the keyboard from the window he works in.
+        let take = self.os.may_take_keyboard();
+        let options = self.os.window_options(Role::Line, bounds, take);
         let snap = self.line_snap();
         let me = cx.entity().downgrade();
         let (name, font, pal) = (self.name.to_string(), self.font.clone(), self.reader_pal());
@@ -262,11 +282,25 @@ impl Avatar {
         if xid != 0 {
             self.set_icon_on(xid);
         }
-        if xid != 0 && std::env::var_os("SA_LINE_NOFOCUS").is_none() {
-            self.os.grab_keyboard(xid).ok();
+        let mut waits = !take;
+        if xid != 0
+            && take
+            && std::env::var_os("SA_LINE_NOFOCUS").is_none()
+            && let Err(e) = self.os.grab_keyboard(xid)
+            && self.os.keyboard_on_input()
+        {
+            elog!("synaps-avatar: line: the keyboard stayed with his window: {e:#}");
+            waits = true;
         }
-        self.line = Some(LineWin { view: view.clone(), handle: handle.into(), xid, prev, at: (x, bottom, w, h), parked: false, her, tail: Some((place.side, place.tail)) });
-        self.os.arm_clicks(true);
+        self.line = Some(LineWin { view: view.clone(), handle: handle.into(), xid, prev, at: (x, bottom, w, h), parked: waits, waiting: waits, her, tail: Some((place.side, place.tail)) });
+        // Clicks elsewhere park a Line that holds the keyboard (a waiting one holds nothing).
+        self.os.arm_clicks(!waits);
+        if waits {
+            let (v, hd) = (view.clone(), handle);
+            cx.defer(move |cx| {
+                hd.update(cx, |_, _, cx| v.update(cx, |l, cx| l.wait(cx))).ok();
+            });
+        }
         self.line_opened_ms = Some(now.elapsed().as_millis());
         // He is reading the thread now: nothing is unread, and the bubble gives way. Opened
         // with a reply unread (her strip, the summon key): the thread starts at that reply.
@@ -290,14 +324,20 @@ impl Avatar {
             });
         }
         elog!(
-            "synaps-avatar: line open at {x},{} {w}x{h} (0x{xid:x}) in {} ms, {} of her",
+            "synaps-avatar: line open at {x},{} {w}x{h} (0x{xid:x}) in {} ms, {} of her{}",
             bottom - h,
             now.elapsed().as_millis(),
-            crate::line::side_key(place.side)
+            crate::line::side_key(place.side),
+            if waits { ", waiting for his key or a click" } else { "" }
         );
         cx.notify();
         self.schedule(cx);
-        format!("ok line {x},{} {w}x{h}", bottom - h)
+        if waits { format!("ok line {x},{} {w}x{h} waiting", bottom - h) } else { format!("ok line {x},{} {w}x{h}", bottom - h) }
+    }
+
+    /// How he presses her summon key here (`$MOD+C`, `WIN+ALT+C`), for the hints.
+    pub(super) fn summon_label(&self) -> String {
+        self.os.key_label(crate::platform::KeyEv::Summon, self.voice.cfg.key)
     }
 
     /// The thread, from the session's transcript (thinking left out).
@@ -306,7 +346,8 @@ impl Avatar {
         let (flag, alarm) = (st.invert && st.plate == crate::theme::Plate::Flag, st.key == "alert");
         let (status, glyph) = (st.label, st.glyph);
         let face = self.stills.as_ref().and_then(|s| s.moods.get(self.mood.key()).cloned()).map(crate::line::Face);
-        let Some(s) = &self.session else { return Snap { status, glyph, flag, alarm, live: false, face, ..Default::default() } };
+        let key = self.summon_label();
+        let Some(s) = &self.session else { return Snap { status, glyph, flag, alarm, live: false, face, key, ..Default::default() } };
         let items = s.link.transcript().items();
         let mut rows = Vec::new();
         for it in items.iter().rev() {
@@ -363,6 +404,7 @@ impl Avatar {
             prompts: b.map(|b| b.prompts.clone()).unwrap_or_default(),
             speaking: self.voice_speaking(),
             listening: self.voice_listening(),
+            key,
             mic: self.voice_mic_row(),
             caption: self.voice_caption_now(),
             face,
@@ -460,14 +502,31 @@ impl Avatar {
                 Ok(())
             }
             Ask::Parked(p) => {
-                self.os.arm_clicks(!p && self.line.is_some());
-                if let Some(l) = &mut self.line {
-                    l.parked = p;
-                    if !p && l.xid != 0 && std::env::var_os("SA_LINE_NOFOCUS").is_none() {
-                        self.os.grab_keyboard(l.xid).ok();
+                // Back to the Line: it takes the keyboard. Where the desktop hands it over only
+                // on his input, without it (a summon from elsewhere) the Line stays parked.
+                let xid = self.line.as_ref().map_or(0, |l| l.xid);
+                let refused = if !p && xid != 0 && std::env::var_os("SA_LINE_NOFOCUS").is_none() {
+                    match self.os.grab_keyboard(xid) {
+                        Err(e) if self.os.keyboard_on_input() => Some(format!("{e:#}")),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                match refused {
+                    Some(e) => {
+                        elog!("synaps-avatar: line: stays parked, the keyboard stayed with his window: {e}");
+                        Err(format!("no keyboard: {e}"))
+                    }
+                    None => {
+                        self.os.arm_clicks(!p && self.line.is_some());
+                        if let Some(l) = &mut self.line {
+                            l.parked = p;
+                            l.waiting &= p;
+                        }
+                        Ok(())
                     }
                 }
-                Ok(())
             }
             Ask::Height(h) => {
                 let sf = self.layout.sf;

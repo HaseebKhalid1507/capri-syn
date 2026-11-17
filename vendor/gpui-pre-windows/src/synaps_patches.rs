@@ -33,3 +33,20 @@ pub(crate) fn mouse_activate_reply(activates: bool) -> isize {
 pub(crate) fn move_runs_moved_callback() -> bool {
     false
 }
+
+/// PW-4: whether `activate()` (`Window::activate_window`) injects a lone Alt press and release
+/// (`SendInput`) before `SetForegroundWindow`, to get past the foreground lock. Stock GPUI does:
+/// that is synthetic input in his session (menus and key tips react to a lone Alt, a game may
+/// get it). She never does: the desktop hands her the keyboard on his own input only.
+pub(crate) fn activate_injects_input() -> bool {
+    false
+}
+
+/// PW-5: whether a window keeps one scale: the one of the display it opens for (`display_id`,
+/// else the primary monitor), on every monitor, and a `WM_DPICHANGED` neither rescales nor
+/// resizes it. Stock GPUI follows each monitor's DPI. Her pop-ups are pixel art laid out at one
+/// scale by capri-syn (its `sf` is the primary monitor's); a rescale would resize her window
+/// under her layout. Every other window as before.
+pub(crate) fn keeps_one_scale(popup: bool) -> bool {
+    popup
+}

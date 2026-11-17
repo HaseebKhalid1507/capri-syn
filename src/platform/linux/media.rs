@@ -3,6 +3,7 @@
 //! Metadata); nothing polls. The view hears only when the sum (`media::aggregate`) changes.
 
 use crate::media::{Filter, Playback, aggregate};
+use anyhow::Context as _;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use zbus::MatchRule;
@@ -84,6 +85,10 @@ struct Shared {
 
 /// Watch the session bus; `on_change` gets the sum whenever it changes (first call: now).
 pub fn watch_media(filter: Filter, on_change: impl Fn(Playback) + Send + Sync + 'static) -> anyhow::Result<()> {
+    watch(filter, on_change).context("mpris")
+}
+
+fn watch(filter: Filter, on_change: impl Fn(Playback) + Send + Sync + 'static) -> anyhow::Result<()> {
     let conn = Connection::session()?;
     let owners = MatchRule::builder()
         .msg_type(Type::Signal)
@@ -108,7 +113,7 @@ pub fn watch_media(filter: Filter, on_change: impl Fn(Playback) + Send + Sync + 
         let filter = filter.clone();
         let on_change = on_change.clone();
         move |s: &mut Shared, first: bool| {
-            let now = aggregate(s.players.values().map(|p| (p.name.as_str(), p.status.as_str(), p.bpm)), &filter);
+            let now = aggregate(s.players.values().map(|p| (p.name.as_str(), p.status.as_str(), p.bpm, false)), &filter);
             if first || now != s.last {
                 s.last = now;
                 let names: Vec<String> =

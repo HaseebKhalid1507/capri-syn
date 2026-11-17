@@ -74,6 +74,8 @@ pub struct Snap {
     pub listening: bool,
     /// The mic row while he holds the key (`● MIC 0:02 ▮▮▯▯▯`), or what follows key-up.
     pub mic: Option<String>,
+    /// How he presses her summon key (`$MOD+C`, `WIN+ALT+C`): the parked hints.
+    pub key: String,
     /// The sentence she is saying now (the caption, paced by her voice).
     pub caption: Option<String>,
     /// Her face now (her mood's, `moods.json` `lineFaces`): on her latest row; the portrait on
@@ -169,6 +171,8 @@ pub struct Line {
     esc_at: Option<Instant>,
     note: Option<String>,
     parked: bool,
+    /// Opened without the keyboard and never had it (`wait`): its hint says how to type.
+    waiting: bool,
     was_active: bool,
     mode: Mode,
     prompt_ix: usize,
@@ -308,9 +312,7 @@ impl Line {
                 if active {
                     this.was_active = true;
                     if this.parked && !this.closing {
-                        this.parked = false;
-                        (this.on_ask)(Ask::Parked(false), cx).ok();
-                        this.refocus(window, cx);
+                        this.unpark(window, cx);
                     }
                 } else if this.was_active && !this.parked && !this.closing {
                     // Focus went elsewhere: park (never destroy); an empty idle Line closes.
@@ -345,6 +347,7 @@ impl Line {
             esc_at: None,
             note: None,
             parked: false,
+            waiting: false,
             was_active: false,
             mode,
             prompt_ix: 0,
@@ -445,6 +448,7 @@ impl Line {
         serde_json::json!({
             "mode": if self.mode == Mode::Prompt { "prompt" } else { "text" },
             "parked": self.parked,
+            "waiting": self.waiting,
             "rows": self.snap.rows.len(),
             "draft_chars": self.input.read(cx).value().chars().count(),
             "renders": self.renders.get(),
@@ -467,14 +471,32 @@ impl Line {
         cx.notify();
     }
 
+    /// Opened without the keyboard (the desktop hands it over only on his input): parked, its
+    /// hint saying how to type, until his key or his click.
+    pub fn wait(&mut self, cx: &mut Context<Line>) {
+        self.parked = true;
+        self.waiting = true;
+        cx.notify();
+    }
+
+    /// Back from parked, if the avatar can take the keyboard for it (it can't on a summon from
+    /// elsewhere where the desktop hands it over only on his input). False: still parked.
+    fn unpark(&mut self, window: &mut Window, cx: &mut Context<Line>) -> bool {
+        if (self.on_ask)(Ask::Parked(false), cx).is_err() {
+            return false;
+        }
+        self.parked = false;
+        self.waiting = false;
+        self.refocus(window, cx);
+        true
+    }
+
     /// The summon key on an open Line: back to it (parked), or close it.
     pub fn summon(&mut self, window: &mut Window, cx: &mut Context<Line>) -> &'static str {
         if self.parked || !window.is_window_active() {
-            self.parked = false;
-            (self.on_ask)(Ask::Parked(false), cx).ok();
-            self.refocus(window, cx);
+            let back = self.unpark(window, cx);
             cx.notify();
-            "resumed"
+            if back { "resumed" } else { "waiting" }
         } else {
             self.close(true, window, cx);
             "closed"
@@ -1213,7 +1235,11 @@ impl Render for Line {
             self.sent_at = None;
             elog!("timing: line: first word of her reply drawn {} ms after Enter", t0.elapsed().as_millis());
         }
-        let status = if self.parked { "PARKED · $MOD+C TO RESUME".to_string() } else { self.snap.status.clone() };
+        let status = match (self.parked, self.waiting) {
+            (true, true) => format!("{} TO TYPE", self.snap.key),
+            (true, false) => format!("PARKED · {} TO RESUME", self.snap.key),
+            _ => self.snap.status.clone(),
+        };
         // Her name on a red blade, LINE, and her state at the right: NEEDS YOU (and the live
         // mic) on a red swallowtail; parked, all text-dim.
         let state: AnyElement = if self.snap.flag && !self.parked {
@@ -1486,9 +1512,7 @@ impl Render for Line {
                 cx.listener(|this, _: &MouseDownEvent, window, cx| {
                     // A click on the parked Line brings it back.
                     if this.parked {
-                        this.parked = false;
-                        (this.on_ask)(Ask::Parked(false), cx).ok();
-                        this.refocus(window, cx);
+                        this.unpark(window, cx);
                         cx.notify();
                     }
                 }),

@@ -8,7 +8,8 @@ use super::super::contract::{self, Driver};
 use super::super::{Os, Role, ShapeRect, WinId, WinRect};
 use super::{Win32, frame_rect, hwnd, id, origin, root_rect};
 use ::windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use ::windows::Win32::Graphics::Gdi::{CreateSolidBrush, GetWindowRgn, CreateRectRgn, DeleteObject, GetRegionData, RGNDATA, RGNDATAHEADER, HBRUSH};
+use ::windows::Win32::Graphics::Gdi::{CreateRectRgn, CreateSolidBrush, DeleteObject, GetRegionData, GetRgnBox, GetWindowRgn, HBRUSH, RGNDATA, RGNDATAHEADER};
+use ::windows::Win32::UI::Input::KeyboardAndMouse::{INPUT, INPUT_0, INPUT_MOUSE, MOUSE_EVENT_FLAGS, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEINPUT, SendInput};
 use ::windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use ::windows::Win32::UI::WindowsAndMessaging::*;
 use ::windows::core::w;
@@ -161,11 +162,31 @@ impl Driver for WinDriver {
         unsafe { GetWindowRect(self.body, &mut r).ok()? };
         Some(root_rect(&r, id(self.body)))
     }
-    /// What her window paints of the effect layers (`Caps::fx_layers` is off): the core's
-    /// display list, clipped to her window, one extent per colour.
+    /// What shows of the effect layers: the core's display list her window paints (clipped to
+    /// it, one extent per colour), and each layer window of the backend that is up (its region's
+    /// box, where the window is).
     fn fx_rects(&mut self) -> Vec<WinRect> {
         let Some(b) = self.body_rect() else { return Vec::new() };
         let os = self.core.clone();
+        let mut out: Vec<WinRect> = Vec::new();
+        for f in self.os.fx.lock().unwrap().iter().filter(|f| f.up) {
+            let h = hwnd(f.id);
+            unsafe {
+                let mut wr = RECT::default();
+                if GetWindowRect(h, &mut wr).is_err() {
+                    continue;
+                }
+                let rgn = CreateRectRgn(0, 0, 0, 0);
+                let mut bx = RECT { left: 0, top: 0, right: wr.right - wr.left, bottom: wr.bottom - wr.top };
+                // ERROR (0): no region, all of the window.
+                if GetWindowRgn(h, rgn).0 != 0 {
+                    GetRgnBox(rgn, &mut bx);
+                }
+                let _ = DeleteObject(rgn.into());
+                let r = RECT { left: wr.left + bx.left, top: wr.top + bx.top, right: wr.left + bx.right, bottom: wr.top + bx.bottom };
+                out.push(root_rect(&r, 0));
+            }
+        }
         let mut ext: HashMap<u32, WinRect> = HashMap::new();
         for under in [true, false] {
             for ((x, y, w, h), c) in os.fx_scene(under) {
@@ -179,7 +200,8 @@ impl Driver for WinDriver {
                     .or_insert(r);
             }
         }
-        ext.into_values().collect()
+        out.extend(ext.into_values());
+        out
     }
     /// The real thing: the pointer goes there, the click-through poller takes its turn, and the
     /// window the system would send a click to is asked for.
@@ -212,6 +234,27 @@ impl Driver for WinDriver {
     }
     async fn settle(&mut self) {
         self.pump(120);
+    }
+    /// A real press and release (`SendInput`) in the middle of `s`, its input region over all of
+    /// it so the click lands there; held a moment, as a hand would (the input poller sees it).
+    fn his_click(&mut self, s: WinId) -> bool {
+        let h = hwnd(s);
+        let mut r = RECT::default();
+        if unsafe { GetWindowRect(h, &mut r) }.is_err() {
+            return false;
+        }
+        self.os.set_input(s, &[(0, 0, (r.right - r.left) as u16, (r.bottom - r.top) as u16)]);
+        let _ = unsafe { SetCursorPos((r.left + r.right) / 2, (r.top + r.bottom) / 2) };
+        self.pump(40);
+        let press = |f: MOUSE_EVENT_FLAGS| INPUT { r#type: INPUT_MOUSE, Anonymous: INPUT_0 { mi: MOUSEINPUT { dwFlags: f, ..Default::default() } } };
+        let size = std::mem::size_of::<INPUT>() as i32;
+        if unsafe { SendInput(&[press(MOUSEEVENTF_LEFTDOWN)], size) } != 1 {
+            return false;
+        }
+        self.pump(60);
+        unsafe { SendInput(&[press(MOUSEEVENTF_LEFTUP)], size) };
+        self.pump(20);
+        true
     }
 }
 

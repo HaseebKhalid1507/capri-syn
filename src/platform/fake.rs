@@ -40,6 +40,8 @@ struct World {
     fx: HashMap<usize, ((i32, i32), Vec<ShapeRect>)>,
     /// Like Hyprland today: no idle time of its own (the core counts from the pointer).
     no_idle: bool,
+    /// He clicked on her since the keyboard last went back (`Caps::keyboard_on_input`).
+    his_input: bool,
 }
 
 type HintFn = Box<dyn Fn(Hint) + Send>;
@@ -204,13 +206,29 @@ impl Stage for FakeStage {
         self.0.w().fx.clear();
     }
     fn flush(&self) {}
+    /// Where the keyboard comes only on his input (as on Windows): refused without it.
     fn grab_keyboard(&self, s: WinId) -> Result<()> {
+        if self.0.caps.keyboard_on_input && !self.keyboard_granted() {
+            anyhow::bail!("fake: no input of his to her");
+        }
         self.0.w().focus = Some(s);
         Ok(())
     }
+    fn keyboard_granted(&self) -> bool {
+        let w = self.0.w();
+        w.his_input || w.focus == Some(BODY)
+    }
+    /// Back to `to` only from her (where the keyboard comes on his input, his input is spent).
     fn release_keyboard(&self, _s: WinId, to: Option<WinId>) -> Result<()> {
+        let mut w = self.0.w();
+        if self.0.caps.keyboard_on_input {
+            if w.focus != Some(BODY) {
+                return Ok(());
+            }
+            w.his_input = false;
+        }
         if to.is_some() {
-            self.0.w().focus = to;
+            w.focus = to;
         }
         Ok(())
     }
@@ -290,6 +308,10 @@ impl Driver for FakeDriver {
         self.0.w().visible.clone()
     }
     async fn settle(&mut self) {}
+    fn his_click(&mut self, _s: WinId) -> bool {
+        self.0.w().his_input = true;
+        true
+    }
     fn session(&mut self, ev: SessionEv) -> bool {
         if let Some(f) = self.0.session.lock().expect("fake session").as_ref() {
             f(ev);
@@ -310,8 +332,14 @@ impl Driver for FakeDriver {
 }
 
 fn fake(target_events: bool) -> (Os, FakeDriver) {
+    fake_with(target_events, false)
+}
+
+/// `keyboard_on_input`: the keyboard comes only on his input (Windows' rule).
+fn fake_with(target_events: bool, keyboard_on_input: bool) -> (Os, FakeDriver) {
     let world = World { root: (1600, 1000), monitors: vec![Monitor { primary: true, x: 0, y: 0, w: 1600, h: 1000 }], next: 100, ..World::default() };
-    let f = Arc::new(Fake { world: Mutex::new(world), hint: Mutex::new(None), session: Mutex::new(None), caps: Caps { shape_mode: true, target_events, fx_layers: true, costly_redraw: false, implicit_grab: true, goal_geometry: false, layout_events: false, host_per_output: false } });
+    let caps = Caps { shape_mode: true, target_events, fx_layers: true, costly_redraw: false, implicit_grab: true, goal_geometry: false, layout_events: false, host_per_output: false, keyboard_on_input };
+    let f = Arc::new(Fake { world: Mutex::new(world), hint: Mutex::new(None), session: Mutex::new(None), caps });
     (Os::new(Arc::new(FakeDesktop(f.clone())), Box::new(FakeStage(f.clone()))), FakeDriver(f))
 }
 
@@ -344,6 +372,18 @@ fn without_idle_time_presence_is_the_pointer() {
 fn contract_fake_polled_target() {
     let (os, mut d) = fake(false);
     contract::block_on(contract::run(&os, &mut d)).unwrap();
+}
+
+/// The keyboard only on his input (Windows' foreground lock): every scenario still passes, and
+/// `keyboard` checks the refusal and the grant.
+#[test]
+fn contract_fake_keyboard_on_his_input() {
+    let (os, mut d) = fake_with(true, true);
+    let passed = contract::block_on(contract::run(&os, &mut d)).unwrap();
+    assert_eq!(passed.len(), 12);
+    // Nothing of his since the keyboard went back: none to take.
+    assert!(!os.may_take_keyboard());
+    assert!(os.grab_keyboard(os.body()).is_err());
 }
 
 #[test]
