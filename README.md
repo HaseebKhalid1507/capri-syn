@@ -8,12 +8,13 @@
   <img alt="Linux: Hyprland" src="https://img.shields.io/badge/linux-Hyprland-ff1438?style=flat-square&labelColor=0a0a0b">
   <img alt="Windows: in progress" src="https://img.shields.io/badge/windows-in%20progress-a8a09b?style=flat-square&labelColor=0a0a0b">
   <img alt="GPUI" src="https://img.shields.io/badge/ui-GPUI-ff1438?style=flat-square&labelColor=0a0a0b">
-  <img alt="Synaps" src="https://img.shields.io/badge/client%20of-Synaps-ff1438?style=flat-square&labelColor=0a0a0b">
+  <a href="https://github.com/HaseebKhalid1507/SynapsCLI"><img alt="Runs on Synaps" src="https://img.shields.io/badge/runs%20on-Synaps-ff1438?style=flat-square&labelColor=0a0a0b"></a>
 </p>
 
 <p align="center">
   <a href="#she-lives-here">Features</a> ·
   <a href="#how-it-works">How it works</a> ·
+  <a href="#whats-running-her">Under the hood</a> ·
   <a href="#install">Install</a> ·
   <a href="#configure">Configure</a> ·
   <a href="#controls">Controls</a> ·
@@ -28,10 +29,12 @@
 </p>
 
 **Capri** lives on your desktop. She sits on your windows, wanders off when she's bored, naps when
-you're away and comes to find you when she wants attention. She is also a client of your
-[Synaps](https://github.com/HaseebKhalid1507/SynapsCLI) daemon with a session of her own: tap a key
-and type, or say "Hey Capri", and she relays it, reads the answer back, and comes over when an agent
-is waiting on a yes.
+you're away and comes to find you when she wants attention.
+
+She also talks. Tap a key and type, or say "Hey Capri": she answers, does things on your machine, and
+comes over when she needs you. Her brain is the real thing, an agent session on
+[Synaps](https://github.com/HaseebKhalid1507/SynapsCLI), the runtime she's built on. The installer
+brings it along.
 
 She's a click-through overlay written in Rust and drawn with GPUI, on X11 and Hyprland (Windows is on
 its way). Your windows stay yours. She just sits on them.
@@ -100,6 +103,9 @@ and she acts when one of them wins.
 Capri has her own Synaps session, named `capri`. The Line is how you reach it without leaving what
 you're doing. It opens right beside her, wherever she is.
 
+It's an ordinary session, so a terminal can join it too: `synaps --attach capri` opens the same thread
+in the Synaps TUI. Type in either one.
+
 <p align="center">
   <img src="docs/media/tour-line.webp" width="100%" alt="The Line opens beside Capri with the earlier exchange in its thread; ship it is typed and sent, and her reply streams in">
   <br><b>The Line</b><br>
@@ -131,6 +137,10 @@ you're doing. It opens right beside her, wherever she is.
 - **Prompts are answered from the keyboard.** <kbd>A</kbd> allows, <kbd>D</kbd> denies, <kbd>Tab</kbd>
   lets you say something instead, <kbd>Esc</kbd> puts it off. Anything that runs, writes or deletes needs
   <kbd>A</kbd> held for about half a second, so a stray keypress can't approve it.
+- **She's a real agent. Treat her like one.** Her session has Synaps's tools, so it can run commands and
+  edit files as you. A prompt appears only when something asks for one, such as an extension that guards
+  tool calls; whether anything asks before a command depends on what your Synaps has installed. It isn't
+  a sandbox. [What she can touch](docs/UNDER-THE-HOOD.md#what-she-can-touch).
 - **Voice is opt-in and local.** Hold the key to talk, or tap the toggle chord and pause when you're done.
   Say **"Hey Capri"** and it turns into a hands-free conversation: each pause sends, she answers aloud,
   and after a minute of quiet she goes back to waiting for her name. Speech-to-text is whisper.cpp and
@@ -199,16 +209,43 @@ when the daemon comes back. Sleep is yours, not the session's: she naps when you
   on her own (a small hop counts a quarter), stays off the window you're working in unless she's come
   over for you, and takes `DND 1 HOUR` from the right-click menu.
 
+## What's running her
+
+[Synaps](https://github.com/HaseebKhalid1507/SynapsCLI). An open-source agent runtime in Rust: one
+background daemon that owns every session, hers included. She's a client of it, the same as a terminal
+would be. So:
+
+- `synaps --attach capri` opens her thread in a terminal.
+- `synaps send --session capri "tea's ready"` and she comes over to tell you. Any script can do that.
+- `[session] model` in her settings picks her brain: any model Synaps can reach.
+- `synaps` on its own starts a session that's yours, not hers. One agent, or a crew.
+
+The longer tour, and what she can and can't touch: [docs/UNDER-THE-HOOD.md](docs/UNDER-THE-HOOD.md).
+
 ## Install
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/HaseebKhalid1507/capri-syn/main/install.sh | bash
 ```
 
-Manual steps (build, her pack, the summon key, voice, autostart): [docs/INSTALL.md](docs/INSTALL.md).
+One line. It installs [Synaps](https://github.com/HaseebKhalid1507/SynapsCLI) first if you don't have
+it, then her, her art pack, the summon key and autostart. It asks before anything needs sudo, and
+`--dry-run` prints every step without doing one.
 
-You need a running [Synaps](https://github.com/HaseebKhalid1507/SynapsCLI) daemon. Her art isn't in this
-repository: it's assembled on your machine from [CapriCore](https://github.com/CapriChooms/CapriCore) and
+Then give her a brain, once:
+
+```sh
+synaps login     # a subscription you already pay for, or an API key
+```
+
+Skip it and she still perches, naps and plays. She just can't answer yet. No account? A local model
+works: [docs/UNDER-THE-HOOD.md](docs/UNDER-THE-HOOD.md#her-brain).
+
+`--uninstall` removes what it added and tells you where Synaps is. Every step, every flag and the manual
+route: [docs/INSTALL.md](docs/INSTALL.md).
+
+Her art isn't in this repository: it's assembled on your machine from
+[CapriCore](https://github.com/CapriChooms/CapriCore) and
 [lachydotmcg/capri-desktop](https://github.com/lachydotmcg/capri-desktop) (see [Credits](#credits--legal)).
 
 ## Configure
@@ -345,3 +382,7 @@ On Windows she registers <kbd>Win</kbd>+<kbd>Alt</kbd>+<kbd>C</kbd> (the Line) a
   is imitated.
 - **Built on** [Synaps](https://github.com/HaseebKhalid1507/SynapsCLI) and
   [GPUI](https://www.gpui.rs/).
+
+<p align="center">
+  <sub>Capri runs on <a href="https://github.com/HaseebKhalid1507/SynapsCLI">Synaps</a>. Synaps is built with Synaps.</sub>
+</p>
