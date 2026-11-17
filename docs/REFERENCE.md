@@ -197,7 +197,9 @@ With `anim/`, `moods.json` `variants` mixes that art in; she never swaps one set
   (`shiftMs`) shifts it in place. Every cut between CapriCore and a strip (or between two strip families)
   goes through a glitch (the body's; her tag stays whole).
 - Strips decode when first wanted, off the main thread; `cacheMb` caps what is kept (least recently shown
-  first, never what is on screen). A pack without `anim/` keeps only the pack's own variants.
+  first, never what is on screen), and one out of use for 45 s goes (a dance, a dangle, a walk are back
+  to disk a minute after). Pixel buffers live in maps of their own and go back to the system when freed.
+  A pack without `anim/` keeps only the pack's own variants.
 - `stand` (standing idle on the floor, the Idle mood only: every other mood keeps the pack's poses) shifts
   in place every `shiftMs`; with `shiftStays` a shift may keep the pack's own pose, so each variant holds
   about its weight's share of the time (Capri: 6 : 1 : 1, CapriCore ~75 %). A drawn arrival or wake ends
@@ -212,13 +214,29 @@ With `anim/`, `moods.json` `variants` mixes that art in; she never swaps one set
   edge), then her sit inside a dip at contact: the squash starts `arrive.perchDipMs` before the change,
   so the swap falls near its trough (no dissolve, no double image), and the sit's legs unfold down over
   the edge in 170 ms, telescoping down from the seat in six strips (her feet first), never a straight cut
-  across the shins. Before a drawn pose (lachy's perch) only that first frame plays, cut inside the
-  landing glitch, so the art changes before she's solid; the dip is then the settle at the glitch's end.
-  The landing glitch never shifts her legs below the edge, and a drawn pose lands as itself on the cut
-  frame: no tint, tears or split after it.
+  across the shins. A leg row shows only once the last two frames had it too (GPUI presents up to two
+  frames late, and a row new to the shape showed the window's old pixels: a faint dark copy of the legs),
+  so the legs are solid or not there. Into a drawn pose (lachy's perch) she forms as that pose: from the
+  moment the bolt reaches the edge, its own red silhouette (the seated drawing's alpha, legs over the
+  edge, painted a frame before it shows), then the drawing on the cut frame, so the outline never jumps
+  and the edge is never bare. The landing glitch never shifts her legs below the edge, and a drawn pose
+  lands as itself on the cut frame: no tint, tears or split after it.
 - Sparkles: one at a time on hair only, every `life.sparkleEveryMs` [min, max] (Capri: 1.5-1.8 s, an even
-  beat); never smaller than 40 % of full size (10-13 px), so none vanish into her hair's own glitter. When
-  one can't show (a glitch, a turn, a frame without hair) she tries again 300 ms later.
+  beat); never smaller than 40 % of full size (10-13 px), so none vanish into her hair's own glitter. Every
+  point a grown one reaches over its life is on her hair, its core stays pink (never a white cross), and one
+  that couldn't show yet starts its life when it does (it swells from nothing). When one can't show (a
+  glitch, a turn, a frame without hair) she tries again 300 ms later.
+- `cutins` (local images, `--mochi` only; a beat without its image, or a pack without them, shows
+  nothing): a show still beside her for a big moment, `ms` long (Capri 1.2 s): `needsYou` (NEEDS YOU,
+  600 ms after it; a summon landing in that time shows `summon` instead), `done` (a turn of at least
+  `doneAfterMs`), `laugh` (`laughChance` of her laughs at a click), `summon` (a summon for his prompt
+  landed), `annoyed` (an error or abort). At most one per `gapMs`. It comes in on a red flash and a tear,
+  holds, and leaves row by row; on her roomier side, `height` px tall, a plate cut and rimmed in her red;
+  clicks pass through it. Never while the Line or the reader is open, a fullscreen window hides her, DND
+  is on, or the intro plays; she moves off and it leaves at once. The window and its pixels go with it.
+- `lineFaces` (mood → `anim/mochi` image, local only): her face on her latest row in the Line follows her
+  mood (thinking, working, NEEDS YOU, done, annoyed, sleepy...); older rows keep the portrait. A mood
+  without one keeps the portrait.
 - `motions` (each optional, each its strip from `anim/` with the anchor it needs; a pack without them
   does what it did before):
   - `walk` (feet, looping): a short calm move she makes on the floor or along the window top she sits on
@@ -261,7 +279,8 @@ The launch, with `[intro] cinematic` on:
   ~3.1 s after the close-up's first frame. After any landing her idle life starts at once: a sparkle, a
   breath step and a blink within half a second. A launch without the close-up lands with `arrive.launch`.
 - Without the close-ups, the launch is just that bolt. The close-ups are decoded for each launch and
-  dropped after it.
+  dropped after it (their memory back to the system); ones that decode after the launch went on are
+  not kept.
 
 ## Building
 

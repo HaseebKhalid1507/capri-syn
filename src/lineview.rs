@@ -291,7 +291,8 @@ impl Avatar {
         let st = self.status();
         let (flag, alarm) = (st.invert && st.plate == crate::theme::Plate::Flag, st.key == "alert");
         let (status, glyph) = (st.label, st.glyph);
-        let Some(s) = &self.session else { return Snap { status, glyph, flag, alarm, live: false, ..Default::default() } };
+        let face = self.stills.as_ref().and_then(|s| s.moods.get(self.mood.key()).cloned()).map(crate::line::Face);
+        let Some(s) = &self.session else { return Snap { status, glyph, flag, alarm, live: false, face, ..Default::default() } };
         let items = s.link.transcript().items();
         let mut rows = Vec::new();
         for it in items.iter().rev() {
@@ -350,6 +351,7 @@ impl Avatar {
             listening: self.voice_listening(),
             mic: self.voice_mic_row(),
             caption: self.voice_caption_now(),
+            face,
         }
     }
 

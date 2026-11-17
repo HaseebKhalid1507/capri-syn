@@ -797,6 +797,8 @@ pub struct Glint {
     pub spin: f32,
     /// Travel over its life (device px), centred on (x, y).
     pub drift: (f32, f32),
+    /// Its life has started on screen (it swells from nothing there, never pops in grown).
+    pub live: bool,
 }
 
 /// Samples per glint life: ticks land at the centres of `GLINT_STEPS` equal slices, plus one
@@ -823,6 +825,22 @@ impl Glint {
     pub fn offset(&self, now: Instant, life_ms: u64) -> (f32, f32) {
         let u = self.u(now, life_ms).unwrap_or(1.0) - 0.5;
         (self.drift.0 * u, self.drift.1 * u)
+    }
+
+    /// Every point a full-grown star reaches over its life (its arm tips at both ends of its
+    /// drift, and the drift's ends): all of them on the hair, or it reads as a stray speck.
+    pub fn reach(&self) -> [(f32, f32); 10] {
+        let mut out = [(self.x, self.y); 10];
+        let (hx, hy) = (self.drift.0 / 2.0, self.drift.1 / 2.0);
+        out[0] = (self.x - hx, self.y - hy);
+        out[1] = (self.x + hx, self.y + hy);
+        for k in 0..4 {
+            let a = self.spin + k as f32 * PI / 2.0;
+            let (dx, dy) = (a.cos() * self.size, a.sin() * self.size);
+            out[2 + 2 * k] = (self.x - hx + dx, self.y - hy + dy);
+            out[3 + 2 * k] = (self.x + hx + dx, self.y + hy + dy);
+        }
+        out
     }
 
     /// Its next sample instant after `now` (slice centres, then its end), if it isn't done.
@@ -1338,7 +1356,7 @@ mod glint_tests {
     #[test]
     fn glint_swells_and_fades_symmetrically_then_ends_on_a_wake() {
         let t0 = Instant::now();
-        let g = Glint { t0, x: 0.0, y: 0.0, size: 10.0, spin: 0.0, drift: (8.0, 0.0) };
+        let g = Glint { t0, x: 0.0, y: 0.0, size: 10.0, spin: 0.0, drift: (8.0, 0.0), live: true };
         let life = 560;
         let mut at = t0;
         let mut scales = Vec::new();

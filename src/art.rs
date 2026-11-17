@@ -192,6 +192,20 @@ pub struct Anim {
     pub intro: Vec<(PathBuf, Option<String>)>,
     /// lachy's stills on disk, by name (`face`, `capri`, `cursor`): (path, sha256).
     pub stills: HashMap<String, (PathBuf, Option<String>)>,
+    /// The local-only images besides the intro's (`make-pack --mochi`: the cut-ins, the Line's
+    /// faces), by file stem (`cutin-eyes`, `face-calm`): (path, sha256). Only those on disk.
+    pub mochi: HashMap<String, (PathBuf, Option<String>)>,
+}
+
+/// `mochi.files` other than the intro's, by stem, that are on disk.
+fn mochi_files(dir: &Path, m: Option<&MochiDoc>) -> HashMap<String, (PathBuf, Option<String>)> {
+    let Some(m) = m else { return HashMap::new() };
+    let root = dir.join("anim/mochi");
+    m.files
+        .iter()
+        .filter(|(f, d)| !f.contains('/') && d.kind.as_deref() != Some(INTRO_KIND) && root.join(f).is_file())
+        .filter_map(|(f, d)| Some((Path::new(f).file_stem()?.to_str()?.to_string(), (root.join(f), d.sha256.clone()))))
+        .collect()
 }
 
 /// Every close-up the intro needs, from `mochi.files` (kind `intro`), in order; empty unless all
@@ -230,11 +244,12 @@ impl Anim {
             bail!("pack: anim/anim.json schemaVersion {} (expected 1)", doc.schema_version);
         }
         let intro = intro_files(dir, doc.mochi.as_ref());
-        let Some(side) = doc.lachy else { return Ok(Some(Anim { intro, ..Anim::default() })) };
+        let mochi = mochi_files(dir, doc.mochi.as_ref());
+        let Some(side) = doc.lachy else { return Ok(Some(Anim { intro, mochi, ..Anim::default() })) };
         let root = dir.join("anim/lachy");
         let mut errors = Vec::new();
         let stand = side.families.get("stand").and_then(|f| f.body_px).filter(|&b| b > 0.0);
-        let mut anim = Anim { intro, ..Anim::default() };
+        let mut anim = Anim { intro, mochi, ..Anim::default() };
         for (name, s) in &side.stills {
             let path = root.join(&s.file);
             if path.is_file() {
@@ -470,6 +485,12 @@ pub mod tests {
         assert_eq!(a.intro.len(), 9);
         assert!(a.intro[0].0.ends_with("anim/mochi/intro-grab.webp") && a.intro[8].0.ends_with("intro-happy.webp"));
         assert_eq!(a.intro[0].1.as_deref(), Some("00"));
+        // The other images by stem, only those on disk.
+        assert!(a.mochi.is_empty(), "face-calm.png isn't on disk");
+        std::fs::write(d.join("anim/mochi/face-calm.png"), b"x").unwrap();
+        let a = Anim::load(&d, 8).unwrap().unwrap();
+        assert_eq!(a.mochi.get("face-calm").map(|m| m.1.as_deref()), Some(Some("01")));
+        assert!(a.mochi.keys().all(|k| !k.starts_with("intro-")));
         // One missing on disk: no intro at all (it silently doesn't exist).
         std::fs::remove_file(d.join("anim/mochi/intro-smear.webp")).unwrap();
         assert!(Anim::load(&d, 8).unwrap().unwrap().intro.is_empty());
