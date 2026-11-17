@@ -49,6 +49,13 @@ pub use os::Os;
 pub use linux::{base_dir, home_dir, local_day, monotonic_s, notify, process_setup, trim_heap, utc_offset_s, watch_media};
 #[cfg(windows)]
 pub use self::windows::{base_dir, home_dir, local_day, monotonic_s, notify, process_setup, trim_heap, utc_offset_s, watch_media};
+/// The voice sidecar's link (capri-voice; newline-delimited JSON both ways) and where it is, for
+/// her log. Linux: its Unix socket. Windows: loopback TCP after a token handshake (the sidecar is
+/// Python, and stock CPython has no AF_UNIX there).
+#[cfg(target_os = "linux")]
+pub use linux::{VoiceLink, voice_link};
+#[cfg(windows)]
+pub use self::windows::{VoiceLink, voice_link};
 
 /// Where her files go, per user (`base_dir`): the core adds `synaps-avatar/…`. `$XDG_<KIND>_HOME`
 /// wins on every OS; else Linux: under `$HOME` (`.config`, `.local/share`, `.local/state`),

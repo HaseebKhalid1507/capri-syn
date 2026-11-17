@@ -55,10 +55,12 @@ mod media;
 mod notifications;
 #[cfg(test)]
 mod testkit;
+mod voice;
 
 pub use dirs::{base_dir, home_dir};
 pub use media::watch_media;
 pub use notifications::notify;
+pub use voice::{VoiceLink, voice_link};
 
 /// How long his input to her (her key, a press on one of her windows) lets her take the
 /// keyboard: the Line opening on it takes well under this.

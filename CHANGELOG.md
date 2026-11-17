@@ -15,6 +15,22 @@
 - The summon key on a parked Line counts as `waiting` only when the desktop refused the keyboard. Any
   other failure (she is gone) is logged as itself (`line: summoned, but she is gone`), not as a wait.
 
+### Windows: the voice sidecar's link and its Windows layer (not shipped)
+- Her link to `capri-voice` goes through the platform layer. Linux: unchanged (the same Unix socket, the
+  same log lines). Windows: loopback TCP after a two-token handshake (`endpoint.json` in
+  `%LOCALAPPDATA%\capri-voice`), since stock CPython has no AF_UNIX there. `CAPRI_VOICE_ENDPOINT`
+  overrides the file on both ends.
+- `capri-voice` runs on Windows through `tools/capri_voice_win.py` (Linux never loads it):
+  - PortAudio (WASAPI) capture and playback;
+  - SMTC pause, and a session-volume duck with Linux's rules and crash repair;
+  - the lock, calls (the mic privacy store) and do-not-disturb.
+  On Linux only seams changed in `capri-voice`: every path runs the same commands in the same order.
+- `packaging/windows/voice-bundle.ps1` builds a 143 MB folder (CPython 3.13 embeddable + wheels, no
+  models) that runs the sidecar with no Python installed. It is not in the installer yet, and she
+  doesn't start it yet.
+- CI: a `voice` job on Linux and Windows runs the unit tests and the selftest. On Windows it also installs
+  every wheel binary-only, builds the bundle, and runs the tests again with the bundled interpreter.
+
 ### Windows: an installer, her files in the right places (not shipped)
 - A per-user installer (Inno Setup, no admin), built by CI as an artifact only: her windowed exe (no
   console window), her AUMID with an icon and a Start-menu shortcut carrying it, opt-in autostart, a
