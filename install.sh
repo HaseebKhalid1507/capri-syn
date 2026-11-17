@@ -204,11 +204,19 @@ receipt_init() {
 bmark() { printf '# %s synaps-avatar (install.sh): %s %s' "$1" "$2" "$1"; }
 block_get() { sed -n "/^$(bmark '>>>' "$2")\$/,/^$(bmark '<<<' "$2")\$/p" "$1" 2>/dev/null | sed '1d;$d'; }
 block_drop() { sed "/^$(bmark '>>>' "$2")\$/,/^$(bmark '<<<' "$2")\$/d" "$1"; }
+# One backup per file per run, before its first change: the file as it was.
+BACKED_UP=''
 backup() {
-    local b
+    case $BACKED_UP in *"|$1|"*) return 0 ;; esac
+    BACKED_UP+="|$1|"
+    local b n=1
     b="$1.synaps-avatar-$(date +%Y%m%d-%H%M%S).bak"
+    while [ -e "$b" ]; do
+        n=$((n + 1))
+        b="$1.synaps-avatar-$(date +%Y%m%d-%H%M%S)-$n.bak"
+    done
     run cp -p "$1" "$b"
-    rec backup "$b"
+    if [ "$UNINSTALL" = 1 ]; then info "backup: $(tilde "$b")"; else rec backup "$b"; fi
 }
 # Put BODY (stdin) in FILE between our markers: the old block replaced, a backup first. Written
 # through (a symlinked dotfile stays a symlink).
