@@ -579,7 +579,7 @@ fn goes_on(line: &str) -> String {
             }
         }
     }
-    format!("{}…", t.trim_end_matches([',', ';', ':', '-', '—']))
+    format!("{}…", t.trim_end_matches([',', ';', ':', '-', '—', '.']))
 }
 
 const TYPE_TICK: Duration = Duration::from_millis(35);
@@ -8448,6 +8448,7 @@ mod bubble_layout_tests {
     fn its_last_line_says_it_goes_on_and_keeps_a_short_word() {
         assert_eq!(super::goes_on("guess."), "guess…");
         assert_eq!(super::goes_on("---"), "…");
+        assert_eq!(super::goes_on("bella and opened four Windows PRs. It"), "bella and opened four Windows PRs…");
         assert_eq!(super::goes_on("though none of it is live yet. Bella's still on the"), "though none of it is live yet. Bella's still on…");
         assert_eq!(super::goes_on("https://github.com/HaseebKhalid1507/capri-"), "https://github.com/HaseebKhalid1507/cap…");
     }
