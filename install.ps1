@@ -85,9 +85,10 @@ function Write-Action([string]$Text) { Write-Host "   `$ $Text" -ForegroundColor
 function Invoke-Native([string]$Exe, [string[]]$ArgList) {
     Write-Action (Format-Command (@($Exe) + $ArgList))
     if ($script:Dry) { return }
-    # A native program's stderr (progress, warnings) is not an error: 5.1 would throw on it.
+    # A native program's stderr (progress, warnings) is not an error: 5.1 would throw on it. Its
+    # stdout goes to the console as it comes: in the module it would be held until the end.
     $ErrorActionPreference = 'Continue'
-    & $Exe @ArgList
+    & $Exe @ArgList | Out-Host
     if ($LASTEXITCODE) { Stop-Install "$(Split-Path -Leaf $Exe) failed (exit $LASTEXITCODE)" }
 }
 # Anything else: its description printed, the block run unless --dry-run.
@@ -513,7 +514,7 @@ function Build-FromSource {
         Write-Action (Format-Command (@('winget') + $wg))
         if (-not $script:Dry) {
             $ErrorActionPreference = 'Continue'
-            & winget @wg
+            & winget @wg | Out-Host
             $rc = $LASTEXITCODE
             # 0x8A15002B: Settings > Apps lists Build Tools with nothing newer to install, yet Visual
             # Studio's installer has no record of it (an interrupted install). winget then installs
@@ -526,7 +527,7 @@ function Build-FromSource {
                 }
                 Write-Info "winget lists it as installed, but it isn't there (an interrupted install): installing it again"
                 Write-Action (Format-Command (@('winget') + $wg + '--force'))
-                & winget @($wg + '--force')
+                & winget @($wg + '--force') | Out-Host
                 $rc = $LASTEXITCODE
             }
             $ErrorActionPreference = 'Stop'
@@ -864,9 +865,11 @@ function Invoke-Brain {
     Write-Host '   ? pick one now [Y/n] ' -ForegroundColor Red -NoNewline
     $a = Read-Host
     if ($a -and $a -notmatch '^(y|yes)$') { Write-Info 'later, then: run that line when you want her to answer'; return }
+    # The picker draws on the console itself: Start-Process hands it the console (inside the module, a
+    # native command's output is a pipe, not the console).
     $ErrorActionPreference = 'Continue'
-    & $script:Synaps login
-    if ($LASTEXITCODE -eq 0 -and (Test-Brain)) { Write-Good 'her brain: logged in (no restart: the daemon reads it on her next turn)' }
+    $p = Start-Process -FilePath $script:Synaps -ArgumentList 'login' -NoNewWindow -Wait -PassThru
+    if ($p.ExitCode -eq 0 -and (Test-Brain)) { Write-Good 'her brain: logged in (no restart: the daemon reads it on her next turn)' }
     else { Write-Warn "no login yet: run ``$cmd`` when you want her to answer" }
 }
 
