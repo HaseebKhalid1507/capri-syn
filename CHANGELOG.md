@@ -8,8 +8,9 @@
   takes). The phrase is now cut as Whisper spells it, doubled or misheard as the first word or two; words with
   no trace of it are the phrase misheard, and the audio after the check's window decides (no speech there:
   nothing is sent, hands-free goes on; speech: that audio is decoded on its own).
-- Junk: subtitle credits and more stock fillers dropped; `*cough*` tags cut; `thank you`/`bye` count as filler
-  under 300 ms of speech (was 400: a real "bye" was dropped). Heard/dropped lines carry Whisper's confidence.
+- Junk, in every mode: subtitle credits (at the line's start) and more stock fillers dropped; `*cough*` tags cut;
+  `thank you`/`bye`/`take a breath` count as filler under 300 ms of speech (was 400: a real "bye" was dropped),
+  sign-offs (`see you next time`, `thanks for listening`) under 600 ms. Heard/dropped lines carry Whisper's confidence.
 
 ### The HUD moves as one system
 - One curve (ease-out, 2 % past the target at most, no wobble) and one set of durations, named in

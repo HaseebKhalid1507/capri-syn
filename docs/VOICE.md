@@ -188,7 +188,8 @@ thresholds) was fitted on stock synthetic voices only (Kokoro packs, espeak-ng),
       music" sends "Pause the music");
     - words with no trace of the phrase ("Take a breath") are the phrase misheard: the audio after the check's
       window decides. Under a hands-free utterance's speech there (8 Silero frames, 256 ms), it is the phrase
-      alone: nothing is sent, hands-free goes on. Otherwise that audio is decoded on its own and sent.
+      alone: nothing is sent, hands-free goes on. Otherwise that audio is decoded on its own and sent (decoded to
+      nothing, or the decode failing: DIDN'T CATCH THAT, logged).
     - The journal says which, with the numbers only: `heard: the phrase alone, misheard (0 ms of speech after
       it) (13 chars, lp -1.22 / p 0.07): hands-free goes on`.
   - **Quiet for `handsfree_timeout`** (60 s; the last 10 s count down on the tag): `HANDS-FREE OFF · 60 S
@@ -266,12 +267,15 @@ thresholds) was fitted on stock synthetic voices only (Kokoro packs, espeak-ng),
   - no letters (`-2,`, `,`, `2.`). Note: a bare number he says, written by Whisper as `2.`, is dropped too;
   - two letters or fewer, unless one of `no ok hi go yo ya ye up on me do it` (`nd,` and `Q.` drop);
   - a single word with no vowel (`, chr,`, `hmm`);
-  - `you`, `thanks for watching` (and its kin: `thank you for watching`, `thanks for listening`, `please
-    subscribe`, `see you next time`, …); subtitle credits (`Subtitles by the Amara.org community`,
-    `Transcription by CastingWords`); `thank you`, `bye`, `bye bye` and `take a breath` from under 300 ms of
-    speech (a real one is longer: stock voices' "Bye." 320–384 ms; under 400 ms, as before, dropped a real
-    "bye", which ends hands-free);
-  - sound tags Whisper writes are cut first: `[Music]`, `(coughs)`, `*cough*`;
+  - `you`, `thanks for watching` (and its kin: `thank you for watching`, `please subscribe`, `like and
+    subscribe`, …); subtitle credits, only as the line's start (`Subtitles by the Amara.org community`,
+    `Transcription by CastingWords`; "Get this translated by Friday" is his) or naming amara.org / CastingWords;
+    `thank you`, `bye`, `bye bye` and `take a breath` from under 300 ms of speech (a real one is longer: stock
+    voices' "Bye." 320–384 ms; under 400 ms, as before, dropped a real "bye", which ends hands-free); sign-offs
+    (`see you next time`, `thanks for listening`, …) from under 600 ms (stock voices say them in 640 ms and up,
+    at speed 1.3). These hold in every mode: hold, toggle, wake and hands-free;
+  - sound tags Whisper writes are cut first: `[Music]`, `(coughs)`, `*cough*` (letters between the stars only:
+    `5 * 3 * 2` stays);
   - three or more words that are all from the recognition prompt (Capri, spike, lynx, …).
 - Silence, breaths, coughs, clicks and hum never reach Whisper: Silero scores them far under 0.70 (stock
   synthetic ones at −45 to −18 dBFS peak at 0.26). So a filler Whisper invents needs some real-looking speech.

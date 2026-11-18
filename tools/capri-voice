@@ -90,6 +90,11 @@ def now_ms():
 
 # ---- models ---------------------------------------------------------------------------------
 
+# Whisper's sound tags: [Music], (coughs), and *cough* / *clears throat* (letters only between the stars, nothing
+# word-like or arithmetic against them: "5 * 3 * 2" stays)
+TAGS = re.compile(r'\[[^\]]*\]|\([^)]*\)|(?<![\w*+\-/=^%])\*[A-Za-z]+(?: [A-Za-z]+){0,3}\*(?![\w*+\-/=^%])')
+
+
 class Stt:
     def __init__(self, name):
         from pywhispercpp.model import Model
@@ -112,7 +117,7 @@ class Stt:
                                  temperature_inc=0.0, max_tokens=tokens or int(16 + 12 * dur))
         text = ' '.join(s.text for s in segs).strip()
         self.conf = self._conf()
-        text = re.sub(r'\[[^\]]*\]|\([^)]*\)|\*[^*]*\*', '', text).strip()     # [Music], (coughs), *cough*
+        text = TAGS.sub('', text).strip()     # [Music], (coughs), *cough*
         out = unloop(text)
         if len(out.split()) < len(text.split()):
             log(f'stt: a decode loop: {len(text.split()) - len(out.split())} repeated words dropped')
@@ -252,6 +257,17 @@ def wake_rest(text, loose=False, again=True):
 
 
 WAKE_HF_LEAD_S = 1.8      # hands-free from the phrase: this much of the ring before the fire (stage 1 fires near the end of "Capri")
+def wake_hf_seed(pre, post, checked, bare):
+    """Hands-free from a wake the check passed: (seed, phrase_s). pre: the ring at the fire; post: what came since;
+    checked: how much of post the check had. Bare: the seed starts after the checked audio, no phrase in it (None).
+    Else it starts WAKE_HF_LEAD_S before the fire, or where the ring starts (it is cleared after every turn, and the wake
+    can fire 1.4 s in), and phrase_s is where the checked window ends in it."""
+    if bare:
+        return bytes(post[checked:]), None
+    lead = pre[-int(WAKE_HF_LEAD_S * MIC_RATE) * 2:]
+    return lead + bytes(post), (len(lead) + checked) / 2 / MIC_RATE
+
+
 def wake_first(text, loose=False):
     """The first utterance of a hands-free that "hey capri" began: what is sent (the phrase cut), or '' when it is the
     phrase alone or "let's talk" (it is hands-free already)."""
@@ -267,7 +283,7 @@ def first_cut(text, post=None):
     trace of it ("Take a breath": live, his "Hey Capri" alone, 2.7 s, 736 ms of speech) are the phrase misheard: what
     counts then is the audio after the window, which needs a hands-free utterance's speech (MIN_FRAMES, PEAK_P) to be
     one. His six bare takes have 0-32 ms there, stock voices' bare "Hey Capri." 0-224 ms."""
-    rest = wake_first(text, loose=True)
+    rest = wake_first(text, loose=post is not None)
     if not rest:
         return 'alone', 'the phrase alone'
     if post is None or wake_find(text) is not None or wake_loose(text) is not None:
@@ -651,11 +667,15 @@ def unloop(text):
 
 
 SHORT_OK = {'no', 'ok', 'hi', 'go', 'yo', 'ya', 'ye', 'up', 'on', 'me', 'do', 'it'}
-JUNK_ALWAYS = {'you', 'thanks for watching', 'thank you for watching', 'thank you so much for watching', 'thanks for listening',
-               'thank you for listening', 'please subscribe', 'like and subscribe', 'see you in the next video',
-               'see you next time', "i'll see you next time", 'i will see you next time'}
-JUNK_CREDITS = re.compile(r'\b(?:subtitles?|captions?|captioning|transcript(?:ion)?|transcribed|translated|translation)\s+by\b'
+JUNK_ALWAYS = {'you', 'thanks for watching', 'thank you for watching', 'thank you so much for watching', 'please subscribe',
+               'like and subscribe', 'see you in the next video'}
+# Whisper's credits: the line starts with them ("Subtitles by the Amara.org community"), or names the two sites anywhere
+JUNK_CREDITS = re.compile(r'^\W*(?:subtitles?|captions?|captioning|transcript(?:ion)?|transcribed|translated|translation)\s+by\b'
                           r'|\bamara\s*\.?\s*org\b|\bcastingwords\b')
+# Junk only from under JUNK_BYE_MS of speech: Whisper's sign-offs. Real ones are longer (stock voices, Silero's count:
+# "See you next time." 864-1152 ms, 640-928 at speed 1.3; "Thanks for listening." 832-1152, 704-896 at 1.3).
+JUNK_BYE = {'thanks for listening', 'thank you for listening', 'see you next time', "i'll see you next time", 'i will see you next time'}
+JUNK_BYE_MS = 600
 # Junk only from under JUNK_SHORT_MS of speech: Whisper's fillers. Silero never lets breaths, coughs, clicks or hum
 # through (stock synthetic ones peak at 0.26 < PEAK_P), so these come from a clip with a little real-looking speech;
 # a real one is longer (stock voices: "Bye." 320-384 ms, "Thank you." 256-672 ms, "Take a breath." 608-864 ms).
@@ -681,9 +701,9 @@ def junk(text, speech_ms):
     if len(words) == 1 and not re.search('[aeiouy]', words[0]):
         return 'not a word'
     whole = ' '.join(words)
-    if whole in JUNK_ALWAYS or (whole in JUNK_SHORT and speech_ms < JUNK_SHORT_MS):
+    if whole in JUNK_ALWAYS or (whole in JUNK_SHORT and speech_ms < JUNK_SHORT_MS) or (whole in JUNK_BYE and speech_ms < JUNK_BYE_MS):
         return 'a stock hallucination'
-    if len(words) <= 8 and JUNK_CREDITS.search(t) and not re.search(r'\b(?:the|my|our|your|his|her)\s+(?:subtitles?|captions?|transcript)', t):
+    if len(words) <= 8 and JUNK_CREDITS.search(t):
         return 'subtitle credits'
     if len(words) >= 3 and all(w in VOCAB_WORDS for w in words):
         return 'the prompt echoed'
@@ -2185,7 +2205,7 @@ class Voice:
             if cand is not None:
                 cand['post'] += chunk
                 if not cand['started'] and len(cand['post']) >= int(WAKE_CHECK_DELAY_S * MIC_RATE) * 2:
-                    cand['started'] = True
+                    cand['started'], cand['checked'] = True, len(cand['post'])
                     pcm = wake_check_pcm(cand['pre'], cand['post'])
                     threading.Thread(target=check, args=(cand, pcm), daemon=True).start()
                 if cand['done'].is_set():
@@ -2202,14 +2222,13 @@ class Voice:
                         # (the check's doubled "Hey Capri. Hey Capri." is not bare: a slow speaker's phrase runs past the
                         # checked window, and a turn started there begins with its tail; the first utterance cuts it instead)
                         bare = not wake_rest(cand.get('text', ''), again=False)[0]
-                        cut = int(WAKE_CHECK_DELAY_S * MIC_RATE) * 2
+                        cut = cand['checked']
                         if hf_on:
                             # Hands-free: the same stream goes on as one, from the phrase (its first utterance cut) or after it.
                             self.emit(ev='wake', handsfree=True, ms={'fire_to_wake': now_ms() - cand['t'], 'verify': round(cand['ms'])})
                             # (from the phrase: the ring's last WAKE_HF_LEAD_S, so words before it can't end a turn of their own)
-                            lead = cand['pre'][-int(WAKE_HF_LEAD_S * MIC_RATE) * 2:]
-                            go.update(seed=bytes(cand['post'][cut:]) if bare else lead + bytes(cand['post']), cut=True,
-                                      phrase_s=None if bare else WAKE_HF_LEAD_S + WAKE_CHECK_DELAY_S)
+                            seed, phrase_s = wake_hf_seed(cand['pre'], cand['post'], cut, bare)
+                            go.update(seed=seed, cut=True, phrase_s=phrase_s)
                             cand = None
                             break
                         self.emit(ev='wake', ms={'fire_to_wake': now_ms() - cand['t'], 'verify': round(cand['ms'])})
@@ -2333,8 +2352,7 @@ class Voice:
             cut = first.pop('cut', False)        # the first utterance after "hey capri": the phrase is cut, as a wake turn's
             k0 = first.pop('k0', None)
             post = None
-            if cut and k0 is not None:            # what came after the checked window: its frames, and its audio
-                k0 = max(0, k0)
+            if cut and k0:                        # what came after the checked window: its frames and audio (0: gone, reset_turn)
                 post = (list(vs.p[k0:]), bytes(tb[k0 * 2 * VAD_FRAME:len(vs.p) * 2 * VAD_FRAME]))
 
             def out():
@@ -2356,13 +2374,19 @@ class Voice:
                         b = min(len(raw), ((x[1] + 1) * VAD_FRAME + int(TAIL_S * MIC_RATE)) * 2)
                         sp = x[2] * FRAME_S * 1000
                         n0, t0 = len(text), now_ms()
-                        with self.stt_lock:
-                            text = self.stt(np.frombuffer(raw[a:b], np.int16).astype(np.float32) / 32768.0, sp)
-                            c['conf'] = self.stt.conf
+                        log(f"heard: the phrase misheard ({n0} chars): {sp:.0f} ms of speech after it, decoded on its own")
+                        try:
+                            with self.stt_lock:
+                                text = self.stt(np.frombuffer(raw[a:b], np.int16).astype(np.float32) / 32768.0, sp)
+                                c['conf'] = self.stt.conf
+                        except Exception as e:
+                            log(f'heard: the decode after the phrase failed: {e!r}')
+                            text, c['conf'] = '', None
                         c['stt_ms'] += now_ms() - t0
                         d['speech_ms'] = sp
-                        log(f"heard: the phrase misheard ({n0} chars): {sp:.0f} ms of speech after it, decoded on its own")
-                        kind, x = first_cut(text) if text else ('alone', 'nothing after the phrase')
+                        if not text:              # he said something there (an utterance's speech) and it didn't decode
+                            return self._drop('nothing decoded after the phrase', 0, sp, (b - a) / 2 / MIC_RATE, c)
+                        kind, x = first_cut(text)
                     if kind == 'alone':
                         log(f"heard: {x} ({len(text)} chars{conf_s(c.get('conf'))}): hands-free goes on")
                         c['t_heard'] = now_ms()
@@ -3046,9 +3070,22 @@ def selftest_junk():
     assert junk('Thank you.', 250) and not junk('Thank you.', 900) and junk('Bye.', 200) and junk('Take a breath.', 200)
     assert junk('Bye.', 352) is None and junk('Take a breath.', 700) is None, 'real ones (stock voices: Bye. 320-384 ms)'
     for j in ('Subtitles by the Amara.org community', 'Transcription by CastingWords', 'Thank you so much for watching!',
-              "I'll see you next time.", 'Thanks for listening.', 'Translated by Nancy Qanqar'):
+              'Translated by Nancy Qanqar', '- Captions by GetTranscribed.com', 'Thanks to amara.org'):
         assert junk(j, 2000), f'{j!r} passed'
-    assert junk('Subtitle the build log by date', 2000) is None and junk('Sort the captions by size', 2000) is None
+    for ok in ('Subtitle the build log by date', 'Sort the captions by size', 'Get this translated by Friday.', 'Was that transcribed by Whisper?',
+               'Is the translation by Google any good?', 'Turn captions by default on', 'Turn on the subtitles by default'):
+        for ms in (250, 2000):
+            assert junk(ok, ms) is None, f'{ok!r} dropped: {junk(ok, ms)}'
+    # sign-offs: junk from a little speech, a real goodbye passes (stock voices: 640 ms and up)
+    for j in ("I'll see you next time.", 'See you next time!', 'Thanks for listening.', 'Thank you for listening.'):
+        assert junk(j, 400) and junk(j, 599), f'{j!r} passed'
+        assert junk(j, 640) is None and junk(j, 1100) is None, f'{j!r} dropped'
+    # sound tags go; arithmetic and words with stars in them stay
+    tag = lambda x: re.sub(r'\s+', ' ', TAGS.sub('', x)).strip()
+    assert tag('*cough* Pause the music.') == 'Pause the music.' and tag('*clears throat* Yes. [BLANK_AUDIO]') == 'Yes.'
+    assert tag('(coughs) Next track *sighs*') == 'Next track'
+    for keep in ("What's 5 * 3 * 2?", '5*3*2', 'a*b*c', 'x * y * z', '2 *3* 4', 'Is 4 * two * 3 twenty-four?'):
+        assert tag(keep) == keep, f'{keep!r} -> {tag(keep)!r}'
     assert conf_s((-0.5234, 0.31)) == ', lp -0.52 / p 0.31' and conf_s(None) == ''
     for ok in ['yes', 'no', 'ok', 'okay', 'stop', 'go', 'hi', 'hey', 'wait', 'what', 'why', 'done', 'next', 'back', 'undo',
                'Capri', 'spike', 'lynx']:
@@ -3139,6 +3176,19 @@ def selftest_wake():
     assert first_cut('Hey Capri, yes.', quiet) == ('send', 'Yes.'), 'the phrase in the words: they decide'
     assert first_cut('Aye, capri, pause the music.', quiet) == ('send', 'Pause the music.') and first_cut('Aye, capri', said)[0] == 'alone'
     assert first_cut("Hey Capri, let's talk.", said) == ('alone', 'the phrase alone') and first_cut('Bye.') == ('send', 'Bye.')
+    # no phrase audio (a bare wake, or the phrase's audio gone): no loose cut, his first words stay
+    for t in ('Keep re-running the tests.', 'Keep ray tracing on.', 'Copy that.', 'Gear pre-set three', 'K, pray for rain'):
+        assert first_cut(t) == ('send', t), (t, first_cut(t))
+    assert first_cut('Keep re-running the tests.', quiet) == ('send', 'Running the tests.'), 'with the phrase audio: loose (it is the phrase)'
+    # the seed of a hands-free from the phrase: where the checked window ends in it, from the buffers
+    sr2, chk = MIC_RATE * 2, int(WAKE_CHECK_DELAY_S * MIC_RATE) * 2
+    for pre_s in (2.5, 1.36, 0.6):          # the ring full, and cleared by the last turn (the wake fires 1.4 s in)
+        pre, post = bytes(int(pre_s * MIC_RATE) * 2), bytearray(chk + 3200 + int(0.5 * sr2))
+        seed, ps = wake_hf_seed(pre, post, chk + 3200, False)
+        lead = min(pre_s, WAKE_HF_LEAD_S)
+        assert len(seed) == int(lead * MIC_RATE) * 2 + len(post) and abs(ps - (lead + WAKE_CHECK_DELAY_S + 0.1)) < 1e-6, (pre_s, ps)
+    seed, ps = wake_hf_seed(bytes(sr2), bytearray(chk + 3200 + 6400), chk + 3200, True)
+    assert ps is None and len(seed) == 6400, 'bare: after the checked audio'
     if all(os.path.exists(f'{MODELS}/{f}') for f in WAKE_FILES):
         ear, why = WakeEar.load()
         assert ear is not None, why
