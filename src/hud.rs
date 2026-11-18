@@ -38,7 +38,7 @@ pub const FLOOR: f32 = 0.4;
 /// The bubble closing: its border glitches, it settles just inside its box, its words dim to
 /// `FLOOR` over its last `CLOSE_DIM_MS`, and it is gone.
 pub const CLOSE_MS: f32 = 120.0;
-pub const CLOSE_DIM_MS: f32 = 60.0;
+pub const CLOSE_DIM_MS: f32 = 34.0;
 /// The bubble collapsing into the pill: its words cross into the pill's, then (after
 /// `PILL_LAG_MS`, its own nearly gone) its box and outline ease into the pill's.
 pub const PILL_LAG_MS: f32 = 100.0;
@@ -72,11 +72,29 @@ pub fn ease(u: f32) -> f32 {
     1.0 + (BACK + 1.0) * s * s * s + BACK * s * s
 }
 
-/// The one crossfade: smooth in and out, 0 → 1. Old at `1 - blend`, new at `blend`: one of
-/// them is always at half or more.
+/// Smooth in and out, 0 → 1 (a shape's morph, its colours).
 pub fn blend(u: f32) -> f32 {
     let u = u.clamp(0.0, 1.0);
     u * u * (3.0 - 2.0 * u)
+}
+
+/// Where the crossfade's two sides cross (as parts of `XFADE_MS`): the old words ease down
+/// to `FLOOR` before it, the new rise from `FLOOR` after it, and inside it (12 ms: one frame
+/// at most) both pass between `FLOOR` and nothing. Never two labels at half over each other.
+const CROSS: (f32, f32) = (0.45, 0.55);
+
+/// The one crossfade at `u` (0..1 of `XFADE_MS`): the old words' level, the new words'.
+pub fn xfade(u: f32) -> (f32, f32) {
+    let u = u.clamp(0.0, 1.0);
+    let (a, b) = CROSS;
+    if u <= a {
+        (1.0 - (1.0 - FLOOR) * blend(u / a), 0.0)
+    } else if u < b {
+        let k = (u - a) / (b - a);
+        (FLOOR * (1.0 - k), FLOOR * k)
+    } else {
+        (0.0, FLOOR + (1.0 - FLOOR) * blend((u - b) / (1.0 - b)))
+    }
 }
 
 /// A value easing toward its target along `ease` (it may start later than now).
@@ -404,11 +422,10 @@ impl<T: Clone + PartialEq> TagFx<T> {
 
     /// What to draw now.
     pub fn frame(&self, now: Instant) -> TagFrame<'_, T> {
-        let k = match (&self.prev, self.x0) {
-            (None, _) => 1.0,
-            (Some(_), None) => 0.0,
-            (Some(_), Some(x0)) if now < x0 => 0.0,
-            (Some(_), Some(x0)) => blend(ms(now, x0) / XFADE_MS),
+        let (old, new) = match (&self.prev, self.x0) {
+            (None, _) => (0.0, 1.0),
+            (Some(_), Some(x0)) if now >= x0 => xfade(ms(now, x0) / XFADE_MS),
+            (Some(_), _) => (1.0, 0.0),
         };
         let alpha = match self.vis {
             Vis::Steady => 1.0,
@@ -423,10 +440,10 @@ impl<T: Clone + PartialEq> TagFx<T> {
         };
         TagFrame {
             cur: self.cur.as_ref(),
-            words: k,
+            words: new,
             shape,
             nat: self.nat,
-            prev: self.prev.as_ref().map(|(p, w)| (p, *w, 1.0 - k)),
+            prev: self.prev.as_ref().map(|(p, w)| (p, *w, old)),
             alpha,
             split: self.glitch.map_or(0.0, |g| g.split(now)),
         }
@@ -546,19 +563,23 @@ impl PanelFx {
         if from_pill && self.pill_x0.is_none() && (w - shell.0) <= 2.0 * INSET.0 + 0.5 && (h - shell.1) <= INSET.1 + 0.5 {
             self.pill_x0 = Some(now);
         }
-        let kp = if from_pill || self.pill_x0.is_some_and(|x| ms(now, x) < XFADE_MS) { self.pill_x0.map_or(0.0, |x| blend(ms(now, x) / XFADE_MS)) } else { 1.0 };
-        let kx = self.x0.map_or(1.0, |x| blend(ms(now, x) / XFADE_MS));
+        let (pill_words, inner) = if from_pill || self.pill_x0.is_some_and(|x| ms(now, x) < XFADE_MS) {
+            self.pill_x0.map_or((1.0, 0.0), |x| xfade(ms(now, x) / XFADE_MS))
+        } else {
+            (0.0, 1.0)
+        };
+        let (old, words) = self.x0.map_or((0.0, 1.0), |x| xfade(ms(now, x) / XFADE_MS));
         if self.pill_x0.is_some_and(|x| ms(now, x) >= XFADE_MS) && !from_pill {
             self.pill_x0 = None;
         }
         PanelFrame {
             shell,
             content,
-            inner: kp,
-            words: kx,
-            old: if self.x0.is_some() { 1.0 - kx } else { 0.0 },
+            inner,
+            words,
+            old,
             replaced,
-            pill: (kp < 1.0).then_some(1.0 - kp),
+            pill: (inner < 1.0).then_some(pill_words),
             split: self.glitch.map_or(0.0, |g| g.split(now)),
         }
     }
@@ -658,8 +679,8 @@ impl<S> Ghost<S> {
     /// Into the pill: its own words' level, the pill's words', and how far its outline and
     /// colours are into the pill's (0..1).
     pub fn pill(&self, now: Instant) -> (f32, f32, f32) {
-        let k = blend(ms(now, self.t0) / XFADE_MS);
-        (1.0 - k, k, blend(self.u(now)))
+        let (own, pill) = xfade(ms(now, self.t0) / XFADE_MS);
+        (own, pill, blend(self.u(now)))
     }
 
     /// The border's RGB split, px.
@@ -695,7 +716,11 @@ mod tests {
         let top = v.iter().enumerate().fold((0, 0.0f32), |a, (i, &x)| if x > a.1 { (i, x) } else { a }).0;
         assert!(v[..=top].windows(2).all(|w| w[1] >= w[0]) && v[top..].windows(2).all(|w| w[1] <= w[0]), "one bump, no wobble");
         assert!(ease(0.2) > 0.5, "fast out");
-        assert!((0..=100).all(|i| { let k = blend(i as f32 / 100.0); k.max(1.0 - k) >= 0.5 }), "a crossfade always shows one side at half or more");
+        let low: Vec<f32> = (0..=1000).map(|i| i as f32 / 1000.0).filter(|&u| { let (o, n) = xfade(u); o.max(n) < FLOOR - 1e-4 }).collect();
+        assert!(low.is_empty() || (low[low.len() - 1] - low[0]) * XFADE_MS <= 12.5, "words under the floor for one frame at most");
+        assert!((0..=1000).all(|i| { let (o, n) = xfade(i as f32 / 1000.0); o.min(n) <= FLOOR + 1e-4 }), "never two labels over each other above the floor");
+        assert_eq!(xfade(0.0), (1.0, 0.0));
+        assert_eq!(xfade(1.0), (0.0, 1.0));
     }
 
     #[test]
@@ -756,9 +781,12 @@ mod tests {
         let t0 = Instant::now();
         let mut fx = TagFx::default();
         let f = run(&mut fx, t0, &[(0, Some("ONLINE")), (1000, Some("WORKING")), (2000, Some("DONE"))], 2600, widths);
+        let mut low = 0;
         for &(t, _, cur, words, prev, alpha, _) in f.iter().filter(|f| f.0 >= 200) {
             let shown = words.max(prev.map_or(0.0, |p| p.1));
-            assert!(cur.is_some() && alpha >= 0.99 && shown >= 0.5, "words show at {t} ms: {words} {prev:?}");
+            assert!(cur.is_some() && alpha >= 0.99 && words.min(prev.map_or(0.0, |p| p.1)) <= FLOOR + 1e-3, "one label at a time at {t} ms");
+            low = if shown < FLOOR - 1e-3 { low + 1 } else { 0 };
+            assert!(low <= 1, "words under the floor for more than a frame at {t} ms: {words} {prev:?}");
         }
         // WORKING → DONE: the old words go first, then the plate shrinks (no overhang).
         let s = f.iter().find(|f| f.0 >= 2000 && f.2 == Some("DONE")).unwrap().0;
@@ -784,8 +812,10 @@ mod tests {
         let wants = [(0, Some("ONLINE")), (1000, Some("THINKING")), (1250, Some("WORKING")), (1500, Some("THINKING")), (1800, Some("WORKING")), (2050, Some("THINKING")), (2350, Some("WORKING")), (2650, Some("DONE"))];
         let f = run(&mut fx, t0, &wants, 3600, widths);
         let mut seen: Vec<(u64, &str)> = Vec::new();
+        let mut low = 0;
         for &(t, _, cur, words, prev, alpha, _) in f.iter().filter(|f| f.0 >= 200) {
-            assert!(alpha >= 0.99 && words.max(prev.map_or(0.0, |p| p.1)) >= 0.5, "no faint frame at {t}");
+            low = if words.max(prev.map_or(0.0, |p| p.1)) < FLOOR - 1e-3 { low + 1 } else { 0 };
+            assert!(alpha >= 0.99 && low <= 1, "no faint frames at {t}");
             if let Some(c) = cur
                 && seen.last().is_none_or(|s| s.1 != c)
             {
@@ -831,11 +861,11 @@ mod tests {
         assert!(f.replaced && f.old == 1.0 && f.words == 0.0);
         let f = p.open((300.0, 80.0), 2, None, at(t0, 760), true, true);
         assert_eq!(f.shell, (400.0, 120.0), "holds while the old words go");
-        assert!(f.words.max(f.old) >= 0.5);
-        let mut t = 776;
+        let (mut t, mut low) = (776, 0);
         while t <= 1100 {
             let f = p.open((300.0, 80.0), 2, None, at(t0, t), true, true);
-            assert!(f.words.max(f.old) >= 0.5);
+            low = if f.words.max(f.old) < FLOOR - 1e-3 { low + 1 } else { 0 };
+            assert!(low <= 1 && f.words.min(f.old) <= FLOOR + 1e-3);
             t += 16;
         }
         let f = p.open((300.0, 80.0), 2, None, at(t0, 1116), true, true);
@@ -847,11 +877,12 @@ mod tests {
         let t0 = Instant::now();
         let mut p = PanelFx::default();
         let mut t = 0;
-        let mut crossed = false;
+        let (mut crossed, mut low) = (false, 0);
         while t <= 500 {
             let f = p.open((400.0, 150.0), 1, Some((110.0, 25.0)), at(t0, t), true, true);
             let pw = f.pill.unwrap_or(0.0);
-            assert!(pw.max(f.inner) >= 0.5, "words show at {t}: pill {pw} live {}", f.inner);
+            low = if pw.max(f.inner) < FLOOR - 1e-3 { low + 1 } else { 0 };
+            assert!(low <= 1, "words show at {t}: pill {pw} live {}", f.inner);
             if f.inner > 0.0 {
                 crossed = true;
                 assert!(400.0 - f.shell.0 <= 2.0 * INSET.0 + 1.0 && 150.0 - f.shell.1 <= INSET.1 + 1.0, "the live words only in a box that holds them");
@@ -873,9 +904,9 @@ mod tests {
         let mut g = Ghost::new((), (0.0, 0.0, 400.0, 200.0), Some((140.0, 230.0, 120.0, 25.0)), t0, true);
         assert_eq!(g.split(t0), 0.0);
         assert_eq!(g.rect(at(t0, 95)), (0.0, 0.0, 400.0, 200.0), "the box holds while the words cross");
-        for t in (0..=300).step_by(8) {
+        for t in (0..=300).step_by(16) {
             let (own, pill, q) = g.pill(at(t0, t));
-            assert!(own.max(pill) >= 0.5 && (0.0..=1.0).contains(&q), "never empty at {t}");
+            assert!((own.max(pill) >= FLOOR - 1e-3 || (54..=66).contains(&t)) && (0.0..=1.0).contains(&q), "never empty at {t}");
             if t >= PILL_LAG_MS as u64 {
                 assert!(own < 0.05, "its own words are gone before the box moves");
             }
