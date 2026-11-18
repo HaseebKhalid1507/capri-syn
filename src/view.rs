@@ -788,6 +788,9 @@ pub struct Avatar {
     panel_old: Option<Vec<String>>,
     /// Opening out of the pill: its width (kept past the frame it was taken).
     pill_open_from: Option<(f32, f32)>,
+    /// The pill's content as the bubble opened out of it (held: a status change meanwhile
+    /// doesn't swap its words mid-open).
+    pill_open_show: Option<TagShow>,
     /// Bubbles made: each reply's own number (a new one in an open bubble pulses).
     bubble_serial: u64,
     /// The tag's resting hair line and column while she stays put (her place, the
@@ -1053,6 +1056,7 @@ impl Avatar {
             panel_last_snap: None,
             panel_old: None,
             pill_open_from: None,
+            pill_open_show: None,
             bubble_serial: 0,
             hud_prof: None,
             hud_paint: Rc::new(RefCell::new(Vec::new())),
@@ -6871,18 +6875,37 @@ impl Render for Avatar {
             });
             // The snapshot a closing bubble is drawn from (where its words are).
             self.panel_last_snap = Some(GhostSnap { g: gc, header_label: header_label.clone(), label: label.clone(), lines: ghost_lines, foot_zone, frame_c });
-            root = root.child(bg);
-            // Out of the pill: the pill's words (and its plate) at the box's centre, crossing
-            // into the bubble's.
+            // Out of the pill: the pill grows (its outline and colours, opaque, its words at the
+            // box's centre as it was when it opened), and becomes the bubble as the words cross.
             if let (Some(level), Some((pw, _))) = (pf.pill, pill_before.or(self.pill_open_from)) {
                 self.pill_open_from = Some((pw, 25.0));
-                let pa = art_of(&pill_show);
+                let shown = self.pill_open_show.get_or_insert_with(|| pill_show.clone()).clone();
+                let pa = art_of(&shown);
+                let q = 1.0 - level;
+                let (cut, fb, eb, wb) = base_of(pal, &pa).unwrap_or((Cut::Tag(pa.look.plate), pa.look.fill, pa.look.edge, 1.5));
+                let from = theme::outline(cut, g.x, g.y, g.x + g.w, g.y + g.h).into_iter().next().unwrap_or_default();
+                root = root.child(morph_bg(from, (fb, eb, wb), g.poly(), (pal.panel, frame_c, 2.0), q, pal.ring));
+                if q > 0.0 {
+                    let sl = g.slivers();
+                    root = root.child(
+                        canvas(|_, _, _| (), move |_, _, window, _| sl.iter().for_each(|p| theme::fill_poly(window, p, rgb(pal.accent))))
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .size_full()
+                            .opacity(q),
+                    );
+                }
                 let (pl, pt) = (g.x + (g.w - pw) * 0.5, g.y + (g.h - pa.h()) * 0.5);
                 if level > 0.0 {
                     root = root.child(div().absolute().left(px(pl)).top(px(pt)).w(px(pw)).h(px(pa.h())).opacity(level).child(tag_ring(pal, &pa, Some((pw, pw)), 0.0, Part::Fore)));
                 }
-            } else if pf.pill.is_none() {
-                self.pill_open_from = None;
+            } else {
+                root = root.child(bg);
+                if pf.pill.is_none() {
+                    self.pill_open_from = None;
+                    self.pill_open_show = None;
+                }
             }
             // Its words (everything inside the shell): out of the pill, crossing in from its.
             let mut panel = div()
