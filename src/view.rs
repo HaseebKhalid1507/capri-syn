@@ -5507,13 +5507,13 @@ fn panel_bg(g: PanelGeom, split: f32, (panel_c, frame_c, frame_w, ring_c, sliver
 }
 
 /// An opaque outline morphing from `a` into `b` at `q` (0..1), its fill, edge and edge width
-/// mixing; ringed.
-fn morph_bg(a: Vec<theme::Pt>, (fa, ea, wa): (u32, u32, f32), b: Vec<theme::Pt>, (fb, eb, wb): (u32, u32, f32), q: f32, ring: u32) -> impl IntoElement {
+/// mixing at `qc`; ringed.
+fn morph_bg(a: Vec<theme::Pt>, (fa, ea, wa): (u32, u32, f32), b: Vec<theme::Pt>, (fb, eb, wb): (u32, u32, f32), (q, qc): (f32, f32), ring: u32) -> impl IntoElement {
     canvas(
         |_, _, _| (),
         move |_, _, window, _| {
             let p = theme::morph(&a, &b, q);
-            theme::paint(window, &[p], Fill::framed(theme::mix(fa, fb, q), theme::mix(ea, eb, q), wa + (wb - wa) * q).ringed(ring));
+            theme::paint(window, &[p], Fill::framed(theme::mix(fa, fb, qc), theme::mix(ea, eb, qc), wa + (wb - wa) * qc).ringed(ring));
         },
     )
     .absolute()
@@ -6510,7 +6510,7 @@ impl Render for Avatar {
                     // slivers go with it.
                     let (cut, fb, eb, wb) = base_of(pal, &pa).unwrap_or((Cut::Tag(pa.look.plate), pa.look.fill, pa.look.edge, 1.5));
                     let to = theme::outline(cut, x, y, x + w, y + h).into_iter().next().unwrap_or_default();
-                    root = root.child(morph_bg(g.poly(), (pal.panel, sn.frame_c, 2.0), to, (fb, eb, wb), q, pal.ring));
+                    root = root.child(morph_bg(g.poly(), (pal.panel, sn.frame_c, 2.0), to, (fb, eb, wb), (q, q), pal.ring));
                     if q < 1.0 {
                         let sl = g.slivers();
                         root = root.child(
@@ -6692,6 +6692,7 @@ impl Render for Avatar {
                 PanelMode::Input { .. } => u64::MAX - 2,
                 PanelMode::Probe => u64::MAX - 3,
             };
+            let lay_w = w;
             let pf = self.panel_fx.open((w, h), serial, pill_before, now, hud_motion, hud_glitch);
             if pf.replaced {
                 // A new reply: the old one's words cross out in the box as it is.
@@ -6875,16 +6876,19 @@ impl Render for Avatar {
             });
             // The snapshot a closing bubble is drawn from (where its words are).
             self.panel_last_snap = Some(GhostSnap { g: gc, header_label: header_label.clone(), label: label.clone(), lines: ghost_lines, foot_zone, frame_c });
-            // Out of the pill: the pill grows (its outline and colours, opaque, its words at the
-            // box's centre as it was when it opened), and becomes the bubble as the words cross.
+            // Out of the pill: the bubble's own shell grows out of the pill's outline, the pill
+            // itself (plate and words, as it was when it opened) at its centre, whole, until the
+            // words cross. Never a pill-red box, never words on the wrong plate.
             if let (Some(level), Some((pw, _))) = (pf.pill, pill_before.or(self.pill_open_from)) {
                 self.pill_open_from = Some((pw, 25.0));
                 let shown = self.pill_open_show.get_or_insert_with(|| pill_show.clone()).clone();
                 let pa = art_of(&shown);
-                let q = 1.0 - level;
-                let (cut, fb, eb, wb) = base_of(pal, &pa).unwrap_or((Cut::Tag(pa.look.plate), pa.look.fill, pa.look.edge, 1.5));
+                let grown = ((g.w - pw) / (lay_w - pw).max(1.0)).clamp(0.0, 1.0);
+                let q = (1.0 - level).max(crate::hud::blend(grown));
+                let cut = base_of(pal, &pa).map_or(Cut::Tag(pa.look.plate), |b| b.0);
                 let from = theme::outline(cut, g.x, g.y, g.x + g.w, g.y + g.h).into_iter().next().unwrap_or_default();
-                root = root.child(morph_bg(from, (fb, eb, wb), g.poly(), (pal.panel, frame_c, 2.0), q, pal.ring));
+                let skin = (pal.panel, frame_c, 2.0);
+                root = root.child(morph_bg(from, skin, g.poly(), skin, (q, q), pal.ring));
                 if q > 0.0 {
                     let sl = g.slivers();
                     root = root.child(
@@ -6898,7 +6902,7 @@ impl Render for Avatar {
                 }
                 let (pl, pt) = (g.x + (g.w - pw) * 0.5, g.y + (g.h - pa.h()) * 0.5);
                 if level > 0.0 {
-                    root = root.child(div().absolute().left(px(pl)).top(px(pt)).w(px(pw)).h(px(pa.h())).opacity(level).child(tag_ring(pal, &pa, Some((pw, pw)), 0.0, Part::Fore)));
+                    root = root.child(div().absolute().left(px(pl)).top(px(pt)).w(px(pw)).h(px(pa.h())).opacity(level).child(tag_ring(pal, &pa, Some((pw, pw)), 0.0, Part::All)));
                 }
             } else {
                 root = root.child(bg);
