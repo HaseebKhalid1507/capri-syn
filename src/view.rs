@@ -786,8 +786,10 @@ pub struct Avatar {
     panel_last_snap: Option<GhostSnap>,
     /// A reply just replaced in the open bubble: its lines, crossing out.
     panel_old: Option<Vec<String>>,
-    /// Opening out of the pill: its width (kept past the frame it was taken).
+    /// Opening out of the tag (or the pill): its width (kept past the frame it was taken).
     pill_open_from: Option<(f32, f32)>,
+    /// The tag as last drawn (with `pill_last`): what the bubble grows out of.
+    pill_last_show: Option<TagShow>,
     /// The pill's content as the bubble opened out of it (held: a status change meanwhile
     /// doesn't swap its words mid-open).
     pill_open_show: Option<TagShow>,
@@ -1057,6 +1059,7 @@ impl Avatar {
             panel_old: None,
             pill_open_from: None,
             pill_open_show: None,
+            pill_last_show: None,
             bubble_serial: 0,
             hud_prof: None,
             hud_paint: Rc::new(RefCell::new(Vec::new())),
@@ -5365,10 +5368,20 @@ fn tag_base(pal: Pal, from: Option<TagArt>, to: TagArt, q: f32, split: f32) -> i
 /// A glitch's RGB split behind an outline: cyan and pink copies `split` px either side, clear of
 /// its dark ring.
 fn fringe_paint(window: &mut Window, polys: &[Vec<theme::Pt>], split: f32) {
+    // Only along its steep sides (a slant, a square end): cyan out to the left, pink to the
+    // right, each a band from the side to its shifted copy, under the plate (which covers the
+    // inward half). A chevron's point or a shallow edge gets none: a shifted copy of it reads
+    // as a second outline.
     let d = split + theme::RING;
-    for (dx, c) in [(-d, fx::CYAN), (d, fx::PINK)] {
-        for p in polys {
-            theme::fill_poly(window, &p.iter().map(|&(x, y)| (x + dx, y)).collect::<Vec<_>>(), rgb(c));
+    for p in polys {
+        for i in 0..p.len() {
+            let (a, b) = (p[i], p[(i + 1) % p.len()]);
+            if (b.1 - a.1).abs() < 2.0 * (b.0 - a.0).abs() || (b.1 - a.1).abs() < 3.0 {
+                continue;
+            }
+            for (dx, c) in [(-d, fx::CYAN), (d, fx::PINK)] {
+                theme::fill_poly(window, &[a, b, (b.0 + dx, b.1), (a.0 + dx, a.1)], rgb(c));
+            }
         }
     }
 }
@@ -5497,11 +5510,9 @@ fn panel_bg(g: PanelGeom, split: f32, (panel_c, frame_c, frame_w, ring_c, sliver
     canvas(
         |_, _, _| (),
         move |_, _, window, _| {
-            let shift = |p: &[(f32, f32)], dx: f32| p.iter().map(|&(x, y)| (x + dx, y)).collect::<Vec<_>>();
             let poly = g.poly();
             if split > 0.0 {
-                theme::fill_poly(window, &shift(&poly, -split - theme::RING), rgb(fx::CYAN));
-                theme::fill_poly(window, &shift(&poly, split + theme::RING), rgb(fx::PINK));
+                fringe_paint(window, std::slice::from_ref(&poly), split);
             }
             // The dark ring outside the outline (the X shape is the ringed outline), the 2 px
             // red edge inside it, then the mane slivers over the top edge.
@@ -5519,11 +5530,14 @@ fn panel_bg(g: PanelGeom, split: f32, (panel_c, frame_c, frame_w, ring_c, sliver
 
 /// An opaque outline morphing from `a` into `b` at `q` (0..1), its fill, edge and edge width
 /// mixing at `qc`; ringed.
-fn morph_bg(a: Vec<theme::Pt>, (fa, ea, wa): (u32, u32, f32), b: Vec<theme::Pt>, (fb, eb, wb): (u32, u32, f32), (q, qc): (f32, f32), ring: u32) -> impl IntoElement {
+fn morph_bg(a: Vec<theme::Pt>, (fa, ea, wa): (u32, u32, f32), b: Vec<theme::Pt>, (fb, eb, wb): (u32, u32, f32), (q, qc): (f32, f32), ring: u32, split: f32) -> impl IntoElement {
     canvas(
         |_, _, _| (),
         move |_, _, window, _| {
             let p = theme::morph(&a, &b, q);
+            if split > 0.0 {
+                fringe_paint(window, std::slice::from_ref(&p), split);
+            }
             theme::paint(window, &[p], Fill::framed(theme::mix(fa, fb, qc), theme::mix(ea, eb, qc), wa + (wb - wa) * qc).ringed(ring));
         },
     )
@@ -6228,6 +6242,7 @@ impl Render for Avatar {
         let hud_motion = alpha && self.hud_cfg.motion;
         let hud_glitch = alpha && self.hud_cfg.glitch && self.rag.is_none();
         let pill_before = self.pill_last.take();
+        let pill_before_show = self.pill_last_show.take();
         // A bubble closing this frame (its ghost starts below) or still closing: the tag waits
         // for it, unseen (else it would come and go under the ghost).
         let closing = mode.is_none() && self.panel_last_snap.is_some() && hud && hud_motion && self.line.is_none();
@@ -6292,7 +6307,7 @@ impl Render for Avatar {
         // Laid out: what it shows, or (collapsing into the pill) the pill it lands as, unseen,
         // so its box is measured before it gets there.
         let live = tag_shown.is_some();
-        let laid = tag_shown.clone().or_else(|| pending.clone().filter(|p| ghost_wait && p.collapsed));
+        let laid = tag_shown.clone().or_else(|| pending.clone().filter(|_| ghost_wait));
         if let Some(show) = laid {
             let art = art_of(&show);
             let look = art.look;
@@ -6374,8 +6389,10 @@ impl Render for Avatar {
             {
                 let (bx, by, bw, bh) = (f32::from(b.origin.x), f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height));
                 let aw = if show_tag { self.tag_fx.width(bw, now, hud_motion) } else { self.tag_fx.width_now(now) };
-                if show_tag && collapsed {
+                // The tag as drawn: a bubble opening next frame grows out of it.
+                if show_tag {
                     self.pill_last = Some((bw, bh));
+                    self.pill_last_show = tag_shown.clone();
                 }
                 let tf = self.tag_fx.frame(now);
                 if by_fx || (aw - bw).abs() > 0.5 {
@@ -6483,9 +6500,10 @@ impl Render for Avatar {
             self.panel_bottom = None;
             self.panel_rect.set(None);
             self.panel_old = None;
-            // Just closed: it leaves where it was (its border glitches, it settles just inside
-            // its box and dims out; or its words cross into the pill's as it eases into the
-            // pill), unless it went with her (a teleport, his hand) or into the Line.
+            // Just closed: it goes into the tag (or the pill): its words, then the tag's label
+            // as its box eases into the tag's; with no tag to show it closes in place (its
+            // border glitches, it settles just inside its box and dims out). Not when it went
+            // with her (a teleport, his hand) or into the Line.
             let snap = self.panel_last_snap.take();
             if self.panel_fx.closed()
                 && hud
@@ -6493,9 +6511,10 @@ impl Render for Avatar {
                 && self.line.is_none()
                 && let Some(snap) = snap
             {
-                // The pill's box: where the tag sits (she hasn't moved), measured as the pill
-                // from the next frame on.
-                let pill = collapsed
+                // The tag's box (the pill's, collapsed): where the tag sits (she hasn't moved),
+                // measured as what it will show from the next frame on.
+                let pill = pending
+                    .is_some()
                     .then(|| {
                         self.tag_box.get().map(|b| {
                             let (bx, by, bw, bh) = (f32::from(b.origin.x), f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height));
@@ -6531,13 +6550,14 @@ impl Render for Avatar {
                 };
                 let alpha = gh.alpha(now);
                 let (own, pill_words, q) = if gh.to_pill { gh.pill(now) } else { (1.0, 0.0, 0.0) };
-                let pa = art_of(&pill_show);
+                // What it goes into: the tag as it will show (the pill, collapsed).
+                let pa = art_of(pending.as_ref().unwrap_or(&pill_show));
                 if gh.to_pill {
-                    // Opaque, its outline morphing into the pill's as its box eases there; its
+                    // Opaque, its outline morphing into the tag's as its box eases there; its
                     // slivers go with it.
                     let (cut, fb, eb, wb) = base_of(pal, &pa).unwrap_or((Cut::Tag(pa.look.plate), pa.look.fill, pa.look.edge, 1.5));
                     let to = theme::outline(cut, x, y, x + w, y + h).into_iter().next().unwrap_or_default();
-                    root = root.child(morph_bg(g.poly(), (pal.panel, sn.frame_c, 2.0), to, (fb, eb, wb), (q, q), pal.ring));
+                    root = root.child(morph_bg(g.poly(), (pal.panel, sn.frame_c, 2.0), to, (fb, eb, wb), (q, q), pal.ring, gh.split(now)));
                     if q < 1.0 {
                         let sl = g.slivers();
                         root = root.child(
@@ -6572,11 +6592,13 @@ impl Render for Avatar {
                     let inner = div().absolute().left(px(sn.g.x - x)).top(px(sn.g.y - y)).w(px(sn.g.w)).h(px(sn.g.h)).child(header).child(body);
                     root = root.child(div().absolute().left(px(x)).top(px(y)).w(px(w)).h(px(h)).overflow_hidden().opacity(own * alpha).child(inner));
                 }
-                // The pill it becomes: its words cross in at the box's centre.
+                // The tag it becomes: its label (and its block) cut in at the box's centre.
                 if gh.to_pill && pill_words > 0.0 {
                     let pw = gh.target().2;
                     let (pl, pt) = (x + (w - pw) * 0.5, y + (h - pa.h()) * 0.5);
-                    root = root.child(div().absolute().left(px(pl)).top(px(pt)).w(px(pw)).h(px(pa.h())).opacity(pill_words).child(tag_ring(pal, &pa, Some((pw, pw)), 0.0, Part::Fore)));
+                    for part in [Part::Block, Part::Fore] {
+                        root = root.child(div().absolute().left(px(pl)).top(px(pt)).w(px(pw)).h(px(pa.h())).opacity(pill_words).child(tag_ring(pal, &pa, Some((pw, pw)), 0.0, part)));
+                    }
                 }
             }
         }
@@ -6908,14 +6930,14 @@ impl Render for Avatar {
             // words cross. Never a pill-red box, never words on the wrong plate.
             if let (Some(level), Some((pw, _))) = (pf.pill, pill_before.or(self.pill_open_from)) {
                 self.pill_open_from = Some((pw, 25.0));
-                let shown = self.pill_open_show.get_or_insert_with(|| pill_show.clone()).clone();
+                let shown = self.pill_open_show.get_or_insert_with(|| pill_before_show.clone().unwrap_or_else(|| pill_show.clone())).clone();
                 let pa = art_of(&shown);
                 let grown = ((g.w - pw) / (lay_w - pw).max(1.0)).clamp(0.0, 1.0);
                 let q = crate::hud::blend(grown);
                 let cut = base_of(pal, &pa).map_or(Cut::Tag(pa.look.plate), |b| b.0);
                 let from = theme::outline(cut, g.x, g.y, g.x + g.w, g.y + g.h).into_iter().next().unwrap_or_default();
                 let skin = (pal.panel, frame_c, 2.0);
-                root = root.child(morph_bg(from, skin, g.poly(), skin, (q, q), pal.ring));
+                root = root.child(morph_bg(from, skin, g.poly(), skin, (q, q), pal.ring, 0.0));
                 if q > 0.0 {
                     let sl = g.slivers();
                     root = root.child(
