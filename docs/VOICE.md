@@ -179,6 +179,19 @@ thresholds) was fitted on stock synthetic voices only (Kokoro packs, espeak-ng),
   pause sends, her replies are spoken, half-duplex or barge-in by `echo`, the end phrases, the refusals.
   - "Hey Capri, what's spike doing?": the request is the conversation's first turn, the phrase cut from it.
   - "Hey Capri" alone (or "Hey Capri, let's talk"): she just listens; nothing is sent until he speaks.
+  - **The phrase is never sent as his words.** That first utterance holds the phrase's audio whenever the check
+    heard more than the phrase, and Whisper decodes it again there, sometimes wrong: on his bare "Hey Capri"
+    takes it wrote "Aye, capri", "And capri", "Ee capri", and live, five times since Nov 16, "Take a breath", which went to her
+    as his turn. Now:
+    - the phrase is cut from the words as Whisper spells it, also doubled ("Hey, Capri. Hey, Capri." for one
+      "Hey Capri" and a pause is the phrase alone) and misheard as the first word or two ("Aye, capri, pause the
+      music" sends "Pause the music");
+    - words with no trace of the phrase ("Take a breath") are the phrase misheard: the audio after the check's
+      window decides. Under a hands-free utterance's speech there (8 Silero frames, 256 ms), it is the phrase
+      alone: nothing is sent, hands-free goes on. Otherwise that audio is decoded on its own and sent (decoded to
+      nothing, or the decode failing: DIDN'T CATCH THAT, logged).
+    - The journal says which, with the numbers only: `heard: the phrase alone, misheard (0 ms of speech after
+      it) (13 chars, lp -1.22 / p 0.07): hands-free goes on`.
   - **Quiet for `handsfree_timeout`** (60 s; the last 10 s count down on the tag): `HANDS-FREE OFF · 60 S
     QUIET`, and the wake stream reopens at once: back to her usual tag with the mic glyph. So does every other
     way it ends (an end phrase, the chord, a lock, a call…), each with its reason first.
@@ -254,9 +267,23 @@ thresholds) was fitted on stock synthetic voices only (Kokoro packs, espeak-ng),
   - no letters (`-2,`, `,`, `2.`). Note: a bare number he says, written by Whisper as `2.`, is dropped too;
   - two letters or fewer, unless one of `no ok hi go yo ya ye up on me do it` (`nd,` and `Q.` drop);
   - a single word with no vowel (`, chr,`, `hmm`);
-  - `you`, `thanks for watching`, `please subscribe`; `thank you` and `bye` from under 400 ms of speech;
+  - `you`, `thanks for watching` (and its kin: `thank you for watching`, `please subscribe`, `like and
+    subscribe`, …); subtitle credits, only as the line's start (`Subtitles by the Amara.org community`,
+    `Transcription by CastingWords`; "Get this translated by Friday" is his) or naming amara.org / CastingWords;
+    `thank you`, `bye`, `bye bye` and `take a breath` from under 300 ms of speech (a real one is longer: stock
+    voices' "Bye." 320–384 ms; under 400 ms, as before, dropped a real "bye", which ends hands-free); sign-offs
+    (`see you next time`, `thanks for listening`, …) from under 600 ms (stock voices say them in 640 ms and up,
+    at speed 1.3). These hold in every mode: hold, toggle, wake and hands-free;
+  - sound tags Whisper writes are cut first: `[Music]`, `(coughs)`, `*cough*` (letters between the stars only:
+    `5 * 3 * 2` stays);
   - three or more words that are all from the recognition prompt (Capri, spike, lynx, …).
-- A drop is logged by length and milliseconds of speech, never the words or the audio.
+- Silence, breaths, coughs, clicks and hum never reach Whisper: Silero scores them far under 0.70 (stock
+  synthetic ones at −45 to −18 dBFS peak at 0.26). So a filler Whisper invents needs some real-looking speech.
+- A drop is logged by length and milliseconds of speech, never the words or the audio. Each heard or dropped
+  line also carries Whisper's own confidence, numbers only (`lp`: its mean log-probability, `p`: its least sure
+  token). It is not a gate: with the recognition prompt it doesn't separate a misheard phrase (−0.8 to −1.2) from
+  a real short reply ("No.", "What?": −1.0 to −2.5 on stock voices), and whisper.cpp's no-speech probability reads
+  0.00 on every clip, speech or not.
 - Whisper's window: the utterance + 1 s, but never under 10 s (a trimmed clip in a smaller window
   decodes into loops like "yes, yes, yes" or "b, b, b" and took 2–7 s); no temperature retries; a token
   cap; a run of 4+ of the same word is kept once (the log says how many were dropped, never the words).
