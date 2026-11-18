@@ -295,6 +295,15 @@ def first_cut(text, post=None):
     return 'after', span
 
 
+def phrase_post(k0, probs, pcm):
+    """What came after the checked window in the first utterance: (its Silero frames, its s16 bytes), or None when the
+    phrase's audio isn't in it: k0 (the window's end, in the turn's frames) None, or 0 and under (Esc, the echo or the
+    pre-speech trim dropped that audio). Then the words decide (first_cut with no post)."""
+    if k0 is None or k0 <= 0:
+        return None
+    return list(probs[k0:]), bytes(pcm[k0 * 2 * VAD_FRAME:len(probs) * 2 * VAD_FRAME])
+
+
 WAKE_STT_FLOOR = int(os.environ.get('CAPRI_VOICE_WAKE_CTX', '256'))   # Whisper's window for the check: 5.1 s for 2.8 s of audio (see the PR)
 WAKE_CHECK_DELAY_S = float(os.environ.get('CAPRI_VOICE_WAKE_DELAY', '0.3'))   # the check waits this much more audio: stage 1
                                                                           # often fires inside "-pri", and a cut word fails
@@ -2351,9 +2360,7 @@ class Voice:
             said = [w for t, ws in list(self.said) if t > time.time() - ECHO_WINDOW_S for w in ws]
             cut = first.pop('cut', False)        # the first utterance after "hey capri": the phrase is cut, as a wake turn's
             k0 = first.pop('k0', None)
-            post = None
-            if cut and k0:                        # what came after the checked window: its frames and audio (0: gone, reset_turn)
-                post = (list(vs.p[k0:]), bytes(tb[k0 * 2 * VAD_FRAME:len(vs.p) * 2 * VAD_FRAME]))
+            post = phrase_post(k0, vs.p, tb) if cut else None
 
             def out():
                 d['done'].wait(10.0)
@@ -2539,7 +2546,7 @@ class Voice:
                 del tb[:k * 2 * VAD_FRAME]
                 del vs.p[:k]
                 if 'k0' in first:
-                    first['k0'] -= k
+                    first['k0'] = max(0, first['k0'] - k)    # trimmed past it: the phrase's audio is gone (as reset_turn)
                 seen = len(vs.p)
                 ep, dr = new_ep(), None        # (its frame count too: the turn cap counts from speech)
         sub.terminate()
@@ -3180,6 +3187,16 @@ def selftest_wake():
     for t in ('Keep re-running the tests.', 'Keep ray tracing on.', 'Copy that.', 'Gear pre-set three', 'K, pray for rain'):
         assert first_cut(t) == ('send', t), (t, first_cut(t))
     assert first_cut('Keep re-running the tests.', quiet) == ('send', 'Running the tests.'), 'with the phrase audio: loose (it is the phrase)'
+    # the phrase's audio gone (two pre-speech trims took k0 66 -> 14 -> -19: a quiet doubled "Hey Capri", 2 s, then the
+    # request): no post, the words decide, and the request is sent (never "alone" on his closing silence)
+    pr, pcm = [0.1] * 40 + [0.9] * 30 + [0.1] * 40, bytes(110 * 2 * VAD_FRAME)
+    for k0 in (-19, 0, None):
+        assert phrase_post(k0, pr, pcm) is None, k0
+        for t in ('Hey, Capri. Hey, Capri. What is the weather today?', 'What is the weather today?'):
+            assert first_cut(t, phrase_post(k0, pr, pcm)) == ('send', 'What is the weather today?'), (k0, t)
+    fp, fb = phrase_post(14, pr, pcm)
+    assert fp == pr[14:] and len(fb) == (110 - 14) * 2 * VAD_FRAME
+    assert first_cut('What is the weather today?', fp)[0] == 'after', 'the phrase audio there: the audio after it is decoded'
     # the seed of a hands-free from the phrase: where the checked window ends in it, from the buffers
     sr2, chk = MIC_RATE * 2, int(WAKE_CHECK_DELAY_S * MIC_RATE) * 2
     for pre_s in (2.5, 1.36, 0.6):          # the ring full, and cleared by the last turn (the wake fires 1.4 s in)
