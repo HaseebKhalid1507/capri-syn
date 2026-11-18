@@ -85,9 +85,9 @@ impl Unseen {
         self.strip = Some(Unread { n, text: first, refused: false });
     }
 
-    /// A reply he heard in a hands-free conversation: seen once spoken, whenever its bubble
-    /// goes. A strip already about it (it went behind the chip mid-speech) drops it; one about
-    /// replies before it stays.
+    /// A reply she said aloud and he heard whole (`voice::Said::heard`; cut or said in part, it
+    /// never comes here): seen, whenever its bubble goes. A strip already about it (it went
+    /// behind the chip mid-speech) drops it; one about replies before it stays.
     pub fn heard(&mut self, turn: u64) {
         self.seen = self.seen.max(turn);
         if let Some(u) = &mut self.strip
@@ -735,7 +735,7 @@ mod unseen_tests {
     fn a_handsfree_reply_is_seen_once_spoken_even_after_handsfree_ends() {
         let mut u = Unseen::default();
         u.ack(Some(6)); // his hands-free turn 7 went out
-        u.heard(7); // her reply to it is said
+        u.heard(7); // her reply to it is said whole
         // Hands-free timed out (60 s quiet) before the bubble's hold ran out: no pill after.
         u.missed(7, &chars("Her spoken reply"), false);
         assert_eq!((u.strip.as_ref(), u.shown(false)), (None, None));
@@ -749,6 +749,33 @@ mod unseen_tests {
         u.missed(4, &chars("Folded early"), false);
         u.heard(4);
         assert_eq!(u.shown(false).map(|s| s.n), Some(1));
+    }
+
+    #[test]
+    fn a_spoken_reply_is_read_only_if_heard_whole() {
+        use crate::voice::Said;
+        let mut u = Unseen::default();
+        // Said whole (his spoken turn, an event's reply; hands-free or not): read before its
+        // bubble goes, so no strip after it.
+        let whole = Said { sent: 2, ended: 2, done: true, cut: false };
+        assert!(whole.heard(false));
+        u.heard(5);
+        u.missed(5, &chars("Build's green, choom."), false);
+        assert_eq!((u.strip.as_ref(), u.shown(false)), (None, None));
+        // Cut (a tap, the talk key, music, the sidecar gone) or said in part: never heard,
+        // so its bubble going leaves a strip, "1 NEW" (the tag, the Line, `state` agree: all
+        // are this strip).
+        for said in [Said { sent: 3, ended: 1, done: true, cut: false }, Said { sent: 2, ended: 2, done: true, cut: true }] {
+            assert!(!said.heard(false));
+        }
+        assert!(!whole.heard(true), "said in part");
+        u.missed(6, &chars("Rebasing polish-e onto main."), false);
+        assert_eq!(u.shown(false), Some(&Unread { n: 1, text: "Rebasing polish-e onto main.".into(), refused: false }));
+        // A long one went behind the chip mid-speech (a teleport): counted, then heard whole.
+        u.missed(7, &chars("Checking CI."), false);
+        assert_eq!(u.shown(false).map(|s| s.n), Some(2));
+        u.heard(7);
+        assert_eq!(u.shown(false).map(|s| s.n), Some(1), "the cut one stays");
     }
 
     #[test]

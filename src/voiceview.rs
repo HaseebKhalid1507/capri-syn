@@ -6,7 +6,7 @@
 
 use super::*;
 use crate::settings::VoiceSettings;
-use crate::voice::{self, Speech};
+use crate::voice::{self, Said, Speech};
 use std::io::{BufRead, Write};
 
 /// Key-up waits this long before it counts: X auto-repeat sends release/press pairs.
@@ -100,9 +100,8 @@ pub(super) struct VoiceState {
     transcribing: bool,
     /// The next new turn is the one he spoke.
     pending: bool,
-    /// ...in hands-free; and the last turn he spoke there (its reply is heard, not unread).
+    /// ...in hands-free.
     hf_pending: bool,
-    hf_turn: Option<u64>,
     /// The spoken turn, and what of it is said.
     turn: Option<u64>,
     /// It arrived on its own (not his): what keeps her quiet is checked all along.
@@ -112,6 +111,8 @@ pub(super) struct VoiceState {
     prev: Option<u64>,
     prev_left: u32,
     prev_unprompted: bool,
+    /// ...and it is still being heard whole (`Said::heard`): said to its end, it is read.
+    prev_whole: bool,
     /// His reply plays on under a newer, silent turn's bubble: its captions stay out of it.
     orphan: bool,
     /// The sidecar can gate unprompted speech (calls, lock, budget): its `ready` says so. Without
@@ -125,9 +126,8 @@ pub(super) struct VoiceState {
     connecting: bool,
     connect_after: Option<Instant>,
     speech: Speech,
-    sent: u32,
-    ended: u32,
-    turn_done: bool,
+    /// The spoken turn's sentences: sent, said, done, cut (heard whole, it is read).
+    said: Said,
     reply: String,
     lips: Option<Lips>,
     caption: Option<String>,
@@ -175,7 +175,7 @@ impl Avatar {
     }
 
     pub(super) fn voice_speaking(&self) -> bool {
-        self.voice.turn.is_some() && (self.voice.sent > self.voice.ended || self.voice.prev_left > 0)
+        self.voice.turn.is_some() && (self.voice.said.left() > 0 || self.voice.prev_left > 0)
     }
 
     pub(super) fn voice_listening(&self) -> bool {
@@ -832,16 +832,21 @@ impl Avatar {
         self.hint = Some(("■ HUSHED · REST IS ON THE LINE".into(), Instant::now() + Duration::from_secs(4)));
     }
 
+    /// She stops (hushed, his voice over hers, the sidecar gone): what she was saying is cut,
+    /// so it is not heard whole and stays unread (as is the turn waiting behind her).
     fn voice_stop_speech(&mut self) {
         let was = self.voice.turn.is_some();
+        if let Some(id) = self.voice.turn.filter(|_| self.voice.said.sent > 0) {
+            elog!("synaps-avatar: voice: turn {id} cut ({} of {} said): stays unread", self.voice.said.ended, self.voice.said.sent);
+        }
         self.voice.speech = Speech::default();
         self.voice.speech.feed("", true);
-        self.voice.sent = 0;
-        self.voice.ended = 0;
+        self.voice.said = Said::default();
         self.voice.lips = None;
         self.voice.prev = None;
         self.voice.prev_left = 0;
         self.voice.prev_unprompted = false;
+        self.voice.prev_whole = false;
         self.voice.unprompted = false;
         if was {
             self.voice.turn = None;
@@ -1162,9 +1167,11 @@ impl Avatar {
                     return;
                 }
                 if self.voice.turn == Some(id) && self.voice.prev.is_some() {
-                    // The turn before it is over (the sidecar plays in order).
+                    // The turn before it is over (the sidecar plays in order; not all of it
+                    // came back said, so not heard whole).
                     self.voice.prev = None;
                     self.voice.prev_left = 0;
+                    self.voice.prev_whole = false;
                 }
                 if !self.voice.unprompted
                     && !self.voice.stats.contains_key("keyup_to_audio_ms")
@@ -1181,9 +1188,6 @@ impl Avatar {
                     }
                     elog!("timing: voice: {}", serde_json::Value::Object(self.voice.stats.clone()));
                 }
-                if voice::heard_handsfree(self.voice.hf.is_some(), self.voice.hf_turn, id) {
-                    self.unseen.heard(id);
-                }
                 let step = Duration::from_millis(v.get("step_ms").and_then(|x| x.as_u64()).unwrap_or(90));
                 let shapes: Vec<u8> = v.get("shapes").and_then(|x| x.as_array()).map(|a| a.iter().map(|s| s.as_u64().unwrap_or(0) as u8).collect()).unwrap_or_default();
                 self.voice.lips = Some(Lips { t0: now, step, shapes });
@@ -1197,17 +1201,26 @@ impl Avatar {
                 if !self.voice_ours(id) {
                     return;
                 }
+                let whole = voice::say_end_whole(&v);
+                if !whole {
+                    elog!("synaps-avatar: voice: turn {id}: a sentence ended short ({v})");
+                }
                 if self.voice.prev == Some(id) {
                     self.voice.prev_left = self.voice.prev_left.saturating_sub(1);
+                    self.voice.prev_whole &= whole;
                     if self.voice.prev_left == 0 {
+                        // The turn before it, said to its end: heard whole, it is read.
+                        if std::mem::take(&mut self.voice.prev_whole) {
+                            self.voice_heard(id);
+                        }
                         self.voice.prev = None;
                     }
                 } else {
-                    self.voice.ended += 1;
+                    self.voice.said.end(whole);
                 }
-                if self.voice.ended >= self.voice.sent && self.voice.prev_left == 0 {
+                if self.voice.said.left() == 0 && self.voice.prev_left == 0 {
                     self.voice.lips = None;
-                    if self.voice.turn_done {
+                    if self.voice.said.done {
                         self.voice_finish();
                     }
                 }
@@ -1229,16 +1242,16 @@ impl Avatar {
                 if self.voice.prev == Some(id) {
                     self.voice.prev = None;
                     self.voice.prev_left = 0;
+                    self.voice.prev_whole = false;
                 } else if self.voice.turn == Some(id) {
                     self.voice.speech = Speech::default();
                     self.voice.speech.feed("", true);
-                    self.voice.sent = 0;
-                    self.voice.ended = 0;
                     if self.voice.prev.is_none() {
                         self.voice_stop_speech();
                     } else {
-                        // Its turn never came: the one before it plays on; this one is text.
-                        self.voice.turn_done = true;
+                        // Its turn never came: the one before it plays on; this one is text
+                        // (unread).
+                        self.voice.said = Said { done: true, cut: true, ..Said::default() };
                     }
                 }
                 self.voice_changed(cx);
@@ -1328,7 +1341,7 @@ impl Avatar {
             // His new turn stops her. An unprompted one that will be heard waits behind her last
             // sentences instead (events queued while she talked start the moment her text ends);
             // at most one waits: a newer one replaces it (that one stays text).
-            let playing = self.voice.turn.filter(|_| self.voice.turn_done && (self.voice.sent > self.voice.ended || self.voice.prev_left > 0));
+            let playing = self.voice.turn.filter(|_| self.voice.said.done && (self.voice.said.left() > 0 || self.voice.prev_left > 0));
             let wait = unprompted && spoken && playing.is_some();
             // A silent turn that isn't his (an event's, compaction, an unknown trigger) doesn't cut
             // his spoken reply short either: it plays on, its captions kept out of the new bubble.
@@ -1337,9 +1350,6 @@ impl Avatar {
                 self.voice.orphan = true;
             } else if self.voice.turn.is_some() && !wait {
                 self.voice_hush("new turn");
-            }
-            if his && self.voice.hf_pending {
-                self.voice.hf_turn = Some(b.turn);
             }
             self.voice.pending = false;
             self.voice.hf_pending = false;
@@ -1355,20 +1365,20 @@ impl Avatar {
                     elog!("synaps-avatar: voice: a newer reply replaces the waiting one (turn {id:?} stays text)");
                 } else {
                     self.voice.prev = self.voice.turn;
-                    self.voice.prev_left = self.voice.sent - self.voice.ended;
+                    self.voice.prev_left = self.voice.said.left();
                     self.voice.prev_unprompted = self.voice.unprompted;
+                    self.voice.prev_whole = !self.voice.said.cut && !self.voice.speech.partial();
                 }
             } else {
                 self.voice.prev = None;
                 self.voice.prev_left = 0;
                 self.voice.prev_unprompted = false;
+                self.voice.prev_whole = false;
             }
-            self.voice.sent = 0;
-            self.voice.ended = 0;
+            self.voice.said = Said::default();
             self.voice.turn = Some(b.turn);
             self.voice.unprompted = unprompted;
             self.voice.speech = if unprompted { Speech::unprompted() } else { Speech::default() };
-            self.voice.turn_done = false;
             if unprompted {
                 // Never a pause or a duck for these: only calls and games are left to push down.
                 elog!("synaps-avatar: voice: speaking a reply to {}", b.trigger);
@@ -1387,7 +1397,7 @@ impl Avatar {
             return false;
         }
         self.voice.reply = b.reply.clone();
-        let first_text = !self.voice.unprompted && self.voice.sent == 0 && !b.raw.trim().is_empty() && !self.voice.stats.contains_key("submit_to_text_ms");
+        let first_text = !self.voice.unprompted && self.voice.said.sent == 0 && !b.raw.trim().is_empty() && !self.voice.stats.contains_key("submit_to_text_ms");
         if first_text && let Some(s) = self.voice.submit_at {
             self.voice.stats.insert("submit_to_text_ms".into(), (s.elapsed().as_millis() as u64).into());
         }
@@ -1398,23 +1408,33 @@ impl Avatar {
                 say["unprompted"] = true.into();
             }
             self.voice_send(say);
-            self.voice.sent += 1;
+            self.voice.said.sent += 1;
         }
         if !b.busy {
-            self.voice.turn_done = true;
-            if self.voice.ended >= self.voice.sent && self.voice.prev_left == 0 {
+            self.voice.said.done = true;
+            if self.voice.said.left() == 0 && self.voice.prev_left == 0 {
                 self.voice_finish();
             }
         }
         true
     }
 
-    /// Her last word: other audio comes back, the bubble gets the whole reply.
+    /// Her last word: other audio comes back, the bubble gets the whole reply. Heard whole
+    /// (every sentence said to its end, nothing of it left unsaid), the reply is read.
     fn voice_finish(&mut self) {
+        if let Some(id) = self.voice.turn {
+            let said = self.voice.said;
+            if said.heard(self.voice.speech.partial()) {
+                self.voice_heard(id);
+            } else if said.sent > 0 {
+                elog!("synaps-avatar: voice: turn {id} said in part (cut {}, partial {}): stays unread", said.cut, self.voice.speech.partial());
+            }
+        }
         self.voice.turn = None;
         self.voice.prev = None;
         self.voice.prev_left = 0;
         self.voice.prev_unprompted = false;
+        self.voice.prev_whole = false;
         self.voice.unprompted = false;
         self.voice.lips = None;
         if self.voice.held && self.voice.hf.is_none() {
@@ -1425,6 +1445,13 @@ impl Avatar {
             h.quiet_since = Instant::now();
         }
         self.voice_caption_done();
+    }
+
+    /// A spoken reply he heard whole: read, as if he had seen it (no strip, no "N NEW"; one
+    /// already left for it, as it went behind the chip mid-speech, goes).
+    fn voice_heard(&mut self, id: u64) {
+        elog!("synaps-avatar: voice: turn {id} heard whole: read");
+        self.unseen.heard(id);
     }
 
     fn voice_caption(&mut self, text: &str, now: Instant) {
@@ -1587,7 +1614,8 @@ impl Avatar {
             "enabled": self.voice.cfg.enabled, "connected": self.voice.link.is_some(),
             "mic_open": self.voice.mic.is_some(), "listening": self.voice_listening(), "transcribing": self.voice.transcribing,
             "speaking": self.voice_speaking(), "turn": self.voice.turn, "prev": self.voice.prev, "prev_left": self.voice.prev_left,
-            "unprompted": self.voice.unprompted, "sent": self.voice.sent, "ended": self.voice.ended,
+            "unprompted": self.voice.unprompted, "sent": self.voice.said.sent, "ended": self.voice.said.ended,
+            "said_done": self.voice.said.done, "cut": self.voice.said.cut, "partial": self.voice.speech.partial(),
             "speak_unprompted": self.voice.cfg.speak_unprompted, "sidecar_unprompted": self.voice.can_unprompted,
             "shape": self.voice_shape(Instant::now()), "held": self.voice.held, "repeats_ignored": self.voice.repeats,
             "mic": {

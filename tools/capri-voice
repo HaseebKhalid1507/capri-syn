@@ -26,7 +26,10 @@ every OS-facing part there is that module's, next to this file):
                                        (the toggle stops itself on a pause; "nothing": no speech in 8 s, nothing sent)
   {"op":"listen-stop"}                 {"ev":"mic-closed"} {"ev":"heard","text":..., "why":..., "ms":{...}}
   {"op":"listen-cancel"}               {"ev":"mic-closed"}
-  {"op":"say","id":n,"text":...}       {"ev":"say-start","id","text","dur_ms","step_ms","shapes"}  {"ev":"say-end","id"}
+  {"op":"say","id":n,"text":...}       {"ev":"say-start","id","text","dur_ms","step_ms","shapes"}  {"ev":"say-end","id"} (said to
+                                       its end; "cut":true: its player ended early; "error": no audio. A hushed,
+                                       dropped or skipped sentence gets none: the avatar counts a turn heard whole, and read,
+                                       only from whole say-ends of all its sentences)
   {"op":"say",...,"unprompted":true}   (a reply he didn't ask for)  {"ev":"say-skipped","id","why"} (Gate: any turn
                                        is skipped locked or in a call; unprompted ones also on DND, budget, cap, too late)
   {"op":"drop","id":n}                 (that turn's sentences go; the one playing stops)
@@ -2855,10 +2858,10 @@ class Voice:
             # Fed from a thread (pw-play takes its input in big gulps), so a sentence stops within
             # ~0.4 s if a call starts or the screen locks under it.
             threading.Thread(target=feed, args=(p, data), daemon=True).start()
-            why = None
+            why, rc = None, None
             while True:
                 try:
-                    p.wait(timeout=0.35)
+                    rc = p.wait(timeout=0.35)
                     break
                 except subprocess.TimeoutExpired:
                     if why is None and (why := self.gate.now_why(unprompted)):
@@ -2870,6 +2873,10 @@ class Voice:
                 hushed = gen != self.hush_gen or sid in self.gate.dropped
             if why:
                 self.skip(sid, why)
+            elif not hushed and rc:
+                # Its player ended early (killed from outside, its sink gone): not said whole.
+                log(f'say {sid}: player ended early (exit {rc})')
+                self.emit(ev='say-end', id=sid, cut=True)
             elif not hushed:
                 self.emit(ev='say-end', id=sid)
 

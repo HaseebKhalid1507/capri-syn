@@ -171,12 +171,44 @@ pub fn wrap(text: &str) -> String {
     format!("{HINT} {text}")
 }
 
-/// A reply she starts saying is one he hears in a hands-free conversation (seen once spoken,
-/// no unread strip after): any while hands-free is on, and the reply to his hands-free turn
-/// even once hands-free has ended (he ended it, the cap, the mic). Else (push-to-talk, typed,
-/// an event outside hands-free) the unread strip works as ever.
-pub fn heard_handsfree(handsfree_on: bool, handsfree_turn: Option<u64>, turn: u64) -> bool {
-    handsfree_on || handsfree_turn == Some(turn)
+/// A spoken turn as the sidecar said it: its sentences sent and said, whether its text is all
+/// in, and whether anything cut it. Heard whole (`heard`), it counts as read: no unread strip,
+/// no "N NEW". Anything less (cut, or said in part) leaves it unread, as a reply never spoken.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Said {
+    pub sent: u32,
+    pub ended: u32,
+    /// The turn is over: its text is all in, every sentence of it given out.
+    pub done: bool,
+    /// Stopped before its end: a tap on her, the talk key, Esc, music, a new turn, his voice
+    /// over hers, a call or the lock (the sidecar skips it), a sentence the sidecar couldn't
+    /// say or whose player ended early, the sidecar going (or restarting) mid-say.
+    pub cut: bool,
+}
+
+impl Said {
+    /// A sentence's `say-end` (`say_end_whole`: said to its end or not).
+    pub fn end(&mut self, whole: bool) {
+        self.ended += 1;
+        self.cut |= !whole;
+    }
+
+    /// Sentences still out (being said, or waiting their turn).
+    pub fn left(&self) -> u32 {
+        self.sent.saturating_sub(self.ended)
+    }
+
+    /// Heard whole: the turn over, every sentence said to its end, none cut, and nothing of
+    /// the reply left unsaid (`partial`: `Speech::partial`).
+    pub fn heard(&self, partial: bool) -> bool {
+        self.done && !self.cut && !partial && self.sent > 0 && self.ended >= self.sent
+    }
+}
+
+/// A `say-end` said its sentence to the end: not when the sidecar couldn't make the audio
+/// (`error`) or its player ended early (`cut`). An older sidecar sends neither: whole.
+pub fn say_end_whole(v: &serde_json::Value) -> bool {
+    v.get("error").is_none() && v.get("cut").and_then(serde_json::Value::as_bool) != Some(true)
 }
 
 /// A hands-free utterance that ends the conversation ("that's all", "goodbye"): the whole of it,
@@ -239,6 +271,10 @@ pub struct Speech {
     stopped: bool,
     /// An unprompted reply's cap: its first sentences only (`unprompted`).
     cap: Option<(usize, usize)>,
+    /// Stopped at a cap after this many sentences: any after them go unsaid.
+    capped: Option<usize>,
+    /// Something of the reply goes unsaid: past a cap, after `---`, code, a table, a link.
+    partial: bool,
 }
 
 /// An unprompted reply says this much at most: two sentences, 30 words.
@@ -254,11 +290,16 @@ impl Speech {
     /// The sentences of `raw` (the reply as written so far) not yet given out; `finished`:
     /// the turn is over, so the last one is complete too.
     pub fn feed(&mut self, raw: &str, finished: bool) -> Vec<String> {
+        let (text, ended, left_out) = speakable(raw, finished);
+        self.partial |= left_out;
         if self.stopped {
+            if let Some(n) = self.capped {
+                self.partial |= sentences(&text, finished || ended).len() > n;
+            }
             return Vec::new();
         }
-        let (text, ended) = speakable(raw, finished);
         let all = sentences(&text, finished || ended);
+        let total = all.len();
         let mut out = Vec::new();
         let mut words = 0;
         for (i, s) in all.into_iter().enumerate() {
@@ -268,6 +309,8 @@ impl Speech {
             {
                 out.push(REST.into());
                 self.stopped = true;
+                self.capped = Some(i);
+                self.partial = true;
                 return out;
             }
             if i >= self.said {
@@ -277,6 +320,8 @@ impl Speech {
             if words > WORDS_MAX {
                 out.push(REST.into());
                 self.stopped = true;
+                self.capped = Some(i + 1);
+                self.partial |= total > i + 1 || !finished;
                 break;
             }
         }
@@ -288,26 +333,35 @@ impl Speech {
         }
         out
     }
+
+    /// Something of the reply went unsaid (past a cap, after `---`, code, a table, a link):
+    /// heard, it is still not heard whole.
+    pub fn partial(&self) -> bool {
+        self.partial
+    }
 }
 
-/// What may be said of `raw`, and whether it hit the `---` line. Only whole lines count
-/// for the markers; the last, unfinished line goes in as it is.
-fn speakable(raw: &str, finished: bool) -> (String, bool) {
+/// What may be said of `raw`, whether it hit the `---` line, and whether anything of it is
+/// left out (text after the rule, code, a table, a link or a path named, not read). Only
+/// whole lines count for the markers; the last, unfinished line goes in as it is.
+fn speakable(raw: &str, finished: bool) -> (String, bool, bool) {
     let mut out = String::new();
-    let (mut code, mut said_code, mut said_table) = (false, false, false);
+    let (mut code, mut said_code, mut said_table, mut left) = (false, false, false, false);
     let lines: Vec<&str> = raw.split('\n').collect();
     let n = lines.len();
-    for (i, line) in lines.into_iter().enumerate() {
+    for (i, line) in lines.iter().enumerate() {
         let whole = i + 1 < n || finished;
         let t = line.trim();
         if whole && (t == "---" || t == "***" || t == "___") {
-            return (out, true);
+            left |= lines[i + 1..].iter().any(|l| !l.trim().is_empty());
+            return (out, true, left);
         }
         if t.starts_with("```") || t.starts_with("~~~") {
             if !code && !said_code {
                 out.push_str(" Code's on the line. ");
                 said_code = true;
             }
+            left = true;
             code = !code;
             continue;
         }
@@ -319,21 +373,23 @@ fn speakable(raw: &str, finished: bool) -> (String, bool) {
                 out.push_str(" There's a table on the line. ");
                 said_table = true;
             }
+            left = true;
             continue;
         }
-        let mut s = plain(t);
+        let (mut s, named) = plain(t);
+        left |= named;
         if whole && !s.is_empty() && !s.ends_with(['.', '?', '!', ';', ':', '…']) {
             s.push('.');
         }
         out.push(' ');
         out.push_str(&s);
     }
-    (out, false)
+    (out, false, left)
 }
 
 /// A markdown line as said: no markers, link text without its URL, bare URLs and long
-/// inline code named, not read.
-fn plain(line: &str) -> String {
+/// inline code named, not read (`true`: something was).
+fn plain(line: &str) -> (String, bool) {
     let mut t = line.trim_start_matches(['#', '>', ' ']).to_string();
     for m in ["- ", "* ", "+ "] {
         if let Some(r) = t.strip_prefix(m) {
@@ -360,18 +416,28 @@ fn plain(line: &str) -> String {
     if let Some(first) = parts.next() {
         o.push_str(first);
     }
+    let mut named = false;
     for (i, p) in parts.enumerate() {
         if i % 2 == 0 {
-            o.push_str(&if p.len() <= 24 && !p.contains(['/', '\\', '(', '{', '=']) { p.replace('*', " ") } else { "that (it's on the line)".into() });
+            let short = p.len() <= 24 && !p.contains(['/', '\\', '(', '{', '=']);
+            named |= !short;
+            o.push_str(&if short { p.replace('*', " ") } else { "that (it's on the line)".into() });
         } else {
             o.push_str(p);
         }
     }
     let words: Vec<String> = speech_marks(&o)
         .split_whitespace()
-        .flat_map(|w| if w.contains("://") || w.starts_with("www.") { vec!["the link's on the line".to_string()] } else { w.replace('_', " ").split_whitespace().map(str::to_string).collect() })
+        .flat_map(|w| {
+            if w.contains("://") || w.starts_with("www.") {
+                named = true;
+                vec!["the link's on the line".to_string()]
+            } else {
+                w.replace('_', " ").split_whitespace().map(str::to_string).collect()
+            }
+        })
         .collect();
-    words.join(" ")
+    (words.join(" "), named)
 }
 
 /// Whole sentences of `s`: they end at `. ? ! ; …` followed by a space (closing quotes,
@@ -418,16 +484,103 @@ fn sentences(s: &str, finished: bool) -> Vec<String> {
 mod tests {
     use super::*;
 
+    /// A reply as the view says it: fed whole, every sentence sent; `ends` of them come back
+    /// said with these `say-end` lines (fewer: she was stopped before the rest).
+    fn say(raw: &str, unprompted: bool, ends: &[&str]) -> (Said, Speech) {
+        let mut sp = if unprompted { Speech::unprompted() } else { Speech::default() };
+        let mut said = Said::default();
+        // As it streams: a half, then the rest (the turn over).
+        let half = &raw[..raw.char_indices().nth(raw.chars().count() / 2).map_or(0, |c| c.0)];
+        said.sent += sp.feed(half, false).len() as u32;
+        said.sent += sp.feed(raw, true).len() as u32;
+        said.done = true;
+        for e in ends {
+            said.end(say_end_whole(&serde_json::from_str(e).unwrap()));
+        }
+        (said, sp)
+    }
+
+    const END: &str = r#"{"ev":"say-end","id":7}"#;
+
     #[test]
-    fn only_replies_heard_in_handsfree_are_seen_when_spoken() {
-        // Hands-free on: his turn's reply, and an event's she speaks then.
-        assert!(heard_handsfree(true, Some(7), 7));
-        assert!(heard_handsfree(true, Some(7), 8));
-        // Hands-free over before her reply was said (he ended it, the cap): still his hands-free turn.
-        assert!(heard_handsfree(false, Some(7), 7));
-        // Outside hands-free: push-to-talk, typed, events: as ever.
-        assert!(!heard_handsfree(false, Some(7), 8));
-        assert!(!heard_handsfree(false, None, 9));
+    fn a_reply_said_whole_is_heard_whole() {
+        let (said, sp) = say("Build's green, choom. Spike pushed the reader fix eleven minutes ago.", false, &[END, END]);
+        assert_eq!((said.sent, said.ended, said.cut, sp.partial()), (2, 2, false, false));
+        assert!(said.heard(sp.partial()));
+        // An event's reply, under its cap: whole too.
+        let (said, sp) = say("From spike: merged.", true, &[END]);
+        assert!(said.heard(sp.partial()));
+        // Not yet: a sentence still out, or the turn not over.
+        let (said, sp) = say("One. Two. Three.", false, &[END, END]);
+        assert!(!said.heard(sp.partial()) && said.left() == 1);
+        assert!(!Said { sent: 1, ended: 1, ..Said::default() }.heard(false), "its text not all in");
+        assert!(!Said { done: true, ..Said::default() }.heard(false), "nothing said is nothing heard");
+    }
+
+    #[test]
+    fn a_cut_reply_is_not_heard_whole() {
+        let reply = "Rebasing polish-e onto main. Two conflicts in view.rs. He's on it.";
+        // A tap on her body, the talk key ($mod+c), Esc: hushed after the first sentence. Her
+        // next `say-end`s never come (the sidecar's hush drops them), and the view drops the turn.
+        let (said, sp) = say(reply, false, &[END]);
+        assert_eq!((said.sent, said.left()), (3, 2));
+        assert!(!said.heard(sp.partial()));
+        // ...on the last sentence, mid-word: still one short.
+        let (said, sp) = say(reply, false, &[END, END]);
+        assert!(!said.heard(sp.partial()));
+        // Music starts under an event's reply: she is hushed (as a tap), or the sidecar's gate
+        // skips the turn (`say-skipped`: cut), or its player ends early (`cut`).
+        let event = "From spike: merged. CI is green.";
+        let (said, sp) = say(event, true, &[END, END]);
+        assert!(said.heard(sp.partial()), "said whole, it would be");
+        let (said, sp) = say(event, true, &[END]);
+        assert!(!said.heard(sp.partial()));
+        let (mut said, sp) = say(event, true, &[END]);
+        said = Said { done: true, cut: true, ..said };
+        assert!(!said.heard(sp.partial()));
+        let (said, sp) = say(event, true, &[END, r#"{"ev":"say-end","id":7,"cut":true}"#]);
+        assert!(said.cut && !said.heard(sp.partial()));
+        let (said, sp) = say(reply, false, &[END, END, r#"{"ev":"say-end","id":7,"cut":true}"#]);
+        assert!(said.cut && !said.heard(sp.partial()));
+        // The sidecar restarts mid-say: the sentence it was saying never ends (the view drops
+        // the turn as the link goes); one it couldn't make after it comes back with an error.
+        let (said, sp) = say(reply, false, &[END, END, r#"{"ev":"say-end","id":7,"error":"onnxruntime: device lost"}"#]);
+        assert!(said.cut && !said.heard(sp.partial()));
+        // An older sidecar's plain `say-end` is a whole one.
+        assert!(say_end_whole(&serde_json::json!({ "ev": "say-end", "id": 7 })));
+        assert!(say_end_whole(&serde_json::json!({ "ev": "say-end", "id": 7, "cut": false })));
+    }
+
+    #[test]
+    fn a_reply_said_in_part_is_not_heard_whole() {
+        let all = |raw: &str, unprompted: bool| {
+            let mut sp = if unprompted { Speech::unprompted() } else { Speech::default() };
+            let n = sp.feed(raw, true).len();
+            let (said, sp) = say(raw, unprompted, &vec![END; n]);
+            (said.heard(sp.partial()), sp.partial())
+        };
+        // Partly spoken counts as cut off: past `---`, code, a table, a link or a path named.
+        assert_eq!(all("Merged.\n---\nsha 9f8e7d6", false), (false, true));
+        assert_eq!(all("Here's the command:\n```bash\ntools/abuild build\n```", false), (false, true));
+        assert_eq!(all("Totals:\n| a | b |\n|---|---|", false), (false, true));
+        assert_eq!(all("Docs at https://x.y/z now.", false), (false, true));
+        assert_eq!(all("Run `tools/abuild build --release` now.", false), (false, true));
+        // Past the 60 words, or an event's cap: the rest is on the line.
+        assert_eq!(all(&"This sentence has exactly ten words in it, see here. ".repeat(8), false), (false, true));
+        assert_eq!(all("Spike says CI is red. Rebase or merge? He waits on you.", true), (false, true));
+        // Said whole: a rule with nothing after it, short code, a link's text, markers.
+        assert_eq!(all("Merged.\n---\n", false), (true, false));
+        assert_eq!(all("Run `ls` and see [the PR](https://x.y/1).", false), (true, false));
+        assert_eq!(all("## Done\n- **Build** is green.", false), (true, false));
+        // Exactly over the 60 words on the last sentence: all of it was said.
+        let sixty_five = "This sentence has exactly ten words in it, see here. ".repeat(6) + "Five more words right here.";
+        assert_eq!(all(&sixty_five, false), (true, false));
+        // Text after the rule that streams in once she stopped at it still counts.
+        let mut sp = Speech::default();
+        assert_eq!(sp.feed("Merged.\n---\n", false), vec!["Merged."]);
+        assert!(!sp.partial());
+        assert!(sp.feed("Merged.\n---\nsha 9f8e7d6", true).is_empty());
+        assert!(sp.partial());
     }
 
     #[test]
