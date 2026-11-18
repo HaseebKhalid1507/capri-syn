@@ -5148,7 +5148,8 @@ fn tag_ring(pal: Pal, a: &TagArt, wide: Option<(f32, f32)>, split: f32, part: Pa
         .size_full()
     };
     let backed = |cut: Cut, f: Fill| div().relative().flex().items_center().child(theme::backdrop(cut, f));
-    let say = |d: Div| d;
+    let say = |d: Div| d.when(part == Part::Block, |d| d.invisible());
+    let (block_on, fore) = (part != Part::Fore, part != Part::Block);
     if let Some(b) = badge.clone() {
         let plate = div()
             .relative()
@@ -5205,6 +5206,9 @@ fn tag_ring(pal: Pal, a: &TagArt, wide: Option<(f32, f32)>, split: f32, part: Pa
                 canvas(
                     |_, _, _| (),
                     move |b, _, window, _| {
+                        if !block_on {
+                            return;
+                        }
                         let (x0, y0, x1, y1) = (f32::from(b.left()), f32::from(b.top()), f32::from(b.right()), f32::from(b.bottom()));
                         let (blk, sw) = theme::half_block(x0, y0, x1, y1, sweep);
                         theme::fill_poly(window, &blk, rgb(block_c));
@@ -5239,6 +5243,9 @@ fn tag_ring(pal: Pal, a: &TagArt, wide: Option<(f32, f32)>, split: f32, part: Pa
                     let (x0, y0, x1, y1) = (f32::from(b.left()), f32::from(b.top()), f32::from(b.right()), f32::from(b.bottom()));
                     if base {
                         tag_base_paint(window, &look, (x0, y0, x1, y1), fill, ring_c);
+                    }
+                    if !fore {
+                        return;
                     }
                     if look.trail {
                         for (p, lvl) in theme::trail(x1, y0, y1, step) {
@@ -5374,8 +5381,12 @@ type TagPinKey = ((i32, i32), std::mem::Discriminant<Placement>, bool);
 #[derive(Clone, Copy, PartialEq)]
 enum Part {
     All,
-    /// All but its base (the outline's ring, edge and fill): what fades over an opaque base.
+    /// All but its base (the outline's ring, edge and fill) and its block: its words, glyphs
+    /// and marks, what crossfades over the opaque base.
     Fore,
+    /// Only its block (WORKING's red name block), laid out as the whole: it fades on its own
+    /// (`hud::plate_levels`), so the plate never looks empty while its words cross.
+    Block,
 }
 
 /// What the tag shows, compared without its level meter (a voice level isn't a change).
@@ -6370,10 +6381,12 @@ impl Render for Avatar {
                 if by_fx || (aw - bw).abs() > 0.5 {
                     by_fx = true;
                     let (x0, bottom) = (bx + (bw - aw) * 0.5, by + bh);
-                    let fore = |a: &TagArt, nat: f32, level: f32| -> Div {
+                    let layer = |a: &TagArt, nat: f32, level: f32, part: Part| -> Div {
                         let h = a.h();
-                        div().absolute().left(px(x0)).top(px(bottom - h)).w(px(aw)).h(px(h)).opacity(level).child(tag_ring(pal, a, Some((aw, nat)), 0.0, Part::Fore))
+                        div().absolute().left(px(x0)).top(px(bottom - h)).w(px(aw)).h(px(h)).opacity(level).child(tag_ring(pal, a, Some((aw, nat)), 0.0, part))
                     };
+                    let fore = |a: &TagArt, nat: f32, level: f32| layer(a, nat, level, Part::Fore);
+                    let blocked = |a: &TagArt| a.badge.is_none() && a.name_part.is_some();
                     let prev = tf.prev.map(|(p, w, words)| (art_of(p), w, words));
                     // The base: opaque, its outline and colours morphing from the old content's.
                     let q = tf.shape;
@@ -6384,8 +6397,18 @@ impl Render for Avatar {
                             div().absolute().left(px(x0)).top(px(bottom - bh_now)).w(px(aw)).h(px(bh_now)).child(tag_base(pal, prev.as_ref().map(|p| p.0.clone()), art.clone(), q, tf.split)),
                         );
                     }
-                    // Over it, the old words crossing into the new (and, coming or going, at the
-                    // tag's level).
+                    // On it, the plates' own blocks, each fading on its own (never under half
+                    // where the words cross); over them, the old words crossing into the new
+                    // (and, coming or going, at the tag's level).
+                    if let Some((pa, pw, _)) = &prev
+                        && blocked(pa)
+                        && tf.blocks.0 > 0.0
+                    {
+                        root = root.child(layer(pa, *pw, tf.blocks.0 * tf.alpha, Part::Block));
+                    }
+                    if blocked(&art) && tf.blocks.1 * tf.alpha > 0.0 {
+                        root = root.child(layer(&art, tf.nat, tf.blocks.1 * tf.alpha, Part::Block));
+                    }
                     if let Some((pa, pw, pwords)) = &prev
                         && *pwords > 0.0
                     {
@@ -6703,7 +6726,7 @@ impl Render for Avatar {
             }
             self.ghost = None;
             // Its shell, and the box its words are laid out in (the same, but while it opens:
-            // the box it is going to, at most `INSET` past the shell, so nothing is cut).
+            // the box it is going to, its words where they will be, shown only inside the shell).
             let g = place_panel(pf.shell.0, pf.shell.1, head_l, bottom, (vis_l, vis_r));
             let gc = place_panel(pf.content.0, pf.content.1, head_l, bottom, (vis_l, vis_r));
             let (x, y, w, h) = (gc.x, gc.y, gc.w, gc.h);
@@ -6884,7 +6907,7 @@ impl Render for Avatar {
                 let shown = self.pill_open_show.get_or_insert_with(|| pill_show.clone()).clone();
                 let pa = art_of(&shown);
                 let grown = ((g.w - pw) / (lay_w - pw).max(1.0)).clamp(0.0, 1.0);
-                let q = (1.0 - level).max(crate::hud::blend(grown));
+                let q = crate::hud::blend(grown);
                 let cut = base_of(pal, &pa).map_or(Cut::Tag(pa.look.plate), |b| b.0);
                 let from = theme::outline(cut, g.x, g.y, g.x + g.w, g.y + g.h).into_iter().next().unwrap_or_default();
                 let skin = (pal.panel, frame_c, 2.0);
@@ -7268,7 +7291,23 @@ impl Render for Avatar {
                         cx.notify();
                     }));
             }
-            root = root.child(panel);
+            if (gc.w - g.w).abs() > 0.5 || (gc.h - g.h).abs() > 0.5 {
+                // Opening: its words stay put and show as the shell grows over them, never
+                // past its frame.
+                let fw = 2.0;
+                root = root.child(
+                    div()
+                        .absolute()
+                        .left(px(g.x + fw))
+                        .top(px(g.y + fw))
+                        .w(px((g.w - 2.0 * fw).max(0.0)))
+                        .h(px((g.h - 2.0 * fw).max(0.0)))
+                        .overflow_hidden()
+                        .child(panel.left(px(x - g.x - fw)).top(px(y - g.y - fw))),
+                );
+            } else {
+                root = root.child(panel);
+            }
         }
         // The HUD moves: a frame per present until it settles, and nothing after.
         let hud_busy = self.tag_fx.busy(now) || self.panel_fx.busy(now) || self.ghost.is_some() || self.tag_y.as_ref().is_some_and(|y| y.1.moving(now));
