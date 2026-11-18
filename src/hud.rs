@@ -25,7 +25,7 @@ pub const STEP_MS: f32 = 33.0;
 pub const OPEN_SCALE: f32 = 0.85;
 pub const CLOSE_SCALE: f32 = 0.92;
 /// The widest sideways shift of a band: the tag's, the bubble's (px).
-pub const TAG_SHIFT: f32 = 8.0;
+pub const TAG_SHIFT: f32 = 10.0;
 pub const PANEL_SHIFT: f32 = 12.0;
 /// The swap's cut from the old text to the new, as a fraction of `SWAP_MS`.
 pub const SWAP_CUT: f32 = 0.4;
@@ -183,11 +183,11 @@ impl Glitch {
             .collect();
         let frac = |i: usize| rank[i] as f32 / n as f32;
         let assemble = |v: f32| -> Vec<Band> {
-            // In at 10..55 % (rank order), shifts decaying to nothing by 85 %.
+            // In at 5..55 % (rank order), shifts falling off to nothing by 85 %.
             (0..n)
                 .map(|i| {
-                    let on = v >= 0.1 + 0.45 * frac(i);
-                    let k = if v >= 0.85 { 0.0 } else { (1.0 - v / 0.85).powi(2) };
+                    let on = v >= 0.05 + 0.5 * frac(i);
+                    let k = (1.0 - v / 0.85).max(0.0);
                     let (m, split) = jitter[i];
                     Band { on, dx: amp * k * m, split: if split { (4.0 * k).round() } else { 0.0 } }
                 })
@@ -208,7 +208,7 @@ impl Glitch {
             Kind::In => {
                 let bands = assemble(u);
                 // The tear: the first step anything shows.
-                Look { bands, old: false, tear: (step == self.step_at(0.1) && n > 1).then(|| 1 + r.pick(n - 1)) }
+                Look { bands, old: false, tear: (step == self.step_at(0.05) && n > 1).then(|| 1 + r.pick(n - 1)) }
             }
             Kind::Out => Look { bands: dissolve(u), old: true, tear: None },
             Kind::Swap => {
@@ -217,8 +217,8 @@ impl Glitch {
                     Look { bands: dissolve(u / SWAP_CUT), old: true, tear: None }
                 } else {
                     let v = (u - SWAP_CUT) / (1.0 - SWAP_CUT);
-                    // The new text comes in fast: its first bands at once.
-                    Look { bands: assemble(0.1 + 0.9 * v), old: false, tear: (step == cut && n > 1).then(|| 1 + r.pick(n - 1)) }
+                    // The new text's first bands come at once (no blank step at the cut).
+                    Look { bands: assemble(0.15 + 0.85 * v), old: false, tear: (step == cut && n > 1).then(|| 1 + r.pick(n - 1)) }
                 }
             }
             Kind::Pulse => {
@@ -276,12 +276,14 @@ pub struct TagFx<T> {
     /// Frames left where the width follows its layout at once (just appeared: the measure
     /// is a frame old).
     snap: u8,
+    /// Its text changed this frame: the layout's width is last frame's (the old text's).
+    measuring: bool,
     salt: u64,
 }
 
 impl<T: Clone + PartialEq> Default for TagFx<T> {
     fn default() -> Self {
-        TagFx { shown: None, old: None, glitch: None, last_glitch: None, last_change: None, width: Tween::still(0.0), snap: 0, salt: 0 }
+        TagFx { shown: None, old: None, glitch: None, last_glitch: None, last_change: None, width: Tween::still(0.0), snap: 0, measuring: false, salt: 0 }
     }
 }
 
@@ -295,6 +297,8 @@ impl<T: Clone + PartialEq> TagFx<T> {
             self.old = None;
         }
         if next == self.shown {
+            // The same to the eye (a level meter moved): drawn as it is now.
+            self.shown = next;
             return;
         }
         let calm = self.last_change.is_none_or(|t| ms(now, t) >= GAP_MS) && self.last_glitch.is_none_or(|t| ms(now, t) >= GAP_MS);
@@ -304,6 +308,7 @@ impl<T: Clone + PartialEq> TagFx<T> {
             me.glitch = Some(Glitch::new(kind, now, seed(me.salt)));
             me.last_glitch = Some(now);
         };
+        self.measuring = self.shown.is_some() && next.is_some();
         match (self.shown.is_some(), next.is_some()) {
             (true, true) => match running {
                 // Mid-glitch: its new half shows the newest text.
@@ -349,6 +354,10 @@ impl<T: Clone + PartialEq> TagFx<T> {
 
     /// The width to draw, given the laid-out one (`motion` off: always that).
     pub fn width(&mut self, laid_out: f32, now: Instant, motion: bool) -> f32 {
+        if std::mem::take(&mut self.measuring) && motion {
+            // Last frame's layout: the old text's width; the new one is measured this frame.
+            return self.width.at(now);
+        }
         if self.snap > 0 || !motion {
             self.snap = self.snap.saturating_sub(1);
             self.width.snap(laid_out);
@@ -356,6 +365,12 @@ impl<T: Clone + PartialEq> TagFx<T> {
             self.width.go(laid_out, now, SIZE_MS);
         }
         self.width.at(now)
+    }
+
+    /// Its text changed this frame and its new width isn't measured yet: draw it at the
+    /// width it has (`width`), not as laid out.
+    pub fn measuring(&self) -> bool {
+        self.measuring
     }
 
     pub fn width_now(&self, now: Instant) -> f32 {
@@ -611,6 +626,11 @@ mod tests {
         t.observe(Some("ONLINE"), t0, false, false);
         assert_eq!(t.width(80.0, t0, true), 80.0);
         assert_eq!(t.width(90.0, at(t0, 16), true), 90.0, "two frames follow the layout");
+        // A new text: last frame's layout is the old text's; the new width is measured next.
+        t.observe(Some("THINKING"), at(t0, 30), false, false);
+        assert!(t.measuring());
+        assert_eq!(t.width(90.0, at(t0, 30), true), 90.0);
+        assert!(!t.measuring());
         let w = t.width(160.0, at(t0, 32), true);
         assert_eq!(w, 90.0);
         assert!(t.busy(at(t0, 100)));

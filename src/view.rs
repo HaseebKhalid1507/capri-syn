@@ -6189,7 +6189,7 @@ impl Render for Avatar {
             // The HUD's own motion: the plate at its easing width, torn by its glitch, drawn at
             // the laid-out box (the holder below lays out the newest text unseen); gone, where
             // it was last.
-            let mut by_fx = !torn && tag_glitch.is_some();
+            let mut by_fx = !torn && (tag_glitch.is_some() || (hud_motion && self.tag_fx.measuring()));
             if !torn && let Some(b) = self.tag_box.get() {
                 let (bx, by, bw, bh) = (f32::from(b.origin.x), f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height));
                 let aw = if show_tag { self.tag_fx.width(bw, now, hud_motion) } else { self.tag_fx.width_now(now) };
