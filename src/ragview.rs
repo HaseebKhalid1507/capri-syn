@@ -63,6 +63,9 @@ pub(super) struct Rag {
     pub next: Option<Shown>,
     /// `next` has been painted (underneath) by a render: it may become `cur` (the shape).
     pub painted: bool,
+    /// A render has drawn her carried since the grab (a script's drag is in hand from then:
+    /// `rag_script_held`).
+    shown: bool,
     arena: Arena,
     plats: Vec<crate::edges::Platform>,
     /// (bubble was open, prompt was shown) at the grab.
@@ -286,6 +289,8 @@ impl Avatar {
         let grab = self.grip_root(self.origin, local);
         self.rag_begin(local, Feed::Script { s: crate::drag::Script::default(), grab }, now, false);
         self.rag_release(now);
+        // Let go at once: out of hand before the next tick (`Os::set_held`).
+        self.os.set_held(self.press.is_some(), self.rag_script_held());
         self.rag.is_some()
     }
 
@@ -365,6 +370,7 @@ impl Avatar {
             due: now,
             cur: None,
             painted: false,
+            shown: false,
             next: None,
             arena: Arena::default(),
             plats: Vec::new(),
@@ -410,8 +416,8 @@ impl Avatar {
         self.follow_seq = 0;
         self.follow_grip = None;
         self.rag = Some(rag);
-        // In hand from its first frame (a script's pick-up too: its region waits, its first
-        // move doesn't; a real press is in hand from the press, `mouse_down`).
+        // A real press is in hand from the press (`mouse_down`); a script's pick-up once its
+        // first frame is drawn (`rag_script_held`).
         self.os.set_held(self.press.is_some(), self.rag_script_held());
         if touch {
             self.brain_touch(crate::brain::Touch::DragStart);
@@ -535,9 +541,15 @@ impl Avatar {
         elog!("drawn {:.6} at {},{} lean {:.1}", mono_s(), self.applied.0, self.applied.1, lean.unwrap_or(f32::NAN));
     }
 
-    /// Held by a script (`drag` on the control socket): a stand-in for a real drag.
+    /// Held by a script (`drag` on the control socket): a stand-in for a real drag, in hand
+    /// from its first frame drawn. That frame's region goes out first, as she stands, so her
+    /// window's first move waits out `GAP` after it (`Os::set_held`): picom shows her picked
+    /// up before she moves. In hand from the grab, her window moved before picom had shown
+    /// the new pose, and its move animation started from its image of her standing: her idle
+    /// art carried along a frame or two more (NVIDIA path, 9 pickups each: held pose on
+    /// screen +83 ms after the command, median; +67 ms with the region first, as on main).
     pub(super) fn rag_script_held(&self) -> bool {
-        self.rag.as_ref().is_some_and(|r| matches!(r.m.phase(), Phase::Held { .. }) && matches!(r.feed, Feed::Script { .. }))
+        self.rag.as_ref().is_some_and(|r| r.shown && matches!(r.m.phase(), Phase::Held { .. }) && matches!(r.feed, Feed::Script { .. }))
     }
 
     /// Held by the real mouse (not scripted, not lockstep).
@@ -1056,6 +1068,7 @@ impl Avatar {
         let Some(r) = &mut self.rag else { return };
         let was = r.painted;
         r.painted = true;
+        r.shown = true;
         if !was && r.next.is_some() {
             self.ticker.set(self.next_deadline());
         }

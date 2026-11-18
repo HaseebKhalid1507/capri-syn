@@ -289,9 +289,9 @@ pub struct Os {
     host_changed: Cell<Option<WinId>>,
     /// Her input region and her moves kept apart (`Os::settling`).
     settle: RefCell<Settle>,
-    /// A press on her: when the button was last asked about, and since when it has been up
-    /// (`press_lost`).
-    press_seen: Cell<Option<(Instant, Option<Instant>)>>,
+    /// A press on her: when the button was last asked about, since when it has been up, and
+    /// whether the backend can tell (`press_lost`).
+    press_seen: Cell<Option<(Instant, Option<Instant>, bool)>>,
 }
 
 impl Os {
@@ -496,8 +496,8 @@ impl Os {
     /// Her drag is in hand or not: the button down on her (`press`: with an implicit grab,
     /// `Caps::implicit_grab`, every pointer event is hers while it is down, whatever her input
     /// region), or a scripted drag held (`script`: no pointer to miss her; it stands in for a
-    /// real drag, so it moves as one does). In hand, her moves never wait and her region waits
-    /// for the release (`settle.rs`).
+    /// real drag, so it moves as one does). In hand, her region waits for the release, so no
+    /// move waits for one (a catch right after a region out waits out `GAP` first: `settle.rs`).
     pub fn set_held(&self, press: bool, script: bool) {
         self.settle.borrow_mut().press((press && self.caps.implicit_grab) || script, Instant::now());
     }
@@ -511,16 +511,27 @@ impl Os {
             self.press_seen.set(None);
             return false;
         }
-        let (asked, up) = self.press_seen.get().unwrap_or((now, None));
+        let (asked, up, _) = self.press_seen.get().unwrap_or((now, None, true));
         if self.press_seen.get().is_some() && now < asked + PRESS_ASK {
             return up.is_some_and(|t| now >= t + PRESS_LOST);
         }
-        let up = match self.desk.primary_down() {
-            Some(false) => Some(up.unwrap_or(now)),
-            _ => None,
-        };
-        self.press_seen.set(Some((now, up)));
+        let down = self.desk.primary_down();
+        let up = (down == Some(false)).then_some(up.unwrap_or(now));
+        self.press_seen.set(Some((now, up, down.is_some())));
         up.is_some_and(|t| now >= t + PRESS_LOST)
+    }
+
+    /// When `press_lost` wants a look while a press lasts (`pressed`): the next ask, or the
+    /// moment an up button makes it lost. None: no press, or the backend can't tell.
+    pub fn press_due(&self, pressed: bool, now: Instant) -> Option<Instant> {
+        if !pressed {
+            return None;
+        }
+        match self.press_seen.get() {
+            None => Some(now),
+            Some((_, _, false)) => None,
+            Some((asked, up, true)) => Some(up.map_or(asked + PRESS_ASK, |t| t + PRESS_LOST)),
+        }
     }
 
     /// When what `settle` holds back is due, if anything is.

@@ -12,14 +12,16 @@
 //!   for no longer than `MAX_HOLD` in all: then her moves stop until the newest is out, `GAP`
 //!   after the last of them (~70 ms). Her walk cycle alone stays under `MISS`, so a walk
 //!   doesn't stop for it;
-//! - a move waits out `GAP` after a region went out;
+//! - a move waits out `GAP` after a region went out, in hand too (a catch mid-flight: the
+//!   region out just before the press);
 //! - while her drag is in hand (`press`: the button down on her, an implicit grab: every
 //!   pointer event is hers whatever her region; or a scripted drag, standing in for one),
-//!   regions wait for the release and moves never wait: a drag never stops for her region;
+//!   regions wait for the release, so no move waits for one: a drag never stops for her
+//!   region (its first moves at most `GAP` after a region out before the press);
 //! - a landing (`landed`: a teleport's, a placed move) never waits.
 //!
-//! So, outside landings and drags in hand, a region and a move never go out within `GAP` of
-//! each other. Time comes in as `now`: the rules are tested on a clock of their own.
+//! So, outside landings, a region and a move never go out within `GAP` of each other. Time
+//! comes in as `now`: the rules are tested on a clock of their own.
 
 use super::ShapeRect;
 use std::time::{Duration, Instant};
@@ -52,7 +54,7 @@ pub(super) struct Settle {
     /// The region out (the last sent).
     out: Vec<ShapeRect>,
     /// How long the region out has been wrong for her since it went out (`MISS`; while her
-    /// drag is in hand it doesn't count) ...
+    /// drag is in hand it doesn't count, and a drag starts it over) ...
     wrong: Duration,
     /// ... and since when it is wrong now (the newest held misses), not yet in `wrong`.
     wrong_from: Option<Instant>,
@@ -100,7 +102,7 @@ impl Settle {
     }
 
     fn move_waits(&self, now: Instant) -> bool {
-        !self.pressed && (self.flush || self.shaped.is_some_and(|t| now < t + GAP))
+        (self.flush && !self.pressed) || self.shaped.is_some_and(|t| now < t + GAP)
     }
 
     fn region_may_go(&self, now: Instant) -> bool {
@@ -156,15 +158,22 @@ impl Settle {
     }
 
     /// Her drag is in hand (`down`) or no longer: the button down on her or up, a scripted
-    /// drag held or let go. In hand, regions wait for the release and moves never wait; the
-    /// time her region out is wrong doesn't count (no click goes by it).
+    /// drag held or let go. In hand, regions wait for the release, so moves wait for none
+    /// (but `GAP` after one out before); the time her region out is wrong doesn't count (no
+    /// click goes by it), and what counted before the drag is forgotten: from the release it
+    /// counts from nothing.
     pub fn press(&mut self, down: bool, now: Instant) {
         if down == self.pressed {
             return;
         }
         self.pressed = down;
         self.flush = false;
-        self.recount(!down && self.held_wrong, now);
+        if down {
+            self.wrong = Duration::ZERO;
+            self.wrong_from = None;
+        } else {
+            self.recount(self.held_wrong, now);
+        }
     }
 
     /// When what is held is due out (`take_due`), if anything is.
@@ -174,12 +183,8 @@ impl Settle {
         }
         let mut due: Option<Instant> = None;
         let mut at = |t: Instant| due = Some(due.map_or(t, |d| d.min(t)));
-        if self.pos.is_some() {
-            if self.pressed {
-                at(now);
-            } else if !self.flush {
-                at(self.shaped.map_or(now, |t| t + GAP));
-            }
+        if self.pos.is_some() && (self.pressed || !self.flush) {
+            at(self.shaped.map_or(now, |t| t + GAP));
         }
         if self.input.is_some() && !self.pressed {
             if self.flush {
@@ -487,7 +492,8 @@ mod tests {
         let mut r = standing(&[(0, 0, 50, 50)]);
         r.s.press(true, r.now);
         for i in 0..30 {
-            // The drag: moves never wait, regions wait for the release.
+            // The drag (the region out long before): moves never wait, regions wait for the
+            // release.
             let n = r.moves.len();
             step(&mut r, i * 3, &[(0, 0, 50, 50 + (i % 2) as u16)]);
             assert_eq!(r.moves.len(), n + 1, "a drag move waited");
@@ -625,10 +631,14 @@ mod tests {
         r.wait(SETTLE * 2);
         assert!(r.s.wants_region(true, &[(1, 1, 1, 2)], r.now));
         r.sent((None, Some(vec![(1, 1, 1, 2)])));
+        let shaped = r.t();
         r.now += Duration::from_millis(2);
         r.s.press(true, r.now);
-        assert!(r.s.wants_move(true, (-1, 0), r.now), "in hand, a move never waits, even right after a region");
-        r.sent((Some((-1, 0)), None));
+        // A catch right after a region went out: its first move waits out the rest of `GAP`
+        // (picom never takes the two in one frame), and no more.
+        assert!(!r.s.wants_move(true, (-1, 0), r.now), "in hand, a move right after a region still waits out GAP");
+        r.wait(GAP);
+        assert_eq!(r.moves, vec![(shaped + GAP, -1)], "out GAP after the region, not later");
         // The squash, then a pause before the drag.
         for _ in 0..10 {
             r.frame(None, Some((2, 2, 2, 2)));
@@ -650,6 +660,34 @@ mod tests {
         r.s.press(false, r.now);
         r.wait(SETTLE + FRAME);
         assert_eq!(r.out, vec![(3, 59, 3, 3)]);
+    }
+
+    /// Wrong time from before a drag is forgotten: after the release her moves run the whole
+    /// `MAX_HOLD` again before they stop for her region, not what was left of it.
+    #[test]
+    fn a_drag_starts_the_wrong_time_over() {
+        let (a, b) = ([(0, 0, 40, 40)], [(100, 0, 40, 40)]);
+        let mut r = standing(&a);
+        // Moving with a region that misses all of the one out: 200 ms of `MAX_HOLD` gone.
+        for i in 0..12 {
+            step(&mut r, i, &b);
+        }
+        assert_eq!(r.regions.len(), 1, "not overdue yet");
+        r.s.press(true, r.now);
+        for i in 12..30 {
+            step(&mut r, i, &b);
+        }
+        r.s.press(false, r.now);
+        let release = r.t();
+        let n = r.regions.len();
+        for i in 30..60 {
+            step(&mut r, i, &b);
+        }
+        let first = r.regions[n..].first().map(|(t, _)| *t).expect("forced out after the release");
+        assert!(first >= release + MAX_HOLD, "out {:?} after the release: the drag didn't start it over", first - release);
+        let still = r.longest_still(release, release + MAX_HOLD);
+        assert!(still <= FRAME + Duration::from_millis(1), "she stopped {still:?} within MAX_HOLD of the release");
+        r.never_met();
     }
 
     /// Still: a new region goes out at once; a move right after it waits out `GAP`; a landing

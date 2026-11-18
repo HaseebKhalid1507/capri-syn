@@ -2323,6 +2323,8 @@ impl Avatar {
         };
         take(self.anim.deadline());
         take(self.os.settle_due());
+        // A press: a look at the button now and then, however still she is (`Os::press_lost`).
+        take(self.os.press_due(self.press.is_some(), now));
         // A frame before each cut of her frames: a render that lays the next drawing
         // underneath (the look-ahead), so the cut's new outline never shows pixels the window
         // hasn't drawn (r43: a held wave frame cut to the next showed the SLEEPING tag of

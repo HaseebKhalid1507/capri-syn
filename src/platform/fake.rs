@@ -468,7 +468,8 @@ fn input_region_and_moves_never_meet_under_picom() {
     os.set_shapes(Some(&[(1, 1, 1, 1)]), None).unwrap();
     os.move_now(500, 100).unwrap();
     assert_eq!(got(), ((500, 100), vec![(1, 1, 1, 1)]), "a landing goes out at once");
-    // The button down on her: her region waits for the release, a drag move never waits.
+    // The button down on her: her region waits for the release, a drag move never waits for
+    // one (the last region out long before).
     std::thread::sleep(SETTLE);
     os.set_held(true, false);
     os.set_shapes(Some(&[(2, 2, 2, 2)]), None).unwrap();
@@ -481,13 +482,21 @@ fn input_region_and_moves_never_meet_under_picom() {
     os.set_held(false, false);
     settled();
     assert_eq!(got().1, vec![(2, 2, 2, 2)], "released and still: out");
-    // A scripted drag stands in for a real one: in hand the same way, even right after a
-    // region went out.
+    // A scripted drag stands in for a real one: in hand the same way, from its first frame
+    // drawn (`rag_script_held`): that frame's region goes out as she stands, then her first
+    // move waits out `GAP` (picom shows her picked up before she moves), and no more. A catch
+    // right after a region went out mid-flight waits the same.
     os.set_shapes(Some(&[(4, 4, 4, 4)]), None).unwrap();
     assert_eq!(got().1, vec![(4, 4, 4, 4)], "still: out at once");
     os.set_held(false, true);
     os.move_to(508, 100).unwrap();
-    assert_eq!(got().0, (508, 100), "a scripted drag's move never waits, even right after a region");
+    assert_eq!(got().0, (506, 100), "in hand, a move right after a region still waits out GAP");
+    assert!(os.settle_due().is_some_and(|t| t <= std::time::Instant::now() + GAP), "due within GAP");
+    std::thread::sleep(GAP);
+    os.settle().unwrap();
+    assert_eq!(got().0, (508, 100), "out once GAP passed");
+    os.move_to(509, 100).unwrap();
+    assert_eq!(got().0, (509, 100), "then never waits");
     os.set_shapes(Some(&[(5, 5, 5, 5)]), None).unwrap();
     std::thread::sleep(SETTLE + Duration::from_millis(5));
     os.settle().unwrap();
@@ -524,18 +533,23 @@ fn a_press_without_its_release_is_lost_once_the_button_stays_up() {
     let t0 = Instant::now();
     let at = |ms: u64| t0 + Duration::from_millis(ms);
     let set = |b: Option<bool>| d.0.w().primary = b;
-    // Can't tell: never lost.
+    // Can't tell: never lost, and no wake for it.
+    assert_eq!(os.press_due(true, at(0)), Some(at(0)), "a press not asked about yet: a look now");
     assert!(!os.press_lost(true, at(0)) && !os.press_lost(true, at(5_000)));
+    assert_eq!(os.press_due(true, at(5_000)), None);
     os.press_lost(false, at(5_000));
+    assert_eq!(os.press_due(false, at(5_000)), None, "no press, no wake");
     // Down: never lost.
     set(Some(true));
     for ms in (0..2_000).step_by(60) {
         assert!(!os.press_lost(true, at(10_000 + ms)), "lost with the button down");
+        assert_eq!(os.press_due(true, at(10_000 + ms)), Some(at(10_000 + ms + 50)), "down: a look every PRESS_ASK");
     }
     os.press_lost(false, at(20_000));
     // Up (its release still on the way, or never coming): lost only after PRESS_LOST.
     set(Some(false));
     assert!(!os.press_lost(true, at(30_000)), "a quick tap's release may still be on its way");
+    assert_eq!(os.press_due(true, at(30_000)), Some(at(30_200)), "up: a wake when it is lost");
     assert!(!os.press_lost(true, at(30_100)));
     assert!(!os.press_lost(true, at(30_190)));
     assert!(os.press_lost(true, at(30_260)), "up for 200 ms: lost");
