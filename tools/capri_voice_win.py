@@ -239,13 +239,16 @@ class Player:
             raise self.sd.CallbackStop
 
     def wait(self, timeout=None):
+        """0 when all it was given played (its input closed), else 1 (killed, the device gone): as
+        pw-play's exit, so a sentence cut short says so in its say-end."""
         if not self.done.wait(timeout):
             raise subprocess.TimeoutExpired('capri-voice speech', timeout)
         try:
             self.stream.close()
         except Exception:
             pass
-        return 0
+        with self.lk:
+            return 0 if self.eof and self.pos >= len(self.buf) else 1
 
     def kill(self):
         try:

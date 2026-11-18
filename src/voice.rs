@@ -182,7 +182,8 @@ pub struct Said {
     pub done: bool,
     /// Stopped before its end: a tap on her, the talk key, Esc, music, a new turn, his voice
     /// over hers, a call or the lock (the sidecar skips it), a sentence the sidecar couldn't
-    /// say or whose player ended early, the sidecar going (or restarting) mid-say.
+    /// say, whose player ended early or that it trimmed to the cap, the sidecar going (or
+    /// restarting) mid-say.
     pub cut: bool,
 }
 
@@ -206,7 +207,8 @@ impl Said {
 }
 
 /// A `say-end` said its sentence to the end: not when the sidecar couldn't make the audio
-/// (`error`) or its player ended early (`cut`). An older sidecar sends neither: whole.
+/// (`error`), or its player ended early or the gate trimmed it to the cap (`cut`). An older
+/// sidecar sends neither: whole.
 pub fn say_end_whole(v: &serde_json::Value) -> bool {
     v.get("error").is_none() && v.get("cut").and_then(serde_json::Value::as_bool) != Some(true)
 }
@@ -321,7 +323,7 @@ impl Speech {
                 out.push(REST.into());
                 self.stopped = true;
                 self.capped = Some(i + 1);
-                self.partial |= total > i + 1 || !finished;
+                self.partial |= total > i + 1;
                 break;
             }
         }

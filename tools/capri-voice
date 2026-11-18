@@ -27,7 +27,7 @@ every OS-facing part there is that module's, next to this file):
   {"op":"listen-stop"}                 {"ev":"mic-closed"} {"ev":"heard","text":..., "why":..., "ms":{...}}
   {"op":"listen-cancel"}               {"ev":"mic-closed"}
   {"op":"say","id":n,"text":...}       {"ev":"say-start","id","text","dur_ms","step_ms","shapes"}  {"ev":"say-end","id"} (said to
-                                       its end; "cut":true: its player ended early; "error": no audio. A hushed,
+                                       its end; "cut":true: its player ended early, or the Gate trimmed it to the cap; "error": no audio. A hushed,
                                        dropped or skipped sentence gets none: the avatar counts a turn heard whole, and read,
                                        only from whole say-ends of all its sentences)
   {"op":"say",...,"unprompted":true}   (a reply he didn't ask for)  {"ev":"say-skipped","id","why"} (Gate: any turn
@@ -1742,26 +1742,27 @@ class Gate:
         return sum(min(d, t - (now - WINDOW_S)) for t, d in self.heard)
 
     def check(self, sid, dur, pcm):
-        """(why, pcm): why this sentence of turn `sid` stays silent, or None (pcm, maybe cut to the
-        reply's cap)."""
+        """(why, pcm, trimmed): why this sentence of turn `sid` stays silent, or None; its pcm, and
+        whether that was cut to the reply's cap (then it isn't said whole: its say-end says cut)."""
         now = time.monotonic()
         first = sid not in self.spent
         if first and now - self.queued.get(sid, now) > STALE_S:
-            return 'too late', pcm
+            return 'too late', pcm, False
         if first and self._cached('dnd', 5.0, dnd_on):
-            return 'do not disturb', pcm
+            return 'do not disturb', pcm, False
         spent = self.spent.get(sid, 0.0)
         if not first and spent + dur > CAP_S:
-            return 'reply cap', pcm
-        if first and dur > CAP_S:
+            return 'reply cap', pcm, False
+        trimmed = first and dur > CAP_S
+        if trimmed:
             n, fade = int(CAP_S * TTS_RATE), int(0.15 * TTS_RATE)
             pcm = pcm[:n].copy()
             pcm[-fade:] *= np.linspace(1, 0, fade, dtype=np.float32)
             dur = CAP_S
         if self.budget_used(now) + dur > BUDGET_S:
-            return 'speech budget', pcm
+            return 'speech budget', pcm, False
         self.spent[sid] = spent + dur
-        return None, pcm
+        return None, pcm, trimmed
 
     def played(self, secs):
         self.heard.append((time.monotonic(), secs))
@@ -2808,77 +2809,89 @@ class Voice:
 
     def _play_loop(self):
         while True:
-            with self.cv:
-                while not self.play_q:
-                    self.cv.wait()
-                sid, text, pcm, shp, t_recv, synth, gen, unprompted = self.play_q.pop(0)
-                if gen != self.hush_gen:
-                    continue
-            t = now_ms()
-            why = self.gate.now_why(unprompted)
-            if not why and unprompted:
-                why, pcm = self.gate.check(sid, len(pcm) / TTS_RATE, pcm)
-            self.gate.check_ms = now_ms() - t
-            if why:
-                self.skip(sid, why)
-                continue
-            if (TEST and (not SINK or SINK.startswith('alsa_'))) or node_missing('sinks', SINK):
-                self.skip(sid, 'test sink missing' if TEST else 'its sink is gone')   # never the default instead
-                continue
-            with self.cv:
-                if gen != self.hush_gen or sid in self.gate.dropped:
-                    continue
-                cmd = ['pw-play', '--rate', str(TTS_RATE), '--channels', '1', '--format', 's16', '--raw',
-                       '-P', '{ application.name = "capri-voice" media.name = "capri-voice speech" node.dont-reconnect = true node.dont-fallback = true }']
-                if SINK:
-                    cmd += ['--target', SINK]
-                if WIN:
-                    try:
-                        p = _win.Player(TTS_RATE, SINK)
-                    except Exception as e:
-                        log(f'say {sid}: no output ({e})')
-                        p = None
-                else:
-                    p = subprocess.Popen(cmd + ['-'], stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
-                self.player, self.playing = p, sid
-            if p is None:
-                with self.cv:
-                    self.player, self.playing = None, None
-                self.skip(sid, 'no audio output')
-                continue
-            data = (np.clip(pcm, -1, 1) * 32767).astype(np.int16).tobytes()
-            t0 = now_ms()
-            # For hands-free: her level on a 20 ms grid (the echo check) and her words (the echo guard).
-            self.played = {'t0': time.time(), 'env': env_db(pcm, int(TTS_RATE * 0.02))}
-            self.said.append((time.time() + len(pcm) / TTS_RATE, words_of(strip_markup(text))))
-            self.emit(ev='say-start', id=sid, text=text, dur_ms=round(len(pcm) / TTS_RATE * 1000), step_ms=STEP_MS, shapes=shp,
-                      ms={'queued_to_audio': round(t0 - t_recv), 'synth': round(synth)})
-            log(f'say {sid}: {len(text)} chars, synth {synth:.0f} ms, recv->audio {t0 - t_recv:.0f} ms, {len(pcm) / TTS_RATE:.2f} s, '
-                f'gate {self.gate.check_ms:.0f} ms' + (' (unprompted)' if unprompted else ''))
-            # Fed from a thread (pw-play takes its input in big gulps), so a sentence stops within
-            # ~0.4 s if a call starts or the screen locks under it.
-            threading.Thread(target=feed, args=(p, data), daemon=True).start()
-            why, rc = None, None
-            while True:
-                try:
-                    rc = p.wait(timeout=0.35)
-                    break
-                except subprocess.TimeoutExpired:
-                    if why is None and (why := self.gate.now_why(unprompted)):
-                        p.kill()
-            if unprompted:
-                self.gate.played(len(pcm) / TTS_RATE if why is None else (now_ms() - t0) / 1000)
+            self._play_one()
+
+    def _player(self, sid):
+        """Her speech out: a pw-play process (Windows: its stand-in), or None."""
+        if WIN:
+            try:
+                return _win.Player(TTS_RATE, SINK)
+            except Exception as e:
+                log(f'say {sid}: no output ({e})')
+                return None
+        cmd = ['pw-play', '--rate', str(TTS_RATE), '--channels', '1', '--format', 's16', '--raw',
+               '-P', '{ application.name = "capri-voice" media.name = "capri-voice speech" node.dont-reconnect = true node.dont-fallback = true }']
+        if SINK:
+            cmd += ['--target', SINK]
+        return subprocess.Popen(cmd + ['-'], stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+
+    def _play_one(self):
+        """Play the next sentence (waits for one), then say how it ended: say-end (cut when its
+        player ended early or the Gate trimmed it), say-skipped, or nothing (hushed, dropped)."""
+        with self.cv:
+            while not self.play_q:
+                self.cv.wait()
+            sid, text, pcm, shp, t_recv, synth, gen, unprompted = self.play_q.pop(0)
+            if gen != self.hush_gen:
+                return
+        t = now_ms()
+        trimmed = False
+        why = self.gate.now_why(unprompted)
+        if not why and unprompted:
+            why, pcm, trimmed = self.gate.check(sid, len(pcm) / TTS_RATE, pcm)
+        self.gate.check_ms = now_ms() - t
+        if why:
+            self.skip(sid, why)
+            return
+        if (TEST and (not SINK or SINK.startswith('alsa_'))) or node_missing('sinks', SINK):
+            self.skip(sid, 'test sink missing' if TEST else 'its sink is gone')   # never the default instead
+            return
+        with self.cv:
+            if gen != self.hush_gen or sid in self.gate.dropped:
+                return
+            p = self._player(sid)
+            self.player, self.playing = p, sid
+        if p is None:
             with self.cv:
                 self.player, self.playing = None, None
-                hushed = gen != self.hush_gen or sid in self.gate.dropped
-            if why:
-                self.skip(sid, why)
-            elif not hushed and rc:
-                # Its player ended early (killed from outside, its sink gone): not said whole.
-                log(f'say {sid}: player ended early (exit {rc})')
-                self.emit(ev='say-end', id=sid, cut=True)
-            elif not hushed:
-                self.emit(ev='say-end', id=sid)
+            self.skip(sid, 'no audio output')
+            return
+        data = (np.clip(pcm, -1, 1) * 32767).astype(np.int16).tobytes()
+        t0 = now_ms()
+        # For hands-free: her level on a 20 ms grid (the echo check) and her words (the echo guard).
+        self.played = {'t0': time.time(), 'env': env_db(pcm, int(TTS_RATE * 0.02))}
+        self.said.append((time.time() + len(pcm) / TTS_RATE, words_of(strip_markup(text))))
+        self.emit(ev='say-start', id=sid, text=text, dur_ms=round(len(pcm) / TTS_RATE * 1000), step_ms=STEP_MS, shapes=shp,
+                  ms={'queued_to_audio': round(t0 - t_recv), 'synth': round(synth)})
+        log(f'say {sid}: {len(text)} chars, synth {synth:.0f} ms, recv->audio {t0 - t_recv:.0f} ms, {len(pcm) / TTS_RATE:.2f} s, '
+            f'gate {self.gate.check_ms:.0f} ms' + (' (unprompted)' if unprompted else '') + (', trimmed to the cap' if trimmed else ''))
+        # Fed from a thread (pw-play takes its input in big gulps), so a sentence stops within
+        # ~0.4 s if a call starts or the screen locks under it.
+        threading.Thread(target=feed, args=(p, data), daemon=True).start()
+        why, rc = None, None
+        while True:
+            try:
+                rc = p.wait(timeout=0.35)
+                break
+            except subprocess.TimeoutExpired:
+                if why is None and (why := self.gate.now_why(unprompted)):
+                    p.kill()
+        if unprompted:
+            self.gate.played(len(pcm) / TTS_RATE if why is None else (now_ms() - t0) / 1000)
+        with self.cv:
+            self.player, self.playing = None, None
+            hushed = gen != self.hush_gen or sid in self.gate.dropped
+        if why:
+            self.skip(sid, why)
+        elif not hushed and rc:
+            # Its player ended early (killed from outside, its sink gone): not said whole.
+            log(f'say {sid}: player ended early (exit {rc})')
+            self.emit(ev='say-end', id=sid, cut=True)
+        elif not hushed and trimmed:
+            # Played to its end, but only the cap's worth of it: not said whole either.
+            self.emit(ev='say-end', id=sid, cut=True)
+        elif not hushed:
+            self.emit(ev='say-end', id=sid)
 
     # -- protocol
     def handle(self, msg):
@@ -3044,8 +3057,9 @@ def selftest_gate():
     assert g.check(1, 4.0, one)[0] is None and g.check(1, 4.0, one)[0] is None
     assert g.check(1, 4.0, one)[0] == 'reply cap', 'one reply: 10 s at most'
     long = np.ones(int(12 * TTS_RATE), np.float32)
-    why, cut = g.check(2, 12.0, long)
+    why, cut, trimmed = g.check(2, 12.0, long)
     assert why is None and len(cut) == int(CAP_S * TTS_RATE) and cut[-1] == 0.0, 'a first sentence over the cap is cut, faded'
+    assert trimmed and not g.check(5, 4.0, one)[2], 'and it says so (its say-end is cut); one under the cap is whole'
     g.played(8.0)
     g.played(10.0)
     assert g.check(3, 4.0, one)[0] == 'speech budget', 'at most 20 s in any 60 s'

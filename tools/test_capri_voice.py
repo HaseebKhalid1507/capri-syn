@@ -6,8 +6,9 @@ crash repair on fake sessions, the call check's reading of the privacy store, an
 the sidecar wires it all in. What needs a real desktop is [VM] (docs/WINDOWS.md).
 
 python3 tools/test_capri_voice.py   (needs numpy; on Windows also sounddevice, for the smoke checks)"""
-import atexit, importlib.machinery, importlib.util, io, json, os, shutil, socket, sys, tempfile, threading, time, unittest
+import atexit, collections, importlib.machinery, importlib.util, io, json, os, shutil, socket, sys, tempfile, threading, time, unittest
 from contextlib import redirect_stderr, redirect_stdout
+from unittest import mock
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -152,6 +153,100 @@ class Link(unittest.TestCase):
         self.stop.set()
         self.t.join(5)
         self.assertFalse(os.path.exists(self.path))
+
+
+class FakePlayer:
+    """pw-play as _play_one sees it: its input, its exit code (0 played to the end; -9 killed, 1 its
+    sink gone), kill."""
+
+    def __init__(self, rc):
+        self.rc, self.stdin, self.killed = rc, io.BytesIO(), False
+
+    def wait(self, timeout=None):
+        return self.rc
+
+    def kill(self):
+        self.killed = True
+
+
+class SayEnd(unittest.TestCase):
+    """How a sentence's say-end reads: the avatar counts a reply read only from whole ones (no cut,
+    no error), so a sentence cut short or trimmed to the cap must say cut."""
+
+    def voice(self, rc):
+        v = object.__new__(CV.Voice)
+        v.lock = threading.Lock()
+        v.cv = threading.Condition(v.lock)
+        v.gate = CV.Gate()
+        v.gate.now_why = lambda unprompted=True: None          # not locked, no call
+        v.gate.cache['dnd'] = (time.monotonic() + 1e6, False)   # no do-not-disturb
+        v.play_q, v.hush_gen, v.player, v.playing, v.played = [], 0, None, None, None
+        v.said = collections.deque(maxlen=40)
+        v.events = []
+        v.emit = lambda **ev: v.events.append(ev)
+        v._player = lambda sid: FakePlayer(rc)
+        return v
+
+    def play(self, rc, secs, unprompted=False):
+        v = self.voice(rc)
+        pcm = CV.np.full(int(secs * CV.TTS_RATE), 0.1, CV.np.float32)
+        v.play_q.append((7, 'A sentence.', pcm, [], CV.now_ms(), 0.0, 0, unprompted))
+        with mock.patch.object(CV, 'TEST', None), mock.patch.object(CV, 'node_missing', lambda kind, name: False), \
+                redirect_stderr(io.StringIO()):
+            v._play_one()
+        self.assertEqual(v.events[0]['ev'], 'say-start', v.events)
+        self.assertEqual([e['ev'] for e in v.events[1:]], ['say-end'], v.events)
+        return v.events[0], v.events[1]
+
+    def test_played_to_its_end_is_whole(self):
+        _, end = self.play(0, 1.0)
+        self.assertEqual(end, {'ev': 'say-end', 'id': 7})
+        _, end = self.play(0, 4.0, unprompted=True)
+        self.assertEqual(end, {'ev': 'say-end', 'id': 7}, 'an unprompted one under the cap')
+
+    def test_a_player_that_ended_early_says_cut(self):
+        for rc in (-9, 1):     # killed from outside (Python's -SIGKILL); its sink unloaded mid-play
+            _, end = self.play(rc, 1.0)
+            self.assertEqual(end, {'ev': 'say-end', 'id': 7, 'cut': True}, rc)
+
+    def test_a_first_sentence_trimmed_to_the_cap_says_cut(self):
+        start, end = self.play(0, 13.0, unprompted=True)
+        self.assertEqual(start['dur_ms'], round(CV.CAP_S * 1000), 'what plays is the cap')
+        self.assertEqual(end, {'ev': 'say-end', 'id': 7, 'cut': True}, 'its player exits 0, but it was not said whole')
+        _, end = self.play(0, 13.0)
+        self.assertEqual(end, {'ev': 'say-end', 'id': 7}, 'his own turn has no cap: whole')
+
+
+class WindowsPlayer(unittest.TestCase):
+    """capri_voice_win.Player.wait answers as pw-play exits: 0 only when all it was given played."""
+
+    class Stream:
+        def close(self):
+            pass
+
+        def abort(self):
+            pass
+
+    def player(self, n, played, eof=True):
+        p = object.__new__(win.Player)
+        p.buf, p.pos, p.eof = bytearray(n), played, eof
+        p.lk, p.done = threading.Lock(), threading.Event()
+        p.stream = self.Stream()
+        return p
+
+    def test_wait(self):
+        p = self.player(4800, 0)
+        with self.assertRaises(win.subprocess.TimeoutExpired):
+            p.wait(timeout=0.01)
+        p.pos = 4800
+        p.done.set()
+        self.assertEqual(p.wait(timeout=0.01), 0, 'played to its end')
+        p = self.player(4800, 1200)
+        p.kill()
+        self.assertEqual(p.wait(timeout=0.01), 1, 'killed mid-sentence')
+        p = self.player(4800, 4800, eof=False)
+        p.kill()
+        self.assertEqual(p.wait(timeout=0.01), 1, 'killed before its input closed')
 
 
 class FakeSessions:

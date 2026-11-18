@@ -16,11 +16,16 @@
 - A spoken reply heard to its last word counts as read: no unread strip, no `N NEW` (the Line and
   `state`'s `unread` agree: they are the one strip). His spoken turns' replies and events' alike, hands-free
   or not; it was hands-free only, and from her first word.
-- Cut off (a tap on her, `$mod+c`, Esc, music, a new turn, his voice over hers, the sidecar's gate, the
-  sidecar going or restarting mid-say) or said in part (past the cap or 60 words, after `---`, code, a
-  table, a link) it stays unread. `docs/VOICE.md`, "Heard whole is read".
-- `capri-voice`: a `say-end` whose player ended early (nonzero exit: killed from outside, its sink gone)
-  carries `"cut": true`; the avatar counts it short. An older sidecar's plain `say-end` is whole.
+- Cut off (a tap on her, Esc, music, a new turn, his voice over hers, the sidecar's gate, the sidecar
+  going or restarting mid-say) or said in part (past the cap or 60 words, after `---`, code, a table, a
+  link) it stays unread. `$mod+c` cuts her too, but opens the Line, so the reply is read there as seen.
+  `docs/VOICE.md`, "Heard whole is read".
+- The strip counts each missed reply and shows the newest; one heard whole after its bubble went drops
+  only itself (it cleared the count's newest, whichever reply that was, and kept its line).
+- `capri-voice`: a `say-end` carries `"cut": true` when its player ended early (nonzero exit: killed from
+  outside, its sink gone) or the gate trimmed it to the 10 s cap (an event's long first sentence); the
+  avatar counts it short. An older sidecar's plain `say-end` is whole. Windows: the player's `wait`
+  reports a stream that didn't play all it was given (it always said 0).
 
 ### The HUD moves as one system
 - One curve (ease-out, 2 % past the target at most, no wobble) and one set of durations, named in
