@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### The HUD moves as one system
+- One curve (ease-out, 2 % past the target at most, no wobble) and one set of durations, named in
+  `src/hud.rs`: a size change 240 ms, the bubble opening 260 ms, closing 200 ms, the tag's text swap
+  220 ms, a new reply's pulse 160 ms.
+- **The bubble** opens from her (85 % at her tail) with a glitch-in (bands of whole rows assemble, an
+  RGB split, a one-step red tear); grows and shrinks to its reply instead of snapping; a new reply in
+  it pulses two bands (streaming text never glitches); closing, it glitches out and shrinks, or shrinks
+  into the pill. The pill opens back out of its own size.
+- **The tag** (and the pill, and the unread chip) glitch-swaps its text: the old text slices out, the
+  new slices in, while the plate's width eases to the new text. A burst of changes swaps quietly (one
+  glitch per element per 600 ms, and only after 600 ms of calm): no strobe. It glitches in and out in
+  place, and comes and goes quietly when something else moves it (the bubble, a teleport, his hand).
+- `[hud] glitch` and `[hud] motion` (both default on). Alpha mode only: under the X shape (no
+  compositor) the HUD changes at once, as before. The Line and the menu don't glitch.
+- `SA_HUD_PROF=1` logs frame intervals and main-thread frame times while the HUD moves.
+
 ### One installer: `install.sh` (Linux), `install.ps1` (Windows)
 - `curl -fsSL …/install.sh | bash`, `irm …/install.ps1 | iex`, or either from a checkout. Seven steps, the
   same on both, each one checks first, so a rerun is an upgrade:
