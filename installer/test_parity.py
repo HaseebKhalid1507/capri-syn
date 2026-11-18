@@ -79,9 +79,13 @@ class Parity(unittest.TestCase):
 
     def test_both_run_whole_or_not_at_all(self):
         # A cut-off download must not run half: install.sh is all functions until its last line;
-        # install.ps1 is one module whose closing brace is its last line.
+        # install.ps1 is one module (its last statement runs it), piped into the block that turns a
+        # stop into exit 1; a cut inside either leaves a brace open, so nothing parses.
         self.assertEqual(SH.rstrip().splitlines()[-1], 'main "$@"')
-        self.assertEqual(PS.rstrip().splitlines()[-2:], ["Invoke-CapriInstall $CliArgs", "}"])
+        tail = PS.rstrip().splitlines()
+        self.assertEqual(tail[-1], "}")
+        module_end = tail.index("} | ForEach-Object {")
+        self.assertIn("try { Invoke-CapriInstall $CliArgs }", tail[module_end - 6:module_end])
 
     def test_install_ps1_leaves_nothing_in_the_callers_scope(self):
         # `irm | iex` runs it in his session's scope: above the module only comments, the analyzer's

@@ -19,7 +19,7 @@ param()
 
 # All of it runs in a module of its own: `irm | iex` runs a script in the caller's scope, and this
 # leaves nothing there (no variables, functions or preferences). A cut-off download doesn't parse
-# (the module's closing brace is the last line), so it never runs half. Not indented, for diffs.
+# (the module's last line closes it), so it never runs half. Not indented, for diffs.
 New-Module -Name capri-install -ReturnResult -ErrorAction Stop -ArgumentList (, [string[]]$args) -ScriptBlock {
 param([string[]]$CliArgs)
 Export-ModuleMember -Function @()
@@ -85,9 +85,10 @@ function Write-Action([string]$Text) { Write-Host "   `$ $Text" -ForegroundColor
 function Invoke-Native([string]$Exe, [string[]]$ArgList) {
     Write-Action (Format-Command (@($Exe) + $ArgList))
     if ($script:Dry) { return }
-    # A native program's stderr (progress, warnings) is not an error: 5.1 would throw on it.
+    # A native program's stderr (progress, warnings) is not an error: 5.1 would throw on it. Its
+    # stdout goes to the console as it comes: in the module it would be held until the end.
     $ErrorActionPreference = 'Continue'
-    & $Exe @ArgList
+    & $Exe @ArgList | Out-Host
     if ($LASTEXITCODE) { Stop-Install "$(Split-Path -Leaf $Exe) failed (exit $LASTEXITCODE)" }
 }
 # Anything else: its description printed, the block run unless --dry-run.
@@ -480,16 +481,31 @@ function Install-Binary {
     Build-FromSource
 }
 
-function Find-VCTools {
+function Find-VCTools([switch]$AnyVS) {
     $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
     if (-not (Test-Path $vswhere)) { return $null }
-    $p = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+    # -AnyVS: Build Tools or a Visual Studio edition, with or without the C++ tools (only those four:
+    # SSMS and other products on the same installer can't take the C++ workload).
+    $req = if ($AnyVS) {
+        @('-products', 'Microsoft.VisualStudio.Product.BuildTools', 'Microsoft.VisualStudio.Product.Community',
+            'Microsoft.VisualStudio.Product.Professional', 'Microsoft.VisualStudio.Product.Enterprise')
+    } else { @('-products', '*', '-requires', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64') }
+    $p = & $vswhere -latest @req -property installationPath
     if ($p) { return [string]$p } else { return $null }
 }
 
 function Build-FromSource {
     $src = Get-Source $script:Ref
-    if (-not (Find-VCTools)) {
+    $vs = if (Find-VCTools) { $null } else { Find-VCTools -AnyVS }
+    if ($vs) {
+        # winget can't add a workload to a Visual Studio that's there (it says "installed" and stops):
+        # its own installer does, and that's his call (admin, ~2 GB).
+        $vsi = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\setup.exe'
+        Write-Info "Visual Studio is here ($vs) without its C++ build tools, which Rust on Windows links with. Add them"
+        Write-Info "in the Visual Studio Installer (Modify, then 'Desktop development with C++'), or as admin:"
+        Write-Info "  $(Format-Command @($vsi, 'modify', '--installPath', $vs, '--add', 'Microsoft.VisualStudio.Workload.VCTools', '--includeRecommended', '--passive'))"
+        if ($script:Dry) { Write-Info '(a real run stops here)' } else { Stop-Install 'then run this again' }
+    } elseif (-not (Find-VCTools)) {
         $wg = @('install', '--id', 'Microsoft.VisualStudio.2022.BuildTools', '-e', '--accept-package-agreements', '--accept-source-agreements',
             '--override', '--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended')
         Write-Info "Rust on Windows links with Visual Studio's C++ build tools (not installed; ~3 GB, admin):"
@@ -499,7 +515,33 @@ function Build-FromSource {
             else { Stop-Install 'no winget: install the C++ build tools from https://visualstudio.microsoft.com/visual-cpp-build-tools/, then run this again' }
         }
         if (-not (Confirm-Action 'install them with winget (a UAC prompt)')) { Stop-Install 'run that (or this script with --yes), then run this again' }
-        Invoke-Native 'winget' $wg
+        Write-Action (Format-Command (@('winget') + $wg))
+        if (-not $script:Dry) {
+            $ErrorActionPreference = 'Continue'
+            & winget @wg | Out-Host
+            $rc = $LASTEXITCODE
+            # 0x8A15002B: Settings > Apps lists Build Tools with nothing newer to install, yet Visual
+            # Studio's installer has no record of it (an interrupted install). winget then installs
+            # nothing; --force runs it again, which works once its old folder is gone (VS won't install
+            # into a folder that isn't empty, and winget still says it succeeded).
+            if ($rc -eq -1978335189) {
+                $bt = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\2022\BuildTools'
+                if ((Test-Path -LiteralPath $bt) -and (Get-ChildItem -Force -LiteralPath $bt | Select-Object -First 1)) {
+                    Stop-Install "Visual Studio Build Tools 2022 is listed in Settings > Apps, but Visual Studio's installer has no record of it (an interrupted install), and its folder isn't empty, so it can't be installed again. As admin, delete $bt, then run this again"
+                }
+                Write-Info "winget lists it as installed, but it isn't there (an interrupted install): it can install it again"
+                if (-not (Confirm-Action 'install them again with winget --force (another UAC prompt)')) {
+                    Stop-Install 'run that with --force (or this script with --yes), then run this again'
+                }
+                Write-Action (Format-Command (@('winget') + $wg + '--force'))
+                & winget @($wg + '--force') | Out-Host
+                $rc = $LASTEXITCODE
+            }
+            $ErrorActionPreference = 'Stop'
+            if ($rc) { Stop-Install "winget failed (exit $rc)" }
+            if (-not (Find-VCTools)) { Stop-Install "winget finished, but Visual Studio's C++ build tools still aren't there (the UAC prompt declined?): run this again, or install 'Desktop development with C++' from https://visualstudio.microsoft.com/visual-cpp-build-tools/" }
+            Write-Good "Visual Studio's C++ build tools"
+        }
     } else {
         Write-Good "Visual Studio's C++ build tools"
     }
@@ -533,9 +575,9 @@ function Build-FromSource {
         if ($script:Dry -or $LASTEXITCODE) { Invoke-Native $rustup @('toolchain', 'install') }
         $env:CARGO_TARGET_DIR = $target
         Write-Info 'building (release; the first build takes a while, later ones only what changed)'
-        $t0 = Get-Date
+        $t0 = [Diagnostics.Stopwatch]::StartNew()   # not the wall clock: a time sync can jump it
         Invoke-Native $cargo @('rustc', '--locked', '--release', '--bin', 'synaps-avatar', '--', '-C', 'link-arg=/SUBSYSTEM:WINDOWS', '-C', 'link-arg=/ENTRY:mainCRTStartup')
-        if (-not $script:Dry) { Write-Good "built in $([int]((Get-Date) - $t0).TotalMinutes) min" }
+        if (-not $script:Dry) { Write-Good "built in $([Math]::Max(1, [int]$t0.Elapsed.TotalMinutes)) min" }
     } finally {
         if (-not $script:Dry) { Pop-Location }
         Remove-Item Env:\CARGO_TARGET_DIR -ErrorAction SilentlyContinue
@@ -707,12 +749,15 @@ function Start-Daemon {
     $s = ''
     if (-not $script:Dry) { $s = (& $script:Synaps daemon status 2>&1 | Out-String); $up = ($LASTEXITCODE -eq 0) } else { $up = $false }
     if (-not $up) { Invoke-Native $script:Synaps @('daemon', '--detach') }
-    # At sign-in: Synaps has no service on Windows; a Run value starts it (whether a console flashes: docs/WINDOWS.md item 15).
+    # At sign-in: Synaps has no service on Windows; a Run value starts it. `synaps.exe` is a console
+    # program: run as is, it opens a terminal that takes the foreground for a moment (seen in the VM).
+    # A headless conhost gives it a console nobody sees (the daemon it starts has its own, hidden).
+    # An EDR may flag that pattern: docs/WINDOWS.md ("conhost --headless and security software").
     $run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
     $theirs = (Get-ItemProperty -Path $run -ErrorAction SilentlyContinue).PSObject.Properties |
         Where-Object { $_.Name -ne 'synaps-daemon' -and "$($_.Value)" -match 'synaps' -and "$($_.Value)" -match 'daemon' } | Select-Object -First 1
     if ($theirs) { Write-Good "your Run\$($theirs.Name) starts the daemon at sign-in" }
-    else { Set-RunValue 'synaps-daemon' "`"$($script:Synaps)`" daemon --detach" }
+    else { Set-RunValue 'synaps-daemon' "`"$env:SystemRoot\System32\conhost.exe`" --headless `"$($script:Synaps)`" daemon --detach" }
     $script:DaemonHow = 'at sign-in (Run key)'
     if ($script:Dry) { $script:DaemonState = '(dry run)'; return }
     for ($i = 0; $i -lt 20; $i++) {
@@ -830,9 +875,11 @@ function Invoke-Brain {
     Write-Host '   ? pick one now [Y/n] ' -ForegroundColor Red -NoNewline
     $a = Read-Host
     if ($a -and $a -notmatch '^(y|yes)$') { Write-Info 'later, then: run that line when you want her to answer'; return }
+    # The picker draws on the console itself: Start-Process hands it the console (inside the module, a
+    # native command's output is a pipe, not the console).
     $ErrorActionPreference = 'Continue'
-    & $script:Synaps login
-    if ($LASTEXITCODE -eq 0 -and (Test-Brain)) { Write-Good 'her brain: logged in (no restart: the daemon reads it on her next turn)' }
+    $p = Start-Process -FilePath $script:Synaps -ArgumentList 'login' -NoNewWindow -Wait -PassThru
+    if ($p.ExitCode -eq 0 -and (Test-Brain)) { Write-Good 'her brain: logged in (no restart: the daemon reads it on her next turn)' }
     else { Write-Warn "no login yet: run ``$cmd`` when you want her to answer" }
 }
 
@@ -1045,5 +1092,15 @@ function Invoke-CapriInstall([string[]]$ArgList) {
     }
 }
 
-Invoke-CapriInstall $CliArgs
+# A stop is said in red already (Stop-Install): no PowerShell error record after it. The module
+# can't exit its caller, so it hands a marker out (below).
+try { Invoke-CapriInstall $CliArgs }
+catch {
+    if ("$($_.Exception.Message)" -notlike 'install.ps1: *') { throw }
+    [char]0 + 'capri-install-stopped'
+}
+} | ForEach-Object {
+    # Run from a file (`-File`, `& .\install.ps1`): a stop is exit 1. Under `irm | iex` there's no
+    # file, and an exit would close his window: the red line says it.
+    if ("$_" -cne ([char]0 + 'capri-install-stopped')) { $_ } elseif ($PSCommandPath) { exit 1 }
 }

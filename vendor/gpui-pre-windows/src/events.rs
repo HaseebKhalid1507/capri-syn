@@ -28,6 +28,11 @@ pub(crate) const WM_GPUI_FORCE_UPDATE_WINDOW: u32 = WM_USER + 5;
 pub(crate) const WM_GPUI_KEYBOARD_LAYOUT_CHANGED: u32 = WM_USER + 6;
 pub(crate) const WM_GPUI_GPU_DEVICE_LOST: u32 = WM_USER + 7;
 pub(crate) const WM_GPUI_DISPLAYS_CHANGED: u32 = WM_USER + 10;
+/// synaps-avatar PW-6: a display change, run from the message loop (`set_display`). Far above
+/// GPUI's own `WM_USER + 1..=10`, so a message upstream adds there can't take its number; still
+/// class-private (`WM_USER..0x7FFF`). Its `wparam` is the window's `validation_number`: the same
+/// number posted by anything else is ignored.
+pub(crate) const WM_SYNAPS_DISPLAY_CHANGED: u32 = WM_USER + 0x5A6;
 
 const SIZE_MOVE_LOOP_TIMER_ID: usize = 1;
 
@@ -163,6 +168,7 @@ impl WindowsWindowInner {
             WM_GPUI_CURSOR_STYLE_CHANGED
             | WM_GPUI_FORCE_UPDATE_WINDOW
             | WM_GPUI_GPU_DEVICE_LOST => self.handle_gpui_events(handle, msg, wparam, lparam),
+            WM_SYNAPS_DISPLAY_CHANGED if wparam.0 == self.validation_number => self.run_display_changed(),
             _ => None,
         };
         if let Some(n) = handled {
@@ -194,7 +200,7 @@ impl WindowsWindowInner {
             // monitor is invalid, we do nothing.
             if !monitor.is_invalid() && self.state.display.get().handle != monitor {
                 // we will get the same monitor if we only have one
-                self.set_display(WindowsDisplay::new(
+                self.set_display(handle, WindowsDisplay::new(
                     WindowsDisplay::display_id_for_monitor(monitor),
                 )?);
             }
@@ -957,16 +963,26 @@ impl WindowsWindowInner {
             return None;
         }
         let new_display = WindowsDisplay::new(WindowsDisplay::display_id_for_monitor(new_monitor))?;
-        self.set_display(new_display);
+        self.set_display(handle, new_display);
         Some(0)
     }
 
-    fn set_display(&self, display: WindowsDisplay) {
+    fn set_display(&self, handle: HWND, display: WindowsDisplay) {
         self.state.display.set(display);
+        // synaps-avatar PW-6: from the message loop (a move inside an App update sends WM_MOVE at once).
+        if crate::synaps_patches::display_change_is_posted() {
+            unsafe { PostMessageW(Some(handle), WM_SYNAPS_DISPLAY_CHANGED, WPARAM(self.validation_number), LPARAM(0)) }.log_err();
+            return;
+        }
+        self.run_display_changed();
+    }
+
+    fn run_display_changed(&self) -> Option<isize> {
         if let Some(mut callback) = self.state.callbacks.display_changed.take() {
             callback();
             self.state.callbacks.display_changed.set(Some(callback));
         }
+        Some(0)
     }
 
     fn handle_hit_test_msg(&self, handle: HWND, lparam: LPARAM) -> Option<isize> {

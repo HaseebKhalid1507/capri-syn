@@ -109,7 +109,7 @@ $status = (& $synaps daemon status 2>&1 | Out-String)
 $ErrorActionPreference = 'Stop'
 Check ($status -match 'daemon: running') 'the Synaps daemon runs'
 Check ($status -match 'protocol: 3') 'protocol 3 (her client)'
-Check ((Get-RunValue 'synaps-daemon') -match 'synaps\.exe" daemon --detach$') 'the daemon starts at sign-in (Run\synaps-daemon)'
+Check ((Get-RunValue 'synaps-daemon') -match '^"[^"]*\\conhost\.exe" --headless "[^"]*synaps\.exe" daemon --detach$') 'the daemon starts at sign-in, hidden (Run\synaps-daemon: conhost --headless)'
 Check (-not (Get-RunValue 'synaps-avatar')) 'no autostart for her (--no-autostart)'
 $r = Get-Content $receipt
 Check (($r | Where-Object { $_ -like "prefix`t*" }) -contains "prefix`t$app") 'the receipt records her prefix'

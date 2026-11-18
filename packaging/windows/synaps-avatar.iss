@@ -55,8 +55,10 @@ Name: autostart; Description: "Start her when I sign in"; Flags: unchecked
 Source: "{#Exe}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#IconDir}\synaps-avatar.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#IconDir}\synaps-avatar.png"; DestDir: "{app}"; Flags: ignoreversion
-; His pack, from his disk at install time (`external`): never inside this installer.
-Source: "{code:PackSource}\*"; DestDir: "{code:PackDest}"; Flags: external recursesubdirs createallsubdirs ignoreversion; Check: HavePack
+; His pack, from his disk at install time (`external`): never inside this installer. Setup sizes
+; external files at startup, before his pick: PackSource is then a folder that isn't there (an empty
+; one made `\*` the root of C:, and the whole drive became her size in Settings, seen in the VM).
+Source: "{code:PackSource}\*"; DestDir: "{code:PackDest}"; Flags: external recursesubdirs createallsubdirs ignoreversion skipifsourcedoesntexist; Check: HavePack
 
 [InstallDelete]
 ; A new pack replaces the old one whole (no stale frames from the last).
@@ -105,17 +107,26 @@ begin
   Result := ExpandConstant('{localappdata}\synaps-avatar\packs\capri');
 end;
 
-function PackSource(Param: String): String;
+{ His pick on the pack page ('' before the page exists, or when he left it empty). }
+function PackChosen: String;
 begin
   Result := '';
   if PackPage <> nil then
     Result := RemoveBackslashUnlessRoot(Trim(PackPage.Values[0]));
 end;
 
+{ The [Files] source: his pick, else a folder that can't exist (never '': `\*` is a drive's root). }
+function PackSource(Param: String): String;
+begin
+  Result := PackChosen;
+  if Result = '' then
+    Result := ExpandConstant('{tmp}') + '\no-pack-chosen';
+end;
+
 { A pack to copy: given, and not the destination itself. }
 function HavePack: Boolean;
 begin
-  Result := (PackSource('') <> '') and (CompareText(ExpandFileName(PackSource('')), PackDest('')) <> 0);
+  Result := (PackChosen <> '') and (CompareText(ExpandFileName(PackChosen), PackDest('')) <> 0);
 end;
 
 function PackReady: Boolean;
@@ -172,7 +183,7 @@ var
 begin
   Result := True;
   if CurPageID = PackPage.ID then begin
-    E := PackError(PackSource(''));
+    E := PackError(PackChosen);
     if E <> '' then begin
       Log('pack: ' + E);
       SuppressibleMsgBox(E, mbError, MB_OK, IDOK);
@@ -184,5 +195,5 @@ end;
 { The same check before anything is installed, whatever the page did. }
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
-  Result := PackError(PackSource(''));
+  Result := PackError(PackChosen);
 end;

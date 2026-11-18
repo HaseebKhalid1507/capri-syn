@@ -292,9 +292,52 @@ def sink_kind(with_id=False):
 
 # ---- the session: lock, calls, do-not-disturb --------------------------------------------------
 
+_lock_unknown = set()
+
+
+def lock_unknown(why):
+    """session_locked() can't tell: logged once per reason (it is asked every second), then None:
+    the input desktop is the whole answer again."""
+    if why not in _lock_unknown:
+        _lock_unknown.add(why)
+        log(f"lock: the session's lock state is unknown ({why}): only a secure desktop counts as locked")
+    return None
+
+
+def session_locked():
+    """His session's own lock state (WTSSessionInfoEx's SessionFlags): True locked, False not, None
+    unknown (logged once). Windows 11's lock screen (LockApp's curtain) runs on the "Default"
+    desktop, so the input desktop alone missed it: the wake word's mic stayed open on the lock
+    screen until she hid (14 s, seen in the VM, build 26300)."""
+    import ctypes
+    from ctypes import wintypes
+    wts, k32 = ctypes.WinDLL('wtsapi32'), ctypes.WinDLL('kernel32')
+    query = wts.WTSQuerySessionInformationW
+    query.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.DWORD)]
+    query.restype = wintypes.BOOL
+    wts.WTSFreeMemory.argtypes = [ctypes.c_void_p]
+    sid = wintypes.DWORD()
+    if not k32.ProcessIdToSessionId(k32.GetCurrentProcessId(), ctypes.byref(sid)):
+        return lock_unknown(f'ProcessIdToSessionId failed: {ctypes.GetLastError()}')
+    buf, n = ctypes.c_void_p(), wintypes.DWORD()
+    if not query(None, sid, 25, ctypes.byref(buf), ctypes.byref(n)):     # WTSSessionInfoEx
+        return lock_unknown(f'WTSQuerySessionInformation failed: {ctypes.GetLastError()}')
+    try:
+        # WTSINFOEXW: DWORD Level (1), then WTSINFOEX_LEVEL1_W, 8-aligned (it holds LARGE_INTEGERs):
+        # SessionId @8, SessionState @12, SessionFlags @16 (0 WTS_SESSIONSTATE_LOCK, 1 UNLOCK).
+        if not buf.value or n.value < 20 or ctypes.c_uint32.from_address(buf.value).value != 1:
+            return lock_unknown(f'an unexpected WTSINFOEX ({n.value} bytes)')
+        flags = ctypes.c_int32.from_address(buf.value + 16).value
+        return {0: True, 1: False}.get(flags) if flags in (0, 1) else lock_unknown(f'SessionFlags {flags}')
+    finally:
+        wts.WTSFreeMemory(buf)
+
+
 def screen_locked():
-    """The input desktop isn't his ("Default"): the lock screen, or a UAC prompt (the secure
-    desktop can't be opened from his session at all)."""
+    """His session is locked (`session_locked`), or the input desktop isn't his ("Default"): a UAC
+    prompt (the secure desktop can't be opened from his session at all)."""
+    if session_locked():
+        return True
     import ctypes
     from ctypes import wintypes
     u = ctypes.WinDLL('user32', use_last_error=True)

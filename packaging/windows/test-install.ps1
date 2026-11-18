@@ -59,6 +59,9 @@ Check ((Get-ItemProperty $aumid -ErrorAction SilentlyContinue).IconUri -eq (Join
 Check (Test-Path (Join-Path $app 'synaps-avatar.png')) 'the icon file'
 Check ((Get-ItemProperty $run -ErrorAction SilentlyContinue).'synaps-avatar' -eq "`"$(Join-Path $app 'synaps-avatar.exe')`"") 'autostart (the Run key), when asked'
 Check (Test-Path $lnk) 'a Start-menu shortcut'
+# Settings > Apps shows EstimatedSize (KB). Sizing the pack before his pick once walked all of C:.
+$size = (Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall' | ForEach-Object { Get-ItemProperty $_.PSPath } | Where-Object { $_.DisplayName -eq 'synaps-avatar' } | Select-Object -First 1).EstimatedSize
+Check ($size -gt 0 -and $size -lt 512000) "her size in Settings > Apps is hers ($size KB, under 500 MB)"
 $item = (New-Object -ComObject Shell.Application).Namespace((Split-Path $lnk)).ParseName((Split-Path $lnk -Leaf))
 Check ($item -and $item.ExtendedProperty('System.AppUserModel.ID') -eq 'Synaps.Avatar') "the shortcut carries her AUMID ($(if ($item) { $item.ExtendedProperty('System.AppUserModel.ID') }))"
 
