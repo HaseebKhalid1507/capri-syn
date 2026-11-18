@@ -185,6 +185,8 @@ WAKE_HEY = {'hey', 'hay', 'hi', 'hei', 'hej', 'heh', 'hai', 'he', 'eh', 'ay', 'a
 # "Capri" as Whisper spells what it heard: Capri, Copry, Kapree, "cup pray", "kah preen"; never Capricorn, Capra, caprese
 _CAPRI = r"(?:k|c|ck|g|q)[aeiouy]{1,2}[rl]?h?p{1,2}r(?:[eiy]{1,3}|ay)(?:n|ne)?"
 WAKE_CAPRI = re.compile(_CAPRI)
+# "Capri, no." written as one word ("Caprino"): the phrase, then a short reply fused to it (only read by wake_loose)
+WAKE_CAPRI_FUSED = re.compile(r"((?:k|c|ck|g|q)[aeiouy]{1,2}[rl]?h?p{1,2}r(?:[eiy]{1,3}|ay))(no|nope|yes|yeah|yep|bye|okay|ok|go|stop|wait)")
 WAKE_FUSED = re.compile(r"h[aeiy]{1,3}(?:l[aeiy]{0,2})?" + _CAPRI)     # "Haikapri", "Hekopri", "Heikah Preen", "Helicapri"
 WAKE_HF = {"let's talk", 'lets talk', "let's chat", 'lets chat', 'hands free', 'handsfree'}
 
@@ -220,6 +222,9 @@ def wake_loose(text):
         for k in (1, 2):
             if i + k <= len(w) and WAKE_CAPRI.fullmatch(''.join(w[i:i + k])):
                 return toks[i + k - 1][1]
+        m = WAKE_CAPRI_FUSED.fullmatch(w[i])
+        if m:
+            return toks[i][1] - len(m.group(2))     # "He caprino" -> "no"
     return None
 
 
@@ -3123,6 +3128,8 @@ def selftest_wake():
     assert wake_first('Aye, capri, pause the music.', loose=True) == 'Pause the music.'
     assert wake_first("What's Capri doing?", loose=True) == "What's Capri doing?", 'a real first word stays'
     assert wake_first("Capricorn's up tonight", loose=True) == "Capricorn's up tonight"
+    assert wake_first('Hey, Caprino.', loose=True) == 'No.' and wake_first('He caprino', loose=True) == 'No' and wake_first('Caprino') == 'Caprino'
+    assert wake_first('Capriba, the build', loose=True) == 'Capriba, the build' and not wake_says('Hey Caprino'), 'only a short reply fused; never the check'
     # ...the words can't tell "Take a breath" (the live phantom) from a request: the audio after the window does
     quiet, said = [0.1] * 30, [0.1] * 3 + [0.9] * 9 + [0.2] * 10
     assert first_cut('Take a breath.', quiet) == ('alone', 'the phrase alone, misheard (0 ms of speech after it)')
