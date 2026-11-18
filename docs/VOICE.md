@@ -84,10 +84,11 @@ for speech. Setup: `tools/capri-voice-setup`, then `tools/systemd/capri-voice.se
 - **One stream, many turns.** Each utterance ends on his pause exactly as a toggle does (Silero, the
   draft decode, the hold after a dangling word) and is sent; the mic stays open. Her reply is spoken. The
   tag reads `● MIC LIVE · HANDS-FREE 0:42 ▮▯▯▯▯`; the Line's mic row says how to end it.
-- **No unread strip** (`N NEW`) while it's on: he hears her. A reply she says to his hands-free
-  turn (or any she says while it's on) is seen once she starts saying it, so no strip shows after it ends
-  either, even if it ended before the bubble's hold ran out. A strip from before hands-free comes back when
-  it ends (unless he spoke in it: sending a turn reads it, as ever). A refused message still shows.
+- **No unread strip** (`N NEW`) while it's on: he hears her. A reply she says whole is read (below,
+  "Heard whole is read"), so no strip shows after hands-free ends either. One she was cut off in (his
+  voice over hers with nothing sent, a tap) or said in part is unread and shows then. A strip from before
+  hands-free comes back when it ends (unless he spoke in it: sending a turn reads it, as ever). A refused
+  message still shows.
 - **Off**, the stream closed by the sidecar, the reason on her tag:
 
   | cause | tag |
@@ -320,6 +321,33 @@ thresholds) was fitted on stock synthetic voices only (Kokoro packs, espeak-ng),
   most one waits: a newer one replaces it (the replaced one stays text). Hushing her (a tap on her body, talk key, Esc)
   drops the waiting one too. A new turn of his stops her at once.
 - These replies never pause or duck other audio, and there is no chime. **Events never open the mic.**
+
+## Heard whole is read
+
+A reply she says aloud, all of it, to its last word, counts as read: no unread strip, no `N NEW` on her
+tag (the Line and `avatarctl state`'s `unread` are the same strip). Any of his replies and any event's,
+hands-free or not. Anything less leaves it unread, as a reply she never spoke:
+
+- **cut off**: a tap on her body, the talk key (`$mod+c`), the toggle chord, Esc, music starting under an
+  event's reply, a new turn of his, his voice over hers, the sidecar's gate (a call, the lock, his
+  do-not-disturb, the budget), the sidecar going or restarting mid-say, a sentence the sidecar couldn't
+  make (`say-end` with `error`), whose player ended early, or that the gate trimmed (`say-end` with
+  `cut`: killed from outside, its sink gone; an event's first sentence over the 10 s cap, played only to
+  10 s);
+- **said in part**: past an event's cap or the 60 words ("The rest is on the line."), after a `---` line,
+  code, a table, a link or a path named instead of read.
+
+Every sentence sent must come back with a whole `say-end` after the turn's text is all in; the log says
+`turn N heard whole: read`, `turn N cut (k of n said): stays unread` or `turn N said in part`.
+
+**Seen is read too.** The Line keeps its own rule: open, it shows the thread, and nothing in it is unread.
+So `$mod+c` is a cut (never *heard*), but the same press opens the Line (or finds it open), and the reply
+is read there, *seen*: no strip after it. The toggle chord likewise, when it opens the mic. A tap on her
+body, music, the sidecar restarting, a reply said in part open no Line: those stay unread.
+
+**The strip counts each reply.** `N NEW` is the replies missed since he last looked, and shows the newest
+one's first line. One heard whole after its bubble went (it went behind the chip mid-speech: a teleport, a
+hide) drops only itself: the strip then shows the newest one still unheard.
 - **Nothing she says is heard** (his spoken turns included) **with the screen locked or in a call**: the
   sidecar checks before every sentence and every 0.35 s while one plays, stops her, and her tag says why.
   Locked = a locker process (`i3lock`, `xsecurelock`, `slock`, `swaylock`, … by name) or logind's

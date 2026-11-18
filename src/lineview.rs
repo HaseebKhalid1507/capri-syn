@@ -50,12 +50,19 @@ pub(super) struct Unread {
     pub refused: bool,
 }
 
-/// What he hasn't seen: her strip, the last turn he has seen, and the turn the strip is about.
+/// Replies the strip remembers by turn (older ones still count in its "N NEW").
+const MISSED_KEEP: usize = 32;
+
+/// What he hasn't seen: her strip, the last turn he has seen, and the replies behind the strip.
 #[derive(Clone, Debug, Default)]
 pub(super) struct Unseen {
     pub strip: Option<Unread>,
     seen: u64,
-    turn: u64,
+    /// The replies he missed, oldest first: (turn, first line). The strip is their count and
+    /// the newest one's line.
+    missed: Vec<(u64, String)>,
+    /// Missed ones past `MISSED_KEEP`, forgotten but counted.
+    older: u32,
 }
 
 impl Unseen {
@@ -63,6 +70,8 @@ impl Unseen {
     /// next message).
     pub fn ack(&mut self, shown: Option<u64>) {
         self.strip = None;
+        self.missed.clear();
+        self.older = 0;
         self.seen = self.seen.max(shown.unwrap_or(0));
     }
 
@@ -76,30 +85,43 @@ impl Unseen {
         if first.is_empty() {
             return;
         }
-        let n = match &self.strip {
-            Some(u) if !u.refused && self.turn != turn => u.n + 1,
-            Some(u) if !u.refused => u.n,
-            _ => 1,
-        };
-        self.turn = turn;
-        self.strip = Some(Unread { n, text: first, refused: false });
-    }
-
-    /// A reply he heard in a hands-free conversation: seen once spoken, whenever its bubble
-    /// goes. A strip already about it (it went behind the chip mid-speech) drops it; one about
-    /// replies before it stays.
-    pub fn heard(&mut self, turn: u64) {
-        self.seen = self.seen.max(turn);
-        if let Some(u) = &mut self.strip
-            && !u.refused
-            && self.turn == turn
-        {
-            if u.n > 1 {
-                u.n -= 1;
-            } else {
-                self.strip = None;
+        // A refused message gives way to the reply (counted from one, as ever).
+        if self.strip.as_ref().is_some_and(|u| u.refused) {
+            self.strip = None;
+            self.missed.clear();
+            self.older = 0;
+        }
+        match self.missed.iter_mut().find(|m| m.0 == turn) {
+            Some(m) => m.1 = first,
+            None => {
+                self.missed.push((turn, first));
+                if self.missed.len() > MISSED_KEEP {
+                    self.missed.remove(0);
+                    self.older += 1;
+                }
             }
         }
+        self.restrip();
+    }
+
+    /// A reply she said aloud and he heard whole (`voice::Said::heard`; cut or said in part, it
+    /// never comes here): seen, whenever its bubble goes. If it already left the strip (it went
+    /// behind the chip mid-speech), only it goes: the others stay, the newest of them shown.
+    pub fn heard(&mut self, turn: u64) {
+        self.seen = self.seen.max(turn);
+        self.missed.retain(|m| m.0 != turn);
+        self.restrip();
+    }
+
+    /// The strip from the replies missed (a refused message stays as it is).
+    fn restrip(&mut self) {
+        if self.strip.as_ref().is_some_and(|u| u.refused) {
+            return;
+        }
+        if self.missed.is_empty() {
+            self.older = 0;
+        }
+        self.strip = self.missed.last().map(|(_, text)| Unread { n: self.older + self.missed.len() as u32, text: text.clone(), refused: false });
     }
 
     /// The strip on her tag: no "N NEW" while hands-free is on (he hears her replies; one
@@ -109,6 +131,8 @@ impl Unseen {
     }
 
     pub fn refused(&mut self, text: String) {
+        self.missed.clear();
+        self.older = 0;
         self.strip = Some(Unread { n: 1, text, refused: true });
     }
 }
@@ -735,7 +759,7 @@ mod unseen_tests {
     fn a_handsfree_reply_is_seen_once_spoken_even_after_handsfree_ends() {
         let mut u = Unseen::default();
         u.ack(Some(6)); // his hands-free turn 7 went out
-        u.heard(7); // her reply to it is said
+        u.heard(7); // her reply to it is said whole
         // Hands-free timed out (60 s quiet) before the bubble's hold ran out: no pill after.
         u.missed(7, &chars("Her spoken reply"), false);
         assert_eq!((u.strip.as_ref(), u.shown(false)), (None, None));
@@ -748,6 +772,93 @@ mod unseen_tests {
         u.missed(3, &chars("Older"), false);
         u.missed(4, &chars("Folded early"), false);
         u.heard(4);
+        assert_eq!(u.shown(false).map(|s| s.n), Some(1));
+    }
+
+    #[test]
+    fn a_spoken_reply_is_read_only_if_heard_whole() {
+        use crate::voice::Said;
+        let mut u = Unseen::default();
+        // Said whole (his spoken turn, an event's reply; hands-free or not): read before its
+        // bubble goes, so no strip after it.
+        let whole = Said { sent: 2, ended: 2, done: true, cut: false };
+        assert!(whole.heard(false));
+        u.heard(5);
+        u.missed(5, &chars("Build's green, choom."), false);
+        assert_eq!((u.strip.as_ref(), u.shown(false)), (None, None));
+        // Cut (a tap, the talk key, music, the sidecar gone) or said in part: never heard,
+        // so its bubble going leaves a strip, "1 NEW" (the tag, the Line, `state` agree: all
+        // are this strip).
+        for said in [Said { sent: 3, ended: 1, done: true, cut: false }, Said { sent: 2, ended: 2, done: true, cut: true }] {
+            assert!(!said.heard(false));
+        }
+        assert!(!whole.heard(true), "said in part");
+        u.missed(6, &chars("Rebasing polish-e onto main."), false);
+        assert_eq!(u.shown(false), Some(&Unread { n: 1, text: "Rebasing polish-e onto main.".into(), refused: false }));
+        // A long one went behind the chip mid-speech (a teleport): counted, then heard whole.
+        u.missed(7, &chars("Checking CI."), false);
+        assert_eq!(u.shown(false).map(|s| s.n), Some(2));
+        u.heard(7);
+        assert_eq!(u.shown(false).map(|s| (s.n, s.text.as_str())), Some((1, "Rebasing polish-e onto main.")), "the cut one stays");
+    }
+
+    #[test]
+    fn heard_drops_only_its_own_reply_from_the_strip() {
+        // Turn 6 missed; turn 7 goes behind the chip mid-speech (a teleport), then is heard
+        // whole: 1 NEW, turn 6's line (never 7's).
+        let mut u = Unseen::default();
+        u.missed(6, &chars("Six: CI is red on main."), false);
+        u.missed(7, &chars("Seven: reran it."), false);
+        assert_eq!(u.shown(false).map(|s| (s.n, s.text.as_str())), Some((2, "Seven: reran it.")));
+        u.heard(7);
+        assert_eq!(u.shown(false), Some(&Unread { n: 1, text: "Six: CI is red on main.".into(), refused: false }));
+        // Turn 7's bubble hold runs out after: still turn 6's strip.
+        u.missed(7, &chars("Seven: reran it."), false);
+        assert_eq!(u.shown(false).map(|s| (s.n, s.text.as_str())), Some((1, "Six: CI is red on main.")));
+        // Two went behind the chip (6 and 7), then 6 is heard whole: 7 stays, and only it.
+        let mut u = Unseen::default();
+        u.missed(6, &chars("Six"), false);
+        u.missed(7, &chars("Seven"), false);
+        u.heard(6);
+        assert_eq!(u.shown(false), Some(&Unread { n: 1, text: "Seven".into(), refused: false }));
+        u.heard(7);
+        assert_eq!(u.strip, None);
+        // Past MISSED_KEEP the oldest are forgotten but still counted.
+        let mut u = Unseen::default();
+        for t in 1..=40 {
+            u.missed(t, &chars(&format!("Reply {t}")), false);
+        }
+        u.heard(40);
+        assert_eq!(u.shown(false).map(|s| (s.n, s.text.as_str())), Some((39, "Reply 39")));
+        // A refused message, then a reply: it gives way, counted from one.
+        u.refused("NOT SENT (no session) · \"hi\"".into());
+        u.missed(41, &chars("After"), false);
+        assert_eq!(u.shown(false), Some(&Unread { n: 1, text: "After".into(), refused: false }));
+    }
+
+    /// `$mod+c` while she speaks (talk_press, unchanged): voice_press hushes her (a cut, so
+    /// `heard` never comes), then the press opens the Line, or finds it open.
+    /// The reply is read as seen there, never as heard. A body tap hushes and opens no Line:
+    /// it stays unread.
+    #[test]
+    fn mod_c_hush_is_read_as_seen_on_the_line_not_as_heard() {
+        use crate::voice::Said;
+        // voice_stop_speech starts Said again: never heard whole (its say-ends don't count).
+        assert!(!Said::default().heard(false), "a hush is a cut");
+        // The Line closed: open_line acks the shown turn (ack_unread); its hold running out
+        // later leaves nothing, Line open or closed again by then.
+        let mut u = Unseen::default();
+        u.ack(Some(9));
+        u.missed(9, &chars("Spoken, hushed by mod+c"), true);
+        u.missed(9, &chars("Spoken, hushed by mod+c"), false);
+        assert_eq!(u.strip, None);
+        // The Line already open: he is reading it there, so its bubble going leaves no strip.
+        let mut u = Unseen::default();
+        u.missed(9, &chars("Spoken, hushed by mod+c"), true);
+        assert_eq!(u.strip, None);
+        // A tap on her body: the same cut, no Line, so the strip.
+        let mut u = Unseen::default();
+        u.missed(9, &chars("Spoken, hushed by a tap"), false);
         assert_eq!(u.shown(false).map(|s| s.n), Some(1));
     }
 
