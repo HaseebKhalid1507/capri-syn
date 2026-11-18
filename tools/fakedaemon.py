@@ -6,12 +6,15 @@ Attach -> the attached_history.json fixture, then events on demand.
 
 Control: one line per connection on /tmp/sa-fake/ctl.sock:
   secret | confirm | confirm2 | benign | compact | compacted | idle | refuse | relay | say TEXT | trig T TEXT
-  | resolve | quit
+  | resolve | nobrain | fail TEXT | brain | quit
 A submit or steer streams a canned reply (FAKE: no model): a turn, text deltas every
 FAKE_DELTA_MS (default 30), done, idle. `refuse`: the next submit is refused instead.
 `relay`: a turn another session woke ([comms] ...). `say TEXT`: a turn with that reply. Both come as
 trigger `event_auto`, as the real daemon's event turns do; a submit's turn is `user`. `trig T TEXT`: a
 turn with trigger T. `resolve`: the pending prompts are answered elsewhere (they go).
+`nobrain`: every submit fails as a Synaps with no model credentials does (its exact error text);
+`fail TEXT`: every submit fails with TEXT; `brain`: replies again.
+FAKE_DAEMON_VERSION and FAKE_MODEL set what the Welcome and the attach say (default 0.0.0-fake, fake).
 Commands the avatar sends are printed; answer values are never printed (only their length)."""
 import json, os, socket, sys, threading, time
 
@@ -20,8 +23,9 @@ SID = "20261113-073427-5fde"
 fixtures = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tests/fixtures")
 os.makedirs(DIR, mode=0o700, exist_ok=True)
 ATTACHED = json.loads(open(os.path.join(fixtures, "attached_history.json")).read())
-WELCOME = {"type": "welcome", "protocol_version": 3, "daemon_version": "0.0.0-fake", "pid": os.getpid(), "profile": None,
-           "sessions": [{"id": SID, "model": "fake", "lifecycle": "live", "name": "capri"}],
+MODEL = os.environ.get("FAKE_MODEL", "fake")
+WELCOME = {"type": "welcome", "protocol_version": 3, "daemon_version": os.environ.get("FAKE_DAEMON_VERSION", "0.0.0-fake"), "pid": os.getpid(), "profile": None,
+           "sessions": [{"id": SID, "model": MODEL, "lifecycle": "live", "name": "capri"}],
            "progressive_tool_disclosure": False, "generation": 1, "features": []}
 attached = []          # live session connections (socket, lock)
 pending = {}           # prompt id -> request (in every Attached snapshot until answered)
@@ -29,6 +33,8 @@ seq = [100]
 client_id = [10]
 lock = threading.Lock()
 refuse_next = [False]
+fail_with = [None]     # every submit fails with this error text (`nobrain`, `fail TEXT`)
+NO_CREDENTIALS = "No Anthropic credentials. Run `synaps login`, or switch to a provider model with `/model groq/llama-3.3-70b-versatile`."
 replies = [
     "Build's green, choom. Spike pushed the reader fix eleven minutes ago.",
     "Here's the build command:\n\n```bash\ntools/abuild build --release\n```\n\nDocs: [gpui-component](https://github.com/longbridge/gpui-component)",
@@ -67,6 +73,15 @@ def stream_turn(user_text, reply, trigger="user", tool=None):
     msgs.append({"role": "assistant", "content": [{"text": reply, "type": "text"}]})
     remember(msgs)
     event({"ev": "stream", "event": {"kind": "session", "session": "done"}})
+    event({"ev": "idle"})
+
+
+def fail_turn(user_text, message):
+    """A turn that fails before the model says a word (as a daemon with no credentials does)."""
+    event({"ev": "turn_started", "turn_baseline": 1, "trigger": "user", "user_text": user_text})
+    time.sleep(0.25)
+    event({"ev": "stream", "event": {"kind": "session", "session": "error", "message": message}})
+    remember([{"role": "user", "content": user_text}])
     event({"ev": "idle"})
 
 
@@ -131,6 +146,8 @@ def serve(conn):
                 v = dict(ATTACHED)
                 v["client"] = me
                 v["meta"] = dict(v["meta"], name="capri")
+                if "FAKE_MODEL" in os.environ:
+                    v["view"] = dict(v.get("view") or {}, model=MODEL)
                 with lock:
                     v["pending_prompts"] = list(pending.values())
                 send(conn, wl, v)
@@ -149,6 +166,8 @@ def serve(conn):
                     if refuse_next[0]:
                         refuse_next[0] = False
                         send(conn, wl, {"type": "error", "session_id": SID, "message": "refused: not the input owner (FAKE)"})
+                    elif fail_with[0]:
+                        threading.Thread(target=fail_turn, args=(c.get("text", ""), fail_with[0]), daemon=True).start()
                     else:
                         reply_to(c.get("text", ""))
                 else:
@@ -217,6 +236,12 @@ def control():
         elif cmd.startswith("trig "):
             _, trig, text = cmd.split(" ", 2)
             threading.Thread(target=stream_turn, args=(None, text.replace("\\n", "\n")), kwargs={"trigger": trig}, daemon=True).start()
+        elif cmd == "nobrain":
+            fail_with[0] = NO_CREDENTIALS
+        elif cmd.startswith("fail "):
+            fail_with[0] = cmd[5:]
+        elif cmd == "brain":
+            fail_with[0] = None
         elif cmd == "resolve":
             with lock:
                 ids = list(pending)

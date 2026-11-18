@@ -769,6 +769,21 @@ mod tests {
         assert!(Settings::parse("[session]\npersonna = true").is_err(), "unknown keys are errors");
     }
 
+    /// The shipped persona is everyone's: no one's name or machines in it, and what runs her is
+    /// said only when asked (ADVICE-funnel §5). A personal one goes in `persona_file`.
+    #[test]
+    fn the_shipped_persona_is_generic() {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("packs/capri/persona.md");
+        let text = std::fs::read_to_string(p).unwrap();
+        let words: Vec<String> = text.split(|c: char| !c.is_alphanumeric()).map(str::to_lowercase).collect();
+        for w in ["haseeb", "bella", "avante", "he", "him", "his"] {
+            assert!(!words.iter().any(|x| x == w), "persona.md says `{w}`");
+        }
+        assert!(text.contains("You never bring it up yourself"));
+        assert!(text.contains("synaps --attach capri"));
+        assert!(text.contains("Never approve a prompt for them"));
+    }
+
     #[test]
     fn persona_text_sources() {
         let dir = std::env::temp_dir().join(format!("sa-persona-{}", std::process::id()));

@@ -19,7 +19,8 @@ steps:  cmd:<avatarctl line>      send a dev-control command
         the real dock's strut still sets her hang line, the strip only hides the real bar in captures).
 --long: allow --timeout up to 300 s (default cap 30 s).  --settings FILE: the test's settings.toml.
 Tests never touch the user's state or settings: XDG_STATE_HOME=/tmp/sa-test/state, XDG_CONFIG_HOME=/tmp/sa-test/config
-(wiped at start unless --keep-state).
+(wiped at start unless --keep-state). The fresh state has met her (`"met": true`), so her one-time first words
+don't land in every clip; --first-run leaves that out.
 --stage X,Y,W,H[,FLOOR[,0xRRGGBB]]: before the app starts, map an override-redirect backdrop that shows
         a plain colour, or the root wallpaper (ParentRelative: no focus change, no layout change) and a dark floor
         slab FLOOR px tall at its bottom; desk/rec default to the stage rect; {floor} = slab top - 6 (ground room).
@@ -304,7 +305,7 @@ def main():
     argv = sys.argv[1:]
     binp = f"{HOME}/.cache/cargo-target-synaps-avatar/debug/synaps-avatar"
     extra, tmo, stage, ground, rec_start, bg_rec = [], 28, None, None, None, None
-    remote_sandbox, long_run, bar, settings, keep_state = False, False, 0, None, False
+    remote_sandbox, long_run, bar, settings, keep_state, first_run = False, False, 0, None, False, False
     while argv and argv[0].startswith("--"):
         k = argv.pop(0)
         if k == "--bin":
@@ -336,6 +337,8 @@ def main():
             settings = argv.pop(0)
         elif k == "--keep-state":
             keep_state = True
+        elif k == "--first-run":
+            first_run = True
         elif k == "--stage":
             stage = [int(v, 0) for v in argv.pop(0).split(",")]
     # Daemon safety: only ever the desktopproto sandbox, or no session at all.
@@ -416,11 +419,18 @@ def main():
         staged = stage_windows(sx, sy, sw, sh, floor, plain, bar)
         # Feet keep the app's 6 px ground room above the slab, as above the monitor edge.
         os.environ["SA_FLOOR"] = str(sy + sh - floor - 6)
+    sp = f"{os.environ['XDG_STATE_HOME']}/synaps-avatar/state.json"
+    os.makedirs(os.path.dirname(sp), exist_ok=True)
+    st = {}
+    if keep_state and os.path.exists(sp):
+        st = json.loads(open(sp).read() or "{}")
     if ground:
         gx, gy = ground.replace("{floor}", os.environ.get("SA_FLOOR", "0")).split(",")
-        sp = f"{os.environ['XDG_STATE_HOME']}/synaps-avatar/state.json"
-        os.makedirs(os.path.dirname(sp), exist_ok=True)
-        open(sp, "w").write(json.dumps({"ground": [int(gx), int(gy)]}))
+        st["ground"] = [int(gx), int(gy)]
+    if not first_run:
+        st.setdefault("met", True)
+    if st:
+        open(sp, "w").write(json.dumps(st))
     log = open("/tmp/sa-shoot.log", "w")
     t0 = time.time()
     if rec_start and stage:
