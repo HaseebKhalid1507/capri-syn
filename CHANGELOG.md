@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### "Hey Capri" is never sent as his words
+- "Hey Capri" alone could reach her as a turn he never said: Whisper decoding the phrase again in the first
+  hands-free utterance wrote "Take a breath" (five times live since Nov 16), "Aye, capri", "And capri", "Ee capri" (his bare
+  takes). The phrase is now cut as Whisper spells it, doubled or misheard as the first word or two; words with
+  no trace of it are the phrase misheard, and the audio after the check's window decides (no speech there:
+  nothing is sent, hands-free goes on; speech: that audio is decoded on its own).
+- Junk: subtitle credits and more stock fillers dropped; `*cough*` tags cut; `thank you`/`bye` count as filler
+  under 300 ms of speech (was 400: a real "bye" was dropped). Heard/dropped lines carry Whisper's confidence.
+
 ### The HUD moves as one system
 - One curve (ease-out, 2 % past the target at most, no wobble) and one set of durations, named in
   `src/hud.rs`: a size change 200 ms, the bubble opening 240 ms (180 ms out of the tag), into the tag
