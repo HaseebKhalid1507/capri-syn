@@ -21,6 +21,10 @@ const TARGET_POLL_TILED: Duration = Duration::from_millis(500);
 const TARGET_POLL_BURST: Duration = Duration::from_millis(16);
 /// How long the burst rate lasts after the target was last seen moving.
 const TARGET_BURST_FOR: Duration = Duration::from_millis(600);
+/// A press on her is lost (`Os::press_lost`) once the server has had the button up this long.
+const PRESS_LOST: Duration = Duration::from_millis(200);
+/// ... asking it no more often than this.
+const PRESS_ASK: Duration = Duration::from_millis(50);
 
 /// What the watcher threads share with the core.
 struct Shared {
@@ -285,6 +289,9 @@ pub struct Os {
     host_changed: Cell<Option<WinId>>,
     /// Her input region and her moves kept apart (`Os::settling`).
     settle: RefCell<Settle>,
+    /// A press on her: when the button was last asked about, and since when it has been up
+    /// (`press_lost`).
+    press_seen: Cell<Option<(Instant, Option<Instant>)>>,
 }
 
 impl Os {
@@ -310,6 +317,7 @@ impl Os {
             hosts: RefCell::new(Vec::new()),
             host_changed: Cell::new(None),
             settle: RefCell::new(Settle::default()),
+            press_seen: Cell::new(None),
         }
     }
 
@@ -485,13 +493,34 @@ impl Os {
         self.shared.reshapes.load(Ordering::Relaxed) && self.composited()
     }
 
-    /// The button went down on her (`down`) or up. With an implicit grab
-    /// (`Caps::implicit_grab`) every pointer event is hers while it is down, whatever her input
-    /// region: the region then waits for the release, so a drag never waits for one.
-    pub fn set_pressed(&self, down: bool) {
-        if self.caps.implicit_grab {
-            self.settle.borrow_mut().press(down, Instant::now());
+    /// Her drag is in hand or not: the button down on her (`press`: with an implicit grab,
+    /// `Caps::implicit_grab`, every pointer event is hers while it is down, whatever her input
+    /// region), or a scripted drag held (`script`: no pointer to miss her; it stands in for a
+    /// real drag, so it moves as one does). In hand, her moves never wait and her region waits
+    /// for the release (`settle.rs`).
+    pub fn set_held(&self, press: bool, script: bool) {
+        self.settle.borrow_mut().press((press && self.caps.implicit_grab) || script, Instant::now());
+    }
+
+    /// A press on her whose release never came (`pressed`: the view holds one): the server
+    /// has had the button up for `PRESS_LOST` (a release on its way is long in by then). The
+    /// button is asked about at most every `PRESS_ASK`; a backend that can't tell never loses
+    /// a press.
+    pub fn press_lost(&self, pressed: bool, now: Instant) -> bool {
+        if !pressed {
+            self.press_seen.set(None);
+            return false;
         }
+        let (asked, up) = self.press_seen.get().unwrap_or((now, None));
+        if self.press_seen.get().is_some() && now < asked + PRESS_ASK {
+            return up.is_some_and(|t| now >= t + PRESS_LOST);
+        }
+        let up = match self.desk.primary_down() {
+            Some(false) => Some(up.unwrap_or(now)),
+            _ => None,
+        };
+        self.press_seen.set(Some((now, up)));
+        up.is_some_and(|t| now >= t + PRESS_LOST)
     }
 
     /// When what `settle` holds back is due, if anything is.

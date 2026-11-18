@@ -424,6 +424,11 @@ pub trait Desktop: Send + Sync {
     /// `w` asks for fullscreen.
     fn is_fullscreen(&self, w: WinId) -> bool;
     fn pointer(&self) -> Result<(i32, i32)>;
+    /// The primary (left) button is down now, as the server has it; None: the backend can't
+    /// tell (`Os::press_lost` then never fires).
+    fn primary_down(&self) -> Option<bool> {
+        None
+    }
     /// A pointer reader with its own connection, for a watcher thread.
     fn pointer_reader(&self) -> Result<PointerRead>;
     /// Milliseconds since the last keyboard or mouse input anywhere. None: the backend can't

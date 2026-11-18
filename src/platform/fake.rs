@@ -42,6 +42,8 @@ struct World {
     no_idle: bool,
     /// He clicked on her since the keyboard last went back (`Caps::keyboard_on_input`).
     his_input: bool,
+    /// The primary button as the server has it (None: can't tell).
+    primary: Option<bool>,
 }
 
 type HintFn = Box<dyn Fn(Hint) + Send>;
@@ -124,6 +126,9 @@ impl Desktop for FakeDesktop {
     }
     fn pointer(&self) -> Result<(i32, i32)> {
         Ok(self.0.w().pointer)
+    }
+    fn primary_down(&self) -> Option<bool> {
+        self.0.w().primary
     }
     fn pointer_reader(&self) -> Result<PointerRead> {
         let f = self.0.clone();
@@ -465,7 +470,7 @@ fn input_region_and_moves_never_meet_under_picom() {
     assert_eq!(got(), ((500, 100), vec![(1, 1, 1, 1)]), "a landing goes out at once");
     // The button down on her: her region waits for the release, a drag move never waits.
     std::thread::sleep(SETTLE);
-    os.set_pressed(true);
+    os.set_held(true, false);
     os.set_shapes(Some(&[(2, 2, 2, 2)]), None).unwrap();
     std::thread::sleep(SETTLE + Duration::from_millis(5));
     os.settle().unwrap();
@@ -473,9 +478,23 @@ fn input_region_and_moves_never_meet_under_picom() {
     assert!(os.settle_due().is_none(), "nothing due while pressed");
     os.move_to(506, 100).unwrap();
     assert_eq!(got().0, (506, 100), "a drag move never waits");
-    os.set_pressed(false);
+    os.set_held(false, false);
     settled();
     assert_eq!(got().1, vec![(2, 2, 2, 2)], "released and still: out");
+    // A scripted drag stands in for a real one: in hand the same way, even right after a
+    // region went out.
+    os.set_shapes(Some(&[(4, 4, 4, 4)]), None).unwrap();
+    assert_eq!(got().1, vec![(4, 4, 4, 4)], "still: out at once");
+    os.set_held(false, true);
+    os.move_to(508, 100).unwrap();
+    assert_eq!(got().0, (508, 100), "a scripted drag's move never waits, even right after a region");
+    os.set_shapes(Some(&[(5, 5, 5, 5)]), None).unwrap();
+    std::thread::sleep(SETTLE + Duration::from_millis(5));
+    os.settle().unwrap();
+    assert_eq!(got().1, vec![(4, 4, 4, 4)], "held by a script: her region waits for the release");
+    os.set_held(false, false);
+    settled();
+    assert_eq!(got().1, vec![(5, 5, 5, 5)], "let go and still: out");
     // Another compositor (KWin, Mutter, ...): not held to it.
     d.0.hint(Hint::Compositor { runs: true, reshapes: false });
     assert!(!os.settling(), "only picom");
@@ -493,6 +512,44 @@ fn input_region_and_moves_never_meet_under_picom() {
     os.move_to(524, 100).unwrap();
     assert_eq!(got(), ((524, 100), vec![(9, 9, 9, 9)]), "both at once");
     assert!(os.settle_due().is_none());
+}
+
+/// A press on her whose release never came (a grab elsewhere took it): lost once the server
+/// has had the button up for `PRESS_LOST`, never while it is down or where the backend can't
+/// tell; a quick tap (the release on its way) is never taken for one.
+#[test]
+fn a_press_without_its_release_is_lost_once_the_button_stays_up() {
+    use std::time::{Duration, Instant};
+    let (os, d) = fake(true);
+    let t0 = Instant::now();
+    let at = |ms: u64| t0 + Duration::from_millis(ms);
+    let set = |b: Option<bool>| d.0.w().primary = b;
+    // Can't tell: never lost.
+    assert!(!os.press_lost(true, at(0)) && !os.press_lost(true, at(5_000)));
+    os.press_lost(false, at(5_000));
+    // Down: never lost.
+    set(Some(true));
+    for ms in (0..2_000).step_by(60) {
+        assert!(!os.press_lost(true, at(10_000 + ms)), "lost with the button down");
+    }
+    os.press_lost(false, at(20_000));
+    // Up (its release still on the way, or never coming): lost only after PRESS_LOST.
+    set(Some(false));
+    assert!(!os.press_lost(true, at(30_000)), "a quick tap's release may still be on its way");
+    assert!(!os.press_lost(true, at(30_100)));
+    assert!(!os.press_lost(true, at(30_190)));
+    assert!(os.press_lost(true, at(30_260)), "up for 200 ms: lost");
+    // The release came after all (the view's press ended): nothing to lose; a new press
+    // starts over.
+    assert!(!os.press_lost(false, at(30_300)));
+    assert!(!os.press_lost(true, at(30_400)), "a new press: up since now, not since before");
+    // Down again in between: the up time starts over.
+    set(Some(true));
+    assert!(!os.press_lost(true, at(30_500)));
+    set(Some(false));
+    assert!(!os.press_lost(true, at(30_560)));
+    assert!(!os.press_lost(true, at(30_700)));
+    assert!(os.press_lost(true, at(30_780)));
 }
 
 /// Where effect layers show, on a backend with surfaces for them: on those surfaces without a

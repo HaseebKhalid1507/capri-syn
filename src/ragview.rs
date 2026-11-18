@@ -410,6 +410,9 @@ impl Avatar {
         self.follow_seq = 0;
         self.follow_grip = None;
         self.rag = Some(rag);
+        // In hand from its first frame (a script's pick-up too: its region waits, its first
+        // move doesn't; a real press is in hand from the press, `mouse_down`).
+        self.os.set_held(self.press.is_some(), self.rag_script_held());
         if touch {
             self.brain_touch(crate::brain::Touch::DragStart);
         }
@@ -530,6 +533,11 @@ impl Avatar {
         let (top, bottom) = self.frame_or_default(c.frame).map_or((0, 1), |f| (f.top, f.bottom));
         let lean = c.plan.slices.as_ref().zip(centres.as_ref()).and_then(|(b, cs)| plan_lean(b, cs, top, bottom));
         elog!("drawn {:.6} at {},{} lean {:.1}", mono_s(), self.applied.0, self.applied.1, lean.unwrap_or(f32::NAN));
+    }
+
+    /// Held by a script (`drag` on the control socket): a stand-in for a real drag.
+    pub(super) fn rag_script_held(&self) -> bool {
+        self.rag.as_ref().is_some_and(|r| matches!(r.m.phase(), Phase::Held { .. }) && matches!(r.feed, Feed::Script { .. }))
     }
 
     /// Held by the real mouse (not scripted, not lockstep).

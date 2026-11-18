@@ -2491,10 +2491,16 @@ impl Avatar {
     fn tick(&mut self, cx: &mut Context<Self>) {
         let now = Instant::now();
         self.view_ticks += 1;
+        // A press whose release never reached her (a grab elsewhere took it): the server has
+        // had the button up a while, so it ends here, as a release would (`Os::press_lost`).
+        if self.os.press_lost(self.press.is_some(), now) {
+            elog!("synaps-avatar: press lost (the button is up, no release came)");
+            self.press_lost(now);
+        }
         // An input region or a move held apart from the other (`Os::settle`), first: a move
-        // this tick then waits out a region sent now. A press lost on the way (no release
-        // came) holds her region no longer than the press itself.
-        self.os.set_pressed(self.press.is_some());
+        // this tick then waits out a region sent now. Her drag in hand (a press, a scripted
+        // drag) moves at once and holds her region until it ends.
+        self.os.set_held(self.press.is_some(), self.rag_script_held());
         self.os.settle().ok();
 
         if self.sliver.is_some_and(|t| now.saturating_duration_since(t) > SLIVER) {
@@ -4742,8 +4748,8 @@ impl Avatar {
                 let caught = self.rag_catch(self.local(ev.position), now);
                 self.press = Some(Press { root, origin: self.origin, head, dragging: caught });
                 // Every pointer event is hers until the release (the implicit grab): her input
-                // region waits for it, so no drag move waits for a region (`Os::set_pressed`).
-                self.os.set_pressed(true);
+                // region waits for it, so no drag move waits for a region (`Os::set_held`).
+                self.os.set_held(true, false);
                 if head {
                     self.dangle_want();
                 }
@@ -4805,7 +4811,7 @@ impl Avatar {
             return;
         }
         let Some(p) = self.press.take() else { return };
-        self.os.set_pressed(false);
+        self.os.set_held(false, self.rag_script_held());
         let now = Instant::now();
         if p.dragging {
             if self.rag.as_ref().is_some_and(|r| matches!(r.feed, ragview::Feed::Real)) {
@@ -4828,6 +4834,17 @@ impl Avatar {
         self.brain_touch(if p.head { crate::brain::Touch::Headpat } else { crate::brain::Touch::Click });
         cx.notify();
         self.schedule(cx);
+    }
+
+    /// The press ended without a release (`Os::press_lost`): a drag lets her go as a release
+    /// would; a press that wasn't a drag does nothing (no click: nobody saw where it ended).
+    fn press_lost(&mut self, now: Instant) {
+        let Some(p) = self.press.take() else { return };
+        self.os.set_held(false, self.rag_script_held());
+        self.squash = None;
+        if p.dragging && self.rag.as_ref().is_some_and(|r| matches!(r.feed, ragview::Feed::Real)) {
+            self.rag_release(now);
+        }
     }
 
     /// Where a synthetic tap lands (window logical px): the head, or the middle of the body.
