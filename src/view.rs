@@ -784,6 +784,10 @@ pub struct Avatar {
     ghost: Option<crate::hud::Ghost<GhostSnap>>,
     /// What the open bubble showed last frame (the ghost's snapshot when it closes).
     panel_last_snap: Option<GhostSnap>,
+    /// A reply just replaced in the open bubble: its lines, crossing out.
+    panel_old: Option<Vec<String>>,
+    /// Opening out of the pill: its width (kept past the frame it was taken).
+    pill_open_from: Option<(f32, f32)>,
     /// Bubbles made: each reply's own number (a new one in an open bubble pulses).
     bubble_serial: u64,
     /// The tag's resting hair line and column while she stays put (her place, the
@@ -1045,6 +1049,8 @@ impl Avatar {
             panel_fx: Default::default(),
             ghost: None,
             panel_last_snap: None,
+            panel_old: None,
+            pill_open_from: None,
             bubble_serial: 0,
             hud_prof: None,
             hud_paint: Rc::new(RefCell::new(Vec::new())),
@@ -5077,6 +5083,220 @@ struct Status {
     key: String,
 }
 
+/// What a tag is drawn from (derived from what it shows, this frame).
+#[derive(Clone)]
+struct TagArt {
+    look: theme::Look,
+    badge: Option<String>,
+    text: String,
+    /// WORKING: the label on the red block.
+    name_part: Option<String>,
+    rest: String,
+    glyph_kind: String,
+    collapsed: bool,
+    sweep: Option<f32>,
+    step: u64,
+    shade: [u32; 3],
+}
+
+impl TagArt {
+    fn h(&self) -> f32 {
+        if self.badge.is_some() { 28.0 } else { 25.0 }
+    }
+}
+
+/// A tag. `wide`: its plate drawn this wide, its content (laid out `nat` wide) centred in it and
+/// kept inside it; None: as laid out. `split`: its border's RGB split, px. `part`: its shell
+/// (plate, block, backdrops), its words (type, glyphs, marks, the chevron) or both.
+fn tag_ring(pal: Pal, a: &TagArt, wide: Option<(f32, f32)>, split: f32, part: Part) -> Div {
+    let TagArt { look, badge, text, name_part, rest, glyph_kind, collapsed, sweep, step, shade } = a.clone();
+    let (shell, words) = (part != Part::Words, part != Part::Shell);
+    // The content inside a plate drawn `wide`: centred in it as laid out, kept inside it.
+    let clip = |plate: Div, row: Div| -> Div {
+        match wide {
+            Some((w, nat)) => plate
+                .w(px(w))
+                .flex_none()
+                .child(div().absolute().top_0().left_0().size_full().overflow_hidden().child(row.absolute().top_0().left(px((w - nat) * 0.5)).h_full())),
+            None => plate.child(row),
+        }
+    };
+    let fringe = move |cut: Cut| {
+        canvas(
+            |_, _, _| (),
+            move |b, _, window, _| {
+                let (x0, y0, x1, y1) = (f32::from(b.left()), f32::from(b.top()), f32::from(b.right()), f32::from(b.bottom()));
+                // Clear of its dark ring: the split shows at the border, nowhere else.
+                let d = split + theme::RING;
+                for (dx, c) in [(-d, fx::CYAN), (d, fx::PINK)] {
+                    for p in theme::outline(cut, x0 + dx, y0, x1 + dx, y1) {
+                        theme::fill_poly(window, &p, rgb(c));
+                    }
+                }
+            },
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+    };
+    // A plate's backdrop when the shell is drawn; its words when they are.
+    let backed = |cut: Cut, f: Fill| div().relative().flex().items_center().when(shell, |d| d.child(theme::backdrop(cut, f)));
+    let say = |d: Div| d.when(!words, |d| d.invisible());
+    if let Some(b) = badge.clone() {
+        let plate = div()
+            .relative()
+            .flex()
+            .items_center()
+            .when(shell && split > 0.0, |d| d.child(fringe(Cut::Unread)))
+            .when(shell, |d| d.child(theme::backdrop(Cut::Unread, Fill::framed(pal.panel, pal.accent, 2.0).ringed(pal.ring))))
+            .h(px(28.0))
+            .text_size(px(TAG_FONT))
+            .line_height(px(TAG_FONT + 1.0))
+            .font_weight(FontWeight::BOLD);
+        let row = div()
+            .flex()
+            .items_center()
+            .gap(px(9.0))
+            .pr(px(22.0))
+            .child(
+                backed(Cut::Badge, Fill::solid(pal.text))
+                    .h_full()
+                    .gap(px(6.0))
+                    .pl(px(11.0))
+                    .pr(px(14.0))
+                    .text_color(rgb(pal.ink))
+                    .child(say(div().child(glyph("dot", pal.accent, pal.text))))
+                    .child(say(tracked(&b, 1.0))),
+            )
+            .child(say(div().text_color(rgb(pal.text)).font_weight(FontWeight::SEMIBOLD).child(tracked(&text, 0.2))))
+            // It opens: say so, inside the plate.
+            .child(backed(Cut::Slant(6.0), Fill::solid(pal.accent)).h(px(18.0)).px(px(8.0)).text_color(rgb(pal.ink)).child(say(tracked("READ ▸", 1.2))));
+        return clip(plate, row.h(px(28.0)));
+    }
+    let (pad_l, pad_r) = look.plate.pad();
+    let fill = Fill::framed(look.fill, look.edge, 1.5).dashed(look.dash).ringed(pal.ring);
+    let split_plate = look.plate == Plate::Split;
+    // DONE's tick is drawn through the plate's corner, not as a glyph.
+    let mark = match look.plate {
+        Plate::Split if glyph_kind == "cross" => "shard".to_string(),
+        Plate::Check => String::new(),
+        _ => glyph_kind.clone(),
+    };
+    let (ring_c, block_c, sweep_c) = (pal.ring, pal.accent, theme::mix(pal.accent, pal.text, 0.45));
+    let block = name_part.clone().map(|n| {
+        div()
+            .relative()
+            .h_full()
+            .ml(px(-pad_l))
+            .pl(px(pad_l))
+            .pr(px(13.0))
+            .flex()
+            .items_center()
+            .gap(px(7.0))
+            .text_color(rgb(pal.ink))
+            .child(
+                canvas(
+                    |_, _, _| (),
+                    move |b, _, window, _| {
+                        if !shell {
+                            return;
+                        }
+                        let (x0, y0, x1, y1) = (f32::from(b.left()), f32::from(b.top()), f32::from(b.right()), f32::from(b.bottom()));
+                        let (blk, sw) = theme::half_block(x0, y0, x1, y1, sweep);
+                        theme::fill_poly(window, &blk, rgb(block_c));
+                        if let Some(sw) = sw {
+                            theme::fill_poly(window, &sw, rgb(sweep_c));
+                        }
+                    },
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+            )
+            .child(say(div().child(glyph(&mark, pal.ink, pal.accent))))
+            .child(say(tracked(&n, 1.5)))
+    });
+    let half = block.is_some();
+    let plate = div()
+        .relative()
+        .flex()
+        .items_center()
+        .h(px(25.0))
+        .text_size(px(TAG_FONT))
+        .line_height(px(TAG_FONT + 1.0))
+        .font_weight(FontWeight::BOLD)
+        .text_color(rgb(look.ink))
+        .when(shell && split > 0.0, |d| d.child(fringe(Cut::Tag(look.plate))))
+        .child(
+            canvas(
+                |_, _, _| (),
+                move |b, _, window, _| {
+                    let (x0, y0, x1, y1) = (f32::from(b.left()), f32::from(b.top()), f32::from(b.right()), f32::from(b.bottom()));
+                    // Its marks (DONE's tick, the bracket ticks) are drawn with the
+                    // words: the glitch never carries them.
+                    if words {
+                        for p in theme::tag_marks(look.plate, x0, y0, x1, y1) {
+                            theme::fill_poly(window, &theme::offset(&p, theme::RING), rgb(ring_c));
+                            theme::fill_poly(window, &p, rgb(look.mark));
+                        }
+                    }
+                    if !shell {
+                        return;
+                    }
+                    let polys = theme::outline(Cut::Tag(look.plate), x0, y0, x1, y1);
+                    match theme::tag_inner(look.plate, x0, y0, x1, y1, 1.5) {
+                        Some(inner) => {
+                            theme::paint(window, &polys, Fill::solid(look.edge).ringed(ring_c));
+                            for p in inner {
+                                theme::fill_poly(window, &p, rgb(look.fill));
+                            }
+                        }
+                        None => theme::paint(window, &polys, fill),
+                    }
+                    if look.trail {
+                        for (p, lvl) in theme::trail(x1, y0, y1, step) {
+                            theme::fill_poly(window, &p, rgb(shade[lvl as usize]));
+                        }
+                    }
+                },
+            )
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full(),
+        );
+    let row = div()
+        .flex()
+        .items_center()
+        .gap(px(7.0))
+        .pl(px(pad_l))
+        .pr(px(pad_r))
+        .children(block)
+        // The ✕'s shard broken off with the plate's piece.
+        .when(!half, |d| {
+            d.child(say(match look.halo {
+                // The disc: 15 px, the glyph centred in it.
+                Some(h) => div()
+                    .relative()
+                    .size(px(15.0))
+                    .mx(px(-2.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(div().absolute().top_0().left_0().child(theme::glyph_at("disc", h, h, 15.0)))
+                    .child(glyph(&mark, look.mark, h)),
+                None => div().when(split_plate, |d| d.relative().left(px(-3.0)).top(px(3.0))).child(glyph(&mark, look.mark, look.fill)),
+            }))
+        })
+        // ERROR: the type starts inside the toothed piece, clear of the break.
+        .child(say(theme::metered(&rest, 1.5, look.ink).when(split_plate, |d| d.ml(px(8.0)))))
+        // A reply put away behind the plate: a small up-chevron inside it.
+        .when(collapsed, |d| d.child(say(div().child(chevron(Chevron::Up, rgb(look.ink))))));
+    clip(plate, row.h(px(25.0)))
+}
+
 /// Where she is, for the tag's pinned height: her window's origin, placement, sitting.
 type TagPinKey = ((i32, i32), std::mem::Discriminant<Placement>, bool);
 
@@ -5106,11 +5326,6 @@ impl PartialEq for TagShow {
             && self.unread == o.unread
             && self.collapsed == o.collapsed
     }
-}
-
-/// A glitch's red tear: 2 px, for one step.
-fn tear_bar(x: f32, y: f32, w: f32) -> Div {
-    div().absolute().left(px(x)).top(px(y - 1.0)).w(px(w)).h(px(2.0)).bg(rgb(fx::BOLT_RED))
 }
 
 /// The tag's outline at `b` (its ring, and the thinking slivers at `trail`'s step) as X shape
@@ -5195,47 +5410,24 @@ fn place_panel(w: f32, h: f32, head_l: f32, bottom: f32, (vis_l, vis_r): (f32, f
     PanelGeom { x, y, w, h, tail_x, tip: (head_l.clamp(tail_x - 9.0, tail_x + 9.0), y + h + TAIL_H) }
 }
 
-/// The bubble shell's glitch bands: 4 or 5 spans over it, its slivers to its tail (window px,
-/// logical).
-fn panel_spans(g: &PanelGeom, seed: u64) -> Vec<(f32, f32)> {
-    let (y0, y1) = (g.y - SLIVER_H - 2.0, g.y + g.h + TAIL_H + 2.0);
-    crate::hud::cuts(y1 - y0, 4 + (seed % 2) as usize, 14.0, seed).windows(2).map(|w| (y0 + w[0], y0 + w[1])).collect()
-}
-
-/// The bubble's shell (the panel with its frame and dark ring, the mane slivers), whole, or in
-/// a glitch's bands: each in its span, shifted, the cyan and pink split behind it, all kept
-/// inside the shell's own box (a shifted band is cut at its edge).
+/// The bubble's shell: the panel with its frame and dark ring, the mane slivers; `split`: its
+/// border's RGB split, px (cyan and pink behind its outline, clear of the ring).
 /// `colours`: panel, frame, frame width, ring, slivers.
-fn panel_bg(g: PanelGeom, look: Option<crate::hud::Look>, spans: Vec<(f32, f32)>, (panel_c, frame_c, frame_w, ring_c, sliver_c): (u32, u32, f32, u32, u32)) -> impl IntoElement {
+fn panel_bg(g: PanelGeom, split: f32, (panel_c, frame_c, frame_w, ring_c, sliver_c): (u32, u32, f32, u32, u32)) -> impl IntoElement {
     canvas(
         |_, _, _| (),
         move |_, _, window, _| {
             let shift = |p: &[(f32, f32)], dx: f32| p.iter().map(|&(x, y)| (x + dx, y)).collect::<Vec<_>>();
-            let draw = |window: &mut Window, dx: f32, split: f32| {
-                let poly = shift(&g.poly(), dx);
-                if split > 0.0 {
-                    theme::fill_poly(window, &shift(&poly, -split - theme::RING), rgb(fx::CYAN));
-                    theme::fill_poly(window, &shift(&poly, split + theme::RING), rgb(fx::PINK));
-                }
-                // The dark ring outside the outline (the X shape is the ringed outline), the
-                // 2 px red edge inside it, then the mane slivers over the top edge.
-                theme::paint(window, &[poly], Fill::framed(panel_c, frame_c, frame_w).ringed(ring_c));
-                for p in g.slivers() {
-                    theme::fill_poly(window, &shift(&p, dx), rgb(sliver_c));
-                }
-            };
-            match &look {
-                None => draw(window, 0.0, 0.0),
-                Some(l) => {
-                    let m = theme::RING + 1.0;
-                    for (b, &(y0, y1)) in l.bands.iter().zip(&spans) {
-                        if y1 <= y0 {
-                            continue;
-                        }
-                        let bounds = Bounds::from_corners(point(px(g.x - m), px(y0)), point(px(g.x + g.w + m), px(y1)));
-                        window.with_content_mask(Some(ContentMask { bounds }), |window| draw(window, b.dx, b.split));
-                    }
-                }
+            let poly = g.poly();
+            if split > 0.0 {
+                theme::fill_poly(window, &shift(&poly, -split - theme::RING), rgb(fx::CYAN));
+                theme::fill_poly(window, &shift(&poly, split + theme::RING), rgb(fx::PINK));
+            }
+            // The dark ring outside the outline (the X shape is the ringed outline), the 2 px
+            // red edge inside it, then the mane slivers over the top edge.
+            theme::paint(window, &[poly], Fill::framed(panel_c, frame_c, frame_w).ringed(ring_c));
+            for p in g.slivers() {
+                theme::fill_poly(window, &p, rgb(sliver_c));
             }
         },
     )
@@ -5243,6 +5435,33 @@ fn panel_bg(g: PanelGeom, look: Option<crate::hud::Look>, spans: Vec<(f32, f32)>
     .top_0()
     .left_0()
     .size_full()
+}
+
+/// A closing bubble's header: her name on its tab, its label, its state.
+fn panel_header(name: &str, header_label: &str, label: &str, pal: Pal) -> Div {
+    div()
+        .absolute()
+        .top(px(PAD_T))
+        .left(px(PAD_L))
+        .right(px(PAD_R))
+        .h(px(HEADER_H))
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .line_height(px(HEADER_H))
+        .child(
+            theme::plate(Cut::Tab(5.0), Fill::solid(pal.accent))
+                .h(px(14.0))
+                .pl(px(7.0))
+                .pr(px(9.0))
+                .text_size(px(10.5))
+                .font_weight(FontWeight::BOLD)
+                .text_color(rgb(pal.ink))
+                .child(tracked(name, 1.8)),
+        )
+        .child(tracked(header_label, 1.5).text_size(px(9.5)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(pal.dim)))
+        .child(div().flex_1())
+        .child(tracked(label, 1.5).text_size(px(9.5)).font_weight(FontWeight::BOLD).text_color(rgb(pal.dim)))
 }
 
 /// What a closing bubble is drawn from: where it was, its words.
@@ -5914,40 +6133,77 @@ impl Render for Avatar {
         let hud_glitch = alpha && self.hud_cfg.glitch && self.rag.is_none();
         let pill_before = self.pill_last.take();
         let ghost_wait = self.ghost.as_ref().is_some_and(|g| !g.tag_ready(now));
-        let tag_next = (show_tag && !ghost_wait).then(|| TagShow {
-            st: Status { label: label.clone(), tone, invert, glyph: glyph_kind.clone(), plate: plate_kind, key: tone_key.clone() },
-            unread: self.unread_shown().cloned(),
-            collapsed,
-        });
-        let tag_quiet = bubble_open || !tag_hud || swap_hold || self.rag.is_some() || !hud_motion;
+        // Collapsing into the pill, it lands: the pill was drawn on the way, it shows at once.
+        let pill_landing = self.ghost.as_ref().is_some_and(|g| g.to_pill && g.tag_ready(now));
+        let status = Status { label: label.clone(), tone, invert, glyph: glyph_kind.clone(), plate: plate_kind, key: tone_key.clone() };
+        let pending = show_tag.then(|| TagShow { st: status.clone(), unread: self.unread_shown().cloned(), collapsed });
+        // The pill as it would show (the bubble opens out of it, or collapses into it).
+        let pill_show = TagShow { st: status, unread: self.unread_shown().cloned(), collapsed: true };
+        let tag_next = pending.clone().filter(|_| !ghost_wait);
+        let tag_quiet = bubble_open || !tag_hud || swap_hold || self.rag.is_some() || !hud_motion || pill_landing;
         self.tag_fx.observe(tag_next, now, hud_glitch && !torn, tag_quiet);
-        let tf = self.tag_fx.frame(now);
-        let (tag_shown, tag_glitch, tag_words) = (tf.content.cloned(), tf.glitch, tf.text);
+        let tag_shown = self.tag_fx.frame(now).cur.cloned();
+        // What a tag shows, drawn: its look this frame (the beat: NEEDS YOU's bone plate turns
+        // black and the rec dot dims on its second half (1 Hz; a summon's pulse holds it bone),
+        // the thinking slivers step every 400 ms, WORKING's sweep crosses its red block every
+        // 2.4 s).
+        let ms = now.saturating_duration_since(self.t_start).as_millis() as u64;
+        let night = self.band() == crate::life::Band::Low;
+        let in_sweep = ms % SWEEP_EVERY_MS < SWEEP_STEPS * SWEEP_STEP_MS;
+        let fit_chars = ((l.win_w as f32 / sf - 80.0) / (TAG_FONT * 0.62 + 1.5)) as usize;
+        let art_of = |show: &TagShow| -> TagArt {
+            let Status { label, tone, invert, glyph: glyph_kind, plate: plate_kind, key: tone_key } = &show.st;
+            let unread = show.unread.as_ref();
+            let mut look = pal.look(*plate_kind, tone_key, *tone, *invert, (ms / 500) % 2 == 1 && !pulse);
+            // Her night (low energy): ONLINE dimmed, a screen turned down.
+            if tone_key == "online" && night {
+                let dim = |c: u32| theme::mix(c, pal.panel, NIGHT_TAG_DIM);
+                (look.edge, look.ink, look.mark) = (dim(look.edge), dim(look.ink), dim(look.mark));
+            }
+            let sweep = (look.half && in_sweep).then(|| ((ms % SWEEP_EVERY_MS) / SWEEP_STEP_MS) as f32 / (SWEEP_STEPS - 1) as f32);
+            let text = match unread {
+                Some(u) if u.refused => u.text.clone(),
+                Some(u) => {
+                    // Inside her window: the plate is centred on her.
+                    let head = format!("{} NEW  READ ▸  ", u.n);
+                    crate::session::one_line(&u.text, fit_chars.saturating_sub(head.chars().count()).clamp(8, 44))
+                }
+                // Her state only, no name (Haseeb, 2026-11-16: "just online, sleeping etc").
+                None => label.clone(),
+            };
+            // WORKING: the label on the red block (ink).
+            let (name_part, rest) = if look.half && unread.is_none() { (Some(label.clone()), String::new()) } else { (None, text.clone()) };
+            TagArt {
+                look,
+                badge: unread.filter(|u| !u.refused).map(|u| format!("{} NEW", u.n)),
+                text,
+                name_part,
+                rest,
+                glyph_kind: glyph_kind.clone(),
+                collapsed: show.collapsed,
+                sweep,
+                step: ms / 400,
+                shade: [pal.accent, theme::mix(pal.accent, pal.bg, 0.45), pal.accent_dim],
+            }
+        };
         // The tag's cut and its trailing slivers' step (for the shape), and the HUD's next
         // motion step.
         let mut tag_cut: Option<(Cut, Option<u64>)> = None;
         let mut motion: Option<Instant> = None;
-        if let Some(TagShow { st: Status { label, tone, invert, glyph: glyph_kind, plate: plate_kind, key: tone_key }, unread, collapsed }) = tag_shown {
+        // Laid out: what it shows, or (collapsing into the pill) the pill it lands as, unseen,
+        // so its box is measured before it gets there.
+        let live = tag_shown.is_some();
+        let laid = tag_shown.clone().or_else(|| pending.clone().filter(|p| ghost_wait && p.collapsed));
+        if let Some(show) = laid {
+            let art = art_of(&show);
+            let look = art.look;
+            let collapsed = show.collapsed;
             // An unread reply is a notification, not a status: a red blade with a bone "N NEW"
             // badge, her name, the reply's first words and READ; the whole plate opens the
             // Line there. It nudges toward her every 2.2 s.
-            let unread = unread.as_ref();
-            let fresh = unread.is_some_and(|u| !u.refused);
-            // The beat: NEEDS YOU's bone plate turns black and the rec dot dims on its second
-            // half (1 Hz; a summon's pulse holds it bone), the thinking slivers step every
-            // 400 ms, WORKING's sweep crosses its red block every 2.4 s.
-            let ms = now.saturating_duration_since(self.t_start).as_millis() as u64;
-            let mut look = pal.look(plate_kind, &tone_key, tone, invert, (ms / 500) % 2 == 1 && !pulse);
-            // Her night (low energy): ONLINE dimmed, a screen turned down.
-            if tone_key == "online" && self.band() == crate::life::Band::Low {
-                let dim = |c: u32| theme::mix(c, pal.panel, NIGHT_TAG_DIM);
-                (look.edge, look.ink, look.mark) = (dim(look.edge), dim(look.ink), dim(look.mark));
-            }
-            let step = ms / 400;
+            let fresh = show.unread.as_ref().is_some_and(|u| !u.refused);
             let nudge = if fresh && ms % 2200 < 240 { 5.0 } else { 0.0 };
-            let beats = invert && matches!(look.plate, Plate::Flag);
-            let in_sweep = ms % SWEEP_EVERY_MS < SWEEP_STEPS * SWEEP_STEP_MS;
-            let sweep = (look.half && in_sweep).then(|| ((ms % SWEEP_EVERY_MS) / SWEEP_STEP_MS) as f32 / (SWEEP_STEPS - 1) as f32);
+            let beats = show.st.invert && matches!(look.plate, Plate::Flag);
             let next_ms = [
                 beats.then_some((ms / 500 + 1) * 500),
                 look.trail.then_some((ms / 400 + 1) * 400),
@@ -5957,212 +6213,11 @@ impl Render for Avatar {
             .into_iter()
             .flatten()
             .min();
-            motion = next_ms.map(|m| self.t_start + Duration::from_millis(m));
-            tag_cut = Some(if fresh { (Cut::Unread, None) } else { (Cut::Tag(look.plate), look.trail.then_some(step)) });
-            let badge = unread.filter(|u| !u.refused).map(|u| format!("{} NEW", u.n));
-            let text = match unread {
-                Some(u) if u.refused => u.text.clone(),
-                Some(u) => {
-                    // Inside her window: the plate is centred on her.
-                    let head = format!("{} NEW  READ ▸  ", u.n);
-                    let per = TAG_FONT * 0.62 + 1.5;
-                    let fit = ((l.win_w as f32 / sf - 80.0) / per) as usize;
-                    crate::session::one_line(&u.text, fit.saturating_sub(head.chars().count()).clamp(8, 44))
-                }
-                // Her state only, no name (Haseeb, 2026-11-16: "just online, sleeping etc").
-                None => label.clone(),
-            };
-            // WORKING: the label on the red block (ink).
-            let (name_part, rest) = if look.half && unread.is_none() { (Some(label.clone()), String::new()) } else { (None, text.clone()) };
-            let shade = [pal.accent, theme::mix(pal.accent, pal.bg, 0.45), pal.accent_dim];
-            // `wide`: drawn at this width (easing to its layout), the content clipped inside the
-            // plate. `split`: a glitch band's RGB split, px (the text and the plate's edges
-            // twice behind themselves, cyan and pink).
-            // `wide`: drawn at this width (easing to its layout), the content clipped inside the
-            // plate. `split`: a glitch band's RGB split on the plate's edges (px). `part`: the
-            // shell, the words, or both (the glitch only ever touches the shell).
-            let make_ring = |wide: Option<f32>, split: f32, part: Part| -> Div {
-                let (shell, words) = (part != Part::Words, part != Part::Shell);
-                // The content inside a plate drawn `wide`: clipped to it, laid out as it would be.
-                let clip = |plate: Div, row: Div| -> Div {
-                    match wide {
-                        Some(w) => plate.w(px(w)).flex_none().child(div().absolute().top_0().left_0().size_full().overflow_hidden().child(row.absolute().top_0().left_0().h_full())),
-                        None => plate.child(row),
-                    }
-                };
-                let fringe = move |cut: Cut| {
-                    canvas(
-                        |_, _, _| (),
-                        move |b, _, window, _| {
-                            let (x0, y0, x1, y1) = (f32::from(b.left()), f32::from(b.top()), f32::from(b.right()), f32::from(b.bottom()));
-                            for (dx, c) in [(-split, fx::CYAN), (split, fx::PINK)] {
-                                for p in theme::outline(cut, x0 + dx, y0, x1 + dx, y1) {
-                                    theme::fill_poly(window, &p, rgb(c));
-                                }
-                            }
-                        },
-                    )
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .size_full()
-                };
-                // A plate's backdrop when the shell is drawn; its words when they are.
-                let backed = |cut: Cut, f: Fill| div().relative().flex().items_center().when(shell, |d| d.child(theme::backdrop(cut, f)));
-                let say = |d: Div| d.when(!words, |d| d.invisible());
-                if let Some(b) = badge.clone() {
-                    let plate = div()
-                        .relative()
-                        .flex()
-                        .items_center()
-                        .when(shell && split > 0.0, |d| d.child(fringe(Cut::Unread)))
-                        .when(shell, |d| d.child(theme::backdrop(Cut::Unread, Fill::framed(pal.panel, pal.accent, 2.0).ringed(pal.ring))))
-                        .h(px(28.0))
-                        .text_size(px(TAG_FONT))
-                        .line_height(px(TAG_FONT + 1.0))
-                        .font_weight(FontWeight::BOLD);
-                    let row = div()
-                        .flex()
-                        .items_center()
-                        .gap(px(9.0))
-                        .pr(px(22.0))
-                        .child(
-                            backed(Cut::Badge, Fill::solid(pal.text))
-                                .h_full()
-                                .gap(px(6.0))
-                                .pl(px(11.0))
-                                .pr(px(14.0))
-                                .text_color(rgb(pal.ink))
-                                .child(say(div().child(glyph("dot", pal.accent, pal.text))))
-                                .child(say(tracked(&b, 1.0))),
-                        )
-                        .child(say(div().text_color(rgb(pal.text)).font_weight(FontWeight::SEMIBOLD).child(tracked(&text, 0.2))))
-                        // It opens: say so, inside the plate.
-                        .child(backed(Cut::Slant(6.0), Fill::solid(pal.accent)).h(px(18.0)).px(px(8.0)).text_color(rgb(pal.ink)).child(say(tracked("READ ▸", 1.2))));
-                    return clip(plate, row.h(px(28.0)));
-                }
-                let (pad_l, pad_r) = look.plate.pad();
-                let fill = Fill::framed(look.fill, look.edge, 1.5).dashed(look.dash).ringed(pal.ring);
-                let split_plate = look.plate == Plate::Split;
-                // DONE's tick is drawn through the plate's corner, not as a glyph.
-                let mark = match look.plate {
-                    Plate::Split if glyph_kind == "cross" => "shard".to_string(),
-                    Plate::Check => String::new(),
-                    _ => glyph_kind.clone(),
-                };
-                let (ring_c, block_c, sweep_c) = (pal.ring, pal.accent, theme::mix(pal.accent, pal.text, 0.45));
-                let block = name_part.clone().map(|n| {
-                    div()
-                        .relative()
-                        .h_full()
-                        .ml(px(-pad_l))
-                        .pl(px(pad_l))
-                        .pr(px(13.0))
-                        .flex()
-                        .items_center()
-                        .gap(px(7.0))
-                        .text_color(rgb(pal.ink))
-                        .child(
-                            canvas(
-                                |_, _, _| (),
-                                move |b, _, window, _| {
-                                    if !shell {
-                                        return;
-                                    }
-                                    let (x0, y0, x1, y1) = (f32::from(b.left()), f32::from(b.top()), f32::from(b.right()), f32::from(b.bottom()));
-                                    let (blk, sw) = theme::half_block(x0, y0, x1, y1, sweep);
-                                    theme::fill_poly(window, &blk, rgb(block_c));
-                                    if let Some(sw) = sw {
-                                        theme::fill_poly(window, &sw, rgb(sweep_c));
-                                    }
-                                },
-                            )
-                            .absolute()
-                            .top_0()
-                            .left_0()
-                            .size_full(),
-                        )
-                        .child(say(div().child(glyph(&mark, pal.ink, pal.accent))))
-                        .child(say(tracked(&n, 1.5)))
-                });
-                let half = block.is_some();
-                let plate = div()
-                    .relative()
-                    .flex()
-                    .items_center()
-                    .h(px(25.0))
-                    .text_size(px(TAG_FONT))
-                    .line_height(px(TAG_FONT + 1.0))
-                    .font_weight(FontWeight::BOLD)
-                    .text_color(rgb(look.ink))
-                    .when(shell && split > 0.0, |d| d.child(fringe(Cut::Tag(look.plate))))
-                    .child(
-                        canvas(
-                            |_, _, _| (),
-                            move |b, _, window, _| {
-                                let (x0, y0, x1, y1) = (f32::from(b.left()), f32::from(b.top()), f32::from(b.right()), f32::from(b.bottom()));
-                                // Its marks (DONE's tick, the bracket ticks) are drawn with the
-                                // words: the glitch never carries them.
-                                if words {
-                                    for p in theme::tag_marks(look.plate, x0, y0, x1, y1) {
-                                        theme::fill_poly(window, &theme::offset(&p, theme::RING), rgb(ring_c));
-                                        theme::fill_poly(window, &p, rgb(look.mark));
-                                    }
-                                }
-                                if !shell {
-                                    return;
-                                }
-                                let polys = theme::outline(Cut::Tag(look.plate), x0, y0, x1, y1);
-                                match theme::tag_inner(look.plate, x0, y0, x1, y1, 1.5) {
-                                    Some(inner) => {
-                                        theme::paint(window, &polys, Fill::solid(look.edge).ringed(ring_c));
-                                        for p in inner {
-                                            theme::fill_poly(window, &p, rgb(look.fill));
-                                        }
-                                    }
-                                    None => theme::paint(window, &polys, fill),
-                                }
-                                if look.trail {
-                                    for (p, lvl) in theme::trail(x1, y0, y1, step) {
-                                        theme::fill_poly(window, &p, rgb(shade[lvl as usize]));
-                                    }
-                                }
-                            },
-                        )
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .size_full(),
-                    );
-                let row = div()
-                    .flex()
-                    .items_center()
-                    .gap(px(7.0))
-                    .pl(px(pad_l))
-                    .pr(px(pad_r))
-                    .children(block)
-                    // The ✕'s shard broken off with the plate's piece.
-                    .when(!half, |d| {
-                        d.child(say(match look.halo {
-                            // The disc: 15 px, the glyph centred in it.
-                            Some(h) => div()
-                                .relative()
-                                .size(px(15.0))
-                                .mx(px(-2.0))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .child(div().absolute().top_0().left_0().child(theme::glyph_at("disc", h, h, 15.0)))
-                                .child(glyph(&mark, look.mark, h)),
-                            None => div().when(split_plate, |d| d.relative().left(px(-3.0)).top(px(3.0))).child(glyph(&mark, look.mark, look.fill)),
-                        }))
-                    })
-                    // ERROR: the type starts inside the toothed piece, clear of the break.
-                    .child(say(theme::metered(&rest, 1.5, look.ink).when(split_plate, |d| d.ml(px(8.0)))))
-                    // A reply put away behind the plate: a small up-chevron inside it.
-                    .when(collapsed, |d| d.child(say(div().child(chevron(Chevron::Up, rgb(look.ink))))));
-                clip(plate, row.h(px(25.0)))
-            };
+            if live {
+                motion = next_ms.map(|m| self.t_start + Duration::from_millis(m));
+                tag_cut = Some(if fresh { (Cut::Unread, None) } else { (Cut::Tag(look.plate), look.trail.then_some(art.step)) });
+            }
+            let make_ring = |wide: Option<(f32, f32)>, split: f32, part: Part| -> Div { tag_ring(pal, &art, wide, split, part) };
             if let (true, Some(b), Some(bands)) = (torn, self.tag_box.get(), plan.slices.as_ref()) {
                 let (bx, by) = (f32::from(b.origin.x), f32::from(b.origin.y));
                 let (bw, bh) = (f32::from(b.size.width), f32::from(b.size.height));
@@ -6209,54 +6264,45 @@ impl Render for Avatar {
                     root = root.child(strip(s0, s1, dxl));
                 }
             }
-            // The HUD's own motion, drawn at the laid-out box (the holder below lays it out
-            // unseen; gone, where it was last): the shell at its easing width, whole or in its
-            // glitch's bands (kept inside the plate's box), and over it the words, clean, at
-            // their level.
-            let mut by_fx = !torn && (tag_glitch.is_some() || tag_words < 1.0 || (hud_motion && self.tag_fx.measuring()));
-            if !torn && let Some(b) = self.tag_box.get() {
+            // The HUD's motion, drawn at the laid-out box (the holder below lays the newest out
+            // unseen; gone, where it was last): the plates at their easing width, the old one
+            // under the new as they cross, each with its words over it, centred and clean; all
+            // at the tag's level as it comes or goes. Never an empty plate.
+            let mut by_fx = live && !torn && self.tag_fx.busy(now);
+            if live
+                && !torn
+                && let Some(b) = self.tag_box.get()
+            {
                 let (bx, by, bw, bh) = (f32::from(b.origin.x), f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height));
                 let aw = if show_tag { self.tag_fx.width(bw, now, hud_motion) } else { self.tag_fx.width_now(now) };
                 if show_tag && collapsed {
                     self.pill_last = Some((bw, bh));
                 }
+                let tf = self.tag_fx.frame(now);
                 if by_fx || (aw - bw).abs() > 0.5 {
                     by_fx = true;
-                    let x0 = bx + (bw - aw) * 0.5;
-                    let bands = tag_glitch.and_then(|g| {
-                        let e = crate::hud::cuts(bh, 3 + (g.seed % 2) as usize, 6.0, g.seed);
-                        g.look(e.len() - 1, crate::hud::TAG_SHIFT, now).map(|l| (e, l))
-                    });
-                    match bands {
-                        Some((edges, look)) => {
-                            // Each band clipped to the plate's box (its ring included): a shifted
-                            // band is cut at the edge, nothing pokes out.
-                            let m = theme::RING + 1.0;
-                            let n = look.bands.len();
-                            for (i, band) in look.bands.iter().enumerate() {
-                                let s0 = if i == 0 { -m } else { edges[i] };
-                                let s1 = if i + 1 == n { bh + m } else { edges[i + 1] };
-                                root = root.child(
-                                    div()
-                                        .absolute()
-                                        .left(px(x0 - m))
-                                        .top(px(by + s0))
-                                        .w(px(aw + 2.0 * m))
-                                        .h(px(s1 - s0))
-                                        .overflow_hidden()
-                                        .child(div().absolute().left(px(m + band.dx)).top(px(-s0)).w(px(aw)).h(px(bh)).child(make_ring(Some(aw), band.split, Part::Shell))),
-                                );
-                            }
-                            if let Some(i) = look.tear {
-                                root = root.child(tear_bar(x0, by + edges[i], aw));
-                            }
-                        }
-                        None => {
-                            root = root.child(div().absolute().left(px(x0)).top(px(by)).w(px(aw)).h(px(bh)).child(make_ring(Some(aw), 0.0, Part::Shell)));
-                        }
+                    let (x0, bottom) = (bx + (bw - aw) * 0.5, by + bh);
+                    let layer = |a: &TagArt, nat: f32, part: Part, split: f32, level: f32| -> Div {
+                        let h = a.h();
+                        div().absolute().left(px(x0)).top(px(bottom - h)).w(px(aw)).h(px(h)).opacity(level).child(tag_ring(pal, a, Some((aw, nat)), split, part))
+                    };
+                    let prev = tf.prev.map(|(p, w, words, plate)| (art_of(p), w, words, plate));
+                    let (cur_nat, a) = (tf.nat, tf.alpha);
+                    if let Some((pa, pw, _, pp)) = &prev
+                        && *pp > 0.0
+                    {
+                        root = root.child(layer(pa, *pw, Part::Shell, 0.0, pp * a));
                     }
-                    if tag_words > 0.0 {
-                        root = root.child(div().absolute().left(px(x0)).top(px(by)).w(px(aw)).h(px(bh)).opacity(tag_words).child(make_ring(Some(aw), 0.0, Part::Words)));
+                    if tf.plate > 0.0 {
+                        root = root.child(layer(&art, cur_nat, Part::Shell, tf.split, tf.plate * a));
+                    }
+                    if let Some((pa, pw, pwords, _)) = &prev
+                        && *pwords > 0.0
+                    {
+                        root = root.child(layer(pa, *pw, Part::Words, 0.0, pwords * a));
+                    }
+                    if tf.words > 0.0 {
+                        root = root.child(layer(&art, cur_nat, Part::Words, 0.0, tf.words * a));
                     }
                 }
             }
@@ -6287,7 +6333,7 @@ impl Render for Avatar {
                     .pr(px((l.win_w as f32 / sf - 2.0 * centre).max(0.0)));
                 // Torn (or drawn by the HUD's motion): the whole tag still lays out (invisibly) so
                 // its box stays current.
-                if torn || by_fx {
+                if torn || by_fx || !live {
                     holder = holder.invisible();
                 }
                 root = root.child(holder.child(probed(row, &tag_cell)));
@@ -6305,13 +6351,13 @@ impl Render for Avatar {
         self.buttons.borrow_mut().clear();
         // As shown: a turn in its quiet start (`session::QUIET_START`) offers no ABORT yet.
         let busy = self.session.as_ref().and_then(|sess| sess.shown.as_ref()).is_some_and(|b| b.busy);
-        let mut tear: Option<(f32, f32, f32)> = None;
         if mode.is_none() {
             self.panel_bottom = None;
             self.panel_rect.set(None);
-            // Just closed: it leaves where it was (its words fade, then the empty shell shrinks
-            // and glitches out, or eases into the pill), unless it went with her (a teleport,
-            // his hand) or into the Line.
+            self.panel_old = None;
+            // Just closed: it leaves where it was (its border glitches, it settles just inside
+            // its box and dims out; or its words cross into the pill's as it eases into the
+            // pill), unless it went with her (a teleport, his hand) or into the Line.
             let snap = self.panel_last_snap.take();
             if self.panel_fx.closed()
                 && hud
@@ -6319,7 +6365,8 @@ impl Render for Avatar {
                 && self.line.is_none()
                 && let Some(snap) = snap
             {
-                // The pill's box: where the tag sat (she hasn't moved), as wide as the pill was.
+                // The pill's box: where the tag sits (she hasn't moved), measured as the pill
+                // from the next frame on.
                 let pill = collapsed
                     .then(|| {
                         self.tag_box.get().map(|b| {
@@ -6331,10 +6378,16 @@ impl Render for Avatar {
                     .flatten();
                 let glitch = hud_glitch && !self.panel_fx.throttled(now);
                 let g = snap.g;
-                self.ghost = Some(crate::hud::Ghost::new(snap, (g.x, g.y, g.w, g.h), pill, g.tip, now, glitch, self.bubble_serial));
+                self.ghost = Some(crate::hud::Ghost::new(snap, (g.x, g.y, g.w, g.h), pill, now, glitch));
             }
             if self.ghost.as_ref().is_some_and(|g| g.done(now)) || !hud {
                 self.ghost = None;
+            }
+            if let Some(gh) = &mut self.ghost
+                && gh.to_pill
+                && let Some(b) = self.tag_box.get()
+            {
+                gh.retarget((f32::from(b.origin.x), f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height)), now);
             }
             if let Some(gh) = &self.ghost {
                 let sn = &gh.snap;
@@ -6346,42 +6399,18 @@ impl Render for Avatar {
                     let tail_x = sn.g.tail_x + (c - sn.g.tail_x) * k;
                     PanelGeom { x, y, w, h, tail_x, tip: (sn.g.tip.0 + (c - sn.g.tip.0) * k, y + h + TAIL_H * (1.0 - k)) }
                 } else {
-                    // Shrinking about the tail's tip.
-                    let s = w / sn.g.w.max(1.0);
-                    PanelGeom { x, y, w, h, tail_x: sn.g.tip.0 - (sn.g.tip.0 - sn.g.tail_x) * s, tip: sn.g.tip }
+                    PanelGeom { x, y, w, h, ..sn.g }
                 };
-                let gl = gh.glitch(now);
-                let spans = panel_spans(&g, gl.map_or(1, |x| x.seed));
-                let look = gl.and_then(|x| x.look(spans.len(), crate::hud::PANEL_SHIFT, now));
-                if let Some(i) = look.as_ref().and_then(|l| l.tear) {
-                    tear = Some((g.x, spans[i].0.max(g.y), g.w));
+                let alpha = gh.alpha(now);
+                let (own, pill_words, pill_plate, shell) = if gh.to_pill { gh.pill(now) } else { (1.0, 0.0, 0.0, 1.0) };
+                if shell > 0.0 {
+                    root = root.child(
+                        div().absolute().top_0().left_0().size_full().opacity(shell * alpha).child(panel_bg(g, gh.split(now), (pal.panel, sn.frame_c, 2.0, pal.ring, pal.accent))),
+                    );
                 }
-                root = root.child(panel_bg(g, look, spans, (pal.panel, sn.frame_c, 2.0, pal.ring, pal.accent)));
-                let words = gh.words(now);
-                if words > 0.0 {
-                    let header = div()
-                        .absolute()
-                        .top(px(PAD_T))
-                        .left(px(PAD_L))
-                        .right(px(PAD_R))
-                        .h(px(HEADER_H))
-                        .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        .line_height(px(HEADER_H))
-                        .child(
-                            theme::plate(Cut::Tab(5.0), Fill::solid(pal.accent))
-                                .h(px(14.0))
-                                .pl(px(7.0))
-                                .pr(px(9.0))
-                                .text_size(px(10.5))
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(rgb(pal.ink))
-                                .child(tracked(&self.name, 1.8)),
-                        )
-                        .child(tracked(&sn.header_label, 1.5).text_size(px(9.5)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(pal.dim)))
-                        .child(div().flex_1())
-                        .child(tracked(&sn.label, 1.5).text_size(px(9.5)).font_weight(FontWeight::BOLD).text_color(rgb(pal.dim)));
+                // Its own words, where they were, inside its box as it goes.
+                if own > 0.0 {
+                    let header = panel_header(&self.name, &sn.header_label, &sn.label, pal);
                     let body = div()
                         .absolute()
                         .top(px(PAD_T + HEADER_H + HEADER_GAP))
@@ -6396,7 +6425,20 @@ impl Render for Avatar {
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(rgb(pal.text))
                         .children(sn.lines.iter().map(|t| div().h(px(LINE_H)).flex().items_center().whitespace_nowrap().child(t.clone())));
-                    root = root.child(div().absolute().left(px(x)).top(px(y)).w(px(w)).h(px(h)).overflow_hidden().opacity(words).child(header).child(body));
+                    let inner = div().absolute().left(px(sn.g.x - x)).top(px(sn.g.y - y)).w(px(sn.g.w)).h(px(sn.g.h)).child(header).child(body);
+                    root = root.child(div().absolute().left(px(x)).top(px(y)).w(px(w)).h(px(h)).overflow_hidden().opacity(own * alpha).child(inner));
+                }
+                // The pill it becomes: its words cross in at the box's centre, its plate takes
+                // over the shell on the way.
+                if gh.to_pill {
+                    let pa = art_of(&pill_show);
+                    let pw = gh.target().2;
+                    let (pl, pt) = (x + (w - pw) * 0.5, y + (h - pa.h()) * 0.5);
+                    for (part, level) in [(Part::Shell, pill_plate), (Part::Words, pill_words)] {
+                        if level > 0.0 {
+                            root = root.child(div().absolute().left(px(pl)).top(px(pt)).w(px(pw)).h(px(pa.h())).opacity(level).child(tag_ring(pal, &pa, Some((pw, pw)), 0.0, part)));
+                        }
+                    }
                 }
             }
         }
@@ -6539,18 +6581,23 @@ impl Render for Avatar {
                 PanelMode::Input { .. } => u64::MAX - 2,
                 PanelMode::Probe => u64::MAX - 3,
             };
-            let (w, h) = self.panel_fx.open((w, h), serial, pill_before, now, hud_motion, hud_glitch);
-            let words = self.panel_fx.words(now);
+            let pf = self.panel_fx.open((w, h), serial, pill_before, now, hud_motion, hud_glitch);
+            if pf.replaced {
+                // A new reply: the old one's words cross out in the box as it is.
+                self.panel_old = self.panel_last_snap.as_ref().map(|s| s.lines.clone());
+            }
+            if pf.old <= 0.0 {
+                self.panel_old = None;
+            }
             self.ghost = None;
-            let g = place_panel(w, h, head_l, bottom, (vis_l, vis_r));
-            let (x, y) = (g.x, g.y);
+            // Its shell, and the box its words are laid out in (the same, but while it opens:
+            // the box it is going to, at most `INSET` past the shell, so nothing is cut).
+            let g = place_panel(pf.shell.0, pf.shell.1, head_l, bottom, (vis_l, vis_r));
+            let gc = place_panel(pf.content.0, pf.content.1, head_l, bottom, (vis_l, vis_r));
+            let (x, y, w, h) = (gc.x, gc.y, gc.w, gc.h);
             self.panel_rect.set(Some((x, y, w, h + TAIL_H)));
             panel_geom = Some(g);
-            // Its shell's glitch (the words are hidden meanwhile): bands shifted inside its box.
             let foot_zone = if footer { FOOTER_GAP + FOOTER_H + PAD_B } else { PAD_B };
-            let gl = self.panel_fx.glitch(now);
-            let spans = panel_spans(&g, gl.map_or(1, |x| x.seed));
-            let look = gl.and_then(|x| x.look(spans.len(), crate::hud::PANEL_SHIFT, now));
             // The rows the body holds at this height: a new line shows once there is room for
             // it, never cut in half by a growing box.
             let fits = ((h - (PAD_T + HEADER_H + HEADER_GAP) - foot_zone) / LINE_H + 0.02).floor().max(0.0) as usize;
@@ -6561,10 +6608,7 @@ impl Render for Avatar {
                 None => pal.accent,
             };
             let warm = pulse || glow.is_some();
-            if let Some(i) = look.as_ref().and_then(|l| l.tear) {
-                tear = Some((g.x, spans[i].0.max(g.y), g.w));
-            }
-            let bg = panel_bg(g, look, spans, (pal.panel, frame_c, if warm { 3.0 } else { 2.0 }, pal.ring, pal.accent));
+            let bg = panel_bg(g, pf.split, (pal.panel, frame_c, if warm { 3.0 } else { 2.0 }, pal.ring, pal.accent));
             let prompt_mode = matches!(mode, PanelMode::Prompt);
             let header_label = if probe {
                 if self.focus.is_focused(window) { "FOCUS PROBE // KEYS OK".to_string() } else { header_label }
@@ -6699,13 +6743,43 @@ impl Render for Avatar {
                     body = body.child(row);
                 }
             }
-            // The words stay inside the panel's inner box (laid out for the size it is going to).
-            body = body.bottom(px(foot_zone)).overflow_hidden();
-            // The snapshot a closing bubble is drawn from.
-            self.panel_last_snap = Some(GhostSnap { g, header_label: header_label.clone(), label: label.clone(), lines: ghost_lines, foot_zone, frame_c });
+            // The words stay inside the panel's inner box; a new reply's cross in over the old.
+            body = body.bottom(px(foot_zone)).overflow_hidden().when(pf.words < 1.0, |d| d.opacity(pf.words));
+            let old_body = self.panel_old.as_ref().filter(|_| pf.old > 0.0).map(|old| {
+                div()
+                    .absolute()
+                    .top(px(PAD_T + HEADER_H + HEADER_GAP))
+                    .left(px(PAD_L))
+                    .right(px(PAD_R))
+                    .bottom(px(foot_zone))
+                    .overflow_hidden()
+                    .opacity(pf.old)
+                    .flex()
+                    .flex_col()
+                    .text_size(px(BODY_FONT))
+                    .line_height(px(LINE_H))
+                    .font_weight(body_weight)
+                    .text_color(rgb(pal.text))
+                    .children(old.iter().map(|t| div().h(px(LINE_H)).flex().items_center().whitespace_nowrap().child(t.clone())))
+            });
+            // The snapshot a closing bubble is drawn from (where its words are).
+            self.panel_last_snap = Some(GhostSnap { g: gc, header_label: header_label.clone(), label: label.clone(), lines: ghost_lines, foot_zone, frame_c });
             root = root.child(bg);
-            // Its words (everything inside the shell) at their level: hidden while the shell
-            // opens or glitches, a short fade once it has settled.
+            // Out of the pill: the pill's words (and its plate) at the box's centre, crossing
+            // into the bubble's.
+            if let (Some((pw_level, pp_level)), Some((pw, _))) = (pf.pill, pill_before.or(self.pill_open_from)) {
+                self.pill_open_from = Some((pw, 25.0));
+                let pa = art_of(&pill_show);
+                let (pl, pt) = (g.x + (g.w - pw) * 0.5, g.y + (g.h - pa.h()) * 0.5);
+                for (part, level) in [(Part::Shell, pp_level), (Part::Words, pw_level)] {
+                    if level > 0.0 {
+                        root = root.child(div().absolute().left(px(pl)).top(px(pt)).w(px(pw)).h(px(pa.h())).opacity(level).child(tag_ring(pal, &pa, Some((pw, pw)), 0.0, part)));
+                    }
+                }
+            } else if pf.pill.is_none() {
+                self.pill_open_from = None;
+            }
+            // Its words (everything inside the shell): out of the pill, crossing in from its.
             let mut panel = div()
                 .id("bubble")
                 .absolute()
@@ -6714,8 +6788,9 @@ impl Render for Avatar {
                 .w(px(w))
                 .h(px(h))
                 .overflow_hidden()
-                .when(words < 1.0, |d| d.opacity(words))
+                .when(pf.inner < 1.0, |d| d.opacity(pf.inner))
                 .child(header)
+                .children(old_body)
                 .child(body);
             // Slanted keys: a hollow red chevron key, DENY bone with the focus ring, the rest
             // (ALLOW, REVIEW, ANSWER) solid red with ink type. Unarmed, they sit back.
@@ -7062,9 +7137,6 @@ impl Render for Avatar {
                     }));
             }
             root = root.child(panel);
-        }
-        if let Some((x, y, w)) = tear {
-            root = root.child(tear_bar(x, y, w));
         }
         // The HUD moves: a frame per present until it settles, and nothing after.
         let hud_busy = self.tag_fx.busy(now) || self.panel_fx.busy(now) || self.ghost.is_some();

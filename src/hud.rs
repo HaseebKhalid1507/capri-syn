@@ -1,52 +1,67 @@
 //! The HUD's motion: the speech bubble, the status tag and the pill move as one designed
-//! system. One curve (`ease`: out, 2 % past the target at most, no wobble) and one set of
-//! durations for every size change, open and close.
+//! system. One curve (`ease`: out, 2 % past the target at most, no wobble), one crossfade
+//! (`blend`) and one set of durations, for every size change, swap, open and close.
 //!
-//! Text is never glitched. Words fade out before their box moves, and come back clean (a
-//! short fade) once it has settled. The glitch (bands shifted inside the box, an RGB split
-//! on its edges, a red tear: her teleport's language) touches only the empty shell, for two
-//! frames at most, and never leaves the box's bounds. A tag label holds at least `DWELL_MS`;
-//! a burst of changes shows only the latest. Pure: the view samples it while something moves
-//! and asks for frames only then.
+//! Nothing is ever an empty shell. A plate or bubble keeps its fill and its words while it
+//! reshapes; a change crossfades the old words and plate into the new ones (both clean, never
+//! sliced), the box easing from wherever it is: a growing box leads its new words, a
+//! shrinking one waits for the old words to go. The glitch is an accent: an RGB split on the
+//! border for two steps while the content is there. A tag label holds at least `DWELL_MS`; a
+//! burst shows only the latest. Pure: the view samples it while something moves and asks for
+//! frames only then.
 
-use crate::anim::Rng;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-/// One glitch frame (two presents at 60 Hz: one per present reads as noise).
+/// One glitch step (two presents at 60 Hz).
 pub const STEP_MS: f32 = 1000.0 / 30.0;
-/// A glitch: two frames at most.
+/// A glitch: two steps, on the border only.
 pub const GLITCH_MS: f32 = 2.0 * STEP_MS;
+/// The border's RGB split on a glitch's first step, px (half on its second).
+pub const SPLIT: f32 = 2.0;
 /// A size change: the bubble growing or shrinking to its content, the tag's width.
-pub const SIZE_MS: f32 = 220.0;
-/// The bubble's shell opening: from `OPEN_SCALE` at her tail.
-pub const OPEN_MS: f32 = 260.0;
-/// Words fading out before their box moves (a tag's swap, the bubble into the pill).
-pub const TEXT_OUT_MS: f32 = 90.0;
-/// The bubble closing: its words are gone by then.
-pub const CLOSE_TEXT_MS: f32 = 50.0;
-/// Words coming back once their box has settled.
-pub const TEXT_IN_MS: f32 = 80.0;
-/// The emptied bubble shrinking to `CLOSE_SCALE`; its exit glitch takes the last frame.
-pub const SHRINK_MS: f32 = 110.0;
-/// The emptied bubble easing into the pill.
+pub const SIZE_MS: f32 = 200.0;
+/// The bubble opening: from just inside its own box (`INSET`), or out of the pill.
+pub const OPEN_MS: f32 = 240.0;
+/// Any crossfade: old words (and plate) out, new in, overlapping.
+pub const XFADE_MS: f32 = 120.0;
+/// A growing plate leads its new words by this much (they never overhang it).
+pub const GROW_LEAD_MS: f32 = 50.0;
+/// A shrinking box waits this long: the old words are nearly gone before it moves.
+pub const SHRINK_LAG_MS: f32 = 90.0;
+/// The tag coming (from `FLOOR` up) and going (down to `FLOOR`, then gone).
+pub const APPEAR_MS: f32 = 90.0;
+pub const EXIT_MS: f32 = 90.0;
+/// The lowest level anything shows at: a fade starts or ends here, never lingers below.
+pub const FLOOR: f32 = 0.4;
+/// The bubble closing: it settles just inside its box, dims to `FLOOR` over its last
+/// `CLOSE_DIM_MS`, and is gone.
+pub const CLOSE_MS: f32 = 120.0;
+pub const CLOSE_DIM_MS: f32 = 60.0;
+/// The bubble collapsing into the pill: its words cross into the pill's, then (after
+/// `PILL_LAG_MS`) its box eases into the pill's.
+pub const PILL_LAG_MS: f32 = 80.0;
 pub const PILL_MS: f32 = 180.0;
-/// Words come in once a size ease is this far: the box is most of the way (the curve is
-/// front-loaded), the rest is too small to read as a move.
-pub const SETTLED: f32 = 0.45;
 /// A tag label shows at least this long; changes meanwhile wait, and only the latest shows.
 pub const DWELL_MS: f32 = 350.0;
 /// At most one glitch per element this often.
 pub const GAP_MS: f32 = 600.0;
-pub const OPEN_SCALE: f32 = 0.85;
-pub const CLOSE_SCALE: f32 = 0.85;
-/// The widest sideways shift of a shell band: the tag's, the bubble's (px).
-pub const TAG_SHIFT: f32 = 6.0;
-pub const PANEL_SHIFT: f32 = 8.0;
+/// How far inside its own box the bubble opens and closes (x per side, y at the top): inside
+/// its padding, so its words are never cut.
+pub const INSET: (f32, f32) = (7.0, 8.0);
 /// The curve's overshoot constant: 2.0 % past the target at 71 % of the way, then settled.
 const BACK: f32 = 0.75;
 
 fn ms(now: Instant, t0: Instant) -> f32 {
     now.saturating_duration_since(t0).as_secs_f32() * 1000.0
+}
+
+fn after(t: Instant, ms_: f32) -> Instant {
+    t + Duration::from_secs_f32(ms_.max(0.0) / 1000.0)
+}
+
+/// 0 → 1 over `ms_` from `t0` (0 before it).
+fn lin(now: Instant, t0: Instant, ms_: f32) -> f32 {
+    (ms(now, t0) / ms_).clamp(0.0, 1.0)
 }
 
 /// The one curve: ease-out with a slight overshoot (`BACK`), 0 at 0 and 1 at 1.
@@ -55,12 +70,20 @@ pub fn ease(u: f32) -> f32 {
     1.0 + (BACK + 1.0) * s * s * s + BACK * s * s
 }
 
-/// A fade's level `ms_` long from `t0`: 0 → 1.
-fn fade_in(now: Instant, t0: Instant, ms_: f32) -> f32 {
-    (ms(now, t0) / ms_).clamp(0.0, 1.0)
+/// The one crossfade: smooth in and out, 0 → 1. Old at `1 - blend`, new at `blend`: one of
+/// them is always at half or more.
+pub fn blend(u: f32) -> f32 {
+    let u = u.clamp(0.0, 1.0);
+    u * u * (3.0 - 2.0 * u)
 }
 
-/// A value easing toward its target along `ease`.
+/// A plate's level in a crossfade at `k` (new: `k`, old: `1 - k`): full by halfway, so the two
+/// overlapping always cover what they share.
+pub fn plate(k: f32) -> f32 {
+    (2.0 * k).clamp(0.0, 1.0)
+}
+
+/// A value easing toward its target along `ease` (it may start later than now).
 #[derive(Clone, Copy, Debug)]
 pub struct Tween {
     from: f32,
@@ -74,8 +97,8 @@ impl Tween {
         Tween { from: v, to: v, t0: None, ms: SIZE_MS }
     }
 
-    pub fn start(from: f32, to: f32, now: Instant, ms: f32) -> Tween {
-        Tween { from, to, t0: Some(now), ms }
+    pub fn start(from: f32, to: f32, t0: Instant, ms: f32) -> Tween {
+        Tween { from, to, t0: Some(t0), ms }
     }
 
     pub fn at(&self, now: Instant) -> f32 {
@@ -89,9 +112,8 @@ impl Tween {
         self.t0.is_some_and(|t0| ms(now, t0) < self.ms)
     }
 
-    /// How far along, 0..1 (1: still).
-    pub fn progress(&self, now: Instant) -> f32 {
-        self.t0.map_or(1.0, |t0| (ms(now, t0) / self.ms).min(1.0))
+    pub fn target(&self) -> f32 {
+        self.to
     }
 
     /// Toward `to` from wherever it is now; no change when that is already where it goes.
@@ -107,470 +129,542 @@ impl Tween {
     }
 }
 
-/// One shell band at one moment: its sideways shift and its RGB split (px).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Band {
-    pub dx: f32,
-    pub split: f32,
-}
-
-/// A shell glitch frame: its bands and the band whose top edge carries the red tear.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Look {
-    pub bands: Vec<Band>,
-    pub tear: Option<usize>,
-}
-
-/// The empty shell's glitch: two frames. Every band stays (the shell never thins); the first
-/// frame shifts them fully with a 3 px split and a red tear, the second at 40 % with 2 px.
+/// A border glitch: the outline's RGB split, `SPLIT` px then half, while the content shows.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Glitch {
     pub t0: Instant,
-    pub seed: u64,
 }
 
 impl Glitch {
-    pub fn new(now: Instant, seed: u64) -> Glitch {
-        Glitch { t0: now, seed: seed | 1 }
+    /// The split now, px (0: over, or not yet).
+    pub fn split(&self, now: Instant) -> f32 {
+        if now < self.t0 {
+            return 0.0;
+        }
+        match ms(now, self.t0) {
+            t if t < STEP_MS => SPLIT,
+            t if t < GLITCH_MS => SPLIT * 0.5,
+            _ => 0.0,
+        }
     }
 
     pub fn done(&self, now: Instant) -> bool {
-        ms(now, self.t0) >= GLITCH_MS
+        now >= self.t0 && ms(now, self.t0) >= GLITCH_MS
     }
+}
 
-    /// `n` bands at `now` (None: over); `amp`: the widest shift, px.
-    pub fn look(&self, n: usize, amp: f32, now: Instant) -> Option<Look> {
-        if self.done(now) {
+/// At most one glitch per element per `GAP_MS`.
+#[derive(Clone, Copy, Debug, Default)]
+struct Throttle(Option<Instant>);
+
+impl Throttle {
+    fn take(&mut self, now: Instant, ok: bool) -> Option<Glitch> {
+        if !ok || self.blocked(now) {
             return None;
         }
-        let n = n.max(1);
-        let step = (ms(now, self.t0) / STEP_MS) as u64;
-        let (k, split) = if step == 0 { (1.0, 3.0) } else { (0.4, 2.0) };
-        let mut r = Rng::new(self.seed ^ step.wrapping_mul(0x9E37_79B9_7F4A_7C15));
-        let bands = (0..n)
-            .map(|_| {
-                let m = r.range(0.35, 1.0) * if r.pick(2) == 0 { -1.0 } else { 1.0 };
-                // Some bands hold still: a tear, not a slide.
-                let moved = r.pick(3) != 0;
-                Band { dx: if moved { (amp * k * m).round() } else { 0.0 }, split: if moved { split } else { 0.0 } }
-            })
-            .collect();
-        Some(Look { bands, tear: (step == 0 && n > 1).then(|| 1 + r.pick(n - 1)) })
+        self.0 = Some(now);
+        Some(Glitch { t0: now })
+    }
+
+    fn blocked(&self, now: Instant) -> bool {
+        self.0.is_some_and(|t| ms(now, t) < GAP_MS)
     }
 }
 
-/// Band edges over `h` px: `n` bands, none thinner than `min` (fixed per glitch).
-pub fn cuts(h: f32, n: usize, min: f32, seed: u64) -> Vec<f32> {
-    let n = n.clamp(1, ((h / min.max(1.0)) as usize).max(1));
-    let mut r = Rng::new(seed | 1);
-    let mut w: Vec<f32> = (0..n).map(|_| r.range(0.6, 1.4)).collect();
-    let sum: f32 = w.iter().sum();
-    w.iter_mut().for_each(|x| *x *= h / sum);
-    let mut out = vec![0.0];
-    let mut y = 0.0;
-    for x in &w[..n - 1] {
-        y += x;
-        out.push(y.round());
-    }
-    out.push(h);
-    out
-}
-
-/// A fresh seed per glitch.
-pub fn seed(salt: u64) -> u64 {
-    (Rng::seeded().next() ^ salt.wrapping_mul(0x2545_F491_4F6C_DD1D)) | 1
-}
-
-/// Where a tag change is.
+/// The tag coming, there, or going.
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum Phase {
+enum Vis {
     Steady,
-    /// The old words fading out (since `t0`); `glitch`: the shell glitches after.
-    TextOut { t0: Instant, glitch: bool },
-    /// The new content's shell: its glitch, its width settling; no words yet.
-    Shell { t0: Instant, glitch: Option<Glitch> },
-    /// Going: the empty shell's exit glitch, then nothing.
-    Exit { glitch: Glitch },
-    /// The new words fading in.
-    TextIn { t0: Instant },
+    /// Coming: since (None: its width isn't measured yet, nothing drawn).
+    Appear(Option<Instant>),
+    /// Going: since.
+    Exit(Instant),
 }
 
-/// What a tag draws this frame: its content (None: nothing), its words' level (0..1), its
-/// shell's glitch.
+/// What a tag draws this frame.
 #[derive(Debug, PartialEq)]
 pub struct TagFrame<'a, T> {
-    pub content: Option<&'a T>,
-    pub text: f32,
-    pub glitch: Option<Glitch>,
+    /// The newest content (None: no tag).
+    pub cur: Option<&'a T>,
+    /// Its words' and plate's levels (0..1; 1 unless it is crossfading in).
+    pub words: f32,
+    pub plate: f32,
+    /// Its laid-out width (the plate is drawn at `width`, its content centred in it).
+    pub nat: f32,
+    /// The content crossfading out: it, its laid-out width, its words' and plate's levels.
+    pub prev: Option<(&'a T, f32, f32, f32)>,
+    /// The whole tag's level (coming or going).
+    pub alpha: f32,
+    /// The border's RGB split, px.
+    pub split: f32,
 }
 
 /// The status tag (and the pill, and the unread chip, which are the tag): what it shows, its
-/// changes, its width.
+/// crossfades, its width.
 #[derive(Debug)]
 pub struct TagFx<T> {
-    /// What it draws.
-    shown: Option<T>,
+    /// The newest shown (what the view lays out).
+    cur: Option<T>,
     /// The latest asked for.
     want: Option<T>,
-    phase: Phase,
-    /// When the shown words came in (the dwell).
-    shown_at: Option<Instant>,
-    last_glitch: Option<Instant>,
-    width: Tween,
-    /// Frames left where the width follows its layout at once (just appeared: the measure
-    /// is a frame old).
-    snap: u8,
-    /// Its content just changed: the layout's width is last frame's.
+    /// Crossfading out: the old content and its laid-out width.
+    prev: Option<(T, f32)>,
+    /// The new words' crossfade start (None: not measured yet).
+    x0: Option<Instant>,
+    vis: Vis,
+    /// The newest content just changed: this frame's layout is the old one's.
     measuring: bool,
-    salt: u64,
+    /// Measured next frame: the change starts then.
+    pending: bool,
+    /// The newest content's laid-out width.
+    nat: f32,
+    /// When the newest content came in (the dwell).
+    shown_at: Option<Instant>,
+    glitch: Option<Glitch>,
+    glitch_ok: bool,
+    throttle: Throttle,
+    width: Tween,
+    /// Frames where the width follows its layout at once (a quiet change).
+    snap: u8,
 }
 
 impl<T: Clone + PartialEq> Default for TagFx<T> {
     fn default() -> Self {
-        TagFx { shown: None, want: None, phase: Phase::Steady, shown_at: None, last_glitch: None, width: Tween::still(0.0), snap: 0, measuring: false, salt: 0 }
+        TagFx {
+            cur: None,
+            want: None,
+            prev: None,
+            x0: None,
+            vis: Vis::Steady,
+            measuring: false,
+            pending: false,
+            nat: 0.0,
+            shown_at: None,
+            glitch: None,
+            glitch_ok: false,
+            throttle: Throttle::default(),
+            width: Tween::still(0.0),
+            snap: 0,
+        }
     }
 }
 
 impl<T: Clone + PartialEq> TagFx<T> {
-    fn glitch_now(&mut self, now: Instant, ok: bool) -> Option<Glitch> {
-        if !ok || self.last_glitch.is_some_and(|t| ms(now, t) < GAP_MS) {
-            return None;
+    /// What is due: a crossfade over, a coming or going done.
+    fn settle(&mut self, now: Instant) {
+        if let Vis::Exit(t0) = self.vis
+            && ms(now, t0) >= EXIT_MS
+        {
+            self.cur = None;
+            self.prev = None;
+            self.vis = Vis::Steady;
         }
-        self.last_glitch = Some(now);
-        self.salt = self.salt.wrapping_add(1);
-        Some(Glitch::new(now, seed(self.salt)))
+        if let Vis::Appear(Some(t0)) = self.vis
+            && ms(now, t0) >= APPEAR_MS
+        {
+            self.vis = Vis::Steady;
+        }
+        if self.prev.is_some() && self.x0.is_some_and(|x| now >= x && ms(now, x) >= XFADE_MS) {
+            self.prev = None;
+        }
+        if self.glitch.is_some_and(|g| g.done(now)) {
+            self.glitch = None;
+        }
     }
 
-    fn switch(&mut self, now: Instant, glitch: bool) {
-        let appear = self.shown.is_none();
-        self.measuring = !appear;
-        if appear {
-            self.snap = 2;
-        }
-        self.shown = self.want.clone();
-        let glitch = self.glitch_now(now, glitch);
-        self.phase = Phase::Shell { t0: now, glitch };
-    }
-
-    /// This frame's wanted content (`None`: no tag). `glitch`: its shell may glitch (the
+    /// This frame's wanted content (`None`: no tag). `glitch`: its border may glitch (the
     /// setting on, alpha mode, not dragged, not torn by her own glitch). `quiet`: it comes or
     /// goes with motion of its own (the bubble taking over, a teleport, a swap's hold, his
-    /// hand): at once.
+    /// hand, motion off): at once.
     pub fn observe(&mut self, next: Option<T>, now: Instant, glitch: bool, quiet: bool) {
-        if next == self.want && next == self.shown && self.phase == Phase::Steady {
-            // The same to the eye (a level meter moved): drawn as it is now.
-            self.shown = next.clone();
-            self.want = next;
+        self.want = next;
+        self.settle(now);
+        if quiet {
+            if self.want != self.cur {
+                self.shown_at = Some(now);
+                self.snap = 2;
+            } else if self.vis == Vis::Steady && self.prev.is_none() && !self.measuring && !self.pending {
+                self.cur = self.want.clone();
+                return;
+            }
+            self.cur = self.want.clone();
+            self.prev = None;
+            self.x0 = None;
+            self.vis = Vis::Steady;
+            self.measuring = false;
+            self.pending = false;
+            self.glitch = None;
             return;
         }
-        self.want = next;
-        if quiet && self.want != self.shown {
-            self.measuring = self.shown.is_some() && self.want.is_some();
-            if self.shown.is_none() {
-                self.snap = 2;
+        if self.want == self.cur {
+            // The same to the eye (a level meter moved): drawn as it is now.
+            self.cur = self.want.clone();
+            if matches!(self.vis, Vis::Exit(_)) {
+                // Called back while going: it stays.
+                self.vis = Vis::Steady;
             }
-            self.shown = self.want.clone();
-            self.phase = Phase::Steady;
+            return;
+        }
+        if matches!(self.vis, Vis::Exit(_)) {
+            return;
+        }
+        if self.cur.is_none() {
+            self.cur = self.want.clone();
+            self.vis = Vis::Appear(None);
+            self.measuring = true;
+            self.glitch_ok = glitch;
             self.shown_at = Some(now);
             return;
         }
-        // Step through what is due (a frame can cross more than one edge).
-        for _ in 0..4 {
-            match self.phase {
-                Phase::Steady => {
-                    if self.want == self.shown {
-                        if let (Some(w), Some(s)) = (&self.want, &mut self.shown) {
-                            // Equal to the eye: the newest look (a meter level) still shows.
-                            *s = w.clone();
-                        }
-                        return;
-                    }
-                    if self.shown.is_none() {
-                        self.switch(now, glitch);
-                    } else if self.shown_at.is_some_and(|t| ms(now, t) < DWELL_MS) {
-                        return;
-                    } else {
-                        self.phase = Phase::TextOut { t0: now, glitch };
-                    }
-                }
-                Phase::TextOut { t0, glitch: g } => {
-                    if ms(now, t0) < TEXT_OUT_MS {
-                        return;
-                    }
-                    if self.want.is_some() {
-                        self.switch(now, g && glitch);
-                    } else {
-                        match self.glitch_now(now, g && glitch) {
-                            Some(x) => self.phase = Phase::Exit { glitch: x },
-                            None => {
-                                self.shown = None;
-                                self.phase = Phase::Steady;
-                            }
-                        }
-                    }
-                }
-                Phase::Exit { glitch: g } => {
-                    if !g.done(now) {
-                        return;
-                    }
-                    self.shown = None;
-                    self.phase = Phase::Steady;
-                }
-                Phase::Shell { t0, glitch: g } => {
-                    let settled = !self.measuring && self.snap == 0 && (!self.width.moving(now) || self.width.progress(now) >= SETTLED);
-                    if g.is_some_and(|g| !g.done(now)) || ms(now, t0) < STEP_MS || !settled {
-                        return;
-                    }
-                    self.phase = Phase::TextIn { t0: now };
-                }
-                Phase::TextIn { t0 } => {
-                    if ms(now, t0) < TEXT_IN_MS {
-                        return;
-                    }
-                    self.phase = Phase::Steady;
-                    self.shown_at = Some(t0);
-                }
+        // Mid-change, or the label hasn't had its dwell: it waits (only the latest shows).
+        let busy = self.prev.is_some() || self.measuring || self.pending || matches!(self.vis, Vis::Appear(_));
+        if busy || self.shown_at.is_some_and(|t| ms(now, t) < DWELL_MS) {
+            return;
+        }
+        match self.want.clone() {
+            None => {
+                self.vis = Vis::Exit(now);
+                self.glitch = self.throttle.take(now, glitch);
+            }
+            Some(w) => {
+                let old = self.cur.replace(w).expect("a tag to change from");
+                self.prev = Some((old, self.nat));
+                self.x0 = None;
+                self.measuring = true;
+                self.glitch_ok = glitch;
+                self.shown_at = Some(now);
             }
         }
     }
 
-    /// What to draw now.
-    pub fn frame(&self, now: Instant) -> TagFrame<'_, T> {
-        let (text, glitch) = match self.phase {
-            Phase::Steady => (1.0, None),
-            Phase::TextOut { t0, .. } => (1.0 - fade_in(now, t0, TEXT_OUT_MS), None),
-            Phase::Shell { glitch, .. } => (0.0, glitch.filter(|g| !g.done(now))),
-            Phase::Exit { glitch } => (0.0, Some(glitch).filter(|g| !g.done(now))),
-            Phase::TextIn { t0 } => (fade_in(now, t0, TEXT_IN_MS), None),
-        };
-        TagFrame { content: self.shown.as_ref(), text, glitch }
-    }
-
-    /// The width to draw, given the laid-out one (`motion` off: always that).
+    /// The plate's width to draw, given the laid-out one (`motion` off: always that).
     pub fn width(&mut self, laid_out: f32, now: Instant, motion: bool) -> f32 {
-        if std::mem::take(&mut self.measuring) && motion {
-            // Last frame's layout: the old content's width; the new one is measured this frame.
-            return self.width.at(now);
-        }
-        if self.snap > 0 || !motion {
+        if !motion || self.snap > 0 {
             self.snap = self.snap.saturating_sub(1);
             self.width.snap(laid_out);
-        } else {
-            self.width.go(laid_out, now, SIZE_MS);
+            self.nat = laid_out;
+            self.measuring = false;
+            self.pending = false;
+            return laid_out;
         }
+        if self.measuring {
+            // This frame's layout is still the old content's: hold; next frame it's measured.
+            self.measuring = false;
+            self.pending = true;
+            return self.width.at(now);
+        }
+        if !std::mem::take(&mut self.pending) {
+            // Steady (or mid-change): a label's width that changed (its meter) eases there.
+            if self.prev.is_none() && self.vis == Vis::Steady {
+                self.nat = laid_out;
+                self.width.go(laid_out, now, SIZE_MS);
+            }
+            return self.width.at(now);
+        }
+        // The newest content is measured: its change starts now.
+        self.nat = laid_out;
+        let g = self.throttle.take(now, self.glitch_ok);
+        if self.vis == Vis::Appear(None) {
+            // Coming: from just inside its width (inside its padding), at `FLOOR`.
+            let from = (laid_out - 2.0 * INSET.0).max(laid_out * 0.9);
+            self.width = Tween::start(from, laid_out, now, SIZE_MS);
+            self.vis = Vis::Appear(Some(now));
+        } else {
+            let w = self.width.at(now);
+            if laid_out > w + 0.5 {
+                // Growing: the plate leads, the new words follow.
+                self.width = Tween::start(w, laid_out, now, SIZE_MS);
+                self.x0 = Some(after(now, GROW_LEAD_MS));
+            } else if laid_out < w - 0.5 {
+                // Shrinking: the old words go first, then the plate.
+                self.width = Tween::start(w, laid_out, after(now, SHRINK_LAG_MS), SIZE_MS);
+                self.x0 = Some(now);
+            } else {
+                self.x0 = Some(now);
+            }
+        }
+        self.glitch = g;
         self.width.at(now)
     }
 
-    /// Its content just changed and its new width isn't measured yet: draw it at the width
-    /// it has (`width`), not as laid out.
-    pub fn measuring(&self) -> bool {
-        self.measuring
-    }
-
+    /// The width as it is (the tag not laid out this frame: going).
     pub fn width_now(&self, now: Instant) -> f32 {
         self.width.at(now)
     }
 
+    /// What to draw now.
+    pub fn frame(&self, now: Instant) -> TagFrame<'_, T> {
+        let k = match (&self.prev, self.x0) {
+            (None, _) => 1.0,
+            (Some(_), None) => 0.0,
+            (Some(_), Some(x0)) if now < x0 => 0.0,
+            (Some(_), Some(x0)) => blend(ms(now, x0) / XFADE_MS),
+        };
+        let alpha = match self.vis {
+            Vis::Steady => 1.0,
+            Vis::Appear(None) => 0.0,
+            Vis::Appear(Some(t0)) => FLOOR + (1.0 - FLOOR) * lin(now, t0, APPEAR_MS),
+            Vis::Exit(t0) => 1.0 - (1.0 - FLOOR) * lin(now, t0, EXIT_MS),
+        };
+        TagFrame {
+            cur: self.cur.as_ref(),
+            words: k,
+            plate: plate(k),
+            nat: self.nat,
+            prev: self.prev.as_ref().map(|(p, w)| (p, *w, 1.0 - k, plate(1.0 - k))),
+            alpha,
+            split: self.glitch.map_or(0.0, |g| g.split(now)),
+        }
+    }
+
     /// Something moves: a frame per present.
     pub fn busy(&self, now: Instant) -> bool {
-        self.phase != Phase::Steady || self.width.moving(now)
+        self.vis != Vis::Steady || self.prev.is_some() || self.measuring || self.pending || self.width.moving(now) || self.glitch.is_some_and(|g| !g.done(now))
     }
 
     /// When a waiting change is due (its dwell over).
     pub fn wake_at(&self) -> Option<Instant> {
-        (self.phase == Phase::Steady && self.want != self.shown).then(|| self.shown_at.map(|t| t + std::time::Duration::from_secs_f32(DWELL_MS / 1000.0))).flatten()
+        let idle = self.vis == Vis::Steady && self.prev.is_none() && !self.measuring && !self.pending;
+        (idle && self.want != self.cur).then(|| self.shown_at.map(|t| after(t, DWELL_MS))).flatten()
     }
 }
 
-/// When the live words show.
+/// The bubble this frame: its shell's size, its content's (the box its words are laid out
+/// in: up to `INSET` past the shell while it opens, so nothing is cut), their levels.
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum Words {
-    Shown,
-    /// Hidden until the shell settles.
-    Wait { t0: Instant },
-    In { t0: Instant },
+pub struct PanelFrame {
+    pub shell: (f32, f32),
+    pub content: (f32, f32),
+    /// Everything inside it (opening out of the pill: it crosses in from the pill's words).
+    pub inner: f32,
+    /// The live reply's words (a new reply crosses in over the old one's).
+    pub words: f32,
+    /// The reply it replaced: its words' level (0: none).
+    pub old: f32,
+    /// Just replaced (this frame): the view keeps the old words.
+    pub replaced: bool,
+    /// Opening out of the pill: the pill's words and plate, at the shell's centre.
+    pub pill: Option<(f32, f32)>,
+    /// The border's RGB split, px.
+    pub split: f32,
 }
 
-/// The bubble while it is open: its drawn size, its shell's glitch, its words' level.
+/// The bubble while it is open: its drawn size, its crossfades, its border's glitch.
 #[derive(Debug)]
 pub struct PanelFx {
     open: bool,
     serial: u64,
     pub w: Tween,
     pub h: Tween,
+    /// Opening: since when, and whether out of the pill.
+    opened: Option<(Instant, bool)>,
+    /// Out of the pill: when its words cross into the bubble's (the box nearly there).
+    pill_x0: Option<Instant>,
+    /// A new reply's crossfade start.
+    x0: Option<Instant>,
     glitch: Option<Glitch>,
-    words: Words,
-    last_glitch: Option<Instant>,
-    salt: u64,
+    throttle: Throttle,
 }
 
 impl Default for PanelFx {
     fn default() -> Self {
-        PanelFx { open: false, serial: 0, w: Tween::still(0.0), h: Tween::still(0.0), glitch: None, words: Words::Shown, last_glitch: None, salt: 0 }
+        PanelFx { open: false, serial: 0, w: Tween::still(0.0), h: Tween::still(0.0), opened: None, pill_x0: None, x0: None, glitch: None, throttle: Throttle::default() }
     }
 }
 
 impl PanelFx {
-    fn glitch_now(&mut self, now: Instant, ok: bool) {
-        if ok && self.last_glitch.is_none_or(|t| ms(now, t) >= GAP_MS) {
-            self.last_glitch = Some(now);
-            self.salt = self.salt.wrapping_add(1);
-            self.glitch = Some(Glitch::new(now, seed(self.salt)));
-        }
-    }
-
-    /// Open this frame at the laid-out `w` × `h`, showing reply `serial`; `from`: the size it
-    /// grows from when it just opened (the pill's), else `OPEN_SCALE` of its own. A new
-    /// reply blanks the words, glitches the shell and lets the words back once it settles.
-    /// `motion` off: drawn as laid out, words at once. Returns the size to draw.
-    pub fn open(&mut self, (w, h): (f32, f32), serial: u64, from: Option<(f32, f32)>, now: Instant, motion: bool, glitch: bool) -> (f32, f32) {
-        if !glitch || self.glitch.is_some_and(|g| g.done(now)) {
+    /// Open this frame at the laid-out `w` × `h`, showing reply `serial`; `pill`: the pill's
+    /// size when it just opened out of it. A new reply crossfades its words in the box as it
+    /// is. `motion` off: drawn as laid out, words at once.
+    pub fn open(&mut self, (w, h): (f32, f32), serial: u64, pill: Option<(f32, f32)>, now: Instant, motion: bool, glitch: bool) -> PanelFrame {
+        let mut replaced = false;
+        if self.glitch.is_some_and(|g| g.done(now)) {
             self.glitch = None;
+        }
+        if self.x0.is_some_and(|x| ms(now, x) >= XFADE_MS) {
+            self.x0 = None;
         }
         if !self.open {
             self.open = true;
             self.serial = serial;
-            let (w0, h0) = from.unwrap_or((w * OPEN_SCALE, h * OPEN_SCALE));
+            self.x0 = None;
+            self.pill_x0 = None;
+            let (w0, h0) = pill.unwrap_or(((w - 2.0 * INSET.0).max(w * 0.9), (h - INSET.1).max(h * 0.9)));
             self.w = Tween::start(w0, w, now, OPEN_MS);
             self.h = Tween::start(h0, h, now, OPEN_MS);
-            self.words = Words::Wait { t0: now };
-            self.glitch_now(now, glitch);
+            self.opened = Some((now, pill.is_some()));
+            self.glitch = self.throttle.take(now, glitch);
         } else {
             if serial != self.serial {
                 self.serial = serial;
-                self.words = Words::Wait { t0: now };
-                self.glitch_now(now, glitch);
+                self.x0 = Some(now);
+                replaced = true;
+                self.glitch = self.throttle.take(now, glitch);
             }
-            self.w.go(w, now, SIZE_MS);
-            self.h.go(h, now, SIZE_MS);
+            // Shrinking while the old words still show: it waits for them.
+            let wait = self.x0.is_some_and(|x| ms(now, x) < SHRINK_LAG_MS);
+            if !(wait && w < self.w.target() - 0.5) {
+                self.w.go(w, now, SIZE_MS);
+            }
+            if !(wait && h < self.h.target() - 0.5) {
+                self.h.go(h, now, SIZE_MS);
+            }
         }
         if !motion {
             self.w.snap(w);
             self.h.snap(h);
-            self.words = Words::Shown;
+            self.opened = None;
+            self.x0 = None;
+            self.glitch = None;
         }
-        self.words = match self.words {
-            Words::Wait { t0 } => {
-                let settled = self.w.progress(now).min(self.h.progress(now)) >= SETTLED;
-                if settled && self.glitch.is_none_or(|g| g.done(now)) && ms(now, t0) >= STEP_MS { Words::In { t0: now } } else { Words::Wait { t0 } }
-            }
-            Words::In { t0 } if ms(now, t0) >= TEXT_IN_MS => Words::Shown,
-            x => x,
+        if self.opened.is_some_and(|(t0, _)| ms(now, t0) >= OPEN_MS && !self.w.moving(now) && !self.h.moving(now)) {
+            self.opened = None;
+        }
+        let shell = (self.w.at(now), self.h.at(now));
+        // Opening: the words sit in the box it is going to, at most `INSET` past the shell.
+        let content = match self.opened {
+            Some(_) => (shell.0 + (w - shell.0).clamp(0.0, 2.0 * INSET.0), shell.1 + (h - shell.1).clamp(0.0, INSET.1)),
+            None => shell,
         };
-        (self.w.at(now), self.h.at(now))
-    }
-
-    /// The live words' level now (0: hidden while the shell moves).
-    pub fn words(&self, now: Instant) -> f32 {
-        match self.words {
-            Words::Shown => 1.0,
-            Words::Wait { .. } => 0.0,
-            Words::In { t0 } => fade_in(now, t0, TEXT_IN_MS),
+        // Out of the pill: its words stay until the box is within `INSET` of its size.
+        let from_pill = self.opened.is_some_and(|(_, p)| p);
+        if from_pill && self.pill_x0.is_none() && (w - shell.0) <= 2.0 * INSET.0 + 0.5 && (h - shell.1) <= INSET.1 + 0.5 {
+            self.pill_x0 = Some(now);
+        }
+        let kp = if from_pill || self.pill_x0.is_some_and(|x| ms(now, x) < XFADE_MS) { self.pill_x0.map_or(0.0, |x| blend(ms(now, x) / XFADE_MS)) } else { 1.0 };
+        let kx = self.x0.map_or(1.0, |x| blend(ms(now, x) / XFADE_MS));
+        if self.pill_x0.is_some_and(|x| ms(now, x) >= XFADE_MS) && !from_pill {
+            self.pill_x0 = None;
+        }
+        PanelFrame {
+            shell,
+            content,
+            inner: kp,
+            words: kx,
+            old: if self.x0.is_some() { 1.0 - kx } else { 0.0 },
+            replaced,
+            pill: (kp < 1.0).then_some((1.0 - kp, plate(1.0 - kp))),
+            split: self.glitch.map_or(0.0, |g| g.split(now)),
         }
     }
 
     /// Not open this frame. True when it just closed (the caller may show it leaving).
     pub fn closed(&mut self) -> bool {
         self.glitch = None;
-        self.words = Words::Shown;
+        self.x0 = None;
+        self.opened = None;
+        self.pill_x0 = None;
         std::mem::replace(&mut self.open, false)
     }
 
-    pub fn glitch(&self, now: Instant) -> Option<Glitch> {
-        self.glitch.filter(|g| !g.done(now))
-    }
-
-    pub fn moving(&self, now: Instant) -> bool {
-        self.w.moving(now) || self.h.moving(now)
-    }
-
     pub fn busy(&self, now: Instant) -> bool {
-        self.moving(now) || self.glitch(now).is_some() || self.words != Words::Shown
+        self.w.moving(now) || self.h.moving(now) || self.glitch.is_some_and(|g| !g.done(now)) || self.x0.is_some() || self.opened.is_some() || self.pill_x0.is_some()
     }
 
+    /// A glitch now would be over the limit.
     pub fn throttled(&self, now: Instant) -> bool {
-        self.last_glitch.is_some_and(|t| ms(now, t) < GAP_MS)
+        self.throttle.blocked(now)
     }
 }
 
 /// A box: x, y, w, h.
 pub type Rect = (f32, f32, f32, f32);
 
-/// A bubble that just closed, drawn from what it last showed while it leaves: its words fade
-/// first, then the empty shell shrinks (to `CLOSE_SCALE` about its tail, then a two-frame exit
-/// glitch) or eases into the pill's box.
+/// A bubble that just closed, drawn from what it last showed while it leaves. Closing: its
+/// border glitches, it settles just inside its own box (its words clear of the edge), dims to
+/// `FLOOR` and is gone. Into the pill: its words cross into the pill's, then its box eases
+/// into the pill's, the pill's plate taking over the shell on the way.
 #[derive(Debug)]
 pub struct Ghost<S> {
     pub snap: S,
     pub t0: Instant,
-    pub from: Rect,
-    pub to: Rect,
-    /// The pill's box: it eases there (else it shrinks about `pivot`).
     pub to_pill: bool,
-    exit: Option<Glitch>,
+    to: Rect,
+    /// The move: from, its start, its length (a retarget rebases it).
+    m_from: Rect,
+    m0: Instant,
+    m_ms: f32,
+    glitch: Option<Glitch>,
 }
 
 impl<S> Ghost<S> {
-    /// From `from`; into `pill` if given, else shrinking about `pivot` (the tail's tip).
-    pub fn new(snap: S, from: Rect, pill: Option<Rect>, pivot: (f32, f32), now: Instant, glitch: bool, salt: u64) -> Ghost<S> {
-        let s = CLOSE_SCALE;
-        let to = pill.unwrap_or((pivot.0 - (pivot.0 - from.0) * s, pivot.1 - (pivot.1 - from.1) * s, from.2 * s, from.3 * s));
-        let words = if pill.is_some() { TEXT_OUT_MS } else { CLOSE_TEXT_MS };
-        let move_ms = if pill.is_some() { PILL_MS } else { SHRINK_MS };
-        // The glitch takes its last frame with it: no empty hold before it goes.
-        let at = now + std::time::Duration::from_secs_f32((words + move_ms - STEP_MS) / 1000.0);
-        let exit = (glitch && pill.is_none()).then(|| Glitch::new(at, seed(salt)));
-        Ghost { snap, t0: now, from, to, to_pill: pill.is_some(), exit }
+    /// From `from`; into `pill` if given, else closing in place.
+    pub fn new(snap: S, from: Rect, pill: Option<Rect>, now: Instant, glitch: bool) -> Ghost<S> {
+        let to = pill.unwrap_or((from.0 + INSET.0, from.1 + INSET.1, from.2 - 2.0 * INSET.0, from.3 - INSET.1));
+        let (m0, m_ms) = if pill.is_some() { (after(now, PILL_LAG_MS), PILL_MS) } else { (now, CLOSE_MS) };
+        Ghost { snap, t0: now, to_pill: pill.is_some(), to, m_from: from, m0, m_ms, glitch: (glitch && pill.is_none()).then_some(Glitch { t0: now }) }
     }
 
-    fn words_ms(&self) -> f32 {
-        if self.to_pill { TEXT_OUT_MS } else { CLOSE_TEXT_MS }
+    /// The pill's box as measured now: the move goes there, from where it is.
+    pub fn retarget(&mut self, to: Rect, now: Instant) {
+        let same = (to.0 - self.to.0).abs() < 0.5 && (to.1 - self.to.1).abs() < 0.5 && (to.2 - self.to.2).abs() < 0.5 && (to.3 - self.to.3).abs() < 0.5;
+        if !self.to_pill || same {
+            return;
+        }
+        if now > self.m0 {
+            let left = (self.m_ms - ms(now, self.m0)).max(100.0);
+            self.m_from = self.rect(now);
+            self.m0 = now;
+            self.m_ms = left;
+        }
+        self.to = to;
     }
 
-    fn move_ms(&self) -> f32 {
-        if self.to_pill { PILL_MS } else { SHRINK_MS }
+    fn u(&self, now: Instant) -> f32 {
+        lin(now, self.m0, self.m_ms)
     }
 
-    /// Its words' level (they fade first).
-    pub fn words(&self, now: Instant) -> f32 {
-        1.0 - fade_in(now, self.t0, self.words_ms())
-    }
-
-    /// How far the shell has moved, 0..1 (eased).
+    /// How far the box has moved, 0..1 (eased).
     pub fn k(&self, now: Instant) -> f32 {
-        let t = ms(now, self.t0) - self.words_ms();
-        if t <= 0.0 { 0.0 } else { ease(t / self.move_ms()) }
+        ease(self.u(now))
+    }
+
+    /// Where it goes.
+    pub fn target(&self) -> Rect {
+        self.to
     }
 
     pub fn rect(&self, now: Instant) -> Rect {
         let k = self.k(now);
         let l = |a: f32, b: f32| a + (b - a) * k;
-        (l(self.from.0, self.to.0), l(self.from.1, self.to.1), l(self.from.2, self.to.2), l(self.from.3, self.to.3))
+        (l(self.m_from.0, self.to.0), l(self.m_from.1, self.to.1), l(self.m_from.2, self.to.2), l(self.m_from.3, self.to.3))
     }
 
-    /// The shell's exit glitch, while it runs.
-    pub fn glitch(&self, now: Instant) -> Option<Glitch> {
-        self.exit.filter(|g| now >= g.t0 && !g.done(now))
+    /// The whole ghost's level: closing, it dims to `FLOOR` over its last `CLOSE_DIM_MS`.
+    pub fn alpha(&self, now: Instant) -> f32 {
+        if self.to_pill {
+            return 1.0;
+        }
+        let t = ms(now, self.t0) - (CLOSE_MS - CLOSE_DIM_MS);
+        1.0 - (1.0 - FLOOR) * (t / CLOSE_DIM_MS).clamp(0.0, 1.0)
     }
 
-    fn moved(&self, now: Instant) -> bool {
-        ms(now, self.t0) >= self.words_ms() + self.move_ms()
+    /// Into the pill: its own words' level, the pill's words', the pill's plate's and its own
+    /// shell's (the plate takes over over the move's last 40 %).
+    pub fn pill(&self, now: Instant) -> (f32, f32, f32, f32) {
+        let k = blend(ms(now, self.t0) / XFADE_MS);
+        let q = ((self.u(now) - 0.6) / 0.4).clamp(0.0, 1.0);
+        (1.0 - k, k, plate(q), plate(1.0 - q))
+    }
+
+    /// The border's RGB split, px.
+    pub fn split(&self, now: Instant) -> f32 {
+        self.glitch.map_or(0.0, |g| g.split(now))
     }
 
     pub fn done(&self, now: Instant) -> bool {
-        self.moved(now) && self.exit.is_none_or(|g| g.done(now))
+        now >= self.m0 && ms(now, self.m0) >= self.m_ms
     }
 
-    /// The tag (or the pill) may show: the shell is in the pill's box, or gone.
+    /// The tag (the pill) takes over: the box is in the pill's, or gone.
     pub fn tag_ready(&self, now: Instant) -> bool {
-        if self.to_pill { self.moved(now) } else { self.done(now) }
+        self.done(now)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     fn at(t0: Instant, ms: u64) -> Instant {
         t0 + Duration::from_millis(ms)
@@ -586,6 +680,7 @@ mod tests {
         let top = v.iter().enumerate().fold((0, 0.0f32), |a, (i, &x)| if x > a.1 { (i, x) } else { a }).0;
         assert!(v[..=top].windows(2).all(|w| w[1] >= w[0]) && v[top..].windows(2).all(|w| w[1] <= w[0]), "one bump, no wobble");
         assert!(ease(0.2) > 0.5, "fast out");
+        assert!((0..=100).all(|i| { let k = blend(i as f32 / 100.0); k.max(1.0 - k) >= 0.5 }), "a crossfade always shows one side at half or more");
     }
 
     #[test]
@@ -598,184 +693,176 @@ mod tests {
         assert!(mid > 150.0 && mid < 200.0);
         w.go(120.0, at(t0, 100), SIZE_MS);
         assert!((w.at(at(t0, 100)) - mid).abs() < 0.01, "no jump on a retarget");
-        assert_eq!(w.at(at(t0, 400)), 120.0);
-        assert!(!w.moving(at(t0, 400)) && w.progress(at(t0, 400)) == 1.0);
-        w.go(120.1, at(t0, 500), SIZE_MS);
-        assert!(!w.moving(at(t0, 500)));
+        let later = Tween::start(100.0, 50.0, at(t0, 90), SIZE_MS);
+        assert_eq!(later.at(at(t0, 40)), 100.0, "a later start holds until then");
+        assert!(later.moving(at(t0, 40)));
     }
 
-    #[test]
-    fn a_glitch_is_two_frames_of_whole_bands() {
-        let t0 = Instant::now();
-        let g = Glitch::new(t0, 42);
-        let a = g.look(5, 10.0, t0).unwrap();
-        assert_eq!(a.bands.len(), 5, "every band stays: the shell never thins");
-        assert!(a.tear.is_some() && a.bands.iter().all(|b| b.dx.abs() <= 10.0 && b.split <= 3.0));
-        let b = g.look(5, 10.0, at(t0, 40)).unwrap();
-        assert!(b.tear.is_none() && b.bands.iter().all(|b| b.dx.abs() <= 4.0));
-        assert_eq!(g.look(5, 10.0, at(t0, 30)), Some(a), "a frame holds a step");
-        assert!(g.look(5, 10.0, at(t0, 67)).is_none() && g.done(at(t0, 67)), "two frames at most");
-    }
+    /// Steps a tag through frames 16 ms apart, `wants` changing at given times; each frame
+    /// lays out the newest content at `widths(content)`. Returns per frame: the drawn width,
+    /// the frame (owned).
+    /// One frame: ms, drawn width, newest content, its words, the old content and its words,
+    /// the tag's level, the border's split.
+    type Step = (u64, f32, Option<&'static str>, f32, Option<(&'static str, f32)>, f32, f32);
 
-    #[test]
-    fn cuts_cover_the_box() {
-        for seed in 0..20 {
-            let c = cuts(25.0, 4, 6.0, seed);
-            assert_eq!((c.first(), c.last(), c.len()), (Some(&0.0), Some(&25.0), 5));
-            assert!(c.windows(2).all(|w| w[1] > w[0]));
-        }
-        assert_eq!(cuts(10.0, 5, 6.0, 1).len(), 2, "never thinner than min");
-    }
-
-    /// Steps a tag through `ms` at 60 Hz (its width as laid out: `w` px per char).
-    fn run<'a>(t: &mut TagFx<&'a str>, from: Instant, to_ms: u64, want: Option<&'a str>, glitch: bool) -> Vec<(u64, Option<&'a str>, f32, bool)> {
+    fn run(fx: &mut TagFx<&'static str>, t0: Instant, wants: &[(u64, Option<&'static str>)], until: u64, widths: fn(&str) -> f32) -> Vec<Step> {
         let mut out = Vec::new();
-        let mut ms_ = 0;
-        while ms_ <= to_ms {
-            let now = at(from, ms_);
-            t.observe(want, now, glitch, false);
-            let laid = t.frame(now).content.map_or(0.0, |c| c.len() as f32 * 10.0);
-            t.width(laid, now, true);
-            let f = t.frame(now);
-            out.push((ms_, f.content.copied(), f.text, f.glitch.is_some()));
-            ms_ += 16;
+        let mut laid: Option<f32> = None;
+        let mut t = 0;
+        while t <= until {
+            let now = at(t0, t);
+            let want = wants.iter().rev().find(|w| w.0 <= t).and_then(|w| w.1);
+            fx.observe(want, now, true, false);
+            let w = match laid {
+                Some(l) => fx.width(l, now, true),
+                None => fx.width_now(now),
+            };
+            let f = fx.frame(now);
+            out.push((t, w, f.cur.copied(), f.words, f.prev.map(|p| (*p.0, p.2)), f.alpha, f.split));
+            laid = f.cur.map(|c| widths(c));
+            t += 16;
         }
         out
     }
 
-    #[test]
-    fn a_swap_fades_the_words_glitches_the_empty_shell_then_brings_the_words_back() {
-        let t0 = Instant::now();
-        let mut t: TagFx<&str> = TagFx::default();
-        let a = run(&mut t, t0, 400, Some("ONLINE"), true);
-        assert!(a.iter().filter(|f| f.3).all(|f| f.2 == 0.0), "no words while the shell glitches");
-        assert!(a.iter().filter(|f| f.3).count() <= 5, "two glitch frames (~67 ms)");
-        assert_eq!(a.last().unwrap().2, 1.0);
-        let t1 = at(t0, 2000);
-        let s = run(&mut t, t1, 600, Some("WORKING · bash"), true);
-        // Out: the old words fade on a still shell; then the shell glitches empty; then the new
-        // words come back once its width has (nearly) settled.
-        let first_new = s.iter().position(|f| f.1 == Some("WORKING · bash")).unwrap();
-        assert!(s[..first_new].iter().all(|f| f.1 == Some("ONLINE") && !f.3));
-        assert!(s[first_new - 1].2 < 0.15, "the old words are (nearly) gone before the switch");
-        assert!(s[first_new].2 == 0.0 && s[first_new].3, "the new shell glitches empty");
-        let back = s.iter().position(|f| f.1 == Some("WORKING · bash") && f.2 > 0.0).unwrap();
-        assert!(back * 16 >= 90 + 67, "words back after the shell: {} ms", back * 16);
-        assert!(s.iter().filter(|f| f.3).all(|f| f.2 == 0.0));
-        assert_eq!(s.last().unwrap().2, 1.0);
+    fn widths(s: &str) -> f32 {
+        match s {
+            "ONLINE" => 100.0,
+            "THINKING" => 130.0,
+            "WORKING" => 190.0,
+            "DONE" => 90.0,
+            _ => 120.0,
+        }
     }
 
     #[test]
-    fn a_burst_dwells_and_shows_only_the_latest() {
+    fn a_swap_crossfades_and_never_shows_an_empty_plate() {
         let t0 = Instant::now();
-        let mut t: TagFx<&str> = TagFx::default();
-        run(&mut t, t0, 400, Some("ONLINE"), true);
-        // Seven changes 250 ms apart: each label holds >= DWELL_MS once in, the ones in between
-        // are skipped, the last one lands.
-        let labels = ["THINKING", "WORKING", "THINKING", "WORKING", "THINKING", "WORKING", "DONE"];
-        let t1 = at(t0, 2000);
+        let mut fx = TagFx::default();
+        let f = run(&mut fx, t0, &[(0, Some("ONLINE")), (1000, Some("WORKING")), (2000, Some("DONE"))], 2600, widths);
+        for &(t, _, cur, words, prev, alpha, _) in f.iter().filter(|f| f.0 >= 200) {
+            let shown = words.max(prev.map_or(0.0, |p| p.1));
+            assert!(cur.is_some() && alpha >= 0.99 && shown >= 0.5, "words show at {t} ms: {words} {prev:?}");
+        }
+        // WORKING → DONE: the old words go first, then the plate shrinks (no overhang).
+        let s = f.iter().find(|f| f.0 >= 2000 && f.2 == Some("DONE")).unwrap().0;
+        let x = |ms: u64| f.iter().find(|f| f.0 >= s + ms).unwrap();
+        assert!(x(64).1 > 189.0, "the plate holds while WORKING fades");
+        assert!(x(250).3 >= 0.99, "DONE in full by ~250 ms");
+        assert!((x(400).1 - 90.0).abs() < 0.5 && x(400).4.is_none(), "settled at DONE's width");
+        let widths_seen: Vec<f32> = f.iter().filter(|f| f.0 >= s && f.0 < s + 400).map(|f| f.1).collect();
+        assert!(widths_seen.windows(2).all(|w| (w[1] - w[0]).abs() < 40.0), "no one-frame shape swap");
+        // ONLINE → WORKING: the plate grows first, the new words follow.
+        let g = f.iter().find(|f| f.0 >= 1000 && f.2 == Some("WORKING")).unwrap().0;
+        let y = |ms: u64| f.iter().find(|f| f.0 >= g + ms).unwrap();
+        assert!(y(48).3 < 0.05 && y(48).1 > 140.0, "the plate leads");
+        assert!(y(16).6 > 0.0, "the border glitches as it starts");
+        let glitched = f.iter().filter(|f| f.6 > 0.0).count();
+        assert!(glitched <= 3 * 5, "a glitch is two steps (~67 ms) per change: {glitched} frames for 3");
+    }
+
+    #[test]
+    fn a_burst_dwells_and_shows_only_the_latest_with_no_faint_frames() {
+        let t0 = Instant::now();
+        let mut fx = TagFx::default();
+        let wants = [(0, Some("ONLINE")), (1000, Some("THINKING")), (1250, Some("WORKING")), (1500, Some("THINKING")), (1800, Some("WORKING")), (2050, Some("THINKING")), (2350, Some("WORKING")), (2650, Some("DONE"))];
+        let f = run(&mut fx, t0, &wants, 3600, widths);
         let mut seen: Vec<(u64, &str)> = Vec::new();
-        for ms_ in (0..3000).step_by(16) {
-            let want = labels[((ms_ / 250) as usize).min(labels.len() - 1)];
-            let now = at(t1, ms_);
-            t.observe(Some(want), now, true, false);
-            let laid = t.frame(now).content.map_or(0.0, |c| c.len() as f32 * 10.0);
-            t.width(laid, now, true);
-            let f = t.frame(now);
-            if f.text >= 1.0 && seen.last().is_none_or(|s| s.1 != *f.content.unwrap()) {
-                seen.push((ms_, f.content.unwrap()));
+        for &(t, _, cur, words, prev, alpha, _) in f.iter().filter(|f| f.0 >= 200) {
+            assert!(alpha >= 0.99 && words.max(prev.map_or(0.0, |p| p.1)) >= 0.5, "no faint frame at {t}");
+            if let Some(c) = cur
+                && seen.last().is_none_or(|s| s.1 != c)
+            {
+                seen.push((t, c));
             }
         }
-        assert_eq!(seen.last().unwrap().1, "DONE");
-        assert!(seen.len() <= 4, "skipped the ones in between: {seen:?}");
         assert!(seen[1..].windows(2).all(|w| w[1].0 - w[0].0 >= DWELL_MS as u64), "each held its dwell: {seen:?}");
+        assert_eq!(seen.last().unwrap().1, "DONE", "the latest wins");
+        assert!(seen.len() <= 6, "skipped what was in between: {seen:?}");
     }
 
     #[test]
-    fn it_goes_in_place_or_quietly() {
+    fn it_comes_and_goes_from_the_floor_and_quietly_when_told() {
         let t0 = Instant::now();
-        let mut t: TagFx<&str> = TagFx::default();
-        run(&mut t, t0, 400, Some("DONE"), true);
-        let g = run(&mut t, at(t0, 2000), 400, None, true);
-        assert!(g.iter().take_while(|f| f.1.is_some()).filter(|f| f.3).all(|f| f.2 == 0.0));
-        assert_eq!(g.last().unwrap().1, None);
-        assert!(g.iter().position(|f| f.1.is_none()).unwrap() * 16 <= 90 + 67 + 32);
-        // Quiet (the bubble took over): at once, both ways.
-        t.observe(Some("ONLINE"), at(t0, 5000), true, true);
-        assert_eq!(t.frame(at(t0, 5000)), TagFrame { content: Some(&"ONLINE"), text: 1.0, glitch: None });
-        t.observe(None, at(t0, 5016), true, true);
-        assert_eq!(t.frame(at(t0, 5016)).content, None);
-        // Glitch off: the words still fade, the shell never glitches.
-        let n = run(&mut t, at(t0, 7000), 500, Some("THINKING"), false);
-        assert!(n.iter().all(|f| !f.3) && n.last().unwrap().2 == 1.0);
-        // A dwell wait asks to be woken.
-        let t2 = at(t0, 7600);
-        t.observe(Some("WORKING"), t2, false, false);
-        assert!(t.wake_at().is_none() || t.wake_at().unwrap() > t2 || t.busy(t2));
+        let mut fx = TagFx::default();
+        let f = run(&mut fx, t0, &[(0, Some("ONLINE")), (1000, None)], 1300, widths);
+        let first = f.iter().find(|f| f.5 > 0.0).unwrap();
+        assert!(first.5 >= FLOOR - 0.01, "it comes in at the floor, not from nothing");
+        assert!(f.iter().filter(|f| f.0 < 1000).all(|f| f.5 == 0.0 || f.5 >= FLOOR - 0.01));
+        let going: Vec<_> = f.iter().filter(|f| f.0 >= 1000 && f.2.is_some()).collect();
+        assert!(going.iter().all(|f| f.5 >= FLOOR - 0.01), "it goes down to the floor, then it's gone");
+        assert!(f.last().unwrap().2.is_none());
+        let mut q = TagFx::default();
+        q.observe(Some("ONLINE"), t0, true, true);
+        assert_eq!(q.frame(t0).alpha, 1.0);
+        q.observe(Some("DONE"), at(t0, 16), true, true);
+        assert!(q.frame(at(t0, 16)).prev.is_none() && q.frame(at(t0, 16)).cur == Some(&"DONE"));
     }
 
     #[test]
-    fn the_tag_width_eases_but_snaps_when_it_appears() {
-        let t0 = Instant::now();
-        let mut t: TagFx<&str> = TagFx::default();
-        t.observe(Some("ONLINE"), t0, false, false);
-        assert_eq!(t.width(80.0, t0, true), 80.0);
-        assert_eq!(t.width(90.0, at(t0, 16), true), 90.0, "two frames follow the layout");
-        assert_eq!(t.width(60.0, at(t0, 500), false), 60.0, "motion off: as laid out");
-    }
-
-    #[test]
-    fn the_panel_opens_settles_then_shows_its_words() {
+    fn the_bubble_opens_full_of_its_words_and_crosses_a_new_reply() {
         let t0 = Instant::now();
         let mut p = PanelFx::default();
-        let (w, h) = p.open((400.0, 200.0), 1, None, t0, true, true);
-        assert_eq!((w, h), (400.0 * OPEN_SCALE, 200.0 * OPEN_SCALE));
-        assert!(p.glitch(t0).is_some() && p.words(t0) == 0.0, "the empty shell glitches");
-        assert!(p.glitch(at(t0, 70)).is_none(), "two frames");
-        let mut first_words = None;
-        for ms_ in (16..400).step_by(16) {
-            p.open((400.0, 200.0), 1, None, at(t0, ms_), true, true);
-            if first_words.is_none() && p.words(at(t0, ms_)) > 0.0 {
-                first_words = Some(ms_);
-            }
+        let f = p.open((400.0, 120.0), 1, None, t0, true, true);
+        assert_eq!(f.words, 1.0, "its words from the first frame");
+        assert!(f.shell.0 >= 400.0 - 2.0 * INSET.0 - 0.01 && f.shell.1 >= 120.0 - INSET.1 - 0.01);
+        assert_eq!(f.content, (400.0, 120.0), "laid out in the box it's going to");
+        assert!(f.split > 0.0);
+        let f = p.open((400.0, 120.0), 1, None, at(t0, 300), true, true);
+        assert_eq!((f.shell, f.content, f.split), ((400.0, 120.0), (400.0, 120.0), 0.0));
+        // A new, shorter reply: the words cross; the box waits for the old ones, then shrinks.
+        let f = p.open((300.0, 80.0), 2, None, at(t0, 700), true, true);
+        assert!(f.replaced && f.old == 1.0 && f.words == 0.0);
+        let f = p.open((300.0, 80.0), 2, None, at(t0, 760), true, true);
+        assert_eq!(f.shell, (400.0, 120.0), "holds while the old words go");
+        assert!(f.words.max(f.old) >= 0.5);
+        let mut t = 776;
+        while t <= 1100 {
+            let f = p.open((300.0, 80.0), 2, None, at(t0, t), true, true);
+            assert!(f.words.max(f.old) >= 0.5);
+            t += 16;
         }
-        let fw = first_words.unwrap();
-        assert!(fw as f32 >= OPEN_MS * SETTLED, "words after the shell settles: {fw}");
-        assert_eq!(p.words(at(t0, 400)), 1.0);
-        // Taller content: it grows, the words stay.
-        let (_, h) = p.open((400.0, 300.0), 1, None, at(t0, 1000), true, true);
-        assert_eq!(h, 200.0);
-        assert_eq!(p.words(at(t0, 1000)), 1.0);
-        // A new reply: the words blank, the shell glitches, they come back.
-        p.open((400.0, 300.0), 2, None, at(t0, 2000), true, true);
-        assert!(p.words(at(t0, 2000)) == 0.0 && p.glitch(at(t0, 2000)).is_some());
-        for ms_ in (2016..2400).step_by(16) {
-            p.open((400.0, 300.0), 2, None, at(t0, ms_), true, true);
-        }
-        assert_eq!(p.words(at(t0, 2400)), 1.0);
-        assert!(p.closed() && !p.closed());
-        // From the pill; motion off: as laid out, words at once.
-        assert_eq!(p.open((400.0, 200.0), 2, Some((120.0, 28.0)), at(t0, 3000), true, false), (120.0, 28.0));
-        p.closed();
-        assert_eq!(p.open((400.0, 200.0), 3, None, at(t0, 4000), false, false), (400.0, 200.0));
-        assert_eq!(p.words(at(t0, 4000)), 1.0);
+        let f = p.open((300.0, 80.0), 2, None, at(t0, 1116), true, true);
+        assert_eq!((f.shell, f.words, f.old), ((300.0, 80.0), 1.0, 0.0));
     }
 
     #[test]
-    fn a_ghost_fades_its_words_then_moves_its_shell() {
+    fn out_of_the_pill_its_words_stay_until_the_box_is_nearly_there() {
         let t0 = Instant::now();
-        let g = Ghost::new((), (0.0, 0.0, 400.0, 200.0), Some((140.0, 230.0, 120.0, 25.0)), (200.0, 216.0), t0, true, 1);
-        assert_eq!(g.rect(at(t0, 80)), (0.0, 0.0, 400.0, 200.0), "the shell holds while the words fade");
-        assert!(g.words(at(t0, 90)) <= 0.01);
-        assert!(!g.tag_ready(at(t0, 200)) && g.tag_ready(at(t0, 271)));
-        let r = g.rect(at(t0, 271));
-        assert!((r.2 - 120.0).abs() < 0.01 && (r.1 - 230.0).abs() < 0.01);
-        assert!(g.glitch(at(t0, 100)).is_none(), "into the pill: no exit glitch (the pill's own takes over)");
-        let c = Ghost::new((), (0.0, 0.0, 400.0, 200.0), None, (200.0, 216.0), t0, true, 1);
-        assert!(c.words(at(t0, 50)) <= 0.01, "closing: the words are gone by +50 ms");
-        assert!(c.glitch(at(t0, 100)).is_none() && c.glitch(at(t0, 130)).is_some(), "the exit glitch on the shrink's last frame");
-        assert!(!c.done(at(t0, 180)) && c.done(at(t0, 195)), "gone by ~190 ms, no empty hold");
-        let r = c.rect(at(t0, 161));
-        assert!((r.2 - 400.0 * CLOSE_SCALE).abs() < 0.5 && (r.1 + r.3 - (216.0 - (216.0 - 200.0) * CLOSE_SCALE)).abs() < 0.5);
+        let mut p = PanelFx::default();
+        let mut t = 0;
+        let mut crossed = false;
+        while t <= 500 {
+            let f = p.open((400.0, 150.0), 1, Some((110.0, 25.0)), at(t0, t), true, true);
+            let (pw, _) = f.pill.unwrap_or((0.0, 0.0));
+            assert!(pw.max(f.inner) >= 0.5, "words show at {t}: pill {pw} live {}", f.inner);
+            if f.inner > 0.0 {
+                crossed = true;
+                assert!(400.0 - f.shell.0 <= 2.0 * INSET.0 + 1.0 && 150.0 - f.shell.1 <= INSET.1 + 1.0, "the live words only in a box that holds them");
+            }
+            t += 16;
+        }
+        assert!(crossed && p.open((400.0, 150.0), 1, None, at(t0, 600), true, true).pill.is_none());
+    }
+
+    #[test]
+    fn a_ghost_closes_in_place_or_crosses_into_the_pill() {
+        let t0 = Instant::now();
+        let c = Ghost::new((), (0.0, 0.0, 400.0, 200.0), None, t0, true);
+        assert!(c.split(t0) > 0.0 && c.alpha(t0) == 1.0, "the border glitches with everything there");
+        let r = c.rect(at(t0, 119));
+        assert!((r.2 - (400.0 - 2.0 * INSET.0)).abs() < 1.0 && (r.1 + r.3 - 200.0).abs() < 0.5, "settles inside its box, about its bottom");
+        assert!((0..=CLOSE_MS as u64).all(|t| c.alpha(at(t0, t)) >= FLOOR - 0.01));
+        assert!(!c.done(at(t0, 100)) && c.done(at(t0, 121)));
+        let mut g = Ghost::new((), (0.0, 0.0, 400.0, 200.0), Some((140.0, 230.0, 120.0, 25.0)), t0, true);
+        assert_eq!(g.split(t0), 0.0);
+        assert_eq!(g.rect(at(t0, 70)), (0.0, 0.0, 400.0, 200.0), "the box holds while the words cross");
+        for t in (0..=300).step_by(8) {
+            let (own, pill, pp, sh) = g.pill(at(t0, t));
+            assert!(own.max(pill) >= 0.5 && pp.max(sh) >= 0.99, "never empty at {t}");
+        }
+        g.retarget((150.0, 230.0, 100.0, 25.0), at(t0, 50));
+        assert!(!g.tag_ready(at(t0, 200)) && g.tag_ready(at(t0, 261)));
+        assert_eq!(g.rect(at(t0, 261)), (150.0, 230.0, 100.0, 25.0), "it ends at exactly the pill's box");
     }
 }
