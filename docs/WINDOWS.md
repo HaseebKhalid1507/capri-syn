@@ -3,7 +3,8 @@
 Windows 11, x86_64-pc-windows-msvc. Everything Windows-only is in `src/platform/windows/`; GPUI's
 Windows crate is vendored with small patches (`vendor/gpui-pre-windows/PATCHES.md`). CI builds,
 tests and lints it on every push (the `windows` job). What CI can't see (a desktop, his input,
-monitors) is checked in the capri-win VM: those items are marked **[VM] pending** below.
+monitors) was checked in the capri-win VM on 2026-11-18: see "The VM day" below. Live audio (item
+13) is still his machine's.
 
 ## Build and run
 
@@ -35,7 +36,7 @@ published. Locally, on a machine with Rust, Inno Setup and ImageMagick: `.\packa
   `--check` from a terminal therefore prints nothing there: read the log, or use a cargo build.
 - **Her pack is never in it.** The wizard's "Her pack" page (unattended: `/PACK="C:\dir"`) takes a
   pack folder on his disk (one with `sprites.json`) and copies it to the default pack location; a
-  folder that isn't a pack is refused. Empty: the location is made for him to fill. Nothing is
+  folder that isn't a pack is refused. Empty: `packs\` is made for him to fill (she says so in her log). Nothing is
   downloaded. A new pack replaces the old one whole.
 - **Her AUMID** `Synaps.Avatar`: registered under `HKCU\Software\Classes\AppUserModelId` with
   `DisplayName` and `IconUri`, and set on the Start-menu shortcut, so toasts show under her name
@@ -46,8 +47,10 @@ published. Locally, on a machine with Rust, Inno Setup and ImageMagick: `.\packa
   if empty. His settings (`%APPDATA%\synaps-avatar`) and any pack he put there himself stay.
 - **Upgrades** close her (Restart Manager) and don't restart her.
 - CI installs, checks and uninstalls it unattended (`test-install.ps1`, a stand-in pack, no art):
-  the files, keys, shortcut AUMID, the windowed exe, her log and default pack path, and that
-  nothing is left after.
+  the files, keys, shortcut AUMID, the windowed exe, her size in Settings → Apps, her log and
+  default pack path, and that nothing is left after.
+- **Unsigned:** downloaded with a browser (Mark of the Web), SmartScreen stops it ("Windows
+  protected your PC"; More info → Run anyway). Defender lets it be. Both installers, in the VM.
 
 Unattended: `synaps-avatar-setup-….exe /VERYSILENT /SUPPRESSMSGBOXES [/PACK="C:\packs\capri"] [/TASKS=autostart]`.
 
@@ -85,7 +88,8 @@ Unattended: `synaps-avatar-voice-setup-….exe /VERYSILENT /SUPPRESSMSGBOXES [/M
    C++ build tools via winget behind a UAC prompt, asked first);
 3. her pack through `tools/make-pack` in a venv of its own (Python from winget if there's none,
    asked first);
-4. `synaps daemon --detach` now, and a Run value for sign-in;
+4. `synaps daemon --detach` now, and a Run value for sign-in (through `conhost --headless`:
+   `synaps.exe` is a console program, and run as is it opened a terminal at sign-in);
 5. Win+Alt+C (she registers it herself);
 6. a Run value for her (default on);
 7. `--voice`: her voice installer and the models.
@@ -109,20 +113,20 @@ What CI can't show is item 15 below.
 | her body, the Line, the reader, the intro | GPUI pop-ups made bare topmost tool windows: no taskbar button, not in Alt+Tab, no DWM frame or rounding | P0 [VM] |
 | click-through | layered + `WS_EX_TRANSPARENT`, toggled by a 10 ms pointer poller over her input region | P0 [VM] |
 | perching | `EnumWindows`, DWM frame bounds, WinEvent hooks for moves, shows, hides, minimise, cloak, foreground | P0 [VM] |
-| virtual desktops | windows on another desktop are cloaked (left out); `IVirtualDesktopManager` confirms; a switch (the shell's registry value) is `Hint::Desktop` | **[VM] pending** |
-| monitors | `EnumDisplayMonitors`; `WM_DISPLAYCHANGE`, `WM_DPICHANGED` and a work-area change (taskbar moved) are `Hint::Layout` | **[VM] pending** |
-| DPI | per-monitor aware (v2), set before GPUI starts. Her windows keep the primary monitor's scale everywhere (PW-5): her art is laid out at one scale | **[VM] pending** (two monitors at different scales) |
-| effect layers | the bolt and anything reaching outside her window: a plain Win32 window per layer, solid colour, shaped by a region, click-through, never activated (`fx.rs`). The rest is painted in her window | **[VM] pending** (visual) |
-| her keys | `RegisterHotKey`: **Win+Alt+C** summons (a tap), **Win+Alt+Ctrl+C** toggles talk. Win alone is the shell's | **[VM] pending** |
-| the Line's keyboard | see below | **[VM] pending** |
-| music | SMTC (the media flyout's sessions): playing or quiet, and whether every playing session is a video | **[VM] pending** |
-| notifications | toasts, see below | **[VM] pending** |
+| virtual desktops | windows on another desktop are cloaked (left out); `IVirtualDesktopManager` confirms; a switch (the shell's registry value) is `Hint::Desktop` | [VM] item 8 (after a fix) |
+| monitors | `EnumDisplayMonitors`; `WM_DISPLAYCHANGE`, `WM_DPICHANGED` and a work-area change (taskbar moved) are `Hint::Layout`, logged (`windows: layout: …`) | [VM] item 4 |
+| DPI | per-monitor aware (v2), set before GPUI starts. Her windows keep the primary monitor's scale everywhere (PW-5): her art is laid out at one scale. A display change reaches GPUI from the message loop (PW-6) | [VM] item 3 (100 % and 150 %; PW-6 fixed a crash) |
+| effect layers | the bolt and anything reaching outside her window: a plain Win32 window per layer, solid colour, shaped by a region, click-through, never activated (`fx.rs`). The rest is painted in her window | [VM] item 9 |
+| her keys | `RegisterHotKey`: **Win+Alt+C** summons (a tap), **Win+Alt+Ctrl+C** toggles talk. Win alone is the shell's | [VM] item 5 |
+| the Line's keyboard | see below | [VM] items 2, 6 |
+| music | SMTC (the media flyout's sessions): playing or quiet, and whether every playing session is a video. Edge reports no playback type: a video in Edge counts as music | [VM] item 10 |
+| notifications | toasts, see below | [VM] item 11 (after a fix) |
 | lock, sleep, idle | WTS session notifications, power broadcasts, `GetLastInputInfo` | P0 [VM] |
 | voice: the link | her end of the sidecar's link: loopback TCP after a two-token handshake (`endpoint.json` in `%LOCALAPPDATA%\capri-voice`); Linux keeps the Unix socket | CI (both ends, Rust and Python) |
-| voice: the sidecar | `tools/capri_voice_win.py`: PortAudio (WASAPI) capture and playback, SMTC pause, session-volume duck with Linux's crash repair, lock, calls (the mic privacy store), DND. The voice installer (below) puts its bundle (embeddable CPython 3.13 + wheels) beside her: `docs/design/windows-voice.md` | CI; **[VM] pending** (live audio: item 13) |
-| voice: she runs it | while `[voice] enabled`: `python.exe capri-voice` from `voice\` beside her exe (or `CAPRI_VOICE_BUNDLE`), no console window, in a job object that kills it with her (however she ends); restarted after 1, 2, 4 … 60 s; its log `%LOCALAPPDATA%\capri-voice\capri-voice.log`. Not before the models are there. `CAPRI_VOICE_SPAWN=0`: he runs it himself | CI (job, backoff, bundle lookup); **[VM] pending** (item 14) |
+| voice: the sidecar | `tools/capri_voice_win.py`: PortAudio (WASAPI) capture and playback, SMTC pause, session-volume duck with Linux's crash repair, lock, calls (the mic privacy store), DND. The voice installer (below) puts its bundle (embeddable CPython 3.13 + wheels) beside her: `docs/design/windows-voice.md`. The lock is the session's own state (WTS): Windows 11's lock screen runs on the Default desktop | CI; [VM] item 14 (lock: after a fix); live audio: item 13 (his machine) |
+| voice: she runs it | while `[voice] enabled`: `python.exe capri-voice` from `voice\` beside her exe (or `CAPRI_VOICE_BUNDLE`), no console window, in a job object that kills it with her (however she ends); restarted after 1, 2, 4 … 60 s; its log `%LOCALAPPDATA%\capri-voice\capri-voice.log`. Not before the models are there. `CAPRI_VOICE_SPAWN=0`: he runs it himself. `[voice] enabled` is read at start and on `capri-ctl settings reload` | CI (job, backoff, bundle lookup); [VM] item 14 |
 | voice: connecting | on a thread (a stale endpoint can't freeze her: up to ~2 s); Linux connects inline, as before | CI (a silent listener) |
-| hold-to-talk | opt-in, `[voice] hold_to_talk = true`: the summon key's press is `talk press`; her key thread then reads the key every 25 ms (`GetAsyncKeyState`, as OBS does) and its release is `talk release`. No keyboard hook. Off: the summon key is a tap, as before | CI (the state machine); **[VM] pending** (item 14) |
+| hold-to-talk | opt-in, `[voice] hold_to_talk = true`: the summon key's press is `talk press`; her key thread then reads the key every 25 ms (`GetAsyncKeyState`, as OBS does) and its release is `talk release`. No keyboard hook. Off: the summon key is a tap, as before | CI (the state machine); [VM] item 14 |
 
 ## The Line's keyboard
 
@@ -149,53 +153,55 @@ a class factory and `INotificationActivationCallback` registered at start (`CoRe
 plus a cold start when she isn't running. About half a day plus a VM check; not cheap without a
 desktop to try it on.
 
-## [VM] pending (one VM day)
+## The VM day (2026-11-18)
 
-1. PW-1/2/3 (from P1a): no frame; a click on her doesn't take focus; no stale frame or extra CPU while
-   she's dragged.
-2. PW-4: no stray Alt (menu key tips) when the Line opens.
-3. PW-5 + DPI: two monitors at 100 % and 150 %: she keeps her size crossing over; no blur.
-4. Hotplug: add or remove a monitor, move the taskbar: she re-reads (`Hint::Layout` in the log).
-5. Her keys: both register (or log the taken chord); a press arrives; the summon takes the keyboard.
-6. The Line from a summon or `capri-ctl`: opens waiting, her tag shows `WIN+ALT+C TO TYPE`, the
-   keyboard stays in his window; his key or a click on the Line then takes it; closing gives it back.
-7. The contract suite (`SA_CONTRACT_WINDOWS=1 … --ignored contract_windows`, interactive session):
-   `keyboard` through his click (`SendInput`), `fx` with layer windows, and the rest as in P0.
-8. Virtual desktops: a perch target on another desktop is left out; a switch re-reads at once.
-9. Effect layers: the bolt shows outside her window, click-through, under/over her as asked.
-10. SMTC: Spotify or a browser playing → `smtc playing (…)` in the log and LISTENING; a video →
-    `ok listening (video)`; a Discord call (ignored) doesn't count.
-11. Toasts: one shows under "synaps-avatar" with her face; the registry key is there.
-12. The installer, interactively: the pack page (Browse, a non-pack refused, empty allowed); the
-    Start-menu shortcut starts her with no console window; a toast after install shows her icon;
-    autostart starts her at sign-in; uninstall from Settings → Apps leaves nothing but his settings.
-13. Voice (his machine for the audio; the VM for the rest), the [VM] column of
-    `docs/design/windows-voice.md` → V1a:
-    - the bundle on a clean Windows (does onnxruntime want the VC++ runtime?);
-    - mic and speaker end to end: hold, toggle, hands-free, the wake word, a hush;
-    - unplugging a headset mid-hold;
-    - the duck by ear, and pause with Spotify, Edge and Media Player;
-    - a call (Teams, Discord, the Sound Recorder) closing the hands-off mic;
-    - Win+L mid-hold;
-    - whether Windows 11's Do not disturb shows in `SHQueryUserNotificationState`;
-    - headphones told from speakers;
-    - Whisper and Kokoro speed on his CPU.
-14. Voice, her side (V1b):
-    - the voice installer interactively, the models task's window, then the sidecar started by her
-      (`voice: sidecar started` in her log), and gone when she is killed (Task Manager);
-    - voice off in settings stops it; on starts it again;
-    - an uninstall of voice while she runs (she restarts it after 1 s: the uninstaller may race her);
-    - `hold_to_talk = true`: holding Win+Alt+C talks and the release sends; a quick tap opens the Line;
-      Win+L mid-hold ends it; no stuck hold after a release in another app's window;
-    - no firewall prompt for the sidecar's loopback port.
-15. install.ps1 on a clean Windows 11, interactively (CI covers the unattended run):
-    - `irm … | iex` in Windows PowerShell 5.1, with no Python: the winget prompt, Python installed
-      per user, the pack built (or "open a new terminal" when PATH isn't refreshed);
-    - `--from-source` with no build tools: winget's Visual Studio Build Tools behind UAC (~3 GB),
-      then the build;
-    - after a sign-out and back in: the Run values start the daemon and her, and she finds her
-      session. Whether `synaps.exe daemon --detach` (a console program) flashes a console window;
-      if it does, a hidden start (`conhost --headless` or a tiny launcher) is the fix;
-    - `--voice` against a real release (the voice installer, the models);
-    - SmartScreen and Defender on the unsigned installers it downloads and runs;
-    - `--uninstall` while she runs.
+The capri-win VM on bella: Windows 11 Enterprise Evaluation 26H2 (build 26300), QEMU/KVM, two
+VirtIO GPU heads (1280×800 and 1920×1200), D3D on WARP (software), an HDA sound card with a silent
+input, 8 GB. Builds: main's CI installers (3713ff0) and this branch built in the VM by
+`install.ps1`'s source path. Driven from inside his session (`SendInput`, the QEMU keyboard for his
+keys and UAC); screenshots on avante in `~/Jawz/workspace/synaps-avatar/winvm/<item>/`, not in the
+repo. **[VM]**: true of the VM (software rendering, no real mic), to check again on his machine.
+
+| # | what | result |
+|---|---|---|
+| 1 | PW-1/2/3: no frame; a click on her doesn't take focus; no stale frame or extra CPU while dragged | **pass**. No frame, border or shadow. A drag and a headpat leave the foreground where it was. While dragged her renders follow her ragdoll animation, not the moves (240 moves: 373 renders in 7 s; 78 moves: 298), no stale frame after. CPU [VM]: 7 % of a core idle, 13 % dragged (her animation on WARP) |
+| 2 | PW-4: no stray Alt when the Line opens | **pass**. A low-level keyboard hook while the Line opened on her key and on a click on her: his keys only, nothing injected |
+| 3 | PW-5 + DPI: 100 % and 150 % | **pass after a fix**. Her window stays 500×695 and her body the same size on both monitors, crisp. Her first move onto the second monitor **aborted her** (`RefCell already borrowed`, `async_context.rs:178`): fixed by **PW-6** (`vendor/gpui-pre-windows/PATCHES.md`) |
+| 4 | hotplug, the taskbar | **pass**. `windows: layout: monitors changed` and `… the work area changed` (new log lines) on a monitor detached with her on it (`her monitor went away: to 848,78`), attached again, a DPI change, the taskbar's auto-hide on and off (Windows 11's taskbar has no other edge) |
+| 5 | her keys | **pass**. Both register (none taken); Win+Alt+C opens the Line with the keyboard; Win+Alt+Ctrl+C toggles talk (`toggle: listening`) |
+| 6 | the Line from `capri-ctl` | **pass**. `talk tap`: the Line opens parked, `ONLINE · WIN+ALT+C TO TYPE` on her tag and on the Line, the terminal keeps the keyboard; his Win+Alt+C, or his click on the Line, takes it; Esc gives it back |
+| 7 | the contract suite | **11 of 13**, `keyboard` and `body-and-teleport-fx` among them. `perch-space` and `monitors-and-areas` need the driver to make a second monitor and a panel that reserves space (`split_monitors`, `dock_top`), not written for Windows (follow-up); items 3 and 4 checked the same by hand |
+| 8 | virtual desktops | **pass after a fix**. With one desktop Windows 11 writes no `CurrentVirtualDesktop` until the first switch, so the watcher never started (`no virtual desktop in the registry`); it now watches the key that exists. A window on desktop 2 is refused as a perch (cloaked: `not visible`); a switch logs `windows: virtual desktop switch` and her perch on desktop 1 is left (`left with the workspace`) |
+| 9 | effect layers | **pass**. The launch and teleport bolts draw outside her window (captured mid-flight); the layer windows are layered, click-through (`WS_EX_TRANSPARENT`) and `WS_EX_NOACTIVATE`; under/over her: the suite |
+| 10 | SMTC | **pass, one gap**. Media Player with a song: `smtc playing (Microsoft.ZuneMusic…=Playing)`, LISTENING, her headphones on; with a video: `(video)`. **Edge reports no playback type** for a video (a file or a page's `<video>`): to her it is music. A Discord call: not tried (no account in the VM) |
+| 11 | toasts | **pass after a fix**. `CAPRI // NEEDS YOU` under "synaps-avatar", the key there. It came without her face: `fs::canonicalize`'s `\\?\` path made a `file://///?/…` URI, which the shell drops silently |
+| 12 | the installer, interactively | **pass after a fix**. SmartScreen first (unsigned). The pack page: a non-pack refused, Browse (a folder picker), empty allowed; the shortcut starts her with no console; a toast shows her icon and face; autostart starts her 3.6 s after sign-in; uninstall from Settings → Apps, with her running, leaves none of hers (his settings stay). **Settings → Apps said 44.6 GB**: Inno sized the pack's line as `\*` (the root of C:) before the page had a value; fixed, and CI checks the size |
+| 13 | voice, live audio | not in the VM: his machine (mic, ears, Whisper and Kokoro speed). The bundle's onnxruntime loaded (the wake word ran), but on a VM with Build Tools, so whether a clean Windows wants the VC++ runtime is still open |
+| 14 | voice, her side | **pass after a fix**. The voice installer (SmartScreen too) and its models window (~358 MB in ~40 s); `voice: sidecar started`, killed with her; `[voice] enabled = false` + `settings reload`: `sidecar stopped (voice off)`, on: started again; the voice uninstaller under her removes everything, she backs off (1, 2, 4, 8 s, `no models`); `hold_to_talk`: a hold listens and its release sends (`key up: transcribing`), a tap opens the Line, a release with Notepad in front ends it and Notepad keeps the keyboard, Win+L mid-hold ends it; the sidecar listens on 127.0.0.1 only: no firewall prompt. **The sidecar missed Windows 11's lock screen** (its curtain runs on the Default desktop): the wake word's mic stayed open on it for 14 s. It now asks the session (WTS) |
+| 15 | install.ps1, interactively | **pass after fixes**, below |
+
+### install.ps1 in the VM
+
+`irm …/install.ps1 | iex` in Windows PowerShell 5.1, no Python, no release (so a source build), on
+bella's line:
+
+- Synaps 0.12.0 through its own installer; the daemon up.
+- The source path: the Build Tools prompt, then UAC (Visual Studio Installer, verified publisher
+  Microsoft); Build Tools in ~1.5 min. The VM's Build Tools from P0 were half gone (winget listed
+  them, Visual Studio didn't know them): it now says so and reinstalls (`--force`) after asking.
+- Her build: ~6.5 min (release, thin LTO, 8 vCPUs). The winget prompt for Python 3.13 (per user,
+  ~1 min), found at once without a new terminal; the pack in ~1.5 min. **~12 min end to end**,
+  his answers included.
+- `synaps login` (y at "pick one now"): its provider picker draws in the console.
+- After a sign-out and in (a restart, autologon): the Run values start the daemon and her (her
+  window 3.4 s after sign-in) and she finds her session. **`synaps.exe daemon --detach` opened a
+  terminal** that took the foreground for a moment: the Run value now goes through
+  `conhost --headless` (checked: nothing shows).
+- `--voice` against a real release: no release yet. The voice installer itself: item 14.
+- SmartScreen stops both installers when they come with the Mark of the Web (a browser download);
+  `install.ps1` fetches with `Invoke-WebRequest` (no mark) and builds hers from source. Defender
+  flagged nothing. Signing them is for the release.
+
+Fixed in install.ps1 on the way: native programs' output shows as it comes (inside the module it
+was held to the end, and lost on a stop); a stop without an error record; the build time from a
+stopwatch (a clock sync mid-build printed "built in -474 min").
