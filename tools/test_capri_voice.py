@@ -292,6 +292,7 @@ class WindowsSmoke(unittest.TestCase):
         self.assertTrue(c is None or isinstance(c, str), c)
         self.assertIsInstance(win.dnd_on(), bool)
         self.assertIsInstance(win.screen_locked(), bool)
+        self.assertIn(win.session_locked(), (True, False, None))
         self.assertIn(win.sink_kind(), ('speakers', 'headphones'))
         self.assertTrue(win.node_missing('sources', 'capri-no-such-device'))
 
