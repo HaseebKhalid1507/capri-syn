@@ -742,12 +742,14 @@ function Start-Daemon {
     $s = ''
     if (-not $script:Dry) { $s = (& $script:Synaps daemon status 2>&1 | Out-String); $up = ($LASTEXITCODE -eq 0) } else { $up = $false }
     if (-not $up) { Invoke-Native $script:Synaps @('daemon', '--detach') }
-    # At sign-in: Synaps has no service on Windows; a Run value starts it (whether a console flashes: docs/WINDOWS.md item 15).
+    # At sign-in: Synaps has no service on Windows; a Run value starts it. `synaps.exe` is a console
+    # program: run as is, it opens a terminal that takes the foreground for a moment (seen in the VM).
+    # A headless conhost gives it a console nobody sees (the daemon it starts has its own, hidden).
     $run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
     $theirs = (Get-ItemProperty -Path $run -ErrorAction SilentlyContinue).PSObject.Properties |
         Where-Object { $_.Name -ne 'synaps-daemon' -and "$($_.Value)" -match 'synaps' -and "$($_.Value)" -match 'daemon' } | Select-Object -First 1
     if ($theirs) { Write-Good "your Run\$($theirs.Name) starts the daemon at sign-in" }
-    else { Set-RunValue 'synaps-daemon' "`"$($script:Synaps)`" daemon --detach" }
+    else { Set-RunValue 'synaps-daemon' "`"$env:SystemRoot\System32\conhost.exe`" --headless `"$($script:Synaps)`" daemon --detach" }
     $script:DaemonHow = 'at sign-in (Run key)'
     if ($script:Dry) { $script:DaemonState = '(dry run)'; return }
     for ($i = 0; $i -lt 20; $i++) {
