@@ -134,7 +134,9 @@ fn on_current_desktop(h: HWND) -> bool {
 }
 
 /// Where the shell keeps the current virtual desktop: Windows 11's key, then Windows 10's (per
-/// session).
+/// session). The first that holds the value; else the first that exists: with one desktop the
+/// shell writes no `CurrentVirtualDesktop` until his first switch (seen in the VM, Windows 11
+/// 26300), and the watcher hears that write.
 fn desktops_key() -> Option<HKEY> {
     let mut sid = 0u32;
     let _ = unsafe { ::windows::Win32::System::RemoteDesktop::ProcessIdToSessionId(::windows::Win32::System::Threading::GetCurrentProcessId(), &mut sid) };
@@ -142,18 +144,24 @@ fn desktops_key() -> Option<HKEY> {
         r"Software\Microsoft\Windows\CurrentVersion\Explorer\VirtualDesktops".to_string(),
         format!(r"Software\Microsoft\Windows\CurrentVersion\Explorer\SessionInfo\{sid}\VirtualDesktops"),
     ];
-    paths.iter().find_map(|p| {
-        let mut key = HKEY::default();
-        let path = ::windows::core::HSTRING::from(p.as_str());
-        unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, &path, None, KEY_READ, &mut key) }.ok().ok()?;
-        if current_desktop(key).is_some() {
-            return Some(key);
+    let keys: Vec<HKEY> = paths
+        .iter()
+        .filter_map(|p| {
+            let mut key = HKEY::default();
+            let path = ::windows::core::HSTRING::from(p.as_str());
+            unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, &path, None, KEY_READ, &mut key) }.ok().ok()?;
+            Some(key)
+        })
+        .collect();
+    let pick = keys.iter().position(|&k| current_desktop(k).is_some()).or((!keys.is_empty()).then_some(0))?;
+    for (i, &k) in keys.iter().enumerate() {
+        if i != pick {
+            unsafe {
+                let _ = ::windows::Win32::System::Registry::RegCloseKey(k);
+            }
         }
-        unsafe {
-            let _ = ::windows::Win32::System::Registry::RegCloseKey(key);
-        }
-        None
-    })
+    }
+    Some(keys[pick])
 }
 
 /// The current virtual desktop's id, as the shell stores it.
@@ -1260,6 +1268,11 @@ mod tests {
     #[test]
     fn gpui_pw4_activate_injects_no_input() {
         assert!(!gpui_patches::activate_injects_input());
+    }
+
+    #[test]
+    fn gpui_pw6_a_display_change_waits_for_the_message_loop() {
+        assert!(gpui_patches::display_change_is_posted(), "a move onto another monitor inside an App update re-entered App");
     }
 
     #[test]

@@ -50,3 +50,13 @@ pub(crate) fn activate_injects_input() -> bool {
 pub(crate) fn keeps_one_scale(popup: bool) -> bool {
     popup
 }
+
+/// PW-6: whether a display change (`WM_MOVE` across monitors, `WM_DISPLAYCHANGE`) reaches GPUI's
+/// `display_changed` callback through the window's own message queue instead of at once. GPUI
+/// core's callback is a bare `AsyncApp::update` (a `RefCell::borrow_mut` that panics when App is
+/// borrowed). A `SetWindowPos` made inside an App update (every move of hers) sends `WM_MOVE`
+/// synchronously, so the first move onto another monitor re-entered App and aborted her (measured
+/// in the VM). Posted, it runs from the message loop, after the update. Stock: at once.
+pub(crate) fn display_change_is_posted() -> bool {
+    true
+}
