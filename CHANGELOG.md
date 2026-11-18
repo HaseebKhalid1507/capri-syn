@@ -4,20 +4,23 @@
 
 ### The HUD moves as one system
 - One curve (ease-out, 2 % past the target at most, no wobble) and one set of durations, named in
-  `src/hud.rs`: a size change 220 ms, the bubble opening 260 ms, words out 90 ms (a closing bubble's
-  by 50 ms), words back 80 ms, a close's shrink 110 ms, into the pill 180 ms, a glitch 2 frames (67 ms).
-- **The glitch never touches text.** It shifts and splits only the empty shell (the plate, the frame,
-  their ring), in whole bands kept inside the shell's own box. Words fade out before their box moves
-  or glitches, and come back clean once it has settled.
-- **The bubble** opens from her (85 % at her tail) with a glitch-in, then its words; grows and shrinks
-  to its reply instead of snapping, a new line showing only once there is room for it, the words
-  clipped to the inner box; a new reply swaps its words through the empty shell (streaming text never
-  glitches); closing, its words go first, then the shell shrinks and glitches out, or eases into the
-  pill. The pill opens back out of its own size.
-- **The tag** (and the pill, and the unread chip) swaps its words through its empty plate while the
-  plate's width eases to the new text. A label shows at least 350 ms; changes meanwhile wait, and only
-  the latest shows (no strobe). Its place is pinned while she stays put (a mood's pose doesn't move
-  it). It comes and goes quietly when something else moves it (the bubble, a teleport, his hand).
+  `src/hud.rs`: a size change 220 ms, the bubble opening 260 ms (180 ms out of the pill), a label swap
+  120 ms, a reply's words out 60 ms then in 70 ms, a close 120 ms, into the pill 170 ms, a glitch 2
+  frames (67 ms) on the border only.
+- **Never an empty shell, never doubled words.** A plate or bubble stays opaque and filled while it
+  reshapes; its outline morphs into the new one (shared edges stay straight). The glitch is a 2-frame
+  RGB split on the border, landing on the swap, never on text.
+- **The tag** (and the pill, and the unread chip): the plate's width eases to the new text from
+  wherever it is (it leads a longer label, waits for a shorter one); the label swaps one at a time
+  (old out, new in, never over each other); WORKING's red block goes and comes with its label. A label
+  shows at least 350 ms; changes meanwhile wait, and only the latest shows (no strobe). Its place is
+  pinned on whole pixels while she stays put.
+- **The bubble** opens from her (85 % at her tail), its words where they will be, shown only inside
+  the growing shell; grows and shrinks to its reply, a new line showing only once there is room for
+  it. A new reply: the old words are out before the new ones start (streaming text never glitches).
+  Into the pill: its words go in two frames while the box holds, then the box eases into the pill's,
+  the pill's label whole as it lands. Out of the pill: the label stays until the shell covers the
+  reply, which comes then.
 - `[hud] glitch` and `[hud] motion` (both default on). Alpha mode only: under the X shape (no
   compositor) the HUD changes at once, as before. The Line and the menu don't glitch.
 - `SA_HUD_PROF=1` logs frame intervals and main-thread frame times while the HUD moves.
