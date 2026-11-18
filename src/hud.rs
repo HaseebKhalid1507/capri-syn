@@ -120,12 +120,15 @@ pub fn fade_in(t: f32, t0: f32, d: f32) -> f32 {
 }
 
 /// A plate's own content (WORKING's red block) through a swap at `u`: the old's level, the
-/// new's. Neither is under half where the words swap (`SWAP`): the plate never looks empty,
-/// only its label dips.
+/// new's. Each goes with its words: the old held whole until the swap (the plate never looks
+/// empty while its label dips), then out in two frames; the new up from the swap.
 pub fn plate_levels(u: f32) -> (f32, f32) {
-    let u = u.clamp(0.0, 1.0);
-    (1.0 - blend((u - 0.3) / 0.7), blend(u / 0.7))
+    let k = blend((u.clamp(0.0, 1.0) - SWAP) / BLOCK_U);
+    (1.0 - k, k)
 }
+
+/// A block's change after the swap, as a part of `XFADE_MS` (two frames).
+const BLOCK_U: f32 = 2.0 * STEP_MS / XFADE_MS;
 
 /// A value easing toward its target along `ease` (it may start later than now).
 #[derive(Clone, Copy, Debug)]
@@ -777,7 +780,8 @@ mod tests {
         let low: Vec<f32> = (0..=1000).map(|i| i as f32 / 1000.0).filter(|&u| { let (o, n) = xfade(u); o.max(n) < FLOOR - 1e-4 }).collect();
         assert!(low.is_empty() || (low[low.len() - 1] - low[0]) * XFADE_MS <= 14.0, "words under the floor for one frame at most");
         assert!((0..=1000).all(|i| { let (o, n) = xfade(i as f32 / 1000.0); o.min(n) == 0.0 }), "never two labels over each other");
-        assert!((0..=1000).all(|i| { let (o, n) = plate_levels(i as f32 / 1000.0); (i as f32 / 1000.0 - SWAP).abs() > 0.12 || o.max(n) >= 0.5 }), "the block at half or more where the words swap");
+        assert!((0..=1000).all(|i| { let u = i as f32 / 1000.0; let (o, n) = plate_levels(u); (u > SWAP || o == 1.0 && n == 0.0) && o.max(n) >= 0.5 }), "the old block whole until the swap, the plate never under half");
+        assert_eq!(plate_levels(SWAP + BLOCK_U), (0.0, 1.0), "two frames after it, the new one's");
         assert_eq!(xfade(0.0), (1.0, 0.0));
         assert_eq!(xfade(1.0), (0.0, 1.0));
     }
