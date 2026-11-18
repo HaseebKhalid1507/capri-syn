@@ -53,21 +53,28 @@ pub struct X11 {
 
 type Escapes = Arc<Mutex<Option<Box<dyn Fn() + Send>>>>;
 
-/// The keycodes that type Escape (keysym 0xff1b).
 /// The compositor owning `_NET_WM_CM_S` (`owner`, its window) takes any change of a window's
 /// shape for a resize (`Desktop::compositor_reshapes`): picom (compton before it was renamed).
-/// It names that window before it takes the selection: WM_NAME, _NET_WM_NAME and WM_CLASS
-/// "picom". Only picom was seen doing it (its animations); other compositors aren't held to it.
+/// It marks that window before it takes the selection: `COMPTON_VERSION` (its version, set by
+/// compton and every picom), and WM_NAME, _NET_WM_NAME and WM_CLASS "picom". Only picom was
+/// seen doing it (its animations); other compositors aren't held to it.
 fn reshapes(conn: &RustConnection, owner: u32) -> bool {
-    owner != x11rb::NONE
-        && [xproto::AtomEnum::WM_CLASS, xproto::AtomEnum::WM_NAME].into_iter().any(|a| {
-            conn.get_property(false, owner, a, xproto::AtomEnum::ANY, 0, 64).ok().and_then(|c| c.reply().ok()).is_some_and(|r| {
-                let v = String::from_utf8_lossy(&r.value).to_ascii_lowercase();
+    if owner == x11rb::NONE {
+        return false;
+    }
+    let prop = |a: u32| conn.get_property(false, owner, a, xproto::AtomEnum::ANY, 0, 64).ok().and_then(|c| c.reply().ok()).map(|r| r.value);
+    // Interned only if it exists: no compton or picom ever ran on this display without it.
+    let version = conn.intern_atom(true, b"COMPTON_VERSION").ok().and_then(|c| c.reply().ok()).map_or(x11rb::NONE, |r| r.atom);
+    (version != x11rb::NONE && prop(version).is_some_and(|v| !v.is_empty()))
+        || [xproto::AtomEnum::WM_CLASS, xproto::AtomEnum::WM_NAME].into_iter().any(|a| {
+            prop(a.into()).is_some_and(|v| {
+                let v = String::from_utf8_lossy(&v).to_ascii_lowercase();
                 v.contains("picom") || v.contains("compton")
             })
         })
 }
 
+/// The keycodes that type Escape (keysym 0xff1b).
 fn escape_codes(c: &RustConnection) -> Vec<u8> {
     let setup = c.setup();
     let (min, max) = (setup.min_keycode, setup.max_keycode);
@@ -446,6 +453,11 @@ impl Desktop for X11 {
     fn pointer(&self) -> Result<(i32, i32)> {
         let r = self.conn.query_pointer(self.root)?.reply()?;
         Ok((r.root_x as i32, r.root_y as i32))
+    }
+
+    fn primary_down(&self) -> Option<bool> {
+        let r = self.conn.query_pointer(self.root).ok()?.reply().ok()?;
+        Some(r.mask.contains(xproto::KeyButMask::BUTTON1))
     }
 
     fn pointer_reader(&self) -> Result<PointerRead> {

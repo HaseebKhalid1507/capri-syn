@@ -1453,10 +1453,12 @@ impl Avatar {
             h = h.min((top - a.y).max(0) as f32);
         }
         self.os.set_target(0);
-        self.land(to, place, now);
+        // The fall first: her window lands (`land`, at once) where the drop starts, above the
+        // spot, never on the spot for a frame before it.
         if let Some(hb) = &mut self.brain {
             hb.drop_in = Some((now, h, posed));
         }
+        self.land(to, place, now);
         self.apply_offset(now);
         let mut g = Glitch::new(GlitchKind::Appear, now, self.rng.next());
         g.soft = true;

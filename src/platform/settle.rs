@@ -7,13 +7,17 @@
 //!
 //! Under picom (`on`; elsewhere everything goes out at once):
 //! - a region set while she moves waits until she has held still for `SETTLE`, a newer one
-//!   replacing it; but once it misses more than `MISS` of her against the region out (clicks go
-//!   by that one: a fling's flight region, a turn mid-walk), no longer than `MAX_HOLD`: then her
-//!   moves stop until it is out, `GAP` after the last of them (~80 ms). Her walk cycle alone
-//!   stays under `MISS`, so a walk doesn't stop for it;
-//! - a move waits out `GAP` after a region went out;
-//! - while the button is down on her (an implicit grab: every pointer event is hers whatever
-//!   her region), regions wait for the release, so a drag never waits for one;
+//!   replacing it; but the region out may be wrong for her (`mismatch` over `MISS`: clicks go
+//!   through her or are eaten next to her: a fling's flight, a turn mid-walk, a bubble closed)
+//!   for no longer than `MAX_HOLD` in all: then her moves stop until the newest is out, `GAP`
+//!   after the last of them (~70 ms). Her walk cycle alone stays under `MISS`, so a walk
+//!   doesn't stop for it;
+//! - a move waits out `GAP` after a region went out, in hand too (a catch mid-flight: the
+//!   region out just before the press);
+//! - while her drag is in hand (`press`: the button down on her, an implicit grab: every
+//!   pointer event is hers whatever her region; or a scripted drag, standing in for one),
+//!   regions wait for the release, so no move waits for one: a drag never stops for her
+//!   region (its first moves at most `GAP` after a region out before the press);
 //! - a landing (`landed`: a teleport's, a placed move) never waits.
 //!
 //! So, outside landings, a region and a move never go out within `GAP` of each other. Time
@@ -24,16 +28,20 @@ use std::time::{Duration, Instant};
 
 /// A region set while she moves goes out once she has held still this long.
 pub const SETTLE: Duration = Duration::from_millis(60);
-/// ... or once it has missed more than `MISS` of her this long: her moves then stop for it.
+/// ... or once the region out has been wrong for her this long in all (`MISS`): her moves
+/// then stop for the newest.
 pub const MAX_HOLD: Duration = Duration::from_millis(250);
-/// The share of her new region the region out may miss (px) before `MAX_HOLD` counts. Main's
-/// region timelines under picom (every change out at once), against the region 300 ms before:
-/// her walk cycle p50 20 %, p90 25 %; a turn up to 58 %; a fling's flight up to 100 %. Replayed
-/// through this gate at 25-40 %: 0.24 forced stops a second of walking (her walk starting,
-/// turning, stopping), 2-3 per fling, none in a drag; the bare cap: 2.9 a second.
+/// How wrong the region out may be for her (`mismatch`) before it counts towards `MAX_HOLD`.
+/// Her regions with nothing held (no compositor), against the region 300 ms before: her walk
+/// cycle p50 21 %, p90 25 % (one-way, through her only: 20 %, 25 %); a walk against the
+/// stand it started from 44 %; a fling's flight up to 66 %. Replayed through this gate with a
+/// move every frame: one stop as a walk sets off facing the other way, none in a walk after,
+/// one a fling (the one-way miss starting over: none, its flight region 330 ms late).
 pub const MISS: f32 = 0.3;
 /// A region and a move never go out closer than this: two frames at 60 Hz, so picom takes
-/// them in different frames.
+/// them in different frames. picom's own trace log under his config (xrender, NVIDIA path,
+/// 20 clips): of 4,675 back-to-back frames that took a move or a region of hers, the longest
+/// gap was 31 ms, and no frame took both.
 pub const GAP: Duration = Duration::from_millis(34);
 
 /// What is held back, and when each kind last went out.
@@ -45,33 +53,56 @@ pub(super) struct Settle {
     input: Option<Vec<ShapeRect>>,
     /// The region out (the last sent).
     out: Vec<ShapeRect>,
-    /// Since when the held region has missed more than `MISS` of her (`MAX_HOLD` counts).
-    wrong: Option<Instant>,
+    /// How long the region out has been wrong for her since it went out (`MISS`; while her
+    /// drag is in hand it doesn't count, and a drag starts it over) ...
+    wrong: Duration,
+    /// ... and since when it is wrong now (the newest held misses), not yet in `wrong`.
+    wrong_from: Option<Instant>,
+    /// The newest region held is wrong for her against the region out.
+    held_wrong: bool,
     /// The newest position held.
     pos: Option<(i32, i32)>,
     /// The held region is overdue (`MAX_HOLD`): moves wait until it is out.
     flush: bool,
-    /// The button is down on her.
+    /// Her drag is in hand (`press`).
     pressed: bool,
 }
 
 impl Settle {
+    /// How long the region out has been wrong for her by `now`.
+    fn wrong_for(&self, now: Instant) -> Duration {
+        self.wrong + self.wrong_from.map_or(Duration::ZERO, |t| now.saturating_duration_since(t))
+    }
+
+    /// The time it has been wrong so far into `wrong`; from `now` on it counts if `counts`.
+    fn recount(&mut self, counts: bool, now: Instant) {
+        self.wrong = self.wrong_for(now);
+        self.wrong_from = counts.then_some(now);
+    }
+
     fn overdue(&mut self, now: Instant) {
-        if !self.pressed && self.input.is_some() && self.wrong.is_some_and(|t| now >= t + MAX_HOLD) {
+        if !self.pressed && self.input.is_some() && self.wrong_for(now) >= MAX_HOLD {
             self.flush = true;
         }
     }
 
     fn sent(&mut self, r: Vec<ShapeRect>, now: Instant) {
         self.out = r;
-        self.input = None;
-        self.wrong = None;
+        self.right();
         self.shaped = Some(now);
+    }
+
+    /// The region out is what she wants: nothing is held, nothing counts.
+    fn right(&mut self) {
+        self.input = None;
+        self.wrong = Duration::ZERO;
+        self.wrong_from = None;
+        self.held_wrong = false;
         self.flush = false;
     }
 
     fn move_waits(&self, now: Instant) -> bool {
-        self.flush || self.shaped.is_some_and(|t| now < t + GAP)
+        (self.flush && !self.pressed) || self.shaped.is_some_and(|t| now < t + GAP)
     }
 
     fn region_may_go(&self, now: Instant) -> bool {
@@ -109,12 +140,13 @@ impl Settle {
         if on {
             if r == self.out {
                 // Back to the region out: nothing to send.
-                self.input = None;
-                self.wrong = None;
-                self.flush = false;
+                self.right();
                 return false;
             }
-            self.wrong = if missed(&self.out, r) > MISS { self.wrong.or(Some(now)) } else { None };
+            // Wrong time adds up from region to region: a frame that happens to fit doesn't
+            // start it over (a tumble, a mirrored walk cycle); only a region out ends it.
+            self.held_wrong = mismatch(&self.out, r) > MISS;
+            self.recount(self.held_wrong && !self.pressed, now);
             self.input = Some(r.to_vec());
             self.overdue(now);
             if !self.region_may_go(now) {
@@ -125,16 +157,22 @@ impl Settle {
         true
     }
 
-    /// The button went down on her (`down`) or up. Pressed, regions wait for the release;
-    /// `MAX_HOLD` then counts from it.
+    /// Her drag is in hand (`down`) or no longer: the button down on her or up, a scripted
+    /// drag held or let go. In hand, regions wait for the release, so moves wait for none
+    /// (but `GAP` after one out before); the time her region out is wrong doesn't count (no
+    /// click goes by it), and what counted before the drag is forgotten: from the release it
+    /// counts from nothing.
     pub fn press(&mut self, down: bool, now: Instant) {
         if down == self.pressed {
             return;
         }
         self.pressed = down;
         self.flush = false;
-        if self.wrong.is_some() {
-            self.wrong = Some(now);
+        if down {
+            self.wrong = Duration::ZERO;
+            self.wrong_from = None;
+        } else {
+            self.recount(self.held_wrong, now);
         }
     }
 
@@ -145,7 +183,7 @@ impl Settle {
         }
         let mut due: Option<Instant> = None;
         let mut at = |t: Instant| due = Some(due.map_or(t, |d| d.min(t)));
-        if self.pos.is_some() && !self.flush {
+        if self.pos.is_some() && (self.pressed || !self.flush) {
             at(self.shaped.map_or(now, |t| t + GAP));
         }
         if self.input.is_some() && !self.pressed {
@@ -155,8 +193,8 @@ impl Settle {
                 if self.pos.is_none() {
                     at(self.moved.map_or(now, |t| t + SETTLE));
                 }
-                if let Some(t) = self.wrong {
-                    at(t + MAX_HOLD);
+                if let Some(t) = self.wrong_from {
+                    at(t + MAX_HOLD.saturating_sub(self.wrong));
                 }
             }
         }
@@ -190,11 +228,14 @@ impl Settle {
     }
 }
 
-/// How much of region `new` (px) region `out` misses: 1 - |out & new| / |new|; 0 for an empty
-/// `new`. Exact, on a bitset over `new`'s box (rects may overlap).
-fn missed(out: &[ShapeRect], new: &[ShapeRect]) -> f32 {
+/// How wrong region `out` is for region `new` (px), 0 to 1: the larger of the share of `new`
+/// it misses (clicks on her go through) and the share of it outside `new` (clicks next to her
+/// are eaten: a bubble or a menu closed, her flight over). An empty `new` against a non-empty
+/// `out` (hidden) is 1; two empty ones 0. Exact, on bitsets over both regions' box (rects may
+/// overlap).
+fn mismatch(out: &[ShapeRect], new: &[ShapeRect]) -> f32 {
     let span = |r: &ShapeRect| (i32::from(r.0), i32::from(r.1), i32::from(r.0) + i32::from(r.2), i32::from(r.1) + i32::from(r.3));
-    let Some((x0, y0, x1, y1)) = new.iter().map(span).filter(|s| s.2 > s.0 && s.3 > s.1).reduce(|a, b| (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3))) else {
+    let Some((x0, y0, x1, y1)) = out.iter().chain(new).map(span).filter(|s| s.2 > s.0 && s.3 > s.1).reduce(|a, b| (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3))) else {
         return 0.0;
     };
     let words = ((x1 - x0) as usize).div_ceil(64);
@@ -220,9 +261,11 @@ fn missed(out: &[ShapeRect], new: &[ShapeRect]) -> f32 {
         m
     };
     let (o, n) = (paint(out), paint(new));
-    let all: u32 = n.iter().map(|w| w.count_ones()).sum();
+    let count = |m: &[u64]| m.iter().map(|w| w.count_ones()).sum::<u32>();
+    let (all_o, all_n) = (count(&o), count(&n));
     let hit: u32 = n.iter().zip(&o).map(|(a, b)| (a & b).count_ones()).sum();
-    if all == 0 { 0.0 } else { 1.0 - hit as f32 / all as f32 }
+    let share = |all: u32| if all == 0 { 0.0 } else { 1.0 - hit as f32 / all as f32 };
+    if all_n == 0 && all_o > 0 { 1.0 } else { share(all_n).max(share(all_o)) }
 }
 
 #[cfg(test)]
@@ -244,12 +287,14 @@ mod tests {
         /// Where her window is, and the region that is out.
         at: i32,
         out: Vec<ShapeRect>,
+        /// (when, region) of each region she asked for.
+        wanted: Vec<(Duration, Vec<ShapeRect>)>,
     }
 
     impl Run {
         fn new() -> Run {
             let t0 = Instant::now();
-            Run { s: Settle::default(), t0, now: t0, moves: vec![], regions: vec![], landings: vec![], at: 0, out: vec![] }
+            Run { s: Settle::default(), t0, now: t0, moves: vec![], regions: vec![], landings: vec![], at: 0, out: vec![], wanted: vec![] }
         }
         fn t(&self) -> Duration {
             self.now - self.t0
@@ -287,10 +332,11 @@ mod tests {
             {
                 self.sent((Some((x, 0)), None));
             }
-            if let Some(r) = r
-                && self.s.wants_region(true, &[r], self.now)
-            {
-                self.sent((None, Some(vec![r])));
+            if let Some(r) = r {
+                self.wanted.push((self.t(), vec![r]));
+                if self.s.wants_region(true, &[r], self.now) {
+                    self.sent((None, Some(vec![r])));
+                }
             }
             self.wait(FRAME);
         }
@@ -314,7 +360,35 @@ mod tests {
         fn longest_still(&self, from: Duration, to: Duration) -> Duration {
             self.moves.windows(2).filter(|w| w[0].0 >= from && w[1].0 < to).map(|w| w[1].0 - w[0].0).max().unwrap_or_default()
         }
+        /// From `from` on, the most time any one region out was wrong for her (`mismatch` of
+        /// it against the newest she asked for over `MISS`: a click there went through her or
+        /// was eaten), ms by ms.
+        fn worst_wrong(&self, from: Duration) -> Duration {
+            let last = |v: &[(Duration, Vec<ShapeRect>)], t: Duration| v.iter().rposition(|(at, _)| *at <= t);
+            let (mut worst, mut cur, mut epoch, mut memo) = (Duration::ZERO, Duration::ZERO, None, None);
+            let mut t = from;
+            while t < self.t() {
+                let (o, w) = (last(&self.regions, t), last(&self.wanted, t));
+                if o != epoch {
+                    (epoch, cur) = (o, Duration::ZERO);
+                }
+                if memo.is_none_or(|(k, _)| k != (o, w)) {
+                    let out = o.map_or(&[][..], |i| &self.regions[i].1[..]);
+                    let bad = w.is_some_and(|i| mismatch(out, &self.wanted[i].1) > MISS);
+                    memo = Some(((o, w), bad));
+                }
+                if memo.is_some_and(|(_, bad)| bad) {
+                    cur += Duration::from_millis(1);
+                    worst = worst.max(cur);
+                }
+                t += Duration::from_millis(1);
+            }
+            worst
+        }
     }
+
+    /// No region out was wrong for her longer than `MAX_HOLD` and the stop it takes.
+    const WRONG_MAX: Duration = Duration::from_millis(250 + 2 * 34 + 2 * 16);
 
     /// Her region for frame `i` of a walk facing right (`dir` 1) or left: her body bobbing a
     /// px, and a leg through four places (her walk cycle: never quite the region out, never
@@ -332,6 +406,7 @@ mod tests {
         if r.s.wants_move(true, (x, 0), r.now) {
             r.sent((Some((x, 0)), None));
         }
+        r.wanted.push((r.t(), region.to_vec()));
         if r.s.wants_region(true, region, r.now) {
             r.sent((None, Some(region.to_vec())));
         }
@@ -341,6 +416,7 @@ mod tests {
     /// She stands (her region out), then walks.
     fn standing(region: &[ShapeRect]) -> Run {
         let mut r = Run::new();
+        r.wanted.push((r.t(), region.to_vec()));
         assert!(r.s.wants_region(true, region, r.now));
         r.sent((None, Some(region.to_vec())));
         r.wait(SETTLE);
@@ -348,15 +424,25 @@ mod tests {
     }
 
     #[test]
-    fn missed_is_the_share_of_the_new_region_out_of_the_old() {
-        assert_eq!(missed(&[(0, 0, 10, 10)], &[(0, 0, 10, 10)]), 0.0);
-        assert_eq!(missed(&[(0, 0, 10, 10)], &[(5, 0, 10, 10)]), 0.5);
-        assert_eq!(missed(&[], &[(5, 0, 10, 10)]), 1.0);
-        assert_eq!(missed(&[(0, 0, 10, 10)], &[]), 0.0);
+    fn mismatch_counts_clicks_through_her_and_clicks_eaten_next_to_her() {
+        assert_eq!(mismatch(&[(0, 0, 10, 10)], &[(0, 0, 10, 10)]), 0.0);
+        assert_eq!(mismatch(&[(0, 0, 10, 10)], &[(5, 0, 10, 10)]), 0.5);
+        // Nothing out where she now is: every click goes through her.
+        assert_eq!(mismatch(&[], &[(5, 0, 10, 10)]), 1.0);
+        // Hidden (no region), the old one still out: every click on it is eaten.
+        assert_eq!(mismatch(&[(0, 0, 10, 10)], &[]), 1.0);
+        assert_eq!(mismatch(&[], &[]), 0.0);
+        // A bubble or a menu closed, her flight over: the new region is all inside the old
+        // (nothing goes through her), the rest of the old one eats clicks.
+        assert_eq!(mismatch(&[(0, 0, 10, 10), (10, 0, 30, 10)], &[(0, 0, 10, 10)]), 0.75);
+        assert_eq!(mismatch(&[(0, 0, 40, 40)], &[(10, 10, 20, 20)]), 0.75);
+        // ... and the other way round: grown.
+        assert_eq!(mismatch(&[(10, 10, 20, 20)], &[(0, 0, 40, 40)]), 0.75);
         // Across 64-px words, overlapping rects counted once, negative coords.
-        assert!((missed(&[(0, 0, 100, 1)], &[(30, 0, 100, 1)]) - 0.3).abs() < 1e-6);
-        assert_eq!(missed(&[(0, 0, 200, 2)], &[(10, 0, 50, 2), (20, 0, 50, 2)]), 0.0);
-        assert_eq!(missed(&[(-20, -5, 10, 10)], &[(-20, -5, 20, 10)]), 0.5);
+        assert!((mismatch(&[(0, 0, 100, 1)], &[(30, 0, 100, 1)]) - 0.3).abs() < 1e-6);
+        assert_eq!(mismatch(&[(0, 0, 200, 2)], &[(10, 0, 50, 2), (20, 0, 50, 2)]), 0.7);
+        assert_eq!(mismatch(&[(10, 0, 50, 2), (20, 0, 50, 2)], &[(10, 0, 60, 2)]), 0.0);
+        assert_eq!(mismatch(&[(-20, -5, 10, 10)], &[(-20, -5, 20, 10)]), 0.5);
     }
 
     /// A long walk (3 s, a move every frame, her walk cycle reshaping her each frame): her
@@ -406,7 +492,8 @@ mod tests {
         let mut r = standing(&[(0, 0, 50, 50)]);
         r.s.press(true, r.now);
         for i in 0..30 {
-            // The drag: moves never wait, regions wait for the release.
+            // The drag (the region out long before): moves never wait, regions wait for the
+            // release.
             let n = r.moves.len();
             step(&mut r, i * 3, &[(0, 0, 50, 50 + (i % 2) as u16)]);
             assert_eq!(r.moves.len(), n + 1, "a drag move waited");
@@ -448,15 +535,110 @@ mod tests {
         assert!(f <= MAX_HOLD + 2 * GAP + 2 * FRAME, "her region turned {f:?} after her");
     }
 
+    /// Shady's review of #69: one frame that happened to fit started `MAX_HOLD` over. A
+    /// tumble passes near upright now and then (here every fourth frame fits the region out),
+    /// so the flight region never went out and his press mid-air went through her: now the
+    /// time it is wrong adds up, and the region out is never wrong for longer than the cap.
+    #[test]
+    fn a_tumbling_fling_that_fits_now_and_then_still_gets_its_region_out() {
+        let stand = [(0, 0, 50, 100)];
+        let mut r = standing(&stand);
+        let from = r.t();
+        for i in 0..90 {
+            let region = if i % 4 == 0 { vec![(2 + (i % 3) as i16, 0, 50, 100)] } else { vec![(-20, 25 + (i % 7) as i16, 100, 50)] };
+            step(&mut r, i * 9, &region);
+        }
+        r.never_met();
+        assert!(r.regions.len() >= 2, "the flight region never went out");
+        let w = r.worst_wrong(from);
+        assert!(w <= WRONG_MAX, "a region out was wrong for her {w:?}");
+    }
+
+    /// A turn mid-walk whose mirrored walk cycle fits the region out now and then (her hair
+    /// swings in front of her for 12 frames of 16): her region still turns within the cap.
+    #[test]
+    fn a_mirrored_walk_cycle_that_fits_now_and_then_still_turns_her_region() {
+        // Torso, a leg on the side she faces, her hair behind her for three steps of four.
+        let walk = |i: i32, dir: i32| -> Vec<ShapeRect> {
+            let leg = 5 * ((i / 4) % 4) as i16;
+            let mut v = vec![(40, 20, 30, 40), if dir > 0 { (60 + leg, 60, 10, 20) } else { (30 - leg, 60, 10, 20) }];
+            if dir < 0 && (i / 4) % 4 != 3 {
+                v.push((0, 10, 40, 20));
+            }
+            v
+        };
+        assert!(mismatch(&walk(0, 1), &walk(12, -1)) < MISS && mismatch(&walk(0, 1), &walk(0, -1)) > MISS);
+        let mut r = standing(&walk(0, 1));
+        for i in 0..30 {
+            step(&mut r, i * 2, &walk(i, 1));
+        }
+        let turn = r.t();
+        let mut faced = None;
+        for i in 0..80 {
+            step(&mut r, 60 - i * 2, &walk(i, -1));
+            if faced.is_none() && r.out.len() == 3 {
+                faced = Some(r.t() - turn);
+            }
+        }
+        r.never_met();
+        assert!(faced.is_some(), "her region never turned");
+        let w = r.worst_wrong(turn);
+        assert!(w <= WRONG_MAX, "a region out was wrong for her {w:?}");
+    }
+
+    /// Shady's review: the gate saw only clicks going through her, not clicks eaten. Each of
+    /// these leaves her new region inside the old one: hidden mid-move (no region), a bubble
+    /// or her menu closed while she walks, her flight over as she slides on landing. The old
+    /// region goes within the cap.
+    #[test]
+    fn a_region_that_shrinks_while_she_moves_goes_out() {
+        let body = |i: i32| walk_region(i, 1);
+        let with = move |i: i32, extra: ShapeRect| {
+            let mut v = body(i);
+            v.push(extra);
+            v
+        };
+        type Pose = Box<dyn Fn(i32) -> Vec<ShapeRect>>;
+        let cases: [(&str, Pose, Pose); 3] = [
+            ("hidden", Box::new(body), Box::new(|_| vec![])),
+            ("bubble closed", Box::new(move |i| with(i, (60, -40, 80, 50))), Box::new(body)),
+            ("flight over", Box::new(|i| vec![(0, (i % 3) as i16, 200, 200)]), Box::new(|_| vec![(50, 100, 50, 100)])),
+        ];
+        for (what, before, after) in cases {
+            let mut r = standing(&before(0));
+            for i in 0..20 {
+                step(&mut r, i * 2, &before(i));
+            }
+            let change = r.t();
+            let n = r.regions.len();
+            for i in 20..80 {
+                step(&mut r, i * 2, &after(i));
+            }
+            r.never_met();
+            assert!(r.regions.len() > n, "{what}: the smaller region never went out");
+            let w = r.worst_wrong(change);
+            assert!(w <= WRONG_MAX, "{what}: a region out was wrong for her {w:?}");
+        }
+    }
+
     /// A drag that pauses before it starts and mid-way (the press squash and her dangle change
     /// her region while she is still): no drag move waits.
     #[test]
     fn a_drag_never_waits_for_a_region() {
         let mut r = Run::new();
-        // Still before the press: her idle region is out.
+        // Still before the press: her idle region is out, the last one just before it.
         r.frame(None, Some((1, 1, 1, 1)));
         r.wait(SETTLE * 2);
+        assert!(r.s.wants_region(true, &[(1, 1, 1, 2)], r.now));
+        r.sent((None, Some(vec![(1, 1, 1, 2)])));
+        let shaped = r.t();
+        r.now += Duration::from_millis(2);
         r.s.press(true, r.now);
+        // A catch right after a region went out: its first move waits out the rest of `GAP`
+        // (picom never takes the two in one frame), and no more.
+        assert!(!r.s.wants_move(true, (-1, 0), r.now), "in hand, a move right after a region still waits out GAP");
+        r.wait(GAP);
+        assert_eq!(r.moves, vec![(shaped + GAP, -1)], "out GAP after the region, not later");
         // The squash, then a pause before the drag.
         for _ in 0..10 {
             r.frame(None, Some((2, 2, 2, 2)));
@@ -473,11 +655,38 @@ mod tests {
             }
         }
         assert_eq!(asked, 45);
-        assert_eq!(r.regions.len(), 1, "no region out while pressed");
+        assert_eq!(r.regions.len(), 2, "no region out while pressed");
         // Released and still: the newest region goes out once she has held still.
         r.s.press(false, r.now);
         r.wait(SETTLE + FRAME);
         assert_eq!(r.out, vec![(3, 59, 3, 3)]);
+    }
+
+    /// Wrong time from before a drag is forgotten: after the release her moves run the whole
+    /// `MAX_HOLD` again before they stop for her region, not what was left of it.
+    #[test]
+    fn a_drag_starts_the_wrong_time_over() {
+        let (a, b) = ([(0, 0, 40, 40)], [(100, 0, 40, 40)]);
+        let mut r = standing(&a);
+        // Moving with a region that misses all of the one out: 200 ms of `MAX_HOLD` gone.
+        for i in 0..12 {
+            step(&mut r, i, &b);
+        }
+        assert_eq!(r.regions.len(), 1, "not overdue yet");
+        r.s.press(true, r.now);
+        for i in 12..30 {
+            step(&mut r, i, &b);
+        }
+        r.s.press(false, r.now);
+        let release = r.t();
+        let n = r.regions.len();
+        for i in 30..60 {
+            step(&mut r, i, &b);
+        }
+        let first = r.regions[n..].first().map(|(t, _)| *t).expect("forced out after the release");
+        assert!(first >= release + MAX_HOLD, "out {:?} after the release: the drag didn't start it over", first - release);
+        let still = r.longest_still(release, release + MAX_HOLD);
+        assert!(still <= FRAME + Duration::from_millis(1), "she stopped {still:?} within MAX_HOLD of the release");
         r.never_met();
     }
 
