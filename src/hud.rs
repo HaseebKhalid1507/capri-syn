@@ -20,9 +20,10 @@ use std::time::{Duration, Instant};
 
 /// One glitch step: one present at 60 Hz.
 pub const STEP_MS: f32 = 1000.0 / 60.0;
-/// A glitch: two frames, on the border only (its steps end between frames: a paint a hair
-/// early never makes a third).
-pub const GLITCH_MS: f32 = 1.5 * STEP_MS;
+/// A glitch: two frames, on the border only (whole, then half: one frame alone can fall
+/// between two presents and never show). It ends before a third (a paint a hair early never
+/// makes one).
+pub const GLITCH_MS: f32 = 1.8 * STEP_MS;
 /// The border's RGB split on a glitch's first step, px (half on its second).
 pub const SPLIT: f32 = 2.0;
 /// A size change: the bubble growing or shrinking to its content, the tag's width.
@@ -837,7 +838,13 @@ mod tests {
         let swap_t = f[sw].0;
         assert!(f.iter().filter(|s| s.0 >= g && s.0 + 20 < swap_t).all(|s| s.6 == 0.0), "not ahead of it");
         let glitched = f.iter().filter(|f| f.6 > 0.0).count();
-        assert!(glitched <= 3 * 3, "a glitch is two frames per change: {glitched} frames for 3");
+        assert!(glitched <= 3 * 2, "a glitch is two frames per change: {glitched} frames for 3");
+        // Every change gets its two frames, whole then half, on its cut (WORKING's included).
+        for (who, from) in [("WORKING", 1000), ("DONE", 2000)] {
+            let cut = f.iter().position(|s| s.0 >= from && s.2 == Some(who) && s.3 > 0.0).unwrap();
+            assert!(f[cut].6 == SPLIT && f[cut + 1].6 == SPLIT * 0.5 && f[cut + 2].6 == 0.0, "{who}: {:?}", &f[cut..cut + 3]);
+            assert!(f[cut].3 >= 0.55, "{who} readable on its first frame");
+        }
     }
 
     #[test]
