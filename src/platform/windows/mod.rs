@@ -176,6 +176,12 @@ fn current_desktop(key: HKEY) -> Option<[u8; 16]> {
 /// taskbar moved or resized), a DPI changed: `Hint::Layout`, on the watcher's thread.
 unsafe extern "system" fn layout_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     if msg == WM_DISPLAYCHANGE || msg == WM_DPICHANGED || (msg == WM_SETTINGCHANGE && wp.0 as u32 == SPI_SETWORKAREA.0) {
+        let why = match msg {
+            WM_DISPLAYCHANGE => "monitors changed",
+            WM_DPICHANGED => "a DPI changed",
+            _ => "the work area changed",
+        };
+        elog!("synaps-avatar: windows: layout: {why}: re-read");
         HINT.with(|f| {
             if let Some(f) = f.borrow().as_ref() {
                 f(Hint::Layout);
@@ -871,6 +877,7 @@ impl Desktop for Win32 {
                 let next = current_desktop(key);
                 if next != now {
                     now = next;
+                    elog!("synaps-avatar: windows: virtual desktop switch");
                     desks(Hint::Desktop);
                 }
             }

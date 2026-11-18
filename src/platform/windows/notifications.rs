@@ -67,10 +67,20 @@ fn esc(s: &str) -> String {
     out
 }
 
-/// `C:\a b\c.png` → `file:///C:/a%20b/c.png`.
+/// `C:\a b\c.png` → `file:///C:/a%20b/c.png`. A verbatim path (`\\?\C:\…`, what
+/// `fs::canonicalize` returns on Windows) loses its prefix first: as `file://///?/C:/…` the shell
+/// drops the image without a word (seen in the VM: her toast came without her face).
 fn file_uri(p: &Path) -> String {
-    let s = p.to_string_lossy().replace('%', "%25").replace(' ', "%20").replace('#', "%23").replace('\\', "/");
-    format!("file:///{}", s.trim_start_matches('/'))
+    let raw = p.to_string_lossy();
+    let plain = match raw.strip_prefix(r"\\?\UNC\") {
+        Some(unc) => format!(r"\\{unc}"),
+        None => raw.strip_prefix(r"\\?\").unwrap_or(&raw).to_string(),
+    };
+    let s = plain.replace('%', "%25").replace(' ', "%20").replace('#', "%23").replace('\\', "/");
+    match s.strip_prefix("//") {
+        Some(share) => format!("file://{share}"),
+        None => format!("file:///{}", s.trim_start_matches('/')),
+    }
 }
 
 /// The toast: her summary and body (generic template), the image (a file) as its logo.
@@ -100,5 +110,14 @@ mod tests {
         let x = toast_xml("s", "b", Some(Path::new(r"C:\Users\me\my face#1.png")));
         assert!(x.contains(r#"<image placement="appLogoOverride" src="file:///C:/Users/me/my%20face%231.png"/>"#), "{x}");
         assert!(!toast_xml("s", "b", Some(Path::new("face.png"))).contains("<image"), "a relative path is no image");
+    }
+
+    #[test]
+    fn a_verbatim_path_is_a_plain_file_uri() {
+        // fs::canonicalize's form: as file://///?/C:/… the shell shows no image.
+        assert_eq!(file_uri(Path::new(r"\\?\C:\Users\me\capri.png")), "file:///C:/Users/me/capri.png");
+        assert_eq!(file_uri(Path::new(r"\\?\UNC\srv\share\capri.png")), "file://srv/share/capri.png");
+        assert_eq!(file_uri(Path::new(r"\\srv\share\a b.png")), "file://srv/share/a%20b.png");
+        assert_eq!(file_uri(Path::new(r"C:\x\c.png")), "file:///C:/x/c.png");
     }
 }
