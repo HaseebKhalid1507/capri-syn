@@ -40,9 +40,10 @@ pub const FLOOR: f32 = 0.4;
 /// `FLOOR` over its last `CLOSE_DIM_MS`, and it is gone.
 pub const CLOSE_MS: f32 = 120.0;
 pub const CLOSE_DIM_MS: f32 = 34.0;
-/// The bubble collapsing into the pill: its words cross into the pill's, then (after
-/// `PILL_LAG_MS`, its own nearly gone) its box and outline ease into the pill's.
-pub const PILL_LAG_MS: f32 = 100.0;
+/// The bubble collapsing into the pill: its words cross into the pill's, and from the end of
+/// the crossing (`PILL_LAG_MS`: its own gone, the pill's rising) its box and outline ease into
+/// the pill's. No full-size box with only the pill's words in it.
+pub const PILL_LAG_MS: f32 = XFADE_MS * CROSS.1;
 pub const PILL_MS: f32 = 180.0;
 /// A tag label shows at least this long; changes meanwhile wait, and only the latest shows.
 pub const DWELL_MS: f32 = 350.0;
@@ -333,6 +334,9 @@ impl<T: Clone + PartialEq> TagFx<T> {
         if matches!(self.vis, Vis::Exit(_)) {
             return;
         }
+        // A change of its own: a quiet change's snap still owed (it was never laid out: the
+        // bubble had the HUD) would cut it short and leave its words unshown.
+        self.snap = 0;
         if self.cur.is_none() {
             self.cur = self.want.clone();
             self.vis = Vis::Appear(None);
@@ -847,6 +851,16 @@ mod tests {
         assert_eq!(q.frame(t0).alpha, 1.0);
         q.observe(Some("DONE"), at(t0, 16), true, true);
         assert!(q.frame(at(t0, 16)).prev.is_none() && q.frame(at(t0, 16)).cur == Some(&"DONE"));
+        // Put away quietly (the bubble took over) and never laid out since: it comes back with
+        // its words, and settles.
+        let mut b = TagFx::default();
+        let f = run(&mut b, t0, &[(0, Some("ONLINE"))], 600, widths);
+        assert!(f.last().unwrap().3 == 1.0);
+        b.observe(None, at(t0, 616), true, true);
+        let f = run(&mut b, at(t0, 632), &[(0, Some("ONLINE"))], 800, widths);
+        let last = f.last().unwrap();
+        assert!(last.3 == 1.0 && last.5 == 1.0, "back with its words: {last:?}");
+        assert!(!b.busy(at(t0, 632 + 800)), "and settled");
     }
 
     #[test]
@@ -907,7 +921,8 @@ mod tests {
         assert!(!c.done(at(t0, 100)) && c.done(at(t0, 121)));
         let mut g = Ghost::new((), (0.0, 0.0, 400.0, 200.0), Some((140.0, 230.0, 120.0, 25.0)), t0, true);
         assert_eq!(g.split(t0), 0.0);
-        assert_eq!(g.rect(at(t0, 95)), (0.0, 0.0, 400.0, 200.0), "the box holds while the words cross");
+        assert_eq!(g.rect(at(t0, 60)), (0.0, 0.0, 400.0, 200.0), "the box holds while the words cross");
+        assert!(g.rect(at(t0, 100)).2 < 395.0, "and moves as the pill's words come up");
         for t in (0..=300).step_by(16) {
             let (own, pill, q) = g.pill(at(t0, t));
             assert!((own.max(pill) >= FLOOR - 1e-3 || (54..=66).contains(&t)) && (0.0..=1.0).contains(&q), "never empty at {t}");
