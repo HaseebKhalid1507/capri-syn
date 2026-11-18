@@ -5110,7 +5110,7 @@ impl TagArt {
 /// (plate, block, backdrops), its words (type, glyphs, marks, the chevron) or both.
 fn tag_ring(pal: Pal, a: &TagArt, wide: Option<(f32, f32)>, split: f32, part: Part) -> Div {
     let TagArt { look, badge, text, name_part, rest, glyph_kind, collapsed, sweep, step, shade } = a.clone();
-    let (shell, words) = (part != Part::Words, part != Part::Shell);
+    let base = part == Part::All;
     // The content inside a plate drawn `wide`: centred in it as laid out, kept inside it.
     let clip = |plate: Div, row: Div| -> Div {
         match wide {
@@ -5140,16 +5140,15 @@ fn tag_ring(pal: Pal, a: &TagArt, wide: Option<(f32, f32)>, split: f32, part: Pa
         .left_0()
         .size_full()
     };
-    // A plate's backdrop when the shell is drawn; its words when they are.
-    let backed = |cut: Cut, f: Fill| div().relative().flex().items_center().when(shell, |d| d.child(theme::backdrop(cut, f)));
-    let say = |d: Div| d.when(!words, |d| d.invisible());
+    let backed = |cut: Cut, f: Fill| div().relative().flex().items_center().child(theme::backdrop(cut, f));
+    let say = |d: Div| d;
     if let Some(b) = badge.clone() {
         let plate = div()
             .relative()
             .flex()
             .items_center()
-            .when(shell && split > 0.0, |d| d.child(fringe(Cut::Unread)))
-            .when(shell, |d| d.child(theme::backdrop(Cut::Unread, Fill::framed(pal.panel, pal.accent, 2.0).ringed(pal.ring))))
+            .when(base && split > 0.0, |d| d.child(fringe(Cut::Unread)))
+            .when(base, |d| d.child(theme::backdrop(Cut::Unread, Fill::framed(pal.panel, pal.accent, 2.0).ringed(pal.ring))))
             .h(px(28.0))
             .text_size(px(TAG_FONT))
             .line_height(px(TAG_FONT + 1.0))
@@ -5199,9 +5198,6 @@ fn tag_ring(pal: Pal, a: &TagArt, wide: Option<(f32, f32)>, split: f32, part: Pa
                 canvas(
                     |_, _, _| (),
                     move |b, _, window, _| {
-                        if !shell {
-                            return;
-                        }
                         let (x0, y0, x1, y1) = (f32::from(b.left()), f32::from(b.top()), f32::from(b.right()), f32::from(b.bottom()));
                         let (blk, sw) = theme::half_block(x0, y0, x1, y1, sweep);
                         theme::fill_poly(window, &blk, rgb(block_c));
@@ -5228,37 +5224,24 @@ fn tag_ring(pal: Pal, a: &TagArt, wide: Option<(f32, f32)>, split: f32, part: Pa
         .line_height(px(TAG_FONT + 1.0))
         .font_weight(FontWeight::BOLD)
         .text_color(rgb(look.ink))
-        .when(shell && split > 0.0, |d| d.child(fringe(Cut::Tag(look.plate))))
+        .when(base && split > 0.0, |d| d.child(fringe(Cut::Tag(look.plate))))
         .child(
             canvas(
                 |_, _, _| (),
                 move |b, _, window, _| {
                     let (x0, y0, x1, y1) = (f32::from(b.left()), f32::from(b.top()), f32::from(b.right()), f32::from(b.bottom()));
-                    // Its marks (DONE's tick, the bracket ticks) are drawn with the
-                    // words: the glitch never carries them.
-                    if words {
-                        for p in theme::tag_marks(look.plate, x0, y0, x1, y1) {
-                            theme::fill_poly(window, &theme::offset(&p, theme::RING), rgb(ring_c));
-                            theme::fill_poly(window, &p, rgb(look.mark));
-                        }
-                    }
-                    if !shell {
-                        return;
-                    }
-                    let polys = theme::outline(Cut::Tag(look.plate), x0, y0, x1, y1);
-                    match theme::tag_inner(look.plate, x0, y0, x1, y1, 1.5) {
-                        Some(inner) => {
-                            theme::paint(window, &polys, Fill::solid(look.edge).ringed(ring_c));
-                            for p in inner {
-                                theme::fill_poly(window, &p, rgb(look.fill));
-                            }
-                        }
-                        None => theme::paint(window, &polys, fill),
+                    if base {
+                        tag_base_paint(window, &look, (x0, y0, x1, y1), fill, ring_c);
                     }
                     if look.trail {
                         for (p, lvl) in theme::trail(x1, y0, y1, step) {
                             theme::fill_poly(window, &p, rgb(shade[lvl as usize]));
                         }
+                    }
+                    // Its marks (DONE's tick, the bracket ticks), over it.
+                    for p in theme::tag_marks(look.plate, x0, y0, x1, y1) {
+                        theme::fill_poly(window, &theme::offset(&p, theme::RING), rgb(ring_c));
+                        theme::fill_poly(window, &p, rgb(look.mark));
                     }
                 },
             )
@@ -5297,16 +5280,95 @@ fn tag_ring(pal: Pal, a: &TagArt, wide: Option<(f32, f32)>, split: f32, part: Pa
     clip(plate, row.h(px(25.0)))
 }
 
+/// A tag's base, as laid out: its outline's ring, edge and fill.
+fn tag_base_paint(window: &mut Window, look: &theme::Look, (x0, y0, x1, y1): (f32, f32, f32, f32), fill: Fill, ring_c: u32) {
+    let polys = theme::outline(Cut::Tag(look.plate), x0, y0, x1, y1);
+    match theme::tag_inner(look.plate, x0, y0, x1, y1, 1.5) {
+        Some(inner) => {
+            theme::paint(window, &polys, Fill::solid(look.edge).ringed(ring_c));
+            for p in inner {
+                theme::fill_poly(window, &p, rgb(look.fill));
+            }
+        }
+        None => theme::paint(window, &polys, fill),
+    }
+}
+
+/// How a tag's base is drawn: its cut, fill, edge, edge width; None when it can't morph (the
+/// split plate, a dashed edge).
+fn base_of(pal: Pal, a: &TagArt) -> Option<(Cut, u32, u32, f32)> {
+    match &a.badge {
+        Some(_) => Some((Cut::Unread, pal.panel, pal.accent, 2.0)),
+        None if a.look.plate == Plate::Split || a.look.dash.is_some() => None,
+        None => Some((Cut::Tag(a.look.plate), a.look.fill, a.look.edge, 1.5)),
+    }
+}
+
+/// A tag's base (opaque, never faded): `to`'s, or `from`'s outline and colours morphing into
+/// `to`'s at `q` (0..1); `split`: its border's RGB split, px. It fills its box (bottom-aligned
+/// by the caller).
+fn tag_base(pal: Pal, from: Option<TagArt>, to: TagArt, q: f32, split: f32) -> impl IntoElement {
+    canvas(
+        |_, _, _| (),
+        move |b, _, window, _| {
+            let (x0, y0, x1, y1) = (f32::from(b.left()), f32::from(b.top()), f32::from(b.right()), f32::from(b.bottom()));
+            let one = |a: &TagArt| base_of(pal, a).map(|(cut, f, e, w)| (theme::outline(cut, x0, y0, x1, y1), f, e, w));
+            let pair = from.as_ref().filter(|_| q < 1.0).map(|f| (one(f), one(&to)));
+            let (polys, fill, edge, width) = match pair {
+                // Both single outlines: one morphing into the other, colours mixing.
+                Some((Some((pa, fa, ea, wa)), Some((pb, fb, eb, wb)))) if pa.len() == 1 && pb.len() == 1 => {
+                    (vec![theme::morph(&pa[0], &pb[0], q)], theme::mix(fa, fb, q), theme::mix(ea, eb, q), wa + (wb - wa) * q)
+                }
+                // Else whichever is nearer, as laid out.
+                _ => {
+                    let a = match &from {
+                        Some(f) if q < 0.5 => f,
+                        _ => &to,
+                    };
+                    let Some((p, f, e, w)) = one(a) else {
+                        if split > 0.0 {
+                            fringe_paint(window, &theme::outline(Cut::Tag(a.look.plate), x0, y0, x1, y1), split);
+                        }
+                        let fill = Fill::framed(a.look.fill, a.look.edge, 1.5).dashed(a.look.dash).ringed(pal.ring);
+                        tag_base_paint(window, &a.look, (x0, y0, x1, y1), fill, pal.ring);
+                        return;
+                    };
+                    (p, f, e, w)
+                }
+            };
+            if split > 0.0 {
+                fringe_paint(window, &polys, split);
+            }
+            theme::paint(window, &polys, Fill::framed(fill, edge, width).ringed(pal.ring));
+        },
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
+}
+
+/// A glitch's RGB split behind an outline: cyan and pink copies `split` px either side, clear of
+/// its dark ring.
+fn fringe_paint(window: &mut Window, polys: &[Vec<theme::Pt>], split: f32) {
+    let d = split + theme::RING;
+    for (dx, c) in [(-d, fx::CYAN), (d, fx::PINK)] {
+        for p in polys {
+            theme::fill_poly(window, &p.iter().map(|&(x, y)| (x + dx, y)).collect::<Vec<_>>(), rgb(c));
+        }
+    }
+}
+
 /// Where she is, for the tag's pinned height: her window's origin, placement, sitting.
 type TagPinKey = ((i32, i32), std::mem::Discriminant<Placement>, bool);
 
-/// What of the tag to draw: all of it, its shell (plate, block, marks) or its words (type,
-/// glyphs, the chevron). The glitch only ever touches the shell.
+/// What of the tag to draw: all of it, or all but its base (for the HUD's motion, which draws
+/// the base itself, opaque, and fades only what is on it).
 #[derive(Clone, Copy, PartialEq)]
 enum Part {
     All,
-    Shell,
-    Words,
+    /// All but its base (the outline's ring, edge and fill): what fades over an opaque base.
+    Fore,
 }
 
 /// What the tag shows, compared without its level meter (a voice level isn't a change).
@@ -5429,6 +5491,22 @@ fn panel_bg(g: PanelGeom, split: f32, (panel_c, frame_c, frame_w, ring_c, sliver
             for p in g.slivers() {
                 theme::fill_poly(window, &p, rgb(sliver_c));
             }
+        },
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
+}
+
+/// An opaque outline morphing from `a` into `b` at `q` (0..1), its fill, edge and edge width
+/// mixing; ringed.
+fn morph_bg(a: Vec<theme::Pt>, (fa, ea, wa): (u32, u32, f32), b: Vec<theme::Pt>, (fb, eb, wb): (u32, u32, f32), q: f32, ring: u32) -> impl IntoElement {
+    canvas(
+        |_, _, _| (),
+        move |_, _, window, _| {
+            let p = theme::morph(&a, &b, q);
+            theme::paint(window, &[p], Fill::framed(theme::mix(fa, fb, q), theme::mix(ea, eb, q), wa + (wb - wa) * q).ringed(ring));
         },
     )
     .absolute()
@@ -6265,9 +6343,9 @@ impl Render for Avatar {
                 }
             }
             // The HUD's motion, drawn at the laid-out box (the holder below lays the newest out
-            // unseen; gone, where it was last): the plates at their easing width, the old one
-            // under the new as they cross, each with its words over it, centred and clean; all
-            // at the tag's level as it comes or goes. Never an empty plate.
+            // unseen; gone, where it was last): one opaque plate at its easing width, its outline
+            // morphing from the old content's, and over it the old words crossing into the new,
+            // centred and clean. Never an empty plate, never a faded one.
             let mut by_fx = live && !torn && self.tag_fx.busy(now);
             if live
                 && !torn
@@ -6282,27 +6360,26 @@ impl Render for Avatar {
                 if by_fx || (aw - bw).abs() > 0.5 {
                     by_fx = true;
                     let (x0, bottom) = (bx + (bw - aw) * 0.5, by + bh);
-                    let layer = |a: &TagArt, nat: f32, part: Part, split: f32, level: f32| -> Div {
+                    let fore = |a: &TagArt, nat: f32, level: f32| -> Div {
                         let h = a.h();
-                        div().absolute().left(px(x0)).top(px(bottom - h)).w(px(aw)).h(px(h)).opacity(level).child(tag_ring(pal, a, Some((aw, nat)), split, part))
+                        div().absolute().left(px(x0)).top(px(bottom - h)).w(px(aw)).h(px(h)).opacity(level).child(tag_ring(pal, a, Some((aw, nat)), 0.0, Part::Fore))
                     };
-                    let prev = tf.prev.map(|(p, w, words, plate)| (art_of(p), w, words, plate));
-                    let (cur_nat, a) = (tf.nat, tf.alpha);
-                    if let Some((pa, pw, _, pp)) = &prev
-                        && *pp > 0.0
-                    {
-                        root = root.child(layer(pa, *pw, Part::Shell, 0.0, pp * a));
-                    }
-                    if tf.plate > 0.0 {
-                        root = root.child(layer(&art, cur_nat, Part::Shell, tf.split, tf.plate * a));
-                    }
-                    if let Some((pa, pw, pwords, _)) = &prev
+                    let prev = tf.prev.map(|(p, w, words)| (art_of(p), w, words));
+                    // The base: opaque, its outline and colours morphing from the old content's.
+                    let q = tf.shape;
+                    let bh_now = prev.as_ref().map_or(art.h(), |(pa, _, _)| pa.h() + (art.h() - pa.h()) * q);
+                    root = root.child(
+                        div().absolute().left(px(x0)).top(px(bottom - bh_now)).w(px(aw)).h(px(bh_now)).child(tag_base(pal, prev.as_ref().map(|p| p.0.clone()), art.clone(), q, tf.split)),
+                    );
+                    // Over it, the old words crossing into the new (and, coming or going, at the
+                    // tag's level).
+                    if let Some((pa, pw, pwords)) = &prev
                         && *pwords > 0.0
                     {
-                        root = root.child(layer(pa, *pw, Part::Words, 0.0, pwords * a));
+                        root = root.child(fore(pa, *pw, pwords * tf.alpha));
                     }
-                    if tf.words > 0.0 {
-                        root = root.child(layer(&art, cur_nat, Part::Words, 0.0, tf.words * a));
+                    if tf.words * tf.alpha > 0.0 {
+                        root = root.child(fore(&art, tf.nat, tf.words * tf.alpha));
                     }
                 }
             }
@@ -6402,11 +6479,27 @@ impl Render for Avatar {
                     PanelGeom { x, y, w, h, ..sn.g }
                 };
                 let alpha = gh.alpha(now);
-                let (own, pill_words, pill_plate, shell) = if gh.to_pill { gh.pill(now) } else { (1.0, 0.0, 0.0, 1.0) };
-                if shell > 0.0 {
-                    root = root.child(
-                        div().absolute().top_0().left_0().size_full().opacity(shell * alpha).child(panel_bg(g, gh.split(now), (pal.panel, sn.frame_c, 2.0, pal.ring, pal.accent))),
-                    );
+                let (own, pill_words, q) = if gh.to_pill { gh.pill(now) } else { (1.0, 0.0, 0.0) };
+                let pa = art_of(&pill_show);
+                if gh.to_pill {
+                    // Opaque, its outline morphing into the pill's as its box eases there; its
+                    // slivers go with it.
+                    let (cut, fb, eb, wb) = base_of(pal, &pa).unwrap_or((Cut::Tag(pa.look.plate), pa.look.fill, pa.look.edge, 1.5));
+                    let to = theme::outline(cut, x, y, x + w, y + h).into_iter().next().unwrap_or_default();
+                    root = root.child(morph_bg(g.poly(), (pal.panel, sn.frame_c, 2.0), to, (fb, eb, wb), q, pal.ring));
+                    if q < 1.0 {
+                        let sl = g.slivers();
+                        root = root.child(
+                            canvas(|_, _, _| (), move |_, _, window, _| sl.iter().for_each(|p| theme::fill_poly(window, p, rgb(pal.accent))))
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .size_full()
+                                .opacity(1.0 - q),
+                        );
+                    }
+                } else {
+                    root = root.child(panel_bg(g, gh.split(now), (pal.panel, sn.frame_c, 2.0, pal.ring, pal.accent)));
                 }
                 // Its own words, where they were, inside its box as it goes.
                 if own > 0.0 {
@@ -6428,17 +6521,11 @@ impl Render for Avatar {
                     let inner = div().absolute().left(px(sn.g.x - x)).top(px(sn.g.y - y)).w(px(sn.g.w)).h(px(sn.g.h)).child(header).child(body);
                     root = root.child(div().absolute().left(px(x)).top(px(y)).w(px(w)).h(px(h)).overflow_hidden().opacity(own * alpha).child(inner));
                 }
-                // The pill it becomes: its words cross in at the box's centre, its plate takes
-                // over the shell on the way.
-                if gh.to_pill {
-                    let pa = art_of(&pill_show);
+                // The pill it becomes: its words cross in at the box's centre.
+                if gh.to_pill && pill_words > 0.0 {
                     let pw = gh.target().2;
                     let (pl, pt) = (x + (w - pw) * 0.5, y + (h - pa.h()) * 0.5);
-                    for (part, level) in [(Part::Shell, pill_plate), (Part::Words, pill_words)] {
-                        if level > 0.0 {
-                            root = root.child(div().absolute().left(px(pl)).top(px(pt)).w(px(pw)).h(px(pa.h())).opacity(level).child(tag_ring(pal, &pa, Some((pw, pw)), 0.0, part)));
-                        }
-                    }
+                    root = root.child(div().absolute().left(px(pl)).top(px(pt)).w(px(pw)).h(px(pa.h())).opacity(pill_words).child(tag_ring(pal, &pa, Some((pw, pw)), 0.0, Part::Fore)));
                 }
             }
         }
@@ -6767,14 +6854,12 @@ impl Render for Avatar {
             root = root.child(bg);
             // Out of the pill: the pill's words (and its plate) at the box's centre, crossing
             // into the bubble's.
-            if let (Some((pw_level, pp_level)), Some((pw, _))) = (pf.pill, pill_before.or(self.pill_open_from)) {
+            if let (Some(level), Some((pw, _))) = (pf.pill, pill_before.or(self.pill_open_from)) {
                 self.pill_open_from = Some((pw, 25.0));
                 let pa = art_of(&pill_show);
                 let (pl, pt) = (g.x + (g.w - pw) * 0.5, g.y + (g.h - pa.h()) * 0.5);
-                for (part, level) in [(Part::Shell, pp_level), (Part::Words, pw_level)] {
-                    if level > 0.0 {
-                        root = root.child(div().absolute().left(px(pl)).top(px(pt)).w(px(pw)).h(px(pa.h())).opacity(level).child(tag_ring(pal, &pa, Some((pw, pw)), 0.0, part)));
-                    }
+                if level > 0.0 {
+                    root = root.child(div().absolute().left(px(pl)).top(px(pt)).w(px(pw)).h(px(pa.h())).opacity(level).child(tag_ring(pal, &pa, Some((pw, pw)), 0.0, Part::Fore)));
                 }
             } else if pf.pill.is_none() {
                 self.pill_open_from = None;
