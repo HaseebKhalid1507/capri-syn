@@ -8161,6 +8161,8 @@ mod menu_edge_tests {
 
     /// x, y, w, h (device px).
     type R = (i32, i32, i32, i32);
+    /// A rect in float px.
+    type F4 = (f32, f32, f32, f32);
 
     struct Desk {
         name: &'static str,
@@ -8199,7 +8201,7 @@ mod menu_edge_tests {
 
     /// As `render` places it: the ranges on her monitor and work area, the picture dropped
     /// where it doesn't fit, under the click. The menu's rect, root device px.
-    fn place(desk: &Desk, o: (i32, i32), sf: f32, click: (f32, f32)) -> ((f32, f32, f32, f32), R, (f32, f32), f32) {
+    fn place(desk: &Desk, o: (i32, i32), sf: f32, click: (f32, f32)) -> (F4, R, (f32, f32), f32) {
         let (ww, wh) = ((WIN.0 * sf).round() as i32, (WIN.1 * sf).round() as i32);
         let c = (o.0 + ((BODY.0 + BODY.2 / 2.0) * sf) as i32, o.1 + ((BODY.1 + BODY.3 / 2.0) * sf) as i32);
         let i = desk.monitors.iter().position(|m| c.0 >= m.0 && c.0 < m.0 + m.2 && c.1 >= m.1 && c.1 < m.1 + m.3).unwrap_or(0);
@@ -8214,7 +8216,7 @@ mod menu_edge_tests {
         ((o.0 as f32 + p.0 * sf, o.1 as f32 + p.1 * sf, MENU_W * sf, h * sf), a, p, h)
     }
 
-    fn inside(menu: (f32, f32, f32, f32), area: R, o: (i32, i32), sf: f32) -> bool {
+    fn inside(menu: F4, area: R, o: (i32, i32), sf: f32) -> bool {
         let (ww, wh) = (WIN.0 * sf, WIN.1 * sf);
         let (x0, y0) = ((area.0 as f32).max(o.0 as f32), (area.1 as f32).max(o.1 as f32));
         let (x1, y1) = (((area.0 + area.2) as f32).min(o.0 as f32 + ww), ((area.1 + area.3) as f32).min(o.1 as f32 + wh));
@@ -8365,9 +8367,11 @@ mod bubble_layout_tests {
         out
     }
 
-    /// The bubble laid out as `render` does for a reply: (lines shown, the panel's text width,
-    /// its rect, rows, the bubble).
-    fn lay(raw: &str, span: (f32, f32), top: f32, bottom: f32) -> (Vec<String>, f32, (f32, f32, f32, f32), usize, Bubble) {
+    /// Lines shown, the panel's text width, its rect, rows, the bubble.
+    type Laid = (Vec<String>, f32, (f32, f32, f32, f32), usize, Bubble);
+
+    /// The bubble laid out as `render` does for a reply.
+    fn lay(raw: &str, span: (f32, f32), top: f32, bottom: f32) -> Laid {
         let text: Vec<char> = crate::session::clean(raw).chars().collect();
         let tb = text_box_for(span);
         let wrap = wrap_lines(&text, tb, Some(&chip_w), |p| breaks(p, tb), width);
