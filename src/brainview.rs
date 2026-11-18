@@ -3194,6 +3194,7 @@ impl Avatar {
                 self.rag_strength = crate::ragdoll::Strength(s.ragdoll.strength);
                 self.mirror_cfg = s.mirror.clone();
                 self.intro.cfg = s.intro.clone();
+                self.hud_cfg = s.hud.clone();
                 if self.voice.cfg != s.voice {
                     self.voice.cfg = s.voice.clone();
                     self.voice_config();
