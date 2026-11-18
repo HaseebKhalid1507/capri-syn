@@ -673,14 +673,23 @@ impl Avatar {
         b.collapsed = true;
         if was_open && b.stream && !b.text.is_empty() {
             b.hide_at = None;
-            let text = b.text.clone();
-            self.reply_missed(&text);
+            let (turn, text) = (b.turn, b.text.clone());
+            self.reply_missed(turn, &text);
         }
     }
 
-    /// The bubble's hold ran out: if he never saw this reply, it leaves a strip.
-    pub(super) fn reply_missed(&mut self, text: &[char]) {
-        let turn = self.session.as_ref().and_then(|s| s.shown.as_ref()).map_or(0, |b| b.turn);
+    /// The bubble is replaced or dropped (a new turn, her own words): a reply still open in it
+    /// (cut off, its hold not out yet; or down only while she is carried) leaves a strip as its
+    /// hold running out would have (#68). Already behind the chip, it had its chance.
+    pub(super) fn bubble_gone(&mut self) {
+        let carried_open = self.rag_hides_bubble();
+        if let Some((turn, text)) = self.bubble.as_ref().and_then(|b| b.open_reply(carried_open)) {
+            self.reply_missed(turn, &text);
+        }
+    }
+
+    /// A reply's bubble went: if he never saw it (or heard it whole), it leaves a strip.
+    pub(super) fn reply_missed(&mut self, turn: u64, text: &[char]) {
         self.unseen.missed(turn, text, self.line.is_some());
     }
 
@@ -716,10 +725,105 @@ pub(super) fn copy_text(t: String, cx: &mut App) {
 
 #[cfg(test)]
 mod unseen_tests {
-    use super::{Unread, Unseen};
+    use super::{Bubble, Unread, Unseen};
 
     fn chars(s: &str) -> Vec<char> {
         s.chars().collect()
+    }
+
+    /// A session reply's bubble, open and typed out.
+    fn reply(turn: u64, text: &str) -> Bubble {
+        let text = chars(text);
+        Bubble {
+            shown: text.len(),
+            text,
+            per_tick: 2,
+            next_char: None,
+            hide_at: None,
+            wrap: None,
+            page: None,
+            raw: String::new(),
+            collapsed: false,
+            stream: true,
+            more: false,
+            width: 0.0,
+            serial: turn,
+            turn,
+            cap: super::LINES_PER_PAGE,
+        }
+    }
+
+    /// As `bubble_gone` does when the next reply's bubble replaces `old`.
+    fn replace(u: &mut Unseen, old: &Bubble, carried: bool, line_open: bool) {
+        if let Some((turn, text)) = old.open_reply(carried) {
+            u.missed(turn, &text, line_open);
+        }
+    }
+
+    #[test]
+    fn a_cut_reply_still_up_when_the_next_opens_leaves_its_strip() {
+        // #68: turn 2 was cut off (a tap, music, a restart: never heard whole); its bubble is
+        // still up when turn 3's opens. Turn 2 is on the strip, in its own words.
+        let mut u = Unseen::default();
+        let two = reply(2, "Turn two: the build is green.\nMore after.");
+        replace(&mut u, &two, false, false);
+        assert_eq!(u.shown(false), Some(&Unread { n: 1, text: "Turn two: the build is green.".into(), refused: false }));
+        // Turn 3 heard whole, its bubble out in turn: turn 2 stays, alone.
+        u.heard(3);
+        let three = reply(3, "Turn three.");
+        replace(&mut u, &three, false, false);
+        assert_eq!(u.shown(false).map(|s| (s.n, s.text.as_str())), Some((1, "Turn two: the build is green.")));
+    }
+
+    #[test]
+    fn a_reply_heard_seen_or_already_behind_the_chip_leaves_nothing_more() {
+        // Heard whole before the next came: read.
+        let mut u = Unseen::default();
+        u.heard(2);
+        replace(&mut u, &reply(2, "Heard."), false, false);
+        assert_eq!(u.strip, None);
+        // Seen (he sent the next message, the Line showed it).
+        let mut u = Unseen::default();
+        u.ack(Some(4));
+        replace(&mut u, &reply(4, "Seen."), false, false);
+        assert_eq!(u.strip, None);
+        // The Line open: he is reading it there.
+        let mut u = Unseen::default();
+        replace(&mut u, &reply(5, "In the Line."), false, true);
+        assert_eq!(u.strip, None);
+        // Behind the chip already (its hold ran out: counted then): not twice.
+        let mut u = Unseen::default();
+        let mut six = reply(6, "Six.");
+        u.missed(6, &six.text, false);
+        six.collapsed = true;
+        replace(&mut u, &six, false, false);
+        assert_eq!(u.shown(false).map(|s| s.n), Some(1));
+        // Her own words (`say`): never a strip.
+        let mut own = reply(0, "Hey. I'm Capri.");
+        own.stream = false;
+        assert_eq!(own.open_reply(false), None);
+    }
+
+    #[test]
+    fn a_reply_put_down_only_for_a_carry_still_counts() {
+        // Carried: the bubble is down for the ride, back at the landing. A new turn then is
+        // the same as one replacing it open.
+        let mut u = Unseen::default();
+        let mut two = reply(2, "Mid-air.");
+        two.collapsed = true;
+        replace(&mut u, &two, true, false);
+        assert_eq!(u.shown(false).map(|s| (s.n, s.text.as_str())), Some((1, "Mid-air.")));
+    }
+
+    #[test]
+    fn one_still_speaking_when_replaced_goes_once_it_is_heard_whole() {
+        // An event reply waits behind the one she is saying: turn 2's bubble gives way to
+        // turn 3's while turn 2 still plays. It goes on the strip; heard to its end, it goes.
+        let mut u = Unseen::default();
+        replace(&mut u, &reply(2, "Still talking."), false, false);
+        assert_eq!(u.shown(false).map(|s| s.n), Some(1));
+        u.heard(2);
+        assert_eq!(u.strip, None);
     }
 
     #[test]

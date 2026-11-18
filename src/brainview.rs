@@ -1145,7 +1145,12 @@ impl Avatar {
             self.wake_up("summon", now);
         }
         let emoting = !urgent && ((!matches!(plan.goal, Goal::Active { .. }) && self.anim.busy()) || self.waking(now));
-        if (moving || emoting) && self.press.is_none() && !self.quitting {
+        // Her menu open: he is choosing (Quit, maybe). Leaving his window and a summon (the two
+        // moves `busy` never holds) wait for it to go (a click, or its 8 s): the menu rode a
+        // drop-in off the screen's bottom, or a teleport took it away mid-aim. Other moves
+        // fail as busy, as ever.
+        let menu = self.menu.is_some() && matches!(plan.goal, Goal::Leave | Goal::Active { why: Why::Summon(_), .. });
+        if (moving || emoting || menu) && self.press.is_none() && !self.quitting {
             // Still landing from the last one: this one goes next (a sulk's far move after
             // the leave, a summon after a passive hop).
             if let Some(h) = &mut self.brain {
