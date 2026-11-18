@@ -1908,9 +1908,11 @@ pub mod tests {
         assert_eq!(ids(&a.perch), ["intro-landing-seat"]);
         // B2c: every motion is in, rate-capped, and the walk never outpaces its drawing.
         let m = &b.motions;
-        let (w, d, g, c) = (m.walk.as_ref().unwrap(), m.dance.as_ref().unwrap(), m.dangle.as_ref().unwrap(), m.click.as_ref().unwrap());
-        assert!((w.strip.as_str(), d.strip.as_str(), g.strip.as_str(), c.strip.as_str()) == ("walk", "dance", "dangle", "click"));
-        assert!(w.gap_ms >= 10_000 && d.gap_ms >= 300_000 && g.gap_ms >= 10_000 && c.gap_ms >= 150);
+        let (w, d, g) = (m.walk.as_ref().unwrap(), m.dance.as_ref().unwrap(), m.dangle.as_ref().unwrap());
+        assert!((w.strip.as_str(), d.strip.as_str(), g.strip.as_str()) == ("walk", "dance", "dangle"));
+        assert!(w.gap_ms >= 10_000 && d.gap_ms >= 300_000 && g.gap_ms >= 10_000);
+        // Haseeb 11-17: no click burst (the rings where you click her). The strip stays loadable.
+        assert!(m.click.is_none(), "no click burst");
         assert!(w.px_per_s <= 90.0 && w.min_px >= 60.0 && (0.0..=1.0).contains(&w.chance));
         assert!(d.ms[1] <= 120_000 && d.min_bpm >= 90.0, "a dance is a while, not the song");
         assert!((0.0..=1.0).contains(&g.chance), "the dangle is an A/B with the ragdoll");

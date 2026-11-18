@@ -1258,10 +1258,6 @@
       "chance": 0.5,
       "afterMs": 260,
       "gapMs": 20000
-    },
-    "click": {
-      "strip": "click",
-      "gapMs": 250
     }
   },
   "variants": {
