@@ -20,6 +20,21 @@ const TARGET_POLL_TILED: Duration = Duration::from_millis(500);
 const TARGET_POLL_BURST: Duration = Duration::from_millis(16);
 /// How long the burst rate lasts after the target was last seen moving.
 const TARGET_BURST_FOR: Duration = Duration::from_millis(600);
+/// `Caps::region_reshapes` under a compositor: her input region and her window's position
+/// never change within this of each other, so the compositor takes the two in different
+/// frames (a few frames at 60 Hz; it takes each X event in its next frame).
+pub const SETTLE: Duration = Duration::from_millis(60);
+
+/// What `SETTLE` holds back, and when each kind last went out.
+#[derive(Default)]
+struct Settle {
+    moved: Option<Instant>,
+    shaped: Option<Instant>,
+    /// The newest input region, waiting for her to hold still.
+    input: Option<Vec<ShapeRect>>,
+    /// The newest position, waiting out a region change.
+    pos: Option<(i32, i32)>,
+}
 
 /// What the watcher threads share with the core.
 struct Shared {
@@ -275,6 +290,8 @@ pub struct Os {
     hosts: RefCell<Vec<(WinId, Monitor)>>,
     /// She moved to another host: the view shows her in it (`take_host_change`).
     host_changed: Cell<Option<WinId>>,
+    /// Her input region and her moves kept apart (`Caps::region_reshapes`).
+    settle: RefCell<Settle>,
 }
 
 impl Os {
@@ -299,6 +316,7 @@ impl Os {
             body_size: Cell::new((0, 0)),
             hosts: RefCell::new(Vec::new()),
             host_changed: Cell::new(None),
+            settle: RefCell::new(Settle::default()),
         }
     }
 
@@ -399,6 +417,26 @@ impl Os {
 
     /// Body origin, root px; on another output's host when she crossed to it.
     pub fn move_to(&self, x: i32, y: i32) -> Result<()> {
+        {
+            let mut s = self.settle.borrow_mut();
+            let now = Instant::now();
+            // A jump (her new rect clear of the old one: a teleport's landing, a placed move)
+            // never waits: a picture of her left behind there is nothing she still overlaps,
+            // and waiting would show her landing where she was.
+            let (at, size) = (self.body_at.get(), self.body_size.get());
+            let jump = size.0 > 0 && size.1 > 0 && ((x - at.0).abs() >= size.0 || (y - at.1).abs() >= size.1);
+            if self.settling() && !jump && s.shaped.is_some_and(|t| now < t + SETTLE) {
+                // Right after a region change: out at `settle`.
+                s.pos = Some((x, y));
+                return Ok(());
+            }
+            s.pos = None;
+            s.moved = Some(now);
+        }
+        self.move_now(x, y)
+    }
+
+    fn move_now(&self, x: i32, y: i32) -> Result<()> {
         self.body_at.set((x, y));
         if let Some(h) = self.host_for(x, y)
             && h != self.stage.body()
@@ -426,7 +464,29 @@ impl Os {
     /// Input region = `input`; everything else clicks through. The visible region is the
     /// mode's: all of the window when a compositor blends her alpha, else `visible`, so no
     /// black box shows. Each `None` stays as it is.
+    ///
+    /// Under a compositor that takes a region change for a resize (`Caps::region_reshapes`),
+    /// the input region waits while she moves: it goes out once she has held still for
+    /// `SETTLE` (`Os::settle`), a newer one replacing it meanwhile.
     pub fn set_shapes(&self, input: Option<&[ShapeRect]>, visible: Option<&[ShapeRect]>) -> Result<()> {
+        let input = match input {
+            Some(r) => {
+                let mut s = self.settle.borrow_mut();
+                let now = Instant::now();
+                if self.settling() && (s.pos.is_some() || s.moved.is_some_and(|t| now < t + SETTLE)) {
+                    s.input = Some(r.to_vec());
+                    None
+                } else {
+                    s.input = None;
+                    s.shaped = Some(now);
+                    Some(r)
+                }
+            }
+            None => None,
+        };
+        if input.is_none() && visible.is_none() {
+            return Ok(());
+        }
         let visible = visible.map(|v| {
             if self.composited() {
                 Visible::All
@@ -437,6 +497,51 @@ impl Os {
             }
         });
         self.stage.set_shapes(input, visible)
+    }
+
+    /// Her input region and her moves are kept apart: under a compositor that takes a region
+    /// change for a resize (`Caps::region_reshapes`: picom then cross-fades her from a stale
+    /// snapshot of herself until she holds still). Elsewhere both go out at once.
+    pub fn settling(&self) -> bool {
+        self.caps.region_reshapes && self.composited()
+    }
+
+    /// When what `SETTLE` holds back is due (`settle`).
+    pub fn settle_due(&self) -> Option<Instant> {
+        let s = self.settle.borrow();
+        match (s.pos, &s.input) {
+            (Some(_), _) => Some(s.shaped.map_or_else(Instant::now, |t| t + SETTLE)),
+            (None, Some(_)) => Some(s.moved.map_or_else(Instant::now, |t| t + SETTLE)),
+            (None, None) => None,
+        }
+    }
+
+    /// Send what `SETTLE` held back once its wait is over: a move first (it never waits
+    /// longer than `SETTLE` after a region change), then the region once she has held still.
+    /// Out of that mode (no compositor), all of it at once.
+    pub fn settle(&self) -> Result<()> {
+        let now = Instant::now();
+        let settling = self.settling();
+        let (pos, input) = {
+            let mut s = self.settle.borrow_mut();
+            let pos = if !settling || s.shaped.is_none_or(|t| now >= t + SETTLE) { s.pos.take() } else { None };
+            if pos.is_some() {
+                s.moved = Some(now);
+            }
+            let still = s.pos.is_none() && pos.is_none() && s.moved.is_none_or(|t| now >= t + SETTLE);
+            let input = if !settling || still { s.input.take() } else { None };
+            if input.is_some() {
+                s.shaped = Some(now);
+            }
+            (pos, input)
+        };
+        if let Some((x, y)) = pos {
+            self.move_now(x, y)?;
+        }
+        if let Some(r) = input {
+            self.stage.set_shapes(Some(&r), None)?;
+        }
+        Ok(())
     }
 
     /// Another surface's input region = `input`; visible: all of it under a compositor, else

@@ -2318,6 +2318,7 @@ impl Avatar {
             }
         };
         take(self.anim.deadline());
+        take(self.os.settle_due());
         // A frame before each cut of her frames: a render that lays the next drawing
         // underneath (the look-ahead), so the cut's new outline never shows pixels the window
         // hasn't drawn (r43: a held wave frame cut to the next showed the SLEEPING tag of
@@ -2486,6 +2487,9 @@ impl Avatar {
     fn tick(&mut self, cx: &mut Context<Self>) {
         let now = Instant::now();
         self.view_ticks += 1;
+        // An input region or a move held apart from the other (`Os::settle`), first: a move
+        // this tick then waits out a region sent now.
+        self.os.settle().ok();
 
         if self.sliver.is_some_and(|t| now.saturating_duration_since(t) > SLIVER) {
             self.sliver = None;
@@ -4263,6 +4267,10 @@ impl Avatar {
         if pos != self.applied {
             self.moves += 1;
             self.os.move_to(pos.0, pos.1).ok();
+            // Held right after a region change (`Os::settle`): a wake when it may go out.
+            if let Some(t) = self.os.settle_due() {
+                self.ticker.wake_by(t);
+            }
             self.applied = pos;
             if ragview::atomic_log() {
                 elog!("atomic move {:.6} {},{}", ragview::mono_s(), pos.0, pos.1);
@@ -7548,6 +7556,7 @@ impl Render for Avatar {
         // Last: hearts, then the X input/bounding shape for exactly what this frame draws.
         let (ax, ay) = (l.avatar_x as i16, l.avatar_y as i16);
         let os = self.os.clone();
+        let ticker = self.ticker.clone();
         let last = self.last_shape.clone();
         let hist = self.shape_hist.clone();
         let first = self.first_frame.clone();
@@ -7743,6 +7752,10 @@ impl Render for Avatar {
                     let (di, dv) = (last.0 != input, last.1 != visible);
                     if di || dv {
                         os.set_shapes(di.then_some(&input[..]), dv.then_some(&visible[..])).ok();
+                        // Held while she moves (`Os::settle`): a wake when it may go out.
+                        if let Some(t) = os.settle_due() {
+                            ticker.wake_by(t);
+                        }
                         if dv {
                             let mut h = hist.borrow_mut();
                             h.swap(0, 1);

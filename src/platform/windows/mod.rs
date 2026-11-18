@@ -589,6 +589,7 @@ impl Desktop for Win32 {
             layout_events: false,
             host_per_output: false,
             keyboard_on_input: true,
+            region_reshapes: false,
         }
     }
 

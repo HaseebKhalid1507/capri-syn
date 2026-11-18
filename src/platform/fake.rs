@@ -338,7 +338,7 @@ fn fake(target_events: bool) -> (Os, FakeDriver) {
 /// `keyboard_on_input`: the keyboard comes only on his input (Windows' rule).
 fn fake_with(target_events: bool, keyboard_on_input: bool) -> (Os, FakeDriver) {
     let world = World { root: (1600, 1000), monitors: vec![Monitor { primary: true, x: 0, y: 0, w: 1600, h: 1000 }], next: 100, ..World::default() };
-    let caps = Caps { shape_mode: true, target_events, fx_layers: true, costly_redraw: false, implicit_grab: true, goal_geometry: false, layout_events: false, host_per_output: false, keyboard_on_input };
+    let caps = Caps { shape_mode: true, target_events, fx_layers: true, costly_redraw: false, implicit_grab: true, goal_geometry: false, layout_events: false, host_per_output: false, keyboard_on_input, region_reshapes: true };
     let f = Arc::new(Fake { world: Mutex::new(world), hint: Mutex::new(None), session: Mutex::new(None), caps });
     (Os::new(Arc::new(FakeDesktop(f.clone())), Box::new(FakeStage(f.clone()))), FakeDriver(f))
 }
@@ -347,7 +347,7 @@ fn fake_with(target_events: bool, keyboard_on_input: bool) -> (Os, FakeDriver) {
 fn contract_fake_with_target_events() {
     let (os, mut d) = fake(true);
     let passed = contract::block_on(contract::run(&os, &mut d)).unwrap();
-    assert_eq!(passed.len(), 13);
+    assert_eq!(passed.len(), 14);
 }
 
 #[test]
@@ -380,7 +380,7 @@ fn contract_fake_polled_target() {
 fn contract_fake_keyboard_on_his_input() {
     let (os, mut d) = fake_with(true, true);
     let passed = contract::block_on(contract::run(&os, &mut d)).unwrap();
-    assert_eq!(passed.len(), 13);
+    assert_eq!(passed.len(), 14);
     // Nothing of his since the keyboard went back: none to take.
     assert!(!os.may_take_keyboard());
     assert!(os.grab_keyboard(os.body()).is_err());
@@ -411,6 +411,57 @@ fn caches_hold_and_freeze() {
     os.freeze_layout(true);
     assert_eq!(os.work_areas().len(), 2, "stale areas: freezing takes a fresh snapshot");
     os.freeze_layout(false);
+}
+
+/// A turn while he drags her, under picom (an X desktop that takes a region change for a
+/// resize, `Caps::region_reshapes`): her input region waits while she moves, and a move right
+/// after a region change waits out `SETTLE`, so the compositor never takes both in one frame (it
+/// then cross-faded her from a snapshot of herself facing the old way until she held still).
+/// Without a compositor (her shape is what shows) both go out at once.
+#[test]
+fn input_region_and_moves_never_meet_under_a_compositor() {
+    use std::time::Duration;
+    let (os, d) = fake(true);
+    os.set_body_size(BODY_SIZE.0, BODY_SIZE.1);
+    let settled = || {
+        std::thread::sleep(super::os::SETTLE + Duration::from_millis(5));
+        os.settle().unwrap();
+    };
+    // One lock per look (the world's mutex isn't reentrant).
+    let got = || {
+        let w = d.0.w();
+        (w.body_at, w.input.clone())
+    };
+    os.force_composited(Some(true));
+    assert!(os.settling(), "an X desktop under a compositor");
+    os.move_to(100, 100).unwrap();
+    os.set_shapes(Some(&[(1, 2, 3, 4)]), None).unwrap();
+    assert_eq!(got(), ((100, 100), vec![]), "the move out, the region held");
+    assert!(os.settle_due().is_some());
+    os.set_shapes(Some(&[(5, 6, 7, 8)]), None).unwrap();
+    os.move_to(104, 100).unwrap();
+    assert_eq!(got().1, vec![], "still moving: still held");
+    settled();
+    assert_eq!(got().1, vec![(5, 6, 7, 8)], "the newest region, once she held still");
+    os.move_to(110, 100).unwrap();
+    assert_eq!(got().0, (104, 100), "a move right after a region change waits");
+    os.move_to(112, 100).unwrap();
+    settled();
+    assert_eq!(got().0, (112, 100), "the newest position, once due");
+    assert!(os.settle_due().is_none());
+    // A jump (a teleport's landing) never waits, even right after a region change.
+    settled();
+    os.set_shapes(Some(&[(1, 1, 1, 1)]), None).unwrap();
+    os.move_to(112 + BODY_SIZE.0, 100).unwrap();
+    assert_eq!(got(), ((112 + BODY_SIZE.0, 100), vec![(1, 1, 1, 1)]), "a jump goes out at once");
+    // Shape mode: no compositor to fool, and her shape must follow every frame.
+    os.force_composited(Some(false));
+    assert!(!os.settling());
+    os.move_to(120, 100).unwrap();
+    os.set_shapes(Some(&[(9, 9, 9, 9)]), None).unwrap();
+    os.move_to(124, 100).unwrap();
+    assert_eq!(got(), ((124, 100), vec![(9, 9, 9, 9)]), "both at once");
+    assert!(os.settle_due().is_none());
 }
 
 /// Where effect layers show, on a backend with surfaces for them: on those surfaces without a

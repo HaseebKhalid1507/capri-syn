@@ -172,6 +172,13 @@ pub struct Caps {
     /// shows it waiting for him (`Stage::keyboard_granted`); she never takes the keyboard from
     /// the window he works in.
     pub keyboard_on_input: bool,
+    /// A change of her input region reaches the compositor as a change of her window's shape
+    /// (X SHAPE: a ShapeNotify, of whatever kind), which picom takes for a resize: with a move
+    /// of her window in the same compositor frame, its move animation starts from a snapshot of
+    /// her pixels from before the change and blends it in until she holds still (a translucent
+    /// copy of her facing the old way through a drag after a turn). The core never lets the two
+    /// meet (`Os::settle`).
+    pub region_reshapes: bool,
 }
 
 /// How the compositor animates a window to a new rect (`Caps::goal_geometry`): how long, and

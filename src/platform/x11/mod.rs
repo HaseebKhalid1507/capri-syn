@@ -330,7 +330,7 @@ impl X11 {
 
 impl Desktop for X11 {
     fn caps(&self) -> Caps {
-        Caps { shape_mode: true, target_events: true, fx_layers: true, costly_redraw: false, implicit_grab: true, goal_geometry: false, layout_events: false, host_per_output: false, keyboard_on_input: false }
+        Caps { shape_mode: true, target_events: true, fx_layers: true, costly_redraw: false, implicit_grab: true, goal_geometry: false, layout_events: false, host_per_output: false, keyboard_on_input: false, region_reshapes: true }
     }
 
     fn root_size(&self) -> (i32, i32) {
