@@ -19,7 +19,7 @@ param()
 
 # All of it runs in a module of its own: `irm | iex` runs a script in the caller's scope, and this
 # leaves nothing there (no variables, functions or preferences). A cut-off download doesn't parse
-# (the module's closing brace is the last line), so it never runs half. Not indented, for diffs.
+# (the module's last line closes it), so it never runs half. Not indented, for diffs.
 New-Module -Name capri-install -ReturnResult -ErrorAction Stop -ArgumentList (, [string[]]$args) -ScriptBlock {
 param([string[]]$CliArgs)
 Export-ModuleMember -Function @()
@@ -480,16 +480,27 @@ function Install-Binary {
     Build-FromSource
 }
 
-function Find-VCTools {
+function Find-VCTools([switch]$AnyVS) {
     $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
     if (-not (Test-Path $vswhere)) { return $null }
-    $p = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+    # -AnyVS: a Visual Studio (Build Tools or an edition) with or without the C++ tools.
+    $req = if ($AnyVS) { @() } else { @('-requires', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64') }
+    $p = & $vswhere -latest -products * @req -property installationPath
     if ($p) { return [string]$p } else { return $null }
 }
 
 function Build-FromSource {
     $src = Get-Source $script:Ref
-    if (-not (Find-VCTools)) {
+    $vs = if (Find-VCTools) { $null } else { Find-VCTools -AnyVS }
+    if ($vs) {
+        # winget can't add a workload to a Visual Studio that's there (it says "installed" and stops):
+        # its own installer does, and that's his call (admin, ~2 GB).
+        $vsi = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\setup.exe'
+        Write-Info "Visual Studio is here ($vs) without its C++ build tools, which Rust on Windows links with. Add them"
+        Write-Info "in the Visual Studio Installer (Modify, then 'Desktop development with C++'), or as admin:"
+        Write-Info "  $(Format-Command @($vsi, 'modify', '--installPath', $vs, '--add', 'Microsoft.VisualStudio.Workload.VCTools', '--includeRecommended', '--passive'))"
+        if ($script:Dry) { Write-Info '(a real run stops here)' } else { Stop-Install 'then run this again' }
+    } elseif (-not (Find-VCTools)) {
         $wg = @('install', '--id', 'Microsoft.VisualStudio.2022.BuildTools', '-e', '--accept-package-agreements', '--accept-source-agreements',
             '--override', '--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended')
         Write-Info "Rust on Windows links with Visual Studio's C++ build tools (not installed; ~3 GB, admin):"
@@ -499,7 +510,30 @@ function Build-FromSource {
             else { Stop-Install 'no winget: install the C++ build tools from https://visualstudio.microsoft.com/visual-cpp-build-tools/, then run this again' }
         }
         if (-not (Confirm-Action 'install them with winget (a UAC prompt)')) { Stop-Install 'run that (or this script with --yes), then run this again' }
-        Invoke-Native 'winget' $wg
+        Write-Action (Format-Command (@('winget') + $wg))
+        if (-not $script:Dry) {
+            $ErrorActionPreference = 'Continue'
+            & winget @wg
+            $rc = $LASTEXITCODE
+            # 0x8A15002B: Settings > Apps lists Build Tools with nothing newer to install, yet Visual
+            # Studio's installer has no record of it (an interrupted install). winget then installs
+            # nothing; --force runs it again, which works once its old folder is gone (VS won't install
+            # into a folder that isn't empty, and winget still says it succeeded).
+            if ($rc -eq -1978335189) {
+                $bt = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\2022\BuildTools'
+                if ((Test-Path -LiteralPath $bt) -and (Get-ChildItem -Force -LiteralPath $bt | Select-Object -First 1)) {
+                    Stop-Install "Visual Studio Build Tools 2022 is listed in Settings > Apps, but Visual Studio's installer has no record of it (an interrupted install), and its folder isn't empty, so it can't be installed again. As admin, delete $bt, then run this again"
+                }
+                Write-Info "winget lists it as installed, but it isn't there (an interrupted install): installing it again"
+                Write-Action (Format-Command (@('winget') + $wg + '--force'))
+                & winget @($wg + '--force')
+                $rc = $LASTEXITCODE
+            }
+            $ErrorActionPreference = 'Stop'
+            if ($rc) { Stop-Install "winget failed (exit $rc)" }
+            if (-not (Find-VCTools)) { Stop-Install "winget finished, but Visual Studio's C++ build tools still aren't there (the UAC prompt declined?): run this again, or install 'Desktop development with C++' from https://visualstudio.microsoft.com/visual-cpp-build-tools/" }
+            Write-Good "Visual Studio's C++ build tools"
+        }
     } else {
         Write-Good "Visual Studio's C++ build tools"
     }
@@ -1045,5 +1079,15 @@ function Invoke-CapriInstall([string[]]$ArgList) {
     }
 }
 
-Invoke-CapriInstall $CliArgs
+# A stop is said in red already (Stop-Install): no PowerShell error record after it. The module
+# can't exit its caller, so it hands a marker out (below).
+try { Invoke-CapriInstall $CliArgs }
+catch {
+    if ("$($_.Exception.Message)" -notlike 'install.ps1: *') { throw }
+    [char]0 + 'capri-install-stopped'
+}
+} | ForEach-Object {
+    # Run from a file (`-File`, `& .\install.ps1`): a stop is exit 1. Under `irm | iex` there's no
+    # file, and an exit would close his window: the red line says it.
+    if ("$_" -cne ([char]0 + 'capri-install-stopped')) { $_ } elseif ($PSCommandPath) { exit 1 }
 }
