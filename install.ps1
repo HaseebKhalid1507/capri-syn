@@ -568,9 +568,9 @@ function Build-FromSource {
         if ($script:Dry -or $LASTEXITCODE) { Invoke-Native $rustup @('toolchain', 'install') }
         $env:CARGO_TARGET_DIR = $target
         Write-Info 'building (release; the first build takes a while, later ones only what changed)'
-        $t0 = Get-Date
+        $t0 = [Diagnostics.Stopwatch]::StartNew()   # not the wall clock: a time sync can jump it
         Invoke-Native $cargo @('rustc', '--locked', '--release', '--bin', 'synaps-avatar', '--', '-C', 'link-arg=/SUBSYSTEM:WINDOWS', '-C', 'link-arg=/ENTRY:mainCRTStartup')
-        if (-not $script:Dry) { Write-Good "built in $([int]((Get-Date) - $t0).TotalMinutes) min" }
+        if (-not $script:Dry) { Write-Good "built in $([Math]::Max(1, [int]$t0.Elapsed.TotalMinutes)) min" }
     } finally {
         if (-not $script:Dry) { Pop-Location }
         Remove-Item Env:\CARGO_TARGET_DIR -ErrorAction SilentlyContinue
