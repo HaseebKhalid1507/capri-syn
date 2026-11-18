@@ -786,8 +786,9 @@ pub struct Avatar {
     panel_last_snap: Option<GhostSnap>,
     /// Bubbles made: each reply's own number (a new one in an open bubble pulses).
     bubble_serial: u64,
-    /// The tag's resting hair line while she stays put (her place, the lowest-reaching row).
-    tag_pin: Cell<Option<(TagPinKey, i32)>>,
+    /// The tag's resting hair line and column while she stays put (her place, the
+    /// lowest-reaching row, her head's x).
+    tag_pin: Cell<Option<(TagPinKey, i32, i32)>>,
     /// The pill's size as last shown (the bubble opens out of it).
     pill_last: Option<(f32, f32)>,
     /// `SA_HUD_PROF`: each frame's main-thread time while the HUD moves, and whether this
@@ -5328,13 +5329,21 @@ impl Render for Avatar {
         }
         let top_l = (l.avatar_y + base_top) as f32 / sf;
         let head_l = (l.avatar_x + head_x) as f32 / sf;
+        // The tag's column, pinned while she stays put: a mood's resting pose (THINKING's head
+        // a few px over) doesn't shift it; a real move of her head (24 px) does.
+        let pin_key = (self.origin, std::mem::discriminant(&self.placement), self.sitting());
+        let tag_x = match self.tag_pin.get() {
+            Some((k, _, x)) if k == pin_key && (x - head_x).abs() < (24.0 * sf) as i32 => x,
+            _ => head_x,
+        };
+        let tag_l = (l.avatar_x + tag_x) as f32 / sf;
         // The status tag sits just clear of the hair under the tag itself (this frame and
         // the resting one), not of the whole silhouette.
         let tag_hair = {
             // Sampled as wide as a usual label at least: the plate doesn't rise or sink with
             // its own text's width.
             let tw = self.tag_w.get().max(TAG_HAIR_W);
-            let (c0, c1) = (((head_l - tw / 2.0) * sf) as i32 - l.avatar_x - 4, ((head_l + tw / 2.0) * sf) as i32 - l.avatar_x + 4);
+            let (c0, c1) = (((tag_l - tw / 2.0) * sf) as i32 - l.avatar_x - 4, ((tag_l + tw / 2.0) * sf) as i32 - l.avatar_x + 4);
             // Clear of the hair under it facing either way (the profile mirrors by reversal):
             // its height doesn't change on a turn either.
             let both = self.mirror_cfg.drag || self.mirror_cfg.own;
@@ -5351,13 +5360,12 @@ impl Render for Avatar {
             };
             // Pinned while she stays put: a mood's resting pose (THINKING's chin rest) never
             // lowers it; a moving frame (an arm up) may still lift it for a moment.
-            let key = (self.origin, std::mem::discriminant(&self.placement), self.sitting());
             let base = match (self.tag_pin.get(), under(raw_base)) {
-                (Some((k, p)), b) if k == key => Some(b.map_or(p, |b| b.min(p))),
+                (Some((k, p, _)), b) if k == pin_key => Some(b.map_or(p, |b| b.min(p))),
                 (_, b) => b,
             };
             if let Some(b) = base {
-                self.tag_pin.set(Some((key, b)));
+                self.tag_pin.set(Some((pin_key, b, tag_x)));
             }
             base.into_iter().chain(under(raw_frame)).min().unwrap_or(base_top)
         };
@@ -6092,10 +6100,18 @@ impl Render for Avatar {
                         canvas(
                             |_, _, _| (),
                             move |b, _, window, _| {
+                                let (x0, y0, x1, y1) = (f32::from(b.left()), f32::from(b.top()), f32::from(b.right()), f32::from(b.bottom()));
+                                // Its marks (DONE's tick, the bracket ticks) are drawn with the
+                                // words: the glitch never carries them.
+                                if words {
+                                    for p in theme::tag_marks(look.plate, x0, y0, x1, y1) {
+                                        theme::fill_poly(window, &theme::offset(&p, theme::RING), rgb(ring_c));
+                                        theme::fill_poly(window, &p, rgb(look.mark));
+                                    }
+                                }
                                 if !shell {
                                     return;
                                 }
-                                let (x0, y0, x1, y1) = (f32::from(b.left()), f32::from(b.top()), f32::from(b.right()), f32::from(b.bottom()));
                                 let polys = theme::outline(Cut::Tag(look.plate), x0, y0, x1, y1);
                                 match theme::tag_inner(look.plate, x0, y0, x1, y1, 1.5) {
                                     Some(inner) => {
@@ -6110,10 +6126,6 @@ impl Render for Avatar {
                                     for (p, lvl) in theme::trail(x1, y0, y1, step) {
                                         theme::fill_poly(window, &p, rgb(shade[lvl as usize]));
                                     }
-                                }
-                                for p in theme::tag_marks(look.plate, x0, y0, x1, y1) {
-                                    theme::fill_poly(window, &theme::offset(&p, theme::RING), rgb(ring_c));
-                                    theme::fill_poly(window, &p, rgb(look.mark));
                                 }
                             },
                         )
@@ -6261,7 +6273,7 @@ impl Render for Avatar {
                     );
                 }
                 row = row.child(ring);
-                let centre = head_l + nudge;
+                let centre = tag_l + nudge;
                 // Asleep, the plate sits a little lower.
                 let tag_bottom = (l.avatar_y + tag_hair) as f32 / sf - TAG_GAP + look.drop;
                 let mut holder = div()

@@ -26,18 +26,19 @@ pub const TEXT_OUT_MS: f32 = 90.0;
 pub const CLOSE_TEXT_MS: f32 = 50.0;
 /// Words coming back once their box has settled.
 pub const TEXT_IN_MS: f32 = 80.0;
-/// The emptied bubble shrinking to `CLOSE_SCALE` before its exit glitch.
-pub const SHRINK_MS: f32 = 140.0;
+/// The emptied bubble shrinking to `CLOSE_SCALE`; its exit glitch takes the last frame.
+pub const SHRINK_MS: f32 = 110.0;
 /// The emptied bubble easing into the pill.
 pub const PILL_MS: f32 = 180.0;
-/// Words come in once a size ease is this far (past its overshoot's rise).
-pub const SETTLED: f32 = 0.7;
+/// Words come in once a size ease is this far: the box is most of the way (the curve is
+/// front-loaded), the rest is too small to read as a move.
+pub const SETTLED: f32 = 0.45;
 /// A tag label shows at least this long; changes meanwhile wait, and only the latest shows.
 pub const DWELL_MS: f32 = 350.0;
 /// At most one glitch per element this often.
 pub const GAP_MS: f32 = 600.0;
 pub const OPEN_SCALE: f32 = 0.85;
-pub const CLOSE_SCALE: f32 = 0.9;
+pub const CLOSE_SCALE: f32 = 0.85;
 /// The widest sideways shift of a shell band: the tag's, the bubble's (px).
 pub const TAG_SHIFT: f32 = 6.0;
 pub const PANEL_SHIFT: f32 = 8.0;
@@ -516,7 +517,8 @@ impl<S> Ghost<S> {
         let to = pill.unwrap_or((pivot.0 - (pivot.0 - from.0) * s, pivot.1 - (pivot.1 - from.1) * s, from.2 * s, from.3 * s));
         let words = if pill.is_some() { TEXT_OUT_MS } else { CLOSE_TEXT_MS };
         let move_ms = if pill.is_some() { PILL_MS } else { SHRINK_MS };
-        let at = now + std::time::Duration::from_secs_f32((words + move_ms) / 1000.0);
+        // The glitch takes its last frame with it: no empty hold before it goes.
+        let at = now + std::time::Duration::from_secs_f32((words + move_ms - STEP_MS) / 1000.0);
         let exit = (glitch && pill.is_none()).then(|| Glitch::new(at, seed(salt)));
         Ghost { snap, t0: now, from, to, to_pill: pill.is_some(), exit }
     }
@@ -771,9 +773,9 @@ mod tests {
         assert!(g.glitch(at(t0, 100)).is_none(), "into the pill: no exit glitch (the pill's own takes over)");
         let c = Ghost::new((), (0.0, 0.0, 400.0, 200.0), None, (200.0, 216.0), t0, true, 1);
         assert!(c.words(at(t0, 50)) <= 0.01, "closing: the words are gone by +50 ms");
-        assert!(c.glitch(at(t0, 100)).is_none() && c.glitch(at(t0, 195)).is_some(), "the exit glitch after the shrink");
-        assert!(!c.done(at(t0, 200)) && c.done(at(t0, 260)));
-        let r = c.rect(at(t0, 191));
+        assert!(c.glitch(at(t0, 100)).is_none() && c.glitch(at(t0, 130)).is_some(), "the exit glitch on the shrink's last frame");
+        assert!(!c.done(at(t0, 180)) && c.done(at(t0, 195)), "gone by ~190 ms, no empty hold");
+        let r = c.rect(at(t0, 161));
         assert!((r.2 - 400.0 * CLOSE_SCALE).abs() < 0.5 && (r.1 + r.3 - (216.0 - (216.0 - 200.0) * CLOSE_SCALE)).abs() < 0.5);
     }
 }
