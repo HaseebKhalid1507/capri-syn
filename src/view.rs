@@ -6213,7 +6213,10 @@ impl Render for Avatar {
         let hud_motion = alpha && self.hud_cfg.motion;
         let hud_glitch = alpha && self.hud_cfg.glitch && self.rag.is_none();
         let pill_before = self.pill_last.take();
-        let ghost_wait = self.ghost.as_ref().is_some_and(|g| !g.tag_ready(now));
+        // A bubble closing this frame (its ghost starts below) or still closing: the tag waits
+        // for it, unseen (else it would come and go under the ghost).
+        let closing = mode.is_none() && self.panel_last_snap.is_some() && hud && hud_motion && self.line.is_none();
+        let ghost_wait = closing || self.ghost.as_ref().is_some_and(|g| !g.tag_ready(now));
         // Collapsing into the pill, it lands: the pill was drawn on the way, it shows at once.
         let pill_landing = self.ghost.as_ref().is_some_and(|g| g.to_pill && g.tag_ready(now));
         let status = Status { label: label.clone(), tone, invert, glyph: glyph_kind.clone(), plate: plate_kind, key: tone_key.clone() };
@@ -6221,7 +6224,7 @@ impl Render for Avatar {
         // The pill as it would show (the bubble opens out of it, or collapses into it).
         let pill_show = TagShow { st: status, unread: self.unread_shown().cloned(), collapsed: true };
         let tag_next = pending.clone().filter(|_| !ghost_wait);
-        let tag_quiet = bubble_open || !tag_hud || swap_hold || self.rag.is_some() || !hud_motion || pill_landing;
+        let tag_quiet = bubble_open || !tag_hud || swap_hold || self.rag.is_some() || !hud_motion || pill_landing || ghost_wait;
         self.tag_fx.observe(tag_next, now, hud_glitch && !torn, tag_quiet);
         let tag_shown = self.tag_fx.frame(now).cur.cloned();
         // What a tag shows, drawn: its look this frame (the beat: NEEDS YOU's bone plate turns

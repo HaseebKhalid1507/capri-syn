@@ -512,7 +512,6 @@ pub fn trail(x1: f32, y0: f32, y1: f32, step: u64) -> Vec<(Vec<Pt>, u8)> {
         .collect()
 }
 
-/// `pts` grown outward by `d` (inward if negative), mitred.
 /// One outline easing into another (`k` 0..1): both walked from their top-left corner the same
 /// way round and sampled at every corner of either (plus an even spread), so it is exactly `a`
 /// at 0 and exactly `b` at 1, with no corner rounded off on the way.
@@ -568,6 +567,7 @@ fn at_fraction(p: &[Pt], f: &[f32], t: f32) -> Pt {
     (a.0 + (b.0 - a.0) * u, a.1 + (b.1 - a.1) * u)
 }
 
+/// `pts` grown outward by `d` (inward if negative), mitred.
 pub fn offset(pts: &[Pt], d: f32) -> Vec<Pt> {
     let n = pts.len();
     if n < 3 || d == 0.0 {

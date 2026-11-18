@@ -15,8 +15,9 @@ use std::time::{Duration, Instant};
 
 /// One glitch step: one present at 60 Hz.
 pub const STEP_MS: f32 = 1000.0 / 60.0;
-/// A glitch: two frames, on the border only.
-pub const GLITCH_MS: f32 = 2.0 * STEP_MS;
+/// A glitch: two frames, on the border only (its steps end between frames: a paint a hair
+/// early never makes a third).
+pub const GLITCH_MS: f32 = 1.5 * STEP_MS;
 /// The border's RGB split on a glitch's first step, px (half on its second).
 pub const SPLIT: f32 = 2.0;
 /// A size change: the bubble growing or shrinking to its content, the tag's width.
@@ -159,7 +160,7 @@ impl Glitch {
             return 0.0;
         }
         match ms(now, self.t0) {
-            t if t < STEP_MS => SPLIT,
+            t if t < 0.5 * STEP_MS => SPLIT,
             t if t < GLITCH_MS => SPLIT * 0.5,
             _ => 0.0,
         }
