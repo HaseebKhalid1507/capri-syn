@@ -5,6 +5,8 @@ have said and when.
 
   config            -> ready (features: unprompted)
   say id text       -> say-start now, say-end after FAKE_WORD_MS (default 60) per word
+                       (FAKE_CAP_S: an unprompted turn as capri-voice's gate: a first sentence over it plays
+                       that long and ends {"cut": true}; a later one past it is say-skipped "reply cap")
   drop id           -> that turn's queued sentences dropped (its playing one cut)
   hush              -> hushed (queued sentences dropped)
   listen-start      -> mic-open      listen-stop -> mic-closed, heard (FAKE_HEARD, default below)
@@ -30,9 +32,11 @@ import json, os, socket, sys, threading, time
 
 SOCK = sys.argv[1] if len(sys.argv) > 1 else "/tmp/sa-fake/v.sock"
 WORD = float(os.environ.get("FAKE_WORD_MS", "60")) / 1000.0
+CAP = float(os.environ.get("FAKE_CAP_S", "0"))   # 0: no cap (an older sidecar)
+spent = {}          # unprompted turn id -> seconds of it played
 HEARD = os.environ.get("FAKE_HEARD", "what's spike doing right now")
 lock = threading.Condition()
-queue = []          # (gen, id, text)
+queue = []          # (gen, id, text, unprompted)
 dropped = set()
 gen = [0]
 conn = [None]
@@ -68,17 +72,30 @@ def player():
         with lock:
             while not queue:
                 lock.wait()
-            g, sid, text = queue.pop(0)
+            g, sid, text, unprompted = queue.pop(0)
             if g != gen[0] or sid in dropped:
                 continue
         dur = max(0.2, WORD * len(text.split()))
+        trimmed = False
+        if CAP and unprompted:
+            if sid in spent and spent[sid] + dur > CAP:
+                emit(ev="say-skipped", id=sid, why="reply cap")
+                log(ev="say-skipped", id=sid, why="reply cap")
+                continue
+            if sid not in spent and dur > CAP:
+                dur, trimmed = CAP, True
+            spent[sid] = spent.get(sid, 0.0) + dur
         emit(ev="say-start", id=sid, text=text, dur_ms=round(dur * 1000), step_ms=90, shapes=[1, 2, 3, 2, 1, 0])
         log(ev="say-start", id=sid, text=text)
         time.sleep(dur)
         with lock:
             if g != gen[0] or sid in dropped:
                 continue
-        emit(ev="say-end", id=sid)
+        if trimmed:
+            emit(ev="say-end", id=sid, cut=True)
+            log(ev="say-end", id=sid, cut=True, why="trimmed to the cap")
+        else:
+            emit(ev="say-end", id=sid)
 
 
 def handle(m):
@@ -88,7 +105,7 @@ def handle(m):
         emit(ev="ready", cfg=m, features=["unprompted"])
     elif op == "say":
         with lock:
-            queue.append((gen[0], m.get("id", 0), m.get("text", "")))
+            queue.append((gen[0], m.get("id", 0), m.get("text", ""), bool(m.get("unprompted"))))
             lock.notify_all()
     elif op == "drop":
         with lock:
