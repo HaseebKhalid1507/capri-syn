@@ -3,10 +3,11 @@
 //! (`blend`) and one set of durations, for every size change, swap, open and close.
 //!
 //! Nothing is ever an empty shell, and a shell is never faded (its layers would show through
-//! each other). A plate or bubble stays opaque and full of words while it reshapes: its outline
-//! morphs into the new one (`theme::morph`) as its colours mix, the old words crossfade into
-//! the new over it (both clean, never sliced), the box easing from wherever it is: a growing
-//! box leads its new words, a shrinking one waits for the old words to go. The glitch is an
+//! each other). A plate or bubble stays opaque while it reshapes: its outline morphs into the
+//! new one (`theme::morph`) as its colours mix, the box easing from wherever it is: a growing
+//! box leads its new words, a shrinking one waits for the old words to go. A tag's label
+//! crossfades (one at a time, through `FLOOR`) while its plate's own block stays at half or
+//! more; a bubble's words go before the new ones come (`OUT_MS`, `IN_MS`), never over them. The glitch is an
 //! accent: an RGB split on the border for two frames while the content is there. A tag label holds at least `DWELL_MS`; a
 //! burst shows only the latest. Pure: the view samples it while something moves and asks for
 //! frames only then.
@@ -34,17 +35,28 @@ pub const SHRINK_LAG_MS: f32 = 90.0;
 /// width) and going (its words down to `FLOOR`, its plate settling in, then gone).
 pub const APPEAR_MS: f32 = 90.0;
 pub const EXIT_MS: f32 = 90.0;
-/// The lowest level words show at: a fade starts or ends here, never lingers below.
-pub const FLOOR: f32 = 0.4;
+/// The lowest level a tag's words show at: a fade starts or ends here, never lingers below.
+pub const FLOOR: f32 = 0.5;
+/// A bubble's words swapping (a new reply, out of or into the pill): one after the other,
+/// never over each other. The old are out by `OUT_MS` (held, then dropped), the new rise over
+/// `IN_MS` after them.
+pub const OUT_MS: f32 = 60.0;
+pub const IN_MS: f32 = 70.0;
 /// The bubble closing: its border glitches, it settles just inside its box, its words dim to
 /// `FLOOR` over its last `CLOSE_DIM_MS`, and it is gone.
 pub const CLOSE_MS: f32 = 120.0;
 pub const CLOSE_DIM_MS: f32 = 34.0;
-/// The bubble collapsing into the pill: its words cross into the pill's, and from the end of
-/// the crossing (`PILL_LAG_MS`: its own gone, the pill's rising) its box and outline ease into
-/// the pill's. No full-size box with only the pill's words in it.
-pub const PILL_LAG_MS: f32 = XFADE_MS * CROSS.1;
-pub const PILL_MS: f32 = 180.0;
+/// The bubble collapsing into the pill: its words go in two frames (`PILL_LAG_MS`) while its
+/// box holds (nothing cut by a moving edge); then its box and outline ease into the pill's,
+/// the pill's words rising at its centre, whole as it lands (the curve is 98 % there at
+/// `LANDS` of its time).
+pub const PILL_LAG_MS: f32 = 2.0 * STEP_MS;
+pub const PILL_MS: f32 = 170.0;
+/// The bubble opening out of the pill: quicker than from her (`OPEN_MS`); the pill's words
+/// stay at its centre until the growing shell covers the bubble's, which then come in.
+pub const PILL_OPEN_MS: f32 = 180.0;
+/// Where `ease` has all but landed (98 %), as a part of its time.
+pub const LANDS: f32 = 0.6;
 /// A tag label shows at least this long; changes meanwhile wait, and only the latest shows.
 pub const DWELL_MS: f32 = 350.0;
 /// At most one glitch per element this often.
@@ -80,27 +92,43 @@ pub fn blend(u: f32) -> f32 {
     u * u * (3.0 - 2.0 * u)
 }
 
-/// Where the crossfade's two sides cross (as parts of `XFADE_MS`): the old words hold, then
-/// drop to `FLOOR` before it (ease-in); the new jump from `FLOOR` after it (ease-out); inside
-/// it (12 ms: one frame at most) both pass between `FLOOR` and nothing. Never two labels at
-/// half over each other, and as few faint frames as that allows.
-const CROSS: (f32, f32) = (0.45, 0.55);
+/// Where a tag's label swaps (a part of `XFADE_MS`): the old words hold, then drop out by
+/// it; the new come up from it. One at a time, never two labels over each other; the frame
+/// either side of it is the only faint one.
+pub const SWAP: f32 = 0.5;
 
-/// The one crossfade at `u` (0..1 of `XFADE_MS`): the old words' level, the new words'.
+/// The one label swap at `u` (0..1 of `XFADE_MS`): the old words' level, the new words'.
 pub fn xfade(u: f32) -> (f32, f32) {
     let u = u.clamp(0.0, 1.0);
-    let (a, b) = CROSS;
-    if u <= a {
-        let v = u / a;
-        (1.0 - (1.0 - FLOOR) * v * v, 0.0)
-    } else if u < b {
-        let k = (u - a) / (b - a);
-        (FLOOR * (1.0 - k), FLOOR * k)
+    if u < SWAP {
+        (1.0 - (u / SWAP).powi(6), 0.0)
     } else {
-        let v = 1.0 - (u - b) / (1.0 - b);
-        (0.0, FLOOR + (1.0 - FLOOR) * (1.0 - v * v))
+        (0.0, 1.0 - (1.0 - (u - SWAP) / (1.0 - SWAP)).powi(6))
     }
 }
+
+/// Words going, one after the other: 1 → 0 over `d` ms from `t0` (held, then dropped).
+pub fn fade_out(t: f32, t0: f32, d: f32) -> f32 {
+    let v = ((t - t0) / d).clamp(0.0, 1.0);
+    1.0 - v * v
+}
+
+/// Words coming: 0 → 1 over `d` ms from `t0` (quick, then settled).
+pub fn fade_in(t: f32, t0: f32, d: f32) -> f32 {
+    let v = 1.0 - ((t - t0) / d).clamp(0.0, 1.0);
+    1.0 - v * v
+}
+
+/// A plate's own content (WORKING's red block) through a swap at `u`: the old's level, the
+/// new's. Each goes with its words: the old held whole until the swap (the plate never looks
+/// empty while its label dips), then out in two frames; the new up from the swap.
+pub fn plate_levels(u: f32) -> (f32, f32) {
+    let k = blend((u.clamp(0.0, 1.0) - SWAP) / BLOCK_U);
+    (1.0 - k, k)
+}
+
+/// A block's change after the swap, as a part of `XFADE_MS` (two frames).
+const BLOCK_U: f32 = 2.0 * STEP_MS / XFADE_MS;
 
 /// A value easing toward its target along `ease` (it may start later than now).
 #[derive(Clone, Copy, Debug)]
@@ -215,6 +243,8 @@ pub struct TagFrame<'a, T> {
     pub prev: Option<(&'a T, f32, f32)>,
     /// Its words' level as it comes or goes (the plate stays opaque).
     pub alpha: f32,
+    /// The plates' own content (a block): the old's level, the new's.
+    pub blocks: (f32, f32),
     /// The border's RGB split, px.
     pub split: f32,
 }
@@ -419,7 +449,12 @@ impl<T: Clone + PartialEq> TagFx<T> {
                 self.m0 = Some(now);
             }
         }
-        self.glitch = g;
+        // The border's two frames land on the label's swap (not ahead of it, on the old one).
+        let at = match (self.vis, self.x0) {
+            (Vis::Appear(_), _) | (_, None) => now,
+            (_, Some(x0)) => after(x0, XFADE_MS * SWAP - STEP_MS),
+        };
+        self.glitch = g.map(|_| Glitch { t0: at });
         self.width.at(now)
     }
 
@@ -430,11 +465,13 @@ impl<T: Clone + PartialEq> TagFx<T> {
 
     /// What to draw now.
     pub fn frame(&self, now: Instant) -> TagFrame<'_, T> {
-        let (old, new) = match (&self.prev, self.x0) {
-            (None, _) => (0.0, 1.0),
-            (Some(_), Some(x0)) if now >= x0 => xfade(ms(now, x0) / XFADE_MS),
-            (Some(_), _) => (1.0, 0.0),
+        let u = match (&self.prev, self.x0) {
+            (None, _) => 1.0,
+            (Some(_), Some(x0)) if now >= x0 => ms(now, x0) / XFADE_MS,
+            (Some(_), _) => 0.0,
         };
+        let (old, new) = if self.prev.is_some() { xfade(u) } else { (0.0, 1.0) };
+        let blocks = if self.prev.is_some() { plate_levels(u) } else { (0.0, 1.0) };
         let alpha = match self.vis {
             Vis::Steady => 1.0,
             Vis::Appear(None) => 0.0,
@@ -453,6 +490,7 @@ impl<T: Clone + PartialEq> TagFx<T> {
             nat: self.nat,
             prev: self.prev.as_ref().map(|(p, w)| (p, *w, old)),
             alpha,
+            blocks,
             split: self.glitch.map_or(0.0, |g| g.split(now)),
         }
     }
@@ -470,7 +508,8 @@ impl<T: Clone + PartialEq> TagFx<T> {
 }
 
 /// The bubble this frame: its shell's size, its content's (the box its words are laid out
-/// in: up to `INSET` past the shell while it opens, so nothing is cut), their levels.
+/// in: the one it is going to while it opens, its words where they will be, shown only inside
+/// the shell), their levels.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PanelFrame {
     pub shell: (f32, f32),
@@ -498,8 +537,9 @@ pub struct PanelFx {
     pub h: Tween,
     /// Opening: since when, and whether out of the pill.
     opened: Option<(Instant, bool)>,
-    /// Out of the pill: when its words cross into the bubble's (the box nearly there).
-    pill_x0: Option<Instant>,
+    /// Out of the pill: since when, and when (ms) its shell covers its words (the pill's go
+    /// just before, the bubble's come then).
+    pill_x0: Option<(Instant, f32)>,
     /// A new reply's crossfade start.
     x0: Option<Instant>,
     glitch: Option<Glitch>,
@@ -521,7 +561,7 @@ impl PanelFx {
         if self.glitch.is_some_and(|g| g.done(now)) {
             self.glitch = None;
         }
-        if self.x0.is_some_and(|x| ms(now, x) >= XFADE_MS) {
+        if self.x0.is_some_and(|x| ms(now, x) >= OUT_MS + IN_MS) {
             self.x0 = None;
         }
         if !self.open {
@@ -530,9 +570,21 @@ impl PanelFx {
             self.x0 = None;
             self.pill_x0 = None;
             let (w0, h0) = pill.unwrap_or(((w - 2.0 * INSET.0).max(w * 0.9), (h - INSET.1).max(h * 0.9)));
-            self.w = Tween::start(w0, w, now, OPEN_MS);
-            self.h = Tween::start(h0, h, now, OPEN_MS);
+            let d = if pill.is_some() { PILL_OPEN_MS } else { OPEN_MS };
+            self.w = Tween::start(w0, w, now, d);
+            self.h = Tween::start(h0, h, now, d);
             self.opened = Some((now, pill.is_some()));
+            // When the shell covers its words (inside its padding): the first such step of
+            // the curve.
+            let cover = (1..=100)
+                .map(|i| i as f32 / 100.0)
+                .find(|&u| {
+                    let k = ease(u);
+                    w - (w0 + (w - w0) * k) <= 2.0 * INSET.0 && h - (h0 + (h - h0) * k) <= INSET.1
+                })
+                .unwrap_or(1.0)
+                * d;
+            self.pill_x0 = pill.map(|_| (now, cover.max(OUT_MS)));
             self.glitch = self.throttle.take(now, glitch);
         } else {
             if serial != self.serial {
@@ -561,25 +613,25 @@ impl PanelFx {
             self.opened = None;
         }
         let shell = (self.w.at(now), self.h.at(now));
-        // Opening: the words sit in the box it is going to, at most `INSET` past the shell.
-        let content = match self.opened {
-            Some(_) => (shell.0 + (w - shell.0).clamp(0.0, 2.0 * INSET.0), shell.1 + (h - shell.1).clamp(0.0, INSET.1)),
-            None => shell,
+        // Opening: its words where they will be (the view shows them only inside the shell).
+        let content = if self.opened.is_some() { (w, h) } else { shell };
+        // Out of the pill: the pill's words go while the box is small, then the bubble's come
+        // as it lands.
+        let (pill_words, inner) = match self.pill_x0 {
+            Some((x, cover)) => {
+                let t = ms(now, x);
+                (fade_out(t, cover - 2.0 * STEP_MS, 2.0 * STEP_MS), fade_in(t, cover, IN_MS))
+            }
+            None => (0.0, 1.0),
         };
-        // Out of the pill: its words stay until the box is within `INSET` of its size.
-        let from_pill = self.opened.is_some_and(|(_, p)| p);
-        if from_pill && self.pill_x0.is_none() && (w - shell.0) <= 2.0 * INSET.0 + 0.5 && (h - shell.1) <= INSET.1 + 0.5 {
-            self.pill_x0 = Some(now);
-        }
-        let (pill_words, inner) = if from_pill || self.pill_x0.is_some_and(|x| ms(now, x) < XFADE_MS) {
-            self.pill_x0.map_or((1.0, 0.0), |x| xfade(ms(now, x) / XFADE_MS))
-        } else {
-            (0.0, 1.0)
-        };
-        let (old, words) = self.x0.map_or((0.0, 1.0), |x| xfade(ms(now, x) / XFADE_MS));
-        if self.pill_x0.is_some_and(|x| ms(now, x) >= XFADE_MS) && !from_pill {
+        if self.pill_x0.is_some_and(|(x, cover)| ms(now, x) >= cover + IN_MS) {
             self.pill_x0 = None;
         }
+        // A new reply: the old words go, then the new come.
+        let (old, words) = self.x0.map_or((0.0, 1.0), |x| {
+            let t = ms(now, x);
+            (fade_out(t, 0.0, OUT_MS), fade_in(t, OUT_MS, IN_MS))
+        });
         PanelFrame {
             shell,
             content,
@@ -687,8 +739,9 @@ impl<S> Ghost<S> {
     /// Into the pill: its own words' level, the pill's words', and how far its outline and
     /// colours are into the pill's (0..1).
     pub fn pill(&self, now: Instant) -> (f32, f32, f32) {
-        let (own, pill) = xfade(ms(now, self.t0) / XFADE_MS);
-        (own, pill, blend(self.u(now)))
+        let t = ms(now, self.t0);
+        let land = PILL_LAG_MS + PILL_MS * LANDS;
+        (fade_out(t, 0.0, PILL_LAG_MS), fade_in(t, PILL_LAG_MS, land - PILL_LAG_MS), ease(self.u(now)).min(1.0))
     }
 
     /// The border's RGB split, px.
@@ -725,8 +778,10 @@ mod tests {
         assert!(v[..=top].windows(2).all(|w| w[1] >= w[0]) && v[top..].windows(2).all(|w| w[1] <= w[0]), "one bump, no wobble");
         assert!(ease(0.2) > 0.5, "fast out");
         let low: Vec<f32> = (0..=1000).map(|i| i as f32 / 1000.0).filter(|&u| { let (o, n) = xfade(u); o.max(n) < FLOOR - 1e-4 }).collect();
-        assert!(low.is_empty() || (low[low.len() - 1] - low[0]) * XFADE_MS <= 12.5, "words under the floor for one frame at most");
-        assert!((0..=1000).all(|i| { let (o, n) = xfade(i as f32 / 1000.0); o.min(n) <= FLOOR + 1e-4 }), "never two labels over each other above the floor");
+        assert!(low.is_empty() || (low[low.len() - 1] - low[0]) * XFADE_MS <= 14.0, "words under the floor for one frame at most");
+        assert!((0..=1000).all(|i| { let (o, n) = xfade(i as f32 / 1000.0); o.min(n) == 0.0 }), "never two labels over each other");
+        assert!((0..=1000).all(|i| { let u = i as f32 / 1000.0; let (o, n) = plate_levels(u); (u > SWAP || o == 1.0 && n == 0.0) && o.max(n) >= 0.5 }), "the old block whole until the swap, the plate never under half");
+        assert_eq!(plate_levels(SWAP + BLOCK_U), (0.0, 1.0), "two frames after it, the new one's");
         assert_eq!(xfade(0.0), (1.0, 0.0));
         assert_eq!(xfade(1.0), (0.0, 1.0));
     }
@@ -792,7 +847,7 @@ mod tests {
         let mut low = 0;
         for &(t, _, cur, words, prev, alpha, _) in f.iter().filter(|f| f.0 >= 200) {
             let shown = words.max(prev.map_or(0.0, |p| p.1));
-            assert!(cur.is_some() && alpha >= 0.99 && words.min(prev.map_or(0.0, |p| p.1)) <= FLOOR + 1e-3, "one label at a time at {t} ms");
+            assert!(cur.is_some() && alpha >= 0.99 && words.min(prev.map_or(0.0, |p| p.1)) == 0.0, "one label at a time at {t} ms");
             low = if shown < FLOOR - 1e-3 { low + 1 } else { 0 };
             assert!(low <= 1, "words under the floor for more than a frame at {t} ms: {words} {prev:?}");
         }
@@ -808,7 +863,11 @@ mod tests {
         let g = f.iter().find(|f| f.0 >= 1000 && f.2 == Some("WORKING")).unwrap().0;
         let y = |ms: u64| f.iter().find(|f| f.0 >= g + ms).unwrap();
         assert!(y(48).3 < 0.05 && y(48).1 > 140.0, "the plate leads");
-        assert!(y(16).6 > 0.0, "the border glitches as it starts");
+        // Its two border frames land on the swap: the frame the new words show, or the one before.
+        let sw = f.iter().position(|f| f.0 >= g && f.3 > 0.0).unwrap();
+        assert!(f[sw - 1].6 > 0.0 || f[sw].6 > 0.0, "the border glitches at the swap");
+        let swap_t = f[sw].0;
+        assert!(f.iter().filter(|s| s.0 >= g && s.0 + 20 < swap_t).all(|s| s.6 == 0.0), "not ahead of it");
         let glitched = f.iter().filter(|f| f.6 > 0.0).count();
         assert!(glitched <= 3 * 3, "a glitch is two frames per change: {glitched} frames for 3");
     }
@@ -874,40 +933,47 @@ mod tests {
         assert!(f.split > 0.0);
         let f = p.open((400.0, 120.0), 1, None, at(t0, 300), true, true);
         assert_eq!((f.shell, f.content, f.split), ((400.0, 120.0), (400.0, 120.0), 0.0));
-        // A new, shorter reply: the words cross; the box waits for the old ones, then shrinks.
+        // A new, shorter reply: the old words go, then the new come (never over each other);
+        // the box waits for the old ones, then shrinks.
         let f = p.open((300.0, 80.0), 2, None, at(t0, 700), true, true);
         assert!(f.replaced && f.old == 1.0 && f.words == 0.0);
         let f = p.open((300.0, 80.0), 2, None, at(t0, 760), true, true);
         assert_eq!(f.shell, (400.0, 120.0), "holds while the old words go");
-        let (mut t, mut low) = (776, 0);
+        assert!(f.old == 0.0, "the old words are out by {OUT_MS} ms");
+        let mut t = 700;
         while t <= 1100 {
             let f = p.open((300.0, 80.0), 2, None, at(t0, t), true, true);
-            low = if f.words.max(f.old) < FLOOR - 1e-3 { low + 1 } else { 0 };
-            assert!(low <= 1 && f.words.min(f.old) <= FLOOR + 1e-3);
-            t += 16;
+            assert!(f.words.min(f.old) == 0.0, "never both at {t}: {} {}", f.old, f.words);
+            t += 8;
         }
         let f = p.open((300.0, 80.0), 2, None, at(t0, 1116), true, true);
         assert_eq!((f.shell, f.words, f.old), ((300.0, 80.0), 1.0, 0.0));
     }
 
     #[test]
-    fn out_of_the_pill_its_words_stay_until_the_box_is_nearly_there() {
+    fn out_of_the_pill_its_words_go_and_the_bubbles_land_with_it() {
         let t0 = Instant::now();
         let mut p = PanelFx::default();
         let mut t = 0;
-        let (mut crossed, mut low) = (false, 0);
+        let mut landed = None;
         while t <= 500 {
             let f = p.open((400.0, 150.0), 1, Some((110.0, 25.0)), at(t0, t), true, true);
             let pw = f.pill.unwrap_or(0.0);
-            low = if pw.max(f.inner) < FLOOR - 1e-3 { low + 1 } else { 0 };
-            assert!(low <= 1, "words show at {t}: pill {pw} live {}", f.inner);
+            assert!(pw.min(f.inner) == 0.0, "never both at {t}: pill {pw} live {}", f.inner);
             if f.inner > 0.0 {
-                crossed = true;
-                assert!(400.0 - f.shell.0 <= 2.0 * INSET.0 + 1.0 && 150.0 - f.shell.1 <= INSET.1 + 1.0, "the live words only in a box that holds them");
+                assert!(400.0 - f.shell.0 <= 2.0 * INSET.0 + 0.5 && 150.0 - f.shell.1 <= INSET.1 + 0.5, "its words only once the shell covers them, at {t}");
             }
-            t += 16;
+            if f.inner == 0.0 && f.shell.0 < 399.0 {
+                assert!(pw > 0.0 || 400.0 - f.shell.0 <= 60.0, "the pill's words while the box is far from there, at {t}");
+            }
+            if f.inner >= 1.0 && landed.is_none() {
+                landed = Some((t, f.shell));
+            }
+            t += 8;
         }
-        assert!(crossed && p.open((400.0, 150.0), 1, None, at(t0, 600), true, true).pill.is_none());
+        let (t, shell) = landed.expect("its words whole");
+        assert!(t <= 180 && 400.0 - shell.0 < 0.03 * 290.0, "whole as the box lands: {t} ms, {shell:?}");
+        assert!(p.open((400.0, 150.0), 1, None, at(t0, 600), true, true).pill.is_none());
     }
 
     #[test]
@@ -921,18 +987,22 @@ mod tests {
         assert!(!c.done(at(t0, 100)) && c.done(at(t0, 121)));
         let mut g = Ghost::new((), (0.0, 0.0, 400.0, 200.0), Some((140.0, 230.0, 120.0, 25.0)), t0, true);
         assert_eq!(g.split(t0), 0.0);
-        assert_eq!(g.rect(at(t0, 60)), (0.0, 0.0, 400.0, 200.0), "the box holds while the words cross");
-        assert!(g.rect(at(t0, 100)).2 < 395.0, "and moves as the pill's words come up");
-        for t in (0..=300).step_by(16) {
+        assert_eq!(g.rect(at(t0, PILL_LAG_MS as u64)), (0.0, 0.0, 400.0, 200.0), "the box holds while its words go");
+        assert_eq!(g.pill(at(t0, PILL_LAG_MS.ceil() as u64)).0, 0.0, "gone before it moves");
+        assert!(g.rect(at(t0, 60)).2 < 395.0, "then moves");
+        let land = (PILL_LAG_MS + PILL_MS * LANDS) as u64;
+        for t in (0..=300).step_by(4) {
             let (own, pill, q) = g.pill(at(t0, t));
-            assert!((own.max(pill) >= FLOOR - 1e-3 || (54..=66).contains(&t)) && (0.0..=1.0).contains(&q), "never empty at {t}");
-            if t >= PILL_LAG_MS as u64 {
-                assert!(own < 0.05, "its own words are gone before the box moves");
+            assert!(own.min(pill) == 0.0 && (0.0..=1.0).contains(&q), "one at a time at {t}");
+            if t >= land {
+                assert!(pill >= 0.999 && q >= 0.97, "the pill's words whole as the box lands, at {t}: {pill} {q}");
             }
         }
         g.retarget((150.0, 230.0, 100.0, 25.0), at(t0, 50));
-        assert!(!g.tag_ready(at(t0, 200)) && g.tag_ready(at(t0, 281)));
-        assert_eq!(g.rect(at(t0, 281)), (150.0, 230.0, 100.0, 25.0), "it ends at exactly the pill's box");
-        assert_eq!(g.pill(at(t0, 281)).2, 1.0, "and exactly the pill's outline");
+        // Retargeted at 50 ms (the pill measured): the rest of its move from there.
+        let end = 50 + (PILL_MS - (50.0 - PILL_LAG_MS)) as u64;
+        assert!(!g.tag_ready(at(t0, end - 10)) && g.tag_ready(at(t0, end + 1)));
+        assert_eq!(g.rect(at(t0, end + 1)), (150.0, 230.0, 100.0, 25.0), "it ends at exactly the pill's box");
+        assert_eq!(g.pill(at(t0, end + 1)).2, 1.0, "and exactly the pill's outline");
     }
 }

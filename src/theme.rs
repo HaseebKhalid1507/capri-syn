@@ -512,9 +512,11 @@ pub fn trail(x1: f32, y0: f32, y1: f32, step: u64) -> Vec<(Vec<Pt>, u8)> {
         .collect()
 }
 
-/// One outline easing into another (`k` 0..1): both walked from their top-left corner the same
-/// way round and sampled at every corner of either (plus an even spread), so it is exactly `a`
-/// at 0 and exactly `b` at 1, with no corner rounded off on the way.
+/// One outline easing into another (`k` 0..1). Both are cast from their common box's centre
+/// along the same rays (at every corner of either, plus an even spread), so it is exactly `a`
+/// at 0 and exactly `b` at 1, no corner rounded off, and an edge the two share (a plate's top
+/// and bottom) stays straight on the way. Collinear and coincident points are dropped, so its
+/// edge and fill (an inset of it) stay clean.
 pub fn morph(a: &[Pt], b: &[Pt], k: f32) -> Vec<Pt> {
     if k <= 0.0 || b.len() < 3 {
         return a.to_vec();
@@ -522,49 +524,87 @@ pub fn morph(a: &[Pt], b: &[Pt], k: f32) -> Vec<Pt> {
     if k >= 1.0 || a.len() < 3 {
         return b.to_vec();
     }
-    let (a, b) = (walk(a), walk(b));
-    let (ta, tb) = (fractions(&a), fractions(&b));
-    let mut ts: Vec<f32> = ta.iter().chain(&tb).copied().chain((0..32).map(|i| i as f32 / 32.0)).collect();
-    ts.sort_by(f32::total_cmp);
-    ts.dedup_by(|x, y| (*x - *y).abs() < 1e-4);
-    ts.iter()
-        .map(|&t| {
-            let (p, q) = (at_fraction(&a, &ta, t), at_fraction(&b, &tb, t));
-            (p.0 + (q.0 - p.0) * k, p.1 + (q.1 - p.1) * k)
+    let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for p in a.iter().chain(b) {
+        (x0, y0, x1, y1) = (x0.min(p.0), y0.min(p.1), x1.max(p.0), y1.max(p.1));
+    }
+    let c = ((x0 + x1) * 0.5, (y0 + y1) * 0.5);
+    let angle = |p: &Pt| (p.1 - c.1).atan2(p.0 - c.0);
+    let tau = std::f32::consts::TAU;
+    // (angle, a corner's): a corner's ray wins over an even one next to it.
+    let mut th: Vec<(f32, bool)> = a.iter().chain(b).map(|p| (angle(p), true)).chain((0..64).map(|i| (-std::f32::consts::PI + tau * i as f32 / 64.0, false))).collect();
+    th.sort_by(|x, y| x.0.total_cmp(&y.0).then(y.1.cmp(&x.1)));
+    th.dedup_by(|x, y| (x.0 - y.0).abs() < 1e-5);
+    let pts: Vec<(Pt, bool)> = th
+        .iter()
+        .filter_map(|&(t, corner)| {
+            let d = (t.cos(), t.sin());
+            let (p, q) = (cast(a, c, d)?, cast(b, c, d)?);
+            Some(((p.0 + (q.0 - p.0) * k, p.1 + (q.1 - p.1) * k), corner))
         })
-        .collect()
+        .collect();
+    simplify(pts)
 }
 
-/// A polygon clockwise on screen, starting at its top-left-most corner.
-fn walk(p: &[Pt]) -> Vec<Pt> {
-    let area: f32 = (0..p.len()).map(|i| {
-        let (a, b) = (p[i], p[(i + 1) % p.len()]);
-        a.0 * b.1 - b.0 * a.1
-    }).sum();
-    let mut v: Vec<Pt> = if area < 0.0 { p.iter().rev().copied().collect() } else { p.to_vec() };
-    let start = (0..v.len()).min_by(|&i, &j| (v[i].0 + v[i].1).total_cmp(&(v[j].0 + v[j].1))).unwrap_or(0);
-    v.rotate_left(start);
-    v
-}
-
-/// Each corner's place along the perimeter, 0..1.
-fn fractions(p: &[Pt]) -> Vec<f32> {
-    let mut acc = vec![0.0f32];
+/// Where a ray from `c` along `d` leaves the polygon (its farthest crossing).
+fn cast(p: &[Pt], c: Pt, d: Pt) -> Option<Pt> {
+    let mut best: Option<f32> = None;
     for i in 0..p.len() {
         let (a, b) = (p[i], p[(i + 1) % p.len()]);
-        acc.push(acc[i] + ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt());
+        let e = (b.0 - a.0, b.1 - a.1);
+        let den = d.0 * e.1 - d.1 * e.0;
+        if den.abs() < 1e-9 {
+            continue;
+        }
+        let w = (a.0 - c.0, a.1 - c.1);
+        let t = (w.0 * e.1 - w.1 * e.0) / den;
+        let u = (w.0 * d.1 - w.1 * d.0) / den;
+        if t > 0.0 && (-1e-4..=1.0 + 1e-4).contains(&u) {
+            best = Some(best.map_or(t, |b: f32| b.max(t)));
+        }
     }
-    let total = acc.pop().unwrap_or(1.0).max(1e-3);
-    acc.iter().map(|x| x / total).collect()
+    best.map(|t| (c.0 + d.0 * t, c.1 + d.1 * t))
 }
 
-/// The point `t` (0..1) along the perimeter.
-fn at_fraction(p: &[Pt], f: &[f32], t: f32) -> Pt {
-    let i = f.iter().rposition(|&x| x <= t).unwrap_or(0);
-    let (a, b) = (p[i], p[(i + 1) % p.len()]);
-    let (f0, f1) = (f[i], if i + 1 < f.len() { f[i + 1] } else { 1.0 });
-    let u = if f1 > f0 { (t - f0) / (f1 - f0) } else { 0.0 };
-    (a.0 + (b.0 - a.0) * u, a.1 + (b.1 - a.1) * u)
+/// Without points closer than a quarter pixel to the last kept, or on the line between their
+/// neighbours.
+fn simplify(p: Vec<(Pt, bool)>) -> Vec<Pt> {
+    let near = |a: Pt, b: Pt| (a.0 - b.0).hypot(a.1 - b.1) <= 0.25;
+    let mut w: Vec<(Pt, bool)> = Vec::with_capacity(p.len());
+    for q in p {
+        match w.last_mut() {
+            // Two on top of each other: a corner's is kept.
+            Some(l) if near(l.0, q.0) => {
+                if q.1 && !l.1 {
+                    *l = q;
+                }
+            }
+            _ => w.push(q),
+        }
+    }
+    while w.len() > 3 && near(w[0].0, w[w.len() - 1].0) {
+        let l = w.pop().expect("more than three");
+        if l.1 && !w[0].1 {
+            w[0] = l;
+        }
+    }
+    let mut v: Vec<Pt> = w.into_iter().map(|q| q.0).collect();
+    let mut changed = true;
+    while changed && v.len() > 3 {
+        changed = false;
+        let n = v.len();
+        for i in 0..n {
+            let (a, b, c) = (v[(i + n - 1) % n], v[i], v[(i + 1) % n]);
+            let cross = (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0);
+            let len = (c.0 - a.0).hypot(c.1 - a.1).max(1e-6);
+            if (cross / len).abs() < 0.02 {
+                v.remove(i);
+                changed = true;
+                break;
+            }
+        }
+    }
+    v
 }
 
 /// `pts` grown outward by `d` (inward if negative), mitred.
@@ -880,11 +920,17 @@ mod tests {
         let m0 = morph(&arrow, &square, 1e-6);
         assert!(arrow.iter().all(|&p| has(&m0, p)), "every corner of the start");
         let m1 = morph(&arrow, &square, 1.0 - 1e-6);
-        assert!(square.iter().all(|&p| has(&m1, p)), "every corner of the end");
+        assert!(square.iter().all(|&p| has(&m1, p)), "every corner of the end: {m1:?}");
         let mid = morph(&arrow, &square, 0.5);
         let (x0, x1) = mid.iter().fold((f32::MAX, f32::MIN), |a, p| (a.0.min(p.0), a.1.max(p.0)));
         assert!(x0 > 0.0 && x0 < 40.0 && x1 > 160.0 && x1 < 206.0, "between the two: {x0}..{x1}");
         assert!(mid.iter().all(|p| p.1 >= -1e-3 && p.1 <= 25.0 + 1e-3));
+        // Their shared top and bottom stay straight lines: no notch, nothing under the plate.
+        assert!(mid.iter().all(|p| !(p.0 > 45.0 && p.0 < 155.0) || p.1.abs() < 1e-3 || (p.1 - 25.0).abs() < 1e-3), "{mid:?}");
+        // Clean enough to inset: no two points on top of each other, no point on a straight run.
+        assert!(mid.len() <= 40, "{} points", mid.len());
+        let inset = offset(&mid, -1.5);
+        assert!(inset.iter().all(|p| p.1 > 1.0 && p.1 < 24.0), "an inset that stays inside: {inset:?}");
     }
 
     use super::{Cut, Pal, Plate, Pt, bubble, contrast, half_block, morph, offset, outline, tag_marks};
