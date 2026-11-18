@@ -152,7 +152,7 @@ value rejects the whole file (the previous values stay). `avatarctl settings rel
 | `[intro] cinematic` | `true` | the launch: her close-up over the desktop first (only with a pack built with `--mochi`), and the bolt back onto the window she sat on last time. `false`: the launch as before |
 | `[intro] cinematic_min_gap_min` | `10` | no close-up if she was running less than this many minutes ago (a crash or `systemctl restart` isn't a greeting) |
 | `[intro] cinematic_when` | `"every"` | `"every"` launch, or `"daily"`: the close-up on the first launch of the day only (`state.json` `introPlayedUnix`) |
-| `[hud] glitch` | `true` | her bubble and tag glitch as they open, close and change (bands, an RGB split, a red tear); `false`: no glitch (reduced motion) |
+| `[hud] glitch` | `true` | her bubble's and tag's frames glitch as they open, close and change (bands, an RGB split, a red tear; never their words); `false`: no glitch (reduced motion) |
 | `[hud] motion` | `true` | sizes ease: the bubble growing or shrinking to its reply, opening from her and closing into the pill, the tag's width; `false`: they change at once |
 | `[display] composited` | `"auto"` | `"auto"` (alpha while a compositor runs, the X shape otherwise), `"on"`, `"off"` |
 | `[music] detect` | `true` | headphones on while an MPRIS player is playing |
