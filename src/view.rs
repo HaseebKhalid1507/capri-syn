@@ -6374,9 +6374,12 @@ impl Render for Avatar {
                     // The base: opaque, its outline and colours morphing from the old content's.
                     let q = tf.shape;
                     let bh_now = prev.as_ref().map_or(art.h(), |(pa, _, _)| pa.h() + (art.h() - pa.h()) * q);
-                    root = root.child(
-                        div().absolute().left(px(x0)).top(px(bottom - bh_now)).w(px(aw)).h(px(bh_now)).child(tag_base(pal, prev.as_ref().map(|p| p.0.clone()), art.clone(), q, tf.split)),
-                    );
+                    // Not yet measured (coming): nothing, not an empty plate.
+                    if tf.alpha > 0.0 {
+                        root = root.child(
+                            div().absolute().left(px(x0)).top(px(bottom - bh_now)).w(px(aw)).h(px(bh_now)).child(tag_base(pal, prev.as_ref().map(|p| p.0.clone()), art.clone(), q, tf.split)),
+                        );
+                    }
                     // Over it, the old words crossing into the new (and, coming or going, at the
                     // tag's level).
                     if let Some((pa, pw, pwords)) = &prev
