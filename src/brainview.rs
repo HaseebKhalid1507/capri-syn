@@ -1453,7 +1453,7 @@ impl Avatar {
             h = h.min((top - a.y).max(0) as f32);
         }
         self.os.set_target(0);
-        self.arrive(to, place, now);
+        self.land(to, place, now);
         if let Some(hb) = &mut self.brain {
             hb.drop_in = Some((now, h, posed));
         }

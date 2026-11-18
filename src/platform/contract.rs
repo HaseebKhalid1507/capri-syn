@@ -462,7 +462,7 @@ async fn shapes<D: Driver>(os: &Os, d: &mut D, _rx: &Receiver<WatchEvent>) -> Re
 /// resize (`Os::settling`: picom cross-faded her from a stale snapshot of herself until she held
 /// still, a copy of her facing the old way through a drag after a turn): a region set while she
 /// moves waits until she has held still for `SETTLE`, a move right after a region change waits
-/// out the rest of it, and `Os::settle` sends each when due. Elsewhere both go out at once.
+/// out `GAP`, and `Os::settle` sends each when due (`settle.rs`). Elsewhere both go out at once.
 async fn region_and_moves<D: Driver>(os: &Os, d: &mut D, _rx: &Receiver<WatchEvent>) -> Result<()> {
     let b = d.body_rect().ok_or(anyhow!("no body"))?;
     let (left, right): (Vec<ShapeRect>, Vec<ShapeRect>) = (vec![(10, 20, 30, 40)], vec![(60, 20, 30, 40)]);
@@ -472,7 +472,7 @@ async fn region_and_moves<D: Driver>(os: &Os, d: &mut D, _rx: &Receiver<WatchEve
         let held = os.settling();
         os.set_shapes(Some(&left[..]), None)?;
         settled(os)?;
-        std::thread::sleep(super::os::SETTLE);
+        std::thread::sleep(super::settle::SETTLE);
         d.settle().await;
         // A move and a new region at once (a turn while he drags her): the move goes out, the
         // region waits for her to hold still.

@@ -657,8 +657,11 @@ pub struct Avatar {
     streak: (u32, Instant),
     /// Window position without the bob/hop offset.
     origin: (i32, i32),
-    /// Where the window really is (origin + offset).
+    /// Where the window was put (origin + offset): the last move asked for (under picom one
+    /// can wait a moment: `Os::shown_at` is where the window is).
     applied: (i32, i32),
+    /// The next move of her window is a landing: out at once (`Os::move_now`).
+    landing: bool,
     ticker: Ticker,
     _tick_loop: Task<()>,
     last_shape: Rc<RefCell<(Vec<ShapeRect>, Vec<ShapeRect>)>>,
@@ -983,6 +986,7 @@ impl Avatar {
             streak: (0, now),
             origin: init.origin,
             applied: init.origin,
+            landing: false,
             ticker,
             _tick_loop: tick_loop,
             last_shape: Rc::new(RefCell::new((vec![(0, 0, 1, 1)], vec![]))),
@@ -2488,7 +2492,9 @@ impl Avatar {
         let now = Instant::now();
         self.view_ticks += 1;
         // An input region or a move held apart from the other (`Os::settle`), first: a move
-        // this tick then waits out a region sent now.
+        // this tick then waits out a region sent now. A press lost on the way (no release
+        // came) holds her region no longer than the press itself.
+        self.os.set_pressed(self.press.is_some());
         self.os.settle().ok();
 
         if self.sliver.is_some_and(|t| now.saturating_duration_since(t) > SLIVER) {
@@ -2858,7 +2864,7 @@ impl Avatar {
         let (to, place, seed, no_bolt) = (tp.to, tp.place, tp.seed, tp.no_bolt);
         if no_bolt {
             // Vanished: appear there at once, the landing glitch reassembles her.
-            self.arrive(to, place, now);
+            self.land(to, place, now);
             self.hidden = false;
             self.glitch = Some(self.land_glitch(now, seed));
             self.arrive_appeared(now);
@@ -2920,7 +2926,7 @@ impl Avatar {
                 if let Some(tp) = &mut self.teleport {
                     tp.moved = true;
                 }
-                self.arrive(to, place, now);
+                self.land(to, place, now);
             }
             if self.drawn_touchdown(now) {
                 early = u >= fx::BOLT_ARRIVE;
@@ -2941,7 +2947,7 @@ impl Avatar {
                 if let Some(tp) = &mut self.teleport {
                     tp.moved = true;
                 }
-                self.arrive(to, place, now);
+                self.land(to, place, now);
             }
             self.arrive_appeared(now);
             redraw = true;
@@ -2974,12 +2980,19 @@ impl Avatar {
             if let Some(tp) = &mut self.teleport {
                 tp.moved = true;
             }
-            self.arrive(to, place, now);
+            self.land(to, place, now);
         }
         redraw
     }
 
     /// Land at the teleport target (window moved while the body is hidden).
+    /// `arrive` where she appears (a teleport's landing, a placed move, a drop-in): her window
+    /// goes there at once (`Os::move_now`), never held for her input region.
+    fn land(&mut self, to: (i32, i32), place: Placement, now: Instant) {
+        self.landing = true;
+        self.arrive(to, place, now);
+    }
+
     fn arrive(&mut self, to: (i32, i32), place: Placement, now: Instant) {
         let was_sitting = self.sitting();
         self.placement = place;
@@ -3062,7 +3075,7 @@ impl Avatar {
                     self.teleport = None;
                     self.hidden = false;
                     self.fx_hide_bolt();
-                    self.arrive(o, Placement::Ground, now);
+                    self.land(o, Placement::Ground, now);
                     state::save_ground(self.ground());
                 } else {
                     self.start_teleport(o, Placement::Ground, now);
@@ -4264,9 +4277,14 @@ impl Avatar {
         }
         let g = self.glide_offset(now);
         let pos = (self.origin.0 + g.0, self.origin.1 + g.1 - hop + self.drop_in_offset(now) + self.float_bob(now));
+        let landing = std::mem::take(&mut self.landing);
         if pos != self.applied {
             self.moves += 1;
-            self.os.move_to(pos.0, pos.1).ok();
+            if landing {
+                self.os.move_now(pos.0, pos.1).ok();
+            } else {
+                self.os.move_to(pos.0, pos.1).ok();
+            }
             // Held right after a region change (`Os::settle`): a wake when it may go out.
             if let Some(t) = self.os.settle_due() {
                 self.ticker.wake_by(t);
@@ -4723,6 +4741,9 @@ impl Avatar {
                 let now = Instant::now();
                 let caught = self.rag_catch(self.local(ev.position), now);
                 self.press = Some(Press { root, origin: self.origin, head, dragging: caught });
+                // Every pointer event is hers until the release (the implicit grab): her input
+                // region waits for it, so no drag move waits for a region (`Os::set_pressed`).
+                self.os.set_pressed(true);
                 if head {
                     self.dangle_want();
                 }
@@ -4762,9 +4783,10 @@ impl Avatar {
             return;
         }
         // Before the drag starts the window hasn't moved since the press: the event's
-        // position is exact.
+        // position is exact, from where the window is (a move asked for may be held).
         let sf = self.layout.sf;
-        let root = (self.applied.0 + (f32::from(ev.position.x) * sf) as i32, self.applied.1 + (f32::from(ev.position.y) * sf) as i32);
+        let at = self.os.shown_at();
+        let root = (at.0 + (f32::from(ev.position.x) * sf) as i32, at.1 + (f32::from(ev.position.y) * sf) as i32);
         let (dx, dy) = (root.0 - p.root.0, root.1 - p.root.1);
         if dx * dx + dy * dy < 25 {
             return;
@@ -4783,6 +4805,7 @@ impl Avatar {
             return;
         }
         let Some(p) = self.press.take() else { return };
+        self.os.set_pressed(false);
         let now = Instant::now();
         if p.dragging {
             if self.rag.as_ref().is_some_and(|r| matches!(r.feed, ragview::Feed::Real)) {

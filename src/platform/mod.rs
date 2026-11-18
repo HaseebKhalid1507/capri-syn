@@ -27,6 +27,7 @@ mod hypr;
 mod linux;
 mod os;
 pub mod pointer;
+mod settle;
 mod track;
 #[cfg(windows)]
 mod windows;
@@ -172,13 +173,6 @@ pub struct Caps {
     /// shows it waiting for him (`Stage::keyboard_granted`); she never takes the keyboard from
     /// the window he works in.
     pub keyboard_on_input: bool,
-    /// A change of her input region reaches the compositor as a change of her window's shape
-    /// (X SHAPE: a ShapeNotify, of whatever kind), which picom takes for a resize: with a move
-    /// of her window in the same compositor frame, its move animation starts from a snapshot of
-    /// her pixels from before the change and blends it in until she holds still (a translucent
-    /// copy of her facing the old way through a drag after a turn). The core never lets the two
-    /// meet (`Os::settle`).
-    pub region_reshapes: bool,
 }
 
 /// How the compositor animates a window to a new rect (`Caps::goal_geometry`): how long, and
@@ -239,10 +233,11 @@ pub enum Hint {
     Changed,
     /// Monitors or the areas panels reserve changed.
     Layout,
-    /// Whether a compositor runs now.
+    /// Whether a compositor runs now, and whether it takes a change of her window's shape
+    /// for a resize (`Desktop::compositor_reshapes`).
     // Not sent on Windows: DWM always composites.
     #[cfg_attr(windows, allow(dead_code))]
-    Compositor(bool),
+    Compositor { runs: bool, reshapes: bool },
 }
 
 /// What the watchers report to the view.
@@ -438,6 +433,14 @@ pub trait Desktop: Send + Sync {
     fn char_key_down(&self, ch: char) -> Result<bool>;
     /// A compositor runs (at connect; later changes come as `Hint::Compositor`).
     fn compositor_running(&self) -> bool;
+    /// The compositor running takes any change of her window's shape (X SHAPE, her input
+    /// region's too) for a resize, and a move in the same frame cross-fades her from a snapshot
+    /// taken before it, until she holds still (picom's animations: a copy of her facing the old
+    /// way through a drag after a turn). The core then keeps the two apart (`Os::settling`).
+    /// At connect; later changes come as `Hint::Compositor`.
+    fn compositor_reshapes(&self) -> bool {
+        false
+    }
     /// Start the event source; `hint` runs on its thread.
     fn watch(&self, hint: Box<dyn Fn(Hint) + Send>) -> Result<()>;
     /// Start reporting the session's lock and sleep (`on` runs on its thread). Linux: logind,

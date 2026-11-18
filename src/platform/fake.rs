@@ -142,6 +142,10 @@ impl Desktop for FakeDesktop {
     fn compositor_running(&self) -> bool {
         false
     }
+    /// A picom desktop (the core then keeps her region and her moves apart).
+    fn compositor_reshapes(&self) -> bool {
+        true
+    }
     fn watch(&self, hint: Box<dyn Fn(Hint) + Send>) -> Result<()> {
         *self.0.hint.lock().map_err(|_| anyhow!("fake hint"))? = Some(hint);
         Ok(())
@@ -338,7 +342,7 @@ fn fake(target_events: bool) -> (Os, FakeDriver) {
 /// `keyboard_on_input`: the keyboard comes only on his input (Windows' rule).
 fn fake_with(target_events: bool, keyboard_on_input: bool) -> (Os, FakeDriver) {
     let world = World { root: (1600, 1000), monitors: vec![Monitor { primary: true, x: 0, y: 0, w: 1600, h: 1000 }], next: 100, ..World::default() };
-    let caps = Caps { shape_mode: true, target_events, fx_layers: true, costly_redraw: false, implicit_grab: true, goal_geometry: false, layout_events: false, host_per_output: false, keyboard_on_input, region_reshapes: true };
+    let caps = Caps { shape_mode: true, target_events, fx_layers: true, costly_redraw: false, implicit_grab: true, goal_geometry: false, layout_events: false, host_per_output: false, keyboard_on_input };
     let f = Arc::new(Fake { world: Mutex::new(world), hint: Mutex::new(None), session: Mutex::new(None), caps });
     (Os::new(Arc::new(FakeDesktop(f.clone())), Box::new(FakeStage(f.clone()))), FakeDriver(f))
 }
@@ -413,19 +417,23 @@ fn caches_hold_and_freeze() {
     os.freeze_layout(false);
 }
 
-/// A turn while he drags her, under picom (an X desktop that takes a region change for a
-/// resize, `Caps::region_reshapes`): her input region waits while she moves, and a move right
-/// after a region change waits out `SETTLE`, so the compositor never takes both in one frame (it
-/// then cross-faded her from a snapshot of herself facing the old way until she held still).
-/// Without a compositor (her shape is what shows) both go out at once.
+/// Under picom (a compositor that takes a region change for a resize: the fake desktop says
+/// so at connect, `Desktop::compositor_reshapes`): her input region waits while she moves or
+/// the button is down on her, a move right after a region change waits, a landing never does,
+/// so picom never takes a region change and a move in one frame (it then cross-faded her from
+/// a snapshot of herself facing the old way until she held still). Another compositor, or none
+/// (her shape is what shows), gets both at once. The timings: `settle.rs`.
 #[test]
-fn input_region_and_moves_never_meet_under_a_compositor() {
+fn input_region_and_moves_never_meet_under_picom() {
+    use super::settle::{GAP, SETTLE};
     use std::time::Duration;
     let (os, d) = fake(true);
-    os.set_body_size(BODY_SIZE.0, BODY_SIZE.1);
+    os.spawn_watcher(|_| ()).unwrap();
     let settled = || {
-        std::thread::sleep(super::os::SETTLE + Duration::from_millis(5));
-        os.settle().unwrap();
+        while let Some(t) = os.settle_due() {
+            std::thread::sleep(t.saturating_duration_since(std::time::Instant::now()) + Duration::from_millis(1));
+            os.settle().unwrap();
+        }
     };
     // One lock per look (the world's mutex isn't reentrant).
     let got = || {
@@ -433,7 +441,7 @@ fn input_region_and_moves_never_meet_under_a_compositor() {
         (w.body_at, w.input.clone())
     };
     os.force_composited(Some(true));
-    assert!(os.settling(), "an X desktop under a compositor");
+    assert!(os.settling(), "picom, in alpha mode");
     os.move_to(100, 100).unwrap();
     os.set_shapes(Some(&[(1, 2, 3, 4)]), None).unwrap();
     assert_eq!(got(), ((100, 100), vec![]), "the move out, the region held");
@@ -444,23 +452,46 @@ fn input_region_and_moves_never_meet_under_a_compositor() {
     settled();
     assert_eq!(got().1, vec![(5, 6, 7, 8)], "the newest region, once she held still");
     os.move_to(110, 100).unwrap();
-    assert_eq!(got().0, (104, 100), "a move right after a region change waits");
+    assert_eq!((got().0, os.shown_at()), ((104, 100), (104, 100)), "a move right after a region change waits");
     os.move_to(112, 100).unwrap();
-    settled();
+    std::thread::sleep(GAP);
+    os.settle().unwrap();
     assert_eq!(got().0, (112, 100), "the newest position, once due");
     assert!(os.settle_due().is_none());
-    // A jump (a teleport's landing) never waits, even right after a region change.
-    settled();
+    // A landing never waits, even right after a region change.
+    std::thread::sleep(SETTLE);
     os.set_shapes(Some(&[(1, 1, 1, 1)]), None).unwrap();
-    os.move_to(112 + BODY_SIZE.0, 100).unwrap();
-    assert_eq!(got(), ((112 + BODY_SIZE.0, 100), vec![(1, 1, 1, 1)]), "a jump goes out at once");
-    // Shape mode: no compositor to fool, and her shape must follow every frame.
+    os.move_now(500, 100).unwrap();
+    assert_eq!(got(), ((500, 100), vec![(1, 1, 1, 1)]), "a landing goes out at once");
+    // The button down on her: her region waits for the release, a drag move never waits.
+    std::thread::sleep(SETTLE);
+    os.set_pressed(true);
+    os.set_shapes(Some(&[(2, 2, 2, 2)]), None).unwrap();
+    std::thread::sleep(SETTLE + Duration::from_millis(5));
+    os.settle().unwrap();
+    assert_eq!(got().1, vec![(1, 1, 1, 1)], "pressed: held, however still she is");
+    assert!(os.settle_due().is_none(), "nothing due while pressed");
+    os.move_to(506, 100).unwrap();
+    assert_eq!(got().0, (506, 100), "a drag move never waits");
+    os.set_pressed(false);
+    settled();
+    assert_eq!(got().1, vec![(2, 2, 2, 2)], "released and still: out");
+    // Another compositor (KWin, Mutter, ...): not held to it.
+    d.0.hint(Hint::Compositor { runs: true, reshapes: false });
+    assert!(!os.settling(), "only picom");
+    os.move_to(510, 100).unwrap();
+    os.set_shapes(Some(&[(3, 3, 3, 3)]), None).unwrap();
+    os.move_to(512, 100).unwrap();
+    assert_eq!(got(), ((512, 100), vec![(3, 3, 3, 3)]), "both at once");
+    d.0.hint(Hint::Compositor { runs: true, reshapes: true });
+    assert!(os.settling(), "picom again");
+    // Shape mode: her shape must follow every frame.
     os.force_composited(Some(false));
     assert!(!os.settling());
-    os.move_to(120, 100).unwrap();
+    os.move_to(520, 100).unwrap();
     os.set_shapes(Some(&[(9, 9, 9, 9)]), None).unwrap();
-    os.move_to(124, 100).unwrap();
-    assert_eq!(got(), ((124, 100), vec![(9, 9, 9, 9)]), "both at once");
+    os.move_to(524, 100).unwrap();
+    assert_eq!(got(), ((524, 100), vec![(9, 9, 9, 9)]), "both at once");
     assert!(os.settle_due().is_none());
 }
 
