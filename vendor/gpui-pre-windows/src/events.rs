@@ -28,7 +28,10 @@ pub(crate) const WM_GPUI_FORCE_UPDATE_WINDOW: u32 = WM_USER + 5;
 pub(crate) const WM_GPUI_KEYBOARD_LAYOUT_CHANGED: u32 = WM_USER + 6;
 pub(crate) const WM_GPUI_GPU_DEVICE_LOST: u32 = WM_USER + 7;
 pub(crate) const WM_GPUI_DISPLAYS_CHANGED: u32 = WM_USER + 10;
-/// synaps-avatar PW-6: a display change, run from the message loop (`set_display`).
+/// synaps-avatar PW-6: a display change, run from the message loop (`set_display`). Far above
+/// GPUI's own `WM_USER + 1..=10`, so a message upstream adds there can't take its number; still
+/// class-private (`WM_USER..0x7FFF`). Its `wparam` is the window's `validation_number`: the same
+/// number posted by anything else is ignored.
 pub(crate) const WM_SYNAPS_DISPLAY_CHANGED: u32 = WM_USER + 0x5A6;
 
 const SIZE_MOVE_LOOP_TIMER_ID: usize = 1;

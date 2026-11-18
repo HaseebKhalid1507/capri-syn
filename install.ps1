@@ -484,9 +484,13 @@ function Install-Binary {
 function Find-VCTools([switch]$AnyVS) {
     $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
     if (-not (Test-Path $vswhere)) { return $null }
-    # -AnyVS: a Visual Studio (Build Tools or an edition) with or without the C++ tools.
-    $req = if ($AnyVS) { @() } else { @('-requires', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64') }
-    $p = & $vswhere -latest -products * @req -property installationPath
+    # -AnyVS: Build Tools or a Visual Studio edition, with or without the C++ tools (only those four:
+    # SSMS and other products on the same installer can't take the C++ workload).
+    $req = if ($AnyVS) {
+        @('-products', 'Microsoft.VisualStudio.Product.BuildTools', 'Microsoft.VisualStudio.Product.Community',
+            'Microsoft.VisualStudio.Product.Professional', 'Microsoft.VisualStudio.Product.Enterprise')
+    } else { @('-products', '*', '-requires', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64') }
+    $p = & $vswhere -latest @req -property installationPath
     if ($p) { return [string]$p } else { return $null }
 }
 
@@ -525,7 +529,10 @@ function Build-FromSource {
                 if ((Test-Path -LiteralPath $bt) -and (Get-ChildItem -Force -LiteralPath $bt | Select-Object -First 1)) {
                     Stop-Install "Visual Studio Build Tools 2022 is listed in Settings > Apps, but Visual Studio's installer has no record of it (an interrupted install), and its folder isn't empty, so it can't be installed again. As admin, delete $bt, then run this again"
                 }
-                Write-Info "winget lists it as installed, but it isn't there (an interrupted install): installing it again"
+                Write-Info "winget lists it as installed, but it isn't there (an interrupted install): it can install it again"
+                if (-not (Confirm-Action 'install them again with winget --force (another UAC prompt)')) {
+                    Stop-Install 'run that with --force (or this script with --yes), then run this again'
+                }
                 Write-Action (Format-Command (@('winget') + $wg + '--force'))
                 & winget @($wg + '--force') | Out-Host
                 $rc = $LASTEXITCODE
@@ -745,6 +752,7 @@ function Start-Daemon {
     # At sign-in: Synaps has no service on Windows; a Run value starts it. `synaps.exe` is a console
     # program: run as is, it opens a terminal that takes the foreground for a moment (seen in the VM).
     # A headless conhost gives it a console nobody sees (the daemon it starts has its own, hidden).
+    # An EDR may flag that pattern: docs/WINDOWS.md ("conhost --headless and security software").
     $run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
     $theirs = (Get-ItemProperty -Path $run -ErrorAction SilentlyContinue).PSObject.Properties |
         Where-Object { $_.Name -ne 'synaps-daemon' -and "$($_.Value)" -match 'synaps' -and "$($_.Value)" -match 'daemon' } | Select-Object -First 1

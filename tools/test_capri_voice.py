@@ -283,6 +283,24 @@ class Calls(unittest.TestCase):
         self.assertFalse(win.HEADPHONES.search('Speakers (Realtek(R) Audio)'))
 
 
+class LockUnknown(unittest.TestCase):
+    """An unknown lock state is logged once per reason, not every second it is asked."""
+
+    def test_logged_once(self):
+        seen, keep = [], win.log
+        win.log = lambda *a: seen.append(' '.join(map(str, a)))
+        try:
+            win._lock_unknown.clear()
+            for _ in range(3):
+                self.assertIsNone(win.lock_unknown('SessionFlags 7'))
+            self.assertIsNone(win.lock_unknown('WTSQuerySessionInformation failed: 5'))
+        finally:
+            win.log = keep
+            win._lock_unknown.clear()
+        self.assertEqual(len(seen), 2, seen)
+        self.assertIn('SessionFlags 7', seen[0])
+
+
 @unittest.skipUnless(WIN, 'Windows only')
 class WindowsSmoke(unittest.TestCase):
     """The live calls answer without raising (what they answer needs a desktop: [VM])."""

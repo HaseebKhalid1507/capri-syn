@@ -23,8 +23,9 @@
 
 use super::{Caps, Desktop, FxZ, Hint, KeyEv, Keys, Monitor, PointerRead, Role, SessionEv, ShapeRect, Stage, Visible, Win, WinId, WinRect};
 use ::windows::Win32::System::Com::{CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx};
+use ::windows::Win32::System::Threading::{CreateEventW, INFINITE, WaitForMultipleObjects};
 use ::windows::Win32::System::Registry::{HKEY, HKEY_CURRENT_USER, KEY_READ, REG_NOTIFY_CHANGE_LAST_SET, RRF_RT_REG_BINARY, RegGetValueW, RegNotifyChangeKeyValue, RegOpenKeyExW};
-use ::windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use ::windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WAIT_OBJECT_0, WPARAM};
 use ::windows::Win32::Graphics::Dwm::{
     DWMNCRP_DISABLED, DWMWA_BORDER_COLOR, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DWMWA_NCRENDERING_POLICY, DWMWA_WINDOW_CORNER_PREFERENCE,
     DWMWCP_DONOTROUND, DwmGetWindowAttribute, DwmSetWindowAttribute,
@@ -134,34 +135,29 @@ fn on_current_desktop(h: HWND) -> bool {
 }
 
 /// Where the shell keeps the current virtual desktop: Windows 11's key, then Windows 10's (per
-/// session). The first that holds the value; else the first that exists: with one desktop the
-/// shell writes no `CurrentVirtualDesktop` until his first switch (seen in the VM, Windows 11
-/// 26300), and the watcher hears that write.
-fn desktops_key() -> Option<HKEY> {
+/// session), each that exists, with its path (for the log). The watcher listens to all of them:
+/// with one desktop the shell writes no `CurrentVirtualDesktop` until his first switch (seen in
+/// the VM, Windows 11 26300), and which key that first write goes to isn't known beforehand.
+fn desktops_keys() -> Vec<(String, HKEY)> {
     let mut sid = 0u32;
     let _ = unsafe { ::windows::Win32::System::RemoteDesktop::ProcessIdToSessionId(::windows::Win32::System::Threading::GetCurrentProcessId(), &mut sid) };
-    let paths = [
+    [
         r"Software\Microsoft\Windows\CurrentVersion\Explorer\VirtualDesktops".to_string(),
         format!(r"Software\Microsoft\Windows\CurrentVersion\Explorer\SessionInfo\{sid}\VirtualDesktops"),
-    ];
-    let keys: Vec<HKEY> = paths
-        .iter()
-        .filter_map(|p| {
-            let mut key = HKEY::default();
-            let path = ::windows::core::HSTRING::from(p.as_str());
-            unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, &path, None, KEY_READ, &mut key) }.ok().ok()?;
-            Some(key)
-        })
-        .collect();
-    let pick = keys.iter().position(|&k| current_desktop(k).is_some()).or((!keys.is_empty()).then_some(0))?;
-    for (i, &k) in keys.iter().enumerate() {
-        if i != pick {
-            unsafe {
-                let _ = ::windows::Win32::System::Registry::RegCloseKey(k);
-            }
-        }
-    }
-    Some(keys[pick])
+    ]
+    .into_iter()
+    .filter_map(|p| {
+        let mut key = HKEY::default();
+        let path = ::windows::core::HSTRING::from(p.as_str());
+        unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, &path, None, KEY_READ, &mut key) }.ok().ok()?;
+        Some((p, key))
+    })
+    .collect()
+}
+
+/// The current virtual desktop: the first key that holds it.
+fn current_desktop_in(keys: &[HKEY]) -> Option<[u8; 16]> {
+    keys.iter().find_map(|&k| current_desktop(k))
 }
 
 /// The current virtual desktop's id, as the shell stores it.
@@ -867,14 +863,42 @@ impl Desktop for Win32 {
         };
         let desks = call.clone();
         std::thread::Builder::new().name("win-desktops".into()).spawn(move || {
-            let Some(key) = desktops_key() else {
+            let found = desktops_keys();
+            if found.is_empty() {
                 elog!("synaps-avatar: windows: no virtual desktop in the registry; a switch shows as his windows hidden");
                 return;
-            };
-            let mut now = current_desktop(key);
-            // Blocks until a value under the key changes (his switch writes the current one).
-            while unsafe { RegNotifyChangeKeyValue(key, false, REG_NOTIFY_CHANGE_LAST_SET, None, false) }.is_ok() {
-                let next = current_desktop(key);
+            }
+            let keys: Vec<HKEY> = found.iter().map(|&(_, k)| k).collect();
+            let holds = found.iter().find(|&&(_, k)| current_desktop(k).is_some()).map_or("none yet (one desktop)", |(p, _)| p.as_str());
+            elog!("synaps-avatar: windows: virtual desktops: watching {} key(s); the current one is in: {holds}", keys.len());
+            // One auto-reset event per key, armed again each time it fires (a notification fires once).
+            let mut events = Vec::new();
+            for _ in &keys {
+                match unsafe { CreateEventW(None, false, false, PCWSTR::null()) } {
+                    Ok(e) => events.push(e),
+                    Err(e) => {
+                        elog!("synaps-avatar: windows: virtual desktops: no event ({e}); a switch shows as his windows hidden");
+                        return;
+                    }
+                }
+            }
+            let arm = |i: usize| unsafe { RegNotifyChangeKeyValue(keys[i], false, REG_NOTIFY_CHANGE_LAST_SET, Some(events[i]), true) }.is_ok();
+            for (i, (path, _)) in found.iter().enumerate() {
+                if !arm(i) {
+                    elog!("synaps-avatar: windows: virtual desktops: cannot watch {path}; a switch shows as his windows hidden");
+                    return;
+                }
+            }
+            let mut now = current_desktop_in(&keys);
+            // Blocks until a value under either key changes (his switch writes the current one).
+            loop {
+                let w = unsafe { WaitForMultipleObjects(&events, false, INFINITE) };
+                let i = w.0.wrapping_sub(WAIT_OBJECT_0.0) as usize;
+                if i >= events.len() || !arm(i) {
+                    elog!("synaps-avatar: windows: virtual desktops: the watch ended ({:#x}); a switch shows as his windows hidden", w.0);
+                    return;
+                }
+                let next = current_desktop_in(&keys);
                 if next != now {
                     now = next;
                     elog!("synaps-avatar: windows: virtual desktop switch");

@@ -89,12 +89,25 @@ Unattended: `synaps-avatar-voice-setup-….exe /VERYSILENT /SUPPRESSMSGBOXES [/M
 3. her pack through `tools/make-pack` in a venv of its own (Python from winget if there's none,
    asked first);
 4. `synaps daemon --detach` now, and a Run value for sign-in (through `conhost --headless`:
-   `synaps.exe` is a console program, and run as is it opened a terminal at sign-in);
+   `synaps.exe` is a console program, and run as is it opened a terminal at sign-in; see the
+   note below);
 5. Win+Alt+C (she registers it herself);
 6. a Run value for her (default on);
 7. `--voice`: her voice installer and the models.
 
 Per user. A receipt in `%LOCALAPPDATA%\synaps-avatar` drives `--uninstall`.
+
+**`conhost --headless` and security software.** `--headless` is the switch Windows' pseudo-console
+(ConPTY) starts conhost with, not a documented interface, and starting a program hidden behind it is
+also a known malware pattern: an EDR (Defender for Endpoint, CrowdStrike, Elastic's rules) may flag
+or block the Run value at sign-in. If it does, the daemon isn't running after sign-in and she has no
+brain until `synaps daemon --detach` runs. Nothing documented is as cheap: `powershell -WindowStyle
+Hidden` and `wscript` flash a window or are flagged as often, and a scheduled task runs a console
+program in a visible console. The clean fix is a tiny windowed launcher (her own exe, which already
+starts the voice sidecar with `CREATE_NO_WINDOW`, could start the daemon the same way): a follow-up,
+as it needs a desktop to check that nothing shows. To accept the flash instead: a Run value of his
+own (any other name) with `"…\synaps.exe" daemon --detach`, and `synaps-daemon` deleted. A rerun
+leaves his alone and adds none (an edit to `synaps-daemon` itself would be put back).
 
 CI (`windows-installer`, every PR) runs it end to end on windows-latest with the installer that
 job built (`installer/test-windows.ps1`):
@@ -171,7 +184,7 @@ repo. **[VM]**: true of the VM (software rendering, no real mic), to check again
 | 5 | her keys | **pass**. Both register (none taken); Win+Alt+C opens the Line with the keyboard; Win+Alt+Ctrl+C toggles talk (`toggle: listening`) |
 | 6 | the Line from `capri-ctl` | **pass**. `talk tap`: the Line opens parked, `ONLINE · WIN+ALT+C TO TYPE` on her tag and on the Line, the terminal keeps the keyboard; his Win+Alt+C, or his click on the Line, takes it; Esc gives it back |
 | 7 | the contract suite | **11 of 13**, `keyboard` and `body-and-teleport-fx` among them. `perch-space` and `monitors-and-areas` need the driver to make a second monitor and a panel that reserves space (`split_monitors`, `dock_top`), not written for Windows (follow-up); items 3 and 4 checked the same by hand |
-| 8 | virtual desktops | **pass after a fix**. With one desktop Windows 11 writes no `CurrentVirtualDesktop` until the first switch, so the watcher never started (`no virtual desktop in the registry`); it now watches the key that exists. A window on desktop 2 is refused as a perch (cloaked: `not visible`); a switch logs `windows: virtual desktop switch` and her perch on desktop 1 is left (`left with the workspace`) |
+| 8 | virtual desktops | **pass after a fix**. With one desktop Windows 11 writes no `CurrentVirtualDesktop` until the first switch, so the watcher never started (`no virtual desktop in the registry`); it now watches both keys (Windows 11's and the per-session one) and logs which holds the current desktop. A window on desktop 2 is refused as a perch (cloaked: `not visible`); a switch logs `windows: virtual desktop switch` and her perch on desktop 1 is left (`left with the workspace`) |
 | 9 | effect layers | **pass**. The launch and teleport bolts draw outside her window (captured mid-flight); the layer windows are layered, click-through (`WS_EX_TRANSPARENT`) and `WS_EX_NOACTIVATE`; under/over her: the suite |
 | 10 | SMTC | **pass, one gap**. Media Player with a song: `smtc playing (Microsoft.ZuneMusic…=Playing)`, LISTENING, her headphones on; with a video: `(video)`. **Edge reports no playback type** for a video (a file or a page's `<video>`): to her it is music. A Discord call: not tried (no account in the VM) |
 | 11 | toasts | **pass after a fix**. `CAPRI // NEEDS YOU` under "synaps-avatar", the key there. It came without her face: `fs::canonicalize`'s `\\?\` path made a `file://///?/…` URI, which the shell drops silently |
@@ -188,7 +201,8 @@ bella's line:
 - Synaps 0.12.0 through its own installer; the daemon up.
 - The source path: the Build Tools prompt, then UAC (Visual Studio Installer, verified publisher
   Microsoft); Build Tools in ~1.5 min. The VM's Build Tools from P0 were half gone (winget listed
-  them, Visual Studio didn't know them): it now says so and reinstalls (`--force`) after asking.
+  them, Visual Studio didn't know them): it now says so and asks again before reinstalling
+  (`--force`, a second UAC prompt; `--yes` answers both).
 - Her build: ~6.5 min (release, thin LTO, 8 vCPUs). The winget prompt for Python 3.13 (per user,
   ~1 min), found at once without a new terminal; the pack in ~1.5 min. **~12 min end to end**,
   his answers included.
