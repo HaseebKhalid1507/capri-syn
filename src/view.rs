@@ -6380,7 +6380,11 @@ impl Render for Avatar {
                 let tf = self.tag_fx.frame(now);
                 if by_fx || (aw - bw).abs() > 0.5 {
                     by_fx = true;
-                    let (x0, bottom) = (bx + (bw - aw) * 0.5, by + bh);
+                    // On whole device pixels: a plate's long edges at a fractional y raster as a
+                    // dashed line.
+                    let px_ = |v: f32| (v * sf).round() / sf;
+                    let aw = px_(aw);
+                    let (x0, bottom) = (px_(bx + (bw - aw) * 0.5), px_(by + bh));
                     let layer = |a: &TagArt, nat: f32, level: f32, part: Part| -> Div {
                         let h = a.h();
                         div().absolute().left(px(x0)).top(px(bottom - h)).w(px(aw)).h(px(h)).opacity(level).child(tag_ring(pal, a, Some((aw, nat)), 0.0, part))
@@ -6439,7 +6443,7 @@ impl Render for Avatar {
                 let tag_bottom = match &mut self.tag_y {
                     Some((k, y)) if *k == pin_key && hud_motion => {
                         y.go(raw_bottom, now, crate::hud::SIZE_MS);
-                        y.at(now)
+                        (y.at(now) * sf).round() / sf
                     }
                     _ => {
                         self.tag_y = Some((pin_key, crate::hud::Tween::still(raw_bottom)));
