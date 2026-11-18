@@ -12,6 +12,16 @@
   `thank you`/`bye`/`take a breath` count as filler under 300 ms of speech (was 400: a real "bye" was dropped),
   sign-offs (`see you next time`, `thanks for listening`) under 600 ms. Heard/dropped lines carry Whisper's confidence.
 
+### A reply she says whole is read
+- A spoken reply heard to its last word counts as read: no unread strip, no `N NEW` (the Line and
+  `state`'s `unread` agree: they are the one strip). His spoken turns' replies and events' alike, hands-free
+  or not; it was hands-free only, and from her first word.
+- Cut off (a tap on her, `$mod+c`, Esc, music, a new turn, his voice over hers, the sidecar's gate, the
+  sidecar going or restarting mid-say) or said in part (past the cap or 60 words, after `---`, code, a
+  table, a link) it stays unread. `docs/VOICE.md`, "Heard whole is read".
+- `capri-voice`: a `say-end` whose player ended early (nonzero exit: killed from outside, its sink gone)
+  carries `"cut": true`; the avatar counts it short. An older sidecar's plain `say-end` is whole.
+
 ### The HUD moves as one system
 - One curve (ease-out, 2 % past the target at most, no wobble) and one set of durations, named in
   `src/hud.rs`: a size change 200 ms, the bubble opening 240 ms (180 ms out of the tag), into the tag
