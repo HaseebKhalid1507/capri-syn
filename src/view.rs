@@ -178,6 +178,8 @@ const SWEEP_STEPS: u64 = 10;
 const SWEEP_STEP_MS: u64 = 70;
 /// Clear air between the status tag and the hair right under it (logical px).
 const TAG_GAP: f32 = 13.0;
+/// The width of hair the tag clears at least (logical px).
+const TAG_HAIR_W: f32 = 220.0;
 const MIN_WIDTH: f32 = 500.0;
 /// Everything that touches a perch edge keeps this far from the window's corners (logical px).
 const EDGE_MARGIN: f32 = 60.0;
@@ -784,6 +786,8 @@ pub struct Avatar {
     panel_last_snap: Option<GhostSnap>,
     /// Bubbles made: each reply's own number (a new one in an open bubble pulses).
     bubble_serial: u64,
+    /// The tag's resting hair line while she stays put (her place, the lowest-reaching row).
+    tag_pin: Cell<Option<(TagPinKey, i32)>>,
     /// The pill's size as last shown (the bubble opens out of it).
     pill_last: Option<(f32, f32)>,
     /// `SA_HUD_PROF`: each frame's main-thread time while the HUD moves, and whether this
@@ -1045,6 +1049,7 @@ impl Avatar {
             hud_paint: Rc::new(RefCell::new(Vec::new())),
             hud_busy_paint: false,
             pill_last: None,
+            tag_pin: Cell::new(None),
             hud_top: Cell::new(None),
             tag_box: Rc::new(Cell::new(None)),
             motion_at: Cell::new(None),
@@ -5071,6 +5076,18 @@ struct Status {
     key: String,
 }
 
+/// Where she is, for the tag's pinned height: her window's origin, placement, sitting.
+type TagPinKey = ((i32, i32), std::mem::Discriminant<Placement>, bool);
+
+/// What of the tag to draw: all of it, its shell (plate, block, marks) or its words (type,
+/// glyphs, the chevron). The glitch only ever touches the shell.
+#[derive(Clone, Copy, PartialEq)]
+enum Part {
+    All,
+    Shell,
+    Words,
+}
+
 /// What the tag shows, compared without its level meter (a voice level isn't a change).
 #[derive(Clone, Debug)]
 struct TagShow {
@@ -5088,21 +5105,6 @@ impl PartialEq for TagShow {
             && self.unread == o.unread
             && self.collapsed == o.collapsed
     }
-}
-
-/// `make(None)`, drawn twice behind itself `s` px either side in cyan and pink (`make(Some(c))`):
-/// a glitch band's RGB split. `s` 0: `make(None)` alone.
-fn rgb_split(s: f32, make: impl Fn(Option<u32>) -> Div) -> Div {
-    if s <= 0.0 {
-        return make(None);
-    }
-    div()
-        .relative()
-        .flex()
-        .items_center()
-        .child(make(Some(fx::CYAN)).absolute().top_0().left(px(-s)))
-        .child(make(Some(fx::PINK)).absolute().top_0().left(px(s)))
-        .child(make(None))
 }
 
 /// A glitch's red tear: 2 px, for one step.
@@ -5150,7 +5152,7 @@ fn rows_and(a: &[ShapeRect], b: &[ShapeRect]) -> Vec<ShapeRect> {
 }
 
 /// Bubble panel geometry, logical px in window coordinates.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct PanelGeom {
     x: f32,
     y: f32,
@@ -5192,29 +5194,16 @@ fn place_panel(w: f32, h: f32, head_l: f32, bottom: f32, (vis_l, vis_r): (f32, f
     PanelGeom { x, y, w, h, tail_x, tip: (head_l.clamp(tail_x - 9.0, tail_x + 9.0), y + h + TAIL_H) }
 }
 
-/// The bubble's glitch bands: the header (with the slivers), the body's rows in runs of one
-/// and two, the footer zone (`foot`: its height from the bottom, with the tail). Each band's
-/// span (window px, logical: possibly empty mid-resize) and each row's band.
-fn panel_bands(g: &PanelGeom, rows: usize, foot: f32) -> (Vec<(f32, f32)>, Vec<usize>) {
-    let head_end = g.y + PAD_T + HEADER_H + HEADER_GAP * 0.5;
-    let body_top = g.y + PAD_T + HEADER_H + HEADER_GAP;
-    let foot_top = (g.y + g.h - foot + FOOTER_GAP * 0.5).max(head_end);
-    let mut spans = vec![(g.y - SLIVER_H - 2.0, head_end)];
-    let mut of_row = Vec::with_capacity(rows);
-    let (mut k, mut run, mut y0) = (0, 1, head_end);
-    while k < rows {
-        let n = run.min(rows - k);
-        let y1 = body_top + (k + n) as f32 * LINE_H;
-        of_row.extend(std::iter::repeat_n(spans.len(), n));
-        spans.push((y0.min(foot_top), y1.min(foot_top)));
-        (y0, k, run) = (y1, k + n, 3 - run);
-    }
-    spans.push((foot_top, g.y + g.h + TAIL_H + 2.0));
-    (spans, of_row)
+/// The bubble shell's glitch bands: 4 or 5 spans over it, its slivers to its tail (window px,
+/// logical).
+fn panel_spans(g: &PanelGeom, seed: u64) -> Vec<(f32, f32)> {
+    let (y0, y1) = (g.y - SLIVER_H - 2.0, g.y + g.h + TAIL_H + 2.0);
+    crate::hud::cuts(y1 - y0, 4 + (seed % 2) as usize, 14.0, seed).windows(2).map(|w| (y0 + w[0], y0 + w[1])).collect()
 }
 
-/// The bubble's plate (the panel with its frame and dark ring, the mane slivers), whole, or in
-/// a glitch's bands: each in its span, shifted, the cyan and pink split behind it.
+/// The bubble's shell (the panel with its frame and dark ring, the mane slivers), whole, or in
+/// a glitch's bands: each in its span, shifted, the cyan and pink split behind it, all kept
+/// inside the shell's own box (a shifted band is cut at its edge).
 /// `colours`: panel, frame, frame width, ring, slivers.
 fn panel_bg(g: PanelGeom, look: Option<crate::hud::Look>, spans: Vec<(f32, f32)>, (panel_c, frame_c, frame_w, ring_c, sliver_c): (u32, u32, f32, u32, u32)) -> impl IntoElement {
     canvas(
@@ -5237,11 +5226,12 @@ fn panel_bg(g: PanelGeom, look: Option<crate::hud::Look>, spans: Vec<(f32, f32)>
             match &look {
                 None => draw(window, 0.0, 0.0),
                 Some(l) => {
+                    let m = theme::RING + 1.0;
                     for (b, &(y0, y1)) in l.bands.iter().zip(&spans) {
-                        if !b.on || y1 <= y0 {
+                        if y1 <= y0 {
                             continue;
                         }
-                        let bounds = Bounds::from_corners(point(px(g.x - 80.0), px(y0)), point(px(g.x + g.w + 80.0), px(y1)));
+                        let bounds = Bounds::from_corners(point(px(g.x - m), px(y0)), point(px(g.x + g.w + m), px(y1)));
                         window.with_content_mask(Some(ContentMask { bounds }), |window| draw(window, b.dx, b.split));
                     }
                 }
@@ -5254,22 +5244,13 @@ fn panel_bg(g: PanelGeom, look: Option<crate::hud::Look>, spans: Vec<(f32, f32)>
     .size_full()
 }
 
-/// A piece of the bubble (`w` × `h`) moved by its glitch band: shifted, or not drawn.
-fn band_shift(el: impl IntoElement, b: crate::hud::Band, w: f32, h: f32) -> Div {
-    div().absolute().top_0().left(px(b.dx)).w(px(w)).h(px(h)).when(!b.on, |d| d.invisible()).child(el)
-}
-
 /// What a closing bubble is drawn from: where it was, its words.
 #[derive(Clone, Debug)]
 struct GhostSnap {
-    head_l: f32,
-    bottom: f32,
-    vis: (f32, f32),
-    size: (f32, f32),
+    g: PanelGeom,
     header_label: String,
     label: String,
     lines: Vec<String>,
-    rows: usize,
     foot_zone: f32,
     frame_c: u32,
 }
@@ -5350,7 +5331,9 @@ impl Render for Avatar {
         // The status tag sits just clear of the hair under the tag itself (this frame and
         // the resting one), not of the whole silhouette.
         let tag_hair = {
-            let tw = self.tag_w.get();
+            // Sampled as wide as a usual label at least: the plate doesn't rise or sink with
+            // its own text's width.
+            let tw = self.tag_w.get().max(TAG_HAIR_W);
             let (c0, c1) = (((head_l - tw / 2.0) * sf) as i32 - l.avatar_x - 4, ((head_l + tw / 2.0) * sf) as i32 - l.avatar_x + 4);
             // Clear of the hair under it facing either way (the profile mirrors by reversal):
             // its height doesn't change on a turn either.
@@ -5366,7 +5349,17 @@ impl Render for Avatar {
                 .filter(|&v| v != i16::MAX)
                 .map(i32::from)
             };
-            under(raw_base).into_iter().chain(under(raw_frame)).min().unwrap_or(base_top)
+            // Pinned while she stays put: a mood's resting pose (THINKING's chin rest) never
+            // lowers it; a moving frame (an arm up) may still lift it for a moment.
+            let key = (self.origin, std::mem::discriminant(&self.placement), self.sitting());
+            let base = match (self.tag_pin.get(), under(raw_base)) {
+                (Some((k, p)), b) if k == key => Some(b.map_or(p, |b| b.min(p))),
+                (_, b) => b,
+            };
+            if let Some(b) = base {
+                self.tag_pin.set(Some((key, b)));
+            }
+            base.into_iter().chain(under(raw_frame)).min().unwrap_or(base_top)
         };
         let image = frame.map(|f| f.image.clone());
         // Where the image sits in the avatar rect (a strip's cell is its opaque box).
@@ -5912,16 +5905,16 @@ impl Render for Avatar {
         let hud_motion = alpha && self.hud_cfg.motion;
         let hud_glitch = alpha && self.hud_cfg.glitch && self.rag.is_none();
         let pill_before = self.pill_last.take();
-        let ghost_wait = self.ghost.as_ref().is_some_and(|g| !g.pill_ready(now));
+        let ghost_wait = self.ghost.as_ref().is_some_and(|g| !g.tag_ready(now));
         let tag_next = (show_tag && !ghost_wait).then(|| TagShow {
             st: Status { label: label.clone(), tone, invert, glyph: glyph_kind.clone(), plate: plate_kind, key: tone_key.clone() },
             unread: self.unread_shown().cloned(),
             collapsed,
         });
-        let tag_quiet = bubble_open || !tag_hud || swap_hold || self.rag.is_some();
+        let tag_quiet = bubble_open || !tag_hud || swap_hold || self.rag.is_some() || !hud_motion;
         self.tag_fx.observe(tag_next, now, hud_glitch && !torn, tag_quiet);
-        let (tag_shown, tag_glitch) = self.tag_fx.frame(now);
-        let tag_shown = tag_shown.cloned();
+        let tf = self.tag_fx.frame(now);
+        let (tag_shown, tag_glitch, tag_words) = (tf.content.cloned(), tf.glitch, tf.text);
         // The tag's cut and its trailing slivers' step (for the shape), and the HUD's next
         // motion step.
         let mut tag_cut: Option<(Cut, Option<u64>)> = None;
@@ -5977,7 +5970,11 @@ impl Render for Avatar {
             // `wide`: drawn at this width (easing to its layout), the content clipped inside the
             // plate. `split`: a glitch band's RGB split, px (the text and the plate's edges
             // twice behind themselves, cyan and pink).
-            let make_ring = |wide: Option<f32>, split: f32| -> Div {
+            // `wide`: drawn at this width (easing to its layout), the content clipped inside the
+            // plate. `split`: a glitch band's RGB split on the plate's edges (px). `part`: the
+            // shell, the words, or both (the glitch only ever touches the shell).
+            let make_ring = |wide: Option<f32>, split: f32, part: Part| -> Div {
+                let (shell, words) = (part != Part::Words, part != Part::Shell);
                 // The content inside a plate drawn `wide`: clipped to it, laid out as it would be.
                 let clip = |plate: Div, row: Div| -> Div {
                     match wide {
@@ -6002,13 +5999,16 @@ impl Render for Avatar {
                     .left_0()
                     .size_full()
                 };
+                // A plate's backdrop when the shell is drawn; its words when they are.
+                let backed = |cut: Cut, f: Fill| div().relative().flex().items_center().when(shell, |d| d.child(theme::backdrop(cut, f)));
+                let say = |d: Div| d.when(!words, |d| d.invisible());
                 if let Some(b) = badge.clone() {
                     let plate = div()
                         .relative()
                         .flex()
                         .items_center()
-                        .when(split > 0.0, |d| d.child(fringe(Cut::Unread)))
-                        .child(theme::backdrop(Cut::Unread, Fill::framed(pal.panel, pal.accent, 2.0).ringed(pal.ring)))
+                        .when(shell && split > 0.0, |d| d.child(fringe(Cut::Unread)))
+                        .when(shell, |d| d.child(theme::backdrop(Cut::Unread, Fill::framed(pal.panel, pal.accent, 2.0).ringed(pal.ring))))
                         .h(px(28.0))
                         .text_size(px(TAG_FONT))
                         .line_height(px(TAG_FONT + 1.0))
@@ -6019,20 +6019,18 @@ impl Render for Avatar {
                         .gap(px(9.0))
                         .pr(px(22.0))
                         .child(
-                            theme::plate(Cut::Badge, Fill::solid(pal.text))
+                            backed(Cut::Badge, Fill::solid(pal.text))
                                 .h_full()
                                 .gap(px(6.0))
                                 .pl(px(11.0))
                                 .pr(px(14.0))
                                 .text_color(rgb(pal.ink))
-                                .child(glyph("dot", pal.accent, pal.text))
-                                .child(tracked(&b, 1.0)),
+                                .child(say(div().child(glyph("dot", pal.accent, pal.text))))
+                                .child(say(tracked(&b, 1.0))),
                         )
-                        .child(rgb_split(split, |c| div().text_color(rgb(c.unwrap_or(pal.text)))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(tracked(&text, 0.2))))
+                        .child(say(div().text_color(rgb(pal.text)).font_weight(FontWeight::SEMIBOLD).child(tracked(&text, 0.2))))
                         // It opens: say so, inside the plate.
-                        .child(theme::plate(Cut::Slant(6.0), Fill::solid(pal.accent)).h(px(18.0)).px(px(8.0)).text_color(rgb(pal.ink)).child(tracked("READ ▸", 1.2)));
+                        .child(backed(Cut::Slant(6.0), Fill::solid(pal.accent)).h(px(18.0)).px(px(8.0)).text_color(rgb(pal.ink)).child(say(tracked("READ ▸", 1.2))));
                     return clip(plate, row.h(px(28.0)));
                 }
                 let (pad_l, pad_r) = look.plate.pad();
@@ -6060,6 +6058,9 @@ impl Render for Avatar {
                             canvas(
                                 |_, _, _| (),
                                 move |b, _, window, _| {
+                                    if !shell {
+                                        return;
+                                    }
                                     let (x0, y0, x1, y1) = (f32::from(b.left()), f32::from(b.top()), f32::from(b.right()), f32::from(b.bottom()));
                                     let (blk, sw) = theme::half_block(x0, y0, x1, y1, sweep);
                                     theme::fill_poly(window, &blk, rgb(block_c));
@@ -6073,8 +6074,8 @@ impl Render for Avatar {
                             .left_0()
                             .size_full(),
                         )
-                        .child(glyph(&mark, pal.ink, pal.accent))
-                        .child(rgb_split(split, |c| tracked(&n, 1.5).when_some(c, |d, c| d.text_color(rgb(c)))))
+                        .child(say(div().child(glyph(&mark, pal.ink, pal.accent))))
+                        .child(say(tracked(&n, 1.5)))
                 });
                 let half = block.is_some();
                 let plate = div()
@@ -6086,11 +6087,14 @@ impl Render for Avatar {
                     .line_height(px(TAG_FONT + 1.0))
                     .font_weight(FontWeight::BOLD)
                     .text_color(rgb(look.ink))
-                    .when(split > 0.0, |d| d.child(fringe(Cut::Tag(look.plate))))
+                    .when(shell && split > 0.0, |d| d.child(fringe(Cut::Tag(look.plate))))
                     .child(
                         canvas(
                             |_, _, _| (),
                             move |b, _, window, _| {
+                                if !shell {
+                                    return;
+                                }
                                 let (x0, y0, x1, y1) = (f32::from(b.left()), f32::from(b.top()), f32::from(b.right()), f32::from(b.bottom()));
                                 let polys = theme::outline(Cut::Tag(look.plate), x0, y0, x1, y1);
                                 match theme::tag_inner(look.plate, x0, y0, x1, y1, 1.5) {
@@ -6127,7 +6131,7 @@ impl Render for Avatar {
                     .children(block)
                     // The ✕'s shard broken off with the plate's piece.
                     .when(!half, |d| {
-                        d.child(match look.halo {
+                        d.child(say(match look.halo {
                             // The disc: 15 px, the glyph centred in it.
                             Some(h) => div()
                                 .relative()
@@ -6139,12 +6143,12 @@ impl Render for Avatar {
                                 .child(div().absolute().top_0().left_0().child(theme::glyph_at("disc", h, h, 15.0)))
                                 .child(glyph(&mark, look.mark, h)),
                             None => div().when(split_plate, |d| d.relative().left(px(-3.0)).top(px(3.0))).child(glyph(&mark, look.mark, look.fill)),
-                        })
+                        }))
                     })
                     // ERROR: the type starts inside the toothed piece, clear of the break.
-                    .child(rgb_split(split, |c| theme::metered(&rest, 1.5, c.unwrap_or(look.ink)).when_some(c, |d, c| d.text_color(rgb(c)))).when(split_plate, |d| d.ml(px(8.0))))
+                    .child(say(theme::metered(&rest, 1.5, look.ink).when(split_plate, |d| d.ml(px(8.0)))))
                     // A reply put away behind the plate: a small up-chevron inside it.
-                    .when(collapsed, |d| d.child(chevron(Chevron::Up, rgb(look.ink))));
+                    .when(collapsed, |d| d.child(say(div().child(chevron(Chevron::Up, rgb(look.ink))))));
                 clip(plate, row.h(px(25.0)))
             };
             if let (true, Some(b), Some(bands)) = (torn, self.tag_box.get(), plan.slices.as_ref()) {
@@ -6169,7 +6173,7 @@ impl Render for Avatar {
                         .w(px(bw + ml + mr))
                         .h(px(s1 - s0))
                         .overflow_hidden()
-                        .child(div().absolute().left(px(ml)).top(px(mt - s0)).w(px(bw)).h(px(bh)).child(make_ring(None, 0.0)))
+                        .child(div().absolute().left(px(ml)).top(px(mt - s0)).w(px(bw)).h(px(bh)).child(make_ring(None, 0.0, Part::All)))
                 };
                 for &(y0, y1, dx, _) in &under_bands {
                     let (a, c) = ((y0 as f32).max(t0), (y1 as f32).min(t0 + th * sf));
@@ -6193,10 +6197,11 @@ impl Render for Avatar {
                     root = root.child(strip(s0, s1, dxl));
                 }
             }
-            // The HUD's own motion: the plate at its easing width, torn by its glitch, drawn at
-            // the laid-out box (the holder below lays out the newest text unseen); gone, where
-            // it was last.
-            let mut by_fx = !torn && (tag_glitch.is_some() || (hud_motion && self.tag_fx.measuring()));
+            // The HUD's own motion, drawn at the laid-out box (the holder below lays it out
+            // unseen; gone, where it was last): the shell at its easing width, whole or in its
+            // glitch's bands (kept inside the plate's box), and over it the words, clean, at
+            // their level.
+            let mut by_fx = !torn && (tag_glitch.is_some() || tag_words < 1.0 || (hud_motion && self.tag_fx.measuring()));
             if !torn && let Some(b) = self.tag_box.get() {
                 let (bx, by, bw, bh) = (f32::from(b.origin.x), f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height));
                 let aw = if show_tag { self.tag_fx.width(bw, now, hud_motion) } else { self.tag_fx.width_now(now) };
@@ -6206,37 +6211,45 @@ impl Render for Avatar {
                 if by_fx || (aw - bw).abs() > 0.5 {
                     by_fx = true;
                     let x0 = bx + (bw - aw) * 0.5;
-                    // Past the box: the shift, the ring, a point or swallowtail, the slivers.
-                    let (ml, mr, mt, mb) = (4.0 + crate::hud::TAG_SHIFT, 34.0 + crate::hud::TAG_SHIFT, 9.0, 6.0);
-                    let th = bh + mt + mb;
-                    let (edges, look) = match tag_glitch {
-                        Some(g) => {
-                            let e = crate::hud::cuts(th, 3 + (g.seed % 3) as usize, 6.0, g.seed);
-                            let look = g.look(e.len() - 1, crate::hud::TAG_SHIFT, now);
-                            (e, look)
+                    let bands = tag_glitch.and_then(|g| {
+                        let e = crate::hud::cuts(bh, 3 + (g.seed % 2) as usize, 6.0, g.seed);
+                        g.look(e.len() - 1, crate::hud::TAG_SHIFT, now).map(|l| (e, l))
+                    });
+                    match bands {
+                        Some((edges, look)) => {
+                            // Each band clipped to the plate's box (its ring included): a shifted
+                            // band is cut at the edge, nothing pokes out.
+                            let m = theme::RING + 1.0;
+                            let n = look.bands.len();
+                            for (i, band) in look.bands.iter().enumerate() {
+                                let s0 = if i == 0 { -m } else { edges[i] };
+                                let s1 = if i + 1 == n { bh + m } else { edges[i + 1] };
+                                root = root.child(
+                                    div()
+                                        .absolute()
+                                        .left(px(x0 - m))
+                                        .top(px(by + s0))
+                                        .w(px(aw + 2.0 * m))
+                                        .h(px(s1 - s0))
+                                        .overflow_hidden()
+                                        .child(div().absolute().left(px(m + band.dx)).top(px(-s0)).w(px(aw)).h(px(bh)).child(make_ring(Some(aw), band.split, Part::Shell))),
+                                );
+                            }
+                            if let Some(i) = look.tear {
+                                root = root.child(tear_bar(x0, by + edges[i], aw));
+                            }
                         }
-                        None => (vec![0.0, th], crate::hud::Look { bands: vec![crate::hud::CLEAN], old: false, tear: None }),
-                    };
-                    for (i, band) in look.bands.iter().enumerate().filter(|(_, b)| b.on) {
-                        let (s0, s1) = (edges[i], edges[i + 1]);
-                        root = root.child(
-                            div()
-                                .absolute()
-                                .left(px(x0 + band.dx - ml))
-                                .top(px(by - mt + s0))
-                                .w(px(aw + ml + mr))
-                                .h(px(s1 - s0))
-                                .overflow_hidden()
-                                .child(div().absolute().left(px(ml)).top(px(mt - s0)).w(px(aw)).h(px(bh)).child(make_ring(Some(aw), band.split))),
-                        );
+                        None => {
+                            root = root.child(div().absolute().left(px(x0)).top(px(by)).w(px(aw)).h(px(bh)).child(make_ring(Some(aw), 0.0, Part::Shell)));
+                        }
                     }
-                    if let Some(i) = look.tear {
-                        root = root.child(tear_bar(x0 - 14.0, by - mt + edges[i], aw + 34.0));
+                    if tag_words > 0.0 {
+                        root = root.child(div().absolute().left(px(x0)).top(px(by)).w(px(aw)).h(px(bh)).opacity(tag_words).child(make_ring(Some(aw), 0.0, Part::Words)));
                     }
                 }
             }
             if show_tag {
-                let ring = make_ring(None, 0.0);
+                let ring = make_ring(None, 0.0, Part::All);
                 let mut row = div().id("tag").flex().items_end().gap(px(3.0)).cursor_pointer();
                 if collapsed || self.session.is_some() || self.unread_shown().is_some() {
                     row = row.on_mouse_down(
@@ -6268,6 +6281,8 @@ impl Render for Avatar {
                 root = root.child(holder.child(probed(row, &tag_cell)));
             }
         }
+        // A tag change waiting out its label's dwell: woken when it ends.
+        let motion = [motion, self.tag_fx.wake_at()].into_iter().flatten().min();
         if motion != self.motion_at.get() {
             self.motion_at.set(motion);
             self.ticker.set(self.next_deadline());
@@ -6282,8 +6297,9 @@ impl Render for Avatar {
         if mode.is_none() {
             self.panel_bottom = None;
             self.panel_rect.set(None);
-            // Just closed: it leaves where it was (a glitch-out and a shrink, or into the
-            // pill), unless it went with her (a teleport, his hand) or into the Line.
+            // Just closed: it leaves where it was (its words fade, then the empty shell shrinks
+            // and glitches out, or eases into the pill), unless it went with her (a teleport,
+            // his hand) or into the Line.
             let snap = self.panel_last_snap.take();
             if self.panel_fx.closed()
                 && hud
@@ -6291,27 +6307,46 @@ impl Render for Avatar {
                 && self.line.is_none()
                 && let Some(snap) = snap
             {
+                // The pill's box: where the tag sat (she hasn't moved), as wide as the pill was.
                 let pill = collapsed
-                    .then(|| pill_before.or_else(|| self.tag_box.get().map(|b| (f32::from(b.size.width).max(96.0), f32::from(b.size.height).max(25.0)))))
+                    .then(|| {
+                        self.tag_box.get().map(|b| {
+                            let (bx, by, bw, bh) = (f32::from(b.origin.x), f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height));
+                            let w = pill_before.map_or(bw, |p| p.0);
+                            (bx + (bw - w) * 0.5, by, w, bh)
+                        })
+                    })
                     .flatten();
                 let glitch = hud_glitch && !self.panel_fx.throttled(now);
-                let from = snap.size;
-                self.ghost = Some(crate::hud::Ghost::new(snap, from, pill, now, glitch, self.bubble_serial));
+                let g = snap.g;
+                self.ghost = Some(crate::hud::Ghost::new(snap, (g.x, g.y, g.w, g.h), pill, g.tip, now, glitch, self.bubble_serial));
             }
             if self.ghost.as_ref().is_some_and(|g| g.done(now)) || !hud {
                 self.ghost = None;
             }
             if let Some(gh) = &self.ghost {
-                let u = gh.u(now);
                 let sn = &gh.snap;
-                let g = place_panel(gh.size(now).0, gh.size(now).1, sn.head_l, sn.bottom, sn.vis);
-                let (spans, of_row) = panel_bands(&g, sn.rows, sn.foot_zone);
-                let look = gh.glitch.map(|gl| gl.look(spans.len(), crate::hud::PANEL_SHIFT, now));
-                let band = |i: usize| look.as_ref().map_or(crate::hud::CLEAN, |l| l.bands[i.min(l.bands.len() - 1)]);
-                root = root.child(panel_bg(g, look.clone(), spans.clone(), (pal.panel, sn.frame_c, 2.0, pal.ring, pal.accent)));
-                // The words go first (into the pill: at once, the plate morphs alone).
-                if !(gh.to_pill && u > 0.3) {
-                    let hb = band(0);
+                let (x, y, w, h) = gh.rect(now);
+                let k = gh.k(now);
+                let g = if gh.to_pill {
+                    // Into the pill: its tail draws in.
+                    let c = x + w * 0.5;
+                    let tail_x = sn.g.tail_x + (c - sn.g.tail_x) * k;
+                    PanelGeom { x, y, w, h, tail_x, tip: (sn.g.tip.0 + (c - sn.g.tip.0) * k, y + h + TAIL_H * (1.0 - k)) }
+                } else {
+                    // Shrinking about the tail's tip.
+                    let s = w / sn.g.w.max(1.0);
+                    PanelGeom { x, y, w, h, tail_x: sn.g.tip.0 - (sn.g.tip.0 - sn.g.tail_x) * s, tip: sn.g.tip }
+                };
+                let gl = gh.glitch(now);
+                let spans = panel_spans(&g, gl.map_or(1, |x| x.seed));
+                let look = gl.and_then(|x| x.look(spans.len(), crate::hud::PANEL_SHIFT, now));
+                if let Some(i) = look.as_ref().and_then(|l| l.tear) {
+                    tear = Some((g.x, spans[i].0.max(g.y), g.w));
+                }
+                root = root.child(panel_bg(g, look, spans, (pal.panel, sn.frame_c, 2.0, pal.ring, pal.accent)));
+                let words = gh.words(now);
+                if words > 0.0 {
                     let header = div()
                         .absolute()
                         .top(px(PAD_T))
@@ -6335,7 +6370,7 @@ impl Render for Avatar {
                         .child(tracked(&sn.header_label, 1.5).text_size(px(9.5)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(pal.dim)))
                         .child(div().flex_1())
                         .child(tracked(&sn.label, 1.5).text_size(px(9.5)).font_weight(FontWeight::BOLD).text_color(rgb(pal.dim)));
-                    let mut body = div()
+                    let body = div()
                         .absolute()
                         .top(px(PAD_T + HEADER_H + HEADER_GAP))
                         .left(px(PAD_L))
@@ -6347,24 +6382,9 @@ impl Render for Avatar {
                         .text_size(px(BODY_FONT))
                         .line_height(px(LINE_H))
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(pal.text));
-                    for (k, t) in sn.lines.iter().enumerate() {
-                        let b = band(of_row.get(k).copied().unwrap_or(spans.len() - 1));
-                        body = body.child(
-                            div()
-                                .h(px(LINE_H))
-                                .flex()
-                                .items_center()
-                                .whitespace_nowrap()
-                                .relative()
-                                .left(px(b.dx))
-                                .when(!b.on, |d| d.invisible())
-                                .child(rgb_split(b.split, |c| div().when_some(c, |d, c| d.text_color(rgb(c))).child(t.clone()))),
-                        );
-                    }
-                    root = root.child(
-                        div().absolute().left(px(g.x)).top(px(g.y)).w(px(g.w)).h(px(g.h)).overflow_hidden().child(band_shift(header, hb, g.w, g.h)).child(body),
-                    );
+                        .text_color(rgb(pal.text))
+                        .children(sn.lines.iter().map(|t| div().h(px(LINE_H)).flex().items_center().whitespace_nowrap().child(t.clone())));
+                    root = root.child(div().absolute().left(px(x)).top(px(y)).w(px(w)).h(px(h)).overflow_hidden().opacity(words).child(header).child(body));
                 }
             }
         }
@@ -6508,21 +6528,20 @@ impl Render for Avatar {
                 PanelMode::Probe => u64::MAX - 3,
             };
             let (w, h) = self.panel_fx.open((w, h), serial, pill_before, now, hud_motion, hud_glitch);
-            let panel_moving = self.panel_fx.moving(now);
+            let words = self.panel_fx.words(now);
             self.ghost = None;
             let g = place_panel(w, h, head_l, bottom, (vis_l, vis_r));
             let (x, y) = (g.x, g.y);
             self.panel_rect.set(Some((x, y, w, h + TAIL_H)));
             panel_geom = Some(g);
-            // Its glitch: bands of whole rows (the header, runs of one or two lines, the footer
-            // and tail), each shifted with an RGB split, coming or going as one.
+            // Its shell's glitch (the words are hidden meanwhile): bands shifted inside its box.
             let foot_zone = if footer { FOOTER_GAP + FOOTER_H + PAD_B } else { PAD_B };
-            let (spans, of_row) = panel_bands(&g, rows, foot_zone);
-            let look = self.panel_fx.glitch(now).map(|gl| gl.look(spans.len(), crate::hud::PANEL_SHIFT, now));
-            let band = |i: usize| look.as_ref().map_or(crate::hud::CLEAN, |l| l.bands[i.min(l.bands.len() - 1)]);
-            let row_band = |k: usize| band(of_row.get(k).copied().unwrap_or(spans.len() - 1));
-            let (head_band, foot_band) = (band(0), band(spans.len() - 1));
-            let clipped = panel_moving || look.is_some();
+            let gl = self.panel_fx.glitch(now);
+            let spans = panel_spans(&g, gl.map_or(1, |x| x.seed));
+            let look = gl.and_then(|x| x.look(spans.len(), crate::hud::PANEL_SHIFT, now));
+            // The rows the body holds at this height: a new line shows once there is room for
+            // it, never cut in half by a growing box.
+            let fits = ((h - (PAD_T + HEADER_H + HEADER_GAP) - foot_zone) / LINE_H + 0.02).floor().max(0.0) as usize;
             // Settled after a summon: the border breathes toward bone; the pulse turns it bone.
             let frame_c = match glow {
                 _ if pulse => pal.focus,
@@ -6530,10 +6549,10 @@ impl Render for Avatar {
                 None => pal.accent,
             };
             let warm = pulse || glow.is_some();
-            let bg = panel_bg(g, look.clone(), spans.clone(), (pal.panel, frame_c, if warm { 3.0 } else { 2.0 }, pal.ring, pal.accent));
             if let Some(i) = look.as_ref().and_then(|l| l.tear) {
-                tear = Some((g.x - 10.0, spans[i].0.max(g.y), g.w + 24.0));
+                tear = Some((g.x, spans[i].0.max(g.y), g.w));
             }
+            let bg = panel_bg(g, look, spans, (pal.panel, frame_c, if warm { 3.0 } else { 2.0 }, pal.ring, pal.accent));
             let prompt_mode = matches!(mode, PanelMode::Prompt);
             let header_label = if probe {
                 if self.focus.is_focused(window) { "FOCUS PROBE // KEYS OK".to_string() } else { header_label }
@@ -6604,8 +6623,7 @@ impl Render for Avatar {
             let caret_bar = move || div().ml(px(1.0)).w(px(2.0)).h(px(BODY_FONT)).bg(rgb(caret_c));
             let ghost_lines = if placeholder.is_some() { Vec::new() } else { lines.clone() };
             if let Some(ph) = &placeholder {
-                let b = row_band(0);
-                let mut row = div().h(px(LINE_H)).flex().items_center().relative().left(px(b.dx)).when(!b.on, |d| d.invisible());
+                let mut row = div().h(px(LINE_H)).flex().items_center();
                 if caret {
                     row = row.child(caret_bar());
                 }
@@ -6657,47 +6675,25 @@ impl Render for Avatar {
                                     cx.notify();
                                 }),
                             );
-                        let b = row_band(k);
-                        body = body.child(div().h(px(LINE_H)).flex().items_center().relative().left(px(b.dx)).when(!b.on, |d| d.invisible()).child(chip));
+                        body = body.child(div().h(px(LINE_H)).flex().items_center().when(k >= fits, |d| d.invisible()).child(chip));
                         continue;
                     }
                     // A chip's opening backtick, typed out before its first letter: not shown.
                     let t = if mode == PanelMode::Reply && t.trim() == "`" { String::new() } else { t };
-                    let b = row_band(k);
-                    let mut row = div()
-                        .h(px(LINE_H))
-                        .flex()
-                        .items_center()
-                        .whitespace_nowrap()
-                        .relative()
-                        .left(px(b.dx))
-                        .when(!b.on, |d| d.invisible())
-                        .child(rgb_split(b.split, |c| div().when_some(c, |d, c| d.text_color(rgb(c))).child(t.clone())));
+                    let mut row = div().h(px(LINE_H)).flex().items_center().whitespace_nowrap().when(k >= fits, |d| d.invisible()).child(t);
                     if caret && k + 1 == n_lines {
                         row = row.child(caret_bar());
                     }
                     body = body.child(row);
                 }
             }
-            if clipped {
-                // Mid-motion: the rows clipped above the footer (they are laid out for the size
-                // it is going to).
-                body = body.bottom(px(foot_zone)).overflow_hidden();
-            }
+            // The words stay inside the panel's inner box (laid out for the size it is going to).
+            body = body.bottom(px(foot_zone)).overflow_hidden();
             // The snapshot a closing bubble is drawn from.
-            self.panel_last_snap = Some(GhostSnap {
-                head_l,
-                bottom,
-                vis: (vis_l, vis_r),
-                size: (w, h),
-                header_label: header_label.clone(),
-                label: label.clone(),
-                lines: ghost_lines,
-                rows,
-                foot_zone,
-                frame_c,
-            });
+            self.panel_last_snap = Some(GhostSnap { g, header_label: header_label.clone(), label: label.clone(), lines: ghost_lines, foot_zone, frame_c });
             root = root.child(bg);
+            // Its words (everything inside the shell) at their level: hidden while the shell
+            // opens or glitches, a short fade once it has settled.
             let mut panel = div()
                 .id("bubble")
                 .absolute()
@@ -6705,8 +6701,9 @@ impl Render for Avatar {
                 .top(px(y))
                 .w(px(w))
                 .h(px(h))
-                .when(clipped, |d| d.overflow_hidden())
-                .child(band_shift(header, head_band, w, h))
+                .overflow_hidden()
+                .when(words < 1.0, |d| d.opacity(words))
+                .child(header)
                 .child(body);
             // Slanted keys: a hollow red chevron key, DENY bone with the focus ring, the rest
             // (ALLOW, REVIEW, ANSWER) solid red with ink type. Unarmed, they sit back.
@@ -6985,15 +6982,10 @@ impl Render for Avatar {
                 PanelMode::Probe => {}
             }
             if footer {
-                panel = panel.child(band_shift(row, foot_band, w, h));
+                panel = panel.child(row);
             } else if chip_last {
                 // The collapse key on the chip's row, at its right.
-                panel = panel.child(band_shift(
-                    div().absolute().bottom(px(PAD_B + 2.0)).right(px(PAD_R - 4.0)).h(px(LINE_H - 4.0)).flex().items_center().child(collapse_btn(cx)),
-                    row_band(rows.saturating_sub(1)),
-                    w,
-                    h,
-                ));
+                panel = panel.child(div().absolute().bottom(px(PAD_B + 2.0)).right(px(PAD_R - 4.0)).h(px(LINE_H - 4.0)).flex().items_center().child(collapse_btn(cx)));
             }
             if mode == PanelMode::Reply {
                 panel = panel
