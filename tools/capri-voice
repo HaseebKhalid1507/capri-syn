@@ -228,15 +228,16 @@ def wake_says(text):
     return wake_find(text) is not None
 
 
-def wake_rest(text, loose=False):
+def wake_rest(text, loose=False, again=True):
     """What he said after "hey capri" (the phrase cut), and whether it asks for hands-free. Whisper's doubled phrase
-    ("Hey, Capri. Hey, Capri." for one "Hey Capri" and a pause) is cut whole. loose: see wake_loose."""
+    ("Hey, Capri. Hey, Capri." for one "Hey Capri" and a pause) is cut whole (again=False: only the first; see the
+    check's bare). loose: see wake_loose."""
     text = unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode()
     e = wake_find(text)
     if e is None and loose:
         e = wake_loose(text)
     rest = text[e:].lstrip(" ,.!?:;-") if e is not None else text.strip()
-    while e is not None and (e2 := wake_find(rest, start=True)) is not None:
+    while again and e is not None and (e2 := wake_find(rest, start=True)) is not None:
         rest = rest[e2:].lstrip(" ,.!?:;-")
     rest = rest[:1].upper() + rest[1:]
     words = re.sub(r"[^a-z' ]", ' ', rest.lower().replace('-', ' ')).split()
@@ -2193,7 +2194,9 @@ class Voice:
                         # The check heard more than the phrase: the turn is the phrase and what follows (the phrase is
                         # cut from its words). Only the phrase ("Hey Capri." then a pause): the turn starts after the
                         # checked audio, so his pause isn't taken as the end of the turn; 5 s for him to start.
-                        bare = not wake_rest(cand.get('text', ''))[0]
+                        # (the check's doubled "Hey Capri. Hey Capri." is not bare: a slow speaker's phrase runs past the
+                        # checked window, and a turn started there begins with its tail; the first utterance cuts it instead)
+                        bare = not wake_rest(cand.get('text', ''), again=False)[0]
                         cut = int(WAKE_CHECK_DELAY_S * MIC_RATE) * 2
                         if hf_on:
                             # Hands-free: the same stream goes on as one, from the phrase (its first utterance cut) or after it.
@@ -3112,6 +3115,7 @@ def selftest_wake():
     for t in ('Hey, Capri. Hey, Capri.', 'Hey Capri. Hey Capri.', 'A capri. A capri.', 'Haikapri, hey Capri!'):
         assert wake_rest(t) == ('', False), t
     assert wake_rest("Hey Capri. Hey Capri, what's up?") == ("What's up?", False) and wake_rest('Hey Capri, tell Capri hi') == ('Tell Capri hi', False)
+    assert wake_rest('Hey, Capri. Hey, Capri.', again=False) == ('Hey, Capri.', False), "the check's bare: as before"
     # the first words after a wake: the misheard phrase is cut (loose), not elsewhere
     for t in ('Aye, capri', 'And capri', 'Ee capri', 'It Capri.', 'K-Capri', '-e, capri,', 'Capri.', 'a capri'):
         assert wake_first(t, loose=True) == '', t

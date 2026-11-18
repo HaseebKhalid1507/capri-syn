@@ -183,9 +183,9 @@ thresholds) was fitted on stock synthetic voices only (Kokoro packs, espeak-ng),
     heard more than the phrase, and Whisper decodes it again there, sometimes wrong: on his bare "Hey Capri"
     takes it wrote "Aye, capri", "And capri", "Ee capri", and live, five times since Nov 16, "Take a breath", which went to her
     as his turn. Now:
-    - the phrase is cut from the words as Whisper spells it, also doubled (the check's "Hey, Capri. Hey,
-      Capri." for one "Hey Capri" and a pause is the phrase alone, so the turn starts after it) and misheard as
-      the first word or two ("Aye, capri, pause the music" sends "Pause the music");
+    - the phrase is cut from the words as Whisper spells it, also doubled ("Hey, Capri. Hey, Capri." for one
+      "Hey Capri" and a pause is the phrase alone) and misheard as the first word or two ("Aye, capri, pause the
+      music" sends "Pause the music");
     - words with no trace of the phrase ("Take a breath") are the phrase misheard: the audio after the check's
       window decides. Under a hands-free utterance's speech there (8 Silero frames, 256 ms), it is the phrase
       alone: nothing is sent, hands-free goes on. Otherwise that audio is decoded on its own and sent.
