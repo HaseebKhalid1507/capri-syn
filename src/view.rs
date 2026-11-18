@@ -793,6 +793,8 @@ pub struct Avatar {
     /// The tag's resting hair line and column while she stays put (her place, the
     /// lowest-reaching row, her head's x).
     tag_pin: Cell<Option<(TagPinKey, i32, i32)>>,
+    /// The tag's bottom edge, easing while she stays put.
+    tag_y: Option<(TagPinKey, crate::hud::Tween)>,
     /// The pill's size as last shown (the bubble opens out of it).
     pill_last: Option<(f32, f32)>,
     /// `SA_HUD_PROF`: each frame's main-thread time while the HUD moves, and whether this
@@ -1057,6 +1059,7 @@ impl Avatar {
             hud_busy_paint: false,
             pill_last: None,
             tag_pin: Cell::new(None),
+            tag_y: None,
             hud_top: Cell::new(None),
             tag_box: Rc::new(Cell::new(None)),
             motion_at: Cell::new(None),
@@ -6397,8 +6400,19 @@ impl Render for Avatar {
                 }
                 row = row.child(ring);
                 let centre = tag_l + nudge;
-                // Asleep, the plate sits a little lower.
-                let tag_bottom = (l.avatar_y + tag_hair) as f32 / sf - TAG_GAP + look.drop;
+                // Asleep, the plate sits a little lower. While she stays put a change of its
+                // height (a mood's pose) eases there; when she moves it goes with her.
+                let raw_bottom = (l.avatar_y + tag_hair) as f32 / sf - TAG_GAP + look.drop;
+                let tag_bottom = match &mut self.tag_y {
+                    Some((k, y)) if *k == pin_key && hud_motion => {
+                        y.go(raw_bottom, now, crate::hud::SIZE_MS);
+                        y.at(now)
+                    }
+                    _ => {
+                        self.tag_y = Some((pin_key, crate::hud::Tween::still(raw_bottom)));
+                        raw_bottom
+                    }
+                };
                 let mut holder = div()
                     .absolute()
                     .left_0()
@@ -7224,7 +7238,7 @@ impl Render for Avatar {
             root = root.child(panel);
         }
         // The HUD moves: a frame per present until it settles, and nothing after.
-        let hud_busy = self.tag_fx.busy(now) || self.panel_fx.busy(now) || self.ghost.is_some();
+        let hud_busy = self.tag_fx.busy(now) || self.panel_fx.busy(now) || self.ghost.is_some() || self.tag_y.as_ref().is_some_and(|y| y.1.moving(now));
         self.hud_busy_paint = hud_busy && self.hud_prof.is_some();
         if hud_busy {
             window.request_animation_frame();

@@ -78,9 +78,10 @@ pub fn blend(u: f32) -> f32 {
     u * u * (3.0 - 2.0 * u)
 }
 
-/// Where the crossfade's two sides cross (as parts of `XFADE_MS`): the old words ease down
-/// to `FLOOR` before it, the new rise from `FLOOR` after it, and inside it (12 ms: one frame
-/// at most) both pass between `FLOOR` and nothing. Never two labels at half over each other.
+/// Where the crossfade's two sides cross (as parts of `XFADE_MS`): the old words hold, then
+/// drop to `FLOOR` before it (ease-in); the new jump from `FLOOR` after it (ease-out); inside
+/// it (12 ms: one frame at most) both pass between `FLOOR` and nothing. Never two labels at
+/// half over each other, and as few faint frames as that allows.
 const CROSS: (f32, f32) = (0.45, 0.55);
 
 /// The one crossfade at `u` (0..1 of `XFADE_MS`): the old words' level, the new words'.
@@ -88,12 +89,14 @@ pub fn xfade(u: f32) -> (f32, f32) {
     let u = u.clamp(0.0, 1.0);
     let (a, b) = CROSS;
     if u <= a {
-        (1.0 - (1.0 - FLOOR) * blend(u / a), 0.0)
+        let v = u / a;
+        (1.0 - (1.0 - FLOOR) * v * v, 0.0)
     } else if u < b {
         let k = (u - a) / (b - a);
         (FLOOR * (1.0 - k), FLOOR * k)
     } else {
-        (0.0, FLOOR + (1.0 - FLOOR) * blend((u - b) / (1.0 - b)))
+        let v = 1.0 - (u - b) / (1.0 - b);
+        (0.0, FLOOR + (1.0 - FLOOR) * (1.0 - v * v))
     }
 }
 
