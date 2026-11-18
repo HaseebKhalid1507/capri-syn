@@ -124,6 +124,30 @@ pub struct Settings {
     pub mirror: MirrorSettings,
     pub voice: VoiceSettings,
     pub intro: IntroSettings,
+    pub hud: HudSettings,
+}
+
+/// `[hud]`: how her bubble and status tag move. `glitch` (default true): they glitch as they
+/// open, close and change (bands, an RGB split, a red tear); false: no glitch (reduced
+/// motion). `motion` (default true): sizes ease (the bubble growing to a reply, the tag's
+/// width, the pill); false: they change at once.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HudSettings {
+    pub glitch: bool,
+    pub motion: bool,
+}
+
+impl Default for HudSettings {
+    fn default() -> Self {
+        HudSettings { glitch: true, motion: true }
+    }
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct HudRaw {
+    glitch: Option<bool>,
+    motion: Option<bool>,
 }
 
 /// `[intro]`: the launch. `cinematic` (default true): her close-up over the desktop before the
@@ -393,6 +417,8 @@ struct FileRaw {
     voice: Option<VoiceRaw>,
     #[serde(default)]
     intro: Option<IntroRaw>,
+    #[serde(default)]
+    hud: Option<HudRaw>,
 }
 
 #[derive(Deserialize, Default)]
@@ -621,7 +647,12 @@ impl Settings {
                 };
             }
         }
-        let Some(r) = raw.brain else { return Ok(Settings { brain: b, ragdoll, session, music, display, mirror, voice, intro }) };
+        let mut hud = HudSettings::default();
+        if let Some(h) = raw.hud {
+            hud.glitch = h.glitch.unwrap_or(hud.glitch);
+            hud.motion = h.motion.unwrap_or(hud.motion);
+        }
+        let Some(r) = raw.brain else { return Ok(Settings { brain: b, ragdoll, session, music, display, mirror, voice, intro, hud }) };
         if let Some(v) = r.enabled {
             b.enabled = v;
         }
@@ -676,7 +707,7 @@ impl Settings {
         }
         // Drift is a transport (by distance), never drawn from the pool.
         b.arrivals.retain(|p| p.0 != Arrival::Drift);
-        Ok(Settings { brain: b, ragdoll, session, music, display, mirror, voice, intro })
+        Ok(Settings { brain: b, ragdoll, session, music, display, mirror, voice, intro, hud })
     }
 
     /// The file's settings (defaults when there is none). Err: a bad file (keep the old values).
@@ -860,6 +891,15 @@ mod tests {
         assert_eq!(Settings::parse("[display]\ncomposited = false\n").unwrap().display.composited, Some(false));
         assert!(Settings::parse("[display]\ncomposited = \"maybe\"\n").is_err());
         assert!(Settings::parse("[display]\nblur = 1\n").is_err());
+    }
+
+    #[test]
+    fn hud_glitch_and_motion() {
+        assert_eq!(Settings::parse("").unwrap().hud, HudSettings { glitch: true, motion: true });
+        assert_eq!(Settings::parse("[hud]\nglitch = false\n").unwrap().hud, HudSettings { glitch: false, motion: true });
+        assert!(!Settings::parse("[hud]\nmotion = false\n").unwrap().hud.motion);
+        assert!(Settings::parse("[hud]\nglitch = \"yes\"\n").is_err());
+        assert!(Settings::parse("[hud]\nfade = true\n").is_err());
     }
 
     #[test]

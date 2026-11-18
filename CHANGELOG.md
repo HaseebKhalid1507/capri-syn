@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### The HUD moves as one system
+- One curve (ease-out, 2 % past the target at most, no wobble) and one set of durations, named in
+  `src/hud.rs`: a size change 220 ms, the bubble opening 260 ms, words out 90 ms (a closing bubble's
+  by 50 ms), words back 80 ms, a close's shrink 110 ms, into the pill 180 ms, a glitch 2 frames (67 ms).
+- **The glitch never touches text.** It shifts and splits only the empty shell (the plate, the frame,
+  their ring), in whole bands kept inside the shell's own box. Words fade out before their box moves
+  or glitches, and come back clean once it has settled.
+- **The bubble** opens from her (85 % at her tail) with a glitch-in, then its words; grows and shrinks
+  to its reply instead of snapping, a new line showing only once there is room for it, the words
+  clipped to the inner box; a new reply swaps its words through the empty shell (streaming text never
+  glitches); closing, its words go first, then the shell shrinks and glitches out, or eases into the
+  pill. The pill opens back out of its own size.
+- **The tag** (and the pill, and the unread chip) swaps its words through its empty plate while the
+  plate's width eases to the new text. A label shows at least 350 ms; changes meanwhile wait, and only
+  the latest shows (no strobe). Its place is pinned while she stays put (a mood's pose doesn't move
+  it). It comes and goes quietly when something else moves it (the bubble, a teleport, his hand).
+- `[hud] glitch` and `[hud] motion` (both default on). Alpha mode only: under the X shape (no
+  compositor) the HUD changes at once, as before. The Line and the menu don't glitch.
+- `SA_HUD_PROF=1` logs frame intervals and main-thread frame times while the HUD moves.
+
 ### One installer: `install.sh` (Linux), `install.ps1` (Windows)
 - `curl -fsSL …/install.sh | bash`, `irm …/install.ps1 | iex`, or either from a checkout. Seven steps, the
   same on both, each one checks first, so a rerun is an upgrade:

@@ -512,6 +512,61 @@ pub fn trail(x1: f32, y0: f32, y1: f32, step: u64) -> Vec<(Vec<Pt>, u8)> {
         .collect()
 }
 
+/// One outline easing into another (`k` 0..1): both walked from their top-left corner the same
+/// way round and sampled at every corner of either (plus an even spread), so it is exactly `a`
+/// at 0 and exactly `b` at 1, with no corner rounded off on the way.
+pub fn morph(a: &[Pt], b: &[Pt], k: f32) -> Vec<Pt> {
+    if k <= 0.0 || b.len() < 3 {
+        return a.to_vec();
+    }
+    if k >= 1.0 || a.len() < 3 {
+        return b.to_vec();
+    }
+    let (a, b) = (walk(a), walk(b));
+    let (ta, tb) = (fractions(&a), fractions(&b));
+    let mut ts: Vec<f32> = ta.iter().chain(&tb).copied().chain((0..32).map(|i| i as f32 / 32.0)).collect();
+    ts.sort_by(f32::total_cmp);
+    ts.dedup_by(|x, y| (*x - *y).abs() < 1e-4);
+    ts.iter()
+        .map(|&t| {
+            let (p, q) = (at_fraction(&a, &ta, t), at_fraction(&b, &tb, t));
+            (p.0 + (q.0 - p.0) * k, p.1 + (q.1 - p.1) * k)
+        })
+        .collect()
+}
+
+/// A polygon clockwise on screen, starting at its top-left-most corner.
+fn walk(p: &[Pt]) -> Vec<Pt> {
+    let area: f32 = (0..p.len()).map(|i| {
+        let (a, b) = (p[i], p[(i + 1) % p.len()]);
+        a.0 * b.1 - b.0 * a.1
+    }).sum();
+    let mut v: Vec<Pt> = if area < 0.0 { p.iter().rev().copied().collect() } else { p.to_vec() };
+    let start = (0..v.len()).min_by(|&i, &j| (v[i].0 + v[i].1).total_cmp(&(v[j].0 + v[j].1))).unwrap_or(0);
+    v.rotate_left(start);
+    v
+}
+
+/// Each corner's place along the perimeter, 0..1.
+fn fractions(p: &[Pt]) -> Vec<f32> {
+    let mut acc = vec![0.0f32];
+    for i in 0..p.len() {
+        let (a, b) = (p[i], p[(i + 1) % p.len()]);
+        acc.push(acc[i] + ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt());
+    }
+    let total = acc.pop().unwrap_or(1.0).max(1e-3);
+    acc.iter().map(|x| x / total).collect()
+}
+
+/// The point `t` (0..1) along the perimeter.
+fn at_fraction(p: &[Pt], f: &[f32], t: f32) -> Pt {
+    let i = f.iter().rposition(|&x| x <= t).unwrap_or(0);
+    let (a, b) = (p[i], p[(i + 1) % p.len()]);
+    let (f0, f1) = (f[i], if i + 1 < f.len() { f[i + 1] } else { 1.0 });
+    let u = if f1 > f0 { (t - f0) / (f1 - f0) } else { 0.0 };
+    (a.0 + (b.0 - a.0) * u, a.1 + (b.1 - a.1) * u)
+}
+
 /// `pts` grown outward by `d` (inward if negative), mitred.
 pub fn offset(pts: &[Pt], d: f32) -> Vec<Pt> {
     let n = pts.len();
@@ -817,7 +872,22 @@ pub fn glyph_at(kind: &str, fg: u32, bg: u32, size: f32) -> impl IntoElement + u
 
 #[cfg(test)]
 mod tests {
-    use super::{Cut, Pal, Plate, Pt, bubble, contrast, half_block, offset, outline, tag_marks};
+    #[test]
+    fn a_morph_is_exact_at_its_ends_and_keeps_every_corner() {
+        let arrow = [(9.0, 0.0), (196.0, 0.0), (206.0, 12.5), (196.0, 25.0), (0.0, 25.0)];
+        let square = [(40.0, 0.0), (160.0, 0.0), (160.0, 25.0), (40.0, 25.0)];
+        let has = |v: &[Pt], p: Pt| v.iter().any(|q| (q.0 - p.0).abs() < 1e-3 && (q.1 - p.1).abs() < 1e-3);
+        let m0 = morph(&arrow, &square, 1e-6);
+        assert!(arrow.iter().all(|&p| has(&m0, p)), "every corner of the start");
+        let m1 = morph(&arrow, &square, 1.0 - 1e-6);
+        assert!(square.iter().all(|&p| has(&m1, p)), "every corner of the end");
+        let mid = morph(&arrow, &square, 0.5);
+        let (x0, x1) = mid.iter().fold((f32::MAX, f32::MIN), |a, p| (a.0.min(p.0), a.1.max(p.0)));
+        assert!(x0 > 0.0 && x0 < 40.0 && x1 > 160.0 && x1 < 206.0, "between the two: {x0}..{x1}");
+        assert!(mid.iter().all(|p| p.1 >= -1e-3 && p.1 <= 25.0 + 1e-3));
+    }
+
+    use super::{Cut, Pal, Plate, Pt, bubble, contrast, half_block, morph, offset, outline, tag_marks};
 
     const P: Pal = Pal::SHARD;
 

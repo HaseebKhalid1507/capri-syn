@@ -178,6 +178,8 @@ const SWEEP_STEPS: u64 = 10;
 const SWEEP_STEP_MS: u64 = 70;
 /// Clear air between the status tag and the hair right under it (logical px).
 const TAG_GAP: f32 = 13.0;
+/// The width of hair the tag clears at least (logical px).
+const TAG_HAIR_W: f32 = 220.0;
 const MIN_WIDTH: f32 = 500.0;
 /// Everything that touches a perch edge keeps this far from the window's corners (logical px).
 const EDGE_MARGIN: f32 = 60.0;
@@ -280,6 +282,8 @@ struct Bubble {
     /// Widest the panel has been: it never narrows while open (a narrower shape would
     /// land before the narrower present and clip the old one for a frame).
     width: f32,
+    /// This reply's number: a new one in an open bubble pulses, streaming text doesn't.
+    serial: u64,
 }
 
 /// How long a typed-out bubble stays open.
@@ -770,6 +774,38 @@ pub struct Avatar {
     /// Where the open menu goes (the click, x, y), decided once: its side never changes while
     /// it is open, whatever her pose does.
     menu_place: Option<(Point<Pixels>, f32, f32, bool)>,
+    /// `[hud]`: the bubble's and tag's glitch and motion.
+    hud_cfg: crate::settings::HudSettings,
+    /// The tag's (and pill's) glitch and width.
+    tag_fx: crate::hud::TagFx<TagShow>,
+    /// The open bubble's size and glitch.
+    panel_fx: crate::hud::PanelFx,
+    /// A bubble leaving: drawn from what it last showed.
+    ghost: Option<crate::hud::Ghost<GhostSnap>>,
+    /// What the open bubble showed last frame (the ghost's snapshot when it closes).
+    panel_last_snap: Option<GhostSnap>,
+    /// A reply just replaced in the open bubble: its lines, crossing out.
+    panel_old: Option<Vec<String>>,
+    /// Opening out of the pill: its width (kept past the frame it was taken).
+    pill_open_from: Option<(f32, f32)>,
+    /// The pill's content as the bubble opened out of it (held: a status change meanwhile
+    /// doesn't swap its words mid-open).
+    pill_open_show: Option<TagShow>,
+    /// Bubbles made: each reply's own number (a new one in an open bubble pulses).
+    bubble_serial: u64,
+    /// The tag's resting hair line and column while she stays put (her place, the
+    /// lowest-reaching row, her head's x).
+    tag_pin: Cell<Option<(TagPinKey, i32, i32)>>,
+    /// The tag's bottom edge, easing while she stays put.
+    tag_y: Option<(TagPinKey, crate::hud::Tween)>,
+    /// The pill's size as last shown (the bubble opens out of it).
+    pill_last: Option<(f32, f32)>,
+    /// `SA_HUD_PROF`: each frame's main-thread time while the HUD moves, and whether this
+    /// frame records it.
+    hud_paint: Rc<RefCell<Vec<f32>>>,
+    hud_busy_paint: bool,
+    /// `SA_HUD_PROF`: frame times while the HUD moves.
+    hud_prof: Option<Vec<(Instant, f32)>>,
     /// The HUD's top while a bubble is up: (resting frame, avatar-local device px).
     hud_top: Cell<Option<(usize, i32)>>,
     /// Last laid-out box of the status tag (window logical px), to tear it in a glitch.
@@ -1013,6 +1049,21 @@ impl Avatar {
             tag_w: Rc::new(Cell::new(150.0)),
             menu_h: Rc::new(Cell::new((0, 0.0))),
             menu_place: None,
+            hud_cfg: crate::settings::Settings::load().map(|s| s.hud).unwrap_or_default(),
+            tag_fx: Default::default(),
+            panel_fx: Default::default(),
+            ghost: None,
+            panel_last_snap: None,
+            panel_old: None,
+            pill_open_from: None,
+            pill_open_show: None,
+            bubble_serial: 0,
+            hud_prof: None,
+            hud_paint: Rc::new(RefCell::new(Vec::new())),
+            hud_busy_paint: false,
+            pill_last: None,
+            tag_pin: Cell::new(None),
+            tag_y: None,
             hud_top: Cell::new(None),
             tag_box: Rc::new(Cell::new(None)),
             motion_at: Cell::new(None),
@@ -1989,6 +2040,45 @@ impl Avatar {
             self.music.is_none() && self.spec(self.mood).map_or(self.mood == Mood::Idle, |s| s.autonomy) && !self.activities().is_empty();
         let next = if autonomous { Some(now + self.autonomy_gap()) } else { None };
         self.next_activity = next;
+    }
+
+    /// `SA_HUD_PROF=1`: while the HUD moves, each frame's start and render time; when it
+    /// settles, the frame intervals (missed: over 25 ms) and render times, in the log.
+    fn hud_prof_note(&mut self, now: Instant, busy: bool) {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if !*ON.get_or_init(|| std::env::var_os("SA_HUD_PROF").is_some()) {
+            return;
+        }
+        let v = self.hud_prof.get_or_insert_with(Vec::new);
+        if busy || !v.is_empty() {
+            v.push((now, now.elapsed().as_secs_f32() * 1000.0));
+        }
+        if busy || v.len() < 3 {
+            if !busy {
+                v.clear();
+            }
+            return;
+        }
+        let q = |mut x: Vec<f32>, f: f32| {
+            x.sort_by(f32::total_cmp);
+            x[((x.len() - 1) as f32 * f) as usize]
+        };
+        let gaps: Vec<f32> = v.windows(2).map(|w| w[1].0.duration_since(w[0].0).as_secs_f32() * 1000.0).collect();
+        let r: Vec<f32> = std::mem::take(&mut *self.hud_paint.borrow_mut());
+        let r = if r.is_empty() { vec![0.0] } else { r };
+        elog!(
+            "hud-prof: {} frames over {:.0} ms; interval p50 {:.1} p95 {:.1} max {:.1} ms, {} over 25 ms; frame (render+layout+paint) p50 {:.2} p95 {:.2} max {:.2} ms",
+            v.len(),
+            v.last().unwrap().0.duration_since(v[0].0).as_secs_f32() * 1000.0,
+            q(gaps.clone(), 0.5),
+            q(gaps.clone(), 0.95),
+            q(gaps.clone(), 1.0),
+            gaps.iter().filter(|&&g| g > 25.0).count(),
+            q(r.clone(), 0.5),
+            q(r.clone(), 0.95),
+            q(r, 1.0)
+        );
+        v.clear();
     }
 
     fn status_of(&self, m: Mood) -> Status {
@@ -3249,6 +3339,10 @@ impl Avatar {
             stream: false,
             more: false,
             width: 0.0,
+            serial: {
+                self.bubble_serial += 1;
+                self.bubble_serial
+            },
         });
         if self.mood != Mood::Talking {
             self.set_mood(Mood::Talking, now);
@@ -3899,6 +3993,10 @@ impl Avatar {
                 stream: true,
                 more: b.busy,
                 width: 0.0,
+                serial: {
+                    self.bubble_serial += 1;
+                    self.bubble_serial
+                },
             });
         }
         // A spoken turn: its sentences go to the sidecar; the bubble is the caption.
@@ -4980,6 +5078,7 @@ fn chevron(dir: Chevron, colour: Rgba) -> impl IntoElement {
     .h(px(10.0))
 }
 
+#[derive(Clone, Debug, PartialEq)]
 struct Status {
     label: String,
     tone: u32,
@@ -4989,6 +5088,313 @@ struct Status {
     plate: Plate,
     /// Its tone key (moods.json): what kind of state it is.
     key: String,
+}
+
+/// What a tag is drawn from (derived from what it shows, this frame).
+#[derive(Clone)]
+struct TagArt {
+    look: theme::Look,
+    badge: Option<String>,
+    text: String,
+    /// WORKING: the label on the red block.
+    name_part: Option<String>,
+    rest: String,
+    glyph_kind: String,
+    collapsed: bool,
+    sweep: Option<f32>,
+    step: u64,
+    shade: [u32; 3],
+}
+
+impl TagArt {
+    fn h(&self) -> f32 {
+        if self.badge.is_some() { 28.0 } else { 25.0 }
+    }
+}
+
+/// A tag. `wide`: its plate drawn this wide, its content (laid out `nat` wide) centred in it and
+/// kept inside it; None: as laid out. `split`: its border's RGB split, px. `part`: its shell
+/// (plate, block, backdrops), its words (type, glyphs, marks, the chevron) or both.
+fn tag_ring(pal: Pal, a: &TagArt, wide: Option<(f32, f32)>, split: f32, part: Part) -> Div {
+    let TagArt { look, badge, text, name_part, rest, glyph_kind, collapsed, sweep, step, shade } = a.clone();
+    let base = part == Part::All;
+    // The content inside a plate drawn `wide`: centred in it as laid out, kept inside it.
+    let clip = |plate: Div, row: Div| -> Div {
+        match wide {
+            Some((w, nat)) => plate
+                .w(px(w))
+                .flex_none()
+                .child(div().absolute().top_0().left_0().size_full().overflow_hidden().child(row.absolute().top_0().left(px((w - nat) * 0.5)).h_full())),
+            None => plate.child(row),
+        }
+    };
+    let fringe = move |cut: Cut| {
+        canvas(
+            |_, _, _| (),
+            move |b, _, window, _| {
+                let (x0, y0, x1, y1) = (f32::from(b.left()), f32::from(b.top()), f32::from(b.right()), f32::from(b.bottom()));
+                // Clear of its dark ring: the split shows at the border, nowhere else.
+                let d = split + theme::RING;
+                for (dx, c) in [(-d, fx::CYAN), (d, fx::PINK)] {
+                    for p in theme::outline(cut, x0 + dx, y0, x1 + dx, y1) {
+                        theme::fill_poly(window, &p, rgb(c));
+                    }
+                }
+            },
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+    };
+    let backed = |cut: Cut, f: Fill| div().relative().flex().items_center().child(theme::backdrop(cut, f));
+    let say = |d: Div| d;
+    if let Some(b) = badge.clone() {
+        let plate = div()
+            .relative()
+            .flex()
+            .items_center()
+            .when(base && split > 0.0, |d| d.child(fringe(Cut::Unread)))
+            .when(base, |d| d.child(theme::backdrop(Cut::Unread, Fill::framed(pal.panel, pal.accent, 2.0).ringed(pal.ring))))
+            .h(px(28.0))
+            .text_size(px(TAG_FONT))
+            .line_height(px(TAG_FONT + 1.0))
+            .font_weight(FontWeight::BOLD);
+        let row = div()
+            .flex()
+            .items_center()
+            .gap(px(9.0))
+            .pr(px(22.0))
+            .child(
+                backed(Cut::Badge, Fill::solid(pal.text))
+                    .h_full()
+                    .gap(px(6.0))
+                    .pl(px(11.0))
+                    .pr(px(14.0))
+                    .text_color(rgb(pal.ink))
+                    .child(say(div().child(glyph("dot", pal.accent, pal.text))))
+                    .child(say(tracked(&b, 1.0))),
+            )
+            .child(say(div().text_color(rgb(pal.text)).font_weight(FontWeight::SEMIBOLD).child(tracked(&text, 0.2))))
+            // It opens: say so, inside the plate.
+            .child(backed(Cut::Slant(6.0), Fill::solid(pal.accent)).h(px(18.0)).px(px(8.0)).text_color(rgb(pal.ink)).child(say(tracked("READ ▸", 1.2))));
+        return clip(plate, row.h(px(28.0)));
+    }
+    let (pad_l, pad_r) = look.plate.pad();
+    let fill = Fill::framed(look.fill, look.edge, 1.5).dashed(look.dash).ringed(pal.ring);
+    let split_plate = look.plate == Plate::Split;
+    // DONE's tick is drawn through the plate's corner, not as a glyph.
+    let mark = match look.plate {
+        Plate::Split if glyph_kind == "cross" => "shard".to_string(),
+        Plate::Check => String::new(),
+        _ => glyph_kind.clone(),
+    };
+    let (ring_c, block_c, sweep_c) = (pal.ring, pal.accent, theme::mix(pal.accent, pal.text, 0.45));
+    let block = name_part.clone().map(|n| {
+        div()
+            .relative()
+            .h_full()
+            .ml(px(-pad_l))
+            .pl(px(pad_l))
+            .pr(px(13.0))
+            .flex()
+            .items_center()
+            .gap(px(7.0))
+            .text_color(rgb(pal.ink))
+            .child(
+                canvas(
+                    |_, _, _| (),
+                    move |b, _, window, _| {
+                        let (x0, y0, x1, y1) = (f32::from(b.left()), f32::from(b.top()), f32::from(b.right()), f32::from(b.bottom()));
+                        let (blk, sw) = theme::half_block(x0, y0, x1, y1, sweep);
+                        theme::fill_poly(window, &blk, rgb(block_c));
+                        if let Some(sw) = sw {
+                            theme::fill_poly(window, &sw, rgb(sweep_c));
+                        }
+                    },
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+            )
+            .child(say(div().child(glyph(&mark, pal.ink, pal.accent))))
+            .child(say(tracked(&n, 1.5)))
+    });
+    let half = block.is_some();
+    let plate = div()
+        .relative()
+        .flex()
+        .items_center()
+        .h(px(25.0))
+        .text_size(px(TAG_FONT))
+        .line_height(px(TAG_FONT + 1.0))
+        .font_weight(FontWeight::BOLD)
+        .text_color(rgb(look.ink))
+        .when(base && split > 0.0, |d| d.child(fringe(Cut::Tag(look.plate))))
+        .child(
+            canvas(
+                |_, _, _| (),
+                move |b, _, window, _| {
+                    let (x0, y0, x1, y1) = (f32::from(b.left()), f32::from(b.top()), f32::from(b.right()), f32::from(b.bottom()));
+                    if base {
+                        tag_base_paint(window, &look, (x0, y0, x1, y1), fill, ring_c);
+                    }
+                    if look.trail {
+                        for (p, lvl) in theme::trail(x1, y0, y1, step) {
+                            theme::fill_poly(window, &p, rgb(shade[lvl as usize]));
+                        }
+                    }
+                    // Its marks (DONE's tick, the bracket ticks), over it.
+                    for p in theme::tag_marks(look.plate, x0, y0, x1, y1) {
+                        theme::fill_poly(window, &theme::offset(&p, theme::RING), rgb(ring_c));
+                        theme::fill_poly(window, &p, rgb(look.mark));
+                    }
+                },
+            )
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full(),
+        );
+    let row = div()
+        .flex()
+        .items_center()
+        .gap(px(7.0))
+        .pl(px(pad_l))
+        .pr(px(pad_r))
+        .children(block)
+        // The ✕'s shard broken off with the plate's piece.
+        .when(!half, |d| {
+            d.child(say(match look.halo {
+                // The disc: 15 px, the glyph centred in it.
+                Some(h) => div()
+                    .relative()
+                    .size(px(15.0))
+                    .mx(px(-2.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(div().absolute().top_0().left_0().child(theme::glyph_at("disc", h, h, 15.0)))
+                    .child(glyph(&mark, look.mark, h)),
+                None => div().when(split_plate, |d| d.relative().left(px(-3.0)).top(px(3.0))).child(glyph(&mark, look.mark, look.fill)),
+            }))
+        })
+        // ERROR: the type starts inside the toothed piece, clear of the break.
+        .child(say(theme::metered(&rest, 1.5, look.ink).when(split_plate, |d| d.ml(px(8.0)))))
+        // A reply put away behind the plate: a small up-chevron inside it.
+        .when(collapsed, |d| d.child(say(div().child(chevron(Chevron::Up, rgb(look.ink))))));
+    clip(plate, row.h(px(25.0)))
+}
+
+/// A tag's base, as laid out: its outline's ring, edge and fill.
+fn tag_base_paint(window: &mut Window, look: &theme::Look, (x0, y0, x1, y1): (f32, f32, f32, f32), fill: Fill, ring_c: u32) {
+    let polys = theme::outline(Cut::Tag(look.plate), x0, y0, x1, y1);
+    match theme::tag_inner(look.plate, x0, y0, x1, y1, 1.5) {
+        Some(inner) => {
+            theme::paint(window, &polys, Fill::solid(look.edge).ringed(ring_c));
+            for p in inner {
+                theme::fill_poly(window, &p, rgb(look.fill));
+            }
+        }
+        None => theme::paint(window, &polys, fill),
+    }
+}
+
+/// How a tag's base is drawn: its cut, fill, edge, edge width; None when it can't morph (the
+/// split plate, a dashed edge).
+fn base_of(pal: Pal, a: &TagArt) -> Option<(Cut, u32, u32, f32)> {
+    match &a.badge {
+        Some(_) => Some((Cut::Unread, pal.panel, pal.accent, 2.0)),
+        None if a.look.plate == Plate::Split || a.look.dash.is_some() => None,
+        None => Some((Cut::Tag(a.look.plate), a.look.fill, a.look.edge, 1.5)),
+    }
+}
+
+/// A tag's base (opaque, never faded): `to`'s, or `from`'s outline and colours morphing into
+/// `to`'s at `q` (0..1); `split`: its border's RGB split, px. It fills its box (bottom-aligned
+/// by the caller).
+fn tag_base(pal: Pal, from: Option<TagArt>, to: TagArt, q: f32, split: f32) -> impl IntoElement {
+    canvas(
+        |_, _, _| (),
+        move |b, _, window, _| {
+            let (x0, y0, x1, y1) = (f32::from(b.left()), f32::from(b.top()), f32::from(b.right()), f32::from(b.bottom()));
+            let one = |a: &TagArt| base_of(pal, a).map(|(cut, f, e, w)| (theme::outline(cut, x0, y0, x1, y1), f, e, w));
+            let pair = from.as_ref().filter(|_| q < 1.0).map(|f| (one(f), one(&to)));
+            let (polys, fill, edge, width) = match pair {
+                // Both single outlines: one morphing into the other, colours mixing.
+                Some((Some((pa, fa, ea, wa)), Some((pb, fb, eb, wb)))) if pa.len() == 1 && pb.len() == 1 => {
+                    (vec![theme::morph(&pa[0], &pb[0], q)], theme::mix(fa, fb, q), theme::mix(ea, eb, q), wa + (wb - wa) * q)
+                }
+                // Else whichever is nearer, as laid out.
+                _ => {
+                    let a = match &from {
+                        Some(f) if q < 0.5 => f,
+                        _ => &to,
+                    };
+                    let Some((p, f, e, w)) = one(a) else {
+                        if split > 0.0 {
+                            fringe_paint(window, &theme::outline(Cut::Tag(a.look.plate), x0, y0, x1, y1), split);
+                        }
+                        let fill = Fill::framed(a.look.fill, a.look.edge, 1.5).dashed(a.look.dash).ringed(pal.ring);
+                        tag_base_paint(window, &a.look, (x0, y0, x1, y1), fill, pal.ring);
+                        return;
+                    };
+                    (p, f, e, w)
+                }
+            };
+            if split > 0.0 {
+                fringe_paint(window, &polys, split);
+            }
+            theme::paint(window, &polys, Fill::framed(fill, edge, width).ringed(pal.ring));
+        },
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
+}
+
+/// A glitch's RGB split behind an outline: cyan and pink copies `split` px either side, clear of
+/// its dark ring.
+fn fringe_paint(window: &mut Window, polys: &[Vec<theme::Pt>], split: f32) {
+    let d = split + theme::RING;
+    for (dx, c) in [(-d, fx::CYAN), (d, fx::PINK)] {
+        for p in polys {
+            theme::fill_poly(window, &p.iter().map(|&(x, y)| (x + dx, y)).collect::<Vec<_>>(), rgb(c));
+        }
+    }
+}
+
+/// Where she is, for the tag's pinned height: her window's origin, placement, sitting.
+type TagPinKey = ((i32, i32), std::mem::Discriminant<Placement>, bool);
+
+/// What of the tag to draw: all of it, or all but its base (for the HUD's motion, which draws
+/// the base itself, opaque, and fades only what is on it).
+#[derive(Clone, Copy, PartialEq)]
+enum Part {
+    All,
+    /// All but its base (the outline's ring, edge and fill): what fades over an opaque base.
+    Fore,
+}
+
+/// What the tag shows, compared without its level meter (a voice level isn't a change).
+#[derive(Clone, Debug)]
+struct TagShow {
+    st: Status,
+    unread: Option<lineview::Unread>,
+    collapsed: bool,
+}
+
+impl PartialEq for TagShow {
+    fn eq(&self, o: &TagShow) -> bool {
+        let bare = |s: &str| s.chars().filter(|c| !matches!(c, '▮' | '▯')).collect::<String>();
+        let (a, b) = (&self.st, &o.st);
+        bare(&a.label) == bare(&b.label)
+            && (a.key.as_str(), a.plate, a.glyph.as_str(), a.invert) == (b.key.as_str(), b.plate, b.glyph.as_str(), b.invert)
+            && self.unread == o.unread
+            && self.collapsed == o.collapsed
+    }
 }
 
 /// The tag's outline at `b` (its ring, and the thinking slivers at `trail`'s step) as X shape
@@ -5031,7 +5437,7 @@ fn rows_and(a: &[ShapeRect], b: &[ShapeRect]) -> Vec<ShapeRect> {
 }
 
 /// Bubble panel geometry, logical px in window coordinates.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct PanelGeom {
     x: f32,
     y: f32,
@@ -5059,6 +5465,99 @@ impl PanelGeom {
         v.extend(self.slivers());
         v
     }
+}
+
+/// The bubble at `w` × `h`: its bottom at `bottom`, 45 % of it left of her head, inside `vis`
+/// (logical px); its tail at her head where the cuts allow.
+fn place_panel(w: f32, h: f32, head_l: f32, bottom: f32, (vis_l, vis_r): (f32, f32)) -> PanelGeom {
+    let x = (head_l - w * 0.45).clamp(vis_l + MARGIN, (vis_r - MARGIN - w).max(vis_l + MARGIN));
+    let y = (bottom - h).max(TOP_MARGIN);
+    // The blade's root: 28 px, offset toward the bubble's end it is nearer.
+    let lo = x + CUT + 16.0;
+    let hi = x + w - CUT - 26.0;
+    let tail_x = head_l.clamp(lo, hi.max(lo));
+    PanelGeom { x, y, w, h, tail_x, tip: (head_l.clamp(tail_x - 9.0, tail_x + 9.0), y + h + TAIL_H) }
+}
+
+/// The bubble's shell: the panel with its frame and dark ring, the mane slivers; `split`: its
+/// border's RGB split, px (cyan and pink behind its outline, clear of the ring).
+/// `colours`: panel, frame, frame width, ring, slivers.
+fn panel_bg(g: PanelGeom, split: f32, (panel_c, frame_c, frame_w, ring_c, sliver_c): (u32, u32, f32, u32, u32)) -> impl IntoElement {
+    canvas(
+        |_, _, _| (),
+        move |_, _, window, _| {
+            let shift = |p: &[(f32, f32)], dx: f32| p.iter().map(|&(x, y)| (x + dx, y)).collect::<Vec<_>>();
+            let poly = g.poly();
+            if split > 0.0 {
+                theme::fill_poly(window, &shift(&poly, -split - theme::RING), rgb(fx::CYAN));
+                theme::fill_poly(window, &shift(&poly, split + theme::RING), rgb(fx::PINK));
+            }
+            // The dark ring outside the outline (the X shape is the ringed outline), the 2 px
+            // red edge inside it, then the mane slivers over the top edge.
+            theme::paint(window, &[poly], Fill::framed(panel_c, frame_c, frame_w).ringed(ring_c));
+            for p in g.slivers() {
+                theme::fill_poly(window, &p, rgb(sliver_c));
+            }
+        },
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
+}
+
+/// An opaque outline morphing from `a` into `b` at `q` (0..1), its fill, edge and edge width
+/// mixing at `qc`; ringed.
+fn morph_bg(a: Vec<theme::Pt>, (fa, ea, wa): (u32, u32, f32), b: Vec<theme::Pt>, (fb, eb, wb): (u32, u32, f32), (q, qc): (f32, f32), ring: u32) -> impl IntoElement {
+    canvas(
+        |_, _, _| (),
+        move |_, _, window, _| {
+            let p = theme::morph(&a, &b, q);
+            theme::paint(window, &[p], Fill::framed(theme::mix(fa, fb, qc), theme::mix(ea, eb, qc), wa + (wb - wa) * qc).ringed(ring));
+        },
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
+}
+
+/// A closing bubble's header: her name on its tab, its label, its state.
+fn panel_header(name: &str, header_label: &str, label: &str, pal: Pal) -> Div {
+    div()
+        .absolute()
+        .top(px(PAD_T))
+        .left(px(PAD_L))
+        .right(px(PAD_R))
+        .h(px(HEADER_H))
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .line_height(px(HEADER_H))
+        .child(
+            theme::plate(Cut::Tab(5.0), Fill::solid(pal.accent))
+                .h(px(14.0))
+                .pl(px(7.0))
+                .pr(px(9.0))
+                .text_size(px(10.5))
+                .font_weight(FontWeight::BOLD)
+                .text_color(rgb(pal.ink))
+                .child(tracked(name, 1.8)),
+        )
+        .child(tracked(header_label, 1.5).text_size(px(9.5)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(pal.dim)))
+        .child(div().flex_1())
+        .child(tracked(label, 1.5).text_size(px(9.5)).font_weight(FontWeight::BOLD).text_color(rgb(pal.dim)))
+}
+
+/// What a closing bubble is drawn from: where it was, its words.
+#[derive(Clone, Debug)]
+struct GhostSnap {
+    g: PanelGeom,
+    header_label: String,
+    label: String,
+    lines: Vec<String>,
+    foot_zone: f32,
+    frame_c: u32,
 }
 
 const HEARTS: [(f32, f32, f32, u32); 4] = [
@@ -5134,11 +5633,21 @@ impl Render for Avatar {
         }
         let top_l = (l.avatar_y + base_top) as f32 / sf;
         let head_l = (l.avatar_x + head_x) as f32 / sf;
+        // The tag's column, pinned while she stays put: a mood's resting pose (THINKING's head
+        // a few px over) doesn't shift it; a real move of her head (24 px) does.
+        let pin_key = (self.origin, std::mem::discriminant(&self.placement), self.sitting());
+        let tag_x = match self.tag_pin.get() {
+            Some((k, _, x)) if k == pin_key && (x - head_x).abs() < (24.0 * sf) as i32 => x,
+            _ => head_x,
+        };
+        let tag_l = (l.avatar_x + tag_x) as f32 / sf;
         // The status tag sits just clear of the hair under the tag itself (this frame and
         // the resting one), not of the whole silhouette.
         let tag_hair = {
-            let tw = self.tag_w.get();
-            let (c0, c1) = (((head_l - tw / 2.0) * sf) as i32 - l.avatar_x - 4, ((head_l + tw / 2.0) * sf) as i32 - l.avatar_x + 4);
+            // Sampled as wide as a usual label at least: the plate doesn't rise or sink with
+            // its own text's width.
+            let tw = self.tag_w.get().max(TAG_HAIR_W);
+            let (c0, c1) = (((tag_l - tw / 2.0) * sf) as i32 - l.avatar_x - 4, ((tag_l + tw / 2.0) * sf) as i32 - l.avatar_x + 4);
             // Clear of the hair under it facing either way (the profile mirrors by reversal):
             // its height doesn't change on a turn either.
             let both = self.mirror_cfg.drag || self.mirror_cfg.own;
@@ -5153,7 +5662,16 @@ impl Render for Avatar {
                 .filter(|&v| v != i16::MAX)
                 .map(i32::from)
             };
-            under(raw_base).into_iter().chain(under(raw_frame)).min().unwrap_or(base_top)
+            // Pinned while she stays put: a mood's resting pose (THINKING's chin rest) never
+            // lowers it; a moving frame (an arm up) may still lift it for a moment.
+            let base = match (self.tag_pin.get(), under(raw_base)) {
+                (Some((k, p, _)), b) if k == pin_key => Some(b.map_or(p, |b| b.min(p))),
+                (_, b) => b,
+            };
+            if let Some(b) = base {
+                self.tag_pin.set(Some((pin_key, b, tag_x)));
+            }
+            base.into_iter().chain(under(raw_frame)).min().unwrap_or(base_top)
         };
         let image = frame.map(|f| f.image.clone());
         // Where the image sits in the avatar rect (a strip's cell is its opaque box).
@@ -5692,31 +6210,88 @@ impl Render for Avatar {
         // In a glitch the tag tears with the body: strips of it, shifted by the same bands.
         let mut tag_strips: Vec<ShapeRect> = Vec::new();
         let torn = show_tag && !collapsed && self.glitch.is_some_and(|g| g.tears_tag);
+        // The HUD's motion (alpha mode only: a shaped window's outline would lag it): the tag
+        // glitches as it comes, goes and changes, and its width eases. It comes or goes quietly
+        // when something else moves it (the bubble taking over, a teleport, a swap's hold, his
+        // hand); after a closing bubble it waits until that is nearly gone.
+        let hud_motion = alpha && self.hud_cfg.motion;
+        let hud_glitch = alpha && self.hud_cfg.glitch && self.rag.is_none();
+        let pill_before = self.pill_last.take();
+        // A bubble closing this frame (its ghost starts below) or still closing: the tag waits
+        // for it, unseen (else it would come and go under the ghost).
+        let closing = mode.is_none() && self.panel_last_snap.is_some() && hud && hud_motion && self.line.is_none();
+        let ghost_wait = closing || self.ghost.as_ref().is_some_and(|g| !g.tag_ready(now));
+        // Collapsing into the pill, it lands: the pill was drawn on the way, it shows at once.
+        let pill_landing = self.ghost.as_ref().is_some_and(|g| g.to_pill && g.tag_ready(now));
+        let status = Status { label: label.clone(), tone, invert, glyph: glyph_kind.clone(), plate: plate_kind, key: tone_key.clone() };
+        let pending = show_tag.then(|| TagShow { st: status.clone(), unread: self.unread_shown().cloned(), collapsed });
+        // The pill as it would show (the bubble opens out of it, or collapses into it).
+        let pill_show = TagShow { st: status, unread: self.unread_shown().cloned(), collapsed: true };
+        let tag_next = pending.clone().filter(|_| !ghost_wait);
+        let tag_quiet = bubble_open || !tag_hud || swap_hold || self.rag.is_some() || !hud_motion || pill_landing || ghost_wait;
+        self.tag_fx.observe(tag_next, now, hud_glitch && !torn, tag_quiet);
+        let tag_shown = self.tag_fx.frame(now).cur.cloned();
+        // What a tag shows, drawn: its look this frame (the beat: NEEDS YOU's bone plate turns
+        // black and the rec dot dims on its second half (1 Hz; a summon's pulse holds it bone),
+        // the thinking slivers step every 400 ms, WORKING's sweep crosses its red block every
+        // 2.4 s).
+        let ms = now.saturating_duration_since(self.t_start).as_millis() as u64;
+        let night = self.band() == crate::life::Band::Low;
+        let in_sweep = ms % SWEEP_EVERY_MS < SWEEP_STEPS * SWEEP_STEP_MS;
+        let fit_chars = ((l.win_w as f32 / sf - 80.0) / (TAG_FONT * 0.62 + 1.5)) as usize;
+        let art_of = |show: &TagShow| -> TagArt {
+            let Status { label, tone, invert, glyph: glyph_kind, plate: plate_kind, key: tone_key } = &show.st;
+            let unread = show.unread.as_ref();
+            let mut look = pal.look(*plate_kind, tone_key, *tone, *invert, (ms / 500) % 2 == 1 && !pulse);
+            // Her night (low energy): ONLINE dimmed, a screen turned down.
+            if tone_key == "online" && night {
+                let dim = |c: u32| theme::mix(c, pal.panel, NIGHT_TAG_DIM);
+                (look.edge, look.ink, look.mark) = (dim(look.edge), dim(look.ink), dim(look.mark));
+            }
+            let sweep = (look.half && in_sweep).then(|| ((ms % SWEEP_EVERY_MS) / SWEEP_STEP_MS) as f32 / (SWEEP_STEPS - 1) as f32);
+            let text = match unread {
+                Some(u) if u.refused => u.text.clone(),
+                Some(u) => {
+                    // Inside her window: the plate is centred on her.
+                    let head = format!("{} NEW  READ ▸  ", u.n);
+                    crate::session::one_line(&u.text, fit_chars.saturating_sub(head.chars().count()).clamp(8, 44))
+                }
+                // Her state only, no name (Haseeb, 2026-11-16: "just online, sleeping etc").
+                None => label.clone(),
+            };
+            // WORKING: the label on the red block (ink).
+            let (name_part, rest) = if look.half && unread.is_none() { (Some(label.clone()), String::new()) } else { (None, text.clone()) };
+            TagArt {
+                look,
+                badge: unread.filter(|u| !u.refused).map(|u| format!("{} NEW", u.n)),
+                text,
+                name_part,
+                rest,
+                glyph_kind: glyph_kind.clone(),
+                collapsed: show.collapsed,
+                sweep,
+                step: ms / 400,
+                shade: [pal.accent, theme::mix(pal.accent, pal.bg, 0.45), pal.accent_dim],
+            }
+        };
         // The tag's cut and its trailing slivers' step (for the shape), and the HUD's next
         // motion step.
         let mut tag_cut: Option<(Cut, Option<u64>)> = None;
         let mut motion: Option<Instant> = None;
-        if show_tag {
+        // Laid out: what it shows, or (collapsing into the pill) the pill it lands as, unseen,
+        // so its box is measured before it gets there.
+        let live = tag_shown.is_some();
+        let laid = tag_shown.clone().or_else(|| pending.clone().filter(|p| ghost_wait && p.collapsed));
+        if let Some(show) = laid {
+            let art = art_of(&show);
+            let look = art.look;
+            let collapsed = show.collapsed;
             // An unread reply is a notification, not a status: a red blade with a bone "N NEW"
             // badge, her name, the reply's first words and READ; the whole plate opens the
             // Line there. It nudges toward her every 2.2 s.
-            let unread = self.unread_shown();
-            let fresh = unread.is_some_and(|u| !u.refused);
-            // The beat: NEEDS YOU's bone plate turns black and the rec dot dims on its second
-            // half (1 Hz; a summon's pulse holds it bone), the thinking slivers step every
-            // 400 ms, WORKING's sweep crosses its red block every 2.4 s.
-            let ms = now.saturating_duration_since(self.t_start).as_millis() as u64;
-            let mut look = pal.look(plate_kind, &tone_key, tone, invert, (ms / 500) % 2 == 1 && !pulse);
-            // Her night (low energy): ONLINE dimmed, a screen turned down.
-            if tone_key == "online" && self.band() == crate::life::Band::Low {
-                let dim = |c: u32| theme::mix(c, pal.panel, NIGHT_TAG_DIM);
-                (look.edge, look.ink, look.mark) = (dim(look.edge), dim(look.ink), dim(look.mark));
-            }
-            let step = ms / 400;
+            let fresh = show.unread.as_ref().is_some_and(|u| !u.refused);
             let nudge = if fresh && ms % 2200 < 240 { 5.0 } else { 0.0 };
-            let beats = invert && matches!(look.plate, Plate::Flag);
-            let in_sweep = ms % SWEEP_EVERY_MS < SWEEP_STEPS * SWEEP_STEP_MS;
-            let sweep = (look.half && in_sweep).then(|| ((ms % SWEEP_EVERY_MS) / SWEEP_STEP_MS) as f32 / (SWEEP_STEPS - 1) as f32);
+            let beats = show.st.invert && matches!(look.plate, Plate::Flag);
             let next_ms = [
                 beats.then_some((ms / 500 + 1) * 500),
                 look.trail.then_some((ms / 400 + 1) * 400),
@@ -5726,154 +6301,11 @@ impl Render for Avatar {
             .into_iter()
             .flatten()
             .min();
-            motion = next_ms.map(|m| self.t_start + Duration::from_millis(m));
-            tag_cut = Some(if fresh { (Cut::Unread, None) } else { (Cut::Tag(look.plate), look.trail.then_some(step)) });
-            let badge = unread.filter(|u| !u.refused).map(|u| format!("{} NEW", u.n));
-            let text = match unread {
-                Some(u) if u.refused => u.text.clone(),
-                Some(u) => {
-                    // Inside her window: the plate is centred on her.
-                    let head = format!("{} NEW  READ ▸  ", u.n);
-                    let per = TAG_FONT * 0.62 + 1.5;
-                    let fit = ((l.win_w as f32 / sf - 80.0) / per) as usize;
-                    crate::session::one_line(&u.text, fit.saturating_sub(head.chars().count()).clamp(8, 44))
-                }
-                // Her state only, no name (Haseeb, 2026-11-16: "just online, sleeping etc").
-                None => label.clone(),
-            };
-            // WORKING: the label on the red block (ink).
-            let (name_part, rest) = if look.half && unread.is_none() { (Some(label.clone()), String::new()) } else { (None, text.clone()) };
-            let shade = [pal.accent, theme::mix(pal.accent, pal.bg, 0.45), pal.accent_dim];
-            let make_ring = || -> Div {
-                if let Some(b) = badge.clone() {
-                    return theme::plate(Cut::Unread, Fill::framed(pal.panel, pal.accent, 2.0).ringed(pal.ring))
-                        .h(px(28.0))
-                        .gap(px(9.0))
-                        .pr(px(22.0))
-                        .text_size(px(TAG_FONT))
-                        .line_height(px(TAG_FONT + 1.0))
-                        .font_weight(FontWeight::BOLD)
-                        .child(
-                            theme::plate(Cut::Badge, Fill::solid(pal.text))
-                                .h_full()
-                                .gap(px(6.0))
-                                .pl(px(11.0))
-                                .pr(px(14.0))
-                                .text_color(rgb(pal.ink))
-                                .child(glyph("dot", pal.accent, pal.text))
-                                .child(tracked(&b, 1.0)),
-                        )
-                        .child(div().text_color(rgb(pal.text)).font_weight(FontWeight::SEMIBOLD).child(tracked(&text, 0.2)))
-                        // It opens: say so, inside the plate.
-                        .child(theme::plate(Cut::Slant(6.0), Fill::solid(pal.accent)).h(px(18.0)).px(px(8.0)).text_color(rgb(pal.ink)).child(tracked("READ ▸", 1.2)));
-                }
-                let (pad_l, pad_r) = look.plate.pad();
-                let fill = Fill::framed(look.fill, look.edge, 1.5).dashed(look.dash).ringed(pal.ring);
-                let split = look.plate == Plate::Split;
-                // DONE's tick is drawn through the plate's corner, not as a glyph.
-                let mark = match look.plate {
-                    Plate::Split if glyph_kind == "cross" => "shard".to_string(),
-                    Plate::Check => String::new(),
-                    _ => glyph_kind.clone(),
-                };
-                let (ring_c, block_c, sweep_c) = (pal.ring, pal.accent, theme::mix(pal.accent, pal.text, 0.45));
-                let block = name_part.clone().map(|n| {
-                    div()
-                        .relative()
-                        .h_full()
-                        .ml(px(-pad_l))
-                        .pl(px(pad_l))
-                        .pr(px(13.0))
-                        .flex()
-                        .items_center()
-                        .gap(px(7.0))
-                        .text_color(rgb(pal.ink))
-                        .child(
-                            canvas(
-                                |_, _, _| (),
-                                move |b, _, window, _| {
-                                    let (x0, y0, x1, y1) = (f32::from(b.left()), f32::from(b.top()), f32::from(b.right()), f32::from(b.bottom()));
-                                    let (blk, sw) = theme::half_block(x0, y0, x1, y1, sweep);
-                                    theme::fill_poly(window, &blk, rgb(block_c));
-                                    if let Some(sw) = sw {
-                                        theme::fill_poly(window, &sw, rgb(sweep_c));
-                                    }
-                                },
-                            )
-                            .absolute()
-                            .top_0()
-                            .left_0()
-                            .size_full(),
-                        )
-                        .child(glyph(&mark, pal.ink, pal.accent))
-                        .child(tracked(&n, 1.5))
-                });
-                let half = block.is_some();
-                div()
-                    .relative()
-                    .flex()
-                    .items_center()
-                    .gap(px(7.0))
-                    .h(px(25.0))
-                    .pl(px(pad_l))
-                    .pr(px(pad_r))
-                    .text_size(px(TAG_FONT))
-                    .line_height(px(TAG_FONT + 1.0))
-                    .font_weight(FontWeight::BOLD)
-                    .text_color(rgb(look.ink))
-                    .child(
-                        canvas(
-                            |_, _, _| (),
-                            move |b, _, window, _| {
-                                let (x0, y0, x1, y1) = (f32::from(b.left()), f32::from(b.top()), f32::from(b.right()), f32::from(b.bottom()));
-                                let polys = theme::outline(Cut::Tag(look.plate), x0, y0, x1, y1);
-                                match theme::tag_inner(look.plate, x0, y0, x1, y1, 1.5) {
-                                    Some(inner) => {
-                                        theme::paint(window, &polys, Fill::solid(look.edge).ringed(ring_c));
-                                        for p in inner {
-                                            theme::fill_poly(window, &p, rgb(look.fill));
-                                        }
-                                    }
-                                    None => theme::paint(window, &polys, fill),
-                                }
-                                if look.trail {
-                                    for (p, lvl) in theme::trail(x1, y0, y1, step) {
-                                        theme::fill_poly(window, &p, rgb(shade[lvl as usize]));
-                                    }
-                                }
-                                for p in theme::tag_marks(look.plate, x0, y0, x1, y1) {
-                                    theme::fill_poly(window, &theme::offset(&p, theme::RING), rgb(ring_c));
-                                    theme::fill_poly(window, &p, rgb(look.mark));
-                                }
-                            },
-                        )
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .size_full(),
-                    )
-                    .children(block)
-                    // The ✕'s shard broken off with the plate's piece.
-                    .when(!half, |d| {
-                        d.child(match look.halo {
-                            // The disc: 15 px, the glyph centred in it.
-                            Some(h) => div()
-                                .relative()
-                                .size(px(15.0))
-                                .mx(px(-2.0))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .child(div().absolute().top_0().left_0().child(theme::glyph_at("disc", h, h, 15.0)))
-                                .child(glyph(&mark, look.mark, h)),
-                            None => div().when(split, |d| d.relative().left(px(-3.0)).top(px(3.0))).child(glyph(&mark, look.mark, look.fill)),
-                        })
-                    })
-                    // ERROR: the type starts inside the toothed piece, clear of the break.
-                    .child(theme::metered(&rest, 1.5, look.ink).when(split, |d| d.ml(px(8.0))))
-                    // A reply put away behind the plate: a small up-chevron inside it.
-                    .when(collapsed, |d| d.child(chevron(Chevron::Up, rgb(look.ink))))
-            };
+            if live {
+                motion = next_ms.map(|m| self.t_start + Duration::from_millis(m));
+                tag_cut = Some(if fresh { (Cut::Unread, None) } else { (Cut::Tag(look.plate), look.trail.then_some(art.step)) });
+            }
+            let make_ring = |wide: Option<(f32, f32)>, split: f32, part: Part| -> Div { tag_ring(pal, &art, wide, split, part) };
             if let (true, Some(b), Some(bands)) = (torn, self.tag_box.get(), plan.slices.as_ref()) {
                 let (bx, by) = (f32::from(b.origin.x), f32::from(b.origin.y));
                 let (bw, bh) = (f32::from(b.size.width), f32::from(b.size.height));
@@ -5896,7 +6328,7 @@ impl Render for Avatar {
                         .w(px(bw + ml + mr))
                         .h(px(s1 - s0))
                         .overflow_hidden()
-                        .child(div().absolute().left(px(ml)).top(px(mt - s0)).w(px(bw)).h(px(bh)).child(make_ring()))
+                        .child(div().absolute().left(px(ml)).top(px(mt - s0)).w(px(bw)).h(px(bh)).child(make_ring(None, 0.0, Part::All)))
                 };
                 for &(y0, y1, dx, _) in &under_bands {
                     let (a, c) = ((y0 as f32).max(t0), (y1 as f32).min(t0 + th * sf));
@@ -5920,36 +6352,96 @@ impl Render for Avatar {
                     root = root.child(strip(s0, s1, dxl));
                 }
             }
-            let ring = make_ring();
-            let mut row = div().id("tag").flex().items_end().gap(px(3.0)).cursor_pointer();
-            if collapsed || self.session.is_some() || self.unread_shown().is_some() {
-                row = row.on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _: &MouseDownEvent, window, cx| {
-                        cx.stop_propagation();
-                        this.chip_click(window, cx);
-                    }),
-                );
+            // The HUD's motion, drawn at the laid-out box (the holder below lays the newest out
+            // unseen; gone, where it was last): one opaque plate at its easing width, its outline
+            // morphing from the old content's, and over it the old words crossing into the new,
+            // centred and clean. Never an empty plate, never a faded one.
+            let mut by_fx = live && !torn && self.tag_fx.busy(now);
+            if live
+                && !torn
+                && let Some(b) = self.tag_box.get()
+            {
+                let (bx, by, bw, bh) = (f32::from(b.origin.x), f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height));
+                let aw = if show_tag { self.tag_fx.width(bw, now, hud_motion) } else { self.tag_fx.width_now(now) };
+                if show_tag && collapsed {
+                    self.pill_last = Some((bw, bh));
+                }
+                let tf = self.tag_fx.frame(now);
+                if by_fx || (aw - bw).abs() > 0.5 {
+                    by_fx = true;
+                    let (x0, bottom) = (bx + (bw - aw) * 0.5, by + bh);
+                    let fore = |a: &TagArt, nat: f32, level: f32| -> Div {
+                        let h = a.h();
+                        div().absolute().left(px(x0)).top(px(bottom - h)).w(px(aw)).h(px(h)).opacity(level).child(tag_ring(pal, a, Some((aw, nat)), 0.0, Part::Fore))
+                    };
+                    let prev = tf.prev.map(|(p, w, words)| (art_of(p), w, words));
+                    // The base: opaque, its outline and colours morphing from the old content's.
+                    let q = tf.shape;
+                    let bh_now = prev.as_ref().map_or(art.h(), |(pa, _, _)| pa.h() + (art.h() - pa.h()) * q);
+                    // Not yet measured (coming): nothing, not an empty plate.
+                    if tf.alpha > 0.0 {
+                        root = root.child(
+                            div().absolute().left(px(x0)).top(px(bottom - bh_now)).w(px(aw)).h(px(bh_now)).child(tag_base(pal, prev.as_ref().map(|p| p.0.clone()), art.clone(), q, tf.split)),
+                        );
+                    }
+                    // Over it, the old words crossing into the new (and, coming or going, at the
+                    // tag's level).
+                    if let Some((pa, pw, pwords)) = &prev
+                        && *pwords > 0.0
+                    {
+                        root = root.child(fore(pa, *pw, pwords * tf.alpha));
+                    }
+                    if tf.words * tf.alpha > 0.0 {
+                        root = root.child(fore(&art, tf.nat, tf.words * tf.alpha));
+                    }
+                }
             }
-            row = row.child(ring);
-            let centre = head_l + nudge;
-            // Asleep, the plate sits a little lower.
-            let tag_bottom = (l.avatar_y + tag_hair) as f32 / sf - TAG_GAP + look.drop;
-            let mut holder = div()
-                .absolute()
-                .left_0()
-                .w(l.lp(l.win_w))
-                .bottom(px(l.win_h as f32 / sf - tag_bottom))
-                .flex()
-                .justify_center()
-                .pl(px((2.0 * centre - l.win_w as f32 / sf).max(0.0)))
-                .pr(px((l.win_w as f32 / sf - 2.0 * centre).max(0.0)));
-            // Torn: the whole tag still lays out (invisibly) so its box stays current.
-            if torn {
-                holder = holder.invisible();
+            if show_tag {
+                let ring = make_ring(None, 0.0, Part::All);
+                let mut row = div().id("tag").flex().items_end().gap(px(3.0)).cursor_pointer();
+                if collapsed || self.session.is_some() || self.unread_shown().is_some() {
+                    row = row.on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                            cx.stop_propagation();
+                            this.chip_click(window, cx);
+                        }),
+                    );
+                }
+                row = row.child(ring);
+                let centre = tag_l + nudge;
+                // Asleep, the plate sits a little lower. While she stays put a change of its
+                // height (a mood's pose) eases there; when she moves it goes with her.
+                let raw_bottom = (l.avatar_y + tag_hair) as f32 / sf - TAG_GAP + look.drop;
+                let tag_bottom = match &mut self.tag_y {
+                    Some((k, y)) if *k == pin_key && hud_motion => {
+                        y.go(raw_bottom, now, crate::hud::SIZE_MS);
+                        y.at(now)
+                    }
+                    _ => {
+                        self.tag_y = Some((pin_key, crate::hud::Tween::still(raw_bottom)));
+                        raw_bottom
+                    }
+                };
+                let mut holder = div()
+                    .absolute()
+                    .left_0()
+                    .w(l.lp(l.win_w))
+                    .bottom(px(l.win_h as f32 / sf - tag_bottom))
+                    .flex()
+                    .justify_center()
+                    .pl(px((2.0 * centre - l.win_w as f32 / sf).max(0.0)))
+                    .pr(px((l.win_w as f32 / sf - 2.0 * centre).max(0.0)));
+                // Torn (or drawn by the HUD's motion): the whole tag still lays out (invisibly) so
+                // its box stays current.
+                if torn || by_fx || !live {
+                    holder = holder.invisible();
+                }
+                root = root.child(holder.child(probed(row, &tag_cell)));
             }
-            root = root.child(holder.child(probed(row, &tag_cell)));
         }
+        // A tag change waiting out its label's dwell: woken when it ends.
+        let motion = [motion, self.tag_fx.wake_at()].into_iter().flatten().min();
         if motion != self.motion_at.get() {
             self.motion_at.set(motion);
             self.ticker.set(self.next_deadline());
@@ -5963,6 +6455,103 @@ impl Render for Avatar {
         if mode.is_none() {
             self.panel_bottom = None;
             self.panel_rect.set(None);
+            self.panel_old = None;
+            // Just closed: it leaves where it was (its border glitches, it settles just inside
+            // its box and dims out; or its words cross into the pill's as it eases into the
+            // pill), unless it went with her (a teleport, his hand) or into the Line.
+            let snap = self.panel_last_snap.take();
+            if self.panel_fx.closed()
+                && hud
+                && hud_motion
+                && self.line.is_none()
+                && let Some(snap) = snap
+            {
+                // The pill's box: where the tag sits (she hasn't moved), measured as the pill
+                // from the next frame on.
+                let pill = collapsed
+                    .then(|| {
+                        self.tag_box.get().map(|b| {
+                            let (bx, by, bw, bh) = (f32::from(b.origin.x), f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height));
+                            let w = pill_before.map_or(bw, |p| p.0);
+                            (bx + (bw - w) * 0.5, by, w, bh)
+                        })
+                    })
+                    .flatten();
+                let glitch = hud_glitch && !self.panel_fx.throttled(now);
+                let g = snap.g;
+                self.ghost = Some(crate::hud::Ghost::new(snap, (g.x, g.y, g.w, g.h), pill, now, glitch));
+            }
+            if self.ghost.as_ref().is_some_and(|g| g.done(now)) || !hud {
+                self.ghost = None;
+            }
+            if let Some(gh) = &mut self.ghost
+                && gh.to_pill
+                && let Some(b) = self.tag_box.get()
+            {
+                gh.retarget((f32::from(b.origin.x), f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height)), now);
+            }
+            if let Some(gh) = &self.ghost {
+                let sn = &gh.snap;
+                let (x, y, w, h) = gh.rect(now);
+                let k = gh.k(now);
+                let g = if gh.to_pill {
+                    // Into the pill: its tail draws in.
+                    let c = x + w * 0.5;
+                    let tail_x = sn.g.tail_x + (c - sn.g.tail_x) * k;
+                    PanelGeom { x, y, w, h, tail_x, tip: (sn.g.tip.0 + (c - sn.g.tip.0) * k, y + h + TAIL_H * (1.0 - k)) }
+                } else {
+                    PanelGeom { x, y, w, h, ..sn.g }
+                };
+                let alpha = gh.alpha(now);
+                let (own, pill_words, q) = if gh.to_pill { gh.pill(now) } else { (1.0, 0.0, 0.0) };
+                let pa = art_of(&pill_show);
+                if gh.to_pill {
+                    // Opaque, its outline morphing into the pill's as its box eases there; its
+                    // slivers go with it.
+                    let (cut, fb, eb, wb) = base_of(pal, &pa).unwrap_or((Cut::Tag(pa.look.plate), pa.look.fill, pa.look.edge, 1.5));
+                    let to = theme::outline(cut, x, y, x + w, y + h).into_iter().next().unwrap_or_default();
+                    root = root.child(morph_bg(g.poly(), (pal.panel, sn.frame_c, 2.0), to, (fb, eb, wb), (q, q), pal.ring));
+                    if q < 1.0 {
+                        let sl = g.slivers();
+                        root = root.child(
+                            canvas(|_, _, _| (), move |_, _, window, _| sl.iter().for_each(|p| theme::fill_poly(window, p, rgb(pal.accent))))
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .size_full()
+                                .opacity(1.0 - q),
+                        );
+                    }
+                } else {
+                    root = root.child(panel_bg(g, gh.split(now), (pal.panel, sn.frame_c, 2.0, pal.ring, pal.accent)));
+                }
+                // Its own words, where they were, inside its box as it goes.
+                if own > 0.0 {
+                    let header = panel_header(&self.name, &sn.header_label, &sn.label, pal);
+                    let body = div()
+                        .absolute()
+                        .top(px(PAD_T + HEADER_H + HEADER_GAP))
+                        .left(px(PAD_L))
+                        .right(px(PAD_R))
+                        .bottom(px(sn.foot_zone))
+                        .overflow_hidden()
+                        .flex()
+                        .flex_col()
+                        .text_size(px(BODY_FONT))
+                        .line_height(px(LINE_H))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(pal.text))
+                        .children(sn.lines.iter().map(|t| div().h(px(LINE_H)).flex().items_center().whitespace_nowrap().child(t.clone())));
+                    let inner = div().absolute().left(px(sn.g.x - x)).top(px(sn.g.y - y)).w(px(sn.g.w)).h(px(sn.g.h)).child(header).child(body);
+                    root = root.child(div().absolute().left(px(x)).top(px(y)).w(px(w)).h(px(h)).overflow_hidden().opacity(own * alpha).child(inner));
+                }
+                // The pill it becomes: its words cross in at the box's centre.
+                if gh.to_pill && pill_words > 0.0 {
+                    let pw = gh.target().2;
+                    let (pl, pt) = (x + (w - pw) * 0.5, y + (h - pa.h()) * 0.5);
+                    root = root.child(div().absolute().left(px(pl)).top(px(pt)).w(px(pw)).h(px(pa.h())).opacity(pill_words).child(tag_ring(pal, &pa, Some((pw, pw)), 0.0, Part::Fore)));
+                }
+            }
         }
         if let Some(mode) = mode {
             let line_strings = |chars: &[char], w: &Wrapped| -> Vec<String> {
@@ -6088,7 +6677,6 @@ impl Render for Avatar {
                 }
                 self.prompt_h = Some((key, h));
             }
-            let x = (head_l - w * 0.45).clamp(vis_l + MARGIN, (vis_r - MARGIN - w).max(vis_l + MARGIN));
             let want = top_l - TIP_GAP - TAIL_H;
             let bottom = match self.panel_bottom {
                 Some(b) if matches!(mode, PanelMode::Prompt | PanelMode::Input { .. }) => b,
@@ -6096,14 +6684,35 @@ impl Render for Avatar {
                 None => want,
             };
             self.panel_bottom = Some(bottom);
-            let y = (bottom - h).max(TOP_MARGIN);
-            // The blade's root: 28 px, offset toward the bubble's end it is nearer.
-            let lo = x + CUT + 16.0;
-            let hi = x + w - CUT - 26.0;
-            let tail_x = head_l.clamp(lo, hi.max(lo));
-            let g = PanelGeom { x, y, w, h, tail_x, tip: (head_l.clamp(tail_x - 9.0, tail_x + 9.0), y + h + TAIL_H) };
+            // Its size eases to the layout (one curve, `hud`); it opens from her at
+            // OPEN_SCALE, or out of the pill. A new reply in it pulses; streaming text doesn't.
+            let serial = match mode {
+                PanelMode::Reply => self.bubble.as_ref().map_or(0, |b| b.serial),
+                PanelMode::Prompt => u64::MAX - 1,
+                PanelMode::Input { .. } => u64::MAX - 2,
+                PanelMode::Probe => u64::MAX - 3,
+            };
+            let lay_w = w;
+            let pf = self.panel_fx.open((w, h), serial, pill_before, now, hud_motion, hud_glitch);
+            if pf.replaced {
+                // A new reply: the old one's words cross out in the box as it is.
+                self.panel_old = self.panel_last_snap.as_ref().map(|s| s.lines.clone());
+            }
+            if pf.old <= 0.0 {
+                self.panel_old = None;
+            }
+            self.ghost = None;
+            // Its shell, and the box its words are laid out in (the same, but while it opens:
+            // the box it is going to, at most `INSET` past the shell, so nothing is cut).
+            let g = place_panel(pf.shell.0, pf.shell.1, head_l, bottom, (vis_l, vis_r));
+            let gc = place_panel(pf.content.0, pf.content.1, head_l, bottom, (vis_l, vis_r));
+            let (x, y, w, h) = (gc.x, gc.y, gc.w, gc.h);
             self.panel_rect.set(Some((x, y, w, h + TAIL_H)));
             panel_geom = Some(g);
+            let foot_zone = if footer { FOOTER_GAP + FOOTER_H + PAD_B } else { PAD_B };
+            // The rows the body holds at this height: a new line shows once there is room for
+            // it, never cut in half by a growing box.
+            let fits = ((h - (PAD_T + HEADER_H + HEADER_GAP) - foot_zone) / LINE_H + 0.02).floor().max(0.0) as usize;
             // Settled after a summon: the border breathes toward bone; the pulse turns it bone.
             let frame_c = match glow {
                 _ if pulse => pal.focus,
@@ -6111,22 +6720,7 @@ impl Render for Avatar {
                 None => pal.accent,
             };
             let warm = pulse || glow.is_some();
-            let (panel_c, ring_c, sliver_c) = (pal.panel, pal.ring, pal.accent);
-            let bg = canvas(
-                |_, _, _| (),
-                move |_, _, window, _| {
-                    // The dark ring outside the outline (the X shape is the ringed outline), the
-                    // 2 px red edge inside it, then the mane slivers over the top edge.
-                    theme::paint(window, &[g.poly()], Fill::framed(panel_c, frame_c, if warm { 3.0 } else { 2.0 }).ringed(ring_c));
-                    for p in g.slivers() {
-                        theme::fill_poly(window, &p, rgb(sliver_c));
-                    }
-                },
-            )
-            .absolute()
-            .top_0()
-            .left_0()
-            .size_full();
+            let bg = panel_bg(g, pf.split, (pal.panel, frame_c, if warm { 3.0 } else { 2.0 }, pal.ring, pal.accent));
             let prompt_mode = matches!(mode, PanelMode::Prompt);
             let header_label = if probe {
                 if self.focus.is_focused(window) { "FOCUS PROBE // KEYS OK".to_string() } else { header_label }
@@ -6195,6 +6789,7 @@ impl Render for Avatar {
                 .font_weight(body_weight)
                 .text_color(rgb(pal.text));
             let caret_bar = move || div().ml(px(1.0)).w(px(2.0)).h(px(BODY_FONT)).bg(rgb(caret_c));
+            let ghost_lines = if placeholder.is_some() { Vec::new() } else { lines.clone() };
             if let Some(ph) = &placeholder {
                 let mut row = div().h(px(LINE_H)).flex().items_center();
                 if caret {
@@ -6248,19 +6843,87 @@ impl Render for Avatar {
                                     cx.notify();
                                 }),
                             );
-                        body = body.child(div().h(px(LINE_H)).flex().items_center().child(chip));
+                        body = body.child(div().h(px(LINE_H)).flex().items_center().when(k >= fits, |d| d.invisible()).child(chip));
                         continue;
                     }
                     // A chip's opening backtick, typed out before its first letter: not shown.
                     let t = if mode == PanelMode::Reply && t.trim() == "`" { String::new() } else { t };
-                    let mut row = div().h(px(LINE_H)).flex().items_center().whitespace_nowrap().child(t);
+                    let mut row = div().h(px(LINE_H)).flex().items_center().whitespace_nowrap().when(k >= fits, |d| d.invisible()).child(t);
                     if caret && k + 1 == n_lines {
                         row = row.child(caret_bar());
                     }
                     body = body.child(row);
                 }
             }
-            let mut panel = div().id("bubble").absolute().left(px(x)).top(px(y)).w(px(w)).h(px(h)).child(bg).child(header).child(body);
+            // The words stay inside the panel's inner box; a new reply's cross in over the old.
+            body = body.bottom(px(foot_zone)).overflow_hidden().when(pf.words < 1.0, |d| d.opacity(pf.words));
+            let old_body = self.panel_old.as_ref().filter(|_| pf.old > 0.0).map(|old| {
+                div()
+                    .absolute()
+                    .top(px(PAD_T + HEADER_H + HEADER_GAP))
+                    .left(px(PAD_L))
+                    .right(px(PAD_R))
+                    .bottom(px(foot_zone))
+                    .overflow_hidden()
+                    .opacity(pf.old)
+                    .flex()
+                    .flex_col()
+                    .text_size(px(BODY_FONT))
+                    .line_height(px(LINE_H))
+                    .font_weight(body_weight)
+                    .text_color(rgb(pal.text))
+                    .children(old.iter().map(|t| div().h(px(LINE_H)).flex().items_center().whitespace_nowrap().child(t.clone())))
+            });
+            // The snapshot a closing bubble is drawn from (where its words are).
+            self.panel_last_snap = Some(GhostSnap { g: gc, header_label: header_label.clone(), label: label.clone(), lines: ghost_lines, foot_zone, frame_c });
+            // Out of the pill: the bubble's own shell grows out of the pill's outline, the pill
+            // itself (plate and words, as it was when it opened) at its centre, whole, until the
+            // words cross. Never a pill-red box, never words on the wrong plate.
+            if let (Some(level), Some((pw, _))) = (pf.pill, pill_before.or(self.pill_open_from)) {
+                self.pill_open_from = Some((pw, 25.0));
+                let shown = self.pill_open_show.get_or_insert_with(|| pill_show.clone()).clone();
+                let pa = art_of(&shown);
+                let grown = ((g.w - pw) / (lay_w - pw).max(1.0)).clamp(0.0, 1.0);
+                let q = (1.0 - level).max(crate::hud::blend(grown));
+                let cut = base_of(pal, &pa).map_or(Cut::Tag(pa.look.plate), |b| b.0);
+                let from = theme::outline(cut, g.x, g.y, g.x + g.w, g.y + g.h).into_iter().next().unwrap_or_default();
+                let skin = (pal.panel, frame_c, 2.0);
+                root = root.child(morph_bg(from, skin, g.poly(), skin, (q, q), pal.ring));
+                if q > 0.0 {
+                    let sl = g.slivers();
+                    root = root.child(
+                        canvas(|_, _, _| (), move |_, _, window, _| sl.iter().for_each(|p| theme::fill_poly(window, p, rgb(pal.accent))))
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .size_full()
+                            .opacity(q),
+                    );
+                }
+                let (pl, pt) = (g.x + (g.w - pw) * 0.5, g.y + (g.h - pa.h()) * 0.5);
+                if level > 0.0 {
+                    root = root.child(div().absolute().left(px(pl)).top(px(pt)).w(px(pw)).h(px(pa.h())).opacity(level).child(tag_ring(pal, &pa, Some((pw, pw)), 0.0, Part::All)));
+                }
+            } else {
+                root = root.child(bg);
+                if pf.pill.is_none() {
+                    self.pill_open_from = None;
+                    self.pill_open_show = None;
+                }
+            }
+            // Its words (everything inside the shell): out of the pill, crossing in from its.
+            let mut panel = div()
+                .id("bubble")
+                .absolute()
+                .left(px(x))
+                .top(px(y))
+                .w(px(w))
+                .h(px(h))
+                .overflow_hidden()
+                .when(pf.inner < 1.0, |d| d.opacity(pf.inner))
+                .child(header)
+                .children(old_body)
+                .child(body);
             // Slanted keys: a hollow red chevron key, DENY bone with the focus ring, the rest
             // (ALLOW, REVIEW, ANSWER) solid red with ink type. Unarmed, they sit back.
             let btn = |id: &'static str, dir: Chevron, on: bool| {
@@ -6607,6 +7270,13 @@ impl Render for Avatar {
             }
             root = root.child(panel);
         }
+        // The HUD moves: a frame per present until it settles, and nothing after.
+        let hud_busy = self.tag_fx.busy(now) || self.panel_fx.busy(now) || self.ghost.is_some() || self.tag_y.as_ref().is_some_and(|y| y.1.moving(now));
+        self.hud_busy_paint = hud_busy && self.hud_prof.is_some();
+        if hud_busy {
+            window.request_animation_frame();
+        }
+        self.hud_prof_note(now, hud_busy);
 
         // Context menu.
         if self.menu.is_none() {
@@ -6836,6 +7506,7 @@ impl Render for Avatar {
         let tag_w = self.tag_w.clone();
         let menu_h = self.menu_h.clone();
         let tag_box = self.tag_box.clone();
+        let hud_paint = self.hud_busy_paint.then(|| self.hud_paint.clone());
         root.child(
             canvas(
                 |_, _, _| (),
@@ -7013,6 +7684,10 @@ impl Render for Avatar {
                             h[0] = std::mem::take(&mut last.1);
                         }
                         *last = (input, visible);
+                    }
+                    // SA_HUD_PROF: this frame's time on the main thread (render, layout, paint).
+                    if let Some(v) = &hud_paint {
+                        v.borrow_mut().push(now.elapsed().as_secs_f32() * 1000.0);
                     }
                     if has_frame && !first.get() {
                         first.set(true);
