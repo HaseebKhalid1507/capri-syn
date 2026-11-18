@@ -786,6 +786,10 @@ pub struct Avatar {
     bubble_serial: u64,
     /// The pill's size as last shown (the bubble opens out of it).
     pill_last: Option<(f32, f32)>,
+    /// `SA_HUD_PROF`: each frame's main-thread time while the HUD moves, and whether this
+    /// frame records it.
+    hud_paint: Rc<RefCell<Vec<f32>>>,
+    hud_busy_paint: bool,
     /// `SA_HUD_PROF`: frame times while the HUD moves.
     hud_prof: Option<Vec<(Instant, f32)>>,
     /// The HUD's top while a bubble is up: (resting frame, avatar-local device px).
@@ -1038,6 +1042,8 @@ impl Avatar {
             panel_last_snap: None,
             bubble_serial: 0,
             hud_prof: None,
+            hud_paint: Rc::new(RefCell::new(Vec::new())),
+            hud_busy_paint: false,
             pill_last: None,
             hud_top: Cell::new(None),
             tag_box: Rc::new(Cell::new(None)),
@@ -2039,9 +2045,10 @@ impl Avatar {
             x[((x.len() - 1) as f32 * f) as usize]
         };
         let gaps: Vec<f32> = v.windows(2).map(|w| w[1].0.duration_since(w[0].0).as_secs_f32() * 1000.0).collect();
-        let r: Vec<f32> = v.iter().map(|x| x.1).collect();
+        let r: Vec<f32> = std::mem::take(&mut *self.hud_paint.borrow_mut());
+        let r = if r.is_empty() { vec![0.0] } else { r };
         elog!(
-            "hud-prof: {} frames over {:.0} ms; interval p50 {:.1} p95 {:.1} max {:.1} ms, {} over 25 ms; render p50 {:.2} p95 {:.2} max {:.2} ms",
+            "hud-prof: {} frames over {:.0} ms; interval p50 {:.1} p95 {:.1} max {:.1} ms, {} over 25 ms; frame (render+layout+paint) p50 {:.2} p95 {:.2} max {:.2} ms",
             v.len(),
             v.last().unwrap().0.duration_since(v[0].0).as_secs_f32() * 1000.0,
             q(gaps.clone(), 0.5),
@@ -7057,6 +7064,7 @@ impl Render for Avatar {
         }
         // The HUD moves: a frame per present until it settles, and nothing after.
         let hud_busy = self.tag_fx.busy(now) || self.panel_fx.busy(now) || self.ghost.is_some();
+        self.hud_busy_paint = hud_busy && self.hud_prof.is_some();
         if hud_busy {
             window.request_animation_frame();
         }
@@ -7290,6 +7298,7 @@ impl Render for Avatar {
         let tag_w = self.tag_w.clone();
         let menu_h = self.menu_h.clone();
         let tag_box = self.tag_box.clone();
+        let hud_paint = self.hud_busy_paint.then(|| self.hud_paint.clone());
         root.child(
             canvas(
                 |_, _, _| (),
@@ -7467,6 +7476,10 @@ impl Render for Avatar {
                             h[0] = std::mem::take(&mut last.1);
                         }
                         *last = (input, visible);
+                    }
+                    // SA_HUD_PROF: this frame's time on the main thread (render, layout, paint).
+                    if let Some(v) = &hud_paint {
+                        v.borrow_mut().push(now.elapsed().as_secs_f32() * 1000.0);
                     }
                     if has_frame && !first.get() {
                         first.set(true);
