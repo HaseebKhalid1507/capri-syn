@@ -36,6 +36,8 @@ pub struct X11 {
     screen_h: u16,
     /// A compositor owned `_NET_WM_CM_S{screen}` at connect.
     composited: bool,
+    /// It was picom (`reshapes`).
+    reshapes: bool,
     atoms: Atoms,
     /// Effect layers: (window, mapped, background colour), created on first use.
     fx: Mutex<Vec<(u32, bool, u32)>>,
@@ -52,6 +54,20 @@ pub struct X11 {
 type Escapes = Arc<Mutex<Option<Box<dyn Fn() + Send>>>>;
 
 /// The keycodes that type Escape (keysym 0xff1b).
+/// The compositor owning `_NET_WM_CM_S` (`owner`, its window) takes any change of a window's
+/// shape for a resize (`Desktop::compositor_reshapes`): picom (compton before it was renamed).
+/// It names that window before it takes the selection: WM_NAME, _NET_WM_NAME and WM_CLASS
+/// "picom". Only picom was seen doing it (its animations); other compositors aren't held to it.
+fn reshapes(conn: &RustConnection, owner: u32) -> bool {
+    owner != x11rb::NONE
+        && [xproto::AtomEnum::WM_CLASS, xproto::AtomEnum::WM_NAME].into_iter().any(|a| {
+            conn.get_property(false, owner, a, xproto::AtomEnum::ANY, 0, 64).ok().and_then(|c| c.reply().ok()).is_some_and(|r| {
+                let v = String::from_utf8_lossy(&r.value).to_ascii_lowercase();
+                v.contains("picom") || v.contains("compton")
+            })
+        })
+}
+
 fn escape_codes(c: &RustConnection) -> Vec<u8> {
     let setup = c.setup();
     let (min, max) = (setup.min_keycode, setup.max_keycode);
@@ -210,7 +226,8 @@ impl X11 {
             wm_state: intern(&conn, "_NET_WM_STATE")?,
             wm_state_fullscreen: intern(&conn, "_NET_WM_STATE_FULLSCREEN")?,
         };
-        let composited = conn.get_selection_owner(atoms.cm)?.reply()?.owner != x11rb::NONE;
+        let owner = conn.get_selection_owner(atoms.cm)?.reply()?.owner;
+        let (composited, reshapes) = (owner != x11rb::NONE, reshapes(&conn, owner));
         Ok(X11 {
             conn: Arc::new(conn),
             win: AtomicU32::new(0),
@@ -218,6 +235,7 @@ impl X11 {
             screen_w,
             screen_h,
             composited,
+            reshapes,
             atoms,
             fx: Mutex::new(Vec::new()),
             clicks: Arc::new(AtomicBool::new(false)),
@@ -472,6 +490,10 @@ impl Desktop for X11 {
         self.composited
     }
 
+    fn compositor_reshapes(&self) -> bool {
+        self.reshapes
+    }
+
     /// One thread on the main connection: SubstructureNotify and property changes on the
     /// root, XFixes on the compositor selection, as hints. It also keeps her body above
     /// managed windows (an override-redirect window isn't kept up by the WM).
@@ -516,7 +538,7 @@ impl Desktop for X11 {
                     }
                     Event::PropertyNotify(e) if e.window == root && e.atom == atoms.active_window => hint(Hint::Focus),
                     Event::PropertyNotify(e) if e.window == root && e.atom == atoms.current_desktop => hint(Hint::Desktop),
-                    Event::XfixesSelectionNotify(e) if e.selection == atoms.cm => hint(Hint::Compositor(e.owner != x11rb::NONE)),
+                    Event::XfixesSelectionNotify(e) if e.selection == atoms.cm => hint(Hint::Compositor { runs: e.owner != x11rb::NONE, reshapes: reshapes(&conn, e.owner) }),
                     _ => {}
                 };
                 handle(ev, &mut restack, &mut may_cover);

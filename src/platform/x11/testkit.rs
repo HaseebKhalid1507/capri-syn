@@ -171,9 +171,15 @@ fn contract_x11() {
     let disp = std::env::var("DISPLAY").unwrap_or_default();
     assert!(!disp.is_empty() && disp != ":0" && std::env::var("SA_CONTRACT_DISPLAY").ok() == Some(disp.clone()), "refusing DISPLAY={disp:?}: set SA_CONTRACT_DISPLAY to the same test display");
     let x = Arc::new(X11::connect().unwrap());
+    // Whether the compositor owning the selection is picom (`reshapes`); SA_CONTRACT_PICOM=0|1
+    // says what the display runs.
+    let picom = x.reshapes;
+    if let Ok(want) = std::env::var("SA_CONTRACT_PICOM") {
+        assert_eq!(picom, want == "1", "picom on {disp}");
+    }
     let mut d = XDriver::new(&x);
     let os = Os::new(x.clone(), Box::new(x));
     let passed = contract::block_on(contract::run(&os, &mut d)).unwrap();
-    eprintln!("contract_x11 on {disp}: {} scenarios passed: {}", passed.len(), passed.join(", "));
-    assert_eq!(passed.len(), 13);
+    eprintln!("contract_x11 on {disp} (compositor {}, picom {picom}): {} scenarios passed: {}", os.compositor_running(), passed.len(), passed.join(", "));
+    assert_eq!(passed.len(), 14);
 }

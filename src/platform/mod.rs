@@ -27,6 +27,7 @@ mod hypr;
 mod linux;
 mod os;
 pub mod pointer;
+mod settle;
 mod track;
 #[cfg(windows)]
 mod windows;
@@ -232,10 +233,11 @@ pub enum Hint {
     Changed,
     /// Monitors or the areas panels reserve changed.
     Layout,
-    /// Whether a compositor runs now.
+    /// Whether a compositor runs now, and whether it takes a change of her window's shape
+    /// for a resize (`Desktop::compositor_reshapes`).
     // Not sent on Windows: DWM always composites.
     #[cfg_attr(windows, allow(dead_code))]
-    Compositor(bool),
+    Compositor { runs: bool, reshapes: bool },
 }
 
 /// What the watchers report to the view.
@@ -431,6 +433,14 @@ pub trait Desktop: Send + Sync {
     fn char_key_down(&self, ch: char) -> Result<bool>;
     /// A compositor runs (at connect; later changes come as `Hint::Compositor`).
     fn compositor_running(&self) -> bool;
+    /// The compositor running takes any change of her window's shape (X SHAPE, her input
+    /// region's too) for a resize, and a move in the same frame cross-fades her from a snapshot
+    /// taken before it, until she holds still (picom's animations: a copy of her facing the old
+    /// way through a drag after a turn). The core then keeps the two apart (`Os::settling`).
+    /// At connect; later changes come as `Hint::Compositor`.
+    fn compositor_reshapes(&self) -> bool {
+        false
+    }
     /// Start the event source; `hint` runs on its thread.
     fn watch(&self, hint: Box<dyn Fn(Hint) + Send>) -> Result<()>;
     /// Start reporting the session's lock and sleep (`on` runs on its thread). Linux: logind,

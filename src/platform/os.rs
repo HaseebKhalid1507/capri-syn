@@ -1,6 +1,7 @@
 //! The core over whichever backend: every desktop decision, once. A backend's answers come
 //! in as plain data (`Desktop`) and go out as primitives (`Stage`); the rules live here.
 
+use super::settle::Settle;
 use super::track::Track;
 use super::{Caps, Desktop, FxZ, Hint, Monitor, MoveAnim, PointerCfg, PointerEv, Role, SEAT_MIN, ShapeRect, Stage, Visible, WatchEvent, WinId, WinRect};
 use anyhow::Result;
@@ -27,6 +28,8 @@ struct Shared {
     target: AtomicU32,
     /// A compositor runs (kept current by the watcher).
     composited: AtomicBool,
+    /// It takes a change of her window's shape for a resize (`Desktop::compositor_reshapes`).
+    reshapes: AtomicBool,
     /// The target poller (backends without target events), woken by a new target.
     poller: OnceLock<std::thread::Thread>,
     /// The space the target was first seen on (`Place::space`; `NO_SPACE`: not yet).
@@ -76,7 +79,12 @@ impl Shared {
                 self.poll_now();
                 on(WatchEvent::Layout);
             }
-            Hint::Compositor(now) if self.composited.swap(now, Ordering::Relaxed) != now => on(WatchEvent::Compositor(now)),
+            Hint::Compositor { runs, reshapes } => {
+                self.reshapes.store(reshapes, Ordering::Relaxed);
+                if self.composited.swap(runs, Ordering::Relaxed) != runs {
+                    on(WatchEvent::Compositor(runs));
+                }
+            }
             _ => {}
         }
     }
@@ -275,12 +283,14 @@ pub struct Os {
     hosts: RefCell<Vec<(WinId, Monitor)>>,
     /// She moved to another host: the view shows her in it (`take_host_change`).
     host_changed: Cell<Option<WinId>>,
+    /// Her input region and her moves kept apart (`Os::settling`).
+    settle: RefCell<Settle>,
 }
 
 impl Os {
     pub fn new(desk: Arc<dyn Desktop>, stage: Box<dyn Stage>) -> Os {
         let caps = desk.caps();
-        let shared = Shared { target: AtomicU32::new(0), composited: AtomicBool::new(desk.compositor_running()), poller: OnceLock::new(), space: AtomicI64::new(NO_SPACE), layout_gen: AtomicU64::new(0), moved_at: Mutex::new(None) };
+        let shared = Shared { target: AtomicU32::new(0), composited: AtomicBool::new(desk.compositor_running()), reshapes: AtomicBool::new(desk.compositor_reshapes()), poller: OnceLock::new(), space: AtomicI64::new(NO_SPACE), layout_gen: AtomicU64::new(0), moved_at: Mutex::new(None) };
         Os {
             desk,
             stage,
@@ -299,6 +309,7 @@ impl Os {
             body_size: Cell::new((0, 0)),
             hosts: RefCell::new(Vec::new()),
             host_changed: Cell::new(None),
+            settle: RefCell::new(Settle::default()),
         }
     }
 
@@ -397,8 +408,28 @@ impl Os {
         self.stage.body()
     }
 
-    /// Body origin, root px; on another output's host when she crossed to it.
+    /// Body origin, root px; on another output's host when she crossed to it. Under picom
+    /// (`Os::settling`) a move right after a region change waits (`Os::settle`).
     pub fn move_to(&self, x: i32, y: i32) -> Result<()> {
+        if !self.settle.borrow_mut().wants_move(self.settling(), (x, y), Instant::now()) {
+            return Ok(());
+        }
+        self.send_move(x, y)
+    }
+
+    /// A landing (a teleport's, a placed move): out at once, never held (`Os::move_to` may
+    /// be): one cross-fade of her by picom costs less than her standing where she left.
+    pub fn move_now(&self, x: i32, y: i32) -> Result<()> {
+        self.settle.borrow_mut().landed(Instant::now());
+        self.send_move(x, y)
+    }
+
+    /// Where her body is on the desktop, root px: the last move out (a held one is not yet).
+    pub fn shown_at(&self) -> (i32, i32) {
+        self.body_at.get()
+    }
+
+    fn send_move(&self, x: i32, y: i32) -> Result<()> {
         self.body_at.set((x, y));
         if let Some(h) = self.host_for(x, y)
             && h != self.stage.body()
@@ -426,7 +457,14 @@ impl Os {
     /// Input region = `input`; everything else clicks through. The visible region is the
     /// mode's: all of the window when a compositor blends her alpha, else `visible`, so no
     /// black box shows. Each `None` stays as it is.
+    ///
+    /// Under picom (`Os::settling`) the input region waits while she moves or the button is
+    /// down on her (`settle.rs` has the rules; `Os::settle` sends it when due).
     pub fn set_shapes(&self, input: Option<&[ShapeRect]>, visible: Option<&[ShapeRect]>) -> Result<()> {
+        let input = input.filter(|r| self.settle.borrow_mut().wants_region(self.settling(), r, Instant::now()));
+        if input.is_none() && visible.is_none() {
+            return Ok(());
+        }
         let visible = visible.map(|v| {
             if self.composited() {
                 Visible::All
@@ -437,6 +475,37 @@ impl Os {
             }
         });
         self.stage.set_shapes(input, visible)
+    }
+
+    /// Her input region and her moves are kept apart (`settle.rs`): under a compositor that
+    /// takes a change of her window's shape for a resize (picom: it then cross-fades her from
+    /// a stale snapshot of herself until she holds still), in alpha mode (in shape mode her
+    /// shape is what shows: it follows every frame). Elsewhere both go out at once.
+    pub fn settling(&self) -> bool {
+        self.shared.reshapes.load(Ordering::Relaxed) && self.composited()
+    }
+
+    /// The button went down on her (`down`) or up. With an implicit grab
+    /// (`Caps::implicit_grab`) every pointer event is hers while it is down, whatever her input
+    /// region: the region then waits for the release, so a drag never waits for one.
+    pub fn set_pressed(&self, down: bool) {
+        if self.caps.implicit_grab {
+            self.settle.borrow_mut().press(down, Instant::now());
+        }
+    }
+
+    /// When what `settle` holds back is due, if anything is.
+    pub fn settle_due(&self) -> Option<Instant> {
+        self.settle.borrow().due(self.settling(), Instant::now())
+    }
+
+    /// Send what is held back and due now: a move or her input region (both at once out of
+    /// that mode). A failed move never drops the region.
+    pub fn settle(&self) -> Result<()> {
+        let (pos, input) = self.settle.borrow_mut().take_due(self.settling(), Instant::now());
+        let moved = pos.map_or(Ok(()), |(x, y)| self.send_move(x, y));
+        let shaped = input.map_or(Ok(()), |r| self.stage.set_shapes(Some(&r), None));
+        moved.and(shaped)
     }
 
     /// Another surface's input region = `input`; visible: all of it under a compositor, else

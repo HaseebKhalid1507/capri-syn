@@ -1,7 +1,7 @@
 //! The contract every backend passes, written once: the scenarios the core relies on (perch on
 //! a window, the window moves / hides / comes back / closes, monitor switch and work areas,
 //! fullscreen, the drag's pointer, her body's moves and the teleport's effect layers, shapes,
-//! the keyboard, the pointer watcher). `fake.rs` runs it in every `cargo test` (with and
+//! her input region kept apart from her moves, the keyboard, the pointer watcher). `fake.rs` runs it in every `cargo test` (with and
 //! without target events); a real backend runs it on a test display (X11: `x11/testkit.rs`
 //! on Xvfb; Hyprland: `hypr/testkit.rs` in the `tools/wlrig` sandbox). A backend is done when it
 //! passes this, not its own tests.
@@ -124,6 +124,7 @@ async fn scenarios<D: Driver>(os: &Os, d: &mut D, stop: bool) -> Result<Vec<(&'s
     scenario!("drag-pointer", drag_pointer);
     scenario!("body-and-teleport-fx", body_and_fx);
     scenario!("shapes", shapes);
+    scenario!("region-and-moves", region_and_moves);
     scenario!("keyboard", keyboard);
     scenario!("pointer-near", pointer_near);
     scenario!("pointer-linger-wiggle", pointer_linger_wiggle);
@@ -134,6 +135,15 @@ async fn scenarios<D: Driver>(os: &Os, d: &mut D, stop: bool) -> Result<Vec<(&'s
 /// The extent `(x, y, w, h)` of a painted layer, with the id dropped.
 fn extent(r: &WinRect) -> (i32, i32, i32, i32) {
     (r.x, r.y, r.w, r.h)
+}
+
+/// Wait out and send what the core holds apart (`Os::settle`).
+fn settled(os: &Os) -> Result<()> {
+    while let Some(t) = os.settle_due() {
+        std::thread::sleep(t.saturating_duration_since(Instant::now()));
+        os.settle()?;
+    }
+    Ok(())
 }
 
 fn drain(rx: &Receiver<WatchEvent>) {
@@ -426,6 +436,7 @@ async fn shapes<D: Driver>(os: &Os, d: &mut D, _rx: &Receiver<WatchEvent>) -> Re
         os.force_composited(mode);
         os.take_shape_stats();
         os.set_shapes(Some(&input[..]), Some(&[(0, 0, 5, 5)]))?;
+        settled(os)?;
         d.settle().await;
         for (x, y) in on {
             ensure!(d.hits(b.x + x, b.y + y), "({x}, {y}) inside her input region passed through (mode {mode:?})");
@@ -441,8 +452,54 @@ async fn shapes<D: Driver>(os: &Os, d: &mut D, _rx: &Receiver<WatchEvent>) -> Re
     }
     // Nothing clickable: every click passes through.
     os.set_shapes(Some(&[]), None)?;
+    settled(os)?;
     d.settle().await;
     ensure!(!d.hits(b.x + 25, b.y + 40), "an empty input region still takes clicks");
+    Ok(())
+}
+
+/// Her input region and her moves, kept apart where the desktop takes a region change for a
+/// resize (`Os::settling`: picom cross-faded her from a stale snapshot of herself until she held
+/// still, a copy of her facing the old way through a drag after a turn): a region set while she
+/// moves waits until she has held still for `SETTLE`, a move right after a region change waits
+/// out `GAP`, and `Os::settle` sends each when due (`settle.rs`). Elsewhere both go out at once.
+async fn region_and_moves<D: Driver>(os: &Os, d: &mut D, _rx: &Receiver<WatchEvent>) -> Result<()> {
+    let b = d.body_rect().ok_or(anyhow!("no body"))?;
+    let (left, right): (Vec<ShapeRect>, Vec<ShapeRect>) = (vec![(10, 20, 30, 40)], vec![(60, 20, 30, 40)]);
+    let at = |d: &mut D| d.body_rect().map(|r| (r.x, r.y));
+    for mode in [Some(false), Some(true), None] {
+        os.force_composited(mode);
+        let held = os.settling();
+        os.set_shapes(Some(&left[..]), None)?;
+        settled(os)?;
+        std::thread::sleep(super::settle::SETTLE);
+        d.settle().await;
+        // A move and a new region at once (a turn while he drags her): the move goes out, the
+        // region waits for her to hold still.
+        os.move_to(b.x + 8, b.y)?;
+        os.set_shapes(Some(&right[..]), None)?;
+        d.settle().await;
+        ensure!(at(d) == Some((b.x + 8, b.y)), "the move waited: {:?} (mode {mode:?})", at(d));
+        let (l, r) = (d.hits(b.x + 8 + 25, b.y + 40), d.hits(b.x + 8 + 75, b.y + 40));
+        ensure!((l, r) == (held, !held), "the region while she moves: old {l} new {r}, held {held} (mode {mode:?})");
+        ensure!(os.settle_due().is_some() == held, "a wake when it may go out (mode {mode:?})");
+        settled(os)?;
+        d.settle().await;
+        let (l, r) = (d.hits(b.x + 8 + 25, b.y + 40), d.hits(b.x + 8 + 75, b.y + 40));
+        ensure!((l, r) == (false, true), "the region once she held still: old {l} new {r} (mode {mode:?})");
+        // A region change and a move at once (she lands, a step of her bob): the region goes
+        // out, the move waits.
+        os.set_shapes(Some(&left[..]), None)?;
+        os.move_to(b.x, b.y)?;
+        d.settle().await;
+        let want = if held { (b.x + 8, b.y) } else { (b.x, b.y) };
+        ensure!(at(d) == Some(want), "a move right after a region change: at {:?}, held {held} (mode {mode:?})", at(d));
+        let x = want.0;
+        ensure!(d.hits(x + 25, b.y + 40) && !d.hits(x + 75, b.y + 40), "the region went out at once (mode {mode:?})");
+        settled(os)?;
+        d.settle().await;
+        ensure!(at(d) == Some((b.x, b.y)), "the move once due: {:?} (mode {mode:?})", at(d));
+    }
     Ok(())
 }
 
