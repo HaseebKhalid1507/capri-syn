@@ -969,8 +969,8 @@ pub struct Avatar {
     /// `SA_LAYOUT_PROBE`: the bubble as last laid out (`state`'s `panel_layout`): its box, each
     /// line's width in the face it is drawn in, the room it had.
     panel_probe: Option<serde_json::Value>,
-    /// The bubble header as GPUI last laid it out (`SA_LAYOUT_PROBE`): its words, the room, the
-    /// widths it used next to the model's.
+    /// The bubble header as GPUI last painted it (`SA_LAYOUT_PROBE`, `state`'s
+    /// `panel_layout.header_px`): its words, the room, the widths it used next to the model's.
     header_px: Rc<RefCell<serde_json::Value>>,
     warmed: bool,
     /// lachy's stills, decoded after the frames (`Stills`); her head-hover pointer is on.
@@ -4100,6 +4100,10 @@ impl Avatar {
         });
         v["art"] = self.art_json();
         v["panel_layout"] = self.panel_probe.clone().filter(|_| self.panel_up()).into();
+        // The header as last painted (its words may be newer than the layout's).
+        if let Some(p) = v["panel_layout"].as_object_mut() {
+            p.insert("header_px".into(), self.header_px.borrow().clone());
+        }
         v["motion"] = self.motion_json();
         v["intro"] = self.intro_json();
         v.to_string()
@@ -6120,6 +6124,8 @@ fn cut_status(s: &str, fits: impl Fn(&str) -> bool) -> String {
 
 /// `cw` with every digit as wide as the widest and the meter's two bars alike: a ticking timer
 /// or level measures the same each second (the status draws them so, `theme::tracked_fixed`).
+/// Boxes, not the font's `tnum`: Exo 2 has it, but its tabular 4 is 618/1000 to the others' 620,
+/// and the bars come from a fallback face.
 fn tabular(cw: impl Fn(char, bool) -> f32) -> impl Fn(char, bool) -> f32 {
     move |c, status| {
         if c.is_ascii_digit() {
@@ -7537,7 +7543,6 @@ impl Avatar {
                     "panel": [ox + dev(x), oy + dev(y), dev(w), dev(h)],
                     "text_box": [ox + dev(x + PAD_L), oy + dev(y + PAD_T + HEADER_H + HEADER_GAP), dev(tw), dev(h - (PAD_T + HEADER_H + HEADER_GAP) - foot_zone)],
                     "text_w": tw, "line_h": LINE_H, "sf": sf, "fits": fits, "cap": cap, "rows": rows, "header": [&header_label, &label],
-                    "header_px": self.header_px.borrow().clone(),
                     "read": self.bubble.as_ref().is_some_and(|b| b.long()) && mode == PanelMode::Reply,
                     "total": total_lines, "area": area, "settled": !self.panel_fx.busy(now),
                 }));
