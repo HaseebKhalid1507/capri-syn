@@ -156,8 +156,12 @@ jobs:
           key: release
           cache-on-failure: true
 
+      # As the release builds her (release.yml): symbols beside the exe, so a dump of a CI build reads.
       - name: Build the installer
         shell: pwsh
+        env:
+          CARGO_PROFILE_RELEASE_STRIP: none
+          CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
         run: ./packaging/windows/build.ps1
 
       - name: Install, check, uninstall (unattended)
@@ -189,14 +193,37 @@ jobs:
         run: ./installer/test-windows.ps1 -Setup (Get-ChildItem packaging/windows/Output/synaps-avatar-setup-*.exe | Select-Object -First 1).FullName -Ref ${{ github.event.pull_request.head.sha || github.sha }}
 
       # Her release exe, offline (no daemon), a minute of clicks and carries on her: every WM_NULL
-      # answered within 1 s, no WER event, no panic (the "not responding" hang of 2026-11-19: her
-      # UI thread and her click-through poller waited on each other). Last: it leaves her state.
+      # answered (within 1 s, or 10 s on a retry), no WER event, no panic (the "not responding"
+      # hang of 2026-11-19: her UI thread and her click-through poller waited on each other).
+      # Last: it leaves her state. On a failure, -Out keeps her log and a minidump of her.
       - name: She keeps answering through a minute of clicks (offline)
         timeout-minutes: 15
         shell: pwsh
-        run: ./tests/windows/test-hang.ps1 -Exe target/release/synaps-avatar.exe
+        run: ./tests/windows/test-hang.ps1 -Exe target/release/synaps-avatar.exe -Out "$env:RUNNER_TEMP/sa-hang"
 
+      - name: Her log and a dump of her, from a failed run
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-hang-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/sa-hang
+            target/release/synaps_avatar.pdb
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Her symbols (the PDB of this build's exe)
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: synaps-avatar-pdb-${{ github.sha }}
+          path: target/release/synaps_avatar.pdb
+          retention-days: 14
+          if-no-files-found: warn
+
+      # Uploaded even when the run above fails (a flake cost main 7b401ea its installer).
       - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
         with:
           name: synaps-avatar-setup-${{ github.sha }}
           path: packaging/windows/Output/synaps-avatar-setup-*.exe
