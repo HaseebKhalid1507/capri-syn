@@ -405,7 +405,7 @@ function Fx-Take([string]$Name, [int]$From, [string]$Ask, [double]$Seconds, [int
         @([int]$o.x, [int]$o.y, [int]$o.w, [int]$o.h)
     } elseif ($Band) {
         $top = [Math]::Max($wa[1], [int]$o.y - 100)
-        @($wa[0], $top, $wa[2], $wa[1] + $wa[3] - $top)
+        @($wa[0], $top, $wa[2], ($wa[1] + $wa[3] - $top))
     } else { $wa }
     $b = Start-ShotBurst -Dir (Join-Path $script:TakeOut 'burst') -Rect $rect -Fps $Fps -Seconds $Seconds
     Start-Sleep -Milliseconds 300

@@ -87,6 +87,8 @@ jobs:
             $sets = if ($only) { $only -join ',' } else { 'settings,header' }
             $hidpi = 'settings/on,settings/empty,header/hf-470,header/prompt-470'
           }
+          # Only the 150% takes of the sets shot (none: that step is skipped).
+          $hidpi = @($hidpi -split ',' | Where-Object { $_ -and $_.Split('/')[0] -in ($sets -split ',') }) -join ','
           $sha = git -C app rev-parse HEAD
           "sets=$sets" >> $env:GITHUB_OUTPUT
           "hidpi=$hidpi" >> $env:GITHUB_OUTPUT
