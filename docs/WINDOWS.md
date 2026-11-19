@@ -71,9 +71,14 @@ persona; no art).
   she is installed without it, and the finish page says what happened in plain words, with the
   one command that tries it again (`powershell -NoProfile -ExecutionPolicy Bypass -File
   "…\steps\steps.ps1" pack`). Unattended, the setup log says the same.
-- **The finish page**: "Start her now", and with no login yet "Sign in to Claude" (Synaps'
-  `synaps login --provider claude`, no window: his browser opens). Her tag reads NO BRAIN YET until
-  then; she re-reads the login on her own.
+- **The finish page**: "Start her now", and with no login yet "Sign in to Claude" (`steps.ps1 login`:
+  Synaps' `synaps login --provider claude`, no window: his browser opens). Synaps 0.12 opens the
+  page with `cmd /c start URL`, and cmd cuts the URL at its first `&` (no `client_id`: claude.ai
+  can't sign him in), so the step opens the whole URL from Synaps' stderr itself (a broken tab from
+  Synaps may open first, until Synaps quotes it). Its stdin is held open until `auth.json` changes:
+  0.12 gives up at once on a closed one. Until her first question her tag reads ONLINE on Windows
+  (the daemon's environment can't be read there, so no login on file is "unknown", `creds.rs`);
+  her first question without a login turns it to NO BRAIN YET.
 - **Her exe is the windowed build** (`cargo rustc … /SUBSYSTEM:WINDOWS`, her binary only): no
   console window from the Start menu or at sign-in. Without a console she logs to the file above.
   `--check` from a terminal therefore prints nothing there: read the log, or use a cargo build.
@@ -117,14 +122,16 @@ CI:
   retry), a CapriCore that doesn't match its pins (refused, deleted), `/PACK=download` over a pack of
   his (moved aside, kept; hers built, `--check` passes; lachy's notices), again (up to date), a pack
   folder over the one Setup built (replaced whole), the files, keys, shortcut AUMID, the windowed
-  exe, her size in Settings → Apps, and that nothing is left after.
+  exe, her size in Settings → Apps, and that nothing is left after. `test-login.ps1`: `steps.ps1
+  login` against a stand-in `synaps.exe` (compiled there): the whole URL, stdin held open, a failed
+  login in its own words.
 - `windows-setup-e2e` (`test-setup-e2e.ps1`, a clean runner): the defaults, unattended; `synaps
   --version`, the daemon (protocol 3, and its Run value), her pack, autostart, the Start menu; she
   starts, attaches (her control socket's `state`: `session.live`, the tag not OFFLINE), and answers
   for 60 s of clicks on her (every `state` from her UI thread, `WM_NULL` to her windows, her ticks,
   no Application Hang event); no microphone, so no voice files; the uninstall leaves nothing of hers.
-- `windows-setup-voice` (`test-setup-voice.ps1`, a clean runner): `/VOICE=on` with the voice
-  installer CI built; the bundle and its selftest, the models, `settings.toml` (`[voice] enabled`,
+- `windows-setup-voice` (`test-setup-voice.ps1`, a clean runner): `/VOICE=on`, the voice installer
+  CI built beside the setup (as a release's comes from GitHub); the bundle and its selftest, the models, `settings.toml` (`[voice] enabled`,
   never her voice itself), her log's `voice: sidecar started`, and an uninstall that leaves no voice.
 - `windows-setup-wizard` (`test-setup-wizard.ps1`, a clean runner): the wizard clicked through with
   its defaults (UI Automation), a screenshot of every page (`tools/shoot-win.ps1`), her on the desktop
