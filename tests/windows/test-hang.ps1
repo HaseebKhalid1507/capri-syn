@@ -162,6 +162,26 @@ Write-Host "ready after $([int]((Get-Date) - $t0).TotalSeconds) s; her window 0x
 # ---- a minute of his pointer ---------------------------------------------------------------------
 $rng = [Random]::new(20261119)
 $steps = 0; $presses = 0; $carries = 0; $worst = 0; $slow = 0; $hung = $null
+# When: every answer over 250 ms, and every line of her log, on one clock (s since the minute
+# began), so a slow answer shows what she was doing (her log has no times of its own).
+$clock = [Diagnostics.Stopwatch]::StartNew()
+$timeline = [System.Collections.Generic.List[string]]::new()
+$slowOnes = [System.Collections.Generic.List[double]]::new()
+$logAt = if (Test-Path $log) { (Get-Item $log).Length } else { 0 }
+function Read-HerLog {
+    if (-not (Test-Path $log)) { return }
+    $fs = [IO.File]::Open($log, 'Open', 'Read', 'ReadWrite, Delete')
+    try {
+        if ($fs.Length -le $script:logAt) { return }
+        [void]$fs.Seek($script:logAt, 'Begin')
+        $new = [IO.StreamReader]::new($fs).ReadToEnd()
+        $cut = $new.LastIndexOf("`n")
+        if ($cut -lt 0) { return }
+        $script:logAt += [Text.Encoding]::UTF8.GetByteCount($new.Substring(0, $cut + 1))
+        $t = $clock.Elapsed.TotalSeconds
+        foreach ($l in $new.Substring(0, $cut).Split("`n")) { if ($l.Trim()) { $timeline.Add(('{0,7:F2}  log  {1}' -f $t, $l.Trim())) } }
+    } finally { $fs.Dispose() }
+}
 $end = (Get-Date).AddSeconds($Seconds)
 while ((Get-Date) -lt $end -and -not $p.HasExited) {
     $b = [Her]::Body($p.Id)
@@ -173,6 +193,7 @@ while ((Get-Date) -lt $end -and -not $p.HasExited) {
     [void][Her]::SetCursorPos($x, $y)
     Start-Sleep -Milliseconds (15 + $rng.Next(40))
     if ([Her]::HersAt($p.Id, $x, $y)) {
+        $timeline.Add(('{0,7:F2}  step {1}: press at {2},{3}' -f $clock.Elapsed.TotalSeconds, ($steps + 1), $x, $y))
         [Her]::Down()
         if ($rng.Next(3) -eq 0) {
             # A short carry.
@@ -188,8 +209,14 @@ while ((Get-Date) -lt $end -and -not $p.HasExited) {
         Start-Sleep -Milliseconds (10 + $rng.Next(30))
         [void][Her]::SetCursorPos($x, $y)
     }
+    $sent = $clock.Elapsed.TotalSeconds
     $ms = [Her]::Ping($body, 1000)
     $steps++
+    if ($ms -lt 0 -or $ms -gt 250) {
+        $timeline.Add(('{0,7:F2}  step {1}: WM_NULL {2}' -f $sent, $steps, $(if ($ms -lt 0) { 'NO ANSWER in 1 s' } else { "$ms ms" })))
+        $slowOnes.Add($sent)
+    }
+    Read-HerLog
     if ($ms -lt 0) {
         # Missed by 1 s: once more, 10 s. Both missed is a hang.
         $slow++
@@ -199,6 +226,7 @@ while ((Get-Date) -lt $end -and -not $p.HasExited) {
             break
         }
         $ms += 1000
+        $timeline.Add(('{0,7:F2}  step {1}: answered on the retry, ~{2} ms in all' -f $clock.Elapsed.TotalSeconds, $steps, $ms))
         if ($ms -ge 5000) {
             # Windows ghosts a window as "not responding" at 5 s: answered that late is still the bug.
             $hung = "step ${steps}: WM_NULL answered after ~$ms ms (over 5 s: 'not responding')"
@@ -209,6 +237,19 @@ while ((Get-Date) -lt $end -and -not $p.HasExited) {
 }
 [void][Her]::SetCursorPos(5, 5)
 Write-Host "$steps steps, $presses presses ($carries carries), slowest WM_NULL $worst ms ($slow over 1 s, answered on the retry)"
+Read-HerLog
+# Around each answer over 250 ms: what happened from 3 s before to 1 s after.
+if ($slowOnes.Count) {
+    Write-Host "answers over 250 ms: $($slowOnes.Count); around each (s since the minute began):"
+    $shown = @{}
+    foreach ($t in $slowOnes) {
+        foreach ($e in $timeline) {
+            $at = [double]($e.Substring(0, 7).Trim())
+            if ($at -ge $t - 3 -and $at -le $t + 1 -and -not $shown.ContainsKey($e)) { $shown[$e] = $true; Write-Host "  $e" }
+        }
+        Write-Host '  --'
+    }
+}
 
 # ---- what's left ---------------------------------------------------------------------------------
 $fails = [System.Collections.Generic.List[string]]::new()
