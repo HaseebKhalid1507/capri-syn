@@ -55,8 +55,9 @@ pub use self::windows::{base_dir, home_dir, local_day, monotonic_s, notify, proc
 /// her log. Linux: its Unix socket. Windows: loopback TCP after a token handshake (the sidecar is
 /// Python, and stock CPython has no AF_UNIX there).
 /// `VOICE_LINK_BLOCKS`: whether `voice_link` can block (Windows: a connect and a hello), so she
-/// calls `voice_link_bg` instead. `voice_sidecar(on)`: whether the sidecar should run, every tick;
-/// Windows starts and keeps it (a job object, dying with her), Linux leaves it to systemd.
+/// calls `voice_link_bg` instead. `voice_sidecar(on, mic)`: whether the sidecar should run, and on
+/// which microphone (`[voice] mic` as she runs it), every tick; Windows starts and keeps it (a job
+/// object, dying with her), Linux leaves it to systemd.
 #[cfg(target_os = "linux")]
 pub use linux::{VOICE_LINK_BLOCKS, VoiceLink, voice_link, voice_link_bg, voice_sidecar};
 #[cfg(windows)]

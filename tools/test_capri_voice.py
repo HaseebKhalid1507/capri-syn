@@ -294,6 +294,88 @@ class WindowsPlayer(unittest.TestCase):
         self.assertEqual(p.wait(timeout=0.01), 1, 'killed before its input closed')
 
 
+class FakeSd:
+    """sounddevice as the stock PortAudio shows a Windows PC: his USB mic three times (MME, its name
+    cut at 31 characters; DirectSound; WASAPI), the built-in mic WASAPI's default, and a headset
+    that is only a speaker. What gets opened is kept."""
+    MIC = 'Microphone (USB Audio Device Pro)'
+
+    def __init__(self):
+        self.opened = []
+
+    def query_hostapis(self):
+        return [{'name': 'MME', 'default_input_device': 0, 'default_output_device': -1},
+                {'name': 'Windows DirectSound', 'default_input_device': 2, 'default_output_device': -1},
+                {'name': 'Windows WASAPI', 'default_input_device': 4, 'default_output_device': 6}]
+
+    def query_devices(self):
+        d = lambda i, name, api, cin, cout: {'index': i, 'name': name, 'hostapi': api, 'max_input_channels': cin, 'max_output_channels': cout}
+        return [d(0, 'Microsoft Sound Mapper - Input', 0, 2, 0), d(1, self.MIC[:31], 0, 2, 0),
+                d(2, 'Primary Sound Capture Driver', 1, 2, 0), d(3, self.MIC, 1, 2, 0),
+                d(4, 'Microphone (Realtek(R) Audio)', 2, 2, 0), d(5, self.MIC, 2, 1, 0),
+                d(6, 'Speakers (Realtek(R) Audio)', 2, 0, 2), d(7, 'Headset (USB)', 2, 0, 2)]
+
+    class WasapiSettings:
+        def __init__(self, auto_convert):
+            self.auto_convert = auto_convert
+
+    class Stream:
+        active = True
+
+        def start(self):
+            pass
+
+        def abort(self):
+            pass
+
+        def close(self):
+            pass
+
+    def RawInputStream(self, **kw):
+        self.opened.append(('input', kw))
+        return self.Stream()
+
+    RawOutputStream = RawInputStream
+
+
+class NamedMic(unittest.TestCase):
+    """His [voice] mic is one device: the exact name, an input, under WASAPI (by its index, so
+    sounddevice never sees an ambiguous name), for the open and the "is it there" check alike."""
+
+    def setUp(self):
+        self.sd = FakeSd()
+        p = mock.patch.dict(sys.modules, {'sounddevice': self.sd})
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_one_device_per_name(self):
+        sd, mic = self.sd, FakeSd.MIC
+        self.assertEqual(win._named(sd, mic, 'input'), 5, 'the WASAPI one of three')
+        self.assertEqual(win._named(sd, f' {mic} ', 'input'), 5)
+        for other in ('Microphone', mic[:31], 'microphone (usb audio device pro)', ''):
+            self.assertIsNone(win._named(sd, other, 'input'), f'{other!r}: exact names only')
+        self.assertIsNone(win._named(sd, 'Headset (USB)', 'input'), 'a speaker is no mic')
+        self.assertEqual(win._named(sd, 'Headset (USB)', 'output'), 7)
+
+    def test_the_check_and_the_open_agree(self):
+        mic = FakeSd.MIC
+        self.assertFalse(win.node_missing('sources', mic))
+        self.assertFalse(win.node_missing('sources', ''), 'none named: the default')
+        for gone in ('Microphone', mic[:31], 'Headset (USB)'):
+            self.assertTrue(win.node_missing('sources', gone), gone)
+        win.Mic(16000, mic).terminate()
+        kind, kw = self.sd.opened.pop()
+        self.assertEqual((kind, kw['device']), ('input', 5), 'opened by its WASAPI index, never by name')
+        self.assertTrue(kw['extra_settings'].auto_convert)
+        with self.assertRaises(LookupError):
+            win.Mic(16000, 'Microphone')
+        self.assertEqual(self.sd.opened, [], 'a mic that is not there: nothing opened, never the default instead')
+        win.Mic(16000).terminate()
+        self.assertEqual(self.sd.opened.pop()[1]['device'], 4, "none named: WASAPI's default")
+        win.Player(24000, 'Headset (USB)').kill()
+        self.assertEqual(self.sd.opened.pop()[1]['device'], 7)
+
+
 class FakeSessions:
     def __init__(self, *ss):
         self.ss = {s['key']: dict(s) for s in ss}

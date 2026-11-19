@@ -61,7 +61,7 @@ pub fn voice_link_bg(done: impl FnOnce(String, std::io::Result<VoiceLink>) + Sen
 
 /// A systemd user unit runs the sidecar here (`tools/systemd/capri-voice.service`): she starts
 /// nothing.
-pub fn voice_sidecar(_on: bool) {}
+pub fn voice_sidecar(_on: bool, _mic: &str) {}
 
 /// Process setup that has to happen before any other thread exists. Each knob was
 /// measured on bella (release, `ps` RSS 6 s after start, see LOG.md):

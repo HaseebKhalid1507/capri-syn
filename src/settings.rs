@@ -232,7 +232,8 @@ pub struct VoiceSettings {
     /// The `vocab` entries left out by the caps (logged when the sidecar gets its config; not an error).
     pub vocab_dropped: Vec<String>,
     /// Windows: the microphone the sidecar listens on, by its name in Sound settings (her
-    /// installer's picker writes it); empty: Windows' default. Read when the sidecar starts. A
+    /// installer's picker writes it); empty: Windows' default. The sidecar gets it from her
+    /// running settings when it starts (a typo elsewhere in the file keeps the last good one). A
     /// named one that's gone is said (NO MIC), never swapped for the default. Linux: unused (the
     /// service's own `CAPRI_VOICE_SOURCE`).
     pub mic: String,

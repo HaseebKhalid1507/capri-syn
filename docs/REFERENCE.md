@@ -195,7 +195,7 @@ value rejects the whole file (the previous values stay). `avatarctl settings rel
 | `[voice] key` | `"c"` | the talk key's letter, so an X auto-repeat isn't taken for a release. Match your binding |
 | `[voice] wake_word` | `true` | "Hey Capri" starts a hands-free conversation. While on (with voice on) one mic stream stays open, shown on her tag. The rest of `[voice]` (toggle, hands-free, echo, pace): [VOICE.md](VOICE.md) |
 | `[voice] hold_to_talk` | `false` | Windows: her summon key (Win+Alt+C) talks while held; a tap opens the Line either way. Linux: unused (the binding sends `talk press` / `talk release`) |
-| `[voice] mic` | `""` | Windows: the microphone the sidecar listens on, by its name in Sound settings (her installer's Voice page writes it); empty: Windows' default. Read when the sidecar starts; a named one that's gone is said (NO MIC), never swapped for the default. Linux: unused |
+| `[voice] mic` | `""` | Windows: the microphone the sidecar listens on, by its name in Sound settings (her installer's Voice page writes it); empty: Windows' default. The device with that exact name under WASAPI. The sidecar gets it when it starts, from the settings she runs with (a typo elsewhere in the file keeps the last good one); a named one that's gone is said (NO MIC), never swapped for the default. Linux: unused |
 
 `[session]` applies only to her own session, never to one she rides with `--session`.
 

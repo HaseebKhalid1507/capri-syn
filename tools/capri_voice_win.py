@@ -147,18 +147,40 @@ def _wasapi(sd, kind):
     return None
 
 
+def _named(sd, name, kind):
+    """The one device `name` means ([voice] mic, by the name Sound settings shows), of `kind`
+    ('input'/'output'): its index under WASAPI, the exact name, with channels of that kind; None
+    when there's no such device. Used for the open and for the "is it there" check alike. A name
+    alone is no device to PortAudio: the stock build lists every endpoint again under MME (its
+    name cut at 31 characters) and DirectSound, so sounddevice refuses it ("Multiple input
+    devices found")."""
+    w = _wasapi(sd, kind)
+    if w is None or not name or not name.strip():
+        return None
+    ch = f'max_{kind}_channels'
+    for i, d in enumerate(sd.query_devices()):
+        if d.get('hostapi') == w[0] and d.get(ch, 0) > 0 and d.get('name', '').strip() == name.strip():
+            return d.get('index', i)
+    return None
+
+
 def _open(sd, cls, rate, device, kind, **kw):
-    """A WASAPI stream (shared mode, Windows resampling to our rate) on `device` (a name, as the
-    Linux test hooks name a node) or WASAPI's default; else PortAudio's default host API."""
+    """A WASAPI stream (shared mode, Windows resampling to our rate) on `device`: a name, the one
+    device `_named` finds and never another (LookupError when there is none), or None: WASAPI's
+    default, else PortAudio's default host API."""
+    wasapi = dict(samplerate=rate, channels=1, dtype='int16', extra_settings=sd.WasapiSettings(auto_convert=True))
+    if device is not None:
+        idx = _named(sd, device, kind)
+        if idx is None:
+            raise LookupError(f'no {kind} device named "{device}" under WASAPI')
+        return cls(device=idx, **wasapi, **kw)
     w = _wasapi(sd, kind)
     if w is not None:
         try:
-            dev = device if device is not None else w[1]
-            return cls(samplerate=rate, channels=1, dtype='int16', device=dev,
-                       extra_settings=sd.WasapiSettings(auto_convert=True), **kw)
+            return cls(device=w[1], **wasapi, **kw)
         except Exception as e:
             log(f'audio: WASAPI {kind} failed ({e}); the default host API')
-    return cls(samplerate=rate, channels=1, dtype='int16', device=device, **kw)
+    return cls(samplerate=rate, channels=1, dtype='int16', **kw)
 
 
 class _Out:
@@ -258,19 +280,14 @@ class Player:
         self.done.set()
 
 
-def _devices(kind):
-    import sounddevice as sd
-    ch = 'max_input_channels' if kind == 'sources' else 'max_output_channels'
-    return [d['name'] for d in sd.query_devices() if d.get(ch, 0) > 0]
-
-
 def node_missing(kind, name):
-    """A named device (the CAPRI_VOICE_SOURCE/SINK test hooks) that isn't there: never the default
-    instead."""
+    """A named device that isn't there, as `_named` (the open's own) finds it: CAPRI_VOICE_SOURCE
+    (his [voice] mic, from her) or the CAPRI_VOICE_SINK test hook. Never the default instead."""
     if not name:
         return False
     try:
-        return not any(name in d for d in _devices(kind))
+        import sounddevice as sd
+        return _named(sd, name, 'input' if kind == 'sources' else 'output') is None
     except Exception:
         return True
 

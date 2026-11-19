@@ -122,7 +122,9 @@ Session (one Synaps daemon session drives the body):
 
   --set KEY=VALUE  write it to settings.toml through her settings writer (the rest of the file as
                   it was; one with a typo is refused), then exit. Her installer's keys only:
-                  voice.enabled, voice.wake_word, voice.speak_unprompted (true|false), voice.mic
+                  voice.enabled, voice.wake_word, voice.speak_unprompted (true|false), voice.mic.
+                  Exit 0 saved, 2 a bad --set, 3 settings.toml refused (a typo; can't read it),
+                  4 not saved
 
 Dev control: newline commands on $XDG_RUNTIME_DIR/synaps-avatar.sock
   mood <idle|thinking|working|talking|needs_you|done|annoyed|sleepy|away>
@@ -131,6 +133,33 @@ Dev control: newline commands on $XDG_RUNTIME_DIR/synaps-avatar.sock
   music on|off   glitch   state   hide   quit
   art <stand|perch|sleepFloor|sleepWindow> <variant id|next>   (a variant pool she is in)
   submit <text>   abort   prompt confirm|secret [text]   (session / dev)";
+
+/// An error with its own exit code: `--set`'s, for her installer (any other error exits 1).
+#[derive(Debug)]
+struct Coded(i32, String);
+
+impl std::fmt::Display for Coded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.1)
+    }
+}
+
+impl std::error::Error for Coded {}
+
+/// `--set`'s exit codes: 0 written (or already so), 2 a bad `--set` (nothing written), 3 his
+/// settings file refused (a typo in it, or it can't be read: never written over), 4 not saved
+/// (it can't be written, or the result wouldn't load).
+const SET_USAGE: i32 = 2;
+const SET_REFUSED: i32 = 3;
+const SET_FAILED: i32 = 4;
+
+fn set_exit(e: &settings::WriteError) -> i32 {
+    use settings::WriteError::*;
+    match e {
+        Typo { .. } | Unreadable(_) => SET_REFUSED,
+        Invalid(_) | Failed(_) => SET_FAILED,
+    }
+}
 
 /// One `--set KEY=VALUE`: the keys her installer's Voice page writes, and only those.
 fn set_edit(pair: &str) -> Result<settings::Edit> {
@@ -195,7 +224,7 @@ fn parse_args_from(argv: impl IntoIterator<Item = String>) -> Result<Args> {
             "--cwd" => a.cwd = Some(PathBuf::from(val("a directory")?)),
             "--model" => a.model = Some(val("a model")?),
             "--no-session" => a.no_session = true,
-            "--set" => a.set.push(set_edit(&val("KEY=VALUE")?)?),
+            "--set" => a.set.push(val("KEY=VALUE").and_then(|v| set_edit(&v)).map_err(|e| Coded(SET_USAGE, format!("{e:#}")))?),
             "--sleepy-after" => {
                 let m: f64 = val("minutes")?.parse().context("--sleepy-after: not a number")?;
                 if !(m > 0.0 && m < 1e6) {
@@ -282,7 +311,7 @@ fn main() {
     }
     if let Err(e) = run(t_start) {
         elog!("synaps-avatar: {e:#}");
-        std::process::exit(1);
+        std::process::exit(e.downcast_ref::<Coded>().map_or(1, |c| c.0));
     }
 }
 
@@ -295,7 +324,7 @@ fn run(t_start: Instant) -> Result<()> {
                 olog!("settings: {} ({})", if written { "written" } else { "already so" }, path.display());
                 Ok(())
             }
-            Err(e) => bail!("settings: {} ({e:?}; {})", e.says(), path.display()),
+            Err(e) => Err(Coded(set_exit(&e), format!("settings: {} ({e}; {})", e.says(), path.display())).into()),
         };
     }
     // Her log's header on Linux too (Windows: `dirs::log_without_console`). After the command line,
@@ -722,7 +751,7 @@ fn fatal(e: anyhow::Error) -> ! {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: gpui's glob exports a `test` attribute that would shadow `#[test]`.
-    use super::{Args, PathBuf, Result, parse_args_from, session, settings};
+    use super::{Args, Coded, PathBuf, Result, SET_FAILED, SET_REFUSED, SET_USAGE, parse_args_from, session, set_exit, settings};
 
     fn parse(args: &[&str]) -> Result<Args> {
         parse_args_from(args.iter().map(|s| s.to_string()))
@@ -765,8 +794,11 @@ mod tests {
         assert_eq!(a.set.len(), 3);
         assert!(parse(&["--set", "voice.mic="]).is_ok(), "empty: Windows' default");
         for bad in ["voice.enabled=maybe", "brain.attention=off", "voice.enabled", "voice.voice=af_heart"] {
-            assert!(parse(&["--set", bad]).is_err(), "{bad}");
+            let e = parse(&["--set", bad]).err().expect(bad);
+            assert_eq!(e.downcast_ref::<Coded>().map(|c| c.0), Some(SET_USAGE), "{bad}: a bad --set exits {SET_USAGE}");
         }
+        let e = parse(&["--set"]).err().expect("no KEY=VALUE");
+        assert_eq!(e.downcast_ref::<Coded>().map(|c| c.0), Some(SET_USAGE));
         let dir = std::env::temp_dir().join(format!("sa-set-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("settings.toml");
@@ -777,6 +809,17 @@ mod tests {
         let v = settings::Settings::parse(&text).unwrap().voice;
         assert!(v.enabled && !v.wake_word && v.mic == "Microphone (USB Audio)");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `--set`'s exit codes, for her installer: a refused file (a typo, unreadable) is 3, a write
+    /// that can't be done is 4; a bad `--set` is 2 (above).
+    #[test]
+    fn set_exit_codes_say_what_went_wrong() {
+        use settings::WriteError::*;
+        assert_eq!(set_exit(&Typo { line: Some(3), detail: "expected `=`".into() }), SET_REFUSED);
+        assert_eq!(set_exit(&Unreadable("access denied".into())), SET_REFUSED);
+        assert_eq!(set_exit(&Failed("disk full".into())), SET_FAILED);
+        assert_eq!(set_exit(&Invalid("attention: sideways".into())), SET_FAILED);
     }
 
     #[test]
