@@ -67,7 +67,12 @@ Reference for `synaps-avatar`, the crate behind capri-syn. The [README](../READM
   secret. None: her tag reads `NO BRAIN YET` in place of `ONLINE` (and asleep), and she reads again
   every 5 s, so a `synaps login` in a terminal clears it without a message. A remote broker
   (`auth.remote_endpoint`, `SYNAPS_AUTH_ENDPOINT`), another provider or an unreadable file is
-  unknown: the daemon's first error says it, and its no-brain error holds the tag until a turn answers.
+  unknown: the daemon's first error says it. A read that can't tell any more takes back the tag a
+  read put up (a remote broker set up instead of a login, #76). The daemon's own no-brain error
+  holds it while the files read as they did when it spoke, until a turn answers or a read finds the
+  login. Any sign of a working brain (a word, a thought, a tool call, the provider's token count)
+  clears it whatever the files say, and no read puts it back until her model changes: only the
+  daemon's own error does. A daemon reached through `--socket` is never read here.
 
   The provider is read off the error (`No Anthropic credentials`: Claude; `no credential configured
   for 'kimi-code'`: Kimi); `synaps login` picks a provider, not a model. The other way out is
