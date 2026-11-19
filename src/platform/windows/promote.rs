@@ -26,11 +26,12 @@ use ::windows::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_DWORD, REG_SAM_FLAGS, RRF_RT_REG_DWORD, RRF_RT_REG_SZ, RegCloseKey, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW,
     RegSetValueExW,
 };
-use ::windows::Win32::UI::Accessibility::{CUIAutomation, IUIAutomation, IUIAutomation2, TreeScope_Descendants};
+use ::windows::Win32::UI::Accessibility::{CUIAutomation8, IUIAutomation, IUIAutomation2, TreeScope_Descendants};
 use ::windows::Win32::UI::Shell::{KF_FLAG_DEFAULT, SHGetKnownFolderPath};
 use ::windows::Win32::UI::WindowsAndMessaging::{FindWindowW, GetWindowRect};
 use ::windows::core::{GUID, HSTRING, Interface, PCWSTR, PWSTR, w};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 /// The shell's per-icon settings, one subkey each.
@@ -53,7 +54,8 @@ const AGAIN: Duration = Duration::from_secs(1);
 pub(super) enum Outcome {
     /// `IsPromoted` = 1 written, marker made, and the shell has her icon on the taskbar.
     Shown,
-    /// As `Shown`, but it took the 1 written a second time (the first alone didn't bring her out in time).
+    /// As `Shown`, but the 1 had been written twice: her icon was on the taskbar after the second write (the
+    /// first alone hadn't brought her out in time; which of the two did it isn't known).
     ShownAfterRewrite,
     /// Written (once more, where it still read 1), marker made; her icon is in the overflow still: Explorer
     /// reads the key again at its next start.
@@ -379,6 +381,9 @@ impl Drop for Com {
     }
 }
 
+/// The timeout's failure said (once per run: `on_taskbar` runs up to eight times).
+static NO_TIMEOUT_SAID: AtomicBool = AtomicBool::new(false);
+
 /// Is her icon on the taskbar now: a button named by her tooltip (`brand::NAME` first) in the taskbar's UI
 /// Automation tree, its centre inside the taskbar's rect (an icon in the overflow has none there: the
 /// shots' rig looks the same way). `Shell_NotifyIconGetRect` can't say: for an icon in the overflow it
@@ -391,10 +396,16 @@ fn on_taskbar() -> Option<bool> {
         let bar = FindWindowW(w!("Shell_TrayWnd"), PCWSTR::null()).ok().filter(|h| !h.is_invalid())?;
         let mut tb = RECT::default();
         GetWindowRect(bar, &mut tb).ok()?;
-        let ui = CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_ALL).ok()?;
-        // A shell that doesn't answer holds this thread for 20 s a call: two seconds, and it's `None` (best effort).
-        if let Ok(ui2) = ui.cast::<IUIAutomation2>() {
-            let _ = ui2.SetTransactionTimeout(2000);
+        // `CUIAutomation8` and not `CUIAutomation`: only the first answers QueryInterface for `IUIAutomation2`.
+        let ui = CoCreateInstance::<_, IUIAutomation>(&CUIAutomation8, None, CLSCTX_ALL).ok()?;
+        // A shell that doesn't answer holds this thread for 20 s a call: two seconds, and it's `None` (best
+        // effort). Where that can't be set, the 20 s stand: said once on her log.
+        match ui.cast::<IUIAutomation2>().and_then(|ui2| ui2.SetTransactionTimeout(2000)) {
+            Ok(()) => {}
+            Err(e) if !NO_TIMEOUT_SAID.swap(true, Ordering::Relaxed) => {
+                elog!("synaps-avatar: tray: UI Automation's call timeout isn't set ({e}); the shell's own (up to 20 s) stands");
+            }
+            Err(_) => {}
         }
         let root = ui.ElementFromHandle(bar).ok()?;
         let all = root.FindAll(TreeScope_Descendants, &ui.CreateTrueCondition().ok()?).ok()?;

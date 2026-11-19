@@ -16,6 +16,12 @@
   set it` or `tray: no NotifyIconSettings entry yet`. Later starts read her entry and say what
   `IsPromoted` is now, writing nothing. The uninstaller removes the marker.
 
+### Known issues
+- On a first run, Explorer can name her taskbar button with her old tooltip followed by the current
+  one (`capri-syn · SPEAKING capri-syn · ONLINE`), so a screen reader hears both. Her tooltip is one
+  string, and the hover popup shows the current one alone; the name chains after a tooltip change. A
+  follow-up is open.
+
 ## 1.0.0 (2026-11-19)
 
 capri-syn's first release: Capri on your desktop, her brain in Synaps. Linux (X11, Hyprland, and

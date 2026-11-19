@@ -564,6 +564,9 @@ $Scenes = [ordered]@{
             if (-not $named) {
                 $script:Fails.Add("${script:Take}: her button's name is '$((Find-TrayButton).Name)', not '$tip' (nor a tooltip of hers, then it)")
                 Write-TrayButtons
+            } elseif ($script:SeenName -cne $tip) {
+                # Accepted (a known issue: Explorer chains her old tooltip before the current one), and said in the run's summary.
+                Write-Host "::warning::${script:Take}: her button's name is '$($script:SeenName)', not exactly '$tip': Explorer chains her old tooltip before the current one (known issue; the take passes)"
             }
             $icon = Find-TrayButton
             $cx = [int]($icon.X + $icon.W / 2); $cy = [int]($icon.Y + $icon.H / 2)
