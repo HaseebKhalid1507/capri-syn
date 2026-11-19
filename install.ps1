@@ -34,8 +34,8 @@ $Usage = @'
 usage: install.ps1 [--yes] [--dry-run] [--uninstall [--purge]] [--voice] [--watch] [--no-autostart]
                    [--from-source] [--prefix DIR] [--with-local-art] [--artifact FILE] [--allow-root]
 
-  --yes             don't ask: Visual Studio's C++ build tools (admin) for a source build, Python
-                    from winget for her pack
+  --yes             don't ask: Synaps' installer, and Visual Studio's C++ build tools (admin) for a
+                    source build
   --dry-run         print every action, touch nothing
   --uninstall       remove what this script installed; your settings stay, and her state and log
                     (her installer's own uninstaller takes those when it runs)
@@ -133,11 +133,6 @@ function Test-Sha256([string]$Path, [string]$Want) {
     $got = Get-Sha256 $Path
     if ($got -ne $Want) { Stop-Install "$(Split-Path -Leaf $Path): sha256 $got is not the expected $Want" }
     Write-Good "sha256 checked: $(Split-Path -Leaf $Path)"
-}
-function Get-SynapsVersion([string]$Exe) {
-    $ErrorActionPreference = 'Continue'
-    try { $o = (& $Exe --version 2>$null) | Select-Object -First 1 } catch { return $null }
-    if ($o -match '(\d+\.\d+\.\d+)') { return $Matches[1] } else { return $null }
 }
 
 # The receipt: what this script installed, one entry per line, tab-separated, the path last: prefix,
@@ -286,11 +281,11 @@ function Read-Manifest {
         if ($eq -lt 1) { Stop-Install "manifest: bad line '$l'" }
         $m[$l.Substring(0, $eq)] = $l.Substring($eq + 1)
     }
-    foreach ($k in 'repo', 'synaps_repo', 'synaps_min', 'synaps_protocol', 'synaps_pin', 'synaps_installer_ps1_sha256',
-        'asset_windows', 'asset_windows_voice', 'rustup_dist', 'capricore_repo', 'capricore_commit', 'pip_pack') {
+    foreach ($k in 'repo', 'synaps_repo', 'synaps_min', 'synaps_pin', 'asset_windows', 'asset_windows_voice', 'rustup_dist') {
         if (-not $m[$k]) { Stop-Install "manifest: no $k" }
     }
     $script:M = $m
+    $script:ManifestText = $text
 }
 
 function Set-Paths {
@@ -298,7 +293,6 @@ function Set-Paths {
     $script:Conf = Join-Path $env:APPDATA 'synaps-avatar'
     $script:Pack = Join-Path $script:Data 'packs\capri'
     $script:Cache = Join-Path $script:Data 'installer'
-    $script:Venv = Join-Path $script:Cache 'venv'
     $script:Receipt = Join-Path $script:Data 'install.receipt'
     $script:Exe = Join-Path $script:Prefix 'synaps-avatar.exe'
     $script:Lnk = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\synaps-avatar.lnk'
@@ -350,61 +344,93 @@ function Get-Source([string]$Ref) {
     return $dir
 }
 
+# The install steps both installers run (packaging/windows/steps.ps1: her installer runs the same
+# file): this checkout's, else fetched from GitHub at this script's ref, beside the manifest this run
+# read (the tree it looks for: steps.ps1 and installer\manifest).
+function Get-StepScript {
+    if ($script:Checkout) { return (Join-Path $script:Checkout 'packaging\windows\steps.ps1') }
+    if ($script:StepScript) { return $script:StepScript }
+    $dir = Join-Path $script:Tmp 'steps'
+    New-Item -ItemType Directory -Force (Join-Path $dir 'installer') | Out-Null
+    Set-Content -LiteralPath (Join-Path $dir 'installer\manifest') -Value $script:ManifestText -Encoding Ascii
+    $f = Join-Path $dir 'steps.ps1'
+    try { Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/$RepoDefault/$($script:Ref)/packaging/windows/steps.ps1" -OutFile $f }
+    catch { Stop-Install "can't fetch her install steps from GitHub ($($script:Ref)): $($_.Exception.Message)" }
+    $script:StepScript = $f
+    return $f
+}
+
+# One shared step, in a PowerShell of its own: its lines shown as they come (as this script's own),
+# its results (`key: value` at the left edge) returned. A failure stops the install with its reason
+# (in plain words), unless -NoStop.
+function Invoke-Step([string]$Script, [string[]]$ArgList, [switch]$NoStop) {
+    $r = @{}
+    $ps = (Get-Process -Id $PID).Path
+    $enc = [Console]::OutputEncoding
+    $ErrorActionPreference = 'Continue'
+    try {
+        # The step writes UTF-8 (a path can have any letter in it).
+        try { [Console]::OutputEncoding = New-Object Text.UTF8Encoding $false } catch { $null = $_ }
+        & $ps -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $Script @ArgList 2>&1 | ForEach-Object {
+            $l = "$_"
+            if ($l -match '^([a-z]+): (.*)$') { $r[$Matches[1]] = $Matches[2] }
+            elseif ($l -match '^   \+ (.*)$') { Write-Good $Matches[1] }
+            elseif ($l -match '^   ! (.*)$') { Write-Warn $Matches[1] }
+            elseif ($l -match '^   \$ (.*)$') { Write-Action $Matches[1] }
+            elseif ($l.Trim()) { Write-Info $l.Trim() }
+        }
+        $r['exit'] = $LASTEXITCODE
+    } finally {
+        try { [Console]::OutputEncoding = $enc } catch { $null = $_ }
+    }
+    if ($r['failed']) { Write-Warn $r['failed'] }
+    if ($r['exit'] -and -not $NoStop) {
+        Stop-Install $(if ($r['failed']) { $r['failed'] } else { "$(Split-Path -Leaf $Script) $($ArgList[0]) failed (exit $($r['exit']))" })
+    }
+    return $r
+}
+# A step's `synaps:` result: State (ok, old, missing, would), Version, Path.
+function Read-SynapsResult([string]$Line) {
+    if ($Line -match '^(\S+) (\S*) (.+)$') { return @{ State = $Matches[1]; Version = $Matches[2]; Path = $Matches[3] } }
+    return @{ State = "$Line".Trim(); Version = ''; Path = (Join-Path $script:CargoBin 'synaps.exe') }
+}
+
 # ---- 1. synaps --------------------------------------------------------------------------------
 
 function Install-Synaps {
     Write-Step 'Synaps'
-    $cur = (Get-Command synaps -ErrorAction SilentlyContinue | Select-Object -First 1).Source
-    $mine = Join-Path $script:CargoBin 'synaps.exe'
-    if (-not $cur -and (Test-Path $mine)) { $cur = $mine }
-    if ($cur) {
-        $v = Get-SynapsVersion $cur
-        if ($v -and ([version]$v -ge [version]$script:M.synaps_min)) {
-            $script:Synaps = $cur; $script:SynapsV = $v
-            Write-Good "synaps $v ($(Get-Tilde $cur))"
-            return
-        }
-        Write-Info "synaps $v at $(Get-Tilde $cur) is older than $($script:M.synaps_min): installing the latest"
+    # Found, and new enough (steps.ps1 synaps-check: `synaps` on PATH, else ~\.cargo\bin).
+    $steps = Get-StepScript
+    $c = Invoke-Step $steps @('synaps-check')
+    $s = Read-SynapsResult $c['synaps']
+    $script:Brain = ($c['brain'] -eq 'yes')
+    if ($s.State -eq 'ok') {
+        $script:Synaps = $s.Path; $script:SynapsV = $s.Version
+        return
+    }
+    if ($s.State -eq 'old') {
+        Write-Info "installing Synaps $($script:M.synaps_pin), the one she was tested with"
         $script:SynapsNew = 2
     } else {
         Write-Info "her brain runs on Synaps, an open-source agent runtime (github.com/$($script:M.synaps_repo))"
-        Write-Info 'not installed yet: installing the latest with its own installer (yours to keep; --uninstall says how to remove it)'
+        Write-Info "not installed yet: installing Synaps $($script:M.synaps_pin), the one she was tested with, with its own installer (yours to keep; --uninstall says how to remove it)"
         $script:SynapsNew = 1
     }
-    # The latest release, and GitHub's sha256 of its installer; else the manifest's pin.
-    $tag = $null; $sha = $null
-    try {
-        $rel = Invoke-RestMethod -UseBasicParsing -Uri "https://api.github.com/repos/$($script:M.synaps_repo)/releases/latest" -Headers (Get-Headers)
-        $tag = $rel.tag_name
-        $asset = $rel.assets | Where-Object { $_.name -eq 'synaps-installer.ps1' } | Select-Object -First 1
-        if ($asset -and $asset.digest) { $sha = ([string]$asset.digest) -replace '^sha256:', '' }
-    } catch { $tag = $null }
-    if (-not $tag -or $sha -notmatch '^[0-9a-f]{64}$') {
-        $tag = "v$($script:M.synaps_pin)"; $sha = $script:M.synaps_installer_ps1_sha256
-        Write-Info "GitHub's API didn't answer: the pinned $tag"
-    }
-    $url = "https://github.com/$($script:M.synaps_repo)/releases/download/$tag/synaps-installer.ps1"
     $edit = Get-SynapsPathEdit
     if ($edit) { Write-Info "its installer puts $(Get-Tilde $script:CargoBin) on your user Path (HKCU\Environment, at the front)" }
     else { Write-Info 'its installer leaves your user Path as it is' }
-    if (-not (Confirm-Action "install Synaps $($tag.TrimStart('v')) with its installer$(if ($edit) { ' (and that Path edit)' })")) {
-        Write-Info "or install it yourself, your Path untouched: `$env:SYNAPS_NO_MODIFY_PATH = '1'; irm $url | iex"
+    if (-not (Confirm-Action "install Synaps with its installer$(if ($edit) { ' (and that Path edit)' })")) {
+        Write-Info "or install it yourself, your Path untouched: `$env:SYNAPS_NO_MODIFY_PATH = '1'; irm https://github.com/$($script:M.synaps_repo)/releases/download/v$($script:M.synaps_pin)/synaps-installer.ps1 | iex"
         Stop-Install 'she needs Synaps: say yes (or --yes), or install it as above, then run this again'
     }
-    $file = Join-Path $script:Tmp 'synaps-installer.ps1'
-    Get-Download $url $file
-    Test-Sha256 $file $sha
-    $ps = (Get-Process -Id $PID).Path
-    Invoke-Native $ps @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $file)
-    $script:Synaps = $mine; $script:SynapsV = $tag.TrimStart('v')
+    # The pinned release's installer (synaps_pin), checked against its pinned SHA-256, run: steps.ps1 synaps.
+    $r = Invoke-Step $steps @(@('synaps') + $(if ($script:Dry) { @('-DryRun') } else { @() }))
+    $s = Read-SynapsResult $r['synaps']
+    $script:Synaps = $s.Path; $script:SynapsV = $s.Version
+    $script:Brain = ($r['brain'] -eq 'yes')
     if ($env:Path -notlike "*$($script:CargoBin)*") { $env:Path = "$($script:CargoBin);$env:Path" }
-    if (-not $script:Dry) {
-        if (-not (Test-Path $mine)) { Stop-Install "the synaps installer ran, but there's no $mine" }
-        $script:SynapsV = Get-SynapsVersion $mine
-        Write-Good "synaps $($script:SynapsV) ($(Get-Tilde $mine))"
-    }
     # Hers to mention removing only if there was none: an upgrade of his stays his.
-    if ($script:SynapsNew -eq 1) { Set-ReceiptMeta 'synaps' $mine; Set-ReceiptMeta 'synaps_path' $(if ($edit) { 'yes' } else { 'no' }) }
+    if ($script:SynapsNew -eq 1) { Set-ReceiptMeta 'synaps' $script:Synaps; Set-ReceiptMeta 'synaps_path' $(if ($edit) { 'yes' } else { 'no' }) }
 }
 
 # Whether Synaps' installer (cargo-dist) will add its bin folder to his user Path: not when it's there
@@ -472,7 +498,8 @@ function Install-Setup([string]$Setup) {
     # once her installer's uninstaller has emptied them.
     New-RecordedPath $script:Prefix
     $log = Join-Path $script:Cache 'setup.log'
-    $argLine = "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /DIR=`"$($script:Prefix)`" /MERGETASKS=`"!autostart`" /LOG=`"$log`""
+    # Her binary only: Synaps, her pack, the daemon, autostart and voice are this script's own steps.
+    $argLine = "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /DIR=`"$($script:Prefix)`" /SYNAPS=skip /PACK=skip /VOICE=off /BY=install.ps1 /MERGETASKS=`"!autostart`" /LOG=`"$log`""
     Write-Action "$(Split-Path -Leaf $Setup) $argLine"
     if (-not $script:Dry) {
         $p = Start-Process -FilePath $Setup -ArgumentList $argLine -Wait -PassThru
@@ -668,156 +695,54 @@ function Find-Python {
     return $null
 }
 
-function Show-Notices {
-    $l = Join-Path $script:Pack 'anim\lachy\LICENSE.md'
-    if (-not (Test-Path $l)) { return }
-    Write-Info "lachy's desktop art: PolyForm Noncommercial 1.0.0 (https://polyformproject.org/licenses/noncommercial/1.0.0)"
-    Select-String -LiteralPath $l -Pattern '^Required Notice:' | ForEach-Object { Write-Host "     $($_.Line)" -ForegroundColor White }
-}
-
-# Her --check: the windowed exe writes to her log, not to a console.
-function Test-Pack {
-    $log = Join-Path $script:Data 'synaps-avatar.log'
-    $before = if (Test-Path $log) { (Get-Item $log).Length } else { 0 }
-    $p = Start-Process -FilePath $script:Exe -ArgumentList "--pack `"$($script:Pack)`" --check" -Wait -PassThru -WindowStyle Hidden
-    $text = ''
-    if (Test-Path $log) {
-        $fs = [IO.File]::Open($log, 'Open', 'Read', 'ReadWrite')
-        try {
-            if ($fs.Length -ge $before) { [void]$fs.Seek($before, 'Begin') }
-            $text = (New-Object IO.StreamReader($fs)).ReadToEnd()
-        } finally { $fs.Dispose() }
-    }
-    return @{ Code = $p.ExitCode; Text = $text }
-}
-
+# The pack step both installers run (steps.ps1 pack): Python (CPython's embeddable package and pip,
+# pinned, no Python of his needed) and CapriCore in the cache, make-pack with lachy's files, every file
+# checked against tools/*.sha256, her --check, then into place (a pack it didn't make moved aside).
+# Its tree is her source's: make-pack and the pins match her binary.
 function Install-Pack {
     Write-Step 'Her art pack'
-    [string[]]$py = Find-Python
-    if (-not $py) {
-        $wg = @('install', '-e', '--id', 'Python.Python.3.13', '--scope', 'user', '--accept-package-agreements', '--accept-source-agreements')
-        Write-Info "her pack is assembled by a Python script (make-pack); no Python here: winget $(Format-Command $wg)"
-        if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
-            if ($script:Dry) { Write-Warn 'no winget: a real run stops here (install Python 3 from https://www.python.org)' }
-            else { Stop-Install 'no winget: install Python 3 from https://www.python.org, then run this again' }
-        }
-        if (-not (Confirm-Action 'install Python 3.13 for you (no admin) with winget')) { Stop-Install 'run that (or this script with --yes), then run this again' }
-        Invoke-Native 'winget' $wg
-        $p313 = Join-Path $env:LOCALAPPDATA 'Programs\Python\Python313\python.exe'
-        [string[]]$py = if ($script:Dry) { 'python' } elseif (Test-Path $p313) { $p313 } else { Find-Python }
-        if (-not $py) { Stop-Install 'Python was installed, but this session can''t see it yet: open a new terminal and run this again' }
-    }
-    $vpy = Join-Path $script:Venv 'Scripts\python.exe'
-    if (-not (Test-Path $vpy)) {
-        New-RecordedDir $script:Cache
-        $pre = @($py | Select-Object -Skip 1)
-        Invoke-Native $py[0] ($pre + @('-m', 'venv', $script:Venv))
-    }
-    $want = @($script:M.pip_pack -split '\s+' | Where-Object { $_ })
-    if ($script:LocalArt -and $script:M.pip_local_art) { $want += @($script:M.pip_local_art -split '\s+' | Where-Object { $_ }) }
-    $stamp = Join-Path $script:Venv '.capri-pip'
-    if ((Test-Path $stamp) -and ((Get-Content -Raw $stamp).Trim() -eq ($want -join ' '))) {
-        Write-Good "make-pack's Python: $($want -join ' ')"
-    } else {
-        Invoke-Native $vpy (@('-m', 'pip', 'install', '-q', '--disable-pip-version-check', '--no-cache-dir') + $want)
-        if (-not $script:Dry) { Set-Content -LiteralPath $stamp -Value ($want -join ' ') }
-    }
     $src = Get-Source $(if ($script:ReleaseTag) { $script:ReleaseTag } else { $script:Ref })
-    $cc = Join-Path $script:Cache "CapriCore-$($script:M.capricore_commit.Substring(0, 7))"
-    if (-not (Test-Path (Join-Path $cc 'docs\character-assets.md'))) {
-        New-RecordedDir $script:Cache
-        $tgz = Join-Path $script:Tmp 'capricore.tar.gz'
-        Get-Download "https://codeload.github.com/$($script:M.capricore_repo)/tar.gz/$($script:M.capricore_commit)" $tgz
-        Invoke-Action "mkdir $cc" { New-Item -ItemType Directory -Force $cc | Out-Null }
-        Invoke-Native 'tar.exe' @('-xzf', $tgz, '-C', $cc, '--strip-components=1')
-    } else {
-        Write-Good "CapriCore $($script:M.capricore_commit.Substring(0, 7)) (cached)"
+    if ($script:LocalArt) { Write-Warn "--with-local-art: mochi's art is for LOCAL PERSONAL USE ONLY: never commit, publish or share it" }
+    $steps = Join-Path $src 'packaging\windows\steps.ps1'
+    $a = @('pack', '-Out', $script:Pack, '-Cache', $script:Cache, '-Exe', $script:Exe, '-KeepCache')
+    if ($script:LocalArt) { $a += '-LocalArt' }
+    # Made by this script before the steps marked their packs: still its own.
+    if (Test-Recorded 'dir' $script:Pack) { $a += '-Ours' }
+    if ($script:Dry) {
+        if (Test-Path -LiteralPath $steps) { $null = Invoke-Step $steps ($a + '-DryRun') }
+        else { Write-Action "steps.ps1 $(Format-Command $a)" }
+        return
     }
-    # Up to date: same make-pack, pins, moods, persona and flags as last time, and it still checks.
-    $parts = @(Get-ChildItem (Join-Path $src 'tools') -Filter '*.sha256' -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
-    $parts += @('tools\make-pack', 'tools\desktop-art.json', 'packs\capri\moods.json', 'packs\capri\persona.md' | ForEach-Object { Join-Path $src $_ })
-    # One sha256 over every part's (a dry run from GitHub has none of them: the hash of nothing).
-    $joined = ($parts | Where-Object { Test-Path $_ } | ForEach-Object { Get-Sha256 $_ }) -join ''
-    $sha = [Security.Cryptography.SHA256]::Create()
-    $fp = (-join ($sha.ComputeHash([Text.Encoding]::ASCII.GetBytes($joined)) | ForEach-Object { $_.ToString('x2') })).Substring(0, 16) + "-$([int]$script:LocalArt)"
-    if (-not $script:Dry -and (Get-ReceiptMeta 'pack') -eq $fp -and (Test-Path (Join-Path $script:Pack 'sprites.json'))) {
-        $c = Test-Pack
-        if ($c.Code -eq 0) { Write-Good "up to date ($(Get-Tilde $script:Pack))"; Show-Notices; return }
-    }
-    $side = @('--lachy', 'auto')
-    if ($script:LocalArt) {
-        $side += @('--mochi', 'auto')
-        Write-Warn "--with-local-art: mochi's art is for LOCAL PERSONAL USE ONLY: never commit, publish or share it"
-    }
-    # A pack there that this script didn't make (his own build): moved aside, and never recorded.
-    if ((Test-Path -LiteralPath $script:Pack) -and -not (Test-Recorded 'dir' $script:Pack)) {
-        $aside = "$($script:Pack).pre-install-$(Get-Date -Format yyyyMMdd-HHmmss)"
-        Write-Warn "$(Get-Tilde $script:Pack) is a pack this script didn't make: it goes to $(Get-Tilde $aside) (yours: --uninstall leaves it)"
-        Invoke-Action "Move-Item $($script:Pack) $aside" { Move-Item -LiteralPath $script:Pack $aside }
-    }
-    $new = "$($script:Pack).new"; $old = "$($script:Pack).old"
-    Invoke-Action "Remove-Item $new" { if (Test-Path $new) { Remove-Item -Recurse -Force $new } }
-    # make-pack's download cache (lachy's files) under the installer's own folder.
-    $env:XDG_CACHE_HOME = Join-Path $script:Cache 'xdg'
-    try { Invoke-Native $vpy (@((Join-Path $src 'tools\make-pack'), $cc, $new) + $side) }
-    finally { Remove-Item Env:\XDG_CACHE_HOME -ErrorAction SilentlyContinue }
-    Invoke-Action "replace $($script:Pack)" {
-        if (Test-Path $old) { Remove-Item -Recurse -Force $old }
-        if (Test-Path $script:Pack) { Move-Item $script:Pack $old }
-        Move-Item $new $script:Pack
-        if (Test-Path $old) { Remove-Item -Recurse -Force $old }
-    }
+    if (-not (Test-Path -LiteralPath $steps)) { Stop-Install "her source ($(Get-Tilde $src)) has no packaging\windows\steps.ps1 (older than this installer): run this again with --from-source" }
+    New-RecordedDir $script:Cache
+    $null = Invoke-Step $steps $a
     Add-Receipt @('dir', $script:Pack)
-    Set-ReceiptMeta 'pack' $fp
-    Show-Notices
-    Write-Action "$($script:Exe) --pack $($script:Pack) --check"
-    if (-not $script:Dry) {
-        $c = Test-Pack
-        $ok = [regex]::Match($c.Text, 'pack `[^`]*` ok: \d+ frames[^,]*').Value
-        if ($c.Code -ne 0 -or -not $ok) {
-            Write-Host ($c.Text -split "`n" | Select-Object -Last 5 | Out-String)
-            Stop-Install "her pack doesn't check: synaps-avatar --check exited $($c.Code)"
-        }
-        Write-Good "$ok (--check)"
-    }
 }
 
 # ---- 4. the daemon and her session --------------------------------------------------------------
 
 function Start-Daemon {
     Write-Step 'Synaps daemon and her session'
-    $ErrorActionPreference = 'Continue'
-    $s = ''
-    if (-not $script:Dry) { $s = (& $script:Synaps daemon status 2>&1 | Out-String); $up = ($LASTEXITCODE -eq 0) } else { $up = $false }
-    if (-not $up) { Invoke-Native $script:Synaps @('daemon', '--detach') }
-    # At sign-in: Synaps has no service on Windows; a Run value starts it. `synaps.exe` is a console
-    # program: run as is, it opens a terminal that takes the foreground for a moment (seen in the VM).
-    # A headless conhost gives it a console nobody sees (the daemon it starts has its own, hidden).
-    # An EDR may flag that pattern: docs/WINDOWS.md ("conhost --headless and security software").
-    $run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-    $theirs = (Get-ItemProperty -Path $run -ErrorAction SilentlyContinue).PSObject.Properties |
-        Where-Object { $_.Name -ne 'synaps-daemon' -and "$($_.Value)" -match 'synaps' -and "$($_.Value)" -match 'daemon' } | Select-Object -First 1
-    if ($theirs) { Write-Good "your Run\$($theirs.Name) starts the daemon at sign-in" }
-    else { Set-RunValue 'synaps-daemon' "`"$env:SystemRoot\System32\conhost.exe`" --headless `"$($script:Synaps)`" daemon --detach" }
+    # Now, and at sign-in through conhost --headless (no console window): steps.ps1 daemon. A Run value
+    # of his own that starts it is left as it is. An EDR may flag that pattern: docs/WINDOWS.md
+    # ("conhost --headless and security software").
+    # -Fresh: Synaps was installed or upgraded just now, so a daemon on another protocol is an older one.
+    $a = @('daemon', '-Synaps', $script:Synaps)
+    if ($script:SynapsNew) { $a += '-Fresh' }
+    if ($script:Dry) { $a += '-DryRun' }
+    $r = Invoke-Step (Get-StepScript) $a -NoStop
+    # The Run value into the receipt first: after a stop below, --uninstall still finds and removes it.
+    if ($r['runvalue'] -eq 'set') { Add-Receipt @('reg', $script:RunKey, 'synaps-daemon') }
+    # A daemon that isn't hers (another protocol, or none said) stops the install, as install.sh's
+    # does: she'd start and never attach. The step said why, and how to fix it.
+    if ($r['daemon'] -eq 'wrong-protocol') { Stop-Install 'her brain''s daemon speaks another protocol (above: how to fix it)' }
+    if ($r['brain']) { $script:Brain = ($r['brain'] -eq 'yes') }
     $script:DaemonHow = 'at sign-in (Run key)'
     if ($script:Dry) { $script:DaemonState = '(dry run)'; return }
-    for ($i = 0; $i -lt 20; $i++) {
-        $s = (& $script:Synaps daemon status 2>&1 | Out-String)
-        if ($LASTEXITCODE -eq 0) { break }
-        Start-Sleep -Milliseconds 500
-    }
-    if ($s -notmatch 'daemon: running') {
-        Write-Warn "the daemon isn't answering yet: $(($s -split "`n")[0])"
-        $script:DaemonState = 'not running'
-        return
-    }
-    $p = if ($s -match 'protocol: (\d+)') { $Matches[1] } else { '?' }
-    if ($p -ne '?' -and $p -ne $script:M.synaps_protocol) {
-        Write-Warn "the daemon speaks protocol $p; her client speaks $($script:M.synaps_protocol) (exact match): she can't attach. Install synaps $($script:M.synaps_pin), or a capri-syn that speaks $p"
-    }
-    $script:DaemonState = "running (protocol $p)"
-    Write-Good "daemon $($script:DaemonState): $($script:DaemonHow)"
-    Write-Info 'her session: `capri`, attached if live, else resumed, else made when she starts'
+    if ($r['daemon'] -match '^running (\S+)') {
+        $script:DaemonState = "running (protocol $($Matches[1]))"
+        Write-Info 'her session: `capri`, attached if live, else resumed, else made when she starts'
+    } else { $script:DaemonState = 'not running' }
 }
 
 # ---- 5. summon key / 6. autostart / 7. voice and watch -----------------------------------------
@@ -841,24 +766,26 @@ function Install-Extras {
     if (-not $script:Voice -and -not $script:Watch) { Write-Info 'skipped (--voice, --watch)'; return }
     if ($script:Watch) { Write-Info 'capri-watch is Linux-only (systemd units, statvfs): skipped' }
     if (-not $script:Voice) { return }
-    $rel = "https://github.com/$($script:M.repo)/releases/latest/download"
-    $sum = $null
-    if (-not $script:FromSource) { try { $sum = ((Get-Text "$rel/$($script:M.asset_windows_voice).sha256") -split '\s+')[0] } catch { $sum = $null } }
-    if ($sum -match '^[0-9a-f]{64}$') {
-        $setup = Join-Path $script:Tmp $script:M.asset_windows_voice
-        Get-Download "$rel/$($script:M.asset_windows_voice)" $setup
-        Test-Sha256 $setup $sum
-        $argLine = '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /MERGETASKS="models"'
-        Write-Action "$(Split-Path -Leaf $setup) $argLine"
-        if (-not $script:Dry) {
-            $p = Start-Process -FilePath $setup -ArgumentList $argLine -Wait -PassThru
-            if ($p.ExitCode -ne 0) { Stop-Install "her voice installer failed (exit $($p.ExitCode))" }
-        }
-        Add-Receipt @('inno', $script:VoiceKey)
+    # Where her voice comes from: steps.ps1 voice-check (her installer's page asks the same): the voice
+    # installer of the release her installer came from (its version, in her Apps entry), never the
+    # latest. None there (built from source, an artifact of no release): built here, below.
+    $ver = (Get-ItemProperty -Path $script:InnoKey -ErrorAction SilentlyContinue).DisplayVersion
+    $herRelease = if ($ver) { @('-Release', "v$ver") } else { @() }
+    $from = if ($script:FromSource) { 'none' } else { "$((Invoke-Step (Get-StepScript) (@('voice-check') + $herRelease) -NoStop)['voicefrom'])" }
+    # A voice that doesn't come (offline, a download cut short, settings he must fix first) is said in
+    # the summary with its retry; the rest of the install stands. Only [voice] enabled is written: a
+    # re-run keeps his microphone, "hey Capri" and read-aloud as he set them.
+    if ($from -like 'release *') {
+        # Her voice installer, sha256 checked, its models, and her settings through her own writer:
+        # steps.ps1 voice (her installer's Voice page runs the same).
+        $r = Invoke-Step (Get-StepScript) @(@('voice', '-Exe', $script:Exe) + $herRelease + $(if ($script:Dry) { @('-DryRun') } else { @() })) -NoStop
+        if (Get-ItemProperty -Path $script:VoiceKey -ErrorAction SilentlyContinue) { Add-Receipt @('inno', $script:VoiceKey) }
     } else {
-        # No release: the same bundle, built here (CPython 3.13's embeddable package + wheels).
+        # No release: the same bundle, built here (CPython 3.13's embeddable package + wheels); then
+        # steps.ps1 voice -Bundle for the models and her settings, as above.
         $src = Get-Source $script:Ref
         $out = Join-Path $script:Prefix 'voice'
+        if ($script:Dry) { Write-Action "voice-bundle.ps1 -Out $out, then steps.ps1 voice -Bundle $out"; return }
         [string[]]$py = Find-Python
         if (-not $py) { Stop-Install 'the voice bundle needs a CPython 3.13 x64 to run pip' }
         $ps = (Get-Process -Id $PID).Path
@@ -866,38 +793,23 @@ function Install-Extras {
         Add-Receipt @('dir', $out)
         $models = Join-Path $env:LOCALAPPDATA 'capri-voice'
         if (-not (Test-Path $models)) { Add-Receipt @('dir', $models) }
-        Invoke-Native $ps @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $out 'voice-models.ps1'))
+        $r = Invoke-Step (Get-StepScript) @('voice', '-Bundle', $out, '-Exe', $script:Exe) -NoStop
     }
-    $settings = Join-Path $script:Conf 'settings.toml'
-    if (-not (Test-Path $settings)) {
-        Invoke-Action "write $settings ([voice] enabled = true)" {
-            New-Item -ItemType Directory -Force $script:Conf | Out-Null
-            Set-Content -LiteralPath $settings -Value "[voice]`nenabled = true" -Encoding ASCII
-        }
-    } elseif (-not (Select-String -LiteralPath $settings -Pattern '^\s*enabled\s*=\s*true' -Quiet)) {
-        Write-Info "turn her voice on in $(Get-Tilde $settings):  [voice] enabled = true"
+    if ($r['exit']) {
+        $script:VoiceHow = "not on: $(if ($r['failed']) { $r['failed'] } else { "steps.ps1 voice exited $($r['exit'])" }). Again: .\install.ps1 --voice"
+        return
     }
     $script:VoiceHow = 'capri-voice (she starts it while [voice] enabled is on)'
 }
 
 function Get-SynapsHome { if ($env:SYNAPS_BASE_DIR) { $env:SYNAPS_BASE_DIR } else { Join-Path $env:USERPROFILE '.synaps-cli' } }
-# A model to talk through: a login (OAuth or API key, both in auth.json) or a local model (in
-# Synaps' config or her own [session]).
-function Test-Brain {
-    $h = Get-SynapsHome
-    $auth = Join-Path $h 'auth.json'
-    if ((Test-Path -LiteralPath $auth) -and (Get-Item -LiteralPath $auth).Length -gt 0) { return $true }
-    foreach ($cfg in @((Join-Path $h 'config'), (Join-Path $script:Conf 'settings.toml'))) {
-        if ((Test-Path -LiteralPath $cfg) -and (Select-String -LiteralPath $cfg -Pattern '^\s*model\s*=\s*"?local/' -Quiet)) { return $true }
-    }
-    return $false
-}
 
 # Her brain: she talks through Synaps, and Synaps needs a model. Signing in is hers to walk him
 # through, not a picker here: until Synaps has one her tag reads NO BRAIN YET, and her answer to
 # his first message ends on the command (a chip; a click copies it).
 function Invoke-Brain {
-    if (Test-Brain) {
+    # $script:Brain: a login or a local model, as steps 1 and 4 read it (steps.ps1).
+    if ($script:Brain) {
         if (-not $script:SynapsNew) { Write-Info 'she found your Synaps. her session is `capri`: it''ll show up in /sessions.' }
         return
     }
@@ -1133,6 +1045,8 @@ function Invoke-CapriInstall([string[]]$ArgList) {
     $script:StepN = 0
     $script:Checkout = ''
     $script:SynapsNew = 0
+    $script:Brain = $false
+    $script:StepScript = ''
     $script:StepCount = $Steps
     $script:HelpOnly = $false
     Read-Flags $ArgList

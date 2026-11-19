@@ -174,7 +174,7 @@ fn set_edit(pair: &str) -> Result<settings::Edit> {
         "voice.enabled" => Edit::Set("voice", "enabled", flag()?.into()),
         "voice.wake_word" => Edit::Set("voice", "wake_word", flag()?.into()),
         "voice.speak_unprompted" => Edit::Set("voice", "speak_unprompted", flag()?.into()),
-        "voice.mic" => Edit::Set("voice", "mic", value.trim().into()),
+        "voice.mic" => Edit::Set("voice", "mic", settings::mic_name(value)?.into()),
         k => bail!("--set {k}: not a key she sets this way (voice.enabled, voice.wake_word, voice.speak_unprompted, voice.mic)"),
     })
 }
@@ -798,7 +798,7 @@ mod tests {
         let a = parse(&["--set", "voice.enabled=true", "--set", "voice.wake_word=off", "--set", "voice.mic=Microphone (USB Audio)"]).unwrap();
         assert_eq!(a.set.len(), 3);
         assert!(parse(&["--set", "voice.mic="]).is_ok(), "empty: Windows' default");
-        for bad in ["voice.enabled=maybe", "brain.attention=off", "voice.enabled", "voice.voice=af_heart"] {
+        for bad in ["voice.enabled=maybe", "brain.attention=off", "voice.enabled", "voice.voice=af_heart", "voice.mic=Mic\u{1b}[31m", "voice.mic=Mic\trophone"] {
             let e = parse(&["--set", bad]).err().expect(bad);
             assert_eq!(e.downcast_ref::<Coded>().map(|c| c.0), Some(SET_USAGE), "{bad}: a bad --set exits {SET_USAGE}");
         }

@@ -1,8 +1,13 @@
 # Installs, checks and uninstalls her installer, unattended, as his own user (CI runs it after
-# build.ps1; it also runs as is in the capri-win VM). No art: a stand-in pack (a sprites.json she
-# rejects) proves the copy and the default path without shipping hers.
+# build.ps1; it also runs as is in the capri-win VM). Her pack's paths: offline (Synaps and her art both
+# fail, Setup still finishes and says why), a CapriCore that doesn't match its pins, /PACK=download over
+# a pack of his (moved aside, kept), again (up to date), then a stand-in pack (a sprites.json she rejects)
+# copied over the one Setup built (replaced whole). Synaps is left out here (/SYNAPS=skip) but offline:
+# the end-to-end job (test-setup-e2e.ps1) installs it.
 #
-#   .\packaging\windows\test-install.ps1 -Setup .\packaging\windows\Output\synaps-avatar-setup-….exe
+#   .\packaging\windows\test-install.ps1 -Setup .\packaging\windows\Output\capri-syn-setup-....exe
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'Logs beside the checks.')]
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', '', Justification = 'Install reads it in script scope.')]
 param([Parameter(Mandatory)] [string]$Setup)
 $ErrorActionPreference = 'Stop'
 $fails = [System.Collections.Generic.List[string]]::new()
@@ -17,6 +22,11 @@ $lnk = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\synaps-avat
 $aumid = 'HKCU:\Software\Classes\AppUserModelId\Synaps.Avatar'
 $run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 if (Test-Path $app) { throw "$app exists already: not a clean machine" }
+# A Synaps from before (a cache that kept ~\.cargo\bin) would make the offline check prove nothing:
+# set aside, and put back at the end.
+$synapsAside = $null
+$s0 = Join-Path $(if ($env:CARGO_HOME) { Join-Path $env:CARGO_HOME 'bin' } else { Join-Path $env:USERPROFILE '.cargo\bin' }) 'synaps.exe'
+if (Test-Path $s0) { $synapsAside = "$s0.test-install-aside"; Move-Item -Force $s0 $synapsAside; Write-Host "  set aside: $s0 (from before)" }
 
 $pack = Join-Path ([IO.Path]::GetTempPath()) "sa-stand-in-pack-$PID"
 New-Item -ItemType Directory -Force (Join-Path $pack 'poses') | Out-Null
@@ -24,6 +34,11 @@ Set-Content (Join-Path $pack 'sprites.json') '{}'
 Set-Content (Join-Path $pack 'poses\stand-in.txt') 'not art'
 $notPack = Join-Path ([IO.Path]::GetTempPath()) "sa-not-a-pack-$PID"
 New-Item -ItemType Directory -Force $notPack | Out-Null
+$cache = Join-Path $data 'installer'
+$exe = Join-Path $app 'synaps-avatar.exe'
+$herLog = Join-Path $data 'synaps-avatar.log'
+$marker = Join-Path $packTo '.capri-syn-pack'
+$synaps = Join-Path $(if ($env:CARGO_HOME) { Join-Path $env:CARGO_HOME 'bin' } else { Join-Path $env:USERPROFILE '.cargo\bin' }) 'synaps.exe'
 
 # Runs `exe` and waits at most `secs`: a stuck one (a dialog nobody sees) fails instead of hanging.
 function RunFor([string]$exe, [string[]]$argv, [int]$secs = 180) {
@@ -37,30 +52,127 @@ function RunFor([string]$exe, [string[]]$argv, [int]$secs = 180) {
     return $p.ExitCode
 }
 
-function Install([string[]]$more) {
+# Her installer, unattended; its log in $script:SetupLog (its steps' lines shown).
+function Install([string[]]$more, [int]$secs = 180) {
     $log = Join-Path ([IO.Path]::GetTempPath()) "sa-setup-$PID.log"
-    $code = RunFor $Setup (@('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=`"$log`"") + $more)
-    if (Test-Path $log) { Get-Content $log -Tail 15 | ForEach-Object { Write-Host "  setup: $_" } }
+    Remove-Item -Force $log -ErrorAction SilentlyContinue
+    $code = RunFor $Setup (@('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=`"$log`"") + $more) $secs
+    $script:SetupLog = if (Test-Path $log) { Get-Content -Raw $log } else { '' }
+    $script:SetupLog -split "`r?`n" | Where-Object { $_ -match '(step |synaps|synaps-check|pack|daemon|finished): ' } | ForEach-Object { Write-Host "  setup: $_" }
+    if (-not ($script:SetupLog -match 'step ')) { Get-Content $log -Tail 15 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  setup: $_" } }
     return $code
+}
+# Her --check on a pack: exit code and her log's line.
+function Test-HerPack([string]$Dir) {
+    $before = if (Test-Path $herLog) { (Get-Item $herLog).Length } else { 0 }
+    $c = Start-Process $exe -ArgumentList "--pack `"$Dir`" --check" -Wait -PassThru -WindowStyle Hidden
+    $t = if (Test-Path $herLog) { $all = Get-Content -Raw $herLog; if ($all.Length -ge $before) { $all.Substring([int]$before) } else { $all } } else { '' }
+    return @{ Code = $c.ExitCode; Line = [regex]::Match($t, 'pack `[^`]*` ok: \d+ frames[^,]*').Value }
 }
 
 # A folder that isn't a pack is refused, and nothing is installed.
-$code = Install @("/PACK=`"$notPack`"")
+$code = Install @("/PACK=`"$notPack`"", '/SYNAPS=skip')
 Check ($code -ne 0 -and -not (Test-Path (Join-Path $app 'synaps-avatar.exe'))) "a folder without sprites.json is refused (exit $code)"
 
-$code = Install @("/PACK=`"$pack`"", '/TASKS=autostart')
+# Offline: GitHub, python.org and PyPI sent nowhere (the hosts file; CI's runner is an admin). Synaps
+# and her art both fail, Setup still finishes, she's installed without them, and the log says why
+# and how to try again.
+$hosts = Join-Path $env:SystemRoot 'System32\drivers\etc\hosts'
+$hostsWas = [IO.File]::ReadAllText($hosts)
+$names = 'github.com', 'api.github.com', 'codeload.github.com', 'raw.githubusercontent.com', 'objects.githubusercontent.com',
+    'release-assets.githubusercontent.com', 'www.python.org', 'pypi.org', 'files.pythonhosted.org'
+try {
+    [IO.File]::AppendAllText($hosts, "`r`n" + (($names | ForEach-Object { "0.0.0.0 $_ # capri-syn test-install" }) -join "`r`n") + "`r`n")
+    ipconfig /flushdns | Out-Null
+    $code = Install @() 300
+} finally {
+    [IO.File]::WriteAllText($hosts, $hostsWas)
+    ipconfig /flushdns | Out-Null
+}
+Check ($code -eq 0) "offline, with its defaults: Setup still exits 0 ($code)"
+Check (Test-Path $exe) 'she is installed'
+Check (-not (Test-Path (Join-Path $packTo 'sprites.json'))) 'with no pack'
+Check (-not (Test-Path $synaps)) 'and no Synaps'
+Check ($script:SetupLog -match 'synaps: failed: [^\r\n]*offline') "the log says why Synaps didn't come: $([regex]::Match($script:SetupLog, 'synaps: failed: [^\r\n]*').Value)"
+Check ($script:SetupLog -match 'pack: failed: [^\r\n]*offline') "and why her art didn't: $([regex]::Match($script:SetupLog, 'pack: failed: [^\r\n]*').Value)"
+Check ($script:SetupLog -match 'steps\.ps1" pack') 'and the command that tries again'
+
+# A CapriCore that doesn't match its pins (in the download cache): refused, nothing installed from it,
+# the bad copy deleted so the next try downloads it again.
+$bad = Join-Path $cache 'CapriCore-bc93892'
+New-Item -ItemType Directory -Force (Join-Path $bad 'docs') | Out-Null
+Set-Content (Join-Path $bad 'docs\character-assets.md') 'not CapriCore'
+$code = Install @('/PACK=download', '/SYNAPS=skip') 900
+Check ($code -eq 0) "a CapriCore that doesn't match its pins: Setup still exits 0 ($code)"
+# Run elevated (CI's runners are) and unattended: no question, a line in the log, and on.
+$elevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+Check (($script:SetupLog -match 'Setup runs as administrator') -eq $elevated) "elevated ($elevated), unattended: said in the log, not asked"
+Check (-not (Test-Path (Join-Path $packTo 'sprites.json'))) 'no pack from it'
+Check ($script:SetupLog -match "pack: failed: CapriCore's files don't match their pins") "the log says so: $([regex]::Match($script:SetupLog, 'pack: failed: [^\r\n]*').Value)"
+Check (-not (Test-Path $bad)) 'and the bad copy is gone'
+
+# /PACK=download over a pack of his (no marker): his goes aside, kept; hers is built, checked, marked.
+New-Item -ItemType Directory -Force $packTo | Out-Null
+Set-Content (Join-Path $packTo 'made-by-hand.txt') 'his own pack'
+$code = Install @('/PACK=download', '/SYNAPS=skip', '/VOICE=off') 900
+Check ($code -eq 0) "/PACK=download exits 0 ($code)"
+Check ($script:SetupLog -match 'voice: off' -and -not (Test-Path (Join-Path $app 'voice')) -and -not (Test-Path (Join-Path $env:LOCALAPPDATA 'capri-voice'))) '/VOICE=off: no voice files'
+Check ($script:SetupLog -notmatch 'step mics') '/VOICE=off: not even a look for a microphone'
+Check ($script:SetupLog -notmatch 'pack: failed') "her art came$(if ($script:SetupLog -match 'pack: failed: [^\r\n]*') { ': ' + $Matches[0] })"
+Check (Test-Path (Join-Path $packTo 'sprites.json')) "sprites.json in $packTo"
+Check (Test-Path (Join-Path $packTo 'anim\lachy\LICENSE.md')) "lachy's art, with its licence"
+Check (Test-Path $marker) 'marked as the steps'' own (.capri-syn-pack)'
+$hc = Test-HerPack $packTo
+Check ($hc.Code -eq 0 -and $hc.Line) "her --pack $packTo --check: $($hc.Line) (exit $($hc.Code))"
+$aside = @(Get-ChildItem -Directory -Path (Split-Path $packTo) -Filter 'capri.pre-install-*' | ForEach-Object { $_.FullName })
+Check ($aside.Count -eq 1 -and (Test-Path (Join-Path "$($aside[0])" 'made-by-hand.txt'))) "his pack went aside, whole ($($aside -join ', '))"
+Check ($script:SetupLog -match 'Required Notice: ') "lachy's Required Notice lines were said"
+Check (-not (Test-Path $cache)) 'the download cache is gone after the build'
+
+# Again: up to date, nothing downloaded. And her exe pinned as on his box (a process of hers that
+# was killed and never went still mapped it: "DeleteFile failed; code 5", Setup aborted): mapped
+# here as an image by a helper process, and Restart Manager kept out (/NOCLOSEAPPLICATIONS: what it
+# would close is the helper). Setup renames it aside, puts the new one in, leaves the old one.
+$exeNow = Join-Path $app 'synaps-avatar.exe'
+$pinCode = @"
+Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class Pin { [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] public static extern IntPtr LoadLibraryExW(string f, IntPtr h, uint flags); }'
+`$h = [Pin]::LoadLibraryExW('$exeNow', [IntPtr]::Zero, 0x20)
+if (`$h -eq [IntPtr]::Zero) { exit 3 }
+Start-Sleep -Seconds 900
+"@
+$pin = Start-Process powershell -ArgumentList @('-NoProfile', '-NonInteractive', '-EncodedCommand', [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($pinCode))) -WindowStyle Hidden -PassThru
+$pinned = $false
+for ($i = 0; $i -lt 40 -and -not $pin.HasExited; $i++) {
+    try { [IO.File]::Open($exeNow, 'Open', 'ReadWrite', 'None').Dispose() } catch { $pinned = $true; break }
+    Start-Sleep -Milliseconds 250
+}
+Check $pinned "her exe is pinned (mapped by pid $($pin.Id)): the case proves something"
+$code = Install @('/PACK=download', '/SYNAPS=skip', '/NOCLOSEAPPLICATIONS') 300
+Check ($code -eq 0 -and $script:SetupLog -match 'up to date \(') "/PACK=download again, her exe pinned: up to date (exit $code)"
+Check ($script:SetupLog -match 'her exe: the old one renamed aside') 'the pinned exe was renamed aside'
+Check ($script:SetupLog -match 'her exe: the old one is still in use') 'and left there, still in use'
+$old = @(Get-ChildItem -Path $app -Filter 'synaps-avatar.exe.old-*' -ErrorAction SilentlyContinue)
+Check ($old.Count -eq 1 -and (Test-Path $exeNow)) "the new exe is in, the old one beside it ($($old.Name -join ', '))"
+Stop-Process -Id $pin.Id -Force -ErrorAction SilentlyContinue
+[void]$pin.WaitForExit(10000)
+
+# A pack folder of his (a stand-in), over the one Setup built: that one is replaced whole.
+$code = Install @("/PACK=`"$pack`"", '/SYNAPS=skip', '/TASKS=autostart')
 Check ($code -eq 0) "installs unattended (exit $code)"
 Check (Test-Path (Join-Path $app 'synaps-avatar.exe')) "her exe in $app"
 Check (Test-Path (Join-Path $app 'unins000.exe')) 'an uninstaller'
 Check (Test-Path (Join-Path $packTo 'sprites.json')) "the pack copied to $packTo"
 Check (Test-Path (Join-Path $packTo 'poses\stand-in.txt')) "with its folders"
+Check (-not (Test-Path (Join-Path $packTo 'anim'))) 'the pack Setup built is replaced whole (nothing of it left)'
+Check ($script:SetupLog -match 'her exe: deleted synaps-avatar\.exe\.old-' -and -not (Get-ChildItem -Path $app -Filter 'synaps-avatar.exe.old-*')) 'the next Setup deleted the old exe (free by then)'
+Check (@(Get-ChildItem -Directory -Path (Split-Path $packTo) -Filter 'capri.pre-install-*').Count -eq 1) 'and not moved aside (it was the steps'' own)'
 Check ((Get-ItemProperty $aumid -ErrorAction SilentlyContinue).DisplayName -eq 'synaps-avatar') 'her AUMID registered (DisplayName)'
 Check ((Get-ItemProperty $aumid -ErrorAction SilentlyContinue).IconUri -eq (Join-Path $app 'synaps-avatar.png')) 'with her icon (IconUri)'
 Check (Test-Path (Join-Path $app 'synaps-avatar.png')) 'the icon file'
 Check ((Get-ItemProperty $run -ErrorAction SilentlyContinue).'synaps-avatar' -eq "`"$(Join-Path $app 'synaps-avatar.exe')`"") 'autostart (the Run key), when asked'
 Check (Test-Path $lnk) 'a Start-menu shortcut'
 # Settings > Apps shows EstimatedSize (KB). Sizing the pack before his pick once walked all of C:.
-$size = (Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall' | ForEach-Object { Get-ItemProperty $_.PSPath } | Where-Object { $_.DisplayName -eq 'synaps-avatar' } | Select-Object -First 1).EstimatedSize
+$size = (Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall' | ForEach-Object { Get-ItemProperty $_.PSPath } | Where-Object { $_.DisplayName -eq 'capri-syn' } | Select-Object -First 1).EstimatedSize
 Check ($size -gt 0 -and $size -lt 512000) "her size in Settings > Apps is hers ($size KB, under 500 MB)"
 $item = (New-Object -ComObject Shell.Application).Namespace((Split-Path $lnk)).ParseName((Split-Path $lnk -Leaf))
 Check ($item -and $item.ExtendedProperty('System.AppUserModel.ID') -eq 'Synaps.Avatar') "the shortcut carries her AUMID ($(if ($item) { $item.ExtendedProperty('System.AppUserModel.ID') }))"
@@ -87,12 +199,19 @@ while ((Test-Path (Join-Path $app 'unins000.exe')) -and (Get-Date) -lt $deadline
 Start-Sleep -Seconds 2
 Check ($ucode -eq 0) "uninstalls unattended (exit $ucode)"
 Check (-not (Test-Path $app)) "$app is gone"
-Check (-not (Test-Path $data)) "$data is gone (pack, log, state)"
+# His pack (moved aside) stays, and so does packs\, its folder.
+$left = @(Get-ChildItem -Recurse -Force $data -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notlike "$($aside[0])*" -and $_.FullName -ne (Split-Path -Parent $packTo) } | ForEach-Object { $_.FullName })
+Check ($left.Count -eq 0) "nothing of hers is left in $data (pack, log, state, cache)$(if ($left) { ': ' + ($left -join ', ') })"
+Check ($aside.Count -eq 1 -and (Test-Path (Join-Path "$($aside[0])" 'made-by-hand.txt'))) 'his pack from before stays'
+Check ((Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall' | ForEach-Object { Get-ItemProperty $_.PSPath } | Where-Object { $_.DisplayName -eq 'capri-syn' }).Count -eq 0) 'her Apps entry (capri-syn) is gone'
+foreach ($a in $aside) { Remove-Item -Recurse -Force -LiteralPath $a }
+Remove-Item -Recurse -Force $data -ErrorAction SilentlyContinue
 Check (-not (Test-Path $aumid)) 'her AUMID key is gone'
 Check ($null -eq (Get-ItemProperty $run -ErrorAction SilentlyContinue).'synaps-avatar') 'the Run value is gone'
 Check (-not (Test-Path $lnk)) 'the shortcut is gone'
 Check (Test-Path (Join-Path $pack 'sprites.json')) 'his own pack folder is untouched'
 
 Remove-Item -Recurse -Force $pack, $notPack -ErrorAction SilentlyContinue
+if ($synapsAside) { Move-Item -Force $synapsAside $s0 }
 if ($fails.Count) { throw "$($fails.Count) check(s) failed: $($fails -join '; ')" }
 Write-Output 'all installer checks passed'

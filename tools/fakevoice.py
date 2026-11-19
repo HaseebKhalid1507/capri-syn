@@ -3,7 +3,8 @@
 the protocol and prints every op it gets, one JSON line each, so a test reads what she would
 have said and when.
 
-  config            -> ready (features: unprompted)
+  config            -> ready (features: unprompted; named_mic: FAKE_NAMED_MIC=1, as capri-voice with a
+                       CAPRI_VOICE_SOURCE: a lost wake stream is asked for again)
   say id text       -> say-start now, say-end after FAKE_WORD_MS (default 60) per word
                        (FAKE_CAP_S: an unprompted turn as capri-voice's gate: a first sentence over it plays
                        that long and ends {"cut": true}; a later one past it is say-skipped "reply cap")
@@ -104,7 +105,7 @@ def handle(m):
     op = m.get("op")
     log(op=op, **{k: v for k, v in m.items() if k != "op"})
     if op == "config":
-        emit(ev="ready", cfg=m, features=["unprompted"])
+        emit(ev="ready", cfg=m, features=["unprompted"], named_mic=os.environ.get("FAKE_NAMED_MIC") == "1")
     elif op == "say":
         with lock:
             queue.append((gen[0], m.get("id", 0), m.get("text", ""), bool(m.get("unprompted"))))
