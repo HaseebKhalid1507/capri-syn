@@ -62,12 +62,14 @@ mod testkit;
 mod hold;
 mod sidecar;
 mod voice;
+mod watchdog;
 
 pub use dirs::{base_dir, home_dir};
 pub use media::watch_media;
 pub use notifications::notify;
 pub use sidecar::voice_sidecar;
 pub use voice::{VOICE_LINK_BLOCKS, VoiceLink, voice_link, voice_link_bg};
+pub use watchdog::start_watchdog;
 
 /// How long his input to her (her key, a press on one of her windows) lets her take the
 /// keyboard: the Line opening on it takes well under this.
@@ -298,6 +300,7 @@ unsafe extern "system" fn pass_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM, _
         WM_SA_PASS => {
             #[cfg(test)]
             PASSES.fetch_add(1, Ordering::Relaxed);
+            trace!("pass: 0x{:x} takes the pointer: {} (applied)", id(h), wp.0 != 0);
             let ex = ex_style(h);
             let ex = if wp.0 != 0 { ex & !WS_EX_TRANSPARENT.0 } else { ex | WS_EX_TRANSPARENT.0 };
             unsafe { SetWindowLongPtrW(h, GWL_EXSTYLE, ex as isize) };
@@ -361,7 +364,10 @@ unsafe extern "system" fn win_event(_h: HWINEVENTHOOK, ev: u32, w: HWND, obj: i3
         EVENT_OBJECT_LOCATIONCHANGE if showing(w) => Hint::Moved(id(w), frame_rect(w).map(|r| root_rect(&r, id(w)))),
         EVENT_OBJECT_SHOW | EVENT_SYSTEM_MINIMIZEEND | EVENT_OBJECT_UNCLOAKED => Hint::Mapped(id(w)),
         EVENT_OBJECT_HIDE | EVENT_OBJECT_DESTROY | EVENT_SYSTEM_MINIMIZESTART | EVENT_OBJECT_CLOAKED => Hint::Gone(id(w)),
-        EVENT_SYSTEM_FOREGROUND => Hint::Focus,
+        EVENT_SYSTEM_FOREGROUND => {
+            trace!("hook: foreground 0x{:x}", id(w));
+            Hint::Focus
+        }
         _ => return,
     };
     HINT.with(|h| {
@@ -515,6 +521,12 @@ impl Win32 {
         }
         let (surfaces, mine, grant) = (self.surfaces.clone(), self.mine.clone(), self.grant_at.clone());
         let trace = std::env::var_os("SA_WIN_TRACE").is_some();
+        // DIAG ONLY (diag/win-hang): `SA_WIN_POLLER=old`, the poller as before the fix: it sets the
+        // style itself, from its thread, holding `surfaces` (the deadlock, for a repro).
+        let old = std::env::var("SA_WIN_POLLER").is_ok_and(|v| v == "old");
+        if old {
+            elog!("synaps-avatar: windows: SA_WIN_POLLER=old: the input poller sets styles cross-thread under its lock (the hang, on purpose)");
+        }
         let t = std::thread::Builder::new().name("win-input".into()).spawn(move || {
             let mut was_pressed = false;
             loop {
@@ -538,7 +550,14 @@ impl Win32 {
                             }
                             let (lx, ly) = (p.x - r.left, p.y - r.top);
                             let inside = surf.input.iter().any(|&(x, y, w, h)| lx >= x as i32 && ly >= y as i32 && lx < x as i32 + w as i32 && ly < y as i32 + h as i32);
-                            if inside == surf.transparent {
+                            if inside == surf.transparent && old {
+                                trace!("poller (old): SetWindowLongPtrW 0x{w:x} takes the pointer: {inside}, holding surfaces");
+                                let ex = ex_style(hwnd(w));
+                                let ex = if inside { ex & !WS_EX_TRANSPARENT.0 } else { ex | WS_EX_TRANSPARENT.0 };
+                                unsafe { SetWindowLongPtrW(hwnd(w), GWL_EXSTYLE, ex as isize) };
+                                surf.transparent = !inside;
+                                trace!("poller (old): SetWindowLongPtrW done");
+                            } else if inside == surf.transparent {
                                 surf.transparent = !inside;
                                 flips.push((w, inside, (lx, ly), surf.input.len()));
                             }
@@ -546,6 +565,7 @@ impl Win32 {
                     }
                     for (w, inside, (lx, ly), n) in flips {
                         let posted = unsafe { PostMessageW(Some(hwnd(w)), WM_SA_PASS, WPARAM(inside as usize), LPARAM(0)) }.is_ok();
+                        trace!("poller: 0x{w:x} takes the pointer: {inside} at {lx},{ly} ({n} rects), posted {posted}");
                         if !posted && let Ok(mut s) = surfaces.lock() && let Some(surf) = s.get_mut(&w) {
                             // Not delivered (gone, or its queue full): asked again next time.
                             surf.transparent = inside;
@@ -573,6 +593,7 @@ impl Win32 {
             let (tx, rx) = std::sync::mpsc::channel::<(WinId, [i32; 4])>();
             let spawned = std::thread::Builder::new().name("win-place".into()).spawn(move || {
                 for (s, [x, y, w, h]) in rx {
+                    trace!("SetWindowPos async 0x{s:x} {x},{y} {w}x{h}");
                     unsafe {
                         let _ = SetWindowPos(hwnd(s), None, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
                     }
@@ -587,7 +608,14 @@ impl Win32 {
     }
 
     fn set_input(&self, s: WinId, input: &[ShapeRect]) {
+        let t0 = crate::trace::on().then(crate::trace::now_ms);
         if let Ok(mut g) = self.surfaces.lock() {
+            if let Some(t0) = t0 {
+                let waited = crate::trace::now_ms() - t0;
+                if g.get(&s).is_some_and(|surf| surf.input != input) || waited > 5 {
+                    trace!("set_input 0x{s:x}: {} rects (the lock took {waited} ms)", input.len());
+                }
+            }
             match g.get_mut(&s) {
                 Some(surf) => surf.input = input.to_vec(),
                 None if std::env::var_os("SA_WIN_TRACE").is_some() => elog!("synaps-avatar: windows: input for 0x{s:x}, not a surface of hers"),
@@ -602,6 +630,7 @@ impl Win32 {
             Visible::Rects(r) => region(r),
         };
         // The window owns the region from here (also on failure: nothing to free then).
+        trace!("SetWindowRgn 0x{s:x} {}", match visible { Visible::All => "all".to_string(), Visible::Rects(r) => format!("{} rects", r.len()) });
         unsafe { SetWindowRgn(hwnd(s), rgn, true) };
     }
 
@@ -1076,11 +1105,14 @@ impl Stage for Arc<Win32> {
 
     fn move_to(&self, x: i32, y: i32) -> Result<()> {
         let (ox, oy) = origin();
+        trace!("SetWindowPos body {},{}", x + ox, y + oy);
         unsafe { SetWindowPos(self.body_hwnd(), None, x + ox, y + oy, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)? };
+        trace!("SetWindowPos body done");
         Ok(())
     }
 
     fn raise(&self) -> Result<()> {
+        trace!("SetWindowPos body topmost");
         unsafe { SetWindowPos(self.body_hwnd(), Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)? };
         Ok(())
     }
@@ -1139,9 +1171,11 @@ impl Stage for Arc<Win32> {
             bail!("windows: no input of his to her just now");
         }
         let h = hwnd(s);
+        trace!("SetForegroundWindow 0x{s:x} (grab)");
         unsafe {
             let _ = SetForegroundWindow(h);
         }
+        trace!("SetForegroundWindow done");
         let fg = unsafe { GetForegroundWindow() };
         if fg != h {
             bail!("windows: the foreground stayed with 0x{:x}", id(fg));
@@ -1163,6 +1197,7 @@ impl Stage for Arc<Win32> {
         if let Some(to) = to
             && self.hers_in_front()
         {
+            trace!("SetForegroundWindow 0x{to:x} (release)");
             unsafe {
                 let _ = SetForegroundWindow(hwnd(to));
             }
@@ -1399,6 +1434,16 @@ mod tests {
                 Err(RecvTimeoutError::Timeout) => panic!("her UI thread stopped for 5 s: it and the input poller wait on each other"),
                 Err(RecvTimeoutError::Disconnected) => panic!("her UI thread ended early (see its panic above)"),
             }
+        }
+    }
+
+    #[test]
+    fn gpui_pw7_traces_the_press_path_only() {
+        use gpui_patches::traced_msg;
+        assert_eq!(traced_msg(WM_LBUTTONDOWN), Some("WM_LBUTTONDOWN"));
+        assert_eq!(traced_msg(WM_STYLECHANGING), Some("WM_STYLECHANGING"));
+        for busy in [WM_MOUSEMOVE, WM_NCHITTEST, WM_PAINT, WM_TIMER, WM_SETCURSOR, WM_MOVE] {
+            assert_eq!(traced_msg(busy), None, "0x{busy:x}: too often for a trace line");
         }
     }
 

@@ -1,0 +1,83 @@
+name: diag
+
+# DIAG ONLY (diag/win-hang, never merged): her Windows exe with a PDB beside it, for the
+# "not responding" hang on Haseeb's box; and the regression test against both pollers.
+on:
+  push:
+    branches: ['diag/**']
+
+jobs:
+  exe:
+    runs-on: windows-latest
+    timeout-minutes: 75
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_TERM_COLOR: always
+      # A PDB (MSVC keeps symbols out of the exe): function names and lines in a dump.
+      CARGO_PROFILE_RELEASE_STRIP: none
+      CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain (rust-toolchain.toml)
+        shell: bash
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: diag-pdb
+          cache-on-failure: true
+
+      # As packaging/windows/build.ps1 builds her (no console window).
+      - name: Build (release, with a PDB)
+        run: cargo rustc --locked --release --bin synaps-avatar '--' -C link-arg=/SUBSYSTEM:WINDOWS -C link-arg=/ENTRY:mainCRTStartup
+
+      - name: The exe and its PDB
+        shell: pwsh
+        run: |
+          Get-ChildItem target/release/synaps-avatar.exe, target/release/synaps_avatar.pdb | Format-Table Name, Length -AutoSize
+          (Get-FileHash target/release/synaps-avatar.exe).Hash
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: synaps-avatar-diag-${{ github.sha }}
+          path: |
+            target/release/synaps-avatar.exe
+            target/release/synaps_avatar.pdb
+          retention-days: 7
+          if-no-files-found: error
+
+  regression:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain (rust-toolchain.toml)
+        shell: bash
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: The fixed poller never waits on her UI thread
+        run: cargo test --locked --bin synaps-avatar input_flips_never_wait_on_her_ui_thread -- --nocapture
+
+      # The test bites: the old poller (SA_WIN_POLLER=old) must deadlock it.
+      - name: The old poller deadlocks (the test must fail)
+        shell: pwsh
+        env:
+          SA_WIN_POLLER: old
+        run: |
+          $out = cargo test --locked --bin synaps-avatar input_flips_never_wait_on_her_ui_thread -- --nocapture 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Output $out
+          if ($code -eq 0) { throw 'the test passed with the old poller: it does not catch the deadlock' }
+          if ($out -notmatch 'stopped for 5 s') { throw "the test failed with the old poller, but not on the deadlock (exit $code)" }
+          Write-Output 'ok: the old poller deadlocks the test, as on his box'
+          $global:LASTEXITCODE = 0

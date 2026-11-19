@@ -62,6 +62,12 @@ pub use linux::{VOICE_LINK_BLOCKS, VoiceLink, voice_link, voice_link_bg, voice_s
 #[cfg(windows)]
 pub use self::windows::{VOICE_LINK_BLOCKS, VoiceLink, voice_link, voice_link_bg, voice_sidecar};
 
+/// Her UI-thread watchdog (a stall: logged with the trace ring, and dumped). Windows only.
+#[cfg(windows)]
+pub use self::windows::start_watchdog;
+#[cfg(not(windows))]
+pub fn start_watchdog() {}
+
 /// Where her files go, per user (`base_dir`): the core adds `synaps-avatar/…`. `$XDG_<KIND>_HOME`
 /// wins on every OS; else Linux: under `$HOME` (`.config`, `.local/share`, `.local/state`),
 /// Windows: `%APPDATA%` (config, it roams) and `%LOCALAPPDATA%` (data, state).

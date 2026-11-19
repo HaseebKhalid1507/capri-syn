@@ -60,3 +60,26 @@ pub(crate) fn keeps_one_scale(popup: bool) -> bool {
 pub(crate) fn display_change_is_posted() -> bool {
     true
 }
+
+/// PW-7 (diagnostics): the messages on the press, focus and DPI path that `handle_msg` logs on
+/// the way in and out, as `log` records with the target `synaps_trace` (capri-syn's `SA_TRACE`
+/// puts them in her trace). Their names; None: not traced.
+pub(crate) fn traced_msg(msg: u32) -> Option<&'static str> {
+    use ::windows::Win32::UI::WindowsAndMessaging::*;
+    Some(match msg {
+        WM_LBUTTONDOWN => "WM_LBUTTONDOWN",
+        WM_LBUTTONUP => "WM_LBUTTONUP",
+        WM_RBUTTONDOWN => "WM_RBUTTONDOWN",
+        WM_RBUTTONUP => "WM_RBUTTONUP",
+        WM_MBUTTONDOWN => "WM_MBUTTONDOWN",
+        WM_MBUTTONUP => "WM_MBUTTONUP",
+        WM_MOUSEACTIVATE => "WM_MOUSEACTIVATE",
+        WM_ACTIVATE => "WM_ACTIVATE",
+        WM_CAPTURECHANGED => "WM_CAPTURECHANGED",
+        WM_DPICHANGED => "WM_DPICHANGED",
+        WM_STYLECHANGING => "WM_STYLECHANGING",
+        WM_STYLECHANGED => "WM_STYLECHANGED",
+        WM_DISPLAYCHANGE => "WM_DISPLAYCHANGE",
+        _ => return None,
+    })
+}

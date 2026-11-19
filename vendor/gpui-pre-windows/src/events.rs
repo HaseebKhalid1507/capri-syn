@@ -90,6 +90,11 @@ impl WindowsWindowInner {
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> LRESULT {
+        // synaps-avatar PW-7: the press path's messages, in and out, for her trace.
+        let traced = crate::synaps_patches::traced_msg(msg);
+        if let Some(name) = traced {
+            log::debug!(target: "synaps_trace", "gpui: {name} 0x{:x} w=0x{:x} in", handle.0 as usize, wparam.0);
+        }
         let handled = match msg {
             // `DefWindowProc` answers `MA_NOACTIVATE` for a left click on `HTCAPTION`.
             // The activation is only triggered when `DefWindowProc` handles the following `WM_NCLBUTTONDOWN`.
@@ -171,11 +176,15 @@ impl WindowsWindowInner {
             WM_SYNAPS_DISPLAY_CHANGED if wparam.0 == self.validation_number => self.run_display_changed(),
             _ => None,
         };
-        if let Some(n) = handled {
+        let r = if let Some(n) = handled {
             LRESULT(n)
         } else {
             unsafe { DefWindowProcW(handle, msg, wparam, lparam) }
+        };
+        if let Some(name) = traced {
+            log::debug!(target: "synaps_trace", "gpui: {name} out");
         }
+        r
     }
 
     fn handle_move_msg(&self, handle: HWND, lparam: LPARAM) -> Option<isize> {
@@ -494,6 +503,7 @@ impl WindowsWindowInner {
         button: MouseButton,
         lparam: LPARAM,
     ) -> Option<isize> {
+        log::debug!(target: "synaps_trace", "gpui: SetCapture 0x{:x}", handle.0 as usize);
         unsafe { SetCapture(handle) };
 
         let Some(mut func) = self.state.callbacks.input.take() else {
@@ -524,6 +534,7 @@ impl WindowsWindowInner {
         button: MouseButton,
         lparam: LPARAM,
     ) -> Option<isize> {
+        log::debug!(target: "synaps_trace", "gpui: ReleaseCapture");
         unsafe { ReleaseCapture().log_err() };
 
         let Some(mut func) = self.state.callbacks.input.take() else {

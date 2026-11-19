@@ -21,6 +21,8 @@ macro_rules! olog {
     }};
 }
 
+#[macro_use]
+mod trace;
 mod anim;
 mod beside;
 mod brain;
@@ -206,13 +208,21 @@ fn parse_args_from(argv: impl IntoIterator<Item = String>) -> Result<Args> {
 }
 
 /// `SA_LOG=debug|info|warn` prints GPUI's own log lines to stderr.
-struct StderrLog;
+/// `SA_LOG`'s level for every crate's records (Off: unset). Records with the target
+/// `synaps_trace` (GPUI's press path, PW-7) go to her trace with `SA_TRACE` instead.
+struct StderrLog(log::LevelFilter);
 impl log::Log for StderrLog {
-    fn enabled(&self, _: &log::Metadata) -> bool {
-        true
+    fn enabled(&self, m: &log::Metadata) -> bool {
+        if m.target() == "synaps_trace" { trace::on() } else { m.level() <= self.0 }
     }
     fn log(&self, r: &log::Record) {
-        elog!("[{} {}] {}", r.level(), r.target(), r.args());
+        if r.target() == "synaps_trace" {
+            if trace::on() {
+                trace::record(*r.args());
+            }
+        } else if r.level() <= self.0 {
+            elog!("[{} {}] {}", r.level(), r.target(), r.args());
+        }
     }
     fn flush(&self) {}
 }
@@ -230,11 +240,11 @@ pub fn env_composited() -> Option<Option<bool>> {
 fn main() {
     let t_start = Instant::now();
     platform::process_setup();
-    if let Ok(level) = std::env::var("SA_LOG")
-        && let Ok(level) = level.parse::<log::LevelFilter>()
-    {
-        log::set_logger(&StderrLog).ok();
-        log::set_max_level(level);
+    let level = std::env::var("SA_LOG").ok().and_then(|l| l.parse::<log::LevelFilter>().ok()).unwrap_or(log::LevelFilter::Off);
+    if level > log::LevelFilter::Off || trace::on() {
+        static LOGGER: std::sync::OnceLock<StderrLog> = std::sync::OnceLock::new();
+        log::set_logger(LOGGER.get_or_init(|| StderrLog(level))).ok();
+        log::set_max_level(if trace::on() { level.max(log::LevelFilter::Debug) } else { level });
     }
     if let Err(e) = run(t_start) {
         elog!("synaps-avatar: {e:#}");
@@ -312,6 +322,16 @@ fn run(t_start: Instant) -> Result<()> {
     let name = args.name.clone().unwrap_or_else(|| pack.name.clone());
 
     gpui_kit::application().run(move |cx: &mut App| {
+        // Her UI thread's heartbeat (a foreground task: it stops when her UI thread does) and the
+        // watchdog that reads it.
+        cx.spawn(async move |cx| {
+            for _ in 0u64.. {
+                trace::beat();
+                cx.background_executor().timer(std::time::Duration::from_millis(100)).await;
+            }
+        })
+        .detach();
+        platform::start_watchdog();
         if !fonts.is_empty()
             && let Err(e) = cx.text_system().add_fonts(fonts)
         {
