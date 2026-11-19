@@ -340,8 +340,10 @@ const BAR_PB: f32 = 8.0;
 const BAR_DROP: f32 = KEYS_PT + super::LINE_H + KEYS_PB - BAR_PB;
 
 /// How far over the panel's bottom the cog (chat, its keys on `key_rows` rows) or `◂ CHAT`
-/// (Settings) sits: the panel keeps its bottom edge, so this is where it is on screen.
-pub(super) fn spot_lift(page: Page, key_rows: usize) -> f32 {
+/// (Settings) sits: the panel keeps its bottom edge, so this is where it is on screen. From
+/// the constants both pages are laid out with (on screen: `state`'s `spot`).
+#[cfg(test)]
+fn spot_lift(page: Page, key_rows: usize) -> f32 {
     match page {
         Page::Chat => KEYS_PT + key_rows as f32 * super::LINE_H + key_rows.saturating_sub(1) as f32 * KEYS_GAP + KEYS_PB,
         Page::Settings => BAR_PB + BAR_DROP,
