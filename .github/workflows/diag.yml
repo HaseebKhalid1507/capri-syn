@@ -81,3 +81,25 @@ jobs:
           if ($out -notmatch 'stopped for 5 s') { throw "the test failed with the old poller, but not on the deadlock (exit $code)" }
           Write-Output 'ok: the old poller deadlocks the test, as on his box'
           $global:LASTEXITCODE = 0
+
+  # Her real exe (the diag build), offline, a minute of clicks and carries: the fixed poller must
+  # answer every WM_NULL within 1 s; the old one (SA_WIN_POLLER=old) must be caught hanging.
+  e2e:
+    needs: exe
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: synaps-avatar-diag-${{ github.sha }}
+          path: diag-exe
+
+      - name: She answers through a minute of clicks (the fix, SA_TRACE on)
+        shell: pwsh
+        run: ./tests/windows/test-hang.ps1 -Exe diag-exe/synaps-avatar.exe -With 'SA_TRACE=1'
+
+      - name: The old poller is caught hanging (the test bites)
+        shell: pwsh
+        run: ./tests/windows/test-hang.ps1 -Exe diag-exe/synaps-avatar.exe -With 'SA_WIN_POLLER=old' -ExpectHang
