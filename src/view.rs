@@ -134,7 +134,7 @@ pub struct Layout {
 
 use crate::theme::{self, Cut, Fill, Pal, Plate, glyph, tracked};
 
-// Logical px. The HUD follows Capri's CSS (cyberpunk.css, avatar-detach.css).
+// Logical px. The HUD's styling is capri-syn's own.
 const MARGIN: f32 = 8.0;
 /// `SA_FRAME_LOG`: every change of the frame on screen goes to the log (critic timing).
 fn frame_log() -> bool {

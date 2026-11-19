@@ -11,6 +11,10 @@
   release, and the sign-in. A step that can't finish says why on the finish page, with the one command to retry.
   install.ps1 runs the same steps (`packaging/windows/steps.ps1`).
 
+### Licence: MIT, with exclusions
+- capri-syn is MIT (`LICENSE`, © 2026 Haseeb Khalid), except the paths README's Credits & legal names
+  (GPUI, parts of synaps-client, `docs/media`, the icon, the wake-word model), which keep their own terms.
+
 ### No one's names or machines in the defaults
 
 - **Speech-to-text vocabulary:** Whisper's recognition prompt is generic now (`Capri, choom, preem,

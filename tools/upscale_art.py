@@ -3,8 +3,41 @@ Lanczos down to x2. CPU only, fixed thread count, deterministic algorithms: the 
 gives the same pixels, so make-pack can pin them (tools/lachy-x2.sha256).
 
 The network shape (SRVGGNetCompact) follows Real-ESRGAN, https://github.com/xinntao/Real-ESRGAN
-(BSD-3-Clause, Copyright (c) 2021 Xintao Wang); the weights are its v0.2.5.0 release asset, sha256-pinned.
-Needs torch, numpy, scipy and Pillow (only for --upscale)."""
+(BSD-3-Clause, Copyright (c) 2021 Xintao Wang; its licence text is below); the weights are its v0.2.5.0
+release asset, sha256-pinned. Needs torch, numpy, scipy and Pillow (only for --upscale)."""
+
+# Real-ESRGAN's licence, for the network shape above (https://github.com/xinntao/Real-ESRGAN, LICENSE):
+#
+# BSD 3-Clause License
+#
+# Copyright (c) 2021, Xintao Wang
+# All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+#
+# 1. Redistributions of source code must retain the above copyright notice, this
+#    list of conditions and the following disclaimer.
+#
+# 2. Redistributions in binary form must reproduce the above copyright notice,
+#    this list of conditions and the following disclaimer in the documentation
+#    and/or other materials provided with the distribution.
+#
+# 3. Neither the name of the copyright holder nor the names of its
+#    contributors may be used to endorse or promote products derived from
+#    this software without specific prior written permission.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+# DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+# FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+# DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+# SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+# CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+# OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
 import hashlib, io, urllib.request
 from pathlib import Path
 

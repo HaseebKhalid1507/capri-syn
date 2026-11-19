@@ -359,8 +359,8 @@ On Windows she registers <kbd>Win</kbd>+<kbd>Alt</kbd>+<kbd>C</kbd> (the Line) a
 
 ## Credits & legal
 
-- **The art.** Capri's sprite art is by CapriChooms
-  ([CapriCore](https://github.com/CapriChooms/CapriCore)). It is not included in this repository:
+- **The art.** Capri's sprite art comes from
+  [CapriCore](https://github.com/CapriChooms/CapriCore). It is not included in this repository:
   `tools/make-pack` assembles the pack on your machine from your own CapriCore checkout.
 - **Desktop art.** Her perch, sleep, walk, dance, dangle and transition animations come from Capri,
   [lachydotmcg/capri-desktop](https://github.com/lachydotmcg/capri-desktop), under the
@@ -372,20 +372,40 @@ On Windows she registers <kbd>Win</kbd>+<kbd>Alt</kbd>+<kbd>C</kbd> (the Line) a
   > Required Notice: Copyright 2026 Lachy (https://github.com/lachydotmcg)
   >
   > Required Notice: Anyone who uses Capri's code, art, animations or any of its other assets must credit the Capri project (https://github.com/lachydotmcg/capri-desktop). Capri's art and animations are by her artist, who prefers to stay private. Parts made by others keep their own licences, listed in its README.
-- **The app icon** ([`assets/icon`](assets/icon/NOTICE), also built into the binaries and the
-  installer) is a crop of Capri's face from a frame of Cyberpunk: Edgerunners 2. It is in this
-  repository, but no licence of any kind is granted for it, capri-syn's included. The frame and the
-  character belong to their rights holders. Rights holders: open an issue and it comes down.
-- **The media on this page.** The clips show the app running with a pack assembled from those two
-  sources, on a staged desktop. The banner uses lachy's perch drawing; the cards are composed from the
-  same captures and one frame of lachy's teleport animation. The artwork in all of them remains its
-  artists'.
 - **Unofficial.** This is a fan project. It is not affiliated with or endorsed by CD PROJEKT RED,
   R. Talsorian Games, Studio Trigger or Netflix. All trademarks belong to their owners.
 - **Her voice.** Speech uses stock Kokoro voices, blended, with light DSP. Nothing is cloned and nobody's voice
   is imitated.
 - **Built on** [Synaps](https://github.com/HaseebKhalid1507/SynapsCLI) and
   [GPUI](https://www.gpui.rs/).
+
+**Licence.** capri-syn's own code, tools, data and docs are released under the MIT License (see
+[`LICENSE`](LICENSE)), © 2026 Haseeb Khalid. MIT covers only what was written for this project. These
+paths are excluded and keep their own terms:
+
+- `vendor/gpui-pre-linux/`, `vendor/gpui-pre-windows/`: GPUI by Zed Industries, Apache-2.0 (each folder's
+  `LICENSE-APACHE`; our changes, listed in its `PATCHES.md`, are under the same licence).
+- `crates/synaps-client/`: MIT, except the portions named in its
+  [`NOTICE`](crates/synaps-client/NOTICE), which are Apache-2.0.
+- `docs/media/`: screenshots and recordings of the app showing third-party character art: Capri's sprites
+  from [CapriCore](https://github.com/CapriChooms/CapriCore), for which no licence is granted (see its
+  `docs/character-assets.md`), and Capri's desktop art from
+  [lachydotmcg/capri-desktop](https://github.com/lachydotmcg/capri-desktop) under the
+  [PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0) with
+  the Required Notices above (parts by Qewiw and mixmix312352). Not under MIT; no commercial use. See
+  [`docs/media/NOTICE.md`](docs/media/NOTICE.md).
+- `assets/icon/`: a crop of Capri's face from a still of *Cyberpunk: Edgerunners 2*; its rights belong to
+  their owners (see [`assets/icon/NOTICE`](assets/icon/NOTICE)). Not under MIT; no licence of any kind is
+  granted for it. It is also built into the release binaries and the installer, where the same applies.
+- `tools/wake/hey-capri-v1.npz`: a wake-word model trained on openWakeWord features (its models are
+  CC BY-NC-SA 4.0) and LibriSpeech dev-clean (CC BY 4.0); distributed under CC BY-NC-SA 4.0 (see
+  [`tools/wake/NOTICE`](tools/wake/NOTICE)).
+
+Two MIT files carry a note: `packs/capri/moods.json` holds frame timings, anchor points, visible bounds
+and sha256s taken from CapriCore (`docs/media/NOTICE.md` says which), and `tools/upscale_art.py` follows
+Real-ESRGAN's network (BSD-3-Clause; its licence text is in the file). Release binaries also contain
+third-party crates under their own licences (mostly MIT/Apache-2.0), and the Windows voice installer
+bundles Python and third-party Python packages under their own licences (espeak-ng's GPL-3.0 among them).
 
 <p align="center">
   <sub>Capri runs on <a href="https://github.com/HaseebKhalid1507/SynapsCLI">Synaps</a>. Synaps is built with Synaps.</sub>
