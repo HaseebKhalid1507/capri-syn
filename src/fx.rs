@@ -1075,12 +1075,15 @@ pub const BOLT_LINE: u32 = 0xff1738;
 const HEAD_START: f32 = 0.06;
 const HEAD_FLIGHT: f32 = 0.3;
 const HEAD_EASE: f32 = 2.2;
-/// The tail sets off just after the tip, slowly at first (a third of the strike is still lit at
-/// `BOLT_LAND`), then gathers speed and drains into her by `TAIL_HOME`, just before `BOLT_END`:
-/// a speck on the last frame, nothing left for the unmap to cut off.
+/// The tail sets off just after the tip, slowly at first (most of the strike lit at touchdown,
+/// about a third at `BOLT_LAND`), gathers speed (`TAIL_EASE`), then settles into her
+/// (`TAIL_SETTLE`), home at `BOLT_END` itself. The settle is for the view's frames, which don't
+/// keep step with the strike: wherever they fall, the last one drawn shows little of it (about a
+/// tenth at 30 fps, at worst), not a stub for the unmap to cut off.
 const TAIL_START: f32 = 0.05;
-const TAIL_HOME: f32 = 0.64;
-const TAIL_EASE: f32 = 1.8;
+const TAIL_HOME: f32 = BOLT_END;
+const TAIL_EASE: f32 = 3.2;
+const TAIL_SETTLE: f32 = 2.4;
 
 /// The ribbon's half-width where it's thickest: `RIB` of the figure's size, within
 /// `[RIB_MIN, RIB_MAX]` px (readable on a small figure, no slab on a big one), and at most
@@ -1315,8 +1318,8 @@ impl Bolt {
 
     /// Head and tail progress along the strike (each 0..1) at time `u` (0..1 of `BOLT_MS`):
     /// fractions of the straight line from `a` to `b`, for `frame` and `streak` alike. The head
-    /// shoots out and settles into the target; the tail follows, slow then fast, and is home just
-    /// before `BOLT_END`. From `BOLT_END` on, both are home (nothing lit).
+    /// shoots out and settles into the target; the tail follows, slow, then fast, then settling,
+    /// and is home at `BOLT_END`. From `BOLT_END` on, both are home (nothing lit).
     pub fn span(u: f32) -> (f32, f32) {
         if u.is_nan() || u >= BOLT_END {
             return (1.0, 1.0);
@@ -1325,7 +1328,8 @@ impl Bolt {
         let s = (u / HEAD_FLIGHT).min(1.0);
         let head = 1.0 - (1.0 - HEAD_START) * (1.0 - s).powf(HEAD_EASE);
         let s = ((u - TAIL_START) / (TAIL_HOME - TAIL_START)).clamp(0.0, 1.0);
-        (head, s.powf(TAIL_EASE).min(head))
+        let tail = 1.0 - (1.0 - s.powf(TAIL_EASE)).powf(TAIL_SETTLE);
+        (head, tail.min(head))
     }
 
     /// The quiet (passive) strike at time `u`: one thin straight shard, `len` px long and `w` px
@@ -2011,6 +2015,18 @@ mod bolt_tests {
         let last = ((BOLT_END / FRAME_30).ceil() - 1.0) * FRAME_30;
         let (h, t) = Bolt::span(last);
         assert!(h - t < 0.03, "{last}: {}", h - t);
+        // Nor does it hang on the strike's own clock: wherever the view's frames fall (at 30 fps
+        // and at 60 Hz), the last one that draws anything of an 800 px strike shows little of it.
+        for (rate, most) in [(FRAME_30, 0.12), (0.5 * FRAME_30, 0.04)] {
+            for k in 0..64 {
+                let mut u = k as f32 / 64.0 * rate;
+                let lit = |u: f32| (Bolt::span(u).0 - Bolt::span(u).1) * 800.0;
+                while u + rate < BOLT_END && lit(u + rate) >= 0.5 {
+                    u += rate;
+                }
+                assert!(lit(u) <= most * 800.0, "frames every {rate} from {}: {} px lit at {u}, then gone", k as f32 / 64.0 * rate, lit(u));
+            }
+        }
         for u in [f32::NAN, f32::INFINITY, 7.0, 1.0] {
             assert_eq!(Bolt::span(u), (1.0, 1.0));
         }
