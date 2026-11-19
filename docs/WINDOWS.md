@@ -124,7 +124,9 @@ What CI can't show is item 15 below.
 | | how | status |
 |---|---|---|
 | her body, the Line, the reader, the intro | GPUI pop-ups made bare topmost tool windows: no taskbar button, not in Alt+Tab, no DWM frame or rounding | P0 [VM] |
-| click-through | layered + `WS_EX_TRANSPARENT`, toggled by a 10 ms pointer poller over her input region | P0 [VM] |
+| click-through | layered + `WS_EX_TRANSPARENT`, wanted by a 10 ms pointer poller over her input region, set by her UI thread on the poller's wake-up (the poller never waits on it) | P0 [VM]; [M] the 2026-11-19 hang |
+| on top | Windows sometimes leaves a topmost window under plain ones with its `WS_EX_TOPMOST` bit still set (on Haseeb's box after he opened an app from Explorer; the second taskbar too). The poller checks her place every 250 ms and when a window comes forward; under a plain window, her UI thread puts her windows back on top (`z: re-topmost (was below …)` in her log). Not while a fullscreen app is in front | [M] 2026-11-19 |
+| fullscreen | a window covering its monitor (not a tool window, not the shell's: Start, Search, Alt+Tab and the flyouts are none, nor his focused window) | [M] 2026-11-19 |
 | perching | `EnumWindows`, DWM frame bounds, WinEvent hooks for moves, shows, hides, minimise, cloak, foreground | P0 [VM] |
 | virtual desktops | windows on another desktop are cloaked (left out); `IVirtualDesktopManager` confirms; a switch (the shell's registry value) is `Hint::Desktop` | [VM] item 8 (after a fix) |
 | monitors | `EnumDisplayMonitors`; `WM_DISPLAYCHANGE`, `WM_DPICHANGED` and a work-area change (taskbar moved) are `Hint::Layout`, logged (`windows: layout: …`) | [VM] item 4 |

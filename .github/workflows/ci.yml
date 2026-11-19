@@ -188,20 +188,30 @@ jobs:
         shell: pwsh
         run: ./installer/test-windows.ps1 -Setup (Get-ChildItem packaging/windows/Output/synaps-avatar-setup-*.exe | Select-Object -First 1).FullName -Ref ${{ github.event.pull_request.head.sha || github.sha }}
 
-      # Her release exe, offline (no daemon), a minute of clicks and carries on her: every WM_NULL
-      # answered within 1 s, no WER event, no panic (the "not responding" hang of 2026-11-19: her
-      # UI thread and her click-through poller waited on each other). Last: it leaves her state.
-      - name: She keeps answering through a minute of clicks (offline)
-        timeout-minutes: 15
-        shell: pwsh
-        run: ./tests/windows/test-hang.ps1 -Exe target/release/synaps-avatar.exe
-
       - uses: actions/upload-artifact@v4
         with:
           name: synaps-avatar-setup-${{ github.sha }}
           path: packaging/windows/Output/synaps-avatar-setup-*.exe
           retention-days: 14
           if-no-files-found: error
+
+      # Her release exe, offline (no daemon), a minute of clicks and carries on her: every WM_NULL
+      # answered (within 1 s, or 10 s on a retry), no WER event, no panic (the "not responding"
+      # hang of 2026-11-19: her UI thread and her click-through poller waited on each other).
+      # After the installer's upload (a failure here keeps it); last: it leaves her state.
+      - name: She keeps answering through a minute of clicks (offline)
+        timeout-minutes: 15
+        shell: pwsh
+        run: ./tests/windows/test-hang.ps1 -Exe target/release/synaps-avatar.exe -Out "$env:RUNNER_TEMP/sa-hang"
+
+      # On a failure: her log and a full minidump of her, taken before she was stopped.
+      - uses: actions/upload-artifact@v4
+        if: ${{ failure() }}
+        with:
+          name: test-hang-${{ github.sha }}
+          path: ${{ runner.temp }}/sa-hang
+          retention-days: 7
+          if-no-files-found: warn
 
   # Her voice installer (packaging/windows/synaps-avatar-voice.iss): the bundle beside her, as its
   # own download. Built, installed, checked and uninstalled unattended (without the models); then

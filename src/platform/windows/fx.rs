@@ -70,63 +70,75 @@ fn create(rgb: u32) -> Option<HWND> {
 impl Win32 {
     /// `Stage::fx_show`: layer `layer` up, solid `rgb` over `rects` (window px; None keeps its
     /// region), its window at root `at` sized `size`, stacked `z`.
+    /// The `fx` lock is never held across a user32 call (one may send messages and wait).
     pub(super) fn fx_show(&self, layer: usize, rgb: u32, at: (i32, i32), size: (i32, i32), rects: Option<&[ShapeRect]>, z: FxZ) -> Result<()> {
-        let mut fx = self.fx.lock().map_err(|_| anyhow!("fx lock"))?;
-        while fx.len() <= layer {
-            let h = create(rgb).ok_or_else(|| anyhow!("windows: no window for effect layer {}", fx.len()))?;
+        loop {
+            let n = self.fx.lock().map_err(|_| anyhow!("fx lock"))?.len();
+            if n > layer {
+                break;
+            }
+            let h = create(rgb).ok_or_else(|| anyhow!("windows: no window for effect layer {n}"))?;
             if let Ok(mut m) = self.mine.lock() {
                 m.insert(id(h));
             }
-            fx.push(FxWin { id: id(h), up: false, rgb });
+            self.fx.lock().map_err(|_| anyhow!("fx lock"))?.push(FxWin { id: id(h), up: false, rgb });
         }
-        let after = match z {
-            FxZ::Top => HWND_TOPMOST,
-            FxZ::UnderBody => self.body_hwnd(),
-            FxZ::Below(j) => match fx.get(j) {
-                Some(s) if s.up => hwnd(s.id),
-                _ => HWND_TOPMOST,
-            },
+        let (h, after, recolour, up) = {
+            let mut fx = self.fx.lock().map_err(|_| anyhow!("fx lock"))?;
+            let after = match z {
+                FxZ::Top => HWND_TOPMOST,
+                FxZ::UnderBody => self.body_hwnd(),
+                FxZ::Below(j) => match fx.get(j) {
+                    Some(s) if s.up => hwnd(s.id),
+                    _ => HWND_TOPMOST,
+                },
+            };
+            let f = &mut fx[layer];
+            (hwnd(f.id), after, std::mem::replace(&mut f.rgb, rgb) != rgb, f.up)
         };
-        let f = &mut fx[layer];
-        let h = hwnd(f.id);
         unsafe {
-            if f.rgb != rgb {
+            if recolour {
                 SetWindowLongPtrW(h, GWLP_USERDATA, colorref(rgb) as isize);
-                f.rgb = rgb;
-                if f.up {
+                if up {
                     let _ = InvalidateRect(Some(h), None, true);
                 }
             }
             if let Some(r) = rects {
                 // The window owns the region from here.
-                SetWindowRgn(h, region(r), f.up);
+                SetWindowRgn(h, region(r), up);
             }
             let (ox, oy) = origin();
-            let show = if f.up { SET_WINDOW_POS_FLAGS(0) } else { SWP_SHOWWINDOW };
+            let show = if up { SET_WINDOW_POS_FLAGS(0) } else { SWP_SHOWWINDOW };
             SetWindowPos(h, Some(after), at.0 + ox, at.1 + oy, size.0.max(1), size.1.max(1), SWP_NOACTIVATE | show)?;
         }
-        f.up = true;
+        if let Ok(mut fx) = self.fx.lock()
+            && let Some(f) = fx.get_mut(layer)
+        {
+            f.up = true;
+        }
         Ok(())
     }
 
     pub(super) fn fx_hide(&self, layer: usize) {
-        if let Ok(mut fx) = self.fx.lock()
-            && let Some(f) = fx.get_mut(layer).filter(|f| f.up)
-        {
-            unsafe {
-                let _ = ShowWindow(hwnd(f.id), SW_HIDE);
-            }
+        let h = self.fx.lock().ok().and_then(|mut fx| fx.get_mut(layer).filter(|f| f.up).map(|f| {
             f.up = false;
+            hwnd(f.id)
+        }));
+        if let Some(h) = h {
+            unsafe {
+                let _ = ShowWindow(h, SW_HIDE);
+            }
         }
     }
 
     pub(super) fn fx_hide_all(&self) {
-        if let Ok(mut fx) = self.fx.lock() {
-            for f in fx.iter_mut().filter(|f| f.up) {
-                unsafe {
-                    let _ = ShowWindow(hwnd(f.id), SW_HIDE);
-                }
-                f.up = false;
+        let up: Vec<HWND> = self.fx.lock().map(|mut fx| fx.iter_mut().filter(|f| f.up).map(|f| {
+            f.up = false;
+            hwnd(f.id)
+        }).collect()).unwrap_or_default();
+        for h in up {
+            unsafe {
+                let _ = ShowWindow(h, SW_HIDE);
             }
         }
     }

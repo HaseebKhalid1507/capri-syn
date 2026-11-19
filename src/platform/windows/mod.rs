@@ -232,6 +232,39 @@ fn is_shell(h: HWND) -> bool {
     h == unsafe { GetShellWindow() } || matches!(class_name(h).as_str(), "Progman" | "WorkerW")
 }
 
+/// The shell's own UI: the desktop, the taskbars, and its flyouts and switchers (Start, Search,
+/// the notification centre, Alt+Tab, Task View). In front, it is never his window nor a
+/// fullscreen app: Start's host covers the whole monitor (on Haseeb's box she went
+/// "fullscreen-hide" every time he opened Start or Search, and followed the Alt+Tab switcher).
+fn is_shell_ui(h: HWND) -> bool {
+    is_shell(h)
+        || matches!(
+            class_name(h).as_str(),
+            "Shell_TrayWnd"
+                | "Shell_SecondaryTrayWnd"
+                | "XamlExplorerHostIslandWindow"
+                | "XamlExplorerHostIslandWindow_WASDK"
+                | "Windows.UI.Core.CoreWindow"
+                | "TopLevelWindowForOverflowXamlIsland"
+                | "NotifyIconOverflowWindow"
+                | "MultitaskingViewFrame"
+                | "TaskSwitcherWnd"
+                | "ForegroundStaging"
+        )
+}
+
+/// It covers its whole monitor (a borderless full screen). Tool windows never count (overlays,
+/// the shell's hosts).
+fn covers_monitor(h: HWND) -> bool {
+    if ex_style(h) & WS_EX_TOOLWINDOW.0 != 0 {
+        return false;
+    }
+    frame_rect(h).zip(monitor_info(unsafe { MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST) })).is_some_and(|(r, mi)| {
+        let m = mi.monitorInfo.rcMonitor;
+        r.left <= m.left && r.top <= m.top && r.right >= m.right && r.bottom >= m.bottom
+    })
+}
+
 fn monitor_info(m: HMONITOR) -> Option<MONITORINFOEXW> {
     let mut mi = MONITORINFOEXW::default();
     mi.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
@@ -279,52 +312,302 @@ fn region(rects: &[ShapeRect]) -> Option<::windows::Win32::Graphics::Gdi::HRGN> 
     }
 }
 
-/// The input poller's word to one of her click-through surfaces, posted: wParam 1 = take the
-/// pointer (no `WS_EX_TRANSPARENT`), 0 = let it through. The surface's own thread sets the style.
-const WM_SA_PASS: u32 = WM_APP + 0x5A1;
-const PASS_SUBCLASS: usize = 0x5A1;
-/// `WM_SA_PASS`es applied (the regression test counts them).
-#[cfg(test)]
-static PASSES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-/// Applies the poller's `WM_SA_PASS` on the surface's own thread (her UI thread). The poller
-/// never sets the style itself: from another thread, `SetWindowLongPtrW(GWL_EXSTYLE)` is a
-/// synchronous send (WM_STYLECHANGING/-CHANGED) to her UI thread, and the poller made it holding
-/// `surfaces` while her UI thread, mid-frame, waited for that lock in `set_input`. Each waited
-/// for the other for good: "synaps-avatar.exe is not responding" (Haseeb's box, three dumps,
-/// 2026-11-19).
-unsafe extern "system" fn pass_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM, _id: usize, _data: usize) -> LRESULT {
-    match msg {
-        WM_SA_PASS => {
-            #[cfg(test)]
-            PASSES.fetch_add(1, Ordering::Relaxed);
-            let ex = ex_style(h);
-            let ex = if wp.0 != 0 { ex & !WS_EX_TRANSPARENT.0 } else { ex | WS_EX_TRANSPARENT.0 };
-            unsafe { SetWindowLongPtrW(h, GWL_EXSTYLE, ex as isize) };
-            LRESULT(0)
+/// The poller's wake-up to one of her click-through surfaces (`Pass`): a message of its own,
+/// registered (no clash with GPUI's or anyone's `WM_APP` range).
+fn pass_msg() -> u32 {
+    static MSG: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *MSG.get_or_init(|| match unsafe { RegisterWindowMessageW(::windows::core::w!("SynapsAvatar.Pass")) } {
+        0 => {
+            elog!("synaps-avatar: windows: no registered message for click-through; WM_APP+0x5A1 instead");
+            WM_APP + 0x5A1
         }
-        WM_NCDESTROY => unsafe {
-            let _ = RemoveWindowSubclass(h, Some(pass_proc), PASS_SUBCLASS);
-            DefSubclassProc(h, msg, wp, lp)
-        },
-        _ => unsafe { DefSubclassProc(h, msg, wp, lp) },
+        m => m,
+    })
+}
+const PASS_SUBCLASS: usize = 0x5A1;
+
+/// The poller's wake-up to her body when she has lost her place on top (`back_on_top`).
+fn top_msg() -> u32 {
+    static MSG: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *MSG.get_or_init(|| match unsafe { RegisterWindowMessageW(::windows::core::w!("SynapsAvatar.Top")) } {
+        0 => WM_APP + 0x5A2,
+        m => m,
+    })
+}
+
+/// A window came forward (the WinEvent hook): the poller checks her place on its next tick.
+static Z_CHECK: AtomicBool = AtomicBool::new(false);
+/// Her place on top is checked at least this often (and on every `Z_CHECK`).
+const Z_EVERY: Duration = Duration::from_millis(250);
+
+/// Whether `h` takes the pointer now (no `WS_EX_TRANSPARENT`). Reading a style never waits.
+fn takes_pointer(h: HWND) -> bool {
+    ex_style(h) & WS_EX_TRANSPARENT.0 == 0
+}
+
+/// Click-through, one surface: the input poller decides, the surface's own thread (her UI thread)
+/// sets the style. The poller never sets it itself: from another thread,
+/// `SetWindowLongPtrW(GWL_EXSTYLE)` is a synchronous send (WM_STYLECHANGING/-CHANGED) to her UI
+/// thread, and the poller made it holding `surfaces` while her UI thread, mid-frame, waited for
+/// that lock in `set_input`. Each waited for the other for good: "synaps-avatar.exe is not
+/// responding" (Haseeb's box, four dumps alike, 2026-11-19).
+///
+/// The wanted state lives here; the message is only a wake-up. At most one is in flight
+/// (`queued`) and the latest `take` wins. The poller compares the real style every tick (10 ms),
+/// so a lost wake-up or a style changed behind its back is posted again.
+#[derive(Default)]
+struct Pass {
+    /// Wanted: she takes the pointer here (no `WS_EX_TRANSPARENT`).
+    take: AtomicBool,
+    /// A wake-up is posted and not handled yet.
+    queued: AtomicBool,
+    /// Its window is gone (WM_NCDESTROY): the poller lets the surface go.
+    gone: AtomicBool,
+    /// Her body: a "back on top" wake-up is posted and not handled yet.
+    top: AtomicBool,
+    /// Her body, right after she was put back: a plain window still over her (0: none). One
+    /// she can't get above (a higher band).
+    still_under: AtomicU32,
+    /// Wake-ups posted and handled (the regression test reads them, per window).
+    #[cfg(test)]
+    posts: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    wakes: std::sync::atomic::AtomicUsize,
+    /// "Back on top" wake-ups handled.
+    #[cfg(test)]
+    tops: std::sync::atomic::AtomicUsize,
+}
+
+impl Pass {
+    /// The poller's side: `h` should take the pointer, or let it through. Never waits (a post).
+    /// Some(posted) when a wake-up was due; None when the style is already so, or one is queued.
+    fn want(&self, h: HWND, take: bool) -> Option<bool> {
+        self.take.store(take, Ordering::SeqCst);
+        if takes_pointer(h) == take || self.queued.swap(true, Ordering::SeqCst) {
+            return None;
+        }
+        #[cfg(test)]
+        self.posts.fetch_add(1, Ordering::SeqCst);
+        let posted = unsafe { PostMessageW(Some(h), pass_msg(), WPARAM(0), LPARAM(0)) }.is_ok();
+        if !posted {
+            // Not delivered (gone, or its queue full): the next tick posts again.
+            self.queued.store(false, Ordering::SeqCst);
+        }
+        Some(posted)
+    }
+
+    /// The poller's side: her body back on top, posted (at most one in flight). Posted or not.
+    fn want_top(&self, h: HWND) -> bool {
+        if self.top.swap(true, Ordering::SeqCst) {
+            return false;
+        }
+        let posted = unsafe { PostMessageW(Some(h), top_msg(), WPARAM(0), LPARAM(0)) }.is_ok();
+        if !posted {
+            self.top.store(false, Ordering::SeqCst);
+        }
+        posted
+    }
+
+    /// The surface's side, on its own thread: `queued` cleared first (a later `want` posts
+    /// again), then the latest `take` set, only if the style differs.
+    fn apply(&self, h: HWND) {
+        self.queued.store(false, Ordering::SeqCst);
+        #[cfg(test)]
+        self.wakes.fetch_add(1, Ordering::SeqCst);
+        let ex = ex_style(h);
+        let want = if self.take.load(Ordering::SeqCst) { ex & !WS_EX_TRANSPARENT.0 } else { ex | WS_EX_TRANSPARENT.0 };
+        if want != ex {
+            unsafe { SetWindowLongPtrW(h, GWL_EXSTYLE, want as isize) };
+        }
     }
 }
 
-/// One of her click-through surfaces: its input region (window px) and whether it lets the
-/// pointer through now (as last asked of it: the surface's thread applies it).
+/// The subclass on her click-through surfaces: `Pass::apply` on the poller's wake-up. `data` is
+/// the surface's `Pass` (an `Arc` given up to it in `adopt_hwnd`, taken back at WM_NCDESTROY).
+unsafe extern "system" fn pass_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM, _id: usize, data: usize) -> LRESULT {
+    if msg == top_msg() {
+        if data != 0 {
+            let pass = unsafe { &*(data as *const Pass) };
+            #[cfg(test)]
+            pass.tops.fetch_add(1, Ordering::SeqCst);
+            back_on_top();
+            // Her windows are all topmost now: any plain window over her is above the band.
+            let still = under_plain_window(h, |_| false, &HashSet::new()).map_or(0, id);
+            pass.still_under.store(still, Ordering::SeqCst);
+            pass.top.store(false, Ordering::SeqCst);
+        }
+        return LRESULT(0);
+    }
+    if msg == pass_msg() {
+        if data != 0 {
+            unsafe { &*(data as *const Pass) }.apply(h);
+        }
+        return LRESULT(0);
+    }
+    if msg == WM_NCDESTROY {
+        unsafe {
+            let _ = RemoveWindowSubclass(h, Some(pass_proc), PASS_SUBCLASS);
+            if data != 0 {
+                let pass = Arc::from_raw(data as *const Pass);
+                pass.gone.store(true, Ordering::SeqCst);
+            }
+        }
+    }
+    unsafe { DefSubclassProc(h, msg, wp, lp) }
+}
+
+/// Her body's place on top is lost: the first window above her that isn't topmost (none above a
+/// topmost window ever is), showing and not hers. Windows does this to topmost windows now and
+/// then, keeping their `WS_EX_TOPMOST` bit: on Haseeb's box (2026-11-19, Windows 11 26200) she,
+/// the second monitor's taskbar and the shell's WASDK host were all found under plain windows
+/// after he opened an app from Explorer, with no call of hers in between.
+/// `skip`: windows she can't get above (a higher band: Task Manager's "always on top").
+fn under_plain_window(body: HWND, mine: impl Fn(WinId) -> bool, skip: &HashSet<WinId>) -> Option<HWND> {
+    if !showing(body) {
+        return None;
+    }
+    let mut w = body;
+    for _ in 0..4096 {
+        w = unsafe { GetWindow(w, GW_HWNDPREV) }.ok()?;
+        if ex_style(w) & WS_EX_TOPMOST.0 == 0 && showing(w) && !skip.contains(&id(w)) && !mine(id(w)) {
+            return Some(w);
+        }
+    }
+    None
+}
+
+/// Her windows (this thread's, showing) back to the top of the topmost band, in the order they
+/// stand among themselves (her Line and bubble stay over her body). On her UI thread, posted by
+/// the poller (`top_msg`): her own windows, so nothing here waits on another thread.
+fn back_on_top() {
+    let me = unsafe { ::windows::Win32::System::Threading::GetCurrentThreadId() };
+    let mut hers = Vec::new();
+    let mut w = unsafe { GetTopWindow(None) }.ok();
+    for _ in 0..8192 {
+        let Some(h) = w else { break };
+        if unsafe { GetWindowThreadProcessId(h, None) } == me && showing(h) {
+            hers.push(h);
+        }
+        w = unsafe { GetWindow(h, GW_HWNDNEXT) }.ok();
+    }
+    for &h in hers.iter().rev() {
+        unsafe {
+            let _ = SetWindowPos(h, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+        }
+    }
+}
+
+/// A process's file name (its exe), for her log.
+fn exe_of(h: HWND) -> String {
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(h, Some(&raw mut pid)) };
+    let name = unsafe { ::windows::Win32::System::Threading::OpenProcess(::windows::Win32::System::Threading::PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok().and_then(|p| {
+        let mut buf = [0u16; 512];
+        let mut n = buf.len() as u32;
+        let ok = unsafe { ::windows::Win32::System::Threading::QueryFullProcessImageNameW(p, ::windows::Win32::System::Threading::PROCESS_NAME_WIN32, ::windows::core::PWSTR(buf.as_mut_ptr()), &mut n) }.is_ok();
+        unsafe {
+            let _ = ::windows::Win32::Foundation::CloseHandle(p);
+        }
+        ok.then(|| String::from_utf16_lossy(&buf[..n as usize]))
+    });
+    name.and_then(|n| n.rsplit('\\').next().map(str::to_string)).unwrap_or_else(|| format!("pid {pid}"))
+}
+
+/// The foreground window covers its whole monitor (a game, a video, a slideshow): Windows may
+/// put it over topmost windows, and the core hides her there anyway (`fullscreen-hide`).
+fn fullscreen_in_front() -> bool {
+    let fg = unsafe { GetForegroundWindow() };
+    !fg.0.is_null() && !is_shell_ui(fg) && covers_monitor(fg)
+}
+
+/// One of her click-through surfaces: its input region (window px) and its click-through state.
 struct Surface {
     input: Vec<ShapeRect>,
-    transparent: bool,
+    pass: Arc<Pass>,
+}
+
+/// A lock even if a panic poisoned it (her locks hold plain values, whole after any panic): said
+/// loudly, once, and carried on (a silent end of the poller would leave her click-through stuck).
+/// Release builds abort on a panic; this is for the rest.
+fn relock<'a, T>(m: &'a Mutex<T>, what: &str) -> std::sync::MutexGuard<'a, T> {
+    m.lock().unwrap_or_else(|e| {
+        static SAID: AtomicBool = AtomicBool::new(false);
+        if !SAID.swap(true, Ordering::Relaxed) {
+            elog!("synaps-avatar: windows: the {what} lock was poisoned (a panic while it was held); carrying on with its data");
+        }
+        m.clear_poison();
+        e.into_inner()
+    })
 }
 
 type Escapes = Arc<Mutex<Option<Box<dyn Fn() + Send>>>>;
+/// The poller's watch on her place on top: a check every `Z_EVERY` and on every window that comes
+/// forward (`Z_CHECK`); out of the topmost band, her UI thread is asked to put her back
+/// (`back_on_top`) and her log says under what. If she's back under something within a second
+/// of being put back, the checks slow down (to 8 s at most) until one finds her on top. A window
+/// still over her right after she was put back is above the topmost band itself (her UI thread
+/// says, `Pass::still_under`): left there until it closes.
+struct ZWatch {
+    last: std::time::Instant,
+    every: Duration,
+    last_put: Option<std::time::Instant>,
+    puts: u64,
+    cant: HashSet<WinId>,
+}
+
+impl Default for ZWatch {
+    fn default() -> ZWatch {
+        ZWatch { last: std::time::Instant::now(), every: Z_EVERY, last_put: None, puts: 0, cant: HashSet::new() }
+    }
+}
+
+impl ZWatch {
+    fn tick(&mut self, body: &AtomicU32, surfaces: &Mutex<HashMap<WinId, Surface>>, mine: &Mutex<HashSet<WinId>>) {
+        let asked = Z_CHECK.swap(false, Ordering::Relaxed);
+        if !asked && self.last.elapsed() < self.every {
+            return;
+        }
+        self.last = std::time::Instant::now();
+        let b = body.load(Ordering::Relaxed);
+        if b == 0 {
+            return;
+        }
+        let Some(pass) = relock(surfaces, "surfaces").get(&b).map(|s| s.pass.clone()) else { return };
+        self.cant.retain(|&w| unsafe { IsWindow(Some(hwnd(w))) }.as_bool());
+        let is_mine = |w: WinId| mine.lock().is_ok_and(|m| m.contains(&w));
+        let Some(over) = under_plain_window(hwnd(b), is_mine, &self.cant).filter(|_| !fullscreen_in_front()) else {
+            self.every = Z_EVERY;
+            return;
+        };
+        if !pass.top.load(Ordering::SeqCst) && pass.still_under.swap(0, Ordering::SeqCst) == id(over) {
+            // Put back, and still under it right after: it is above the topmost band itself.
+            elog!("synaps-avatar: z: can't get above {} of {} (0x{:x}): left there", class_name(over), exe_of(over), id(over));
+            self.cant.insert(id(over));
+            return;
+        }
+        if self.last_put.is_some_and(|at| at.elapsed() < Duration::from_secs(1)) {
+            self.every = (self.every * 2).min(Duration::from_secs(8));
+        }
+        if pass.want_top(hwnd(b)) {
+            self.last_put = Some(std::time::Instant::now());
+            self.puts += 1;
+            if self.puts <= 20 || self.puts.is_multiple_of(100) {
+                elog!("synaps-avatar: z: re-topmost (was below {} of {}, 0x{:x}; #{})", class_name(over), exe_of(over), id(over), self.puts);
+            }
+        }
+    }
+}
+
+/// The pointer for the input poller: screen px, and whether a button is held (None: unread).
+type PointerSource = Box<dyn Fn() -> Option<(POINT, bool)> + Send>;
 /// A window and where it goes (screen px: x, y, w, h).
 type Placer = std::sync::mpsc::Sender<(WinId, [i32; 4])>;
 
 pub struct Win32 {
     /// Her body's window (0 until adopted).
-    body: AtomicU32,
+    body: Arc<AtomicU32>,
+    /// The last window of his that had the foreground (the shell's UI in front doesn't count).
+    last_app: AtomicU32,
     /// Every surface of hers (left out of `windows`, no hints).
     mine: Arc<Mutex<HashSet<WinId>>>,
     /// Her click-through surfaces (body, intro), by id.
@@ -356,6 +639,10 @@ unsafe extern "system" fn win_event(_h: HWINEVENTHOOK, ev: u32, w: HWND, obj: i3
     // Windows themselves (not carets, cursors, scroll bars), top-level ones.
     if obj != OBJID_WINDOW.0 || child != CHILDID_SELF as i32 || w.0.is_null() || unsafe { GetAncestor(w, GA_ROOT) } != w {
         return;
+    }
+    if matches!(ev, EVENT_SYSTEM_FOREGROUND | EVENT_OBJECT_SHOW | EVENT_SYSTEM_MINIMIZEEND | EVENT_OBJECT_UNCLOAKED) {
+        // Windows came forward: is she still on top of them? (`under_plain_window`, the poller.)
+        Z_CHECK.store(true, Ordering::Relaxed);
     }
     let hint = match ev {
         EVENT_OBJECT_LOCATIONCHANGE if showing(w) => Hint::Moved(id(w), frame_rect(w).map(|r| root_rect(&r, id(w)))),
@@ -415,7 +702,8 @@ impl Win32 {
             bail!("windows: no desktop (a service session?)");
         }
         Ok(Win32 {
-            body: AtomicU32::new(0),
+            body: Arc::new(AtomicU32::new(0)),
+            last_app: AtomicU32::new(0),
             mine: Arc::new(Mutex::new(HashSet::new())),
             surfaces: Arc::new(Mutex::new(HashMap::new())),
             input_thread: Mutex::new(None),
@@ -444,6 +732,8 @@ impl Win32 {
     /// without focus).
     fn adopt_hwnd(&self, role: Role, h: HWND) -> Result<WinId> {
         let through = matches!(role, Role::Body | Role::Intro | Role::Fx);
+        // Lets the pointer through (WS_EX_TRANSPARENT below) until the poller says otherwise.
+        let pass = through.then(|| Arc::new(Pass::default()));
         let asked = self.asked_at.lock().ok().and_then(|mut a| a.iter().position(|e| e.0 == role).map(|i| a.swap_remove(i).1));
         unsafe {
             // The client area becomes the whole window: where and as big as the core asked for it
@@ -458,6 +748,21 @@ impl Win32 {
             }
             // GPUI PW-1 creates a pop-up as a bare WS_POPUP; one with a caption (an unpatched
             // GPUI) is made one here.
+            // The subclass before any style is touched (the poller's wake-ups are handled from the
+            // first one on). A subclass is the window thread's: adopt runs on it.
+            debug_assert_eq!(
+                GetWindowThreadProcessId(h, None),
+                ::windows::Win32::System::Threading::GetCurrentThreadId(),
+                "adopt 0x{:x} on its own thread",
+                id(h)
+            );
+            if let Some(pass) = &pass {
+                let data = Arc::into_raw(pass.clone()) as usize;
+                if !SetWindowSubclass(h, Some(pass_proc), PASS_SUBCLASS, data).as_bool() {
+                    drop(Arc::from_raw(data as *const Pass));
+                    bail!("windows: cannot subclass 0x{:x} (click-through)", id(h));
+                }
+            }
             let style = GetWindowLongPtrW(h, GWL_STYLE) as u32;
             if style & WS_CAPTION.0 != 0 {
                 SetWindowLongPtrW(h, GWL_STYLE, (WS_POPUP.0 | (style & WS_VISIBLE.0)) as isize);
@@ -471,10 +776,6 @@ impl Win32 {
                 // A layered window shows nothing until it has attributes; DirectComposition's
                 // per-pixel alpha still applies under a constant 255.
                 SetLayeredWindowAttributes(h, ::windows::Win32::Foundation::COLORREF(0), 255, LWA_ALPHA)?;
-                // The poller's flips are applied here, on this thread (`pass_proc`).
-                if !SetWindowSubclass(h, Some(pass_proc), PASS_SUBCLASS, 0).as_bool() {
-                    bail!("windows: cannot subclass 0x{:x} (click-through)", id(h));
-                }
             }
             let set = |attr, v: u32| DwmSetWindowAttribute(h, attr, &v as *const u32 as *const _, 4).ok();
             set(DWMWA_NCRENDERING_POLICY, DWMNCRP_DISABLED.0 as u32);
@@ -493,10 +794,8 @@ impl Win32 {
         if let Ok(mut m) = self.mine.lock() {
             m.insert(w);
         }
-        if through {
-            if let Ok(mut g) = self.surfaces.lock() {
-                g.insert(w, Surface { input: Vec::new(), transparent: true });
-            }
+        if let Some(pass) = pass {
+            relock(&self.surfaces, "surfaces").insert(w, Surface { input: Vec::new(), pass });
             self.start_input_poller();
         }
         if role == Role::Body {
@@ -509,48 +808,52 @@ impl Win32 {
     /// (`WS_EX_TRANSPARENT`) while it is off her input region. A held button freezes it (the
     /// window under the press keeps the pointer, as X's implicit grab does).
     fn start_input_poller(&self) {
-        let Ok(mut g) = self.input_thread.lock() else { return };
+        self.start_input_poller_with(Box::new(|| {
+            let mut p = POINT::default();
+            unsafe { GetCursorPos(&mut p) }.ok().map(|_| (p, buttons_down()))
+        }));
+    }
+
+    /// The poller, reading the pointer (screen px, a button held) from `pointer` (a test's own).
+    /// One per backend: later calls do nothing.
+    fn start_input_poller_with(&self, pointer: PointerSource) {
+        let mut g = relock(&self.input_thread, "input thread");
         if g.is_some() {
             return;
         }
-        let (surfaces, mine, grant) = (self.surfaces.clone(), self.mine.clone(), self.grant_at.clone());
+        let (surfaces, mine, grant, body) = (self.surfaces.clone(), self.mine.clone(), self.grant_at.clone(), self.body.clone());
         let trace = std::env::var_os("SA_WIN_TRACE").is_some();
         let t = std::thread::Builder::new().name("win-input".into()).spawn(move || {
             let mut was_pressed = false;
+            let mut z = ZWatch::default();
             loop {
-                let mut p = POINT::default();
-                let pressed = buttons_down();
+                z.tick(&body, &surfaces, &mine);
+                let at = pointer();
+                let pressed = at.is_some_and(|(_, down)| down);
                 // His press on one of her windows (the Line too): the keyboard is his to give.
                 if pressed && !was_pressed && hers_at_pointer(&mine) {
                     grant.store(tick(), Ordering::Relaxed);
                 }
                 was_pressed = pressed;
-                if unsafe { GetCursorPos(&mut p) }.is_ok() && !pressed {
-                    // Decided under the lock; posted after it (a post never waits). Nothing here
-                    // waits on her UI thread: it may be waiting for this lock (`pass_proc`).
-                    let mut flips: Vec<(WinId, bool, (i32, i32), usize)> = Vec::new();
-                    {
-                        let Ok(mut s) = surfaces.lock() else { return };
-                        for (&w, surf) in s.iter_mut() {
+                if let Some((p, false)) = at {
+                    // Decided under the lock; told after it. Nothing here waits on her UI thread
+                    // (it may be waiting for this lock): `Pass::want` only stores and posts.
+                    let mut s = relock(&surfaces, "surfaces");
+                    s.retain(|_, surf| !surf.pass.gone.load(Ordering::SeqCst));
+                    let wants: Vec<(WinId, Arc<Pass>, bool, (i32, i32), usize)> = s
+                        .iter()
+                        .filter_map(|(&w, surf)| {
                             let mut r = RECT::default();
-                            if unsafe { GetWindowRect(hwnd(w), &mut r) }.is_err() {
-                                continue;
-                            }
+                            unsafe { GetWindowRect(hwnd(w), &mut r) }.ok()?;
                             let (lx, ly) = (p.x - r.left, p.y - r.top);
                             let inside = surf.input.iter().any(|&(x, y, w, h)| lx >= x as i32 && ly >= y as i32 && lx < x as i32 + w as i32 && ly < y as i32 + h as i32);
-                            if inside == surf.transparent {
-                                surf.transparent = !inside;
-                                flips.push((w, inside, (lx, ly), surf.input.len()));
-                            }
-                        }
-                    }
-                    for (w, inside, (lx, ly), n) in flips {
-                        let posted = unsafe { PostMessageW(Some(hwnd(w)), WM_SA_PASS, WPARAM(inside as usize), LPARAM(0)) }.is_ok();
-                        if !posted && let Ok(mut s) = surfaces.lock() && let Some(surf) = s.get_mut(&w) {
-                            // Not delivered (gone, or its queue full): asked again next time.
-                            surf.transparent = inside;
-                        }
-                        if trace {
+                            Some((w, surf.pass.clone(), inside, (lx, ly), surf.input.len()))
+                        })
+                        .collect();
+                    drop(s);
+                    for (w, pass, inside, (lx, ly), n) in wants {
+                        let posted = pass.want(hwnd(w), inside);
+                        if trace && let Some(posted) = posted {
                             elog!("synaps-avatar: windows: 0x{w:x} takes the pointer: {inside} at {lx},{ly} ({n} input rects){}", if posted { "" } else { " (not posted)" });
                         }
                     }
@@ -558,8 +861,9 @@ impl Win32 {
                 std::thread::sleep(Duration::from_millis(10));
             }
         });
-        if let Ok(t) = t {
-            *g = Some(t.thread().clone());
+        match t {
+            Ok(t) => *g = Some(t.thread().clone()),
+            Err(e) => elog!("synaps-avatar: windows: no input poller (her click-through is stuck): {e}"),
         }
     }
 
@@ -587,12 +891,10 @@ impl Win32 {
     }
 
     fn set_input(&self, s: WinId, input: &[ShapeRect]) {
-        if let Ok(mut g) = self.surfaces.lock() {
-            match g.get_mut(&s) {
-                Some(surf) => surf.input = input.to_vec(),
-                None if std::env::var_os("SA_WIN_TRACE").is_some() => elog!("synaps-avatar: windows: input for 0x{s:x}, not a surface of hers"),
-                None => {}
-            }
+        let known = relock(&self.surfaces, "surfaces").get_mut(&s).map(|surf| surf.input = input.to_vec()).is_some();
+        // Said once the lock is let go (her log may block on a full pipe).
+        if !known && std::env::var_os("SA_WIN_TRACE").is_some() {
+            elog!("synaps-avatar: windows: input for 0x{s:x}, not a surface of hers");
         }
     }
 
@@ -704,9 +1006,19 @@ impl Desktop for Win32 {
     }
 
     /// The foreground window; the desktop in front is nobody (as a focused X root is).
+    /// The foreground window; none on the desktop. With the shell's UI in front (Start, Search,
+    /// Alt+Tab, a flyout) his window is still the one he was in.
     fn active_window(&self) -> Option<WinId> {
         let h = unsafe { GetForegroundWindow() };
-        (!h.0.is_null() && !is_shell(h)).then(|| id(h))
+        if h.0.is_null() || is_shell(h) {
+            return None;
+        }
+        if !is_shell_ui(h) {
+            self.last_app.store(id(h), Ordering::Relaxed);
+            return Some(id(h));
+        }
+        let last = self.last_app.load(Ordering::Relaxed);
+        (last != 0 && showing(hwnd(last))).then_some(last)
     }
 
     fn focused_window(&self) -> Option<WinId> {
@@ -735,14 +1047,10 @@ impl Desktop for Win32 {
     /// shell reports a D3D full screen or presentation mode.
     fn is_fullscreen(&self, w: WinId) -> bool {
         let h = hwnd(w);
-        if is_shell(h) || !showing(h) {
+        if is_shell_ui(h) || !showing(h) {
             return false;
         }
-        let covers = frame_rect(h).zip(monitor_info(unsafe { MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST) })).is_some_and(|(r, mi)| {
-            let m = mi.monitorInfo.rcMonitor;
-            r.left <= m.left && r.top <= m.top && r.right >= m.right && r.bottom >= m.bottom
-        });
-        if covers {
+        if covers_monitor(h) {
             return true;
         }
         let state = unsafe { SHQueryUserNotificationState() };
@@ -1338,33 +1646,38 @@ mod tests {
         unsafe { DefWindowProcW(h, msg, wp, lp) }
     }
 
-    /// The hang on Haseeb's box (2026-11-19, three dumps alike): the input poller set
+    /// The hang on Haseeb's box (2026-11-19, four dumps alike): the input poller set
     /// `WS_EX_TRANSPARENT` from its own thread holding `surfaces` (a synchronous send to her UI
     /// thread) while her UI thread, mid-frame, waited for `surfaces` in `set_input`. Here a
-    /// thread plays her UI thread: it changes her input region under a still pointer and works
-    /// a "frame" (no messages pumped) in between, so the poller flips while it is busy. It must
-    /// never stop for good, and the flips must arrive once it pumps. Needs a desktop (the
-    /// pointer): Windows CI has one.
+    /// thread plays her UI thread: it changes her input region under a still pointer (the
+    /// poller's, injected) and works a "frame" (no messages pumped) in between. The poller must
+    /// post while it is busy (its posts rise before the pump: it didn't wait), at most one
+    /// wake-up in flight; the window's real style ends as last wanted, both ways; and a style
+    /// changed behind the poller's back is put back. No pointer of the desktop's is used.
     #[test]
     fn input_flips_never_wait_on_her_ui_thread() {
         use std::sync::mpsc::{RecvTimeoutError, channel};
         use std::time::Instant;
-        let (tx, rx) = channel::<Option<usize>>();
+        let (tx, rx) = channel::<bool>();
         std::thread::Builder::new()
             .name("her-ui".into())
             .spawn(move || {
                 let x = Win32::connect().unwrap();
-                let mut p = POINT::default();
-                unsafe { GetCursorPos(&mut p) }.expect("no pointer: this test needs a desktop");
+                let (ox, oy) = origin();
+                let at = POINT { x: ox + 40, y: oy + 40 };
+                // The poller's pointer: still, at window px 100,100; no button held.
+                let p = POINT { x: at.x + 100, y: at.y + 100 };
+                x.start_input_poller_with(Box::new(move || Some((p, false))));
                 let h = unsafe {
                     let inst = ::windows::Win32::System::LibraryLoader::GetModuleHandleW(None).unwrap();
                     let wc = WNDCLASSW { lpfnWndProc: Some(plain_proc), hInstance: inst.into(), lpszClassName: ::windows::core::w!("SaHangTest"), ..Default::default() };
                     RegisterClassW(&wc);
-                    CreateWindowExW(WINDOW_EX_STYLE(0), ::windows::core::w!("SaHangTest"), ::windows::core::w!("sa-hang-test"), WS_POPUP | WS_VISIBLE, p.x - 100, p.y - 100, 200, 200, None, None, Some(inst.into()), None).unwrap()
+                    CreateWindowExW(WINDOW_EX_STYLE(0), ::windows::core::w!("SaHangTest"), ::windows::core::w!("sa-hang-test"), WS_POPUP | WS_VISIBLE, at.x, at.y, 200, 200, None, None, Some(inst.into()), None).unwrap()
                 };
                 let s = x.adopt_hwnd(Role::Body, h).unwrap();
-                // Window px: the pointer is at 100,100.
-                let (take, pass): ([ShapeRect; 1], [ShapeRect; 1]) = ([(50, 50, 100, 100)], [(0, 0, 10, 10)]);
+                let pass = x.surfaces.lock().unwrap().get(&s).map(|surf| surf.pass.clone()).expect("her body is a click-through surface");
+                assert!(!takes_pointer(h), "adopted letting the pointer through");
+                let (take, through): ([ShapeRect; 1], [ShapeRect; 1]) = ([(50, 50, 100, 100)], [(0, 0, 10, 10)]);
                 let pump = || unsafe {
                     let mut m = MSG::default();
                     while PeekMessageW(&mut m, None, 0, 0, PM_REMOVE).as_bool() {
@@ -1372,32 +1685,173 @@ mod tests {
                         DispatchMessageW(&m);
                     }
                 };
-                let (t0, before) = (Instant::now(), PASSES.load(Ordering::Relaxed));
-                while t0.elapsed() < Duration::from_secs(3) {
+                let posts = || pass.posts.load(Ordering::SeqCst);
+                let in_flight = || pass.posts.load(Ordering::SeqCst) - pass.wakes.load(Ordering::SeqCst);
+                // Busy, not pumping, until the poller posts (at most 2 s).
+                let busy_until_posted = |before: usize| {
+                    let t = Instant::now();
+                    while posts() == before && t.elapsed() < Duration::from_secs(2) {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    posts() > before
+                };
+
+                // 1. Frames that change her region under the pointer: each one posts before the pump.
+                let (t0, mut rounds, mut posted_busy) = (Instant::now(), 0, 0);
+                while t0.elapsed() < Duration::from_secs(2) {
+                    let before = posts();
                     x.set_input(s, &take);
                     std::thread::sleep(Duration::from_millis(25));
-                    x.set_input(s, &pass);
+                    x.set_input(s, &through);
                     std::thread::sleep(Duration::from_millis(25));
+                    posted_busy += usize::from(posts() > before);
+                    assert!(in_flight() <= 1, "{} wake-ups in flight: not coalesced", in_flight());
+                    rounds += 1;
                     pump();
-                    tx.send(None).ok();
+                    tx.send(true).ok();
                 }
-                std::thread::sleep(Duration::from_millis(50));
+                assert!(rounds >= 10 && posted_busy * 2 >= rounds, "the poller posted while her UI thread was busy in {posted_busy} of {rounds} frames");
+
+                // 2. The real style ends as last wanted, both ways.
+                for (want_take, region) in [(true, &take), (false, &through), (true, &take)] {
+                    let before = posts();
+                    x.set_input(s, region);
+                    assert!(busy_until_posted(before) || takes_pointer(h) == want_take, "no wake-up for take={want_take} in 2 s");
+                    pump();
+                    std::thread::sleep(Duration::from_millis(30));
+                    pump();
+                    assert_eq!(takes_pointer(h), want_take, "her real style after a wanted take={want_take}");
+                    assert_eq!(in_flight(), 0);
+                    tx.send(true).ok();
+                }
+
+                // 3. Changed behind the poller's back (it wants take): put back within a few ticks.
+                unsafe { SetWindowLongPtrW(h, GWL_EXSTYLE, (ex_style(h) | WS_EX_TRANSPARENT.0) as isize) };
+                assert!(!takes_pointer(h));
+                let before = posts();
+                assert!(busy_until_posted(before), "a style out of step with the wanted state isn't posted again");
                 pump();
-                tx.send(Some(PASSES.load(Ordering::Relaxed) - before)).ok();
+                assert!(takes_pointer(h), "put back as wanted");
+                tx.send(true).ok();
                 unsafe {
                     let _ = DestroyWindow(h);
                 }
+                tx.send(false).ok();
             })
             .unwrap();
         loop {
             match rx.recv_timeout(Duration::from_secs(5)) {
-                Ok(None) => {}
-                Ok(Some(n)) => {
-                    assert!(n >= 20, "only {n} click-through flips applied in 3 s: the poller didn't flip (no desktop?)");
-                    return;
-                }
+                Ok(true) => {}
+                Ok(false) => return,
                 Err(RecvTimeoutError::Timeout) => panic!("her UI thread stopped for 5 s: it and the input poller wait on each other"),
                 Err(RecvTimeoutError::Disconnected) => panic!("her UI thread ended early (see its panic above)"),
+            }
+        }
+    }
+
+    /// Windows takes her out of the topmost band now and then, her `WS_EX_TOPMOST` bit kept
+    /// (Haseeb's box, 2026-11-19): plain windows end up over her. Here another thread's plain
+    /// window is put over her that way, then again across a hide and show of hers. The poller
+    /// must see it (no pointer, no hook) and her UI thread put her back on top.
+    #[test]
+    fn she_takes_her_place_on_top_back() {
+        use std::sync::mpsc::channel;
+        use std::time::Instant;
+        let (ox, oy) = origin();
+        // Another app's plain window, on a thread of its own that pumps (cross-thread calls on it
+        // come back).
+        let (wtx, wrx) = channel::<isize>();
+        let (stop_tx, stop_rx) = channel::<()>();
+        let other = std::thread::spawn(move || unsafe {
+            let inst = ::windows::Win32::System::LibraryLoader::GetModuleHandleW(None).unwrap();
+            let wc = WNDCLASSW { lpfnWndProc: Some(plain_proc), hInstance: inst.into(), lpszClassName: ::windows::core::w!("SaZOther"), ..Default::default() };
+            RegisterClassW(&wc);
+            let h = CreateWindowExW(WS_EX_NOACTIVATE, ::windows::core::w!("SaZOther"), ::windows::core::w!("sa-z-other"), WS_POPUP | WS_VISIBLE, ox + 300, oy + 300, 300, 300, None, None, Some(inst.into()), None).unwrap();
+            wtx.send(h.0 as isize).unwrap();
+            let mut m = MSG::default();
+            while stop_rx.try_recv().is_err() {
+                while PeekMessageW(&mut m, None, 0, 0, PM_REMOVE).as_bool() {
+                    let _ = TranslateMessage(&m);
+                    DispatchMessageW(&m);
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let _ = DestroyWindow(h);
+        });
+        let plain = HWND(wrx.recv().unwrap() as *mut _);
+        let x = Win32::connect().unwrap();
+        x.start_input_poller_with(Box::new(|| None));
+        let body = unsafe {
+            let inst = ::windows::Win32::System::LibraryLoader::GetModuleHandleW(None).unwrap();
+            let wc = WNDCLASSW { lpfnWndProc: Some(plain_proc), hInstance: inst.into(), lpszClassName: ::windows::core::w!("SaZBody"), ..Default::default() };
+            RegisterClassW(&wc);
+            CreateWindowExW(WINDOW_EX_STYLE(0), ::windows::core::w!("SaZBody"), ::windows::core::w!("sa-z-body"), WS_POPUP | WS_VISIBLE, ox + 350, oy + 350, 200, 200, None, None, Some(inst.into()), None).unwrap()
+        };
+        let s = x.adopt_hwnd(Role::Body, body).unwrap();
+        let pass = x.surfaces.lock().unwrap().get(&s).map(|surf| surf.pass.clone()).expect("her body is a click-through surface");
+        let pump = || unsafe {
+            let mut m = MSG::default();
+            while PeekMessageW(&mut m, None, 0, 0, PM_REMOVE).as_bool() {
+                let _ = TranslateMessage(&m);
+                DispatchMessageW(&m);
+            }
+        };
+        let on_top = || under_plain_window(body, |w| x.mine.lock().is_ok_and(|m| m.contains(&w)), &HashSet::new()).is_none();
+        pump();
+        assert!(on_top(), "adopted on top of the plain window");
+        for case in ["out of the band, her bit kept", "the same across a hide and show"] {
+            let cycle = case.contains("hide");
+            unsafe {
+                if cycle {
+                    let _ = ShowWindow(body, SW_HIDE);
+                }
+                let keep = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
+                SetWindowPos(body, Some(HWND_NOTOPMOST), 0, 0, 0, 0, keep).unwrap();
+                SetWindowPos(plain, Some(HWND_TOP), 0, 0, 0, 0, keep).unwrap();
+                SetWindowLongPtrW(body, GWL_EXSTYLE, (ex_style(body) | WS_EX_TOPMOST.0) as isize);
+                if cycle {
+                    let _ = ShowWindow(body, SW_SHOWNA);
+                }
+            }
+            assert!(!on_top(), "{case}: the plain window isn't over her: the test proves nothing");
+            let (t0, before) = (Instant::now(), pass.tops.load(Ordering::SeqCst));
+            while !on_top() {
+                assert!(t0.elapsed() < Duration::from_secs(3), "{case}: still under a plain window after 3 s");
+                std::thread::sleep(Duration::from_millis(10));
+                pump();
+            }
+            assert!(pass.tops.load(Ordering::SeqCst) > before, "{case}: put back, but not by her");
+            assert_ne!(ex_style(body) & WS_EX_TOPMOST.0, 0, "{case}: topmost again");
+        }
+        stop_tx.send(()).ok();
+        other.join().unwrap();
+        unsafe {
+            let _ = DestroyWindow(body);
+        }
+    }
+
+    /// Start's host is a monitor-sized window of the shell's: never a fullscreen app (on
+    /// Haseeb's box she hid each time he opened Start). A plain monitor-sized window is one; a
+    /// tool window (an overlay) isn't.
+    #[test]
+    fn the_shells_ui_is_no_fullscreen_app() {
+        let x = Win32::connect().unwrap();
+        let m = monitor_info(unsafe { MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) }).expect("a monitor").monitorInfo.rcMonitor;
+        let make = |class: PCWSTR, ex: WINDOW_EX_STYLE| unsafe {
+            let inst = ::windows::Win32::System::LibraryLoader::GetModuleHandleW(None).unwrap();
+            let wc = WNDCLASSW { lpfnWndProc: Some(plain_proc), hInstance: inst.into(), lpszClassName: class, ..Default::default() };
+            RegisterClassW(&wc);
+            CreateWindowExW(ex | WS_EX_NOACTIVATE, class, ::windows::core::w!("sa-fs-test"), WS_POPUP | WS_VISIBLE, m.left, m.top, m.right - m.left, m.bottom - m.top, None, None, Some(inst.into()), None).unwrap()
+        };
+        let start = make(::windows::core::w!("XamlExplorerHostIslandWindow"), WINDOW_EX_STYLE(0));
+        let app = make(::windows::core::w!("SaFullscreenApp"), WINDOW_EX_STYLE(0));
+        let overlay = make(::windows::core::w!("SaOverlay"), WS_EX_TOOLWINDOW);
+        assert!(is_shell_ui(start) && !x.is_fullscreen(id(start)), "Start's host taken for a fullscreen app");
+        assert!(!is_shell_ui(app) && x.is_fullscreen(id(app)), "a monitor-sized app window is fullscreen");
+        assert!(!x.is_fullscreen(id(overlay)), "an overlay (tool window) taken for a fullscreen app");
+        unsafe {
+            for h in [start, app, overlay] {
+                let _ = DestroyWindow(h);
             }
         }
     }
