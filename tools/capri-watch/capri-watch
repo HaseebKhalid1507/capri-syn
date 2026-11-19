@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """capri-watch: event hooks that wake Capri.
 
-One small poller per machine. It watches GitHub (bella only), the local Synaps daemon's
-sessions, failed systemd units, free disk, the Jawz backup and a few opt-in extras, and
+One small poller per machine. It watches the local Synaps daemon's sessions, failed systemd
+units, free disk, and (when configured) GitHub, a backup unit and a few opt-in extras, and
 delivers each new event into Capri's session as ONE short framed line:
 
     [watch] <event>@<host>: <what> (<id/link>)
 
-bella delivers with `synaps send --session capri --source watch:<event> -- <line>`; avante runs
-the same command on bella over ssh (BatchMode). The transport is pluggable ([deliver] transport
-= "local" | "ssh" | "command"), so agent-comms can replace ssh later.
+Its role comes from its config file only, never from the hostname. role "local" (the default):
+Capri lives on this machine; it delivers with `synaps send --session capri --source
+watch:<event> -- <line>` and watches GitHub. role "remote": any other machine; it runs that same
+command on Capri's machine over ssh ([deliver] ssh_host, BatchMode) and leaves GitHub to the local
+one. The transport is pluggable ([deliver] transport = "local" | "ssh" | "command").
 
 Safeguards: dedupe (an event fires once per state change), burst bundling (one digest per
 `bundle_s` window), a wake cap per hour, her DND and music state (read from the avatar's control
@@ -33,25 +35,25 @@ except ImportError:  # Python < 3.11
 
 # ─── config ────────────────────────────────────────────────────────────────────────────────
 
-REPOS = ["HaseebKhalid1507/capri-syn", "HaseebKhalid1507/SynapsCLI", "HaseebKhalid1507/Axon",
-         "HaseebKhalid1507/synaps-desk", "HaseebKhalid1507/axel", "HaseebKhalid1507/agent-comms"]
+ROLES = ("local", "remote")
+OLD_ROLES = ("", "bella", "avante")   # before v1: by hostname, or the developer's two machines
 
 DEFAULTS = {
-    "role": "",            # "bella" (Capri's machine: GitHub + local delivery) | "avante" (ssh delivery); "" = by hostname
-    "host": "",            # the name in event lines; "" = the role
+    "role": "local",       # "local" (Capri's machine: GitHub + local delivery) | "remote" (another machine: ssh delivery)
+    "host": "",            # the name in event lines (a label only); "" = this machine's short hostname
     "poll_s": 10,          # local sources (sessions, units, disk, ...)
-    "synaps": "",          # this machine's synaps CLI for `daemon sessions --json`; "" = synaps (bella) / synaps-dev (avante)
+    "synaps": "synaps",    # this machine's synaps CLI for `daemon sessions --json`
     "profile": "",         # its --profile
     "synaps_home": "~/.synaps-cli",
     "ignore_sessions": ["capri"],   # names / ids / id prefixes never reported: her own session (no loops)
     "state_file": "~/.local/state/capri-watch/state.json",
-    "github": {"enabled": None, "poll_s": 120, "repos": REPOS},   # enabled None = on for role bella only
+    "github": {"enabled": None, "poll_s": 120, "repos": []},   # enabled None = on for role local only; repos "owner/name"
     "deliver": {
-        "transport": "",   # "local" | "ssh" | "command"; "" = local (bella) / ssh (avante)
+        "transport": "",   # "local" | "ssh" | "command"; "" = local (role local) / ssh (role remote)
         "session": "capri",
         "synaps": "synaps",
         "profile": "",
-        "ssh_host": "bella",
+        "ssh_host": "",    # transport ssh: Capri's machine (an ssh host or alias); required there
         "connect_timeout_s": 5,
         "command": [],     # transport "command": argv with {source} {text} {session}
     },
@@ -72,7 +74,9 @@ DEFAULTS = {
         "unit_failed": {"enabled": True, "system": True, "user": True, "ignore_transient": True,
                         "ignore": ["dunst*", "xdg-document-portal*", "xdg-desktop-portal*", "run-*", "probe-*"]},
         "disk_low": {"enabled": True, "paths": ["/", "/home"], "min_free_pct": 10, "min_free_gb": 20},
-        "backup_failed": {"enabled": True, "unit": "jawz-backup-local.service", "log": "~/Jawz/logs/backup-local.log"},
+        # backup_failed watches nothing until `unit` names a systemd --user unit; `log` (optional): ERROR lines in its
+        # last run count too, the run starting at the last `log_start` line ("" = the whole tail)
+        "backup_failed": {"enabled": True, "unit": "", "log": "", "log_start": ""},
         # OFF (implemented)
         "pr_opened": {"enabled": False},
         "pr_merged": {"enabled": False},
@@ -81,7 +85,7 @@ DEFAULTS = {
         "release": {"enabled": False},
         "battery_low": {"enabled": False, "below_pct": 15},
         "gpu_hot": {"enabled": False, "above_c": 85},
-        "calendar": {"enabled": False, "lead_min": 10, "db": "~/Jawz/data/calendar.db"},
+        "calendar": {"enabled": False, "lead_min": 10, "db": ""},   # db: a SQLite calendar (see docs/WATCH.md)
     },
 }
 
@@ -109,20 +113,29 @@ def load_config(path=None, text=None, hostname=None):
             raise RuntimeError("Python 3.11+ (tomllib) is needed to read watch.toml")
         over = tomllib.loads(text)
     cfg = merge(DEFAULTS, over)
-    hn = (hostname or socket.gethostname()).split(".")[0].lower()
-    if not cfg["role"]:
-        cfg["role"] = "bella" if hn in ("bella", "parabellum") else "avante"
-    if cfg["role"] not in ("bella", "avante"):
-        raise ValueError('role must be "bella" or "avante"')
-    bella = cfg["role"] == "bella"
-    cfg["host"] = cfg["host"] or cfg["role"]
-    cfg["synaps"] = cfg["synaps"] or ("synaps" if bella else "synaps-dev")
+    # The role and the transport come from the file (or the defaults), never from the hostname;
+    # the hostname is only the label in event lines when `host` is empty. A copy from before v1
+    # (role "" meant "by hostname", or one of its two machine roles: OLD_ROLES) says so rather than guess.
+    if "role" in over and str(over["role"]).strip().lower() in OLD_ROLES:
+        raise ValueError(f'watch.toml predates v1 (role = {over["role"]!r}): set role = "local" (Capri\'s machine), '
+                         'or role = "remote" with [deliver] ssh_host = her machine')
+    if cfg["role"] not in ROLES:
+        raise ValueError('role must be "local" or "remote"')
+    local = cfg["role"] == "local"
+    cfg["host"] = cfg["host"] or (hostname or socket.gethostname()).split(".")[0].lower() or cfg["role"]
+    cfg["synaps"] = cfg["synaps"] or "synaps"
     if cfg["github"]["enabled"] is None:
-        cfg["github"]["enabled"] = bella
+        cfg["github"]["enabled"] = local
     d = cfg["deliver"]
-    d["transport"] = d["transport"] or ("local" if bella else "ssh")
+    d["transport"] = d["transport"] or ("local" if local else "ssh")
     if d["transport"] not in ("local", "ssh", "command"):
         raise ValueError('deliver.transport must be "local", "ssh" or "command"')
+    if d["transport"] == "ssh" and not d["ssh_host"].strip():
+        raise ValueError('deliver.ssh_host must name Capri\'s machine (transport "ssh", the default for role "remote")')
+    if d["transport"] == "local" and d["ssh_host"].strip():
+        # A forgotten role = "remote" (or a pre-v1 file): delivering here would be quiet and wrong.
+        raise ValueError(f'deliver.ssh_host is {d["ssh_host"]!r} but delivery is local: on another machine set '
+                         'role = "remote"; on Capri\'s machine leave ssh_host empty')
     if cfg["safeguards"]["music"] not in ("defer", "drop", "ignore"):
         raise ValueError('safeguards.music must be "defer", "drop" or "ignore"')
     parse_quiet(cfg["safeguards"]["quiet_hours"])
@@ -217,7 +230,7 @@ class Sys:
 
     def statvfs(self, path):
         """(filesystem id, free bytes, total bytes). The id is the mount's source device, so two btrfs
-        subvolumes of one disk (bella's / and /home: different st_dev) count as one filesystem."""
+        subvolumes of one disk (/ and /home on one btrfs: different st_dev) count as one filesystem."""
         st = os.statvfs(path)
         return self.fs_id(path), st.f_bavail * st.f_frsize, st.f_blocks * st.f_frsize
 
@@ -266,7 +279,7 @@ class Sys:
 
 def probe_avatar(sock=""):
     """Her DND, music and his presence from the avatar's control socket (read-only `brain state`
-    and `state`). Self-contained: the ssh transport runs this very function on bella."""
+    and `state`). Self-contained: the ssh transport runs this very function on Capri's machine."""
     import json, os, socket, subprocess
     sock = sock or os.path.join(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}", "capri", "synaps-avatar.sock")
 
@@ -348,7 +361,7 @@ class SshTransport(Transport):
 
     def remote_script(self, argv):
         # The argv travels base64-encoded inside a Python script on stdin: no remote shell
-        # quoting at all (bella's login shell is fish).
+        # quoting at all (her machine's login shell may be fish, or anything else).
         return REMOTE_RUN.format(b64=base64.b64encode(json.dumps(argv).encode()).decode())
 
     def send(self, source, text):
@@ -401,7 +414,16 @@ class Source:
         return self.cfg["poll_s"]
 
     def active(self):
-        return any(self.on(k) for k in self.kinds)
+        return any(self.on(k) for k in self.live())
+
+    def live(self):
+        """The events this source really watches: on, and with what it needs configured."""
+        return [k for k in self.kinds if self.on(k)]
+
+    def idle(self):
+        """Events switched on that it can't watch: what they need isn't configured (for the startup log)."""
+        live = self.live()
+        return [k for k in self.kinds if self.on(k) and k not in live]
 
     def json_of(self, argv, timeout=30):
         rc, out, err = self.sys.run(argv, timeout=timeout)
@@ -419,8 +441,15 @@ class GitHub(Source):
     def interval(self):
         return self.cfg["github"]["poll_s"]
 
-    def active(self):
-        return self.cfg["github"]["enabled"] and super().active()
+    def live(self):
+        # review_requested is a search across GitHub; the others need repos
+        if not self.cfg["github"]["enabled"]:
+            return []
+        return [k for k in super().live() if k == "review_requested" or self.cfg["github"]["repos"]]
+
+    def idle(self):
+        # GitHub off (a remote machine's default, or enabled = false) is not a missing setting
+        return super().idle() if self.cfg["github"]["enabled"] else []
 
     def me(self):
         if not self.state.get("me"):
@@ -676,7 +705,7 @@ class Units(Source):
         e = self.cfg["event"]["unit_failed"]
         out, self.unknown = [], []
         skip = set()
-        if self.on("backup_failed"):
+        if self.on("backup_failed") and self.cfg["event"]["backup_failed"]["unit"]:
             skip.add(self.cfg["event"]["backup_failed"]["unit"])   # reported by backup_failed
         seen = []
         for scope in ("system", "user"):
@@ -752,6 +781,9 @@ class Backup(Source):
     name = "backup"
     kinds = ("backup_failed",)
 
+    def live(self):
+        return super().live() if self.cfg["event"]["backup_failed"]["unit"] else []
+
     def poll(self, now):
         e = self.cfg["event"]["backup_failed"]
         rc, out, err = self.sys.run(["systemctl", "--user", "show", e["unit"], "-p", "LoadState", "-p", "ExecMainStatus",
@@ -765,9 +797,10 @@ class Backup(Source):
         status = int(p.get("ExecMainStatus") or 0) if p.get("ExecMainExitTimestamp") else 0
         errors = 0
         try:
-            text = self.sys.read(os.path.expanduser(e["log"]), tail=1 << 20)
-            last = text.rsplit("===== Local backup started =====", 1)
-            errors = sum(1 for line in (last[1] if len(last) == 2 else text).splitlines() if "ERROR" in line)
+            if e["log"]:
+                text = self.sys.read(os.path.expanduser(e["log"]), tail=1 << 20)
+                last = text.rsplit(e["log_start"], 1) if e["log_start"] else [text]
+                errors = sum(1 for line in last[-1].splitlines() if "ERROR" in line)
         except OSError:
             pass
         self.note = f"{e['unit']}: last exit {status}, {errors} ERROR line(s) in the last run"
@@ -835,6 +868,8 @@ class Gpu(Source):
 
 
 class Calendar(Source):
+    """A SQLite calendar: `events` (id, title, date, time, recurring_pattern) and `event_instances`
+    (event_id, override_title, occurrence_date, occurrence_time, status), dates and times in UTC."""
     name = "calendar"
     kinds = ("calendar",)
     SQL = ("SELECT id, title, date, time FROM events WHERE time IS NOT NULL AND (recurring_pattern IS NULL OR "
@@ -842,10 +877,13 @@ class Calendar(Source):
            "ei.occurrence_date, ei.occurrence_time FROM events e JOIN event_instances ei ON e.id = ei.event_id "
            "WHERE ei.status = 'active' AND ei.occurrence_time IS NOT NULL AND ei.occurrence_date BETWEEN ? AND ?")
 
+    def live(self):
+        return super().live() if self.cfg["event"]["calendar"]["db"] else []
+
     def poll(self, now):
         e = self.cfg["event"]["calendar"]
         db = os.path.expanduser(e["db"])
-        if not self.sys.exists(db):
+        if not e["db"] or not self.sys.exists(db):
             return []
         lead = e["lead_min"] * 60
         d0 = dt.datetime.fromtimestamp(now, dt.timezone.utc).date()
@@ -1074,9 +1112,13 @@ def main(argv=None):
         return 0
     state = {} if a.dry_run and not a.state else None
     w = Watcher(cfg, dry_run=a.dry_run, state=state, verbose=a.verbose)
-    on = [k for k in EVENTS if w.on(k)]
+    live = {k for src in w.sources for k in src.live()}
+    on = [k for k in EVENTS if k in live]
+    idle = {k for src in w.sources for k in src.idle()}
+    idle = [k for k in EVENTS if k in idle]
     log(f"role {cfg['role']} as {cfg['host']}, delivering via {cfg['deliver']['transport']} to session "
-        f"{cfg['deliver']['session']!r}{' (DRY RUN)' if a.dry_run else ''}; events on: {', '.join(on) or 'none'}")
+        f"{cfg['deliver']['session']!r}{' (DRY RUN)' if a.dry_run else ''}; events on: {', '.join(on) or 'none'}"
+        + (f"; on but not configured (no repos, unit or db): {', '.join(idle)}" if idle else ""))
     if a.once:
         w.tick(force=True)
         return 0

@@ -4,6 +4,7 @@
     python3 tools/capri-watch/test_capri_watch.py
 """
 import atexit, base64, importlib.machinery, importlib.util, io, json, os, re, shutil, sys, tempfile, unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 _loader = importlib.machinery.SourceFileLoader("capri_watch", os.path.join(HERE, "capri-watch"))
@@ -33,7 +34,7 @@ class FakeSys(cw.Sys):
         self.db = False
         # argv-prefix → (rc, stdout, stderr); the first matching prefix wins
         self.routes = {}
-        self.set("gh api user", out="haseeb\n")
+        self.set("gh api user", out="me\n")
         self.set("gh run list", out="[]")
         self.set("gh pr list -R", out="[]")
         self.set("gh release list", out="[]")
@@ -41,7 +42,7 @@ class FakeSys(cw.Sys):
         self.set("synaps daemon sessions --json", out="[]")
         self.set("systemctl list-units", out="[]")
         self.set("systemctl --user list-units", out="[]")
-        self.set("systemctl --user show jawz-backup-local.service", out="LoadState=not-found\n")
+        self.set("systemctl --user show nightly-backup.service", out="LoadState=not-found\n")
         self.set("nvidia-smi", out="0, 50\n")
 
     def set(self, prefix, out="", rc=0, err=""):
@@ -88,7 +89,7 @@ class FakeTransport(cw.Transport):
 
     def send(self, source, text):
         if not self.ok:
-            return False, "ssh: connect to host bella port 22: No route to host"
+            return False, "ssh: connect to host desk port 22: No route to host"
         self.sent.append((source, text))
         return True, ""
 
@@ -97,15 +98,21 @@ class FakeTransport(cw.Transport):
         return dict(self.state)
 
 
-def config(toml="", role="bella"):
-    c = cw.load_config(text=f'role = "{role}"\n' + toml)
+HOSTS = {"local": "desk", "remote": "box"}   # the event-line labels in these tests
+
+
+def config(toml="", role="local"):
+    head = f'role = "{role}"\nhost = "{HOSTS[role]}"\n'
+    if role == "remote" and "[deliver]" not in toml:
+        toml += '\n[deliver]\nssh_host = "desk"\n'
+    c = cw.load_config(text=head + toml)
     c["state_file"] = os.path.join(TMP, "state.json")
     return c
 
 
 class Base(unittest.TestCase):
     toml = ""
-    role = "bella"
+    role = "local"
 
     def setUp(self):
         self.sys = FakeSys()
@@ -131,7 +138,7 @@ def gh_runs(*runs):
                        for i, (wf, c, sha) in enumerate(runs)])
 
 
-def pr(n, author="haseeb", checks=(), title="feat: things"):
+def pr(n, author="me", checks=(), title="feat: things"):
     return {"number": n, "title": title, "url": f"https://github.com/o/r/pull/{n}", "author": {"login": author},
             "isDraft": False, "statusCheckRollup": [{"name": a, "conclusion": b} for a, b in checks]}
 
@@ -141,7 +148,7 @@ def pr(n, author="haseeb", checks=(), title="feat: things"):
 
 class ConfigTest(unittest.TestCase):
     def test_defaults_match_the_brief(self):
-        c = cw.load_config(text="", hostname="parabellum")
+        c = cw.load_config(text="", hostname="desk")
         on = {k for k in cw.EVENTS if c["event"][k]["enabled"]}
         self.assertEqual(on, {"ci_failed", "approval_waiting", "session_error", "unit_failed", "disk_low", "backup_failed"})
         self.assertEqual(set(cw.EVENTS) - on, {"pr_opened", "pr_merged", "review_requested", "long_turn", "release",
@@ -159,13 +166,55 @@ class ConfigTest(unittest.TestCase):
             self.assertIn(k, ex["event"], f"watch.toml documents event.{k}")
             self.assertEqual(set(ex["event"][k]), set(cw.DEFAULTS["event"][k]), f"event.{k}: same keys")
 
-    def test_role_by_host(self):
-        b = cw.load_config(text="", hostname="parabellum")
-        a = cw.load_config(text="", hostname="avante")
-        self.assertEqual((b["role"], b["host"], b["synaps"], b["deliver"]["transport"], b["github"]["enabled"]),
-                         ("bella", "bella", "synaps", "local", True))
-        self.assertEqual((a["role"], a["host"], a["synaps"], a["deliver"]["transport"], a["github"]["enabled"]),
-                         ("avante", "avante", "synaps-dev", "ssh", False), "GitHub runs on bella only")
+    def test_the_role_comes_from_the_file_only(self):
+        for hn in ("desk", "box", "laptop", "Desk.lan"):
+            c = cw.load_config(text="", hostname=hn)
+            self.assertEqual((c["role"], c["synaps"], c["deliver"]["transport"], c["github"]["enabled"]),
+                             ("local", "synaps", "local", True), f"no hostname magic ({hn})")
+            self.assertEqual(c["host"], hn.split(".")[0].lower(), "the hostname is only the label")
+        r = cw.load_config(text='role = "remote"\nhost = "box"\nsynaps = "synaps-dev"\n[deliver]\nssh_host = "desk"\n', hostname="desk")
+        self.assertEqual((r["role"], r["host"], r["synaps"], r["deliver"]["transport"], r["deliver"]["ssh_host"], r["github"]["enabled"]),
+                         ("remote", "box", "synaps-dev", "ssh", "desk", False), "GitHub runs on her machine only")
+        self.assertEqual(cw.load_config(text='[github]\nenabled = true\n', hostname="x")["github"]["repos"], [], "no repos by default")
+        for bad in ('role = "remote"\n', 'role = "desk"\n', '[deliver]\ntransport = "ssh"\n'):
+            with self.assertRaises(ValueError, msg=bad):
+                cw.load_config(text=bad, hostname="x")
+        with self.assertRaisesRegex(ValueError, '^role must be "local" or "remote"$'):
+            cw.load_config(text='role = "desk"\n', hostname="x")
+        # a pre-v1 copy (role = "" meant "by hostname", "bella"/"avante" were its roles, ssh_host was filled in):
+        # an error that says so, never a quiet local
+        for old in ('role = ""\nsynaps = ""\n[deliver]\ntransport = ""\nssh_host = "desk"\n', 'role = ""\n', 'role = "  "\n',
+                    'role = "bella"\n', 'role = "avante"\n[deliver]\nssh_host = "bella"\n', 'role = "Bella"\n'):
+            with self.assertRaisesRegex(ValueError, "predates v1", msg=old):
+                cw.load_config(text=old, hostname="x")
+        with self.assertRaisesRegex(ValueError, r"predates v1 \(role = 'avante'\)"):
+            cw.load_config(text='role = "avante"\n', hostname="x")
+
+    def test_local_delivery_with_an_ssh_host_is_an_error(self):
+        # a forgotten role = "remote" would deliver here, quietly
+        for bad in ('[deliver]\nssh_host = "desk"\n', 'role = "local"\n[deliver]\nssh_host = "desk"\n',
+                    'role = "remote"\n[deliver]\ntransport = "local"\nssh_host = "desk"\n'):
+            with self.assertRaisesRegex(ValueError, "ssh_host is 'desk' but delivery is local", msg=bad):
+                cw.load_config(text=bad, hostname="x")
+        for ok in ('role = "local"\n', 'role = "local"\n[deliver]\nssh_host = " "\n', 'role = "remote"\n[deliver]\nssh_host = "desk"\n',
+                   'role = "local"\n[deliver]\ntransport = "command"\ncommand = ["true"]\nssh_host = "desk"\n'):
+            cw.load_config(text=ok, hostname="x")
+        with open(os.path.join(HERE, "watch.toml")) as f:
+            shipped = cw.load_config(text=f.read(), hostname="x")
+        self.assertEqual((shipped["role"], shipped["deliver"]["transport"], shipped["deliver"]["ssh_host"]), ("local", "local", ""),
+                         "the shipped template is a working local setup")
+
+    def test_no_personal_leftovers_in_the_defaults(self):
+        with open(os.path.join(HERE, "watch.toml")) as f:
+            shipped = f.read().lower()
+        with open(os.path.join(HERE, "capri-watch")) as f:
+            # OLD_ROLES is the one exception: pre-v1 role values, recognized only to say the file is old
+            code = "".join(l for l in f if not l.startswith("OLD_ROLES = ")).lower()
+        for word in ("haseeb", "bella", "avante", "parabellum", "jawz", "/home/"):
+            self.assertNotIn(word, json.dumps(cw.DEFAULTS).lower())
+            self.assertNotIn(word, shipped, f"watch.toml names {word}")
+            self.assertNotIn(word, code, f"capri-watch names {word}")
+        self.assertNotIn("bella", " ".join(cw.ROLES), "no machine is a role")
 
     def test_overrides_and_errors(self):
         c = config('[event.pr_merged]\nenabled = true\n[safeguards]\nmax_per_hour = 2\n')
@@ -189,18 +238,20 @@ class ConfigTest(unittest.TestCase):
 
 
 class GitHubTest(Base):
+    toml = '[github]\nrepos = ["o/capri-syn", "o/Axon"]\n'
+
     def test_ci_failed_on_main_fires_once_per_state_change(self):
-        self.sys.set("gh run list -R HaseebKhalid1507/capri-syn", out=gh_runs(("ci", "failure", "09b138d")))
+        self.sys.set("gh run list -R o/capri-syn", out=gh_runs(("ci", "failure", "09b138d")))
         self.tick()
         self.assertEqual(len(self.tr.sent), 1)
         src, text = self.tr.sent[0]
         self.assertEqual(src, "watch:ci_failed")
-        self.assertEqual(text, "[watch] ci_failed@bella: capri-syn main: ci failed on 09b138d (https://github.com/x/runs/0)")
+        self.assertEqual(text, "[watch] ci_failed@desk: capri-syn main: ci failed on 09b138d (https://github.com/x/runs/0)")
         self.tick(200)
         self.assertEqual(len(self.tr.sent), 1, "still failing: no second wake")
-        self.sys.set("gh run list -R HaseebKhalid1507/capri-syn", out=gh_runs(("ci", "success", "aaaaaaa")))
+        self.sys.set("gh run list -R o/capri-syn", out=gh_runs(("ci", "success", "aaaaaaa")))
         self.tick(200)
-        self.sys.set("gh run list -R HaseebKhalid1507/capri-syn", out=gh_runs(("ci", "failure", "bbbbbbb")))
+        self.sys.set("gh run list -R o/capri-syn", out=gh_runs(("ci", "failure", "bbbbbbb")))
         self.tick(200)
         self.assertEqual(len(self.tr.sent), 2, "fixed, then broken again: fires again")
         self.assertIn("on bbbbbbb", self.tr.sent[1][1])
@@ -216,33 +267,84 @@ class GitHubTest(Base):
         self.assertEqual(self.tr.sent, [], "latest ci passed, cancelled isn't a failure, PR-event runs are ignored")
 
     def test_ci_failed_on_my_prs_only(self):
-        self.sys.set("gh pr list -R HaseebKhalid1507/Axon --state open",
+        self.sys.set("gh pr list -R o/Axon --state open",
                      out=json.dumps([pr(26, checks=[("test", "SUCCESS"), ("windows", "FAILURE")]),
                                      pr(27, author="dependabot", checks=[("test", "FAILURE")])]))
         self.tick()
-        self.assertEqual(self.texts(), ['[watch] ci_failed@bella: Axon #26 "feat: things": windows failed (https://github.com/o/r/pull/26)'])
+        self.assertEqual(self.texts(), ['[watch] ci_failed@desk: Axon #26 "feat: things": windows failed (https://github.com/o/r/pull/26)'])
 
     def test_pr_events_are_off_by_default(self):
-        self.sys.set("gh pr list -R HaseebKhalid1507/Axon --state open", out=json.dumps([pr(1)]))
+        self.sys.set("gh pr list -R o/Axon --state open", out=json.dumps([pr(1)]))
         self.tick()
-        self.sys.set("gh pr list -R HaseebKhalid1507/Axon --state open", out=json.dumps([pr(1), pr(2)]))
+        self.sys.set("gh pr list -R o/Axon --state open", out=json.dumps([pr(1), pr(2)]))
         self.tick(200)
         self.assertEqual(self.tr.sent, [])
         self.assertFalse(any("--state merged" in " ".join(a) or "release" in a for a, _ in self.sys.calls),
                          "disabled events cost no API calls")
 
-    def test_github_off_on_avante(self):
-        cfg = config("", role="avante")
+    def test_github_off_on_a_remote_machine(self):
+        cfg = config(self.toml, role="remote")
         w = cw.Watcher(cfg, self.sys, FakeTransport(cfg, self.sys), state={})
         w.tick(T0, force=True)
         self.assertFalse(any(a[0] == "gh" for a, _ in self.sys.calls))
 
+    def test_what_runs_needs_what_it_watches(self):
+        def live(toml, role="local"):
+            cfg = config(toml, role)
+            w = cw.Watcher(cfg, self.sys, FakeTransport(cfg, self.sys), state={})
+            return {src.name: src.live() for src in w.sources if src.live()}
+        bare = live("")
+        self.assertNotIn("github", bare, "no repos: ci_failed watches nothing")
+        self.assertNotIn("backup", bare, "no unit: backup_failed watches nothing")
+        self.assertEqual(live(self.toml)["github"], ["ci_failed"])
+        self.assertEqual(live('[event.review_requested]\nenabled = true\n')["github"], ["review_requested"],
+                         "reviews are a search across GitHub: no repos needed")
+        self.assertNotIn("github", live(self.toml, role="remote"))
+        self.assertEqual(live('[event.backup_failed]\nunit = "b.service"\n')["backup"], ["backup_failed"])
+        self.assertNotIn("calendar", live('[event.calendar]\nenabled = true\n'), "no db: nothing to read")
+
+    def test_the_startup_log_names_only_what_runs(self):
+        path = os.path.join(TMP, "startup.toml")
+        with open(path, "w") as f:
+            f.write('role = "local"\nhost = "desk"\n')
+        logged = []
+        with mock.patch.object(cw.Watcher, "tick", lambda *a, **k: None), mock.patch.object(cw, "log", logged.append):
+            self.assertEqual(cw.main(["--config", path, "--dry-run", "--once"]), 0)
+        line = logged[0]
+        on = line.split("events on: ")[1].split(";")[0].split(", ")
+        self.assertIn("approval_waiting", on)
+        self.assertNotIn("ci_failed", on, "no repos")
+        self.assertNotIn("backup_failed", on, "no unit")
+        self.assertIn("on but not configured (no repos, unit or db): ci_failed, backup_failed", line)
+
+    def test_the_startup_log_leaves_github_out_when_it_is_off(self):
+        # GitHub off (a remote machine's default, or enabled = false) is not "not configured"
+        path = os.path.join(TMP, "startup-off.toml")
+        for text in ('role = "remote"\nhost = "box"\n[deliver]\nssh_host = "desk"\n',
+                     'role = "local"\nhost = "desk"\n[github]\nenabled = false\n'):
+            with open(path, "w") as f:
+                f.write(text)
+            logged = []
+            with mock.patch.object(cw.Watcher, "tick", lambda *a, **k: None), mock.patch.object(cw, "log", logged.append):
+                self.assertEqual(cw.main(["--config", path, "--dry-run", "--once"]), 0)
+            line = logged[0]
+            self.assertIn("on but not configured (no repos, unit or db): backup_failed", line, text)
+            for k in cw.GitHub.kinds:
+                self.assertNotIn(k, line, f"{k}: GitHub is off, not unconfigured ({text!r})")
+        # switched on with no repos: still named
+        with open(path, "w") as f:
+            f.write('role = "remote"\nhost = "box"\n[deliver]\nssh_host = "desk"\n[github]\nenabled = true\n')
+        logged = []
+        with mock.patch.object(cw.Watcher, "tick", lambda *a, **k: None), mock.patch.object(cw, "log", logged.append):
+            cw.main(["--config", path, "--dry-run", "--once"])
+        self.assertIn("on but not configured (no repos, unit or db): ci_failed, backup_failed", logged[0])
+
     def test_a_failed_repo_keeps_its_conditions(self):
-        self.sys.set("gh run list -R HaseebKhalid1507/capri-syn", out=gh_runs(("ci", "failure", "1234567")))
+        self.sys.set("gh run list -R o/capri-syn", out=gh_runs(("ci", "failure", "1234567")))
         self.tick()
-        self.sys.set("gh run list -R HaseebKhalid1507/capri-syn", rc=1, err="HTTP 502")
+        self.sys.set("gh run list -R o/capri-syn", rc=1, err="HTTP 502")
         self.tick(200)
-        self.sys.set("gh run list -R HaseebKhalid1507/capri-syn", out=gh_runs(("ci", "failure", "1234567")))
+        self.sys.set("gh run list -R o/capri-syn", out=gh_runs(("ci", "failure", "1234567")))
         self.tick(200)
         self.assertEqual(len(self.tr.sent), 1, "a GitHub hiccup is not a state change")
 
@@ -253,12 +355,12 @@ class GitHubOptInTest(Base):
 
     def test_opened_merged_release_seed_then_fire(self):
         self.sys.set("gh pr list -R o/r --state open", out=json.dumps([pr(1)]))
-        self.sys.set("gh pr list -R o/r --state merged", out=json.dumps([{"number": 5, "title": "old", "url": "u5", "mergedBy": {"login": "haseeb"}}]))
+        self.sys.set("gh pr list -R o/r --state merged", out=json.dumps([{"number": 5, "title": "old", "url": "u5", "mergedBy": {"login": "me"}}]))
         self.sys.set("gh release list -R o/r", out=json.dumps([{"tagName": "v0.1.0", "isDraft": False}]))
         self.tick()
         self.assertEqual(self.tr.sent, [], "the first pass only learns what already exists")
         self.sys.set("gh pr list -R o/r --state open", out=json.dumps([pr(1), pr(2, author="spike", title="x" * 80)]))
-        self.sys.set("gh pr list -R o/r --state merged", out=json.dumps([{"number": 6, "title": "fix", "url": "u6", "mergedBy": {"login": "haseeb"}},
+        self.sys.set("gh pr list -R o/r --state merged", out=json.dumps([{"number": 6, "title": "fix", "url": "u6", "mergedBy": {"login": "me"}},
                                                                          {"number": 5, "title": "old", "url": "u5"}]))
         self.sys.set("gh release list -R o/r", out=json.dumps([{"tagName": "v0.2.0", "isDraft": False, "isPrerelease": True},
                                                                {"tagName": "v0.1.0", "isDraft": False}]))
@@ -267,11 +369,11 @@ class GitHubOptInTest(Base):
         self.tick(200)
         self.assertEqual(self.tr.sent[0][0], "watch:digest")
         text = self.tr.sent[0][1]
-        self.assertTrue(text.startswith("[watch] digest@bella: 4 events\n"), text)
-        self.assertIn(f'[watch] pr_opened@bella: r #2 "{"x" * 49}…" opened by spike (https://github.com/o/r/pull/2)', text)
-        self.assertIn('[watch] pr_merged@bella: r #6 "fix" merged by haseeb (u6)', text)
-        self.assertIn("[watch] release@bella: r v0.2.0 published (pre-release) (https://github.com/o/r/releases/tag/v0.2.0)", text)
-        self.assertIn('[watch] review_requested@bella: r #9 "review me" wants your review (u9)', text)
+        self.assertTrue(text.startswith("[watch] digest@desk: 4 events\n"), text)
+        self.assertIn(f'[watch] pr_opened@desk: r #2 "{"x" * 49}…" opened by spike (https://github.com/o/r/pull/2)', text)
+        self.assertIn('[watch] pr_merged@desk: r #6 "fix" merged by me (u6)', text)
+        self.assertIn("[watch] release@desk: r v0.2.0 published (pre-release) (https://github.com/o/r/releases/tag/v0.2.0)", text)
+        self.assertIn('[watch] review_requested@desk: r #9 "review me" wants your review (u9)', text)
         self.tick(200)
         self.assertEqual(len(self.tr.sent), 1, "one-shots fire once")
 
@@ -301,7 +403,7 @@ class DaemonTest(Base):
         self.assertEqual(self.tr.sent, [], "20 s: not yet")
         self.tick(15)
         self.tick(16)   # the bundle window
-        self.assertEqual(self.texts(), ["[watch] approval_waiting@bella: session axon is waiting on an approval (20261114-000000-aaaa)"])
+        self.assertEqual(self.texts(), ["[watch] approval_waiting@desk: session axon is waiting on an approval (20261114-000000-aaaa)"])
         self.tick(60)
         self.assertEqual(len(self.tr.sent), 1, "same prompt: once")
         self.sessions(session(awaiting=0, busy=True))
@@ -335,7 +437,7 @@ class DaemonTest(Base):
             f"{ts(end - 2)}  WARN ThreadId(77) API request failed (not retried) status=503 request_id=\"req\" error=Anthropic server error\n")
         self.tick(10)
         self.tick(16)
-        self.assertEqual(self.texts(), ["[watch] session_error@bella: session axon: turn failed (HTTP 503) (20261114-000000-aaaa)"])
+        self.assertEqual(self.texts(), ["[watch] session_error@desk: session axon: turn failed (HTTP 503) (20261114-000000-aaaa)"])
         self.assertNotIn("sk-ant", self.lines())
 
     def test_a_turn_that_replied_is_not_an_error(self):
@@ -354,7 +456,7 @@ class DaemonTest(Base):
         self.journal("user", [{"type": "tool_result", "tool_use_id": "t", "content": "ok"}])
         self.tick(10)
         self.tick(16)
-        self.assertEqual(self.texts(), ["[watch] session_error@bella: session axon: turn ended without a reply (error or abort) (20261114-000000-aaaa)"])
+        self.assertEqual(self.texts(), ["[watch] session_error@desk: session axon: turn ended without a reply (error or abort) (20261114-000000-aaaa)"])
 
     def test_a_short_turn_between_two_polls_is_still_checked(self):
         self.sessions(session(busy=False, since=T0 - 50, messages=8))
@@ -432,7 +534,7 @@ class LongTurnTest(DaemonTest.__base__):
     def test_a_long_turn_while_he_is_away(self):
         self.tr.state.update(present=False)
         self.run_turn(14)
-        self.assertEqual(self.texts(), ["[watch] long_turn@bella: session axon finished a turn after 14 min (20261114-000000-aaaa)"])
+        self.assertEqual(self.texts(), ["[watch] long_turn@desk: session axon finished a turn after 14 min (20261114-000000-aaaa)"])
 
     def test_not_when_he_is_here(self):
         self.run_turn(14)
@@ -447,18 +549,20 @@ class LongTurnTest(DaemonTest.__base__):
 
 
 class UnitsTest(Base):
+    toml = '[event.backup_failed]\nunit = "nightly-backup.service"\n'   # its failures are backup_failed's, not unit_failed's
+
     def test_failed_units_with_the_noise_filter(self):
         self.sys.set("systemctl list-units", out=json.dumps([{"unit": "axon-nightly.service"}, {"unit": "xdg-document-portal.service"}]))
         self.sys.set("systemctl --user list-units", out=json.dumps([{"unit": u} for u in (
-            "dunst.service", "jawz-backup-local.service", "probe-deletion-6.service", "proof-x.service",
+            "dunst.service", "nightly-backup.service", "probe-deletion-6.service", "proof-x.service",
             "run-u12.service", "wallpaper-rotate.service", "xdg-desktop-portal-gtk.service")]))
-        self.sys.set("systemctl --user show -p Id", out="Id=jawz-backup-local.service\nTransient=no\n\nId=proof-x.service\nTransient=yes\n\n"
+        self.sys.set("systemctl --user show -p Id", out="Id=nightly-backup.service\nTransient=no\n\nId=proof-x.service\nTransient=yes\n\n"
                                                          "Id=wallpaper-rotate.service\nTransient=no\n")
         self.tick()
         self.tick(16)
-        self.assertEqual(self.texts(), ["[watch] digest@bella: 2 events\n"
-                                        "[watch] unit_failed@bella: axon-nightly.service failed (system)\n"
-                                        "[watch] unit_failed@bella: wallpaper-rotate.service failed (user)"])
+        self.assertEqual(self.texts(), ["[watch] digest@desk: 2 events\n"
+                                        "[watch] unit_failed@desk: axon-nightly.service failed (system)\n"
+                                        "[watch] unit_failed@desk: wallpaper-rotate.service failed (user)"])
         self.tick(100)
         self.assertEqual(len(self.tr.sent), 1)
 
@@ -468,7 +572,7 @@ class UnitsTest(Base):
         self.sys.set("systemctl list-units", out=json.dumps([{"unit": "axon-nightly.service"}, {"unit": "dunst.service"}]))
         w = cw.Watcher(cfg, self.sys, tr, state={})
         w.tick(T0, force=True)
-        self.assertEqual(tr.sent, [("watch:unit_failed", "[watch] unit_failed@bella: dunst.service failed (system)")])
+        self.assertEqual(tr.sent, [("watch:unit_failed", "[watch] unit_failed@desk: dunst.service failed (system)")])
         self.assertFalse(any(a[:3] == ["systemctl", "--user", "list-units"] for a, _ in self.sys.calls))
 
 
@@ -476,12 +580,12 @@ class DiskTest(Base):
     def test_low_by_percent_or_by_gb_on_one_device_once(self):
         self.sys.disks = {"/": (7, 90e9, 1000e9), "/home": (7, 90e9, 1000e9)}
         self.tick()
-        self.assertEqual(self.texts(), ["[watch] disk_low@bella: / and /home low on space: 90.0 GB free (9 %)"])
+        self.assertEqual(self.texts(), ["[watch] disk_low@desk: / and /home low on space: 90.0 GB free (9 %)"])
         self.sys.disks = {"/": (1, 19e9, 100e9), "/home": (2, 500e9, 1000e9)}
         self.setUp()
         self.sys.disks = {"/": (1, 19e9, 100e9), "/home": (2, 500e9, 1000e9)}
         self.tick()
-        self.assertEqual(self.texts(), ["[watch] disk_low@bella: / low on space: 19.0 GB free (19 %)"])
+        self.assertEqual(self.texts(), ["[watch] disk_low@desk: / low on space: 19.0 GB free (19 %)"])
 
     def test_hysteresis(self):
         self.sys.disks = {"/": (1, 19e9, 100e9), "/home": (1, 19e9, 100e9)}
@@ -498,9 +602,10 @@ class DiskTest(Base):
 
 
 class BackupTest(Base):
-    role = "avante"
-    LOG = os.path.expanduser("~/Jawz/logs/backup-local.log")
-    SHOW = "systemctl --user show jawz-backup-local.service"
+    role = "remote"
+    toml = '[event.backup_failed]\nunit = "nightly-backup.service"\nlog = "~/logs/backup.log"\nlog_start = "===== Local backup started ====="\n'
+    LOG = os.path.expanduser("~/logs/backup.log")
+    SHOW = "systemctl --user show nightly-backup.service"
 
     def test_exit_code_and_error_lines(self):
         self.sys.set(self.SHOW, out="LoadState=loaded\nActiveState=failed\nExecMainStatus=2\nExecMainExitTimestamp=Sat 2026-11-14 04:10:32 EST\n")
@@ -508,7 +613,7 @@ class BackupTest(Base):
                                     "[y] ===== Local backup started =====\n[y] ERROR: could not snapshot brain.r8 from /secret/path\n"
                                     "[y] ERROR: snapshot of axel-v2-brain.r8 failed\n[y] ERROR: brains NOT in this backup\n")
         self.tick()
-        self.assertEqual(self.texts(), ["[watch] backup_failed@avante: jawz-backup-local failed: exited 2, 3 ERROR lines in its last run "
+        self.assertEqual(self.texts(), ["[watch] backup_failed@box: nightly-backup failed: exited 2, 3 ERROR lines in its last run "
                                         "(Sat 2026-11-14 04:10:32 EST)"])
         self.assertNotIn("/secret/path", self.lines(), "no log content in the line")
 
@@ -525,15 +630,29 @@ class BackupTest(Base):
         self.tick()
         self.assertEqual(self.tr.sent, [])
 
+    def test_no_unit_no_backup_watch(self):
+        cfg = config("", role="remote")
+        w = cw.Watcher(cfg, self.sys, FakeTransport(cfg, self.sys), state={})
+        w.tick(T0, force=True)
+        self.assertFalse(any("show" in a and "nightly-backup.service" in a for a, _ in self.sys.calls), "no unit named: nothing watched")
+
+    def test_without_log_start_the_whole_tail_counts(self):
+        cfg = config('[event.backup_failed]\nunit = "nightly-backup.service"\nlog = "~/logs/backup.log"\n', role="remote")
+        tr = FakeTransport(cfg, self.sys)
+        self.sys.set(self.SHOW, out="LoadState=loaded\nExecMainStatus=0\nExecMainExitTimestamp=Sun\n")
+        self.sys.files[self.LOG] = "[x] ERROR: one\n[y] ok\n[z] ERROR: two\n"
+        cw.Watcher(cfg, self.sys, tr, state={}).tick(T0, force=True)
+        self.assertEqual([t for _, t in tr.sent], ["[watch] backup_failed@box: nightly-backup failed: 2 ERROR lines in its last run (Sun)"])
+
     def test_the_backup_unit_is_not_reported_twice(self):
         self.sys.set(self.SHOW, out="LoadState=loaded\nExecMainStatus=2\nExecMainExitTimestamp=Sat\n")
-        self.sys.set("systemctl --user list-units", out=json.dumps([{"unit": "jawz-backup-local.service"}]))
+        self.sys.set("systemctl --user list-units", out=json.dumps([{"unit": "nightly-backup.service"}]))
         self.tick()
         self.assertEqual([s for s, _ in self.tr.sent], ["watch:backup_failed"])
 
 
 class ExtrasTest(Base):
-    toml = "[event.battery_low]\nenabled = true\n[event.gpu_hot]\nenabled = true\n[event.calendar]\nenabled = true\n"
+    toml = "[event.battery_low]\nenabled = true\n[event.gpu_hot]\nenabled = true\n[event.calendar]\nenabled = true\ndb = \"~/cal.db\"\n"
 
     def test_battery_gpu_calendar(self):
         self.sys.files["/sys/class/power_supply/BAT1/capacity"] = "12\n"
@@ -546,15 +665,15 @@ class ExtrasTest(Base):
                          (4, "Later", later.strftime("%Y-%m-%d"), later.strftime("%H:%M:%S"))]
         self.tick()
         text = self.lines()
-        self.assertIn("[watch] battery_low@bella: battery at 12 % and discharging", text)
-        self.assertIn("[watch] gpu_hot@bella: GPU 0 at 91 °C", text)
-        self.assertIn('[watch] calendar@bella: "Dentist" starts in 8 min', text)
+        self.assertIn("[watch] battery_low@desk: battery at 12 % and discharging", text)
+        self.assertIn("[watch] gpu_hot@desk: GPU 0 at 91 °C", text)
+        self.assertIn('[watch] calendar@desk: "Dentist" starts in 8 min', text)
         self.assertNotIn("Later", text)
         self.sys.files["/sys/class/power_supply/BAT1/status"] = "Charging\n"
         self.sys.set("nvidia-smi", out="0, 88\n")   # within 5 °C: still hot (hysteresis)
         self.tick(30)
-        self.assertNotIn("battery_low:bella:BAT1", self.w.state["fired"])
-        self.assertIn("gpu_hot:bella:0", self.w.state["fired"])
+        self.assertNotIn("battery_low:desk:BAT1", self.w.state["fired"])
+        self.assertIn("gpu_hot:desk:0", self.w.state["fired"])
         self.assertEqual(len(self.tr.sent), 1)
 
     def test_all_off_costs_nothing(self):
@@ -583,14 +702,14 @@ class SafeguardTest(Base):
         self.tick(6, force=False)
         self.assertEqual(len(self.tr.sent), 1)
         self.assertEqual(self.tr.sent[0][0], "watch:digest")
-        self.assertTrue(self.tr.sent[0][1].startswith("[watch] digest@bella: 3 events"))
+        self.assertTrue(self.tr.sent[0][1].startswith("[watch] digest@desk: 3 events"))
 
     def test_digest_caps_its_length(self):
         self.fire(*[f"u{i}.service" for i in range(14)])
         self.tick()
         lines = self.tr.sent[0][1].splitlines()
         self.assertEqual(len(lines), 12)
-        self.assertEqual(lines[-1], "[watch] digest@bella: and 4 more")
+        self.assertEqual(lines[-1], "[watch] digest@desk: and 4 more")
 
     def test_wake_cap_per_hour(self):
         self.cfg["safeguards"]["max_per_hour"] = 2
@@ -704,7 +823,7 @@ class SafeguardTest(Base):
         self.fire("a.service")
         w.tick(T0, force=True)
         self.assertEqual(self.tr.sent, [])
-        self.assertIn("--- would send --source watch:unit_failed:\n[watch] unit_failed@bella: a.service failed (system)", out.getvalue())
+        self.assertIn("--- would send --source watch:unit_failed:\n[watch] unit_failed@desk: a.service failed (system)", out.getvalue())
 
 
 class LineTest(unittest.TestCase):
@@ -730,19 +849,19 @@ class TransportTest(unittest.TestCase):
         self.assertIn("watch-test", sysx.calls[-1][0])
 
     def test_ssh_ships_the_argv_without_a_remote_shell(self):
-        cfg = config("", role="avante")
+        cfg = config("", role="remote")
         sysx = FakeSys()
-        text = "[watch] unit_failed@avante: it's \"quoted\" $(rm -rf ~) `x` \\ ok"
+        text = "[watch] unit_failed@box: it's \"quoted\" $(rm -rf ~) `x` \\ ok"
         ok, _ = cw.SshTransport(cfg, sysx).send("watch:unit_failed", text)
         self.assertTrue(ok)
         argv, stdin = sysx.calls[-1]
-        self.assertEqual(argv, ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "ServerAliveInterval=5", "bella", "python3", "-"])
+        self.assertEqual(argv, ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "ServerAliveInterval=5", "desk", "python3", "-"])
         b64 = re.search(r"b64decode\('([^']+)'\)", stdin)[1]
         self.assertEqual(json.loads(base64.b64decode(b64)), ["synaps", "send", "--session", "capri", "--source", "watch:unit_failed", "--", text])
         compile(stdin, "remote", "exec")
 
     def test_ssh_avatar_probe_is_self_contained(self):
-        cfg = config("", role="avante")
+        cfg = config("", role="remote")
         sysx = FakeSys()
         sysx.set("ssh", out='{"reachable": true, "dnd": true, "music": false, "present": true, "idle_s": 3}\n')
         a = cw.SshTransport(cfg, sysx).avatar()

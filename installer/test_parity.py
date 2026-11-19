@@ -79,6 +79,22 @@ class Parity(unittest.TestCase):
             for pm in ("apt", "pacman", "dnf", "zypper"):
                 self.assertIn(f"{kind}_{pm}", keys)
 
+    def test_synaps_is_the_pin_never_latest(self):
+        # Her client speaks synaps_protocol exactly: Synaps is the manifest's pin and its hash, never
+        # GitHub's latest (a newer one may speak another protocol).
+        body = block(SH, "step_synaps() {", "\n}\n")
+        self.assertNotRegex(code(body), r"api\.github\.com|releases/latest")
+        self.assertIn("M_synaps_pin", body)
+        self.assertIn("M_synaps_installer_sh_sha256", body)
+
+    @unittest.skipUnless(STEPS.exists(), "install.ps1 takes the latest Synaps until its steps are steps.ps1's")
+    def test_synaps_is_the_pin_never_latest_on_windows(self):
+        steps = block(STEPS.read_text(encoding="utf-8"), "function Install-Synaps", "\n}\n")
+        self.assertNotRegex(code(steps), r"api\.github\.com|releases/latest")
+        self.assertIn("synaps_pin", steps)
+        self.assertIn("synaps_installer_ps1_sha256", steps)
+        self.assertNotRegex(code(block(PS, "function Install-Synaps", "\n}\n")), r"api\.github\.com|releases/latest")
+
     def test_install_ps1_is_ascii(self):
         # Windows PowerShell 5.1 reads a script without a BOM as ANSI.
         bad = [(i + 1, l) for i, l in enumerate(PS.splitlines()) if not l.isascii()]

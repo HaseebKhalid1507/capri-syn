@@ -313,8 +313,7 @@ The capri-win VM on bella: Windows 11 Enterprise Evaluation 26H2 (build 26300), 
 VirtIO GPU heads (1280×800 and 1920×1200), D3D on WARP (software), an HDA sound card with a silent
 input, 8 GB. Builds: main's CI installers (3713ff0) and this branch built in the VM by
 `install.ps1`'s source path. Driven from inside his session (`SendInput`, the QEMU keyboard for his
-keys and UAC); screenshots on avante in `~/Jawz/workspace/synaps-avatar/winvm/<item>/`, not in the
-repo. **[VM]**: true of the VM (software rendering, no real mic), to check again on his machine.
+keys and UAC); screenshots kept outside the repo. **[VM]**: true of the VM (software rendering, no real mic), to check again on his machine.
 
 | # | what | result |
 |---|---|---|
