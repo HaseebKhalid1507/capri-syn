@@ -166,6 +166,25 @@ a class factory and `INotificationActivationCallback` registered at start (`CoRe
 plus a cold start when she isn't running. About half a day plus a VM check; not cheap without a
 desktop to try it on.
 
+## Shots on a runner
+
+`.github/workflows/shots.yml` shoots her on a GitHub Windows runner: Actions → shots → Run workflow
+(a ref and the scene sets), or the `shots` label on a PR (its head; `shots:settings` or
+`shots:header` for one set). It builds the release binary of that ref, assembles her pack with
+`tools/make-pack` (CapriCore v1.0.4 + lachy, `--lachy auto`; never mochi), starts the fake daemon
+(`tools/fakedaemon.py`: the daemon's named pipe, its control on 127.0.0.1:47811) and, for voice
+takes, the fake sidecar (`tools/fakevoice.py`, on the real link), then runs `tools/shots/scenes.ps1`
+at 1920x1080 and 100%, and a few takes again at 150%. She is driven through her control socket;
+keys and clicks only where it can't (the Line's keyboard, a menu row). Each shot is cropped to her
+windows, with her `state` beside it; the lot is an artifact kept 3 days. No GPU there: GPUI draws
+with WARP, fine for layout, not for colour or timing.
+
+`tools/shoot-win.ps1` is the reusable part (dot-source it): the display pinned
+(`Set-ShotDisplay -Width 1920 -Height 1080 -Scale 150`, live, no sign-out), a process's or a
+title's windows shot cropped (`Save-WindowShot -Path x.png -ProcessId $p.Id` or `-Title 'Setup*'`),
+and SendInput keys and clicks (`Send-ShotKeys 'ctrl+comma'`, `Send-ShotClick`). Never the whole
+desktop.
+
 ## The VM day (2026-11-18)
 
 The capri-win VM on bella: Windows 11 Enterprise Evaluation 26H2 (build 26300), QEMU/KVM, two
