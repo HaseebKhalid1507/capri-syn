@@ -223,6 +223,12 @@ pub fn by_id(id: &str) -> Option<&'static Provider> {
     ALL.iter().find(|p| p.id == id)
 }
 
+/// Synaps' own default model (`core/models.rs` `default_model`: Claude's first): hers when no one
+/// picked one.
+pub fn synaps_default(model: &str) -> bool {
+    same(model, CLAUDE.models[0].0)
+}
+
 /// The provider she calls `name` (her no-brain line's).
 pub fn by_name(name: &str) -> Option<&'static Provider> {
     ALL.iter().find(|p| p.name == name)
@@ -596,6 +602,12 @@ pub struct Status {
     pub gemini: bool,
     /// The local server her daemon last couldn't reach (`Link::local_tried`, as shown).
     pub tried: Option<String>,
+    /// Her login ran out, or was turned down (her last turn's `LOGGED OUT`): her provider's row
+    /// signs in again.
+    pub expired: bool,
+    /// She runs on Windows (`cfg!(windows)`; a test says which): what Synaps 0.12 can't sign in
+    /// to from there (`signin::needs_newer`).
+    pub windows: bool,
 }
 
 impl Status {
@@ -635,11 +647,12 @@ impl Status {
         }
     }
 
-    /// MODEL's menu: every model of every account signed in here and every service with a key
-    /// (`signed`), hers too unless she has no login (can't tell: hers stands), and the local
-    /// server's (`local/<id>`), by provider in the table's order. Hers is checked; set by hand and
-    /// not in its list, it's there as it is, not one to pick again. Empty: nothing to switch to
-    /// (sign in first).
+    /// MODEL's menu: every model of every account with a login here and every service with a key
+    /// (`signed`, or hers with a login confirmed), and the local server's (`local/<id>`), by
+    /// provider in the table's order. Nothing for a login she can't confirm (a fresh install, a
+    /// daemon whose files she can't read): no Claude models just because Claude is Synaps'
+    /// default. Hers is checked; set by hand and not in its list, it's there as it is, not one to
+    /// pick again. Empty: nothing to switch to (sign in first).
     pub fn menu(&self) -> Vec<Group> {
         let mine = self.model.as_deref();
         let hers = self.provider();
@@ -656,10 +669,10 @@ impl Status {
                     })
                     .collect(),
                 (Kind::Local, _) => Vec::new(),
-                _ if self.has(p) || (is_hers && self.signed_in.is_none()) => p.models.iter().map(|&(id, l)| Choice { pick: Some(id), label: l.to_string(), on: on(id) }).collect(),
+                _ if self.has(p) => p.models.iter().map(|&(id, l)| Choice { pick: Some(id), label: l.to_string(), on: on(id) }).collect(),
                 _ => Vec::new(),
             };
-            if let Some(m) = mine.filter(|_| is_hers && !self.none() && !models.iter().any(|c| c.on)) {
+            if let Some(m) = mine.filter(|_| is_hers && (self.has(p) || p.kind == Kind::Local) && !models.iter().any(|c| c.on)) {
                 models.push(Choice { pick: None, label: model_label(m), on: true });
             }
             if !models.is_empty() {
@@ -973,11 +986,18 @@ mod tests {
         st.signed_in = Some(true);
         let mine: Vec<_> = st.menu()[1].models.iter().filter(|c| c.on).cloned().collect();
         assert_eq!(mine, [Choice { pick: None, label: "OPUS 4.1".into(), on: true }]);
-        // Hers without a login: not hers to pick; can't tell: hers stands.
+        // Hers without a login: not hers to pick; can't tell (a fresh install): nothing either,
+        // no Claude models for Synaps' default.
         let none = Status { model: Some("claude-sonnet-4-6".into()), signed_in: Some(false), here: true, ..Status::default() };
         assert!(none.menu().is_empty(), "nothing signed in, no local model: sign in first");
         let unsure = Status { signed_in: None, ..none.clone() };
-        assert_eq!(names(&unsure), ["CLAUDE"]);
+        assert!(unsure.menu().is_empty(), "no confirmed login: no models");
+        let confirmed = Status { signed_in: Some(true), ..none.clone() };
+        assert_eq!(names(&confirmed), ["CLAUDE"], "her model answered: its login, confirmed");
+        // A local model of hers the server doesn't have: there, in force, not one to pick.
+        let off = Status { model: Some("local/qwen3:8b".into()), signed_in: None, here: true, local: Some(("http://localhost:11434/v1".into(), Local::Off)), ..Status::default() };
+        assert_eq!(off.menu(), [Group { name: "LOCAL".into(), models: vec![Choice { pick: None, label: "QWEN3:8B".into(), on: true }] }]);
+        assert!(synaps_default("claude-sonnet-4-6") && synaps_default("anthropic/claude-sonnet-4-6") && !synaps_default("claude-opus-5-5"));
         // A daemon on another machine: its local server isn't this one's.
         let far = Status { here: false, local: Some(("http://localhost:11434/v1".into(), Local::Up(vec!["qwen3:8b".into()]))), ..none };
         assert!(far.menu().is_empty());

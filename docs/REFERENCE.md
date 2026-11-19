@@ -56,7 +56,7 @@ Paths here are Linux's: Windows keeps the same files under `%APPDATA%` and `%LOC
   | trouble | she says | tag | mood |
   |---|---|---|---|
   | no credentials (`synaps login` + no credential; 0.12.0: `No credentials for anthropic at …`) | No brain yet, choom. Synaps has no Claude login. Log in, or set another model ([session] model in my settings): `$ synaps login --provider claude` (the provider's own `--provider`; none named: `$ synaps login`) | `NO BRAIN YET` | idle |
-  | a lapsed or rejected login | My login ran out. In a terminal: `$ synaps login` | `LOGGED OUT` | idle |
+  | a lapsed or rejected login | My login ran out. Sign me in again: `SIGN IN AGAIN ▸` (a button to Settings ▸ Brain, where her account's row signs in again) | `LOGGED OUT` | idle |
   | rate or usage limit, billing | Hit my model's limit for now. Give it a bit, then ask me again. | `AT THE LIMIT` | annoyed |
   | overloaded, a 5xx | My model's swamped right now. Try me again in a minute. | `MODEL BUSY` | annoyed |
   | unreachable, timed out, a dropped stream | Can't reach my model. Check the connection, then ask me again. | `NO CONNECTION` | annoyed |
@@ -117,20 +117,32 @@ Paths here are Linux's: Windows keeps the same files under `%APPDATA%` and `%LOC
     daemon's own `synaps`, from `daemon.json`, else the one on PATH), and Synaps opens your browser
     on the provider's page: Claude, ChatGPT, Gemini and Grok with the sign-in ready, Kimi and Muse
     with their code filled in, Copilot on GitHub's device page, its code shown large in the row and
-    copied to type there. The row says SIGNING IN… (⏎ stops it, killing Synaps); the foot links the
-    page for when the browser didn't open. Synaps' stdin is held open meanwhile (its 0.12 login
+    copied to type there (a short-lived, single-use code: the one thing she copies). The row says
+    SIGNING IN… (⏎ stops it, killing Synaps); under it, for Claude, ChatGPT and Gemini, NO BROWSER?
+    opens the page again (keys or a click). Synaps' stdin is held open meanwhile (its 0.12 login
     gives up at end of input) and closed once `auth.json` has the login or Synaps says it's done; it
-    is killed 15 s later if it hasn't ended, after 10 minutes, on a stop and when she quits. On
-    Windows, where Synaps' `cmd /c start` cuts the page's URL at its first `&`, she opens the whole
-    URL herself (Claude's, ChatGPT's or Google's own sign-in page only). Signed in: ✓ SIGNED IN, and
-    her model switches to the account's first model (not under `--model`/`--session`, not when
-    she's on it). Failed: she says why, the row reads DIDN'T WORK (⏎ tries again), and her bubble
-    has the `synaps login --provider …` line for a terminal. Neither the URL nor the code is ever
-    logged.
+    is killed 15 s later if it hasn't ended, after 10 minutes, on a stop and when she quits, and it
+    dies with her however she ends (Windows: a job object that kills it, and what it started, when
+    her handle closes; Linux: `PR_SET_PDEATHSIG`). A page is read only off the line its provider
+    prints it on (the PKCE page alone, cyan, right after `If the browser didn't open, visit…`; a
+    device's `At:`), and opened only when it's that provider's own sign-in page: https,
+    `claude.ai/oauth/authorize`, `auth.openai.com/oauth/authorize` or
+    `accounts.google.com/o/oauth2/v2/auth` exactly, no `user@`, no port, no `\`. On Windows, where
+    Synaps' `cmd /c start` cuts the page's URL at its first `&`, she opens that page whole herself.
+    Grok on Windows reads NEEDS A NEWER SYNAPS and does nothing: Synaps 0.12.0's xAI login opens
+    its page with `cmd /c start` and never prints it, so nothing can open it whole (in a terminal
+    it's cut the same way). Signed in: ✓ SIGNED IN, and once the write of its first model is in,
+    her model is that (`Opus 5.5 it is`; not under `--model`/`--session`, not when she's on it).
+    Failed (`✗ Login failed`, `Not stored`, `Login succeeded at the provider but could not be
+    stored`): she says why, the row reads DIDN'T WORK (⏎ tries again), and her bubble has the
+    `synaps login --provider …` line for a terminal. Neither the URL nor the code is ever logged.
+    Her login ran out (LOGGED OUT): her bubble's `SIGN IN AGAIN ▸` opens the Brain screen on her
+    account's row, its list open; it reads LOGGED OUT · ⏎ SIGN IN AGAIN and runs the same sign-in (a key service's:
+    KEY TURNED DOWN · ⏎ NEW KEY); the BRAIN row says SIGN IN AGAIN.
   - **API KEY**: Synaps' 19 key services (`KEY SET · GROQ`, `IN USE · GROQ +1` on the row). ⏎ on
     one with a key switches her to it; on one without, a hidden field takes the key and ⏎ hands it
     to `synaps login --provider <id>` on its stdin (never its command line, never a log; the field
-    is dropped once sent, or with Esc).
+    is cleared and dropped once sent, or with Esc, and her copy of the key is zeroed as it goes).
   - **RUN LOCAL**: the local server, looked at: `provider.local.url`'s last line as the
     daemon read it at its start (the one she saw for this start stands when his TUI rewrites the
     config, one she never saw for it is taken as written, an unreadable config keeps what she knew;
@@ -143,12 +155,15 @@ Paths here are Linux's: Windows keeps the same files under `%APPDATA%` and `%LOC
     show a URL, Synaps' errors' too, without anything up to its last `@`, then from its first
     `?#&=;` on. When the daemon's own error names another local URL than hers, its config changed
     after it started: no ✓, and she says `Synaps is still on its old local URL. Run synaps daemon
-    reload, then ask me again.` until it answers or reconnects. ⏎ opens the local-model steps.
+    reload, then ask me again.` until it answers or reconnects. ⏎ with the server up and models on
+    it opens them in place (MODEL's LOCAL group: a pick switches her); else (or her model locked)
+    the local-model steps.
 
   Then **MODEL**: her model, and ⏎ opens its menu in place: every model of every account signed in
-  here and every service with a key (hers too while her login can't be told), and the local
+  here and every service with a key (a login confirmed: on file, or her model answered; none while
+  it can't be told, so a fresh install lists no Claude models for Synaps' default), and the local
   server's (`local/<id>`), grouped under each provider's name in the table's order, hers checked;
-  no cap, the list scrolls. A model she runs that isn't in its provider's list (set by hand) is
+  no cap, the list scrolls (↑↓, PgUp/PgDn, Home/End). A model she runs that isn't in its provider's list (set by hand) is
   there, checked, not one to pick again. The lists are Synaps 0.12.0's own catalogs (the accounts'
   static ones, the key services' registry; aliases such as `grok-latest` aside): Synaps 0.12 has no
   model catalog a client can ask for (its daemon protocol has none; `synaps rpc` has one, but boots
@@ -166,10 +181,12 @@ Paths here are Linux's: Windows keeps the same files under `%APPDATA%` and `%LOC
   that adds or drops a row. The keys under the list say what ⏎ does on the row picked. Her menu's
   last row and ABOUT name her model the same way (`SYNAPS 0.12.0 · SONNET 4.6`).
 - **NO BRAIN YET, none picked.** With no `[session] model`, no `--model`, not riding his session,
-  and no `model` in Synaps' config, her model is Synaps' default (Claude's), picked by no one: a
+  no `model` in Synaps' config, and her session on Synaps' default (a session resumed on another
+  model counts as picked), her model is Synaps' default (Claude's), picked by no one: a
   failed turn for want of its login says `No brain yet, choom. Pick one: an account, an API key, or
   a model on this machine.` with `SET ME UP ▸` (bubble and Line), which opens Settings ▸ Brain. A
-  model someone picked keeps naming its provider and its `synaps login --provider …`.
+  model someone picked keeps naming its provider and its `synaps login --provider …`. A row's words
+  are fixed when it's made: a pick made later doesn't reword it.
 - **A turn shows as started** (THINKING, the busy bubble with ABORT) only once it has run 400 ms with
   no word, or its first word comes: one that fails at once never promises a reply.
 - **Sleep follows you, not the chat**: while you're at the desk she stays up,

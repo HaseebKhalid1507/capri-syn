@@ -88,13 +88,32 @@ pub fn guarded(name: &str) -> bool {
     name.trim().eq_ignore_ascii_case(GUARDED)
 }
 
-/// A prompt's answer: never printed.
+/// A prompt's answer, an API key: never printed, and wiped when it goes.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Secret(pub String);
+
+impl Secret {
+    /// Its text, handed on (to the daemon's answer): the caller holds it now, this one is empty.
+    pub fn take(mut self) -> String {
+        std::mem::take(&mut self.0)
+    }
+}
 
 impl std::fmt::Debug for Secret {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("<redacted>")
+    }
+}
+
+/// Its bytes zeroed before its memory is freed (volatile: the writes aren't optimised away).
+impl Drop for Secret {
+    fn drop(&mut self) {
+        // SAFETY: zero bytes are valid UTF-8; the length stays as it is until it's cleared.
+        for b in unsafe { self.0.as_mut_vec() }.iter_mut() {
+            unsafe { std::ptr::write_volatile(b, 0) };
+        }
+        std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+        self.0.clear();
     }
 }
 
@@ -242,6 +261,9 @@ pub struct Link {
     /// Synaps' config sets a `model` (a read's; None: not read, or unreadable): with none, and
     /// none of hers, her model is Synaps' default, picked by no one (`unpicked`).
     synaps_model: Option<bool>,
+    /// The thread's error rows made while no one had picked her model (`unpicked` then), by
+    /// transcript id: their words stay as they were said (a pick made later doesn't reword them).
+    unpicked_errors: Vec<u64>,
     /// The daemon's profile and pid (`Connected`): where its credentials are, and its env.
     daemon: Option<(Option<String>, u32)>,
     /// The daemon's version (`Welcome`), for her maker's mark.
@@ -325,6 +347,7 @@ impl Link {
             creds_by: Said::Read,
             creds_read: None,
             synaps_model: None,
+            unpicked_errors: Vec::new(),
             local_tried: None,
             daemon: None,
             daemon_version: None,
@@ -556,18 +579,32 @@ impl Link {
         }
     }
 
-    /// No one picked her model: no `[session] model`, no `--model`, not his session, and Synaps'
-    /// config sets none (read on this machine). It's Synaps' default (Claude's), not a choice:
-    /// with no login for it, she says to pick a brain, not to sign in to Claude.
+    /// No one picked her model: no `[session] model`, no `--model`, not his session, Synaps'
+    /// config sets none (read on this machine), and her session is on Synaps' default (a session
+    /// resumed on another model was put on it: picked). It's Synaps' default (Claude's), not a
+    /// choice: with no login for it, she says to pick a brain, not to sign in to Claude.
     pub fn unpicked(&self) -> bool {
-        self.synaps_model == Some(false) && self.opts.persona.model.is_none() && self.opts.model.is_none() && !self.rides_other()
+        self.synaps_model == Some(false)
+            && self.opts.persona.model.is_none()
+            && self.opts.model.is_none()
+            && !self.rides_other()
+            && self.model().is_none_or(crate::provider::synaps_default)
+    }
+
+    /// The error row `id` (a transcript item) was made while no one had picked her model: its
+    /// words ask for a pick, as they did then.
+    pub fn unpicked_error(&self, id: u64) -> bool {
+        self.unpicked_errors.contains(&id)
     }
 
     /// A sign-in from her just landed: her credentials are read again now (not after an answer
-    /// on this model: that stands).
+    /// on this model: that stands), and a login that ran out (`LOGGED OUT`) is in again.
     pub fn creds_now(&mut self, now: Instant) {
         if self.creds_by != Said::Answer {
             self.creds_at = Some(now);
+        }
+        if self.trouble == Some(Trouble::LoggedOut) {
+            self.trouble = None;
         }
     }
 
@@ -1080,6 +1117,12 @@ impl Link {
                 StreamEvent::Session(SessionStreamEvent::Usage { input_tokens, output_tokens, model }) if (input_tokens > 0 || output_tokens > 0) && self.hers(model.as_deref()) => self.answered(),
                 StreamEvent::Session(SessionStreamEvent::Error { message }) => match Trouble::of(&message, self.model()).map(|t| t.unpicked(self.unpicked())) {
                     Some(t) => {
+                        // Its row in the thread (just made from this event) keeps these words.
+                        if t == Trouble::NoPick
+                            && let Some(it) = self.transcript.items().iter().rev().find(|i| matches!(i.kind, synaps_client::transcript::ItemKind::Error))
+                        {
+                            self.unpicked_errors.push(it.id);
+                        }
                         // Her log and bubble show its URLs as she does (`urls_shown`): Synaps
                         // quotes its local URL whole, a `user:password@` too.
                         elog!("synaps-avatar: turn error ({}): {}", t.key(), one_line(&crate::provider::urls_shown(&message), 300));
@@ -1556,7 +1599,8 @@ impl Trouble {
             Trouble::NoBrain { on: None } => format!("No brain yet, choom. Synaps has no login for my model. Log in, or set another model ([session] model in my settings):\n`{LOGIN_CMD}`"),
             // His pick: an account, a key or a local model, none first (`SET ME UP ▸`: the Brain screen).
             Trouble::NoPick => format!("No brain yet, choom. Pick one: an account, an API key, or a model on this machine.\n`{}`", crate::line::SET_ME_UP),
-            Trouble::LoggedOut => format!("My login ran out. In a terminal:\n`{LOGIN_CMD}`"),
+            // Signed in again from her (Settings ▸ Brain: her account's row), no terminal.
+            Trouble::LoggedOut => format!("My login ran out. Sign me in again:\n`{}`", crate::line::SIGN_IN_AGAIN),
             Trouble::Limited => "Hit my model's limit for now. Give it a bit, then ask me again.".into(),
             Trouble::Swamped => "My model's swamped right now. Try me again in a minute.".into(),
             Trouble::Offline => "Can't reach my model. Check the connection, then ask me again.".into(),
@@ -1592,7 +1636,8 @@ impl Trouble {
     /// The Line's quiet footer tip: that his message isn't lost (her row says the fix).
     pub fn tip(&self) -> &'static str {
         match self {
-            Trouble::NoBrain { .. } | Trouble::LoggedOut => "after synaps login, ↑ resends your message",
+            Trouble::NoBrain { .. } => "after synaps login, ↑ resends your message",
+            Trouble::LoggedOut => "signed in again, ↑ resends your message",
             Trouble::NoPick => "once I have a brain, ↑ resends your message",
             Trouble::LocalDown { .. } => "once it's up, ↑ resends your message",
             Trouble::ModelMissing { .. } => "once it's pulled, ↑ resends your message",
@@ -2419,7 +2464,8 @@ mod tests {
             let want = match &t {
                 Trouble::NoBrain { on: Some("Claude") } => Some("synaps login --provider claude".to_string()),
                 Trouble::NoBrain { on: Some("Kimi") } => Some("synaps login --provider kimi-code".to_string()),
-                Trouble::NoBrain { .. } | Trouble::LoggedOut => Some(LOGIN_CMD.to_string()),
+                Trouble::NoBrain { .. } => Some(LOGIN_CMD.to_string()),
+                Trouble::LoggedOut => Some(crate::line::SIGN_IN_AGAIN.to_string()),
                 Trouble::ModelMissing { model } if model == "qwen3:8b" => Some("ollama pull qwen3:8b".to_string()),
                 Trouble::ModelMissing { model } if model == "capri-qwen3" => Some("ollama create capri-qwen3 -f Modelfile".to_string()),
                 // Library models with no tag are pulled, as they always were.
@@ -2483,23 +2529,38 @@ mod tests {
         assert_eq!(l.creds_due(t0 + CREDS_EVERY * 10), None, "no more reads");
     }
 
-    /// What the daemon said stands: a read that can't tell leaves it (and reading goes on, on a
-    /// Claude model: a login mid-write reads as Unknown); a read that finds the login, or an
-    /// answer, clears it.
     /// NO BRAIN YET on a model no one picked (no `[session] model`, no `--model`, Synaps' config
     /// sets none): a brain to pick (SET ME UP), not Claude's login. Picked: its login, named.
     #[test]
     fn no_brain_on_a_model_no_one_picked_asks_for_a_pick() {
         const NO_LOGIN: &str = "No Anthropic credentials. Run `synaps login`, or switch to a provider model with `/model groq/llama-3.3-70b-versatile`.";
         let t0 = Instant::now();
-        let mut l = live_link(t0);
+        // Her session on Synaps' default (created on it, or resumed on it).
+        let on = |model: &str| {
+            let mut l = Link::new(opts(), t0);
+            l.on_event(connected(), t0);
+            l.attaching(1);
+            let p = Persona { model: Some(model.into()), ..Persona::default() };
+            l.on_event(mine(1, AttachMode::Observe, None, Some("capri"), Some(&p)), t0);
+            l
+        };
+        let mut l = on("claude-sonnet-4-6");
         assert!(!l.unpicked(), "Synaps' config not read: can't say");
         l.set_synaps_model(Some(false));
         l.set_synaps_model(None);
         assert!(l.unpicked(), "an unreadable config says nothing new");
+        // Resumed on another model (his /model put it there once): picked.
+        let mut other = on("claude-opus-5-5");
+        other.set_synaps_model(Some(false));
+        assert!(!other.unpicked(), "a session already on a model of its own");
         failed_turn(&mut l, NO_LOGIN, t0);
         let b = l.body(t0);
         assert_eq!(b.trouble, Some(Trouble::NoPick));
+        // Its row keeps these words, whatever is picked later.
+        let errors = |l: &Link| l.transcript().items().iter().filter(|i| matches!(i.kind, synaps_client::transcript::ItemKind::Error)).map(|i| i.id).collect::<Vec<_>>();
+        let first = errors(&l);
+        assert_eq!(first.len(), 1);
+        assert!(l.unpicked_error(first[0]));
         assert_eq!(b.label.as_deref(), Some("NO BRAIN YET"));
         assert!(b.reply.ends_with("\n`SET ME UP ▸`") && !b.reply.contains("synaps login") && !b.reply.contains("Claude"), "{}", b.reply);
         assert_eq!(l.trouble(), Some(&Trouble::NoPick));
@@ -2509,6 +2570,9 @@ mod tests {
         l.set_synaps_model(Some(true));
         failed_turn(&mut l, NO_LOGIN, t0);
         assert_eq!(l.body(t0).trouble, Some(Trouble::NoBrain { on: Some("Claude") }));
+        let both = errors(&l);
+        assert_eq!(both.len(), 2);
+        assert!(l.unpicked_error(both[0]) && !l.unpicked_error(both[1]), "the first row's words stay; the second names Claude");
         // Her `[session] model`: picked.
         l.set_synaps_model(Some(false));
         let mut o = opts();
@@ -2528,6 +2592,9 @@ mod tests {
         assert_eq!(Trouble::LoggedOut.unpicked(true), Trouble::LoggedOut, "a login that ran out is his");
     }
 
+    /// What the daemon said stands: a read that can't tell leaves it (and reading goes on, on a
+    /// Claude model: a login mid-write reads as Unknown); a read that finds the login, or an
+    /// answer, clears it.
     #[test]
     fn the_daemons_no_brain_stands_until_an_answer() {
         let t0 = Instant::now();

@@ -4206,8 +4206,7 @@ impl Avatar {
                 let b = s.link.body(Instant::now());
                 serde_json::json!({ "live": b.live, "busy": b.busy, "mood": b.mood.key(), "label": b.label, "reply": b.reply,
                                     "echo": b.echo, "prompt": b.prompt.map(|p| p.title),
-                                    "mode": format!("{:?}", s.link.mode()).to_lowercase(), "client": s.generation,
-                                    "trouble": s.link.trouble().map(|t| t.key()) })
+                                    "mode": format!("{:?}", s.link.mode()).to_lowercase(), "client": s.generation })
             }),
             "input": self.input.as_ref().map(|i| serde_json::json!({ "len": i.text.chars().count(), "secret": i.secret.is_some(),
                                                                        "prev": i.prev, "esc": i.esc_at.is_some() })),
@@ -4224,6 +4223,7 @@ impl Avatar {
             // Her brain as she reads it (outside the macro above: its recursion limit).
             v["session"]["creds"] = format!("{:?}", s.link.creds()).into();
             v["session"]["here"] = s.link.local().into();
+            v["session"]["trouble"] = s.link.trouble().map(|t| t.key()).into();
         }
         v["panel_layout"] = self.panel_probe.clone().filter(|_| self.panel_up()).into();
         // The header as last painted (its words may be newer than the layout's).
@@ -4336,7 +4336,7 @@ impl Avatar {
                 Act::Resync => s.client.resync(),
                 Act::Submit(t) => s.client.submit(t),
                 Act::Steer(t) => s.client.steer(t),
-                Act::Answer(id, v) => s.client.answer(id, v.map(|v| v.0)),
+                Act::Answer(id, v) => s.client.answer(id, v.map(crate::session::Secret::take)),
                 Act::Abort => s.client.abort(),
                 Act::Detach => s.client.detach(),
                 Act::Set(setting) => s.client.set(setting).map(drop),
@@ -7707,8 +7707,14 @@ impl Avatar {
                         && let Some(c) = crate::line::command(&t)
                     {
                         // Her own words' SET ME UP (no brain): a solid red key to Settings ▸ Brain.
-                        // Hers too where she has no brain and none was picked (`Trouble::NoPick`).
-                        if c == SET_ME_UP && (self.bubble.as_ref().is_some_and(|b| b.turn == 0) || self.session.as_ref().is_some_and(|s| s.link.trouble() == Some(&crate::session::Trouble::NoPick))) {
+                        // Hers too where she has no brain and none was picked (`Trouble::NoPick`),
+                        // and her SIGN IN AGAIN where her login ran out (`Trouble::LoggedOut`).
+                        let trouble = self.session.as_ref().and_then(|s| s.link.trouble());
+                        let first = self.bubble.as_ref().is_some_and(|b| b.turn == 0);
+                        if (c == SET_ME_UP && (first || trouble == Some(&crate::session::Trouble::NoPick)))
+                            || (c == crate::line::SIGN_IN_AGAIN && trouble == Some(&crate::session::Trouble::LoggedOut))
+                        {
+                            let label = c.to_string();
                             let whole = chips_whole.get(k) == Some(&true);
                             let probes = self.buttons.clone();
                             let go = theme::plate(Cut::Slant(6.0), Fill::solid(if whole { pal.accent } else { pal.dim }))
@@ -7720,7 +7726,7 @@ impl Avatar {
                                 .text_size(px(12.5))
                                 .font_weight(FontWeight::BOLD)
                                 .text_color(rgb(pal.ink))
-                                .child(theme::tracked(SET_ME_UP, 1.4))
+                                .child(theme::tracked(&label, 1.4))
                                 .on_mouse_down(
                                     MouseButton::Left,
                                     cx.listener(move |this, _: &MouseDownEvent, _, cx| {
@@ -7729,7 +7735,7 @@ impl Avatar {
                                             return;
                                         }
                                         let r = this.show_line_page(crate::line::Page::Brain, cx);
-                                        elog!("synaps-avatar: SET ME UP clicked: {r}");
+                                        elog!("synaps-avatar: her button to Settings > Brain clicked: {r}");
                                         cx.notify();
                                     }),
                                 );

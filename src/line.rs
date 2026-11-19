@@ -166,6 +166,15 @@ pub enum Ask {
 /// Line on Settings ▸ Brain. A chip line of hers, never a command to copy.
 pub const SET_ME_UP: &str = "SET ME UP ▸";
 
+/// Her button where her login ran out (`LOGGED OUT`): the Line on Settings ▸ Brain, where her
+/// account's row signs in again from her (no terminal).
+pub const SIGN_IN_AGAIN: &str = "SIGN IN AGAIN ▸";
+
+/// One of her buttons to Settings ▸ Brain (`SET ME UP ▸`, `SIGN IN AGAIN ▸`), not a command.
+pub fn to_brain(c: &str) -> bool {
+    c == SET_ME_UP || c == SIGN_IN_AGAIN
+}
+
 /// The command a paragraph (or a bubble line) is, when it is nothing but one `` `inline code` ``
 /// span: whole, or still typing out (no closing backtick yet).
 pub fn command(t: &str) -> Option<&str> {
@@ -282,7 +291,7 @@ pub struct Line {
     fold_scroll: ScrollHandle,
     fold_seen: std::cell::Cell<Option<(Option<settings::Fold>, usize)>>,
     /// API KEY's field, open for this service: masked, never logged, never kept.
-    keying: Option<(&'static crate::provider::Provider, Entity<InputState>)>,
+    keying: Option<settings::Keying>,
     /// The last page swap (its RGB split, the cog's turn).
     swap: Option<Instant>,
     /// The tallest the panel was on a page it left: both pages are at least as tall from then
@@ -503,7 +512,7 @@ impl Line {
         // Settings: the Line's own handle (keys never type into the hidden field), or API KEY's.
         if self.nav.page.settings() {
             match &self.keying {
-                Some((_, f)) => f.update(cx, |s, cx| s.focus(window, cx)),
+                Some(k) => k.field.update(cx, |s, cx| s.focus(window, cx)),
                 None => window.focus(&self.focus, cx),
             }
             return;
@@ -608,7 +617,9 @@ impl Line {
         // Settings ▸ Brain (apart: the macro's recursion limit).
         v["brain_sel"] = self.bsel.into();
         v["fold"] = format!("{:?}", self.fold).into();
-        v["keying"] = self.keying.as_ref().map(|(p, _)| p.id).into();
+        v["keying"] = self.keying.as_ref().map(|k| k.to.id).into();
+        // The list open's box: scrolled this far, of this much.
+        v["fold_scroll"] = vec![f32::from(self.fold_scroll.offset().y), f32::from(self.fold_scroll.max_offset().y)].into();
         v["mind"] = self.snap.prefs.as_ref().map_or(serde_json::Value::Null, |p| {
             serde_json::json!({
                 "model": p.mind.model, "signed_in": p.mind.signed_in, "signed": p.mind.signed, "here": p.mind.here,
@@ -1062,8 +1073,9 @@ impl Line {
         for (bi, b) in parse(md).into_iter().enumerate() {
             col = col.child(match b {
                 Block::Heading(_, t) => div().font_weight(FontWeight::BOLD).text_color(rgb(pal.accent)).child(self.styled(&t)).into_any_element(),
-                // Her SET ME UP (no brain, none picked): a solid red key to Settings ▸ Brain.
-                Block::Para(t) if command(&t) == Some(SET_ME_UP) => div()
+                // Her SET ME UP (no brain, none picked) and SIGN IN AGAIN (her login ran out): a
+                // solid red key to Settings ▸ Brain.
+                Block::Para(t) if command(&t).is_some_and(to_brain) => div()
                     .flex()
                     .child(
                         theme::plate(Cut::Slant(6.0), Fill::solid(pal.accent))
@@ -1076,7 +1088,7 @@ impl Line {
                             .text_size(px(12.5))
                             .font_weight(FontWeight::BOLD)
                             .text_color(rgb(pal.ink))
-                            .child(tracked(SET_ME_UP, 1.4))
+                            .child(tracked(command(&t).unwrap_or(SET_ME_UP), 1.4))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 if this.nav.go(Page::Brain) {
                                     this.page_changed(window, cx);

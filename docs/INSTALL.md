@@ -72,8 +72,9 @@ installer. Her tag reads NO BRAIN YET, her first words end on a red `SET ME UP â
 none a click on her or her summon key opens the Line on **Settings â–¸ Brain**: three ways in, none
 first. SIGN IN lists the accounts by name (ChatGPT, Claude, Copilot, Gemini, Grok, Kimi, Muse); a
 click runs Synaps' sign-in for it with no window and your browser opens on the provider's page
-(Copilot's code is shown large and copied, to type there). API KEY takes a key in a hidden field and
-hands it to Synaps on its stdin. RUN LOCAL opens the local-model steps
+(Copilot's code is shown large and copied, to type there; on Windows Grok needs a newer Synaps).
+API KEY takes a key in a hidden field and hands it to Synaps on its stdin. RUN LOCAL lists your
+local server's models when it's up with some, else opens the local-model steps
 ([UNDER-THE-HOOD.md](UNDER-THE-HOOD.md#her-brain)). Signed in, she switches to that account's model;
 the daemon picks the login up on her next turn, with no restart: Synaps reads `auth.json` per
 request. With no model picked anywhere and no login, her failed first message says to pick a brain

@@ -269,8 +269,18 @@ pub enum Act {
     Cancel,
     /// An API key for this service: her masked field opens, its key goes to Synaps on its stdin.
     Key(&'static Provider),
-    /// RUN LOCAL. Until her Ollama setup (PR 5): the steps, opened.
+    /// RUN LOCAL with no local model to pick. Until her Ollama setup (PR 5): the steps, opened.
     Local,
+    /// The sign-in running's own page, opened again (his browser didn't): `signin::allowed`.
+    Open(String),
+}
+
+/// API KEY's field, open for one service: masked, never logged, never kept. It goes with its
+/// subscription, its text cleared first (`Line::keying_off`).
+pub(super) struct Keying {
+    pub to: &'static Provider,
+    pub field: Entity<InputState>,
+    _sub: Subscription,
 }
 
 /// The Brain screen's lists that open in place, one at a time.
@@ -280,6 +290,8 @@ pub enum Fold {
     SignIn,
     /// API KEY's services.
     Key,
+    /// RUN LOCAL's models: the local server's (MODEL's LOCAL group).
+    Local,
     /// MODEL's menu.
     Model,
 }
@@ -291,12 +303,17 @@ pub enum BrainRow {
     SignIn,
     /// One of SIGN IN's accounts (`Status::accounts`, its index).
     Account(usize),
+    /// Under the account signing in: its own page, to open again (`sign_in_page`).
+    Page,
     /// API KEY: one of Synaps' API-key services, its list opened in place.
     Key,
     /// One of API KEY's services (`provider::services`, its index).
     Service(usize),
-    /// RUN LOCAL: a model on his machine.
+    /// RUN LOCAL: a model on his machine; with the local server's models, their list opened in
+    /// place.
     Local,
+    /// One of RUN LOCAL's models (`local_picks`, its index).
+    LocalPick(usize),
     /// MODEL: every model she can switch to, its menu opened in place.
     Model,
     /// One of MODEL's models (`Status::menu`, its index across the groups).
@@ -307,10 +324,10 @@ impl BrainRow {
     /// The list a row heads or is in.
     pub fn fold(self) -> Option<Fold> {
         match self {
-            BrainRow::SignIn | BrainRow::Account(_) => Some(Fold::SignIn),
+            BrainRow::SignIn | BrainRow::Account(_) | BrainRow::Page => Some(Fold::SignIn),
             BrainRow::Key | BrainRow::Service(_) => Some(Fold::Key),
+            BrainRow::Local | BrainRow::LocalPick(_) => Some(Fold::Local),
             BrainRow::Model | BrainRow::Pick(_) => Some(Fold::Model),
-            BrainRow::Local => None,
         }
     }
 
@@ -319,13 +336,19 @@ impl BrainRow {
         match f {
             Fold::SignIn => BrainRow::SignIn,
             Fold::Key => BrainRow::Key,
+            Fold::Local => BrainRow::Local,
             Fold::Model => BrainRow::Model,
         }
     }
 
     /// One of a list's own rows (not its head).
     pub fn inside(self) -> bool {
-        matches!(self, BrainRow::Account(_) | BrainRow::Service(_) | BrainRow::Pick(_))
+        matches!(self, BrainRow::Account(_) | BrainRow::Page | BrainRow::Service(_) | BrainRow::LocalPick(_) | BrainRow::Pick(_))
+    }
+
+    /// A row that heads a list.
+    fn heads(self) -> bool {
+        matches!(self, BrainRow::SignIn | BrainRow::Key | BrainRow::Local | BrainRow::Model)
     }
 }
 
@@ -334,18 +357,46 @@ pub fn picks(m: &provider::Status) -> Vec<provider::Choice> {
     m.menu().into_iter().flat_map(|g| g.models).collect()
 }
 
+/// RUN LOCAL's list: the local server's models (MODEL's LOCAL group).
+pub fn local_picks(m: &provider::Status) -> Vec<provider::Choice> {
+    let local = provider::LOCAL.name.to_uppercase();
+    m.menu().into_iter().find(|g| g.name == local).map_or_else(Vec::new, |g| g.models)
+}
+
+/// RUN LOCAL opens its list: a server here with models to pick, and her model free to change.
+/// Else its ⏎ opens the steps.
+fn local_opens(m: &provider::Status) -> bool {
+    m.lock.is_none() && local_picks(m).iter().any(|c| c.pick.is_some())
+}
+
+/// The sign-in running's own page (its provider's, `signin::allowed`), to open again.
+pub fn sign_in_page(p: &Prefs) -> Option<(&'static Provider, &str)> {
+    let s = p.signing.as_ref().filter(|s| s.failed.is_none())?;
+    let to = provider::by_id(s.id)?;
+    s.url.as_deref().filter(|u| provider::signin::allowed(to, u)).map(|u| (to, u))
+}
+
 /// The Brain screen's rows (`fold`: the list open). MODEL once she has a model (attached).
 pub fn brain_rows(p: &Prefs, fold: Option<Fold>) -> Vec<BrainRow> {
     let m = &p.mind;
     let mut v = vec![BrainRow::SignIn];
     if fold == Some(Fold::SignIn) {
-        v.extend((0..m.accounts().len()).map(BrainRow::Account));
+        let page = sign_in_page(p).map(|(to, _)| to.id);
+        for (i, a) in m.accounts().iter().enumerate() {
+            v.push(BrainRow::Account(i));
+            if page == Some(a.id) {
+                v.push(BrainRow::Page);
+            }
+        }
     }
     v.push(BrainRow::Key);
     if fold == Some(Fold::Key) {
         v.extend((0..provider::services().count()).map(BrainRow::Service));
     }
     v.push(BrainRow::Local);
+    if fold == Some(Fold::Local) {
+        v.extend((0..local_picks(m).len()).map(BrainRow::LocalPick));
+    }
     if m.model.is_some() {
         v.push(BrainRow::Model);
         if fold == Some(Fold::Model) {
@@ -355,6 +406,21 @@ pub fn brain_rows(p: &Prefs, fold: Option<Fold>) -> Vec<BrainRow> {
     v
 }
 
+/// Where the Brain screen opens: SIGN IN picked, every list closed; her login ran out (SIGN IN
+/// AGAIN ▸ brought him here), her own account's row (or her service's), its list open.
+pub fn brain_landing(p: &Prefs) -> (usize, Option<Fold>) {
+    let m = &p.mind;
+    let Some(to) = m.provider().filter(|_| m.expired && m.here) else { return (0, None) };
+    let (fold, row) = match to.kind {
+        Kind::Key => (Fold::Key, provider::services().position(|q| q == to).map(BrainRow::Service)),
+        Kind::Local => return (0, None),
+        _ => (Fold::SignIn, m.accounts().iter().position(|&q| q == to).map(BrainRow::Account)),
+    };
+    let Some(row) = row else { return (0, None) };
+    let rows = brain_rows(p, Some(fold));
+    rows.iter().position(|&r| r == row).map_or((0, None), |i| (i, Some(fold)))
+}
+
 /// The Brain screen's row `sel` once its rows change from `old`'s to `new`'s (a look found
 /// Gemini's client id, a login or a local model; her brain changed): the same row, the same
 /// account or model, where it is now. A row gone: the same place, kept in the list.
@@ -362,6 +428,7 @@ pub fn brain_reselect(old: &Prefs, new: &Prefs, sel: usize, fold: Option<Fold>) 
     let id = |p: &Prefs, r: BrainRow| match r {
         BrainRow::Account(i) => (BrainRow::Account(0), p.mind.accounts().get(i).map(|a| a.id.to_string())),
         BrainRow::Pick(i) => (BrainRow::Pick(0), picks(&p.mind).get(i).map(|c| c.pick.map_or_else(|| c.label.clone(), str::to_string))),
+        BrainRow::LocalPick(i) => (BrainRow::LocalPick(0), local_picks(&p.mind).get(i).map(|c| c.pick.map_or_else(|| c.label.clone(), str::to_string))),
         r => (r, None),
     };
     let now = brain_rows(new, fold);
@@ -383,20 +450,30 @@ fn signing<'a>(p: &'a Prefs, to: &Provider) -> Option<&'a Signing> {
 /// An account's or a service's row: what ⏎ on it does. One with a login here, not hers: switch
 /// her to it (its default model). Without one: sign in (an account: in his browser; a service:
 /// its key in her field), not for a daemon on another machine (a sign-in here wouldn't reach
-/// it). Hers, signed in: nothing. Its sign-in running: stop it.
+/// it), nor Grok on Windows (`signin::needs_newer`). Hers, signed in: nothing; its login ran
+/// out: sign in again, the same way. Its sign-in running: stop it.
 fn use_provider(p: &Prefs, to: &'static Provider) -> Act {
     let m = &p.mind;
     if signing(p, to).is_some_and(|s| s.failed.is_none()) {
         return Act::Cancel;
     }
+    let sign_in = || match to.kind {
+        Kind::Key => Act::Key(to),
+        _ if provider::signin::needs_newer(m.windows, to) => Act::Nothing,
+        _ => Act::SignIn(to),
+    };
+    let hers = m.provider() == Some(to);
     match (m.has(to), m.here) {
-        (true, _) if m.provider() == Some(to) => Act::Nothing,
+        (_, true) if hers && m.expired => sign_in(),
+        (true, _) if hers => Act::Nothing,
         (true, _) if m.lock.is_none() => to.models.first().map_or(Act::Nothing, |d| Act::Pref(Pref::Model(d.0))),
-        (false, true) if to.kind == Kind::Key => Act::Key(to),
-        (false, true) => Act::SignIn(to),
+        (false, true) => sign_in(),
         _ => Act::Nothing,
     }
 }
+
+/// PgUp/PgDn move this many rows; Home/End go to the ends (of the list open, when he's in it).
+const PAGE: usize = 7;
 
 /// MODEL's ⏎: its menu opens, unless there's nothing to pick (nothing signed in, no local
 /// model) or her model is locked (`--model`, `--session`).
@@ -415,25 +492,52 @@ pub fn brain_key(key: &str, sel: usize, p: &Prefs, fold: Option<Fold>) -> (usize
     let at = |f: Option<Fold>, on: BrainRow| brain_rows(p, f).iter().position(|r| *r == on).unwrap_or(0);
     let go = matches!(key, "enter" | "right" | "space");
     let head = |f: Fold| BrainRow::head(f);
+    // A head's list opens: MODEL's and RUN LOCAL's only with something to pick.
+    let opens = |r: BrainRow| match r {
+        BrainRow::Model => model_opens(p),
+        BrainRow::Local => local_opens(&p.mind),
+        r => r.heads(),
+    };
+    // PgUp/PgDn/Home/End: within the list open while he's in it (or on its head), else the screen.
+    let (lo, hi) = match fold.filter(|&f| row.fold() == Some(f)) {
+        Some(f) => {
+            let mine: Vec<usize> = rows.iter().enumerate().filter(|(_, r)| r.inside() && r.fold() == Some(f)).map(|(i, _)| i).collect();
+            (mine.first().copied().unwrap_or(0), mine.last().copied().unwrap_or(rows.len() - 1))
+        }
+        None => (0, rows.len() - 1),
+    };
     let act = match (key, row) {
         ("up", _) => return (sel.saturating_sub(1), Act::Nothing),
         ("down", _) => return ((sel + 1).min(rows.len() - 1), Act::Nothing),
+        ("home", _) => return (lo, Act::Nothing),
+        ("end", _) => return (hi, Act::Nothing),
+        ("pageup", _) => return (sel.saturating_sub(PAGE).max(lo), Act::Nothing),
+        ("pagedown", _) => return ((sel + PAGE).clamp(lo, hi), Act::Nothing),
         ("left", r) if fold.is_some() && r.fold() == fold => {
             let f = fold.unwrap_or(Fold::SignIn);
             return (at(None, head(f)), Act::Fold(None));
         }
         (_, BrainRow::Model) if go && !model_opens(p) => Act::Nothing,
-        ("right", r @ (BrainRow::SignIn | BrainRow::Key | BrainRow::Model)) if fold != r.fold() => return (at(r.fold(), r), Act::Fold(r.fold())),
-        ("enter" | "space", r @ (BrainRow::SignIn | BrainRow::Key | BrainRow::Model)) => {
+        ("right", r) if r.heads() && opens(r) && fold != r.fold() => return (at(r.fold(), r), Act::Fold(r.fold())),
+        ("enter" | "space", r) if r.heads() && (opens(r) || fold == r.fold()) => {
             let f = if fold == r.fold() { None } else { r.fold() };
             return (at(f, r), Act::Fold(f));
         }
+        (_, BrainRow::Page) if go => sign_in_page(p).map_or(Act::Nothing, |(_, u)| Act::Open(u.to_string())),
         (_, BrainRow::Account(i)) if go => p.mind.accounts().get(i).map_or(Act::Nothing, |&to| use_provider(p, to)),
         (_, BrainRow::Service(i)) if go => provider::services().nth(i).map_or(Act::Nothing, |to| use_provider(p, to)),
         (_, BrainRow::Pick(i)) if go => match picks(&p.mind).get(i) {
             Some(c) if !c.on && p.mind.lock.is_none() => match c.pick {
                 // Picked: the menu closes on MODEL.
                 Some(to) => return (at(None, BrainRow::Model), Act::Pref(Pref::Model(to))),
+                None => Act::Nothing,
+            },
+            _ => Act::Nothing,
+        },
+        (_, BrainRow::LocalPick(i)) if go => match local_picks(&p.mind).get(i) {
+            Some(c) if !c.on && p.mind.lock.is_none() => match c.pick {
+                // Picked: the list closes on RUN LOCAL.
+                Some(to) => return (at(None, BrainRow::Local), Act::Pref(Pref::Model(to))),
                 None => Act::Nothing,
             },
             _ => Act::Nothing,
@@ -486,13 +590,16 @@ pub fn brain_hint(p: &Prefs, sel: usize, fold: Option<Fold>) -> &'static str {
     let rows = brain_rows(p, fold);
     let row = rows[sel.min(rows.len() - 1)];
     let open = fold.is_some() && row.fold() == fold;
+    let again = |to: &Provider| p.mind.expired && p.mind.provider() == Some(to);
     match (row, brain_key("enter", sel, p, fold).1, open) {
-        (BrainRow::SignIn | BrainRow::Key | BrainRow::Model, Act::Fold(None), _) => "↑↓ pick · ⏎ close · esc back",
-        (BrainRow::SignIn | BrainRow::Key | BrainRow::Model, Act::Fold(Some(_)), _) => "↑↓ pick · ⏎ open · esc back",
+        (BrainRow::SignIn | BrainRow::Key | BrainRow::Local | BrainRow::Model, Act::Fold(None), _) => "↑↓ pick · ⏎ close · esc back",
+        (BrainRow::SignIn | BrainRow::Key | BrainRow::Local | BrainRow::Model, Act::Fold(Some(_)), _) => "↑↓ pick · ⏎ open · esc back",
+        (_, Act::SignIn(to), true) if again(to) => "↑↓ pick · ⏎ sign in again · ← close · esc back",
         (_, Act::SignIn(_), true) => "↑↓ pick · ⏎ sign in · ← close · esc back",
+        (_, Act::Open(_), _) => "↑↓ pick · ⏎ open it in your browser · ← close · esc back",
         (_, Act::Cancel, true) => "↑↓ pick · ⏎ stop signing in · ← close · esc back",
         (_, Act::Key(_), true) => "↑↓ pick · ⏎ paste a key · ← close · esc back",
-        (BrainRow::Pick(_), Act::Pref(_), _) => "↑↓ pick · ⏎ use it · ← close · esc back",
+        (BrainRow::Pick(_) | BrainRow::LocalPick(_), Act::Pref(_), _) => "↑↓ pgup pgdn · ⏎ use it · ← close · esc back",
         (_, Act::Pref(_), true) => "↑↓ pick · ⏎ switch to it · ← close · esc back",
         (_, _, true) => "↑↓ pick · ← close · esc back",
         (_, Act::Local, _) => "↑↓ pick · ⏎ the steps · esc back",
@@ -756,7 +863,7 @@ impl Line {
         let now = Instant::now();
         self.swap = Some(now);
         // API KEY's field goes with the page (what was typed in it too).
-        self.keying = None;
+        self.keying_off(window, cx);
         // A held ALLOW lets go: its prompt is off screen now (or was, a moment ago).
         self.hold_at = None;
         // What was said on the page left goes with it (COPIED, ESC AGAIN TO ABORT), and so does
@@ -773,9 +880,8 @@ impl Line {
         if self.nav.page == Page::Settings {
             self.sel = 0;
         } else if self.nav.page == Page::Brain {
-            // The ways in, SIGN IN picked; every list closed.
-            self.bsel = 0;
-            self.fold = None;
+            // The ways in, SIGN IN picked, every list closed; her login ran out: her own row.
+            (self.bsel, self.fold) = self.snap.prefs.as_ref().map_or((0, None), brain_landing);
         } else if !self.snap.prompts.is_empty() {
             // Back to a prompt he couldn't see: its buttons arm afresh.
             self.prompt_at = now;
@@ -817,7 +923,7 @@ impl Line {
         // API KEY's field open: its keys are its own (⏎ saves); Esc closes it.
         if self.keying.is_some() {
             if k.key == "escape" {
-                self.keying = None;
+                self.keying_off(window, cx);
                 self.refocus(window, cx);
                 cx.notify();
                 return true;
@@ -863,8 +969,9 @@ impl Line {
         let page = self.nav.page;
         match act {
             Act::Pref(p) => {
-                // A model picked from MODEL's menu: it closes (`brain_key` is on MODEL already).
-                if matches!(p, Pref::Model(_)) && self.fold == Some(Fold::Model) {
+                // A model picked from MODEL's menu (or RUN LOCAL's): it closes (`brain_key` is on
+                // its head already).
+                if matches!(p, Pref::Model(_)) && matches!(self.fold, Some(Fold::Model | Fold::Local)) {
                     self.fold = None;
                 }
                 // Shown as asked at once: a second key steps on from it, not from the value
@@ -888,7 +995,7 @@ impl Line {
             }
             Act::Fold(f) => {
                 self.fold = f;
-                self.keying = None;
+                self.keying_off(window, cx);
                 self.refocus(window, cx);
             }
             Act::SignIn(to) => {
@@ -902,30 +1009,41 @@ impl Line {
                 (self.on_ask)(Ask::SignInCancel, cx).ok();
             }
             Act::Key(to) => {
+                self.keying_off(window, cx);
                 let f = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder(format!("your {} API key (hidden, never logged)", to.name)));
                 let sub = cx.subscribe_in(&f, window, move |this: &mut Line, st: &Entity<InputState>, ev: &InputEvent, window, cx| {
                     if let InputEvent::PressEnter { .. } = ev {
-                        let key = st.read(cx).value().trim().to_string();
-                        if !key.is_empty() {
-                            this.keying = None;
+                        let key = crate::session::Secret(st.read(cx).value().trim().to_string());
+                        if !key.0.is_empty() {
+                            this.keying_off(window, cx);
                             if let Some(prefs) = &mut this.snap.prefs {
                                 prefs.signing = Some(Signing::new(to.id));
                             }
-                            (this.on_ask)(Ask::Key(to, crate::session::Secret(key)), cx).ok();
+                            (this.on_ask)(Ask::Key(to, key), cx).ok();
                             this.refocus(window, cx);
                             cx.notify();
                         }
                     }
                 });
-                self._subs.push(sub);
-                self.keying = Some((to, f));
+                self.keying = Some(Keying { to, field: f, _sub: sub });
                 self.refocus(window, cx);
             }
             Act::Local => {
                 (self.on_ask)(Ask::OpenUrl(LOCAL_STEPS.into()), cx).ok();
                 self.say(page, "OPENED THE STEPS", cx);
             }
+            Act::Open(u) => {
+                (self.on_ask)(Ask::OpenUrl(u), cx).ok();
+                self.say(page, "OPENED THE SIGN-IN PAGE", cx);
+            }
             Act::Nothing => {}
+        }
+    }
+
+    /// API KEY's field closed: its text cleared before it goes, and its subscription with it.
+    pub(super) fn keying_off(&mut self, window: &mut Window, cx: &mut Context<Line>) {
+        if let Some(k) = self.keying.take() {
+            k.field.update(cx, |s, cx| s.set_value("", window, cx));
         }
     }
 
@@ -1123,6 +1241,7 @@ impl Line {
             let mut fold_at: Option<usize> = None;
             let menu = m.menu();
             let picks: Vec<(usize, provider::Choice)> = menu.iter().enumerate().flat_map(|(g, gr)| gr.models.iter().cloned().map(move |c| (g, c))).collect();
+            let locals = local_picks(m);
             let flush = |fold: &mut Vec<AnyElement>, out: &mut Vec<AnyElement>| {
                 if !fold.is_empty() {
                     out.push(
@@ -1155,9 +1274,12 @@ impl Line {
                         .child(div().w(px(14.0)).flex().justify_center().child(theme::glyph_at(arrow, if live { pal.accent } else { c }, pal.panel, 9.0)))
                         .into_any_element()
                 };
-                // ✓ on a provider with a login here; IN USE on hers.
+                // ✓ on a provider with a login here; IN USE on hers (its login ran out: a red dot
+                // and ⏎ to sign in again).
                 let state = |to: &'static Provider, blurb: &str| -> (String, Option<&'static str>) {
                     match (m.has(to), m.provider() == Some(to)) {
+                        (_, true) if m.expired && m.here && to.kind == Kind::Key => ("KEY TURNED DOWN · ⏎ NEW KEY".into(), Some("disc")),
+                        (_, true) if m.expired && m.here => ("LOGGED OUT · ⏎ SIGN IN AGAIN".into(), Some("disc")),
                         (true, true) => ("IN USE".into(), Some("check")),
                         (true, false) => ("SIGNED IN".into(), Some("check")),
                         _ if !m.here => ("ON ITS MACHINE".into(), None),
@@ -1174,7 +1296,8 @@ impl Line {
                     BrainRow::SignIn => {
                         let accounts = m.accounts();
                         let n = accounts.iter().filter(|to| m.has(to)).count();
-                        let (b, mark) = match m.provider().filter(|to| to.kind == Kind::OAuth && m.has(to)) {
+                        let (b, mark) = match m.provider().filter(|to| to.kind == Kind::OAuth && (m.has(to) || m.expired)) {
+                            Some(to) if m.expired => (format!("LOGGED OUT · {}", to.name.to_uppercase()), Some("disc")),
                             Some(to) => (format!("IN USE · {}", to.name.to_uppercase()), Some("check")),
                             None if n > 0 => (format!("{n} SIGNED IN"), Some("check")),
                             None if !m.here => ("ON ITS MACHINE".into(), None),
@@ -1208,12 +1331,16 @@ impl Line {
                             }
                             Some(sg) if sg.failed.is_none() => target.push(way(&name, "SIGNING IN… · ⏎ STOP".into(), None, true, None)),
                             Some(_) => target.push(way(&name, "DIDN'T WORK · ⏎ AGAIN".into(), Some("disc"), true, None)),
+                            // Grok on Windows: Synaps 0.12.0 can't open its page whole.
+                            None if !m.has(to) && m.here && provider::signin::needs_newer(m.windows, to) => target.push(way(&name, "NEEDS A NEWER SYNAPS".into(), None, false, None)),
                             None => {
                                 let (b, mark) = state(to, blurb);
                                 target.push(way(&name, b, mark, m.here || m.has(to), None));
                             }
                         }
                     }
+                    // Under the account signing in: its page, for when his browser didn't open.
+                    BrainRow::Page => target.push(way("      NO BROWSER?", "OPEN THE SIGN-IN PAGE".into(), None, true, None)),
                     BrainRow::Key => {
                         let (b, mark) = key_word(m);
                         target.push(way("API KEY", b, mark, true, Some(self.fold == Some(Fold::Key))));
@@ -1231,7 +1358,7 @@ impl Line {
                             }
                         }
                         // Its key, typed: masked, never logged, never kept.
-                        if let Some((_, f)) = self.keying.as_ref().filter(|(k, _)| k.id == to.id) {
+                        if let Some(Keying { field: f, .. }) = self.keying.as_ref().filter(|k| k.to.id == to.id) {
                             target.push(
                                 div()
                                     .px(px(PAD))
@@ -1255,7 +1382,16 @@ impl Line {
                             Some(provider::Local::Off) if ollama => ("free · offline · Ollama isn't running".into(), None),
                             _ => ("free · offline · Ollama".into(), None),
                         };
-                        target.push(way("RUN LOCAL", b, mark, m.here, None));
+                        let opens = local_opens(m);
+                        target.push(way("RUN LOCAL", b, mark, m.here, opens.then_some(self.fold == Some(Fold::Local))));
+                    }
+                    BrainRow::LocalPick(i) => {
+                        let Some(c) = locals.get(i) else { continue };
+                        let mut r = row(ix, on).child(label(&format!("   {}", c.label), on, None, 420.0)).child(div().flex_1());
+                        if c.on {
+                            r = r.child(word("IN USE".into(), Some("check"), pal.accent));
+                        }
+                        target.push(r.into_any_element());
                     }
                     BrainRow::Model => {
                         let why = match m.lock {
@@ -1310,33 +1446,10 @@ impl Line {
                 self.fold_scroll.scroll_to_item(k);
                 self.fold_seen.set(Some((self.fold, sel)));
             }
-            // Where his login goes (and where it doesn't: a daemon on another machine); while a
-            // sign-in runs, its page, for when the browser didn't open.
-            match p.signing.as_ref().filter(|s| s.failed.is_none()).and_then(|s| s.url.clone()) {
-                Some(url) => out.push(
-                    div()
-                        .id("brain-url")
-                        .px(px(PAD))
-                        .pt(px(6.0))
-                        .cursor_pointer()
-                        .text_size(px(SMALL))
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(rgb(pal.accent))
-                        .child("browser didn't open? open the sign-in page ▸")
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                                cx.stop_propagation();
-                                (this.on_ask)(Ask::OpenUrl(url.clone()), cx).ok();
-                            }),
-                        )
-                        .into_any_element(),
-                ),
-                None => {
-                    let foot = if m.here { "your login stays on this machine (~/.synaps-cli)" } else { "my daemon is on another machine (--socket): its logins are there" };
-                    out.push(div().px(px(PAD)).pt(px(6.0)).text_size(px(SMALL)).font_weight(FontWeight::MEDIUM).text_color(rgb(small_c)).child(foot).into_any_element());
-                }
-            }
+            // Where his login goes (and where it doesn't: a daemon on another machine). A sign-in's
+            // page, for when his browser didn't open, is a row under its account (`BrainRow::Page`).
+            let foot = if m.here { "your login stays on this machine (~/.synaps-cli)" } else { "my daemon is on another machine (--socket): its logins are there" };
+            out.push(div().px(px(PAD)).pt(px(6.0)).text_size(px(SMALL)).font_weight(FontWeight::MEDIUM).text_color(rgb(small_c)).child(foot).into_any_element());
         } else {
             let rows = set_rows(&p);
             let sel = self.sel.min(rows.len() - 1);
@@ -1345,7 +1458,8 @@ impl Line {
                 match r {
                     SetRow::Brain => {
                         out.push(section("BRAIN"));
-                        let none = m.none();
+                        // No brain, or its login ran out: a red dot and SET UP / SIGN IN AGAIN.
+                        let none = m.none() || m.expired;
                         let c = if none { pal.accent } else if m.ok() { pal.text } else { small_c };
                         let mark = if none {
                             Some("disc")
@@ -1369,7 +1483,11 @@ impl Line {
                             row(ix, on)
                                 .child(label("BRAIN", on, None, 170.0))
                                 .child(div().flex_1().min_w(px(0.0)).flex().justify_end().overflow_hidden().child(word(brain_word(m), mark, c)))
-                                .child(go(if none { button("set-brain", "SET UP ▸", true) } else { button("set-brain", "CHANGE ▸", false) }))
+                                .child(go(match (m.none(), m.expired) {
+                                    (false, true) => button("set-brain", "SIGN IN AGAIN ▸", true),
+                                    (true, _) => button("set-brain", "SET UP ▸", true),
+                                    _ => button("set-brain", "CHANGE ▸", false),
+                                }))
                                 .into_any_element(),
                         );
                     }
@@ -1513,6 +1631,8 @@ pub fn brain_line(m: &provider::Status) -> &'static str {
     match m.local.as_ref().map(|l| &l.1) {
         _ if !m.here && !m.ok() => "My brain runs on another machine. Sign in there, then say hi.",
         _ if m.none() => "Give me a brain and I'll talk back.",
+        _ if m.expired && m.provider().is_some_and(|p| p.kind == Kind::Key) => "My key was turned down. Paste a new one under API KEY.",
+        _ if m.expired => "My login ran out. Sign me in again under SIGN IN.",
         _ if local && m.stale_url() => "Synaps is still on its old local URL. Run `synaps daemon reload`, then ask me again.",
         _ if m.ok() => "That's what I think with. Swap it any time.",
         Some(provider::Local::Off) if local && ollama => "Ollama's asleep. Start it and I'll look again.",
@@ -1555,6 +1675,9 @@ pub fn brain_word(m: &provider::Status) -> String {
         Some(p) => format!("{} · {label}", p.name.to_uppercase()),
         None => label,
     };
+    if m.expired {
+        w.push_str(" · LOGGED OUT");
+    }
     if m.provider().is_some_and(|p| p.kind == Kind::Local) {
         match &m.local {
             Some((_, provider::Local::Off)) => w.push_str(" · OFF"),
@@ -1699,6 +1822,15 @@ mod tests {
         assert_eq!(brain_key("enter", 1, &p, in_), (1, Act::SignIn(by("openai-codex"))));
         assert_eq!(brain_key("enter", 2, &p, in_), (2, Act::SignIn(by("anthropic"))));
         assert_eq!(brain_key("enter", 4, &p, in_), (4, Act::SignIn(by("xai-auth"))), "Grok, where Gemini would be");
+        // Windows: Synaps 0.12.0 can't open Grok's page whole (it prints none): its row does
+        // nothing (it says it needs a newer Synaps). The others as anywhere.
+        let mut w = p.clone();
+        w.mind.windows = true;
+        assert_eq!(brain_key("enter", 4, &w, in_), (4, Act::Nothing));
+        assert_eq!(brain_hint(&w, 4, in_), "↑↓ pick · ← close · esc back");
+        assert_eq!(brain_key("enter", 2, &w, in_), (2, Act::SignIn(by("anthropic"))));
+        w.mind.signed.push("xai-auth");
+        assert_eq!(brain_key("enter", 4, &w, in_), (4, Act::Pref(Pref::Model("xai-auth/grok-4.3"))), "a login on file: a switch, no sign-in");
         assert_eq!(brain_key("left", 4, &p, in_), (0, Act::Fold(None)), "← closes it, back on SIGN IN");
         assert_eq!(brain_key("down", 9, &p, in_), (9, Act::Nothing));
         // API KEY from under SIGN IN's accounts: SIGN IN closes, API KEY opens, picked.
@@ -1745,7 +1877,18 @@ mod tests {
         assert_eq!(brain_key("enter", 4, &p, m), (4, Act::Nothing), "hers already");
         assert_eq!(brain_key("enter", 8, &p, m), (model, Act::Pref(Pref::Model("claude-opus-5-5"))), "picked: the menu closes on MODEL");
         assert_eq!(brain_key("left", 6, &p, m), (model, Act::Fold(None)));
-        assert_eq!(brain_hint(&p, 8, m), "↑↓ pick · ⏎ use it · ← close · esc back");
+        assert_eq!(brain_hint(&p, 8, m), "↑↓ pgup pgdn · ⏎ use it · ← close · esc back");
+        // PgUp/PgDn a page, Home/End its ends: within the menu while he's in it (or on MODEL).
+        let last = open.len() - 1;
+        assert_eq!(brain_key("home", 9, &p, m), (4, Act::Nothing));
+        assert_eq!(brain_key("end", 4, &p, m), (last, Act::Nothing));
+        assert_eq!(brain_key("pagedown", 4, &p, m).0, (4 + 7).min(last));
+        assert_eq!(brain_key("pagedown", last - 1, &p, m).0, last);
+        assert_eq!(brain_key("pageup", last, &p, m).0, last - 7);
+        assert_eq!(brain_key("pageup", 5, &p, m).0, 4, "never past its first");
+        assert_eq!(brain_key("pagedown", model, &p, m).0, 4 + 7 - 1, "on MODEL: into its menu");
+        assert_eq!(brain_key("end", 0, &p, None).0, model, "no list open: the screen's ends");
+        assert_eq!(brain_key("home", model, &p, None).0, 0);
         assert_eq!(brain_hint(&p, 4, m), "↑↓ pick · ← close · esc back", "hers: nothing to do");
         assert_eq!(brain_hint(&p, model, None), "↑↓ pick · ⏎ open · esc back");
         assert_eq!(brain_word(&p.mind), "CLAUDE · SONNET 4.6");
@@ -1841,6 +1984,52 @@ mod tests {
         assert_eq!(brain_key("enter", 1, &p, in_).1, Act::SignIn(provider::by_id("openai-codex").unwrap()));
         p.signing = Some(Signing { failed: Some("OAuth denied".into()), ..Signing::new("anthropic") });
         assert_eq!(brain_key("enter", 2, &p, in_).1, Act::SignIn(provider::by_id("anthropic").unwrap()), "again");
+        // Its own page (its provider's, `signin::allowed`): a row under it opens it, by keys or
+        // a click, for when his browser didn't.
+        let page = "https://claude.ai/oauth/authorize?code=true&client_id=x&state=y";
+        p.signing = Some(Signing { url: Some(page.into()), ..Signing::new("anthropic") });
+        let rows = brain_rows(&p, in_);
+        assert_eq!(&rows[2..5], &[BrainRow::Account(1), BrainRow::Page, BrainRow::Account(2)]);
+        assert_eq!(brain_key("down", 2, &p, in_), (3, Act::Nothing));
+        assert_eq!(brain_key("enter", 3, &p, in_), (3, Act::Open(page.into())));
+        assert_eq!(brain_hint(&p, 3, in_), "↑↓ pick · ⏎ open it in your browser · ← close · esc back");
+        assert_eq!(brain_key("left", 3, &p, in_), (0, Act::Fold(None)));
+        assert_eq!(brain_rows(&p, None), [BrainRow::SignIn, BrainRow::Key, BrainRow::Local, BrainRow::Model], "closed: not there");
+        // Not its own page: no row (a redirect off its domain, another's, a failed sign-in's).
+        for url in ["https://www.google.com/url?q=https://claude.ai/&a=1", "https://evil.com\\.claude.ai/?a=1&b=2", "https://auth.openai.com/oauth/authorize?a=1&b=2"] {
+            p.signing = Some(Signing { url: Some(url.into()), ..Signing::new("anthropic") });
+            assert!(!brain_rows(&p, in_).contains(&BrainRow::Page), "{url}");
+        }
+        p.signing = Some(Signing { url: Some(page.into()), failed: Some("x".into()), ..Signing::new("anthropic") });
+        assert!(!brain_rows(&p, in_).contains(&BrainRow::Page), "failed: its page is gone");
+    }
+
+    /// Her login ran out (`LOGGED OUT`): her account's row signs in again, the same way as a
+    /// first sign-in (no terminal); a key turned down takes a new one in her field.
+    #[test]
+    fn a_login_that_ran_out_signs_in_again() {
+        let mut p = prefs();
+        p.mind.expired = true;
+        let in_ = Some(Fold::SignIn);
+        assert_eq!(brain_key("enter", 2, &p, in_).1, Act::SignIn(provider::by_id("anthropic").unwrap()));
+        assert_eq!(brain_hint(&p, 2, in_), "↑↓ pick · ⏎ sign in again · ← close · esc back");
+        assert_eq!(brain_line(&p.mind), "My login ran out. Sign me in again under SIGN IN.");
+        assert_eq!(brain_word(&p.mind), "CLAUDE · SONNET 4.6 · LOGGED OUT");
+        // Another account with a login: a switch, as ever.
+        p.mind.signed.push("openai-codex");
+        assert_eq!(brain_key("enter", 1, &p, in_).1, Act::Pref(Pref::Model("openai-codex/gpt-5.5")));
+        let mut k = Prefs { mind: mind("groq/llama-3.3-70b-versatile", Some(true)), ..prefs() };
+        k.mind.expired = true;
+        assert_eq!(brain_key("enter", 2, &k, Some(Fold::Key)).1, Act::Key(provider::by_id("groq").unwrap()));
+        assert_eq!(brain_line(&k.mind), "My key was turned down. Paste a new one under API KEY.");
+        // SIGN IN AGAIN ▸ lands on her own row, its list open.
+        assert_eq!(brain_landing(&p), (2, in_));
+        assert_eq!(brain_landing(&k), (2, Some(Fold::Key)));
+        assert_eq!(brain_landing(&prefs()), (0, None), "not ran out: SIGN IN, closed");
+        // On another machine: nothing to do here.
+        p.mind.here = false;
+        assert_eq!(brain_key("enter", 2, &p, in_).1, Act::Nothing);
+        assert_eq!(brain_landing(&p), (0, None));
     }
 
     /// A look that adds or drops a row (Gemini's client id found, a login on file) keeps the row
@@ -1879,14 +2068,15 @@ mod tests {
         assert_eq!(brain_key("enter", 2, &p, None).1, Act::Nothing, "RUN LOCAL: its machine's server, not this one's");
         assert_eq!(brain_hint(&p, 2, None), "↑↓ pick · esc back");
         assert_eq!(brain_hint(&p, 2, in_), "↑↓ pick · ← close · esc back");
-        // MODEL: hers, its login there (can't tell here): its provider's models.
-        assert_eq!(brain_key("enter", 3, &p, None).1, Act::Fold(Some(Fold::Model)));
-        assert_eq!(brain_key("enter", 8, &p, Some(Fold::Model)).1, Act::Pref(Pref::Model("claude-opus-5-5")));
+        // MODEL: its login there can't be told from here: no models until her model answers.
+        assert_eq!(brain_key("enter", 3, &p, None).1, Act::Nothing, "no confirmed login: nothing to pick");
         assert_eq!(brain_line(&p.mind), "My brain runs on another machine. Sign in there, then say hi.");
         assert_eq!(brain_word(&p.mind), "CLAUDE · SONNET 4.6");
-        // It answered: a brain, there or here.
+        // It answered: a brain, there or here; its provider's models.
         p.mind.signed_in = Some(true);
         assert_eq!(brain_line(&p.mind), "That's what I think with. Swap it any time.");
+        assert_eq!(brain_key("enter", 3, &p, None).1, Act::Fold(Some(Fold::Model)));
+        assert_eq!(brain_key("enter", 8, &p, Some(Fold::Model)).1, Act::Pref(Pref::Model("claude-opus-5-5")));
     }
 
     /// A local model: the server's look says whether it's there; MODEL holds the server's.
@@ -1920,6 +2110,24 @@ mod tests {
         p.mind.local = Some(("http://localhost:11434/v1".into(), Local::Up(vec!["qwen3:8b".into(), "gemma3:4b".into()])));
         assert_eq!(brain_key("enter", model, &p, None).1, Act::Fold(Some(Fold::Model)));
         assert_eq!(brain_key("enter", model + 2, &p, Some(Fold::Model)).1, Act::Pref(Pref::Model("local/gemma3:4b")));
+        // RUN LOCAL with the server's models: their list in place, not a web page; a pick
+        // switches her and closes it on RUN LOCAL.
+        let (local, l) = (2, Some(Fold::Local));
+        assert_eq!(brain_key("enter", local, &p, None), (local, Act::Fold(l)));
+        assert_eq!(brain_hint(&p, local, None), "↑↓ pick · ⏎ open · esc back");
+        assert_eq!(&brain_rows(&p, l)[local..], &[BrainRow::Local, BrainRow::LocalPick(0), BrainRow::LocalPick(1), BrainRow::Model]);
+        assert_eq!(brain_key("enter", 3, &p, l).1, Act::Nothing, "hers");
+        assert_eq!(brain_key("enter", 4, &p, l), (local, Act::Pref(Pref::Model("local/gemma3:4b"))));
+        assert_eq!(brain_hint(&p, 4, l), "↑↓ pgup pgdn · ⏎ use it · ← close · esc back");
+        assert_eq!(brain_key("left", 4, &p, l), (local, Act::Fold(None)));
+        assert_eq!(brain_key("enter", local, &p, l), (local, Act::Fold(None)), "open: ⏎ closes it");
+        // Its server down, or her model locked: the steps.
+        let mut off = p.clone();
+        off.mind.local = Some(("http://localhost:11434/v1".into(), Local::Off));
+        assert_eq!(brain_key("enter", local, &off, None).1, Act::Local);
+        let mut locked = p.clone();
+        locked.mind.lock = Some(Lock::Cli);
+        assert_eq!(brain_key("enter", local, &locked, None).1, Act::Local);
         assert_eq!(brain_word(&Status::default()), "OFFLINE");
     }
 

@@ -26,9 +26,11 @@
               Brain screen, MODEL's menu, a model picked and written); his TUI's /model followed, a
               ChatGPT sign-in made in a terminal seen by the open screen, MODEL sent back; a Groq key
               on file, its row under API KEY switching her to it; two accounts and a local server
-              (tools/fakelocal.py): MODEL's menu by provider, scrolled, a local model picked; a
-              sign-in from her (tools/fakesynaps.cmd: Copilot's code, then its login); and a daemon
-              through --socket (another machine's).
+              (tools/fakelocal.py): MODEL's menu by provider, End, scrolled, a local model picked,
+              RUN LOCAL's models; sign-ins from her (tools/fakesynaps.cmd: Copilot's code, then its
+              login; ChatGPT's page opened whole, again by keys, and its synaps login gone with her
+              when she's killed); an API key typed into her field; and a daemon through --socket
+              (another machine's).
   Out: <Out>\<set>\<take>\<step>.png + .json (her `state`), <Out>\index.json, <Out>\logs\.
 #>
 param(
@@ -552,7 +554,8 @@ $Scenes = [ordered]@{
         # Two accounts signed in and a local model: MODEL's menu, every model by provider, scrolled
         # to the local ones, one picked.
         menu   = {
-            Start-Take brain menu -Local -Model 'claude-sonnet-4-6' -History $Short -LocalModels @('qwen3:8b', 'llama3.2:latest') -Synaps @{
+            $urlFile = Join-Path $Root 'brain-menu-url.txt'
+            Start-Take brain menu -Local -Model 'claude-sonnet-4-6' -History $Short -LocalModels @('qwen3:8b', 'llama3.2:latest') -Env @{ SA_URL_FILE = $urlFile } -Synaps @{
                 'auth.json' = '{"anthropic": {"type": "oauth"}, "openai-codex": {"type": "oauth"}}'
                 'config'    = "provider.local.url = http://127.0.0.1:$LocalPort/v1`n"
             }
@@ -567,21 +570,38 @@ $Scenes = [ordered]@{
             $groups = @((State).line.mind.menu | ForEach-Object { $_.name })
             if (($groups -join ',') -ne 'CHATGPT,CLAUDE,LOCAL') { $script:Fails.Add("${script:Take}: MODEL's menu is $($groups -join ','), not CHATGPT,CLAUDE,LOCAL") }
             Shot '20-menu' 'MODEL open: ChatGPT, Claude and the local server''s models, by provider; Sonnet checked'
-            1..30 | ForEach-Object { Key 'down' 80 }
+            Key 'end' 1000
             Start-Sleep 1
-            Shot '21-menu-local' 'down to the last: the menu scrolled to the local models'
+            $st = State
+            if ($st.line.brain_sel -ne @($st.line.brain_rows).Count - 1) { $script:Fails.Add("${script:Take}: End isn't on the menu's last ($($st.line.brain_sel))") }
+            if ([Math]::Abs([double]$st.line.fold_scroll[0]) -lt 1) { $script:Fails.Add("${script:Take}: the menu never scrolled ($($st.line.fold_scroll -join ','))") }
+            Shot '21-menu-local' 'End: the last, the menu scrolled to the local models'
             Key 'enter' 1800
             $dl = Join-Path $Logs 'brain-menu-daemon.log'
             if (-not (Wait-Until { (Get-Content -Raw $dl -ErrorAction SilentlyContinue) -match 'cmd set model local/llama3.2:latest' } 10 'her session on the local model')) {
                 $script:Fails.Add("${script:Take}: a local model picked never reached her session")
             }
+            if ((State).line.fold -ne 'None') { $script:Fails.Add("${script:Take}: the menu didn't close on a pick ($((State).line.fold))") }
             Start-Sleep 1
             Shot '22-picked' 'enter: her brain is the local model, the menu closed'
+            # RUN LOCAL with the server up: its models in place (no web page).
+            Remove-Item $urlFile -ErrorAction SilentlyContinue
+            Key 'up' 600
+            Key 'enter' 1200
+            $st = State
+            if ($st.line.fold -ne 'Some(Local)' -or @($st.line.brain_rows) -notcontains 'LocalPick(1)') { $script:Fails.Add("${script:Take}: RUN LOCAL didn't open its models ($($st.line.fold))") }
+            if (Test-Path $urlFile) { $script:Fails.Add("${script:Take}: RUN LOCAL opened a page: $(Get-Content -Raw $urlFile)") }
+            Shot '22b-run-local' 'up to RUN LOCAL, enter: the local server''s models in place, hers checked'
         }
         # A sign-in from her (a stand-in synaps, Copilot's device login): SIGNING IN with its code
         # large (copied), then its login on file: SIGNED IN, her model on Copilot.
         signin = {
-            Start-Take brain signin -Local -Model 'claude-sonnet-4-6' -History $Short -SynapsExe (Join-Path $Tools 'fakesynaps.cmd') -Env @{ FAKE_SIGNIN_AFTER = '8'; SA_CLIP_FILE = (Join-Path $Root 'brain-signin-clip.txt') }
+            $pids = Join-Path $Root 'brain-signin-pids.txt'
+            $urlFile = Join-Path $Root 'brain-signin-url.txt'
+            Start-Take brain signin -Local -Model 'claude-sonnet-4-6' -History $Short -SynapsExe (Join-Path $Tools 'fakesynaps.cmd') -Env @{
+                FAKE_SIGNIN_AFTER = '8'; FAKE_SIGNIN_NEVER = 'openai-codex'; FAKE_SYNAPS_PIDS = $pids
+                SA_CLIP_FILE = (Join-Path $Root 'brain-signin-clip.txt'); SA_URL_FILE = $urlFile
+            }
             $null = Ctl 'brain off'
             $null = Ctl 'settings open brain'
             Start-Sleep 2
@@ -599,10 +619,77 @@ $Scenes = [ordered]@{
             if (-not (Wait-Until { (Get-Content -Raw $dl -ErrorAction SilentlyContinue) -match 'cmd set model github-copilot/' } 10 'her session on Copilot')) {
                 $script:Fails.Add("${script:Take}: signed in, but her model never moved to Copilot")
             }
-            $log = (Get-Content -Raw (Join-Path $Logs 'brain-signin-her.err') -ErrorAction SilentlyContinue) + (Get-Content -Raw (Join-Path $Logs 'brain-signin-her.log') -ErrorAction SilentlyContinue)
-            if ("$log" -match 'FAKE-C0DE|github\.com/login/device') { $script:Fails.Add("${script:Take}: her log has the code or the URL") }
             Start-Sleep 1
             Shot '24-signed-in' 'its login on file: SIGNED IN, her model on Copilot'
+            # Its stand-in ended (its stdin closed once the login was on file).
+            $first = @(Get-Content $pids -ErrorAction SilentlyContinue)[0]
+            if (-not $first -or -not (Wait-Until { -not (Get-Process -Id $first -ErrorAction SilentlyContinue) } 20 'Copilot''s stand-in gone')) {
+                $script:Fails.Add("${script:Take}: Copilot's synaps login (pid $first) never ended")
+            }
+            # ChatGPT, a PKCE page: Synaps' `cmd /c start` cuts it at its first &, so she opens it
+            # whole herself (SA_URL_FILE: the page she opened). Its row then has the page under it.
+            $page = 'https://auth.openai.com/oauth/authorize?response_type=code&client_id=FAKE&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&state=FAKE'
+            Remove-Item $urlFile -ErrorAction SilentlyContinue
+            Key 'up'; Key 'up' 600
+            Key 'enter' 1500
+            if (-not (Wait-Until { (Get-Content -Raw $urlFile -ErrorAction SilentlyContinue) -ceq $page } 15 'the page opened whole')) {
+                $script:Fails.Add("${script:Take}: ChatGPT's page wasn't opened whole ($(Get-Content -Raw $urlFile -ErrorAction SilentlyContinue))")
+            }
+            if (-not (Wait-Until { @((State).line.brain_rows) -contains 'Page' } 10 'the page''s row')) { $script:Fails.Add("${script:Take}: no row for its page under CHATGPT") }
+            Shot '25-chatgpt-page' 'SIGN IN > CHATGPT: her browser opened on its page, whole; under it, its page to open again'
+            # The page again, by keys alone: down to its row, enter.
+            Remove-Item $urlFile -ErrorAction SilentlyContinue
+            Key 'down' 800
+            Key 'enter' 1200
+            if (-not (Wait-Until { (Get-Content -Raw $urlFile -ErrorAction SilentlyContinue) -ceq $page } 10 'the page again')) {
+                $script:Fails.Add("${script:Take}: its row didn't open the page by keys")
+            }
+            Shot '26-page-again' 'down to NO BROWSER?, enter: the page opened again'
+            $log = (Get-Content -Raw (Join-Path $Logs 'brain-signin-her.err') -ErrorAction SilentlyContinue) + (Get-Content -Raw (Join-Path $Logs 'brain-signin-her.log') -ErrorAction SilentlyContinue)
+            if ("$log" -match 'FAKE-C0DE|github\.com/login/device|auth\.openai\.com') { $script:Fails.Add("${script:Take}: her log has a code or a URL") }
+            # She dies mid sign-in (killed, as a crash): its synaps login goes with her (her job object).
+            $last = @(Get-Content $pids -ErrorAction SilentlyContinue)[-1]
+            if (-not $last -or $last -eq $first -or -not (Get-Process -Id $last -ErrorAction SilentlyContinue)) {
+                $script:Fails.Add("${script:Take}: ChatGPT's synaps login isn't running (pid $last)")
+            } else {
+                Stop-Process -Id $script:Her.Id -Force
+                if (-not (Wait-Until { -not (Get-Process -Id $last -ErrorAction SilentlyContinue) } 10 'its stand-in gone with her')) {
+                    $script:Fails.Add("${script:Take}: synaps login (pid $last) outlived her")
+                    Stop-Process -Id $last -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
+        # An API key from her: API KEY > GROQ, her masked field, the key typed; enter hands it to
+        # synaps login on its stdin (the stand-in takes only that key), never logged; KEY SET, her
+        # brain on Groq.
+        keyin  = {
+            $pids = Join-Path $Root 'brain-keyin-pids.txt'
+            Start-Take brain keyin -Local -Model 'claude-sonnet-4-6' -History $Short -SynapsExe (Join-Path $Tools 'fakesynaps.cmd') `
+                -Synaps @{ 'auth.json' = '{"anthropic": {"type": "oauth"}}' } -Env @{ FAKE_KEY_EXPECT = 'gsk1234fake'; FAKE_SYNAPS_PIDS = $pids }
+            $null = Ctl 'brain off'
+            $null = Ctl 'settings open brain'
+            Start-Sleep 2
+            Focus-Line-Top
+            Key 'down'; Key 'enter' 1000
+            Key 'down' 800
+            Key 'enter' 1200
+            if ((State).line.keying -ne 'groq') { $script:Fails.Add("${script:Take}: enter on GROQ didn't open her field ($((State).line.keying))") }
+            foreach ($c in 'gsk1234fake'.ToCharArray()) { Key "$c" 60 }
+            Start-Sleep 1
+            Shot '27-key-typed' 'API KEY > GROQ, enter: her field, masked, a key typed'
+            Key 'enter' 1500
+            if ((State).line.keying) { $script:Fails.Add("${script:Take}: her field is still open after enter") }
+            if (-not (Wait-Until { @((State).line.mind.signed) -contains 'groq' } 20 'the key on file')) { $script:Fails.Add("${script:Take}: the key never reached synaps login") }
+            $dl = Join-Path $Logs 'brain-keyin-daemon.log'
+            if (-not (Wait-Until { (Get-Content -Raw $dl -ErrorAction SilentlyContinue) -match 'cmd set model groq/llama-3.3-70b-versatile' } 10 'her session on Groq')) {
+                $script:Fails.Add("${script:Take}: the key in, but her model never moved to Groq")
+            }
+            $one = @(Get-Content $pids -ErrorAction SilentlyContinue)[0]
+            if (-not $one -or -not (Wait-Until { -not (Get-Process -Id $one -ErrorAction SilentlyContinue) } 10 'its stand-in gone')) { $script:Fails.Add("${script:Take}: synaps login (pid $one) never ended") }
+            $log = (Get-Content -Raw (Join-Path $Logs 'brain-keyin-her.err') -ErrorAction SilentlyContinue) + (Get-Content -Raw (Join-Path $Logs 'brain-keyin-her.log') -ErrorAction SilentlyContinue)
+            if ("$log" -match 'gsk1234fake') { $script:Fails.Add("${script:Take}: her log has the key") }
+            Start-Sleep 1
+            Shot '28-key-in' 'enter: the key to synaps login on its stdin; GROQ KEY SET, her brain on Groq'
         }
         # A daemon through --socket (maybe another machine's): its logins aren't hers to read or make.
         remote = {

@@ -175,6 +175,8 @@ fn model_held(sent: bool, has: bool, blocked: bool) -> Option<&'static str> {
 pub(super) struct PrefJob {
     pub pref: Pref,
     pub menu: bool,
+    /// Her bubble says it too once it's in (a sign-in's switch: "Opus 5.5 it is").
+    pub aloud: bool,
 }
 
 pub(super) struct LineWin {
@@ -623,7 +625,7 @@ impl Avatar {
                     Row { who: Who::Tool, text: format!("{name} {mark}"), detail: crate::session::one_line(&t.input, 110), streaming: false }
                 }
                 K::Notice => Row { who: Who::Sys, text: it.text.trim().to_string(), detail: String::new(), streaming: false },
-                K::Error => error_row(&it.text, s.link.model(), s.link.unpicked()),
+                K::Error => error_row(&it.text, s.link.model(), s.link.unpicked_error(it.id)),
                 _ => continue,
             };
             rows.push(row);
@@ -746,11 +748,15 @@ impl Avatar {
                     }
                 }
                 provider::signin::Ev::Url(u) => {
-                    if cfg!(windows) && provider::signin::reopen(p, &u) {
+                    // Its own sign-in page only (`allowed`): opened whole where Synaps' was cut
+                    // (Windows), and kept for the Brain screen's row that opens it again.
+                    if provider::signin::reopen(cfg!(windows), p, &u) {
                         elog!("synaps-avatar: sign-in: {} page opened whole (Synaps' was cut at its &)", p.id);
-                        cx.open_url(&u);
+                        self.line_ask(Ask::OpenUrl(u.clone()), cx).ok();
                     }
-                    if let Some(s) = &mut self.signing {
+                    if provider::signin::allowed(p, &u)
+                        && let Some(s) = &mut self.signing
+                    {
                         s.url = Some(u);
                     }
                 }
@@ -784,22 +790,30 @@ impl Avatar {
             s.link.creds_now(now);
         }
         let m = self.mind_now();
-        let said = match p.models.first() {
-            Some(d) if m.provider() != Some(p) && m.lock.is_none() => {
-                self.set_pref(Pref::Model(d.0), cx);
-                format!("Signed in to {}. {} it is.", p.name, provider::model_spoken(d.0))
-            }
-            _ => format!("Signed in to {}.", p.name),
-        };
+        // Its default model, once its write is in: "X it is" said then, not before.
+        let said = format!("Signed in to {}.", p.name);
         self.say(said.clone(), now);
         self.prefs_says = Some(said);
+        if let Some(d) = p.models.first()
+            && m.provider() != Some(p)
+            && m.lock.is_none()
+        {
+            self.settings_write(PrefJob { pref: Pref::Model(d.0), menu: false, aloud: true }, cx);
+        }
     }
 
     /// Her brain as the Settings page shows it: her model (as asked: a MODEL write on its way),
     /// its login, what locks it, and the last look (`look_at_brain`).
     pub(super) fn mind_now(&self) -> provider::Status {
         let look = &self.brain_look;
-        let mut m = provider::Status { signed: look.signed.clone(), synaps: look.synaps.clone(), local: look.local.clone(), gemini: look.gemini, ..provider::Status::default() };
+        let mut m = provider::Status {
+            signed: look.signed.clone(),
+            synaps: look.synaps.clone(),
+            local: look.local.clone(),
+            gemini: look.gemini,
+            windows: cfg!(windows),
+            ..provider::Status::default()
+        };
         let Some(s) = &self.session else { return m };
         m.model = crate::line::asked_model(self.prefs_io.pending().map(|j| &j.pref), s.link.model_on_way().or(s.link.model()));
         m.signed_in = match s.link.creds() {
@@ -816,6 +830,7 @@ impl Avatar {
         };
         m.here = s.link.local();
         m.tried = s.link.local_tried().map(str::to_string);
+        m.expired = s.link.trouble() == Some(&crate::session::Trouble::LoggedOut);
         m
     }
 
@@ -873,7 +888,7 @@ impl Avatar {
     /// can't read or parse is left alone), off her UI thread; once it is in, that key alone is
     /// applied (his other hand edits wait for `settings reload`). Her line says which.
     pub(super) fn set_pref(&mut self, p: Pref, cx: &mut Context<Self>) {
-        self.settings_write(PrefJob { pref: p, menu: false }, cx);
+        self.settings_write(PrefJob { pref: p, menu: false, aloud: false }, cx);
     }
 
     /// settings.toml written in the order asked, one write at a time, each off the UI thread
@@ -958,7 +973,14 @@ impl Avatar {
                     Pref::Wake(true) => "Say my name, I'll hear it.".into(),
                     Pref::Wake(false) => "I'll stop listening for my name.".into(),
                     Pref::Model(m) => match held {
-                        None => format!("{} it is. Your next message runs on it.", provider::model_spoken(m)),
+                        None => {
+                            let said = format!("{} it is. Your next message runs on it.", provider::model_spoken(m));
+                            // A sign-in's switch: in, so said where he is.
+                            if job.aloud {
+                                self.say(format!("{} it is.", provider::model_spoken(m)), Instant::now());
+                            }
+                            said
+                        }
                         Some(why) => why.into(),
                     },
                 }

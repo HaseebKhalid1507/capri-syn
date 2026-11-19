@@ -8,15 +8,27 @@
   LOCAL, each opened in place. Claude has no row or label of its own any more. `provider.rs` `ALL`
   lists its accounts in that order (by name), Claude second.
 - **She signs in herself:** a SIGN IN account runs `synaps login --provider …` with no window and
-  your browser opens on the provider's page (Copilot: its code shown large and copied). SIGNING IN…
-  with ⏎ to stop; signed in, she switches to that account's model; failed, she says why, with the
-  terminal line in her bubble. An API key goes in a hidden field, to Synaps on its stdin. Never a
-  copied command for a SIGN IN row, never the URL or the code in her log.
+  your browser opens on the provider's page (Copilot: its code shown large and copied, the one
+  thing she copies: short-lived, single-use). SIGNING IN… with ⏎ to stop, and NO BROWSER? under it
+  to open the page again (keys or a click); signed in, she switches to that account's model and
+  says so once it's written; failed, she says why, with the terminal line in her bubble. An API key
+  goes in a hidden field, to Synaps on its stdin (the field cleared, her copy zeroed). Never a
+  copied command for a SIGN IN row, never the URL or the code in her log. Synaps' login dies with
+  her, a crash too (a job object on Windows, `PR_SET_PDEATHSIG` on Linux).
+- **Only its own sign-in page is opened:** read off the exact line its provider prints, then https,
+  `claude.ai`, `auth.openai.com` or `accounts.google.com` with their sign-in path, no userinfo, no
+  port, no `\`. On Windows she opens it whole (Synaps' `cmd /c start` cuts it at its `&`). Grok on
+  Windows says NEEDS A NEWER SYNAPS: Synaps 0.12.0 opens its page cut and never prints it.
+- **LOGGED OUT signs in again from her:** `SIGN IN AGAIN ▸` in her bubble opens Settings ▸ Brain on
+  her account's row (LOGGED OUT · ⏎ SIGN IN AGAIN, the same sign-in), no terminal.
 - **MODEL is a menu:** every model of every account signed in here, every key service with a key,
-  and the local server's, by provider, hers checked; no cap, it scrolls. `sign in first` when there's
-  nothing. The model lists are Synaps 0.12.0's catalogs.
-- **NO BRAIN YET with nothing picked** (no `[session] model`, no model in Synaps' config) says to
-  pick a brain, with `SET ME UP ▸` to Settings ▸ Brain, not to sign in to Claude.
+  and the local server's, by provider, hers checked; no cap, it scrolls (PgUp/PgDn, Home/End).
+  Only confirmed logins count: a fresh install lists no Claude models. `sign in first` when there's
+  nothing. The model lists are Synaps 0.12.0's catalogs. RUN LOCAL with the server up lists its
+  models in place.
+- **NO BRAIN YET with nothing picked** (no `[session] model`, no model in Synaps' config, her
+  session on Synaps' default) says to pick a brain, with `SET ME UP ▸` to Settings ▸ Brain, not to
+  sign in to Claude.
 
 ### Windows: her tray icon starts on the taskbar
 - Windows 11 puts every new tray icon in the hidden `^` overflow, so on a first install she was there
