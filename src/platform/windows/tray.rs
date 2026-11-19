@@ -21,6 +21,8 @@
 //!   time. `WM_CONTEXTMENU` opens the menu her model laid out (`TrackPopupMenu` at the click;
 //!   what can't act now greyed), and its pick comes back as `WM_COMMAND`: `TrayEv::Pick`. Either
 //!   is his input to her: the keyboard is hers to take for `GRANT_MS` (the Line on a click).
+//! - Windows 11 starts a new icon in the `^` overflow: the first time hers is in, once, it is put on
+//!   the taskbar (`promote`, on a thread of its own). Hide her later and she stays hidden.
 //! - Gone on `remove` (QUIT), on its window's end and when the session ends: no ghost.
 
 use super::super::{Tray, TrayEv, TrayIcon, TrayItem};
@@ -153,6 +155,8 @@ struct State {
     v4: bool,
     /// When the last `Open` went (`tick` ms): the second click of a double click is the same one.
     opened_at: u64,
+    /// Her icon went in once, and `promote` was started for it (never again in this run).
+    promote_started: bool,
 }
 
 thread_local! {
@@ -320,6 +324,10 @@ fn try_add(h: HWND, s: &mut State, why: Why) {
         match why {
             Why::Restart => elog!("synaps-avatar: tray: Explorer started again; her icon is back"),
             _ => elog!("synaps-avatar: tray: her icon is in ({} px from {from}, {by}){}", s.px, if again { ", tried again" } else { "" }),
+        }
+        // The first time it's in, out of the overflow (never from a test: it writes her marker and his registry).
+        if !std::mem::replace(&mut s.promote_started, true) && !cfg!(test) {
+            super::promote::spawn(s.guid.to_u128());
         }
         return;
     }
@@ -671,6 +679,7 @@ pub(super) fn start(icon: TrayIcon, instance: &str, grant: Arc<AtomicU64>, on: B
             left: false,
             v4: false,
             opened_at: 0,
+            promote_started: false,
         };
         STATE.with(|st| *st.borrow_mut() = Some(s));
         GUID_NOW.set(guid.to_u128());
@@ -787,6 +796,8 @@ mod tests {
     const TEST: &str = "tray test";
     /// The cut-short end's test: an instance of its own.
     const CUT: &str = "tray test, cut short";
+    /// The promote's test: an instance of its own.
+    const PROMO: &str = "tray test, promoted";
     /// The live tray tests one at a time: `LIVE` is one per process, as her tray is.
     static LIVE_TEST: Mutex<()> = Mutex::new(());
 
@@ -1076,5 +1087,50 @@ mod tests {
         t.remove();
         assert!(!delete_now(Duration::from_secs(2)), "her tray took it out already");
         drop(t);
+    }
+
+    /// Her icon out of the overflow, on the runner's own tray: the icon in, her NotifyIconSettings subkey
+    /// found (Explorer writes it a moment after the add), `IsPromoted` written once and read back, and
+    /// left alone the second time (the marker). A machine with no such key (not Windows 11) or no subkey
+    /// of hers in ten seconds says so on the log and passes (`shots:tray` is the check there: it fails
+    /// the take if she doesn't promote herself). CI only, as above: it writes the shell's own settings.
+    #[test]
+    fn her_icon_is_promoted_once_it_is_in() {
+        use super::super::promote::{self, Outcome};
+        if std::env::var_os("CI").is_none() && std::env::var_os("SA_TRAY_TEST").is_none() {
+            elog!("tray test: skipped (not CI; SA_TRAY_TEST=1 runs it here)");
+            return;
+        }
+        let _one = LIVE_TEST.lock().unwrap_or_else(|p| p.into_inner());
+        let own = crate::brand::own();
+        let icon = TrayIcon { file: None, stamp: 0, w: own.width(), h: own.height(), rgba: own.into_raw() };
+        let t = start(icon, PROMO, Arc::new(AtomicU64::new(0)), Box::new(|_: TrayEv| {})).unwrap();
+        assert!(t.until(|t| t.shown()), "Shell_NotifyIconW(NIM_ADD) returned FALSE");
+        let g = guid(PROMO).to_u128();
+        let dir = std::env::temp_dir().join(format!("capri-tray-promote-{}", std::process::id()));
+        let marker = dir.join("tray-promoted");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let first = promote::run(g, &marker).expect("her exe's path");
+        let read = promote::promoted(g);
+        elog!("tray test: promote: {first:?}, IsPromoted read back: {read:?}, marker: {}; {}", marker.exists(), promote::seen());
+        match first {
+            Outcome::Shown => {
+                assert_eq!(read, Some(1), "IsPromoted isn't a 1 in her subkey");
+                assert!(marker.is_file(), "no marker");
+                assert_eq!(promote::run(g, &marker), Some(Outcome::LeftAsSet), "once only");
+            }
+            // Explorer had set it already for this exe and icon: his, left as it is.
+            Outcome::LeftAsSet => assert!(marker.is_file()),
+            Outcome::NoKey | Outcome::NoEntry => {
+                elog!("tray test: promote: nothing to promote here ({first:?})");
+                assert!(!marker.exists(), "a marker with nothing done");
+            }
+            Outcome::Failed(e) => panic!("her subkey wouldn't take IsPromoted (error {e})"),
+        }
+        t.remove();
+        assert!(!unsafe { IsWindow(Some(t.h())) }.as_bool());
+        drop(t);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

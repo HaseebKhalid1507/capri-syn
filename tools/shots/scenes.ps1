@@ -902,12 +902,30 @@ function Get-HerTrayGuid {
     [Guid]::Parse(('{0}-{1}-{2}-{3}-{4}' -f $x.Substring(0, 8), $x.Substring(8, 4), $x.Substring(12, 4), $x.Substring(16, 4), $x.Substring(20, 12)))
 }
 
-<# Her icon out of the overflow: its NotifyIconSettings key (Explorer writes one the first time an
-   icon is in) IsPromoted = 1, and Explorer started again if that alone doesn't bring it out (she
-   puts her icon back on TaskbarCreated, and Explorer reads the key then). Her button. #>
+<# A NotifyIconSettings key's IconGuid as a [Guid] (text, or 16 bytes); none where it has none. #>
+function Get-KeyGuid($Key) {
+    $v = $Key.GetValue('IconGuid')
+    if ($v -is [byte[]] -and $v.Length -eq 16) { return [Guid]::new([byte[]]$v) }
+    $o = [Guid]::Empty
+    if ($v -and [Guid]::TryParse([string]$v, [ref]$o)) { return $o }
+}
+
+<# Her icon out of the overflow. She does it herself, the first time it's in (promote.rs): her
+   NotifyIconSettings key (Explorer writes one the first time an icon is in) IsPromoted = 1, once. Said
+   here, and a problem if she didn't (the take's fresh state folder has no marker); then the key is set
+   from here, as before, and Explorer started again if that alone doesn't bring it out (she puts her
+   icon back on TaskbarCreated, and Explorer reads the key then). Her button. #>
 function Show-TrayIcon {
     $keys = { @(Get-ChildItem 'HKCU:\Control Panel\NotifyIconSettings' -ErrorAction SilentlyContinue | Where-Object { [string]$_.GetValue('ExecutablePath') -like '*\synaps-avatar.exe' }) }
     $null = Wait-Until { (& $keys).Count -gt 0 } 20 'her NotifyIconSettings key'
+    $g = Get-HerTrayGuid
+    $mine = { @(& $keys | Where-Object { $kg = Get-KeyGuid $_; (-not $kg) -or ($kg -eq $g) } | Where-Object { $_.GetValue('IsPromoted') -eq 1 }) }
+    if (Wait-Until { (& $mine).Count -gt 0 } 20 'her own IsPromoted = 1') {
+        Write-Host "  she promoted herself: NotifyIconSettings\$((& $mine)[0].PSChildName)"
+    } else {
+        $script:Fails.Add("${script:Take}: she didn't promote her own icon (no IsPromoted = 1 in her NotifyIconSettings key after 20 s; set from here)")
+        foreach ($k in & $keys) { Write-Host "    key $($k.PSChildName): $($k.GetValue('ExecutablePath')) IconGuid=$($k.GetValue('IconGuid')) UID=$($k.GetValue('UID')) IsPromoted=$($k.GetValue('IsPromoted'))" }
+    }
     foreach ($k in & $keys) {
         Set-ItemProperty -Path $k.PSPath -Name IsPromoted -Value 1 -Type DWord
         Write-Host "  promoted: NotifyIconSettings\$($k.PSChildName) ($($k.GetValue('InitialTooltip')))"

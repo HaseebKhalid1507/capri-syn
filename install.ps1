@@ -944,7 +944,7 @@ function Get-SelfCommand {
 function Remove-Hers {
     foreach ($f in @((Join-Path $script:Conf 'settings.toml'), (Join-Path $script:Conf 'settings.toml.tmp'),
             (Join-Path $script:Data 'state.json'), (Join-Path $script:Data 'state.json.tmp'),
-            (Join-Path $script:Data 'sessions.json'), (Join-Path $script:Data 'sessions.json.tmp'),
+            (Join-Path $script:Data 'sessions.json'), (Join-Path $script:Data 'sessions.json.tmp'), (Join-Path $script:Data 'tray-promoted'),
             (Join-Path $script:Data 'synaps-avatar.log'), (Join-Path $script:Data 'synaps-avatar.old.log'))) {
         if (Test-Path -LiteralPath $f) { Invoke-Action "Remove-Item $f" { Remove-Item -Force -LiteralPath $f } }
     }
