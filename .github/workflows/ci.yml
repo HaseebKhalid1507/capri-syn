@@ -181,6 +181,11 @@ jobs:
         shell: powershell
         run: ./installer/test-units.ps1
 
+      # steps.ps1 login against a stand-in synaps.exe: the whole sign-in URL, stdin held open.
+      - name: Her sign-in step
+        shell: powershell
+        run: ./packaging/windows/test-login.ps1
+
       # install.ps1 end to end with the installer this job built, as his own user: dry runs that
       # touch nothing (also fetched from GitHub at this commit: as a scriptblock, and the real
       # `irm | iex`, which must leave the session as it was), the install (--yes --no-autostart),
@@ -360,7 +365,7 @@ jobs:
         shell: pwsh
         run: |
           if (-not (Get-Module -ListAvailable PSScriptAnalyzer)) { Install-Module PSScriptAnalyzer -Force -Scope CurrentUser }
-          $found = foreach ($f in 'install.ps1', 'installer/test-windows.ps1', 'installer/test-units.ps1', 'packaging/windows/steps.ps1', 'packaging/windows/test-install.ps1', 'packaging/windows/test-setup-e2e.ps1', 'packaging/windows/test-setup-wizard.ps1', 'packaging/windows/test-setup-voice.ps1') { Invoke-ScriptAnalyzer -Path $f -Severity Warning, Error }
+          $found = foreach ($f in 'install.ps1', 'installer/test-windows.ps1', 'installer/test-units.ps1', 'packaging/windows/steps.ps1', 'packaging/windows/test-install.ps1', 'packaging/windows/test-setup-e2e.ps1', 'packaging/windows/test-setup-wizard.ps1', 'packaging/windows/test-setup-voice.ps1', 'packaging/windows/test-login.ps1') { Invoke-ScriptAnalyzer -Path $f -Severity Warning, Error }
           $found | Format-Table -AutoSize ScriptName, Line, RuleName, Message | Out-String -Width 220
           if ($found) { throw "PSScriptAnalyzer: $(@($found).Count) finding(s)" }
           Write-Output 'PSScriptAnalyzer: clean'
