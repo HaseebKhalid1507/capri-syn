@@ -66,3 +66,5 @@ Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 
 if ($fails.Count) { throw "$($fails.Count) check(s) failed: $($fails -join '; ')" }
 Write-Output 'her sign-in step works'
+# The failed login above left $LASTEXITCODE at 1: the shell would report it.
+exit 0
