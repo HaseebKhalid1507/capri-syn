@@ -4,6 +4,7 @@
     python3 tools/capri-watch/test_capri_watch.py
 """
 import atexit, base64, importlib.machinery, importlib.util, io, json, os, re, shutil, sys, tempfile, unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 _loader = importlib.machinery.SourceFileLoader("capri_watch", os.path.join(HERE, "capri-watch"))
@@ -178,9 +179,24 @@ class ConfigTest(unittest.TestCase):
         for bad in ('role = "remote"\n', 'role = "bella"\n', 'role = "avante"\n', '[deliver]\ntransport = "ssh"\n'):
             with self.assertRaises(ValueError, msg=bad):
                 cw.load_config(text=bad, hostname="x")
-        old = cw.load_config(text='role = ""\nsynaps = ""\n[deliver]\ntransport = ""\nssh_host = "elsewhere"\n', hostname="x")
-        self.assertEqual((old["role"], old["synaps"], old["deliver"]["transport"]), ("local", "synaps", "local"),
-                         "an old copy of watch.toml (empty role and synaps) runs as the defaults")
+        # a pre-v1 copy (role = "" meant "by hostname", ssh_host was filled in): an error, never a quiet local
+        for old in ('role = ""\nsynaps = ""\n[deliver]\ntransport = ""\nssh_host = "desk"\n', 'role = ""\n', 'role = "  "\n'):
+            with self.assertRaisesRegex(ValueError, "predates v1", msg=old):
+                cw.load_config(text=old, hostname="x")
+
+    def test_local_delivery_with_an_ssh_host_is_an_error(self):
+        # a forgotten role = "remote" would deliver here, quietly
+        for bad in ('[deliver]\nssh_host = "desk"\n', 'role = "local"\n[deliver]\nssh_host = "desk"\n',
+                    'role = "remote"\n[deliver]\ntransport = "local"\nssh_host = "desk"\n'):
+            with self.assertRaisesRegex(ValueError, "ssh_host is 'desk' but delivery is local", msg=bad):
+                cw.load_config(text=bad, hostname="x")
+        for ok in ('role = "local"\n', 'role = "local"\n[deliver]\nssh_host = " "\n', 'role = "remote"\n[deliver]\nssh_host = "desk"\n',
+                   'role = "local"\n[deliver]\ntransport = "command"\ncommand = ["true"]\nssh_host = "desk"\n'):
+            cw.load_config(text=ok, hostname="x")
+        with open(os.path.join(HERE, "watch.toml")) as f:
+            shipped = cw.load_config(text=f.read(), hostname="x")
+        self.assertEqual((shipped["role"], shipped["deliver"]["transport"], shipped["deliver"]["ssh_host"]), ("local", "local", ""),
+                         "the shipped template is a working local setup")
 
     def test_no_personal_leftovers_in_the_defaults(self):
         with open(os.path.join(HERE, "watch.toml")) as f:
@@ -263,6 +279,35 @@ class GitHubTest(Base):
         w = cw.Watcher(cfg, self.sys, FakeTransport(cfg, self.sys), state={})
         w.tick(T0, force=True)
         self.assertFalse(any(a[0] == "gh" for a, _ in self.sys.calls))
+
+    def test_what_runs_needs_what_it_watches(self):
+        def live(toml, role="local"):
+            cfg = config(toml, role)
+            w = cw.Watcher(cfg, self.sys, FakeTransport(cfg, self.sys), state={})
+            return {src.name: src.live() for src in w.sources if src.live()}
+        bare = live("")
+        self.assertNotIn("github", bare, "no repos: ci_failed watches nothing")
+        self.assertNotIn("backup", bare, "no unit: backup_failed watches nothing")
+        self.assertEqual(live(self.toml)["github"], ["ci_failed"])
+        self.assertEqual(live('[event.review_requested]\nenabled = true\n')["github"], ["review_requested"],
+                         "reviews are a search across GitHub: no repos needed")
+        self.assertNotIn("github", live(self.toml, role="remote"))
+        self.assertEqual(live('[event.backup_failed]\nunit = "b.service"\n')["backup"], ["backup_failed"])
+        self.assertNotIn("calendar", live('[event.calendar]\nenabled = true\n'), "no db: nothing to read")
+
+    def test_the_startup_log_names_only_what_runs(self):
+        path = os.path.join(TMP, "startup.toml")
+        with open(path, "w") as f:
+            f.write('role = "local"\nhost = "desk"\n')
+        logged = []
+        with mock.patch.object(cw.Watcher, "tick", lambda *a, **k: None), mock.patch.object(cw, "log", logged.append):
+            self.assertEqual(cw.main(["--config", path, "--dry-run", "--once"]), 0)
+        line = logged[0]
+        on = line.split("events on: ")[1].split(";")[0].split(", ")
+        self.assertIn("approval_waiting", on)
+        self.assertNotIn("ci_failed", on, "no repos")
+        self.assertNotIn("backup_failed", on, "no unit")
+        self.assertIn("on but not configured (no repos, unit or db): ci_failed, backup_failed", line)
 
     def test_a_failed_repo_keeps_its_conditions(self):
         self.sys.set("gh run list -R o/capri-syn", out=gh_runs(("ci", "failure", "1234567")))

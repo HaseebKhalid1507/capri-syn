@@ -79,9 +79,9 @@ STT_FILES = {'tiny.en': 'ggml-tiny.en-q5_1.bin', 'base.en': 'ggml-base.en-q5_1.b
              'medium.en': f'{HOME}/.local/share/pywhispercpp/models/ggml-medium.en-q5_0.bin'}
 # Whisper's recognition prompt: words it should spell her way. Generic on purpose; a user's own names,
 # machines and jargon come from `[voice] vocab` in settings.toml and are appended (vocab_prompt).
-VOCAB = 'Capri, choom, preem, Night City, Synaps, avatarctl'
+VOCAB = 'Capri, choom, preem, Night City, Synaps, ' + ('capri-ctl' if WIN else 'avatarctl')   # her CLI on this OS
 VOCAB_MAX_WORDS, VOCAB_WORD_CHARS, VOCAB_USER_CHARS = 16, 32, 200   # the user's part: words, one word, all of it
-SAY_FIX = [(r'\bSynaps\b', 'Synapse'), (r'\bGPUI\b', 'G P U I'), (r'\bavatarctl\b', 'avatar control'), (r'\bJawz\b', 'Jaws'),
+SAY_FIX = [(r'\bSynaps\b', 'Synapse'), (r'\bGPUI\b', 'G P U I'), (r'\bavatarctl\b', 'avatar control'), (r'\bcapri-ctl\b', 'Capri control'),
            (r'\bi3\b', 'i three'), (r'\bCI\b', 'C I'), (r'\bPR\b', 'P R'), (r'\bchoom\b', 'chewm')]
 MIC_RATE, TTS_RATE, STEP_MS = 16000, 24000, 90
 
@@ -3179,7 +3179,13 @@ def selftest_junk():
         for v in (ok, ok.capitalize() + '.', ok.upper() + '!', ok + '?'):
             assert junk(v, 250) is None, f'{v!r} dropped: {junk(v, 250)}'
     assert junk("What's spike doing?", 900) is None and junk('Capri, stop.', 600) is None
-    selftest_vocab()
+    assert unloop('yes, yes, yes, yes, yes, yes,') == 'yes' and unloop('Well, no, no, no, no, no') == 'Well, no'
+    assert unloop('OK, okay, okay.') == 'OK, okay, okay.' and unloop('Stop.') == 'Stop.' and unloop('no no no') == 'no no no'
+    assert speech_span([0.1] * 50) is None, 'silence'
+    assert speech_span([0.9] * 5 + [0.1] * 40) is None, '5 frames (160 ms) is not enough'
+    assert speech_span([0.1] * 10 + [0.6] * 7 + [0.1] * 5) is None, 'never reaches 0.70'
+    assert speech_span([0.1] * 10 + [0.8] * 6 + [0.1] * 5) == (10, 15, 6)
+    assert speech_span([0.1] * 10 + [0.8] * 7 + [0.1] * 5, 'hands-free') is None, 'hands-free wants 8'
 
 
 def selftest_vocab():
@@ -3197,13 +3203,6 @@ def selftest_vocab():
     words = vocab_words(vocab_prompt(['Lynx', 'spike', 'bella'])[0])
     assert junk('Lynx, spike, bella.', 900, words) == 'the prompt echoed' and junk('Lynx, spike, bella.', 900) is None
     assert junk("What's spike doing?", 900, words) is None
-    assert unloop('yes, yes, yes, yes, yes, yes,') == 'yes' and unloop('Well, no, no, no, no, no') == 'Well, no'
-    assert unloop('OK, okay, okay.') == 'OK, okay, okay.' and unloop('Stop.') == 'Stop.' and unloop('no no no') == 'no no no'
-    assert speech_span([0.1] * 50) is None, 'silence'
-    assert speech_span([0.9] * 5 + [0.1] * 40) is None, '5 frames (160 ms) is not enough'
-    assert speech_span([0.1] * 10 + [0.6] * 7 + [0.1] * 5) is None, 'never reaches 0.70'
-    assert speech_span([0.1] * 10 + [0.8] * 6 + [0.1] * 5) == (10, 15, 6)
-    assert speech_span([0.1] * 10 + [0.8] * 7 + [0.1] * 5, 'hands-free') is None, 'hands-free wants 8'
 
 
 def selftest_endpoint():
@@ -3436,6 +3435,7 @@ def selftest():
     print('selftest: unprompted gate ok (call, lock, budget, cap, too late)')
     selftest_junk()
     print('selftest: junk filter ok')
+    selftest_vocab()
     print('selftest: vocab ok')
     if WIN:
         print('selftest: duck rules: Windows', _win.__name__, '(test_capri_voice.py)')

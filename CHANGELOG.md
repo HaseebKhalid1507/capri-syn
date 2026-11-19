@@ -5,10 +5,12 @@
 ### No one's names or machines in the defaults
 
 - **Speech-to-text vocabulary:** Whisper's recognition prompt is generic now (`Capri, choom, preem,
-  Night City, Synaps, avatarctl`). It no longer carries the developer's names, agents and machines. Add your
-  own with `[voice] vocab = ["…"]` in `settings.toml`: the words are appended to the prompt and count for the
-  prompt-echo filter too. Up to 16 entries, each one word or name (≤ 32 characters, no commas), 200
-  characters in all. A bad list is a settings error; the sidecar caps and cleans it again on its side.
+  Night City, Synaps, avatarctl`; `capri-ctl` instead of `avatarctl` on Windows). It no longer carries the
+  developer's names, agents and machines. Add your own with `[voice] vocab = ["…"]` in `settings.toml`: the
+  words are appended to the prompt and count for the prompt-echo filter too (so no everyday words). Up to 16
+  entries of ≤ 32 characters, 200 characters in all; past that, the first that fit are kept and the rest are
+  logged, not an error. An empty entry, a comma or a control character is a settings error naming the entry.
+- Her pronunciation fixes no longer include `Jawz` → "Jaws" (docs/VOICE.md shows how to add one).
 - **capri-watch has no hostname magic:** the role comes only from `watch.toml`.
   - `role = "local"` (the default) is her machine. It delivers here and watches GitHub.
   - `role = "remote"` is any other machine. It delivers over ssh to `[deliver] ssh_host`, which it now
@@ -20,7 +22,11 @@
   - Before this, `install.sh --watch` on any machine not named bella ran as the remote role and tried to ssh
     to `bella`. It now delivers locally.
   - Breaking for a two-machine setup that leaned on the hostnames: set `role`, `host` and `[deliver]
-    ssh_host` in each machine's `watch.toml` (docs/WATCH.md has an example).
+    ssh_host` in each machine's `watch.toml` (docs/WATCH.md has an example). A copy from before this
+    (`role = ""`) stops with an error instead of guessing, and so does `ssh_host` with local delivery (a
+    forgotten `role = "remote"`).
+  - Its first log line lists only the events that really run: `ci_failed` with no repos, `backup_failed`
+    with no unit and `calendar` with no db show as on but not configured.
 - `tools/synaps-avatar-remote` needs its host now (`synaps-avatar-remote <host>`); it had a personal
   default.
 

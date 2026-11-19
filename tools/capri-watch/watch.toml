@@ -3,7 +3,8 @@
 # Lines she gets look like:  [watch] ci_failed@desk: capri-syn main: ci failed on 09b138d (https://…)
 
 # "local": Capri's machine (watches GitHub, delivers here). "remote": any other machine (no GitHub,
-# delivers over ssh to [deliver] ssh_host, which it then needs). Only this file sets it.
+# delivers over ssh to [deliver] ssh_host, which it then needs). Only this file sets it; an empty
+# role (a pre-v1 copy of this file) is an error.
 role = "local"
 host = ""                 # the name in event lines (a label only); empty = this machine's short hostname
 poll_s = 10               # sessions, units, disk, backup, battery, GPU, calendar
@@ -23,7 +24,8 @@ transport = ""            # "local" | "ssh" | "command"; empty = by role (local 
 session = "capri"
 synaps = "synaps"         # the CLI on the machine she lives on
 profile = ""
-ssh_host = ""             # transport "ssh": Capri's machine (a host or ~/.ssh/config alias); required there
+ssh_host = ""             # transport "ssh": Capri's machine (a host or ~/.ssh/config alias); required there,
+                          # an error with local delivery (a forgotten role = "remote")
 connect_timeout_s = 5
 command = []              # transport "command": argv, with {source} {text} {session} filled in
 

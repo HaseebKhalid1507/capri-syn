@@ -113,9 +113,11 @@ def load_config(path=None, text=None, hostname=None):
         over = tomllib.loads(text)
     cfg = merge(DEFAULTS, over)
     # The role and the transport come from the file (or the defaults), never from the hostname;
-    # the hostname is only the label in event lines when `host` is empty.
-    # An empty role or synaps (as in watch.toml before v1) is the default.
-    cfg["role"] = cfg["role"] or "local"
+    # the hostname is only the label in event lines when `host` is empty. A file that sets an empty
+    # role is a copy from before v1 (role "" meant "by hostname"): it says so rather than guess.
+    if "role" in over and not str(over["role"]).strip():
+        raise ValueError('watch.toml predates v1: set role = "local" (Capri\'s machine), '
+                         'or role = "remote" with [deliver] ssh_host = her machine')
     if cfg["role"] not in ROLES:
         raise ValueError('role must be "local" or "remote"')
     local = cfg["role"] == "local"
@@ -129,6 +131,10 @@ def load_config(path=None, text=None, hostname=None):
         raise ValueError('deliver.transport must be "local", "ssh" or "command"')
     if d["transport"] == "ssh" and not d["ssh_host"].strip():
         raise ValueError('deliver.ssh_host must name Capri\'s machine (transport "ssh", the default for role "remote")')
+    if d["transport"] == "local" and d["ssh_host"].strip():
+        # A forgotten role = "remote" (or a pre-v1 file): delivering here would be quiet and wrong.
+        raise ValueError(f'deliver.ssh_host is {d["ssh_host"]!r} but delivery is local: on another machine set '
+                         'role = "remote"; on Capri\'s machine leave ssh_host empty')
     if cfg["safeguards"]["music"] not in ("defer", "drop", "ignore"):
         raise ValueError('safeguards.music must be "defer", "drop" or "ignore"')
     parse_quiet(cfg["safeguards"]["quiet_hours"])
@@ -407,7 +413,11 @@ class Source:
         return self.cfg["poll_s"]
 
     def active(self):
-        return any(self.on(k) for k in self.kinds)
+        return any(self.on(k) for k in self.live())
+
+    def live(self):
+        """The events this source really watches: on, and with what it needs configured."""
+        return [k for k in self.kinds if self.on(k)]
 
     def json_of(self, argv, timeout=30):
         rc, out, err = self.sys.run(argv, timeout=timeout)
@@ -425,8 +435,11 @@ class GitHub(Source):
     def interval(self):
         return self.cfg["github"]["poll_s"]
 
-    def active(self):
-        return self.cfg["github"]["enabled"] and super().active()
+    def live(self):
+        # review_requested is a search across GitHub; the others need repos
+        if not self.cfg["github"]["enabled"]:
+            return []
+        return [k for k in super().live() if k == "review_requested" or self.cfg["github"]["repos"]]
 
     def me(self):
         if not self.state.get("me"):
@@ -758,8 +771,8 @@ class Backup(Source):
     name = "backup"
     kinds = ("backup_failed",)
 
-    def active(self):
-        return bool(self.cfg["event"]["backup_failed"]["unit"]) and super().active()
+    def live(self):
+        return super().live() if self.cfg["event"]["backup_failed"]["unit"] else []
 
     def poll(self, now):
         e = self.cfg["event"]["backup_failed"]
@@ -853,6 +866,9 @@ class Calendar(Source):
            "recurring_pattern = '') AND date BETWEEN ? AND ? UNION ALL SELECT e.id, COALESCE(ei.override_title, e.title), "
            "ei.occurrence_date, ei.occurrence_time FROM events e JOIN event_instances ei ON e.id = ei.event_id "
            "WHERE ei.status = 'active' AND ei.occurrence_time IS NOT NULL AND ei.occurrence_date BETWEEN ? AND ?")
+
+    def live(self):
+        return super().live() if self.cfg["event"]["calendar"]["db"] else []
 
     def poll(self, now):
         e = self.cfg["event"]["calendar"]
@@ -1086,9 +1102,12 @@ def main(argv=None):
         return 0
     state = {} if a.dry_run and not a.state else None
     w = Watcher(cfg, dry_run=a.dry_run, state=state, verbose=a.verbose)
-    on = [k for k in EVENTS if w.on(k)]
+    live = {k for src in w.sources for k in src.live()}
+    on = [k for k in EVENTS if k in live]
+    idle = [k for k in EVENTS if w.on(k) and k not in live]
     log(f"role {cfg['role']} as {cfg['host']}, delivering via {cfg['deliver']['transport']} to session "
-        f"{cfg['deliver']['session']!r}{' (DRY RUN)' if a.dry_run else ''}; events on: {', '.join(on) or 'none'}")
+        f"{cfg['deliver']['session']!r}{' (DRY RUN)' if a.dry_run else ''}; events on: {', '.join(on) or 'none'}"
+        + (f"; on but not configured (no repos, unit or db): {', '.join(idle)}" if idle else ""))
     if a.once:
         w.tick(force=True)
         return 0

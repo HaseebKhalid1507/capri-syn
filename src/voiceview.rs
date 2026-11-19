@@ -310,6 +310,15 @@ impl Avatar {
         // Calls are never ducked: the [music] ignore list (player names) goes along.
         let ignore = crate::settings::Settings::load().map(|s| s.music.ignore).unwrap_or_default();
         let c = &self.voice.cfg;
+        if !c.vocab_dropped.is_empty() {
+            elog!(
+                "synaps-avatar: settings: [voice] vocab is over its caps ({} entries, {} characters each, {} in all); left out: {}",
+                crate::settings::VOCAB_MAX,
+                crate::settings::VOCAB_WORD_CHARS,
+                crate::settings::VOCAB_CHARS,
+                c.vocab_dropped.join(", ")
+            );
+        }
         let cfg = serde_json::json!({ "op": "config", "stt_model": c.stt_model, "voice": c.voice, "speed": c.speed, "pace": c.pace, "flow": c.flow, "duck_ignore": ignore, "vocab": c.vocab });
         self.voice_send(cfg);
         // New settings take a fresh wake stream (a new sensitivity; the word back on after a lost one).
