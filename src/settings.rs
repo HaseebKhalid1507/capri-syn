@@ -231,12 +231,28 @@ pub struct VoiceSettings {
     pub vocab: Vec<String>,
     /// The `vocab` entries left out by the caps (logged when the sidecar gets its config; not an error).
     pub vocab_dropped: Vec<String>,
-    /// Windows: the microphone the sidecar listens on, by its name in Sound settings (her
-    /// installer's picker writes it); empty: Windows' default. The sidecar gets it from her
-    /// running settings when it starts (a typo elsewhere in the file keeps the last good one). A
-    /// named one that's gone is said (NO MIC), never swapped for the default. Linux: unused (the
-    /// service's own `CAPRI_VOICE_SOURCE`).
+    /// Windows: the microphone the sidecar listens on, by its WASAPI name, "Microphone (USB Audio
+    /// Device Pro)" (her installer's picker writes it; `mic_name`); empty: Windows' default. The
+    /// sidecar gets it from her running settings when it starts, and starts again on a new one
+    /// (a settings reload; a typo elsewhere in the file keeps the last good one). A named one
+    /// that's gone is said (NO MIC), never swapped for the default. Linux: unused (the service's
+    /// own `CAPRI_VOICE_SOURCE`).
     pub mic: String,
+}
+
+/// `[voice] mic`'s longest name, in characters (a Windows endpoint's is far shorter).
+pub const MIC_CHARS: usize = 256;
+
+/// `[voice] mic` as she keeps it: trimmed; empty is Windows' default. A control character (it
+/// would never name a device, and a NUL stops the sidecar's start) or a name over `MIC_CHARS` is
+/// an error, for the settings file and `--set` alike.
+pub fn mic_name(m: &str) -> Result<String> {
+    let m = m.trim();
+    anyhow::ensure!(
+        !m.chars().any(char::is_control) && m.chars().count() <= MIC_CHARS,
+        "voice.mic ({m:?}): a microphone's name as Windows lists it, at most {MIC_CHARS} characters, no control characters"
+    );
+    Ok(m.to_string())
 }
 
 /// `[voice] vocab` caps, the same as the sidecar's (`VOCAB_MAX_WORDS, VOCAB_WORD_CHARS,
@@ -671,7 +687,7 @@ impl Settings {
                 voice.hold_to_talk = h;
             }
             if let Some(m) = v.mic {
-                voice.mic = m.trim().to_string();
+                voice.mic = mic_name(&m)?;
             }
             if let Some(h) = v.wake_handsfree {
                 voice.wake_handsfree = h;
@@ -1287,6 +1303,15 @@ mod tests {
         assert_eq!(v.mic, "", "Windows' default microphone unless he picked one");
         assert_eq!(Settings::parse("[voice]\nmic = \" Microphone (USB Audio) \"\n").unwrap().voice.mic, "Microphone (USB Audio)");
         assert!(Settings::parse("[voice]\nmic = 3\n").is_err());
+        for bad in ["\\u0000", "Mic\\u0000rophone", "Microphone\\t(USB)", "Mic\\u001b[31m", "Mic\\u0085rophone"] {
+            let e = Settings::parse(&format!("[voice]\nmic = \"{bad}\"\n")).unwrap_err().to_string();
+            assert!(e.contains("voice.mic") && e.contains("control characters"), "{bad}: {e}");
+        }
+        let long = "m".repeat(MIC_CHARS);
+        assert_eq!(Settings::parse(&format!("[voice]\nmic = \"{long}\"\n")).unwrap().voice.mic, long);
+        assert!(Settings::parse(&format!("[voice]\nmic = \"{long}m\"\n")).is_err(), "over {MIC_CHARS} characters");
+        assert_eq!(mic_name(" Headset Microphone (WH-1000XM4 Hands-Free) ").unwrap(), "Headset Microphone (WH-1000XM4 Hands-Free)");
+        assert_eq!(mic_name("  ").unwrap(), "", "blank: Windows' default");
         let h = Settings::parse("[voice]\nhandsfree = false\nhandsfree_timeout = 15\nhandsfree_max = 0\necho = \"Speakers\"\n").unwrap().voice;
         assert_eq!((h.handsfree, h.handsfree_timeout, h.handsfree_max, h.echo.as_str()), (false, 15, 0, "speakers"));
         assert!(Settings::parse("[voice]\nhandsfree_timeout = 5\n").is_err() && Settings::parse("[voice]\nhandsfree_max = 9999\n").is_err());

@@ -1,9 +1,10 @@
 //! She starts the voice sidecar on Windows (on Linux a systemd user unit runs it; she starts
 //! nothing there). The bundle (`packaging/windows/voice-bundle.ps1`, put beside her by the voice
 //! installer) runs as her child inside a job object that kills it when the job's last handle
-//! closes: it dies with her, even when she is killed. It follows `[voice] enabled`. A sidecar that
-//! exits is started again after 1, 2, 4 … 60 s (back to 1 s after a run of a minute). Its stdout
-//! and stderr go to `%LOCALAPPDATA%\capri-voice\capri-voice.log` (started over past 4 MB).
+//! closes: it dies with her, even when she is killed. It follows `[voice] enabled`, and `[voice] mic`
+//! (a new one starts it again on that one). A sidecar that exits is started again after 1, 2, 4 …
+//! 60 s (back to 1 s after a run of a minute). Its stdout and stderr go to
+//! `%LOCALAPPDATA%\capri-voice\capri-voice.log` (started over past 4 MB).
 //!
 //! `CAPRI_VOICE_BUNDLE` names another bundle folder; `CAPRI_VOICE_SPAWN=0` leaves the sidecar to
 //! him (he runs it himself). Never under test (`SA_BRAIN_SYNTH`).
@@ -41,7 +42,8 @@ static STARTED: Once = Once::new();
 
 /// Whether the sidecar should run (`[voice] enabled`) and on which microphone (`[voice] mic`;
 /// empty: Windows' default), called every tick: the first `true` starts the supervisor; it
-/// starts, restarts and stops the sidecar from then on. The mic is read at each start.
+/// starts, restarts and stops the sidecar from then on. The sidecar reads its mic only when it
+/// starts, so a new one (a settings reload) starts it again on that one.
 pub fn voice_sidecar(on: bool, mic: &str) {
     {
         let mut m = MIC.lock().unwrap_or_else(|p| p.into_inner());
@@ -74,8 +76,9 @@ pub fn voice_sidecar(on: bool, mic: &str) {
             elog!("synaps-avatar: voice: the sidecar runs from {}, its log is {}", dir.display(), log.display());
             let mut sup = Supervisor::default();
             loop {
-                let mut once = || start(&dir, &log, &job);
-                sup.step(WANT.load(Ordering::Relaxed), Instant::now(), &mut once);
+                let mic = MIC.lock().unwrap_or_else(|p| p.into_inner()).clone();
+                let mut once = |mic: &str| start(&dir, &log, &job, mic);
+                sup.step(WANT.load(Ordering::Relaxed), &mic, Instant::now(), &mut once);
                 std::thread::sleep(LOOK);
             }
         });
@@ -139,15 +142,14 @@ fn models_ready() -> Result<(), PathBuf> {
     if ["kokoro-v1.0.int8.onnx", "voices-v1.0.bin"].iter().all(|f| d.join(f).is_file()) { Ok(()) } else { Err(d) }
 }
 
-/// One start: the bundle's interpreter on `capri-voice`, no console window, in the job.
-fn start(dir: &Path, log: &Path, job: &Job) -> io::Result<Child> {
+/// One start: the bundle's interpreter on `capri-voice`, no console window, in the job, on `mic`.
+fn start(dir: &Path, log: &Path, job: &Job, mic: &str) -> io::Result<Child> {
     if let Err(d) = models_ready() {
         return Err(io::Error::new(io::ErrorKind::NotFound, format!("no models in {} yet: run voice-models.ps1 (the voice installer does)", d.display())));
     }
     let out = open_log(log)?;
     let err = out.try_clone()?;
-    let mic = MIC.lock().unwrap_or_else(|p| p.into_inner()).clone();
-    let mut c = command(dir, &mic);
+    let mut c = command(dir, mic);
     c.stdout(out).stderr(err);
     launch(&mut c, job)
 }
@@ -184,18 +186,33 @@ fn launch(c: &mut Command, job: &Job) -> io::Result<Child> {
     Ok(child)
 }
 
-/// The supervisor's state: the running sidecar, when it started, the wait before the next start.
+/// The supervisor's state: the running sidecar, when it started, the wait before the next start,
+/// the mic its last start was given.
 #[derive(Default)]
 struct Supervisor {
     child: Option<(Child, Instant)>,
     wait: Duration,
     next_at: Option<Instant>,
     starts: u32,
+    mic: String,
 }
 
 impl Supervisor {
-    /// One look: start it if wanted and due, stop it if not wanted, note an exit.
-    fn step(&mut self, want: bool, now: Instant, start: &mut dyn FnMut() -> io::Result<Child>) {
+    /// One look: start it if wanted and due (on `mic`), stop it if not wanted, note an exit. A new
+    /// mic while it runs, or waits to start again, starts it on that one now, with no wait.
+    fn step(&mut self, want: bool, mic: &str, now: Instant, start: &mut dyn FnMut(&str) -> io::Result<Child>) {
+        if want && mic != self.mic && (self.child.is_some() || self.next_at.is_some()) {
+            let to = if mic.is_empty() { "Windows' default".to_string() } else { format!("\"{mic}\"") };
+            if let Some((mut c, _)) = self.child.take() {
+                c.kill().ok();
+                c.wait().ok();
+                elog!("synaps-avatar: voice: sidecar stopped (his mic is now {to}); starting it again on that one");
+            } else {
+                elog!("synaps-avatar: voice: his mic is now {to}: the sidecar starts on that one now, not after its wait");
+            }
+            self.wait = Duration::ZERO;
+            self.next_at = None;
+        }
         if let Some((c, t0)) = &mut self.child {
             if !want {
                 c.kill().ok();
@@ -225,7 +242,8 @@ impl Supervisor {
         if !want || self.next_at.is_some_and(|t| now < t) {
             return;
         }
-        match start() {
+        mic.clone_into(&mut self.mic);
+        match start(mic) {
             Ok(c) => {
                 self.starts += 1;
                 elog!("synaps-avatar: voice: sidecar started (pid {}, start {})", c.id(), self.starts);
@@ -304,30 +322,75 @@ mod tests {
     fn the_supervisor_restarts_and_stops() {
         let job = Job::new().unwrap();
         let mut sup = Supervisor::default();
-        let mut quick = || launch(Command::new("cmd").args(["/c", "exit 3"]), &job);
+        let mut quick = |_: &str| launch(Command::new("cmd").args(["/c", "exit 3"]), &job);
         let t0 = Instant::now();
-        sup.step(true, t0, &mut quick);
+        sup.step(true, "", t0, &mut quick);
         assert_eq!(sup.starts, 1);
         // Its exit is seen (real time: the process ends), and the next start waits 1 s.
         let seen = Instant::now();
         while sup.child.is_some() && seen.elapsed() < Duration::from_secs(10) {
-            sup.step(true, t0, &mut quick);
+            sup.step(true, "", t0, &mut quick);
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(sup.child.is_none(), "the exit was seen");
         assert_eq!(sup.next_at, Some(t0 + Duration::from_secs(1)));
-        sup.step(true, t0 + Duration::from_millis(500), &mut quick);
+        sup.step(true, "", t0 + Duration::from_millis(500), &mut quick);
         assert_eq!(sup.starts, 1, "not before the wait");
-        sup.step(true, t0 + Duration::from_millis(1100), &mut quick);
+        sup.step(true, "", t0 + Duration::from_millis(1100), &mut quick);
         assert_eq!(sup.starts, 2, "again after it");
         // Voice off: a running one is killed; nothing starts while off.
-        let mut long = || launch(Command::new("ping").args(["-n", "30", "127.0.0.1"]).stdout(Stdio::null()), &job);
+        let mut long = |_: &str| launch(Command::new("ping").args(["-n", "30", "127.0.0.1"]).stdout(Stdio::null()), &job);
         let mut sup = Supervisor::default();
-        sup.step(true, t0, &mut long);
+        sup.step(true, "", t0, &mut long);
         assert!(sup.child.is_some());
-        sup.step(false, t0, &mut long);
+        sup.step(false, "", t0, &mut long);
         assert!(sup.child.is_none());
-        sup.step(false, t0 + Duration::from_secs(5), &mut long);
+        sup.step(false, "", t0 + Duration::from_secs(5), &mut long);
         assert_eq!(sup.starts, 1);
+    }
+
+    /// The sidecar reads his mic only when it starts: a new one (a settings reload) stops it and
+    /// starts it on that one at once, also from a wait to start again; the same one leaves it be,
+    /// and voice off starts nothing.
+    #[test]
+    fn a_new_mic_starts_the_sidecar_again_on_it() {
+        let job = Job::new().unwrap();
+        let given = std::cell::RefCell::new(Vec::<String>::new());
+        let mut long = |mic: &str| {
+            given.borrow_mut().push(mic.to_string());
+            launch(Command::new("ping").args(["-n", "30", "127.0.0.1"]).stdout(Stdio::null()), &job)
+        };
+        let (usb, bt) = ("Microphone (USB Audio Device Pro)", "Headset Microphone (WH-1000XM4 Hands-Free)");
+        let t0 = Instant::now();
+        let mut sup = Supervisor::default();
+        sup.step(true, usb, t0, &mut long);
+        sup.step(true, usb, t0, &mut long);
+        assert_eq!(sup.starts, 1, "the same mic: left running");
+        sup.step(true, bt, t0, &mut long);
+        assert_eq!(sup.starts, 2, "a new mic: started again in the same look");
+        assert!(sup.child.is_some());
+        sup.step(true, "", t0, &mut long);
+        assert_eq!(sup.starts, 3, "back to Windows' default");
+        assert_eq!(*given.borrow(), [usb, bt, ""]);
+        sup.step(false, "", t0, &mut long);
+        sup.step(false, usb, t0, &mut long);
+        assert!(sup.child.is_none() && sup.starts == 3, "voice off: a new mic starts nothing");
+
+        // A start that failed waits (1 s); a new mic is tried at once, the same one waits on.
+        let tried = std::cell::RefCell::new(Vec::<String>::new());
+        let mut fail = |mic: &str| -> io::Result<Child> {
+            tried.borrow_mut().push(mic.to_string());
+            Err(io::Error::other("no models yet"))
+        };
+        let mut sup = Supervisor::default();
+        sup.step(true, usb, t0, &mut fail);
+        sup.step(true, usb, t0, &mut fail);
+        assert_eq!(*tried.borrow(), [usb], "waits");
+        sup.step(true, bt, t0, &mut fail);
+        assert_eq!(*tried.borrow(), [usb, bt], "a new mic: tried now");
+        sup.step(true, bt, t0 + Duration::from_millis(500), &mut fail);
+        assert_eq!(tried.borrow().len(), 2, "then waits again");
+        sup.step(true, bt, t0 + Duration::from_millis(1100), &mut fail);
+        assert_eq!(tried.borrow().len(), 3);
     }
 }

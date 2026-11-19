@@ -9306,6 +9306,7 @@ mod header_fit_tests {
         v.extend((0..=10).map(|left| hf_label(Some(left), 0, 0.0)));
         v.extend([0.0, 1.0].map(|l| format!("SPEAKING {}", level_bars(l))));
         v.extend(["MIC …", "HEARD · …", "WAKE PAUSED · IN A CALL", "WAKE PAUSED · SCREEN LOCKED", "WAKE PAUSED · TOO MANY FALSE STARTS", "WAKE OFF · MIC LOST"].map(String::from));
+        v.extend(["WAKE PAUSED · MIC LOST", "WAKE PAUSED · ITS SOURCE IS GONE", "WAKE PAUSED · CAPTURE FAILED"].map(String::from));
         v.extend(["WAKE PAUSED · A SECRET IS ON SCREEN", "WAKE PAUSED · SHE IS HIDDEN", "WAKE OFF · NO MODEL (capri-voice-setup)", "TEST SIDECAR · NOTHING HEARD FOR A WHILE NOW"].map(String::from));
         v.push("W".repeat(80));
         v.push("WWWWWWWWWWWW · WWWWWWWWWWWWWWWWWW · WWWWWWWWWWWWWWWW".into());

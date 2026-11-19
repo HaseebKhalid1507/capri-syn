@@ -28,8 +28,51 @@ for speech. Setup: `tools/capri-voice-setup`, then `tools/systemd/capri-voice.se
 | `wake_handsfree` | `true` | "Hey Capri" starts hands-free (with `handsfree` on): quiet for `handsfree_timeout`, it ends and the wake word listens again. `false`: one turn, as before |
 | `echo` | `"auto"` | `"auto"` (the sink says headphones or speakers), `"headphones"` (talking over her stops her) or `"speakers"` (half-duplex) |
 | `vocab` | `[]` | your own words for speech-to-text: names, machines, jargon (`["Lynx", "polish-e", "devbox"]`). Whisper's recognition prompt is `Capri, choom, preem, Night City, Synaps, avatarctl` (`capri-ctl` on Windows), and these go after it. Up to 16 entries of at most 32 characters, 200 characters in all: past that, the first ones that fit are kept and the rest are left out, logged (not an error). A word already in her prompt (`Capri`, `choom`, …) still takes one of those slots, though the sidecar skips it, so don't repeat them. An empty entry, a comma or a control character in one is an error. They also join the prompt-echo filter (three or more words, all from the prompt, are dropped as junk; [What counts as speech](#what-counts-as-speech)), so leave out everyday words like "on", "off" or "build": "build on, off" would be thrown away |
+| `mic` | `""` | Windows: the microphone she listens on, by its WASAPI name (below); empty: Windows' default. Linux: unused (the service's own `CAPRI_VOICE_SOURCE`) |
 
-`avatarctl settings reload` re-sends changed voice settings to a connected sidecar.
+`avatarctl settings reload` re-sends changed voice settings to a connected sidecar. On Windows a new
+`mic` starts her sidecar again on it (`capri-ctl settings reload`); no restart of hers is needed.
+
+### Windows: which `mic`
+
+`mic` is the microphone's **WASAPI name** (its endpoint's friendly name), exactly:
+`mic = "Microphone (USB Audio Device Pro)"`. Sound settings shows it on two lines, `Microphone` with
+`USB Audio Device Pro` under it: the name is the first line with the second in brackets. Typed as
+those two lines, or as either one alone, it matches nothing. To see the names:
+
+- her installer's Voice page lists them and writes the one picked;
+- Device Manager, under "Audio inputs and outputs", shows the same names (the speakers too);
+- or in PowerShell, the microphones only:
+
+  ```powershell
+  Get-CimInstance Win32_PnPEntity -Filter "PNPClass = 'AudioEndpoint'" |
+    Where-Object { $_.PNPDeviceID -like 'SWD\MMDEVAPI\{0.0.1.*' -and $_.Status -eq 'OK' } |
+    Select-Object -ExpandProperty Name
+  ```
+
+The match is exact (case and spaces inside; the ends are trimmed) and only under WASAPI. A named mic
+that isn't there is said (NO MIC · ITS SOURCE IS GONE), never swapped for the default. One that
+connects later (a Bluetooth headset after sign-in) is found without a restart:
+
+- on a miss the sidecar reads Windows' device list again, at most once every 10 s, and never while a
+  stream of hers is open (her speech, the wake word's mic): that would end it;
+- the wake word, refused for a mic that's gone (`WAKE PAUSED · ITS SOURCE IS GONE`), is asked for
+  again every 30 s, so "Hey Capri" comes back by itself within about 30 s of the headset connecting
+  (a minute if she was speaking at that ask);
+- a talk press finds it at once (unless the list was read in the last 10 s: the next press does), and
+  the wake word is asked for again as soon as that press ends;
+- one that drops while she listens (a headset out of range) ends the wake word's stream
+  (`WAKE PAUSED · MIC LOST`). PortAudio's list still holds it, so a stream on a named mic that ends by
+  itself, or won't open or start, marks the list stale: the next look reads it again (the same 10 s
+  cap) and finds the mic gone or back. The wake word is asked for again every 30 s, as for a gone one.
+  Once per streak of failures: a mic that's listed but refused (another app holds it exclusively,
+  Windows' mic privacy: `WAKE PAUSED · CAPTURE FAILED`, asked again every 3 s) gets one read, and the
+  next only after it has opened again.
+
+While the list is read again (PortAudio starting again: a fraction of a second, more with many
+devices) a new stream of hers waits, and a line the sidecar logs in that moment is lost (sounddevice
+points stderr at `nul` while PortAudio starts). A control character or a name over 256 characters is
+a settings error.
 
 ## Talking to her: hold, or toggle
 
@@ -209,8 +252,14 @@ thresholds) was fitted on stock synthetic voices only (Kokoro packs, espeak-ng),
 - **Closed** (no stream, the reason on her tag) while: a secret is on screen (`WAKE PAUSED · A SECRET IS ON
   SCREEN`), she is hidden, the screen is locked, he is in a call (or `pactl` can't say). It comes back when
   the cause clears (the avatar asks again every 3 s; the sidecar refuses while locked or in a call). Push-to-
-  talk, a toggle or hands-free close it for their turn, and it comes back after. A stream that dies is not
-  reopened (`WAKE OFF · MIC LOST`) until the settings are reloaded.
+  talk, a toggle or hands-free close it for their turn, and it comes back after. A stream that dies on the
+  default mic is not reopened (`WAKE OFF · MIC LOST`) until the settings are reloaded: it would open on
+  whatever the default is now. On a named mic (Windows: `[voice] mic`; Linux: the service's
+  `CAPRI_VOICE_SOURCE`) it can't fall back to the default, so a lost stream (`WAKE PAUSED · MIC LOST`)
+  and a mic that isn't there (`WAKE PAUSED · ITS SOURCE IS GONE`) are asked for again every 30 s, and
+  at once after a talk press that found the mic. While she is hidden or a secret is on screen, an ask
+  that came due waits, looked at every 3 s. A refusal that repeats is logged once, by the sidecar and
+  by her, till its reason changes.
 - **A candidate needs speech:** Silero must hear at least ~0.1 s of speech in the last second, else it is
   dropped before Whisper (no check, not counted by the limit). Music and doors make most stage-1 candidates.
 - **His personal layer (optional, local, never committed):** `tools/capri-wake-tune --fit` builds

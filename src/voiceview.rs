@@ -84,10 +84,34 @@ pub(super) struct Wake {
     /// Lost only because a hands-free that "hey capri" began closed (MIC LOST, for now): its
     /// real reason (`handsfree-end`) may still come and undo it.
     lost_hf: bool,
+    /// The sidecar records from a named mic (its `ready`: `named_mic`, CAPRI_VOICE_SOURCE; on
+    /// Windows his `[voice] mic`), never the default: a lost stream is asked for again (`wake_mic_lost`).
+    named_mic: bool,
 }
 
 /// Asked for, not answered: ask again after this long. Closed for a call or the lock: ask again this often.
 const WAKE_RETRY: Duration = Duration::from_secs(3);
+/// His named mic isn't there (SOURCE IS GONE): asked again this often, so one that connects later (a
+/// Bluetooth headset after sign-in) brings "Hey Capri" back by itself.
+const WAKE_GONE_RETRY: Duration = Duration::from_secs(30);
+
+/// The wake word's next ask as a deadline for her ticker. One that came due but wasn't sent (she is
+/// hidden, a secret is on screen, another capture is open, no sidecar yet: `voice_wake_tick` returns
+/// early and leaves `retry_at` behind) would be a deadline in the past, a wait of zero, and her main
+/// loop would spin till the cause cleared. So a due one is offered `WAKE_RETRY` from now: a look every
+/// 3 s while it can't be sent.
+pub(super) fn wake_deadline(retry_at: Option<Instant>, now: Instant) -> Option<Instant> {
+    retry_at.map(|t| if t <= now { now + WAKE_RETRY } else { t })
+}
+
+/// The wake stream lost its mic (`MIC LOST`): her tag, and when it is asked for again. On the default
+/// mic never by itself (`None`: `lost`, till a settings reload or a new sidecar): it would open on
+/// whatever the default is now. A named mic (`Wake::named_mic`) never falls back to the default (gone,
+/// it is refused: ITS SOURCE IS GONE), so it is asked for again every `WAKE_GONE_RETRY`, like one that
+/// is gone: a headset that dropped brings "Hey Capri" back when it is back.
+pub(super) fn wake_mic_lost(named: bool) -> (&'static str, Option<Duration>) {
+    if named { ("WAKE PAUSED · MIC LOST", Some(WAKE_GONE_RETRY)) } else { ("WAKE OFF · MIC LOST", None) }
+}
 
 /// A toggled turn (`talk toggle`): open until his pause, a second tap, Esc or `talk cancel`.
 #[derive(Clone, Copy, Debug)]
@@ -622,9 +646,11 @@ impl Avatar {
         // stream that began with "hey capri" died: that is the wake stream's own rule).
         if h.wake && why.contains("MIC LOST") && !self.voice.wake.lost {
             let w = &mut self.voice.wake;
-            w.lost = true;
+            let (label, again) = wake_mic_lost(w.named_mic);
+            w.lost = again.is_none();
             w.lost_hf = true;
-            w.paused = Some("WAKE OFF · MIC LOST".into());
+            w.retry_at = again.map(|d| Instant::now() + d);
+            w.paused = Some(label.into());
         }
         self.voice_wake_tick(cx);
         self.voice_changed(cx);
@@ -900,6 +926,7 @@ impl Avatar {
                 w.open = Some(now);
                 w.asked = None;
                 w.paused = None;
+                w.lost_hf = false; // a late handsfree-end no longer speaks for this stream
                 elog!("synaps-avatar: voice: wake word listening (sensitivity {})", self.voice.cfg.wake_sensitivity);
                 self.voice_changed(cx);
             }
@@ -978,7 +1005,7 @@ impl Avatar {
                     "call" => ("WAKE PAUSED · IN A CALL", Some(WAKE_RETRY)),
                     "lock" => ("WAKE PAUSED · SCREEN LOCKED", Some(WAKE_RETRY)),
                     "false starts" => ("WAKE PAUSED · TOO MANY FALSE STARTS", Some(Duration::from_secs(600))),
-                    _ => ("WAKE OFF · MIC LOST", None),
+                    _ => wake_mic_lost(w.named_mic),
                 };
                 w.paused = Some(label.into());
                 w.retry_at = again.map(|d| now + d);
@@ -988,6 +1015,13 @@ impl Avatar {
             }
             "mic-open" => {
                 self.voice.mic = Some(now);
+                // His mic was gone (or his named one lost) and this capture (a talk press) found it: "Hey
+                // Capri" is asked for again as soon as the capture ends, not after the rest of its 30 s wait.
+                let w = &mut self.voice.wake;
+                if !w.lost && w.paused.as_deref().is_some_and(|p| p.contains("SOURCE IS GONE") || p.contains("MIC LOST")) {
+                    w.paused = None;
+                    w.retry_at = None;
+                }
                 if let Some(a) = self.voice.asked {
                     self.voice.stats.insert("hold_to_mic_ms".into(), ((now - a).as_millis() as u64).into());
                 }
@@ -1050,6 +1084,7 @@ impl Avatar {
                     if !lost && std::mem::take(&mut w.lost_hf) {
                         w.lost = false;
                         w.paused = None;
+                        w.retry_at = None;
                         self.voice_wake_tick(cx);
                     }
                     self.voice_changed(cx);
@@ -1114,9 +1149,19 @@ impl Avatar {
                 let why = v.get("why").and_then(|t| t.as_str()).unwrap_or("").replace("NO MIC", "WAKE PAUSED");
                 let w = &mut self.voice.wake;
                 w.asked = None;
-                w.lost = why.contains("NO MODEL") || why.contains("TEST SIDECAR") || why.contains("SOURCE IS GONE");
-                w.retry_at = (!w.lost).then(|| now + if why.contains("FALSE STARTS") { Duration::from_secs(60) } else { WAKE_RETRY });
-                elog!("synaps-avatar: voice: wake word refused ({why})");
+                w.lost = why.contains("NO MODEL") || why.contains("TEST SIDECAR");
+                let wait = if why.contains("FALSE STARTS") {
+                    Duration::from_secs(60)
+                } else if why.contains("SOURCE IS GONE") {
+                    WAKE_GONE_RETRY
+                } else {
+                    WAKE_RETRY
+                };
+                w.retry_at = (!w.lost).then(|| now + wait);
+                // Once per reason: a mic that stays gone is asked for every 30 s.
+                if w.paused.as_deref() != Some(why.as_str()) {
+                    elog!("synaps-avatar: voice: wake word refused ({why})");
+                }
                 w.paused = Some(why);
                 self.voice_changed(cx);
             }
@@ -1256,6 +1301,7 @@ impl Avatar {
             }
             "ready" => {
                 self.voice.can_unprompted = v.get("features").and_then(|f| f.as_array()).is_some_and(|f| f.iter().any(|x| x == "unprompted"));
+                self.voice.wake.named_mic = v.get("named_mic").and_then(|x| x.as_bool()).unwrap_or(false);
             }
             // The sidecar kept an unprompted reply silent (a call, the lock, his do-not-disturb,
             // the speech budget, too late): the rest of it stays text.
@@ -1568,7 +1614,7 @@ impl Avatar {
         if let Some(t) = [timer, self.voice.mic_check_at].into_iter().flatten().min() {
             return Some(t);
         }
-        let wake = self.voice.wake.retry_at.filter(|_| self.voice.cfg.wake_word && self.voice_on());
+        let wake = wake_deadline(self.voice.wake.retry_at, now).filter(|_| self.voice.cfg.wake_word && self.voice_on());
         [self.voice.retry_at.filter(|_| self.voice_on() && self.voice.link.is_none()), wake].into_iter().flatten().min()
     }
 
@@ -1647,9 +1693,50 @@ impl Avatar {
             "handsfree": self.voice.hf.map(|h| serde_json::json!({ "ms": h.since.elapsed().as_millis() as u64, "quiet_ms": h.quiet_since.elapsed().as_millis() as u64, "hearing": h.hearing, "left_s": self.voice_hf_left(), "wake": h.wake })),
             "busy": self.voice.busy,
             "wake": { "on": self.voice.cfg.wake_word, "sensitivity": self.voice.cfg.wake_sensitivity, "handsfree": self.voice.cfg.wake_handsfree, "open": self.voice.wake.open.is_some(),
-                      "asked": self.voice.wake.asked.is_some(), "turn": self.voice.wake.turn, "paused": self.voice.wake.paused, "lost": self.voice.wake.lost },
+                      "asked": self.voice.wake.asked.is_some(), "turn": self.voice.wake.turn, "paused": self.voice.wake.paused, "lost": self.voice.wake.lost,
+                      "named_mic": self.voice.wake.named_mic },
             "toggle_lock": self.voice.toggle_lock, "toggles_ignored": self.voice.toggles_ignored, "silence_s": self.voice.cfg.silence_s,
             "stats": serde_json::Value::Object(self.voice.stats.clone()),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{WAKE_GONE_RETRY, WAKE_RETRY, wake_deadline, wake_mic_lost};
+    use std::time::{Duration, Instant};
+
+    /// A wake retry that came due while she was hidden (or a secret was on screen, or another
+    /// capture was open) stays in `retry_at`: as a deadline it must never be now or past, or her
+    /// ticker waits zero and the main loop spins till she is shown. The 30 s ask for a gone mic,
+    /// the 3 s one for a call or the lock and the false starts' alike.
+    #[test]
+    fn a_wake_retry_due_while_blocked_is_never_a_deadline_in_the_past() {
+        let now = Instant::now() + Duration::from_secs(1000);
+        assert_eq!(wake_deadline(None, now), None);
+        for ahead in [Duration::from_millis(1), WAKE_RETRY, WAKE_GONE_RETRY, Duration::from_secs(600)] {
+            assert_eq!(wake_deadline(Some(now + ahead), now), Some(now + ahead), "{ahead:?} ahead: kept as it is");
+        }
+        for ago in [Duration::ZERO, Duration::from_millis(1), WAKE_RETRY, WAKE_GONE_RETRY, Duration::from_secs(600)] {
+            let d = wake_deadline(Some(now - ago), now).expect("still asked for");
+            assert!(d > now, "{ago:?} ago: never now or past (a wait of zero: a spin)");
+            assert_eq!(d, now + WAKE_RETRY, "{ago:?} ago: a look every 3 s while it can't be sent");
+        }
+        // Blocked for a minute: looked at every 3 s, never in a loop.
+        let (mut t, mut looks) = (now, 0);
+        let due = now - Duration::from_secs(1);
+        while t < now + Duration::from_secs(60) {
+            t = wake_deadline(Some(due), t).unwrap();
+            looks += 1;
+        }
+        assert_eq!(looks, 20);
+    }
+
+    /// MIC LOST: on the default mic the wake word stays off (asked again, it would open on whatever
+    /// the default is now); a named one can't fall back to the default, so it is asked for again.
+    #[test]
+    fn a_lost_named_mic_is_asked_for_again_the_default_never() {
+        assert_eq!(wake_mic_lost(false), ("WAKE OFF · MIC LOST", None));
+        assert_eq!(wake_mic_lost(true), ("WAKE PAUSED · MIC LOST", Some(WAKE_GONE_RETRY)));
     }
 }
