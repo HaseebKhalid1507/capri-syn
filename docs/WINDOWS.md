@@ -58,7 +58,14 @@ persona; no art).
   `capri.pre-install-<date>`, never deleted.
 - **The daemon**: `synaps daemon --detach` now, and a Run value for sign-in through
   `conhost --headless` (no console window; see the install.ps1 note below).
-- **Her voice**: a task, off by default: the voice installer below, with its models.
+- **Her voice** (page "Her voice"): "Talk to her", on when Windows has a microphone (off and greyed,
+  "no microphone found", when it doesn't); a microphone picker over Windows' capture endpoints
+  ("Windows default" first); "Hey Capri" and "Read replies aloud", both on. Ticked, it downloads
+  the voice installer below (the latest release's, its `.sha256` checked) and runs it, fetches
+  the models (`voice-models.ps1`, each pinned), then saves his choices with her own settings writer
+  (`synaps-avatar --set`: `[voice] enabled`, `wake_word`, `speak_unprompted`, `mic`). Her voice
+  itself (`voice`, `speed`, `pace`, `flow`) is never written: she keeps her built-in default, so a
+  new voice is a change to her alone. install.ps1's `--voice` runs the same step.
 - **Progress**: a page of its own while the steps run, with each step's lines (downloads in MB).
 - **A step that fails doesn't fail Setup.** Offline, a pin that doesn't match, a build that stops:
   she is installed without it, and the finish page says what happened in plain words, with the
@@ -88,13 +95,17 @@ Unattended:
 
 ```
 capri-syn-setup-….exe /VERYSILENT /SUPPRESSMSGBOXES [/SYNAPS=install|skip]
-                      [/PACK=download|skip|"C:\packs\capri"] [/TASKS="autostart,voice"]
+                      [/PACK=download|skip|"C:\packs\capri"] [/VOICE=on|off] [/MIC="name"]
+                      [/VOICESETUP="C:\...\capri-syn-voice-setup.exe"] [/TASKS=autostart]
 ```
 
-The defaults are the wizard's: Synaps if it's needed, her art downloaded, autostart, no voice.
-install.ps1 runs it with `/SYNAPS=skip /PACK=skip /BY=install.ps1`: Synaps, her pack, the daemon and
-her voice are its own steps (the same steps.ps1), so nothing is downloaded twice, and her settings
-and its cache stay its own to remove.
+The defaults are the wizard's: Synaps if it's needed, her art downloaded, autostart, her voice when
+Windows has a microphone. `/VOICESETUP`: a voice installer of yours instead of the release's (CI
+passes the one it built: there is no release yet; a release's setup downloads
+`capri-syn-voice-setup-x86_64.exe` from releases/latest, checked against its `.sha256`).
+install.ps1 runs it with `/SYNAPS=skip /PACK=skip /VOICE=off /BY=install.ps1`: Synaps, her pack, the
+daemon and her voice are its own steps (the same steps.ps1), so nothing is downloaded twice, and her
+settings and its cache stay its own to remove.
 
 CI:
 - `windows-installer` (`test-install.ps1`): offline (a hosts file that sends GitHub, python.org and
@@ -107,7 +118,10 @@ CI:
   --version`, the daemon (protocol 3, and its Run value), her pack, autostart, the Start menu; she
   starts, attaches (her control socket's `state`: `session.live`, the tag not OFFLINE), and answers
   for 60 s of clicks on her (every `state` from her UI thread, `WM_NULL` to her windows, her ticks,
-  no Application Hang event); the uninstall leaves nothing of hers.
+  no Application Hang event); no microphone, so no voice files; the uninstall leaves nothing of hers.
+- `windows-setup-voice` (`test-setup-voice.ps1`, a clean runner): `/VOICE=on` with the voice
+  installer CI built; the bundle and its selftest, the models, `settings.toml` (`[voice] enabled`,
+  never her voice itself), her log's `voice: sidecar started`, and an uninstall that leaves no voice.
 - `windows-setup-wizard` (`test-setup-wizard.ps1`, a clean runner): the wizard clicked through with
   its defaults (UI Automation), a screenshot of every page (`tools/shoot-win.ps1`), her on the desktop
   after "Start her now", and the uninstall's questions. The shots are the job's artifact.

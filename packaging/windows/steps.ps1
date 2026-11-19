@@ -12,8 +12,11 @@
 #                            sign-in: Run\synaps-daemon through conhost --headless, so no console window
 #                            opens (a Run value of his own that starts it is left as it is).
 #   steps.ps1 pack           her art pack (below).
-#   steps.ps1 voice          her voice: the latest release's voice installer, sha256 checked, with its
-#                            models (~320 MB).
+#   steps.ps1 mics           the microphones Windows has (its capture endpoints that work). Reads only.
+#   steps.ps1 voice          her voice: the latest release's voice installer (or -VoiceSetup FILE, or
+#                            -Bundle DIR already in place), sha256 checked, then its models (~375 MB,
+#                            each pinned), then his choices (-Mic, -WakeWord, -ReadAloud) written to
+#                            settings.toml by her own settings writer (synaps-avatar --set).
 #   steps.ps1 login          `synaps login --provider claude` with no window: his browser opens, and he
 #                            signs in there (given 10 minutes).
 #   steps.ps1 synaps-remove  Synaps' daemon stopped, synaps.exe and its install record removed. His login
@@ -41,7 +44,7 @@
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Show-Notices reads as install.ps1 named it.')]
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', '', Justification = 'The steps read them in script scope.')]
 param(
-    [Parameter(Position = 0, Mandatory, ValueFromRemainingArguments)] [ValidateSet('synaps-check', 'synaps', 'daemon', 'pack', 'voice', 'login', 'synaps-remove', 'remove')] [string[]]$Step,
+    [Parameter(Position = 0, Mandatory, ValueFromRemainingArguments)] [ValidateSet('synaps-check', 'synaps', 'daemon', 'pack', 'mics', 'voice', 'login', 'synaps-remove', 'remove')] [string[]]$Step,
     [string]$Synaps = '',
     [string]$Out = (Join-Path $env:LOCALAPPDATA 'synaps-avatar\packs\capri'),
     [string]$Exe = '',
@@ -50,6 +53,11 @@ param(
     [switch]$KeepCache,
     [switch]$LocalArt,
     [switch]$Ours,
+    [string]$VoiceSetup = '',
+    [string]$Bundle = '',
+    [string]$Mic = '',
+    [ValidateSet('on', 'off')] [string]$WakeWord = 'on',
+    [ValidateSet('on', 'off')] [string]$ReadAloud = 'on',
     [switch]$DryRun
 )
 
@@ -80,6 +88,7 @@ try {
             'synaps' { Install-Synaps }
             'daemon' { Start-Daemon }
             'pack' { if ($From) { Copy-Pack } else { Build-Pack } }
+            'mics' { Show-Mics }
             'voice' { Install-Voice }
             'login' { Invoke-Login }
             'synaps-remove' { Remove-Synaps }
@@ -141,6 +150,8 @@ function Get-NetWhy($E) {
         $off = "$($w.Status)" -ne 'ProtocolError'
         return @{ Text = $w.Message; Offline = $off }
     }
+    # PowerShell 7: an HTTP answer (404, 500) is an HttpResponseException: the network is there.
+    if ($E.GetType().Name -eq 'HttpResponseException') { return @{ Text = $E.Message; Offline = $false } }
     while ($E.InnerException) { $E = $E.InnerException }
     return @{ Text = $E.Message; Offline = $true }
 }
@@ -639,31 +650,91 @@ function Copy-Pack {
 
 # ---- her voice ----------------------------------------------------------------------------------
 
-# Her voice installer from the latest release, sha256 checked, unattended, with the models.
+# The microphones: Windows' audio endpoints for capture (MMDEVAPI {0.0.1...}) that work, by the
+# names Sound settings shows (the sidecar finds a device by that name).
+function Show-Mics {
+    $eps = @(Get-CimInstance -ClassName Win32_PnPEntity -Filter "PNPClass = 'AudioEndpoint'" -ErrorAction SilentlyContinue |
+            Where-Object { $_.PNPDeviceID -like 'SWD\MMDEVAPI\{0.0.1.*' -and $_.Status -eq 'OK' -and $_.Name } | Sort-Object Name)
+    foreach ($e in $eps) { Result "mic: $($e.Name)" }
+    if (-not $eps) { Say 'no microphone found' }
+    Result "mics: $($eps.Count)"
+}
+
+# Her voice. The component: the voice installer (the latest release's, its .sha256 beside it; or
+# -VoiceSetup, a file of his, checked against FILE.sha256 when there is one), run unattended, into
+# voice\ beside her; or -Bundle, a bundle install.ps1 built. Then the models (voice-models.ps1, each
+# file pinned), then his choices into settings.toml through her own writer (synaps-avatar --set:
+# [voice] enabled, wake_word, speak_unprompted, mic). Never her voice itself (voice, speed, pace, flow):
+# she keeps her built-in default, so a new voice is a change to her alone.
 function Install-Voice {
-    $asset = Get-Key 'asset_windows_voice'
-    $rel = "https://github.com/$(Get-Key 'repo')/releases/latest/download"
-    $sum = $null
-    try { $sum = ((Get-Text "$rel/$asset.sha256") -split '\s+')[0] } catch { $sum = $null }
-    if ($sum -notmatch '^[0-9a-f]{64}$') { Stop-Step "there's no release of her voice installer on GitHub yet ($asset): nothing installed" }
-    $argLine = '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /MERGETASKS="models"'
-    if ($DryRun) { Say "`$ Invoke-WebRequest $rel/$asset (its sha256: $sum), then: $asset $argLine"; Result 'voice: dry-run'; return }
-    $setup = Join-Path $script:Tmp $asset
-    Get-Url "$rel/$asset" $setup 'her voice installer'
-    Test-Pin $setup $sum $asset
-    Say "running it, and its model download (~320 MB)"
-    $p = Start-Process -FilePath $setup -ArgumentList $argLine -Wait -PassThru
-    if ($p.ExitCode -ne 0) { Stop-Step "her voice installer stopped (exit $($p.ExitCode))" }
-    Good 'her voice is installed: she starts it while [voice] enabled is on'
-    $conf = Join-Path $env:APPDATA 'synaps-avatar'
-    $settings = Join-Path $conf 'settings.toml'
-    if (-not (Test-Path -LiteralPath $settings)) {
-        New-Item -ItemType Directory -Force $conf | Out-Null
-        Set-Content -LiteralPath $settings -Value "[voice]`nenabled = true" -Encoding Ascii
-        Good "turned on: [voice] enabled = true in $settings"
-    } elseif (-not (Select-String -LiteralPath $settings -Pattern '^\s*enabled\s*=\s*true' -Quiet)) {
-        Say "turn her voice on in $($settings):  [voice] enabled = true"
+    if (-not $Exe) { $c = Join-Path (Split-Path -Parent $script:Root) 'synaps-avatar.exe'; if (Test-Path -LiteralPath $c) { $script:Exe = $c } }
+    $voiceKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{B7E0CA8F-064C-4B7F-939A-41681146411C}_is1'
+    $dir = $Bundle
+    if (-not $dir) {
+        if ($VoiceSetup) {
+            if (-not (Test-Path -LiteralPath $VoiceSetup -PathType Leaf)) { Stop-Step "there is no voice installer at $VoiceSetup" }
+            $setup = (Resolve-Path -LiteralPath $VoiceSetup).Path
+            $pin = "$setup.sha256"
+            $sum = if (Test-Path -LiteralPath $pin) { ((Get-Content -Raw -LiteralPath $pin) -split '\s+')[0] } else { $null }
+            $what = Split-Path -Leaf $setup
+        } else {
+            $asset = Get-Key 'asset_windows_voice'
+            $rel = "https://github.com/$(Get-Key 'repo')/releases/latest/download"
+            $sum = $null
+            try { $sum = ((Get-Text "$rel/$asset.sha256") -split '\s+')[0] } catch {
+                $w = Get-NetWhy $_.Exception
+                if ($w.Offline) { Stop-Step "couldn't reach github.com for her voice ($($w.Text)). Is this PC offline?" }
+            }
+            if ($sum -notmatch '^[0-9a-f]{64}$') { Stop-Step "there's no release of her voice on GitHub yet ($asset), so there's nothing to download" }
+            $what = $asset
+            if ($DryRun) { $setup = $null } else {
+                $setup = Join-Path $script:Tmp $asset
+                Get-Url "$rel/$asset" $setup 'her voice'
+            }
+        }
+        $argLine = '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /MERGETASKS="!models"'
+        if ($DryRun) { Say "`$ $what $argLine, then voice-models.ps1, then synaps-avatar --set voice.enabled=true ..."; Result 'voice: dry-run'; return }
+        if ($sum -match '^[0-9a-f]{64}$') { Test-Pin $setup $sum $what }
+        else { Warn "no .sha256 beside $($setup): used as you gave it" }
+        Say 'installing her voice (the speech bundle beside her)'
+        $p = Start-Process -FilePath $setup -ArgumentList $argLine -Wait -PassThru
+        if ($p.ExitCode -ne 0) { Stop-Step "her voice installer stopped (exit $($p.ExitCode))" }
+        $dir = (Get-ItemProperty -Path $voiceKey -ErrorAction SilentlyContinue).InstallLocation
+        if (-not $dir) { Stop-Step "her voice installer ran, but left no record of where it went" }
+        $dir = $dir.TrimEnd('\')
+        Good "her voice: $dir"
+    } elseif ($DryRun) { Say "`$ voice-models.ps1 ($dir), then synaps-avatar --set voice.enabled=true ..."; Result 'voice: dry-run'; return }
+    $models = Join-Path $dir 'voice-models.ps1'
+    if (-not (Test-Path -LiteralPath $models)) { Stop-Step "there's no voice-models.ps1 in $dir" }
+    Say 'her speech models (~375 MB, each SHA-256 pinned)'
+    $ps = (Get-Process -Id $PID).Path
+    $rc = Invoke-Logged $ps @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $models)
+    if ($rc) {
+        $l = @($script:Last | Where-Object { $_ -like 'FAIL*' } | Select-Object -First 1)
+        if ("$l" -match 'curl exit (6|7|28|35)\b') { Stop-Step "couldn't download her speech models ($l). Is this PC offline?" }
+        Stop-Step "her speech models didn't all come: $(if ($l) { $l } else { "exit $rc" }) (what came is kept: the retry goes on from there)"
     }
+    Result "voice: installed $dir"
+    # His choices, by her own settings writer: the rest of settings.toml stays as it was.
+    if (-not $Exe) { Stop-Step "her voice is installed, but there's no synaps-avatar.exe here to save your choices with" }
+    $set = @("voice.enabled=true", "voice.wake_word=$(if ($WakeWord -eq 'on') { 'true' } else { 'false' })",
+        "voice.speak_unprompted=$(if ($ReadAloud -eq 'on') { 'true' } else { 'false' })", "voice.mic=$Mic")
+    $argv = ($set | ForEach-Object { "--set `"$_`"" }) -join ' '
+    $log = Join-Path $env:LOCALAPPDATA 'synaps-avatar\synaps-avatar.log'
+    $before = if (Test-Path -LiteralPath $log) { (Get-Item -LiteralPath $log).Length } else { 0 }
+    $p = Start-Process -FilePath $Exe -ArgumentList $argv -Wait -PassThru -WindowStyle Hidden
+    if ($p.ExitCode -ne 0) {
+        $said = ''
+        if (Test-Path -LiteralPath $log) {
+            $fs = New-Object IO.FileStream($log, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]'ReadWrite, Delete')
+            try { if ($fs.Length -ge $before) { [void]$fs.Seek($before, [IO.SeekOrigin]::Begin) }; $said = (New-Object IO.StreamReader($fs)).ReadToEnd() } finally { $fs.Dispose() }
+        }
+        $said = (($said -split "`r?`n" | Where-Object { $_ -match 'synaps-avatar: ' } | Select-Object -Last 1) -replace '^.*synaps-avatar: ', '').Trim()
+        if ($said -match 'unknown argument `--set`') { $said = "this build of her can't save settings from her installer yet (synaps-avatar --set)" }
+        Stop-Step "her voice is installed, but your choices weren't saved: $said"
+    }
+    Good "saved: talk to her on, `"hey Capri`" $WakeWord, replies read aloud $ReadAloud, microphone $(if ($Mic) { $Mic } else { "Windows' default" })"
+    Say 'she starts her voice the next time she starts (or on "settings reload")'
     Result 'voice: ok'
 }
 

@@ -9,15 +9,19 @@
 ;   - Her pack: the "Her pack" page downloads her art and builds it on his machine (the default), copies
 ;     a pack folder he has, or skips. Her art is never in this installer.
 ;   - The Synaps daemon, now and at sign-in (no console window).
-;   - Her voice, when he ticks it: the voice installer and its models.
+;   - Her voice (page "Her voice", on when Windows has a microphone): the voice installer and its
+;     models, downloaded; his choices (microphone, "hey Capri", replies aloud) saved by her own
+;     settings writer. Never her voice itself: she keeps her built-in default.
 ; A step that fails doesn't fail Setup: she is installed, and the finish page says what happened in
 ; plain words, with the one command that tries it again. Unattended, the log says it.
 ;
 ; Unattended: setup.exe /VERYSILENT /SUPPRESSMSGBOXES [/SYNAPS=install|skip]
-;             [/PACK=download|skip|"C:\packs\capri"] [/TASKS="autostart,voice"]
-; (the defaults are the wizard's: install Synaps if needed, download her art, autostart on, no voice).
-; install.ps1 runs it with /SYNAPS=skip /PACK=skip /BY=install.ps1: Synaps and her pack are its own
-; steps, and her settings and its cache its own to remove.
+;             [/PACK=download|skip|"C:\packs\capri"] [/VOICE=on|off] [/MIC="Microphone (...)"]
+;             [/VOICESETUP="C:\...\capri-syn-voice-setup.exe"] [/TASKS=autostart]
+; The defaults are the wizard's: Synaps if it's needed, her art downloaded, autostart on, her voice
+; when Windows has a microphone. /VOICESETUP: a voice installer of his instead of the release's.
+; install.ps1 runs it with /SYNAPS=skip /PACK=skip /VOICE=off /BY=install.ps1: those are its own
+; steps (the same steps.ps1), and her settings and its cache are its own to remove.
 
 #ifndef AppVersion
   #define AppVersion "0.0.0"
@@ -57,6 +61,9 @@ SolidCompression=yes
 OutputDir=Output
 OutputBaseFilename=capri-syn-setup-{#AppVersion}-{#Build}
 SetupIconFile={#IconDir}\capri-syn.ico
+#if VER >= EncodeVer(6,5,2)
+WizardSmallImageFile={#IconDir}\capri-syn-256.png
+#endif
 UninstallDisplayIcon={app}\synaps-avatar.ico
 UninstallDisplayName=capri-syn
 ; An upgrade closes the running one (Restart Manager), and doesn't restart it.
@@ -65,7 +72,6 @@ RestartApplications=no
 
 [Tasks]
 Name: autostart; Description: "Start her when I sign in"
-Name: voice; Description: "Her voice: talk to her out loud (downloads her voice installer and ~320 MB of models)"; Flags: unchecked
 
 [Files]
 ; The install steps and what they read, in a tree like the repo's (steps.ps1 finds installer\manifest
@@ -134,7 +140,12 @@ const
   PackSkip = 2;
 
 var
-  BrainPage, PackPage: TWizardPage;
+  BrainPage, PackPage, VoicePage: TWizardPage;
+  TalkBox, WakeBox, ReadBox: TNewCheckBox;
+  TalkNote, MicLabel: TNewStaticText;
+  MicCombo: TNewComboBox;
+  { The microphones Windows has (steps.ps1 mics), once; -1: not looked yet. }
+  MicCount: Integer;
   SynapsBox: TNewCheckBox;
   SynapsStatus: TNewStaticText;
   DownloadRadio, FolderRadio, SkipRadio: TNewRadioButton;
@@ -147,7 +158,7 @@ var
   StepName, StepTitle, StepFailed: String;
   StepResults: TStringList;
   { What the steps did, for the finish page. }
-  SynapsOk, SynapsNew, BrainOk, DaemonOk, PackOk, VoiceOk: Boolean;
+  SynapsOk, SynapsNew, BrainOk, DaemonOk, PackOk, VoiceOk, VoiceRan: Boolean;
   SynapsVer, SynapsPath, SynapsWhy, DaemonWhy, PackWhy, VoiceWhy, PackFrom: String;
   Retry, Notices: TStringList;
 
@@ -264,7 +275,7 @@ end;
 
 function IsResultKey(const K: String): Boolean;
 begin
-  Result := Pos(',' + K + ',', ',synaps,brain,daemon,runvalue,pack,voice,release,was,remove,failed,') > 0;
+  Result := Pos(',' + K + ',', ',synaps,brain,daemon,runvalue,pack,voice,release,was,remove,mic,mics,failed,') > 0;
 end;
 
 { One line of a step: in the log; a result is kept; anything else goes on the progress page. }
@@ -471,13 +482,145 @@ begin
   PackChoiceClick(nil);
 end;
 
+{ ---- the "Her voice" page ------------------------------------------------------------------------ }
+
+function VoiceParam: String;
+begin
+  Result := Lowercase(Trim(ExpandConstant('{param:VOICE|}')));
+end;
+
+procedure VoiceClick(Sender: TObject);
+begin
+  MicLabel.Enabled := TalkBox.Checked;
+  MicCombo.Enabled := TalkBox.Checked;
+  WakeBox.Enabled := TalkBox.Checked;
+  ReadBox.Enabled := TalkBox.Checked;
+end;
+
+{ steps.ps1 mics, once (from the temporary copy): the picker's names, and the page's default. }
+procedure CheckMics;
+var
+  I, Pick: Integer;
+  M: String;
+begin
+  if MicCount >= 0 then exit;
+  MicCount := 0;
+  { Off (install.ps1 runs it so: its --voice is its own): no need to look. }
+  if VoiceParam = 'off' then begin
+    TalkBox.Checked := False;
+    VoiceClick(nil);
+    exit;
+  end;
+  try
+    ExtractTemporaryFiles('{app}\steps\steps.ps1');
+    ExtractTemporaryFiles('{app}\steps\installer\manifest');
+    RunStep('mics', 'Looking for a microphone', ExpandConstant('{tmp}') + '\{app}\steps\steps.ps1', 'mics');
+  except
+    Log('mics: ' + GetExceptionMessage);
+  end;
+  for I := 0 to StepResults.Count - 1 do
+    if Copy(StepResults[I], 1, 4) = 'mic=' then begin
+      MicCombo.Items.Add(Copy(StepResults[I], 5, Length(StepResults[I])));
+      MicCount := MicCount + 1;
+    end;
+  { /MIC=: that one (kept as given when Windows doesn't list it: she says so if it's gone). }
+  M := Trim(ExpandConstant('{param:MIC|}'));
+  Pick := 0;
+  if M <> '' then begin
+    Pick := MicCombo.Items.IndexOf(M);
+    if Pick < 0 then Pick := MicCombo.Items.Add(M);
+  end;
+  MicCombo.ItemIndex := Pick;
+  if VoiceParam = 'on' then TalkBox.Checked := True
+  else if VoiceParam = 'off' then TalkBox.Checked := False
+  else TalkBox.Checked := MicCount > 0;
+  if MicCount = 0 then begin
+    TalkNote.Caption := 'No microphone found. Plug one in and run Setup again to talk to her.';
+    TalkBox.Enabled := VoiceParam = 'on';
+  end;
+  VoiceClick(nil);
+end;
+
+function WantVoice: Boolean;
+begin
+  Result := (VoicePage <> nil) and TalkBox.Checked;
+end;
+
+{ His microphone: '' for Windows' default. }
+function MicChosen: String;
+begin
+  Result := '';
+  if MicCombo.ItemIndex > 0 then Result := MicCombo.Items[MicCombo.ItemIndex];
+end;
+
+function OnOff(B: Boolean): String;
+begin
+  if B then Result := 'on' else Result := 'off';
+end;
+
+{ steps.ps1 voice's arguments: his choices, and /VOICESETUP when given. }
+function VoiceArgs: String;
+var
+  V: String;
+begin
+  Result := 'voice -Mic "' + MicChosen + '" -WakeWord ' + OnOff(WakeBox.Checked) + ' -ReadAloud ' + OnOff(ReadBox.Checked);
+  V := Trim(ExpandConstant('{param:VOICESETUP|}'));
+  if V <> '' then Result := Result + ' -VoiceSetup "' + V + '"';
+end;
+
+function NewBox(Page: TWizardPage; const Caption: String; Top: Integer): TNewCheckBox;
+begin
+  Result := TNewCheckBox.Create(Page);
+  Result.Parent := Page.Surface;
+  Result.Top := Top;
+  Result.Width := Page.SurfaceWidth;
+  Result.Height := ScaleY(20);
+  Result.Caption := Caption;
+end;
+
+procedure CreateVoicePage;
+var
+  T: TNewStaticText;
+begin
+  VoicePage := CreateCustomPage(PackPage.ID, 'Her voice', 'Talk to her out loud, and she talks back.');
+  TalkBox := NewBox(VoicePage, 'Talk to her', 0);
+  TalkBox.OnClick := @VoiceClick;
+  TalkNote := NewText(VoicePage, 'Downloads her voice and its speech models, about 420 MB. What you say is turned ' +
+    'into words on this PC; only the words go to her brain.', ScaleX(18), TalkBox.Top + TalkBox.Height + ScaleY(2));
+  MicLabel := NewText(VoicePage, 'Microphone', ScaleX(18), TalkNote.Top + ScaleY(40));
+  MicLabel.AutoSize := True;
+  MicCombo := TNewComboBox.Create(VoicePage);
+  MicCombo.Parent := VoicePage.Surface;
+  MicCombo.Style := csDropDownList;
+  MicCombo.Left := ScaleX(110);
+  MicCombo.Top := MicLabel.Top - ScaleY(3);
+  MicCombo.Width := VoicePage.SurfaceWidth - ScaleX(110);
+  MicCombo.Items.Add('Windows default');
+  MicCombo.ItemIndex := 0;
+  WakeBox := NewBox(VoicePage, '"Hey Capri": she listens for her name', MicCombo.Top + MicCombo.Height + ScaleY(14));
+  WakeBox.Left := ScaleX(18);
+  WakeBox.Width := VoicePage.SurfaceWidth - ScaleX(18);
+  WakeBox.Checked := True;
+  T := NewText(VoicePage, 'While it''s on, the microphone stays open for her name. Her tag shows it.',
+    ScaleX(36), WakeBox.Top + WakeBox.Height + ScaleY(2));
+  ReadBox := NewBox(VoicePage, 'Read replies aloud', T.Top + T.Height + ScaleY(10));
+  ReadBox.Left := ScaleX(18);
+  ReadBox.Width := VoicePage.SurfaceWidth - ScaleX(18);
+  ReadBox.Checked := True;
+  NewText(VoicePage, 'Her replies to what comes in on its own (events, other sessions) are spoken too. ' +
+    'Her answers to what you say out loud always are.', ScaleX(36), ReadBox.Top + ReadBox.Height + ScaleY(2));
+  VoiceClick(nil);
+end;
+
 procedure InitializeWizard;
 begin
   StepResults := TStringList.Create;
   Retry := TStringList.Create;
   Notices := TStringList.Create;
+  MicCount := -1;
   CreateBrainPage;
   CreatePackPage;
+  CreateVoicePage;
 end;
 
 function ShouldSkipPage(PageID: Integer): Boolean;
@@ -490,6 +633,7 @@ begin
     { Here and new enough: nothing to ask. }
     Result := SynapsFound = 'ok';
   end;
+  if PageID = VoicePage.ID then CheckMics;
 end;
 
 { Silent installs "click" Next too: a False here then ends Setup. The box is suppressible
@@ -567,13 +711,17 @@ begin
         Retry.Add('Her brain''s daemon: ' + StepCommand('daemon'));
       end;
     end;
-    if WizardIsTaskSelected('voice') then begin
-      VoiceOk := RunStep('voice', 'Her voice (~360 MB in all)', StepsScript, 'voice');
+    { Unattended with /VOICE= and no look at the page yet: its default needs the microphones. }
+    if MicCount < 0 then CheckMics;
+    if WantVoice then begin
+      VoiceRan := True;
+      VoiceOk := RunStep('voice', 'Her voice: downloading it and its speech models (~420 MB)', StepsScript, VoiceArgs);
       if not VoiceOk then begin
         VoiceWhy := StepFailed;
-        Retry.Add('Her voice: ' + StepCommand('voice'));
+        Retry.Add('Her voice: ' + StepCommand(VoiceArgs));
       end;
-    end;
+    end else if MicCount = 0 then Log('voice: off (no microphone found)')
+    else Log('voice: off');
   finally
     Progress.Hide;
   end;
@@ -607,8 +755,14 @@ begin
   else if PackOk then Result := Result + '+ Her art: downloaded, built and checked.' + N
   else if PackWhy <> '' then Result := Result + '- Her art didn''t come: ' + PackWhy + ' She''s installed without it.' + N
   else Result := Result + '- No art yet: she shows up once a pack is in ' + PackDest('') + '.' + N;
-  if VoiceOk then Result := Result + '+ Her voice, with its models.' + N
-  else if VoiceWhy <> '' then Result := Result + '- Her voice didn''t install: ' + VoiceWhy + N;
+  if VoiceOk then begin
+    Result := Result + '+ Her voice: say "hey Capri"';
+    if not WakeBox.Checked then Result := Result + ', or hold Win+Alt+C,';
+    Result := Result + ' and talk.';
+    if MicChosen <> '' then Result := Result + ' Microphone: ' + MicChosen + '.';
+    Result := Result + N;
+  end else if VoiceWhy <> '' then Result := Result + '- Her voice didn''t come: ' + VoiceWhy + ' She''s installed without it.' + N
+  else if (VoicePage <> nil) and (MicCount = 0) and (VoiceParam <> 'off') then Result := Result + '- No voice: no microphone found.' + N;
   Result := Result + N;
   if OfferLogin then
     Result := Result + 'Next, give her a brain: leave "Sign in to Claude" ticked, and sign in in your browser. ' +

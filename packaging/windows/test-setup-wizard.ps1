@@ -81,10 +81,12 @@ foreach ($page in @(
         @('^Select Additional Tasks$', 'tasks', 'Next'),
         @('^Her brain$', 'her-brain', 'Next'),
         @('^Her pack$', 'her-pack', 'Next'),
+        @('^Her voice$', 'her-voice', 'Next'),
         @('^Ready to Install$', 'ready', 'Install'))) {
     $t = Wait-Page $w $page[0]
     Get-Shot $page[1] @('-Title', $wiz)
     if ($page[1] -eq 'her-brain') { Check (($t -match 'Install Synaps \(her brain, open source\)').Count -gt 0) 'her brain page offers to install Synaps' }
+    if ($page[1] -eq 'her-voice') { Check (($t -match '^Talk to her$').Count -gt 0 -and ($t -match 'Read replies aloud').Count -gt 0) 'her voice page: talk, microphone, "hey Capri", replies aloud' }
     if ($page[1] -eq 'her-pack') { Check (($t -match 'Download her art').Count -gt 0) 'her pack page offers the download' }
     Invoke-Button $w $page[2]
 }
