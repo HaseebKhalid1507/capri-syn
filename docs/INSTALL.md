@@ -181,7 +181,7 @@ she runs through XWayland, the X server those desktops keep for X apps.
   ([WINDOWS.md](WINDOWS.md#the-installer)).
 - **Windows:** the installers are unsigned, so a browser download meets SmartScreen ("More info",
   then "Run anyway"); Windows 10 and Windows 11 on Arm are untested; a click on one of her notifications does nothing (as
-  on Linux). Linux has no tray icon yet: HIDE's chip is the way back there.
+  on Linux); her voice needs the VC++ runtime (MSVCP140) on a clean PC for now. Linux has no tray icon yet: HIDE's chip is the way back there.
 
 ## Flags
 

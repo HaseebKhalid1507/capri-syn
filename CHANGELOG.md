@@ -20,8 +20,8 @@
 - Her Windows exe links the C runtime in (`+crt-static`, `.cargo/config.toml`), so a PC without
   the Visual C++ Redistributable runs her. Main's exe imported `VCRUNTIME140.dll` (CI's PDB at
   0ea4ac9). `build.ps1` now lists her exe's DLL imports and stops on a C runtime one. The voice
-  bundle still wants `MSVCP140.dll` / `MSVCP140_1.dll` from the system (onnxruntime): a follow-up
-  (WINDOWS.md, VM item 13).
+  bundle still wants `MSVCP140.dll` / `MSVCP140_1.dll` from the system (onnxruntime; espeak-ng's
+  DLL wants `MSVCP140.dll` too): a follow-up (WINDOWS.md, VM item 13).
 
 ### Docs: true for v1
 - docs/ says what main does: her Settings page, menu and Windows tray; Settings ▸ Brain as the way to

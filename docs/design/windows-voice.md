@@ -99,8 +99,8 @@ the wake word's 2.4).
 
 **Nothing is missing:** every package has a Windows x64 wheel for CPython 3.13. **Missing for ARM64 Windows:**
 pywhispercpp has no win_arm64 wheel; numpy, onnxruntime, espeakng-loader, sounddevice and winrt do.
-**[VM]:** onnxruntime on a clean Windows may want the VC++ runtime (the runners have it installed): run
-the bundle on the Windows 11 VM before shipping it.
+**[VM]→fact:** a clean Windows does want the VC++ runtime (MSVCP140; WINDOWS.md item 13) until the
+bundle carries it.
 
 ### Into the installer: picked in V1b, a separate download (option (1))
 The options were:
