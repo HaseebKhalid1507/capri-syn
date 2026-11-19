@@ -39,7 +39,10 @@ use ::windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, GetLastInputInfo, HOT_KEY_MODIFIERS, LASTINPUTINFO, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, RegisterHotKey, VK_ESCAPE,
     VK_LBUTTON, VK_MBUTTON, VK_RBUTTON, VkKeyScanW,
 };
-use ::windows::Win32::UI::Shell::{IVirtualDesktopManager, QUNS_PRESENTATION_MODE, QUNS_RUNNING_D3D_FULL_SCREEN, SHQueryUserNotificationState, VirtualDesktopManager};
+use ::windows::Win32::UI::Shell::{
+    DefSubclassProc, IVirtualDesktopManager, QUNS_PRESENTATION_MODE, QUNS_RUNNING_D3D_FULL_SCREEN, RemoveWindowSubclass, SHQueryUserNotificationState,
+    SetWindowSubclass, VirtualDesktopManager,
+};
 use ::windows::Win32::UI::WindowsAndMessaging::*;
 use ::windows::core::{BOOL, PCWSTR};
 use anyhow::{Result, bail};
@@ -276,8 +279,40 @@ fn region(rects: &[ShapeRect]) -> Option<::windows::Win32::Graphics::Gdi::HRGN> 
     }
 }
 
+/// The input poller's word to one of her click-through surfaces, posted: wParam 1 = take the
+/// pointer (no `WS_EX_TRANSPARENT`), 0 = let it through. The surface's own thread sets the style.
+const WM_SA_PASS: u32 = WM_APP + 0x5A1;
+const PASS_SUBCLASS: usize = 0x5A1;
+/// `WM_SA_PASS`es applied (the regression test counts them).
+#[cfg(test)]
+static PASSES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Applies the poller's `WM_SA_PASS` on the surface's own thread (her UI thread). The poller
+/// never sets the style itself: from another thread, `SetWindowLongPtrW(GWL_EXSTYLE)` is a
+/// synchronous send (WM_STYLECHANGING/-CHANGED) to her UI thread, and the poller made it holding
+/// `surfaces` while her UI thread, mid-frame, waited for that lock in `set_input`. Each waited
+/// for the other for good: "synaps-avatar.exe is not responding" (Haseeb's box, three dumps,
+/// 2026-11-19).
+unsafe extern "system" fn pass_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM, _id: usize, _data: usize) -> LRESULT {
+    match msg {
+        WM_SA_PASS => {
+            #[cfg(test)]
+            PASSES.fetch_add(1, Ordering::Relaxed);
+            let ex = ex_style(h);
+            let ex = if wp.0 != 0 { ex & !WS_EX_TRANSPARENT.0 } else { ex | WS_EX_TRANSPARENT.0 };
+            unsafe { SetWindowLongPtrW(h, GWL_EXSTYLE, ex as isize) };
+            LRESULT(0)
+        }
+        WM_NCDESTROY => unsafe {
+            let _ = RemoveWindowSubclass(h, Some(pass_proc), PASS_SUBCLASS);
+            DefSubclassProc(h, msg, wp, lp)
+        },
+        _ => unsafe { DefSubclassProc(h, msg, wp, lp) },
+    }
+}
+
 /// One of her click-through surfaces: its input region (window px) and whether it lets the
-/// pointer through now.
+/// pointer through now (as last asked of it: the surface's thread applies it).
 struct Surface {
     input: Vec<ShapeRect>,
     transparent: bool,
@@ -436,6 +471,10 @@ impl Win32 {
                 // A layered window shows nothing until it has attributes; DirectComposition's
                 // per-pixel alpha still applies under a constant 255.
                 SetLayeredWindowAttributes(h, ::windows::Win32::Foundation::COLORREF(0), 255, LWA_ALPHA)?;
+                // The poller's flips are applied here, on this thread (`pass_proc`).
+                if !SetWindowSubclass(h, Some(pass_proc), PASS_SUBCLASS, 0).as_bool() {
+                    bail!("windows: cannot subclass 0x{:x} (click-through)", id(h));
+                }
             }
             let set = |attr, v: u32| DwmSetWindowAttribute(h, attr, &v as *const u32 as *const _, 4).ok();
             set(DWMWA_NCRENDERING_POLICY, DWMNCRP_DISABLED.0 as u32);
@@ -487,23 +526,32 @@ impl Win32 {
                 }
                 was_pressed = pressed;
                 if unsafe { GetCursorPos(&mut p) }.is_ok() && !pressed {
-                    let Ok(mut s) = surfaces.lock() else { return };
-                    for (&w, surf) in s.iter_mut() {
-                        let h = hwnd(w);
-                        let mut r = RECT::default();
-                        if unsafe { GetWindowRect(h, &mut r) }.is_err() {
-                            continue;
-                        }
-                        let (lx, ly) = (p.x - r.left, p.y - r.top);
-                        let inside = surf.input.iter().any(|&(x, y, w, h)| lx >= x as i32 && ly >= y as i32 && lx < x as i32 + w as i32 && ly < y as i32 + h as i32);
-                        if inside == surf.transparent {
-                            let ex = ex_style(h);
-                            let ex = if inside { ex & !WS_EX_TRANSPARENT.0 } else { ex | WS_EX_TRANSPARENT.0 };
-                            unsafe { SetWindowLongPtrW(h, GWL_EXSTYLE, ex as isize) };
-                            surf.transparent = !inside;
-                            if trace {
-                                elog!("synaps-avatar: windows: 0x{w:x} takes the pointer: {inside} at {lx},{ly} ({} input rects)", surf.input.len());
+                    // Decided under the lock; posted after it (a post never waits). Nothing here
+                    // waits on her UI thread: it may be waiting for this lock (`pass_proc`).
+                    let mut flips: Vec<(WinId, bool, (i32, i32), usize)> = Vec::new();
+                    {
+                        let Ok(mut s) = surfaces.lock() else { return };
+                        for (&w, surf) in s.iter_mut() {
+                            let mut r = RECT::default();
+                            if unsafe { GetWindowRect(hwnd(w), &mut r) }.is_err() {
+                                continue;
                             }
+                            let (lx, ly) = (p.x - r.left, p.y - r.top);
+                            let inside = surf.input.iter().any(|&(x, y, w, h)| lx >= x as i32 && ly >= y as i32 && lx < x as i32 + w as i32 && ly < y as i32 + h as i32);
+                            if inside == surf.transparent {
+                                surf.transparent = !inside;
+                                flips.push((w, inside, (lx, ly), surf.input.len()));
+                            }
+                        }
+                    }
+                    for (w, inside, (lx, ly), n) in flips {
+                        let posted = unsafe { PostMessageW(Some(hwnd(w)), WM_SA_PASS, WPARAM(inside as usize), LPARAM(0)) }.is_ok();
+                        if !posted && let Ok(mut s) = surfaces.lock() && let Some(surf) = s.get_mut(&w) {
+                            // Not delivered (gone, or its queue full): asked again next time.
+                            surf.transparent = inside;
+                        }
+                        if trace {
+                            elog!("synaps-avatar: windows: 0x{w:x} takes the pointer: {inside} at {lx},{ly} ({n} input rects){}", if posted { "" } else { " (not posted)" });
                         }
                     }
                 }
@@ -1284,6 +1332,74 @@ mod tests {
         assert!(click_activates(false, false) && click_activates(false, true), "other kinds as stock");
         assert_eq!(mouse_activate_reply(false), MA_NOACTIVATE as isize);
         assert_eq!(mouse_activate_reply(true), MA_ACTIVATE as isize);
+    }
+
+    unsafe extern "system" fn plain_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+        unsafe { DefWindowProcW(h, msg, wp, lp) }
+    }
+
+    /// The hang on Haseeb's box (2026-11-19, three dumps alike): the input poller set
+    /// `WS_EX_TRANSPARENT` from its own thread holding `surfaces` (a synchronous send to her UI
+    /// thread) while her UI thread, mid-frame, waited for `surfaces` in `set_input`. Here a
+    /// thread plays her UI thread: it changes her input region under a still pointer and works
+    /// a "frame" (no messages pumped) in between, so the poller flips while it is busy. It must
+    /// never stop for good, and the flips must arrive once it pumps. Needs a desktop (the
+    /// pointer): Windows CI has one.
+    #[test]
+    fn input_flips_never_wait_on_her_ui_thread() {
+        use std::sync::mpsc::{RecvTimeoutError, channel};
+        use std::time::Instant;
+        let (tx, rx) = channel::<Option<usize>>();
+        std::thread::Builder::new()
+            .name("her-ui".into())
+            .spawn(move || {
+                let x = Win32::connect().unwrap();
+                let mut p = POINT::default();
+                unsafe { GetCursorPos(&mut p) }.expect("no pointer: this test needs a desktop");
+                let h = unsafe {
+                    let inst = ::windows::Win32::System::LibraryLoader::GetModuleHandleW(None).unwrap();
+                    let wc = WNDCLASSW { lpfnWndProc: Some(plain_proc), hInstance: inst.into(), lpszClassName: ::windows::core::w!("SaHangTest"), ..Default::default() };
+                    RegisterClassW(&wc);
+                    CreateWindowExW(WINDOW_EX_STYLE(0), ::windows::core::w!("SaHangTest"), ::windows::core::w!("sa-hang-test"), WS_POPUP | WS_VISIBLE, p.x - 100, p.y - 100, 200, 200, None, None, Some(inst.into()), None).unwrap()
+                };
+                let s = x.adopt_hwnd(Role::Body, h).unwrap();
+                // Window px: the pointer is at 100,100.
+                let (take, pass): ([ShapeRect; 1], [ShapeRect; 1]) = ([(50, 50, 100, 100)], [(0, 0, 10, 10)]);
+                let pump = || unsafe {
+                    let mut m = MSG::default();
+                    while PeekMessageW(&mut m, None, 0, 0, PM_REMOVE).as_bool() {
+                        let _ = TranslateMessage(&m);
+                        DispatchMessageW(&m);
+                    }
+                };
+                let (t0, before) = (Instant::now(), PASSES.load(Ordering::Relaxed));
+                while t0.elapsed() < Duration::from_secs(3) {
+                    x.set_input(s, &take);
+                    std::thread::sleep(Duration::from_millis(25));
+                    x.set_input(s, &pass);
+                    std::thread::sleep(Duration::from_millis(25));
+                    pump();
+                    tx.send(None).ok();
+                }
+                std::thread::sleep(Duration::from_millis(50));
+                pump();
+                tx.send(Some(PASSES.load(Ordering::Relaxed) - before)).ok();
+                unsafe {
+                    let _ = DestroyWindow(h);
+                }
+            })
+            .unwrap();
+        loop {
+            match rx.recv_timeout(Duration::from_secs(5)) {
+                Ok(None) => {}
+                Ok(Some(n)) => {
+                    assert!(n >= 20, "only {n} click-through flips applied in 3 s: the poller didn't flip (no desktop?)");
+                    return;
+                }
+                Err(RecvTimeoutError::Timeout) => panic!("her UI thread stopped for 5 s: it and the input poller wait on each other"),
+                Err(RecvTimeoutError::Disconnected) => panic!("her UI thread ended early (see its panic above)"),
+            }
+        }
     }
 
     #[test]
