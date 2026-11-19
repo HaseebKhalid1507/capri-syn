@@ -10,9 +10,6 @@
 #     step, settings.toml byte for byte (his mic, "hey Capri" off), "as you set it" said;
 #   - the uninstall leaves no voice: the bundle, %LOCALAPPDATA%\capri-voice, its Apps entry.
 #
-# Until her binary has `--set` (#92), the checks that need her choices saved (settings.toml, the
-# sidecar started) say SKIP with the reason, and the rest still run.
-#
 #   pwsh .\packaging\windows\test-setup-voice.ps1 -Setup DIR\capri-syn-setup-....exe   (the voice installer beside it)
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'Logs beside the checks.')]
 param([Parameter(Mandatory)] [string]$Setup)
@@ -46,10 +43,9 @@ $setupLog = if (Test-Path $log) { Get-Content -Raw $log } else { '' }
 Check ($p.ExitCode -eq 0) "her installer with /VOICE=on exits 0 ($($p.ExitCode), $([int]((Get-Date) - $t0).TotalSeconds) s)"
 Check ($setupLog -match 'voice: voice: installed ') 'the voice step installed her voice'
 Check ($setupLog -match 'voicefrom: file [^\r\n]*capri-syn-voice-setup') "from /VOICEFROM: $([regex]::Match($setupLog, 'voicefrom: [^\r\n]*').Value)"
-# Her binary without --set (before #92): the voice is installed, his choices can't be saved yet.
-$noSet = $setupLog -match "can't save settings from her installer yet"
-if ($noSet) { Write-Output "SKIP her choices saved, settings.toml, the sidecar started: this build of her has no --set yet (#92)" }
-else { Check ($setupLog -match 'voice: voice: ok') "and saved his choices through her writer$(if ($setupLog -match 'voice: failed: [^\r\n]*') { ': ' + $Matches[0] })" }
+# Her binary has --set (#92): his choices are saved through her own writer, never skipped.
+Check ($setupLog -notmatch "can't save settings from her installer yet") 'her binary takes --set'
+Check ($setupLog -match 'voice: voice: ok') "and saved his choices through her writer$(if ($setupLog -match 'voice: failed: [^\r\n]*') { ': ' + $Matches[0] })"
 
 # 2. The bundle, its selftest, the models.
 $py = Join-Path $voice 'python\python.exe'
@@ -68,11 +64,9 @@ foreach ($m in 'kokoro-v1.0.int8.onnx', 'voices-v1.0.bin', 'ggml-small.en-q5_1.b
 $text = if (Test-Path $settings) { Get-Content -Raw $settings } else { '' }
 Write-Output "--- settings.toml ---`n$text---"
 Check ($text -notmatch '(?m)^\s*(voice|speed|pace|flow)\s*=') 'never her voice itself (voice, speed, pace, flow: her default)'
-if (-not $noSet) {
-    Check ($text -match '(?m)^\s*enabled\s*=\s*true') '[voice] enabled = true'
-    Check ($text -match '(?m)^\s*wake_word\s*=\s*true') '[voice] wake_word = true ("hey Capri", the default)'
-    Check ($text -match '(?m)^\s*speak_unprompted\s*=\s*true') '[voice] speak_unprompted = true (replies aloud, the default)'
-}
+Check ($text -match '(?m)^\s*enabled\s*=\s*true') '[voice] enabled = true'
+Check ($text -match '(?m)^\s*wake_word\s*=\s*true') '[voice] wake_word = true ("hey Capri", the default)'
+Check ($text -match '(?m)^\s*speak_unprompted\s*=\s*true') '[voice] speak_unprompted = true (replies aloud, the default)'
 
 # 4. She starts her voice.
 $from = if (Test-Path $herLog) { (Get-Item $herLog).Length } else { 0 }
@@ -87,8 +81,7 @@ while (((Get-Date) - $t0).TotalSeconds -lt 120 -and -not $her.HasExited) {
     }
     Start-Sleep -Milliseconds 500
 }
-if ($noSet) { Write-Output "SKIP the sidecar started: voice isn't on without --set (her log: $([regex]::Match($said, 'voice: [^\r\n]*').Value))" }
-else { Check ($said -match 'voice: sidecar started \(pid \d+') "her log: $([regex]::Match($said, 'voice: sidecar started[^\r\n]*').Value)" }
+Check ($said -match 'voice: sidecar started \(pid \d+') "her log: $([regex]::Match($said, 'voice: sidecar started[^\r\n]*').Value)"
 $vlog = Join-Path $cv 'capri-voice.log'
 if (Test-Path $vlog) { Write-Output "--- capri-voice.log (end) ---`n$((Get-Content $vlog -Tail 15) -join "`n")`n---" }
 Write-Output "--- her log (voice) ---`n$(($said -split "`r?`n" | Where-Object { $_ -match 'voice' } | Select-Object -Last 15) -join "`n")`n---"
