@@ -21,6 +21,18 @@
 - MODEL is refused under `--model` / `--session` whoever asks; with `[brain]` off its write reads
   `[session]` off her UI thread.
 
+### Every download carries its licences
+
+- The Linux tarball and both Windows installers now hold capri-syn's `LICENSE` and the notices that go
+  with what's inside them: GPUI's Apache-2.0 licence and our patches to it, synaps-client's notice, the
+  icon's, and a `THIRD-PARTY-LICENSES.txt` listing every Rust crate compiled into that build with its
+  licence text. The wake-word model's `NOTICE` sits beside it. The voice installer also lists every
+  Python package it bundles with its licence, carries espeak-ng's and whisper.cpp's licences, and says
+  where the source of its GPL parts (espeak-ng 1.52.0, phonemizer) is.
+- Release notes come from this file (a version's own `## X.Y.Z` section), not a list of merged PRs.
+  Each release also carries `install.sh`, `install.ps1`, `SHA256SUMS` and a build-provenance
+  attestation.
+
 ### Her brain, in her Settings (Settings PR 3)
 - Settings' first row is BRAIN: her model and its login (`✓ CLAUDE · SONNET 4.6`, or `● NO BRAIN YET`
   with a red `SET UP ▸`). It opens Settings ▸ Brain: SIGN IN WITH CLAUDE first, RUN LOCAL, and OTHER

@@ -39,6 +39,10 @@
 #endif
 ; Her icon: the master in assets\icon (assets/icon/NOTICE), used as is.
 #define IconDir "..\..\assets\icon"
+; Her licence and the notices that go with her binary, laid out by build.ps1 (installer/licenses/list).
+#ifndef Notices
+  #define Notices "build\notices"
+#endif
 ; Her AppUserModelID: src/platform/windows/notifications.rs uses the same.
 #define Aumid "Synaps.Avatar"
 ; Her voice installer's AppId (synaps-avatar-voice.iss).
@@ -97,6 +101,8 @@ Source: "..\..\packs\capri\persona.md"; DestDir: "{app}\steps\packs\capri"; Flag
 Source: "{#Exe}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#IconDir}\capri-syn.ico"; DestDir: "{app}"; DestName: "synaps-avatar.ico"; Flags: ignoreversion
 Source: "{#IconDir}\capri-syn-256.png"; DestDir: "{app}"; DestName: "synaps-avatar.png"; Flags: ignoreversion
+; LICENSE and licenses\ (GPUI's Apache-2.0, the crates' licences, the icon's and synaps-client's notices).
+Source: "{#Notices}\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
 
 [Dirs]
 ; Where she looks for packs: made even without one. Removed at uninstall if empty.

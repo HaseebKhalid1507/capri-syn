@@ -169,6 +169,9 @@ Check (@(Get-ChildItem -Directory -Path (Split-Path $packTo) -Filter 'capri.pre-
 Check ((Get-ItemProperty $aumid -ErrorAction SilentlyContinue).DisplayName -eq 'synaps-avatar') 'her AUMID registered (DisplayName)'
 Check ((Get-ItemProperty $aumid -ErrorAction SilentlyContinue).IconUri -eq (Join-Path $app 'synaps-avatar.png')) 'with her icon (IconUri)'
 Check (Test-Path (Join-Path $app 'synaps-avatar.png')) 'the icon file'
+# Her licence and the notices that go with her binary, the crates' licences for this build.
+. (Join-Path $PSScriptRoot '..\..\installer\licenses\check.ps1')
+Test-HerLicence -App $app
 Check ((Get-ItemProperty $run -ErrorAction SilentlyContinue).'synaps-avatar' -eq "`"$(Join-Path $app 'synaps-avatar.exe')`"") 'autostart (the Run key), when asked'
 Check (Test-Path $lnk) 'a Start-menu shortcut'
 # Settings > Apps shows EstimatedSize (KB). Sizing the pack before his pick once walked all of C:.

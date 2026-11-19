@@ -7,6 +7,10 @@
 #   <Out>\site-packages\   tools\capri-voice-win-requirements.txt, wheels only (nothing compiled)
 #   <Out>\capri-voice, <Out>\capri_voice_win.py
 #   <Out>\voice-models.ps1, <Out>\wake\hey-capri-v1.npz   (the model fetch, and the one model in the repo)
+#   <Out>\LICENSE, <Out>\wake\NOTICE   capri-syn's licence; the wake-word model's, beside it
+#   <Out>\licenses\       every package's licence texts, espeak-ng's and whisper.cpp's (inside two
+#                          wheels that don't carry them), and where the GPL parts' source is
+#                          (voice-licenses.py: SOURCE.txt). CPython's own: <Out>\python\LICENSE.txt.
 #
 # Run it:  <Out>\python\pythonw.exe <Out>\capri-voice      (no console; python.exe for one)
 # Models are never in it: %LOCALAPPDATA%\capri-voice\models, fetched by voice-models.ps1 (what
@@ -58,6 +62,10 @@ Copy-Item (Join-Path $repo 'tools\capri_voice_win.py') $Out
 Copy-Item (Join-Path $PSScriptRoot 'voice-models.ps1') $Out
 New-Item -ItemType Directory -Force (Join-Path $Out 'wake') | Out-Null
 Copy-Item (Join-Path $repo 'tools\wake\hey-capri-v1.npz') (Join-Path $Out 'wake')
+Copy-Item (Join-Path $repo 'tools\wake\NOTICE') (Join-Path $Out 'wake')
+Copy-Item (Join-Path $repo 'LICENSE') $Out
+& $Python (Join-Path $PSScriptRoot 'voice-licenses.py') $Out
+if ($LASTEXITCODE) { throw "voice-licenses.py failed ($LASTEXITCODE)" }
 & $Python -m pip freeze --path $site | Set-Content -Encoding utf8 (Join-Path $Out 'versions.txt')
 
 $mb = [math]::Round(((Get-ChildItem -Recurse -File $Out | Measure-Object Length -Sum).Sum / 1MB), 1)

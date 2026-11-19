@@ -108,6 +108,29 @@ class Parity(unittest.TestCase):
         self.assertIn("@('-Release', \"v$ver\")", extras)
         self.assertEqual(extras.count("$herRelease"), 3)
 
+    def test_the_release_builds_the_assets_the_installers_fetch(self):
+        # install.sh and install.ps1 fetch releases/latest/download/<asset_*> (installer/manifest); a
+        # rename on one side only 404s every install the day the release is published.
+        rel = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        assets = dict(re.findall(r"^(asset_\w+)=(\S+)$", MANIFEST, re.M))
+        self.assertEqual(set(assets), {"asset_linux", "asset_windows", "asset_windows_voice"})
+        assemble = block(rel, "  assemble:", "  publish:")
+        for key, name in assets.items():
+            self.assertTrue(name.removesuffix(".tar.gz") in code(rel), f"release.yml doesn't build {key} ({name})")
+            self.assertIn(key, assemble, f"release.yml's assemble doesn't check {key} is there")
+        self.assertFalse("--generate-notes" in code(rel), "release.yml's notes are CHANGELOG.md's, never --generate-notes")
+        self.assertTrue("--notes-file notes/notes.md" in rel, "release.yml publishes notes/notes.md")
+
+    def test_the_voice_licences_name_the_wheels_it_bundles(self):
+        # voice-licenses.py's notes on what two wheels carry inside them are written for one version
+        # of each: the requirements pin exactly those.
+        req = (ROOT / "tools/capri-voice-win-requirements.txt").read_text(encoding="utf-8")
+        vl = (ROOT / "packaging/windows/voice-licenses.py").read_text(encoding="utf-8")
+        loader = re.search(r'^LOADER = "([^"]+)"', vl, re.M).group(1)
+        self.assertRegex(req, rf"(?m)^espeakng-loader=={re.escape(loader)}\b")
+        whisper = re.search(r'"pywhispercpp": \("([^"]+)"', vl).group(1)
+        self.assertRegex(req, rf"(?m)^pywhispercpp=={re.escape(whisper)}\b")
+
     def test_install_ps1_is_ascii(self):
         # Windows PowerShell 5.1 reads a script without a BOM as ANSI.
         bad = [(i + 1, l) for i, l in enumerate(PS.splitlines()) if not l.isascii()]

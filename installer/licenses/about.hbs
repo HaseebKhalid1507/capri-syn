@@ -1,0 +1,21 @@
+Licences of the Rust crates compiled into this build of synaps-avatar: one section per licence text,
+each with the crates under it. The source of every crate is on crates.io at the version shown
+(https://crates.io/crates/NAME/VERSION); none is modified here, except GPUI's platform crate
+(gpui-pre-linux or gpui-pre-windows: licenses/gpui/PATCHES.md says what changed, and the changes are
+under the same Apache-2.0 licence).
+
+Overview:
+{{#each overview}}
+  {{{name}}} ({{{id}}}): {{count}}
+{{/each}}
+
+{{#each licenses}}
+================================================================================
+{{{name}}} ({{{id}}}), used by:
+{{#each used_by}}
+  {{{crate.name}}} {{{crate.version}}}{{#if crate.repository}}  {{{crate.repository}}}{{/if}}
+{{/each}}
+--------------------------------------------------------------------------------
+{{{text}}}
+
+{{/each}}

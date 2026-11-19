@@ -1,0 +1,15 @@
+# Her licence and the notices that go with her binary, in every artifact that carries it: the Linux
+# tarball (installer/stage.sh, under lib/synaps-avatar/) and her Windows installer
+# (packaging/windows/build.ps1 lays them out for synaps-avatar.iss, under {app}). CI checks each
+# artifact holds all of them (installer/licenses/check.sh, packaging/windows/test-install.ps1).
+#
+# From (the repo; @os@ is linux or windows), a tab, to (in the artifact).
+LICENSE	LICENSE
+assets/icon/NOTICE	licenses/icon/NOTICE
+crates/synaps-client/NOTICE	licenses/synaps-client/NOTICE
+crates/synaps-client/LICENSE-APACHE	licenses/synaps-client/LICENSE-APACHE
+vendor/gpui-pre-@os@/LICENSE-APACHE	licenses/gpui/LICENSE-APACHE
+vendor/gpui-pre-@os@/PATCHES.md	licenses/gpui/PATCHES.md
+# Generated for the target built (installer/licenses/third-party.ps1: cargo-about). A source build
+# on his own machine has none (nothing is redistributed); every release artifact does.
+@third-party@	licenses/THIRD-PARTY-LICENSES.txt

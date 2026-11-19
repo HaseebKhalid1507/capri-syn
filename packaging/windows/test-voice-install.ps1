@@ -49,6 +49,22 @@ foreach ($f in 'python\python.exe', 'python\python313._pth', 'capri-voice', 'cap
                'site-packages\onnxruntime', 'site-packages\kokoro_onnx', 'unins000.exe') {
     Check (Test-Path (Join-Path $voice $f)) "$f in $voice"
 }
+# Its licences: capri-syn's, the wake-word model's NOTICE beside it, espeak-ng's and whisper.cpp's
+# (in two wheels that don't carry them), every package's, where the GPL parts' source is, CPython's.
+$repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+$same = @{ 'LICENSE' = 'LICENSE'; 'wake\NOTICE' = 'tools\wake\NOTICE'; 'licenses\whisper.cpp\LICENSE' = 'packaging\windows\voice-licenses\whisper.cpp\LICENSE' }
+foreach ($f in 'COPYING', 'COPYING.APACHE', 'COPYING.BSD2', 'COPYING.UCD') { $same["licenses\espeak-ng\$f"] = "packaging\windows\voice-licenses\espeak-ng\$f" }
+foreach ($f in $same.Keys | Sort-Object) {
+    $got = Join-Path $voice $f
+    Check ((Test-Path $got) -and (Get-FileHash -Algorithm SHA256 $got).Hash -eq (Get-FileHash -Algorithm SHA256 (Join-Path $repo $same[$f])).Hash) "$f in $voice, the repo's $($same[$f])"
+}
+$tp = Join-Path $voice 'licenses\THIRD-PARTY-LICENSES.txt'
+$t = if (Test-Path $tp) { [IO.File]::ReadAllText($tp) } else { '' }
+Check ($t -match '(?m)^phonemizer \d' -and $t -match '(?m)^onnxruntime \d' -and $t.Contains('ThirdPartyNotices') -and $t -match '(?m)^  inside:  espeak-ng 1\.52\.0') "licenses\THIRD-PARTY-LICENSES.txt: every package ($([regex]::Matches($t, '(?m)^={100}\r?\n\S+ \S+').Count) of them, onnxruntime's notices, espeak-ng inside espeakng-loader)"
+$src = Join-Path $voice 'licenses\SOURCE.txt'
+$st = if (Test-Path $src) { [IO.File]::ReadAllText($src) } else { '' }
+Check ($st.Contains('https://github.com/espeak-ng/espeak-ng/tree/1.52.0') -and $st -match 'phonemizer \d') "licenses\SOURCE.txt: espeak-ng 1.52.0's source, phonemizer's"
+Check (Test-Path (Join-Path $voice 'python\LICENSE.txt')) "python\LICENSE.txt (CPython's, from its embeddable package)"
 Check (Test-Path $lnk) 'a Start-menu shortcut to fetch the models again'
 Check (-not (Test-Path (Join-Path $state 'models'))) 'no models fetched (the task was left out)'
 Check ((Get-ItemProperty $voiceKey -ErrorAction SilentlyContinue).DisplayName -eq 'capri-syn voice') 'its own entry in Apps (capri-syn voice)'
