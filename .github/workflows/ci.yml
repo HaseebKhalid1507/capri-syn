@@ -298,6 +298,38 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+  # Her installer with her voice, unattended on a clean runner (/VOICE=on, and the voice installer
+  # the job below built, as a release's would be downloaded): the bundle and its selftest, the
+  # models, settings.toml through her own writer, the sidecar started by her, and an uninstall
+  # that leaves no voice (test-setup-voice.ps1).
+  windows-setup-voice:
+    needs: [windows-installer, windows-voice-installer]
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: capri-syn-setup-${{ github.sha }}
+          path: setup
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: capri-syn-voice-setup-${{ github.sha }}
+          path: setup
+
+      - name: Her installer, /VOICE=on
+        timeout-minutes: 35
+        shell: pwsh
+        run: ./packaging/windows/test-setup-voice.ps1 -Setup (Get-ChildItem setup/capri-syn-setup-*.exe | Select-Object -First 1).FullName -VoiceSetup (Get-ChildItem setup/capri-syn-voice-setup-*.exe | Select-Object -First 1).FullName
+
+      - name: Her logs
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          foreach ($f in @("$env:LOCALAPPDATA\synaps-avatar\synaps-avatar.log", "$env:TEMP\capri-setup-voice-*.log")) { Get-ChildItem $f -ErrorAction SilentlyContinue | ForEach-Object { Write-Output "--- $($_.FullName)"; Get-Content $_ -Tail 200 } }
+
   # Her voice installer (packaging/windows/synaps-avatar-voice.iss): the bundle beside her, as its
   # own download. Built, installed, checked and uninstalled unattended (without the models); then
   # the model fetch on its small files (resume, a bad hash). An artifact, never released.
@@ -353,7 +385,7 @@ jobs:
         shell: pwsh
         run: |
           if (-not (Get-Module -ListAvailable PSScriptAnalyzer)) { Install-Module PSScriptAnalyzer -Force -Scope CurrentUser }
-          $found = foreach ($f in 'install.ps1', 'installer/test-windows.ps1', 'installer/test-units.ps1', 'packaging/windows/steps.ps1', 'packaging/windows/test-install.ps1', 'packaging/windows/test-setup-e2e.ps1', 'packaging/windows/test-setup-wizard.ps1', 'tools/shoot-win.ps1') { Invoke-ScriptAnalyzer -Path $f -Severity Warning, Error }
+          $found = foreach ($f in 'install.ps1', 'installer/test-windows.ps1', 'installer/test-units.ps1', 'packaging/windows/steps.ps1', 'packaging/windows/test-install.ps1', 'packaging/windows/test-setup-e2e.ps1', 'packaging/windows/test-setup-wizard.ps1', 'packaging/windows/test-setup-voice.ps1', 'tools/shoot-win.ps1') { Invoke-ScriptAnalyzer -Path $f -Severity Warning, Error }
           $found | Format-Table -AutoSize ScriptName, Line, RuleName, Message | Out-String -Width 220
           if ($found) { throw "PSScriptAnalyzer: $(@($found).Count) finding(s)" }
           Write-Output 'PSScriptAnalyzer: clean'

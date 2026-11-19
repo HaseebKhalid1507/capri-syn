@@ -499,7 +499,7 @@ function Install-Setup([string]$Setup) {
     New-RecordedPath $script:Prefix
     $log = Join-Path $script:Cache 'setup.log'
     # Her binary only: Synaps, her pack, the daemon, autostart and voice are this script's own steps.
-    $argLine = "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /DIR=`"$($script:Prefix)`" /SYNAPS=skip /PACK=skip /BY=install.ps1 /MERGETASKS=`"!autostart,!voice`" /LOG=`"$log`""
+    $argLine = "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /DIR=`"$($script:Prefix)`" /SYNAPS=skip /PACK=skip /VOICE=off /BY=install.ps1 /MERGETASKS=`"!autostart`" /LOG=`"$log`""
     Write-Action "$(Split-Path -Leaf $Setup) $argLine"
     if (-not $script:Dry) {
         $p = Start-Process -FilePath $Setup -ArgumentList $argLine -Wait -PassThru
@@ -764,13 +764,16 @@ function Install-Extras {
     $sum = $null
     if (-not $script:FromSource) { try { $sum = ((Get-Text "$rel/$($script:M.asset_windows_voice).sha256") -split '\s+')[0] } catch { $sum = $null } }
     if ($sum -match '^[0-9a-f]{64}$') {
-        # Her voice installer, sha256 checked, with its models: steps.ps1 voice (her installer's too).
-        $null = Invoke-Step (Get-StepScript) @(@('voice') + $(if ($script:Dry) { @('-DryRun') } else { @() }))
+        # Her voice installer, sha256 checked, its models, and her settings through her own writer:
+        # steps.ps1 voice (her installer's Voice page runs the same).
+        $null = Invoke-Step (Get-StepScript) @(@('voice', '-Exe', $script:Exe) + $(if ($script:Dry) { @('-DryRun') } else { @() }))
         Add-Receipt @('inno', $script:VoiceKey)
     } else {
-        # No release: the same bundle, built here (CPython 3.13's embeddable package + wheels).
+        # No release: the same bundle, built here (CPython 3.13's embeddable package + wheels); then
+        # steps.ps1 voice -Bundle for the models and her settings, as above.
         $src = Get-Source $script:Ref
         $out = Join-Path $script:Prefix 'voice'
+        if ($script:Dry) { Write-Action "voice-bundle.ps1 -Out $out, then steps.ps1 voice -Bundle $out"; return }
         [string[]]$py = Find-Python
         if (-not $py) { Stop-Install 'the voice bundle needs a CPython 3.13 x64 to run pip' }
         $ps = (Get-Process -Id $PID).Path
@@ -778,16 +781,7 @@ function Install-Extras {
         Add-Receipt @('dir', $out)
         $models = Join-Path $env:LOCALAPPDATA 'capri-voice'
         if (-not (Test-Path $models)) { Add-Receipt @('dir', $models) }
-        Invoke-Native $ps @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $out 'voice-models.ps1'))
-    }
-    $settings = Join-Path $script:Conf 'settings.toml'
-    if (-not (Test-Path $settings)) {
-        Invoke-Action "write $settings ([voice] enabled = true)" {
-            New-Item -ItemType Directory -Force $script:Conf | Out-Null
-            Set-Content -LiteralPath $settings -Value "[voice]`nenabled = true" -Encoding ASCII
-        }
-    } elseif (-not (Select-String -LiteralPath $settings -Pattern '^\s*enabled\s*=\s*true' -Quiet)) {
-        Write-Info "turn her voice on in $(Get-Tilde $settings):  [voice] enabled = true"
+        $null = Invoke-Step (Get-StepScript) @('voice', '-Bundle', $out, '-Exe', $script:Exe)
     }
     $script:VoiceHow = 'capri-voice (she starts it while [voice] enabled is on)'
 }

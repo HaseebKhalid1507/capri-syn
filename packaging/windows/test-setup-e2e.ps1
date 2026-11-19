@@ -122,6 +122,13 @@ $text = if (Test-Path $herLog) { (Get-Content -Raw $herLog).Substring([int]$befo
 Check ($c.ExitCode -eq 0 -and $text -match 'pack `Capri` ok: \d+ frames') "her --check: $([regex]::Match($text, 'pack `Capri` ok: \d+ frames[^,]*').Value) (exit $($c.ExitCode))"
 Check ((Get-RunValue 'synaps-avatar') -eq "`"$exe`"") 'she starts at sign-in (Run\synaps-avatar, the default)'
 Check (Test-Path $lnk) 'her Start-menu entry'
+# Her voice: the page's default is on only when Windows has a microphone (a CI runner has none).
+$mics = [regex]::Match($setupLog, 'mics: mics: (\d+)').Groups[1].Value
+Write-Host "  microphones: $mics"
+if ($mics -eq '0') {
+    Check ($setupLog -match 'voice: off \(no microphone found\)') 'no microphone: her voice is off, and the log says why'
+    Check (-not (Test-Path (Join-Path $app 'voice')) -and -not (Test-Path (Join-Path $env:LOCALAPPDATA 'capri-voice'))) 'and no voice files'
+}
 
 # 4. She starts, from his profile folder (the finish page's "Start her now"), and attaches.
 $from = (Get-Item $herLog -ErrorAction SilentlyContinue).Length

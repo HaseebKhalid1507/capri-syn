@@ -106,8 +106,10 @@ Check (-not (Test-Path $bad)) 'and the bad copy is gone'
 # /PACK=download over a pack of his (no marker): his goes aside, kept; hers is built, checked, marked.
 New-Item -ItemType Directory -Force $packTo | Out-Null
 Set-Content (Join-Path $packTo 'made-by-hand.txt') 'his own pack'
-$code = Install @('/PACK=download', '/SYNAPS=skip') 900
+$code = Install @('/PACK=download', '/SYNAPS=skip', '/VOICE=off') 900
 Check ($code -eq 0) "/PACK=download exits 0 ($code)"
+Check ($script:SetupLog -match 'voice: off' -and -not (Test-Path (Join-Path $app 'voice')) -and -not (Test-Path (Join-Path $env:LOCALAPPDATA 'capri-voice'))) '/VOICE=off: no voice files'
+Check ($script:SetupLog -notmatch 'step mics') '/VOICE=off: not even a look for a microphone'
 Check ($script:SetupLog -notmatch 'pack: failed') "her art came$(if ($script:SetupLog -match 'pack: failed: [^\r\n]*') { ': ' + $Matches[0] })"
 Check (Test-Path (Join-Path $packTo 'sprites.json')) "sprites.json in $packTo"
 Check (Test-Path (Join-Path $packTo 'anim\lachy\LICENSE.md')) "lachy's art, with its licence"
