@@ -211,6 +211,7 @@ synaps-avatar [--profile P | --socket PATH] [--session NAME|ID | --new [--cwd DI
 | `--height PX` | standing body height in logical px (default 340) |
 | `--check` | load and decode the pack, print a summary, exit (no window) |
 | `--dump DIR` | with `--check`: every decoded frame as a PNG, the pixels she draws at `--height` (scale it by the display's sf to see the real render) |
+| `-V`, `--version` | print `synaps-avatar <version>`, exit. Her log says it at start too: `--- synaps-avatar <version> (pid N)` |
 
 `synaps-avatar --help` lists the rest (`--name`, `--threads`, `--no-verify`, `--focus-probe`).
 
