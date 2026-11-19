@@ -202,10 +202,12 @@ New-Item -ItemType Directory -Force $other, $conf | Out-Null
 Set-Content (Join-Path $other 'pack.txt') 'his'
 Set-Content (Join-Path $conf 'settings.toml') '[voice]'
 Set-Content (Join-Path $data 'state.json') '{}'
+Set-Content (Join-Path $data 'tray-promoted') 'she put her icon on the taskbar'
 $code = Invoke-Installer 'purge' @('--uninstall', '--purge')
 Check ($code -eq 0) "--uninstall --purge exits 0 ($code)"
 Check (-not (Test-Path (Join-Path $conf 'settings.toml'))) 'her settings are gone'
 Check (-not (Test-Path (Join-Path $data 'state.json'))) 'her state is gone'
+Check (-not (Test-Path (Join-Path $data 'tray-promoted'))) 'her tray marker is gone'
 Check (-not (Test-Path (Join-Path $data 'synaps-avatar.log'))) 'her log is gone'
 Check (Test-Path (Join-Path $other 'pack.txt')) 'another pack stays (packs\mine)'
 Check ($aside.Count -eq 1 -and (Test-Path -LiteralPath "$($aside[0])")) 'his pack from before stays'

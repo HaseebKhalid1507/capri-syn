@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### Windows: her tray icon starts on the taskbar
+- Windows 11 puts every new tray icon in the hidden `^` overflow, so on a first install she was there
+  and nobody saw her. The first time her icon is in, she now sets `IsPromoted` on her own entry in
+  `HKCU\Control Panel\NotifyIconSettings` (matched by her exe's path and her icon's GUID), so it sits on
+  the taskbar. Explorer takes no value written while it adds the icon, so she waits a few seconds first,
+  then asks the shell whether her icon is on the taskbar and, if not, writes the same 1 once more.
+  Once only: a `tray-promoted` file in her state folder (`%LOCALAPPDATA%\synaps-avatar`) says it was
+  done, and after that the setting is his: hide her and she stays hidden. An entry that already has
+  `IsPromoted` is left as it is. Windows 10 has no such key: nothing is done there. Her log says what is
+  true: `tray: shown on the taskbar (first run)` (`, written twice` if it took the 1 a second time),
+  `tray: set to show on the taskbar; Explorer hasn't moved her yet (next sign-in)`, `tray: left as he
+  set it` or `tray: no NotifyIconSettings entry yet`. Later starts read her entry and say what
+  `IsPromoted` is now, writing nothing. The uninstaller removes the marker.
+
+### Known issues
+- On a first run, Explorer can name her taskbar button with her old tooltip followed by the current
+  one (`capri-syn · SPEAKING capri-syn · ONLINE`), so a screen reader hears both. Her tooltip is one
+  string, and the hover popup shows the current one alone; the name chains after a tooltip change. A
+  follow-up is open.
+
 ## 1.0.0 (2026-11-19)
 
 capri-syn's first release: Capri on your desktop, her brain in Synaps. Linux (X11, Hyprland, and

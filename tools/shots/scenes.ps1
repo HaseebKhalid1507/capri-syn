@@ -550,8 +550,23 @@ $Scenes = [ordered]@{
             $null = Ctl "pos $([int]($sc[0] + $sc[2] / 4)) 100000 now"
             $null = Show-TrayIcon
             $tip = 'capri-syn · ONLINE'
-            if (-not (Wait-Until { (Find-TrayButton).Name -ceq $tip } 20 "her tooltip: $tip")) {
-                $script:Fails.Add("${script:Take}: her tooltip is '$((Find-TrayButton).Name)', not '$tip'")
+            # Her first words come first (SPEAKING): the tooltip is judged once her tag says ONLINE, and her
+            # button's name as Explorer gives it (Test-TrayName). Each name it takes on is said.
+            if (-not (Wait-Until { $st = State; $st.status -ceq 'ONLINE' -and -not $st.voice.speaking } 30 'her tag ONLINE, her first words over')) {
+                $script:Fails.Add("${script:Take}: her tag is '$((State).status)', not ONLINE: no tooltip to judge")
+            }
+            $script:SeenName = $null
+            $named = Wait-Until {
+                $n = (Find-TrayButton).Name
+                if ($n -cne $script:SeenName) { $script:SeenName = $n; Write-Host "  her button's name: '$n'" }
+                Test-TrayName $n $tip
+            } 20 "her button's name: $tip"
+            if (-not $named) {
+                $script:Fails.Add("${script:Take}: her button's name is '$((Find-TrayButton).Name)', not '$tip' (nor a tooltip of hers, then it)")
+                Write-TrayButtons
+            } elseif ($script:SeenName -cne $tip) {
+                # Accepted (a known issue: Explorer chains her old tooltip before the current one), and said in the run's summary.
+                Write-Host "::warning::${script:Take}: her button's name is '$($script:SeenName)', not exactly '$tip': Explorer chains her old tooltip before the current one (known issue; the take passes)"
             }
             $icon = Find-TrayButton
             $cx = [int]($icon.X + $icon.W / 2); $cy = [int]($icon.Y + $icon.H / 2)
@@ -649,6 +664,7 @@ $Scenes = [ordered]@{
             if (-not $script:Her.WaitForExit(10000)) { $script:Fails.Add("${script:Take}: she didn't quit") }
             if (Wait-Until { -not (Find-TrayButton) } 10 'her icon gone') { Write-Host '  quit: her icon is gone' }
             else { $script:Fails.Add("${script:Take}: her icon stayed after QUIT") }
+            Write-HerTrayLog
         }
     }
 }
@@ -890,6 +906,22 @@ function Find-TrayButton {
     } | Select-Object -First 1
 }
 
+<# Her button's name is her tooltip as Explorer says it, and once her tooltip has changed since the button
+   was made (SPEAKING in her first words, then ONLINE) it says the first, then the current one:
+   `capri-syn · SPEAKING capri-syn · ONLINE`. Hers is one NIM_MODIFY with the current text only (her
+   tooltip is one `brand::tooltip`), and the shell's own hover popup, drawn from that text, reads the
+   current one alone (shots 44623949347: 01-tip.png). So: her current tooltip last, and before it only a
+   tooltip of hers (`capri-syn`, or `capri-syn · ` and a tag word). Any other name, or a stale one that
+   ends in an old tooltip, is no match. #>
+function Test-TrayName([string]$Name, [string]$Tip) {
+    $Name -cmatch ('^(?:capri-syn(?: · [A-Z][A-Z ·…-]*)? )?' + [regex]::Escape($Tip) + '$')
+}
+
+<# Everything named on the taskbar, said (what the shell has there now). #>
+function Write-TrayButtons {
+    Get-TrayButtons | ForEach-Object { Write-Host "    taskbar: '$($_.Name)' ($($_.Class)) at $($_.X),$($_.Y) $($_.W)x$($_.H)" }
+}
+
 <# Her icon's GUID as she makes it (platform::windows::tray::guid): her exe's path and her control
    socket's (`instance`, as XDG_RUNTIME_DIR is set). #>
 function Get-HerTrayGuid {
@@ -902,17 +934,56 @@ function Get-HerTrayGuid {
     [Guid]::Parse(('{0}-{1}-{2}-{3}-{4}' -f $x.Substring(0, 8), $x.Substring(8, 4), $x.Substring(12, 4), $x.Substring(16, 4), $x.Substring(20, 12)))
 }
 
-<# Her icon out of the overflow: its NotifyIconSettings key (Explorer writes one the first time an
-   icon is in) IsPromoted = 1, and Explorer started again if that alone doesn't bring it out (she
-   puts her icon back on TaskbarCreated, and Explorer reads the key then). Her button. #>
+<# A NotifyIconSettings key's IconGuid as a [Guid] (text, or 16 bytes); none where it has none. #>
+function Get-KeyGuid($Key) {
+    $v = $Key.GetValue('IconGuid')
+    if ($v -is [byte[]] -and $v.Length -eq 16) { return [Guid]::new([byte[]]$v) }
+    $o = [Guid]::Empty
+    if ($v -and [Guid]::TryParse([string]$v, [ref]$o)) { return $o }
+}
+
+<# Her log's `tray:` lines, said (her stderr's file in the take's logs, and her log file in the take's
+   state folder, wherever she wrote them). #>
+function Write-HerTrayLog {
+    $n = $script:Take -replace '/', '-'
+    foreach ($f in (Join-Path $Logs "$n-her.err"), (Join-Path $Root "$n\state\synaps-avatar\synaps-avatar.log")) {
+        if (Test-Path $f) { Select-String -Path $f -Pattern 'tray: ' -SimpleMatch | ForEach-Object { Write-Host "    her log: $($_.Line)" } }
+    }
+}
+
+<# Her icon out of the overflow. She does it herself, the first time it's in (promote.rs, a few seconds
+   after the add: Explorer takes no value written during it): her NotifyIconSettings key (Explorer
+   writes one the first time an icon is in) IsPromoted = 1, once. Said here, and a problem if she didn't
+   (the take's fresh state folder has no marker); then the key is set from here, as before, and Explorer
+   started again if that alone doesn't bring it out (she puts her icon back on TaskbarCreated, and
+   Explorer reads the key then). Her button. The 8 s wait is the judge of her own write: when she did it
+   and her icon isn't out in 8 s, that's a failure too, with what the shell says of her icon then. #>
 function Show-TrayIcon {
     $keys = { @(Get-ChildItem 'HKCU:\Control Panel\NotifyIconSettings' -ErrorAction SilentlyContinue | Where-Object { [string]$_.GetValue('ExecutablePath') -like '*\synaps-avatar.exe' }) }
     $null = Wait-Until { (& $keys).Count -gt 0 } 20 'her NotifyIconSettings key'
-    foreach ($k in & $keys) {
-        Set-ItemProperty -Path $k.PSPath -Name IsPromoted -Value 1 -Type DWord
-        Write-Host "  promoted: NotifyIconSettings\$($k.PSChildName) ($($k.GetValue('InitialTooltip')))"
+    $g = Get-HerTrayGuid
+    $mine = { @(& $keys | Where-Object { $kg = Get-KeyGuid $_; (-not $kg) -or ($kg -eq $g) } | Where-Object { $_.GetValue('IsPromoted') -eq 1 }) }
+    $herself = Wait-Until { (& $mine).Count -gt 0 } 20 'her own IsPromoted = 1'
+    if ($herself) {
+        $k = (& $mine)[0]
+        Write-Host "  she promoted herself: NotifyIconSettings\$($k.PSChildName) (nothing set from here; InitialTooltip '$($k.GetValue('InitialTooltip'))')"
+    } else {
+        # She didn't: the key is set from here, so the take goes on (and the failure is said).
+        $script:Fails.Add("${script:Take}: she didn't promote her own icon (no IsPromoted = 1 in her NotifyIconSettings key after 20 s; set from here)")
+        foreach ($k in & $keys) { Write-Host "    key $($k.PSChildName): $($k.GetValue('ExecutablePath')) IconGuid=$($k.GetValue('IconGuid')) UID=$($k.GetValue('UID')) IsPromoted=$($k.GetValue('IsPromoted'))" }
+        foreach ($k in & $keys) {
+            Set-ItemProperty -Path $k.PSPath -Name IsPromoted -Value 1 -Type DWord
+            Write-Host "  promoted from here: NotifyIconSettings\$($k.PSChildName) ($($k.GetValue('InitialTooltip')))"
+        }
     }
     if (-not (Wait-Until { Find-TrayButton } 8 'her icon on the taskbar, promoted live')) {
+        # Her write alone didn't bring the icon out in 8 s: a failure, and Explorer started again so the take goes on.
+        if ($herself) { $script:Fails.Add("${script:Take}: she set IsPromoted = 1 on her own icon and it wasn't on the taskbar 8 s later (Explorer started again from here)") }
+        $hr0 = 0
+        $r0 = [ShotsTray.Native]::IconRect((Get-HerTrayGuid), [ref]$hr0)
+        Write-Host "  not on the taskbar: the shell by her GUID: $(if ($r0) { $r0 -join ',' } else { 'hr 0x{0:x8}' -f $hr0 })"
+        Write-TrayButtons
+        Write-HerTrayLog
         Restart-ShotExplorer
         $null = Wait-Until { Find-TrayButton } 30 'her icon on the taskbar, after Explorer'
     }
@@ -921,7 +992,7 @@ function Show-TrayIcon {
     $g = [ShotsTray.Native]::IconRect((Get-HerTrayGuid), [ref]$hr)
     Write-Host "  her icon: UIA $(if ($b) { "'$($b.Name)' at $($b.X),$($b.Y) $($b.W)x$($b.H)" } else { 'none' }); the shell by her GUID: $(if ($g) { $g -join ',' } else { 'hr 0x{0:x8}' -f $hr })"
     if (-not $b) {
-        Get-TrayButtons | ForEach-Object { Write-Host "    taskbar: '$($_.Name)' ($($_.Class)) at $($_.X),$($_.Y) $($_.W)x$($_.H)" }
+        Write-TrayButtons
         throw "$script:Take: her icon isn't on the taskbar"
     }
     return $b

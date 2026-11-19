@@ -139,6 +139,7 @@ Type: files; Name: "{localappdata}\synaps-avatar\state.json"
 Type: files; Name: "{localappdata}\synaps-avatar\state.json.tmp"
 Type: files; Name: "{localappdata}\synaps-avatar\sessions.json"
 Type: files; Name: "{localappdata}\synaps-avatar\sessions.json.tmp"
+Type: files; Name: "{localappdata}\synaps-avatar\tray-promoted"
 Type: filesandordirs; Name: "{localappdata}\synaps-avatar\installer"; Check: not ByInstallPs1
 Type: files; Name: "{app}\capri-syn-setup.ini"
 Type: files; Name: "{userappdata}\synaps-avatar\settings.toml"; Check: not ByInstallPs1

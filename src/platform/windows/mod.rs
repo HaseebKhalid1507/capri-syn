@@ -57,6 +57,7 @@ mod dirs;
 mod fx;
 mod media;
 mod notifications;
+mod promote;
 #[cfg(test)]
 mod testkit;
 mod hold;
