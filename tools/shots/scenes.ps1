@@ -105,6 +105,10 @@ function Set-TakeEnv([hashtable]$Vars) {
     }
 }
 
+# The Synaps her fake daemon says it is (her Settings' VERSION row shows it): the docs' (REFERENCE.md),
+# never a FAKE string on camera. The README's stills come from these shots.
+$DaemonVersion = '0.12.0'
+
 function Start-Take {
     param(
         [Parameter(Mandatory)][string]$Set, [Parameter(Mandatory)][string]$Name,
@@ -125,7 +129,7 @@ function Start-Take {
     $log = Join-Path $Logs "$Set-$Name"
 
     # The fake daemon (FAKE: canned replies, scripted prompts).
-    $fakeEnv = @{ FAKE_DIR = (Join-Path $t 'fake'); FAKE_CTL_PORT = $FakePort; FAKE_DELTA_MS = $DeltaMs; PYTHONUTF8 = '1' }
+    $fakeEnv = @{ FAKE_DIR = (Join-Path $t 'fake'); FAKE_CTL_PORT = $FakePort; FAKE_DELTA_MS = $DeltaMs; FAKE_DAEMON_VERSION = $DaemonVersion; PYTHONUTF8 = '1' }
     if ($Model) { $fakeEnv.FAKE_MODEL = $Model }
     if ($null -ne $History) {
         $h = Join-Path $t 'history.json'
@@ -159,7 +163,7 @@ function Start-Take {
         $base = Join-Path $t 'synaps'
         New-Item -ItemType Directory -Force -Path (Join-Path $base 'run') | Out-Null
         foreach ($f in $Synaps.Keys) { Set-Content -Path (Join-Path $base $f) -Value $Synaps[$f] -Encoding utf8NoBOM }
-        $info = [ordered]@{ pid = $script:Daemon.Id; protocol_version = 3; daemon_version = '0.0.0-fake'; socket = $sock; exe = 'C:\fake\synaps.exe' }
+        $info = [ordered]@{ pid = $script:Daemon.Id; protocol_version = 3; daemon_version = $DaemonVersion; socket = $sock; exe = 'C:\fake\synaps.exe' }
         Set-Content -Path (Join-Path $base 'run\daemon.json') -Value (ConvertTo-Json $info) -Encoding utf8NoBOM
         $herEnv.SYNAPS_BASE_DIR = $base
         $where = @()
