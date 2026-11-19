@@ -156,9 +156,21 @@ jobs:
           key: release
           cache-on-failure: true
 
+      # As the release builds her (release.yml): symbols beside the exe, so a dump of a CI build reads.
       - name: Build the installer
         shell: pwsh
+        env:
+          CARGO_PROFILE_RELEASE_STRIP: none
+          CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
         run: ./packaging/windows/build.ps1
+
+      - name: Her symbols (the PDB of this build's exe)
+        uses: actions/upload-artifact@v4
+        with:
+          name: synaps-avatar-pdb-${{ github.sha }}
+          path: target/release/synaps_avatar.pdb
+          retention-days: 14
+          if-no-files-found: error
 
       - name: Install, check, uninstall (unattended)
         timeout-minutes: 15

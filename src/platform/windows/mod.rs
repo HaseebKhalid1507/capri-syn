@@ -232,25 +232,56 @@ fn is_shell(h: HWND) -> bool {
     h == unsafe { GetShellWindow() } || matches!(class_name(h).as_str(), "Progman" | "WorkerW")
 }
 
+/// The shell's processes: explorer and its out-of-process hosts (Start, Search, the
+/// notification centre and Quick Settings, the touch keyboard, the lock screen).
+const SHELL_EXES: &[&str] = &[
+    "explorer.exe",
+    "StartMenuExperienceHost.exe",
+    "SearchHost.exe",
+    "SearchApp.exe",
+    "SearchUI.exe",
+    "ShellExperienceHost.exe",
+    "ShellHost.exe",
+    "TextInputHost.exe",
+    "LockApp.exe",
+];
+
+/// The shell's windows known by their class: the taskbars, Start's, Search's and the flyouts'
+/// hosts, Alt+Tab and Task View.
+const SHELL_CLASSES: &[&str] = &[
+    "Shell_TrayWnd",
+    "Shell_SecondaryTrayWnd",
+    "XamlExplorerHostIslandWindow",
+    "XamlExplorerHostIslandWindow_WASDK",
+    "Windows.UI.Core.CoreWindow",
+    "TopLevelWindowForOverflowXamlIsland",
+    "NotifyIconOverflowWindow",
+    "MultitaskingViewFrame",
+    "TaskSwitcherWnd",
+    "ForegroundStaging",
+];
+
+/// A window of class `class` (a tool window or not) of process `exe` is the shell's own UI: the
+/// shell's processes only (every UWP app has a `Windows.UI.Core.CoreWindow` too, top level when it
+/// goes full screen), and of theirs a class known or any tool window (a flyout whose class a
+/// Windows update renamed: class lists go stale, the tool-window rule doesn't).
+fn shell_ui(class: &str, tool: bool, exe: &str) -> bool {
+    SHELL_EXES.iter().any(|e| exe.eq_ignore_ascii_case(e)) && (tool || SHELL_CLASSES.contains(&class))
+}
+
 /// The shell's own UI: the desktop, the taskbars, and its flyouts and switchers (Start, Search,
 /// the notification centre, Alt+Tab, Task View). In front, it is never his window nor a
 /// fullscreen app: Start's host covers the whole monitor (on Haseeb's box she went
 /// "fullscreen-hide" every time he opened Start or Search, and followed the Alt+Tab switcher).
+/// The process is only asked for a window that could be the shell's (a known class or a tool
+/// window).
 fn is_shell_ui(h: HWND) -> bool {
-    is_shell(h)
-        || matches!(
-            class_name(h).as_str(),
-            "Shell_TrayWnd"
-                | "Shell_SecondaryTrayWnd"
-                | "XamlExplorerHostIslandWindow"
-                | "XamlExplorerHostIslandWindow_WASDK"
-                | "Windows.UI.Core.CoreWindow"
-                | "TopLevelWindowForOverflowXamlIsland"
-                | "NotifyIconOverflowWindow"
-                | "MultitaskingViewFrame"
-                | "TaskSwitcherWnd"
-                | "ForegroundStaging"
-        )
+    if is_shell(h) {
+        return true;
+    }
+    let class = class_name(h);
+    let tool = ex_style(h) & WS_EX_TOOLWINDOW.0 != 0;
+    (tool || SHELL_CLASSES.contains(&class.as_str())) && shell_ui(&class, tool, &exe_of(h))
 }
 
 /// It covers its whole monitor (a borderless full screen). Tool windows never count (overlays,
@@ -337,8 +368,32 @@ fn top_msg() -> u32 {
 
 /// A window came forward (the WinEvent hook): the poller checks her place on its next tick.
 static Z_CHECK: AtomicBool = AtomicBool::new(false);
-/// Her place on top is checked at least this often (and on every `Z_CHECK`).
+/// Her place on top is checked at least this often (and on every `Z_CHECK`, at this pace).
 const Z_EVERY: Duration = Duration::from_millis(250);
+/// The slowest the checks get while her puts don't hold (`ZPace`).
+const Z_MAX: Duration = Duration::from_secs(8);
+/// A window she couldn't get above is left out of the checks this long, then tried again (one
+/// bad reading never leaves her under his window for good).
+const Z_CANT_FOR: Duration = Duration::from_secs(60);
+/// A wake-up posted and not handled for this long was lost (its window never took it): posted
+/// again.
+const REPOST_MS: u64 = 500;
+
+/// Posts `msg` to `h` unless one is in flight (`flag`): at most one at a time, and one left
+/// unhandled for `REPOST_MS` posted again. None: one is in flight; else whether it went out.
+fn post_once(h: HWND, msg: u32, flag: &AtomicBool, at: &AtomicU64) -> Option<bool> {
+    let now = tick();
+    if flag.swap(true, Ordering::SeqCst) && now.saturating_sub(at.load(Ordering::SeqCst)) < REPOST_MS {
+        return None;
+    }
+    at.store(now, Ordering::SeqCst);
+    let posted = unsafe { PostMessageW(Some(h), msg, WPARAM(0), LPARAM(0)) }.is_ok();
+    if !posted {
+        // Not delivered (gone, or its queue full): the next tick posts again.
+        flag.store(false, Ordering::SeqCst);
+    }
+    Some(posted)
+}
 
 /// Whether `h` takes the pointer now (no `WS_EX_TRANSPARENT`). Reading a style never waits.
 fn takes_pointer(h: HWND) -> bool {
@@ -353,22 +408,25 @@ fn takes_pointer(h: HWND) -> bool {
 /// responding" (Haseeb's box, four dumps alike, 2026-11-19).
 ///
 /// The wanted state lives here; the message is only a wake-up. At most one is in flight
-/// (`queued`) and the latest `take` wins. The poller compares the real style every tick (10 ms),
-/// so a lost wake-up or a style changed behind its back is posted again.
+/// (`queued`) and the latest `take` wins. The poller compares the real style every tick (10 ms):
+/// a style changed behind its back is posted again, and so is a wake-up left unhandled for
+/// `REPOST_MS`.
 #[derive(Default)]
 struct Pass {
     /// Wanted: she takes the pointer here (no `WS_EX_TRANSPARENT`).
     take: AtomicBool,
-    /// A wake-up is posted and not handled yet.
+    /// A wake-up is posted and not handled yet; since when (`tick`).
     queued: AtomicBool,
+    queued_at: AtomicU64,
     /// Its window is gone (WM_NCDESTROY): the poller lets the surface go.
     gone: AtomicBool,
-    /// Her body: a "back on top" wake-up is posted and not handled yet.
+    /// Her body: a "back on top" wake-up is posted and not handled yet; since when (`tick`).
     top: AtomicBool,
+    top_at: AtomicU64,
     /// Her body, right after she was put back: a plain window still over her (0: none). One
     /// she can't get above (a higher band).
     still_under: AtomicU32,
-    /// Wake-ups posted and handled (the regression test reads them, per window).
+    /// Wake-ups that went out and wake-ups handled (the regression test reads them, per window).
     #[cfg(test)]
     posts: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
@@ -383,29 +441,24 @@ impl Pass {
     /// Some(posted) when a wake-up was due; None when the style is already so, or one is queued.
     fn want(&self, h: HWND, take: bool) -> Option<bool> {
         self.take.store(take, Ordering::SeqCst);
-        if takes_pointer(h) == take || self.queued.swap(true, Ordering::SeqCst) {
+        if takes_pointer(h) == take {
             return None;
         }
+        // Counted before it goes (its handling never runs ahead of the count), taken back if not.
         #[cfg(test)]
         self.posts.fetch_add(1, Ordering::SeqCst);
-        let posted = unsafe { PostMessageW(Some(h), pass_msg(), WPARAM(0), LPARAM(0)) }.is_ok();
-        if !posted {
-            // Not delivered (gone, or its queue full): the next tick posts again.
-            self.queued.store(false, Ordering::SeqCst);
+        let r = post_once(h, pass_msg(), &self.queued, &self.queued_at);
+        #[cfg(test)]
+        if r != Some(true) {
+            self.posts.fetch_sub(1, Ordering::SeqCst);
         }
-        Some(posted)
+        r
     }
 
-    /// The poller's side: her body back on top, posted (at most one in flight). Posted or not.
-    fn want_top(&self, h: HWND) -> bool {
-        if self.top.swap(true, Ordering::SeqCst) {
-            return false;
-        }
-        let posted = unsafe { PostMessageW(Some(h), top_msg(), WPARAM(0), LPARAM(0)) }.is_ok();
-        if !posted {
-            self.top.store(false, Ordering::SeqCst);
-        }
-        posted
+    /// The poller's side: her body back on top (at most one in flight, a lost one posted again).
+    /// None: one is in flight; else whether it went out.
+    fn want_top(&self, h: HWND) -> Option<bool> {
+        post_once(h, top_msg(), &self.top, &self.top_at)
     }
 
     /// The surface's side, on its own thread: `queued` cleared first (a later `want` posts
@@ -432,7 +485,7 @@ unsafe extern "system" fn pass_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM, _
             pass.tops.fetch_add(1, Ordering::SeqCst);
             back_on_top();
             // Her windows are all topmost now: any plain window over her is above the band.
-            let still = under_plain_window(h, |_| false, &HashSet::new()).map_or(0, id);
+            let still = under_plain_window(h, |_| false, |_| false).map_or(0, id);
             pass.still_under.store(still, Ordering::SeqCst);
             pass.top.store(false, Ordering::SeqCst);
         }
@@ -462,30 +515,32 @@ unsafe extern "system" fn pass_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM, _
 /// the second monitor's taskbar and the shell's WASDK host were all found under plain windows
 /// after he opened an app from Explorer, with no call of hers in between.
 /// `skip`: windows she can't get above (a higher band: Task Manager's "always on top").
-fn under_plain_window(body: HWND, mine: impl Fn(WinId) -> bool, skip: &HashSet<WinId>) -> Option<HWND> {
+fn under_plain_window(body: HWND, mine: impl Fn(WinId) -> bool, skip: impl Fn(WinId) -> bool) -> Option<HWND> {
     if !showing(body) {
         return None;
     }
     let mut w = body;
     for _ in 0..4096 {
         w = unsafe { GetWindow(w, GW_HWNDPREV) }.ok()?;
-        if ex_style(w) & WS_EX_TOPMOST.0 == 0 && showing(w) && !skip.contains(&id(w)) && !mine(id(w)) {
+        if ex_style(w) & WS_EX_TOPMOST.0 == 0 && showing(w) && !skip(id(w)) && !mine(id(w)) {
             return Some(w);
         }
     }
     None
 }
 
-/// Her windows (this thread's, showing) back to the top of the topmost band, in the order they
-/// stand among themselves (her Line and bubble stay over her body). On her UI thread, posted by
-/// the poller (`top_msg`): her own windows, so nothing here waits on another thread.
+/// Her windows (this thread's surfaces: showing tool windows, as `adopt` makes every one; a
+/// dialog of hers, were there one, is left alone) back to the top of the topmost band, in the
+/// order they stand among themselves (her Line and bubble stay over her body). Not by her
+/// topmost bit: Windows may have cleared it. On her UI thread, posted by the poller
+/// (`top_msg`): her own windows, so nothing here waits on another thread.
 fn back_on_top() {
     let me = unsafe { ::windows::Win32::System::Threading::GetCurrentThreadId() };
     let mut hers = Vec::new();
     let mut w = unsafe { GetTopWindow(None) }.ok();
     for _ in 0..8192 {
         let Some(h) = w else { break };
-        if unsafe { GetWindowThreadProcessId(h, None) } == me && showing(h) {
+        if unsafe { GetWindowThreadProcessId(h, None) } == me && showing(h) && ex_style(h) & WS_EX_TOOLWINDOW.0 != 0 {
             hers.push(h);
         }
         w = unsafe { GetWindow(h, GW_HWNDNEXT) }.ok();
@@ -513,11 +568,24 @@ fn exe_of(h: HWND) -> String {
     name.and_then(|n| n.rsplit('\\').next().map(str::to_string)).unwrap_or_else(|| format!("pid {pid}"))
 }
 
-/// The foreground window covers its whole monitor (a game, a video, a slideshow): Windows may
-/// put it over topmost windows, and the core hides her there anyway (`fullscreen-hide`).
+/// A fullscreen app: showing, not the shell's UI, and covering its whole monitor (a borderless
+/// full screen), or in front while the shell reports a D3D full screen or presentation mode
+/// (asked only when it doesn't cover its monitor).
+fn fullscreen(h: HWND) -> bool {
+    if h.0.is_null() || is_shell_ui(h) || !showing(h) {
+        return false;
+    }
+    if covers_monitor(h) {
+        return true;
+    }
+    let state = unsafe { SHQueryUserNotificationState() };
+    matches!(state, Ok(s) if s == QUNS_RUNNING_D3D_FULL_SCREEN || s == QUNS_PRESENTATION_MODE) && unsafe { GetForegroundWindow() } == h
+}
+
+/// A fullscreen app in front (a game, a video, a slideshow): Windows may put it over topmost
+/// windows, and the core hides her there anyway (`fullscreen-hide`).
 fn fullscreen_in_front() -> bool {
-    let fg = unsafe { GetForegroundWindow() };
-    !fg.0.is_null() && !is_shell_ui(fg) && covers_monitor(fg)
+    fullscreen(unsafe { GetForegroundWindow() })
 }
 
 /// One of her click-through surfaces: its input region (window px) and its click-through state.
@@ -527,12 +595,21 @@ struct Surface {
 }
 
 /// A lock even if a panic poisoned it (her locks hold plain values, whole after any panic): said
-/// loudly, once, and carried on (a silent end of the poller would leave her click-through stuck).
+/// loudly, once a lock, and carried on (a silent end of the poller would leave her click-through stuck).
 /// Release builds abort on a panic; this is for the rest.
-fn relock<'a, T>(m: &'a Mutex<T>, what: &str) -> std::sync::MutexGuard<'a, T> {
+fn relock<'a, T>(m: &'a Mutex<T>, what: &'static str) -> std::sync::MutexGuard<'a, T> {
     m.lock().unwrap_or_else(|e| {
-        static SAID: AtomicBool = AtomicBool::new(false);
-        if !SAID.swap(true, Ordering::Relaxed) {
+        // Once per lock (one list for every `T`).
+        static SAID: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+        let first = match SAID.lock() {
+            Ok(said) if said.contains(&what) => false,
+            Ok(mut said) => {
+                said.push(what);
+                true
+            }
+            Err(_) => true,
+        };
+        if first {
             elog!("synaps-avatar: windows: the {what} lock was poisoned (a panic while it was held); carrying on with its data");
         }
         m.clear_poison();
@@ -541,30 +618,95 @@ fn relock<'a, T>(m: &'a Mutex<T>, what: &str) -> std::sync::MutexGuard<'a, T> {
 }
 
 type Escapes = Arc<Mutex<Option<Box<dyn Fn() + Send>>>>;
-/// The poller's watch on her place on top: a check every `Z_EVERY` and on every window that comes
-/// forward (`Z_CHECK`); out of the topmost band, her UI thread is asked to put her back
-/// (`back_on_top`) and her log says under what. If she's back under something within a second
-/// of being put back, the checks slow down (to 8 s at most) until one finds her on top. A window
-/// still over her right after she was put back is above the topmost band itself (her UI thread
-/// says, `Pass::still_under`): left there until it closes.
+/// How often the poller looks at her place on top, and whether her last put held: `ZWatch`'s
+/// decisions, no Win32 in them (tested as they are).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ZPace {
+    every: Duration,
+    /// A put went out and no check has found her on top since: under again means it didn't hold.
+    unsettled: bool,
+}
+
+/// What a check does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ZStep {
+    /// She is on top (or a fullscreen app is in front): nothing to do.
+    OnTop,
+    /// Her UI thread hasn't taken the last put yet.
+    Waiting,
+    /// Put back, and still under that window right after: it is above the topmost band.
+    Cant,
+    /// Put her back on top.
+    Put,
+}
+
+impl Default for ZPace {
+    fn default() -> ZPace {
+        ZPace { every: Z_EVERY, unsettled: false }
+    }
+}
+
+impl ZPace {
+    /// A check is due `since` the last one; `asked`: a window came forward. Backing off, that
+    /// waits its turn too (else every menu, tooltip and toast would undo the backoff).
+    fn due(&self, since: Duration, asked: bool) -> bool {
+        since >= self.every || (asked && self.every <= Z_EVERY)
+    }
+
+    /// A check found her `under` a plain window, or not; `in_flight`: her UI thread hasn't taken
+    /// the last put; `still_under_it`: right after its put, that very window was still over her.
+    /// A put that didn't hold until this check doubles the wait (to `Z_MAX`); on top, the pace is
+    /// back to `Z_EVERY`.
+    fn found(&mut self, under: bool, in_flight: bool, still_under_it: bool) -> ZStep {
+        if !under {
+            *self = ZPace::default();
+            return ZStep::OnTop;
+        }
+        if in_flight {
+            return ZStep::Waiting;
+        }
+        if still_under_it {
+            self.unsettled = false;
+            return ZStep::Cant;
+        }
+        if self.unsettled {
+            self.every = (self.every * 2).min(Z_MAX);
+        }
+        ZStep::Put
+    }
+
+    /// The put went out.
+    fn put(&mut self) {
+        self.unsettled = true;
+    }
+}
+
+/// The poller's watch on her place on top (`ZPace` decides): a check every `Z_EVERY` and on every
+/// window that comes forward (`Z_CHECK`); out of the topmost band, her UI thread is asked to put
+/// her back (`back_on_top`) and her log says under what. While her puts don't hold, the checks
+/// slow down (8 s at most) until one finds her on top. A window still over her right after she
+/// was put back (her UI thread says, `Pass::still_under`) is above the topmost band itself, and
+/// so is every plain window over it (bands stack): all left out for `Z_CANT_FOR`.
 struct ZWatch {
     last: std::time::Instant,
-    every: Duration,
-    last_put: Option<std::time::Instant>,
+    pace: ZPace,
     puts: u64,
-    cant: HashSet<WinId>,
+    /// Windows she can't get above, since when.
+    cant: HashMap<WinId, std::time::Instant>,
+    /// Those her log has named (once a window).
+    said: HashSet<WinId>,
 }
 
 impl Default for ZWatch {
     fn default() -> ZWatch {
-        ZWatch { last: std::time::Instant::now(), every: Z_EVERY, last_put: None, puts: 0, cant: HashSet::new() }
+        ZWatch { last: std::time::Instant::now(), pace: ZPace::default(), puts: 0, cant: HashMap::new(), said: HashSet::new() }
     }
 }
 
 impl ZWatch {
     fn tick(&mut self, body: &AtomicU32, surfaces: &Mutex<HashMap<WinId, Surface>>, mine: &Mutex<HashSet<WinId>>) {
         let asked = Z_CHECK.swap(false, Ordering::Relaxed);
-        if !asked && self.last.elapsed() < self.every {
+        if !self.pace.due(self.last.elapsed(), asked) {
             return;
         }
         self.last = std::time::Instant::now();
@@ -573,26 +715,40 @@ impl ZWatch {
             return;
         }
         let Some(pass) = relock(surfaces, "surfaces").get(&b).map(|s| s.pass.clone()) else { return };
-        self.cant.retain(|&w| unsafe { IsWindow(Some(hwnd(w))) }.as_bool());
+        let alive = |w: WinId| unsafe { IsWindow(Some(hwnd(w))) }.as_bool();
+        self.cant.retain(|&w, at| alive(w) && at.elapsed() < Z_CANT_FOR);
+        self.said.retain(|&w| alive(w));
         let is_mine = |w: WinId| mine.lock().is_ok_and(|m| m.contains(&w));
-        let Some(over) = under_plain_window(hwnd(b), is_mine, &self.cant).filter(|_| !fullscreen_in_front()) else {
-            self.every = Z_EVERY;
-            return;
-        };
-        if !pass.top.load(Ordering::SeqCst) && pass.still_under.swap(0, Ordering::SeqCst) == id(over) {
-            // Put back, and still under it right after: it is above the topmost band itself.
-            elog!("synaps-avatar: z: can't get above {} of {} (0x{:x}): left there", class_name(over), exe_of(over), id(over));
-            self.cant.insert(id(over));
-            return;
-        }
-        if self.last_put.is_some_and(|at| at.elapsed() < Duration::from_secs(1)) {
-            self.every = (self.every * 2).min(Duration::from_secs(8));
-        }
-        if pass.want_top(hwnd(b)) {
-            self.last_put = Some(std::time::Instant::now());
-            self.puts += 1;
-            if self.puts <= 20 || self.puts.is_multiple_of(100) {
-                elog!("synaps-avatar: z: re-topmost (was below {} of {}, 0x{:x}; #{})", class_name(over), exe_of(over), id(over), self.puts);
+        let over = under_plain_window(hwnd(b), is_mine, |w| self.cant.contains_key(&w)).filter(|_| !fullscreen_in_front());
+        let in_flight = pass.top.load(Ordering::SeqCst);
+        // Her UI thread's word on its last put, read once (a stale one never names a later window).
+        let reported = if in_flight { 0 } else { pass.still_under.swap(0, Ordering::SeqCst) };
+        match self.pace.found(over.is_some(), in_flight, over.is_some_and(|o| reported == id(o))) {
+            ZStep::OnTop => {}
+            ZStep::Waiting => {
+                // A wake-up left unhandled for `REPOST_MS` goes again.
+                let _ = pass.want_top(hwnd(b));
+            }
+            ZStep::Cant => {
+                let mut o = over;
+                while let Some(w) = o {
+                    if self.said.insert(id(w)) {
+                        elog!("synaps-avatar: z: can't get above {} of {} (0x{:x}): left there", class_name(w), exe_of(w), id(w));
+                    }
+                    self.cant.insert(id(w), std::time::Instant::now());
+                    o = under_plain_window(w, is_mine, |x| self.cant.contains_key(&x));
+                }
+            }
+            ZStep::Put => {
+                if pass.want_top(hwnd(b)) == Some(true) {
+                    self.pace.put();
+                    self.puts += 1;
+                    if let Some(o) = over
+                        && (self.puts <= 20 || self.puts.is_multiple_of(100))
+                    {
+                        elog!("synaps-avatar: z: re-topmost (was below {} of {}, 0x{:x}; #{})", class_name(o), exe_of(o), id(o), self.puts);
+                    }
+                }
             }
         }
     }
@@ -1009,7 +1165,6 @@ impl Desktop for Win32 {
         out
     }
 
-    /// The foreground window; the desktop in front is nobody (as a focused X root is).
     /// The foreground window; none on the desktop. With the shell's UI in front (Start, Search,
     /// Alt+Tab, a flyout) his window is still the one he was in.
     fn active_window(&self) -> Option<WinId> {
@@ -1048,17 +1203,9 @@ impl Desktop for Win32 {
     }
 
     /// It covers its whole monitor (a borderless full screen), or it is in front while the
-    /// shell reports a D3D full screen or presentation mode.
+    /// shell reports a D3D full screen or presentation mode (`fullscreen`).
     fn is_fullscreen(&self, w: WinId) -> bool {
-        let h = hwnd(w);
-        if is_shell_ui(h) || !showing(h) {
-            return false;
-        }
-        if covers_monitor(h) {
-            return true;
-        }
-        let state = unsafe { SHQueryUserNotificationState() };
-        matches!(state, Ok(s) if s == QUNS_RUNNING_D3D_FULL_SCREEN || s == QUNS_PRESENTATION_MODE) && unsafe { GetForegroundWindow() } == h
+        fullscreen(hwnd(w))
     }
 
     fn pointer(&self) -> Result<(i32, i32)> {
@@ -1754,9 +1901,12 @@ mod tests {
     }
 
     /// Windows takes her out of the topmost band now and then, her `WS_EX_TOPMOST` bit kept
-    /// (Haseeb's box, 2026-11-19): plain windows end up over her. Here another thread's plain
-    /// window is put over her that way, then again across a hide and show of hers. The poller
-    /// must see it (no pointer, no hook) and her UI thread put her back on top.
+    /// (Haseeb's box, 2026-11-19): plain windows end up over her. That bit can't be set from
+    /// here (Windows ignores `WS_EX_TOPMOST` through `SetWindowLongPtrW`: on his box her style
+    /// stayed as it was), and the repair never reads it: she is put right under another thread's
+    /// plain window (her bit cleared), then again across a hide and show of hers. The poller must
+    /// see it (no pointer, no hook) and her UI thread put her back on top. Another topmost
+    /// window over her (his picture-in-picture, an always-on-top app) is left be: no fight.
     #[test]
     fn she_takes_her_place_on_top_back() {
         use std::sync::mpsc::channel;
@@ -1815,7 +1965,7 @@ mod tests {
         let state = || format!("her ex 0x{:x} showing {}, the plain window's ex 0x{:x} showing {}", ex_style(body), showing(body), ex_style(plain), showing(plain));
         pump();
         assert!(!plain_over_her(), "adopted under the plain window: {}", state());
-        for case in ["out of the band", "out of the band across a hide and show", "out of the band, her bit kept"] {
+        for case in ["out of the band", "out of the band across a hide and show"] {
             unsafe {
                 if case.contains("hide") {
                     let _ = ShowWindow(body, SW_HIDE);
@@ -1828,14 +1978,6 @@ mod tests {
                 }
             }
             assert!(plain_over_her(), "{case}: the plain window isn't over her: the test proves nothing ({})", state());
-            if case.contains("bit kept") {
-                // Windows leaves her so on his box; a style write may sort her back itself.
-                unsafe { SetWindowLongPtrW(body, GWL_EXSTYLE, (ex_style(body) | WS_EX_TOPMOST.0) as isize) };
-                if !plain_over_her() {
-                    eprintln!("{case}: setting WS_EX_TOPMOST put her back on top by itself ({})", state());
-                    continue;
-                }
-            }
             let (t0, before) = (Instant::now(), pass.tops.load(Ordering::SeqCst));
             while plain_over_her() {
                 assert!(t0.elapsed() < Duration::from_secs(3), "{case}: still under the plain window after 3 s ({})", state());
@@ -1845,6 +1987,18 @@ mod tests {
             assert!(pass.tops.load(Ordering::SeqCst) > before, "{case}: put back, but not by her ({})", state());
             assert_ne!(ex_style(body) & WS_EX_TOPMOST.0, 0, "{case}: topmost again ({})", state());
         }
+        // No fight: a topmost window over her stays over her, and she isn't raised once in a second.
+        let keep = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
+        unsafe { SetWindowPos(plain, Some(HWND_TOPMOST), 0, 0, 0, 0, keep).unwrap() };
+        assert!(plain_over_her(), "a topmost window isn't over her: the case proves nothing ({})", state());
+        let (t0, before) = (Instant::now(), pass.tops.load(Ordering::SeqCst));
+        while t0.elapsed() < Duration::from_secs(1) {
+            std::thread::sleep(Duration::from_millis(10));
+            pump();
+        }
+        assert_eq!(pass.tops.load(Ordering::SeqCst), before, "she was raised over a topmost window ({})", state());
+        assert!(plain_over_her(), "a topmost window over her was moved ({})", state());
+        unsafe { SetWindowPos(plain, Some(HWND_NOTOPMOST), 0, 0, 0, 0, keep).unwrap() };
         stop_tx.send(()).ok();
         other.join().unwrap();
         unsafe {
@@ -1852,11 +2006,59 @@ mod tests {
         }
     }
 
+    /// The re-raise's pace (Shady on #85: it stopped backing off at about 1 s, and a window
+    /// coming forward skipped the backoff). Each put that hasn't held by the next check doubles
+    /// the wait, to 8 s; a check that finds her on top brings back 250 ms; backing off, a window
+    /// coming forward waits its turn; her UI thread still on the last put changes nothing; a
+    /// window still over her right after her put is one she can't get above.
+    #[test]
+    fn the_re_raise_backs_off_to_8_s_and_waits_its_turn() {
+        let mut z = ZPace::default();
+        let mut waits = Vec::new();
+        for _ in 0..8 {
+            assert_eq!(z.found(true, false, false), ZStep::Put);
+            z.put();
+            waits.push(z.every.as_millis());
+        }
+        assert_eq!(waits, [250, 500, 1000, 2000, 4000, 8000, 8000, 8000], "under again after every put");
+        assert!(!z.due(Duration::from_millis(300), true), "backing off, a window coming forward waits its turn");
+        assert!(!z.due(Duration::from_millis(7999), false) && z.due(Z_MAX, false));
+        let backing = z;
+        assert_eq!(z.found(true, true, false), ZStep::Waiting);
+        assert_eq!(z, backing, "waiting on her UI thread doubles nothing");
+        assert_eq!(z.found(false, false, false), ZStep::OnTop);
+        assert_eq!(z, ZPace::default(), "on top: the base pace");
+        assert!(z.due(Duration::ZERO, true) && !z.due(Duration::from_millis(10), false) && z.due(Z_EVERY, false));
+        // A put that holds: the next demotion starts at the base pace.
+        assert_eq!(z.found(true, false, false), ZStep::Put);
+        z.put();
+        assert_eq!(z.found(false, false, false), ZStep::OnTop);
+        assert_eq!(z.found(true, false, false), ZStep::Put);
+        assert_eq!(z.every, Z_EVERY);
+        z.put();
+        // Still under that very window right after the put: above the band; settled, no doubling.
+        assert_eq!(z.found(true, false, true), ZStep::Cant);
+        assert_eq!((z.every, z.unsettled), (Z_EVERY, false));
+    }
+
     /// Start's host is a monitor-sized window of the shell's: never a fullscreen app (on
-    /// Haseeb's box she hid each time he opened Start). A plain monitor-sized window is one; a
-    /// tool window (an overlay) isn't.
+    /// Haseeb's box she hid each time he opened Start). The shell's UI is the shell's processes'
+    /// only: of another process, a window with a shell class is an app (every UWP app has a
+    /// `Windows.UI.Core.CoreWindow`, top level when it goes full screen: Shady on #85). A plain
+    /// monitor-sized window is a fullscreen app; a tool window (an overlay) isn't.
     #[test]
     fn the_shells_ui_is_no_fullscreen_app() {
+        assert!(shell_ui("XamlExplorerHostIslandWindow", false, "explorer.exe"), "Start's and Search's host");
+        assert!(shell_ui("Windows.UI.Core.CoreWindow", false, "StartMenuExperienceHost.exe"));
+        assert!(shell_ui("Windows.UI.Core.CoreWindow", false, "searchhost.exe"), "any case");
+        assert!(shell_ui("AFlyoutAnUpdateRenamed", true, "ShellHost.exe"), "a tool window of the shell's");
+        assert!(!shell_ui("Windows.UI.Core.CoreWindow", false, "Microsoft.Media.Player.exe"), "a UWP app's own CoreWindow");
+        assert!(!shell_ui("XamlExplorerHostIslandWindow", false, "synaps-avatar.exe"), "a shell class outside the shell");
+        assert!(!shell_ui("CabinetWClass", false, "explorer.exe"), "his Explorer window is his");
+        assert!(!shell_ui("Chrome_WidgetWin_1", true, "brave.exe"), "a tool window of an app's");
+        // This desktop's own taskbar, read off the window.
+        let tray = unsafe { FindWindowW(::windows::core::w!("Shell_TrayWnd"), PCWSTR::null()) }.expect("a taskbar: the runner has a desktop");
+        assert!(is_shell_ui(tray), "the taskbar ({} of {}) isn't the shell's UI", class_name(tray), exe_of(tray));
         let x = Win32::connect().unwrap();
         let m = monitor_info(unsafe { MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) }).expect("a monitor").monitorInfo.rcMonitor;
         let make = |class: PCWSTR, ex: WINDOW_EX_STYLE| unsafe {
@@ -1865,14 +2067,17 @@ mod tests {
             RegisterClassW(&wc);
             CreateWindowExW(ex | WS_EX_NOACTIVATE, class, ::windows::core::w!("sa-fs-test"), WS_POPUP | WS_VISIBLE, m.left, m.top, m.right - m.left, m.bottom - m.top, None, None, Some(inst.into()), None).unwrap()
         };
-        let start = make(::windows::core::w!("XamlExplorerHostIslandWindow"), WINDOW_EX_STYLE(0));
+        // Monitor-sized windows of this process (no shell's): apps, whatever their class.
+        let impostor = make(::windows::core::w!("XamlExplorerHostIslandWindow"), WINDOW_EX_STYLE(0));
+        let uwp = make(::windows::core::w!("Windows.UI.Core.CoreWindow"), WINDOW_EX_STYLE(0));
         let app = make(::windows::core::w!("SaFullscreenApp"), WINDOW_EX_STYLE(0));
         let overlay = make(::windows::core::w!("SaOverlay"), WS_EX_TOOLWINDOW);
-        assert!(is_shell_ui(start) && !x.is_fullscreen(id(start)), "Start's host taken for a fullscreen app");
-        assert!(!is_shell_ui(app) && x.is_fullscreen(id(app)), "a monitor-sized app window is fullscreen");
+        for (h, what) in [(impostor, "a shell class outside the shell"), (uwp, "a full-screen UWP app"), (app, "a monitor-sized app window")] {
+            assert!(!is_shell_ui(h) && x.is_fullscreen(id(h)), "{what} taken for the shell's UI");
+        }
         assert!(!x.is_fullscreen(id(overlay)), "an overlay (tool window) taken for a fullscreen app");
         unsafe {
-            for h in [start, app, overlay] {
+            for h in [impostor, uwp, app, overlay] {
                 let _ = DestroyWindow(h);
             }
         }

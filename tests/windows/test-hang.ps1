@@ -3,9 +3,10 @@
 # her UI thread and her click-through poller waiting on each other; it takes his pointer crossing
 # her outline while she animates. Here the pointer sweeps her window: each step a move, a short
 # wait (the poller flips), then, where she takes the pointer, a click or a short carry. After every
-# step a WM_NULL to her window must come back: within 1 s, or else within 10 s more (a slow
-# runner, a window of hers opening); both missed is a hang. At the end she still runs, no WER hang
-# or crash event names her, and her log has no panic.
+# step a WM_NULL to her window must come back: within 1 s, or else on a second try (a slow
+# runner, a window of hers opening) before 5 s have gone, when Windows calls a window "not
+# responding"; later or never is the hang. At the end she still runs, no WER hang or crash event
+# names her, and her log has no panic.
 #
 #   tests\windows\test-hang.ps1 [-Exe PATH] [-Pack DIR] [-Seconds 60] [-With 'K=V', ...] [-Out DIR]
 #
@@ -146,6 +147,13 @@ while ((Get-Date) -lt $deadline) {
 }
 if ($p.HasExited -or $body -eq [IntPtr]::Zero) {
     if (Test-Path $log) { Get-Content $log -Tail 40 | ForEach-Object { Write-Host "    | $_" } }
+    if (-not $p.HasExited) {
+        # Up, but no window: where her threads are, then she is stopped.
+        $dmp = Join-Path $work "synaps-avatar-$($p.Id).dmp"
+        try { Write-Host "dump: $dmp ($([Her]::Dump($p, $dmp)))" } catch { Write-Host "dump failed: $_" }
+        Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+    }
+    Write-Host "kept: $work"
     throw "she didn't come up (exited: $($p.HasExited))"
 }
 Start-Sleep -Seconds 3
@@ -191,6 +199,11 @@ while ((Get-Date) -lt $end -and -not $p.HasExited) {
             break
         }
         $ms += 1000
+        if ($ms -ge 5000) {
+            # Windows ghosts a window as "not responding" at 5 s: answered that late is still the bug.
+            $hung = "step ${steps}: WM_NULL answered after ~$ms ms (over 5 s: 'not responding')"
+            break
+        }
     }
     if ($ms -gt $worst) { $worst = $ms }
 }
