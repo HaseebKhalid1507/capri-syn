@@ -60,7 +60,11 @@ connects later (a Bluetooth headset after sign-in) is found without a restart:
   again every 30 s, so "Hey Capri" comes back by itself within about 30 s of the headset connecting
   (a minute if she was speaking at that ask);
 - a talk press finds it at once (unless the list was read in the last 10 s: the next press does), and
-  the wake word is asked for again as soon as that press ends.
+  the wake word is asked for again as soon as that press ends;
+- one that drops while she listens (a headset out of range) ends the wake word's stream
+  (`WAKE PAUSED · MIC LOST`). PortAudio's list still holds it, so a stream on a named mic that ends by
+  itself, or won't open or start, marks the list stale: the next look reads it again (the same 10 s
+  cap) and finds the mic gone or back. The wake word is asked for again every 30 s, as for a gone one.
 
 While the list is read again (PortAudio starting again: a fraction of a second, more with many
 devices) a new stream of hers waits, and a line the sidecar logs in that moment is lost (sounddevice
@@ -245,10 +249,14 @@ thresholds) was fitted on stock synthetic voices only (Kokoro packs, espeak-ng),
 - **Closed** (no stream, the reason on her tag) while: a secret is on screen (`WAKE PAUSED · A SECRET IS ON
   SCREEN`), she is hidden, the screen is locked, he is in a call (or `pactl` can't say). It comes back when
   the cause clears (the avatar asks again every 3 s; the sidecar refuses while locked or in a call). Push-to-
-  talk, a toggle or hands-free close it for their turn, and it comes back after. A stream that dies is not
-  reopened (`WAKE OFF · MIC LOST`) until the settings are reloaded. A named mic that isn't there
-  (`WAKE PAUSED · ITS SOURCE IS GONE`) is asked for again every 30 s, and at once after a talk press
-  that found it.
+  talk, a toggle or hands-free close it for their turn, and it comes back after. A stream that dies on the
+  default mic is not reopened (`WAKE OFF · MIC LOST`) until the settings are reloaded: it would open on
+  whatever the default is now. On a named mic (Windows: `[voice] mic`; Linux: the service's
+  `CAPRI_VOICE_SOURCE`) it can't fall back to the default, so a lost stream (`WAKE PAUSED · MIC LOST`)
+  and a mic that isn't there (`WAKE PAUSED · ITS SOURCE IS GONE`) are asked for again every 30 s, and
+  at once after a talk press that found the mic. While she is hidden or a secret is on screen, an ask
+  that came due waits, looked at every 3 s. A refusal that repeats is logged once, by the sidecar and
+  by her, till its reason changes.
 - **A candidate needs speech:** Silero must hear at least ~0.1 s of speech in the last second, else it is
   dropped before Whisper (no check, not counted by the limit). Music and doors make most stage-1 candidates.
 - **His personal layer (optional, local, never committed):** `tools/capri-wake-tune --fit` builds

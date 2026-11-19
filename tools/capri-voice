@@ -1834,6 +1834,7 @@ class Voice:
         self.wake_forced, self.wake_forced_for = None, None    # its sound-alike filter (False: off), for that Stt
         self.wake_personal = None
         self.wake_paused_until = 0.0
+        self.wake_refused = None   # the wake word's last refusal, logged once (it is asked for again and again)
         self.wake_checks = collections.deque(maxlen=WAKE_VERIFY_N)   # times of the last Whisper checks
         self.wake_n = {'candidates': 0, 'rejected': 0, 'woke': 0, 'second': 0, 'paused': 0, 'no_speech': 0, 'handsfree': 0, 'verify_ms': []}
         self.tts = Tts()
@@ -1907,10 +1908,10 @@ class Voice:
                 if self.wake is None:
                     refuse = 'WAKE OFF · NO MODEL (capri-voice-setup)'
         if refuse:
+            self._log_refusal(mode, refuse)
             self.cur['t_heard'] = now_ms()
             self.emit(ev='mic-closed', mode=mode)
             self.emit(ev='heard', text='', why=refuse, ms=self._ms())
-            log(f'mic: refused ({refuse})')
             return
         # 20 ms chunks (pw-record's default is ~100 ms): the endpoint sees a pause that much sooner.
         cmd = ['pw-record', '--rate', str(MIC_RATE), '--channels', '1', '--format', 's16', '--raw', '--latency', '20ms',
@@ -1926,13 +1927,17 @@ class Voice:
             try:
                 self.rec = _win.Mic(MIC_RATE, SOURCE)
             except Exception as e:
-                log(f'mic: no capture ({e})')
+                # gone since the check (LookupError), or a device PortAudio still listed that went away (the
+                # next look reads its list again: capri_voice_win._stale)
+                why = 'NO MIC · ITS SOURCE IS GONE' if isinstance(e, LookupError) else 'NO MIC · CAPTURE FAILED'
+                self._log_refusal(mode, why, e)
                 self.cur['t_heard'] = now_ms()
                 self.emit(ev='mic-closed', mode=mode)
-                self.emit(ev='heard', text='', why='NO MIC · CAPTURE FAILED', ms=self._ms())
+                self.emit(ev='heard', text='', why=why, ms=self._ms())
                 return
         else:
             self.rec = subprocess.Popen(cmd + ['-'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
+        self._log_refusal(mode, None)
         if mode == 'wake':
             echo = echo if echo in ('headphones', 'speakers') else sink_kind()
             thr = self.wake.threshold(sensitivity)
@@ -2780,6 +2785,16 @@ class Voice:
         log(f"heard: {len(text)} chars in {c['stt_ms']:.0f} ms from {dur:.1f} s ({speech_ms:.0f} ms of speech{conf_s(c.get('conf'))})"
             + (' (the draft)' if c.get('draft') else '') + (f" (held on {c['held_on']}x)" if c.get('held_on') else ''))
 
+    def _log_refusal(self, mode, why, detail=None):
+        """A refused capture is logged; the wake word's only when its reason changes. The avatar asks for
+        the wake word again and again while it is refused (every 3 s in a call, every 30 s while his named
+        mic is gone: thousands of the same line a day). His own presses are always logged. `why` None:
+        its capture opened, so its next refusal is logged whatever it is."""
+        if why and (mode != 'wake' or why != self.wake_refused):
+            log(f'mic: refused ({why})' + (f': {detail}' if detail else ''))
+        if mode == 'wake':
+            self.wake_refused = why
+
     def _ms(self, c=None):
         c = self.cur if c is None else c
         d = lambda a, b: round(c[b] - c[a]) if a in c and b in c else None
@@ -2977,7 +2992,9 @@ class Voice:
             if isinstance(msg.get('vocab'), list):
                 self.cfg['vocab'] = msg['vocab']
             self.set_vocab(self.cfg['vocab'])
-            self.emit(ev='ready', cfg=self.cfg, features=FEATURES)
+            # named_mic: CAPRI_VOICE_SOURCE is set (Windows: his `[voice] mic`). Such a stream never falls back
+            # to the default, so the avatar asks again for a wake word whose mic was lost.
+            self.emit(ev='ready', cfg=self.cfg, features=FEATURES, named_mic=bool(SOURCE))
         elif op == 'listen-start':
             self.listen_start(msg.get('mode', 'hold'), float(msg.get('silence_s', 1.0)), float(msg.get('max_s', 0) or 0), msg.get('echo', 'auto'),
                               float(msg.get('sensitivity', 0.5)), bool(msg.get('handsfree')))

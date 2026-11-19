@@ -49,6 +49,11 @@
   for again every 30 s, so it comes back by itself; a talk press that finds the mic brings it back as
   soon as the press ends. Linux too: a `CAPRI_VOICE_SOURCE` that's gone no longer keeps the wake word
   off till a settings reload.
+- A named mic that drops while "Hey Capri" listens (a headset out of range) no longer keeps the wake word
+  off till a settings reload: `WAKE PAUSED · MIC LOST`, asked for again every 30 s (it can't fall back
+  to the default, so asking is safe). On Windows the stream that ended marks the device list stale, so
+  the next look reads it again. The default mic keeps its rule: `WAKE OFF · MIC LOST` till a reload.
+  The sidecar logs the wake word's refusal once per reason, not at every ask.
 - A control character or a name over 256 characters is a settings error (`--set` exits 2), not a
   sidecar that can never start.
 

@@ -207,6 +207,15 @@ class Vocab(unittest.TestCase):
             v.handle({'op': 'config', 'stt_model': 'base.en', 'vocab': ['Lynx']})
         self.assertEqual((made, v.stt.name, v.stt.prompt), (['base.en'], 'base.en', CV.VOCAB + ', Lynx'))
 
+    def test_ready_says_if_her_mic_is_named(self):
+        """A named mic (CAPRI_VOICE_SOURCE; Windows: his `[voice] mic`) never falls back to the default,
+        so the avatar asks again for a wake word whose stream lost it."""
+        for source, named in ((None, False), ('Headset Microphone (WH-1000XM4 Hands-Free)', True)):
+            v = self.voice()
+            with mock.patch.object(CV, 'SOURCE', source), redirect_stderr(io.StringIO()):
+                v.handle({'op': 'config'})
+            self.assertEqual((v.events[-1]['ev'], v.events[-1]['named_mic']), ('ready', named), source)
+
     def test_a_bad_vocab_is_ignored(self):
         v = self.voice()
         with redirect_stderr(io.StringIO()):
@@ -262,6 +271,49 @@ class SayEnd(unittest.TestCase):
         self.assertEqual(end, {'ev': 'say-end', 'id': 7}, 'his own turn has no cap: whole')
 
 
+class Refusals(unittest.TestCase):
+    """A refused capture is logged; the wake word's only when its reason changes: the avatar asks for it
+    every 30 s while his named mic is gone (every 3 s in a call), and one line each time was ~2,900 a day."""
+
+    def voice(self):
+        v = object.__new__(CV.Voice)
+        v.rec, v.rec_stop_at, v.cur = None, None, {}
+        v.gate = CV.Gate()
+        v.gate.cache['hint'] = (time.monotonic() + 1e6, False)   # logind: not locked
+        v.vad, v.wake, v.wake_paused_until, v.wake_refused = object(), object(), 0.0, None
+        v.events = []
+        v.emit = lambda **ev: v.events.append(ev)
+        return v
+
+    def test_the_wake_words_refusal_is_logged_once_per_reason(self):
+        v = self.voice()
+        gone, call = [True], ['']
+        err = io.StringIO()
+        with mock.patch.object(CV, 'TEST', None), mock.patch.object(CV, 'SOURCE', 'Headset'), \
+                mock.patch.object(CV, 'node_missing', lambda kind, name: gone[0]), \
+                mock.patch.object(CV, 'screen_locked', lambda: False), mock.patch.object(CV, 'in_call', lambda: call[0]), \
+                redirect_stderr(err):
+            def ask(mode='wake'):
+                v.listen_start(mode)
+                return v.events[-1]['why']
+            for _ in range(5):
+                self.assertEqual(ask(), 'NO MIC · ITS SOURCE IS GONE', 'still refused, still said to the avatar')
+            self.assertEqual(ask('hold'), 'NO MIC · ITS SOURCE IS GONE', 'his press')
+            gone[0], call[0] = False, 'Teams'
+            for _ in range(3):
+                self.assertEqual(ask(), 'WAKE PAUSED · IN A CALL')
+            gone[0] = True
+            ask()
+            ask()
+            v._log_refusal('wake', None)      # a wake stream opened
+            ask()
+        lines = [l.split(' ', 1)[1] for l in err.getvalue().splitlines()]
+        self.assertEqual(lines, ['mic: refused (NO MIC · ITS SOURCE IS GONE)'] * 2 + ['mic: refused (WAKE PAUSED · IN A CALL)']
+                         + ['mic: refused (NO MIC · ITS SOURCE IS GONE)'] * 2,
+                         'once per reason; his press always; again after one got through')
+        self.assertEqual(len(v.events), 2 * 12, 'every ask still answered (mic-closed, heard)')
+
+
 class WindowsPlayer(unittest.TestCase):
     """capri_voice_win.Player.wait answers as pw-play exits: 0 only when all it was given played."""
 
@@ -299,13 +351,26 @@ class FakeSd:
     cut at 31 characters; DirectSound; WASAPI), the built-in mic WASAPI's default, and a headset
     that is only a speaker. What gets opened is kept. `later`: devices PortAudio lists only once it
     starts again (`_terminate`, `_initialize`: a Bluetooth headset that connected since), which
-    also closes every stream, as Pa_Terminate does."""
+    also closes every stream, as Pa_Terminate does. `gone`: devices that went away (`drop`): listed
+    on till PortAudio starts again, and opening one fails."""
     MIC = 'Microphone (USB Audio Device Pro)'
     BT = 'Headset Microphone (WH-1000XM4 Hands-Free)'
 
     def __init__(self, later=()):
-        self.opened, self.streams, self.later, self.extra = [], [], list(later), []
+        self.opened, self.streams, self.later, self.extra, self.gone = [], [], list(later), [], set()
         self._initialized, self.restarts, self.fail_start, self.no_stream_start = 1, 0, False, False
+
+    def drop(self, name):
+        """A headset out of range: its streams end by themselves (finished_callback, as WASAPI's do)."""
+        self.gone.add(name)
+        for st in self.streams:
+            if st.name == name:
+                st.end()
+
+    def back(self, name):
+        self.gone.discard(name)
+        if name not in self.extra:
+            self.later.append(name)
 
     def _terminate(self):
         assert self._initialized > 0, 'Pa_Terminate: not initialized'
@@ -319,7 +384,7 @@ class FakeSd:
             raise RuntimeError('Error initializing PortAudio')
         self._initialized += 1
         self.restarts += 1
-        self.extra, self.later = self.extra + self.later, []
+        self.extra, self.later = [n for n in self.extra + self.later if n not in self.gone], []
 
     def query_hostapis(self):
         assert self._initialized > 0, 'PortAudio not initialized'
@@ -341,22 +406,33 @@ class FakeSd:
             self.auto_convert = auto_convert
 
     class Stream:
-        def __init__(self, sd):
-            self.sd, self.active, self.closed = sd, True, False
+        def __init__(self, sd, name=None, finished=None):
+            self.sd, self.active, self.closed, self.name, self.finished = sd, True, False, name, finished
 
         def start(self):
             if self.sd.no_stream_start:
                 raise RuntimeError('Error starting stream: Unanticipated host error')
 
+        def end(self):
+            """It goes inactive: its finished_callback runs (PortAudio's, on abort and close too)."""
+            if self.active:
+                self.active = False
+                if self.finished:
+                    self.finished()
+
         def abort(self):
-            self.active = False
+            self.end()
 
         def close(self):
-            self.active, self.closed = False, True
+            self.end()
+            self.closed = True
 
     def RawInputStream(self, **kw):
+        name = {d['index']: d['name'] for d in self.query_devices()}.get(kw.get('device'))
+        if name in self.gone:
+            raise RuntimeError('Error opening RawInputStream: Unanticipated host error [PaErrorCode -9999]')
         self.opened.append(('input', kw))
-        self.streams.append(self.Stream(self))
+        self.streams.append(self.Stream(self, name, kw.get('finished_callback')))
         return self.streams[-1]
 
     RawOutputStream = RawInputStream
@@ -373,7 +449,8 @@ class NamedMic(unittest.TestCase):
         self.addCleanup(p.stop)
         self.addCleanup(lambda: self.assertEqual([s for s in win._STREAMS if not s.closed], [], 'every stream closed'))
         self.t = 1000.0
-        for p in (mock.patch.object(win, '_clock', lambda: self.t), mock.patch.object(win, '_reloaded_at', None)):
+        for p in (mock.patch.object(win, '_clock', lambda: self.t), mock.patch.object(win, '_reloaded_at', None),
+                  mock.patch.object(win, '_stale', False)):
             p.start()
             self.addCleanup(p.stop)
 
@@ -475,6 +552,52 @@ class NamedMic(unittest.TestCase):
         self.t += 1
         self.assertFalse(win.node_missing('sources', FakeSd.BT), 'down: started at once, the cap or not')
         self.assertEqual((sd.restarts, sd._initialized), (1, 1))
+
+    def test_a_named_mic_that_dropped_is_looked_for_again(self):
+        """His named headset went out of range mid-listen: its stream ends by itself, and PortAudio still
+        lists it (its list is a snapshot), so a hit on its name would prove nothing. The list is marked
+        stale: the next look (the wake word asks again in 30 s) reads it again, finds it gone (ITS SOURCE
+        IS GONE), and once it is back finds it again."""
+        sd = self.use(FakeSd(later=[FakeSd.BT]))
+        self.assertFalse(win.node_missing('sources', FakeSd.BT))
+        m = win.Mic(16000, FakeSd.BT)
+        self.t += 60
+        sd.drop(FakeSd.BT)
+        self.assertEqual(m.read(0), b'', 'the mic is lost')
+        m.terminate()
+        self.assertEqual(sd.restarts, 1)
+        self.t += 30
+        self.assertTrue(win.node_missing('sources', FakeSd.BT), 'read again: gone, not the old entry')
+        self.assertEqual(sd.restarts, 2)
+        self.t += 30
+        self.assertTrue(win.node_missing('sources', FakeSd.BT), 'still gone: a miss')
+        sd.back(FakeSd.BT)
+        self.t += 30
+        self.assertFalse(win.node_missing('sources', FakeSd.BT), 'back: found')
+        self.assertEqual(sd.restarts, 4)
+        win.Mic(16000, FakeSd.BT).terminate()
+        self.assertEqual(sd.opened.pop()[1]['device'], 8)
+        self.t += 60
+        self.assertFalse(win.node_missing('sources', FakeSd.BT))
+        self.assertEqual(sd.restarts, 4, 'closed by her, not lost: nothing is read again')
+
+    def test_a_named_open_that_fails_marks_the_list_stale(self):
+        """A device PortAudio still lists went away with nothing of hers on it: the check says it's there
+        and the open fails (CAPTURE FAILED). The next look reads the list again, within the same cap."""
+        sd = self.use(FakeSd(later=[FakeSd.BT]))
+        self.assertFalse(win.node_missing('sources', FakeSd.BT))
+        sd.gone.add(FakeSd.BT)
+        self.t += 3
+        self.assertFalse(win.node_missing('sources', FakeSd.BT), 'PortAudio still lists it')
+        with self.assertRaises(RuntimeError):
+            win.Mic(16000, FakeSd.BT)
+        self.assertFalse(win.node_missing('sources', FakeSd.BT), 'stale, but 3 s since the last read: the cap holds')
+        self.assertEqual(sd.restarts, 1)
+        self.t += 10
+        self.assertTrue(win.node_missing('sources', FakeSd.BT), 'read again: gone')
+        self.assertEqual(sd.restarts, 2)
+        with self.assertRaises(LookupError):
+            win.Mic(16000, FakeSd.BT)          # ITS SOURCE IS GONE, not CAPTURE FAILED
 
     def test_a_stream_that_will_not_start_is_closed(self):
         """A stream whose start fails is closed at once: left open (till the garbage collector) it
