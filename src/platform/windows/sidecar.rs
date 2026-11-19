@@ -145,6 +145,13 @@ fn start(dir: &Path, log: &Path, job: &Job) -> io::Result<Child> {
         .stdout(out)
         .stderr(err)
         .creation_flags(CREATE_NO_WINDOW);
+    // His microphone (`[voice] mic`, her installer's picker): the sidecar's capture device, by
+    // name. None (or a settings file she can't read): Windows' default.
+    if let Ok(st) = crate::settings::Settings::load()
+        && !st.voice.mic.is_empty()
+    {
+        c.env("CAPRI_VOICE_SOURCE", &st.voice.mic);
+    }
     launch(&mut c, job)
 }
 
