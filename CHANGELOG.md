@@ -3,17 +3,24 @@
 ## Unreleased
 
 ### Her brain, last follow-ups (Settings PR 5)
-- API KEY acts on what it says: with one service's key set and her on another brain, ⏎ switches her
-  to it (`⏎ use it`); else it copies `synaps login` to set one.
+- API KEY acts on what it says: with keys set here, ⏎ switches her to one (`⏎ use it`: the first;
+  on one of several, `IN USE · GROQ +1` and `⏎ the next key`); on the only one, or none, it copies
+  `synaps login` to set one.
+- A key counts where the daemon has it: in its environment when that can be read (Linux), not
+  one only in hers (a ✓ there would be a switch that fails).
 - A MODEL pick refused under `--model` / `--session` puts the page back on the model in force.
 - The Brain screen's look reads Synaps' `config`, `auth.json` and the daemon's environment once a
-  look, not once per provider. The local server is asked again after 5 s, then less often while it
-  answers the same (to every 40 s); a Settings page opened or a new URL asks at once. At most two
-  name lookups left hanging at a time; an address isn't looked up.
-- `provider.local.url` counts as Synaps reads it, at the daemon's start: one added since is used
-  from its next start (one she saw there before stands when his TUI rewrites the config).
-- No credentials in her log: the local server's URL is logged (and shown) without
-  `user:password@` or a `?query`, and the probe never sends them.
+  look, not once per provider. A local server that answers (with her model, if she's on one of
+  its) is asked again after 5 s, then less often while it answers the same (to every 40 s); one
+  that's off, or without her model yet, every 5 s (he may be starting it, or pulling it). A
+  Settings page opened (even mid-look) or a new URL asks at once. At most two name lookups left
+  hanging at a time; an address isn't looked up.
+- `provider.local.url` counts as Synaps reads it, at the daemon's start: the one she saw there for
+  this start stands when his TUI rewrites the config (`/model`, `/thinking`, `/theme`); one she
+  never saw for it is taken as written. A config she can't read keeps what she knew.
+- No credentials in her log or bubble: a URL is shown without anything up to its last `@` (a
+  password with `/`, `?` or `#` in it too), a `?query` or a `#fragment`, in what she logs and in
+  Synaps' errors (it quotes its local URL whole); the probe never sends them.
 
 ### Her brain, follow-ups (Settings PR 4)
 - MODEL follows her session when his TUI changes it (`/model`: the daemon's `setting_changed` to

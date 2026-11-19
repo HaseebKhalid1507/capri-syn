@@ -251,9 +251,31 @@ pub fn local_url(set: Option<&str>, env: Option<String>) -> String {
         .to_string()
 }
 
-/// A URL as she shows it, in her log or on a page: no `user:password@` and no `?query` (where a
-/// URL can carry a credential), the rest as it is.
+/// A URL as she shows it, in her log, her bubble or on a page: nothing up to its last `@` (a
+/// password may hold `/`, `?`, `#` unencoded), no `?query` or `#fragment` (where a URL can carry
+/// a credential). An `@` past the host (no local server has one) costs only what's shown.
 pub fn url_shown(u: &str) -> String {
+    let u = u.trim();
+    let (scheme, rest) = u.split_once("://").unwrap_or(("", u));
+    let rest = rest.rsplit_once('@').map_or(rest, |(_, r)| r);
+    let rest = rest.split_once(['?', '#']).map_or(rest, |(a, _)| a);
+    if scheme.is_empty() { rest.to_string() } else { format!("{scheme}://{rest}") }
+}
+
+/// Every URL in a daemon's message as she shows one (`url_shown`; Synaps quotes its local URL
+/// whole: `can't reach local endpoint at …`). The rest, its whitespace too, as it is.
+pub fn urls_shown(s: &str) -> String {
+    s.split_inclusive(char::is_whitespace)
+        .map(|w| {
+            let t = w.trim_end_matches(char::is_whitespace);
+            if t.contains("://") { format!("{}{}", url_shown(t), &w[t.len()..]) } else { w.to_string() }
+        })
+        .collect()
+}
+
+/// The server a URL names, for the probe: its `user:password@` (never sent: a local server takes
+/// none) and its query off, the host and path as a URL parser reads them.
+fn url_target(u: &str) -> String {
     let u = u.trim();
     let u = u.split_once(['?', '#']).map_or(u, |(a, _)| a);
     let (scheme, rest) = u.split_once("://").unwrap_or(("", u));
@@ -298,11 +320,11 @@ pub fn probe(url: &str, timeout: Duration) -> Local {
     let end = std::time::Instant::now() + timeout;
     let left = || end.checked_duration_since(std::time::Instant::now()).filter(|d| !d.is_zero());
     // No `user:password@` (never sent: a local server takes none) and no query.
-    let Some(rest) = url_shown(url).strip_prefix("http://").map(str::to_string) else { return Local::Odd(0) };
+    let Some(rest) = url_target(url).strip_prefix("http://").map(str::to_string) else { return Local::Odd(0) };
     let (host, path) = rest.split_once('/').map_or((rest.as_str(), ""), |(h, p)| (h, p));
     let host = if host.rsplit_once(':').is_some_and(|(_, p)| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())) { host.to_string() } else { format!("{host}:80") };
     let path = format!("/{}/models", path.trim_matches('/')).replace("//", "/");
-    let Some(addrs) = resolve(&host, &left) else { return Local::Off };
+    let Some(addrs) = resolve(&host, left) else { return Local::Off };
     let Some(mut s) = addrs.iter().find_map(|a| std::net::TcpStream::connect_timeout(a, left()?).ok()) else { return Local::Off };
     let req = format!("GET {path} HTTP/1.0\r\nHost: {host}\r\nAccept: application/json\r\nConnection: close\r\n\r\n");
     if left().is_none_or(|d| s.set_write_timeout(Some(d)).is_err()) || s.write_all(req.as_bytes()).is_err() {
@@ -568,18 +590,37 @@ mod tests {
         assert_eq!(from("provider.local.url = http://a:1/v1\nprovider.local.url =\n", Some("http://y/v1")), "http://y/v1", "blanked: the variable");
     }
 
-    /// No credential in a URL she shows (her log, the page): `user:password@` and a query go.
+    /// No credential in a URL she shows (her log, her bubble, the page): everything up to its
+    /// last `@`, a query and a fragment go, a password holding `/`, `?` or `#` unencoded too.
     #[test]
     fn a_url_shown_has_no_credentials() {
         assert_eq!(url_shown("http://localhost:11434/v1"), "http://localhost:11434/v1");
         assert_eq!(url_shown("http://bob:hunter2@10.0.0.2:8080/v1"), "http://10.0.0.2:8080/v1");
         assert_eq!(url_shown("http://bob:p@ss@host"), "http://host", "an @ in the password");
         assert_eq!(url_shown("https://tok@host/v1/?api_key=sk-x#frag"), "https://host/v1/");
-        assert_eq!(url_shown("http://host/a@b"), "http://host/a@b", "an @ past the host is the path's");
+        assert_eq!(url_shown("http://bob:p/ss@host:1/v1"), "http://host:1/v1", "a / in the password");
+        assert_eq!(url_shown("http://bob:p?ss@host:1/v1"), "http://host:1/v1", "a ? in the password");
+        assert_eq!(url_shown("http://bob:p#ss@host:1/v1"), "http://host:1/v1", "a # in the password");
+        assert_eq!(url_shown("http://host/a@b"), "http://b", "an @ past the host: less shown, never more");
         assert_eq!(url_shown(" http://h:1 "), "http://h:1");
         assert_eq!(url_shown("localhost:11434"), "localhost:11434");
         assert_eq!(url_shown("u:pw@localhost:11434/v1"), "localhost:11434/v1", "no scheme");
+        assert_eq!(url_shown("http://[::1]:11434/v1"), "http://[::1]:11434/v1");
         assert!(!format!("{:?}", Some((url_shown("http://u:secret@h/v1"), Local::Off))).contains("secret"));
+        // The probe's own parse: the server as a URL parser reads it.
+        assert_eq!(url_target("http://bob:hunter2@10.0.0.2:8080/v1?k=x"), "http://10.0.0.2:8080/v1");
+        assert_eq!(url_target("http://host/a@b"), "http://host/a@b", "an @ past the host is the path's");
+    }
+
+    /// Synaps quotes its local URL whole in its errors: every URL in one goes as she shows it,
+    /// the rest of it (lines too) as it was.
+    #[test]
+    fn a_daemons_message_shows_no_credentials() {
+        let m = "can't reach local endpoint at http://bob:p/ss@10.0.0.2:8080/v1: connection refused";
+        assert_eq!(urls_shown(m), "can't reach local endpoint at http://10.0.0.2:8080/v1: connection refused");
+        assert_eq!(urls_shown("a\n  (https://t@h/v1?key=sk-1)\tb"), "a\n  (https://h/v1\tb", "a URL's query and what follows it in the word go");
+        assert_eq!(urls_shown("no url here: a@b ?x"), "no url here: a@b ?x");
+        assert!(!urls_shown("x http://u:secret@h/v1 y http://v:hunter2@g/").contains("secret") && !urls_shown("x http://u:secret@h/v1 y http://v:hunter2@g/").contains("hunter2"));
     }
 
     #[test]

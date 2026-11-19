@@ -328,17 +328,26 @@ fn use_provider(p: &Prefs, to: &'static Provider) -> Act {
     }
 }
 
-/// API KEY's ⏎: with one service's key set here and her on another, switch her to it (its
-/// default model; not under `--model`/`--session`). Else, on this machine, Synaps' list of
-/// services, to set one; a daemon on another machine: nothing (a key here wouldn't reach it).
+/// The key services with a key here (`key_word`'s), in the table's order: hers counts when
+/// she has a login on it.
+fn keys_set(m: &provider::Status) -> Vec<&'static Provider> {
+    provider::ALL.iter().filter(|q| q.kind == Kind::Key && (m.signed.contains(&q.id) || (m.provider() == Some(*q) && m.signed_in == Some(true)))).collect()
+}
+
+/// API KEY's ⏎ (not under `--model`/`--session`): with keys set here, switch her to one (its
+/// default model): the first, or the one after hers when she's on one of several. On the only
+/// one, none set, or locked: on this machine, Synaps' list of services, to set one; a daemon on
+/// another machine: nothing (a key here wouldn't reach it).
 fn key_act(p: &Prefs) -> Act {
     let m = &p.mind;
-    let set: Vec<&'static Provider> = provider::ALL.iter().filter(|q| q.kind == Kind::Key && m.signed.contains(&q.id)).collect();
-    let to = match set.as_slice() {
-        [one] if m.provider() != Some(*one) && m.lock.is_none() => one.models.first(),
-        _ => None,
+    let set = keys_set(m);
+    let to = match set.iter().position(|q| m.provider() == Some(*q)) {
+        _ if m.lock.is_some() => None,
+        None => set.first(),
+        Some(i) if set.len() > 1 => set.get((i + 1) % set.len()),
+        Some(_) => None,
     };
-    match to {
+    match to.and_then(|q| q.models.first()) {
         Some(d) => Act::Pref(Pref::Model(d.0)),
         None if m.here => Act::Login(None),
         None => Act::Nothing,
@@ -431,15 +440,18 @@ pub fn brain_hint(p: &Prefs, sel: usize, other: bool) -> &'static str {
     let rows = brain_rows(p, other);
     let row = rows[sel.min(rows.len() - 1)];
     let inside = other && matches!(row, BrainRow::Account(_) | BrainRow::Key);
+    let on_key = p.mind.provider().is_some_and(|q| q.kind == Kind::Key);
     match (row, brain_key("enter", sel, p, other).1) {
         (BrainRow::Model, _) if step_model(p, 1) != Act::Nothing => "↑↓ pick · ←→ change · esc back",
         (BrainRow::Model, _) => "↑↓ pick · esc back",
         (BrainRow::Other, _) if other => "↑↓ pick · ⏎ close · esc back",
         (BrainRow::Other, _) => "↑↓ pick · ⏎ open · esc back",
         (_, Act::Login(_)) if inside => "↑↓ pick · ⏎ copy the sign-in · ← close · esc back",
+        (BrainRow::Key, Act::Pref(_)) if inside && on_key => "↑↓ pick · ⏎ the next key · ← close · esc back",
         (_, Act::Pref(_)) if inside => "↑↓ pick · ⏎ use it · ← close · esc back",
         (_, _) if inside => "↑↓ pick · ← close · esc back",
         (_, Act::Login(_)) => "↑↓ pick · ⏎ copy the sign-in · esc back",
+        (BrainRow::Key, Act::Pref(_)) if on_key => "↑↓ pick · ⏎ the next key · esc back",
         (_, Act::Pref(_)) => "↑↓ pick · ⏎ use it · esc back",
         (_, Act::Local) => "↑↓ pick · ⏎ the steps · esc back",
         _ => "↑↓ pick · esc back",
@@ -1312,14 +1324,16 @@ pub fn brain_line(m: &provider::Status) -> &'static str {
 /// API KEY's word: IN USE on hers (a key service with its key), else ✓ and the services with a
 /// key set here, else a few of them.
 pub fn key_word(m: &provider::Status) -> (String, Option<&'static str>) {
-    let has = |p: &provider::Provider| m.signed.contains(&p.id) || (m.provider() == Some(p) && m.signed_in == Some(true));
-    if let Some(to) = m.provider().filter(|&p| p.kind == Kind::Key && has(p)) {
-        return (format!("IN USE · {}", to.name.to_uppercase()), Some("check"));
+    let set = keys_set(m);
+    if let Some(to) = m.provider().filter(|p| set.contains(p)) {
+        // Others set too: ⏎ steps to the next (`key_act`).
+        let more = if set.len() > 1 { format!(" +{}", set.len() - 1) } else { String::new() };
+        return (format!("IN USE · {}{more}", to.name.to_uppercase()), Some("check"));
     }
     if !m.here {
         return ("ON ITS MACHINE".into(), None);
     }
-    let keys: Vec<String> = provider::ALL.iter().filter(|&p| p.kind == Kind::Key && has(p)).map(|p| p.name.to_uppercase()).collect();
+    let keys: Vec<String> = set.iter().map(|p| p.name.to_uppercase()).collect();
     match keys.as_slice() {
         [] => ("Groq · OpenRouter · 17 more".into(), None),
         [k] => (format!("KEY SET · {k}"), Some("check")),
@@ -1590,8 +1604,18 @@ mod tests {
         assert_eq!(brain_key("enter", key_row, &locked, true).1, Act::Login(None), "--model: no switch");
         let mut two = p.clone();
         two.mind.signed.push("openrouter");
-        assert_eq!(brain_key("enter", key_row, &two, true).1, Act::Login(None), "two keys: which is MODEL's");
-        assert_eq!(brain_hint(&two, key_row, true), "↑↓ pick · ⏎ copy the sign-in · ← close · esc back");
+        assert_eq!(brain_key("enter", key_row, &two, true).1, Act::Pref(Pref::Model("groq/llama-3.3-70b-versatile")), "two keys: the first");
+        // On one of them: ⏎ steps to the next, round.
+        let openrouter = provider::by_id("openrouter").unwrap().models[0].0;
+        two.mind.model = Some("groq/llama-3.3-70b-versatile".into());
+        let at = brain_rows(&two, true).iter().position(|r| *r == BrainRow::Key).unwrap();
+        assert_eq!(key_word(&two.mind).0, "IN USE · GROQ +1");
+        assert_eq!(brain_key("enter", at, &two, true).1, Act::Pref(Pref::Model(openrouter)));
+        assert_eq!(brain_hint(&two, at, true), "↑↓ pick · ⏎ the next key · ← close · esc back");
+        two.mind.model = Some(openrouter.into());
+        assert_eq!(brain_key("enter", at, &two, true).1, Act::Pref(Pref::Model("groq/llama-3.3-70b-versatile")), "round to the first");
+        two.mind.lock = Some(Lock::Theirs);
+        assert_eq!(brain_key("enter", at, &two, true).1, Act::Login(None), "their session: no switch");
         let mut on_it = Prefs { mind: mind("groq/llama-3.3-70b-versatile", Some(true)), ..prefs() };
         assert_eq!(key_word(&on_it.mind).0, "IN USE · GROQ");
         let rows = brain_rows(&on_it, true);

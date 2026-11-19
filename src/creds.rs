@@ -70,8 +70,18 @@ impl Seen {
         }
     }
 
-    /// A variable is set, not blank, in her environment or the daemon's.
+    /// A key the daemon has: in its environment where that can be read (it alone decides: one in
+    /// hers only isn't the daemon's), else in hers.
     pub fn env_set(&self, k: &str) -> bool {
+        match &self.env {
+            Some(e) => e.set.contains(k),
+            None => env_set(k),
+        }
+    }
+
+    /// A variable set in her environment or the daemon's (Gemini's client id: a sign-in in his
+    /// terminal reads it there, the daemon to refresh).
+    pub fn env_either(&self, k: &str) -> bool {
         env_set(k) || self.env.as_ref().is_some_and(|e| e.set.contains(k))
     }
 
@@ -85,7 +95,11 @@ impl Seen {
     /// found it read then), its `LOCAL_ENDPOINT` (where it can't be read, hers). With what to
     /// remember of the config's for the next look.
     pub fn local_url(&self, known: Option<&UrlAtStart>) -> (String, Option<UrlAtStart>) {
-        let (set, keep) = url_at_start(self.files.local_url.clone(), self.files.config_at, self.started, known);
+        let (set, keep) = match self.files.config {
+            // Unreadable (held by another process) says nothing of its URL: what was known stands.
+            None => (known.filter(|k| Some(k.0) == self.started).and_then(|k| k.1.clone()), known.cloned()),
+            Some(_) => url_at_start(self.files.local_url.clone(), self.files.config_at, self.started, known),
+        };
         let env = self.env.as_ref().map_or_else(|| std::env::var("LOCAL_ENDPOINT").ok(), |e| e.local_endpoint.clone());
         (crate::provider::local_url(set.as_deref(), env), keep)
     }
@@ -96,9 +110,10 @@ pub type UrlAtStart = (SystemTime, Option<String>);
 
 /// The config's `provider.local.url` (`written`) as the daemon has it: Synaps reads it once, at
 /// its start, as it does its keys. A config there then (`there_at_start`), or no start known: as
-/// written, and remembered for that start. One written since (or too close to tell): what an
-/// earlier look found for that start, else none (the daemon's `LOCAL_ENDPOINT` or Ollama's) until
-/// its next start.
+/// written, and remembered for that start. One written since (or too close to tell; his TUI
+/// rewrites it on /model, /thinking, /theme): what an earlier look found for that start, else as
+/// written, not remembered (that URL rarely changes; dropping it would probe Ollama's port while
+/// she answers through his LM Studio).
 pub fn url_at_start(written: Option<String>, config_at: Option<SystemTime>, started: Option<SystemTime>, known: Option<&UrlAtStart>) -> (Option<String>, Option<UrlAtStart>) {
     let Some(t) = started else { return (written, None) };
     if config_at.is_none_or(|w| there_at_start(w, t)) {
@@ -106,7 +121,7 @@ pub fn url_at_start(written: Option<String>, config_at: Option<SystemTime>, star
     }
     match known.filter(|k| k.0 == t) {
         Some(k) => (k.1.clone(), Some(k.clone())),
-        None => (None, None),
+        None => (written, None),
     }
 }
 
@@ -177,7 +192,7 @@ pub fn env_set(k: &str) -> bool {
     std::env::var_os(k).is_some_and(|v| !v.to_string_lossy().trim().is_empty())
 }
 
-/// `env`: a variable is set in her environment or the daemon's; `daemon_read`: whether the
+/// `env`: the daemon has a variable set (`Seen::env_set`: its environment, else hers); `daemon_read`: whether the
 /// daemon's was read; `started`: when the daemon started (it read its `config` then, and only
 /// then: a key put there since isn't its yet).
 #[cfg(test)]
@@ -475,7 +490,8 @@ mod tests {
     }
 
     /// `provider.local.url` as the daemon read it at its start, as its keys: written before it
-    /// (by 2 s), as written; since, what an earlier look found for that start, else none.
+    /// (by 2 s), as written; since, what an earlier look found for that start, else as written
+    /// (not remembered: a TUI write after its start mustn't drop a URL that works).
     #[test]
     fn the_local_url_is_the_one_read_at_its_start() {
         let t = SystemTime::UNIX_EPOCH + Duration::from_secs(1_794_625_965);
@@ -484,15 +500,54 @@ mod tests {
         assert_eq!(url_at_start(a(), Some(since), None, None), (a(), None), "no daemon.json: as written");
         assert_eq!(url_at_start(a(), Some(before), Some(t), None), (a(), Some((t, a()))), "there at its start");
         assert_eq!(url_at_start(a(), None, Some(t), None), (a(), Some((t, a()))), "no time for it: as written");
-        assert_eq!(url_at_start(a(), Some(since), Some(t), None), (None, None), "added since: not its until its next start");
-        assert_eq!(url_at_start(a(), Some(t - Duration::from_secs(1)), Some(t), None), (None, None), "too close to tell");
+        assert_eq!(url_at_start(a(), Some(since), Some(t), None), (a(), None), "written since, nothing seen before: as written");
+        assert_eq!(url_at_start(a(), Some(t - Duration::from_secs(1)), Some(t), None), (a(), None), "too close to tell: as written");
         // His TUI writes the config (/theme) after its start: the URL seen there before stands.
         let known = (t, Some("http://b:2/v1".to_string()));
         assert_eq!(url_at_start(a(), Some(since), Some(t), Some(&known)), (known.1.clone(), Some(known.clone())));
         let unset = (t, None);
         assert_eq!(url_at_start(a(), Some(since), Some(t), Some(&unset)).0, None, "none at its start: none");
         let other_start = (t - Duration::from_secs(3600), Some("http://old:3/v1".to_string()));
-        assert_eq!(url_at_start(a(), Some(since), Some(t), Some(&other_start)), (None, None), "another start's: not this one's");
+        assert_eq!(url_at_start(a(), Some(since), Some(t), Some(&other_start)), (a(), None), "another start's: not this one's");
         assert_eq!(url_at_start(None, Some(before), Some(t), Some(&known)), (None, Some((t, None))), "taken out before it: none");
+    }
+
+    /// Where the daemon's environment can be read, it alone says which keys it has: one only in
+    /// hers isn't the daemon's (a ✓ there would be a switch that fails). Unread: hers counts.
+    /// Gemini's client id counts in either (a sign-in in his terminal reads it there).
+    #[test]
+    fn a_readable_daemon_env_decides_alone() {
+        let d = dir("envs");
+        let files = || Files::read(&d, None);
+        let daemon = |keys: &[&str]| Some(crate::platform::Environ { set: keys.iter().map(|k| k.to_string()).collect(), local_endpoint: None });
+        // PATH: set in hers (any test run has one), never in this daemon's.
+        let read = Seen { files: files(), env: daemon(&["GROQ_API_KEY"]), started: None };
+        assert!(!read.env_set("PATH"), "hers only: not the daemon's");
+        assert!(read.env_set("GROQ_API_KEY"));
+        assert!(read.env_either("PATH") && read.env_either("GROQ_API_KEY"));
+        assert_eq!(read.check("groq/llama-3.3-70b-versatile").0, Creds::Have);
+        assert_eq!(read.check("cerebras/llama3.1-8b").0, Creds::Missing(Some("Cerebras")));
+        let unread = Seen { files: files(), env: None, started: None };
+        assert!(unread.env_set("PATH"), "the daemon's unread: hers");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// A config she can't read (another process holds it) says nothing of its URL: what she knew
+    /// for this start stands and is kept; never remembered as none.
+    #[test]
+    fn an_unreadable_config_keeps_the_url_known() {
+        let t = SystemTime::UNIX_EPOCH + Duration::from_secs(1_794_625_965);
+        let env = || Some(crate::platform::Environ::default());
+        let held = || Files { config: None, local_url: None, config_at: Some(t - Duration::from_secs(3600)), auth: Some(Vec::new()) };
+        let seen = Seen { files: held(), env: env(), started: Some(t) };
+        let known = (t, Some("http://lm:1234/v1".to_string()));
+        assert_eq!(seen.local_url(Some(&known)), ("http://lm:1234/v1".to_string(), Some(known.clone())));
+        assert_eq!(seen.local_url(None), ("http://localhost:11434/v1".to_string(), None), "nothing known: not remembered as none");
+        let old = (t - Duration::from_secs(60), Some("http://old:1/v1".to_string()));
+        assert_eq!(seen.local_url(Some(&old)).0, "http://localhost:11434/v1", "another start's: not this one's");
+        // Readable, written since its start, nothing known: as written (his TUI's /theme mustn't
+        // drop a URL that works).
+        let since = Seen { files: Files { config: Some(HashSet::new()), local_url: Some("http://lm:1234/v1".into()), config_at: Some(t + Duration::from_secs(60)), auth: Some(Vec::new()) }, env: env(), started: Some(t) };
+        assert_eq!(since.local_url(None), ("http://lm:1234/v1".to_string(), None));
     }
 }

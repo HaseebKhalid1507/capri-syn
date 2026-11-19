@@ -71,8 +71,8 @@ Reference for `synaps-avatar`, the crate behind capri-syn. The [README](../READM
   file time's rounding flips it: Synaps reads its config once, at start, `daemon.json`'s
   `started_at`, so one added since, or too close to tell, is unknown until a restart or her first
   answer), or
-  its key variable (`ANTHROPIC_API_KEY`, `GROQ_API_KEY`, …) in her environment or the daemon's
-  (Linux: `/proc/<pid>/environ`, whether it's set, never its value). Keys and types only, never a
+  its key variable (`ANTHROPIC_API_KEY`, `GROQ_API_KEY`, …) in the daemon's environment (Linux:
+  `/proc/<pid>/environ`, whether it's set, never its value; where it can't be read, hers). Keys and types only, never a
   secret. None: her tag reads `NO BRAIN YET` in place of `ONLINE` (and asleep), and she reads again
   every 5 s, so a `synaps login` in a terminal clears it without a message. With no brain her summon
   key, a click on her or on her tag open the Line on Settings ▸ Brain (Esc: chat), and her menu's
@@ -93,12 +93,14 @@ Reference for `synaps-avatar`, the crate behind capri-syn. The [README](../READM
   else: `‹error: …›` (cut at 90 characters), annoyed, as before.
 - **Settings ▸ Brain.** Settings' first row, BRAIN, shows her model and its login (`✓ CLAUDE ·
   SONNET 4.6`, `● NO BRAIN YET` with a red `SET UP ▸`); ⏎ (or its button) opens the Brain screen:
-  SIGN IN WITH CLAUDE, RUN LOCAL (its server looked at: `provider.local.url`'s last line, read at
-  the daemon's start as its keys are, so one added since counts from its next start; else the
-  daemon's `LOCAL_ENDPOINT` (Windows: hers), else Ollama's port; one deadline for the lookup, the
-  connect and the reply; asked again after 5 s, then less often while it answers the same, to every
-  40 s, and at once when a Settings page opens or the URL changes; never with the URL's
-  `user:password@`, and her log shows the URL without it or a `?query`), OTHER
+  SIGN IN WITH CLAUDE, RUN LOCAL (its server looked at: `provider.local.url`'s last line as the
+  daemon read it at its start: the one she saw for this start stands when his TUI rewrites the
+  config, one she never saw for it is taken as written, an unreadable config keeps what she knew;
+  else the daemon's `LOCAL_ENDPOINT` (Windows: hers), else Ollama's port; one deadline for the
+  lookup, the connect and the reply; asked every 5 s while it's off or lacks her model, less often
+  while it answers the same, to every 40 s, and at once when a Settings page opens or the URL
+  changes; never with the URL's `user:password@`. Her log, her bubble and the Line show a URL,
+  Synaps' errors' too, without anything up to its last `@`, a `?query` or a `#fragment`), OTHER
   (opened in place: ChatGPT, Copilot, Gemini, Grok, Kimi, Muse, then API KEY; Gemini only with
   `SYNAPS_GOOGLE_GEMINI_CLIENT_ID` set, which Synaps 0.12 needs to sign in to it, or a Gemini login
   on file), and, once she has a brain, MODEL: her provider's few models, written to `settings.toml`
@@ -110,8 +112,9 @@ Reference for `synaps-avatar`, the crate behind capri-syn. The [README](../READM
   and a click switches her to its first model; a sign-in copies its `synaps login --provider …` for
   a terminal until she runs it herself (the keys under the list say what ⏎ does on the row picked).
   API KEY says `IN USE · GROQ` when her brain is a key service with its key, else `KEY SET · …` for
-  the services with a key here; with one set (and her on another brain), ⏎ switches her to it (its
-  default model), else it copies `synaps login` to set one. Locked: `--model` (`set by --model`), `--session` (`their
+  the services with a key here; ⏎ switches her to one (its default model: the first, or on one of
+  several, `IN USE · GROQ +1`, the next), else (the only one, none) it copies `synaps login` to set
+  one. Locked: `--model` (`set by --model`), `--session` (`their
   session`); nothing else writes MODEL then either. A daemon through `--socket` signs in on its own
   machine: the ways in (RUN LOCAL too) say ON ITS MACHINE and do nothing here. The open Brain
   screen looks again every 5 s (Synaps' files and the daemon's environment read once a look) and
