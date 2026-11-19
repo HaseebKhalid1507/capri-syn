@@ -161,7 +161,8 @@ cargo-about, `installer/licenses/`).
   her exe and her tray (#79).
 - **Her tray menu** (a right click on her icon) is owner-drawn (`platform/windows/traymenu.rs`):
   her own menu's colours and marks (`platform/menulook.rs`, from `theme`), sized at the DPI of the
-  monitor it opens on. The menu itself is Windows': its keys, its submenu, its screen-reader words.
+  monitor it opens on. The menu itself is Windows': its keys and its submenu. A screen reader gets
+  each row's words from its `MSAAMENUINFO`. Under high contrast it's the stock menu, in your theme.
 - **Autostart** (a task, checked): the `HKCU\…\Run` value.
 - **Uninstall** (Settings → Apps, or `unins000.exe /VERYSILENT`): stops her (this install of her, by
   its path: never a synaps-avatar.exe of his elsewhere), then removes her exe,
