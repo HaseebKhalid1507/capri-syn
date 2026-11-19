@@ -19,9 +19,7 @@
   `capri-voice.log` starts over as it's written.
 - Her Windows exe links the C runtime in (`+crt-static`, `.cargo/config.toml`), so a PC without
   the Visual C++ Redistributable runs her. Main's exe imported `VCRUNTIME140.dll` (CI's PDB at
-  0ea4ac9). `build.ps1` now lists her exe's DLL imports and stops on a C runtime one. The voice
-  bundle still wants `MSVCP140.dll` / `MSVCP140_1.dll` from the system (onnxruntime; espeak-ng's
-  DLL wants `MSVCP140.dll` too): a follow-up (WINDOWS.md, VM item 13).
+  0ea4ac9). `build.ps1` now lists her exe's DLL imports and stops on a C runtime one.
 
 ### Docs: true for v1
 - docs/ says what main does: her Settings page, menu and Windows tray; Settings ▸ Brain as the way to
@@ -85,6 +83,17 @@
   (Linux), one deadline for the name lookup, the connect and the reply.
 - MODEL is refused under `--model` / `--session` whoever asks; with `[brain]` off its write reads
   `[session]` off her UI thread.
+
+### Windows voice: the VC++ runtime is in the bundle
+- A Windows PC without the Visual C++ Redistributable couldn't start her voice: onnxruntime's and
+  espeak-ng's DLLs import `MSVCP140.dll` (onnxruntime `MSVCP140_1.dll` too), and the sidecar died on
+  import ("DLL load failed") over and over, with nothing on screen. The voice bundle now carries the
+  runtime beside its Python (`msvcp140.dll`, `msvcp140_1.dll`, `vcruntime140*.dll`, from Visual
+  Studio, unmodified, under the Visual Studio licence's Distributable Code) with Microsoft's end-user
+  terms for it (`licenses\vc-runtime\LICENSE.txt`). Its build stops when a DLL imports what neither
+  the bundle nor a clean Windows has (a pinned list of System32's DLLs, not the build machine's
+  System32), or a runtime older than the MSVC that linked it (`voice-imports.py`), and CI checks the
+  installed bundle loads its own copies, espeak-ng's as phonemizer loads it.
 
 ### Every download carries its licences
 

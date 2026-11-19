@@ -50,7 +50,8 @@ if (Test-Path $voice) { throw "$voice exists already: not a clean machine" }
 $code = Install
 Check ($code -eq 0) "installs unattended, without the models (exit $code)"
 foreach ($f in 'python\python.exe', 'python\python313._pth', 'capri-voice', 'capri_voice_win.py', 'voice-models.ps1', 'wake\hey-capri-v1.npz',
-               'site-packages\onnxruntime', 'site-packages\kokoro_onnx', 'unins000.exe') {
+               'site-packages\onnxruntime', 'site-packages\kokoro_onnx', 'unins000.exe',
+               'python\msvcp140.dll', 'python\msvcp140_1.dll', 'python\vcruntime140.dll', 'python\vcruntime140_1.dll') {
     Check (Test-Path (Join-Path $voice $f)) "$f in $voice"
 }
 # Its licences: capri-syn's, the wake-word model's NOTICE beside it, espeak-ng's (and sonic's),
@@ -58,7 +59,8 @@ foreach ($f in 'python\python.exe', 'python\python313._pth', 'capri-voice', 'cap
 # GPL parts' source is, CPython's.
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $same = @{ 'LICENSE' = 'LICENSE'; 'wake\NOTICE' = 'tools\wake\NOTICE'; 'licenses\whisper.cpp\LICENSE' = 'packaging\windows\voice-licenses\whisper.cpp\LICENSE'
-           'licenses\portaudio\LICENSE.txt' = 'packaging\windows\voice-licenses\portaudio\LICENSE.txt' }
+           'licenses\portaudio\LICENSE.txt' = 'packaging\windows\voice-licenses\portaudio\LICENSE.txt'
+           'licenses\vc-runtime\LICENSE.txt' = 'packaging\windows\voice-licenses\vc-runtime\LICENSE.txt' }
 foreach ($f in 'COPYING', 'COPYING.APACHE', 'COPYING.BSD2', 'COPYING.UCD', 'sonic-LICENSE') { $same["licenses\espeak-ng\$f"] = "packaging\windows\voice-licenses\espeak-ng\$f" }
 foreach ($f in $same.Keys | Sort-Object) {
     $got = Join-Path $voice $f
@@ -66,7 +68,7 @@ foreach ($f in $same.Keys | Sort-Object) {
 }
 $tp = Join-Path $voice 'licenses\THIRD-PARTY-LICENSES.txt'
 $t = if (Test-Path $tp) { [IO.File]::ReadAllText($tp) } else { '' }
-Check ($t -match '(?m)^phonemizer \d' -and $t -match '(?m)^onnxruntime \d' -and $t.Contains('ThirdPartyNotices') -and $t -match '(?m)^  inside:  espeak-ng 1\.52\.0' -and $t -match '(?m)^  inside:  PortAudio v19\.7\.0') "licenses\THIRD-PARTY-LICENSES.txt: every package ($([regex]::Matches($t, '(?m)^={100}\r?\n\S+ \d').Count) of them, onnxruntime's notices, espeak-ng inside espeakng-loader, PortAudio inside sounddevice)"
+Check ($t -match '(?m)^phonemizer \d' -and $t -match '(?m)^onnxruntime \d' -and $t.Contains('ThirdPartyNotices') -and $t -match '(?m)^  inside:  espeak-ng 1\.52\.0' -and $t -match '(?m)^  inside:  PortAudio v19\.7\.0' -and $t.Contains('licenses\vc-runtime\LICENSE.txt') -and $t -match 'msvcp140_1\.dll 14\.\d+') "licenses\THIRD-PARTY-LICENSES.txt: every package ($([regex]::Matches($t, '(?m)^={100}\r?\n\S+ \d').Count) of them, onnxruntime's notices, espeak-ng inside espeakng-loader, PortAudio inside sounddevice, the VC++ runtime in python\ with its versions)"
 # sounddevice's PortAudio: the one DLL she loads, none of its ASIO builds (Steinberg's SDK) or other platforms'.
 $pa = @(Get-ChildItem (Join-Path $voice 'site-packages\_sounddevice_data\portaudio-binaries') -Name -ErrorAction SilentlyContinue | Sort-Object)
 Check (($pa -join ',') -eq 'libportaudio64bit.dll,README.md') "site-packages\_sounddevice_data\portaudio-binaries: libportaudio64bit.dll only ($($pa -join ', '))"
@@ -77,6 +79,14 @@ Check (Test-Path (Join-Path $voice 'python\LICENSE.txt')) "python\LICENSE.txt (C
 Check (Test-Path $lnk) 'a Start-menu shortcut to fetch the models again'
 Check (-not (Test-Path (Join-Path $state 'models'))) 'no models fetched (the task was left out)'
 Check ((Get-ItemProperty $voiceKey -ErrorAction SilentlyContinue).DisplayName -eq 'capri-syn voice') 'its own entry in Apps (capri-syn voice)'
+
+# Every DLL's imports are in the installed bundle or Windows, the VC++ runtime from the bundle only (a
+# clean Windows has none; this runner has it in System32, so loading alone proves nothing); then, run by
+# its own interpreter after the sidecar's imports, the VC++ runtime it loaded is python\'s.
+$vi = & (Join-Path $voice 'python\python.exe') (Join-Path $repo 'packaging\windows\voice-imports.py') $voice --live
+$vc = $LASTEXITCODE
+$vi | ForEach-Object { Write-Host "  imports: $_" }
+Check ($vc -eq 0) "its DLLs' imports are all in it or Windows, and the VC++ runtime it loads is its own (voice-imports.py --live, exit $vc)"
 
 # The bundle runs from where it was installed, with no Python on PATH needed.
 $env:CAPRI_VOICE_MODELS = Join-Path ([IO.Path]::GetTempPath()) "sa-no-models-$PID"

@@ -73,7 +73,8 @@ and the unit tests run on both OSes).
 ### The bundle: `packaging/windows/voice-bundle.ps1` (built and run in CI; not in the installer yet)
 
 ```
-voice\python\          CPython 3.13.17 embeddable (python.org, SHA-256 pinned), python313._pth → ..\site-packages
+voice\python\          CPython 3.13.17 embeddable (python.org, SHA-256 pinned), python313._pth → ..\site-packages,
+                       the VC++ runtime (msvcp140*.dll, vcruntime140*.dll, from Visual Studio)
 voice\site-packages\   tools\capri-voice-win-requirements.txt, wheels only (versions.txt: what was installed)
 voice\capri-voice, voice\capri_voice_win.py
 run: voice\python\pythonw.exe voice\capri-voice
@@ -99,8 +100,16 @@ the wake word's 2.4).
 
 **Nothing is missing:** every package has a Windows x64 wheel for CPython 3.13. **Missing for ARM64 Windows:**
 pywhispercpp has no win_arm64 wheel; numpy, onnxruntime, espeakng-loader, sounddevice and winrt do.
-**[VM]→fact:** a clean Windows does want the VC++ runtime (MSVCP140; WINDOWS.md item 13) until the
-bundle carries it.
+**The VC++ runtime:** onnxruntime's DLLs import `MSVCP140.dll` and `MSVCP140_1.dll`, espeak-ng's `MSVCP140.dll`;
+a clean Windows has neither (the runners do). The bundle carries them in `python\` (voice-bundle.ps1), and
+`voice-imports.py` checks every DLL's imports against the bundle and a clean Windows (`CLEAN_SYSTEM32`, a
+pinned list: the runner's System32 holds what Visual Studio and the SDKs put there). Windows Update doesn't
+patch app-local copies: each bundle ships the build machine's runtime, so a runtime fix reaches users with
+the next voice release. Our right to ship it is the Visual Studio licence's Distributable Code, from the
+runner's Visual Studio **[G: murky whether a hosted runner's copy is "validly licensed" for this repo; numpy
+and pywhispercpp ship msvcp140 from runners the same way, and Community covers OSI-licensed work]**.
+**[VM]:** run the bundle on a fresh Windows 11 VM (no Build Tools, so no VC++ Redistributable) before
+shipping it.
 
 ### Into the installer: picked in V1b, a separate download (option (1))
 The options were:

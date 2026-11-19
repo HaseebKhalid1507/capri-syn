@@ -3,10 +3,12 @@
 # into (kokoro-onnx's API, pywhispercpp's DLL and object layout: tools/capri-voice-setup pins the
 # same) and the wheels that carry someone else's binaries without their licence (espeakng-loader:
 # espeak-ng; pywhispercpp: whisper.cpp; sounddevice: PortAudio), which
-# packaging/windows/voice-licenses.py names for exactly these versions; the bundle records exact
-# versions when it is built (docs/design/windows-voice.md).
+# packaging/windows/voice-licenses.py names for exactly these versions. onnxruntime has a ceiling: the
+# release builds its own bundle, and a newer one built by a newer MSVC than the runner's VC++ runtime
+# would stop it there (packaging/windows/voice-imports.py). The bundle records exact versions when it is
+# built (docs/design/windows-voice.md).
 numpy>=2.0
-onnxruntime>=1.20
+onnxruntime>=1.20,<1.33    # 1.32.0: MSVCP140 + MSVCP140_1, linked by MSVC 14.44 (voice-imports.py)
 kokoro-onnx==0.6.1    # brings phonemizer and espeakng-loader (espeak-ng's DLL)
 espeakng-loader==0.2.4    # espeak-ng 1.52.0's DLL (GPL-3.0): voice-licenses.py names its source
 pywhispercpp==1.5.1

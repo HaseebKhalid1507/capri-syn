@@ -1,7 +1,8 @@
 # Builds her VOICE installer: packaging\windows\Output\capri-syn-voice-setup-<version>-<build>.exe.
 # A separate download from hers (her installer stays ~9 MB): the voice bundle (voice-bundle.ps1)
-# beside her, and the model fetch. Needs a CPython 3.13 x64 (for pip) and Inno Setup 6: both on
-# GitHub's windows-latest (setup-python). Run from anywhere.
+# beside her, and the model fetch. Needs a CPython 3.13 x64 (for pip), Inno Setup 6, and Visual Studio
+# or its Build Tools with the C++ tools (the VC++ runtime): all on GitHub's windows-latest
+# (Python through setup-python). Run from anywhere.
 #
 #   .\packaging\windows\build-voice.ps1 [-Python python] [-NoBundle]   # -NoBundle: reuse build\voice
 param([string]$Python = 'python', [switch]$NoBundle)
