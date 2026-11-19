@@ -3227,7 +3227,21 @@ impl Avatar {
         "ok".into()
     }
 
+    /// settings.toml read again and applied. With writes of hers still on the way, it is done
+    /// again once the last is in (`settings_written`): she ends up running what the file says.
     pub(super) fn settings_reload(&mut self, now: Instant) -> String {
+        let again = self.prefs_io.reload();
+        self.menu_save = self.menu_save.reloaded(self.prefs_io.pending().any(|j| j.menu));
+        let r = self.settings_reload_now(now);
+        if again {
+            let n = self.prefs_io.pending().count();
+            format!("{r} (again once {n} pending write{} {} in)", if n == 1 { "" } else { "s" }, if n == 1 { "is" } else { "are" })
+        } else {
+            r
+        }
+    }
+
+    fn settings_reload_now(&mut self, now: Instant) -> String {
         match Settings::load() {
             Ok(s) => {
                 self.rag_strength = crate::ragdoll::Strength(s.ragdoll.strength);
@@ -3280,22 +3294,29 @@ impl Avatar {
         }
     }
 
-    /// The menu's ATTENTION line: MIX → HANG ONLY → OFF, written back to settings.toml.
-    pub(super) fn cycle_attention(&mut self) -> Attention {
-        let Some(h) = &mut self.brain else { return Attention::Mix };
-        let next = h.settings.brain.attention.next();
-        h.settings.brain.attention = next;
-        h.brain.settings.attention = next;
-        if let Err(e) = Settings::save_attention(next) {
-            elog!("synaps-avatar: settings.toml: {e:#}");
-        }
+    /// The menu's ATTENTION line: MIX → HANG ONLY → OFF, written to settings.toml (only that
+    /// key) and applied once it is in, as the Settings page's changes are (a file she can't
+    /// write: nothing changes, and she says why).
+    pub(super) fn cycle_attention(&mut self, cx: &mut Context<Self>) -> Attention {
+        let Some(h) = self.brain.as_ref().filter(|_| self.attention_live()) else { return Attention::Off };
+        let next = crate::line::next_attention(self.prefs_io.pending().map(|j| &j.pref), h.settings.brain.attention);
+        self.settings_write(super::lineview::PrefJob { pref: crate::line::Pref::Attention(next), menu: true }, cx);
         let now = Instant::now();
         self.brain_feed(BrainEvent::Interaction(Touch::Menu), now);
         next
     }
 
+    /// Her brain runs by settings.toml (`[brain] enabled`): ATTENTION means something. Off, the
+    /// Settings page locks it and her menu leaves it out.
+    pub(super) fn attention_live(&self) -> bool {
+        self.brain.as_ref().is_some_and(|h| h.settings.brain.enabled)
+    }
+
+    /// The menu's ATTENTION value, as the Settings page shows it: the last one asked for (its
+    /// write on the way), else hers. None: no row (no brain, or it is off).
     pub(super) fn attention_label(&self) -> Option<&'static str> {
-        Some(self.brain.as_ref()?.settings.brain.attention.label())
+        let h = self.brain.as_ref().filter(|_| self.attention_live())?;
+        Some(crate::line::asked(self.prefs_io.pending().map(|j| &j.pref), h.settings.brain.attention, false).0.label())
     }
 
     pub(super) fn dnd_on(&self) -> bool {
