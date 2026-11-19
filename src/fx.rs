@@ -835,9 +835,22 @@ const NOTES_DRAWN: usize = 7;
 /// The note size the view decodes its sprites for, canvas px (`view::note_px`): never bigger.
 const NOTE_PX: f32 = 120.0;
 /// A note's life, seconds, each note within ±`NOTE_LIFE_VAR` of it: about five alive at once at
-/// 110 bpm, two at 40, the cap at 240.
+/// 110 bpm, two at 40. Past ~120 bpm that many beats would hold more than `NOTES_DRAWN`, so each
+/// life is cut to under `NOTES_DRAWN` beats (`music_notes`): faster notes, never more than the cap.
 const NOTE_LIFE: f32 = 2.9;
 const NOTE_LIFE_VAR: f32 = 0.15;
+/// How much of a beat the shortest cut life leaves between the oldest note's end and the next
+/// birth: the oldest has faded out before a newer one would push it off the list.
+const NOTE_BEAT_SPARE: f64 = 0.25;
+/// Each note's own rolls (`hash01` salts on its birth beat), one per property, so no two of them
+/// move together.
+const ROLL_LIFE: u32 = 1;
+const ROLL_OUT: u32 = 2;
+const ROLL_UP: u32 = 3;
+const ROLL_SIZE: u32 = 4;
+const ROLL_TILT: u32 = 5;
+const ROLL_PEEL: u32 = 6;
+const ROLL_RISE: u32 = 7;
 /// How far out and how far up a note drifts over its life, canvas px (each note somewhere in these
 /// ranges): from beside her headphones to well clear of her head, out to the side and above.
 const NOTE_OUT: (f32, f32) = (120.0, 230.0);
@@ -870,7 +883,11 @@ pub fn music_notes(age_s: f32, beat_s: f32, emitters: &[[i32; 2]]) -> Vec<Note> 
     // f64: hours in, `age_s` is a big f32, and each note's age is a small difference of two.
     let (age, beat) = (f64::from(age_s), f64::from(beat_s));
     let mid = emitters.iter().map(|e| f64::from(e[0])).sum::<f64>() / emitters.len() as f64;
-    let longest = f64::from(NOTE_LIFE * (1.0 + NOTE_LIFE_VAR));
+    // No life reaches `NOTES_DRAWN` beats: at most that many births are ever alive at once, so
+    // the cap below never drops a note still on screen (at a fast tempo, a fully lit note would
+    // pop off the list). Also bounds this loop for any positive `beat`.
+    let cap = (NOTES_DRAWN as f64 - NOTE_BEAT_SPARE) * beat;
+    let longest = f64::from(NOTE_LIFE * (1.0 + NOTE_LIFE_VAR)).min(cap);
     // Newest first, so the cap drops the oldest; then turned around.
     let mut out = Vec::with_capacity(NOTES_DRAWN);
     let mut k = (age / beat).floor() as u64;
@@ -879,7 +896,7 @@ pub fn music_notes(age_s: f32, beat_s: f32, emitters: &[[i32; 2]]) -> Vec<Note> 
         if t > longest || out.len() == NOTES_DRAWN {
             break;
         }
-        out.extend(note(k, t, emitters, mid));
+        out.extend(note(k, t, emitters, mid, cap));
         match k.checked_sub(1) {
             Some(j) => k = j,
             None => break,
@@ -889,17 +906,18 @@ pub fn music_notes(age_s: f32, beat_s: f32, emitters: &[[i32; 2]]) -> Vec<Note> 
     out
 }
 
-/// Note `k` (born on beat `k`) `t` seconds into its life, or `None` once it has gone.
-fn note(k: u64, t: f64, emitters: &[[i32; 2]], mid: f64) -> Option<Note> {
+/// Note `k` (born on beat `k`) `t` seconds into its life of at most `cap` seconds, or `None`
+/// once it has gone.
+fn note(k: u64, t: f64, emitters: &[[i32; 2]], mid: f64, cap: f64) -> Option<Note> {
     let id = k as u32;
     let roll = |salt: u32| hash01(id, salt);
     let pick = |(lo, hi): (f32, f32), salt: u32| lo + (hi - lo) * roll(salt);
-    let life = NOTE_LIFE * (1.0 + NOTE_LIFE_VAR * (2.0 * roll(1) - 1.0));
-    if t > f64::from(life) {
+    let life = f64::from(NOTE_LIFE * (1.0 + NOTE_LIFE_VAR * (2.0 * roll(ROLL_LIFE) - 1.0))).min(cap);
+    if t > life {
         return None;
     }
     // A hair under zero when the beat's multiple rounds past `age`: born just now.
-    let s = (t / f64::from(life)).max(0.0) as f32;
+    let s = (t / life).max(0.0) as f32;
     let e = emitters[(k % emitters.len() as u64) as usize];
     // Outward: away from the other emitters. One alone (or in line with the rest): every other
     // note goes left.
@@ -913,14 +931,14 @@ fn note(k: u64, t: f64, emitters: &[[i32; 2]], mid: f64) -> Option<Note> {
     };
     // It peels off sideways first (eased out), then the rise takes over (eased in), so the path
     // bends from the side to straight up. Never down: `up` only grows.
-    let out = pick(NOTE_OUT, 2) * (1.0 - (1.0 - s).powf(1.7 + 0.8 * roll(6)));
-    let up = pick(NOTE_UP, 3) * (0.2 * s + 0.8 * s.powf(1.45 + 0.5 * roll(7)));
+    let out = pick(NOTE_OUT, ROLL_OUT) * (1.0 - (1.0 - s).powf(1.7 + 0.8 * roll(ROLL_PEEL)));
+    let up = pick(NOTE_UP, ROLL_UP) * (0.2 * s + 0.8 * s.powf(1.45 + 0.5 * roll(ROLL_RISE)));
     let grow = (s / NOTE_GROW).min(1.0);
-    let size = (pick(NOTE_SIZE, 4) * (NOTE_POP + (1.0 - NOTE_POP) * (1.0 - (1.0 - grow).powi(3)))).min(NOTE_PX);
+    let size = (pick(NOTE_SIZE, ROLL_SIZE) * (NOTE_POP + (1.0 - NOTE_POP) * (1.0 - (1.0 - grow).powi(3)))).min(NOTE_PX);
     let alpha = (s / NOTE_FADE_IN).min((1.0 - s) / NOTE_FADE_OUT).clamp(0.0, 1.0);
     // Positive is clockwise: a note going right tips its top right, one going left tips it left.
     let edge = NOTE_ANGLES[NOTE_ANGLES.len() - 1];
-    let deg = (NOTE_TILT * (2.0 * roll(5) - 1.0) + side * NOTE_LEAN * (PI * s).sin()).clamp(-edge, edge);
+    let deg = (NOTE_TILT * (2.0 * roll(ROLL_TILT) - 1.0) + side * NOTE_LEAN * (PI * s).sin()).clamp(-edge, edge);
     // The sprites cycle, with a skip every fourth birth: neighbours always differ, and each side
     // shows every sprite in turn instead of the same two.
     Some(Note { sprite: k.wrapping_add(k / 4) as usize, x: e[0] as f32 + side * out, y: e[1] as f32 - up, size, alpha, deg })
@@ -1086,8 +1104,9 @@ const SWING: f32 = 0.17;
 const SWING_MIN: f32 = 0.08;
 const SWING_MAX: f32 = 0.4;
 const SWING_OF_LEN: f32 = 0.35;
-/// No leg leans more than 45° off the strike's line, so no corner turns more than 90°: sharp,
-/// but with `CORNER_GAP` the inner miter always fits inside its legs (see `unfold`).
+/// No leg between main corners leans more than 45° off the strike's line, so a main corner turns
+/// at most 90°. The jags laid on the legs afterwards kink them further (turns to about 120°), so
+/// the outline's own guards are `unfold` and `untangled`, not this.
 const LEG_SLOPE: f32 = 1.0;
 /// The small jags on the legs between corners: a kink of this share of the leg, at most `JAG_MAX`
 /// of the figure's size.
@@ -1109,6 +1128,8 @@ const THIN_BELOW: f32 = 8.0;
 const THIN_MIN: f32 = 0.3;
 /// The streak's half-width the box leaves room for, of the figure's size (the view's is far less).
 const STREAK_ROOM: f32 = 0.05;
+/// The figure size, px, a `scale` that isn't a number stands for (the view's at sf 1).
+const SCALE_FALLBACK: f32 = 220.0;
 /// Shorter than this (px), a strike draws nothing.
 const BOLT_MIN_LEN: f32 = 1.0;
 /// Coordinates past this aren't on any desktop: such a strike draws nothing.
@@ -1158,7 +1179,7 @@ pub struct Bolt {
 impl Bolt {
     /// `scale`: figure size in px (the bolt's thickness follows it).
     pub fn new(a: (f32, f32), b: (f32, f32), seed: u64, scale: f32) -> Bolt {
-        let scale = if scale.is_finite() { scale.clamp(20.0, 2000.0) } else { 220.0 };
+        let scale = if scale.is_finite() { scale.clamp(20.0, 2000.0) } else { SCALE_FALLBACK };
         let sane = [a.0, a.1, b.0, b.1].iter().all(|v| v.abs() <= ROOT_MAX);
         let (dx, dy) = (b.0 - a.0, b.1 - a.1);
         let len = if sane { dx.hypot(dy) } else { 0.0 };
@@ -1326,32 +1347,10 @@ impl Bolt {
         vec![tip, at(0.22 * long, half), at(long, 0.0), at(0.22 * long, -half)]
     }
 
-    /// The bolt at time `u` (0..1 of `BOLT_MS`) as one polygon, root px (empty before/after
-    /// the strike): the lit piece's left edge from the tail's point to the tip's, then its right
-    /// edge back, mitred at every bend.
+    /// The bolt at time `u` (0..1 of `BOLT_MS`) as one simple polygon, root px (empty
+    /// before/after the strike): the lit piece's `outline`, never crossing itself (`untangled`).
     pub fn frame(&self, u: f32) -> Vec<(f32, f32)> {
-        let ribs = self.ribs(u);
-        if ribs.len() < 3 {
-            return Vec::new();
-        }
-        let across = |p: (f32, f32), q: (f32, f32)| {
-            let e = unit((q.0 - p.0, q.1 - p.1), self.dir);
-            (-e.1, e.0)
-        };
-        let (mut left, mut right) = (Vec::with_capacity(ribs.len()), Vec::with_capacity(ribs.len()));
-        for w in ribs.windows(3) {
-            let (r, n0, n1) = (w[1], across(w[0].p, w[1].p), across(w[1].p, w[2].p));
-            let m = unit((n0.0 + n1.0, n0.1 + n1.1), n0);
-            let c = (m.0 * n0.0 + m.1 * n0.1).max(0.5);
-            left.push((r.p.0 + m.0 * r.left / c, r.p.1 + m.1 * r.left / c));
-            right.push((r.p.0 - m.0 * r.right / c, r.p.1 - m.1 * r.right / c));
-        }
-        let mut poly = Vec::with_capacity(2 * ribs.len());
-        poly.push(ribs[0].p);
-        poly.extend(left);
-        poly.push(ribs[ribs.len() - 1].p);
-        poly.extend(right.into_iter().rev());
-        poly
+        untangled(self.ribs(u), self.dir)
     }
 
     /// The lit piece at `u` as cross-sections, tail (a point) to tip (a point): the route's own
@@ -1420,18 +1419,108 @@ fn bend(a: (f32, f32), b: (f32, f32), c: (f32, f32)) -> f32 {
     (u.0 * v.1 - u.1 * v.0).abs().atan2(u.0 * v.0 + u.1 * v.1)
 }
 
-/// Thins out cross-sections until every stretch between two is longer than both ends' inner
-/// miters reach back along it. Then neither edge can fold back over itself at a bend, and the
-/// outline is one simple loop: under `bolt_rects`' even-odd fill an overlap would be a hole in
-/// the line. The straighter of the two goes, never an end; real corners stay.
-fn unfold(ribs: &mut Vec<Rib>) {
-    fn turn(r: &[Rib], i: usize) -> f32 {
-        if i == 0 || i + 1 >= r.len() { 0.0 } else { bend(r[i - 1].p, r[i].p, r[i + 1].p) }
+/// How sharply the ribbon turns at cross-section `i` (0 at either end).
+fn turn(r: &[Rib], i: usize) -> f32 {
+    if i == 0 || i + 1 >= r.len() { 0.0 } else { bend(r[i - 1].p, r[i].p, r[i + 1].p) }
+}
+
+/// The lit piece's outline: its left edge from the tail's point to the tip's, then its right
+/// edge back, mitred at every bend (a miter at most 2× the width, which keeps it in the box).
+/// Empty under three cross-sections.
+fn outline(ribs: &[Rib], dir: (f32, f32)) -> Vec<(f32, f32)> {
+    if ribs.len() < 3 {
+        return Vec::new();
     }
-    // The inner miter point, projected back onto a leg (`frame` caps the miter at 2×).
+    let across = |p: (f32, f32), q: (f32, f32)| {
+        let e = unit((q.0 - p.0, q.1 - p.1), dir);
+        (-e.1, e.0)
+    };
+    let (mut left, mut right) = (Vec::with_capacity(ribs.len()), Vec::with_capacity(ribs.len()));
+    for w in ribs.windows(3) {
+        let (r, n0, n1) = (w[1], across(w[0].p, w[1].p), across(w[1].p, w[2].p));
+        let m = unit((n0.0 + n1.0, n0.1 + n1.1), n0);
+        let c = (m.0 * n0.0 + m.1 * n0.1).max(0.5);
+        left.push((r.p.0 + m.0 * r.left / c, r.p.1 + m.1 * r.left / c));
+        right.push((r.p.0 - m.0 * r.right / c, r.p.1 - m.1 * r.right / c));
+    }
+    let mut poly = Vec::with_capacity(2 * ribs.len());
+    poly.push(ribs[0].p);
+    poly.extend(left);
+    poly.push(ribs[ribs.len() - 1].p);
+    poly.extend(right.into_iter().rev());
+    poly
+}
+
+/// The first two edges of the closed polygon `poly` that cross (each by the index of its first
+/// point), or `None` when it's one simple loop. Edges sharing a point don't count, nor does a
+/// touch.
+fn first_crossing(poly: &[(f32, f32)]) -> Option<(usize, usize)> {
+    let n = poly.len();
+    let side = |a: (f32, f32), b: (f32, f32), c: (f32, f32)| (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0);
+    let apart = |p: (f32, f32), q: (f32, f32), r: (f32, f32), s: (f32, f32)| {
+        p.0.max(q.0) < r.0.min(s.0) || r.0.max(s.0) < p.0.min(q.0) || p.1.max(q.1) < r.1.min(s.1) || r.1.max(s.1) < p.1.min(q.1)
+    };
+    (0..n).find_map(|i| {
+        let (p, q) = (poly[i], poly[(i + 1) % n]);
+        (i + 2..n).filter(|&j| i > 0 || j + 1 < n).find_map(|j| {
+            let (r, s) = (poly[j], poly[(j + 1) % n]);
+            let cross = !apart(p, q, r, s) && side(r, s, p) * side(r, s, q) < 0.0 && side(p, q, r) * side(p, q, s) < 0.0;
+            cross.then_some((i, j))
+        })
+    })
+}
+
+/// `outline`, made sure to be one simple loop (LOCKED #1: under `bolt_rects`' even-odd fill an
+/// overlap is a hole in the line). `unfold` has already spaced the cross-sections so the edges
+/// don't fold at a bend; should two edges cross all the same, the straightest cross-section at
+/// either of them goes and the outline is drawn again. With a single one left and still
+/// crossing, `kite` stands in.
+fn untangled(mut ribs: Vec<Rib>, dir: (f32, f32)) -> Vec<(f32, f32)> {
+    loop {
+        let poly = outline(&ribs, dir);
+        let Some((e, f)) = first_crossing(&poly) else { return poly };
+        // `poly` is ribs[0], the left of 1..n-1, ribs[n - 1], the right of n-2 down to 1.
+        let n = ribs.len();
+        let rib = |j: usize| if j < n { j } else { 2 * n - 2 - j };
+        let at = [e, e + 1, f, f + 1].map(|j| rib(j % poly.len()));
+        let gone = at.into_iter().filter(|&i| i > 0 && i + 1 < n).min_by(|&x, &y| turn(&ribs, x).total_cmp(&turn(&ribs, y)));
+        match gone {
+            Some(i) if n > 3 => {
+                ribs.remove(i);
+            }
+            _ => return kite(&ribs),
+        }
+    }
+}
+
+/// The lit piece as a slim kite on the straight chord from its tail's point to its tip's, as
+/// wide as its widest cross-section and widest near the tip: convex, so it can't cross itself.
+/// `untangled`'s last resort (never seen in a strike).
+fn kite(ribs: &[Rib]) -> Vec<(f32, f32)> {
+    let (Some(t), Some(h)) = (ribs.first(), ribs.last()) else { return Vec::new() };
+    let (dx, dy) = (h.p.0 - t.p.0, h.p.1 - t.p.1);
+    let long = dx.hypot(dy);
+    if !long.is_finite() || long < 0.5 {
+        return Vec::new();
+    }
+    let half = ribs.iter().fold(0.0f32, |w, r| w.max(r.left).max(r.right)).min(0.2 * long).max(0.25);
+    let (nx, ny) = (-dy / long * half, dx / long * half);
+    let (mx, my) = (t.p.0 + 0.7 * dx, t.p.1 + 0.7 * dy);
+    vec![t.p, (mx + nx, my + ny), h.p, (mx - nx, my - ny)]
+}
+
+/// Thins out cross-sections until every stretch between two is longer than both ends' inner
+/// miters reach back along it, each miter sized by the widest cross-section at its bend (the
+/// chips let a neighbour be ~4× the bend's own width, and a wide neighbour's inner corner pokes
+/// back past a thin bend's miter). So the edges don't fold at a bend and the jagged shape stays
+/// as laid; `untangled` only has freaks left to catch. The straighter of the two goes, never an
+/// end; real corners stay.
+fn unfold(ribs: &mut Vec<Rib>) {
+    // The inner miter point, projected back onto a leg (`outline` caps the miter at 2×).
     fn reach(r: &[Rib], i: usize) -> f32 {
         let (s, c) = (0.5 * turn(r, i)).sin_cos();
-        r[i].left.max(r[i].right) * s / c.max(0.5)
+        let w = r[i.saturating_sub(1)..r.len().min(i + 2)].iter().fold(0.0f32, |w, q| w.max(q.left).max(q.right));
+        w * s / c.max(0.5)
     }
     fn pinch(r: &[Rib]) -> Option<usize> {
         (0..r.len().saturating_sub(1)).find_map(|i| {
@@ -2074,26 +2163,72 @@ mod bolt_tests {
 
     #[test]
     fn the_outline_never_crosses_itself() {
-        // Stronger than the holes test: one simple loop, at every scale.
-        let side = |a: (f32, f32), b: (f32, f32), c: (f32, f32)| (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0);
-        let crosses = |p: (f32, f32), q: (f32, f32), r: (f32, f32), s: (f32, f32)| side(r, s, p) * side(r, s, q) < 0.0 && side(p, q, r) * side(p, q, s) < 0.0;
+        // Stronger than the holes test: one simple loop, at every scale. And `unfold` alone
+        // gets there, so the strike is the shape as laid, not `untangled`'s repair of it.
         for &(a, b) in &STRIKES[..6] {
-            for seed in 0..12u64 {
+            for seed in 0..24u64 {
                 for scale in [110.0, 220.0, 440.0] {
                     let bolt = Bolt::new(a, b, seed.wrapping_mul(0x2545_f491_4f6c_dd1d), scale);
                     for k in 0..34 {
-                        let poly = bolt.frame(k as f32 * 0.02);
-                        let n = poly.len();
-                        for i in 0..n {
-                            for j in i + 2..n {
-                                if i == 0 && j == n - 1 {
-                                    continue;
-                                }
-                                assert!(!crosses(poly[i], poly[(i + 1) % n], poly[j], poly[(j + 1) % n]), "{a:?} {b:?} seed {seed} scale {scale} u {}: edges {i} and {j} cross", k as f32 * 0.02);
-                            }
-                        }
+                        let u = k as f32 * 0.02;
+                        let laid = outline(&bolt.ribs(u), bolt.dir);
+                        assert_eq!(first_crossing(&laid), None, "{a:?} {b:?} seed {seed} scale {scale} u {u}");
+                        assert_eq!(bolt.frame(u), laid, "{a:?} {b:?} seed {seed} scale {scale} u {u}: repaired");
                     }
                 }
+            }
+        }
+    }
+
+    fn rib(x: f32, y: f32, left: f32, right: f32) -> Rib {
+        Rib { p: (x, y), left, right }
+    }
+
+    /// A lit piece from a fuzzed strike (scale 440, u 0.064): a 100° bend whose own cross-section
+    /// is thin between wider ones. Sized by the bend's width alone, the next cross-section's
+    /// inner corner poked 0.55 px past the incoming leg's inner edge.
+    fn thin_bend() -> Vec<Rib> {
+        vec![
+            rib(-1961.0, 805.0, 0.0, 0.0),
+            rib(-1935.8, 797.6, 5.6, 7.15),
+            rib(-1910.8, 790.2, 9.83, 3.62),
+            rib(-1885.8, 782.8, 10.52, 7.85),
+            rib(-1860.8, 775.5, 5.37, 4.83),
+            rib(-1860.0, 782.5, 8.16, 5.41),
+            rib(-1858.1, 799.4, 13.81, 6.28),
+            rib(-1855.4, 823.4, 5.91, 4.24),
+            rib(-1852.7, 847.5, 0.0, 0.0),
+        ]
+    }
+
+    #[test]
+    fn a_wide_neighbour_never_folds_over_a_thin_bend() {
+        let dir = (0.88, 0.47);
+        assert!(first_crossing(&outline(&thin_bend(), dir)).is_some(), "the case still crosses unthinned");
+        let mut ribs = thin_bend();
+        unfold(&mut ribs);
+        let poly = outline(&ribs, dir);
+        assert!(ribs.len() >= 6 && first_crossing(&poly).is_none(), "{poly:?}");
+        // And the net alone untangles it, keeping the bend.
+        let poly = untangled(thin_bend(), dir);
+        assert!(poly.len() >= 8 && first_crossing(&poly).is_none(), "{poly:?}");
+    }
+
+    #[test]
+    fn whatever_goes_in_untangled_returns_one_simple_loop() {
+        // Hairpins, doubling back, wild widths: no input `unfold` would ever pass on, and still
+        // one simple loop out, on the chord from the tail's point to the tip's.
+        let mut rng = Rng::new(0x7a46_01e5);
+        for case in 0..3000 {
+            let n = 3 + rng.pick(10);
+            let mut ribs: Vec<Rib> = (0..n).map(|_| rib(rng.range(0.0, 60.0), rng.range(0.0, 60.0), rng.range(0.0, 30.0), rng.range(0.0, 30.0))).collect();
+            (ribs[0].left, ribs[0].right, ribs[n - 1].left, ribs[n - 1].right) = (0.0, 0.0, 0.0, 0.0);
+            let (t, h) = (ribs[0].p, ribs[n - 1].p);
+            let poly = untangled(ribs, (0.0, 1.0));
+            assert_eq!(first_crossing(&poly), None, "case {case}: {poly:?}");
+            assert!(poly.iter().all(|p| p.0.is_finite() && p.1.is_finite()), "case {case}");
+            if (h.0 - t.0).hypot(h.1 - t.1) >= 0.5 {
+                assert!(poly.len() >= 4 && poly[0] == t, "case {case}: {poly:?}");
             }
         }
     }
@@ -2151,7 +2286,7 @@ mod bolt_tests {
 mod note_tests {
     use super::*;
 
-    /// The view draws the first seven (view.rs:759, `NOTES_MAX`).
+    /// The view draws the first seven (view.rs, `NOTES_MAX`).
     const VIEW_NOTES_MAX: usize = 7;
     /// Capri's default tempo (moods.json `music.bpm` 110).
     const BEAT_110: f32 = 60.0 / 110.0;
@@ -2206,7 +2341,7 @@ mod note_tests {
         for i in 0..120 {
             let age = 30.0 + i as f32 * 0.037;
             let notes = music_notes(age, beat, &EMITTERS);
-            assert_eq!(notes.len(), VIEW_NOTES_MAX, "{age}");
+            assert!((6..=VIEW_NOTES_MAX).contains(&notes.len()), "{age}: {}", notes.len());
             let newest = (f64::from(age) / f64::from(beat)).floor() as u64;
             assert_eq!(notes.last().map(|n| n.sprite), Some(sprite_of(newest)), "{age}: the newest last");
             assert!(notes.windows(2).all(|w| w[0].sprite < w[1].sprite), "{age}: oldest first");
@@ -2214,6 +2349,32 @@ mod note_tests {
         // The slowest: fewer, never none.
         let slow: Vec<usize> = (0..100).map(|i| music_notes(30.0 + i as f32 * 0.1, 1.5, &EMITTERS).len()).collect();
         assert!(slow.iter().all(|n| (1..=VIEW_NOTES_MAX).contains(n)), "{slow:?}");
+    }
+
+    #[test]
+    fn the_cap_only_ever_drops_a_faded_note() {
+        // Whatever leaves the list between two calls 5 ms apart is under the view's alpha floor
+        // (0.14, `update_notes`) already: none pops while drawn, at any tempo.
+        for bpm in [60.0f32, 110.0, 130.0, 150.0, 180.0, 240.0] {
+            let beat = 60.0 / bpm;
+            let mut was = music_notes(30.0, beat, &EMITTERS);
+            for i in 1..2000 {
+                let age = 30.0 + i as f32 * 0.005;
+                let now = music_notes(age, beat, &EMITTERS);
+                for n in was.iter().filter(|n| now.iter().all(|m| m.sprite != n.sprite)) {
+                    assert!(n.alpha < 0.14, "{bpm} bpm at {age}: {n:?} dropped while drawn");
+                }
+                assert!(now.len() <= VIEW_NOTES_MAX, "{bpm} bpm at {age}: {}", now.len());
+                was = now;
+            }
+        }
+        // And at the fastest, each note still gets well clear before it goes.
+        let beat = 0.25;
+        let rise = (0..400).filter_map(|i| {
+            let notes = music_notes(30.0 + i as f32 * 0.01, beat, &EMITTERS);
+            notes.first().map(|n| EMITTERS[0][1].min(EMITTERS[1][1]) as f32 - n.y)
+        });
+        assert!(rise.fold(0.0f32, f32::max) > 250.0, "cut halfway up");
     }
 
     #[test]
@@ -2451,9 +2612,16 @@ mod sheets {
 
     /// The notes at `age` around her head (a ring between the emitters, for the sheet only), at
     /// `geo` device px per canvas px, as the view quantises them; labelled in centiseconds.
-    fn notes_cell(age: f32, beat: f32, em: &[[i32; 2]], geo: f32) -> RgbImage {
+    /// The canvas span a notes cell shows, `(x0, x1)` and `(y0, y1)`: room out to both sides
+    /// and well above the emitters.
+    fn crop(em: &[[i32; 2]]) -> ((i32, i32), (i32, i32)) {
         let xs = (em.iter().map(|e| e[0]).min().unwrap_or(0) - 420, em.iter().map(|e| e[0]).max().unwrap_or(0) + 420);
         let ys = (em.iter().map(|e| e[1]).min().unwrap_or(0) - 560, em.iter().map(|e| e[1]).max().unwrap_or(0) + 200);
+        (xs, ys)
+    }
+
+    fn notes_cell(age: f32, beat: f32, em: &[[i32; 2]], geo: f32) -> RgbImage {
+        let (xs, ys) = crop(em);
         let to = |x: f32, y: f32| ((x - xs.0 as f32) * geo, (y - ys.0 as f32) * geo);
         let mut im = RgbImage::from_pixel(((xs.1 - xs.0) as f32 * geo) as u32, ((ys.1 - ys.0) as f32 * geo) as u32, BG);
         let (l, r) = (em[0], em[em.len() - 1]);
@@ -2511,9 +2679,11 @@ mod sheets {
         notes("notes-floor-1h.png", 60.0 / 110.0, &[[522, 642], [775, 591]], 3600.0, 0.1, 12);
         // Every note's centre over ten seconds, in its sprite's colour.
         let mut im = notes_cell(-1.0, 60.0 / 110.0, &window, 0.4);
+        let (xs, ys) = crop(&window);
         for i in 0..600 {
             for n in music_notes(20.0 + i as f32 / 60.0, 60.0 / 110.0, &window) {
-                put(&mut im, ((n.x - 113.0) * 0.4).round() as i64, ((n.y + 195.0) * 0.4).round() as i64, rgb(SPRITES[n.sprite % 4]));
+                let (x, y) = ((n.x - xs.0 as f32) * 0.4, (n.y - ys.0 as f32) * 0.4);
+                put(&mut im, x.round() as i64, y.round() as i64, rgb(SPRITES[n.sprite % SPRITES.len()]));
             }
         }
         save(&im, "notes-paths.png");
