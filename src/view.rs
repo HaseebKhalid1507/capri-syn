@@ -2708,6 +2708,7 @@ impl Avatar {
         take(self.hud_after.filter(|&t| t > now));
         take(self.motion_at.get());
         take(self.menu.map(|m| m.1));
+        take(self.brain_look_due(now).map(|t| t.max(now)));
         if let Some(s) = &self.session {
             take(s.link.deadline(now));
             take(s.respawn_at);
@@ -3040,6 +3041,8 @@ impl Avatar {
             self.sync_body(now);
             dirty |= self.mood != before;
         }
+        // A sign-in to another account (his terminal's): the open Brain screen's look sees it.
+        self.brain_look_tick(now, cx);
 
         // Effects.
         if let Some(g) = self.glitch {
@@ -5416,7 +5419,8 @@ impl Avatar {
         ((l.ground_x - l.avatar_x) as f32, (y - l.avatar_y) as f32)
     }
 
-    /// The menu's last row: `SYNAPS 0.12.0 · CLAUDE-OPUS-5`, the model cut to fit the menu.
+    /// The menu's last row: `SYNAPS 0.12.0 · SONNET 4.6` (as Settings' ABOUT says it), cut to
+    /// fit the menu.
     fn menu_mark(&self, window: &Window) -> Option<String> {
         let mark = self.session.as_ref()?.link.mark()?.to_uppercase();
         let fits = |s: &str| self.tracked_width(s, MARK_PX, FontWeight::MEDIUM, 0.8, window) <= MENU_W - 20.0;
@@ -8605,6 +8609,25 @@ impl std::future::Future for YieldNow {
         }
         cx.waker().wake_by_ref();
         std::task::Poll::Pending
+    }
+}
+
+#[cfg(test)]
+mod first_words_tests {
+    use super::{FIRST_WORDS_CREDS, FIRST_WORDS_WITHIN, creds_waited};
+    use std::time::{Duration, Instant};
+
+    /// Her first words wait for a look at her login (a fresh install's are about her brain), but
+    /// FIRST_WORDS_CREDS at most from their first try: then they go, read or not.
+    #[test]
+    fn first_words_wait_for_her_login_a_little() {
+        let t0 = Instant::now();
+        let deadline = t0 + FIRST_WORDS_WITHIN;
+        assert!(!creds_waited(t0, deadline), "the first try waits");
+        assert!(!creds_waited(t0 + FIRST_WORDS_CREDS - Duration::from_millis(1), deadline));
+        assert!(creds_waited(t0 + FIRST_WORDS_CREDS, deadline), "then no longer");
+        assert!(creds_waited(deadline, deadline));
+        assert!(creds_waited(deadline + Duration::from_secs(1), deadline), "past the window");
     }
 }
 

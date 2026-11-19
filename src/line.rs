@@ -526,6 +526,10 @@ impl Line {
         }
         let had_prompts = !self.snap.prompts.is_empty();
         let ids: Vec<u64> = self.snap.prompts.iter().map(|p| p.id).collect();
+        // The Brain screen's row picked stays on its provider when a look moves the rows.
+        if let (Some(was), Some(now)) = (&self.snap.prefs, &snap.prefs) {
+            self.bsel = settings::brain_reselect(was, now, self.bsel, self.other);
+        }
         self.snap = snap;
         if self.snap.prompts.is_empty() {
             if had_prompts {

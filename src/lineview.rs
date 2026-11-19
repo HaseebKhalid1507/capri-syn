@@ -31,7 +31,7 @@ const ROWS_MAX: usize = 240;
 pub(super) type PrefsIo = WriteQueue<PrefJob>;
 
 /// A look at her brain is good this long: a Settings page opened again within it doesn't look
-/// again.
+/// again, and the Brain screen, open, looks again this often (a sign-in he ran in a terminal).
 const LOOK_EVERY: Duration = Duration::from_secs(5);
 /// A local model server answers in this or isn't there.
 const PROBE_WITHIN: Duration = Duration::from_millis(800);
@@ -45,9 +45,42 @@ pub(super) struct BrainLook {
     pub signed: Vec<&'static str>,
     /// Gemini can be signed in to (`provider::GEMINI_CLIENT_ID` set, hers or the daemon's).
     pub gemini: bool,
-    /// When it was taken (None: never), and whether one is under way.
+    /// When it was taken (None: never, or since gone stale), and whether one is under way.
     pub at: Option<Instant>,
     pub busy: bool,
+    /// It went stale while one was under way (a login landed): look again once that one is in.
+    pub again: bool,
+}
+
+impl BrainLook {
+    /// A look may start now: none under way, and the last one older than `LOOK_EVERY` (or stale).
+    fn start(&mut self, now: Instant) -> bool {
+        if self.busy || self.at.is_some_and(|t| now < t + LOOK_EVERY) {
+            return false;
+        }
+        self.busy = true;
+        true
+    }
+
+    /// What it shows is stale (her login changed): the next look goes at once, and one under way
+    /// now is followed by another (it may have read the files before the change).
+    fn stale(&mut self) {
+        self.at = None;
+        self.again |= self.busy;
+    }
+
+    /// A look is in. true: look again now (it went stale meanwhile: what it found is shown, but
+    /// not as fresh, so it can't hold off the next).
+    fn done(&mut self, look: BrainLook, now: Instant) -> bool {
+        let again = std::mem::take(&mut self.again);
+        *self = BrainLook { at: (!again).then_some(now), busy: false, again: false, ..look };
+        again
+    }
+
+    /// When the open Brain screen looks again (None: one is under way).
+    fn due(&self, now: Instant) -> Option<Instant> {
+        (!self.busy).then(|| self.at.map_or(now, |t| t + LOOK_EVERY))
+    }
 }
 
 /// The look itself (`here`: the daemon runs on this machine; else nothing here is its).
@@ -59,16 +92,31 @@ fn look_now(profile: Option<String>, pid: Option<u32>, here: bool) -> BrainLook 
     }
     let base = synaps_client::discovery::base_dir();
     let config = std::fs::read_to_string(crate::creds::synaps_file(&base, profile.as_deref(), "config")).ok();
-    let url = provider::local_url(config.as_deref(), std::env::var("LOCAL_ENDPOINT").ok());
+    // The daemon's LOCAL_ENDPOINT is the one it uses; where it can't be read, hers.
+    let env = pid.and_then(crate::platform::local_endpoint).unwrap_or_else(|| std::env::var("LOCAL_ENDPOINT").ok());
+    let url = provider::local_url(config.as_deref(), env);
     let local = provider::probe(&url, PROBE_WITHIN);
     let signed = provider::ALL
         .iter()
-        .filter(|p| p.kind == Kind::OAuth)
+        .filter(|p| p.kind != Kind::Local)
         .filter(|p| p.models.first().is_some_and(|m| crate::creds::check(&crate::creds::Query { model: m.0.into(), profile: profile.clone(), pid }).0 == Creds::Have))
         .map(|p| p.id)
         .collect();
     let gemini = crate::creds::env_set(provider::GEMINI_CLIENT_ID) || pid.and_then(|p| crate::platform::process_env(p, provider::GEMINI_CLIENT_ID)) == Some(true);
-    BrainLook { local: Some((url, local)), synaps, signed, gemini, at: None, busy: false }
+    BrainLook { local: Some((url, local)), synaps, signed, gemini, ..BrainLook::default() }
+}
+
+/// A MODEL pick her session can't take now: her next start sets it.
+const LATER: &str = "Saved for my next start.";
+
+/// Why a MODEL pick isn't in her session now, as she says it; None: it is, or is on its way
+/// (`sent`: Sets or the Mirror switch for them went out; `has`: her session has it, or asked).
+fn model_held(sent: bool, has: bool, blocked: bool) -> Option<&'static str> {
+    match (sent || has, blocked) {
+        (true, _) => None,
+        (false, true) => Some("Saved for my next start: another client has my session's input."),
+        (false, false) => Some(LATER),
+    }
 }
 
 /// What a settings.toml write applies once it is in: the change, and whether her menu asked
@@ -559,14 +607,8 @@ impl Avatar {
     /// Her settings as asked (a change on its way to settings.toml), else as she runs them:
     /// for the Settings page, which steps on from them as her menu does.
     pub(super) fn prefs_now(&self) -> Prefs {
-        // ABOUT: the versions, and her model as the page says it (`SONNET 4.6`, not its id).
-        let link = self.session.as_ref().map(|s| &s.link);
-        let synaps = link.and_then(|l| l.daemon_version()).map_or_else(|| "SYNAPS".to_string(), |v| format!("SYNAPS {v}"));
-        let mark = match link.and_then(|l| l.model()) {
-            Some(m) => format!("{synaps} · {}", provider::model_label(m)),
-            None if link.is_some_and(|l| l.daemon_version().is_some()) => synaps,
-            None => "SYNAPS · OFFLINE".into(),
-        };
+        // ABOUT: the versions, and her model as the page says it (`SONNET 4.6`; her menu's too).
+        let mark = self.session.as_ref().and_then(|s| s.link.mark()).unwrap_or_else(|| "SYNAPS · OFFLINE".into());
         let running = self.brain.as_ref().map_or(Attention::Off, |h| h.settings.brain.attention);
         let (attention, wake) = crate::line::asked(self.prefs_io.pending().map(|j| &j.pref), running, self.voice.cfg.wake_word);
         Prefs {
@@ -607,17 +649,19 @@ impl Avatar {
     /// Look at her brain (off her UI thread): her local server, how he runs `synaps`, the
     /// accounts with a login here. At most every `LOOK_EVERY`; the page gets it when it's in.
     pub(super) fn look_at_brain(&mut self, cx: &mut Context<Self>) {
-        let now = Instant::now();
-        if self.brain_look.busy || self.brain_look.at.is_some_and(|t| now < t + LOOK_EVERY) {
+        if !self.brain_look.start(Instant::now()) {
             return;
         }
-        self.brain_look.busy = true;
         let ((profile, pid), here) = self.session.as_ref().map_or(((None, None), false), |s| (s.link.daemon_at(), s.link.local()));
         cx.spawn(async move |this, cx| {
             let look = crate::off_thread(move || Ok(look_now(profile, pid, here))).await.unwrap_or_default();
             this.update(cx, |a, cx| {
-                elog!("synaps-avatar: brain: local {:?}, signed in: {:?}", look.local, look.signed);
-                a.brain_look = BrainLook { at: Some(Instant::now()), busy: false, ..look };
+                if look.signed != a.brain_look.signed || look.local != a.brain_look.local {
+                    elog!("synaps-avatar: brain: local {:?}, signed in: {:?}", look.local, look.signed);
+                }
+                if a.brain_look.done(look, Instant::now()) {
+                    a.look_at_brain(cx);
+                }
                 a.line_push(cx);
             })
             .ok();
@@ -626,12 +670,25 @@ impl Avatar {
     }
 
     /// Her login changed (a read found one, or lost it): the open Settings page shows it, and
-    /// looks again at once (the accounts signed in here).
+    /// looks again at once (the accounts signed in here), after the look under way if one is.
     pub(super) fn brain_news(&mut self, cx: &mut Context<Self>) {
-        self.brain_look.at = None;
+        self.brain_look.stale();
         if self.line.as_ref().is_some_and(|l| l.page.settings()) {
             self.look_at_brain(cx);
             self.line_push(cx);
+        }
+    }
+
+    /// The Brain screen, open, looks again every `LOOK_EVERY` (a sign-in to another account he
+    /// ran in a terminal: her own login's read doesn't see that one). When it next does.
+    pub(super) fn brain_look_due(&self, now: Instant) -> Option<Instant> {
+        self.line.as_ref().filter(|l| l.page == Page::Brain).and_then(|_| self.brain_look.due(now))
+    }
+
+    /// The tick's part: the Brain screen's look, when due.
+    pub(super) fn brain_look_tick(&mut self, now: Instant, cx: &mut Context<Self>) {
+        if self.brain_look_due(now).is_some_and(|t| t <= now) {
+            self.look_at_brain(cx);
         }
     }
 
@@ -657,12 +714,20 @@ impl Avatar {
 
     fn settings_write_next(&mut self, cx: &mut Context<Self>) {
         let Some((seq, edits)) = self.prefs_io.start(Instant::now()) else { return };
+        // A MODEL write with her brain off ([brain] enabled = false: no settings held): the rest
+        // of her `[session]` is read with it, off her UI thread too.
+        let session_too = self.brain.is_none() && matches!(self.prefs_io.pending().next().map(|j| j.pref), Some(Pref::Model(_)));
         cx.spawn(async move |this, cx| {
-            let r = crate::off_thread(move || Ok(Settings::write(&edits))).await;
-            let r = r.unwrap_or_else(|e| Err(crate::settings::WriteError::Failed(format!("{e:#}"))));
+            let r = crate::off_thread(move || {
+                let w = Settings::write(&edits);
+                let session = if session_too && w.is_ok() { Settings::load().map(|s| s.session).ok() } else { None };
+                Ok((w, session))
+            })
+            .await;
+            let (r, session) = r.unwrap_or_else(|e| (Err(crate::settings::WriteError::Failed(format!("{e:#}"))), None));
             this.update(cx, |a, cx| {
                 if let Some((job, reload)) = a.prefs_io.finish(seq) {
-                    a.settings_written(job, r, reload, cx);
+                    a.settings_written(job, r, session, reload, cx);
                 }
                 a.settings_write_next(cx);
             })
@@ -693,12 +758,12 @@ impl Avatar {
 
     /// A write is done: its change applied if it went in (nothing if refused: she says why);
     /// then the reload asked for while it was under way, once the last is in.
-    fn settings_written(&mut self, job: PrefJob, r: Result<bool, crate::settings::WriteError>, reload: bool, cx: &mut Context<Self>) {
+    fn settings_written(&mut self, job: PrefJob, r: Result<bool, crate::settings::WriteError>, session: Option<crate::settings::SessionSettings>, reload: bool, cx: &mut Context<Self>) {
         let p = job.pref;
         self.menu_save = self.menu_save.written(p, job.menu, r.is_ok());
         self.prefs_says = Some(match r {
             Ok(_) => {
-                let held = self.pref_apply(p);
+                let held = self.pref_apply(p, session);
                 elog!("synaps-avatar: settings: {p:?}: ok (that key only{})", if job.menu { ", her menu" } else { "" });
                 match p {
                     Pref::Attention(a) => {
@@ -735,8 +800,9 @@ impl Avatar {
     }
 
     /// A change written: its key in what she runs with, nothing else. Some: why her session
-    /// didn't take a model now (her next start sets it), as she says it.
-    fn pref_apply(&mut self, p: Pref) -> Option<&'static str> {
+    /// didn't take a model now (her next start sets it), as she says it. `session`: her
+    /// `[session]` as read with the write (her brain off: none held here).
+    fn pref_apply(&mut self, p: Pref, session: Option<crate::settings::SessionSettings>) -> Option<&'static str> {
         match p {
             Pref::Attention(a) => {
                 if let Some(h) = &mut self.brain {
@@ -757,26 +823,22 @@ impl Avatar {
             // `[session]` as she runs it. Never on a session she rides (`--session`), and `--model`
             // wins (the page locks both).
             Pref::Model(m) => {
-                let mut session = match &self.brain {
-                    Some(h) => h.settings.session.clone(),
-                    None => Settings::load().map(|s| s.session).unwrap_or_default(),
+                let mut session = match (&self.brain, session) {
+                    (Some(h), _) => h.settings.session.clone(),
+                    (None, Some(s)) => s,
+                    // Her brain went off while it was written: the model alone.
+                    (None, None) => Default::default(),
                 };
                 session.model = Some(m.to_string());
                 if let Some(h) = &mut self.brain {
                     p.apply(&mut h.settings);
                 }
-                const LATER: &str = "Saved for my next start.";
                 let (acts, held) = match &mut self.session {
                     Some(sl) if !sl.link.rides_other() => {
                         let persona = crate::session_persona(&session, &self.voice.cfg, sl.link.cli_model(), &self.pack.dir);
                         let acts = sl.link.pick_persona(persona, Instant::now());
-                        let held = if !acts.is_empty() || sl.link.model() == Some(m) || sl.link.model_on_way() == Some(m) {
-                            None
-                        } else if sl.link.persona_blocked() {
-                            Some("Saved for my next start: another client has my session's input.")
-                        } else {
-                            Some(LATER)
-                        };
+                        let has = sl.link.model() == Some(m) || sl.link.model_on_way() == Some(m);
+                        let held = model_held(!acts.is_empty(), has, sl.link.persona_blocked());
                         (acts, held)
                     }
                     _ => (Vec::new(), Some(LATER)),
@@ -934,6 +996,12 @@ impl Avatar {
                     self.prefs_says = None;
                 }
                 self.line_push(cx);
+                Ok(())
+            }
+            // MODEL is locked under `--model` and `--session` (the page says so and asks nothing;
+            // this holds for anything else that asks).
+            Ask::Pref(Pref::Model(m)) if self.mind_now().lock.is_some() => {
+                elog!("synaps-avatar: settings: model {m} not written: locked ({:?})", self.mind_now().lock);
                 Ok(())
             }
             Ask::Pref(p) => {
@@ -1399,5 +1467,68 @@ mod tap_tests {
         // A hold that listens is his: the tap waits, up to TALK_STALE.
         assert!(press_holds(s(90), true));
         assert!(!press_holds(TALK_STALE, true));
+    }
+}
+
+#[cfg(test)]
+mod brain_look_tests {
+    use super::{BrainLook, LOOK_EVERY};
+    use std::time::{Duration, Instant};
+
+    fn found(signed: &[&'static str]) -> BrainLook {
+        BrainLook { signed: signed.to_vec(), synaps: "synaps".into(), ..BrainLook::default() }
+    }
+
+    /// One look at a time, at most every LOOK_EVERY; the open Brain screen's next is due then.
+    #[test]
+    fn a_look_at_most_every_look_every() {
+        let t0 = Instant::now();
+        let mut b = BrainLook::default();
+        assert_eq!(b.due(t0), Some(t0), "never looked: now");
+        assert!(b.start(t0));
+        assert!(!b.start(t0), "one under way");
+        assert_eq!(b.due(t0), None);
+        assert!(!b.done(found(&[]), t0));
+        assert_eq!(b.due(t0), Some(t0 + LOOK_EVERY));
+        assert!(!b.start(t0 + LOOK_EVERY - Duration::from_millis(1)));
+        assert!(b.start(t0 + LOOK_EVERY), "the open screen looks again (a sign-in in his terminal)");
+        assert!(!b.done(found(&["openai-codex"]), t0 + LOOK_EVERY));
+        assert_eq!(b.signed, ["openai-codex"]);
+    }
+
+    /// A login lands while a look is under way (it may have read the files before): what it
+    /// found shows, but stale (no timestamp), and another look follows at once.
+    #[test]
+    fn a_login_during_a_look_looks_again() {
+        let t0 = Instant::now();
+        let mut b = BrainLook::default();
+        assert!(b.start(t0));
+        b.stale();
+        assert!(!b.start(t0), "still one at a time");
+        let t1 = t0 + Duration::from_millis(300);
+        assert!(b.done(found(&[]), t1), "again");
+        assert_eq!((b.at, b.busy, b.again), (None, false, false), "the stale look doesn't hold off the next");
+        assert!(b.start(t1));
+        assert!(!b.done(found(&["anthropic"]), t1));
+        assert_eq!((b.at, b.signed.clone()), (Some(t1), vec!["anthropic"]));
+        // Stale with none under way: the next look goes at once, nothing owed after it.
+        b.stale();
+        assert_eq!((b.due(t1), b.again), (Some(t1), false));
+    }
+}
+
+#[cfg(test)]
+mod model_held_tests {
+    use super::{LATER, model_held};
+
+    /// What she says after a MODEL write: nothing of her session when it has the model or it's
+    /// on its way; else saved for her next start, and why when another client owns its input.
+    #[test]
+    fn a_model_her_session_cant_take_now_is_for_her_next_start() {
+        assert_eq!(model_held(true, false, false), None, "sent");
+        assert_eq!(model_held(false, true, false), None, "has it, or asked it already");
+        assert_eq!(model_held(true, false, true), None, "sent wins over an old block");
+        assert_eq!(model_held(false, false, true), Some("Saved for my next start: another client has my session's input."));
+        assert_eq!(model_held(false, false, false), Some(LATER));
     }
 }

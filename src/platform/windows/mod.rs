@@ -1749,6 +1749,12 @@ pub fn process_env(_pid: u32, _key: &str) -> Option<bool> {
     None
 }
 
+/// Another process's `LOCAL_ENDPOINT`: not read on Windows either (`process_env`); her own is
+/// used instead.
+pub fn local_endpoint(_pid: u32) -> Option<Option<String>> {
+    None
+}
+
 /// The system heap hands freed pages back on its own.
 pub fn trim_heap() {}
 
@@ -1897,6 +1903,19 @@ mod tests {
                     }
                     posts() > before
                 };
+                // Pumping until a wake-up past `woke` is handled (at most 1 s). `posts` is counted
+                // just before the post (`Pass::want`): the message may not be in the queue yet
+                // when the count is seen, so one pump right after it can find nothing.
+                let pump_until_woken = |woke: usize| {
+                    let t = Instant::now();
+                    loop {
+                        pump();
+                        if pass.wakes.load(Ordering::SeqCst) > woke || t.elapsed() >= Duration::from_secs(1) {
+                            return;
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                };
 
                 // 1. Frames that change her region under the pointer: each one posts before the pump.
                 let (t0, mut rounds, mut posted_busy) = (Instant::now(), 0, 0);
@@ -1916,10 +1935,13 @@ mod tests {
 
                 // 2. The real style ends as last wanted, both ways.
                 for (want_take, region) in [(true, &take), (false, &through), (true, &take)] {
-                    let before = posts();
+                    let (before, woke) = (posts(), pass.wakes.load(Ordering::SeqCst));
                     x.set_input(s, region);
-                    assert!(busy_until_posted(before) || takes_pointer(h) == want_take, "no wake-up for take={want_take} in 2 s");
-                    pump();
+                    if busy_until_posted(before) {
+                        pump_until_woken(woke);
+                    } else {
+                        assert_eq!(takes_pointer(h), want_take, "no wake-up for take={want_take} in 2 s");
+                    }
                     std::thread::sleep(Duration::from_millis(30));
                     pump();
                     assert_eq!(takes_pointer(h), want_take, "her real style after a wanted take={want_take}");
@@ -1930,9 +1952,9 @@ mod tests {
                 // 3. Changed behind the poller's back (it wants take): put back within a few ticks.
                 unsafe { SetWindowLongPtrW(h, GWL_EXSTYLE, (ex_style(h) | WS_EX_TRANSPARENT.0) as isize) };
                 assert!(!takes_pointer(h));
-                let before = posts();
+                let (before, woke) = (posts(), pass.wakes.load(Ordering::SeqCst));
                 assert!(busy_until_posted(before), "a style out of step with the wanted state isn't posted again");
-                pump();
+                pump_until_woken(woke);
                 assert!(takes_pointer(h), "put back as wanted");
                 tx.send(true).ok();
                 unsafe {
