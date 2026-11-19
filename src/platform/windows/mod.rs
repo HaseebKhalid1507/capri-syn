@@ -1749,6 +1749,12 @@ pub fn process_env(_pid: u32, _key: &str) -> Option<bool> {
     None
 }
 
+/// Another process's `LOCAL_ENDPOINT`: not read on Windows either (`process_env`); her own is
+/// used instead.
+pub fn local_endpoint(_pid: u32) -> Option<Option<String>> {
+    None
+}
+
 /// The system heap hands freed pages back on its own.
 pub fn trim_heap() {}
 

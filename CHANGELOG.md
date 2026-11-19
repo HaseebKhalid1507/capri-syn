@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### Her brain, follow-ups (Settings PR 4)
+- MODEL follows her session when his TUI changes it (`/model`: the daemon's `setting_changed` to
+  every client), so picking her model back sends it; a Set's reply lost for 10 s no longer leaves
+  MODEL on the asked model.
+- The open Brain screen looks again every 5 s: a sign-in to any provider in a terminal gets its ✓
+  without reopening it (and a login landing mid-look looks again); the row picked stays on its
+  provider when a look adds Gemini or drops a row.
+- The keys under the Brain screen say what ⏎ does on the row (copy the sign-in, use it, close),
+  and nothing under `--socket`. Her menu's last row names her model as Settings does
+  (`SONNET 4.6`).
+- API KEY shows `IN USE · <service>` / `KEY SET · …`. A service's key counts as Synaps counts it:
+  `<id>` with `type: api_key` and a key in `auth.json`, the config's last line, and a config key
+  only once the daemon has started since it was written.
+- RUN LOCAL's server: the config's last `provider.local.url`, the daemon's `LOCAL_ENDPOINT`
+  (Linux), one deadline for the name lookup, the connect and the reply.
+- MODEL is refused under `--model` / `--session` whoever asks; with `[brain]` off its write reads
+  `[session]` off her UI thread.
+
 ### Her brain, in her Settings (Settings PR 3)
 - Settings' first row is BRAIN: her model and its login (`✓ CLAUDE · SONNET 4.6`, or `● NO BRAIN YET`
   with a red `SET UP ▸`). It opens Settings ▸ Brain: SIGN IN WITH CLAUDE first, RUN LOCAL, and OTHER

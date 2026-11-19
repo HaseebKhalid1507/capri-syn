@@ -162,6 +162,15 @@ pub fn process_env(pid: u32, key: &str) -> Option<bool> {
     Some(env.split(|&b| b == 0).filter_map(|kv| kv.strip_prefix(want.as_bytes())).any(|v| !v.trim_ascii().is_empty()))
 }
 
+/// Another process's `LOCAL_ENDPOINT` (the daemon's local model server: a URL Synaps keeps as
+/// non-secret configuration; the one value read from another environment). Some(None): not set
+/// there, or blank; None: that environment can't be read.
+pub fn local_endpoint(pid: u32) -> Option<Option<String>> {
+    let env = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
+    let v = env.split(|&b| b == 0).filter_map(|kv| kv.strip_prefix(b"LOCAL_ENDPOINT=")).next_back();
+    Some(v.map(|v| String::from_utf8_lossy(v.trim_ascii()).into_owned()).filter(|v| !v.is_empty()))
+}
+
 /// Hand freed heap back to the OS (after the frame decode).
 pub fn trim_heap() {
     #[cfg(target_env = "gnu")]
@@ -373,6 +382,7 @@ mod tests {
             .arg("5")
             .env("SA_TEST_KEY", "sk-x")
             .env("SA_TEST_EMPTY", " ")
+            .env("LOCAL_ENDPOINT", "http://10.0.0.2:8080/v1")
             .spawn()
             .expect("sleep");
         let pid = c.id();
@@ -384,9 +394,11 @@ mod tests {
         assert_eq!(process_env(pid, "SA_TEST_KEY"), Some(true));
         assert_eq!(process_env(pid, "SA_TEST_EMPTY"), Some(false), "blank is unset");
         assert_eq!(process_env(pid, "SA_TEST_KE"), Some(false), "a whole name, not a prefix");
+        assert_eq!(local_endpoint(pid), Some(Some("http://10.0.0.2:8080/v1".into())));
         c.kill().ok();
         c.wait().ok();
         assert_eq!(process_env(pid, "SA_TEST_KEY"), None, "gone: can't be read");
+        assert_eq!(local_endpoint(pid), None);
     }
 
     #[test]

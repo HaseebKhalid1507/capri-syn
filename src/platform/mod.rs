@@ -48,9 +48,9 @@ pub use os::Os;
 // awareness), the clock, the calendar, the media players (`watch_media`: `on_change` gets the
 // sum whenever it changes, first call now) and notifications (`notify`: blocking, Ok is its id).
 #[cfg(target_os = "linux")]
-pub use linux::{base_dir, home_dir, local_day, monotonic_s, notify, process_env, process_setup, trim_heap, utc_offset_s, watch_media};
+pub use linux::{base_dir, home_dir, local_day, local_endpoint, monotonic_s, notify, process_env, process_setup, trim_heap, utc_offset_s, watch_media};
 #[cfg(windows)]
-pub use self::windows::{base_dir, home_dir, local_day, monotonic_s, notify, process_env, process_setup, trim_heap, utc_offset_s, watch_media};
+pub use self::windows::{base_dir, home_dir, local_day, local_endpoint, monotonic_s, notify, process_env, process_setup, trim_heap, utc_offset_s, watch_media};
 /// The voice sidecar's link (capri-voice; newline-delimited JSON both ways) and where it is, for
 /// her log. Linux: its Unix socket. Windows: loopback TCP after a token handshake (the sidecar is
 /// Python, and stock CPython has no AF_UNIX there).

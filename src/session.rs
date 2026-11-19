@@ -552,16 +552,11 @@ impl Link {
         self.creds_at = None;
     }
 
-    /// The daemon's version, once it has said it (`0.12.0`).
-    pub fn daemon_version(&self) -> Option<&str> {
-        self.daemon_version.as_deref()
-    }
-
-    /// Her maker's mark for the menu: `SYNAPS 0.12.0 · claude-opus-5` (the daemon's version and
-    /// her session's model, without its provider). None until the daemon has said either.
+    /// Her maker's mark, for the menu and Settings' ABOUT: `SYNAPS 0.12.0 · SONNET 4.6` (the
+    /// daemon's version and her session's model as the page names it, `provider::model_label`).
+    /// None until the daemon has said either.
     pub fn mark(&self) -> Option<String> {
-        let model = self.model();
-        let model = model.map(|m| m.rsplit('/').next().unwrap_or(m));
+        let model = self.model().map(crate::provider::model_label);
         match (self.daemon_version.as_deref(), model) {
             (None, None) => None,
             (Some(v), None) => Some(format!("SYNAPS {v}")),
@@ -905,13 +900,7 @@ impl Link {
             }
             Event::SettingApplied { setting, view, .. } => {
                 elog!("synaps-avatar: persona: {setting} set");
-                if view.get("model") != self.view.as_ref().and_then(|v| v.get("model")) {
-                    self.creds = Creds::Unknown;
-                    self.creds_by = Said::Read;
-                    self.creds_read = None;
-                    self.creds_at = Some(now);
-                }
-                self.view = Some(view);
+                self.view_now(view, now);
                 self.persona_replied();
             }
             Event::Error { error: Error::SettingRefused { setting, reason, .. }, .. } => {
@@ -962,7 +951,16 @@ impl Link {
                     acts.push(Act::Resync);
                 }
             }
-            Event::Session { event, .. } => {
+            Event::Session { event, raw, .. } => {
+                // A setting changed by anyone (his TUI's `/model`, `/thinking`): the daemon sends
+                // the new view to every attached client, and the client makes only her own Sets'
+                // replies `SettingApplied`. Hers come here too, with the view she has already.
+                if raw.get("ev").and_then(|e| e.as_str()) == Some("setting_changed")
+                    && raw.pointer("/applied/ok").and_then(|o| o.as_bool()) == Some(true)
+                    && let Some(view) = raw.pointer("/applied/view").filter(|v| v.is_object())
+                {
+                    self.view_now(view.clone(), now);
+                }
                 self.transcript.apply(&event);
                 self.session_event(event, now);
             }
@@ -1167,6 +1165,16 @@ impl Link {
 
     /// Timers: retry a lost session; back to Observe once nothing needs Mirror.
     pub fn tick(&mut self, now: Instant) -> Vec<Act> {
+        // Replies not in after PERSONA_WAIT are lost (an older daemon, a frame-level error, or the
+        // downgrade leaving the attach they'd come on): the view is the daemon's alone again, or
+        // MODEL would show the asked model for good and stale asks would come back. The cost: a
+        // round trip longer than this (a Muse model fetching its catalog first, a parked session
+        // waking) brings back A, B, A's stranding for that pick.
+        if self.persona_wait > 0 && now >= self.persona_sent + PERSONA_WAIT {
+            elog!("synaps-avatar: persona: {} repl{} not in after {}s; the daemon's view stands", self.persona_wait, if self.persona_wait == 1 { "y" } else { "ies" }, PERSONA_WAIT.as_secs());
+            self.persona_wait = 0;
+            self.persona_asked.clear();
+        }
         if self.retry_at.is_some_and(|t| t <= now) && self.attach == Attach::None && self.connected {
             // The answer (`Sessions`) resolves.
             self.retry_at = None;
@@ -1181,6 +1189,17 @@ impl Link {
             return vec![Act::Attach(id, AttachMode::Observe)];
         }
         Vec::new()
+    }
+
+    /// The session's settings as the daemon says them now: another model reads its login afresh.
+    fn view_now(&mut self, view: serde_json::Value, now: Instant) {
+        if view.get("model") != self.view.as_ref().and_then(|v| v.get("model")) {
+            self.creds = Creds::Unknown;
+            self.creds_by = Said::Read;
+            self.creds_read = None;
+            self.creds_at = Some(now);
+        }
+        self.view = Some(view);
     }
 
     /// A `Set`'s reply: the last one in, the view is the daemon's alone again.
@@ -1219,6 +1238,9 @@ impl Link {
         }
         if let Some(d) = self.downgrade_at() {
             t.push(d.max(now + Duration::from_millis(1)));
+        }
+        if self.persona_wait > 0 {
+            t.push((self.persona_sent + PERSONA_WAIT).max(now + Duration::from_millis(1)));
         }
         if let Some((_, until)) = self.flash {
             t.push(until);
@@ -1816,6 +1838,92 @@ mod tests {
         assert!(!l.persona_blocked());
     }
 
+    /// His TUI's `/model` on her session: the daemon broadcasts `setting_changed` with the
+    /// engine command's reserved id (not a reply to any Set of hers, so the client sends it on
+    /// only as a raw session event). Her view takes it: MODEL shows it, her login is read again
+    /// for it, and a pick of her model sends it back. A refused change, or her own Set's echo
+    /// (its reply already in), changes nothing.
+    #[test]
+    fn his_tui_s_model_change_is_seen() {
+        let t0 = Instant::now();
+        let a = persona();
+        let wire = |e: serde_json::Value| {
+            let line = serde_json::json!({"type": "event", "session_id": SID, "seq": 77, "ts": "t", "event": e}).to_string();
+            let DaemonFrame::Event(env) = decode_frame(&line).unwrap() else { panic!() };
+            let event = env.decode().unwrap();
+            Event::Session { attach_seq: 1, session_id: SID.into(), seq: env.seq, event, raw: Arc::new(env.event.clone()) }
+        };
+        let changed = |ok: bool, model: &str| {
+            let view = serde_json::json!({"model": model, "reasoning_level": a.thinking, "system_prompt": a.system});
+            wire(serde_json::json!({"ev": "setting_changed", "applied": {"id": (1u64 << 63) + 3, "setting": "model", "ok": ok, "message": null, "view": view, "clamp": null}}))
+        };
+        let mut l = Link::new(Options { persona: a.clone(), ..opts() }, t0);
+        l.on_event(connected(), t0);
+        l.on_event(Event::Sessions(vec![meta(SID, Some("capri"))]), t0);
+        l.attaching(1);
+        assert!(on(&mut l, mine(1, AttachMode::Observe, None, Some("capri"), Some(&a)), t0).is_empty());
+        l.set_creds(Creds::Have, Again::Never, t0);
+        assert_eq!(l.creds(), Creds::Have);
+        let haiku = "claude-haiku-4-5-20251001";
+        assert!(on(&mut l, changed(false, haiku), t0).is_empty());
+        assert_eq!(l.model(), Some("anthropic/claude-sonnet-4-6"), "refused: nothing changed");
+        on(&mut l, changed(true, haiku), t0);
+        assert_eq!((l.model(), l.model_on_way()), (Some(haiku), None));
+        assert_eq!(l.creds(), Creds::Unknown, "another model: its login read afresh");
+        assert!(l.creds_due(t0).is_some_and(|q| q.model == haiku));
+        // MODEL picks hers again: compared against Haiku, so it goes out.
+        let acts = l.pick_persona(a.clone(), t0);
+        assert!(matches!(acts.as_slice(), [Act::Attach(_, AttachMode::Mirror)]), "{acts:?}");
+        l.attaching(2);
+        let mut view = a.clone();
+        view.model = Some(haiku.into());
+        let acts = on(&mut l, mine(2, AttachMode::Mirror, Some(1), Some("capri"), Some(&view)), t0);
+        assert!(matches!(acts.as_slice(), [Act::Set(s)] if *s == Setting::model("anthropic/claude-sonnet-4-6")), "{acts:?}");
+        l.on_event(applied(2, "model", &a), t0);
+        l.set_creds(Creds::Have, Again::Never, t0);
+        // Her own Set's raw echo: the view she has already, her login kept.
+        let mut echo = changed(true, "anthropic/claude-sonnet-4-6");
+        if let Event::Session { attach_seq, .. } = &mut echo {
+            *attach_seq = 2;
+        }
+        on(&mut l, echo, t0);
+        assert_eq!((l.model(), l.creds()), (Some("anthropic/claude-sonnet-4-6"), Creds::Have));
+    }
+
+    /// A Set's reply that never comes (an older daemon, a daemon error, the downgrade leaving
+    /// its attach): after PERSONA_WAIT the daemon's view stands again. MODEL stops showing the
+    /// asked model, and the lost ask isn't compared against on the next pick.
+    #[test]
+    fn a_lost_reply_lets_go_after_persona_wait() {
+        let t0 = Instant::now();
+        let a = persona();
+        let b = Persona { model: Some("claude-opus-5-5".into()), ..persona() };
+        let mut l = Link::new(Options { persona: a.clone(), ..opts() }, t0);
+        l.on_event(connected(), t0);
+        l.on_event(Event::Sessions(vec![meta(SID, Some("capri"))]), t0);
+        l.attaching(1);
+        on(&mut l, mine(1, AttachMode::Observe, None, Some("capri"), Some(&a)), t0);
+        l.pick_persona(b.clone(), t0);
+        l.attaching(2);
+        let acts = on(&mut l, mine(2, AttachMode::Mirror, Some(1), Some("capri"), Some(&a)), t0);
+        assert!(matches!(acts.as_slice(), [Act::Set(_)]), "{acts:?}");
+        assert_eq!(l.model_on_way(), Some("claude-opus-5-5"));
+        assert!(l.deadline(t0).is_some_and(|d| d <= t0 + PERSONA_WAIT));
+        assert!(l.tick(t0 + PERSONA_WAIT - Duration::from_millis(1)).is_empty());
+        assert_eq!(l.model_on_way(), Some("claude-opus-5-5"), "not yet");
+        // No reply: let go (and back to Observe, as before).
+        let acts = l.tick(t0 + PERSONA_WAIT);
+        assert!(matches!(acts.as_slice(), [Act::Attach(_, AttachMode::Observe)]), "{acts:?}");
+        assert_eq!((l.model(), l.model_on_way()), (Some("anthropic/claude-sonnet-4-6"), None), "the daemon's view stands");
+        // Picking A now is no change from the daemon's view: nothing to send, the lost B ignored.
+        let t1 = t0 + PERSONA_WAIT + Duration::from_secs(1);
+        l.attaching(3);
+        on(&mut l, mine(3, AttachMode::Observe, None, Some("capri"), Some(&a)), t1);
+        assert!(l.pick_persona(a.clone(), t1).is_empty());
+        // And B again goes out (it isn't on its way any more).
+        assert!(matches!(l.pick_persona(b.clone(), t1).as_slice(), [Act::Attach(_, AttachMode::Mirror)]));
+    }
+
     /// The hard guard: never a session she rides with --session (even named like her), never
     /// a renamed one she finds by the remembered id, never `subconscious`.
     #[test]
@@ -2361,7 +2469,7 @@ mod tests {
     /// `daemon_read`: false on Windows). False: none was due.
     fn read(l: &mut Link, base: &std::path::Path, env: &dyn Fn(&str) -> bool, daemon_read: bool, t: Instant) -> bool {
         let Some(q) = l.creds_due(t) else { return false };
-        let (c, again) = crate::creds::check_at(&q.model, base, q.profile.as_deref(), env, daemon_read);
+        let (c, again) = crate::creds::check_at(&q.model, base, q.profile.as_deref(), env, daemon_read, None);
         l.set_creds(c, again, t);
         true
     }
@@ -2634,17 +2742,18 @@ mod tests {
         assert_eq!((b.busy, b.turn, b.reply.as_str()), (true, before.turn + 2, "Hey"));
     }
 
-    /// Touchpoint 8: the daemon's version and her session's model, without the provider.
+    /// Touchpoint 8: the daemon's version and her session's model as the Settings page names it
+    /// (her menu's last row and ABOUT say the same).
     #[test]
     fn her_mark_names_the_daemon_and_model() {
         let t0 = Instant::now();
         assert_eq!(Link::new(opts(), t0).mark(), None);
         let mut l = live_link(t0);
-        assert_eq!(l.mark().as_deref(), Some("SYNAPS 0.11.1 · claude-haiku-4-5"));
+        assert_eq!(l.mark().as_deref(), Some("SYNAPS 0.11.1 · HAIKU 4.5"));
         let mut p = persona();
         p.model = Some("local/llama3.2".into());
         l.on_event(applied(1, "model", &p), t0);
-        assert_eq!(l.mark().as_deref(), Some("SYNAPS 0.11.1 · llama3.2"));
+        assert_eq!(l.mark().as_deref(), Some("SYNAPS 0.11.1 · LLAMA3.2"));
     }
 
     #[test]

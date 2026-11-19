@@ -6,7 +6,7 @@ Attach -> the attached_history.json fixture, then events on demand.
 
 Control: one line per connection on /tmp/sa-fake/ctl.sock:
   secret | confirm | confirm2 | benign | compact | compacted | idle | refuse | relay | say TEXT | trig T TEXT
-  | resolve | nobrain | fail TEXT | brain | quit
+  | resolve | nobrain | fail TEXT | brain | model M | quit
 A submit or steer streams a canned reply (FAKE: no model): a turn, text deltas every
 FAKE_DELTA_MS (default 30), done, idle. `refuse`: the next submit is refused instead.
 `relay`: a turn another session woke ([comms] ...). `say TEXT`: a turn with that reply. Both come as
@@ -16,7 +16,9 @@ turn with trigger T. `resolve`: the pending prompts are answered elsewhere (they
 `fail TEXT`: every submit fails with TEXT; `brain`: replies again.
 FAKE_DAEMON_VERSION and FAKE_MODEL set what the Welcome and the attach say (default 0.0.0-fake, fake).
 A `set` (her persona, `[session] model`) is applied to the session's view and answered as the daemon
-does (`setting_changed`, ok, the new view): her model shows as set.
+does (`setting_changed`, ok, the new view): her model shows as set. `model M`: another client's
+`/model M` (his TUI's): the view changed, broadcast as the daemon does an engine command's change
+(`setting_changed` with its reserved id, `VIEW_CHANGED_SETTING_ID`), a reply to no one's Set.
 FAKE_HISTORY=FILE: the attached chat's messages instead of the fixture's (a JSON list of api messages).
 Commands the avatar sends are printed; answer values are never printed (only their length).
 
@@ -285,6 +287,11 @@ def control():
             fail_with[0] = cmd[5:]
         elif cmd == "brain":
             fail_with[0] = None
+        elif cmd.startswith("model "):
+            with lock:
+                VIEW["model"] = cmd[6:].strip()
+                view = dict(VIEW)
+            event({"ev": "setting_changed", "applied": {"id": (1 << 63) + 3, "setting": "model", "ok": True, "message": None, "view": view, "clamp": None}})
         elif cmd == "resolve":
             with lock:
                 ids = list(pending)

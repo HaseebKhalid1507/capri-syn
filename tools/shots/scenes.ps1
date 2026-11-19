@@ -18,7 +18,9 @@
               Synaps folder of the take's own, no --socket): no login (her first words, SET ME UP,
               the Brain screen it opens, OTHER, esc, her menu); Claude with no login after his first
               message (the tag, a click on her, the list's BRAIN row); signed in (the list, the Brain
-              screen, MODEL changed and written); and a daemon through --socket (another machine's).
+              screen, MODEL changed and written); his TUI's /model followed, a ChatGPT sign-in made in
+              a terminal seen by the open screen, MODEL sent back (PR 4); and a daemon through
+              --socket (another machine's).
   Out: <Out>\<set>\<take>\<step>.png + .json (her `state`), <Out>\index.json, <Out>\logs\.
 #>
 param(
@@ -440,6 +442,31 @@ $Scenes = [ordered]@{
             if ($f -notmatch '(?m)^model = "claude-opus-5-5"') { $script:Fails.Add("${script:Take}: [session] model not written: $f") }
             Key 'escape' 1400
             Shot '12-back' 'esc: back on the list'
+        }
+        # Her session moved by another client (his TUI's /model: the daemon's broadcast), then a sign-in
+        # to ChatGPT in his terminal while the Brain screen is open, then MODEL back to Sonnet.
+        drift  = {
+            Start-Take brain drift -Local -Model 'claude-sonnet-4-6' -History $Short -Synaps @{ 'auth.json' = '{"anthropic": {"type": "oauth"}}' }
+            $null = Ctl 'brain off'
+            $null = Ctl 'settings open brain'
+            Start-Sleep 2
+            Focus-Line-Top
+            $null = Fake 'model claude-haiku-4-5-20251001'
+            $null = Wait-Until { (State).line.mind.model -eq 'claude-haiku-4-5-20251001' } 10 'MODEL following his TUI'
+            Start-Sleep 1
+            Shot '14-tui-model' 'his TUI''s /model haiku: MODEL says HAIKU 4.5'
+            Key 'down'; Key 'down'; Key 'enter' 1400
+            Set-Content -Path (Join-Path $Root 'brain-drift\synaps\auth.json') -Value '{"anthropic": {"type": "oauth"}, "openai-codex": {"type": "oauth"}}' -Encoding utf8NoBOM
+            $signed = Wait-Until { @((State).line.mind.signed) -contains 'openai-codex' } 12 'a ChatGPT sign-in made in his terminal'
+            if (-not $signed) { $script:Fails.Add("${script:Take}: the open Brain screen never saw ChatGPT's login") }
+            Key 'down' 1000
+            Shot '15-terminal-signin' 'ChatGPT signed in from a terminal: its check without reopening; the keys say what enter does'
+            Key 'left'; Key 'down'; Key 'right' 1800
+            $dl = Join-Path $Logs 'brain-drift-daemon.log'
+            $sent = Wait-Until { (Get-Content -Raw $dl -ErrorAction SilentlyContinue) -match 'cmd set model claude-sonnet-4-6' } 10 'MODEL sent back to her session'
+            if (-not $sent) { $script:Fails.Add("${script:Take}: MODEL back to Sonnet never reached her session (stale view)") }
+            Start-Sleep 1
+            Shot '16-model-back' 'left, down to MODEL, right: SONNET 4.6, set on her session again'
         }
         # A daemon through --socket (maybe another machine's): its logins aren't hers to read or make.
         remote = {

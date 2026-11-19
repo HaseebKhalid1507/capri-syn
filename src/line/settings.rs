@@ -294,6 +294,25 @@ pub fn brain_rows(p: &Prefs, other: bool) -> Vec<BrainRow> {
     v
 }
 
+/// The Brain screen's row `sel` once its rows change from `old`'s to `new`'s (a look found
+/// Gemini's client id or a login, her brain changed): the same row, the same provider, where it
+/// is now. A row gone: the same place, kept in the list.
+pub fn brain_reselect(old: &Prefs, new: &Prefs, sel: usize, other: bool) -> usize {
+    let id = |p: &Prefs, r: BrainRow| match r {
+        BrainRow::Account(i) => (BrainRow::Account(0), p.mind.others().get(i).map(|a| a.id)),
+        r => (r, None),
+    };
+    let now = brain_rows(new, other);
+    let keep = sel.min(now.len() - 1);
+    match brain_rows(old, other).get(sel) {
+        Some(&r) => {
+            let was = id(old, r);
+            now.iter().position(|&x| id(new, x) == was).unwrap_or(keep)
+        }
+        None => keep,
+    }
+}
+
 /// A provider's row: what ⏎ on it does. One with a login on file, not hers: switch her to it
 /// (its default model). Without one: sign in (not for a daemon on another machine: a sign-in
 /// here wouldn't reach it). Hers, signed in: nothing.
@@ -389,22 +408,24 @@ pub fn hint(p: &Prefs, sel: usize) -> &'static str {
     }
 }
 
-/// The Brain screen's keys for the row picked.
+/// The Brain screen's keys for the row picked: what ⏎ does there (copies a sign-in, switches
+/// her, opens or closes OTHER), ← where it closes OTHER, nothing where ⏎ does nothing.
 pub fn brain_hint(p: &Prefs, sel: usize, other: bool) -> &'static str {
     let rows = brain_rows(p, other);
     let row = rows[sel.min(rows.len() - 1)];
-    let esc = |open: bool| if open { "↑↓ pick · ⏎ open · ← close · esc back" } else { "↑↓ pick · ⏎ open · esc back" };
-    match row {
-        BrainRow::Model if step_model(p, 1) != Act::Nothing => "↑↓ pick · ←→ change · esc back",
-        BrainRow::Model => "↑↓ pick · esc back",
-        BrainRow::Other => esc(other),
-        BrainRow::Account(_) | BrainRow::Key => esc(true),
-        _ => match brain_key("enter", sel, p, other).1 {
-            Act::Login(_) => "↑↓ pick · ⏎ copy the sign-in · esc back",
-            Act::Pref(_) => "↑↓ pick · ⏎ use it · esc back",
-            Act::Local => "↑↓ pick · ⏎ the steps · esc back",
-            _ => "↑↓ pick · esc back",
-        },
+    let inside = other && matches!(row, BrainRow::Account(_) | BrainRow::Key);
+    match (row, brain_key("enter", sel, p, other).1) {
+        (BrainRow::Model, _) if step_model(p, 1) != Act::Nothing => "↑↓ pick · ←→ change · esc back",
+        (BrainRow::Model, _) => "↑↓ pick · esc back",
+        (BrainRow::Other, _) if other => "↑↓ pick · ⏎ close · esc back",
+        (BrainRow::Other, _) => "↑↓ pick · ⏎ open · esc back",
+        (_, Act::Login(_)) if inside => "↑↓ pick · ⏎ copy the sign-in · ← close · esc back",
+        (_, Act::Pref(_)) if inside => "↑↓ pick · ⏎ use it · ← close · esc back",
+        (_, _) if inside => "↑↓ pick · ← close · esc back",
+        (_, Act::Login(_)) => "↑↓ pick · ⏎ copy the sign-in · esc back",
+        (_, Act::Pref(_)) => "↑↓ pick · ⏎ use it · esc back",
+        (_, Act::Local) => "↑↓ pick · ⏎ the steps · esc back",
+        _ => "↑↓ pick · esc back",
     }
 }
 
@@ -760,7 +781,9 @@ impl Line {
                 // Shown as asked at once: a second key steps on from it, not from the value
                 // the first one's write hasn't changed yet (her next snapshot says the same).
                 if let Some(prefs) = &mut self.snap.prefs {
+                    let was = prefs.clone();
                     p.show(prefs);
+                    self.bsel = brain_reselect(&was, prefs, self.bsel, self.other);
                 }
                 (self.on_ask)(Ask::Pref(p), cx).ok();
             }
@@ -1040,8 +1063,8 @@ impl Line {
                         out.push(way(name.as_str(), b, mark, m.here || has(to), None));
                     }
                     BrainRow::Key => {
-                        let b = if m.here { "Groq · OpenRouter · 17 more" } else { "ON ITS MACHINE" };
-                        out.push(way("   API KEY", b.into(), None, m.here, None));
+                        let (b, mark) = key_word(m);
+                        out.push(way("   API KEY", b, mark, m.here || mark.is_some(), None));
                     }
                     BrainRow::Model => {
                         out.push(section("MODEL"));
@@ -1269,6 +1292,25 @@ pub fn brain_line(m: &provider::Status) -> &'static str {
     }
 }
 
+/// API KEY's word: IN USE on hers (a key service with its key), else ✓ and the services with a
+/// key set here, else a few of them.
+pub fn key_word(m: &provider::Status) -> (String, Option<&'static str>) {
+    let has = |p: &provider::Provider| m.signed.contains(&p.id) || (m.provider() == Some(p) && m.signed_in == Some(true));
+    if let Some(to) = m.provider().filter(|&p| p.kind == Kind::Key && has(p)) {
+        return (format!("IN USE · {}", to.name.to_uppercase()), Some("check"));
+    }
+    if !m.here {
+        return ("ON ITS MACHINE".into(), None);
+    }
+    let keys: Vec<String> = provider::ALL.iter().filter(|&p| p.kind == Kind::Key && has(p)).map(|p| p.name.to_uppercase()).collect();
+    match keys.as_slice() {
+        [] => ("Groq · OpenRouter · 17 more".into(), None),
+        [k] => (format!("KEY SET · {k}"), Some("check")),
+        [x, y] => (format!("KEYS SET · {x} · {y}"), Some("check")),
+        [x, y, rest @ ..] => (format!("KEYS SET · {x} · {y} +{}", rest.len()), Some("check")),
+    }
+}
+
 /// The BRAIN row's word: `CLAUDE · SONNET 4.6`, `NO BRAIN YET`, `LOCAL · QWEN3:8B · OFF`.
 pub fn brain_word(m: &provider::Status) -> String {
     let Some(model) = m.model.as_deref() else { return "OFFLINE".into() };
@@ -1292,7 +1334,7 @@ pub fn brain_word(m: &provider::Status) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Act, BrainRow, FLASH, MenuSave, Mode, Nav, Note, Page, Pref, Prefs, SetRow, asked, asked_model, brain_hint, brain_key, brain_line, brain_rows, brain_word, esc_closes, hint, hold_fires, list_key, next_attention, page_left, set_rows, spot_lift};
+    use super::{Act, BrainRow, FLASH, MenuSave, Mode, Nav, Note, Page, Pref, Prefs, SetRow, asked, asked_model, brain_hint, brain_key, brain_line, brain_reselect, brain_rows, brain_word, esc_closes, hint, hold_fires, key_word, list_key, next_attention, page_left, set_rows, spot_lift};
     use crate::provider::{self, Local, Lock, Status};
     use crate::settings::{Attention, Settings, WriteQueue, write_at};
 
@@ -1444,7 +1486,10 @@ mod tests {
         assert_eq!(brain_key("down", 2, &p, false), (2, Act::Nothing), "closed: nothing under OTHER");
         assert_eq!(brain_hint(&p, 0, false), "↑↓ pick · ⏎ copy the sign-in · esc back");
         assert_eq!(brain_hint(&p, 1, false), "↑↓ pick · ⏎ the steps · esc back");
-        assert_eq!(brain_hint(&p, 2, true), "↑↓ pick · ⏎ open · ← close · esc back");
+        assert_eq!(brain_hint(&p, 2, false), "↑↓ pick · ⏎ open · esc back");
+        assert_eq!(brain_hint(&p, 2, true), "↑↓ pick · ⏎ close · esc back", "⏎ on OTHER, open, closes it");
+        assert_eq!(brain_hint(&p, 3, true), "↑↓ pick · ⏎ copy the sign-in · ← close · esc back", "an account: ⏎ copies its sign-in");
+        assert_eq!(brain_hint(&p, 8, true), "↑↓ pick · ⏎ copy the sign-in · ← close · esc back", "API KEY");
         assert_eq!(brain_line(&p.mind), "Give me a brain and I'll talk back.");
         assert_eq!(brain_word(&p.mind), "NO BRAIN YET");
     }
@@ -1467,7 +1512,7 @@ mod tests {
         let mut q = prefs();
         q.mind.signed.push("openai-codex");
         assert_eq!(brain_key("enter", 3, &q, true), (3, Act::Pref(Pref::Model("openai-codex/gpt-5.5"))));
-        assert_eq!(brain_hint(&q, 3, true), "↑↓ pick · ⏎ open · ← close · esc back");
+        assert_eq!(brain_hint(&q, 3, true), "↑↓ pick · ⏎ use it · ← close · esc back");
         // On ChatGPT: Claude's row (its login on file) switches back.
         let mut r = Prefs { mind: mind("openai-codex/gpt-5.5", Some(true)), ..prefs() };
         r.mind.signed.push("anthropic");
@@ -1489,6 +1534,46 @@ mod tests {
         assert_eq!(brain_key("left", model, &own, false).1, Act::Pref(Pref::Model("claude-opus-5-5")));
     }
 
+    /// API KEY: IN USE on a key service she runs on, ✓ and the services with a key here.
+    #[test]
+    fn api_key_says_which_keys_are_set() {
+        let mut m = mind("claude-sonnet-4-6", Some(true));
+        assert_eq!(key_word(&m), ("Groq · OpenRouter · 17 more".to_string(), None));
+        m.signed.push("groq");
+        assert_eq!(key_word(&m), ("KEY SET · GROQ".to_string(), Some("check")));
+        m.signed.push("openrouter");
+        assert_eq!(key_word(&m), ("KEYS SET · GROQ · OPENROUTER".to_string(), Some("check")));
+        m.signed.push("cerebras");
+        assert_eq!(key_word(&m).0, "KEYS SET · GROQ · CEREBRAS +1", "in the table's order");
+        let groq = mind("groq/llama-3.3-70b-versatile", Some(true));
+        assert_eq!(key_word(&groq), ("IN USE · GROQ".to_string(), Some("check")));
+        let mut none = mind("groq/llama-3.3-70b-versatile", Some(false));
+        assert_eq!(key_word(&none).1, None, "no key: not in use");
+        none.here = false;
+        assert_eq!(key_word(&none).0, "ON ITS MACHINE");
+    }
+
+    /// A look that adds or drops a row under OTHER (Gemini's client id found, a login on file)
+    /// keeps the row picked on its provider; one that's gone keeps the place.
+    #[test]
+    fn a_look_keeps_the_provider_picked() {
+        let p = Prefs { mind: mind("claude-sonnet-4-6", Some(false)), ..prefs() };
+        let mut g = p.clone();
+        g.mind.gemini = true;
+        // Grok picked (row 5 without Gemini); Gemini comes in before it: Grok is row 6 now.
+        assert_eq!(brain_reselect(&p, &g, 5, true), 6);
+        assert_eq!(brain_reselect(&g, &p, 6, true), 5, "and back");
+        assert_eq!(brain_reselect(&p, &g, 4, true), 4, "Copilot, above it: as it was");
+        assert_eq!(brain_reselect(&p, &g, 8, true), 9, "API KEY");
+        assert_eq!(brain_reselect(&g, &p, 5, true), 5, "Gemini itself gone: the same place (Grok)");
+        assert_eq!(brain_reselect(&p, &g, 2, false), 2, "OTHER closed: nothing moves");
+        // A brain now: MODEL comes in at the end; the row picked stays.
+        let signed = Prefs { mind: mind("claude-sonnet-4-6", Some(true)), ..prefs() };
+        assert_eq!(brain_reselect(&p, &signed, 1, false), 1);
+        // No brain any more: MODEL picked, gone: the last row.
+        assert_eq!(brain_reselect(&signed, &p, 3, false), 2);
+    }
+
     /// A daemon through `--socket` (another machine's): no sign-in here reaches it, so the ways
     /// in do nothing and say where; MODEL is hers, still live.
     #[test]
@@ -1500,6 +1585,9 @@ mod tests {
         assert_eq!(brain_key("enter", 8, &p, true).1, Act::Nothing, "API KEY");
         assert_eq!(brain_key("enter", 1, &p, false).1, Act::Nothing, "RUN LOCAL: its machine's server, not this one's");
         assert_eq!(brain_hint(&p, 1, false), "↑↓ pick · esc back");
+        assert_eq!(brain_hint(&p, 0, false), "↑↓ pick · esc back", "nothing to do here: no ⏎");
+        assert_eq!(brain_hint(&p, 3, true), "↑↓ pick · ← close · esc back");
+        assert_eq!(brain_hint(&p, 8, true), "↑↓ pick · ← close · esc back");
         let model = brain_rows(&p, false).len() - 1;
         assert_eq!(brain_key("right", model, &p, false).1, Act::Pref(Pref::Model("claude-opus-5-5")));
         assert_eq!(brain_line(&p.mind), "My brain runs on another machine. Sign in there, then say hi.");

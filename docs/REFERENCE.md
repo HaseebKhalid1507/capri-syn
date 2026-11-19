@@ -65,9 +65,12 @@ Reference for `synaps-avatar`, the crate behind capri-syn. The [README](../READM
 - **No brain, before a word.** At each attach (and model change) she reads whether her model has
   credentials (`creds.rs`), by its provider as Synaps routes it (`provider.rs`: bare `claude-*` or
   `anthropic/…` is Claude, `<id>/…` that provider): an `<id>` or `<id>@<label>` entry in Synaps'
-  `auth.json` (a profile's folder first; Claude's is `anthropic`), an API-key service's
-  `provider.<id>` in Synaps' `config`, or its key variable (`ANTHROPIC_API_KEY`, `GROQ_API_KEY`, …) in
-  her environment or the daemon's (Linux: `/proc/<pid>/environ`). Keys and types only, never a
+  `auth.json` (a profile's folder first; Claude's is `anthropic`; an API-key service's is `<id>`
+  alone, `type: api_key` with a key in it), an API-key service's `provider.<id>` in Synaps' `config`
+  (its last line for it; only if the daemon started after it was written: Synaps reads its config
+  once, at start, `daemon.json`'s `started_at`, so one added since is unknown until a restart), or
+  its key variable (`ANTHROPIC_API_KEY`, `GROQ_API_KEY`, …) in her environment or the daemon's
+  (Linux: `/proc/<pid>/environ`, whether it's set, never its value). Keys and types only, never a
   secret. None: her tag reads `NO BRAIN YET` in place of `ONLINE` (and asleep), and she reads again
   every 5 s, so a `synaps login` in a terminal clears it without a message. With no brain her summon
   key, a click on her or on her tag open the Line on Settings ▸ Brain (Esc: chat), and her menu's
@@ -88,18 +91,27 @@ Reference for `synaps-avatar`, the crate behind capri-syn. The [README](../READM
   else: `‹error: …›` (cut at 90 characters), annoyed, as before.
 - **Settings ▸ Brain.** Settings' first row, BRAIN, shows her model and its login (`✓ CLAUDE ·
   SONNET 4.6`, `● NO BRAIN YET` with a red `SET UP ▸`); ⏎ (or its button) opens the Brain screen:
-  SIGN IN WITH CLAUDE, RUN LOCAL (its server looked at: Ollama's port, or `provider.local.url`), OTHER
+  SIGN IN WITH CLAUDE, RUN LOCAL (its server looked at: `provider.local.url`'s last line, else the
+  daemon's `LOCAL_ENDPOINT` (Windows: hers), else Ollama's port; one deadline for the lookup, the
+  connect and the reply), OTHER
   (opened in place: ChatGPT, Copilot, Gemini, Grok, Kimi, Muse, then API KEY; Gemini only with
   `SYNAPS_GOOGLE_GEMINI_CLIENT_ID` set, which Synaps 0.12 needs to sign in to it, or a Gemini login
   on file), and, once she has a brain, MODEL: her provider's few models, written to `settings.toml`
   as an explicit `[session] model` (only that key; the safe writer) and set on her session at once,
-  even when the file has it already (her session may have moved off it). If another client owns her
-  session's input it isn't set: she says so, and her next start sets it. A provider with a login
-  on file shows ✓ and a click switches her to its first model; a sign-in copies its `synaps login
-  --provider …` for a terminal until she runs it herself. Locked: `--model` (`set by --model`),
-  `--session` (`their session`). A daemon through `--socket` signs in on its own machine: the ways in
-  (RUN LOCAL too) say ON ITS MACHINE and do nothing here. The page looks again when a read finds a
-  login (one made in a terminal shows without reopening it).
+  even when the file has it already (his TUI's `/model` moves her session off it: the daemon's
+  `setting_changed` to every client, which she follows). If another client owns her session's input
+  it isn't set: she says so, and her next start sets it. A Set whose reply doesn't come within 10 s
+  counts as lost: MODEL shows her session's model again. A provider with a login on file shows ✓
+  and a click switches her to its first model; a sign-in copies its `synaps login --provider …` for
+  a terminal until she runs it herself (the keys under the list say what ⏎ does on the row picked).
+  API KEY says `IN USE · GROQ` when her brain is a key service with its key, else `KEY SET · …` for
+  the services with a key here. Locked: `--model` (`set by --model`), `--session` (`their
+  session`); nothing else writes MODEL then either. A daemon through `--socket` signs in on its own
+  machine: the ways in (RUN LOCAL too) say ON ITS MACHINE and do nothing here. The open Brain
+  screen looks again every 5 s and when a read finds her login, so a sign-in made in a terminal
+  (to any provider) shows without reopening it; the row picked stays on its provider when that
+  adds or drops a row. Her menu's last row and ABOUT name her model the same way (`SYNAPS 0.12.0 ·
+  SONNET 4.6`).
 - **A turn shows as started** (THINKING, the busy bubble with ABORT) only once it has run 400 ms with
   no word, or its first word comes: one that fails at once never promises a reply.
 - **Sleep follows you, not the chat**: while you're at the desk she stays up,

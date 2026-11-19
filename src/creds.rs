@@ -2,8 +2,8 @@
 //! NO BRAIN YET from the start, not ONLINE. Read where Synaps 0.12 keeps them (`auth.json` in
 //! its base folder, a profile's folder first: `core/config.rs` `resolve_read_path`), by key and
 //! type only: never a secret. Her model's provider (`provider::of`) decides what counts: an
-//! account's login on file, an API key on file, in Synaps' config or in the environment (hers or
-//! the daemon's). A local model needs none (whether its server answers is the Settings page's
+//! account's login on file, an API key on file, in Synaps' config (as the daemon read it at its
+//! start) or in the environment (hers or the daemon's). A local model needs none (whether its server answers is the Settings page's
 //! look, `provider::probe`); a provider Synaps doesn't know, a remote broker or a file she can't
 //! read is Unknown, and the daemon's first error says it (`session::Trouble`). A daemon reached
 //! through `--socket` (an ssh-forwarded remote one) isn't read at all: its files and its pid are
@@ -39,7 +39,8 @@ pub fn check(q: &Query) -> (Creds, Again) {
     let daemon = |k: &str| q.pid.and_then(|p| crate::platform::process_env(p, k));
     let env = |k: &str| env_set(k) || daemon(k) == Some(true);
     let daemon_read = daemon("ANTHROPIC_API_KEY").is_some();
-    check_at(&q.model, &synaps_client::discovery::base_dir(), q.profile.as_deref(), &env, daemon_read)
+    let started = crate::provider::daemon_started(&synaps_client::discovery::run_dir(), q.profile.as_deref());
+    check_at(&q.model, &synaps_client::discovery::base_dir(), q.profile.as_deref(), &env, daemon_read, started)
 }
 
 /// A variable is set (not blank) in her environment. Only whether: a key's value is never read.
@@ -48,8 +49,9 @@ pub fn env_set(k: &str) -> bool {
 }
 
 /// `env`: a variable is set in her environment or the daemon's; `daemon_read`: whether the
-/// daemon's was read.
-pub fn check_at(model: &str, base: &Path, profile: Option<&str>, env: &dyn Fn(&str) -> bool, daemon_read: bool) -> (Creds, Again) {
+/// daemon's was read; `started`: when the daemon started (it read its `config` then, and only
+/// then: a key put there since isn't its yet).
+pub fn check_at(model: &str, base: &Path, profile: Option<&str>, env: &dyn Fn(&str) -> bool, daemon_read: bool, started: Option<std::time::SystemTime>) -> (Creds, Again) {
     use crate::provider::Kind;
     const NEVER: (Creds, Again) = (Creds::Unknown, Again::Never);
     const TRY_AGAIN: (Creds, Again) = (Creds::Unknown, Again::Yes);
@@ -70,14 +72,21 @@ pub fn check_at(model: &str, base: &Path, profile: Option<&str>, env: &dyn Fn(&s
         return (Creds::Have, Again::Never);
     }
     let file = |name: &str| synaps_file(base, profile, name);
+    // A key in Synaps' login config (`provider.groq = …`), set (never read further) before the
+    // daemon started: one put there since waits for its next start (Unknown, read again).
+    let mut config_key = None;
     match std::fs::read_to_string(file("config")) {
         Ok(c) if remote_broker(&c) => return NEVER,
-        // An API key in Synaps' login config (`provider.groq = …`): set, never read further.
-        Ok(c) if p.kind == Kind::Key && config_key(&c, p.id) => return (Creds::Have, Again::Never),
+        Ok(c) if p.kind == Kind::Key && set(&c, &format!("provider.{}", p.id)) => {
+            let since = |t: std::time::SystemTime| std::fs::metadata(file("config")).and_then(|m| m.modified()).is_ok_and(|m| m > t);
+            config_key = Some(if started.is_some_and(since) { TRY_AGAIN } else { (Creds::Have, Again::Never) });
+        }
         Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(_) => return TRY_AGAIN,
     }
+    // One on file (read on every request: the daemon has it now) is a key either way.
+    let missing = config_key.unwrap_or(missing);
     let text = match std::fs::read_to_string(file("auth.json")) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return missing,
@@ -89,10 +98,13 @@ pub fn check_at(model: &str, base: &Path, profile: Option<&str>, env: &dyn Fn(&s
     let Ok(serde_json::Value::Object(root)) = serde_json::from_str::<serde_json::Value>(&text) else {
         return TRY_AGAIN;
     };
-    // Its slots: `<id>` (the default account, or the key) and `<id>@<label>`. Any typed entry
-    // counts (an expired token is still a login: the broker refreshes it).
-    let named = |k: &str| k == p.id || k.strip_prefix(p.id).is_some_and(|r| r.starts_with('@'));
-    let has = root.iter().any(|(k, v)| named(k) && v.get("type").and_then(|t| t.as_str()).is_some());
+    // An account's slots: `<id>` (the default one) and `<id>@<label>`, any typed entry (an
+    // expired token is still a login: the broker refreshes it). A key service's: `<id>` alone,
+    // `type: api_key` with a key in it (Synaps' `load_static_key`).
+    let has = match p.kind {
+        Kind::Key => root.get(p.id).is_some_and(|v| v.get("type").and_then(|t| t.as_str()) == Some("api_key") && v.get("key").and_then(|k| k.as_str()).is_some_and(|k| !k.is_empty())),
+        _ => root.iter().any(|(k, v)| (k == p.id || k.strip_prefix(p.id).is_some_and(|r| r.starts_with('@'))) && v.get("type").and_then(|t| t.as_str()).is_some()),
+    };
     if has { (Creds::Have, Again::Never) } else { missing }
 }
 
@@ -102,21 +114,14 @@ pub fn synaps_file(base: &Path, profile: Option<&str>, name: &str) -> std::path:
     profile.filter(|p| !p.trim().is_empty()).map(|p| base.join(p).join(name)).filter(|f| f.exists()).unwrap_or_else(|| base.join(name))
 }
 
-/// Synaps' login config has a key for `id` (`provider.<id> = <key>`, not empty).
-fn config_key(config: &str, id: &str) -> bool {
-    let want = format!("provider.{id}");
-    config.lines().any(|l| {
-        let l = l.trim();
-        !l.starts_with('#') && l.split_once('=').is_some_and(|(k, v)| k.trim() == want && !v.trim().is_empty())
-    })
+/// Synaps' config sets `key`, not blank (its last line for it: `provider::config_value`).
+fn set(config: &str, key: &str) -> bool {
+    crate::provider::config_value(config, key).is_some_and(|v| !v.is_empty())
 }
 
-/// The config sets `auth.remote_endpoint` (`key = value` lines, `#` comments).
+/// The config sets `auth.remote_endpoint`.
 fn remote_broker(config: &str) -> bool {
-    config.lines().any(|l| {
-        let l = l.trim();
-        !l.starts_with('#') && l.split_once('=').is_some_and(|(k, v)| k.trim() == "auth.remote_endpoint" && !v.trim().is_empty())
-    })
+    set(config, "auth.remote_endpoint")
 }
 
 #[cfg(test)]
@@ -140,12 +145,12 @@ mod tests {
     #[test]
     fn no_claude_login_is_missing() {
         let d = dir("missing");
-        assert_eq!(check_at("claude-sonnet-4-6", &d.join("nowhere"), None, &none, true).0, MISSING);
-        assert_eq!(check_at("claude-sonnet-4-6", &d, None, &none, true).0, MISSING);
+        assert_eq!(check_at("claude-sonnet-4-6", &d.join("nowhere"), None, &none, true, None).0, MISSING);
+        assert_eq!(check_at("claude-sonnet-4-6", &d, None, &none, true, None).0, MISSING);
         std::fs::write(d.join("auth.json"), "").unwrap();
-        assert_eq!(check_at("claude-sonnet-4-6", &d, None, &none, true).0, MISSING);
+        assert_eq!(check_at("claude-sonnet-4-6", &d, None, &none, true, None).0, MISSING);
         std::fs::write(d.join("auth.json"), r#"{"groq": {"type": "api_key", "key": "k"}, "anthropic-ish": {"type": "oauth"}}"#).unwrap();
-        assert_eq!(check_at("anthropic/claude-opus-4-1", &d, None, &none, true).0, MISSING);
+        assert_eq!(check_at("anthropic/claude-opus-4-1", &d, None, &none, true, None).0, MISSING);
         std::fs::remove_dir_all(&d).ok();
     }
 
@@ -153,12 +158,12 @@ mod tests {
     fn a_claude_login_or_key_is_have() {
         let d = dir("have");
         std::fs::write(d.join("auth.json"), r#"{"anthropic": {"type": "oauth", "access": "a", "refresh": "r", "expires": 0}}"#).unwrap();
-        assert_eq!(check_at("claude-sonnet-4-6", &d, None, &none, true).0, Creds::Have);
+        assert_eq!(check_at("claude-sonnet-4-6", &d, None, &none, true, None).0, Creds::Have);
         std::fs::write(d.join("auth.json"), r#"{"anthropic@work": {"type": "oauth"}}"#).unwrap();
-        assert_eq!(check_at("claude-sonnet-4-6", &d, None, &none, true).0, Creds::Have, "a named account");
+        assert_eq!(check_at("claude-sonnet-4-6", &d, None, &none, true, None).0, Creds::Have, "a named account");
         std::fs::remove_file(d.join("auth.json")).unwrap();
         let key = |k: &str| k == "ANTHROPIC_API_KEY";
-        assert_eq!(check_at("claude-sonnet-4-6", &d, None, &key, true).0, Creds::Have, "Synaps takes ANTHROPIC_API_KEY");
+        assert_eq!(check_at("claude-sonnet-4-6", &d, None, &key, true, None).0, Creds::Have, "Synaps takes ANTHROPIC_API_KEY");
         std::fs::remove_dir_all(&d).ok();
     }
 
@@ -168,17 +173,17 @@ mod tests {
     fn what_she_cant_tell_is_unknown() {
         let d = dir("unknown");
         for m in ["local/qwen3:8b", "acme/x", "gpt-5", ""] {
-            assert_eq!(check_at(m, &d, None, &none, true), (Creds::Unknown, Again::Never), "{m}");
+            assert_eq!(check_at(m, &d, None, &none, true, None), (Creds::Unknown, Again::Never), "{m}");
         }
         let remote = |k: &str| k == "SYNAPS_AUTH_ENDPOINT";
-        assert_eq!(check_at("claude-sonnet-4-6", &d, None, &remote, true).0, Creds::Unknown);
+        assert_eq!(check_at("claude-sonnet-4-6", &d, None, &remote, true, None).0, Creds::Unknown);
         std::fs::write(d.join("config"), "# auth.remote_endpoint = x\nmodel = claude-sonnet-4-6\n").unwrap();
-        assert_eq!(check_at("claude-sonnet-4-6", &d, None, &none, true).0, MISSING, "a comment isn't a setting");
+        assert_eq!(check_at("claude-sonnet-4-6", &d, None, &none, true, None).0, MISSING, "a comment isn't a setting");
         std::fs::write(d.join("config"), "auth.remote_endpoint = https://broker.example\n").unwrap();
-        assert_eq!(check_at("claude-sonnet-4-6", &d, None, &none, true).0, Creds::Unknown);
+        assert_eq!(check_at("claude-sonnet-4-6", &d, None, &none, true, None).0, Creds::Unknown);
         std::fs::remove_file(d.join("config")).unwrap();
         std::fs::write(d.join("auth.json"), "{ not json").unwrap();
-        assert_eq!(check_at("claude-sonnet-4-6", &d, None, &none, true).0, Creds::Unknown);
+        assert_eq!(check_at("claude-sonnet-4-6", &d, None, &none, true, None).0, Creds::Unknown);
         std::fs::remove_dir_all(&d).ok();
     }
 
@@ -188,13 +193,13 @@ mod tests {
     #[test]
     fn an_unread_daemon_env_is_unknown_not_missing() {
         let d = dir("unread");
-        assert_eq!(check_at("claude-sonnet-4-6", &d, None, &none, false).0, Creds::Unknown);
+        assert_eq!(check_at("claude-sonnet-4-6", &d, None, &none, false, None).0, Creds::Unknown);
         std::fs::write(d.join("auth.json"), "{}").unwrap();
-        assert_eq!(check_at("claude-sonnet-4-6", &d, None, &none, false).0, Creds::Unknown);
+        assert_eq!(check_at("claude-sonnet-4-6", &d, None, &none, false, None).0, Creds::Unknown);
         let key = |k: &str| k == "ANTHROPIC_API_KEY";
-        assert_eq!(check_at("claude-sonnet-4-6", &d, None, &key, false).0, Creds::Have);
+        assert_eq!(check_at("claude-sonnet-4-6", &d, None, &key, false, None).0, Creds::Have);
         std::fs::write(d.join("auth.json"), r#"{"anthropic": {"type": "oauth"}}"#).unwrap();
-        assert_eq!(check_at("claude-sonnet-4-6", &d, None, &none, false).0, Creds::Have);
+        assert_eq!(check_at("claude-sonnet-4-6", &d, None, &none, false, None).0, Creds::Have);
         std::fs::remove_dir_all(&d).ok();
     }
 
@@ -205,7 +210,7 @@ mod tests {
     #[test]
     fn reads_stop_where_nothing_here_can_change_them() {
         let d = dir("again");
-        let at = |m: &str, env: &dyn Fn(&str) -> bool, read: bool| check_at(m, &d, None, env, read);
+        let at = |m: &str, env: &dyn Fn(&str) -> bool, read: bool| check_at(m, &d, None, env, read, None);
         assert_eq!(at("local/qwen3:8b", &none, true), (Creds::Unknown, Again::Never));
         let remote = |k: &str| k == "SYNAPS_AUTH_ENDPOINT";
         assert_eq!(at("claude-sonnet-4-6", &remote, true), (Creds::Unknown, Again::Never));
@@ -227,17 +232,17 @@ mod tests {
     fn another_account_is_on_file_or_missing() {
         let d = dir("accounts");
         for read in [true, false] {
-            assert_eq!(check_at("openai-codex/gpt-5.5", &d, None, &none, read), (Creds::Missing(Some("ChatGPT")), Again::Yes), "daemon read: {read}");
+            assert_eq!(check_at("openai-codex/gpt-5.5", &d, None, &none, read, None), (Creds::Missing(Some("ChatGPT")), Again::Yes), "daemon read: {read}");
         }
         std::fs::write(d.join("auth.json"), r#"{"anthropic": {"type": "oauth"}, "openai-codexx": {"type": "oauth"}}"#).unwrap();
-        assert_eq!(check_at("openai-codex/gpt-5.5", &d, None, &none, false).0, Creds::Missing(Some("ChatGPT")), "Claude's login isn't ChatGPT's");
+        assert_eq!(check_at("openai-codex/gpt-5.5", &d, None, &none, false, None).0, Creds::Missing(Some("ChatGPT")), "Claude's login isn't ChatGPT's");
         std::fs::write(d.join("auth.json"), r#"{"openai-codex@work": {"type": "oauth"}, "github-copilot": {"type": "oauth"}}"#).unwrap();
-        assert_eq!(check_at("openai-codex/gpt-5.5", &d, None, &none, false), (Creds::Have, Again::Never));
-        assert_eq!(check_at("github-copilot/gpt-5.5", &d, None, &none, false).0, Creds::Have);
-        assert_eq!(check_at("kimi-code/k3", &d, None, &none, true).0, Creds::Missing(Some("Kimi")));
-        assert_eq!(check_at("muse/muse-wonder-1.0", &d, None, &none, false).0, Creds::Unknown, "META_API_KEY in an unread env");
+        assert_eq!(check_at("openai-codex/gpt-5.5", &d, None, &none, false, None), (Creds::Have, Again::Never));
+        assert_eq!(check_at("github-copilot/gpt-5.5", &d, None, &none, false, None).0, Creds::Have);
+        assert_eq!(check_at("kimi-code/k3", &d, None, &none, true, None).0, Creds::Missing(Some("Kimi")));
+        assert_eq!(check_at("muse/muse-wonder-1.0", &d, None, &none, false, None).0, Creds::Unknown, "META_API_KEY in an unread env");
         let meta = |k: &str| k == "META_API_KEY";
-        assert_eq!(check_at("muse/muse-wonder-1.0", &d, None, &meta, false).0, Creds::Have);
+        assert_eq!(check_at("muse/muse-wonder-1.0", &d, None, &meta, false, None).0, Creds::Have);
         std::fs::remove_dir_all(&d).ok();
     }
 
@@ -248,21 +253,54 @@ mod tests {
     fn an_api_key_is_on_file_in_the_config_or_in_the_env() {
         let d = dir("keys");
         let groq = "groq/llama-3.3-70b-versatile";
-        assert_eq!(check_at(groq, &d, None, &none, true), (Creds::Missing(Some("Groq")), Again::Yes));
-        assert_eq!(check_at(groq, &d, None, &none, false), (Creds::Unknown, Again::IfMissing));
+        assert_eq!(check_at(groq, &d, None, &none, true, None), (Creds::Missing(Some("Groq")), Again::Yes));
+        assert_eq!(check_at(groq, &d, None, &none, false, None), (Creds::Unknown, Again::IfMissing));
         let key = |k: &str| k == "GROQ_API_KEY";
-        assert_eq!(check_at(groq, &d, None, &key, true), (Creds::Have, Again::Never));
+        assert_eq!(check_at(groq, &d, None, &key, true, None), (Creds::Have, Again::Never));
         let other = |k: &str| k == "CEREBRAS_API_KEY";
-        assert_eq!(check_at(groq, &d, None, &other, true).0, Creds::Missing(Some("Groq")), "another service's key");
+        assert_eq!(check_at(groq, &d, None, &other, true, None).0, Creds::Missing(Some("Groq")), "another service's key");
         std::fs::write(d.join("config"), "# provider.groq = old\nprovider.groq =\n").unwrap();
-        assert_eq!(check_at(groq, &d, None, &none, true).0, Creds::Missing(Some("Groq")), "a comment, an empty value");
+        assert_eq!(check_at(groq, &d, None, &none, true, None).0, Creds::Missing(Some("Groq")), "a comment, an empty value");
         std::fs::write(d.join("config"), "provider.groq = gsk-x\n").unwrap();
-        assert_eq!(check_at(groq, &d, None, &none, false), (Creds::Have, Again::Never));
-        assert_eq!(check_at("claude-sonnet-4-6", &d, None, &none, true).0, MISSING, "a key's config line signs in only its service");
+        assert_eq!(check_at(groq, &d, None, &none, false, None), (Creds::Have, Again::Never));
+        assert_eq!(check_at("claude-sonnet-4-6", &d, None, &none, true, None).0, MISSING, "a key's config line signs in only its service");
         std::fs::remove_file(d.join("config")).unwrap();
         std::fs::write(d.join("auth.json"), r#"{"groq": {"type": "api_key", "key": "gsk"}}"#).unwrap();
-        assert_eq!(check_at(groq, &d, None, &none, false).0, Creds::Have);
-        assert_eq!(check_at("kimi/kimi-k3.1-pro", &d, None, &none, true).0, Creds::Missing(Some("Moonshot")));
+        assert_eq!(check_at(groq, &d, None, &none, false, None).0, Creds::Have);
+        assert_eq!(check_at("kimi/kimi-k3.1-pro", &d, None, &none, true, None).0, Creds::Missing(Some("Moonshot")));
+        // On file, Synaps takes `<id>` alone, `type: api_key`, a key in it.
+        for not in [r#"{"groq@work": {"type": "api_key", "key": "gsk"}}"#, r#"{"groq": {"type": "oauth", "key": "gsk"}}"#, r#"{"groq": {"type": "api_key", "key": ""}}"#, r#"{"groq": {"type": "api_key"}}"#] {
+            std::fs::write(d.join("auth.json"), not).unwrap();
+            assert_eq!(check_at(groq, &d, None, &none, true, None).0, Creds::Missing(Some("Groq")), "{not}");
+        }
+        // The config's last line for a key is the one (Synaps reads them into a map).
+        std::fs::write(d.join("config"), "provider.groq = gsk-x\nprovider.groq =\n").unwrap();
+        assert_eq!(check_at(groq, &d, None, &none, true, None).0, Creds::Missing(Some("Groq")), "set, then blanked");
+        std::fs::write(d.join("config"), "provider.groq =\nprovider.groq = gsk-x\n").unwrap();
+        assert_eq!(check_at(groq, &d, None, &none, true, None).0, Creds::Have);
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// Synaps reads its config's keys once, when the daemon starts: one put there since isn't the
+    /// daemon's until its next start (Unknown, read again; not a ✓ that fails). One on file in
+    /// `auth.json` it reads on every request: a key at once.
+    #[test]
+    fn a_config_key_since_the_daemon_started_waits_for_its_next_start() {
+        use std::time::Duration;
+        let d = dir("since");
+        let groq = "groq/llama-3.3-70b-versatile";
+        std::fs::write(d.join("config"), "provider.groq = gsk-x\n").unwrap();
+        let written = std::fs::metadata(d.join("config")).unwrap().modified().unwrap();
+        let before = written - Duration::from_secs(60);
+        let after = written + Duration::from_secs(60);
+        assert_eq!(check_at(groq, &d, None, &none, true, Some(after)), (Creds::Have, Again::Never), "there when it started");
+        assert_eq!(check_at(groq, &d, None, &none, true, None), (Creds::Have, Again::Never), "no daemon.json: as written");
+        assert_eq!(check_at(groq, &d, None, &none, true, Some(before)), (Creds::Unknown, Again::Yes), "put there since");
+        std::fs::write(d.join("auth.json"), r#"{"groq": {"type": "api_key", "key": "gsk"}}"#).unwrap();
+        assert_eq!(check_at(groq, &d, None, &none, true, Some(before)), (Creds::Have, Again::Never), "on file too");
+        let key = |k: &str| k == "GROQ_API_KEY";
+        std::fs::remove_file(d.join("auth.json")).unwrap();
+        assert_eq!(check_at(groq, &d, None, &key, true, Some(before)).0, Creds::Have, "in its environment");
         std::fs::remove_dir_all(&d).ok();
     }
 
@@ -271,10 +309,10 @@ mod tests {
     fn a_profile_reads_its_folder_first() {
         let d = dir("profile");
         std::fs::write(d.join("auth.json"), r#"{"anthropic": {"type": "oauth"}}"#).unwrap();
-        assert_eq!(check_at("claude-sonnet-4-6", &d, Some("work"), &none, true).0, Creds::Have, "no folder of its own: the base file");
+        assert_eq!(check_at("claude-sonnet-4-6", &d, Some("work"), &none, true, None).0, Creds::Have, "no folder of its own: the base file");
         std::fs::create_dir_all(d.join("work")).unwrap();
         std::fs::write(d.join("work").join("auth.json"), "{}").unwrap();
-        assert_eq!(check_at("claude-sonnet-4-6", &d, Some("work"), &none, true).0, MISSING);
+        assert_eq!(check_at("claude-sonnet-4-6", &d, Some("work"), &none, true, None).0, MISSING);
         std::fs::remove_dir_all(&d).ok();
     }
 }

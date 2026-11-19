@@ -169,9 +169,46 @@ pub fn model_spoken(model: &str) -> String {
 /// `daemon.json` (Synaps' run registry: `<base>/run/daemon[-<profile>].json`): the `synaps` the
 /// daemon runs from (`exe`), so a sign-in needn't find it on PATH. None: no file, or no `exe`.
 pub fn daemon_exe(run_dir: &Path, profile: Option<&str>) -> Option<PathBuf> {
+    daemon_json(run_dir, profile, "exe").map(PathBuf::from)
+}
+
+/// When the daemon started (`daemon.json`'s `started_at`; a reload is a new start): Synaps reads
+/// its `config` then, once (`core/config.rs`, `PROVIDER_KEYS`). None: no file, or no time in it.
+pub fn daemon_started(run_dir: &Path, profile: Option<&str>) -> Option<std::time::SystemTime> {
+    utc(&daemon_json(run_dir, profile, "started_at")?)
+}
+
+/// A string of `daemon.json`'s (pid, profile, paths, times: never a secret), not blank.
+fn daemon_json(run_dir: &Path, profile: Option<&str>, key: &str) -> Option<String> {
     let f = run_dir.join(format!("{}.json", synaps_client::discovery::stem(profile)));
     let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(f).ok()?).ok()?;
-    v.get("exe").and_then(|e| e.as_str()).map(str::trim).filter(|e| !e.is_empty()).map(PathBuf::from)
+    v.get(key).and_then(|e| e.as_str()).map(str::trim).filter(|e| !e.is_empty()).map(str::to_string)
+}
+
+/// An RFC 3339 time in UTC as chrono writes it (`2026-11-14T03:12:45.123456789Z`, or `+00:00`).
+fn utc(t: &str) -> Option<std::time::SystemTime> {
+    let t = t.trim();
+    let t = t.strip_suffix('Z').or_else(|| t.strip_suffix("+00:00"))?;
+    let (date, time) = t.split_once('T')?;
+    let num = |x: Option<&str>| x.filter(|x| !x.is_empty() && x.bytes().all(|b| b.is_ascii_digit())).and_then(|x| x.parse::<u64>().ok());
+    let mut d = date.split('-');
+    let (y, m, day) = (num(d.next())?, num(d.next())?, num(d.next())?);
+    let (hms, frac) = time.split_once('.').unwrap_or((time, ""));
+    let mut c = hms.split(':');
+    let (h, mi, sec) = (num(c.next())?, num(c.next())?, num(c.next())?);
+    if d.next().is_some() || c.next().is_some() || !(1..=12).contains(&m) || !(1..=31).contains(&day) || h > 23 || mi > 59 || sec > 60 || y < 1970 {
+        return None;
+    }
+    if !frac.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let nanos = format!("{frac:0<9}")[..9].parse::<u32>().unwrap_or(0);
+    // Days since 1970-01-01 (H. Hinnant's days_from_civil).
+    let y = if m <= 2 { y - 1 } else { y };
+    let (era, yoe) = (y / 400, y % 400);
+    let doy = (153 * ((m + 9) % 12) + 2) / 5 + day - 1;
+    let days = (era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy).checked_sub(719_468)?;
+    Some(std::time::UNIX_EPOCH + Duration::new(days * 86_400 + h * 3_600 + mi * 60 + sec, nanos))
 }
 
 /// `name` is a program on `path` (`$PATH`: Windows tries `.exe` too).
@@ -196,15 +233,17 @@ pub fn synaps_cmd(exe: Option<&Path>, path: Option<&std::ffi::OsStr>) -> String 
     }
 }
 
+/// The value Synaps' `config` gives `key`: its last `key = value` line (`#` comments skipped),
+/// as Synaps reads it into its map, trimmed. Some(""): set blank (unset, to Synaps).
+pub fn config_value<'a>(config: &'a str, key: &str) -> Option<&'a str> {
+    config.lines().map(str::trim).filter(|l| !l.starts_with('#')).filter_map(|l| l.split_once('=')).filter(|(k, _)| k.trim() == key).map(|(_, v)| v.trim()).next_back()
+}
+
 /// The local server's base URL as Synaps finds it: `provider.local.url` in its config, then
-/// `LOCAL_ENDPOINT`, then Ollama's (`http://localhost:11434/v1`).
+/// `LOCAL_ENDPOINT` (the daemon's, where it can be read; else hers), then Ollama's
+/// (`http://localhost:11434/v1`).
 pub fn local_url(config: Option<&str>, env: Option<String>) -> String {
-    let set = config.and_then(|c| {
-        c.lines().map(str::trim).filter(|l| !l.starts_with('#')).find_map(|l| {
-            let (k, v) = l.split_once('=')?;
-            (k.trim() == "provider.local.url").then(|| v.trim().trim_matches('"').to_string())
-        })
-    });
+    let set = config.and_then(|c| config_value(c, "provider.local.url")).map(|v| v.trim_matches('"').to_string());
     set.filter(|u| !u.is_empty())
         .or(env.filter(|u| !u.trim().is_empty()))
         .unwrap_or_else(|| "http://localhost:11434/v1".into())
@@ -232,28 +271,46 @@ impl Local {
     }
 }
 
-/// `GET <url>/models` on a plain-http server (a local one: no TLS here), within `timeout`.
+/// `GET <url>/models` on a plain-http server (a local one: no TLS here), all of it within
+/// `timeout`: the name's lookup (on a thread of its own, left behind if it hangs), the connect,
+/// the request and the reply (1 MiB at most). A server that never stops talking ends at it too.
 pub fn probe(url: &str, timeout: Duration) -> Local {
     use std::io::{Read, Write};
     use std::net::ToSocketAddrs;
+    let end = std::time::Instant::now() + timeout;
+    let left = || end.checked_duration_since(std::time::Instant::now()).filter(|d| !d.is_zero());
     let Some(rest) = url.trim().strip_prefix("http://") else { return Local::Odd(0) };
     let (host, path) = rest.split_once('/').map_or((rest, ""), |(h, p)| (h, p));
     let host = if host.contains(':') { host.to_string() } else { format!("{host}:80") };
     let path = format!("/{}/models", path.trim_matches('/')).replace("//", "/");
     // `localhost` is ::1 and 127.0.0.1: Ollama listens on the second only.
-    let addrs: Vec<std::net::SocketAddr> = host.to_socket_addrs().map(|a| a.collect()).unwrap_or_default();
-    let Some(mut s) = addrs.iter().find_map(|a| std::net::TcpStream::connect_timeout(a, timeout).ok()) else { return Local::Off };
-    s.set_read_timeout(Some(timeout)).ok();
-    s.set_write_timeout(Some(timeout)).ok();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let name = host.clone();
+    let looked = std::thread::Builder::new().name("probe-dns".into()).spawn(move || {
+        tx.send(name.to_socket_addrs().map(|a| a.collect::<Vec<_>>()).unwrap_or_default()).ok();
+    });
+    let Some(addrs) = looked.ok().and_then(|_| rx.recv_timeout(left()?).ok()) else { return Local::Off };
+    let Some(mut s) = addrs.iter().find_map(|a| std::net::TcpStream::connect_timeout(a, left()?).ok()) else { return Local::Off };
     let req = format!("GET {path} HTTP/1.0\r\nHost: {host}\r\nAccept: application/json\r\nConnection: close\r\n\r\n");
-    if s.write_all(req.as_bytes()).is_err() {
+    if left().is_none_or(|d| s.set_write_timeout(Some(d)).is_err()) || s.write_all(req.as_bytes()).is_err() {
         return Local::Off;
     }
     let mut buf = Vec::new();
-    if s.take(1 << 20).read_to_end(&mut buf).is_err() && buf.is_empty() {
+    let mut chunk = [0u8; 8192];
+    while buf.len() < 1 << 20 {
+        let Some(d) = left() else { break };
+        s.set_read_timeout(Some(d)).ok();
+        match s.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => break,
+        }
+    }
+    if buf.is_empty() {
         return Local::Off;
     }
-    models_reply(&String::from_utf8_lossy(&buf))
+    models_reply(&String::from_utf8_lossy(&buf[..buf.len().min(1 << 20)]))
 }
 
 /// An HTTP reply to `GET /models`: an OpenAI-style list (`{"data": [{"id": …}]}`).
@@ -309,8 +366,9 @@ pub struct Status {
     pub model: Option<String>,
     /// It has a login: Some(false) none (NO BRAIN YET), None she can't tell (`creds::check`).
     pub signed_in: Option<bool>,
-    /// The accounts with a login on file here (`creds::check` of each one's default model): the
-    /// Brain screen's ✓, and a switch to one of them is a MODEL write, no sign-in.
+    /// The accounts with a login here, and the key services with a key (`creds::check` of each
+    /// one's default model): the Brain screen's ✓, and a switch to an account with one is a
+    /// MODEL write, no sign-in.
     pub signed: Vec<&'static str>,
     /// Why MODEL is locked.
     pub lock: Option<Lock>,
@@ -465,6 +523,8 @@ mod tests {
         assert_eq!(local_url(Some("# provider.local.url = http://x\nmodel = a\n"), None), "http://localhost:11434/v1", "a comment isn't a setting");
         assert_eq!(local_url(Some("provider.local.url = http://localhost:1234/v1/\n"), Some("http://y/v1".into())), "http://localhost:1234/v1", "the config first");
         assert_eq!(local_url(Some(""), Some("http://127.0.0.1:8080/v1".into())), "http://127.0.0.1:8080/v1");
+        assert_eq!(local_url(Some("provider.local.url = http://a:1/v1\nprovider.local.url = http://b:2/v1\n"), None), "http://b:2/v1", "its last line, as Synaps reads it");
+        assert_eq!(local_url(Some("provider.local.url = http://a:1/v1\nprovider.local.url =\n"), Some("http://y/v1".into())), "http://y/v1", "blanked: the variable");
     }
 
     #[test]
@@ -495,6 +555,46 @@ mod tests {
         t.join().unwrap();
         let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
         assert_eq!(probe(&format!("http://127.0.0.1:{free}/v1"), Duration::from_millis(500)), Local::Off);
+    }
+
+    /// One deadline for all of it: a server that never stops talking (each read in time) ends
+    /// there, as does a name that doesn't resolve.
+    #[test]
+    fn a_probe_ends_at_its_deadline() {
+        use std::io::Write;
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut c, _) = l.accept().unwrap();
+            c.write_all(b"HTTP/1.0 200 OK\r\n\r\n{\"data\":[").ok();
+            while c.write_all(b" ").is_ok() {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
+        let t0 = std::time::Instant::now();
+        assert_eq!(probe(&format!("http://127.0.0.1:{port}/v1"), Duration::from_millis(600)), Local::Odd(200), "a list that never ends isn't one");
+        assert!(t0.elapsed() < Duration::from_millis(1500), "{:?}", t0.elapsed());
+        let t0 = std::time::Instant::now();
+        assert_eq!(probe("http://nowhere.invalid:11434/v1", Duration::from_millis(400)), Local::Off);
+        assert!(t0.elapsed() < Duration::from_millis(1400), "{:?}", t0.elapsed());
+    }
+
+    #[test]
+    fn daemon_json_says_when_it_started() {
+        let d = std::env::temp_dir().join(format!("sa-provider-started-{}", std::process::id()));
+        std::fs::remove_dir_all(&d).ok();
+        std::fs::create_dir_all(&d).unwrap();
+        assert_eq!(daemon_started(&d, None), None);
+        std::fs::write(d.join("daemon.json"), r#"{"pid": 7, "started_at": "2026-11-14T03:12:45.250Z"}"#).unwrap();
+        let t = daemon_started(&d, None).unwrap();
+        assert_eq!(t.duration_since(std::time::UNIX_EPOCH).unwrap(), Duration::new(1_794_625_965, 250_000_000));
+        assert_eq!(utc("1970-01-01T00:00:00Z"), Some(std::time::UNIX_EPOCH));
+        assert_eq!(utc("2000-03-01T00:00:00+00:00").map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()), Some(951_868_800));
+        assert_eq!(utc("2024-02-29T23:59:59.123456789123Z").map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap()), Some(Duration::new(1_709_251_199, 123_456_789)));
+        for bad in ["", "2026-11-14T03:12:45", "2026-11-14T03:12:45+02:00", "2026-13-01T00:00:00Z", "2026-11-14 03:12:45Z", "2026-11-14T03:12:45.1é2Z", "x-11-14T03:12:45Z"] {
+            assert_eq!(utc(bad), None, "{bad}");
+        }
+        std::fs::remove_dir_all(&d).ok();
     }
 
     #[test]
