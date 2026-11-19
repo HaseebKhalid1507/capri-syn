@@ -306,7 +306,7 @@ public static class Cover {
 
     public static bool Up() { return FindWindow(Class, null) != IntPtr.Zero; }
 
-    /// Runs till the process ends: the cover, kept on the whole screen (a scaling change resizes
+    /// Runs till the process ends: the cover, kept on the work area (a scaling change resizes
     /// it) and shown (a minimize-all would hide it).
     public static void Run(int rgb) {
         SetThreadDpiAwarenessContext(new IntPtr(-4));
@@ -325,10 +325,16 @@ public static class Cover {
         while (GetMessage(out msg, IntPtr.Zero, 0, 0) > 0) { TranslateMessage(ref msg); DispatchMessage(ref msg); }
     }
 
+    [DllImport("user32.dll")] static extern bool SystemParametersInfo(uint a, uint b, ref Native.RECT r, uint f);
+
     static void Fit(IntPtr h) {
         if (IsIconic(h)) ShowWindow(h, 4);
+        // The work area, never the taskbar: a window over the whole monitor is a fullscreen app to
+        // the shell, which puts its taskbar under it (the cover then took the taskbar's clicks).
+        var r = new Native.RECT();
+        if (!SystemParametersInfo(0x0030, 0, ref r, 0)) { r.R = GetSystemMetrics(0); r.B = GetSystemMetrics(1); }
         // Below every window but the desktop's own: under the desktop it would show nothing.
-        SetWindowPos(h, IntPtr.Zero, 0, 0, GetSystemMetrics(0), GetSystemMetrics(1), 0x0010 | 0x0004 | 0x0200);
+        SetWindowPos(h, IntPtr.Zero, r.L, r.T, r.R - r.L, r.B - r.T, 0x0010 | 0x0004 | 0x0200);
     }
 }
 }

@@ -531,8 +531,8 @@ $Scenes = [ordered]@{
                 if (-not $menu) { $null = New-Windows $before; Move-ShotPointer ($sc[0] + 8) ($sc[1] + 8); Key 'escape' 600 }
             }
             $how = 'a real right click'
+            $tw = [ShotsTray.Native]::Find('SynapsAvatarTray', [uint32]$script:Her.Id)
             if (-not $menu) {
-                $tw = [ShotsTray.Native]::Find('SynapsAvatarTray', [uint32]$script:Her.Id)
                 $ok = [ShotsTray.Native]::Post($tw, 0x8001, ($cx -band 0xffff) -bor (($cy -band 0xffff) -shl 16), 0x7B -bor (1 -shl 16))
                 $null = Wait-Until { Get-HerMenu } 5 'her tray menu (the shell''s message)'
                 $menu = Get-HerMenu
@@ -544,9 +544,14 @@ $Scenes = [ordered]@{
             Move-ShotPointer ($sc[0] + 8) ($sc[1] + 8)
             Start-Sleep 1
             Write-Host "  her menu at $($menu.X),$($menu.Y) $($menu.W)x$($menu.H), by $how"
-            Shot '02-menu' "her menu, by $how" -At (Get-CornerRect -Icon $icon -Also @($menu) -Aspect 1.6)
+            Shot '02-menu' "her menu, by $how" -At (Get-CornerRect -Icon $icon -Also @($menu) -Aspect 1.6 -Above 96)
             Key 'escape' 800
-            if (Get-HerMenu) { $script:Fails.Add("${script:Take}: her menu stayed after esc") }
+            if (Get-HerMenu) {
+                # Opened by a post, it never had the keyboard (no foreground for her tray's window).
+                if ($how -eq 'a real right click') { $script:Fails.Add("${script:Take}: her menu stayed after esc") }
+                $null = [ShotsTray.Native]::Post($tw, 0x001F, 0, 0)  # WM_CANCELMODE
+                $null = Wait-Until { -not (Get-HerMenu) } 3 'her menu closed'
+            }
 
             # A real left click: the Line (her summon key's tap). Said, never a shot.
             $null = [ShotsTray.Native]::Glide($cx, $cy)
@@ -851,17 +856,18 @@ function Get-HerMenu {
     [ShotsTray.Native]::Of([uint32]$script:Her.Id) | Where-Object { $_.Class -eq '#32768' } | Select-Object -First 1
 }
 
-<# A shot of the taskbar's corner: her icon and -Also (her menu, the tooltip), padded, down to the
-   screen's bottom; at least -Aspect times as wide as tall (0: as it comes). Its right edge is the
-   screen's, or short of anything on the taskbar that tells the time or date (if the clock stayed). #>
+<# A shot of the taskbar's corner: her icon and -Also (her menu, the tooltip), padded (-Above px
+   over them, at 100%), down to the screen's bottom; at least -Aspect times as wide as tall (0: as
+   it comes). Its right edge is the screen's, or short of anything on the taskbar that tells the
+   time or date (if the clock stayed). Never off the screen. #>
 function Get-CornerRect {
-    param([Parameter(Mandatory)]$Icon, [object[]]$Also = @(), [double]$Aspect = 0)
+    param([Parameter(Mandatory)]$Icon, [object[]]$Also = @(), [double]$Aspect = 0, [int]$Above = 24)
     $sf = [double](State).scale_factor
     $pad = [int](24 * $sf)
     $sc = [ShootWin.Native]::Screen()
     $all = @($Icon) + @($Also)
     $l = ($all | ForEach-Object { $_.X } | Measure-Object -Minimum).Minimum - $pad
-    $t = ($all | ForEach-Object { $_.Y } | Measure-Object -Minimum).Minimum - $pad
+    $t = ($all | ForEach-Object { $_.Y } | Measure-Object -Minimum).Minimum - [int]($Above * $sf)
     $b = $sc[1] + $sc[3]
     $r = $sc[0] + $sc[2]
     $clock = @(Get-TrayButtons | Where-Object { $_.X -ge $Icon.X + $Icon.W - 1 -and $_.Name -match '\d{1,2}:\d{2}|\d{1,2}/\d{1,2}/\d{2,4}|\d{4}-\d{2}-\d{2}' })
@@ -869,7 +875,7 @@ function Get-CornerRect {
         $r = ($clock | ForEach-Object { $_.X } | Measure-Object -Minimum).Minimum - [int](2 * $sf)
         Write-Warning "${script:Take}: the clock stayed on the taskbar ('$($clock[0].Name)'): the shot ends at x $r"
     }
-    $r = [Math]::Max($r, ($all | ForEach-Object { $_.X + $_.W } | Measure-Object -Maximum).Maximum)
+    $r = [Math]::Min([Math]::Max($r, ($all | ForEach-Object { $_.X + $_.W } | Measure-Object -Maximum).Maximum), $sc[0] + $sc[2])
     if ($Aspect -gt 0) { $l = [Math]::Min($l, $r - [int]($Aspect * ($b - $t))) }
     $l = [Math]::Max($l, $sc[0]); $t = [Math]::Max($t, $sc[1])
     return @([int]$l, [int]$t, [int]($r - $l), [int]($b - $t))
