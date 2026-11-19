@@ -71,9 +71,10 @@ pub fn log_without_console() {
 }
 
 /// Whether someone reads her stderr as she writes it: a console, or a redirect (a script's). Her
-/// own log file (no console): no one does (`crate::startfail`).
+/// own log file (no console), or no stderr at all (her log couldn't be made): no one does
+/// (`crate::startfail`).
 pub fn stderr_seen() -> bool {
-    OWN.get().is_none()
+    OWN.get().is_none() && unsafe { GetStdHandle(STD_ERROR_HANDLE) }.is_ok()
 }
 
 /// The file her stderr goes to, when it's her own log (no console).

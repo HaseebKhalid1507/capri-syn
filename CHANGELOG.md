@@ -7,9 +7,11 @@
   so on screen too, once, as she exits. Before, the click did nothing visible. On Windows it's a
   message box titled capri-syn: one sentence (a missing or broken pack: install capri-syn again)
   and where her log is. It goes away when she exits, after 2 minutes at the most. On Linux it's a
-  desktop notification (she waits up to 2 s for it). Nothing more for `--check`, `--set`, `-h`,
-  `-V`, a bad command line, one that's already running, or a terminal. Windows doesn't show it for
-  a redirected stderr either. `SA_NO_NOTICE=1` keeps it to her log (tests).
+  critical desktop notification (she waits up to 2 s for it). Nothing more for `--check`, `--set`,
+  `-h`, `-V`, a bad command line, or one that's already running. On Linux a terminal doesn't get it
+  either (a virtual console under a desktop does). On Windows her exe has no console even from a
+  terminal, so it shows there too, unless her stderr is redirected (a script's). The installers
+  start her with `SA_NO_NOTICE=1` (it keeps it to her log): they say a failed start themselves.
 - Her log starts over past 4 MB while she runs, not only at start, the earlier part kept as
   `.old.log` (one kept). A thread that isn't her UI thread checks it every 30 s. That covers
   Windows' `synaps-avatar.log` and Linux's install.sh `launch.log`; a terminal, the journal or your

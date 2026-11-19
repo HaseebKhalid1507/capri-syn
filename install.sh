@@ -1692,10 +1692,11 @@ start_her() {
     mkdir -p "$(dirname "$log")"
     if [ -f "$log" ]; then mv -f "$log" "${log%.log}.old.log"; fi
     printf '   %s$ %s &%s\n' "$D" "$cmd" "$N"
+    # SA_NO_NOTICE=1: a failed start is said here, from her log, not in a desktop notification too.
     if have setsid; then
-        setsid sh -c "cd && exec $cmd" </dev/null >"$log" 2>&1 &
+        SA_NO_NOTICE=1 setsid sh -c "cd && exec $cmd" </dev/null >"$log" 2>&1 &
     else
-        nohup sh -c "cd && exec $cmd" </dev/null >"$log" 2>&1 &
+        SA_NO_NOTICE=1 nohup sh -c "cd && exec $cmd" </dev/null >"$log" 2>&1 &
     fi
     pid=$!
     # Up to 20 s (a cold start reads her pack); gone for good (her pid and every synaps-avatar) after 2 s.
@@ -1713,7 +1714,8 @@ start_her() {
         info "she's still starting: her log is $(tilde "$log")"
     else
         warn "she didn't start. the end of her log ($(tilde "$log")):"
-        tail -n 4 "$log" 2>/dev/null | sed "s/^/       $D│$N /"
+        # Not the line saying no notification was shown (SA_NO_NOTICE=1): her error is above it.
+        { grep -v '^synaps-avatar: not said on screen' "$log" 2>/dev/null || true; } | tail -n 4 | sed "s/^/       $D│$N /"
     fi
 }
 

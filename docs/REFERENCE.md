@@ -293,13 +293,21 @@ synaps-avatar --set KEY=VALUE [--set KEY=VALUE ...]
 `synaps-avatar --help` lists the rest (`--name`, `--threads`, `--no-verify`, `--focus-probe`).
 
 **When she can't start.** The error goes in her log, and when nobody is reading that log (she was
-started from the Start menu, the app menu or autostart, not from a terminal), she also shows it once
-on screen before exiting. On Windows that's a message box titled capri-syn: one sentence (for a
-missing or broken pack: install capri-syn again to put it back) and where her log is. It closes
-when she exits, at the latest after 2 minutes. On Linux it's a desktop notification, if the session
-has a notification server (she waits up to 2 s for it). This only happens when she was starting:
-not for `--check`, `--set`, `-h`, `-V` or a bad command line, and not when she's already running.
-`SA_NO_NOTICE=1` keeps it to her log (tests).
+started from the Start menu, the app menu or autostart), she also shows it once on screen before
+exiting. On Windows that's a message box titled capri-syn: one sentence (for a missing or broken
+pack: install capri-syn again to put it back) and where her log is, or that her log couldn't be
+written. It closes when she exits, at the latest after 2 minutes. On Linux it's a critical desktop
+notification (most desktops keep one up until you close it), if the session has a notification
+server (she waits up to 2 s for it).
+
+- Only a start: not `--check`, `--set`, `-h`, `-V` or a bad command line, and not when she's
+  already running.
+- Linux: not from a terminal, which reads her log. A virtual console that a desktop covers (sway or
+  i3 started from a console login) doesn't count as one.
+- Windows: her exe has no console even when started from a terminal, so it shows there too, unless
+  her stderr is redirected (a script's).
+- install.sh and install.ps1 start her with `SA_NO_NOTICE=1`: they read her log and report a failed
+  start themselves. `SA_NO_NOTICE=1` keeps it to her log (tests too).
 
 **Her log stays small.** Her own log starts over once it passes 4 MB, and the earlier part is kept
 as `.old.log` (only the latest one). This happens while she runs, checked every 30 s from a thread

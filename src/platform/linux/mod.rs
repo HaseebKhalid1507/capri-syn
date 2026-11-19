@@ -420,10 +420,21 @@ pub fn monotonic_s() -> f64 {
 }
 
 /// Whether someone reads her stderr as she writes it: a terminal. A file, a journal or a pipe: no
-/// one does (`crate::startfail`).
+/// one does (`crate::startfail`), nor a virtual console (`tty_read`).
 pub fn stderr_seen() -> bool {
+    use std::os::unix::fs::MetadataExt as _;
     // SAFETY: a plain query on this process's own descriptor.
-    unsafe { libc::isatty(2) == 1 }
+    if unsafe { libc::isatty(2) } != 1 {
+        return false;
+    }
+    std::fs::metadata("/proc/self/fd/2").map_or(true, |m| tty_read(m.rdev()))
+}
+
+/// Whether the terminal device `rdev` is read: a pty (a terminal window, ssh, tmux) or a serial
+/// line is. A virtual console (`/dev/ttyN`: major 4, minor under 64) isn't: sway, i3 or startx
+/// started from a console login hand their children the console their desktop now covers.
+fn tty_read(rdev: u64) -> bool {
+    !(libc::major(rdev) == 4 && libc::minor(rdev) < 64)
 }
 
 /// The file her stderr goes to, when it's one (install.sh's `launch.log`, a redirect of his).
@@ -441,7 +452,8 @@ pub fn fail_notice(title: &str, text: &str) {
     let (tx, rx) = std::sync::mpsc::channel();
     let (title, text) = (title.to_string(), text.to_string());
     let spawned = std::thread::Builder::new().name("fail-notice".into()).spawn(move || {
-        tx.send(notify(&title, &text, None)).ok();
+        // Critical: it stays until he closes it (a normal one may pass unseen at login).
+        tx.send(notifications::notify_as(&title, &text, None, 2)).ok();
     });
     if let Err(e) = spawned {
         elog!("synaps-avatar: not said on screen: {e}");
@@ -713,6 +725,16 @@ mod tests {
             Some(p) => assert!(fd2.is_ok_and(|m| m.is_file()) && same_file(&p, std::path::Path::new("/proc/self/fd/2")), "{}", p.display()),
             None => assert!(!fd2.is_ok_and(|m| m.is_file())),
         }
+    }
+
+    /// A terminal is read, the virtual console a desktop covers isn't (`stderr_seen`).
+    #[test]
+    fn a_virtual_console_isnt_read() {
+        assert!(!tty_read(libc::makedev(4, 1)), "/dev/tty1: sway or i3 from a console login");
+        assert!(!tty_read(libc::makedev(4, 63)), "/dev/tty63");
+        assert!(tty_read(libc::makedev(136, 3)), "/dev/pts/3: a terminal window, ssh, tmux");
+        assert!(tty_read(libc::makedev(4, 64)), "/dev/ttyS0: a serial line");
+        assert!(tty_read(libc::makedev(5, 0)), "/dev/tty");
     }
 
     /// The daemon's environment, read from outside (a key exported in the shell that started it).

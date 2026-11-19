@@ -52,8 +52,14 @@ pub fn on_screen(start: bool, seen: bool, running: bool) -> bool {
     start && !seen && !running
 }
 
+/// Where no file has her log: Linux, a journal or a pipe; Windows, her log couldn't be made.
+#[cfg(not(windows))]
+const NO_LOG: &str = "To see what went wrong, run synaps-avatar in a terminal.";
+#[cfg(windows)]
+const NO_LOG: &str = r"Her log couldn't be written (%LOCALAPPDATA%\synaps-avatar).";
+
 /// What she says: one plain sentence, then where her log is (`log`: the file her stderr goes to;
-/// None, where it isn't a file: a journal).
+/// None, where it isn't a file: `NO_LOG`).
 pub fn text(why: Why, log: Option<&Path>) -> String {
     let what = match why {
         Why::Pack => "Capri couldn't start: her character pack is missing or damaged, and installing capri-syn again puts it back.",
@@ -61,7 +67,7 @@ pub fn text(why: Why, log: Option<&Path>) -> String {
     };
     match log {
         Some(p) => format!("{what}\n\nWhat went wrong is in her log: {}", p.display()),
-        None => format!("{what}\n\nTo see what went wrong, run synaps-avatar in a terminal."),
+        None => format!("{what}\n\n{NO_LOG}"),
     }
 }
 
@@ -100,7 +106,10 @@ mod tests {
         assert!(t.ends_with("What went wrong is in her log: /home/h/.local/state/synaps-avatar/launch.log"), "{t}");
         assert_eq!(t.lines().next().map(|l| l.matches(". ").count()), Some(0), "one sentence: {t}");
         let t = text(Why::Other, None);
+        #[cfg(not(windows))]
         assert_eq!(t, "Capri couldn't start.\n\nTo see what went wrong, run synaps-avatar in a terminal.");
+        #[cfg(windows)]
+        assert_eq!(t, "Capri couldn't start.\n\nHer log couldn't be written (%LOCALAPPDATA%\\synaps-avatar).");
     }
 
     /// A pack's error keeps its own text in her log (the chain, as `{:#}` prints it), and is told

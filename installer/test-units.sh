@@ -46,11 +46,12 @@ sleep 60 | "$tmp/My Apps/synaps-avatar" &
 bare2=$!
 pids+=("$bare2")
 FAKE=()
-# Only the stand-ins listed in FAKE, and only while alive (a reaped or zombie one has no cmdline).
+# Only the stand-ins listed in FAKE, and only while alive (a reaped or zombie one has no cmdline);
+# none: 1, as pgrep says it.
 pgrep() {
-    local p
-    for p in "${FAKE[@]}"; do [ -n "$(tr -d '\000' <"/proc/$p/cmdline" 2>/dev/null)" ] && echo "$p"; done
-    return 0
+    local p r=1
+    for p in "${FAKE[@]}"; do [ -n "$(tr -d '\000' <"/proc/$p/cmdline" 2>/dev/null)" ] && echo "$p" && r=0; done
+    return $r
 }
 RAN=()
 QUIT_TAKES=''
@@ -134,7 +135,7 @@ check "$([ ${#RAN[@]} = 0 ] && kill -0 "$flagged" 2>/dev/null && echo 0)" "nothi
 # The old binary, bare: quit (avatarctl, else kill), then she starts, from his home folder, her
 # last log kept once.
 # shellcheck disable=SC2016 # her stand-in's own lines
-printf '%s\n' '#!/bin/sh' "echo \$\$ >'$tmp/started.pid'" 'echo "cwd=$(pwd)" >&2' 'echo "first-frame: painted 7 ms" >&2' 'exec sleep 30' >"$tmp/bin/synaps-avatar"
+printf '%s\n' '#!/bin/sh' "echo \$\$ >'$tmp/started.pid'" 'echo "cwd=$(pwd)" >&2' 'echo "notice=${SA_NO_NOTICE-}" >&2' 'echo "first-frame: painted 7 ms" >&2' 'exec sleep 30' >"$tmp/bin/synaps-avatar"
 chmod +x "$tmp/bin/synaps-avatar"
 echo 'the last run' >"$tmp/state/synaps-avatar/launch.log"
 FAKE=("$bare")
@@ -147,6 +148,7 @@ check $r "avatarctl quit first, else kill (that pid only): ${RAN[*]}"
 check "$(kill -0 "$flagged" 2>/dev/null && echo 0)" "his own run untouched"
 check "$(grep -qx "cwd=$tmp/home" "$tmp/state/synaps-avatar/launch.log" && echo 0)" "started from his home folder"
 check "$(grep -qx 'the last run' "$tmp/state/synaps-avatar/launch.old.log" && echo 0)" "the last run's log kept as launch.old.log"
+check "$(grep -qx 'notice=1' "$tmp/state/synaps-avatar/launch.log" && echo 0)" "SA_NO_NOTICE=1: a failed start is said here, not in a notification too"
 kill "$(cat "$tmp/started.pid" 2>/dev/null)" 2>/dev/null
 
 # Its pids read again right before a kill: one the quit already took isn't killed (its pid may be
@@ -161,6 +163,17 @@ case $out in *"she's up"*STARTED=1) r=0 ;; *) r=1 ;; esac
 check $r "and she starts"
 kill "$(cat "$tmp/started.pid" 2>/dev/null)" 2>/dev/null
 pkill -P $$ -x sleep 2>/dev/null
+
+# A start that fails: the end of her log, not her line saying no notification was shown.
+printf '%s\n' '#!/bin/sh' 'for i in 1 2 3 4 5; do echo "line $i" >&2; done' \
+    "echo \"synaps-avatar: not said on screen (SA_NO_NOTICE=\$SA_NO_NOTICE): Capri couldn't start.\" >&2" 'exit 1' >"$tmp/bin/synaps-avatar"
+FAKE=()
+RAN=()
+start
+case $out in *"she didn't start"*'line 2'*'line 5'*STARTED=0) r=0 ;; *) r=1 ;; esac
+case $out in *'line 1'* | *'not said on screen'*) r=1 ;; esac
+check $r "a failed start: her log's last 4 lines, not the notice's"
+check "$(grep -q 'not said on screen (SA_NO_NOTICE=1)' "$tmp/state/synaps-avatar/launch.log" && echo 0)" "and none was shown (SA_NO_NOTICE=1)"
 
 # Synaps: the manifest's pin and its hash, never releases/latest (a newer one may speak another
 # protocol). A stand-in `synaps` older than synaps_min; a dry run prints what it would fetch.
