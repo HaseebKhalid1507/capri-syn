@@ -71,10 +71,10 @@ struct Line {
     name: Name,
 }
 
-/// A row's words for a screen reader. The menu proxies (oleacc's, UI Automation's) ask
-/// `GetMenuString` first and, for an owner-drawn row it has no words for, read its item data as a
-/// pointer to an `MSAAMENUINFO`, from her memory (dotnet/wpf's `WindowsMenu.cs`): this, boxed so
-/// it stays where it was pointed at.
+/// A row's words for a screen reader, beside the string the row keeps (oleacc's menu proxy reads
+/// that one: the shots' tray scene, #112 round 2). A proxy that reads an owner-drawn row by its
+/// item data (dotnet/wpf's `WindowsMenu.cs`, when `GetMenuString` gives it nothing) reads it as a
+/// pointer to an `MSAAMENUINFO`, from her memory: this, boxed so it stays where it was pointed at.
 struct Name(Box<Named>);
 
 #[repr(C)]
@@ -521,8 +521,7 @@ mod tests {
     use crate::settings::Attention;
     use ::windows::Win32::Graphics::Gdi::{BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CLR_INVALID, CreateDIBSection, DIB_RGB_COLORS, GdiFlush, GetPixel, HBITMAP};
 
-    /// A row's words as Windows keeps them (a screen reader's; owner-drawn rows have no
-    /// `GetMenuString`).
+    /// A row's words as Windows keeps them (`MIIM_STRING`), owner-drawn or not.
     fn words(m: HMENU, pos: u32) -> String {
         let mut b = [0u16; 128];
         let mut mi = MENUITEMINFOW { cbSize: size_of::<MENUITEMINFOW>() as u32, fMask: MIIM_STRING, dwTypeData: PWSTR(b.as_mut_ptr()), cch: b.len() as u32, ..Default::default() };
@@ -598,9 +597,9 @@ mod tests {
         }
     }
 
-    /// Each row's words as a screen reader's menu proxy reads them (UI Automation's, oleacc's):
-    /// its item data as an `MSAAMENUINFO`, MSAA_MENU_SIG first, its length, its words ended by a
-    /// 0; ATTENTION's choices and the note under them too. Rules have none to read.
+    /// Each row's words as a proxy that reads an owner-drawn row by its item data does
+    /// (dotnet/wpf's `WindowsMenu.cs`): an `MSAAMENUINFO`, MSAA_MENU_SIG first, its length, its
+    /// words ended by a 0; ATTENTION's choices and the note under them too. Rules have none.
     #[test]
     fn a_screen_reader_reads_her_rows_words() {
         let why = crate::line::MenuSave::Refused.says().unwrap();

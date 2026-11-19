@@ -12,7 +12,8 @@
 - Sized at the DPI of the monitor it opens on, in whole pixels: crisp at 100, 150 and 200 %.
 - Keyboard as before: arrows, Enter, Esc, → into ATTENTION; a typed letter goes to the row it
   starts (a second row with that letter: it lights, a second press moves on). A screen reader reads
-  each row's words (`MSAAMENUINFO`; UI Automation reads them in the shots' tray scene).
+  each row's words: MSAA reads every one in the shots' tray scene, as it reads the stock menu's. Each
+  row's item data is an `MSAAMENUINFO` with its words too, for a reader that goes by that.
 
 ### When she can't start, she says so; her logs stay small; Windows needs no VC++ runtime
 - A start that fails where no one reads her log (the Start menu, the app menu, autostart) now says
