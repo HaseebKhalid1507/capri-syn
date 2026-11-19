@@ -197,17 +197,20 @@ so it's gone. The Synaps and capri-watch paragraphs are unchanged.
   session, an error). Another value is ignored, with a line in her log.
 - Hyprland is a `HYPRLAND_INSTANCE_SIGNATURE` naming one that runs on this display, or
   `XDG_CURRENT_DESKTOP` / `XDG_SESSION_DESKTOP` saying Hyprland while one does, for her binary and
-  `install.sh` alike. One runs while the PID in its `hyprland.lock` does (as `hyprctl instances`
-  reads it; a crash leaves the lock and its sockets), on the display the lock names. A signature or
-  desktop variable left over from an earlier Hyprland login (GNOME's environment, a tmux server's)
-  no longer reads as Hyprland (on GNOME she takes XWayland); a Hyprland whose signature got lost
-  doesn't fall back to XWayland unasked. What she picked and ignored goes in her log after its
-  header, when she starts.
+  `install.sh` alike. One runs while the PID in its `hyprland.lock` is a Hyprland that runs (a crash
+  leaves the lock and its sockets, and its PID may be reused), on the display the lock names; with
+  no lock, her binary asks its socket. Hyprland before 0.40 (in `/tmp/hypr`) isn't read. A signature
+  or desktop variable left over from an earlier Hyprland login (GNOME's environment, a tmux
+  server's) no longer reads as Hyprland (on GNOME she takes XWayland); a Hyprland whose signature
+  got lost doesn't fall back to XWayland unasked. What she picked and ignored goes in her log after
+  its header, when she starts.
 - `install.sh` puts her in your app menu on Linux as Capri
   (`~/.local/share/applications/synaps-avatar.desktop`, with her icon, `--no-autostart` or not), so
   once she's quit she starts from there, as from Windows' Start menu. In the receipt: `--uninstall`
-  removes it, and her autostart entry, while they carry the header it wrote. Her autostart entry is
-  named Capri too.
+  removes it, and her autostart entry, while they carry the header it wrote (KDE's menu editor
+  drops it: an entry edited there stays, and her autostart entry's `TryExec` keeps it from starting
+  anything once she's gone). An entry there that isn't hers is backed up first. Her autostart entry
+  is named Capri too.
 - Summon key: on GNOME it offers a custom keyboard shortcut, Super+Alt+C running `avatarctl talk tap`,
   when that's free and only when you say yes on the terminal (`--yes` doesn't answer it). It's added
   to your custom shortcuts (yours stay), recorded as `gkey PATH`, and `--uninstall` takes it out (with

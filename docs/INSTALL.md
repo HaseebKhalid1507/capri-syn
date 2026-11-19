@@ -111,11 +111,15 @@ she runs through XWayland, the X server those desktops keep for X apps.
 - **Hyprland is** a `HYPRLAND_INSTANCE_SIGNATURE` naming one that runs on this display, or
   `XDG_CURRENT_DESKTOP` or `XDG_SESSION_DESKTOP` saying Hyprland while one does; the installer reads
   it the same way. One runs while the PID in its lock
-  (`$XDG_RUNTIME_DIR/hypr/<signature>/hyprland.lock`, Hyprland 0.40 on) does, as `hyprctl instances`
-  reads it: a crash leaves the lock and its sockets behind. It serves the display its lock names,
-  which has to be `WAYLAND_DISPLAY`. One older than 0.40 writes no lock: its socket is there. (Her
-  binary also counts a socket that takes a connection, for a Hyprland whose PID is in another PID
-  namespace, as in tools/wlrig.)
+  (`$XDG_RUNTIME_DIR/hypr/<signature>/hyprland.lock`) is a Hyprland that runs (its process name says
+  Hyprland, as Nix's `.Hyprland-wrapped` does too): a crash leaves the lock and its sockets behind,
+  and its PID may be another process's by now. It serves the display its lock names, which has to be
+  `WAYLAND_DISPLAY`. No lock: Hyprland's first moments (its request socket comes up before the
+  lock), or a shutdown that crashed after removing it. Her binary counts it while the socket takes a
+  connection, as it does a Hyprland whose PID is in another PID namespace (tools/wlrig); the
+  installer can't connect to a socket, and doesn't. Hyprland before 0.40 lived in `/tmp/hypr`,
+  which she doesn't read: unsupported (she takes XWayland, and her log calls its signature left
+  over).
   - Left over from an earlier Hyprland login (in GNOME's environment, or a tmux server's, which
     keeps the ones it started with), a signature or desktop variable names no Hyprland that runs
     here; a compositor nested in Hyprland inherits them, and serves a display of its own. Either way
@@ -132,8 +136,8 @@ she runs through XWayland, the X server those desktops keep for X apps.
     and nap.
 - **Her summon key on GNOME** is a custom keyboard shortcut. The installer checks that Super+Alt+C
   is free (GNOME's window, Shell and media-key shortcuts, every custom one, and the Shell
-  extensions': the system's schemas and those of the ones you installed yourself, in
-  `~/.local/share/gnome-shell/extensions`; Mod4 is Super and Mod1 Alt), then asks on the terminal
+  extensions': the system's schemas and those of the ones you installed yourself, each folder's own,
+  in `~/.local/share/gnome-shell/extensions`; Mod4 is Super and Mod1 Alt), then asks on the terminal
   whether to add it, running `avatarctl talk tap`. The default is no; `--yes` doesn't answer it, and
   with no terminal it isn't asked. Said no, or the key is taken, it tells you where to add one
   yourself: Settings > Keyboard > Keyboard Shortcuts > Custom Shortcuts. It's added to the end of
@@ -179,14 +183,17 @@ so a path with spaces stays one path. `--uninstall` walks it backwards:
 - it removes the folders it made (when empty), the prefix's included.
 
 What didn't come out (her GNOME shortcut, when gsettings doesn't take it out or isn't there) stays
-in the receipt, with the folders it made that are still there, and the next `--uninstall` tries
-again.
+in the receipt, with the folders it made that are still there and the prefixes she went to, and the
+next `--uninstall` tries again.
 
 It removes only what is inside her folders (each `--prefix` she went to, and her data, config and
 cache folders): never `/` or your home, nothing with a newline or `..` in it. A folder removed
 whole must be one it makes (her pack, `lib/synaps-avatar`, the installer's cache, the voice
 folders). A unit, her app-menu entry and her autostart entry are removed only while they still
-carry the header it wrote. An entry outside those is reported and left alone.
+carry the header it wrote. An entry outside those is reported and left alone. (KDE's menu editor
+keeps no comments, so an entry you edited there is yours now: it stays, and her autostart entry's
+`TryExec` keeps one left behind from starting anything once she's gone. An install that finds an
+entry there without the header backs it up first, as it does your configs.)
 
 Synaps stays installed, since her daemon may have other clients, and so does rustup if it installed
 it. `--uninstall` says where (`~/.cargo/bin/synaps`) and that your Synaps login and sessions live in
@@ -229,11 +236,13 @@ A pull request that touches the packaging runs the same builds and tests, and re
   - `installer/test_parity.py`: both scripts take the same flags, run the same steps in the same
     order, read keys the manifest has, and `install.ps1` keeps nothing in the caller's scope;
   - `installer/test-units.sh`: her start at the end, the pinned Synaps and the daemon's protocol,
-    her app-menu entry, which desktop is Hyprland (its lock's PID and display; a signature or
-    desktop variable left over isn't), the GNOME shortcut (a stand-in `gsettings`: never on `--yes`
-    or without a terminal, your list kept, a write it says yes to and doesn't keep caught) and
-    Hyprland's Super+Alt+C, and `--uninstall` taking them away (not an entry that isn't hers any
-    more; what it can't take out stays in the receipt);
+    her app-menu entry (one that isn't hers backed up first), which desktop is Hyprland (its
+    lock's PID a Hyprland by name, and its display; no lock, a PID reused, a signature or desktop
+    variable left over isn't), the GNOME shortcut (a stand-in `gsettings`, as GLib lists an
+    extension's own schemas: never on `--yes` or without a terminal, your list kept, a write it says
+    yes to and doesn't keep caught) and Hyprland's Super+Alt+C, and `--uninstall` taking them away
+    (not an entry that isn't hers any more; what it can't take out stays in the receipt, with her
+    prefixes);
   - `install.sh --dry-run` several ways (one fetched from GitHub as `curl | bash` gets it, one with a
     `--prefix` with spaces, one from `CAPRI_INSTALL_FLAGS`), checked to change nothing; as root,
     refused without `--allow-root` and always with someone else's `HOME`.

@@ -236,7 +236,9 @@ RUN_REAL=1 FAKE=()
 mkdir -p "$PACK" "$BIN"
 : >"$PACK/icon.png"
 declare -A GS=()
-GS_WM='' GS_EXT='' GS_EGO='' GS_LOST=0
+GS_WM='' GS_EXT='' GS_EGO='' GS_APP='' GS_LOST=0
+# The system's schemas: two with shortcuts, and an app's (its own shortcuts, in its window only).
+SYS=(org.gnome.desktop.wm.keybindings org.gnome.shell.extensions.tiling-assistant org.example.Editor)
 # A string as gsettings set takes one ('...' or "...", a backslash before a quote or a backslash),
 # and as gsettings prints one: GLib's way, in single quotes, or in double ones when it holds a single
 # quote (a backslash before that quote and before a backslash).
@@ -258,14 +260,17 @@ gs_out() {
 }
 # GS holds a list as gsettings prints it, a string as it is.
 gsettings() {
-    local dir=''
+    local dir='' own=() ids=() s
     if [ "$1" = --schemadir ]; then dir=$2 && shift 2; fi
+    # An extension of his own: its schemas only in its folder (--schemadir), whose source has the
+    # system's as its parent.
+    if [ "$dir" = "$DATA/gnome-shell/extensions/ego@x/schemas" ]; then own=(org.gnome.shell.extensions.ego); fi
     case $1 in
         set | reset-recursively) if [ "$GS_LOST" = 1 ]; then return 0; fi ;;
     esac
     case $1 in
         writable) echo true ;;
-        list-schemas) printf '%s\n' org.gnome.desktop.wm.keybindings org.gnome.shell.extensions.tiling-assistant ;;
+        list-schemas) printf '%s\n' "${SYS[@]}" "${own[@]}" ;;
         get)
             if [ "$3" = custom-keybindings ]; then
                 echo "${GS["$2 $3"]:-@as []}"
@@ -277,15 +282,20 @@ gsettings() {
         set) if [ "$3" = custom-keybindings ]; then GS["$2 $3"]=${4//\"/\'}; else GS["$2 $3"]=$(gs_in "$4"); fi ;;
         reset-recursively) for k in "${!GS[@]}"; do case $k in "$2 "*) unset "GS[$k]" ;; esac; done ;;
         list-recursively)
-            # An extension of his own: its schemas only in its folder (--schemadir).
-            if [ -n "$dir" ]; then
-                if [ "$dir" = "$DATA/gnome-shell/extensions/ego@x/schemas" ]; then printf '%s\n' "$GS_EGO"; fi
-                return 0
-            fi
-            case $2 in
-                org.gnome.desktop.wm.keybindings) printf '%s\n' "$2 close ['<Alt>F4']" "$GS_WM" ;;
-                org.gnome.shell.extensions.tiling-assistant) printf '%s\n' "$2 tile-left-half ['<Super>Left']" "$GS_EXT" ;;
-            esac
+            # With no schema: every one its source lists, the system's too. GLib before 2.82 (Ubuntu
+            # 24.04's 2.80) opens each from the default source, and aborts on the folder's own.
+            if [ $# -ge 2 ]; then ids=("$2"); else ids=("${SYS[@]}" "${own[@]}"); fi
+            for s in "${ids[@]}"; do
+                case $s in
+                    org.gnome.desktop.wm.keybindings) printf '%s\n' "$s close ['<Alt>F4']" "$GS_WM" ;;
+                    org.gnome.shell.extensions.tiling-assistant) printf '%s\n' "$s tile-left-half ['<Super>Left']" "$GS_EXT" ;;
+                    org.example.Editor) printf '%s\n' "$s find ['<Primary>f']" "$GS_APP" ;;
+                    org.gnome.shell.extensions.ego)
+                        if [ $# -lt 2 ]; then return 133; fi
+                        if [ ${#own[@]} -gt 0 ]; then printf '%s\n' "$GS_EGO"; fi
+                        ;;
+                esac
+            done
             ;;
     esac
 }
@@ -307,25 +317,58 @@ out=$(AUTOSTART=1 DESKTOP=other step_autostart 2>&1)
 check "$(grep -qx "Icon=$CONF/synaps-avatar/icon.png" "$app" && echo 0)" "his own icon wins, as for her window"
 check "$(grep -qx NoDisplay=true "$CONF/autostart/synaps-avatar.desktop" && echo 0)" "autostart: its own entry, hidden from the menu"
 check "$([ "$(grep -E '^(Name|Comment)=' "$app")" = "$(grep -E '^(Name|Comment)=' "$CONF/autostart/synaps-avatar.desktop")" ] && echo 0)" "the same Name and Comment in both"
+check "$(grep -qx "TryExec=$BIN/synaps-avatar" "$CONF/autostart/synaps-avatar.desktop" && echo 0)" \
+    "autostart: TryExec too (one left behind starts nothing once she's gone)"
+check "$([ -z "$(compgen -G "$app.synaps-avatar-*.bak")" ] && [ -z "$(compgen -G "$CONF/autostart/synaps-avatar.desktop.synaps-avatar-*.bak")" ] && echo 0)" \
+    "hers written again: no backup"
+# His entry where hers goes (his own, or hers once KDE's menu editor rewrote it: no header): backed
+# up first, as his configs are. In a home of its own.
+his_entries() {
+    local DATA=$tmp/h3/share CONF=$tmp/h3/config RECEIPT=$tmp/h3/receipt f b
+    mkdir -p "$DATA/applications" "$CONF/autostart"
+    printf '%s\n' '[Desktop Entry]' 'Name=Capri (his)' | tee "$DATA/applications/synaps-avatar.desktop" >"$CONF/autostart/synaps-avatar.desktop"
+    AUTOSTART=1 DESKTOP=other step_autostart >/dev/null 2>&1
+    for f in "$DATA/applications/synaps-avatar.desktop" "$CONF/autostart/synaps-avatar.desktop"; do
+        b=$(compgen -G "$f.synaps-avatar-*.bak") && ours "$f" && grep -qx 'Name=Capri (his)' "$b" && grep -qxF "backup	$b" "$RECEIPT" || return 0
+    done
+    echo 0
+}
+check "$(his_entries)" "an entry there that isn't hers (his, or KDE's rewrite): a backup first, in the receipt; then hers"
 
 # Hyprland as her binary reads it (linux::hyprland_in): a signature naming one that runs on this
-# display, or the desktop variables while one does. One runs when its lock's PID does (this shell's
-# here), else not (a crash leaves the lock and a socket behind); one older than 0.40 has no lock, and
-# runs while its socket is there. Signatures and desktop variables left over aren't Hyprland.
+# display, or the desktop variables while one does. One runs while its lock's PID is a Hyprland (by
+# its name: sleep run as Hyprland here, and as Nix's .Hyprland-wrapped), else not (a crash leaves the
+# lock and a socket behind; its PID may be another process's by now); with no lock it doesn't (a
+# shutdown that crashed after removing it leaves the socket). Signatures and desktop variables left
+# over aren't Hyprland.
 sock() { python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$1"; }
 sleep 0 &
 gone=$!
 wait "$gone"
-# rt3: one older than 0.40 alone (it serves any display); rt2: none that runs; rt4: one running in
-# a folder named by a blank signature (a space and a tab).
+mkdir -p "$tmp/hy"
+for n in Hyprland .Hyprland-wrapped; do
+    cp "$(command -v sleep)" "$tmp/hy/$n"
+    "$tmp/hy/$n" 600 &
+    pids+=("$!")
+done
+hyp=${pids[-2]} nixp=${pids[-1]}
+for _ in {1..100}; do
+    [ "$(cat "/proc/$hyp/comm" "/proc/$nixp/comm" 2>/dev/null)" = $'Hyprland\n.Hyprland-wrapp' ] && break
+    sleep 0.05
+done
+# rt3: one with no lock alone; rt2: none that runs; rt4: one running in a folder named by a blank
+# signature (a space and a tab).
 blank=$(printf ' \t')
-mkdir -p "$tmp/rt/hypr/live_1" "$tmp/rt/hypr/crashed_2" "$tmp/rt/hypr/bad_4" "$tmp/rt2/hypr/crashed_2" "$tmp/rt3/hypr/old_3" "$tmp/rt4/hypr/$blank"
-printf '%s\nwayland-1\n' "$$" >"$tmp/rt4/hypr/$blank/hyprland.lock"
-printf '%s\nwayland-1\n' "$$" >"$tmp/rt/hypr/live_1/hyprland.lock"
+mkdir -p "$tmp/rt/hypr/live_1" "$tmp/rt/hypr/crashed_2" "$tmp/rt/hypr/bad_4" "$tmp/rt/hypr/reused_5" "$tmp/rt/hypr/nix_6" \
+    "$tmp/rt2/hypr/crashed_2" "$tmp/rt3/hypr/torn_3" "$tmp/rt4/hypr/$blank"
+printf '%s\nwayland-1\n' "$hyp" >"$tmp/rt4/hypr/$blank/hyprland.lock"
+printf '%s\nwayland-1\n' "$hyp" >"$tmp/rt/hypr/live_1/hyprland.lock"
 printf '%s\nwayland-1\n' "$gone" >"$tmp/rt/hypr/crashed_2/hyprland.lock"
 cp "$tmp/rt/hypr/crashed_2/hyprland.lock" "$tmp/rt2/hypr/crashed_2/"
 printf 'self\nwayland-1\n' >"$tmp/rt/hypr/bad_4/hyprland.lock"
-for d in rt/hypr/live_1 rt/hypr/crashed_2 rt/hypr/bad_4 rt2/hypr/crashed_2 rt3/hypr/old_3; do sock "$tmp/$d/.socket.sock"; done
+printf '%s\nwayland-1\n' "$$" >"$tmp/rt/hypr/reused_5/hyprland.lock"
+printf '%s\nwayland-1\n' "$nixp" >"$tmp/rt/hypr/nix_6/hyprland.lock"
+for d in rt/hypr/live_1 rt/hypr/crashed_2 rt/hypr/bad_4 rt/hypr/reused_5 rt2/hypr/crashed_2 rt3/hypr/torn_3; do sock "$tmp/$d/.socket.sock"; done
 # de VAR=VALUE...: the desktop, those set (no i3 running).
 de() {
     (
@@ -341,12 +384,15 @@ de() {
 # is WANT VAR=VALUE...: whether the desktop those make is WANT.
 is() { [ "$(de "${@:2}")" = "$1" ]; }
 hy=HYPRLAND_INSTANCE_SIGNATURE xd=XDG_CURRENT_DESKTOP
-check "$(is hyprland WAYLAND_DISPLAY=wayland-1 $hy=live_1 && echo 0)" "a signature whose lock names a PID that runs, on this display: Hyprland"
+check "$(is hyprland WAYLAND_DISPLAY=wayland-1 $hy=live_1 && echo 0)" "a signature whose lock names a Hyprland that runs, on this display: Hyprland"
+check "$(is hyprland WAYLAND_DISPLAY=wayland-1 $hy=nix_6 && echo 0)" "Nix's (.Hyprland-wrapped) too"
 check "$(is hyprland WAYLAND_DISPLAY=/run/user/1000/wayland-1 $hy=live_1 && is hyprland $hy=live_1 && echo 0)" "its display by name (a path, or no WAYLAND_DISPLAY: any)"
 check "$(is other WAYLAND_DISPLAY=wayland-1 $hy=crashed_2 $xd=GNOME && echo 0)" "its lock's PID gone (a crash: lock and socket still there): not Hyprland"
 check "$(is other WAYLAND_DISPLAY=wayland-0 $hy=old_9 $xd=GNOME && echo 0)" "a signature with nothing there: not Hyprland"
+check "$(is other WAYLAND_DISPLAY=wayland-1 $hy=reused_5 $xd=GNOME && echo 0)" "its lock's PID another process's by now (a crash, the PID reused): not Hyprland"
 check "$(is other WAYLAND_DISPLAY=wayland-1 $hy=bad_4 && echo 0)" "a lock that doesn't read as one (self, not a PID): not Hyprland"
-check "$(is hyprland WAYLAND_DISPLAY=wayland-0 $hy=old_3 XDG_RUNTIME_DIR="$tmp/rt3" && echo 0)" "one older than 0.40 (no lock, its socket there): Hyprland"
+check "$(is other WAYLAND_DISPLAY=wayland-0 $hy=torn_3 $xd=Hyprland XDG_RUNTIME_DIR="$tmp/rt3" && echo 0)" \
+    "no lock (a shutdown that crashed after removing it: its socket left): not Hyprland"
 check "$(is other WAYLAND_DISPLAY=wayland-1 "$hy=$blank" $xd=GNOME XDG_RUNTIME_DIR="$tmp/rt4" && echo 0)" "a blank signature (a space, a tab) isn't one, as her binary trims it"
 check "$(is other WAYLAND_DISPLAY=wayland-2 $hy=live_1 $xd=Hyprland && echo 0)" "a compositor nested in Hyprland (another display): not Hyprland"
 check "$(is hyprland WAYLAND_DISPLAY=wayland-1 $xd=Hyprland && is hyprland WAYLAND_DISPLAY=wayland-1 XDG_SESSION_DESKTOP=hyprland && echo 0)" \
@@ -410,7 +456,10 @@ GS_EGO="org.gnome.shell.extensions.ego toggle ['<Super><Alt>c']"
 step_summon >"$tmp/out" 2>&1
 case $(cat "$tmp/out") in *asked:*) r=1 ;; *'Super+Alt+C is taken: org.gnome.shell.extensions.ego toggle'*) r=0 ;; *) r=1 ;; esac
 check $r "taken by an extension he installed himself (its schemas in its own folder): not asked"
-GS_EGO=''
+GS_EGO='' GS_APP="org.example.Editor find-in-files ['<Super><Alt>c']"
+case $(gnome_taken) in *org.example.Editor*) r=1 ;; *) r=0 ;; esac
+check $r "an app's own shortcut isn't read, through his extension's folder either (that folder's own schemas only)"
+GS_APP=''
 rm -rf "$DATA/gnome-shell"
 GS["$GSCHEMA.custom-keybinding:$GKEY command"]="$BIN/avatarctl talk tap" GS_WM=''
 # gsettings says yes and keeps nothing (dconf didn't commit it): read back, he's told, with the
@@ -472,24 +521,29 @@ check "$([ "$(gsettings get "$GSCHEMA" custom-keybindings)" = "['$C0']" ] && [ "
     "--uninstall again: her GNOME shortcut out of his list and reset, his own kept: $(gsettings get "$GSCHEMA" custom-keybindings)"
 check "$([ ! -e "$RECEIPT" ] && echo 0)" "and the receipt"
 
-# His own entry where her app-menu entry was, and an --uninstall with no gsettings: his entry stays;
-# her GNOME shortcut's line stays in the receipt (for an --uninstall where gsettings runs), and with
-# it the folders this made that are still there (his entry is in one), in the receipt's order.
+# His own entry where her app-menu entry was, and an --uninstall --purge with no gsettings: his entry
+# stays; her GNOME shortcut's line stays in the receipt (for an --uninstall where gsettings runs), and
+# with it the folders this made that are still there (his entry is in one) and where she went (its
+# prefixes, which the next one reads), in the receipt's order.
 rm -rf "$DATA/applications" "$CONF/autostart"
+pf1=$'prefix\t'"$tmp/pfx 1" pf2=$'prefix\t'"$tmp/pfx 2"
+printf '%s\n' "$pf1" "$pf2" >"$RECEIPT"
 out=$(AUTOSTART=1 DESKTOP=other step_autostart 2>&1)
 rec gkey "$GKEY"
 printf '%s\n' '[Desktop Entry]' Type=Application 'Name=His own' Exec=true >"$app"
 (
     # shellcheck disable=SC2317,SC2329 # uninstall's have
     have() { [ "$1" != gsettings ] && command -v "$1" >/dev/null 2>&1; }
-    uninstall
+    PURGE=1 uninstall
 ) >"$tmp/out" 2>&1
 case $(cat "$tmp/out") in *"applications/synaps-avatar.desktop isn't the one this wrote any more: left as it is"*) r=0 ;; *) r=1 ;; esac
 check "$([ $r = 0 ] && grep -qx 'Name=His own' "$app" && [ ! -e "$CONF/autostart/synaps-avatar.desktop" ] && echo 0)" \
     "--uninstall: an entry that isn't hers any more stays, hers goes"
 case $(cat "$tmp/out") in *"no gsettings here: the GNOME shortcut $GKEY is left as it is"*'kept in the receipt'*) r=0 ;; *) r=1 ;; esac
-check "$([ $r = 0 ] && [ "$(cat "$RECEIPT")" = "rmdir"$'\t'"$DATA/applications"$'\n'"gkey"$'\t'"$GKEY" ] && [ ! -d "$CONF/autostart" ] && echo 0)" \
-    "no gsettings: her shortcut's line kept, with the folder this made that's still there (the empty one gone)"
+check "$([ $r = 0 ] && [ "$(cat "$RECEIPT")" = "$pf1"$'\n'"$pf2"$'\n'"rmdir"$'\t'"$DATA/applications"$'\n'"gkey"$'\t'"$GKEY" ] && [ ! -d "$CONF/autostart" ] && echo 0)" \
+    "no gsettings: her shortcut's line kept, with the folder this made that's still there (the empty one gone) and her prefixes, in order"
+check "$(grep -qx '   left in ~/.local/share/synaps-avatar, not hers: packs ' "$tmp/out" && ! grep -q 'not hers:.*install.receipt' "$tmp/out" && echo 0)" \
+    "--purge: her receipt, kept, isn't called not hers"
 uninstall >"$tmp/out" 2>&1
 check "$([ ! -e "$RECEIPT" ] && grep -qx 'Name=His own' "$app" && echo 0)" "--uninstall again, gsettings there: done, his entry and its folder kept"
 

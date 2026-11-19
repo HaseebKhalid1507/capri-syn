@@ -988,23 +988,21 @@ first_file() {
 # server's) names none that runs.
 #
 # hypr_runs SIG: whether Hyprland SIG ($XDG_RUNTIME_DIR/hypr/SIG) runs, on this display
-# ($WAYLAND_DISPLAY, by name) when there is one. From 0.40 it writes hyprland.lock there (its PID,
-# then its display, a line each) and leaves it behind after a crash, with its sockets: it runs when
-# that PID does, as hyprctl's `instances` reads it. One older, with no lock: its request socket is
-# there. (Her binary goes further, connecting to that socket: one that answers runs, as for a PID in
-# another PID namespace, and with no lock it has to answer. This runs in no sandbox, and bash can't
-# connect to it.)
+# ($WAYLAND_DISPLAY, by name) when there is one. It writes hyprland.lock there (its PID, then its
+# display, a line each) and leaves it behind after a crash, with its sockets: it runs while that PID
+# is a Hyprland (its name says so: Hyprland, Nix's .Hyprland-wrapp; a PID reused after a crash
+# isn't). No lock, no Hyprland: a shutdown that crashed after removing it leaves its socket behind.
+# (Her binary also asks that socket: one that takes a connection runs, as for a PID in another PID
+# namespace or Hyprland's first moments, before its lock. bash can't connect to it, and this runs in
+# no sandbox and in no Hyprland's first moments.) Hyprland before 0.40 lived in /tmp/hypr, which
+# neither reads: unsupported.
 hypr_runs() {
-    local d=${XDG_RUNTIME_DIR:-}/hypr/$1 pid='' wd=''
-    [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -n "$1" ] || return 1
-    if [ -f "$d/hyprland.lock" ]; then
-        { read -r pid && { read -r wd || [ -n "$wd" ]; }; } <"$d/hyprland.lock" || return 1
-        [[ $pid =~ ^[0-9]+$ ]] || return 1
-        [ -d "/proc/$pid" ] || return 1
-        [ -z "${WAYLAND_DISPLAY:-}" ] || [ "${wd##*/}" = "${WAYLAND_DISPLAY##*/}" ]
-    else
-        [ -S "$d/.socket.sock" ]
-    fi
+    local d=${XDG_RUNTIME_DIR:-}/hypr/$1 pid='' wd='' comm=''
+    [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -n "$1" ] && [ -f "$d/hyprland.lock" ] || return 1
+    { read -r pid && { read -r wd || [ -n "$wd" ]; }; } <"$d/hyprland.lock" || return 1
+    [[ $pid =~ ^[0-9]+$ ]] && read -r comm 2>/dev/null <"/proc/$pid/comm" || return 1
+    [[ $comm == *yprland* ]] || return 1
+    [ -z "${WAYLAND_DISPLAY:-}" ] || [ "${wd##*/}" = "${WAYLAND_DISPLAY##*/}" ]
 }
 on_hyprland() {
     local sig=${HYPRLAND_INSTANCE_SIGNATURE:-} d de
@@ -1195,17 +1193,22 @@ gnome_get() { gsettings get "$GSCHEMA.custom-keybinding:$1" "$2" 2>/dev/null || 
 # What already has Super+Alt+C (Mod4 is Super, Mod1 Alt; either order): the window manager's, the
 # Shell's, its extensions' and the media keys' shortcuts, and every custom one. Extensions: the system's
 # schemas, and the ones in each extension he installed himself (extensions.gnome.org's, with their own
-# compiled schemas, which gsettings reads only from there).
+# compiled schemas, which gsettings reads only from there; its source there has the system's as its
+# parent, so it lists those too: that folder's own only).
 gnome_taken() {
-    local s p
+    local s p id sys
+    sys=$(gsettings list-schemas 2>/dev/null | sort)
     {
         for s in org.gnome.desktop.wm.keybindings org.gnome.shell.keybindings org.gnome.mutter.keybindings \
             org.gnome.mutter.wayland.keybindings "$GSCHEMA" \
-            $(gsettings list-schemas 2>/dev/null | grep -E '^org\.gnome\.shell\.extensions\.' | sort || true); do
+            $(printf '%s\n' "$sys" | grep -E '^org\.gnome\.shell\.extensions\.' || true); do
             gsettings list-recursively "$s" 2>/dev/null || true
         done
         for s in "$DATA"/gnome-shell/extensions/*/schemas; do
-            if [ -f "$s/gschemas.compiled" ]; then gsettings --schemadir "$s" list-recursively 2>/dev/null || true; fi
+            [ -f "$s/gschemas.compiled" ] || continue
+            for id in $(comm -13 <(printf '%s\n' "$sys") <(gsettings --schemadir "$s" list-schemas 2>/dev/null | sort)); do
+                gsettings --schemadir "$s" list-recursively "$id" 2>/dev/null || true
+            done
         done
         while IFS= read -r p; do printf '%s binding %s\n' "$p" "$(gnome_get "$p" binding)"; done < <(gnome_paths)
     } | grep -Ei "'<(super|mod4)><(alt|mod1)>c'|'<(alt|mod1)><(super|mod4)>c'" || true
@@ -1371,6 +1374,14 @@ launch_cmd() {
 # from Windows' Start menu. Written with --no-autostart too. Her name in the grid, the binary's in
 # the Comment (both entries).
 DESKTOP_COMMENT="Capri, your desktop companion (synaps-avatar)"
+# An entry where hers goes that isn't hers (his own, or hers rewritten by KDE's menu editor, which
+# keeps no comments, so no header): a backup first, as for his configs (--uninstall leaves it be).
+desktop_backup() {
+    if [ -f "$1" ] && ! ours "$1"; then
+        info "$(tilde "$1") isn't the one this wrote (yours, or rewritten): a backup first"
+        backup "$1"
+    fi
+}
 app_entry() {
     local f=$DATA/applications/synaps-avatar.desktop icon=''
     # Her icon as she picks it for her window: his own, else her pack's (the art step put it there).
@@ -1380,6 +1391,7 @@ app_entry() {
         icon=$PACK/icon.png
     fi
     info "she's in your app menu: Capri"
+    desktop_backup "$f"
     put "$f" < <(
         printf '%s\n' '[Desktop Entry]' "# capri-syn's install.sh wrote this (install.sh --uninstall removes it)." \
             Type=Application Name=Capri 'GenericName=Desktop companion' "Comment=$DESKTOP_COMMENT" \
@@ -1430,9 +1442,11 @@ step_autostart() {
             fi
             ;;
         *)
-            local f=$CONF/autostart/synaps-avatar.desktop
+            local f=$CONF/autostart/synaps-avatar.desktop try=${BIN//\\/\\\\}/synaps-avatar
             cmd=$(launch_cmd xdg)
             info "she starts at login: an XDG autostart entry (--no-autostart to skip)"
+            desktop_backup "$f"
+            # TryExec: an entry left behind (one --uninstall didn't know as hers) starts nothing.
             put "$f" <<EOF
 [Desktop Entry]
 # capri-syn's install.sh wrote this (install.sh --uninstall removes it).
@@ -1440,6 +1454,7 @@ Type=Application
 Name=Capri
 Comment=$DESKTOP_COMMENT
 Exec=$cmd
+TryExec=$try
 Terminal=false
 NoDisplay=true
 X-GNOME-Autostart-enabled=true
@@ -1788,7 +1803,7 @@ skipped() { warn "left alone: $1 (not hers to remove: the receipt is wrong there
 uninstall() {
     STEPS=1 STEP_N=0
     step "Remove what install.sh installed"
-    local d rmdirs=() keep=() syn_mine syn_rc rust_mine
+    local d rmdirs=() keep=() pfx=() syn_mine syn_rc rust_mine
     # Read now: the receipt is gone by the end.
     syn_mine=$(meta synaps) syn_rc=$(meta synaps_rc) rust_mine=$(meta rustup)
     if [ -f "$RECEIPT" ]; then
@@ -1808,7 +1823,8 @@ uninstall() {
                 *) tag='' f=$rest ;;
             esac
             case $kind in
-                prefix | meta) ;;
+                prefix) pfx+=("$line") ;;
+                meta) ;;
                 backup) if [ -f "$f" ]; then info "kept your config's backup: $(tilde "$f")"; fi ;;
                 block) if editable "$f"; then block_rm "$f" "$tag"; else skipped "$f"; fi ;;
                 unit)
@@ -1885,16 +1901,21 @@ uninstall() {
     done
     if [ ${#keep[@]} -gt 0 ]; then
         # The folders this made that are still there go with it, for the --uninstall that empties
-        # them. In the receipt's order (keep has it the other way round, from tac): innermost last.
+        # them, and where she went (its prefixes: their folders are hers to remove). In the
+        # receipt's order (keep has it the other way round, from tac): innermost last.
         for d in "${rmdirs[@]}"; do
             if [ -d "$d" ]; then keep+=("rmdir"$'\t'"$d"); fi
         done
+        keep+=("${pfx[@]}")
         [ "$DRY" = 1 ] || printf '%s\n' "${keep[@]}" | tac >"$RECEIPT"
         warn "kept in the receipt ($(tilde "$RECEIPT")): what didn't come out (--uninstall again tries it again)"
     fi
     if [ "$PURGE" = 1 ] && [ "$DRY" = 0 ]; then
+        local left
         for d in "$CONF/synaps-avatar" "$STATE/synaps-avatar" "$DATA/synaps-avatar" "$CACHE_ROOT"; do
-            if [ -d "$d" ]; then info "left in $(tilde "$d"), not hers: $(cd "$d" && find . -mindepth 1 -maxdepth 1 | sed 's#^\./##' | head -n5 | tr '\n' ' ')"; fi
+            # Not her receipt, when it's kept (said above).
+            left=$(cd "$d" 2>/dev/null && find . -mindepth 1 -maxdepth 1 ! -path ./install.receipt | sed 's#^\./##' | head -n5 | tr '\n' ' ')
+            if [ -n "$left" ]; then info "left in $(tilde "$d"), not hers: $left"; fi
         done
     fi
     synaps_stays "$syn_mine" "$syn_rc" "$rust_mine"

@@ -96,7 +96,7 @@ fn asked(v: &OsStr) -> Option<Backend> {
 }
 
 /// A Hyprland that runs (`hypr_running_in`): its signature, and the Wayland display it serves
-/// (its lock's second line; None for one older than 0.40, which writes no lock).
+/// (its lock's second line; None with no lock to read: `hypr_running_in`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Hypr {
     sig: String,
@@ -124,26 +124,35 @@ fn lock_in(text: &str) -> Option<(u32, String)> {
     Some((pid.parse().ok()?, lines.next()?.trim().to_string()))
 }
 
+/// Whether process `pid` is a Hyprland: its name (`/proc/PID/comm`) says so, `Hyprland` (or
+/// Nix's `.Hyprland-wrapp`, or a `hyprland` link to it). A PID reused after a crash isn't one.
+fn is_hyprland(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/comm")).is_ok_and(|c| c.contains("yprland"))
+}
+
 /// The Hyprlands that run in `root` (`$XDG_RUNTIME_DIR/hypr`), a folder each, named by its
-/// signature. From 0.40 Hyprland writes its lock there (`lock_in`), and after a crash leaves it
-/// behind with its sockets (only a clean exit removes them): one runs when the lock's PID does, as
-/// hyprctl's `instances` reads it, or when its request socket (`.socket.sock`) takes a connection
-/// (a PID in another PID namespace, as tools/wlrig's: a crash's socket refuses). One older than
-/// 0.40, with no lock, runs when that socket takes one. install.sh's `hypr_runs` reads it the
-/// same way, but for the socket: it never runs in a sandbox, so its PID is always there.
+/// signature. Hyprland writes its lock there (`lock_in`), and after a crash leaves it behind with
+/// its sockets (only a clean exit removes them): one runs when the lock's PID is a Hyprland that
+/// runs (`is_hyprland`; hyprctl's `instances` takes any PID that runs), or when its request socket
+/// (`.socket.sock`) takes a connection (a PID in another PID namespace, as tools/wlrig's: a
+/// crash's socket refuses). No lock, or one being written: Hyprland's first moments (its request
+/// socket comes up before the lock), or a shutdown that crashed after removing it; it runs while
+/// that socket takes a connection. Hyprland before 0.40 lived in `/tmp/hypr`, which she doesn't
+/// read: unsupported. install.sh's `hypr_runs` reads the lock the same way, but never the socket
+/// (bash can't connect to one, and the installer runs in no sandbox and in no Hyprland's first
+/// moments): no lock, no Hyprland.
 fn hypr_running_in(root: &std::path::Path) -> Vec<Hypr> {
     let mut out = Vec::new();
     for e in std::fs::read_dir(root).into_iter().flatten().flatten() {
         let dir = e.path();
         let Ok(sig) = e.file_name().into_string() else { continue };
         let answers = || std::os::unix::net::UnixStream::connect(dir.join(".socket.sock")).is_ok();
-        let display = match std::fs::read_to_string(dir.join("hyprland.lock")) {
-            Ok(text) => match lock_in(&text) {
-                Some((pid, display)) if PathBuf::from(format!("/proc/{pid}")).exists() || answers() => Some(display),
-                _ => continue,
-            },
-            Err(_) if answers() => None,
-            Err(_) => continue,
+        let display = match std::fs::read_to_string(dir.join("hyprland.lock")).ok().as_deref().map(lock_in) {
+            Some(Some((pid, display))) if is_hyprland(pid) || answers() => Some(display),
+            Some(Some(_)) => continue,
+            // No lock, or one being written: the socket decides.
+            _ if answers() => None,
+            _ => continue,
         };
         out.push(Hypr { sig, display });
     }
@@ -221,7 +230,9 @@ fn notes_in(var: &impl Fn(&str) -> Option<OsString>, running: &[Hypr], b: Backen
     if matches!(b, Backend::XWayland | Backend::XWaylandAuto | Backend::NoXWayland) && !hyprland {
         if let Some(sig) = sig_in(var) {
             out.push(match running.iter().find(|h| h.sig == sig) {
-                None => format!("synaps-avatar: HYPRLAND_INSTANCE_SIGNATURE={sig} names no Hyprland that runs: left over from an earlier session, ignored"),
+                None => format!(
+                    "synaps-avatar: HYPRLAND_INSTANCE_SIGNATURE={sig} names no Hyprland that runs: left over from an earlier session (or a Hyprland older than 0.40), ignored"
+                ),
                 Some(h) => format!(
                     "synaps-avatar: HYPRLAND_INSTANCE_SIGNATURE={sig} is a Hyprland on {}, not on this session's WAYLAND_DISPLAY={wd} (a compositor nested in it?): ignored",
                     h.display.as_deref().unwrap_or_default()
@@ -231,7 +242,7 @@ fn notes_in(var: &impl Fn(&str) -> Option<OsString>, running: &[Hypr], b: Backen
         let said = xdg_hyprland(var);
         if !said.is_empty() {
             out.push(format!(
-                "synaps-avatar: {} says Hyprland, but none runs on WAYLAND_DISPLAY={wd}: left over (a tmux server keeps what it started with) or inherited (a compositor nested in Hyprland), ignored",
+                "synaps-avatar: {} says Hyprland, but none runs on WAYLAND_DISPLAY={wd}: left over (a tmux server keeps what it started with), inherited (a compositor nested in Hyprland) or a Hyprland older than 0.40, ignored",
                 said.join(" ")
             ));
         }
@@ -616,7 +627,7 @@ mod tests {
         assert_eq!(pick(&[wl, hypr, x]), Backend::Wayland);
         assert_eq!(pick(&[wl, hypr]), Backend::Wayland);
         assert_eq!(pick(&[("WAYLAND_DISPLAY", "/run/user/1000/wayland-1"), hypr]), Backend::Wayland);
-        // One older than 0.40 (no lock) serves any display.
+        // One with no lock to read (its first moments) serves any display.
         assert_eq!(pick_in(&[gnome, hypr], &[Hypr { sig: "abc_123".into(), display: None }]), Backend::Wayland);
         // GNOME, KDE, sway: XWayland when it runs (she says so), else nothing she can run on.
         assert_eq!(pick(&[gnome, x]), Backend::XWaylandAuto);
@@ -712,15 +723,25 @@ mod tests {
         assert_eq!(lock_in("+1234\nwayland-1\n"), None);
         assert_eq!(lock_in("self\nwayland-1\n"), None, "/proc/self is no PID");
         assert_eq!(lock_in(""), None);
-        // A runtime dir's hypr: a lock naming this process, one naming a process that's gone (a
-        // crash: its socket stays, refusing), one whose PID is in another PID namespace (tools/wlrig:
-        // its socket answers), one older than 0.40 (a socket, no lock), and a folder with neither.
+        // A runtime dir's hypr: a lock naming a Hyprland that runs (a shell run as `Hyprland`), one
+        // naming a process that's gone (a crash: its socket stays, refusing), one whose PID is in
+        // another PID namespace (tools/wlrig: its socket answers), one with no lock (its first
+        // moments: a socket that answers), a folder with neither, one whose PID was reused after a
+        // crash (this test's: no Hyprland), and a lock being written (empty: the socket decides).
         use std::os::unix::net::UnixListener;
         let root = std::env::temp_dir().join(format!("sa-hypr-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
         let mut child = std::process::Command::new("true").spawn().expect("true");
         let gone = child.id();
         child.wait().expect("true ends");
+        std::os::unix::fs::symlink("/bin/sh", root.join("Hyprland")).unwrap();
+        let mut hyprland = std::process::Command::new(root.join("Hyprland"))
+            .args(["-c", "read x"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .expect("sh as Hyprland");
+        assert!(is_hyprland(hyprland.id()) && !is_hyprland(std::process::id()) && !is_hyprland(gone));
         let at = |sig: &str, lock: Option<String>| {
             let d = root.join(sig);
             std::fs::create_dir_all(&d).unwrap();
@@ -729,20 +750,25 @@ mod tests {
             }
             d.join(".socket.sock")
         };
-        at("live_1", Some(format!("{}\nwayland-1\n", std::process::id())));
+        at("live_1", Some(format!("{}\nwayland-1\n", hyprland.id())));
         drop(UnixListener::bind(at("crashed_2", Some(format!("{gone}\nwayland-1\n")))).unwrap());
         let _nested = UnixListener::bind(at("sandboxed_3", Some(format!("{gone}\nwayland-9\n")))).unwrap();
-        let _old = UnixListener::bind(at("old_4", None)).unwrap();
+        let _starting = UnixListener::bind(at("starting_4", None)).unwrap();
         at("empty_5", None);
+        drop(UnixListener::bind(at("reused_6", Some(format!("{}\nwayland-1\n", std::process::id())))).unwrap());
+        let _writing = UnixListener::bind(at("writing_7", Some(String::new()))).unwrap();
         let mut running = hypr_running_in(&root);
         running.sort_by(|a, b| a.sig.cmp(&b.sig));
+        drop(hyprland.stdin.take());
+        hyprland.wait().expect("its read ends");
         let _ = std::fs::remove_dir_all(&root);
         assert_eq!(
             running,
             [
                 Hypr { sig: "live_1".into(), display: Some("wayland-1".into()) },
-                Hypr { sig: "old_4".into(), display: None },
                 Hypr { sig: "sandboxed_3".into(), display: Some("wayland-9".into()) },
+                Hypr { sig: "starting_4".into(), display: None },
+                Hypr { sig: "writing_7".into(), display: None },
             ]
         );
         assert!(hypr_running_in(&root).is_empty(), "no runtime dir: none");
