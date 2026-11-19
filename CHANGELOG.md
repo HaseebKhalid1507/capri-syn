@@ -8,7 +8,7 @@ capri-syn's first release: Capri on your desktop, her brain in Synaps. Linux (X1
 GNOME, KDE and other Wayland desktops through XWayland) and Windows 11 (x64). One line installs her:
 `install.sh` on Linux, `install.ps1` or `capri-syn-setup-x86_64.exe` on Windows. Her voice is its own
 download: `--voice` on Linux; on Windows her setup's Voice page (on when Windows has a microphone, on a
-first install only; an upgrade never turns it on).
+first install only; an upgrade never turns it on by itself).
 
 ### Install and releases
 - `curl -fsSL …/install.sh | bash`, `irm …/install.ps1 | iex`, or either from a checkout. Seven steps, the
