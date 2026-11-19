@@ -1498,6 +1498,9 @@ fullscreen = "stay"
         for f in [&dead, &mine] {
             std::fs::write(f, "x").unwrap();
         }
+        // Windows tells a dead writer's by its age (over a minute).
+        #[cfg(not(unix))]
+        std::fs::OpenOptions::new().write(true).open(&dead).unwrap().set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(120)).unwrap();
         for k in keep {
             std::fs::write(d.join(k), "x").unwrap();
         }
