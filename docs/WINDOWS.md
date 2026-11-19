@@ -23,7 +23,7 @@ Her files (`platform::base_dir`; `$XDG_*_HOME` still wins, as on Linux):
 | her pack (default `--pack`) | `%LOCALAPPDATA%\synaps-avatar\packs\capri` |
 | state | `%LOCALAPPDATA%\synaps-avatar\state.json`, `sessions.json` |
 | her log, without a console | `%LOCALAPPDATA%\synaps-avatar\synaps-avatar.log` (appended; over 4 MB at start, kept as `.old.log`) |
-| her icon (tray), your own | `%APPDATA%\synaps-avatar\icon.ico` if it's there, else the capri-syn icon (`assets/icon`, in her exe); read at start and on `capri-ctl settings reload` |
+| her icon (tray), your own | `%APPDATA%\synaps-avatar\icon.ico` if it's there (up to 1024 px a side), else the capri-syn icon (`assets/icon`, in her exe; a pack's `icon` isn't used here); read at start and on `capri-ctl settings reload`, when it changed |
 
 ## The installer
 
@@ -41,7 +41,8 @@ published. Locally, on a machine with Rust, Inno Setup and ImageMagick: `.\packa
   downloaded. A new pack replaces the old one whole.
 - **Her AUMID** `Synaps.Avatar`: registered under `HKCU\Software\Classes\AppUserModelId` with
   `DisplayName` and `IconUri`, and set on the Start-menu shortcut, so toasts show under her name
-  and icon. The icon is a mark in her colours (her red bolt on black), drawn at build time: no art.
+  and icon. That icon is still a mark in her colours (her red bolt on black), drawn at build time;
+  her exe and her tray carry capri-syn's (`assets/icon`).
 - **Autostart, opt-in** (a task, unchecked): the `HKCU\…\Run` value.
 - **Uninstall** (Settings → Apps, or `unins000.exe /VERYSILENT`): stops her, then removes her exe,
   the shortcut, the AUMID key, the Run value, the pack it copied, her log and state, and her folders

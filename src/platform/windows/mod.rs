@@ -889,8 +889,8 @@ impl Desktop for Win32 {
 
     /// Her icon in the notification area (`tray.rs`). A click on it or a pick in its menu is his
     /// input to her, as her key is: the keyboard is hers to take for `GRANT_MS`.
-    fn tray(&self, icon: super::TrayIcon, on: Box<dyn Fn(super::TrayEv) + Send>) -> Result<Option<Box<dyn super::Tray>>> {
-        Ok(Some(Box::new(tray::start(icon, self.grant_at.clone(), on)?)))
+    fn tray(&self, icon: super::TrayIcon, instance: &str, on: Box<dyn Fn(super::TrayEv) + Send>) -> Result<Option<Box<dyn super::Tray>>> {
+        Ok(Some(Box::new(tray::start(icon, instance, self.grant_at.clone(), on)?)))
     }
 
     /// One thread: out-of-context WinEvent hooks (moves, shows, hides, minimise, cloak,

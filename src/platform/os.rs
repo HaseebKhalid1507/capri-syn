@@ -299,9 +299,12 @@ pub struct Os {
 /// Her tray icon and what it was last told (only a change goes to the desktop).
 struct TrayLink {
     tray: Box<dyn super::Tray>,
+    /// What the tooltip and menu were made from (`tray_show`'s `key`): the same, nothing is made.
+    key: Option<u64>,
     tip: String,
     menu: Vec<super::TrayItem>,
-    icon: super::TrayIcon,
+    /// Its icon's `stamp`.
+    icon: u64,
 }
 
 impl Os {
@@ -471,6 +474,11 @@ impl Os {
 
     pub fn set_icon(&self, s: WinId, data: &[u32]) -> Result<()> {
         self.stage.set_icon(s, data)
+    }
+
+    /// `set_icon` marks her windows here (`Stage::window_icons`): else the core makes none.
+    pub fn window_icons(&self) -> bool {
+        self.stage.window_icons()
     }
 
     /// Input region = `input`; everything else clicks through. The visible region is the
@@ -833,12 +841,13 @@ impl Os {
 
     // ---- her tray icon --------------------------------------------------------------------
 
-    /// Her icon in the desktop's tray, where it has one she uses (`Desktop::tray`): Ok(false)
-    /// where none. `on` runs on the tray's thread.
-    pub fn start_tray(&self, icon: super::TrayIcon, on: impl Fn(super::TrayEv) + Send + 'static) -> Result<bool> {
-        let t = self.desk.tray(icon.clone(), Box::new(on))?;
+    /// Her icon in the desktop's tray, where it has one she uses (`Desktop::tray`; `instance`
+    /// as there): Ok(false) where none. `on` runs on the tray's thread.
+    pub fn start_tray(&self, icon: super::TrayIcon, instance: &str, on: impl Fn(super::TrayEv) + Send + 'static) -> Result<bool> {
+        let stamp = icon.stamp;
+        let t = self.desk.tray(icon, instance, Box::new(on))?;
         let up = t.is_some();
-        *self.tray.borrow_mut() = t.map(|tray| TrayLink { tray, tip: String::new(), menu: Vec::new(), icon });
+        *self.tray.borrow_mut() = t.map(|tray| TrayLink { tray, key: None, tip: String::new(), menu: Vec::new(), icon: stamp });
         Ok(up)
     }
 
@@ -847,13 +856,18 @@ impl Os {
         self.tray.borrow().is_some()
     }
 
-    /// What her tray icon shows: its tooltip, its menu. Only what changed goes to the desktop.
-    pub fn tray_show(&self, tip: &str, menu: Vec<super::TrayItem>) {
+    /// What her tray icon shows: its tooltip and menu, made by `make` only when `key` (what
+    /// they are made from) changed. Only what changed goes to the desktop.
+    pub fn tray_show(&self, key: u64, make: impl FnOnce() -> (String, Vec<super::TrayItem>)) {
         let mut t = self.tray.borrow_mut();
         let Some(t) = t.as_mut() else { return };
+        if t.key.replace(key) == Some(key) {
+            return;
+        }
+        let (tip, menu) = make();
         if t.tip != tip {
-            t.tip = tip.to_string();
-            t.tray.set_tip(tip);
+            t.tray.set_tip(&tip);
+            t.tip = tip;
         }
         if t.menu != menu {
             t.tray.set_menu(menu.clone());
@@ -862,12 +876,12 @@ impl Os {
     }
 
     /// Her tray icon's picture from now on (`crate::brand::icon` read again): to the desktop
-    /// only if it changed. True: it did.
+    /// only if it is another (its `stamp`). True: it was.
     pub fn tray_icon(&self, icon: super::TrayIcon) -> bool {
         let mut t = self.tray.borrow_mut();
-        let Some(t) = t.as_mut().filter(|t| t.icon != icon) else { return false };
-        t.tray.set_icon(icon.clone());
-        t.icon = icon;
+        let Some(t) = t.as_mut().filter(|t| t.icon != icon.stamp) else { return false };
+        t.icon = icon.stamp;
+        t.tray.set_icon(icon);
         true
     }
 

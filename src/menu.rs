@@ -2,7 +2,8 @@
 //! tray's menu (drawn by the desktop, `platform::Tray`) read the same rows, in the same order,
 //! with the same words, and a pick on either goes through the same dispatch
 //! (`Avatar::menu_do`). A surface only draws: what it can't show its own way (ATTENTION's
-//! choices) it shows as the model gives it.
+//! choices) it shows as the model gives it. What can't act now (`enabled`) is greyed on both,
+//! and `menu_do` refuses it whatever asked.
 
 use crate::control::Command;
 use crate::platform::{TrayEv, TrayItem};
@@ -98,6 +99,14 @@ pub enum Via {
 /// What her menu's rows depend on, read off her each time (`Avatar::menu_state`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct State {
+    /// Her quit is under way: only QUIT acts.
+    pub quitting: bool,
+    /// A teleport is under way (RESET's, hers, a bid's).
+    pub teleporting: bool,
+    /// In his hands: pressed, dragged, carried or flung.
+    pub held: bool,
+    /// Her launch intro plays.
+    pub intro: bool,
     /// Hidden (HIDE): SHOW leads.
     pub hidden: bool,
     /// DND on; None: no brain, no row.
@@ -110,6 +119,30 @@ pub struct State {
     pub quit_armed: bool,
 }
 
+/// By hand: `Attention` (settings.rs) has no `Hash`; its key stands in.
+impl std::hash::Hash for State {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        (self.quitting, self.teleporting, self.held, self.intro, self.hidden).hash(h);
+        (self.dnd, self.attention.map(Attention::key), self.handsfree, self.quit_armed).hash(h);
+    }
+}
+
+/// Whether `item` acts now: greyed on both menus where not, and refused by `menu_do`. While she
+/// quits, only QUIT. Nothing hides her or puts her home while she teleports, while he has her
+/// in his hands or while her launch plays (SHOW, the way back, always can). Hands-free doesn't
+/// start while she is hidden or arriving; it always ends.
+pub fn enabled(item: Item, s: &State) -> bool {
+    if s.quitting {
+        return item == Item::Quit;
+    }
+    let moving = s.teleporting || s.held || s.intro;
+    match item {
+        Item::ShowHide => s.hidden || !moving,
+        Item::Reset => !moving,
+        Item::HandsFree => s.handsfree == Some(true) || !(s.hidden || s.intro),
+        _ => true,
+    }
+}
 /// One row of her menu.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Row {
@@ -123,11 +156,13 @@ pub struct Row {
     pub armed: bool,
     /// The row that matters most now (SHOW while she is hidden: the way back).
     pub lead: bool,
+    /// It acts now (`enabled`); else greyed.
+    pub enabled: bool,
 }
 
 impl Row {
     fn new(item: Item, label: &'static str) -> Row {
-        Row { item, label, choices: Vec::new(), rule: false, armed: false, lead: false }
+        Row { item, label, choices: Vec::new(), rule: false, armed: false, lead: false, enabled: true }
     }
 }
 
@@ -154,6 +189,9 @@ pub fn rows(s: &State) -> Vec<Row> {
     v.push(Row::new(Item::Settings, "SETTINGS"));
     let quit = if s.quit_armed { "QUIT? CLICK AGAIN" } else { "QUIT" };
     v.push(Row { rule: true, armed: s.quit_armed, ..Row::new(Item::Quit, quit) });
+    for r in &mut v {
+        r.enabled = enabled(r.item, s);
+    }
     v
 }
 
@@ -165,11 +203,12 @@ pub fn tray_items(rows: &[Row]) -> Vec<TrayItem> {
         if r.rule {
             v.push(TrayItem::Rule);
         }
+        let enabled = r.enabled;
         v.push(if r.choices.is_empty() {
-            TrayItem::Item { id: r.item.id(), label: r.label.to_string(), checked: false, lead: r.lead }
+            TrayItem::Item { id: r.item.id(), label: r.label.to_string(), checked: false, lead: r.lead, enabled }
         } else {
-            let items = r.choices.iter().map(|&(i, l, on)| TrayItem::Item { id: i.id(), label: l.to_string(), checked: on, lead: false }).collect();
-            TrayItem::Sub { label: r.label.to_string(), items }
+            let items = r.choices.iter().map(|&(i, l, on)| TrayItem::Item { id: i.id(), label: l.to_string(), checked: on, lead: false, enabled }).collect();
+            TrayItem::Sub { label: r.label.to_string(), items, enabled }
         });
     }
     v
@@ -182,17 +221,6 @@ pub fn command_for(ev: TrayEv) -> Option<Command> {
         TrayEv::Open => Some(Command::TalkTap),
         TrayEv::Pick(id) => Item::from_id(id).map(Command::MenuPick),
     }
-}
-
-/// Her menu's steps (MIX → HANG ONLY → OFF → MIX) from `from` to `to`.
-pub fn attention_steps(from: Attention, to: Attention) -> usize {
-    let mut a = from;
-    let mut n = 0;
-    while a != to && n < 3 {
-        a = a.next();
-        n += 1;
-    }
-    n
 }
 
 #[cfg(test)]
@@ -231,24 +259,24 @@ mod tests {
         let r = rows(&State { attention: Some(Attention::HangOnly), ..State::default() });
         let a = r.iter().find(|r| r.item == Item::Attention(None)).unwrap();
         assert_eq!(a.choices, [(Item::Attention(Some(Attention::Mix)), "MIX", false), (Item::Attention(Some(Attention::HangOnly)), "HANG ONLY", true), (Item::Attention(Some(Attention::Off)), "OFF", false)]);
-        assert_eq!(attention_steps(Attention::Mix, Attention::Mix), 0);
-        assert_eq!(attention_steps(Attention::Mix, Attention::Off), 2);
-        assert_eq!(attention_steps(Attention::Off, Attention::Mix), 1);
-        assert_eq!(attention_steps(Attention::HangOnly, Attention::Mix), 2);
+        // Her row's pick steps on (`line::next_attention`, from the one asked); each of the
+        // tray's choices is a pick of its own, straight there (one write, not two steps).
+        assert_eq!(a.item, Item::Attention(None));
+        assert!(a.choices.iter().all(|(i, ..)| Item::from_id(i.id()) == Some(*i) && *i != a.item));
     }
 
     #[test]
     fn the_tray_menu_is_her_menu() {
         let s = State { dnd: Some(false), attention: Some(Attention::Off), handsfree: Some(true), hidden: true, ..State::default() };
         let items = tray_items(&rows(&s));
-        let item = |id: u32, label: &str, lead: bool| TrayItem::Item { id, label: label.into(), checked: false, lead };
-        let pick = |a: Attention, on: bool| TrayItem::Item { id: Item::Attention(Some(a)).id(), label: a.label().into(), checked: on, lead: false };
+        let item = |id: u32, label: &str, lead: bool| TrayItem::Item { id, label: label.into(), checked: false, lead, enabled: true };
+        let pick = |a: Attention, on: bool| TrayItem::Item { id: Item::Attention(Some(a)).id(), label: a.label().into(), checked: on, lead: false, enabled: true };
         assert_eq!(
             items,
             [
                 item(2, "RESET POSITION", false),
                 item(3, "DND 1 HOUR", false),
-                TrayItem::Sub { label: "ATTENTION: OFF".into(), items: vec![pick(Attention::Mix, false), pick(Attention::HangOnly, false), pick(Attention::Off, true)] },
+                TrayItem::Sub { label: "ATTENTION: OFF".into(), items: vec![pick(Attention::Mix, false), pick(Attention::HangOnly, false), pick(Attention::Off, true)], enabled: true },
                 item(8, "END HANDS-FREE", false),
                 item(9, "COPY LAST REPLY", false),
                 item(1, "SHOW", true),
@@ -257,6 +285,39 @@ mod tests {
                 item(11, "QUIT", false),
             ]
         );
+    }
+
+    fn greyed(s: &State) -> Vec<&'static str> {
+        rows(s).iter().filter(|r| !r.enabled).map(|r| r.label).collect()
+    }
+
+    /// The tray is live while her own menu isn't drawn: what can't act now is greyed there and
+    /// on hers, from the same rule `menu_do` refuses by.
+    #[test]
+    fn what_cant_act_now_is_greyed() {
+        let full = State { dnd: Some(false), attention: Some(Attention::Mix), handsfree: Some(false), ..State::default() };
+        assert!(greyed(&full).is_empty(), "at rest, everything acts");
+        let quitting = State { quitting: true, ..full };
+        assert_eq!(greyed(&quitting), ["RESET POSITION", "DND 1 HOUR", "ATTENTION: MIX", "HANDS-FREE TALK", "COPY LAST REPLY", "HIDE", "SETTINGS"], "only QUIT while she quits");
+        for moving in [State { teleporting: true, ..full }, State { held: true, ..full }] {
+            assert_eq!(greyed(&moving), ["RESET POSITION", "HIDE"], "{moving:?}");
+        }
+        assert_eq!(greyed(&State { intro: true, ..full }), ["RESET POSITION", "HANDS-FREE TALK", "HIDE"]);
+        // Hidden: SHOW is the way back, whatever else; hands-free doesn't start, but it ends.
+        assert_eq!(greyed(&State { hidden: true, intro: true, ..full }), ["RESET POSITION", "HANDS-FREE TALK"]);
+        assert!(greyed(&State { hidden: true, handsfree: Some(true), ..full }).is_empty());
+        assert!(enabled(Item::Quit, &quitting) && !enabled(Item::ShowHide, &State { hidden: true, ..quitting }));
+        // The tray greys the same rows, ATTENTION's choices with their row.
+        let items = tray_items(&rows(&quitting));
+        let live: Vec<bool> = items
+            .iter()
+            .filter_map(|i| match i {
+                TrayItem::Item { enabled, .. } | TrayItem::Sub { enabled, .. } => Some(*enabled),
+                TrayItem::Rule => None,
+            })
+            .collect();
+        assert_eq!(live, [false, false, false, false, false, false, false, true]);
+        assert!(items.iter().any(|i| matches!(i, TrayItem::Sub { items, .. } if items.iter().all(|c| matches!(c, TrayItem::Item { enabled: false, .. })))));
     }
 
     #[test]

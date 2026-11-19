@@ -22,7 +22,9 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
-    let ico = std::fs::read(ICO).unwrap_or_else(|e| panic!("{ICO}: {e}"));
+    // From the crate's own folder, wherever cargo runs this from.
+    let at = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR")).join(ICO);
+    let ico = std::fs::read(&at).unwrap_or_else(|e| panic!("{}: {e}", at.display()));
     let res = res_of(&ico).unwrap_or_else(|e| panic!("{ICO}: {e}"));
     let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR")).join("capri-syn-icon.res");
     std::fs::write(&out, res).unwrap_or_else(|e| panic!("{}: {e}", out.display()));

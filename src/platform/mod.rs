@@ -477,9 +477,10 @@ pub trait Desktop: Send + Sync {
     /// The pointer's image over her surface `s` (None: the desktop's). Backends without it keep
     /// the desktop's.
     fn pointer_image(&self, _s: WinId, _img: Option<&PointerImage>) {}
-    /// Put her icon in the desktop's tray; `on` runs on the tray's own thread. Ok(None): no tray
-    /// she uses here (Linux for now: `linux::tray`).
-    fn tray(&self, _icon: TrayIcon, _on: Box<dyn Fn(TrayEv) + Send>) -> Result<Option<Box<dyn Tray>>> {
+    /// Put her icon in the desktop's tray; `on` runs on the tray's own thread. `instance`: empty
+    /// for her usual run, else what tells this run apart (her control socket), so two of her
+    /// never share one icon. Ok(None): no tray she uses here (Linux for now: `linux::tray`).
+    fn tray(&self, _icon: TrayIcon, _instance: &str, _on: Box<dyn Fn(TrayEv) + Send>) -> Result<Option<Box<dyn Tray>>> {
         Ok(None)
     }
 }
@@ -501,13 +502,15 @@ pub struct PointerImage {
 // Only Windows has a tray so far: on Linux these are built and never read (`linux::tray`).
 
 /// Her icon for the desktop's tray (`crate::brand::Icon::tray`): its picture, straight-alpha RGBA
-/// `w`×`h`, which the backend scales to what its tray wants, and his file when it is his. A
-/// backend that can load an icon's own sizes takes them from his file, or with none from hers
-/// (Windows: her exe's icon resource), and the picture where that fails.
+/// `w`×`h` (at most 256 a side), which the backend scales to what its tray wants, and the file
+/// it was read from. A backend that can load an icon's own sizes takes them from that file, or
+/// with none from hers (Windows: her exe's icon resource), and the picture where that fails.
+/// `stamp`: the same icon has the same one (`Os::tray_icon` tells only a new one).
 #[cfg_attr(not(windows), allow(dead_code))]
 #[derive(Clone, Debug, PartialEq)]
 pub struct TrayIcon {
     pub file: Option<std::path::PathBuf>,
+    pub stamp: u64,
     pub w: u32,
     pub h: u32,
     pub rgba: Vec<u8>,
@@ -519,10 +522,10 @@ pub struct TrayIcon {
 #[derive(Clone, Debug, PartialEq)]
 pub enum TrayItem {
     /// A pick (`id` never 0). `checked`: the choice in force; `lead`: the row that matters most
-    /// now (bold where the tray can).
-    Item { id: u32, label: String, checked: bool, lead: bool },
+    /// now (bold where the tray can); `enabled` false: shown greyed, not picked (`menu::enabled`).
+    Item { id: u32, label: String, checked: bool, lead: bool, enabled: bool },
     /// A row that opens its choices.
-    Sub { label: String, items: Vec<TrayItem> },
+    Sub { label: String, items: Vec<TrayItem>, enabled: bool },
     Rule,
 }
 
@@ -571,6 +574,11 @@ pub trait Stage {
     /// The same for another of her surfaces (the intro's close-up).
     fn shape_of(&self, s: WinId, input: &[ShapeRect], visible: Visible<'_>) -> Result<()>;
     fn set_icon(&self, s: WinId, data: &[u32]) -> Result<()>;
+    /// `set_icon` marks her windows here (X11's `_NET_WM_ICON`; elsewhere it does nothing, and
+    /// the core doesn't make one).
+    fn window_icons(&self) -> bool {
+        false
+    }
     /// Show effect layer `layer`: solid `rgb` over `rects` (relative to `origin`; `None`
     /// keeps the last ones), `size` px, stacked `z`. Input passes through. Not flushed.
     fn fx_show(&self, layer: usize, rgb: u32, origin: (i32, i32), size: (i32, i32), rects: Option<&[ShapeRect]>, z: FxZ) -> Result<()>;

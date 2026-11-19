@@ -2,23 +2,28 @@
 //! thread of its own, pumping its own messages as the session and layout watchers do (a
 //! message-only window would miss `TaskbarCreated`: it is a broadcast). The core talks to it
 //! through `WinTray` (`platform::Tray`): a new tooltip or icon is posted to it, the menu is kept
-//! for the next right click, the removal is posted and waited for.
+//! for the next right click, the removal is posted and waited for. Nothing of hers ever waits on
+//! Explorer: `start` returns once the window is up, and the icon goes in on the tray's thread.
 //!
-//! - Her icon is known by a GUID made from her exe's path (`guid`; the shell ties a GUID to one
-//!   path): each install keeps its own, and a start first deletes whatever a killed run left
-//!   under it (a ghost) before adding hers.
+//! - Her icon is known by a GUID made from her exe's path (and her instance, `guid`; the shell
+//!   ties a GUID to one path): each install keeps its own, and an add first deletes whatever a
+//!   killed run left under it (a ghost).
+//! - An add that fails is tried again every `RETRY_MS` for `RETRY_FOR_MS` (the taskbar is up
+//!   before its tray takes icons, at sign-in), and again when Explorer starts again. A shell
+//!   that refuses her GUID outright (not a timeout: it may still take that one) gets her window's
+//!   id instead, for good (`fell_back`); her removal then deletes by both.
 //! - Her icon is her exe's own (build.rs: assets/icon/capri-syn.ico), or his .ico: Windows picks
 //!   the image made for the tray's size from it. A picture is drawn only where neither loads.
 //! - Explorer restarted (`TaskbarCreated`): added again, at the size the tray wants now.
 //! - A click (`NIN_SELECT`; Enter: `NIN_KEYSELECT`) is `TrayEv::Open`, once per double-click
-//!   time. `WM_CONTEXTMENU` opens the menu her model laid out (`TrackPopupMenu` at the click),
-//!   and its pick comes back as `WM_COMMAND`: `TrayEv::Pick`. Either is his input to her: the
-//!   keyboard is hers to take for `GRANT_MS` (the Line on a click).
+//!   time. `WM_CONTEXTMENU` opens the menu her model laid out (`TrackPopupMenu` at the click;
+//!   what can't act now greyed), and its pick comes back as `WM_COMMAND`: `TrayEv::Pick`. Either
+//!   is his input to her: the keyboard is hers to take for `GRANT_MS` (the Line on a click).
 //! - Gone on `remove` (QUIT), on its window's end and when the session ends: no ghost.
 
 use super::super::{Tray, TrayEv, TrayIcon, TrayItem};
 use super::tick;
-use ::windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+use ::windows::Win32::Foundation::{ERROR_TIMEOUT, GetLastError, HWND, LPARAM, LRESULT, POINT, WPARAM};
 use ::windows::Win32::Graphics::Gdi::{BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateBitmap, CreateDIBSection, DIB_RGB_COLORS, DeleteObject, RGBQUAD};
 use ::windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use ::windows::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime;
@@ -42,6 +47,12 @@ const WM_TRAY_TIP: u32 = WM_APP + 2;
 const WM_TRAY_REMOVE: u32 = WM_APP + 3;
 /// A new icon (`WinTray::set_icon`: his own put in or taken out).
 const WM_TRAY_ICON: u32 = WM_APP + 4;
+/// Into the tray, the first time (posted by `start` to its own window).
+const WM_TRAY_ADD: u32 = WM_APP + 5;
+/// The timer that tries an add again while she isn't in.
+const ADD_TIMER: usize = 1;
+const RETRY_MS: u32 = 2000;
+const RETRY_FOR_MS: u64 = 60_000;
 /// Her icon's id (with the GUID; alone where the shell refuses the GUID).
 const UID: u32 = 1;
 /// Enter or Space on her icon: `NIN_SELECT | NINF_KEY`.
@@ -84,6 +95,14 @@ struct State {
     guid: GUID,
     /// The shell took the GUID (else her window and `UID` name the icon).
     by_guid: bool,
+    /// The shell refused her GUID once: by her window since, and her removal deletes by both.
+    fell_back: bool,
+    /// An add timed out: the shell may have taken it after all.
+    timed_out: bool,
+    /// Adds are tried again until then (`tick` ms); None: not trying.
+    retry_until: Option<u64>,
+    /// Out for good (`delete`): no add after it.
+    left: bool,
     /// The shell speaks version 4 (`NIN_SELECT`, `WM_CONTEXTMENU`); else plain mouse messages.
     v4: bool,
     /// When the last `Open` went (`tick` ms): the second click of a double click is the same one.
@@ -92,6 +111,8 @@ struct State {
 
 thread_local! {
     static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
+    /// Her GUID, for a removal that can't wait for her state (`delete_any`).
+    static GUID_NOW: std::cell::Cell<u128> = const { std::cell::Cell::new(0) };
 }
 
 /// Runs `f` on the tray's state. None: there is none, or a call of hers is under way below
@@ -104,11 +125,13 @@ fn busy() -> bool {
     STATE.with(|s| s.try_borrow_mut().is_err())
 }
 
-/// Her icon's GUID, from her exe's path: one per install, kept across runs.
-fn guid() -> GUID {
+/// Her icon's GUID, from her exe's path and her `instance` (`Desktop::tray`): one per install,
+/// kept across runs, and another for another of her.
+fn guid(instance: &str) -> GUID {
     use sha2::{Digest, Sha256};
     let exe = std::env::current_exe().map(|p| p.to_string_lossy().to_lowercase()).unwrap_or_default();
-    let d = Sha256::digest(format!("capri-syn tray icon\0{exe}").as_bytes());
+    let key = if instance.is_empty() { format!("capri-syn tray icon\0{exe}") } else { format!("capri-syn tray icon\0{exe}\0{instance}") };
+    let d = Sha256::digest(key.as_bytes());
     let mut b = [0u8; 16];
     b.copy_from_slice(&d[..16]);
     // A name-based GUID's shape (version 5, variant 1).
@@ -133,16 +156,21 @@ fn tip_w(tip: &str) -> [u16; 128] {
     out
 }
 
-/// Her icon's identity, with `flags`.
-fn nid(h: HWND, s: &State, flags: NOTIFY_ICON_DATA_FLAGS) -> NOTIFYICONDATAW {
+/// An icon of her window's, by `guid`, else by her window and `UID`; with `flags`.
+fn data_for(h: HWND, guid: Option<GUID>, flags: NOTIFY_ICON_DATA_FLAGS) -> NOTIFYICONDATAW {
     NOTIFYICONDATAW {
         cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
         hWnd: h,
         uID: UID,
-        uFlags: if s.by_guid { flags | NIF_GUID } else { flags },
-        guidItem: s.guid,
+        uFlags: if guid.is_some() { flags | NIF_GUID } else { flags },
+        guidItem: guid.unwrap_or_default(),
         ..Default::default()
     }
+}
+
+/// Her icon's identity as the shell knows it now, with `flags`.
+fn nid(h: HWND, s: &State, flags: NOTIFY_ICON_DATA_FLAGS) -> NOTIFYICONDATAW {
+    data_for(h, s.by_guid.then_some(s.guid), flags)
 }
 
 /// Explorer's taskbar is up (the tray is in it).
@@ -155,15 +183,24 @@ fn add(h: HWND, s: &mut State) -> bool {
     let tip = s.shared.lock().map(|g| g.tip.clone()).unwrap_or_default();
     let full = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
     let data = |s: &State| NOTIFYICONDATAW { uCallbackMessage: WM_TRAY, hIcon: s.hicon, szTip: tip_w(&tip), ..nid(h, s, full) };
+    let none = NOTIFY_ICON_DATA_FLAGS(0);
     unsafe {
-        let _ = Shell_NotifyIconW(NIM_DELETE, &nid(h, s, NOTIFY_ICON_DATA_FLAGS(0)));
-        let mut ok = Shell_NotifyIconW(NIM_ADD, &data(s)).as_bool();
-        if !ok && s.by_guid && taskbar_up() {
-            // The shell refused her GUID (it holds it for another path): by her window instead.
-            elog!("synaps-avatar: tray: the shell refused her icon's GUID; by her window instead");
-            s.by_guid = false;
-            ok = Shell_NotifyIconW(NIM_ADD, &data(s)).as_bool();
+        let _ = Shell_NotifyIconW(NIM_DELETE, &data_for(h, Some(s.guid), none));
+        if !s.by_guid {
+            let _ = Shell_NotifyIconW(NIM_DELETE, &data_for(h, None, none));
         }
+        // Read at once: the next call may set its own.
+        let mut ok = Shell_NotifyIconW(NIM_ADD, &data(s)).as_bool();
+        let mut err = if ok { None } else { Some(GetLastError()) };
+        if !ok && s.by_guid && err != Some(ERROR_TIMEOUT) && taskbar_up() {
+            // Refused, not late: the shell holds her GUID for another path. By her window.
+            elog!("synaps-avatar: tray: the shell refused her icon's GUID ({:?}); by her window from now on", err.map(|e| e.0));
+            s.by_guid = false;
+            s.fell_back = true;
+            ok = Shell_NotifyIconW(NIM_ADD, &data(s)).as_bool();
+            err = if ok { None } else { Some(GetLastError()) };
+        }
+        s.timed_out = err == Some(ERROR_TIMEOUT);
         if ok {
             let mut v = data(s);
             v.Anonymous.uVersion = NOTIFYICON_VERSION_4;
@@ -173,13 +210,84 @@ fn add(h: HWND, s: &mut State) -> bool {
     }
 }
 
-/// Out of the tray.
-fn delete(h: HWND, s: &State) {
+/// Why an add is tried, for her log.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Why {
+    Start,
+    Retry,
+    Restart,
+}
+
+/// An add, and what follows from it: shown, logged, and while she isn't in, tried again every
+/// `RETRY_MS` for `RETRY_FOR_MS`.
+fn try_add(h: HWND, s: &mut State, why: Why) {
+    if s.left {
+        return;
+    }
+    let ok = add(h, s);
+    if let Ok(mut g) = s.shared.lock() {
+        g.shown = ok;
+        if why == Why::Restart {
+            g.readded += 1;
+        }
+    }
+    let from = s.shared.lock().map(|g| g.from).unwrap_or_default();
+    let by = if s.by_guid { "by its GUID" } else { "by her window" };
+    if ok {
+        let again = s.retry_until.take().is_some();
+        let _ = unsafe { KillTimer(Some(h), ADD_TIMER) };
+        match why {
+            Why::Restart => elog!("synaps-avatar: tray: Explorer started again; her icon is back"),
+            _ => elog!("synaps-avatar: tray: her icon is in ({} px from {from}, {by}){}", s.px, if again { ", tried again" } else { "" }),
+        }
+        return;
+    }
+    let now = tick();
+    match s.retry_until {
+        None => {
+            s.retry_until = Some(now + RETRY_FOR_MS);
+            let _ = unsafe { SetTimer(Some(h), ADD_TIMER, RETRY_MS, None) };
+            elog!(
+                "synaps-avatar: tray: her icon didn't go in (taskbar up: {}{}); again every {} s for {} s, and when Explorer starts again",
+                taskbar_up(),
+                if s.timed_out { ", timed out" } else { "" },
+                RETRY_MS / 1000,
+                RETRY_FOR_MS / 1000
+            );
+        }
+        Some(until) if now >= until => {
+            let _ = unsafe { KillTimer(Some(h), ADD_TIMER) };
+            elog!("synaps-avatar: tray: her icon still isn't in; again when Explorer starts again");
+        }
+        Some(_) => {}
+    }
+}
+
+/// Out of the tray, once: by the id she has now where she is in (or an add timed out: she may
+/// be), and by her GUID too where she fell back from it. No add after it.
+fn delete(h: HWND, s: &mut State) {
+    if std::mem::replace(&mut s.left, true) {
+        return;
+    }
+    let _ = unsafe { KillTimer(Some(h), ADD_TIMER) };
     let shown = s.shared.lock().map(|mut g| std::mem::replace(&mut g.shown, false)).unwrap_or(true);
-    if shown {
-        unsafe {
+    unsafe {
+        if shown || s.timed_out {
             let _ = Shell_NotifyIconW(NIM_DELETE, &nid(h, s, NOTIFY_ICON_DATA_FLAGS(0)));
         }
+        if s.fell_back {
+            let _ = Shell_NotifyIconW(NIM_DELETE, &data_for(h, Some(s.guid), NOTIFY_ICON_DATA_FLAGS(0)));
+        }
+    }
+}
+
+/// Out of the tray by every id she may have, without her state (it is in use below: the
+/// session ends while a call of hers waits on the shell).
+fn delete_any(h: HWND) {
+    let none = NOTIFY_ICON_DATA_FLAGS(0);
+    unsafe {
+        let _ = Shell_NotifyIconW(NIM_DELETE, &data_for(h, Some(GUID::from_u128(GUID_NOW.get())), none));
+        let _ = Shell_NotifyIconW(NIM_DELETE, &data_for(h, None, none));
     }
 }
 
@@ -280,19 +388,26 @@ fn paint_icon(h: HWND, s: &mut State, px: u32) {
     }
 }
 
-/// The menu as her model laid it out: a row with choices opens them, the lead row is bold.
+/// The menu as her model laid it out: a row with choices opens them, the lead row is bold, what
+/// can't act now is greyed (`TrackPopupMenu` never picks it).
 fn build_menu(items: &[TrayItem]) -> ::windows::core::Result<HMENU> {
     // `&` marks a mnemonic in a menu: hers are written as they read.
     let text = |s: &str| HSTRING::from(s.replace('&', "&&"));
+    let greyed = |f: MENU_ITEM_FLAGS, enabled: bool| if enabled { f } else { f | MF_GRAYED };
     unsafe {
         let m = CreatePopupMenu()?;
         for it in items {
             let r = match it {
-                TrayItem::Item { id, label, checked, lead } => {
-                    let f = if *checked { MF_STRING | MF_CHECKED } else { MF_STRING };
+                TrayItem::Item { id, label, checked, lead, enabled } => {
+                    let f = greyed(if *checked { MF_STRING | MF_CHECKED } else { MF_STRING }, *enabled);
                     AppendMenuW(m, f, *id as usize, &text(label)).and_then(|()| if *lead { SetMenuDefaultItem(m, *id, 0) } else { Ok(()) })
                 }
-                TrayItem::Sub { label, items } => build_menu(items).and_then(|sub| AppendMenuW(m, MF_STRING | MF_POPUP, sub.0 as usize, &text(label))),
+                // A submenu not taken in is ours to destroy.
+                TrayItem::Sub { label, items, enabled } => build_menu(items).and_then(|sub| {
+                    AppendMenuW(m, greyed(MF_STRING | MF_POPUP, *enabled), sub.0 as usize, &text(label)).inspect_err(|_| {
+                        let _ = DestroyMenu(sub);
+                    })
+                }),
                 TrayItem::Rule => AppendMenuW(m, MF_SEPARATOR, 0, PCWSTR::null()),
             };
             if let Err(e) = r {
@@ -367,13 +482,27 @@ fn on_icon(h: HWND, ev: u32, wp: WPARAM) {
 }
 
 unsafe extern "system" fn tray_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
-    let ours = matches!(msg, WM_TRAY | WM_TRAY_TIP | WM_TRAY_ICON | WM_TRAY_REMOVE | WM_COMMAND) || (msg != 0 && msg == TASKBAR_CREATED.load(Ordering::Relaxed));
+    let ours = matches!(msg, WM_TRAY | WM_TRAY_ADD | WM_TRAY_TIP | WM_TRAY_ICON | WM_TRAY_REMOVE | WM_COMMAND) || (msg != 0 && msg == TASKBAR_CREATED.load(Ordering::Relaxed));
     if ours && busy() {
         // Sent while a call of hers waits on the shell: after it.
         let _ = unsafe { PostMessageW(Some(h), msg, wp, lp) };
         return LRESULT(0);
     }
     match msg {
+        WM_TRAY_ADD => {
+            with(|s| try_add(h, s, Why::Start));
+        }
+        // Not yet in: again (a tick while a call of hers waits is skipped; the next one comes).
+        WM_TIMER if wp.0 == ADD_TIMER => {
+            with(|s| {
+                if s.shared.lock().is_ok_and(|g| g.shown) {
+                    s.retry_until = None;
+                    let _ = unsafe { KillTimer(Some(h), ADD_TIMER) };
+                } else {
+                    try_add(h, s, Why::Retry);
+                }
+            });
+        }
         WM_TRAY => on_icon(h, (lp.0 as u32) & 0xffff, wp),
         WM_COMMAND => {
             let id = (wp.0 & 0xffff) as u32;
@@ -400,9 +529,12 @@ unsafe extern "system" fn tray_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -
             with(|s| delete(h, s));
             unsafe { PostQuitMessage(0) };
         }
-        // The session ends: out before the process is stopped.
+        // The session ends: out before the process is stopped, now (a repost would never run),
+        // by every id if her state is in use below.
         WM_ENDSESSION if wp.0 != 0 => {
-            with(|s| delete(h, s));
+            if with(|s| delete(h, s)).is_none() {
+                delete_any(h);
+            }
         }
         WM_DPICHANGED | WM_DISPLAYCHANGE => {
             with(|s| refresh_icon(h, s));
@@ -415,15 +547,14 @@ unsafe extern "system" fn tray_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -
                 }
             });
         }
+        // Explorer started again: its tray is new and empty. In again (and tried again for a
+        // while if it isn't ready).
         m if m != 0 && m == TASKBAR_CREATED.load(Ordering::Relaxed) => {
             with(|s| {
                 refresh_icon(h, s);
-                let ok = add(h, s);
-                if let Ok(mut g) = s.shared.lock() {
-                    g.shown = ok;
-                    g.readded += 1;
-                }
-                elog!("synaps-avatar: tray: Explorer started again; her icon {}", if ok { "is back" } else { "didn't go in" });
+                s.retry_until = None;
+                let _ = unsafe { KillTimer(Some(h), ADD_TIMER) };
+                try_add(h, s, Why::Restart);
             });
         }
         _ => {}
@@ -434,9 +565,11 @@ unsafe extern "system" fn tray_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -
     unsafe { DefWindowProcW(h, msg, wp, lp) }
 }
 
-/// Her icon in the tray, on a thread of its own. Ok once its window is up; the icon itself
-/// goes in now if the taskbar is there, else when Explorer says it started.
-pub(super) fn start(icon: TrayIcon, grant: Arc<AtomicU64>, on: Box<dyn Fn(TrayEv) + Send>) -> Result<WinTray> {
+/// Her icon in the tray, on a thread of its own (`instance`: `Desktop::tray`'s). Ok once its
+/// window is up, before any call to the shell: the icon goes in on that thread right after
+/// (`WM_TRAY_ADD`), and is tried again if it doesn't.
+pub(super) fn start(icon: TrayIcon, instance: &str, grant: Arc<AtomicU64>, on: Box<dyn Fn(TrayEv) + Send>) -> Result<WinTray> {
+    let guid = guid(instance);
     let shared = Arc::new(Mutex::new(Shared::default()));
     let sh = shared.clone();
     let (tx, rx) = std::sync::mpsc::channel::<Result<isize>>();
@@ -463,18 +596,30 @@ pub(super) fn start(icon: TrayIcon, grant: Arc<AtomicU64>, on: Box<dyn Fn(TrayEv
         let px = small_px();
         let made = make_icon(&icon, px);
         let from = made.map_or("Windows' stand-in", |m| m.1);
-        let mut s = State { on, shared: sh, grant, own: made.is_some(), hicon: made.map_or_else(stand_in, |m| m.0), icon, px, guid: guid(), by_guid: true, v4: false, opened_at: 0 };
-        let ok = add(h, &mut s);
-        if let Ok(mut g) = s.shared.lock() {
-            g.shown = ok;
+        if let Ok(mut g) = sh.lock() {
             g.from = from;
         }
-        if ok {
-            elog!("synaps-avatar: tray: her icon is in ({px} px from {from}, {})", if s.by_guid { "by its GUID" } else { "by her window" });
-        } else {
-            elog!("synaps-avatar: tray: her icon didn't go in (taskbar up: {}); again when Explorer says it started", taskbar_up());
-        }
+        let s = State {
+            on,
+            shared: sh,
+            grant,
+            own: made.is_some(),
+            hicon: made.map_or_else(stand_in, |m| m.0),
+            icon,
+            px,
+            guid,
+            by_guid: true,
+            fell_back: false,
+            timed_out: false,
+            retry_until: None,
+            left: false,
+            v4: false,
+            opened_at: 0,
+        };
         STATE.with(|st| *st.borrow_mut() = Some(s));
+        GUID_NOW.set(guid.to_u128());
+        // Her side goes on now; the shell is called from the loop.
+        let _ = unsafe { PostMessageW(Some(h), WM_TRAY_ADD, WPARAM(0), LPARAM(0)) };
         tx.send(Ok(h.0 as isize)).ok();
         let mut msg = MSG::default();
         while unsafe { GetMessageW(&mut msg, None, 0, 0) }.as_bool() {
@@ -571,11 +716,22 @@ mod tests {
         fn drawn_from(&self) -> &'static str {
             self.shared.lock().unwrap().from
         }
+        /// Waits up to 5 s for `f` to hold.
+        fn until(&self, f: impl Fn(&Self) -> bool) -> bool {
+            let end = Instant::now() + Duration::from_secs(5);
+            while !f(self) && Instant::now() < end {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            f(self)
+        }
     }
 
+    /// The test's own instance: never the GUID of a real run of hers on this machine.
+    const TEST: &str = "tray test";
+
     /// Her icon as the shell knows it (by the GUID, which a fresh start always gets here).
-    fn ident(h: HWND) -> NOTIFYICONIDENTIFIER {
-        NOTIFYICONIDENTIFIER { cbSize: std::mem::size_of::<NOTIFYICONIDENTIFIER>() as u32, hWnd: h, uID: UID, guidItem: guid() }
+    fn found_by(h: HWND) -> NOTIFYICONIDENTIFIER {
+        NOTIFYICONIDENTIFIER { cbSize: std::mem::size_of::<NOTIFYICONIDENTIFIER>() as u32, hWnd: h, uID: UID, guidItem: guid(TEST) }
     }
 
     /// Every pick in a menu, top to bottom, choices in place.
@@ -596,7 +752,9 @@ mod tests {
     }
 
     /// build.rs put assets/icon/capri-syn.ico in this exe as icon group 1, every image of it:
-    /// Windows picks the 16 px one for 16 px and the 256 one for 256.
+    /// Windows picks the 16 px one for 16 px and the 256 one for 256. (MSVC's linker takes the
+    /// .res; a -gnu build has none and draws her picture.)
+    #[cfg(target_env = "msvc")]
     #[test]
     fn her_exe_carries_her_icon() {
         use ::windows::Win32::System::LibraryLoader::{FindResourceW, LoadResource, LockResource, SizeofResource};
@@ -628,8 +786,17 @@ mod tests {
     }
 
     #[test]
+    fn a_guid_per_install_and_instance() {
+        assert_eq!(guid(""), guid(""), "kept across runs");
+        assert_ne!(guid(""), guid(TEST));
+        assert_ne!(guid(TEST), guid("C:\\other\\synaps-avatar.sock"));
+        let b = guid("").to_u128().to_be_bytes();
+        assert_eq!((b[6] >> 4, b[8] >> 6), (5, 2), "a name-based GUID's shape");
+    }
+
+    #[test]
     fn the_menu_is_drawn_as_her_model_lays_it_out() {
-        let s = Menu { hidden: true, dnd: Some(false), attention: Some(Attention::HangOnly), handsfree: Some(false), quit_armed: false };
+        let s = Menu { hidden: true, dnd: Some(false), attention: Some(Attention::HangOnly), handsfree: Some(false), ..Menu::default() };
         let items = menu::tray_items(&menu::rows(&s));
         let m = build_menu(&items).unwrap();
         unsafe {
@@ -640,7 +807,7 @@ mod tests {
                     TrayItem::Item { id, label, .. } => {
                         assert_eq!((GetMenuItemID(m, i as i32), text(m, i as u32)), (*id, label.clone()));
                     }
-                    TrayItem::Sub { label, items } => {
+                    TrayItem::Sub { label, items, .. } => {
                         assert_eq!(text(m, i as u32), *label);
                         let sub = GetSubMenu(m, i as i32);
                         assert!(!sub.is_invalid());
@@ -656,29 +823,71 @@ mod tests {
         }
     }
 
-    /// The tray icon on the runner's own taskbar: in (her exe's icon), found, every menu pick and
-    /// a click back through her window's own path to the commands the view dispatches
-    /// (`menu_do`, the Line), his own .ico taken, in again after Explorer says it started, then
-    /// out with nothing left.
+    /// While she quits, every row but QUIT is greyed (ATTENTION's choices with it).
+    #[test]
+    fn what_cant_act_now_is_greyed_in_the_tray() {
+        let s = Menu { quitting: true, dnd: Some(false), attention: Some(Attention::Mix), handsfree: Some(false), ..Menu::default() };
+        let items = menu::tray_items(&menu::rows(&s));
+        let m = build_menu(&items).unwrap();
+        unsafe {
+            let mut greyed = Vec::new();
+            for (i, it) in items.iter().enumerate() {
+                let g = GetMenuState(m, i as u32, MF_BYPOSITION) & MF_GRAYED.0 != 0;
+                match it {
+                    TrayItem::Item { label, .. } => greyed.push((label.clone(), g)),
+                    TrayItem::Sub { label, .. } => {
+                        greyed.push((label.clone(), g));
+                        let sub = GetSubMenu(m, i as i32);
+                        assert!((0..3).all(|j| GetMenuState(sub, j, MF_BYPOSITION) & MF_GRAYED.0 != 0));
+                    }
+                    TrayItem::Rule => {}
+                }
+            }
+            let live: Vec<&str> = greyed.iter().filter(|(_, g)| !g).map(|(l, _)| l.as_str()).collect();
+            assert_eq!(live, ["QUIT"], "{greyed:?}");
+            DestroyMenu(m).unwrap();
+        }
+    }
+
+    /// The tray icon on the runner's own taskbar: in (her exe's icon) after `start` has
+    /// returned, found, every menu pick and a click back through her window's own path to the
+    /// commands the view dispatches (`menu_do`, the Line), his own .ico taken, in again after
+    /// Explorer says it started, then out with nothing left. CI only (`CI`; `SA_TRAY_TEST=1`
+    /// elsewhere): it puts a real icon in the tray of whoever runs it.
     #[test]
     fn her_tray_icon_comes_answers_and_goes() {
+        if std::env::var_os("CI").is_none() && std::env::var_os("SA_TRAY_TEST").is_none() {
+            elog!("tray test: skipped (not CI; SA_TRAY_TEST=1 runs it here)");
+            return;
+        }
         let (tx, rx) = mpsc::channel();
         let grant = Arc::new(AtomicU64::new(0));
-        let icon = crate::brand::icon().tray();
-        assert!(icon.file.is_none(), "the runner has an icon of his");
+        let own = crate::brand::own();
+        let icon = TrayIcon { file: None, stamp: 0, w: own.width(), h: own.height(), rgba: own.into_raw() };
         let on: Box<dyn Fn(TrayEv) + Send> = Box::new(move |e| {
             tx.send(e).ok();
         });
-        let t = start(icon, grant.clone(), on).unwrap();
+        let t0 = Instant::now();
+        let t = start(icon, TEST, grant.clone(), on).unwrap();
+        let returned = t0.elapsed();
         let h = t.h();
+        let shown = t.until(|t| t.shown());
         // On the runner's log (elog: not captured).
-        elog!("tray test: taskbar up: {}, icon in: {}, found at: {:?}", taskbar_up(), t.shown(), unsafe { Shell_NotifyIconGetRect(&ident(h)) });
-        assert!(t.shown(), "Shell_NotifyIconW(NIM_ADD) returned FALSE");
-        assert_eq!(t.drawn_from(), "her exe");
-        let found = unsafe { Shell_NotifyIconGetRect(&ident(h)) }.is_ok();
+        elog!(
+            "tray test: start returned in {} ms, icon in after {} ms: {shown}; taskbar up: {}, found at: {:?}",
+            returned.as_millis(),
+            t0.elapsed().as_millis(),
+            taskbar_up(),
+            unsafe { Shell_NotifyIconGetRect(&found_by(h)) }
+        );
+        assert!(shown, "Shell_NotifyIconW(NIM_ADD) returned FALSE");
+        if cfg!(target_env = "msvc") {
+            assert_eq!(t.drawn_from(), "her exe");
+        }
+        let found = unsafe { Shell_NotifyIconGetRect(&found_by(h)) }.is_ok();
 
         // What the core sends.
-        t.set_tip(&crate::brand::tooltip("ONLINE"));
+        t.set_tip(&crate::brand::tooltip("ONLINE", false));
         let s = Menu { dnd: Some(false), attention: Some(Attention::Mix), handsfree: Some(false), ..Menu::default() };
         let items = menu::tray_items(&menu::rows(&s));
         t.set_menu(items.clone());
@@ -710,11 +919,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("icon.ico");
         image::RgbaImage::from_pixel(32, 32, image::Rgba([0x20, 0x80, 0xff, 0xff])).save(&file).unwrap();
-        t.set_icon(TrayIcon { file: Some(file), w: 1, h: 1, rgba: Vec::new() });
-        let end = Instant::now() + Duration::from_secs(5);
-        while t.repainted() == 0 && Instant::now() < end {
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        t.set_icon(TrayIcon { file: Some(file), stamp: 1, w: 1, h: 1, rgba: Vec::new() });
+        t.until(|t| t.repainted() > 0);
         assert_eq!((t.repainted(), t.drawn_from(), t.shown()), (1, "his file", true), "NIM_MODIFY with his icon returned FALSE");
         std::fs::remove_dir_all(dir).ok();
 
@@ -726,7 +932,7 @@ mod tests {
         t.remove();
         assert!(!t.shown());
         assert!(!unsafe { IsWindow(Some(h)) }.as_bool());
-        let after = unsafe { Shell_NotifyIconGetRect(&ident(h)) };
+        let after = unsafe { Shell_NotifyIconGetRect(&found_by(h)) };
         elog!("tray test: removed; found at: {after:?}");
         if found {
             assert!(after.is_err(), "no ghost");

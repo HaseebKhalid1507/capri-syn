@@ -248,9 +248,11 @@ pub fn local_day(unix: f64) -> Option<(i32, i32)> {
 ///   are; `Event "clicked"` → `TrayEv::Pick(id)`). `Activate` → `TrayEv::Open`.
 /// - The returned `Tray`: `set_tip` → `NewToolTip`, `set_icon` → `NewIcon`, `set_menu` →
 ///   `LayoutUpdated`, `remove` → the name released (the watcher drops the item).
+/// - Its bus name `org.kde.StatusNotifierItem-<pid>-1`; `instance` goes in its `Id`, so two of
+///   her (another control socket) show as two.
 /// - No watcher on the bus (`NameHasOwner` false; plain i3bar has only an XEmbed tray, GNOME
 ///   needs the AppIndicator extension): Ok(None), as now; the restore chip stays the way back.
-pub fn tray(_icon: super::TrayIcon, _on: Box<dyn Fn(super::TrayEv) + Send>) -> anyhow::Result<Option<Box<dyn super::Tray>>> {
+pub fn tray(_icon: super::TrayIcon, _instance: &str, _on: Box<dyn Fn(super::TrayEv) + Send>) -> anyhow::Result<Option<Box<dyn super::Tray>>> {
     Ok(None)
 }
 

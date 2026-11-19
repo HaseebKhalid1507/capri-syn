@@ -56,6 +56,9 @@ pub(super) struct ArriveState {
     pub unfold: Option<Instant>,
     /// A drawn touchdown is painted a frame before it shows (outside her shape).
     pub prepaint: bool,
+    /// Her icon as her windows have it (`set_icon_on`): what it was made from and its
+    /// `_NET_WM_ICON`. Made once, again only when `icon_reload` finds another icon.
+    icon: std::cell::RefCell<Option<(std::sync::Arc<crate::brand::Icon>, std::rc::Rc<Vec<u32>>)>>,
 }
 
 impl ArriveState {
@@ -595,36 +598,56 @@ impl Avatar {
 
     // ---- the icon -----------------------------------------------------------------------------
 
-    /// Her icon (`brand::icon`: his own, else the capri-syn icon) on window `xid` as
-    /// `_NET_WM_ICON` (48 and 32 px).
+    /// Her icon (`brand::icon`) on window `xid` as `_NET_WM_ICON` (48 and 32 px), where her
+    /// windows carry one (`Os::window_icons`: X11). Made from the icon read at start, the first
+    /// time; again only after `icon_reload` found another.
     pub(super) fn set_icon_on(&self, xid: u32) {
-        self.icon_on(xid, &crate::brand::icon().img);
-    }
-
-    /// Her icon read again (`settings reload`: his own put in or taken out): her tray's, her
-    /// body's. The Line reads it when it opens.
-    pub(super) fn icon_reload(&self) {
-        let i = crate::brand::icon();
-        if self.os.tray_icon(i.tray()) {
-            elog!("synaps-avatar: tray: her icon is now {}", i.source());
+        if !self.os.window_icons() {
+            return;
         }
-        let body = self.os.body();
-        if body != 0 {
-            self.icon_on(body, &i.img);
-        }
-    }
-
-    fn icon_on(&self, xid: u32, img: &image::RgbaImage) {
-        let mut data: Vec<u32> = Vec::new();
-        for n in [48u32, 32] {
-            let s = image::imageops::resize(img, n, n, image::imageops::FilterType::Lanczos3);
-            data.extend([n, n]);
-            data.extend(s.pixels().map(|p| (p[3] as u32) << 24 | (p[0] as u32) << 16 | (p[1] as u32) << 8 | p[2] as u32));
-        }
+        let data = {
+            let mut c = self.arrive.icon.borrow_mut();
+            let (_, data) = c.get_or_insert_with(|| {
+                let i = crate::brand::icon(crate::brand::pack_icon(&self.pack).as_deref());
+                let d = std::rc::Rc::new(net_wm_icon(&i.img));
+                (i, d)
+            });
+            data.clone()
+        };
         if let Err(e) = self.os.set_icon(xid, &data) {
             elog!("synaps-avatar: icon on 0x{xid:x}: {e:#}");
         }
     }
+
+    /// Her icon read again (`settings reload`): only a file it comes from that changed (his,
+    /// her pack's: path, length, time) is decoded, and only another icon is told: to her tray,
+    /// to her body (the Line has it when it next opens).
+    pub(super) fn icon_reload(&self) {
+        let i = crate::brand::icon(crate::brand::pack_icon(&self.pack).as_deref());
+        if self.os.tray_icon(i.tray()) {
+            elog!("synaps-avatar: tray: her icon is now {}", i.source());
+        }
+        let same = self.arrive.icon.borrow().as_ref().is_none_or(|(had, _)| std::sync::Arc::ptr_eq(had, &i));
+        if same {
+            return;
+        }
+        *self.arrive.icon.borrow_mut() = None;
+        let body = self.os.body();
+        if body != 0 {
+            self.set_icon_on(body);
+        }
+    }
+}
+
+/// `_NET_WM_ICON` for `img`: 48 and 32 px, each (w, h, ARGB pixels...).
+fn net_wm_icon(img: &image::RgbaImage) -> Vec<u32> {
+    let mut data: Vec<u32> = Vec::new();
+    for n in [48u32, 32] {
+        let s = image::imageops::resize(img, n, n, image::imageops::FilterType::Lanczos3);
+        data.extend([n, n]);
+        data.extend(s.pixels().map(|p| (p[3] as u32) << 24 | (p[0] as u32) << 16 | (p[1] as u32) << 8 | p[2] as u32));
+    }
+    data
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

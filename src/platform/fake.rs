@@ -161,7 +161,7 @@ impl Desktop for FakeDesktop {
         Ok(())
     }
     fn arm_clicks(&self, _on: bool) {}
-    fn tray(&self, _icon: super::TrayIcon, _on: Box<dyn Fn(super::TrayEv) + Send>) -> Result<Option<Box<dyn super::Tray>>> {
+    fn tray(&self, _icon: super::TrayIcon, _instance: &str, _on: Box<dyn Fn(super::TrayEv) + Send>) -> Result<Option<Box<dyn super::Tray>>> {
         Ok(Some(Box::new(FakeTray(self.0.clone()))))
     }
 }
@@ -427,26 +427,37 @@ fn contract_fake_keyboard_on_his_input() {
 #[test]
 fn the_tray_hears_only_changes() {
     use crate::menu::{State, rows, tray_items};
+    use std::cell::Cell;
     let (os, d) = fake(true);
-    os.tray_show("capri-syn · ONLINE", Vec::new());
-    assert!(!os.has_tray() && d.0.w().tray.is_empty(), "no tray yet: nothing told");
-    let icon = |n: u32| super::TrayIcon { file: None, w: n, h: n, rgba: vec![0; (n * n * 4) as usize] };
-    assert!(os.start_tray(icon(256), |_| {}).unwrap() && os.has_tray());
-    let menu = |s: State| tray_items(&rows(&s));
+    let made = Cell::new(0);
+    let show = |key: u64, tip: &str, s: State| {
+        os.tray_show(key, || {
+            made.set(made.get() + 1);
+            (tip.to_string(), tray_items(&rows(&s)))
+        })
+    };
+    show(1, "capri-syn · ONLINE", State::default());
+    assert!(!os.has_tray() && d.0.w().tray.is_empty() && made.get() == 0, "no tray yet: nothing made, nothing told");
+    let icon = |stamp: u64, n: u32| super::TrayIcon { file: None, stamp, w: n, h: n, rgba: vec![0; (n * n * 4) as usize] };
+    assert!(os.start_tray(icon(7, 256), "", |_| {}).unwrap() && os.has_tray());
     for _ in 0..3 {
-        os.tray_show("capri-syn · ONLINE", menu(State::default()));
+        show(1, "capri-syn · ONLINE", State::default());
     }
-    os.tray_show("capri-syn · SLEEPING", menu(State::default()));
-    os.tray_show("capri-syn · SLEEPING", menu(State { hidden: true, ..State::default() }));
-    // His own icon put in (`settings reload`); the same again is no news.
-    assert!(!os.tray_icon(icon(256)));
-    assert!(os.tray_icon(icon(48)) && !os.tray_icon(icon(48)));
+    assert_eq!(made.get(), 1, "the same key: made once");
+    // A new key: made again, and only what changed is told.
+    show(2, "capri-syn · ONLINE", State::default());
+    show(3, "capri-syn · SLEEPING", State::default());
+    show(4, "capri-syn · HIDDEN", State { hidden: true, ..State::default() });
+    assert_eq!(made.get(), 4);
+    // His own icon put in (`settings reload`); the same stamp again is no news.
+    assert!(!os.tray_icon(icon(7, 256)));
+    assert!(os.tray_icon(icon(8, 48)) && !os.tray_icon(icon(8, 48)));
     os.tray_remove();
     os.tray_remove();
-    os.tray_show("capri-syn · ONLINE", menu(State::default()));
-    assert!(!os.tray_icon(icon(32)));
+    show(5, "capri-syn · ONLINE", State::default());
+    assert!(!os.tray_icon(icon(9, 32)));
     assert!(!os.has_tray());
-    assert_eq!(d.0.w().tray, ["tip capri-syn · ONLINE", "menu 6 lead ", "tip capri-syn · SLEEPING", "menu 6 lead SHOW", "icon 48x48", "remove"]);
+    assert_eq!(d.0.w().tray, ["tip capri-syn · ONLINE", "menu 6 lead ", "tip capri-syn · SLEEPING", "tip capri-syn · HIDDEN", "menu 6 lead SHOW", "icon 48x48", "remove"]);
 }
 
 #[test]

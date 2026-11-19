@@ -474,8 +474,8 @@ impl Desktop for X11 {
     }
 
     /// None yet (`linux::tray`: where a StatusNotifierItem goes).
-    fn tray(&self, icon: super::TrayIcon, on: Box<dyn Fn(super::TrayEv) + Send>) -> Result<Option<Box<dyn super::Tray>>> {
-        super::linux::tray(icon, on)
+    fn tray(&self, icon: super::TrayIcon, instance: &str, on: Box<dyn Fn(super::TrayEv) + Send>) -> Result<Option<Box<dyn super::Tray>>> {
+        super::linux::tray(icon, instance, on)
     }
 
     /// MIT-SCREEN-SAVER.
@@ -739,6 +739,10 @@ impl Stage for Arc<X11> {
         self.conn.change_property32(xproto::PropMode::REPLACE, s, atom, xproto::AtomEnum::CARDINAL, data)?;
         self.conn.flush()?;
         Ok(())
+    }
+
+    fn window_icons(&self) -> bool {
+        true
     }
 
     /// Server-painted override-redirect windows: `background_pixel` and a bounding shape, an

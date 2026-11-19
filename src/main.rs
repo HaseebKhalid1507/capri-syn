@@ -426,20 +426,25 @@ fn run(t_start: Instant) -> Result<()> {
                 .ok();
             }
             // Her icon in the tray (Windows' notification area; none on Linux yet): a click is
-            // her summon key's tap, its menu is her menu (`menu`). The icon: his own, else the
-            // capri-syn icon (`brand::icon`).
-            let tx = tx2.clone();
-            let icon = brand::icon();
-            if icon.file.is_some() {
-                elog!("synaps-avatar: her icon: {}", icon.source());
-            }
-            if let Err(e) = os.start_tray(icon.tray(), move |ev| {
-                if let Some(cmd) = menu::command_for(ev) {
-                    let (r, _) = std::sync::mpsc::channel();
-                    tx.send_blocking((cmd, r)).ok();
+            // her summon key's tap, its menu is her menu (`menu`). The icon by its one rule
+            // (`brand::icon`). Never under test. Another of her on another control socket
+            // (`XDG_RUNTIME_DIR`) has an icon of her own.
+            if std::env::var_os("SA_BRAIN_SYNTH").is_none() {
+                let tx = tx2.clone();
+                let icon = brand::icon(brand::pack_icon(&pack2).as_deref());
+                if icon.file.is_some() {
+                    elog!("synaps-avatar: her icon: {}", icon.source());
                 }
-            }) {
-                elog!("synaps-avatar: tray: {e:#} (HIDE's chip still brings her back)");
+                let instance = std::env::var_os("XDG_RUNTIME_DIR").map(|_| control::socket_path().display().to_string()).unwrap_or_default();
+                if let Err(e) = os.start_tray(icon.tray(), &instance, move |ev| {
+                    if let Some(cmd) = menu::command_for(ev) {
+                        let (r, _) = std::sync::mpsc::channel();
+                        // Unbounded: never waits (this runs on the tray's thread).
+                        tx.try_send((cmd, r)).ok();
+                    }
+                }) {
+                    elog!("synaps-avatar: tray: {e:#} (HIDE's chip still brings her back)");
+                }
             }
             // Real LISTENING: his media players, as the OS reports them. Tests see only their
             // own fake player (SA_MPRIS_ONLY), never his.

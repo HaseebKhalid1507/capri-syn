@@ -32,7 +32,7 @@ $subsystem = [BitConverter]::ToUInt16($pe, [BitConverter]::ToInt32($pe, 0x3C) + 
 if (-not $NoCargo -and $subsystem -ne 2) { throw "synaps-avatar.exe is not windowed (subsystem $subsystem)" }
 if ($subsystem -ne 2) { Write-Warning "synaps-avatar.exe is a console build (subsystem $subsystem): a console window will open with her" }
 
-# Her icon: not her art (that stays in his packs), a mark in her colours: her red bolt on her black.
+# The installer's icon, for now: a mark in her colours, her red bolt on her black (her exe carries capri-syn's, assets\icon).
 $png = Join-Path $work 'synaps-avatar.png'
 $ico = Join-Path $work 'synaps-avatar.ico'
 magick -size 256x256 xc:none `
