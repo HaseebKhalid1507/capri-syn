@@ -755,7 +755,7 @@ mod tests {
         assert_eq!(model_label("groq/llama-3.1-8b-instant"), "LLAMA 3.1 8B");
         assert_eq!(model_label("groq/qwen-x"), "QWEN-X", "not in the table: itself");
         assert_eq!(model_spoken("claude-opus-5-5"), "Opus 5.5");
-        assert_eq!(model_spoken("openai-codex/gpt-5.4-mini"), "5.4 Mini");
+        assert_eq!(model_spoken("openai-codex/gpt-5.4-mini"), "GPT-5.4 Mini");
         assert_eq!(model_spoken("openai-codex/gpt-5.5"), "GPT-5.5");
         assert_eq!(model_spoken("kimi-code/k3-256k"), "K3 256K");
     }

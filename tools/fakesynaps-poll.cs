@@ -14,18 +14,21 @@ static class FakeSynaps
 {
     static int Main(string[] args)
     {
-        var browser = Process.Start(new ProcessStartInfo("ping.exe", "-n 900 127.0.0.1") { UseShellExecute = false, CreateNoWindow = true });
-        var pids = Environment.GetEnvironmentVariable("FAKE_SYNAPS_PIDS");
-        if (!string.IsNullOrEmpty(pids))
-        {
-            File.AppendAllText(pids, Process.GetCurrentProcess().Id + "\n" + browser.Id + "\n");
-        }
         const string E = "\u001b";
         var err = Console.Error;
         err.Write("\n" + E + "[1mGitHub Copilot device login" + E + "[0m\n");
         err.Write("  Enter code: " + E + "[36mFAKE-P0LL" + E + "[0m\n");
         err.Write("  At:         " + E + "[36mhttps://github.com/login/device" + E + "[0m\n\n");
         err.Flush();
+        // Its "browser" only once she has had time to put this process in her job (her spawn, then
+        // the assign): started before that, it was never in the job and its surviving proves nothing.
+        Thread.Sleep(1500);
+        var browser = Process.Start(new ProcessStartInfo("ping.exe", "-n 900 127.0.0.1") { UseShellExecute = false, CreateNoWindow = true });
+        var pids = Environment.GetEnvironmentVariable("FAKE_SYNAPS_PIDS");
+        if (!string.IsNullOrEmpty(pids))
+        {
+            File.AppendAllText(pids, Process.GetCurrentProcess().Id + "\n" + browser.Id + "\n");
+        }
         while (true)
         {
             Thread.Sleep(1000);

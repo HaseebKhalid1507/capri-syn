@@ -664,16 +664,17 @@ $Scenes = [ordered]@{
         # started a "browser" and polls on whatever its stdin does: her job object must end it
         # (it's what she starts), and only it (the browser it started stays).
         crash  = {
-            $exe = Join-Path $Root 'fakesynaps-poll.exe'
-            if (-not (Test-Path $exe)) {
+            # $poll, not $exe: names are case-blind, and $exe would hide the script's -Exe (her).
+            $poll = Join-Path $Root 'fakesynaps-poll.exe'
+            if (-not (Test-Path $poll)) {
                 New-Item -ItemType Directory -Force -Path $Root | Out-Null
                 $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
-                $said = & $csc /nologo /out:$exe (Join-Path $Tools 'fakesynaps-poll.cs') 2>&1
+                $said = & $csc /nologo /out:$poll (Join-Path $Tools 'fakesynaps-poll.cs') 2>&1
                 if ($LASTEXITCODE -ne 0) { throw "csc: $said" }
             }
             $pids = Join-Path $Root 'brain-crash-pids.txt'
             Remove-Item $pids -ErrorAction SilentlyContinue
-            Start-Take brain crash -Local -Model 'claude-sonnet-4-6' -History $Short -SynapsExe $exe -Env @{
+            Start-Take brain crash -Local -Model 'claude-sonnet-4-6' -History $Short -SynapsExe $poll -Env @{
                 FAKE_SYNAPS_PIDS = $pids; SA_CLIP_FILE = (Join-Path $Root 'brain-crash-clip.txt'); SA_URL_FILE = (Join-Path $Root 'brain-crash-url.txt')
             }
             $null = Ctl 'brain off'
@@ -684,6 +685,8 @@ $Scenes = [ordered]@{
             Key 'down'; Key 'down'; Key 'down' 600
             Key 'enter' 1500
             if (-not (Wait-Until { (State).line.mind.signing.code } 15 'its code')) { $script:Fails.Add("${script:Take}: no code shown") }
+            # Its browser starts after its code (once it's in her job): both pids written.
+            $null = Wait-Until { @(Get-Content $pids -ErrorAction SilentlyContinue).Count -ge 2 } 10 'its pid and its browser''s'
             $synaps, $browser = @(Get-Content $pids -ErrorAction SilentlyContinue)[0, 1]
             if (-not $synaps -or -not $browser -or -not (Get-Process -Id $synaps -ErrorAction SilentlyContinue) -or -not (Get-Process -Id $browser -ErrorAction SilentlyContinue)) {
                 $script:Fails.Add("${script:Take}: its synaps login (pid $synaps) or its browser (pid $browser) isn't running")
