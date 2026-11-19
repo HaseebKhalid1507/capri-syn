@@ -37,6 +37,9 @@ toml = "0.8"
 toml_edit = "0.22"
 # Cutting a header label never mid-character (already in the lock through GPUI).
 unicode-segmentation = "1"
+# A sign-in page checked before she opens it (its host, path, no userinfo or port); already in
+# the lock through GPUI.
+url = "2"
 
 # The Linux desktops (src/platform/x11, src/platform/hypr) and services (src/platform/linux).
 [target.'cfg(target_os = "linux")'.dependencies]

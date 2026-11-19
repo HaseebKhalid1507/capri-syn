@@ -5,6 +5,7 @@
 use super::*;
 use crate::beside::{self, Panel, Place};
 use crate::line::{Ask, Line, Page, Pref, Prefs, Row, Snap, Who};
+use crate::provider::signin::Signing;
 use crate::provider::{self, Kind};
 use crate::session::Creds;
 use crate::settings::{Attention, Settings, WriteQueue};
@@ -174,6 +175,8 @@ fn model_held(sent: bool, has: bool, blocked: bool) -> Option<&'static str> {
 pub(super) struct PrefJob {
     pub pref: Pref,
     pub menu: bool,
+    /// Her bubble says it too once it's in (a sign-in's switch: "Opus 5.5 it is").
+    pub aloud: bool,
 }
 
 pub(super) struct LineWin {
@@ -622,7 +625,7 @@ impl Avatar {
                     Row { who: Who::Tool, text: format!("{name} {mark}"), detail: crate::session::one_line(&t.input, 110), streaming: false }
                 }
                 K::Notice => Row { who: Who::Sys, text: it.text.trim().to_string(), detail: String::new(), streaming: false },
-                K::Error => error_row(&it.text, s.link.model()),
+                K::Error => error_row(&it.text, s.link.model(), s.link.unpicked_error(it.id)),
                 _ => continue,
             };
             rows.push(row);
@@ -670,6 +673,133 @@ impl Avatar {
             mind: self.mind_now(),
             says: self.prefs_says.clone(),
             new: self.unseen.strip.as_ref().filter(|u| !u.refused).map_or(0, |u| u.n),
+            signing: self.signing.clone(),
+        }
+    }
+
+    /// A sign-in from her Brain screen (`signin`): Synaps' `login` with no window, his browser
+    /// opened by Synaps; `key`: an API key, to it on its stdin. One at a time: another asked
+    /// stops the one running. Not for a daemon on another machine (a login here isn't its).
+    pub(super) fn sign_in(&mut self, p: &'static provider::Provider, key: Option<crate::session::Secret>, cx: &mut Context<Self>) {
+        let ((profile, _), here) = self.session.as_ref().map_or(((None, None), false), |s| (s.link.daemon_at(), s.link.local()));
+        if let Some(mut r) = self.signin.take() {
+            r.kill();
+        }
+        self.signing = None;
+        if here {
+            let exe = provider::daemon_exe(&synaps_client::discovery::run_dir(), profile.as_deref()).unwrap_or_else(|| std::path::PathBuf::from("synaps"));
+            match provider::signin::Run::start(&exe, profile.as_deref(), p, key.as_ref().map(|k| k.0.as_str())) {
+                Ok(r) => {
+                    elog!("synaps-avatar: sign-in: {} started{}", p.id, if key.is_some() { " (a key)" } else { "" });
+                    self.signin = Some(r);
+                    self.signing = Some(Signing::new(p.id));
+                    let said = if key.is_some() { format!("Saving your {} key.", p.name) } else { format!("Your browser's open: sign in to {} there.", p.name) };
+                    if key.is_none() {
+                        self.say(said.clone(), Instant::now());
+                    }
+                    self.prefs_says = Some(said);
+                }
+                Err(e) => {
+                    elog!("synaps-avatar: sign-in: {} didn't start: {e}", p.id);
+                    let why = provider::signin::why(&e.to_string());
+                    self.prefs_says = Some(format!("Couldn't run synaps login: {why}."));
+                    self.signing = Some(Signing { failed: Some(why), ..Signing::new(p.id) });
+                }
+            }
+        }
+        self.line_push(cx);
+        self.schedule(cx);
+    }
+
+    /// The sign-in running stops: Synaps killed.
+    pub(super) fn sign_in_stop(&mut self, cx: &mut Context<Self>) {
+        if let Some(mut r) = self.signin.take() {
+            r.kill();
+            elog!("synaps-avatar: sign-in: {} stopped", r.provider.id);
+            self.prefs_says = Some("Stopped. Nothing's signed in.".into());
+        }
+        self.signing = None;
+        self.line_push(cx);
+    }
+
+    /// The tick's part: what the sign-in running said (its code, its page, its end). Never its
+    /// code or URL in her log.
+    pub(super) fn sign_in_tick(&mut self, now: Instant, cx: &mut Context<Self>) {
+        let Some(r) = &mut self.signin else { return };
+        let p = r.provider;
+        let evs = r.poll(now);
+        if evs.is_empty() {
+            return;
+        }
+        for ev in evs {
+            match ev {
+                provider::signin::Ev::Code(code) => {
+                    elog!("synaps-avatar: sign-in: {} has a code to type", p.id);
+                    // Copilot's page doesn't carry it: he types it there, so it's copied. Kimi's and
+                    // Muse's carry theirs: shown to check against.
+                    self.prefs_says = Some(if p.id == "github-copilot" {
+                        copy_text(code.clone(), cx);
+                        format!("GitHub's page is open: type {code} there. It's on your clipboard.")
+                    } else {
+                        format!("{}'s page is open: check it shows {code}.", p.name)
+                    });
+                    if let Some(s) = &mut self.signing {
+                        s.code = Some(code);
+                    }
+                }
+                provider::signin::Ev::Url(u) => {
+                    // Its own sign-in page only (`allowed`, as parsed): opened whole where
+                    // Synaps' was cut (Windows), and kept for the Brain screen's row that opens it
+                    // again.
+                    if let Some(page) = provider::signin::reopen(cfg!(windows), p, &u) {
+                        elog!("synaps-avatar: sign-in: {} page opened whole (Synaps' was cut at its &)", p.id);
+                        self.line_ask(Ask::OpenUrl(page), cx).ok();
+                    }
+                    if let Some(page) = provider::signin::allowed(p, &u)
+                        && let Some(s) = &mut self.signing
+                    {
+                        s.url = Some(page);
+                    }
+                }
+                provider::signin::Ev::Done(Ok(())) => {
+                    elog!("synaps-avatar: sign-in: {} signed in", p.id);
+                    self.signin = None;
+                    self.signing = None;
+                    self.signed_in(p, now, cx);
+                }
+                provider::signin::Ev::Done(Err(why)) => {
+                    elog!("synaps-avatar: sign-in: {} didn't work: {why}", p.id);
+                    self.signin = None;
+                    let said = format!("Couldn't sign in to {}: {why}.", p.name);
+                    // Her bubble: why, and the line that does it in a terminal (a chip, copied
+                    // on a click). The page's ⏎ AGAIN is the other way.
+                    self.say(format!("{said} Again from Settings, or in a terminal:\n`{}`", self.mind_now().login_cmd(Some(p))), now);
+                    self.prefs_says = Some(said);
+                    self.signing = Some(Signing { failed: Some(why), ..Signing::new(p.id) });
+                }
+            }
+        }
+        self.line_push(cx);
+    }
+
+    /// Signed in from her: the logins here and her own read again now, and her model on the
+    /// account (its default), unless she's on it already or her model is locked.
+    fn signed_in(&mut self, p: &'static provider::Provider, now: Instant, cx: &mut Context<Self>) {
+        self.brain_look.stale();
+        self.look_at_brain(cx);
+        if let Some(s) = &mut self.session {
+            s.link.creds_now(now);
+        }
+        let m = self.mind_now();
+        // Its default model, once its write is in: "X it is" said then, not before.
+        let said = format!("Signed in to {}.", p.name);
+        self.say(said.clone(), now);
+        self.prefs_says = Some(said);
+        if let Some(d) = p.models.first()
+            && m.provider() != Some(p)
+            && m.lock.is_none()
+        {
+            self.settings_write(PrefJob { pref: Pref::Model(d.0), menu: false, aloud: true }, cx);
         }
     }
 
@@ -677,7 +807,14 @@ impl Avatar {
     /// its login, what locks it, and the last look (`look_at_brain`).
     pub(super) fn mind_now(&self) -> provider::Status {
         let look = &self.brain_look;
-        let mut m = provider::Status { signed: look.signed.clone(), synaps: look.synaps.clone(), local: look.local.clone(), gemini: look.gemini, ..provider::Status::default() };
+        let mut m = provider::Status {
+            signed: look.signed.clone(),
+            synaps: look.synaps.clone(),
+            local: look.local.clone(),
+            gemini: look.gemini,
+            windows: cfg!(windows),
+            ..provider::Status::default()
+        };
         let Some(s) = &self.session else { return m };
         m.model = crate::line::asked_model(self.prefs_io.pending().map(|j| &j.pref), s.link.model_on_way().or(s.link.model()));
         m.signed_in = match s.link.creds() {
@@ -694,6 +831,7 @@ impl Avatar {
         };
         m.here = s.link.local();
         m.tried = s.link.local_tried().map(str::to_string);
+        m.expired = s.link.trouble() == Some(&crate::session::Trouble::LoggedOut);
         m
     }
 
@@ -751,7 +889,7 @@ impl Avatar {
     /// can't read or parse is left alone), off her UI thread; once it is in, that key alone is
     /// applied (his other hand edits wait for `settings reload`). Her line says which.
     pub(super) fn set_pref(&mut self, p: Pref, cx: &mut Context<Self>) {
-        self.settings_write(PrefJob { pref: p, menu: false }, cx);
+        self.settings_write(PrefJob { pref: p, menu: false, aloud: false }, cx);
     }
 
     /// settings.toml written in the order asked, one write at a time, each off the UI thread
@@ -836,7 +974,14 @@ impl Avatar {
                     Pref::Wake(true) => "Say my name, I'll hear it.".into(),
                     Pref::Wake(false) => "I'll stop listening for my name.".into(),
                     Pref::Model(m) => match held {
-                        None => format!("{} it is. Your next message runs on it.", provider::model_spoken(m)),
+                        None => {
+                            let said = format!("{} it is. Your next message runs on it.", provider::model_spoken(m));
+                            // A sign-in's switch: in, so said where he is.
+                            if job.aloud {
+                                self.say(format!("{} it is.", provider::model_spoken(m)), Instant::now());
+                            }
+                            said
+                        }
                         Some(why) => why.into(),
                     },
                 }
@@ -1064,6 +1209,18 @@ impl Avatar {
             }
             Ask::Pref(p) => {
                 self.set_pref(p, cx);
+                Ok(())
+            }
+            Ask::SignIn(p) => {
+                self.sign_in(p, None, cx);
+                Ok(())
+            }
+            Ask::Key(p, key) => {
+                self.sign_in(p, Some(key), cx);
+                Ok(())
+            }
+            Ask::SignInCancel => {
+                self.sign_in_stop(cx);
                 Ok(())
             }
             Ask::OpenUrl(u) => {
@@ -1479,9 +1636,9 @@ fn press_holds(age: Duration, listening: bool) -> bool {
 /// own (a chip). A local 400 has two causes (no tool calling, a context too small): the server's
 /// own words go under hers. Anything else is the raw error. Its URLs as she shows them
 /// (`provider::urls_shown`: no `user:password@`).
-fn error_row(text: &str, model: Option<&str>) -> Row {
+fn error_row(text: &str, model: Option<&str>, unpicked: bool) -> Row {
     let shown = provider::urls_shown(text);
-    match crate::session::Trouble::of(text, model) {
+    match crate::session::Trouble::of(text, model).map(|t| t.unpicked(unpicked)) {
         Some(t) => {
             let detail = if matches!(t, crate::session::Trouble::WrongModel) { crate::session::one_line(&shown, 400) } else { String::new() };
             Row { who: Who::Her, text: t.says().replace("\n`", "\n\n`"), detail, streaming: false }
@@ -1495,22 +1652,35 @@ mod error_row_tests {
     use super::error_row;
     use crate::line::Who;
 
+    /// No brain on a model no one picked: a brain to pick (SET ME UP), not Claude's login. A
+    /// model he picked: its own login, named.
+    #[test]
+    fn no_brain_picked_points_at_the_brain_screen() {
+        let raw = "No Anthropic credentials. Run `synaps login`, or switch to a provider model with `/model groq/llama-3.3-70b-versatile`.";
+        let r = error_row(raw, Some("claude-sonnet-4-6"), true);
+        assert!(r.text.ends_with("\n\n`SET ME UP ▸`") && !r.text.contains("synaps login") && !r.text.contains("Claude"), "{}", r.text);
+        let r = error_row(raw, Some("claude-sonnet-4-6"), false);
+        assert!(r.text.ends_with("\n\n`synaps login --provider claude`"), "{}", r.text);
+        let codex = "request failed: credential error: No credentials for openai-codex at /home/u/.synaps/auth.json. Run `synaps login`.";
+        assert!(error_row(codex, Some("openai-codex/gpt-5.5"), false).text.contains("ChatGPT"));
+    }
+
     #[test]
     fn a_local_400_keeps_the_servers_words() {
         let raw = "openai request failed: broker transport error: provider request failed: 400 Bad Request: registry.ollama.ai/library/gemma3:4b does not support tools";
-        let r = error_row(raw, Some("local/gemma3:4b"));
+        let r = error_row(raw, Some("local/gemma3:4b"), false);
         assert_eq!(r.who, Who::Her);
         assert!(r.text.starts_with("My local model turned that down."), "{}", r.text);
         assert_eq!(r.detail, raw, "which of the two 400s it was");
-        let r = error_row("openai request failed: broker transport error: provider request failed: 404 Not Found [not_found_error]", Some("local/qwen3:8b"));
+        let r = error_row("openai request failed: broker transport error: provider request failed: 404 Not Found [not_found_error]", Some("local/qwen3:8b"), false);
         assert_eq!((r.who, r.detail.as_str()), (Who::Her, ""), "her words say it all");
         assert!(r.text.ends_with("\n\n`ollama pull qwen3:8b`"), "the command a paragraph of its own: {}", r.text);
-        let r = error_row("tool registry: unknown tool", Some("local/qwen3:8b"));
+        let r = error_row("tool registry: unknown tool", Some("local/qwen3:8b"), false);
         assert_eq!((r.who, r.text.as_str(), r.detail.as_str()), (Who::Error, "tool registry: unknown tool", ""));
         // Synaps quotes its local URL whole: shown without its `user:password@`.
-        let r = error_row("proxy at http://bob:hunter2@10.0.0.2:3128/ said no", Some("local/qwen3:8b"));
+        let r = error_row("proxy at http://bob:hunter2@10.0.0.2:3128/ said no", Some("local/qwen3:8b"), false);
         assert_eq!((r.who, r.text.as_str()), (Who::Error, "proxy at http://10.0.0.2:3128/ said no"));
-        let r = error_row("provider request failed: 400 Bad Request at http://u:pw@lm:1234/v1: context too small", Some("local/qwen3:8b"));
+        let r = error_row("provider request failed: 400 Bad Request at http://u:pw@lm:1234/v1: context too small", Some("local/qwen3:8b"), false);
         assert!(r.detail.contains("http://lm:1234/v1") && !r.detail.contains("pw"), "{}", r.detail);
     }
 }

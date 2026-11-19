@@ -138,6 +138,12 @@ pub enum Ask {
     Answer(u64, Option<String>),
     /// The first key: Mirror follows keystrokes.
     Typing,
+    /// Sign in to this account from her (`signin`): Synaps opens his browser.
+    SignIn(&'static crate::provider::Provider),
+    /// The sign-in running stops.
+    SignInCancel,
+    /// An API key for this service, to Synaps on its stdin: never logged, never kept.
+    Key(&'static crate::provider::Provider, crate::session::Secret),
     /// Gone (Esc, the summon key): `restore` hands the keyboard back. Its draft and history.
     Closed { restore: bool, draft: String, sent: Vec<String> },
     /// Lost (true) or got (false) the keyboard.
@@ -154,6 +160,19 @@ pub enum Ask {
     Page(Page),
     /// A setting changed on the Settings page: written to settings.toml and applied.
     Pref(Pref),
+}
+
+/// Her own words' button with no brain (her first words, NO BRAIN YET with none picked): the
+/// Line on Settings ▸ Brain. A chip line of hers, never a command to copy.
+pub const SET_ME_UP: &str = "SET ME UP ▸";
+
+/// Her button where her login ran out (`LOGGED OUT`): the Line on Settings ▸ Brain, where her
+/// account's row signs in again from her (no terminal).
+pub const SIGN_IN_AGAIN: &str = "SIGN IN AGAIN ▸";
+
+/// One of her buttons to Settings ▸ Brain (`SET ME UP ▸`, `SIGN IN AGAIN ▸`), not a command.
+pub fn to_brain(c: &str) -> bool {
+    c == SET_ME_UP || c == SIGN_IN_AGAIN
 }
 
 /// The command a paragraph (or a bubble line) is, when it is nothing but one `` `inline code` ``
@@ -265,9 +284,14 @@ pub struct Line {
     nav: settings::Nav,
     /// The Settings row picked (↑↓).
     sel: usize,
-    /// The Brain screen's row picked, and whether its OTHER is open.
+    /// The Brain screen's row picked, and its list open (SIGN IN, API KEY, MODEL).
     bsel: usize,
-    other: bool,
+    fold: Option<settings::Fold>,
+    /// That list's box, scrolled to the row picked once per move (`fold_seen`: the last).
+    fold_scroll: ScrollHandle,
+    fold_seen: std::cell::Cell<Option<(Option<settings::Fold>, usize)>>,
+    /// API KEY's field, open for this service: masked, never logged, never kept.
+    keying: Option<settings::Keying>,
     /// The last page swap (its RGB split, the cog's turn).
     swap: Option<Instant>,
     /// The tallest the panel was on a page it left: both pages are at least as tall from then
@@ -459,7 +483,10 @@ impl Line {
             nav: settings::Nav::on(page),
             sel: 0,
             bsel: 0,
-            other: false,
+            fold: None,
+            fold_scroll: ScrollHandle::new(),
+            fold_seen: std::cell::Cell::new(None),
+            keying: None,
             swap: None,
             keep_h: 0.0,
             keep_chat: false,
@@ -482,9 +509,12 @@ impl Line {
     /// The keyboard goes where this state types: the field, the masked field, or the Line
     /// itself (a confirm: no field, so no typed word can answer it).
     fn refocus(&mut self, window: &mut Window, cx: &mut Context<Line>) {
-        // Settings: the Line's own handle (keys never type into the hidden field).
+        // Settings: the Line's own handle (keys never type into the hidden field), or API KEY's.
         if self.nav.page.settings() {
-            window.focus(&self.focus, cx);
+            match &self.keying {
+                Some(k) => k.field.update(cx, |s, cx| s.focus(window, cx)),
+                None => window.focus(&self.focus, cx),
+            }
             return;
         }
         match (self.mode, &self.secret) {
@@ -528,7 +558,7 @@ impl Line {
         let ids: Vec<u64> = self.snap.prompts.iter().map(|p| p.id).collect();
         // The Brain screen's row picked stays on its provider when a look moves the rows.
         if let (Some(was), Some(now)) = (&self.snap.prefs, &snap.prefs) {
-            self.bsel = settings::brain_reselect(was, now, self.bsel, self.other);
+            self.bsel = settings::brain_reselect(was, now, self.bsel, self.fold);
         }
         self.snap = snap;
         if self.snap.prompts.is_empty() {
@@ -586,13 +616,20 @@ impl Line {
         });
         // Settings ▸ Brain (apart: the macro's recursion limit).
         v["brain_sel"] = self.bsel.into();
-        v["other"] = self.other.into();
+        v["fold"] = format!("{:?}", self.fold).into();
+        v["keying"] = self.keying.as_ref().map(|k| k.to.id).into();
+        // The list open's box: scrolled this far, of this much.
+        v["fold_scroll"] = vec![f32::from(self.fold_scroll.offset().y), f32::from(self.fold_scroll.max_offset().y)].into();
         v["mind"] = self.snap.prefs.as_ref().map_or(serde_json::Value::Null, |p| {
             serde_json::json!({
                 "model": p.mind.model, "signed_in": p.mind.signed_in, "signed": p.mind.signed, "here": p.mind.here,
                 "local": p.mind.local.as_ref().map(|(u, l)| format!("{u} {l:?}")), "tried": p.mind.tried,
+                // Never its code or its URL.
+                "signing": p.signing.as_ref().map(|s| serde_json::json!({"id": s.id, "failed": s.failed.is_some(), "code": s.code.is_some(), "url": s.url.is_some()})),
+                "menu": p.mind.menu().iter().map(|g| serde_json::json!({"name": g.name, "models": g.models.iter().map(|c| serde_json::json!([c.label, c.on])).collect::<Vec<_>>()})).collect::<Vec<_>>(),
             })
         });
+        v["brain_rows"] = self.snap.prefs.as_ref().map_or(serde_json::Value::Null, |p| settings::brain_rows(p, self.fold).iter().map(|r| format!("{r:?}")).collect::<Vec<_>>().into());
         v
     }
 
@@ -1036,6 +1073,30 @@ impl Line {
         for (bi, b) in parse(md).into_iter().enumerate() {
             col = col.child(match b {
                 Block::Heading(_, t) => div().font_weight(FontWeight::BOLD).text_color(rgb(pal.accent)).child(self.styled(&t)).into_any_element(),
+                // Her SET ME UP (no brain, none picked) and SIGN IN AGAIN (her login ran out): a
+                // solid red key to Settings ▸ Brain.
+                Block::Para(t) if command(&t).is_some_and(to_brain) => div()
+                    .flex()
+                    .child(
+                        theme::plate(Cut::Slant(6.0), Fill::solid(pal.accent))
+                            .id(SharedString::from(format!("setup-{row}-{bi}")))
+                            .h(px(24.0))
+                            .px(px(12.0))
+                            .flex()
+                            .items_center()
+                            .cursor_pointer()
+                            .text_size(px(12.5))
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(pal.ink))
+                            .child(tracked(command(&t).unwrap_or(SET_ME_UP), 1.4))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                if this.nav.go(Page::Brain) {
+                                    this.page_changed(window, cx);
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .into_any_element(),
                 // A paragraph that is one command (`synaps login`): a chip, its text copied on a click.
                 Block::Para(t) if command(&t).is_some() => {
                     let c = command(&t).unwrap_or_default().to_string();

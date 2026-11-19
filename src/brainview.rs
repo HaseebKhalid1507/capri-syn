@@ -3304,7 +3304,7 @@ impl Avatar {
         let h = self.brain.as_ref().filter(|_| self.attention_live())?;
         let to = pick.unwrap_or_else(|| crate::line::next_attention(self.prefs_io.pending().map(|j| &j.pref), h.settings.brain.attention));
         if self.attention() != Some(to) {
-            self.settings_write(super::lineview::PrefJob { pref: crate::line::Pref::Attention(to), menu: true }, cx);
+            self.settings_write(super::lineview::PrefJob { pref: crate::line::Pref::Attention(to), menu: true, aloud: false }, cx);
             self.brain_feed(BrainEvent::Interaction(Touch::Menu), Instant::now());
         }
         self.attention()
