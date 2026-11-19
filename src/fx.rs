@@ -1087,17 +1087,21 @@ const TAIL_SETTLE: f32 = 2.4;
 
 /// The ribbon's half-width where it's thickest: `RIB` of the figure's size, within
 /// `[RIB_MIN, RIB_MAX]` px (readable on a small figure, no slab on a big one), and at most
-/// `RIB_OF_LEN` of a short hop's length.
+/// `RIB_OF_LEN` of a short strike's length (thin next to its swings: a hop's stroke as thick as
+/// its zig-zag was a smudge), though never under `RIB_FLOOR` px (`bolt_rects` steps runs in 2 px,
+/// so a thinner line breaks into dots).
 const RIB: f32 = 0.032;
 const RIB_MIN: f32 = 3.0;
 const RIB_MAX: f32 = 11.0;
-const RIB_OF_LEN: f32 = 0.06;
+const RIB_OF_LEN: f32 = 0.025;
+const RIB_FLOOR: f32 = 2.0;
 /// How far each edge sits from the centre line at each route point, a share of the half-width,
 /// the two sides rolled apart: chipped, crystalline edges rather than a tube.
 const CHIP: (f32, f32) = (0.35, 1.35);
-/// Main corners: about one per `CORNER_EVERY` of the figure's size along the strike, 2 to
-/// `CORNERS_MAX` of them, never closer than `CORNER_GAP` half-widths.
+/// Main corners: about one per `CORNER_EVERY` of the figure's size along the strike,
+/// `CORNERS_MIN` to `CORNERS_MAX` of them, never closer than `CORNER_GAP` half-widths.
 const CORNER_EVERY: f32 = 0.7;
+const CORNERS_MIN: usize = 3;
 const CORNERS_MAX: usize = 7;
 const CORNER_GAP: f32 = 6.0;
 /// Their swing off the straight line at its widest (mid-strike): `SWING` of the strike's length,
@@ -1107,14 +1111,27 @@ const SWING: f32 = 0.17;
 const SWING_MIN: f32 = 0.08;
 const SWING_MAX: f32 = 0.4;
 const SWING_OF_LEN: f32 = 0.35;
-/// No leg between main corners leans more than 45° off the strike's line, so a main corner turns
-/// at most 90°. The jags laid on the legs afterwards kink them further (turns to about 120°), so
-/// the outline's own guards are `unfold` and `untangled`, not this.
+/// No leg between main corners leans more than 45° off the strike's line (on a hop, `HOP_SLOPE`),
+/// so a main corner turns at most 90°. The jags laid on the legs afterwards kink them further
+/// (turns to about 120°), so the outline's own guards are `unfold` and `untangled`, not this.
 const LEG_SLOPE: f32 = 1.0;
 /// The small jags on the legs between corners: a kink of this share of the leg, at most `JAG_MAX`
 /// of the figure's size.
 const JAG: (f32, f32) = (0.07, 0.13);
 const JAG_MAX: f32 = 0.12;
+/// A hop: a strike too short for `CORNERS_MIN` corners at one per `CORNER_EVERY` (up to about her
+/// own height), and her most common one. To the rules above it came out a flat lens (one shallow
+/// hump, as thick as it swung), so it has its own: `CORNERS_MIN` corners all the same, as close as
+/// `HOP_GAP` half-widths, each swinging `HOP_SWING` of its length where the envelope is widest and
+/// never under `HOP_SWING_LEAST` of that, on legs up to `HOP_SLOPE` steep (about 58°). A small
+/// "M", legible down to the shortest teleport (48 px). No jags: its legs are too short to show
+/// them, and on legs this steep one would turn a corner past 120°, where `unfold`'s miter sizing
+/// stops being exact (its 2× cap) and the ribbon can fold. Its corners turn at most 2·atan(1.6),
+/// about 116°.
+const HOP_GAP: f32 = 4.5;
+const HOP_SWING: f32 = 0.3;
+const HOP_SWING_LEAST: f32 = 0.5;
+const HOP_SLOPE: f32 = 1.6;
 /// The route is resampled every `ROUTE_STEP` half-widths (or a `ROUTE_PIECES`th of a long strike),
 /// so the edges chip along straight legs too, in tens of points.
 const ROUTE_STEP: f32 = 2.6;
@@ -1187,7 +1204,7 @@ impl Bolt {
         let (dx, dy) = (b.0 - a.0, b.1 - a.1);
         let len = if sane { dx.hypot(dy) } else { 0.0 };
         let dir = if len > 1e-3 { (dx / len, dy / len) } else { (0.0, 1.0) };
-        let half = (RIB * scale).clamp(RIB_MIN, RIB_MAX).min((RIB_OF_LEN * len).max(1.5));
+        let half = (RIB * scale).clamp(RIB_MIN, RIB_MAX).min((RIB_OF_LEN * len).max(RIB_FLOOR));
         let mut bolt =
             Bolt { a, dir, len, route: Vec::new(), half, room: STREAK_ROOM * scale, lead_max: LEAD_MAX * scale, bbox: (0, 0, 1, 1) };
         if !sane {
@@ -1198,15 +1215,19 @@ impl Bolt {
 
         // The main corners as (along, off): px along the straight line, px off it (+ = left of
         // travel). Evenly spread with a jitter, sides alternating from a random first one.
-        let gap = CORNER_GAP * half;
+        let usual = (len / (CORNER_EVERY * scale)).round() as usize + 1;
+        let hop = usual < CORNERS_MIN;
+        let gap = half * if hop { HOP_GAP } else { CORNER_GAP };
         let mut knots = vec![(0.0f32, 0.0f32)];
         if len >= 2.0 * gap {
-            let n = ((len / (CORNER_EVERY * scale)).round() as usize + 1).clamp(2, CORNERS_MAX).min(((len / gap) as usize).saturating_sub(1));
-            let swing = (SWING * len).clamp(SWING_MIN * scale, SWING_MAX * scale).min(SWING_OF_LEN * len);
+            let n = usual.clamp(CORNERS_MIN, CORNERS_MAX).min(((len / gap) as usize).saturating_sub(1));
+            let swing = if hop { HOP_SWING * len } else { (SWING * len).clamp(SWING_MIN * scale, SWING_MAX * scale).min(SWING_OF_LEN * len) };
+            // A hop's corners jitter only as far as keeps them all `gap` apart: every one fits.
+            let wobble = if hop { (0.5 * (1.0 - gap * (n + 1) as f32 / len)).clamp(0.0, 0.38) } else { 0.38 };
             let mut side = flip(&mut rng);
             let (mut at, mut last) = (0.0f32, None::<f32>);
             for i in 1..=n {
-                let t = ((i as f32 + rng.range(-0.38, 0.38)) / (n + 1) as f32 * len).max(at + gap);
+                let t = ((i as f32 + rng.range(-wobble, wobble)) / (n + 1) as f32 * len).max(at + gap);
                 if t > len - gap {
                     break;
                 }
@@ -1217,6 +1238,9 @@ impl Bolt {
                     r = if r < 0.55 { r + 0.45 } else { r - 0.45 };
                 }
                 last = Some(r);
+                if hop {
+                    r = HOP_SWING_LEAST + (1.0 - HOP_SWING_LEAST) * r;
+                }
                 // Gentlest near both ends (it leaves and lands almost head-on), widest mid-strike.
                 let env = (PI * t / len).sin().max(0.0).powf(0.8);
                 knots.push((t, side * swing * env * r));
@@ -1224,12 +1248,13 @@ impl Bolt {
             }
         }
         knots.push((len, 0.0));
-        // Legs at most 45° off the line: shrink the corners a too-steep leg joins (a few passes
-        // settle it; the ends stay on the line).
+        // Legs at most 45° off the line (a hop's steeper): shrink the corners a too-steep leg joins
+        // (a few passes settle it; the ends stay on the line).
+        let slope = if hop { HOP_SLOPE } else { LEG_SLOPE };
         for _ in 0..4 {
             for i in 0..knots.len() - 1 {
                 let ((x0, o0), (x1, o1)) = (knots[i], knots[i + 1]);
-                let (rise, room) = ((o1 - o0).abs(), LEG_SLOPE * (x1 - x0));
+                let (rise, room) = ((o1 - o0).abs(), slope * (x1 - x0));
                 if rise > room {
                     let k = room / rise;
                     if i > 0 {
@@ -1249,15 +1274,15 @@ impl Bolt {
             *p = b;
         }
 
-        // Small jags on the legs: one kink on a mid-size leg, two on a long one.
+        // Small jags on the legs: one kink on a mid-size leg, two on a long one (none on a hop).
         let mut path = vec![a];
         for leg in main.windows(2) {
             let (p, q) = (leg[0], leg[1]);
             let (ex, ey) = (q.0 - p.0, q.1 - p.1);
             let long = ex.hypot(ey);
-            let cuts: &[(f32, f32)] = if long >= 7.0 * gap {
+            let cuts: &[(f32, f32)] = if !hop && long >= 7.0 * gap {
                 &[(0.2, 0.36), (0.64, 0.8)]
-            } else if long >= 2.5 * gap {
+            } else if !hop && long >= 2.5 * gap {
                 &[(0.35, 0.65)]
             } else {
                 &[]
@@ -1973,6 +1998,90 @@ mod bolt_tests {
         rows[from..].iter().take_while(|r| i32::from(r.1) == y).any(|r| (i32::from(r.0)..i32::from(r.0) + i32::from(r.2)).contains(&x))
     }
 
+    /// The route's swings between `from` and `to` (fractions of the strike): how far off the line
+    /// each excursion to one side gets, counting only those at least `least` px out, in order (so
+    /// they alternate sides).
+    fn swings(bolt: &Bolt, from: f32, to: f32, least: f32) -> Vec<f32> {
+        let n = (-bolt.dir.1, bolt.dir.0);
+        let mut out: Vec<f32> = Vec::new();
+        for k in bolt.route.iter().filter(|k| (from * bolt.len..=to * bolt.len).contains(&k.along)) {
+            let o = (k.p.0 - bolt.a.0) * n.0 + (k.p.1 - bolt.a.1) * n.1;
+            if o.abs() < least {
+                continue;
+            }
+            match out.last_mut() {
+                Some(l) if (*l > 0.0) == (o > 0.0) => {
+                    if o.abs() > l.abs() {
+                        *l = o;
+                    }
+                }
+                _ => out.push(o),
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_short_hop_zigzags_legibly() {
+        // r65's critics: the short hop (48 to 150 px) read as a flat red lens, one smooth hump.
+        // Every hop (up to about her height) now reads as lightning at a glance: three corners or
+        // more, alternating sides, each well off the line, and a stroke thin next to them. On any
+        // figure size, in any direction, for any seed, down to the shortest teleport (48 px).
+        for scale in [110.0, 220.0, 440.0] {
+            for f in [0.0, 0.15, 0.3, 0.45, 0.6, 0.75, 0.9, 1.0] {
+                let len = (f * scale).max(48.0);
+                for k in 0..8 {
+                    let ang = -PI + k as f32 * PI / 4.0 + 0.1;
+                    let (a, b) = ((500.0, 500.0), (500.0 + len * ang.cos(), 500.0 + len * ang.sin()));
+                    for seed in 0..40u64 {
+                        let bolt = Bolt::new(a, b, seed.wrapping_mul(0x9e37_79b9_7f4a_7c15).wrapping_add(1), scale);
+                        let at = format!("{len} px at {ang} rad, scale {scale}, seed {seed}");
+                        let sw = swings(&bolt, 0.0, 1.0, 0.07 * len);
+                        assert!(sw.len() >= 3, "{at}: corners {sw:?}");
+                        let (lo, hi) = sw.iter().fold((0.0f32, 0.0f32), |(lo, hi), &o| (lo.min(o), hi.max(o)));
+                        assert!(hi - lo >= 0.25 * len, "{at}: swings {lo}..{hi}");
+                        assert!(2.0 * bolt.half <= 0.3 * (hi - lo), "{at}: a {} px stroke on swings {lo}..{hi}", 2.0 * bolt.half);
+                        // And in flight, the lit piece itself shows two of them at least.
+                        for u in [0.12, 0.2, 0.3, 0.35] {
+                            let (head, tail) = Bolt::span(u);
+                            assert!(swings(&bolt, tail, head, 0.07 * len).len() >= 2, "{at}: u {u}");
+                        }
+                        // Steep, but no corner past 120° (`unfold`'s exact range): the ribbon is
+                        // the shape as laid, never `untangled`'s repair of it.
+                        let sharpest = bolt.route.windows(3).map(|w| bend(w[0].p, w[1].p, w[2].p)).fold(0.0f32, f32::max);
+                        assert!(sharpest.to_degrees() < 117.0, "{at}: a {}° corner", sharpest.to_degrees());
+                        if seed < 3 {
+                            for k in 0..34 {
+                                let u = k as f32 * 0.02;
+                                let laid = outline(&bolt.ribs(u), bolt.dir);
+                                assert_eq!(first_crossing(&laid), None, "{at}: u {u}");
+                                assert_eq!(bolt.frame(u), laid, "{at}: u {u}, repaired");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_bolt_is_bright_from_its_first_frame() {
+        // r65: a dark speck where a long strike set off, on its first frame, before it went red.
+        // The bolt is one flat fill in `BOLT_LINE` (LOCKED #1), its glitches' red is `BOLT_RED`:
+        // neither is dark (each near full HSV value). And the first frame already draws it: a long
+        // strike at once, through the view's own path, a hop one frame in (at once it's a 3 px tip).
+        let value = |c: u32| [16, 8, 0].map(|sh| (c >> sh) & 0xff).into_iter().max().unwrap_or(0);
+        assert!(value(BOLT_LINE) >= 0xe0 && value(BOLT_RED) >= 0xe0, "{BOLT_LINE:06x} {BOLT_RED:06x}");
+        for (i, &(a, b)) in STRIKES[..6].iter().enumerate() {
+            for seed in [1, 9, 77] {
+                let bolt = Bolt::new(a, b, seed, 220.0);
+                let (x, y, _, _) = bolt.bbox();
+                let first = if i == 4 { FRAME_30 } else { 0.0 };
+                assert!(bolt_rects(&bolt.frame(first), (x, y)).len() >= 10, "{a:?} {b:?} seed {seed}: next to nothing at {first}");
+            }
+        }
+    }
+
     #[test]
     fn bolt_reaches_both_ends() {
         let (a, b) = STRIKES[0];
@@ -2672,18 +2781,32 @@ mod sheets {
     #[test]
     #[ignore = "writes PNG contact sheets for tuning by eye (FX_SHEETS=dir)"]
     fn contact_sheets() {
-        // The bolt over its timeline: diagonal, the launch, a short hop, a mid hop zoomed in, across
-        // two monitors (at half size), and the quiet streak.
+        // The bolt over its timeline: diagonal, the launch, the shortest hop, a mid hop zoomed in, a
+        // hop, across two monitors (at half size), and the quiet streak.
         strike("bolt-diagonal.png", &Bolt::new((120.0, 840.0), (930.0, 260.0), 0x5eed, 220.0), false, 5, 1, 1);
         strike("bolt-launch.png", &Bolt::new((640.0, 0.0), (640.0, 560.0), 4, 220.0), false, 10, 1, 1);
         strike("bolt-hop48.png", &Bolt::new((900.0, 500.0), (948.0, 506.0), 21, 220.0), false, 5, 4, 1);
         strike("bolt-hop300.png", &Bolt::new((100.0, 300.0), (380.0, 200.0), 77, 220.0), false, 5, 2, 1);
+        strike("bolt-hop120.png", &Bolt::new((900.0, 500.0), (1010.0, 452.0), 5, 220.0), false, 5, 3, 1);
         strike("bolt-monitors.png", &Bolt::new((-1700.0, 300.0), (1500.0, 700.0), 9, 220.0), false, 2, 1, 2);
         strike("bolt-quiet.png", &Bolt::new((120.0, 840.0), (930.0, 260.0), 0x5eed, 220.0), true, 5, 1, 1);
         // Twelve seeds of one strike, mostly lit (no house shape), and the same strike on a
         // small, the usual and a 4K figure.
         let seeds: Vec<RgbImage> = (0..12).map(|s| bolt_cell(&Bolt::new((60.0, 400.0), (700.0, 120.0), s * 7919 + 1, 220.0), 0.24, false, 1.0)).collect();
         save(&grid(&seeds, 4, 1), "bolt-seeds.png");
+        // Hops, her most common strike, mid-flight: a row per span from the shortest teleport
+        // (48 px) to about her height, four seeds and directions each.
+        let hops: Vec<RgbImage> = [48.0f32, 64.0, 80.0, 100.0, 130.0, 160.0, 200.0]
+            .iter()
+            .flat_map(|&len| {
+                (0..4u64).map(move |s| {
+                    let ang = 0.4 - 1.1 * s as f32;
+                    let to = (500.0 + len * ang.cos(), 500.0 + len * ang.sin());
+                    bolt_cell(&Bolt::new((500.0, 500.0), to, 17 * s + len as u64, 220.0), 0.24, false, 1.0)
+                })
+            })
+            .collect();
+        save(&grid(&hops, 4, 2), "bolt-hops.png");
         let scales: Vec<RgbImage> = [110.0, 220.0, 440.0].iter().map(|&sc| bolt_cell(&Bolt::new((60.0, 400.0), (700.0, 120.0), 3, sc), 0.24, false, sc / 220.0)).collect();
         save(&grid(&scales, 3, 1), "bolt-scales.png");
 
