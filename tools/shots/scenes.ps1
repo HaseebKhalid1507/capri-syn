@@ -206,8 +206,8 @@ function Close-Dialogs([string]$Where) {
     }
 }
 
-<# A step's shot: her windows, cropped (or -Rect: x, y, w, h); her `state` beside it. #>
-function Shot([string]$Step, [string]$Note = '', [int[]]$Rect = $null) {
+<# A step's shot: her windows, cropped (or -At: a rect of the screen, x, y, w, h); her `state` beside it. #>
+function Shot([string]$Step, [string]$Note = '', [int[]]$At = $null) {
     # A notice the runner popped up meanwhile (the scaling change's) goes before it is in one. One
     # of hers (an error box) is a failure, closed or not.
     Close-Dialogs "$script:Take/$Step"
@@ -215,9 +215,9 @@ function Shot([string]$Step, [string]$Note = '', [int[]]$Rect = $null) {
     $png = Join-Path $script:TakeOut "$Step.png"
     $rect = $null
     try {
-        if ($Rect) {
-            Save-RectShot -Path $png -Rect $Rect
-            $rect = $Rect
+        if ($At) {
+            Save-RectShot -Path $png -Rect $At
+            $rect = $At
         } else {
             $rect = Save-WindowShot -Path $png -ProcessId $script:Her.Id -Pad 16
         }
@@ -506,31 +506,55 @@ $Scenes = [ordered]@{
             $cx = [int]($icon.X + $icon.W / 2); $cy = [int]($icon.Y + $icon.H / 2)
             $sf = [double](State).scale_factor
 
-            # Hovered: the shell's tooltip (whatever window it draws it in, near her icon).
+            # Hovered (real moves): the shell's tooltip, in whatever window it draws it near her icon.
             $before = @([ShotsTray.Native]::Of(0) | ForEach-Object { $_.Handle })
-            Move-ShotPointer $cx $cy
+            $null = [ShotsTray.Native]::Glide($cx, $cy)
             Start-Sleep 2.5
-            $near = @([ShotsTray.Native]::Of(0) | Where-Object { $_.Handle -notin $before -and $_.Y + $_.H -ge $icon.Y - 400 * $sf -and [Math]::Abs($_.X + $_.W / 2 - $cx) -lt 400 * $sf })
-            $near | ForEach-Object { Write-Host "  hover: a window of pid $($_.Pid), class $($_.Class), at $($_.X),$($_.Y) $($_.W)x$($_.H)" }
+            $near = @(New-Windows $before | Where-Object { $_.Y + $_.H -ge $icon.Y - 400 * $sf -and [Math]::Abs($_.X + $_.W / 2 - $cx) -lt 400 * $sf })
             $tipBox = if ($near) { $near } else { @([pscustomobject]@{ X = $cx - [int](180 * $sf); Y = $icon.Y - [int](64 * $sf); W = [int](360 * $sf); H = [int](64 * $sf) }) }
-            Shot '01-tip' "hovered: $tip" -Rect (Get-CornerRect -Icon $icon -Also $tipBox)
+            Shot '01-tip' "hovered: $tip$(if (-not $near) { ' (no tooltip window found: a box above her icon)' })" -At (Get-CornerRect -Icon $icon -Also $tipBox)
             Move-ShotPointer ($sc[0] + 8) ($sc[1] + 8)
             Start-Sleep 1.5
 
-            # Right-clicked: her menu, a #32768 window of hers; the pointer off it, so no row is lit.
+            # Right-clicked (real input): her menu, a #32768 window of hers. If none opens, the shell's
+            # own message for it (version 4: WM_CONTEXTMENU at her icon) to her tray's window, said.
             $menu = $null
-            for ($i = 0; $i -lt 3 -and -not $menu; $i++) {
-                Send-ShotClick -X $cx -Y $cy -Right
+            for ($i = 1; $i -le 2 -and -not $menu; $i++) {
+                $before = @([ShotsTray.Native]::Of(0) | ForEach-Object { $_.Handle })
+                $null = [ShotsTray.Native]::Glide($cx, $cy)
+                Start-Sleep -Milliseconds 300
+                $pressed = [ShotsTray.Native]::Press($true)
                 $null = Wait-Until { Get-HerMenu } 5 'her tray menu'
                 $menu = Get-HerMenu
+                $fg = [ShotsTray.Native]::Front()
+                Write-Host "  right click ${i} (SendInput took $pressed of 2): $(if ($menu) { 'her menu' } else { 'no menu' }); in front: $($fg.Class) (pid $($fg.Pid)$(if ($fg.Pid -eq $script:Her.Id) { ', hers' }))"
+                if (-not $menu) { $null = New-Windows $before; Move-ShotPointer ($sc[0] + 8) ($sc[1] + 8); Key 'escape' 600 }
             }
-            if (-not $menu) { throw "$script:Take: no menu after 3 right clicks on her icon at $cx,$cy" }
+            $how = 'a real right click'
+            if (-not $menu) {
+                $tw = [ShotsTray.Native]::Find('SynapsAvatarTray', [uint32]$script:Her.Id)
+                $ok = [ShotsTray.Native]::Post($tw, 0x8001, ($cx -band 0xffff) -bor (($cy -band 0xffff) -shl 16), 0x7B -bor (1 -shl 16))
+                $null = Wait-Until { Get-HerMenu } 5 'her tray menu (the shell''s message)'
+                $menu = Get-HerMenu
+                $how = "the shell's message posted to her tray window ($tw, $ok): a real right click opened none"
+                Write-Warning "${script:Take}: $how"
+            }
+            if (-not $menu) { throw "$script:Take: no menu, by a real right click or the shell's message" }
+            # The pointer off it by a jump (a glide across would light a row, or open ATTENTION's).
             Move-ShotPointer ($sc[0] + 8) ($sc[1] + 8)
             Start-Sleep 1
-            Write-Host "  her menu at $($menu.X),$($menu.Y) $($menu.W)x$($menu.H)"
-            Shot '02-menu' 'right-clicked: her menu' -Rect (Get-CornerRect -Icon $icon -Also @($menu) -Aspect 1.6)
+            Write-Host "  her menu at $($menu.X),$($menu.Y) $($menu.W)x$($menu.H), by $how"
+            Shot '02-menu' "her menu, by $how" -At (Get-CornerRect -Icon $icon -Also @($menu) -Aspect 1.6)
             Key 'escape' 800
             if (Get-HerMenu) { $script:Fails.Add("${script:Take}: her menu stayed after esc") }
+
+            # A real left click: the Line (her summon key's tap). Said, never a shot.
+            $null = [ShotsTray.Native]::Glide($cx, $cy)
+            Start-Sleep -Milliseconds 300
+            $null = [ShotsTray.Native]::Press($false)
+            Move-ShotPointer ($sc[0] + 8) ($sc[1] + 8)
+            if (Wait-Until { (State).line } 5 'the Line, from a left click on her icon') { Write-Host '  left click: the Line opened' }
+            else { Write-Warning "${script:Take}: a real left click on her icon opened no Line" }
 
             # QUIT: the icon goes with her.
             $null = Ctl 'quit' 2000
@@ -609,7 +633,15 @@ public static class Native {
     [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr FindWindow(string cls, string title);
     [DllImport("shell32.dll")] static extern int Shell_NotifyIconGetRect(ref NOTIFYICONIDENTIFIER id, out RECT r);
+    [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
+    [DllImport("user32.dll")] static extern bool GetCursorPos(out POINT p);
+    [DllImport("user32.dll")] static extern int GetSystemMetrics(int i);
+    [DllImport("user32.dll")] static extern uint SendInput(uint n, INPUT[] inputs, int size);
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
+    [StructLayout(LayoutKind.Sequential)] struct POINT { public int X, Y; }
+    [StructLayout(LayoutKind.Sequential)] struct MOUSEINPUT { public int dx, dy; public uint data, flags, time; public IntPtr extra; }
+    [StructLayout(LayoutKind.Sequential)] struct INPUT { public uint type; public MOUSEINPUT mi; }
     [StructLayout(LayoutKind.Sequential)] struct NOTIFYICONIDENTIFIER { public uint cbSize; public IntPtr hWnd; public uint uID; public Guid guidItem; }
 
     public class Win { public long Handle; public uint Pid; public string Class; public int X, Y, W, H; }
@@ -631,6 +663,59 @@ public static class Native {
             return true;
         }, IntPtr.Zero);
         return o;
+    }
+
+    /// A window of `pid`'s of class `cls`, shown or not (her tray's is hidden): 0 if none.
+    public static long Find(string cls, uint pid) {
+        long found = 0;
+        EnumWindows((h, l) => {
+            uint p; GetWindowThreadProcessId(h, out p);
+            if (p != pid) return true;
+            var c = new StringBuilder(128); GetClassName(h, c, 128);
+            if (c.ToString() != cls) return true;
+            found = h.ToInt64();
+            return false;
+        }, IntPtr.Zero);
+        return found;
+    }
+
+    /// The window in front: its class and process.
+    public static Win Front() {
+        Aware();
+        var h = GetForegroundWindow();
+        uint p; GetWindowThreadProcessId(h, out p);
+        var c = new StringBuilder(128); GetClassName(h, c, 128);
+        return new Win { Handle = h.ToInt64(), Pid = p, Class = c.ToString() };
+    }
+
+    public static bool Post(long h, uint m, long w, long l) { return PostMessage(new IntPtr(h), m, new IntPtr(w), new IntPtr(l)); }
+
+    /// The pointer to x, y (physical px) as a hand moves it: 10 injected absolute moves (the
+    /// taskbar's XAML hovers and lights on input, not on SetCursorPos). The moves SendInput took.
+    public static uint Glide(int x, int y) {
+        Aware();
+        POINT p; GetCursorPos(out p);
+        int vx = GetSystemMetrics(76), vy = GetSystemMetrics(77), vw = GetSystemMetrics(78), vh = GetSystemMetrics(79);
+        uint n = 0;
+        for (int i = 1; i <= 10; i++) {
+            int ix = p.X + (x - p.X) * i / 10, iy = p.Y + (y - p.Y) * i / 10;
+            var m = new INPUT { type = 0 };
+            m.mi.dx = (int)(((long)(ix - vx) * 65536 + vw - 1) / vw);
+            m.mi.dy = (int)(((long)(iy - vy) * 65536 + vh - 1) / vh);
+            m.mi.flags = 0x0001 | 0x8000 | 0x4000;  // MOVE | ABSOLUTE | VIRTUALDESK
+            n += SendInput(1, new[] { m }, Marshal.SizeOf(typeof(INPUT)));
+            System.Threading.Thread.Sleep(15);
+        }
+        return n;
+    }
+
+    /// A button pressed where the pointer is, held ~120 ms (right: the right one). 2: both went in.
+    public static uint Press(bool right) {
+        var d = new INPUT { type = 0 }; d.mi.flags = right ? 0x0008u : 0x0002u;
+        var u = new INPUT { type = 0 }; u.mi.flags = right ? 0x0010u : 0x0004u;
+        uint n = SendInput(1, new[] { d }, Marshal.SizeOf(typeof(INPUT)));
+        System.Threading.Thread.Sleep(120);
+        return n + SendInput(1, new[] { u }, Marshal.SizeOf(typeof(INPUT)));
     }
 
     /// The taskbar's window (Shell_TrayWnd): 0 while Explorer is down.
@@ -751,6 +836,14 @@ function Show-TrayIcon {
         throw "$script:Take: her icon isn't on the taskbar"
     }
     return $b
+}
+
+<# Visible windows that came up since `$Before` (handles), each said. #>
+function New-Windows([object[]]$Before) {
+    foreach ($w in [ShotsTray.Native]::Of(0) | Where-Object { $_.Handle -notin $Before }) {
+        Write-Host "    new window: class $($w.Class), pid $($w.Pid), at $($w.X),$($w.Y) $($w.W)x$($w.H)"
+        $w
+    }
 }
 
 <# Her open menu: a visible #32768 window of hers. #>
