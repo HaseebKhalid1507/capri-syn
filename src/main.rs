@@ -112,6 +112,7 @@ Session (one Synaps daemon session drives the body):
   --threads N     decode threads (default min(8, cores/2))
   --no-verify     skip the sha256 pass over the pack's frames
   --focus-probe   dev: show a text field in the bubble to test keyboard focus
+  -V, --version   print `synaps-avatar <version>`, exit
   --check         validate and decode the pack, print stats, exit (no window)
   --dump DIR      with --check: every decoded frame as a PNG in DIR (her pixels at --height)
 
@@ -124,7 +125,12 @@ Dev control: newline commands on $XDG_RUNTIME_DIR/synaps-avatar.sock
   submit <text>   abort   prompt confirm|secret [text]   (session / dev)";
 
 fn parse_args() -> Result<Args> {
-    parse_args_from(std::env::args().skip(1))
+    let a = parse_args_from(std::env::args().skip(1))?;
+    // Her log's header on Linux too (Windows: `dirs::log_without_console`). After the command line,
+    // so -V and -h print their own line only.
+    #[cfg(target_os = "linux")]
+    elog!("--- synaps-avatar {} (pid {})", env!("CARGO_PKG_VERSION"), std::process::id());
+    Ok(a)
 }
 
 fn parse_args_from(argv: impl IntoIterator<Item = String>) -> Result<Args> {
@@ -173,6 +179,10 @@ fn parse_args_from(argv: impl IntoIterator<Item = String>) -> Result<Args> {
                     bail!("--sleepy-after must be a positive number of minutes");
                 }
                 a.sleepy_after = std::time::Duration::from_secs_f64(m * 60.0);
+            }
+            "-V" | "--version" => {
+                olog!("synaps-avatar {}", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
             }
             "-h" | "--help" => {
                 olog!("{USAGE}");
