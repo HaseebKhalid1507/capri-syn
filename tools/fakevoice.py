@@ -27,7 +27,9 @@ have said and when.
                        Any other listen-start closes an open wake stream first (mic-closed {mode: wake}), as the real one.
   listen-drop       -> printed only
   stats             -> stats {mic_open}
-Run the avatar with CAPRI_VOICE_SOCK=SOCK."""
+Run the avatar with CAPRI_VOICE_SOCK=SOCK. Windows (no AF_UNIX in stock CPython): SOCK is the
+endpoint.json she reads (CAPRI_VOICE_ENDPOINT=SOCK for her), served as the real sidecar's link is:
+loopback TCP and the token handshake (tools/capri_voice_win.py `serve`)."""
 import json, os, socket, sys, threading, time
 
 SOCK = sys.argv[1] if len(sys.argv) > 1 else "/tmp/sa-fake/v.sock"
@@ -254,7 +256,38 @@ def toggle_run(n, plan):
         emit(ev="heard", text=HEARD, why="", ms={"stt": 1})
 
 
+def link(c):
+    """One avatar's connection, until it goes."""
+    conn[0] = c
+    log(ev="connected")
+    buf = b""
+    while True:
+        try:
+            d = c.recv(4096)
+        except OSError:
+            d = b""
+        if not d:
+            break
+        buf += d
+        while b"\n" in buf:
+            line, buf = buf.split(b"\n", 1)
+            try:
+                handle(json.loads(line))
+            except ValueError:
+                pass
+    if conn[0] is c:
+        conn[0] = None
+    log(ev="gone")
+
+
 def main():
+    if os.name == "nt":
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import capri_voice_win
+        threading.Thread(target=player, daemon=True).start()
+        log(fake=f"capri-voice at {SOCK} (FAKE: no audio)")
+        capri_voice_win.serve(link, path=SOCK)
+        return
     if os.path.exists(SOCK):
         os.unlink(SOCK)
     s = socket.socket(socket.AF_UNIX)

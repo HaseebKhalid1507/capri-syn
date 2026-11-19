@@ -47,7 +47,7 @@ class Sidecar(unittest.TestCase):
         with redirect_stdout(out), redirect_stderr(io.StringIO()):
             CV.selftest()
         text = out.getvalue()
-        for part in ('parsing ok', 'unprompted gate ok', 'junk filter ok', 'endpointer ok', 'hands-free helpers ok',
+        for part in ('parsing ok', 'plain Kokoro fallback ok', 'unprompted gate ok', 'junk filter ok', 'endpointer ok', 'hands-free helpers ok',
                      'wake word phrase check ok', 'no models, skipping the graph checks'):
             self.assertIn(part, text)
         self.assertIn('duck rules: Windows' if WIN else 'duck rules ok', text)

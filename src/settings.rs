@@ -227,10 +227,11 @@ pub struct VoiceSettings {
     pub hold_to_talk: bool,
 }
 
-/// Her voice (Haseeb's picks, LOCKED 13 + 14): W3, the bright blend (timbre af_heart/af_bella/
-/// af_jessica; prosody af_heart/af_jessica pushed away from af_sarah), pitched to a ~272 Hz
-/// median, cleaned; at speed 1/0.77 by pace "stretch", with flow "emphasis" (his r24 "ALT").
-pub const VOICE: &str = "af_heart:0.5,af_bella:0.3,af_jessica:0.2|af_heart:0.84,af_jessica:0.56,af_sarah:-0.4@+4.93+clean";
+/// Her voice (Haseeb's picks, LOCKED 13 + 14, then r26 "R-A"): W3, the bright blend (timbre af_heart/
+/// af_bella/af_jessica; prosody af_heart/af_jessica pushed away from af_sarah), pitched to a ~306 Hz
+/// median (r26: +7.00 st, was +4.93 / ~272 Hz), cleaned; at speed 1/0.77 by pace "stretch", with
+/// flow "emphasis" (his r24 "ALT"). A `voice` in his settings.toml still wins over it.
+pub const VOICE: &str = "af_heart:0.5,af_bella:0.3,af_jessica:0.2|af_heart:0.84,af_jessica:0.56,af_sarah:-0.4@+7.00+clean";
 /// His pick: `rubberband -t 0.77`, as a speed.
 pub const SPEED: f32 = 1.2987;
 
@@ -1197,6 +1198,11 @@ mod tests {
         let v = Settings::parse("").unwrap().voice;
         assert_eq!((v.flow.as_str(), v.pace.as_str(), v.speed, v.voice.as_str()), ("emphasis", "stretch", SPEED, VOICE));
         assert!((1.0 / SPEED - 0.77).abs() < 1e-4, "his pick: rubberband -t 0.77");
+        assert!(VOICE.ends_with("@+7.00+clean"), "his r26 pick (R-A): only the pitch moved, +4.93 -> +7.00");
+        // A voice set in his file is his: the new default doesn't touch it (nor the speed and flow).
+        let old = "af_heart:0.5,af_bella:0.3,af_jessica:0.2|af_heart:0.84,af_jessica:0.56,af_sarah:-0.4@+4.93+clean";
+        let mine = Settings::parse(&format!("[voice]\nvoice = \"{old}\"\n")).unwrap().voice;
+        assert_eq!((mine.voice.as_str(), mine.speed, mine.flow.as_str(), mine.pace.as_str()), (old, SPEED, "emphasis", "stretch"));
         assert_eq!(Settings::parse("[voice]\npace = \"model\"\n").unwrap().voice.pace, "model");
         assert!(Settings::parse("[voice]\npace = \"warp\"\n").is_err());
         assert_eq!(Settings::parse("[voice]\nflow = \"Off\"\n").unwrap().voice.flow, "off");
@@ -1225,6 +1231,17 @@ mod tests {
         assert!(Settings::parse("[voice]\nhandsfree_timeout = 5\n").is_err() && Settings::parse("[voice]\nhandsfree_max = 9999\n").is_err());
         assert!(Settings::parse("[voice]\necho = \"aec\"\n").is_err());
         assert!(Settings::parse("[mirror]\nflip = true\n").is_err());
+    }
+
+    /// tools/capri-voice speaks with its own defaults when nothing is sent (`--render`, a bare start):
+    /// they are this file's, line for line, so the two can't drift apart.
+    #[test]
+    fn the_sidecar_has_the_same_default_voice() {
+        let py = include_str!("../tools/capri-voice");
+        let d = VoiceSettings::default();
+        let has = |want: String| py.lines().any(|l| l.trim_end() == want);
+        assert!(has(format!("VOICE = '{VOICE}'")), "tools/capri-voice's VOICE is settings::VOICE");
+        assert!(has(format!("SPEED, FLOW, PACE = {SPEED}, '{}', '{}'", d.flow, d.pace)), "and its SPEED, FLOW, PACE");
     }
 
     #[test]
