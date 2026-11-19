@@ -6,7 +6,7 @@
 # --prefix with spaces over a pack he made himself (moved aside, never removed), and --purge (her
 # files only).
 #
-#   .\installer\test-windows.ps1 -Setup .\packaging\windows\Output\synaps-avatar-setup-....exe [-Ref SHA]
+#   .\installer\test-windows.ps1 -Setup .\packaging\windows\Output\capri-syn-setup-....exe [-Ref SHA]
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'The logs are echoed beside the checks; the functions return exit codes.')]
 param(
     [Parameter(Mandatory)] [string]$Setup,

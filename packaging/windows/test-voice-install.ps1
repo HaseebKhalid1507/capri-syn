@@ -2,7 +2,7 @@
 # build-voice.ps1; it also runs as is in the capri-win VM). The models task is left out (~320 MB;
 # voice-models.ps1 has its own test): the bundle's own interpreter runs the selftest without them.
 #
-#   .\packaging\windows\test-voice-install.ps1 -Setup .\packaging\windows\Output\synaps-avatar-voice-setup-….exe
+#   .\packaging\windows\test-voice-install.ps1 -Setup .\packaging\windows\Output\capri-syn-voice-setup-….exe
 param([Parameter(Mandatory)] [string]$Setup)
 $ErrorActionPreference = 'Stop'
 $fails = [System.Collections.Generic.List[string]]::new()
@@ -51,7 +51,7 @@ foreach ($f in 'python\python.exe', 'python\python313._pth', 'capri-voice', 'cap
 }
 Check (Test-Path $lnk) 'a Start-menu shortcut to fetch the models again'
 Check (-not (Test-Path (Join-Path $state 'models'))) 'no models fetched (the task was left out)'
-Check ((Get-ItemProperty $voiceKey -ErrorAction SilentlyContinue).DisplayName -eq 'synaps-avatar voice') 'its own entry in Apps'
+Check ((Get-ItemProperty $voiceKey -ErrorAction SilentlyContinue).DisplayName -eq 'capri-syn voice') 'its own entry in Apps (capri-syn voice)'
 
 # The bundle runs from where it was installed, with no Python on PATH needed.
 $env:CAPRI_VOICE_MODELS = Join-Path ([IO.Path]::GetTempPath()) "sa-no-models-$PID"

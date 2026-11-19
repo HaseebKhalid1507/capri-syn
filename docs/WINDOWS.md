@@ -26,38 +26,97 @@ Her files (`platform::base_dir`; `$XDG_*_HOME` still wins, as on Linux):
 
 ## The installer
 
-`packaging/windows` (Inno Setup 6). CI's `windows-installer` job builds it on every PR and push to
-main and uploads it as an artifact (`synaps-avatar-setup-<sha>`, kept 14 days): never released or
-published. Locally, on a machine with Rust, Inno Setup and ImageMagick: `.\packaging\windows\build.ps1`.
+`capri-syn-setup-<version>-<build>.exe` (`packaging/windows/synaps-avatar.iss`, Inno Setup 6), released
+as `capri-syn-setup-x86_64.exe`. CI's `windows-installer` job builds it on every PR and push to main
+and uploads it as an artifact (`capri-syn-setup-<sha>`, kept 14 days). Locally, on a machine with
+Rust, Inno Setup and ImageMagick: `.\packaging\windows\build.ps1`. In Apps & features she is
+`capri-syn`; the AppId is the one every `synaps-avatar` install had, so an older install upgrades in
+place. Her binary and folders keep the name `synaps-avatar`.
+
+Double-clicked on a PC with nothing installed, it leaves a working Capri. After her files it runs the
+install steps install.ps1 runs too: one copy of them, `packaging/windows/steps.ps1`, installed with
+her in `{app}\steps` along with what they read (the manifest, `make-pack`, the pins, her moods and
+persona; no art).
 
 - **Per user, no admin**: she goes to `%LOCALAPPDATA%\Programs\synaps-avatar`.
+- **Her brain** (page "Her brain", shown only when it's needed): Synaps is looked for as install.ps1
+  looks (`synaps` on PATH, else `~\.cargo\bin\synaps.exe`, at least the manifest's `synaps_min`).
+  Missing or too old: "Install Synaps (her brain, open source)", checked, runs the latest release's
+  own `synaps-installer.ps1`, checked against GitHub's sha256 of the asset (the manifest's pin when
+  GitHub's API doesn't answer).
+- **Her pack** (page "Her pack"): "Download her art (CapriCore + lachy's desktop art, ~100 MB)", the
+  default; "Use a pack folder I already have" (copied; a folder without `sprites.json` is refused);
+  or "Skip, I'll add one later". The download is the one install.ps1 does: CPython's embeddable
+  package and pip (pinned, SHA-256 checked) in a cache folder, fonttools into it, CapriCore at
+  `capricore_commit` from codeload, then `tools/make-pack --lachy auto`, every file checked against
+  `tools/*.sha256`, and her `--check` on the result. Nothing of his is used or changed: not his
+  Python, not his PATH. lachy's PolyForm Noncommercial notices (`Required Notice:` lines) are shown
+  on the finish page. Her art is never in the installer, and never mochi's (`--with-local-art` is
+  install.ps1's alone).
+- **Upgrades:** a pack the steps made (it holds `.capri-syn-pack`) is replaced whole, or left as it
+  is when it was built from the same inputs; any other pack (his) is moved to
+  `capri.pre-install-<date>`, never deleted.
+- **The daemon**: `synaps daemon --detach` now, and a Run value for sign-in through
+  `conhost --headless` (no console window; see the install.ps1 note below).
+- **Her voice**: a task, off by default: the voice installer below, with its models.
+- **Progress**: a page of its own while the steps run, with each step's lines (downloads in MB).
+- **A step that fails doesn't fail Setup.** Offline, a pin that doesn't match, a build that stops:
+  she is installed without it, and the finish page says what happened in plain words, with the
+  one command that tries it again (`powershell -NoProfile -ExecutionPolicy Bypass -File
+  "…\steps\steps.ps1" pack`). Unattended, the setup log says the same.
+- **The finish page**: "Start her now", and with no login yet "Sign in to Claude" (Synaps'
+  `synaps login --provider claude`, no window: his browser opens). Her tag reads NO BRAIN YET until
+  then; she re-reads the login on her own.
 - **Her exe is the windowed build** (`cargo rustc … /SUBSYSTEM:WINDOWS`, her binary only): no
   console window from the Start menu or at sign-in. Without a console she logs to the file above.
   `--check` from a terminal therefore prints nothing there: read the log, or use a cargo build.
-- **Her pack is never in it.** The wizard's "Her pack" page (unattended: `/PACK="C:\dir"`) takes a
-  pack folder on his disk (one with `sprites.json`) and copies it to the default pack location; a
-  folder that isn't a pack is refused. Empty: `packs\` is made for him to fill (she says so in her log). Nothing is
-  downloaded. A new pack replaces the old one whole.
 - **Her AUMID** `Synaps.Avatar`: registered under `HKCU\Software\Classes\AppUserModelId` with
   `DisplayName` and `IconUri`, and set on the Start-menu shortcut, so toasts show under her name
   and icon. The icon is a mark in her colours (her red bolt on black), drawn at build time: no art.
-- **Autostart, opt-in** (a task, unchecked): the `HKCU\…\Run` value.
+- **Autostart** (a task, checked): the `HKCU\…\Run` value.
 - **Uninstall** (Settings → Apps, or `unins000.exe /VERYSILENT`): stops her, then removes her exe,
-  the shortcut, the AUMID key, the Run value, the pack it copied, her log and state, and her folders
-  if empty. His settings (`%APPDATA%\synaps-avatar`) and any pack he put there himself stay.
+  the steps, the shortcut, the AUMID key, her Run value and the daemon's, the pack the steps made,
+  her voice, her log, state and settings, the download cache, and her folders. A pack he put there
+  himself (and one moved aside) stays. Synaps: when Setup installed it, the wizard asks whether to
+  remove it too (his login and sessions in `~\.synaps-cli` stay either way); unattended, it stays.
 - **Upgrades** close her (Restart Manager) and don't restart her.
-- CI installs, checks and uninstalls it unattended (`test-install.ps1`, a stand-in pack, no art):
-  the files, keys, shortcut AUMID, the windowed exe, her size in Settings → Apps, her log and
-  default pack path, and that nothing is left after.
 - **Unsigned:** downloaded with a browser (Mark of the Web), SmartScreen stops it ("Windows
   protected your PC"; More info → Run anyway). Defender lets it be. Both installers, in the VM.
 
-Unattended: `synaps-avatar-setup-….exe /VERYSILENT /SUPPRESSMSGBOXES [/PACK="C:\packs\capri"] [/TASKS=autostart]`.
+Unattended:
+
+```
+capri-syn-setup-….exe /VERYSILENT /SUPPRESSMSGBOXES [/SYNAPS=install|skip]
+                      [/PACK=download|skip|"C:\packs\capri"] [/TASKS="autostart,voice"]
+```
+
+The defaults are the wizard's: Synaps if it's needed, her art downloaded, autostart, no voice.
+install.ps1 runs it with `/SYNAPS=skip /PACK=skip /BY=install.ps1`: Synaps, her pack, the daemon and
+her voice are its own steps (the same steps.ps1), so nothing is downloaded twice, and her settings
+and its cache stay its own to remove.
+
+CI:
+- `windows-installer` (`test-install.ps1`): offline (a hosts file that sends GitHub, python.org and
+  PyPI nowhere: Setup exits 0, she's installed without Synaps or a pack, the log says why and how to
+  retry), a CapriCore that doesn't match its pins (refused, deleted), `/PACK=download` over a pack of
+  his (moved aside, kept; hers built, `--check` passes; lachy's notices), again (up to date), a pack
+  folder over the one Setup built (replaced whole), the files, keys, shortcut AUMID, the windowed
+  exe, her size in Settings → Apps, and that nothing is left after.
+- `windows-setup-e2e` (`test-setup-e2e.ps1`, a clean runner): the defaults, unattended; `synaps
+  --version`, the daemon (protocol 3, and its Run value), her pack, autostart, the Start menu; she
+  starts, attaches (her control socket's `state`: `session.live`, the tag not OFFLINE), and answers
+  for 60 s of clicks on her (every `state` from her UI thread, `WM_NULL` to her windows, her ticks,
+  no Application Hang event); the uninstall leaves nothing of hers.
+- `windows-setup-wizard` (`test-setup-wizard.ps1`, a clean runner): the wizard clicked through with
+  its defaults (UI Automation), a screenshot of every page (`tools/shoot-win.ps1`), her on the desktop
+  after "Start her now", and the uninstall's questions. The shots are the job's artifact.
 
 ## Her voice: a second installer
 
-`synaps-avatar-voice-setup-….exe` (`packaging/windows/synaps-avatar-voice.iss`, built by
-`build-voice.ps1`; CI's `windows-voice-installer` job, an artifact). **Its own download, not a
+`capri-syn-voice-setup-….exe` (`packaging/windows/synaps-avatar-voice.iss`, built by
+`build-voice.ps1`; CI's `windows-voice-installer` job, an artifact; released as
+`capri-syn-voice-setup-x86_64.exe`; `capri-syn voice` in Apps & features, its AppId unchanged).
+**Its own download, not a
 component of hers:** an Inno component sits inside `setup.exe` even unchecked, so every download of
 her would carry the 143 MB bundle (~45 MB compressed). As a second installer, her default download
 stays ~9 MB (CI fails hers past 20 MB), and only he who wants voice gets the rest.
@@ -77,7 +136,7 @@ stays ~9 MB (CI fails hers past 20 MB), and only he who wants voice gets the res
   left), and runs the model fetch on its small files (`test-voice-models.ps1`: resume, a bad hash, a
   kept file).
 
-Unattended: `synaps-avatar-voice-setup-….exe /VERYSILENT /SUPPRESSMSGBOXES [/MERGETASKS="!models"]`.
+Unattended: `capri-syn-voice-setup-….exe /VERYSILENT /SUPPRESSMSGBOXES [/MERGETASKS="!models"]`.
 
 ## install.ps1: one script (Synaps too)
 
@@ -86,8 +145,8 @@ Unattended: `synaps-avatar-voice-setup-….exe /VERYSILENT /SUPPRESSMSGBOXES [/M
 1. Synaps through its own `synaps-installer.ps1`, sha256-checked;
 2. her installer from the latest release, or a windowed source build (rustup, and Visual Studio's
    C++ build tools via winget behind a UAC prompt, asked first);
-3. her pack through `tools/make-pack` in a venv of its own (Python from winget if there's none,
-   asked first);
+3. her pack through `tools/make-pack` in CPython's embeddable package (in her cache folder: no
+   Python of his needed or touched), the same steps.ps1 her installer runs;
 4. `synaps daemon --detach` now, and a Run value for sign-in (through `conhost --headless`:
    `synaps.exe` is a console program, and run as is it opened a terminal at sign-in; see the
    note below);

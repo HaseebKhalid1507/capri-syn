@@ -1,4 +1,5 @@
-# Builds her per-user installer: packaging\windows\Output\synaps-avatar-setup-<version>-<build>.exe.
+# Builds her per-user installer: packaging\windows\Output\capri-syn-setup-<version>-<build>.exe (her
+# binary, and the install steps it runs after: steps.ps1 and what it reads; no art).
 # Needs the Rust toolchain (rust-toolchain.toml), Inno Setup 6 (ISCC) and ImageMagick 7 (magick):
 # all three are on GitHub's windows-latest image. Run from anywhere.
 #
@@ -51,5 +52,5 @@ if (-not $iscc) { $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.
 if (-not (Test-Path $iscc)) { throw 'Inno Setup 6 (ISCC.exe) is not installed' }
 & $iscc /Qp "/DAppVersion=$version" "/DBuild=$build" "/DExe=$exe" "/DIconDir=$work" (Join-Path $here 'synaps-avatar.iss')
 if ($LASTEXITCODE) { throw "ISCC failed ($LASTEXITCODE)" }
-$setup = Get-ChildItem (Join-Path $here 'Output') -Filter "synaps-avatar-setup-$version-$build.exe"
+$setup = Get-ChildItem (Join-Path $here 'Output') -Filter "capri-syn-setup-$version-$build.exe"
 Write-Output "installer: $($setup.FullName) ($([math]::Round($setup.Length / 1MB, 1)) MB)"

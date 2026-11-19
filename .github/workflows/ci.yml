@@ -135,8 +135,9 @@ jobs:
           Get-Content "$env:RUNNER_TEMP\voice\versions.txt"
 
   # Her per-user installer (Inno Setup, packaging/windows): the windowed release build, the
-  # installer as an artifact (never released or published), then an unattended install, check
-  # and uninstall on the runner. No art in it: packs stay his.
+  # installer as an artifact (never released or published), then unattended installs, checks and
+  # uninstalls on the runner: offline, a CapriCore that doesn't match its pins, /PACK=download over a
+  # pack of his, a pack folder of his. No art in it: her art is downloaded on the machine.
   windows-installer:
     runs-on: windows-latest
     timeout-minutes: 75
@@ -164,16 +165,16 @@ jobs:
           CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
         run: ./packaging/windows/build.ps1
 
-      - name: Install, check, uninstall (unattended)
-        timeout-minutes: 15
+      - name: Install, check, uninstall (unattended; offline, a bad pin, /PACK=download)
+        timeout-minutes: 40
         shell: pwsh
-        run: ./packaging/windows/test-install.ps1 -Setup (Get-ChildItem packaging/windows/Output/synaps-avatar-setup-*.exe | Select-Object -First 1).FullName
+        run: ./packaging/windows/test-install.ps1 -Setup (Get-ChildItem packaging/windows/Output/capri-syn-setup-*.exe | Select-Object -First 1).FullName
 
       # Voice is its own download (windows-voice-installer): hers must stay small.
       - name: Her installer stays small (no voice in it)
         shell: pwsh
         run: |
-          $s = (Get-ChildItem packaging/windows/Output/synaps-avatar-setup-*.exe | Select-Object -First 1).Length
+          $s = (Get-ChildItem packaging/windows/Output/capri-syn-setup-*.exe | Select-Object -First 1).Length
           Write-Output "her installer: $([math]::Round($s / 1MB, 1)) MB"
           if ($s -gt 20MB) { throw "her installer is $([math]::Round($s / 1MB, 1)) MB: over 20 MB" }
 
@@ -190,7 +191,7 @@ jobs:
       - name: install.ps1 with this installer
         timeout-minutes: 25
         shell: pwsh
-        run: ./installer/test-windows.ps1 -Setup (Get-ChildItem packaging/windows/Output/synaps-avatar-setup-*.exe | Select-Object -First 1).FullName -Ref ${{ github.event.pull_request.head.sha || github.sha }}
+        run: ./installer/test-windows.ps1 -Setup (Get-ChildItem packaging/windows/Output/capri-syn-setup-*.exe | Select-Object -First 1).FullName -Ref ${{ github.event.pull_request.head.sha || github.sha }}
 
       # Her release exe, offline (no daemon), a minute of clicks and carries on her: every WM_NULL
       # answered (within 1 s, or 10 s on a retry), no WER event, no panic (the "not responding"
@@ -225,10 +226,77 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
         with:
-          name: synaps-avatar-setup-${{ github.sha }}
-          path: packaging/windows/Output/synaps-avatar-setup-*.exe
+          name: capri-syn-setup-${{ github.sha }}
+          path: packaging/windows/Output/capri-syn-setup-*.exe
           retention-days: 14
           if-no-files-found: error
+
+  # Her installer end to end, on a clean runner, as someone with nothing installed gets it: unattended
+  # with its defaults, then Synaps, its daemon, her pack, her attached (not OFFLINE) and responsive for
+  # 60 s of clicks, and an uninstall that leaves nothing of hers (test-setup-e2e.ps1).
+  windows-setup-e2e:
+    needs: windows-installer
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: capri-syn-setup-${{ github.sha }}
+          path: setup
+
+      - name: Her installer, its defaults, end to end
+        timeout-minutes: 35
+        shell: pwsh
+        run: ./packaging/windows/test-setup-e2e.ps1 -Setup (Get-ChildItem setup/capri-syn-setup-*.exe | Select-Object -First 1).FullName -Shots shots
+
+      - name: Her logs
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          foreach ($f in @("$env:LOCALAPPDATA\synaps-avatar\synaps-avatar.log", "$env:TEMP\capri-setup-e2e-*.log")) { Get-ChildItem $f -ErrorAction SilentlyContinue | ForEach-Object { Write-Output "--- $($_.FullName)"; Get-Content $_ -Tail 200 } }
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: capri-syn-setup-e2e-shots-${{ github.sha }}
+          path: shots
+          retention-days: 14
+          if-no-files-found: warn
+
+  # Her installer's wizard, clicked through with its defaults on a clean runner: a screenshot of every
+  # page, of her on the desktop after "Start her now", and of the uninstall's questions.
+  windows-setup-wizard:
+    needs: windows-installer
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: capri-syn-setup-${{ github.sha }}
+          path: setup
+
+      - name: Her wizard, every page
+        timeout-minutes: 35
+        shell: powershell
+        run: ./packaging/windows/test-setup-wizard.ps1 -Setup (Get-ChildItem setup/capri-syn-setup-*.exe | Select-Object -First 1).FullName -Shots shots
+
+      - name: Her logs
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          foreach ($f in @("$env:LOCALAPPDATA\synaps-avatar\synaps-avatar.log", "$env:TEMP\capri-setup-wizard-*.log")) { Get-ChildItem $f -ErrorAction SilentlyContinue | ForEach-Object { Write-Output "--- $($_.FullName)"; Get-Content $_ -Tail 200 } }
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: capri-syn-setup-wizard-shots-${{ github.sha }}
+          path: shots
+          retention-days: 14
+          if-no-files-found: warn
 
   # Her voice installer (packaging/windows/synaps-avatar-voice.iss): the bundle beside her, as its
   # own download. Built, installed, checked and uninstalled unattended (without the models); then
@@ -250,7 +318,7 @@ jobs:
       - name: Install, check, uninstall (unattended)
         timeout-minutes: 15
         shell: pwsh
-        run: ./packaging/windows/test-voice-install.ps1 -Setup (Get-ChildItem packaging/windows/Output/synaps-avatar-voice-setup-*.exe | Select-Object -First 1).FullName
+        run: ./packaging/windows/test-voice-install.ps1 -Setup (Get-ChildItem packaging/windows/Output/capri-syn-voice-setup-*.exe | Select-Object -First 1).FullName
 
       - name: The model fetch (small files; resume, a bad hash)
         if: ${{ !cancelled() }}
@@ -260,8 +328,8 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: synaps-avatar-voice-setup-${{ github.sha }}
-          path: packaging/windows/Output/synaps-avatar-voice-setup-*.exe
+          name: capri-syn-voice-setup-${{ github.sha }}
+          path: packaging/windows/Output/capri-syn-voice-setup-*.exe
           retention-days: 14
           if-no-files-found: error
 
@@ -285,7 +353,7 @@ jobs:
         shell: pwsh
         run: |
           if (-not (Get-Module -ListAvailable PSScriptAnalyzer)) { Install-Module PSScriptAnalyzer -Force -Scope CurrentUser }
-          $found = foreach ($f in 'install.ps1', 'installer/test-windows.ps1', 'installer/test-units.ps1') { Invoke-ScriptAnalyzer -Path $f -Severity Warning, Error }
+          $found = foreach ($f in 'install.ps1', 'installer/test-windows.ps1', 'installer/test-units.ps1', 'packaging/windows/steps.ps1', 'packaging/windows/test-install.ps1', 'packaging/windows/test-setup-e2e.ps1', 'packaging/windows/test-setup-wizard.ps1', 'tools/shoot-win.ps1') { Invoke-ScriptAnalyzer -Path $f -Severity Warning, Error }
           $found | Format-Table -AutoSize ScriptName, Line, RuleName, Message | Out-String -Width 220
           if ($found) { throw "PSScriptAnalyzer: $(@($found).Count) finding(s)" }
           Write-Output 'PSScriptAnalyzer: clean'

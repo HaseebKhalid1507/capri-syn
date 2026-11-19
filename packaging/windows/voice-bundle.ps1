@@ -21,11 +21,12 @@ param(
 $ErrorActionPreference = 'Stop'
 $repo = Resolve-Path (Join-Path $PSScriptRoot '..\..')
 
-# The pin: the SHA-256 was taken from python.org's file when pinned (python.org publishes Sigstore
-# bundles, not hashes); bump both together.
-$pyVer = '3.13.17'
-$pySha = '9e35319bffedab8b36ad44d8f377cb4f1733bcec257a0b6d04d94f01486ddb38'
-$tag = 'python313'
+# The pin: installer/manifest's python_embed and its SHA-256 (her pack's Python is the same one).
+$manifest = Get-Content (Join-Path $repo 'installer\manifest')
+$pyVer = (($manifest | Where-Object { $_ -like 'python_embed=*' }) -split '=', 2)[1]
+$pySha = (($manifest | Where-Object { $_ -like 'python_embed_sha256=*' }) -split '=', 2)[1]
+if (-not $pyVer -or -not $pySha) { throw 'installer/manifest has no python_embed or python_embed_sha256' }
+$tag = 'python' + (($pyVer -split '\.')[0..1] -join '')
 
 $v = & $Python -c "import sys, platform; print('%d.%d' % sys.version_info[:2], platform.machine())"
 if ($LASTEXITCODE -or $v -ne '3.13 AMD64') { throw "-Python must be CPython 3.13 x64 (got: $v)" }
