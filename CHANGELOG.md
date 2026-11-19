@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### Her voice: higher (his r26 pick, "R-A")
+- The default voice is the same W3 blend, now at `@+7.00`: about 306 Hz median, up from `@+4.93` (~272 Hz).
+  The speed (1/0.77), pace ("stretch") and flow ("emphasis") are unchanged, so only the pitch moved. He picked
+  it blind from round r26 ("anime girlie, more bubbly"): six recipes plus the old default. Stock Kokoro voices
+  and our own DSP only, as before.
+- A `voice` set in `settings.toml` is kept; only the default changed. The previous voice, back in one line:
+  `[voice] voice = "af_heart:0.5,af_bella:0.3,af_jessica:0.2|af_heart:0.84,af_jessica:0.56,af_sarah:-0.4@+4.93+clean"`.
+- Stress on a `*word*` rides closer to its 400 Hz cap: any planned peak over ~267 Hz in the model leaves no
+  room, so most pitch bumps are cut short and the stress is mostly length and energy. Expected: raising
+  `emph_st` doesn't change it.
+- Windows (no rubberband: the shift is in-model, the pace is Kokoro's): the median pitch matches Linux within
+  0.1 st. The floor is 2.3 st lower, the sound brighter, and the name/number test set slips more (7.5 % vs 1.7 %
+  WER). Numbers in docs/VOICE.md. Bundling rubberband there is a follow-up.
+- Fixed: with no flow graph (another model file, or the patch didn't load) and no rubberband (always so on
+  Windows), a voice with an `@` shift failed every sentence (`TypeError`: the flow pass was called on None).
+  She now speaks plain Kokoro at its own pitch, as docs/VOICE.md says, and the log says once that the shift
+  is off. `--selftest` covers it.
+
 ### A new personality, written from scratch
 
 Her persona's first paragraph is rewritten clean-room from the show's canon: a construct stitched
@@ -280,7 +298,8 @@ so it's gone. The Synaps and capri-watch paragraphs are unchanged.
 ### Voice: her picked voice, and stress on a word (LOCKED 13 + 14)
 - The default voice is Haseeb's pick:
   - **W3**, the bright blend (`timbre|prosody` split, pushed away from af_sarah, `+clean`);
-  - **two semitones higher** (~272 Hz median) **and 23 % faster**: speed 1/0.77, pace "stretch";
+  - **two semitones higher** (`@+4.93`, ~272 Hz median; since raised to `@+7.00`, ~306 Hz: "Her voice:
+    higher" above) **and 23 % faster**: speed 1/0.77, pace "stretch";
   - flow **"emphasis"**.
 - Pace "stretch": Kokoro speaks at its own speed, and the time goes ×0.77 in the same rubberband pass as
   the pitch shift. This keeps Kokoro's speed-1 pitch shape. It was his blind pick ("ALT") over Kokoro's own

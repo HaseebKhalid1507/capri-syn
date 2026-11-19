@@ -732,13 +732,15 @@ def junk(text, speech_ms):
 #   @SEMITONES: a formant-keeping pitch shift (rubberband; without it, done inside the model).
 #   +clean: EQ, de-esser and a gentle compressor. +glitch: the machine trace on the attack.
 # W3 (Haseeb's pick, LOCKED 13): bright and energetic, pitched to a ~240 Hz median at speed 1.
-# VOICE (LOCKED 14, the default): W3 + 2 st (~272 Hz median), flow "emphasis", at SPEED 1/0.77
-# with PACE "stretch": Kokoro speaks at its own speed 1 and the time goes x0.77 in the same
+# VOICE (the default, his r26 pick "R-A"): W3 + 4.07 st (~306 Hz median), flow "emphasis", at
+# SPEED 1/0.77 with PACE "stretch" (LOCKED 14's speed and pace; only the pitch moved up, from
+# @+4.93, ~272 Hz). Kokoro speaks at its own speed 1 and the time goes x0.77 in the same
 # rubberband pass as the pitch shift, so the sentence keeps Kokoro's speed-1 pitch shape. His
 # blind pick (r24 "ALT") over PACE "model" (Kokoro's speed 1.32): that one dropped the floor
-# ~1.4 st and the sentence ends ~2 st deeper (and with it, use @+4.50: its pitch plan is higher).
+# ~1.4 st and the sentence ends ~2 st deeper. Without rubberband (Windows) the shift is in-model
+# and the pace is "model": docs/VOICE.md has how close that gets.
 W3 = 'af_heart:0.5,af_bella:0.3,af_jessica:0.2|af_heart:0.84,af_jessica:0.56,af_sarah:-0.4@+2.93+clean'
-VOICE = 'af_heart:0.5,af_bella:0.3,af_jessica:0.2|af_heart:0.84,af_jessica:0.56,af_sarah:-0.4@+4.93+clean'
+VOICE = 'af_heart:0.5,af_bella:0.3,af_jessica:0.2|af_heart:0.84,af_jessica:0.56,af_sarah:-0.4@+7.00+clean'
 SPEED, FLOW, PACE = 1.2987, 'emphasis', 'stretch'
 PACES = ('stretch', 'model')
 VOICE_RE = re.compile(r'^(?P<t>[a-z]{2}_[a-z]+(?::-?[\d.]+)?(?:,[a-z]{2}_[a-z]+(?::-?[\d.]+)?)*)'
@@ -776,6 +778,7 @@ class Tts:
         self.flow = Flow.load(f'{MODELS}/{model}', self.k, so)
         self.rubberband = shutil.which('rubberband')
         self._styles = {}
+        self._shift_off = False      # logged once: no flow graph and no rubberband, so no @ shift
         log(f'tts kokoro loaded in {now_ms() - t:.0f} ms ({model}, CPU; flow {"on" if self.flow else "off"}, '
             f'pitch {"rubberband" if self.rubberband else "in-model"})')
 
@@ -809,6 +812,13 @@ class Tts:
         preset = FLOW_PRESETS.get(flow) if self.flow else None
         shift = v['shift'] + (preset or {}).get('register', 0.0) * register(text, gap_before > 0)
         in_model = 0.0 if self.rubberband else shift
+        if in_model and not self.flow:
+            # The in-model shift needs the patched graph's f0 input. Without it (Flow.load said no)
+            # and without rubberband she speaks plain Kokoro, at its own pitch (docs/VOICE.md).
+            if not self._shift_off:
+                log(f'tts: no flow graph and no rubberband: the @{shift:+.2f} shift is off, plain Kokoro')
+                self._shift_off = True
+            in_model = 0.0
         if preset is None and not in_model:
             a, sr = self.k.create(strip_markup(said), voice=st, speed=speed, lang=lang)
             a = np.asarray(a, np.float32)
@@ -3300,12 +3310,37 @@ def selftest_duck():
     assert abs(60 * np.log10(DUCK_RAW) + 18.06) < 0.01, 'x0.5 raw is -18 dB (cubic)'
 
 
+def selftest_plain():
+    """No flow graph (Flow.load said no) and no rubberband (Windows), with an @ shift: plain Kokoro at
+    its own pitch, once logged; never the flow pass on None. A fake Kokoro: no model needed."""
+    calls = []
+    class FakeKokoro:
+        def get_voice_style(self, name):
+            return np.zeros((510, 1, 256), np.float32)
+        def create(self, text, voice, speed, lang):
+            calls.append((text, speed, lang))
+            return np.full(2400, 0.1, np.float32), TTS_RATE
+    t = Tts.__new__(Tts)
+    t.k, t.flow, t.rubberband, t._styles, t._shift_off = FakeKokoro(), None, None, {}, False
+    global log
+    logged, log0 = [], log
+    log = lambda *a: logged.append(' '.join(map(str, a)))
+    try:
+        for i in range(2):
+            a = t("I'm *not* signing that.", VOICE, SPEED, FLOW, 0.0, PACE)
+            assert isinstance(a, np.ndarray) and len(a) == 2400, a
+    finally:
+        log = log0
+    assert calls == [("I'm not signing that.", SPEED, 'en-us')] * 2, calls
+    assert len([m for m in logged if 'shift is off' in m]) == 1, logged
+
+
 def selftest():
     """Checks that need no audio device: the voice string, the markup, the gaps; with the models
     present, that the patched graph with neutral inputs speaks exactly like the stock one."""
     v = parse_voice(W3)
     assert v['p'] and abs(v['shift'] - 2.93) < 1e-9 and v['clean'] and not v['glitch'], v
-    assert parse_voice(VOICE)['shift'] == 4.93 and parse_voice(VOICE)['t'] == v['t'] and parse_voice(VOICE)['p'] == v['p']
+    assert parse_voice(VOICE)['shift'] == 7.0 and parse_voice(VOICE)['t'] == v['t'] and parse_voice(VOICE)['p'] == v['p']
     assert PACE in PACES and abs(1 / SPEED - 0.77) < 1e-4, 'the default is his pick: rubberband -t 0.77'
     assert parse_voice('af_heart') == {'t': 'af_heart', 'p': None, 'shift': 0.0, 'clean': False, 'glitch': False}
     assert parse_voice('af_bella:0.6,af_nicole:0.4+glitch')['glitch']
@@ -3328,6 +3363,8 @@ def selftest():
     assert 0.32 <= g <= 0.54 and g == sentence_gap('Fine.', 'full'), 'gaps: in range and the same text gives the same gap'
     assert 0.40 <= sentence_gap('Really?', 'full') <= 0.62
     print('selftest: parsing ok')
+    selftest_plain()
+    print('selftest: plain Kokoro fallback ok (no flow graph, no rubberband, an @ shift)')
     selftest_gate()
     print('selftest: unprompted gate ok (call, lock, budget, cap, too late)')
     selftest_junk()
