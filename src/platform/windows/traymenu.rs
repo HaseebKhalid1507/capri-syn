@@ -1,11 +1,12 @@
 //! Her tray's menu, owner-drawn in her colours (Haseeb: the stock white menu read as another
 //! app's). Her own menu's rows (`crate::menu`, as `TrayItem`s) red on jet black, the hovered one
-//! ink on her red blade, what can't act now dim; a check on a switch that's on (DND, hands-free),
-//! a dot on ATTENTION's choice in force; sizes and fonts at the DPI of the monitor it opens on
-//! (`platform::menulook`). A stock menu underneath: the arrows, Enter, Esc and submenus are
-//! Windows' own, a typed letter goes to her row (`WM_MENUCHAR`), each row keeps its words (a
-//! screen reader's), and her frame replaces the system's light one (each menu window's own proc
-//! wrapped while it's up).
+//! ink on her red blade, what can't act now dim (outlined while the arrow keys are on it); a dot
+//! on ATTENTION's choice in force (a switch has no tick: its words say what a click does); sizes
+//! and fonts at the DPI of the monitor it opens on (`platform::menulook`). A stock menu
+//! underneath: the arrows, Enter, Esc and submenus are Windows' own, a typed letter goes to her row
+//! (`WM_MENUCHAR`), each row keeps its words (a screen reader's), and her frame replaces the
+//! system's light one (each menu window's own proc wrapped while it's up). Under high contrast it
+//! is the stock menu, in his theme's colours (`hc`, asked at each open).
 
 use super::super::menulook::{self, COLORS, Keyed, Metrics, Typed};
 use super::super::{Mark, TrayItem};
@@ -18,6 +19,7 @@ use ::windows::Win32::Graphics::Gdi::{
     MonitorFromPoint, NULL_PEN, OUT_TT_PRECIS, Polygon, ReleaseDC, RestoreDC, SYMBOL_CHARSET, SaveDC, SelectObject, SetBkMode, SetTextCharacterExtra, SetTextColor, TRANSPARENT,
 };
 use ::windows::Win32::System::Threading::GetCurrentThreadId;
+use ::windows::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
 use ::windows::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, GetSystemMetricsForDpi, MDT_EFFECTIVE_DPI};
 use ::windows::Win32::UI::WindowsAndMessaging::*;
 use ::windows::core::PWSTR;
@@ -69,7 +71,9 @@ struct Line {
 }
 
 /// Her menu's pen while it's up (`track`): its rows, its sizes and fonts at the DPI of the monitor
-/// it opens on. GDI objects of this thread's, deleted with it.
+/// it opens on. GDI objects of this thread's, deleted with it. A submenu that opens on a monitor
+/// of another scale keeps these sizes (only its frame takes its own: `paint_frame`); rare at the
+/// tray's corner.
 struct Pen {
     lines: Vec<Line>,
     dpi: u32,
@@ -89,7 +93,7 @@ impl Pen {
             m,
             font: font("Segoe UI", m.font, FW_SEMIBOLD.0 as i32, DEFAULT_CHARSET),
             bold: font("Segoe UI", m.font, FW_BOLD.0 as i32, DEFAULT_CHARSET),
-            // DrawFrameControl's own marks: a check, a dot, the submenu arrow.
+            // DrawFrameControl's own marks: a choice's dot, the submenu arrow.
             marks: font("Marlett", m.glyph, FW_NORMAL.0 as i32, SYMBOL_CHARSET),
             bg: unsafe { CreateSolidBrush(rgb(COLORS.bg)) },
         }
@@ -129,17 +133,18 @@ fn font(face: &str, px: i32, weight: i32, charset: FONT_CHARSET) -> HFONT {
 }
 
 /// Her menu as her model laid it out, every row owner-drawn (`lines`: each one's words and marks,
-/// by its item data): a row with choices opens them, the lead row is the default, what can't act
-/// now is greyed (`TrackPopupMenu` never picks it), a mark that's on is checked. Each row keeps its
-/// words (`&` doubled: hers are written as they read).
-fn build(items: &[TrayItem], lines: &mut Vec<Line>) -> ::windows::core::Result<HMENU> {
+/// by its item data), or the stock rows (`stock`: high contrast): a row with choices opens them,
+/// the lead row is the default, what can't act now is greyed (`TrackPopupMenu` never picks it),
+/// the choice in force is checked (a radio check: a dot). Each row keeps its words (`&` doubled:
+/// hers are written as they read).
+fn build(items: &[TrayItem], lines: &mut Vec<Line>, stock: bool) -> ::windows::core::Result<HMENU> {
     unsafe {
         let m = CreatePopupMenu()?;
         for (pos, it) in items.iter().enumerate() {
             let (line, id, sub, live) = match it {
                 TrayItem::Item { id, label, mark, lead, enabled } => (Line { label: label.clone(), mark: *mark, lead: *lead, ..Line::default() }, *id, None, *enabled),
                 // A submenu not taken in is ours to destroy.
-                TrayItem::Sub { label, items, enabled } => match build(items, lines) {
+                TrayItem::Sub { label, items, enabled } => match build(items, lines, stock) {
                     Ok(sub) => (Line { label: label.clone(), opens: true, ..Line::default() }, 0, Some(sub), *enabled),
                     Err(e) => {
                         let _ = DestroyMenu(m);
@@ -155,11 +160,20 @@ fn build(items: &[TrayItem], lines: &mut Vec<Line>) -> ::windows::core::Result<H
             if line.lead {
                 state |= MFS_DEFAULT;
             }
+            let mut kind = match (line.rule, stock) {
+                (true, true) => MFT_SEPARATOR,
+                (false, true) => MFT_STRING,
+                (true, false) => MFT_OWNERDRAW | MFT_SEPARATOR,
+                (false, false) => MFT_OWNERDRAW,
+            };
+            if matches!(line.mark, Mark::Choice(_)) {
+                kind |= MFT_RADIOCHECK;
+            }
             let mut text: Vec<u16> = line.label.replace('&', "&&").encode_utf16().chain(Some(0)).collect();
             let mut mi = MENUITEMINFOW {
                 cbSize: size_of::<MENUITEMINFOW>() as u32,
                 fMask: MIIM_FTYPE | MIIM_ID | MIIM_STATE | MIIM_DATA,
-                fType: if line.rule { MFT_OWNERDRAW | MFT_SEPARATOR } else { MFT_OWNERDRAW },
+                fType: kind,
                 fState: state,
                 wID: id,
                 dwItemData: lines.len(),
@@ -194,18 +208,34 @@ fn dpi_at(at: POINT) -> u32 {
     if ok { x } else { 96 }
 }
 
+/// High contrast is on: his theme's colours over hers (the stock menu). None: Windows didn't say.
+fn hc() -> Option<bool> {
+    let mut h = HIGHCONTRASTW { cbSize: size_of::<HIGHCONTRASTW>() as u32, ..Default::default() };
+    let ok = unsafe { SystemParametersInfoW(SPI_GETHIGHCONTRAST, h.cbSize, Some(&mut h as *mut HIGHCONTRASTW as *mut _), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0)) }.is_ok();
+    ok.then(|| h.dwFlags.contains(HCF_HIGHCONTRASTON))
+}
+
 /// Her menu at `at` (screen px), owned by her tray's window `h`, until he picks (a `WM_COMMAND`
-/// to `h`) or clicks away.
+/// to `h`) or clicks away. Owner-drawn, or the stock menu under high contrast (asked each open:
+/// turned on mid-session, the next one follows it).
 pub(super) fn track(h: HWND, at: POINT, items: &[TrayItem]) -> ::windows::core::Result<()> {
+    // Already up: that one stays (a new pen would delete the fonts it's drawn with).
+    if PEN.with(|p| p.borrow().is_some()) {
+        return Ok(());
+    }
+    let stock = hc().unwrap_or(false);
     let mut lines = Vec::new();
-    let m = build(items, &mut lines)?;
+    let m = build(items, &mut lines, stock)?;
+    // Her rows' words for a typed letter, the stock menu's too.
     let pen = Pen::new(lines, dpi_at(at));
-    // Her black under the rows (the margins too), the submenu's as well.
-    let info = MENUINFO { cbSize: size_of::<MENUINFO>() as u32, fMask: MIM_BACKGROUND | MIM_APPLYTOSUBMENUS, hbrBack: pen.bg, ..Default::default() };
-    let _ = unsafe { SetMenuInfo(m, &info) };
+    if !stock {
+        // Her black under the rows (the margins too), the submenu's as well.
+        let info = MENUINFO { cbSize: size_of::<MENUINFO>() as u32, fMask: MIM_BACKGROUND | MIM_APPLYTOSUBMENUS, hbrBack: pen.bg, ..Default::default() };
+        let _ = unsafe { SetMenuInfo(m, &info) };
+    }
     PEN.with(|p| *p.borrow_mut() = Some(pen));
     // Her frame on each of its windows as it's made (the menu's, a submenu's).
-    let hook = unsafe { SetWindowsHookExW(WH_CBT, Some(cbt), None, GetCurrentThreadId()) }.ok();
+    let hook = if stock { None } else { unsafe { SetWindowsHookExW(WH_CBT, Some(cbt), None, GetCurrentThreadId()) }.ok() };
     unsafe {
         // In front, or a click elsewhere won't close it (the shell's own sample does the same).
         let _ = SetForegroundWindow(h);
@@ -294,9 +324,17 @@ fn fill(dc: HDC, rc: RECT, c: u32) {
     }
 }
 
+/// A `w` px line of `c` just inside `r`.
+fn outline(dc: HDC, r: RECT, w: i32, c: u32) {
+    for edge in [RECT { bottom: r.top + w, ..r }, RECT { top: r.bottom - w, ..r }, RECT { right: r.left + w, ..r }, RECT { left: r.right - w, ..r }] {
+        fill(dc, edge, c);
+    }
+}
+
 /// One row in `r` (`state`: the ODS_ flags): her black, or (lit and live) her red blade with its
-/// bottom right corner cut, as her own menu's; its mark, its words, its arrow. Nothing of the
-/// system's goes over it after (its own arrow and check are black: clipped out).
+/// bottom right corner cut, as her own menu's; lit but greyed (the arrow keys stop on it), a dim
+/// line around it: where they are. Its mark, its words, its arrow. Nothing of the system's goes
+/// over it after (its own arrow and check are black: clipped out).
 fn paint_line(pen: &Pen, line: &Line, dc: HDC, r: RECT, state: u32) {
     let m = &pen.m;
     let live = state & (ODS_GRAYED | ODS_DISABLED) == 0;
@@ -317,14 +355,17 @@ fn paint_line(pen: &Pen, line: &Line, dc: HDC, r: RECT, state: u32) {
                 SelectObject(dc, op);
                 SelectObject(dc, ob);
                 let _ = DeleteObject(b.into());
+            } else if !live && state & ODS_SELECTED != 0 {
+                outline(dc, r, m.line, COLORS.dim);
             }
             let ink = if lit { COLORS.on_blade } else if live { COLORS.item } else { COLORS.dim };
             SetBkMode(dc, TRANSPARENT);
             SetTextColor(dc, rgb(ink));
             let center = DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX;
             SelectObject(dc, pen.marks.into());
+            // The choice in force: Marlett's dot.
             if line.mark.on() {
-                text(dc, if matches!(line.mark, Mark::Choice(_)) { "h" } else { "a" }, cell(r.left + m.pad, r.left + m.pad + m.mark), center);
+                text(dc, "h", cell(r.left + m.pad, r.left + m.pad + m.mark), center);
             }
             if line.opens {
                 text(dc, "8", cell(r.right - m.pad - m.arrow, r.right - m.pad), center);
@@ -465,7 +506,7 @@ mod tests {
         let s = Menu { hidden: true, dnd: Some(false), attention: Some(Attention::HangOnly), handsfree: Some(true), unsaved: why, ..Menu::default() };
         let items = menu::tray_items(&menu::rows(&s));
         let mut lines = Vec::new();
-        let m = build(&items, &mut lines).unwrap();
+        let m = build(&items, &mut lines, false).unwrap();
         unsafe {
             assert_eq!(GetMenuItemCount(Some(m)), items.len() as i32);
             for (i, it) in items.iter().enumerate() {
@@ -487,6 +528,7 @@ mod tests {
                         let checked: Vec<bool> = (0..3).map(|j| state(sub, j) & MF_CHECKED.0 != 0).collect();
                         assert_eq!(checked, [false, true, false], "HANG ONLY in force");
                         assert!((0..3).all(|j| matches!(lines[data(sub, j)].mark, Mark::Choice(_))), "a dot, not a check");
+                        assert!((0..3).all(|j| ftype(sub, j) & MFT_RADIOCHECK.0 != 0), "a radio choice, for a screen reader");
                         // Its last pick didn't save: why, under a rule, greyed (no pick).
                         assert!(state(sub, 3) & MF_SEPARATOR.0 != 0);
                         assert!(state(sub, 4) & MF_GRAYED.0 != 0);
@@ -498,7 +540,7 @@ mod tests {
             // Every row, the submenu's too, has its line.
             assert_eq!(lines.len(), items.len() + 5);
             let checked: Vec<&str> = (0..items.len() as u32).filter(|&p| state(m, p) & MF_CHECKED.0 != 0).map(|p| lines[data(m, p)].label.as_str()).collect();
-            assert_eq!(checked, ["END HANDS-FREE"], "hands-free on: checked; DND off: not");
+            assert!(checked.is_empty(), "a switch has no tick, on or off (END HANDS-FREE says what a click does): {checked:?}");
             assert_eq!(GetMenuDefaultItem(m, 0, GET_MENU_DEFAULT_ITEM_FLAGS(0)), menu::Item::ShowHide.id(), "SHOW leads while she is hidden");
             DestroyMenu(m).unwrap();
         }
@@ -509,7 +551,7 @@ mod tests {
     fn what_cant_act_now_is_greyed_in_the_tray() {
         let s = Menu { quitting: true, dnd: Some(false), attention: Some(Attention::Mix), handsfree: Some(false), ..Menu::default() };
         let items = menu::tray_items(&menu::rows(&s));
-        let m = build(&items, &mut Vec::new()).unwrap();
+        let m = build(&items, &mut Vec::new(), false).unwrap();
         unsafe {
             let mut greyed = Vec::new();
             for (i, it) in items.iter().enumerate() {
@@ -528,6 +570,55 @@ mod tests {
             assert_eq!(live, ["QUIT"], "{greyed:?}");
             DestroyMenu(m).unwrap();
         }
+    }
+
+    /// Under high contrast (`hc`): the stock menu, in his theme's colours. No row of hers to draw,
+    /// rules real separators, the same words, checks, default and greyed rows; ATTENTION's choices
+    /// radio checks (Windows' dot). Each row still points at its line (a typed letter).
+    #[test]
+    fn under_high_contrast_it_is_the_stock_menu() {
+        let s = Menu { hidden: true, dnd: Some(true), attention: Some(Attention::Mix), handsfree: Some(true), intro: true, ..Menu::default() };
+        let items = menu::tray_items(&menu::rows(&s));
+        let mut lines = Vec::new();
+        let m = build(&items, &mut lines, true).unwrap();
+        let stock = |m: HMENU, pos: u32, rule: bool| {
+            let t = ftype(m, pos);
+            assert_eq!(t & MFT_OWNERDRAW.0, 0, "row {pos}: the system's to draw");
+            assert_eq!(t & MFT_SEPARATOR.0 != 0, rule, "row {pos}: a separator only for a rule");
+            t
+        };
+        unsafe {
+            assert_eq!(GetMenuItemCount(Some(m)), items.len() as i32);
+            for (i, it) in items.iter().enumerate() {
+                let (pos, st) = (i as u32, state(m, i as u32));
+                let t = stock(m, pos, matches!(it, TrayItem::Rule));
+                match it {
+                    TrayItem::Item { id, label, enabled, .. } => {
+                        assert_eq!((GetMenuItemID(m, i as i32), words(m, pos), &lines[data(m, pos)].label), (*id, label.clone(), label));
+                        assert_eq!((t & MFT_RADIOCHECK.0, st & MF_CHECKED.0), (0, 0), "{label}: no tick on a switch");
+                        assert_eq!(st & MF_GRAYED.0 == 0, *enabled, "{label}");
+                    }
+                    TrayItem::Sub { label, .. } => {
+                        assert_eq!(words(m, pos), *label);
+                        let sub = GetSubMenu(m, i as i32);
+                        assert!(!sub.is_invalid());
+                        for j in 0..3 {
+                            assert!(stock(sub, j, false) & MFT_RADIOCHECK.0 != 0, "choice {j}: Windows' dot");
+                        }
+                        let checked: Vec<bool> = (0..3).map(|j| state(sub, j) & MF_CHECKED.0 != 0).collect();
+                        assert_eq!(checked, [true, false, false], "MIX in force");
+                    }
+                    TrayItem::Rule => {}
+                }
+            }
+            // Her intro: RESET POSITION greyed (END HANDS-FREE still acts), in his colours as in hers.
+            let greyed: Vec<String> = (0..items.len()).filter(|&i| !matches!(items[i], TrayItem::Rule) && state(m, i as u32) & MF_GRAYED.0 != 0).map(|i| words(m, i as u32)).collect();
+            assert_eq!(greyed, ["RESET POSITION"]);
+            assert_eq!(GetMenuDefaultItem(m, 0, GET_MENU_DEFAULT_ITEM_FLAGS(0)), menu::Item::ShowHide.id(), "SHOW leads while she is hidden");
+            DestroyMenu(m).unwrap();
+        }
+        // Asked as Windows answers it: an answer, on or off (the size it's asked with is right).
+        assert!(hc().is_some(), "SPI_GETHIGHCONTRAST answered");
     }
 
     /// A 32-bit canvas `w`×`h` to draw rows on, and its pixels as 0xRRGGBB, read from its own
@@ -596,12 +687,13 @@ mod tests {
     }
 
     /// Her rows on a canvas, as her menu draws them in its window: black, her red words; lit, ink
-    /// on her red blade (its corner cut); can't act, dim words and no blade; the rule her dark
-    /// red; a mark only while on; the arrow on a row that opens. Nothing goes over a row after.
+    /// on her red blade (its corner cut); can't act, dim words and no blade (lit by the arrow keys,
+    /// a dim line around it); the rule her dark red; a dot on the choice in force, round, none on
+    /// the others; the arrow on a row that opens. Nothing goes over a row after.
     #[test]
     fn her_rows_are_red_on_black() {
         let row = |label: &str, mark: Mark, opens: bool| Line { label: label.into(), mark, opens, ..Line::default() };
-        let pen = Pen::new(vec![row("RESET POSITION", Mark::None, false), Line { rule: true, ..Line::default() }, row("DND OFF", Mark::Switch(true), false), row("ATTENTION: MIX", Mark::None, true), row("HIDE", Mark::Switch(false), false)], 96);
+        let pen = Pen::new(vec![row("RESET POSITION", Mark::None, false), Line { rule: true, ..Line::default() }, row("MIX", Mark::Choice(true), false), row("ATTENTION: MIX", Mark::None, true), row("HANG ONLY", Mark::Choice(false), false)], 96);
         let m = pen.m;
         let (w, h) = (260, m.row);
         let r = RECT { left: 0, top: 0, right: w, bottom: h };
@@ -627,10 +719,15 @@ mod tests {
         assert_eq!(c.px(w - 2, h - 1), COLORS.bg, "its bottom right corner cut");
         assert!(c.all(words).into_iter().filter(|&p| dark(p)).count() > 20, "ink words on it");
 
+        // Its words, clear of a line around the row.
+        let inner = RECT { top: m.line, bottom: h - m.line, ..words };
         for greyed in [ODS_SELECTED | ODS_GRAYED, ODS_SELECTED | ODS_DISABLED, ODS_GRAYED] {
             let c = drawn(0, greyed);
-            assert_eq!(c.px(1, 1), COLORS.bg, "can't act: no blade, lit or not");
-            assert!(c.all(words).into_iter().any(grey) && !c.all(words).into_iter().any(red), "dim words");
+            assert_eq!(c.px(m.line, m.line), COLORS.bg, "can't act: no blade, lit or not");
+            assert!(c.all(inner).into_iter().any(grey) && !c.all(inner).into_iter().any(red), "dim words");
+            let edge = [c.px(0, 0), c.px(w / 2, 0), c.px(w - 1, h - 1), c.px(0, h / 2)];
+            let want = if greyed & ODS_SELECTED != 0 { COLORS.dim } else { COLORS.bg };
+            assert_eq!(edge, [want; 4], "lit by the arrow keys: a dim line around it ({greyed:#x}); else none");
         }
 
         let c = drawn(1, 0);
@@ -638,8 +735,14 @@ mod tests {
         assert_eq!((c.px(1, y), c.px(m.pad + 4, y), c.px(m.pad + 4, 0)), (COLORS.bg, COLORS.rule, COLORS.bg), "the rule: her dark red line, inset");
         assert_eq!(drawn(1, ODS_SELECTED).px(1, 1), COLORS.bg, "a rule never lights");
 
-        assert!(drawn(2, 0).all(mark).into_iter().any(red), "a switch that's on: checked");
-        assert!(drawn(4, 0).all(mark).into_iter().all(|p| p == COLORS.bg), "a switch that's off: no mark");
+        // The choice in force: a dot, round (as wide as tall, give or take its smoothing).
+        let c = drawn(2, 0);
+        let dot: Vec<(i32, i32)> = (mark.top..mark.bottom).flat_map(|y| (mark.left..mark.right).map(move |x| (x, y))).filter(|&(x, y)| red(c.px(x, y))).collect();
+        assert!(dot.len() >= 4, "the choice in force: its dot ({} px)", dot.len());
+        let span = |k: fn(&(i32, i32)) -> i32| dot.iter().map(k).max().unwrap() - dot.iter().map(k).min().unwrap() + 1;
+        let (dw, dh) = (span(|p| p.0), span(|p| p.1));
+        assert!((dw - dh).abs() <= 2, "a dot, not a check: {dw}x{dh}");
+        assert!(drawn(4, 0).all(mark).into_iter().all(|p| p == COLORS.bg), "a choice not in force: no dot");
         assert!(drawn(3, 0).all(arrow).into_iter().any(red), "her arrow on the row that opens");
         assert!(drawn(0, 0).all(arrow).into_iter().all(|p| p == COLORS.bg));
     }
@@ -671,7 +774,7 @@ mod tests {
         let s = Menu { dnd: Some(false), attention: Some(Attention::Mix), handsfree: Some(false), ..Menu::default() };
         let items = menu::tray_items(&menu::rows(&s));
         let mut lines = Vec::new();
-        let m = build(&items, &mut lines).unwrap();
+        let m = build(&items, &mut lines, false).unwrap();
         PEN.with(|p| *p.borrow_mut() = Some(Pen::new(lines, 96)));
         let key = |c: char| on_message(WM_MENUCHAR, WPARAM(c as usize), LPARAM(m.0 as isize)).map(|r| ((r.0 >> 16) as u32, (r.0 & 0xffff) as usize));
         assert_eq!(key('r'), Some((MNC_EXECUTE, 0)));

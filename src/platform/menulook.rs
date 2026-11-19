@@ -33,7 +33,7 @@ pub struct Metrics {
     pub rule: i32,
     /// Room left of the mark and right of the arrow.
     pub pad: i32,
-    /// The mark's column (a check, a dot), left of the words.
+    /// The mark's column (a choice's dot), left of the words.
     pub mark: i32,
     /// The submenu arrow's column, right of the words (kept on every row: the words line up).
     pub arrow: i32,

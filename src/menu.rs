@@ -161,9 +161,6 @@ pub struct Row {
     pub armed: bool,
     /// The row that matters most now (SHOW while she is hidden: the way back).
     pub lead: bool,
-    /// A switch (DND, hands-free): whether it's on now. The tray checks it; the words say what a
-    /// click does (DND OFF, END HANDS-FREE), on both menus.
-    pub on: Option<bool>,
     /// It acts now (`enabled`); else greyed.
     pub enabled: bool,
     /// Why its last pick didn't stick (ATTENTION's: `State::unsaved`): under its choices in
@@ -173,15 +170,17 @@ pub struct Row {
 
 impl Row {
     fn new(item: Item, label: &'static str) -> Row {
-        Row { item, label, choices: Vec::new(), rule: false, armed: false, lead: false, on: None, enabled: true, note: None }
+        Row { item, label, choices: Vec::new(), rule: false, armed: false, lead: false, enabled: true, note: None }
     }
 }
 
 /// Her menu, top to bottom.
 pub fn rows(s: &State) -> Vec<Row> {
     let mut v = vec![Row::new(Item::Reset, "RESET POSITION")];
+    // A switch's words say what a click does (DND OFF, END HANDS-FREE), on both menus: no tick
+    // in the tray as well (a screen reader would read "DND OFF, checked").
     if let Some(on) = s.dnd {
-        v.push(Row { on: Some(on), ..Row::new(Item::Dnd, if on { "DND OFF" } else { "DND 1 HOUR" }) });
+        v.push(Row::new(Item::Dnd, if on { "DND OFF" } else { "DND 1 HOUR" }));
     }
     if let Some(a) = s.attention {
         let label = match a {
@@ -193,7 +192,7 @@ pub fn rows(s: &State) -> Vec<Row> {
         v.push(Row { choices, note: s.unsaved, ..Row::new(Item::Attention(None), label) });
     }
     if let Some(on) = s.handsfree {
-        v.push(Row { on: Some(on), ..Row::new(Item::HandsFree, if on { "END HANDS-FREE" } else { "HANDS-FREE TALK" }) });
+        v.push(Row::new(Item::HandsFree, if on { "END HANDS-FREE" } else { "HANDS-FREE TALK" }));
     }
     v.push(Row::new(Item::Copy, "COPY LAST REPLY"));
     v.push(Row { lead: s.hidden, ..Row::new(Item::ShowHide, if s.hidden { "SHOW" } else { "HIDE" }) });
@@ -207,7 +206,7 @@ pub fn rows(s: &State) -> Vec<Row> {
 }
 
 /// The rows as a tray draws them: a row with choices opens them (the tray's own arrow), the one
-/// in force marked, its note under them greyed (id 0: never a pick); a switch marked while on.
+/// in force marked, its note under them greyed (id 0: never a pick).
 pub fn tray_items(rows: &[Row]) -> Vec<TrayItem> {
     let mut v = Vec::new();
     for r in rows {
@@ -216,7 +215,7 @@ pub fn tray_items(rows: &[Row]) -> Vec<TrayItem> {
         }
         let enabled = r.enabled;
         v.push(if r.choices.is_empty() {
-            TrayItem::Item { id: r.item.id(), label: r.label.to_string(), mark: r.on.map_or(Mark::None, Mark::Switch), lead: r.lead, enabled }
+            TrayItem::Item { id: r.item.id(), label: r.label.to_string(), mark: Mark::None, lead: r.lead, enabled }
         } else {
             let mut items: Vec<TrayItem> = r.choices.iter().map(|&(i, l, on)| TrayItem::Item { id: i.id(), label: l.to_string(), mark: Mark::Choice(on), lead: false, enabled }).collect();
             if let Some(note) = r.note {
@@ -298,9 +297,9 @@ mod tests {
             items,
             [
                 item(2, "RESET POSITION", Mark::None, false),
-                item(3, "DND 1 HOUR", Mark::Switch(false), false),
+                item(3, "DND 1 HOUR", Mark::None, false),
                 TrayItem::Sub { label: "ATTENTION: OFF".into(), items: vec![pick(Attention::Mix, false), pick(Attention::HangOnly, false), pick(Attention::Off, true)], enabled: true },
-                item(8, "END HANDS-FREE", Mark::Switch(true), false),
+                item(8, "END HANDS-FREE", Mark::None, false),
                 item(9, "COPY LAST REPLY", Mark::None, false),
                 item(1, "SHOW", Mark::None, true),
                 item(10, "SETTINGS", Mark::None, false),
@@ -308,9 +307,9 @@ mod tests {
                 item(11, "QUIT", Mark::None, false),
             ]
         );
-        // DND on: checked, its words what a click does.
+        // DND on: its words what a click does, no tick (hands-free's above, on, has none either).
         let dnd = tray_items(&rows(&State { dnd: Some(true), ..s }));
-        assert!(dnd.contains(&item(3, "DND OFF", Mark::Switch(true), false)));
+        assert!(dnd.contains(&item(3, "DND OFF", Mark::None, false)));
     }
 
     fn greyed(s: &State) -> Vec<&'static str> {

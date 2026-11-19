@@ -552,22 +552,21 @@ pub enum TrayItem {
     Rule,
 }
 
-/// A tray row's mark: a switch's state (DND, hands-free: checked while on), or one of several
-/// choices (ATTENTION's: the one in force). The words stay her menu's.
+/// A tray row's mark: one of several choices (ATTENTION's: a dot on the one in force). A switch
+/// (DND, hands-free) has none: its words say what a click does (DND OFF), as on her own menu.
 #[cfg_attr(not(windows), allow(dead_code))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Mark {
     #[default]
     None,
-    Switch(bool),
     Choice(bool),
 }
 
 impl Mark {
-    /// Checked: a switch that's on, the choice in force.
+    /// Checked: the choice in force.
     #[cfg_attr(not(windows), allow(dead_code))]
     pub fn on(self) -> bool {
-        matches!(self, Mark::Switch(true) | Mark::Choice(true))
+        matches!(self, Mark::Choice(true))
     }
 }
 
