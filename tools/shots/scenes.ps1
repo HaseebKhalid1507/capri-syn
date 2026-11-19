@@ -753,14 +753,15 @@ public static class Native {
 }
 
 <# The taskbar for a still: dark (the shell and apps), opaque, its clock off (the date never on
-   camera), no toasts; Explorer started again so all of it holds. A runner only. #>
+   camera), its apps to the left (out of a shot of its corner), no toasts; Explorer started again so
+   all of it holds. A runner only. #>
 function Set-ShotTaskbar {
     Assert-ShotRunner 'Set-ShotTaskbar'
     $cv = 'HKCU:\Software\Microsoft\Windows\CurrentVersion'
     foreach ($v in @(
             @("$cv\Themes\Personalize", 'SystemUsesLightTheme', 0), @("$cv\Themes\Personalize", 'AppsUseLightTheme', 0),
             @("$cv\Themes\Personalize", 'EnableTransparency', 0), @("$cv\Policies\Explorer", 'HideClock', 1),
-            @("$cv\PushNotifications", 'ToastEnabled', 0), @("$cv\Explorer", 'EnableAutoTray', 0))) {
+            @("$cv\Explorer\Advanced", 'TaskbarAl', 0), @("$cv\PushNotifications", 'ToastEnabled', 0), @("$cv\Explorer", 'EnableAutoTray', 0))) {
         if (-not (Test-Path $v[0])) { New-Item -Path $v[0] -Force | Out-Null }
         Set-ItemProperty -Path $v[0] -Name $v[1] -Value $v[2] -Type DWord
     }
