@@ -569,6 +569,15 @@ fn menu_at(click: (f32, f32), (w, h): (f32, f32), (min_x, max_x): (f32, f32), (m
     (x, y)
 }
 
+/// The menu's top left kept 12 px under her tag (`tag`: its box) where it would run into it,
+/// if it fits there (`max_y`); else as it was.
+fn menu_under_tag((x, y): (f32, f32), (w, h): (f32, f32), max_y: f32, tag: Option<(f32, f32, f32, f32)>) -> (f32, f32) {
+    const GAP: f32 = 12.0;
+    let Some((t0, t1, t2, t3)) = tag else { return (x, y) };
+    let over = x < t2 && x + w > t0 && y < t3 + GAP && y + h > t1;
+    if over && t3 + GAP <= max_y { (x, t3 + GAP) } else { (x, y) }
+}
+
 /// An open menu at `at` that her face (after a pose change) is now under: the place across the
 /// face (its far side), same height, else the near side, whichever is in `x` first; else None
 /// (it stays).
@@ -7823,7 +7832,7 @@ impl Avatar {
         if let Some((at, _)) = self.menu.filter(|_| hud) {
             // Red items; the hovered one on a red blade with ink type. QUIT? (armed) is a bone
             // blade: danger.
-            let (accent_c, ink_c, danger_c, dim_c) = (pal.accent, pal.ink, pal.danger, pal.dim);
+            let (accent_c, ink_c, danger_c) = (pal.accent, pal.ink, pal.danger);
             let blade = |c: u32| div().absolute().top_0().left_0().size_full().child(theme::backdrop(Cut::Tab(8.0), Fill::solid(c)));
             let item_as = |label: &'static str, armed: bool| {
                 let group = SharedString::from(format!("menu-{label}"));
@@ -7880,6 +7889,9 @@ impl Avatar {
                 }
                 _ if measured => {
                     let p = menu_at((f32::from(at.x), f32::from(at.y)), (MENU_W, h), xr, yr, face);
+                    // Clear of her tag (ONLINE ^): its top right ran into it.
+                    let tag = self.tag_box.get().map(|b| (f32::from(b.left()), f32::from(b.top()), f32::from(b.right()), f32::from(b.bottom())));
+                    let p = menu_under_tag(p, (MENU_W, h), yr.1, tag);
                     self.menu_place = Some((at, p.0, p.1, false));
                     Some(p)
                 }
@@ -7976,8 +7988,8 @@ impl Avatar {
                         this.schedule(cx);
                     }),
                 ))
-                // Her Settings (the Line's second page; ctrl+, there).
-                .child(item("SETTINGS").id("settings").flex().items_center().gap(px(10.0)).child(div().flex_1()).child(div().text_size(px(10.0)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(dim_c)).group_hover("menu-SETTINGS", |s| s.text_color(rgb(ink_c))).child("ctrl+,")).on_mouse_down(
+                // Her Settings (the Line's second page).
+                .child(item("SETTINGS").id("settings").on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, _: &MouseDownEvent, _, cx| {
                         cx.stop_propagation();
@@ -8317,7 +8329,7 @@ impl std::future::Future for YieldNow {
 
 #[cfg(test)]
 mod menu_tests {
-    use super::menu_at;
+    use super::{menu_at, menu_under_tag};
 
     // A 500×695 window, her face at 190..240 × 300..340, a 210×300 menu.
     const FACE: Option<(f32, f32, f32, f32)> = Some((190.0, 300.0, 240.0, 340.0));
@@ -8329,6 +8341,12 @@ mod menu_tests {
     fn under_the_click_when_it_fits_and_misses_her_face() {
         assert_eq!(menu_at((60.0, 360.0), SIZE, X, (0.0, 500.0), FACE), (60.0, 360.0), "under her face: as clicked");
         assert_eq!(menu_at((100.0, 50.0), SIZE, X, Y, None), (100.0, 50.0));
+        // Her tag: a menu that would touch it goes 12 px under it; one clear of it stays.
+        let tag = Some((150.0, 20.0, 260.0, 44.0));
+        assert_eq!(menu_under_tag((100.0, 50.0), SIZE, 500.0, tag), (100.0, 56.0));
+        assert_eq!(menu_under_tag((100.0, 60.0), SIZE, 500.0, tag), (100.0, 60.0));
+        assert_eq!(menu_under_tag((300.0, 30.0), SIZE, 500.0, tag), (300.0, 30.0), "beside it");
+        assert_eq!(menu_under_tag((100.0, 50.0), SIZE, 52.0, tag), (100.0, 50.0), "no room under it");
     }
 
     #[test]

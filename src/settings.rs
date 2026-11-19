@@ -727,6 +727,123 @@ impl Settings {
     }
 }
 
+/// settings.toml writes, one at a time in the order asked (each `Settings::write` runs off her UI
+/// thread). What a write changes is applied only once it is in the file (`finish`), and a
+/// reload asked for meanwhile is owed again once the last write is in: what she runs with is
+/// what the file says. `T`: what to apply when its write lands.
+pub struct WriteQueue<T> {
+    jobs: std::collections::VecDeque<(Vec<Edit>, T)>,
+    /// The write under way: its number, when it started, what it applies.
+    under_way: Option<(u64, std::time::Instant, T)>,
+    seq: u64,
+    reload_owed: bool,
+}
+
+impl<T> Default for WriteQueue<T> {
+    fn default() -> Self {
+        WriteQueue { jobs: Default::default(), under_way: None, seq: 0, reload_owed: false }
+    }
+}
+
+/// A write under way this long is stuck (a hung network home, a dead disk): she says so.
+pub const WRITE_STUCK: std::time::Duration = std::time::Duration::from_secs(4);
+
+impl<T> WriteQueue<T> {
+    pub fn push(&mut self, edits: Vec<Edit>, then: T) {
+        self.jobs.push_back((edits, then));
+    }
+
+    /// The next write to run, if none is under way: its number and its edits.
+    pub fn start(&mut self, now: std::time::Instant) -> Option<(u64, Vec<Edit>)> {
+        if self.under_way.is_some() {
+            return None;
+        }
+        let (edits, then) = self.jobs.pop_front()?;
+        self.seq += 1;
+        self.under_way = Some((self.seq, now, then));
+        Some((self.seq, edits))
+    }
+
+    /// Write `seq` is done (written or refused): what it applies, and whether a reload is owed
+    /// now (the last write is in).
+    pub fn finish(&mut self, seq: u64) -> Option<(T, bool)> {
+        if self.under_way.as_ref().is_none_or(|u| u.0 != seq) {
+            return None;
+        }
+        let (_, _, then) = self.under_way.take()?;
+        let reload = self.reload_owed && self.jobs.is_empty();
+        if reload {
+            self.reload_owed = false;
+        }
+        Some((then, reload))
+    }
+
+    /// A reload now: true if writes are pending (it is done again once they are in).
+    pub fn reload(&mut self) -> bool {
+        self.reload_owed = self.busy();
+        self.reload_owed
+    }
+
+    pub fn busy(&self) -> bool {
+        self.under_way.is_some() || !self.jobs.is_empty()
+    }
+
+    /// The writes not in yet, oldest first (the one under way, then the queue).
+    pub fn pending(&self) -> impl Iterator<Item = &T> {
+        self.under_way.iter().map(|u| &u.2).chain(self.jobs.iter().map(|j| &j.1))
+    }
+
+    /// Write `seq` still under way after WRITE_STUCK.
+    pub fn stuck(&self, seq: u64, now: std::time::Instant) -> bool {
+        self.under_way.as_ref().is_some_and(|u| u.0 == seq && now.saturating_duration_since(u.1) >= WRITE_STUCK)
+    }
+
+    /// The write under way has been for WRITE_STUCK.
+    pub fn stuck_now(&self, now: std::time::Instant) -> bool {
+        self.under_way.as_ref().is_some_and(|u| now.saturating_duration_since(u.1) >= WRITE_STUCK)
+    }
+}
+
+/// Her temp files left beside `path`'s file by a write that never finished (a crash, a kill):
+/// only her own pattern (`<name>.<pid>.tmp`, the pid not running, or this process's), never
+/// anything else. How many went.
+pub fn sweep_temps(path: &std::path::Path) -> usize {
+    let Ok(target) = resolve(path) else { return 0 };
+    let Some(dir) = target.parent().filter(|d| !d.as_os_str().is_empty()) else { return 0 };
+    let name = target.file_name().map_or("settings.toml".into(), |n| n.to_string_lossy().into_owned());
+    let Ok(rd) = std::fs::read_dir(dir) else { return 0 };
+    let mut gone = 0;
+    for e in rd.flatten() {
+        let f = e.file_name().to_string_lossy().into_owned();
+        let Some(ps) = f.strip_prefix(&format!("{name}.")).and_then(|r| r.strip_suffix(".tmp")) else { continue };
+        let Some(pid) = ps.parse::<u32>().ok().filter(|p| p.to_string() == ps) else { continue };
+        if !e.file_type().is_ok_and(|t| t.is_file()) {
+            continue;
+        }
+        if (pid == std::process::id() || !alive(pid, &e)) && std::fs::remove_file(e.path()).is_ok() {
+            gone += 1;
+        }
+    }
+    gone
+}
+
+/// Whether the process `pid` that made temp file `e` may still be writing it. Unix: it is
+/// running; elsewhere: the file is under a minute old.
+fn alive(pid: u32, e: &std::fs::DirEntry) -> bool {
+    #[cfg(unix)]
+    {
+        let _ = e;
+        let Ok(p) = libc::pid_t::try_from(pid) else { return false };
+        // SAFETY: signal 0 sends nothing; it only checks the pid.
+        unsafe { libc::kill(p, 0) == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_none_or(|a| a < std::time::Duration::from_secs(60))
+    }
+}
+
 /// One change to the settings file.
 #[derive(Clone, Debug)]
 pub enum Edit {
@@ -1366,5 +1483,55 @@ fullscreen = "stay"
         write_at(&p, &[att(Attention::Mix)]).unwrap();
         assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o664);
         std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn only_her_own_dead_temps_are_swept() {
+        let d = tmp("sweep");
+        let p = d.join("settings.toml");
+        std::fs::write(&p, HIS).unwrap();
+        // Hers, from a pid that can't be running (above any pid_max) and from this process.
+        let dead = d.join("settings.toml.4294967290.tmp");
+        let mine = d.join(format!("settings.toml.{}.tmp", std::process::id()));
+        // Not hers: another name, no pid, a padded pid, not a .tmp, a directory.
+        let keep = ["other.toml.12.tmp", "settings.toml.x1.tmp", "settings.toml.0012.tmp", "settings.toml.12.bak", "settings.toml..tmp"];
+        for f in [&dead, &mine] {
+            std::fs::write(f, "x").unwrap();
+        }
+        for k in keep {
+            std::fs::write(d.join(k), "x").unwrap();
+        }
+        std::fs::create_dir(d.join("settings.toml.99.tmp")).unwrap();
+        assert_eq!(sweep_temps(&p), 2);
+        assert!(!dead.exists() && !mine.exists() && p.exists());
+        assert!(keep.iter().all(|k| d.join(k).exists()) && d.join("settings.toml.99.tmp").is_dir());
+        #[cfg(unix)]
+        {
+            // A live writer's (pid 1 always runs) stays.
+            let live = d.join("settings.toml.1.tmp");
+            std::fs::write(&live, "x").unwrap();
+            assert_eq!(sweep_temps(&p), 0);
+            assert!(live.exists());
+        }
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn the_queue_runs_one_write_at_a_time_and_owes_a_reload() {
+        let t0 = std::time::Instant::now();
+        let mut q: WriteQueue<u8> = WriteQueue::default();
+        assert!(!q.reload(), "nothing pending: a reload is just a reload");
+        q.push(vec![att(Attention::Off)], 1);
+        q.push(vec![att(Attention::Mix)], 2);
+        let (a, _) = q.start(t0).unwrap();
+        assert!(q.start(t0).is_none(), "one under way");
+        assert_eq!(q.pending().copied().collect::<Vec<_>>(), vec![1, 2]);
+        assert!(q.reload(), "owed again once they are in");
+        assert!(q.finish(a + 7).is_none(), "not that write");
+        assert_eq!(q.finish(a), Some((1, false)), "one still queued: not yet");
+        let (b, _) = q.start(t0).unwrap();
+        assert!(!q.stuck(b, t0 + WRITE_STUCK / 2) && q.stuck(b, t0 + WRITE_STUCK) && q.stuck_now(t0 + WRITE_STUCK));
+        assert_eq!(q.finish(b), Some((2, true)), "the last is in: the reload now");
+        assert!(!q.busy() && q.start(t0).is_none());
     }
 }

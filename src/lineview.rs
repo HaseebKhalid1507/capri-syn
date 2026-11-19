@@ -5,7 +5,7 @@
 use super::*;
 use crate::beside::{self, Panel, Place};
 use crate::line::{Ask, Line, Page, Pref, Prefs, Row, Snap, Who};
-use crate::settings::{Attention, Edit, Settings};
+use crate::settings::{Attention, Settings, WriteQueue};
 
 /// A press held this long is a hold (voice, later); shorter is a tap (type).
 pub(super) const TAP_MS: u128 = 250;
@@ -25,11 +25,15 @@ const LINE_H0: f32 = 120.0;
 /// Rows the Line holds (the transcript's tail).
 const ROWS_MAX: usize = 240;
 
-/// settings.toml writes waiting, and whether one is under way (`settings_write`).
-#[derive(Default)]
-pub(super) struct PrefsIo {
-    pub queue: std::collections::VecDeque<(Vec<Edit>, Option<Pref>)>,
-    pub busy: bool,
+/// settings.toml writes, one at a time (`settings_write`).
+pub(super) type PrefsIo = WriteQueue<PrefJob>;
+
+/// What a settings.toml write applies once it is in: the change, and whether her menu asked
+/// (else the Settings page).
+#[derive(Clone, Copy, Debug)]
+pub(super) struct PrefJob {
+    pub pref: Pref,
+    pub menu: bool,
 }
 
 pub(super) struct LineWin {
@@ -495,7 +499,8 @@ impl Avatar {
     pub(super) fn prefs_now(&self) -> Prefs {
         let mark = self.session.as_ref().and_then(|s| s.link.mark()).unwrap_or_else(|| "SYNAPS · OFFLINE".into());
         Prefs {
-            attention: self.brain.as_ref().map(|h| h.settings.brain.attention),
+            attention: self.brain.as_ref().map_or(Attention::Off, |h| h.settings.brain.attention),
+            brain: self.brain.as_ref().is_some_and(|h| h.settings.brain.enabled),
             wake: self.voice.cfg.wake_word,
             voice: self.voice.cfg.enabled,
             about: format!("CAPRI {} · {mark}", env!("CARGO_PKG_VERSION")),
@@ -508,78 +513,112 @@ impl Avatar {
     /// can't read or parse is left alone), off her UI thread; once it is in, that key alone is
     /// applied (his other hand edits wait for `settings reload`). Her line says which.
     pub(super) fn set_pref(&mut self, p: Pref, cx: &mut Context<Self>) {
-        let edit = match p {
-            Pref::Attention(a) => Edit::Set("brain", "attention", a.key().into()),
-            Pref::Wake(on) => Edit::Set("voice", "wake_word", on.into()),
-        };
-        self.settings_write(vec![edit], Some(p), cx);
+        self.settings_write(PrefJob { pref: p, menu: false }, cx);
     }
 
     /// settings.toml written in the order asked, one write at a time, each off the UI thread
-    /// (its fsync, Windows' retries); `pref`: the page's change, applied once written.
-    pub(super) fn settings_write(&mut self, edits: Vec<Edit>, pref: Option<Pref>, cx: &mut Context<Self>) {
-        self.prefs_io.queue.push_back((edits, pref));
+    /// (its fsync, Windows' retries). Its change is applied when it is in, menu or page alike.
+    pub(super) fn settings_write(&mut self, job: PrefJob, cx: &mut Context<Self>) {
+        let now = Instant::now();
+        self.prefs_io.push(vec![job.pref.edit()], job);
+        if self.prefs_io.stuck_now(now) {
+            self.settings_stuck(cx);
+        }
         self.settings_write_next(cx);
     }
 
     fn settings_write_next(&mut self, cx: &mut Context<Self>) {
-        if self.prefs_io.busy {
-            return;
-        }
-        let Some((edits, pref)) = self.prefs_io.queue.pop_front() else { return };
-        self.prefs_io.busy = true;
+        let Some((seq, edits)) = self.prefs_io.start(Instant::now()) else { return };
         cx.spawn(async move |this, cx| {
             let r = crate::off_thread(move || Ok(Settings::write(&edits))).await;
             let r = r.unwrap_or_else(|e| Err(crate::settings::WriteError::Failed(format!("{e:#}"))));
             this.update(cx, |a, cx| {
-                a.prefs_io.busy = false;
-                a.settings_written(pref, r, cx);
+                if let Some((job, reload)) = a.prefs_io.finish(seq) {
+                    a.settings_written(job, r, reload, cx);
+                }
                 a.settings_write_next(cx);
+            })
+            .ok();
+        })
+        .detach();
+        // A write that hangs (a dead network home): she says so, rather than queue in silence.
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(crate::settings::WRITE_STUCK).await;
+            this.update(cx, |a, cx| {
+                if a.prefs_io.stuck(seq, Instant::now()) {
+                    a.settings_stuck(cx);
+                }
             })
             .ok();
         })
         .detach();
     }
 
-    fn settings_written(&mut self, pref: Option<Pref>, r: Result<bool, crate::settings::WriteError>, cx: &mut Context<Self>) {
-        let Some(p) = pref else {
-            if let Err(e) = r {
-                elog!("synaps-avatar: settings.toml: {e}");
-            }
-            return;
-        };
+    fn settings_stuck(&mut self, cx: &mut Context<Self>) {
+        let n = self.prefs_io.pending().count();
+        elog!("synaps-avatar: settings.toml: a write is stuck ({n} change(s) waiting)");
+        self.prefs_says = Some(format!("Your settings file isn't answering. {n} change{} waiting.", if n == 1 { "" } else { "s" }));
+        self.line_push(cx);
+        cx.notify();
+    }
+
+    /// A write is done: its change applied if it went in (nothing if refused: she says why);
+    /// then the reload asked for while it was under way, once the last is in.
+    fn settings_written(&mut self, job: PrefJob, r: Result<bool, crate::settings::WriteError>, reload: bool, cx: &mut Context<Self>) {
+        let p = job.pref;
         self.prefs_says = Some(match r {
             Ok(_) => {
-                let says = match p {
+                self.pref_apply(p);
+                elog!("synaps-avatar: settings: {p:?}: ok (that key only{})", if job.menu { ", her menu" } else { "" });
+                match p {
                     Pref::Attention(a) => {
-                        if let Some(h) = &mut self.brain {
-                            h.settings.brain.attention = a;
-                            h.brain.settings.attention = a;
+                        // The menu's click was already news to her brain.
+                        if !job.menu {
+                            self.brain_touch(crate::brain::Touch::Menu);
                         }
-                        self.brain_touch(crate::brain::Touch::Menu);
                         match a {
                             Attention::Mix => "Mixing it up. Hang, cling, sit, peek.",
                             Attention::HangOnly => "Hanging only. I like it up there.",
                             Attention::Off => "Fine. I'll stay put.",
                         }
                     }
-                    Pref::Wake(on) => {
-                        if self.voice.cfg.wake_word != on {
-                            self.voice.cfg.wake_word = on;
-                            self.voice_config();
-                        }
-                        if on { "Say my name, I'll hear it." } else { "I'll stop listening for my name." }
-                    }
-                };
-                elog!("synaps-avatar: settings: {p:?}: ok (that key only)");
-                says.to_string()
+                    Pref::Wake(true) => "Say my name, I'll hear it.",
+                    Pref::Wake(false) => "I'll stop listening for my name.",
+                }
+                .to_string()
             }
             Err(e) => {
                 elog!("synaps-avatar: settings: {p:?} not saved: {e}");
                 e.says()
             }
         });
+        if reload {
+            let r = self.settings_reload(Instant::now());
+            elog!("synaps-avatar: settings reload, again now the writes are in: {r}");
+        }
         self.line_push(cx);
+        cx.notify();
+    }
+
+    /// A change written: its key in what she runs with, nothing else.
+    fn pref_apply(&mut self, p: Pref) {
+        match p {
+            Pref::Attention(a) => {
+                if let Some(h) = &mut self.brain {
+                    p.apply(&mut h.settings);
+                    h.brain.settings.attention = a;
+                }
+            }
+            Pref::Wake(on) => {
+                if self.voice.cfg.wake_word != on {
+                    self.voice.cfg.wake_word = on;
+                    self.voice_config();
+                }
+                if let Some(h) = &mut self.brain {
+                    p.apply(&mut h.settings);
+                }
+            }
+        }
     }
 
     /// Bring an open Line up to date (deferred: the Line may call back).

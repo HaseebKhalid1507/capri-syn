@@ -9,7 +9,7 @@
 //! ([`Ask`]).
 
 mod settings;
-pub use settings::{Page, Pref, Prefs};
+pub use settings::{Page, Pref, Prefs, next_attention};
 
 use crate::reader::{Block, Mark, Pal, inline, parse};
 use crate::theme::{self, Cut, Fill, glyph, tracked};
@@ -178,6 +178,28 @@ fn keyboard_refused(e: &str) -> bool {
     e.starts_with(NO_KEYBOARD)
 }
 
+/// What Esc does, first match: cancel the open mic, hush her voice, else the page's own (a
+/// step back on Settings; abort or close on chat).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Esc {
+    CancelListen,
+    Hush,
+    Settings,
+    Chat,
+}
+
+fn esc_does(listening: bool, speaking: bool, page: Page) -> Esc {
+    if listening {
+        Esc::CancelListen
+    } else if speaking {
+        Esc::Hush
+    } else if page == Page::Settings {
+        Esc::Settings
+    } else {
+        Esc::Chat
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
     Text,
@@ -247,8 +269,13 @@ pub struct Line {
     swap: Option<Instant>,
     /// The tallest the panel was on a page it left: both pages are at least as tall from then
     /// on, so swapping back and forth never moves its top (only the first can, if Settings
-    /// needs more than chat had).
+    /// needs more than chat had). Let go when what made it tall goes (`relax`).
     keep_h: f32,
+    /// `keep_h` is chat's (its draft, its prompt strip): let go when that goes.
+    keep_chat: bool,
+    /// `keep_h` to let go of at the next unpark (its cause went where shrinking would move
+    /// the panel under him: on Settings, or mid-swap).
+    relax_owed: bool,
     /// The field's height as last laid out (one line: the cog's; Settings' bar is as tall).
     field_h: std::rc::Rc<std::cell::Cell<f32>>,
     on_ask: OnAsk,
@@ -356,6 +383,9 @@ impl Line {
                         this.typed = true;
                         (this.on_ask)(Ask::Typing, cx).ok();
                     }
+                    if this.input.read(cx).value().is_empty() {
+                        this.relax();
+                    }
                     this.note = None;
                     cx.notify();
                 }
@@ -424,6 +454,8 @@ impl Line {
             sel: 0,
             swap: None,
             keep_h: 0.0,
+            keep_chat: false,
+            relax_owed: false,
             field_h: std::rc::Rc::new(std::cell::Cell::new(settings::FIELD_H0)),
             on_ask,
             _subs: subs,
@@ -487,6 +519,9 @@ impl Line {
         let ids: Vec<u64> = self.snap.prompts.iter().map(|p| p.id).collect();
         self.snap = snap;
         if self.snap.prompts.is_empty() {
+            if had_prompts {
+                self.relax();
+            }
             if self.mode == Mode::Prompt {
                 self.mode = Mode::Text;
                 self.secret = None;
@@ -558,6 +593,9 @@ impl Line {
         if r.is_ok() {
             self.parked = false;
             self.waiting = false;
+            if std::mem::take(&mut self.relax_owed) {
+                self.keep_h = 0.0;
+            }
             self.refocus(window, cx);
         }
         r
@@ -580,6 +618,21 @@ impl Line {
         } else {
             self.close(true, window, cx);
             "closed".into()
+        }
+    }
+
+    /// What kept the panel tall went (a draft sent or cleared, the prompt strip): `keep_h` lets
+    /// go now if that moves nothing under him (on chat, no swap running), else at the next
+    /// unpark.
+    fn relax(&mut self) {
+        if !self.keep_chat {
+            return;
+        }
+        let now = Instant::now();
+        if self.nav.page == Page::Chat && !self.swap_split(now).1 && !self.cog_turn(now).1 {
+            self.keep_h = 0.0;
+        } else if self.keep_h > 0.0 {
+            self.relax_owed = true;
         }
     }
 
@@ -610,6 +663,7 @@ impl Line {
                 if self.sent.last() != Some(&text) {
                     self.sent.push(text);
                 }
+                self.relax();
                 self.recall = None;
                 self.note = None;
                 self.tip = None;
@@ -697,20 +751,27 @@ impl Line {
             self.page_changed(window, cx);
             return true;
         }
+        // Esc: the open mic, then her voice, on either page (the mic row says "esc to cancel" on
+        // Settings too: never left open to send on key-up); then the page's own.
+        if k.key == "escape" {
+            match esc_does(self.snap.listening, self.snap.speaking, self.nav.page) {
+                Esc::CancelListen => {
+                    (self.on_ask)(Ask::CancelListen, cx).ok();
+                    return true;
+                }
+                Esc::Hush => {
+                    (self.on_ask)(Ask::Hush, cx).ok();
+                    self.note = Some("HUSHED · THE REST IS HERE".into());
+                    cx.notify();
+                    return true;
+                }
+                Esc::Settings | Esc::Chat => {}
+            }
+        }
         if self.nav.page == Page::Settings {
             return self.settings_key(k, window, cx);
         }
         match (k.key.as_str(), self.mode) {
-            ("escape", _) if self.snap.listening => {
-                (self.on_ask)(Ask::CancelListen, cx).ok();
-                true
-            }
-            ("escape", _) if self.snap.speaking => {
-                (self.on_ask)(Ask::Hush, cx).ok();
-                self.note = Some("HUSHED · THE REST IS HERE".into());
-                cx.notify();
-                true
-            }
             ("escape", Mode::Text) if self.snap.busy => {
                 if self.esc_at.is_some_and(|t| now < t + ESC_AGAIN) {
                     self.esc_at = None;
@@ -814,6 +875,8 @@ impl Line {
                 true
             }
             ("tab", Mode::Prompt) => {
+                // The prompt strip goes: a held ALLOW with it.
+                self.hold_at = None;
                 self.mode = Mode::Text;
                 self.secret = None;
                 self.refocus(window, cx);
@@ -846,7 +909,7 @@ impl Line {
         cx.spawn_in(window, async move |this, cx| {
             cx.background_executor().timer(HOLD).await;
             this.update_in(cx, |l, window, cx| {
-                if settings::hold_fires(l.hold_at, now, l.nav.page, l.prompt().is_some_and(|p| p.id == id)) {
+                if settings::hold_fires(l.hold_at, now, l.nav.page, l.mode, l.prompt().is_some_and(|p| p.id == id)) {
                     l.hold_at = None;
                     l.answer(id, Some("y".into()), window, cx);
                 }
@@ -1417,7 +1480,9 @@ impl Render for Line {
                     .text_color(rgb(pal.ink))
                     .child(tracked(&self.name.to_uppercase(), 1.6)),
             )
-            .child(div().text_color(rgb(pal.dim)).child(tracked(if self.nav.page == Page::Settings { "SETTINGS" } else { "LINE" }, 1.6)))
+            // Settings: the way back where the page's name is.
+            .when(self.nav.page == Page::Chat, |d| d.child(div().text_color(rgb(pal.dim)).child(tracked("LINE", 1.6))))
+            .when(self.nav.page == Page::Settings, |d| d.child(self.back_el(cx)))
             .child(div().flex_1())
             .child(state);
         let on_settings = self.nav.page == Page::Settings;
@@ -1604,10 +1669,10 @@ impl Render for Line {
             .px(px(PAD))
             .pt(px(4.0))
             .pb(px(8.0))
-            .text_size(px(11.5))
+            .text_size(px(settings::SMALL))
             .children(self.note.clone().map(|n| div().text_color(rgb(pal.accent)).font_weight(FontWeight::BOLD).child(n)))
             .children(tip.map(|n| div().text_size(px(13.0)).text_color(rgb(pal.text)).child(n)))
-            .children(hint.map(|h| div().text_color(rgb(pal.dim)).child(h)));
+            .children(hint.map(|h| div().font_weight(FontWeight::MEDIUM).text_color(rgb(theme::mix(pal.dim, pal.text, 0.2))).child(h)));
         // Laid out at its natural height (absolute, unconstrained) and measured: the window
         // follows it, bottom edge fixed.
         let probe_h = self.height;
@@ -1769,8 +1834,21 @@ pub fn tail_overlay(side: crate::beside::Side, at: f32, edge_c: u32, point_c: u3
 
 #[cfg(test)]
 mod tests {
-    use super::{GONE, NO_KEYBOARD, command, keyboard_refused, links, risky};
+    use super::{Esc, GONE, NO_KEYBOARD, Page, command, esc_does, keyboard_refused, links, risky};
     use crate::session::PromptView;
+
+    #[test]
+    fn esc_cancels_the_mic_and_hushes_on_either_page() {
+        for page in [Page::Chat, Page::Settings] {
+            // The mic open (its row says "esc to cancel"): cancelled, never a page step that
+            // leaves it open to send on key-up.
+            assert_eq!(esc_does(true, false, page), Esc::CancelListen, "{page:?}");
+            assert_eq!(esc_does(true, true, page), Esc::CancelListen, "{page:?}");
+            assert_eq!(esc_does(false, true, page), Esc::Hush, "{page:?}");
+        }
+        assert_eq!(esc_does(false, false, Page::Settings), Esc::Settings);
+        assert_eq!(esc_does(false, false, Page::Chat), Esc::Chat);
+    }
 
     fn confirm(title: &str, text: &str) -> PromptView {
         PromptView { id: 1, title: title.into(), text: text.into(), secret: false }

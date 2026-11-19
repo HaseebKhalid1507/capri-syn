@@ -249,6 +249,15 @@ fn run(t_start: Instant) -> Result<()> {
         frames::verify_poses(&pack)?;
     }
     let t_pack = t_start.elapsed().as_millis();
+    if !args.check {
+        // A write of hers that never finished (a crash, a kill) left its temp file: hers only.
+        std::thread::spawn(|| {
+            let n = settings::sweep_temps(&settings::Settings::path());
+            if n > 0 {
+                elog!("synaps-avatar: settings: {n} temp file(s) left by an unfinished write, removed");
+            }
+        });
+    }
 
     if args.check {
         let layout = view::Layout::new(&pack, 1.0, args.height);

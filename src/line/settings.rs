@@ -5,7 +5,7 @@
 //! change ([`Pref`]).
 
 use super::{Ask, Line, Mode, PAD};
-use crate::settings::Attention;
+use crate::settings::{Attention, Edit, Settings};
 use crate::theme::{self, Cut, Fill, tracked};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -80,8 +80,10 @@ impl Nav {
 /// What the Settings page shows: the values she runs with.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Prefs {
-    /// `[brain] attention` (None: her brain is off: no row).
-    pub attention: Option<Attention>,
+    /// `[brain] attention`, as she runs it.
+    pub attention: Attention,
+    /// Her brain runs (`[brain] enabled`): ATTENTION is locked while it doesn't, and reads OFF.
+    pub brain: bool,
     /// `[voice] wake_word`.
     pub wake: bool,
     /// `[voice] enabled`: "HEY CAPRI" is dim while it is off.
@@ -94,11 +96,42 @@ pub struct Prefs {
     pub new: u32,
 }
 
-/// A change he asks for on the page.
+/// A change he asks for (on the page, or her menu's ATTENTION row).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Pref {
     Attention(Attention),
     Wake(bool),
+}
+
+impl Pref {
+    /// Its one key in settings.toml.
+    pub fn edit(self) -> Edit {
+        match self {
+            Pref::Attention(a) => Edit::Set("brain", "attention", a.key().into()),
+            Pref::Wake(on) => Edit::Set("voice", "wake_word", on.into()),
+        }
+    }
+
+    /// Its key in `s`, as the file has it once written.
+    pub fn apply(self, s: &mut Settings) {
+        match self {
+            Pref::Attention(a) => s.brain.attention = a,
+            Pref::Wake(on) => s.voice.wake_word = on,
+        }
+    }
+}
+
+/// The next attention for her menu's row: on from the last one asked for and not written yet,
+/// else from the one she runs (two clicks before the first write is in go two steps).
+pub fn next_attention<'a>(pending: impl Iterator<Item = &'a Pref>, running: Attention) -> Attention {
+    pending
+        .filter_map(|p| match p {
+            Pref::Attention(a) => Some(*a),
+            Pref::Wake(_) => None,
+        })
+        .last()
+        .unwrap_or(running)
+        .next()
 }
 
 /// The page's rows, top to bottom.
@@ -109,14 +142,8 @@ pub enum SetRow {
     About,
 }
 
-pub fn set_rows(p: &Prefs) -> Vec<SetRow> {
-    let mut v = Vec::new();
-    if p.attention.is_some() {
-        v.push(SetRow::Attention);
-    }
-    v.push(SetRow::Wake);
-    v.push(SetRow::About);
-    v
+pub fn set_rows(_: &Prefs) -> Vec<SetRow> {
+    vec![SetRow::Attention, SetRow::Wake, SetRow::About]
 }
 
 const ATTENTION: [Attention; 3] = [Attention::Mix, Attention::HangOnly, Attention::Off];
@@ -143,9 +170,9 @@ pub fn list_key(key: &str, sel: usize, p: &Prefs) -> (usize, Act) {
     let act = match (key, rows[sel]) {
         ("up", _) => return (sel.saturating_sub(1), Act::Nothing),
         ("down", _) => return ((sel + 1).min(rows.len() - 1), Act::Nothing),
-        ("left", SetRow::Attention) => p.attention.map_or(Act::Nothing, |a| Act::Pref(Pref::Attention(step(a, -1)))),
-        ("right" | "space" | "enter", SetRow::Attention) => p.attention.map_or(Act::Nothing, |a| Act::Pref(Pref::Attention(step(a, 1)))),
-        // Locked while voice is off ([voice] enabled is his, in the file).
+        // Each locked while what it tunes is off ([brain] / [voice] enabled: his, in the file).
+        ("left", SetRow::Attention) if p.brain => Act::Pref(Pref::Attention(step(p.attention, -1))),
+        ("right" | "space" | "enter", SetRow::Attention) if p.brain => Act::Pref(Pref::Attention(step(p.attention, 1))),
         ("left" | "right" | "space" | "enter", SetRow::Wake) if p.voice => Act::Pref(Pref::Wake(!p.wake)),
         ("enter", SetRow::About) => Act::Copy,
         _ => Act::Nothing,
@@ -157,17 +184,18 @@ pub fn list_key(key: &str, sel: usize, p: &Prefs) -> (usize, Act) {
 pub fn hint(p: &Prefs, sel: usize) -> &'static str {
     let rows = set_rows(p);
     match rows[sel.min(rows.len() - 1)] {
-        SetRow::Attention => "↑↓ pick · ←→ change · esc chat",
+        SetRow::Attention if p.brain => "↑↓ pick · ←→ change · esc chat",
         SetRow::Wake if p.voice => "↑↓ pick · ←→ change · esc chat",
-        SetRow::Wake => "↑↓ pick · esc chat",
+        SetRow::Attention | SetRow::Wake => "↑↓ pick · esc chat",
         SetRow::About => "↑↓ pick · ⏎ copy · esc chat",
     }
 }
 
 /// A held ALLOW fires at HOLD only if it is still that hold on that prompt, and the prompt is on
-/// screen: a page swap lets go of it (#74: nothing approved unseen).
-pub fn hold_fires(hold_at: Option<Instant>, started: Instant, page: Page, same_prompt: bool) -> bool {
-    hold_at == Some(started) && same_prompt && page == Page::Chat
+/// screen: chat, in prompt mode (a page swap, or Tab to the field, lets go of it; #74: nothing
+/// approved unseen).
+pub(super) fn hold_fires(hold_at: Option<Instant>, started: Instant, page: Page, mode: Mode, same_prompt: bool) -> bool {
+    hold_at == Some(started) && same_prompt && page == Page::Chat && mode == Mode::Prompt
 }
 
 /// The text field's height (one line) until it has been laid out: Settings' bar is as tall as
@@ -176,6 +204,8 @@ pub(super) const FIELD_H0: f32 = 52.0;
 const COG_W: f32 = 34.0;
 /// Her line's slot on the Settings page.
 const QUOTE_H: f32 = 28.0;
+/// The page's small type (a version, a lock, a reason, the hints): px.
+pub(super) const SMALL: f32 = 12.0;
 
 /// A gear (`theme::glyph`'s, 8 teeth) `size` px square, turned `turn` radians (a tooth: π/4).
 fn gear(fg: u32, bg: u32, size: f32, turn: f32) -> impl IntoElement {
@@ -235,14 +265,15 @@ impl Line {
         }
     }
 
-    /// The cog: a chamfered shard as tall as the field, a dim-red edge, red on hover. On
-    /// Settings: a solid red plate with a back glyph (the way to chat).
+    /// The cog: a chamfered shard as tall as the field, a dim-red edge round a red gear, solid
+    /// red on hover. On Settings it is lit (her red edge): the same spot flips back.
     pub(super) fn cog_el(&self, cx: &Context<Line>) -> Stateful<Div> {
         let pal = self.pal;
         let on = self.nav.page == Page::Settings;
         let (turn, _) = self.cog_turn(Instant::now());
         let cut = Cut::Corners(7.0);
         let center = || div().absolute().top_0().left_0().size_full().flex().items_center().justify_center();
+        let (edge, w) = if on { (pal.accent, 2.0) } else { (pal.border, 1.5) };
         div()
             .id("cog")
             .group("cog")
@@ -250,18 +281,46 @@ impl Line {
             .flex_none()
             .w(px(COG_W))
             .cursor_pointer()
-            .when(on, |d| d.child(theme::backdrop(cut, Fill::solid(pal.accent))).child(center().child(theme::glyph_at("back", pal.ink, pal.accent, 12.0))))
-            .when(!on, |d| {
-                d.child(theme::backdrop(cut, Fill::framed(pal.field, pal.border, 1.0)))
-                    .child(center().child(gear(pal.dim, pal.field, 15.0, turn)))
-                    .child(center().invisible().group_hover("cog", |s| s.visible()).child(theme::backdrop(cut, Fill::solid(pal.accent))).child(gear(pal.ink, pal.accent, 15.0, turn)))
-            })
+            .child(theme::backdrop(cut, Fill::framed(pal.field, edge, w)))
+            .child(center().child(gear(pal.accent, pal.field, 15.0, turn)))
+            .child(center().invisible().group_hover("cog", |s| s.visible()).child(theme::backdrop(cut, Fill::solid(pal.accent))).child(gear(pal.ink, pal.accent, 15.0, turn)))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseDownEvent, window, cx| {
                     cx.stop_propagation();
                     this.nav.cog();
                     this.page_changed(window, cx);
+                }),
+            )
+    }
+
+    /// Settings' way back, in the header where the page's name was: one row tall, her dim-red
+    /// edge as the cog's (her red on hover).
+    pub(super) fn back_el(&self, cx: &Context<Line>) -> Stateful<Div> {
+        let pal = self.pal;
+        let cut = Cut::Corners(5.0);
+        div()
+            .id("set-chat")
+            .group("set-chat")
+            .relative()
+            .h(px(20.0))
+            .pl(px(7.0))
+            .pr(px(10.0))
+            .flex()
+            .items_center()
+            .gap(px(5.0))
+            .cursor_pointer()
+            .text_size(px(11.5))
+            .text_color(rgb(pal.accent))
+            .child(theme::backdrop(cut, Fill::framed(pal.field, pal.border, 1.5)))
+            .child(div().absolute().top_0().left_0().size_full().invisible().group_hover("set-chat", |s| s.visible()).child(theme::backdrop(cut, Fill::line(pal.accent, 1.5))))
+            .child(theme::glyph_at("back", pal.accent, pal.field, 9.0))
+            .child(div().group_hover("set-chat", |s| s.text_color(rgb(pal.text))).child(tracked("CHAT", 1.6)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    this.show(Page::Chat, window, cx);
                 }),
             )
     }
@@ -273,8 +332,12 @@ impl Line {
         self.swap = Some(now);
         // A held ALLOW lets go: its prompt is off screen now (or was, a moment ago).
         self.hold_at = None;
-        // The page left was this tall: both stay at least that.
-        self.keep_h = self.keep_h.max(self.height);
+        // The page left was this tall: both stay at least that (chat's draft or prompt strip
+        // let go of it when they go: `relax`).
+        if self.height > self.keep_h {
+            self.keep_h = self.height;
+            self.keep_chat = self.nav.page == Page::Settings;
+        }
         if self.nav.page == Page::Settings {
             self.sel = 0;
         } else if !self.snap.prompts.is_empty() {
@@ -411,11 +474,13 @@ impl Line {
                 .child(div().flex_1().min_w(px(0.0)).overflow_hidden().whitespace_nowrap().text_size(px(14.5)).text_color(rgb(if said { pal.text } else { pal.dim })).child(says))
                 .into_any_element(),
         );
+        // Small type (a version, a lock, a reason): never under the section labels' size.
+        let small_c = theme::mix(pal.dim, pal.text, 0.2);
         let section = |name: &str| {
             div()
                 .px(px(PAD))
                 .pt(px(8.0))
-                .pb(px(2.0))
+                .pb(px(5.0))
                 .flex()
                 .items_center()
                 .gap(px(8.0))
@@ -459,6 +524,17 @@ impl Line {
                 .p(px(3.0))
                 .child(theme::backdrop(Cut::Corners(7.0), Fill::line(if live { pal.border } else { theme::mix(pal.border, pal.panel, 0.6) }, 1.0)))
         };
+        let lock = || {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .text_size(px(SMALL))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(rgb(small_c))
+                .child(theme::glyph_at("lock", small_c, pal.panel, 12.0))
+                .child("locked · settings.toml")
+        };
         let label = |name: &str, on: bool, sub: Option<&str>| {
             div()
                 .w(px(170.0))
@@ -467,7 +543,7 @@ impl Line {
                 .flex_col()
                 .line_height(px(16.0))
                 .child(div().text_size(px(12.5)).font_weight(FontWeight::BOLD).text_color(rgb(if on { pal.text } else { theme::mix(pal.text, pal.dim, 0.55) })).child(tracked(name, 1.4)))
-                .children(sub.map(|s| div().text_size(px(11.0)).text_color(rgb(pal.dim)).child(s.to_string())))
+                .children(sub.map(|s| div().text_size(px(SMALL)).font_weight(FontWeight::MEDIUM).text_color(rgb(small_c)).child(s.to_string())))
         };
         // A row: picked, a 3 px red notch on the panel's edge and a faint band across.
         let row = |ix: usize, on: bool| {
@@ -497,21 +573,32 @@ impl Line {
             match r {
                 SetRow::Attention => {
                     out.push(section("BEHAVIOUR"));
-                    let cur = p.attention.unwrap_or_default();
+                    // Her brain off: she bids for nothing, so OFF is what runs; locked to the file.
+                    let live = p.brain;
+                    let cur = if live { p.attention } else { Attention::Off };
                     let segs = ATTENTION.iter().map(|&a| {
-                        seg(a.label(), a == cur, true, SharedString::from(format!("set-att-{}", a.key()))).cursor_pointer().on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                                cx.stop_propagation();
-                                this.sel = ix;
-                                if this.snap.prefs.as_ref().is_some_and(|p| p.attention != Some(a)) {
-                                    this.settings_act(Act::Pref(Pref::Attention(a)), cx);
-                                }
-                                cx.notify();
-                            }),
-                        )
+                        seg(a.label(), a == cur, live, SharedString::from(format!("set-att-{}", a.key()))).when(live, |d| {
+                            d.cursor_pointer().on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                                    cx.stop_propagation();
+                                    this.sel = ix;
+                                    if this.snap.prefs.as_ref().is_some_and(|p| p.brain && p.attention != a) {
+                                        this.settings_act(Act::Pref(Pref::Attention(a)), cx);
+                                    }
+                                    cx.notify();
+                                }),
+                            )
+                        })
                     });
-                    out.push(row(ix, on).child(label("ATTENTION", on, None)).child(div().flex_1()).child(track(true).children(segs)).into_any_element());
+                    out.push(
+                        row(ix, on)
+                            .child(label("ATTENTION", on, (!live).then_some("brain is off")))
+                            .child(div().flex_1())
+                            .children((!live).then(lock))
+                            .child(track(live).children(segs))
+                            .into_any_element(),
+                    );
                 }
                 SetRow::Wake => {
                     out.push(section("VOICE"));
@@ -534,21 +621,11 @@ impl Line {
                             )
                         })
                     });
-                    let lock = (!live).then(|| {
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.0))
-                            .text_size(px(11.0))
-                            .text_color(rgb(pal.dim))
-                            .child(theme::glyph_at("lock", pal.dim, pal.panel, 11.0))
-                            .child("locked · settings.toml")
-                    });
                     out.push(
                         row(ix, on)
                             .child(label("\u{201c}HEY CAPRI\u{201d}", on, (!live).then_some("voice is off")))
                             .child(div().flex_1())
-                            .children(lock)
+                            .children((!live).then(lock))
                             .child(track(live).children(segs))
                             .into_any_element(),
                     );
@@ -569,7 +646,7 @@ impl Line {
                     out.push(
                         row(ix, on)
                             .child(label("VERSION", on, None))
-                            .child(div().flex_1().min_w(px(0.0)).text_size(px(12.5)).text_color(rgb(if on { pal.text } else { pal.dim })).overflow_hidden().whitespace_nowrap().child(p.about.clone()))
+                            .child(div().flex_1().min_w(px(0.0)).text_size(px(13.0)).font_weight(FontWeight::MEDIUM).text_color(rgb(if on { pal.text } else { small_c })).overflow_hidden().whitespace_nowrap().child(p.about.clone()))
                             .child(button("set-github", "GITHUB ▸").on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |this, _: &MouseDownEvent, _, cx| {
@@ -595,7 +672,7 @@ impl Line {
         }
         // As tall as chat was (the content's min height): the bar stays where the field was.
         out.push(div().flex_1().min_h(px(4.0)).into_any_element());
-        // The bar where the field is, as tall as the field's: the cog (back to chat), CHAT, and
+        // The bar where the field is, as tall as the field's: the cog, lit (it flips back), and
         // what came meanwhile.
         out.push(
             div()
@@ -607,24 +684,6 @@ impl Line {
                 .h(px(10.0 + 1.0 + self.field_h.get()))
                 .gap(px(8.0))
                 .child(self.cog_el(cx))
-                .child(
-                    div()
-                        .id("set-chat")
-                        .flex()
-                        .items_center()
-                        .cursor_pointer()
-                        .text_size(px(12.5))
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(rgb(pal.text))
-                        .child(tracked("CHAT", 1.4))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _: &MouseDownEvent, window, cx| {
-                                cx.stop_propagation();
-                                this.show(Page::Chat, window, cx);
-                            }),
-                        ),
-                )
                 .child(div().flex_1())
                 .when(p.new > 0, |d| {
                     d.child(
@@ -647,8 +706,8 @@ impl Line {
 
 #[cfg(test)]
 mod tests {
-    use super::{Act, Nav, Page, Pref, Prefs, SetRow, hint, hold_fires, list_key, set_rows};
-    use crate::settings::Attention;
+    use super::{Act, Mode, Nav, Page, Pref, Prefs, SetRow, hint, hold_fires, list_key, next_attention, set_rows};
+    use crate::settings::{Attention, Settings, WriteQueue, write_at};
 
     #[test]
     fn esc_steps_back_one_page_at_a_time() {
@@ -684,7 +743,7 @@ mod tests {
     }
 
     fn prefs() -> Prefs {
-        Prefs { attention: Some(Attention::Mix), wake: true, voice: true, about: "CAPRI 0.0.1".into(), says: None, new: 0 }
+        Prefs { attention: Attention::Mix, brain: true, wake: true, voice: true, about: "CAPRI 0.0.1".into(), says: None, new: 0 }
     }
 
     #[test]
@@ -699,11 +758,14 @@ mod tests {
         assert_eq!(list_key("space", 1, &p), (1, Act::Pref(Pref::Wake(false))));
         assert_eq!(list_key("enter", 2, &p), (2, Act::Copy));
         assert_eq!(list_key("x", 1, &p), (1, Act::Nothing));
-        // Her brain off: no ATTENTION row, the rest moves up.
-        let q = Prefs { attention: None, ..prefs() };
-        assert_eq!(set_rows(&q), vec![SetRow::Wake, SetRow::About]);
-        assert_eq!(list_key("enter", 0, &q), (0, Act::Pref(Pref::Wake(false))));
-        assert_eq!(list_key("down", 5, &q), (1, Act::Nothing));
+        // Her brain off: ATTENTION is there but locked to the file, as "HEY CAPRI" is.
+        let q = Prefs { brain: false, ..prefs() };
+        assert_eq!(set_rows(&q), vec![SetRow::Attention, SetRow::Wake, SetRow::About]);
+        for k in ["left", "right", "space", "enter"] {
+            assert_eq!(list_key(k, 0, &q), (0, Act::Nothing), "{k}");
+        }
+        assert_eq!(list_key("enter", 1, &q), (1, Act::Pref(Pref::Wake(false))));
+        assert_eq!(list_key("down", 5, &q), (2, Act::Nothing));
         // Voice off: "HEY CAPRI" is locked to the file, no key changes it.
         let off = Prefs { voice: false, ..prefs() };
         for k in ["left", "right", "space", "enter"] {
@@ -718,20 +780,87 @@ mod tests {
         assert_eq!(hint(&p, 1), "↑↓ pick · ←→ change · esc chat");
         assert_eq!(hint(&p, 2), "↑↓ pick · ⏎ copy · esc chat", "⏎ copy only where it copies");
         assert_eq!(hint(&Prefs { voice: false, ..prefs() }, 1), "↑↓ pick · esc chat", "locked: nothing to change");
+        assert_eq!(hint(&Prefs { brain: false, ..prefs() }, 0), "↑↓ pick · esc chat");
         assert_eq!(hint(&p, 9), hint(&p, 2));
     }
 
     #[test]
     fn a_held_allow_never_fires_off_screen() {
         let t0 = std::time::Instant::now();
+        let p = Mode::Prompt;
         // Held on chat, still held at HOLD, the same prompt: it allows.
-        assert!(hold_fires(Some(t0), t0, Page::Chat, true));
+        assert!(hold_fires(Some(t0), t0, Page::Chat, p, true));
         // He went to Settings meanwhile (the swap lets go: hold_at None), or it is still set
         // but the prompt is off screen: never allowed unseen.
-        assert!(!hold_fires(None, t0, Page::Chat, true));
-        assert!(!hold_fires(Some(t0), t0, Page::Settings, true));
+        assert!(!hold_fires(None, t0, Page::Chat, p, true));
+        assert!(!hold_fires(Some(t0), t0, Page::Settings, p, true));
+        // Tab to the field while holding: the prompt strip is gone, so is the hold.
+        assert!(!hold_fires(Some(t0), t0, Page::Chat, Mode::Text, true));
         // A later hold, or another prompt in its place: not this one's.
-        assert!(!hold_fires(Some(t0 + std::time::Duration::from_millis(5)), t0, Page::Chat, true));
-        assert!(!hold_fires(Some(t0), t0, Page::Chat, false));
+        assert!(!hold_fires(Some(t0 + std::time::Duration::from_millis(5)), t0, Page::Chat, p, true));
+        assert!(!hold_fires(Some(t0), t0, Page::Chat, p, false));
+    }
+
+    /// Her menu's ATTENTION row, a Settings change and a `settings reload`, mixed with the
+    /// writes in flight: each change is in memory only once its write is, and after the last
+    /// one what she runs with is what the file says.
+    #[test]
+    fn menu_page_and_reload_end_where_the_file_is() {
+        let d = std::env::temp_dir().join(format!("sa-line-prefs-{}", std::process::id()));
+        std::fs::remove_dir_all(&d).ok();
+        std::fs::create_dir_all(&d).unwrap();
+        let f = d.join("settings.toml");
+        std::fs::write(&f, "# his\n[brain]\nattention = \"mix\"\n[voice]\nwake_word = true\n[ragdoll]\nstrength = 0.4\n").unwrap();
+        let load = || Settings::parse(&std::fs::read_to_string(&f).unwrap()).unwrap();
+        let mut mem = load();
+        let mut q: WriteQueue<Pref> = WriteQueue::default();
+        let t0 = std::time::Instant::now();
+        // The menu twice before anything is written: two steps, MIX → HANG ONLY → OFF.
+        for _ in 0..2 {
+            let a = next_attention(q.pending(), mem.brain.attention);
+            q.push(vec![Pref::Attention(a).edit()], Pref::Attention(a));
+        }
+        // The page: "HEY CAPRI" off.
+        q.push(vec![Pref::Wake(false).edit()], Pref::Wake(false));
+        assert_eq!((mem.brain.attention, mem.voice.wake_word), (Attention::Mix, true), "nothing applied before it is written");
+        let run = |q: &mut WriteQueue<Pref>, mem: &mut Settings| {
+            let (n, edits) = q.start(t0).unwrap();
+            let r = write_at(&f, &edits);
+            let (p, reload) = q.finish(n).unwrap();
+            if r.is_ok() {
+                p.apply(mem);
+            }
+            if reload {
+                *mem = load();
+            }
+        };
+        run(&mut q, &mut mem);
+        assert_eq!(mem.brain.attention, Attention::HangOnly);
+        // He edits the file by hand and reloads while two writes are still to go: memory is
+        // the file now, and the reload is owed again after the last write.
+        let text = std::fs::read_to_string(&f).unwrap().replace("strength = 0.4", "strength = 0.75");
+        std::fs::write(&f, text).unwrap();
+        mem = load();
+        assert!(q.reload());
+        run(&mut q, &mut mem);
+        assert_eq!(mem.brain.attention, Attention::Off);
+        assert!(mem.voice.wake_word, "the page's change isn't in yet");
+        run(&mut q, &mut mem);
+        assert!(!q.busy());
+        assert_eq!(mem, load(), "memory is the file");
+        assert_eq!((mem.brain.attention, mem.voice.wake_word, mem.ragdoll.strength), (Attention::Off, false, 0.75));
+        assert!(std::fs::read_to_string(&f).unwrap().starts_with("# his\n"));
+        // A write refused (read-only): nothing applied, memory still the file.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o444)).unwrap();
+            let a = next_attention(q.pending(), mem.brain.attention);
+            q.push(vec![Pref::Attention(a).edit()], Pref::Attention(a));
+            run(&mut q, &mut mem);
+            assert_eq!(mem, load());
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        std::fs::remove_dir_all(&d).ok();
     }
 }

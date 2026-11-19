@@ -3227,7 +3227,20 @@ impl Avatar {
         "ok".into()
     }
 
+    /// settings.toml read again and applied. With writes of hers still on the way, it is done
+    /// again once the last is in (`settings_written`): she ends up running what the file says.
     pub(super) fn settings_reload(&mut self, now: Instant) -> String {
+        let again = self.prefs_io.reload();
+        let r = self.settings_reload_now(now);
+        if again {
+            let n = self.prefs_io.pending().count();
+            format!("{r} (again once {n} pending write{} {} in)", if n == 1 { "" } else { "s" }, if n == 1 { "is" } else { "are" })
+        } else {
+            r
+        }
+    }
+
+    fn settings_reload_now(&mut self, now: Instant) -> String {
         match Settings::load() {
             Ok(s) => {
                 self.rag_strength = crate::ragdoll::Strength(s.ragdoll.strength);
@@ -3280,22 +3293,23 @@ impl Avatar {
         }
     }
 
-    /// The menu's ATTENTION line: MIX → HANG ONLY → OFF, written back to settings.toml.
+    /// The menu's ATTENTION line: MIX → HANG ONLY → OFF, written to settings.toml (only that
+    /// key) and applied once it is in, as the Settings page's changes are (a file she can't
+    /// write: nothing changes, and she says why).
     pub(super) fn cycle_attention(&mut self, cx: &mut Context<Self>) -> Attention {
-        let Some(h) = &mut self.brain else { return Attention::Mix };
-        let next = h.settings.brain.attention.next();
-        h.settings.brain.attention = next;
-        h.brain.settings.attention = next;
-        // Only that key, his file otherwise as it was (one he can't have read or that doesn't
-        // parse is left alone: it runs as picked until he fixes it).
-        self.settings_write(vec![crate::settings::Edit::Set("brain", "attention", next.key().into())], None, cx);
+        let Some(h) = &self.brain else { return Attention::Mix };
+        let next = crate::line::next_attention(self.prefs_io.pending().map(|j| &j.pref), h.settings.brain.attention);
+        self.settings_write(super::lineview::PrefJob { pref: crate::line::Pref::Attention(next), menu: true }, cx);
         let now = Instant::now();
         self.brain_feed(BrainEvent::Interaction(Touch::Menu), now);
         next
     }
 
+    /// The menu's ATTENTION value: the last one asked for (its write on the way), else hers.
     pub(super) fn attention_label(&self) -> Option<&'static str> {
-        Some(self.brain.as_ref()?.settings.brain.attention.label())
+        let h = self.brain.as_ref()?;
+        let asked = self.prefs_io.pending().filter_map(|j| if let crate::line::Pref::Attention(a) = j.pref { Some(a) } else { None }).last();
+        Some(asked.unwrap_or(h.settings.brain.attention).label())
     }
 
     pub(super) fn dnd_on(&self) -> bool {
