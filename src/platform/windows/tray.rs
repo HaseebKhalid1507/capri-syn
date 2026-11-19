@@ -471,37 +471,6 @@ fn paint_icon(h: HWND, s: &mut State, px: u32) {
     }
 }
 
-/// The menu as her model laid it out: a row with choices opens them, the lead row is bold, what
-/// can't act now is greyed (`TrackPopupMenu` never picks it).
-fn build_menu(items: &[TrayItem]) -> ::windows::core::Result<HMENU> {
-    // `&` marks a mnemonic in a menu: hers are written as they read.
-    let text = |s: &str| HSTRING::from(s.replace('&', "&&"));
-    let greyed = |f: MENU_ITEM_FLAGS, enabled: bool| if enabled { f } else { f | MF_GRAYED };
-    unsafe {
-        let m = CreatePopupMenu()?;
-        for it in items {
-            let r = match it {
-                TrayItem::Item { id, label, checked, lead, enabled } => {
-                    let f = greyed(if *checked { MF_STRING | MF_CHECKED } else { MF_STRING }, *enabled);
-                    AppendMenuW(m, f, *id as usize, &text(label)).and_then(|()| if *lead { SetMenuDefaultItem(m, *id, 0) } else { Ok(()) })
-                }
-                // A submenu not taken in is ours to destroy.
-                TrayItem::Sub { label, items, enabled } => build_menu(items).and_then(|sub| {
-                    AppendMenuW(m, greyed(MF_STRING | MF_POPUP, *enabled), sub.0 as usize, &text(label)).inspect_err(|_| {
-                        let _ = DestroyMenu(sub);
-                    })
-                }),
-                TrayItem::Rule => AppendMenuW(m, MF_SEPARATOR, 0, PCWSTR::null()),
-            };
-            if let Err(e) = r {
-                let _ = DestroyMenu(m);
-                return Err(e);
-            }
-        }
-        Ok(m)
-    }
-}
-
 /// A click on her icon: `Open`, once per double click.
 fn open() {
     with(|s| {
@@ -523,26 +492,15 @@ fn pick(id: u32) {
     });
 }
 
-/// Her menu at `at` (screen px), until he picks or clicks away.
+/// Her menu at `at` (screen px), until he picks or clicks away: owner-drawn in her colours
+/// (`traymenu`).
 fn show_menu(h: HWND, at: POINT) {
     let items = with(|s| s.shared.lock().map(|g| g.menu.clone()).unwrap_or_default()).unwrap_or_default();
     if items.is_empty() {
         return;
     }
-    let m = match build_menu(&items) {
-        Ok(m) => m,
-        Err(e) => {
-            elog!("synaps-avatar: tray: no menu ({e})");
-            return;
-        }
-    };
-    unsafe {
-        // In front, or a click elsewhere won't close it (the shell's own sample does the same).
-        let _ = SetForegroundWindow(h);
-        let align = if GetSystemMetrics(SM_MENUDROPALIGNMENT) != 0 { TPM_RIGHTALIGN } else { TPM_LEFTALIGN };
-        let _ = TrackPopupMenu(m, TPM_RIGHTBUTTON | align, at.x, at.y, None, h, None);
-        let _ = PostMessageW(Some(h), WM_NULL, WPARAM(0), LPARAM(0));
-        let _ = DestroyMenu(m);
+    if let Err(e) = super::traymenu::track(h, at, &items) {
+        elog!("synaps-avatar: tray: no menu ({e})");
     }
 }
 
@@ -565,6 +523,10 @@ fn on_icon(h: HWND, ev: u32, wp: WPARAM) {
 }
 
 unsafe extern "system" fn tray_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    // Her open menu's rows (their sizes, drawing them, a typed letter): never her state's.
+    if let Some(r) = super::traymenu::on_message(msg, wp, lp) {
+        return r;
+    }
     let ours = matches!(msg, WM_TRAY | WM_TRAY_ADD | WM_TRAY_TIP | WM_TRAY_ICON | WM_TRAY_REMOVE | WM_COMMAND) || (msg != 0 && msg == TASKBAR_CREATED.load(Ordering::Relaxed));
     if ours && busy() {
         // Sent while a call of hers waits on the shell: after it.
@@ -848,12 +810,6 @@ mod tests {
         }
     }
 
-    fn text(m: HMENU, pos: u32) -> String {
-        let mut b = [0u16; 128];
-        let n = unsafe { GetMenuStringW(m, pos, Some(&mut b), MF_BYPOSITION) };
-        String::from_utf16_lossy(&b[..n.max(0) as usize])
-    }
-
     /// build.rs put assets/icon/capri-syn.ico in this exe as icon group 1, every image of it:
     /// Windows picks the 16 px one for 16 px and the 256 one for 256. (MSVC's linker takes the
     /// .res; a -gnu build has none and draws her picture.)
@@ -927,66 +883,6 @@ mod tests {
         assert_ne!(guid(TEST), guid("C:\\other\\synaps-avatar.sock"));
         let b = guid("").to_u128().to_be_bytes();
         assert_eq!((b[6] >> 4, b[8] >> 6), (5, 2), "a name-based GUID's shape");
-    }
-
-    #[test]
-    fn the_menu_is_drawn_as_her_model_lays_it_out() {
-        let why = crate::line::MenuSave::Refused.says();
-        let s = Menu { hidden: true, dnd: Some(false), attention: Some(Attention::HangOnly), handsfree: Some(false), unsaved: why, ..Menu::default() };
-        let items = menu::tray_items(&menu::rows(&s));
-        let m = build_menu(&items).unwrap();
-        unsafe {
-            assert_eq!(GetMenuItemCount(Some(m)), items.len() as i32);
-            for (i, it) in items.iter().enumerate() {
-                let state = GetMenuState(m, i as u32, MF_BYPOSITION);
-                match it {
-                    TrayItem::Item { id, label, .. } => {
-                        assert_eq!((GetMenuItemID(m, i as i32), text(m, i as u32)), (*id, label.clone()));
-                    }
-                    TrayItem::Sub { label, items, .. } => {
-                        assert_eq!(text(m, i as u32), *label);
-                        let sub = GetSubMenu(m, i as i32);
-                        assert!(!sub.is_invalid());
-                        assert_eq!(GetMenuItemCount(Some(sub)), items.len() as i32);
-                        let checked: Vec<bool> = (0..3).map(|j| GetMenuState(sub, j, MF_BYPOSITION) & MF_CHECKED.0 != 0).collect();
-                        assert_eq!(checked, [false, true, false], "HANG ONLY in force");
-                        // Its last pick didn't save: why, under a rule, greyed (no pick).
-                        assert!(GetMenuState(sub, 3, MF_BYPOSITION) & MF_SEPARATOR.0 != 0);
-                        assert!(GetMenuState(sub, 4, MF_BYPOSITION) & MF_GRAYED.0 != 0);
-                        assert_eq!((GetMenuItemID(sub, 4), text(sub, 4)), (0, why.unwrap().to_string()));
-                    }
-                    TrayItem::Rule => assert!(state & MF_SEPARATOR.0 != 0),
-                }
-            }
-            assert_eq!(GetMenuDefaultItem(m, 0, GET_MENU_DEFAULT_ITEM_FLAGS(0)), menu::Item::ShowHide.id(), "SHOW leads while she is hidden");
-            DestroyMenu(m).unwrap();
-        }
-    }
-
-    /// While she quits, every row but QUIT is greyed (ATTENTION's choices with it).
-    #[test]
-    fn what_cant_act_now_is_greyed_in_the_tray() {
-        let s = Menu { quitting: true, dnd: Some(false), attention: Some(Attention::Mix), handsfree: Some(false), ..Menu::default() };
-        let items = menu::tray_items(&menu::rows(&s));
-        let m = build_menu(&items).unwrap();
-        unsafe {
-            let mut greyed = Vec::new();
-            for (i, it) in items.iter().enumerate() {
-                let g = GetMenuState(m, i as u32, MF_BYPOSITION) & MF_GRAYED.0 != 0;
-                match it {
-                    TrayItem::Item { label, .. } => greyed.push((label.clone(), g)),
-                    TrayItem::Sub { label, .. } => {
-                        greyed.push((label.clone(), g));
-                        let sub = GetSubMenu(m, i as i32);
-                        assert!((0..3).all(|j| GetMenuState(sub, j, MF_BYPOSITION) & MF_GRAYED.0 != 0));
-                    }
-                    TrayItem::Rule => {}
-                }
-            }
-            let live: Vec<&str> = greyed.iter().filter(|(_, g)| !g).map(|(l, _)| l.as_str()).collect();
-            assert_eq!(live, ["QUIT"], "{greyed:?}");
-            DestroyMenu(m).unwrap();
-        }
     }
 
     unsafe extern "system" fn his_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {

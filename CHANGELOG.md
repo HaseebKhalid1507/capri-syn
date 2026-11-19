@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Windows: her tray menu in her colours
+- Her tray's right-click menu was Windows' stock white menu. It's now drawn as her own menu is: her
+  red words on jet black, the row under the pointer ink on her red blade (its corner cut), what can't
+  act now dim, a check on DND OFF / END HANDS-FREE while they're on and a dot on ATTENTION's choice in
+  force, her dark red frame (square on Windows 11).
+- Sized at the DPI of the monitor it opens on, in whole pixels: crisp at 100, 150 and 200 %.
+- Keyboard as before: arrows, Enter, Esc, → into ATTENTION; a typed letter goes to the row it
+  starts (a second row with that letter: it lights, a second press moves on). Each row keeps its
+  words for a screen reader.
+
 ### When she can't start, she says so; her logs stay small; Windows needs no VC++ runtime
 - A start that fails where no one reads her log (the Start menu, the app menu, autostart) now says
   so on screen too, once, as she exits. Before, the click did nothing visible. On Windows it's a

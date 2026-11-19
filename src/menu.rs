@@ -6,7 +6,7 @@
 //! and `menu_do` refuses it whatever asked.
 
 use crate::control::Command;
-use crate::platform::{TrayEv, TrayItem};
+use crate::platform::{Mark, TrayEv, TrayItem};
 use crate::settings::Attention;
 
 /// One of her menu's items, as a pick.
@@ -161,6 +161,9 @@ pub struct Row {
     pub armed: bool,
     /// The row that matters most now (SHOW while she is hidden: the way back).
     pub lead: bool,
+    /// A switch (DND, hands-free): whether it's on now. The tray checks it; the words say what a
+    /// click does (DND OFF, END HANDS-FREE), on both menus.
+    pub on: Option<bool>,
     /// It acts now (`enabled`); else greyed.
     pub enabled: bool,
     /// Why its last pick didn't stick (ATTENTION's: `State::unsaved`): under its choices in
@@ -170,7 +173,7 @@ pub struct Row {
 
 impl Row {
     fn new(item: Item, label: &'static str) -> Row {
-        Row { item, label, choices: Vec::new(), rule: false, armed: false, lead: false, enabled: true, note: None }
+        Row { item, label, choices: Vec::new(), rule: false, armed: false, lead: false, on: None, enabled: true, note: None }
     }
 }
 
@@ -178,7 +181,7 @@ impl Row {
 pub fn rows(s: &State) -> Vec<Row> {
     let mut v = vec![Row::new(Item::Reset, "RESET POSITION")];
     if let Some(on) = s.dnd {
-        v.push(Row::new(Item::Dnd, if on { "DND OFF" } else { "DND 1 HOUR" }));
+        v.push(Row { on: Some(on), ..Row::new(Item::Dnd, if on { "DND OFF" } else { "DND 1 HOUR" }) });
     }
     if let Some(a) = s.attention {
         let label = match a {
@@ -190,7 +193,7 @@ pub fn rows(s: &State) -> Vec<Row> {
         v.push(Row { choices, note: s.unsaved, ..Row::new(Item::Attention(None), label) });
     }
     if let Some(on) = s.handsfree {
-        v.push(Row::new(Item::HandsFree, if on { "END HANDS-FREE" } else { "HANDS-FREE TALK" }));
+        v.push(Row { on: Some(on), ..Row::new(Item::HandsFree, if on { "END HANDS-FREE" } else { "HANDS-FREE TALK" }) });
     }
     v.push(Row::new(Item::Copy, "COPY LAST REPLY"));
     v.push(Row { lead: s.hidden, ..Row::new(Item::ShowHide, if s.hidden { "SHOW" } else { "HIDE" }) });
@@ -203,8 +206,8 @@ pub fn rows(s: &State) -> Vec<Row> {
     v
 }
 
-/// The rows as a tray draws them: a row with choices opens them (the tray's own arrow), one
-/// checked, its note under them greyed (id 0: never a pick).
+/// The rows as a tray draws them: a row with choices opens them (the tray's own arrow), the one
+/// in force marked, its note under them greyed (id 0: never a pick); a switch marked while on.
 pub fn tray_items(rows: &[Row]) -> Vec<TrayItem> {
     let mut v = Vec::new();
     for r in rows {
@@ -213,11 +216,11 @@ pub fn tray_items(rows: &[Row]) -> Vec<TrayItem> {
         }
         let enabled = r.enabled;
         v.push(if r.choices.is_empty() {
-            TrayItem::Item { id: r.item.id(), label: r.label.to_string(), checked: false, lead: r.lead, enabled }
+            TrayItem::Item { id: r.item.id(), label: r.label.to_string(), mark: r.on.map_or(Mark::None, Mark::Switch), lead: r.lead, enabled }
         } else {
-            let mut items: Vec<TrayItem> = r.choices.iter().map(|&(i, l, on)| TrayItem::Item { id: i.id(), label: l.to_string(), checked: on, lead: false, enabled }).collect();
+            let mut items: Vec<TrayItem> = r.choices.iter().map(|&(i, l, on)| TrayItem::Item { id: i.id(), label: l.to_string(), mark: Mark::Choice(on), lead: false, enabled }).collect();
             if let Some(note) = r.note {
-                items.extend([TrayItem::Rule, TrayItem::Item { id: 0, label: note.to_string(), checked: false, lead: false, enabled: false }]);
+                items.extend([TrayItem::Rule, TrayItem::Item { id: 0, label: note.to_string(), mark: Mark::None, lead: false, enabled: false }]);
             }
             TrayItem::Sub { label: r.label.to_string(), items, enabled }
         });
@@ -289,22 +292,25 @@ mod tests {
     fn the_tray_menu_is_her_menu() {
         let s = State { dnd: Some(false), attention: Some(Attention::Off), handsfree: Some(true), hidden: true, ..State::default() };
         let items = tray_items(&rows(&s));
-        let item = |id: u32, label: &str, lead: bool| TrayItem::Item { id, label: label.into(), checked: false, lead, enabled: true };
-        let pick = |a: Attention, on: bool| TrayItem::Item { id: Item::Attention(Some(a)).id(), label: a.label().into(), checked: on, lead: false, enabled: true };
+        let item = |id: u32, label: &str, mark: Mark, lead: bool| TrayItem::Item { id, label: label.into(), mark, lead, enabled: true };
+        let pick = |a: Attention, on: bool| TrayItem::Item { id: Item::Attention(Some(a)).id(), label: a.label().into(), mark: Mark::Choice(on), lead: false, enabled: true };
         assert_eq!(
             items,
             [
-                item(2, "RESET POSITION", false),
-                item(3, "DND 1 HOUR", false),
+                item(2, "RESET POSITION", Mark::None, false),
+                item(3, "DND 1 HOUR", Mark::Switch(false), false),
                 TrayItem::Sub { label: "ATTENTION: OFF".into(), items: vec![pick(Attention::Mix, false), pick(Attention::HangOnly, false), pick(Attention::Off, true)], enabled: true },
-                item(8, "END HANDS-FREE", false),
-                item(9, "COPY LAST REPLY", false),
-                item(1, "SHOW", true),
-                item(10, "SETTINGS", false),
+                item(8, "END HANDS-FREE", Mark::Switch(true), false),
+                item(9, "COPY LAST REPLY", Mark::None, false),
+                item(1, "SHOW", Mark::None, true),
+                item(10, "SETTINGS", Mark::None, false),
                 TrayItem::Rule,
-                item(11, "QUIT", false),
+                item(11, "QUIT", Mark::None, false),
             ]
         );
+        // DND on: checked, its words what a click does.
+        let dnd = tray_items(&rows(&State { dnd: Some(true), ..s }));
+        assert!(dnd.contains(&item(3, "DND OFF", Mark::Switch(true), false)));
     }
 
     fn greyed(s: &State) -> Vec<&'static str> {
@@ -364,7 +370,7 @@ mod tests {
         for why in [MenuSave::Refused, MenuSave::Stuck] {
             let s = State { unsaved: why.says(), ..fine };
             let c = sub(&s).unwrap();
-            let note = TrayItem::Item { id: 0, label: why.says().unwrap().into(), checked: false, lead: false, enabled: false };
+            let note = TrayItem::Item { id: 0, label: why.says().unwrap().into(), mark: Mark::None, lead: false, enabled: false };
             assert_eq!(c[3..], [TrayItem::Rule, note], "{why:?}");
             assert_ne!(hash(&s), hash(&fine), "{why:?}: the tray's menu kept as it was");
             assert_eq!(labels(&s), labels(&fine), "her rows are the same rows");
