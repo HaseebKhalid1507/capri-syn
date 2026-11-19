@@ -357,28 +357,41 @@ end;
   pumps, enables it again (the call's own cleanup enables it once more, harmlessly). Not much to click,
   but not nothing: its system menu is live (the icon, Alt+Space, a right click on the title bar), with
   Minimize and Inno's "About Setup...", a modal box that opens from inside that pump. So the timer
-  leaves the wizard alone while it owns an enabled popup (that box), else it would enable the wizard
-  under its own modal and About boxes would stack. While the box is up, or a drag is held (the mouse
-  down on the title bar runs Windows' move loop inside that pump), the wait doesn't run: the step goes
-  on until its output fills the pipe (about 4 KB, read only in that wait) and its next write blocks;
-  it goes on when the box is closed or the mouse is let go. Nothing is lost, nothing deadlocks. On
-  the other pages (the short looks before the install) the wizard stays disabled: its buttons are live. }
+  leaves the wizard alone while another window of Setup's is up (that box), else it would enable the
+  wizard under its own modal and About boxes would stack. (Not GetWindow(GW_ENABLEDPOPUP): tried, with
+  no box up it still names a popup the wizard owns, so the wizard was never enabled again.) While the
+  box is up, or a drag is held (the mouse down on the title bar runs Windows' move loop inside that
+  pump), the wait doesn't run: the step goes on until its output fills the pipe (about 4 KB, read only
+  in that wait) and its next write blocks; it goes on when the box is closed or the mouse is let go.
+  Nothing is lost, nothing deadlocks. On the other pages (the short looks before the install) the
+  wizard stays disabled: its buttons are live. }
 function EnableWindow(Wnd: HWND; Enable: Integer): Integer; external 'EnableWindow@user32.dll stdcall';
-function GetWindow(Wnd: HWND; Cmd: LongWord): HWND; external 'GetWindow@user32.dll stdcall';
+function IsWindowVisible(Wnd: HWND): Integer; external 'IsWindowVisible@user32.dll stdcall';
+function EnumThreadWindows(Thread, Proc, Param: LongWord): Integer; external 'EnumThreadWindows@user32.dll stdcall';
+function GetCurrentThreadId: LongWord; external 'GetCurrentThreadId@kernel32.dll stdcall';
 function SetTimer(Wnd: HWND; Id, Elapse, Proc: LongWord): LongWord; external 'SetTimer@user32.dll stdcall';
 function KillTimer(Wnd: HWND; Id: LongWord): Integer; external 'KillTimer@user32.dll stdcall';
 
-const
-  GW_ENABLEDPOPUP = 6; { the enabled popup this window owns, or the window itself when it has none }
-
 var
-  LiveProc: LongWord;
+  LiveProc, SeeProc: LongWord;
+  OtherUp: Boolean;
+
+{ EnumThreadWindows' callback (0 stops it): a window of Setup's, other than the wizard, that shows. }
+function SeeOther(Wnd: HWND; Param: LongWord): LongWord;
+begin
+  Result := 1;
+  if (Wnd <> WizardForm.Handle) and (IsWindowVisible(Wnd) <> 0) then begin
+    OtherUp := True;
+    Result := 0;
+  end;
+end;
 
 procedure KeepWizardLive(Wnd, Msg, Id, Tick: LongWord);
 begin
-  if (Progress <> nil) and (WizardForm.CurPageID = Progress.ID)
-     and (GetWindow(WizardForm.Handle, GW_ENABLEDPOPUP) = WizardForm.Handle) then
-    EnableWindow(WizardForm.Handle, 1);
+  if (Progress = nil) or (WizardForm.CurPageID <> Progress.ID) then exit;
+  OtherUp := False;
+  EnumThreadWindows(GetCurrentThreadId, SeeProc, 0);
+  if not OtherUp then EnableWindow(WizardForm.Handle, 1);
 end;
 
 { PowerShell Params, its output through StepLine, waited for; the wizard live meanwhile (above). }
@@ -389,6 +402,7 @@ begin
   Timer := 0;
   if (Progress <> nil) and (WizardForm.CurPageID = Progress.ID) then begin
     if LiveProc = 0 then LiveProc := CreateCallback(@KeepWizardLive);
+    if SeeProc = 0 then SeeProc := CreateCallback(@SeeOther);
     Timer := SetTimer(0, 0, 50, LiveProc);
     if Timer = 0 then
       Log('drag: no timer for step ' + StepName + ' (SetTimer: Windows error ' + IntToStr(DLLGetLastError) +
