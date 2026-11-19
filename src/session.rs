@@ -411,15 +411,16 @@ impl Link {
         Some(crate::creds::Query { model: self.model()?.to_string(), profile, pid })
     }
 
-    /// What the read found. Missing, or Unknown on a Claude model (a file mid-write, a login under
-    /// way): read again in `CREDS_EVERY`. Have, or another model's Unknown, ends the reads (until
-    /// the next attach or model change). Unknown leaves a Missing the daemon said (its next
-    /// answer, or a read that finds the login, clears that).
-    pub fn set_creds(&mut self, c: Creds, now: Instant) {
-        let again = match c {
-            Creds::Missing(_) => true,
-            Creds::Unknown => self.model().is_some_and(crate::creds::on_claude),
-            Creds::Have => false,
+    /// What the read found, and whether reading again can change it (`creds::Again`): if so, read
+    /// again in `CREDS_EVERY`; if not (a login found, another provider, a remote broker), the
+    /// reads end until the next attach or model change. Unknown leaves a Missing the daemon said
+    /// (its next answer, or a read that finds the login, clears that).
+    pub fn set_creds(&mut self, c: Creds, again: crate::creds::Again, now: Instant) {
+        use crate::creds::Again;
+        let again = match again {
+            Again::Yes => true,
+            Again::IfMissing => matches!(self.creds, Creds::Missing(_)),
+            Again::Never => false,
         };
         self.creds_at = again.then_some(now + CREDS_EVERY);
         if c == Creds::Unknown && matches!(self.creds, Creds::Missing(_)) {
@@ -1294,9 +1295,10 @@ impl Trouble {
             Trouble::LocalDown { ollama: true } => "Ollama's not answering, so I've got no brain. Start Ollama, then ask me again.".into(),
             Trouble::LocalDown { ollama: false } => "My local model's server isn't answering. Start it, then ask me again.".into(),
             Trouble::ModelMissing { model } => match model_word(model) {
-                // No `:tag` and no namespace: one made from a Modelfile (the docs' `capri-qwen3`, a
-                // 16k context), not a name Ollama's library has to pull.
-                Some(w) if !w.contains([':', '/']) => format!("{w} isn't on my local server. Create it from its Modelfile, then ask me again:\n`ollama create {w} -f Modelfile`"),
+                // One made from a Modelfile, as the docs make `capri-qwen3` (a 16k context): `capri-`
+                // and no `:tag`. Anything else is a name Ollama's library has (`mistral`,
+                // `llama3.2`, `qwen3:8b`): pulled.
+                Some(w) if w.starts_with("capri-") && !w.contains([':', '/']) => format!("{w} isn't on my local server. Create it from its Modelfile, then ask me again:\n`ollama create {w} -f Modelfile`"),
                 Some(w) => format!("{w} isn't on my local server. Pull it, then ask me again:\n`ollama pull {w}`"),
                 None => "My model isn't on my local server. Pull it there, then ask me again.".into(),
             },
@@ -1435,6 +1437,7 @@ fn links(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::creds::Again;
     use std::sync::Arc;
     use synaps_client::protocol::{DaemonFrame, decode_frame};
 
@@ -1948,6 +1951,9 @@ mod tests {
             Trouble::LocalDown { ollama: false },
             Trouble::ModelMissing { model: "qwen3:8b".into() },
             Trouble::ModelMissing { model: "capri-qwen3".into() },
+            Trouble::ModelMissing { model: "mistral".into() },
+            Trouble::ModelMissing { model: "llama3.2".into() },
+            Trouble::ModelMissing { model: "capri-qwen3:latest".into() },
             Trouble::ModelMissing { model: "someone/qwen3-tools".into() },
             Trouble::ModelMissing { model: "hf.co/someone/a-very-long-model-name-GGUF:Q4_K_M".into() },
             Trouble::ModelMissing { model: "a b; rm -rf ~".into() },
@@ -1964,7 +1970,8 @@ mod tests {
                 Trouble::NoBrain { .. } | Trouble::LoggedOut => Some(LOGIN_CMD.to_string()),
                 Trouble::ModelMissing { model } if model == "qwen3:8b" => Some("ollama pull qwen3:8b".to_string()),
                 Trouble::ModelMissing { model } if model == "capri-qwen3" => Some("ollama create capri-qwen3 -f Modelfile".to_string()),
-                Trouble::ModelMissing { model } if model == "someone/qwen3-tools" => Some("ollama pull someone/qwen3-tools".to_string()),
+                // Library models with no tag are pulled, as they always were.
+                Trouble::ModelMissing { model } if ["mistral", "llama3.2", "capri-qwen3:latest", "someone/qwen3-tools"].contains(&model.as_str()) => Some(format!("ollama pull {model}")),
                 _ => None,
             };
             assert_eq!(cmd, want, "{says}");
@@ -2009,7 +2016,7 @@ mod tests {
         let q = l.creds_due(t0).expect("due at attach");
         assert_eq!(q, crate::creds::Query { model: "anthropic/claude-haiku-4-5".into(), profile: None, pid: Some(1) });
         assert_eq!(l.body(t0).label, None);
-        l.set_creds(Creds::Missing(Some("Claude")), t0);
+        l.set_creds(Creds::Missing(Some("Claude")), Again::Yes, t0);
         let b = l.body(t0);
         assert_eq!((b.mood, b.label.as_deref(), b.trouble), (Mood::Idle, Some("NO BRAIN YET"), None), "a tag, not a line he didn't ask for");
         let sleepy = l.body(t0 + Duration::from_secs(3600));
@@ -2018,7 +2025,7 @@ mod tests {
         assert!(l.deadline(t0).is_some_and(|d| d <= t0 + CREDS_EVERY), "woken for the next read");
         assert!(l.creds_due(t0 + CREDS_EVERY).is_some());
         // He logged in (a terminal): the next read finds it.
-        l.set_creds(Creds::Have, t0 + CREDS_EVERY);
+        l.set_creds(Creds::Have, Again::Never, t0 + CREDS_EVERY);
         assert_eq!(l.body(t0 + CREDS_EVERY).label, None, "ONLINE again");
         assert_eq!(l.creds_due(t0 + CREDS_EVERY * 10), None, "no more reads");
     }
@@ -2034,10 +2041,13 @@ mod tests {
         let t1 = t0 + TROUBLE_FOR;
         assert_eq!(l.body(t1).label.as_deref(), Some("NO BRAIN YET"));
         assert!(l.creds_due(t0 + CREDS_EVERY).is_some());
-        l.set_creds(Creds::Unknown, t0 + CREDS_EVERY);
+        l.set_creds(Creds::Unknown, Again::Yes, t0 + CREDS_EVERY);
         assert_eq!(l.body(t1).label.as_deref(), Some("NO BRAIN YET"), "an Unknown read doesn't undo the daemon's word");
-        assert!(l.creds_due(t0 + CREDS_EVERY * 2).is_some(), "a Claude model: read again after an Unknown");
-        l.set_creds(Creds::Have, t0 + CREDS_EVERY * 2);
+        assert!(l.creds_due(t0 + CREDS_EVERY * 2).is_some(), "a file mid-write: read again");
+        l.set_creds(Creds::Unknown, Again::IfMissing, t0 + CREDS_EVERY * 2);
+        assert!(l.creds_due(t0 + CREDS_EVERY * 3).is_some(), "the daemon's environment unread: read on while NO BRAIN YET shows");
+        assert_eq!(l.body(t1).label.as_deref(), Some("NO BRAIN YET"));
+        l.set_creds(Creds::Have, Again::Never, t0 + CREDS_EVERY * 2);
         assert_eq!(l.body(t1).label, None, "the login, found");
         assert_eq!(l.creds_due(t1 + CREDS_EVERY * 10), None, "no more reads");
         failed_turn(&mut l, "Config error: openai provider: no credential configured for 'kimi-code'. Run `synaps login` to add one.", t1);
@@ -2049,17 +2059,31 @@ mod tests {
         assert_eq!(l.body(t1 + Duration::from_secs(30)).label, None, "she answered: a brain");
     }
 
-    /// Another model's Unknown ends the reads: nothing to decide there.
+    /// Where no read can ever decide (another provider, a remote broker, Windows with no login on
+    /// file and no tag showing), the reads end: no wake-up every 5 s. A model change, or a new
+    /// attach, reads again.
     #[test]
-    fn another_models_unknown_ends_the_reads() {
+    fn reads_end_where_they_can_never_decide() {
         let t0 = Instant::now();
         let mut l = live_link(t0);
         let mut p = persona();
         p.model = Some("local/qwen3:8b".into());
         l.on_event(applied(1, "model", &p), t0);
         assert!(l.creds_due(t0).is_some());
-        l.set_creds(Creds::Unknown, t0);
-        assert_eq!(l.creds_due(t0 + CREDS_EVERY * 10), None);
+        l.set_creds(Creds::Unknown, Again::Never, t0);
+        assert_eq!(l.creds_due(t0 + CREDS_EVERY * 10), None, "another provider");
+        // Back to Claude: read again; a remote broker or (Windows) no login on file ends it.
+        p.model = Some("anthropic/claude-haiku-4-5".into());
+        l.on_event(applied(1, "model", &p), t0);
+        assert!(l.creds_due(t0).is_some(), "a model change re-arms");
+        l.set_creds(Creds::Unknown, Again::IfMissing, t0);
+        assert_eq!(l.creds_due(t0 + CREDS_EVERY * 10), None, "nothing showing: no reads");
+        assert!(l.deadline(t0).is_none_or(|d| d > t0 + CREDS_EVERY), "and no wake-ups for them");
+        l.attaching(2);
+        l.on_event(attached(2, "attached_create.json"), t0 + CREDS_EVERY);
+        assert!(l.creds_due(t0 + CREDS_EVERY).is_some(), "a new attach re-arms");
+        l.set_creds(Creds::Unknown, Again::Never, t0 + CREDS_EVERY);
+        assert_eq!(l.creds_due(t0 + CREDS_EVERY * 10), None, "a remote broker");
     }
 
     /// A daemon through `--socket` (an ssh-forwarded remote one, `tools/synaps-avatar-remote`):
@@ -2099,6 +2123,18 @@ mod tests {
         assert_eq!(b.reply, "qwen3:8b isn't on my local server. Pull it, then ask me again:\n`ollama pull qwen3:8b`");
         failed_turn(&mut l, "openai request failed: broker transport error: can't reach local endpoint at http://localhost:11434/v1/chat/completions — is Ollama/LM Studio running?", t0);
         assert_eq!(l.body(t0).label.as_deref(), Some("OLLAMA IS OFF"));
+    }
+
+    /// A 404 on a library model with no tag (`local/mistral`, `local/llama3.2`) is pulled; only the
+    /// docs' own Modelfile model (`capri-…`) is created.
+    #[test]
+    fn a_missing_untagged_model_is_pulled_unless_its_the_docs_own() {
+        let e404 = "openai request failed: broker transport error: provider request failed: 404 Not Found [not_found_error]";
+        let chip = |model: &str| Trouble::of(e404, Some(model)).map(|t| t.says()).and_then(|s| s.rsplit_once("\n`").map(|(_, c)| c.trim_end_matches('`').to_string()));
+        assert_eq!(chip("local/mistral").as_deref(), Some("ollama pull mistral"));
+        assert_eq!(chip("local/llama3.2").as_deref(), Some("ollama pull llama3.2"));
+        assert_eq!(chip("local/qwen3:8b").as_deref(), Some("ollama pull qwen3:8b"));
+        assert_eq!(chip("local/capri-qwen3").as_deref(), Some("ollama create capri-qwen3 -f Modelfile"));
     }
 
     /// A turn that fails at once never shows as started: no THINKING, no busy bubble (ABORT)

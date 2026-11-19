@@ -126,6 +126,12 @@ Check ($code -eq 0) "a rerun exits 0 ($code)"
 $rerun = Get-Content -Raw (Join-Path $logs 'rerun.log')
 Check ($rerun -match 'up to date \(') 'her pack is up to date (not rebuilt)'
 Check ($rerun -match 'already set: Run\\synaps-daemon') 'the Run value is already set'
+if ($installText -match "she's up \(") {
+    # She runs (bare, this session): stopped by pid for her binary, said so, and started again.
+    $stop = [regex]::Match($rerun, 'Stop-Process -Id \d+ \(her binary is replaced; pid \d+\)').Value
+    Check ([bool]$stop) "a rerun stops the run going, by pid, and says so: $stop"
+    Check ($rerun -match "she's up \(\d+ ms") 'and starts her again'
+}
 
 # 3. --uninstall: nothing of hers is left; Synaps stays.
 $code = Invoke-Installer 'uninstall' @('--uninstall')

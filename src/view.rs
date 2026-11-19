@@ -2843,7 +2843,8 @@ impl Avatar {
             if let Some(s) = self.session.as_mut()
                 && let Some(q) = s.link.creds_due(now)
             {
-                s.link.set_creds(crate::creds::check(&q), now);
+                let (c, again) = crate::creds::check(&q);
+                s.link.set_creds(c, again, now);
             }
             let before = self.mood;
             self.sync_body(now);

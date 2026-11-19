@@ -85,6 +85,12 @@ foreach ($c in @(
     Check ((Get-CommandArgs $c[0]) -ceq $c[1]) "Get-CommandArgs '$($c[0])' -> '$($c[1])'"
 }
 
+# How a stop names a run: in another sign-in session (his desktop, seen from ssh), and his own.
+$l = Get-RunLabel ([pscustomobject]@{ Id = 42; Session = 1; Here = $false; Line = '"C:\x\synaps-avatar.exe" --profile work' })
+Check ($l -eq 'pid 42 in your other sign-in session (1), as you started her: "C:\x\synaps-avatar.exe" --profile work') "Get-RunLabel: another session, his own run ($l)"
+$l = Get-RunLabel ([pscustomobject]@{ Id = 7; Session = 2; Here = $true; Line = '' })
+Check ($l -eq 'pid 7') "Get-RunLabel: here, bare ($l)"
+
 Remove-Item -Recurse -Force -LiteralPath $tmp
 if ($fails.Count) { throw "$($fails.Count) check(s) failed: $($fails -join '; ')" }
 Write-Output 'all unit checks passed'
