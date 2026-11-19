@@ -26,13 +26,17 @@ until you list some.
 
 Two settings stop it with an error instead of delivering to the wrong place:
 
-- `role = ""`, as in a copy of `watch.toml` from before v1, where it meant "pick by hostname". Set
-  `role = "local"`, or `role = "remote"` with `[deliver] ssh_host`.
+- A role from a copy of `watch.toml` from before v1: `role = ""`, where it meant "pick by hostname", or one
+  of the two machine names it took then. The error says the file predates v1. Set `role = "local"`, or
+  `role = "remote"` with `[deliver] ssh_host`.
 - `[deliver] ssh_host` set while delivery is local (no `role = "remote"`): that's a forgotten role. On her
   machine, leave `ssh_host` empty.
 
 Its first log line names the events it really watches: `ci_failed` without `[github] repos`, `backup_failed`
-without a `unit` and `calendar` without a `db` are listed as on but not configured.
+without a `unit` and `calendar` without a `db` are listed as on but not configured. With GitHub off (a
+`remote` machine's default, or `[github] enabled = false`) its events are simply not listed.
+
+`install.sh --watch` checks the file with `capri-watch --print-config` and warns if it won't load.
 
 The ssh transport ships the argv base64-encoded in a Python script on stdin (`ssh <ssh_host> python3 -`). No
 remote shell parses the line, so quotes, `$( )` and the like in a PR title arrive unchanged, whatever the

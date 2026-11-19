@@ -9,8 +9,10 @@
   developer's names, agents and machines. Add your own with `[voice] vocab = ["…"]` in `settings.toml`: the
   words are appended to the prompt and count for the prompt-echo filter too (so no everyday words). Up to 16
   entries of ≤ 32 characters, 200 characters in all; past that, the first that fit are kept and the rest are
-  logged, not an error. An empty entry, a comma or a control character is a settings error naming the entry.
-- Her pronunciation fixes no longer include `Jawz` → "Jaws" (docs/VOICE.md shows how to add one).
+  logged, not an error (a word already in her prompt still takes a slot). An empty entry, a comma or a
+  control character is a settings error naming the entry.
+- Her pronunciation fixes no longer include `Jawz` → "Jaws". They're built into the sidecar (an update replaces
+  them); docs/VOICE.md lists them.
 - **capri-watch has no hostname magic:** the role comes only from `watch.toml`.
   - `role = "local"` (the default) is her machine. It delivers here and watches GitHub.
   - `role = "remote"` is any other machine. It delivers over ssh to `[deliver] ssh_host`, which it now
@@ -23,10 +25,12 @@
     to `bella`. It now delivers locally.
   - Breaking for a two-machine setup that leaned on the hostnames: set `role`, `host` and `[deliver]
     ssh_host` in each machine's `watch.toml` (docs/WATCH.md has an example). A copy from before this
-    (`role = ""`) stops with an error instead of guessing, and so does `ssh_host` with local delivery (a
-    forgotten `role = "remote"`).
+    (`role = ""`, or one of the two old machine roles) stops with an error that says the file predates v1,
+    instead of guessing; so does `ssh_host` with local delivery (a forgotten `role = "remote"`).
+    `install.sh --watch` checks the file first and warns, rather than enabling a watcher that won't start.
   - Its first log line lists only the events that really run: `ci_failed` with no repos, `backup_failed`
-    with no unit and `calendar` with no db show as on but not configured.
+    with no unit and `calendar` with no db show as on but not configured. With GitHub off (a remote
+    machine, or `enabled = false`) its events aren't listed at all.
 - `tools/synaps-avatar-remote` needs its host now (`synaps-avatar-remote <host>`); it had a personal
   default.
 

@@ -36,6 +36,7 @@ except ImportError:  # Python < 3.11
 # ─── config ────────────────────────────────────────────────────────────────────────────────
 
 ROLES = ("local", "remote")
+OLD_ROLES = ("", "bella", "avante")   # before v1: by hostname, or the developer's two machines
 
 DEFAULTS = {
     "role": "local",       # "local" (Capri's machine: GitHub + local delivery) | "remote" (another machine: ssh delivery)
@@ -113,10 +114,10 @@ def load_config(path=None, text=None, hostname=None):
         over = tomllib.loads(text)
     cfg = merge(DEFAULTS, over)
     # The role and the transport come from the file (or the defaults), never from the hostname;
-    # the hostname is only the label in event lines when `host` is empty. A file that sets an empty
-    # role is a copy from before v1 (role "" meant "by hostname"): it says so rather than guess.
-    if "role" in over and not str(over["role"]).strip():
-        raise ValueError('watch.toml predates v1: set role = "local" (Capri\'s machine), '
+    # the hostname is only the label in event lines when `host` is empty. A copy from before v1
+    # (role "" meant "by hostname", or one of its two machine roles: OLD_ROLES) says so rather than guess.
+    if "role" in over and str(over["role"]).strip().lower() in OLD_ROLES:
+        raise ValueError(f'watch.toml predates v1 (role = {over["role"]!r}): set role = "local" (Capri\'s machine), '
                          'or role = "remote" with [deliver] ssh_host = her machine')
     if cfg["role"] not in ROLES:
         raise ValueError('role must be "local" or "remote"')
@@ -419,6 +420,11 @@ class Source:
         """The events this source really watches: on, and with what it needs configured."""
         return [k for k in self.kinds if self.on(k)]
 
+    def idle(self):
+        """Events switched on that it can't watch: what they need isn't configured (for the startup log)."""
+        live = self.live()
+        return [k for k in self.kinds if self.on(k) and k not in live]
+
     def json_of(self, argv, timeout=30):
         rc, out, err = self.sys.run(argv, timeout=timeout)
         if rc != 0:
@@ -440,6 +446,10 @@ class GitHub(Source):
         if not self.cfg["github"]["enabled"]:
             return []
         return [k for k in super().live() if k == "review_requested" or self.cfg["github"]["repos"]]
+
+    def idle(self):
+        # GitHub off (a remote machine's default, or enabled = false) is not a missing setting
+        return super().idle() if self.cfg["github"]["enabled"] else []
 
     def me(self):
         if not self.state.get("me"):
@@ -1104,7 +1114,8 @@ def main(argv=None):
     w = Watcher(cfg, dry_run=a.dry_run, state=state, verbose=a.verbose)
     live = {k for src in w.sources for k in src.live()}
     on = [k for k in EVENTS if k in live]
-    idle = [k for k in EVENTS if w.on(k) and k not in live]
+    idle = {k for src in w.sources for k in src.idle()}
+    idle = [k for k in EVENTS if k in idle]
     log(f"role {cfg['role']} as {cfg['host']}, delivering via {cfg['deliver']['transport']} to session "
         f"{cfg['deliver']['session']!r}{' (DRY RUN)' if a.dry_run else ''}; events on: {', '.join(on) or 'none'}"
         + (f"; on but not configured (no repos, unit or db): {', '.join(idle)}" if idle else ""))

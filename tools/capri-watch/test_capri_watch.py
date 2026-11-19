@@ -176,13 +176,19 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual((r["role"], r["host"], r["synaps"], r["deliver"]["transport"], r["deliver"]["ssh_host"], r["github"]["enabled"]),
                          ("remote", "box", "synaps-dev", "ssh", "desk", False), "GitHub runs on her machine only")
         self.assertEqual(cw.load_config(text='[github]\nenabled = true\n', hostname="x")["github"]["repos"], [], "no repos by default")
-        for bad in ('role = "remote"\n', 'role = "bella"\n', 'role = "avante"\n', '[deliver]\ntransport = "ssh"\n'):
+        for bad in ('role = "remote"\n', 'role = "desk"\n', '[deliver]\ntransport = "ssh"\n'):
             with self.assertRaises(ValueError, msg=bad):
                 cw.load_config(text=bad, hostname="x")
-        # a pre-v1 copy (role = "" meant "by hostname", ssh_host was filled in): an error, never a quiet local
-        for old in ('role = ""\nsynaps = ""\n[deliver]\ntransport = ""\nssh_host = "desk"\n', 'role = ""\n', 'role = "  "\n'):
+        with self.assertRaisesRegex(ValueError, '^role must be "local" or "remote"$'):
+            cw.load_config(text='role = "desk"\n', hostname="x")
+        # a pre-v1 copy (role = "" meant "by hostname", "bella"/"avante" were its roles, ssh_host was filled in):
+        # an error that says so, never a quiet local
+        for old in ('role = ""\nsynaps = ""\n[deliver]\ntransport = ""\nssh_host = "desk"\n', 'role = ""\n', 'role = "  "\n',
+                    'role = "bella"\n', 'role = "avante"\n[deliver]\nssh_host = "bella"\n', 'role = "Bella"\n'):
             with self.assertRaisesRegex(ValueError, "predates v1", msg=old):
                 cw.load_config(text=old, hostname="x")
+        with self.assertRaisesRegex(ValueError, r"predates v1 \(role = 'avante'\)"):
+            cw.load_config(text='role = "avante"\n', hostname="x")
 
     def test_local_delivery_with_an_ssh_host_is_an_error(self):
         # a forgotten role = "remote" would deliver here, quietly
@@ -202,11 +208,13 @@ class ConfigTest(unittest.TestCase):
         with open(os.path.join(HERE, "watch.toml")) as f:
             shipped = f.read().lower()
         with open(os.path.join(HERE, "capri-watch")) as f:
-            code = f.read().lower()
+            # OLD_ROLES is the one exception: pre-v1 role values, recognized only to say the file is old
+            code = "".join(l for l in f if not l.startswith("OLD_ROLES = ")).lower()
         for word in ("haseeb", "bella", "avante", "parabellum", "jawz", "/home/"):
             self.assertNotIn(word, json.dumps(cw.DEFAULTS).lower())
             self.assertNotIn(word, shipped, f"watch.toml names {word}")
             self.assertNotIn(word, code, f"capri-watch names {word}")
+        self.assertNotIn("bella", " ".join(cw.ROLES), "no machine is a role")
 
     def test_overrides_and_errors(self):
         c = config('[event.pr_merged]\nenabled = true\n[safeguards]\nmax_per_hour = 2\n')
@@ -308,6 +316,28 @@ class GitHubTest(Base):
         self.assertNotIn("ci_failed", on, "no repos")
         self.assertNotIn("backup_failed", on, "no unit")
         self.assertIn("on but not configured (no repos, unit or db): ci_failed, backup_failed", line)
+
+    def test_the_startup_log_leaves_github_out_when_it_is_off(self):
+        # GitHub off (a remote machine's default, or enabled = false) is not "not configured"
+        path = os.path.join(TMP, "startup-off.toml")
+        for text in ('role = "remote"\nhost = "box"\n[deliver]\nssh_host = "desk"\n',
+                     'role = "local"\nhost = "desk"\n[github]\nenabled = false\n'):
+            with open(path, "w") as f:
+                f.write(text)
+            logged = []
+            with mock.patch.object(cw.Watcher, "tick", lambda *a, **k: None), mock.patch.object(cw, "log", logged.append):
+                self.assertEqual(cw.main(["--config", path, "--dry-run", "--once"]), 0)
+            line = logged[0]
+            self.assertIn("on but not configured (no repos, unit or db): backup_failed", line, text)
+            for k in cw.GitHub.kinds:
+                self.assertNotIn(k, line, f"{k}: GitHub is off, not unconfigured ({text!r})")
+        # switched on with no repos: still named
+        with open(path, "w") as f:
+            f.write('role = "remote"\nhost = "box"\n[deliver]\nssh_host = "desk"\n[github]\nenabled = true\n')
+        logged = []
+        with mock.patch.object(cw.Watcher, "tick", lambda *a, **k: None), mock.patch.object(cw, "log", logged.append):
+            cw.main(["--config", path, "--dry-run", "--once"])
+        self.assertIn("on but not configured (no repos, unit or db): ci_failed, backup_failed", logged[0])
 
     def test_a_failed_repo_keeps_its_conditions(self):
         self.sys.set("gh run list -R o/capri-syn", out=gh_runs(("ci", "failure", "1234567")))
