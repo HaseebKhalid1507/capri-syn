@@ -53,7 +53,8 @@ function Wait-Window([string]$Title, [int]$Secs = 60) {
     throw "no window '$Title' in $Secs s"
 }
 # Every name shown in a window (its page's caption among them).
-function Get-WindowText($W) { @($W.FindAll($Tree::Descendants, [Windows.Automation.Condition]::TrueCondition) | ForEach-Object { $_.Current.Name } | Where-Object { $_ }) }
+# Trimmed: a heading's name can end in a line break (the finish page's does).
+function Get-WindowText($W) { @($W.FindAll($Tree::Descendants, [Windows.Automation.Condition]::TrueCondition) | ForEach-Object { "$($_.Current.Name)".Trim() } | Where-Object { $_ }) }
 function Find-Named($W, [string]$Name) {
     foreach ($e in $W.FindAll($Tree::Descendants, [Windows.Automation.Condition]::TrueCondition)) { if ($e.Current.Name -match $Name) { return $e } }
     return $null

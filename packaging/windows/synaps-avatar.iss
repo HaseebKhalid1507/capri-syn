@@ -57,7 +57,12 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 ; AF_UNIX (her control socket) needs 1803; GPUI's DirectComposition path 1809.
 MinVersion=10.0.17763
+; Hers: black (Inno 6.6's dark style), her icon the red in it. An older Inno: its light one.
+#if VER >= EncodeVer(6,6,0)
+WizardStyle=modern dark
+#else
 WizardStyle=modern
+#endif
 Compression=lzma2/max
 SolidCompression=yes
 OutputDir=Output

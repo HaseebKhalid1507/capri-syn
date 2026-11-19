@@ -37,6 +37,7 @@ if (-not $build) { $build = 'local' }
 $iscc = (Get-Command ISCC.exe -ErrorAction SilentlyContinue).Source
 if (-not $iscc) { $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe' }
 if (-not (Test-Path $iscc)) { throw 'Inno Setup 6 (ISCC.exe) is not installed' }
+Write-Output "Inno Setup $((Get-Item $iscc).VersionInfo.ProductVersion) ($iscc)"
 & $iscc /Qp "/DAppVersion=$version" "/DBuild=$build" "/DExe=$exe" (Join-Path $here 'synaps-avatar.iss')
 if ($LASTEXITCODE) { throw "ISCC failed ($LASTEXITCODE)" }
 $setup = Get-ChildItem (Join-Path $here 'Output') -Filter "capri-syn-setup-$version-$build.exe"

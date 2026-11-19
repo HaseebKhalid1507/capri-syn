@@ -86,7 +86,12 @@ function Get-HerState {
     return $null
 }
 # Shots: spike's tools/shoot-win.ps1 (#82), dot-sourced. A process's windows, cropped (+ Pad).
-if ($Shots) { . (Join-Path $root 'tools\shoot-win.ps1') }
+if ($Shots) {
+    . (Join-Path $root 'tools\shoot-win.ps1')
+    # The desktop quiet (the runner's console minimized, a flat backdrop), long before she's up:
+    # MinimizeAll is the shell's, and late, and would take her with it.
+    try { Clear-ShotDesktop } catch { Write-Host "  (desktop stays as it is: $($_.Exception.Message))" }
+}
 function Get-Shot([string]$Name, [int]$ProcessId, [int]$Pad = 12) {
     if (-not $Shots) { return }
     try { $r = Save-WindowShot -Path (Join-Path $Shots "$Name.png") -ProcessId $ProcessId -Pad $Pad; Write-Host "  shot $Name.png: $($r -join ',')" }
@@ -135,9 +140,6 @@ Check (-not (Test-Path (Join-Path $app 'voice')) -and -not (Test-Path (Join-Path
 # 4. She starts, from his profile folder (the finish page's "Start her now"), and attaches.
 $from = (Get-Item $herLog -ErrorAction SilentlyContinue).Length
 $t0 = Get-Date
-# The shots' desktop quiet (the runner's console minimized, a flat backdrop): before she's up, so
-# she isn't minimized with it.
-if ($Shots) { try { Clear-ShotDesktop } catch { Write-Host "  (desktop stays as it is: $($_.Exception.Message))" } }
 $her = Start-Process $exe -WorkingDirectory $env:USERPROFILE -PassThru
 $st = $null; $painted = $false
 while (((Get-Date) - $t0).TotalSeconds -lt 60) {
@@ -148,6 +150,11 @@ while (((Get-Date) - $t0).TotalSeconds -lt 60) {
     Start-Sleep -Milliseconds 500
 }
 Check (-not $her.HasExited) "she runs (pid $($her.Id))"
+# Attached first (a fast daemon): her first frame's line may come after.
+while (-not $painted -and ((Get-Date) - $t0).TotalSeconds -lt 60 -and -not $her.HasExited) {
+    if ((Get-Content -Raw $herLog).Substring([int]$from) -match 'first-frame: painted (\d+) ms') { $painted = $true; Write-Host "  her first frame: $($Matches[1]) ms" }
+    else { Start-Sleep -Milliseconds 500 }
+}
 Check $painted 'her first frame is painted'
 Check ($st -and $st.session -and $st.session.live) "she attaches to the daemon (session.live) in $([int]((Get-Date) - $t0).TotalSeconds) s"
 Check ($st -and "$($st.status)" -notmatch 'OFFLINE') "her tag isn't OFFLINE: '$($st.status)' (session: '$($st.session.label)')"
