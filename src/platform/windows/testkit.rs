@@ -153,6 +153,25 @@ impl Driver for WinDriver {
         let (rw, _) = super::super::Desktop::root_size(&*self.os);
         self.open(WinRect::new(0, 0, rw, h), false)
     }
+    /// The touch keyboard's handwriting canvas as found on a real desktop (TabTip.exe, ex
+    /// 0xa0800a8): a topmost tool window over the whole primary monitor, layered and
+    /// click-through, never activated. Drawn opaque (alpha 255): only its style lets it by.
+    fn overlay(&mut self) -> Option<WinId> {
+        let ex = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_COMPOSITED | WS_EX_NOACTIVATE;
+        let (sw, sh) = unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
+        let o = unsafe {
+            let inst = GetModuleHandleW(None).ok()?;
+            // The primary monitor's top-left is 0,0 (screen px).
+            let o = CreateWindowExW(ex, w!("SaContractWorld"), w!("sa-contract-overlay"), WS_POPUP, 0, 0, sw, sh, None, None, Some(inst.into()), None).ok()?;
+            SetLayeredWindowAttributes(o, ::windows::Win32::Foundation::COLORREF(0), 255, LWA_ALPHA).ok()?;
+            let _ = ShowWindow(o, SW_SHOWNOACTIVATE);
+            o
+        };
+        // Her body stays above it (both topmost), as above everything the world opens.
+        self.os_raise();
+        self.pump(30);
+        Some(id(o))
+    }
     fn warp(&mut self, x: i32, y: i32) {
         let (ox, oy) = origin();
         unsafe { SetCursorPos(x + ox, y + oy).ok() };

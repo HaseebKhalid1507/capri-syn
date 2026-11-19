@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Windows: an overlay no longer takes her seats
+- On Windows she perches again on a monitor that has a click-through overlay over it. The touch
+  keyboard's handwriting canvas (`TabTip.exe`) keeps a topmost tool window the size of the primary
+  monitor, invisible and click-through, whenever its service runs. She took it for a window over
+  every other one, so no window's top edge on that monitor was hers to sit on, and she fell to the
+  floor there (a second monitor was fine).
+- A window clicks pass through (layered and `WS_EX_TRANSPARENT`, or layered at alpha 0: an
+  overlay, the canvas, a game or GPU overlay, a recorder's frame) is now left out of the windows
+  she sits on or hides behind. It isn't a fullscreen app either, nor the window he's in when it
+  has the foreground. `TabTip.exe` is also counted with the shell's processes.
+- A window that isn't his and covers a whole monitor goes in her log once (its class, exe, style
+  and rect, and whether it was left out), and once more if it turns click-through or back, so the
+  next overlay like it shows there. The shell's own hosts (Start, Search, Task View, Alt+Tab) are
+  said only when click-through: they cover the monitor each time they're up.
+- Tests: a Windows unit test puts the canvas, as found, over a window of his (CI's desktop), and
+  the contract has an `overlay` scenario (the fake and the Windows rig make one).
+
 ### Windows: her tray menu in her colours
 - Her tray's right-click menu was Windows' stock white menu. It's now drawn as her own menu is: her
   red words on jet black, the row under the pointer ink on her red blade (its corner cut), what can't

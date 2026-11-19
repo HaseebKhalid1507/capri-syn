@@ -21,6 +21,8 @@ struct FWin {
     reserve_top: i32,
     /// Its workspace (1, or 2: the one the second monitor shows).
     space: i64,
+    /// Clicks pass through it (an overlay): a backend leaves it out of its windows.
+    through: bool,
 }
 
 #[derive(Default)]
@@ -103,7 +105,7 @@ impl Desktop for FakeDesktop {
         Some(144.0)
     }
     fn windows(&self) -> Vec<Win> {
-        self.0.w().wins.iter().filter(|(_, f)| f.visible).map(|(_, f)| Win { rect: f.rect, managed: f.managed }).collect()
+        self.0.w().wins.iter().filter(|(_, f)| f.visible && !f.through).map(|(_, f)| Win { rect: f.rect, managed: f.managed }).collect()
     }
     fn active_window(&self) -> Option<WinId> {
         None
@@ -278,7 +280,7 @@ impl FakeDriver {
             let mut w = self.0.w();
             w.next += 1;
             let id = w.next;
-            w.wins.push((id, FWin { rect: WinRect { id, ..rect }, managed, visible: true, fullscreen: false, reserve_top, space: 1 }));
+            w.wins.push((id, FWin { rect: WinRect { id, ..rect }, managed, visible: true, fullscreen: false, reserve_top, space: 1, through: false }));
             id
         };
         self.0.hint(Hint::Mapped(id));
@@ -323,6 +325,12 @@ impl Driver for FakeDriver {
     fn dock_top(&mut self, h: i32) -> WinId {
         let rw = self.0.w().root.0;
         self.add(WinRect::new(0, 0, rw, h), true, h)
+    }
+    fn overlay(&mut self) -> Option<WinId> {
+        let m = self.0.w().monitors[0].rect();
+        let o = self.add(m, false, 0);
+        self.0.win(o, |f| f.through = true);
+        Some(o)
     }
     fn warp(&mut self, x: i32, y: i32) {
         self.0.w().pointer = (x, y);
@@ -383,7 +391,7 @@ fn fake_with(target_events: bool, keyboard_on_input: bool) -> (Os, FakeDriver) {
 fn contract_fake_with_target_events() {
     let (os, mut d) = fake(true);
     let passed = contract::block_on(contract::run(&os, &mut d)).unwrap();
-    assert_eq!(passed.len(), 14);
+    assert_eq!(passed.len(), 15);
 }
 
 #[test]
@@ -416,7 +424,7 @@ fn contract_fake_polled_target() {
 fn contract_fake_keyboard_on_his_input() {
     let (os, mut d) = fake_with(true, true);
     let passed = contract::block_on(contract::run(&os, &mut d)).unwrap();
-    assert_eq!(passed.len(), 14);
+    assert_eq!(passed.len(), 15);
     // Nothing of his since the keyboard went back: none to take.
     assert!(!os.may_take_keyboard());
     assert!(os.grab_keyboard(os.body()).is_err());

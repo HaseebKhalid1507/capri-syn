@@ -332,5 +332,5 @@ fn contract_hypr() {
     let r = result.borrow_mut().take().expect("the suite ran");
     let passed = r.unwrap();
     eprintln!("contract_hypr: {} scenarios passed: {}", passed.len(), passed.join(", "));
-    assert_eq!(passed.len(), 14);
+    assert_eq!(passed.len(), 15);
 }
