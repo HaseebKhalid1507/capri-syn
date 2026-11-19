@@ -21,6 +21,8 @@ does (`setting_changed`, ok, the new view): her model shows as set. `model M`: a
 `/model M` (his TUI's): the view changed, broadcast as the daemon does an engine command's change
 (`setting_changed` with its reserved id, `VIEW_CHANGED_SETTING_ID`), a reply to no one's Set.
 FAKE_HISTORY=FILE: the attached chat's messages instead of the fixture's (a JSON list of api messages).
+The Synaps TUI attaches too (`synaps --attach capri`, SYNAPS_RUNTIME_DIR=FAKE_DIR with daemon.sock
+linked to d.sock, SYNAPS_DAEMON_AUTOSPAWN=0): FAKE_LOCK=FILE holds a flock there as a daemon does.
 Commands the avatar sends are printed; answer values are never printed (only their length).
 
 Windows (stock CPython has no AF_UNIX there; the shots workflow runs it): the daemon end is the
@@ -55,7 +57,9 @@ def _synaps_pin():
 
 SYNAPS_PIN = _synaps_pin()
 WELCOME = {"type": "welcome", "protocol_version": 3, "daemon_version": os.environ.get("FAKE_DAEMON_VERSION") or SYNAPS_PIN, "pid": os.getpid(), "profile": None,
-           "sessions": [{"id": SID, "model": MODEL, "lifecycle": "live", "name": "capri"}],
+           # The session entry carries the attach's meta (`created_at`, cwd, ...) as the daemon's does:
+           # the Synaps TUI reads it from the Welcome before it attaches.
+           "sessions": [dict(ATTACHED["meta"], id=SID, model=MODEL, lifecycle="live", name="capri")],
            "progressive_tool_disclosure": False, "generation": 1, "features": []}
 attached = []          # live session connections (socket, lock)
 pending = {}           # prompt id -> request (in every Attached snapshot until answered)
@@ -147,7 +151,7 @@ def event(ev):
         targets = list(attached)
     for conn, wl in targets:
         try:
-            send(conn, wl, {"type": "event", "session_id": SID, "seq": n, "ts": "t", "event": ev})
+            send(conn, wl, {"type": "event", "session_id": SID, "seq": n, "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "event": ev})
         except OSError:
             pass
 
@@ -407,6 +411,11 @@ def pipe_accept(name):
 
 
 def main():
+    if os.environ.get("FAKE_LOCK"):
+        # Stand in for a Synaps daemon's run dir (the TUI checks the daemon's flock): synthetic only.
+        import fcntl
+        main.lockf = open(os.environ["FAKE_LOCK"], "a+")
+        fcntl.flock(main.lockf, fcntl.LOCK_EX | fcntl.LOCK_NB)
     path = f"{DIR}/d.sock"
     os.makedirs(DIR, exist_ok=True)
     if WIN:
