@@ -74,6 +74,18 @@ public static class Native {
         return new[] { GetSystemMetrics(76), GetSystemMetrics(77), GetSystemMetrics(78), GetSystemMetrics(79) };
     }
 
+    [DllImport("user32.dll")] static extern IntPtr GetDC(IntPtr h);
+    [DllImport("user32.dll")] static extern int ReleaseDC(IntPtr h, IntPtr dc);
+    [DllImport("gdi32.dll")] static extern bool BitBlt(IntPtr dst, int x, int y, int w, int h, IntPtr src, int sx, int sy, uint rop);
+    /// The screen's pixels at x, y (w x h) into `dst` (a bitmap's DC) at 0, 0: SRCCOPY | CAPTUREBLT,
+    /// so layered windows too.
+    public static bool Blit(IntPtr dst, int x, int y, int w, int h) {
+        Aware();
+        IntPtr src = GetDC(IntPtr.Zero);
+        try { return BitBlt(dst, 0, 0, w, h, src, x, y, 0x00CC0020u | 0x40000000u); }
+        finally { ReleaseDC(IntPtr.Zero, src); }
+    }
+
     // ---- input --------------------------------------------------------------------------------
     [StructLayout(LayoutKind.Sequential)] struct KEYBDINPUT { public ushort vk, scan; public uint flags, time; public IntPtr extra; }
     [StructLayout(LayoutKind.Sequential)] struct MOUSEINPUT { public int dx, dy; public uint data, flags, time; public IntPtr extra; }
@@ -103,14 +115,17 @@ public static class Native {
     /// The pointer to screen pixels (off what a shot shows: no hover).
     public static void Move(int x, int y) { Aware(); SetCursorPos(x, y); }
 
-    /// A click at screen pixels (right: the right button).
+    /// A click at screen pixels (right: the right button), held as a hand holds one (~120 ms): a
+    /// program polling the buttons sees it down.
     public static uint Click(int x, int y, bool right) {
         Aware();
         SetCursorPos(x, y);
-        System.Threading.Thread.Sleep(30);
+        System.Threading.Thread.Sleep(40);
         var down = new INPUT { type = 0 }; down.u.mi.flags = right ? 0x0008u : 0x0002u;
         var up = new INPUT { type = 0 }; up.u.mi.flags = right ? 0x0010u : 0x0004u;
-        return SendInput(2, new[] { down, up }, Marshal.SizeOf(typeof(INPUT)));
+        uint n = SendInput(1, new[] { down }, Marshal.SizeOf(typeof(INPUT)));
+        System.Threading.Thread.Sleep(120);
+        return n + SendInput(1, new[] { up }, Marshal.SizeOf(typeof(INPUT)));
     }
 
     // ---- the display: its mode and its scaling ------------------------------------------------
@@ -274,12 +289,15 @@ function Save-RectShot {
     param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][int[]]$Rect)
     $full = [IO.Path]::GetFullPath($Path)
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $full) | Out-Null
-    [ShootWin.Native]::Aware()
-    $bmp = [System.Drawing.Bitmap]::new($Rect[2], $Rect[3])
+    $bmp = [System.Drawing.Bitmap]::new($Rect[2], $Rect[3], [System.Drawing.Imaging.PixelFormat]::Format24bppRgb)
     $g = [System.Drawing.Graphics]::FromImage($bmp)
     try {
-        $op = [Enum]::ToObject([System.Drawing.CopyPixelOperation], 0x40CC0020)
-        $g.CopyFromScreen($Rect[0], $Rect[1], 0, 0, [System.Drawing.Size]::new($Rect[2], $Rect[3]), $op)
+        $dc = $g.GetHdc()
+        try {
+            if (-not [ShootWin.Native]::Blit($dc, $Rect[0], $Rect[1], $Rect[2], $Rect[3])) { throw "BitBlt failed" }
+        } finally {
+            $g.ReleaseHdc($dc)
+        }
         $bmp.Save($full, [System.Drawing.Imaging.ImageFormat]::Png)
     } finally {
         $g.Dispose(); $bmp.Dispose()

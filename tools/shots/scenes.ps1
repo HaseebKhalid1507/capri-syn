@@ -97,7 +97,7 @@ function Set-TakeEnv([hashtable]$Vars) {
 function Start-Take {
     param(
         [Parameter(Mandatory)][string]$Set, [Parameter(Mandatory)][string]$Name,
-        [string]$Settings = '', [hashtable]$Env = @{}, [object[]]$History, [switch]$Voice, [int]$DeltaMs = 30
+        [string]$Settings = '', [hashtable]$Env = @{}, [object[]]$History, [switch]$Voice, [int]$DeltaMs = 30, [string[]]$HerArgs = @()
     )
     $script:Take = "$Set/$Name"
     $t = Join-Path $Root "$Set-$Name"
@@ -140,7 +140,8 @@ function Start-Take {
     foreach ($k in $Env.Keys) { $herEnv[$k] = $Env[$k] }
     Set-TakeEnv $herEnv
 
-    $script:Her = Start-Process $Exe -ArgumentList '--pack', (Q $Pack), '--socket', (Q (Join-Path $t 'fake\d.sock')) -NoNewWindow -PassThru `
+    $argv = @('--pack', (Q $Pack), '--socket', (Q (Join-Path $t 'fake\d.sock'))) + @($HerArgs | Where-Object { $_ })
+    $script:Her = Start-Process $Exe -ArgumentList $argv -NoNewWindow -PassThru `
         -RedirectStandardOutput "$log-her.log" -RedirectStandardError "$log-her.err"
     $up = Wait-Until { (State).loaded -eq $true } 120 "her frames ($script:Take)"
     if (-not $up) { throw "$script:Take: she never loaded (see $log-her.err)" }
@@ -325,14 +326,16 @@ $Scenes = [ordered]@{
     header   = [ordered]@{}
 }
 
-# The header at two widths: 470 where she stands, 340 against the screen's edge (her bubble keeps
-# to the part of her window on the screen: 340 is its least).
-$HfReply = 'Spike pushed the reader fix eleven minutes ago, and CI went green right after. Want me to nudge lynx about the rebase?'
+# The header at two widths: 470 where she stands (a reply long enough to fill it), 340 against the
+# screen's left edge: her bubble keeps to the part of her window on the screen, and her window is
+# 500 px with her in its middle, so she is drawn 190 px tall there (--height) to leave it 352 px
+# (the bubble's least, 340, then).
+$HfReply = 'Spike pushed the reader fix eleven minutes ago, and CI went green right after. The Windows installer job took nineteen minutes and the voice bundle eleven. Want me to nudge lynx about the rebase, or leave it for the morning?'
 $YouSay = 'can you check whether the windows runner still builds the release binary after the vendored gpui patch from last night'
 foreach ($w in 470, 340) {
     $edge = $w -eq 340
     $Scenes.header["hf-$w"] = [scriptblock]::Create(@"
-        Start-Take header hf-$w -Settings "[voice]``nenabled = true``nwake_word = false``n" -History `$Short -Voice
+        Start-Take header hf-$w -Settings "[voice]``nenabled = true``nwake_word = false``n" -History `$Short -Voice -HerArgs `$(if (`$$edge) { @('--height', '190') } else { @() })
         `$null = Ctl 'brain off'
         if (`$$edge) { To-Edge }
         `$null = Ctl 'talk handsfree on'
@@ -342,7 +345,7 @@ foreach ($w in 470, 340) {
         Shot 'hf' 'hands-free and a reply'
 "@)
     $Scenes.header["prompt-$w"] = [scriptblock]::Create(@"
-        Start-Take header prompt-$w -Settings "[voice]``nenabled = true``nwake_word = false``n" -History `$Short -Voice
+        Start-Take header prompt-$w -Settings "[voice]``nenabled = true``nwake_word = false``n" -History `$Short -Voice -HerArgs `$(if (`$$edge) { @('--height', '190') } else { @() })
         `$null = Ctl 'brain off'
         if (`$$edge) { To-Edge }
         `$null = Ctl 'talk handsfree on'
@@ -352,7 +355,7 @@ foreach ($w in 470, 340) {
         Shot 'prompt' 'a prompt, 3 waiting, hands-free'
 "@)
     $Scenes.header["you-$w"] = [scriptblock]::Create(@"
-        Start-Take header you-$w -History `$Short -DeltaMs 600
+        Start-Take header you-$w -History `$Short -DeltaMs 600 -HerArgs `$(if (`$$edge) { @('--height', '190') } else { @() })
         `$null = Ctl 'brain off'
         if (`$$edge) { To-Edge }
         `$null = Ctl "submit `$YouSay"
@@ -361,21 +364,14 @@ foreach ($w in 470, 340) {
 "@)
 }
 
-<# Her against the screen's left edge, else its right: whichever leaves her bubble less room. #>
+<# Her against the screen's left edge. #>
 function To-Edge {
-    $best = $null
-    foreach ($x in 0, 100000) {
-        $null = Ctl "pos $x 100000 now"
-        Start-Sleep 1
-        $s = State
-        $o = $s.window
-        $sc = [ShootWin.Native]::Screen()
-        $vis = [Math]::Min($o.x + $o.w, $sc[0] + $sc[2]) - [Math]::Max($o.x, $sc[0])
-        Write-Host "  edge x=${x}: her window $($o.x),$($o.w): $vis px of it on screen"
-        if (-not $best -or $vis -lt $best[1]) { $best = @($x, $vis) }
-    }
-    $null = Ctl "pos $($best[0]) 100000 now"
+    $null = Ctl 'pos 0 100000 now'
     Start-Sleep 1
+    $o = (State).window
+    $sc = [ShootWin.Native]::Screen()
+    $vis = [Math]::Min($o.x + $o.w, $sc[0] + $sc[2]) - [Math]::Max($o.x, $sc[0])
+    Write-Host "  at the edge: her window at $($o.x), $($o.w) wide: $vis px of it on screen"
 }
 
 # ---- run ---------------------------------------------------------------------------------------
