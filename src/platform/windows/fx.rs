@@ -8,7 +8,7 @@
 use super::{FxZ, ShapeRect, Win32, WinId, hwnd, id, origin, region};
 use ::windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use ::windows::Win32::Graphics::Dwm::{DWMNCRP_DISABLED, DWMWA_NCRENDERING_POLICY, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DwmSetWindowAttribute};
-use ::windows::Win32::Graphics::Gdi::{CreateSolidBrush, DeleteObject, FillRect, HDC, InvalidateRect, SetWindowRgn};
+use ::windows::Win32::Graphics::Gdi::{CreateSolidBrush, DeleteObject, FillRect, HDC, InvalidateRect, RDW_ERASE, RDW_ERASENOW, RDW_INVALIDATE, RDW_UPDATENOW, RedrawWindow, SetWindowRgn};
 use ::windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use ::windows::Win32::UI::WindowsAndMessaging::*;
 use ::windows::core::{PCWSTR, w};
@@ -33,6 +33,8 @@ unsafe extern "system" fn fx_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
     unsafe {
         match msg {
             WM_ERASEBKGND => {
+                #[cfg(test)]
+                tests::erasing(h);
                 let mut r = RECT::default();
                 let _ = GetClientRect(h, &mut r);
                 let b = CreateSolidBrush(COLORREF(GetWindowLongPtrW(h, GWLP_USERDATA) as u32));
@@ -44,6 +46,21 @@ unsafe extern "system" fn fx_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
             _ => DefWindowProcW(h, msg, wp, lp),
         }
+    }
+}
+
+/// Shows the hidden window `h` at root `x, y` (`w` × `ht` px), above `after`, already filled.
+/// Shown as it is, its fresh surface stays black until its WM_ERASEBKGND comes round the message
+/// loop, and DWM can composite it before then: a dark first frame (r65: the bolt's first, a dark
+/// speck where it set off). So it goes up transparent, is filled before this returns
+/// (`RDW_ERASENOW`), and only then turns opaque.
+fn show_filled(h: HWND, after: HWND, x: i32, y: i32, w: i32, ht: i32) -> ::windows::core::Result<()> {
+    unsafe {
+        let _ = SetLayeredWindowAttributes(h, COLORREF(0), 0, LWA_ALPHA);
+        let shown = SetWindowPos(h, Some(after), x, y, w, ht, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        let _ = RedrawWindow(Some(h), None, None, RDW_INVALIDATE | RDW_ERASE | RDW_ERASENOW | RDW_UPDATENOW);
+        let _ = SetLayeredWindowAttributes(h, COLORREF(0), 255, LWA_ALPHA);
+        shown
     }
 }
 
@@ -108,8 +125,12 @@ impl Win32 {
                 SetWindowRgn(h, region(r), up);
             }
             let (ox, oy) = origin();
-            let show = if up { SET_WINDOW_POS_FLAGS(0) } else { SWP_SHOWWINDOW };
-            SetWindowPos(h, Some(after), at.0 + ox, at.1 + oy, size.0.max(1), size.1.max(1), SWP_NOACTIVATE | show)?;
+            let (x, y, w, ht) = (at.0 + ox, at.1 + oy, size.0.max(1), size.1.max(1));
+            if up {
+                SetWindowPos(h, Some(after), x, y, w, ht, SWP_NOACTIVATE)?;
+            } else {
+                show_filled(h, after, x, y, w, ht)?;
+            }
         }
         if let Ok(mut fx) = self.fx.lock()
             && let Some(f) = fx.get_mut(layer)
@@ -147,6 +168,41 @@ impl Win32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+
+    thread_local! {
+        /// An effect window's layered alpha at each WM_ERASEBKGND on this thread.
+        static ERASES: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(super) fn erasing(h: HWND) {
+        let mut alpha = 0u8;
+        unsafe {
+            let _ = GetLayeredWindowAttributes(h, None, Some(&raw mut alpha), None);
+        }
+        ERASES.with(|e| e.borrow_mut().push(alpha));
+    }
+
+    #[test]
+    fn a_layer_goes_up_already_filled() {
+        // Shown for a strike, the layer is filled while it's still transparent, and opaque only
+        // once that's done: the screen never gets its unpainted surface (a dark first frame).
+        let h = create(0xff1738).expect("an effect window");
+        let (ox, oy) = origin();
+        ERASES.with(|e| e.borrow_mut().clear());
+        show_filled(h, HWND_TOPMOST, ox + 40, oy + 40, 160, 90).expect("shown");
+        let seen = ERASES.with(|e| e.borrow().clone());
+        let mut alpha = 0u8;
+        let visible = unsafe {
+            let _ = GetLayeredWindowAttributes(h, None, Some(&raw mut alpha), None);
+            let v = IsWindowVisible(h).as_bool();
+            let _ = DestroyWindow(h);
+            v
+        };
+        assert!(visible);
+        assert_eq!(seen.first(), Some(&0), "filled while transparent, before this returned: {seen:?}");
+        assert_eq!(alpha, 255, "opaque once up");
+    }
 
     #[test]
     fn colours_swap_to_bgr() {
