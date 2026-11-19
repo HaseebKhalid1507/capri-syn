@@ -60,6 +60,9 @@ function Get-OursHere {
 
 # 0. A dry run touches nothing; from GitHub as `irm | iex` users get it, when -Ref is given.
 $before = @(Get-OursHere)
+# And everything at their top, as before: logged, never failed on (the runner's own come and go).
+function Get-AllHere { @(Get-ChildItem -Force $env:LOCALAPPDATA, $env:APPDATA -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }) }
+$beforeAll = @(Get-AllHere)
 if ($Ref) {
     $env:CAPRI_INSTALL_REF = $Ref
     $remote = "& ([scriptblock]::Create((Invoke-RestMethod 'https://raw.githubusercontent.com/HaseebKhalid1507/capri-syn/$Ref/install.ps1'))) --dry-run --voice"
@@ -95,6 +98,9 @@ $code = Invoke-Installer 'dry-run' @('--dry-run', '--artifact', $Setup)
 Check ($code -eq 0) "--dry-run exits 0 ($code)"
 $after = @(Get-OursHere)
 $new = @($after | Where-Object { $before -notcontains $_ })
+$nowAll = @(Get-AllHere)
+$all = @($nowAll | Where-Object { $beforeAll -notcontains $_ } | ForEach-Object { "+ $_" }) + @($beforeAll | Where-Object { $nowAll -notcontains $_ } | ForEach-Object { "- $_" })
+Write-Host "  %LOCALAPPDATA% and %APPDATA% during the dry run, all of it (not hers is logged only): $(if ($all) { $all -join '; ' } else { 'no change' })"
 Check ($new.Count -eq 0) "--dry-run made nothing in %LOCALAPPDATA% or %APPDATA% ($($new -join ', '))"
 Check (-not (Test-Path $app)) '--dry-run installed nothing'
 
@@ -123,7 +129,8 @@ Check ($text -match 'pack `Capri` ok: \d+ frames') "her log: $([regex]::Match($t
 $ErrorActionPreference = 'Continue'
 $status = (& $synaps daemon status 2>&1 | Out-String)
 $ErrorActionPreference = 'Stop'
-Check ($status -match 'daemon: running') 'the Synaps daemon runs'
+# "running" alone: it answers (another protocol's is "running (not answering)", exit 1).
+Check ($status -match '(?m)^daemon: running\r?$') 'the Synaps daemon runs and answers'
 Check ($status -match 'protocol: 3') 'protocol 3 (her client)'
 Check ((Get-RunValue 'synaps-daemon') -match '^"[^"]*\\conhost\.exe" --headless "[^"]*synaps\.exe" daemon --detach$') 'the daemon starts at sign-in, hidden (Run\synaps-daemon: conhost --headless)'
 Check (-not (Get-RunValue 'synaps-avatar')) 'no autostart for her (--no-autostart)'

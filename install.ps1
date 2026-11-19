@@ -731,10 +731,11 @@ function Start-Daemon {
     if ($script:SynapsNew) { $a += '-Fresh' }
     if ($script:Dry) { $a += '-DryRun' }
     $r = Invoke-Step (Get-StepScript) $a -NoStop
+    # The Run value into the receipt first: after a stop below, --uninstall still finds and removes it.
+    if ($r['runvalue'] -eq 'set') { Add-Receipt @('reg', $script:RunKey, 'synaps-daemon') }
     # A daemon that isn't hers (another protocol, or none said) stops the install, as install.sh's
     # does: she'd start and never attach. The step said why, and how to fix it.
     if ($r['daemon'] -eq 'wrong-protocol') { Stop-Install 'her brain''s daemon speaks another protocol (above: how to fix it)' }
-    if ($r['runvalue'] -eq 'set') { Add-Receipt @('reg', $script:RunKey, 'synaps-daemon') }
     if ($r['brain']) { $script:Brain = ($r['brain'] -eq 'yes') }
     $script:DaemonHow = 'at sign-in (Run key)'
     if ($script:Dry) { $script:DaemonState = '(dry run)'; return }
@@ -765,15 +766,19 @@ function Install-Extras {
     if (-not $script:Voice -and -not $script:Watch) { Write-Info 'skipped (--voice, --watch)'; return }
     if ($script:Watch) { Write-Info 'capri-watch is Linux-only (systemd units, statvfs): skipped' }
     if (-not $script:Voice) { return }
-    # Where her voice comes from: steps.ps1 voice-check (her installer's page asks the same).
-    $from = if ($script:FromSource) { 'none' } else { "$((Invoke-Step (Get-StepScript) @('voice-check') -NoStop)['voicefrom'])" }
+    # Where her voice comes from: steps.ps1 voice-check (her installer's page asks the same): the voice
+    # installer of the release her installer came from (its version, in her Apps entry), never the
+    # latest. None there (built from source, an artifact of no release): built here, below.
+    $ver = (Get-ItemProperty -Path $script:InnoKey -ErrorAction SilentlyContinue).DisplayVersion
+    $herRelease = if ($ver) { @('-Release', "v$ver") } else { @() }
+    $from = if ($script:FromSource) { 'none' } else { "$((Invoke-Step (Get-StepScript) (@('voice-check') + $herRelease) -NoStop)['voicefrom'])" }
     # A voice that doesn't come (offline, a download cut short, settings he must fix first) is said in
     # the summary with its retry; the rest of the install stands. Only [voice] enabled is written: a
     # re-run keeps his microphone, "hey Capri" and read-aloud as he set them.
     if ($from -like 'release *') {
         # Her voice installer, sha256 checked, its models, and her settings through her own writer:
         # steps.ps1 voice (her installer's Voice page runs the same).
-        $r = Invoke-Step (Get-StepScript) @(@('voice', '-Exe', $script:Exe) + $(if ($script:Dry) { @('-DryRun') } else { @() })) -NoStop
+        $r = Invoke-Step (Get-StepScript) @(@('voice', '-Exe', $script:Exe) + $herRelease + $(if ($script:Dry) { @('-DryRun') } else { @() })) -NoStop
         if (Get-ItemProperty -Path $script:VoiceKey -ErrorAction SilentlyContinue) { Add-Receipt @('inno', $script:VoiceKey) }
     } else {
         # No release: the same bundle, built here (CPython 3.13's embeddable package + wheels); then

@@ -544,7 +544,8 @@ begin
     ExtractTemporaryFiles('{app}\steps\steps.ps1');
     ExtractTemporaryFiles('{app}\steps\installer\manifest');
     { An empty "" argument can be lost on its way to -File: none is passed. }
-    A := 'mics voice-check';
+    { Her voice is her own release's (v{#AppVersion}), never the latest. }
+    A := 'mics voice-check -Release v{#AppVersion}';
     if VoiceFrom <> '' then A := A + ' -VoiceFrom "' + VoiceFrom + '"';
     RunStep('mics', 'Looking for a microphone', ExpandConstant('{tmp}') + '\{app}\steps\steps.ps1', A);
   except
@@ -608,12 +609,12 @@ begin
 end;
 
 { steps.ps1 voice's arguments: his choices (all of them: he ticked the box), and where his voice comes
-  from when it isn't the release. }
+  from: her own release (v{#AppVersion}), or /VOICEFROM. }
 function VoiceArgs: String;
 var
   V: String;
 begin
-  Result := 'voice -WakeWord ' + OnOff(WakeBox.Checked) + ' -ReadAloud ' + OnOff(ReadBox.Checked);
+  Result := 'voice -Release v{#AppVersion} -WakeWord ' + OnOff(WakeBox.Checked) + ' -ReadAloud ' + OnOff(ReadBox.Checked);
   if MicChosen <> '' then Result := Result + ' -Mic "' + MicChosen + '"'
   else Result := Result + ' -MicDefault';
   V := VoiceFrom;

@@ -116,7 +116,8 @@ Check ($v -match '^synaps \d+\.\d+\.\d+') "synaps --version: $v"
 $userPath = (Get-Item -LiteralPath 'registry::HKEY_CURRENT_USER\Environment').GetValue('Path', '', 'DoNotExpandEnvironmentNames')
 Check (@($userPath -split ';') -contains $cargoBin) "$cargoBin is on his user Path (Synaps' installer)"
 $status = if (Test-Path $synaps) { (& $synaps daemon status 2>&1 | Out-String) } else { '' }
-Check ($status -match 'daemon: running') "the Synaps daemon runs: $(($status -split "`n")[0])"
+# "running" alone: it answers (another protocol's is "running (not answering)", exit 1).
+Check ($status -match '(?m)^daemon: running\r?$') "the Synaps daemon runs and answers: $(($status -split "`n")[0])"
 Check ($status -match 'protocol: 3') 'protocol 3 (her client)'
 Check ((Get-RunValue 'synaps-daemon') -match '^"[^"]*\\conhost\.exe" --headless "[^"]*\\synaps\.exe" daemon --detach$') "and at sign-in, no console window: $(Get-RunValue 'synaps-daemon')"
 

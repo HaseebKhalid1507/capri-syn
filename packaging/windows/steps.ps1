@@ -18,10 +18,12 @@
 #                            so), so a daemon on another protocol is an older one still running.
 #   steps.ps1 pack           her art pack (below).
 #   steps.ps1 mics           the microphones Windows has (its capture endpoints that work). Reads only.
-#   steps.ps1 voice-check    where her voice would come from (-VoiceFrom, else the latest release), or
-#                            none yet. Reads only.
-#   steps.ps1 voice          her voice: its installer (-VoiceFrom FILE or URL, else the latest
-#                            release's; a .sha256 beside it checked), or -Bundle DIR already in place;
+#   steps.ps1 voice-check    where her voice would come from (-VoiceFrom, else -Release's: her release,
+#                            vX.Y.Z), or none yet. Reads only.
+#   steps.ps1 voice          her voice: its installer (-VoiceFrom FILE or https URL, else the one of
+#                            -Release, the release she came with; never releases/latest: a voice from
+#                            a newer release than her could need a newer her; its .sha256 checked),
+#                            or -Bundle DIR already in place;
 #                            then its models (~375 MB, each pinned); then [voice] enabled, and the
 #                            choices given (-Mic NAME or -MicDefault, -WakeWord, -ReadAloud; one not
 #                            given stays as he set it), written to settings.toml by her own settings
@@ -65,6 +67,7 @@ param(
     [switch]$LocalArt,
     [switch]$Ours,
     [string]$VoiceFrom = '',
+    [string]$Release = '',
     [string]$Bundle = '',
     [string]$Mic = '',
     [switch]$MicDefault,
@@ -311,17 +314,22 @@ function Install-Synaps {
     $script:Fresh = $true
     # An upgrade: a daemon the old Synaps started runs it until it's stopped. Said now (the daemon
     # step stops if it speaks another protocol).
-    if ($was -eq 'old' -and (Get-DaemonStatus $mine).Up) { Warn "a daemon is running, from the Synaps before this one: stop it now (`"$mine`" daemon stop)" }
+    if ($was -eq 'old' -and (Get-DaemonStatus $mine).Alive) { Warn "a daemon is running, from the Synaps before this one: stop it now (`"$mine`" daemon stop)" }
     Show-Synaps $s
 }
 
-# The daemon status: Up, and its protocol.
+# The daemon status. Alive: a daemon runs, whatever it speaks. Up: it also answered this Synaps'
+# ping, exit 0. A daemon on another protocol than this synaps.exe's refuses the ping, and Synaps
+# (0.11 and 0.12, src/cmd/daemon.rs `status`) then says "daemon: running (not answering)" and exits 1,
+# with its protocol from daemon.json: Alive, not Up. So the protocol checks go on Alive; Up is only
+# "it answers" (the wait for a daemon just started, and a hung one of hers).
 function Get-DaemonStatus([string]$File) {
     $ErrorActionPreference = 'Continue'
     $t = (& $File daemon status 2>&1 | Out-String)
-    $up = ($LASTEXITCODE -eq 0) -and ($t -match 'daemon: running')
+    $alive = $t -match '(?m)^daemon: running'
+    $up = ($LASTEXITCODE -eq 0) -and $alive
     $p = if ($t -match 'protocol: (\d+)') { $Matches[1] } else { '?' }
-    return @{ Up = $up; Protocol = $p; Text = $t.Trim() }
+    return @{ Up = $up; Alive = $alive; Protocol = $p; Text = $t.Trim() }
 }
 # One of these steps' own Run\synaps-daemon values (any Synaps path), as against one of his.
 function Test-OurRunValue([string]$Value) { $Value -match '^"[^"]*\\conhost\.exe" --headless "[^"]*\\synaps\.exe" daemon --detach$' }
@@ -334,6 +342,7 @@ function Start-Daemon {
     else {
         $st = Get-DaemonStatus $exe
         if ($st.Up) { Good 'the daemon runs already' }
+        elseif ($st.Alive) { Say "a daemon runs already, but doesn't answer this Synaps: $(($st.Text -split "`n")[0]) (its protocol: below)" }
         else {
             Say "`$ $exe daemon --detach"
             $rc = Invoke-Logged $exe @('daemon', '--detach')
@@ -364,7 +373,7 @@ function Start-Daemon {
         if ($st.Up) { break }
         Start-Sleep -Milliseconds 500
     }
-    if (-not $st.Up) {
+    if (-not $st.Alive) {
         Warn "the daemon isn't answering yet: $(($st.Text -split "`n")[0])"
         Result 'daemon: not-running'
         Result "brain: $(if (Test-Brain) { 'yes' } else { 'no' })"
@@ -389,6 +398,13 @@ function Start-Daemon {
     if ($st.Protocol -ne $proto) {
         Result 'daemon: wrong-protocol'
         Stop-Step "the daemon speaks protocol $($st.Protocol); she speaks $proto (exact match), so she can't attach. Install Synaps $pin (irm https://github.com/$(Get-Key 'synaps_repo')/releases/download/v$pin/synaps-installer.ps1 | iex), stop the daemon, $stop, and run this again; or use a capri-syn that speaks $($st.Protocol)"
+    }
+    # Hers, but it didn't answer in 10 s: hung, never "running".
+    if (-not $st.Up) {
+        Warn "the daemon runs (protocol $($st.Protocol), hers) but doesn't answer: stop it, $stop, then start it again, `"$exe`" daemon --detach"
+        Result 'daemon: not-running'
+        Result "brain: $(if (Test-Brain) { 'yes' } else { 'no' })"
+        return
     }
     Good "daemon running (protocol $($st.Protocol)): at sign-in too"
     Result "daemon: running $($st.Protocol)"
@@ -781,7 +797,10 @@ function Find-Voice {
         $sum = if (Test-Path -LiteralPath "$f.sha256") { ((Get-Content -Raw -LiteralPath "$f.sha256") -split '\s+')[0] } else { '' }
         return @{ Kind = 'file'; Where = $f; Sum = $sum }
     }
-    $url = "https://github.com/$(Get-Key 'repo')/releases/latest/download/$(Get-Key 'asset_windows_voice')"
+    # Her release's own voice installer: the tag of the setup she came with (her installer passes its
+    # version, install.ps1 the one in her Apps entry). Never releases/latest.
+    if ($Release -notmatch '^v\d+\.\d+\.\d+([-+][0-9A-Za-z.-]+)?$') { return @{ Kind = 'none'; Where = "(no release of hers given$(if ($Release) { ": $Release" }))"; Sum = '' } }
+    $url = "https://github.com/$(Get-Key 'repo')/releases/download/$Release/$(Get-Key 'asset_windows_voice')"
     try { $sum = ((Get-Text "$url.sha256") -split '\s+')[0] } catch {
         $w = Get-NetWhy $_.Exception
         # Windows PowerShell can read github.com's 404 (no release) as a closed connection: offline
@@ -790,9 +809,9 @@ function Find-Voice {
             try { $null = Invoke-WebRequest -UseBasicParsing -Method Head -Uri "https://github.com/$(Get-Key 'repo')" -Headers (Get-Headers) -TimeoutSec 30 }
             catch { return @{ Kind = 'offline'; Where = $w.Text; Sum = '' } }
         }
-        return @{ Kind = 'none'; Where = '(no release has it yet)'; Sum = '' }
+        return @{ Kind = 'none'; Where = "(release $Release doesn't have it yet)"; Sum = '' }
     }
-    if ($sum -notmatch '^[0-9a-f]{64}$') { return @{ Kind = 'none'; Where = '(no release has it yet)'; Sum = '' } }
+    if ($sum -notmatch '^[0-9a-f]{64}$') { return @{ Kind = 'none'; Where = "(release $Release doesn't have it yet)"; Sum = '' } }
     return @{ Kind = 'release'; Where = $url; Sum = $sum }
 }
 

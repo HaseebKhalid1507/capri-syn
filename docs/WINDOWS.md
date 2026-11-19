@@ -50,6 +50,9 @@ persona; no art).
   -Fresh`), a daemon on another protocol is an older one still running: "synaps 0.12.0 is installed,
   but the daemon still running is an older one (protocol 2; hers is 3): stop it, `synaps daemon stop`
   (--force if it won't), then run this again". An upgrade warns about a running daemon at once.
+  A daemon on another protocol than the `synaps.exe` asking doesn't answer it: Synaps' `daemon
+  status` says "running (not answering)", exits 1, and still gives its protocol. The step reads that
+  as a daemon that runs and checks its protocol; one of hers that doesn't answer is "not running".
 - **Her pack** (page "Her pack"): "Download her art (CapriCore + lachy's desktop art, ~100 MB)", the
   default; "Use a pack folder I already have" (copied; a folder without `sprites.json` is refused);
   or "Skip, I'll add one later". The download is the one install.ps1 does: CPython's embeddable
@@ -69,7 +72,7 @@ persona; no art).
 - **Her voice** (page "Her voice"): "Talk to her", on when Windows has a microphone (off and greyed,
   "no microphone found", when it doesn't); a microphone picker over Windows' capture endpoints
   ("Windows default" first); "Hey Capri" and "Read replies aloud", both on. Ticked, it downloads
-  the voice installer below (the latest release's, its `.sha256` checked) and runs it, fetches
+  the voice installer below (her own release's, its `.sha256` checked) and runs it, fetches
   the models (`voice-models.ps1`, each pinned), then saves his choices with her own settings writer
   (`synaps-avatar --set`: `[voice] enabled`, `wake_word`, `speak_unprompted`, `mic`). Her voice
   itself (`voice`, `speed`, `pace`, `flow`) is never written: she keeps her built-in default, so a
@@ -133,8 +136,10 @@ capri-syn-setup-….exe /VERYSILENT /SUPPRESSMSGBOXES [/SYNAPS=install|skip]
 The defaults are the wizard's: Synaps if it's needed, her art downloaded, autostart, her voice when
 Windows has a microphone and there's a voice to install (a first install only: see Upgrades above).
 Her voice comes from `/VOICEFROM` (a path, or an `https://` URL; a `.sha256` beside it is checked),
-else the latest release's `capri-syn-voice-setup-x86_64.exe`, checked against the
-`capri-syn-voice-setup-x86_64.exe.sha256` release.yml uploads beside it. Never from a file found by
+else the `capri-syn-voice-setup-x86_64.exe` of her own release, `v<the setup's version>` (never
+`releases/latest`: a voice from a newer release could need a newer her), checked against the
+`capri-syn-voice-setup-x86_64.exe.sha256` release.yml uploads beside it. install.ps1 `--voice` asks
+for the release in her Apps entry, the setup it just ran. Never from a file found by
 its name beside the setup: that folder is usually Downloads (CI's voice job passes its build with
 `/VOICEFROM`). With none of those (no
 release yet), the Voice page says "Her voice comes with her first release" and stays off and greyed;
