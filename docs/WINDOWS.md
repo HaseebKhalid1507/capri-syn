@@ -195,9 +195,9 @@ stays ~9 MB (CI fails hers past 20 MB), and only he who wants voice gets the res
   "synaps-avatar voice models", runs it again.
 - She starts the sidecar once the models are there (her log says so until then).
 - **Licences:** `LICENSE`, `wake\NOTICE` beside the wake-word model, and `licenses\`: every Python
-  package with the licence texts its wheel carries, espeak-ng's licence files and `SOURCE.txt` (where
-  the source of espeak-ng 1.52.0's DLL and of phonemizer is: GPL-3.0; espeak-ng's is attached to the
-  same release), whisper.cpp's MIT licence (pywhispercpp's DLLs), PortAudio's (sounddevice's
+  package with the licence texts its wheel carries, espeak-ng's licence files and sonic's (compiled
+  into its DLL), and `SOURCE.txt` (where the source of espeak-ng 1.52.0's DLL and of phonemizer is:
+  GPL-3.0; espeak-ng's, with sonic's, is attached to the same release), whisper.cpp's MIT licence (pywhispercpp's DLLs), PortAudio's (sounddevice's
   `libportaudio64bit.dll`, the only one of its builds kept: the ASIO ones and other platforms' are
   removed), Microsoft's terms for the VC++ runtime, and CPython's in `python\LICENSE.txt`.
   `voice-licenses.py` writes them, and stops the build when espeakng-loader, pywhispercpp or

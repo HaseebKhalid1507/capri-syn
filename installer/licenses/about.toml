@@ -38,3 +38,97 @@ workarounds = ["chrono", "linux-raw-sys", "ring", "rustix", "rustls", "unicode-i
 # reads crate tables last.
 [option-ext]
 accepted = ["MPL-2.0"]
+
+# Microsoft's windows-rs crates (MIT OR Apache-2.0; MIT elected): the scan misses their indented
+# license-mit ("Copyright (c) Microsoft Corporation."). Same bytes in all 43 in Cargo.lock under
+# these names; a version that changes the file stops matching, falls back to SPDX's template, and
+# third-party.ps1's copyright guard stops the build.
+[windows.clarify]
+license = "MIT"
+[[windows.clarify.files]]
+path = "license-mit"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[windows_x86_64_msvc.clarify]
+license = "MIT"
+[[windows_x86_64_msvc.clarify.files]]
+path = "license-mit"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[windows-collections.clarify]
+license = "MIT"
+[[windows-collections.clarify.files]]
+path = "license-mit"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[windows-core.clarify]
+license = "MIT"
+[[windows-core.clarify.files]]
+path = "license-mit"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[windows-future.clarify]
+license = "MIT"
+[[windows-future.clarify.files]]
+path = "license-mit"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[windows-implement.clarify]
+license = "MIT"
+[[windows-implement.clarify.files]]
+path = "license-mit"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[windows-interface.clarify]
+license = "MIT"
+[[windows-interface.clarify.files]]
+path = "license-mit"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[windows-link.clarify]
+license = "MIT"
+[[windows-link.clarify.files]]
+path = "license-mit"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[windows-numerics.clarify]
+license = "MIT"
+[[windows-numerics.clarify.files]]
+path = "license-mit"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[windows-registry.clarify]
+license = "MIT"
+[[windows-registry.clarify.files]]
+path = "license-mit"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[windows-result.clarify]
+license = "MIT"
+[[windows-result.clarify.files]]
+path = "license-mit"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[windows-strings.clarify]
+license = "MIT"
+[[windows-strings.clarify.files]]
+path = "license-mit"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[windows-sys.clarify]
+license = "MIT"
+[[windows-sys.clarify.files]]
+path = "license-mit"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[windows-targets.clarify]
+license = "MIT"
+[[windows-targets.clarify.files]]
+path = "license-mit"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[windows-threading.clarify]
+license = "MIT"
+[[windows-threading.clarify.files]]
+path = "license-mit"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"

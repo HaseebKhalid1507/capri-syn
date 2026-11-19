@@ -140,13 +140,14 @@ class Parity(unittest.TestCase):
         vl = (ROOT / "packaging/windows/voice-licenses.py").read_text(encoding="utf-8")
         ver = re.search(r'^ESPEAK_NG = "([^"]+)"', vl, re.M).group(1)
         loader = re.search(r'^LOADER = "([^"]+)"', vl, re.M).group(1)
+        sonic = re.search(r'^SONIC_COMMIT = "([^"]+)"', vl, re.M).group(1)
         assemble = code(block(rel, "  assemble:", "  publish:"))
         sums = assemble.index("> SHA256SUMS")
         # Fetched by the versions voice-licenses.py names, checked against SHA-256s pinned for these
         # file names: a version bump on one side only fails here, and in the job.
-        for asset in (f"release/espeak-ng-{ver}.tar.gz", f"release/espeakng-loader-{loader}-build.tar.gz"):
+        for asset in (f"release/espeak-ng-{ver}.tar.gz", f"release/espeakng-loader-{loader}-build.tar.gz", f"release/sonic-{sonic[:7]}.tar.gz"):
             self.assertRegex(assemble[:sums], rf"[0-9a-f]{{64}}  {re.escape(asset)}", f"no pinned SHA-256 for {asset} before SHA256SUMS")
-        for name in ("ESPEAK_NG", "LOADER", "LOADER_COMMIT"):
+        for name in ("ESPEAK_NG", "LOADER", "LOADER_COMMIT", "SONIC_COMMIT"):
             self.assertTrue(f"v {name}" in assemble, f"assemble doesn't read {name} from voice-licenses.py")
         self.assertTrue("sha256sum -c -" in assemble[:sums])
 

@@ -17,9 +17,10 @@ are pinned (tools/capri-voice-win-requirements.txt) and checked here against the
 written for, and the espeak-ng and PortAudio DLLs against the versions named: a new wheel can't ship
 under a stale notice.
 
-It also stops the bundle on what nobody has looked at: a native binary not in NATIVE (a debug C
-runtime among them), a package whose declared licence isn't on ACCEPTED, a new GPL-family package,
-or a compiled one (SOURCE.txt calls the GPL packages their own source).
+It also stops the bundle on what nobody has looked at: a native binary (DLL or exe) not in NATIVE (a
+debug C runtime among them), a package whose declared licence isn't on ACCEPTED or names a REFUSED
+one beside it, a new GPL-family package, or a compiled one (SOURCE.txt calls the GPL packages their
+own source).
 """
 
 import re
@@ -39,6 +40,10 @@ LOADER_COMMIT = "146599e29be31bf17d99f0bcb7dbb2f92aef3d95"
 # installer came from (release.yml's assemble attaches them, SHA-256 pinned there).
 ESPEAK_NG_SOURCE = f"espeak-ng-{ESPEAK_NG}.tar.gz"
 LOADER_SOURCE = f"espeakng-loader-{LOADER}-build.tar.gz"
+# espeak-ng's CMake (cmake/deps.cmake) clones Bill Cox's sonic at this commit and compiles sonic.c into the
+# DLL (its sinc table is in espeak-ng.dll): Apache-2.0, and part of the DLL's Corresponding Source.
+SONIC_COMMIT = "fbf75c3d6d846bad3bb3d456cbc5d07d9fd8c104"
+SONIC_SOURCE = f"sonic-{SONIC_COMMIT[:7]}.tar.gz"
 # The PortAudio in sounddevice 0.5.6's wheel: what its DLL reports (spatialaudio/portaudio-binaries
 # builds the v19.7.0 tag).
 PORTAUDIO = "19.7.0"
@@ -49,6 +54,7 @@ INSIDE = {
     "espeakng-loader": (LOADER, [
         f"espeak-ng {ESPEAK_NG} (espeak-ng.dll, espeak-ng-data): GPL-3.0-or-later; its licence files are in",
         "licenses\\espeak-ng\\, and where its source is, in licenses\\SOURCE.txt",
+        "sonic (compiled into espeak-ng.dll by espeak-ng's CMake): Apache-2.0, licenses\\espeak-ng\\sonic-LICENSE",
         "the loader itself (__init__.py): MIT, its repository's LICENSE (none in the wheel):",
         "https://github.com/thewh1teagle/espeakng-loader",
     ], "espeak-ng"),
@@ -65,7 +71,8 @@ INSIDE = {
 }
 
 # Every native binary in site-packages, by whose it is (its licence: INSIDE, or its wheel's own). A new
-# one stops the bundle until it's named here, with its licence. Release builds only: a debug C runtime
+# one stops the bundle until it's named here, with its licence. DLLs and exes; Python's own extension
+# modules (.pyd) aren't listed yet. Release builds only: a debug C runtime
 # (msvcp140d, vcruntime140d, ucrtbased: not redistributable) matches none of these.
 NATIVE = [
     r"^numpy\.libs/(libscipy_openblas64_|msvcp140)-[0-9a-f]+\.dll$",  # numpy's: OpenBLAS (its LICENSE.txt), the VC++ runtime
@@ -74,8 +81,12 @@ NATIVE = [
     r"^onnxruntime/capi/onnxruntime(_providers_shared)?\.dll$",  # onnxruntime's (its ThirdPartyNotices)
     r"^_sounddevice_data/portaudio-binaries/libportaudio64bit\.dll$",  # sounddevice's (INSIDE)
 ]
-# The licences a package may declare (an SPDX expression, a License field, or its classifiers).
-ACCEPTED = re.compile(r"MIT|BSD|Apache|ISC|PSF|Python Software Foundation|MPL-2\.0|Mozilla Public|Unlicense|Zlib|CC0", re.I)
+# The licences a package may declare (an SPDX expression, a License field, or its classifiers). Whole
+# words: "MIT" is in "permitted", "ISC" in "disclaimer".
+ACCEPTED = re.compile(r"\b(MIT|BSD|Apache|ISC|PSF|Python Software Foundation|MPL-2\.0|Mozilla Public|Unlicense|Zlib|CC0)\b", re.I)
+# Refused even beside an accepted one ("MIT AND LicenseRef-Proprietary"). Declared names and licence
+# classifiers only: Apache's full text says "commercial damages".
+REFUSED = re.compile(r"Proprietary|Commercial|LicenseRef|Other/|SSPL|BUSL|Elastic|Commons Clause", re.I)
 # Packages that declare none, read by hand from the licence file their wheel carries.
 UNDECLARED = {"kokoro-onnx": "MIT"}
 # GPL-family packages, each a decision: pure Python, so the bundle holds their source.
@@ -135,7 +146,7 @@ def key(dist):
 def is_gpl(dist):
     text = " ".join([declared(dist), dist.metadata.get("License") or ""] + (dist.metadata.get_all("Classifier") or []))
     # LGPL-* and AGPL-* too: there's no word boundary inside "LGPL".
-    return re.search(r"\b(?:A|L)?GPL|General Public License", text) is not None
+    return re.search(r"\b(?:A|L)?GPL|General Public License", text, re.I) is not None
 
 
 def main(bundle):
@@ -165,7 +176,7 @@ def main(bundle):
         sys.exit(f"voice-licenses: {pa} isn't PortAudio V{PORTAUDIO}: update PORTAUDIO and licenses\\portaudio\\")
 
     # Every native binary is someone's: one nobody named stops the bundle.
-    native = sorted(p.relative_to(site).as_posix() for p in site.rglob("*") if p.suffix.lower() in (".dll", ".dylib", ".so"))
+    native = sorted(p.relative_to(site).as_posix() for p in site.rglob("*") if p.suffix.lower() in (".dll", ".dylib", ".so", ".exe"))
     unknown = [n for n in native if not any(re.match(rx, n) for rx in NATIVE)]
     if unknown:
         sys.exit("voice-licenses: native binaries nobody vouched for (name each in NATIVE, with its licence): " + ", ".join(unknown))
@@ -175,8 +186,9 @@ def main(bundle):
                 sys.exit(f"voice-licenses: {d.metadata['Name']} is {declared(d)}: a new GPL-family package is a decision (GPL_OK)")
             if any(str(f).lower().endswith((".pyd", ".dll", ".so")) for f in d.files or []):
                 sys.exit(f"voice-licenses: {d.metadata['Name']} is GPL and compiled: SOURCE.txt can't call it its own source")
-        elif not ACCEPTED.search(declared(d)) and key(d) not in INSIDE and key(d) not in UNDECLARED:
-            sys.exit(f"voice-licenses: {d.metadata['Name']} {d.version} declares {declared(d)!r}: not on ACCEPTED")
+        elif key(d) not in INSIDE and key(d) not in UNDECLARED and (not ACCEPTED.search(declared(d)) or REFUSED.search(
+                " ".join([declared(d)] + [c for c in d.metadata.get_all("Classifier") or [] if c.startswith("License ::")]))):
+            sys.exit(f"voice-licenses: {d.metadata['Name']} {d.version} declares {declared(d)!r}: not on ACCEPTED, or REFUSED beside it")
 
     python_licence = bundle / "python" / "LICENSE.txt"
     if not python_licence.is_file():
@@ -191,6 +203,7 @@ def main(bundle):
         "                    carries. Every one is on PyPI at the version shown (https://pypi.org/project/NAME/VERSION/).",
         f"  espeak-ng {ESPEAK_NG}   inside espeakng-loader (its DLL and espeak-ng-data): GPL-3.0-or-later; its",
         "                    licence files are in licenses\\espeak-ng\\, and where its source is, in licenses\\SOURCE.txt.",
+        "                    Bill Cox's sonic is compiled into that DLL: Apache-2.0, licenses\\espeak-ng\\sonic-LICENSE.",
         f"  PortAudio {PORTAUDIO}  inside sounddevice (libportaudio64bit.dll): licenses\\portaudio\\LICENSE.txt.",
         "  whisper.cpp       inside pywhispercpp (whisper-*.dll, ggml-*.dll): licenses\\whisper.cpp\\LICENSE.",
         "  Microsoft's Visual C++ runtime (python\\vcruntime140*.dll; msvcp140-*.dll, vcomp140-*.dll from numpy's",
@@ -239,14 +252,18 @@ def main(bundle):
         "source tree). In object code form here: site-packages\\espeakng_loader\\espeak-ng.dll and its data,",
         f"site-packages\\espeakng_loader\\espeak-ng-data\\, from espeakng-loader {LOADER}'s wheel. espeakng-loader",
         "builds espeak-ng's own source unchanged (its build.sh: CMake with BUILD_SHARED_LIBS=ON,",
-        "ENABLE_TESTS=OFF, COMPILE_INTONATIONS=OFF, Release).",
+        "ENABLE_TESTS=OFF, COMPILE_INTONATIONS=OFF, Release). espeak-ng's CMake (cmake/deps.cmake) fetches",
+        f"Bill Cox's sonic at commit {SONIC_COMMIT[:7]} and compiles sonic.c into the DLL (Apache-2.0,",
+        "licenses\\espeak-ng\\sonic-LICENSE).",
         "",
         f"Its Corresponding Source, attached to capri-syn's release v{version}, the one this installer came from:",
         f"  {rel}/{ESPEAK_NG_SOURCE}   (espeak-ng {ESPEAK_NG}, commit {ESPEAK_NG_COMMIT})",
         f"  {rel}/{LOADER_SOURCE}   (the scripts that built the DLL: build.sh, .github/workflows/)",
+        f"  {rel}/{SONIC_SOURCE}   (sonic {SONIC_COMMIT[:7]}: espeak-ng's CMake fetches it and compiles sonic.c into the DLL)",
         "The same, upstream:",
         f"  https://github.com/espeak-ng/espeak-ng/tree/{ESPEAK_NG}",
         f"  https://github.com/thewh1teagle/espeakng-loader/tree/{LOADER_COMMIT}",
+        f"  https://github.com/waywardgeek/sonic/tree/{SONIC_COMMIT}",
         "",
     ]
     if gpl:

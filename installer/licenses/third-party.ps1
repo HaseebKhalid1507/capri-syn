@@ -66,14 +66,16 @@ foreach ($pin in @('gpui-kit-assets 0.9.1')) {
     if ($crates -notcontains $pin) { throw "the third-party licences for ${Target}: '$pin' changed or left: check what it embeds now, then refresh installer/licenses/vendored/ and this pin" }
 }
 # She highlights no code (Cargo.toml: gpui-kit without "syntect"). syntect and two-face embed syntax
-# definitions under their own licences (two-face's acknowledgements), and none of those are here.
-$back = @($crates | Where-Object { $_ -match '^(syntect|two-face) ' })
-if ($back) { throw "the third-party licences for ${Target}: $($back -join ', ') came back; their syntax definitions' licences aren't shipped (two-face's acknowledgements_full.md)" }
+# definitions under their own licences (two-face's acknowledgements), and gpui-component's tree-sitter
+# feature compiles in query files from other repositories; none of those licences are here.
+$back = @($crates | Where-Object { $_ -match '^(syntect|two-face|tree-sitter[-\w]*) ' })
+if ($back) { throw "the third-party licences for ${Target}: $($back -join ', ') came back; what they embed (syntax definitions, queries) carries licences that aren't shipped (two-face's acknowledgements_full.md)" }
 
 # Crates whose licence text is SPDX's template, with no copyright line (`<year> <copyright holders>`):
-# cargo-about found no licence file of theirs it could match. Today's (Linux and Windows); a new one
-# stops the build. Give it a [crate.clarify] in about.toml (its licence file, from its repository) or,
-# after looking, add it here. Work the list down, never up without a reason.
+# cargo-about found no licence file of theirs it could match. Linux's list, plus whatever Windows turns
+# out to need (nothing today: windows-rs is clarified in about.toml); a new one stops the build. Give
+# it a [crate.clarify] in about.toml (its licence file, from its repository) or, after looking, add it
+# here. Work the list down, never up without a reason.
 $noCopyrightLine = @(
     'accesskit', 'accesskit_atspi_common', 'accesskit_consumer', 'accesskit_unix', 'accesskit_windows',
     'exr', 'granit-parser', 'harfrust', 'libm', 'lyon', 'lyon_algorithms', 'lyon_geom', 'lyon_path',

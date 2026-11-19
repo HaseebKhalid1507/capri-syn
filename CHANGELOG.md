@@ -29,7 +29,8 @@
   licence text, and Lucide's licence for the icons built in. The wake-word model's `NOTICE` sits beside
   it. The voice installer also lists every Python package it bundles with its licence, carries
   espeak-ng's, whisper.cpp's and PortAudio's licences, and says where the source of its GPL parts
-  (espeak-ng 1.52.0, phonemizer) is: espeak-ng's is attached to every release.
+  (espeak-ng 1.52.0, phonemizer) is: espeak-ng's is attached to every release, with that of sonic,
+  which espeak-ng's build compiles into its DLL.
 - The voice installer is a little smaller: of the PortAudio builds sounddevice ships, only the one she
   loads stays (no ASIO builds, no other platforms').
 - Her binary no longer compiles in syntect and two-face's syntax definitions: she never highlighted

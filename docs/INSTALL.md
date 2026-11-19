@@ -218,21 +218,24 @@ with what's in it:
   build with its licence text (cargo-about, pinned: `installer/licenses/`). The list is
   `installer/licenses/list`. The generation stops on a licence not accepted in `about.toml` (MPL-2.0
   crate by crate), on a crate with no copyright line that isn't known, on a gpui-kit-assets that
-  isn't the one Lucide's licence was copied for, and if syntect or two-face come back (she highlights
-  no code, and their syntax definitions carry licences of their own);
+  isn't the one Lucide's licence was copied for, and if syntect, two-face or tree-sitter come back (she
+  highlights no code, and their syntax definitions and queries carry licences of their own);
 - the wake-word model's `NOTICE` beside it (`tools/wake/`, in the tarball and the voice installer);
 - her voice installer: `licenses/THIRD-PARTY-LICENSES.txt` (every Python package in it with the
   licence texts its wheel carries, and Microsoft's terms for the Visual C++ runtime), espeak-ng's
-  licence files and `SOURCE.txt` (where the GPL parts' source is: espeak-ng 1.52.0, phonemizer),
+  licence files (with sonic's, compiled into its DLL) and `SOURCE.txt` (where the GPL parts' source is: espeak-ng 1.52.0, phonemizer),
   whisper.cpp's licence, PortAudio's, and CPython's own (`python/LICENSE.txt`). Of sounddevice's
   PortAudio builds only the one she loads ships (none of the ASIO ones, built with Steinberg's SDK).
   `packaging/windows/voice-licenses.py` writes them, and stops the build if a wheel that carries
   someone else's binary isn't the version its notes were written for, on a native binary nobody
-  named, on a declared licence not accepted, and on a new or compiled GPL-family package.
+  named (DLL or exe), on a declared licence not accepted (whole words; a proprietary one beside it
+  still stops it), and on a new or compiled GPL-family package.
 
 **espeak-ng's source** (GPL-3.0 section 6(d): beside the object code). The voice installer carries
-espeak-ng's DLL, so every release also carries `espeak-ng-<version>.tar.gz` (its tag) and
-`espeakng-loader-<version>-build.tar.gz` (the scripts that built the DLL), fetched by `assemble`
+espeak-ng's DLL, so every release also carries `espeak-ng-<version>.tar.gz` (its tag),
+`espeakng-loader-<version>-build.tar.gz` (the scripts that built the DLL) and
+`sonic-<commit7>.tar.gz` (Bill Cox's sonic, Apache-2.0: espeak-ng's CMake fetches it and compiles
+`sonic.c` into the DLL, so it is part of the DLL's source), fetched by `assemble`
 and checked against SHA-256s pinned in release.yml; the notes say so, and `SOURCE.txt` links them.
 
 CI checks each artifact holds all of them: the `installer` job on the Linux layout, release.yml on

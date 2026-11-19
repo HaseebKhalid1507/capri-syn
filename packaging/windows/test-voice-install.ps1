@@ -53,13 +53,13 @@ foreach ($f in 'python\python.exe', 'python\python313._pth', 'capri-voice', 'cap
                'site-packages\onnxruntime', 'site-packages\kokoro_onnx', 'unins000.exe') {
     Check (Test-Path (Join-Path $voice $f)) "$f in $voice"
 }
-# Its licences: capri-syn's, the wake-word model's NOTICE beside it, espeak-ng's, whisper.cpp's and
-# PortAudio's (in three wheels that don't carry them), every package's, where the GPL parts' source
-# is, CPython's.
+# Its licences: capri-syn's, the wake-word model's NOTICE beside it, espeak-ng's (and sonic's),
+# whisper.cpp's and PortAudio's (in three wheels that don't carry them), every package's, where the
+# GPL parts' source is, CPython's.
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $same = @{ 'LICENSE' = 'LICENSE'; 'wake\NOTICE' = 'tools\wake\NOTICE'; 'licenses\whisper.cpp\LICENSE' = 'packaging\windows\voice-licenses\whisper.cpp\LICENSE'
            'licenses\portaudio\LICENSE.txt' = 'packaging\windows\voice-licenses\portaudio\LICENSE.txt' }
-foreach ($f in 'COPYING', 'COPYING.APACHE', 'COPYING.BSD2', 'COPYING.UCD') { $same["licenses\espeak-ng\$f"] = "packaging\windows\voice-licenses\espeak-ng\$f" }
+foreach ($f in 'COPYING', 'COPYING.APACHE', 'COPYING.BSD2', 'COPYING.UCD', 'sonic-LICENSE') { $same["licenses\espeak-ng\$f"] = "packaging\windows\voice-licenses\espeak-ng\$f" }
 foreach ($f in $same.Keys | Sort-Object) {
     $got = Join-Path $voice $f
     Check ((Test-Path $got) -and (Get-FileHash -Algorithm SHA256 $got).Hash -eq (Get-FileHash -Algorithm SHA256 (Join-Path $repo $same[$f])).Hash) "$f in $voice, the repo's $($same[$f])"
@@ -72,7 +72,7 @@ $pa = @(Get-ChildItem (Join-Path $voice 'site-packages\_sounddevice_data\portaud
 Check (($pa -join ',') -eq 'libportaudio64bit.dll,README.md') "site-packages\_sounddevice_data\portaudio-binaries: libportaudio64bit.dll only ($($pa -join ', '))"
 $src = Join-Path $voice 'licenses\SOURCE.txt'
 $st = if (Test-Path $src) { [IO.File]::ReadAllText($src) } else { '' }
-Check ($st.Contains('/espeak-ng-1.52.0.tar.gz') -and $st.Contains('/espeakng-loader-0.2.4-build.tar.gz') -and $st.Contains('https://github.com/espeak-ng/espeak-ng/tree/1.52.0') -and $st -match 'phonemizer \d' -and -not $st.Contains('open an issue')) "licenses\SOURCE.txt: espeak-ng 1.52.0's source (the release's assets, upstream), phonemizer's"
+Check ($st.Contains('/espeak-ng-1.52.0.tar.gz') -and $st.Contains('/espeakng-loader-0.2.4-build.tar.gz') -and $st.Contains('/sonic-fbf75c3.tar.gz') -and $st.Contains('https://github.com/espeak-ng/espeak-ng/tree/1.52.0') -and $st -match 'phonemizer \d' -and -not $st.Contains('open an issue')) "licenses\SOURCE.txt: espeak-ng 1.52.0's source with sonic's (the release's assets, upstream), phonemizer's"
 Check (Test-Path (Join-Path $voice 'python\LICENSE.txt')) "python\LICENSE.txt (CPython's, from its embeddable package)"
 Check (Test-Path $lnk) 'a Start-menu shortcut to fetch the models again'
 Check (-not (Test-Path (Join-Path $state 'models'))) 'no models fetched (the task was left out)'
