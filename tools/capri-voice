@@ -732,13 +732,15 @@ def junk(text, speech_ms):
 #   @SEMITONES: a formant-keeping pitch shift (rubberband; without it, done inside the model).
 #   +clean: EQ, de-esser and a gentle compressor. +glitch: the machine trace on the attack.
 # W3 (Haseeb's pick, LOCKED 13): bright and energetic, pitched to a ~240 Hz median at speed 1.
-# VOICE (LOCKED 14, the default): W3 + 2 st (~272 Hz median), flow "emphasis", at SPEED 1/0.77
-# with PACE "stretch": Kokoro speaks at its own speed 1 and the time goes x0.77 in the same
+# VOICE (the default, his r26 pick "R-A"): W3 + 4.07 st (~306 Hz median), flow "emphasis", at
+# SPEED 1/0.77 with PACE "stretch" (LOCKED 14's speed and pace; only the pitch moved up, from
+# @+4.93, ~272 Hz). Kokoro speaks at its own speed 1 and the time goes x0.77 in the same
 # rubberband pass as the pitch shift, so the sentence keeps Kokoro's speed-1 pitch shape. His
 # blind pick (r24 "ALT") over PACE "model" (Kokoro's speed 1.32): that one dropped the floor
-# ~1.4 st and the sentence ends ~2 st deeper (and with it, use @+4.50: its pitch plan is higher).
+# ~1.4 st and the sentence ends ~2 st deeper. Without rubberband (Windows) the shift is in-model
+# and the pace is "model": docs/VOICE.md has how close that gets.
 W3 = 'af_heart:0.5,af_bella:0.3,af_jessica:0.2|af_heart:0.84,af_jessica:0.56,af_sarah:-0.4@+2.93+clean'
-VOICE = 'af_heart:0.5,af_bella:0.3,af_jessica:0.2|af_heart:0.84,af_jessica:0.56,af_sarah:-0.4@+4.93+clean'
+VOICE = 'af_heart:0.5,af_bella:0.3,af_jessica:0.2|af_heart:0.84,af_jessica:0.56,af_sarah:-0.4@+7.00+clean'
 SPEED, FLOW, PACE = 1.2987, 'emphasis', 'stretch'
 PACES = ('stretch', 'model')
 VOICE_RE = re.compile(r'^(?P<t>[a-z]{2}_[a-z]+(?::-?[\d.]+)?(?:,[a-z]{2}_[a-z]+(?::-?[\d.]+)?)*)'
@@ -3305,7 +3307,7 @@ def selftest():
     present, that the patched graph with neutral inputs speaks exactly like the stock one."""
     v = parse_voice(W3)
     assert v['p'] and abs(v['shift'] - 2.93) < 1e-9 and v['clean'] and not v['glitch'], v
-    assert parse_voice(VOICE)['shift'] == 4.93 and parse_voice(VOICE)['t'] == v['t'] and parse_voice(VOICE)['p'] == v['p']
+    assert parse_voice(VOICE)['shift'] == 7.0 and parse_voice(VOICE)['t'] == v['t'] and parse_voice(VOICE)['p'] == v['p']
     assert PACE in PACES and abs(1 / SPEED - 0.77) < 1e-4, 'the default is his pick: rubberband -t 0.77'
     assert parse_voice('af_heart') == {'t': 'af_heart', 'p': None, 'shift': 0.0, 'clean': False, 'glitch': False}
     assert parse_voice('af_bella:0.6,af_nicole:0.4+glitch')['glitch']

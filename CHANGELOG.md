@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Her voice: higher (his r26 pick, "R-A")
+- The default voice is the same W3 blend, now at `@+7.00`: about 306 Hz median, up from `@+4.93` (~272 Hz).
+  The speed (1/0.77), pace ("stretch") and flow ("emphasis") are unchanged, so only the pitch moved. He picked
+  it blind from round r26 ("anime girlie, more bubbly"): six recipes plus the old default. Stock Kokoro voices
+  and our own DSP only, as before.
+- A `voice` set in `settings.toml` is kept; only the default changed.
+- Windows (no rubberband: the shift is in-model, the pace is Kokoro's): the median pitch matches Linux within
+  0.1 st. The floor is 2.3 st lower, the sound brighter, and the name/number test set slips more (7.5 % vs 1.7 %
+  WER). Numbers in docs/VOICE.md. Bundling rubberband there is a follow-up.
+
 ### A new personality, written from scratch
 
 Her persona's first paragraph is rewritten clean-room from the show's canon: a construct stitched

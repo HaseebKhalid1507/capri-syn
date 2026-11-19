@@ -359,15 +359,48 @@ hide) drops only itself: the strip then shows the newest one still unheard.
 ## Her voice
 
 ```
-af_heart:0.5,af_bella:0.3,af_jessica:0.2|af_heart:0.84,af_jessica:0.56,af_sarah:-0.4@+4.93+clean   speed 1/0.77, pace "stretch", flow "emphasis"
+af_heart:0.5,af_bella:0.3,af_jessica:0.2|af_heart:0.84,af_jessica:0.56,af_sarah:-0.4@+7.00+clean   speed 1/0.77, pace "stretch", flow "emphasis"
 ```
 
-Haseeb picked it by ear (LOCKED 13 and 14 in the workspace):
+Haseeb picked it by ear (LOCKED 13 and 14 in the workspace, then round r26):
 - **W3:** a bright, energetic blend.
 - **F2:** stressed words, no added pauses.
-- **Pitch and pace:** two semitones higher, about 23 % faster (`rubberband -t 0.77`).
+- **Pitch (r26, "R-A"):** `@+7.00`, a ~306 Hz median. Before r26 it was `@+4.93` (~272 Hz). Round r26 ("anime
+  girlie, more bubbly") offered six blind recipes plus the old default. He picked the pitch-only one: same
+  blend, same speed, same flow, 2.07 st higher. Every word of the test lines still transcribes (whisper base.en).
+- **Pace:** about 23 % faster (`rubberband -t 0.77`).
 - **Pace by stretch:** in a blind listen of three files he chose "ALT" over "ENGINE" (Kokoro's own speed);
   see the table below.
+
+A `voice` (or `speed`, `pace`, `flow`) in `settings.toml` still wins over the default: only the default moved.
+
+**On Windows** there's no rubberband, so the shift is done inside the model and the pace is "model"
+(Kokoro's speed 1.2987). It's measured against the Linux sound: the same five replies, each path rendered by
+`capri-voice --render`, loudness-matched to −21 LUFS.
+
+| | Linux (rubberband) | Windows path (in-model) | the old default, Linux → Windows |
+|---|---|---|---|
+| F0 median | 306 Hz | 304 Hz (−0.1 st) | 274 → 271 Hz (−0.2 st) |
+| F0 floor (p10) | 250 Hz | 219 Hz (−2.3 st) | 223 → 202 Hz (−1.7 st) |
+| movement inside a phrase (IQR) | 4.1 st | 5.7 st | 4.1 → 5.3 st |
+| statement ends (median of 8) | −2.4 st | −4.0 st | −2.3 → −2.2 st |
+| speech time | 14.7 s | 15.3 s (+4 %) | 14.7 → 15.1 s |
+| presence 2–5 kHz · HNR | −18.4 dB · 15.1 dB | −14.3 dB · 12.8 dB | −17.4 → −14.5 dB · 14.3 → 13.3 dB |
+| WER, her lines · 12 name/number sentences | 0 % · 1.7 % | 0 % · 7.5 % | 0 → 0 % · 0 → 6.7 % |
+
+The spectral envelope sits in the same place on both paths (0.0 st apart), so the formants match. What's
+different:
+- the pitch is right on average, but the floor is lower and the melody moves more: that's Kokoro's own
+  pace, as in r24;
+- the in-model shift sounds brighter and a little rougher;
+- the stress set slips on the same small words with either voice (in → and, as → is, "into" → "in a").
+
+The gap was already there with the old default. R-A widens it a little:
+- the floor is 2.3 st lower, against 1.7 st before;
+- statements end 1.6 st deeper, where before they matched;
+- presence is +4.1 dB, against +2.9 dB before.
+
+Bundling rubberband on Windows would close all of it. That's a follow-up, judged by ear.
 
 These are stock Kokoro voices plus DSP. Nothing is cloned, trained or converted.
 
@@ -384,7 +417,7 @@ Voice string: `TIMBRE[|PROSODY][@SEMITONES][+clean][+glitch]`.
 1/`speed` in the same rubberband pass as the pitch shift, so the sentence keeps Kokoro's speed-1 pitch
 shape. `pace = "model"` hands the speed to Kokoro instead. That replans the pitch:
 - the floor sits about 1.4 st lower and sentence ends fall about 2 st deeper;
-- its median sits ~0.4 st higher, so pair it with `@+4.50`.
+- its median sits ~0.4 st higher (measured on W3 in r24), so pair it with an `@` about 0.4 st lower.
 
 Without rubberband installed, the pace is always "model".
 
