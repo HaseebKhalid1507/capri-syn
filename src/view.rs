@@ -5971,9 +5971,9 @@ fn prompt_label(title: &str, more: usize) -> String {
     if more > 1 { format!("{title} · 1 OF {more}") } else { title }
 }
 
-/// The header row (name plate, label, a spring, the status): the gaps between its four
-/// children, and the least air between a label and the status.
-const HEADER_GAPS: f32 = 3.0 * 8.0;
+/// The header row (label, a spring, the status): the gaps between its three children, and the
+/// least air between a label and the status.
+const HEADER_GAPS: f32 = 2.0 * 8.0;
 const HEADER_AIR: f32 = 8.0;
 /// A label cut to fewer chars than this goes instead ("INCO…" says nothing).
 const HEADER_KEEP: usize = 6;
@@ -6066,12 +6066,11 @@ fn tabular(cw: impl Fn(char, bool) -> f32) -> impl Fn(char, bool) -> f32 {
     }
 }
 
-/// The header's label and status as they fit its row, `room` wide, beside her name plate
-/// (`name_w`, always shown): the status whole if it fits, the label in what is left (cut, or
-/// gone); only with the label gone, the status shorter (`status_steps`), at last cut. `cw` as
-/// in [`header_text_w`], [`tabular`].
-fn fit_header(room: f32, name_w: f32, label: &str, status: &str, cw: &dyn Fn(char, bool) -> f32) -> (String, String) {
-    let free = room - name_w - HEADER_GAPS;
+/// The header's label and status as they fit its row, `room` wide: the status whole if it
+/// fits, the label in what is left (cut, or gone); only with the label gone, the status shorter
+/// (`status_steps`), at last cut. `cw` as in [`header_text_w`], [`tabular`].
+fn fit_header(room: f32, label: &str, status: &str, cw: &dyn Fn(char, bool) -> f32) -> (String, String) {
+    let free = room - HEADER_GAPS;
     let steps = status_steps(status);
     let short = match steps.iter().find(|s| header_status_w(s, cw) <= free) {
         Some(s) => s.clone(),
@@ -6082,8 +6081,8 @@ fn fit_header(room: f32, name_w: f32, label: &str, status: &str, cw: &dyn Fn(cha
     (label.unwrap_or_default(), short)
 }
 
-/// A closing bubble's header: her name on its tab, its label, its state.
-fn panel_header(name: &str, header_label: &str, label: &str, pal: Pal) -> Div {
+/// A closing bubble's header: its label, its state.
+fn panel_header(header_label: &str, label: &str, pal: Pal) -> Div {
     div()
         .absolute()
         .top(px(PAD_T))
@@ -6094,16 +6093,6 @@ fn panel_header(name: &str, header_label: &str, label: &str, pal: Pal) -> Div {
         .items_center()
         .gap(px(8.0))
         .line_height(px(HEADER_H))
-        .child(
-            theme::plate(Cut::Tab(5.0), Fill::solid(pal.accent))
-                .h(px(14.0))
-                .pl(px(7.0))
-                .pr(px(9.0))
-                .text_size(px(10.5))
-                .font_weight(FontWeight::BOLD)
-                .text_color(rgb(pal.ink))
-                .child(tracked(name, 1.8)),
-        )
         .child(tracked(header_label, 1.5).text_size(px(9.5)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(pal.dim)))
         .child(div().flex_1())
         .child(tracked(label, 1.5).text_size(px(9.5)).font_weight(FontWeight::BOLD).text_color(rgb(pal.dim)))
@@ -7123,7 +7112,7 @@ impl Avatar {
                 }
                 // Its own words, where they were, inside its box as it goes.
                 if own > 0.0 {
-                    let header = panel_header(&self.name, &sn.header_label, &sn.label, pal);
+                    let header = panel_header(&sn.header_label, &sn.label, pal);
                     let body = div()
                         .absolute()
                         .top(px(PAD_T + HEADER_H + HEADER_GAP))
@@ -7242,12 +7231,11 @@ impl Avatar {
             let probe = mode == PanelMode::Probe;
             let (vis_l, vis_r) = self.panel_span();
             let max_w = (vis_r - vis_l - 2.0 * MARGIN).min(PANEL_MAX_W);
-            // Never narrower than the header line (name plate, label .. glyph status), with air
-            // to spare; past `max_w` the header gives way (`fit_header`).
-            let name_w = self.tracked_width(&self.name, 10.5, FontWeight::BOLD, 1.8, window) + 16.0;
+            // Never narrower than the header line (label .. glyph status), with air to spare;
+            // past `max_w` the header gives way (`fit_header`).
             let header_w = {
                 let cw = self.header_cw(window);
-                PAD_L + PAD_R + name_w + HEADER_GAPS + header_text_w(&header_label, false, &cw) + header_status_w(&label, &cw) + 32.0
+                PAD_L + PAD_R + HEADER_GAPS + header_text_w(&header_label, false, &cw) + header_status_w(&label, &cw) + 32.0
             };
             let min_w = PANEL_MIN_W.max(header_w).min(max_w);
             let mut w = (text_w + PAD_L + PAD_R + 2.0).clamp(min_w, max_w);
@@ -7332,7 +7320,7 @@ impl Avatar {
             // the status's digits and meter in boxes as wide as they were measured.
             let (header_label, label, tab_w) = {
                 let cw = self.header_cw(window);
-                let (l, s) = fit_header(w - PAD_L - PAD_R, name_w, &header_label, &label, &cw);
+                let (l, s) = fit_header(w - PAD_L - PAD_R, &header_label, &label, &cw);
                 (l, s, (cw('0', true) - 1.5, cw('▮', true) - 1.5))
             };
             let tab = move |c: char| if c.is_ascii_digit() { Some(tab_w.0) } else if is_bar(c) { Some(tab_w.1) } else { None };
@@ -7346,17 +7334,6 @@ impl Avatar {
                 .items_center()
                 .gap(px(8.0))
                 .line_height(px(HEADER_H))
-                // Her name on a red blade, ink type.
-                .child(
-                    theme::plate(Cut::Tab(5.0), Fill::solid(pal.accent))
-                        .h(px(14.0))
-                        .pl(px(7.0))
-                        .pr(px(9.0))
-                        .text_size(px(10.5))
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(rgb(pal.ink))
-                        .child(tracked(&self.name, 1.8)),
-                )
                 .child(tracked(&header_label, 1.5).text_size(px(9.5)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(if prompt_mode { pal.text } else { pal.dim })))
                 .child(div().flex_1())
                 .child(if invert || pulse {
@@ -9080,7 +9057,7 @@ mod prompt_button_tests {
 #[cfg(test)]
 mod header_fit_tests {
     use super::voiceview::{hf_label, level_bars, mic_label};
-    use super::{HEADER_AIR, HEADER_GAPS, HEADER_KEEP, PAD_L, PAD_R, PANEL_MAX_W, PANEL_MIN_W, fit_header, header_status_w, header_text_w, prompt_label, reply_label, status_steps, tabular};
+    use super::{HEADER_AIR, HEADER_KEEP, PAD_L, PAD_R, PANEL_MAX_W, PANEL_MIN_W, fit_header, header_status_w, header_text_w, prompt_label, reply_label, status_steps, tabular};
     use crate::session::Trouble;
 
     /// Exo 2 at the header's 9.5 px as `tracked_width` measures it (each glyph rounded up, 1.5
@@ -9102,9 +9079,6 @@ mod header_fit_tests {
         };
         w + 1.5
     }
-
-    /// "CAPRI" on her plate (10.5 px bold, 1.8 tracking, 16 px of plate), rounded up.
-    const NAME_W: f32 = 16.0 + 5.0 * 10.0;
 
     /// Every status her tag can carry into the bubble: the pack's (moods, music, sulking), the
     /// session's, the voice's (its timers at every length, the meter dark and full), with the
@@ -9175,9 +9149,13 @@ mod header_fit_tests {
         v
     }
 
-    /// The row as laid out: name plate, label, status, their gaps, and the air when the label shows.
+    /// The row as `panel_header` and the live header build it, counted here on its own: three
+    /// children (label, spring, status), `.gap(8)` between them.
+    const ROW_GAPS: f32 = 2.0 * 8.0;
+
+    /// The row as laid out: label, status, their gaps, and the air when the label shows.
     fn row_w(label: &str, status: &str, cw: &dyn Fn(char, bool) -> f32) -> f32 {
-        NAME_W + HEADER_GAPS + header_text_w(label, false, cw) + header_status_w(status, cw) + if label.is_empty() { 0.0 } else { HEADER_AIR }
+        ROW_GAPS + header_text_w(label, false, cw) + header_status_w(status, cw) + if label.is_empty() { 0.0 } else { HEADER_AIR }
     }
 
     #[test]
@@ -9187,13 +9165,13 @@ mod header_fit_tests {
         let mut n = 0;
         for w in [PANEL_MIN_W, PANEL_MAX_W] {
             let room = w - PAD_L - PAD_R;
-            let free = room - NAME_W - HEADER_GAPS;
+            let free = room - ROW_GAPS;
             for status in &statuses {
                 let steps = status_steps(status);
-                // Its longest step that fits beside her name (her name plate always shows).
+                // Its longest step that fits.
                 let best = steps.iter().find(|s| header_status_w(s, &cw) <= free);
                 for label in &labels {
-                    let (l, s) = fit_header(room, NAME_W, label, status, &cw);
+                    let (l, s) = fit_header(room, label, status, &cw);
                     let used = row_w(&l, &s, &cw);
                     assert!(used <= room, "{w}: {label:?} + {status:?} shown as {l:?} + {s:?}: {used} px in {room}");
                     match best {
@@ -9223,25 +9201,25 @@ mod header_fit_tests {
         assert!(n > 5000, "{n} headers");
     }
 
-    /// The bug (Haseeb's shot, 2026-11-18): hands-free over a reply ran off the bubble. At the
-    /// widest the status shows whole and INCOMING TRANSMISSION gives way; at the narrowest the
-    /// status loses MIC LIVE, keeps its meter.
+    /// The bug (Haseeb's shot, 2026-11-18): hands-free over a reply ran off the bubble. With no
+    /// name plate (Haseeb, 23:18: "i dont want to see CAPRI") the status shows whole down to the
+    /// narrowest bubble and INCOMING TRANSMISSION gives way (cut, then gone); in a narrower box
+    /// (a bubble easing open) the status loses MIC LIVE, then its meter.
     #[test]
     fn hands_free_over_a_reply() {
         let cw = tabular(exo2);
         let status = hf_label(None, 12, 0.4);
         let label = reply_label(None, false);
-        let (l, s) = fit_header(PANEL_MAX_W - PAD_L - PAD_R, NAME_W, &label, &status, &cw);
-        assert!((l.is_empty() || l == "INCOMING…") && s == status, "{l:?} {s:?}");
-        let (l, s) = fit_header(PANEL_MIN_W - PAD_L - PAD_R, NAME_W, &label, &status, &cw);
-        assert_eq!((l.as_str(), s.as_str()), ("", "HANDS-FREE 0:12 ▮▮▯▯▯"));
+        let fit = |w: f32, label: &str, status: &str| fit_header(w - PAD_L - PAD_R, label, status, &cw);
+        assert_eq!(fit(PANEL_MAX_W, &label, &status), ("INCOMING…".into(), status.clone()));
+        assert_eq!(fit(PANEL_MIN_W, &label, &status), (String::new(), status.clone()));
+        assert_eq!(fit(300.0, &label, &status), (String::new(), "HANDS-FREE 0:12 ▮▮▯▯▯".into()));
+        assert_eq!(fit(230.0, &label, &status), (String::new(), "HANDS-FREE 0:12".into()));
         // A short status leaves the label room: whole, or cut after a whole word.
-        let (l, _) = fit_header(PANEL_MIN_W - PAD_L - PAD_R, NAME_W, &label, "ONLINE", &cw);
-        assert_eq!(l, "INCOMING…");
-        let (l, _) = fit_header(PANEL_MAX_W - PAD_L - PAD_R, NAME_W, &label, "ONLINE", &cw);
-        assert_eq!(l, "INCOMING TRANSMISSION");
+        assert_eq!(fit(PANEL_MIN_W, &label, "ONLINE").0, "INCOMING TRANSMISSION");
+        assert_eq!(fit(PANEL_MIN_W, &label, "LOCAL MODEL OFF").0, "INCOMING…");
         let echo = reply_label(Some("what's the weather like in toronto tomorrow morning"), false);
-        let (l, s) = fit_header(PANEL_MIN_W - PAD_L - PAD_R, NAME_W, &echo, "LISTENING", &cw);
+        let (l, s) = fit(PANEL_MIN_W, &echo, "LISTENING");
         assert!(l.starts_with("YOU › what") && l.ends_with('…') && s == "LISTENING", "{l:?} {s:?}");
     }
 
@@ -9273,10 +9251,10 @@ mod header_fit_tests {
                 for label in ["", "INCOMING TRANSMISSION"] {
                     for w in (PANEL_MIN_W as i32 - 60..=PANEL_MAX_W as i32).step_by(3).map(|w| w as f32) {
                         let room = w - PAD_L - PAD_R;
-                        let (l0, s0) = fit_header(room, NAME_W, label, &first, &cw);
+                        let (l0, s0) = fit_header(room, label, &first, &cw);
                         for &t in group.iter() {
                             for l in levels {
-                                let (l1, s1) = fit_header(room, NAME_W, label, &make(t, l), &cw);
+                                let (l1, s1) = fit_header(room, label, &make(t, l), &cw);
                                 assert_eq!((l1.as_str(), norm(&s1)), (l0.as_str(), norm(&s0)), "{w}: {:?} reflows the header", make(t, l));
                             }
                         }
