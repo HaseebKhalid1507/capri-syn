@@ -263,6 +263,9 @@ type ImageBox = ((i32, i32), (i32, i32));
 struct Wrapped {
     /// Char ranges of the wrapped lines (a line keeps its trailing space).
     lines: Vec<(usize, usize)>,
+    /// Per line: a paragraph that is one command (its chip). Never read off a line alone: a
+    /// paragraph opening with a long code span wraps into a line that looks like one.
+    chips: Vec<bool>,
     /// Widest line, logical px.
     width: f32,
     /// The width it was wrapped to (the bubble's text box): wrapped again when that changes.
@@ -344,15 +347,67 @@ struct InputBox {
 struct PromptUi {
     view: PromptView,
     shown_at: Instant,
+    /// Its buttons take clicks from here (`PROMPT_ARM` after it shows, or after they change).
+    arm_at: Instant,
+    /// Cut to fit once: stays so until answered (its one-click ALLOW must not come back under
+    /// his cursor as she moves).
+    cut: bool,
+    /// Its go button as last drawn.
+    go: Option<Go>,
     /// Escape or the chevron: hidden behind the chip, still pending.
     dismissed: bool,
     /// From the dev `prompt` command: answers go nowhere.
     fake: bool,
 }
 
-/// Buttons of a prompt ignore clicks this long after it shows (a click meant for
-/// something else must not answer it).
+/// Buttons of a prompt ignore clicks this long after it shows, or after they change (a click
+/// meant for something else must not answer it).
 const PROMPT_ARM: Duration = Duration::from_millis(400);
+
+/// A prompt's go button.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Go {
+    /// A secret: type it.
+    Answer,
+    /// Risky, or cut to fit: the Line, whole.
+    Review,
+    Allow,
+}
+
+impl PromptUi {
+    fn new(view: PromptView, now: Instant, fake: bool) -> Self {
+        PromptUi { view, shown_at: now, arm_at: now + PROMPT_ARM, cut: false, go: None, dismissed: false, fake }
+    }
+
+    /// Shown again (from behind the chip): its buttons arm again.
+    fn reshow(&mut self, now: Instant) {
+        self.dismissed = false;
+        self.shown_at = now;
+        self.arm_at = now + PROMPT_ARM;
+    }
+
+    /// Its go button this frame, `cut` it is cut to fit now. Once cut it stays cut; a change of
+    /// button re-arms them all.
+    fn go(&mut self, cut: bool, now: Instant) -> Go {
+        self.cut |= cut;
+        let go = if self.view.secret {
+            Go::Answer
+        } else if self.cut || crate::line::risky(&self.view) {
+            Go::Review
+        } else {
+            Go::Allow
+        };
+        if self.go.is_some_and(|g| g != go) {
+            self.arm_at = self.arm_at.max(now + PROMPT_ARM);
+        }
+        self.go = Some(go);
+        go
+    }
+
+    fn armed(&self, now: Instant) -> bool {
+        now >= self.arm_at
+    }
+}
 /// Escape twice within this, while a turn runs, aborts it. One Escape closes the field
 /// when it runs out.
 const ESC_AGAIN: Duration = Duration::from_millis(1_000);
@@ -396,6 +451,14 @@ impl Bubble {
             .collect()
     }
 
+    /// Which of `page_lines` are command chips (as wrapped: a paragraph that is one command).
+    fn page_chips(&self) -> Vec<bool> {
+        let Some(w) = &self.wrap else { return Vec::new() };
+        let (top, _) = self.pages();
+        let n = self.page_lines().len();
+        (top..top + n).map(|i| w.chips.get(i).copied().unwrap_or(false)).collect()
+    }
+
     /// The page's lines, its last one ending "…" when the text goes on past the page (r21: it
     /// was cut mid-sentence with no sign).
     fn page_lines_marked(&self) -> Vec<String> {
@@ -405,8 +468,8 @@ impl Bubble {
         // the pager says there is more.
         if top + self.rows() < total
             && self.shown >= self.text.len()
+            && self.page_chips().last() != Some(&true)
             && let Some(last) = lines.last_mut()
-            && crate::line::command(last).is_none()
         {
             *last = goes_on(last);
         }
@@ -416,12 +479,16 @@ impl Bubble {
     /// Its last line is one command (its chip) and no code: with nothing else for the footer,
     /// the collapse key sits on the chip's row.
     fn ends_on_chip(&self) -> bool {
-        !self.raw.contains("```")
-            && !self.raw.contains("~~~")
-            && self.wrap.as_ref().and_then(|w| w.lines.last()).is_some_and(|&(a, e)| {
-                let t: String = self.text[a.min(self.text.len())..e.min(self.text.len())].iter().collect();
-                crate::line::command(&t).is_some()
-            })
+        !self.raw.contains("```") && !self.raw.contains("~~~") && self.wrap.as_ref().is_some_and(|w| w.chips.last() == Some(&true))
+    }
+
+    /// He put it away (the chevron). Whole and finished: read, the turn to mark heard (no strip
+    /// when the next reply replaces it). Still streaming or typing: not yet, its end leaves
+    /// the strip (`ended_unseen`).
+    fn put_away(&mut self) -> Option<u64> {
+        self.collapsed = true;
+        self.hide_at = None;
+        (self.stream && self.turn > 0 && !self.more && self.shown >= self.text.len()).then_some(self.turn)
     }
 
     /// A session reply still out in it (or put down only while she is carried): the strip it
@@ -515,6 +582,7 @@ fn menu_reflow(at: (f32, f32), (w, h): (f32, f32), (min_x, max_x): (f32, f32), f
 fn wrap_lines(text: &[char], wrap_w: f32, chip: Option<&dyn Fn(&str) -> f32>, mut breaks: impl FnMut(&str) -> Vec<usize>, width: impl Fn(&str) -> f32) -> Wrapped {
     let s: String = text.iter().collect();
     let mut lines = Vec::new();
+    let mut chips = Vec::new();
     let mut widest = 0.0f32;
     let mut base = 0usize;
     for para in s.split('\n') {
@@ -523,6 +591,7 @@ fn wrap_lines(text: &[char], wrap_w: f32, chip: Option<&dyn Fn(&str) -> f32>, mu
             && let Some(c) = crate::line::command(para)
         {
             lines.push((base, base + n));
+            chips.push(true);
             widest = widest.max(cw(c).min(wrap_w));
             base += n + 1;
             continue;
@@ -534,11 +603,18 @@ fn wrap_lines(text: &[char], wrap_w: f32, chip: Option<&dyn Fn(&str) -> f32>, mu
                 widest = widest.max(width(t));
             }
             lines.push((base + para[..start].chars().count(), base + para[..ix].chars().count()));
+            chips.push(false);
             start = ix;
         }
         base += n + 1;
     }
-    Wrapped { lines, width: widest, at: wrap_w }
+    Wrapped { lines, chips, width: widest, at: wrap_w }
+}
+
+/// A streaming reply's turn just ended (`was_more`, more no longer) behind the chip: he put it
+/// away (or it went) before its end, which he hasn't seen.
+fn ended_unseen(was_more: bool, b: &Bubble) -> bool {
+    was_more && !b.more && b.stream && b.collapsed && !b.text.is_empty()
 }
 
 /// The text box (logical px) of a bubble in `span`: the widest it may be, less its padding.
@@ -2532,7 +2608,7 @@ impl Avatar {
         }
         take(self.hint.as_ref().map(|h| h.1));
         take(self.input.as_ref().and_then(|i| i.esc_at).map(|t| t + ESC_AGAIN));
-        take(self.prompt_ui.as_ref().map(|p| p.shown_at + PROMPT_ARM).filter(|&t| t > now));
+        take(self.prompt_ui.as_ref().map(|p| p.arm_at).filter(|&t| t > now));
         if self.glitch.is_some() {
             // As often as GPUI presents, so every presented frame has a new pattern.
             take(Some(now + FRAME_FAST));
@@ -2801,7 +2877,7 @@ impl Avatar {
             self.close_input(true);
             dirty = true;
         }
-        if self.prompt_ui.as_ref().is_some_and(|p| p.shown_at + PROMPT_ARM <= now && p.shown_at + PROMPT_ARM + FRAME_FAST > now) {
+        if self.prompt_ui.as_ref().is_some_and(|p| p.arm_at <= now && p.arm_at + FRAME_FAST > now) {
             dirty = true;
         }
         if let Some(s) = &self.session
@@ -3457,7 +3533,7 @@ impl Avatar {
             }
             Command::FakePrompt { secret, text } => {
                 let view = PromptView { id: 0, title: if secret { "password required".into() } else { "Confirm tool call".into() }, text, secret };
-                self.prompt_ui = Some(PromptUi { view, shown_at: now, dismissed: false, fake: true });
+                self.prompt_ui = Some(PromptUi::new(view, now, true));
                 self.set_mood(Mood::NeedsYou, now);
                 "ok".into()
             }
@@ -4165,7 +4241,7 @@ impl Avatar {
                     if self.input.as_ref().is_some_and(|i| i.secret.is_some() && i.secret != b.prompt.as_ref().map(|p| p.id)) {
                         self.close_input(true);
                     }
-                    self.prompt_ui = b.prompt.clone().map(|view| PromptUi { view, shown_at: now, dismissed: false, fake: false });
+                    self.prompt_ui = b.prompt.clone().map(|view| PromptUi::new(view, now, false));
                 }
             }
         }
@@ -4233,7 +4309,7 @@ impl Avatar {
         bb.text = text;
         bb.raw = b.raw.clone();
         bb.reveal_all_if_long();
-        bb.more = b.busy;
+        let was_more = std::mem::replace(&mut bb.more, b.busy);
         if (annoyed || b.trouble.is_some()) && !b.busy {
             // The reason (aborted, error, no login) must be seen.
             bb.collapsed = false;
@@ -4245,6 +4321,11 @@ impl Avatar {
             bb.hide_at = None;
         } else if bb.hide_at.is_none() && !bb.collapsed {
             bb.hide_at = Some(now + hold_for(bb.text.len()));
+        }
+        // Put away while it streamed: its end came behind the chip, unseen.
+        if ended_unseen(was_more, bb) && !self.rag_hides_bubble() {
+            let (turn, text) = (bb.turn, bb.text.clone());
+            self.reply_missed(turn, &text);
         }
     }
 
@@ -5121,8 +5202,7 @@ impl Avatar {
         self.ack_unread();
         self.brain_touch(crate::brain::Touch::Chip);
         if let Some(p) = self.prompt_ui.as_mut().filter(|p| p.dismissed) {
-            p.dismissed = false;
-            p.shown_at = now;
+            p.reshow(now);
         } else if let Some(b) = self.bubble.as_mut().filter(|b| b.collapsed) {
             b.collapsed = false;
             if b.next_char.is_none() && !b.more {
@@ -6920,12 +7000,17 @@ impl Avatar {
             };
             // (lines, pages, text width, all lines, header label, placeholder)
             let mut placeholder: Option<String> = None;
+            // A reply's lines that are command chips (as wrapped).
+            let mut chips: Vec<bool> = Vec::new();
             let (lines, pages, text_w, total_lines, header_label): (Vec<String>, Option<(usize, usize)>, f32, usize, String) = match mode {
                 PanelMode::Reply => {
                     let b = self.bubble.as_ref().expect("reply mode has a bubble");
                     // The reader open: the bubble is a stub (header + CLOSE READER), not a
                     // second copy of the text.
                     let lines = if self.reader.is_some() { Vec::new() } else { b.page_lines_marked() };
+                    if self.reader.is_none() {
+                        chips = b.page_chips();
+                    }
                     if lines.is_empty() && self.reader.is_none() {
                         placeholder = Some("…".into());
                     }
@@ -6981,6 +7066,8 @@ impl Avatar {
                     (vec![body], None, 260.0, 1, "FOCUS PROBE // CLICK ME".into())
                 }
             };
+            // Its go button: cut once, REVIEW until answered; a change re-arms its buttons.
+            let prompt_go = if mode == PanelMode::Prompt { self.prompt_ui.as_mut().map(|u| u.go(prompt_cut, now)) } else { None };
             let probe = mode == PanelMode::Probe;
             let (vis_l, vis_r) = self.panel_span();
             let max_w = (vis_r - vis_l - 2.0 * MARGIN).min(PANEL_MAX_W);
@@ -7131,7 +7218,7 @@ impl Avatar {
                     .iter()
                     .enumerate()
                     .map(|(k, t)| {
-                        let chip = (mode == PanelMode::Reply).then(|| crate::line::command(t)).flatten();
+                        let chip = chips.get(k).copied().unwrap_or(false).then(|| crate::line::command(t)).flatten();
                         let lw = match chip {
                             Some(c) => self.chip_w(&self.chip_text(c, tw, window), window),
                             None if t.is_empty() => 0.0,
@@ -7180,6 +7267,7 @@ impl Avatar {
                     // A line that is one command (`synaps login`, typed out or whole): a chip,
                     // copied on a click.
                     if mode == PanelMode::Reply
+                        && chips.get(k) == Some(&true)
                         && let Some(c) = crate::line::command(&t)
                     {
                         let copied = self.cmd_copied.as_deref() == Some(c);
@@ -7376,15 +7464,9 @@ impl Avatar {
                             if let Some(p) = &mut this.prompt_ui {
                                 p.dismissed = true;
                             }
-                        } else if let Some(b) = &mut this.bubble {
-                            // He put it away: read, no strip when its hold runs out or the
-                            // next reply replaces it.
-                            b.collapsed = true;
-                            b.hide_at = None;
-                            if b.stream && b.turn > 0 {
-                                let turn = b.turn;
-                                this.unseen.heard(turn);
-                            }
+                        } else if let Some(turn) = this.bubble.as_mut().and_then(Bubble::put_away) {
+                            // He put it away whole: read, no strip when the next reply replaces it.
+                            this.unseen.heard(turn);
                         }
                         cx.notify();
                         this.schedule(cx);
@@ -7517,8 +7599,8 @@ impl Avatar {
                 }
                 PanelMode::Prompt => {
                     let u = self.prompt_ui.as_ref().expect("prompt mode has a prompt");
-                    let armed = now >= u.shown_at + PROMPT_ARM;
-                    let (secret, risky) = (u.view.secret, crate::line::risky(&u.view));
+                    let armed = u.armed(now);
+                    let secret = u.view.secret;
                     // DENY first. A risky one (a tool activation, a tool that runs or changes
                     // things) has no one-click ALLOW here: REVIEW opens the Line, where it
                     // takes Shift+A or a held A.
@@ -7527,7 +7609,7 @@ impl Avatar {
                             MouseButton::Left,
                             cx.listener(|this, _: &MouseDownEvent, _, cx| {
                                 cx.stop_propagation();
-                                if this.prompt_ui.as_ref().is_some_and(|u| Instant::now() >= u.shown_at + PROMPT_ARM) {
+                                if this.prompt_ui.as_ref().is_some_and(|u| u.armed(Instant::now())) {
                                     this.answer(None);
                                     cx.notify();
                                     this.schedule(cx);
@@ -7541,13 +7623,13 @@ impl Avatar {
                             cx.listener(|this, _: &MouseDownEvent, window, cx| {
                                 cx.stop_propagation();
                                 let Some(u) = &this.prompt_ui else { return };
-                                if Instant::now() >= u.shown_at + PROMPT_ARM {
+                                if u.armed(Instant::now()) {
                                     let id = u.view.id;
                                     this.open_input(Some(id), window, cx);
                                 }
                             }),
                         ));
-                    } else if risky || prompt_cut {
+                    } else if prompt_go == Some(Go::Review) {
                         row = row.child(tbtn("review", "REVIEW ▸", Key::Go, armed).on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, _: &MouseDownEvent, _, cx| {
@@ -7563,7 +7645,7 @@ impl Avatar {
                             MouseButton::Left,
                             cx.listener(|this, _: &MouseDownEvent, _, cx| {
                                 cx.stop_propagation();
-                                if this.prompt_ui.as_ref().is_some_and(|u| Instant::now() >= u.shown_at + PROMPT_ARM) {
+                                if this.prompt_ui.as_ref().is_some_and(|u| u.go == Some(Go::Allow) && u.armed(Instant::now())) {
                                     this.answer(Some("y".into()));
                                     cx.notify();
                                     this.schedule(cx);
@@ -7576,7 +7658,7 @@ impl Avatar {
                             MouseButton::Left,
                             cx.listener(|this, _: &MouseDownEvent, _, cx| {
                                 cx.stop_propagation();
-                                if this.prompt_ui.as_ref().is_some_and(|u| Instant::now() >= u.shown_at + PROMPT_ARM) {
+                                if this.prompt_ui.as_ref().is_some_and(|u| u.armed(Instant::now())) {
                                     this.answer(None);
                                     cx.notify();
                                     this.schedule(cx);
@@ -8383,7 +8465,7 @@ mod menu_edge_tests {
 mod bubble_layout_tests {
     use super::{
         Bubble, FOOTER_GAP, FOOTER_H, HEADER_GAP, HEADER_H, LINE_H, LINES_PER_PAGE, MARGIN, OPENING_LINES, PAD_B, PAD_L, PAD_R, PAD_T, PANEL_MAX_W, PANEL_MIN_W, fit_middle,
-        place_panel, reply_cap, rows_room, text_box_for, top_under, wrap_lines,
+        ended_unseen, place_panel, reply_cap, rows_room, text_box_for, top_under, wrap_lines,
     };
 
     /// A proportional face's widths (logical px at the bubble's 20 px): wide glyphs (CJK, emoji)
@@ -8511,8 +8593,8 @@ mod bubble_layout_tests {
                 for (top, bottom) in rooms {
                     let (lines, text_w, (x, y, w, h), rows, b) = lay(&raw, span, top, bottom);
                     let at = format!("{name} span {span:?} room {top}..{bottom}");
-                    for l in &lines {
-                        let lw = match crate::line::command(l) {
+                    for (l, chip) in lines.iter().zip(b.page_chips()) {
+                        let lw = match chip.then(|| crate::line::command(l)).flatten() {
                             Some(c) => chip_w(&fit_middle(c, |s| chip_w(s) <= text_w)),
                             None => width(l),
                         };
@@ -8530,7 +8612,7 @@ mod bubble_layout_tests {
                     let total = b.wrap.as_ref().unwrap().lines.len();
                     if total > rows {
                         let last = lines.last().unwrap();
-                        assert!(last.ends_with('…') || crate::line::command(last).is_some(), "{at}: {total} lines, {rows} shown, no …: {lines:?}");
+                        assert!(last.ends_with('…') || b.page_chips().last() == Some(&true), "{at}: {total} lines, {rows} shown, no …: {lines:?}");
                         assert!(b.long(), "{at}");
                     }
                     n += 1;
@@ -8598,6 +8680,52 @@ mod bubble_layout_tests {
     }
 
     #[test]
+    fn a_long_code_span_that_wraps_is_no_chip() {
+        // Shady (#71): a paragraph opening with a long code span wrapped into a first line that
+        // read as one command ("`SYNAPS_DESKTOP_BIN=…" with no backtick after): a chip that
+        // copied a fragment. Chips are the wrap's: a paragraph that is one command, only.
+        let raw = "`SYNAPS_DESKTOP_BIN=$HOME/.local/bin/synaps-desktop-hybrid.motion synaps-desktop --verbose` starts it with its log on, then `synaps login` signs it in.";
+        let (lines, ..) = lay(raw, (0.0, 432.0), 6.0, 300.0);
+        assert!(lines.len() >= 2 && crate::line::command(&lines[0]).is_some(), "the case: its first line reads as a command: {lines:?}");
+        let (_, _, _, _, b) = lay(raw, (0.0, 432.0), 6.0, 300.0);
+        assert!(b.page_chips().iter().all(|c| !c), "{lines:?}");
+        assert!(!b.ends_on_chip());
+        // Cut there, that line takes its "…" like any text.
+        let ten = format!("{raw}\n2\n3\n4\n5\n6\n7\n8\n9\n10");
+        let (_, _, _, rows, b) = lay(&ten, (0.0, 432.0), 6.0, 300.0);
+        assert!(b.long() && rows == OPENING_LINES);
+        assert!(b.page_chips().iter().all(|c| !c));
+        // A paragraph that is one command is still a chip.
+        let (lines, _, _, _, b) = lay("Then:\n`synaps login`", (0.0, 432.0), 6.0, 300.0);
+        assert_eq!(b.page_chips(), vec![false, true], "{lines:?}");
+        assert!(b.ends_on_chip());
+    }
+
+    #[test]
+    fn put_away_mid_stream_its_end_is_unseen_put_away_whole_it_is_read() {
+        // Shady (#71): the chevron marked a reply heard while it still streamed, so its final
+        // answer landed behind the chip with no strip.
+        let (_, _, _, _, mut b) = lay("First half of the answer,", (0.0, 500.0), 6.0, 300.0);
+        b.more = true;
+        assert_eq!(b.put_away(), None, "streaming: not read yet");
+        assert!(b.collapsed);
+        // The turn ends behind the chip: its end leaves the strip.
+        let was_more = std::mem::replace(&mut b.more, false);
+        assert!(ended_unseen(was_more, &b));
+        // Typed out only in part: not read either.
+        let (_, _, _, _, mut b) = lay("Still typing this one.", (0.0, 500.0), 6.0, 300.0);
+        b.shown = 5;
+        assert_eq!(b.put_away(), None);
+        // Whole and finished: read, and nothing ends unseen later.
+        let (_, _, _, _, mut b) = lay("All of it.", (0.0, 500.0), 6.0, 300.0);
+        assert_eq!(b.put_away(), Some(1));
+        assert!(!ended_unseen(false, &b));
+        // Open when it ended (he saw it end): no strip from here (its hold does that).
+        let (_, _, _, _, b) = lay("Seen.", (0.0, 500.0), 6.0, 300.0);
+        assert!(!ended_unseen(true, &b));
+    }
+
+    #[test]
     fn a_reply_ending_on_its_chip_gets_the_footers_row() {
         // Room for three rows with the footer, four without: four lines ending on a chip have
         // no footer (the collapse key is on the chip's row), so all four show, nothing cut.
@@ -8640,5 +8768,46 @@ mod bubble_layout_tests {
         }
         assert!(seen_now.len() > 1, "the case: counted on the bobbing window, the rows change");
         assert_eq!(seen_rest.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod prompt_button_tests {
+    use super::{Go, PROMPT_ARM, PromptUi};
+    use crate::session::PromptView;
+    use std::time::{Duration, Instant};
+
+    fn read_prompt() -> PromptView {
+        PromptView { id: 7, title: "Confirm tool call".into(), text: "read: README.md (lines 1-40)".into(), secret: false }
+    }
+
+    #[test]
+    fn cut_once_it_stays_review_and_a_changed_button_rearms() {
+        // Shady (#71): `prompt_cut` was per frame. She moved, the prompt fit again, and REVIEW
+        // turned back into a one-click ALLOW under his cursor, armed since the prompt showed.
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+        let mut u = PromptUi::new(read_prompt(), t0, false);
+        assert_eq!(u.go(false, ms(0)), Go::Allow);
+        assert!(!u.armed(ms(100)) && u.armed(ms(400)));
+        // Cut at 1 s (she moved up): REVIEW, and its buttons take no click for PROMPT_ARM.
+        assert_eq!(u.go(true, ms(1000)), Go::Review);
+        assert!(!u.armed(ms(1000)) && !u.armed(ms(1000) + PROMPT_ARM - Duration::from_millis(1)));
+        assert!(u.armed(ms(1000) + PROMPT_ARM));
+        // It fits again a frame later: still REVIEW (until answered), still not armed.
+        assert_eq!(u.go(false, ms(1016)), Go::Review);
+        assert!(!u.armed(ms(1100)));
+        for k in 0..100 {
+            assert_eq!(u.go(k % 2 == 0, ms(1500 + 16 * k)), Go::Review);
+        }
+        assert!(u.armed(ms(3200)), "no change since: armed");
+        // Risky or secret: as ever.
+        let mut r = PromptUi::new(PromptView { text: "bash wants to run: rm -rf ./build".into(), ..read_prompt() }, t0, false);
+        assert_eq!(r.go(false, ms(0)), Go::Review);
+        let mut s = PromptUi::new(PromptView { secret: true, ..read_prompt() }, t0, false);
+        assert_eq!(s.go(true, ms(0)), Go::Answer);
+        // Shown again from behind the chip: armed again from then.
+        u.reshow(ms(5000));
+        assert!(!u.armed(ms(5100)) && u.go(false, ms(5100)) == Go::Review);
     }
 }
