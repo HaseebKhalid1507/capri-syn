@@ -8,6 +8,8 @@ name: release
 #   synaps-avatar-x86_64-unknown-linux-gnu.tar.gz   her binary, avatarctl, tools, the user units, install.sh
 #   synaps-avatar-setup-x86_64.exe                  her Windows installer (packaging/windows)
 #   synaps-avatar-voice-setup-x86_64.exe            her Windows voice installer (its own download)
+#   synaps-avatar-x86_64.pdb                        her Windows exe's symbols (never in the installer):
+#                                                   a dump of hers from his box reads with them
 #
 # A pull request that touches the packaging runs the same builds and smoke tests, and releases
 # nothing. Nothing here pushes a tag or publishes a release.
@@ -129,8 +131,13 @@ jobs:
         with:
           python-version: "3.13"
 
+      # Her symbols in a PDB beside the exe (MSVC keeps them out of it): line tables, the same
+      # optimised code. The PDB is a release asset of its own, never in the installer.
       - name: Her installer
         shell: pwsh
+        env:
+          CARGO_PROFILE_RELEASE_STRIP: none
+          CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
         run: ./packaging/windows/build.ps1
 
       - name: Her voice installer
@@ -145,7 +152,8 @@ jobs:
           $out = 'packaging/windows/Output'
           Copy-Item (Get-ChildItem "$out/synaps-avatar-setup-*.exe" | Select-Object -First 1).FullName dist/synaps-avatar-setup-x86_64.exe
           Copy-Item (Get-ChildItem "$out/synaps-avatar-voice-setup-*.exe" | Select-Object -First 1).FullName dist/synaps-avatar-voice-setup-x86_64.exe
-          foreach ($f in Get-ChildItem dist/*.exe) {
+          Copy-Item target/release/synaps_avatar.pdb dist/synaps-avatar-x86_64.pdb
+          foreach ($f in Get-ChildItem dist/*.exe, dist/*.pdb) {
             $h = (Get-FileHash -Algorithm SHA256 $f.FullName).Hash.ToLowerInvariant()
             [IO.File]::WriteAllText("$($f.FullName).sha256", "$h  $($f.Name)`n")
             Write-Output "$h  $($f.Name)  $([math]::Round($f.Length / 1MB, 1)) MB"
