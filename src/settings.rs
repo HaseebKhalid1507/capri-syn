@@ -231,6 +231,11 @@ pub struct VoiceSettings {
     pub vocab: Vec<String>,
     /// The `vocab` entries left out by the caps (logged when the sidecar gets its config; not an error).
     pub vocab_dropped: Vec<String>,
+    /// Windows: the microphone the sidecar listens on, by its name in Sound settings (her
+    /// installer's picker writes it); empty: Windows' default. Read when the sidecar starts. A
+    /// named one that's gone is said (NO MIC), never swapped for the default. Linux: unused (the
+    /// service's own `CAPRI_VOICE_SOURCE`).
+    pub mic: String,
 }
 
 /// `[voice] vocab` caps, the same as the sidecar's (`VOCAB_MAX_WORDS, VOCAB_WORD_CHARS,
@@ -271,7 +276,7 @@ pub const SPEED: f32 = 1.2987;
 
 impl Default for VoiceSettings {
     fn default() -> Self {
-        VoiceSettings { enabled: false, stt_model: "small.en".into(), voice: VOICE.into(), speed: SPEED, pace: "stretch".into(), flow: "emphasis".into(), duck: "duck".into(), speak_unprompted: true, key: 'c', silence_s: 1.0, toggle_key: 'c', handsfree: true, handsfree_timeout: 60, handsfree_max: 30, echo: "auto".into(), wake_word: true, wake_sensitivity: 0.5, wake_handsfree: true, hold_to_talk: false, vocab: Vec::new(), vocab_dropped: Vec::new() }
+        VoiceSettings { enabled: false, stt_model: "small.en".into(), voice: VOICE.into(), speed: SPEED, pace: "stretch".into(), flow: "emphasis".into(), duck: "duck".into(), speak_unprompted: true, key: 'c', silence_s: 1.0, toggle_key: 'c', handsfree: true, handsfree_timeout: 60, handsfree_max: 30, echo: "auto".into(), wake_word: true, wake_sensitivity: 0.5, wake_handsfree: true, hold_to_talk: false, vocab: Vec::new(), vocab_dropped: Vec::new(), mic: String::new() }
     }
 }
 
@@ -298,6 +303,7 @@ struct VoiceRaw {
     wake_handsfree: Option<bool>,
     hold_to_talk: Option<bool>,
     vocab: Option<Vec<String>>,
+    mic: Option<String>,
 }
 
 /// `[mirror]`: she faces where she goes. `drag`: turn while dragged (and flung), looking back
@@ -662,6 +668,9 @@ impl Settings {
             }
             if let Some(h) = v.hold_to_talk {
                 voice.hold_to_talk = h;
+            }
+            if let Some(m) = v.mic {
+                voice.mic = m.trim().to_string();
             }
             if let Some(h) = v.wake_handsfree {
                 voice.wake_handsfree = h;
@@ -1274,6 +1283,9 @@ mod tests {
         assert!(!v.hold_to_talk, "a tap is the default: holding to talk is opt-in");
         assert!(Settings::parse("[voice]\nhold_to_talk = true\n").unwrap().voice.hold_to_talk);
         assert!(Settings::parse("[voice]\nhold_to_talk = 1\n").is_err());
+        assert_eq!(v.mic, "", "Windows' default microphone unless he picked one");
+        assert_eq!(Settings::parse("[voice]\nmic = \" Microphone (USB Audio) \"\n").unwrap().voice.mic, "Microphone (USB Audio)");
+        assert!(Settings::parse("[voice]\nmic = 3\n").is_err());
         let h = Settings::parse("[voice]\nhandsfree = false\nhandsfree_timeout = 15\nhandsfree_max = 0\necho = \"Speakers\"\n").unwrap().voice;
         assert_eq!((h.handsfree, h.handsfree_timeout, h.handsfree_max, h.echo.as_str()), (false, 15, 0, "speakers"));
         assert!(Settings::parse("[voice]\nhandsfree_timeout = 5\n").is_err() && Settings::parse("[voice]\nhandsfree_max = 9999\n").is_err());
