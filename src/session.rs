@@ -1035,7 +1035,9 @@ impl Link {
                 StreamEvent::Session(SessionStreamEvent::Usage { input_tokens, output_tokens, model }) if (input_tokens > 0 || output_tokens > 0) && self.hers(model.as_deref()) => self.answered(),
                 StreamEvent::Session(SessionStreamEvent::Error { message }) => match Trouble::of(&message, self.model()) {
                     Some(t) => {
-                        elog!("synaps-avatar: turn error ({}): {}", t.key(), one_line(&message, 300));
+                        // Her log and bubble show its URLs as she does (`urls_shown`): Synaps
+                        // quotes its local URL whole, a `user:password@` too.
+                        elog!("synaps-avatar: turn error ({}): {}", t.key(), one_line(&crate::provider::urls_shown(&message), 300));
                         if let Trouble::NoBrain { on } = t {
                             // The daemon's word: missing until a check or an answer says otherwise,
                             // or the files read otherwise than when it spoke (#76).
@@ -1048,7 +1050,7 @@ impl Link {
                         self.trouble = Some(t);
                     }
                     None => {
-                        self.notice = Some(format!("‹error: {}›", one_line(&message, 90)));
+                        self.notice = Some(format!("‹error: {}›", one_line(&crate::provider::urls_shown(&message), 90)));
                         self.flash = Some((Mood::Annoyed, now + ANNOYED_FOR));
                     }
                 },
@@ -1082,7 +1084,7 @@ impl Link {
             SessionEvent::CompactionApplied { .. } | SessionEvent::CompactionCancelled => self.compacting = false,
             SessionEvent::CompactionFailed { message } => {
                 self.compacting = false;
-                elog!("synaps-avatar: compaction failed: {message}");
+                elog!("synaps-avatar: compaction failed: {}", crate::provider::urls_shown(&message));
             }
             SessionEvent::Cleared { .. } => {
                 self.raw.clear();

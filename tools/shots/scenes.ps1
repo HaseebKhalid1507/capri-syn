@@ -19,8 +19,9 @@
               the Brain screen it opens, OTHER, esc, her menu); Claude with no login after his first
               message (the tag, a click on her, the list's BRAIN row); signed in (the list, the Brain
               screen, MODEL changed and written); his TUI's /model followed, a ChatGPT sign-in made in
-              a terminal seen by the open screen, MODEL sent back (PR 4); and a daemon through
-              --socket (another machine's).
+              a terminal seen by the open screen, MODEL sent back (PR 4); a Groq key on file, API
+              KEY's enter switching her to it (PR 5); and a daemon through --socket (another
+              machine's).
   Out: <Out>\<set>\<take>\<step>.png + .json (her `state`), <Out>\index.json, <Out>\logs\.
 #>
 param(
@@ -452,7 +453,9 @@ $Scenes = [ordered]@{
             Start-Sleep 2
             Focus-Line-Top
             $null = Fake 'model claude-haiku-4-5-20251001'
-            $null = Wait-Until { (State).line.mind.model -eq 'claude-haiku-4-5-20251001' } 10 'MODEL following his TUI'
+            if (-not (Wait-Until { (State).line.mind.model -eq 'claude-haiku-4-5-20251001' } 10 'MODEL following his TUI')) {
+                $script:Fails.Add("${script:Take}: MODEL never followed his TUI")
+            }
             Start-Sleep 1
             Shot '14-tui-model' 'his TUI''s /model haiku: MODEL says HAIKU 4.5'
             Key 'down'; Key 'down'; Key 'enter' 1400
@@ -467,6 +470,30 @@ $Scenes = [ordered]@{
             if (-not $sent) { $script:Fails.Add("${script:Take}: MODEL back to Sonnet never reached her session (stale view)") }
             Start-Sleep 1
             Shot '16-model-back' 'left, down to MODEL, right: SONNET 4.6, set on her session again'
+        }
+        # Claude signed in, a Groq key on file: API KEY says KEY SET and enter switches her to it.
+        apikey = {
+            Start-Take brain apikey -Local -Model 'claude-sonnet-4-6' -History $Short -Synaps @{ 'auth.json' = '{"anthropic": {"type": "oauth"}, "groq": {"type": "api_key", "key": "gsk-fake"}}' }
+            $null = Ctl 'brain off'
+            $null = Ctl 'settings open brain'
+            Start-Sleep 2
+            Focus-Line-Top
+            Key 'down'; Key 'down'; Key 'enter' 1000
+            # API KEY is the row above MODEL, OTHER open: to the bottom, one up.
+            1..12 | ForEach-Object { Key 'down' 150 }
+            Key 'up' 1200
+            if (-not (Wait-Until { @((State).line.mind.signed) -contains 'groq' } 10 'the Groq key read')) {
+                $script:Fails.Add("${script:Take}: the Brain screen never saw the Groq key")
+            }
+            Start-Sleep 1
+            Shot '17-key-set' 'a Groq key on file: API KEY says KEY SET; the keys say enter uses it'
+            Key 'enter' 1800
+            $dl = Join-Path $Logs 'brain-apikey-daemon.log'
+            if (-not (Wait-Until { (Get-Content -Raw $dl -ErrorAction SilentlyContinue) -match 'cmd set model groq/llama-3.3-70b-versatile' } 10 'her session on Groq')) {
+                $script:Fails.Add("${script:Take}: enter on API KEY never switched her to Groq")
+            }
+            Start-Sleep 1
+            Shot '18-key-in-use' 'enter: her brain is Groq, API KEY says IN USE'
         }
         # A daemon through --socket (maybe another machine's): its logins aren't hers to read or make.
         remote = {
@@ -532,10 +559,13 @@ function To-Edge {
 
 Clear-ShotDesktop
 
+$taken = [System.Collections.Generic.HashSet[string]]::new()
 foreach ($set in $Sets) {
-    if (-not $Scenes.Contains($set)) { throw "no scene set '$set' (sets: $($Scenes.Keys -join ', '))" }
-    foreach ($name in @($Scenes[$set].Keys)) {
+    if (-not $Scenes.Contains($set)) { throw "no scene set '$set' (sets: $($Scenes.PSBase.Keys -join ', '))" }
+    # PSBase: a scene named like a hashtable's property (keys, values, count) would shadow it.
+    foreach ($name in @($Scenes[$set].PSBase.Keys)) {
         if ($Only.Count -and "$set/$name" -notin $Only) { continue }
+        $null = $taken.Add("$set/$name")
         Write-Host "take $set/$name"
         try {
             & $Scenes[$set][$name]
@@ -546,6 +576,10 @@ foreach ($set in $Sets) {
             Stop-Take
         }
     }
+}
+# An -Only take that never ran (no such scene, or one the loop missed) is a problem, not a pass.
+foreach ($o in $Only) {
+    if ($o.Split('/')[0] -in $Sets -and -not $taken.Contains($o)) { $script:Fails.Add("${o}: no such take, never shot") }
 }
 
 [pscustomobject]@{ index = $script:Index; fails = $script:Fails; screen = [ShootWin.Native]::Screen(); scales = [ShootWin.Native]::Scales() } |

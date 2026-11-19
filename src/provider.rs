@@ -239,17 +239,58 @@ pub fn config_value<'a>(config: &'a str, key: &str) -> Option<&'a str> {
     config.lines().map(str::trim).filter(|l| !l.starts_with('#')).filter_map(|l| l.split_once('=')).filter(|(k, _)| k.trim() == key).map(|(_, v)| v.trim()).next_back()
 }
 
-/// The local server's base URL as Synaps finds it: `provider.local.url` in its config, then
-/// `LOCAL_ENDPOINT` (the daemon's, where it can be read; else hers), then Ollama's
-/// (`http://localhost:11434/v1`).
-pub fn local_url(config: Option<&str>, env: Option<String>) -> String {
-    let set = config.and_then(|c| config_value(c, "provider.local.url")).map(|v| v.trim_matches('"').to_string());
+/// The local server's base URL as Synaps finds it: `provider.local.url` in its config (`set`: its
+/// value, `config_value`), then `LOCAL_ENDPOINT` (the daemon's, where it can be read; else hers),
+/// then Ollama's (`http://localhost:11434/v1`).
+pub fn local_url(set: Option<&str>, env: Option<String>) -> String {
+    let set = set.map(|v| v.trim().trim_matches('"').to_string());
     set.filter(|u| !u.is_empty())
         .or(env.filter(|u| !u.trim().is_empty()))
         .unwrap_or_else(|| "http://localhost:11434/v1".into())
         .trim_end_matches('/')
         .to_string()
 }
+
+/// A URL as she shows it, in her log, her bubble or on a page: nothing up to its last `@` (a
+/// password may hold `/`, `?`, `#` unencoded), no `?query` or `#fragment` (where a URL can carry
+/// a credential). An `@` past the host (no local server has one) costs only what's shown.
+pub fn url_shown(u: &str) -> String {
+    let u = u.trim();
+    let (scheme, rest) = u.split_once("://").unwrap_or(("", u));
+    let rest = rest.rsplit_once('@').map_or(rest, |(_, r)| r);
+    let rest = rest.split_once(['?', '#']).map_or(rest, |(a, _)| a);
+    if scheme.is_empty() { rest.to_string() } else { format!("{scheme}://{rest}") }
+}
+
+/// Every URL in a daemon's message as she shows one (`url_shown`; Synaps quotes its local URL
+/// whole: `can't reach local endpoint at …`). The rest, its whitespace too, as it is.
+pub fn urls_shown(s: &str) -> String {
+    s.split_inclusive(char::is_whitespace)
+        .map(|w| {
+            let t = w.trim_end_matches(char::is_whitespace);
+            if t.contains("://") { format!("{}{}", url_shown(t), &w[t.len()..]) } else { w.to_string() }
+        })
+        .collect()
+}
+
+/// The server a URL names, for the probe: its `user:password@` (never sent: a local server takes
+/// none) and its query off, the host and path as a URL parser reads them.
+fn url_target(u: &str) -> String {
+    let u = u.trim();
+    let u = u.split_once(['?', '#']).map_or(u, |(a, _)| a);
+    let (scheme, rest) = u.split_once("://").unwrap_or(("", u));
+    let (host, path) = rest.split_once('/').map_or((rest, None), |(h, p)| (h, Some(p)));
+    let host = host.rsplit_once('@').map_or(host, |(_, h)| h);
+    let scheme = if scheme.is_empty() { String::new() } else { format!("{scheme}://") };
+    match path {
+        Some(p) => format!("{scheme}{host}/{p}"),
+        None => format!("{scheme}{host}"),
+    }
+}
+
+/// Name lookups (`probe`) still running, left behind by a deadline: no more than `DNS_MAX` at once.
+static DNS_LIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+const DNS_MAX: usize = 2;
 
 /// What a look at the local server found.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -276,20 +317,14 @@ impl Local {
 /// the request and the reply (1 MiB at most). A server that never stops talking ends at it too.
 pub fn probe(url: &str, timeout: Duration) -> Local {
     use std::io::{Read, Write};
-    use std::net::ToSocketAddrs;
     let end = std::time::Instant::now() + timeout;
     let left = || end.checked_duration_since(std::time::Instant::now()).filter(|d| !d.is_zero());
-    let Some(rest) = url.trim().strip_prefix("http://") else { return Local::Odd(0) };
-    let (host, path) = rest.split_once('/').map_or((rest, ""), |(h, p)| (h, p));
-    let host = if host.contains(':') { host.to_string() } else { format!("{host}:80") };
+    // No `user:password@` (never sent: a local server takes none) and no query.
+    let Some(rest) = url_target(url).strip_prefix("http://").map(str::to_string) else { return Local::Odd(0) };
+    let (host, path) = rest.split_once('/').map_or((rest.as_str(), ""), |(h, p)| (h, p));
+    let host = if host.rsplit_once(':').is_some_and(|(_, p)| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())) { host.to_string() } else { format!("{host}:80") };
     let path = format!("/{}/models", path.trim_matches('/')).replace("//", "/");
-    // `localhost` is ::1 and 127.0.0.1: Ollama listens on the second only.
-    let (tx, rx) = std::sync::mpsc::channel();
-    let name = host.clone();
-    let looked = std::thread::Builder::new().name("probe-dns".into()).spawn(move || {
-        tx.send(name.to_socket_addrs().map(|a| a.collect::<Vec<_>>()).unwrap_or_default()).ok();
-    });
-    let Some(addrs) = looked.ok().and_then(|_| rx.recv_timeout(left()?).ok()) else { return Local::Off };
+    let Some(addrs) = resolve(&host, left) else { return Local::Off };
     let Some(mut s) = addrs.iter().find_map(|a| std::net::TcpStream::connect_timeout(a, left()?).ok()) else { return Local::Off };
     let req = format!("GET {path} HTTP/1.0\r\nHost: {host}\r\nAccept: application/json\r\nConnection: close\r\n\r\n");
     if left().is_none_or(|d| s.set_write_timeout(Some(d)).is_err()) || s.write_all(req.as_bytes()).is_err() {
@@ -311,6 +346,39 @@ pub fn probe(url: &str, timeout: Duration) -> Local {
         return Local::Off;
     }
     models_reply(&String::from_utf8_lossy(&buf[..buf.len().min(1 << 20)]))
+}
+
+/// `host:port`'s addresses, by `left()`'s deadline. An address as it is; a name on a thread of
+/// its own (`localhost` is ::1 and 127.0.0.1: Ollama listens on the second only), left behind if
+/// it hangs, and none started while `DNS_MAX` of those still hang (None: no answer).
+fn resolve(host: &str, left: impl Fn() -> Option<Duration>) -> Option<Vec<std::net::SocketAddr>> {
+    use std::net::ToSocketAddrs;
+    use std::sync::atomic::Ordering;
+    if let Ok(a) = host.parse::<std::net::SocketAddr>() {
+        return Some(vec![a]);
+    }
+    // `localhost` (the default) without a lookup: 127.0.0.1 first (Ollama's), then ::1.
+    if let Some((h, port)) = host.rsplit_once(':')
+        && h.eq_ignore_ascii_case("localhost")
+        && let Ok(port) = port.parse::<u16>()
+    {
+        return Some(vec![(std::net::Ipv4Addr::LOCALHOST, port).into(), (std::net::Ipv6Addr::LOCALHOST, port).into()]);
+    }
+    if DNS_LIVE.fetch_add(1, Ordering::SeqCst) >= DNS_MAX {
+        DNS_LIVE.fetch_sub(1, Ordering::SeqCst);
+        return None;
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let name = host.to_string();
+    let looked = std::thread::Builder::new().name("probe-dns".into()).spawn(move || {
+        tx.send(name.to_socket_addrs().map(|a| a.collect::<Vec<_>>()).unwrap_or_default()).ok();
+        DNS_LIVE.fetch_sub(1, Ordering::SeqCst);
+    });
+    if looked.is_err() {
+        DNS_LIVE.fetch_sub(1, Ordering::SeqCst);
+        return None;
+    }
+    rx.recv_timeout(left()?).ok()
 }
 
 /// An HTTP reply to `GET /models`: an OpenAI-style list (`{"data": [{"id": …}]}`).
@@ -519,12 +587,47 @@ mod tests {
 
     #[test]
     fn the_local_server_is_where_synaps_looks() {
+        let from = |config: &str, env: Option<&str>| local_url(config_value(config, "provider.local.url"), env.map(str::to_string));
         assert_eq!(local_url(None, None), "http://localhost:11434/v1");
-        assert_eq!(local_url(Some("# provider.local.url = http://x\nmodel = a\n"), None), "http://localhost:11434/v1", "a comment isn't a setting");
-        assert_eq!(local_url(Some("provider.local.url = http://localhost:1234/v1/\n"), Some("http://y/v1".into())), "http://localhost:1234/v1", "the config first");
-        assert_eq!(local_url(Some(""), Some("http://127.0.0.1:8080/v1".into())), "http://127.0.0.1:8080/v1");
-        assert_eq!(local_url(Some("provider.local.url = http://a:1/v1\nprovider.local.url = http://b:2/v1\n"), None), "http://b:2/v1", "its last line, as Synaps reads it");
-        assert_eq!(local_url(Some("provider.local.url = http://a:1/v1\nprovider.local.url =\n"), Some("http://y/v1".into())), "http://y/v1", "blanked: the variable");
+        assert_eq!(from("# provider.local.url = http://x\nmodel = a\n", None), "http://localhost:11434/v1", "a comment isn't a setting");
+        assert_eq!(from("provider.local.url = http://localhost:1234/v1/\n", Some("http://y/v1")), "http://localhost:1234/v1", "the config first");
+        assert_eq!(from("provider.local.url = \"http://localhost:1234/v1\"\n", None), "http://localhost:1234/v1", "quoted");
+        assert_eq!(from("", Some("http://127.0.0.1:8080/v1")), "http://127.0.0.1:8080/v1");
+        assert_eq!(from("provider.local.url = http://a:1/v1\nprovider.local.url = http://b:2/v1\n", None), "http://b:2/v1", "its last line, as Synaps reads it");
+        assert_eq!(from("provider.local.url = http://a:1/v1\nprovider.local.url =\n", Some("http://y/v1")), "http://y/v1", "blanked: the variable");
+    }
+
+    /// No credential in a URL she shows (her log, her bubble, the page): everything up to its
+    /// last `@`, a query and a fragment go, a password holding `/`, `?` or `#` unencoded too.
+    #[test]
+    fn a_url_shown_has_no_credentials() {
+        assert_eq!(url_shown("http://localhost:11434/v1"), "http://localhost:11434/v1");
+        assert_eq!(url_shown("http://bob:hunter2@10.0.0.2:8080/v1"), "http://10.0.0.2:8080/v1");
+        assert_eq!(url_shown("http://bob:p@ss@host"), "http://host", "an @ in the password");
+        assert_eq!(url_shown("https://tok@host/v1/?api_key=sk-x#frag"), "https://host/v1/");
+        assert_eq!(url_shown("http://bob:p/ss@host:1/v1"), "http://host:1/v1", "a / in the password");
+        assert_eq!(url_shown("http://bob:p?ss@host:1/v1"), "http://host:1/v1", "a ? in the password");
+        assert_eq!(url_shown("http://bob:p#ss@host:1/v1"), "http://host:1/v1", "a # in the password");
+        assert_eq!(url_shown("http://host/a@b"), "http://b", "an @ past the host: less shown, never more");
+        assert_eq!(url_shown(" http://h:1 "), "http://h:1");
+        assert_eq!(url_shown("localhost:11434"), "localhost:11434");
+        assert_eq!(url_shown("u:pw@localhost:11434/v1"), "localhost:11434/v1", "no scheme");
+        assert_eq!(url_shown("http://[::1]:11434/v1"), "http://[::1]:11434/v1");
+        assert!(!format!("{:?}", Some((url_shown("http://u:secret@h/v1"), Local::Off))).contains("secret"));
+        // The probe's own parse: the server as a URL parser reads it.
+        assert_eq!(url_target("http://bob:hunter2@10.0.0.2:8080/v1?k=x"), "http://10.0.0.2:8080/v1");
+        assert_eq!(url_target("http://host/a@b"), "http://host/a@b", "an @ past the host is the path's");
+    }
+
+    /// Synaps quotes its local URL whole in its errors: every URL in one goes as she shows it,
+    /// the rest of it (lines too) as it was.
+    #[test]
+    fn a_daemons_message_shows_no_credentials() {
+        let m = "can't reach local endpoint at http://bob:p/ss@10.0.0.2:8080/v1: connection refused";
+        assert_eq!(urls_shown(m), "can't reach local endpoint at http://10.0.0.2:8080/v1: connection refused");
+        assert_eq!(urls_shown("a\n  (https://t@h/v1?key=sk-1)\tb"), "a\n  (https://h/v1\tb", "a URL's query and what follows it in the word go");
+        assert_eq!(urls_shown("no url here: a@b ?x"), "no url here: a@b ?x");
+        assert!(!urls_shown("x http://u:secret@h/v1 y http://v:hunter2@g/").contains("secret") && !urls_shown("x http://u:secret@h/v1 y http://v:hunter2@g/").contains("hunter2"));
     }
 
     #[test]
@@ -548,13 +651,31 @@ mod tests {
             let (mut c, _) = l.accept().unwrap();
             let mut req = [0u8; 512];
             let n = c.read(&mut req).unwrap();
-            assert!(String::from_utf8_lossy(&req[..n]).starts_with("GET /v1/models HTTP/1.0\r\n"));
+            let req = String::from_utf8_lossy(&req[..n]).into_owned();
+            assert!(req.starts_with("GET /v1/models HTTP/1.0\r\n") && !req.contains("bob") && !req.contains("pw"), "{req}");
             c.write_all(b"HTTP/1.0 200 OK\r\n\r\n{\"data\":[{\"id\":\"qwen3:8b\"}]}").unwrap();
         });
-        assert_eq!(probe(&format!("http://127.0.0.1:{port}/v1"), Duration::from_secs(2)), Local::Up(vec!["qwen3:8b".into()]));
+        assert_eq!(probe(&format!("http://bob:pw@127.0.0.1:{port}/v1?x=1"), Duration::from_secs(2)), Local::Up(vec!["qwen3:8b".into()]), "no user:password in the request");
         t.join().unwrap();
         let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
         assert_eq!(probe(&format!("http://127.0.0.1:{free}/v1"), Duration::from_millis(500)), Local::Off);
+    }
+
+    /// An address isn't looked up, nor `localhost`; a name is, unless `DNS_MAX` lookups left
+    /// behind still hang.
+    #[test]
+    fn name_lookups_left_behind_are_bounded() {
+        use std::sync::atomic::Ordering;
+        let left = || Some(Duration::from_secs(2));
+        assert_eq!(resolve("127.0.0.1:11434", left), Some(vec!["127.0.0.1:11434".parse().unwrap()]));
+        DNS_LIVE.fetch_add(DNS_MAX, Ordering::SeqCst);
+        assert_eq!(resolve("ollama.invalid:11434", left), None, "no new lookup");
+        assert_eq!(resolve("[::1]:11434", left).map(|a| a.len()), Some(1), "an address still goes");
+        let local: Vec<std::net::SocketAddr> = vec!["127.0.0.1:11434".parse().unwrap(), "[::1]:11434".parse().unwrap()];
+        assert_eq!(resolve("localhost:11434", left), Some(local.clone()), "localhost: no lookup, so not capped");
+        assert_eq!(resolve("LocalHost:11434", left), Some(local));
+        DNS_LIVE.fetch_sub(DNS_MAX, Ordering::SeqCst);
+        assert!(resolve("localhost:11434", left).is_some_and(|a| !a.is_empty()));
     }
 
     /// One deadline for all of it: a server that never stops talking (each read in time) ends

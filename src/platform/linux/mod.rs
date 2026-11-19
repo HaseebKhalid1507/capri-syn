@@ -260,22 +260,22 @@ fn vendor_icds(vendor: &str) -> Option<String> {
     (!files.is_empty()).then(|| files.join(":"))
 }
 
-/// Whether another process has an environment variable set, not blank (his own processes:
-/// `/proc/<pid>/environ`); its value is never kept. None when that environment can't be read
+/// Another process's environment (his own processes: `/proc/<pid>/environ`), read once: the
+/// names set, not blank (no value kept), and its `LOCAL_ENDPOINT`. None when it can't be read
 /// (gone, not his).
-pub fn process_env(pid: u32, key: &str) -> Option<bool> {
+pub fn process_environ(pid: u32) -> Option<super::Environ> {
     let env = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
-    let want = format!("{key}=");
-    Some(env.split(|&b| b == 0).filter_map(|kv| kv.strip_prefix(want.as_bytes())).any(|v| !v.trim_ascii().is_empty()))
-}
-
-/// Another process's `LOCAL_ENDPOINT` (the daemon's local model server: a URL Synaps keeps as
-/// non-secret configuration; the one value read from another environment). Some(None): not set
-/// there, or blank; None: that environment can't be read.
-pub fn local_endpoint(pid: u32) -> Option<Option<String>> {
-    let env = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
-    let v = env.split(|&b| b == 0).filter_map(|kv| kv.strip_prefix(b"LOCAL_ENDPOINT=")).next_back();
-    Some(v.map(|v| String::from_utf8_lossy(v.trim_ascii()).into_owned()).filter(|v| !v.is_empty()))
+    let mut e = super::Environ::default();
+    for (k, v) in env.split(|&b| b == 0).filter_map(|kv| kv.iter().position(|&b| b == b'=').map(|i| (&kv[..i], kv[i + 1..].trim_ascii()))) {
+        let k = String::from_utf8_lossy(k).into_owned();
+        if k == "LOCAL_ENDPOINT" {
+            e.local_endpoint = (!v.is_empty()).then(|| String::from_utf8_lossy(v).into_owned());
+        }
+        if !v.is_empty() {
+            e.set.insert(k);
+        }
+    }
+    Some(e)
 }
 
 /// Hand freed heap back to the OS (after the frame decode).
@@ -495,17 +495,17 @@ mod tests {
         let pid = c.id();
         // Until its exec the child's environ is still ours: give it a moment.
         let t0 = std::time::Instant::now();
-        while process_env(pid, "SA_TEST_KEY") != Some(true) && t0.elapsed() < std::time::Duration::from_secs(3) {
+        let has = |k: &str| process_environ(pid).map(|e| e.set.contains(k));
+        while has("SA_TEST_KEY") != Some(true) && t0.elapsed() < std::time::Duration::from_secs(3) {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        assert_eq!(process_env(pid, "SA_TEST_KEY"), Some(true));
-        assert_eq!(process_env(pid, "SA_TEST_EMPTY"), Some(false), "blank is unset");
-        assert_eq!(process_env(pid, "SA_TEST_KE"), Some(false), "a whole name, not a prefix");
-        assert_eq!(local_endpoint(pid), Some(Some("http://10.0.0.2:8080/v1".into())));
+        assert_eq!(has("SA_TEST_KEY"), Some(true));
+        assert_eq!(has("SA_TEST_EMPTY"), Some(false), "blank is unset");
+        assert_eq!(has("SA_TEST_KE"), Some(false), "a whole name, not a prefix");
+        assert_eq!(process_environ(pid).and_then(|e| e.local_endpoint), Some("http://10.0.0.2:8080/v1".into()));
         c.kill().ok();
         c.wait().ok();
-        assert_eq!(process_env(pid, "SA_TEST_KEY"), None, "gone: can't be read");
-        assert_eq!(local_endpoint(pid), None);
+        assert_eq!(process_environ(pid), None, "gone: can't be read");
     }
 
     /// Her display server: Hyprland natively (a signature naming one that runs, or the desktop
