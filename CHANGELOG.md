@@ -16,6 +16,14 @@
   set it` or `tray: no NotifyIconSettings entry yet`. Later starts read her entry and say what
   `IsPromoted` is now, writing nothing. The uninstaller removes the marker.
 
+### Windows: Setup's window drags while she's being set up
+- On "Setting her up" (Synaps, her art, her daemon: minutes) the installer's window couldn't be dragged.
+  It kept painting and answering, but took no mouse: Setup disables its own windows for as long as a
+  program it started runs (so nobody clicks into a half-run step), and the steps are such programs. On
+  that page there is nothing to click (no buttons, the close box greyed), so it is enabled again there,
+  50 ms after each step starts. The short looks before the install (Synaps, the microphones: a second
+  or two each, on a click of Next) still hold it.
+
 ### Known issues
 - On a first run, Explorer can name her taskbar button with her old tooltip followed by the current
   one (`capri-syn · SPEAKING capri-syn · ONLINE`), so a screen reader hears both. Her tooltip is one

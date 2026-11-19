@@ -3,12 +3,6 @@
 # questions (and "Remove Synaps too?": yes). CI's windows-setup-wizard job, on a clean runner, uploads
 # the shots; it runs as is in the capri-win VM. Windows PowerShell 5.1 (UIAutomationClient).
 #
-# And the window itself, as a person would use it: on a normal page, and again while a step runs
-# (Synaps, her art, the daemon: it takes a while), its top-level window must have its caption and
-# answer WM_NCHITTEST with HTCAPTION there, be responsive (not hung, WM_NULL answered within 1 s), be
-# enabled, and drag: a real mouse drag by its title bar (SendInput) moves it. ("I can't drag the
-# installer": Setup disables every window of its own while ExecAndLogOutput waits.)
-#
 #   powershell -File .\packaging\windows\test-setup-wizard.ps1 -Setup capri-syn-setup-....exe -Shots DIR
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'Logs beside the checks.')]
 param([Parameter(Mandatory)] [string]$Setup, [Parameter(Mandatory)] [string]$Shots)
@@ -29,63 +23,6 @@ public static class Wiz {
     public static void Click(int x, int y) { SetCursorPos(x, y); mouse_event(0x0002, 0, 0, 0, UIntPtr.Zero); mouse_event(0x0004, 0, 0, 0, UIntPtr.Zero); }
 }
 '@
-# The wizard's window as Windows sees it: style, rect, enabled, hung, answering, hit test, a drag.
-Add-Type @'
-using System;
-using System.Runtime.InteropServices;
-using System.Threading;
-public static class WizWin {
-    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
-    [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
-    [StructLayout(LayoutKind.Sequential)] struct MOUSEINPUT { public int dx, dy; public uint mouseData, dwFlags, time; public UIntPtr dwExtraInfo; }
-    [StructLayout(LayoutKind.Sequential)] struct INPUT { public uint type; public MOUSEINPUT mi; }
-    [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
-    [DllImport("user32.dll")] static extern int GetWindowLong(IntPtr h, int i);
-    [DllImport("user32.dll")] static extern bool IsWindowEnabled(IntPtr h);
-    [DllImport("user32.dll")] static extern bool IsHungAppWindow(IntPtr h);
-    [DllImport("user32.dll")] static extern IntPtr SendMessageTimeout(IntPtr h, uint msg, IntPtr w, IntPtr l, uint flags, uint ms, out IntPtr result);
-    [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(POINT p);
-    [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr h, uint flags);
-    [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
-    [DllImport("user32.dll")] static extern uint SendInput(uint n, INPUT[] inputs, int size);
-    [DllImport("user32.dll")] static extern int GetSystemMetrics(int i);
-
-    public static int[] Rect(IntPtr h) { RECT r; GetWindowRect(h, out r); return new int[] { r.Left, r.Top, r.Right, r.Bottom }; }
-    public static int Style(IntPtr h) { return GetWindowLong(h, -16); }
-    public static bool Enabled(IntPtr h) { return IsWindowEnabled(h); }
-    public static bool Hung(IntPtr h) { return IsHungAppWindow(h); }
-    // WM_NULL: does it answer within ms?
-    public static bool Answers(IntPtr h, uint ms) { IntPtr res; return SendMessageTimeout(h, 0, IntPtr.Zero, IntPtr.Zero, 0, ms, out res) != IntPtr.Zero; }
-    // WM_NCHITTEST at a screen point: HTCAPTION is 2; -1: no answer.
-    public static int HitTest(IntPtr h, int x, int y) {
-        IntPtr res;
-        IntPtr lp = new IntPtr(((y & 0xFFFF) << 16) | (x & 0xFFFF));
-        if (SendMessageTimeout(h, 0x84, IntPtr.Zero, lp, 0, 1000, out res) == IntPtr.Zero) return -1;
-        return (int)res.ToInt64();
-    }
-    // The top-level window that is under a screen point.
-    public static IntPtr RootAt(int x, int y) { POINT p; p.X = x; p.Y = y; IntPtr w = WindowFromPoint(p); return w == IntPtr.Zero ? w : GetAncestor(w, 2); }
-    public static void MoveTo(IntPtr h, int x, int y) { SetWindowPos(h, IntPtr.Zero, x, y, 0, 0, 0x0001 | 0x0004 | 0x0010); } // NOSIZE | NOZORDER | NOACTIVATE
-    static bool Mouse(int x, int y, uint buttons) {
-        int w = GetSystemMetrics(0), h = GetSystemMetrics(1);
-        INPUT[] a = new INPUT[1];
-        a[0].type = 0; // INPUT_MOUSE
-        a[0].mi.dx = (int)((long)x * 65535 / (w - 1));
-        a[0].mi.dy = (int)((long)y * 65535 / (h - 1));
-        a[0].mi.dwFlags = buttons | 0x8000 | 0x0001; // + ABSOLUTE | MOVE
-        return SendInput(1, a, Marshal.SizeOf(typeof(INPUT))) == 1;
-    }
-    // A real drag: the pointer to (x, y), the left button down, a move of (dx, dy) in ten steps, up.
-    public static bool Drag(int x, int y, int dx, int dy) {
-        bool ok = Mouse(x, y, 0); Thread.Sleep(200);
-        ok &= Mouse(x, y, 0x0002); Thread.Sleep(200);
-        for (int i = 1; i <= 10; i++) { ok &= Mouse(x + dx * i / 10, y + dy * i / 10, 0); Thread.Sleep(40); }
-        Thread.Sleep(150);
-        ok &= Mouse(x + dx, y + dy, 0x0004); Thread.Sleep(400);
-        return ok;
-    }
-}
-'@
 [void][Wiz]::SetProcessDPIAware()
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $Setup = (Resolve-Path $Setup).Path
@@ -99,6 +36,8 @@ $n = 0
 # Shots: spike's tools/shoot-win.ps1 (#82), dot-sourced: a window (by title glob or process),
 # cropped (+ Pad), numbered in the order taken.
 . (Join-Path $root 'tools\shoot-win.ps1')
+# The wizard's window as a person uses it (caption, answering, enabled, dragging): test-wizard-window.ps1.
+. (Join-Path $PSScriptRoot 'test-wizard-window.ps1')
 function Get-Shot([string]$Name, [string]$Title = '', [int]$ProcessId = 0, [int]$Pad = 12) {
     $script:n++
     $f = Join-Path $Shots ('{0:D2}-{1}.png' -f $script:n, $Name)
@@ -117,10 +56,10 @@ function Wait-Window([string]$Title, [int]$Secs = 60) {
 }
 # Every name shown in a window (its page's caption among them).
 # Trimmed: a heading's name can end in a line break (the finish page's does).
-# A window that closes under the read (the uninstall's questions do) says nothing: not an error.
 function Get-WindowText($W) {
+    # A window that closes under the read (the uninstall's questions do) says nothing: not an error.
     try { @($W.FindAll($Tree::Descendants, [Windows.Automation.Condition]::TrueCondition) | ForEach-Object { "$($_.Current.Name)".Trim() } | Where-Object { $_ }) }
-    catch [System.Runtime.InteropServices.COMException], [Windows.Automation.ElementNotAvailableException] { @() }
+    catch { @() }
 }
 # A button by its caption, whatever UI Automation calls it (a VCL button can come through as a pane):
 # Invoke when it has that, else a real click on its middle.
@@ -148,64 +87,6 @@ function Wait-Page($W, [string]$Caption, [int]$Secs = 120) {
     throw "the wizard never showed '$Caption' (it shows: $((Get-WindowText $W) -join ' | '))"
 }
 
-# The wizard's window, as Windows sees it (never UI Automation's word for it): one look at its caption,
-# whether it answers, and, with -Drag, a real mouse drag by its title bar (SendInput: down, move, up;
-# then it is put back where it was, for the shots).
-function Get-WindowState([IntPtr]$H, [switch]$Drag) {
-    $r = [WizWin]::Rect($H)
-    $x = [int](($r[0] + $r[2]) / 2)
-    # The first point down the title bar that answers WM_NCHITTEST with HTCAPTION (2).
-    $capY = $null
-    for ($y = $r[1] + 4; $y -lt $r[1] + 80 -and -not $capY; $y += 3) { if ([WizWin]::HitTest($H, $x, $y) -eq 2) { $capY = $y } }
-    $o = [ordered]@{
-        Caption = (([WizWin]::Style($H) -band 0xC00000) -eq 0xC00000); HitCaption = [bool]$capY
-        Enabled = [WizWin]::Enabled($H); Hung = [WizWin]::Hung($H); Answers = [WizWin]::Answers($H, 1000)
-        Moved = $null; Why = ''; From = "$($r[0]),$($r[1])"; To = ''
-    }
-    if ($Drag) {
-        if (-not $capY) { $o.Moved = $false; $o.Why = 'no point on the title bar answers HTCAPTION' }
-        elseif ([WizWin]::RootAt($x, $capY) -ne $H) { $o.Moved = $false; $o.Why = 'another window is over the title bar' }
-        else {
-            if (-not [WizWin]::Drag($x, $capY, 60, 40)) { $o.Why = 'SendInput took fewer events than sent' }
-            $r2 = [WizWin]::Rect($H)
-            $o.To = "$($r2[0]),$($r2[1])"
-            $o.Moved = ($r2[0] - $r[0]) -ge 30 -and ($r2[1] - $r[1]) -ge 20
-            [WizWin]::MoveTo($H, $r[0], $r[1])
-            Start-Sleep -Milliseconds 300
-        }
-    }
-    [pscustomobject]$o
-}
-function Format-WindowState($S) {
-    "caption=$($S.Caption) HTCAPTION=$($S.HitCaption) enabled=$($S.Enabled) hung=$($S.Hung) answers=$($S.Answers)" +
-    $(if ($null -ne $S.Moved) { " drag: $($S.From) -> $($S.To) moved=$($S.Moved) $($S.Why)" })
-}
-# On a page: caption, responsive, enabled, and a drag that moves it.
-function Test-WizardWindow([IntPtr]$H, [string]$Where) {
-    $st = Get-WindowState $H -Drag
-    Write-Host "  $Where`: $(Format-WindowState $st)"
-    Check ($st.Caption -and $st.HitCaption) "$Where`: the window has its caption (WS_CAPTION) and its title bar answers WM_NCHITTEST with HTCAPTION"
-    Check ((-not $st.Hung) -and $st.Answers) "$Where`: the window is responsive (not hung, WM_NULL answered within 1 s)"
-    Check $st.Enabled "$Where`: the window is enabled"
-    Check ([bool]$st.Moved) "$Where`: dragging it by its title bar moves it ($($st.From) -> $($st.To))"
-}
-# The steps Setup ran, from its own log ("step NAME: ARGS" opens one, "step NAME: exit N" closes it).
-function Get-StepRuns {
-    $runs = [System.Collections.Generic.List[object]]::new()
-    $lines = try { @(Get-Content -LiteralPath $log -ErrorAction Stop) } catch { @() }
-    foreach ($l in $lines) {
-        if ($l -notmatch '^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\S*\s+step ([\w-]+): (.*)$') { continue }
-        $at = [datetime]$Matches[1]; $name = $Matches[2]; $rest = $Matches[3]
-        if ($rest -match '^exit (-?\d+)') {
-            $code = $Matches[1]
-            $open = $runs | Where-Object { $_.Name -eq $name -and -not $_.End } | Select-Object -Last 1
-            if ($open) { $open.End = $at; $open.Exit = $code }
-        } else { $runs.Add([pscustomobject]@{ Name = $name; Start = $at; End = $null; Exit = $null }) }
-    }
-    $runs
-}
-function Get-StepNow { Get-StepRuns | Where-Object { -not $_.End } | Select-Object -Last 1 }
-
 # The wizard, as he gets it: double-clicked, every default left as it is.
 $log = Join-Path ([IO.Path]::GetTempPath()) "capri-setup-wizard-$PID.log"
 # The shots' desktop quiet (the runner's console minimized, a flat backdrop), before the wizard.
@@ -231,8 +112,6 @@ while (-not $w -and ((Get-Date) - $t0).TotalSeconds -lt 60) {
     if (-not $w) { Start-Sleep -Milliseconds 300 }
 }
 if (-not $w) { throw "no window '^Setup - capri-syn' in 60 s" }
-$h = [IntPtr][int]$w.Current.NativeWindowHandle
-Write-Host "  the wizard's window: $h, class $($w.Current.ClassName), '$($w.Current.Name)'"
 Check ($askedAdmin -eq $elevated) "it asks when run as administrator, and only then (elevated: $elevated, asked: $askedAdmin)"
 foreach ($page in @(
         @('^Select Destination Location$', 'destination', 'Next'),
@@ -246,48 +125,17 @@ foreach ($page in @(
     if ($page[1] -eq 'her-brain') { Check (($t -match 'Install Synaps \(her brain, open source\)').Count -gt 0) 'her brain page offers to install Synaps' }
     if ($page[1] -eq 'her-voice') { Check (($t -match '^Talk to her$').Count -gt 0 -and ($t -match 'Read replies aloud').Count -gt 0) 'her voice page: talk, microphone, "hey Capri", replies aloud' }
     if ($page[1] -eq 'her-pack') { Check (($t -match 'Download her art').Count -gt 0) 'her pack page offers the download' }
-    # A normal page: it has its caption, answers, and drags.
-    if ($page[1] -in 'destination', 'ready') { Test-WizardWindow $h "the $($page[1]) page" }
+    if ($page[1] -in 'destination', 'ready') { Test-WizardWindow $w "the $($page[1]) page" }
     Invoke-Button $w $page[2]
 }
 # The steps, on their progress page (Synaps, her art, the daemon), then the finish page.
 $null = Wait-Page $w '^Setting her up$' 180
 Start-Sleep -Seconds 3
 Get-Shot 'setting-her-up' -Title 'Setup - capri-syn*'
-# The steps are running (Setup's log says which): the same look again and again, with a drag in the
-# first four, until ten looks were taken inside one step each or the finish page is up.
-$during = [System.Collections.Generic.List[object]]::new()
-$drags = 0
-$t0 = Get-Date
-while ($during.Count -lt 10 -and ((Get-Date) - $t0).TotalSeconds -lt 1200) {
-    if (@(Get-WindowText $w) -match '^Completing the capri-syn Setup Wizard$') { break }
-    $run = Get-StepNow
-    if (-not $run) { Start-Sleep -Milliseconds 300; continue }
-    $drag = $drags -lt 4
-    $st = Get-WindowState $h -Drag:$drag
-    if ($drag) { $drags++ }
-    $now = Get-StepNow
-    # Counted only when the same step was running before and after the look.
-    if ($now -and $now.Name -eq $run.Name -and $now.Start -eq $run.Start) {
-        Add-Member -InputObject $st -NotePropertyName Step -NotePropertyValue $run.Name
-        $during.Add($st)
-        Write-Host "  while step '$($run.Name)' runs (look $($during.Count)): $(Format-WindowState $st)"
-    }
-}
-$stepNames = @($during | ForEach-Object { $_.Step } | Select-Object -Unique)
-Check ($during.Count -ge 3) "the window was looked at $($during.Count) times while a step ran ($($stepNames -join ', ')): at least 3"
-$bad = @($during | Where-Object { -not ($_.Caption -and $_.HitCaption) })
-Check ($bad.Count -eq 0) "while a step runs: the window has its caption (WS_CAPTION) and its title bar answers WM_NCHITTEST with HTCAPTION ($($during.Count - $bad.Count) of $($during.Count) looks)"
-$bad = @($during | Where-Object { $_.Hung -or -not $_.Answers })
-Check ($bad.Count -eq 0) "while a step runs: the window is responsive (not hung, WM_NULL answered within 1 s) ($($during.Count - $bad.Count) of $($during.Count) looks)"
-$bad = @($during | Where-Object { -not $_.Enabled })
-Check ($bad.Count -eq 0) "while a step runs: the window is enabled ($($during.Count - $bad.Count) of $($during.Count) looks)"
-$dragged = @($during | Where-Object { $null -ne $_.Moved })
-$bad = @($dragged | Where-Object { -not $_.Moved })
-Check ($dragged.Count -gt 0 -and $bad.Count -eq 0) "while a step runs: dragging it by its title bar moves it ($($dragged.Count - $bad.Count) of $($dragged.Count) drags did)"
+Test-WizardDuringStep $w
 $t = Wait-Page $w '^Completing the capri-syn Setup Wizard$' 1200
 Get-Shot 'finish' -Title 'Setup - capri-syn*'
-foreach ($r in Get-StepRuns) { Write-Host ("  step {0}: {1} s (exit {2})" -f $r.Name, $(if ($r.End) { [int]($r.End - $r.Start).TotalSeconds } else { '?' }), $r.Exit) }
+Write-StepTime
 Check (($t -match 'Synaps \d+\.\d+\.\d+, her brain: installed').Count -gt 0) 'the finish page: Synaps installed'
 Check (($t -match 'Her art: downloaded, built and checked').Count -gt 0) 'the finish page: her art'
 Check (($t -match 'Its daemon runs').Count -gt 0) 'the finish page: the daemon'
