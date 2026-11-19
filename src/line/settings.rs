@@ -440,7 +440,8 @@ pub fn brain_hint(p: &Prefs, sel: usize, other: bool) -> &'static str {
     let rows = brain_rows(p, other);
     let row = rows[sel.min(rows.len() - 1)];
     let inside = other && matches!(row, BrainRow::Account(_) | BrainRow::Key);
-    let on_key = p.mind.provider().is_some_and(|q| q.kind == Kind::Key);
+    // On a key service with its key (`keys_set`), ⏎ steps on; on one without, it's a switch.
+    let on_key = p.mind.provider().is_some_and(|q| keys_set(&p.mind).contains(&q));
     match (row, brain_key("enter", sel, p, other).1) {
         (BrainRow::Model, _) if step_model(p, 1) != Act::Nothing => "↑↓ pick · ←→ change · esc back",
         (BrainRow::Model, _) => "↑↓ pick · esc back",
@@ -1312,6 +1313,7 @@ pub fn brain_line(m: &provider::Status) -> &'static str {
     match m.local.as_ref().map(|l| &l.1) {
         _ if !m.here && !m.ok() => "My brain runs on another machine. Sign in there, then say hi.",
         _ if m.none() => "Give me a brain and I'll talk back.",
+        _ if local && m.stale_url() => "Synaps is still on its old local URL. Run `synaps daemon reload`, then ask me again.",
         _ if m.ok() => "That's what I think with. Swap it any time.",
         Some(provider::Local::Off) if local && ollama => "Ollama's asleep. Start it and I'll look again.",
         Some(provider::Local::Off) if local => "My local server's asleep. Start it and I'll look again.",
@@ -1625,6 +1627,12 @@ mod tests {
         on_it.mind.signed.clear();
         assert_eq!(brain_key("enter", at, &on_it, true).1, Act::Nothing, "a daemon on another machine");
         assert_eq!(brain_hint(&on_it, at, true), "↑↓ pick · ← close · esc back");
+        // On a key service with no key, a Groq key set: ⏎ is a switch, not a step.
+        let mut keyless = Prefs { mind: mind("cerebras/llama3.1-8b", Some(false)), ..prefs() };
+        keyless.mind.signed.push("groq");
+        let at = brain_rows(&keyless, true).iter().position(|r| *r == BrainRow::Key).unwrap();
+        assert_eq!(brain_key("enter", at, &keyless, true).1, Act::Pref(Pref::Model("groq/llama-3.3-70b-versatile")));
+        assert_eq!(brain_hint(&keyless, at, true), "↑↓ pick · ⏎ use it · ← close · esc back");
     }
 
     /// A look that adds or drops a row under OTHER (Gemini's client id found, a login on file)
@@ -1686,6 +1694,17 @@ mod tests {
         assert_eq!(brain_line(&p.mind), "That model isn't on this machine.");
         p.mind.local = Some(("http://localhost:11434/v1".into(), Local::Up(vec!["qwen3:8b".into()])));
         assert!(p.mind.ok());
+        // The daemon failed on another URL (its config changed after it started): the way out.
+        let mut stale = p.clone();
+        stale.mind.tried = Some("http://localhost:1234/v1".into());
+        assert!(!stale.mind.ok());
+        assert_eq!(brain_line(&stale.mind), "Synaps is still on its old local URL. Run `synaps daemon reload`, then ask me again.");
+        stale.mind.tried = Some("http://localhost:11434/v1".into());
+        assert_eq!(brain_line(&stale.mind), "That's what I think with. Swap it any time.", "the same URL: its server came back");
+        stale.mind.model = Some("claude-sonnet-4-6".into());
+        stale.mind.signed_in = Some(true);
+        stale.mind.tried = Some("http://localhost:1234/v1".into());
+        assert_eq!(brain_line(&stale.mind), "That's what I think with. Swap it any time.", "not her brain now");
         let model = brain_rows(&p, false).len() - 1;
         assert_eq!(brain_key("right", model, &p, false).1, Act::Nothing, "one model: nothing to step to");
         assert_eq!(brain_word(&Status::default()), "OFFLINE");

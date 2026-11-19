@@ -693,6 +693,7 @@ impl Avatar {
             None
         };
         m.here = s.link.local();
+        m.tried = s.link.local_tried().map(str::to_string);
         m
     }
 

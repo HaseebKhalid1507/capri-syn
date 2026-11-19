@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Her brain, the last nits (Settings PR 6)
+- A local URL changed while the daemon runs: Synaps reads it at its start, so it keeps trying the
+  old one. When its error names another URL than the one she shows, Settings ▸ Brain drops the ✓
+  and says `Synaps is still on its old local URL. Run synaps daemon reload, then ask me again.`
+  (until she answers or the daemon reconnects). docs/UNDER-THE-HOOD.md: set the URL, then
+  `synaps daemon reload`.
+- The probe never sends a `user:pa` (an unencoded `/`, `?` or `#` in a password) to DNS; on
+  `localhost` the connect's time is split between 127.0.0.1 and ::1 (a refused one on Windows
+  took it all).
+- A URL she shows stops at a query's first `?#&=;` after its last `@` (`?u=me@x&key=sk` showed
+  `x&key=sk`).
+- API KEY's hint on a key service with no key, another set: `⏎ use it` (it switches), not
+  `⏎ the next key`.
+
 ### Her brain, last follow-ups (Settings PR 5)
 - API KEY acts on what it says: with keys set here, ⏎ switches her to one (`⏎ use it`: the first;
   on one of several, `IN USE · GROQ +1` and `⏎ the next key`); on the only one, or none, it copies

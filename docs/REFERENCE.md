@@ -99,8 +99,13 @@ Reference for `synaps-avatar`, the crate behind capri-syn. The [README](../READM
   else the daemon's `LOCAL_ENDPOINT` (Windows: hers), else Ollama's port; one deadline for the
   lookup, the connect and the reply; asked every 5 s while it's off or lacks her model, less often
   while it answers the same, to every 40 s, and at once when a Settings page opens or the URL
-  changes; never with the URL's `user:password@`. Her log, her bubble and the Line show a URL,
-  Synaps' errors' too, without anything up to its last `@`, a `?query` or a `#fragment`), OTHER
+  changes; never with the URL's `user:password@`, and a host that isn't an address or a plain
+  name (a `user:pa` a `/` in a password leaves) is never looked up; `localhost` without a lookup,
+  127.0.0.1 then ::1, the connect's time split between them. Her log, her bubble and the Line
+  show a URL, Synaps' errors' too, without anything up to its last `@`, then from its first
+  `?#&=;` on. When the daemon's own error names another local URL than hers, its config changed
+  after it started: no ✓, and she says `Synaps is still on its old local URL. Run synaps daemon
+  reload, then ask me again.` until it answers or reconnects), OTHER
   (opened in place: ChatGPT, Copilot, Gemini, Grok, Kimi, Muse, then API KEY; Gemini only with
   `SYNAPS_GOOGLE_GEMINI_CLIENT_ID` set, which Synaps 0.12 needs to sign in to it, or a Gemini login
   on file), and, once she has a brain, MODEL: her provider's few models, written to `settings.toml`
