@@ -14,7 +14,8 @@ trigger `event_auto`, as the real daemon's event turns do; a submit's turn is `u
 turn with trigger T. `resolve`: the pending prompts are answered elsewhere (they go).
 `nobrain`: every submit fails as a Synaps with no model credentials does (its exact error text);
 `fail TEXT`: every submit fails with TEXT; `brain`: replies again.
-FAKE_DAEMON_VERSION and FAKE_MODEL set what the Welcome and the attach say (default 0.0.0-fake, fake).
+FAKE_DAEMON_VERSION and FAKE_MODEL set what the Welcome and the attach say (default: the Synaps her
+installer pins, installer/manifest's synaps_pin, so no FAKE string reaches a shot; and fake).
 A `set` (her persona, `[session] model`) is applied to the session's view and answered as the daemon
 does (`setting_changed`, ok, the new view): her model shows as set. `model M`: another client's
 `/model M` (his TUI's): the view changed, broadcast as the daemon does an engine command's change
@@ -43,7 +44,17 @@ if os.environ.get("FAKE_HISTORY"):
     ATTACHED["replay"] = []
 MODEL = os.environ.get("FAKE_MODEL", "fake")
 VIEW = dict(ATTACHED.get("view") or {}, **({"model": MODEL} if "FAKE_MODEL" in os.environ else {}))
-WELCOME = {"type": "welcome", "protocol_version": 3, "daemon_version": os.environ.get("FAKE_DAEMON_VERSION", "0.0.0-fake"), "pid": os.getpid(), "profile": None,
+# The Synaps her installer pins (installer/manifest): what she'd really meet.
+def _synaps_pin():
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "installer", "manifest"), encoding="utf-8") as f:
+            return next((l.split("=", 1)[1].strip() for l in f if l.startswith("synaps_pin=")), "0.0.0-fake")
+    except OSError:
+        return "0.0.0-fake"
+
+
+SYNAPS_PIN = _synaps_pin()
+WELCOME = {"type": "welcome", "protocol_version": 3, "daemon_version": os.environ.get("FAKE_DAEMON_VERSION") or SYNAPS_PIN, "pid": os.getpid(), "profile": None,
            "sessions": [{"id": SID, "model": MODEL, "lifecycle": "live", "name": "capri"}],
            "progressive_tool_disclosure": False, "generation": 1, "features": []}
 attached = []          # live session connections (socket, lock)

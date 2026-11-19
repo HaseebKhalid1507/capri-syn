@@ -6,7 +6,8 @@
 # see this repo's runs can download it): only the fakes' canned words, never anything private.
 #
 # Run it: Actions → shots → Run workflow (a ref: a branch, tag or sha; the sets), or put the
-# `shots` label on a PR (its head; `shots:settings`, `shots:header` or `shots:brain` for one set only).
+# `shots` label on a PR (its head; `shots:settings`, `shots:header`, `shots:brain` or `shots:tray` for
+# one set only). The tray set isn't in the defaults: it restarts Explorer.
 name: shots
 
 on:
@@ -17,7 +18,7 @@ on:
         required: true
         default: main
       sets:
-        description: "Scene sets, comma-separated: settings, header, brain"
+        description: "Scene sets, comma-separated: settings, header, brain, tray (restarts Explorer)"
         required: true
         default: settings,header,brain
       hidpi:
@@ -85,8 +86,10 @@ jobs:
             $labels = @($env:LABELS | ConvertFrom-Json)
             $only = @($labels | Where-Object { $_ -like 'shots:*' } | ForEach-Object { $_.Substring(6) })
             $sets = if ($only) { $only -join ',' } else { 'settings,header,brain' }
-            $hidpi = 'settings/on,settings/empty,header/hf-470,header/prompt-470,brain/first'
+            $hidpi = 'settings/on,settings/empty,header/hf-470,header/prompt-470,brain/first,tray/menu'
           }
+          # Only the 150% takes of the sets shot (none: that step is skipped, not "no shots at all").
+          $hidpi = @($hidpi -split ',' | Where-Object { $_ -and ($_ -split '/')[0] -in ($sets -split ',') }) -join ','
           $sha = git -C app rev-parse HEAD
           "sets=$sets" >> $env:GITHUB_OUTPUT
           "hidpi=$hidpi" >> $env:GITHUB_OUTPUT
