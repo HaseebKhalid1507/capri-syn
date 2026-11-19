@@ -8409,11 +8409,12 @@ mod menu_tests {
         // The click right of her tag: under it (12 px) would cover her face, so it goes beside
         // the face at once, still under the tag: never placed on the face to hop a frame later.
         let tag = Some((150.0, 200.0, 260.0, 224.0));
-        let face = Some((190.0, 240.0, 240.0, 280.0));
+        let fb = (190.0, 240.0, 240.0, 280.0);
+        let face = Some(fb);
         let (x, y) = menu_at((180.0, 210.0), SIZE, (0.0, 400.0), (0.0, 391.0), face, tag);
         assert_eq!((x, y), (248.0, 236.0));
         let over = |x: f32, y: f32, b: (f32, f32, f32, f32)| x < b.2 && x + SIZE.0 > b.0 && y < b.3 && y + SIZE.1 > b.1;
-        assert!(!over(x, y, face.unwrap()) && !over(x, y, (150.0, 200.0, 260.0, 236.0)));
+        assert!(!over(x, y, fb) && !over(x, y, (150.0, 200.0, 260.0, 236.0)));
         // No side clear of both: under her face, clear of the tag.
         assert_eq!(menu_at((180.0, 210.0), SIZE, (150.0, 200.0), (0.0, 391.0), face, tag), (180.0, 288.0));
     }
