@@ -1,6 +1,6 @@
 //! The contract every backend passes, written once: the scenarios the core relies on (perch on
-//! a window, the window moves / hides / comes back / closes, monitor switch and work areas,
-//! fullscreen, the drag's pointer, her body's moves and the teleport's effect layers, shapes,
+//! a window, a click-through overlay that hides none, the window moves / hides / comes back /
+//! closes, monitor switch and work areas, fullscreen, the drag's pointer, her body's moves and the teleport's effect layers, shapes,
 //! her input region kept apart from her moves, the keyboard, the pointer watcher). `fake.rs` runs it in every `cargo test` (with and
 //! without target events); a real backend runs it on a test display (X11: `x11/testkit.rs`
 //! on Xvfb; Hyprland: `hypr/testkit.rs` in the `tools/wlrig` sandbox). A backend is done when it
@@ -54,6 +54,12 @@ pub trait Driver {
     /// after his input sees it: `Caps::keyboard_on_input`). False: this rig can't click.
     fn his_click(&mut self, _s: WinId) -> bool {
         false
+    }
+    /// A window over the whole first monitor, above every other, that clicks pass through (an
+    /// overlay: a touch keyboard's handwriting canvas, a game overlay). None: this rig can't make
+    /// one; the scenario then passes.
+    fn overlay(&mut self) -> Option<WinId> {
+        None
     }
     /// The login session as the session manager would report it (locked, asleep, ...).
     /// False: this rig can't (a real session isn't the test's to lock); the scenario then
@@ -116,6 +122,7 @@ async fn scenarios<D: Driver>(os: &Os, d: &mut D, stop: bool) -> Result<Vec<(&'s
         };
     }
     scenario!("stack-and-seats", stack_and_seats);
+    scenario!("overlay", overlay);
     scenario!("perch-follow", perch_follow);
     scenario!("perch-burst", perch_burst);
     scenario!("perch-space", perch_space);
@@ -203,6 +210,35 @@ async fn stack_and_seats<D: Driver>(os: &Os, d: &mut D, _rx: &Receiver<WatchEven
     let fx = d.fx_rects();
     ensure!(fx.is_empty(), "the effect layer stayed up: {fx:?}");
     ensure!(os.stack().iter().all(|(r, _)| ![a, b, c].contains(&r.id)), "closed windows still listed");
+    Ok(())
+}
+
+/// A click-through overlay over the whole monitor is no window: not in the stack, and the window
+/// under it keeps its seat, its whole top edge open (Windows: the touch keyboard's handwriting
+/// canvas took every seat on a monitor).
+async fn overlay<D: Driver>(os: &Os, d: &mut D, _rx: &Receiver<WatchEvent>) -> Result<()> {
+    let a = d.open(rect(100, 300, 500, 300), true);
+    let Some(o) = d.overlay() else {
+        d.close(a);
+        d.settle().await;
+        return Ok(());
+    };
+    d.settle().await;
+    let checked = hides_none(os, a, o);
+    d.close(o);
+    d.close(a);
+    d.settle().await;
+    checked
+}
+
+/// Overlay `o` isn't in the stack, and `a` under it is a seat with its whole top edge open.
+fn hides_none(os: &Os, a: WinId, o: WinId) -> Result<()> {
+    let (stack, seat): (Vec<WinRect>, Vec<bool>) = os.stack().into_iter().unzip();
+    ensure!(stack.iter().all(|r| r.id != o), "the overlay is in the stack");
+    let i = stack.iter().position(|r| r.id == a).ok_or(anyhow!("A not listed"))?;
+    ensure!(seat[i], "A is no seat under the overlay");
+    let open = crate::edges::exposed_spans(&stack, i);
+    ensure!(open == [(stack[i].x, stack[i].right())], "A's top edge isn't all open under the overlay: {open:?}");
     Ok(())
 }
 

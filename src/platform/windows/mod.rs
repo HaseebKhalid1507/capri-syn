@@ -245,6 +245,10 @@ const SHELL_EXES: &[&str] = &[
     "ShellExperienceHost.exe",
     "ShellHost.exe",
     "TextInputHost.exe",
+    // The touch keyboard and handwriting panel's service (`Common Files\microsoft shared\ink`).
+    // Its Shell Handwriting Canvas is a topmost tool window the size of the primary monitor,
+    // click-through (`see_through` leaves it out of `windows`); it starts again on demand.
+    "TabTip.exe",
     "LockApp.exe",
 ];
 
@@ -286,16 +290,44 @@ fn is_shell_ui(h: HWND) -> bool {
     (tool || SHELL_CLASSES.contains(&class.as_str())) && shell_ui(&class, tool, &exe_of(h))
 }
 
-/// It covers its whole monitor (a borderless full screen). Tool windows never count (overlays,
-/// the shell's hosts).
-fn covers_monitor(h: HWND) -> bool {
-    if ex_style(h) & WS_EX_TOOLWINDOW.0 != 0 {
+/// He sees through it and clicks through it (`ex`: its extended style): layered and
+/// `WS_EX_TRANSPARENT`, which the system's hit-testing passes by (DWM's best practices: a
+/// top-level window is click-through only with both; `WS_EX_TRANSPARENT` alone still takes
+/// clicks), or layered at alpha 0 (`SetLayeredWindowAttributes`: not drawn, and clicked
+/// through). Overlays are made this way: the touch keyboard's handwriting canvas (TabTip.exe:
+/// the whole primary monitor, topmost, up while its service runs; on Haseeb's box, 2026-11-19,
+/// it left her no seat on any window of that monitor), a GPU vendor's or a game launcher's
+/// in-game overlay, a screen recorder's frame. Never a window to sit on or be under.
+fn see_through(h: HWND, ex: u32) -> bool {
+    if ex & WS_EX_LAYERED.0 == 0 {
         return false;
     }
-    frame_rect(h).zip(monitor_info(unsafe { MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST) })).is_some_and(|(r, mi)| {
-        let m = mi.monitorInfo.rcMonitor;
-        r.left <= m.left && r.top <= m.top && r.right >= m.right && r.bottom >= m.bottom
-    })
+    if ex & WS_EX_TRANSPARENT.0 != 0 {
+        return true;
+    }
+    // A window drawn with `UpdateLayeredWindow` has no attributes to read: not this.
+    let (mut alpha, mut flags) = (255u8, LAYERED_WINDOW_ATTRIBUTES_FLAGS(0));
+    unsafe { GetLayeredWindowAttributes(h, None, Some(&raw mut alpha), Some(&raw mut flags)) }.is_ok() && flags.contains(LWA_ALPHA) && alpha == 0
+}
+
+/// `r` covers all of monitor `m` (screen px).
+fn spans(r: &RECT, m: &RECT) -> bool {
+    r.left <= m.left && r.top <= m.top && r.right >= m.right && r.bottom >= m.bottom
+}
+
+/// Every monitor's rect (screen px).
+fn monitor_rects() -> Vec<RECT> {
+    hmonitors().into_iter().filter_map(monitor_info).map(|mi| mi.monitorInfo.rcMonitor).collect()
+}
+
+/// It covers its whole monitor (a borderless full screen). Tool windows never count (overlays,
+/// the shell's hosts), nor one he clicks through (`see_through`).
+fn covers_monitor(h: HWND) -> bool {
+    let ex = ex_style(h);
+    if ex & WS_EX_TOOLWINDOW.0 != 0 || see_through(h, ex) {
+        return false;
+    }
+    frame_rect(h).zip(monitor_info(unsafe { MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST) })).is_some_and(|(r, mi)| spans(&r, &mi.monitorInfo.rcMonitor))
 }
 
 fn monitor_info(m: HMONITOR) -> Option<MONITORINFOEXW> {
@@ -817,6 +849,9 @@ pub struct Win32 {
     asked_at: Mutex<Vec<(Role, [f32; 4])>>,
     /// The thread that resizes her GPUI windows (`place_later`).
     later: Mutex<Option<Placer>>,
+    /// Windows not his found covering a whole monitor, by id: each is said in her log once
+    /// (`note_cover`).
+    covers_seen: Mutex<HashSet<WinId>>,
 }
 
 thread_local! {
@@ -904,6 +939,7 @@ impl Win32 {
             fx: Mutex::new(Vec::new()),
             asked_at: Mutex::new(Vec::new()),
             later: Mutex::new(None),
+            covers_seen: Mutex::new(HashSet::new()),
         })
     }
 
@@ -913,6 +949,35 @@ impl Win32 {
 
     fn mine(&self, h: HWND) -> bool {
         self.mine.lock().is_ok_and(|m| m.contains(&id(h)))
+    }
+
+    /// `h`, not his window (a tool window, one never activated, or one he clicks through), covers
+    /// a whole monitor (`r`, screen px): said once per window, with what she makes of it. Kept, it
+    /// hides every window under it from her (TabTip's handwriting canvas did, before
+    /// `see_through`): the next one shows in her log.
+    fn note_cover(&self, h: HWND, r: &RECT, through: bool) {
+        {
+            let Ok(mut seen) = self.covers_seen.lock() else { return };
+            // Overlays started again get new ids: a long day never grows this past 256.
+            if seen.len() >= 256 {
+                seen.clear();
+            }
+            if !seen.insert(id(h)) {
+                return;
+            }
+        }
+        let what = if through { "click-through: left out" } else { "kept: no window under it is a seat" };
+        elog!(
+            "synaps-avatar: windows: {} of {} (0x{:x}, ex 0x{:x}) covers a whole monitor ({},{} {}x{}): {what}",
+            class_name(h),
+            exe_of(h),
+            id(h),
+            ex_style(h),
+            r.left,
+            r.top,
+            r.right - r.left,
+            r.bottom - r.top
+        );
     }
 
     /// Make `h` one of her surfaces: a bare topmost tool window. Click-through surfaces (body,
@@ -1100,12 +1165,13 @@ impl Win32 {
     /// `active_window` with `h` in front. Her tray's window counts as the shell's UI: it takes
     /// the foreground for its menu (`tray::show_menu`), so a pick there that opens the Line
     /// (SETTINGS) would else make it his last window, and Esc would hand his keyboard to a
-    /// hidden 0×0 window.
+    /// hidden 0×0 window. A window he clicks through (`see_through`: an overlay given the
+    /// foreground) isn't his either.
     fn active_of(&self, h: HWND) -> Option<WinId> {
         if h.0.is_null() || is_shell(h) {
             return None;
         }
-        if !is_shell_ui(h) && !tray::is_tray(h) {
+        if !is_shell_ui(h) && !tray::is_tray(h) && !see_through(h, ex_style(h)) {
             self.last_app.store(id(h), Ordering::Relaxed);
             return Some(id(h));
         }
@@ -1190,20 +1256,29 @@ impl Desktop for Win32 {
         (dm.dmDisplayFrequency > 1).then_some(dm.dmDisplayFrequency as f32)
     }
 
-    /// Showing top-level windows bottom → top, hers and the desktop's left out. Managed: an
-    /// app's window (no tool windows: menus, tooltips, the taskbar, pop-up toasts).
+    /// Showing top-level windows bottom → top, hers, the desktop's and those he clicks through
+    /// (`see_through`: overlays) left out. Managed: an app's window (no tool windows: menus,
+    /// tooltips, the taskbar, pop-up toasts). One not his that covers a whole monitor is said in
+    /// her log once (`note_cover`).
     fn windows(&self) -> Vec<Win> {
+        // Read once a call, and only if a window not his is there to check.
+        let mons: std::cell::OnceCell<Vec<RECT>> = std::cell::OnceCell::new();
         let mut out: Vec<Win> = toplevels()
             .into_iter()
             .filter(|&h| showing(h) && !self.mine(h) && !is_shell(h) && on_current_desktop(h))
             .filter_map(|h| {
-                let r = root_rect(&frame_rect(h)?, id(h));
+                let fr = frame_rect(h)?;
+                let r = root_rect(&fr, id(h));
                 if r.w <= 0 || r.h <= 0 {
                     return None;
                 }
                 let ex = ex_style(h);
-                let managed = ex & WS_EX_TOOLWINDOW.0 == 0 && ex & WS_EX_NOACTIVATE.0 == 0;
-                Some(Win { rect: r, managed })
+                let through = see_through(h, ex);
+                let managed = !through && ex & WS_EX_TOOLWINDOW.0 == 0 && ex & WS_EX_NOACTIVATE.0 == 0;
+                if !managed && mons.get_or_init(monitor_rects).iter().any(|m| spans(&fr, m)) {
+                    self.note_cover(h, &fr, through);
+                }
+                (!through).then_some(Win { rect: r, managed })
             })
             .collect();
         out.reverse();
@@ -2244,6 +2319,7 @@ mod tests {
         assert!(shell_ui("Windows.UI.Core.CoreWindow", false, "StartMenuExperienceHost.exe"));
         assert!(shell_ui("Windows.UI.Core.CoreWindow", false, "searchhost.exe"), "any case");
         assert!(shell_ui("AFlyoutAnUpdateRenamed", true, "ShellHost.exe"), "a tool window of the shell's");
+        assert!(shell_ui("ShellHandwritingCanvas", true, "TabTip.exe"), "the touch keyboard's handwriting canvas");
         assert!(!shell_ui("Windows.UI.Core.CoreWindow", false, "Microsoft.Media.Player.exe"), "a UWP app's own CoreWindow");
         assert!(!shell_ui("XamlExplorerHostIslandWindow", false, "synaps-avatar.exe"), "a shell class outside the shell");
         assert!(!shell_ui("CabinetWClass", false, "explorer.exe"), "his Explorer window is his");
@@ -2270,6 +2346,100 @@ mod tests {
         assert!(!x.is_fullscreen(id(overlay)), "an overlay (tool window) taken for a fullscreen app");
         unsafe {
             for h in [impostor, uwp, app, overlay] {
+                let _ = DestroyWindow(h);
+            }
+        }
+    }
+
+    /// The touch keyboard's handwriting canvas (TabTip.exe) as found on Haseeb's main monitor
+    /// (2026-11-19): a topmost tool window over the whole primary monitor, layered,
+    /// click-through, composited, never activated (ex 0xa0800a8). Taken for a window, it hid
+    /// every top edge under it: no seat on that monitor, she fell to the floor. Here it is over a
+    /// window of his. Drawn and not click-through, it hides his top edge (the check sees a
+    /// cover); with the canvas's own style, or at alpha 0, it's left out of the stack and his
+    /// window is a seat again, its whole top edge open. It's said in her log once. Not a tool
+    /// window, a monitor-sized window he clicks through is no fullscreen app (drawn and not
+    /// click-through, it is one), nor his window when it's in front. The seat is read among this
+    /// test's windows only: other tests' windows share the desktop.
+    #[test]
+    fn a_click_through_overlay_hides_no_seat() {
+        use crate::edges::{exposed_spans, seat_ranges};
+        use ::windows::Win32::Foundation::COLORREF;
+        let x = Arc::new(Win32::connect().unwrap());
+        let os = super::super::Os::new(x.clone(), Box::new(x.clone()));
+        let m = monitor_info(unsafe { MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) }).expect("a monitor").monitorInfo.rcMonitor;
+        let (mw, mh) = (m.right - m.left, m.bottom - m.top);
+        let inst = unsafe { ::windows::Win32::System::LibraryLoader::GetModuleHandleW(None).unwrap() };
+        let class = ::windows::core::w!("SaOverlayTest");
+        unsafe {
+            let wc = WNDCLASSW { lpfnWndProc: Some(plain_proc), hInstance: inst.into(), lpszClassName: class, ..Default::default() };
+            RegisterClassW(&wc);
+        }
+        // Shown without activation; a layered one drawn opaque (alpha 255).
+        let make = |ex: u32, style: WINDOW_STYLE, (l, t, cw, ch): (i32, i32, i32, i32)| unsafe {
+            let h = CreateWindowExW(WINDOW_EX_STYLE(ex), class, ::windows::core::w!("sa-overlay-test"), style, l, t, cw, ch, None, None, Some(inst.into()), None).unwrap();
+            if ex & WS_EX_LAYERED.0 != 0 {
+                SetLayeredWindowAttributes(h, COLORREF(0), 255, LWA_ALPHA).unwrap();
+            }
+            let _ = ShowWindow(h, SW_SHOWNOACTIVATE);
+            h
+        };
+        let set_ex = |h: HWND, ex: u32| unsafe {
+            SetWindowLongPtrW(h, GWL_EXSTYLE, ex as isize);
+        };
+        let pump = || unsafe {
+            let mut msg = MSG::default();
+            while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        };
+        // His window: framed, in the middle of the monitor. The canvas over all of it, drawn and
+        // not click-through yet.
+        let his = make(0, WS_OVERLAPPEDWINDOW, (m.left + mw / 4, m.top + mh / 3, mw / 2, mh / 3));
+        let canvas_ex = WS_EX_TOPMOST.0 | WS_EX_TOOLWINDOW.0 | WS_EX_LAYERED.0 | WS_EX_COMPOSITED.0 | WS_EX_TRANSPARENT.0 | WS_EX_NOACTIVATE.0;
+        assert_eq!(canvas_ex, 0x0a08_00a8, "the canvas's style as found");
+        let canvas = make(canvas_ex & !(WS_EX_TRANSPARENT.0 | WS_EX_COMPOSITED.0), WS_POPUP, (m.left, m.top, mw, mh));
+        pump();
+        // The stack among this test's windows: the canvas in it, his window a seat, his top
+        // edge's open stretches and seat ranges, his rect.
+        let read = || {
+            let (stack, seat): (Vec<WinRect>, Vec<bool>) = os.stack().into_iter().filter(|(r, _)| r.id == id(his) || r.id == id(canvas)).unzip();
+            let i = stack.iter().position(|r| r.id == id(his)).expect("his window isn't in the stack");
+            (stack.iter().any(|r| r.id == id(canvas)), seat[i], exposed_spans(&stack, i), seat_ranges(&stack, i, (-20, 20), 10), stack[i])
+        };
+        let (listed, seat, open, _, _) = read();
+        assert!(listed && seat, "a drawn canvas left out ({listed}), or his window no seat ({seat})");
+        assert!(open.is_empty(), "his top edge open under a drawn canvas ({open:?}): the check sees no cover");
+        assert!(x.covers_seen.lock().unwrap().contains(&id(canvas)), "a window over a whole monitor not said in her log");
+        // The canvas's own style: click-through.
+        set_ex(canvas, canvas_ex);
+        let lt = WS_EX_LAYERED.0 | WS_EX_TRANSPARENT.0;
+        assert_eq!(ex_style(canvas) & lt, lt, "the canvas's style didn't take: {:#x}", ex_style(canvas));
+        pump();
+        let (listed, seat, open, seats, r) = read();
+        assert!(!listed, "the click-through canvas is in the stack");
+        assert!(seat, "his window is no seat");
+        assert_eq!(open, [(r.x, r.right())], "his top edge isn't all open under the click-through canvas");
+        assert!(!seats.is_empty(), "no seat on his window: {r:?}");
+        assert!(!x.is_fullscreen(id(canvas)), "the canvas taken for a fullscreen app");
+        // Not click-through, at alpha 0: not drawn, clicked through.
+        set_ex(canvas, canvas_ex & !WS_EX_TRANSPARENT.0);
+        unsafe { SetLayeredWindowAttributes(canvas, COLORREF(0), 0, LWA_ALPHA).unwrap() };
+        pump();
+        let (listed, _, open, _, r) = read();
+        assert!(!listed, "a canvas at alpha 0 is in the stack");
+        assert_eq!(open, [(r.x, r.right())], "his top edge isn't all open under a canvas at alpha 0");
+        // Not a tool window: drawn, a fullscreen app; click-through, none, nor his window.
+        let sheet = make(WS_EX_TOPMOST.0 | WS_EX_LAYERED.0, WS_POPUP, (m.left, m.top, mw, mh));
+        pump();
+        assert!(x.is_fullscreen(id(sheet)), "a drawn monitor-sized window isn't a fullscreen app: the check proves nothing");
+        set_ex(sheet, ex_style(sheet) | WS_EX_TRANSPARENT.0);
+        assert!(!x.is_fullscreen(id(sheet)), "a click-through window taken for a fullscreen app");
+        assert_eq!(x.active_of(his), Some(id(his)));
+        assert_eq!(x.active_of(sheet), Some(id(his)), "a click-through window in front taken for his");
+        unsafe {
+            for h in [sheet, canvas, his] {
                 let _ = DestroyWindow(h);
             }
         }
