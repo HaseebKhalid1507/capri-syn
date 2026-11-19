@@ -76,6 +76,11 @@ pub struct Options {
     pub model: Option<String>,
     pub sleepy_after: Duration,
     pub persona: Persona,
+    /// The daemon runs on this machine (reached by its profile): its credentials file and its
+    /// environment can be read here (`creds`). Not one reached through `--socket`, an
+    /// ssh-forwarded remote daemon's: its login and its pid are another machine's, and its
+    /// first error says what it lacks.
+    pub local: bool,
 }
 
 /// `name` (or a name given for an id) is the guarded session.
@@ -392,28 +397,38 @@ impl Link {
         self.view.as_ref().and_then(|v| v.get("model")).and_then(|m| m.as_str()).map(str::trim).filter(|m| !m.is_empty())
     }
 
-    /// A credentials read is due (`creds::check`): what to read them for. Only while live.
+    /// When the next credentials read is: only while live, and only for a daemon on this machine.
+    fn creds_next(&self) -> Option<Instant> {
+        self.creds_at.filter(|_| self.opts.local && self.live())
+    }
+
+    /// A credentials read is due (`creds::check`): what to read them for.
     pub fn creds_due(&self, now: Instant) -> Option<crate::creds::Query> {
-        if !self.live() || self.creds_at.is_none_or(|t| now < t) {
+        if self.creds_next().is_none_or(|t| now < t) {
             return None;
         }
         let (profile, pid) = self.daemon.clone().map_or((None, None), |(p, pid)| (p, Some(pid)));
         Some(crate::creds::Query { model: self.model()?.to_string(), profile, pid })
     }
 
-    /// What the read found. Missing: read again in `CREDS_EVERY`; anything else ends the reads
-    /// (until the next attach or model change). Unknown leaves a Missing the daemon said (its
-    /// next answer clears that).
+    /// What the read found. Missing, or Unknown on a Claude model (a file mid-write, a login under
+    /// way): read again in `CREDS_EVERY`. Have, or another model's Unknown, ends the reads (until
+    /// the next attach or model change). Unknown leaves a Missing the daemon said (its next
+    /// answer, or a read that finds the login, clears that).
     pub fn set_creds(&mut self, c: Creds, now: Instant) {
+        let again = match c {
+            Creds::Missing(_) => true,
+            Creds::Unknown => self.model().is_some_and(crate::creds::on_claude),
+            Creds::Have => false,
+        };
+        self.creds_at = again.then_some(now + CREDS_EVERY);
         if c == Creds::Unknown && matches!(self.creds, Creds::Missing(_)) {
-            self.creds_at = None;
             return;
         }
         if c != self.creds {
             elog!("synaps-avatar: her model's credentials: {c:?}");
         }
         self.creds = c;
-        self.creds_at = matches!(c, Creds::Missing(_)).then_some(now + CREDS_EVERY);
     }
 
     /// Her maker's mark for the menu: `SYNAPS 0.12.0 · claude-opus-5` (the daemon's version and
@@ -1043,9 +1058,7 @@ impl Link {
         if let Some((_, until)) = self.flash {
             t.push(until);
         }
-        if self.live()
-            && let Some(c) = self.creds_at
-        {
+        if let Some(c) = self.creds_next() {
             t.push(c.max(now));
         }
         if self.quiet_start(now) {
@@ -1281,6 +1294,9 @@ impl Trouble {
             Trouble::LocalDown { ollama: true } => "Ollama's not answering, so I've got no brain. Start Ollama, then ask me again.".into(),
             Trouble::LocalDown { ollama: false } => "My local model's server isn't answering. Start it, then ask me again.".into(),
             Trouble::ModelMissing { model } => match model_word(model) {
+                // No `:tag` and no namespace: one made from a Modelfile (the docs' `capri-qwen3`, a
+                // 16k context), not a name Ollama's library has to pull.
+                Some(w) if !w.contains([':', '/']) => format!("{w} isn't on my local server. Create it from its Modelfile, then ask me again:\n`ollama create {w} -f Modelfile`"),
                 Some(w) => format!("{w} isn't on my local server. Pull it, then ask me again:\n`ollama pull {w}`"),
                 None => "My model isn't on my local server. Pull it there, then ask me again.".into(),
             },
@@ -1435,6 +1451,7 @@ mod tests {
             model: None,
             sleepy_after: Duration::from_secs(600),
             persona: Persona::default(),
+            local: true,
         }
     }
 
@@ -1930,6 +1947,8 @@ mod tests {
             Trouble::LocalDown { ollama: true },
             Trouble::LocalDown { ollama: false },
             Trouble::ModelMissing { model: "qwen3:8b".into() },
+            Trouble::ModelMissing { model: "capri-qwen3".into() },
+            Trouble::ModelMissing { model: "someone/qwen3-tools".into() },
             Trouble::ModelMissing { model: "hf.co/someone/a-very-long-model-name-GGUF:Q4_K_M".into() },
             Trouble::ModelMissing { model: "a b; rm -rf ~".into() },
             Trouble::WrongModel,
@@ -1944,6 +1963,8 @@ mod tests {
                 Trouble::NoBrain { on: Some("Kimi") } => Some("synaps login --provider kimi-code".to_string()),
                 Trouble::NoBrain { .. } | Trouble::LoggedOut => Some(LOGIN_CMD.to_string()),
                 Trouble::ModelMissing { model } if model == "qwen3:8b" => Some("ollama pull qwen3:8b".to_string()),
+                Trouble::ModelMissing { model } if model == "capri-qwen3" => Some("ollama create capri-qwen3 -f Modelfile".to_string()),
+                Trouble::ModelMissing { model } if model == "someone/qwen3-tools" => Some("ollama pull someone/qwen3-tools".to_string()),
                 _ => None,
             };
             assert_eq!(cmd, want, "{says}");
@@ -2002,7 +2023,9 @@ mod tests {
         assert_eq!(l.creds_due(t0 + CREDS_EVERY * 10), None, "no more reads");
     }
 
-    /// What the daemon said stands: a read that can't tell leaves it; an answer clears it.
+    /// What the daemon said stands: a read that can't tell leaves it (and reading goes on, on a
+    /// Claude model: a login mid-write reads as Unknown); a read that finds the login, or an
+    /// answer, clears it.
     #[test]
     fn the_daemons_no_brain_stands_until_an_answer() {
         let t0 = Instant::now();
@@ -2013,11 +2036,52 @@ mod tests {
         assert!(l.creds_due(t0 + CREDS_EVERY).is_some());
         l.set_creds(Creds::Unknown, t0 + CREDS_EVERY);
         assert_eq!(l.body(t1).label.as_deref(), Some("NO BRAIN YET"), "an Unknown read doesn't undo the daemon's word");
-        assert_eq!(l.creds_due(t1 + CREDS_EVERY), None);
+        assert!(l.creds_due(t0 + CREDS_EVERY * 2).is_some(), "a Claude model: read again after an Unknown");
+        l.set_creds(Creds::Have, t0 + CREDS_EVERY * 2);
+        assert_eq!(l.body(t1).label, None, "the login, found");
+        assert_eq!(l.creds_due(t1 + CREDS_EVERY * 10), None, "no more reads");
+        failed_turn(&mut l, "Config error: openai provider: no credential configured for 'kimi-code'. Run `synaps login` to add one.", t1);
+        let t1 = t1 + TROUBLE_FOR;
+        assert_eq!(l.body(t1).label.as_deref(), Some("NO BRAIN YET"));
         l.on_event(wire(1, serde_json::json!({"ev": "turn_started", "turn_baseline": 1, "trigger": "user", "user_text": "hi"})), t1);
         l.on_event(wire(1, serde_json::json!({"ev": "stream", "event": {"kind": "llm", "llm": "text", "text": "Hey"}})), t1);
         l.on_event(wire(1, serde_json::json!({"ev": "idle"})), t1);
         assert_eq!(l.body(t1 + Duration::from_secs(30)).label, None, "she answered: a brain");
+    }
+
+    /// Another model's Unknown ends the reads: nothing to decide there.
+    #[test]
+    fn another_models_unknown_ends_the_reads() {
+        let t0 = Instant::now();
+        let mut l = live_link(t0);
+        let mut p = persona();
+        p.model = Some("local/qwen3:8b".into());
+        l.on_event(applied(1, "model", &p), t0);
+        assert!(l.creds_due(t0).is_some());
+        l.set_creds(Creds::Unknown, t0);
+        assert_eq!(l.creds_due(t0 + CREDS_EVERY * 10), None);
+    }
+
+    /// A daemon through `--socket` (an ssh-forwarded remote one, `tools/synaps-avatar-remote`):
+    /// its login and its pid are another machine's. Never read here (this machine's auth.json, a
+    /// local process's environment): no NO BRAIN YET from a read, no wake-ups for one. Its own
+    /// error still says it.
+    #[test]
+    fn a_remote_daemons_credentials_are_never_read_here() {
+        let t0 = Instant::now();
+        let mut l = Link::new(Options { local: false, ..opts() }, t0);
+        l.on_event(connected(), t0);
+        l.attaching(1);
+        l.on_event(attached(1, "attached_create.json"), t0);
+        assert!(l.live());
+        for t in [t0, t0 + CREDS_EVERY, t0 + CREDS_EVERY * 100] {
+            assert_eq!(l.creds_due(t), None, "never due");
+        }
+        assert!(l.deadline(t0).is_none_or(|d| d > t0), "no wake-up spin for a read that never comes");
+        assert_eq!(l.body(t0).label, None, "ONLINE: nothing read, nothing claimed");
+        failed_turn(&mut l, "Token refresh failed: credential error: No credentials for anthropic at /home/h/.synaps-cli/auth.json. Run synaps login --provider anthropic", t0);
+        assert_eq!(l.body(t0 + TROUBLE_FOR).label.as_deref(), Some("NO BRAIN YET"), "the daemon's own word");
+        assert_eq!(l.creds_due(t0 + CREDS_EVERY), None, "and still no reads here");
     }
 
     /// Local-model troubles are calm and named, with the model she runs on.

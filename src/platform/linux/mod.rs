@@ -154,14 +154,17 @@ fn vendor_icds(vendor: &str) -> Option<String> {
 }
 
 /// Another process's environment variable (his own processes: `/proc/<pid>/environ`). None when
-/// it isn't set, is empty, or can't be read.
-pub fn process_env(pid: u32, key: &str) -> Option<String> {
+/// that environment can't be read (gone, not his); Some(None) when the variable isn't set or is
+/// blank.
+pub fn process_env(pid: u32, key: &str) -> Option<Option<String>> {
     let env = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
     let want = format!("{key}=");
-    env.split(|&b| b == 0)
-        .find_map(|kv| kv.strip_prefix(want.as_bytes()))
-        .map(|v| String::from_utf8_lossy(v).into_owned())
-        .filter(|v| !v.trim().is_empty())
+    Some(
+        env.split(|&b| b == 0)
+            .find_map(|kv| kv.strip_prefix(want.as_bytes()))
+            .map(|v| String::from_utf8_lossy(v).into_owned())
+            .filter(|v| !v.trim().is_empty()),
+    )
 }
 
 /// Hand freed heap back to the OS (after the frame decode).
@@ -362,15 +365,15 @@ mod tests {
         let pid = c.id();
         // Until its exec the child's environ is still ours: give it a moment.
         let t0 = std::time::Instant::now();
-        while process_env(pid, "SA_TEST_KEY").is_none() && t0.elapsed() < std::time::Duration::from_secs(3) {
+        while process_env(pid, "SA_TEST_KEY").flatten().is_none() && t0.elapsed() < std::time::Duration::from_secs(3) {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        assert_eq!(process_env(pid, "SA_TEST_KEY").as_deref(), Some("sk-x"));
-        assert_eq!(process_env(pid, "SA_TEST_EMPTY"), None, "blank is unset");
-        assert_eq!(process_env(pid, "SA_TEST_KE"), None, "a whole name, not a prefix");
+        assert_eq!(process_env(pid, "SA_TEST_KEY"), Some(Some("sk-x".into())));
+        assert_eq!(process_env(pid, "SA_TEST_EMPTY"), Some(None), "blank is unset");
+        assert_eq!(process_env(pid, "SA_TEST_KE"), Some(None), "a whole name, not a prefix");
         c.kill().ok();
         c.wait().ok();
-        assert_eq!(process_env(pid, "SA_TEST_KEY"), None, "gone");
+        assert_eq!(process_env(pid, "SA_TEST_KEY"), None, "gone: can't be read");
     }
 
     #[test]

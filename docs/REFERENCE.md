@@ -54,7 +54,8 @@ Reference for `synaps-avatar`, the crate behind capri-syn. The [README](../READM
   | `local/…`: `can't reach local endpoint` (Ollama's port 11434) | Ollama's not answering, so I've got no brain. Start Ollama, then ask me again. | `OLLAMA IS OFF` | idle |
   | the same, another port (LM Studio, llama.cpp) | My local model's server isn't answering. Start it, then ask me again. | `LOCAL MODEL OFF` | idle |
   | `local/<model>`: a 404 (Ollama hasn't pulled it) | qwen3:8b isn't on my local server. Pull it, then ask me again: `$ ollama pull qwen3:8b` | `MODEL MISSING` | idle |
-  | `local/<model>`: a 400 (no tool calling; a context too small, where the server says so) | My local model turned that down. I need one with tool calling and a 16k+ context: set another ([session] model in my settings). | `WRONG MODEL` | idle |
+  | the same, a name with no `:tag` (one made from a Modelfile, as [UNDER-THE-HOOD.md](UNDER-THE-HOOD.md#her-brain) has it) | capri-qwen3 isn't on my local server. Create it from its Modelfile, then ask me again: `$ ollama create capri-qwen3 -f Modelfile` | `MODEL MISSING` | idle |
+  | `local/<model>`: a 400 (no tool calling; a context too small, where the server says so) | My local model turned that down. I need one with tool calling and a 16k+ context: set another ([session] model in my settings). In the Line, the server's own words under it. | `WRONG MODEL` | idle |
 
   Ollama cuts a prompt longer than its context without an error (4k below 24 GB of VRAM; hers is
   ~7k tokens): nothing to name there, so [UNDER-THE-HOOD.md](UNDER-THE-HOOD.md#her-brain) has a

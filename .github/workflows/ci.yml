@@ -244,7 +244,7 @@ jobs:
       - name: shellcheck
         run: |
           shellcheck --version | sed -n 2p
-          shellcheck -x install.sh installer/stage.sh
+          shellcheck -x install.sh installer/stage.sh installer/test-units.sh
 
       - name: PSScriptAnalyzer
         shell: pwsh
@@ -257,6 +257,9 @@ jobs:
 
       - name: The two installers in step
         run: python3 installer/test_parity.py -v
+
+      - name: install.sh's start of her (which runs it quits, ssh, her log, her folder)
+        run: bash installer/test-units.sh
 
       - name: install.sh --dry-run touches nothing
         run: |

@@ -42,7 +42,7 @@ usage: install.ps1 [--yes] [--dry-run] [--uninstall [--purge]] [--voice] [--watc
   --purge           with --uninstall: remove those too (only her own files in those folders)
   --voice           also her voice: the voice installer (or bundle), ~320 MB of models
   --watch           capri-watch (Linux only: skipped here)
-  --no-autostart    don't start her at sign-in
+  --no-autostart    don't start her at sign-in (she still starts now, at the end)
   --from-source     build her from source even when a release has an installer
   --prefix DIR      where she goes (default %LOCALAPPDATA%\Programs\synaps-avatar)
   --with-local-art  also mochi's art: LOCAL PERSONAL USE ONLY, never publish or share it
@@ -226,6 +226,7 @@ function Read-Flags([string[]]$ArgList) {
     $script:Yes = $false; $script:Dry = $false; $script:Uninstall = $false; $script:Purge = $false
     $script:Voice = $false; $script:Watch = $false; $script:Autostart = $true; $script:FromSource = $false
     $script:LocalArt = $false; $script:Prefix = Join-Path $env:LOCALAPPDATA 'Programs\synaps-avatar'; $script:Artifact = ''; $script:PrefixGiven = $false
+    $script:HisRun = ''
     $i = 0
     while ($ArgList -and $i -lt $ArgList.Count) {
         $a = [string]$ArgList[$i]
@@ -417,8 +418,33 @@ function Get-SynapsPathEdit {
 
 # ---- 2. her binary ----------------------------------------------------------------------------
 
+# A command line's arguments after its program (quoted or not): '' when it was started bare.
+function Get-CommandArgs([string]$Line) {
+    $l = $Line.TrimStart()
+    $rest = if ($l.StartsWith('"')) { $i = $l.IndexOf('"', 1); if ($i -lt 0) { '' } else { $l.Substring($i + 1) } }
+    else { $i = $l.IndexOfAny([char[]]" `t"); if ($i -lt 0) { '' } else { $l.Substring($i) } }
+    return $rest.Trim()
+}
+
+# Her runs in this sign-in session: Id, and Line, the command line of one started with arguments
+# (--socket, --profile, --session...: his own run), '' for one started bare (as the Start menu and
+# her Run value start her).
+function Get-HerRuns {
+    $me = (Get-Process -Id $PID).SessionId
+    foreach ($p in @(Get-CimInstance Win32_Process -Filter "Name = 'synaps-avatar.exe'" -ErrorAction SilentlyContinue)) {
+        if ($p.SessionId -ne $me) { continue }
+        $line = [string]$p.CommandLine
+        [pscustomobject]@{ Id = [int]$p.ProcessId; Line = $(if (Get-CommandArgs $line) { $line.Trim() } else { '' }) }
+    }
+}
+
+# Before her binary is replaced (Windows locks a running one): every run of hers stops. One he
+# started with his own arguments is noted ($script:HisRun): she isn't started bare in its place.
 function Stop-Her {
     if ($script:Dry) { return }
+    $runs = @(Get-HerRuns)
+    $his = @($runs | Where-Object { $_.Line } | Select-Object -First 1)
+    if ($his) { $script:HisRun = $his[0].Line }
     $p = Get-Process -Name 'synaps-avatar' -ErrorAction SilentlyContinue
     if ($p) { Invoke-Action 'Stop-Process -Name synaps-avatar (she is replaced)' { $p | Stop-Process -Force; Start-Sleep -Milliseconds 500 } }
 }
@@ -877,20 +903,27 @@ function Read-LogSince([string]$Path, [long]$From) {
     } catch { return '' }
 }
 
-# Her, now: the first launch is the install's, not the next sign-in's. Without a console she logs to
-# synaps-avatar.log beside her state: up once it says her first frame is painted. Only in his desktop
-# session. One that runs already is the old binary: stopped, then started again. Sets
-# $script:Started when she's up.
+# Her, now: the first launch is the install's, not the next sign-in's (with --no-autostart too: that
+# one is about sign-in). Without a console she logs to synaps-avatar.log beside her state: up once it
+# says her first frame is painted. Only in his desktop session, never over ssh. One that runs
+# already as the Start menu starts her is the old binary: stopped, then started again; one he
+# started with his own arguments is left be (or, stopped for her binary, not replaced by a bare
+# one). Started from his profile folder. Sets $script:Started when she's up.
 function Start-HerNow {
     $script:Started = $false
     if ($script:Dry) { Write-Action "Start-Process `"$(Get-Tilde $script:Exe)`""; return }
-    if (-not [Environment]::UserInteractive) { Write-Info 'no desktop session here: she starts at your next sign-in, or from the Start menu'; return }
+    $later = if ($script:Autostart) { 'she starts at your next sign-in, or from the Start menu' } else { 'start her from the Start menu' }
+    if ($env:SSH_CONNECTION -or $env:SSH_TTY) { Write-Info "an ssh session (she would start where you can't see her, and close with it): not started here. $later"; return }
+    if (-not [Environment]::UserInteractive) { Write-Info "no desktop session here: $later"; return }
+    $his = @(Get-HerRuns | Where-Object { $_.Line } | Select-Object -First 1)
+    if ($his) { Write-Info "she's running as you started her ($($his[0].Line)): left be. to run the new one, quit her (her menu: Quit), then start her"; return }
+    if ($script:HisRun) { Write-Info "your own run of her was stopped to replace her binary: start it again: & $($script:HisRun)"; return }
     Stop-Her
     $log = Join-Path $script:Data 'synaps-avatar.log'
     $from = if (Test-Path -LiteralPath $log) { (Get-Item -LiteralPath $log).Length } else { 0 }
     Write-Action "Start-Process `"$(Get-Tilde $script:Exe)`""
     $ErrorActionPreference = 'Continue'
-    try { $p = Start-Process -FilePath $script:Exe -PassThru }
+    try { $p = Start-Process -FilePath $script:Exe -WorkingDirectory $env:USERPROFILE -PassThru }
     catch { Write-Warn "she didn't start: $($_.Exception.Message)"; return }
     # Up to 20 s (a cold start reads her pack): the lines she wrote since.
     $new = ''

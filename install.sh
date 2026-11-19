@@ -28,7 +28,7 @@ usage: install.sh [--yes] [--dry-run] [--uninstall [--purge]] [--voice] [--watch
   --purge           with --uninstall: remove those too (only her own files in those folders)
   --voice           also her voice: capri-voice (a user venv, ~320 MB of models, its user unit)
   --watch           also capri-watch (its user unit; enabled only with --yes)
-  --no-autostart    don't start her at login
+  --no-autostart    don't start her at login (she still starts now, at the end)
   --from-source     build her from source even when a release has a binary
   --prefix DIR      where bin/ and lib/synaps-avatar/ go (default ~/.local)
   --with-local-art  also mochi's art: LOCAL PERSONAL USE ONLY, never publish or share it
@@ -1302,47 +1302,87 @@ brain() {
     info "her brain: Synaps has no model yet. say hi to her: she'll tell you how to give her one."
 }
 
-# Her, now: the first launch is the install's, not the next login's. Started the way autostart
-# starts her (XWayland off Hyprland and i3), in a session of her own (closing this terminal leaves
-# her be); up once her log says her first frame is painted. Only with a desktop to show on. One
-# that runs already is the old binary: quit, then started again. STARTED=1 when she's up.
+# Her runs now (his user's), from their command lines (/proc/PID/cmdline): BARE, the pids started
+# with no arguments (as autostart starts her: the old binary, quit and started again), and HIS, the
+# command line of one started with arguments (--socket, --profile, --session...: his own run, never
+# quit here).
+her_runs() {
+    local p n
+    BARE=() HIS=''
+    for p in $(pgrep -u "$(id -u)" -x synaps-avatar 2>/dev/null || true); do
+        # Its arguments, NUL-terminated (a path with spaces is still one).
+        n=$(tr -cd '\000' <"/proc/$p/cmdline" 2>/dev/null | wc -c) || n=0
+        if [ "$n" -gt 1 ]; then
+            HIS=$(tr '\000' ' ' <"/proc/$p/cmdline" 2>/dev/null) || true
+            HIS=$(tilde "${HIS% }")
+        else
+            BARE+=("$p")
+        fi
+    done
+}
+
+# Why she isn't started from this terminal, if she isn't: an ssh session (with `ssh -X` she'd open
+# on the ssh client's screen and die with the tunnel), or no desktop at all.
+no_desktop() {
+    if [ -n "${SSH_CONNECTION:-}${SSH_TTY:-}" ]; then
+        printf 'an ssh session (she would open on the far screen and close with it)'
+    elif [ -z "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ]; then
+        printf 'no desktop in this terminal (no DISPLAY or WAYLAND_DISPLAY)'
+    else
+        return 1
+    fi
+}
+
+# Her, now: the first launch is the install's, not the next login's (with --no-autostart too: that
+# one is about login). Started the way autostart starts her (XWayland off Hyprland and i3), from his
+# home folder, in a session of her own (closing this terminal leaves her be); up once her log says
+# her first frame is painted. Only with a desktop here to show on. One that runs already as
+# autostart starts her is the old binary: quit, then started again; one he started with his own
+# arguments is left be. Her log is this run's (the last one's kept as launch.old.log). STARTED=1
+# when she's up.
 start_her() {
-    local cmd log pid i me
+    local cmd log pid i why
     STARTED=0
     cmd=$(launch_cmd)
     log=$STATE/synaps-avatar/launch.log
-    me=$(id -u)
     if [ "$DRY" = 1 ]; then
         printf '   %s$ %s &%s\n' "$D" "$cmd" "$N"
         return 0
     fi
-    if [ -z "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ]; then
-        if pgrep -u "$me" -x synaps-avatar >/dev/null 2>&1; then
-            info "no desktop in this terminal: she's still running the old binary (\`avatarctl quit\`, then start her from your desktop)"
+    her_runs
+    if why=$(no_desktop); then
+        if [ -n "$HIS" ] || [ ${#BARE[@]} -gt 0 ]; then
+            info "$why: she's still running the old binary (\`avatarctl quit\`, then start her from your desktop)"
         elif [ "$AUTOSTART" = 1 ]; then
-            info "no desktop in this terminal (no DISPLAY or WAYLAND_DISPLAY): she starts at your next login"
+            info "$why: not started here. she starts at your next login"
         else
-            info "no desktop in this terminal (no DISPLAY or WAYLAND_DISPLAY): start her from your desktop"
+            info "$why: not started here. start her from your desktop"
         fi
         return 0
     fi
-    if pgrep -u "$me" -x synaps-avatar >/dev/null 2>&1; then
-        run "$BIN/avatarctl" quit || run pkill -u "$me" -x synaps-avatar || true
+    if [ -n "$HIS" ]; then
+        info "she's running as you started her ($HIS): left be. to run the new one, \`avatarctl quit\`, then start her"
+        return 0
+    fi
+    if [ ${#BARE[@]} -gt 0 ]; then
+        run "$BIN/avatarctl" quit || run kill "${BARE[@]}" || true
         for i in $(seq 50); do
-            pgrep -u "$me" -x synaps-avatar >/dev/null 2>&1 || break
+            her_runs
+            [ ${#BARE[@]} -gt 0 ] || [ -n "$HIS" ] || break
             sleep 0.1
         done
-        if pgrep -u "$me" -x synaps-avatar >/dev/null 2>&1; then
+        if [ ${#BARE[@]} -gt 0 ] || [ -n "$HIS" ]; then
             warn "she didn't quit: \`avatarctl quit\`, then start her with the line below"
             return 0
         fi
     fi
     mkdir -p "$(dirname "$log")"
+    if [ -f "$log" ]; then mv -f "$log" "${log%.log}.old.log"; fi
     printf '   %s$ %s &%s\n' "$D" "$cmd" "$N"
     if have setsid; then
-        setsid sh -c "exec $cmd" </dev/null >"$log" 2>&1 &
+        setsid sh -c "cd && exec $cmd" </dev/null >"$log" 2>&1 &
     else
-        nohup sh -c "exec $cmd" </dev/null >"$log" 2>&1 &
+        nohup sh -c "cd && exec $cmd" </dev/null >"$log" 2>&1 &
     fi
     pid=$!
     # Up to 20 s (a cold start reads her pack); gone for good (her pid and every synaps-avatar) after 2 s.
@@ -1351,12 +1391,12 @@ start_her() {
             STARTED=1
             break
         fi
-        if [ "$i" -gt 10 ] && ! kill -0 "$pid" 2>/dev/null && ! pgrep -u "$me" -x synaps-avatar >/dev/null 2>&1; then break; fi
+        if [ "$i" -gt 10 ] && ! kill -0 "$pid" 2>/dev/null && ! pgrep -u "$(id -u)" -x synaps-avatar >/dev/null 2>&1; then break; fi
         sleep 0.2
     done
     if [ "$STARTED" = 1 ]; then
         good "she's up ($(awk '/first-frame: painted/ { print $3 " ms"; exit }' "$log") to her first frame)"
-    elif pgrep -u "$me" -x synaps-avatar >/dev/null 2>&1; then
+    elif pgrep -u "$(id -u)" -x synaps-avatar >/dev/null 2>&1; then
         info "she's still starting: her log is $(tilde "$log")"
     else
         warn "she didn't start. the end of her log ($(tilde "$log")):"
@@ -1433,6 +1473,7 @@ purge() {
     local f
     for f in "$CONF/synaps-avatar/settings.toml" "$CONF/synaps-avatar/settings.toml.tmp" \
         "$STATE/synaps-avatar/state.json" "$STATE/synaps-avatar/state.json.tmp" "$STATE/synaps-avatar/launch.log" \
+        "$STATE/synaps-avatar/launch.old.log" \
         "$STATE/synaps-avatar/sessions.json" "$STATE/synaps-avatar/sessions.json.tmp"; do
         if [ -f "$f" ]; then run rm -f "$f"; fi
     done

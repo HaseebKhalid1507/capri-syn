@@ -51,6 +51,8 @@ pub struct Row {
     pub who: Who,
     /// Her rows: markdown as written. Tool rows: `name` then a one-line input preview.
     pub text: String,
+    /// Tool rows: their input. Her rows: what her words came from, when it helps (a local
+    /// server's own error), shown small under them.
     pub detail: String,
     pub streaming: bool,
 }
@@ -1039,6 +1041,10 @@ impl Line {
         let body: AnyElement = match &r.who {
             Who::Her => {
                 let mut b = self.her_body(ix, &r.text, cx);
+                // What she said comes from (a local server's own error): small, under it.
+                if !r.detail.is_empty() {
+                    b = b.child(div().font_family(MONO).text_size(px(12.0)).text_color(rgb(pal.dim)).child(r.detail.clone()));
+                }
                 if r.streaming {
                     b = b.child(div().w(px(9.0)).h(px(3.0)).bg(rgb(pal.accent)));
                 }

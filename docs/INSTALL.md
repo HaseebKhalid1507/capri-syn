@@ -63,12 +63,23 @@ ends on the command (`synaps login --provider claude` for Claude). The daemon pi
 next turn, with no restart: Synaps reads `auth.json` per request. When Synaps was already there with
 a model, one line says her session is `capri`.
 
-Then it starts her, the way autostart will (Linux: `env SA_BACKEND=x11` off Hyprland and i3, so
-GNOME and KDE on Wayland run her through XWayland), in a session of her own so closing the terminal
-leaves her be, and waits up to 20 s for her first frame (`~/.local/state/synaps-avatar/launch.log`;
-Windows: her `synaps-avatar.log`). One already running (the old binary) is quit and started again.
-With no desktop to show on (an SSH session, CI) it doesn't, and says so. The `start her:` line is the
-same command, to start her again later.
+Then it starts her, `--no-autostart` or not (that flag is about login), the way autostart will
+(Linux: `env SA_BACKEND=x11` off Hyprland and i3, so GNOME and KDE on Wayland run her through
+XWayland), from your home folder, in a session of her own so closing the terminal leaves her be, and
+waits up to 20 s for her first frame (`~/.local/state/synaps-avatar/launch.log`, the run before's
+kept as `launch.old.log`; Windows: her `synaps-avatar.log`, which she starts over past 4 MB).
+
+- **One already running as autostart starts her** (no arguments: the old binary) is quit and started
+  again.
+- **One you started with your own arguments** (`--socket`, `--profile`, `--session`...) is left
+  running, and it tells you to quit her, then start her. On Windows her binary can't be replaced
+  while she runs, so that one stops anyway; it isn't replaced by a bare one, and you get its own
+  command line back to start it again.
+- **No desktop here to show on**, so it doesn't start her and says so: an SSH session
+  (`SSH_CONNECTION` or `SSH_TTY`: with `ssh -X` she'd open on the far screen and die with the
+  tunnel), no `DISPLAY` or `WAYLAND_DISPLAY` (CI), or no interactive session on Windows.
+
+The `start her:` line is the same command, to start her again later.
 
 A pack at her pack's place that this script didn't make (your own build) is moved aside to
 `capri.pre-install-<time>`, said so, and never removed by `--uninstall`.
@@ -83,7 +94,7 @@ A pack at her pack's place that this script didn't make (your own build) is move
 | `--purge` | with `--uninstall`: remove those too: her own files only (`settings.toml`, `state.json`, `sessions.json`, her log, the installer's cache), never the folders' other contents. A pack it didn't make (yours at `packs/capri`, or one moved aside) is never removed |
 | `--voice` | her voice too |
 | `--watch` | capri-watch too (Linux) |
-| `--no-autostart` | don't start her at login |
+| `--no-autostart` | don't start her at login (she still starts at the end of the install) |
 | `--from-source` | build even when a release has a binary |
 | `--prefix DIR` | where `bin/` and `lib/synaps-avatar/` go (Linux, default `~/.local`); her folder (Windows, default `%LOCALAPPDATA%\Programs\synaps-avatar`) |
 | `--with-local-art` | mochi's art too: **local personal use only**, never publish or share it |
