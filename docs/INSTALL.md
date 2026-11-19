@@ -102,18 +102,27 @@ she runs through XWayland, the X server those desktops keep for X apps.
 
 - **She picks it herself.** A bare `synaps-avatar` with `WAYLAND_DISPLAY` set, no Hyprland and
   XWayland running (`DISPLAY` set) runs as `SA_BACKEND=x11` does, and says so in one line of her
-  log. Without XWayland (`DISPLAY` unset) she stops with an error that says so: turn XWayland on, or
-  log in to an X11 session. `SA_BACKEND` always wins, in any case: `x11` is XWayland (on Hyprland
-  too), `wayland` is Hyprland or nothing (with no Wayland session at all, an error); any other value
-  is ignored, with a line in her log. The installer's start line, autostart entry and app-menu entry
-  still say `env SA_BACKEND=x11` off Hyprland and i3.
-- **Hyprland is** a `HYPRLAND_INSTANCE_SIGNATURE` naming one that runs (its socket,
-  `$XDG_RUNTIME_DIR/hypr/<signature>/.socket.sock`, is there), or `XDG_CURRENT_DESKTOP` or
-  `XDG_SESSION_DESKTOP` saying Hyprland; the installer reads it the same way. A signature left over
-  from an earlier Hyprland login (in GNOME's environment, or a tmux server's) names none, so she
-  takes XWayland and her log says the signature was ignored. Hyprland started where its signature
-  got lost on the way to her (systemd or D-Bus activation) still reads as Hyprland, and her error
-  says it's missing rather than her taking XWayland unasked.
+  log, after its header (when she starts: not for `--check` or `--set`). Without XWayland (`DISPLAY`
+  unset) she stops with an error that says so: turn XWayland on, or log in to an X11 session.
+  `SA_BACKEND` always wins, in any case: `x11` is XWayland (on Hyprland too), `wayland` is Hyprland
+  or nothing (with no Wayland session at all, an error); any other value is ignored, with a line in
+  her log. The installer's start line, autostart entry and app-menu entry still say
+  `env SA_BACKEND=x11` off Hyprland and i3.
+- **Hyprland is** a `HYPRLAND_INSTANCE_SIGNATURE` naming one that runs on this display, or
+  `XDG_CURRENT_DESKTOP` or `XDG_SESSION_DESKTOP` saying Hyprland while one does; the installer reads
+  it the same way. One runs while the PID in its lock
+  (`$XDG_RUNTIME_DIR/hypr/<signature>/hyprland.lock`, Hyprland 0.40 on) does, as `hyprctl instances`
+  reads it: a crash leaves the lock and its sockets behind. It serves the display its lock names,
+  which has to be `WAYLAND_DISPLAY`. One older than 0.40 writes no lock: its socket is there. (Her
+  binary also counts a socket that takes a connection, for a Hyprland whose PID is in another PID
+  namespace, as in tools/wlrig.)
+  - Left over from an earlier Hyprland login (in GNOME's environment, or a tmux server's, which
+    keeps the ones it started with), a signature or desktop variable names no Hyprland that runs
+    here; a compositor nested in Hyprland inherits them, and serves a display of its own. Either way
+    she takes XWayland, and her log says what she ignored.
+  - Hyprland started where its signature got lost on the way to her (systemd or D-Bus activation)
+    still reads as Hyprland, and her error says it's missing rather than her taking XWayland
+    unasked.
 - **What she can't do there:**
   - she perches only on X apps: a native Wayland window doesn't exist for her, so she can't sit on
     it or follow it;
@@ -122,16 +131,18 @@ she runs through XWayland, the X server those desktops keep for X apps.
     only input that X apps get. While you type in a native Wayland app she may decide you're away
     and nap.
 - **Her summon key on GNOME** is a custom keyboard shortcut. The installer checks that Super+Alt+C
-  is free (GNOME's window, Shell and media-key shortcuts, the installed Shell extensions' and every
-  custom one; Mod4 is Super and Mod1 Alt), then asks on the terminal whether to add it, running
-  `avatarctl talk tap`. The default is no; `--yes` doesn't answer it, and with no terminal it isn't
-  asked. Said no, or the key is taken, it tells you where to add one yourself: Settings > Keyboard >
-  Keyboard Shortcuts > Custom Shortcuts. It's added to the end of your list (yours stay), and
-  `--uninstall` takes it out again (unless you changed it to run something else). Both read
-  GNOME's settings back after writing (`gsettings set` can succeed while dconf keeps nothing): when
-  they don't hold it, you get a warning and the exact `gsettings` commands to run yourself, and
-  `--uninstall` keeps that line in its receipt so the next one tries again. On KDE, bind
-  `avatarctl talk tap` in its Shortcuts settings yourself.
+  is free (GNOME's window, Shell and media-key shortcuts, every custom one, and the Shell
+  extensions': the system's schemas and those of the ones you installed yourself, in
+  `~/.local/share/gnome-shell/extensions`; Mod4 is Super and Mod1 Alt), then asks on the terminal
+  whether to add it, running `avatarctl talk tap`. The default is no; `--yes` doesn't answer it, and
+  with no terminal it isn't asked. Said no, or the key is taken, it tells you where to add one
+  yourself: Settings > Keyboard > Keyboard Shortcuts > Custom Shortcuts. It's added to the end of
+  your list (yours stay), and `--uninstall` takes it out again (unless you changed it to run
+  something else; where gsettings doesn't run, it stays in the receipt for an `--uninstall` where it
+  does). Both read GNOME's settings back after writing (`gsettings set` can succeed while dconf
+  keeps nothing): when they don't hold it, you get a warning and the exact `gsettings` commands to
+  run yourself, and `--uninstall` keeps that line in its receipt so the next one tries again. On
+  KDE, bind `avatarctl talk tap` in its Shortcuts settings yourself.
 
 ## Flags
 
@@ -167,11 +178,15 @@ so a path with spaces stays one path. `--uninstall` walks it backwards:
   run something else stays);
 - it removes the folders it made (when empty), the prefix's included.
 
+What didn't come out (her GNOME shortcut, when gsettings doesn't take it out or isn't there) stays
+in the receipt, with the folders it made that are still there, and the next `--uninstall` tries
+again.
+
 It removes only what is inside her folders (each `--prefix` she went to, and her data, config and
 cache folders): never `/` or your home, nothing with a newline or `..` in it. A folder removed
 whole must be one it makes (her pack, `lib/synaps-avatar`, the installer's cache, the voice
-folders). A unit is disabled and removed only while it still carries the header it wrote. An entry
-outside those is reported and left alone.
+folders). A unit, her app-menu entry and her autostart entry are removed only while they still
+carry the header it wrote. An entry outside those is reported and left alone.
 
 Synaps stays installed, since her daemon may have other clients, and so does rustup if it installed
 it. `--uninstall` says where (`~/.cargo/bin/synaps`) and that your Synaps login and sessions live in
@@ -213,10 +228,12 @@ A pull request that touches the packaging runs the same builds and tests, and re
   - shellcheck on `install.sh`, PSScriptAnalyzer on `install.ps1`;
   - `installer/test_parity.py`: both scripts take the same flags, run the same steps in the same
     order, read keys the manifest has, and `install.ps1` keeps nothing in the caller's scope;
-  - `installer/test-units.sh`: her start at the end, the pinned Synaps and the daemon's protocol, her
-    app-menu entry, which desktop is Hyprland (a signature left over isn't), the GNOME shortcut (a
-    stand-in `gsettings`: never on `--yes` or without a terminal, your list kept, a write it says
-    yes to and doesn't keep caught) and Hyprland's Super+Alt+C, and `--uninstall` taking them away;
+  - `installer/test-units.sh`: her start at the end, the pinned Synaps and the daemon's protocol,
+    her app-menu entry, which desktop is Hyprland (its lock's PID and display; a signature or
+    desktop variable left over isn't), the GNOME shortcut (a stand-in `gsettings`: never on `--yes`
+    or without a terminal, your list kept, a write it says yes to and doesn't keep caught) and
+    Hyprland's Super+Alt+C, and `--uninstall` taking them away (not an entry that isn't hers any
+    more; what it can't take out stays in the receipt);
   - `install.sh --dry-run` several ways (one fetched from GitHub as `curl | bash` gets it, one with a
     `--prefix` with spaces, one from `CAPRI_INSTALL_FLAGS`), checked to change nothing; as root,
     refused without `--allow-root` and always with someone else's `HOME`.

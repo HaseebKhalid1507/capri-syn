@@ -95,27 +95,101 @@ fn asked(v: &OsStr) -> Option<Backend> {
     }
 }
 
-/// Whether this is Hyprland's session, as install.sh's `desktop` reads it: its signature
-/// (`HYPRLAND_INSTANCE_SIGNATURE`) naming one that runs (`live`: its request socket is there; a
-/// signature left over from an earlier Hyprland login, in GNOME's environment or a tmux server's,
-/// names none), or `XDG_CURRENT_DESKTOP` or `XDG_SESSION_DESKTOP` saying Hyprland (one whose
-/// signature got lost on the way to her, as systemd or D-Bus activation can: `connect` then says
-/// what's missing, rather than her taking XWayland unasked).
-fn hyprland_in(var: &impl Fn(&str) -> Option<OsString>, live: &impl Fn(&str) -> bool) -> bool {
-    let sig = var("HYPRLAND_INSTANCE_SIGNATURE").and_then(|v| v.into_string().ok()).unwrap_or_default();
-    if !sig.trim().is_empty() && live(sig.as_str()) {
-        return true;
+/// A Hyprland that runs (`hypr_running_in`): its signature, and the Wayland display it serves
+/// (its lock's second line; None for one older than 0.40, which writes no lock).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Hypr {
+    sig: String,
+    display: Option<String>,
+}
+
+impl Hypr {
+    /// Whether it serves `wd` (`WAYLAND_DISPLAY`; by name, as either may be a path): any display
+    /// when `wd` is unset or empty, or the Hyprland doesn't say which. A compositor nested in
+    /// Hyprland inherits its signature, and serves a display of its own.
+    fn serves(&self, wd: &str) -> bool {
+        let name = |d: &str| std::path::Path::new(d).file_name().map(OsStr::to_os_string);
+        wd.is_empty() || self.display.as_deref().is_none_or(|d| name(d) == name(wd))
     }
+}
+
+/// A Hyprland lock (`hyprland.lock`), read: its PID, then its Wayland display, a line each.
+/// None when it doesn't read as one (hyprctl skips those too).
+fn lock_in(text: &str) -> Option<(u32, String)> {
+    let mut lines = text.lines();
+    let pid = lines.next()?.trim();
+    if pid.is_empty() || !pid.bytes().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    Some((pid.parse().ok()?, lines.next()?.trim().to_string()))
+}
+
+/// The Hyprlands that run in `root` (`$XDG_RUNTIME_DIR/hypr`), a folder each, named by its
+/// signature. From 0.40 Hyprland writes its lock there (`lock_in`), and after a crash leaves it
+/// behind with its sockets (only a clean exit removes them): one runs when the lock's PID does, as
+/// hyprctl's `instances` reads it, or when its request socket (`.socket.sock`) takes a connection
+/// (a PID in another PID namespace, as tools/wlrig's: a crash's socket refuses). One older than
+/// 0.40, with no lock, runs when that socket takes one. install.sh's `hypr_runs` reads it the
+/// same way, but for the socket: it never runs in a sandbox, so its PID is always there.
+fn hypr_running_in(root: &std::path::Path) -> Vec<Hypr> {
+    let mut out = Vec::new();
+    for e in std::fs::read_dir(root).into_iter().flatten().flatten() {
+        let dir = e.path();
+        let Ok(sig) = e.file_name().into_string() else { continue };
+        let answers = || std::os::unix::net::UnixStream::connect(dir.join(".socket.sock")).is_ok();
+        let display = match std::fs::read_to_string(dir.join("hyprland.lock")) {
+            Ok(text) => match lock_in(&text) {
+                Some((pid, display)) if PathBuf::from(format!("/proc/{pid}")).exists() || answers() => Some(display),
+                _ => continue,
+            },
+            Err(_) if answers() => None,
+            Err(_) => continue,
+        };
+        out.push(Hypr { sig, display });
+    }
+    out
+}
+
+/// `hypr_running_in` her runtime dir's `hypr` (hypr::ipc's): none without `XDG_RUNTIME_DIR`.
+fn hypr_running() -> Vec<Hypr> {
+    std::env::var_os("XDG_RUNTIME_DIR").map_or_else(Vec::new, |r| hypr_running_in(&PathBuf::from(r).join("hypr")))
+}
+
+/// `HYPRLAND_INSTANCE_SIGNATURE`, unless unset or blank.
+fn sig_in(var: &impl Fn(&str) -> Option<OsString>) -> Option<String> {
+    var("HYPRLAND_INSTANCE_SIGNATURE").and_then(|v| v.into_string().ok()).filter(|s| !s.trim().is_empty())
+}
+
+/// The desktop variables that say Hyprland (`XDG_CURRENT_DESKTOP`, `XDG_SESSION_DESKTOP`, in any
+/// case), as `NAME=value`: none, empty.
+fn xdg_hyprland(var: &impl Fn(&str) -> Option<OsString>) -> Vec<String> {
     ["XDG_CURRENT_DESKTOP", "XDG_SESSION_DESKTOP"]
         .into_iter()
-        .any(|k| var(k).is_some_and(|v| v.to_string_lossy().to_lowercase().contains("hyprland")))
+        .filter_map(|k| {
+            let v = var(k)?.to_string_lossy().into_owned();
+            v.to_lowercase().contains("hyprland").then(|| format!("{k}={v}"))
+        })
+        .collect()
+}
+
+/// Whether this is Hyprland's session, as install.sh's `desktop` reads it (`running`: the
+/// Hyprlands that run, `hypr_running`; serving this display, `Hypr::serves`). Its signature
+/// (`HYPRLAND_INSTANCE_SIGNATURE`) naming one that serves it; or `XDG_CURRENT_DESKTOP` or
+/// `XDG_SESSION_DESKTOP` saying Hyprland while one serves it: Hyprland whose signature got lost on
+/// the way to her (systemd or D-Bus activation), so `connect` says what's missing rather than her
+/// taking XWayland unasked. Either one left over from an earlier Hyprland login (GNOME's
+/// environment, a tmux server's) names none that runs here, and isn't Hyprland.
+fn hyprland_in(var: &impl Fn(&str) -> Option<OsString>, running: &[Hypr]) -> bool {
+    let wd = var("WAYLAND_DISPLAY").map(|v| v.to_string_lossy().into_owned()).unwrap_or_default();
+    let here: Vec<&Hypr> = running.iter().filter(|h| h.serves(&wd)).collect();
+    sig_in(var).is_some_and(|sig| here.iter().any(|h| h.sig == sig)) || (!here.is_empty() && !xdg_hyprland(var).is_empty())
 }
 
 /// Which display server she runs on, from her environment (`var`: a variable, None when unset;
-/// `live`: whether a Hyprland signature names one that runs). `SA_BACKEND` wins whenever it's set
-/// to one she knows (`x11`, `wayland`); anything else in it is ignored. Without it, a Wayland
-/// session is Hyprland's (natively) or, anywhere else, XWayland's when it has one.
-fn backend_in(var: impl Fn(&str) -> Option<OsString>, live: impl Fn(&str) -> bool) -> Backend {
+/// `running`: the Hyprlands that run). `SA_BACKEND` wins whenever it's set to one she knows
+/// (`x11`, `wayland`); anything else in it is ignored. Without it, a Wayland session is
+/// Hyprland's (natively) or, anywhere else, XWayland's when it has one.
+fn backend_in(var: impl Fn(&str) -> Option<OsString>, running: &[Hypr]) -> Backend {
     let set = |k: &str| var(k).is_some_and(|v| !v.is_empty());
     let ask = var("SA_BACKEND").and_then(|v| asked(&v));
     if !set("WAYLAND_DISPLAY") {
@@ -124,7 +198,7 @@ fn backend_in(var: impl Fn(&str) -> Option<OsString>, live: impl Fn(&str) -> boo
     if let Some(b) = ask {
         return b;
     }
-    if hyprland_in(&var, &live) {
+    if hyprland_in(&var, running) {
         Backend::Wayland
     } else if set("DISPLAY") {
         Backend::XWaylandAuto
@@ -133,27 +207,64 @@ fn backend_in(var: impl Fn(&str) -> Option<OsString>, live: impl Fn(&str) -> boo
     }
 }
 
-/// `backend_in` on her own environment. After `process_setup` an XWayland pick reads as X11
-/// (`WAYLAND_DISPLAY` is gone by then).
+/// What she says about her display server (`b`, from `backend_in` on the same environment) once
+/// she starts: a value of `SA_BACKEND` she ignored; Hyprland's variables she ignored, off Hyprland
+/// in a Wayland session (on Hyprland's Wayland `connect` uses them, and says what's wrong); her
+/// XWayland, on Hyprland or picked herself.
+fn notes_in(var: &impl Fn(&str) -> Option<OsString>, running: &[Hypr], b: Backend) -> Vec<String> {
+    let s = |k: &str| var(k).map(|v| v.to_string_lossy().into_owned()).unwrap_or_default();
+    let mut out = Vec::new();
+    if let Some(v) = var("SA_BACKEND").filter(|v| !v.to_string_lossy().trim().is_empty() && asked(v).is_none()) {
+        out.push(format!("synaps-avatar: SA_BACKEND={v:?} isn't x11 or wayland: ignored"));
+    }
+    let (wd, hyprland) = (s("WAYLAND_DISPLAY"), hyprland_in(var, running));
+    if matches!(b, Backend::XWayland | Backend::XWaylandAuto | Backend::NoXWayland) && !hyprland {
+        if let Some(sig) = sig_in(var) {
+            out.push(match running.iter().find(|h| h.sig == sig) {
+                None => format!("synaps-avatar: HYPRLAND_INSTANCE_SIGNATURE={sig} names no Hyprland that runs: left over from an earlier session, ignored"),
+                Some(h) => format!(
+                    "synaps-avatar: HYPRLAND_INSTANCE_SIGNATURE={sig} is a Hyprland on {}, not on this session's WAYLAND_DISPLAY={wd} (a compositor nested in it?): ignored",
+                    h.display.as_deref().unwrap_or_default()
+                ),
+            });
+        }
+        let said = xdg_hyprland(var);
+        if !said.is_empty() {
+            out.push(format!(
+                "synaps-avatar: {} says Hyprland, but none runs on WAYLAND_DISPLAY={wd}: left over (a tmux server keeps what it started with) or inherited (a compositor nested in Hyprland), ignored",
+                said.join(" ")
+            ));
+        }
+    }
+    if b == Backend::XWayland && hyprland {
+        out.push("synaps-avatar: SA_BACKEND=x11 on Hyprland: through XWayland she sees X clients only, and can't stay above native windows".into());
+    }
+    if b == Backend::XWaylandAuto {
+        out.push(format!("synaps-avatar: Wayland, not Hyprland: through XWayland (DISPLAY={}), as SA_BACKEND=x11 does; she sees X clients only", s("DISPLAY")));
+    }
+    out
+}
+
+/// Her display server and its notes (`notes_in`), as `process_setup` found them.
+static PICKED: std::sync::OnceLock<(Backend, Vec<String>)> = std::sync::OnceLock::new();
+
+/// Her display server: as `process_setup` picked it (by then an XWayland pick reads as X11 to
+/// anything that reads `WAYLAND_DISPLAY`: it's gone), else `backend_in` her environment now.
 pub fn backend() -> Backend {
-    backend_in(|k| std::env::var_os(k), hypr_live)
+    PICKED.get().map_or_else(|| backend_in(|k| std::env::var_os(k), &hypr_running()), |p| p.0)
 }
 
-/// `hyprland_in` on her own environment.
-pub fn hyprland() -> bool {
-    hyprland_in(&|k: &str| std::env::var_os(k), &hypr_live)
-}
-
-/// Whether the Hyprland instance `sig` runs: its request socket is there
-/// (`$XDG_RUNTIME_DIR/hypr/<sig>/.socket.sock`, as `hypr::ipc` connects to it).
-fn hypr_live(sig: &str) -> bool {
-    std::env::var_os("XDG_RUNTIME_DIR").is_some_and(|r| PathBuf::from(r).join("hypr").join(sig).join(".socket.sock").exists())
+/// What she has to say about her display server (`notes_in`), for her log once she starts: after
+/// its header, so not for `--check`, `--set` or `-V` (`connect` says them).
+pub fn backend_notes() -> &'static [String] {
+    PICKED.get().map_or(&[], |p| p.1.as_slice())
 }
 
 /// Process setup that has to happen before any other thread exists:
 ///
 /// * Her display server (`backend`): through XWayland, `WAYLAND_DISPLAY` is unset for GPUI
-///   and for `connect`, with one line in her log when she picked that herself.
+///   and for `connect`. What she has to say about it (`backend_notes`: an XWayland she picked
+///   herself, what she ignored) waits for her log's header: `connect` says it.
 ///
 /// Each knob below was measured on bella (release, `ps` RSS 6 s after start, see LOG.md):
 ///
@@ -167,24 +278,11 @@ fn hypr_live(sig: &str) -> bool {
 /// * glibc malloc: two arenas and a 1 MiB trim threshold, so the full-size PNG decode
 ///   buffers go back to the OS after scaling: 226 → 84 MB.
 pub fn process_setup() {
-    // Her display server, and a line for each thing about it she ignored or picked herself.
-    let b = backend();
-    if let Some(v) = std::env::var_os("SA_BACKEND").filter(|v| !v.to_string_lossy().trim().is_empty() && asked(v).is_none()) {
-        elog!("synaps-avatar: SA_BACKEND={v:?} isn't x11 or wayland: ignored");
-    }
-    if let Ok(sig) = std::env::var("HYPRLAND_INSTANCE_SIGNATURE")
-        && !sig.trim().is_empty()
-        && !hypr_live(&sig)
-    {
-        elog!("synaps-avatar: HYPRLAND_INSTANCE_SIGNATURE={sig} names no Hyprland that runs (no $XDG_RUNTIME_DIR/hypr/{sig}/.socket.sock): one left over from an earlier session, ignored");
-    }
-    if b == Backend::XWayland && hyprland() {
-        elog!("synaps-avatar: SA_BACKEND=x11 on Hyprland: through XWayland she sees X clients only, and can't stay above native windows");
-    }
-    if b == Backend::XWaylandAuto {
-        let display = std::env::var("DISPLAY").unwrap_or_default();
-        elog!("synaps-avatar: Wayland, not Hyprland: through XWayland (DISPLAY={display}), as SA_BACKEND=x11 does; she sees X clients only");
-    }
+    // Her display server, and what she'll say about it once she starts (`backend_notes`).
+    let var = |k: &str| std::env::var_os(k);
+    let running = hypr_running();
+    let b = backend_in(var, &running);
+    PICKED.set((b, notes_in(&var, &running, b))).ok();
     // Through XWayland (SA_BACKEND=x11, or a Wayland desktop that isn't Hyprland): GPUI and we
     // both take X11.
     if matches!(b, Backend::XWayland | Backend::XWaylandAuto) {
@@ -496,62 +594,158 @@ mod tests {
         assert_eq!(process_env(pid, "SA_TEST_KEY"), None, "gone: can't be read");
     }
 
-    /// Her display server: Hyprland natively (a signature naming one that runs, or the desktop
-    /// variables saying Hyprland), any other Wayland desktop through XWayland when it runs, X11
-    /// as it is; `SA_BACKEND` wins whenever it says x11 or wayland, in any case.
+    /// Her display server: Hyprland natively (a signature naming one that runs on this display, or
+    /// the desktop variables saying Hyprland while one does), any other Wayland desktop through
+    /// XWayland when it runs, X11 as it is; `SA_BACKEND` wins whenever it says x11 or wayland, in
+    /// any case.
     #[test]
     fn wayland_off_hyprland_runs_through_xwayland() {
-        // Hyprland `abc_123` runs (its socket is there); any other signature names none.
-        fn pick(vars: &[(&str, &str)]) -> Backend {
-            backend_in(|k: &str| vars.iter().find(|(n, _)| *n == k).map(|(_, v)| OsString::from(v)), |sig: &str| sig == "abc_123")
-        }
-        let (wl, hypr, x) = (("WAYLAND_DISPLAY", "wayland-0"), ("HYPRLAND_INSTANCE_SIGNATURE", "abc_123"), ("DISPLAY", ":0"));
-        let stale = ("HYPRLAND_INSTANCE_SIGNATURE", "old_456");
+        // Hyprland `abc_123` runs on wayland-1 (Hyprland never takes wayland-0); GNOME has wayland-0.
+        let hy = [Hypr { sig: "abc_123".into(), display: Some("wayland-1".into()) }];
+        let pick_in = |vars: &[(&str, &str)], running: &[Hypr]| backend_in(env_of(vars), running);
+        let pick = |vars: &[(&str, &str)]| pick_in(vars, &hy);
+        let (wl, hypr, x) = (("WAYLAND_DISPLAY", "wayland-1"), ("HYPRLAND_INSTANCE_SIGNATURE", "abc_123"), ("DISPLAY", ":0"));
+        let (gnome, stale) = (("WAYLAND_DISPLAY", "wayland-0"), ("HYPRLAND_INSTANCE_SIGNATURE", "old_456"));
         // X11: no Wayland session (a blank WAYLAND_DISPLAY is none, as GPUI reads it).
         assert_eq!(pick(&[]), Backend::X11);
         assert_eq!(pick(&[x]), Backend::X11);
         assert_eq!(pick(&[("WAYLAND_DISPLAY", ""), x]), Backend::X11);
         assert_eq!(pick(&[x, ("SA_BACKEND", "x11")]), Backend::X11, "on X11 there's nothing to unset");
-        // Hyprland: natively, XWayland or not.
+        assert_eq!(pick(&[x, hypr]), Backend::X11, "Hyprland's signature in an X11 session");
+        // Hyprland: natively, XWayland or not; its display by name.
         assert_eq!(pick(&[wl, hypr, x]), Backend::Wayland);
         assert_eq!(pick(&[wl, hypr]), Backend::Wayland);
+        assert_eq!(pick(&[("WAYLAND_DISPLAY", "/run/user/1000/wayland-1"), hypr]), Backend::Wayland);
+        // One older than 0.40 (no lock) serves any display.
+        assert_eq!(pick_in(&[gnome, hypr], &[Hypr { sig: "abc_123".into(), display: None }]), Backend::Wayland);
         // GNOME, KDE, sway: XWayland when it runs (she says so), else nothing she can run on.
-        assert_eq!(pick(&[wl, x]), Backend::XWaylandAuto);
-        assert_eq!(pick(&[wl]), Backend::NoXWayland);
-        assert_eq!(pick(&[wl, ("DISPLAY", "")]), Backend::NoXWayland, "a blank DISPLAY is none");
-        assert_eq!(pick(&[wl, ("HYPRLAND_INSTANCE_SIGNATURE", ""), x]), Backend::XWaylandAuto, "a blank signature isn't Hyprland");
-        assert_eq!(pick(&[wl, ("HYPRLAND_INSTANCE_SIGNATURE", " "), x]), Backend::XWaylandAuto, "nor a blank one");
-        // A signature left over from an earlier Hyprland login (in GNOME's environment, a tmux
-        // server's) names no Hyprland that runs: not Hyprland.
-        assert_eq!(pick(&[wl, stale, x, ("XDG_CURRENT_DESKTOP", "GNOME")]), Backend::XWaylandAuto);
-        assert_eq!(pick(&[wl, stale]), Backend::NoXWayland);
+        assert_eq!(pick(&[gnome, x]), Backend::XWaylandAuto);
+        assert_eq!(pick(&[gnome]), Backend::NoXWayland);
+        assert_eq!(pick(&[gnome, ("DISPLAY", "")]), Backend::NoXWayland, "a blank DISPLAY is none");
+        assert_eq!(pick(&[gnome, ("HYPRLAND_INSTANCE_SIGNATURE", ""), x]), Backend::XWaylandAuto, "a blank signature isn't Hyprland");
+        assert_eq!(pick(&[wl, ("HYPRLAND_INSTANCE_SIGNATURE", " \t"), x]), Backend::XWaylandAuto, "nor a blank one");
+        // A signature left over from an earlier Hyprland login (GNOME's environment, a tmux
+        // server's) names no Hyprland that runs (none, or its lock's PID is gone): not Hyprland.
+        assert_eq!(pick(&[gnome, stale, x, ("XDG_CURRENT_DESKTOP", "GNOME")]), Backend::XWaylandAuto);
+        assert_eq!(pick(&[gnome, stale]), Backend::NoXWayland);
+        assert_eq!(pick_in(&[wl, hypr, x], &[]), Backend::XWaylandAuto, "its Hyprland crashed");
+        // A compositor nested in Hyprland: its signature and desktop inherited, a display of its own.
+        assert_eq!(pick(&[("WAYLAND_DISPLAY", "wayland-2"), hypr, x, ("XDG_CURRENT_DESKTOP", "Hyprland")]), Backend::XWaylandAuto);
         // Hyprland whose signature got lost (systemd or D-Bus activation): the desktop variables
-        // say Hyprland (as install.sh reads them), and Hyprland's connect says what's missing.
+        // say Hyprland (as install.sh reads them) and one serves this display, so Hyprland's
+        // connect says what's missing.
         assert_eq!(pick(&[wl, x, ("XDG_CURRENT_DESKTOP", "Hyprland")]), Backend::Wayland);
         assert_eq!(pick(&[wl, x, ("XDG_SESSION_DESKTOP", "hyprland")]), Backend::Wayland);
-        assert_eq!(pick(&[wl, stale, x, ("XDG_CURRENT_DESKTOP", "Hyprland")]), Backend::Wayland);
-        assert_eq!(pick(&[wl, x, ("XDG_CURRENT_DESKTOP", "ubuntu:GNOME"), ("XDG_SESSION_DESKTOP", "ubuntu")]), Backend::XWaylandAuto);
-        assert_eq!(pick(&[wl, x, ("XDG_CURRENT_DESKTOP", "KDE"), ("XDG_SESSION_DESKTOP", "plasma")]), Backend::XWaylandAuto);
+        assert_eq!(pick(&[wl, stale, x, ("XDG_CURRENT_DESKTOP", "Hyprland")]), Backend::Wayland, "connect says the signature's wrong");
+        // The desktop variables left over (a tmux server started under Hyprland, now on GNOME):
+        // no Hyprland runs, or none on this display.
+        assert_eq!(pick_in(&[wl, x, ("XDG_CURRENT_DESKTOP", "Hyprland")], &[]), Backend::XWaylandAuto);
+        assert_eq!(pick(&[gnome, stale, x, ("XDG_CURRENT_DESKTOP", "Hyprland")]), Backend::XWaylandAuto);
+        assert_eq!(pick_in(&[wl, ("XDG_SESSION_DESKTOP", "Hyprland")], &[]), Backend::NoXWayland);
+        assert_eq!(pick(&[gnome, x, ("XDG_CURRENT_DESKTOP", "ubuntu:GNOME"), ("XDG_SESSION_DESKTOP", "ubuntu")]), Backend::XWaylandAuto);
+        assert_eq!(pick(&[gnome, x, ("XDG_CURRENT_DESKTOP", "KDE"), ("XDG_SESSION_DESKTOP", "plasma")]), Backend::XWaylandAuto);
         // SA_BACKEND wins: x11 is XWayland as asked (no note of her own), wayland never falls back.
-        assert_eq!(pick(&[wl, x, ("SA_BACKEND", "x11")]), Backend::XWayland);
+        assert_eq!(pick(&[gnome, x, ("SA_BACKEND", "x11")]), Backend::XWayland);
         assert_eq!(pick(&[wl, hypr, x, ("SA_BACKEND", "x11")]), Backend::XWayland);
-        assert_eq!(pick(&[wl, ("SA_BACKEND", "x11")]), Backend::XWayland, "asked for without XWayland: X11's connect says why");
-        assert_eq!(pick(&[wl, x, ("SA_BACKEND", "wayland")]), Backend::Wayland);
-        assert_eq!(pick(&[wl, x, ("SA_BACKEND", " x11\n")]), Backend::XWayland, "trimmed");
+        assert_eq!(pick(&[gnome, ("SA_BACKEND", "x11")]), Backend::XWayland, "asked for without XWayland: X11's connect says why");
+        assert_eq!(pick(&[gnome, x, ("SA_BACKEND", "wayland")]), Backend::Wayland);
+        assert_eq!(pick(&[gnome, x, ("SA_BACKEND", " x11\n")]), Backend::XWayland, "trimmed");
         assert_eq!(pick(&[wl, hypr, x, ("SA_BACKEND", "X11")]), Backend::XWayland, "in any case");
-        assert_eq!(pick(&[wl, x, ("SA_BACKEND", "Wayland")]), Backend::Wayland);
+        assert_eq!(pick(&[gnome, x, ("SA_BACKEND", "Wayland")]), Backend::Wayland);
         assert_eq!(pick(&[wl, x, ("XDG_CURRENT_DESKTOP", "Hyprland"), ("SA_BACKEND", "x11")]), Backend::XWayland);
         // wayland with no Wayland session: no fallback to X11.
         assert_eq!(pick(&[x, ("SA_BACKEND", "wayland")]), Backend::NoWayland);
         assert_eq!(pick(&[("WAYLAND_DISPLAY", ""), x, ("SA_BACKEND", "WAYLAND")]), Backend::NoWayland);
         // A value she doesn't know (or a blank one) is ignored.
-        assert_eq!(pick(&[wl, x, ("SA_BACKEND", "gnome")]), Backend::XWaylandAuto);
+        assert_eq!(pick(&[gnome, x, ("SA_BACKEND", "gnome")]), Backend::XWaylandAuto);
         assert_eq!(pick(&[wl, hypr, ("SA_BACKEND", "")]), Backend::Wayland);
         assert_eq!(pick(&[x, ("SA_BACKEND", "gnome")]), Backend::X11);
-        // The ones process_setup names as ignored: set, not blank, not one she knows.
+        // The ones notes_in names as ignored: set, not blank, not one she knows.
         assert_eq!(asked(OsStr::new("gnome")), None);
         assert_eq!(asked(OsStr::new(" ")), None);
         assert_eq!(asked(OsStr::new("Wayland ")), Some(Backend::Wayland));
+    }
+
+    /// `vars` as her environment: a variable, None when unset.
+    fn env_of<'a>(vars: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<OsString> + 'a {
+        move |k: &str| vars.iter().find(|(n, _)| *n == k).map(|(_, v)| OsString::from(v))
+    }
+
+    #[test]
+    fn display_notes_say_what_she_ignored_and_picked() {
+        let hy = [Hypr { sig: "abc_123".into(), display: Some("wayland-1".into()) }];
+        let notes = |vars: &[(&str, &str)]| {
+            let b = backend_in(env_of(vars), &hy);
+            notes_in(&env_of(vars), &hy, b).join("\n")
+        };
+        let (wl, hypr, x) = (("WAYLAND_DISPLAY", "wayland-1"), ("HYPRLAND_INSTANCE_SIGNATURE", "abc_123"), ("DISPLAY", ":0"));
+        let (gnome, stale) = (("WAYLAND_DISPLAY", "wayland-0"), ("HYPRLAND_INSTANCE_SIGNATURE", "old_456"));
+        // Hyprland, and X11: nothing to say.
+        assert_eq!(notes(&[wl, hypr, x, ("XDG_CURRENT_DESKTOP", "Hyprland")]), "");
+        assert_eq!(notes(&[x, stale, ("XDG_CURRENT_DESKTOP", "Hyprland")]), "", "no Wayland session: Hyprland's variables mean nothing");
+        // GNOME: her XWayland, and the leftovers she ignored.
+        let n = notes(&[gnome, x]);
+        assert!(n.starts_with("synaps-avatar: Wayland, not Hyprland: through XWayland (DISPLAY=:0)") && n.lines().count() == 1, "{n}");
+        let n = notes(&[gnome, stale, x, ("XDG_CURRENT_DESKTOP", "Hyprland")]);
+        assert!(n.contains("HYPRLAND_INSTANCE_SIGNATURE=old_456 names no Hyprland that runs") && n.contains("XDG_CURRENT_DESKTOP=Hyprland says Hyprland, but none runs on WAYLAND_DISPLAY=wayland-0"), "{n}");
+        assert!(n.contains("through XWayland"), "{n}");
+        let n = notes(&[("WAYLAND_DISPLAY", "wayland-2"), hypr]);
+        assert!(n.contains("HYPRLAND_INSTANCE_SIGNATURE=abc_123 is a Hyprland on wayland-1, not on this session's WAYLAND_DISPLAY=wayland-2"), "{n}");
+        assert!(!n.contains("through XWayland"), "no XWayland (DISPLAY unset): connect says so");
+        // On Hyprland's Wayland (asked for, or a lost signature) its variables aren't ignored:
+        // connect uses them and says what's wrong.
+        assert_eq!(notes(&[gnome, stale, x, ("SA_BACKEND", "wayland")]), "");
+        assert_eq!(notes(&[wl, stale, x, ("XDG_CURRENT_DESKTOP", "Hyprland")]), "");
+        // SA_BACKEND: x11 on Hyprland is said; x11 anywhere else ignores the leftovers too.
+        let n = notes(&[wl, hypr, x, ("SA_BACKEND", "x11")]);
+        assert!(n.contains("SA_BACKEND=x11 on Hyprland") && !n.contains("ignored"), "{n}");
+        let n = notes(&[gnome, stale, x, ("SA_BACKEND", "x11")]);
+        assert!(n.contains("old_456 names no Hyprland that runs") && !n.contains("SA_BACKEND=x11 on Hyprland") && !n.contains("Wayland, not Hyprland"), "{n}");
+        assert_eq!(notes(&[gnome, x, ("SA_BACKEND", "gnome")]).lines().next(), Some(r#"synaps-avatar: SA_BACKEND="gnome" isn't x11 or wayland: ignored"#));
+    }
+
+    #[test]
+    fn hyprland_runs_while_its_lock_says_so() {
+        assert_eq!(lock_in("1234\nwayland-1\n"), Some((1234, "wayland-1".into())));
+        assert_eq!(lock_in(" 1234 \n wayland-1"), Some((1234, "wayland-1".into())));
+        assert_eq!(lock_in("1234\n"), None, "no display line");
+        assert_eq!(lock_in("+1234\nwayland-1\n"), None);
+        assert_eq!(lock_in("self\nwayland-1\n"), None, "/proc/self is no PID");
+        assert_eq!(lock_in(""), None);
+        // A runtime dir's hypr: a lock naming this process, one naming a process that's gone (a
+        // crash: its socket stays, refusing), one whose PID is in another PID namespace (tools/wlrig:
+        // its socket answers), one older than 0.40 (a socket, no lock), and a folder with neither.
+        use std::os::unix::net::UnixListener;
+        let root = std::env::temp_dir().join(format!("sa-hypr-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut child = std::process::Command::new("true").spawn().expect("true");
+        let gone = child.id();
+        child.wait().expect("true ends");
+        let at = |sig: &str, lock: Option<String>| {
+            let d = root.join(sig);
+            std::fs::create_dir_all(&d).unwrap();
+            if let Some(l) = lock {
+                std::fs::write(d.join("hyprland.lock"), l).unwrap();
+            }
+            d.join(".socket.sock")
+        };
+        at("live_1", Some(format!("{}\nwayland-1\n", std::process::id())));
+        drop(UnixListener::bind(at("crashed_2", Some(format!("{gone}\nwayland-1\n")))).unwrap());
+        let _nested = UnixListener::bind(at("sandboxed_3", Some(format!("{gone}\nwayland-9\n")))).unwrap();
+        let _old = UnixListener::bind(at("old_4", None)).unwrap();
+        at("empty_5", None);
+        let mut running = hypr_running_in(&root);
+        running.sort_by(|a, b| a.sig.cmp(&b.sig));
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(
+            running,
+            [
+                Hypr { sig: "live_1".into(), display: Some("wayland-1".into()) },
+                Hypr { sig: "old_4".into(), display: None },
+                Hypr { sig: "sandboxed_3".into(), display: Some("wayland-9".into()) },
+            ]
+        );
+        assert!(hypr_running_in(&root).is_empty(), "no runtime dir: none");
     }
 
     #[test]

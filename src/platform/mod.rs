@@ -605,11 +605,15 @@ pub trait Stage {
 /// first for that: `SA_BACKEND=x11`, or any other Wayland desktop with XWayland running).
 #[cfg(target_os = "linux")]
 pub fn connect() -> Result<Os> {
+    // What she had to say about it (an XWayland she picked, what she ignored): after her log's header.
+    for n in linux::backend_notes() {
+        elog!("{n}");
+    }
     match linux::backend() {
         linux::Backend::Wayland => {
             let (desk, stage) = hypr::connect().map_err(|e| {
                 anyhow::anyhow!(
-                    "{e:#}. On Wayland she runs natively on Hyprland only. Not Hyprland (XDG_CURRENT_DESKTOP or HYPRLAND_INSTANCE_SIGNATURE left over from an earlier Hyprland login, or SA_BACKEND=wayland)? SA_BACKEND=x11 runs her through XWayland. Hyprland? Its HYPRLAND_INSTANCE_SIGNATURE has to reach her environment"
+                    "{e:#}. On Wayland she runs natively on Hyprland only. Not Hyprland (SA_BACKEND=wayland)? SA_BACKEND=x11 runs her through XWayland. Hyprland? Its HYPRLAND_INSTANCE_SIGNATURE has to reach her environment (`hyprctl instances` lists the ones that run): one left over from an earlier Hyprland login, as a tmux server keeps it, names none"
                 )
             })?;
             return Ok(Os::new(desk, Box::new(stage)));

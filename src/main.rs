@@ -293,8 +293,9 @@ pub fn env_composited() -> Option<Option<bool>> {
 }
 
 fn main() {
-    // -V alone: before process_setup, whose notes (the GPU pick, SA_BACKEND) are stderr lines a
-    // version query doesn't want. With other arguments it's parse_args' (in order, as -h is).
+    // -V alone: before process_setup, whose note (the GPU pick) is a stderr line a version query
+    // doesn't want (its display server's wait for connect). With other arguments it's parse_args'
+    // (in order, as -h is).
     let mut argv = std::env::args_os().skip(1);
     if let (Some(a), None) = (argv.next(), argv.next())
         && (a == "-V" || a == "--version")
