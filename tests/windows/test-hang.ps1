@@ -107,7 +107,6 @@ if (-not (Test-Path (Join-Path $Pack 'sprites.json'))) {
 # Her log: her stderr, here (a console build would write to its console, a windowed one to its file).
 $log = Join-Path $work 'her.log'
 if (Get-Process synaps-avatar -ErrorAction SilentlyContinue) { throw 'another synaps-avatar runs: not a clean machine' }
-if (Get-Process synaps -ErrorAction SilentlyContinue) { throw 'a Synaps daemon runs: this run is offline' }
 $saved = @{}
 foreach ($kv in $With) {
     $k, $v = $kv -split '=', 2
@@ -115,7 +114,8 @@ foreach ($kv in $With) {
     [Environment]::SetEnvironmentVariable($k, $v)
 }
 $t0 = Get-Date
-$p = Start-Process -FilePath $Exe -ArgumentList @('--pack', "`"$Pack`"") -PassThru -RedirectStandardError $log -RedirectStandardOutput (Join-Path $work 'her.out')
+# Offline as on his box: a daemon socket nobody serves (a daemon running here is left alone).
+$p = Start-Process -FilePath $Exe -ArgumentList @('--pack', "`"$Pack`"", '--socket', "\\.\pipe\sa-hang-nobody-$PID") -PassThru -RedirectStandardError $log -RedirectStandardOutput (Join-Path $work 'her.out')
 foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) }
 $null = $p.Handle
 Write-Host "her pid $($p.Id) ($Exe; $($With -join ' '))"
