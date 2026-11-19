@@ -232,6 +232,10 @@ pub struct Link {
     creds_at: Option<Instant>,
     /// Who stands behind `creds` (#76): what a read can take back, and what it can't.
     creds_by: Said,
+    /// The local server the daemon last couldn't reach, as its error names it (`local_tried`):
+    /// the URL it runs with, which may not be its config's now (Synaps reads that at its start).
+    /// Gone with an answer or a (re)connect (`synaps daemon reload`).
+    local_tried: Option<String>,
     /// The last settled read's own answer (`set_creds`), whatever `creds` kept: none since the
     /// last model change or answer.
     creds_read: Option<(Creds, crate::creds::Again)>,
@@ -317,6 +321,7 @@ impl Link {
             creds_at: None,
             creds_by: Said::Read,
             creds_read: None,
+            local_tried: None,
             daemon: None,
             daemon_version: None,
             turn_at: now,
@@ -449,6 +454,12 @@ impl Link {
         self.creds
     }
 
+    /// The local server the daemon last couldn't reach (`url_shown`, its `/chat/completions`
+    /// off), until an answer or a (re)connect.
+    pub fn local_tried(&self) -> Option<&str> {
+        self.local_tried.as_deref()
+    }
+
     /// Her credentials have been looked at since she attached: a read settled, the daemon or an
     /// answer said, or there is nothing here to read (a daemon through `--socket`). Her first
     /// words wait for it a little (a fresh install's are about her brain).
@@ -550,6 +561,7 @@ impl Link {
         self.creds_by = Said::Answer;
         self.creds_read = None;
         self.creds_at = None;
+        self.local_tried = None;
     }
 
     /// Her maker's mark, for the menu and Settings' ABOUT: `SYNAPS 0.12.0 · SONNET 4.6` (the
@@ -755,6 +767,8 @@ impl Link {
             Event::Status(s) => {
                 let up = matches!(s, Status::Connected { .. });
                 if let Status::Connected { daemon_version, profile, pid, .. } = &s {
+                    // A reload reads its config again: the URL it couldn't reach is the old one's.
+                    self.local_tried = None;
                     self.daemon_version = Some(daemon_version.trim().to_string()).filter(|v| !v.is_empty());
                     // Another daemon process is another brain: an answer from the last one proves
                     // nothing here (#76). The attach reads again.
@@ -1038,6 +1052,9 @@ impl Link {
                         // Her log and bubble show its URLs as she does (`urls_shown`): Synaps
                         // quotes its local URL whole, a `user:password@` too.
                         elog!("synaps-avatar: turn error ({}): {}", t.key(), one_line(&crate::provider::urls_shown(&message), 300));
+                        if matches!(t, Trouble::LocalDown { .. }) {
+                            self.local_tried = local_tried(&message);
+                        }
                         if let Trouble::NoBrain { on } = t {
                             // The daemon's word: missing until a check or an answer says otherwise,
                             // or the files read otherwise than when it spoke (#76).
@@ -1387,6 +1404,16 @@ pub enum Trouble {
     /// (Ollama), or a context too small for her prompt (llama.cpp, LM Studio, vLLM). Ollama itself
     /// cuts an overlong prompt without a word: no error to name there.
     WrongModel,
+}
+
+/// The local server a `can't reach local endpoint at <url> — …` error names (Synaps' base URL
+/// and `/chat/completions`), as she shows one (`provider::url_shown`), the path it adds off.
+fn local_tried(message: &str) -> Option<String> {
+    const AT: &str = "local endpoint at ";
+    let at = message.to_ascii_lowercase().find(AT)? + AT.len();
+    let url = crate::provider::url_shown(message[at..].split_whitespace().next()?);
+    let url = url.trim_end_matches('/');
+    Some(url.strip_suffix("/chat/completions").unwrap_or(url).trim_end_matches('/').to_string()).filter(|u| !u.is_empty())
 }
 
 /// The command a no-brain line ends on, on a line of its own (the bubble draws it as a chip).
@@ -2240,6 +2267,30 @@ mod tests {
         l.on_event(wire(1, serde_json::json!({"ev": "turn_started", "turn_baseline": 1, "trigger": "user", "user_text": "hi"})), t);
         l.on_event(wire(1, serde_json::json!({"ev": "stream", "event": {"kind": "session", "session": "error", "message": message}})), t);
         l.on_event(wire(1, serde_json::json!({"ev": "idle"})), t);
+    }
+
+    /// The local server a LocalDown names, as she shows it: its path and any `user:password@`
+    /// off. Kept until her model answers or the daemon (re)connects (a reload reads its config).
+    #[test]
+    fn the_local_url_the_daemon_tried_is_kept_until_an_answer() {
+        let t0 = Instant::now();
+        let down = |u: &str| format!("openai request failed: broker transport error: can't reach local endpoint at {u}/chat/completions — is Ollama/LM Studio running?");
+        assert_eq!(local_tried(&down("http://localhost:11434/v1")).as_deref(), Some("http://localhost:11434/v1"));
+        assert_eq!(local_tried(&down("http://bob:pw@lm.lan:1234/v1/")).as_deref(), Some("http://lm.lan:1234/v1"), "no user:password, one slash");
+        assert_eq!(local_tried("Can't reach local endpoint at http://127.0.0.1:1234/v1/chat/completions — is"), Some("http://127.0.0.1:1234/v1".into()), "v0.10's capital");
+        assert_eq!(local_tried("can't reach local endpoint at "), None);
+        let mut l = live_link(t0);
+        assert_eq!(l.local_tried(), None);
+        failed_turn(&mut l, "No Anthropic credentials. Run `synaps login`.", t0);
+        assert_eq!(l.local_tried(), None, "another trouble names none");
+        failed_turn(&mut l, &down("http://localhost:11434/v1"), t0);
+        assert_eq!(l.local_tried(), Some("http://localhost:11434/v1"));
+        l.on_event(wire(1, serde_json::json!({"ev": "turn_started", "turn_baseline": 1, "trigger": "user", "user_text": "hi"})), t0);
+        l.on_event(wire(1, serde_json::json!({"ev": "stream", "event": {"kind": "session", "session": "usage", "input_tokens": 6, "output_tokens": 15, "model": null}})), t0);
+        assert_eq!(l.local_tried(), None, "it answered");
+        failed_turn(&mut l, &down("http://localhost:11434/v1"), t0);
+        l.on_event(connected(), t0);
+        assert_eq!(l.local_tried(), None, "a reconnect: its config read again");
     }
 
     /// The daemon's own texts (SynapsCLI 3072a25: runtime/api.rs, auth.rs, session_driver.rs;

@@ -590,7 +590,7 @@ impl Line {
         v["mind"] = self.snap.prefs.as_ref().map_or(serde_json::Value::Null, |p| {
             serde_json::json!({
                 "model": p.mind.model, "signed_in": p.mind.signed_in, "signed": p.mind.signed, "here": p.mind.here,
-                "local": p.mind.local.as_ref().map(|(u, l)| format!("{u} {l:?}")),
+                "local": p.mind.local.as_ref().map(|(u, l)| format!("{u} {l:?}")), "tried": p.mind.tried,
             })
         });
         v

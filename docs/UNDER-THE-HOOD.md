@@ -77,6 +77,10 @@ and `avatarctl settings reload` (on Windows: `%APPDATA%\synaps-avatar\settings.t
 her). A local model makes a slower, plainer Capri, and without a GPU a slow one. When it fails she
 says why: Ollama off, a model it hasn't pulled, or one that can't take her request.
 
+LM Studio, llama.cpp or another server: set its URL in Synaps (`provider.local.url` in its config,
+or its TUI's /settings ▸ Providers ▸ Local), then `synaps daemon reload`: Synaps reads it when
+its daemon starts.
+
 ## What else Synaps does
 
 - **Sessions outlive the window.** The daemon owns them. Close every terminal and they keep going.

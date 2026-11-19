@@ -252,13 +252,14 @@ pub fn local_url(set: Option<&str>, env: Option<String>) -> String {
 }
 
 /// A URL as she shows it, in her log, her bubble or on a page: nothing up to its last `@` (a
-/// password may hold `/`, `?`, `#` unencoded), no `?query` or `#fragment` (where a URL can carry
-/// a credential). An `@` past the host (no local server has one) costs only what's shown.
+/// password may hold `/`, `?`, `#` unencoded), then nothing from a query's or fragment's first
+/// mark on (`?#&=;`: one with an `@` in it leaves only its tail after the cut, `x&key=sk`). An
+/// `@` past the host (no local server has one) costs only what's shown.
 pub fn url_shown(u: &str) -> String {
     let u = u.trim();
     let (scheme, rest) = u.split_once("://").unwrap_or(("", u));
     let rest = rest.rsplit_once('@').map_or(rest, |(_, r)| r);
-    let rest = rest.split_once(['?', '#']).map_or(rest, |(a, _)| a);
+    let rest = rest.split_once(['?', '#', '&', '=', ';']).map_or(rest, |(a, _)| a);
     if scheme.is_empty() { rest.to_string() } else { format!("{scheme}://{rest}") }
 }
 
@@ -324,8 +325,14 @@ pub fn probe(url: &str, timeout: Duration) -> Local {
     let (host, path) = rest.split_once('/').map_or((rest.as_str(), ""), |(h, p)| (h, p));
     let host = if host.rsplit_once(':').is_some_and(|(_, p)| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())) { host.to_string() } else { format!("{host}:80") };
     let path = format!("/{}/models", path.trim_matches('/')).replace("//", "/");
+    if !resolvable(&host) {
+        return Local::Odd(0);
+    }
     let Some(addrs) = resolve(&host, left) else { return Local::Off };
-    let Some(mut s) = addrs.iter().find_map(|a| std::net::TcpStream::connect_timeout(a, left()?).ok()) else { return Local::Off };
+    // What's left split across the addresses (`localhost`: 127.0.0.1, then ::1), so a refused
+    // first one (Windows takes 2 s to say so) leaves the next its share.
+    let n = addrs.len();
+    let Some(mut s) = addrs.iter().enumerate().find_map(|(i, a)| std::net::TcpStream::connect_timeout(a, left()? / (n - i) as u32).ok()) else { return Local::Off };
     let req = format!("GET {path} HTTP/1.0\r\nHost: {host}\r\nAccept: application/json\r\nConnection: close\r\n\r\n");
     if left().is_none_or(|d| s.set_write_timeout(Some(d)).is_err()) || s.write_all(req.as_bytes()).is_err() {
         return Local::Off;
@@ -346,6 +353,14 @@ pub fn probe(url: &str, timeout: Duration) -> Local {
         return Local::Off;
     }
     models_reply(&String::from_utf8_lossy(&buf[..buf.len().min(1 << 20)]))
+}
+
+/// `host:port` is an address, or a name a resolver could answer: never a `user:pa` left by a `/`,
+/// `?` or `#` unencoded in a password (`url_target` cuts the host at the first), which would go
+/// to DNS.
+fn resolvable(host: &str) -> bool {
+    let name = host.rsplit_once(':').map_or(host, |(h, _)| h);
+    host.parse::<std::net::SocketAddr>().is_ok() || (!name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b"-._".contains(&b)))
 }
 
 /// `host:port`'s addresses, by `left()`'s deadline. An address as it is; a name on a thread of
@@ -448,6 +463,8 @@ pub struct Status {
     pub local: Option<(String, Local)>,
     /// `GEMINI_CLIENT_ID` is set (hers, or the daemon's): Gemini can be signed in to.
     pub gemini: bool,
+    /// The local server her daemon last couldn't reach (`Link::local_tried`, as shown).
+    pub tried: Option<String>,
 }
 
 impl Status {
@@ -461,16 +478,23 @@ impl Status {
         others().filter(|&p| p.id != "google-gemini" || self.gemini || self.signed.contains(&p.id) || self.provider() == Some(p)).collect()
     }
 
+    /// Her daemon couldn't reach another local server than the one she looks at (`tried`): its
+    /// config's URL changed after it started (Synaps reads it then; `synaps daemon reload`).
+    pub fn stale_url(&self) -> bool {
+        let norm = |u: &str| u.trim().trim_end_matches('/').to_ascii_lowercase();
+        matches!((&self.tried, &self.local), (Some(t), Some((u, _))) if norm(t) != norm(u))
+    }
+
     /// No brain: no login for her model (her tag's NO BRAIN YET).
     pub fn none(&self) -> bool {
         self.signed_in == Some(false)
     }
 
     /// A working brain, as far as she can tell: a login (on file, or her model answered), or her
-    /// local model on a server that answers.
+    /// local model on a server that answers, the one her daemon runs with.
     pub fn ok(&self) -> bool {
         match (self.provider().map(|p| p.kind), &self.local) {
-            (Some(Kind::Local), Some((_, l))) => self.model.as_deref().is_some_and(|m| l.has(m)),
+            (Some(Kind::Local), Some((_, l))) => !self.stale_url() && self.model.as_deref().is_some_and(|m| l.has(m)),
             _ => self.signed_in == Some(true),
         }
     }
@@ -613,6 +637,8 @@ mod tests {
         assert_eq!(url_shown("localhost:11434"), "localhost:11434");
         assert_eq!(url_shown("u:pw@localhost:11434/v1"), "localhost:11434/v1", "no scheme");
         assert_eq!(url_shown("http://[::1]:11434/v1"), "http://[::1]:11434/v1");
+        assert_eq!(url_shown("http://h/v1?u=me@x&key=sk"), "http://x", "an @ in a query: none of its key");
+        assert_eq!(url_shown("http://h/v1;key=sk"), "http://h/v1");
         assert!(!format!("{:?}", Some((url_shown("http://u:secret@h/v1"), Local::Off))).contains("secret"));
         // The probe's own parse: the server as a URL parser reads it.
         assert_eq!(url_target("http://bob:hunter2@10.0.0.2:8080/v1?k=x"), "http://10.0.0.2:8080/v1");
@@ -662,9 +688,9 @@ mod tests {
     }
 
     /// An address isn't looked up, nor `localhost`; a name is, unless `DNS_MAX` lookups left
-    /// behind still hang.
+    /// behind still hang. (Not that one comes back down: CI can't count on DNS.)
     #[test]
-    fn name_lookups_left_behind_are_bounded() {
+    fn name_lookups_are_capped_and_localhost_needs_none() {
         use std::sync::atomic::Ordering;
         let left = || Some(Duration::from_secs(2));
         assert_eq!(resolve("127.0.0.1:11434", left), Some(vec!["127.0.0.1:11434".parse().unwrap()]));
@@ -675,7 +701,31 @@ mod tests {
         assert_eq!(resolve("localhost:11434", left), Some(local.clone()), "localhost: no lookup, so not capped");
         assert_eq!(resolve("LocalHost:11434", left), Some(local));
         DNS_LIVE.fetch_sub(DNS_MAX, Ordering::SeqCst);
-        assert!(resolve("localhost:11434", left).is_some_and(|a| !a.is_empty()));
+    }
+
+    /// A `user:pa` a `/` in a password leaves as the host is never sent to DNS: the probe stops
+    /// before any lookup (Odd, not the Off a failed one gives).
+    #[test]
+    fn a_password_fragment_is_never_looked_up() {
+        assert_eq!(probe("http://admin:s3cr/et@lm.lan:1234/v1", Duration::from_millis(400)), Local::Odd(0));
+        assert_eq!(probe("http://admin:s3cr?et@lm.lan:1234/v1", Duration::from_millis(400)), Local::Odd(0), "a ?");
+        assert!(!resolvable("admin:s3cr:80") && !resolvable("[admin:s3cr]:80") && !resolvable(":80"));
+        assert!(resolvable("lm.lan:1234") && resolvable("my-box_2:80") && resolvable("127.0.0.1:1234") && resolvable("[::1]:11434") && resolvable("localhost:11434"));
+    }
+
+    /// Her daemon runs with the URL it read at its start: a failure naming another than the one
+    /// she looks at isn't a brain, however her look's server answers.
+    #[test]
+    fn a_local_url_the_daemon_isnt_on_is_no_brain() {
+        let up = Local::Up(vec!["qwen3:8b".into()]);
+        let mut s = Status { model: Some("local/qwen3:8b".into()), here: true, local: Some(("http://localhost:1234/v1".into(), up)), ..Status::default() };
+        assert!(s.ok() && !s.stale_url());
+        s.tried = Some("http://localhost:1234/v1/".into());
+        assert!(s.ok() && !s.stale_url(), "the same server: it's just down");
+        s.tried = Some("http://localhost:11434/v1".into());
+        assert!(s.stale_url() && !s.ok(), "Ollama's, from before LM Studio's was set");
+        s.local = None;
+        assert!(!s.stale_url(), "nothing looked at yet");
     }
 
     /// One deadline for all of it: a server that never stops talking (each read in time) ends

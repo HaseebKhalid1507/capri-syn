@@ -495,6 +495,25 @@ $Scenes = [ordered]@{
             Start-Sleep 1
             Shot '18-key-in-use' 'enter: her brain is Groq, API KEY says IN USE'
         }
+        # A local URL set after the daemon started (LM Studio's in its config; the daemon, which reads
+        # it at its start, still on Ollama's): its error names the old URL, and the Brain screen says
+        # to reload it.
+        stale  = {
+            Start-Take brain stale -Local -Model 'local/qwen3:8b' -History $Short -Synaps @{ 'config' = "provider.local.url = http://127.0.0.1:9/v1`n" }
+            $null = Ctl 'brain off'
+            $null = Fake "fail openai request failed: broker transport error: can't reach local endpoint at http://localhost:11434/v1/chat/completions -- is Ollama/LM Studio running?"
+            Start-Sleep 3
+            $null = Ctl 'submit hi'
+            Start-Sleep 3
+            $null = Ctl 'settings open brain'
+            Start-Sleep 2
+            Focus-Line-Top
+            if (-not (Wait-Until { (State).line.mind.tried -eq 'http://localhost:11434/v1' -and (State).line.mind.local -like 'http://127.0.0.1:9/v1 *' } 15 'the old URL beside hers')) {
+                $script:Fails.Add("${script:Take}: the Brain screen never had the daemon's old URL beside hers")
+            }
+            Start-Sleep 1
+            Shot '19-stale-url' 'the daemon on its old local URL: no check, and synaps daemon reload'
+        }
         # A daemon through --socket (maybe another machine's): its logins aren't hers to read or make.
         remote = {
             Start-Take brain remote -Model 'claude-sonnet-4-6' -History $Short
