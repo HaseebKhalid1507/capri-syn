@@ -96,13 +96,17 @@ Unattended:
 ```
 capri-syn-setup-….exe /VERYSILENT /SUPPRESSMSGBOXES [/SYNAPS=install|skip]
                       [/PACK=download|skip|"C:\packs\capri"] [/VOICE=on|off] [/MIC="name"]
-                      [/VOICESETUP="C:\...\capri-syn-voice-setup.exe"] [/TASKS=autostart]
+                      [/VOICEFROM="C:\...\capri-syn-voice-setup.exe" or a URL] [/TASKS=autostart]
 ```
 
 The defaults are the wizard's: Synaps if it's needed, her art downloaded, autostart, her voice when
-Windows has a microphone. `/VOICESETUP`: a voice installer of yours instead of the release's (CI
-passes the one it built: there is no release yet; a release's setup downloads
-`capri-syn-voice-setup-x86_64.exe` from releases/latest, checked against its `.sha256`).
+Windows has a microphone and there's a voice to install. Her voice comes from `/VOICEFROM` (a path
+or a URL; a `.sha256` beside it is checked), else a `capri-syn-voice-setup*.exe` beside the setup
+(CI downloads both artifacts of a build into one folder: that's how the voice job gets the voice CI
+built), else the latest release's `capri-syn-voice-setup-x86_64.exe`, checked against the
+`capri-syn-voice-setup-x86_64.exe.sha256` release.yml uploads beside it. With none of those (no
+release yet), the Voice page says "Her voice comes with her first release" and stays off and greyed;
+nothing fails.
 install.ps1 runs it with `/SYNAPS=skip /PACK=skip /VOICE=off /BY=install.ps1`: Synaps, her pack, the
 daemon and her voice are its own steps (the same steps.ps1), so nothing is downloaded twice, and her
 settings and its cache stay its own to remove.

@@ -33,10 +33,14 @@ $app = Join-Path $env:LOCALAPPDATA 'Programs\synaps-avatar'
 $synaps = Join-Path $(if ($env:CARGO_HOME) { Join-Path $env:CARGO_HOME 'bin' } else { Join-Path $env:USERPROFILE '.cargo\bin' }) 'synaps.exe'
 $n = 0
 
-function Get-Shot([string]$Name, [string[]]$More) {
+# Shots: spike's tools/shoot-win.ps1 (#82), dot-sourced: a window (by title glob or process),
+# cropped (+ Pad), numbered in the order taken.
+. (Join-Path $root 'tools\shoot-win.ps1')
+function Get-Shot([string]$Name, [string]$Title = '', [int]$ProcessId = 0, [int]$Pad = 12) {
     $script:n++
     $f = Join-Path $Shots ('{0:D2}-{1}.png' -f $script:n, $Name)
-    try { & (Join-Path $root 'tools\shoot-win.ps1') -Out $f @More } catch { Write-Host "  (no shot $($Name): $($_.Exception.Message))" }
+    try { $r = Save-WindowShot -Path $f -Title $Title -ProcessId $ProcessId -Pad $Pad; Write-Host "  shot $(Split-Path -Leaf $f): $($r -join ',')" }
+    catch { Write-Host "  (no shot $($Name): $($_.Exception.Message))" }
 }
 # The top-level windows whose title matches.
 function Find-Windows([string]$Title) {
@@ -75,7 +79,6 @@ function Wait-Page($W, [string]$Caption, [int]$Secs = 120) {
 $log = Join-Path ([IO.Path]::GetTempPath()) "capri-setup-wizard-$PID.log"
 $p = Start-Process $Setup -ArgumentList "/LOG=`"$log`"" -PassThru
 $w = Wait-Window '^Setup - capri-syn'
-$wiz = '^Setup - capri-syn'
 foreach ($page in @(
         @('^Select Destination Location$', 'destination', 'Next'),
         @('^Select Additional Tasks$', 'tasks', 'Next'),
@@ -84,7 +87,7 @@ foreach ($page in @(
         @('^Her voice$', 'her-voice', 'Next'),
         @('^Ready to Install$', 'ready', 'Install'))) {
     $t = Wait-Page $w $page[0]
-    Get-Shot $page[1] @('-Title', $wiz)
+    Get-Shot $page[1] -Title 'Setup - capri-syn*'
     if ($page[1] -eq 'her-brain') { Check (($t -match 'Install Synaps \(her brain, open source\)').Count -gt 0) 'her brain page offers to install Synaps' }
     if ($page[1] -eq 'her-voice') { Check (($t -match '^Talk to her$').Count -gt 0 -and ($t -match 'Read replies aloud').Count -gt 0) 'her voice page: talk, microphone, "hey Capri", replies aloud' }
     if ($page[1] -eq 'her-pack') { Check (($t -match 'Download her art').Count -gt 0) 'her pack page offers the download' }
@@ -93,9 +96,9 @@ foreach ($page in @(
 # The steps, on their progress page (Synaps, her art, the daemon), then the finish page.
 $null = Wait-Page $w '^Setting her up$' 180
 Start-Sleep -Seconds 3
-Get-Shot 'setting-her-up' @('-Title', $wiz)
+Get-Shot 'setting-her-up' -Title 'Setup - capri-syn*'
 $t = Wait-Page $w '^Completing the capri-syn Setup Wizard$' 1200
-Get-Shot 'finish' @('-Title', $wiz)
+Get-Shot 'finish' -Title 'Setup - capri-syn*'
 Check (($t -match 'Synaps \d+\.\d+\.\d+, her brain: installed').Count -gt 0) 'the finish page: Synaps installed'
 Check (($t -match 'Her art: downloaded, built and checked').Count -gt 0) 'the finish page: her art'
 Check (($t -match 'Its daemon runs').Count -gt 0) 'the finish page: the daemon'
@@ -105,7 +108,7 @@ if ($login) {
     $r = $login.Current.BoundingRectangle
     [Wiz]::Click([int]($r.Left + 9), [int]($r.Top + $r.Height / 2))
     Start-Sleep -Milliseconds 500
-    Get-Shot 'finish-sign-in-off' @('-Title', $wiz)
+    Get-Shot 'finish-sign-in-off' -Title 'Setup - capri-syn*'
 } else { Write-Host '  (no "Sign in to Claude" item found)' }
 Invoke-Button $w 'Finish'
 [void]$p.WaitForExit(60000)
@@ -119,15 +122,14 @@ $t0 = Get-Date
 while (-not $her -and ((Get-Date) - $t0).TotalSeconds -lt 30) { $her = Get-Process synaps-avatar -ErrorAction SilentlyContinue | Select-Object -First 1; Start-Sleep -Milliseconds 300 }
 Check ([bool]$her) '"Start her now" started her'
 Start-Sleep -Seconds 12
-Get-Shot 'her-on-the-desktop' @()
-if ($her) { Get-Shot 'her' @('-ProcessId', $her.Id, '-Pad', '40') }
+if ($her) { Get-Shot 'her-on-the-desktop' -ProcessId $her.Id -Pad 240; Get-Shot 'her' -ProcessId $her.Id -Pad 40 }
 $herLog = Join-Path $env:LOCALAPPDATA 'synaps-avatar\synaps-avatar.log'
 if (Test-Path $herLog) { Write-Output "--- her log (end) ---`n$((Get-Content $herLog -Tail 12) -join "`n")`n---" }
 
 # The uninstall, as he'd click it: sure? yes; Synaps too? yes (her installer installed it); done.
 $u = Start-Process (Join-Path $app 'unins000.exe') -PassThru
 $d = Wait-Window '^capri-syn Uninstall$' 60
-Get-Shot 'uninstall-sure' @('-Title', '^capri-syn Uninstall$')
+Get-Shot 'uninstall-sure' -Title 'capri-syn Uninstall'
 Invoke-Button $d 'Yes'
 $t0 = Get-Date
 $asked = $false
@@ -136,8 +138,8 @@ while (-not $done -and ((Get-Date) - $t0).TotalSeconds -lt 180) {
     # Its progress window and its questions share the title: the one with the words.
     foreach ($d in Find-Windows '^capri-syn Uninstall$') {
         $texts = Get-WindowText $d
-        if (-not $asked -and ($texts -match 'Remove Synaps too')) { $asked = $true; Get-Shot 'uninstall-synaps-too' @('-ProcessId', $d.Current.ProcessId); Invoke-Button $d 'Yes' }
-        elseif ($texts -match 'successfully removed') { Get-Shot 'uninstall-done' @('-ProcessId', $d.Current.ProcessId); Invoke-Button $d 'OK'; $done = $true }
+        if (-not $asked -and ($texts -match 'Remove Synaps too')) { $asked = $true; Get-Shot 'uninstall-synaps-too' -ProcessId $d.Current.ProcessId; Invoke-Button $d 'Yes' }
+        elseif ($texts -match 'successfully removed') { Get-Shot 'uninstall-done' -ProcessId $d.Current.ProcessId; Invoke-Button $d 'OK'; $done = $true }
     }
     Start-Sleep -Milliseconds 400
 }

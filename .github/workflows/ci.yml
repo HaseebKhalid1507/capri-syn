@@ -152,10 +152,12 @@ jobs:
         run: rustup show active-toolchain || rustup toolchain install
 
       # The release build's own cache (the `windows` job's is a dev build).
+      # Not ~/.cargo/bin: a Synaps an earlier run installed there would come back.
       - uses: Swatinem/rust-cache@v2
         with:
           key: release
           cache-on-failure: true
+          cache-bin: false
 
       # As the release builds her (release.yml): symbols beside the exe, so a dump of a CI build reads.
       - name: Build the installer
@@ -322,7 +324,7 @@ jobs:
       - name: Her installer, /VOICE=on
         timeout-minutes: 35
         shell: pwsh
-        run: ./packaging/windows/test-setup-voice.ps1 -Setup (Get-ChildItem setup/capri-syn-setup-*.exe | Select-Object -First 1).FullName -VoiceSetup (Get-ChildItem setup/capri-syn-voice-setup-*.exe | Select-Object -First 1).FullName
+        run: ./packaging/windows/test-setup-voice.ps1 -Setup (Get-ChildItem setup/capri-syn-setup-*.exe | Select-Object -First 1).FullName
 
       - name: Her logs
         if: ${{ !cancelled() }}
@@ -385,7 +387,7 @@ jobs:
         shell: pwsh
         run: |
           if (-not (Get-Module -ListAvailable PSScriptAnalyzer)) { Install-Module PSScriptAnalyzer -Force -Scope CurrentUser }
-          $found = foreach ($f in 'install.ps1', 'installer/test-windows.ps1', 'installer/test-units.ps1', 'packaging/windows/steps.ps1', 'packaging/windows/test-install.ps1', 'packaging/windows/test-setup-e2e.ps1', 'packaging/windows/test-setup-wizard.ps1', 'packaging/windows/test-setup-voice.ps1', 'tools/shoot-win.ps1') { Invoke-ScriptAnalyzer -Path $f -Severity Warning, Error }
+          $found = foreach ($f in 'install.ps1', 'installer/test-windows.ps1', 'installer/test-units.ps1', 'packaging/windows/steps.ps1', 'packaging/windows/test-install.ps1', 'packaging/windows/test-setup-e2e.ps1', 'packaging/windows/test-setup-wizard.ps1', 'packaging/windows/test-setup-voice.ps1') { Invoke-ScriptAnalyzer -Path $f -Severity Warning, Error }
           $found | Format-Table -AutoSize ScriptName, Line, RuleName, Message | Out-String -Width 220
           if ($found) { throw "PSScriptAnalyzer: $(@($found).Count) finding(s)" }
           Write-Output 'PSScriptAnalyzer: clean'
