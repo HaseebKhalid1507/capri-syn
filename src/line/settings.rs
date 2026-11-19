@@ -98,7 +98,7 @@ pub struct Prefs {
     pub wake: bool,
     /// `[voice] enabled`: "HEY CAPRI" is dim while it is off.
     pub voice: bool,
-    /// `CAPRI 0.0.1 · SYNAPS 0.12.0 · SONNET 4.6`.
+    /// `CAPRI 1.0.0 · SYNAPS 0.12.0 · SONNET 4.6`.
     pub about: String,
     /// Her BRAIN: the model she thinks with and whether it has a login (`brain` above is her
     /// behaviour engine's switch).
@@ -1405,7 +1405,7 @@ mod tests {
     }
 
     fn prefs() -> Prefs {
-        Prefs { attention: Attention::Mix, brain: true, wake: true, voice: true, about: "CAPRI 0.0.1".into(), mind: mind("claude-sonnet-4-6", Some(true)), says: None, new: 0 }
+        Prefs { attention: Attention::Mix, brain: true, wake: true, voice: true, about: "CAPRI 1.0.0".into(), mind: mind("claude-sonnet-4-6", Some(true)), says: None, new: 0 }
     }
 
     /// Her brain on `model`, a daemon on this machine; `signed_in`: a login (None: can't tell).

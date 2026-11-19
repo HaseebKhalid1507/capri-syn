@@ -54,7 +54,7 @@ concurrency:
 jobs:
   # The tag says the version: Cargo.toml must agree (her Windows installer's version comes from it),
   # and CHANGELOG.md must have its section (the notes). A dry run or a PR takes Cargo.toml's, and
-  # the notes fall back to `## Unreleased`.
+  # the notes fall back to `## Unreleased`; it says whether a tag of that version would find its own.
   version:
     runs-on: ubuntu-24.04
     outputs:
@@ -83,6 +83,13 @@ jobs:
             bash installer/release-notes.sh "${{ steps.v.outputs.cargo }}" > notes/notes.md
           else
             bash installer/release-notes.sh --dry-run "${{ steps.v.outputs.cargo }}" > notes/notes.md
+            # What a tag of this version would do here (a note, never a failure: main's CHANGELOG has
+            # no section for its version until a release cuts one).
+            if n=$(bash installer/release-notes.sh "${{ steps.v.outputs.cargo }}" 2>&1); then
+              echo "::notice::a v${{ steps.v.outputs.cargo }} tag finds its notes: CHANGELOG.md's own section, $(printf '%s\n' "$n" | wc -l) lines"
+            else
+              echo "::notice::a v${{ steps.v.outputs.cargo }} tag would stop here: $n"
+            fi
           fi
           echo "notes: $(wc -l < notes/notes.md) lines, $(wc -c < notes/notes.md) bytes"
           head -n 30 notes/notes.md
