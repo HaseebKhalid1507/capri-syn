@@ -593,6 +593,13 @@ step_synaps() {
         SYNAPS_V=$(synaps_version "$SYNAPS")
         good "synaps $SYNAPS_V ($(tilde "$SYNAPS"))"
     fi
+    # An upgrade: a daemon the old Synaps started runs it until it's stopped. Said now, so he can
+    # stop it while the rest installs (step 4 starts the new one, and stops if it speaks another).
+    if [ "$SYNAPS_NEW" = 2 ] && [ -x "$SYNAPS" ]; then
+        case $("$SYNAPS" daemon status 2>&1 || true) in
+        *"daemon: running"*) warn "a daemon is running, from the Synaps before this one: stop it now, \`$(tilde "$SYNAPS") daemon stop\`" ;;
+        esac
+    fi
     local first
     first=$(command -v synaps 2>/dev/null || true)
     if [ -n "$first" ] && [ "$first" != "$SYNAPS" ]; then
@@ -952,15 +959,17 @@ step_daemon() {
     p=$(printf '%s' "$s" | grep -o 'protocol: [0-9]*' | grep -o '[0-9]*$' || true)
     stop="\`$(tilde "$SYNAPS") daemon stop\` (--force if it won't)"
     if [ -z "$p" ]; then
-        die "the daemon doesn't say which protocol it speaks (an older Synaps'?); her client speaks $M_synaps_protocol, exactly: stop it, $stop, then run this again"
+        die "the daemon doesn't say which protocol it speaks (an older Synaps?); her client speaks $M_synaps_protocol, exactly: stop it, $stop, then run this again"
     fi
-    if [ "$p" != "$M_synaps_protocol" ] && [ "${SYNAPS_NEW:-0}" = 2 ]; then
-        die "synaps $SYNAPS_V is installed, but the daemon still running is the old one (protocol $p; hers is $M_synaps_protocol): stop it, $stop, then run this again"
+    # This run put Synaps in (new, or an upgrade): the daemon still up is another one; installing
+    # the pin again won't change it.
+    if [ "$p" != "$M_synaps_protocol" ] && [ "${SYNAPS_NEW:-0}" != 0 ]; then
+        die "synaps $SYNAPS_V is installed, but the daemon still running is another one (protocol $p; hers is $M_synaps_protocol): stop it, $stop, then run this again"
     fi
     if [ "$p" != "$M_synaps_protocol" ]; then
         die "the daemon speaks protocol $p; her client speaks $M_synaps_protocol (exact match): she can't attach. Install synaps $M_synaps_pin (curl -fsSL https://github.com/$M_synaps_repo/releases/download/v$M_synaps_pin/synaps-installer.sh | sh), stop the daemon, $stop, and run this again; or use a capri-syn that speaks $p"
     fi
-    DAEMON_STATE="running (protocol ${p:-?})"
+    DAEMON_STATE="running (protocol $p)"
     good "daemon $DAEMON_STATE: $DAEMON_HOW"
     info "her session: \`capri\`, attached if live, else resumed, else made when she starts"
 }

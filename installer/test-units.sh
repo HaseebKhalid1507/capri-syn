@@ -170,9 +170,20 @@ pin=https://github.com/$M_synaps_repo/releases/download/v$M_synaps_pin/synaps-in
 case $out in *"installing $M_synaps_pin"*"$pin"*"(checks its sha256: $M_synaps_installer_sh_sha256)"*) r=0 ;; *) r=1 ;; esac
 check $r "synaps older than $M_synaps_min: the pinned $M_synaps_pin, its manifest hash"
 check "$([ ! -e "$tmp/fetched" ] && echo 0)" "and never asks GitHub for its latest: $(head -n1 "$tmp/fetched" 2>/dev/null)"
+case $out in *"daemon stop"*) r=1 ;; *) r=0 ;; esac
+check $r "no daemon running: nothing said about one"
+# An upgrade, with a daemon up: step 1 says to stop it, so he can while the rest installs.
+# shellcheck disable=SC2016 # the stand-in's own $1
+printf '#!/bin/sh\ncase $1 in daemon) echo "daemon: running" ;; esac\n' >"$tmp/cargo/bin/synaps"
+chmod +x "$tmp/cargo/bin/synaps"
+out=$(PATH=$tmp/old-synaps:$PATH DRY=1 YES=1 CARGO_BIN=$tmp/cargo/bin TMP=$tmp step_synaps 2>&1)
+case $out in *"a daemon is running, from the Synaps before this one"*"cargo/bin/synaps daemon stop"*) r=0 ;; *) r=1 ;; esac
+check $r "an upgrade with a daemon up: stop it now, said in step 1"
+rm -f "$tmp/cargo/bin/synaps"
 
 # The daemon's protocol is hers exactly, or the install stops (never "running"). A stand-in synaps
-# whose `daemon status` reads as 0.12.0's (no `pid:` line: none said); $2=2: this run upgraded Synaps.
+# whose `daemon status` reads as 0.12.0's (no `pid:` line: none said); $2: SYNAPS_NEW (this run put
+# Synaps in: 1 new, 2 an upgrade).
 daemon_says() {
     {
         printf '#!/bin/sh\necho "daemon: running"\necho "socket: /run/user/1/synaps.sock"\n'
@@ -190,11 +201,13 @@ case $out in *"speaks protocol 4"*"can't attach"*"v$M_synaps_pin/synaps-installe
 check $r "one that speaks 4: the install stops, saying how to fix it (the pin, then stop the daemon)"
 case $out in *"daemon running"*) r=1 ;; *) r=0 ;; esac
 check $r "and never says it's running"
-out=$(daemon_says 2 2)
-case $out in *"synaps $M_synaps_pin is installed, but the daemon still running is the old one (protocol 2"*"daemon stop"*rc=1) r=0 ;; *) r=1 ;; esac
-check $r "Synaps upgraded by this run, the old daemon still up: stop it (not: install the pin again)"
-case $out in *"Install synaps"* | *"daemon running"*) r=1 ;; *) r=0 ;; esac
-check $r "and nothing else said"
+for n in 2 1; do
+    out=$(daemon_says 2 $n)
+    case $out in *"synaps $M_synaps_pin is installed, but the daemon still running is another one (protocol 2"*"daemon stop"*rc=1) r=0 ;; *) r=1 ;; esac
+    check $r "Synaps put in by this run (SYNAPS_NEW=$n), another daemon still up: stop it (not: install the pin again)"
+    case $out in *"Install synaps"* | *"daemon running"*) r=1 ;; *) r=0 ;; esac
+    check $r "and nothing else said"
+done
 out=$(daemon_says '')
 case $out in *"doesn't say which protocol"*"daemon stop"*rc=1) r=0 ;; *) r=1 ;; esac
 check $r "one that doesn't say its protocol: the install stops too"
