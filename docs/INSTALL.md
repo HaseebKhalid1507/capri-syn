@@ -50,7 +50,7 @@ flag also has PowerShell's spelling: `-Yes`, `-DryRun`, `-NoAutostart`, and so o
 | 3 | **Her art pack** | `tools/make-pack`: CapriCore v1.0.4 plus lachy's desktop art at their pinned commits, every file checked against `tools/*.sha256`, built with Python and fonttools in a venv of its own (never system-wide). It prints lachy's licence and Required Notice lines. A pack built from the same inputs is left alone. Mochi's art is **not** fetched: `--with-local-art` adds it, for local personal use only. | The same, with Python from winget when there's none (asks). |
 | 4 | **Daemon and her session** | When systemd's user manager runs, it writes and enables a `synaps-daemon.service` user unit; a unit of your own is kept, and enabled only if you agree. With no user manager, it starts the daemon now, and her autostart line starts it at login. It checks the daemon speaks protocol 3; a daemon that speaks another, or doesn't say, stops the install (exit 1, with how to fix it: an older daemon still running after this run installed or upgraded Synaps is stopped, `synaps daemon stop`; an upgrade says so in step 1 too). Her session `capri` is her own, as before (attached if live, else resumed, else made). | It starts `synaps daemon --detach` now, plus a Run value (`synaps-daemon`) for sign-in. A `synaps-daemon` value of your own is left as it is and never recorded. |
 | 5 | **Summon key** | i3, sway or Hyprland: shows the binding (`$mod+c`: press and release, so a hold talks). With your consent (`--yes`) it appends it between marker comments, after a timestamped backup. The key is named as your config sets `$mod` (Super for Mod4, Alt for Mod1). One that is already taken is reported, not overridden; on Hyprland (whose stock config closes a window on Super+C) it offers Super+Alt+C instead, Windows' key, when that one's free. GNOME: it offers a custom keyboard shortcut, Super+Alt+C running `avatarctl talk tap`, only when you say yes on the terminal ([below](#gnome-kde-and-other-wayland-desktops)). On any other desktop it tells you what to bind (`avatarctl talk tap`). | Win+Alt+C: she registers it herself. |
-| 6 | **Autostart** (default on) | i3 and sway get an `exec` line, Hyprland an `exec-once`, others an XDG autostart `.desktop`. Each one starts the daemon first if needed. Whatever `--no-autostart` says, she also goes in your app menu (`~/.local/share/applications/synaps-avatar.desktop`, with her icon), so once she's quit she starts from there. | A Run value (`synaps-avatar`). |
+| 6 | **Autostart** (default on) | i3 and sway get an `exec` line, Hyprland an `exec-once`, others an XDG autostart `.desktop`. Each one starts the daemon first if needed. Whatever `--no-autostart` says, she also goes in your app menu as Capri (`~/.local/share/applications/synaps-avatar.desktop`, with her icon), so once she's quit she starts from there. | A Run value (`synaps-avatar`). |
 | 7 | **`--voice`, `--watch`** | `--voice` runs `tools/capri-voice-setup` (its own venv, ~320 MB of models) and installs `capri-voice.service`. `--watch` installs `capri-watch.service`, enabled only with `--yes`. | `--voice` uses her voice installer (or builds the same bundle without a release) and fetches the models. `--watch` is Linux-only. |
 
 At the end comes an `installed:` summary: what is where, how the daemon starts, how to summon her,
@@ -95,13 +95,20 @@ A pack at her pack's place that this script didn't make (your own build) is move
 Hyprland is the one Wayland desktop she runs on natively. On any other (GNOME, KDE Plasma, sway...)
 she runs through XWayland, the X server those desktops keep for X apps.
 
-- **She picks it herself.** A bare `synaps-avatar` with `WAYLAND_DISPLAY` set, no Hyprland
-  (`HYPRLAND_INSTANCE_SIGNATURE` unset) and XWayland running (`DISPLAY` set) runs as
-  `SA_BACKEND=x11` does, and says so in one line of her log. Without XWayland (`DISPLAY` unset) she
-  stops with an error that says so: turn XWayland on, or log in to an X11 session. `SA_BACKEND`
-  always wins: `x11` is XWayland (on Hyprland too), `wayland` is Hyprland or nothing. The
-  installer's start line, autostart entry and app-menu entry still say `env SA_BACKEND=x11` off
-  Hyprland and i3.
+- **She picks it herself.** A bare `synaps-avatar` with `WAYLAND_DISPLAY` set, no Hyprland and
+  XWayland running (`DISPLAY` set) runs as `SA_BACKEND=x11` does, and says so in one line of her
+  log. Without XWayland (`DISPLAY` unset) she stops with an error that says so: turn XWayland on, or
+  log in to an X11 session. `SA_BACKEND` always wins, in any case: `x11` is XWayland (on Hyprland
+  too), `wayland` is Hyprland or nothing (with no Wayland session at all, an error); any other value
+  is ignored, with a line in her log. The installer's start line, autostart entry and app-menu entry
+  still say `env SA_BACKEND=x11` off Hyprland and i3.
+- **Hyprland is** a `HYPRLAND_INSTANCE_SIGNATURE` naming one that runs (its socket,
+  `$XDG_RUNTIME_DIR/hypr/<signature>/.socket.sock`, is there), or `XDG_CURRENT_DESKTOP` or
+  `XDG_SESSION_DESKTOP` saying Hyprland; the installer reads it the same way. A signature left over
+  from an earlier Hyprland login (in GNOME's environment, or a tmux server's) names none, so she
+  takes XWayland and her log says the signature was ignored. Hyprland started where its signature
+  got lost on the way to her (systemd or D-Bus activation) still reads as Hyprland, and her error
+  says it's missing rather than her taking XWayland unasked.
 - **What she can't do there:**
   - she perches only on X apps: a native Wayland window doesn't exist for her, so she can't sit on
     it or follow it;
@@ -110,12 +117,16 @@ she runs through XWayland, the X server those desktops keep for X apps.
     only input that X apps get. While you type in a native Wayland app she may decide you're away
     and nap.
 - **Her summon key on GNOME** is a custom keyboard shortcut. The installer checks that Super+Alt+C
-  is free (GNOME's window, Shell and media-key shortcuts and every custom one), then asks on the
-  terminal whether to add it, running `avatarctl talk tap`. The default is no; `--yes` doesn't
-  answer it, and with no terminal it isn't asked. Said no, or the key is taken, it tells you where
-  to add one yourself: Settings > Keyboard > Keyboard Shortcuts > Custom Shortcuts. It's added to
-  the end of your list (yours stay), and `--uninstall` takes it out again (unless you changed it to
-  run something else). On KDE, bind `avatarctl talk tap` in its Shortcuts settings yourself.
+  is free (GNOME's window, Shell and media-key shortcuts, the installed Shell extensions' and every
+  custom one; Mod4 is Super and Mod1 Alt), then asks on the terminal whether to add it, running
+  `avatarctl talk tap`. The default is no; `--yes` doesn't answer it, and with no terminal it isn't
+  asked. Said no, or the key is taken, it tells you where to add one yourself: Settings > Keyboard >
+  Keyboard Shortcuts > Custom Shortcuts. It's added to the end of your list (yours stay), and
+  `--uninstall` takes it out again (unless you changed it to run something else). Both read
+  GNOME's settings back after writing (`gsettings set` can succeed while dconf keeps nothing): when
+  they don't hold it, you get a warning and the exact `gsettings` commands to run yourself, and
+  `--uninstall` keeps that line in its receipt so the next one tries again. On KDE, bind
+  `avatarctl talk tap` in its Shortcuts settings yourself.
 
 ## Flags
 
@@ -198,8 +209,9 @@ A pull request that touches the packaging runs the same builds and tests, and re
   - `installer/test_parity.py`: both scripts take the same flags, run the same steps in the same
     order, read keys the manifest has, and `install.ps1` keeps nothing in the caller's scope;
   - `installer/test-units.sh`: her start at the end, the pinned Synaps and the daemon's protocol, her
-    app-menu entry, the GNOME shortcut (a stand-in `gsettings`: never on `--yes` or without a
-    terminal, your list kept) and Hyprland's Super+Alt+C, and `--uninstall` taking them away;
+    app-menu entry, which desktop is Hyprland (a signature left over isn't), the GNOME shortcut (a
+    stand-in `gsettings`: never on `--yes` or without a terminal, your list kept, a write it says
+    yes to and doesn't keep caught) and Hyprland's Super+Alt+C, and `--uninstall` taking them away;
   - `install.sh --dry-run` several ways (one fetched from GitHub as `curl | bash` gets it, one with a
     `--prefix` with spaces, one from `CAPRI_INSTALL_FLAGS`), checked to change nothing; as root,
     refused without `--allow-root` and always with someone else's `HOME`.

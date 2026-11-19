@@ -223,8 +223,9 @@ check $r "one that doesn't say its protocol: the install stops too"
 
 # Her app-menu entry (step 6, with --no-autostart too), her summon key as a GNOME custom shortcut
 # (only on his yes at a terminal) and Hyprland's Super+Alt+C when Super+C is taken; --uninstall takes
-# each away again. A home of its own under $tmp; gsettings is a stand-in (its values in GS), and
-# nothing here quits or kills anything.
+# each away again. A home of its own under $tmp; gsettings is a stand-in (its values in GS; with
+# GS_LOST=1 it says yes to a write and keeps nothing, as when dconf doesn't commit), and nothing here
+# quits or kills anything.
 h=$tmp/h2
 mkdir -p "$h"
 HOME=$h DATA=$h/.local/share CONF=$h/.config STATE=$h/.local/state CACHE_BASE=$h/.cache
@@ -235,10 +236,14 @@ RUN_REAL=1 FAKE=()
 mkdir -p "$PACK" "$BIN"
 : >"$PACK/icon.png"
 declare -A GS=()
-GS_WM=''
+GS_WM='' GS_EXT='' GS_LOST=0
 gsettings() {
     case $1 in
+        set | reset-recursively) if [ "$GS_LOST" = 1 ]; then return 0; fi ;;
+    esac
+    case $1 in
         writable) echo true ;;
+        list-schemas) printf '%s\n' org.gnome.desktop.wm.keybindings org.gnome.shell.extensions.tiling-assistant ;;
         get)
             if [ -n "${GS["$2 $3"]:-}" ]; then
                 echo "${GS["$2 $3"]}"
@@ -247,7 +252,12 @@ gsettings() {
         # A list reads back in single quotes, as gsettings prints one.
         set) if [ "$3" = custom-keybindings ]; then GS["$2 $3"]=${4//\"/\'}; else GS["$2 $3"]=$4; fi ;;
         reset-recursively) for k in "${!GS[@]}"; do case $k in "$2 "*) unset "GS[$k]" ;; esac; done ;;
-        list-recursively) if [ "$2" = org.gnome.desktop.wm.keybindings ]; then printf '%s\n' "$2 close ['<Alt>F4']" "$GS_WM"; fi ;;
+        list-recursively)
+            case $2 in
+                org.gnome.desktop.wm.keybindings) printf '%s\n' "$2 close ['<Alt>F4']" "$GS_WM" ;;
+                org.gnome.shell.extensions.tiling-assistant) printf '%s\n' "$2 tile-left-half ['<Super>Left']" "$GS_EXT" ;;
+            esac
+            ;;
     esac
 }
 gk() { gsettings get "$GSCHEMA.custom-keybinding:$1" "$2"; }
@@ -258,6 +268,7 @@ app=$DATA/applications/synaps-avatar.desktop
 out=$(AUTOSTART=0 DESKTOP=other step_autostart 2>&1)
 check "$([ -f "$app" ] && [ ! -e "$CONF/autostart/synaps-avatar.desktop" ] && echo 0)" "--no-autostart: her app-menu entry all the same, no autostart one"
 check "$(grep -q NoDisplay "$app" || echo 0)" "it shows in the menu (no NoDisplay)"
+check "$(grep -qx Name=Capri "$app" && grep -qx 'Comment=Capri, your desktop companion (synaps-avatar)' "$app" && echo 0)" "named Capri, the binary's name in its Comment"
 check "$(grep -qx "Icon=$PACK/icon.png" "$app" && echo 0)" "her pack's icon"
 check "$(grep -qx "Exec=env SA_BACKEND=x11 $BIN/synaps-avatar" "$app" && grep -qx "TryExec=$BIN/synaps-avatar" "$app" && echo 0)" "her start command (XWayland off Hyprland and i3): $(grep '^Exec=' "$app")"
 check "$(grep -qxF "file	$app" "$RECEIPT" && echo 0)" "in the receipt"
@@ -266,6 +277,27 @@ mkdir -p "$CONF/synaps-avatar"
 out=$(AUTOSTART=1 DESKTOP=other step_autostart 2>&1)
 check "$(grep -qx "Icon=$CONF/synaps-avatar/icon.png" "$app" && echo 0)" "his own icon wins, as for her window"
 check "$(grep -qx NoDisplay=true "$CONF/autostart/synaps-avatar.desktop" && echo 0)" "autostart: its own entry, hidden from the menu"
+check "$([ "$(grep -E '^(Name|Comment)=' "$app")" = "$(grep -E '^(Name|Comment)=' "$CONF/autostart/synaps-avatar.desktop")" ] && echo 0)" "the same Name and Comment in both"
+
+# Hyprland as her binary reads it (linux::hyprland_in): a signature naming one that runs (its socket
+# there), or the desktop variables; a signature left over from an earlier Hyprland login isn't one.
+mkdir -p "$tmp/rt/hypr/live_1"
+: >"$tmp/rt/hypr/live_1/.socket.sock"
+# de VAR=VALUE...: the desktop, those set (no i3 running).
+de() {
+    (
+        # shellcheck disable=SC2317,SC2329 # desktop's pgrep
+        pgrep() { return 1; }
+        unset CAPRI_DESKTOP XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP HYPRLAND_INSTANCE_SIGNATURE SWAYSOCK I3SOCK
+        # shellcheck disable=SC2163 # "$@" are VAR=VALUE
+        export XDG_RUNTIME_DIR=$tmp/rt "$@"
+        desktop
+        echo "$DESKTOP"
+    )
+}
+check "$([ "$(de HYPRLAND_INSTANCE_SIGNATURE=live_1)" = hyprland ] && echo 0)" "a signature whose Hyprland runs: Hyprland"
+check "$([ "$(de HYPRLAND_INSTANCE_SIGNATURE=old_2 XDG_CURRENT_DESKTOP=GNOME)" = other ] && echo 0)" "a signature left over (GNOME now): not Hyprland"
+check "$([ "$(de XDG_CURRENT_DESKTOP=Hyprland)" = hyprland ] && [ "$(de XDG_SESSION_DESKTOP=hyprland)" = hyprland ] && echo 0)" "no signature, the desktop says Hyprland: Hyprland"
 
 # GNOME: a custom shortcut, never on --yes, never without a terminal, default no.
 export XDG_CURRENT_DESKTOP=ubuntu:GNOME CAPRI_DESKTOP=other
@@ -301,7 +333,26 @@ GS["$GSCHEMA.custom-keybinding:$GKEY command"]="'/usr/bin/true'"
 step_summon >"$tmp/out" 2>&1
 case $(cat "$tmp/out") in *asked:*) r=1 ;; *'Super+Alt+C is taken: org.gnome.desktop.wm.keybindings toggle-maximized'*) r=0 ;; *) r=1 ;; esac
 check $r "Super+Alt+C taken (any modifier order): not asked"
+GS_WM='' GS_EXT="org.gnome.shell.extensions.tiling-assistant restore-window ['<Mod1><Mod4>c']"
+step_summon >"$tmp/out" 2>&1
+case $(cat "$tmp/out") in *asked:*) r=1 ;; *'Super+Alt+C is taken: org.gnome.shell.extensions.tiling-assistant restore-window'*) r=0 ;; *) r=1 ;; esac
+check $r "taken by a Shell extension, as <Mod1><Mod4>c: not asked"
+GS_EXT=
 GS["$GSCHEMA.custom-keybinding:$GKEY command"]="\"$BIN/avatarctl talk tap\"" GS_WM=''
+# gsettings says yes and keeps nothing (dconf didn't commit it): read back, he's told, with the
+# commands to run by hand. In a subshell: her shortcut stays set out here.
+out=$(
+    GS["$GSCHEMA custom-keybindings"]="['$C0']"
+    for k in name command binding; do unset "GS[$GSCHEMA.custom-keybinding:$GKEY $k]"; done
+    GS_LOST=1 ANSWER=y SUMMON='' SUMMON_KEY=''
+    step_summon 2>&1
+    echo "SUMMON_KEY=$SUMMON_KEY"
+)
+case $out in
+    *"gsettings didn't keep it"*"binding '\"<Super><Alt>c\"'"*"custom-keybindings '[\"$C0\", \"$GKEY\"]'"*'Custom Shortcuts'*SUMMON_KEY=) r=0 ;;
+    *) r=1 ;;
+esac
+check $r "gsettings kept nothing: read back, he's told, the commands by hand"
 unset XDG_CURRENT_DESKTOP
 
 # Hyprland: its stock Super+C closes a window, so Super+Alt+C (Windows' key), when that's free.
@@ -329,11 +380,22 @@ hypr 'bind = $mainMod, C, killactive,'
 unset CAPRI_DESKTOP
 
 # --uninstall: the app-menu and autostart entries, her GNOME shortcut (his stays), her Hyprland block.
+# First with gsettings keeping nothing: her shortcut is still there, so its line stays in the receipt.
+GS_LOST=1
 uninstall >"$tmp/out" 2>&1
+GS_LOST=0
 check "$([ ! -e "$app" ] && [ ! -e "$CONF/autostart/synaps-avatar.desktop" ] && echo 0)" "--uninstall: both desktop entries gone"
-check "$([ "$(gsettings get "$GSCHEMA" custom-keybindings)" = "['$C0']" ] && [ "$(gk "$GKEY" command)" = "''" ] && [ "$(gk "$C0" command)" = "'kgx'" ] && echo 0)" \
-    "her GNOME shortcut out of his list and reset, his own kept: $(gsettings get "$GSCHEMA" custom-keybindings)"
 check "$(! grep -q avatarctl "$hc" && grep -qx 'bind = $mainMod, C, killactive,' "$hc" && echo 0)" "her Hyprland block out, his lines kept"
+case $(cat "$tmp/out") in
+    *"didn't take her GNOME shortcut out"*"custom-keybindings '[\"$C0\"]'"*"reset-recursively $GSCHEMA.custom-keybinding:$GKEY"*'kept in the receipt'*) r=0 ;;
+    *) r=1 ;;
+esac
+check "$([ $r = 0 ] && [ "$(cat "$RECEIPT")" = "gkey"$'\t'"$GKEY" ] && echo 0)" \
+    "gsettings kept nothing: read back, he's told, the commands by hand, her line alone left in the receipt"
+check "$([ "$(gsettings get "$GSCHEMA" custom-keybindings)" = "['$C0', '$GKEY']" ] && echo 0)" "and her shortcut still there (nothing was kept)"
+uninstall >"$tmp/out" 2>&1
+check "$([ "$(gsettings get "$GSCHEMA" custom-keybindings)" = "['$C0']" ] && [ "$(gk "$GKEY" command)" = "''" ] && [ "$(gk "$C0" command)" = "'kgx'" ] && echo 0)" \
+    "--uninstall again: her GNOME shortcut out of his list and reset, his own kept: $(gsettings get "$GSCHEMA" custom-keybindings)"
 check "$([ ! -e "$RECEIPT" ] && echo 0)" "and the receipt"
 
 if [ "$fails" -gt 0 ]; then

@@ -608,13 +608,18 @@ pub fn connect() -> Result<Os> {
     match linux::backend() {
         linux::Backend::Wayland => {
             let (desk, stage) = hypr::connect().map_err(|e| {
-                anyhow::anyhow!("{e:#}; Hyprland is the one Wayland desktop she runs on natively: elsewhere XWayland (SA_BACKEND unset, or x11)")
+                anyhow::anyhow!(
+                    "{e:#}. On Wayland she runs natively on Hyprland only. Not Hyprland (XDG_CURRENT_DESKTOP or HYPRLAND_INSTANCE_SIGNATURE left over from an earlier Hyprland login, or SA_BACKEND=wayland)? SA_BACKEND=x11 runs her through XWayland. Hyprland? Its HYPRLAND_INSTANCE_SIGNATURE has to reach her environment"
+                )
             })?;
             return Ok(Os::new(desk, Box::new(stage)));
         }
         linux::Backend::NoXWayland => anyhow::bail!(
             "this Wayland desktop isn't Hyprland, and XWayland isn't running (DISPLAY is unset): off Hyprland she runs through XWayland. Turn XWayland on, or log in to an X11 session"
         ),
+        linux::Backend::NoWayland => {
+            anyhow::bail!("SA_BACKEND=wayland, and this isn't a Wayland session (WAYLAND_DISPLAY is unset): no fallback to X11 when it's asked for. Unset SA_BACKEND")
+        }
         linux::Backend::X11 | linux::Backend::XWayland | linux::Backend::XWaylandAuto => {}
     }
     let x = std::sync::Arc::new(x11::X11::connect()?);

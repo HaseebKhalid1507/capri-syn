@@ -147,14 +147,22 @@ so it's gone. The Synaps and capri-watch paragraphs are unchanged.
 - A bare `synaps-avatar` on a Wayland desktop that isn't Hyprland, with XWayland running (`DISPLAY`
   set), runs as `SA_BACKEND=x11` does and says so in one log line. Before, it exited and told you to
   set `SA_BACKEND=x11`. With no XWayland it stops with an error that says so. `SA_BACKEND` always
-  wins: `x11` is XWayland, `wayland` is Hyprland or nothing (new).
-- `install.sh` puts her in your app menu on Linux (`~/.local/share/applications/synaps-avatar.desktop`,
-  with her icon, `--no-autostart` or not), so once she's quit she starts from there, as from Windows'
-  Start menu. In the receipt: `--uninstall` removes it.
+  wins, in any case: `x11` is XWayland, `wayland` is Hyprland or nothing (new; with no Wayland
+  session, an error). Another value is ignored, with a line in her log.
+- Hyprland is a `HYPRLAND_INSTANCE_SIGNATURE` whose socket is there, or `XDG_CURRENT_DESKTOP` /
+  `XDG_SESSION_DESKTOP` saying Hyprland, for her binary and `install.sh` alike. A signature left over
+  from an earlier Hyprland login no longer reads as Hyprland (on GNOME she takes XWayland); a
+  Hyprland whose signature got lost doesn't fall back to XWayland unasked.
+- `install.sh` puts her in your app menu on Linux as Capri
+  (`~/.local/share/applications/synaps-avatar.desktop`, with her icon, `--no-autostart` or not), so
+  once she's quit she starts from there, as from Windows' Start menu. In the receipt: `--uninstall`
+  removes it. Her autostart entry is named Capri too.
 - Summon key: on GNOME it offers a custom keyboard shortcut, Super+Alt+C running `avatarctl talk tap`,
   when that's free and only when you say yes on the terminal (`--yes` doesn't answer it). It's added to
-  your custom shortcuts (yours stay), recorded as `gkey PATH`, and `--uninstall` takes it out. On
-  Hyprland, when Super+C is taken (the stock config's killactive) it offers Super+Alt+C instead.
+  your custom shortcuts (yours stay), recorded as `gkey PATH`, and `--uninstall` takes it out. Both
+  read GNOME's settings back: when they don't hold the change, a warning and the `gsettings`
+  commands to run yourself (and `--uninstall` keeps the line for next time). On Hyprland, when
+  Super+C is taken (the stock config's killactive) it offers Super+Alt+C instead.
 - The XWayland limits are written down (docs/INSTALL.md): she perches only on X apps, sees the pointer
   only over X windows, and her presence counts only input X apps get, so she may nap while you type in
   a native Wayland app. README's platform row says so instead of "Not supported".
