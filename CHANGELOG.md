@@ -6,12 +6,15 @@
 - Windows 11 puts every new tray icon in the hidden `^` overflow, so on a first install she was there
   and nobody saw her. The first time her icon is in, she now sets `IsPromoted` on her own entry in
   `HKCU\Control Panel\NotifyIconSettings` (matched by her exe's path and her icon's GUID), so it sits on
-  the taskbar. Once only: a `tray-promoted` file in her state folder (`%LOCALAPPDATA%\synaps-avatar`)
-  says it was done, and after that the setting is his: hide her and she stays hidden. An entry that
-  already has `IsPromoted` is left as it is. Windows 10 has no such key: nothing is done there. Her log
-  says which: `tray: shown on the taskbar (first run)`, `tray: left as he set it` or
-  `tray: no NotifyIconSettings entry yet`. Later starts read her entry and say what `IsPromoted` is
-  now, writing nothing. The uninstaller removes the marker.
+  the taskbar. Explorer takes no value written while it adds the icon, so she waits a few seconds first,
+  then asks the shell whether her icon is on the taskbar and, if not, writes the same 1 once more.
+  Once only: a `tray-promoted` file in her state folder (`%LOCALAPPDATA%\synaps-avatar`) says it was
+  done, and after that the setting is his: hide her and she stays hidden. An entry that already has
+  `IsPromoted` is left as it is. Windows 10 has no such key: nothing is done there. Her log says what is
+  true: `tray: shown on the taskbar (first run)`, `tray: set to show on the taskbar; Explorer hasn't
+  moved her yet (next sign-in)`, `tray: left as he set it` or `tray: no NotifyIconSettings entry yet`.
+  Later starts read her entry and say what `IsPromoted` is now, writing nothing. The uninstaller removes
+  the marker.
 
 ## 1.0.0 (2026-11-19)
 

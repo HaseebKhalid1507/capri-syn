@@ -649,6 +649,7 @@ $Scenes = [ordered]@{
             if (-not $script:Her.WaitForExit(10000)) { $script:Fails.Add("${script:Take}: she didn't quit") }
             if (Wait-Until { -not (Find-TrayButton) } 10 'her icon gone') { Write-Host '  quit: her icon is gone' }
             else { $script:Fails.Add("${script:Take}: her icon stayed after QUIT") }
+            Write-HerTrayLog
         }
     }
 }
@@ -910,11 +911,22 @@ function Get-KeyGuid($Key) {
     if ($v -and [Guid]::TryParse([string]$v, [ref]$o)) { return $o }
 }
 
-<# Her icon out of the overflow. She does it herself, the first time it's in (promote.rs): her
-   NotifyIconSettings key (Explorer writes one the first time an icon is in) IsPromoted = 1, once. Said
-   here, and a problem if she didn't (the take's fresh state folder has no marker); then the key is set
-   from here, as before, and Explorer started again if that alone doesn't bring it out (she puts her
-   icon back on TaskbarCreated, and Explorer reads the key then). Her button. #>
+<# Her log's `tray:` lines, said (her stderr's file in the take's logs, and her log file in the take's
+   state folder, wherever she wrote them). #>
+function Write-HerTrayLog {
+    $n = $script:Take -replace '/', '-'
+    foreach ($f in (Join-Path $Logs "$n-her.err"), (Join-Path $Root "$n\state\synaps-avatar\synaps-avatar.log")) {
+        if (Test-Path $f) { Select-String -Path $f -Pattern 'tray: ' -SimpleMatch | ForEach-Object { Write-Host "    her log: $($_.Line)" } }
+    }
+}
+
+<# Her icon out of the overflow. She does it herself, the first time it's in (promote.rs, a few seconds
+   after the add: Explorer takes no value written during it): her NotifyIconSettings key (Explorer
+   writes one the first time an icon is in) IsPromoted = 1, once. Said here, and a problem if she didn't
+   (the take's fresh state folder has no marker); then the key is set from here, as before, and Explorer
+   started again if that alone doesn't bring it out (she puts her icon back on TaskbarCreated, and
+   Explorer reads the key then). Her button. The 8 s wait is the judge of her own write: when she did it
+   and her icon isn't out in 8 s, that's a failure too, with what the shell says of her icon then. #>
 function Show-TrayIcon {
     $keys = { @(Get-ChildItem 'HKCU:\Control Panel\NotifyIconSettings' -ErrorAction SilentlyContinue | Where-Object { [string]$_.GetValue('ExecutablePath') -like '*\synaps-avatar.exe' }) }
     $null = Wait-Until { (& $keys).Count -gt 0 } 20 'her NotifyIconSettings key'
@@ -935,6 +947,11 @@ function Show-TrayIcon {
     if (-not (Wait-Until { Find-TrayButton } 8 'her icon on the taskbar, promoted live')) {
         # Her write alone didn't bring the icon out in 8 s: a failure, and Explorer started again so the take goes on.
         if ($herself) { $script:Fails.Add("${script:Take}: she set IsPromoted = 1 on her own icon and it wasn't on the taskbar 8 s later (Explorer started again from here)") }
+        $hr0 = 0
+        $r0 = [ShotsTray.Native]::IconRect((Get-HerTrayGuid), [ref]$hr0)
+        Write-Host "  not on the taskbar: the shell by her GUID: $(if ($r0) { $r0 -join ',' } else { 'hr 0x{0:x8}' -f $hr0 })"
+        Get-TrayButtons | ForEach-Object { Write-Host "    taskbar: '$($_.Name)' ($($_.Class)) at $($_.X),$($_.Y) $($_.W)x$($_.H)" }
+        Write-HerTrayLog
         Restart-ShotExplorer
         $null = Wait-Until { Find-TrayButton } 30 'her icon on the taskbar, after Explorer'
     }

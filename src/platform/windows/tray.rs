@@ -1090,16 +1090,17 @@ mod tests {
     }
 
     /// Her icon out of the overflow, on the runner's own tray: the icon in, her NotifyIconSettings subkey
-    /// found (Explorer writes it a moment after the add), `IsPromoted` written once and read back, and
-    /// left alone the second time (the marker: her subkey read, nothing written). A machine with no such
-    /// key (not Windows 11) says so on the log and passes. So does one where Explorer wrote no subkey of
-    /// this exe in ten seconds (`shots:tray` is the check there: it fails the take if she doesn't promote
-    /// herself), but not one where a subkey of this exe's name and this icon's GUID is there and her match
-    /// found none: that's a match that's wrong, not a runner with nothing to promote. CI only, as above:
-    /// it writes the shell's own settings.
+    /// found (Explorer writes it during the add; she looks a few seconds after), `IsPromoted` written once
+    /// and read back, and left alone the second time (the marker: her subkey read, nothing written). Where
+    /// the shell has her on the taskbar after it is `Shown`; where it doesn't it's `NotMoved` (on the log, with
+    /// what the shell was asked: `shots:tray` is the judge of that, on a desktop of its own). A machine
+    /// with no such key (not Windows 11) says so on the log and passes. So does one where Explorer wrote no
+    /// subkey of this exe in ten seconds, unless a subkey of this exe's name and this icon's GUID is there
+    /// and the match (one strict look more, after) found none: that's a match that's wrong, not Explorer
+    /// being slow. CI only, as above: it writes the shell's own settings.
     #[test]
     fn her_icon_is_promoted_once_it_is_in() {
-        use super::super::promote::{self, Outcome};
+        use super::super::promote::{self, Now, Outcome};
         if std::env::var_os("CI").is_none() && std::env::var_os("SA_TRAY_TEST").is_none() {
             elog!("tray test: skipped (not CI; SA_TRAY_TEST=1 runs it here)");
             return;
@@ -1109,17 +1110,20 @@ mod tests {
         let icon = TrayIcon { file: None, stamp: 0, w: own.width(), h: own.height(), rgba: own.into_raw() };
         let t = start(icon, PROMO, Arc::new(AtomicU64::new(0)), Box::new(|_: TrayEv| {})).unwrap();
         assert!(t.until(|t| t.shown()), "Shell_NotifyIconW(NIM_ADD) returned FALSE");
+        // Named as hers is, so the taskbar's button for it is found by that name.
+        t.set_tip(&crate::brand::tooltip("ONLINE", false));
         let g = guid(PROMO).to_u128();
         let dir = std::env::temp_dir().join(format!("capri-tray-promote-{}", std::process::id()));
         let marker = dir.join("tray-promoted");
         let _ = std::fs::remove_dir_all(&dir);
 
         let first = promote::run(g, &marker).expect("her exe's path");
-        let read = promote::promoted(g);
+        let read = promote::now(g);
         elog!("tray test: promote: {first:?}, IsPromoted read back: {read:?}, marker: {}; {}", marker.exists(), promote::seen());
         match first {
-            Outcome::Shown => {
-                assert_eq!(read, Some(1), "IsPromoted isn't a 1 in her subkey");
+            // Written: a 1 in her subkey and the marker, whether the shell had moved her icon or not.
+            Outcome::Shown | Outcome::NotMoved | Outcome::Written => {
+                assert_eq!(read, Now::Value(1), "IsPromoted isn't a 1 in her subkey");
                 assert!(marker.is_file(), "no marker");
                 let again = promote::run(g, &marker);
                 elog!("tray test: promote again: {again:?}");
@@ -1132,9 +1136,15 @@ mod tests {
                 assert!(!marker.exists(), "a marker with nothing done");
             }
             Outcome::NoEntry => {
+                // One strict look more: there now is Explorer slow, there still isn't and a lookalike is the match broken.
+                let late = promote::now(g);
                 let like = promote::lookalikes(g);
-                assert!(like.is_empty(), "the shell has a subkey of this exe and this icon's GUID and the match found none: {like:?}");
-                elog!("tray test: promote: no subkey of this exe in ten seconds");
+                if matches!(late, Now::Value(_) | Now::Unset) {
+                    elog!("tray test: promote: Explorer was slow: her subkey is there after the ten seconds ({late:?})");
+                } else {
+                    assert!(like.is_empty(), "the shell has a subkey of this exe and this icon's GUID and her match found none, then or now ({late:?}): {like:?}");
+                    elog!("tray test: promote: no subkey of this exe in ten seconds");
+                }
                 assert!(!marker.exists(), "a marker with nothing done");
             }
             Outcome::Marked { .. } => panic!("a marker in a folder made for this test: {first:?}"),

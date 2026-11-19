@@ -4,9 +4,15 @@
 //! switch in Settings, and reads it live.
 //!
 //! - After her icon went in the first time (`tray::try_add`), a thread of its own looks for her subkey
-//!   (never the tray's or the UI's: Explorer writes it a moment after `Shell_NotifyIconW` returns), a few
-//!   times over `WAIT`. Hers: `ExecutablePath` is her exe's (Explorer may write a known folder's GUID for
-//!   its start: `{F1B32785-…}\Programs\…`), and `IconGuid`, where the subkey has one, is her icon's.
+//!   (never the tray's or the UI's), a few times over `WAIT`. Explorer writes the subkey *during* the
+//!   add, and takes no value written then (CI, v1.0.0's fix: `IsPromoted` = 1 a few ms after the add,
+//!   and her icon stayed in the overflow), so the first look is `WAIT`'s first gap after it, never at once.
+//!   Hers: `ExecutablePath` is her exe's (Explorer may write a known folder's GUID for its start:
+//!   `{F1B32785-…}\Programs\…`), and `IconGuid`, where the subkey has one, is her icon's.
+//! - Then the shell is asked whether she's on the taskbar (her button in the taskbar's UI Automation
+//!   tree, as the shots' rig looks). Not within `CONFIRM_FOR`: the same 1 once more after `AGAIN`, if it
+//!   still reads 1 (a 0 is his, never written over). Her log says what is true: on the taskbar, or set
+//!   and not moved yet (Explorer reads the key at its next start).
 //! - Once only. That it was done is a marker file in her state folder (`tray-promoted`, beside her log;
 //!   not settings.toml). With the marker, or an `IsPromoted` in her subkey already (his, or an earlier
 //!   install's), she touches nothing: hide her later and she stays hidden.
@@ -14,13 +20,15 @@
 //!   No marker either where no subkey of hers showed up: the next start looks again.
 
 use super::super::BaseDir;
-use ::windows::Win32::Foundation::{ERROR_MORE_DATA, ERROR_NO_MORE_ITEMS, ERROR_SUCCESS};
-use ::windows::Win32::System::Com::CoTaskMemFree;
+use ::windows::Win32::Foundation::{ERROR_MORE_DATA, ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, RECT};
+use ::windows::Win32::System::Com::{CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize};
 use ::windows::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_DWORD, REG_SAM_FLAGS, RRF_RT_REG_DWORD, RRF_RT_REG_SZ, RegCloseKey, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW,
     RegSetValueExW,
 };
+use ::windows::Win32::UI::Accessibility::{CUIAutomation, IUIAutomation, TreeScope_Descendants};
 use ::windows::Win32::UI::Shell::{KF_FLAG_DEFAULT, SHGetKnownFolderPath};
+use ::windows::Win32::UI::WindowsAndMessaging::{FindWindowW, GetWindowRect};
 use ::windows::core::{GUID, HSTRING, PCWSTR, PWSTR, w};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -30,15 +38,26 @@ const KEY: &str = r"Control Panel\NotifyIconSettings";
 /// Her marker, in her state folder.
 const MARKER: &str = "tray-promoted";
 /// What the marker says when she was the one who set it (its first words).
-const SET_NOTE: &str = "she put her icon on the taskbar";
-/// Before each look after the first (Explorer writes her subkey a moment after her add): ten seconds in all.
-const WAIT: [Duration; 4] = [Duration::from_secs(1), Duration::from_secs(2), Duration::from_secs(3), Duration::from_secs(4)];
+const SET_NOTE: &str = "she set her icon to show on the taskbar";
+/// Before each look, the first after her add (Explorer writes her subkey during the add and takes no value
+/// written then: one a few seconds later is seen at once): five looks over ten seconds.
+const WAIT: [Duration; 5] = [Duration::from_secs(3), Duration::from_secs(1), Duration::from_secs(2), Duration::from_secs(2), Duration::from_secs(2)];
+/// After a write: a look at the taskbar each `LOOK`, for `CONFIRM_FOR` (inside the shots' 8 s, with `AGAIN`).
+const LOOK: Duration = Duration::from_millis(500);
+const CONFIRM_FOR: Duration = Duration::from_secs(2);
+/// Not on the taskbar yet: the wait before the same 1 is written once more.
+const AGAIN: Duration = Duration::from_secs(1);
 
 /// How it ended, for her log.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum Outcome {
-    /// `IsPromoted` = 1 written, marker made.
+    /// `IsPromoted` = 1 written, marker made, and the shell has her icon on the taskbar.
     Shown,
+    /// Written (once more, where it still read 1), marker made; her icon is in the overflow still: Explorer
+    /// reads the key again at its next start.
+    NotMoved,
+    /// Written, marker made; the shell couldn't be asked where her icon is.
+    Written,
     /// His say is there already (`IsPromoted` set, an earlier install's or his): left as it is.
     LeftAsSet,
     /// Done on an earlier start (the marker): nothing written, her subkey only read, for her log (does
@@ -69,15 +88,18 @@ impl Outcome {
     fn line(&self) -> String {
         match self {
             Outcome::Shown => "synaps-avatar: tray: shown on the taskbar (first run)".into(),
+            Outcome::NotMoved => "synaps-avatar: tray: set to show on the taskbar; Explorer hasn't moved her yet (next sign-in)".into(),
+            Outcome::Written => "synaps-avatar: tray: set to show on the taskbar (first run); the shell couldn't say whether she's there".into(),
             Outcome::LeftAsSet => "synaps-avatar: tray: left as he set it".into(),
             Outcome::Marked { now, set } => {
-                let then = if *set { "she set 1 on her first run" } else { "it was his already on her first run" };
-                match now {
-                    Now::Value(n) => format!("synaps-avatar: tray: left as he set it (IsPromoted now {n}; {then})"),
-                    Now::Unset => format!("synaps-avatar: tray: left as he set it (IsPromoted now unset; {then})"),
-                    Now::NoEntry => format!("synaps-avatar: tray: left as he set it (no entry of hers now; {then})"),
-                    Now::NoKey => format!("synaps-avatar: tray: left as he set it (no NotifyIconSettings key now; {then})"),
-                }
+                // What a later start finds: hers to say only what is read. Where she set the 1, it isn't "as he set it".
+                let now = match now {
+                    Now::Value(n) => format!("IsPromoted now {n}"),
+                    Now::Unset => "IsPromoted now unset".to_string(),
+                    Now::NoEntry => "no entry of hers now".to_string(),
+                    Now::NoKey => "no NotifyIconSettings key now".to_string(),
+                };
+                if *set { format!("synaps-avatar: tray: {now}; she set 1 on her first run") } else { format!("synaps-avatar: tray: left as he set it ({now}; it was his already on her first run)") }
             }
             Outcome::NoEntry => "synaps-avatar: tray: no NotifyIconSettings entry yet; she looks again at her next start".into(),
             Outcome::NoKey => "synaps-avatar: tray: no NotifyIconSettings key (Windows 10's tray has none): nothing to do".into(),
@@ -106,7 +128,18 @@ trait Settings {
     fn folder(&self, id: u128) -> Option<String>;
     /// `IsPromoted` = 1 in subkey `name`; Err: the registry's error.
     fn promote(&mut self, name: &str) -> Result<(), u32>;
+    /// Is her icon on the taskbar now (and not in the overflow)?
+    fn on_taskbar(&mut self) -> Seen;
     fn wait(&mut self, d: Duration);
+}
+
+/// The shell's answer to where her icon is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Seen {
+    On,
+    Off,
+    /// It couldn't be asked.
+    Unknown,
 }
 
 /// Her icon's subkey, once: `Shown`, `LeftAsSet`, or what kept it from being either. The marker comes
@@ -118,38 +151,82 @@ fn promote(s: &mut impl Settings, marker: &Path, exe: &str, guid: u128) -> Outco
         return Outcome::Marked { now: look(s, exe, guid), set };
     }
     let mut key = false;
-    for gap in std::iter::once(Duration::ZERO).chain(WAIT) {
-        if !gap.is_zero() {
-            s.wait(gap);
-        }
+    for gap in WAIT {
+        s.wait(gap);
         let Some(all) = s.entries() else { continue };
         key = true;
-        let mine: Vec<&Entry> = all.iter().filter(|e| is_hers(e, exe, guid, &|id| s.folder(id))).collect();
+        let mine = find(&all, &*s, exe, guid);
         if mine.is_empty() {
             continue;
         }
-        let mut shown = false;
-        for e in mine {
+        let mut wrote = false;
+        for e in &mine {
             // A value there is his (or an earlier install's): never overwritten.
             if e.promoted.is_some() {
                 continue;
             }
             match s.promote(&e.name) {
-                Ok(()) => shown = true,
+                Ok(()) => wrote = true,
                 Err(code) => return Outcome::Failed(code),
             }
         }
-        mark(marker, if shown { SET_NOTE } else { "her icon's setting was his already" });
-        return if shown { Outcome::Shown } else { Outcome::LeftAsSet };
+        mark(marker, if wrote { SET_NOTE } else { "her icon's setting was his already" });
+        return if wrote { confirm(s, exe, guid) } else { Outcome::LeftAsSet };
     }
     if key { Outcome::NoEntry } else { Outcome::NoKey }
+}
+
+/// Her icon is set (marker made): is it on the taskbar? The shell is asked for `CONFIRM_FOR`; if she isn't,
+/// the same 1 is written once more after `AGAIN` where her subkey still reads 1 (a 0 is his: never written
+/// over, and nothing is), and the shell asked for `CONFIRM_FOR` again.
+fn confirm(s: &mut impl Settings, exe: &str, guid: u128) -> Outcome {
+    match asked(s) {
+        Seen::On => return Outcome::Shown,
+        Seen::Unknown => return Outcome::Written,
+        Seen::Off => {}
+    }
+    s.wait(AGAIN);
+    let mine = s.entries().map(|all| find(&all, &*s, exe, guid)).unwrap_or_default();
+    if mine.iter().any(|e| e.promoted == Some(0)) {
+        return Outcome::LeftAsSet;
+    }
+    let ones: Vec<&Entry> = mine.iter().filter(|e| e.promoted == Some(1)).collect();
+    if ones.is_empty() {
+        return Outcome::NotMoved;
+    }
+    for e in ones {
+        // A refusal now isn't one that matters: it took it the first time.
+        let _ = s.promote(&e.name);
+    }
+    match asked(s) {
+        Seen::On => Outcome::Shown,
+        Seen::Off => Outcome::NotMoved,
+        Seen::Unknown => Outcome::Written,
+    }
+}
+
+/// The shell's answer, looked for each `LOOK` over `CONFIRM_FOR`: `On` at once when it comes, `Off` at the end.
+fn asked(s: &mut impl Settings) -> Seen {
+    let mut seen = Seen::Off;
+    for _ in 0..(CONFIRM_FOR.as_millis() / LOOK.as_millis()) {
+        s.wait(LOOK);
+        seen = s.on_taskbar();
+        if seen != Seen::Off {
+            break;
+        }
+    }
+    seen
+}
+
+/// The subkeys of `all` that are hers.
+fn find(all: &[Entry], s: &impl Settings, exe: &str, guid: u128) -> Vec<Entry> {
+    all.iter().filter(|e| is_hers(e, exe, guid, &|id| s.folder(id))).cloned().collect()
 }
 
 /// Her subkey now, one look and nothing written.
 fn look(s: &mut impl Settings, exe: &str, guid: u128) -> Now {
     let Some(all) = s.entries() else { return Now::NoKey };
-    let mine: Vec<&Entry> = all.iter().filter(|e| is_hers(e, exe, guid, &|id| s.folder(id))).collect();
-    match mine.first() {
+    match find(&all, &*s, exe, guid).first() {
         None => Now::NoEntry,
         Some(e) => e.promoted.map_or(Now::Unset, Now::Value),
     }
@@ -205,14 +282,15 @@ fn marker_path() -> Option<PathBuf> {
     Some(super::dirs::base_dir(BaseDir::State)?.join("synaps-avatar").join(MARKER))
 }
 
-/// The key `path` of HKCU, as `Settings`.
+/// The key `path` of HKCU, as `Settings` (and the shell's tray, asked where her icon is when `shell`).
 struct Registry {
     path: String,
+    shell: bool,
 }
 
 impl Registry {
     fn hers() -> Self {
-        Registry { path: KEY.to_string() }
+        Registry { path: KEY.to_string(), shell: true }
     }
 
     /// `path`'s subkey `sub` (or itself, empty), opened with `sam`.
@@ -273,8 +351,59 @@ impl Settings for Registry {
         if r == ERROR_SUCCESS { Ok(()) } else { Err(r.0) }
     }
 
+    fn on_taskbar(&mut self) -> Seen {
+        if !self.shell {
+            return Seen::Unknown;
+        }
+        match on_taskbar() {
+            Some(true) => Seen::On,
+            Some(false) => Seen::Off,
+            None => Seen::Unknown,
+        }
+    }
+
     fn wait(&mut self, d: Duration) {
         std::thread::sleep(d);
+    }
+}
+
+/// COM on this thread, till it's dropped.
+struct Com;
+
+impl Drop for Com {
+    fn drop(&mut self) {
+        unsafe { CoUninitialize() }
+    }
+}
+
+/// Is her icon on the taskbar now: a button named by her tooltip (`brand::NAME` first) in the taskbar's UI
+/// Automation tree, its centre inside the taskbar's rect (an icon in the overflow has none there: the
+/// shots' rig looks the same way). `Shell_NotifyIconGetRect` can't say: for an icon in the overflow it
+/// answers with the `^` button's rect, and a lone icon takes that very place when it comes out. None: it
+/// couldn't be asked (no taskbar, no UI Automation).
+fn on_taskbar() -> Option<bool> {
+    unsafe {
+        // The thread of her promotion is her own: MTA, as media.rs's; every object below is gone before `_com`.
+        let _com = CoInitializeEx(None, COINIT_MULTITHREADED).is_ok().then_some(Com);
+        let bar = FindWindowW(w!("Shell_TrayWnd"), PCWSTR::null()).ok().filter(|h| !h.is_invalid())?;
+        let mut tb = RECT::default();
+        GetWindowRect(bar, &mut tb).ok()?;
+        let ui = CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_ALL).ok()?;
+        let root = ui.ElementFromHandle(bar).ok()?;
+        let all = root.FindAll(TreeScope_Descendants, &ui.CreateTrueCondition().ok()?).ok()?;
+        for i in 0..all.Length().ok()? {
+            let Ok(e) = all.GetElement(i) else { continue };
+            let Ok(name) = e.CurrentName() else { continue };
+            if !name.to_string().starts_with(crate::brand::NAME) {
+                continue;
+            }
+            let Ok(r) = e.CurrentBoundingRectangle() else { continue };
+            let (cx, cy) = ((r.left + r.right) / 2, (r.top + r.bottom) / 2);
+            if r.right > r.left && (tb.left..tb.right).contains(&cx) && (tb.top..tb.bottom).contains(&cy) {
+                return Some(true);
+            }
+        }
+        Some(false)
     }
 }
 
@@ -322,13 +451,14 @@ pub(super) fn spawn(guid: u128) {
     }
 }
 
-/// `IsPromoted` of her icon `guid`'s subkey now (a test reads it back); None: no such subkey, or none set.
+/// Her icon `guid`'s subkey as it is now, one strict look (a test reads it back, and says whether the match
+/// or Explorer was the late one).
 #[cfg(test)]
-pub(super) fn promoted(guid: u128) -> Option<u32> {
-    let mut reg = Registry::hers();
-    let exe = std::env::current_exe().ok()?.to_string_lossy().into_owned();
-    let all = reg.entries()?;
-    all.iter().find(|e| is_hers(e, &exe, guid, &|id| reg.folder(id))).and_then(|e| e.promoted)
+pub(super) fn now(guid: u128) -> Now {
+    match std::env::current_exe() {
+        Ok(exe) => look(&mut Registry::hers(), &exe.to_string_lossy(), guid),
+        Err(_) => Now::NoEntry,
+    }
 }
 
 /// Subkeys that look like hers by a looser rule than the match's: this exe's file name, and her icon's
@@ -384,12 +514,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(m.parent().unwrap());
     }
 
-    /// The registry and the clock from a script: what each look finds (the last one repeats), what was
-    /// written, the waits between looks.
+    /// The registry, the shell and the clock from a script: what each look finds (the last one repeats), what
+    /// the shell says each time it's asked (the last repeats; none: it can't say), what was written, the waits.
     #[derive(Default)]
     struct Fake {
         looks: Vec<Option<Vec<Entry>>>,
         seen: usize,
+        shell: Vec<Seen>,
+        asked: usize,
         wrote: Vec<String>,
         waited: Vec<Duration>,
         refuse: Option<u32>,
@@ -398,6 +530,10 @@ mod tests {
     impl Fake {
         fn finds(looks: Vec<Option<Vec<Entry>>>) -> Self {
             Fake { looks, ..Default::default() }
+        }
+        fn says(mut self, shell: &[Seen]) -> Self {
+            self.shell = shell.to_vec();
+            self
         }
     }
 
@@ -417,6 +553,10 @@ mod tests {
                     Ok(())
                 }
             }
+        }
+        fn on_taskbar(&mut self) -> Seen {
+            self.asked += 1;
+            self.shell.get(self.asked - 1).or(self.shell.last()).copied().unwrap_or(Seen::Unknown)
         }
         fn wait(&mut self, d: Duration) {
             self.waited.push(d);
@@ -477,10 +617,10 @@ mod tests {
     fn it_is_done_once_and_the_marker_says_so() {
         let m = marker("once");
         let mine = || entry("1", EXE, Some(HERS), None);
-        let mut s = Fake::finds(vec![Some(vec![entry("0", r"C:\other\x.exe", None, None), mine()])]);
+        let mut s = Fake::finds(vec![Some(vec![entry("0", r"C:\other\x.exe", None, None), mine()])]).says(&[Seen::On]);
         assert_eq!(promote(&mut s, &m, EXE, HERS), Outcome::Shown);
         assert_eq!(s.wrote, ["1"], "her subkey only");
-        assert!(s.waited.is_empty(), "there at the first look: no waiting");
+        assert_eq!(s.waited, [WAIT[0], LOOK], "not at once (Explorer takes no value written during the add), then a look at the taskbar");
         assert!(m.is_file(), "the marker's made after the write");
 
         // The next start: the marker, and her subkey is only read (he may have hidden her since: a 0).
@@ -490,7 +630,7 @@ mod tests {
 
         // Deleted by hand: it does it again.
         std::fs::remove_file(&m).unwrap();
-        assert_eq!(promote(&mut Fake::finds(vec![Some(vec![mine()])]), &m, EXE, HERS), Outcome::Shown);
+        assert_eq!(promote(&mut Fake::finds(vec![Some(vec![mine()])]).says(&[Seen::On]), &m, EXE, HERS), Outcome::Shown);
         clean(&m);
     }
 
@@ -517,6 +657,59 @@ mod tests {
     }
 
     #[test]
+    fn she_is_written_again_once_if_the_shell_hasnt_moved_her() {
+        let unset = || Some(vec![entry("1", EXE, Some(HERS), None)]);
+        let with = |p| Some(vec![entry("1", EXE, Some(HERS), Some(p))]);
+        let (on, off) = (Seen::On, Seen::Off);
+
+        // On the taskbar at the third look: one write, no more asked.
+        let m = marker("c-on");
+        let mut s = Fake::finds(vec![unset()]).says(&[off, off, on]);
+        assert_eq!(promote(&mut s, &m, EXE, HERS), Outcome::Shown);
+        assert_eq!((s.wrote.len(), s.asked), (1, 3));
+        clean(&m);
+
+        // Not within CONFIRM_FOR: after AGAIN, her subkey still reads 1, the same 1 is written once more, and
+        // the shell is asked CONFIRM_FOR again. Still in the overflow: said so, marker kept (it was written).
+        let m = marker("c-again");
+        let mut s = Fake::finds(vec![unset(), with(1)]).says(&[off]);
+        assert_eq!(promote(&mut s, &m, EXE, HERS), Outcome::NotMoved);
+        assert_eq!(s.wrote, ["1", "1"]);
+        assert_eq!(s.asked, 8, "four looks, then four");
+        assert!(s.waited.contains(&AGAIN));
+        assert!(m.is_file());
+        clean(&m);
+
+        // The second write brings her out.
+        let m = marker("c-second");
+        let mut s = Fake::finds(vec![unset(), with(1)]).says(&[off, off, off, off, on]);
+        assert_eq!(promote(&mut s, &m, EXE, HERS), Outcome::Shown);
+        assert_eq!((s.wrote.len(), s.asked), (2, 5));
+        clean(&m);
+
+        // He hid her meanwhile (a 0): never written over, nothing more asked.
+        let m = marker("c-hid");
+        let mut s = Fake::finds(vec![unset(), with(0)]).says(&[off]);
+        assert_eq!(promote(&mut s, &m, EXE, HERS), Outcome::LeftAsSet);
+        assert_eq!((s.wrote.len(), s.asked), (1, 4));
+        clean(&m);
+
+        // Her subkey doesn't read 1 any more (gone, or unset): nothing to write again.
+        let m = marker("c-gone");
+        let mut s = Fake::finds(vec![unset(), Some(vec![])]).says(&[off]);
+        assert_eq!(promote(&mut s, &m, EXE, HERS), Outcome::NotMoved);
+        assert_eq!(s.wrote.len(), 1);
+        clean(&m);
+
+        // The shell can't say: no second write, and no claim.
+        let m = marker("c-unknown");
+        let mut s = Fake::finds(vec![unset()]).says(&[Seen::Unknown]);
+        assert_eq!(promote(&mut s, &m, EXE, HERS), Outcome::Written);
+        assert_eq!((s.wrote.len(), s.asked), (1, 1));
+        clean(&m);
+    }
+
+    #[test]
     fn what_is_set_already_is_his() {
         for his in [0, 1, 2] {
             let m = marker("his");
@@ -532,9 +725,9 @@ mod tests {
     fn explorer_writes_her_subkey_a_moment_late() {
         let m = marker("late");
         let (none, there) = (Some(vec![entry("0", r"C:\other\x.exe", None, None)]), Some(vec![entry("1", EXE, Some(HERS), None)]));
-        let mut s = Fake::finds(vec![none, Some(vec![]), there]);
+        let mut s = Fake::finds(vec![none, Some(vec![]), there]).says(&[Seen::On]);
         assert_eq!(promote(&mut s, &m, EXE, HERS), Outcome::Shown);
-        assert_eq!(s.waited, [Duration::from_secs(1), Duration::from_secs(2)]);
+        assert_eq!(s.waited, [Duration::from_secs(3), Duration::from_secs(1), Duration::from_secs(2), LOOK]);
         assert_eq!(s.wrote, ["1"]);
         clean(&m);
     }
@@ -557,7 +750,7 @@ mod tests {
         assert_eq!(promote(&mut s, &m, EXE, HERS), Outcome::NoKey);
         assert!(s.wrote.is_empty() && !m.exists());
         // The key made late (a first icon of all): looked for again.
-        let mut late = Fake::finds(vec![None, Some(vec![entry("1", EXE, Some(HERS), None)])]);
+        let mut late = Fake::finds(vec![None, Some(vec![entry("1", EXE, Some(HERS), None)])]).says(&[Seen::On]);
         assert_eq!(promote(&mut late, &m, EXE, HERS), Outcome::Shown);
         clean(&m);
     }
@@ -576,15 +769,20 @@ mod tests {
     fn her_log_says_which() {
         for (o, said) in [
             (Outcome::Shown, "tray: shown on the taskbar (first run)"),
+            (Outcome::NotMoved, "tray: set to show on the taskbar; Explorer hasn't moved her yet (next sign-in)"),
+            (Outcome::Written, "tray: set to show on the taskbar (first run); the shell couldn't say"),
             (Outcome::LeftAsSet, "tray: left as he set it"),
             (Outcome::NoEntry, "tray: no NotifyIconSettings entry yet"),
-            (Outcome::Marked { now: Now::Value(0), set: true }, "tray: left as he set it (IsPromoted now 0; she set 1 on her first run)"),
-            (Outcome::Marked { now: Now::Value(1), set: true }, "tray: left as he set it (IsPromoted now 1; she set 1 on her first run)"),
-            (Outcome::Marked { now: Now::Unset, set: false }, "(IsPromoted now unset; it was his already on her first run)"),
-            (Outcome::Marked { now: Now::NoEntry, set: true }, "(no entry of hers now;"),
-            (Outcome::Marked { now: Now::NoKey, set: true }, "(no NotifyIconSettings key now;"),
+            (Outcome::Marked { now: Now::Value(0), set: true }, "tray: IsPromoted now 0; she set 1 on her first run"),
+            (Outcome::Marked { now: Now::Value(1), set: true }, "tray: IsPromoted now 1; she set 1 on her first run"),
+            (Outcome::Marked { now: Now::Unset, set: true }, "tray: IsPromoted now unset; she set 1"),
+            (Outcome::Marked { now: Now::NoEntry, set: true }, "tray: no entry of hers now; she set 1"),
+            (Outcome::Marked { now: Now::NoKey, set: true }, "tray: no NotifyIconSettings key now; she set 1"),
+            (Outcome::Marked { now: Now::Value(0), set: false }, "tray: left as he set it (IsPromoted now 0; it was his already on her first run)"),
         ] {
             assert!(o.line().contains(said), "{}", o.line());
+            // Said as his only where it was his: a 0 she set 1 over isn't "as he set it" (it may be his hiding her, but the log says only what it read).
+            assert_eq!(o.line().contains("left as he set it"), matches!(o, Outcome::LeftAsSet | Outcome::Marked { set: false, .. }), "{}", o.line());
         }
         assert!(Outcome::NoKey.line().contains("no NotifyIconSettings key"));
         assert!(Outcome::Failed(5).line().contains("error 5"));
@@ -608,8 +806,9 @@ mod tests {
             let _ = unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, &HSTRING::from(self.root.as_str())) };
         }
 
+        /// As `Settings`, with no shell to ask (the tray here is the runner's, not this key's).
         fn registry(&self) -> Registry {
-            Registry { path: self.path.clone() }
+            Registry { path: self.path.clone(), shell: false }
         }
 
         /// `sub` of it (the key itself, empty), made and open for writing.
@@ -662,7 +861,7 @@ mod tests {
         s.entry("3", r"C:\other\x.exe", Some(HERS), None);
         s.entry("4", r"C:\other\y.exe", None, Some(0));
         let m = marker("registry");
-        assert_eq!(promote(&mut s.registry(), &m, &exe, HERS), Outcome::Shown);
+        assert_eq!(promote(&mut s.registry(), &m, &exe, HERS), Outcome::Written);
         let after: Vec<(String, Option<u32>)> = {
             let mut v: Vec<_> = s.registry().entries().unwrap().into_iter().map(|e| (e.name, e.promoted)).collect();
             v.sort();
@@ -686,7 +885,7 @@ mod tests {
         let exe = format!(r"{local}\Programs\synaps-avatar\synaps-avatar.exe");
         s.entry("7", r"{F1B32785-6FBA-4FCF-9D55-7B8E7F157091}\Programs\synaps-avatar\synaps-avatar.exe", Some(HERS), None);
         let m = marker("known");
-        assert_eq!(promote(&mut s.registry(), &m, &exe, HERS), Outcome::Shown);
+        assert_eq!(promote(&mut s.registry(), &m, &exe, HERS), Outcome::Written);
         assert_eq!(s.registry().entries().unwrap()[0].promoted, Some(1));
         clean(&m);
     }
