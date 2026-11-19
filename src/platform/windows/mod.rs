@@ -1820,9 +1820,9 @@ mod tests {
                 if case.contains("hide") {
                     let _ = ShowWindow(body, SW_HIDE);
                 }
-                let keep = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
-                SetWindowPos(body, Some(HWND_NOTOPMOST), 0, 0, 0, 0, keep).unwrap();
-                SetWindowPos(plain, Some(HWND_TOP), 0, 0, 0, 0, keep).unwrap();
+                // Right under the plain window: out of the topmost band (inserted after a window
+                // that isn't topmost).
+                SetWindowPos(body, Some(plain), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE).unwrap();
                 if case.contains("hide") {
                     let _ = ShowWindow(body, SW_SHOWNA);
                 }
