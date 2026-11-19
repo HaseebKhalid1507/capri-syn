@@ -243,10 +243,15 @@ synaps-avatar [--profile P | --socket PATH] [--session NAME|ID | --new [--cwd DI
 
 `synaps-avatar --help` lists the rest (`--name`, `--threads`, `--no-verify`, `--focus-probe`).
 
-Environment knobs: `SA_COMPOSITED=0|1` overrides `[display] composited`. `SA_ANY_GPU=1` lets GPUI pick
-the GPU (by default it uses the boot VGA device), `SA_GL=1` brings back GPUI's GL probe, `SA_TIMING=1`
-logs Enter → first reply text → first word on screen, `SA_DEBUG=1` logs attach mode switches, and
-`SA_RESPAWN_AFTER=<s>` sets the offline time before the client is re-created (tests).
+Environment knobs: `SA_BACKEND=x11` runs her through XWayland on any Wayland desktop, Hyprland
+included, and `SA_BACKEND=wayland` keeps her on Wayland (Hyprland only, no fallback: with no
+Wayland session it's an error); any case, and another value is ignored with a line in her log.
+Unset, a Wayland desktop that isn't Hyprland runs her through XWayland when it has one
+([INSTALL](INSTALL.md#gnome-kde-and-other-wayland-desktops)). `SA_COMPOSITED=0|1` overrides
+`[display] composited`. `SA_ANY_GPU=1` lets GPUI pick the GPU (by default it uses the boot VGA
+device), `SA_GL=1` brings back GPUI's GL probe, `SA_TIMING=1` logs Enter → first reply text →
+first word on screen, `SA_DEBUG=1` logs attach mode switches, and `SA_RESPAWN_AFTER=<s>` sets the
+offline time before the client is re-created (tests).
 `CAPRI_VOICE_SOCK` points her at a voice sidecar socket other than `$XDG_RUNTIME_DIR/capri-voice.sock`.
 
 ## A daemon on another machine

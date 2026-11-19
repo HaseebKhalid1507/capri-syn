@@ -166,7 +166,7 @@ put() {
 
 # The receipt: what this script installed, one entry per line, its fields tab-separated and the path
 # last: `prefix PATH` (each --prefix she went to), `file PATH`, `dir PATH`, `rmdir PATH`, `backup PATH`,
-# `block TAG FILE`, `unit NAME FILE`, `meta KEY VALUE`. --uninstall reads it backwards (and removes only paths in her folders: removable).
+# `block TAG FILE`, `unit NAME FILE`, `gkey PATH` (her GNOME shortcut), `meta KEY VALUE`. --uninstall reads it backwards (and removes only paths in her folders: removable).
 rec() {
     [ "$DRY" = 1 ] && return 0
     local IFS=$'\t' line
@@ -982,12 +982,19 @@ first_file() {
     return 0
 }
 
+# Hyprland as her binary reads it (linux::hyprland_in): its signature naming one that runs (its request
+# socket is there; one left over from an earlier Hyprland login, in GNOME's environment or tmux's,
+# names none), or the desktop variables saying Hyprland.
+hypr_live() {
+    local sig=${HYPRLAND_INSTANCE_SIGNATURE:-}
+    [ -n "${sig// /}" ] && [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -e "$XDG_RUNTIME_DIR/hypr/$sig/.socket.sock" ]
+}
 desktop() {
     local de
     DESKTOP=${CAPRI_DESKTOP:-}
     if [ -z "$DESKTOP" ]; then
         de=$(printf '%s:%s' "${XDG_CURRENT_DESKTOP:-}" "${XDG_SESSION_DESKTOP:-}" | tr '[:upper:]' '[:lower:]')
-        if [ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ] || [[ $de == *hyprland* ]]; then
+        if hypr_live || [[ $de == *hyprland* ]]; then
             DESKTOP=hyprland
         elif [ -n "${SWAYSOCK:-}" ] || [[ $de == *sway* ]]; then
             DESKTOP=sway
@@ -1026,8 +1033,9 @@ wm_mod() {
     esac
 }
 
+# Her key's lines for his WM config. Hyprland: $1 its modifiers (SUPER, or SUPER ALT when Super+C is taken).
 summon_lines() {
-    local ctl
+    local ctl hm=${1:-SUPER}
     ctl=$(q "$BIN/avatarctl")
     case $DESKTOP in
         i3 | sway)
@@ -1036,9 +1044,9 @@ summon_lines() {
             if [ "$VOICE" = 1 ]; then printf '\nbindsym %s+Ctrl+c exec --no-startup-id %s talk toggle' "$MOD_WORD" "$ctl"; fi
             ;;
         hyprland)
-            printf 'bind = SUPER, C, exec, %s talk press\n' "$ctl"
-            printf 'bindr = SUPER, C, exec, %s talk release' "$ctl"
-            if [ "$VOICE" = 1 ]; then printf '\nbind = SUPER CTRL, C, exec, %s talk toggle' "$ctl"; fi
+            printf 'bind = %s, C, exec, %s talk press\n' "$hm" "$ctl"
+            printf 'bindr = %s, C, exec, %s talk release' "$hm" "$ctl"
+            if [ "$VOICE" = 1 ]; then printf '\nbind = %s CTRL, C, exec, %s talk toggle' "$hm" "$ctl"; fi
             ;;
     esac
     return 0
@@ -1048,6 +1056,10 @@ step_summon() {
     step "Summon key"
     desktop
     if [ "$DESKTOP" = other ]; then
+        if on_gnome; then
+            gnome_summon
+            return 0
+        fi
         info "desktop: ${XDG_CURRENT_DESKTOP:-unknown} (not i3, sway or Hyprland): bind a key yourself in its keyboard settings to"
         info "  $(tilde "$BIN/avatarctl") talk tap        (a tap opens the Line beside her)"
         SUMMON="a key you bind to \`avatarctl talk tap\`"
@@ -1068,21 +1080,33 @@ step_summon() {
         SUMMON="your own binding"
         return 0
     fi
-    local clash
+    local clash alt key=$MOD_NAME+C
     case $DESKTOP in
         i3 | sway) clash=$(wm_grep "^\\s*bindsym\\s+(--\\S+\\s+)*(\\\$mod|$MOD_RAW)\\+c\\s" || true) ;;
         hyprland) clash=$(wm_grep '^\s*bind[a-z]*\s*=\s*(\$mainmod|\$mod|super)\s*,\s*c\s*,' || true) ;;
     esac
     if [ -n "$clash" ]; then
         warn "$MOD_NAME+C is taken: $(printf '%s' "$clash" | head -n1 | sed 's/^\s*//')"
+        # Hyprland's stock config closes a window on Super+C: Super+Alt+C then (Windows' key), if it's free.
+        if [ "$DESKTOP" = hyprland ]; then
+            alt=$(wm_grep '^\s*bind[a-z]*\s*=\s*((\$mainmod|\$mod|super|win)[ _]*alt|alt[ _]*(\$mainmod|\$mod|super|win))\s*,\s*c\s*,' || true)
+            if [ -z "$alt" ]; then
+                key=Super+Alt+C
+                lines=$(summon_lines 'SUPER ALT')
+            else
+                warn "Super+Alt+C is taken too: $(printf '%s' "$alt" | head -n1 | sed 's/^\s*//')"
+            fi
+        fi
+    fi
+    if [ -n "$clash" ] && [ "$key" = "$MOD_NAME+C" ]; then
         info "pick another key and add these to $(tilde "$WMCONF") with it:"
         printf '%s\n' "$lines" | sed "s/^/       $D│$N /"
         SUMMON="not bound ($MOD_NAME+C is taken)"
         return 0
     fi
-    if confirm "add the summon key ($MOD_NAME+C) to $(tilde "$WMCONF") (a backup first)"; then
+    if confirm "add the summon key ($key) to $(tilde "$WMCONF") (a backup first)"; then
         block_put "$WMCONF" summon "$lines"
-        SUMMON="$MOD_NAME+C ($DESKTOP)" SUMMON_KEY="$MOD_NAME+C"
+        SUMMON="$key ($DESKTOP)" SUMMON_KEY=$key
         wm_reload
     else
         info "add these yourself:"
@@ -1096,6 +1120,180 @@ wm_reload() {
         i3) if [ -n "${I3SOCK:-}" ] && have i3-msg; then run i3-msg -q reload; fi ;;
         sway) if [ -n "${SWAYSOCK:-}" ] && have swaymsg; then run swaymsg -q reload; fi ;;
     esac
+}
+
+# GNOME: her key as one of its custom keyboard shortcuts (gsettings), only when he says yes on a
+# terminal. The receipt's `gkey PATH` is that shortcut: --uninstall takes it out of the list and resets it.
+GSCHEMA=org.gnome.settings-daemon.plugins.media-keys
+GKEY=/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/synaps-avatar/
+
+# GNOME (its name in XDG_CURRENT_DESKTOP: GNOME, ubuntu:GNOME...), its shortcuts writable through gsettings.
+on_gnome() {
+    case ":${XDG_CURRENT_DESKTOP:-}:" in *:GNOME:* | *:GNOME-Classic:*) ;; *) return 1 ;; esac
+    have gsettings && [ "$(gsettings writable "$GSCHEMA" custom-keybindings 2>/dev/null)" = true ]
+}
+# A GVariant string, for gsettings set.
+gv() {
+    local s=${1//\\/\\\\}
+    s=${s//\"/\\\"}
+    printf '"%s"' "$s"
+}
+# The custom-keybindings list, as gsettings prints it ('' when it doesn't read as one); its paths, one a line.
+glist_get() {
+    local l
+    l=$(gsettings get "$GSCHEMA" custom-keybindings 2>/dev/null || true)
+    case $l in '@as []' | "['"*"']") printf '%s' "$l" ;; esac
+}
+glist_paths() { printf '%s' "$1" | grep -o "'[^']*'" | tr -d "'" || true; }
+gnome_paths() { glist_paths "$(glist_get)"; }
+# Paths (one a line, each once) as a list for gsettings set.
+glist() {
+    local p out=''
+    while IFS= read -r p; do
+        case $p in '' | *[\"\\]*) continue ;; esac
+        case "$out, " in *"\"$p\", "*) continue ;; esac
+        out+=${out:+, }\"$p\"
+    done
+    printf '[%s]' "$out"
+}
+# One key of a custom shortcut, as gsettings prints it.
+gnome_get() { gsettings get "$GSCHEMA.custom-keybinding:$1" "$2" 2>/dev/null || true; }
+# What already has Super+Alt+C (Mod4 is Super, Mod1 Alt; either order): the window manager's, the
+# Shell's, its extensions' (the installed schemas) and the media keys' shortcuts, and every custom one.
+gnome_taken() {
+    local s p
+    {
+        for s in org.gnome.desktop.wm.keybindings org.gnome.shell.keybindings org.gnome.mutter.keybindings \
+            org.gnome.mutter.wayland.keybindings "$GSCHEMA" \
+            $(gsettings list-schemas 2>/dev/null | grep -E '^org\.gnome\.shell\.extensions\.' | sort || true); do
+            gsettings list-recursively "$s" 2>/dev/null || true
+        done
+        while IFS= read -r p; do printf '%s binding %s\n' "$p" "$(gnome_get "$p" binding)"; done < <(gnome_paths)
+    } | grep -Ei "'<(super|mod4)><(alt|mod1)>c'|'<(alt|mod1)><(super|mod4)>c'" || true
+}
+# A GVariant string as gsettings prints it, unquoted ('' when it isn't one).
+gstr() {
+    local s=$1 out='' c
+    case $s in \'*\' | \"*\") s=${s:1:${#s}-2} ;; *) return 0 ;; esac
+    while [ -n "$s" ]; do
+        c=${s:0:1} s=${s:1}
+        if [ "$c" = "\\" ]; then c=${s:0:1} s=${s:1}; fi
+        out+=$c
+    done
+    printf '%s' "$out"
+}
+# Her shortcut, read back (gsettings set can say yes and dconf not keep it): KEYS bound or gone.
+gnome_holds() {
+    local l
+    [ "$DRY" = 1 ] && return 0
+    l=$(glist_get)
+    [ -n "$l" ] || return 1
+    case $1 in
+        bound)
+            glist_paths "$l" | grep -qxF "$GKEY" &&
+                [ "$(gstr "$(gnome_get "$GKEY" name)")" = synaps-avatar ] &&
+                [ "$(gstr "$(gnome_get "$GKEY" command)")" = "$2" ] &&
+                [ "$(gstr "$(gnome_get "$GKEY" binding)")" = '<Super><Alt>c' ]
+            ;;
+        gone)
+            ! glist_paths "$l" | grep -qxF "$GKEY" &&
+                [ -z "$(gstr "$(gnome_get "$GKEY" command)")" ] && [ -z "$(gstr "$(gnome_get "$GKEY" binding)")" ]
+            ;;
+    esac
+}
+# A command for him to run (printed, not run).
+byhand() { info "  $(q "$@")"; }
+# Her shortcut in (CMD, the new LIST), or out (gnome_unbind_cmds LIST: the list without it, '' to
+# leave it), through `run`, or `byhand`.
+gnome_bind() {
+    local r=$1
+    "$r" gsettings set "$GSCHEMA.custom-keybinding:$GKEY" name "$(gv synaps-avatar)" &&
+        "$r" gsettings set "$GSCHEMA.custom-keybinding:$GKEY" command "$(gv "$2")" &&
+        "$r" gsettings set "$GSCHEMA.custom-keybinding:$GKEY" binding "$(gv '<Super><Alt>c')" &&
+        "$r" gsettings set "$GSCHEMA" custom-keybindings "$3"
+}
+gnome_unbind_cmds() {
+    local r=$1 rc=0
+    if [ -n "$2" ]; then "$r" gsettings set "$GSCHEMA" custom-keybindings "$2" || rc=1; fi
+    "$r" gsettings reset-recursively "$GSCHEMA.custom-keybinding:$GKEY" || rc=1
+    return $rc
+}
+# confirm, but only his own yes on a terminal counts (--yes doesn't answer it): for a change outside
+# her files and his WM config.
+confirm_tty() {
+    if [ "$YES" = 1 ]; then
+        info "--yes doesn't answer this one (without it you're asked): $1"
+        return 1
+    fi
+    if [ "$DRY" = 0 ] && ! (: </dev/tty) 2>/dev/null; then
+        info "no terminal to ask on: skipped ($1)"
+        return 1
+    fi
+    confirm "$1"
+}
+
+gnome_summon() {
+    local cmd p c b list taken
+    cmd="$(q "$BIN/avatarctl") talk tap"
+    info "desktop: GNOME (${XDG_CURRENT_DESKTOP:-}): her key can be one of its keyboard shortcuts"
+    while IFS= read -r p; do
+        c=$(gnome_get "$p" command)
+        case $c in *avatarctl*' talk '*) ;; *) continue ;; esac
+        b=$(gnome_get "$p" binding)
+        c=$(gstr "$c") b=$(gstr "$b")
+        good "already a GNOME shortcut: $b runs $c"
+        if [ "$p" = "$GKEY" ]; then
+            rec gkey "$GKEY"
+            if [ "$b" = '<Super><Alt>c' ]; then SUMMON_KEY=Super+Alt+C; fi
+            SUMMON="${SUMMON_KEY:-$b} (GNOME shortcut)"
+        else
+            SUMMON="your own binding (GNOME shortcut $b)"
+        fi
+        return 0
+    done < <(gnome_paths)
+    taken=$(gnome_taken)
+    if [ -n "$taken" ]; then
+        warn "Super+Alt+C is taken: $(printf '%s' "$taken" | head -n1)"
+    elif confirm_tty "add a GNOME keyboard shortcut: Super+Alt+C runs avatarctl talk tap (a tap opens the Line beside her)"; then
+        # His shortcuts stay in the list: never written from a list that didn't read.
+        list=$(glist_get)
+        if [ -z "$list" ]; then
+            warn "can't read GNOME's custom shortcuts (gsettings get $GSCHEMA custom-keybindings): left as they are"
+        else
+            # In the receipt first: --uninstall takes out whatever of it got written.
+            rec gkey "$GKEY"
+            list=$(glist < <(glist_paths "$list"; printf '%s\n' "$GKEY"))
+            if gnome_bind run "$cmd" "$list" && gnome_holds bound "$cmd"; then
+                SUMMON="Super+Alt+C (GNOME shortcut)" SUMMON_KEY=Super+Alt+C
+                return 0
+            fi
+            warn "gsettings didn't keep it (read back, GNOME's settings don't have it): these add it by hand"
+            gnome_bind byhand "$cmd" "$list"
+        fi
+    fi
+    info "bind a key yourself: Settings > Keyboard > Keyboard Shortcuts > Custom Shortcuts, one that runs"
+    info "  $cmd        (a tap opens the Line beside her)"
+    SUMMON="a key you bind to \`avatarctl talk tap\`"
+}
+
+# --uninstall: her GNOME shortcut out of the list, its keys reset (one he made run something else
+# stays), read back. 1 when GNOME's settings still have it (the commands printed, to run by hand).
+gnome_unbind() {
+    local c list new=''
+    c=$(gnome_get "$GKEY" command)
+    case $c in
+        '' | "''" | *avatarctl*) ;;
+        *)
+            info "the GNOME shortcut $GKEY runs $c now (yours): left as it is"
+            return 0
+            ;;
+    esac
+    list=$(glist_get)
+    case $list in *"'$GKEY'"*) new=$(glist < <(glist_paths "$list" | grep -vxF "$GKEY")) ;; esac
+    if gnome_unbind_cmds run "$new" && gnome_holds gone; then return 0; fi
+    warn "gsettings didn't take her GNOME shortcut out (read back, GNOME's settings still have it): these do it by hand"
+    gnome_unbind_cmds byhand "$new"
+    return 1
 }
 
 # ---- 6. autostart -----------------------------------------------------------------------------
@@ -1130,8 +1328,33 @@ launch_cmd() {
     printf '%s' "$cmd"
 }
 
+# Her entry in his app menu (GNOME's, KDE's, a launcher's): once she's quit she starts from there, as
+# from Windows' Start menu. Written with --no-autostart too. Her name in the grid, the binary's in
+# the Comment (both entries).
+DESKTOP_COMMENT="Capri, your desktop companion (synaps-avatar)"
+app_entry() {
+    local f=$DATA/applications/synaps-avatar.desktop icon=''
+    # Her icon as she picks it for her window: his own, else her pack's (the art step put it there).
+    if [ -f "$CONF/synaps-avatar/icon.png" ]; then
+        icon=$CONF/synaps-avatar/icon.png
+    elif [ -f "$PACK/icon.png" ] || [ "$DRY" = 1 ]; then
+        icon=$PACK/icon.png
+    fi
+    info "she's in your app menu: Capri"
+    put "$f" < <(
+        printf '%s\n' '[Desktop Entry]' "# capri-syn's install.sh wrote this (install.sh --uninstall removes it)." \
+            Type=Application Name=Capri 'GenericName=Desktop companion' "Comment=$DESKTOP_COMMENT" \
+            'Keywords=Capri;capri-syn;synaps-avatar;Synaps;' "TryExec=${BIN//\\/\\\\}/synaps-avatar" "Exec=$(launch_cmd xdg)"
+        if [ -n "$icon" ]; then printf 'Icon=%s\n' "${icon//\\/\\\\}"; fi
+        printf '%s\n' Terminal=false 'Categories=Utility;' StartupNotify=false
+    )
+    rec file "$f"
+    APP_HOW="Capri ($(tilde "$f"))"
+}
+
 step_autostart() {
     step "Autostart"
+    app_entry
     if [ "$AUTOSTART" = 0 ]; then
         info "skipped (--no-autostart)"
         AUTOSTART_HOW="off"
@@ -1175,8 +1398,8 @@ step_autostart() {
 [Desktop Entry]
 # capri-syn's install.sh wrote this (install.sh --uninstall removes it).
 Type=Application
-Name=synaps-avatar
-Comment=Capri, your desktop companion
+Name=Capri
+Comment=$DESKTOP_COMMENT
 Exec=$cmd
 Terminal=false
 NoDisplay=true
@@ -1472,6 +1695,7 @@ summary() {
     printf '   %-*s %s\n' $w daemon "${DAEMON_STATE:-?}, ${DAEMON_HOW:-?}"
     printf '   %-*s %s\n' $w summon "${SUMMON:-?}"
     printf '   %-*s %s\n' $w autostart "${AUTOSTART_HOW:-?}"
+    printf '   %-*s %s\n' $w "app menu" "${APP_HOW:-?}"
     if [ -n "${VOICE_HOW:-}" ]; then printf '   %-*s %s\n' $w voice "$VOICE_HOW"; fi
     if [ -n "${WATCH_HOW:-}" ]; then printf '   %-*s %s\n' $w watch "$WATCH_HOW"; fi
     local how='click her to talk'
@@ -1482,7 +1706,7 @@ summary() {
     start_her
     if [ "${STARTED:-0}" = 1 ]; then
         printf '\n   %sshe'"'"'s on your screen:%s %s\n' "$B$T" "$N" "$how"
-        info "start her again: $(launch_cmd show) &"
+        info "start her again: $(launch_cmd show) &   (or from your app menu)"
     else
         printf '\n   %sstart her:%s %s &      %sthen %s%s\n' "$B$T" "$N" "$(launch_cmd show)" "$D" "$how" "$N"
     fi
@@ -1532,7 +1756,7 @@ uninstall() {
         if pgrep -u "$(id -u)" -x synaps-avatar >/dev/null 2>&1; then
             if [ -x "$BIN/avatarctl" ]; then run "$BIN/avatarctl" quit || true; else run pkill -u "$(id -u)" -x synaps-avatar || true; fi
         fi
-        local line kind rest tag f reload=0
+        local line kind rest tag f reload=0 keep=()
         while IFS= read -r line; do
             [ -n "$line" ] || continue
             kind=${line%%$'\t'*} rest=${line#*$'\t'}
@@ -1585,11 +1809,26 @@ uninstall() {
                     fi
                     ;;
                 rmdir) if removable "$f" rmdir; then rmdirs+=("$f"); else skipped "$f"; fi ;;
+                gkey)
+                    if [ "$f" != "$GKEY" ]; then
+                        skipped "$f"
+                    elif have gsettings; then
+                        gnome_unbind || keep+=("$line")
+                    else
+                        info "no gsettings here: the GNOME shortcut $f is left as it is"
+                    fi
+                    ;;
                 *) warn "a receipt entry this script doesn't know (left alone): $line" ;;
             esac
         done < <(tac "$RECEIPT")
         if [ "$reload" = 1 ] && systemd_user; then run systemctl --user daemon-reload; fi
-        run rm -f "$RECEIPT"
+        if [ ${#keep[@]} -gt 0 ]; then
+            # What didn't come out stays in the receipt, for the next --uninstall.
+            [ "$DRY" = 1 ] || printf '%s\n' "${keep[@]}" >"$RECEIPT"
+            warn "kept in the receipt ($(tilde "$RECEIPT")): what didn't come out (--uninstall again tries it again)"
+        else
+            run rm -f "$RECEIPT"
+        fi
     else
         info "no receipt ($(tilde "$RECEIPT")): nothing installed by this script"
     fi

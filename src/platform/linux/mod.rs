@@ -9,7 +9,7 @@ pub use media::watch_media;
 pub use notifications::notify;
 
 use super::BaseDir;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
 /// XDG's base directories: `$XDG_<KIND>_HOME`, else under `$HOME`.
@@ -63,8 +63,99 @@ pub fn voice_link_bg(done: impl FnOnce(String, std::io::Result<VoiceLink>) + Sen
 /// nothing.
 pub fn voice_sidecar(_on: bool, _mic: &str) {}
 
-/// Process setup that has to happen before any other thread exists. Each knob was
-/// measured on bella (release, `ps` RSS 6 s after start, see LOG.md):
+/// The display server she runs on (`backend`). GPUI picks its own from the same variables, so
+/// `process_setup` unsets `WAYLAND_DISPLAY` for both XWayland kinds before it starts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Backend {
+    /// X11: no Wayland session (`WAYLAND_DISPLAY` unset or blank).
+    X11,
+    /// Wayland itself: Hyprland (`hyprland_in`), or `SA_BACKEND=wayland` (Hyprland or nothing:
+    /// it's the only Wayland desktop she has a backend for).
+    Wayland,
+    /// X11 through XWayland, asked for: `SA_BACKEND=x11`.
+    XWayland,
+    /// X11 through XWayland, picked for him: a Wayland desktop that isn't Hyprland (GNOME, KDE,
+    /// sway), with XWayland running (`DISPLAY` set).
+    XWaylandAuto,
+    /// A Wayland desktop that isn't Hyprland, without XWayland (`DISPLAY` unset or blank):
+    /// nothing she can run on.
+    NoXWayland,
+    /// `SA_BACKEND=wayland` with no Wayland session (`WAYLAND_DISPLAY` unset or blank): asked
+    /// for, so no fallback to X11.
+    NoWayland,
+}
+
+/// What `SA_BACKEND` asks for: `x11` (XWayland) or `wayland`, in any case, trimmed. None for a
+/// blank value or one she doesn't know (`process_setup` says so).
+fn asked(v: &OsStr) -> Option<Backend> {
+    match v.to_str()?.trim().to_ascii_lowercase().as_str() {
+        "x11" => Some(Backend::XWayland),
+        "wayland" => Some(Backend::Wayland),
+        _ => None,
+    }
+}
+
+/// Whether this is Hyprland's session, as install.sh's `desktop` reads it: its signature
+/// (`HYPRLAND_INSTANCE_SIGNATURE`) naming one that runs (`live`: its request socket is there; a
+/// signature left over from an earlier Hyprland login, in GNOME's environment or a tmux server's,
+/// names none), or `XDG_CURRENT_DESKTOP` or `XDG_SESSION_DESKTOP` saying Hyprland (one whose
+/// signature got lost on the way to her, as systemd or D-Bus activation can: `connect` then says
+/// what's missing, rather than her taking XWayland unasked).
+fn hyprland_in(var: &impl Fn(&str) -> Option<OsString>, live: &impl Fn(&str) -> bool) -> bool {
+    let sig = var("HYPRLAND_INSTANCE_SIGNATURE").and_then(|v| v.into_string().ok()).unwrap_or_default();
+    if !sig.trim().is_empty() && live(sig.as_str()) {
+        return true;
+    }
+    ["XDG_CURRENT_DESKTOP", "XDG_SESSION_DESKTOP"]
+        .into_iter()
+        .any(|k| var(k).is_some_and(|v| v.to_string_lossy().to_lowercase().contains("hyprland")))
+}
+
+/// Which display server she runs on, from her environment (`var`: a variable, None when unset;
+/// `live`: whether a Hyprland signature names one that runs). `SA_BACKEND` wins whenever it's set
+/// to one she knows (`x11`, `wayland`); anything else in it is ignored. Without it, a Wayland
+/// session is Hyprland's (natively) or, anywhere else, XWayland's when it has one.
+fn backend_in(var: impl Fn(&str) -> Option<OsString>, live: impl Fn(&str) -> bool) -> Backend {
+    let set = |k: &str| var(k).is_some_and(|v| !v.is_empty());
+    let ask = var("SA_BACKEND").and_then(|v| asked(&v));
+    if !set("WAYLAND_DISPLAY") {
+        return if ask == Some(Backend::Wayland) { Backend::NoWayland } else { Backend::X11 };
+    }
+    if let Some(b) = ask {
+        return b;
+    }
+    if hyprland_in(&var, &live) {
+        Backend::Wayland
+    } else if set("DISPLAY") {
+        Backend::XWaylandAuto
+    } else {
+        Backend::NoXWayland
+    }
+}
+
+/// `backend_in` on her own environment. After `process_setup` an XWayland pick reads as X11
+/// (`WAYLAND_DISPLAY` is gone by then).
+pub fn backend() -> Backend {
+    backend_in(|k| std::env::var_os(k), hypr_live)
+}
+
+/// `hyprland_in` on her own environment.
+pub fn hyprland() -> bool {
+    hyprland_in(&|k: &str| std::env::var_os(k), &hypr_live)
+}
+
+/// Whether the Hyprland instance `sig` runs: its request socket is there
+/// (`$XDG_RUNTIME_DIR/hypr/<sig>/.socket.sock`, as `hypr::ipc` connects to it).
+fn hypr_live(sig: &str) -> bool {
+    std::env::var_os("XDG_RUNTIME_DIR").is_some_and(|r| PathBuf::from(r).join("hypr").join(sig).join(".socket.sock").exists())
+}
+
+/// Process setup that has to happen before any other thread exists:
+///
+/// * Her display server (`backend`): through XWayland, `WAYLAND_DISPLAY` is unset for GPUI
+///   and for `connect`, with one line in her log when she picked that herself.
+///
+/// Each knob below was measured on bella (release, `ps` RSS 6 s after start, see LOG.md):
 ///
 /// * Render on the boot VGA device (the iGPU on a hybrid laptop) unless `ZED_DEVICE_ID` is
 ///   set. On bella every vkQueuePresent to this 32-bit override-redirect window
@@ -76,11 +167,27 @@ pub fn voice_sidecar(_on: bool, _mic: &str) {}
 /// * glibc malloc: two arenas and a 1 MiB trim threshold, so the full-size PNG decode
 ///   buffers go back to the OS after scaling: 226 → 84 MB.
 pub fn process_setup() {
-    // SA_BACKEND=x11 on a Wayland desktop: GPUI and we both take X11 (XWayland).
-    if std::env::var("SA_BACKEND").is_ok_and(|v| v == "x11") && std::env::var_os("WAYLAND_DISPLAY").is_some() {
-        if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some() {
-            elog!("synaps-avatar: SA_BACKEND=x11 on Hyprland: through XWayland she sees X clients only, and can't stay above native windows");
-        }
+    // Her display server, and a line for each thing about it she ignored or picked herself.
+    let b = backend();
+    if let Some(v) = std::env::var_os("SA_BACKEND").filter(|v| !v.to_string_lossy().trim().is_empty() && asked(v).is_none()) {
+        elog!("synaps-avatar: SA_BACKEND={v:?} isn't x11 or wayland: ignored");
+    }
+    if let Ok(sig) = std::env::var("HYPRLAND_INSTANCE_SIGNATURE")
+        && !sig.trim().is_empty()
+        && !hypr_live(&sig)
+    {
+        elog!("synaps-avatar: HYPRLAND_INSTANCE_SIGNATURE={sig} names no Hyprland that runs (no $XDG_RUNTIME_DIR/hypr/{sig}/.socket.sock): one left over from an earlier session, ignored");
+    }
+    if b == Backend::XWayland && hyprland() {
+        elog!("synaps-avatar: SA_BACKEND=x11 on Hyprland: through XWayland she sees X clients only, and can't stay above native windows");
+    }
+    if b == Backend::XWaylandAuto {
+        let display = std::env::var("DISPLAY").unwrap_or_default();
+        elog!("synaps-avatar: Wayland, not Hyprland: through XWayland (DISPLAY={display}), as SA_BACKEND=x11 does; she sees X clients only");
+    }
+    // Through XWayland (SA_BACKEND=x11, or a Wayland desktop that isn't Hyprland): GPUI and we
+    // both take X11.
+    if matches!(b, Backend::XWayland | Backend::XWaylandAuto) {
         // SAFETY: first thing in main, single-threaded.
         unsafe { std::env::remove_var("WAYLAND_DISPLAY") };
     }
@@ -387,6 +494,64 @@ mod tests {
         c.kill().ok();
         c.wait().ok();
         assert_eq!(process_env(pid, "SA_TEST_KEY"), None, "gone: can't be read");
+    }
+
+    /// Her display server: Hyprland natively (a signature naming one that runs, or the desktop
+    /// variables saying Hyprland), any other Wayland desktop through XWayland when it runs, X11
+    /// as it is; `SA_BACKEND` wins whenever it says x11 or wayland, in any case.
+    #[test]
+    fn wayland_off_hyprland_runs_through_xwayland() {
+        // Hyprland `abc_123` runs (its socket is there); any other signature names none.
+        fn pick(vars: &[(&str, &str)]) -> Backend {
+            backend_in(|k: &str| vars.iter().find(|(n, _)| *n == k).map(|(_, v)| OsString::from(v)), |sig: &str| sig == "abc_123")
+        }
+        let (wl, hypr, x) = (("WAYLAND_DISPLAY", "wayland-0"), ("HYPRLAND_INSTANCE_SIGNATURE", "abc_123"), ("DISPLAY", ":0"));
+        let stale = ("HYPRLAND_INSTANCE_SIGNATURE", "old_456");
+        // X11: no Wayland session (a blank WAYLAND_DISPLAY is none, as GPUI reads it).
+        assert_eq!(pick(&[]), Backend::X11);
+        assert_eq!(pick(&[x]), Backend::X11);
+        assert_eq!(pick(&[("WAYLAND_DISPLAY", ""), x]), Backend::X11);
+        assert_eq!(pick(&[x, ("SA_BACKEND", "x11")]), Backend::X11, "on X11 there's nothing to unset");
+        // Hyprland: natively, XWayland or not.
+        assert_eq!(pick(&[wl, hypr, x]), Backend::Wayland);
+        assert_eq!(pick(&[wl, hypr]), Backend::Wayland);
+        // GNOME, KDE, sway: XWayland when it runs (she says so), else nothing she can run on.
+        assert_eq!(pick(&[wl, x]), Backend::XWaylandAuto);
+        assert_eq!(pick(&[wl]), Backend::NoXWayland);
+        assert_eq!(pick(&[wl, ("DISPLAY", "")]), Backend::NoXWayland, "a blank DISPLAY is none");
+        assert_eq!(pick(&[wl, ("HYPRLAND_INSTANCE_SIGNATURE", ""), x]), Backend::XWaylandAuto, "a blank signature isn't Hyprland");
+        assert_eq!(pick(&[wl, ("HYPRLAND_INSTANCE_SIGNATURE", " "), x]), Backend::XWaylandAuto, "nor a blank one");
+        // A signature left over from an earlier Hyprland login (in GNOME's environment, a tmux
+        // server's) names no Hyprland that runs: not Hyprland.
+        assert_eq!(pick(&[wl, stale, x, ("XDG_CURRENT_DESKTOP", "GNOME")]), Backend::XWaylandAuto);
+        assert_eq!(pick(&[wl, stale]), Backend::NoXWayland);
+        // Hyprland whose signature got lost (systemd or D-Bus activation): the desktop variables
+        // say Hyprland (as install.sh reads them), and Hyprland's connect says what's missing.
+        assert_eq!(pick(&[wl, x, ("XDG_CURRENT_DESKTOP", "Hyprland")]), Backend::Wayland);
+        assert_eq!(pick(&[wl, x, ("XDG_SESSION_DESKTOP", "hyprland")]), Backend::Wayland);
+        assert_eq!(pick(&[wl, stale, x, ("XDG_CURRENT_DESKTOP", "Hyprland")]), Backend::Wayland);
+        assert_eq!(pick(&[wl, x, ("XDG_CURRENT_DESKTOP", "ubuntu:GNOME"), ("XDG_SESSION_DESKTOP", "ubuntu")]), Backend::XWaylandAuto);
+        assert_eq!(pick(&[wl, x, ("XDG_CURRENT_DESKTOP", "KDE"), ("XDG_SESSION_DESKTOP", "plasma")]), Backend::XWaylandAuto);
+        // SA_BACKEND wins: x11 is XWayland as asked (no note of her own), wayland never falls back.
+        assert_eq!(pick(&[wl, x, ("SA_BACKEND", "x11")]), Backend::XWayland);
+        assert_eq!(pick(&[wl, hypr, x, ("SA_BACKEND", "x11")]), Backend::XWayland);
+        assert_eq!(pick(&[wl, ("SA_BACKEND", "x11")]), Backend::XWayland, "asked for without XWayland: X11's connect says why");
+        assert_eq!(pick(&[wl, x, ("SA_BACKEND", "wayland")]), Backend::Wayland);
+        assert_eq!(pick(&[wl, x, ("SA_BACKEND", " x11\n")]), Backend::XWayland, "trimmed");
+        assert_eq!(pick(&[wl, hypr, x, ("SA_BACKEND", "X11")]), Backend::XWayland, "in any case");
+        assert_eq!(pick(&[wl, x, ("SA_BACKEND", "Wayland")]), Backend::Wayland);
+        assert_eq!(pick(&[wl, x, ("XDG_CURRENT_DESKTOP", "Hyprland"), ("SA_BACKEND", "x11")]), Backend::XWayland);
+        // wayland with no Wayland session: no fallback to X11.
+        assert_eq!(pick(&[x, ("SA_BACKEND", "wayland")]), Backend::NoWayland);
+        assert_eq!(pick(&[("WAYLAND_DISPLAY", ""), x, ("SA_BACKEND", "WAYLAND")]), Backend::NoWayland);
+        // A value she doesn't know (or a blank one) is ignored.
+        assert_eq!(pick(&[wl, x, ("SA_BACKEND", "gnome")]), Backend::XWaylandAuto);
+        assert_eq!(pick(&[wl, hypr, ("SA_BACKEND", "")]), Backend::Wayland);
+        assert_eq!(pick(&[x, ("SA_BACKEND", "gnome")]), Backend::X11);
+        // The ones process_setup names as ignored: set, not blank, not one she knows.
+        assert_eq!(asked(OsStr::new("gnome")), None);
+        assert_eq!(asked(OsStr::new(" ")), None);
+        assert_eq!(asked(OsStr::new("Wayland ")), Some(Backend::Wayland));
     }
 
     #[test]
