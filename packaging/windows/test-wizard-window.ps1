@@ -3,7 +3,9 @@
 #   - have its caption (WS_CAPTION), and answer WM_NCHITTEST with HTCAPTION on its title bar;
 #   - be responsive: not hung (IsHungAppWindow), WM_NULL answered within 1 s;
 #   - be enabled (not WS_DISABLED);
-#   - drag: a real mouse drag by its title bar (SendInput: down, move, up) moves it.
+#   - drag: a real mouse drag by its title bar (SendInput: down, move, up) moves it;
+#   - while a step runs, with its "About Setup..." box open (system menu), stay disabled under it, and be
+#     enabled again once it is closed.
 # "I can't drag the installer": Setup disables every window of its own while ExecAndLogOutput waits, so
 # the wizard answered and painted, but took no mouse. Uses Check, Get-WindowText and $log (Setup's own
 # log: "step NAME: ARGS" opens a step, "step NAME: exit N" closes it) of the script that dot-sources it.
@@ -28,6 +30,9 @@ public static class WizWin {
     [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
     [DllImport("user32.dll")] static extern uint SendInput(uint n, INPUT[] inputs, int size);
     [DllImport("user32.dll")] static extern int GetSystemMetrics(int i);
+    [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr h, uint cmd);
+    [DllImport("user32.dll")] static extern bool IsWindow(IntPtr h);
+    [DllImport("user32.dll")] static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
 
     public static int[] Rect(IntPtr h) { RECT r; GetWindowRect(h, out r); return new int[] { r.Left, r.Top, r.Right, r.Bottom }; }
     public static int Style(IntPtr h) { return GetWindowLong(h, -16); }
@@ -42,6 +47,11 @@ public static class WizWin {
         if (SendMessageTimeout(h, 0x84, IntPtr.Zero, lp, 0, 1000, out res) == IntPtr.Zero) return -1;
         return (int)res.ToInt64();
     }
+    // The enabled popup a window owns (GW_ENABLEDPOPUP: a modal box over it), 0 when it has none.
+    public static IntPtr Popup(IntPtr h) { IntPtr p = GetWindow(h, 6); return p == h ? IntPtr.Zero : p; }
+    public static bool Alive(IntPtr h) { return IsWindow(h); }
+    // PostMessage: it returns at once (SendMessage waits for a modal box, and times out).
+    public static bool Post(IntPtr h, uint msg, int w) { return PostMessage(h, msg, new IntPtr(w), IntPtr.Zero); }
     // The top-level window under a screen point.
     public static IntPtr RootAt(int x, int y) { POINT p; p.X = x; p.Y = y; IntPtr w = WindowFromPoint(p); return w == IntPtr.Zero ? w : GetAncestor(w, 2); }
     public static void MoveTo(IntPtr h, int x, int y) { SetWindowPos(h, IntPtr.Zero, x, y, 0, 0, 0x0001 | 0x0004 | 0x0010); } // NOSIZE | NOZORDER | NOACTIVATE
@@ -121,7 +131,12 @@ function Get-StepRun {
             $code = $Matches[1]
             $open = $runs | Where-Object { $_.Name -eq $name -and -not $_.End } | Select-Object -Last 1
             if ($open) { $open.End = $at; $open.Exit = $code }
-        } else { $runs.Add([pscustomobject]@{ Name = $name; Start = $at; End = $null; Exit = $null }) }
+        } else {
+            # One step runs at a time: one still open when the next starts never logged its exit (an
+            # early exit of an older Setup's RunStep), so it is closed here, not left running for ever.
+            foreach ($o in @($runs | Where-Object { -not $_.End })) { $o.End = $at; $o.Exit = '?' }
+            $runs.Add([pscustomobject]@{ Name = $name; Start = $at; End = $null; Exit = $null })
+        }
     }
     $runs
 }
@@ -130,7 +145,48 @@ function Get-StepNow { Get-StepRun | Where-Object { -not $_.End } | Select-Objec
 function Write-StepTime {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'Logs beside the checks.')]
     param()
-    foreach ($r in Get-StepRun) { Write-Host ("  step {0}: {1} s (exit {2})" -f $r.Name, $(if ($r.End) { [int]($r.End - $r.Start).TotalSeconds } else { '?' }), $r.Exit) }
+    $runs = @(Get-StepRun)
+    foreach ($r in $runs) { Write-Host ("  step {0}: {1} s (exit {2})" -f $r.Name, $(if ($r.End) { [int]($r.End - $r.Start).TotalSeconds } else { '?' }), $r.Exit) }
+    # Every "step NAME: ARGS" has its "step NAME: exit N", whichever way the step ended.
+    $open = @($runs | Where-Object { $_.Exit -eq '?' -or -not $_.End })
+    Check ($runs.Count -gt 0 -and $open.Count -eq 0) "Setup's log has an exit line for each of its $($runs.Count) steps$(if ($open) { " (none for: $(($open | ForEach-Object { $_.Name }) -join ', '))" })"
+}
+
+# The wizard's "About Setup..." (its system menu: the icon, Alt+Space, a right click on the title bar)
+# opened while a step runs: a modal box inside Setup's wait for the step. The wizard must stay disabled
+# under it (enabled, its title bar would open a second box), and be live again once the box is closed.
+# $false when no step was running to open it in (try again later).
+function Test-WizardAbout {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'Logs beside the checks.')]
+    param($W)
+    $h = [IntPtr][int]$W.Current.NativeWindowHandle
+    $run = Get-StepNow
+    if (-not $run) { return $false }
+    [void][WizWin]::Post($h, 0x112, 9999) # WM_SYSCOMMAND, Inno's "About Setup..." item
+    $box = $null
+    $t0 = Get-Date
+    while (-not $box -and ((Get-Date) - $t0).TotalSeconds -lt 15) { $box = Find-Window '^About Setup$'; if (-not $box) { Start-Sleep -Milliseconds 200 } }
+    Check ([bool]$box) "while step '$($run.Name)' runs: the wizard's About box opens"
+    if (-not $box) { return $true }
+    $bh = [IntPtr][int]$box.Current.NativeWindowHandle
+    # The box is up: the 50 ms timer that keeps the wizard live runs in its loop too, 24 ticks or so.
+    $live = 0
+    for ($i = 0; $i -lt 12; $i++) { Start-Sleep -Milliseconds 100; if ([WizWin]::Enabled($h)) { $live++ } }
+    Write-Host "  while the About box is up: it is the wizard's enabled popup: $([WizWin]::Popup($h) -eq $bh); the wizard was enabled in $live of 12 looks"
+    Check ($live -eq 0) "while the About box is up: the wizard stays disabled under it ($live of 12 looks enabled)"
+    # Closed as he would: OK; the close message when that finds no button.
+    try { Invoke-Button $box 'OK' } catch { Write-Host "  ($($_.Exception.Message))" }
+    $t0 = Get-Date
+    while ([WizWin]::Alive($bh) -and ((Get-Date) - $t0).TotalSeconds -lt 3) { Start-Sleep -Milliseconds 200 }
+    if ([WizWin]::Alive($bh)) { [void][WizWin]::Post($bh, 0x10, 0) } # WM_CLOSE
+    $t0 = Get-Date
+    while ([WizWin]::Alive($bh) -and ((Get-Date) - $t0).TotalSeconds -lt 5) { Start-Sleep -Milliseconds 200 }
+    Check (-not [WizWin]::Alive($bh)) 'the About box closes'
+    if ([WizWin]::Alive($bh)) { throw 'the About box stays open: Setup waits behind it' }
+    $t0 = Get-Date
+    while (-not [WizWin]::Enabled($h) -and ((Get-Date) - $t0).TotalSeconds -lt 3) { Start-Sleep -Milliseconds 100 }
+    Check ([WizWin]::Enabled($h)) 'after the About box is closed: the wizard is enabled again (a step is running)'
+    $true
 }
 
 # The wizard $W while the steps run (Setup's log says which): the same look again and again, with a
@@ -141,6 +197,7 @@ function Test-WizardDuringStep {
     $h = [IntPtr][int]$W.Current.NativeWindowHandle
     $during = [System.Collections.Generic.List[object]]::new()
     $drags = 0
+    $about = $false
     $t0 = Get-Date
     while ($during.Count -lt 10 -and ((Get-Date) - $t0).TotalSeconds -lt 1200) {
         if (@(Get-WindowText $W) -match '^Completing the capri-syn Setup Wizard$') { break }
@@ -156,7 +213,10 @@ function Test-WizardDuringStep {
             $during.Add($st)
             Write-Host "  while step '$($run.Name)' runs (look $($during.Count)): $(Format-WindowState $st)"
         }
+        # Once, from the fifth look on, inside a step.
+        if (-not $about -and $during.Count -ge 5) { $about = Test-WizardAbout $W }
     }
+    Check $about 'the About box was opened and closed while a step ran'
     $names = @($during | ForEach-Object { $_.Step } | Select-Object -Unique)
     Check ($during.Count -ge 3) "the window was looked at $($during.Count) times while a step ran ($($names -join ', ')): at least 3"
     $bad = @($during | Where-Object { -not ($_.Caption -and $_.HitCaption) })

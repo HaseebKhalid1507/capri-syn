@@ -352,20 +352,33 @@ end;
 
 { Setup disables every window of its own for as long as an Exec call waits, ExecAndLogOutput's too (so
   nobody clicks into a half-run step). A disabled window takes no mouse: the wizard couldn't be dragged
-  for the minutes the steps take, though it kept painting and answering. On the progress page there is
-  nothing to click (no buttons, its close box greyed), so there a timer, run by the messages that wait
-  pumps, enables the wizard again (the call's own cleanup enables it once more, harmlessly). On the
-  other pages (the short looks before the install) it stays disabled: its buttons would be live. }
+  for the minutes the steps take, though it kept painting and answering. On the progress page its
+  buttons are hidden and its close box is greyed, so there a timer, run by the messages the wait
+  pumps, enables it again (the call's own cleanup enables it once more, harmlessly). Not much to click,
+  but not nothing: its system menu is live (the icon, Alt+Space, a right click on the title bar), with
+  Minimize and Inno's "About Setup...", a modal box that opens from inside that pump. So the timer
+  leaves the wizard alone while it owns an enabled popup (that box), else it would enable the wizard
+  under its own modal and About boxes would stack. While the box is up, or a drag is held (the mouse
+  down on the title bar runs Windows' move loop inside that pump), the wait doesn't run: the step goes
+  on until its output fills the pipe (about 4 KB, read only in that wait) and its next write blocks;
+  it goes on when the box is closed or the mouse is let go. Nothing is lost, nothing deadlocks. On
+  the other pages (the short looks before the install) the wizard stays disabled: its buttons are live. }
 function EnableWindow(Wnd: HWND; Enable: Integer): Integer; external 'EnableWindow@user32.dll stdcall';
+function GetWindow(Wnd: HWND; Cmd: LongWord): HWND; external 'GetWindow@user32.dll stdcall';
 function SetTimer(Wnd: HWND; Id, Elapse, Proc: LongWord): LongWord; external 'SetTimer@user32.dll stdcall';
 function KillTimer(Wnd: HWND; Id: LongWord): Integer; external 'KillTimer@user32.dll stdcall';
+
+const
+  GW_ENABLEDPOPUP = 6; { the enabled popup this window owns, or the window itself when it has none }
 
 var
   LiveProc: LongWord;
 
 procedure KeepWizardLive(Wnd, Msg, Id, Tick: LongWord);
 begin
-  if (Progress <> nil) and (WizardForm.CurPageID = Progress.ID) then EnableWindow(WizardForm.Handle, 1);
+  if (Progress <> nil) and (WizardForm.CurPageID = Progress.ID)
+     and (GetWindow(WizardForm.Handle, GW_ENABLEDPOPUP) = WizardForm.Handle) then
+    EnableWindow(WizardForm.Handle, 1);
 end;
 
 { PowerShell Params, its output through StepLine, waited for; the wizard live meanwhile (above). }
@@ -377,6 +390,9 @@ begin
   if (Progress <> nil) and (WizardForm.CurPageID = Progress.ID) then begin
     if LiveProc = 0 then LiveProc := CreateCallback(@KeepWizardLive);
     Timer := SetTimer(0, 0, 50, LiveProc);
+    if Timer = 0 then
+      Log('drag: no timer for step ' + StepName + ' (SetTimer: Windows error ' + IntToStr(DLLGetLastError) +
+        '), so the wizard stays disabled until it ends');
   end;
   try
     Result := ExecAndLogOutput(PowerShell, Params, '', SW_HIDE, ewWaitUntilTerminated, Code, @StepLine);
@@ -385,10 +401,13 @@ begin
   end;
 end;
 
-{ steps.ps1 Args in a PowerShell with no window; True when it says it's done. Its reason in StepFailed. }
+{ steps.ps1 Args in a PowerShell with no window; True when it says it's done. Its reason in StepFailed.
+  The log has a "step NAME: exit N" for every "step NAME: ARGS", whichever way it ended. }
 function RunStep(const Name, Title, Script, Args: String): Boolean;
 var
   Code: Integer;
+  Ran: Boolean;
+  Tail: String;
 begin
   StepName := Name;
   StepTitle := Title;
@@ -397,18 +416,21 @@ begin
   if Progress <> nil then Progress.SetText(Title, '');
   Log('step ' + Name + ': ' + Args);
   Result := False;
+  Ran := False;
+  Code := -1;
   try
-    if not ExecLive('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + Script + '" ' + Args, Code) then begin
-      StepFailed := 'PowerShell didn''t start (' + SysErrorMessage(Code) + ')';
-      exit;
-    end;
+    Ran := ExecLive('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + Script + '" ' + Args, Code);
+    if not Ran then StepFailed := 'PowerShell didn''t start (' + SysErrorMessage(Code) + ')';
   except
     StepFailed := 'PowerShell didn''t run: ' + GetExceptionMessage;
-    exit;
   end;
-  Result := Code = 0;
-  if not Result and (StepFailed = '') then StepFailed := 'it stopped (exit ' + IntToStr(Code) + '): the setup log has its lines';
-  Log('step ' + Name + ': exit ' + IntToStr(Code));
+  Tail := '';
+  if Ran then begin
+    Result := Code = 0;
+    if not Result and (StepFailed = '') then StepFailed := 'it stopped (exit ' + IntToStr(Code) + '): the setup log has its lines';
+  end else
+    Tail := ' (not run: ' + StepFailed + ')';
+  Log('step ' + Name + ': exit ' + IntToStr(Code) + Tail);
 end;
 
 { "ok 0.12.0 C:\...\synaps.exe": the version and the path. }

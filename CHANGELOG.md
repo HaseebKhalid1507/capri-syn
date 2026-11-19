@@ -68,9 +68,14 @@
 - On "Setting her up" (Synaps, her art, her daemon: minutes) the installer's window couldn't be dragged.
   It kept painting and answering, but took no mouse: Setup disables its own windows for as long as a
   program it started runs (so nobody clicks into a half-run step), and the steps are such programs. On
-  that page there is nothing to click (no buttons, the close box greyed), so it is enabled again there,
-  50 ms after each step starts. The short looks before the install (Synaps, the microphones: a second
-  or two each, on a click of Next) still hold it.
+  that page its buttons are hidden and its close box is greyed, so it is enabled again there, 50 ms
+  after each step starts. Its system menu is live (Minimize, "About Setup..."), and while the About
+  box is up the window stays disabled under it, so boxes can't stack. The short looks before the
+  install (Synaps, the microphones: a second or two each, on a click of Next) still hold it.
+  A drag held down, or the About box, pauses Setup's wait on the step: the step goes on until its
+  output fills the pipe (about 4 KB), then waits there for the mouse to be let go or the box closed.
+  Nothing is lost. Setup's log now has a `step NAME: exit N` for every `step NAME: ARGS`, a step that
+  couldn't start included.
 
 ## 1.0.0 (2026-11-19)
 

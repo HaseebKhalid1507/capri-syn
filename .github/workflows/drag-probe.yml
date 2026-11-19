@@ -1,0 +1,75 @@
+# TEMPORARY (fix/setup-drag-nits): the wizard test (this branch's) against main's own .iss and against
+# this branch's, in minutes instead of the full ci run's half hour. Deleted before the PR is ready.
+name: drag-probe
+on:
+  push:
+    branches: [fix/setup-drag-nits]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: PSScriptAnalyzer (ci.yml's own command, on the two test files)
+        shell: pwsh
+        run: |
+          if (-not (Get-Module -ListAvailable PSScriptAnalyzer)) { Install-Module PSScriptAnalyzer -Force -Scope CurrentUser }
+          $found = foreach ($f in 'packaging/windows/test-setup-wizard.ps1', 'packaging/windows/test-wizard-window.ps1') { Invoke-ScriptAnalyzer -Path $f -Severity Warning, Error }
+          $found | Format-List RuleName, Severity, ScriptName, Line, Message
+          if ($found) { throw "PSScriptAnalyzer: $(@($found).Count) finding(s)" }
+          Write-Output 'PSScriptAnalyzer: clean'
+  # The installer as an .iss builds it. Her exe is taken from an older main installer (a silent install of
+  # it), so no cargo build: build.ps1 -NoCargo, then this branch's wizard test.
+  wizard:
+    strategy:
+      fail-fast: false
+      matrix:
+        iss: [before, after]
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: The .iss of main (before)
+        if: ${{ matrix.iss == 'before' }}
+        shell: bash
+        run: git checkout origin/main -- packaging/windows/synaps-avatar.iss
+      - uses: actions/download-artifact@v4
+        with:
+          name: capri-syn-setup-1902bc085c98eea7ad59f79337ec32ae82e808dc
+          path: main-setup
+          run-id: 44631499696
+          github-token: ${{ github.token }}
+      - name: Her exe, from main's installer
+        shell: powershell
+        run: |
+          $setup = (Get-ChildItem main-setup/capri-syn-setup-*.exe | Select-Object -First 1).FullName
+          $p = Start-Process $setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SYNAPS=skip', '/VOICE=off', '/PACK=download' -PassThru -Wait
+          "setup exit $($p.ExitCode)"
+          $app = Join-Path $env:LOCALAPPDATA 'Programs\synaps-avatar'
+          New-Item -ItemType Directory -Force target\release | Out-Null
+          Copy-Item (Join-Path $app 'synaps-avatar.exe') target\release\synaps-avatar.exe
+          $u = Start-Process (Join-Path $app 'unins000.exe') -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -PassThru -Wait
+          "uninstall exit $($u.ExitCode)"
+          Start-Sleep -Seconds 3
+          foreach ($d in @($app, (Join-Path $env:LOCALAPPDATA 'synaps-avatar'))) { if (Test-Path $d) { Remove-Item -Recurse -Force $d; "removed leftover $d" } }
+      - name: Toolchain (rust-toolchain.toml)
+        shell: bash
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Build the installer (${{ matrix.iss }} .iss)
+        shell: pwsh
+        run: ./packaging/windows/build.ps1 -NoCargo
+      - name: The wizard test, the ${{ matrix.iss }} installer
+        timeout-minutes: 20
+        shell: powershell
+        run: ./packaging/windows/test-setup-wizard.ps1 -Setup (Get-ChildItem packaging/windows/Output/capri-syn-setup-*.exe | Select-Object -First 1).FullName -Shots shots
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: drag-probe-${{ matrix.iss }}-shots
+          path: shots
+          retention-days: 3
+          if-no-files-found: warn
