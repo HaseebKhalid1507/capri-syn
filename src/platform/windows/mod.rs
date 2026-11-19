@@ -62,6 +62,7 @@ mod testkit;
 mod hold;
 mod sidecar;
 mod tray;
+mod traymenu;
 mod voice;
 
 pub use dirs::{base_dir, home_dir, keep_log_under, stderr_file, stderr_seen};

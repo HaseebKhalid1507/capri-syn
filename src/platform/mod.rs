@@ -29,6 +29,7 @@ mod os;
 pub mod pointer;
 mod settle;
 mod track;
+mod menulook;
 #[cfg(windows)]
 mod windows;
 #[cfg(target_os = "linux")]
@@ -542,12 +543,31 @@ pub struct TrayIcon {
 #[cfg_attr(not(windows), allow(dead_code))]
 #[derive(Clone, Debug, PartialEq)]
 pub enum TrayItem {
-    /// A pick (`id` never 0). `checked`: the choice in force; `lead`: the row that matters most
-    /// now (bold where the tray can); `enabled` false: shown greyed, not picked (`menu::enabled`).
-    Item { id: u32, label: String, checked: bool, lead: bool, enabled: bool },
+    /// A pick (`id` never 0). `mark`: a switch's state or the choice in force; `lead`: the row
+    /// that matters most now (bold where the tray can); `enabled` false: shown greyed, not picked
+    /// (`menu::enabled`).
+    Item { id: u32, label: String, mark: Mark, lead: bool, enabled: bool },
     /// A row that opens its choices.
     Sub { label: String, items: Vec<TrayItem>, enabled: bool },
     Rule,
+}
+
+/// A tray row's mark: one of several choices (ATTENTION's: a dot on the one in force). A switch
+/// (DND, hands-free) has none: its words say what a click does (DND OFF), as on her own menu.
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Mark {
+    #[default]
+    None,
+    Choice(bool),
+}
+
+impl Mark {
+    /// Checked: the choice in force.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn on(self) -> bool {
+        matches!(self, Mark::Choice(true))
+    }
 }
 
 /// What he does to her tray icon.

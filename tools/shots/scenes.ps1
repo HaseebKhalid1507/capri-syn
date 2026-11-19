@@ -600,14 +600,30 @@ $Scenes = [ordered]@{
             Start-Sleep 1
             Write-Host "  her menu at $($menu.X),$($menu.Y) $($menu.W)x$($menu.H), by $how"
             Shot '02-menu' "her menu, by $how" -At (Get-CornerRect -Icon $icon -Also @($menu) -Aspect 1.6 -Above 96)
+            # Her rows' names as a screen reader gets them: MSAA's menu proxy (oleacc, on her menu
+            # window). UI Automation is said, never failed: on the runner it sees no Win32 menu's
+            # rows at all (main's stock menu: the same).
+            Show-UiaFocus 'her menu up'
+            $read = Get-MenuNames $menu 'her menu'
+            foreach ($want in 'RESET POSITION', 'ATTENTION: MIX', 'QUIT') {
+                if ($want -cnotin $read.Msaa) { $script:Fails.Add("${script:Take}: no row named '$want' for a screen reader (MSAA reads: $($read.Msaa -join ', '))") }
+                if ($want -cnotin $read.Uia3) { Write-Warning "${script:Take}: UI Automation reads no row named '$want' (it reads: $($read.Uia3 -join ', ')); not a failure: it sees no Win32 menu's rows here, main's stock menu's too" }
+            }
             # His keys in it (a real right click gave it the keyboard): down x3 lights ATTENTION (a
             # lit row), right opens its choices (the one in force marked, the first lit).
             if ($how -eq 'a real right click') {
-                foreach ($k in 'down', 'down', 'down') { Key $k 200 }
+                Key 'down' 300
+                Show-UiaFocus 'down: the first row lit'
+                foreach ($k in 'down', 'down') { Key $k 200 }
                 Key 'right' 800
+                Show-UiaFocus 'right: into ATTENTION'
                 $menus = @([ShotsTray.Native]::Of([uint32]$script:Her.Id) | Where-Object { $_.Class -eq '#32768' })
                 if ($menus.Count -ge 2) {
                     Shot '03-keys' 'her menu by his keys: ATTENTION lit, its choices open' -At (Get-CornerRect -Icon $icon -Also $menus -Aspect 1.6 -Above 96)
+                    # Its choices by name too (the one in force first: MIX).
+                    $sub = $menus | Where-Object { $_.Handle -ne $menu.Handle } | Select-Object -First 1
+                    $subRead = Get-MenuNames $sub 'ATTENTION'
+                    if ('MIX' -cnotin $subRead.Msaa) { $script:Fails.Add("${script:Take}: no choice named 'MIX' under ATTENTION for a screen reader (MSAA reads: $($subRead.Msaa -join ', '))") }
                 }
                 else { $script:Fails.Add("${script:Take}: down, down, down, right opened no ATTENTION choices ($($menus.Count) menu)") }
                 Key 'escape' 500
@@ -922,6 +938,265 @@ function New-Windows([object[]]$Before) {
 <# Her open menu: a visible #32768 window of hers. #>
 function Get-HerMenu {
     [ShotsTray.Native]::Of([uint32]$script:Her.Id) | Where-Object { $_.Class -eq '#32768' } | Select-Object -First 1
+}
+
+<# The readers a screen reader reads her menu by, compiled apart (a failure here is said, never the
+   set's): MSAA (oleacc's menu proxy: AccessibleObjectFromWindow, a menu window's client, its rows
+   its children) and UI Automation's COM client (UIA3, Narrator's: a Win32 menu's rows come to it
+   through that MSAA proxy). #>
+function Add-ShotReaders {
+    if ('ShotsTray.Msaa' -as [type]) { return $true }
+    try {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+
+namespace ShotsTray {
+// IAccessible's first slots after IDispatch's, in its vtable's order.
+[ComImport, Guid("618736E0-3C3D-11CF-810C-00AA00389B71"), InterfaceType(ComInterfaceType.InterfaceIsDual)]
+public interface IAcc {
+    [return: MarshalAs(UnmanagedType.IDispatch)] object Parent();
+    int ChildCount();
+    [return: MarshalAs(UnmanagedType.IDispatch)] object Child(object id);
+    [return: MarshalAs(UnmanagedType.BStr)] string Name(object id);
+    [return: MarshalAs(UnmanagedType.BStr)] string Value(object id);
+    [return: MarshalAs(UnmanagedType.BStr)] string Description(object id);
+    object Role(object id);
+}
+
+public static class Msaa {
+    [DllImport("oleacc.dll")] static extern int AccessibleObjectFromWindow(IntPtr h, uint id, ref Guid iid, [MarshalAs(UnmanagedType.IUnknown)] out object acc);
+
+    /// Window h's client as MSAA reads it, a line each (indented by depth): self's name, role and
+    /// child count, then each simple child's id, name and role. Its HRESULT if there's none.
+    public static List<string> Rows(long h) {
+        var o = new List<string>();
+        var iid = new Guid("618736E0-3C3D-11CF-810C-00AA00389B71");
+        object acc;
+        int hr = AccessibleObjectFromWindow(new IntPtr(h), 0xFFFFFFFC, ref iid, out acc);
+        if (hr != 0 || acc == null) { o.Add("AccessibleObjectFromWindow: 0x" + hr.ToString("x8")); return o; }
+        Walk((IAcc)acc, 0, o);
+        return o;
+    }
+
+    /// The names of window h's simple children (a menu's rows), in order.
+    public static List<string> Names(long h) {
+        var o = new List<string>();
+        var iid = new Guid("618736E0-3C3D-11CF-810C-00AA00389B71");
+        object acc;
+        if (AccessibleObjectFromWindow(new IntPtr(h), 0xFFFFFFFC, ref iid, out acc) != 0 || acc == null) return o;
+        var a = (IAcc)acc;
+        int n = 0;
+        try { n = a.ChildCount(); } catch { return o; }
+        for (int i = 1; i <= n; i++) { string s; try { s = a.Name(i); } catch { s = null; } o.Add(s ?? ""); }
+        return o;
+    }
+
+    static void Walk(IAcc a, int depth, List<string> o) {
+        string pad = new string(' ', depth * 2);
+        int n;
+        try { n = a.ChildCount(); } catch (Exception e) { o.Add(pad + "children: " + e.Message); return; }
+        o.Add(pad + "'" + Safe(() => a.Name(0)) + "' role " + Safe(() => Convert.ToString(a.Role(0))) + ", " + n + " children");
+        for (int i = 1; i <= n && o.Count < 80; i++) {
+            object child = null;
+            try { child = a.Child(i); } catch { }
+            var sub = child as IAcc;
+            if (sub != null && depth < 3) { Walk(sub, depth + 1, o); continue; }
+            o.Add(pad + "  " + i + ": '" + Safe(() => a.Name(i)) + "' role " + Safe(() => Convert.ToString(a.Role(i))));
+        }
+    }
+
+    static string Safe(Func<string> f) { try { return f() ?? "(null)"; } catch (Exception e) { return "(" + e.Message + ")"; } }
+}
+
+// UI Automation's COM client (UIA3: what Narrator reads by; System.Windows.Automation in
+// PowerShell 7 has no proxy for a Win32 menu, its rows unseen even in the stock menu). Each
+// interface's slots in its vtable's order (the windows crate's), the unused as placeholders.
+[ComImport, Guid("352ffba8-0973-437c-a61f-f64cafd81df9"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IUiaCondition {}
+
+[StructLayout(LayoutKind.Sequential)]
+public struct UiaPoint { public int X, Y; }
+
+[ComImport, Guid("30cbe57d-d9d0-452a-ab13-7ac5ac4825ee"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IUia {
+    void _0(); void _1(); void _2();
+    IUiaElement ElementFromHandle(IntPtr hwnd);
+    IUiaElement ElementFromPoint(UiaPoint pt);
+    IUiaElement GetFocusedElement();
+    void _6(); void _7(); void _8(); void _9(); void _10();
+    IUiaWalker ControlViewWalker();
+    IUiaWalker ContentViewWalker();
+    IUiaWalker RawViewWalker();
+    void _14(); void _15(); void _16(); void _17();
+    IUiaCondition CreateTrueCondition();
+}
+
+[ComImport, Guid("d22108aa-8ac5-49a5-837b-37bbb3d7591e"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IUiaElement {
+    void _0(); void _1(); void _2();
+    IUiaArray FindAll(int scope, IUiaCondition condition);
+    void _4(); void _5(); void _6(); void _7(); void _8(); void _9(); void _10(); void _11(); void _12(); void _13(); void _14(); void _15(); void _16();
+    int CurrentProcessId();
+    int CurrentControlType();
+    [return: MarshalAs(UnmanagedType.BStr)] string CurrentLocalizedControlType();
+    [return: MarshalAs(UnmanagedType.BStr)] string CurrentName();
+    void _21(); void _22(); void _23(); void _24(); void _25(); void _26();
+    [return: MarshalAs(UnmanagedType.BStr)] string CurrentClassName();
+    void _28(); void _29(); void _30(); void _31(); void _32(); void _33(); void _34(); void _35(); void _36();
+    [return: MarshalAs(UnmanagedType.BStr)] string CurrentFrameworkId();
+}
+
+[ComImport, Guid("14314595-b4bc-4055-95f2-58f2e42c9855"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IUiaArray {
+    int Length();
+    IUiaElement GetElement(int i);
+}
+
+[ComImport, Guid("4042c624-389c-4afc-a630-9df854a541fc"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IUiaWalker {
+    IUiaElement GetParentElement(IUiaElement e);
+    IUiaElement GetFirstChildElement(IUiaElement e);
+    IUiaElement GetLastChildElement(IUiaElement e);
+    IUiaElement GetNextSiblingElement(IUiaElement e);
+}
+
+public static class Uia3 {
+    static IUia u;
+    static IUia U() {
+        if (u == null) u = (IUia)Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("ff48dba4-60ef-4201-aa87-54103eef594e")));
+        return u;
+    }
+
+    static string Kind(int id) {
+        switch (id) {
+            case 50009: return "Menu";
+            case 50010: return "MenuBar";
+            case 50011: return "MenuItem";
+            case 50033: return "Pane";
+            case 50038: return "Separator";
+            case 50032: return "Window";
+            default: return id.ToString();
+        }
+    }
+
+    /// An element, said: its control type, class, framework, name.
+    public static string Say(IUiaElement e) {
+        if (e == null) return "(none)";
+        return Safe(() => Kind(e.CurrentControlType())) + " '" + Safe(e.CurrentClassName) + "' fw=" + Safe(e.CurrentFrameworkId) + " '" + Safe(e.CurrentName) + "'";
+    }
+
+    /// Window h's element and its raw tree three deep, a line each (indented by depth).
+    public static List<string> Tree(long h) {
+        var o = new List<string>();
+        var e = U().ElementFromHandle(new IntPtr(h));
+        o.Add(Say(e));
+        Walk(U().RawViewWalker(), e, 1, o);
+        return o;
+    }
+
+    static void Walk(IUiaWalker w, IUiaElement e, int d, List<string> o) {
+        var k = w.GetFirstChildElement(e);
+        while (k != null && o.Count < 80) {
+            o.Add(new string(' ', d * 2) + Say(k));
+            if (d < 3) Walk(w, k, d + 1, o);
+            k = w.GetNextSiblingElement(k);
+        }
+    }
+
+    /// The names of window h's descendants (FindAll, every one), in order.
+    public static List<string> Names(long h) {
+        var o = new List<string>();
+        var all = U().ElementFromHandle(new IntPtr(h)).FindAll(4, U().CreateTrueCondition());
+        if (all == null) return o;
+        for (int i = 0; i < all.Length(); i++) { string s; try { s = all.GetElement(i).CurrentName(); } catch { s = null; } o.Add(s ?? ""); }
+        return o;
+    }
+
+    /// The element at screen point x, y (physical px; the caller per-monitor aware), and its name.
+    public static string[] At(int x, int y) {
+        var e = U().ElementFromPoint(new UiaPoint { X = x, Y = y });
+        string n = null;
+        if (e != null) { try { n = e.CurrentName(); } catch { } }
+        return new[] { Say(e), n ?? "" };
+    }
+
+    /// The focused element and its parent, said.
+    public static string Focus() {
+        var f = U().GetFocusedElement();
+        return Say(f) + ", under " + (f == null ? "(none)" : Say(U().RawViewWalker().GetParentElement(f)));
+    }
+
+    static string Safe(Func<string> f) { try { return f() ?? "(null)"; } catch (Exception e) { return "(" + e.Message + ")"; } }
+}
+}
+'@
+        return $true
+    }
+    catch { Write-Host "  readers: not compiled: $($_.Exception.Message)"; return $false }
+}
+
+<# A UI Automation element, said: its control type, class, framework, name. #>
+function Format-Uia($e) {
+    if (-not $e) { return '(none)' }
+    try { $c = $e.Current; "$($c.ControlType.ProgrammaticName) '$($c.ClassName)' fw=$($c.FrameworkId) '$($c.Name)'" }
+    catch { "($($_.Exception.Message))" }
+}
+
+<# What a screen reader can read in menu window $Win (a [ShotsTray.Native]::Of window), said: MSAA's
+   menu proxy (oleacc: its client, each row), UI Automation's COM client (UIA3: the element, its raw
+   tree three deep, its descendants' names, what's under points down its middle) and, for the
+   record, PowerShell's own System.Windows.Automation (UIA2). On the runner neither UI Automation
+   sees a Win32 menu's rows, main's stock menu's included (#112, round 2): a #32768 is a bare Pane,
+   no children. Returns the names read, @{ Msaa = ...; Uia3 = ... }. #>
+function Get-MenuNames($Win, [string]$What) {
+    $Handle = [long]$Win.Handle
+    $uia3 = @(); $msaa = @()
+    if (Add-ShotReaders) {
+        try {
+            foreach ($l in [ShotsTray.Uia3]::Tree($Handle)) { Write-Host "    uia3 $l" }
+            $uia3 = @([ShotsTray.Uia3]::Names($Handle) | Where-Object { $_ })
+        }
+        catch { Write-Host "  uia3 ($What): $($_.Exception.Message)" }
+        try {
+            [ShootWin.Native]::Aware()
+            $x = [int]($Win.X + $Win.W / 2)
+            foreach ($k in 0..7) {
+                $y = [int]($Win.Y + $Win.H * (2 * $k + 1) / 16)
+                $at = [ShotsTray.Uia3]::At($x, $y)
+                Write-Host "    uia3 at $x,$y : $($at[0])"
+                if ($at[1] -and $at[1] -cnotin $uia3) { $uia3 += $at[1] }
+            }
+        }
+        catch { Write-Host "  uia3 ($What) by point: $($_.Exception.Message)" }
+        try {
+            foreach ($l in [ShotsTray.Msaa]::Rows($Handle)) { Write-Host "    msaa $l" }
+            $msaa = @([ShotsTray.Msaa]::Names($Handle) | Where-Object { $_ })
+        }
+        catch { Write-Host "  msaa ($What): $($_.Exception.Message)" }
+    }
+    Write-Host "  uia3 ($What): $($uia3 -join ' | ')"
+    Write-Host "  msaa ($What): $($msaa -join ' | ')"
+    try {
+        if (-not ('System.Windows.Automation.AutomationElement' -as [type])) { Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes }
+        $el = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$Handle)
+        $rows = @($el.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition))
+        Write-Host "  uia2 ($What): $(Format-Uia $el) rows=$($rows.Count)"
+    }
+    catch { Write-Host "  uia2 ($What): $($_.Exception.Message)" }
+    @{ Uia3 = $uia3; Msaa = $msaa }
+}
+
+<# UI Automation's focused element (and its parent), said (UIA3's; UIA2's for the record). #>
+function Show-UiaFocus([string]$When) {
+    if ((Add-ShotReaders)) {
+        try { Write-Host "  uia3 focus ($When): $([ShotsTray.Uia3]::Focus())" }
+        catch { Write-Host "  uia3 focus ($When): $($_.Exception.Message)" }
+    }
+    if (-not ('System.Windows.Automation.AutomationElement' -as [type])) { Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes }
+    try { Write-Host "  uia2 focus ($When): $(Format-Uia ([System.Windows.Automation.AutomationElement]::FocusedElement))" }
+    catch { Write-Host "  uia2 focus ($When): $($_.Exception.Message)" }
 }
 
 <# A shot of the taskbar's corner: her icon and -Also (her menu, the tooltip), padded (-Above px

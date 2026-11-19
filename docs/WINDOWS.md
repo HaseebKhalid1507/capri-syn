@@ -159,6 +159,11 @@ cargo-about, `installer/licenses/`).
   and icon. The icon is capri-syn's, `assets/icon/capri-syn.ico` (256 to 16 px) and its 256 px PNG,
   used as they are (`assets/icon/NOTICE`): the setup's own icon, Apps & features, the shortcut, toasts,
   her exe and her tray (#79).
+- **Her tray menu** (a right click on her icon) is owner-drawn (`platform/windows/traymenu.rs`):
+  her own menu's colours and marks (`platform/menulook.rs`, from `theme`), sized at the DPI of the
+  monitor it opens on. The menu itself is Windows': its keys and its submenu. Each row keeps its
+  words for a screen reader (MSAA reads them as it reads the stock menu's), and its item data is an
+  `MSAAMENUINFO` with them too. Under high contrast it's the stock menu, in your theme.
 - **Autostart** (a task, checked): the `HKCU\…\Run` value.
 - **Uninstall** (Settings → Apps, or `unins000.exe /VERYSILENT`): stops her (this install of her, by
   its path: never a synaps-avatar.exe of his elsewhere), then removes her exe,
