@@ -73,6 +73,18 @@ Add-Receipt @('file', "$prefix\a")
 $r = @(Get-Content -LiteralPath $script:Receipt)
 Check (($r -join '|') -eq "file`t$prefix\a b.exe|file`t$prefix\a") "Add-Receipt: whole lines, once each ($($r -join ' | '))"
 
+# Which of her runs is his own: a command line with arguments after her program, quoted or not.
+foreach ($c in @(
+        @('"C:\Users\a b\AppData\Local\Programs\synaps-avatar\synaps-avatar.exe"', ''),
+        @('"C:\Users\a b\AppData\Local\Programs\synaps-avatar\synaps-avatar.exe" ', ''),
+        @('C:\Users\ab\AppData\Local\Programs\synaps-avatar\synaps-avatar.exe', ''),
+        @('"C:\Users\a b\synaps-avatar.exe" --socket \\.\pipe\synaps', '--socket \\.\pipe\synaps'),
+        @('C:\x\synaps-avatar.exe --profile work', '--profile work'),
+        @('"C:\x\synaps-avatar.exe"--session capri', '--session capri'),
+        @('', ''))) {
+    Check ((Get-CommandArgs $c[0]) -ceq $c[1]) "Get-CommandArgs '$($c[0])' -> '$($c[1])'"
+}
+
 Remove-Item -Recurse -Force -LiteralPath $tmp
 if ($fails.Count) { throw "$($fails.Count) check(s) failed: $($fails -join '; ')" }
 Write-Output 'all unit checks passed'

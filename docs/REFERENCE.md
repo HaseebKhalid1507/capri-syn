@@ -25,8 +25,9 @@ Reference for `synaps-avatar`, the crate behind capri-syn. The [README](../READM
   said them.
 - **Her first words.** On her first launch ever (`state.json` has no `met` and nothing else of hers:
   no `ground`, `seenUnix`, `brain` or `perch`), once she has landed and nothing else is on, she says
-  "Hey. I'm Capri. Tap $MOD+C when you want me. Headpats also accepted." (the key as the Line's hints
-  write it), then `met` is set. Not a word about what runs her. If the Line opens first she skips it.
+  "Hey. I'm Capri. Click me when you want me. Headpats also accepted.", then `met` is set. Where she
+  binds her key herself (Windows) it names it instead: "Tap WIN+ALT+C when you want me." (a WM's key
+  may not exist: GNOME and KDE have none until he binds one). Not a word about what runs her. If the Line opens first she skips it.
   Anyone who ran her before is marked met without it. `tools/shoot.py` writes `met` (`--first-run`:
   not).
 - She shows up in `/clients` as `capri` (the pack's character name). If the daemon is gone or the
@@ -39,16 +40,34 @@ Reference for `synaps-avatar`, the crate behind capri-syn. The [README](../READM
   annoyed (abort or error), needs-you (a pending prompt), sleepy, compacting, and away (no daemon).
 - **A failed turn she can name** is said in her words instead of the daemon's (`session::Trouble`,
   matched on the daemon's own wording): the bubble and her row in the Line get her line, her tag the
-  name for 10 s, the Line's footer a quiet `↑ resends your message` (in place of the key legend). A login fix ends on the command in
-  a monospace chip (`$ synaps login`); a click copies it. The raw text stays in the log.
+  name for 10 s, the Line's footer a quiet `↑ resends your message` (in place of the key legend). A fix that
+  is a command ends on it in a monospace chip (`$ synaps login --provider claude`); a click copies it.
+  The raw text stays in the log.
 
   | trouble | she says | tag | mood |
   |---|---|---|---|
-  | no credentials (`synaps login` + no credential) | No brain yet, choom. Synaps has no Claude login. Log in, or set another model ([session] model in my settings): `$ synaps login` | `NO BRAIN YET` | idle |
+  | no credentials (`synaps login` + no credential; 0.12.0: `No credentials for anthropic at …`) | No brain yet, choom. Synaps has no Claude login. Log in, or set another model ([session] model in my settings): `$ synaps login --provider claude` (the provider's own `--provider`; none named: `$ synaps login`) | `NO BRAIN YET` | idle |
   | a lapsed or rejected login | My login ran out. In a terminal: `$ synaps login` | `LOGGED OUT` | idle |
   | rate or usage limit, billing | Hit my model's limit for now. Give it a bit, then ask me again. | `AT THE LIMIT` | annoyed |
   | overloaded, a 5xx | My model's swamped right now. Try me again in a minute. | `MODEL BUSY` | annoyed |
   | unreachable, timed out, a dropped stream | Can't reach my model. Check the connection, then ask me again. | `NO CONNECTION` | annoyed |
+  | `local/…`: `can't reach local endpoint` (Ollama's port 11434) | Ollama's not answering, so I've got no brain. Start Ollama, then ask me again. | `OLLAMA IS OFF` | idle |
+  | the same, another port (LM Studio, llama.cpp) | My local model's server isn't answering. Start it, then ask me again. | `LOCAL MODEL OFF` | idle |
+  | `local/<model>`: a 404 (Ollama hasn't pulled it) | qwen3:8b isn't on my local server. Pull it, then ask me again: `$ ollama pull qwen3:8b` | `MODEL MISSING` | idle |
+  | the same, a name with no `:tag` (one made from a Modelfile, as [UNDER-THE-HOOD.md](UNDER-THE-HOOD.md#her-brain) has it) | capri-qwen3 isn't on my local server. Create it from its Modelfile, then ask me again: `$ ollama create capri-qwen3 -f Modelfile` | `MODEL MISSING` | idle |
+  | `local/<model>`: a 400 (no tool calling; a context too small, where the server says so) | My local model turned that down. I need one with tool calling and a 16k+ context: set another ([session] model in my settings). In the Line, the server's own words under it. | `WRONG MODEL` | idle |
+
+  Ollama cuts a prompt longer than its context without an error (4k below 24 GB of VRAM; hers is
+  ~7k tokens): nothing to name there, so [UNDER-THE-HOOD.md](UNDER-THE-HOOD.md#her-brain) has a
+  16k copy of the model made first.
+- **No brain, before a word.** At each attach (and model change) she reads whether her model has
+  credentials (`creds.rs`): a Claude model (bare `claude-*` or `anthropic/…`) needs an `anthropic` or
+  `anthropic@<label>` entry in Synaps' `auth.json` (a profile's folder first), or `ANTHROPIC_API_KEY`
+  in her environment or the daemon's (Linux: `/proc/<pid>/environ`). Keys and types only, never a
+  secret. None: her tag reads `NO BRAIN YET` in place of `ONLINE` (and asleep), and she reads again
+  every 5 s, so a `synaps login` in a terminal clears it without a message. A remote broker
+  (`auth.remote_endpoint`, `SYNAPS_AUTH_ENDPOINT`), another provider or an unreadable file is
+  unknown: the daemon's first error says it, and its no-brain error holds the tag until a turn answers.
 
   The provider is read off the error (`No Anthropic credentials`: Claude; `no credential configured
   for 'kimi-code'`: Kimi); `synaps login` picks a provider, not a model. The other way out is

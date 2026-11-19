@@ -25,6 +25,7 @@ mod anim;
 mod beside;
 mod brain;
 mod control;
+mod creds;
 mod drag;
 mod edges;
 mod facing;
@@ -606,6 +607,8 @@ fn connect_session(args: &Args, character: &str, persona: session::Persona, view
         model: args.model.clone(),
         sleepy_after: args.sleepy_after,
         persona,
+        // `--socket`: maybe another machine's daemon (`tools/synaps-avatar-remote`).
+        local: args.socket.is_none(),
     };
     let link = session::Link::new(opts, Instant::now());
     let options = synaps_client::ClientOptions::new(endpoint, identity);

@@ -28,6 +28,8 @@ const DONE_FOR: Duration = Duration::from_secs(3);
 const ANNOYED_FOR: Duration = Duration::from_secs(5);
 /// A turn that failed for a reason she can name (no model, a lapsed login): its tag shows this long.
 const TROUBLE_FOR: Duration = Duration::from_secs(10);
+/// While her model has no credentials, read them again this often (a stat and a small file).
+const CREDS_EVERY: Duration = Duration::from_secs(5);
 /// A turn shows as started (THINKING, the bubble with ABORT) only once it has run this long
 /// with no word yet, or a word comes: one that fails at once (no login) goes straight to
 /// her saying so, never promising a reply first.
@@ -74,6 +76,11 @@ pub struct Options {
     pub model: Option<String>,
     pub sleepy_after: Duration,
     pub persona: Persona,
+    /// The daemon runs on this machine (reached by its profile): its credentials file and its
+    /// environment can be read here (`creds`). Not one reached through `--socket`, an
+    /// ssh-forwarded remote daemon's: its login and its pid are another machine's, and its
+    /// first error says what it lacks.
+    pub local: bool,
 }
 
 /// `name` (or a name given for an id) is the guarded session.
@@ -216,6 +223,15 @@ pub struct Link {
     notice: Option<String>,
     /// The last turn's failure, when she can name it (cleared by the next turn).
     trouble: Option<Trouble>,
+    /// Whether her model has credentials (`creds`): known before his first message, so a fresh
+    /// install reads NO BRAIN YET from the start, not ONLINE. The daemon's own no-login error and
+    /// any turn that answers settle it too.
+    creds: Creds,
+    /// When to read the credentials again (`creds_due`): at each attach or model change, and every
+    /// `CREDS_EVERY` while missing (a `synaps login` in a terminal clears it without a message).
+    creds_at: Option<Instant>,
+    /// The daemon's profile and pid (`Connected`): where its credentials are, and its env.
+    daemon: Option<(Option<String>, u32)>,
     /// The daemon's version (`Welcome`), for her maker's mark.
     daemon_version: Option<String>,
     /// When the running turn started (`QUIET_START`), and the last turn's reply, raw text and
@@ -287,6 +303,9 @@ impl Link {
             response_at: 0,
             notice: None,
             trouble: None,
+            creds: Creds::Unknown,
+            creds_at: None,
+            daemon: None,
             daemon_version: None,
             turn_at: now,
             before: Default::default(),
@@ -373,10 +392,49 @@ impl Link {
         self.opts.model.clone()
     }
 
+    /// The session's model as the daemon last said it (`claude-sonnet-4-6`, `local/qwen3:8b`).
+    pub fn model(&self) -> Option<&str> {
+        self.view.as_ref().and_then(|v| v.get("model")).and_then(|m| m.as_str()).map(str::trim).filter(|m| !m.is_empty())
+    }
+
+    /// When the next credentials read is: only while live, and only for a daemon on this machine.
+    fn creds_next(&self) -> Option<Instant> {
+        self.creds_at.filter(|_| self.opts.local && self.live())
+    }
+
+    /// A credentials read is due (`creds::check`): what to read them for.
+    pub fn creds_due(&self, now: Instant) -> Option<crate::creds::Query> {
+        if self.creds_next().is_none_or(|t| now < t) {
+            return None;
+        }
+        let (profile, pid) = self.daemon.clone().map_or((None, None), |(p, pid)| (p, Some(pid)));
+        Some(crate::creds::Query { model: self.model()?.to_string(), profile, pid })
+    }
+
+    /// What the read found. Missing, or Unknown on a Claude model (a file mid-write, a login under
+    /// way): read again in `CREDS_EVERY`. Have, or another model's Unknown, ends the reads (until
+    /// the next attach or model change). Unknown leaves a Missing the daemon said (its next
+    /// answer, or a read that finds the login, clears that).
+    pub fn set_creds(&mut self, c: Creds, now: Instant) {
+        let again = match c {
+            Creds::Missing(_) => true,
+            Creds::Unknown => self.model().is_some_and(crate::creds::on_claude),
+            Creds::Have => false,
+        };
+        self.creds_at = again.then_some(now + CREDS_EVERY);
+        if c == Creds::Unknown && matches!(self.creds, Creds::Missing(_)) {
+            return;
+        }
+        if c != self.creds {
+            elog!("synaps-avatar: her model's credentials: {c:?}");
+        }
+        self.creds = c;
+    }
+
     /// Her maker's mark for the menu: `SYNAPS 0.12.0 · claude-opus-5` (the daemon's version and
     /// her session's model, without its provider). None until the daemon has said either.
     pub fn mark(&self) -> Option<String> {
-        let model = self.view.as_ref().and_then(|v| v.get("model")).and_then(|m| m.as_str()).map(str::trim).filter(|m| !m.is_empty());
+        let model = self.model();
         let model = model.map(|m| m.rsplit('/').next().unwrap_or(m));
         match (self.daemon_version.as_deref(), model) {
             (None, None) => None,
@@ -568,8 +626,9 @@ impl Link {
         match ev {
             Event::Status(s) => {
                 let up = matches!(s, Status::Connected { .. });
-                if let Status::Connected { daemon_version, .. } = &s {
+                if let Status::Connected { daemon_version, profile, pid, .. } = &s {
                     self.daemon_version = Some(daemon_version.trim().to_string()).filter(|v| !v.is_empty());
+                    self.daemon = Some((profile.clone(), *pid));
                 }
                 if self.connected && !up && matches!(self.attach, Attach::Live(_)) {
                     self.lost = true;
@@ -630,6 +689,7 @@ impl Link {
                     );
                 }
                 self.view = Some(attached.view.clone());
+                self.creds_at = Some(now);
                 self.me = attached.client;
                 self.owner = attached.input_owner;
                 // A mode switch on the session we follow: same body, no new bubble.
@@ -697,6 +757,10 @@ impl Link {
             }
             Event::SettingApplied { setting, view, .. } => {
                 elog!("synaps-avatar: persona: {setting} set");
+                if view.get("model") != self.view.as_ref().and_then(|v| v.get("model")) {
+                    self.creds = Creds::Unknown;
+                    self.creds_at = Some(now);
+                }
                 self.view = Some(view);
                 self.persona_wait = self.persona_wait.saturating_sub(1);
             }
@@ -807,6 +871,8 @@ impl Link {
                         }
                         self.raw.push_str(&text);
                         self.phase = Phase::Talking;
+                        self.creds = Creds::Have;
+                        self.creds_at = None;
                     }
                     LlmEvent::ToolUseStart { tool_name, .. } | LlmEvent::ToolUse { tool_name, .. } => {
                         self.phase = Phase::Working(tool_name);
@@ -814,12 +880,17 @@ impl Link {
                     LlmEvent::ToolResult { .. } => self.phase = Phase::Thinking,
                     _ => {}
                 },
-                StreamEvent::Session(SessionStreamEvent::Error { message }) => match Trouble::of(&message) {
+                StreamEvent::Session(SessionStreamEvent::Error { message }) => match Trouble::of(&message, self.model()) {
                     Some(t) => {
                         elog!("synaps-avatar: turn error ({}): {}", t.key(), one_line(&message, 300));
-                        self.trouble = Some(t);
+                        if let Trouble::NoBrain { on } = t {
+                            // The daemon's word: missing until a check or an answer says otherwise.
+                            self.creds = Creds::Missing(on);
+                            self.creds_at = Some(now + CREDS_EVERY);
+                        }
                         self.notice = Some(t.says());
                         self.flash = Some((t.mood(), now + TROUBLE_FOR));
+                        self.trouble = Some(t);
                     }
                     None => {
                         self.notice = Some(format!("‹error: {}›", one_line(&message, 90)));
@@ -987,6 +1058,9 @@ impl Link {
         if let Some((_, until)) = self.flash {
             t.push(until);
         }
+        if let Some(c) = self.creds_next() {
+            t.push(c.max(now));
+        }
         if self.quiet_start(now) {
             t.push(self.turn_at + QUIET_START);
         }
@@ -1035,13 +1109,20 @@ impl Link {
         } else if let Some((m, until)) = self.flash
             && now < until
         {
-            label = self.trouble.map(|t| t.tag().to_string());
+            label = self.trouble.as_ref().map(|t| t.tag().to_string());
             m
         } else if self.resting.unwrap_or(now >= self.last_active + self.opts.sleepy_after) {
             Mood::Sleepy
         } else {
             Mood::Idle
         };
+        // At rest with no brain: her tag says so (not ONLINE), before his first message too.
+        if let Creds::Missing(on) = self.creds
+            && label.is_none()
+            && matches!(mood, Mood::Idle | Mood::Sleepy)
+        {
+            label = Some(Trouble::NoBrain { on }.tag().to_string());
+        }
         // Whole: a security decision is made on the full text (the bubble cuts its own copy).
         let prompts: Vec<PromptView> = self
             .prompts
@@ -1066,19 +1147,29 @@ impl Link {
             prompt,
             prompts,
             live: self.live(),
-            trouble: self.trouble,
+            trouble: self.trouble.clone(),
         }
     }
+}
+
+/// Whether her model has credentials, as far as she can tell without asking it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Creds {
+    /// Not read, or not hers to decide (another provider, a remote broker, an unreadable file).
+    Unknown,
+    Have,
+    /// None for the provider (its name, as `Trouble::NoBrain` says it).
+    Missing(Option<&'static str>),
 }
 
 /// A failed turn she can explain in her own words. The daemon's text is written for a terminal
 /// (it names slash commands the Line doesn't have, and the bubble cut it mid-word); these are
 /// the common ones, matched on the daemon's own wording (Synaps classifies its auth errors on
 /// `synaps login` too). Anything else keeps the raw `‹error: …›`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Trouble {
     /// No model credentials: a fresh install before `synaps login`. `on`: the provider her
-    /// model is on, when the daemon names it (`No Anthropic credentials`: Claude).
+    /// model is on, when the daemon names it (`No credentials for anthropic`: Claude).
     NoBrain { on: Option<&'static str> },
     /// A login that lapsed or was rejected.
     LoggedOut,
@@ -1088,23 +1179,71 @@ pub enum Trouble {
     Swamped,
     /// The model can't be reached (network, timeout, a dropped stream).
     Offline,
+    /// Her local model's server isn't answering (`local/…`; `ollama`: on Ollama's port).
+    LocalDown { ollama: bool },
+    /// Her local model isn't on its server (a 404 for `local/<model>`: Ollama hasn't pulled it).
+    ModelMissing { model: String },
+    /// Her local model's server refused the request (a 400): a model without tool calling
+    /// (Ollama), or a context too small for her prompt (llama.cpp, LM Studio, vLLM). Ollama itself
+    /// cuts an overlong prompt without a word: no error to name there.
+    WrongModel,
 }
 
 /// The command a no-brain line ends on, on a line of its own (the bubble draws it as a chip).
 pub const LOGIN_CMD: &str = "synaps login";
 
+/// Synaps' OAuth providers: the key it stores and names them by, the `--provider` that signs in
+/// (it takes the storage keys; `claude` for Anthropic), and what she calls them.
+const PROVIDERS: &[(&str, &str, &str)] = &[
+    ("anthropic", "claude", "Claude"),
+    ("openai-codex", "openai-codex", "Codex"),
+    ("xai-auth", "xai-auth", "Grok"),
+    ("kimi-code", "kimi-code", "Kimi"),
+    ("github-copilot", "github-copilot", "Copilot"),
+    ("google-gemini", "google-gemini", "Gemini"),
+    ("muse", "muse", "Muse"),
+];
+
+/// A model name she can put in a command: Ollama's characters only, and short (her line stays
+/// a bubble's).
+fn model_word(m: &str) -> Option<&str> {
+    (!m.is_empty() && m.len() <= 46 && m.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ':' | '/'))).then_some(m)
+}
+
 impl Trouble {
-    pub fn of(message: &str) -> Option<Trouble> {
+    /// `model`: her session's (`local/…` tells a local server's 404 and 400 apart from others).
+    pub fn of(message: &str, model: Option<&str>) -> Option<Trouble> {
         let m = message.to_ascii_lowercase();
         let any = |keys: &[&str]| keys.iter().any(|k| m.contains(k));
         if m.contains("synaps login") || m.contains("(authentication_error)") {
             if any(&["no anthropic credentials", "no api key or oauth token"]) {
                 return Some(Trouble::NoBrain { on: Some("Claude") });
             }
+            // Synaps 0.12: `… credential error: No credentials for anthropic at …/auth.json. Run
+            // synaps login --provider anthropic …` (wrapped in a "Token refresh failed").
+            if let Some(rest) = m.split("no credentials for ").nth(1) {
+                return Some(Trouble::NoBrain { on: provider_name(rest.split_whitespace().next().unwrap_or("")) });
+            }
             if let Some(rest) = m.split("no credential configured for '").nth(1) {
                 return Some(Trouble::NoBrain { on: provider_name(rest.split('\'').next().unwrap_or("")) });
             }
+            if m.contains("no oauth credential at ") {
+                return Some(Trouble::NoBrain { on: None });
+            }
             return Some(Trouble::LoggedOut);
+        }
+        // `can't reach local endpoint at http://localhost:11434/v1/… — is Ollama/LM Studio running?`
+        if m.contains("reach local endpoint") {
+            return Some(Trouble::LocalDown { ollama: m.contains(":11434/") });
+        }
+        if let Some(local) = model.and_then(|m| m.trim().strip_prefix("local/")) {
+            // `provider request failed: 404 Not Found [not_found_error]` (Ollama: not pulled).
+            if m.contains("request failed: 404") {
+                return Some(Trouble::ModelMissing { model: local.to_string() });
+            }
+            if m.contains("request failed: 400") {
+                return Some(Trouble::WrongModel);
+            }
         }
         if any(&["rate limit", "(http 429", "usage limit", "quota", "(billing_error)"]) {
             Some(Trouble::Limited)
@@ -1117,56 +1256,84 @@ impl Trouble {
         }
     }
 
-    pub fn key(self) -> &'static str {
+    pub fn key(&self) -> &'static str {
         match self {
             Trouble::NoBrain { .. } => "no_brain",
             Trouble::LoggedOut => "logged_out",
             Trouble::Limited => "limited",
             Trouble::Swamped => "swamped",
             Trouble::Offline => "offline",
+            Trouble::LocalDown { .. } => "local_down",
+            Trouble::ModelMissing { .. } => "model_missing",
+            Trouble::WrongModel => "wrong_model",
         }
     }
 
-    /// What she says (the bubble, and her row in the Line). A login fix ends on the command,
-    /// on its own line, in backticks.
-    pub fn says(self) -> String {
+    /// The command that signs in for this provider (`--provider` skips Synaps' picker).
+    fn login_cmd(on: Option<&str>) -> String {
+        match PROVIDERS.iter().find(|p| Some(p.2) == on) {
+            Some((_, flag, _)) => format!("{LOGIN_CMD} --provider {flag}"),
+            None => LOGIN_CMD.to_string(),
+        }
+    }
+
+    /// What she says (the bubble, and her row in the Line). A fix that is a command ends on it,
+    /// on its own line, in backticks (a chip; a click copies it).
+    pub fn says(&self) -> String {
         match self {
-            // `synaps login` picks a provider and signs in; it doesn't pick a model. Her model
-            // is the daemon's default (Claude) or her `[session] model` (applied live on a
-            // settings reload): the other way out. Not `/model`: the daemon takes no slash
-            // commands, and the Line would send it to the model as words.
-            Trouble::NoBrain { on: Some(p) } => format!("No brain yet, choom. Synaps has no {p} login. Log in, or set another model ([session] model in my settings):\n`{LOGIN_CMD}`"),
+            // `synaps login` signs in; it doesn't pick a model. Her model is the daemon's default
+            // (Claude) or her `[session] model` (applied live on a settings reload): the other way
+            // out. Not `/model`: the daemon takes no slash commands, and the Line would send it to
+            // the model as words.
+            Trouble::NoBrain { on: Some(p) } => format!("No brain yet, choom. Synaps has no {p} login. Log in, or set another model ([session] model in my settings):\n`{}`", Self::login_cmd(Some(p))),
             Trouble::NoBrain { on: None } => format!("No brain yet, choom. Synaps has no login for my model. Log in, or set another model ([session] model in my settings):\n`{LOGIN_CMD}`"),
             Trouble::LoggedOut => format!("My login ran out. In a terminal:\n`{LOGIN_CMD}`"),
             Trouble::Limited => "Hit my model's limit for now. Give it a bit, then ask me again.".into(),
             Trouble::Swamped => "My model's swamped right now. Try me again in a minute.".into(),
             Trouble::Offline => "Can't reach my model. Check the connection, then ask me again.".into(),
+            Trouble::LocalDown { ollama: true } => "Ollama's not answering, so I've got no brain. Start Ollama, then ask me again.".into(),
+            Trouble::LocalDown { ollama: false } => "My local model's server isn't answering. Start it, then ask me again.".into(),
+            Trouble::ModelMissing { model } => match model_word(model) {
+                // No `:tag` and no namespace: one made from a Modelfile (the docs' `capri-qwen3`, a
+                // 16k context), not a name Ollama's library has to pull.
+                Some(w) if !w.contains([':', '/']) => format!("{w} isn't on my local server. Create it from its Modelfile, then ask me again:\n`ollama create {w} -f Modelfile`"),
+                Some(w) => format!("{w} isn't on my local server. Pull it, then ask me again:\n`ollama pull {w}`"),
+                None => "My model isn't on my local server. Pull it there, then ask me again.".into(),
+            },
+            Trouble::WrongModel => "My local model turned that down. I need one with tool calling and a 16k+ context: set another ([session] model in my settings).".into(),
         }
     }
 
     /// Her tag while it shows.
-    pub fn tag(self) -> &'static str {
+    pub fn tag(&self) -> &'static str {
         match self {
             Trouble::NoBrain { .. } => "NO BRAIN YET",
             Trouble::LoggedOut => "LOGGED OUT",
             Trouble::Limited => "AT THE LIMIT",
             Trouble::Swamped => "MODEL BUSY",
             Trouble::Offline => "NO CONNECTION",
+            Trouble::LocalDown { ollama: true } => "OLLAMA IS OFF",
+            Trouble::LocalDown { ollama: false } => "LOCAL MODEL OFF",
+            Trouble::ModelMissing { .. } => "MODEL MISSING",
+            Trouble::WrongModel => "WRONG MODEL",
         }
     }
 
     /// The Line's quiet footer tip: that his message isn't lost (her row says the fix).
-    pub fn tip(self) -> &'static str {
+    pub fn tip(&self) -> &'static str {
         match self {
             Trouble::NoBrain { .. } | Trouble::LoggedOut => "after synaps login, ↑ resends your message",
+            Trouble::LocalDown { .. } => "once it's up, ↑ resends your message",
+            Trouble::ModelMissing { .. } => "once it's pulled, ↑ resends your message",
             _ => "↑ resends your message",
         }
     }
 
-    /// Not her fault and not his: no login is calm; a provider's trouble annoys her.
-    fn mood(self) -> Mood {
+    /// Not her fault and not his: no login, or a local model to set up, is calm; a provider's
+    /// trouble annoys her.
+    fn mood(&self) -> Mood {
         match self {
-            Trouble::NoBrain { .. } | Trouble::LoggedOut => Mood::Idle,
+            Trouble::NoBrain { .. } | Trouble::LoggedOut | Trouble::LocalDown { .. } | Trouble::ModelMissing { .. } | Trouble::WrongModel => Mood::Idle,
             _ => Mood::Annoyed,
         }
     }
@@ -1174,16 +1341,8 @@ impl Trouble {
 
 /// A provider key as Synaps names it (`no credential configured for 'kimi-code'`), as she'd say it.
 fn provider_name(key: &str) -> Option<&'static str> {
-    Some(match key {
-        "anthropic" => "Claude",
-        "openai-codex" => "Codex",
-        "xai-auth" => "Grok",
-        "kimi-code" => "Kimi",
-        "github-copilot" => "Copilot",
-        "google-gemini" => "Gemini",
-        "muse" => "Muse",
-        _ => return None,
-    })
+    let key = key.trim_matches(|c: char| !(c.is_ascii_alphanumeric() || c == '-'));
+    PROVIDERS.iter().find(|p| p.0 == key).map(|p| p.2)
 }
 
 /// A tool name for the tag: short and safe (never arguments).
@@ -1292,6 +1451,7 @@ mod tests {
             model: None,
             sleepy_after: Duration::from_secs(600),
             persona: Persona::default(),
+            local: true,
         }
     }
 
@@ -1733,36 +1893,84 @@ mod tests {
         l.on_event(wire(1, serde_json::json!({"ev": "idle"})), t);
     }
 
-    /// The daemon's own texts (SynapsCLI 3072a25: runtime/api.rs, auth.rs, session_driver.rs).
+    /// The daemon's own texts (SynapsCLI 3072a25: runtime/api.rs, auth.rs, session_driver.rs;
+    /// v0.12.0: auth/token.rs:609, auth/broker.rs:233 and :3599, the broker's proxy statuses).
     #[test]
     fn troubles_are_read_off_the_daemons_words() {
+        const CLAUDE: Option<&str> = Some("claude-sonnet-4-6");
+        const LOCAL: Option<&str> = Some("local/qwen3:8b");
         let cases = [
-            ("No Anthropic credentials. Run `synaps login`, or switch to a provider model with `/model groq/llama-3.3-70b-versatile`.", Some(Trouble::NoBrain { on: Some("Claude") })),
-            ("Auth error: No API key or OAuth token found. Run `synaps login` to authenticate.", Some(Trouble::NoBrain { on: Some("Claude") })),
-            ("Config error: openai provider: no credential configured for 'kimi-code'. Run `synaps login` to add one.", Some(Trouble::NoBrain { on: Some("Kimi") })),
-            ("Config error: openai provider: no credential configured for 'acme-ai'. Run `synaps login` to add one.", Some(Trouble::NoBrain { on: None })),
-            ("API error: Authentication rejected. Run `synaps login` to re-authenticate.", Some(Trouble::LoggedOut)),
-            ("Token refresh failed for account 'work': expired. Run `synaps login` (or `synaps login --account work`) to re-authenticate, or check auth.remote_endpoint / broker reachability.", Some(Trouble::LoggedOut)),
-            ("API stream error (authentication_error). Provider error details withheld — they can echo request content.", Some(Trouble::LoggedOut)),
-            ("Rate limited by Anthropic (HTTP 429). Retry after 30 s.", Some(Trouble::Limited)),
-            ("Rate limit exhausted — retries used up while waiting for reset (next window in 4 min).", Some(Trouble::Limited)),
-            ("Anthropic is overloaded right now. Retries exhausted — wait a minute and try again.", Some(Trouble::Swamped)),
-            ("Anthropic server error (HTTP 502). Try again.", Some(Trouble::Swamped)),
-            ("Could not reach api.anthropic.com (connection failed). Check your network, DNS, or proxy settings.", Some(Trouble::Offline)),
-            ("Connection lost mid-response. Partial reply kept — send again to continue.", Some(Trouble::Offline)),
-            ("tool registry: unknown tool `frobnicate`", None),
+            ("No Anthropic credentials. Run `synaps login`, or switch to a provider model with `/model groq/llama-3.3-70b-versatile`.", CLAUDE, Some(Trouble::NoBrain { on: Some("Claude") })),
+            ("Auth error: No API key or OAuth token found. Run `synaps login` to authenticate.", CLAUDE, Some(Trouble::NoBrain { on: Some("Claude") })),
+            // v0.12.0, a fresh install's first message (measured in a container, never logged in).
+            ("Auth error: Token refresh failed for account 'default': credential error: No credentials for anthropic at /home/chooms/.synaps-cli/auth.json. Run `synaps login --provider anthropic --account default`. Or check auth.remote_endpoint / broker reachability.", CLAUDE, Some(Trouble::NoBrain { on: Some("Claude") })),
+            ("request failed: credential error: No credentials for openai-codex at /home/user/.synaps/auth.json. Run `synaps login`.", None, Some(Trouble::NoBrain { on: Some("Codex") })),
+            ("Token refresh failed: no credential configured for 'anthropic'. Run `synaps login` to add one.. Run `synaps login` to re-authenticate, or check auth.remote_endpoint / broker reachability.", CLAUDE, Some(Trouble::NoBrain { on: Some("Claude") })),
+            ("Config error: openai provider: no credential configured for 'kimi-code'. Run `synaps login` to add one.", None, Some(Trouble::NoBrain { on: Some("Kimi") })),
+            ("API error: openai request failed: no credential configured for 'kimi-code'. Run `synaps login` to add one.", None, Some(Trouble::NoBrain { on: Some("Kimi") })),
+            ("Config error: openai provider: no credential configured for 'acme-ai'. Run `synaps login` to add one.", None, Some(Trouble::NoBrain { on: None })),
+            ("API error: Authentication rejected. Run `synaps login` to re-authenticate.", CLAUDE, Some(Trouble::LoggedOut)),
+            ("Token refresh failed for account 'work': expired. Run `synaps login` (or `synaps login --account work`) to re-authenticate, or check auth.remote_endpoint / broker reachability.", CLAUDE, Some(Trouble::LoggedOut)),
+            // v0.12.0, a login that's there but dead (measured: a bogus auth.json).
+            ("Auth error: OAuth recovery failed for 'default': Token refresh failed (400 Bad Request): invalid_grant: Refresh token not found or invalid. Run `synaps login --account default` to re-authenticate.", CLAUDE, Some(Trouble::LoggedOut)),
+            ("API stream error (authentication_error). Provider error details withheld — they can echo request content.", CLAUDE, Some(Trouble::LoggedOut)),
+            ("Rate limited by Anthropic (HTTP 429). Retry after 30 s.", CLAUDE, Some(Trouble::Limited)),
+            ("Rate limit exhausted — retries used up while waiting for reset (next window in 4 min).", CLAUDE, Some(Trouble::Limited)),
+            ("Anthropic is overloaded right now. Retries exhausted — wait a minute and try again.", CLAUDE, Some(Trouble::Swamped)),
+            ("Anthropic server error (HTTP 502). Try again.", CLAUDE, Some(Trouble::Swamped)),
+            ("Could not reach api.anthropic.com (connection failed). Check your network, DNS, or proxy settings.", CLAUDE, Some(Trouble::Offline)),
+            ("Connection lost mid-response. Partial reply kept — send again to continue.", CLAUDE, Some(Trouble::Offline)),
+            // v0.12.0's local provider (measured: Ollama off; a model it hasn't pulled).
+            ("openai request failed: broker transport error: can't reach local endpoint at http://localhost:11434/v1/chat/completions — is Ollama/LM Studio running?", LOCAL, Some(Trouble::LocalDown { ollama: true })),
+            ("openai request failed: broker transport error: can't reach local endpoint at http://127.0.0.1:1234/v1/chat/completions — is Ollama/LM Studio running?", Some("local/qwen2.5-7b-instruct"), Some(Trouble::LocalDown { ollama: false })),
+            ("openai request failed: broker transport error: provider request failed: 404 Not Found [not_found_error]", LOCAL, Some(Trouble::ModelMissing { model: "qwen3:8b".into() })),
+            ("openai request failed: broker transport error: provider request failed: 404 Not Found [api_error]", LOCAL, Some(Trouble::ModelMissing { model: "qwen3:8b".into() })),
+            // Ollama: a model without tool calling; llama.cpp: a context too small (unlabelled).
+            ("openai request failed: broker transport error: provider request failed: 400 Bad Request [invalid_request_error]", LOCAL, Some(Trouble::WrongModel)),
+            ("broker transport error: provider request failed: 400 Bad Request", Some("local/gemma3"), Some(Trouble::WrongModel)),
+            // The same statuses from another provider aren't hers to explain.
+            ("openai request failed: broker transport error: provider request failed: 404 Not Found [not_found_error]", Some("groq/llama-3.3-70b-versatile"), None),
+            ("openai request failed: broker transport error: provider request failed: 400 Bad Request", None, None),
+            ("tool registry: unknown tool `frobnicate`", CLAUDE, None),
         ];
-        for (m, want) in cases {
-            assert_eq!(Trouble::of(m), want, "{m}");
+        for (m, model, want) in cases {
+            assert_eq!(Trouble::of(m, model), want, "{m}");
         }
-        for t in [Trouble::NoBrain { on: Some("Claude") }, Trouble::NoBrain { on: None }, Trouble::LoggedOut, Trouble::Limited, Trouble::Swamped, Trouble::Offline] {
+        let all = [
+            Trouble::NoBrain { on: Some("Claude") },
+            Trouble::NoBrain { on: Some("Kimi") },
+            Trouble::NoBrain { on: None },
+            Trouble::LoggedOut,
+            Trouble::Limited,
+            Trouble::Swamped,
+            Trouble::Offline,
+            Trouble::LocalDown { ollama: true },
+            Trouble::LocalDown { ollama: false },
+            Trouble::ModelMissing { model: "qwen3:8b".into() },
+            Trouble::ModelMissing { model: "capri-qwen3".into() },
+            Trouble::ModelMissing { model: "someone/qwen3-tools".into() },
+            Trouble::ModelMissing { model: "hf.co/someone/a-very-long-model-name-GGUF:Q4_K_M".into() },
+            Trouble::ModelMissing { model: "a b; rm -rf ~".into() },
+            Trouble::WrongModel,
+        ];
+        for t in all {
             let says = t.says();
-            assert!(says.chars().count() <= 150, "{}: a short bubble", t.key());
-            // A login fix ends on the command alone, in backticks (the chip); the rest has none.
-            let login = matches!(t, Trouble::NoBrain { .. } | Trouble::LoggedOut);
-            assert_eq!(says.ends_with(&format!("\n`{LOGIN_CMD}`")), login, "{says}");
-            assert_eq!(says.matches('`').count(), if login { 2 } else { 0 }, "{says}");
+            assert!(says.chars().count() <= 150, "{}: a short bubble: {says}", t.key());
+            // A fix that is a command ends on it alone, in backticks (the chip); the rest has none.
+            let cmd = says.rsplit_once("\n`").map(|(_, c)| c.trim_end_matches('`').to_string());
+            let want = match &t {
+                Trouble::NoBrain { on: Some("Claude") } => Some("synaps login --provider claude".to_string()),
+                Trouble::NoBrain { on: Some("Kimi") } => Some("synaps login --provider kimi-code".to_string()),
+                Trouble::NoBrain { .. } | Trouble::LoggedOut => Some(LOGIN_CMD.to_string()),
+                Trouble::ModelMissing { model } if model == "qwen3:8b" => Some("ollama pull qwen3:8b".to_string()),
+                Trouble::ModelMissing { model } if model == "capri-qwen3" => Some("ollama create capri-qwen3 -f Modelfile".to_string()),
+                Trouble::ModelMissing { model } if model == "someone/qwen3-tools" => Some("ollama pull someone/qwen3-tools".to_string()),
+                _ => None,
+            };
+            assert_eq!(cmd, want, "{says}");
+            assert_eq!(says.matches('`').count(), if want.is_some() { 2 } else { 0 }, "{says}");
             assert!(t.tip().ends_with("↑ resends your message") && t.tip() == t.tip().to_lowercase(), "a quiet tip, not all-caps");
+            assert!(t.tag().len() <= 16 && t.tag() == t.tag().to_uppercase(), "{}", t.tag());
         }
     }
 
@@ -1771,13 +1979,13 @@ mod tests {
     fn no_model_yet_is_said_in_her_words() {
         let t0 = Instant::now();
         let mut l = live_link(t0);
-        failed_turn(&mut l, "No Anthropic credentials. Run `synaps login`, or switch to a provider model with `/model groq/llama-3.3-70b-versatile`.", t0);
+        failed_turn(&mut l, "Auth error: Token refresh failed for account 'default': credential error: No credentials for anthropic at /home/chooms/.synaps-cli/auth.json. Run `synaps login --provider anthropic --account default`. Or check auth.remote_endpoint / broker reachability.", t0);
         let b = l.body(t0);
         assert_eq!(b.trouble, Some(Trouble::NoBrain { on: Some("Claude") }));
-        assert_eq!(b.reply, "No brain yet, choom. Synaps has no Claude login. Log in, or set another model ([session] model in my settings):\n`synaps login`");
+        assert_eq!(b.reply, "No brain yet, choom. Synaps has no Claude login. Log in, or set another model ([session] model in my settings):\n`synaps login --provider claude`");
         assert_eq!((b.mood, b.label.as_deref()), (Mood::Idle, Some("NO BRAIN YET")), "calm, not ERROR / annoyed; no Done flash over it");
         let later = l.body(t0 + TROUBLE_FOR);
-        assert_eq!((later.mood, later.label), (Mood::Idle, None));
+        assert_eq!((later.mood, later.label.as_deref()), (Mood::Idle, Some("NO BRAIN YET")), "still no brain: never back to ONLINE");
         assert_eq!(later.trouble, Some(Trouble::NoBrain { on: Some("Claude") }), "kept for the Line until the next turn");
         l.on_event(wire(1, serde_json::json!({"ev": "turn_started", "turn_baseline": 1, "trigger": "user", "user_text": "hi"})), t0);
         assert_eq!(l.body(t0).trouble, None);
@@ -1786,6 +1994,111 @@ mod tests {
         let b = l.body(t0);
         assert_eq!((b.mood, b.trouble), (Mood::Annoyed, None));
         assert_eq!(b.reply, "‹error: tool registry: unknown tool `frobnicate`›");
+    }
+
+    /// Before his first message: a read of her model's credentials (`creds`) puts NO BRAIN YET on
+    /// her tag, not ONLINE; read again while missing, so a login in a terminal clears it alone.
+    #[test]
+    fn no_brain_shows_before_his_first_message() {
+        let t0 = Instant::now();
+        let mut l = Link::new(opts(), t0);
+        assert_eq!(l.creds_due(t0), None, "not before she is live");
+        l.on_event(connected(), t0);
+        l.attaching(1);
+        l.on_event(attached(1, "attached_create.json"), t0);
+        let q = l.creds_due(t0).expect("due at attach");
+        assert_eq!(q, crate::creds::Query { model: "anthropic/claude-haiku-4-5".into(), profile: None, pid: Some(1) });
+        assert_eq!(l.body(t0).label, None);
+        l.set_creds(Creds::Missing(Some("Claude")), t0);
+        let b = l.body(t0);
+        assert_eq!((b.mood, b.label.as_deref(), b.trouble), (Mood::Idle, Some("NO BRAIN YET"), None), "a tag, not a line he didn't ask for");
+        let sleepy = l.body(t0 + Duration::from_secs(3600));
+        assert_eq!((sleepy.mood, sleepy.label.as_deref()), (Mood::Sleepy, Some("NO BRAIN YET")));
+        assert_eq!(l.creds_due(t0), None);
+        assert!(l.deadline(t0).is_some_and(|d| d <= t0 + CREDS_EVERY), "woken for the next read");
+        assert!(l.creds_due(t0 + CREDS_EVERY).is_some());
+        // He logged in (a terminal): the next read finds it.
+        l.set_creds(Creds::Have, t0 + CREDS_EVERY);
+        assert_eq!(l.body(t0 + CREDS_EVERY).label, None, "ONLINE again");
+        assert_eq!(l.creds_due(t0 + CREDS_EVERY * 10), None, "no more reads");
+    }
+
+    /// What the daemon said stands: a read that can't tell leaves it (and reading goes on, on a
+    /// Claude model: a login mid-write reads as Unknown); a read that finds the login, or an
+    /// answer, clears it.
+    #[test]
+    fn the_daemons_no_brain_stands_until_an_answer() {
+        let t0 = Instant::now();
+        let mut l = live_link(t0);
+        failed_turn(&mut l, "Config error: openai provider: no credential configured for 'kimi-code'. Run `synaps login` to add one.", t0);
+        let t1 = t0 + TROUBLE_FOR;
+        assert_eq!(l.body(t1).label.as_deref(), Some("NO BRAIN YET"));
+        assert!(l.creds_due(t0 + CREDS_EVERY).is_some());
+        l.set_creds(Creds::Unknown, t0 + CREDS_EVERY);
+        assert_eq!(l.body(t1).label.as_deref(), Some("NO BRAIN YET"), "an Unknown read doesn't undo the daemon's word");
+        assert!(l.creds_due(t0 + CREDS_EVERY * 2).is_some(), "a Claude model: read again after an Unknown");
+        l.set_creds(Creds::Have, t0 + CREDS_EVERY * 2);
+        assert_eq!(l.body(t1).label, None, "the login, found");
+        assert_eq!(l.creds_due(t1 + CREDS_EVERY * 10), None, "no more reads");
+        failed_turn(&mut l, "Config error: openai provider: no credential configured for 'kimi-code'. Run `synaps login` to add one.", t1);
+        let t1 = t1 + TROUBLE_FOR;
+        assert_eq!(l.body(t1).label.as_deref(), Some("NO BRAIN YET"));
+        l.on_event(wire(1, serde_json::json!({"ev": "turn_started", "turn_baseline": 1, "trigger": "user", "user_text": "hi"})), t1);
+        l.on_event(wire(1, serde_json::json!({"ev": "stream", "event": {"kind": "llm", "llm": "text", "text": "Hey"}})), t1);
+        l.on_event(wire(1, serde_json::json!({"ev": "idle"})), t1);
+        assert_eq!(l.body(t1 + Duration::from_secs(30)).label, None, "she answered: a brain");
+    }
+
+    /// Another model's Unknown ends the reads: nothing to decide there.
+    #[test]
+    fn another_models_unknown_ends_the_reads() {
+        let t0 = Instant::now();
+        let mut l = live_link(t0);
+        let mut p = persona();
+        p.model = Some("local/qwen3:8b".into());
+        l.on_event(applied(1, "model", &p), t0);
+        assert!(l.creds_due(t0).is_some());
+        l.set_creds(Creds::Unknown, t0);
+        assert_eq!(l.creds_due(t0 + CREDS_EVERY * 10), None);
+    }
+
+    /// A daemon through `--socket` (an ssh-forwarded remote one, `tools/synaps-avatar-remote`):
+    /// its login and its pid are another machine's. Never read here (this machine's auth.json, a
+    /// local process's environment): no NO BRAIN YET from a read, no wake-ups for one. Its own
+    /// error still says it.
+    #[test]
+    fn a_remote_daemons_credentials_are_never_read_here() {
+        let t0 = Instant::now();
+        let mut l = Link::new(Options { local: false, ..opts() }, t0);
+        l.on_event(connected(), t0);
+        l.attaching(1);
+        l.on_event(attached(1, "attached_create.json"), t0);
+        assert!(l.live());
+        for t in [t0, t0 + CREDS_EVERY, t0 + CREDS_EVERY * 100] {
+            assert_eq!(l.creds_due(t), None, "never due");
+        }
+        assert!(l.deadline(t0).is_none_or(|d| d > t0), "no wake-up spin for a read that never comes");
+        assert_eq!(l.body(t0).label, None, "ONLINE: nothing read, nothing claimed");
+        failed_turn(&mut l, "Token refresh failed: credential error: No credentials for anthropic at /home/h/.synaps-cli/auth.json. Run synaps login --provider anthropic", t0);
+        assert_eq!(l.body(t0 + TROUBLE_FOR).label.as_deref(), Some("NO BRAIN YET"), "the daemon's own word");
+        assert_eq!(l.creds_due(t0 + CREDS_EVERY), None, "and still no reads here");
+    }
+
+    /// Local-model troubles are calm and named, with the model she runs on.
+    #[test]
+    fn a_missing_local_model_is_named() {
+        let t0 = Instant::now();
+        let mut l = live_link(t0);
+        let mut p = persona();
+        p.model = Some("local/qwen3:8b".into());
+        l.on_event(applied(1, "model", &p), t0);
+        assert_eq!(l.creds_due(t0).map(|q| q.model).as_deref(), Some("local/qwen3:8b"), "a model change reads again");
+        failed_turn(&mut l, "openai request failed: broker transport error: provider request failed: 404 Not Found [not_found_error]", t0);
+        let b = l.body(t0);
+        assert_eq!((b.mood, b.label.as_deref()), (Mood::Idle, Some("MODEL MISSING")));
+        assert_eq!(b.reply, "qwen3:8b isn't on my local server. Pull it, then ask me again:\n`ollama pull qwen3:8b`");
+        failed_turn(&mut l, "openai request failed: broker transport error: can't reach local endpoint at http://localhost:11434/v1/chat/completions — is Ollama/LM Studio running?", t0);
+        assert_eq!(l.body(t0).label.as_deref(), Some("OLLAMA IS OFF"));
     }
 
     /// A turn that fails at once never shows as started: no THINKING, no busy bubble (ABORT)

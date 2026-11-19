@@ -420,13 +420,7 @@ impl Avatar {
                     Row { who: Who::Tool, text: format!("{name} {mark}"), detail: crate::session::one_line(&t.input, 110), streaming: false }
                 }
                 K::Notice => Row { who: Who::Sys, text: it.text.trim().to_string(), detail: String::new(), streaming: false },
-                // One she can name is said in her words, as in the bubble (the daemon's text
-                // names slash commands the Line doesn't have).
-                K::Error => match crate::session::Trouble::of(&it.text) {
-                    // The command on a paragraph of its own: a chip.
-                    Some(t) => Row { who: Who::Her, text: t.says().replace("\n`", "\n\n`"), detail: String::new(), streaming: false },
-                    None => Row { who: Who::Error, text: it.text.trim().to_string(), detail: String::new(), streaming: false },
-                },
+                K::Error => error_row(&it.text, s.link.model()),
                 _ => continue,
             };
             rows.push(row);
@@ -451,7 +445,7 @@ impl Avatar {
             mic: self.voice_mic_row(),
             caption: self.voice_caption_now(),
             face,
-            trouble: b.and_then(|b| b.trouble).map(|t| t.tip().to_string()),
+            trouble: b.and_then(|b| b.trouble.as_ref()).map(|t| t.tip().to_string()),
         }
     }
 
@@ -988,6 +982,40 @@ mod unseen_tests {
 /// have opened its mic yet, or its mic (`listening`) is asked for or open, until `TALK_STALE`.
 fn press_holds(age: Duration, listening: bool) -> bool {
     age < TAP_GUARD || (listening && age < TALK_STALE)
+}
+
+/// A turn's error in the Line. One she can name is said in her words, as in the bubble (the
+/// daemon's text names slash commands the Line doesn't have), its command on a paragraph of its
+/// own (a chip). A local 400 has two causes (no tool calling, a context too small): the server's
+/// own words go under hers. Anything else is the raw error.
+fn error_row(text: &str, model: Option<&str>) -> Row {
+    match crate::session::Trouble::of(text, model) {
+        Some(t) => {
+            let detail = if matches!(t, crate::session::Trouble::WrongModel) { crate::session::one_line(text, 400) } else { String::new() };
+            Row { who: Who::Her, text: t.says().replace("\n`", "\n\n`"), detail, streaming: false }
+        }
+        None => Row { who: Who::Error, text: text.trim().to_string(), detail: String::new(), streaming: false },
+    }
+}
+
+#[cfg(test)]
+mod error_row_tests {
+    use super::error_row;
+    use crate::line::Who;
+
+    #[test]
+    fn a_local_400_keeps_the_servers_words() {
+        let raw = "openai request failed: broker transport error: provider request failed: 400 Bad Request: registry.ollama.ai/library/gemma3:4b does not support tools";
+        let r = error_row(raw, Some("local/gemma3:4b"));
+        assert_eq!(r.who, Who::Her);
+        assert!(r.text.starts_with("My local model turned that down."), "{}", r.text);
+        assert_eq!(r.detail, raw, "which of the two 400s it was");
+        let r = error_row("openai request failed: broker transport error: provider request failed: 404 Not Found [not_found_error]", Some("local/qwen3:8b"));
+        assert_eq!((r.who, r.detail.as_str()), (Who::Her, ""), "her words say it all");
+        assert!(r.text.ends_with("\n\n`ollama pull qwen3:8b`"), "the command a paragraph of its own: {}", r.text);
+        let r = error_row("tool registry: unknown tool", Some("local/qwen3:8b"));
+        assert_eq!((r.who, r.text.as_str(), r.detail.as_str()), (Who::Error, "tool registry: unknown tool", ""));
+    }
 }
 
 #[cfg(test)]

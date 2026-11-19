@@ -28,7 +28,7 @@ usage: install.sh [--yes] [--dry-run] [--uninstall [--purge]] [--voice] [--watch
   --purge           with --uninstall: remove those too (only her own files in those folders)
   --voice           also her voice: capri-voice (a user venv, ~320 MB of models, its user unit)
   --watch           also capri-watch (its user unit; enabled only with --yes)
-  --no-autostart    don't start her at login
+  --no-autostart    don't start her at login (she still starts now, at the end)
   --from-source     build her from source even when a release has a binary
   --prefix DIR      where bin/ and lib/synaps-avatar/ go (default ~/.local)
   --with-local-art  also mochi's art: LOCAL PERSONAL USE ONLY, never publish or share it
@@ -143,6 +143,14 @@ verify() {
 }
 ver_ge() { [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1)" = "$2" ]; }
 tilde() { printf '%s' "${1/#$HOME/\~}"; }
+# A path as he'd type it: ~ for his home (outside any quotes, so it expands), the rest quoted as needed.
+# shellcheck disable=SC2088 # a ~ to print, not to expand
+tq() {
+    case $1 in
+        "$HOME"/*) printf '~/%s' "$(q "${1#"$HOME"/}")" ;;
+        *) q "$1" ;;
+    esac
+}
 # Write a file (content on stdin): printed with --dry-run.
 put() {
     local f=$1 body
@@ -629,7 +637,7 @@ install_tree() {
     run mv "$LIB.new" "$LIB"
     rec dir "$LIB"
     if [ "$DRY" = 0 ] && pgrep -u "$(id -u)" -x synaps-avatar >/dev/null 2>&1; then
-        info "she's running the old binary: \`avatarctl quit\`, then start her again"
+        info "she's running the old binary: restarted at the end"
     fi
 }
 
@@ -1079,14 +1087,19 @@ xq() {
         *) printf '%s' "$a" ;;
     esac
 }
-# Her start command, for a WM config's exec (sh -c reads it) or a desktop entry's Exec (FORM xdg).
+# Her start command, for a WM config's exec (sh -c reads it), a desktop entry's Exec (FORM xdg),
+# or as he'd type it (FORM show: ~ for his home).
 launch_cmd() {
     local form=${1:-sh} cmd syn
-    if [ "$form" = xdg ] && [ "$SYSTEMD" = 1 ]; then cmd=$(xq "$BIN/synaps-avatar"); else cmd=$(q "$BIN/synaps-avatar"); fi
+    case $form in
+        xdg) if [ "$SYSTEMD" = 1 ]; then cmd=$(xq "$BIN/synaps-avatar"); else cmd=$(q "$BIN/synaps-avatar"); fi ;;
+        show) cmd=$(tq "$BIN/synaps-avatar") ;;
+        *) cmd=$(q "$BIN/synaps-avatar") ;;
+    esac
     # Off Hyprland, Wayland desktops run her through XWayland (a no-op on X11).
     case $DESKTOP in hyprland | i3) ;; *) cmd="env SA_BACKEND=x11 $cmd" ;; esac
     if [ "$SYSTEMD" = 0 ]; then
-        syn=$(q "$SYNAPS")
+        if [ "$form" = show ]; then syn=$(tq "$SYNAPS"); else syn=$(q "$SYNAPS"); fi
         cmd="sh -c \"$syn daemon status >/dev/null 2>&1 || $syn daemon --detach; exec $cmd\""
     fi
     if [ "$form" = xdg ]; then cmd=${cmd//%/%%}; fi
@@ -1270,51 +1283,124 @@ step_extras() {
 # ---- summary ----------------------------------------------------------------------------------
 
 synaps_home() { printf '%s' "${SYNAPS_BASE_DIR:-$HOME/.synaps-cli}"; }
-# A model to talk through: a login (OAuth or API key, both in auth.json) or a local model.
+# A model to talk through: a login (OAuth or API key, both in auth.json) or a local model (in
+# Synaps' config or her own [session]).
 has_brain() {
     local h
     h=$(synaps_home)
-    [ -s "$h/auth.json" ] || grep -Eq '^\s*model\s*=\s*local/' "$h/config" 2>/dev/null
+    [ -s "$h/auth.json" ] || grep -Eq '^\s*model\s*=\s*"?local/' "$h/config" "$CONF/synaps-avatar/settings.toml" 2>/dev/null
 }
 
-# The brain step: she talks through Synaps, and Synaps needs a model (`synaps login`, a picker).
-# Run here only with a terminal to pick on, and never with --yes; a daemon already running picks the login up on her next
-# turn (Synaps reads auth.json per request).
+# Her brain: she talks through Synaps, and Synaps needs a model. Signing in is hers to walk him
+# through, not a picker here: until Synaps has one her tag reads NO BRAIN YET, and her answer to
+# his first message ends on the command (a chip; a click copies it).
 brain() {
-    local cmd a=''
-    cmd="$(q "$(tilde "$SYNAPS")") login"
     if has_brain; then
         if [ "${SYNAPS_NEW:-0}" = 0 ]; then info "she found your Synaps. her session is \`capri\`: it'll show up in /sessions."; fi
         return 0
     fi
-    printf '\n %s▌%s%s one thing left: her brain%s\n' "$R" "$N" "$B$T" "$N"
-    info "she talks through Synaps, and Synaps needs a model."
-    printf '   %s$ %s%s        %sa subscription you already pay for, an API key, or a local model%s\n' "$T" "$cmd" "$N" "$D" "$N"
-    info "skip it and she still perches, naps and plays. she just can't answer yet."
-    # A picker waits for him: --yes (unattended) never opens it.
-    if [ "$YES" = 1 ]; then
-        info "--yes: not opened here (it waits for you to pick): run that line when you want her to answer"
-        return 0
-    fi
-    if [ "$DRY" = 1 ]; then
-        info "(asks: pick one now [Y/n], with a terminal)"
-        return 0
-    fi
-    if ! (: </dev/tty) 2>/dev/null; then
-        info "no terminal to pick on: run that line when you want her to answer"
-        return 0
-    fi
-    printf '   %s?%s pick one now [Y/n] ' "$R$B" "$N" >/dev/tty
-    read -r a </dev/tty || a=n
-    case $a in '' | y | Y | yes | YES) ;; *)
-        info "later, then: run that line when you want her to answer"
-        return 0
-        ;;
-    esac
-    if "$SYNAPS" login </dev/tty >/dev/tty 2>&1 && has_brain; then
-        good "her brain: logged in (no restart: the daemon reads it on her next turn)"
+    info "her brain: Synaps has no model yet. say hi to her: she'll tell you how to give her one."
+}
+
+# Her runs now (his user's), from their command lines (/proc/PID/cmdline): BARE, the pids started
+# with no arguments (as autostart starts her: the old binary, quit and started again), and HIS, the
+# command line of one started with arguments (--socket, --profile, --session...: his own run, never
+# quit here).
+her_runs() {
+    local p n
+    BARE=() HIS=''
+    for p in $(pgrep -u "$(id -u)" -x synaps-avatar 2>/dev/null || true); do
+        # Its arguments, NUL-terminated (a path with spaces is still one).
+        n=$(tr -cd '\000' <"/proc/$p/cmdline" 2>/dev/null | wc -c) || n=0
+        if [ "$n" -gt 1 ]; then
+            HIS=$(tr '\000' ' ' <"/proc/$p/cmdline" 2>/dev/null) || true
+            HIS=$(tilde "${HIS% }")
+        else
+            BARE+=("$p")
+        fi
+    done
+}
+
+# Why she isn't started from this terminal, if she isn't: an ssh session (with `ssh -X` she'd open
+# on the ssh client's screen and die with the tunnel), or no desktop at all.
+no_desktop() {
+    if [ -n "${SSH_CONNECTION:-}${SSH_TTY:-}" ]; then
+        printf 'an ssh session (she would open on the far screen and close with it)'
+    elif [ -z "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ]; then
+        printf 'no desktop in this terminal (no DISPLAY or WAYLAND_DISPLAY)'
     else
-        warn "no login yet: run \`$cmd\` when you want her to answer"
+        return 1
+    fi
+}
+
+# Her, now: the first launch is the install's, not the next login's (with --no-autostart too: that
+# one is about login). Started the way autostart starts her (XWayland off Hyprland and i3), from his
+# home folder, in a session of her own (closing this terminal leaves her be); up once her log says
+# her first frame is painted. Only with a desktop here to show on. One that runs already as
+# autostart starts her is the old binary: quit, then started again; one he started with his own
+# arguments is left be. Her log is this run's (the last one's kept as launch.old.log). STARTED=1
+# when she's up.
+start_her() {
+    local cmd log pid i why
+    STARTED=0
+    cmd=$(launch_cmd)
+    log=$STATE/synaps-avatar/launch.log
+    if [ "$DRY" = 1 ]; then
+        printf '   %s$ %s &%s\n' "$D" "$cmd" "$N"
+        return 0
+    fi
+    her_runs
+    if why=$(no_desktop); then
+        if [ -n "$HIS" ] || [ ${#BARE[@]} -gt 0 ]; then
+            info "$why: she's still running the old binary (\`avatarctl quit\`, then start her from your desktop)"
+        elif [ "$AUTOSTART" = 1 ]; then
+            info "$why: not started here. she starts at your next login"
+        else
+            info "$why: not started here. start her from your desktop"
+        fi
+        return 0
+    fi
+    if [ -n "$HIS" ]; then
+        info "she's running as you started her ($HIS): left be. to run the new one, \`avatarctl quit\`, then start her"
+        return 0
+    fi
+    if [ ${#BARE[@]} -gt 0 ]; then
+        run "$BIN/avatarctl" quit || run kill "${BARE[@]}" || true
+        for i in $(seq 50); do
+            her_runs
+            [ ${#BARE[@]} -gt 0 ] || [ -n "$HIS" ] || break
+            sleep 0.1
+        done
+        if [ ${#BARE[@]} -gt 0 ] || [ -n "$HIS" ]; then
+            warn "she didn't quit: \`avatarctl quit\`, then start her with the line below"
+            return 0
+        fi
+    fi
+    mkdir -p "$(dirname "$log")"
+    if [ -f "$log" ]; then mv -f "$log" "${log%.log}.old.log"; fi
+    printf '   %s$ %s &%s\n' "$D" "$cmd" "$N"
+    if have setsid; then
+        setsid sh -c "cd && exec $cmd" </dev/null >"$log" 2>&1 &
+    else
+        nohup sh -c "cd && exec $cmd" </dev/null >"$log" 2>&1 &
+    fi
+    pid=$!
+    # Up to 20 s (a cold start reads her pack); gone for good (her pid and every synaps-avatar) after 2 s.
+    for i in $(seq 100); do
+        if grep -q 'first-frame: painted' "$log" 2>/dev/null; then
+            STARTED=1
+            break
+        fi
+        if [ "$i" -gt 10 ] && ! kill -0 "$pid" 2>/dev/null && ! pgrep -u "$(id -u)" -x synaps-avatar >/dev/null 2>&1; then break; fi
+        sleep 0.2
+    done
+    if [ "$STARTED" = 1 ]; then
+        good "she's up ($(awk '/first-frame: painted/ { print $3 " ms"; exit }' "$log") to her first frame)"
+    elif pgrep -u "$(id -u)" -x synaps-avatar >/dev/null 2>&1; then
+        info "she's still starting: her log is $(tilde "$log")"
+    else
+        warn "she didn't start. the end of her log ($(tilde "$log")):"
+        tail -n 4 "$log" 2>/dev/null | sed "s/^/       $D│$N /"
     fi
 }
 
@@ -1355,10 +1441,17 @@ summary() {
     local how='click her to talk'
     if [ -n "${SUMMON_KEY:-}" ]; then how="tap $SUMMON_KEY (or click her) to talk"; fi
     case ${SUMMON:-} in 'your own'*) how='your key summons her' ;; esac
-    printf '\n   %sstart her:%s %s &      %sthen %s%s\n' "$B$T" "$N" "$(q "$(tilde "$BIN/synaps-avatar")")" "$D" "$how" "$N"
+    brain
+    printf '\n'
+    start_her
+    if [ "${STARTED:-0}" = 1 ]; then
+        printf '\n   %sshe'"'"'s on your screen:%s %s\n' "$B$T" "$N" "$how"
+        info "start her again: $(launch_cmd show) &"
+    else
+        printf '\n   %sstart her:%s %s &      %sthen %s%s\n' "$B$T" "$N" "$(launch_cmd show)" "$D" "$how" "$N"
+    fi
     case ":$PATH:" in *":$BIN:"*) ;; *) info "$(tilde "$BIN") isn't on your PATH: add it to use \`synaps-avatar\` and \`avatarctl\` by name" ;; esac
     info "remove her: $(self_cmd) --uninstall   (synaps stays)"
-    brain
 }
 
 # This script as he'd run it again: the checkout's or the tarball's file, else the piped form.
@@ -1379,7 +1472,8 @@ self_cmd() {
 purge() {
     local f
     for f in "$CONF/synaps-avatar/settings.toml" "$CONF/synaps-avatar/settings.toml.tmp" \
-        "$STATE/synaps-avatar/state.json" "$STATE/synaps-avatar/state.json.tmp" \
+        "$STATE/synaps-avatar/state.json" "$STATE/synaps-avatar/state.json.tmp" "$STATE/synaps-avatar/launch.log" \
+        "$STATE/synaps-avatar/launch.old.log" \
         "$STATE/synaps-avatar/sessions.json" "$STATE/synaps-avatar/sessions.json.tmp"; do
         if [ -f "$f" ]; then run rm -f "$f"; fi
     done

@@ -1193,6 +1193,13 @@ pub fn process_setup() {
     }
 }
 
+/// Another process's environment variable: not read on Windows (it lives in that process's
+/// memory, its PEB). His user's variables are hers too, but one set only in the shell that started
+/// the daemon isn't: None, can't be read (so a key there is never ruled out).
+pub fn process_env(_pid: u32, _key: &str) -> Option<Option<String>> {
+    None
+}
+
 /// The system heap hands freed pages back on its own.
 pub fn trim_heap() {}
 

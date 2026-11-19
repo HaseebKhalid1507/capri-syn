@@ -56,14 +56,30 @@ flag also has PowerShell's spelling: `-Yes`, `-DryRun`, `-NoAutostart`, and so o
 At the end comes an `installed:` summary: what is where, how the daemon starts, how to summon her,
 how to start her, and how to remove her (as you ran it: the checkout's script, or the piped form).
 
-Last comes the brain step, when Synaps has no model yet (no login in `~/.synaps-cli/auth.json`, no
-`local/` model in its config): she talks through Synaps, and Synaps needs a model. With a terminal
-to pick on (`curl | bash` reads it from `/dev/tty`), it asks, then runs `synaps login` (a picker:
-a subscription, an API key, or a local model). With `--yes` (unattended) or no terminal it only
-prints the command: the picker would wait. It comes after everything else, so leaving the picker
-with Ctrl-C loses nothing. Skipped, she still perches, naps and plays; she just can't answer yet. A
-daemon that is already running picks the login up on her next turn: Synaps reads `auth.json` per
-request. When Synaps was already there with a model, one line says her session is `capri`.
+When Synaps has no model yet (no login in `~/.synaps-cli/auth.json`, no `local/` model in its config
+or her `[session]`), one line says so: signing in is hers to walk you through, not a picker in the
+installer. Until Synaps has a model her tag reads NO BRAIN YET, and her answer to your first message
+ends on the command (`synaps login --provider claude` for Claude). The daemon picks a login up on her
+next turn, with no restart: Synaps reads `auth.json` per request. When Synaps was already there with
+a model, one line says her session is `capri`.
+
+Then it starts her, `--no-autostart` or not (that flag is about login), the way autostart will
+(Linux: `env SA_BACKEND=x11` off Hyprland and i3, so GNOME and KDE on Wayland run her through
+XWayland), from your home folder, in a session of her own so closing the terminal leaves her be, and
+waits up to 20 s for her first frame (`~/.local/state/synaps-avatar/launch.log`, the run before's
+kept as `launch.old.log`; Windows: her `synaps-avatar.log`, which she starts over past 4 MB).
+
+- **One already running as autostart starts her** (no arguments: the old binary) is quit and started
+  again.
+- **One you started with your own arguments** (`--socket`, `--profile`, `--session`...) is left
+  running, and it tells you to quit her, then start her. On Windows her binary can't be replaced
+  while she runs, so that one stops anyway; it isn't replaced by a bare one, and you get its own
+  command line back to start it again.
+- **No desktop here to show on**, so it doesn't start her and says so: an SSH session
+  (`SSH_CONNECTION` or `SSH_TTY`: with `ssh -X` she'd open on the far screen and die with the
+  tunnel), no `DISPLAY` or `WAYLAND_DISPLAY` (CI), or no interactive session on Windows.
+
+The `start her:` line is the same command, to start her again later.
 
 A pack at her pack's place that this script didn't make (your own build) is moved aside to
 `capri.pre-install-<time>`, said so, and never removed by `--uninstall`.
@@ -78,7 +94,7 @@ A pack at her pack's place that this script didn't make (your own build) is move
 | `--purge` | with `--uninstall`: remove those too: her own files only (`settings.toml`, `state.json`, `sessions.json`, her log, the installer's cache), never the folders' other contents. A pack it didn't make (yours at `packs/capri`, or one moved aside) is never removed |
 | `--voice` | her voice too |
 | `--watch` | capri-watch too (Linux) |
-| `--no-autostart` | don't start her at login |
+| `--no-autostart` | don't start her at login (she still starts at the end of the install) |
 | `--from-source` | build even when a release has a binary |
 | `--prefix DIR` | where `bin/` and `lib/synaps-avatar/` go (Linux, default `~/.local`); her folder (Windows, default `%LOCALAPPDATA%\Programs\synaps-avatar`) |
 | `--with-local-art` | mochi's art too: **local personal use only**, never publish or share it |

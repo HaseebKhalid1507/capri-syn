@@ -789,6 +789,12 @@ impl Os {
         !self.caps.keyboard_on_input || self.stage.keyboard_granted()
     }
 
+    /// The key's label when the desktop's backend binds it itself (Windows' `RegisterHotKey`):
+    /// a key she knows works. None where his WM config binds it (or nothing does).
+    pub fn bound_key_label(&self, ev: super::KeyEv, key: char) -> Option<String> {
+        self.desk.key_label(ev, key)
+    }
+
     /// How he presses her key `ev` (letter `key`): the backend's chord where it grabs the keys,
     /// else the binding the docs give his desktop (`$MOD+C`).
     pub fn key_label(&self, ev: super::KeyEv, key: char) -> String {

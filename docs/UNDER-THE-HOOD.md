@@ -40,10 +40,12 @@ A fresh session, in the terminal. Hers is listed when you open it. `/sessions` s
 
 ## Her brain
 
-She uses whichever model your Synaps is logged in to. Log in, or change it:
+She uses whichever model your Synaps is logged in to. Until it has one her tag reads NO BRAIN YET,
+and her answer to your first message ends on the command. Log in, or change it:
 
 ```sh
-synaps login                       # pick a provider: a subscription, an API key, cloud
+synaps login --provider claude     # a Claude subscription: it opens your browser
+synaps login                       # or pick a provider: a subscription, an API key
 ```
 
 To give her a model of her own, set it in `~/.config/synaps-avatar/settings.toml`:
@@ -53,8 +55,27 @@ To give her a model of her own, set it in `~/.config/synaps-avatar/settings.toml
 model = "anthropic/claude-opus-5"   # provider/model, as Synaps names them
 ```
 
-No account? Synaps runs local models through Ollama (`local/llama3.2`, for example). Smaller models
-make a slower, plainer Capri.
+No account? A model on your own machine works, through [Ollama](https://ollama.com/download):
+Synaps finds it at `localhost:11434` by itself. She needs a model with tool calling, and room for her
+prompt (~7k tokens: her tools and her persona). Ollama gives a model a 4k context unless your GPU
+has 24 GB or more, and cuts a longer prompt without a word. So, once Ollama runs:
+
+```sh
+ollama pull qwen3:8b                                           # ~5 GB
+printf 'FROM qwen3:8b\nPARAMETER num_ctx 16384\n' > /tmp/Modelfile
+ollama create capri-qwen3 -f /tmp/Modelfile                    # the same model, a 16k context
+```
+
+then in her settings:
+
+```toml
+[session]
+model = "local/capri-qwen3"
+```
+
+and `avatarctl settings reload` (on Windows: `%APPDATA%\synaps-avatar\settings.toml`, then restart
+her). A local model makes a slower, plainer Capri, and without a GPU a slow one. When it fails she
+says why: Ollama off, a model it hasn't pulled, or one that can't take her request.
 
 ## What else Synaps does
 

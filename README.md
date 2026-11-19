@@ -229,17 +229,13 @@ curl -fsSL https://raw.githubusercontent.com/HaseebKhalid1507/capri-syn/main/ins
 ```
 
 One line. It installs [Synaps](https://github.com/HaseebKhalid1507/SynapsCLI) first if you don't have
-it, then her, her art pack, the summon key and autostart. It asks before anything needs sudo, and
-`--dry-run` prints every step without doing one.
+it, then her, her art pack, the summon key and autostart, and starts her. It asks before anything
+needs sudo, and `--dry-run` prints every step without doing one.
 
-Then give her a brain, once:
-
-```sh
-synaps login     # a subscription you already pay for, or an API key
-```
-
-Skip it and she still perches, naps and plays. She just can't answer yet. No account? A local model
-works: [docs/UNDER-THE-HOOD.md](docs/UNDER-THE-HOOD.md#her-brain).
+She needs a brain to answer: until Synaps has a model her tag reads NO BRAIN YET. Say hi and she
+tells you the one command (a Claude subscription: `synaps login --provider claude`, which opens your
+browser). Without one she still perches, naps and plays. No account? A local model works through
+Ollama: [the steps](docs/UNDER-THE-HOOD.md#her-brain).
 
 `--uninstall` removes what it added and tells you where Synaps is. Every step, every flag and the manual
 route: [docs/INSTALL.md](docs/INSTALL.md).
