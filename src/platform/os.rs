@@ -292,6 +292,19 @@ pub struct Os {
     /// A press on her: when the button was last asked about, since when it has been up, and
     /// whether the backend can tell (`press_lost`).
     press_seen: Cell<Option<(Instant, Option<Instant>, bool)>>,
+    /// Her tray icon (`Desktop::tray`; None: none here) and what it shows now.
+    tray: RefCell<Option<TrayLink>>,
+}
+
+/// Her tray icon and what it was last told (only a change goes to the desktop).
+struct TrayLink {
+    tray: Box<dyn super::Tray>,
+    /// What the menu was made from (`tray_menu`'s `key`): the same, nothing is made.
+    key: Option<u64>,
+    tip: String,
+    menu: Vec<super::TrayItem>,
+    /// Its icon's `stamp`.
+    icon: u64,
 }
 
 impl Os {
@@ -318,6 +331,7 @@ impl Os {
             host_changed: Cell::new(None),
             settle: RefCell::new(Settle::default()),
             press_seen: Cell::new(None),
+            tray: RefCell::new(None),
         }
     }
 
@@ -460,6 +474,11 @@ impl Os {
 
     pub fn set_icon(&self, s: WinId, data: &[u32]) -> Result<()> {
         self.stage.set_icon(s, data)
+    }
+
+    /// `set_icon` marks her windows here (`Stage::window_icons`): else the core makes none.
+    pub fn window_icons(&self) -> bool {
+        self.stage.window_icons()
     }
 
     /// Input region = `input`; everything else clicks through. The visible region is the
@@ -818,6 +837,63 @@ impl Os {
 
     pub fn char_key_down(&self, ch: char) -> Result<bool> {
         self.desk.char_key_down(ch)
+    }
+
+    // ---- her tray icon --------------------------------------------------------------------
+
+    /// Her icon in the desktop's tray, where it has one she uses (`Desktop::tray`; `instance`
+    /// as there): Ok(false) where none. `on` runs on the tray's thread.
+    pub fn start_tray(&self, icon: super::TrayIcon, instance: &str, on: impl Fn(super::TrayEv) + Send + 'static) -> Result<bool> {
+        let stamp = icon.stamp;
+        let t = self.desk.tray(icon, instance, Box::new(on))?;
+        let up = t.is_some();
+        *self.tray.borrow_mut() = t.map(|tray| TrayLink { tray, key: None, tip: String::new(), menu: Vec::new(), icon: stamp });
+        Ok(up)
+    }
+
+    /// She has a tray icon (the view keeps it current only then).
+    pub fn has_tray(&self) -> bool {
+        self.tray.borrow().is_some()
+    }
+
+    /// Her tray icon's tooltip: to the desktop only when it changed.
+    pub fn tray_tip(&self, tip: &str) {
+        let mut t = self.tray.borrow_mut();
+        let Some(t) = t.as_mut().filter(|t| t.tip != tip) else { return };
+        t.tray.set_tip(tip);
+        t.tip = tip.to_string();
+    }
+
+    /// Her tray icon's menu, made by `make` only when `key` (what it is made from) changed; to
+    /// the desktop only when it did.
+    pub fn tray_menu(&self, key: u64, make: impl FnOnce() -> Vec<super::TrayItem>) {
+        let mut t = self.tray.borrow_mut();
+        let Some(t) = t.as_mut() else { return };
+        if t.key.replace(key) == Some(key) {
+            return;
+        }
+        let menu = make();
+        if t.menu != menu {
+            t.tray.set_menu(menu.clone());
+            t.menu = menu;
+        }
+    }
+
+    /// Her tray icon's picture from now on (`crate::brand::icon` read again): to the desktop
+    /// only if it is another (its `stamp`). True: it was.
+    pub fn tray_icon(&self, icon: super::TrayIcon) -> bool {
+        let mut t = self.tray.borrow_mut();
+        let Some(t) = t.as_mut().filter(|t| t.icon != icon.stamp) else { return false };
+        t.icon = icon.stamp;
+        t.tray.set_icon(icon);
+        true
+    }
+
+    /// Her tray icon out of the tray (the end of a quit), nothing left behind.
+    pub fn tray_remove(&self) {
+        if let Some(t) = self.tray.borrow_mut().take() {
+            t.tray.remove();
+        }
     }
 
     // ---- compositor mode -----------------------------------------------------------------

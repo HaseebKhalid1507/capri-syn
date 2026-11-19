@@ -36,6 +36,7 @@ mod intro;
 mod life;
 mod pack;
 mod art;
+mod brand;
 mod variants;
 mod places;
 mod moves;
@@ -47,6 +48,7 @@ mod reader;
 mod line;
 mod chip;
 mod media;
+mod menu;
 mod notify;
 mod session;
 mod settings;
@@ -89,6 +91,7 @@ struct Args {
 const USAGE: &str = "usage: synaps-avatar [--profile P | --socket PATH] [--session NAME|ID | --new [--cwd DIR] [--model M]] [--no-session]
                      [--sleepy-after MIN] [--pack DIR] [--height PX] [--name NAME] [--threads N] [--no-verify]
                      [--focus-probe] [--check [--dump DIR]]
+       synaps-avatar -V | --version
 
 Session (one Synaps daemon session drives the body):
   --profile P     daemon profile (default $SYNAPS_PROFILE, else the default daemon)
@@ -110,6 +113,7 @@ Session (one Synaps daemon session drives the body):
   --threads N     decode threads (default min(8, cores/2))
   --no-verify     skip the sha256 pass over the pack's frames
   --focus-probe   dev: show a text field in the bubble to test keyboard focus
+  -V, --version   print `synaps-avatar <version>`, exit
   --check         validate and decode the pack, print stats, exit (no window)
   --dump DIR      with --check: every decoded frame as a PNG in DIR (her pixels at --height)
 
@@ -172,6 +176,10 @@ fn parse_args_from(argv: impl IntoIterator<Item = String>) -> Result<Args> {
                 }
                 a.sleepy_after = std::time::Duration::from_secs_f64(m * 60.0);
             }
+            "-V" | "--version" => {
+                olog!("synaps-avatar {}", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
+            }
             "-h" | "--help" => {
                 olog!("{USAGE}");
                 std::process::exit(0);
@@ -228,6 +236,15 @@ pub fn env_composited() -> Option<Option<bool>> {
 }
 
 fn main() {
+    // -V alone: before process_setup, whose notes (the GPU pick, SA_BACKEND) are stderr lines a
+    // version query doesn't want. With other arguments it's parse_args' (in order, as -h is).
+    let mut argv = std::env::args_os().skip(1);
+    if let (Some(a), None) = (argv.next(), argv.next())
+        && (a == "-V" || a == "--version")
+    {
+        olog!("synaps-avatar {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
     let t_start = Instant::now();
     platform::process_setup();
     if let Ok(level) = std::env::var("SA_LOG")
@@ -244,6 +261,10 @@ fn main() {
 
 fn run(t_start: Instant) -> Result<()> {
     let args = parse_args()?;
+    // Her log's header on Linux too (Windows: `dirs::log_without_console`). After the command line,
+    // so -V and -h print their own line only; before the pack loads.
+    #[cfg(target_os = "linux")]
+    elog!("--- synaps-avatar {} (pid {})", env!("CARGO_PKG_VERSION"), std::process::id());
     let pack = Arc::new(pack::Pack::load(&args.pack)?);
     if args.verify {
         frames::verify_poses(&pack)?;
@@ -422,6 +443,27 @@ fn run(t_start: Instant) -> Result<()> {
                 })
                 .map_err(|e| elog!("synaps-avatar: session watcher: {e:#}; a lock won't put her to sleep at once"))
                 .ok();
+            }
+            // Her icon in the tray (Windows' notification area; none on Linux yet): a click is
+            // her summon key's tap, its menu is her menu (`menu`). The icon by its one rule
+            // (`brand::icon`). Never under test. Another of her on another control socket
+            // (`XDG_RUNTIME_DIR`) has an icon of her own.
+            if std::env::var_os("SA_BRAIN_SYNTH").is_none() {
+                let tx = tx2.clone();
+                let icon = brand::icon(brand::pack_icon(&pack2).as_deref());
+                if icon.file.is_some() {
+                    elog!("synaps-avatar: her icon: {}", icon.source());
+                }
+                let instance = std::env::var_os("XDG_RUNTIME_DIR").map(|_| control::socket_path().display().to_string()).unwrap_or_default();
+                if let Err(e) = os.start_tray(icon.tray(), &instance, move |ev| {
+                    if let Some(cmd) = menu::command_for(ev) {
+                        let (r, _) = std::sync::mpsc::channel();
+                        // Unbounded: never waits (this runs on the tray's thread).
+                        tx.try_send((cmd, r)).ok();
+                    }
+                }) {
+                    elog!("synaps-avatar: tray: {e:#} (HIDE's chip still brings her back)");
+                }
             }
             // Real LISTENING: his media players, as the OS reports them. Tests see only their
             // own fake player (SA_MPRIS_ONLY), never his.

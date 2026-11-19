@@ -3294,16 +3294,27 @@ impl Avatar {
         }
     }
 
-    /// The menu's ATTENTION line: MIX → HANG ONLY → OFF, written to settings.toml (only that
-    /// key) and applied once it is in, as the Settings page's changes are (a file she can't
-    /// write: nothing changes, and she says why).
-    pub(super) fn cycle_attention(&mut self, cx: &mut Context<Self>) -> Attention {
-        let Some(h) = self.brain.as_ref().filter(|_| self.attention_live()) else { return Attention::Off };
-        let next = crate::line::next_attention(self.prefs_io.pending().map(|j| &j.pref), h.settings.brain.attention);
-        self.settings_write(super::lineview::PrefJob { pref: crate::line::Pref::Attention(next), menu: true }, cx);
-        let now = Instant::now();
-        self.brain_feed(BrainEvent::Interaction(Touch::Menu), now);
-        next
+    /// Her menu's ATTENTION, from her own menu's row (`pick` None: the next one on from the one
+    /// asked, MIX → HANG ONLY → OFF) or her tray's (the one picked): written to settings.toml
+    /// (only that key) and applied once it is in, as the Settings page's changes are (a file she
+    /// can't write: nothing changes, and her menu says why), and her brain hears he touched her
+    /// menu. The one asked already, or no row (no brain, or it is off): nothing. The one asked
+    /// now.
+    pub(super) fn set_attention(&mut self, pick: Option<Attention>, cx: &mut Context<Self>) -> Option<Attention> {
+        let h = self.brain.as_ref().filter(|_| self.attention_live())?;
+        let to = pick.unwrap_or_else(|| crate::line::next_attention(self.prefs_io.pending().map(|j| &j.pref), h.settings.brain.attention));
+        if self.attention() != Some(to) {
+            self.settings_write(super::lineview::PrefJob { pref: crate::line::Pref::Attention(to), menu: true }, cx);
+            self.brain_feed(BrainEvent::Interaction(Touch::Menu), Instant::now());
+        }
+        self.attention()
+    }
+
+    /// Her menu's ATTENTION, as the Settings page shows it: the last one asked for (its write on
+    /// the way), else hers. None: no row (no brain, or it is off).
+    pub(super) fn attention(&self) -> Option<Attention> {
+        let h = self.brain.as_ref().filter(|_| self.attention_live())?;
+        Some(crate::line::asked(self.prefs_io.pending().map(|j| &j.pref), h.settings.brain.attention, false).0)
     }
 
     /// Her brain runs by settings.toml (`[brain] enabled`): ATTENTION means something. Off, the
@@ -3312,11 +3323,9 @@ impl Avatar {
         self.brain.as_ref().is_some_and(|h| h.settings.brain.enabled)
     }
 
-    /// The menu's ATTENTION value, as the Settings page shows it: the last one asked for (its
-    /// write on the way), else hers. None: no row (no brain, or it is off).
+    /// `attention`'s word.
     pub(super) fn attention_label(&self) -> Option<&'static str> {
-        let h = self.brain.as_ref().filter(|_| self.attention_live())?;
-        Some(crate::line::asked(self.prefs_io.pending().map(|j| &j.pref), h.settings.brain.attention, false).0.label())
+        self.attention().map(Attention::label)
     }
 
     pub(super) fn dnd_on(&self) -> bool {

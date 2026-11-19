@@ -2,6 +2,56 @@
 
 ## Unreleased
 
+### Windows: her icon in the tray
+- Her icon sits in the notification area while she runs. Its tooltip is `capri-syn · <her status>`
+  (ONLINE, SLEEPING, NO BRAIN YET, HIDDEN, ...). It changes when her status does; her mic's clock
+  and level meter stay off it, and hands-free's last seconds read ENDING.
+- A click opens the Line, as Win+Alt+C does. A right click opens her menu: the same rows as her
+  right-click menu, from one model (`src/menu.rs`), with the same greying of what can't act now.
+  Hidden, the tray is the way back (SHOW). An ATTENTION pick that didn't save says so under its
+  choices (CAN'T SAVE / NOT SAVED YET), as her menu does under its row.
+- Explorer restarting puts it back. QUIT takes it out, with no ghost left. An icon the shell won't
+  take at sign-in is tried again every 2 s for a minute.
+- Linux: no tray yet. A StatusNotifierItem would plug in at `platform::linux::tray`, for X11 and
+  Hyprland both.
+
+### capri-syn's app icon
+- `assets/icon/`: `capri-syn.ico` (256 to 16 px), 512 and 256 px PNGs, and its `NOTICE`. Her Windows
+  exe carries the .ico as its icon (`build.rs`), and her tray loads its size from there.
+- Her icon, in order: your own beside settings.toml (`icon.ico` on Windows, `icon.png` on Linux),
+  then her pack's `icon` (Linux only), then capri-syn's. Read at start and on `settings reload`
+  (`avatarctl`, `capri-ctl` on Windows).
+
+### NO BRAIN YET goes when he sets up a remote broker (#76)
+- A read that found no login put NO BRAIN YET on her tag; if he then set up a remote broker
+  (`auth.remote_endpoint`, `SYNAPS_AUTH_ENDPOINT`) instead of logging in, the next read couldn't tell
+  and stopped, and the tag stayed until his next message answered. A read that can't tell any more now
+  takes back what a read said. The daemon's own no-brain error goes too once the files read otherwise
+  than when it spoke (he said hi first, then set up the broker; Windows alike). A file caught mid-write
+  changes neither: she reads again.
+- Any sign of a working brain clears it at once, whatever the files say: a word, a thought, a tool call
+  or her model's token count (it was the first word only; a subagent's on another model doesn't count).
+  After that no read puts it back, a re-attach to the same daemon neither; only the daemon's own error,
+  a model change or a new daemon process (a restart: she reads again) does.
+
+### Her voice: higher (his r26 pick, "R-A")
+- The default voice is the same W3 blend, now at `@+7.00`: about 306 Hz median, up from `@+4.93` (~272 Hz).
+  The speed (1/0.77), pace ("stretch") and flow ("emphasis") are unchanged, so only the pitch moved. He picked
+  it blind from round r26 ("anime girlie, more bubbly"): six recipes plus the old default. Stock Kokoro voices
+  and our own DSP only, as before.
+- A `voice` set in `settings.toml` is kept; only the default changed. The previous voice, back in one line:
+  `[voice] voice = "af_heart:0.5,af_bella:0.3,af_jessica:0.2|af_heart:0.84,af_jessica:0.56,af_sarah:-0.4@+4.93+clean"`.
+- Stress on a `*word*` rides closer to its 400 Hz cap: any planned peak over ~267 Hz in the model leaves no
+  room, so most pitch bumps are cut short and the stress is mostly length and energy. Expected: raising
+  `emph_st` doesn't change it.
+- Windows (no rubberband: the shift is in-model, the pace is Kokoro's): the median pitch matches Linux within
+  0.1 st. The floor is 2.3 st lower, the sound brighter, and the name/number test set slips more (7.5 % vs 1.7 %
+  WER). Numbers in docs/VOICE.md. Bundling rubberband there is a follow-up.
+- Fixed: with no flow graph (another model file, or the patch didn't load) and no rubberband (always so on
+  Windows), a voice with an `@` shift failed every sentence (`TypeError`: the flow pass was called on None).
+  She now speaks plain Kokoro at its own pitch, as docs/VOICE.md says, and the log says once that the shift
+  is off. `--selftest` covers it.
+
 ### A new personality, written from scratch
 
 Her persona's first paragraph is rewritten clean-room from the show's canon: a construct stitched
@@ -280,7 +330,8 @@ so it's gone. The Synaps and capri-watch paragraphs are unchanged.
 ### Voice: her picked voice, and stress on a word (LOCKED 13 + 14)
 - The default voice is Haseeb's pick:
   - **W3**, the bright blend (`timbre|prosody` split, pushed away from af_sarah, `+clean`);
-  - **two semitones higher** (~272 Hz median) **and 23 % faster**: speed 1/0.77, pace "stretch";
+  - **two semitones higher** (`@+4.93`, ~272 Hz median; since raised to `@+7.00`, ~306 Hz: "Her voice:
+    higher" above) **and 23 % faster**: speed 1/0.77, pace "stretch";
   - flow **"emphasis"**.
 - Pace "stretch": Kokoro speaks at its own speed, and the time goes ×0.77 in the same rubberband pass as
   the pitch shift. This keeps Kokoro's speed-1 pitch shape. It was his blind pick ("ALT") over Kokoro's own

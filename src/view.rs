@@ -21,6 +21,8 @@ mod motionview;
 pub(crate) mod introview;
 #[path = "cutinview.rs"]
 mod cutinview;
+#[path = "menuview.rs"]
+mod menuview;
 
 use crate::anim::{Animator, Mood, Rng, Seq};
 use crate::variants::PoolKey;
@@ -2813,6 +2815,7 @@ impl Avatar {
         self.cutin_fetch(cx);
         self.sync_shadow();
         self.sync_pointer_watch();
+        self.tray_sync();
         if self.os.fx_take_dirty() {
             cx.notify();
         }
@@ -3386,6 +3389,10 @@ impl Avatar {
                 self.rag_cancel(now);
             }
         }
+        // His own icon put in or taken out: read again with settings.toml.
+        if matches!(cmd, Command::SettingsReload) {
+            self.icon_reload();
+        }
         let reply = match cmd {
             Command::Mood(m) => {
                 self.set_mood(m, now);
@@ -3435,6 +3442,8 @@ impl Avatar {
                 self.menu = Some((self.head_point(), now + Duration::from_secs(8)));
                 "ok".into()
             }
+            Command::MenuPick(item) => self.menu_do(item, crate::menu::Via::Tray, cx),
+            Command::TrayOpen => self.tray_open(cx),
             Command::Drop => {
                 if self.teleport.is_some() {
                     "error: teleporting".into()
@@ -4074,6 +4083,7 @@ impl Avatar {
         }
         self.save_seen();
         self.fx_hide_all();
+        self.os.tray_remove();
         std::fs::remove_file(crate::control::socket_path()).ok();
         if self.fatal {
             std::process::exit(2);
@@ -6097,23 +6107,32 @@ fn header_text_w(s: &str, status: bool, cw: &dyn Fn(char, bool) -> f32) -> f32 {
     s.chars().map(|c| cw(c, status)).sum()
 }
 
+/// A status's words and level meter as [`status_text`] draws them (the meter as bars).
+fn status_text_w(s: &str, cw: &dyn Fn(char, bool) -> f32) -> f32 {
+    theme::metered_runs(s)
+        .iter()
+        .map(|r| match r {
+            theme::Metered::Words(w) => header_text_w(w, true, cw),
+            theme::Metered::Meter(bars) => theme::meter_w(bars.len()),
+        })
+        .sum()
+}
+
 /// A status in the header as [`header_row`] draws it, the wider of its two dresses: on its
-/// plate (glyph, words, a level meter as glyphs) or calm (glyph, words, a level meter as bars).
+/// plate or calm (its glyph, then [`status_text`]).
 fn header_status_w(s: &str, cw: &dyn Fn(char, bool) -> f32) -> f32 {
-    let plate = STATUS_PL + theme::GLYPH_W + STATUS_GAP + header_text_w(s, true, cw) + STATUS_PR;
-    let (mut calm, mut run) = (theme::GLYPH_W + STATUS_GAP, 0);
-    for c in s.chars().chain(['\0']) {
-        if is_bar(c) {
-            run += 1;
-            continue;
-        }
-        calm += theme::meter_w(run);
-        run = 0;
-        if c != '\0' {
-            calm += cw(c, true);
-        }
-    }
+    let text = status_text_w(s, cw);
+    let plate = STATUS_PL + theme::GLYPH_W + STATUS_GAP + text + STATUS_PR;
+    let calm = theme::GLYPH_W + STATUS_GAP + text;
     plate.max(calm)
+}
+
+/// A status's words and its level meter, in either dress: the words in the header's bold type
+/// (each digit `tab` px wide), the meter as bars, all in `ink`. One for both dresses: the plate
+/// drew its meter as glyphs once, hollow boxes from a fallback face (spike's shots, 2026-11-19).
+fn status_text(s: &str, tab: f32, ink: u32) -> Div {
+    let tab = move |c: char| c.is_ascii_digit().then_some(tab);
+    theme::metered_fixed(s, HEADER_TRACK, ink, &tab).text_size(px(HEADER_FONT)).font_weight(FontWeight::BOLD).text_color(rgb(ink))
 }
 
 /// A status, whole, then shorter: hands-free's `MIC LIVE · ` off, the level meter off,
@@ -6178,20 +6197,11 @@ fn cut_status(s: &str, fits: impl Fn(&str) -> bool) -> String {
     cut_to(s, 1, true, &fits).or_else(|| cut_to(s, 1, false, &fits)).unwrap_or_default()
 }
 
-/// `cw` with every digit as wide as the widest and the meter's two bars alike: a ticking timer
-/// or level measures the same each second (the status draws them so, `theme::tracked_fixed`).
-/// Boxes, not the font's `tnum`: Exo 2 has it, but its tabular 4 is 618/1000 to the others' 620,
-/// and the bars come from a fallback face.
+/// `cw` with every digit as wide as the widest: a ticking timer measures the same each second
+/// (the status draws them so, [`status_text`]; a level meter is bars of a fixed size). Boxes,
+/// not the font's `tnum`: Exo 2 has it, but its tabular 4 is 618/1000 to the others' 620.
 fn tabular(cw: impl Fn(char, bool) -> f32) -> impl Fn(char, bool) -> f32 {
-    move |c, status| {
-        if c.is_ascii_digit() {
-            ('0'..='9').map(|d| cw(d, status)).fold(0.0, f32::max)
-        } else if is_bar(c) {
-            cw('▮', status).max(cw('▯', status))
-        } else {
-            cw(c, status)
-        }
-    }
+    move |c, status| if c.is_ascii_digit() { ('0'..='9').map(|d| cw(d, status)).fold(0.0, f32::max) } else { cw(c, status) }
 }
 
 /// The header's label and status as they fit its row, `room` wide (`cw` as in
@@ -6235,8 +6245,7 @@ fn fit_header(room: f32, label: &HeaderLabel, status: &str, cw: &dyn Fn(char, bo
 
 /// How a header's status is dressed: its glyph, its plate's silhouette and paint (`key`,
 /// `tone`), on its plate (`invert`, or a summon's `pulse`: the bone swallowtail) or calm; a
-/// prompt's label `bright`; the digit's and the meter bar's boxes (`tabular`: as wide as they
-/// were measured).
+/// prompt's label `bright`; the digits' box (`tabular`: as wide as they were measured).
 #[derive(Clone, Debug, PartialEq)]
 struct HeaderDress {
     glyph: String,
@@ -6246,7 +6255,7 @@ struct HeaderDress {
     invert: bool,
     pulse: bool,
     bright: bool,
-    tab: (f32, f32),
+    tab: f32,
 }
 
 /// The header's glyph widths, (char, bold) → px.
@@ -6260,8 +6269,6 @@ type HeaderProbe = Rc<dyn Fn([f32; 3])>;
 /// spring, the status. Should the words ever be wider than [`fit_header`] measured, the label
 /// shrinks and clips and the row clips at its ends (in x only); never past the frame.
 fn header_row(label: &str, status: &str, d: &HeaderDress, pal: Pal, probe: Option<HeaderProbe>) -> Div {
-    let tab_w = d.tab;
-    let tab = move |c: char| if c.is_ascii_digit() { Some(tab_w.0) } else if is_bar(c) { Some(tab_w.1) } else { None };
     let label_c = if d.bright { pal.text } else { pal.dim };
     let natural = Rc::new(Cell::new(0.0f32));
     let mut label_box = div()
@@ -6288,7 +6295,7 @@ fn header_row(label: &str, status: &str, d: &HeaderDress, pal: Pal, probe: Optio
             .pr(px(STATUS_PR))
             .gap(px(STATUS_GAP))
             .child(glyph(&d.glyph, hl.mark, hl.fill))
-            .child(theme::tracked_fixed(status, HEADER_TRACK, &tab).text_size(px(HEADER_FONT)).font_weight(FontWeight::BOLD).text_color(rgb(hl.ink)))
+            .child(status_text(status, d.tab, hl.ink))
     } else {
         // Calm: a bone glyph, the state in text-dim (r21: a red dot read as "recording" or
         // "offline").
@@ -6299,7 +6306,7 @@ fn header_row(label: &str, status: &str, d: &HeaderDress, pal: Pal, probe: Optio
             .items_center()
             .gap(px(STATUS_GAP))
             .child(glyph(&d.glyph, glyph_c, pal.panel))
-            .child(theme::metered_fixed(status, HEADER_TRACK, pal.dim, &tab).text_size(px(HEADER_FONT)).font_weight(FontWeight::BOLD).text_color(rgb(pal.dim)))
+            .child(status_text(status, d.tab, pal.dim))
     };
     let mut row = div()
         .absolute()
@@ -7548,12 +7555,12 @@ impl Avatar {
             };
             // What of the header fits the box it is laid out in (while it resizes, the narrower
             // end: it fits once, not a word at a time on the way); the ghost keeps the same
-            // words and look. The status's digits and meter in boxes as wide as they measured.
+            // words and look. The status's digits in boxes as wide as they measured.
             let room = w.min(pf.fit_w) - PAD_L - PAD_R;
             let (header_label, label, dress, header_probe) = {
                 let cw = self.header_cw(window, &glyph_memo);
                 let (l, s) = fit_header(room, &header_label, &label, &cw);
-                let tab = (cw('0', true) - HEADER_TRACK, cw('▮', true) - HEADER_TRACK);
+                let tab = cw('0', true) - HEADER_TRACK;
                 let dress = HeaderDress { glyph: glyph_kind.clone(), plate: plate_kind, key: tone_key.clone(), tone, invert, pulse, bright: prompt_mode, tab };
                 let probe = layout_probe().then(|| {
                     let sink = self.header_px.clone();
@@ -8136,25 +8143,6 @@ impl Avatar {
             self.menu_why = None;
         }
         if let Some((at, _)) = self.menu.filter(|_| hud) {
-            // Red items; the hovered one on a red blade with ink type. QUIT? (armed) is a bone
-            // blade: danger.
-            let (accent_c, ink_c, danger_c) = (pal.accent, pal.ink, pal.danger);
-            let blade = |c: u32| div().absolute().top_0().left_0().size_full().child(theme::backdrop(Cut::Tab(8.0), Fill::solid(c)));
-            let item_as = |label: &'static str, armed: bool| {
-                let group = SharedString::from(format!("menu-{label}"));
-                div()
-                    .group(group.clone())
-                    .relative()
-                    .px(px(10.0))
-                    .py(px(5.0))
-                    .text_size(px(11.0))
-                    .font_weight(if armed { FontWeight::BOLD } else { FontWeight::SEMIBOLD })
-                    .text_color(rgb(if armed { ink_c } else { accent_c }))
-                    .when(armed, |d| d.child(blade(danger_c)))
-                    .when(!armed, |d| d.hover(|s| s.text_color(rgb(ink_c))).child(blade(accent_c).invisible().group_hover(group, |s| s.visible())))
-                    .child(tracked(label, 1.2))
-            };
-            let item = |label: &'static str| item_as(label, false);
             let mark = self.menu_mark(window);
             // Under the click if it fits in her window, else as far up as it must (a perched
             // her: a click low on her body cut the menu's bottom rows off). Before its first
@@ -8163,7 +8151,7 @@ impl Avatar {
             let mut kept = self.menu_why.filter(|k| k.0 == at).map(|k| k.1);
             let cant = self.attention_label().and_then(|_| self.menu_save.line(&mut kept));
             self.menu_why = kept.map(|t| (at, t));
-            let rows = 7 + usize::from(self.brain.is_some()) + usize::from(self.attention_label().is_some()) + usize::from(cant.is_some()) + usize::from(self.voice_on() && self.voice.cfg.handsfree);
+            let rows = crate::menu::rows(&self.menu_state()).len() + 2 + usize::from(cant.is_some());
             // Her work area (under the bar, on her monitor), window-local logical px: the menu's
             // top left stays within it less the menu's size.
             let o = self.origin;
@@ -8235,133 +8223,8 @@ impl Avatar {
                 .py(px(4.0))
                 .child(theme::backdrop(MENU_CUT, Fill::framed(pal.panel, pal.accent, 2.0).ringed(pal.ring)))
                 .children(header)
-                .child(item("RESET POSITION").id("reset").on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                        cx.stop_propagation();
-                        this.reset_position(cx);
-                    }),
-                ))
-                .when(self.brain.is_some(), |m| {
-                    let dnd = self.dnd_on();
-                    m.child(item(if dnd { "DND OFF" } else { "DND 1 HOUR" }).id("dnd").on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                            cx.stop_propagation();
-                            this.menu = None;
-                            this.toggle_dnd();
-                            cx.notify();
-                            this.schedule(cx);
-                        }),
-                    ))
-                })
-                // Not with her brain off in settings.toml (the Settings page locks it).
-                .when_some(self.attention_label(), |m, att| {
-                    let label = match att {
-                        "MIX" => "ATTENTION: MIX ▸",
-                        "HANG ONLY" => "ATTENTION: HANG ONLY ▸",
-                        _ => "ATTENTION: OFF ▸",
-                    };
-                    // Its last click didn't stick (refused, or the write hangs): why, under it;
-                    // landed since it opened: the same room, unseen (the rows hold still).
-                    let why = cant.map(|(c, shown)| {
-                        div()
-                            .when(!shown, |d| d.invisible())
-                            .pt(px(2.0))
-                            .text_size(px(10.5))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(pal.text))
-                            .group_hover(SharedString::from(format!("menu-{label}")), |s| s.text_color(rgb(ink_c)))
-                            .child(c)
-                    });
-                    // In `state`'s buttons (a shot's click on it).
-                    let probe = self.buttons.clone();
-                    m.child(item(label).flex().flex_col().children(why).child(canvas(move |b, _, _| probe.borrow_mut().push(("menu-attention", b)), |_, _, _, _| {}).absolute().top_0().left_0().size_full()).id("attention").on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                            cx.stop_propagation();
-                            this.cycle_attention(cx);
-                            if let Some(m) = &mut this.menu {
-                                m.1 = Instant::now() + Duration::from_secs(8);
-                            }
-                            cx.notify();
-                            this.schedule(cx);
-                        }),
-                    ))
-                })
-                .when(self.voice_on() && self.voice.cfg.handsfree, |m| {
-                    let on = self.voice.hf.is_some();
-                    m.child(item(if on { "END HANDS-FREE" } else { "HANDS-FREE TALK" }).id("handsfree").on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                            cx.stop_propagation();
-                            this.menu = None;
-                            let r = if on {
-                                this.voice_hf_end("HANDS-FREE OFF", cx);
-                                "ok hands-free off".to_string()
-                            } else {
-                                this.voice_hf_start(cx)
-                            };
-                            elog!("synaps-avatar: menu hands-free: {r}");
-                            cx.notify();
-                            this.schedule(cx);
-                        }),
-                    ))
-                })
-                .child(item("COPY LAST REPLY").id("copy").on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                        cx.stop_propagation();
-                        this.menu = None;
-                        let r = this.copy_last_reply(cx);
-                        elog!("synaps-avatar: menu copy: {r}");
-                        cx.notify();
-                        this.schedule(cx);
-                    }),
-                ))
-                .child(item("HIDE").id("hide").on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                        cx.stop_propagation();
-                        this.park(Instant::now());
-                        cx.notify();
-                        this.schedule(cx);
-                    }),
-                ))
-                // Her Settings (the Line's second page).
-                .child(item("SETTINGS").id("settings").on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                        cx.stop_propagation();
-                        this.menu = None;
-                        let r = this.show_line_page(crate::line::Page::Settings, cx);
-                        elog!("synaps-avatar: menu settings: {r}");
-                        cx.notify();
-                        this.schedule(cx);
-                    }),
-                ))
-                .child(div().h(px(1.0)).mx(px(10.0)).my(px(3.0)).bg(rgb(pal.rule)))
-                .child(
-                    item_as(if self.quit_armed.is_some() { "QUIT? CLICK AGAIN" } else { "QUIT" }, self.quit_armed.is_some()).id("quit").on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                            cx.stop_propagation();
-                            let now = Instant::now();
-                            if this.quit_armed.is_some_and(|t| now < t) {
-                                this.quit_armed = None;
-                                this.vanish_quit(now);
-                            } else {
-                                // A second click within 2 s exits; the menu stays up that long.
-                                this.quit_armed = Some(now + Duration::from_secs(2));
-                                if let Some(m) = &mut this.menu {
-                                    m.1 = m.1.max(now + Duration::from_secs(3));
-                                }
-                            }
-                            cx.notify();
-                            this.schedule(cx);
-                        }),
-                    ),
-                )
+                // Her menu's rows: its one model's, as her tray's (`menuview.rs`).
+                .children(self.menu_rows(pal, cant, cx))
                 // Her maker's mark: what runs her, for whoever wonders. Dim, small, not a button;
                 // under a gap and a hairline, a footer.
                 .when_some(mark, |m, mark| {
@@ -9360,8 +9223,10 @@ mod prompt_button_tests {
 mod header_fit_tests {
     use super::voiceview::{hf_label, level_bars, mic_label};
     use super::{
-        HEADER_AIR, HEADER_KEEP, HeaderLabel, PAD_L, PAD_R, PANEL_MAX_W, PANEL_MIN_W, cut_to, fit_header, header_status_w, header_text_w, prompt_label, reply_label, status_steps, tabular,
+        HEADER_AIR, HEADER_KEEP, HeaderLabel, PAD_L, PAD_R, PANEL_MAX_W, PANEL_MIN_W, STATUS_GAP, STATUS_PL, STATUS_PR, cut_to, fit_header, header_status_w, header_text_w,
+        prompt_label, reply_label, status_steps, tabular,
     };
+    use crate::theme;
     use unicode_segmentation::UnicodeSegmentation as _;
     use crate::session::Trouble;
 
@@ -9553,6 +9418,27 @@ mod header_fit_tests {
         let echo = reply_label(Some("what's the weather like in toronto tomorrow morning"), false);
         let (l, s) = fit(PANEL_MIN_W, &echo, "LISTENING");
         assert!(l.starts_with("YOU › what") && l.ends_with('…') && s == "LISTENING", "{l:?} {s:?}");
+    }
+
+    /// Hands-free's level meter on its red plate (spike's shots, 2026-11-19: `MIC LIVE ·
+    /// HANDS-FREE 0:06 ▯▯▯▯▯` drawn as hollow glyph boxes): bars, as the calm status draws it. The
+    /// plate measures its words and five bars, never five glyphs, at every level and timer.
+    #[test]
+    fn the_plate_measures_its_meter_as_bars() {
+        let cw = tabular(exo2);
+        // Five glyphs measure otherwise: the test tells the two apart.
+        assert_ne!(5.0 * cw('▮', true), theme::meter_w(5));
+        for level in [0.0, 0.2, 0.4, 0.6, 0.8, 1.0] {
+            for secs in [6, 12, 71] {
+                for status in [hf_label(None, secs, level), mic_label(secs, level, false), mic_label(secs, level, true)] {
+                    let runs = theme::metered_runs(&status);
+                    let words: f32 = runs.iter().filter_map(|r| if let theme::Metered::Words(w) = r { Some(header_text_w(w, true, &cw)) } else { None }).sum();
+                    assert!(runs.contains(&theme::Metered::Meter(level_bars(level).chars().map(|c| c == '▮').collect())), "{status:?}: {runs:?}");
+                    let plate = STATUS_PL + theme::GLYPH_W + STATUS_GAP + words + theme::meter_w(5) + STATUS_PR;
+                    assert_eq!(header_status_w(&status, &cw), plate, "{status:?}");
+                }
+            }
+        }
     }
 
     /// A ticking timer or level never moves the header: the status measures the same each

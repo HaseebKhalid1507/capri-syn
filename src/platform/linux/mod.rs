@@ -1,6 +1,6 @@
 //! The Linux process: what has to be set before GPUI starts (GPU choice, the allocator), and
-//! the session bus's services (media players, notifications, logind). Shared by every Linux
-//! backend (X11, Hyprland).
+//! the session bus's services (media players, notifications, logind, a tray icon some day).
+//! Shared by every Linux backend (X11, Hyprland).
 
 mod media;
 mod notifications;
@@ -236,6 +236,24 @@ pub fn local_day(unix: f64) -> Option<(i32, i32)> {
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     let r = unsafe { libc::localtime_r(&t, &mut tm) };
     (!r.is_null()).then_some((tm.tm_year, tm.tm_yday))
+}
+
+/// Her tray icon: none on Linux yet. X11 and Hyprland both route `Desktop::tray` here (as they
+/// do `watch_session` to logind), so one StatusNotifierItem serves both:
+///
+/// - `linux/tray.rs`, on the session bus with the zbus that `media.rs` uses: an
+///   `org.kde.StatusNotifierItem` object (`IconPixmap` from `icon`, ARGB32 big-endian; `ToolTip`;
+///   `Status`), registered with `org.kde.StatusNotifierWatcher` (`RegisterStatusNotifierItem`),
+///   and its menu as `com.canonical.dbusmenu` (`GetLayout` from the same `TrayItem`s, ids as they
+///   are; `Event "clicked"` → `TrayEv::Pick(id)`). `Activate` → `TrayEv::Open`.
+/// - The returned `Tray`: `set_tip` → `NewToolTip`, `set_icon` → `NewIcon`, `set_menu` →
+///   `LayoutUpdated`, `remove` → the name released (the watcher drops the item).
+/// - Its bus name `org.kde.StatusNotifierItem-<pid>-1`; `instance` goes in its `Id`, so two of
+///   her (another control socket) show as two.
+/// - No watcher on the bus (`NameHasOwner` false; plain i3bar has only an XEmbed tray, GNOME
+///   needs the AppIndicator extension): Ok(None), as now; the restore chip stays the way back.
+pub fn tray(_icon: super::TrayIcon, _instance: &str, _on: Box<dyn Fn(super::TrayEv) + Send>) -> anyhow::Result<Option<Box<dyn super::Tray>>> {
+    Ok(None)
 }
 
 const LOGIND: &str = "org.freedesktop.login1";

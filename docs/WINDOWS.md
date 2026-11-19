@@ -23,6 +23,7 @@ Her files (`platform::base_dir`; `$XDG_*_HOME` still wins, as on Linux):
 | her pack (default `--pack`) | `%LOCALAPPDATA%\synaps-avatar\packs\capri` |
 | state | `%LOCALAPPDATA%\synaps-avatar\state.json`, `sessions.json` |
 | her log, without a console | `%LOCALAPPDATA%\synaps-avatar\synaps-avatar.log` (appended; over 4 MB at start, kept as `.old.log`) |
+| her icon (tray), your own | `%APPDATA%\synaps-avatar\icon.ico` if it's there (up to 1024 px a side), else the capri-syn icon (`assets/icon`, in her exe; a pack's `icon` isn't used here); read at start and on `capri-ctl settings reload`, when it changed |
 
 ## The installer
 
@@ -40,7 +41,8 @@ published. Locally, on a machine with Rust, Inno Setup and ImageMagick: `.\packa
   downloaded. A new pack replaces the old one whole.
 - **Her AUMID** `Synaps.Avatar`: registered under `HKCU\Software\Classes\AppUserModelId` with
   `DisplayName` and `IconUri`, and set on the Start-menu shortcut, so toasts show under her name
-  and icon. The icon is a mark in her colours (her red bolt on black), drawn at build time: no art.
+  and icon. That icon is still a mark in her colours (her red bolt on black), drawn at build time;
+  her exe and her tray carry capri-syn's (`assets/icon`).
 - **Autostart, opt-in** (a task, unchecked): the `HKCU\…\Run` value.
 - **Uninstall** (Settings → Apps, or `unins000.exe /VERYSILENT`): stops her, then removes her exe,
   the shortcut, the AUMID key, the Run value, the pack it copied, her log and state, and her folders
@@ -167,6 +169,29 @@ it open the Line was left out: it needs a COM activator, a `ToastActivatorCLSID`
 a class factory and `INotificationActivationCallback` registered at start (`CoRegisterClassObject`),
 plus a cold start when she isn't running. About half a day plus a VM check; not cheap without a
 desktop to try it on.
+
+## Shots on a runner
+
+`.github/workflows/shots.yml` shoots her on a GitHub Windows runner: Actions → shots → Run workflow
+(a ref and the scene sets), or the `shots` label on a PR (its head; `shots:settings` or
+`shots:header` for one set). It builds the release binary of that ref, assembles her pack with
+`tools/make-pack` (CapriCore v1.0.4 + lachy, `--lachy auto`; never mochi), starts the fake daemon
+(`tools/fakedaemon.py`: the daemon's named pipe, its control on 127.0.0.1:47811) and, for voice
+takes, the fake sidecar (`tools/fakevoice.py`, on the real link), then runs `tools/shots/scenes.ps1`
+at 1920x1080 and 100%, and a few takes again at 150%. She is driven through her control socket;
+keys and clicks only where it can't (the Line's keyboard, a menu row). Each shot is cropped to her
+windows, with her `state` beside it; the lot is an artifact kept 3 days (public meanwhile, like
+the run). No GPU there: GPUI draws with WARP, fine for layout, not for colour or timing. The job
+fails on any problem in a take (she never loaded or exited, OFFLINE, a dialog of hers, a shot
+missed), and with no shots at all; the shots it did get are uploaded anyway.
+
+`tools/shoot-win.ps1` is the reusable part (dot-source it): the display pinned
+(`Set-ShotDisplay -Width 1920 -Height 1080 -Scale 150`, live, no sign-out), a process's or a
+title's windows shot cropped (`Save-WindowShot -Path x.png -ProcessId $p.Id` or `-Title 'Setup*'`),
+and SendInput keys and clicks (`Send-ShotKeys 'ctrl+comma'`, `Send-ShotClick`). Never the whole
+desktop. `Set-ShotDisplay` and `Clear-ShotDesktop` change the machine (scaling, wallpaper, every
+dialog closed, a cover window left up), so they refuse to run off a GitHub-hosted runner
+(`RUNNER_ENVIRONMENT`) unless `SHOOT_WIN_ANYWAY` is set.
 
 ## The VM day (2026-11-18)
 
