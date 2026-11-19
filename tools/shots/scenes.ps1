@@ -550,8 +550,20 @@ $Scenes = [ordered]@{
             $null = Ctl "pos $([int]($sc[0] + $sc[2] / 4)) 100000 now"
             $null = Show-TrayIcon
             $tip = 'capri-syn · ONLINE'
-            if (-not (Wait-Until { (Find-TrayButton).Name -ceq $tip } 20 "her tooltip: $tip")) {
-                $script:Fails.Add("${script:Take}: her tooltip is '$((Find-TrayButton).Name)', not '$tip'")
+            # Her first words come first (SPEAKING): the tooltip is judged once her tag says ONLINE, and her
+            # button's name as Explorer gives it (Test-TrayName). Each name it takes on is said.
+            if (-not (Wait-Until { $st = State; $st.status -ceq 'ONLINE' -and -not $st.voice.speaking } 30 'her tag ONLINE, her first words over')) {
+                $script:Fails.Add("${script:Take}: her tag is '$((State).status)', not ONLINE: no tooltip to judge")
+            }
+            $script:SeenName = $null
+            $named = Wait-Until {
+                $n = (Find-TrayButton).Name
+                if ($n -cne $script:SeenName) { $script:SeenName = $n; Write-Host "  her button's name: '$n'" }
+                Test-TrayName $n $tip
+            } 20 "her button's name: $tip"
+            if (-not $named) {
+                $script:Fails.Add("${script:Take}: her button's name is '$((Find-TrayButton).Name)', not '$tip' (nor a tooltip of hers, then it)")
+                Write-TrayButtons
             }
             $icon = Find-TrayButton
             $cx = [int]($icon.X + $icon.W / 2); $cy = [int]($icon.Y + $icon.H / 2)
@@ -891,6 +903,22 @@ function Find-TrayButton {
     } | Select-Object -First 1
 }
 
+<# Her button's name is her tooltip as Explorer says it, and once her tooltip has changed since the button
+   was made (SPEAKING in her first words, then ONLINE) it says the first, then the current one:
+   `capri-syn · SPEAKING capri-syn · ONLINE`. Hers is one NIM_MODIFY with the current text only (her
+   tooltip is one `brand::tooltip`), and the shell's own hover popup, drawn from that text, reads the
+   current one alone (shots 44623949347: 01-tip.png). So: her current tooltip last, and before it only a
+   tooltip of hers (`capri-syn`, or `capri-syn · ` and a tag word). Any other name, or a stale one that
+   ends in an old tooltip, is no match. #>
+function Test-TrayName([string]$Name, [string]$Tip) {
+    $Name -cmatch ('^(?:capri-syn(?: · [A-Z][A-Z ·…-]*)? )?' + [regex]::Escape($Tip) + '$')
+}
+
+<# Everything named on the taskbar, said (what the shell has there now). #>
+function Write-TrayButtons {
+    Get-TrayButtons | ForEach-Object { Write-Host "    taskbar: '$($_.Name)' ($($_.Class)) at $($_.X),$($_.Y) $($_.W)x$($_.H)" }
+}
+
 <# Her icon's GUID as she makes it (platform::windows::tray::guid): her exe's path and her control
    socket's (`instance`, as XDG_RUNTIME_DIR is set). #>
 function Get-HerTrayGuid {
@@ -934,7 +962,8 @@ function Show-TrayIcon {
     $mine = { @(& $keys | Where-Object { $kg = Get-KeyGuid $_; (-not $kg) -or ($kg -eq $g) } | Where-Object { $_.GetValue('IsPromoted') -eq 1 }) }
     $herself = Wait-Until { (& $mine).Count -gt 0 } 20 'her own IsPromoted = 1'
     if ($herself) {
-        Write-Host "  she promoted herself: NotifyIconSettings\$((& $mine)[0].PSChildName) (nothing set from here)"
+        $k = (& $mine)[0]
+        Write-Host "  she promoted herself: NotifyIconSettings\$($k.PSChildName) (nothing set from here; InitialTooltip '$($k.GetValue('InitialTooltip'))')"
     } else {
         # She didn't: the key is set from here, so the take goes on (and the failure is said).
         $script:Fails.Add("${script:Take}: she didn't promote her own icon (no IsPromoted = 1 in her NotifyIconSettings key after 20 s; set from here)")
@@ -950,7 +979,7 @@ function Show-TrayIcon {
         $hr0 = 0
         $r0 = [ShotsTray.Native]::IconRect((Get-HerTrayGuid), [ref]$hr0)
         Write-Host "  not on the taskbar: the shell by her GUID: $(if ($r0) { $r0 -join ',' } else { 'hr 0x{0:x8}' -f $hr0 })"
-        Get-TrayButtons | ForEach-Object { Write-Host "    taskbar: '$($_.Name)' ($($_.Class)) at $($_.X),$($_.Y) $($_.W)x$($_.H)" }
+        Write-TrayButtons
         Write-HerTrayLog
         Restart-ShotExplorer
         $null = Wait-Until { Find-TrayButton } 30 'her icon on the taskbar, after Explorer'
@@ -960,7 +989,7 @@ function Show-TrayIcon {
     $g = [ShotsTray.Native]::IconRect((Get-HerTrayGuid), [ref]$hr)
     Write-Host "  her icon: UIA $(if ($b) { "'$($b.Name)' at $($b.X),$($b.Y) $($b.W)x$($b.H)" } else { 'none' }); the shell by her GUID: $(if ($g) { $g -join ',' } else { 'hr 0x{0:x8}' -f $hr })"
     if (-not $b) {
-        Get-TrayButtons | ForEach-Object { Write-Host "    taskbar: '$($_.Name)' ($($_.Class)) at $($_.X),$($_.Y) $($_.W)x$($_.H)" }
+        Write-TrayButtons
         throw "$script:Take: her icon isn't on the taskbar"
     }
     return $b

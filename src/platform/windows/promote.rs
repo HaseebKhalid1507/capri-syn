@@ -26,10 +26,10 @@ use ::windows::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_DWORD, REG_SAM_FLAGS, RRF_RT_REG_DWORD, RRF_RT_REG_SZ, RegCloseKey, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW,
     RegSetValueExW,
 };
-use ::windows::Win32::UI::Accessibility::{CUIAutomation, IUIAutomation, TreeScope_Descendants};
+use ::windows::Win32::UI::Accessibility::{CUIAutomation, IUIAutomation, IUIAutomation2, TreeScope_Descendants};
 use ::windows::Win32::UI::Shell::{KF_FLAG_DEFAULT, SHGetKnownFolderPath};
 use ::windows::Win32::UI::WindowsAndMessaging::{FindWindowW, GetWindowRect};
-use ::windows::core::{GUID, HSTRING, PCWSTR, PWSTR, w};
+use ::windows::core::{GUID, HSTRING, Interface, PCWSTR, PWSTR, w};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -53,6 +53,8 @@ const AGAIN: Duration = Duration::from_secs(1);
 pub(super) enum Outcome {
     /// `IsPromoted` = 1 written, marker made, and the shell has her icon on the taskbar.
     Shown,
+    /// As `Shown`, but it took the 1 written a second time (the first alone didn't bring her out in time).
+    ShownAfterRewrite,
     /// Written (once more, where it still read 1), marker made; her icon is in the overflow still: Explorer
     /// reads the key again at its next start.
     NotMoved,
@@ -88,6 +90,7 @@ impl Outcome {
     fn line(&self) -> String {
         match self {
             Outcome::Shown => "synaps-avatar: tray: shown on the taskbar (first run)".into(),
+            Outcome::ShownAfterRewrite => "synaps-avatar: tray: shown on the taskbar (first run, written twice)".into(),
             Outcome::NotMoved => "synaps-avatar: tray: set to show on the taskbar; Explorer hasn't moved her yet (next sign-in)".into(),
             Outcome::Written => "synaps-avatar: tray: set to show on the taskbar (first run); the shell couldn't say whether she's there".into(),
             Outcome::LeftAsSet => "synaps-avatar: tray: left as he set it".into(),
@@ -199,7 +202,7 @@ fn confirm(s: &mut impl Settings, exe: &str, guid: u128) -> Outcome {
         let _ = s.promote(&e.name);
     }
     match asked(s) {
-        Seen::On => Outcome::Shown,
+        Seen::On => Outcome::ShownAfterRewrite,
         Seen::Off => Outcome::NotMoved,
         Seen::Unknown => Outcome::Written,
     }
@@ -389,6 +392,10 @@ fn on_taskbar() -> Option<bool> {
         let mut tb = RECT::default();
         GetWindowRect(bar, &mut tb).ok()?;
         let ui = CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_ALL).ok()?;
+        // A shell that doesn't answer holds this thread for 20 s a call: two seconds, and it's `None` (best effort).
+        if let Ok(ui2) = ui.cast::<IUIAutomation2>() {
+            let _ = ui2.SetTransactionTimeout(2000);
+        }
         let root = ui.ElementFromHandle(bar).ok()?;
         let all = root.FindAll(TreeScope_Descendants, &ui.CreateTrueCondition().ok()?).ok()?;
         for i in 0..all.Length().ok()? {
@@ -683,7 +690,7 @@ mod tests {
         // The second write brings her out.
         let m = marker("c-second");
         let mut s = Fake::finds(vec![unset(), with(1)]).says(&[off, off, off, off, on]);
-        assert_eq!(promote(&mut s, &m, EXE, HERS), Outcome::Shown);
+        assert_eq!(promote(&mut s, &m, EXE, HERS), Outcome::ShownAfterRewrite, "and her log says it took two writes");
         assert_eq!((s.wrote.len(), s.asked), (2, 5));
         clean(&m);
 
@@ -769,6 +776,7 @@ mod tests {
     fn her_log_says_which() {
         for (o, said) in [
             (Outcome::Shown, "tray: shown on the taskbar (first run)"),
+            (Outcome::ShownAfterRewrite, "tray: shown on the taskbar (first run, written twice)"),
             (Outcome::NotMoved, "tray: set to show on the taskbar; Explorer hasn't moved her yet (next sign-in)"),
             (Outcome::Written, "tray: set to show on the taskbar (first run); the shell couldn't say"),
             (Outcome::LeftAsSet, "tray: left as he set it"),

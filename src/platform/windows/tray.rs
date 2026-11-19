@@ -1092,12 +1092,13 @@ mod tests {
     /// Her icon out of the overflow, on the runner's own tray: the icon in, her NotifyIconSettings subkey
     /// found (Explorer writes it during the add; she looks a few seconds after), `IsPromoted` written once
     /// and read back, and left alone the second time (the marker: her subkey read, nothing written). Where
-    /// the shell has her on the taskbar after it is `Shown`; where it doesn't it's `NotMoved` (on the log, with
-    /// what the shell was asked: `shots:tray` is the judge of that, on a desktop of its own). A machine
-    /// with no such key (not Windows 11) says so on the log and passes. So does one where Explorer wrote no
-    /// subkey of this exe in ten seconds, unless a subkey of this exe's name and this icon's GUID is there
-    /// and the match (one strict look more, after) found none: that's a match that's wrong, not Explorer
-    /// being slow. CI only, as above: it writes the shell's own settings.
+    /// the shell has her on the taskbar after it is `Shown` (`ShownAfterRewrite` if it took a second write);
+    /// where it doesn't it's `NotMoved` (on the log, with what the shell was asked: `shots:tray` is the
+    /// judge of that, on a desktop of its own). A machine with no such key (not Windows 11) says so on the
+    /// log and passes. So does one where Explorer wrote no subkey of this exe in ten seconds, unless a
+    /// subkey of this exe's name and this icon's GUID is there and the match (one strict look more, after)
+    /// found none: that's a match that's wrong, not Explorer being slow. CI only, as above: it writes the
+    /// shell's own settings.
     #[test]
     fn her_icon_is_promoted_once_it_is_in() {
         use super::super::promote::{self, Now, Outcome};
@@ -1122,7 +1123,7 @@ mod tests {
         elog!("tray test: promote: {first:?}, IsPromoted read back: {read:?}, marker: {}; {}", marker.exists(), promote::seen());
         match first {
             // Written: a 1 in her subkey and the marker, whether the shell had moved her icon or not.
-            Outcome::Shown | Outcome::NotMoved | Outcome::Written => {
+            Outcome::Shown | Outcome::ShownAfterRewrite | Outcome::NotMoved | Outcome::Written => {
                 assert_eq!(read, Now::Value(1), "IsPromoted isn't a 1 in her subkey");
                 assert!(marker.is_file(), "no marker");
                 let again = promote::run(g, &marker);

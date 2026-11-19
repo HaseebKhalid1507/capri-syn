@@ -11,10 +11,10 @@
   Once only: a `tray-promoted` file in her state folder (`%LOCALAPPDATA%\synaps-avatar`) says it was
   done, and after that the setting is his: hide her and she stays hidden. An entry that already has
   `IsPromoted` is left as it is. Windows 10 has no such key: nothing is done there. Her log says what is
-  true: `tray: shown on the taskbar (first run)`, `tray: set to show on the taskbar; Explorer hasn't
-  moved her yet (next sign-in)`, `tray: left as he set it` or `tray: no NotifyIconSettings entry yet`.
-  Later starts read her entry and say what `IsPromoted` is now, writing nothing. The uninstaller removes
-  the marker.
+  true: `tray: shown on the taskbar (first run)` (`, written twice` if it took the 1 a second time),
+  `tray: set to show on the taskbar; Explorer hasn't moved her yet (next sign-in)`, `tray: left as he
+  set it` or `tray: no NotifyIconSettings entry yet`. Later starts read her entry and say what
+  `IsPromoted` is now, writing nothing. The uninstaller removes the marker.
 
 ## 1.0.0 (2026-11-19)
 
