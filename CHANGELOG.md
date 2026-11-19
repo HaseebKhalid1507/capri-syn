@@ -22,6 +22,18 @@
   then her pack's `icon` (Linux only), then capri-syn's. Read at start and on `settings reload`
   (`avatarctl`, `capri-ctl` on Windows).
 
+### NO BRAIN YET goes when he sets up a remote broker (#76)
+- A read that found no login put NO BRAIN YET on her tag; if he then set up a remote broker
+  (`auth.remote_endpoint`, `SYNAPS_AUTH_ENDPOINT`) instead of logging in, the next read couldn't tell
+  and stopped, and the tag stayed until his next message answered. A read that can't tell any more now
+  takes back what a read said. The daemon's own no-brain error goes too once the files read otherwise
+  than when it spoke (he said hi first, then set up the broker; Windows alike). A file caught mid-write
+  changes neither: she reads again.
+- Any sign of a working brain clears it at once, whatever the files say: a word, a thought, a tool call
+  or her model's token count (it was the first word only; a subagent's on another model doesn't count).
+  After that no read puts it back, a re-attach to the same daemon neither; only the daemon's own error,
+  a model change or a new daemon process (a restart: she reads again) does.
+
 ### Her voice: higher (his r26 pick, "R-A")
 - The default voice is the same W3 blend, now at `@+7.00`: about 306 Hz median, up from `@+4.93` (~272 Hz).
   The speed (1/0.77), pace ("stretch") and flow ("emphasis") are unchanged, so only the pitch moved. He picked

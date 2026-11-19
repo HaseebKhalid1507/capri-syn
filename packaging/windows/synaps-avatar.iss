@@ -173,7 +173,7 @@ var
   StepName, StepTitle, StepFailed: String;
   StepResults: TStringList;
   { What the steps did, for the finish page. }
-  SynapsOk, SynapsNew, BrainOk, DaemonOk, DaemonWrong, PackOk, VoiceOk, VoiceRan: Boolean;
+  SynapsOk, SynapsNew, SynapsPut, BrainOk, DaemonOk, DaemonWrong, PackOk, VoiceOk, VoiceRan: Boolean;
   SynapsVer, SynapsPath, SynapsWhy, DaemonWhy, PackWhy, VoiceWhy, PackFrom: String;
   Retry, Notices: TStringList;
 
@@ -741,6 +741,8 @@ begin
       if SynapsOk then begin
         ReadSynaps(StepResult('synaps'));
         BrainOk := StepResult('brain') = 'yes';
+        { Installed or upgraded now: a daemon on another protocol is an older one still running. }
+        SynapsPut := (StepResult('was') = 'missing') or (StepResult('was') = 'old');
         { Installed where there was none: hers to offer to remove with her. }
         if StepResult('was') = 'missing' then begin
           SynapsNew := True;
@@ -771,7 +773,10 @@ begin
       end;
     end;
     if SynapsOk then begin
-      DaemonOk := RunStep('daemon', 'Her brain''s daemon', StepsScript, 'daemon -Synaps "' + SynapsPath + '"');
+      if SynapsPut then
+        DaemonOk := RunStep('daemon', 'Her brain''s daemon', StepsScript, 'daemon -Fresh -Synaps "' + SynapsPath + '"')
+      else
+        DaemonOk := RunStep('daemon', 'Her brain''s daemon', StepsScript, 'daemon -Synaps "' + SynapsPath + '"');
       DaemonOk := DaemonOk and (Copy(StepResult('daemon'), 1, 7) = 'running');
       DaemonWrong := StepResult('daemon') = 'wrong-protocol';
       if StepResult('brain') <> '' then BrainOk := StepResult('brain') = 'yes';

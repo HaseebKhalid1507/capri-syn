@@ -4,7 +4,9 @@
 # opened); stdin held open until auth.json changes (the stand-in, as 0.12, fails with "Manual input
 # channel closed" otherwise), then closed; `brain: yes`. A URL that isn't Claude's or Anthropic's is
 # never opened. And a login that fails says why. The same stand-in's daemon on protocol 4: steps.ps1
-# daemon fails, and says she can't attach (her installer's finish page then never says it runs).
+# daemon fails, and says she can't attach (her installer's finish page then never says it runs); one
+# that doesn't say its protocol fails too; and right after Synaps was installed or upgraded (-Fresh),
+# one on another protocol is "an older one still running", with how to stop it.
 #
 #   powershell -File .\packaging\windows\test-login.ps1
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'Logs beside the checks.')]
@@ -28,7 +30,12 @@ public static class Program {
     static volatile bool closed;
     public static int Main(string[] a) {
         if (a.Length > 0 && a[0] == "--version") { Console.WriteLine("synaps 0.12.0"); return 0; }
-        if (a.Length > 1 && a[0] == "daemon" && a[1] == "status") { Console.WriteLine("daemon: running (pid 4242)"); Console.WriteLine("protocol: 4"); return 0; }
+        if (a.Length > 1 && a[0] == "daemon" && a[1] == "status") {
+            var p = Environment.GetEnvironmentVariable("FAKE_PROTOCOL");
+            Console.WriteLine("daemon: running (pid 4242)");
+            if (p != "none") Console.WriteLine("protocol: " + (string.IsNullOrEmpty(p) ? "4" : p));
+            return 0;
+        }
         if (a.Length > 0 && a[0] == "daemon") { return 0; }
         if (Environment.GetEnvironmentVariable("FAKE_LOGIN_FAIL") == "1") { Console.Error.WriteLine("Error: token exchange failed (400)"); return 1; }
         // As 0.12: stdin read from the start (the paste); its end ends the login.
@@ -80,17 +87,37 @@ Remove-Item Env:\FAKE_LOGIN_FAIL
 # as it was before, after.
 $run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 $had = (Get-ItemProperty -Path $run -Name 'synaps-daemon' -ErrorAction SilentlyContinue).'synaps-daemon'
-try {
-    $out = & $ps -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $steps daemon -Synaps (Join-Path $bin 'synaps.exe') 2>&1 | Out-String
-    $rc = $LASTEXITCODE
-} finally {
-    if ($null -ne $had) { Set-ItemProperty -Path $run -Name 'synaps-daemon' -Value $had } else { Remove-ItemProperty -Path $run -Name 'synaps-daemon' -ErrorAction SilentlyContinue }
+function Invoke-Daemon([string[]]$More) {
+    try {
+        $o = & $ps -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $steps daemon -Synaps (Join-Path $bin 'synaps.exe') @More 2>&1 | Out-String
+        $script:rc = $LASTEXITCODE
+    } finally {
+        if ($null -ne $had) { Set-ItemProperty -Path $run -Name 'synaps-daemon' -Value $had } else { Remove-ItemProperty -Path $run -Name 'synaps-daemon' -ErrorAction SilentlyContinue }
+    }
+    Write-Host ($o.Trim() -split "`n" | ForEach-Object { "  daemon: $_" } | Out-String)
+    return $o
 }
-Write-Host ($out.Trim() -split "`n" | ForEach-Object { "  daemon: $_" } | Out-String)
+$out = Invoke-Daemon @()
 Check ($rc -ne 0) "a daemon on another protocol fails the daemon step ($rc)"
 Check ($out -match '(?m)^daemon: wrong-protocol') 'daemon: wrong-protocol (her installer: "she can''t use it")'
 Check ($out -match 'failed: the daemon speaks protocol 4; she speaks 3 \(exact match\), so she can''t attach') 'and says why'
+Check ($out -match 'Install Synaps \d+\.\d+\.\d+ \(irm https://github\.com/[^ ]+/releases/download/v\d+\.\d+\.\d+/synaps-installer\.ps1 \| iex\), stop the daemon, "[^"]+synaps\.exe" daemon stop') 'and how to fix it (the pin, then stop the daemon)'
 Check ($out -notmatch '(?m)^daemon: running') 'never "daemon: running"'
+
+# One that doesn't say which protocol it speaks: never let through as running.
+$env:FAKE_PROTOCOL = 'none'
+$out = Invoke-Daemon @()
+Check ($rc -ne 0 -and $out -match '(?m)^daemon: wrong-protocol') "a daemon that doesn't say its protocol fails the step too ($rc)"
+Check ($out -match "failed: the daemon doesn't say which protocol it speaks \(an older Synaps\?\); she speaks 3, exactly: stop it, `"[^`"]+synaps\.exe`" daemon stop \(--force if it won't\), then run this again") 'and says to stop it'
+Check ($out -notmatch '(?m)^daemon: running') 'never "daemon: running (protocol ?)"'
+
+# Right after Synaps was installed or upgraded (-Fresh): another protocol is an older daemon still up.
+$env:FAKE_PROTOCOL = '2'
+$out = Invoke-Daemon @('-Fresh')
+Check ($rc -ne 0 -and $out -match '(?m)^daemon: wrong-protocol') "after an install, an older daemon fails the step ($rc)"
+Check ($out -match "failed: synaps 0\.12\.0 is installed, but the daemon still running is an older one \(protocol 2; hers is 3\): stop it, `"[^`"]+synaps\.exe`" daemon stop \(--force if it won't\), then run this again") 'and says so: stop the old one (not "install Synaps" again)'
+Check ($out -notmatch 'Install Synaps') 'no "Install Synaps" right after it was installed'
+Remove-Item Env:\FAKE_PROTOCOL
 Remove-Item Env:\CAPRI_NO_BROWSER, Env:\SYNAPS_BASE_DIR
 Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 

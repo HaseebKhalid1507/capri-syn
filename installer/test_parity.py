@@ -11,11 +11,18 @@ ROOT = Path(__file__).resolve().parent.parent
 SH = (ROOT / "install.sh").read_text()
 PS = (ROOT / "install.ps1").read_text(encoding="utf-8")
 MANIFEST = (ROOT / "installer/manifest").read_text()
+# Windows' install steps, shared with her installer (where they are, the Synaps step is).
+STEPS = ROOT / "packaging/windows/steps.ps1"
 
 
 def block(text, start, end):
     i = text.index(start)
     return text[i:text.index(end, i + len(start))]
+
+
+def code(text):
+    """Without its whole-line comments (they may say what it never does)."""
+    return re.sub(r"(?m)^\s*#.*$", "", text)
 
 
 def flags(usage):
@@ -103,6 +110,34 @@ class Parity(unittest.TestCase):
         # `irm | iex` can't pass flags: both take CAPRI_INSTALL_FLAGS when given none.
         self.assertIn("CAPRI_INSTALL_FLAGS", block(SH, "main() {", "\n}\n"))
         self.assertIn("CAPRI_INSTALL_FLAGS", block(PS, "function Invoke-CapriInstall", "\n}\n"))
+
+    # The daemon step's three stops, said the same way on both (her client speaks synaps_protocol
+    # exactly): a daemon that doesn't say its protocol; one that speaks another right after this run
+    # installed or upgraded Synaps (an older one still running: installing the pin again won't help);
+    # and one that speaks another anyway.
+    DAEMON_STOPS = ("doesn't say which protocol it speaks", "is installed, but the daemon still running is", "(exact match)")
+
+    def test_a_daemon_that_isnt_hers_stops_windows(self):
+        steps = code(block(STEPS.read_text(encoding="utf-8"), "function Start-Daemon {", "\n}\n"))
+        for why in self.DAEMON_STOPS:
+            line = next((l for l in steps.splitlines() if why in l), "")
+            self.assertIn("Stop-Step", line, f"steps.ps1's daemon step doesn't stop on: {why}")
+        # An unknown protocol is checked first, never let through as "running (protocol ?)".
+        self.assertLess(steps.index("-eq '?'"), steps.index("Result \"daemon: running"))
+        self.assertIn("$script:Fresh", steps)
+        # Both of her Windows installers tell it when they just installed Synaps, and install.ps1
+        # stops on it as install.sh does.
+        self.assertIn("'-Fresh'", block(PS, "function Start-Daemon", "\n}\n"))
+        self.assertIn("Stop-Install", block(PS, "function Start-Daemon", "\n}\n"))
+        self.assertIn("daemon -Fresh", (ROOT / "packaging/windows/synaps-avatar.iss").read_text(encoding="utf-8"))
+
+    def test_a_daemon_that_isnt_hers_stops_linux_too(self):
+        sh = code(block(SH, "step_daemon() {", "\n}\n"))
+        if self.DAEMON_STOPS[0] not in sh:
+            self.skipTest("install.sh's daemon step says these once #98 is in")
+        for why in self.DAEMON_STOPS:
+            line = next((l for l in sh.splitlines() if why in l), "")
+            self.assertIn("die ", line, f"install.sh's daemon step doesn't stop on: {why}")
 
 
 if __name__ == "__main__":

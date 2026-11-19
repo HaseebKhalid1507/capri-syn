@@ -67,7 +67,13 @@ Reference for `synaps-avatar`, the crate behind capri-syn. The [README](../READM
   secret. None: her tag reads `NO BRAIN YET` in place of `ONLINE` (and asleep), and she reads again
   every 5 s, so a `synaps login` in a terminal clears it without a message. A remote broker
   (`auth.remote_endpoint`, `SYNAPS_AUTH_ENDPOINT`), another provider or an unreadable file is
-  unknown: the daemon's first error says it, and its no-brain error holds the tag until a turn answers.
+  unknown: the daemon's first error says it. A read that can't tell any more takes back the tag a
+  read put up (a remote broker set up instead of a login, #76). The daemon's own no-brain error
+  holds it while the files read as they did when it spoke, until a turn answers or a read finds the
+  login. A file caught mid-write changes neither: she reads again. Any sign of a working brain (a
+  word, a thought, a tool call, her model's token count; not a subagent's on another model) clears
+  it whatever the files say, and no read puts it back until her model or the daemon process
+  changes: only the daemon's own error does. A daemon reached through `--socket` is never read here.
 
   The provider is read off the error (`No Anthropic credentials`: Claude; `no credential configured
   for 'kimi-code'`: Kimi); `synaps login` picks a provider, not a model. The other way out is
@@ -211,6 +217,7 @@ synaps-avatar [--profile P | --socket PATH] [--session NAME|ID | --new [--cwd DI
 | `--height PX` | standing body height in logical px (default 340) |
 | `--check` | load and decode the pack, print a summary, exit (no window) |
 | `--dump DIR` | with `--check`: every decoded frame as a PNG, the pixels she draws at `--height` (scale it by the display's sf to see the real render) |
+| `-V`, `--version` | print `synaps-avatar <version>`, exit. Her log says it at start too: `--- synaps-avatar <version> (pid N)` |
 
 `synaps-avatar --help` lists the rest (`--name`, `--threads`, `--no-verify`, `--focus-probe`).
 

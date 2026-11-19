@@ -12,7 +12,10 @@
 #   steps.ps1 daemon         the Synaps daemon now (`synaps daemon --detach` unless it runs) and at
 #                            sign-in: Run\synaps-daemon through conhost --headless, so no console window
 #                            opens (a Run value of his own that starts it is left as it is). A daemon
-#                            whose protocol isn't hers (synaps_protocol, exact match) fails the step.
+#                            whose protocol isn't hers (synaps_protocol, exact match), or that doesn't
+#                            say, fails the step (`daemon: wrong-protocol`, with how to fix it). -Fresh:
+#                            this run installed or upgraded Synaps (her installer and install.ps1 say
+#                            so), so a daemon on another protocol is an older one still running.
 #   steps.ps1 pack           her art pack (below).
 #   steps.ps1 mics           the microphones Windows has (its capture endpoints that work). Reads only.
 #   steps.ps1 voice-check    where her voice would come from (-VoiceFrom, else the latest release), or
@@ -65,6 +68,7 @@ param(
     [string]$Bundle = '',
     [string]$Mic = '',
     [switch]$MicDefault,
+    [switch]$Fresh,
     [ValidateSet('', 'on', 'off')] [string]$WakeWord = '',
     [ValidateSet('', 'on', 'off')] [string]$ReadAloud = '',
     [switch]$DryRun
@@ -301,8 +305,13 @@ function Install-Synaps {
     }
     if (-not (Test-Path -LiteralPath $mine)) { Stop-Step "Synaps' installer ran, but there's no $mine" }
     $script:Synaps = $mine
+    $was = $s.State
     $s = Find-Synaps
     if ($s.State -ne 'ok') { Stop-Step "Synaps' installer ran, but $mine says version '$($s.Version)' (she needs $(Get-Key 'synaps_min') or newer)" }
+    $script:Fresh = $true
+    # An upgrade: a daemon the old Synaps started runs it until it's stopped. Said now (the daemon
+    # step stops if it speaks another protocol).
+    if ($was -eq 'old' -and (Get-DaemonStatus $mine).Up) { Warn "a daemon is running, from the Synaps before this one: stop it now (`"$mine`" daemon stop)" }
     Show-Synaps $s
 }
 
@@ -361,10 +370,25 @@ function Start-Daemon {
         Result "brain: $(if (Test-Brain) { 'yes' } else { 'no' })"
         return
     }
+    # Never "running" unless it's her protocol: she'd start and never attach. A daemon still up from
+    # an older Synaps keeps its protocol until it's stopped (`daemon stop` ends any; its sessions
+    # are saved).
     $proto = Get-Key 'synaps_protocol'
-    if ($st.Protocol -ne '?' -and $st.Protocol -ne $proto) {
+    $pin = Get-Key 'synaps_pin'
+    $stop = "`"$exe`" daemon stop (--force if it won't)"
+    if ($st.Protocol -eq '?') {
         Result 'daemon: wrong-protocol'
-        Stop-Step "the daemon speaks protocol $($st.Protocol); she speaks $proto (exact match), so she can't attach. Install Synaps $(Get-Key 'synaps_pin'), or a capri-syn that speaks $($st.Protocol)"
+        Stop-Step "the daemon doesn't say which protocol it speaks (an older Synaps?); she speaks $proto, exactly: stop it, $stop, then run this again"
+    }
+    # This run put Synaps in (new, or an upgrade): the daemon still up is an older one; installing
+    # the pin again won't change it.
+    if ($st.Protocol -ne $proto -and $script:Fresh) {
+        Result 'daemon: wrong-protocol'
+        Stop-Step "synaps $($s.Version) is installed, but the daemon still running is an older one (protocol $($st.Protocol); hers is $proto): stop it, $stop, then run this again"
+    }
+    if ($st.Protocol -ne $proto) {
+        Result 'daemon: wrong-protocol'
+        Stop-Step "the daemon speaks protocol $($st.Protocol); she speaks $proto (exact match), so she can't attach. Install Synaps $pin (irm https://github.com/$(Get-Key 'synaps_repo')/releases/download/v$pin/synaps-installer.ps1 | iex), stop the daemon, $stop, and run this again; or use a capri-syn that speaks $($st.Protocol)"
     }
     Good "daemon running (protocol $($st.Protocol)): at sign-in too"
     Result "daemon: running $($st.Protocol)"

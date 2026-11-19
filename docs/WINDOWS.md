@@ -45,7 +45,11 @@ persona; no art).
   Missing or too old: "Install Synaps (her brain, open source)", checked, runs the `synaps-installer.ps1`
   of the release the manifest pins (`synaps_pin`, one she was run against), checked against its pinned
   SHA-256. Never the latest: her client needs the daemon's protocol exactly (`synaps_protocol`), and a
-  daemon on another one fails the daemon step ("she can't use it", on the finish page).
+  daemon on another one, or one that doesn't say, fails the daemon step ("she can't use it", on the
+  finish page, with the fix). Right after Setup installed or upgraded Synaps (`steps.ps1 daemon
+  -Fresh`), a daemon on another protocol is an older one still running: "synaps 0.12.0 is installed,
+  but the daemon still running is an older one (protocol 2; hers is 3): stop it, `synaps daemon stop`
+  (--force if it won't), then run this again". An upgrade warns about a running daemon at once.
 - **Her pack** (page "Her pack"): "Download her art (CapriCore + lachy's desktop art, ~100 MB)", the
   default; "Use a pack folder I already have" (copied; a folder without `sprites.json` is refused);
   or "Skip, I'll add one later". The download is the one install.ps1 does: CPython's embeddable

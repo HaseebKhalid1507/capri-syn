@@ -726,9 +726,14 @@ function Start-Daemon {
     # Now, and at sign-in through conhost --headless (no console window): steps.ps1 daemon. A Run value
     # of his own that starts it is left as it is. An EDR may flag that pattern: docs/WINDOWS.md
     # ("conhost --headless and security software").
+    # -Fresh: Synaps was installed or upgraded just now, so a daemon on another protocol is an older one.
     $a = @('daemon', '-Synaps', $script:Synaps)
+    if ($script:SynapsNew) { $a += '-Fresh' }
     if ($script:Dry) { $a += '-DryRun' }
     $r = Invoke-Step (Get-StepScript) $a -NoStop
+    # A daemon that isn't hers (another protocol, or none said) stops the install, as install.sh's
+    # does: she'd start and never attach. The step said why, and how to fix it.
+    if ($r['daemon'] -eq 'wrong-protocol') { Stop-Install 'her brain''s daemon speaks another protocol (above: how to fix it)' }
     if ($r['runvalue'] -eq 'set') { Add-Receipt @('reg', $script:RunKey, 'synaps-daemon') }
     if ($r['brain']) { $script:Brain = ($r['brain'] -eq 'yes') }
     $script:DaemonHow = 'at sign-in (Run key)'

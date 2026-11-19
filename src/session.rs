@@ -230,6 +230,11 @@ pub struct Link {
     /// When to read the credentials again (`creds_due`): at each attach or model change, and every
     /// `CREDS_EVERY` while missing (a `synaps login` in a terminal clears it without a message).
     creds_at: Option<Instant>,
+    /// Who stands behind `creds` (#76): what a read can take back, and what it can't.
+    creds_by: Said,
+    /// The last settled read's own answer (`set_creds`), whatever `creds` kept: none since the
+    /// last model change or answer.
+    creds_read: Option<(Creds, crate::creds::Again)>,
     /// The daemon's profile and pid (`Connected`): where its credentials are, and its env.
     daemon: Option<(Option<String>, u32)>,
     /// The daemon's version (`Welcome`), for her maker's mark.
@@ -305,6 +310,8 @@ impl Link {
             trouble: None,
             creds: Creds::Unknown,
             creds_at: None,
+            creds_by: Said::Read,
+            creds_read: None,
             daemon: None,
             daemon_version: None,
             turn_at: now,
@@ -413,23 +420,71 @@ impl Link {
 
     /// What the read found, and whether reading again can change it (`creds::Again`): if so, read
     /// again in `CREDS_EVERY`; if not (a login found, another provider, a remote broker), the
-    /// reads end until the next attach or model change. Unknown leaves a Missing the daemon said
-    /// (its next answer, or a read that finds the login, clears that).
+    /// reads end until the next attach or model change. A read never says she has no brain once
+    /// she has answered on this model and daemon (only the daemon's own error can). A settled
+    /// Unknown takes back a Missing a read said, once it can't tell (a remote broker set up
+    /// instead of a login, #76). One the daemon said stands while the files read as they did
+    /// when it spoke (another provider, the daemon's environment unread): its next answer, or a
+    /// read that finds the login, clears that; a read that changed (a remote broker since) takes
+    /// it back too. A file mid-write or unreadable (Unknown, read again) changes neither.
     pub fn set_creds(&mut self, c: Creds, again: crate::creds::Again, now: Instant) {
         use crate::creds::Again;
+        if self.creds_by == Said::Answer {
+            self.creds_at = None;
+            return;
+        }
+        // A file mid-write or unreadable says nothing of the setup: whoever said Missing, it
+        // stands and she reads again. Not what the daemon spoke over, nor a change under it.
+        let settled = (c, again) != (Creds::Unknown, Again::Yes);
+        if settled {
+            self.creds_read = Some((c, again));
+        }
+        let missing = matches!(self.creds, Creds::Missing(_));
+        let keep = missing
+            && c == Creds::Unknown
+            && (!settled
+                || match &mut self.creds_by {
+                    // No read when it spoke (it was quicker): the first settled one is what it spoke over.
+                    Said::Daemon(over) => *over.get_or_insert((c, again)) == (c, again),
+                    _ => false,
+                });
+        let c = if keep { self.creds } else { c };
         let again = match again {
             Again::Yes => true,
-            Again::IfMissing => matches!(self.creds, Creds::Missing(_)),
+            Again::IfMissing => matches!(c, Creds::Missing(_)),
             Again::Never => false,
         };
         self.creds_at = again.then_some(now + CREDS_EVERY);
-        if c == Creds::Unknown && matches!(self.creds, Creds::Missing(_)) {
-            return;
-        }
         if c != self.creds {
             elog!("synaps-avatar: her model's credentials: {c:?}");
         }
         self.creds = c;
+        if !keep {
+            self.creds_by = Said::Read;
+        }
+    }
+
+    /// `model` (a token count's, when the daemon names one) is hers: none named, or hers without
+    /// its provider (`claude-sonnet-4-6` is `anthropic/claude-sonnet-4-6`).
+    fn hers(&self, model: Option<&str>) -> bool {
+        let bare = |m: &str| m.trim().rsplit('/').next().unwrap_or("").to_ascii_lowercase();
+        match model.filter(|m| !m.trim().is_empty()) {
+            None => true,
+            Some(m) => self.model().is_some_and(|me| bare(me) == bare(m)),
+        }
+    }
+
+    /// The daemon answered on her model (a word, a thought, a tool call, the provider's token
+    /// count): a working brain, whatever a read of the files says. Reads stop until the next
+    /// model change; only the daemon's own no-login error puts NO BRAIN YET back.
+    fn answered(&mut self) {
+        if self.creds_by != Said::Answer {
+            elog!("synaps-avatar: her model answered: a brain");
+        }
+        self.creds = Creds::Have;
+        self.creds_by = Said::Answer;
+        self.creds_read = None;
+        self.creds_at = None;
     }
 
     /// Her maker's mark for the menu: `SYNAPS 0.12.0 · claude-opus-5` (the daemon's version and
@@ -629,6 +684,13 @@ impl Link {
                 let up = matches!(s, Status::Connected { .. });
                 if let Status::Connected { daemon_version, profile, pid, .. } = &s {
                     self.daemon_version = Some(daemon_version.trim().to_string()).filter(|v| !v.is_empty());
+                    // Another daemon process is another brain: an answer from the last one proves
+                    // nothing here (#76). The attach reads again.
+                    if self.creds_by == Said::Answer && self.daemon.as_ref().is_some_and(|(p, id)| p != profile || id != pid) {
+                        self.creds = Creds::Unknown;
+                        self.creds_by = Said::Read;
+                        self.creds_read = None;
+                    }
                     self.daemon = Some((profile.clone(), *pid));
                 }
                 if self.connected && !up && matches!(self.attach, Attach::Live(_)) {
@@ -689,8 +751,16 @@ impl Link {
                         }
                     );
                 }
+                // Another model is another brain: read for it afresh. An answer on this one
+                // stands (#76): no read.
+                let model = attached.view.get("model");
+                if self.view.as_ref().and_then(|v| v.get("model")) != model {
+                    self.creds = Creds::Unknown;
+                    self.creds_by = Said::Read;
+                    self.creds_read = None;
+                }
                 self.view = Some(attached.view.clone());
-                self.creds_at = Some(now);
+                self.creds_at = (self.creds_by != Said::Answer).then_some(now);
                 self.me = attached.client;
                 self.owner = attached.input_owner;
                 // A mode switch on the session we follow: same body, no new bubble.
@@ -760,6 +830,8 @@ impl Link {
                 elog!("synaps-avatar: persona: {setting} set");
                 if view.get("model") != self.view.as_ref().and_then(|v| v.get("model")) {
                     self.creds = Creds::Unknown;
+                    self.creds_by = Said::Read;
+                    self.creds_read = None;
                     self.creds_at = Some(now);
                 }
                 self.view = Some(view);
@@ -856,6 +928,7 @@ impl Link {
                         if !matches!(self.phase, Phase::Working(_)) {
                             self.phase = Phase::Thinking;
                         }
+                        self.answered();
                     }
                     LlmEvent::ResponseStart => {
                         self.phase = Phase::Thinking;
@@ -872,20 +945,25 @@ impl Link {
                         }
                         self.raw.push_str(&text);
                         self.phase = Phase::Talking;
-                        self.creds = Creds::Have;
-                        self.creds_at = None;
+                        self.answered();
                     }
                     LlmEvent::ToolUseStart { tool_name, .. } | LlmEvent::ToolUse { tool_name, .. } => {
                         self.phase = Phase::Working(tool_name);
+                        self.answered();
                     }
                     LlmEvent::ToolResult { .. } => self.phase = Phase::Thinking,
                     _ => {}
                 },
+                // The provider's token count: it answered (Synaps sends one per response, unnamed).
+                // A named one is a subagent's (`subagent/oneshot.rs`): only her own model counts.
+                StreamEvent::Session(SessionStreamEvent::Usage { input_tokens, output_tokens, model }) if (input_tokens > 0 || output_tokens > 0) && self.hers(model.as_deref()) => self.answered(),
                 StreamEvent::Session(SessionStreamEvent::Error { message }) => match Trouble::of(&message, self.model()) {
                     Some(t) => {
                         elog!("synaps-avatar: turn error ({}): {}", t.key(), one_line(&message, 300));
                         if let Trouble::NoBrain { on } = t {
-                            // The daemon's word: missing until a check or an answer says otherwise.
+                            // The daemon's word: missing until a check or an answer says otherwise,
+                            // or the files read otherwise than when it spoke (#76).
+                            self.creds_by = Said::Daemon(self.creds_read);
                             self.creds = Creds::Missing(on);
                             self.creds_at = Some(now + CREDS_EVERY);
                         }
@@ -1151,6 +1229,17 @@ impl Link {
             trouble: self.trouble.clone(),
         }
     }
+}
+
+/// Who stands behind what she says of her model's credentials (`Link::creds`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Said {
+    /// A read of this machine's files (`creds::check`), or nothing yet.
+    Read,
+    /// The daemon's own no-login error, and the settled read it spoke over (none yet: the next).
+    Daemon(Option<(Creds, crate::creds::Again)>),
+    /// An answer on her model: a working brain, whatever the files say.
+    Answer,
 }
 
 /// Whether her model has credentials, as far as she can tell without asking it.
@@ -2106,6 +2195,237 @@ mod tests {
         failed_turn(&mut l, "Token refresh failed: credential error: No credentials for anthropic at /home/h/.synaps-cli/auth.json. Run synaps login --provider anthropic", t0);
         assert_eq!(l.body(t0 + TROUBLE_FOR).label.as_deref(), Some("NO BRAIN YET"), "the daemon's own word");
         assert_eq!(l.creds_due(t0 + CREDS_EVERY), None, "and still no reads here");
+    }
+
+    /// A Synaps base folder of its own, for reads (`creds::check_at`).
+    fn creds_dir(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("sa-session-creds-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn no_env(_: &str) -> Option<String> {
+        None
+    }
+
+    /// The read `view.rs` makes when one is due, of `base` (`env`: hers and the daemon's;
+    /// `daemon_read`: false on Windows). False: none was due.
+    fn read(l: &mut Link, base: &std::path::Path, env: &dyn Fn(&str) -> Option<String>, daemon_read: bool, t: Instant) -> bool {
+        let Some(q) = l.creds_due(t) else { return false };
+        let (c, again) = crate::creds::check_at(&q.model, base, q.profile.as_deref(), env, daemon_read);
+        l.set_creds(c, again, t);
+        true
+    }
+
+    const BROKER: &str = "auth.remote_endpoint = https://broker.example\n";
+    const NO_LOGIN: &str = "Token refresh failed: credential error: No credentials for anthropic at /home/h/.synaps-cli/auth.json. Run synaps login --provider anthropic";
+
+    /// #76: no login on file reads NO BRAIN YET; he sets up a remote broker instead of logging in
+    /// (`auth.remote_endpoint`, or `SYNAPS_AUTH_ENDPOINT`). The next read can't tell: it takes NO
+    /// BRAIN YET back (it was stuck until his next message) and the reads end. A re-attach (the
+    /// daemon restarted for it) claims nothing either.
+    #[test]
+    fn a_remote_broker_instead_of_a_login_takes_no_brain_back() {
+        let d = creds_dir("broker");
+        let t0 = Instant::now();
+        let mut l = live_link(t0);
+        assert!(read(&mut l, &d, &no_env, true, t0));
+        assert_eq!(l.body(t0).label.as_deref(), Some("NO BRAIN YET"), "no login on file");
+        // A file mid-write says nothing: it stands, and she reads again.
+        std::fs::write(d.join("auth.json"), "{ \"groq\": {\"ty").unwrap();
+        let t05 = t0 + CREDS_EVERY / 2;
+        assert!(!read(&mut l, &d, &no_env, true, t05), "not due yet");
+        assert!(read(&mut l, &d, &no_env, true, t0 + CREDS_EVERY), "read again while missing");
+        assert_eq!(l.body(t0 + CREDS_EVERY).label.as_deref(), Some("NO BRAIN YET"), "a file mid-write changes nothing");
+        std::fs::remove_file(d.join("auth.json")).unwrap();
+        std::fs::write(d.join("config"), BROKER).unwrap();
+        let t1 = t0 + CREDS_EVERY * 2;
+        assert!(read(&mut l, &d, &no_env, true, t1), "and again");
+        assert_eq!(l.body(t1).label, None, "ONLINE: the read that said it can't tell any more");
+        assert_eq!(l.body(t1 + Duration::from_secs(3600)).label, None, "asleep too");
+        assert_eq!(l.creds_due(t1 + CREDS_EVERY * 10), None, "and the reads end");
+        assert!(l.deadline(t1).is_none_or(|w| w > t1 + CREDS_EVERY), "no wake-ups for them");
+        l.attaching(2);
+        l.on_event(attached(2, "attached_create.json"), t1);
+        assert!(read(&mut l, &d, &no_env, true, t1), "a new attach reads again");
+        assert_eq!(l.body(t1).label, None);
+        // The broker in the environment (hers or the daemon's) instead of the config.
+        std::fs::remove_file(d.join("config")).unwrap();
+        let mut l = live_link(t0);
+        assert!(read(&mut l, &d, &no_env, true, t0));
+        assert_eq!(l.body(t0).label.as_deref(), Some("NO BRAIN YET"));
+        let broker = |k: &str| (k == "SYNAPS_AUTH_ENDPOINT").then(|| "https://broker.example".to_string());
+        assert!(read(&mut l, &d, &broker, true, t1));
+        assert_eq!(l.body(t1).label, None);
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// He said hi first: the daemon's own no-login error, over a read that found none too. He sets
+    /// up a remote broker: the files read otherwise than when it spoke, so its word goes with
+    /// the read's. The same on Windows (the daemon's environment unread: the read said Unknown,
+    /// not Missing). A read that still sees what the daemon spoke over leaves it (another
+    /// provider's model: nothing here to read).
+    #[test]
+    fn the_daemons_no_brain_goes_when_the_files_change_under_it() {
+        for daemon_read in [true, false] {
+            let d = creds_dir(&format!("daemon-{daemon_read}"));
+            let t0 = Instant::now();
+            let mut l = live_link(t0);
+            assert!(read(&mut l, &d, &no_env, daemon_read, t0));
+            failed_turn(&mut l, NO_LOGIN, t0);
+            let t1 = t0 + TROUBLE_FOR;
+            assert_eq!(l.body(t1).label.as_deref(), Some("NO BRAIN YET"), "daemon read: {daemon_read}");
+            // A login mid-write reads as nothing: it stands, and she reads again.
+            std::fs::write(d.join("auth.json"), "{ \"anthropic\": {\"ty").unwrap();
+            assert!(read(&mut l, &d, &no_env, daemon_read, t1), "read on while it shows");
+            assert_eq!(l.body(t1).label.as_deref(), Some("NO BRAIN YET"), "a file mid-write changes nothing");
+            std::fs::remove_file(d.join("auth.json")).unwrap();
+            std::fs::write(d.join("config"), BROKER).unwrap();
+            let t2 = t1 + CREDS_EVERY;
+            assert!(read(&mut l, &d, &no_env, daemon_read, t2));
+            assert_eq!(l.body(t2).label, None, "a broker since it spoke (daemon read: {daemon_read})");
+            assert_eq!(l.creds_due(t2 + CREDS_EVERY * 10), None);
+            std::fs::remove_dir_all(&d).ok();
+        }
+        // Another provider: every read can't tell, the same as when it spoke. It stands.
+        let d = creds_dir("daemon-kimi");
+        let t0 = Instant::now();
+        let mut l = live_link(t0);
+        let mut p = persona();
+        p.model = Some("kimi-code/kimi-k2".into());
+        l.on_event(applied(1, "model", &p), t0);
+        assert!(read(&mut l, &d, &no_env, true, t0));
+        failed_turn(&mut l, "Config error: openai provider: no credential configured for 'kimi-code'. Run `synaps login` to add one.", t0);
+        let t1 = t0 + TROUBLE_FOR;
+        assert!(read(&mut l, &d, &no_env, true, t1));
+        assert_eq!(l.body(t1).label.as_deref(), Some("NO BRAIN YET"), "the daemon's word, until an answer");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// A login landing later clears it on the next read. So does any sign the daemon has a working
+    /// brain, whatever the files say (a key or a login she can't see): a word, a thought, a tool
+    /// call, or the provider's token count. After that no read brings NO BRAIN YET back, a new
+    /// attach neither; only the daemon's own error, or a model change, reads afresh.
+    #[test]
+    fn creds_that_appear_later_clear_it() {
+        let d = creds_dir("later");
+        let t0 = Instant::now();
+        let mut l = live_link(t0);
+        assert!(read(&mut l, &d, &no_env, true, t0));
+        assert_eq!(l.body(t0).label.as_deref(), Some("NO BRAIN YET"));
+        std::fs::write(d.join("auth.json"), r#"{"anthropic": {"type": "oauth"}}"#).unwrap();
+        let t1 = t0 + CREDS_EVERY;
+        assert!(read(&mut l, &d, &no_env, true, t1));
+        assert_eq!(l.body(t1).label, None, "the login, found");
+        assert_eq!(l.creds_due(t1 + CREDS_EVERY * 10), None);
+        std::fs::remove_file(d.join("auth.json")).unwrap();
+
+        // On attach `seq`: a turn with `ev` in it, then idle; she's checked at rest after it.
+        let turn = |l: &mut Link, seq: u64, ev: serde_json::Value, t: Instant| {
+            l.on_event(wire(seq, serde_json::json!({"ev": "turn_started", "turn_baseline": 1, "trigger": "user", "user_text": "hi"})), t);
+            l.on_event(wire(seq, serde_json::json!({"ev": "stream", "event": ev})), t);
+            l.on_event(wire(seq, serde_json::json!({"ev": "idle"})), t);
+        };
+        let rest = Duration::from_secs(30);
+        let answers = [
+            ("a word", serde_json::json!({"kind": "llm", "llm": "text", "text": "Hey"})),
+            ("a thought", serde_json::json!({"kind": "llm", "llm": "thinking", "text": "hm"})),
+            ("a tool call", serde_json::json!({"kind": "llm", "llm": "tool_use_start", "tool_name": "bash", "tool_id": "t1"})),
+            ("its token count", serde_json::json!({"kind": "session", "session": "usage", "input_tokens": 78, "output_tokens": 290, "model": null})),
+        ];
+        let no_login = serde_json::json!({"kind": "session", "session": "error", "message": NO_LOGIN});
+        for (what, ev) in answers {
+            let mut l = live_link(t0);
+            assert!(read(&mut l, &d, &no_env, true, t0));
+            failed_turn(&mut l, NO_LOGIN, t0);
+            assert_eq!(l.body(t0 + TROUBLE_FOR).label.as_deref(), Some("NO BRAIN YET"));
+            turn(&mut l, 1, ev, t1);
+            assert_eq!(l.body(t1 + rest).label, None, "{what}: a brain");
+            assert_eq!(l.creds_due(t1 + CREDS_EVERY), None, "{what}: no reads after it");
+            l.set_creds(Creds::Missing(Some("Claude")), crate::creds::Again::Yes, t1);
+            assert_eq!(l.body(t1 + rest).label, None, "{what}: a read can't say otherwise");
+            l.attaching(2);
+            l.on_event(attached(2, "attached_create.json"), t1);
+            assert_eq!(l.creds_due(t1), None, "{what}: nor a new attach");
+            assert_eq!(l.body(t1 + rest).label, None);
+            turn(&mut l, 2, no_login.clone(), t1);
+            assert_eq!(l.body(t1 + TROUBLE_FOR).label.as_deref(), Some("NO BRAIN YET"), "{what}: the daemon's own word still does");
+        }
+        // An empty token count (a request that never ran) proves nothing; nor does a subagent's on
+        // another model (Synaps names the model only there). Hers, named without its provider, does.
+        let usage = |model: Option<&str>, tokens: u64| serde_json::json!({"kind": "session", "session": "usage", "input_tokens": tokens, "output_tokens": tokens, "model": model});
+        let mut l = live_link(t0);
+        failed_turn(&mut l, NO_LOGIN, t0);
+        turn(&mut l, 1, usage(None, 0), t1);
+        assert_eq!(l.body(t1 + rest).label.as_deref(), Some("NO BRAIN YET"), "an empty token count");
+        turn(&mut l, 1, usage(Some("kimi-k2"), 50), t1);
+        assert_eq!(l.body(t1 + rest).label.as_deref(), Some("NO BRAIN YET"), "a subagent's, on another model");
+        turn(&mut l, 1, usage(Some("claude-haiku-4-5"), 50), t1);
+        assert_eq!(l.body(t1 + rest).label, None, "hers (anthropic/claude-haiku-4-5)");
+        // Another daemon process (a restart: he dropped the key it had) is another brain: the
+        // attach reads again. The same daemon reconnecting doesn't.
+        let daemon = |pid: u32| Event::Status(Status::Connected { daemon_version: "0.12.0".into(), profile: None, pid, features: vec![] });
+        let mut l = live_link(t0);
+        turn(&mut l, 1, serde_json::json!({"kind": "llm", "llm": "text", "text": "Hey"}), t0);
+        l.on_event(daemon(1), t1);
+        l.attaching(2);
+        l.on_event(attached(2, "attached_create.json"), t1);
+        assert_eq!(l.creds_due(t1), None, "the same daemon: its answer stands");
+        l.on_event(daemon(2), t1);
+        l.attaching(3);
+        l.on_event(attached(3, "attached_create.json"), t1);
+        assert!(l.creds_due(t1).is_some(), "a new daemon: read again");
+        assert!(read(&mut l, &d, &no_env, true, t1));
+        assert_eq!(l.body(t1 + rest).label.as_deref(), Some("NO BRAIN YET"), "and nothing on file");
+        // A model change reads afresh: the answer was another model's.
+        let mut l = live_link(t0);
+        turn(&mut l, 1, serde_json::json!({"kind": "llm", "llm": "text", "text": "Hey"}), t0);
+        let mut p = persona();
+        p.model = Some("claude-sonnet-4-6".into());
+        l.on_event(applied(1, "model", &p), t1);
+        assert!(read(&mut l, &d, &no_env, true, t1), "a model change reads again");
+        assert_eq!(l.body(t1 + rest).label.as_deref(), Some("NO BRAIN YET"));
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// A daemon through `--socket` with no login on this machine: nothing here is read, so nothing
+    /// here says NO BRAIN YET. Only its own error does, and its first answer (or token count)
+    /// takes it back. A daemon on this machine with a remote broker and no `auth.json` at all
+    /// claims nothing either, and stops reading.
+    #[test]
+    fn a_remote_brain_with_no_local_file_is_never_no_brain() {
+        let d = creds_dir("remote");
+        let t0 = Instant::now();
+        let mut l = Link::new(Options { local: false, ..opts() }, t0);
+        l.on_event(connected(), t0);
+        l.attaching(1);
+        l.on_event(attached(1, "attached_create.json"), t0);
+        for t in [t0, t0 + CREDS_EVERY * 100] {
+            assert!(!read(&mut l, &d, &no_env, true, t), "never read here");
+            assert_eq!(l.body(t).label, None);
+        }
+        failed_turn(&mut l, NO_LOGIN, t0);
+        let t1 = t0 + TROUBLE_FOR;
+        assert_eq!(l.body(t1).label.as_deref(), Some("NO BRAIN YET"), "its own word");
+        assert!(!read(&mut l, &d, &no_env, true, t1));
+        l.on_event(wire(1, serde_json::json!({"ev": "turn_started", "turn_baseline": 1, "trigger": "user", "user_text": "hi"})), t1);
+        l.on_event(wire(1, serde_json::json!({"ev": "stream", "event": {"kind": "session", "session": "usage", "input_tokens": 6, "output_tokens": 15, "model": null}})), t1);
+        l.on_event(wire(1, serde_json::json!({"ev": "idle"})), t1);
+        assert_eq!(l.body(t1 + Duration::from_secs(30)).label, None, "it answered");
+        // It restarts: nothing to read here, nothing claimed.
+        l.on_event(Event::Status(Status::Connected { daemon_version: "0.12.0".into(), profile: None, pid: 2, features: vec![] }), t1);
+        l.attaching(2);
+        l.on_event(attached(2, "attached_create.json"), t1);
+        assert!(!read(&mut l, &d, &no_env, true, t1 + CREDS_EVERY));
+        assert_eq!(l.body(t1 + Duration::from_secs(30)).label, None, "a restart claims nothing");
+        // On this machine, a broker and no auth.json: Unknown, no tag, no more reads.
+        std::fs::write(d.join("config"), BROKER).unwrap();
+        let mut l = live_link(t0);
+        assert!(read(&mut l, &d, &no_env, true, t0));
+        assert_eq!(l.body(t0).label, None);
+        assert_eq!(l.creds_due(t0 + CREDS_EVERY * 10), None);
+        std::fs::remove_dir_all(&d).ok();
     }
 
     /// Local-model troubles are calm and named, with the model she runs on.
