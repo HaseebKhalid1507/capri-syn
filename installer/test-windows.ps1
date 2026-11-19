@@ -47,8 +47,19 @@ function Invoke-Installer([string]$Name, [string[]]$Flags) {
 }
 function Get-RunValue([string]$Name) { (Get-ItemProperty -Path $runKey -Name $Name -ErrorAction SilentlyContinue).$Name }
 
+# What an installer of hers could make in %LOCALAPPDATA% and %APPDATA%: synaps* and capri* at the
+# top, anything in Programs (her folder, a --prefix's), her Start-menu entries. Not the rest: the
+# runner's own programs come and go there (a browser made Mozilla mid-test on #97's run 44501610793).
+function Get-OursHere {
+    $start = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'
+    @(Get-ChildItem -Force $env:LOCALAPPDATA, $env:APPDATA -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^(synaps|capri)|^Programs$' }
+        Get-ChildItem -Force (Join-Path $env:LOCALAPPDATA 'Programs') -ErrorAction SilentlyContinue
+        Get-ChildItem -Force $start -ErrorAction SilentlyContinue | Where-Object { $_.Name -match 'synaps|capri' }) |
+        ForEach-Object { $_.FullName } | Where-Object { $_ -notmatch 'capri-install-test' }
+}
+
 # 0. A dry run touches nothing; from GitHub as `irm | iex` users get it, when -Ref is given.
-$before = @(Get-ChildItem -Force $env:LOCALAPPDATA, $env:APPDATA -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+$before = @(Get-OursHere)
 if ($Ref) {
     $env:CAPRI_INSTALL_REF = $Ref
     $remote = "& ([scriptblock]::Create((Invoke-RestMethod 'https://raw.githubusercontent.com/HaseebKhalid1507/capri-syn/$Ref/install.ps1'))) --dry-run --voice"
@@ -82,8 +93,8 @@ if ($Ref) {
 }
 $code = Invoke-Installer 'dry-run' @('--dry-run', '--artifact', $Setup)
 Check ($code -eq 0) "--dry-run exits 0 ($code)"
-$after = @(Get-ChildItem -Force $env:LOCALAPPDATA, $env:APPDATA -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
-$new = @(Compare-Object $before $after -PassThru | Where-Object { $_ -notmatch 'Temp|capri-install-test' })
+$after = @(Get-OursHere)
+$new = @($after | Where-Object { $before -notcontains $_ })
 Check ($new.Count -eq 0) "--dry-run made nothing in %LOCALAPPDATA% or %APPDATA% ($($new -join ', '))"
 Check (-not (Test-Path $app)) '--dry-run installed nothing'
 
