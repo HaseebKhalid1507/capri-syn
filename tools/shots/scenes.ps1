@@ -600,6 +600,15 @@ $Scenes = [ordered]@{
             Start-Sleep 1
             Write-Host "  her menu at $($menu.X),$($menu.Y) $($menu.W)x$($menu.H), by $how"
             Shot '02-menu' "her menu, by $how" -At (Get-CornerRect -Icon $icon -Also @($menu) -Aspect 1.6 -Above 96)
+            # Her rows' names as a screen reader gets them: UI Automation's menu proxy (an owner-drawn
+            # row's item data read as MSAAMENUINFO, from her memory).
+            if (-not ('System.Windows.Automation.AutomationElement' -as [type])) { Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes }
+            $uia = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$menu.Handle).FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+            $names = @($uia | ForEach-Object { $_.Current.Name })
+            Write-Host "  her rows for a screen reader: $($names -join ' | ')"
+            foreach ($want in 'RESET POSITION', 'ATTENTION: MIX', 'QUIT') {
+                if ($want -cnotin $names) { $script:Fails.Add("${script:Take}: no row named '$want' for a screen reader (UI Automation reads: $($names -join ', '))") }
+            }
             # His keys in it (a real right click gave it the keyboard): down x3 lights ATTENTION (a
             # lit row), right opens its choices (the one in force marked, the first lit).
             if ($how -eq 'a real right click') {

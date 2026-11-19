@@ -4,7 +4,7 @@
 //! on ATTENTION's choice in force (a switch has no tick: its words say what a click does); sizes
 //! and fonts at the DPI of the monitor it opens on (`platform::menulook`). A stock menu
 //! underneath: the arrows, Enter, Esc and submenus are Windows' own, a typed letter goes to her row
-//! (`WM_MENUCHAR`), each row keeps its words (a screen reader's), and her frame replaces the
+//! (`WM_MENUCHAR`), each row's words are a screen reader's (`Name`), and her frame replaces the
 //! system's light one (each menu window's own proc wrapped while it's up). Under high contrast it
 //! is the stock menu, in his theme's colours (`hc`, asked at each open).
 
@@ -19,7 +19,7 @@ use ::windows::Win32::Graphics::Gdi::{
     MonitorFromPoint, NULL_PEN, OUT_TT_PRECIS, Polygon, ReleaseDC, RestoreDC, SYMBOL_CHARSET, SaveDC, SelectObject, SetBkMode, SetTextCharacterExtra, SetTextColor, TRANSPARENT,
 };
 use ::windows::Win32::System::Threading::GetCurrentThreadId;
-use ::windows::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
+use ::windows::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW, MSAA_MENU_SIG, MSAAMENUINFO};
 use ::windows::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, GetSystemMetricsForDpi, MDT_EFFECTIVE_DPI};
 use ::windows::Win32::UI::WindowsAndMessaging::*;
 use ::windows::core::PWSTR;
@@ -60,14 +60,55 @@ const ODS_DISABLED: u32 = 0x4;
 /// The menu windows' class.
 const MENU_CLASS: &str = "#32768";
 
-/// A row of her menu as it's drawn: its item data is its index in the menu's `Pen`.
-#[derive(Clone, Debug, Default, PartialEq)]
+/// A row of her menu as it's drawn: its item data is where its `name` is.
+#[derive(Debug, Default)]
 struct Line {
     label: String,
     mark: Mark,
     lead: bool,
     opens: bool,
     rule: bool,
+    name: Name,
+}
+
+/// A row's words for a screen reader. The menu proxies (oleacc's, UI Automation's) ask
+/// `GetMenuString` first and, for an owner-drawn row it has no words for, read its item data as a
+/// pointer to an `MSAAMENUINFO`, from her memory (dotnet/wpf's `WindowsMenu.cs`): this, boxed so
+/// it stays where it was pointed at.
+struct Name(Box<Named>);
+
+#[repr(C)]
+struct Named {
+    /// First: where the item data points.
+    msaa: MSAAMENUINFO,
+    /// Its words, ended by a 0 (`msaa.pszWText`).
+    words: Vec<u16>,
+}
+
+impl Name {
+    fn new(s: &str) -> Name {
+        let mut words: Vec<u16> = s.encode_utf16().chain(Some(0)).collect();
+        let msaa = MSAAMENUINFO { dwMSAASignature: MSAA_MENU_SIG as u32, cchWText: (words.len() - 1) as u32, pszWText: PWSTR(words.as_mut_ptr()) };
+        Name(Box::new(Named { msaa, words }))
+    }
+
+    /// Its row's item data.
+    fn data(&self) -> usize {
+        std::ptr::from_ref(&self.0.msaa).expose_provenance()
+    }
+}
+
+impl Default for Name {
+    fn default() -> Name {
+        Name::new("")
+    }
+}
+
+impl std::fmt::Debug for Name {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let w = &self.0.words;
+        write!(f, "Name({:?})", String::from_utf16_lossy(&w[..w.len() - 1]))
+    }
 }
 
 /// Her menu's pen while it's up (`track`): its rows, its sizes and fonts at the DPI of the monitor
@@ -97,6 +138,11 @@ impl Pen {
             marks: font("Marlett", m.glyph, FW_NORMAL.0 as i32, SYMBOL_CHARSET),
             bg: unsafe { CreateSolidBrush(rgb(COLORS.bg)) },
         }
+    }
+
+    /// The row whose item data is `data`: one of hers, or None.
+    fn line(&self, data: usize) -> Option<&Line> {
+        self.lines.iter().find(|l| l.name.data() == data)
     }
 
     /// The words' font: bold on the row that leads (SHOW while she's hidden).
@@ -132,16 +178,16 @@ fn font(face: &str, px: i32, weight: i32, charset: FONT_CHARSET) -> HFONT {
     unsafe { CreateFontIndirectW(&lf) }
 }
 
-/// Her menu as her model laid it out, every row owner-drawn (`lines`: each one's words and marks,
-/// by its item data), or the stock rows (`stock`: high contrast): a row with choices opens them,
-/// the lead row is the default, what can't act now is greyed (`TrackPopupMenu` never picks it),
-/// the choice in force is checked (a radio check: a dot). Each row keeps its words (`&` doubled:
-/// hers are written as they read).
+/// Her menu as her model laid it out, every row owner-drawn (`lines`: each one's words, marks and
+/// name, its item data where the name is), or the stock rows (`stock`: high contrast): a row with
+/// choices opens them, the lead row is the default, what can't act now is greyed
+/// (`TrackPopupMenu` never picks it), the choice in force is checked (a radio check: a dot). Each
+/// row keeps its words (`&` doubled: hers are written as they read).
 fn build(items: &[TrayItem], lines: &mut Vec<Line>, stock: bool) -> ::windows::core::Result<HMENU> {
     unsafe {
         let m = CreatePopupMenu()?;
         for (pos, it) in items.iter().enumerate() {
-            let (line, id, sub, live) = match it {
+            let (mut line, id, sub, live) = match it {
                 TrayItem::Item { id, label, mark, lead, enabled } => (Line { label: label.clone(), mark: *mark, lead: *lead, ..Line::default() }, *id, None, *enabled),
                 // A submenu not taken in is ours to destroy.
                 TrayItem::Sub { label, items, enabled } => match build(items, lines, stock) {
@@ -153,6 +199,7 @@ fn build(items: &[TrayItem], lines: &mut Vec<Line>, stock: bool) -> ::windows::c
                 },
                 TrayItem::Rule => (Line { rule: true, ..Line::default() }, 0, None, true),
             };
+            line.name = Name::new(&line.label);
             let mut state = if live { MENU_ITEM_STATE(0) } else { MFS_GRAYED };
             if line.mark.on() {
                 state |= MFS_CHECKED;
@@ -176,7 +223,7 @@ fn build(items: &[TrayItem], lines: &mut Vec<Line>, stock: bool) -> ::windows::c
                 fType: kind,
                 fState: state,
                 wID: id,
-                dwItemData: lines.len(),
+                dwItemData: line.name.data(),
                 ..Default::default()
             };
             if !line.rule {
@@ -277,7 +324,7 @@ pub(super) fn on_message(msg: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
 
 /// A row's size: its words' width in its font at the menu's DPI, its mark and arrow columns.
 fn measure(pen: &Pen, mi: &mut MeasureItem) -> bool {
-    let Some(line) = pen.lines.get(mi.item_data) else { return false };
+    let Some(line) = pen.line(mi.item_data) else { return false };
     let m = &pen.m;
     if line.rule {
         mi.item_height = m.rule as u32;
@@ -306,7 +353,7 @@ fn text_width(pen: &Pen, line: &Line) -> i32 {
 }
 
 fn draw(pen: &Pen, di: &DrawItem) -> bool {
-    let Some(line) = pen.lines.get(di.item_data) else { return false };
+    let Some(line) = pen.line(di.item_data) else { return false };
     paint_line(pen, line, di.hdc, di.rc_item, di.item_state);
     true
 }
@@ -388,7 +435,7 @@ fn typed_in(pen: &Pen, menu: HMENU, c: char) -> Option<LRESULT> {
     for pos in 0..n.max(0) as u32 {
         let mut mi = MENUITEMINFOW { cbSize: size_of::<MENUITEMINFOW>() as u32, fMask: MIIM_DATA | MIIM_STATE | MIIM_SUBMENU, ..Default::default() };
         unsafe { GetMenuItemInfoW(menu, pos, true, &mut mi) }.ok()?;
-        let line = pen.lines.get(mi.dwItemData)?;
+        let line = pen.line(mi.dwItemData)?;
         if mi.fState.0 & MFS_HILITE.0 != 0 {
             lit = Some(pos as usize);
         }
@@ -483,6 +530,11 @@ mod tests {
         String::from_utf16_lossy(&b[..mi.cch as usize])
     }
 
+    /// Her row by its item data.
+    fn at(lines: &[Line], data: usize) -> &Line {
+        lines.iter().find(|l| l.name.data() == data).expect("one of her rows")
+    }
+
     fn data(m: HMENU, pos: u32) -> usize {
         let mut mi = MENUITEMINFOW { cbSize: size_of::<MENUITEMINFOW>() as u32, fMask: MIIM_DATA, ..Default::default() };
         unsafe { GetMenuItemInfoW(m, pos, true, &mut mi) }.unwrap();
@@ -512,7 +564,7 @@ mod tests {
             for (i, it) in items.iter().enumerate() {
                 let (pos, st) = (i as u32, state(m, i as u32));
                 assert!(ftype(m, pos) & MFT_OWNERDRAW.0 != 0, "row {i}: hers to draw");
-                let line = &lines[data(m, pos)];
+                let line = at(&lines, data(m, pos));
                 match it {
                     TrayItem::Item { id, label, mark, .. } => {
                         assert_eq!((GetMenuItemID(m, i as i32), words(m, pos), &line.label), (*id, label.clone(), label));
@@ -527,7 +579,7 @@ mod tests {
                         assert_eq!(GetMenuItemCount(Some(sub)), items.len() as i32);
                         let checked: Vec<bool> = (0..3).map(|j| state(sub, j) & MF_CHECKED.0 != 0).collect();
                         assert_eq!(checked, [false, true, false], "HANG ONLY in force");
-                        assert!((0..3).all(|j| matches!(lines[data(sub, j)].mark, Mark::Choice(_))), "a dot, not a check");
+                        assert!((0..3).all(|j| matches!(at(&lines, data(sub, j)).mark, Mark::Choice(_))), "a dot, not a check");
                         assert!((0..3).all(|j| ftype(sub, j) & MFT_RADIOCHECK.0 != 0), "a radio choice, for a screen reader");
                         // Its last pick didn't save: why, under a rule, greyed (no pick).
                         assert!(state(sub, 3) & MF_SEPARATOR.0 != 0);
@@ -539,11 +591,40 @@ mod tests {
             }
             // Every row, the submenu's too, has its line.
             assert_eq!(lines.len(), items.len() + 5);
-            let checked: Vec<&str> = (0..items.len() as u32).filter(|&p| state(m, p) & MF_CHECKED.0 != 0).map(|p| lines[data(m, p)].label.as_str()).collect();
+            let checked: Vec<&str> = (0..items.len() as u32).filter(|&p| state(m, p) & MF_CHECKED.0 != 0).map(|p| at(&lines, data(m, p)).label.as_str()).collect();
             assert!(checked.is_empty(), "a switch has no tick, on or off (END HANDS-FREE says what a click does): {checked:?}");
             assert_eq!(GetMenuDefaultItem(m, 0, GET_MENU_DEFAULT_ITEM_FLAGS(0)), menu::Item::ShowHide.id(), "SHOW leads while she is hidden");
             DestroyMenu(m).unwrap();
         }
+    }
+
+    /// Each row's words as a screen reader's menu proxy reads them (UI Automation's, oleacc's):
+    /// its item data as an `MSAAMENUINFO`, MSAA_MENU_SIG first, its length, its words ended by a
+    /// 0; ATTENTION's choices and the note under them too. Rules have none to read.
+    #[test]
+    fn a_screen_reader_reads_her_rows_words() {
+        let why = crate::line::MenuSave::Refused.says().unwrap();
+        let s = Menu { dnd: Some(true), attention: Some(Attention::Mix), handsfree: Some(false), unsaved: Some(why), ..Menu::default() };
+        let items = menu::tray_items(&menu::rows(&s));
+        let mut lines = Vec::new();
+        let m = build(&items, &mut lines, false).unwrap();
+        let read = |m: HMENU, pos: u32| {
+            // SAFETY: her row's item data: its `Named`, alive while `lines` is (as her memory is
+            // to the proxy while the menu's up).
+            let info = unsafe { &*std::ptr::with_exposed_provenance::<MSAAMENUINFO>(data(m, pos)) };
+            assert_eq!(info.dwMSAASignature, MSAA_MENU_SIG as u32, "row {pos}: MSAA_MENU_SIG first");
+            let w = unsafe { std::slice::from_raw_parts(info.pszWText.0, info.cchWText as usize + 1) };
+            assert_eq!(w.last(), Some(&0), "row {pos}: its words ended by a 0");
+            String::from_utf16(&w[..w.len() - 1]).unwrap()
+        };
+        let names = |m: HMENU| -> Vec<String> {
+            let n = unsafe { GetMenuItemCount(Some(m)) }.max(0) as u32;
+            (0..n).filter(|&p| state(m, p) & MF_SEPARATOR.0 == 0).map(|p| read(m, p)).collect()
+        };
+        assert_eq!(names(m), ["RESET POSITION", "DND OFF", "ATTENTION: MIX", "HANDS-FREE TALK", "COPY LAST REPLY", "HIDE", "SETTINGS", "QUIT"]);
+        let sub = unsafe { GetSubMenu(m, 2) };
+        assert_eq!(names(sub), ["MIX", "HANG ONLY", "OFF", why]);
+        unsafe { DestroyMenu(m).unwrap() };
     }
 
     /// While she quits, every row but QUIT is greyed (ATTENTION's choices with it).
@@ -594,7 +675,7 @@ mod tests {
                 let t = stock(m, pos, matches!(it, TrayItem::Rule));
                 match it {
                     TrayItem::Item { id, label, enabled, .. } => {
-                        assert_eq!((GetMenuItemID(m, i as i32), words(m, pos), &lines[data(m, pos)].label), (*id, label.clone(), label));
+                        assert_eq!((GetMenuItemID(m, i as i32), words(m, pos), &at(&lines, data(m, pos)).label), (*id, label.clone(), label));
                         assert_eq!((t & MFT_RADIOCHECK.0, st & MF_CHECKED.0), (0, 0), "{label}: no tick on a switch");
                         assert_eq!(st & MF_GRAYED.0 == 0, *enabled, "{label}");
                     }
@@ -753,7 +834,7 @@ mod tests {
     fn rows_are_measured_at_the_menus_dpi() {
         let lines = || vec![Line { label: "COPY LAST REPLY".into(), ..Line::default() }, Line { rule: true, ..Line::default() }];
         let ask = |pen: &Pen, i: usize| {
-            let mut mi = MeasureItem { ctl_type: ODT_MENU, _ctl_id: 0, _item_id: 0, item_width: 0, item_height: 0, item_data: i };
+            let mut mi = MeasureItem { ctl_type: ODT_MENU, _ctl_id: 0, _item_id: 0, item_width: 0, item_height: 0, item_data: pen.lines[i].name.data() };
             assert!(measure(pen, &mut mi));
             (mi.item_width as i32, mi.item_height as i32)
         };
