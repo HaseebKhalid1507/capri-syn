@@ -2097,7 +2097,8 @@ mod tests {
     /// her, under another app's window, through a second of checks; with none in front she's put
     /// back on top at the next check (Shady on #85). The poller's own check, by hand: the
     /// fullscreen app is the test's word (`front_fullscreen`), as the foreground can't be taken
-    /// on a runner reliably.
+    /// on a runner reliably. Her window is adopted as a click-through surface that isn't her body,
+    /// so the real poller's watch (it looks at her body only) never raises her behind the test.
     #[test]
     fn a_fullscreen_app_in_front_means_no_re_raise() {
         use std::sync::mpsc::channel;
@@ -2129,7 +2130,9 @@ mod tests {
             RegisterClassW(&wc);
             CreateWindowExW(WINDOW_EX_STYLE(0), ::windows::core::w!("SaZFsBody"), ::windows::core::w!("sa-z-fs-body"), WS_POPUP | WS_VISIBLE, ox + 350, oy + 350, 200, 200, None, None, Some(inst.into()), None).unwrap()
         };
-        let s = x.adopt_hwnd(Role::Body, body).unwrap();
+        let s = x.adopt_hwnd(Role::Intro, body).unwrap();
+        assert_eq!(x.body.load(Ordering::SeqCst), 0, "adopted as her body: the real poller would raise her");
+        let mine_body = AtomicU32::new(s);
         let pass = x.surfaces.lock().unwrap().get(&s).map(|surf| surf.pass.clone()).expect("her body is a click-through surface");
         let pump = || unsafe {
             let mut m = MSG::default();
@@ -2157,7 +2160,7 @@ mod tests {
         let (t0, before) = (Instant::now(), pass.tops.load(Ordering::SeqCst));
         while t0.elapsed() < Duration::from_secs(1) {
             z.last = Instant::now() - Duration::from_secs(10);
-            z.tick(&x.body, &x.surfaces, &x.mine);
+            z.tick(&mine_body, &x.surfaces, &x.mine);
             std::thread::sleep(Duration::from_millis(20));
             pump();
         }
@@ -2169,7 +2172,7 @@ mod tests {
         while plain_over_her() {
             assert!(t0.elapsed() < Duration::from_secs(3), "no fullscreen app in front, and still under the window after 3 s");
             z.last = Instant::now() - Duration::from_secs(10);
-            z.tick(&x.body, &x.surfaces, &x.mine);
+            z.tick(&mine_body, &x.surfaces, &x.mine);
             std::thread::sleep(Duration::from_millis(20));
             pump();
         }
