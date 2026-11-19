@@ -133,7 +133,6 @@ const
   PackDownload = 0;
   PackFolder = 1;
   PackSkip = 2;
-  RunKey = 'Software\Microsoft\Windows\CurrentVersion\Run';
 
 var
   BrainPage, PackPage: TWizardPage;
@@ -339,7 +338,7 @@ end;
 
 { ---- the "Her brain" page: Synaps ---------------------------------------------------------------- }
 
-{ synaps-check, once, from a copy of the steps in {tmp} (nothing is installed yet). }
+{ synaps-check, once, from a copy of the steps in the temporary folder (nothing is installed yet). }
 procedure CheckSynaps;
 var
   Script: String;
