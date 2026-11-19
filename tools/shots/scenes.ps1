@@ -170,6 +170,8 @@ function Stop-Take {
 
 <# A step's shot: her windows, cropped; her `state` beside it. #>
 function Shot([string]$Step, [string]$Note = '') {
+    # A notice the runner popped up meanwhile (the scaling change's) goes before it is in one.
+    foreach ($t in [ShootWin.Native]::CloseDialogs()) { Write-Host "desktop: closed a dialog: '$t'" }
     Start-Sleep -Milliseconds 400
     $png = Join-Path $script:TakeOut "$Step.png"
     $rect = $null
