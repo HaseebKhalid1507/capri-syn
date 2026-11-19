@@ -2,7 +2,8 @@
 
 Capri reacts to her own session. `tools/capri-watch` gives her things to react to: a failing CI run, a session
 stuck on an approval, a failed unit, a nearly full disk. It's one small stdlib-Python poller per machine
-(a systemd `--user` unit). For each new event it writes ONE short line into her session:
+(a systemd `--user` unit; Linux only: `install.sh --watch`). For each new event it writes ONE short line
+into her session:
 
 ```
 [watch] ci_failed@desk: capri-syn main: ci failed on 09b138d (https://github.com/you/capri-syn/actions/runs/43671709347)
@@ -10,7 +11,8 @@ stuck on an approval, a failed unit, a nearly full disk. It's one small stdlib-P
 
 She answers like she answers anything else, in a line, and offers the obvious next step. Her persona has a
 paragraph for `[watch]` lines (`packs/capri/persona.md`): one line, no acting on anything risky without your yes.
-With voice on, the voice PR speaks replies to events (never over music).
+With voice on, she speaks her replies to events too (`[voice] speak_unprompted`, never over music:
+[VOICE.md](VOICE.md#which-replies-are-spoken)).
 
 ## Machines
 
@@ -83,8 +85,8 @@ ssh_host = "desk"          # an ssh host or ~/.ssh/config alias that reaches her
 
 A one-shot event (opened, merged, release, a turn's end, calendar) learns what already exists on its first
 pass and fires only for what's new. A condition (CI failing, unit failed, disk low, approval waiting, backup)
-fires when it starts holding, and again only after it cleared. capri-syn's main CI, which fails on every
-push while its secret is missing, therefore fires once.
+fires when it starts holding, and again only after it cleared. A CI that fails on push after push
+therefore fires once, and again only after a green run.
 
 The calendar is read from two tables, dates and times in UTC: `events` (`id`, `title`, `date`, `time`,
 `recurring_pattern`) for one-off events and `event_instances` (`event_id`, `override_title`,
@@ -112,7 +114,7 @@ so her answering an event can't make another event.
   out as one digest (`--source watch:digest`, a header line plus up to 10 event lines).
 - **Wake cap:** `max_per_hour = 6` deliveries per rolling hour. The rest wait and arrive together.
 - **Her DND:** while it's on (DND 1 HOUR in her menu), events wait. The watcher reads it from the avatar's
-  control socket (`brain state`, the socket `capri-ctl` uses). On a `remote` machine that check runs on her
+  control socket (`brain state`, the socket `avatarctl` uses). On a `remote` machine that check runs on her
   machine over ssh.
 - **Music:** `music = "defer"` waits until it stops, `"drop"` drops, `"ignore"` sends anyway. "Playing" is
   her music mode (MPRIS, `[music] ignore` honoured). Without her avatar running it falls back to `playerctl`.

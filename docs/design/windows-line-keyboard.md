@@ -1,7 +1,8 @@
 # The Line's keyboard on Windows, under the foreground lock (design note)
 
-**Status:** decided (Jawz, for Haseeb): **A, plus the honest half of D.** Built in P1b; the [VM] checks
-are pending. The options below are kept as the record of why.
+**Status:** decided: **A, plus the honest half of D.** Built in P1b, and checked in the VM
+([WINDOWS.md](../WINDOWS.md#the-vm-day-2026-11-18), items 2, 5, 6 and 7). The options below are kept
+as the record of why.
 
 ## The decision
 
@@ -9,7 +10,7 @@ are pending. The options below are kept as the record of why.
   his press on one of her windows (the input poller sees the press over her) are *his input to her*. For
   `GRANT_MS` (1 s) after it, `Stage::keyboard_granted` is true, and the Line opens with the keyboard
   (`SetForegroundWindow`, which Windows allows then: her process received the last input).
-- **Every other opening waits.** A summon from the brain, `capri-ctl`, a voice turn: the Line opens
+- **Every other opening waits.** A summon from the brain, a `talk tap` on her control socket, a voice turn: the Line opens
   without the keyboard and without activation (`focus: false`, so PW-2 keeps a click from activating
   it too), parked. Her tag says how to type (`ONLINE · WIN+ALT+C TO TYPE`), and so does the Line's own
   status (`WIN+ALT+C TO TYPE`). His next press of her key, or his click on the Line, takes the
@@ -26,7 +27,7 @@ are pending. The options below are kept as the record of why.
 - **The contract:** `Caps::keyboard_on_input` is set on Windows. The `keyboard` scenario first checks
   that a grab without his input is refused and the keyboard stays put, then clicks on her for real
   (`SendInput` in the Windows driver), then grabs and gives back. The fake runs that path in every
-  `cargo test` (`contract_fake_keyboard_on_his_input`); on Windows it is [VM] pending.
+  `cargo test` (`contract_fake_keyboard_on_his_input`); on Windows it passed in the VM (item 7).
 
 ## The problem
 
@@ -43,10 +44,10 @@ Which openings qualify:
 
 | opening | who received the last input | qualifies today? |
 |---|---|---|
-| a registered hotkey (Win+Alt+C, `talk tap`) | her process (`WM_HOTKEY` is input to the thread that registered it) | **likely yes** (docs: "received the last input event"); [VM] check pending |
+| a registered hotkey (Win+Alt+C, `talk tap`) | her process (`WM_HOTKEY` is input to the thread that registered it) | **yes** (docs: "received the last input event"; [VM] item 5) |
 | a click on her body | her process (her window took the click, with PW-2: without activation) | likely yes, but PW-2's `MA_NOACTIVATE` means she must activate the Line herself |
 | a summon from the brain (a prompt, a finished turn) | his app | **no** |
-| `capri-ctl` from a terminal / a voice turn from the sidecar | the terminal, or nobody | **no** |
+| a command on her control socket, from a terminal / a voice turn from the sidecar | the terminal, or nobody | **no** |
 | giving the keyboard back on close | her process (he typed in the Line) | yes |
 
 The hard cases are the ones without his input: she opens the Line on her own, or another process opens it.

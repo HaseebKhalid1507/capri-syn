@@ -1,10 +1,15 @@
-# She on Windows (in progress)
+# She on Windows
 
-Windows 11, x86_64-pc-windows-msvc. Everything Windows-only is in `src/platform/windows/`; GPUI's
-Windows crate is vendored with small patches (`vendor/gpui-pre-windows/PATCHES.md`). CI builds,
-tests and lints it on every push (the `windows` job). What CI can't see (a desktop, his input,
-monitors) was checked in the capri-win VM on 2026-11-18: see "The VM day" below. Live audio (item
-13) is still his machine's.
+Windows 11, x64 (x86_64-pc-windows-msvc). Everything Windows-only is in `src/platform/windows/`;
+GPUI's Windows crate is vendored with small patches (`vendor/gpui-pre-windows/PATCHES.md`). CI
+builds, tests and lints it on every push (the `windows` job), and installs, starts and uninstalls
+her on clean runners (below). What CI can't see (a desktop, his input, monitors) was checked in a
+Windows 11 VM on 2026-11-18: see "The VM day" below. Live audio (item 13) needs real hardware, not
+the VM.
+
+**Windows 10** (1809, build 17763, or newer) is let through by both installers (`MinVersion` in
+`packaging/windows/*.iss`), but she has never been run on it: untested, and not supported yet.
+The same goes for Windows 11 on Arm, which the installers accept (`x64compatible`: x64 emulation).
 
 ## Build and run
 
@@ -13,7 +18,8 @@ cargo build --release --bin synaps-avatar
 .\target\release\synaps-avatar.exe      # a console build: her log in the terminal
 ```
 
-`capri-ctl` and the brain talk to her over the same local socket (AF_UNIX, Windows 10 1803+).
+Her control socket is there too (AF_UNIX, Windows 10 1803+), `synaps-avatar.sock` in your temp
+folder; no control CLI for it ships here ([Control](#control-no-avatarctl-here)).
 
 Her files (`platform::base_dir`; `$XDG_*_HOME` still wins, as on Linux):
 
@@ -23,7 +29,46 @@ Her files (`platform::base_dir`; `$XDG_*_HOME` still wins, as on Linux):
 | her pack (default `--pack`) | `%LOCALAPPDATA%\synaps-avatar\packs\capri` |
 | state | `%LOCALAPPDATA%\synaps-avatar\state.json`, `sessions.json` |
 | her log, without a console | `%LOCALAPPDATA%\synaps-avatar\synaps-avatar.log` (appended; over 4 MB at start, kept as `.old.log`) |
-| her icon (tray), your own | `%APPDATA%\synaps-avatar\icon.ico` if it's there (up to 1024 px a side), else the capri-syn icon (`assets/icon`, in her exe; a pack's `icon` isn't used here); read at start and on `capri-ctl settings reload`, when it changed |
+| her icon (tray), your own | `%APPDATA%\synaps-avatar\icon.ico` if it's there (up to 1024 px a side), else the capri-syn icon (`assets/icon`, in her exe; a pack's `icon` isn't used here); read at start and on a `settings reload` ([Control](#control-no-avatarctl-here)), when it changed |
+
+Settings in the Line (the cog left of its field, Ctrl+, there, or SETTINGS in her menu or her
+tray's) changes BRAIN (and its MODEL), ATTENTION and "HEY CAPRI", each applied at once; ABOUT shows
+her versions ([REFERENCE.md](REFERENCE.md#what-she-shows)). Every other key is `settings.toml` by
+hand.
+
+## Control: no avatarctl here
+
+`avatarctl`, Linux's control client (a Python script on her Unix socket), doesn't ship on Windows.
+Her log's hotkey line and some older notes name a `capri-ctl` for Windows: it was never built.
+What the client is for in daily use is on her instead:
+
+| on Linux | on Windows |
+|---|---|
+| `avatarctl talk tap` (a summon key's binding) | Win+Alt+C, or a click on her tray icon |
+| `avatarctl talk toggle` | Win+Alt+Ctrl+C (twice in quick succession: hands-free) |
+| `avatarctl talk handsfree on` | HANDS-FREE TALK in her menu or her tray's, or "Hey Capri" |
+| `avatarctl show` | SHOW in her tray's menu, or a click on her chip |
+| `avatarctl settings open [brain]` | SETTINGS in her menu or her tray's (SET UP MY BRAIN while she has none), the cog in the Line |
+| `avatarctl settings reload` | a change made in Settings applies at once. A hand edit of `settings.toml` applies when she starts again: QUIT (her menu, or her tray's), then start her from the Start menu (`synaps-avatar`); or at once, with the script below (PowerShell 7) |
+| `avatarctl quit` | QUIT in her menu (it asks twice) or in her tray's (once) |
+
+For scripts, the socket takes the same one-line commands as on Linux
+([REFERENCE.md](REFERENCE.md#dev-control-and-test-tools)). It is `synaps-avatar.sock` in
+`[IO.Path]::GetTempPath()` (or in `%XDG_RUNTIME_DIR%` when that's set). PowerShell 7 can send one
+(Windows PowerShell 5.1's .NET has no Unix sockets; to get 7: `winget install Microsoft.PowerShell`,
+then run `pwsh`). This is what CI's shots do (`tools/shots/scenes.ps1`): her reply is one line,
+read until its newline, with a timeout.
+
+```powershell
+$s = [Net.Sockets.Socket]::new('Unix', 'Stream', 'Unspecified'); $s.ReceiveTimeout = 5000
+try {
+    $s.Connect([Net.Sockets.UnixDomainSocketEndPoint]::new((Join-Path ([IO.Path]::GetTempPath()) 'synaps-avatar.sock')))
+    $null = $s.Send([Text.Encoding]::UTF8.GetBytes("settings reload`n"))
+    $b = [byte[]]::new(65536); $m = [IO.MemoryStream]::new()
+    do { $n = $s.Receive($b); $m.Write($b, 0, $n) } while ($n -gt 0 -and $b[$n - 1] -ne 10)
+    [Text.Encoding]::UTF8.GetString($m.ToArray()).Trim()
+} finally { $s.Dispose() }
+```
 
 ## The installer
 
@@ -96,12 +141,19 @@ cargo-about, `installer/licenses/`).
   page with `cmd /c start URL`, and cmd cuts the URL at its first `&` (no `client_id`: claude.ai
   can't sign him in), so the step opens the whole URL from Synaps' stderr itself (a broken tab from
   Synaps may open first, until Synaps quotes it). Its stdin is held open until `auth.json` changes:
-  0.12 gives up at once on a closed one. Until her first question her tag reads ONLINE on Windows
-  (the daemon's environment can't be read there, so no login on file is "unknown", `creds.rs`);
-  her first question without a login turns it to NO BRAIN YET.
+  0.12 gives up at once on a closed one. The same sign-in later, from PowerShell (her install
+  folder's `steps`; the default folder shown): `powershell -NoProfile -ExecutionPolicy Bypass -File
+  "$env:LOCALAPPDATA\Programs\synaps-avatar\steps\steps.ps1" login`. A plain `synaps login
+  --provider claude` in a terminal (the line Settings ▸ Brain copies) opens the cut tab: copy the
+  whole URL it prints into your browser instead. Until her first question her tag reads ONLINE on
+  Windows for Claude, her default (the daemon's environment can't be read there, so no login on
+  file is "unknown", `creds.rs`); her first question without a login turns it to NO BRAIN YET.
 - **Her exe is the windowed build** (`cargo rustc … /SUBSYSTEM:WINDOWS`, her binary only): no
   console window from the Start menu or at sign-in. Without a console she logs to the file above.
-  `--check` from a terminal therefore prints nothing there: read the log, or use a cargo build.
+  `--check`, `-V` and `--set` from a terminal therefore print nothing there (`--set` writes its
+  line to the log): pipe them, `& "$env:LOCALAPPDATA\Programs\synaps-avatar\synaps-avatar.exe" -V
+  2>&1 | Write-Output`. PowerShell then waits for her, shows what she printed, and `$LASTEXITCODE`
+  holds `--set`'s exit code. Or use a cargo build.
 - **Her AUMID** `Synaps.Avatar`: registered under `HKCU\Software\Classes\AppUserModelId` with
   `DisplayName` and `IconUri`, and set on the Start-menu shortcut, so toasts show under her name
   and icon. The icon is capri-syn's, `assets/icon/capri-syn.ico` (256 to 16 px) and its 256 px PNG,
@@ -118,13 +170,13 @@ cargo-about, `installer/licenses/`).
   binaries its installer's receipt lists (`synaps.exe`, `hidden.exe`), the receipt, and once nothing
   else is in it the folder and its Path entry.
 - **Upgrades** close her (Restart Manager) and don't restart her. A process of hers that was killed and never went
-  (seen once on his box: one thread, 707 handles, for good) still maps her exe, and Windows won't
+  (seen once on a real desktop: one thread, 707 handles, for good) still maps her exe, and Windows won't
   let it be replaced ("DeleteFile failed; code 5"; Setup used to abort with exit 5). So just before
   her files go in, Setup renames the old exe aside (`synaps-avatar.exe.old-<time>`: a mapped exe
   can be renamed), and deletes it once the new one is in. Still mapped, it's left for the next
   Setup or the uninstall. If Setup stops before her files are in, it's renamed back. CI pins it as
   an image in another process and upgrades over it (`test-install.ps1`). Her quit itself is bounded
-  in #91.
+  (the quit row [below](#what-she-does-here)).
 - **Unsigned:** downloaded with a browser (Mark of the Web), SmartScreen stops it ("Windows
   protected your PC"; More info → Run anyway). Defender lets it be. Both installers, in the VM.
 
@@ -258,22 +310,23 @@ What CI can't show is item 15 below.
 |---|---|---|
 | her body, the Line, the reader, the intro | GPUI pop-ups made bare topmost tool windows: no taskbar button, not in Alt+Tab, no DWM frame or rounding | P0 [VM] |
 | click-through | layered + `WS_EX_TRANSPARENT`, wanted by a 10 ms pointer poller over her input region, set by her UI thread on the poller's wake-up (the poller never waits on it) | P0 [VM]; [M] the 2026-11-19 hang |
-| on top | Windows sometimes leaves a topmost window under plain ones with its `WS_EX_TOPMOST` bit still set (on Haseeb's box after he opened an app from Explorer; the second taskbar too). The poller checks her place every 250 ms and when a window comes forward; under a plain window, her UI thread puts her windows back on top (`z: re-topmost (was below …)` in her log). Not while a fullscreen app is in front; never over another topmost window (his picture-in-picture, an always-on-top app). While her puts don't hold, the checks slow down to one every 8 s until one finds her on top. A window still over her right after a put is above the topmost band (Task Manager's "always on top", the touch keyboard): it and every plain window over it are left out for 60 s, doubled each time it's found over her again, 10 min at most (`z: can't get above …`, once a window). The poller's fullscreen check never asks the shell (`SHQueryUserNotificationState` is answered by explorer: a hung one would stall the poller) | [M] 2026-11-19 |
+| on top | Windows sometimes leaves a topmost window under plain ones with its `WS_EX_TOPMOST` bit still set (seen on a real desktop after an app was opened from Explorer; the second taskbar too). The poller checks her place every 250 ms and when a window comes forward; under a plain window, her UI thread puts her windows back on top (`z: re-topmost (was below …)` in her log). Not while a fullscreen app is in front; never over another topmost window (his picture-in-picture, an always-on-top app). While her puts don't hold, the checks slow down to one every 8 s until one finds her on top. A window still over her right after a put is above the topmost band (Task Manager's "always on top", the touch keyboard): it and every plain window over it are left out for 60 s, doubled each time it's found over her again, 10 min at most (`z: can't get above …`, once a window). The poller's fullscreen check never asks the shell (`SHQueryUserNotificationState` is answered by explorer: a hung one would stall the poller) | [M] 2026-11-19 |
 | fullscreen | a window covering its monitor (not a tool window, not the shell's: Start, Search, Alt+Tab and the flyouts are none, nor his focused window). The shell's UI: a window of the shell's processes (explorer, StartMenuExperienceHost, SearchHost, ShellExperienceHost, ShellHost, TextInputHost, LockApp) of a known class or any tool window; another process's window is an app whatever its class (a full-screen UWP app's `Windows.UI.Core.CoreWindow`) | [M] 2026-11-19 |
 | perching | `EnumWindows`, DWM frame bounds, WinEvent hooks for moves, shows, hides, minimise, cloak, foreground | P0 [VM] |
 | virtual desktops | windows on another desktop are cloaked (left out); `IVirtualDesktopManager` confirms; a switch (the shell's registry value) is `Hint::Desktop` | [VM] item 8 (after a fix) |
-| quit | her bye, the daemon told (800 ms at most), her state saved, GPUI's teardown; 2 s after her bye a watchdog ends her (`quit: still here … ending now (exit N)`, her exit code: 2 after a fatal error), and after GPUI's run she ends with `TerminateProcess` on herself, not `ExitProcess` (no DLL's detach can hold her with her exe mapped); every exit once GPUI is up goes that way, her tray icon taken out first from the thread that ends her (300 ms at most; no ghost icon when her UI thread is the one stuck). Windows only: on Linux her teardown runs to its end. On his box once, desk locked: a quit stayed, a kill left her half-gone, her exe pinned, and the installer failed (code 5). `tests/windows/test-quit.ps1` (CI, last): gone within 5 s of her bye, exit code 0 and her exe free, unlocked, with her teardown held 10 s (`SA_TEST_QUIT_STALL_MS`, tests only: the watchdog's line, then gone), and with the session locked | [M] 2026-11-19 |
+| quit | her bye, the daemon told (800 ms at most), her state saved, GPUI's teardown; 2 s after her bye a watchdog ends her (`quit: still here … ending now (exit N)`, her exit code: 2 after a fatal error), and after GPUI's run she ends with `TerminateProcess` on herself, not `ExitProcess` (no DLL's detach can hold her with her exe mapped); every exit once GPUI is up goes that way, her tray icon taken out first from the thread that ends her (300 ms at most; no ghost icon when her UI thread is the one stuck). Windows only: on Linux her teardown runs to its end. Once on a real desktop, locked: a quit stayed, a kill left her half-gone, her exe pinned, and the installer failed (code 5). `tests/windows/test-quit.ps1` (CI, last): gone within 5 s of her bye, exit code 0 and her exe free, unlocked, with her teardown held 10 s (`SA_TEST_QUIT_STALL_MS`, tests only: the watchdog's line, then gone), and with the session locked | [M] 2026-11-19 |
 | monitors | `EnumDisplayMonitors`; `WM_DISPLAYCHANGE`, `WM_DPICHANGED` and a work-area change (taskbar moved) are `Hint::Layout`, logged (`windows: layout: …`) | [VM] item 4 |
 | DPI | per-monitor aware (v2), set before GPUI starts. Her windows keep the primary monitor's scale everywhere (PW-5): her art is laid out at one scale. A display change reaches GPUI from the message loop (PW-6) | [VM] item 3 (100 % and 150 %; PW-6 fixed a crash) |
 | effect layers | the bolt and anything reaching outside her window: a plain Win32 window per layer, solid colour, shaped by a region, click-through, never activated (`fx.rs`). The rest is painted in her window | [VM] item 9 |
 | her keys | `RegisterHotKey`: **Win+Alt+C** summons (a tap), **Win+Alt+Ctrl+C** toggles talk. Win alone is the shell's | [VM] item 5 |
+| her tray icon | `Shell_NotifyIconW` (`tray.rs`): her icon (her exe's, or your `icon.ico` above), the tooltip `capri-syn · ONLINE` (her tag's word; `HIDDEN` while hidden). A click opens the Line (her key's tap); a right-click opens her menu, the same rows as her right-click menu (`menu.rs`: RESET POSITION, DND, ATTENTION with its three choices, HANDS-FREE TALK, COPY LAST REPLY, HIDE or SHOW, SETTINGS, QUIT), and its QUIT quits at once. Back after Explorer restarts; gone when she quits, no ghost icon. Linux has none yet | CI (unit tests) |
 | the Line's keyboard | see below | [VM] items 2, 6 |
 | music | SMTC (the media flyout's sessions): playing or quiet, and whether every playing session is a video. Edge reports no playback type: a video in Edge counts as music | [VM] item 10 |
 | notifications | toasts, see below | [VM] item 11 (after a fix) |
 | lock, sleep, idle | WTS session notifications, power broadcasts, `GetLastInputInfo` | P0 [VM] |
 | voice: the link | her end of the sidecar's link: loopback TCP after a two-token handshake (`endpoint.json` in `%LOCALAPPDATA%\capri-voice`); Linux keeps the Unix socket | CI (both ends, Rust and Python) |
-| voice: the sidecar | `tools/capri_voice_win.py`: PortAudio (WASAPI) capture and playback, SMTC pause, session-volume duck with Linux's crash repair, lock, calls (the mic privacy store), DND. The voice installer (below) puts its bundle (embeddable CPython 3.13 + wheels) beside her: `docs/design/windows-voice.md`. The lock is the session's own state (WTS): Windows 11's lock screen runs on the Default desktop | CI; [VM] item 14 (lock: after a fix); live audio: item 13 (his machine) |
-| voice: she runs it | while `[voice] enabled`: `python.exe capri-voice` from `voice\` beside her exe (or `CAPRI_VOICE_BUNDLE`), no console window, in a job object that kills it with her (however she ends); restarted after 1, 2, 4 … 60 s; its log `%LOCALAPPDATA%\capri-voice\capri-voice.log`. Not before the models are there. `CAPRI_VOICE_SPAWN=0`: he runs it himself. `[voice] enabled` is read at start and on `capri-ctl settings reload`; a new `[voice] mic` there starts the sidecar again on it (the sidecar reads its mic only when it starts) | CI (job, backoff, bundle lookup); [VM] item 14 |
+| voice: the sidecar | `tools/capri_voice_win.py`: PortAudio (WASAPI) capture and playback, SMTC pause, session-volume duck with Linux's crash repair, lock, calls (the mic privacy store), DND. The voice installer (below) puts its bundle (embeddable CPython 3.13 + wheels) beside her: `docs/design/windows-voice.md`. The lock is the session's own state (WTS): Windows 11's lock screen runs on the Default desktop | CI; [VM] item 14 (lock: after a fix); live audio: item 13 (real hardware) |
+| voice: she runs it | while `[voice] enabled`: `python.exe capri-voice` from `voice\` beside her exe (or `CAPRI_VOICE_BUNDLE`), no console window, in a job object that kills it with her (however she ends); restarted after 1, 2, 4 … 60 s; its log `%LOCALAPPDATA%\capri-voice\capri-voice.log`. Not before the models are there. `CAPRI_VOICE_SPAWN=0`: he runs it himself. `[voice] enabled` is read at start and on a `settings reload` ([Control](#control-no-avatarctl-here)); a new `[voice] mic` there starts the sidecar again on it (the sidecar reads its mic only when it starts) | CI (job, backoff, bundle lookup); [VM] item 14 |
 | voice: connecting | on a thread (a stale endpoint can't freeze her: up to ~2 s); Linux connects inline, as before | CI (a silent listener) |
 | hold-to-talk | opt-in, `[voice] hold_to_talk = true`: the summon key's press is `talk press`; her key thread then reads the key every 25 ms (`GetAsyncKeyState`, as OBS does) and its release is `talk release`. No keyboard hook. Off: the summon key is a tap, as before | CI (the state machine); [VM] item 14 |
 
@@ -283,7 +336,7 @@ Windows hands a process the foreground only right after the user's own input to 
 (`docs/design/windows-line-keyboard.md`):
 
 - her key and a click on her take the keyboard at once;
-- any other opening (a summon from the brain, `capri-ctl`, voice) shows the Line **without** the
+- any other opening (a summon from the brain, a `talk tap` on her control socket, voice) shows the Line **without** the
   keyboard, and her tag says `WIN+ALT+C TO TYPE`; his key or a click on the Line then takes it;
 - she never takes the keyboard from the window he works in, never flashes, never injects input.
 
@@ -325,13 +378,15 @@ desktop. `Set-ShotDisplay` and `Clear-ShotDesktop` change the machine (scaling, 
 dialog closed, a cover window left up), so they refuse to run off a GitHub-hosted runner
 (`RUNNER_ENVIRONMENT`) unless `SHOOT_WIN_ANYWAY` is set.
 
+<a name="vm-pending-one-vm-day"></a>
+
 ## The VM day (2026-11-18)
 
-The capri-win VM on bella: Windows 11 Enterprise Evaluation 26H2 (build 26300), QEMU/KVM, two
+The VM: Windows 11 Enterprise Evaluation 26H2 (build 26300), QEMU/KVM, two
 VirtIO GPU heads (1280×800 and 1920×1200), D3D on WARP (software), an HDA sound card with a silent
 input, 8 GB. Builds: main's CI installers (3713ff0) and this branch built in the VM by
 `install.ps1`'s source path. Driven from inside his session (`SendInput`, the QEMU keyboard for his
-keys and UAC); screenshots kept outside the repo. **[VM]**: true of the VM (software rendering, no real mic), to check again on his machine.
+keys and UAC); screenshots kept outside the repo. **[VM]**: true of the VM (software rendering, no real mic), to check again on real hardware.
 
 | # | what | result |
 |---|---|---|
@@ -340,21 +395,20 @@ keys and UAC); screenshots kept outside the repo. **[VM]**: true of the VM (soft
 | 3 | PW-5 + DPI: 100 % and 150 % | **pass after a fix**. Her window stays 500×695 and her body the same size on both monitors, crisp. Her first move onto the second monitor **aborted her** (`RefCell already borrowed`, `async_context.rs:178`): fixed by **PW-6** (`vendor/gpui-pre-windows/PATCHES.md`) |
 | 4 | hotplug, the taskbar | **pass**. `windows: layout: monitors changed` and `… the work area changed` (new log lines) on a monitor detached with her on it (`her monitor went away: to 848,78`), attached again, a DPI change, the taskbar's auto-hide on and off (Windows 11's taskbar has no other edge) |
 | 5 | her keys | **pass**. Both register (none taken); Win+Alt+C opens the Line with the keyboard; Win+Alt+Ctrl+C toggles talk (`toggle: listening`) |
-| 6 | the Line from `capri-ctl` | **pass**. `talk tap`: the Line opens parked, `ONLINE · WIN+ALT+C TO TYPE` on her tag and on the Line, the terminal keeps the keyboard; his Win+Alt+C, or his click on the Line, takes it; Esc gives it back |
+| 6 | the Line from her control socket | **pass**. `talk tap` (sent from a terminal): the Line opens parked, `ONLINE · WIN+ALT+C TO TYPE` on her tag and on the Line, the terminal keeps the keyboard; his Win+Alt+C, or his click on the Line, takes it; Esc gives it back |
 | 7 | the contract suite | **11 of 13**, `keyboard` and `body-and-teleport-fx` among them. `perch-space` and `monitors-and-areas` need the driver to make a second monitor and a panel that reserves space (`split_monitors`, `dock_top`), not written for Windows (follow-up); items 3 and 4 checked the same by hand |
 | 8 | virtual desktops | **pass after a fix**. With one desktop Windows 11 writes no `CurrentVirtualDesktop` until the first switch, so the watcher never started (`no virtual desktop in the registry`); it now watches both keys (Windows 11's and the per-session one) and logs which holds the current desktop. A window on desktop 2 is refused as a perch (cloaked: `not visible`); a switch logs `windows: virtual desktop switch` and her perch on desktop 1 is left (`left with the workspace`) |
 | 9 | effect layers | **pass**. The launch and teleport bolts draw outside her window (captured mid-flight); the layer windows are layered, click-through (`WS_EX_TRANSPARENT`) and `WS_EX_NOACTIVATE`; under/over her: the suite |
 | 10 | SMTC | **pass, one gap**. Media Player with a song: `smtc playing (Microsoft.ZuneMusic…=Playing)`, LISTENING, her headphones on; with a video: `(video)`. **Edge reports no playback type** for a video (a file or a page's `<video>`): to her it is music. A Discord call: not tried (no account in the VM) |
 | 11 | toasts | **pass after a fix**. `CAPRI // NEEDS YOU` under "synaps-avatar", the key there. It came without her face: `fs::canonicalize`'s `\\?\` path made a `file://///?/…` URI, which the shell drops silently |
 | 12 | the installer, interactively | **pass after a fix**. SmartScreen first (unsigned). The pack page: a non-pack refused, Browse (a folder picker), empty allowed; the shortcut starts her with no console; a toast shows her icon and face; autostart starts her 3.6 s after sign-in; uninstall from Settings → Apps, with her running, leaves none of hers (his settings stay). **Settings → Apps said 44.6 GB**: Inno sized the pack's line as `\*` (the root of C:) before the page had a value; fixed, and CI checks the size |
-| 13 | voice, live audio | not in the VM: his machine (mic, ears, Whisper and Kokoro speed). The bundle's onnxruntime loaded (the wake word ran), but on a VM with Build Tools, so whether a clean Windows wants the VC++ runtime is still open |
+| 13 | voice, live audio | not in the VM: real hardware (mic, ears, Whisper and Kokoro speed). The bundle's onnxruntime loaded (the wake word ran), but on a VM with Build Tools, so whether a clean Windows wants the VC++ runtime is still open |
 | 14 | voice, her side | **pass after a fix**. The voice installer (SmartScreen too) and its models window (~358 MB in ~40 s); `voice: sidecar started`, killed with her; `[voice] enabled = false` + `settings reload`: `sidecar stopped (voice off)`, on: started again; the voice uninstaller under her removes everything, she backs off (1, 2, 4, 8 s, `no models`); `hold_to_talk`: a hold listens and its release sends (`key up: transcribing`), a tap opens the Line, a release with Notepad in front ends it and Notepad keeps the keyboard, Win+L mid-hold ends it; the sidecar listens on 127.0.0.1 only: no firewall prompt. **The sidecar missed Windows 11's lock screen** (its curtain runs on the Default desktop): the wake word's mic stayed open on it for 14 s. It now asks the session (WTS) |
 | 15 | install.ps1, interactively | **pass after fixes**, below |
 
 ### install.ps1 in the VM
 
-`irm …/install.ps1 | iex` in Windows PowerShell 5.1, no Python, no release (so a source build), on
-bella's line:
+`irm …/install.ps1 | iex` in Windows PowerShell 5.1, no Python, no release (so a source build):
 
 - Synaps 0.12.0 through its own installer; the daemon up.
 - The source path: the Build Tools prompt, then UAC (Visual Studio Installer, verified publisher
@@ -364,7 +418,8 @@ bella's line:
 - Her build: ~6.5 min (release, thin LTO, 8 vCPUs). The winget prompt for Python 3.13 (per user,
   ~1 min), found at once without a new terminal; the pack in ~1.5 min. **~12 min end to end**,
   his answers included.
-- `synaps login` (y at "pick one now"): its provider picker draws in the console.
+- `synaps login` (y at "pick one now"): its provider picker draws in the console. (install.ps1
+  offered a sign-in then; it no longer does: giving her a brain is hers, Settings ▸ Brain.)
 - After a sign-out and in (a restart, autologon): the Run values start the daemon and her (her
   window 3.4 s after sign-in) and she finds her session. **`synaps.exe daemon --detach` opened a
   terminal** that took the foreground for a moment: the Run value now goes through

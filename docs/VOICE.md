@@ -1,16 +1,26 @@
 # Capri's voice
 
-Push-to-talk in, spoken replies out. The avatar holds no audio. `tools/capri-voice` (the sidecar) owns the
-mic, the speech models and the speaker, and talks to the avatar over a unix socket. The protocol is at the
-top of that file. Everything runs on the CPU: whisper.cpp for speech-to-text, Kokoro (int8, onnxruntime)
-for speech. Setup: `tools/capri-voice-setup`, then `tools/systemd/capri-voice.service`.
+Push-to-talk, hands-free and "Hey Capri" in, spoken replies out. The avatar holds no audio.
+`tools/capri-voice` (the sidecar) owns the mic, the speech models and the speaker, and talks to the
+avatar over a unix socket (Windows: loopback TCP with a token handshake). The protocol is at the top of
+that file. Everything runs on the CPU: whisper.cpp for speech-to-text, Kokoro (int8, onnxruntime) for
+speech. Setup on Linux: `install.sh --voice` (it runs `tools/capri-voice-setup`, then installs
+`tools/systemd/capri-voice.service`). On Windows: the "Her voice" page of her installer, or
+`install.ps1 --voice`; she starts the sidecar herself ([WINDOWS.md](WINDOWS.md#her-voice-a-second-installer)).
+
+What follows is the Linux sidecar unless it says Windows. On Windows its audio layer is WASAPI
+(PortAudio), the lock is the session's own (WTS), a call is another app using the mic (Windows' mic
+privacy store), and there is no `rubberband` (below).
 
 ## Settings: `[voice]` in `~/.config/synaps-avatar/settings.toml`
+
+Windows: `%APPDATA%\synaps-avatar\settings.toml`. "HEY CAPRI" (`wake_word`) is also a row in her
+Settings; the rest is the file.
 
 | key | default | |
 |---|---|---|
 | `enabled` | `false` | voice on: the talk key, spoken replies, and the persona lines below |
-| `stt_model` | `"small.en"` | `"tiny.en"`, `"base.en"`, `"small.en"` or `"medium.en"` |
+| `stt_model` | `"small.en"` | `"tiny.en"`, `"base.en"`, `"small.en"` or `"medium.en"`. Setup fetches `small.en` and `base.en` only: for `tiny.en`, put `ggml-tiny.en-q5_1.bin` yourself in `~/.local/share/capri-voice/models` (`$XDG_DATA_HOME/capri-voice/models` when that's set; Windows: `%LOCALAPPDATA%\capri-voice\models`; `CAPRI_VOICE_MODELS` overrides); `medium.en` is read from `~/.local/share/pywhispercpp/models/ggml-medium.en-q5_0.bin` (Windows: under `%USERPROFILE%`). Without the file her voice never gets ready (the sidecar logs why) |
 | `voice` | her voice (below) | a Kokoro voice or a voice string |
 | `speed` | `1.2987` | 0.5 to 2; 1.2987 = 1/0.77 goes with the default voice |
 | `pace` | `"stretch"` | how the speed is made: `"stretch"` (Kokoro at its own speed, the time scaled in the pitch pass) or `"model"` (Kokoro's speed) |
@@ -27,11 +37,13 @@ for speech. Setup: `tools/capri-voice-setup`, then `tools/systemd/capri-voice.se
 | `wake_sensitivity` | `0.5` | 0.1 to 0.9: higher wakes more easily (and falsely more often) |
 | `wake_handsfree` | `true` | "Hey Capri" starts hands-free (with `handsfree` on): quiet for `handsfree_timeout`, it ends and the wake word listens again. `false`: one turn, as before |
 | `echo` | `"auto"` | `"auto"` (the sink says headphones or speakers), `"headphones"` (talking over her stops her) or `"speakers"` (half-duplex) |
-| `vocab` | `[]` | your own words for speech-to-text: names, machines, jargon (`["Lynx", "polish-e", "devbox"]`). Whisper's recognition prompt is `Capri, choom, preem, Night City, Synaps, avatarctl` (`capri-ctl` on Windows), and these go after it. Up to 16 entries of at most 32 characters, 200 characters in all: past that, the first ones that fit are kept and the rest are left out, logged (not an error). A word already in her prompt (`Capri`, `choom`, …) still takes one of those slots, though the sidecar skips it, so don't repeat them. An empty entry, a comma or a control character in one is an error. They also join the prompt-echo filter (three or more words, all from the prompt, are dropped as junk; [What counts as speech](#what-counts-as-speech)), so leave out everyday words like "on", "off" or "build": "build on, off" would be thrown away |
+| `vocab` | `[]` | your own words for speech-to-text: names, machines, jargon (`["Kubernetes", "nginx", "devbox"]`). Whisper's recognition prompt is `Capri, choom, preem, Night City, Synaps, avatarctl` (`capri-ctl` on Windows: only a word in the prompt, no such tool ships), and these go after it. Up to 16 entries of at most 32 characters, 200 characters in all: past that, the first ones that fit are kept and the rest are left out, logged (not an error). A word already in her prompt (`Capri`, `choom`, …) still takes one of those slots, though the sidecar skips it, so don't repeat them. An empty entry, a comma or a control character in one is an error. They also join the prompt-echo filter (three or more words, all from the prompt, are dropped as junk; [What counts as speech](#what-counts-as-speech)), so leave out everyday words like "on", "off" or "build": "build on, off" would be thrown away |
 | `mic` | `""` | Windows: the microphone she listens on, by its WASAPI name (below); empty: Windows' default. Linux: unused (the service's own `CAPRI_VOICE_SOURCE`) |
 
 `avatarctl settings reload` re-sends changed voice settings to a connected sidecar. On Windows a new
-`mic` starts her sidecar again on it (`capri-ctl settings reload`); no restart of hers is needed.
+`mic` starts her sidecar again on it, on a `settings reload` sent to her control socket; Windows has
+no `avatarctl` to send it, so there it's a restart of hers, or a script
+([WINDOWS.md](WINDOWS.md#control-no-avatarctl-here)).
 
 ### Windows: which `mic`
 
@@ -76,16 +88,16 @@ a settings error.
 
 ## Talking to her: hold, or toggle
 
-- **Hold** (`$mod+c` → `capri-ctl talk press|release`): the mic is open while the key is down; the
+- **Hold** (`$mod+c` → `avatarctl talk press|release`): the mic is open while the key is down; the
   release sends. A tap (under 250 ms) opens the Line for typing.
-  - A `talk tap` (Windows' key, `capri-ctl`) while a hold listens is ignored: it would end the hold. A
+  - A `talk tap` (Windows' key, `avatarctl talk tap`) while a hold listens is ignored: it would end the hold. A
     press with no mic that has gone over 1 s without its `talk release` lost it: a tap clears it and goes
     ahead.
-- **Toggle** (`$mod+Ctrl+c` → `capri-ctl talk toggle`, on press): one tap opens the mic, and his pause
+- **Toggle** (`$mod+Ctrl+c` → `avatarctl talk toggle`, on press): one tap opens the mic, and his pause
   sends: `silence_s` (1.0 s) of silence after he has spoken, ×1.5 while he has said less than 1 s ("so…",
   "um, Capri…" often stop for a breath). The tag reads `● MIC 0:03 ▮▮▯ · AUTO`.
   - A second tap sends now once he has started; before that it cancels. The talk key does the same.
-  - Esc in the Line, or `capri-ctl talk cancel`: nothing is sent.
+  - Esc in the Line, or `avatarctl talk cancel`: nothing is sent.
   - No speech in 8 s: `NOTHING HEARD · MIC CLOSED`. At 60 s it sends what it has
     (`SENT AT 1:00 · MAX LENGTH`; a 42 s utterance decodes whole).
   - Holding the chord is one toggle: after a toggle, more are ignored until its key is seen up.
@@ -94,10 +106,12 @@ a settings error.
     window when the turn ends.
 - **Windows** has no key release to listen to without a low-level keyboard hook (which game anti-cheat
   can dislike), so the avatar registers two hotkeys itself and toggle is how you talk there:
-  - **Win+Alt+`key`** (Win+Alt+C) is a tap (`talk tap`): it opens or closes the Line and never holds.
+  - **Win+Alt+`key`** (Win+Alt+C) is a tap (`talk tap`): it opens or closes the Line and never holds,
+    unless `[voice] hold_to_talk = true`: then a hold talks (her key thread reads the key while it's
+    down, no hook) and a tap still opens the Line.
   - **Win+Alt+Ctrl+`toggle_key`** (Win+Alt+Ctrl+C) is the toggle above.
-  - Win alone is the shell's (Win+C is taken). A chord another app holds is logged at start, and
-    `capri-ctl talk tap|toggle` still work.
+  - Win alone is the shell's (Win+C is taken). A chord another app holds is logged at start; a click on
+    her tray icon still opens the Line, and her menu's HANDS-FREE TALK still talks.
 - **The mic refuses**, with the reason on her tag: a secret on screen (an approval doesn't: nothing
   spoken answers one), the screen locked, voice off, no speech detector (toggle), and for a toggle,
   her hidden (her tag must be on screen). A secret appearing or the screen locking closes any open
@@ -121,7 +135,7 @@ a settings error.
 ## Hands-free: a conversation
 
 - **On:** "Hey Capri" (the wake word, below; `wake_handsfree`), double-tap the toggle chord (the second tap
-  within 400 ms, before he has said anything), the menu's HANDS-FREE TALK, or `capri-ctl talk handsfree on`.
+  within 400 ms, before he has said anything), the menu's HANDS-FREE TALK (her tray's too, on Windows), or `avatarctl talk handsfree on`.
   Always off at launch, never restored.
   Refused, with the reason on her tag, when voice is off, `handsfree = false`, a secret is on screen,
   the screen is locked, he is in a call, she is hidden, or there is no sidecar.
@@ -182,18 +196,18 @@ a settings error.
   hands-free stream closes only if she stays undrawn for more than 2 s. Hidden for a fullscreen window
   ends it at once, so hands-free can't run under a fullscreen app.
 - Cap in the sidecar, whatever the avatar does: its `max_s` (from `handsfree_max`).
-- Measured on the virtual chain (bella, nothing played aloud): see the PR.
+- Measured on a virtual audio chain (nothing played aloud) when it was built.
 
 ## "Hey Capri": the wake word (on by default)
 
-**On by default** (his call, 2026-11-16), with the known gaps below: far and fast/casual speech. Round 3 measured it on his own takes (recorded with `tools/capri-wake-record`; they stay on
-his machine and only ids and counts left it). Everything it ships with (stage 1's head, the filter's two
+**On by default** (since 2026-11-16), with the known gaps below: far and fast/casual speech. Round 3 measured it on one tester's own takes (recorded with `tools/capri-wake-record`; they stay on
+the tester's machine and only ids and counts left it). Everything it ships with (stage 1's head, the filter's two
 thresholds) was fitted on stock synthetic voices only (Kokoro packs, espeak-ng), never on a recording of anyone.
 
 - **On** whenever voice is on, unless `wake_word = false` (then nothing about it loads). One mic
   stream stays open. Her tag stays her usual one (`ONLINE`, her mood, music) with a mic glyph in place of
   its dot while the stream is open (no timer, no meter, no level events). Until 2026-11-16 it read
-  `◌ MIC ON · SAY "HEY CAPRI"`; Haseeb asked for just `ONLINE`.
+  `◌ MIC ON · SAY "HEY CAPRI"`; now it's just `ONLINE`.
 - **Stage 1, always on:** openWakeWord's front end (its v0.5.1 `melspectrogram.onnx` and
   `embedding_model.onnx`, SHA-pinned; its README puts its released models under CC BY-NC-SA 4.0, so
   personal use) and our head (`tools/wake/hey-capri-v1.npz`: 16 embeddings of 96 → 64 → 1, numpy). Every
@@ -222,7 +236,7 @@ thresholds) was fitted on stock synthetic voices only (Kokoro packs, espeak-ng),
   The same stream goes on as the hands-free one (no gap: nothing he says right after the phrase is lost),
   other audio is held, the tag reads `● MIC LIVE · HANDS-FREE`, and every hands-free rule above applies: each
   pause sends, her replies are spoken, half-duplex or barge-in by `echo`, the end phrases, the refusals.
-  - "Hey Capri, what's spike doing?": the request is the conversation's first turn, the phrase cut from it.
+  - "Hey Capri, what's the build doing?": the request is the conversation's first turn, the phrase cut from it.
   - "Hey Capri" alone (or "Hey Capri, let's talk"): she just listens; nothing is sent until he speaks.
   - **The phrase is never sent as his words.** That first utterance holds the phrase's audio whenever the check
     heard more than the phrase, and Whisper decodes it again there, sometimes wrong: on his bare "Hey Capri"
@@ -243,7 +257,7 @@ thresholds) was fitted on stock synthetic voices only (Kokoro packs, espeak-ng),
   - Where hands-free may not open (a secret on screen, she is hidden, a lock, a call), the wake stream is
     closed too, so the phrase can't be heard there at all.
 - **One turn instead** (`wake_handsfree = false`, or `handsfree = false`): a pass flips the tag to `● MIC`,
-  holds other audio, and takes his turn as a toggle does (it ends on his pause). "Hey Capri, what's spike
+  holds other audio, and takes his turn as a toggle does (it ends on his pause). "Hey Capri, what's the build
   doing?" is one turn, and the phrase is cut from it. "Hey Capri" then a pause: the mic waits 5 s for
   speech, then `NOTHING HEARD`. "Hey Capri, let's talk" (`let's chat`, `hands free`) starts hands-free. A
   turn is sent at 30 s. Then the idle wake stream goes on.
@@ -267,7 +281,7 @@ thresholds) was fitted on stock synthetic voices only (Kokoro packs, espeak-ng),
   and a threshold set against two public AMI meetings (≤ 5 extra candidates an hour). A hop that matches them
   is a candidate too; every candidate still goes through the same check and filter. It is written only if
   2-fold cross-validation on his takes shows a gain, read only if it is there, and `--remove` deletes it.
-- **Measured, round 3** (offline replays of this exact path on bella; the PR has the tables): on his 40 takes
+- **Measured, round 3** (offline replays of this exact path on a dev machine; the PR has the tables): on his 40 takes
   it wakes on all 14 quiet, 7 of 10 with media playing, all 6 bare, **none of 6 far and none of 4 casual**
   (stage 1 doesn't fire on them), and **none of his 10 sound-alikes** (round 2's path: 1). Wakes land
   0.64 s (median; p95 0.72) after the end of "Capri". With his personal layer, held out (fit on half his
@@ -401,7 +415,7 @@ hide) drops only itself: the strip then shows the newest one still unheard.
 - **Nothing she says is heard** (his spoken turns included) **with the screen locked or in a call**: the
   sidecar checks before every sentence and every 0.35 s while one plays, stops her, and her tag says why.
   Locked = a locker process (`i3lock`, `xsecurelock`, `slock`, `swaylock`, … by name) or logind's
-  LockedHint. A call = any other app capturing a real source (not a monitor; level meters don't count).
+  LockedHint (Windows: the session's lock state). A call = any other app capturing a real source (not a monitor; level meters don't count).
   If `pactl` can't answer, that counts as a call ("audio state unknown").
 - With voice on, the avatar connects to the sidecar at start and looks for it again every 10 s.
   Connecting opens no mic.
@@ -412,7 +426,7 @@ hide) drops only itself: the strip then shows the newest one still unheard.
 af_heart:0.5,af_bella:0.3,af_jessica:0.2|af_heart:0.84,af_jessica:0.56,af_sarah:-0.4@+7.00+clean   speed 1/0.77, pace "stretch", flow "emphasis"
 ```
 
-Haseeb picked it by ear (LOCKED 13 and 14 in the workspace, then round r26):
+Picked by ear over blind listening rounds (the last one r26):
 - **W3:** a bright, energetic blend.
 - **F2:** stressed words, no added pauses.
 - **Pitch (r26, "R-A"):** `@+7.00`, a ~306 Hz median. Before r26 it was `@+4.93` (~272 Hz). Round r26 ("anime
@@ -543,12 +557,12 @@ the voice bundle on Windows), so a local edit is lost. A word she says wrong for
 upstream, as a regex and its replacement, for example `(r'\bnginx\b', 'engine x')`. `[voice] vocab` is the
 other direction: it helps Whisper spell what you say, not how she says it.
 
-## Measured in r24, at the old default `@+4.93` (six test lines, bella quiet)
+## Measured in r24, at the old default `@+4.93` (six test lines, a quiet machine)
 
 This is the r24 round that picked the pace, at the pitch of the time (`@+4.93`, ~272 Hz). Today's default is
 the same path at `@+7.00` (~306 Hz, "Her voice" above); the shape comparisons still hold.
 
-Compared with the reference Haseeb picked (`rubberband -3 -F -p 2 -t 0.77` on the F2 render), against the two
+Compared with the reference picked by ear (`rubberband -3 -F -p 2 -t 0.77` on the F2 render), against the two
 ways of building it in the engine. He heard all three and chose the stretch (ALT):
 
 | | reference | **pace "stretch" (ALT, his pick; @+4.93)** | pace "model" (ENGINE: Kokoro speed 1.32, @+4.50) |
@@ -565,9 +579,8 @@ The stretch keeps the reference's pitch shape: its floor, top and sentence ends 
 semitone. Kokoro's own speed changes the shape. ASR (whisper base.en) loses no word in either; the stretch
 transcribes exactly like W3 plain.
 
-`voice-samples/r24/SHIPPED.wav` was the default path in r24 (`capri-voice --render` with no options, then
-`@+4.93`; today's default renders `@+7.00`). It is
-sample-identical to ENGINE-alt.wav up to its loudness normalisation: the same length to the sample, and
+r24's render of its default path (`SHIPPED.wav`, not in this repository: `capri-voice --render` with no
+options, then `@+4.93`; today's default renders `@+7.00`) is sample-identical to ENGINE-alt.wav up to its loudness normalisation: the same length to the sample, and
 75.8 dB SNR after one gain (at most 1.5 LSB apart).
 
 ## Checks
@@ -578,5 +591,5 @@ sample-identical to ENGINE-alt.wav up to its loudness normalisation: the same le
 - `tools/capri-voice --render "One. || Two *words*. ||| A new reply." --out /tmp/x.wav [--voice V --speed S
   --flow F --pace P]` writes a sample. `||` separates sentences and `|||` separates replies. It never opens
   the mic or plays anything.
-- `tools/abuild test` covers the markup, display and persona tests (`voice::tests`, `reader::tests`,
+- `cargo test` (maintainers: `tools/abuild test`) covers the markup, display and persona tests (`voice::tests`, `reader::tests`,
   `session::tests`, `settings::tests`).

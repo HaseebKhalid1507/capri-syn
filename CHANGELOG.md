@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Docs: true for v1
+- docs/ says what main does: her Settings page, menu and Windows tray; Settings ▸ Brain as the way to
+  a brain; Windows 10 and Windows 11 on Arm untested; no `capri-ctl` (WINDOWS.md's Control: what
+  Windows has instead, with a PowerShell 7 script); Known issues in INSTALL.md (the dark slab on X11
+  without a compositor, #72, with its likely workaround); which Whisper models setup fetches;
+  `--set`'s exit codes; no one's names or machines.
+- README: Windows 11 is a platform, not "in progress" (its badge, its intro line, its Platforms row
+  with the VM day); the dead `#vm-pending-one-vm-day` link fixed.
+
 ### Her brain, the last nits (Settings PR 6)
 - A local URL changed while the daemon runs: Synaps reads it at its start, so it keeps trying the
   old one. When its error names another URL than the one she shows, Settings ▸ Brain drops the ✓
@@ -94,7 +103,7 @@
 - `capri-syn-setup-x86_64.exe` (was `synaps-avatar-setup-x86_64.exe`; the same AppId, so an older install
   upgrades in place; the voice one is `capri-syn-voice-setup-x86_64.exe`) leaves a working Capri on a PC with
   nothing installed: Synaps (the pinned release), its daemon (one on another protocol is said, with the fix), her
-  art downloaded and built on his machine (CapriCore and lachy's, never in the installer), her voice from her own
+  art downloaded and built on the PC (CapriCore and lachy's, never in the installer), her voice from her own
   release, and the sign-in. A step that can't finish says why on the finish page, with the one command to retry.
   install.ps1 runs the same steps (`packaging/windows/steps.ps1`).
 

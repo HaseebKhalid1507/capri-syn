@@ -6,7 +6,7 @@
   <img alt="Rust 1.100" src="https://img.shields.io/badge/rust-1.100-ff1438?style=flat-square&labelColor=0a0a0b&logo=rust&logoColor=ff1438">
   <img alt="Linux: X11" src="https://img.shields.io/badge/linux-X11-ff1438?style=flat-square&labelColor=0a0a0b">
   <img alt="Linux: Hyprland" src="https://img.shields.io/badge/linux-Hyprland-ff1438?style=flat-square&labelColor=0a0a0b">
-  <img alt="Windows: in progress" src="https://img.shields.io/badge/windows-in%20progress-a8a09b?style=flat-square&labelColor=0a0a0b">
+  <img alt="Windows 11" src="https://img.shields.io/badge/windows-11-ff1438?style=flat-square&labelColor=0a0a0b">
   <img alt="GPUI" src="https://img.shields.io/badge/ui-GPUI-ff1438?style=flat-square&labelColor=0a0a0b">
   <a href="https://github.com/HaseebKhalid1507/SynapsCLI"><img alt="Runs on Synaps" src="https://img.shields.io/badge/runs%20on-Synaps-ff1438?style=flat-square&labelColor=0a0a0b"></a>
 </p>
@@ -36,8 +36,8 @@ comes over when she needs you. Her brain is the real thing, an agent session on
 [Synaps](https://github.com/HaseebKhalid1507/SynapsCLI), the runtime she's built on. The installer
 brings it along.
 
-She's a click-through overlay written in Rust and drawn with GPUI, on X11 and Hyprland (Windows is on
-its way). Your windows stay yours. She just sits on them.
+She's a click-through overlay written in Rust and drawn with GPUI, on X11, Hyprland and Windows 11.
+Your windows stay yours. She just sits on them.
 
 <p align="center"><img src="docs/media/card-brain.png" width="100%" alt="A cat, not a widget. She roams, naps when you're away, pounces on your cursor, and sulks when you ignore her."></p>
 
@@ -240,7 +240,7 @@ Ollama: [the steps](docs/UNDER-THE-HOOD.md#her-brain).
 `--uninstall` removes what it added and tells you where Synaps is. Every step, every flag and the manual
 route: [docs/INSTALL.md](docs/INSTALL.md).
 
-On Windows (in progress): `irm https://raw.githubusercontent.com/HaseebKhalid1507/capri-syn/main/install.ps1 | iex`,
+On Windows 11: `irm https://raw.githubusercontent.com/HaseebKhalid1507/capri-syn/main/install.ps1 | iex`,
 or her installer, `capri-syn-setup-x86_64.exe`: it installs Synaps if you don't have it, downloads
 her art, starts her brain's daemon and offers the Claude sign-in at the end.
 
@@ -349,7 +349,7 @@ On Windows she registers <kbd>Win</kbd>+<kbd>Alt</kbd>+<kbd>C</kbd> (the Line) a
 | **Linux, X11** | Her home. Built and used daily on i3, with or without a compositor. Every clip on this page is X11. |
 | **Linux, Hyprland** | Works: perching, drag and fling, effects, several monitors. Tested in a nested Hyprland rig, not yet daily-driven. No idle time there yet, so typing alone for 5 minutes reads as away. |
 | **Other Wayland desktops** (GNOME, KDE, sway) | Works through XWayland (untested on real GNOME/KDE). She perches on X apps only, and may nap while you type in native Wayland ones ([limits](docs/INSTALL.md#gnome-kde-and-other-wayland-desktops)). |
-| **Windows 11** | In progress. CI builds, tests and lints it and builds an installer on every push, but it hasn't been run on real hardware or in the VM yet: [14 checks are open](docs/WINDOWS.md#vm-pending-one-vm-day). |
+| **Windows 11** | x64. CI builds, tests and installs her on every push; the desktop checks passed in a Windows 11 VM ([the VM day](docs/WINDOWS.md#the-vm-day-2026-11-18)); live audio is still to check on real hardware. Windows 10 and Windows on Arm: untested. |
 | **macOS** | Not planned. |
 
 - **Names.** The repository is `capri-syn`. The crate, the binary and the config and state paths are
