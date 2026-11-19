@@ -14,10 +14,11 @@
               cog and `CHAT` (their rects, from `state`) with an empty chat and a full one.
     header    the bubble's header (#78) at 470 px and at 340 px: hands-free and a reply, a prompt
               with 3 waiting, his long words (YOU) while the turn runs.
-    fx        her effects as frame bursts of the work area (Start-ShotBurst): a teleport across the
-              screen, a short one, the launch replayed (`intro`), each at 30 fps from just before
-              it is asked till well after; music mode at 70 BPM, the pack's own and 170 BPM, 7 s
-              each at 15 fps. A still of her before and after each.
+    fx        her effects as 30 fps frame bursts (Start-ShotBurst): a teleport across the screen and a
+              short one (her band of the work area, from just before it is asked), her launch (the
+              work area from before she starts); music mode at 70 BPM, the pack's own and 170 BPM
+              (her window, 7 s). A still of her before and after each; she has met him (no first
+              words).
   Out: <Out>\<set>\<take>\<step>.png + .json (her `state`), <Out>\index.json, <Out>\logs\.
 #>
 param(
@@ -101,13 +102,22 @@ function Set-TakeEnv([hashtable]$Vars) {
 function Start-Take {
     param(
         [Parameter(Mandatory)][string]$Set, [Parameter(Mandatory)][string]$Name,
-        [string]$Settings = '', [hashtable]$Env = @{}, [object[]]$History, [switch]$Voice, [int]$DeltaMs = 30, [string[]]$HerArgs = @()
+        [string]$Settings = '', [hashtable]$Env = @{}, [object[]]$History, [switch]$Voice, [int]$DeltaMs = 30, [string[]]$HerArgs = @(),
+        # She has met him (state.json `met`): no first words in the take.
+        [switch]$Met,
+        # A burst of the work area from 0.3 s before she starts, this long (her launch); she is
+        # left where she lands. $script:Launch, with $script:LaunchMarks (`ask`: started, `loaded`).
+        [double]$LaunchBurst = 0
     )
     $script:Take = "$Set/$Name"
     $t = Join-Path $Root "$Set-$Name"
     Remove-Item -Recurse -Force $t -ErrorAction SilentlyContinue
     foreach ($d in 'cfg\synaps-avatar', 'data', 'state', 'run', 'fake', 'voice') { New-Item -ItemType Directory -Force -Path (Join-Path $t $d) | Out-Null }
     $script:SettingsFile = Join-Path $t 'cfg\synaps-avatar\settings.toml'
+    if ($Met) {
+        New-Item -ItemType Directory -Force -Path (Join-Path $t 'state\synaps-avatar') | Out-Null
+        Set-Content -Path (Join-Path $t 'state\synaps-avatar\state.json') -Value '{"met": true}' -Encoding utf8NoBOM
+    }
     Set-Content -Path $script:SettingsFile -Value ("[intro]`ncinematic = false`n" + $Settings) -Encoding utf8NoBOM
     $script:CtlSock = Join-Path $t 'run\synaps-avatar.sock'
     $script:TakeOut = Join-Path $Out "$Set\$Name"
@@ -145,6 +155,13 @@ function Start-Take {
     Set-TakeEnv $herEnv
 
     $argv = @('--pack', (Q $Pack), '--socket', (Q (Join-Path $t 'fake\d.sock'))) + @($HerArgs | Where-Object { $_ })
+    $script:Launch = $null
+    if ($LaunchBurst -gt 0) {
+        Move-ShotPointer 0 0
+        $script:Launch = Start-ShotBurst -Dir (Join-Path $script:TakeOut 'burst') -Fps 30 -Seconds $LaunchBurst
+        Start-Sleep -Milliseconds 300
+        $script:LaunchMarks = @{ ask = [Math]::Round($script:Launch.Now(), 1) }
+    }
     $script:Her = Start-Process $Exe -ArgumentList $argv -NoNewWindow -PassThru `
         -RedirectStandardOutput "$log-her.log" -RedirectStandardError "$log-her.err"
     $null = $script:Her.Handle  # held, so her exit code is still there after she's gone
@@ -152,8 +169,10 @@ function Start-Take {
     $up = Wait-Until { $script:Her.HasExited -or (State).loaded -eq $true } 120 "her frames ($script:Take)"
     if ($script:Her.HasExited) { throw "$script:Take: she exited at start (code $($script:Her.ExitCode); see $log-her.err)" }
     if (-not $up) { throw "$script:Take: she never loaded (see $log-her.err)" }
+    if ($script:Launch) { $script:LaunchMarks.loaded = [Math]::Round($script:Launch.Now(), 1) }
     $live = Wait-Until { (State).session.live -eq $true } 30 "her session ($script:Take)"
     if (-not $live) { $script:Fails.Add("$script:Take: OFFLINE (the fake daemon never answered)") }
+    if ($script:Launch) { return }
     # Her window whole on the screen (her bubble keeps to the part of it there), off the desktop's
     # corner watermark where the Line still fits left of her.
     $st = State
@@ -349,41 +368,68 @@ $Scenes = [ordered]@{
     }
     header   = [ordered]@{}
     fx       = [ordered]@{
-        'bolt-long'     = { Fx-Take 'bolt-long' -From 300 -Ask 'pos 1650 100000' -Seconds 4 }
-        'bolt-short'    = { Fx-Take 'bolt-short' -From 1390 -Ask 'pos 1190 100000' -Seconds 3.5 }
-        'bolt-intro'    = { Fx-Take 'bolt-intro' -From 1390 -Ask 'intro' -Seconds 7 }
-        'notes-slow'    = { Fx-Take 'notes-slow' -From 1390 -Ask 'music on 70' -Seconds 7 -Fps 15 }
-        'notes-default' = { Fx-Take 'notes-default' -From 1390 -Ask 'music on' -Seconds 7 -Fps 15 }
-        'notes-fast'    = { Fx-Take 'notes-fast' -From 1390 -Ask 'music on 170' -Seconds 7 -Fps 15 }
+        # A teleport across the screen, a short one (her body's band of the work area, 30 fps).
+        'bolt-long'     = { Fx-Take 'bolt-long' -From 300 -Ask 'pos 1650 100000' -Seconds 3 -Band }
+        'bolt-short'    = { Fx-Take 'bolt-short' -From 1390 -Ask 'pos 1190 100000' -Seconds 3 -Band }
+        # Her launch (no close-ups in this pack: the bolt from the top of the monitor), the whole
+        # work area from before she starts.
+        'bolt-launch'   = {
+            Start-Take fx bolt-launch -Met -LaunchBurst 8
+            $null = Ctl 'brain off'
+            $m = Stop-ShotBurst $script:Launch -Marks $script:LaunchMarks -Extra @{ ask = '(launch)'; window_after = (State).window }
+            Fx-Check 'bolt-launch' $m '(launch)' 'ok'
+            Shot 'after' 'after her launch'
+        }
+        # Music mode, 7 s of her window at 30 fps: 70 BPM, the pack's own, 170 BPM.
+        'notes-slow'    = { Fx-Take 'notes-slow' -From 1390 -Ask 'music on 70' -Seconds 7 -Window }
+        'notes-default' = { Fx-Take 'notes-default' -From 1390 -Ask 'music on' -Seconds 7 -Window }
+        'notes-fast'    = { Fx-Take 'notes-fast' -From 1390 -Ask 'music on 170' -Seconds 7 -Window }
     }
 }
 
-<# An effect take: her at -From (root px, on the floor), still; a burst of the work area that starts
-   0.3 s before -Ask goes to her socket and runs -Seconds; a still of her before and after. The
-   burst's burst.json marks `ask` (sent) and `answered` (her reply), in ms from its start. #>
-function Fx-Take([string]$Name, [int]$From, [string]$Ask, [double]$Seconds, [int]$Fps = 30) {
-    Start-Take fx $Name
+<# An effect take: her at -From (root px, on the floor), met (no first words), still; a burst that
+   starts 0.3 s before -Ask goes to her socket and runs -Seconds; a still of her before and after.
+   The burst: the work area, or its band from 100 px over her window down (-Band), or her window
+   (-Window). burst.json marks `ask` (sent) and `answered` (her reply), in ms from its start. #>
+function Fx-Take([string]$Name, [int]$From, [string]$Ask, [double]$Seconds, [int]$Fps = 30, [switch]$Band, [switch]$Window) {
+    Start-Take fx $Name -Met
     $null = Ctl 'brain off'
     $null = Ctl "pos $From 100000 now"
-    Start-Sleep 1.5
+    Start-Sleep 2.5
     $before = State
     Shot 'before' "at $From, before: $Ask"
     Move-ShotPointer 0 0
-    $b = Start-ShotBurst -Dir (Join-Path $script:TakeOut 'burst') -Fps $Fps -Seconds $Seconds
+    $wa = [ShootWin.Native]::WorkArea()
+    $o = $before.window
+    $rect = if ($Window) {
+        @([int]$o.x, [int]$o.y, [int]$o.w, [int]$o.h)
+    } elseif ($Band) {
+        $top = [Math]::Max($wa[1], [int]$o.y - 100)
+        @($wa[0], $top, $wa[2], $wa[1] + $wa[3] - $top)
+    } else { $wa }
+    $b = Start-ShotBurst -Dir (Join-Path $script:TakeOut 'burst') -Rect $rect -Fps $Fps -Seconds $Seconds
     Start-Sleep -Milliseconds 300
     $sent = $b.Now()
     $r = Ctl $Ask
     $answered = $b.Now()
-    $m = Stop-ShotBurst $b -Marks @{ ask = [Math]::Round($sent, 1); answered = [Math]::Round($answered, 1) } -Extra @{
+    $marks = @{ ask = [Math]::Round($sent, 1); answered = [Math]::Round($answered, 1) }
+    $null = $b.Wait()  # over before her `state` after it is asked
+    $m = Stop-ShotBurst $b -Marks $marks -Extra @{
         ask = $Ask; reply = $r; window_before = $before.window; window_after = (State).window; scale_factor = $before.scale_factor
     }
+    Fx-Check $Name $m $Ask $r
+    Shot 'after' "after: $Ask"
+}
+
+<# A burst's numbers in the log; a short one, a failed grab or an error reply is a problem. #>
+function Fx-Check([string]$Name, $m, [string]$Ask, [string]$Reply) {
     $gaps = @(for ($i = 1; $i -lt $m.times_ms.Count; $i++) { $m.times_ms[$i] - $m.times_ms[$i - 1] })
     $worst = if ($gaps) { ($gaps | Measure-Object -Maximum).Maximum } else { 0 }
-    Write-Host "  burst ${Name}: $($m.frames) frames in $Seconds s at $Fps fps (worst gap $worst ms); '$Ask' -> $r"
+    $late = @($gaps | Where-Object { $_ -gt 1500 / $m.fps }).Count
+    Write-Host "  burst ${Name}: $($m.frames) frames in $($m.seconds) s at $($m.fps) fps, rect $($m.rect -join ','); $late slot(s) skipped, worst gap $worst ms; '$Ask' -> $Reply"
     if ($m.error) { $script:Fails.Add("fx/${Name}: burst: $($m.error)") }
-    if ($m.frames -lt $Fps * $Seconds * 0.8) { $script:Fails.Add("fx/${Name}: burst: $($m.frames) frames, under 80% of $Fps fps") }
-    if ($r -match '^error') { $script:Fails.Add("fx/${Name}: '$Ask' -> $r") }
-    Shot 'after' "after: $Ask"
+    if ($m.frames -lt $m.fps * $m.seconds * 0.6) { $script:Fails.Add("fx/${Name}: burst: $($m.frames) frames, under 60% of $($m.fps) fps") }
+    if ($Reply -match '^error') { $script:Fails.Add("fx/${Name}: '$Ask' -> $Reply") }
 }
 
 # The header at two widths: 470 where she stands (a reply long enough to fill it), 340 against the

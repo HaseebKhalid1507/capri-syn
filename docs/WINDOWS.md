@@ -192,8 +192,8 @@ and SendInput keys and clicks (`Send-ShotKeys 'ctrl+comma'`, `Send-ShotClick`). 
 desktop. For motion, `Start-ShotBurst -Dir d -Fps 30 -Seconds 4` grabs the work area (or `-Rect`)
 on a thread of its own, frames written raw and gzipped (`fNNNN.bgra.gz`, BGRA top-down), and
 `Stop-ShotBurst` writes `burst.json` (the rect, each frame's time, marks such as when a command
-went out). The `fx` set uses it: a long and a short teleport, the launch replayed (`intro`), and
-music mode at 70 BPM, the pack's own and 170 BPM. `Set-ShotDisplay` and `Clear-ShotDesktop` change the machine (scaling, wallpaper, every
+went out). The `fx` set uses it: a long and a short teleport, her launch (from before she starts),
+and music mode at 70 BPM, the pack's own and 170 BPM. `Set-ShotDisplay` and `Clear-ShotDesktop` change the machine (scaling, wallpaper, every
 dialog closed, a cover window left up), so they refuse to run off a GitHub-hosted runner
 (`RUNNER_ENVIRONMENT`) unless `SHOOT_WIN_ANYWAY` is set.
 
