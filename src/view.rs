@@ -379,11 +379,33 @@ impl PromptUi {
         PromptUi { view, shown_at: now, arm_at: now + PROMPT_ARM, cut: false, go: None, dismissed: false, fake }
     }
 
-    /// Shown again (from behind the chip): its buttons arm again.
+    /// Shown again (from behind the chip, or after she was carried): its buttons arm again.
     fn reshow(&mut self, now: Instant) {
         self.dismissed = false;
         self.shown_at = now;
         self.arm_at = now + PROMPT_ARM;
+    }
+
+    /// Put down while she is carried: whether it showed (it shows again where she lands).
+    fn carry(&mut self) -> bool {
+        !std::mem::replace(&mut self.dismissed, true)
+    }
+
+    /// She landed: shown again if it showed when he picked her up, its buttons armed again (the
+    /// click that dropped her, or the next one, must not answer it).
+    fn land(&mut self, showed: bool, now: Instant) {
+        if showed {
+            self.reshow(now);
+        }
+    }
+
+    /// The session's news for the same prompt: new words re-arm its buttons (a click meant for
+    /// the old ones must not answer these).
+    fn update(&mut self, view: &PromptView, now: Instant) {
+        if self.view != *view {
+            self.view = view.clone();
+            self.arm_at = self.arm_at.max(now + PROMPT_ARM);
+        }
     }
 
     /// Its go button this frame, `cut` it is cut to fit now. Once cut it stays cut; a change of
@@ -406,6 +428,11 @@ impl PromptUi {
 
     fn armed(&self, now: Instant) -> bool {
         now >= self.arm_at
+    }
+
+    /// A click on ALLOW now answers yes.
+    fn allows(&self, now: Instant) -> bool {
+        self.go == Some(Go::Allow) && self.armed(now)
     }
 }
 /// Escape twice within this, while a turn runs, aborts it. One Escape closes the field
@@ -457,6 +484,15 @@ impl Bubble {
         let (top, _) = self.pages();
         let n = self.page_lines().len();
         (top..top + n).map(|i| w.chips.get(i).copied().unwrap_or(false)).collect()
+    }
+
+    /// Which of `page_lines` are chips that copy: typed out to their end, the turn over. Before
+    /// that a chip is what has come so far (`rm -rf ~/build` before `/tmp` streams in).
+    fn page_chips_whole(&self) -> Vec<bool> {
+        let Some(w) = &self.wrap else { return Vec::new() };
+        let (top, _) = self.pages();
+        let chips = self.page_chips();
+        chips.iter().enumerate().map(|(k, &c)| c && !self.more && w.lines.get(top + k).is_some_and(|&(_, e)| self.shown >= e)).collect()
     }
 
     /// The page's lines, its last one ending "…" when the text goes on past the page (r21: it
@@ -4236,7 +4272,7 @@ impl Avatar {
         self.echo = b.echo.clone();
         if prev.as_ref().map(|p| &p.prompt) != Some(&b.prompt) {
             match (&mut self.prompt_ui, &b.prompt) {
-                (Some(u), Some(p)) if u.view.id == p.id && !u.fake => u.view = p.clone(),
+                (Some(u), Some(p)) if u.view.id == p.id && !u.fake => u.update(p, now),
                 _ => {
                     if self.input.as_ref().is_some_and(|i| i.secret.is_some() && i.secret != b.prompt.as_ref().map(|p| p.id)) {
                         self.close_input(true);
@@ -7001,8 +7037,9 @@ impl Avatar {
             };
             // (lines, pages, text width, all lines, header label, placeholder)
             let mut placeholder: Option<String> = None;
-            // A reply's lines that are command chips (as wrapped).
+            // A reply's lines that are command chips (as wrapped), and those whole (they copy).
             let mut chips: Vec<bool> = Vec::new();
+            let mut chips_whole: Vec<bool> = Vec::new();
             let (lines, pages, text_w, total_lines, header_label): (Vec<String>, Option<(usize, usize)>, f32, usize, String) = match mode {
                 PanelMode::Reply => {
                     let b = self.bubble.as_ref().expect("reply mode has a bubble");
@@ -7011,6 +7048,7 @@ impl Avatar {
                     let lines = if self.reader.is_some() { Vec::new() } else { b.page_lines_marked() };
                     if self.reader.is_none() {
                         chips = b.page_chips();
+                        chips_whole = b.page_chips_whole();
                     }
                     if lines.is_empty() && self.reader.is_none() {
                         placeholder = Some("…".into());
@@ -7272,6 +7310,8 @@ impl Avatar {
                         && let Some(c) = crate::line::command(&t)
                     {
                         let copied = self.cmd_copied.as_deref() == Some(c);
+                        // Still typing or streaming: no copy yet (a part of a command is another).
+                        let whole = chips_whole.get(k) == Some(&true);
                         // Too long for the box: its start and end around "…"; copied whole.
                         let face = self.chip_text(c, w - PAD_L - PAD_R, window);
                         let c = c.to_string();
@@ -7286,7 +7326,7 @@ impl Avatar {
                             .flex()
                             .items_center()
                             .gap(px(8.0))
-                            .cursor_pointer()
+                            .when(whole, |d| d.cursor_pointer())
                             .font_family(MONO)
                             .text_size(px(BODY_FONT - 3.0))
                             .font_weight(FontWeight::NORMAL)
@@ -7301,13 +7341,16 @@ impl Avatar {
                                     .text_size(px(12.5))
                                     .font_family(self.font.clone())
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(if copied { pal.accent } else { pal.text }))
+                                    .text_color(rgb(if copied { pal.accent } else if whole { pal.text } else { pal.dim }))
                                     .child(if copied { "copied ✓" } else { "copy" }),
                             )
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |this, _: &MouseDownEvent, _, cx| {
                                     cx.stop_propagation();
+                                    if !whole {
+                                        return;
+                                    }
                                     lineview::copy_text(c.clone(), cx);
                                     this.cmd_copied = Some(c.clone());
                                     cx.notify();
@@ -7646,7 +7689,7 @@ impl Avatar {
                             MouseButton::Left,
                             cx.listener(|this, _: &MouseDownEvent, _, cx| {
                                 cx.stop_propagation();
-                                if this.prompt_ui.as_ref().is_some_and(|u| u.go == Some(Go::Allow) && u.armed(Instant::now())) {
+                                if this.prompt_ui.as_ref().is_some_and(|u| u.allows(Instant::now())) {
                                     this.answer(Some("y".into()));
                                     cx.notify();
                                     this.schedule(cx);
@@ -8703,6 +8746,37 @@ mod bubble_layout_tests {
     }
 
     #[test]
+    fn a_chip_copies_only_once_whole() {
+        // Shady (#74): a chip copied what had come so far: `rm -rf ~/build` before `/tmp` streamed
+        // in. It copies once the turn is over and it is typed out to its end.
+        let raw = "Clean it out:\n`rm -rf ~/build/tmp`";
+        let (_, _, _, _, mut b) = lay(raw, (0.0, 500.0), 6.0, 300.0);
+        assert_eq!(b.page_chips(), vec![false, true]);
+        assert_eq!(b.page_chips_whole(), vec![false, true], "whole, the turn over: it copies");
+        // Streaming: the part that has come is a chip, and copies nothing.
+        let (lines, _, _, _, mut part) = lay("Clean it out:\n`rm -rf ~/build", (0.0, 500.0), 6.0, 300.0);
+        part.more = true;
+        assert_eq!(crate::line::command(&lines[1]), Some("rm -rf ~/build"), "the case: {lines:?}");
+        assert_eq!(part.page_chips(), vec![false, true]);
+        assert_eq!(part.page_chips_whole(), vec![false, false], "more may come: no copy");
+        // All of it in, the turn still running: no copy yet either.
+        b.more = true;
+        assert_eq!(b.page_chips_whole(), vec![false, false]);
+        // The turn over, still typing it out: no copy until its last letter shows.
+        b.more = false;
+        let end = b.text.len();
+        b.shown = end - 4;
+        assert_eq!(b.page_chips(), vec![false, true], "{:?}", b.page_lines());
+        assert_eq!(b.page_chips_whole(), vec![false, false]);
+        b.shown = end;
+        assert_eq!(b.page_chips_whole(), vec![false, true]);
+        // A chip whole before the text goes on copies while the rest types out.
+        let (_, _, _, _, mut c) = lay("Run:\n`synaps login`\nthen pick Claude.", (0.0, 500.0), 6.0, 300.0);
+        c.shown = c.text.len() - 5;
+        assert_eq!(c.page_chips_whole(), vec![false, true, false]);
+    }
+
+    #[test]
     fn put_away_mid_stream_its_end_is_unseen_put_away_whole_it_is_read() {
         // Shady (#71): the chevron marked a reply heard while it still streamed, so its final
         // answer landed behind the chip with no strip.
@@ -8810,5 +8884,60 @@ mod prompt_button_tests {
         // Shown again from behind the chip: armed again from then.
         u.reshow(ms(5000));
         assert!(!u.armed(ms(5100)) && u.go(false, ms(5100)) == Go::Review);
+    }
+
+    #[test]
+    fn a_prompt_back_from_a_carry_takes_no_click_at_once() {
+        // Shady (#74): the landing showed the prompt again with its old arm time, so ALLOW, armed
+        // since long before he picked her up, took a stray click right after the drop.
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+        let mut u = PromptUi::new(read_prompt(), t0, false);
+        assert_eq!(u.go(false, ms(0)), Go::Allow);
+        assert!(u.allows(ms(1000)), "the case: armed before she is picked up");
+        // Carried at 2 s (rag_begin): put down.
+        assert!(u.carry(), "it showed: it comes back");
+        assert!(u.dismissed);
+        // Dropped at 5 s (rag_restore_with): shown again, ALLOW clicked at once and within
+        // PROMPT_ARM: nothing answers.
+        let drop = ms(5000);
+        u.land(true, drop);
+        assert!(!u.dismissed);
+        assert_eq!(u.go(false, drop), Go::Allow);
+        assert!(!u.allows(drop), "a click on ALLOW at the drop approves nothing");
+        assert!(!u.allows(drop + PROMPT_ARM - Duration::from_millis(1)));
+        assert!(u.allows(drop + PROMPT_ARM), "armed again PROMPT_ARM after the drop");
+        // Behind the chip when he picked her up: it stays there.
+        let mut v = PromptUi::new(read_prompt(), t0, false);
+        v.dismissed = true;
+        let showed = v.carry();
+        assert!(!showed);
+        v.land(showed, drop);
+        assert!(v.dismissed);
+    }
+
+    #[test]
+    fn new_words_for_the_same_prompt_rearm_it() {
+        // Shady (#74): a prompt that kept its id with new text kept its old arm time: a click
+        // meant for the old words answered the new ones.
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+        let mut u = PromptUi::new(read_prompt(), t0, false);
+        assert_eq!(u.go(false, ms(0)), Go::Allow);
+        assert!(u.allows(ms(2000)));
+        // The same news again: nothing changes.
+        u.update(&read_prompt(), ms(2000));
+        assert!(u.allows(ms(2000)));
+        // New words, same id, still ALLOW: not armed for PROMPT_ARM.
+        let new = PromptView { text: "read: Cargo.toml (lines 1-80)".into(), ..read_prompt() };
+        u.update(&new, ms(3000));
+        assert_eq!(u.view, new);
+        assert_eq!(u.go(false, ms(3000)), Go::Allow, "the same button: only the words changed");
+        assert!(!u.allows(ms(3000)) && !u.allows(ms(3000) + PROMPT_ARM - Duration::from_millis(1)));
+        assert!(u.allows(ms(3000) + PROMPT_ARM));
+        // A new title re-arms too.
+        let titled = PromptView { title: "Confirm tool call (again)".into(), ..new };
+        u.update(&titled, ms(4000));
+        assert!(!u.allows(ms(4000)) && u.allows(ms(4000) + PROMPT_ARM));
     }
 }

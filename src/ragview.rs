@@ -329,10 +329,7 @@ impl Avatar {
         if let Some(b) = &mut self.bubble {
             b.collapsed = true;
         }
-        let prompt = self.prompt_ui.as_ref().is_some_and(|p| !p.dismissed);
-        if let Some(p) = &mut self.prompt_ui {
-            p.dismissed = true;
-        }
+        let prompt = self.prompt_ui.as_mut().is_some_and(|p| p.carry());
         if self.input.is_some() {
             self.close_input(true);
         }
@@ -1021,11 +1018,8 @@ impl Avatar {
         {
             b.collapsed = false;
         }
-        if r.restore.1
-            && let Some(p) = &mut self.prompt_ui
-        {
-            p.dismissed = false;
-            p.shown_at = now;
+        if let Some(p) = &mut self.prompt_ui {
+            p.land(r.restore.1, now);
         }
         // The session moved on while she was carried: play that mood's entry now. Still
         // asleep: she lies back down where he put her (Sleepy's entry again).
