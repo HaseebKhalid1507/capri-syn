@@ -4,17 +4,29 @@ name: fx-sheets
 # them by eye: the bolt painted through `bolt_rects`, the notes through the view's quantisation.
 # Uploaded as the `fx-sheets` artifact.
 on:
+  workflow_dispatch:
   pull_request:
     paths:
       - src/fx.rs
       - .github/workflows/fx-sheets.yml
 
+# Reads the code and uploads an artifact; nothing else.
+permissions:
+  contents: read
+
+# A newer push to the same branch supersedes a run still going.
+concurrency:
+  group: fx-sheets-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   sheets:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: System libraries (GPUI on Linux)
         run: |
@@ -46,3 +58,4 @@ jobs:
           name: fx-sheets
           path: ${{ runner.temp }}/fx-sheets
           if-no-files-found: error
+          retention-days: 14
