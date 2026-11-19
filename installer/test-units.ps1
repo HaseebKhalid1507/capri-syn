@@ -96,29 +96,68 @@ Check ($l -eq 'pid 7') "Get-RunLabel: here, bare ($l)"
 # steps.ps1's Set-Pack: a new pack that can't go in (a folder in use) leaves the one that was there
 # in place, his own or the steps', and the new one where it was. Move-Item fails on cue for it.
 $stepsAst = [Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path -Parent $PSScriptRoot) 'packaging\windows\steps.ps1'), [ref]$null, [ref]$null)
-foreach ($name in 'Set-Pack', 'Say', 'Good', 'Warn', 'Stop-Step', 'Test-SignInUrl') {
+foreach ($name in 'Set-Pack', 'Say', 'Good', 'Warn', 'Stop-Step', 'Get-SignInPage') {
     $fn = $stepsAst.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name }, $true)
     . ([scriptblock]::Create($fn.Extent.Text))
+}
+# Each account's sign-in page (Get-SignInPage's), and a model's id, as steps.ps1 sets them.
+foreach ($v in '$script:Reopen', '$script:ModelId') {
+    $a = $stepsAst.Find({ param($n) $n -is [Management.Automation.Language.AssignmentStatementAst] -and "$($n.Left)" -eq $v }, $true)
+    . ([scriptblock]::Create($a.Extent.Text))
 }
 function Move-Item([string]$LiteralPath, [Parameter(Position = 1)] [string]$Destination) {
     if ($script:FailMove -and $LiteralPath -eq $script:FailMove) { throw 'The process cannot access the file because it is being used by another process. (a test)' }
     Microsoft.PowerShell.Management\Move-Item -LiteralPath $LiteralPath -Destination $Destination
 }
-# The sign-in page steps.ps1 login opens: Claude's or Anthropic's, https, nothing else.
+# The sign-in page steps.ps1 login opens again whole (Synaps' line after "If the browser didn't
+# open, visit this URL:"): https on exactly the provider's host and path, with an & that cmd cut; its
+# AbsoluteUri. Nothing else: another provider's, another host or path, a user@, a port, a \, a #,
+# http.
+$claude = 'https://claude.ai/oauth/authorize?code=true&client_id=9d1c&response_type=code&redirect_uri=http%3A%2F%2Flocalhost%3A54545%2Fcallback&state=x'
 foreach ($c in @(
-        @('https://claude.ai/oauth/authorize?code=true&client_id=9d1c&state=x', $true),
-        @('https://console.anthropic.com/oauth/authorize?a=1&b=2', $true),
-        @('https://CLAUDE.AI/oauth?a&b', $true),
-        @('http://claude.ai/oauth?a&b', $false),
-        @('https://claude.ai.evil.example/oauth?a&b', $false),
-        @('https://notclaude.ai/oauth?a&b', $false),
-        @('https://evil.example/claude.ai?a&b', $false),
-        @('https://claude.ai@evil.example/?a&b', $false),
-        @('https://me@claude.ai/?a&b', $false),
-        @('https://claude.ai:8443/?a&b', $false),
-        @('file:///C:/Windows/System32/calc.exe?a&b', $false),
-        @('not a url', $false))) {
-    Check ((Test-SignInUrl $c[0]) -eq $c[1]) "Test-SignInUrl $($c[0]) = $($c[1])"
+        @($claude, $claude, 'anthropic'),
+        @('https://CLAUDE.AI/oauth/authorize?a=1&b=2', 'https://claude.ai/oauth/authorize?a=1&b=2', 'anthropic'),
+        @('https://auth.openai.com/oauth/authorize?response_type=code&client_id=app_X&state=s9', 'https://auth.openai.com/oauth/authorize?response_type=code&client_id=app_X&state=s9', 'openai-codex'),
+        @('https://accounts.google.com/o/oauth2/v2/auth?a=1&b=2', 'https://accounts.google.com/o/oauth2/v2/auth?a=1&b=2', 'google-gemini'),
+        # Device sign-ins: nothing to reopen. Grok: not here. A key service: no page.
+        @('https://github.com/login/device?a=1&b=2', '', 'github-copilot'),
+        @('https://www.kimi.com/code/authorize_device?a=1&b=2', '', 'kimi-code'),
+        @('https://claude.ai/oauth/authorize?a=1&b=2', '', 'xai-auth'),
+        @('https://claude.ai/oauth/authorize?a=1&b=2', '', 'groq'),
+        # Another provider's page.
+        @($claude, '', 'openai-codex'),
+        @('https://auth.openai.com/oauth/authorize?a=1&b=2', '', 'anthropic'),
+        # Its site, another page: a redirect through Google, a path that isn't the sign-in's.
+        @('https://www.google.com/url?q=https://accounts.google.com/o/oauth2/v2/auth&sa=D', '', 'google-gemini'),
+        @('https://accounts.google.com/url?q=x&sa=D', '', 'google-gemini'),
+        @('https://claude.ai/oauth/authorizer?a=1&b=2', '', 'anthropic'),
+        @('https://claude.ai/oauth/authorize/more?a=1&b=2', '', 'anthropic'),
+        @('https://claude.ai/oauth/authorize?a=1&b=2#x', '', 'anthropic'),
+        @('https://claude.ai/logout?a=1&b=2', '', 'anthropic'),
+        @('https://console.anthropic.com/oauth/authorize?a=1&b=2', '', 'anthropic'),
+        # Another host that looks like it.
+        @('https://claude.ai.evil.example/oauth/authorize?a=1&b=2', '', 'anthropic'),
+        @('https://notclaude.ai/oauth/authorize?a=1&b=2', '', 'anthropic'),
+        @('https://evil.example/claude.ai/oauth/authorize?a=1&b=2', '', 'anthropic'),
+        @('https://evil.com\.claude.ai/?a=1&b=2', '', 'anthropic'),
+        @('https://claude.ai\oauth\authorize?a=1&b=2', '', 'anthropic'),
+        # A user@, a port (even 443), not https, two words, nothing cut.
+        @('https://claude.ai@evil.example/oauth/authorize?a=1&b=2', '', 'anthropic'),
+        @('https://me@claude.ai/oauth/authorize?a=1&b=2', '', 'anthropic'),
+        @('https://claude.ai:8443/oauth/authorize?a=1&b=2', '', 'anthropic'),
+        @('https://claude.ai:443/oauth/authorize?a=1&b=2', '', 'anthropic'),
+        @('http://claude.ai/oauth/authorize?a=1&b=2', '', 'anthropic'),
+        @('https://claude.ai/oauth/authorize?a=1&b=2 and more', '', 'anthropic'),
+        @('https://claude.ai/oauth/authorize?a=1', '', 'anthropic'),
+        @('file:///C:/Windows/System32/calc.exe?a&b', '', 'anthropic'),
+        @('not a url', '', 'anthropic'))) {
+    $got = Get-SignInPage $c[0] $c[2]
+    Check ($got -ceq $c[1]) "Get-SignInPage $($c[0]) for $($c[2]): $(if ($c[1]) { 'opened' } else { 'never' })$(if ($got -cne $c[1]) { " (got '$got')" })"
+}
+# A model's id, as it may reach a command line: nothing with a quote, a space, a ; or a $ in it.
+foreach ($c in @(@('qwen3:8b', $true), @('qwen/qwen3-8b', $true), @('hf.co/bartowski/Llama-3.2-3B-Instruct-GGUF:Q4_K_M', $true), @('model@v1+fast', $true),
+        @('a"b', $false), @('a b', $false), @('a;b', $false), @('$(calc)', $false), @("a`nb", $false), @("ab`n", $false), @('', $false))) {
+    Check (($c[0] -cmatch $script:ModelId) -eq $c[1]) "a model id $($c[0] -replace "`n", '\n'): $(if ($c[1]) { 'taken' } else { 'refused' })"
 }
 
 $script:Marker = '.capri-syn-pack'

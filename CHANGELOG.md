@@ -48,6 +48,16 @@
   set it` or `tray: no NotifyIconSettings entry yet`. Later starts read her entry and say what
   `IsPromoted` is now, writing nothing. The uninstaller removes the marker.
 
+### Her installers ask which brain, and pick none for you
+- With no brain yet, her setup's new "Her model" page, and install.sh and install.ps1 in your terminal,
+  offer the same four choices: sign in to an account (ChatGPT, Claude, Copilot, Gemini, Grok, Kimi,
+  Muse, her own list: your browser opens on the sign-in page; Copilot's code is shown to you), a model
+  running on this PC (Ollama or LM Studio), an API key (never on a command line or in a log), or later.
+  Later is the default, and her setup no longer ticks "Sign in to Claude". Then her model is that one's
+  default. Grok isn't offered on Windows yet. An account's model is set once you're signed in, never
+  before. Unattended: `--brain=` (`/BRAIN=` for her setup). `synaps-avatar --set session.model=…` sets
+  her model, and a running her reads her settings again.
+
 ### Known issues
 - On a first run, Explorer can name her taskbar button with her old tooltip followed by the current
   one (`capri-syn · SPEAKING capri-syn · ONLINE`), so a screen reader hears both. Her tooltip is one

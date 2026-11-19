@@ -1,7 +1,10 @@
 # Her installer's wizard, driven as a person would click it (UI Automation), with a screenshot of every
-# page (tools/shoot-win.ps1), then "Start her now" and her on the desktop, then the uninstall's
-# questions (and "Remove Synaps too?": yes). CI's windows-setup-wizard job, on a clean runner, uploads
-# the shots; it runs as is in the capri-win VM. Windows PowerShell 5.1 (UIAutomationClient).
+# page (tools/shoot-win.ps1): her model ChatGPT (its sign-in, then her model, started by Finish;
+# stopped: her model stays unset), then
+# "Start her now" and her on the desktop; Setup again with "Choose later" (no sign-in), and again with
+# a model on this PC (an Ollama stand-in); then the uninstall's questions (and "Remove Synaps too?":
+# yes). CI's windows-setup-wizard job, on a clean runner, uploads the shots; it runs as is in the
+# capri-win VM. Windows PowerShell 5.1 (UIAutomationClient).
 #
 #   powershell -File .\packaging\windows\test-setup-wizard.ps1 -Setup capri-syn-setup-....exe -Shots DIR
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'Logs beside the checks.')]
@@ -21,6 +24,32 @@ public static class Wiz {
     [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
     public static void Click(int x, int y) { SetCursorPos(x, y); mouse_event(0x0002, 0, 0, 0, UIntPtr.Zero); mouse_event(0x0004, 0, 0, 0, UIntPtr.Zero); }
+    // Setup's VCL controls (TNewRadioButton, TNewComboBox) are Win32 buttons and combo boxes under
+    // class names UI Automation doesn't know (a pane each, no patterns): read and set as Win32 ones.
+    [DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr SendMessage(IntPtr h, uint m, IntPtr w, System.Text.StringBuilder l);
+    [DllImport("user32.dll")] static extern IntPtr GetParent(IntPtr h);
+    [DllImport("user32.dll")] static extern int GetDlgCtrlID(IntPtr h);
+    // BM_GETCHECK: BST_CHECKED.
+    public static bool Checked(IntPtr h) { return SendMessage(h, 0x00F0, IntPtr.Zero, IntPtr.Zero).ToInt64() == 1; }
+    // CB_GETCOUNT, CB_GETLBTEXTLEN, CB_GETLBTEXT: a combo box's items.
+    public static string[] Items(IntPtr h) {
+        int n = (int)SendMessage(h, 0x0146, IntPtr.Zero, IntPtr.Zero);
+        var r = new string[Math.Max(n, 0)];
+        for (int i = 0; i < n; i++) {
+            int len = (int)SendMessage(h, 0x0149, (IntPtr)i, IntPtr.Zero);
+            var sb = new System.Text.StringBuilder(Math.Max(len, 0) + 1);
+            SendMessage(h, 0x0148, (IntPtr)i, sb);
+            r[i] = sb.ToString();
+        }
+        return r;
+    }
+    // CB_SETCURSEL, then CBN_SELCHANGE to its parent (WM_COMMAND), as a pick of his sends it.
+    public static int Pick(IntPtr h, int i) {
+        SendMessage(h, 0x014E, (IntPtr)i, IntPtr.Zero);
+        SendMessage(GetParent(h), 0x0111, (IntPtr)((1 << 16) | (GetDlgCtrlID(h) & 0xFFFF)), h);
+        return (int)SendMessage(h, 0x0147, IntPtr.Zero, IntPtr.Zero);
+    }
 }
 '@
 [void][Wiz]::SetProcessDPIAware()
@@ -87,11 +116,75 @@ function Wait-Page($W, [string]$Caption, [int]$Secs = 120) {
     throw "the wizard never showed '$Caption' (it shows: $((Get-WindowText $W) -join ' | '))"
 }
 
-# The wizard, as he gets it: double-clicked, every default left as it is.
+# The control called Name (its caption), on screen.
+function Find-Named($W, [string]$Name) {
+    @($W.FindAll($Tree::Descendants, [Windows.Automation.Condition]::TrueCondition) | Where-Object {
+            "$($_.Current.Name)".Trim() -eq $Name -and $_.Current.BoundingRectangle.Width -gt 0 }) | Select-Object -First 1
+}
+# A radio button picked: its check (BM_GETCHECK), else UI Automation's word for it.
+function Test-Picked($E) {
+    if (-not $E) { return $false }
+    $h = [IntPtr]$E.Current.NativeWindowHandle
+    if ($h -ne [IntPtr]::Zero) { return [Wiz]::Checked($h) }
+    $o = $null
+    if ($E.TryGetCurrentPattern([Windows.Automation.SelectionItemPattern]::Pattern, [ref]$o)) { return $o.Current.IsSelected }
+    return $false
+}
+# A radio button picked as he'd pick it: a click on its caption (its OnClick runs).
+function Select-Radio($W, [string]$Name) {
+    $e = Find-Named $W $Name
+    if (-not $e) { throw "no '$Name' (it shows: $((Get-WindowText $W) -join ' | '))" }
+    $r = $e.Current.BoundingRectangle
+    try { [void][Wiz]::SetForegroundWindow([IntPtr]$W.Current.NativeWindowHandle) } catch { $null = $_ }
+    [Wiz]::Click([int]($r.Left + 40), [int]($r.Top + $r.Height / 2))
+    Start-Sleep -Milliseconds 400
+    return (Test-Picked $e)
+}
+# In the page's one enabled list (a drop-down, TNewComboBox): the item whose words are like Like,
+# picked. Its words.
+function Select-Item($W, [string]$Like) {
+    $seen = @()
+    $lists = @($W.FindAll($Tree::Descendants, [Windows.Automation.Condition]::TrueCondition) | Where-Object {
+            $_.Current.ClassName -match 'ComboBox' -and $_.Current.IsEnabled -and $_.Current.BoundingRectangle.Width -gt 0 })
+    foreach ($c in $lists) {
+        $h = [IntPtr]$c.Current.NativeWindowHandle
+        $items = @([Wiz]::Items($h))
+        $seen += $items
+        for ($i = 0; $i -lt $items.Count; $i++) {
+            if ($items[$i] -like $Like) {
+                $at = [Wiz]::Pick($h, $i)
+                Start-Sleep -Milliseconds 300
+                if ($at -ne $i) { throw "picked '$($items[$i])' ($i), but the list says $at" }
+                return $items[$i]
+            }
+        }
+    }
+    throw "no item like '$Like' in an enabled list ($($lists.Count) of them; they show: $($seen -join ' | '))"
+}
+# Waits until the wizard no longer shows a page whose caption matches (after a click on Next).
+function Wait-Leave($W, [string]$Caption, [int]$Secs = 60) {
+    $t0 = Get-Date
+    while (((Get-Date) - $t0).TotalSeconds -lt $Secs) { if (-not ((Get-WindowText $W) -match $Caption)) { return }; Start-Sleep -Milliseconds 300 }
+    throw "the wizard stayed on '$Caption' (it shows: $((Get-WindowText $W) -join ' | '))"
+}
+# Her settings' [session] model ('' when there's none).
+function Get-HerModel {
+    $f = Join-Path $env:APPDATA 'synaps-avatar\settings.toml'
+    if (-not (Test-Path $f)) { return '' }
+    $m = [regex]::Match((Get-Content -Raw $f), '(?ms)^\[session\][^\[]*?^model\s*=\s*"([^"]*)"')
+    if ($m.Success) { return $m.Groups[1].Value } else { return '' }
+}
+# Synaps login processes, and the steps that run them.
+function Get-SignIn([string]$Provider) { Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match "synaps(\.exe)?`"? login --provider $Provider" } | Select-Object -First 1 }
+function Close-SignIn { Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'steps\.ps1" login|synaps(\.exe)?"? login' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } }
+
+# The wizard, as he gets it: double-clicked, every default left as it is but her model (ChatGPT).
 $log = Join-Path ([IO.Path]::GetTempPath()) "capri-setup-wizard-$PID.log"
 # The shots' desktop quiet (the runner's console minimized, a flat backdrop), before the wizard.
 try { Clear-ShotDesktop } catch { Write-Host "  (desktop stays as it is: $($_.Exception.Message))" }
 $p = Start-Process $Setup -ArgumentList "/LOG=`"$log`"" -PassThru
+# Its handle now, while it runs: else its ExitCode is $null once it's gone.
+$null = $p.Handle
 # Run elevated (CI's runners are), Setup asks first, No its default: he says Yes here. Not elevated
 # (a double-click on his PC), it doesn't ask.
 $elevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -117,16 +210,29 @@ foreach ($page in @(
         @('^Select Destination Location$', 'destination', 'Next'),
         @('^Select Additional Tasks$', 'tasks', 'Next'),
         @('^Her brain$', 'her-brain', 'Next'),
+        @('^Her model$', 'her-model', 'Next'),
         @('^Her pack$', 'her-pack', 'Next'),
         @('^Her voice$', 'her-voice', 'Next'),
         @('^Ready to Install$', 'ready', 'Install'))) {
     $t = Wait-Page $w $page[0]
+    if ($page[1] -eq 'her-model') {
+        # Four choices at the same level, "Choose later" the one picked; no model server here.
+        Check ((Test-Picked (Find-Named $w 'Choose later')) -and -not (Test-Picked (Find-Named $w 'Sign in to an account')) -and
+            -not (Test-Picked (Find-Named $w 'An API key'))) 'her model page: "Choose later" is the default, nothing else picked'
+        Check (($t -match '^A model on this PC$').Count -gt 0 -and ($t -match 'None running here').Count -gt 0) 'no model server here: it says so'
+        Get-Shot 'her-model-later' -Title 'Setup - capri-syn*'
+        # An account: ChatGPT, signed in to at the end (short of the real sign-in).
+        Check (Select-Radio $w 'Sign in to an account') 'a click picks "Sign in to an account"'
+        $picked = Select-Item $w 'ChatGPT*'
+        Check ($picked -eq 'ChatGPT (your browser)') "ChatGPT, how it signs in: $picked"
+    }
     Get-Shot $page[1] -Title 'Setup - capri-syn*'
     if ($page[1] -eq 'her-brain') { Check (($t -match 'Install Synaps \(her brain, open source\)').Count -gt 0) 'her brain page offers to install Synaps' }
     if ($page[1] -eq 'her-voice') { Check (($t -match '^Talk to her$').Count -gt 0 -and ($t -match 'Read replies aloud').Count -gt 0) 'her voice page: talk, microphone, "hey Capri", replies aloud' }
     if ($page[1] -eq 'her-pack') { Check (($t -match 'Download her art').Count -gt 0) 'her pack page offers the download' }
     if ($page[1] -in 'destination', 'ready') { Test-WizardWindow $w "the $($page[1]) page" }
     Invoke-Button $w $page[2]
+    Wait-Leave $w $page[0]
 }
 # The steps, on their progress page (Synaps, her art, the daemon), then the finish page.
 $null = Wait-Page $w '^Setting her up$' 180
@@ -139,22 +245,31 @@ Write-StepTime
 Check (($t -match 'Synaps \d+\.\d+\.\d+, her brain: installed').Count -gt 0) 'the finish page: Synaps installed'
 Check (($t -match 'Her art: downloaded, built and checked').Count -gt 0) 'the finish page: her art'
 Check (($t -match 'Its daemon runs').Count -gt 0) 'the finish page: the daemon'
-# Its defaults: "Start her now" and "Sign in to Claude" ticked. The sign-in starts with no
-# terminal: steps.ps1 login, then synaps login, then his browser (CI can't sign in: stopped after).
+# An account: her model is set once he's signed in (the finish page's step), never before.
+$m1 = Get-HerModel
+Check ($m1 -eq '') "her model: not set at install, before the sign-in ($m1)"
+Check (($t -match '(?m)^\+ Her model:').Count -eq 0) 'the finish page names no model of hers'
+Check (($t -match 'Next, her brain: leave "Sign in to ChatGPT" ticked, and sign in in your browser\. Her model is ChatGPT''s once you''re signed in\.').Count -gt 0) 'the finish page: ChatGPT''s sign-in, ticked; her model once signed in'
+# Finish: "Start her now" and "Sign in to ChatGPT", ticked. The sign-in starts with no terminal:
+# steps.ps1 login model, then synaps login, then his browser (CI can't sign in: stopped after).
 Invoke-Button $w 'Finish'
 [void]$p.WaitForExit(60000)
 Check ($p.ExitCode -eq 0) "the wizard exits 0 ($($p.ExitCode))"
 $signIn = $null
 $t0 = Get-Date
 while (-not $signIn -and ((Get-Date) - $t0).TotalSeconds -lt 30) {
-    $signIn = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'synaps(\.exe)?"? login --provider claude' } | Select-Object -First 1
+    $signIn = Get-SignIn 'openai-codex'
     if (-not $signIn) { Start-Sleep -Milliseconds 500 }
 }
-Check ([bool]$signIn) "Finish started the sign-in, no terminal: $(if ($signIn) { $signIn.CommandLine })"
+Check ([bool]$signIn) "Finish started ChatGPT's sign-in, no terminal: $(if ($signIn) { $signIn.CommandLine })"
+$step = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'steps\.ps1" login model -Provider openai-codex -Exe "[^"]+\\synaps-avatar\.exe"' } | Select-Object -First 1
+Check ([bool]$step) "by steps.ps1 login model (her model once signed in): $(if ($step) { $step.CommandLine })"
 Start-Sleep -Seconds 4
 $browser = @(Get-Process -Name msedge, chrome, firefox -ErrorAction SilentlyContinue)
 Write-Host "  a browser runs: $(if ($browser) { ($browser | Select-Object -ExpandProperty Name -Unique) -join ', ' } else { 'none seen' })"
-Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'steps\.ps1" login|synaps(\.exe)?"? login' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+Close-SignIn
+Start-Sleep -Seconds 2
+Check ((Get-HerModel) -eq '') "the sign-in stopped: her model still unset ($(Get-HerModel))"
 
 # Her, started by the finish page.
 $her = $null
@@ -165,6 +280,104 @@ Start-Sleep -Seconds 12
 if ($her) { Get-Shot 'her-on-the-desktop' -ProcessId $her.Id -Pad 240; Get-Shot 'her' -ProcessId $her.Id -Pad 40 }
 $herLog = Join-Path $env:LOCALAPPDATA 'synaps-avatar\synaps-avatar.log'
 if (Test-Path $herLog) { Write-Output "--- her log (end) ---`n$((Get-Content $herLog -Tail 12) -join "`n")`n---" }
+
+# Setup again over her (still no brain: the sign-in above was stopped), pack and voice skipped: every
+# page as it comes (no destination, no "Her brain": Synaps is here), "Her model" as OnModel picks, up
+# to the finish page. Its texts; the wizard in $script:w, its process in $script:p. She's quit first,
+# as he'd quit her (else Setup's "Preparing to Install" asks to close her: Next there closes her).
+function Invoke-Again([string]$Name, [scriptblock]$OnModel) {
+    Get-Process synaps-avatar -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    $t0 = Get-Date
+    while ((Get-Process synaps-avatar -ErrorAction SilentlyContinue) -and ((Get-Date) - $t0).TotalSeconds -lt 15) { Start-Sleep -Milliseconds 300 }
+    $log = Join-Path ([IO.Path]::GetTempPath()) "capri-setup-wizard-$Name-$PID.log"
+    $script:p = Start-Process $Setup -ArgumentList "/LOG=`"$log`" /PACK=skip /VOICE=off" -PassThru
+    $null = $script:p.Handle
+    $script:w = $null
+    $t0 = Get-Date
+    while (-not $script:w -and ((Get-Date) - $t0).TotalSeconds -lt 60) {
+        foreach ($d in Find-Windows '^Setup$|^capri-syn') { if ((Get-WindowText $d) -match 'Setup is running as administrator') { Invoke-Button $d 'Yes' } }
+        $script:w = Find-Window '^Setup - capri-syn'
+        if (-not $script:w) { Start-Sleep -Milliseconds 300 }
+    }
+    if (-not $script:w) { throw "$($Name): no window '^Setup - capri-syn' in 60 s" }
+    $model = $false
+    $t0 = Get-Date
+    while (((Get-Date) - $t0).TotalSeconds -lt 900) {
+        $t = Get-WindowText $script:w
+        if ($t -match '^Completing the capri-syn Setup Wizard$') { Start-Sleep -Milliseconds 400; return Get-WindowText $script:w }
+        $page = @($t -match '^(Select Destination Location|Select Additional Tasks|Her brain|Her model|Her pack|Her voice|Ready to Install|Preparing to Install)$') | Select-Object -First 1
+        if ($page) {
+            Start-Sleep -Milliseconds 400
+            if ($page -eq 'Her model') { $model = $true; & $OnModel $script:w; Get-Shot "$Name-her-model" -Title 'Setup - capri-syn*' }
+            Invoke-Button $script:w $(if ($page -eq 'Ready to Install') { 'Install' } else { 'Next' })
+            Wait-Leave $script:w "^$page$"
+        } else { Start-Sleep -Milliseconds 500 }
+        if ($page -eq 'Ready to Install' -and -not $model) { throw "$($Name): no ""Her model"" page (no brain yet: it should ask)" }
+    }
+    throw "$($Name): no finish page in 900 s (it shows: $((Get-WindowText $script:w) -join ' | '))"
+}
+
+# Later: "Choose later", as it starts. No sign-in, her model as it was, and the finish page says so.
+$t = Invoke-Again 'later' { param($W) Check (Test-Picked (Find-Named $W 'Choose later')) 'again: "Choose later" picked' }
+Get-Shot 'later-finish' -Title 'Setup - capri-syn*'
+Check (($t -match 'Her brain: later, as you chose\. She shows NO BRAIN YET until then; her Settings > Brain gives her one\.').Count -gt 0) 'later: the finish page says so'
+Check (($t -match 'Sign in to').Count -eq 0) 'later: no sign-in on the finish page'
+Invoke-Button $script:w 'Finish'
+[void]$script:p.WaitForExit(60000)
+Start-Sleep -Seconds 8
+Check (-not (Get-SignIn '\S+')) 'later: no sign-in started'
+Check ((Get-HerModel) -eq $m1) "later: her model as it was ($(Get-HerModel))"
+Close-SignIn
+
+# A model on this PC: an Ollama stand-in on its port (its model list, as Ollama's /v1/models gives it).
+Add-Type -TypeDefinition @'
+using System;
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
+using System.Threading;
+public static class FakeOllama {
+    public static void Start(int port, string body) {
+        var l = new TcpListener(IPAddress.Loopback, port);
+        l.Start();
+        var t = new Thread(() => {
+            while (true) {
+                try {
+                    using (var c = l.AcceptTcpClient()) {
+                        var s = c.GetStream();
+                        s.ReadTimeout = 2000;
+                        try { s.Read(new byte[8192], 0, 8192); } catch { }
+                        var b = Encoding.UTF8.GetBytes(body);
+                        var h = Encoding.ASCII.GetBytes("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + b.Length + "\r\nConnection: close\r\n\r\n");
+                        s.Write(h, 0, h.Length);
+                        s.Write(b, 0, b.Length);
+                    }
+                } catch { return; }
+            }
+        });
+        t.IsBackground = true;
+        t.Start();
+    }
+}
+'@
+[FakeOllama]::Start(11434, '{"object":"list","data":[{"id":"qwen3:8b","object":"model","owned_by":"library"},{"id":"nomic-embed-text:latest","object":"model"}]}')
+$t = Invoke-Again 'local' {
+    param($W)
+    Check (Select-Radio $W 'A model on this PC') 'local: a click picks "A model on this PC"'
+    $picked = Select-Item $W 'qwen3:8b*'
+    Check ($picked -eq 'qwen3:8b (Ollama)') "local: Ollama's model, no embedding one: $picked"
+}
+Get-Shot 'local-finish' -Title 'Setup - capri-syn*'
+Check (($t -match '\+ Her model: qwen3:8b, on Ollama\.').Count -gt 0) 'local: the finish page says her model'
+Check ((Get-HerModel) -eq 'local/qwen3:8b') "local: her model local/qwen3:8b ($(Get-HerModel))"
+$cfg = Join-Path $env:USERPROFILE '.synaps-cli\config'
+Check (-not ((Test-Path $cfg) -and (Select-String -LiteralPath $cfg -Pattern 'provider\.local\.url' -Quiet))) "local: Synaps' config untouched (Ollama's is its default)"
+Check (($t -match 'Sign in to').Count -eq 0) 'local: no sign-in on the finish page'
+Invoke-Button $script:w 'Finish'
+[void]$script:p.WaitForExit(60000)
+Check ($script:p.ExitCode -eq 0) "local: the wizard exits 0 ($($script:p.ExitCode))"
+Start-Sleep -Seconds 4
+Close-SignIn
 
 # The uninstall, as he'd click it: sure? yes; Synaps too? yes (her installer installed it); done.
 $bin = Split-Path -Parent $synaps

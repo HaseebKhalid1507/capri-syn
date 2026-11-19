@@ -28,8 +28,22 @@
 #                            choices given (-Mic NAME or -MicDefault, -WakeWord, -ReadAloud; one not
 #                            given stays as he set it), written to settings.toml by her own settings
 #                            writer (synaps-avatar --set).
-#   steps.ps1 login          `synaps login --provider claude` with no window: his browser opens, and he
-#                            signs in there (given 10 minutes).
+#   steps.ps1 brain-check    her brain: is there one (`brain: yes|no`), the accounts and key services
+#                            she can take (`brains: id|login|name|how|why not`, from -Exe's table:
+#                            synaps-avatar --providers), and the models on this PC (`local:
+#                            server|url|model`: Ollama's, LM Studio's). Reads only.
+#   steps.ps1 login          `synaps login --provider` -Provider's (Claude when none), with no window:
+#                            his browser opens on the sign-in page, and he signs in there (given 10
+#                            minutes). Copilot's page needs a code: a small window shows it (and it's on
+#                            the clipboard). The page's URL and the code never go to this step's output.
+#   steps.ps1 key            -Provider's API key, from $env:CAPRI_BRAIN_KEY (taken out of the
+#                            environment first), to `synaps login --provider` on its stdin: never on a
+#                            command line or in a log.
+#   steps.ps1 local          -Model on this PC's server (-Url; Ollama's when none): Synaps'
+#                            provider.local.url when it isn't that already (its daemon reloaded when it
+#                            runs), then her model, local/<model>.
+#   steps.ps1 model          her model (-Exe's settings writer): -Model, else -Provider's default (her
+#                            own table: synaps-avatar --providers).
 #   steps.ps1 synaps-remove  Synaps (-Synaps: the synaps.exe her installer installed and recorded): its
 #                            daemon stopped, the binaries its installer's receipt lists (synaps.exe,
 #                            hidden.exe) beside it, the receipt, and once nothing else is in it the
@@ -57,7 +71,7 @@
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Show-Notices reads as install.ps1 named it.')]
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', '', Justification = 'The steps read them in script scope.')]
 param(
-    [Parameter(Position = 0, Mandatory, ValueFromRemainingArguments)] [ValidateSet('synaps-check', 'synaps', 'daemon', 'pack', 'mics', 'voice-check', 'voice', 'login', 'synaps-remove', 'remove')] [string[]]$Step,
+    [Parameter(Position = 0, Mandatory, ValueFromRemainingArguments)] [ValidateSet('synaps-check', 'synaps', 'daemon', 'pack', 'mics', 'voice-check', 'voice', 'brain-check', 'login', 'key', 'local', 'model', 'synaps-remove', 'remove')] [string[]]$Step,
     [string]$Synaps = '',
     [string]$Out = (Join-Path $env:LOCALAPPDATA 'synaps-avatar\packs\capri'),
     [string]$Exe = '',
@@ -74,6 +88,9 @@ param(
     [switch]$Fresh,
     [ValidateSet('', 'on', 'off')] [string]$WakeWord = '',
     [ValidateSet('', 'on', 'off')] [string]$ReadAloud = '',
+    [string]$Provider = '',
+    [string]$Model = '',
+    [string]$Url = '',
     [switch]$DryRun
 )
 
@@ -107,7 +124,11 @@ try {
             'mics' { Show-Mics }
             'voice-check' { $v = Find-Voice; Result "voicefrom: $($v.Kind) $($v.Where)" }
             'voice' { Install-Voice }
+            'brain-check' { Show-Brains }
             'login' { Invoke-Login }
+            'key' { Invoke-Key }
+            'local' { Set-Local }
+            'model' { Set-HerModel }
             'synaps-remove' { Remove-Synaps }
             'remove' { Remove-Hers }
         }
@@ -411,77 +432,427 @@ function Start-Daemon {
     Result "brain: $(if (Test-Brain) { 'yes' } else { 'no' })"
 }
 
-# A sign-in page these steps open in his browser: https on claude.ai or anthropic.com (or a name
-# under them), nothing else, whatever synaps prints.
-function Test-SignInUrl([string]$Url) {
-    $u = $null
-    if (-not [Uri]::TryCreate($Url, [UriKind]::Absolute, [ref]$u)) { return $false }
-    if ($u.Scheme -ne 'https' -or $u.UserInfo -or -not $u.IsDefaultPort) { return $false }
-    $h = $u.IdnHost.ToLowerInvariant()
-    return [bool]($h -match '^(([a-z0-9-]+\.)*)(claude\.ai|anthropic\.com)$')
+# ---- her brain: the model she thinks with --------------------------------------------------------
+
+# Her brains are her own table (synaps-avatar --providers: src/provider.rs' ALL, in its order, and
+# how each is signed in to: browser, code, key), never a copy here; the local server isn't one (Find-
+# Local finds its models). Read once (Get-Brains).
+$script:BrainList = $null
+$script:BrainsWhy = ''
+# Synaps 0.12 opens a sign-in page with `cmd /c start URL` (auth/browser.rs), and cmd cuts the URL at
+# its first &. Grok's flow never prints its URL (auth/xai.rs), so its page can't open whole on
+# Windows: not offered here until it does.
+$script:NotHere = @{ 'xai-auth' = "Synaps 0.12 can't open xAI's sign-in page whole on Windows yet" }
+# Each account's sign-in page, as the login step opens it again whole: the line after Synaps' "If the
+# browser didn't open, visit this URL:" (Gemini's: "visit:"), https on exactly this host and path
+# (auth/mod.rs, openai_codex.rs, google_gemini.rs: their AUTHORIZE_URL). '': a device sign-in, whose
+# page has no & to cut (Copilot's, Kimi's, Muse's: a code to type, or filled in): nothing to reopen.
+$script:Reopen = @{
+    'anthropic' = 'claude.ai/oauth/authorize'; 'openai-codex' = 'auth.openai.com/oauth/authorize'
+    'google-gemini' = 'accounts.google.com/o/oauth2/v2/auth'
+    'github-copilot' = ''; 'kimi-code' = ''; 'muse' = ''
+}
+# A model's id as it may reach a command line (her --set, the steps' -Model): nothing else is listed.
+$script:ModelId = '^[A-Za-z0-9._:/@+-]+\z'
+# The model servers she can think with on this PC: Ollama's (Synaps' default) and LM Studio's.
+$script:Servers = @(
+    @{ Name = 'Ollama'; Url = 'http://localhost:11434/v1'; Probe = 'http://127.0.0.1:11434/v1/models' },
+    @{ Name = 'LM Studio'; Url = 'http://localhost:1234/v1'; Probe = 'http://127.0.0.1:1234/v1/models' })
+
+# Her exe: -Exe, else the one beside these steps (her install folder's; in her setup, its
+# temporary copy's), else none.
+function Resolve-Her {
+    if (-not $Exe) { $c = Join-Path (Split-Path -Parent $script:Root) 'synaps-avatar.exe'; if (Test-Path -LiteralPath $c) { $script:Exe = $c } }
+    if ($Exe -and -not (Test-Path -LiteralPath $Exe)) { $script:Exe = '' }
+}
+# Her accounts and key services, from her table (Id, Login, Name, How, Model: its default); none,
+# and BrainsWhy says why, when there's no exe of hers or it has no table.
+function Get-Brains {
+    if ($null -eq $script:BrainList) {
+        $script:BrainList = @()
+        Resolve-Her
+        if (-not $Exe) { $script:BrainsWhy = "there's no synaps-avatar.exe here to list her brains" }
+        else {
+            $r = Invoke-Her @('--providers')
+            foreach ($l in $r.Out) {
+                $f = @($l -split "`t")
+                if ($f.Count -ge 6 -and $f[2] -in @('account', 'key') -and $f[0] -and $f[1] -and $f[4]) {
+                    $script:BrainList += [pscustomobject]@{ Id = $f[0]; Login = $f[1]; Name = $f[4]; How = $f[5]; Model = $f[3] }
+                }
+            }
+            if (-not $script:BrainList.Count) { $script:BrainsWhy = "this build of her can't list her brains (synaps-avatar --providers)" }
+        }
+    }
+    $script:BrainList
+}
+function Find-Brain([string]$Id) {
+    $all = @(Get-Brains)
+    if (-not $all.Count) { Stop-Step $script:BrainsWhy }
+    $b = $all | Where-Object { $_.Id -eq $Id -or $_.Login -eq $Id } | Select-Object -First 1
+    if (-not $b) { Stop-Step "there's no brain called '$Id' (one of: $(($all | ForEach-Object { $_.Id }) -join ', '))" }
+    return $b
+}
+function Get-SynapsHome { if ($env:SYNAPS_BASE_DIR) { $env:SYNAPS_BASE_DIR } else { Join-Path $env:USERPROFILE '.synaps-cli' } }
+
+# The models on this PC's servers (OpenAI's /v1/models; 2 s each, nothing sent but the ask). An
+# embedding model isn't one to talk with.
+function Find-Local {
+    foreach ($s in $script:Servers) {
+        try { $r = Invoke-RestMethod -UseBasicParsing -Uri $s.Probe -TimeoutSec 2 -ErrorAction Stop } catch { continue }
+        foreach ($m in @($r.data)) {
+            $id = "$($m.id)".Trim()
+            if ($id -cmatch $script:ModelId -and $id -notmatch 'embed') { [pscustomobject]@{ Server = $s.Name; Url = $s.Url; Model = $id } }
+        }
+    }
 }
 
-# Her installer's "sign in" box (and her Start-menu "Sign in to Claude"): Synaps' Claude login with no
-# window. It opens his browser and waits on its localhost callback. Its stdin is a pipe held open: at
-# end of input (a closed or null stdin) synaps 0.12's login gives up at once ("Manual input channel
-# closed"), and after a sign-in it may wait on that read; so the pipe is closed once auth.json changes.
-function Invoke-Login {
-    $s = Find-Synaps
-    if ($s.State -eq 'missing') { Stop-Step 'there is no Synaps to sign in' }
-    $h = if ($env:SYNAPS_BASE_DIR) { $env:SYNAPS_BASE_DIR } else { Join-Path $env:USERPROFILE '.synaps-cli' }
-    $auth = Join-Path $h 'auth.json'
-    $was = if (Test-Path -LiteralPath $auth) { (Get-Item -LiteralPath $auth).LastWriteTimeUtc } else { [datetime]::MinValue }
+function Show-Brains {
+    Result "brain: $(if (Test-Brain) { 'yes' } else { 'no' })"
+    $all = @(Get-Brains)
+    if (-not $all.Count) { Warn "no accounts or key services: $script:BrainsWhy" }
+    foreach ($b in $all) {
+        # Gemini's sign-in needs its Google client (Synaps' google_gemini.rs): not without it.
+        if ($b.Id -eq 'google-gemini' -and -not $env:SYNAPS_GOOGLE_GEMINI_CLIENT_ID) { continue }
+        Result "brains: $($b.Id)|$($b.Login)|$($b.Name)|$($b.How)|$($script:NotHere[$b.Id])"
+    }
+    $n = 0
+    foreach ($l in Find-Local) { Result "local: $($l.Server)|$($l.Url)|$($l.Model)"; $n++ }
+    if ($n) { Good "$n model(s) on this PC" } else { Say 'no model server on this PC (Ollama, LM Studio)' }
+}
+
+# The sign-in page -Id's login opens in his browser, from Synaps' line ($Url): its whole URL
+# ([Uri]'s AbsoluteUri), when the line is one word with no \ in it (Windows reads one as /), https
+# on exactly -Id's host (no user@, no port) and path ($script:Reopen), no #, with an & that cmd cut;
+# else ''. Whatever else synaps prints is never opened. The same rules as her own sign-in
+# (src/signin.rs' allowed); a Rust test holds $script:Reopen's pages to it.
+function Get-SignInPage([string]$Url, [string]$Id = 'anthropic') {
+    $want = "$($script:Reopen[$Id])"
+    if (-not $want -or $Url -match '[\s\\#\x00-\x1f\x7f]' -or -not $Url.Contains('&')) { return '' }
+    $site, $path = $want.Split('/', 2)
+    $path = "/$path"
+    # The raw line's own start: https://HOST/ (a user@ or a :port never gets past this).
+    if (-not $Url.StartsWith("https://$site/", [StringComparison]::OrdinalIgnoreCase)) { return '' }
+    $u = $null
+    if (-not [Uri]::TryCreate($Url, [UriKind]::Absolute, [ref]$u)) { return '' }
+    if ($u.Scheme -ne 'https' -or $u.UserInfo -or $u.Port -ne 443 -or $u.IdnHost -ne $site -or $u.Authority -ne $site) { return '' }
+    if ($u.AbsolutePath -cne $path -or $u.Fragment -or -not $u.Query.Contains('&')) { return '' }
+    return $u.AbsoluteUri
+}
+
+# Copilot's code, in a small window of its own (and on the clipboard), never in a log or in this
+# step's output: Invoke-Login shows it modal (its own message loop) until he's signed in, or closes
+# it (Cancel, Esc, its X): then the sign-in is stopped.
+function New-CodeWindow([string]$Code, [string]$Name) {
+    Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+    if (-not ('CapriSteps.Win' -as [type])) {
+        Add-Type -Namespace CapriSteps -Name Win -MemberDefinition '[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c); [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);'
+    }
+    try { [Windows.Forms.Clipboard]::SetText($Code) } catch { $null = $_ }
+    $f = New-Object Windows.Forms.Form
+    $f.Text = "Sign in to $Name"
+    $f.FormBorderStyle = 'FixedDialog'; $f.MaximizeBox = $false; $f.MinimizeBox = $false
+    $f.StartPosition = 'CenterScreen'; $f.TopMost = $true; $f.ShowInTaskbar = $true
+    $f.AutoScaleMode = 'Dpi'
+    $f.ClientSize = New-Object Drawing.Size(400, 176)
+    $f.BackColor = [Drawing.Color]::FromArgb(10, 10, 11); $f.ForeColor = [Drawing.Color]::White
+    $a = New-Object Windows.Forms.Label
+    $a.Text = "Type this code on the sign-in page that opened in your browser. It's on your clipboard too."
+    $a.SetBounds(16, 14, 368, 36)
+    $c = New-Object Windows.Forms.TextBox
+    $c.Text = $Code; $c.ReadOnly = $true; $c.BorderStyle = 'None'; $c.TextAlign = 'Center'
+    $c.BackColor = $f.BackColor; $c.ForeColor = [Drawing.Color]::FromArgb(255, 20, 56)
+    $c.Font = New-Object Drawing.Font('Consolas', 24, [Drawing.FontStyle]::Bold)
+    $c.SetBounds(16, 56, 368, 44)
+    $w = New-Object Windows.Forms.Label
+    $w.Text = 'This closes once you''re signed in.'
+    $w.ForeColor = [Drawing.Color]::Silver
+    $w.SetBounds(16, 112, 250, 20)
+    $x = New-Object Windows.Forms.Button
+    $x.Text = 'Cancel'; $x.FlatStyle = 'System'; $x.DialogResult = 'Cancel'
+    $x.SetBounds(296, 136, 88, 28)
+    $f.CancelButton = $x
+    $f.Controls.AddRange(@($a, $c, $w, $x))
+    return $f
+}
+
+# The code off his clipboard, when it's still what's there (he may have copied something since).
+function Clear-Code([string]$Code) {
+    try { if ([Windows.Forms.Clipboard]::GetText() -ceq $Code) { [Windows.Forms.Clipboard]::Clear() } } catch { $null = $_ }
+}
+
+# synaps (its path) with these arguments, no window, its stdin, stdout and stderr ours. Windows
+# PowerShell's Process.Start writes the console's input encoding's BOM on a child's stdin at once
+# (.NET Framework, a UTF-8 console), and Synaps 0.12 trims a key but not a BOM (a broken key,
+# stored): so that encoding is made one without, for this process, before it starts.
+function Start-Synaps([string]$File, [string]$ArgLine) {
+    $bom = { try { [Console]::InputEncoding.GetPreamble().Length } catch { 0 } }
+    if (& $bom) {
+        try { [Console]::InputEncoding = New-Object Text.UTF8Encoding $false } catch { $null = $_ }
+        if (& $bom) { Stop-Step "synaps' input can't be made plain here (this console's encoding: $([Console]::InputEncoding.WebName))" }
+    }
     $pi = New-Object Diagnostics.ProcessStartInfo
-    $pi.FileName = $s.Path
-    $pi.Arguments = 'login --provider claude'
+    $pi.FileName = $File
+    $pi.Arguments = $ArgLine
     $pi.UseShellExecute = $false
     $pi.CreateNoWindow = $true
     $pi.RedirectStandardInput = $true
     $pi.RedirectStandardOutput = $true
     $pi.RedirectStandardError = $true
-    $p = [Diagnostics.Process]::Start($pi)
+    return [Diagnostics.Process]::Start($pi)
+}
+
+# Her installer's sign-in (and install.ps1's): Synaps' login for -Provider (Claude when none), with
+# no window. Synaps opens his browser and waits on its localhost callback (or, Copilot, Kimi and Muse,
+# on the device code). Its stdin is a pipe held open: at end of input (a closed or null stdin) synaps
+# 0.12's login gives up at once ("Manual input channel closed"), and after a sign-in it waits on that
+# read; so the pipe is closed once auth.json changes, and then it exits. What it prints is read,
+# never passed on: the page's URL and a code stay out of this step's output (and so out of every log).
+# Copilot's code window closed: synaps is stopped, and the step fails, saying so.
+function Invoke-Login {
+    $b = Find-Brain $(if ($Provider) { $Provider } else { 'anthropic' })
+    if ($b.How -eq 'key') { Stop-Step "$($b.Name) takes an API key, not a sign-in (steps.ps1 key)" }
+    if ($script:NotHere[$b.Id]) { Stop-Step "$($script:NotHere[$b.Id]): pick another brain in her Settings" }
+    $s = Find-Synaps
+    if ($s.State -eq 'missing') { Stop-Step 'there is no Synaps to sign in' }
+    if ($DryRun) { Say "`$ synaps login --provider $($b.Login) (your browser opens)"; Result 'brain: dry-run'; return }
+    $auth = Join-Path (Get-SynapsHome) 'auth.json'
+    $was = if (Test-Path -LiteralPath $auth) { (Get-Item -LiteralPath $auth).LastWriteTimeUtc } else { [datetime]::MinValue }
+    $p = Start-Synaps $s.Path "login --provider $($b.Login)"
     $null = $p.StandardOutput.ReadToEndAsync()
-    Say 'your browser opens: sign in to Claude there (10 minutes)'
+    if ($b.How -eq 'code') { Say "your browser opens: sign in to $($b.Name) there, with the code a small window shows you (10 minutes)" }
+    else { Say "your browser opens: sign in to $($b.Name) there (10 minutes)" }
     $t0 = Get-Date
-    $in = $false
     $said = New-Object Collections.Generic.List[string]
-    $state = @{ Line = $p.StandardError.ReadLineAsync(); Opened = $false }
-    # Its stderr, what's there so far. Synaps 0.12 opens the page with `cmd /c start URL`, and cmd
-    # cuts the URL at its first & (no client_id: claude.ai can't sign him in). The whole URL is on
-    # its stderr: opened here, by the shell, which leaves it whole.
+    $state = @{ Line = $p.StandardError.ReadLineAsync(); Next = $false; Opened = $false; Code = $null; In = $false; Done = $false; Raised = $false; Err = $null }
+    # Its stderr, what's there so far. The sign-in page (the line after "If the browser didn't open,
+    # visit...") is opened here whole, by the shell, when it's -Provider's own (Get-SignInPage).
+    # Copilot's code is kept for its window.
     $read = {
         while ($state.Line -and $state.Line.IsCompleted) {
             $r = $state.Line.Result
             if ($null -eq $r) { $state.Line = $null; break }
             $state.Line = $p.StandardError.ReadLineAsync()
             $l = ($r -replace "\x1b\[[0-9;]*m", '').Trim()
-            if ($l) { $said.Add($l) }
-            if (-not $state.Opened -and $l -match '^https://\S+\?\S*&\S+$') {
+            # The page: the very next line, alone (a blank one there: none).
+            if ($state.Next) {
+                $state.Next = $false
                 $state.Opened = $true
-                if (-not (Test-SignInUrl $l)) { Warn "not opened (not a Claude or Anthropic sign-in page): $l" }
-                elseif ($env:CAPRI_NO_BROWSER) { Say "would open: $l" }
-                else { try { Start-Process $l; Good 'opened the sign-in page in your browser' } catch { Warn "your browser didn't open: go to $l" } }
+                $page = Get-SignInPage $l $b.Id
+                if (-not $page) { Warn "not opened: the page Synaps gave isn't $($b.Name)'s sign-in page" }
+                elseif ($env:CAPRI_NO_BROWSER) { Add-Content -LiteralPath $env:CAPRI_NO_BROWSER -Value $page; Say 'would open the sign-in page (CAPRI_NO_BROWSER)' }
+                else { try { Start-Process $page; Good 'opened the sign-in page in your browser' } catch { Warn "your browser didn't open: run ``synaps login --provider $($b.Login)`` in a terminal" } }
+            }
+            if (-not $l) { continue }
+            $said.Add($l)
+            if (-not $state.Opened -and $script:Reopen[$b.Id] -and $l -match "^If the browser didn't open, visit( this URL)?:$") { $state.Next = $true }
+            if ($b.How -eq 'code' -and -not $state.Code -and $l -match '^(Enter|Confirm) code:\s*(\S+)$') { $state.Code = $Matches[2] }
+        }
+    }
+    $signed = { (Test-Path -LiteralPath $auth) -and (Get-Item -LiteralPath $auth).LastWriteTimeUtc -gt $was }
+    $late = { ((Get-Date) - $t0).TotalMinutes -ge 10 }
+    $closed = $false
+    # Anything thrown here: synaps is stopped first.
+    try {
+        while (-not $p.HasExited -and -not (& $late)) {
+            & $read
+            if (& $signed) { $state.In = $true; break }
+            if (-not $state.Code) { Start-Sleep -Milliseconds 250; continue }
+            # Copilot's code: its window, until he's signed in (then it closes) or he closes it. Raised
+            # once shown: a process started hidden (her installer's finish page) has its first show hidden.
+            $f = New-CodeWindow $state.Code $b.Name
+            $tick = New-Object Windows.Forms.Timer
+            $tick.Interval = 200
+            $tick.Add_Tick({
+                    try {
+                        if (-not $state.Raised) {
+                            $state.Raised = $true
+                            [void][CapriSteps.Win]::ShowWindow($f.Handle, 5)
+                            [void][CapriSteps.Win]::SetForegroundWindow($f.Handle)
+                        }
+                        & $read
+                        if (& $signed) { $state.In = $true }
+                        if ($state.In -or $p.HasExited -or (& $late)) { $state.Done = $true; $f.Close() }
+                    } catch { $state.Err = "$_"; $state.Done = $true; $f.Close() }
+                })
+            $tick.Start()
+            Good 'the code is in its window, and on your clipboard'
+            try { [void]$f.ShowDialog() } finally { $tick.Stop(); $tick.Dispose(); $f.Dispose(); Clear-Code $state.Code }
+            if ($state.Err) { throw $state.Err }
+            $closed = -not $state.Done
+            break
+        }
+    } catch { try { $p.Kill() } catch { $null = $_ }; throw }
+    if (-not $state.In -and -not $p.HasExited) {
+        try { $p.Kill() } catch { $null = $_ }
+        [void]$p.WaitForExit(5000)
+        if ($closed) { Stop-Step "the $($b.Name) sign-in was stopped (its window closed): her Settings > Brain signs in later" }
+        Stop-Step 'no sign-in in 10 minutes: she says how to sign in when you talk to her'
+    }
+    if ($state.In) {
+        # Signed in: its stdin closed, it exits (15 s, else it's stopped: the sign-in is kept).
+        try { $p.StandardInput.Close() } catch { $null = $_ }
+        if (-not $p.WaitForExit(15000)) { try { $p.Kill() } catch { $null = $_ } }
+    }
+    for ($i = 0; $i -lt 30 -and $state.Line; $i++) { & $read; if ($state.Line) { Start-Sleep -Milliseconds 100 } }
+    if (-not $state.In -and $p.ExitCode) {
+        # Its own last words, but never a URL or the code.
+        $why = $said | Where-Object { $_ -and $_ -notmatch '://' -and -not ($state.Code -and $_.Contains($state.Code)) -and $_ -notmatch 'code:' } | Select-Object -Last 1
+        Stop-Step "synaps login exited $($p.ExitCode): $(($why -replace '^[^\w]*Login failed:\s*', ''))"
+    }
+    Good "signed in to $($b.Name): her brain is in"
+    Result 'brain: yes'
+}
+
+# -Provider's API key: from $env:CAPRI_BRAIN_KEY, out of the environment before anything starts (so
+# synaps doesn't inherit it), then on synaps login's stdin, Synaps' own way for a key from a pipe
+# (cmd/login.rs: read_secret_line). Never on a command line, in a log or in this step's output.
+function Invoke-Key {
+    $key = "$env:CAPRI_BRAIN_KEY".Trim()
+    Remove-Item Env:\CAPRI_BRAIN_KEY -ErrorAction SilentlyContinue
+    $b = Find-Brain $Provider
+    if ($b.How -ne 'key') { Stop-Step "$($b.Name) is signed in to, not given a key (steps.ps1 login)" }
+    if ($DryRun) { Say "`$ synaps login --provider $($b.Login) (the key on its stdin)"; Result 'brain: dry-run'; return }
+    if (-not $key) { Stop-Step "no $($b.Name) key was given" }
+    if ($key -match '\s') { Stop-Step "that $($b.Name) key has a space or a line break in it: paste it again" }
+    $s = Find-Synaps
+    if ($s.State -eq 'missing') { Stop-Step "there is no Synaps to keep the key" }
+    $p = Start-Synaps $s.Path "login --provider $($b.Login)"
+    $out = $p.StandardOutput.ReadToEndAsync()
+    $err = $p.StandardError.ReadToEndAsync()
+    # Its bytes, and a line's end: nothing before them (no BOM), nothing of an encoding's own.
+    $bytes = (New-Object Text.UTF8Encoding $false).GetBytes("$key`n")
+    $key = $null
+    try {
+        $p.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length)
+        $p.StandardInput.BaseStream.Flush()
+    } catch { $null = $_ } finally {
+        [Array]::Clear($bytes, 0, $bytes.Length)
+        try { $p.StandardInput.Close() } catch { $null = $_ }
+    }
+    if (-not $p.WaitForExit(30000)) { try { $p.Kill() } catch { $null = $_ }; Stop-Step "synaps login didn't take the $($b.Name) key in 30 s" }
+    $null = $out.Result
+    if ($p.ExitCode) {
+        $why = (("$($err.Result)" -replace "\x1b\[[0-9;]*m", '') -split "`r?`n" | Where-Object { $_ -match 'failed' } | Select-Object -Last 1)
+        Stop-Step "Synaps didn't take the $($b.Name) key: $(("$why".Trim() -replace '^[^\w]*Login failed:\s*', ''))"
+    }
+    Good "your $($b.Name) key is in Synaps (its credential store)"
+    Result 'brain: yes'
+}
+
+# Synaps' config value for Key: its last `key = value` line, as Synaps reads it (# lines skipped);
+# '' when there's none.
+function Get-ConfigValue([string]$Text, [string]$Key) {
+    $v = ''
+    foreach ($l in ($Text -split "`r?`n")) {
+        $t = $l.Trim()
+        if ($t.StartsWith('#') -or -not $t.Contains('=')) { continue }
+        $k, $rest = $t -split '=', 2
+        if ($k.Trim() -eq $Key) { $v = $rest.Trim().Trim('"') }
+    }
+    return $v
+}
+
+# A model on this PC: -Url (Ollama's when none) as Synaps' provider.local.url when it uses another
+# now (its config's line, else Ollama's), written as Synaps' own writer leaves it (`key = value`,
+# the line replaced, else added); its daemon reloaded when it runs (it reads its config as it
+# starts). Then her model, local/-Model.
+function Set-Local {
+    $m = "$Model".Trim()
+    if ($m.StartsWith('local/')) { $m = $m.Substring(6) }
+    if (-not $m) { Stop-Step 'which model? (-Model)' }
+    if ($m -cnotmatch $script:ModelId) { Stop-Step "-Model isn't a model's name (letters, digits and ._:/@+- only)" }
+    $want = if ($Url) { $Url.Trim().TrimEnd('/') } else { $script:Servers[0].Url }
+    if ($want -notmatch '^https?://[^\s"''#\\]+$') { Stop-Step "-Url isn't a server's address (http://host:port/v1)" }
+    $cfg = Join-Path (Get-SynapsHome) 'config'
+    $text = if (Test-Path -LiteralPath $cfg) { [IO.File]::ReadAllText($cfg) } else { '' }
+    $now = Get-ConfigValue $text 'provider.local.url'
+    $have = if ($now) { $now.TrimEnd('/') } else { $script:Servers[0].Url }
+    if ($have -ne $want) {
+        if ($DryRun) { Say "`$ provider.local.url = $want ($cfg)" }
+        else {
+            $line = "provider.local.url = $want"
+            $found = $false
+            $lines = New-Object Collections.Generic.List[string]
+            foreach ($l in $(if ($text) { @($text -split "`r?`n") } else { @() })) {
+                $t = $l.Trim()
+                if (-not $t.StartsWith('#') -and $t.Contains('=') -and ($t -split '=', 2)[0].Trim() -eq 'provider.local.url') { $found = $true; $lines.Add($line) }
+                else { $lines.Add($l) }
+            }
+            if ($lines.Count -and $lines[$lines.Count - 1] -eq '') { $lines.RemoveAt($lines.Count - 1) }
+            if (-not $found) { $lines.Add($line) }
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $cfg) | Out-Null
+            [IO.File]::WriteAllText("$cfg.tmp", (($lines -join "`n") + "`n"), (New-Object Text.UTF8Encoding $false))
+            Move-Item -Force -LiteralPath "$cfg.tmp" -Destination $cfg
+            Good "Synaps' local server: $want (provider.local.url in $cfg)"
+            $s = Find-Synaps
+            if ($s.State -ne 'missing' -and (Get-DaemonStatus $s.Path).Alive) {
+                $ErrorActionPreference = 'Continue'
+                $o = (& $s.Path daemon reload 2>&1 | Out-String)
+                if ($LASTEXITCODE) { Warn "its daemon runs with the old one: reload it (synaps daemon reload): $("$o".Trim() -split "`r?`n" | Select-Object -Last 1)" }
+                else { Good 'its daemon reloaded it' }
+                $ErrorActionPreference = 'Stop'
             }
         }
     }
-    while (-not $p.HasExited -and ((Get-Date) - $t0).TotalMinutes -lt 10) {
-        & $read
-        if (-not $in -and (Test-Path -LiteralPath $auth) -and (Get-Item -LiteralPath $auth).LastWriteTimeUtc -gt $was) {
-            $in = $true
-            $p.StandardInput.Close()
-            [void]$p.WaitForExit(15000)
-            break
-        }
-        Start-Sleep -Milliseconds 500
+    $script:Model = "local/$m"
+    Set-HerModel
+}
+
+# Her exe (-Exe) with these arguments, no window: its exit code, stdout lines and stderr.
+function Invoke-Her([string[]]$ArgList) {
+    $pi = New-Object Diagnostics.ProcessStartInfo
+    $pi.FileName = $Exe
+    $pi.Arguments = ($ArgList | ForEach-Object { '"' + ($_ -replace '"', '\"') + '"' }) -join ' '
+    $pi.UseShellExecute = $false
+    $pi.CreateNoWindow = $true
+    $pi.RedirectStandardOutput = $true
+    $pi.RedirectStandardError = $true
+    $p = [Diagnostics.Process]::Start($pi)
+    $err = $p.StandardError.ReadToEndAsync()
+    $out = $p.StandardOutput.ReadToEnd()
+    $p.WaitForExit()
+    return @{ Code = $p.ExitCode; Out = @($out -split "`r?`n" | Where-Object { $_ }); Err = "$($err.Result)" }
+}
+
+# Why synaps-avatar --set saved nothing: its own words (Said: its last `synaps-avatar: ` line), else
+# its exit code's (2 a bad --set, 3 settings.toml refused: a typo in it, or unreadable, never written
+# over; 4 not saved).
+function Get-SetWhy([int]$Code, [string]$Said) {
+    $Said = (($Said -split "`r?`n" | Where-Object { $_ -match 'synaps-avatar: ' } | Select-Object -Last 1) -replace '^.*synaps-avatar: ', '').Trim()
+    if ($Said -match 'unknown argument `--set`') { return "this build of her can't save settings from her installer yet (synaps-avatar --set)" }
+    $settings = Join-Path $env:APPDATA 'synaps-avatar\settings.toml'
+    if (-not $Said) {
+        return $(switch ($Code) {
+                3 { "your settings file ($settings) has a typo, and she won't write over it: fix it, then run this again" }
+                4 { "she couldn't write $settings" }
+                default { "synaps-avatar --set exited $Code" }
+            })
     }
-    if (-not $p.HasExited) {
-        try { $p.Kill() } catch { $null = $_ }
-        if (-not $in) { Stop-Step 'no sign-in in 10 minutes: she says how to sign in when you talk to her' }
+    if ($Code -eq 3) { return "$Said Fix it ($settings), then run this again." }
+    return $Said
+}
+
+# Her model: -Model, else -Provider's default from her own table (synaps-avatar --providers: never a
+# copy here), by her settings writer.
+function Set-HerModel {
+    Resolve-Her
+    if ($DryRun -and -not $Exe) {
+        Say "`$ synaps-avatar --set session.model=$(if ($Model) { $Model } else { "($Provider's default)" })"
+        Result 'model: dry-run'
+        return
     }
-    for ($i = 0; $i -lt 30 -and $state.Line; $i++) { & $read; if ($state.Line) { Start-Sleep -Milliseconds 100 } }
-    if (-not $in -and $p.ExitCode) { Stop-Step "synaps login exited $($p.ExitCode): $($said | Where-Object { $_ } | Select-Object -Last 1)" }
-    Good 'signed in: her brain is in'
-    Result 'brain: yes'
+    if (-not $Exe) { Stop-Step "there's no synaps-avatar.exe here to set her model with" }
+    $m = $Model
+    if (-not $m) {
+        $b = Find-Brain $Provider
+        $m = $b.Model
+        if (-not $m) { Stop-Step "this build of her has no default model for $($b.Name) (synaps-avatar --providers)" }
+    }
+    if ($DryRun) { Say "`$ synaps-avatar --set session.model=$m"; Result "model: $m"; return }
+    $r = Invoke-Her @('--set', "session.model=$m")
+    if ($r.Code -ne 0) { Stop-Step "her model wasn't saved: $(Get-SetWhy $r.Code $r.Err)" }
+    Good "her model: $m"
+    Result "model: $m"
 }
 
 # Her uninstaller, when he says to remove Synaps too (it installed it): -Synaps, the synaps.exe it
@@ -688,8 +1059,7 @@ function Set-Pack([string]$New, [string]$Fingerprint, [string]$Source) {
 }
 
 function Build-Pack {
-    if (-not $Exe) { $c = Join-Path (Split-Path -Parent $script:Root) 'synaps-avatar.exe'; if (Test-Path -LiteralPath $c) { $script:Exe = $c } }
-    if ($Exe -and -not (Test-Path -LiteralPath $Exe)) { $script:Exe = '' }
+    Resolve-Her
     if ($DryRun) {
         Say "`$ make-pack CapriCore@$((Get-Key 'capricore_commit').Substring(0, 7)) $Out --lachy auto$(if ($LocalArt) { ' --mochi auto' }), in CPython $(Get-Key 'python_embed') (embeddable) with $(Get-Key 'pip_pack')"
         Result 'pack: dry-run'
@@ -876,19 +1246,7 @@ function Install-Voice {
             $fs = New-Object IO.FileStream($log, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]'ReadWrite, Delete')
             try { if ($fs.Length -ge $before) { [void]$fs.Seek($before, [IO.SeekOrigin]::Begin) }; $said = (New-Object IO.StreamReader($fs)).ReadToEnd() } finally { $fs.Dispose() }
         }
-        $said = (($said -split "`r?`n" | Where-Object { $_ -match 'synaps-avatar: ' } | Select-Object -Last 1) -replace '^.*synaps-avatar: ', '').Trim()
-        if ($said -match 'unknown argument `--set`') { $said = "this build of her can't save settings from her installer yet (synaps-avatar --set)" }
-        # synaps-avatar --set's exit codes: 2 a bad --set, 3 settings.toml refused (a typo in it, or
-        # unreadable: never written over), 4 not saved.
-        $settings = Join-Path $env:APPDATA 'synaps-avatar\settings.toml'
-        if (-not $said) {
-            $said = switch ($p.ExitCode) {
-                3 { "your settings file ($settings) has a typo, and she won't write over it: fix it, then run this again" }
-                4 { "she couldn't write $settings" }
-                default { "synaps-avatar --set exited $($p.ExitCode)" }
-            }
-        } elseif ($p.ExitCode -eq 3) { $said = "$said Fix it ($settings), then run this again." }
-        Stop-Step "her voice is installed, but your choices weren't saved: $said"
+        Stop-Step "her voice is installed, but your choices weren't saved: $(Get-SetWhy $p.ExitCode $said)"
     }
     $mine = @('talk to her on')
     if ($WakeWord) { $mine += "`"hey Capri`" $WakeWord" }

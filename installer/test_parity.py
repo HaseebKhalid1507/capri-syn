@@ -34,7 +34,7 @@ class Parity(unittest.TestCase):
         sh = flags(block(SH, "usage: install.sh", "EOF"))
         ps = flags(block(PS, "usage: install.ps1", "'@"))
         self.assertEqual(sh, ps)
-        self.assertEqual(sh, ["--allow-root", "--artifact", "--dry-run", "--from-source", "--no-autostart", "--prefix",
+        self.assertEqual(sh, ["--allow-root", "--artifact", "--brain", "--dry-run", "--from-source", "--no-autostart", "--prefix",
                               "--purge", "--uninstall", "--voice", "--watch", "--with-local-art", "--yes"])
 
     def test_every_flag_is_parsed(self):

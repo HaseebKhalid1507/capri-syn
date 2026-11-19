@@ -334,7 +334,7 @@ synaps-avatar --set KEY=VALUE [--set KEY=VALUE ...]
 | `--check` | load and decode the pack, print a summary, exit (no window) |
 | `--dump DIR` | with `--check`: every decoded frame as a PNG, the pixels she draws at `--height` (scale it by the display's sf to see the real render) |
 | `-V`, `--version` | print `synaps-avatar <version>`, exit. Her log says it at start too: `--- synaps-avatar <version> (pid N)` |
-| `--set KEY=VALUE` | write these to `settings.toml` with her own writer (as Settings does), then exit; nothing else runs. Her Windows installer's Voice page uses it. Only `voice.enabled`, `voice.wake_word`, `voice.speak_unprompted` (`true`/`on`, `false`/`off`) and `voice.mic` (a name; empty: the default). Exit 0: saved (or already so); 2: a bad `--set`; 3: the file refused (a typo, unreadable); 4: not saved (it couldn't be written, or the result wouldn't load) |
+| `--set KEY=VALUE` | write these to `settings.toml` with her own writer (as Settings does), then exit; nothing else runs but, when she's running, a `settings reload` on her control socket (she reads them again). Her installers use it (Voice, her model). Only `voice.enabled`, `voice.wake_word`, `voice.speak_unprompted` (`true`/`on`, `false`/`off`), `voice.mic` (a name; empty: the default) and `session.model` (a model Synaps routes: `claude-…`, `<provider>/<model>`, `local/<name>`). Exit 0: saved (or already so); 2: a bad `--set`; 3: the file refused (a typo, unreadable); 4: not saved (it couldn't be written, or the result wouldn't load) |
 
 `synaps-avatar --help` lists the rest (`--name`, `--threads`, `--no-verify`, `--focus-probe`).
 

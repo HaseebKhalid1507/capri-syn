@@ -9,6 +9,12 @@
 ;     against; never the latest) with its own installer, checked against its pinned SHA-256.
 ;   - Her pack: the "Her pack" page downloads her art and builds it on his machine (the default), copies
 ;     a pack folder he has, or skips. Her art is never in this installer.
+;   - Her model (page "Her model", when Synaps has none yet): an account to sign in to (the finish page
+;     signs in: his browser opens on the page; Copilot's code in a small window), a model on this PC
+;     (Ollama's, LM Studio's), an API key (to Synaps on its stdin, never on a command line), or later
+;     (the default). A model on this PC or a key's service: her model is set at install, before she
+;     starts. An account: once he's signed in (the finish page's step: its default, her own table's,
+;     and she reads it again); never before, so she reads NO BRAIN YET until then.
 ;   - The Synaps daemon, now and at sign-in (no console window).
 ;   - Her voice (page "Her voice", on when Windows has a microphone; never by default on an upgrade:
 ;     one that is installed keeps his settings): the voice installer and its models, downloaded; his
@@ -20,12 +26,15 @@
 ; Unattended: setup.exe /VERYSILENT /SUPPRESSMSGBOXES [/SYNAPS=install|skip]
 ;             [/PACK=download|skip|"C:\packs\capri"] [/VOICE=on|off] [/MIC="Microphone (...)"]
 ;             [/VOICEFROM="C:\...\capri-syn-voice-setup.exe" or a URL] [/TASKS=autostart]
+;             [/BRAIN=later|local|local:MODEL|ACCOUNT]
 ; The defaults are the wizard's: Synaps if it's needed, her art downloaded, autostart on, her voice
-; when Windows has a microphone (on a first install only). Her voice comes from /VOICEFROM (a file,
-; or an https URL), else her own release (v<AppVersion>; never the latest: steps.ps1 voice-check);
-; never from a file found by name beside this setup (that folder is usually Downloads). With neither,
-; the page says it comes with her first release, and stays off. Run as administrator, Setup asks
-; first (she and her daemon would run elevated).
+; when Windows has a microphone (on a first install only), her model later. /BRAIN= starts her model
+; page on it (ACCOUNT: an id or login, claude, openai-codex...; unattended, her model is set to its
+; default, and the sign-in is his to do: the log says so). A key can't be given unattended.
+; Her voice comes from /VOICEFROM (a file, or an https URL), else her own release (v<AppVersion>;
+; never the latest: steps.ps1 voice-check); never from a file found by name beside this setup (that
+; folder is usually Downloads). With neither, the page says it comes with her first release, and
+; stays off. Run as administrator, Setup asks first (she and her daemon would run elevated).
 ; install.ps1 runs it with /SYNAPS=skip /PACK=skip /VOICE=off /BY=install.ps1: those are its own
 ; steps (the same steps.ps1), and her settings and its cache are its own to remove.
 
@@ -123,8 +132,10 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 [Run]
 ; Started from his profile folder, as install.ps1 starts her.
 Filename: "{app}\synaps-avatar.exe"; WorkingDir: "{%USERPROFILE}"; Description: "Start her now"; Flags: nowait postinstall skipifsilent; Check: PackReady
-; No brain yet: Synaps' Claude sign-in, with no window (steps.ps1 login): his browser opens.
-Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\steps\steps.ps1"" login"; Description: "Sign in to Claude, her brain (your browser opens; a Claude Pro or Max plan)"; Flags: nowait postinstall skipifsilent runhidden; Check: OfferLogin
+; An account picked on her model page: its sign-in, with no window (steps.ps1 login): his browser opens on
+; the page (Copilot's code in a small window of its own). Signed in, then her model (steps.ps1 model:
+; its default, her running self told); not signed in, her model stays unset (NO BRAIN YET).
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\steps\steps.ps1"" login model -Provider {code:PickLogin} -Exe ""{app}\synaps-avatar.exe"""; Description: "{code:LoginDescription}"; Flags: nowait postinstall skipifsilent runhidden; Check: OfferLogin
 
 [UninstallDelete]
 ; Her old exe, renamed aside by an upgrade while a process of hers still mapped it.
@@ -203,6 +214,23 @@ begin
 end;
 
 { The command he can run again in a terminal (PowerShell or cmd). }
+{ A model's id as it may reach a command line (-Model "..."): letters, digits and ._:/@+- only, as
+  steps.ps1's $script:ModelId. }
+function SafeModel(const S: String): Boolean;
+var
+  I: Integer;
+  C: String;
+begin
+  Result := S <> '';
+  for I := 1 to Length(S) do begin
+    C := Copy(S, I, 1);
+    if not (((C >= 'A') and (C <= 'Z')) or ((C >= 'a') and (C <= 'z')) or ((C >= '0') and (C <= '9')) or (Pos(C, '._:/@+-') > 0)) then begin
+      Result := False;
+      exit;
+    end;
+  end;
+end;
+
 function StepCommand(const Args: String): String;
 begin
   Result := 'powershell -NoProfile -ExecutionPolicy Bypass -File "' + StepsScript + '" ' + Args;
@@ -271,11 +299,6 @@ begin
   Result := Lowercase(ExpandConstant('{param:BY|}')) = 'install.ps1';
 end;
 
-function OfferLogin: Boolean;
-begin
-  Result := SynapsOk and not BrainOk;
-end;
-
 function StateIni: String;
 begin
   Result := ExpandConstant('{app}\capri-syn-setup.ini');
@@ -298,7 +321,7 @@ end;
 
 function IsResultKey(const K: String): Boolean;
 begin
-  Result := Pos(',' + K + ',', ',synaps,brain,daemon,runvalue,pack,voice,voicefrom,release,was,remove,mic,mics,failed,pin,') > 0;
+  Result := Pos(',' + K + ',', ',synaps,brain,brains,local,model,daemon,runvalue,pack,voice,voicefrom,release,was,remove,mic,mics,failed,pin,') > 0;
 end;
 
 { One line of a step: in the log; a result is kept; anything else goes on the progress page. }
@@ -455,6 +478,17 @@ begin
   Result.Caption := Caption;
 end;
 
+function NewRadio(Page: TWizardPage; const Caption: String; Top: Integer; Click: TNotifyEvent): TNewRadioButton;
+begin
+  Result := TNewRadioButton.Create(Page);
+  Result.Parent := Page.Surface;
+  Result.Top := Top;
+  Result.Width := Page.SurfaceWidth;
+  Result.Height := ScaleY(20);
+  Result.Caption := Caption;
+  Result.OnClick := Click;
+end;
+
 procedure CreateBrainPage;
 var
   T: TNewStaticText;
@@ -475,6 +509,286 @@ begin
     ScaleX(18), SynapsBox.Top + SynapsBox.Height + ScaleY(4));
 end;
 
+{ ---- the "Her model" page: what she thinks with ------------------------------------------------- }
+
+var
+  ModelPage: TWizardPage;
+  AccountRadio, LocalRadio, KeyRadio, LaterRadio: TNewRadioButton;
+  AccountCombo, LocalCombo, KeyCombo: TNewComboBox;
+  KeyEdit: TPasswordEdit;
+  LocalNote, OllamaLink: TNewStaticText;
+  { brain-check's, once: the accounts and the key services (id|login|name|how|why not), the models on
+    this PC (server|url|model), in their combos' order. ModelAsked: the page was his to see. }
+  BrainChecked, ModelFilled, ModelAsked: Boolean;
+  Accounts, KeyBrains, LocalModels: TStringList;
+  { The pick, carried out at install (RunPick): its step's result, and the model it set. }
+  PickRan, PickOk: Boolean;
+  PickWhy, PickModel: String;
+
+{ A key for steps.ps1 key, in this process's environment for its child alone (never on a command
+  line), and out again once it has run. }
+function SetEnvVar(lpName, lpValue: String): Integer;
+  external 'SetEnvironmentVariableW@kernel32.dll stdcall';
+
+{ Field N (from 1) of a brain-check line, its fields split by |. }
+function Field(S: String; N: Integer): String;
+var
+  P: Integer;
+begin
+  Result := '';
+  while N > 1 do begin
+    P := Pos('|', S);
+    if P = 0 then exit;
+    S := Copy(S, P + 1, Length(S));
+    N := N - 1;
+  end;
+  P := Pos('|', S);
+  if P = 0 then Result := S else Result := Copy(S, 1, P - 1);
+end;
+
+function BrainParam: String;
+begin
+  Result := Lowercase(Trim(ExpandConstant('{param:BRAIN|}')));
+end;
+
+{ brain-check, once, from the copy of the steps in the temporary folder (nothing is installed yet):
+  a brain already, the accounts and key services she can take (her own table: her exe beside the
+  steps, synaps-avatar --providers), the models on this PC. }
+procedure CheckBrains;
+var
+  Script, L: String;
+  I: Integer;
+begin
+  if BrainChecked then exit;
+  BrainChecked := True;
+  Script := ExpandConstant('{tmp}') + '\{app}\steps\steps.ps1';
+  try
+    if not FileExists(Script) then begin
+      ExtractTemporaryFiles('{app}\steps\steps.ps1');
+      ExtractTemporaryFiles('{app}\steps\installer\manifest');
+    end;
+  except
+    Log('brain-check: ' + GetExceptionMessage);
+    exit;
+  end;
+  { Without her exe there: no accounts or key services on the page (brain-check says why). }
+  try
+    if not FileExists(ExpandConstant('{tmp}') + '\{app}\synaps-avatar.exe') then
+      ExtractTemporaryFiles('{app}\synaps-avatar.exe');
+  except
+    Log('brain-check: her exe: ' + GetExceptionMessage);
+  end;
+  RunStep('brain-check', 'Looking for her brain', Script, 'brain-check');
+  BrainOk := StepResult('brain') = 'yes';
+  for I := 0 to StepResults.Count - 1 do begin
+    L := StepResults[I];
+    if Copy(L, 1, 7) = 'brains=' then begin
+      L := Copy(L, 8, Length(L));
+      if Field(L, 4) = 'key' then KeyBrains.Add(L) else Accounts.Add(L);
+    end else if Copy(L, 1, 6) = 'local=' then
+      if SafeModel(Field(Copy(L, 7, Length(L)), 3)) then LocalModels.Add(Copy(L, 7, Length(L)));
+  end;
+end;
+
+procedure ModelClick(Sender: TObject);
+begin
+  AccountCombo.Enabled := AccountRadio.Checked;
+  LocalCombo.Enabled := LocalRadio.Checked;
+  KeyCombo.Enabled := KeyRadio.Checked;
+  KeyEdit.Enabled := KeyRadio.Checked;
+end;
+
+procedure OllamaClick(Sender: TObject);
+var
+  Code: Integer;
+begin
+  ShellExec('open', 'https://ollama.com', '', '', SW_SHOWNORMAL, ewNoWait, Code);
+end;
+
+function NewCombo(Page: TWizardPage; Left, Top, Width: Integer): TNewComboBox;
+begin
+  Result := TNewComboBox.Create(Page);
+  Result.Parent := Page.Surface;
+  Result.Style := csDropDownList;
+  Result.Left := Left;
+  Result.Top := Top;
+  Result.Width := Width;
+end;
+
+{ Four choices, at the same level; nothing picked but "Choose later". Filled once brain-check ran. }
+procedure CreateModelPage;
+var
+  W: Integer;
+begin
+  ModelPage := CreateCustomPage(BrainPage.ID, 'Her model', 'What she thinks with. Pick one now, or later in her Settings.');
+  W := ModelPage.SurfaceWidth - ScaleX(18);
+  AccountRadio := NewRadio(ModelPage, 'Sign in to an account', 0, @ModelClick);
+  AccountCombo := NewCombo(ModelPage, ScaleX(18), AccountRadio.Top + AccountRadio.Height + ScaleY(2), W);
+  LocalRadio := NewRadio(ModelPage, 'A model on this PC', AccountCombo.Top + AccountCombo.Height + ScaleY(8), @ModelClick);
+  LocalRadio.Width := ScaleX(200);
+  LocalCombo := NewCombo(ModelPage, ScaleX(18), LocalRadio.Top + LocalRadio.Height + ScaleY(2), W);
+  LocalNote := NewText(ModelPage, 'None running here: get Ollama, then pick it in her Settings > Brain.',
+    ScaleX(18), LocalCombo.Top + ScaleY(3));
+  LocalNote.Visible := False;
+  OllamaLink := NewText(ModelPage, 'ollama.com', ScaleX(210), LocalRadio.Top + ScaleY(2));
+  OllamaLink.Width := ScaleX(120);
+  OllamaLink.Font.Style := [fsUnderline];
+  OllamaLink.Cursor := crHand;
+  OllamaLink.OnClick := @OllamaClick;
+  OllamaLink.Visible := False;
+  KeyRadio := NewRadio(ModelPage, 'An API key', LocalCombo.Top + LocalCombo.Height + ScaleY(8), @ModelClick);
+  KeyCombo := NewCombo(ModelPage, ScaleX(18), KeyRadio.Top + KeyRadio.Height + ScaleY(2), ScaleX(160));
+  KeyEdit := TPasswordEdit.Create(ModelPage);
+  KeyEdit.Parent := ModelPage.Surface;
+  KeyEdit.Left := KeyCombo.Left + KeyCombo.Width + ScaleX(8);
+  KeyEdit.Top := KeyCombo.Top;
+  KeyEdit.Width := ModelPage.SurfaceWidth - KeyEdit.Left;
+  LaterRadio := NewRadio(ModelPage, 'Choose later', KeyCombo.Top + KeyCombo.Height + ScaleY(8), @ModelClick);
+  NewText(ModelPage, 'She shows NO BRAIN YET until she has one. Her Settings > Brain has all of these.',
+    ScaleX(18), LaterRadio.Top + LaterRadio.Height + ScaleY(2));
+  LaterRadio.Checked := True;
+  ModelClick(nil);
+end;
+
+function HowText(const How: String): String;
+begin
+  if How = 'code' then Result := 'your browser, and a code shown to you'
+  else Result := 'your browser';
+end;
+
+{ The page's lists from brain-check, once; then /BRAIN=, when it names one of them. }
+procedure FillModelPage;
+var
+  I: Integer;
+  L, P: String;
+begin
+  if ModelFilled then exit;
+  ModelFilled := True;
+  for I := 0 to Accounts.Count - 1 do begin
+    L := Accounts[I];
+    if Field(L, 5) <> '' then AccountCombo.Items.Add(Field(L, 3) + ' (not here: ' + Field(L, 5) + ')')
+    else AccountCombo.Items.Add(Field(L, 3) + ' (' + HowText(Field(L, 4)) + ')');
+  end;
+  for I := 0 to KeyBrains.Count - 1 do KeyCombo.Items.Add(Field(KeyBrains[I], 3));
+  for I := 0 to LocalModels.Count - 1 do LocalCombo.Items.Add(Field(LocalModels[I], 3) + ' (' + Field(LocalModels[I], 1) + ')');
+  AccountRadio.Enabled := Accounts.Count > 0;
+  KeyRadio.Enabled := KeyBrains.Count > 0;
+  LocalRadio.Enabled := LocalModels.Count > 0;
+  LocalCombo.Visible := LocalModels.Count > 0;
+  LocalNote.Visible := LocalModels.Count = 0;
+  OllamaLink.Visible := LocalModels.Count = 0;
+  P := BrainParam;
+  if (P = 'local') and (LocalModels.Count > 0) then begin
+    LocalRadio.Checked := True;
+    LocalCombo.ItemIndex := 0;
+  end else if Copy(P, 1, 6) = 'local:' then begin
+    for I := 0 to LocalModels.Count - 1 do
+      if Lowercase(Field(LocalModels[I], 3)) = Copy(P, 7, Length(P)) then begin
+        LocalRadio.Checked := True;
+        LocalCombo.ItemIndex := I;
+      end;
+  end else if (P <> '') and (P <> 'later') then begin
+    for I := 0 to Accounts.Count - 1 do
+      if ((P = Field(Accounts[I], 1)) or (P = Field(Accounts[I], 2))) and (Field(Accounts[I], 5) = '') then begin
+        AccountRadio.Checked := True;
+        AccountCombo.ItemIndex := I;
+      end;
+  end;
+  if (P <> '') and (P <> 'later') and LaterRadio.Checked then
+    Log('her model: /BRAIN=' + P + ' isn''t one this page can take here (a key needs the page; a local model must be running): later');
+  ModelClick(nil);
+end;
+
+{ His pick: account, local, key or later; '' when the page wasn't his to see (a brain already, no
+  Synaps coming, or install.ps1's run: it asks its own). }
+function PickKind: String;
+begin
+  Result := '';
+  if not ModelAsked then exit;
+  if AccountRadio.Checked and (AccountCombo.ItemIndex >= 0) then Result := 'account'
+  else if LocalRadio.Checked and (LocalCombo.ItemIndex >= 0) then Result := 'local'
+  else if KeyRadio.Checked and (KeyCombo.ItemIndex >= 0) then Result := 'key'
+  else Result := 'later';
+end;
+
+{ The pick's brain-check line: an account's or key service's (id|login|name|how|why not), or a
+  local model's (server|url|model). }
+function PickLine: String;
+var
+  K: String;
+begin
+  Result := '';
+  K := PickKind;
+  if K = 'account' then Result := Accounts[AccountCombo.ItemIndex]
+  else if K = 'key' then Result := KeyBrains[KeyCombo.ItemIndex]
+  else if K = 'local' then Result := LocalModels[LocalCombo.ItemIndex];
+end;
+
+function PickLogin(Param: String): String;
+begin
+  Result := Field(PickLine, 2);
+end;
+
+function LoginDescription(Param: String): String;
+begin
+  Result := 'Sign in to ' + Field(PickLine, 3) + ', her brain (your browser opens';
+  if Field(PickLine, 4) = 'code' then Result := Result + '; a small window shows the code to type there';
+  Result := Result + ')';
+end;
+
+{ The finish page's sign-in: an account picked, and no brain yet. }
+function OfferLogin: Boolean;
+begin
+  Result := SynapsOk and not BrainOk and (PickKind = 'account');
+end;
+
+{ What he picked, in place before she starts: a local model (and Synaps' provider.local.url), or a
+  key into Synaps, then its default. An account's sign-in, then its model, is the finish page's
+  (login model): nothing here, so a sign-in he unticks or that fails leaves her model unset. }
+procedure RunPick;
+var
+  K, L, Her, Args: String;
+begin
+  K := PickKind;
+  L := PickLine;
+  Her := ExpandConstant('{app}\synaps-avatar.exe');
+  if (K = 'account') and WizardSilent then
+    Log('her brain: ' + Field(L, 3) + ', not signed in to (silent): to sign in, then set her model: ' + StepCommand('login model -Provider ' + Field(L, 2) + ' -Exe "' + Her + '"'));
+  if (K = '') or (K = 'later') or (K = 'account') then exit;
+  PickRan := True;
+  if K = 'key' then begin
+    if not SynapsOk then begin
+      PickWhy := 'there''s no Synaps to keep it';
+      exit;
+    end;
+    SetEnvVar('CAPRI_BRAIN_KEY', Trim(KeyEdit.Text));
+    try
+      PickOk := RunStep('key', 'Her brain: your ' + Field(L, 3) + ' key, into Synaps', StepsScript, 'key -Provider ' + Field(L, 1));
+    finally
+      SetEnvVar('CAPRI_BRAIN_KEY', '');
+      KeyEdit.Text := '';
+    end;
+    if not PickOk then begin
+      PickWhy := StepFailed;
+      exit;
+    end;
+    BrainOk := True;
+  end;
+  if (K = 'local') and not SafeModel(Field(L, 3)) then begin
+    PickWhy := 'its name isn''t one a command line can take';
+    exit;
+  end;
+  if K = 'local' then Args := 'local -Model "' + Field(L, 3) + '" -Url "' + Field(L, 2) + '" -Exe "' + Her + '"'
+  else Args := 'model -Provider ' + Field(L, 1) + ' -Exe "' + Her + '"';
+  PickOk := RunStep(K, 'Her model', StepsScript, Args);
+  PickModel := StepResult('model');
+  if PickOk and (K = 'local') then BrainOk := True;
+  if not PickOk then begin
+    PickWhy := StepFailed;
+    Retry.Add('Her model: ' + StepCommand(Args));
+  end;
+end;
+
 { ---- the "Her pack" page ------------------------------------------------------------------------- }
 
 procedure PackChoiceClick(Sender: TObject);
@@ -492,32 +806,21 @@ begin
     FolderEdit.Text := Dir;
 end;
 
-function NewRadio(const Caption: String; Top: Integer): TNewRadioButton;
-begin
-  Result := TNewRadioButton.Create(PackPage);
-  Result.Parent := PackPage.Surface;
-  Result.Top := Top;
-  Result.Width := PackPage.SurfaceWidth;
-  Result.Height := ScaleY(20);
-  Result.Caption := Caption;
-  Result.OnClick := @PackChoiceClick;
-end;
-
 procedure CreatePackPage;
 var
   T: TNewStaticText;
   Y: Integer;
 begin
-  PackPage := CreateCustomPage(BrainPage.ID, 'Her pack', 'Which art should she wear?');
+  PackPage := CreateCustomPage(ModelPage.ID, 'Her pack', 'Which art should she wear?');
   T := NewText(PackPage, 'Her art isn''t in this installer. Setup can download it from its artists'' GitHub ' +
     'repositories and build her pack on this PC.', 0, 0);
   Y := T.Top + T.Height + ScaleY(10);
-  DownloadRadio := NewRadio('Download her art (CapriCore + lachy''s desktop art, ~100 MB)', Y);
+  DownloadRadio := NewRadio(PackPage, 'Download her art (CapriCore + lachy''s desktop art, ~100 MB)', Y, @PackChoiceClick);
   T := NewText(PackPage, 'At pinned versions, every file checked against its SHA-256. lachy''s desktop art is under ' +
     'the PolyForm Noncommercial License 1.0.0 (noncommercial use only): its notices are shown when it''s done.',
     ScaleX(18), DownloadRadio.Top + DownloadRadio.Height + ScaleY(2));
   Y := T.Top + T.Height + ScaleY(10);
-  FolderRadio := NewRadio('Use a pack folder I already have', Y);
+  FolderRadio := NewRadio(PackPage, 'Use a pack folder I already have', Y, @PackChoiceClick);
   FolderEdit := TNewEdit.Create(PackPage);
   FolderEdit.Parent := PackPage.Surface;
   FolderEdit.Left := ScaleX(18);
@@ -532,7 +835,7 @@ begin
   BrowseButton.Height := WizardForm.NextButton.Height;
   BrowseButton.OnClick := @BrowseClick;
   Y := FolderEdit.Top + FolderEdit.Height + ScaleY(12);
-  SkipRadio := NewRadio('Skip, I''ll add one later', Y);
+  SkipRadio := NewRadio(PackPage, 'Skip, I''ll add one later', Y, @PackChoiceClick);
   NewText(PackPage, 'She needs a pack to show up: it goes in ' + PackDest('') + '.', ScaleX(18),
     SkipRadio.Top + SkipRadio.Height + ScaleY(2));
   case ParamPackChoice of
@@ -730,7 +1033,11 @@ begin
   MicCount := -1;
   HerBefore := RegKeyExists(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{2147942F-E90C-4536-BEA2-8AB4B7F51734}_is1');
   VoiceBefore := RegKeyExists(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#VoiceAppId}_is1');
+  Accounts := TStringList.Create;
+  KeyBrains := TStringList.Create;
+  LocalModels := TStringList.Create;
   CreateBrainPage;
+  CreateModelPage;
   CreatePackPage;
   CreateVoicePage;
 end;
@@ -745,6 +1052,18 @@ begin
     { Here and new enough: nothing to ask. }
     Result := SynapsFound = 'ok';
   end;
+  if PageID = ModelPage.ID then begin
+    { install.ps1 asks its own; with no Synaps coming, there's no brain to give her. }
+    if ByInstallPs1 or (SynapsParam = 'skip') or ((SynapsFound <> 'ok') and not WantSynaps) then begin
+      Result := True;
+      exit;
+    end;
+    CheckBrains;
+    FillModelPage;
+    { A brain already (a login, or a local model): nothing to ask. }
+    Result := BrainOk;
+    ModelAsked := not Result;
+  end;
   if PageID = VoicePage.ID then CheckMics;
 end;
 
@@ -755,6 +1074,24 @@ var
   E: String;
 begin
   Result := True;
+  if CurPageID = ModelPage.ID then begin
+    E := '';
+    if AccountRadio.Checked then begin
+      if AccountCombo.ItemIndex < 0 then E := 'Pick the account to sign in to, or another choice.'
+      else if Field(Accounts[AccountCombo.ItemIndex], 5) <> '' then
+        E := Field(Accounts[AccountCombo.ItemIndex], 5) + '. Pick another, or another choice.';
+    end else if LocalRadio.Checked then begin
+      if LocalCombo.ItemIndex < 0 then E := 'Pick the model, or another choice.';
+    end else if KeyRadio.Checked then begin
+      if KeyCombo.ItemIndex < 0 then E := 'Pick whose key it is, or another choice.'
+      else if Trim(KeyEdit.Text) = '' then E := 'Paste the key, or another choice.';
+    end;
+    if E <> '' then begin
+      Log('her model: ' + E);
+      SuppressibleMsgBox(E, mbError, MB_OK, IDOK);
+      Result := False;
+    end;
+  end;
   if (CurPageID = PackPage.ID) and (PackChoice = PackFolder) then begin
     E := PackError(PackFolderChosen);
     if E <> '' then begin
@@ -798,6 +1135,7 @@ begin
     end;
     if not WantSynaps and (SynapsParam <> 'skip') and ((SynapsFound = 'old') or (SynapsFound = 'missing')) then
       Retry.Add('Synaps and its daemon: ' + StepCommand('synaps daemon'));
+    RunPick;
     case PackChoice of
       PackDownload: begin
         PackOk := RunStep('pack', 'Her art: downloading and building her pack', StepsScript, 'pack');
@@ -822,7 +1160,7 @@ begin
         DaemonOk := RunStep('daemon', 'Her brain''s daemon', StepsScript, 'daemon -Synaps "' + SynapsPath + '"');
       DaemonOk := DaemonOk and (Copy(StepResult('daemon'), 1, 7) = 'running');
       DaemonWrong := StepResult('daemon') = 'wrong-protocol';
-      if StepResult('brain') <> '' then BrainOk := StepResult('brain') = 'yes';
+      if StepResult('brain') = 'yes' then BrainOk := True;
       if not DaemonOk then begin
         DaemonWhy := StepFailed;
         if DaemonWhy = '' then DaemonWhy := 'it isn''t answering yet';
@@ -911,7 +1249,7 @@ end;
 
 function FinishText: String;
 var
-  N: String;
+  N, K, L: String;
 begin
   N := #13#10;
   Result := 'She''s installed.' + N + N;
@@ -942,10 +1280,22 @@ begin
   else if VoiceKind = 'none' then Result := Result + '- Her voice comes with her first release.' + N
   else if VoiceKind = 'offline' then Result := Result + '- No voice: GitHub couldn''t be reached. Run Setup again to add it.' + N
   else if (VoicePage <> nil) and (MicCount = 0) and (VoiceParam <> 'off') then Result := Result + '- No voice: no microphone found.' + N;
+  K := PickKind;
+  L := PickLine;
+  if PickRan then begin
+    if PickOk and (K = 'local') then Result := Result + '+ Her model: ' + Field(L, 3) + ', on ' + Field(L, 1) + '.' + N
+    else if PickOk and (K = 'key') then Result := Result + '+ Her brain: ' + Field(L, 3) + ' (' + PickModel + '), your key in Synaps.' + N
+    else if PickOk then Result := Result + '+ Her model: ' + PickModel + ' (' + Field(L, 3) + ').' + N
+    else if K = 'key' then Result := Result + '- Synaps didn''t take your ' + Field(L, 3) + ' key: ' + PickWhy + ' Add it in her Settings > Brain.' + N
+    else Result := Result + '- Her model wasn''t set: ' + PickWhy + N;
+  end;
   Result := Result + N;
-  if OfferLogin then
-    Result := Result + 'Next, give her a brain: leave "Sign in to Claude" ticked, and sign in in your browser. ' +
-      'Or say hi to her: she tells you how.' + N;
+  if OfferLogin then begin
+    Result := Result + 'Next, her brain: leave "Sign in to ' + Field(L, 3) + '" ticked, and sign in in your browser.';
+    if Field(L, 4) = 'code' then Result := Result + ' A small window shows the code to type there (it''s on your clipboard too).';
+    Result := Result + ' Her model is ' + Field(L, 3) + '''s once you''re signed in.' + N;
+  end else if (K = 'later') and not BrainOk then
+    Result := Result + 'Her brain: later, as you chose. She shows NO BRAIN YET until then; her Settings > Brain gives her one.' + N;
   Result := Result + 'Talk to her: Win+Alt+C, or click her.';
 end;
 

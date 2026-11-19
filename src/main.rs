@@ -98,6 +98,7 @@ const USAGE: &str = "usage: synaps-avatar [--profile P | --socket PATH] [--sessi
                      [--focus-probe] [--check [--dump DIR]]
        synaps-avatar -V | --version
        synaps-avatar --set KEY=VALUE [--set KEY=VALUE ...]
+       synaps-avatar --providers
 
 Session (one Synaps daemon session drives the body):
   --profile P     daemon profile (default $SYNAPS_PROFILE, else the default daemon)
@@ -125,9 +126,13 @@ Session (one Synaps daemon session drives the body):
 
   --set KEY=VALUE  write it to settings.toml through her settings writer (the rest of the file as
                   it was; one with a typo is refused), then exit. Her installer's keys only:
-                  voice.enabled, voice.wake_word, voice.speak_unprompted (true|false), voice.mic.
-                  Exit 0 saved, 2 a bad --set, 3 settings.toml refused (a typo; can't read it),
-                  4 not saved
+                  voice.enabled, voice.wake_word, voice.speak_unprompted (true|false), voice.mic,
+                  session.model (a model Synaps routes: claude-..., <provider>/<model>, local/<name>).
+                  A running her reads them again (settings reload). Exit 0 saved, 2 a bad --set,
+                  3 settings.toml refused (a typo; can't read it), 4 not saved
+  --providers     her brains, one a line, then exit: id, login, kind (account|key|local), default
+                  model (none for local), name, how it's signed in to (browser|code|key|none);
+                  tab-separated, in her Settings' order (her installers' list)
 
 Dev control: newline commands on $XDG_RUNTIME_DIR/synaps-avatar.sock
   mood <idle|thinking|working|talking|needs_you|done|annoyed|sleepy|away>
@@ -164,7 +169,8 @@ fn set_exit(e: &settings::WriteError) -> i32 {
     }
 }
 
-/// One `--set KEY=VALUE`: the keys her installer's Voice page writes, and only those.
+/// One `--set KEY=VALUE`: the keys her installers write (the Voice page's, and the brain picked),
+/// and only those.
 fn set_edit(pair: &str) -> Result<settings::Edit> {
     use settings::Edit;
     let (key, value) = pair.split_once('=').with_context(|| format!("--set {pair}: KEY=VALUE"))?;
@@ -178,8 +184,46 @@ fn set_edit(pair: &str) -> Result<settings::Edit> {
         "voice.wake_word" => Edit::Set("voice", "wake_word", flag()?.into()),
         "voice.speak_unprompted" => Edit::Set("voice", "speak_unprompted", flag()?.into()),
         "voice.mic" => Edit::Set("voice", "mic", settings::mic_name(value)?.into()),
-        k => bail!("--set {k}: not a key she sets this way (voice.enabled, voice.wake_word, voice.speak_unprompted, voice.mic)"),
+        "session.model" => Edit::Set("session", "model", session_model(value)?.into()),
+        k => bail!("--set {k}: not a key she sets this way (voice.enabled, voice.wake_word, voice.speak_unprompted, voice.mic, session.model)"),
     })
+}
+
+/// `--set session.model=`: one word (as `[session] model` takes it) that Synaps routes to a
+/// provider it has (`provider::of`): `claude-…`, `<provider>/<model>`, `local/<name>`.
+fn session_model(value: &str) -> Result<String> {
+    let m = value.trim();
+    anyhow::ensure!(!m.is_empty() && !m.chars().any(|c| c.is_whitespace() || c.is_control()), "--set session.model: a model, one word, not `{}`", m.escape_debug());
+    anyhow::ensure!(provider::of(m).is_some(), "--set session.model: Synaps has no provider for `{m}` (claude-..., <provider>/<model> or local/<name>)");
+    Ok(m.to_string())
+}
+
+/// `--providers`: provider.rs' `ALL`, in its order, a line each: id, login, kind, default model
+/// (none for a local server: its models are its own), name, how. Her installers' brains are this
+/// table (install.sh and steps.ps1 read it from her: no copy of their own), so a provider added to
+/// `ALL` is in them too; `the_installers_know_every_account` holds what they add to it.
+fn providers_table() -> String {
+    provider::ALL
+        .iter()
+        .map(|p| {
+            let (kind, how) = match p.kind {
+                provider::Kind::OAuth => ("account", sign_in(p)),
+                provider::Kind::Key => ("key", "key"),
+                provider::Kind::Local => ("local", "none"),
+            };
+            let model = p.models.first().map_or("", |&(m, _)| m);
+            format!("{}\t{}\t{kind}\t{model}\t{}\t{how}", p.id, p.login, p.name)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// How Synaps 0.12's `login` signs in to an account: "browser", his browser opens on a page that
+/// needs nothing typed (a PKCE link and a localhost callback; Kimi's and Muse's device pages come
+/// with their code filled in), or "code", the page opens without its code, and he types the one
+/// Synaps prints (Copilot: github.com/login/device).
+fn sign_in(p: &provider::Provider) -> &'static str {
+    if p.id == "github-copilot" { "code" } else { "browser" }
 }
 
 fn parse_args() -> Result<Args> {
@@ -237,6 +281,10 @@ fn parse_args_from(argv: impl IntoIterator<Item = String>) -> Result<Args> {
             }
             "-V" | "--version" => {
                 olog!("synaps-avatar {}", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
+            }
+            "--providers" => {
+                olog!("{}", providers_table());
                 std::process::exit(0);
             }
             "-h" | "--help" => {
@@ -300,9 +348,13 @@ fn main() {
     // (in order, as -h is).
     let mut argv = std::env::args_os().skip(1);
     if let (Some(a), None) = (argv.next(), argv.next())
-        && (a == "-V" || a == "--version")
+        && (a == "-V" || a == "--version" || a == "--providers")
     {
-        olog!("synaps-avatar {}", env!("CARGO_PKG_VERSION"));
+        if a == "--providers" {
+            olog!("{}", providers_table());
+        } else {
+            olog!("synaps-avatar {}", env!("CARGO_PKG_VERSION"));
+        }
         return;
     }
     let t_start = Instant::now();
@@ -328,6 +380,11 @@ fn run(t_start: Instant) -> Result<()> {
         return match settings::Settings::write(&args.set) {
             Ok(written) => {
                 olog!("settings: {} ({})", if written { "written" } else { "already so" }, path.display());
+                // She reads settings.toml as she starts: a running her is told to read it again (her
+                // installer's sign-in sets her model while she runs).
+                if written && let Some(r) = control::tell(&control::socket_path(), "settings reload") {
+                    olog!("settings: she runs, and read them again ({r})");
+                }
                 Ok(())
             }
             Err(e) => Err(Coded(set_exit(&e), format!("settings: {} ({e}; {})", e.says(), path.display())).into()),
@@ -768,7 +825,7 @@ fn fatal(why: startfail::Why, e: anyhow::Error) -> ! {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: gpui's glob exports a `test` attribute that would shadow `#[test]`.
-    use super::{Args, Coded, PathBuf, Result, SET_FAILED, SET_REFUSED, SET_USAGE, parse_args_from, session, set_exit, settings};
+    use super::{Args, Coded, PathBuf, Result, SET_FAILED, SET_REFUSED, SET_USAGE, parse_args_from, provider, providers_table, session, session_model, set_exit, settings};
 
     fn parse(args: &[&str]) -> Result<Args> {
         parse_args_from(args.iter().map(|s| s.to_string()))
@@ -826,6 +883,116 @@ mod tests {
         let v = settings::Settings::parse(&text).unwrap().voice;
         assert!(v.enabled && !v.wake_word && v.mic == "Microphone (USB Audio)");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The brain picked in her installers: `--set session.model=` takes a model Synaps routes
+    /// (`provider::of`), one word, and her settings writer puts it in `[session]`.
+    #[test]
+    fn set_takes_a_model_synaps_routes() {
+        let default = provider::CLAUDE.models[0].0;
+        for ok in [default, "openai-codex/gpt-5.5", "local/qwen3:8b", "local/qwen/qwen3-8b", " anthropic/claude-opus-5-5 "] {
+            assert!(parse(&["--set", &format!("session.model={ok}")]).is_ok(), "{ok}");
+        }
+        for bad in ["", "gpt-5.5", "nope/x", "local/", "/x", "claude sonnet", "local/q\u{1b}[31m", "openai-codex/gpt\t5"] {
+            let e = parse(&["--set", &format!("session.model={bad}")]).err().unwrap_or_else(|| panic!("{bad:?} taken"));
+            assert_eq!(e.downcast_ref::<Coded>().map(|c| c.0), Some(SET_USAGE), "{bad:?}: a bad --set exits {SET_USAGE}");
+        }
+        let a = parse(&["--set", "session.model= local/qwen3:8b "]).unwrap();
+        let dir = std::env::temp_dir().join(format!("sa-set-model-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("settings.toml");
+        std::fs::write(&p, "# his\n[session]\nthinking = \"high\"\nmodel = \"claude-opus-5-5\"\n").unwrap();
+        assert!(settings::write_at(&p, &a.set).unwrap());
+        let text = std::fs::read_to_string(&p).unwrap();
+        let s = settings::Settings::parse(&text).unwrap().session;
+        assert_eq!((s.model.as_deref(), s.thinking.as_deref()), (Some("local/qwen3:8b"), Some("high")), "{text}");
+        assert!(text.starts_with("# his\n[session]\n"), "{text}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `--providers`: provider.rs' table as her installers read it, in `ALL`'s order, each
+    /// provider's default model one she'd take.
+    #[test]
+    fn providers_table_gives_each_default() {
+        let t = providers_table();
+        let rows: Vec<Vec<&str>> = t.lines().map(|l| l.split('\t').collect()).collect();
+        assert_eq!(rows.iter().map(|r| r[0]).collect::<Vec<_>>(), provider::ALL.iter().map(|p| p.id).collect::<Vec<_>>(), "{t}");
+        assert!(rows.iter().all(|r| r.len() == 6 && !r[0].is_empty() && !r[4].is_empty()), "{t}");
+        let claude = rows.iter().find(|r| r[0] == "anthropic").expect("Claude");
+        assert_eq!(*claude, ["anthropic", "claude", "account", provider::CLAUDE.models[0].0, "Claude", "browser"]);
+        assert!(rows.contains(&vec!["local", "local", "local", "", "Local", "none"]), "{t}");
+        for r in rows.iter().filter(|r| r[2] != "local") {
+            assert!(session_model(r[3]).is_ok(), "{r:?}: a default she takes");
+            assert_eq!(provider::of(r[3]).map(|p| p.id), Some(r[0]), "{r:?}: its default is its own");
+            assert_eq!(r[5] == "key", r[2] == "key", "{r:?}: a key service's is a key, an account's a sign-in");
+        }
+        // A code to type in: Copilot's alone (github.com/login/device opens without it; Kimi's and
+        // Muse's pages come with theirs).
+        let code: Vec<&str> = rows.iter().filter(|r| r[5] == "code").map(|r| r[0]).collect();
+        assert_eq!(code, ["github-copilot"]);
+    }
+
+    /// Her installers have no list of brains: install.sh's picker and steps.ps1's (her Windows
+    /// setup's, install.ps1's) read `--providers`, `ALL` in its order. What steps.ps1 adds is per
+    /// account, one of three: the sign-in page it opens again whole (Synaps 0.12's `cmd /c start`
+    /// cuts the URL at its first `&`), as `host/path`; none to reopen (a device sign-in: Copilot's,
+    /// Kimi's, Muse's pages have no `&`); or why it isn't offered on Windows. An account added to
+    /// `ALL` fails here until steps.ps1 says which; neither names one `ALL` hasn't.
+    #[test]
+    fn the_installers_know_every_account() {
+        use crate::provider::Kind;
+        let ps = include_str!("../packaging/windows/steps.ps1");
+        let sh = include_str!("../install.sh");
+        // `$script:Name = @{ 'id' = 'value'; 'id' = "value" ... }`: its ids and values.
+        let table = |name: &str| -> Vec<(String, String)> {
+            let start = format!("$script:{name} = @{{");
+            let i = ps.find(&start).unwrap_or_else(|| panic!("steps.ps1 has no `{start}`")) + start.len();
+            let body = ps[i..].split('}').next().unwrap_or_default();
+            body.split(['\n', ';'])
+                .filter_map(|e| {
+                    let (id, rest) = e.trim().strip_prefix('\'')?.split_once('\'')?;
+                    let v = rest.trim().strip_prefix('=')?.trim();
+                    Some((id.to_string(), v.trim_matches(['\'', '"']).to_string()))
+                })
+                .collect()
+        };
+        let reopen = table("Reopen");
+        let not_here: Vec<String> = table("NotHere").into_iter().map(|(id, _)| id).collect();
+        let accounts: Vec<&str> = provider::ALL.iter().filter(|p| p.kind == Kind::OAuth).map(|p| p.id).collect();
+        for a in &accounts {
+            let n = reopen.iter().filter(|(id, _)| id == a).count() + not_here.iter().filter(|id| id == a).count();
+            assert_eq!(n, 1, "steps.ps1: {a} needs one of $script:Reopen (its page, or '') or $script:NotHere: her Windows sign-in can't open its page");
+        }
+        for s in reopen.iter().map(|(id, _)| id).chain(&not_here) {
+            assert!(accounts.contains(&s.as_str()), "steps.ps1 names {s}, not an account in provider.rs' ALL");
+        }
+        // Where a page is claimed: the one her own sign-in opens for that account
+        // (`signin::allowed`: Synaps 0.12's AUTHORIZE_URLs, exact host and path), and no other
+        // account's.
+        let pages: Vec<(&str, &str)> = reopen.iter().filter(|(_, v)| !v.is_empty()).map(|(id, v)| (id.as_str(), v.as_str())).collect();
+        assert_eq!(pages.iter().map(|(id, _)| *id).collect::<Vec<_>>(), ["anthropic", "openai-codex", "google-gemini"]);
+        for (id, v) in &pages {
+            let (host, path) = v.split_once('/').unwrap_or_else(|| panic!("{id}: `{v}` has no path"));
+            assert!(host.contains('.') && !host.contains(['*', ':', '@', '\\']) && !path.is_empty() && !path.ends_with('/'), "{id}: `{v}` isn't host/path");
+            let url = format!("https://{v}?a=1&b=2");
+            for p in provider::ALL.iter().filter(|p| p.kind == Kind::OAuth) {
+                let opens = crate::provider::signin::allowed(p, &url).is_some();
+                assert_eq!(opens, p.id == *id, "steps.ps1's {id} page {url}: signin::allowed for {} says {opens}", p.id);
+            }
+            // Its path exactly: not one under it, not one beside it.
+            for other in [format!("https://{v}/x?a=1&b=2"), format!("https://{v}x?a=1&b=2"), format!("https://{host}/?a=1&b=2")] {
+                let p = crate::provider::by_id(id).unwrap_or_else(|| panic!("{id}"));
+                assert_eq!(crate::provider::signin::allowed(p, &other), None, "{other}");
+            }
+        }
+        let none: Vec<&str> = reopen.iter().filter(|(_, v)| v.is_empty()).map(|(id, _)| id.as_str()).collect();
+        assert_eq!(none, ["github-copilot", "kimi-code", "muse"], "the device sign-ins: nothing to reopen");
+        assert_eq!(not_here, ["xai-auth"], "Grok alone isn't offered on Windows (Synaps 0.12 never prints its page)");
+        // No copy of the list: both ask her (`--providers`).
+        assert!(ps.contains("Invoke-Her @('--providers')") && sh.contains("--providers"), "the installers read her table");
+        for (file, text) in [("steps.ps1", ps), ("install.sh", sh)] {
+            assert!(!text.contains("openai-codex|openai-codex|ChatGPT"), "{file} has a copy of the list of brains");
+        }
     }
 
     /// `--set`'s exit codes, for her installer: a refused file (a typo, unreadable) is 3, a write

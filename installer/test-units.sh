@@ -561,6 +561,209 @@ check "$(grep -qx '   left in ~/.local/share/synaps-avatar, not hers: packs ' "$
 uninstall >"$tmp/out" 2>&1
 check "$([ ! -e "$RECEIPT" ] && grep -qx 'Name=His own' "$app" && echo 0)" "--uninstall again, gsettings there: done, his entry and its folder kept"
 
+# Her brain (brain): --brain and the picker, on stand-ins. A synaps that signs in as 0.12's does (its
+# stdin must be a pipe: a terminal there would ask to open its app; a browser sign-in fails at once at
+# its end, and once signed in waits on it till it ends) and takes a key on its stdin (kept for the
+# check, never on its command line); her own --providers and --set; Ollama and LM Studio stand-ins on
+# loopback, at ports of their own (SERVERS); his terminal a file (TTYIN).
+(
+    b=$tmp/brain
+    # The real curl here (above, a stand-in that fetches nothing): to the stand-in servers only.
+    unset -f curl
+    mkdir -p "$b/bin" "$b/synaps-cli" "$b/ollama/v1" "$b/lmstudio/v1"
+    TMP=$b BIN=$b/bin SYNAPS=$b/synaps DRY=0 YES=0 TTYOUT=/dev/null SYNAPS_NEW=1 CONF=$b/conf
+    export SYNAPS_BASE_DIR=$b/synaps-cli
+    cat >"$SYNAPS" <<'SYNAPS'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$SYNAPS_BASE_DIR/args"
+case "$1 $2" in
+    'login --provider')
+        if [ -t 0 ]; then echo 'stdin is a terminal' >&2; exit 3; fi
+        if [ "$3" = groq ]; then
+            IFS= read -r k
+            printf '%s' "$k" >"$SYNAPS_BASE_DIR/key"
+        elif [ "$3" != github-copilot ]; then
+            # A browser sign-in: stdin read from the start (a pasted redirect), its end before the
+            # callback a failure. FAKE_NEVER: he never signs in. Once signed in, it waits on that
+            # read till stdin ends (10 s at most here: a pipe never closed shows as slow, not hung).
+            sleep 0.3
+            if read -r -t 0 && ! read -r _; then echo 'Error: Manual input channel closed' >&2; exit 1; fi
+            if [ -n "${FAKE_NEVER:-}" ]; then exec cat >/dev/null; fi
+            echo '{"signed": true}' >"$SYNAPS_BASE_DIR/auth.json"
+            echo '✓ Login successful' >&2
+            if timeout 10 cat >/dev/null; then echo closed >"$SYNAPS_BASE_DIR/stdin"; else echo held >"$SYNAPS_BASE_DIR/stdin"; fi
+            exit 0
+        fi
+        echo '{"signed": true}' >"$SYNAPS_BASE_DIR/auth.json" ;;
+    'daemon status') exit 0 ;;
+    'daemon reload') echo reloaded >>"$SYNAPS_BASE_DIR/args" ;;
+esac
+SYNAPS
+    cat >"$BIN/synaps-avatar" <<'HER'
+#!/usr/bin/env bash
+case $1 in
+    # Her table (src/provider.rs ALL), not in the order main had it: the picker's is hers. HER_OLD: a
+    # build before --providers.
+    --providers)
+        [ -z "${HER_OLD:-}" ] || exit 1
+        printf 'openai-codex\topenai-codex\taccount\topenai-codex/gpt-5.5\tChatGPT\tbrowser\n'
+        printf 'anthropic\tclaude\taccount\tclaude-sonnet-4-6\tClaude\tbrowser\n'
+        printf 'github-copilot\tgithub-copilot\taccount\tgithub-copilot/claude-sonnet-4.6\tCopilot\tcode\n'
+        printf 'google-gemini\tgoogle-gemini\taccount\tgoogle-gemini/gemini-2.5-pro\tGemini\tbrowser\n'
+        printf 'local\tlocal\tlocal\t\tLocal\tnone\n'
+        printf 'groq\tgroq\tkey\tgroq/llama-3.3-70b-versatile\tGroq\tkey\n'
+        ;;
+    --set) printf '%s\n' "$2" >>"$SYNAPS_BASE_DIR/her" ;;
+esac
+HER
+    chmod +x "$SYNAPS" "$BIN/synaps-avatar"
+    printf '{"object":"list","data":[{"id":"qwen3:8b","object":"model"},{"id":"nomic-embed-text:latest","object":"model"}]}' >"$b/ollama/v1/models"
+    printf '{"data": [{"id": "qwen/qwen3-8b", "object": "model"}]}' >"$b/lmstudio/v1/models"
+    # A stand-in server for folder $1, on a free loopback port: its port, once it listens.
+    serve() {
+        python3 -u -m http.server --bind 127.0.0.1 --directory "$1" 0 >"$1.log" 2>&1 &
+        echo $! >>"$b/servers"
+        for _ in $(seq 100); do
+            port=$(sed -n 's/.*port \([0-9]*\).*/\1/p' "$1.log" | head -1)
+            if [ -n "$port" ]; then
+                printf '%s' "$port"
+                return
+            fi
+            sleep 0.1
+        done
+    }
+    po=$(serve "$b/ollama")
+    pl=$(serve "$b/lmstudio")
+    SERVERS="Ollama|http://localhost:11434/v1|http://127.0.0.1:$po/v1/models
+LM Studio|http://localhost:1234/v1|http://127.0.0.1:$pl/v1/models"
+    again() { rm -f "$SYNAPS_BASE_DIR/auth.json" "$SYNAPS_BASE_DIR/args" "$SYNAPS_BASE_DIR/her" "$SYNAPS_BASE_DIR/key" "$SYNAPS_BASE_DIR/config" "$SYNAPS_BASE_DIR/stdin"; }
+    me=$BASHPID
+    ms() { echo $((($(date +%s%N) - t0) / 1000000)); }
+    brains() { brain >"$b/out" 2>&1 </dev/null; }
+    said() { tr '\n' ' ' <"$b/out"; }
+
+    check "$([ "$(local_models)" = "Ollama|http://localhost:11434/v1|qwen3:8b"$'\n'"LM Studio|http://localhost:1234/v1|qwen/qwen3-8b" ] && echo 0)" \
+        "local_models: Ollama's and LM Studio's, no embedding model ($(local_models | tr '\n' ' '))"
+    rows=$(brains_here)
+    check "$([ "$rows" = $'openai-codex|openai-codex|ChatGPT|browser\nanthropic|claude|Claude|browser\ngithub-copilot|github-copilot|Copilot|code\ngroq|groq|Groq|key' ] && echo 0)" \
+        "her brains are her table's (--providers), in its order, no local server, no Gemini without its Google client ($(tr '\n' ' ' <<<"$rows"))"
+    rows=$(SYNAPS_GOOGLE_GEMINI_CLIENT_ID=x brains_here)
+    check "$(case $'\n'$rows$'\n' in *$'\n''google-gemini|google-gemini|Gemini|browser'$'\n'*) echo 0 ;; esac)" "Gemini with it"
+
+    # No --brain, no terminal: later, nothing run.
+    again
+    TTYIN=$b/none BRAIN_PICK='' brains
+    check "$([ ! -e "$SYNAPS_BASE_DIR/args" ] && [ ! -e "$SYNAPS_BASE_DIR/her" ] && grep -q 'her brain: later' "$b/out" && echo 0)" "no terminal and no --brain: later, nothing run"
+
+    # --brain openai-codex: its sign-in (stdin a pipe), then her model its default (her table's).
+    # Signed in, its stdin is closed and it ends: no wait on the pipe's holder (gone too).
+    again
+    t0=$(date +%s%N)
+    TTYIN=$b/none BRAIN_PICK=openai-codex brains
+    took=$(ms)
+    check "$([ "$(cat "$SYNAPS_BASE_DIR/args")" = 'login --provider openai-codex' ] && [ "$(cat "$SYNAPS_BASE_DIR/her")" = 'session.model=openai-codex/gpt-5.5' ] && echo 0)" \
+        "--brain openai-codex: signed in, her model its default: $(said)"
+    check "$([ "$(cat "$SYNAPS_BASE_DIR/stdin" 2>/dev/null)" = closed ] && [ "$took" -lt 5000 ] && ! command pgrep -P "$me" -fx 'sleep 900' >/dev/null && echo 0)" \
+        "signed in: synaps' stdin closed, so it ends (${took} ms; its stdin $(cat "$SYNAPS_BASE_DIR/stdin" 2>/dev/null || echo '?'); the holder $(command pgrep -P "$me" -fx 'sleep 900' >/dev/null && echo 'still there' || echo gone))"
+    # --brain claude: by its login's name too.
+    again
+    TTYIN=$b/none BRAIN_PICK=claude brains
+    check "$([ "$(cat "$SYNAPS_BASE_DIR/args")" = 'login --provider claude' ] && [ "$(cat "$SYNAPS_BASE_DIR/her")" = 'session.model=claude-sonnet-4-6' ] && echo 0)" "--brain claude: Claude's login, its default"
+
+    # A key: off his terminal, unshown, trimmed, on synaps' stdin; never in its arguments or on screen.
+    again
+    printf '  gsk_test123secret  \n' >"$b/tty"
+    TTYIN=$b/tty BRAIN_PICK=groq brains
+    check "$([ "$(cat "$SYNAPS_BASE_DIR/key")" = 'gsk_test123secret' ] && [ "$(cat "$SYNAPS_BASE_DIR/args")" = 'login --provider groq' ] &&
+        [ "$(cat "$SYNAPS_BASE_DIR/her")" = 'session.model=groq/llama-3.3-70b-versatile' ] && ! grep -q 'gsk_' "$b/out" && echo 0)" \
+        "--brain groq: the key on synaps' stdin, never in its arguments or on screen; her model Groq's default: $(said)"
+    # No terminal to ask on: later, nothing run.
+    again
+    TTYIN=$b/none BRAIN_PICK=groq brains
+    check "$([ ! -e "$SYNAPS_BASE_DIR/args" ] && grep -q 'no terminal to ask on' "$b/out" && echo 0)" "--brain groq with no terminal: not asked, said"
+
+    # A model on this machine: Ollama's (Synaps' default server: its config untouched, no reload).
+    again
+    TTYIN=$b/none BRAIN_PICK=local:qwen3:8b brains
+    check "$([ "$(cat "$SYNAPS_BASE_DIR/her")" = 'session.model=local/qwen3:8b' ] && [ ! -e "$SYNAPS_BASE_DIR/config" ] && [ ! -e "$SYNAPS_BASE_DIR/args" ] && echo 0)" \
+        "--brain local:qwen3:8b: her model local/qwen3:8b, Synaps' config untouched (Ollama's is its default): $(said)"
+    # LM Studio's: provider.local.url, his other lines kept, an old one replaced; the daemon reloaded.
+    again
+    printf '# his\nmodel = claude-opus-5-5\nprovider.local.url = http://old:9/v1\n' >"$SYNAPS_BASE_DIR/config"
+    TTYIN=$b/none BRAIN_PICK=local:qwen/qwen3-8b brains
+    check "$([ "$(cat "$SYNAPS_BASE_DIR/config")" = $'# his\nmodel = claude-opus-5-5\nprovider.local.url = http://localhost:1234/v1' ] &&
+        [ "$(cat "$SYNAPS_BASE_DIR/her")" = 'session.model=local/qwen/qwen3-8b' ] && grep -qx reloaded "$SYNAPS_BASE_DIR/args" && echo 0)" \
+        "--brain local:qwen/qwen3-8b (LM Studio): provider.local.url replaced, his lines kept, the daemon reloaded: $(said)"
+    # One that isn't running: later, said. A name she doesn't know: later, said.
+    again
+    TTYIN=$b/none BRAIN_PICK=local:llama9 brains
+    check "$([ ! -e "$SYNAPS_BASE_DIR/her" ] && grep -q 'no model llama9 running' "$b/out" && echo 0)" "--brain local:MODEL not running: later, said"
+    again
+    TTYIN=$b/none BRAIN_PICK=nope brains
+    check "$([ ! -e "$SYNAPS_BASE_DIR/args" ] && grep -q "isn't one she knows" "$b/out" && echo 0)" "--brain with a name she doesn't know: later, said"
+
+    # The picker, on his terminal: 2 (a model here), then 2 (LM Studio's).
+    again
+    printf '2\n2\n' >"$b/tty"
+    TTYIN=$b/tty BRAIN_PICK='' brains
+    check "$([ "$(cat "$SYNAPS_BASE_DIR/her")" = 'session.model=local/qwen/qwen3-8b' ] && echo 0)" "the picker: a model on this machine, the second: $(said)"
+    # 1 (an account), 3 (the third in her table: ChatGPT, Claude, Copilot).
+    again
+    printf '1\n3\n' >"$b/tty"
+    TTYIN=$b/tty BRAIN_PICK='' brains
+    check "$([ "$(cat "$SYNAPS_BASE_DIR/args")" = 'login --provider github-copilot' ] && echo 0)" "the picker: an account, Copilot: $(said)"
+    # Enter (or the end of his input): later.
+    again
+    printf '\n' >"$b/tty"
+    TTYIN=$b/tty BRAIN_PICK='' brains
+    check "$([ ! -e "$SYNAPS_BASE_DIR/args" ] && [ ! -e "$SYNAPS_BASE_DIR/her" ] && grep -q 'her brain: later' "$b/out" && echo 0)" "the picker: Enter is later"
+    # A build of her before --providers: an account can't be looked up; later, said, nothing run.
+    again
+    HER_OLD=1 TTYIN=$b/none BRAIN_PICK=claude brains
+    check "$([ ! -e "$SYNAPS_BASE_DIR/args" ] && [ ! -e "$SYNAPS_BASE_DIR/her" ] && grep -q "can't list her brains" "$b/out" && echo 0)" "no table from her: later, said: $(said)"
+    # Ctrl-C while he signs in (he never does): synaps and its stdin's holder go with install.sh (its
+    # EXIT trap, on_exit), though a background job here ignores SIGINT. As a terminal sends it: to
+    # its process group (a session of its own here, SIGINT not ignored).
+    again
+    mkdir -p "$b/int"
+    cat >"$b/interrupted.sh" <<'INT'
+source <(sed '$d' "$1")
+set +e
+ui
+TMP=$2 BIN=$3 SYNAPS=$4 CONF=$5 DRY=0 YES=0 TTYIN=/dev/null TTYOUT=/dev/null SYNAPS_NEW=1 BRAIN_PICK=claude SERVERS=''
+trap on_exit EXIT
+brain
+INT
+    FAKE_NEVER=1 python3 -c 'import os, signal, sys; os.setsid(); signal.signal(signal.SIGINT, signal.SIG_DFL); os.execvp(sys.argv[1], sys.argv[1:])' \
+        bash "$b/interrupted.sh" "$here/install.sh" "$b/int" "$BIN" "$SYNAPS" "$b/conf" >"$b/int.out" 2>&1 &
+    ipid=$!
+    for _ in $(seq 50); do if [ -s "$SYNAPS_BASE_DIR/args" ]; then break; fi; sleep 0.1; done
+    sleep 0.5
+    before=$(command pgrep -g "$ipid" -fx 'sleep 900|cat' | wc -l)
+    kill -INT -- -"$ipid" 2>/dev/null
+    wait "$ipid"
+    irc=$?
+    sleep 0.3
+    left=$(command pgrep -g "$ipid" -a | tr '\n' ' ')
+    check "$([ "$before" = 2 ] && [ -z "$left" ] && [ ! -e "$b/int" ] && echo 0)" \
+        "Ctrl-C while signing in: synaps and its stdin's holder stopped, her scratch gone (exit $irc; before: $before of them; left: ${left:-none})"
+    command pkill -g "$ipid" 2>/dev/null
+    # A login already: nothing asked.
+    again
+    echo '{}' >"$SYNAPS_BASE_DIR/auth.json"
+    printf '1\n1\n' >"$b/tty"
+    TTYIN=$b/tty BRAIN_PICK='' brains
+    check "$([ ! -e "$SYNAPS_BASE_DIR/args" ] && echo 0)" "a login already: nothing asked"
+    # --dry-run: through run (said, not run), nothing else.
+    again
+    RAN=() RUN_REAL=0
+    DRY=1 TTYIN=$b/none BRAIN_PICK=openai-codex brains
+    check "$([ ! -e "$SYNAPS_BASE_DIR/args" ] && [ ! -e "$SYNAPS_BASE_DIR/her" ] && [ "${RAN[0]}" = "$SYNAPS login --provider openai-codex" ] &&
+        [ "${RAN[1]}" = "$BIN/synaps-avatar --set session.model=openai-codex/gpt-5.5" ] && echo 0)" "--dry-run: the sign-in and her model through run, not run: $([ -e "$SYNAPS_BASE_DIR/args" ] && echo "(synaps ran: $(cat "$SYNAPS_BASE_DIR/args")) ")$([ -e "$SYNAPS_BASE_DIR/her" ] && echo "(her set: $(cat "$SYNAPS_BASE_DIR/her")) ")${RAN[*]}"
+    xargs kill <"$b/servers" 2>/dev/null
+    exit "$fails"
+) || fails=$((fails + $?))
+
 if [ "$fails" -gt 0 ]; then
     echo "$fails install.sh unit check(s) failed"
     exit 1

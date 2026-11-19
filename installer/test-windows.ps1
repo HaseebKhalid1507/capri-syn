@@ -118,11 +118,11 @@ Check (Test-Path (Join-Path $pack 'sprites.json')) "her pack in $pack"
 Check (Test-Path (Join-Path $pack 'persona.md')) 'with her persona'
 Check (Test-Path (Join-Path $pack 'anim\lachy\LICENSE.md')) "and lachy's art, with its licence"
 Check (Test-Path $receipt) "a receipt ($receipt)"
-# The end: she's started (or it says why not), and the sign-in is hers to walk him through (no picker).
+# The end: she's started (or it says why not); --yes is her brain later (nothing signed in to).
 $installText = Get-Content -Raw (Join-Path $logs 'install.log')
 Check ($installText -match "she's up \(\d+ ms|she's still starting|she didn't start|no desktop session here") "it starts her at the end: $([regex]::Match($installText, "she's up[^\r\n]*|she's still starting|she didn't start[^\r\n]*|no desktop session here").Value)"
-Check ($installText -match 'her brain: Synaps has no model yet') 'no model yet: it says she will walk him through it'
-Check ($installText -notmatch 'pick one now') 'no sign-in picker in the installer'
+Check ($installText -match 'her brain: later\. she shows NO BRAIN YET') '--yes: her brain later, said'
+Check ($installText -notmatch 'your browser opens|which one\?') '--yes: no picker, no sign-in'
 # Her --check: the windowed exe writes to her log.
 $herLog = Join-Path $data 'synaps-avatar.log'
 $p = Start-Process -FilePath (Join-Path $app 'synaps-avatar.exe') -ArgumentList '--check' -Wait -PassThru -WindowStyle Hidden

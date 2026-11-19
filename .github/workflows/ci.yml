@@ -461,11 +461,12 @@ jobs:
           touch /tmp/marker && sleep 1
           bash install.sh --dry-run | tee /tmp/dry.log
           # It ends by starting her the way autostart does (off Hyprland and i3: XWayland), prints that
-          # command, and leaves the sign-in to her (no picker here).
+          # command; a dry run asks no brain (later, said).
           grep -q '\$ env SA_BACKEND=x11 .*/synaps-avatar &' /tmp/dry.log
           grep -q 'start her: env SA_BACKEND=x11 ~/.local/bin/synaps-avatar &' /tmp/dry.log
-          grep -q "her brain: Synaps has no model yet. say hi to her" /tmp/dry.log
-          if grep -q 'pick one now' /tmp/dry.log; then echo "::error::the installer still runs a sign-in"; exit 1; fi
+          grep -q "(asks which brain: an account, a model on this machine, an API key, or later)" /tmp/dry.log
+          grep -q "her brain: later. she shows NO BRAIN YET" /tmp/dry.log
+          if grep -q 'login --provider' /tmp/dry.log; then echo "::error::a dry run with no --brain signed in"; exit 1; fi
           bash install.sh --dry-run --from-source --voice --watch
           curl -fsSL "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${CAPRI_INSTALL_REF}/install.sh" | bash -s -- --dry-run --with-local-art
           bash install.sh --dry-run --uninstall --purge

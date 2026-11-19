@@ -20,6 +20,7 @@ usage() {
     cat <<'EOF'
 usage: install.sh [--yes] [--dry-run] [--uninstall [--purge]] [--voice] [--watch] [--no-autostart]
                   [--from-source] [--prefix DIR] [--with-local-art] [--artifact FILE] [--allow-root]
+                  [--brain WHICH]
 
   --yes             don't ask: sudo for system packages, edits to your window manager's config,
                     enabling capri-watch
@@ -34,6 +35,10 @@ usage: install.sh [--yes] [--dry-run] [--uninstall [--purge]] [--voice] [--watch
   --with-local-art  also mochi's art: LOCAL PERSONAL USE ONLY, never publish or share it
   --artifact FILE   install this release asset (the Linux tarball) instead of downloading one
   --allow-root      install her for root (as root, with root's own HOME); otherwise root is refused
+  --brain WHICH     her model, when Synaps has none: an account to sign in to now, in your browser
+                    (claude, openai-codex, github-copilot, kimi-code, muse...), an API key's service
+                    (groq, openrouter...: asked for here, unshown), local or local:MODEL (a model on
+                    this machine: Ollama, LM Studio), or later. Without it she asks; --yes means later
 
 With no flags, $CAPRI_INSTALL_FLAGS is read instead (space-separated, said in the banner); this
 script never passes it on. Prefer `bash -s -- FLAGS`: an exported one would go on applying.
@@ -317,7 +322,7 @@ block_write() {
 
 args() {
     YES=0 DRY=0 UNINSTALL=0 PURGE=0 VOICE=0 WATCH=0 AUTOSTART=1 FROM_SOURCE=0 LOCAL_ART=0 ALLOW_ROOT=0
-    PREFIX=$HOME/.local ARTIFACT='' PREFIX_GIVEN=0
+    PREFIX=$HOME/.local ARTIFACT='' PREFIX_GIVEN=0 BRAIN_PICK='' TTYIN=/dev/tty TTYOUT=/dev/tty TTYFD=''
     while [ $# -gt 0 ]; do
         case $1 in
             -y | --yes) YES=1 ;;
@@ -334,6 +339,8 @@ args() {
             --prefix=*) PREFIX=${1#*=} PREFIX_GIVEN=1 ;;
             --artifact) [ $# -ge 2 ] || die "--artifact needs a file"; ARTIFACT=$2; shift ;;
             --artifact=*) ARTIFACT=${1#*=} ;;
+            --brain) [ $# -ge 2 ] || die "--brain needs which: an account (claude...), local[:MODEL] or later"; BRAIN_PICK=$2; shift ;;
+            --brain=*) BRAIN_PICK=${1#*=} ;;
             -h | --help) usage; exit 0 ;;
             *) usage >&2; die "unknown flag: $1" ;;
         esac
@@ -1600,15 +1607,341 @@ has_brain() {
     [ -s "$h/auth.json" ] || grep -Eq '^\s*model\s*=\s*"?local/' "$h/config" "$CONF/synaps-avatar/settings.toml" 2>/dev/null
 }
 
-# Her brain: she talks through Synaps, and Synaps needs a model. Signing in is hers to walk him
-# through, not a picker here: until Synaps has one her tag reads NO BRAIN YET, and her answer to
-# his first message ends on the command (a chip; a click copies it).
+# The model servers she can think with here: Ollama's (Synaps' default) and LM Studio's.
+SERVERS='Ollama|http://localhost:11434/v1|http://127.0.0.1:11434/v1/models
+LM Studio|http://localhost:1234/v1|http://127.0.0.1:1234/v1/models'
+
+# Her brains here, "id|login|name|how" a line: her own table (synaps-avatar --providers:
+# src/provider.rs' ALL, in its order; never a copy here), its accounts and key services. how:
+# browser (his browser opens on the sign-in page), code (it opens, and he types the code Synaps
+# shows: Copilot's), key (an API key). Gemini's sign-in needs its Google client (Synaps'
+# google_gemini.rs), so not without it.
+brains_here() {
+    local l
+    while IFS= read -r l; do
+        if [ "${l%%|*}" = google-gemini ] && [ -z "${SYNAPS_GOOGLE_GEMINI_CLIENT_ID:-}" ]; then continue; fi
+        printf '%s\n' "$l"
+    done < <("$BIN/synaps-avatar" --providers 2>/dev/null |
+        awk -F'\t' '($3 == "account" || $3 == "key") && $1 != "" && $2 != "" && $5 != "" && $6 != "" { print $1 "|" $2 "|" $5 "|" $6 }' || true)
+}
+
+# A model's id she lists and passes on (her --set, a command line): letters, digits and ._:/@+-
+# only (ASCII, whatever the locale).
+model_id() {
+    case $1 in '' | *[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:/@+-]*) return 1 ;; esac
+}
+
+# The models on this machine's servers, "server|url|model" a line (OpenAI's /v1/models, 2 s each,
+# nothing sent but the ask, never through a proxy). An embedding model isn't one to talk with, and an
+# id with anything but letters, digits and ._:/@+- in it isn't listed (it goes on a command line).
+local_models() {
+    local name url probe id
+    while IFS='|' read -r name url probe; do
+        while IFS= read -r id; do
+            model_id "$id" || continue
+            case $id in *embed*) continue ;; esac
+            printf '%s|%s|%s\n' "$name" "$url" "$id"
+        done < <(curl -fsS --noproxy '*' --max-time 2 "$probe" 2>/dev/null | grep -oE '"id"[[:space:]]*:[[:space:]]*"[^"]+"' | sed -E 's/.*"([^"]+)"$/\1/' || true)
+    done <<<"$SERVERS"
+}
+
+# A number from 1 to $1 off the terminal (brain's $TTYFD), Enter for $2 (shown as $3); asked again
+# until it is one. The end of its input is Enter.
+pick_n() {
+    local a
+    while :; do
+        printf '   %s?%s [1-%s, Enter: %s] ' "$R$B" "$N" "$1" "$3" >"$TTYOUT"
+        read -r a <&"$TTYFD" || a=''
+        if [ -z "$a" ]; then
+            printf '%s' "$2"
+            return 0
+        fi
+        case $a in *[!0-9]*) continue ;; esac
+        if [ "$a" -ge 1 ] && [ "$a" -le "$1" ]; then
+            printf '%s' "$a"
+            return 0
+        fi
+    done
+}
+
+# One of the rows after $1 (a brain's id|login|name|how, or a local model's server|url|model),
+# numbered on the terminal by $1's words; its line, or nothing for Enter.
+pick_row() {
+    local kind=$1 i=0 n line a b c d
+    shift
+    [ $# -gt 0 ] || return 0
+    for line in "$@"; do
+        i=$((i + 1))
+        IFS='|' read -r a b c d <<<"$line"
+        case $kind in
+            local) printf '     %2d  %s  (%s)\n' "$i" "$c" "$a" ;;
+            *) printf '     %2d  %s%s\n' "$i" "$c" "$([ "$d" = code ] && printf '  (your browser, and a code to type there)')" ;;
+        esac
+    done >"$TTYOUT"
+    n=$(pick_n $# '' later)
+    if [ -n "$n" ]; then
+        shift $((n - 1))
+        printf '%s' "$1"
+    fi
+}
+
+# `synaps login --provider $1` in this terminal: his browser opens on its page (Copilot's: and Synaps
+# shows the code to type there). Synaps 0.12's browser sign-ins read stdin from the start (a pasted
+# redirect: at its end they give up at once, "Manual input channel closed"; on a terminal they ask to
+# open its own app), and once he's signed in their runtime waits on that read before it exits. So
+# synaps runs in the background, its stdin a pipe held open (LOGIN_HOLD), until auth.json is written
+# (or it ends, or 10 minutes); then the pipe is closed and it exits (15 s, else it's stopped: the
+# sign-in is kept). Both are stopped on the way out, Ctrl-C too (stop_login, from main's trap): a
+# background job here ignores SIGINT.
+LOGIN_PID=''
+LOGIN_HOLD=''
+stop_login() {
+    if [ -n "$LOGIN_HOLD" ]; then kill "$LOGIN_HOLD" 2>/dev/null || true; fi
+    if [ -n "$LOGIN_PID" ]; then kill "$LOGIN_PID" 2>/dev/null || true; fi
+    LOGIN_HOLD=''
+    LOGIN_PID=''
+}
+login_brain() {
+    local rc=0 auth mark in=0 i
+    info "your browser opens: sign in to $2 there"
+    if [ "$DRY" = 1 ]; then
+        run "$SYNAPS" login --provider "$1"
+        return 0
+    fi
+    printf '   %s$ %s%s\n' "$D" "$(q "$SYNAPS" login --provider "$1")" "$N"
+    auth=$(synaps_home)/auth.json
+    mark=$TMP/login.mark
+    : >"$mark"
+    rm -f "$TMP/hold"
+    mkfifo "$TMP/hold"
+    sleep 900 >"$TMP/hold" &
+    LOGIN_HOLD=$!
+    "$SYNAPS" login --provider "$1" <"$TMP/hold" &
+    LOGIN_PID=$!
+    for ((i = 0; i < 6000; i++)); do
+        if [ -n "$(find "$auth" -newer "$mark" 2>/dev/null)" ]; then in=1 && break; fi
+        kill -0 "$LOGIN_PID" 2>/dev/null || break
+        sleep 0.1
+    done
+    if [ "$in" = 0 ] && [ -n "$(find "$auth" -newer "$mark" 2>/dev/null)" ]; then in=1; fi
+    kill "$LOGIN_HOLD" 2>/dev/null || true
+    wait "$LOGIN_HOLD" 2>/dev/null || true
+    LOGIN_HOLD=''
+    if [ "$in" = 1 ]; then
+        for ((i = 0; i < 150; i++)); do kill -0 "$LOGIN_PID" 2>/dev/null || break; sleep 0.1; done
+    fi
+    if kill -0 "$LOGIN_PID" 2>/dev/null; then
+        kill "$LOGIN_PID" 2>/dev/null || true
+        wait "$LOGIN_PID" 2>/dev/null || true
+        rc=timeout
+    else
+        wait "$LOGIN_PID" 2>/dev/null || rc=$?
+    fi
+    LOGIN_PID=''
+    rm -f "$TMP/hold" "$mark"
+    if [ "$in" = 1 ]; then
+        good "signed in to $2"
+        return 0
+    fi
+    if [ "$rc" = timeout ]; then
+        warn "no $2 sign-in in 10 minutes: her Settings ▸ Brain signs in later"
+        return 1
+    fi
+    if [ "$rc" != 0 ]; then
+        warn "the $2 sign-in didn't finish (synaps login exited $rc): her Settings ▸ Brain signs in later"
+        return 1
+    fi
+    good "signed in to $2"
+}
+
+# An API key, read off the terminal unshown, given to `synaps login --provider $1` on its stdin
+# (Synaps' own way for a key from a pipe): never on a command line, in a log or on screen.
+key_brain() {
+    local key=''
+    if [ "$DRY" = 1 ]; then
+        info "(asks for your $2 API key, unshown)"
+        run "$SYNAPS" login --provider "$1"
+        return 0
+    fi
+    if [ -z "$TTYFD" ]; then
+        warn "her brain: a $2 key is asked for, and there's no terminal to ask on: later, in her Settings ▸ Brain"
+        return 1
+    fi
+    printf '   %s?%s paste your %s API key (it isn'"'"'t shown): ' "$R$B" "$N" "$2" >"$TTYOUT"
+    IFS= read -rs key <&"$TTYFD" || key=''
+    printf '\n' >"$TTYOUT"
+    key=${key#"${key%%[![:space:]]*}"}
+    key=${key%"${key##*[![:space:]]}"}
+    if [ -z "$key" ]; then
+        warn "her brain: no key given: later, in her Settings ▸ Brain"
+        return 1
+    fi
+    printf '   %s$ %s%s\n' "$D" "$(q "$SYNAPS" login --provider "$1") (the key on its stdin)" "$N"
+    if printf '%s\n' "$key" | "$SYNAPS" login --provider "$1" >/dev/null 2>"$TMP/key.err"; then
+        key=''
+        good "your $2 key is in Synaps (its credential store)"
+        return 0
+    fi
+    key=''
+    warn "Synaps didn't take the $2 key: $(sed 's/\x1b\[[0-9;]*m//g' "$TMP/key.err" | grep -i 'failed' | tail -1 | sed 's/^[^[:alnum:]]*Login failed: *//')"
+    return 1
+}
+
+# Her model: provider $1's default from her own table (synaps-avatar --providers: never a copy
+# here), or $2, by her settings writer.
+set_model() {
+    local m=${2:-} her=$BIN/synaps-avatar
+    if [ -z "$m" ]; then
+        m=$("$her" --providers 2>/dev/null | awk -F'\t' -v id="$1" '$1 == id { print $4 }') || m=''
+    fi
+    if [ "$DRY" = 1 ]; then
+        run "$her" --set "session.model=${m:-(the default of $1)}"
+        return 0
+    fi
+    if [ -z "$m" ]; then
+        warn "her model stays as it was: this build of her has no default for $1 (pick it in her Settings ▸ Brain)"
+        return 1
+    fi
+    printf '   %s$ %s%s\n' "$D" "$(q "$her" --set "session.model=$m")" "$N"
+    if "$her" --set "session.model=$m" >/dev/null 2>"$TMP/set.err"; then
+        good "her model: $m"
+        return 0
+    fi
+    warn "her model stays as it was ($(tail -n1 "$TMP/set.err" | sed 's/^synaps-avatar: //')): pick it in her Settings ▸ Brain"
+    return 1
+}
+
+# A model on this machine ($1: server|url|model): Synaps' provider.local.url when it uses another
+# server now (its config's line, else Ollama's), as Synaps' own writer leaves it (`key = value`, the
+# line replaced, else added), its daemon reloaded when it runs (it reads its config as it starts);
+# then her model, local/MODEL.
+local_brain() {
+    local server url model cfg now
+    IFS='|' read -r server url model <<<"$1"
+    cfg=$(synaps_home)/config
+    now=$(grep -E '^[[:space:]]*provider\.local\.url[[:space:]]*=' "$cfg" 2>/dev/null | tail -n1 | sed -E 's/^[^=]*=[[:space:]]*//; s/[[:space:]]+$//; s/^"//; s/"$//; s#/+$##') || now=''
+    if [ "${now:-http://localhost:11434/v1}" != "$url" ]; then
+        if [ "$DRY" = 1 ]; then
+            info "\$ provider.local.url = $url ($(tilde "$cfg"))"
+        else
+            mkdir -p "$(dirname "$cfg")"
+            if [ -f "$cfg" ]; then
+                awk -v line="provider.local.url = $url" '
+                    { t = $0; sub(/^[ \t]+/, "", t) }
+                    t !~ /^#/ && t ~ /^provider\.local\.url[ \t]*=/ { print line; done = 1; next }
+                    { print }
+                    END { if (!done) print line }' "$cfg" >"$TMP/config"
+                cat "$TMP/config" >"$cfg"
+            else
+                (umask 077 && printf 'provider.local.url = %s\n' "$url" >"$cfg")
+            fi
+            good "Synaps' local server: $url (provider.local.url in $(tilde "$cfg"))"
+            if "$SYNAPS" daemon status >/dev/null 2>&1; then
+                if "$SYNAPS" daemon reload >/dev/null 2>&1; then good 'its daemon reloaded it'; else warn "its daemon runs with the old one: reload it (synaps daemon reload)"; fi
+            fi
+        fi
+    fi
+    good "her brain: $model, on $server"
+    set_model local "local/$model"
+}
+
+# Her brain: she talks through Synaps, and Synaps needs a model. With none yet, he picks one here
+# (or --brain): an account, signed in to now in his browser, a model on this machine, an API key
+# (read unshown, on synaps login's stdin), or later (her tag reads NO BRAIN YET; her Settings ▸
+# Brain gives her one). Then her model is that one (an account's: its default, her own table's).
 brain() {
     if has_brain; then
         if [ "${SYNAPS_NEW:-0}" = 0 ]; then info "she found your Synaps. her session is \`capri\`: it'll show up in /sessions."; fi
         return 0
     fi
-    info "her brain: Synaps has no model yet. say hi to her: she'll tell you how to give her one."
+    local rc=0
+    # His terminal, opened once for the picker and a key (TTYIN, TTYOUT: /dev/tty; a test's files).
+    TTYFD=''
+    if (: <"$TTYIN") 2>/dev/null; then exec {TTYFD}<"$TTYIN"; fi
+    brain_pick || rc=$?
+    if [ -n "$TTYFD" ]; then exec {TTYFD}<&-; fi
+    TTYFD=''
+    return "$rc"
+}
+
+brain_pick() {
+    local pick=$BRAIN_PICK ask=0 n='' line='' want id login name how l
+    local -a rows=() locals=() accounts=() keys=()
+    if [ -z "$pick" ] && [ "$YES" = 0 ] && [ "$DRY" = 0 ] && [ -n "$TTYFD" ]; then ask=1; fi
+    if [ -z "$pick" ] && [ "$ask" = 0 ]; then
+        if [ "$DRY" = 1 ]; then info "(asks which brain: an account, a model on this machine, an API key, or later)"; fi
+        info "her brain: later. she shows NO BRAIN YET; her Settings ▸ Brain gives her one (or run this again with --brain)"
+        return 0
+    fi
+    mapfile -t rows < <(brains_here)
+    mapfile -t locals < <(local_models)
+    if [ -n "$pick" ] && [ ${#rows[@]} = 0 ] && [ "${pick%%:*}" != local ] && [ "$pick" != later ]; then
+        if [ "$DRY" = 1 ]; then
+            info "(her brain: --brain $pick, from her own list of brains once she's installed)"
+        else
+            warn "her brain: this build of her can't list her brains (synaps-avatar --providers): later, in her Settings ▸ Brain"
+        fi
+        return 0
+    fi
+    for l in "${rows[@]}"; do
+        case $l in *'|key') keys+=("$l") ;; *) accounts+=("$l") ;; esac
+    done
+    if [ "$ask" = 1 ]; then
+        printf '\n   %sher brain: Synaps has no model yet. which one?%s\n' "$B$T" "$N"
+        printf '     1  sign in to an account (in your browser)\n'
+        if [ ${#locals[@]} -gt 0 ]; then
+            printf '     2  a model on this machine (%s found)\n' "${#locals[@]}"
+        else
+            printf '     2  a model on this machine (none running: get Ollama, ollama.com)\n'
+        fi
+        printf '     3  an API key\n     4  later: her Settings ▸ Brain\n'
+        n=$(pick_n 4 4 4)
+        case $n in
+            1) line=$(pick_row account "${accounts[@]}") ;;
+            2) if [ ${#locals[@]} -gt 0 ]; then line=$(pick_row local "${locals[@]}"); fi ;;
+            3) line=$(pick_row key "${keys[@]}") ;;
+        esac
+        if [ -z "$line" ]; then pick=later
+        elif [ "$n" = 2 ]; then pick=local:${line##*|}
+        else pick=${line%%|*}
+        fi
+    fi
+    case $pick in
+        later)
+            info "her brain: later. she shows NO BRAIN YET; her Settings ▸ Brain gives her one"
+            return 0
+            ;;
+        local | local:*)
+            want=${pick#local}
+            want=${want#:}
+            line=''
+            for l in "${locals[@]}"; do
+                if [ -z "$want" ] || [ "${l##*|}" = "$want" ]; then line=$l && break; fi
+            done
+            if [ -z "$line" ]; then
+                warn "her brain: no ${want:+model $want }running on this machine (Ollama, LM Studio): later, in her Settings ▸ Brain"
+                return 0
+            fi
+            local_brain "$line" || true
+            ;;
+        *)
+            line=''
+            for l in "${rows[@]}"; do
+                IFS='|' read -r id login name how <<<"$l"
+                if [ "$id" = "$pick" ] || [ "$login" = "$pick" ]; then line=$l && break; fi
+            done
+            if [ -z "$line" ]; then
+                warn "her brain: --brain $pick isn't one she knows here ($(printf '%s\n' "${rows[@]}" | cut -d'|' -f1 | tr '\n' ' ')local, later): later"
+                return 0
+            fi
+            IFS='|' read -r id login name how <<<"$line"
+            if [ "$how" = key ]; then
+                if key_brain "$login" "$name"; then set_model "$id" || true; fi
+            elif login_brain "$login" "$name"; then
+                set_model "$id" || true
+            fi
+            ;;
+    esac
 }
 
 # Her runs now (his user's), from their command lines (/proc/PID/cmdline): BARE, the pids started
@@ -1924,6 +2257,12 @@ uninstall() {
     printf '\n %s▌removed%s%s\n' "$R$B" "$N" "$([ "$DRY" = 1 ] && printf '  %s(dry run: nothing was)%s' "$R" "$N")"
 }
 
+# On the way out, however it ends (Ctrl-C too): a sign-in still running stopped, her scratch gone.
+on_exit() {
+    stop_login
+    rm -rf "$TMP"
+}
+
 main() {
     STEP_N=0
     # `irm | iex` can't pass flags (install.ps1 reads them from here too); `curl | bash -s --` can.
@@ -1944,7 +2283,7 @@ main() {
     ui
     root_check
     TMP=$(mktemp -d "${TMPDIR:-/tmp}/capri-install.XXXXXX")
-    trap 'rm -rf "$TMP"' EXIT
+    trap on_exit EXIT
     locate
     paths
     if [ "$UNINSTALL" = 1 ]; then
