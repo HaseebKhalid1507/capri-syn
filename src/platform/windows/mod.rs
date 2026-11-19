@@ -598,6 +598,10 @@ impl ZWatch {
     }
 }
 
+/// The poller's word for one surface: its id, its state, take the pointer, where the pointer is
+/// (window px), how many input rects.
+type Want = (WinId, Arc<Pass>, bool, (i32, i32), usize);
+
 /// The pointer for the input poller: screen px, and whether a button is held (None: unread).
 type PointerSource = Box<dyn Fn() -> Option<(POINT, bool)> + Send>;
 /// A window and where it goes (screen px: x, y, w, h).
@@ -840,7 +844,7 @@ impl Win32 {
                     // (it may be waiting for this lock): `Pass::want` only stores and posts.
                     let mut s = relock(&surfaces, "surfaces");
                     s.retain(|_, surf| !surf.pass.gone.load(Ordering::SeqCst));
-                    let wants: Vec<(WinId, Arc<Pass>, bool, (i32, i32), usize)> = s
+                    let wants: Vec<Want> = s
                         .iter()
                         .filter_map(|(&w, surf)| {
                             let mut r = RECT::default();
@@ -1796,32 +1800,50 @@ mod tests {
                 DispatchMessageW(&m);
             }
         };
-        let on_top = || under_plain_window(body, |w| x.mine.lock().is_ok_and(|m| m.contains(&w)), &HashSet::new()).is_none();
+        // `plain` over her, read off the z-order itself.
+        let plain_over_her = || {
+            let mut w = body;
+            for _ in 0..4096 {
+                match unsafe { GetWindow(w, GW_HWNDPREV) } {
+                    Ok(p) if p == plain => return true,
+                    Ok(p) => w = p,
+                    Err(_) => return false,
+                }
+            }
+            false
+        };
+        let state = || format!("her ex 0x{:x} showing {}, the plain window's ex 0x{:x} showing {}", ex_style(body), showing(body), ex_style(plain), showing(plain));
         pump();
-        assert!(on_top(), "adopted on top of the plain window");
-        for case in ["out of the band, her bit kept", "the same across a hide and show"] {
-            let cycle = case.contains("hide");
+        assert!(!plain_over_her(), "adopted under the plain window: {}", state());
+        for case in ["out of the band", "out of the band across a hide and show", "out of the band, her bit kept"] {
             unsafe {
-                if cycle {
+                if case.contains("hide") {
                     let _ = ShowWindow(body, SW_HIDE);
                 }
                 let keep = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
                 SetWindowPos(body, Some(HWND_NOTOPMOST), 0, 0, 0, 0, keep).unwrap();
                 SetWindowPos(plain, Some(HWND_TOP), 0, 0, 0, 0, keep).unwrap();
-                SetWindowLongPtrW(body, GWL_EXSTYLE, (ex_style(body) | WS_EX_TOPMOST.0) as isize);
-                if cycle {
+                if case.contains("hide") {
                     let _ = ShowWindow(body, SW_SHOWNA);
                 }
             }
-            assert!(!on_top(), "{case}: the plain window isn't over her: the test proves nothing");
+            assert!(plain_over_her(), "{case}: the plain window isn't over her: the test proves nothing ({})", state());
+            if case.contains("bit kept") {
+                // Windows leaves her so on his box; a style write may sort her back itself.
+                unsafe { SetWindowLongPtrW(body, GWL_EXSTYLE, (ex_style(body) | WS_EX_TOPMOST.0) as isize) };
+                if !plain_over_her() {
+                    eprintln!("{case}: setting WS_EX_TOPMOST put her back on top by itself ({})", state());
+                    continue;
+                }
+            }
             let (t0, before) = (Instant::now(), pass.tops.load(Ordering::SeqCst));
-            while !on_top() {
-                assert!(t0.elapsed() < Duration::from_secs(3), "{case}: still under a plain window after 3 s");
+            while plain_over_her() {
+                assert!(t0.elapsed() < Duration::from_secs(3), "{case}: still under the plain window after 3 s ({})", state());
                 std::thread::sleep(Duration::from_millis(10));
                 pump();
             }
-            assert!(pass.tops.load(Ordering::SeqCst) > before, "{case}: put back, but not by her");
-            assert_ne!(ex_style(body) & WS_EX_TOPMOST.0, 0, "{case}: topmost again");
+            assert!(pass.tops.load(Ordering::SeqCst) > before, "{case}: put back, but not by her ({})", state());
+            assert_ne!(ex_style(body) & WS_EX_TOPMOST.0, 0, "{case}: topmost again ({})", state());
         }
         stop_tx.send(()).ok();
         other.join().unwrap();
