@@ -111,6 +111,9 @@ Check (Test-Path $synaps) "synaps in $synaps"
 $v = if (Test-Path $synaps) { (& $synaps --version) | Select-Object -First 1 } else { '' }
 Check ($v -match '^synaps \d+\.\d+\.\d+') "synaps --version: $v"
 Check (Test-Path (Join-Path $app 'synaps-avatar.exe')) "her exe in $app"
+# Her licence and the notices that go with her binary, the crates' licences for this build.
+. (Join-Path $root 'installer\licenses\check.ps1')
+Test-HerLicence -App $app
 Check (Test-Path (Join-Path $pack 'sprites.json')) "her pack in $pack"
 Check (Test-Path (Join-Path $pack 'persona.md')) 'with her persona'
 Check (Test-Path (Join-Path $pack 'anim\lachy\LICENSE.md')) "and lachy's art, with its licence"

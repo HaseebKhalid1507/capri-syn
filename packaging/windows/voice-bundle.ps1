@@ -7,6 +7,10 @@
 #   <Out>\site-packages\   tools\capri-voice-win-requirements.txt, wheels only (nothing compiled)
 #   <Out>\capri-voice, <Out>\capri_voice_win.py
 #   <Out>\voice-models.ps1, <Out>\wake\hey-capri-v1.npz   (the model fetch, and the one model in the repo)
+#   <Out>\LICENSE, <Out>\wake\NOTICE   capri-syn's licence; the wake-word model's, beside it
+#   <Out>\licenses\       every package's licence texts, espeak-ng's and whisper.cpp's (inside two
+#                          wheels that don't carry them), and where the GPL parts' source is
+#                          (voice-licenses.py: SOURCE.txt). CPython's own: <Out>\python\LICENSE.txt.
 #
 # Run it:  <Out>\python\pythonw.exe <Out>\capri-voice      (no console; python.exe for one)
 # Models are never in it: %LOCALAPPDATA%\capri-voice\models, fetched by voice-models.ps1 (what
@@ -52,12 +56,22 @@ $site = Join-Path $Out 'site-packages'
 if ($LASTEXITCODE) { throw "pip failed ($LASTEXITCODE)" }
 # What pip leaves that the sidecar never runs.
 Get-ChildItem -Path $site -Directory -Filter 'bin' | Remove-Item -Recurse -Force
+# sounddevice's wheel carries PortAudio for every platform, and builds of it with Steinberg's ASIO SDK
+# (GPL-3.0 or Steinberg's own terms). She loads libportaudio64bit.dll only (never SD_ENABLE_ASIO):
+# the rest goes. PortAudio's licence: voice-licenses.py (licenses\portaudio\).
+$pa = Join-Path $site '_sounddevice_data\portaudio-binaries'
+if (-not (Test-Path (Join-Path $pa 'libportaudio64bit.dll'))) { throw "no libportaudio64bit.dll in $pa (sounddevice's wheel changed)" }
+Get-ChildItem $pa -Force | Where-Object Name -NotIn 'libportaudio64bit.dll', 'README.md' | Remove-Item -Recurse -Force
 
 Copy-Item (Join-Path $repo 'tools\capri-voice') $Out
 Copy-Item (Join-Path $repo 'tools\capri_voice_win.py') $Out
 Copy-Item (Join-Path $PSScriptRoot 'voice-models.ps1') $Out
 New-Item -ItemType Directory -Force (Join-Path $Out 'wake') | Out-Null
 Copy-Item (Join-Path $repo 'tools\wake\hey-capri-v1.npz') (Join-Path $Out 'wake')
+Copy-Item (Join-Path $repo 'tools\wake\NOTICE') (Join-Path $Out 'wake')
+Copy-Item (Join-Path $repo 'LICENSE') $Out
+& $Python (Join-Path $PSScriptRoot 'voice-licenses.py') $Out
+if ($LASTEXITCODE) { throw "voice-licenses.py failed ($LASTEXITCODE)" }
 & $Python -m pip freeze --path $site | Set-Content -Encoding utf8 (Join-Path $Out 'versions.txt')
 
 $mb = [math]::Round(((Get-ChildItem -Recurse -File $Out | Measure-Object Length -Sum).Sum / 1MB), 1)

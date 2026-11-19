@@ -1,0 +1,134 @@
+# cargo-about's config (installer/licenses/third-party.ps1): the licences of the crates compiled into
+# her binary. A crate's licence expression must be satisfiable from this list, or the generation
+# fails (--fail): a new licence in Cargo.lock is a decision, made here. Earlier in the list wins when a
+# crate offers a choice (MIT first: the shortest text).
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "MIT-0",
+    "CC0-1.0",
+    "Unlicense",
+    "BSL-1.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "NCSA",
+    "CDLA-Permissive-2.0",
+]
+
+# Test-only crates aren't in her binary. Build dependencies stay listed: some generate code into it.
+ignore-dev-dependencies = true
+
+# Her own crates (publish = false: synaps-avatar, synaps-client) aren't third-party: LICENSE, and
+# synaps-client's NOTICE and LICENSE-APACHE, ship as files beside this one (installer/licenses/list).
+private = { ignore = true }
+
+# cargo-about's built-in clarifications for crates whose licence files a scan misreads.
+workarounds = ["chrono", "linux-raw-sys", "ring", "rustix", "rustls", "unicode-ident"]
+
+# File-level copyleft, crate by crate (never in the list above: a new MPL crate is a decision too).
+# Unmodified; its source is on crates.io at the version listed, as the generated file's header says
+# (MPL-2.0 3.2). The only one in her Linux and Windows builds: Cargo.lock's other two, cbindgen (GPUI's
+# macOS platform) and dwrote (font-kit's, which her Windows build doesn't use), aren't. cargo-about
+# reads crate tables last.
+[option-ext]
+accepted = ["MPL-2.0"]
+
+# Microsoft's windows-rs crates (MIT OR Apache-2.0; MIT elected): the scan misses their indented
+# license-mit ("Copyright (c) Microsoft Corporation."). Same bytes in all 43 in Cargo.lock under
+# these names; a version that changes the file stops matching, falls back to SPDX's template, and
+# third-party.ps1's copyright guard stops the build.
+[windows.clarify]
+license = "MIT"
+[[windows.clarify.files]]
+path = "license-mit"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[windows_x86_64_msvc.clarify]
+license = "MIT"
+[[windows_x86_64_msvc.clarify.files]]
+path = "license-mit"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[windows-collections.clarify]
+license = "MIT"
+[[windows-collections.clarify.files]]
+path = "license-mit"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[windows-core.clarify]
+license = "MIT"
+[[windows-core.clarify.files]]
+path = "license-mit"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[windows-future.clarify]
+license = "MIT"
+[[windows-future.clarify.files]]
+path = "license-mit"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[windows-implement.clarify]
+license = "MIT"
+[[windows-implement.clarify.files]]
+path = "license-mit"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[windows-interface.clarify]
+license = "MIT"
+[[windows-interface.clarify.files]]
+path = "license-mit"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[windows-link.clarify]
+license = "MIT"
+[[windows-link.clarify.files]]
+path = "license-mit"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[windows-numerics.clarify]
+license = "MIT"
+[[windows-numerics.clarify.files]]
+path = "license-mit"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[windows-registry.clarify]
+license = "MIT"
+[[windows-registry.clarify.files]]
+path = "license-mit"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[windows-result.clarify]
+license = "MIT"
+[[windows-result.clarify.files]]
+path = "license-mit"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[windows-strings.clarify]
+license = "MIT"
+[[windows-strings.clarify.files]]
+path = "license-mit"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[windows-sys.clarify]
+license = "MIT"
+[[windows-sys.clarify.files]]
+path = "license-mit"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[windows-targets.clarify]
+license = "MIT"
+[[windows-targets.clarify.files]]
+path = "license-mit"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[windows-threading.clarify]
+license = "MIT"
+[[windows-threading.clarify.files]]
+path = "license-mit"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"

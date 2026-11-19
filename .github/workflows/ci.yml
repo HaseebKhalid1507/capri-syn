@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   check:
     runs-on: ubuntu-24.04
@@ -37,6 +40,13 @@ jobs:
       - name: Tests
         run: cargo test --locked --workspace
 
+      # The crates' licences for the Linux tarball (installer/licenses/third-party.ps1, as release.yml's
+      # linux job makes them): a dependency that brings a licence nobody accepted, a crate with no
+      # copyright line, or syntect back fails on its PR, not on the tag. Windows': windows-installer.
+      - name: The crates' licences (Linux)
+        shell: pwsh
+        run: ./installer/licenses/third-party.ps1 -Target x86_64-unknown-linux-gnu -Out "$env:RUNNER_TEMP/third-party.txt"
+
   # The compile gate for Windows (x86_64-pc-windows-msvc, the runner's host): build, the unit tests
   # (the fake contract suite in both modes among them) and clippy. The Windows contract suite proper
   # needs a desktop (`contract_windows`, ignored here: run it in the capri-win VM).
@@ -57,7 +67,7 @@ jobs:
 
       # The registry and the dependencies' build (the workspace's own crates pruned); saved on a
       # failed run too, so a red run still warms the next.
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           cache-on-failure: true
 
@@ -164,7 +174,7 @@ jobs:
 
       # The release build's own cache (the `windows` job's is a dev build).
       # Not ~/.cargo/bin: a Synaps an earlier run installed there would come back.
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: release
           cache-on-failure: true
@@ -414,19 +424,34 @@ jobs:
       - name: shellcheck
         run: |
           shellcheck --version | sed -n 2p
-          shellcheck -x install.sh installer/stage.sh installer/test-units.sh
+          shellcheck -x install.sh installer/stage.sh installer/test-units.sh installer/licenses/check.sh installer/release-notes.sh
 
       - name: PSScriptAnalyzer
         shell: pwsh
         run: |
           if (-not (Get-Module -ListAvailable PSScriptAnalyzer)) { Install-Module PSScriptAnalyzer -Force -Scope CurrentUser }
-          $found = foreach ($f in 'install.ps1', 'installer/test-windows.ps1', 'installer/test-units.ps1', 'packaging/windows/steps.ps1', 'packaging/windows/test-install.ps1', 'packaging/windows/test-setup-e2e.ps1', 'packaging/windows/test-setup-wizard.ps1', 'packaging/windows/test-setup-voice.ps1', 'packaging/windows/test-login.ps1') { Invoke-ScriptAnalyzer -Path $f -Severity Warning, Error }
+          $found = foreach ($f in 'install.ps1', 'installer/test-windows.ps1', 'installer/test-units.ps1', 'packaging/windows/steps.ps1', 'packaging/windows/test-install.ps1', 'packaging/windows/test-setup-e2e.ps1', 'packaging/windows/test-setup-wizard.ps1', 'packaging/windows/test-setup-voice.ps1', 'packaging/windows/test-login.ps1', 'installer/licenses/third-party.ps1', 'installer/licenses/check.ps1', 'packaging/windows/build.ps1', 'packaging/windows/build-voice.ps1', 'packaging/windows/voice-bundle.ps1', 'packaging/windows/test-voice-install.ps1') { Invoke-ScriptAnalyzer -Path $f -Severity Warning, Error }
           $found | Format-Table -AutoSize ScriptName, Line, RuleName, Message | Out-String -Width 220
           if ($found) { throw "PSScriptAnalyzer: $(@($found).Count) finding(s)" }
           Write-Output 'PSScriptAnalyzer: clean'
 
       - name: The two installers in step
         run: python3 installer/test_parity.py -v
+
+      # The Linux artifact's layout (installer/stage.sh) with a stand-in binary: her LICENSE and every
+      # notice that goes with her binary, the repo's bytes, and the wake-word model's NOTICE beside it.
+      # The crates' licences need cargo: release.yml's linux job checks the real tarball with them.
+      - name: Her licence and notices in the Linux layout
+        run: |
+          bash installer/stage.sh . /bin/true "$RUNNER_TEMP/stage" ci
+          bash installer/licenses/check.sh . "$RUNNER_TEMP/stage"
+
+      # A tag's notes are CHANGELOG.md's section for it (release.yml): it must keep parsing.
+      - name: The release notes (CHANGELOG.md)
+        run: |
+          v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          bash installer/release-notes.sh --dry-run "$v" > "$RUNNER_TEMP/notes.md"
+          echo "the notes for $v: $(wc -l < "$RUNNER_TEMP/notes.md") lines"; head -n 3 "$RUNNER_TEMP/notes.md"
 
       - name: install.sh's start of her (which runs it quits, ssh, her log, her folder)
         run: bash installer/test-units.sh

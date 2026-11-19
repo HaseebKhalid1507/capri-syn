@@ -37,7 +37,10 @@ place. Her binary and folders keep the name `synaps-avatar`.
 Double-clicked on a PC with nothing installed, it leaves a working Capri. After her files it runs the
 install steps install.ps1 runs too: one copy of them, `packaging/windows/steps.ps1`, installed with
 her in `{app}\steps` along with what they read (the manifest, `make-pack`, the pins, her moods and
-persona; no art).
+persona; no art). With her exe: `LICENSE` and `licenses\` (GPUI's Apache-2.0 and `PATCHES.md`, the
+icon's and synaps-client's notices, Lucide's ISC licence for the icons compiled in, and
+`THIRD-PARTY-LICENSES.txt`, the licences of every crate in that exe: `build.ps1` generates it with
+cargo-about, `installer/licenses/`).
 
 - **Per user, no admin**: she goes to `%LOCALAPPDATA%\Programs\synaps-avatar`.
 - **Her brain** (page "Her brain", shown only when it's needed): Synaps is looked for as install.ps1
@@ -191,10 +194,19 @@ stays ~9 MB (CI fails hers past 20 MB), and only he who wants voice gets the res
   download resumes (`curl.exe -C -`); a wrong hash is deleted and the run fails. A Start-menu entry,
   "synaps-avatar voice models", runs it again.
 - She starts the sidecar once the models are there (her log says so until then).
+- **Licences:** `LICENSE`, `wake\NOTICE` beside the wake-word model, and `licenses\`: every Python
+  package with the licence texts its wheel carries, espeak-ng's licence files and sonic's (compiled
+  into its DLL), and `SOURCE.txt` (where the source of espeak-ng 1.52.0's DLL and of phonemizer is:
+  GPL-3.0; espeak-ng's, with sonic's, is attached to the same release), whisper.cpp's MIT licence (pywhispercpp's DLLs), PortAudio's (sounddevice's
+  `libportaudio64bit.dll`, the only one of its builds kept: the ASIO ones and other platforms' are
+  removed), Microsoft's terms for the VC++ runtime, and CPython's in `python\LICENSE.txt`.
+  `voice-licenses.py` writes them, and stops the build when espeakng-loader, pywhispercpp or
+  sounddevice isn't the version its notes were written for, on a native binary nobody named, on a
+  licence not accepted, and on a new or compiled GPL-family package.
 - **Uninstall** stops the sidecar (only the `python.exe` in that folder), removes the bundle, Python's
   caches, and `%LOCALAPPDATA%\capri-voice` (models, log, link, media state).
 - CI installs, checks and uninstalls it unattended without the models (`test-voice-install.ps1`: the
-  files, the selftest run by the installed interpreter, the folder beside her in both cases, nothing
+  files and licences, the selftest run by the installed interpreter, the folder beside her in both cases, nothing
   left), and runs the model fetch on its small files (`test-voice-models.ps1`: resume, a bad hash, a
   kept file).
 

@@ -216,18 +216,60 @@ Windows: her installer's folder, her pack under `%LOCALAPPDATA%\synaps-avatar`, 
 
 ## Releases
 
-`.github/workflows/release.yml` runs on a `v*` tag. The tag must match `Cargo.toml`'s version. It
-builds:
+`.github/workflows/release.yml` runs on a `v*` tag. The tag must match `Cargo.toml`'s version, and
+`CHANGELOG.md` must have a `## <version>` section: it becomes the release's notes
+(`installer/release-notes.sh`), so a tag without one fails before anything is built. It builds:
 - the Linux tarball, on ubuntu-22.04 for glibc 2.35: her binary, avatarctl, the tools and units,
   and `install.sh`;
 - her Windows installer and her voice installer.
 
 Each asset gets a `.sha256`, is smoke-tested through the installers above, and is attached to that
-tag's release. If there is no release yet, it creates a **draft**: publishing is a person's call,
-and `releases/latest` (what the installers read) skips drafts. Until a release exists, both
-installers build from source.
+tag's release with `install.sh`, `install.ps1` (that commit's), espeak-ng's source (below),
+`SHA256SUMS` and a build-provenance attestation (`gh attestation verify FILE --repo
+HaseebKhalid1507/capri-syn`). From v1.0.0 every asset name is frozen: installers, docs and the voice
+installer's `SOURCE.txt` point at them. If there is no
+release yet, it creates a **draft**: publishing is a person's call, and `releases/latest` (what the
+installers read) skips drafts. Until a release exists, both installers build from source.
 
-A pull request that touches the packaging runs the same builds and tests, and releases nothing.
+**Licences inside the artifacts.** Each one carries capri-syn's `LICENSE` and the notices that go
+with what's in it:
+- the tarball (under `lib/synaps-avatar/`, installed with her) and her Windows installer (under her
+  folder): `licenses/` holds GPUI's Apache-2.0 and its `PATCHES.md`, synaps-client's `NOTICE` and
+  Apache-2.0, the icon's `NOTICE`, Lucide's ISC licence (its icons are embedded by gpui-kit-assets,
+  which declares only Apache-2.0), and `THIRD-PARTY-LICENSES.txt`, every crate compiled into that
+  build with its licence text (cargo-about, pinned: `installer/licenses/`). The list is
+  `installer/licenses/list`. The generation stops on a licence not accepted in `about.toml` (MPL-2.0
+  crate by crate), on a crate with no copyright line that isn't known, on a gpui-kit-assets that
+  isn't the one Lucide's licence was copied for, and if syntect, two-face or tree-sitter come back (she
+  highlights no code, and their syntax definitions and queries carry licences of their own);
+- the wake-word model's `NOTICE` beside it (`tools/wake/`, in the tarball and the voice installer);
+- her voice installer: `licenses/THIRD-PARTY-LICENSES.txt` (every Python package in it with the
+  licence texts its wheel carries, and Microsoft's terms for the Visual C++ runtime), espeak-ng's
+  licence files (with sonic's, compiled into its DLL) and `SOURCE.txt` (where the GPL parts' source is: espeak-ng 1.52.0, phonemizer),
+  whisper.cpp's licence, PortAudio's, and CPython's own (`python/LICENSE.txt`). Of sounddevice's
+  PortAudio builds only the one she loads ships (none of the ASIO ones, built with Steinberg's SDK).
+  `packaging/windows/voice-licenses.py` writes them, and stops the build if a wheel that carries
+  someone else's binary isn't the version its notes were written for, on a native binary nobody
+  named (DLL or exe), on a declared licence not accepted (whole words; a proprietary one beside it
+  still stops it), and on a new or compiled GPL-family package.
+
+**espeak-ng's source** (GPL-3.0 section 6(d): beside the object code). The voice installer carries
+espeak-ng's DLL, so every release also carries `espeak-ng-<version>.tar.gz` (its tag),
+`espeakng-loader-<version>-build.tar.gz` (the scripts that built the DLL) and
+`sonic-<commit7>.tar.gz` (Bill Cox's sonic, Apache-2.0: espeak-ng's CMake fetches it and compiles
+`sonic.c` into the DLL, so it is part of the DLL's source), fetched by `assemble`
+and checked against SHA-256s pinned in release.yml; the notes say so, and `SOURCE.txt` links them.
+
+CI checks each artifact holds all of them: the `installer` job on the Linux layout, release.yml on
+the tarball and on its own voice installer, `windows-installer` and `windows-voice-installer` on
+what Setup installed. ci.yml's `check` job generates the Linux crates' licences on every PR, so a new
+licence fails there and not on the tag.
+
+A pull request that touches the packaging runs the same builds and tests, and assembles the
+release's files (`assemble`), and releases nothing. **Run workflow** on release.yml is the dry
+run: everything a tag does, onto a draft pre-release named `dryrun-v<version>` at that commit (its
+notes are `## Unreleased` until the version has its own section). It never makes a `v*` tag and is
+never published; delete it when you're done.
 
 ## How it is tested
 

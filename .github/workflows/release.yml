@@ -9,15 +9,31 @@ name: release
 #   capri-syn-setup-x86_64.exe                      her Windows installer (packaging/windows)
 #   capri-syn-voice-setup-x86_64.exe                her Windows voice installer (its own download)
 #
-# A pull request that touches the packaging runs the same builds and smoke tests, and releases
-# nothing. Nothing here pushes a tag or publishes a release.
-#
 # Also attached: synaps-avatar-x86_64.pdb (and its .sha256), her Windows exe's symbols (line
-# tables): a dump of hers from a machine reads with them. Never in the installer.
+# tables): a dump of hers from a machine reads with them. Never in the installer. And install.sh,
+# install.ps1 (this commit's), SHA256SUMS (every asset's), and a build-provenance attestation of
+# each (`gh attestation verify FILE --repo HaseebKhalid1507/capri-syn`). And espeak-ng's source
+# (GPL-3.0 6(d), beside the voice setup that carries its DLL): espeak-ng-<ver>.tar.gz,
+# espeakng-loader-<ver>-build.tar.gz (the scripts that built it) and sonic-<commit7>.tar.gz (which
+# espeak-ng's CMake compiles into it), SHA-256 pinned here; the voice
+# setup's licenses\SOURCE.txt names them (packaging/windows/voice-licenses.py). From v1.0.0 every
+# asset name here is frozen: installers, docs and SOURCE.txt in the field point at them.
+#
+# The notes are CHANGELOG.md's `## <version>` section (installer/release-notes.sh): a tag without
+# one fails before anything is built. Every artifact carries her LICENSE and the notices that go
+# with it (installer/licenses/; the voice installer's: packaging/windows/voice-licenses.py).
+#
+# A pull request that touches the packaging runs the same builds, smoke tests and assembly
+# (`assemble`: the release's files as an artifact), and releases nothing. "Run workflow" (a
+# workflow_dispatch) is the dry run: everything a tag does, onto a DRAFT PRE-RELEASE named
+# `dryrun-v<version>` at that commit, never a `v*` tag (a draft makes no tag; releases/latest
+# skips drafts and pre-releases). Delete it when you're done looking. Nothing here pushes a tag or
+# publishes a release.
 
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
   pull_request:
     paths:
       - .github/workflows/release.yml
@@ -29,24 +45,53 @@ on:
 permissions:
   contents: read
 
+# One run per tag, dry run or PR at a time: two dry runs would race to delete and remake the same
+# draft. A PR's newer push cancels its older run; a tag's or a dry run's never is.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  # The tag says the version: Cargo.toml must agree (her Windows installer's version comes from it).
+  # The tag says the version: Cargo.toml must agree (her Windows installer's version comes from it),
+  # and CHANGELOG.md must have its section (the notes). A dry run or a PR takes Cargo.toml's, and
+  # the notes fall back to `## Unreleased`.
   version:
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.v.outputs.version }}
+      cargo: ${{ steps.v.outputs.cargo }}
     steps:
       - uses: actions/checkout@v4
       - id: v
         run: |
           cargo=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          echo "cargo=$cargo" >> "$GITHUB_OUTPUT"
           if [ "${GITHUB_REF_TYPE}" = tag ]; then
             tag=${GITHUB_REF_NAME#v}
             [ "$tag" = "$cargo" ] || { echo "::error::tag v$tag but Cargo.toml says $cargo: bump Cargo.toml (and CHANGELOG), then tag"; exit 1; }
             echo "version=v$tag" >> "$GITHUB_OUTPUT"
+          elif [ "${GITHUB_EVENT_NAME}" = workflow_dispatch ]; then
+            echo "version=v$cargo-dryrun.$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
           else
             echo "version=v$cargo-pr.$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: The release notes (CHANGELOG.md)
+        run: |
+          mkdir -p notes
+          if [ "${GITHUB_REF_TYPE}" = tag ]; then
+            bash installer/release-notes.sh "${{ steps.v.outputs.cargo }}" > notes/notes.md
+          else
+            bash installer/release-notes.sh --dry-run "${{ steps.v.outputs.cargo }}" > notes/notes.md
+          fi
+          echo "notes: $(wc -l < notes/notes.md) lines, $(wc -c < notes/notes.md) bytes"
+          head -n 30 notes/notes.md
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: notes/notes.md
+          if-no-files-found: error
 
   # Built on 22.04 for its older glibc (2.35, installer/manifest's linux_glibc_min): it runs on
   # 22.04 and newer, Debian 12+, Fedora 36+, Arch. Older systems build from source.
@@ -72,7 +117,7 @@ jobs:
       - name: Toolchain (rust-toolchain.toml)
         run: rustup show active-toolchain || rustup toolchain install
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3 (pinned: these builds are attested)
         with:
           key: release-linux
           cache-on-failure: true
@@ -80,14 +125,22 @@ jobs:
       - name: Build
         run: cargo build --release --locked --bin synaps-avatar
 
+      # Apache-2.0 (GPUI, compiled in) asks for its text with every copy: the crates' licences for
+      # this target, generated (cargo-about, pinned), go into the tarball with her LICENSE.
+      - name: The crates' licences
+        shell: pwsh
+        run: ./installer/licenses/third-party.ps1 -Target x86_64-unknown-linux-gnu -Out dist/THIRD-PARTY-LICENSES.txt
+
       - name: The tarball and its sha256
         run: |
-          mkdir -p dist
-          bash installer/stage.sh . target/release/synaps-avatar "dist/$NAME" "${{ needs.version.outputs.version }}"
+          bash installer/stage.sh . target/release/synaps-avatar "dist/$NAME" "${{ needs.version.outputs.version }}" dist/THIRD-PARTY-LICENSES.txt
           tar -C dist -czf "dist/$NAME.tar.gz" "$NAME"
           (cd dist && sha256sum "$NAME.tar.gz" > "$NAME.tar.gz.sha256" && cat "$NAME.tar.gz.sha256")
           ls -l dist
           objdump -T "dist/$NAME/bin/synaps-avatar" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1
+
+      - name: Her licence and notices in the tarball
+        run: bash installer/licenses/check.sh . "dist/$NAME.tar.gz" --third-party
 
       # The tarball as a user gets it: its own install.sh, from the unpacked folder (the art pack from
       # CapriCore and lachy, Synaps from its release), then her --check. No display needed.
@@ -123,7 +176,7 @@ jobs:
         shell: bash
         run: rustup show active-toolchain || rustup toolchain install
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3 (pinned: these builds are attested)
         with:
           key: release
           cache-on-failure: true
@@ -168,6 +221,13 @@ jobs:
           [IO.File]::WriteAllText("$PWD/dist/synaps-avatar-x86_64.pdb.sha256", "$h  synaps-avatar-x86_64.pdb`n")
           Write-Output "$h  synaps-avatar-x86_64.pdb  $([math]::Round((Get-Item dist/synaps-avatar-x86_64.pdb).Length / 1MB, 1)) MB"
 
+      # The release's own voice setup (not ci.yml's build: the wheels float within their bounds),
+      # installed and checked, its licences among them (test-voice-install.ps1), and uninstalled.
+      - name: Her voice installer, installed and checked
+        timeout-minutes: 15
+        shell: pwsh
+        run: ./packaging/windows/test-voice-install.ps1 -Setup dist/capri-syn-voice-setup-x86_64.exe
+
       # The installer as a user gets it: install.ps1 with this release's installer, then the checks
       # (synaps --version, her --check, the daemon, a rerun, --uninstall).
       - name: install.ps1 with it
@@ -181,33 +241,110 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
-  # Only for a tag: the assets onto its release (a draft when there is none yet; never published here).
-  publish:
-    if: github.ref_type == 'tag'
+  # The release's files, every time (a PR too, read-only): the builds, this commit's install.sh and
+  # install.ps1, espeak-ng's source, SHA256SUMS. Every asset the installers fetch by name
+  # (installer/manifest) must be there with its .sha256, or nothing is released.
+  assemble:
     needs: [version, linux, windows]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release
+          merge-multiple: true
+      - name: install.sh, install.ps1, SHA256SUMS
+        run: |
+          mkdir -p notes && mv release/notes.md notes/
+          cp install.sh install.ps1 release/
+          for k in asset_linux asset_windows asset_windows_voice; do
+            a=$(sed -n "s/^$k=//p" installer/manifest)
+            [ -n "$a" ] && [ -s "release/$a" ] && [ -s "release/$a.sha256" ] || { echo "::error::installer/manifest's $k ($a): not built, or no .sha256"; exit 1; }
+            (cd release && sha256sum -c "$a.sha256")
+          done
+
+          # GPL-3.0 6(d): espeak-ng's Corresponding Source (with sonic, which its CMake fetches and
+          # compiles in), and the scripts that built its DLL, beside the voice setup that carries it (its SOURCE.txt names these files; versions from
+          # voice-licenses.py). GitHub's archives, pinned: if their bytes ever change this fails, and
+          # `git archive` of the same commits is the fallback.
+          v() { sed -n "s/^$1 = \"\([^\"]*\)\".*/\1/p" packaging/windows/voice-licenses.py; }
+          ng=$(v ESPEAK_NG) loader=$(v LOADER) loader_commit=$(v LOADER_COMMIT) sonic=$(v SONIC_COMMIT)
+          curl -fsSL --retry 3 -o "release/espeak-ng-$ng.tar.gz" "https://github.com/espeak-ng/espeak-ng/archive/refs/tags/$ng.tar.gz"
+          curl -fsSL --retry 3 -o "release/espeakng-loader-$loader-build.tar.gz" "https://github.com/thewh1teagle/espeakng-loader/archive/$loader_commit.tar.gz"
+          curl -fsSL --retry 3 -o "release/sonic-${sonic:0:7}.tar.gz" "https://github.com/waywardgeek/sonic/archive/$sonic.tar.gz"
+          printf '%s\n' \
+            "bb4338102ff3b49a81423da8a1a158b420124b055b60fa76cfb4b18677130a23  release/espeak-ng-1.52.0.tar.gz" \
+            "d6496114cd0608988f5291f54d2d15b50cb37b7f007af00bb62cf93be1b3ceca  release/espeakng-loader-0.2.4-build.tar.gz" \
+            "715827b5a39b79e56e44397d7b845910df996d4cca74777b3b61629b1ddc98c1  release/sonic-fbf75c3.tar.gz" |
+            sha256sum -c -
+          printf '\n---\n\n%s\n' "\`capri-syn-voice-setup-x86_64.exe\` contains espeak-ng $ng (GPL-3.0-or-later). Its source is attached: \`espeak-ng-$ng.tar.gz\` (espeak-ng's $ng tag), built into the DLL by \`build.sh\` in \`espeakng-loader-$loader-build.tar.gz\` (espeakng-loader $loader, commit ${loader_commit:0:7}), and sonic's (\`sonic-${sonic:0:7}.tar.gz\`), which espeak-ng's build compiles in. Every download carries its licences: \`LICENSE\` and \`licenses/\` beside her files." >> notes/notes.md
+          (cd release && sha256sum -- $(ls | grep -v -e '\.sha256$' -e '^SHA256SUMS$') > SHA256SUMS)
+          cat release/SHA256SUMS
+          ls -l release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: assembled-${{ needs.version.outputs.version }}
+          path: |
+            release
+            notes
+          # A PR's: a day, to download and look at; a tag's or a dry run's: publish reads it.
+          retention-days: ${{ github.event_name == 'pull_request' && 1 || 7 }}
+          if-no-files-found: error
+
+  # A tag: its release, as a DRAFT (made when there is none; never published here). "Run workflow":
+  # the dry run, a draft pre-release `dryrun-v<version>` at this commit (made again each run).
+  publish:
+    if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+    needs: [version, assemble]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     env:
       GH_TOKEN: ${{ github.token }}
-      TAG: ${{ github.ref_name }}
+      VERSION: ${{ needs.version.outputs.version }}
+      CARGO_VERSION: ${{ needs.version.outputs.cargo }}
     steps:
       - uses: actions/download-artifact@v4
         with:
-          path: dist
-          merge-multiple: true
-      - name: Attach to the release
+          name: assembled-${{ needs.version.outputs.version }}
+          path: .
+
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: release/*
+
+      - name: The draft release
         run: |
-          ls -l dist
+          ls -l release
+          if [ "${GITHUB_REF_TYPE}" = tag ]; then
+            tag=$GITHUB_REF_NAME
+            title=$tag
+            new=(--verify-tag)
+          else
+            # Never a `v*` name: published by mistake, it makes a tag no installer and no tag
+            # build reads.
+            tag=dryrun-v$CARGO_VERSION
+            title="DRY RUN $VERSION: not a release, never publish"
+            new=(--prerelease --target "$GITHUB_SHA")
+          fi
           # A published release is never changed: its assets and their .sha256 are what people
-          # checked. A draft (this workflow's own, re-run) takes the new build's assets.
-          if draft=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null); then
+          # checked. A draft (this workflow's own, re-run) takes the new build's assets and notes;
+          # a dry run's is made again, at this commit.
+          if draft=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null); then
             if [ "$draft" != true ]; then
-              echo "::error::$TAG is already published: its assets stay as they are (tag a new version)"
+              echo "::error::$tag is already published: its assets stay as they are (tag a new version)"
               exit 1
             fi
-            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber dist/*
-          else
-            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --verify-tag --title "$TAG" --generate-notes
-            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" dist/*
+            if [ "${GITHUB_REF_TYPE}" = tag ]; then
+              gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber release/*
+              gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --notes-file notes/notes.md
+              exit 0
+            fi
+            gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes
           fi
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --draft "${new[@]}" --title "$title" --notes-file notes/notes.md release/*
+          gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json name,isDraft,isPrerelease,tagName,url,assets --jq '"\(.name): draft=\(.isDraft) prerelease=\(.isPrerelease) tag=\(.tagName) \(.url)\n" + ([.assets[] | "  \(.name) \(.size)"] | join("\n"))'

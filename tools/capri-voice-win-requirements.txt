@@ -1,12 +1,16 @@
 # capri-voice on Windows: what the sidecar imports, all from wheels (CI installs these with
 # --only-binary :all: on windows-latest, CPython 3.13). Lower bounds, except the two the sidecar binds
 # into (kokoro-onnx's API, pywhispercpp's DLL and object layout: tools/capri-voice-setup pins the
-# same); the bundle records exact versions when it is built (docs/design/windows-voice.md).
+# same) and the wheels that carry someone else's binaries without their licence (espeakng-loader:
+# espeak-ng; pywhispercpp: whisper.cpp; sounddevice: PortAudio), which
+# packaging/windows/voice-licenses.py names for exactly these versions; the bundle records exact
+# versions when it is built (docs/design/windows-voice.md).
 numpy>=2.0
 onnxruntime>=1.20
 kokoro-onnx==0.6.1    # brings phonemizer and espeakng-loader (espeak-ng's DLL)
+espeakng-loader==0.2.4    # espeak-ng 1.52.0's DLL (GPL-3.0): voice-licenses.py names its source
 pywhispercpp==1.5.1
-sounddevice>=0.5      # its wheel carries PortAudio
+sounddevice==0.5.6    # PortAudio v19.7.0's DLL (MIT): voice-licenses.py names it
 pycaw>=20240316       # with comtypes and psutil
 winrt-runtime>=2.0
 winrt-Windows.Foundation>=2.0
