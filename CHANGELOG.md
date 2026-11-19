@@ -91,9 +91,11 @@
   espeak-ng's DLLs import `MSVCP140.dll` (onnxruntime `MSVCP140_1.dll` too), and the sidecar died on
   import ("DLL load failed") over and over, with nothing on screen. The voice bundle now carries the
   runtime beside its Python (`msvcp140.dll`, `msvcp140_1.dll`, `vcruntime140*.dll`, from Visual
-  Studio, unmodified) with Microsoft's terms for it (`licenses\vc-runtime\LICENSE.txt`). Its build
-  stops when a DLL imports what neither the bundle nor Windows has, or a runtime older than the MSVC
-  that linked it (`voice-imports.py`), and CI checks the installed bundle loads its own copies.
+  Studio, unmodified, under the Visual Studio licence's Distributable Code) with Microsoft's end-user
+  terms for it (`licenses\vc-runtime\LICENSE.txt`). Its build stops when a DLL imports what neither
+  the bundle nor a clean Windows has (a pinned list of System32's DLLs, not the build machine's
+  System32), or a runtime older than the MSVC that linked it (`voice-imports.py`), and CI checks the
+  installed bundle loads its own copies, espeak-ng's as phonemizer loads it.
 
 ### Every download carries its licences
 

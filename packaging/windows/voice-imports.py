@@ -5,22 +5,32 @@ on the bundle it built; test-voice-install.ps1 on what Setup installed, with --l
 
 Reads the import table and the delay-load table of every .dll, .pyd and .exe under BUNDLE (PE files,
 read here: no dumpbin or pefile, so it runs off Windows too) and looks for each DLL they name where
-Windows' loader does when Python loads them. Extension modules (.pyd) and the DLLs ctypes loads by
-path (espeak-ng, PortAudio) are loaded with LOAD_LIBRARY_SEARCH_DEFAULT_DIRS | _DLL_LOAD_DIR, which
-search:
-  - BUNDLE\\python\\: python.exe's folder, the application's;
+Windows' loader does when Python loads them, in its order. Extension modules (.pyd) and the DLLs ctypes
+loads by path (espeak-ng, PortAudio) are loaded with LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | _DEFAULT_DIRS,
+which search:
   - the folder of the file that imports it;
+  - BUNDLE\\python\\: python.exe's folder, the application's;
   - the folders packages add with os.add_dll_directory: site-packages\\<name>.libs\\ (delvewheel's,
     numpy's) for the files under site-packages\\<name>\\;
-  - System32 (--system32 DIR; on Windows %SystemRoot%\\System32), but NOT for the Visual C++ runtime
-    (msvcp140*, vcruntime140*, vcomp140, concrt140, ...). GitHub's runners and any PC with Visual
-    Studio have the VC++ Redistributable in System32; a clean Windows doesn't, so the bundle must
-    carry each of those it imports (voice-bundle.ps1 copies them into python\\).
-API sets (api-ms-win-*, ext-ms-win-*) are Windows' own. Off Windows with no --system32, the other
-names are listed as System32's, unchecked. And the VC++ runtime in python\\ must be at least as new as
-the MSVC that linked each file importing it (its PE header's linker version; Microsoft: the runtime
-must be the same or later than the build tools; onnxruntime built with 14.40+ crashes on an older
-msvcp140, std::mutex).
+  - System32.
+A delay-load is loaded with LoadLibraryExA(name, NULL, 0): python\\, then System32.
+
+System32 counts only for a name in CLEAN_SYSTEM32, what a clean Windows 10 1809+ has (on Windows, also
+found in --system32 DIR, default %SystemRoot%\\System32): the build machine's System32 also holds what
+Visual Studio and the Windows SDKs put there. Never for the Visual C++ runtime (msvcp140*, vcruntime140*,
+vcomp140, concrt140, ...): GitHub's runners and any PC with Visual Studio have the VC++ Redistributable
+in System32, a clean Windows doesn't. The bundle carries each of those it imports in python\\
+(voice-bundle.ps1), and it is one copy per process by name: python\\'s, never one beside a module.
+API sets (api-ms-win-*, ext-ms-win-*) are Windows' own.
+
+And the VC++ runtime in python\\ must be at least as new as the MSVC that linked each file importing it
+(Microsoft: the runtime must be the same or later than the newest build tools in the app; onnxruntime
+built with 14.40+ crashes on an older msvcp140, std::mutex). The measure is rough: the PE header's
+linker version. MSVC's link.exe writes its own; lld-link writes 14.0 unless told otherwise, so a
+clang-built DLL's floor means nothing (GNU ld writes 2.x: the MinGW builds, OpenBLAS and protobuf's,
+don't import the VC++ runtime). And renamed copies (numpy's and pywhispercpp's msvcp140-<hash>.dll)
+aren't floored: pywhispercpp's whisper and ggml DLLs, linked by 14.44, run on its 14.40.33810 copy.
+That one is at the 14.40 std::mutex change, and --live loads them.
 
 --live (Windows; run by the bundle's own python.exe): then imports what the sidecar does and loads
 espeak-ng's DLL as phonemizer does, and checks the VC++ runtime this process loaded is the bundle's
@@ -37,8 +47,19 @@ import sys
 from pathlib import Path
 
 # The Visual C++ Redistributable's DLLs: never counted as System32's.
-VC_RUNTIME = re.compile(r"^(msvcp|vcruntime|vcomp|concrt|vccorlib|vcamp|mfc|mfcm)\d+[a-z0-9_]*\.dll$|^msvcr\d+\.dll$", re.I)
+# (ucrtbased: the debug UCRT, which the Windows SDK puts in the runner's System32.)
+VC_RUNTIME = re.compile(r"^(msvcp|vcruntime|vcomp|concrt|vccorlib|vcamp|mfc|mfcm)\d+[a-z0-9_]*\.dll$|^msvcr\d+\.dll$|^ucrtbased\.dll$", re.I)
 API_SET = re.compile(r"^(api|ext)-ms-", re.I)
+# What a clean Windows 10 1809+ (the installers' MinVersion) has in System32, by name: the bundle's
+# imports as of #113 (unins000.exe's too). The build machine's System32 also holds what Visual Studio and
+# the SDKs put there, so a new name stops the build until someone checks a clean Windows has it.
+CLEAN_SYSTEM32 = {
+    "advapi32.dll", "bcrypt.dll", "comctl32.dll", "comdlg32.dll", "crypt32.dll", "dbghelp.dll", "dwmapi.dll",
+    "dxgi.dll", "gdi32.dll", "imm32.dll", "iphlpapi.dll", "kernel32.dll", "mpr.dll", "msimg32.dll", "msvcrt.dll",
+    "ntdll.dll", "ole32.dll", "oleaut32.dll", "pdh.dll", "powrprof.dll", "propsys.dll", "psapi.dll", "rpcrt4.dll",
+    "setupapi.dll", "shcore.dll", "shell32.dll", "shlwapi.dll", "user32.dll", "uxtheme.dll", "version.dll",
+    "windowscodecs.dll", "winhttp.dll", "winmm.dll", "winspool.drv", "ws2_32.dll", "wtsapi32.dll",
+}
 
 
 def file_version(path):
@@ -106,9 +127,14 @@ def imports(path):
     return normal, delayed, linker
 
 
-def search(bundle, f):
-    """The bundle's folders the loader looks in for what `f` imports (the docstring's list)."""
-    dirs = [bundle / "python", f.parent]
+def search(bundle, f, delay=False):
+    """The bundle's folders the loader looks in for what `f` imports, in its order. A module Python loads
+    (LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | DEFAULT_DIRS): the importer's folder, python\\ (the application's),
+    then os.add_dll_directory's (site-packages\\<name>.libs\\). A delay-load (LoadLibraryExA(name, NULL, 0)):
+    python\\ only, before System32."""
+    if delay:
+        return [bundle / "python"]
+    dirs = [f.parent, bundle / "python"]
     site = bundle / "site-packages"
     rel = f.relative_to(site).parts if f.is_relative_to(site) else ()
     if len(rel) > 1:
@@ -134,12 +160,17 @@ def loaded():
 
 def live(bundle):
     """--live: what the sidecar loads, then whose VC++ runtime is in this process."""
-    import ctypes
     import importlib
-    for m in ("numpy", "onnxruntime", "sounddevice", "pywhispercpp.model", "kokoro_onnx"):
+    for m in ("numpy", "onnxruntime", "sounddevice", "pywhispercpp.model", "kokoro_onnx", "psutil",
+              "pycaw.pycaw", "winrt.windows.media.control"):
         importlib.import_module(m)
     import espeakng_loader
-    ctypes.CDLL(espeakng_loader.get_library_path())        # phonemizer loads it by path, as here
+    from phonemizer.backend.espeak.wrapper import EspeakWrapper
+    EspeakWrapper.set_library(espeakng_loader.get_library_path())
+    EspeakWrapper.set_data_path(espeakng_loader.get_data_path())
+    # phonemizer's own load, as kokoro's tokenizer makes it: a copy in %TEMP%, by path. From there
+    # msvcp140 comes from python\ (the application's folder) or what is loaded already.
+    print(f"  espeak-ng {'.'.join(map(str, EspeakWrapper().version))}, loaded as phonemizer does")
     inside = os.path.normcase(os.path.realpath(bundle)) + os.sep      # long names on both sides (no RUNNER~1)
     vc = sorted((p for p in loaded() if VC_RUNTIME.match(p.name)), key=lambda p: p.name.lower())
     for p in vc:
@@ -191,30 +222,36 @@ def main(argv):
             n += 1
             if API_SET.match(dll):
                 continue
-            found = next((d for d in search(bundle, f) if has(d, dll)), None)
-            if found is not None:
-                if VC_RUNTIME.match(dll):
-                    vc.setdefault(dll.lower(), set()).add(f.name)
-                    have = version(found, dll) if found == bundle / "python" else None
-                    if have and have[:2] < linker:
-                        missing.append(f"{f.relative_to(bundle)} -> {dll}: linked by MSVC {linker[0]}.{linker[1]}, but python\\{dll} is "
-                                       f"{'.'.join(map(str, have))}: the runtime must be at least as new")
-                continue
+            how = " (delay-loaded)" if delay else ""
+            found = next((d for d in search(bundle, f, delay) if has(d, dll)), None)
             if VC_RUNTIME.match(dll):
-                missing.append(f"{f.relative_to(bundle)} -> {dll}{' (delay-loaded)' if delay else ''}: the Visual C++ runtime, which a clean Windows doesn't have")
-            elif system32 is None:
-                system.add(dll.lower())
-            elif has(system32, dll):
-                system.add(dll.lower())
+                # By its own name, one copy per process: python\'s, never one beside a module, never System32's.
+                if found != bundle / "python":
+                    where = f"it would load {found.relative_to(bundle)}'s" if found else "python\\ has none"
+                    missing.append(f"{f.relative_to(bundle)} -> {dll}{how}: the Visual C++ runtime ({where}); it must be python\\'s")
+                    continue
+                vc.setdefault(dll.lower(), set()).add(f.name)
+                have = version(found, dll)
+                if have and have[:2] < linker:
+                    missing.append(f"{f.relative_to(bundle)} -> {dll}: linked by MSVC {linker[0]}.{linker[1]}, but python\\{dll} is "
+                                   f"{'.'.join(map(str, have))}: the runtime must be at least as new")
+                continue
+            if found is not None:
+                continue
+            if dll.lower() not in CLEAN_SYSTEM32:
+                missing.append(f"{f.relative_to(bundle)} -> {dll}{how}: not in the bundle, nor in CLEAN_SYSTEM32 "
+                               f"(check a clean Windows 10 1809 has it, then add it)")
+            elif system32 is not None and not has(system32, dll):
+                missing.append(f"{f.relative_to(bundle)} -> {dll}{how}: not in the bundle, nor in {system32}")
             else:
-                missing.append(f"{f.relative_to(bundle)} -> {dll}{' (delay-loaded)' if delay else ''}: not in the bundle or {system32}")
+                system.add(dll.lower())
 
     print(f"voice imports: {len(files)} DLLs/modules/exes, {n} imports")
     for dll in sorted(vc):
         v = version(bundle / "python", dll) if has(bundle / "python", dll) else None
         print(f"  {dll}{' ' + '.'.join(map(str, v)) if v else ''} (VC++ runtime, from the bundle): "
               f"{', '.join(sorted(vc[dll])[:6])}{' ...' if len(vc[dll]) > 6 else ''}")
-    print(f"  System32's{' (unchecked: not on Windows)' if system32 is None else ''}: {', '.join(sorted(system))}")
+    print(f"  System32's (CLEAN_SYSTEM32{'' if system32 else '; not on Windows, so not looked for'}): {', '.join(sorted(system))}")
     if missing:
         print("voice-imports: what the bundle imports that a clean Windows wouldn't find, or too old a runtime:", file=sys.stderr)
         for m in missing:

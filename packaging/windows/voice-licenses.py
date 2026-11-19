@@ -10,8 +10,9 @@ writes BUNDLE/licenses/:
   espeak-ng/, whisper.cpp/, portaudio/
                             the licence files of what three wheels carry inside them without one
                             (packaging/windows/voice-licenses/)
-  vc-runtime/LICENSE.txt    Microsoft's terms for the Visual C++ runtime voice-bundle.ps1 puts in
-                            python/ (VC_RUNTIME)
+  vc-runtime/LICENSE.txt    Microsoft's end-user terms for the Visual C++ runtime voice-bundle.ps1
+                            puts in python/: what the user's use of it is under. Our right to ship it
+                            is the Visual Studio licence's (VC_RUNTIME's comment).
 
 espeak-ng's DLL comes inside espeakng-loader's wheel, whisper.cpp's and ggml's DLLs inside
 pywhispercpp's, PortAudio's inside sounddevice's; none of the three has their licence text. All three
@@ -54,10 +55,14 @@ SONIC_SOURCE = f"sonic-{SONIC_COMMIT[:7]}.tar.gz"
 PORTAUDIO = "19.7.0"
 # The Visual C++ runtime voice-bundle.ps1 puts beside python.exe (onnxruntime's and espeak-ng's DLLs
 # import it by name; a clean Windows doesn't have it): from Visual Studio's VC\Redist\MSVC\<version>\
-# x64\Microsoft.VC14x.CRT, unmodified (Distributable Code), the embeddable's vcruntime140*.dll kept
-# when newer. Microsoft's terms for it, voice-licenses/vc-runtime/LICENSE.txt: the "Visual C++ v14
-# Redistributable and Runtime" licence (https://aka.ms/VCRedistLicense, EULA ID Cpp_v14_ENU.1033, last
-# updated October 1, 2025), as text. Written for the v14 runtime (14.x, Visual Studio 2017 to 2026).
+# x64\Microsoft.VC14x.CRT, unmodified, the embeddable's vcruntime140*.dll kept when newer. Our right to
+# ship it: the Visual Studio licence's Distributable Code (its Distributable List,
+# https://aka.ms/vs/18/redistribution, names VC\Redist), which requires end users to take terms that
+# protect it at least as much. Those terms, voice-licenses/vc-runtime/LICENSE.txt: Microsoft's end-user
+# licence for the runtime ("Visual C++ v14 Redistributable and Runtime", https://aka.ms/VCRedistLicense,
+# EULA ID Cpp_v14_ENU.1033, last updated October 1, 2025), as text. It grants use only and forbids
+# passing the runtime on (4(e), (f)): what the user's use is under, not our permission. Written for the
+# v14 runtime (14.x, Visual Studio 2017 to 2026).
 VC_RUNTIME = ["msvcp140.dll", "msvcp140_1.dll", "vcruntime140.dll", "vcruntime140_1.dll"]
 VC_RUNTIME_MAJOR = 14
 # The VC++ runtime's DLL names, and its debug builds (not redistributable).
@@ -252,12 +257,13 @@ def main(bundle):
         "                    Bill Cox's sonic is compiled into that DLL: Apache-2.0, licenses\\espeak-ng\\sonic-LICENSE.",
         f"  PortAudio {PORTAUDIO}  inside sounddevice (libportaudio64bit.dll): licenses\\portaudio\\LICENSE.txt.",
         "  whisper.cpp       inside pywhispercpp (whisper-*.dll, ggml-*.dll): licenses\\whisper.cpp\\LICENSE.",
-        "  Microsoft's Visual C++ runtime (python\\msvcp140*.dll, python\\vcruntime140*.dll; msvcp140-*.dll, vcomp140-*.dll",
-        "                    from numpy's and pywhispercpp's wheels): Microsoft Distributable Code, redistributed unmodified",
-        "                    under Microsoft's Visual Studio licence terms. Microsoft's terms for it (the Visual C++ v14",
-        "                    Redistributable and Runtime's) are in licenses\\vc-runtime\\LICENSE.txt. Don't alter its",
-        "                    notices, use Microsoft's trademarks to suggest endorsement, run it off Microsoft platforms, or",
-        "                    ship it in malicious programs.",
+        "  Microsoft's Visual C++ runtime (python\\msvcp140.dll, msvcp140_1.dll, vcruntime140.dll, vcruntime140_1.dll;",
+        "                    msvcp140-*.dll, vcomp140-*.dll from numpy's and pywhispercpp's wheels): Microsoft's, not",
+        "                    capri-syn's, and not under its LICENSE. Distributable Code, redistributed unmodified under the",
+        "                    Visual Studio licence (its Distributable List, https://aka.ms/vs/18/redistribution: VC\\Redist).",
+        "                    Your use of it is under Microsoft's terms for the runtime, licenses\\vc-runtime\\LICENSE.txt:",
+        "                    installing or using this bundle accepts them. Pass it on only inside this bundle, unmodified",
+        "                    (never on its own: those terms, 4(e) and (f)), with Microsoft's notices left as they are.",
     ] + textwrap.wrap("In python\\: " + ", ".join(f"{n} {v}" for n, v in vc.items()) + ".", 100,
                       initial_indent=" " * 20, subsequent_indent=" " * 20) + [
         "",
