@@ -778,6 +778,7 @@ class Tts:
         self.flow = Flow.load(f'{MODELS}/{model}', self.k, so)
         self.rubberband = shutil.which('rubberband')
         self._styles = {}
+        self._shift_off = False      # logged once: no flow graph and no rubberband, so no @ shift
         log(f'tts kokoro loaded in {now_ms() - t:.0f} ms ({model}, CPU; flow {"on" if self.flow else "off"}, '
             f'pitch {"rubberband" if self.rubberband else "in-model"})')
 
@@ -811,6 +812,13 @@ class Tts:
         preset = FLOW_PRESETS.get(flow) if self.flow else None
         shift = v['shift'] + (preset or {}).get('register', 0.0) * register(text, gap_before > 0)
         in_model = 0.0 if self.rubberband else shift
+        if in_model and not self.flow:
+            # The in-model shift needs the patched graph's f0 input. Without it (Flow.load said no)
+            # and without rubberband she speaks plain Kokoro, at its own pitch (docs/VOICE.md).
+            if not self._shift_off:
+                log(f'tts: no flow graph and no rubberband: the @{shift:+.2f} shift is off, plain Kokoro')
+                self._shift_off = True
+            in_model = 0.0
         if preset is None and not in_model:
             a, sr = self.k.create(strip_markup(said), voice=st, speed=speed, lang=lang)
             a = np.asarray(a, np.float32)
@@ -3302,6 +3310,31 @@ def selftest_duck():
     assert abs(60 * np.log10(DUCK_RAW) + 18.06) < 0.01, 'x0.5 raw is -18 dB (cubic)'
 
 
+def selftest_plain():
+    """No flow graph (Flow.load said no) and no rubberband (Windows), with an @ shift: plain Kokoro at
+    its own pitch, once logged; never the flow pass on None. A fake Kokoro: no model needed."""
+    calls = []
+    class FakeKokoro:
+        def get_voice_style(self, name):
+            return np.zeros((510, 1, 256), np.float32)
+        def create(self, text, voice, speed, lang):
+            calls.append((text, speed, lang))
+            return np.full(2400, 0.1, np.float32), TTS_RATE
+    t = Tts.__new__(Tts)
+    t.k, t.flow, t.rubberband, t._styles, t._shift_off = FakeKokoro(), None, None, {}, False
+    global log
+    logged, log0 = [], log
+    log = lambda *a: logged.append(' '.join(map(str, a)))
+    try:
+        for i in range(2):
+            a = t("I'm *not* signing that.", VOICE, SPEED, FLOW, 0.0, PACE)
+            assert isinstance(a, np.ndarray) and len(a) == 2400, a
+    finally:
+        log = log0
+    assert calls == [("I'm not signing that.", SPEED, 'en-us')] * 2, calls
+    assert len([m for m in logged if 'shift is off' in m]) == 1, logged
+
+
 def selftest():
     """Checks that need no audio device: the voice string, the markup, the gaps; with the models
     present, that the patched graph with neutral inputs speaks exactly like the stock one."""
@@ -3330,6 +3363,8 @@ def selftest():
     assert 0.32 <= g <= 0.54 and g == sentence_gap('Fine.', 'full'), 'gaps: in range and the same text gives the same gap'
     assert 0.40 <= sentence_gap('Really?', 'full') <= 0.62
     print('selftest: parsing ok')
+    selftest_plain()
+    print('selftest: plain Kokoro fallback ok (no flow graph, no rubberband, an @ shift)')
     selftest_gate()
     print('selftest: unprompted gate ok (call, lock, budget, cap, too late)')
     selftest_junk()

@@ -1233,6 +1233,17 @@ mod tests {
         assert!(Settings::parse("[mirror]\nflip = true\n").is_err());
     }
 
+    /// tools/capri-voice speaks with its own defaults when nothing is sent (`--render`, a bare start):
+    /// they are this file's, line for line, so the two can't drift apart.
+    #[test]
+    fn the_sidecar_has_the_same_default_voice() {
+        let py = include_str!("../tools/capri-voice");
+        let d = VoiceSettings::default();
+        let has = |want: String| py.lines().any(|l| l.trim_end() == want);
+        assert!(has(format!("VOICE = '{VOICE}'")), "tools/capri-voice's VOICE is settings::VOICE");
+        assert!(has(format!("SPEED, FLOW, PACE = {SPEED}, '{}', '{}'", d.flow, d.pace)), "and its SPEED, FLOW, PACE");
+    }
+
     #[test]
     fn display_composited_auto_on_off() {
         assert_eq!(Settings::parse("").unwrap().display.composited, None);
