@@ -74,7 +74,8 @@ function Wait-Page($W, [string]$Caption, [int]$Secs = 120) {
     $t0 = Get-Date
     while (((Get-Date) - $t0).TotalSeconds -lt $Secs) {
         $t = Get-WindowText $W
-        if ($t -match $Caption) { Start-Sleep -Milliseconds 400; return $t }
+        # The caption changes first; the page's own controls are in the tree a moment later.
+        if ($t -match $Caption) { Start-Sleep -Milliseconds 400; return Get-WindowText $W }
         Start-Sleep -Milliseconds 300
     }
     throw "the wizard never showed '$Caption' (it shows: $((Get-WindowText $W) -join ' | '))"
