@@ -29,7 +29,7 @@ Her files (`platform::base_dir`; `$XDG_*_HOME` still wins, as on Linux):
 `capri-syn-setup-<version>-<build>.exe` (`packaging/windows/synaps-avatar.iss`, Inno Setup 6), released
 as `capri-syn-setup-x86_64.exe`. CI's `windows-installer` job builds it on every PR and push to main
 and uploads it as an artifact (`capri-syn-setup-<sha>`, kept 14 days). Locally, on a machine with
-Rust, Inno Setup and ImageMagick: `.\packaging\windows\build.ps1`. In Apps & features she is
+Rust and Inno Setup: `.\packaging\windows\build.ps1`. In Apps & features she is
 `capri-syn`; the AppId is the one every `synaps-avatar` install had, so an older install upgrades in
 place. Her binary and folders keep the name `synaps-avatar`.
 
@@ -72,7 +72,8 @@ persona; no art).
   `--check` from a terminal therefore prints nothing there: read the log, or use a cargo build.
 - **Her AUMID** `Synaps.Avatar`: registered under `HKCU\Software\Classes\AppUserModelId` with
   `DisplayName` and `IconUri`, and set on the Start-menu shortcut, so toasts show under her name
-  and icon. The icon is a mark in her colours (her red bolt on black), drawn at build time: no art.
+  and icon. The icon is capri-syn's, `assets/icon/capri-syn.ico` (256 to 16 px) and its 256 px PNG,
+  used as they are (`assets/icon/NOTICE`): the setup's own icon, Apps & features, the shortcut, toasts.
 - **Autostart** (a task, checked): the `HKCU\…\Run` value.
 - **Uninstall** (Settings → Apps, or `unins000.exe /VERYSILENT`): stops her, then removes her exe,
   the steps, the shortcut, the AUMID key, her Run value and the daemon's, the pack the steps made,
