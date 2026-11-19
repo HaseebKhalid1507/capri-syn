@@ -13,7 +13,9 @@
   she sits on or hides behind. It isn't a fullscreen app either, nor the window he's in when it
   has the foreground. `TabTip.exe` is also counted with the shell's processes.
 - A window that isn't his and covers a whole monitor goes in her log once (its class, exe, style
-  and rect, and whether it was left out), so the next overlay like it shows there.
+  and rect, and whether it was left out), and once more if it turns click-through or back, so the
+  next overlay like it shows there. The shell's own hosts (Start, Search, Task View, Alt+Tab) are
+  said only when click-through: they cover the monitor each time they're up.
 - Tests: a Windows unit test puts the canvas, as found, over a window of his (CI's desktop), and
   the contract has an `overlay` scenario (the fake and the Windows rig make one).
 

@@ -849,9 +849,9 @@ pub struct Win32 {
     asked_at: Mutex<Vec<(Role, [f32; 4])>>,
     /// The thread that resizes her GPUI windows (`place_later`).
     later: Mutex<Option<Placer>>,
-    /// Windows not his found covering a whole monitor, by id: each is said in her log once
-    /// (`note_cover`).
-    covers_seen: Mutex<HashSet<WinId>>,
+    /// Windows not his found covering a whole monitor, by id and whether he clicks through it:
+    /// each is said in her log once, and once more if that changes (`note_cover`).
+    covers_seen: Mutex<HashSet<(WinId, bool)>>,
 }
 
 thread_local! {
@@ -952,9 +952,10 @@ impl Win32 {
     }
 
     /// `h`, not his window (a tool window, one never activated, or one he clicks through), covers
-    /// a whole monitor (`r`, screen px): said once per window, with what she makes of it. Kept, it
-    /// hides every window under it from her (TabTip's handwriting canvas did, before
-    /// `see_through`): the next one shows in her log.
+    /// a whole monitor (`r`, screen px): said once per window and `through` (a window that turns
+    /// click-through, or back, is said again), with what she makes of it. Kept, it hides every
+    /// window under it from her (TabTip's handwriting canvas did, before `see_through`): the next
+    /// one shows in her log.
     fn note_cover(&self, h: HWND, r: &RECT, through: bool) {
         {
             let Ok(mut seen) = self.covers_seen.lock() else { return };
@@ -962,7 +963,7 @@ impl Win32 {
             if seen.len() >= 256 {
                 seen.clear();
             }
-            if !seen.insert(id(h)) {
+            if !seen.insert((id(h), through)) {
                 return;
             }
         }
@@ -1259,9 +1260,12 @@ impl Desktop for Win32 {
     /// Showing top-level windows bottom → top, hers, the desktop's and those he clicks through
     /// (`see_through`: overlays) left out. Managed: an app's window (no tool windows: menus,
     /// tooltips, the taskbar, pop-up toasts). One not his that covers a whole monitor is said in
-    /// her log once (`note_cover`).
+    /// her log once (`note_cover`), unless it's the shell's own UI and drawn: Start's, Search's,
+    /// Task View's and Alt+Tab's hosts cover their monitor while they're up, and may be new
+    /// windows each time (a line per Alt+Tab). A click-through one is said whoever's it is.
     fn windows(&self) -> Vec<Win> {
-        // Read once a call, and only if a window not his is there to check.
+        // Read at most once a call, at the first window that isn't an app's (the taskbar is
+        // one, so in practice every call).
         let mons: std::cell::OnceCell<Vec<RECT>> = std::cell::OnceCell::new();
         let mut out: Vec<Win> = toplevels()
             .into_iter()
@@ -1275,7 +1279,9 @@ impl Desktop for Win32 {
                 let ex = ex_style(h);
                 let through = see_through(h, ex);
                 let managed = !through && ex & WS_EX_TOOLWINDOW.0 == 0 && ex & WS_EX_NOACTIVATE.0 == 0;
-                if !managed && mons.get_or_init(monitor_rects).iter().any(|m| spans(&fr, m)) {
+                // The shell's UI is asked last: its process is read only for a window over a
+                // whole monitor.
+                if !managed && mons.get_or_init(monitor_rects).iter().any(|m| spans(&fr, m)) && (through || !is_shell_ui(h)) {
                     self.note_cover(h, &fr, through);
                 }
                 (!through).then_some(Win { rect: r, managed })
@@ -2411,7 +2417,10 @@ mod tests {
         let (listed, seat, open, _, _) = read();
         assert!(listed && seat, "a drawn canvas left out ({listed}), or his window no seat ({seat})");
         assert!(open.is_empty(), "his top edge open under a drawn canvas ({open:?}): the check sees no cover");
-        assert!(x.covers_seen.lock().unwrap().contains(&id(canvas)), "a window over a whole monitor not said in her log");
+        // Said once per state: read twice, one entry.
+        read();
+        let said = || x.covers_seen.lock().unwrap().iter().filter(|(w, _)| *w == id(canvas)).map(|&(_, t)| t).collect::<Vec<bool>>();
+        assert_eq!(said(), [false], "a drawn window over a whole monitor not said once in her log");
         // The canvas's own style: click-through.
         set_ex(canvas, canvas_ex);
         let lt = WS_EX_LAYERED.0 | WS_EX_TRANSPARENT.0;
@@ -2423,12 +2432,18 @@ mod tests {
         assert_eq!(open, [(r.x, r.right())], "his top edge isn't all open under the click-through canvas");
         assert!(!seats.is_empty(), "no seat on his window: {r:?}");
         assert!(!x.is_fullscreen(id(canvas)), "the canvas taken for a fullscreen app");
+        // Turned click-through: said once more (and only once).
+        read();
+        let mut both = said();
+        both.sort_unstable();
+        assert_eq!(both, [false, true], "the canvas turned click-through not said once more");
         // Not click-through, at alpha 0: not drawn, clicked through.
         set_ex(canvas, canvas_ex & !WS_EX_TRANSPARENT.0);
         unsafe { SetLayeredWindowAttributes(canvas, COLORREF(0), 0, LWA_ALPHA).unwrap() };
         pump();
         let (listed, _, open, _, r) = read();
         assert!(!listed, "a canvas at alpha 0 is in the stack");
+        assert_eq!(said().len(), 2, "the canvas still click-through, said again");
         assert_eq!(open, [(r.x, r.right())], "his top edge isn't all open under a canvas at alpha 0");
         // Not a tool window: drawn, a fullscreen app; click-through, none, nor his window.
         let sheet = make(WS_EX_TOPMOST.0 | WS_EX_LAYERED.0, WS_POPUP, (m.left, m.top, mw, mh));
