@@ -178,14 +178,18 @@ desktop to try it on.
 takes, the fake sidecar (`tools/fakevoice.py`, on the real link), then runs `tools/shots/scenes.ps1`
 at 1920x1080 and 100%, and a few takes again at 150%. She is driven through her control socket;
 keys and clicks only where it can't (the Line's keyboard, a menu row). Each shot is cropped to her
-windows, with her `state` beside it; the lot is an artifact kept 3 days. No GPU there: GPUI draws
-with WARP, fine for layout, not for colour or timing.
+windows, with her `state` beside it; the lot is an artifact kept 3 days (public meanwhile, like
+the run). No GPU there: GPUI draws with WARP, fine for layout, not for colour or timing. The job
+fails on any problem in a take (she never loaded or exited, OFFLINE, a dialog of hers, a shot
+missed), and with no shots at all; the shots it did get are uploaded anyway.
 
 `tools/shoot-win.ps1` is the reusable part (dot-source it): the display pinned
 (`Set-ShotDisplay -Width 1920 -Height 1080 -Scale 150`, live, no sign-out), a process's or a
 title's windows shot cropped (`Save-WindowShot -Path x.png -ProcessId $p.Id` or `-Title 'Setup*'`),
 and SendInput keys and clicks (`Send-ShotKeys 'ctrl+comma'`, `Send-ShotClick`). Never the whole
-desktop.
+desktop. `Set-ShotDisplay` and `Clear-ShotDesktop` change the machine (scaling, wallpaper, every
+dialog closed, a cover window left up), so they refuse to run off a GitHub-hosted runner
+(`RUNNER_ENVIRONMENT`) unless `SHOOT_WIN_ANYWAY` is set.
 
 ## The VM day (2026-11-18)
 

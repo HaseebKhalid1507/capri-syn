@@ -2,7 +2,8 @@
 # for, her pack assembled from CapriCore + lachy (never mochi: its art may never be shown in public),
 # a fake Synaps daemon and voice sidecar (FAKE: no model, no audio), and the scene sets, shot cropped
 # to her windows at 1920x1080 and 100%, then a few takes again at 150%. GPU-less: GPUI draws with
-# WARP, fine for layout. The shots are an artifact kept 3 days, never published.
+# WARP, fine for layout. The shots are an artifact kept 3 days, and public meanwhile (anyone who can
+# see this repo's runs can download it): only the fakes' canned words, never anything private.
 #
 # Run it: Actions → shots → Run workflow (a ref: a branch, tag or sha; the sets), or put the
 # `shots` label on a PR (its head; `shots:settings` or `shots:header` for one set only).
@@ -29,8 +30,16 @@ on:
 permissions:
   contents: read
 
+# One shoot per PR (or ref) at a time: a new push or `shots` label cancels the one running. Any other
+# event (another label, a push to an unlabelled PR) gets a group of its own, so it never cancels a
+# shoot, and its job is skipped.
 concurrency:
-  group: shots-${{ github.event.pull_request.number || inputs.ref }}
+  group: >-
+    shots-${{ github.event.pull_request.number || inputs.ref }}-${{
+      (github.event_name == 'workflow_dispatch' ||
+       (contains(github.event.pull_request.labels.*.name, 'shots') &&
+        (github.event.action != 'labeled' || startsWith(github.event.label.name, 'shots'))))
+      && 'shoot' || github.run_id }}
   cancel-in-progress: true
 
 jobs:
@@ -53,12 +62,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: rig
+          persist-credentials: false
 
       - name: Her, at the ref to shoot
         uses: actions/checkout@v4
         with:
           ref: ${{ env.SHOT_REF }}
           path: app
+          persist-credentials: false
 
       - name: What to shoot
         id: what
@@ -96,6 +107,8 @@ jobs:
           workspaces: app
           key: shots
           cache-on-failure: true
+          # Saved from main only (a PR's build can't poison what main's shoots start from).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # A console build: her log goes to the take's log file.
       - name: Build (release)
@@ -122,6 +135,7 @@ jobs:
           if (Test-Path "$env:RUNNER_TEMP\pack\anim\mochi") { throw 'mochi art in the pack' }
 
       - name: Her pack checks out
+        id: check
         shell: pwsh
         run: |
           & app/target/release/synaps-avatar.exe --pack "$env:RUNNER_TEMP\pack" --check
@@ -142,7 +156,7 @@ jobs:
 
       # Haseeb's laptop panel is 150%: non-integer HiDPI.
       - name: Shots at 150%
-        if: ${{ !cancelled() && steps.what.outputs.hidpi != '' }}
+        if: ${{ !cancelled() && steps.check.outcome == 'success' && steps.what.outputs.hidpi != '' }}
         shell: pwsh
         env:
           SETS: ${{ steps.what.outputs.sets }}

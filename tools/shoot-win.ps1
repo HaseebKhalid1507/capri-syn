@@ -19,6 +19,10 @@
   Every rect is in physical pixels (this thread is made per-monitor DPI aware), so shots and clicks
   agree at any scaling. No param block: dot-sourcing it sets nothing in the caller's scope but its
   functions.
+
+  Set-ShotDisplay and Clear-ShotDesktop (and -Display, -Cover) change the machine: its mode and
+  scaling, the wallpaper gone, every dialog closed, every window minimized, a cover window left
+  running. They refuse to run off a GitHub-hosted runner unless SHOOT_WIN_ANYWAY is set.
 #>
 
 Add-Type -AssemblyName System.Drawing
@@ -94,10 +98,10 @@ public static class Native {
         return hid;
     }
     /// Close every visible dialog box (class #32770) but ours: what a runner pops up (a scaling
-    /// change's notice) sits over the shots otherwise. Their titles.
-    public static List<string> CloseDialogs() {
+    /// change's notice) sits over the shots otherwise. Each one's process and title.
+    public static List<Win> CloseDialogs() {
         var mine = (uint)System.Diagnostics.Process.GetCurrentProcess().Id;
-        var shut = new List<string>();
+        var shut = new List<Win>();
         EnumWindows((h, l) => {
             if (!IsWindowVisible(h)) return true;
             var c = new StringBuilder(64); GetClassName(h, c, 64);
@@ -106,7 +110,7 @@ public static class Native {
             if (pid == mine) return true;
             var t = new StringBuilder(256); GetWindowText(h, t, 256);
             PostMessage(h, 0x0010, IntPtr.Zero, IntPtr.Zero);
-            shut.Add(t.ToString());
+            shut.Add(new Win { Handle = h.ToInt64(), Pid = pid, Title = t.ToString() });
             return true;
         }, IntPtr.Zero);
         return shut;
@@ -333,10 +337,18 @@ public static class Cover {
 
 # ---- the display -------------------------------------------------------------------------------
 
+<# Throws off a GitHub-hosted runner (SHOOT_WIN_ANYWAY set: anywhere): what calls it changes the
+   machine for good, not a desk to do that to by accident. #>
+function Assert-ShotRunner([string]$What) {
+    if ($env:RUNNER_ENVIRONMENT -eq 'github-hosted' -or $env:SHOOT_WIN_ANYWAY) { return }
+    throw "${What}: changes this machine (display, wallpaper, dialogs, windows); only on a GitHub-hosted runner, or set SHOOT_WIN_ANYWAY=1"
+}
+
 <# The display pinned: its mode (w x h) and its scaling (100, 125, 150 ...), checked after. Says what
    it found and what it set; throws if it can't. #>
 function Set-ShotDisplay {
     param([int]$Width = 1920, [int]$Height = 1080, [int]$Scale = 100)
+    Assert-ShotRunner 'Set-ShotDisplay'
     Write-Host "display: modes $(([ShootWin.Native]::Modes()) -join ', ')"
     $r = [ShootWin.Native]::SetMode($Width, $Height)
     if ($r -ne 0) {
@@ -381,8 +393,9 @@ function Get-ShotWindows {
    it). #>
 function Clear-ShotDesktop {
     param([int]$Color = 0x202024)
+    Assert-ShotRunner 'Clear-ShotDesktop'
     (New-Object -ComObject Shell.Application).MinimizeAll()
-    foreach ($t in [ShootWin.Native]::CloseDialogs()) { Write-Host "desktop: closed a dialog: '$t'" }
+    foreach ($d in [ShootWin.Native]::CloseDialogs()) { Write-Host "desktop: closed a dialog: '$($d.Title)' (pid $($d.Pid))" }
     if (-not [ShootWin.Native]::Backdrop($Color)) { Write-Warning 'desktop: the backdrop stayed' }
     if (-not [ShootWin.Native]::HideIcons()) { Write-Warning 'desktop: its icons stayed' }
     # Over all that, a flat window of that colour (the desktop's watermark is drawn whatever its
@@ -490,6 +503,7 @@ if ($args.Count -gt 0) {
         Set-ShotDisplay -Width ([int]$Matches[1]) -Height ([int]$Matches[2]) -Scale $sc
     }
     if ($cli.cover) {
+        Assert-ShotRunner '-Cover'
         [ShootWin.Cover]::Run([int]$cli.cover)
     }
     if ($cli.shot) {

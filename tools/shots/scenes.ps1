@@ -143,7 +143,10 @@ function Start-Take {
     $argv = @('--pack', (Q $Pack), '--socket', (Q (Join-Path $t 'fake\d.sock'))) + @($HerArgs | Where-Object { $_ })
     $script:Her = Start-Process $Exe -ArgumentList $argv -NoNewWindow -PassThru `
         -RedirectStandardOutput "$log-her.log" -RedirectStandardError "$log-her.err"
-    $up = Wait-Until { (State).loaded -eq $true } 120 "her frames ($script:Take)"
+    $null = $script:Her.Handle  # held, so her exit code is still there after she's gone
+    # Her frames in, or her gone (a crash at start: said now, not after the 120 s).
+    $up = Wait-Until { $script:Her.HasExited -or (State).loaded -eq $true } 120 "her frames ($script:Take)"
+    if ($script:Her.HasExited) { throw "$script:Take: she exited at start (code $($script:Her.ExitCode); see $log-her.err)" }
     if (-not $up) { throw "$script:Take: she never loaded (see $log-her.err)" }
     $live = Wait-Until { (State).session.live -eq $true } 30 "her session ($script:Take)"
     if (-not $live) { $script:Fails.Add("$script:Take: OFFLINE (the fake daemon never answered)") }
@@ -168,10 +171,19 @@ function Stop-Take {
     Start-Sleep -Milliseconds 500
 }
 
+<# Dialogs closed (the runner's, and hers: a failure, said in `fails`). #>
+function Close-Dialogs([string]$Where) {
+    foreach ($d in [ShootWin.Native]::CloseDialogs()) {
+        Write-Host "desktop: closed a dialog: '$($d.Title)' (pid $($d.Pid))"
+        if ($script:Her -and $d.Pid -eq $script:Her.Id) { $script:Fails.Add("${Where}: her dialog '$($d.Title)' (closed)") }
+    }
+}
+
 <# A step's shot: her windows, cropped; her `state` beside it. #>
 function Shot([string]$Step, [string]$Note = '') {
-    # A notice the runner popped up meanwhile (the scaling change's) goes before it is in one.
-    foreach ($t in [ShootWin.Native]::CloseDialogs()) { Write-Host "desktop: closed a dialog: '$t'" }
+    # A notice the runner popped up meanwhile (the scaling change's) goes before it is in one. One
+    # of hers (an error box) is a failure, closed or not.
+    Close-Dialogs "$script:Take/$Step"
     Start-Sleep -Milliseconds 400
     $png = Join-Path $script:TakeOut "$Step.png"
     $rect = $null
@@ -406,3 +418,6 @@ foreach ($set in $Sets) {
     ConvertTo-Json -Depth 8 | Set-Content -Path (Join-Path $Out 'index.json') -Encoding utf8NoBOM
 Write-Host "$($script:Index.Count) shots, $($script:Fails.Count) problem(s)"
 $script:Fails | ForEach-Object { Write-Warning $_ }
+# The step fails with any problem (the index and the shots are still kept: the upload runs anyway).
+if ($script:Index.Count -eq 0) { throw 'no shots at all' }
+if ($script:Fails.Count) { exit 1 }
