@@ -1,0 +1,21 @@
+name: Idea
+description: Something she should do, or do differently.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: The idea
+      description: What should she do? Describe the moment you'd want it.
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why
+      description: What's missing or annoying today?
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Sketches, links, how other desktop companions do it.

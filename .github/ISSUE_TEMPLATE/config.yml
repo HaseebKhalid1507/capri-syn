@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and ideas to talk through
+    url: https://github.com/HaseebKhalid1507/capri-syn/discussions
+    about: Ask, share your setup, or float an idea before opening an issue.
+  - name: Security problem
+    url: https://github.com/HaseebKhalid1507/capri-syn/security/advisories/new
+    about: Report it privately. Please don't open a public issue.
+  - name: Something in Synaps (her brain's runtime)
+    url: https://github.com/HaseebKhalid1507/SynapsCLI/issues
+    about: Problems with the agent runtime itself belong there.

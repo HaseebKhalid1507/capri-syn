@@ -1,0 +1,76 @@
+name: Bug report
+description: Something about Capri is broken or behaves wrong.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! Before you post, please remove anything private (names, paths, tokens) from logs and screenshots.
+        Security problems go through [private reporting](https://github.com/HaseebKhalid1507/capri-syn/security/advisories/new), not here.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what she did instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Start her with …
+        2. Drag her onto …
+        3. …
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: "`synaps-avatar --version` (Windows: the version in her right-click menu or Settings)"
+      placeholder: "1.0.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Desktop
+      options:
+        - Windows 11
+        - Windows 10 (untested)
+        - Linux, X11 (i3, bspwm, …)
+        - Linux, Hyprland
+        - Linux, GNOME (Wayland, through XWayland)
+        - Linux, KDE (Wayland, through XWayland)
+        - Linux, other
+    validations:
+      required: true
+  - type: input
+    id: details
+    attributes:
+      label: Distro / build, monitors, scaling
+      placeholder: "Ubuntu 24.04, two monitors, 100% + 150%"
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      multiple: true
+      options:
+        - Install / uninstall
+        - Her look, moves or perching
+        - The Line (chat) or her brain
+        - Voice / Hey Capri
+        - Settings
+        - Tray / menus
+        - Something else
+  - type: textarea
+    id: log
+    attributes:
+      label: Her log
+      description: |
+        Linux: `~/.local/state/synaps-avatar/launch.log` · Windows: `%LOCALAPPDATA%\synaps-avatar\synaps-avatar.log`
+        The last ~50 lines around the problem are usually enough.
+      render: text
+  - type: textarea
+    id: extra
+    attributes:
+      label: Screenshots or anything else
