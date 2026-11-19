@@ -10,7 +10,8 @@
   says it was done, and after that the setting is his: hide her and she stays hidden. An entry that
   already has `IsPromoted` is left as it is. Windows 10 has no such key: nothing is done there. Her log
   says which: `tray: shown on the taskbar (first run)`, `tray: left as he set it` or
-  `tray: no NotifyIconSettings entry yet`. The uninstaller removes the marker.
+  `tray: no NotifyIconSettings entry yet`. Later starts read her entry and say what `IsPromoted` is
+  now, writing nothing. The uninstaller removes the marker.
 
 ## 1.0.0 (2026-11-19)
 

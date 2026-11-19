@@ -920,17 +920,21 @@ function Show-TrayIcon {
     $null = Wait-Until { (& $keys).Count -gt 0 } 20 'her NotifyIconSettings key'
     $g = Get-HerTrayGuid
     $mine = { @(& $keys | Where-Object { $kg = Get-KeyGuid $_; (-not $kg) -or ($kg -eq $g) } | Where-Object { $_.GetValue('IsPromoted') -eq 1 }) }
-    if (Wait-Until { (& $mine).Count -gt 0 } 20 'her own IsPromoted = 1') {
-        Write-Host "  she promoted herself: NotifyIconSettings\$((& $mine)[0].PSChildName)"
+    $herself = Wait-Until { (& $mine).Count -gt 0 } 20 'her own IsPromoted = 1'
+    if ($herself) {
+        Write-Host "  she promoted herself: NotifyIconSettings\$((& $mine)[0].PSChildName) (nothing set from here)"
     } else {
+        # She didn't: the key is set from here, so the take goes on (and the failure is said).
         $script:Fails.Add("${script:Take}: she didn't promote her own icon (no IsPromoted = 1 in her NotifyIconSettings key after 20 s; set from here)")
         foreach ($k in & $keys) { Write-Host "    key $($k.PSChildName): $($k.GetValue('ExecutablePath')) IconGuid=$($k.GetValue('IconGuid')) UID=$($k.GetValue('UID')) IsPromoted=$($k.GetValue('IsPromoted'))" }
-    }
-    foreach ($k in & $keys) {
-        Set-ItemProperty -Path $k.PSPath -Name IsPromoted -Value 1 -Type DWord
-        Write-Host "  promoted: NotifyIconSettings\$($k.PSChildName) ($($k.GetValue('InitialTooltip')))"
+        foreach ($k in & $keys) {
+            Set-ItemProperty -Path $k.PSPath -Name IsPromoted -Value 1 -Type DWord
+            Write-Host "  promoted from here: NotifyIconSettings\$($k.PSChildName) ($($k.GetValue('InitialTooltip')))"
+        }
     }
     if (-not (Wait-Until { Find-TrayButton } 8 'her icon on the taskbar, promoted live')) {
+        # Her write alone didn't bring the icon out in 8 s: a failure, and Explorer started again so the take goes on.
+        if ($herself) { $script:Fails.Add("${script:Take}: she set IsPromoted = 1 on her own icon and it wasn't on the taskbar 8 s later (Explorer started again from here)") }
         Restart-ShotExplorer
         $null = Wait-Until { Find-TrayButton } 30 'her icon on the taskbar, after Explorer'
     }

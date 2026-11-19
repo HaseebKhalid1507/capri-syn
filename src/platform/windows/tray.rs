@@ -1091,9 +1091,12 @@ mod tests {
 
     /// Her icon out of the overflow, on the runner's own tray: the icon in, her NotifyIconSettings subkey
     /// found (Explorer writes it a moment after the add), `IsPromoted` written once and read back, and
-    /// left alone the second time (the marker). A machine with no such key (not Windows 11) or no subkey
-    /// of hers in ten seconds says so on the log and passes (`shots:tray` is the check there: it fails
-    /// the take if she doesn't promote herself). CI only, as above: it writes the shell's own settings.
+    /// left alone the second time (the marker: her subkey read, nothing written). A machine with no such
+    /// key (not Windows 11) says so on the log and passes. So does one where Explorer wrote no subkey of
+    /// this exe in ten seconds (`shots:tray` is the check there: it fails the take if she doesn't promote
+    /// herself), but not one where a subkey of this exe's name and this icon's GUID is there and her match
+    /// found none: that's a match that's wrong, not a runner with nothing to promote. CI only, as above:
+    /// it writes the shell's own settings.
     #[test]
     fn her_icon_is_promoted_once_it_is_in() {
         use super::super::promote::{self, Outcome};
@@ -1118,14 +1121,23 @@ mod tests {
             Outcome::Shown => {
                 assert_eq!(read, Some(1), "IsPromoted isn't a 1 in her subkey");
                 assert!(marker.is_file(), "no marker");
-                assert_eq!(promote::run(g, &marker), Some(Outcome::LeftAsSet), "once only");
+                let again = promote::run(g, &marker);
+                elog!("tray test: promote again: {again:?}");
+                assert!(matches!(again, Some(Outcome::Marked { set: true, .. })), "once only: {again:?}");
             }
             // Explorer had set it already for this exe and icon: his, left as it is.
             Outcome::LeftAsSet => assert!(marker.is_file()),
-            Outcome::NoKey | Outcome::NoEntry => {
-                elog!("tray test: promote: nothing to promote here ({first:?})");
+            Outcome::NoKey => {
+                elog!("tray test: promote: no NotifyIconSettings key here");
                 assert!(!marker.exists(), "a marker with nothing done");
             }
+            Outcome::NoEntry => {
+                let like = promote::lookalikes(g);
+                assert!(like.is_empty(), "the shell has a subkey of this exe and this icon's GUID and the match found none: {like:?}");
+                elog!("tray test: promote: no subkey of this exe in ten seconds");
+                assert!(!marker.exists(), "a marker with nothing done");
+            }
+            Outcome::Marked { .. } => panic!("a marker in a folder made for this test: {first:?}"),
             Outcome::Failed(e) => panic!("her subkey wouldn't take IsPromoted (error {e})"),
         }
         t.remove();
