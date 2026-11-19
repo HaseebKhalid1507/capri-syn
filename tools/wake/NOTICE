@@ -1,0 +1,18 @@
+tools/wake/hey-capri-v1.npz: capri-syn's "hey capri" wake-word head (16 openWakeWord embeddings of
+96 -> 64 -> 1, numpy; its manifest is inside the file).
+
+NOT covered by capri-syn's MIT License. It is distributed under the Creative Commons
+Attribution-NonCommercial-ShareAlike 4.0 International licence (CC BY-NC-SA 4.0):
+https://creativecommons.org/licenses/by-nc-sa/4.0/
+
+It was trained on features from openWakeWord v0.5.1's front end (melspectrogram.onnx and
+embedding_model.onnx), by David Scripka, https://github.com/dscripka/openWakeWord, whose README puts
+its released models under CC BY-NC-SA 4.0. Those two models are not in this repository:
+tools/capri-voice-setup (Linux) and packaging/windows/voice-models.ps1 (Windows) fetch them,
+sha256-pinned.
+
+Training data. Positives: stock TTS voices only (Kokoro v1.0 voice packs and blends, espeak-ng); no
+recording of anyone. Negatives include LibriSpeech dev-clean (5.39 h): the LibriSpeech ASR corpus,
+V. Panayotov, G. Chen, D. Povey and S. Khudanpur, https://www.openslr.org/12, under CC BY 4.0,
+https://creativecommons.org/licenses/by/4.0/. The file holds the head's weights, normalisation and
+thresholds, not any of that audio.
