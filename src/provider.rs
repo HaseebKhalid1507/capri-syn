@@ -357,6 +357,13 @@ fn resolve(host: &str, left: impl Fn() -> Option<Duration>) -> Option<Vec<std::n
     if let Ok(a) = host.parse::<std::net::SocketAddr>() {
         return Some(vec![a]);
     }
+    // `localhost` (the default) without a lookup: 127.0.0.1 first (Ollama's), then ::1.
+    if let Some((h, port)) = host.rsplit_once(':')
+        && h.eq_ignore_ascii_case("localhost")
+        && let Ok(port) = port.parse::<u16>()
+    {
+        return Some(vec![(std::net::Ipv4Addr::LOCALHOST, port).into(), (std::net::Ipv6Addr::LOCALHOST, port).into()]);
+    }
     if DNS_LIVE.fetch_add(1, Ordering::SeqCst) >= DNS_MAX {
         DNS_LIVE.fetch_sub(1, Ordering::SeqCst);
         return None;
@@ -654,15 +661,19 @@ mod tests {
         assert_eq!(probe(&format!("http://127.0.0.1:{free}/v1"), Duration::from_millis(500)), Local::Off);
     }
 
-    /// An address isn't looked up; a name is, unless `DNS_MAX` lookups left behind still hang.
+    /// An address isn't looked up, nor `localhost`; a name is, unless `DNS_MAX` lookups left
+    /// behind still hang.
     #[test]
     fn name_lookups_left_behind_are_bounded() {
         use std::sync::atomic::Ordering;
         let left = || Some(Duration::from_secs(2));
         assert_eq!(resolve("127.0.0.1:11434", left), Some(vec!["127.0.0.1:11434".parse().unwrap()]));
         DNS_LIVE.fetch_add(DNS_MAX, Ordering::SeqCst);
-        assert_eq!(resolve("localhost:11434", left), None, "no new lookup");
+        assert_eq!(resolve("ollama.invalid:11434", left), None, "no new lookup");
         assert_eq!(resolve("[::1]:11434", left).map(|a| a.len()), Some(1), "an address still goes");
+        let local: Vec<std::net::SocketAddr> = vec!["127.0.0.1:11434".parse().unwrap(), "[::1]:11434".parse().unwrap()];
+        assert_eq!(resolve("localhost:11434", left), Some(local.clone()), "localhost: no lookup, so not capped");
+        assert_eq!(resolve("LocalHost:11434", left), Some(local));
         DNS_LIVE.fetch_sub(DNS_MAX, Ordering::SeqCst);
         assert!(resolve("localhost:11434", left).is_some_and(|a| !a.is_empty()));
     }

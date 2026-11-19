@@ -69,10 +69,10 @@ Reference for `synaps-avatar`, the crate behind capri-syn. The [README](../READM
   alone, `type: api_key` with a key in it), an API-key service's `provider.<id>` in Synaps' `config`
   (its last line for it; only if the daemon started after it was written, by 2 s or more so no
   file time's rounding flips it: Synaps reads its config once, at start, `daemon.json`'s
-  `started_at`, so one added since, or too close to tell, is unknown until a restart or her first
-  answer), or
-  its key variable (`ANTHROPIC_API_KEY`, `GROQ_API_KEY`, …) in the daemon's environment (Linux:
-  `/proc/<pid>/environ`, whether it's set, never its value; where it can't be read, hers). Keys and types only, never a
+  `started_at`, so one added since, or too close to tell, is unknown until a restart (or, for her
+  own model, her first answer)), or its key variable (`ANTHROPIC_API_KEY`, `GROQ_API_KEY`, …) in
+  the daemon's environment (Linux: `/proc/<pid>/environ`, whether it's set, never its value; where
+  it can't be read, hers). Keys and types only, never a
   secret. None: her tag reads `NO BRAIN YET` in place of `ONLINE` (and asleep), and she reads again
   every 5 s, so a `synaps login` in a terminal clears it without a message. With no brain her summon
   key, a click on her or on her tag open the Line on Settings ▸ Brain (Esc: chat), and her menu's
