@@ -21,6 +21,10 @@
               screen, MODEL changed and written); his TUI's /model followed, a ChatGPT sign-in made in
               a terminal seen by the open screen, MODEL sent back (PR 4); and a daemon through
               --socket (another machine's).
+    tray      her icon in the notification area (#79), promoted out of the overflow, on a dark
+              taskbar with its clock off: hovered (its tooltip, capri-syn · ONLINE), right-clicked (her
+              menu), cropped to the taskbar's corner and the menu; then QUIT leaves no icon behind.
+              Restarts Explorer (a runner only).
   Out: <Out>\<set>\<take>\<step>.png + .json (her `state`), <Out>\index.json, <Out>\logs\.
 #>
 param(
@@ -202,8 +206,8 @@ function Close-Dialogs([string]$Where) {
     }
 }
 
-<# A step's shot: her windows, cropped; her `state` beside it. #>
-function Shot([string]$Step, [string]$Note = '') {
+<# A step's shot: her windows, cropped (or -Rect: x, y, w, h); her `state` beside it. #>
+function Shot([string]$Step, [string]$Note = '', [int[]]$Rect = $null) {
     # A notice the runner popped up meanwhile (the scaling change's) goes before it is in one. One
     # of hers (an error box) is a failure, closed or not.
     Close-Dialogs "$script:Take/$Step"
@@ -211,7 +215,12 @@ function Shot([string]$Step, [string]$Note = '') {
     $png = Join-Path $script:TakeOut "$Step.png"
     $rect = $null
     try {
-        $rect = Save-WindowShot -Path $png -ProcessId $script:Her.Id -Pad 16
+        if ($Rect) {
+            Save-RectShot -Path $png -Rect $Rect
+            $rect = $Rect
+        } else {
+            $rect = Save-WindowShot -Path $png -ProcessId $script:Her.Id -Pad 16
+        }
     } catch {
         $script:Fails.Add("$script:Take/${Step}: $_")
     }
@@ -478,6 +487,58 @@ $Scenes = [ordered]@{
             Shot '13-remote' 'a daemon through --socket: settings open brain'
         }
     }
+    tray     = [ordered]@{
+        # Her icon (#79) on a dark taskbar, out of the overflow: its tooltip, then her menu (the
+        # one model's rows: voice on for HANDS-FREE TALK, a reply for COPY LAST REPLY). She stands
+        # a quarter of the way in, off the corner. QUIT takes the icon out: none left behind.
+        menu = {
+            Set-ShotTaskbar
+            Start-Take tray menu -Settings "[voice]`nenabled = true`nwake_word = false`n" -History $Short -Voice
+            $null = Ctl 'brain off'
+            $sc = [ShootWin.Native]::Screen()
+            $null = Ctl "pos $([int]($sc[0] + $sc[2] / 4)) 100000 now"
+            $null = Show-TrayIcon
+            $tip = 'capri-syn · ONLINE'
+            if (-not (Wait-Until { (Find-TrayButton).Name -ceq $tip } 20 "her tooltip: $tip")) {
+                $script:Fails.Add("${script:Take}: her tooltip is '$((Find-TrayButton).Name)', not '$tip'")
+            }
+            $icon = Find-TrayButton
+            $cx = [int]($icon.X + $icon.W / 2); $cy = [int]($icon.Y + $icon.H / 2)
+            $sf = [double](State).scale_factor
+
+            # Hovered: the shell's tooltip (whatever window it draws it in, near her icon).
+            $before = @([ShotsTray.Native]::Of(0) | ForEach-Object { $_.Handle })
+            Move-ShotPointer $cx $cy
+            Start-Sleep 2.5
+            $near = @([ShotsTray.Native]::Of(0) | Where-Object { $_.Handle -notin $before -and $_.Y + $_.H -ge $icon.Y - 400 * $sf -and [Math]::Abs($_.X + $_.W / 2 - $cx) -lt 400 * $sf })
+            $near | ForEach-Object { Write-Host "  hover: a window of pid $($_.Pid), class $($_.Class), at $($_.X),$($_.Y) $($_.W)x$($_.H)" }
+            $tipBox = if ($near) { $near } else { @([pscustomobject]@{ X = $cx - [int](180 * $sf); Y = $icon.Y - [int](64 * $sf); W = [int](360 * $sf); H = [int](64 * $sf) }) }
+            Shot '01-tip' "hovered: $tip" -Rect (Get-CornerRect -Icon $icon -Also $tipBox)
+            Move-ShotPointer ($sc[0] + 8) ($sc[1] + 8)
+            Start-Sleep 1.5
+
+            # Right-clicked: her menu, a #32768 window of hers; the pointer off it, so no row is lit.
+            $menu = $null
+            for ($i = 0; $i -lt 3 -and -not $menu; $i++) {
+                Send-ShotClick -X $cx -Y $cy -Right
+                $null = Wait-Until { Get-HerMenu } 5 'her tray menu'
+                $menu = Get-HerMenu
+            }
+            if (-not $menu) { throw "$script:Take: no menu after 3 right clicks on her icon at $cx,$cy" }
+            Move-ShotPointer ($sc[0] + 8) ($sc[1] + 8)
+            Start-Sleep 1
+            Write-Host "  her menu at $($menu.X),$($menu.Y) $($menu.W)x$($menu.H)"
+            Shot '02-menu' 'right-clicked: her menu' -Rect (Get-CornerRect -Icon $icon -Also @($menu) -Aspect 1.6)
+            Key 'escape' 800
+            if (Get-HerMenu) { $script:Fails.Add("${script:Take}: her menu stayed after esc") }
+
+            # QUIT: the icon goes with her.
+            $null = Ctl 'quit' 2000
+            if (-not $script:Her.WaitForExit(10000)) { $script:Fails.Add("${script:Take}: she didn't quit") }
+            if (Wait-Until { -not (Find-TrayButton) } 10 'her icon gone') { Write-Host '  quit: her icon is gone' }
+            else { $script:Fails.Add("${script:Take}: her icon stayed after QUIT") }
+        }
+    }
 }
 
 # The header at two widths: 470 where she stands (a reply long enough to fill it), 340 against the
@@ -526,6 +587,199 @@ function To-Edge {
     $sc = [ShootWin.Native]::Screen()
     $vis = [Math]::Min($o.x + $o.w, $sc[0] + $sc[2]) - [Math]::Max($o.x, $sc[0])
     Write-Host "  at the edge: her window at $($o.x), $($o.w) wide: $vis px of it on screen"
+}
+
+# ---- the tray (the tray set) -------------------------------------------------------------------
+
+if (-not ('ShotsTray.Native' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Text;
+
+namespace ShotsTray {
+public static class Native {
+    [DllImport("user32.dll")] static extern IntPtr SetThreadDpiAwarenessContext(IntPtr ctx);
+    delegate bool EnumProc(IntPtr h, IntPtr l);
+    [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc f, IntPtr l);
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr h, StringBuilder s, int n);
+    [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr FindWindow(string cls, string title);
+    [DllImport("shell32.dll")] static extern int Shell_NotifyIconGetRect(ref NOTIFYICONIDENTIFIER id, out RECT r);
+    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
+    [StructLayout(LayoutKind.Sequential)] struct NOTIFYICONIDENTIFIER { public uint cbSize; public IntPtr hWnd; public uint uID; public Guid guidItem; }
+
+    public class Win { public long Handle; public uint Pid; public string Class; public int X, Y, W, H; }
+
+    static void Aware() { SetThreadDpiAwarenessContext(new IntPtr(-4)); }
+
+    /// Visible top-level windows (of process `pid`; 0: anyone's) with their class, physical px.
+    public static List<Win> Of(uint pid) {
+        Aware();
+        var o = new List<Win>();
+        EnumWindows((h, l) => {
+            if (!IsWindowVisible(h)) return true;
+            uint p; GetWindowThreadProcessId(h, out p);
+            if (pid != 0 && p != pid) return true;
+            RECT r;
+            if (!GetWindowRect(h, out r) || r.R - r.L < 2 || r.B - r.T < 2) return true;
+            var c = new StringBuilder(128); GetClassName(h, c, 128);
+            o.Add(new Win { Handle = h.ToInt64(), Pid = p, Class = c.ToString(), X = r.L, Y = r.T, W = r.R - r.L, H = r.B - r.T });
+            return true;
+        }, IntPtr.Zero);
+        return o;
+    }
+
+    /// The taskbar's window (Shell_TrayWnd): 0 while Explorer is down.
+    public static long Taskbar() { return FindWindow("Shell_TrayWnd", null).ToInt64(); }
+
+    /// A window's rect: x, y, w, h (physical px); null if it has none.
+    public static int[] Rect(long h) {
+        Aware();
+        RECT r;
+        if (h == 0 || !GetWindowRect(new IntPtr(h), out r)) return null;
+        return new[] { r.L, r.T, r.R - r.L, r.B - r.T };
+    }
+
+    /// An icon's rect by its GUID (the shell's own answer): x, y, w, h, or null (`hr` says why).
+    public static int[] IconRect(Guid g, out int hr) {
+        Aware();
+        var id = new NOTIFYICONIDENTIFIER { guidItem = g };
+        id.cbSize = (uint)Marshal.SizeOf(typeof(NOTIFYICONIDENTIFIER));
+        RECT r;
+        hr = Shell_NotifyIconGetRect(ref id, out r);
+        return hr == 0 ? new[] { r.L, r.T, r.R - r.L, r.B - r.T } : null;
+    }
+}
+}
+'@
+}
+
+<# The taskbar for a still: dark (the shell and apps), opaque, its clock off (the date never on
+   camera), no toasts; Explorer started again so all of it holds. A runner only. #>
+function Set-ShotTaskbar {
+    Assert-ShotRunner 'Set-ShotTaskbar'
+    $cv = 'HKCU:\Software\Microsoft\Windows\CurrentVersion'
+    foreach ($v in @(
+            @("$cv\Themes\Personalize", 'SystemUsesLightTheme', 0), @("$cv\Themes\Personalize", 'AppsUseLightTheme', 0),
+            @("$cv\Themes\Personalize", 'EnableTransparency', 0), @("$cv\Policies\Explorer", 'HideClock', 1),
+            @("$cv\PushNotifications", 'ToastEnabled', 0), @("$cv\Explorer", 'EnableAutoTray', 0))) {
+        if (-not (Test-Path $v[0])) { New-Item -Path $v[0] -Force | Out-Null }
+        Set-ItemProperty -Path $v[0] -Name $v[1] -Value $v[2] -Type DWord
+    }
+    Restart-ShotExplorer -Clear
+}
+
+<# Explorer down and up again (winlogon brings the shell back; else it is started): what it reads
+   only at its start holds, and every tray icon is asked back (TaskbarCreated). -Clear: the desktop
+   quiet again after (Clear-ShotDesktop; never with her up: it minimizes all). #>
+function Restart-ShotExplorer {
+    param([switch]$Clear)
+    Assert-ShotRunner 'Restart-ShotExplorer'
+    $old = [ShotsTray.Native]::Taskbar()
+    Get-Process explorer -ErrorAction SilentlyContinue | Stop-Process -Force
+    $new = { $h = [ShotsTray.Native]::Taskbar(); $h -ne 0 -and $h -ne $old }
+    if (-not (Wait-Until $new 15 'the shell back by itself')) {
+        Start-Process explorer.exe
+        if (-not (Wait-Until $new 30 'the shell back')) { throw 'Explorer never came back' }
+    }
+    # Its tray up (the TaskbarCreated broadcast).
+    Start-Sleep 5
+    if ($Clear) { Clear-ShotDesktop }
+    Write-Host "  explorer: back; taskbar at $(([ShotsTray.Native]::Rect([ShotsTray.Native]::Taskbar())) -join ',')"
+}
+
+<# Everything named on the taskbar (UI Automation, physical px): Name, Class, X, Y, W, H. #>
+function Get-TrayButtons {
+    if (-not ('System.Windows.Automation.AutomationElement' -as [type])) { Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes }
+    [ShootWin.Native]::Aware()
+    $h = [ShotsTray.Native]::Taskbar()
+    if (-not $h) { return }
+    $root = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$h)
+    foreach ($e in $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)) {
+        $c = $e.Current
+        $r = $c.BoundingRectangle
+        if (-not $c.Name -or $r.IsEmpty -or $r.Width -lt 1) { continue }
+        [pscustomobject]@{ Name = $c.Name; Class = $c.ClassName; X = [int]$r.X; Y = [int]$r.Y; W = [int]$r.Width; H = [int]$r.Height }
+    }
+}
+
+<# Her icon's button on the taskbar (named by her tooltip; inside the taskbar, not the overflow). #>
+function Find-TrayButton {
+    $tb = [ShotsTray.Native]::Rect([ShotsTray.Native]::Taskbar())
+    if (-not $tb) { return }
+    Get-TrayButtons | Where-Object {
+        $_.Name -like 'capri-syn*' -and $_.X -ge $tb[0] -and $_.Y -ge $tb[1] - 1 -and $_.X + $_.W -le $tb[0] + $tb[2] -and $_.Y + $_.H -le $tb[1] + $tb[3] + 1
+    } | Select-Object -First 1
+}
+
+<# Her icon's GUID as she makes it (platform::windows::tray::guid): her exe's path and her control
+   socket's (`instance`, as XDG_RUNTIME_DIR is set). #>
+function Get-HerTrayGuid {
+    $exe = $script:Her.Path.ToLowerInvariant()
+    $d = [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes("capri-syn tray icon`0$exe`0$script:CtlSock"))
+    $b = [byte[]]$d[0..15]
+    $b[6] = ($b[6] -band 0x0f) -bor 0x50
+    $b[8] = ($b[8] -band 0x3f) -bor 0x80
+    $x = -join ($b | ForEach-Object { $_.ToString('x2') })
+    [Guid]::Parse(('{0}-{1}-{2}-{3}-{4}' -f $x.Substring(0, 8), $x.Substring(8, 4), $x.Substring(12, 4), $x.Substring(16, 4), $x.Substring(20, 12)))
+}
+
+<# Her icon out of the overflow: its NotifyIconSettings key (Explorer writes one the first time an
+   icon is in) IsPromoted = 1, and Explorer started again if that alone doesn't bring it out (she
+   puts her icon back on TaskbarCreated, and Explorer reads the key then). Her button. #>
+function Show-TrayIcon {
+    $keys = { @(Get-ChildItem 'HKCU:\Control Panel\NotifyIconSettings' -ErrorAction SilentlyContinue | Where-Object { [string]$_.GetValue('ExecutablePath') -like '*\synaps-avatar.exe' }) }
+    $null = Wait-Until { (& $keys).Count -gt 0 } 20 'her NotifyIconSettings key'
+    foreach ($k in & $keys) {
+        Set-ItemProperty -Path $k.PSPath -Name IsPromoted -Value 1 -Type DWord
+        Write-Host "  promoted: NotifyIconSettings\$($k.PSChildName) ($($k.GetValue('InitialTooltip')))"
+    }
+    if (-not (Wait-Until { Find-TrayButton } 8 'her icon on the taskbar, promoted live')) {
+        Restart-ShotExplorer
+        $null = Wait-Until { Find-TrayButton } 30 'her icon on the taskbar, after Explorer'
+    }
+    $b = Find-TrayButton
+    $hr = 0
+    $g = [ShotsTray.Native]::IconRect((Get-HerTrayGuid), [ref]$hr)
+    Write-Host "  her icon: UIA $(if ($b) { "'$($b.Name)' at $($b.X),$($b.Y) $($b.W)x$($b.H)" } else { 'none' }); the shell by her GUID: $(if ($g) { $g -join ',' } else { 'hr 0x{0:x8}' -f $hr })"
+    if (-not $b) {
+        Get-TrayButtons | ForEach-Object { Write-Host "    taskbar: '$($_.Name)' ($($_.Class)) at $($_.X),$($_.Y) $($_.W)x$($_.H)" }
+        throw "$script:Take: her icon isn't on the taskbar"
+    }
+    return $b
+}
+
+<# Her open menu: a visible #32768 window of hers. #>
+function Get-HerMenu {
+    [ShotsTray.Native]::Of([uint32]$script:Her.Id) | Where-Object { $_.Class -eq '#32768' } | Select-Object -First 1
+}
+
+<# A shot of the taskbar's corner: her icon and -Also (her menu, the tooltip), padded, down to the
+   screen's bottom; at least -Aspect times as wide as tall (0: as it comes). Its right edge is the
+   screen's, or short of anything on the taskbar that tells the time or date (if the clock stayed). #>
+function Get-CornerRect {
+    param([Parameter(Mandatory)]$Icon, [object[]]$Also = @(), [double]$Aspect = 0)
+    $sf = [double](State).scale_factor
+    $pad = [int](24 * $sf)
+    $sc = [ShootWin.Native]::Screen()
+    $all = @($Icon) + @($Also)
+    $l = ($all | ForEach-Object { $_.X } | Measure-Object -Minimum).Minimum - $pad
+    $t = ($all | ForEach-Object { $_.Y } | Measure-Object -Minimum).Minimum - $pad
+    $b = $sc[1] + $sc[3]
+    $r = $sc[0] + $sc[2]
+    $clock = @(Get-TrayButtons | Where-Object { $_.X -ge $Icon.X + $Icon.W - 1 -and $_.Name -match '\d{1,2}:\d{2}|\d{1,2}/\d{1,2}/\d{2,4}|\d{4}-\d{2}-\d{2}' })
+    if ($clock) {
+        $r = ($clock | ForEach-Object { $_.X } | Measure-Object -Minimum).Minimum - [int](2 * $sf)
+        Write-Warning "${script:Take}: the clock stayed on the taskbar ('$($clock[0].Name)'): the shot ends at x $r"
+    }
+    $r = [Math]::Max($r, ($all | ForEach-Object { $_.X + $_.W } | Measure-Object -Maximum).Maximum)
+    if ($Aspect -gt 0) { $l = [Math]::Min($l, $r - [int]($Aspect * ($b - $t))) }
+    $l = [Math]::Max($l, $sc[0]); $t = [Math]::Max($t, $sc[1])
+    return @([int]$l, [int]$t, [int]($r - $l), [int]($b - $t))
 }
 
 # ---- run ---------------------------------------------------------------------------------------

@@ -6,7 +6,8 @@
 # see this repo's runs can download it): only the fakes' canned words, never anything private.
 #
 # Run it: Actions → shots → Run workflow (a ref: a branch, tag or sha; the sets), or put the
-# `shots` label on a PR (its head; `shots:settings`, `shots:header` or `shots:brain` for one set only).
+# `shots` label on a PR (its head; `shots:settings`, `shots:header`, `shots:brain` or `shots:tray` for
+# one set only). The tray set isn't in the defaults: it restarts Explorer.
 name: shots
 
 on:
@@ -17,7 +18,7 @@ on:
         required: true
         default: main
       sets:
-        description: "Scene sets, comma-separated: settings, header, brain"
+        description: "Scene sets, comma-separated: settings, header, brain, tray (restarts Explorer)"
         required: true
         default: settings,header,brain
       hidpi:
