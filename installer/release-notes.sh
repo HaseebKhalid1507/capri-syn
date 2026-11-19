@@ -30,16 +30,29 @@ section() {
         }' "$log"
 }
 
+# Whether a heading's first word (a leading v dropped) is $1, empty or not.
+has() {
+    awk -v want="$1" '
+        /^## / { h = substr($0, 4); sub(/^v/, "", h); split(h, w, /[ \t]/); if (w[1] == want) { f = 1; exit } }
+        END { exit !f }' "$log"
+}
+
+# What $log has for heading $1, when its section gave nothing: none, or an empty one.
+# shellcheck disable=SC2016 # the backticks are Markdown's
+what() {
+    if has "$1"; then printf 'an empty `## %s` section' "$1"; else printf 'no `## %s` section' "$1"; fi
+}
+
 notes=$(section "$ver")
 if [ -n "$notes" ]; then
     printf '%s\n' "$notes"
     exit 0
 fi
 if [ "$dry" = 0 ]; then
-    echo "release-notes: $log has no \`## $ver\` section: write it (what changed for the people installing her), then tag" >&2
+    echo "release-notes: $log has $(what "$ver"): write it (what changed for the people installing her), then tag" >&2
     exit 1
 fi
 notes=$(section Unreleased)
-[ -n "$notes" ] || { echo "release-notes: $log has neither \`## $ver\` nor \`## Unreleased\`" >&2; exit 1; }
+[ -n "$notes" ] || { echo "release-notes: $log has $(what "$ver") and $(what Unreleased): nothing to show yet (write what changed under \`## Unreleased\`)" >&2; exit 1; }
 # shellcheck disable=SC2016 # the backticks are Markdown's
-printf '> **Dry run.** CHANGELOG.md has no `## %s` section yet: these are its `## Unreleased` notes.\n\n%s\n' "$ver" "$notes"
+printf '> **Dry run.** No notes under `## %s` yet: these are the `## Unreleased` notes.\n\n%s\n' "$ver" "$notes"

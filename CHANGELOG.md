@@ -7,9 +7,8 @@
 capri-syn's first release: Capri on your desktop, her brain in Synaps. Linux (X11, Hyprland, and
 GNOME, KDE and other Wayland desktops through XWayland) and Windows 11 (x64). One line installs her:
 `install.sh` on Linux, `install.ps1` or `capri-syn-setup-x86_64.exe` on Windows. Her voice is its own
-download: `--voice` on Linux; on Windows her setup's Voice page (on when Windows has a microphone).
-
-- The README is new for v1.
+download: `--voice` on Linux; on Windows her setup's Voice page (on when Windows has a microphone, on a
+first install only; an upgrade never turns it on).
 
 ### Install and releases
 - `curl -fsSL …/install.sh | bash`, `irm …/install.ps1 | iex`, or either from a checkout. Seven steps, the
@@ -23,26 +22,28 @@ download: `--voice` on Linux; on Windows her setup's Voice page (on when Windows
   3. her art pack (CapriCore v1.0.4 + lachy through `tools/make-pack`, in a venv of its own;
      lachy's Required Notice shown);
   4. the Synaps daemon at login and her session;
-  5. the summon key (i3/sway/Hyprland, with consent, backed up, between markers; Windows:
-     Win+Alt+C);
+  5. the summon key (i3/sway/Hyprland, with consent, backed up, between markers; Windows: Win+Alt+C);
   6. autostart (default on);
   7. `--voice` / `--watch`.
 - Flags: `--yes`, `--dry-run`, `--uninstall [--purge]`, `--voice`, `--watch`, `--no-autostart`,
-  `--from-source`, `--prefix`, `--with-local-art` (mochi, local personal use only), `--artifact`.
-  Pins in `installer/manifest`. `docs/INSTALL.md` has the steps and flags.
+  `--from-source`, `--prefix`, `--with-local-art` (mochi, local personal use only), `--artifact`,
+  `--allow-root`. Pins in `installer/manifest`. `docs/INSTALL.md` has the steps and flags.
+- Run it as yourself: it refuses root unless `--allow-root` (Linux, root with its own `HOME`), and always
+  when `HOME` is someone else's, as `sudo` leaves it. It never runs `sudo` on its own.
 - `--uninstall` walks a receipt of everything it added, and leaves Synaps, settings and state.
 - A daemon on another protocol, or one that doesn't say which, stops the install (exit 1), with the fix.
   When this run installed or upgraded Synaps and an older daemon is still up, it says to restart that
   one (`synaps daemon stop`, then run it again); an upgrade says so in step 1 too, while the rest
   installs.
-- Windows: `capri-syn-setup-x86_64.exe` leaves a working Capri on a PC with nothing installed: Synaps (the
-  pinned release), its daemon (one on another protocol is said, with the fix), her art downloaded and
-  built on the PC (CapriCore and lachy's, never in the installer), her voice from her own release, and
-  the sign-in. A step that can't finish says why on the finish page, with the one command to retry.
-  install.ps1 runs the same steps (`packaging/windows/steps.ps1`). It's per-user (Inno Setup, no
-  admin): her windowed exe (no console window), her AUMID with an icon and a Start-menu shortcut
-  carrying it, autostart at sign-in, a clean uninstall. An install from `synaps-avatar-setup-x86_64.exe`
-  (the same AppId) upgrades in place. `docs/WINDOWS.md` → The installer.
+- Windows: `capri-syn-setup-x86_64.exe` leaves a working Capri on a PC with nothing installed: Synaps
+  (the pinned release), its daemon (one on another protocol is said, with the fix), her art downloaded
+  and built on the PC (CapriCore and lachy's, never in the installer; `/PACK="C:\…"` takes a pack from
+  his disk instead), her voice from her own release, and the sign-in. A step that can't finish says why
+  on the finish page, with the one command to retry. install.ps1 runs the same steps
+  (`packaging/windows/steps.ps1`). It's per-user (Inno Setup, no admin): her windowed exe (no console
+  window), her AUMID with an icon and a Start-menu shortcut carrying it, autostart at sign-in, a clean
+  uninstall. An install from `synaps-avatar-setup-x86_64.exe` (the same AppId) upgrades in place.
+  `docs/WINDOWS.md` → The installer.
 - Her voice on Windows is a download of its own, `capri-syn-voice-setup-x86_64.exe`; her own installer
   stays small. Its "models" task fetches Whisper, Kokoro, Silero and the wake word's models (~320 MB,
   SHA-256 pinned, resumable) with `voice-models.ps1`.
@@ -104,10 +105,9 @@ download: `--voice` on Linux; on Windows her setup's Voice page (on when Windows
     moves resume.
   - Still allowed asleep: her window closing (rescue or fall), her perch leaving with the workspace,
     riding a moved window, falling off a covered one.
-- **The new art about half the time.** Window perch: CapriCore's sit and lachy's perch come up 1 : 1
-  (was 4 : 1), and the pose shifts in place every 2–6 min (was 4–12). Floor sleep: CapriCore's lie and
-  lachy's doze 1 : 1 (was 3 : 1). Window sleep stays CapriCore's (laydown is still at weight 0). Weights
-  only, in `packs/capri/moods.json`.
+- **The new art about half the time.** Window perch: CapriCore's sit and lachy's perch come up 1 : 1,
+  and the pose shifts in place every 2–6 min. Floor sleep: CapriCore's lie and lachy's doze 1 : 1.
+  Window sleep is CapriCore's (laydown is at weight 0). Weights only, in `packs/capri/moods.json`.
 - **Her right-click menu** stays in her work area and keeps off her face, placed once before it shows;
   if her pose then puts her face under it, it moves once, across her face (never off-screen). Her
   maker's mark is one dim row under QUIT, her Synaps and her model as Settings names them
@@ -130,8 +130,8 @@ download: `--voice` on Linux; on Windows her setup's Voice page (on when Windows
   own beside settings.toml (`icon.ico` on Windows, `icon.png` on Linux), then her pack's `icon` (Linux
   only), then capri-syn's. Read at start and on a settings reload. Her Windows exe carries the .ico as
   its icon (`build.rs`), and her tray loads its size from there.
-- Fixed: the Line put her answer above his question after a failed turn (a refold kept the error note
-  ahead of the turn's prompt; `synaps-client`'s `Transcript` anchors it to its turn now). The Line's
+- After a failed turn the Line keeps her answer below his question: `synaps-client`'s `Transcript`
+  anchors the error note to its turn, so a refold never puts it ahead of the turn's prompt. The Line's
   footer wraps.
 
 ### Her brain (Settings ▸ Brain)
@@ -200,17 +200,13 @@ download: `--voice` on Linux; on Windows her setup's Voice page (on when Windows
 - `avatarctl settings open brain`.
 
 ### Voice
-- **Her default voice** is Haseeb's pick: **W3**, the bright blend (`timbre|prosody` split, pushed away
-  from af_sarah, `+clean`), at `@+7.00` (about 306 Hz median), 23 % faster (speed 1/0.77, pace
-  "stretch"), flow "emphasis". He picked the pitch blind from round r26 ("anime girlie, more bubbly"):
-  six recipes plus his earlier pick. Stock Kokoro voices and our own DSP only. A `voice` set in
-  `settings.toml` is kept. His earlier pick (`@+4.93`, ~272 Hz), in one line:
-  `[voice] voice = "af_heart:0.5,af_bella:0.3,af_jessica:0.2|af_heart:0.84,af_jessica:0.56,af_sarah:-0.4@+4.93+clean"`.
+- **The default voice:** W3, a blend of stock Kokoro voices (`timbre|prosody` split, pushed away from
+  af_sarah, `+clean`), at `@+7.00` (about 306 Hz median), 23 % faster (speed 1/0.77, pace "stretch"),
+  flow "emphasis". Stock Kokoro voices and our own DSP only. A `voice` set in `settings.toml` is kept.
 - Pace "stretch": Kokoro speaks at its own speed, and the time goes ×0.77 in the same rubberband pass as
-  the pitch shift. This keeps Kokoro's speed-1 pitch shape. It was his blind pick ("ALT") over Kokoro's
-  own speed 1.32, which dropped the pitch floor ~1.4 st and the sentence ends ~2 st deeper.
-  `[voice] pace = "model"` keeps that option; there Kokoro's speed scales time linearly, unrounded
-  durations rounded once (no 25 ms steps: 1.30 → 1.38 cut 18 %).
+  the pitch shift. This keeps Kokoro's speed-1 pitch shape: Kokoro's own speed 1.32 drops the pitch floor
+  ~1.4 st and the sentence ends ~2 st deeper. `[voice] pace = "model"` gives that instead; there
+  Kokoro's speed scales time linearly, unrounded durations rounded once (no 25 ms steps).
 - Flow: Kokoro's graph is patched in memory (weights and voices untouched, guarded by SHA-256, plain
   Kokoro as the fallback) to read and steer its own duration, pitch and energy predictions.
   - A `*word*` in her reply is stressed: a longer vowel, more energy, and a closed-loop pitch accent.
@@ -227,25 +223,23 @@ download: `--voice` on Linux; on Windows her setup's Voice page (on when Windows
 - `*word*` reaches the sidecar; `**bold**` and stray asterisks don't. The bubble and the caption never
   show the asterisks; the Line shows the word in italics. With voice on, her persona gains a few lines
   on writing for the ear. They allow one stressed word in a reply, and say most replies need none.
-- Fixed: with no flow graph (another model file, or the patch didn't load) and no rubberband (always so
-  on Windows), a voice with an `@` shift failed every sentence (`TypeError`). She now speaks plain
-  Kokoro at its own pitch, as docs/VOICE.md says, and the log says once that the shift is off.
+- With no flow graph (another model file, or the patch didn't load) and no rubberband (always so on
+  Windows), a voice with an `@` shift speaks plain Kokoro at its own pitch, as docs/VOICE.md says, and
+  the log says once that the shift is off.
 - **"Hey Capri" starts a conversation** (`[voice] wake_handsfree`, default true, with `handsfree` on):
-  the wake stream goes on as the hands-free one in the same capture (no gap), so "Hey Capri, what's
-  spike doing?" is the conversation's first turn (the phrase cut) and "Hey Capri" alone just listens.
+  the wake stream goes on as the hands-free one in the same capture (no gap), so "Hey Capri, what time
+  is it?" is the conversation's first turn (the phrase cut) and "Hey Capri" alone just listens.
   Every hands-free rule holds: each pause sends, spoken replies, half-duplex/barge-in, the end phrases.
   Quiet for `handsfree_timeout` (60 s, counted down on her tag for the last 10), it ends and the wake
   word listens again at once. `wake_handsfree = false` (or `handsfree = false`): one turn per "Hey
   Capri".
-- **"Hey Capri" from across the desk.** The check decodes the 2.8 s it was measured and documented with
-  (it had decoded 2.0 s: a byte count read as samples). The second look (his whole turn, decoded once he
-  pauses) gets every rejected candidate whose margin is over −8 (was −2), and it passes at its own
-  thresholds: the words say "hey capri", `T > −10` and `margin > −3` (was `> 0`). With the request after
-  the phrase, Whisper reads far and casual speech much better. On his own takes: 29 →
-  35 of 40 woken (far and casual 1 → 6 of 10), none of his 10 sound-alikes. The log gets the second
-  look's two scores (never words), and says when its words held no "hey capri".
+- **"Hey Capri" from across the desk.** The check decodes 2.8 s of audio, the window its thresholds were
+  measured on. The second look (his whole turn, decoded once he pauses) gets every rejected candidate
+  whose margin is over −8, and it passes at its own thresholds: the words say "hey capri", `T > −10` and
+  `margin > −3`. With the request after the phrase, Whisper reads far and casual speech better. The log
+  gets the second look's two scores (never words), and says when its words held no "hey capri".
 - **"Hey Capri" is never sent as his words.** Whisper decoding the phrase again in the first hands-free
-  utterance wrote "Take a breath", "Aye, capri", "And capri", "Ee capri". The phrase is now cut as
+  utterance can write "Take a breath", "Aye, capri", "And capri", "Ee capri". The phrase is cut as
   Whisper spells it, doubled or misheard as the first word or two; words with no trace of it are the
   phrase misheard, and the audio after the check's window decides (no speech there: nothing is sent,
   hands-free goes on; speech: that audio is decoded on its own).
@@ -308,15 +302,15 @@ download: `--voice` on Linux; on Windows her setup's Voice page (on when Windows
   - The strip counts each missed reply and shows the newest; one heard whole after its bubble went drops
     only itself.
 - **Speech-to-text vocabulary:** Whisper's recognition prompt is generic
-  (`Capri, choom, preem, Night City, Synaps, avatarctl`; `capri-ctl` instead of `avatarctl` on Windows).
-  Add your own with `[voice] vocab = ["…"]` in `settings.toml`: the words are appended to the prompt and
-  count for the prompt-echo filter too (so no everyday words). Up to 16 entries of ≤ 32 characters, 200
-  characters in all; past that, the first that fit are kept and the rest are logged, not an error (a
-  word already in her prompt still takes a slot). An empty entry, a comma or a control character is a
-  settings error naming the entry.
+  (`Capri, choom, preem, Night City, Synaps, avatarctl`; on Windows the word `capri-ctl` instead of
+  `avatarctl`: only a word in the prompt, no such tool ships). Add your own with `[voice] vocab = ["…"]`
+  in `settings.toml`: the words are appended to the prompt and count for the prompt-echo filter too (so
+  no everyday words). Up to 16 entries of ≤ 32 characters, 200 characters in all; past that, the first
+  that fit are kept and the rest are logged, not an error (a word already in her prompt still takes a
+  slot). An empty entry, a comma or a control character is a settings error naming the entry.
 - Her pronunciation fixes are built into the sidecar (an update replaces them); docs/VOICE.md lists
   them.
-- Linux: `pw-record --latency 20ms` (was ~100 ms chunks). A `CAPRI_VOICE_SOURCE` that's gone doesn't keep
+- Linux: she records with `pw-record --latency 20ms`. A `CAPRI_VOICE_SOURCE` that's gone doesn't keep
   the wake word off till a settings reload.
 
 ### Windows
@@ -361,20 +355,19 @@ download: `--voice` on Linux; on Windows her setup's Voice page (on when Windows
     opens on, in whole pixels at 100–200 %. High contrast on: the stock menu in your theme's colours.
   - Keyboard: arrows, Enter, Esc, → into ATTENTION; a typed letter goes to the row it starts (a second
     row with that letter: it lights, a second press moves on). MSAA (what NVDA and JAWS read Win32 menus
-    through) reads each row's words, as it reads the stock menu's. Each row's item data is an
-    `MSAAMENUINFO` with its words too, for a reader that goes by that.
+    through) reads each row's words, as it reads the stock menu's; Narrator is still to check by hand.
+    Each row's item data is an `MSAAMENUINFO` with its words too, for a reader that goes by that.
 - **Her files:** settings in `%APPDATA%\synaps-avatar`, packs and state in `%LOCALAPPDATA%\synaps-avatar`.
   `$XDG_*_HOME` still wins. Without a console she logs to
   `%LOCALAPPDATA%\synaps-avatar\synaps-avatar.log`.
 - **No VC++ runtime needed.** Her exe links the C runtime in (`+crt-static`, `.cargo/config.toml`), so a
-  PC without the Visual
-  C++ Redistributable runs her; `build.ps1` lists her exe's DLL imports and stops on a C runtime one. Her
-  voice bundle carries the runtime beside its Python (`msvcp140.dll`, `msvcp140_1.dll`,
-  `vcruntime140*.dll`, from Visual Studio, unmodified, under the Visual Studio licence's Distributable
-  Code) with Microsoft's end-user terms for it (`licenses\vc-runtime\LICENSE.txt`): onnxruntime's and
-  espeak-ng's DLLs import `MSVCP140.dll` (onnxruntime `MSVCP140_1.dll` too), and without it the sidecar
-  died on import. Its build stops when
-  a DLL imports what neither the bundle nor a clean Windows has (a pinned list of System32's DLLs), or a
+  PC without the Visual C++ Redistributable runs her; `build.ps1` lists her exe's DLL imports and stops
+  on a C runtime one. Her voice bundle carries the runtime beside its Python (`msvcp140.dll`,
+  `msvcp140_1.dll`, `vcruntime140*.dll`, from Visual Studio, unmodified, under the Visual Studio
+  licence's Distributable Code) with Microsoft's end-user terms for it
+  (`licenses\vc-runtime\LICENSE.txt`): onnxruntime's and espeak-ng's DLLs import `MSVCP140.dll`
+  (onnxruntime `MSVCP140_1.dll` too), and the sidecar can't load them without it. Its build stops when a
+  DLL imports what neither the bundle nor a clean Windows has (a pinned list of System32's DLLs), or a
   runtime older than the MSVC that linked it (`voice-imports.py`), and CI checks the installed bundle
   loads its own copies, espeak-ng's as phonemizer loads it.
 - **Her voice on Windows.** She starts the sidecar while `[voice] enabled` is on: the bundle beside her,
@@ -392,10 +385,10 @@ download: `--voice` on Linux; on Windows her setup's Voice page (on when Windows
     Kokoro's). The floor is 2.3 st lower, the sound brighter, and the name/number test set slips more
     (7.5 % vs 1.7 % WER). Numbers in docs/VOICE.md. Bundling rubberband there is a follow-up.
 - **Her mic by name** (`[voice] mic`): the microphone she listens on, by its WASAPI name
-  (`Microphone (USB Audio Device Pro)`, not the two lines Sound settings shows; `docs/VOICE.md` says
-  how to see the names).
-  Her installer's Voice page writes it. A new one on a settings reload starts her voice sidecar again on
-  it. A control character or a name over 256 characters is a settings error (`--set` exits 2).
+  (`Microphone (USB Audio Device Pro)`, not the two lines Sound settings shows; `docs/VOICE.md` says how
+  to see the names). Her installer's Voice page writes it. A new one on a settings reload starts her
+  voice sidecar again on it. A control character or a name over 256 characters is a settings error
+  (`--set` exits 2).
   - A mic that connects after she started (a Bluetooth headset after sign-in) is found without a
     restart. On a miss the sidecar reads the device list again (at most every 10 s, never while a stream
     of hers is open). "Hey Capri", refused for a mic that's gone (`WAKE PAUSED · ITS SOURCE IS GONE`), is
@@ -456,17 +449,16 @@ download: `--voice` on Linux; on Windows her setup's Voice page (on when Windows
   - `backup_failed` watches nothing until `unit` names one. Its `log` is optional, and `log_start` marks
     a run's start in it.
   - The calendar's `db` has no default path.
-  - `install.sh --watch` delivers locally unless `watch.toml` says `remote` (it used to guess the role
-    from the hostname, and tried ssh).
-  - Breaking for a two-machine setup that leaned on the hostnames: set `role`, `host` and
-    `[deliver] ssh_host` in each machine's `watch.toml` (docs/WATCH.md has an example). A copy from
-    before v1 (`role = ""`, or one of the two old machine roles) stops with an error that says the file
-    predates v1, instead of guessing; so does `ssh_host` with local delivery (a forgotten
-    `role = "remote"`). `install.sh --watch` checks the file first and warns, rather than enabling a
-    watcher that won't start.
-  - Its first log line lists only the events that really run: `ci_failed` with no repos,
-    `backup_failed` with no unit and `calendar` with no db show as on but not configured. With GitHub
-    off (a remote machine, or `enabled = false`) its events aren't listed at all.
+  - `install.sh --watch` delivers locally unless `watch.toml` says `remote`; it never guesses the role
+    from the hostname.
+  - A two-machine setup sets `role`, `host` and `[deliver] ssh_host` in each machine's `watch.toml`
+    (docs/WATCH.md has an example). A copy from before v1 (`role = ""`, or one of the two old machine
+    roles) stops with an error that says the file predates v1, instead of guessing; so does `ssh_host`
+    with local delivery (a forgotten `role = "remote"`). `install.sh --watch` checks the file first and
+    warns, rather than enabling a watcher that won't start.
+  - Its first log line lists only the events that really run: `ci_failed` with no repos, `backup_failed`
+    with no unit and `calendar` with no db show as on but not configured. With GitHub off (a remote
+    machine, or `enabled = false`) its events aren't listed at all.
 - `tools/synaps-avatar-remote` needs its host (`synaps-avatar-remote <host>`).
 
 ### Licences
@@ -481,15 +473,16 @@ download: `--voice` on Linux; on Windows her setup's Voice page (on when Windows
   it bundles with its licence, carries espeak-ng's, whisper.cpp's and PortAudio's licences, and says
   where the source of its GPL parts (espeak-ng 1.52.0, phonemizer) is: espeak-ng's is attached to every
   release, with that of sonic, which espeak-ng's build compiles into its DLL.
-- The app icon (`assets/icon/NOTICE`): a still from Cyberpunk: Edgerunners 2, used as the app icon; the
-  character is used with Mike Pondsmith's permission; the frame's rights stay with their owners.
-- Her persona's first paragraph is clean-room: the old one closely paraphrased CapriCore's GPL-3.0
-  `PERSONALITY.md`, so it's gone.
+- The app icon (`assets/icon/`) is not covered by the MIT licence, and no licence is granted for it: a
+  crop of a frame of Cyberpunk: Edgerunners 2, which belongs to its rights holders. capri-syn is an
+  unofficial, non-commercial fan project, not affiliated with or endorsed by them (`assets/icon/NOTICE`).
+- Her persona's first paragraph is clean-room, not a paraphrase of CapriCore's GPL-3.0 `PERSONALITY.md`.
 - Smaller downloads: of the PortAudio builds sounddevice ships, the voice installer keeps only the one
   she loads (no ASIO builds, no other platforms'); her binary doesn't compile in syntect and two-face's
   syntax definitions (she never highlighted code with them).
 
 ### Docs
+- The README is new for v1.
 - docs/ says what she does at v1: her Settings page, menu and Windows tray; Settings ▸ Brain as the way
   to a brain; what Windows has instead of `avatarctl` (WINDOWS.md's Control, with a PowerShell 7
   script); Known issues in INSTALL.md; which Whisper models setup fetches; `--set`'s exit codes; no
@@ -520,15 +513,26 @@ download: `--voice` on Linux; on Windows her setup's Voice page (on when Windows
   wheel where the distro has none.
 
 ### Known issues
+- A dark slab on X11 without a compositor (#72): now and then her whole window's rectangle paints solid
+  black behind her and her bubble, covering what's under it, more often while a prompt hangs below her.
+  So far it has only been seen with no compositor running, where she cuts her window to her outline
+  with the X shape. Workaround (likely; not yet confirmed): run a compositor (picom: `picom -b`). With
+  `[display] composited = "auto"`, the default, she switches to alpha when it starts, no restart.
+- GNOME, KDE and sway run her through XWayland, with its limits (docs/INSTALL.md). None of them has been
+  tried on a real session yet: CI and the test containers stand in for them.
+- Hyprland has no idle time for her yet: your presence is the pointer moving, so typing alone for 5 min
+  reads as away. Hyprland before 0.40 isn't supported: she takes XWayland there.
 - Signing in is a terminal step: Settings ▸ Brain copies the `synaps login` line; she doesn't run it
-  herself yet.
+  herself yet. On Windows, Synaps 0.12's `synaps login` opens a sign-in tab cut at the URL's first `&`:
+  copy the whole URL it prints into your browser, or run her installer's Claude sign-in (install.ps1
+  puts it there too; the default folder shown):
+  `powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Programs\synaps-avatar\steps\steps.ps1" login`
 - Windows: the installers are unsigned, so a browser download meets SmartScreen ("More info", then "Run
   anyway"). Windows 10 and Windows 11 on Arm are untested. A click on one of her notifications does
   nothing (as on Linux). Her voice brings its own VC++ runtime but hasn't yet run on a PC without the
-  Visual C++ Redistributable. Narrator on her tray menu is still to check by hand.
+  Visual C++ Redistributable. Live audio is still to check on real hardware: her desktop checks ran in
+  a Windows 11 VM, with no real audio.
 - Linux has no tray icon yet: HIDE's chip is the way back there.
-- A dark slab on X11 without a compositor (#72): now and then her whole window's rectangle paints solid
-  black behind her. Workaround (likely; not yet confirmed): run a compositor (`picom -b`).
-- With `XDG_RUNTIME_DIR` unset, she and the sidecar look for the Linux socket in different places: she
-  in the temp dir (`$TMPDIR`, else `/tmp`), the sidecar in `/run/user/<uid>`. Set it, or set
+- With `XDG_RUNTIME_DIR` unset, she and her voice sidecar look for the Linux socket in different places:
+  she in the temp dir (`$TMPDIR`, else `/tmp`), the sidecar in `/run/user/<uid>`. Set it, or set
   `CAPRI_VOICE_SOCK` for both. It isn't aligned yet because that would change how she behaves.
