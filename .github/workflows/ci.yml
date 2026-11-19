@@ -71,6 +71,12 @@ jobs:
           CAPRI_VOICE_TEST_PY: python
         run: cargo test --locked --workspace
 
+      # Its log says which way a plain show leaves an effect layer unpainted on this Windows (the
+      # first erase inside the show, or none before it returns): the dark-first-frame diagnosis.
+      - name: Effect layer goes up filled (log)
+        if: ${{ !cancelled() }}
+        run: cargo test --locked --bin synaps-avatar a_layer_goes_up_already_filled -- --nocapture
+
       - name: Fake contract suite (target events, polled)
         if: ${{ !cancelled() }}
         run: cargo test --locked --bin synaps-avatar contract_fake -- --nocapture
