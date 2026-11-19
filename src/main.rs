@@ -371,7 +371,7 @@ fn run(t_start: Instant) -> Result<()> {
                 Ok(w) => w,
                 Err(e) => {
                     elog!("synaps-avatar: {e:#}");
-                    std::process::exit(1);
+                    platform::exit_now(1);
                 }
             };
             os.force_composited(env_composited().unwrap_or_else(|| settings::Settings::load().ok().and_then(|s| s.display.composited)));
@@ -512,7 +512,7 @@ fn run(t_start: Instant) -> Result<()> {
         if let Err(e) = opened {
             elog!("synaps-avatar: cannot open the window: {e:#}");
             std::fs::remove_file(control::socket_path()).ok();
-            std::process::exit(1);
+            platform::exit_now(1);
         }
         let view = built.expect("window built");
         if let (Ok(w), Some(h)) = (&opened, first) {
@@ -590,6 +590,11 @@ fn run(t_start: Instant) -> Result<()> {
         })
         .detach();
     });
+    // Windows: nothing past GPUI's run (her state is saved: `finish_quit`). ExitProcess would run
+    // every DLL's detach, and a GPU driver's can hold her there, her exe still mapped.
+    if cfg!(windows) {
+        platform::exit_now(0);
+    }
     Ok(())
 }
 
@@ -679,7 +684,7 @@ async fn off_thread<T: Send + 'static>(f: impl FnOnce() -> anyhow::Result<T> + S
 fn fatal(e: anyhow::Error) -> ! {
     elog!("synaps-avatar: {e:#}");
     std::fs::remove_file(control::socket_path()).ok();
-    std::process::exit(1);
+    platform::exit_now(1);
 }
 
 #[cfg(test)]
