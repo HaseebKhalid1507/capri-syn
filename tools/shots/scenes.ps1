@@ -16,7 +16,8 @@
               with 3 waiting, his long words (YOU) while the turn runs.
     tray      her icon in the notification area (#79), promoted out of the overflow, on a dark
               taskbar with its clock off: hovered (its tooltip, capri-syn · ONLINE), right-clicked (her
-              menu), cropped to the taskbar's corner and the menu; then QUIT leaves no icon behind.
+              menu), cropped to the taskbar's corner and the menu; the menu by his keys (ATTENTION lit,
+              its choices open); then QUIT leaves no icon behind.
               Restarts Explorer (a runner only).
     brain     her brain (Settings PR 3), the daemon found as on his machine (its daemon.json in a
               Synaps folder of the take's own, no --socket): no login (her first words, SET ME UP,
@@ -553,6 +554,18 @@ $Scenes = [ordered]@{
             Start-Sleep 1
             Write-Host "  her menu at $($menu.X),$($menu.Y) $($menu.W)x$($menu.H), by $how"
             Shot '02-menu' "her menu, by $how" -At (Get-CornerRect -Icon $icon -Also @($menu) -Aspect 1.6 -Above 96)
+            # His keys in it (a real right click gave it the keyboard): down x3 lights ATTENTION (a
+            # lit row), right opens its choices (the one in force marked, the first lit).
+            if ($how -eq 'a real right click') {
+                foreach ($k in 'down', 'down', 'down') { Key $k 200 }
+                Key 'right' 800
+                $menus = @([ShotsTray.Native]::Of([uint32]$script:Her.Id) | Where-Object { $_.Class -eq '#32768' })
+                if ($menus.Count -ge 2) {
+                    Shot '03-keys' 'her menu by his keys: ATTENTION lit, its choices open' -At (Get-CornerRect -Icon $icon -Also $menus -Aspect 1.6 -Above 96)
+                }
+                else { $script:Fails.Add("${script:Take}: down, down, down, right opened no ATTENTION choices ($($menus.Count) menu)") }
+                Key 'escape' 500
+            }
             Key 'escape' 800
             if (Get-HerMenu) {
                 # Opened by a post, it never had the keyboard (no foreground for her tray's window).
