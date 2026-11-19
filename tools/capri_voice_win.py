@@ -139,17 +139,23 @@ def serve(accepted, path=None, ready=None, stop=None):
 # PortAudio reads its device list once, when it starts (`import sounddevice`): a mic that comes
 # later (a Bluetooth headset connecting after sign-in) isn't in it till PortAudio starts again,
 # and that ends every stream. So it starts again only on a miss, with none of ours open (_STREAMS:
-# the ones `_open` made), and never while another of these calls runs (_PA).
+# the ones `_open` made), never while another of these calls runs (_PA), and at most once per
+# RELOAD_EVERY s (the wake word asks every 30 s while his mic is gone; a talk press asks too).
 _PA = threading.RLock()
 _STREAMS = weakref.WeakSet()
+RELOAD_EVERY = 10.0
+_clock = time.monotonic
+_reloaded_at = None           # when it last started again (or tried)
 
 
 def _reload(sd):
     """PortAudio's device list read again (Pa_Terminate, then Pa_Initialize) if no stream of ours
-    is open: True when it was. A failed start is tried again on the next miss."""
+    is open: True when it was. A failed start is tried again on the next look."""
+    global _reloaded_at
     with _PA:
         if any(not s.closed for s in list(_STREAMS)):
             return False
+        _reloaded_at = _clock()
         try:
             while sd._initialized > 0:
                 sd._terminate()
@@ -158,6 +164,10 @@ def _reload(sd):
             log(f'audio: the device list could not be read again ({e})')
             return False
         return True
+
+
+def _reload_due():
+    return _reloaded_at is None or _clock() - _reloaded_at >= RELOAD_EVERY
 
 
 def _wasapi(sd, kind):
@@ -182,11 +192,12 @@ def _named(sd, name, kind):
     if not name or not name.strip():
         return None
     with _PA:
+        down = getattr(sd, '_initialized', 1) <= 0      # a start again failed: started below, whenever
         try:
-            i = _find(sd, name, kind)
+            i = None if down else _find(sd, name, kind)
         except Exception:
-            i = None                  # PortAudio is down (a start again failed): started below
-        if i is None and _reload(sd):
+            i, down = None, True
+        if i is None and (down or _reload_due()) and _reload(sd):
             i = _find(sd, name, kind)
             if i is not None:
                 log(f'audio: {kind} "{name.strip()}" found once the device list was read again')
@@ -232,6 +243,20 @@ def _open_at(sd, cls, rate, device, kind, **kw):
     return cls(samplerate=rate, channels=1, dtype='int16', **kw)
 
 
+def _start(s):
+    """s.start(); a stream that won't start is closed (and leaves _STREAMS), or it would keep the
+    device list from being read again till the garbage collector got to it."""
+    try:
+        s.start()
+    except Exception:
+        try:
+            s.close()
+        except Exception:
+            pass
+        _STREAMS.discard(s)
+        raise
+
+
 class _Out:
     def fileno(self):
         return -1
@@ -249,7 +274,7 @@ class Mic:
         self.closed = False
         self.stream = _open(sd, sd.RawInputStream, rate, device, 'input', blocksize=rate // 50,
                             callback=lambda data, n, t, st: self.q.put(bytes(data)), finished_callback=lambda: self.q.put(b''))
-        self.stream.start()
+        _start(self.stream)
 
     def read(self, wait):
         try:
@@ -287,7 +312,7 @@ class Player:
         self.lk, self.done = threading.Lock(), threading.Event()
         self.stdin = self
         self.stream = _open(sd, sd.RawOutputStream, rate, device, 'output', callback=self._fill, finished_callback=self.done.set)
-        self.stream.start()
+        _start(self.stream)
 
     def write(self, data):
         with self.lk:

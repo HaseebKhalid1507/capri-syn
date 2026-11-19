@@ -305,7 +305,7 @@ class FakeSd:
 
     def __init__(self, later=()):
         self.opened, self.streams, self.later, self.extra = [], [], list(later), []
-        self._initialized, self.restarts, self.fail_start = 1, 0, False
+        self._initialized, self.restarts, self.fail_start, self.no_stream_start = 1, 0, False, False
 
     def _terminate(self):
         assert self._initialized > 0, 'Pa_Terminate: not initialized'
@@ -341,11 +341,12 @@ class FakeSd:
             self.auto_convert = auto_convert
 
     class Stream:
-        def __init__(self):
-            self.active, self.closed = True, False
+        def __init__(self, sd):
+            self.sd, self.active, self.closed = sd, True, False
 
         def start(self):
-            pass
+            if self.sd.no_stream_start:
+                raise RuntimeError('Error starting stream: Unanticipated host error')
 
         def abort(self):
             self.active = False
@@ -355,7 +356,7 @@ class FakeSd:
 
     def RawInputStream(self, **kw):
         self.opened.append(('input', kw))
-        self.streams.append(self.Stream())
+        self.streams.append(self.Stream(self))
         return self.streams[-1]
 
     RawOutputStream = RawInputStream
@@ -371,6 +372,10 @@ class NamedMic(unittest.TestCase):
         p.start()
         self.addCleanup(p.stop)
         self.addCleanup(lambda: self.assertEqual([s for s in win._STREAMS if not s.closed], [], 'every stream closed'))
+        self.t = 1000.0
+        for p in (mock.patch.object(win, '_clock', lambda: self.t), mock.patch.object(win, '_reloaded_at', None)):
+            p.start()
+            self.addCleanup(p.stop)
 
     def test_one_device_per_name(self):
         sd, mic = self.sd, FakeSd.MIC
@@ -417,8 +422,16 @@ class NamedMic(unittest.TestCase):
         self.assertEqual(sd.restarts, 1, 'a hit reads nothing again')
         win.Mic(16000, FakeSd.BT).terminate()
         self.assertEqual(sd.opened.pop()[1]['device'], 8)
+        self.t += 9.9
         self.assertTrue(win.node_missing('sources', 'Microphone (Nothing Here)'))
-        self.assertEqual((sd.restarts, sd._initialized), (2, 1), 'a miss is read again each time, and PortAudio stays up')
+        self.assertEqual(sd.restarts, 1, 'a miss reads it again at most once per 10 s')
+        self.t += 0.1
+        self.assertTrue(win.node_missing('sources', 'Microphone (Nothing Here)'))
+        self.assertEqual((sd.restarts, sd._initialized), (2, 1), 'then again, and PortAudio stays up')
+        for _ in range(30):                       # the wake word asks every 30 s while it's gone, a talk press in between
+            self.t += 3
+            win.node_missing('sources', 'Microphone (Nothing Here)')
+        self.assertEqual(sd.restarts, 2 + 7, 'never more often than that: here every fourth look (12 s)')
 
     def test_never_while_a_stream_of_hers_is_open(self):
         """Starting PortAudio again ends every stream: while one of hers is open (her speech, the
@@ -437,6 +450,7 @@ class NamedMic(unittest.TestCase):
         self.assertFalse(win.node_missing('sources', FakeSd.BT), 'her speech is over: read again, found')
         self.assertEqual(sd.restarts, 1)
         m = win.Mic(16000, FakeSd.BT)
+        self.t += 60
         self.assertTrue(win.node_missing('sources', 'Microphone (Nothing Here)'))
         self.assertEqual(sd.restarts, 1, 'the mic is open')
         self.assertFalse(m.stream.closed)
@@ -452,6 +466,31 @@ class NamedMic(unittest.TestCase):
         sd._terminate()
         win.Mic(16000).terminate()
         self.assertEqual((sd.restarts, sd.opened.pop()[1]['device']), (2, 4), "down: started before an open, even of the default")
+
+    def test_a_down_portaudio_is_started_whenever(self):
+        """The 10 s cap is for misses: PortAudio down (a start again failed) is started on the next look."""
+        sd = self.use(FakeSd(later=[FakeSd.BT]))
+        sd.fail_start = True
+        self.assertTrue(win.node_missing('sources', FakeSd.BT))
+        self.t += 1
+        self.assertFalse(win.node_missing('sources', FakeSd.BT), 'down: started at once, the cap or not')
+        self.assertEqual((sd.restarts, sd._initialized), (1, 1))
+
+    def test_a_stream_that_will_not_start_is_closed(self):
+        """A stream whose start fails is closed at once: left open (till the garbage collector) it
+        would keep the device list from being read again."""
+        sd = self.use(FakeSd(later=[FakeSd.BT]))
+        sd.no_stream_start = True
+        with self.assertRaises(RuntimeError):
+            win.Mic(16000, FakeSd.MIC)
+        with self.assertRaises(RuntimeError):
+            win.Player(24000)
+        self.assertEqual(len(sd.streams), 2)
+        self.assertTrue(all(s.closed for s in sd.streams), 'both closed')
+        self.assertEqual([s for s in win._STREAMS if not s.closed], [])
+        sd.no_stream_start = False
+        self.assertFalse(win.node_missing('sources', FakeSd.BT), 'nothing of hers open: read again, found')
+        self.assertEqual(sd.restarts, 1)
 
 
 class FakeSessions:

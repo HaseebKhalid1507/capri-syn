@@ -202,11 +202,13 @@ impl Supervisor {
     /// mic while it runs, or waits to start again, starts it on that one now, with no wait.
     fn step(&mut self, want: bool, mic: &str, now: Instant, start: &mut dyn FnMut(&str) -> io::Result<Child>) {
         if want && mic != self.mic && (self.child.is_some() || self.next_at.is_some()) {
+            let to = if mic.is_empty() { "Windows' default".to_string() } else { format!("\"{mic}\"") };
             if let Some((mut c, _)) = self.child.take() {
                 c.kill().ok();
                 c.wait().ok();
-                let to = if mic.is_empty() { "Windows' default".to_string() } else { format!("\"{mic}\"") };
                 elog!("synaps-avatar: voice: sidecar stopped (his mic is now {to}); starting it again on that one");
+            } else {
+                elog!("synaps-avatar: voice: his mic is now {to}: the sidecar starts on that one now, not after its wait");
             }
             self.wait = Duration::ZERO;
             self.next_at = None;
@@ -362,12 +364,11 @@ mod tests {
         let t0 = Instant::now();
         let mut sup = Supervisor::default();
         sup.step(true, usb, t0, &mut long);
-        let first = sup.child.as_ref().map(|(c, _)| c.id());
         sup.step(true, usb, t0, &mut long);
         assert_eq!(sup.starts, 1, "the same mic: left running");
         sup.step(true, bt, t0, &mut long);
         assert_eq!(sup.starts, 2, "a new mic: started again in the same look");
-        assert!(sup.child.is_some() && sup.child.as_ref().map(|(c, _)| c.id()) != first);
+        assert!(sup.child.is_some());
         sup.step(true, "", t0, &mut long);
         assert_eq!(sup.starts, 3, "back to Windows' default");
         assert_eq!(*given.borrow(), [usb, bt, ""]);

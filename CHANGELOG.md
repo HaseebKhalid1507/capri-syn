@@ -43,8 +43,12 @@
   Pro)`, not the two lines Sound settings shows; `docs/VOICE.md` says how to see the names). Her
   installer's Voice page writes it. A new one on `settings reload` starts her voice sidecar again on
   it.
-- A mic that connects after she started (a Bluetooth headset after sign-in) is found the next time she
-  listens: on a miss the sidecar reads the device list again, when no stream of hers is open.
+- A mic that connects after she started (a Bluetooth headset after sign-in) is found without a restart.
+  On a miss the sidecar reads the device list again (at most every 10 s, never while a stream of hers
+  is open). "Hey Capri", refused for a mic that's gone (`WAKE PAUSED · ITS SOURCE IS GONE`), is asked
+  for again every 30 s, so it comes back by itself; a talk press that finds the mic brings it back as
+  soon as the press ends. Linux too: a `CAPRI_VOICE_SOURCE` that's gone no longer keeps the wake word
+  off till a settings reload.
 - A control character or a name over 256 characters is a settings error (`--set` exits 2), not a
   sidecar that can never start.
 

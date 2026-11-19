@@ -1303,7 +1303,7 @@ mod tests {
         assert_eq!(v.mic, "", "Windows' default microphone unless he picked one");
         assert_eq!(Settings::parse("[voice]\nmic = \" Microphone (USB Audio) \"\n").unwrap().voice.mic, "Microphone (USB Audio)");
         assert!(Settings::parse("[voice]\nmic = 3\n").is_err());
-        for bad in ["\\u0000", "Mic\\u0000rophone", "Microphone\\t(USB)", "Mic\\u001b[31m", "Mic\\u0085"] {
+        for bad in ["\\u0000", "Mic\\u0000rophone", "Microphone\\t(USB)", "Mic\\u001b[31m", "Mic\\u0085rophone"] {
             let e = Settings::parse(&format!("[voice]\nmic = \"{bad}\"\n")).unwrap_err().to_string();
             assert!(e.contains("voice.mic") && e.contains("control characters"), "{bad}: {e}");
         }

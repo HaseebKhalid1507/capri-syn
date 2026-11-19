@@ -88,6 +88,9 @@ pub(super) struct Wake {
 
 /// Asked for, not answered: ask again after this long. Closed for a call or the lock: ask again this often.
 const WAKE_RETRY: Duration = Duration::from_secs(3);
+/// His named mic isn't there (SOURCE IS GONE): asked again this often, so one that connects later (a
+/// Bluetooth headset after sign-in) brings "Hey Capri" back by itself.
+const WAKE_GONE_RETRY: Duration = Duration::from_secs(30);
 
 /// A toggled turn (`talk toggle`): open until his pause, a second tap, Esc or `talk cancel`.
 #[derive(Clone, Copy, Debug)]
@@ -988,6 +991,13 @@ impl Avatar {
             }
             "mic-open" => {
                 self.voice.mic = Some(now);
+                // His mic was gone and this capture (a talk press) found it: "Hey Capri" is asked for
+                // again as soon as the capture ends, not after the rest of its 30 s wait.
+                let w = &mut self.voice.wake;
+                if w.paused.as_deref().is_some_and(|p| p.contains("SOURCE IS GONE")) {
+                    w.paused = None;
+                    w.retry_at = None;
+                }
                 if let Some(a) = self.voice.asked {
                     self.voice.stats.insert("hold_to_mic_ms".into(), ((now - a).as_millis() as u64).into());
                 }
@@ -1114,9 +1124,19 @@ impl Avatar {
                 let why = v.get("why").and_then(|t| t.as_str()).unwrap_or("").replace("NO MIC", "WAKE PAUSED");
                 let w = &mut self.voice.wake;
                 w.asked = None;
-                w.lost = why.contains("NO MODEL") || why.contains("TEST SIDECAR") || why.contains("SOURCE IS GONE");
-                w.retry_at = (!w.lost).then(|| now + if why.contains("FALSE STARTS") { Duration::from_secs(60) } else { WAKE_RETRY });
-                elog!("synaps-avatar: voice: wake word refused ({why})");
+                w.lost = why.contains("NO MODEL") || why.contains("TEST SIDECAR");
+                let wait = if why.contains("FALSE STARTS") {
+                    Duration::from_secs(60)
+                } else if why.contains("SOURCE IS GONE") {
+                    WAKE_GONE_RETRY
+                } else {
+                    WAKE_RETRY
+                };
+                w.retry_at = (!w.lost).then(|| now + wait);
+                // Once per reason: a mic that stays gone is asked for every 30 s.
+                if w.paused.as_deref() != Some(why.as_str()) {
+                    elog!("synaps-avatar: voice: wake word refused ({why})");
+                }
                 w.paused = Some(why);
                 self.voice_changed(cx);
             }

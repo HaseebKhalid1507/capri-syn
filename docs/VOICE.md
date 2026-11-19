@@ -52,10 +52,20 @@ those two lines, or as either one alone, it matches nothing. To see the names:
 
 The match is exact (case and spaces inside; the ends are trimmed) and only under WASAPI. A named mic
 that isn't there is said (NO MIC · ITS SOURCE IS GONE), never swapped for the default. One that
-connects later (a Bluetooth headset after sign-in) is found the next time she listens: on a miss the
-sidecar reads Windows' device list again, unless a stream of hers is open (her speech, the wake
-word's mic), as that would end it. A control character or a name over 256 characters is a settings
-error.
+connects later (a Bluetooth headset after sign-in) is found without a restart:
+
+- on a miss the sidecar reads Windows' device list again, at most once every 10 s, and never while a
+  stream of hers is open (her speech, the wake word's mic): that would end it;
+- the wake word, refused for a mic that's gone (`WAKE PAUSED · ITS SOURCE IS GONE`), is asked for
+  again every 30 s, so "Hey Capri" comes back by itself within about 30 s of the headset connecting
+  (a minute if she was speaking at that ask);
+- a talk press finds it at once (unless the list was read in the last 10 s: the next press does), and
+  the wake word is asked for again as soon as that press ends.
+
+While the list is read again (PortAudio starting again: a fraction of a second, more with many
+devices) a new stream of hers waits, and a line the sidecar logs in that moment is lost (sounddevice
+points stderr at `nul` while PortAudio starts). A control character or a name over 256 characters is
+a settings error.
 
 ## Talking to her: hold, or toggle
 
@@ -236,7 +246,9 @@ thresholds) was fitted on stock synthetic voices only (Kokoro packs, espeak-ng),
   SCREEN`), she is hidden, the screen is locked, he is in a call (or `pactl` can't say). It comes back when
   the cause clears (the avatar asks again every 3 s; the sidecar refuses while locked or in a call). Push-to-
   talk, a toggle or hands-free close it for their turn, and it comes back after. A stream that dies is not
-  reopened (`WAKE OFF · MIC LOST`) until the settings are reloaded.
+  reopened (`WAKE OFF · MIC LOST`) until the settings are reloaded. A named mic that isn't there
+  (`WAKE PAUSED · ITS SOURCE IS GONE`) is asked for again every 30 s, and at once after a talk press
+  that found it.
 - **A candidate needs speech:** Silero must hear at least ~0.1 s of speech in the last second, else it is
   dropped before Whisper (no check, not counted by the limit). Music and doors make most stage-1 candidates.
 - **His personal layer (optional, local, never committed):** `tools/capri-wake-tune --fit` builds
