@@ -22,9 +22,10 @@
 ;             [/VOICEFROM="C:\...\capri-syn-voice-setup.exe" or a URL] [/TASKS=autostart]
 ; The defaults are the wizard's: Synaps if it's needed, her art downloaded, autostart on, her voice
 ; when Windows has a microphone (on a first install only). Her voice comes from /VOICEFROM (a file,
-; or an https URL), else the latest release; never from a file found by name beside this setup (that
-; folder is usually Downloads). With neither, the page says it comes with her first release, and
-; stays off. Run as administrator, Setup asks first (she and her daemon would run elevated).
+; or an https URL), else her own release (v<AppVersion>; never the latest: steps.ps1 voice-check);
+; never from a file found by name beside this setup (that folder is usually Downloads). With neither,
+; the page says it comes with her first release, and stays off. Run as administrator, Setup asks
+; first (she and her daemon would run elevated).
 ; install.ps1 runs it with /SYNAPS=skip /PACK=skip /VOICE=off /BY=install.ps1: those are its own
 ; steps (the same steps.ps1), and her settings and its cache are its own to remove.
 

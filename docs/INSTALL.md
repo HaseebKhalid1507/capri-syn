@@ -182,7 +182,12 @@ she runs through XWayland, the X server those desktops keep for X apps.
 - **Windows:** the installers are unsigned, so a browser download meets SmartScreen ("More info",
   then "Run anyway"); Windows 10 and Windows 11 on Arm are untested; a click on one of her notifications does nothing (as
   on Linux); her voice brings its own VC++ runtime but hasn't yet run on a PC without the Visual C++
-  Redistributable. Linux has no tray icon yet: HIDE's chip is the way back there.
+  Redistributable; live audio is still to check on real hardware: her desktop checks ran in a
+  Windows 11 VM, with no real audio ([WINDOWS.md](WINDOWS.md)). Linux has no tray icon yet: HIDE's
+  chip is the way back there.
+- **`XDG_RUNTIME_DIR` unset:** she and her voice sidecar look for the Linux socket in different
+  places: she in the temp dir (`$TMPDIR`, else `/tmp`), the sidecar in `/run/user/<uid>`. Set it, or
+  set `CAPRI_VOICE_SOCK` for both. It isn't aligned yet because that would change how she behaves.
 
 ## Flags
 
