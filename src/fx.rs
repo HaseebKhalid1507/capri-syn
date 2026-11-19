@@ -2203,6 +2203,7 @@ mod bolt_tests {
     /// A lit piece from a fuzzed strike (scale 440, u 0.064): a 100° bend whose own cross-section
     /// is thin between wider ones. Sized by the bend's width alone, the next cross-section's
     /// inner corner poked 0.55 px past the incoming leg's inner edge.
+    #[allow(clippy::approx_constant)] // 6.28 is a fuzzed width, not τ.
     fn thin_bend() -> Vec<Rib> {
         vec![
             rib(-1961.0, 805.0, 0.0, 0.0),
