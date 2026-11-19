@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Windows: one setup, called capri-syn
+
+- `capri-syn-setup-x86_64.exe` (was `synaps-avatar-setup-x86_64.exe`; the same AppId, so an older install
+  upgrades in place; the voice one is `capri-syn-voice-setup-x86_64.exe`) leaves a working Capri on a PC with
+  nothing installed: Synaps (the pinned release), its daemon (one on another protocol is said, with the fix), her
+  art downloaded and built on his machine (CapriCore and lachy's, never in the installer), her voice from her own
+  release, and the sign-in. A step that can't finish says why on the finish page, with the one command to retry.
+  install.ps1 runs the same steps (`packaging/windows/steps.ps1`).
+
 ### Licence: MIT, with exclusions
 - capri-syn is MIT (`LICENSE`, © 2026 Haseeb Khalid), except the paths README's Credits & legal names
   (GPUI, parts of synaps-client, `docs/media`, the icon, the wake-word model), which keep their own terms.

@@ -6,7 +6,7 @@
 # --prefix with spaces over a pack he made himself (moved aside, never removed), and --purge (her
 # files only).
 #
-#   .\installer\test-windows.ps1 -Setup .\packaging\windows\Output\synaps-avatar-setup-....exe [-Ref SHA]
+#   .\installer\test-windows.ps1 -Setup .\packaging\windows\Output\capri-syn-setup-....exe [-Ref SHA]
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'The logs are echoed beside the checks; the functions return exit codes.')]
 param(
     [Parameter(Mandatory)] [string]$Setup,
@@ -47,8 +47,22 @@ function Invoke-Installer([string]$Name, [string[]]$Flags) {
 }
 function Get-RunValue([string]$Name) { (Get-ItemProperty -Path $runKey -Name $Name -ErrorAction SilentlyContinue).$Name }
 
+# What an installer of hers could make in %LOCALAPPDATA% and %APPDATA%: synaps* and capri* at the
+# top, anything in Programs (her folder, a --prefix's), her Start-menu entries. Not the rest: the
+# runner's own programs come and go there (a browser made Mozilla mid-test on #97's run 44501610793).
+function Get-OursHere {
+    $start = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'
+    @(Get-ChildItem -Force $env:LOCALAPPDATA, $env:APPDATA -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^(synaps|capri)|^Programs$' }
+        Get-ChildItem -Force (Join-Path $env:LOCALAPPDATA 'Programs') -ErrorAction SilentlyContinue
+        Get-ChildItem -Force $start -ErrorAction SilentlyContinue | Where-Object { $_.Name -match 'synaps|capri' }) |
+        ForEach-Object { $_.FullName } | Where-Object { $_ -notmatch 'capri-install-test' }
+}
+
 # 0. A dry run touches nothing; from GitHub as `irm | iex` users get it, when -Ref is given.
-$before = @(Get-ChildItem -Force $env:LOCALAPPDATA, $env:APPDATA -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+$before = @(Get-OursHere)
+# And everything at their top, as before: logged, never failed on (the runner's own come and go).
+function Get-AllHere { @(Get-ChildItem -Force $env:LOCALAPPDATA, $env:APPDATA -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }) }
+$beforeAll = @(Get-AllHere)
 if ($Ref) {
     $env:CAPRI_INSTALL_REF = $Ref
     $remote = "& ([scriptblock]::Create((Invoke-RestMethod 'https://raw.githubusercontent.com/HaseebKhalid1507/capri-syn/$Ref/install.ps1'))) --dry-run --voice"
@@ -82,8 +96,11 @@ if ($Ref) {
 }
 $code = Invoke-Installer 'dry-run' @('--dry-run', '--artifact', $Setup)
 Check ($code -eq 0) "--dry-run exits 0 ($code)"
-$after = @(Get-ChildItem -Force $env:LOCALAPPDATA, $env:APPDATA -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
-$new = @(Compare-Object $before $after -PassThru | Where-Object { $_ -notmatch 'Temp|capri-install-test' })
+$after = @(Get-OursHere)
+$new = @($after | Where-Object { $before -notcontains $_ })
+$nowAll = @(Get-AllHere)
+$all = @($nowAll | Where-Object { $beforeAll -notcontains $_ } | ForEach-Object { "+ $_" }) + @($beforeAll | Where-Object { $nowAll -notcontains $_ } | ForEach-Object { "- $_" })
+Write-Host "  %LOCALAPPDATA% and %APPDATA% during the dry run, all of it (not hers is logged only): $(if ($all) { $all -join '; ' } else { 'no change' })"
 Check ($new.Count -eq 0) "--dry-run made nothing in %LOCALAPPDATA% or %APPDATA% ($($new -join ', '))"
 Check (-not (Test-Path $app)) '--dry-run installed nothing'
 
@@ -112,7 +129,8 @@ Check ($text -match 'pack `Capri` ok: \d+ frames') "her log: $([regex]::Match($t
 $ErrorActionPreference = 'Continue'
 $status = (& $synaps daemon status 2>&1 | Out-String)
 $ErrorActionPreference = 'Stop'
-Check ($status -match 'daemon: running') 'the Synaps daemon runs'
+# "running" alone: it answers (another protocol's is "running (not answering)", exit 1).
+Check ($status -match '(?m)^daemon: running\r?$') 'the Synaps daemon runs and answers'
 Check ($status -match 'protocol: 3') 'protocol 3 (her client)'
 Check ((Get-RunValue 'synaps-daemon') -match '^"[^"]*\\conhost\.exe" --headless "[^"]*synaps\.exe" daemon --detach$') 'the daemon starts at sign-in, hidden (Run\synaps-daemon: conhost --headless)'
 Check (-not (Get-RunValue 'synaps-avatar')) 'no autostart for her (--no-autostart)'

@@ -95,6 +95,19 @@ class Parity(unittest.TestCase):
         self.assertIn("synaps_installer_ps1_sha256", steps)
         self.assertNotRegex(code(block(PS, "function Install-Synaps", "\n}\n")), r"api\.github\.com|releases/latest")
 
+    def test_her_voice_is_her_own_release_never_latest(self):
+        voice = code(block(STEPS.read_text(encoding="utf-8"), "function Find-Voice", "\n}\n"))
+        self.assertNotIn("releases/latest", voice)
+        self.assertIn("releases/download/$Release/", voice)
+        # Both of her Windows installers name the release: her installer its own version, install.ps1
+        # the one in her Apps entry (the setup it just ran).
+        iss = (ROOT / "packaging/windows/synaps-avatar.iss").read_text(encoding="utf-8")
+        self.assertIn("'mics voice-check -Release v{#AppVersion}'", iss)
+        self.assertIn("'voice -Release v{#AppVersion} ", iss)
+        extras = code(block(PS, "function Install-Extras", "\n}\n"))
+        self.assertIn("@('-Release', \"v$ver\")", extras)
+        self.assertEqual(extras.count("$herRelease"), 3)
+
     def test_install_ps1_is_ascii(self):
         # Windows PowerShell 5.1 reads a script without a BOM as ANSI.
         bad = [(i + 1, l) for i, l in enumerate(PS.splitlines()) if not l.isascii()]
@@ -126,6 +139,77 @@ class Parity(unittest.TestCase):
         # `irm | iex` can't pass flags: both take CAPRI_INSTALL_FLAGS when given none.
         self.assertIn("CAPRI_INSTALL_FLAGS", block(SH, "main() {", "\n}\n"))
         self.assertIn("CAPRI_INSTALL_FLAGS", block(PS, "function Invoke-CapriInstall", "\n}\n"))
+
+    # The daemon step's three stops, said the same way on both (her client speaks synaps_protocol
+    # exactly): a daemon that doesn't say its protocol; one that speaks another right after this run
+    # installed or upgraded Synaps (an older one still running: installing the pin again won't help);
+    # and one that speaks another anyway.
+    DAEMON_STOPS = ("doesn't say which protocol it speaks", "is installed, but the daemon still running is", "(exact match)")
+
+    def test_a_daemon_that_isnt_hers_stops_windows(self):
+        steps = code(block(STEPS.read_text(encoding="utf-8"), "function Start-Daemon {", "\n}\n"))
+        for why in self.DAEMON_STOPS:
+            line = next((l for l in steps.splitlines() if why in l), "")
+            self.assertIn("Stop-Step", line, f"steps.ps1's daemon step doesn't stop on: {why}")
+        # An unknown protocol is checked first, never let through as "running (protocol ?)".
+        self.assertLess(steps.index("-eq '?'"), steps.index("Result \"daemon: running"))
+        self.assertIn("$script:Fresh", steps)
+        # Both of her Windows installers tell it when they just installed Synaps, and install.ps1
+        # stops on it as install.sh does.
+        self.assertIn("'-Fresh'", block(PS, "function Start-Daemon", "\n}\n"))
+        self.assertIn("Stop-Install", block(PS, "function Start-Daemon", "\n}\n"))
+        self.assertIn("daemon -Fresh", (ROOT / "packaging/windows/synaps-avatar.iss").read_text(encoding="utf-8"))
+
+    def test_a_daemon_that_isnt_hers_stops_linux_too(self):
+        sh = code(block(SH, "step_daemon() {", "\n}\n"))
+        if self.DAEMON_STOPS[0] not in sh:
+            self.skipTest("install.sh's daemon step says these once #98 is in")
+        for why in self.DAEMON_STOPS:
+            line = next((l for l in sh.splitlines() if why in l), "")
+            self.assertIn("die ", line, f"install.sh's daemon step doesn't stop on: {why}")
+
+    # `synaps daemon status` as Synaps 0.11 and 0.12 print it (src/cmd/daemon.rs `status`): "running"
+    # only when the daemon answered this synaps' ping, exit 0. One on another protocol refuses the
+    # ping: "running (not answering)", exit 1, its protocol from daemon.json. Both installers must
+    # read that as a daemon that runs (then stop on its protocol), whatever the exit code.
+    STATUS = {
+        "hers": ("daemon: running\nsocket: /run/user/1000/synaps/daemon.sock\npid: 4242  version: 0.12.0  protocol: 3  started: 2026-11-19T00:00:00Z\nuptime: 5s  sessions: 1\n", 0, True, "3"),
+        "another protocol": ("daemon: running (not answering)\nsocket: /run/user/1000/synaps/daemon.sock\npid: 4242  version: 0.10.2  protocol: 2  started: 2026-11-19T00:00:00Z\n", 1, True, "2"),
+        "no daemon.json": ("daemon: running\nsocket: /run/user/1000/synaps/daemon.sock\nuptime: 5s  sessions: 1\n", 0, True, None),
+        "not running": ("daemon: not running (auto-starts on first --attach)\nsocket: /run/user/1000/synaps/daemon.sock\n", 1, False, None),
+        "stale": ("daemon: stale (pid dead)\nsocket: /run/user/1000/synaps/daemon.sock\npid: 4242  version: 0.12.0  protocol: 3  started: 2026-11-19T00:00:00Z\n", 1, False, "3"),
+    }
+
+    def test_both_read_daemon_status_the_same(self):
+        ps = block(STEPS.read_text(encoding="utf-8"), "function Get-DaemonStatus", "\n}\n")
+        m = re.search(r"\$alive = \$t -match '([^']+)'", ps)
+        self.assertIsNotNone(m, "steps.ps1's Get-DaemonStatus has no Alive (a daemon that runs, whatever the exit code)")
+        ps_alive = m.group(1)
+        ps_proto = re.search(r"\$t -match '(protocol: [^']+)'", ps).group(1)
+        self.assertNotIn("LASTEXITCODE", next(l for l in ps.splitlines() if "$alive =" in l), "Alive never hangs on the exit code")
+        sh = code(block(SH, "step_daemon() {", "\n}\n"))
+        sh_alive = re.search(r"""grep -q '(daemon: [^']+)'""", sh).group(1)
+        sh_proto = re.search(r"""grep -o '(protocol: [^']+)'""", sh).group(1)
+        for name, (text, rc, alive, proto) in self.STATUS.items():
+            with self.subTest(name):
+                # PowerShell's -match: .NET, case-insensitive; grep -q: a line holds it.
+                self.assertEqual(bool(re.search(ps_alive, text, re.I | re.M)), alive, f"steps.ps1, exit {rc}")
+                self.assertEqual(bool(re.search(sh_alive, text)), alive, f"install.sh, exit {rc}")
+                m = re.search(ps_proto, text, re.I)
+                self.assertEqual(m.group(1) if m else None, proto, "steps.ps1's protocol")
+                m = re.search(sh_proto, text)
+                self.assertEqual(m.group(0).split()[-1] if m and m.group(0).split()[-1].isdigit() else None, proto, "install.sh's protocol")
+
+    def test_windows_checks_the_protocol_of_any_daemon_that_runs(self):
+        steps = code(block(STEPS.read_text(encoding="utf-8"), "function Start-Daemon {", "\n}\n"))
+        # After the wait: "not running" only when none runs; the protocol stops come before "running",
+        # and a hung one of hers (Alive, not Up) is never "running".
+        self.assertIn("if (-not $st.Alive) {", steps)
+        self.assertLess(steps.index("if (-not $st.Alive) {"), steps.index("-eq '?'"))
+        self.assertLess(steps.index("$script:Fresh"), steps.rindex("if (-not $st.Up) {"))
+        self.assertLess(steps.rindex("if (-not $st.Up) {"), steps.index("Result \"daemon: running"))
+        # Step 1's upgrade warning: any daemon the old Synaps left, answering or not.
+        self.assertIn("(Get-DaemonStatus $mine).Alive", STEPS.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

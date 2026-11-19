@@ -1,4 +1,4 @@
-; synaps-avatar's VOICE installer (Inno Setup 6): the voice sidecar's bundle, beside her. Per user, no
+; capri-syn's VOICE installer (Inno Setup 6): the voice sidecar's bundle, beside her. Per user, no
 ; admin. A separate download, so her own installer stays small (~9 MB; this one is ~45 MB). Built by
 ; build-voice.ps1 (CI: the `windows-voice-installer` job, an artifact); docs/WINDOWS.md says what it
 ; does.
@@ -23,10 +23,11 @@
 #define HerAppId "{2147942F-E90C-4536-BEA2-8AB4B7F51734}"
 
 [Setup]
+; The AppId of every synaps-avatar voice install before the rename: an upgrade replaces it in place.
 AppId={{B7E0CA8F-064C-4B7F-939A-41681146411C}
-AppName=synaps-avatar voice
+AppName=capri-syn voice
 AppVersion={#AppVersion}
-AppVerName=synaps-avatar voice {#AppVersion} ({#Build})
+AppVerName=capri-syn voice {#AppVersion} ({#Build})
 AppPublisher=Haseeb Khalid
 AppPublisherURL=https://github.com/HaseebKhalid1507/capri-syn
 PrivilegesRequired=lowest
@@ -41,8 +42,8 @@ WizardStyle=modern
 Compression=lzma2/max
 SolidCompression=yes
 OutputDir=Output
-OutputBaseFilename=synaps-avatar-voice-setup-{#AppVersion}-{#Build}
-UninstallDisplayName=synaps-avatar voice
+OutputBaseFilename=capri-syn-voice-setup-{#AppVersion}-{#Build}
+UninstallDisplayName=capri-syn voice
 ; A running sidecar holds python.exe: an upgrade closes it (she starts it again after).
 CloseApplications=force
 RestartApplications=no
