@@ -3231,7 +3231,7 @@ impl Avatar {
     /// again once the last is in (`settings_written`): she ends up running what the file says.
     pub(super) fn settings_reload(&mut self, now: Instant) -> String {
         let again = self.prefs_io.reload();
-        self.menu_save = crate::line::MenuSave::Fine;
+        self.menu_save = self.menu_save.reloaded(self.prefs_io.pending().any(|j| j.menu));
         let r = self.settings_reload_now(now);
         if again {
             let n = self.prefs_io.pending().count();

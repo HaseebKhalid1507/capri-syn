@@ -228,7 +228,7 @@ pub struct Line {
     sent: Vec<String>,
     recall: Option<usize>,
     esc_at: Option<Instant>,
-    note: Option<String>,
+    note: settings::Note,
     /// A quiet tip under a failed turn (`Trouble::tip`): not a warning, so not the note's style.
     tip: Option<String>,
     /// The command chip last copied (its label reads `copied`).
@@ -278,6 +278,9 @@ pub struct Line {
     relax_owed: bool,
     /// The field's height as last laid out (one line: the cog's; Settings' bar is as tall).
     field_h: std::rc::Rc<std::cell::Cell<f32>>,
+    /// The cog (chat) or `◂ CHAT` (Settings) as last painted: x, its bottom's height over the
+    /// window's bottom, w, h (`state`: the two must be in one spot).
+    spot: std::rc::Rc<std::cell::Cell<Option<[f32; 4]>>>,
     on_ask: OnAsk,
     _subs: Vec<Subscription>,
 }
@@ -386,7 +389,7 @@ impl Line {
                     if this.input.read(cx).value().is_empty() {
                         this.relax();
                     }
-                    this.note = None;
+                    this.note.clear();
                     cx.notify();
                 }
                 _ => {}
@@ -429,7 +432,7 @@ impl Line {
             sent,
             recall: None,
             esc_at: None,
-            note: None,
+            note: Default::default(),
             tip: None,
             copied_cmd: None,
             parked: false,
@@ -457,6 +460,7 @@ impl Line {
             keep_chat: false,
             relax_owed: false,
             field_h: std::rc::Rc::new(std::cell::Cell::new(settings::FIELD_H0)),
+            spot: Default::default(),
             on_ask,
             _subs: subs,
         };
@@ -561,13 +565,14 @@ impl Line {
             "holding": self.hold_at.is_some(),
             "allow": self.allow_box.get().map(|b| [f32::from(b.origin.x), f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height)]),
             "risky": self.prompt().is_some_and(risky),
-            "note": self.note,
+            "note": self.note.on(self.nav.page, Instant::now()),
             "tip": self.tip,
             "prompts": self.snap.prompts.len(),
             "prompt_ix": self.prompt_ix,
             "height": self.height,
             "scroll": [f32::from(self.scroll.offset().y), f32::from(self.scroll.max_offset().y)],
             "page": self.nav.page.key(),
+            "spot": self.spot.get(),
             "sel": self.sel,
         })
     }
@@ -665,13 +670,13 @@ impl Line {
                 }
                 self.relax();
                 self.recall = None;
-                self.note = None;
+                self.note.clear();
                 self.tip = None;
                 self.pinned_up = false;
                 self.scroll.scroll_to_bottom();
             }
             // Refused: the text stays in the field, and he is told why.
-            Err(why) => self.note = Some(format!("NOT SENT · {} · text kept", why.to_uppercase())),
+            Err(why) => self.say(Page::Chat, format!("NOT SENT · {} · text kept", why.to_uppercase()), cx),
         }
         cx.notify();
     }
@@ -681,7 +686,7 @@ impl Line {
         if self.input.read(cx).value().trim().is_empty() {
             self.set_field(text, window, cx);
         }
-        self.note = Some(format!("NOT SENT · {} · text kept", why.to_uppercase()));
+        self.say(Page::Chat, format!("NOT SENT · {} · text kept", why.to_uppercase()), cx);
         cx.notify();
     }
 
@@ -690,7 +695,7 @@ impl Line {
             return;
         }
         if let Err(e) = (self.on_ask)(Ask::Answer(id, value), cx) {
-            self.note = Some(format!("NOT ANSWERED · {}", e.to_uppercase()));
+            self.say(Page::Chat, format!("NOT ANSWERED · {}", e.to_uppercase()), cx);
         }
         self.secret = None;
         let _ = window;
@@ -712,11 +717,27 @@ impl Line {
         self.snap.rows.iter().rev().find(|r| r.who == Who::Her && !r.text.trim().is_empty()).map(|r| r.text.as_str())
     }
 
+    /// Her note, said on `page` (in place of its keys); on Settings it goes by itself.
+    fn say(&mut self, page: Page, text: impl Into<String>, cx: &mut Context<Line>) {
+        if let Some(until) = self.note.say(page, text, Instant::now()) {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(until.saturating_duration_since(Instant::now())).await;
+                this.update(cx, |l, cx| {
+                    if l.note.expire(until) {
+                        cx.notify();
+                    }
+                })
+                .ok();
+            })
+            .detach();
+        }
+    }
+
     fn copy_last(&mut self, cx: &mut Context<Line>) {
         if let Some(t) = self.last_reply().map(str::to_string) {
             (self.on_ask)(Ask::Copy(t), cx).ok();
             self.copied_at = Some(Instant::now());
-            self.note = Some("COPIED HER LAST REPLY".into());
+            self.say(self.nav.page, "COPIED HER LAST REPLY", cx);
             cx.notify();
         }
     }
@@ -725,10 +746,10 @@ impl Line {
         let last = self.snap.rows.iter().rev().filter(|r| r.who == Who::Her).find_map(|r| links(&r.text).pop());
         match last {
             Some(u) => {
-                self.note = Some(format!("OPENED {}", one(&u, 60)));
+                self.say(self.nav.page, format!("OPENED {}", one(&u, 60)), cx);
                 (self.on_ask)(Ask::OpenUrl(u), cx).ok();
             }
-            None => self.note = Some("NO LINK IN HER REPLIES".into()),
+            None => self.say(self.nav.page, "NO LINK IN HER REPLIES", cx),
         }
         cx.notify();
     }
@@ -761,7 +782,7 @@ impl Line {
                 }
                 Esc::Hush => {
                     (self.on_ask)(Ask::Hush, cx).ok();
-                    self.note = Some("HUSHED · THE REST IS HERE".into());
+                    self.say(self.nav.page, "HUSHED · THE REST IS HERE", cx);
                     cx.notify();
                     return true;
                 }
@@ -776,15 +797,15 @@ impl Line {
                 if self.esc_at.is_some_and(|t| now < t + ESC_AGAIN) {
                     self.esc_at = None;
                     (self.on_ask)(Ask::Abort, cx).ok();
-                    self.note = Some("ABORTED".into());
+                    self.say(Page::Chat, "ABORTED", cx);
                 } else {
                     // One Esc closes after a beat unless a second one (abort) follows.
                     self.esc_at = Some(now);
-                    self.note = Some("ESC AGAIN TO ABORT".into());
+                    self.say(Page::Chat, "ESC AGAIN TO ABORT", cx);
                     cx.spawn_in(window, async move |this, cx| {
                         cx.background_executor().timer(ESC_AGAIN).await;
                         this.update_in(cx, |l, window, cx| {
-                            if l.esc_at == Some(now) {
+                            if settings::esc_closes(l.esc_at, now, l.nav.page) {
                                 l.close(true, window, cx);
                             }
                         })
@@ -905,7 +926,7 @@ impl Line {
     /// A risky allow, held (A or a click on ALLOW): it fires at HOLD unless let go first.
     fn start_hold(&mut self, id: u64, now: Instant, window: &mut Window, cx: &mut Context<Line>) {
         self.hold_at = Some(now);
-        self.note = None;
+        self.note.clear();
         cx.spawn_in(window, async move |this, cx| {
             cx.background_executor().timer(HOLD).await;
             this.update_in(cx, |l, window, cx| {
@@ -924,7 +945,7 @@ impl Line {
     fn let_go(&mut self, cx: &mut Context<Line>) {
         if let Some(t0) = self.hold_at.take() {
             if t0.elapsed() < HOLD {
-                self.note = Some(format!("NOT ALLOWED · HOLD A FOR {:.2} s TO ALLOW THIS ONE", HOLD.as_secs_f32()));
+                self.say(Page::Chat, format!("NOT ALLOWED · HOLD A FOR {:.2} s TO ALLOW THIS ONE", HOLD.as_secs_f32()), cx);
             }
             cx.notify();
         }
@@ -1644,7 +1665,8 @@ impl Render for Line {
                 .child(div().flex_1().text_color(rgb(pal.text)).child(c))
         });
         // A failed turn's tip stands alone: the legend would bury it.
-        let tip = self.tip.clone().filter(|_| self.note.is_none());
+        let note = self.note.on(Page::Chat, Instant::now()).map(str::to_string);
+        let tip = self.tip.clone().filter(|_| note.is_none());
         // Settings has its keys in its bar (`settings_el`): no row under it.
         let hint = if self.mode == Mode::Prompt || tip.is_some() {
             None
@@ -1662,12 +1684,12 @@ impl Render for Line {
             .flex()
             .flex_wrap()
             .gap_x(px(10.0))
-            .gap_y(px(2.0))
+            .gap_y(px(settings::KEYS_GAP))
             .px(px(PAD))
-            .pt(px(4.0))
-            .pb(px(8.0))
+            .pt(px(settings::KEYS_PT))
+            .pb(px(settings::KEYS_PB))
             .text_size(px(settings::SMALL))
-            .children(self.note.clone().map(|n| div().text_color(rgb(pal.accent)).font_weight(FontWeight::BOLD).child(n)))
+            .children(note.map(|n| div().text_color(rgb(pal.accent)).font_weight(FontWeight::BOLD).child(n)))
             .children(tip.map(|n| div().text_size(px(13.0)).text_color(rgb(pal.text)).child(n)))
             .children(hint.map(|h| div().font_weight(FontWeight::MEDIUM).text_color(rgb(theme::mix(pal.dim, pal.text, 0.2))).child(h)));
         // Laid out at its natural height (absolute, unconstrained) and measured: the window

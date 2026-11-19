@@ -9,7 +9,7 @@ use crate::settings::{Attention, Edit, Settings};
 use crate::theme::{self, Cut, Fill, tracked};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// The Line's pages.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -146,7 +146,7 @@ pub fn next_attention<'a>(pending: impl Iterator<Item = &'a Pref>, running: Atte
 }
 
 /// Her menu's ATTENTION row, under its value: why its last click didn't stick (the write was
-/// refused, or hangs). Until an attention write lands, or a reload.
+/// refused, or hangs). Until an attention write lands (a reload keeps it: [`MenuSave::reloaded`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MenuSave {
     #[default]
@@ -168,6 +168,28 @@ impl MenuSave {
     /// A write hangs; `menu`: a change of the menu's is among those waiting.
     pub fn stuck(self, menu: bool) -> MenuSave {
         if menu && self == MenuSave::Fine { MenuSave::Stuck } else { self }
+    }
+
+    /// A `settings reload`: a refusal stands (until an attention write lands), and so does a
+    /// hang while a change of the menu's is still waiting (`menu`).
+    pub fn reloaded(self, menu: bool) -> MenuSave {
+        match self {
+            MenuSave::Stuck if !menu => MenuSave::Fine,
+            s => s,
+        }
+    }
+
+    /// The row's second line while her menu is open (`kept`: what it said in this opening):
+    /// as said; gone meanwhile (its write landed), kept unseen as room, so the rows under it
+    /// don't move up under his next click. The text, and whether it shows.
+    pub fn line(self, kept: &mut Option<&'static str>) -> Option<(&'static str, bool)> {
+        match self.says() {
+            Some(t) => {
+                *kept = Some(t);
+                Some((t, true))
+            }
+            None => kept.map(|t| (t, false)),
+        }
     }
 
     /// The row's second line.
@@ -244,6 +266,61 @@ pub(super) fn hold_fires(hold_at: Option<Instant>, started: Instant, page: Page,
     hold_at == Some(started) && same_prompt && page == Page::Chat && mode == Mode::Prompt
 }
 
+/// A note on Settings (COPIED, HUSHED) goes by itself after this: the page has no field to
+/// type in, which is what clears one on chat.
+pub(super) const FLASH: Duration = Duration::from_millis(1500);
+
+/// Her note in place of the keys (COPIED, ESC AGAIN TO ABORT, NOT SENT · … · text kept): said
+/// on a page and shown only there; on Settings it goes after [`FLASH`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct Note {
+    text: Option<String>,
+    page: Page,
+    until: Option<Instant>,
+}
+
+impl Note {
+    /// Said on `page` at `now`; on Settings, when it goes (its timer calls [`Note::expire`]).
+    pub fn say(&mut self, page: Page, text: impl Into<String>, now: Instant) -> Option<Instant> {
+        let until = (page == Page::Settings).then(|| now + FLASH);
+        *self = Note { text: Some(text.into()), page, until };
+        until
+    }
+
+    pub fn clear(&mut self) {
+        *self = Note::default();
+    }
+
+    /// What `page` shows at `now`.
+    pub fn on(&self, page: Page, now: Instant) -> Option<&str> {
+        self.text.as_deref().filter(|_| self.page == page && self.until.is_none_or(|u| now < u))
+    }
+
+    /// Its timer is up: gone if it is still that note (true: redraw).
+    pub fn expire(&mut self, until: Instant) -> bool {
+        let gone = self.text.is_some() && self.until == Some(until);
+        if gone {
+            self.clear();
+        }
+        gone
+    }
+}
+
+/// The page changed (to `to`): what was said on the other one goes, and a pending Esc (the one
+/// that closes the Line a beat later unless a second aborts) with it.
+pub(super) fn page_left(note: &mut Note, esc_at: &mut Option<Instant>, to: Page) {
+    if note.page != to {
+        note.clear();
+    }
+    *esc_at = None;
+}
+
+/// One Esc during a turn (at `armed`) closes the Line a beat later: only if it is still that
+/// Esc, on chat.
+pub(super) fn esc_closes(esc_at: Option<Instant>, armed: Instant, page: Page) -> bool {
+    esc_at == Some(armed) && page == Page::Chat
+}
+
 /// The text field's height (one line) until it has been laid out: Settings' bar is as tall as
 /// the field's, so the swap moves nothing under it.
 pub(super) const FIELD_H0: f32 = 52.0;
@@ -252,9 +329,27 @@ const COG_W: f32 = 34.0;
 const BACK_W: f32 = 84.0;
 /// Her line's slot on the Settings page.
 const QUOTE_H: f32 = 28.0;
-/// How far chat's cog sits above Settings' bar's `◂ CHAT` with no room to spare: chat's row of
-/// keys under its field (4 + a line + 8) less the bar's 8 under it.
-const BAR_DROP: f32 = 4.0 + super::LINE_H;
+/// Chat's row of keys under its field: the room over and under its line.
+pub(super) const KEYS_PT: f32 = 4.0;
+pub(super) const KEYS_PB: f32 = 8.0;
+/// Under `◂ CHAT` in Settings' bar.
+const BAR_PB: f32 = 8.0;
+/// Under Settings' bar, always: chat's row of keys less the bar's own room under `◂ CHAT`, so
+/// `◂ CHAT` sits where the cog was, whichever page is the taller (r62 gave it only the room
+/// to spare: with Settings the taller, as on a first run's empty chat, it sat 27 px low).
+const BAR_DROP: f32 = KEYS_PT + super::LINE_H + KEYS_PB - BAR_PB;
+
+/// How far over the panel's bottom the cog (chat, its keys on `key_rows` rows) or `◂ CHAT`
+/// (Settings) sits: the panel keeps its bottom edge, so this is where it is on screen.
+pub(super) fn spot_lift(page: Page, key_rows: usize) -> f32 {
+    match page {
+        Page::Chat => KEYS_PT + key_rows as f32 * super::LINE_H + key_rows.saturating_sub(1) as f32 * KEYS_GAP + KEYS_PB,
+        Page::Settings => BAR_PB + BAR_DROP,
+    }
+}
+
+/// Between chat's rows of keys, when a long note puts them on two.
+pub(super) const KEYS_GAP: f32 = 2.0;
 /// A row's height, a sub-line ("voice is off") inside it: the page is as tall locked or not.
 const ROW_H: f32 = 32.0;
 /// The page's small type (a version, a lock, a reason, the hints): px.
@@ -332,6 +427,7 @@ impl Line {
             .flex_none()
             .w(px(COG_W))
             .cursor_pointer()
+            .child(self.spot_probe())
             .child(theme::backdrop(cut, Fill::framed(pal.field, pal.border, 1.5)))
             .child(center().child(gear(pal.accent, pal.field, 15.0, turn)))
             .child(center().invisible().group_hover("cog", |s| s.visible()).child(theme::backdrop(cut, Fill::solid(pal.accent))).child(gear(pal.ink, pal.accent, 15.0, turn)))
@@ -343,6 +439,20 @@ impl Line {
                     this.page_changed(window, cx);
                 }),
             )
+    }
+
+    /// Where the cog or `◂ CHAT` is painted, for `state` (`spot`).
+    fn spot_probe(&self) -> impl IntoElement {
+        let spot = self.spot.clone();
+        canvas(
+            move |b, window, _| {
+                let vh = f32::from(window.viewport_size().height);
+                spot.set(Some([f32::from(b.left()), vh - f32::from(b.bottom()), f32::from(b.size.width), f32::from(b.size.height)]));
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full()
     }
 
     /// Settings' way back, in the cog's spot (he leaves where he came in): `◂ CHAT`, as tall
@@ -373,6 +483,7 @@ impl Line {
             .flex_none()
             .w(px(BACK_W))
             .cursor_pointer()
+            .child(self.spot_probe())
             .child(theme::backdrop(cut, Fill::framed(pal.field, pal.border, 1.5)))
             .child(face(pal.accent, pal.field))
             .child(div().absolute().top_0().left_0().size_full().invisible().group_hover("set-chat", |s| s.visible()).child(theme::backdrop(cut, Fill::solid(pal.accent))).child(face(pal.ink, pal.accent)))
@@ -392,6 +503,9 @@ impl Line {
         self.swap = Some(now);
         // A held ALLOW lets go: its prompt is off screen now (or was, a moment ago).
         self.hold_at = None;
+        // What was said on the page left goes with it (COPIED, ESC AGAIN TO ABORT), and so does
+        // a pending Esc's close: a cog click in its beat closed the Line on Settings.
+        page_left(&mut self.note, &mut self.esc_at, self.nav.page);
         // The page left was this tall: both stay at least that (chat's draft or prompt strip
         // let go of it when they go: `relax`).
         if self.height > self.keep_h {
@@ -479,7 +593,7 @@ impl Line {
             Act::Copy => {
                 let about = self.snap.prefs.as_ref().map(|p| p.about.clone()).unwrap_or_default();
                 (self.on_ask)(Ask::Copy(format!("{about} · {} · {}", std::env::consts::OS, std::env::consts::ARCH)), cx).ok();
-                self.note = Some("COPIED".into());
+                self.say(Page::Settings, "COPIED", cx);
             }
             Act::Nothing => {}
         }
@@ -739,19 +853,19 @@ impl Line {
         out.push(div().flex_1().min_h(px(4.0)).into_any_element());
         // The bar where chat's field is (its keys on the same row, no row under it): `◂ CHAT` in
         // the cog's spot, the keys (or what she just did: COPIED), what came meanwhile.
-        let (keys, keys_c, weight) = match &self.note {
-            Some(n) => (n.clone(), pal.accent, FontWeight::BOLD),
+        let (keys, keys_c, weight) = match self.note.on(Page::Settings, Instant::now()) {
+            Some(n) => (n.to_string(), pal.accent, FontWeight::BOLD),
             None => (hint(&p, sel).to_string(), small_c, FontWeight::MEDIUM),
         };
         out.push(
             div()
                 .px(px(PAD))
                 .pt(px(10.0))
-                .pb(px(8.0))
+                .pb(px(BAR_PB))
                 .border_t_1()
                 .border_color(rgb(pal.rule))
                 .flex()
-                .h(px(10.0 + 1.0 + self.field_h.get() + 8.0))
+                .h(px(10.0 + 1.0 + self.field_h.get() + BAR_PB))
                 .gap(px(12.0))
                 .child(self.back_el(cx))
                 .child(div().self_center().text_size(px(SMALL)).line_height(px(16.0)).font_weight(weight).text_color(rgb(keys_c)).whitespace_nowrap().child(keys))
@@ -771,17 +885,16 @@ impl Line {
                 })
                 .into_any_element(),
         );
-        // The room the page has over its rows (it is as tall as chat) goes under the bar first,
-        // up to chat's row of keys: `◂ CHAT` where the cog was, his second click in place
-        // goes back. The rest above it.
-        out.push(div().max_h(px(BAR_DROP)).flex_grow(1000.0).into_any_element());
+        // Chat's row of keys, as room: `◂ CHAT` where the cog was, his second click in place
+        // goes back. The room the page has over its rows (it is as tall as chat) is above.
+        out.push(div().flex_none().h(px(BAR_DROP)).into_any_element());
         out
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Act, MenuSave, Mode, Nav, Page, Pref, Prefs, SetRow, asked, hint, hold_fires, list_key, next_attention, set_rows};
+    use super::{Act, FLASH, MenuSave, Mode, Nav, Note, Page, Pref, Prefs, SetRow, asked, esc_closes, hint, hold_fires, list_key, next_attention, page_left, set_rows, spot_lift};
     use crate::settings::{Attention, Settings, WriteQueue, write_at};
 
     #[test]
@@ -921,9 +1034,10 @@ mod tests {
         assert_eq!(MenuSave::Refused.written(att, false, true), MenuSave::Fine);
         assert_eq!(MenuSave::Refused.written(Pref::Wake(true), false, true), MenuSave::Refused);
         // The real thing: a read-only file refuses the menu's write, nothing changes, the row
-        // says so; writable again, the next click lands and the row is clear.
+        // says so; writable again, the next click lands and the row is clear. Root writes
+        // anything: nothing to see there (as the writer's own test).
         #[cfg(unix)]
-        {
+        if unsafe { libc::geteuid() } != 0 {
             use std::os::unix::fs::PermissionsExt;
             let d = std::env::temp_dir().join(format!("sa-menu-save-{}", std::process::id()));
             std::fs::remove_dir_all(&d).ok();
@@ -955,6 +1069,107 @@ mod tests {
             assert_eq!(load().brain.attention, Attention::HangOnly);
             std::fs::remove_dir_all(&d).ok();
         }
+    }
+
+    /// A reload (`settings reload`, or the one owed after the last write) keeps the row's
+    /// warning: a refusal until an attention write lands, a hang while the menu's change still
+    /// waits. Either order: the reload before the write's end, or after it.
+    #[test]
+    fn a_reload_keeps_the_menu_warning() {
+        let att = Pref::Attention(Attention::HangOnly);
+        // Hangs, he reloads while it still waits, then it is refused, then he reloads again.
+        let mut row = MenuSave::Fine.stuck(true);
+        row = row.reloaded(true);
+        assert_eq!(row.says(), Some("NOT SAVED YET · settings.toml"), "still waiting: still says so");
+        row = row.written(att, true, false);
+        assert_eq!(row.reloaded(false), MenuSave::Refused);
+        // Refused first, then a reload (nothing waiting), then a hanging click: still refused.
+        let mut row = MenuSave::Fine.written(att, true, false);
+        row = row.reloaded(false);
+        assert_eq!(row.says(), Some("CAN'T SAVE · settings.toml"));
+        row = row.stuck(true).reloaded(true);
+        assert_eq!(row, MenuSave::Refused);
+        // It lands: clear, and a reload after leaves it so.
+        assert_eq!(row.written(att, true, true).reloaded(false), MenuSave::Fine);
+        // Hanging, it lands, then the owed reload: clear. A hang with nothing waiting any more
+        // (only the page's writes were): a reload clears it.
+        assert_eq!(MenuSave::Fine.stuck(true).written(att, true, true).reloaded(false), MenuSave::Fine);
+        assert_eq!(MenuSave::Stuck.reloaded(false), MenuSave::Fine);
+        // Through the queue: the reload asked while the menu's write is under way.
+        let mut q: crate::settings::WriteQueue<(Pref, bool)> = Default::default();
+        q.push(vec![att.edit()], (att, true));
+        let (n, _) = q.start(std::time::Instant::now()).unwrap();
+        let mut row = MenuSave::Fine.stuck(q.pending().any(|j| j.1));
+        assert!(q.reload());
+        row = row.reloaded(q.pending().any(|j| j.1));
+        assert_eq!(row, MenuSave::Stuck);
+        let ((p, menu), owed) = q.finish(n).unwrap();
+        row = row.written(p, menu, false);
+        assert!(owed, "the reload is owed now the last write is in");
+        assert_eq!(row.reloaded(q.pending().any(|j| j.1)), MenuSave::Refused);
+    }
+
+    /// The row's second line holds its room while the menu is open: its write landing doesn't
+    /// pull HANDS-FREE TALK up under his next click.
+    #[test]
+    fn the_menu_holds_its_rows_till_it_closes() {
+        let mut kept = None;
+        assert_eq!(MenuSave::Fine.line(&mut kept), None, "nothing said this opening: no line");
+        assert_eq!(MenuSave::Stuck.line(&mut kept), Some(("NOT SAVED YET · settings.toml", true)));
+        assert_eq!(MenuSave::Fine.line(&mut kept), Some(("NOT SAVED YET · settings.toml", false)), "landed: its room, unseen");
+        assert_eq!(MenuSave::Refused.line(&mut kept), Some(("CAN'T SAVE · settings.toml", true)));
+        // Closed and opened again (the view lets go of `kept`): no line.
+        let mut kept = None;
+        assert_eq!(MenuSave::Fine.line(&mut kept), None);
+    }
+
+    /// A note belongs to the page it was said on: the page swap drops it (COPIED never comes
+    /// back with chat, ESC AGAIN TO ABORT never sits on Settings), and on Settings it goes by
+    /// itself. A pending Esc's close goes with the swap.
+    #[test]
+    fn notes_and_a_pending_esc_stay_on_their_page() {
+        let t0 = std::time::Instant::now();
+        let mut n = Note::default();
+        // COPIED on Settings: shown, gone after FLASH, never on chat.
+        let until = n.say(Page::Settings, "COPIED", t0).expect("a flash on Settings");
+        assert_eq!(n.on(Page::Settings, t0), Some("COPIED"));
+        assert_eq!(n.on(Page::Chat, t0), None);
+        assert_eq!(n.on(Page::Settings, t0 + FLASH), None, "gone at FLASH, timer or not");
+        assert!(n.expire(until));
+        assert_eq!(n, Note::default());
+        // A second COPIED in its beat: the first's timer leaves it be.
+        let u1 = n.say(Page::Settings, "COPIED", t0).unwrap();
+        let u2 = n.say(Page::Settings, "COPIED", t0 + FLASH / 2).unwrap();
+        assert!(!n.expire(u1));
+        assert_eq!(n.on(Page::Settings, t0 + FLASH), Some("COPIED"));
+        assert!(n.expire(u2));
+        // Back to chat with COPIED up: gone.
+        n.say(Page::Settings, "COPIED", t0);
+        let mut esc = None;
+        page_left(&mut n, &mut esc, Page::Chat);
+        assert_eq!(n.on(Page::Chat, t0), None);
+        // Chat's notes stay till typed over (no timer); the cog takes them and the Esc away.
+        assert_eq!(n.say(Page::Chat, "ESC AGAIN TO ABORT", t0), None);
+        assert_eq!(n.on(Page::Chat, t0 + FLASH * 10), Some("ESC AGAIN TO ABORT"));
+        let mut esc = Some(t0);
+        assert!(esc_closes(esc, t0, Page::Chat), "one Esc in a turn closes a beat later");
+        page_left(&mut n, &mut esc, Page::Settings);
+        assert_eq!((n.on(Page::Settings, t0), n.on(Page::Chat, t0), esc), (None, None, None));
+        assert!(!esc_closes(esc, t0, Page::Settings), "the cog in its beat: the Line stays open");
+        assert!(!esc_closes(Some(t0), t0, Page::Settings), "on Settings it never closes");
+        // A chat note that came while on Settings (a message refused late) waits for chat.
+        n.say(Page::Chat, "NOT SENT · OFFLINE · text kept", t0);
+        assert_eq!(n.on(Page::Settings, t0), None);
+        page_left(&mut n, &mut esc, Page::Chat);
+        assert_eq!(n.on(Page::Chat, t0), Some("NOT SENT · OFFLINE · text kept"));
+    }
+
+    /// `◂ CHAT` is where the cog was: both sit as high over the panel's bottom (which stays
+    /// put), Settings' room under its bar fixed, whichever page is the taller.
+    #[test]
+    fn back_sits_where_the_cog_was() {
+        assert_eq!(spot_lift(Page::Settings, 1), spot_lift(Page::Chat, 1));
+        assert_eq!(spot_lift(Page::Chat, 1), 35.0);
     }
 
     /// Her menu's ATTENTION row, a Settings change and a `settings reload`, mixed with the

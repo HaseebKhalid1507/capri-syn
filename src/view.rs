@@ -548,7 +548,6 @@ impl Bubble {
 /// else under it, else above it, the first of those clear of the tag too (else the first); over
 /// it only when none fits.
 fn menu_at(click: (f32, f32), (w, h): (f32, f32), (min_x, max_x): (f32, f32), (min_y, max_y): (f32, f32), face: Option<(f32, f32, f32, f32)>, tag: Option<(f32, f32, f32, f32)>) -> (f32, f32) {
-    const GAP: f32 = 8.0;
     let x = click.0.min(max_x).max(min_x);
     // Taller than its room: its bottom (Quit) stays in view.
     let y = click.1.max(min_y).min(max_y);
@@ -557,21 +556,32 @@ fn menu_at(click: (f32, f32), (w, h): (f32, f32), (min_x, max_x): (f32, f32), (m
         Some(t) if on_tag(x, y) && t.3 + MENU_TAG_GAP <= max_y => t.3 + MENU_TAG_GAP,
         _ => y,
     };
-    let Some((f0, f1, f2, f3)) = face else { return (x, y) };
-    let over = |x: f32, y: f32| x < f2 + GAP && x + w > f0 - GAP && y < f3 + GAP && y + h > f1 - GAP;
+    let Some(f) = face else { return (x, y) };
+    let (f0, f1, f2, f3) = f;
+    let over = |x: f32, y: f32| x < f2 + MENU_FACE_GAP && x + w > f0 - MENU_FACE_GAP && y < f3 + MENU_FACE_GAP && y + h > f1 - MENU_FACE_GAP;
     if !over(x, y) {
         return (x, y);
     }
-    let (right, left) = (f2 + GAP, f0 - GAP - w);
-    let sides = if click.0 >= (f0 + f2) / 2.0 { [right, left] } else { [left, right] };
-    let mut ways: Vec<(f32, f32)> = sides.into_iter().filter(|&sx| sx >= min_x && sx <= max_x).map(|sx| (sx, y)).collect();
-    if f3 + GAP <= max_y {
-        ways.push((x, f3 + GAP));
+    menu_off_face((x, y), (w, h), (min_x, max_x), (min_y, max_y), f, tag, click.0 >= (f0 + f2) / 2.0).unwrap_or((x, y))
+}
+
+/// The menu keeps this far off her face.
+const MENU_FACE_GAP: f32 = 8.0;
+
+/// Off her face (`f`), for a menu at `p` over it: beside it (`right_first`: its right side
+/// first), else under it, else above it, inside `x`/`y`; the first of those clear of her tag
+/// too, else the first. None: nowhere off it fits.
+fn menu_off_face(p: (f32, f32), (w, h): (f32, f32), (min_x, max_x): (f32, f32), (min_y, max_y): (f32, f32), (f0, f1, f2, f3): (f32, f32, f32, f32), tag: Option<(f32, f32, f32, f32)>, right_first: bool) -> Option<(f32, f32)> {
+    let (right, left) = (f2 + MENU_FACE_GAP, f0 - MENU_FACE_GAP - w);
+    let sides = if right_first { [right, left] } else { [left, right] };
+    let mut ways: Vec<(f32, f32)> = sides.into_iter().filter(|&sx| sx >= min_x && sx <= max_x).map(|sx| (sx, p.1)).collect();
+    if f3 + MENU_FACE_GAP <= max_y {
+        ways.push((p.0, f3 + MENU_FACE_GAP));
     }
-    if f1 - GAP - h >= min_y {
-        ways.push((x, f1 - GAP - h));
+    if f1 - MENU_FACE_GAP - h >= min_y {
+        ways.push((p.0, f1 - MENU_FACE_GAP - h));
     }
-    ways.iter().copied().find(|&(x, y)| !on_tag(x, y)).or_else(|| ways.first().copied()).unwrap_or((x, y))
+    ways.iter().copied().find(|&q| !menu_hits_tag(q, (w, h), tag)).or_else(|| ways.first().copied())
 }
 
 /// Her open menu's place, decided once per opening (keyed by its click): whether it goes
@@ -600,9 +610,6 @@ fn menu_tag_squeezed(click: (f32, f32), (w, h): (f32, f32), (min_x, max_x): (f32
     tag.is_some_and(|t| t.3 + MENU_TAG_GAP > max_y) && menu_hits_tag(at, (w, h), tag)
 }
 
-/// An open menu at `at` that her face (after a pose change) is now under: the place across the
-/// face (its far side), same height, else the near side, whichever is in `x` first; else None
-/// (it stays).
 /// Where a menu `h` tall may put its top left (window-local logical px): inside her window's
 /// part on her monitor (`span`; `win_h` tall) and her work area (`area`: x, y, w, h), 4 px in.
 /// Also the height it has there.
@@ -630,17 +637,18 @@ fn menu_inside((x, y): (f32, f32), (min_x, max_x): (f32, f32), (min_y, max_y): (
     (x.min(max_x).max(min_x), y.max(min_y).min(max_y))
 }
 
-fn menu_reflow(at: (f32, f32), (w, h): (f32, f32), (min_x, max_x): (f32, f32), face: Option<(f32, f32, f32, f32)>) -> Option<(f32, f32)> {
-    const GAP: f32 = 8.0;
-    let (f0, f1, f2, f3) = face?;
+/// An open menu at `at` that her face (after a pose change) is now under: off it by the same
+/// placement as an opening's ([`menu_off_face`], clear of her tag too), across the face (its
+/// far side) first; else None (it stays).
+fn menu_reflow(at: (f32, f32), (w, h): (f32, f32), x: (f32, f32), y: (f32, f32), face: Option<(f32, f32, f32, f32)>, tag: Option<(f32, f32, f32, f32)>) -> Option<(f32, f32)> {
+    let f = face?;
+    let (f0, f1, f2, f3) = f;
     let over = at.0 < f2 && at.0 + w > f0 && at.1 < f3 && at.1 + h > f1;
     if !over {
         return None;
     }
-    let (right, left) = (f2 + GAP, f0 - GAP - w);
     // The face in the menu's right half: across it is its right.
-    let sides = if (f0 + f2) / 2.0 > at.0 + w / 2.0 { [right, left] } else { [left, right] };
-    sides.into_iter().find(|x| (min_x..=max_x).contains(x)).map(|x| (x, at.1))
+    menu_off_face(at, (w, h), x, y, f, tag, (f0 + f2) / 2.0 > at.0 + w / 2.0)
 }
 
 /// `text` in lines broken where `breaks` says (byte offsets in a paragraph; GPUI's wrapper at
@@ -1211,6 +1219,8 @@ pub struct Avatar {
     prefs_io: lineview::PrefsIo,
     /// Why her menu's last ATTENTION click didn't stick, on its row.
     menu_save: crate::line::MenuSave,
+    /// That line as the open menu (its click) last said it: its room is kept till it closes.
+    menu_why: Option<(Point<Pixels>, &'static str)>,
     /// Her work area this frame (`render`): None outside one; keyed by where she is.
     area_memo: Cell<Option<Option<AreaMemo>>>,
     moves: u64,
@@ -1431,6 +1441,7 @@ impl Avatar {
             prefs_says: None,
             prefs_io: Default::default(),
             menu_save: Default::default(),
+            menu_why: None,
             area_memo: Cell::new(None),
             moves: 0,
             follow_at: None,
@@ -7852,6 +7863,7 @@ impl Avatar {
         // Context menu.
         if self.menu.is_none() {
             self.menu_place = None;
+            self.menu_why = None;
         }
         if let Some((at, _)) = self.menu.filter(|_| hud) {
             // Red items; the hovered one on a red blade with ink type. QUIT? (armed) is a bone
@@ -7877,7 +7889,10 @@ impl Avatar {
             // Under the click if it fits in her window, else as far up as it must (a perched
             // her: a click low on her body cut the menu's bottom rows off). Before its first
             // paint, its height is estimated from its rows.
-            let cant = self.attention_label().and(self.menu_save.says());
+            // ATTENTION's second line (why its click didn't stick): kept as room till it closes.
+            let mut kept = self.menu_why.filter(|k| k.0 == at).map(|k| k.1);
+            let cant = self.attention_label().and_then(|_| self.menu_save.line(&mut kept));
+            self.menu_why = kept.map(|t| (at, t));
             let rows = 7 + usize::from(self.brain.is_some()) + usize::from(self.attention_label().is_some()) + usize::from(cant.is_some()) + usize::from(self.voice_on() && self.voice.cfg.handsfree);
             // Her work area (under the bar, on her monitor), window-local logical px: the menu's
             // top left stays within it less the menu's size.
@@ -7920,7 +7935,7 @@ impl Avatar {
                 // Kept inside her work area as it is now: she moved under it (a drop-in, a
                 // landing) or it grew (its footer came) and its last rows went off (Quit).
                 Some((x, y, moved)) => {
-                    let (p, moved) = match menu_reflow((x, y), (MENU_W, h), xr, face).filter(|_| !moved) {
+                    let (p, moved) = match menu_reflow((x, y), (MENU_W, h), xr, yr, face, tag).filter(|_| !moved) {
                         Some(p) => (p, true),
                         None => ((x, y), moved),
                     };
@@ -7977,9 +7992,11 @@ impl Avatar {
                         "HANG ONLY" => "ATTENTION: HANG ONLY ▸",
                         _ => "ATTENTION: OFF ▸",
                     };
-                    // Its last click didn't stick (refused, or the write hangs): why, under it.
-                    let why = cant.map(|c| {
+                    // Its last click didn't stick (refused, or the write hangs): why, under it;
+                    // landed since it opened: the same room, unseen (the rows hold still).
+                    let why = cant.map(|(c, shown)| {
                         div()
+                            .when(!shown, |d| d.invisible())
                             .pt(px(2.0))
                             .text_size(px(10.5))
                             .font_weight(FontWeight::SEMIBOLD)
@@ -8443,15 +8460,32 @@ mod menu_tests {
         use super::menu_reflow;
         // Placed left of her face (at 30); her pose moves the face onto its right half.
         let moved = Some((200.0, 300.0, 230.0, 330.0));
-        assert_eq!(menu_reflow((30.0, 200.0), SIZE, X, moved), Some((238.0, 200.0)), "to the face's right, same height");
+        assert_eq!(menu_reflow((30.0, 200.0), SIZE, X, Y, moved, None), Some((238.0, 200.0)), "to the face's right, same height");
         // Onto its left half: across it is its left, if the work area has room; else its right.
         let left = Some((60.0, 300.0, 90.0, 330.0));
-        assert_eq!(menu_reflow((40.0, 200.0), SIZE, (-200.0, 280.0), left), Some((-158.0, 200.0)));
-        assert_eq!(menu_reflow((40.0, 200.0), SIZE, X, left), Some((98.0, 200.0)), "no room across: the near side");
-        assert_eq!(menu_reflow((40.0, 200.0), SIZE, (0.0, 50.0), left), None, "no room either side: it stays");
+        assert_eq!(menu_reflow((40.0, 200.0), SIZE, (-200.0, 280.0), Y, left, None), Some((-158.0, 200.0)));
+        assert_eq!(menu_reflow((40.0, 200.0), SIZE, X, Y, left, None), Some((98.0, 200.0)), "no room across: the near side");
+        // No room either side: under it, as an opening would; nothing fits: it stays.
+        assert_eq!(menu_reflow((40.0, 200.0), SIZE, (0.0, 50.0), Y, left, None), Some((40.0, 338.0)));
+        assert_eq!(menu_reflow((40.0, 200.0), SIZE, (0.0, 50.0), (150.0, 250.0), left, None), None);
         // Not under it, or no face: it stays.
-        assert_eq!(menu_reflow((250.0, 200.0), SIZE, X, FACE), None);
-        assert_eq!(menu_reflow((30.0, 200.0), SIZE, X, None), None);
+        assert_eq!(menu_reflow((250.0, 200.0), SIZE, X, Y, FACE, None), None);
+        assert_eq!(menu_reflow((30.0, 200.0), SIZE, X, Y, None, None), None);
+    }
+
+    /// A pose change moves an open menu by the opening's own rules: off her face and clear of
+    /// her tag, not onto the tag across the face.
+    #[test]
+    fn a_reflow_keeps_clear_of_her_tag_too() {
+        use super::menu_reflow;
+        // The face moves onto the menu's right half; across it (its right) is her tag.
+        let moved = Some((200.0, 300.0, 230.0, 330.0));
+        let tag = Some((238.0, 250.0, 400.0, 274.0));
+        assert_eq!(menu_reflow((30.0, 200.0), SIZE, (-200.0, 280.0), Y, moved, None), Some((238.0, 200.0)), "no tag: across");
+        // With the tag there: the near side.
+        assert_eq!(menu_reflow((30.0, 200.0), SIZE, (-200.0, 280.0), Y, moved, tag), Some((-18.0, 200.0)));
+        // Nothing beside it clear of the tag: under the face.
+        assert_eq!(menu_reflow((30.0, 200.0), SIZE, (0.0, 280.0), (0.0, 391.0), moved, tag), Some((30.0, 338.0)));
     }
 
     #[test]
