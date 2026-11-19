@@ -245,9 +245,10 @@ pub struct Line {
     sel: usize,
     /// The last page swap (its RGB split, the cog's turn).
     swap: Option<Instant>,
-    /// The panel's height on chat when Settings opened: Settings is at least as tall, so the
-    /// swap doesn't move its top (more only if its rows need it).
-    chat_h: f32,
+    /// The tallest the panel was on a page it left: both pages are at least as tall from then
+    /// on, so swapping back and forth never moves its top (only the first can, if Settings
+    /// needs more than chat had).
+    keep_h: f32,
     /// The field's height as last laid out (one line: the cog's; Settings' bar is as tall).
     field_h: std::rc::Rc<std::cell::Cell<f32>>,
     on_ask: OnAsk,
@@ -422,7 +423,7 @@ impl Line {
             nav: settings::Nav::on(page),
             sel: 0,
             swap: None,
-            chat_h: 0.0,
+            keep_h: 0.0,
             field_h: std::rc::Rc::new(std::cell::Cell::new(settings::FIELD_H0)),
             on_ask,
             _subs: subs,
@@ -1618,8 +1619,11 @@ impl Render for Line {
             .right_0()
             .flex()
             .flex_col()
-            .when(on_settings, |d| d.min_h(px(self.chat_h)))
+            .min_h(px(self.keep_h))
             .child(header)
+            // Kept taller than its thread (after Settings): the room is under the header, the
+            // thread stays on the field.
+            .when(!on_settings, |d| d.child(div().flex_1()))
             .children(thread)
             .children(pending)
             .children(prompt)

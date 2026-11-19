@@ -175,7 +175,7 @@ pub fn hold_fires(hold_at: Option<Instant>, started: Instant, page: Page, same_p
 pub(super) const FIELD_H0: f32 = 52.0;
 const COG_W: f32 = 34.0;
 /// Her line's slot on the Settings page.
-const QUOTE_H: f32 = 30.0;
+const QUOTE_H: f32 = 28.0;
 
 /// A gear (`theme::glyph`'s, 8 teeth) `size` px square, turned `turn` radians (a tooth: π/4).
 fn gear(fg: u32, bg: u32, size: f32, turn: f32) -> impl IntoElement {
@@ -273,11 +273,10 @@ impl Line {
         self.swap = Some(now);
         // A held ALLOW lets go: its prompt is off screen now (or was, a moment ago).
         self.hold_at = None;
+        // The page left was this tall: both stay at least that.
+        self.keep_h = self.keep_h.max(self.height);
         if self.nav.page == Page::Settings {
             self.sel = 0;
-            if self.nav.back.last() == Some(&Page::Chat) {
-                self.chat_h = self.height;
-            }
         } else if !self.snap.prompts.is_empty() {
             // Back to a prompt he couldn't see: its buttons arm afresh.
             self.prompt_at = now;
@@ -400,7 +399,7 @@ impl Line {
         out.push(
             div()
                 .mx(px(PAD))
-                .mt(px(10.0))
+                .mt(px(8.0))
                 .h(px(QUOTE_H))
                 .px(px(10.0))
                 .border_l_3()
@@ -415,11 +414,12 @@ impl Line {
         let section = |name: &str| {
             div()
                 .px(px(PAD))
-                .pt(px(10.0))
+                .pt(px(8.0))
                 .pb(px(2.0))
                 .flex()
                 .items_center()
                 .gap(px(8.0))
+                .line_height(px(14.0))
                 .text_size(px(10.5))
                 .font_weight(FontWeight::BOLD)
                 .text_color(rgb(pal.dim))
@@ -465,6 +465,7 @@ impl Line {
                 .flex_none()
                 .flex()
                 .flex_col()
+                .line_height(px(16.0))
                 .child(div().text_size(px(12.5)).font_weight(FontWeight::BOLD).text_color(rgb(if on { pal.text } else { theme::mix(pal.text, pal.dim, 0.55) })).child(tracked(name, 1.4)))
                 .children(sub.map(|s| div().text_size(px(11.0)).text_color(rgb(pal.dim)).child(s.to_string())))
         };
@@ -474,8 +475,8 @@ impl Line {
                 .id(SharedString::from(format!("set-row-{ix}")))
                 .relative()
                 .px(px(PAD))
-                .py(px(4.0))
-                .min_h(px(34.0))
+                .py(px(3.0))
+                .min_h(px(32.0))
                 .flex()
                 .items_center()
                 .gap(px(8.0))
@@ -593,7 +594,7 @@ impl Line {
             }
         }
         // As tall as chat was (the content's min height): the bar stays where the field was.
-        out.push(div().flex_1().min_h(px(6.0)).into_any_element());
+        out.push(div().flex_1().min_h(px(4.0)).into_any_element());
         // The bar where the field is, as tall as the field's: the cog (back to chat), CHAT, and
         // what came meanwhile.
         out.push(
