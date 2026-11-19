@@ -67,8 +67,9 @@ Reference for `synaps-avatar`, the crate behind capri-syn. The [README](../READM
   `anthropic/…` is Claude, `<id>/…` that provider): an `<id>` or `<id>@<label>` entry in Synaps'
   `auth.json` (a profile's folder first; Claude's is `anthropic`; an API-key service's is `<id>`
   alone, `type: api_key` with a key in it), an API-key service's `provider.<id>` in Synaps' `config`
-  (its last line for it; only if the daemon started after it was written: Synaps reads its config
-  once, at start, `daemon.json`'s `started_at`, so one added since is unknown until a restart), or
+  (its last line for it; only if the daemon started after it was written, by 2 s or more so no
+  file time's rounding flips it: Synaps reads its config once, at start, `daemon.json`'s
+  `started_at`, so one added since, or too close to tell, is unknown until a restart), or
   its key variable (`ANTHROPIC_API_KEY`, `GROQ_API_KEY`, …) in her environment or the daemon's
   (Linux: `/proc/<pid>/environ`, whether it's set, never its value). Keys and types only, never a
   secret. None: her tag reads `NO BRAIN YET` in place of `ONLINE` (and asleep), and she reads again

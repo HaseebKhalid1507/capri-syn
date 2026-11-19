@@ -590,7 +590,9 @@ mod tests {
         assert_eq!(t.duration_since(std::time::UNIX_EPOCH).unwrap(), Duration::new(1_794_625_965, 250_000_000));
         assert_eq!(utc("1970-01-01T00:00:00Z"), Some(std::time::UNIX_EPOCH));
         assert_eq!(utc("2000-03-01T00:00:00+00:00").map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()), Some(951_868_800));
-        assert_eq!(utc("2024-02-29T23:59:59.123456789123Z").map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap()), Some(Duration::new(1_709_251_199, 123_456_789)));
+        // Read to the nanosecond; held at the clock's own resolution (Windows': 100 ns).
+        let at_100ns = |t: std::time::SystemTime| t.duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() / 100;
+        assert_eq!(utc("2024-02-29T23:59:59.123456789123Z").map(at_100ns), Some(17_092_511_991_234_567));
         for bad in ["", "2026-11-14T03:12:45", "2026-11-14T03:12:45+02:00", "2026-13-01T00:00:00Z", "2026-11-14 03:12:45Z", "2026-11-14T03:12:45.1é2Z", "x-11-14T03:12:45Z"] {
             assert_eq!(utc(bad), None, "{bad}");
         }

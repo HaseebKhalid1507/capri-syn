@@ -11,6 +11,18 @@
 
 use crate::session::Creds;
 use std::path::Path;
+use std::time::{Duration, SystemTime};
+
+/// A file's time and the daemon's start are told apart at this much, no finer: the coarsest file
+/// time (FAT's 2 s; ext3's and HFS+'s 1 s) and Windows' 100 ns clock both round within it, so
+/// neither side's rounding can turn "before" into "after".
+const MTIME_SLACK: Duration = Duration::from_secs(2);
+
+/// A file written at `written` was there when the daemon started at `started`: older by
+/// `MTIME_SLACK` at least. Closer than that, can't tell (false).
+fn there_at_start(written: SystemTime, started: SystemTime) -> bool {
+    written.checked_add(MTIME_SLACK).is_some_and(|w| w <= started)
+}
 
 /// What to read credentials for: her session's model, and the daemon's profile and pid.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,7 +63,7 @@ pub fn env_set(k: &str) -> bool {
 /// `env`: a variable is set in her environment or the daemon's; `daemon_read`: whether the
 /// daemon's was read; `started`: when the daemon started (it read its `config` then, and only
 /// then: a key put there since isn't its yet).
-pub fn check_at(model: &str, base: &Path, profile: Option<&str>, env: &dyn Fn(&str) -> bool, daemon_read: bool, started: Option<std::time::SystemTime>) -> (Creds, Again) {
+pub fn check_at(model: &str, base: &Path, profile: Option<&str>, env: &dyn Fn(&str) -> bool, daemon_read: bool, started: Option<SystemTime>) -> (Creds, Again) {
     use crate::provider::Kind;
     const NEVER: (Creds, Again) = (Creds::Unknown, Again::Never);
     const TRY_AGAIN: (Creds, Again) = (Creds::Unknown, Again::Yes);
@@ -73,12 +85,13 @@ pub fn check_at(model: &str, base: &Path, profile: Option<&str>, env: &dyn Fn(&s
     }
     let file = |name: &str| synaps_file(base, profile, name);
     // A key in Synaps' login config (`provider.groq = …`), set (never read further) before the
-    // daemon started: one put there since waits for its next start (Unknown, read again).
+    // daemon started: one put there since, or too close to its start to tell, waits for its next
+    // start (Unknown, read again; her first answer settles it).
     let mut config_key = None;
     match std::fs::read_to_string(file("config")) {
         Ok(c) if remote_broker(&c) => return NEVER,
         Ok(c) if p.kind == Kind::Key && set(&c, &format!("provider.{}", p.id)) => {
-            let since = |t: std::time::SystemTime| std::fs::metadata(file("config")).and_then(|m| m.modified()).is_ok_and(|m| m > t);
+            let since = |t: SystemTime| std::fs::metadata(file("config")).and_then(|m| m.modified()).is_ok_and(|m| !there_at_start(m, t));
             config_key = Some(if started.is_some_and(since) { TRY_AGAIN } else { (Creds::Have, Again::Never) });
         }
         Ok(_) => {}
@@ -286,7 +299,6 @@ mod tests {
     /// `auth.json` it reads on every request: a key at once.
     #[test]
     fn a_config_key_since_the_daemon_started_waits_for_its_next_start() {
-        use std::time::Duration;
         let d = dir("since");
         let groq = "groq/llama-3.3-70b-versatile";
         std::fs::write(d.join("config"), "provider.groq = gsk-x\n").unwrap();
@@ -296,12 +308,28 @@ mod tests {
         assert_eq!(check_at(groq, &d, None, &none, true, Some(after)), (Creds::Have, Again::Never), "there when it started");
         assert_eq!(check_at(groq, &d, None, &none, true, None), (Creds::Have, Again::Never), "no daemon.json: as written");
         assert_eq!(check_at(groq, &d, None, &none, true, Some(before)), (Creds::Unknown, Again::Yes), "put there since");
+        assert_eq!(check_at(groq, &d, None, &none, true, Some(written + Duration::from_millis(500))).0, Creds::Unknown, "too close to its start to tell");
         std::fs::write(d.join("auth.json"), r#"{"groq": {"type": "api_key", "key": "gsk"}}"#).unwrap();
         assert_eq!(check_at(groq, &d, None, &none, true, Some(before)), (Creds::Have, Again::Never), "on file too");
         let key = |k: &str| k == "GROQ_API_KEY";
         std::fs::remove_file(d.join("auth.json")).unwrap();
         assert_eq!(check_at(groq, &d, None, &key, true, Some(before)).0, Creds::Have, "in its environment");
         std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// "Written before the daemon started" holds only by a margin no file system's or clock's
+    /// rounding reaches: a 2 s file time (FAT) rounded down, a start read at 100 ns (Windows).
+    #[test]
+    fn before_its_start_is_told_at_a_resolution_both_sides_have() {
+        let s = SystemTime::UNIX_EPOCH + Duration::new(1_794_625_965, 250_000_000);
+        assert!(there_at_start(s - Duration::from_secs(60), s));
+        assert!(there_at_start(s - MTIME_SLACK, s));
+        assert!(!there_at_start(s - Duration::from_millis(1_999), s), "within 2 s: can't tell");
+        assert!(!there_at_start(s, s));
+        assert!(!there_at_start(s + Duration::from_nanos(100), s), "after: never");
+        // Written 0.5 s after the start, a FAT time (even seconds, rounded down) reads 1.25 s before.
+        let fat = SystemTime::UNIX_EPOCH + Duration::from_secs(1_794_625_964);
+        assert!(!there_at_start(fat, s));
     }
 
     /// A profile reads its own folder's file first, else the base one (Synaps' `resolve_read_path`).

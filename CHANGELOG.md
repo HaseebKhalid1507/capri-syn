@@ -14,7 +14,8 @@
   (`SONNET 4.6`).
 - API KEY shows `IN USE · <service>` / `KEY SET · …`. A service's key counts as Synaps counts it:
   `<id>` with `type: api_key` and a key in `auth.json`, the config's last line, and a config key
-  only once the daemon has started since it was written.
+  only once the daemon has started since it was written (by 2 s or more: closer, no file time or
+  clock tells them apart, so it's unknown, not a ✓).
 - RUN LOCAL's server: the config's last `provider.local.url`, the daemon's `LOCAL_ENDPOINT`
   (Linux), one deadline for the name lookup, the connect and the reply.
 - MODEL is refused under `--model` / `--session` whoever asks; with `[brain]` off its write reads
