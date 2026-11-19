@@ -139,6 +139,15 @@ so it's gone. The Synaps and capri-watch paragraphs are unchanged.
   compositor) the HUD changes at once, as before. The Line and the menu don't glitch.
 - `SA_HUD_PROF=1` logs frame intervals and main-thread frame times while the HUD moves.
 
+### install.sh: Synaps is the pin, and a daemon she can't attach to stops it
+- Synaps (missing, or older than 0.11.0) is the manifest's `synaps_pin` (0.12.0), its installer
+  checked against the manifest's sha256. It was the latest release, so a Synaps with a newer protocol
+  would have come in the day one shipped; her client speaks protocol 3 exactly. (Windows: #81.)
+- A daemon on another protocol, or one that doesn't say which, now stops the install (exit 1), where
+  it printed "running". When this run installed or upgraded Synaps and an older daemon is still up,
+  it says to restart that one (`synaps daemon stop`, then run it again); an upgrade says so in step 1
+  too, while the rest installs.
+
 ### One installer: `install.sh` (Linux), `install.ps1` (Windows)
 - `curl -fsSL …/install.sh | bash`, `irm …/install.ps1 | iex`, or either from a checkout. Seven steps, the
   same on both, each one checks first, so a rerun is an upgrade:
