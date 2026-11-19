@@ -572,10 +572,22 @@ fn menu_at(click: (f32, f32), (w, h): (f32, f32), (min_x, max_x): (f32, f32), (m
 /// The menu's top left kept 12 px under her tag (`tag`: its box) where it would run into it,
 /// if it fits there (`max_y`); else as it was.
 fn menu_under_tag((x, y): (f32, f32), (w, h): (f32, f32), max_y: f32, tag: Option<(f32, f32, f32, f32)>) -> (f32, f32) {
-    const GAP: f32 = 12.0;
-    let Some((t0, t1, t2, t3)) = tag else { return (x, y) };
-    let over = x < t2 && x + w > t0 && y < t3 + GAP && y + h > t1;
-    if over && t3 + GAP <= max_y { (x, t3 + GAP) } else { (x, y) }
+    let Some((_, _, _, t3)) = tag else { return (x, y) };
+    if menu_hits_tag((x, y), (w, h), tag) && t3 + MENU_TAG_GAP <= max_y { (x, t3 + MENU_TAG_GAP) } else { (x, y) }
+}
+
+/// The menu keeps this far under her tag.
+const MENU_TAG_GAP: f32 = 12.0;
+
+fn menu_hits_tag((x, y): (f32, f32), (w, h): (f32, f32), tag: Option<(f32, f32, f32, f32)>) -> bool {
+    tag.is_some_and(|(t0, t1, t2, t3)| x < t2 && x + w > t0 && y < t3 + MENU_TAG_GAP && y + h > t1)
+}
+
+/// A menu `h` tall (with its picture) clicked open at `click` would run into her tag with no
+/// room under it (her feet on the screen's bottom): it goes without its picture, and so lower.
+fn menu_tag_squeezed(click: (f32, f32), (w, h): (f32, f32), (min_x, max_x): (f32, f32), (min_y, max_y): (f32, f32), tag: Option<(f32, f32, f32, f32)>) -> bool {
+    let at = (click.0.min(max_x).max(min_x), click.1.max(min_y).min(max_y));
+    tag.is_some_and(|t| t.3 + MENU_TAG_GAP > max_y) && menu_hits_tag(at, (w, h), tag)
 }
 
 /// An open menu at `at` that her face (after a pose change) is now under: the place across the
@@ -7862,7 +7874,12 @@ impl Avatar {
             // Its picture only where it fits whole: without it the menu is MENU_HEADER_H
             // shorter (her window cut off by the top of the screen left too little of it).
             let (last_sig, last_h) = self.menu_h.get();
-            let header_on = self.stills.as_ref().is_some_and(|s| s.capri.is_some()) && menu_header_fits(last_sig, last_h, menu_ranges(span, f32::from(l.lp(l.win_h)), area, 0.0).2);
+            // Nor where it would run into her tag with no room under it.
+            let tag = self.tag_box.get().map(|b| (f32::from(b.left()), f32::from(b.top()), f32::from(b.right()), f32::from(b.bottom())));
+            let with_h = if last_sig & 1 == 1 || last_h <= 0.0 { last_h } else { last_h + MENU_HEADER_H };
+            let (xr_with, yr_with, _) = menu_ranges(span, f32::from(l.lp(l.win_h)), area, with_h);
+            let squeezed = last_h > 0.0 && menu_tag_squeezed((f32::from(at.x), f32::from(at.y)), (MENU_W, with_h), xr_with, yr_with, tag);
+            let header_on = self.stills.as_ref().is_some_and(|s| s.capri.is_some()) && menu_header_fits(last_sig, last_h, menu_ranges(span, f32::from(l.lp(l.win_h)), area, 0.0).2) && !squeezed;
             // Its height as painted for this set of rows: placed once that is known (a menu
             // never painted with these rows is laid out unseen for a frame and measured).
             let sig = (rows as u32) << 2 | u32::from(mark.is_some()) << 1 | u32::from(header_on);
@@ -7890,7 +7907,6 @@ impl Avatar {
                 _ if measured => {
                     let p = menu_at((f32::from(at.x), f32::from(at.y)), (MENU_W, h), xr, yr, face);
                     // Clear of her tag (ONLINE ^): its top right ran into it.
-                    let tag = self.tag_box.get().map(|b| (f32::from(b.left()), f32::from(b.top()), f32::from(b.right()), f32::from(b.bottom())));
                     let p = menu_under_tag(p, (MENU_W, h), yr.1, tag);
                     self.menu_place = Some((at, p.0, p.1, false));
                     Some(p)
@@ -8329,7 +8345,7 @@ impl std::future::Future for YieldNow {
 
 #[cfg(test)]
 mod menu_tests {
-    use super::{menu_at, menu_under_tag};
+    use super::{menu_at, menu_tag_squeezed, menu_under_tag};
 
     // A 500×695 window, her face at 190..240 × 300..340, a 210×300 menu.
     const FACE: Option<(f32, f32, f32, f32)> = Some((190.0, 300.0, 240.0, 340.0));
@@ -8347,6 +8363,10 @@ mod menu_tests {
         assert_eq!(menu_under_tag((100.0, 60.0), SIZE, 500.0, tag), (100.0, 60.0));
         assert_eq!(menu_under_tag((300.0, 30.0), SIZE, 500.0, tag), (300.0, 30.0), "beside it");
         assert_eq!(menu_under_tag((100.0, 50.0), SIZE, 52.0, tag), (100.0, 50.0), "no room under it");
+        // Her feet on the screen's bottom (the menu pushed up into her tag): no picture.
+        assert!(menu_tag_squeezed((100.0, 300.0), SIZE, X, (0.0, 52.0), tag));
+        assert!(!menu_tag_squeezed((100.0, 300.0), SIZE, X, (0.0, 391.0), tag), "room under it: lower instead");
+        assert!(!menu_tag_squeezed((100.0, 300.0), SIZE, X, (0.0, 52.0), None));
     }
 
     #[test]

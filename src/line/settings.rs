@@ -479,7 +479,7 @@ impl Line {
         let section = |name: &str| {
             div()
                 .px(px(PAD))
-                .pt(px(8.0))
+                .pt(px(6.0))
                 .pb(px(5.0))
                 .flex()
                 .items_center()
