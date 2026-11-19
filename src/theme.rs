@@ -741,14 +741,40 @@ pub fn plate(cut: Cut, f: Fill) -> Div {
 
 /// HUD lettering with CSS-style letter-spacing (GPUI has none): one box per glyph.
 pub fn tracked(s: &str, spacing: f32) -> Div {
-    div()
-        .flex()
-        .flex_none()
-        .children(s.chars().map(|c| div().mr(px(spacing)).child(if c == ' ' { "\u{00A0}".to_string() } else { c.to_string() })))
+    tracked_fixed(s, spacing, &|_| None)
+}
+
+/// [`tracked`], the glyphs `fixed` gives a width to in boxes that wide, centred (tabular: a
+/// ticking timer keeps its width).
+pub fn tracked_fixed(s: &str, spacing: f32, fixed: &dyn Fn(char) -> Option<f32>) -> Div {
+    div().flex().flex_none().children(s.chars().map(|c| {
+        let g = div().mr(px(spacing)).child(if c == ' ' { "\u{00A0}".to_string() } else { c.to_string() });
+        match fixed(c) {
+            Some(w) => g.w(px(w)).flex().justify_center(),
+            None => g,
+        }
+    }))
+}
+
+/// A level meter's bars ([`metered`]): this wide and tall, this far apart, this much air either
+/// side of the meter.
+pub const METER_BAR_W: f32 = 4.0;
+pub const METER_BAR_H: f32 = 10.0;
+pub const METER_BAR_GAP: f32 = 2.0;
+pub const METER_MX: f32 = 3.0;
+
+/// A meter of `n` bars as [`metered`] draws it, its air included (none: 0).
+pub fn meter_w(n: usize) -> f32 {
+    if n == 0 { 0.0 } else { n as f32 * METER_BAR_W + (n - 1) as f32 * METER_BAR_GAP + 2.0 * METER_MX }
 }
 
 /// A label with its level meter (`▮▮▯▯▯`) drawn as bars: lit ones in `fg`, the rest at 28 %.
 pub fn metered(s: &str, spacing: f32, fg: u32) -> Div {
+    metered_fixed(s, spacing, fg, &|_| None)
+}
+
+/// [`metered`], its words [`tracked_fixed`].
+pub fn metered_fixed(s: &str, spacing: f32, fg: u32, fixed: &dyn Fn(char) -> Option<f32>) -> Div {
     let mut row = div().flex().flex_none().items_center();
     let mut word = String::new();
     let mut bars: Vec<bool> = Vec::new();
@@ -756,13 +782,19 @@ pub fn metered(s: &str, spacing: f32, fg: u32) -> Div {
         if bars.is_empty() {
             return row;
         }
-        let m = div().flex().items_end().gap(px(2.0)).h(px(10.0)).mx(px(3.0)).children(bars.drain(..).map(|on| div().w(px(4.0)).h(px(10.0)).bg(alpha(fg, if on { 1.0 } else { 0.28 }))));
+        let m = div()
+            .flex()
+            .items_end()
+            .gap(px(METER_BAR_GAP))
+            .h(px(METER_BAR_H))
+            .mx(px(METER_MX))
+            .children(bars.drain(..).map(|on| div().w(px(METER_BAR_W)).h(px(METER_BAR_H)).bg(alpha(fg, if on { 1.0 } else { 0.28 }))));
         row.child(m)
     };
     for c in s.chars() {
         if c == '▮' || c == '▯' {
             if !word.is_empty() {
-                row = row.child(tracked(&std::mem::take(&mut word), spacing));
+                row = row.child(tracked_fixed(&std::mem::take(&mut word), spacing, fixed));
             }
             bars.push(c == '▮');
         } else {
@@ -772,7 +804,7 @@ pub fn metered(s: &str, spacing: f32, fg: u32) -> Div {
     }
     row = flush_bars(row, &mut bars);
     if !word.is_empty() {
-        row = row.child(tracked(&word, spacing));
+        row = row.child(tracked_fixed(&word, spacing, fixed));
     }
     row
 }
@@ -781,8 +813,11 @@ pub fn metered(s: &str, spacing: f32, fg: u32) -> Div {
 /// `bg` paints cut-outs. Kinds: dot, dots, gear, play (and back), bang, check, cross (and `shard`: the
 /// ✕ broken off, tilted), moon, ring, rec, disc, note, mic, hf, warn.
 pub fn glyph(kind: &str, fg: u32, bg: u32) -> impl IntoElement + use<> {
-    glyph_at(kind, fg, bg, 11.0)
+    glyph_at(kind, fg, bg, GLYPH_W)
 }
+
+/// [`glyph`]'s box, px.
+pub const GLYPH_W: f32 = 11.0;
 
 /// [`glyph`], `size` px square.
 pub fn glyph_at(kind: &str, fg: u32, bg: u32, size: f32) -> impl IntoElement + use<> {

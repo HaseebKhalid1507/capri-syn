@@ -143,6 +143,17 @@ impl Tween {
         self.t0.is_some_and(|t0| ms(now, t0) < self.ms)
     }
 
+    /// The least it is on its way while it moves (from where it came, or where it goes less
+    /// the curve's overshoot past it); else where it is.
+    pub fn low(&self, now: Instant) -> f32 {
+        if !self.moving(now) || self.to >= self.from {
+            return if self.moving(now) { self.from } else { self.to };
+        }
+        // `ease`'s peak: where its slope is 0.
+        let over = ease(1.0 - 2.0 * BACK / (3.0 * (BACK + 1.0))) - 1.0;
+        self.to - (self.from - self.to) * over
+    }
+
     /// Toward `to` from wherever it is now; no change when that is already where it goes.
     pub fn go(&mut self, to: f32, now: Instant, ms: f32) {
         if (to - self.to).abs() < 0.25 {
@@ -495,6 +506,9 @@ impl<T: Clone + PartialEq> TagFx<T> {
 pub struct PanelFrame {
     pub shell: (f32, f32),
     pub content: (f32, f32),
+    /// The width its header is fit to: its content's, but while it resizes the narrower end
+    /// (the header fits once, not a word at a time on the way).
+    pub fit_w: f32,
     /// Everything inside it (out of the tag: 0 until its shell covers its words, then cut in).
     pub inner: f32,
     /// The live reply's words.
@@ -597,9 +611,11 @@ impl PanelFx {
         if self.pill_x0.is_some_and(|(x, cover)| ms(now, x) >= cover + STEP_MS) {
             self.pill_x0 = None;
         }
+        let fit_w = if self.opened.is_some() { w } else { self.w.low(now) };
         PanelFrame {
             shell,
             content,
+            fit_w,
             inner,
             words: 1.0,
             old: 0.0,
@@ -905,6 +921,7 @@ mod tests {
         assert_eq!(f.words, 1.0, "its words from the first frame");
         assert!(f.shell.0 >= 400.0 - 2.0 * INSET.0 - 0.01 && f.shell.1 >= 120.0 - INSET.1 - 0.01);
         assert_eq!(f.content, (400.0, 120.0), "laid out in the box it's going to");
+        assert_eq!(f.fit_w, 400.0, "its header fit to that box");
         assert!(f.split > 0.0);
         let f = p.open((400.0, 120.0), 1, None, at(t0, 300), true, true);
         assert_eq!((f.shell, f.content, f.split), ((400.0, 120.0), (400.0, 120.0), 0.0));
@@ -913,14 +930,24 @@ mod tests {
         let f = p.open((300.0, 80.0), 2, None, at(t0, 700), true, true);
         assert!(f.replaced && f.old == 0.0 && f.words == 1.0 && f.split > 0.0);
         let mut t = 708;
+        let fit = p.open((300.0, 80.0), 2, None, at(t0, 704), true, true).fit_w;
+        assert!(fit < 300.0 && fit > 297.0, "a shrink: its header fit under the overshoot, {fit}");
         while t <= 1000 {
             let f = p.open((300.0, 80.0), 2, None, at(t0, t), true, true);
             assert!(!f.replaced && f.old == 0.0 && f.words == 1.0, "at {t}");
+            // Its header fit once, never wider than the box on the way.
+            assert!((f.fit_w == fit || f.fit_w == 300.0) && f.fit_w <= f.shell.0 + 1e-3, "at {t}: {f:?}");
             assert!(t < 700 + 2 * STEP_MS as u64 || f.split == 0.0, "two frames of split at most");
             t += 8;
         }
         let f = p.open((300.0, 80.0), 2, None, at(t0, 1000), true, true);
         assert_eq!(f.shell, (300.0, 80.0));
+        // Growing: the header keeps the width it had until the box is there.
+        for t in (1100..1100 + SIZE_MS as u64).step_by(8) {
+            let f = p.open((380.0, 80.0), 2, None, at(t0, t), true, true);
+            assert!(f.fit_w == 300.0 && f.fit_w <= f.shell.0, "at {t}: {f:?}");
+        }
+        assert_eq!(p.open((380.0, 80.0), 2, None, at(t0, 1400), true, true).fit_w, 380.0);
     }
 
     #[test]

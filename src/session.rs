@@ -1348,7 +1348,7 @@ fn provider_name(key: &str) -> Option<&'static str> {
 }
 
 /// A tool name for the tag: short and safe (never arguments).
-fn tool_label(name: &str) -> String {
+pub(crate) fn tool_label(name: &str) -> String {
     let n = name.rsplit("__").next().unwrap_or(name);
     let n: String = n.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':')).collect();
     if n.chars().count() > TOOL_MAX { format!("{}…", n.chars().take(TOOL_MAX - 1).collect::<String>()) } else { n }

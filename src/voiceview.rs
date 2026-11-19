@@ -32,6 +32,24 @@ const DOUBLE_TAP: Duration = Duration::from_millis(400);
 /// The quiet countdown shows on her tag for its last seconds.
 const HF_WARN: Duration = Duration::from_secs(10);
 
+/// A level meter: five bars, lit up to `v` (0..1).
+pub(super) fn level_bars(v: f32) -> String {
+    (0..5).map(|i| if v * 5.0 > i as f32 + 0.3 { '▮' } else { '▯' }).collect()
+}
+
+/// The hands-free tag: its last seconds (`left`), else how long it has been open and his level.
+pub(super) fn hf_label(left: Option<u64>, secs: u64, level: f32) -> String {
+    match left {
+        Some(left) => format!("MIC LIVE · HANDS-FREE · ENDS IN 0:{left:02}"),
+        None => format!("MIC LIVE · HANDS-FREE {}:{:02} {}", secs / 60, secs % 60, level_bars(level)),
+    }
+}
+
+/// The mic's tag (held, or a tap's AUTO): how long it has been open, his level.
+pub(super) fn mic_label(secs: u64, level: f32, auto: bool) -> String {
+    format!("MIC {}:{:02} {}{}", secs / 60, secs % 60, level_bars(level), if auto { " · AUTO" } else { "" })
+}
+
 /// A hands-free conversation: one stream, many turns, until he ends it or it goes quiet.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct HandsFree {
@@ -1557,21 +1575,12 @@ impl Avatar {
             plate,
             key: key.into(),
         };
-        let bars = |v: f32| -> String { (0..5).map(|i| if v * 5.0 > i as f32 + 0.3 { '▮' } else { '▯' }).collect() };
         if let (Some(h), Some(_)) = (self.voice.hf, self.voice.mic) {
-            let label = match self.voice_hf_left() {
-                Some(left) => format!("MIC LIVE · HANDS-FREE · ENDS IN 0:{left:02}"),
-                None => {
-                    let s = h.since.elapsed().as_secs();
-                    format!("MIC LIVE · HANDS-FREE {}:{:02} {}", s / 60, s % 60, bars(self.voice.level))
-                }
-            };
+            let label = hf_label(self.voice_hf_left(), h.since.elapsed().as_secs(), self.voice.level);
             return Some(st(label, "mic", true, "hf", Plate::Flag));
         }
         if let Some(m) = self.voice.mic {
-            let s = m.elapsed().as_secs();
-            let auto = if self.voice.toggle.is_some() { " · AUTO" } else { "" };
-            return Some(st(format!("MIC {}:{:02} {}{auto}", s / 60, s % 60, bars(self.voice.level)), "mic", true, "mic", Plate::Flag));
+            return Some(st(mic_label(m.elapsed().as_secs(), self.voice.level, self.voice.toggle.is_some()), "mic", true, "mic", Plate::Flag));
         }
         if self.voice.asked.is_some() {
             return Some(st("MIC …".into(), "mic", false, "ring", Plate::Slant));
@@ -1586,7 +1595,7 @@ impl Avatar {
         }
         if self.voice_speaking() {
             let s = self.voice_shape(Instant::now()).unwrap_or(0);
-            return Some(st(format!("SPEAKING {}", bars(s as f32 / 3.0)), "speak", false, "play", Plate::Arrow));
+            return Some(st(format!("SPEAKING {}", level_bars(s as f32 / 3.0)), "speak", false, "play", Plate::Arrow));
         }
         None
     }
