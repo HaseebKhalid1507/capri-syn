@@ -1,0 +1,189 @@
+# Her screenshots on a Windows runner (tools/shots/scenes.ps1): a release build of the ref asked
+# for, her pack assembled from CapriCore + lachy (never mochi: its art may never be shown in public),
+# a fake Synaps daemon and voice sidecar (FAKE: no model, no audio), and the scene sets, shot cropped
+# to her windows at 1920x1080 and 100%, then a few takes again at 150%. GPU-less: GPUI draws with
+# WARP, fine for layout. The shots are an artifact kept 3 days, and public meanwhile (anyone who can
+# see this repo's runs can download it): only the fakes' canned words, never anything private.
+#
+# Run it: Actions → shots → Run workflow (a ref: a branch, tag or sha; the sets), or put the
+# `shots` label on a PR (its head; `shots:settings` or `shots:header` for one set only).
+name: shots
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: The branch, tag or commit to shoot
+        required: true
+        default: main
+      sets:
+        description: "Scene sets, comma-separated: settings, header"
+        required: true
+        default: settings,header
+      hidpi:
+        description: "Takes shot again at 150% (set/take, comma-separated; empty: none)"
+        required: false
+        default: settings/on,settings/empty,header/hf-470,header/prompt-470
+  pull_request:
+    types: [labeled, synchronize, reopened]
+
+permissions:
+  contents: read
+
+# One shoot per PR (or ref) at a time: a new push or `shots` label cancels the one running. Any other
+# event (another label, a push to an unlabelled PR) gets a group of its own, so it never cancels a
+# shoot, and its job is skipped.
+concurrency:
+  group: >-
+    shots-${{ github.event.pull_request.number || inputs.ref }}-${{
+      (github.event_name == 'workflow_dispatch' ||
+       (contains(github.event.pull_request.labels.*.name, 'shots') &&
+        (github.event.action != 'labeled' || startsWith(github.event.label.name, 'shots'))))
+      && 'shoot' || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  shots:
+    # A PR: while it carries `shots` (and not again for another label added).
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (contains(github.event.pull_request.labels.*.name, 'shots') &&
+       (github.event.action != 'labeled' || startsWith(github.event.label.name, 'shots')))
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_TERM_COLOR: always
+      PYTHONUTF8: "1"
+      SHOT_REF: ${{ inputs.ref || github.event.pull_request.head.sha }}
+    steps:
+      # The rig (this workflow's commit): the scenes, the fakes and the shot helpers, so an older ref
+      # without them can still be shot.
+      - uses: actions/checkout@v4
+        with:
+          path: rig
+          persist-credentials: false
+
+      - name: Her, at the ref to shoot
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SHOT_REF }}
+          path: app
+          persist-credentials: false
+
+      - name: What to shoot
+        id: what
+        shell: pwsh
+        env:
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          SETS_IN: ${{ inputs.sets }}
+          HIDPI_IN: ${{ inputs.hidpi }}
+        run: |
+          if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
+            $sets = $env:SETS_IN; $hidpi = $env:HIDPI_IN
+          } else {
+            $labels = @($env:LABELS | ConvertFrom-Json)
+            $only = @($labels | Where-Object { $_ -like 'shots:*' } | ForEach-Object { $_.Substring(6) })
+            $sets = if ($only) { $only -join ',' } else { 'settings,header' }
+            $hidpi = 'settings/on,settings/empty,header/hf-470,header/prompt-470'
+          }
+          $sha = git -C app rev-parse HEAD
+          "sets=$sets" >> $env:GITHUB_OUTPUT
+          "hidpi=$hidpi" >> $env:GITHUB_OUTPUT
+          "sha=$sha" >> $env:GITHUB_OUTPUT
+          Write-Host "shooting $env:SHOT_REF ($sha): sets $sets; at 150%: $hidpi"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Toolchain (rust-toolchain.toml)
+        working-directory: app
+        shell: bash
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app
+          key: shots
+          cache-on-failure: true
+          # Saved from main only (a PR's build can't poison what main's shoots start from).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # A console build: her log goes to the take's log file.
+      - name: Build (release)
+        working-directory: app
+        run: cargo build --locked --release --bin synaps-avatar
+
+      # Her pack, assembled here as on his machine (tools/make-pack: every file checked against its
+      # pinned sha256). CapriCore v1.0.4 and lachy's desktop art; mochi's never.
+      - uses: actions/cache@v4
+        id: pack
+        with:
+          path: ${{ runner.temp }}/pack
+          key: shots-pack-${{ hashFiles('app/tools/make-pack', 'app/tools/*.sha256', 'app/tools/desktop-art.json', 'app/packs/capri/**') }}
+
+      - name: Her pack (CapriCore + lachy, no mochi)
+        if: steps.pack.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          python -m pip install --disable-pip-version-check -q fonttools
+          git clone -q https://github.com/CapriChooms/CapriCore "$env:RUNNER_TEMP\CapriCore"
+          git -C "$env:RUNNER_TEMP\CapriCore" checkout -q bc93892c751a73fdce14355b477dcdc775e46fd9
+          python app/tools/make-pack "$env:RUNNER_TEMP\CapriCore" "$env:RUNNER_TEMP\pack" --lachy auto
+          if ($LASTEXITCODE) { throw "make-pack: $LASTEXITCODE" }
+          if (Test-Path "$env:RUNNER_TEMP\pack\anim\mochi") { throw 'mochi art in the pack' }
+
+      - name: Her pack checks out
+        id: check
+        shell: pwsh
+        run: |
+          & app/target/release/synaps-avatar.exe --pack "$env:RUNNER_TEMP\pack" --check
+          if ($LASTEXITCODE) { throw "--check: $LASTEXITCODE" }
+
+      # Pinned, so shots compare run to run: 1920x1080, 100%.
+      - name: The display (1920x1080, 100%)
+        shell: pwsh
+        run: ./rig/tools/shoot-win.ps1 -Display 1920x1080@100
+
+      - name: Shots at 100%
+        shell: pwsh
+        env:
+          SETS: ${{ steps.what.outputs.sets }}
+        run: |
+          ./rig/tools/shots/scenes.ps1 -Exe "$PWD\app\target\release\synaps-avatar.exe" -Pack "$env:RUNNER_TEMP\pack" `
+            -Out shots\100 -Sets ($env:SETS -split ',')
+
+      # Haseeb's laptop panel is 150%: non-integer HiDPI.
+      - name: Shots at 150%
+        if: ${{ !cancelled() && steps.check.outcome == 'success' && steps.what.outputs.hidpi != '' }}
+        shell: pwsh
+        env:
+          SETS: ${{ steps.what.outputs.sets }}
+          HIDPI: ${{ steps.what.outputs.hidpi }}
+        run: |
+          ./rig/tools/shoot-win.ps1 -Display 1920x1080@150
+          ./rig/tools/shots/scenes.ps1 -Exe "$PWD\app\target\release\synaps-avatar.exe" -Pack "$env:RUNNER_TEMP\pack" `
+            -Out shots\150 -Sets ($env:SETS -split ',') -Only ($env:HIDPI -split ',')
+
+      - name: The shots' index
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        env:
+          SHA: ${{ steps.what.outputs.sha }}
+        run: |
+          New-Item -ItemType Directory -Force shots | Out-Null
+          "ref $env:SHOT_REF = $env:SHA; rig $env:GITHUB_SHA; WARP (no GPU); FAKE daemon and sidecar" | Set-Content shots\README.txt
+          Get-ChildItem shots -Recurse -Filter index.json | ForEach-Object {
+            $i = Get-Content -Raw $_.FullName | ConvertFrom-Json
+            Write-Host "$($_.Directory.Name): $(@($i.index).Count) shots; screen $($i.screen -join ','); scaling $($i.scales -join '; ')"
+            $i.fails | ForEach-Object { Write-Host "::warning::$($_)" }
+          }
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: shots-${{ steps.what.outputs.sha }}
+          path: shots
+          retention-days: 3
+          if-no-files-found: error
