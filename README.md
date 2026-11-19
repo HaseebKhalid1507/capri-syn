@@ -368,6 +368,10 @@ On Windows she registers <kbd>Win</kbd>+<kbd>Alt</kbd>+<kbd>C</kbd> (the Line) a
   > Required Notice: Copyright 2026 Lachy (https://github.com/lachydotmcg)
   >
   > Required Notice: Anyone who uses Capri's code, art, animations or any of its other assets must credit the Capri project (https://github.com/lachydotmcg/capri-desktop). Capri's art and animations are by her artist, who prefers to stay private. Parts made by others keep their own licences, listed in its README.
+- **The app icon** ([`assets/icon`](assets/icon/NOTICE), also built into the binaries and the
+  installer) is a crop of Capri's face from a frame of Cyberpunk: Edgerunners 2. It is in this
+  repository, but no licence of any kind is granted for it, capri-syn's included. The frame and the
+  character belong to their rights holders. Rights holders: open an issue and it comes down.
 - **The media on this page.** The clips show the app running with a pack assembled from those two
   sources, on a staged desktop. The banner uses lachy's perch drawing; the cards are composed from the
   same captures and one frame of lachy's teleport animation. The artwork in all of them remains its
