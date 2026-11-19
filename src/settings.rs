@@ -199,7 +199,8 @@ struct IntroRaw {
 /// "hey capri" (default true: while on, a mic stream stays open, shown on her tag; `false` turns it off); `wake_sensitivity`:
 /// 0.1..0.9 (default 0.5: tuned to ~0.5 false starts an hour on synthetic voices); `wake_handsfree`: "hey capri"
 /// starts a hands-free conversation (default true, with `handsfree` on; its request is the first turn; quiet for
-/// `handsfree_timeout`, it ends and the wake word listens again); false: one turn, as before.
+/// `handsfree_timeout`, it ends and the wake word listens again); false: one turn, as before. `vocab`: words
+/// Whisper should spell your way (names, machines, jargon), appended to the sidecar's generic prompt.
 #[derive(Clone, Debug, PartialEq)]
 pub struct VoiceSettings {
     pub enabled: bool,
@@ -225,6 +226,39 @@ pub struct VoiceSettings {
     /// Windows: her summon key talks while held (opt-in; a tap opens the Line either way). Linux:
     /// unused (his desktop's binding sends `talk press` and `talk release` itself).
     pub hold_to_talk: bool,
+    /// `[voice] vocab`: the user's own words for Whisper's recognition prompt, after the sidecar's
+    /// generic `VOCAB` (Capri, choom, …). Empty by default; capped by `VOCAB_*` below (`vocab_fit`).
+    pub vocab: Vec<String>,
+    /// The `vocab` entries left out by the caps (logged when the sidecar gets its config; not an error).
+    pub vocab_dropped: Vec<String>,
+}
+
+/// `[voice] vocab` caps, the same as the sidecar's (`VOCAB_MAX_WORDS, VOCAB_WORD_CHARS,
+/// VOCAB_USER_CHARS`): words or names, characters in one, characters in all (joined by ", ").
+/// Whisper's prompt is short (224 tokens) and a long one echoes into what it hears.
+pub const VOCAB_MAX: usize = 16;
+pub const VOCAB_WORD_CHARS: usize = 32;
+pub const VOCAB_CHARS: usize = 200;
+
+/// `[voice] vocab` under the caps, as the sidecar's `vocab_prompt` does it: in order, a repeat (any case)
+/// is skipped, and an entry that doesn't fit (over `VOCAB_WORD_CHARS`, past `VOCAB_MAX` kept, or past
+/// `VOCAB_CHARS` in all) is left out while later ones still may fit. Returns (kept, left out).
+pub fn vocab_fit(words: Vec<String>) -> (Vec<String>, Vec<String>) {
+    let (mut kept, mut dropped, mut seen) = (Vec::<String>::new(), Vec::new(), Vec::new());
+    for w in words {
+        let low = w.to_lowercase();
+        if seen.contains(&low) {
+            continue;
+        }
+        let total = kept.iter().map(|k| k.chars().count() + 2).sum::<usize>() + w.chars().count();
+        if w.chars().count() > VOCAB_WORD_CHARS || kept.len() >= VOCAB_MAX || total > VOCAB_CHARS {
+            dropped.push(w);
+        } else {
+            seen.push(low);
+            kept.push(w);
+        }
+    }
+    (kept, dropped)
 }
 
 /// Her voice (Haseeb's picks, LOCKED 13 + 14, then r26 "R-A"): W3, the bright blend (timbre af_heart/
@@ -237,7 +271,7 @@ pub const SPEED: f32 = 1.2987;
 
 impl Default for VoiceSettings {
     fn default() -> Self {
-        VoiceSettings { enabled: false, stt_model: "small.en".into(), voice: VOICE.into(), speed: SPEED, pace: "stretch".into(), flow: "emphasis".into(), duck: "duck".into(), speak_unprompted: true, key: 'c', silence_s: 1.0, toggle_key: 'c', handsfree: true, handsfree_timeout: 60, handsfree_max: 30, echo: "auto".into(), wake_word: true, wake_sensitivity: 0.5, wake_handsfree: true, hold_to_talk: false }
+        VoiceSettings { enabled: false, stt_model: "small.en".into(), voice: VOICE.into(), speed: SPEED, pace: "stretch".into(), flow: "emphasis".into(), duck: "duck".into(), speak_unprompted: true, key: 'c', silence_s: 1.0, toggle_key: 'c', handsfree: true, handsfree_timeout: 60, handsfree_max: 30, echo: "auto".into(), wake_word: true, wake_sensitivity: 0.5, wake_handsfree: true, hold_to_talk: false, vocab: Vec::new(), vocab_dropped: Vec::new() }
     }
 }
 
@@ -263,6 +297,7 @@ struct VoiceRaw {
     wake_sensitivity: Option<f64>,
     wake_handsfree: Option<bool>,
     hold_to_talk: Option<bool>,
+    vocab: Option<Vec<String>>,
 }
 
 /// `[mirror]`: she faces where she goes. `drag`: turn while dragged (and flung), looking back
@@ -630,6 +665,19 @@ impl Settings {
             }
             if let Some(h) = v.wake_handsfree {
                 voice.wake_handsfree = h;
+            }
+            if let Some(words) = v.vocab {
+                // Malformed entries are errors; too many or too long ones are only left out (vocab_fit).
+                let mut clean = Vec::with_capacity(words.len());
+                for (i, w) in words.iter().enumerate() {
+                    anyhow::ensure!(
+                        !w.trim().is_empty() && !w.contains(',') && !w.chars().any(char::is_control),
+                        "voice.vocab entry {} ({w:?}): one word or name, not empty, no commas or control characters",
+                        i + 1
+                    );
+                    clean.push(w.split_whitespace().collect::<Vec<_>>().join(" "));
+                }
+                (voice.vocab, voice.vocab_dropped) = vocab_fit(clean);
             }
         }
         let mut intro = IntroSettings::default();
@@ -1242,6 +1290,44 @@ mod tests {
         let has = |want: String| py.lines().any(|l| l.trim_end() == want);
         assert!(has(format!("VOICE = '{VOICE}'")), "tools/capri-voice's VOICE is settings::VOICE");
         assert!(has(format!("SPEED, FLOW, PACE = {SPEED}, '{}', '{}'", d.flow, d.pace)), "and its SPEED, FLOW, PACE");
+        assert!(
+            py.lines().any(|l| l.starts_with(&format!("VOCAB_MAX_WORDS, VOCAB_WORD_CHARS, VOCAB_USER_CHARS = {VOCAB_MAX}, {VOCAB_WORD_CHARS}, {VOCAB_CHARS} "))),
+            "and its [voice] vocab caps"
+        );
+    }
+
+    /// `[voice] vocab`: the user's words for Whisper, cleaned and capped; the sidecar's own prompt is
+    /// generic (no one's names or machines).
+    #[test]
+    fn voice_vocab() {
+        assert!(Settings::parse("").unwrap().voice.vocab.is_empty());
+        let v = Settings::parse("[voice]\nvocab = [\"Lynx\", \" polish-e \", \"Night   City\"]\n").unwrap().voice;
+        assert_eq!(v.vocab, ["Lynx", "polish-e", "Night City"]);
+        assert!(Settings::parse("[voice]\nvocab = []\n").unwrap().voice.vocab.is_empty());
+        // malformed: an error that names the entry
+        for bad in ["\"Lynx\"", "[\"\"]", "[\"  \"]", "[\"ok\", \"a, b\"]", "[\"bell\\u0007\"]", "[1]"] {
+            assert!(Settings::parse(&format!("[voice]\nvocab = {bad}\n")).is_err(), "vocab = {bad}");
+        }
+        let e = Settings::parse("[voice]\nvocab = [\"ok\", \"a, b\"]\n").unwrap_err().to_string();
+        assert!(e.contains("entry 2") && e.contains("\"a, b\""), "{e}");
+        // over the caps: the first that fit are kept, the rest left out (not an error), as the sidecar does
+        let many = format!("[{}]", (0..=VOCAB_MAX).map(|i| format!("\"w{i}\"")).collect::<Vec<_>>().join(", "));
+        let v = Settings::parse(&format!("[voice]\nvocab = {many}\n")).unwrap().voice;
+        assert_eq!((v.vocab.len(), v.vocab_dropped.clone()), (VOCAB_MAX, vec![format!("w{VOCAB_MAX}")]));
+        let long = "x".repeat(VOCAB_WORD_CHARS + 1);
+        let v = Settings::parse(&format!("[voice]\nvocab = [\"Lynx\", \"{long}\", \"lynx\", \"devbox\"]\n")).unwrap().voice;
+        assert_eq!((v.vocab, v.vocab_dropped), (vec!["Lynx".to_string(), "devbox".into()], vec![long]), "too long: out; a repeat: skipped");
+        // 5 x 32 + 4 x 2 = 168; a 6th of 32 makes 202 > 200: out, and a short one after it still fits
+        let words: Vec<String> = (0..7).map(|i| format!("{}{i}", "y".repeat(VOCAB_WORD_CHARS - 1))).chain(["z".to_string()]).collect();
+        let toml = format!("[voice]\nvocab = [{}]\n", words.iter().map(|w| format!("{w:?}")).collect::<Vec<_>>().join(", "));
+        let v = Settings::parse(&toml).unwrap().voice;
+        assert_eq!((v.vocab.len(), v.vocab_dropped.len(), v.vocab.last().map(String::as_str)), (6, 2, Some("z")));
+        assert!(v.vocab.join(", ").chars().count() <= VOCAB_CHARS);
+        let py = include_str!("../tools/capri-voice");
+        let vocab = py.lines().find(|l| l.starts_with("VOCAB = ")).expect("tools/capri-voice has a VOCAB").to_lowercase();
+        for w in ["haseeb", "bella", "avante", "parabellum", "jawz", "lynx", "spike"] {
+            assert!(!vocab.contains(w), "the sidecar's default prompt names `{w}`");
+        }
     }
 
     #[test]

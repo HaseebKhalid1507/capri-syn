@@ -6,7 +6,7 @@ newline-delimited JSON (Windows: loopback TCP after a token handshake, see capri
 every OS-facing part there is that module's, next to this file):
 
   avatar -> here                       here -> avatar
-  {"op":"config", stt_model, voice, speed, flow, pace, duck_ignore}
+  {"op":"config", stt_model, voice, speed, flow, pace, duck_ignore, vocab}
   {"op":"listen-start"}                {"ev":"mic-open"}  {"ev":"level","v":0..1} (5 Hz)
   {"op":"listen-start","mode":"handsfree","silence_s","max_s","echo":"auto|headphones|speakers"}
                                        one stream, many turns: speech/endpoint/heard per utterance;
@@ -77,14 +77,39 @@ TEST = os.environ.get('CAPRI_VOICE_TEST')   # a test sidecar: never a real (alsa
 MOVABLE = bool(TEST and os.environ.get('CAPRI_VOICE_TEST_MOVABLE'))
 STT_FILES = {'tiny.en': 'ggml-tiny.en-q5_1.bin', 'base.en': 'ggml-base.en-q5_1.bin', 'small.en': 'ggml-small.en-q5_1.bin',
              'medium.en': f'{HOME}/.local/share/pywhispercpp/models/ggml-medium.en-q5_0.bin'}
-VOCAB = 'Capri, choom, Synaps, spike, lynx, polish-e, GPUI, avatarctl, Jawz, i3, Haseeb, bella, avante'
-SAY_FIX = [(r'\bSynaps\b', 'Synapse'), (r'\bGPUI\b', 'G P U I'), (r'\bavatarctl\b', 'avatar control'), (r'\bJawz\b', 'Jaws'),
+# Whisper's recognition prompt: words it should spell her way. Generic on purpose; a user's own names,
+# machines and jargon come from `[voice] vocab` in settings.toml and are appended (vocab_prompt).
+VOCAB = 'Capri, choom, preem, Night City, Synaps, ' + ('capri-ctl' if WIN else 'avatarctl')   # her CLI on this OS
+VOCAB_MAX_WORDS, VOCAB_WORD_CHARS, VOCAB_USER_CHARS = 16, 32, 200   # the user's part: words, one word, all of it
+SAY_FIX = [(r'\bSynaps\b', 'Synapse'), (r'\bGPUI\b', 'G P U I'), (r'\bavatarctl\b', 'avatar control'), (r'\bcapri-ctl\b', 'Capri control'),
            (r'\bi3\b', 'i three'), (r'\bCI\b', 'C I'), (r'\bPR\b', 'P R'), (r'\bchoom\b', 'chewm')]
 MIC_RATE, TTS_RATE, STEP_MS = 16000, 24000, 90
 
 
 def log(*a):
     print(time.strftime('%H:%M:%S'), *a, file=sys.stderr, flush=True)
+
+
+def vocab_prompt(extra=None):
+    """Whisper's prompt: VOCAB, then the user's words (`[voice] vocab`) in their order. Each is cleaned (control
+    characters and commas out, spaces collapsed), a repeat of one already there is skipped (any case), and
+    the user's part is capped: VOCAB_MAX_WORDS words of at most VOCAB_WORD_CHARS characters, VOCAB_USER_CHARS
+    in all. Returns (prompt, how many of theirs were dropped)."""
+    have = {w.strip().lower() for w in VOCAB.split(',')}
+    out, dropped = [], 0
+    for w in extra if isinstance(extra, list) else []:
+        w = ' '.join(''.join(c if c.isprintable() and c != ',' else ' ' for c in str(w)).split()) if isinstance(w, str) else ''
+        if not w:
+            dropped += 1
+            continue
+        if w.lower() in have:
+            continue
+        if len(w) > VOCAB_WORD_CHARS or len(out) >= VOCAB_MAX_WORDS or len(', '.join(out + [w])) > VOCAB_USER_CHARS:
+            dropped += 1
+            continue
+        have.add(w.lower())
+        out.append(w)
+    return ', '.join([VOCAB] + out), dropped
 
 
 def now_ms():
@@ -105,15 +130,17 @@ class Stt:
         path = path if os.path.isabs(path) else f'{MODELS}/{path}'
         t = now_ms()
         self.name = name
+        self.prompt = VOCAB      # the recognition prompt (vocab_prompt: the user's words appended)
         self.m = Model(path, n_threads=THREADS, print_progress=False, print_realtime=False, redirect_whispercpp_logs_to=None)
         self.conf = None
         log(f'stt {name} loaded in {now_ms() - t:.0f} ms ({os.path.basename(path)}, {THREADS} threads, CPU)')
 
-    def __call__(self, pcm, speech_ms=None, prompt=VOCAB, floor=512, tokens=None):
+    def __call__(self, pcm, speech_ms=None, prompt=..., floor=512, tokens=None):
         # The encoder window cut to the utterance (+1 s), not Whisper's fixed 30 s, but never under
         # 512 (10 s): a trimmed clip in a smaller window decodes into loops ("b, b, b, b", "yes,
         # yes, yes") and slow temperature retries. Measured on 30 sentences of 1-3 s of speech:
         # the bare formula 56 % word errors and 15 loops, the 512 floor 3 % and none.
+        prompt = self.prompt if prompt is ... else prompt   # ...: the recognition prompt; None: none
         dur = len(pcm) / MIC_RATE
         ctx = max(floor, min(1500, int(np.ceil((dur + 1.0) * 50 / 64) * 64)))
         segs = self.m.transcribe(pcm, initial_prompt=prompt or '', no_context=True, single_segment=True, audio_ctx=ctx, temperature=0.0,
@@ -696,13 +723,19 @@ JUNK_SHORT_MS = 300
 VOCAB_WORDS = set(re.findall(r"[a-z0-9']+", VOCAB.lower()))
 
 
+def vocab_words(prompt):
+    """The words of a recognition prompt, for junk()'s prompt-echo rule."""
+    return set(re.findall(r"[a-z0-9']+", prompt.lower()))
+
+
 def conf_s(conf):
     """Whisper's confidence for a log line: ', lp -0.52 / p 0.31' (numbers only), or ''."""
     return f', lp {conf[0]:.2f} / p {conf[1]:.2f}' if conf else ''
 
 
-def junk(text, speech_ms):
-    """Why a transcript is junk Whisper made from near-silence or a clipped sound, or None."""
+def junk(text, speech_ms, vocab=None):
+    """Why a transcript is junk Whisper made from near-silence or a clipped sound, or None. `vocab`: the
+    recognition prompt's words (vocab_words; default: VOCAB's)."""
     t = text.lower()
     letters = re.sub(r'[^a-z]', '', t)
     words = re.findall(r"[a-z0-9']+", t)
@@ -717,7 +750,7 @@ def junk(text, speech_ms):
         return 'a stock hallucination'
     if len(words) <= 8 and JUNK_CREDITS.search(t):
         return 'subtitle credits'
-    if len(words) >= 3 and all(w in VOCAB_WORDS for w in words):
+    if len(words) >= 3 and all(w in (VOCAB_WORDS if vocab is None else vocab) for w in words):
         return 'the prompt echoed'
     return None
 
@@ -1783,9 +1816,11 @@ class Voice:
         self.lock = threading.Lock()
         self.conn = None
         self.gate = Gate()
-        self.cfg = {'stt_model': os.environ.get('CAPRI_VOICE_STT', 'small.en'), 'voice': VOICE, 'speed': SPEED, 'flow': FLOW, 'pace': PACE}
+        self.cfg = {'stt_model': os.environ.get('CAPRI_VOICE_STT', 'small.en'), 'voice': VOICE, 'speed': SPEED, 'flow': FLOW, 'pace': PACE,
+                    'vocab': []}
         self.last_said = (None, '', 0.0)  # (id, text, tail silence s) of the last sentence: the gap before the next
         self.stt = Stt(self.cfg['stt_model'])
+        self.vocab = VOCAB_WORDS   # the recognition prompt's words (the prompt-echo junk rule)
         self.vad = Vad.load()
         self.stt_lock = threading.Lock()   # one Whisper decode at a time (a draft and the final)
         self.played = None       # her sentence now playing: start, level envelope (hands-free)
@@ -2733,7 +2768,7 @@ class Voice:
         return self._sent(text, speech_ms, dur, c)
 
     def _sent(self, text, speech_ms, dur, c):
-        why = junk(text, speech_ms) if text else 'empty'
+        why = junk(text, speech_ms, self.vocab) if text else 'empty'
         if why:
             return self._drop(why, len(text), speech_ms, dur, c)
         c['t_heard'] = now_ms()
@@ -2903,6 +2938,17 @@ class Voice:
         elif not hushed:
             self.emit(ev='say-end', id=sid)
 
+    def set_vocab(self, words):
+        """Whisper's prompt: VOCAB plus `[voice] vocab` (capped; see vocab_prompt)."""
+        prompt, dropped = vocab_prompt(words)
+        if dropped:
+            log(f'stt: {dropped} vocab word(s) dropped (empty, over {VOCAB_WORD_CHARS} characters, or past the cap of '
+                f'{VOCAB_MAX_WORDS} words / {VOCAB_USER_CHARS} characters)')
+        if prompt != self.stt.prompt:
+            log(f'stt: recognition prompt {len(prompt)} characters, {len(prompt.split(","))} words and names')
+        self.stt.prompt = prompt
+        self.vocab = vocab_words(prompt)
+
     # -- protocol
     def handle(self, msg):
         op = msg.get('op')
@@ -2924,6 +2970,9 @@ class Voice:
             if msg.get('stt_model') and msg['stt_model'] != self.stt.name:
                 self.cfg['stt_model'] = msg['stt_model']
                 self.stt = Stt(msg['stt_model'])
+            if isinstance(msg.get('vocab'), list):
+                self.cfg['vocab'] = msg['vocab']
+            self.set_vocab(self.cfg['vocab'])
             self.emit(ev='ready', cfg=self.cfg, features=FEATURES)
         elif op == 'listen-start':
             self.listen_start(msg.get('mode', 'hold'), float(msg.get('silence_s', 1.0)), float(msg.get('max_s', 0) or 0), msg.get('echo', 'auto'),
@@ -3103,7 +3152,7 @@ def selftest_gate():
 
 
 def selftest_junk():
-    for j in ['-2,', ', chr,', 'nd,', 'Q.', ',', '2.', '♪', 'hmm', 'You', 'Thanks for watching!', 'Capri, spike, lynx.']:
+    for j in ['-2,', ', chr,', 'nd,', 'Q.', ',', '2.', '♪', 'hmm', 'You', 'Thanks for watching!', 'Capri, choom, Synaps.']:
         assert junk(j, 1500), f'{j!r} passed'
     assert junk('Thank you.', 250) and not junk('Thank you.', 900) and junk('Bye.', 200) and junk('Take a breath.', 200)
     assert junk('Bye.', 352) is None and junk('Take a breath.', 700) is None, 'real ones (stock voices: Bye. 320-384 ms)'
@@ -3126,7 +3175,7 @@ def selftest_junk():
         assert tag(keep) == keep, f'{keep!r} -> {tag(keep)!r}'
     assert conf_s((-0.5234, 0.31)) == ', lp -0.52 / p 0.31' and conf_s(None) == ''
     for ok in ['yes', 'no', 'ok', 'okay', 'stop', 'go', 'hi', 'hey', 'wait', 'what', 'why', 'done', 'next', 'back', 'undo',
-               'Capri', 'spike', 'lynx']:
+               'Capri', 'choom', 'spike', 'lynx']:
         for v in (ok, ok.capitalize() + '.', ok.upper() + '!', ok + '?'):
             assert junk(v, 250) is None, f'{v!r} dropped: {junk(v, 250)}'
     assert junk("What's spike doing?", 900) is None and junk('Capri, stop.', 600) is None
@@ -3137,6 +3186,23 @@ def selftest_junk():
     assert speech_span([0.1] * 10 + [0.6] * 7 + [0.1] * 5) is None, 'never reaches 0.70'
     assert speech_span([0.1] * 10 + [0.8] * 6 + [0.1] * 5) == (10, 15, 6)
     assert speech_span([0.1] * 10 + [0.8] * 7 + [0.1] * 5, 'hands-free') is None, 'hands-free wants 8'
+
+
+def selftest_vocab():
+    """Whisper's prompt: generic by default, the user's `[voice] vocab` appended, cleaned and capped."""
+    for w in ('haseeb', 'bella', 'avante', 'parabellum', 'jawz', 'lynx', 'spike', 'polish-e'):
+        assert w not in VOCAB.lower(), f'the default prompt names {w!r}'
+    assert vocab_prompt(None) == (VOCAB, 0) and vocab_prompt([]) == (VOCAB, 0) and vocab_prompt('spike') == (VOCAB, 0)
+    p, dropped = vocab_prompt(['Lynx', 'spike', 'capri', ' polish-e ', 'Jawz,\ti3', 'lynx', '', 'x' * 33, 5, '\x07'])
+    assert p == VOCAB + ', Lynx, spike, polish-e, Jawz i3', p
+    assert dropped == 4, dropped   # '', the 33-character one, a number, a control character alone; repeats aren't counted
+    p, dropped = vocab_prompt([f'w{i}' for i in range(20)])
+    assert p.split(', ')[-1] == 'w15' and dropped == 4, (p, dropped)
+    p, dropped = vocab_prompt([chr(97 + i) * 30 for i in range(16)])
+    assert len(p) - len(VOCAB) - 2 <= VOCAB_USER_CHARS and dropped == 10, (len(p), dropped)
+    words = vocab_words(vocab_prompt(['Lynx', 'spike', 'bella'])[0])
+    assert junk('Lynx, spike, bella.', 900, words) == 'the prompt echoed' and junk('Lynx, spike, bella.', 900) is None
+    assert junk("What's spike doing?", 900, words) is None
 
 
 def selftest_endpoint():
@@ -3369,6 +3435,8 @@ def selftest():
     print('selftest: unprompted gate ok (call, lock, budget, cap, too late)')
     selftest_junk()
     print('selftest: junk filter ok')
+    selftest_vocab()
+    print('selftest: vocab ok')
     if WIN:
         print('selftest: duck rules: Windows', _win.__name__, '(test_capri_voice.py)')
     else:

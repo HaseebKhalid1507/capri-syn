@@ -1283,7 +1283,15 @@ step_extras() {
         run install -m 755 "$LIB/tools/capri-watch/capri-watch" "$BIN/capri-watch"
         rec file "$BIN/capri-watch"
         user_unit "$LIB/tools/systemd/capri-watch.service" capri-watch.service
-        if [ "$SYSTEMD" = 1 ] && [ "$YES" = 1 ]; then
+        # Its config loads (a watch.toml from before v1 is an error now): say so here, not 30 s after "enabled".
+        local py=/usr/bin/python3 bad=''
+        [ -x "$py" ] || py=python3
+        if [ "$DRY" != 1 ] && ! bad=$("$py" "$BIN/capri-watch" --print-config 2>&1 >/dev/null); then
+            bad=${bad#capri-watch: }
+            [ -n "$bad" ] || bad="its config does not load"
+            warn "capri-watch won't start: $bad (docs/WATCH.md)"
+            WATCH_HOW="capri-watch (installed, not enabled: fix $(tilde "$HOME/.config/synaps-avatar/watch.toml"))"
+        elif [ "$SYSTEMD" = 1 ] && [ "$YES" = 1 ]; then
             run systemctl --user enable --now capri-watch.service
             WATCH_HOW="capri-watch (enabled)"
         else

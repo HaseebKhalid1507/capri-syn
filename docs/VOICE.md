@@ -27,6 +27,7 @@ for speech. Setup: `tools/capri-voice-setup`, then `tools/systemd/capri-voice.se
 | `wake_sensitivity` | `0.5` | 0.1 to 0.9: higher wakes more easily (and falsely more often) |
 | `wake_handsfree` | `true` | "Hey Capri" starts hands-free (with `handsfree` on): quiet for `handsfree_timeout`, it ends and the wake word listens again. `false`: one turn, as before |
 | `echo` | `"auto"` | `"auto"` (the sink says headphones or speakers), `"headphones"` (talking over her stops her) or `"speakers"` (half-duplex) |
+| `vocab` | `[]` | your own words for speech-to-text: names, machines, jargon (`["Lynx", "polish-e", "devbox"]`). Whisper's recognition prompt is `Capri, choom, preem, Night City, Synaps, avatarctl` (`capri-ctl` on Windows), and these go after it. Up to 16 entries of at most 32 characters, 200 characters in all: past that, the first ones that fit are kept and the rest are left out, logged (not an error). A word already in her prompt (`Capri`, `choom`, …) still takes one of those slots, though the sidecar skips it, so don't repeat them. An empty entry, a comma or a control character in one is an error. They also join the prompt-echo filter (three or more words, all from the prompt, are dropped as junk; [What counts as speech](#what-counts-as-speech)), so leave out everyday words like "on", "off" or "build": "build on, off" would be thrown away |
 
 `avatarctl settings reload` re-sends changed voice settings to a connected sidecar.
 
@@ -277,7 +278,7 @@ thresholds) was fitted on stock synthetic voices only (Kokoro packs, espeak-ng),
     at speed 1.3). These hold in every mode: hold, toggle, wake and hands-free;
   - sound tags Whisper writes are cut first: `[Music]`, `(coughs)`, `*cough*` (letters between the stars only:
     `5 * 3 * 2` stays);
-  - three or more words that are all from the recognition prompt (Capri, spike, lynx, …).
+  - three or more words that are all from the recognition prompt (Capri, choom, …, and your `vocab`).
 - Silence, breaths, coughs, clicks and hum never reach Whisper: Silero scores them far under 0.70 (stock
   synthetic ones at −45 to −18 dBFS peak at 0.26). So a filler Whisper invents needs some real-looking speech.
 - A drop is logged by length and milliseconds of speech, never the words or the audio. Each heard or dropped
@@ -484,6 +485,14 @@ it carries the point: "at most one in a reply, and most replies need none".
   - The Line renders the word in italics (`reader::Mark::Em`).
   - The spoken caption drops them.
   - `a * b`, `2*3*4` and anything in backticks are left as written.
+
+**Pronunciation.** Before Kokoro reads a sentence, a short built-in list of fixes rewrites words it says wrong
+(`SAY_FIX` in `tools/capri-voice`): `Synaps` → "Synapse", `GPUI` → "G P U I", `avatarctl` → "avatar control",
+`capri-ctl` → "Capri control", `i3`, `CI`, `PR` spelled out, `choom` → "chewm". It's part of the sidecar, not
+your settings, and there's no settings key for it yet: every update replaces the file (`install.sh` on Linux,
+the voice bundle on Windows), so a local edit is lost. A word she says wrong for everyone belongs in that list
+upstream, as a regex and its replacement, for example `(r'\bnginx\b', 'engine x')`. `[voice] vocab` is the
+other direction: it helps Whisper spell what you say, not how she says it.
 
 ## Measured in r24, at the old default `@+4.93` (six test lines, bella quiet)
 

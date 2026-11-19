@@ -1,7 +1,8 @@
-# capri-watch: event hooks that wake Capri (see docs/WATCH.md). NOT installed by anything.
-# Install by hand, on bella AND on avante (each machine watches itself; GitHub on bella only):
+# capri-watch: event hooks that wake Capri (see docs/WATCH.md). `install.sh --watch` installs it on her machine.
+# Install by hand, on Capri's machine and on any other machine whose events she should hear (each
+# machine watches itself; the others need role = "remote" and [deliver] ssh_host in their watch.toml):
 #   install -m 755 tools/capri-watch/capri-watch ~/.local/bin/capri-watch
-#   cp tools/capri-watch/watch.toml ~/.config/synaps-avatar/watch.toml     # optional: no file = the defaults
+#   cp tools/capri-watch/watch.toml ~/.config/synaps-avatar/watch.toml     # optional on her machine: no file = the defaults
 #   capri-watch --dry-run --once -v                                          # what it would send right now
 #   mkdir -p ~/.config/systemd/user && cp tools/systemd/capri-watch.service ~/.config/systemd/user/
 #   systemctl --user daemon-reload && systemctl --user enable --now capri-watch
@@ -17,7 +18,7 @@ StartLimitBurst=5
 [Service]
 Type=simple
 ExecStart=/usr/bin/python3 %h/.local/bin/capri-watch
-# The user manager's PATH lacks ~/.local/bin (synaps-dev, capri-ctl) on some machines.
+# The user manager's PATH lacks ~/.local/bin (synaps, capri-ctl) on some machines.
 Environment=PATH=%h/.local/bin:%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin
 Environment=PYTHONUNBUFFERED=1
 Nice=10
