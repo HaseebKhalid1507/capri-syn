@@ -522,10 +522,13 @@ $Scenes = [ordered]@{
 
             # Right-clicked (real input): her menu, a #32768 window of hers. If none opens, the shell's
             # own message for it (version 4: WM_CONTEXTMENU at her icon) to her tray's window, said.
+            # Clicked in her button's top fifth: the menu ends where it was asked for, over her
+            # glyph from its middle.
             $menu = $null
+            $ry = [int]($icon.Y + $icon.H / 5)
             for ($i = 1; $i -le 2 -and -not $menu; $i++) {
                 $before = @([ShotsTray.Native]::Of(0) | ForEach-Object { $_.Handle })
-                $null = [ShotsTray.Native]::Glide($cx, $cy)
+                $null = [ShotsTray.Native]::Glide($cx, $ry)
                 Start-Sleep -Milliseconds 300
                 $pressed = [ShotsTray.Native]::Press($true)
                 $null = Wait-Until { Get-HerMenu } 5 'her tray menu'
@@ -537,7 +540,7 @@ $Scenes = [ordered]@{
             $how = 'a real right click'
             $tw = [ShotsTray.Native]::Find('SynapsAvatarTray', [uint32]$script:Her.Id)
             if (-not $menu) {
-                $ok = [ShotsTray.Native]::Post($tw, 0x8001, ($cx -band 0xffff) -bor (($cy -band 0xffff) -shl 16), 0x7B -bor (1 -shl 16))
+                $ok = [ShotsTray.Native]::Post($tw, 0x8001, ($cx -band 0xffff) -bor (($ry -band 0xffff) -shl 16), 0x7B -bor (1 -shl 16))
                 $null = Wait-Until { Get-HerMenu } 5 'her tray menu (the shell''s message)'
                 $menu = Get-HerMenu
                 $how = "the shell's message posted to her tray window ($tw, $ok): a real right click opened none"
@@ -753,14 +756,15 @@ public static class Native {
 }
 
 <# The taskbar for a still: dark (the shell and apps), opaque, its clock off (the date never on
-   camera), its apps to the left (out of a shot of its corner), no toasts; Explorer started again so
-   all of it holds. A runner only. #>
+   camera), its apps to the left (out of a shot of its corner), no volume icon (a runner has no
+   audio device: a crossed-out speaker), no toasts; Explorer started again so all of it holds. A
+   runner only. #>
 function Set-ShotTaskbar {
     Assert-ShotRunner 'Set-ShotTaskbar'
     $cv = 'HKCU:\Software\Microsoft\Windows\CurrentVersion'
     foreach ($v in @(
             @("$cv\Themes\Personalize", 'SystemUsesLightTheme', 0), @("$cv\Themes\Personalize", 'AppsUseLightTheme', 0),
-            @("$cv\Themes\Personalize", 'EnableTransparency', 0), @("$cv\Policies\Explorer", 'HideClock', 1),
+            @("$cv\Themes\Personalize", 'EnableTransparency', 0), @("$cv\Policies\Explorer", 'HideClock', 1), @("$cv\Policies\Explorer", 'HideSCAVolume', 1),
             @("$cv\Explorer\Advanced", 'TaskbarAl', 0), @("$cv\PushNotifications", 'ToastEnabled', 0), @("$cv\Explorer", 'EnableAutoTray', 0))) {
         if (-not (Test-Path $v[0])) { New-Item -Path $v[0] -Force | Out-Null }
         Set-ItemProperty -Path $v[0] -Name $v[1] -Value $v[2] -Type DWord
