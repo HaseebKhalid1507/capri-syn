@@ -28,9 +28,8 @@
 #ifndef Exe
   #define Exe "..\..\target\release\synaps-avatar.exe"
 #endif
-#ifndef IconDir
-  #define IconDir "build"
-#endif
+; Her icon: the master in assets\icon (assets/icon/NOTICE), used as is.
+#define IconDir "..\..\assets\icon"
 ; Her AppUserModelID: src/platform/windows/notifications.rs uses the same.
 #define Aumid "Synaps.Avatar"
 ; Her voice installer's AppId (synaps-avatar-voice.iss).
@@ -57,7 +56,7 @@ Compression=lzma2/max
 SolidCompression=yes
 OutputDir=Output
 OutputBaseFilename=capri-syn-setup-{#AppVersion}-{#Build}
-SetupIconFile={#IconDir}\synaps-avatar.ico
+SetupIconFile={#IconDir}\capri-syn.ico
 UninstallDisplayIcon={app}\synaps-avatar.ico
 UninstallDisplayName=capri-syn
 ; An upgrade closes the running one (Restart Manager), and doesn't restart it.
@@ -80,8 +79,8 @@ Source: "..\..\tools\desktop-art.json"; DestDir: "{app}\steps\tools"; Flags: ign
 Source: "..\..\packs\capri\moods.json"; DestDir: "{app}\steps\packs\capri"; Flags: ignoreversion
 Source: "..\..\packs\capri\persona.md"; DestDir: "{app}\steps\packs\capri"; Flags: ignoreversion
 Source: "{#Exe}"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#IconDir}\synaps-avatar.ico"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#IconDir}\synaps-avatar.png"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#IconDir}\capri-syn.ico"; DestDir: "{app}"; DestName: "synaps-avatar.ico"; Flags: ignoreversion
+Source: "{#IconDir}\capri-syn-256.png"; DestDir: "{app}"; DestName: "synaps-avatar.png"; Flags: ignoreversion
 
 [Dirs]
 ; Where she looks for packs: made even without one. Removed at uninstall if empty.

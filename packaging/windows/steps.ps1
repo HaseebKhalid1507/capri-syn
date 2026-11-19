@@ -57,6 +57,13 @@ param(
 function Invoke-Steps {
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+# Windows PowerShell started from PowerShell 7 (or from a setup started there) inherits 7's module
+# path, and then can't load its own Microsoft.PowerShell.Utility, Archive and so on. Its own first.
+if ($PSVersionTable.PSEdition -eq 'Desktop') {
+    $own = @((Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'WindowsPowerShell\Modules'),
+        (Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules'), (Join-Path $PSHOME 'Modules'))
+    $env:PSModulePath = (@($own) + @("$env:PSModulePath" -split ';' | Where-Object { $_ -and $_ -notmatch '\\PowerShell\\7|\\powershell\\Modules$' -and $own -notcontains $_ })) -join ';'
+}
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 # Read as UTF-8 by both callers (paths can have any letter in them).
 if ([Console]::IsOutputRedirected) { try { [Console]::OutputEncoding = New-Object Text.UTF8Encoding $false } catch { $null = $_ } }
@@ -175,7 +182,11 @@ function Get-Url([string]$Url, [string]$To, [string]$What) {
     }
     Move-Item -Force -LiteralPath $part $To
 }
-function Get-Sha256([string]$Path) { (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant() }
+function Get-Sha256([string]$Path) {
+    $sha = [Security.Cryptography.SHA256]::Create()
+    $fs = [IO.File]::OpenRead($Path)
+    try { -join ($sha.ComputeHash($fs) | ForEach-Object { $_.ToString('x2') }) } finally { $fs.Dispose(); $sha.Dispose() }
+}
 function Test-Pin([string]$Path, [string]$Want, [string]$What) {
     $got = Get-Sha256 $Path
     if ($got -ne $Want.ToLowerInvariant()) {
@@ -481,7 +492,8 @@ function Get-Python {
     $zip = Join-Path $Cache "python-$v-embed-amd64.zip"
     Get-Url "https://www.python.org/ftp/python/$v/python-$v-embed-amd64.zip" $zip "Python $v"
     Test-Pin $zip (Get-Key 'python_embed_sha256') "python-$v-embed-amd64.zip"
-    Expand-Archive -LiteralPath $zip -DestinationPath $dir
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    [IO.Compression.ZipFile]::ExtractToDirectory($zip, $dir)
     Remove-Item -Force -LiteralPath $zip
     # Its search path: the stdlib zip, its own folder, its packages (no site: his user packages stay out).
     Set-Content -Encoding Ascii -LiteralPath (Join-Path $dir "$tag._pth") -Value @("$tag.zip", '.', 'site-packages')
