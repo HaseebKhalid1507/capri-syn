@@ -230,9 +230,10 @@ jobs:
           retention-days: 14
           if-no-files-found: error
 
-      # Her quit is bounded (2 s after her bye) and frees her exe, then the same with the session
-      # locked, as on his box when a quit stayed and pinned her exe. Last: the lock stays.
-      - name: Her quit, unlocked and locked
+      # Her quit is bounded (2 s after her bye) and frees her exe: unlocked, with her teardown held
+      # (the watchdog ends her), then with the session locked, as on his box when a quit stayed and
+      # pinned her exe. Last: the lock stays.
+      - name: Her quit, unlocked, held and locked
         timeout-minutes: 5
         shell: pwsh
         run: ./tests/windows/test-quit.ps1 -Exe target/release/synaps-avatar.exe -Locked -Out "$env:RUNNER_TEMP/sa-quit"
