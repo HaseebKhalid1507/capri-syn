@@ -22,6 +22,11 @@ $lnk = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\synaps-avat
 $aumid = 'HKCU:\Software\Classes\AppUserModelId\Synaps.Avatar'
 $run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 if (Test-Path $app) { throw "$app exists already: not a clean machine" }
+# A Synaps from before (a cache that kept ~\.cargo\bin) would make the offline check prove nothing:
+# set aside, and put back at the end.
+$synapsAside = $null
+$s0 = Join-Path $(if ($env:CARGO_HOME) { Join-Path $env:CARGO_HOME 'bin' } else { Join-Path $env:USERPROFILE '.cargo\bin' }) 'synaps.exe'
+if (Test-Path $s0) { $synapsAside = "$s0.test-install-aside"; Move-Item -Force $s0 $synapsAside; Write-Host "  set aside: $s0 (from before)" }
 
 $pack = Join-Path ([IO.Path]::GetTempPath()) "sa-stand-in-pack-$PID"
 New-Item -ItemType Directory -Force (Join-Path $pack 'poses') | Out-Null
@@ -180,5 +185,6 @@ Check (-not (Test-Path $lnk)) 'the shortcut is gone'
 Check (Test-Path (Join-Path $pack 'sprites.json')) 'his own pack folder is untouched'
 
 Remove-Item -Recurse -Force $pack, $notPack -ErrorAction SilentlyContinue
+if ($synapsAside) { Move-Item -Force $synapsAside $s0 }
 if ($fails.Count) { throw "$($fails.Count) check(s) failed: $($fails -join '; ')" }
 Write-Output 'all installer checks passed'

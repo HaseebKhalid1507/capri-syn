@@ -17,9 +17,11 @@
 ;
 ; Unattended: setup.exe /VERYSILENT /SUPPRESSMSGBOXES [/SYNAPS=install|skip]
 ;             [/PACK=download|skip|"C:\packs\capri"] [/VOICE=on|off] [/MIC="Microphone (...)"]
-;             [/VOICESETUP="C:\...\capri-syn-voice-setup.exe"] [/TASKS=autostart]
+;             [/VOICEFROM="C:\...\capri-syn-voice-setup.exe" or a URL] [/TASKS=autostart]
 ; The defaults are the wizard's: Synaps if it's needed, her art downloaded, autostart on, her voice
-; when Windows has a microphone. /VOICESETUP: a voice installer of his instead of the release's.
+; when Windows has a microphone. Her voice comes from /VOICEFROM, else a capri-syn-voice-setup*.exe
+; beside this setup (CI hands its own build over so), else the latest release; with none of them
+; the page says it comes with her first release, and stays off.
 ; install.ps1 runs it with /SYNAPS=skip /PACK=skip /VOICE=off /BY=install.ps1: those are its own
 ; steps (the same steps.ps1), and her settings and its cache are its own to remove.
 
@@ -146,6 +148,8 @@ var
   MicCombo: TNewComboBox;
   { The microphones Windows has (steps.ps1 mics), once; -1: not looked yet. }
   MicCount: Integer;
+  { Where her voice would come from (steps.ps1 voice-check): file, url, release, none or offline. }
+  VoiceKind: String;
   SynapsBox: TNewCheckBox;
   SynapsStatus: TNewStaticText;
   DownloadRadio, FolderRadio, SkipRadio: TNewRadioButton;
@@ -275,7 +279,7 @@ end;
 
 function IsResultKey(const K: String): Boolean;
 begin
-  Result := Pos(',' + K + ',', ',synaps,brain,daemon,runvalue,pack,voice,release,was,remove,mic,mics,failed,') > 0;
+  Result := Pos(',' + K + ',', ',synaps,brain,daemon,runvalue,pack,voice,voicefrom,release,was,remove,mic,mics,failed,') > 0;
 end;
 
 { One line of a step: in the log; a result is kept; anything else goes on the progress page. }
@@ -497,11 +501,25 @@ begin
   ReadBox.Enabled := TalkBox.Checked;
 end;
 
-{ steps.ps1 mics, once (from the temporary copy): the picker's names, and the page's default. }
+{ Her voice installer: /VOICEFROM, else one beside this setup (CI's own build), else '' (the release). }
+function VoiceFrom: String;
+var
+  F: TFindRec;
+begin
+  Result := Trim(ExpandConstant('{param:VOICEFROM|}'));
+  if Result <> '' then exit;
+  if FindFirst(ExpandConstant('{src}\capri-syn-voice-setup*.exe'), F) then begin
+    Result := ExpandConstant('{src}\') + F.Name;
+    FindClose(F);
+  end;
+end;
+
+{ steps.ps1 mics and voice-check, once (from the temporary copy): the picker's names, where her voice
+  would come from, and the page's default. }
 procedure CheckMics;
 var
   I, Pick: Integer;
-  M: String;
+  M, A: String;
 begin
   if MicCount >= 0 then exit;
   MicCount := 0;
@@ -511,10 +529,14 @@ begin
     VoiceClick(nil);
     exit;
   end;
+  VoiceKind := 'none';
   try
     ExtractTemporaryFiles('{app}\steps\steps.ps1');
     ExtractTemporaryFiles('{app}\steps\installer\manifest');
-    RunStep('mics', 'Looking for a microphone', ExpandConstant('{tmp}') + '\{app}\steps\steps.ps1', 'mics');
+    { An empty "" argument can be lost on its way to -File: none is passed. }
+    A := 'mics voice-check';
+    if VoiceFrom <> '' then A := A + ' -VoiceFrom "' + VoiceFrom + '"';
+    RunStep('mics', 'Looking for a microphone', ExpandConstant('{tmp}') + '\{app}\steps\steps.ps1', A);
   except
     Log('mics: ' + GetExceptionMessage);
   end;
@@ -523,6 +545,8 @@ begin
       MicCombo.Items.Add(Copy(StepResults[I], 5, Length(StepResults[I])));
       MicCount := MicCount + 1;
     end;
+  if StepResult('voicefrom') <> '' then
+    VoiceKind := Copy(StepResult('voicefrom'), 1, Pos(' ', StepResult('voicefrom') + ' ') - 1);
   { /MIC=: that one (kept as given when Windows doesn't list it: she says so if it's gone). }
   M := Trim(ExpandConstant('{param:MIC|}'));
   Pick := 0;
@@ -537,6 +561,16 @@ begin
   if MicCount = 0 then begin
     TalkNote.Caption := 'No microphone found. Plug one in and run Setup again to talk to her.';
     TalkBox.Enabled := VoiceParam = 'on';
+  end;
+  { Nothing to install it from: off and greyed, whatever was asked. }
+  if VoiceKind = 'none' then begin
+    TalkNote.Caption := 'Her voice comes with her first release. Run Setup again then to talk to her.';
+    TalkBox.Checked := False;
+    TalkBox.Enabled := False;
+  end else if VoiceKind = 'offline' then begin
+    TalkNote.Caption := 'Can''t reach GitHub for her voice. Run Setup again when you''re online to talk to her.';
+    TalkBox.Checked := False;
+    TalkBox.Enabled := False;
   end;
   VoiceClick(nil);
 end;
@@ -558,14 +592,15 @@ begin
   if B then Result := 'on' else Result := 'off';
 end;
 
-{ steps.ps1 voice's arguments: his choices, and /VOICESETUP when given. }
+{ steps.ps1 voice's arguments: his choices, and where his voice comes from when it isn't the release. }
 function VoiceArgs: String;
 var
   V: String;
 begin
-  Result := 'voice -Mic "' + MicChosen + '" -WakeWord ' + OnOff(WakeBox.Checked) + ' -ReadAloud ' + OnOff(ReadBox.Checked);
-  V := Trim(ExpandConstant('{param:VOICESETUP|}'));
-  if V <> '' then Result := Result + ' -VoiceSetup "' + V + '"';
+  Result := 'voice -WakeWord ' + OnOff(WakeBox.Checked) + ' -ReadAloud ' + OnOff(ReadBox.Checked);
+  if MicChosen <> '' then Result := Result + ' -Mic "' + MicChosen + '"';
+  V := VoiceFrom;
+  if V <> '' then Result := Result + ' -VoiceFrom "' + V + '"';
 end;
 
 function NewBox(Page: TWizardPage; const Caption: String; Top: Integer): TNewCheckBox;
@@ -720,7 +755,9 @@ begin
         VoiceWhy := StepFailed;
         Retry.Add('Her voice: ' + StepCommand(VoiceArgs));
       end;
-    end else if MicCount = 0 then Log('voice: off (no microphone found)')
+    end else if VoiceKind = 'none' then Log('voice: off (it comes with her first release)')
+    else if VoiceKind = 'offline' then Log('voice: off (GitHub unreachable)')
+    else if MicCount = 0 then Log('voice: off (no microphone found)')
     else Log('voice: off');
   finally
     Progress.Hide;
@@ -762,6 +799,8 @@ begin
     if MicChosen <> '' then Result := Result + ' Microphone: ' + MicChosen + '.';
     Result := Result + N;
   end else if VoiceWhy <> '' then Result := Result + '- Her voice didn''t come: ' + VoiceWhy + ' She''s installed without it.' + N
+  else if VoiceKind = 'none' then Result := Result + '- Her voice comes with her first release.' + N
+  else if VoiceKind = 'offline' then Result := Result + '- No voice: GitHub couldn''t be reached. Run Setup again to add it.' + N
   else if (VoicePage <> nil) and (MicCount = 0) and (VoiceParam <> 'off') then Result := Result + '- No voice: no microphone found.' + N;
   Result := Result + N;
   if OfferLogin then

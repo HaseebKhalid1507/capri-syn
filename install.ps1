@@ -760,10 +760,9 @@ function Install-Extras {
     if (-not $script:Voice -and -not $script:Watch) { Write-Info 'skipped (--voice, --watch)'; return }
     if ($script:Watch) { Write-Info 'capri-watch is Linux-only (systemd units, statvfs): skipped' }
     if (-not $script:Voice) { return }
-    $rel = "https://github.com/$($script:M.repo)/releases/latest/download"
-    $sum = $null
-    if (-not $script:FromSource) { try { $sum = ((Get-Text "$rel/$($script:M.asset_windows_voice).sha256") -split '\s+')[0] } catch { $sum = $null } }
-    if ($sum -match '^[0-9a-f]{64}$') {
+    # Where her voice comes from: steps.ps1 voice-check (her installer's page asks the same).
+    $from = if ($script:FromSource) { 'none' } else { "$((Invoke-Step (Get-StepScript) @('voice-check') -NoStop)['voicefrom'])" }
+    if ($from -like 'release *') {
         # Her voice installer, sha256 checked, its models, and her settings through her own writer:
         # steps.ps1 voice (her installer's Voice page runs the same).
         $null = Invoke-Step (Get-StepScript) @(@('voice', '-Exe', $script:Exe) + $(if ($script:Dry) { @('-DryRun') } else { @() }))

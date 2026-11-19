@@ -85,9 +85,12 @@ function Get-HerState {
     if ($t -and $t.StartsWith('{')) { return ($t | ConvertFrom-Json) }
     return $null
 }
-function Get-Shot([string]$Name, [string[]]$More) {
+# Shots: spike's tools/shoot-win.ps1 (#82), dot-sourced. A process's windows, cropped (+ Pad).
+if ($Shots) { . (Join-Path $root 'tools\shoot-win.ps1') }
+function Get-Shot([string]$Name, [int]$ProcessId, [int]$Pad = 12) {
     if (-not $Shots) { return }
-    try { & (Join-Path $root 'tools\shoot-win.ps1') -Out (Join-Path $Shots "$Name.png") @More } catch { Write-Host "  (no shot $($Name): $($_.Exception.Message))" }
+    try { $r = Save-WindowShot -Path (Join-Path $Shots "$Name.png") -ProcessId $ProcessId -Pad $Pad; Write-Host "  shot $Name.png: $($r -join ',')" }
+    catch { Write-Host "  (no shot $($Name): $($_.Exception.Message))" }
 }
 
 # 1. Her installer, unattended, its defaults (Synaps, her art, the daemon, autostart; no voice).
@@ -122,13 +125,12 @@ $text = if (Test-Path $herLog) { (Get-Content -Raw $herLog).Substring([int]$befo
 Check ($c.ExitCode -eq 0 -and $text -match 'pack `Capri` ok: \d+ frames') "her --check: $([regex]::Match($text, 'pack `Capri` ok: \d+ frames[^,]*').Value) (exit $($c.ExitCode))"
 Check ((Get-RunValue 'synaps-avatar') -eq "`"$exe`"") 'she starts at sign-in (Run\synaps-avatar, the default)'
 Check (Test-Path $lnk) 'her Start-menu entry'
-# Her voice: the page's default is on only when Windows has a microphone (a CI runner has none).
-$mics = [regex]::Match($setupLog, 'mics: mics: (\d+)').Groups[1].Value
-Write-Host "  microphones: $mics"
-if ($mics -eq '0') {
-    Check ($setupLog -match 'voice: off \(no microphone found\)') 'no microphone: her voice is off, and the log says why'
-    Check (-not (Test-Path (Join-Path $app 'voice')) -and -not (Test-Path (Join-Path $env:LOCALAPPDATA 'capri-voice'))) 'and no voice files'
-}
+# Her voice: on by default only with a microphone and somewhere to get it from (a CI runner has no
+# microphone, and there's no release yet): off, the log says why, and no voice files.
+Write-Host "  microphones: $([regex]::Match($setupLog, 'mics: mics: (\d+)').Groups[1].Value); $([regex]::Match($setupLog, 'voicefrom: [^\r\n]*').Value)"
+$off = [regex]::Match($setupLog, 'voice: off \(.*?\)').Value
+Check ([bool]$off) "her voice is off by default here, and the log says why: $off"
+Check (-not (Test-Path (Join-Path $app 'voice')) -and -not (Test-Path (Join-Path $env:LOCALAPPDATA 'capri-voice'))) 'and no voice files'
 
 # 4. She starts, from his profile folder (the finish page's "Start her now"), and attaches.
 $from = (Get-Item $herLog -ErrorAction SilentlyContinue).Length
@@ -146,8 +148,8 @@ Check (-not $her.HasExited) "she runs (pid $($her.Id))"
 Check $painted 'her first frame is painted'
 Check ($st -and $st.session -and $st.session.live) "she attaches to the daemon (session.live) in $([int]((Get-Date) - $t0).TotalSeconds) s"
 Check ($st -and "$($st.status)" -notmatch 'OFFLINE') "her tag isn't OFFLINE: '$($st.status)' (session: '$($st.session.label)')"
-Get-Shot 'her-on-the-desktop' @()
-Get-Shot 'her-window' @('-ProcessId', $her.Id, '-Pad', '40')
+Get-Shot 'her-on-the-desktop' $her.Id 240
+Get-Shot 'her' $her.Id 40
 
 # 5. Responsive for 60 s, clicked on.
 $t0 = Get-Date
@@ -160,7 +162,7 @@ while (((Get-Date) - $t0).TotalSeconds -lt $Responsive -and -not $her.HasExited)
     if ($s -and $s.avatar -and ($round % 5 -eq 0)) {
         [E2e]::Click([int]($s.avatar.x + $s.avatar.w / 2), [int]($s.avatar.y + $s.avatar.h / 2))
         $clicks++
-        if ($clicks -eq 2) { Get-Shot 'her-clicked' @() }
+        if ($clicks -eq 2) { Get-Shot 'her-clicked' $her.Id 120 }
     }
     Start-Sleep -Milliseconds 1000
 }
