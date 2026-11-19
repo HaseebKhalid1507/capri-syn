@@ -29,9 +29,12 @@ pub const KEEP_SIDE: u32 = 256;
 const PACK_ICON: bool = cfg!(not(windows));
 
 /// Her tray tooltip for her status (her tag's word: ONLINE, SLEEPING, NO BRAIN YET,
-/// OFFLINE...). Hidden (HIDE), it says so: the tray is the way back.
+/// OFFLINE...), steady: up to its first figure or meter bar (her mic's clock and level, a
+/// countdown's seconds: her tag moves with them many times a second, the tray hears the word
+/// once). Hidden (HIDE), it says so: the tray is the way back.
 pub fn tooltip(status: &str, hidden: bool) -> String {
-    match if hidden { "HIDDEN" } else { status.trim() } {
+    let cut = status.find(|c: char| c.is_ascii_digit() || matches!(c, '▮' | '▯')).unwrap_or(status.len());
+    match if hidden { "HIDDEN" } else { status[..cut].trim_end_matches([' ', '·']).trim() } {
         "" => NAME.to_string(),
         s => format!("{NAME} · {s}"),
     }
@@ -89,7 +92,8 @@ pub fn icon(pack: Option<&Path>) -> Arc<Icon> {
 static LAST: Mutex<Option<Arc<Icon>>> = Mutex::new(None);
 
 fn cached(his: &Path, pack: Option<&Path>) -> Arc<Icon> {
-    let places: Vec<&Path> = std::iter::once(his).chain(pack).collect();
+    // Her pack's icon only where it may be used: on Windows a change to it is no news.
+    let places: Vec<&Path> = std::iter::once(his).chain(pack.filter(|_| PACK_ICON)).collect();
     let stamp = Stamp::of(&places);
     let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(i) = last.as_ref().filter(|i| i.stamp == stamp) {
@@ -192,6 +196,12 @@ mod tests {
         assert_eq!(tooltip(" THINKING ", false), "capri-syn · THINKING");
         assert_eq!(tooltip("", false), "capri-syn", "no status yet: her name alone");
         assert_eq!(tooltip("ONLINE", true), "capri-syn · HIDDEN", "hidden, her tag's word isn't what he sees");
+        // Her mic's clock and meter, a countdown: the word, not the figures.
+        assert_eq!(tooltip("MIC LIVE · HANDS-FREE 1:23 ▮▮▯▯▯", false), "capri-syn · MIC LIVE · HANDS-FREE");
+        assert_eq!(tooltip("MIC 0:03 ▮▯▯▯▯ · AUTO", false), "capri-syn · MIC");
+        assert_eq!(tooltip("SPEAKING ▮▮▮▯▯", false), "capri-syn · SPEAKING");
+        assert_eq!(tooltip("MIC LIVE · HANDS-FREE · ENDS IN 0:09", false), "capri-syn · MIC LIVE · HANDS-FREE · ENDS IN");
+        assert_eq!(tooltip("HEARD · …", false), "capri-syn · HEARD · …");
     }
 
     #[test]
@@ -314,6 +324,13 @@ mod tests {
         assert_eq!(cached(&his, None).img.dimensions(), (33, 33));
         std::fs::remove_file(&his).unwrap();
         assert_eq!(cached(&his, None).origin, Origin::App);
+        // Her pack's icon put in: read where it counts; on Windows (the app's icon) no news.
+        let pack = d.join("pack-icon.png");
+        let before = cached(&his, Some(&pack));
+        RgbaImage::from_pixel(40, 40, image::Rgba([9, 9, 9, 255])).save(&pack).unwrap();
+        let after = cached(&his, Some(&pack));
+        assert_eq!(Arc::ptr_eq(&before, &after), !PACK_ICON);
+        assert_eq!(after.origin, if PACK_ICON { Origin::Pack } else { Origin::App });
         std::fs::remove_dir_all(d).ok();
     }
 }

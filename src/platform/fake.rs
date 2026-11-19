@@ -423,7 +423,7 @@ fn contract_fake_keyboard_on_his_input() {
 }
 
 /// Her tray hears only what changed: the same tooltip and menu every schedule cost the desktop
-/// nothing, and a quit takes the icon out once.
+/// nothing, a new tooltip never makes the menu again, and a quit takes the icon out once.
 #[test]
 fn the_tray_hears_only_changes() {
     use crate::menu::{State, rows, tray_items};
@@ -431,9 +431,10 @@ fn the_tray_hears_only_changes() {
     let (os, d) = fake(true);
     let made = Cell::new(0);
     let show = |key: u64, tip: &str, s: State| {
-        os.tray_show(key, || {
+        os.tray_tip(tip);
+        os.tray_menu(key, || {
             made.set(made.get() + 1);
-            (tip.to_string(), tray_items(&rows(&s)))
+            tray_items(&rows(&s))
         })
     };
     show(1, "capri-syn · ONLINE", State::default());
@@ -444,11 +445,13 @@ fn the_tray_hears_only_changes() {
         show(1, "capri-syn · ONLINE", State::default());
     }
     assert_eq!(made.get(), 1, "the same key: made once");
+    // Her status moves on, her menu's state doesn't: the tooltip only, the menu isn't made.
+    show(1, "capri-syn · SLEEPING", State::default());
+    assert_eq!(made.get(), 1, "a new tooltip alone: the menu isn't made again");
     // A new key: made again, and only what changed is told.
-    show(2, "capri-syn · ONLINE", State::default());
-    show(3, "capri-syn · SLEEPING", State::default());
-    show(4, "capri-syn · HIDDEN", State { hidden: true, ..State::default() });
-    assert_eq!(made.get(), 4);
+    show(2, "capri-syn · SLEEPING", State::default());
+    show(3, "capri-syn · HIDDEN", State { hidden: true, ..State::default() });
+    assert_eq!(made.get(), 3);
     // His own icon put in (`settings reload`); the same stamp again is no news.
     assert!(!os.tray_icon(icon(7, 256)));
     assert!(os.tray_icon(icon(8, 48)) && !os.tray_icon(icon(8, 48)));

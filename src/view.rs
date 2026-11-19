@@ -3443,6 +3443,7 @@ impl Avatar {
                 "ok".into()
             }
             Command::MenuPick(item) => self.menu_do(item, crate::menu::Via::Tray, cx),
+            Command::TrayOpen => self.tray_open(cx),
             Command::Drop => {
                 if self.teleport.is_some() {
                     "error: teleporting".into()

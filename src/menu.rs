@@ -214,11 +214,16 @@ pub fn tray_items(rows: &[Row]) -> Vec<TrayItem> {
     v
 }
 
-/// What a tray event asks of her: a click on the icon is her summon key's tap (the Line), a
-/// pick is that item through `menu_do`.
+/// Whether a click on her tray icon opens the Line (her summon key's tap): not while she quits.
+pub fn opens(s: &State) -> bool {
+    !s.quitting
+}
+
+/// What a tray event asks of her: a click on the icon is `TrayOpen` (her summon key's tap,
+/// where `opens`), a pick is that item through `menu_do`.
 pub fn command_for(ev: TrayEv) -> Option<Command> {
     match ev {
-        TrayEv::Open => Some(Command::TalkTap),
+        TrayEv::Open => Some(Command::TrayOpen),
         TrayEv::Pick(id) => Item::from_id(id).map(Command::MenuPick),
     }
 }
@@ -299,6 +304,7 @@ mod tests {
         assert!(greyed(&full).is_empty(), "at rest, everything acts");
         let quitting = State { quitting: true, ..full };
         assert_eq!(greyed(&quitting), ["RESET POSITION", "DND 1 HOUR", "ATTENTION: MIX", "HANDS-FREE TALK", "COPY LAST REPLY", "HIDE", "SETTINGS"], "only QUIT while she quits");
+        assert!(opens(&full) && opens(&State { hidden: true, ..full }) && !opens(&quitting), "her icon's click: the Line, hidden too, never while she quits");
         for moving in [State { teleporting: true, ..full }, State { held: true, ..full }] {
             assert_eq!(greyed(&moving), ["RESET POSITION", "HIDE"], "{moving:?}");
         }
@@ -332,6 +338,6 @@ mod tests {
         assert_eq!(Item::from_id(0), None);
         assert_eq!((Item::Attention(Some(Attention::Off)).key(), Item::ShowHide.probe()), ("attention", "menu-hide"));
         assert!(command_for(TrayEv::Pick(99)).is_none(), "an id that isn't hers does nothing");
-        assert!(matches!(command_for(TrayEv::Open), Some(Command::TalkTap)), "a click is her summon key");
+        assert!(matches!(command_for(TrayEv::Open), Some(Command::TrayOpen)), "a click is her summon key's tap");
     }
 }

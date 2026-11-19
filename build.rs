@@ -36,8 +36,8 @@ fn main() {
     }
 }
 
-/// The .res for an .ico: an empty first entry, each image as an RT_ICON (ids 1..), then the
-/// RT_GROUP_ICON naming them (the .ico's directory with ids for offsets).
+/// The .res for an .ico of PNG images: an empty first entry, each image as an RT_ICON (ids
+/// 1..), then the RT_GROUP_ICON naming them (the .ico's directory with ids for offsets).
 fn res_of(ico: &[u8]) -> Result<Vec<u8>, String> {
     let u16_at = |i: usize| ico.get(i..i + 2).map(|b| u16::from_le_bytes([b[0], b[1]])).ok_or("cut short");
     let u32_at = |i: usize| ico.get(i..i + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])).ok_or("cut short");
@@ -58,6 +58,11 @@ fn res_of(ico: &[u8]) -> Result<Vec<u8>, String> {
         let e = 6 + 16 * usize::from(k);
         let (size, at) = (u32_at(e + 8)?, u32_at(e + 12)? as usize);
         let img = ico.get(at..at + size as usize).ok_or("an image past the end")?;
+        // PNG images only, as the shipped .ico has: for a BMP one rc reads planes and bits from
+        // its own header, which this doesn't (the build stops).
+        if !img.starts_with(b"\x89PNG\r\n\x1a\n") {
+            return Err(format!("image {} isn't a PNG (only PNG images go in)", k + 1));
+        }
         let id = k + 1;
         entry(&mut res, RT_ICON, id, ICON_FLAGS, LANG, img);
         // Width, height, colours, reserved; planes and bits (an image of PNG often says 0: rc

@@ -11,7 +11,9 @@
 //! - An add that fails is tried again every `RETRY_MS` for `RETRY_FOR_MS` (the taskbar is up
 //!   before its tray takes icons, at sign-in), and again when Explorer starts again. A shell
 //!   that refuses her GUID outright (not a timeout: it may still take that one) gets her window's
-//!   id instead, for good (`fell_back`); her removal then deletes by both.
+//!   id, and keeps it only once that goes in (`add_by`: at sign-in a tray not taking icons yet
+//!   refuses both, and the next try is by her GUID again). Once her window's id was tried, her
+//!   adds and her removal delete by both (`fell_back`).
 //! - Her icon is her exe's own (build.rs: assets/icon/capri-syn.ico), or his .ico: Windows picks
 //!   the image made for the tray's size from it. A picture is drawn only where neither loads.
 //! - Explorer restarted (`TaskbarCreated`): added again, at the size the tray wants now.
@@ -23,7 +25,7 @@
 
 use super::super::{Tray, TrayEv, TrayIcon, TrayItem};
 use super::tick;
-use ::windows::Win32::Foundation::{ERROR_TIMEOUT, GetLastError, HWND, LPARAM, LRESULT, POINT, WPARAM};
+use ::windows::Win32::Foundation::{ERROR_TIMEOUT, GetLastError, HWND, LPARAM, LRESULT, POINT, WIN32_ERROR, WPARAM};
 use ::windows::Win32::Graphics::Gdi::{BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateBitmap, CreateDIBSection, DIB_RGB_COLORS, DeleteObject, RGBQUAD};
 use ::windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use ::windows::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime;
@@ -95,7 +97,8 @@ struct State {
     guid: GUID,
     /// The shell took the GUID (else her window and `UID` name the icon).
     by_guid: bool,
-    /// The shell refused her GUID once: by her window since, and her removal deletes by both.
+    /// Her window's id was tried (`add_by`): it may be in, so her adds and her removal delete
+    /// by both ids from now on.
     fell_back: bool,
     /// An add timed out: the shell may have taken it after all.
     timed_out: bool,
@@ -178,7 +181,33 @@ fn taskbar_up() -> bool {
     unsafe { FindWindowW(w!("Shell_TrayWnd"), PCWSTR::null()) }.is_ok_and(|h| !h.is_invalid())
 }
 
-/// Into the tray (again): what a run before left under her GUID goes first. True: it is in.
+/// An add by the rule, apart from the shell (`shell`: an add by her GUID, true, or by her
+/// window's id; Err: the shell's error).
+#[derive(Debug, PartialEq)]
+struct Added {
+    /// In; else the error to tell (her GUID's, where both were refused).
+    r: Result<(), WIN32_ERROR>,
+    /// By her GUID from now on; else by her window's id.
+    by_guid: bool,
+    /// Her window's id was tried: it may be in (a late add).
+    window_tried: bool,
+}
+
+/// Her GUID while the shell takes it. Refused outright (not a timeout: it may still go in) with
+/// the taskbar up, her window's id; given up for it only if that goes in: at sign-in a tray not
+/// taking icons yet refuses both, and the GUID is tried again (`ADD_TIMER`).
+fn add_by(by_guid: bool, up: impl FnOnce() -> bool, mut shell: impl FnMut(bool) -> Result<(), WIN32_ERROR>) -> Added {
+    match shell(by_guid) {
+        Err(e) if by_guid && e != ERROR_TIMEOUT && up() => match shell(false) {
+            Ok(()) => Added { r: Ok(()), by_guid: false, window_tried: true },
+            Err(_) => Added { r: Err(e), by_guid: true, window_tried: true },
+        },
+        r => Added { r, by_guid, window_tried: !by_guid },
+    }
+}
+
+/// Into the tray (again): what a run before left under her GUID goes first (and under her
+/// window's id, once that was tried). True: it is in.
 fn add(h: HWND, s: &mut State) -> bool {
     let tip = s.shared.lock().map(|g| g.tip.clone()).unwrap_or_default();
     let full = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
@@ -186,21 +215,22 @@ fn add(h: HWND, s: &mut State) -> bool {
     let none = NOTIFY_ICON_DATA_FLAGS(0);
     unsafe {
         let _ = Shell_NotifyIconW(NIM_DELETE, &data_for(h, Some(s.guid), none));
-        if !s.by_guid {
+        if s.fell_back {
             let _ = Shell_NotifyIconW(NIM_DELETE, &data_for(h, None, none));
         }
-        // Read at once: the next call may set its own.
-        let mut ok = Shell_NotifyIconW(NIM_ADD, &data(s)).as_bool();
-        let mut err = if ok { None } else { Some(GetLastError()) };
-        if !ok && s.by_guid && err != Some(ERROR_TIMEOUT) && taskbar_up() {
-            // Refused, not late: the shell holds her GUID for another path. By her window.
-            elog!("synaps-avatar: tray: the shell refused her icon's GUID ({:?}); by her window from now on", err.map(|e| e.0));
-            s.by_guid = false;
-            s.fell_back = true;
-            ok = Shell_NotifyIconW(NIM_ADD, &data(s)).as_bool();
-            err = if ok { None } else { Some(GetLastError()) };
+        let (guid, hicon) = (s.guid, s.hicon);
+        let a = add_by(s.by_guid, taskbar_up, |g| {
+            let d = NOTIFYICONDATAW { uCallbackMessage: WM_TRAY, hIcon: hicon, szTip: tip_w(&tip), ..data_for(h, g.then_some(guid), full) };
+            // Read at once: the next call may set its own.
+            if Shell_NotifyIconW(NIM_ADD, &d).as_bool() { Ok(()) } else { Err(GetLastError()) }
+        });
+        if s.by_guid && !a.by_guid {
+            elog!("synaps-avatar: tray: the shell refused her icon's GUID; by her window from now on");
         }
-        s.timed_out = err == Some(ERROR_TIMEOUT);
+        s.by_guid = a.by_guid;
+        s.fell_back |= a.window_tried;
+        s.timed_out = a.r == Err(ERROR_TIMEOUT);
+        let ok = a.r.is_ok();
         if ok {
             let mut v = data(s);
             v.Anonymous.uVersion = NOTIFYICON_VERSION_4;
@@ -264,7 +294,7 @@ fn try_add(h: HWND, s: &mut State, why: Why) {
 }
 
 /// Out of the tray, once: by the id she has now where she is in (or an add timed out: she may
-/// be), and by her GUID too where she fell back from it. No add after it.
+/// be), and by the other too once her window's id was tried. No add after it.
 fn delete(h: HWND, s: &mut State) {
     if std::mem::replace(&mut s.left, true) {
         return;
@@ -276,7 +306,7 @@ fn delete(h: HWND, s: &mut State) {
             let _ = Shell_NotifyIconW(NIM_DELETE, &nid(h, s, NOTIFY_ICON_DATA_FLAGS(0)));
         }
         if s.fell_back {
-            let _ = Shell_NotifyIconW(NIM_DELETE, &data_for(h, Some(s.guid), NOTIFY_ICON_DATA_FLAGS(0)));
+            let _ = Shell_NotifyIconW(NIM_DELETE, &data_for(h, (!s.by_guid).then_some(s.guid), NOTIFY_ICON_DATA_FLAGS(0)));
         }
     }
 }
@@ -785,6 +815,36 @@ mod tests {
         assert_eq!((t[126], t[127]), (0, 0));
     }
 
+    /// The add's rule against a shell that answers from a script: the ids it was asked by (true:
+    /// her GUID) and what came of it.
+    fn add_with(by_guid: bool, up: bool, answers: &[Result<(), WIN32_ERROR>]) -> (Added, Vec<bool>) {
+        let mut asked = Vec::new();
+        let mut it = answers.iter().copied();
+        let a = add_by(by_guid, || up, |g| {
+            asked.push(g);
+            it.next().expect("asked more than the script says")
+        });
+        (a, asked)
+    }
+
+    #[test]
+    fn her_guid_is_given_up_only_once_her_window_goes_in() {
+        let no = WIN32_ERROR(5);
+        let added = |r, by_guid, window_tried| Added { r, by_guid, window_tried };
+        // At sign-in the tray refuses both: by her GUID still (the timer tries it again), and her
+        // window's id was tried (deletes go by both).
+        assert_eq!(add_with(true, true, &[Err(no), Err(no)]), (added(Err(no), true, true), vec![true, false]));
+        // Her GUID held for another path: by her window, for good.
+        assert_eq!(add_with(true, true, &[Err(no), Ok(())]), (added(Ok(()), false, true), vec![true, false]));
+        // Late, not refused (it may still go in), or no taskbar yet: her GUID only.
+        assert_eq!(add_with(true, true, &[Err(ERROR_TIMEOUT)]), (added(Err(ERROR_TIMEOUT), true, false), vec![true]));
+        assert_eq!(add_with(true, false, &[Err(no)]), (added(Err(no), true, false), vec![true]));
+        assert_eq!(add_with(true, true, &[Ok(())]), (added(Ok(()), true, false), vec![true]));
+        // Fallen back: by her window, refused or not.
+        assert_eq!(add_with(false, true, &[Err(no)]), (added(Err(no), false, true), vec![false]));
+        assert_eq!(add_with(false, true, &[Ok(())]), (added(Ok(()), false, true), vec![false]));
+    }
+
     #[test]
     fn a_guid_per_install_and_instance() {
         assert_eq!(guid(""), guid(""), "kept across runs");
@@ -909,7 +969,7 @@ mod tests {
         click();
         let ev = rx.recv_timeout(Duration::from_secs(5)).expect("the click came back");
         assert_eq!(ev, TrayEv::Open);
-        assert!(matches!(menu::command_for(ev), Some(Command::TalkTap)));
+        assert!(matches!(menu::command_for(ev), Some(Command::TrayOpen)));
         click();
         assert!(rx.recv_timeout(Duration::from_millis(250)).is_err(), "a double click opens once");
 

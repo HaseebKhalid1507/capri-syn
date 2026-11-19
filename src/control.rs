@@ -39,6 +39,9 @@ pub enum Command {
     Menu,
     /// Internal: a pick in her tray icon's menu (`menu::command_for`).
     MenuPick(crate::menu::Item),
+    /// Internal: a click on her tray icon: her summon key's tap, not while she quits
+    /// (`menu::opens`).
+    TrayOpen,
     /// One-line JSON snapshot of the avatar's state.
     State,
     /// The bounding rects of the last paint (computed in alpha mode too, just not sent).

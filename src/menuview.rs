@@ -1,6 +1,7 @@
 //! Her menu from its one model (`crate::menu`), on both surfaces: the rows of her right-click
-//! menu (framed and placed in view.rs), her tray icon's tooltip and menu (`Os::tray_show`), and
-//! the one dispatch a pick on either goes through (`menu_do`). A child module of `view`.
+//! menu (framed and placed in view.rs), her tray icon's tooltip and menu (`Os::tray_tip`,
+//! `Os::tray_menu`), and the one dispatch a pick on either goes through (`menu_do`). A child
+//! module of `view`.
 
 use super::*;
 use crate::menu::{self, Via};
@@ -22,19 +23,30 @@ impl Avatar {
         }
     }
 
-    /// Her tray icon's tooltip (`capri-syn · ONLINE`, `capri-syn · HIDDEN`) and menu, from her
-    /// status and her menu's model, every schedule: made only when those changed, and the
-    /// desktop hears only a change (`Os::tray_show`). Nothing where she has no tray.
+    /// Her tray icon's tooltip (`capri-syn · ONLINE`, `capri-syn · HIDDEN`; her tag's word,
+    /// steady: `brand::tooltip`) and menu (her menu's model, made only when its state changed),
+    /// every schedule: the desktop hears only a change (`Os::tray_tip`, `Os::tray_menu`), and her
+    /// mic's meter moving her tag never makes the menu again. Nothing where she has no tray.
     pub(super) fn tray_sync(&self) {
         if !self.os.has_tray() {
             return;
         }
         // The tray's QUIT quits: it never asks twice there.
         let s = menu::State { quit_armed: false, ..self.menu_state() };
-        let status = self.status_now().label;
+        self.os.tray_tip(&crate::brand::tooltip(&self.status_now().label, s.hidden));
         let mut h = std::hash::DefaultHasher::new();
-        (s, &status).hash(&mut h);
-        self.os.tray_show(h.finish(), || (crate::brand::tooltip(&status, s.hidden), menu::tray_items(&menu::rows(&s))));
+        s.hash(&mut h);
+        self.os.tray_menu(h.finish(), || menu::tray_items(&menu::rows(&s)));
+    }
+
+    /// A click on her tray icon: her summon key's tap (the Line), not while she quits
+    /// (`menu::opens`).
+    pub(super) fn tray_open(&mut self, cx: &mut Context<Self>) -> String {
+        if !menu::opens(&self.menu_state()) {
+            elog!("synaps-avatar: tray: a click while she quits: nothing");
+            return "error: quitting".into();
+        }
+        self.talk_tap(cx)
     }
 
     /// A pick on her menu or her tray's: the one place each item acts. What can't act now
@@ -170,5 +182,28 @@ impl Avatar {
             );
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::voiceview::{hf_label, level_bars, mic_label};
+    use crate::brand::tooltip;
+    use std::collections::BTreeSet;
+
+    /// Her tag moves with her mic's clock and meter many times a second; her tray's tooltip is
+    /// one word for the whole of it (a new one is a `NIM_MODIFY` on Windows).
+    #[test]
+    fn her_mic_meter_never_moves_the_tray() {
+        let levels = [0.0, 0.25, 0.5, 0.75, 1.0];
+        let tips = |labels: Vec<String>| labels.iter().map(|l| tooltip(l, false)).collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>();
+        let hf = (0..200).flat_map(|s| levels.map(|l| hf_label(None, s, l))).collect();
+        assert_eq!(tips(hf), ["capri-syn · MIC LIVE · HANDS-FREE"]);
+        let ending = (0..10).map(|left| hf_label(Some(left), 0, 0.5)).collect();
+        assert_eq!(tips(ending), ["capri-syn · MIC LIVE · HANDS-FREE · ENDS IN"]);
+        let mic = (0..200).flat_map(|s| levels.map(|l| mic_label(s, l, s % 2 == 0))).collect();
+        assert_eq!(tips(mic), ["capri-syn · MIC"]);
+        let speaking = levels.map(|l| format!("SPEAKING {}", level_bars(l))).to_vec();
+        assert_eq!(tips(speaking), ["capri-syn · SPEAKING"]);
     }
 }

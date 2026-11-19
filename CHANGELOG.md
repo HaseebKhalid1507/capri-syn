@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### Windows: her icon in the tray
+- Her icon sits in the notification area while she runs. Its tooltip is `capri-syn · <her status>`
+  (ONLINE, SLEEPING, NO BRAIN YET, HIDDEN, ...). It changes when her status does; her mic's clock
+  and level meter stay off it.
+- A click opens the Line, as Win+Alt+C does. A right click opens her menu: the same rows as her
+  right-click menu, from one model (`src/menu.rs`), with the same greying of what can't act now.
+  Hidden, the tray is the way back (SHOW).
+- Explorer restarting puts it back. QUIT takes it out, with no ghost left. An icon the shell won't
+  take at sign-in is tried again every 2 s for a minute.
+- Linux: no tray yet. A StatusNotifierItem would plug in at `platform::linux::tray`, for X11 and
+  Hyprland both.
+
+### capri-syn's app icon
+- `assets/icon/`: `capri-syn.ico` (256 to 16 px), 512 and 256 px PNGs, and its `NOTICE`. Her Windows
+  exe carries the .ico as its icon (`build.rs`), and her tray loads its size from there.
+- Her icon, in order: your own beside settings.toml (`icon.ico` on Windows, `icon.png` on Linux),
+  then her pack's `icon` (Linux only), then capri-syn's. Read at start and on `settings reload`
+  (`avatarctl`, `capri-ctl` on Windows).
+
 ### A new personality, written from scratch
 
 Her persona's first paragraph is rewritten clean-room from the show's canon: a construct stitched

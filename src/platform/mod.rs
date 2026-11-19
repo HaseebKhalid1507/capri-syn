@@ -540,7 +540,7 @@ pub enum TrayEv {
 }
 
 /// Her icon in the desktop's tray (`Desktop::tray`): it stays while she runs, hidden or not.
-/// The core sends only what changed (`Os::tray_show`). Main thread.
+/// The core sends only what changed (`Os::tray_tip`, `Os::tray_menu`). Main thread.
 pub trait Tray {
     /// Its tooltip (`crate::brand::tooltip`).
     fn set_tip(&self, tip: &str);

@@ -299,7 +299,7 @@ pub struct Os {
 /// Her tray icon and what it was last told (only a change goes to the desktop).
 struct TrayLink {
     tray: Box<dyn super::Tray>,
-    /// What the tooltip and menu were made from (`tray_show`'s `key`): the same, nothing is made.
+    /// What the menu was made from (`tray_menu`'s `key`): the same, nothing is made.
     key: Option<u64>,
     tip: String,
     menu: Vec<super::TrayItem>,
@@ -856,19 +856,23 @@ impl Os {
         self.tray.borrow().is_some()
     }
 
-    /// What her tray icon shows: its tooltip and menu, made by `make` only when `key` (what
-    /// they are made from) changed. Only what changed goes to the desktop.
-    pub fn tray_show(&self, key: u64, make: impl FnOnce() -> (String, Vec<super::TrayItem>)) {
+    /// Her tray icon's tooltip: to the desktop only when it changed.
+    pub fn tray_tip(&self, tip: &str) {
+        let mut t = self.tray.borrow_mut();
+        let Some(t) = t.as_mut().filter(|t| t.tip != tip) else { return };
+        t.tray.set_tip(tip);
+        t.tip = tip.to_string();
+    }
+
+    /// Her tray icon's menu, made by `make` only when `key` (what it is made from) changed; to
+    /// the desktop only when it did.
+    pub fn tray_menu(&self, key: u64, make: impl FnOnce() -> Vec<super::TrayItem>) {
         let mut t = self.tray.borrow_mut();
         let Some(t) = t.as_mut() else { return };
         if t.key.replace(key) == Some(key) {
             return;
         }
-        let (tip, menu) = make();
-        if t.tip != tip {
-            t.tray.set_tip(&tip);
-            t.tip = tip;
-        }
+        let menu = make();
         if t.menu != menu {
             t.tray.set_menu(menu.clone());
             t.menu = menu;
