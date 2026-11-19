@@ -1,10 +1,7 @@
-Still from Cyberpunk: Edgerunners 2, used as the app icon; the character is used with Mike Pondsmith's permission; the frame's rights stay with their owners.
-
 capri-syn's app icon: capri-syn.ico (256 to 16 px), capri-syn-512.png, capri-syn-256.png.
 
-A tight crop on Capri's face from a still of Cyberpunk: Edgerunners 2 (a show frame, not fan art),
-with the chamfered corner from her UI. The rights to the frame are the studio's; the character is
-covered by Mike Pondsmith's OK. Used in public builds by Haseeb's decision of 2026-11-19, to be
-looked at again before a release.
+NOT covered by capri-syn's licence. No licence of any kind is granted for these files.
 
-These files are the masters: the installer, her shortcut and her tray use them as they are.
+A crop of Capri's face from a frame of Cyberpunk: Edgerunners 2, with a chamfered corner added. The frame and the character belong to their rights holders (CD PROJEKT RED, Studio Trigger, Netflix); Cyberpunk is a trademark of CD PROJEKT RED. capri-syn is an unofficial, non-commercial fan project and is not affiliated with or endorsed by any of them.
+
+The icon is built into capri-syn's binaries (the Windows icon resource, src/brand.rs) and its installer; these terms apply there too. Rights holders: open an issue and it comes down.
