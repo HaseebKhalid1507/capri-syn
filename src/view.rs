@@ -5327,6 +5327,15 @@ impl Avatar {
             .sum()
     }
 
+    /// [`header_text_w`]'s glyphs here: `tracked_width`'s at the header's 9.5 px, [`tabular`].
+    fn header_cw<'a>(&'a self, window: &'a Window) -> impl Fn(char, bool) -> f32 + 'a {
+        let memo = RefCell::new(std::collections::HashMap::new());
+        tabular(move |c: char, status: bool| {
+            let weight = if status { FontWeight::BOLD } else { FontWeight::SEMIBOLD };
+            *memo.borrow_mut().entry((c, status)).or_insert_with(|| self.tracked_width(&c.to_string(), 9.5, weight, 1.5, window))
+        })
+    }
+
     /// The span of her window the bubble may use (window-local logical px): on her monitor,
     /// inside her work area (a side panel included).
     fn panel_span(&self) -> (f32, f32) {
@@ -5937,6 +5946,140 @@ fn morph_bg(a: Vec<theme::Pt>, (fa, ea, wa): (u32, u32, f32), b: Vec<theme::Pt>,
     .top_0()
     .left_0()
     .size_full()
+}
+
+/// A reply's header label: whose turn it answers (his words, typed or said, or another
+/// session's), else INCOMING TRANSMISSION; IN THE READER while the reader has it.
+fn reply_label(echo: Option<&str>, reader: bool) -> String {
+    match echo {
+        _ if reader => "IN THE READER".into(),
+        // A turn another session woke is theirs, not his.
+        Some(e) => match crate::session::origin(e) {
+            Some((who, _, text)) => format!("⇄ {who} › {}", crate::session::one_line(&text, 24)),
+            None => match crate::voice::spoken(e) {
+                Some(said) => format!("◉ YOU › {}", crate::session::one_line(said, 24)),
+                None => format!("YOU › {}", crate::session::one_line(e, 26)),
+            },
+        },
+        None => "INCOMING TRANSMISSION".into(),
+    }
+}
+
+/// A prompt's header label: its title, and its place when more wait.
+fn prompt_label(title: &str, more: usize) -> String {
+    let title = crate::session::one_line(&title.to_uppercase(), 28);
+    if more > 1 { format!("{title} · 1 OF {more}") } else { title }
+}
+
+/// The header row (name plate, label, a spring, the status): the gaps between its four
+/// children, and the least air between a label and the status.
+const HEADER_GAPS: f32 = 3.0 * 8.0;
+const HEADER_AIR: f32 = 8.0;
+/// A label cut to fewer chars than this goes instead ("INCO…" says nothing).
+const HEADER_KEEP: usize = 6;
+
+/// A level meter's bar.
+fn is_bar(c: char) -> bool {
+    c == '▮' || c == '▯'
+}
+
+/// `s` in the header's type: `cw(char, status)` a glyph's box and its letter spacing (the
+/// status bold, the label semibold).
+fn header_text_w(s: &str, status: bool, cw: &dyn Fn(char, bool) -> f32) -> f32 {
+    s.chars().map(|c| cw(c, status)).sum()
+}
+
+/// A status in the header, the wider of its two dresses: on its plate (inverted, or a summon's
+/// pulse: 6 + glyph 11 + 5 + its words + 9) or calm (glyph 11 + 5 + its words, a level meter as
+/// bars: 4 px, 2 apart, 3 either side).
+fn header_status_w(s: &str, cw: &dyn Fn(char, bool) -> f32) -> f32 {
+    let plate = 31.0 + header_text_w(s, true, cw);
+    let (mut calm, mut run) = (16.0, 0.0);
+    for c in s.chars().chain(['\0']) {
+        if is_bar(c) {
+            run += 1.0;
+            continue;
+        }
+        if run > 0.0 {
+            calm += 6.0 * run + 4.0;
+            run = 0.0;
+        }
+        if c != '\0' {
+            calm += cw(c, true);
+        }
+    }
+    plate.max(calm)
+}
+
+/// A status, whole, then shorter: hands-free's `MIC LIVE · ` off, the level meter off,
+/// `HANDS-FREE · ` off (its countdown stays), then its `· …` parts from the end. Whole words
+/// and marks only, so a ticking status shortens the same way every second.
+fn status_steps(s: &str) -> Vec<String> {
+    let mut out = vec![s.to_string()];
+    let mut push = |t: &str| {
+        let t = t.trim();
+        if !t.is_empty() && out.last().is_none_or(|l| l != t) {
+            out.push(t.to_string());
+        }
+    };
+    let s = s.strip_prefix("MIC LIVE · ").unwrap_or(s);
+    push(s);
+    let s = s.split(' ').filter(|w| w.is_empty() || !w.chars().all(is_bar)).collect::<Vec<_>>().join(" ");
+    push(&s);
+    let s = s.strip_prefix("HANDS-FREE · ").unwrap_or(&s);
+    push(s);
+    let mut parts: Vec<&str> = s.split(" · ").collect();
+    while parts.len() > 1 {
+        parts.pop();
+        push(&parts.join(" · "));
+    }
+    out
+}
+
+/// `s` whole if it `fits`, else cut with "…": after a whole word (`words`; CJK and emoji at
+/// any char) or a whole char, a separator left hanging dropped; None when that keeps fewer than
+/// `keep` chars.
+fn cut_to(s: &str, keep: usize, words: bool, fits: impl Fn(&str) -> bool) -> Option<String> {
+    if fits(s) {
+        return Some(s.to_string());
+    }
+    let c: Vec<char> = s.chars().collect();
+    let wide = |c: char| c as u32 >= 0x2E80;
+    (keep.max(1)..c.len())
+        .rev()
+        .filter(|&n| !words || c[n].is_whitespace() || wide(c[n]) || wide(c[n - 1]))
+        .map(|n| format!("{}…", c[..n].iter().collect::<String>().trim_end_matches(|c: char| c.is_whitespace() || "›·/".contains(c))))
+        .find(|t| t.chars().count() > keep && fits(t))
+}
+
+/// `cw` with every digit as wide as the widest and the meter's two bars alike: a ticking timer
+/// or level measures the same each second (the status draws them so, `theme::tracked_fixed`).
+fn tabular(cw: impl Fn(char, bool) -> f32) -> impl Fn(char, bool) -> f32 {
+    move |c, status| {
+        if c.is_ascii_digit() {
+            ('0'..='9').map(|d| cw(d, status)).fold(0.0, f32::max)
+        } else if is_bar(c) {
+            cw('▮', status).max(cw('▯', status))
+        } else {
+            cw(c, status)
+        }
+    }
+}
+
+/// The header's label and status as they fit its row, `room` wide, beside her name plate
+/// (`name_w`, always shown): the status whole if it fits, the label in what is left (cut, or
+/// gone); only with the label gone, the status shorter (`status_steps`), at last cut. `cw` as
+/// in [`header_text_w`], [`tabular`].
+fn fit_header(room: f32, name_w: f32, label: &str, status: &str, cw: &dyn Fn(char, bool) -> f32) -> (String, String) {
+    let free = room - name_w - HEADER_GAPS;
+    let steps = status_steps(status);
+    let short = match steps.iter().find(|s| header_status_w(s, cw) <= free) {
+        Some(s) => s.clone(),
+        None => steps.last().and_then(|s| cut_to(s, 1, false, |t| header_status_w(t, cw) <= free)).unwrap_or_default(),
+    };
+    let left = free - header_status_w(&short, cw) - HEADER_AIR;
+    let label = if short == status { cut_to(label, HEADER_KEEP, true, |t| header_text_w(t, false, cw) <= left) } else { None };
+    (label.unwrap_or_default(), short)
 }
 
 /// A closing bubble's header: her name on its tab, its label, its state.
@@ -7054,18 +7197,7 @@ impl Avatar {
                     if lines.is_empty() && self.reader.is_none() {
                         placeholder = Some("…".into());
                     }
-                    let label = match &self.echo {
-                        _ if self.reader.is_some() => "IN THE READER".into(),
-                        // A turn another session woke is theirs, not his.
-                        Some(e) => match crate::session::origin(e) {
-                            Some((who, _, text)) => format!("⇄ {who} › {}", crate::session::one_line(&text, 24)),
-                            None => match crate::voice::spoken(e) {
-                                Some(said) => format!("◉ YOU › {}", crate::session::one_line(said, 24)),
-                                None => format!("YOU › {}", crate::session::one_line(e, 26)),
-                            },
-                        },
-                        None => "INCOMING TRANSMISSION".into(),
-                    };
+                    let label = reply_label(self.echo.as_deref(), self.reader.is_some());
                     (lines, Some(b.pages()), b.wrap.as_ref().map_or(260.0, |w| w.width), b.wrap.as_ref().map_or(1, |w| w.lines.len()), label)
                 }
                 PanelMode::Input { secret } => {
@@ -7097,8 +7229,7 @@ impl Avatar {
                     let n = lines.len().max(1);
                     // More waiting: a count (all of them, whole, in the Line: $mod+c).
                     let more = self.session.as_ref().and_then(|s| s.shown.as_ref()).map_or(0, |b| b.prompts.len());
-                    let title = crate::session::one_line(&u.view.title.to_uppercase(), 28);
-                    (lines, None, w.width.max(260.0), n, if more > 1 { format!("{title} · 1 OF {more}") } else { title })
+                    (lines, None, w.width.max(260.0), n, prompt_label(&u.view.title, more))
                 }
                 PanelMode::Probe => {
                     let text = self.focus_probe.clone().unwrap_or_default();
@@ -7111,18 +7242,13 @@ impl Avatar {
             let probe = mode == PanelMode::Probe;
             let (vis_l, vis_r) = self.panel_span();
             let max_w = (vis_r - vis_l - 2.0 * MARGIN).min(PANEL_MAX_W);
-            // Never narrower than the header line (name plate, label .. glyph status).
-            let header_w = PAD_L
-                + PAD_R
-                + self.tracked_width(&self.name, 10.5, FontWeight::BOLD, 1.8, window)
-                + 16.0
-                + 15.0
-                + self.tracked_width(&header_label, 9.5, FontWeight::SEMIBOLD, 1.5, window)
-                + self.tracked_width(&label, 9.5, FontWeight::BOLD, 1.5, window)
-                + 3.0 * 8.0
-                + 11.0
-                + 5.0
-                + 32.0;
+            // Never narrower than the header line (name plate, label .. glyph status), with air
+            // to spare; past `max_w` the header gives way (`fit_header`).
+            let name_w = self.tracked_width(&self.name, 10.5, FontWeight::BOLD, 1.8, window) + 16.0;
+            let header_w = {
+                let cw = self.header_cw(window);
+                PAD_L + PAD_R + name_w + HEADER_GAPS + header_text_w(&header_label, false, &cw) + header_status_w(&label, &cw) + 32.0
+            };
             let min_w = PANEL_MIN_W.max(header_w).min(max_w);
             let mut w = (text_w + PAD_L + PAD_R + 2.0).clamp(min_w, max_w);
             if mode == PanelMode::Reply && self.reader.is_some() {
@@ -7202,6 +7328,14 @@ impl Avatar {
             } else {
                 header_label
             };
+            // What of the header fits the box it is laid out in now (the ghost keeps the same);
+            // the status's digits and meter in boxes as wide as they were measured.
+            let (header_label, label, tab_w) = {
+                let cw = self.header_cw(window);
+                let (l, s) = fit_header(w - PAD_L - PAD_R, name_w, &header_label, &label, &cw);
+                (l, s, (cw('0', true) - 1.5, cw('▮', true) - 1.5))
+            };
+            let tab = move |c: char| if c.is_ascii_digit() { Some(tab_w.0) } else if is_bar(c) { Some(tab_w.1) } else { None };
             let header = div()
                 .absolute()
                 .top(px(PAD_T))
@@ -7236,7 +7370,7 @@ impl Avatar {
                         .pr(px(9.0))
                         .gap(px(5.0))
                         .child(glyph(&glyph_kind, hl.mark, hl.fill))
-                        .child(tracked(&label, 1.5).text_size(px(9.5)).font_weight(FontWeight::BOLD).text_color(rgb(hl.ink)))
+                        .child(theme::tracked_fixed(&label, 1.5, &tab).text_size(px(9.5)).font_weight(FontWeight::BOLD).text_color(rgb(hl.ink)))
                 } else {
                     // Calm: a bone glyph, the state in text-dim (r21: a red dot read as
                     // "recording" or "offline").
@@ -7246,7 +7380,7 @@ impl Avatar {
                         .items_center()
                         .gap(px(5.0))
                         .child(glyph(&glyph_kind, glyph_c, pal.panel))
-                        .child(theme::metered(&label, 1.5, pal.dim).text_size(px(9.5)).font_weight(FontWeight::BOLD).text_color(rgb(pal.dim)))
+                        .child(theme::metered_fixed(&label, 1.5, pal.dim, &tab).text_size(px(9.5)).font_weight(FontWeight::BOLD).text_color(rgb(pal.dim)))
                 });
             let caret = matches!(mode, PanelMode::Input { .. });
             let body_weight = if prompt_mode { FontWeight::BOLD } else { FontWeight::SEMIBOLD };
@@ -7277,7 +7411,7 @@ impl Avatar {
                     "mode": match mode { PanelMode::Reply => "reply", PanelMode::Prompt => "prompt", PanelMode::Input { .. } => "input", PanelMode::Probe => "probe" },
                     "panel": [ox + dev(x), oy + dev(y), dev(w), dev(h)],
                     "text_box": [ox + dev(x + PAD_L), oy + dev(y + PAD_T + HEADER_H + HEADER_GAP), dev(tw), dev(h - (PAD_T + HEADER_H + HEADER_GAP) - foot_zone)],
-                    "text_w": tw, "line_h": LINE_H, "sf": sf, "fits": fits, "cap": cap, "rows": rows,
+                    "text_w": tw, "line_h": LINE_H, "sf": sf, "fits": fits, "cap": cap, "rows": rows, "header": [&header_label, &label],
                     "read": self.bubble.as_ref().is_some_and(|b| b.long()) && mode == PanelMode::Reply,
                     "total": total_lines, "area": area, "settled": !self.panel_fx.busy(now),
                 }));
@@ -8940,5 +9074,227 @@ mod prompt_button_tests {
         let titled = PromptView { title: "Confirm tool call (again)".into(), ..new };
         u.update(&titled, ms(4000));
         assert!(!u.allows(ms(4000)) && u.allows(ms(4000) + PROMPT_ARM));
+    }
+}
+
+#[cfg(test)]
+mod header_fit_tests {
+    use super::voiceview::{hf_label, level_bars, mic_label};
+    use super::{HEADER_AIR, HEADER_GAPS, HEADER_KEEP, PAD_L, PAD_R, PANEL_MAX_W, PANEL_MIN_W, fit_header, header_status_w, header_text_w, prompt_label, reply_label, status_steps, tabular};
+    use crate::session::Trouble;
+
+    /// Exo 2 at the header's 9.5 px as `tracked_width` measures it (each glyph rounded up, 1.5
+    /// px of tracking), never narrower than there: its digits proportional ('1' narrow, '4'
+    /// wide), DejaVu Sans for the marks Exo 2 lacks, a CJK face for the wide ones.
+    fn exo2(c: char, _status: bool) -> f32 {
+        let w = match c {
+            '1' => 5.0,
+            '4' => 7.0,
+            '0'..='9' => 6.0,
+            'I' | 'J' | 'i' | 'j' | 'l' | 'f' | 't' | ' ' | '·' | ':' | '.' | ',' | '\'' | '!' | '›' | '(' | ')' => 4.0,
+            'M' | 'W' | 'm' | 'w' | '%' => 10.0,
+            '&' | '…' => 9.0,
+            '▮' | '▯' => 6.0,
+            c if c.is_ascii() => 7.0,
+            c if (c as u32) >= 0x1F000 => 13.0,
+            c if (c as u32) >= 0x2E80 => 10.0,
+            _ => 9.0,
+        };
+        w + 1.5
+    }
+
+    /// "CAPRI" on her plate (10.5 px bold, 1.8 tracking, 16 px of plate), rounded up.
+    const NAME_W: f32 = 16.0 + 5.0 * 10.0;
+
+    /// Every status her tag can carry into the bubble: the pack's (moods, music, sulking), the
+    /// session's, the voice's (its timers at every length, the meter dark and full), with the
+    /// Line's "· … TO TYPE"; and words no one wrote yet (a sidecar's reason, a long tool name).
+    fn statuses() -> Vec<String> {
+        let mut v: Vec<String> = Vec::new();
+        let pack: serde_json::Value = serde_json::from_str(include_str!("../packs/capri/moods.json")).unwrap();
+        fn walk(j: &serde_json::Value, out: &mut Vec<String>) {
+            match j {
+                serde_json::Value::Object(m) => m.iter().for_each(|(k, x)| match x {
+                    serde_json::Value::String(s) if k == "status" => out.push(s.clone()),
+                    _ => walk(x, out),
+                }),
+                serde_json::Value::Array(a) => a.iter().for_each(|x| walk(x, out)),
+                _ => {}
+            }
+        }
+        walk(&pack, &mut v);
+        assert!(v.len() >= 10 && v.iter().any(|s| s == "ONLINE"), "the pack's statuses: {v:?}");
+        let troubles = [
+            Trouble::NoBrain { on: None },
+            Trouble::LoggedOut,
+            Trouble::Limited,
+            Trouble::Swamped,
+            Trouble::Offline,
+            Trouble::LocalDown { ollama: true },
+            Trouble::LocalDown { ollama: false },
+            Trouble::ModelMissing { model: "qwen3".into() },
+            Trouble::WrongModel,
+        ];
+        v.extend(troubles.iter().map(|t| t.tag().to_string()));
+        v.push("COMPACTING".into());
+        for tool in ["bash", "mcp__github__create_pull_request", &"W".repeat(40)] {
+            v.push(format!("WORKING · {}", crate::session::tool_label(tool)));
+        }
+        for secs in [0, 9, 59, 61, 599, 600, 3599, 36_000] {
+            for level in [0.0, 0.5, 1.0] {
+                v.push(hf_label(None, secs, level));
+                v.push(mic_label(secs, level, false));
+                v.push(mic_label(secs, level, true));
+            }
+        }
+        v.extend((0..=10).map(|left| hf_label(Some(left), 0, 0.0)));
+        v.extend([0.0, 1.0].map(|l| format!("SPEAKING {}", level_bars(l))));
+        v.extend(["MIC …", "HEARD · …", "WAKE PAUSED · IN A CALL", "WAKE PAUSED · SCREEN LOCKED", "WAKE PAUSED · TOO MANY FALSE STARTS", "WAKE OFF · MIC LOST"].map(String::from));
+        v.extend(["WAKE PAUSED · A SECRET IS ON SCREEN", "WAKE PAUSED · SHE IS HIDDEN", "WAKE OFF · NO MODEL (capri-voice-setup)", "TEST SIDECAR · NOTHING HEARD FOR A WHILE NOW"].map(String::from));
+        v.push("W".repeat(80));
+        v.push("WWWWWWWWWWWW · WWWWWWWWWWWWWWWWWW · WWWWWWWWWWWWWWWW".into());
+        let typed: Vec<String> = v.iter().map(|s| format!("{s} · WIN+ALT+C TO TYPE")).collect();
+        v.extend(typed);
+        v
+    }
+
+    /// Every header label: a reply's (his words typed or said, another session's, none, the
+    /// reader's), the field's, a prompt's (its place among more), the probe's; at their longest.
+    fn labels() -> Vec<String> {
+        let mut v = vec![String::new(), reply_label(None, false), reply_label(Some("hi"), true)];
+        let texts = ["what's the weather like in toronto tomorrow morning, and the day after", &"W".repeat(60), &"漢".repeat(60), &"🎉".repeat(40)];
+        for t in texts {
+            v.push(reply_label(Some(t), false));
+            v.push(reply_label(Some(&format!("[voice] {t}")), false));
+            v.push(reply_label(Some(&format!("[comms] #12 ask from spike: {t}")), false));
+            v.push(reply_label(Some(&format!("[comms] #7 tell from {}: {t}", "W".repeat(30))), false));
+            v.push(prompt_label(t, 1));
+            v.push(prompt_label(t, 12));
+        }
+        v.extend(["TRANSMIT", "SECRET ANSWER", "FOCUS PROBE // CLICK ME", "FOCUS PROBE // KEYS OK"].map(String::from));
+        v
+    }
+
+    /// The row as laid out: name plate, label, status, their gaps, and the air when the label shows.
+    fn row_w(label: &str, status: &str, cw: &dyn Fn(char, bool) -> f32) -> f32 {
+        NAME_W + HEADER_GAPS + header_text_w(label, false, cw) + header_status_w(status, cw) + if label.is_empty() { 0.0 } else { HEADER_AIR }
+    }
+
+    #[test]
+    fn every_header_fits_its_bubble() {
+        let cw = tabular(exo2);
+        let (statuses, labels) = (statuses(), labels());
+        let mut n = 0;
+        for w in [PANEL_MIN_W, PANEL_MAX_W] {
+            let room = w - PAD_L - PAD_R;
+            let free = room - NAME_W - HEADER_GAPS;
+            for status in &statuses {
+                let steps = status_steps(status);
+                // Its longest step that fits beside her name (her name plate always shows).
+                let best = steps.iter().find(|s| header_status_w(s, &cw) <= free);
+                for label in &labels {
+                    let (l, s) = fit_header(room, NAME_W, label, status, &cw);
+                    let used = row_w(&l, &s, &cw);
+                    assert!(used <= room, "{w}: {label:?} + {status:?} shown as {l:?} + {s:?}: {used} px in {room}");
+                    match best {
+                        Some(b) => assert_eq!(&s, b, "{w}: {status:?} isn't its longest step that fits"),
+                        None => {
+                            let last = steps.last().unwrap();
+                            assert!(s.is_empty() || (s.ends_with('…') && last.starts_with(s.trim_end_matches('…').trim_end())), "{w}: {status:?} cut as {s:?}");
+                        }
+                    }
+                    // The label gives way first: whole, cut after a whole word (keeping some), or
+                    // gone; gone before the status shortens.
+                    let wide = |c: Option<char>| c.is_some_and(|c| c as u32 >= 0x2E80);
+                    let cut = l.strip_suffix('…').is_some_and(|k| {
+                        let rest = label.strip_prefix(k).unwrap_or("");
+                        label.starts_with(k)
+                            && k.chars().count() >= HEADER_KEEP
+                            && (rest.starts_with(|c: char| c.is_whitespace() || "›·/".contains(c)) || wide(k.chars().last()) || wide(rest.chars().next()))
+                    });
+                    assert!(l == *label || l.is_empty() || cut, "{w}: {label:?} shown as {l:?}");
+                    if s != *status {
+                        assert!(l.is_empty(), "{w}: {status:?} shortened to {s:?} while {l:?} still shows");
+                    }
+                    n += 1;
+                }
+            }
+        }
+        assert!(n > 5000, "{n} headers");
+    }
+
+    /// The bug (Haseeb's shot, 2026-11-18): hands-free over a reply ran off the bubble. At the
+    /// widest the status shows whole and INCOMING TRANSMISSION gives way; at the narrowest the
+    /// status loses MIC LIVE, keeps its meter.
+    #[test]
+    fn hands_free_over_a_reply() {
+        let cw = tabular(exo2);
+        let status = hf_label(None, 12, 0.4);
+        let label = reply_label(None, false);
+        let (l, s) = fit_header(PANEL_MAX_W - PAD_L - PAD_R, NAME_W, &label, &status, &cw);
+        assert!((l.is_empty() || l == "INCOMING…") && s == status, "{l:?} {s:?}");
+        let (l, s) = fit_header(PANEL_MIN_W - PAD_L - PAD_R, NAME_W, &label, &status, &cw);
+        assert_eq!((l.as_str(), s.as_str()), ("", "HANDS-FREE 0:12 ▮▮▯▯▯"));
+        // A short status leaves the label room: whole, or cut after a whole word.
+        let (l, _) = fit_header(PANEL_MIN_W - PAD_L - PAD_R, NAME_W, &label, "ONLINE", &cw);
+        assert_eq!(l, "INCOMING…");
+        let (l, _) = fit_header(PANEL_MAX_W - PAD_L - PAD_R, NAME_W, &label, "ONLINE", &cw);
+        assert_eq!(l, "INCOMING TRANSMISSION");
+        let echo = reply_label(Some("what's the weather like in toronto tomorrow morning"), false);
+        let (l, s) = fit_header(PANEL_MIN_W - PAD_L - PAD_R, NAME_W, &echo, "LISTENING", &cw);
+        assert!(l.starts_with("YOU › what") && l.ends_with('…') && s == "LISTENING", "{l:?} {s:?}");
+    }
+
+    /// A ticking timer or level never moves the header: the status measures the same each
+    /// second (its digits tabular), so at any width the same words show, digits for digits.
+    #[test]
+    fn a_ticking_status_keeps_its_header() {
+        let cw = tabular(exo2);
+        let norm = |s: &str| s.chars().map(|c| if c.is_ascii_digit() { '0' } else if super::is_bar(c) { '▮' } else { c }).collect::<String>();
+        let ticks: Vec<u64> = [0u64, 1, 4, 9].iter().flat_map(|m| [0u64, 11, 14, 41, 44, 59].map(|s| m * 60 + s)).collect();
+        let long: Vec<u64> = [10u64, 11, 44].iter().flat_map(|m| [0u64, 11, 44].map(|s| m * 60 + s)).collect();
+        let levels = [0.0, 0.2, 0.5, 0.8, 1.0];
+        type Label = Box<dyn Fn(u64, f32) -> String>;
+        let makers: [Label; 4] = [
+            Box::new(|t, l| hf_label(None, t, l)),
+            Box::new(|t, _| hf_label(Some(t % 11), 0, 0.0)),
+            Box::new(|t, l| mic_label(t, l, false)),
+            Box::new(|t, l| mic_label(t, l, true)),
+        ];
+        for make in &makers {
+            for group in [&ticks, &long] {
+                let first = make(group[0], 0.0);
+                let w0 = header_status_w(&first, &cw);
+                for &t in group.iter() {
+                    for l in levels {
+                        assert_eq!(header_status_w(&make(t, l), &cw), w0, "{:?} measures apart from {first:?}", make(t, l));
+                    }
+                }
+                for label in ["", "INCOMING TRANSMISSION"] {
+                    for w in (PANEL_MIN_W as i32 - 60..=PANEL_MAX_W as i32).step_by(3).map(|w| w as f32) {
+                        let room = w - PAD_L - PAD_R;
+                        let (l0, s0) = fit_header(room, NAME_W, label, &first, &cw);
+                        for &t in group.iter() {
+                            for l in levels {
+                                let (l1, s1) = fit_header(room, NAME_W, label, &make(t, l), &cw);
+                                assert_eq!((l1.as_str(), norm(&s1)), (l0.as_str(), norm(&s0)), "{w}: {:?} reflows the header", make(t, l));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn status_steps_drop_whole_parts() {
+        assert_eq!(
+            status_steps(&hf_label(None, 72, 0.4)),
+            ["MIC LIVE · HANDS-FREE 1:12 ▮▮▯▯▯", "HANDS-FREE 1:12 ▮▮▯▯▯", "HANDS-FREE 1:12"].map(String::from)
+        );
+        assert_eq!(status_steps(&hf_label(Some(7), 0, 0.0)), ["MIC LIVE · HANDS-FREE · ENDS IN 0:07", "HANDS-FREE · ENDS IN 0:07", "ENDS IN 0:07"].map(String::from));
+        assert_eq!(status_steps(&mic_label(5, 1.0, true)), ["MIC 0:05 ▮▮▮▮▮ · AUTO", "MIC 0:05 · AUTO", "MIC 0:05"].map(String::from));
+        assert_eq!(status_steps("WAKE PAUSED · TOO MANY FALSE STARTS"), ["WAKE PAUSED · TOO MANY FALSE STARTS", "WAKE PAUSED"].map(String::from));
+        assert_eq!(status_steps("ONLINE"), ["ONLINE"].map(String::from));
     }
 }

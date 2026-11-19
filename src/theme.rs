@@ -741,14 +741,28 @@ pub fn plate(cut: Cut, f: Fill) -> Div {
 
 /// HUD lettering with CSS-style letter-spacing (GPUI has none): one box per glyph.
 pub fn tracked(s: &str, spacing: f32) -> Div {
-    div()
-        .flex()
-        .flex_none()
-        .children(s.chars().map(|c| div().mr(px(spacing)).child(if c == ' ' { "\u{00A0}".to_string() } else { c.to_string() })))
+    tracked_fixed(s, spacing, &|_| None)
+}
+
+/// [`tracked`], the glyphs `fixed` gives a width to in boxes that wide, centred (tabular: a
+/// ticking timer keeps its width).
+pub fn tracked_fixed(s: &str, spacing: f32, fixed: &dyn Fn(char) -> Option<f32>) -> Div {
+    div().flex().flex_none().children(s.chars().map(|c| {
+        let g = div().mr(px(spacing)).child(if c == ' ' { "\u{00A0}".to_string() } else { c.to_string() });
+        match fixed(c) {
+            Some(w) => g.w(px(w)).flex().justify_center(),
+            None => g,
+        }
+    }))
 }
 
 /// A label with its level meter (`▮▮▯▯▯`) drawn as bars: lit ones in `fg`, the rest at 28 %.
 pub fn metered(s: &str, spacing: f32, fg: u32) -> Div {
+    metered_fixed(s, spacing, fg, &|_| None)
+}
+
+/// [`metered`], its words [`tracked_fixed`].
+pub fn metered_fixed(s: &str, spacing: f32, fg: u32, fixed: &dyn Fn(char) -> Option<f32>) -> Div {
     let mut row = div().flex().flex_none().items_center();
     let mut word = String::new();
     let mut bars: Vec<bool> = Vec::new();
@@ -762,7 +776,7 @@ pub fn metered(s: &str, spacing: f32, fg: u32) -> Div {
     for c in s.chars() {
         if c == '▮' || c == '▯' {
             if !word.is_empty() {
-                row = row.child(tracked(&std::mem::take(&mut word), spacing));
+                row = row.child(tracked_fixed(&std::mem::take(&mut word), spacing, fixed));
             }
             bars.push(c == '▮');
         } else {
@@ -772,7 +786,7 @@ pub fn metered(s: &str, spacing: f32, fg: u32) -> Div {
     }
     row = flush_bars(row, &mut bars);
     if !word.is_empty() {
-        row = row.child(tracked(&word, spacing));
+        row = row.child(tracked_fixed(&word, spacing, fixed));
     }
     row
 }
