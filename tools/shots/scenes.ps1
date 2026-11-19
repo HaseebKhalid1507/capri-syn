@@ -21,12 +21,14 @@
               Restarts Explorer (a runner only).
     brain     her brain (Settings PR 3), the daemon found as on his machine (its daemon.json in a
               Synaps folder of the take's own, no --socket): no login (her first words, SET ME UP,
-              the Brain screen it opens, OTHER, esc, her menu); Claude with no login after his first
-              message (the tag, a click on her, the list's BRAIN row); signed in (the list, the Brain
-              screen, MODEL changed and written); his TUI's /model followed, a ChatGPT sign-in made in
-              a terminal seen by the open screen, MODEL sent back (PR 4); a Groq key on file, API
-              KEY's enter switching her to it (PR 5); and a daemon through --socket (another
-              machine's).
+              the Brain screen it opens, SIGN IN open, esc, her menu); Claude with no login after his
+              first message (the tag, a click on her, the list's BRAIN row); signed in (the list, the
+              Brain screen, MODEL's menu, a model picked and written); his TUI's /model followed, a
+              ChatGPT sign-in made in a terminal seen by the open screen, MODEL sent back; a Groq key
+              on file, its row under API KEY switching her to it; two accounts and a local server
+              (tools/fakelocal.py): MODEL's menu by provider, scrolled, a local model picked; a
+              sign-in from her (tools/fakesynaps.cmd: Copilot's code, then its login); and a daemon
+              through --socket (another machine's).
   Out: <Out>\<set>\<take>\<step>.png + .json (her `state`), <Out>\index.json, <Out>\logs\.
 #>
 param(
@@ -36,7 +38,8 @@ param(
     [string[]]$Sets = @('settings', 'header', 'brain'),
     [string[]]$Only = @(),
     [string]$Python = 'python',
-    [int]$FakePort = 47811
+    [int]$FakePort = 47811,
+    [int]$LocalPort = 47812
 )
 $ErrorActionPreference = 'Stop'
 $Tools = Split-Path -Parent $PSScriptRoot
@@ -117,7 +120,11 @@ function Start-Take {
         [string]$Settings = '', [hashtable]$Env = @{}, [object[]]$History, [switch]$Voice, [int]$DeltaMs = 30, [string[]]$HerArgs = @(),
         # The daemon found as on his machine: a Synaps folder of the take's own (SYNAPS_BASE_DIR) with
         # its daemon.json, these files in it (auth.json: a login), and no --socket.
-        [switch]$Local, [hashtable]$Synaps = @{}, [string]$Model = ''
+        [switch]$Local, [hashtable]$Synaps = @{}, [string]$Model = '',
+        # The `synaps` its daemon.json names (a sign-in from her runs it): none there by default.
+        [string]$SynapsExe = 'C:\fake\synaps.exe',
+        # A local model server (tools/fakelocal.py) with these models, on $LocalPort.
+        [string[]]$LocalModels = @()
     )
     $script:Take = "$Set/$Name"
     $t = Join-Path $Root "$Set-$Name"
@@ -159,13 +166,19 @@ function Start-Take {
         $herEnv.CAPRI_VOICE_ENDPOINT = $ep
         $herEnv.CAPRI_VOICE_SPAWN = '0'
     }
+    $script:LocalProc = $null
+    if ($LocalModels) {
+        $script:LocalProc = Start-Process $Python -ArgumentList (@((Q (Join-Path $Tools 'fakelocal.py')), $LocalPort) + $LocalModels) -NoNewWindow -PassThru `
+            -RedirectStandardOutput "$log-local.log" -RedirectStandardError "$log-local.err"
+        $null = Wait-Until { (Get-Content -Raw "$log-local.log" -ErrorAction SilentlyContinue) -match 'fake local server on' } 20 'the fake local server'
+    }
     $sock = Join-Path $t 'fake\d.sock'
     $where = @('--socket', (Q $sock))
     if ($Local) {
         $base = Join-Path $t 'synaps'
         New-Item -ItemType Directory -Force -Path (Join-Path $base 'run') | Out-Null
         foreach ($f in $Synaps.Keys) { Set-Content -Path (Join-Path $base $f) -Value $Synaps[$f] -Encoding utf8NoBOM }
-        $info = [ordered]@{ pid = $script:Daemon.Id; protocol_version = 3; daemon_version = $DaemonVersion; socket = $sock; exe = 'C:\fake\synaps.exe' }
+        $info = [ordered]@{ pid = $script:Daemon.Id; protocol_version = 3; daemon_version = $DaemonVersion; socket = $sock; exe = $SynapsExe }
         Set-Content -Path (Join-Path $base 'run\daemon.json') -Value (ConvertTo-Json $info) -Encoding utf8NoBOM
         $herEnv.SYNAPS_BASE_DIR = $base
         $where = @()
@@ -196,7 +209,7 @@ function Stop-Take {
     try { $null = Ctl 'quit' 2000 } catch { }
     if ($script:Her -and -not $script:Her.WaitForExit(5000)) { Stop-Process -Id $script:Her.Id -Force -ErrorAction SilentlyContinue }
     try { $null = Fake 'quit' } catch { }
-    foreach ($p in $script:Daemon, $script:VoiceProc) {
+    foreach ($p in $script:Daemon, $script:VoiceProc, $script:LocalProc) {
         if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
     }
     foreach ($k in $script:EnvSet) { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
@@ -411,9 +424,9 @@ $Scenes = [ordered]@{
             Click-Button 'setup'
             Start-Sleep 2
             Focus-Line-Top
-            Shot '02-set-me-up' 'SET ME UP: the Line on Settings > Brain, Claude picked'
-            Key 'down'; Key 'down'; Key 'enter' 1400
-            Shot '03-other' 'down down enter: OTHER open in place'
+            Shot '02-set-me-up' 'SET ME UP: the Line on Settings > Brain, three ways in, none first'
+            Key 'enter' 1400
+            Shot '03-signin' 'enter: SIGN IN open in place, its accounts by name'
             Key 'escape' 1400
             Shot '04-esc' 'esc: chat (it opened on Brain)'
             Key 'escape' 1400
@@ -421,7 +434,8 @@ $Scenes = [ordered]@{
             Start-Sleep 1
             Shot '05-menu' 'her menu: SET UP MY BRAIN'
         }
-        # Claude, no login: the first message fails as Synaps' does (FAKE: nobrain).
+        # Claude, no login, and no model picked anywhere (no [session] model, no Synaps config): the
+        # first message fails as Synaps' does (FAKE: nobrain); she asks for a pick, not a Claude login.
         none   = {
             Start-Take brain none -Local -Model 'claude-sonnet-4-6' -History $Short
             $null = Ctl 'brain off'
@@ -430,7 +444,8 @@ $Scenes = [ordered]@{
             $null = Ctl 'submit hi'
             $null = Wait-Until { (State).session.label -eq 'NO BRAIN YET' } 20 'NO BRAIN YET'
             Start-Sleep 3
-            Shot '06-tag' 'his first message: NO BRAIN YET'
+            Shot '06-tag' 'his first message: NO BRAIN YET, none picked: pick one, SET ME UP'
+            if ((State).session.trouble -ne 'no_pick') { $script:Fails.Add("${script:Take}: her trouble is $((State).session.trouble), not no_pick") }
             $null = Ctl 'talk tap'
             Start-Sleep 2
             Focus-Line-Top
@@ -450,8 +465,11 @@ $Scenes = [ordered]@{
             Shot '09-list' 'signed in: the list, BRAIN first'
             Key 'enter' 1400
             Shot '10-brain' 'enter: the Brain screen, Claude in use, MODEL'
-            Key 'down'; Key 'down'; Key 'down'; Key 'right' 1800
-            Shot '11-model' 'down to MODEL, right: OPUS 5.5, written'
+            Key 'down'; Key 'down'; Key 'down'; Key 'enter' 1400
+            Shot '11-model-open' 'down to MODEL, enter: its menu, every Claude model, Sonnet checked'
+            1..5 | ForEach-Object { Key 'down' 150 }
+            Key 'enter' 1800
+            Shot '11-model' 'down to OPUS 5.5, enter: written, the menu closed'
             $f = Get-Content -Raw $script:SettingsFile
             Write-Host "  settings.toml: $($f -replace "`n", ' | ')"
             if ($f -notmatch '(?m)^model = "claude-opus-5-5"') { $script:Fails.Add("${script:Take}: [session] model not written: $f") }
@@ -472,18 +490,22 @@ $Scenes = [ordered]@{
             }
             Start-Sleep 1
             Shot '14-tui-model' 'his TUI''s /model haiku: MODEL says HAIKU 4.5'
-            Key 'down'; Key 'down'; Key 'enter' 1400
+            Key 'enter' 1400
             Set-Content -Path (Join-Path $Root 'brain-drift\synaps\auth.json') -Value '{"anthropic": {"type": "oauth"}, "openai-codex": {"type": "oauth"}}' -Encoding utf8NoBOM
             $signed = Wait-Until { @((State).line.mind.signed) -contains 'openai-codex' } 12 'a ChatGPT sign-in made in his terminal'
             if (-not $signed) { $script:Fails.Add("${script:Take}: the open Brain screen never saw ChatGPT's login") }
             Key 'down' 1000
             Shot '15-terminal-signin' 'ChatGPT signed in from a terminal: its check without reopening; the keys say what enter does'
-            Key 'left'; Key 'down'; Key 'right' 1800
+            # MODEL's menu: ChatGPT's models now, then Claude's; Sonnet is Claude's first.
+            Key 'left'; Key 'down'; Key 'down'; Key 'down'; Key 'enter' 1000
+            $codex = 9
+            1..($codex + 1) | ForEach-Object { Key 'down' 120 }
+            Key 'enter' 1800
             $dl = Join-Path $Logs 'brain-drift-daemon.log'
             $sent = Wait-Until { (Get-Content -Raw $dl -ErrorAction SilentlyContinue) -match 'cmd set model claude-sonnet-4-6' } 10 'MODEL sent back to her session'
             if (-not $sent) { $script:Fails.Add("${script:Take}: MODEL back to Sonnet never reached her session (stale view)") }
             Start-Sleep 1
-            Shot '16-model-back' 'left, down to MODEL, right: SONNET 4.6, set on her session again'
+            Shot '16-model-back' 'MODEL open, down to SONNET 4.6, enter: set on her session again'
         }
         # Claude signed in, a Groq key on file: API KEY says KEY SET and enter switches her to it.
         apikey = {
@@ -492,22 +514,21 @@ $Scenes = [ordered]@{
             $null = Ctl 'settings open brain'
             Start-Sleep 2
             Focus-Line-Top
-            Key 'down'; Key 'down'; Key 'enter' 1000
-            # API KEY is the row above MODEL, OTHER open: to the bottom, one up.
-            1..12 | ForEach-Object { Key 'down' 150 }
-            Key 'up' 1200
+            # API KEY, open: Groq is its first service.
+            Key 'down'; Key 'enter' 1000
+            Key 'down' 1200
             if (-not (Wait-Until { @((State).line.mind.signed) -contains 'groq' } 10 'the Groq key read')) {
                 $script:Fails.Add("${script:Take}: the Brain screen never saw the Groq key")
             }
             Start-Sleep 1
-            Shot '17-key-set' 'a Groq key on file: API KEY says KEY SET; the keys say enter uses it'
+            Shot '17-key-set' 'a Groq key on file: API KEY open, GROQ KEY SET; the keys say enter switches to it'
             Key 'enter' 1800
             $dl = Join-Path $Logs 'brain-apikey-daemon.log'
             if (-not (Wait-Until { (Get-Content -Raw $dl -ErrorAction SilentlyContinue) -match 'cmd set model groq/llama-3.3-70b-versatile' } 10 'her session on Groq')) {
-                $script:Fails.Add("${script:Take}: enter on API KEY never switched her to Groq")
+                $script:Fails.Add("${script:Take}: enter on GROQ never switched her to it")
             }
             Start-Sleep 1
-            Shot '18-key-in-use' 'enter: her brain is Groq, API KEY says IN USE'
+            Shot '18-key-in-use' 'enter: her brain is Groq, GROQ says IN USE'
         }
         # A local URL set after the daemon started (LM Studio's in its config; the daemon, which reads
         # it at its start, still on Ollama's): its error names the old URL, and the Brain screen says
@@ -527,6 +548,61 @@ $Scenes = [ordered]@{
             }
             Start-Sleep 1
             Shot '19-stale-url' 'the daemon on its old local URL: no check, and synaps daemon reload'
+        }
+        # Two accounts signed in and a local model: MODEL's menu, every model by provider, scrolled
+        # to the local ones, one picked.
+        menu   = {
+            Start-Take brain menu -Local -Model 'claude-sonnet-4-6' -History $Short -LocalModels @('qwen3:8b', 'llama3.2:latest') -Synaps @{
+                'auth.json' = '{"anthropic": {"type": "oauth"}, "openai-codex": {"type": "oauth"}}'
+                'config'    = "provider.local.url = http://127.0.0.1:$LocalPort/v1`n"
+            }
+            $null = Ctl 'brain off'
+            $null = Ctl 'settings open brain'
+            Start-Sleep 2
+            Focus-Line-Top
+            if (-not (Wait-Until { $m = (State).line.mind; (@($m.signed) -contains 'openai-codex') -and ($m.local -like '*Up*') } 15 'two accounts and a local model')) {
+                $script:Fails.Add("${script:Take}: the Brain screen never saw ChatGPT's login and the local models")
+            }
+            Key 'down'; Key 'down'; Key 'down'; Key 'enter' 1400
+            $groups = @((State).line.mind.menu | ForEach-Object { $_.name })
+            if (($groups -join ',') -ne 'CHATGPT,CLAUDE,LOCAL') { $script:Fails.Add("${script:Take}: MODEL's menu is $($groups -join ','), not CHATGPT,CLAUDE,LOCAL") }
+            Shot '20-menu' 'MODEL open: ChatGPT, Claude and the local server''s models, by provider; Sonnet checked'
+            1..30 | ForEach-Object { Key 'down' 80 }
+            Start-Sleep 1
+            Shot '21-menu-local' 'down to the last: the menu scrolled to the local models'
+            Key 'enter' 1800
+            $dl = Join-Path $Logs 'brain-menu-daemon.log'
+            if (-not (Wait-Until { (Get-Content -Raw $dl -ErrorAction SilentlyContinue) -match 'cmd set model local/llama3.2:latest' } 10 'her session on the local model')) {
+                $script:Fails.Add("${script:Take}: a local model picked never reached her session")
+            }
+            Start-Sleep 1
+            Shot '22-picked' 'enter: her brain is the local model, the menu closed'
+        }
+        # A sign-in from her (a stand-in synaps, Copilot's device login): SIGNING IN with its code
+        # large (copied), then its login on file: SIGNED IN, her model on Copilot.
+        signin = {
+            Start-Take brain signin -Local -Model 'claude-sonnet-4-6' -History $Short -SynapsExe (Join-Path $Tools 'fakesynaps.cmd') -Env @{ FAKE_SIGNIN_AFTER = '8'; SA_CLIP_FILE = (Join-Path $Root 'brain-signin-clip.txt') }
+            $null = Ctl 'brain off'
+            $null = Ctl 'settings open brain'
+            Start-Sleep 2
+            Focus-Line-Top
+            Key 'enter' 1000
+            Key 'down'; Key 'down'; Key 'down' 600
+            Key 'enter' 1500
+            if (-not (Wait-Until { (State).line.mind.signing.code } 15 'its code')) { $script:Fails.Add("${script:Take}: no code shown") }
+            Start-Sleep 1
+            Shot '23-copilot-code' 'SIGN IN > COPILOT, enter: signing in from her, its code large and copied'
+            $clip = Get-Content -Raw (Join-Path $Root 'brain-signin-clip.txt') -ErrorAction SilentlyContinue
+            if ("$clip".Trim() -ne 'FAKE-C0DE') { $script:Fails.Add("${script:Take}: the code wasn't copied ($clip)") }
+            if (-not (Wait-Until { @((State).line.mind.signed) -contains 'github-copilot' } 20 'its login on file')) { $script:Fails.Add("${script:Take}: never signed in") }
+            $dl = Join-Path $Logs 'brain-signin-daemon.log'
+            if (-not (Wait-Until { (Get-Content -Raw $dl -ErrorAction SilentlyContinue) -match 'cmd set model github-copilot/' } 10 'her session on Copilot')) {
+                $script:Fails.Add("${script:Take}: signed in, but her model never moved to Copilot")
+            }
+            $log = (Get-Content -Raw (Join-Path $Logs 'brain-signin-her.err') -ErrorAction SilentlyContinue) + (Get-Content -Raw (Join-Path $Logs 'brain-signin-her.log') -ErrorAction SilentlyContinue)
+            if ("$log" -match 'FAKE-C0DE|github\.com/login/device') { $script:Fails.Add("${script:Take}: her log has the code or the URL") }
+            Start-Sleep 1
+            Shot '24-signed-in' 'its login on file: SIGNED IN, her model on Copilot'
         }
         # A daemon through --socket (maybe another machine's): its logins aren't hers to read or make.
         remote = {

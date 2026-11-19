@@ -47,9 +47,12 @@ pub enum Again {
 
 /// Read them. An env var counts in her environment or the daemon's (a key exported in the shell
 /// that started it). Where the daemon's can't be read (Windows, no pid), such a key can't be ruled
-/// out: no login on file is Unknown there, not Missing.
-pub fn check(q: &Query) -> (Creds, Again) {
-    Seen::read(q.profile.as_deref(), q.pid).check(&q.model)
+/// out: no login on file is Unknown there, not Missing. With whether Synaps' config sets a
+/// `model` (`Seen::model_set`).
+pub fn check(q: &Query) -> (Creds, Again, Option<bool>) {
+    let seen = Seen::read(q.profile.as_deref(), q.pid);
+    let (c, again) = seen.check(&q.model);
+    (c, again, seen.model_set())
 }
 
 /// Synaps' files, the daemon's environment and its start as one read found them: any number of
@@ -83,6 +86,11 @@ impl Seen {
     /// terminal reads it there, the daemon to refresh).
     pub fn env_either(&self, k: &str) -> bool {
         env_set(k) || self.env.as_ref().is_some_and(|e| e.set.contains(k))
+    }
+
+    /// Synaps' config sets a `model` (its own pick, or his TUI's /model). None: unreadable.
+    pub fn model_set(&self) -> Option<bool> {
+        self.files.config.as_ref().map(|c| c.contains("model"))
     }
 
     /// `model`'s credentials (`check`).

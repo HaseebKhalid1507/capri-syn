@@ -110,40 +110,66 @@ Paths here are Linux's: Windows keeps the same files under `%APPDATA%` and `%LOC
   `avatarctl settings open [brain]|close` drives it.
 - **Settings ▸ Brain.** Settings' first row, BRAIN, shows her model and its login (`✓ CLAUDE ·
   SONNET 4.6`, `● NO BRAIN YET` with a red `SET UP ▸`); ⏎ (or its button) opens the Brain screen:
-  SIGN IN WITH CLAUDE, RUN LOCAL (its server looked at: `provider.local.url`'s last line as the
-  daemon read it at its start: the one she saw for this start stands when his TUI rewrites the
-  config, one she never saw for it is taken as written, an unreadable config keeps what she knew;
-  else the daemon's `LOCAL_ENDPOINT` (Windows: hers), else Ollama's port; one deadline for the
-  lookup, the connect and the reply; asked every 5 s while it's off or lacks her model, less often
-  while it answers the same, to every 40 s, and at once when a Settings page opens or the URL
-  changes; never with the URL's `user:password@`, and a host that isn't an address or a plain
-  name (a `user:pa` a `/` in a password leaves) is never looked up; `localhost` without a lookup,
-  127.0.0.1 then ::1, the connect's time split between them. Her log, her bubble and the Line
-  show a URL, Synaps' errors' too, without anything up to its last `@`, then from its first
-  `?#&=;` on. When the daemon's own error names another local URL than hers, its config changed
-  after it started: no ✓, and she says `Synaps is still on its old local URL. Run synaps daemon
-  reload, then ask me again.` until it answers or reconnects), OTHER
-  (opened in place: ChatGPT, Copilot, Gemini, Grok, Kimi, Muse, then API KEY; Gemini only with
-  `SYNAPS_GOOGLE_GEMINI_CLIENT_ID` set, which Synaps 0.12 needs to sign in to it, or a Gemini login
-  on file), and, once she has a brain, MODEL: her provider's few models, written to `settings.toml`
-  as an explicit `[session] model` (only that key; the safe writer) and set on her session at once,
-  even when the file has it already (his TUI's `/model` moves her session off it: the daemon's
-  `setting_changed` to every client, which she follows). If another client owns her session's input
-  it isn't set: she says so, and her next start sets it. A Set whose reply doesn't come within 10 s
-  counts as lost: MODEL shows her session's model again. A provider with a login on file shows ✓
-  and a click switches her to its first model; a sign-in copies its `synaps login --provider …` for
-  a terminal until she runs it herself (the keys under the list say what ⏎ does on the row picked).
-  API KEY says `IN USE · GROQ` when her brain is a key service with its key, else `KEY SET · …` for
-  the services with a key here; ⏎ switches her to one (its default model: the first, or on one of
-  several, `IN USE · GROQ +1`, the next), else (the only one, none) it copies `synaps login` to set
-  one. Locked: `--model` (`set by --model`), `--session` (`their
-  session`); nothing else writes MODEL then either. A daemon through `--socket` signs in on its own
-  machine: the ways in (RUN LOCAL too) say ON ITS MACHINE and do nothing here. The open Brain
-  screen looks again every 5 s (Synaps' files and the daemon's environment read once a look) and
-  when a read finds her login, so a sign-in made in a terminal
-  (to any provider) shows without reopening it; the row picked stays on its provider when that
-  adds or drops a row. Her menu's last row and ABOUT name her model the same way (`SYNAPS 0.12.0 ·
-  SONNET 4.6`).
+  three ways in, none first, each a list opened in place (one at a time; ← closes it):
+  - **SIGN IN**: the accounts by name (ChatGPT, Claude, Copilot, Gemini, Grok, Kimi, Muse; Gemini
+    only with `SYNAPS_GOOGLE_GEMINI_CLIENT_ID` set, which Synaps 0.12 needs to sign in to it, or a
+    Gemini login on file). ⏎ on one runs `synaps login --provider <id>` from her with no window (the
+    daemon's own `synaps`, from `daemon.json`, else the one on PATH), and Synaps opens your browser
+    on the provider's page: Claude, ChatGPT, Gemini and Grok with the sign-in ready, Kimi and Muse
+    with their code filled in, Copilot on GitHub's device page, its code shown large in the row and
+    copied to type there. The row says SIGNING IN… (⏎ stops it, killing Synaps); the foot links the
+    page for when the browser didn't open. Synaps' stdin is held open meanwhile (its 0.12 login
+    gives up at end of input) and closed once `auth.json` has the login or Synaps says it's done; it
+    is killed 15 s later if it hasn't ended, after 10 minutes, on a stop and when she quits. On
+    Windows, where Synaps' `cmd /c start` cuts the page's URL at its first `&`, she opens the whole
+    URL herself (Claude's, ChatGPT's or Google's own sign-in page only). Signed in: ✓ SIGNED IN, and
+    her model switches to the account's first model (not under `--model`/`--session`, not when
+    she's on it). Failed: she says why, the row reads DIDN'T WORK (⏎ tries again), and her bubble
+    has the `synaps login --provider …` line for a terminal. Neither the URL nor the code is ever
+    logged.
+  - **API KEY**: Synaps' 19 key services (`KEY SET · GROQ`, `IN USE · GROQ +1` on the row). ⏎ on
+    one with a key switches her to it; on one without, a hidden field takes the key and ⏎ hands it
+    to `synaps login --provider <id>` on its stdin (never its command line, never a log; the field
+    is dropped once sent, or with Esc).
+  - **RUN LOCAL**: the local server, looked at: `provider.local.url`'s last line as the
+    daemon read it at its start (the one she saw for this start stands when his TUI rewrites the
+    config, one she never saw for it is taken as written, an unreadable config keeps what she knew;
+    else the daemon's `LOCAL_ENDPOINT` (Windows: hers), else Ollama's port); one deadline for the
+    lookup, the connect and the reply; asked every 5 s while it's off or lacks her model, less often
+    while it answers the same, to every 40 s, and at once when a Settings page opens or the URL
+    changes; never with the URL's `user:password@`, and a host that isn't an address or a plain
+    name (a `user:pa` a `/` in a password leaves) is never looked up; `localhost` without a lookup,
+    127.0.0.1 then ::1, the connect's time split between them. Her log, her bubble and the Line
+    show a URL, Synaps' errors' too, without anything up to its last `@`, then from its first
+    `?#&=;` on. When the daemon's own error names another local URL than hers, its config changed
+    after it started: no ✓, and she says `Synaps is still on its old local URL. Run synaps daemon
+    reload, then ask me again.` until it answers or reconnects. ⏎ opens the local-model steps.
+
+  Then **MODEL**: her model, and ⏎ opens its menu in place: every model of every account signed in
+  here and every service with a key (hers too while her login can't be told), and the local
+  server's (`local/<id>`), grouped under each provider's name in the table's order, hers checked;
+  no cap, the list scrolls. A model she runs that isn't in its provider's list (set by hand) is
+  there, checked, not one to pick again. The lists are Synaps 0.12.0's own catalogs (the accounts'
+  static ones, the key services' registry; aliases such as `grok-latest` aside): Synaps 0.12 has no
+  model catalog a client can ask for (its daemon protocol has none; `synaps rpc` has one, but boots
+  a whole runtime). Nothing signed in and no local model: `sign in first`, and ⏎ does nothing. A
+  pick is written to `settings.toml` as an explicit `[session] model` (only that key; the safe
+  writer) and set on her session at once, even when the file has it already (his TUI's `/model`
+  moves her session off it: the daemon's `setting_changed` to every client, which she follows). If
+  another client owns her session's input it isn't set: she says so, and her next start sets it. A
+  Set whose reply doesn't come within 10 s counts as lost: MODEL shows her session's model again.
+  Locked: `--model` (`set by --model`), `--session` (`their session`); no pick, no switch then.
+  A daemon through `--socket` signs in on its own machine: the ways in say ON ITS MACHINE and do
+  nothing here. The open Brain screen looks again every 5 s (Synaps' files and the daemon's
+  environment read once a look) and when a read finds her login, so a sign-in made in a terminal
+  (to any provider) shows without reopening it; the row picked stays on its account or model when
+  that adds or drops a row. The keys under the list say what ⏎ does on the row picked. Her menu's
+  last row and ABOUT name her model the same way (`SYNAPS 0.12.0 · SONNET 4.6`).
+- **NO BRAIN YET, none picked.** With no `[session] model`, no `--model`, not riding his session,
+  and no `model` in Synaps' config, her model is Synaps' default (Claude's), picked by no one: a
+  failed turn for want of its login says `No brain yet, choom. Pick one: an account, an API key, or
+  a model on this machine.` with `SET ME UP ▸` (bubble and Line), which opens Settings ▸ Brain. A
+  model someone picked keeps naming its provider and its `synaps login --provider …`.
 - **A turn shows as started** (THINKING, the busy bubble with ABORT) only once it has run 400 ms with
   no word, or its first word comes: one that fails at once never promises a reply.
 - **Sleep follows you, not the chat**: while you're at the desk she stays up,

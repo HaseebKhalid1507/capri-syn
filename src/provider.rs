@@ -8,6 +8,10 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+/// Signing in from her: Synaps' `login`, run with no window (`Run`).
+#[path = "signin.rs"]
+pub mod signin;
+
 /// How a provider is signed in to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -44,54 +48,158 @@ const fn key(id: &'static str, name: &'static str, env: &'static [&'static str],
     Provider { id, login: id, name, kind: Kind::Key, env, models }
 }
 
-/// Claude: the default, and the first way in.
-pub const CLAUDE: Provider = oauth(
-    "anthropic",
-    "claude",
-    "Claude",
-    &["ANTHROPIC_API_KEY"],
-    &[("claude-sonnet-4-6", "SONNET 4.6"), ("claude-opus-5-5", "OPUS 5.5"), ("claude-haiku-4-5-20251001", "HAIKU 4.5")],
-);
+/// Claude: Synaps' own default model's provider (`claude-sonnet-4-6`, nothing set), the way in
+/// its first-run check knows. On the Brain screen it is one account among the others.
+pub const CLAUDE: Provider = oauth("anthropic", "claude", "Claude", &["ANTHROPIC_API_KEY"], &[
+        ("claude-sonnet-4-6", "SONNET 4.6"), ("claude-fable-5-2", "FABLE 5.2"),
+        ("claude-fable-5-1", "FABLE 5.1"), ("claude-fable-5", "FABLE 5"), ("claude-opus-5-5", "OPUS 5.5"),
+        ("claude-opus-4-7", "OPUS 4.7"), ("claude-opus-4-6", "OPUS 4.6"),
+        ("claude-haiku-4-5-20251001", "HAIKU 4.5"),
+    ]);
 
 /// A model server on his machine: `local/<name>`. Its models are the server's (the probe).
 pub const LOCAL: Provider = Provider { id: "local", login: "local", name: "Local", kind: Kind::Local, env: &[], models: &[] };
 
-/// Every provider: Claude, the other accounts in the order OTHER lists them, the local server,
-/// then the API-key services (Synaps' `STATIC_PROVIDERS`, with their default models).
+/// Every provider: the accounts in SIGN IN's order (by name: none comes first by favour), the
+/// local server, then the API-key services (Synaps' `STATIC_PROVIDERS`). Their models are Synaps
+/// 0.12.0's own catalogs (the accounts' static ones, `agent-engine` `openai/catalog/*.rs` and
+/// `core/models.rs`; the services', `openai/registry.rs`), its aliases (`grok-latest`) aside;
+/// each one's first is what a sign-in switches her to.
 pub static ALL: &[Provider] = &[
+    oauth("openai-codex", "openai-codex", "ChatGPT", &[], &[
+            ("openai-codex/gpt-5.5", "GPT-5.5"), ("openai-codex/gpt-6.1-sol", "GPT-6.1 SOL"),
+            ("openai-codex/gpt-6-astra", "GPT-6 ASTRA"), ("openai-codex/gpt-5.6-sol", "GPT-5.6 SOL"),
+            ("openai-codex/gpt-5.6-terra", "GPT-5.6 TERRA"), ("openai-codex/gpt-5.6-luna", "GPT-5.6 LUNA"),
+            ("openai-codex/gpt-5.4", "GPT-5.4"), ("openai-codex/gpt-5.4-mini", "GPT-5.4 MINI"),
+            ("openai-codex/gpt-5.3-codex-spark", "GPT-5.3 CODEX SPARK"),
+        ]),
     CLAUDE,
-    oauth("openai-codex", "openai-codex", "ChatGPT", &[], &[("openai-codex/gpt-5.5", "GPT-5.5"), ("openai-codex/gpt-5.4", "GPT-5.4"), ("openai-codex/gpt-5.4-mini", "5.4 MINI")]),
-    oauth("github-copilot", "github-copilot", "Copilot", &[], &[("github-copilot/claude-sonnet-4.6", "SONNET 4.6"), ("github-copilot/gpt-5.5", "GPT-5.5")]),
-    oauth("google-gemini", "google-gemini", "Gemini", &[], &[("google-gemini/gemini-2.5-pro", "2.5 PRO"), ("google-gemini/gemini-2.5-flash", "2.5 FLASH")]),
-    oauth("xai-auth", "xai-auth", "Grok", &[], &[("xai-auth/grok-4.3", "GROK 4.3"), ("xai-auth/grok-4.7", "GROK 4.7")]),
-    oauth("kimi-code", "kimi-code", "Kimi", &[], &[("kimi-code/k3", "K3"), ("kimi-code/k3-256k", "K3 256K")]),
-    oauth("muse", "muse", "Muse", &["META_API_KEY"], &[("muse/muse-wonder-1.0", "WONDER"), ("muse/muse-spark-1.3", "SPARK")]),
+    oauth("github-copilot", "github-copilot", "Copilot", &[], &[
+            ("github-copilot/claude-sonnet-4.6", "SONNET 4.6"),
+            ("github-copilot/gpt-5.3-codex", "GPT-5.3 CODEX"), ("github-copilot/gpt-5.4", "GPT-5.4"),
+            ("github-copilot/gpt-5.4-mini", "GPT-5.4 MINI"), ("github-copilot/gpt-5.6-luna", "GPT-5.6 LUNA"),
+            ("github-copilot/gpt-5.6-terra", "GPT-5.6 TERRA"), ("github-copilot/gpt-5-mini", "GPT-5 MINI"),
+            ("github-copilot/gpt-5.5", "GPT-5.5"), ("github-copilot/claude-fable-5", "FABLE 5"),
+            ("github-copilot/claude-opus-4.7", "OPUS 4.7"), ("github-copilot/claude-opus-4.8", "OPUS 4.8"),
+            ("github-copilot/claude-opus-4.8-fast", "OPUS 4.8 FAST"),
+            ("github-copilot/claude-sonnet-5", "SONNET 5"), ("github-copilot/claude-haiku-4.5", "HAIKU 4.5"),
+            ("github-copilot/gemini-3.1-pro-preview", "GEMINI 3.1 PRO"),
+            ("github-copilot/gemini-3.5-flash", "GEMINI 3.5 FLASH"),
+        ]),
+    oauth("google-gemini", "google-gemini", "Gemini", &[], &[
+            ("google-gemini/gemini-2.5-pro", "2.5 PRO"),
+            ("google-gemini/gemini-3.1-pro-preview", "3.1 PRO PREVIEW"),
+            ("google-gemini/gemini-3-pro-preview", "3 PRO PREVIEW"),
+            ("google-gemini/gemini-3.5-flash", "3.5 FLASH"),
+            ("google-gemini/gemini-3-flash-preview", "3 FLASH PREVIEW"),
+            ("google-gemini/gemini-3.1-flash-lite", "3.1 FLASH LITE"),
+            ("google-gemini/gemini-2.5-flash", "2.5 FLASH"),
+        ]),
+    oauth("xai-auth", "xai-auth", "Grok", &[], &[
+            ("xai-auth/grok-4.3", "GROK 4.3"), ("xai-auth/grok-4.20-0309-reasoning", "GROK 4.20 REASONING"),
+            ("xai-auth/grok-4.20-0309-non-reasoning", "GROK 4.20 NON-REASONING"),
+            ("xai-auth/grok-4.20-multi-agent-0309", "GROK 4.20 MULTI-AGENT"),
+            ("xai-auth/grok-4.5", "GROK 4.5"), ("xai-auth/grok-4.6", "GROK 4.6"),
+            ("xai-auth/grok-4.7", "GROK 4.7"),
+        ]),
+    oauth("kimi-code", "kimi-code", "Kimi", &[], &[
+            ("kimi-code/k3", "K3"), ("kimi-code/k3-256k", "K3 256K"),
+            ("kimi-code/kimi-for-coding", "K2.7 CODING"),
+            ("kimi-code/kimi-for-coding-highspeed", "K2.7 CODING HIGHSPEED"),
+        ]),
+    oauth("muse", "muse", "Muse", &["META_API_KEY"], &[("muse/muse-wonder-1.0", "WONDER 1.0")]),
     LOCAL,
-    key("groq", "Groq", &["GROQ_API_KEY"], &[("groq/llama-3.3-70b-versatile", "LLAMA 3.3 70B")]),
-    key("cerebras", "Cerebras", &["CEREBRAS_API_KEY"], &[("cerebras/llama3.1-8b", "LLAMA 3.1 8B")]),
-    key("nvidia", "NVIDIA", &["NVIDIA_API_KEY"], &[("nvidia/meta/llama-3.3-70b-instruct", "LLAMA 3.3 70B")]),
-    key("sambanova", "SambaNova", &["SAMBANOVA_API_KEY"], &[("sambanova/Meta-Llama-3.3-70B-Instruct", "LLAMA 3.3 70B")]),
-    key("openrouter", "OpenRouter", &["OPENROUTER_API_KEY"], &[("openrouter/meta-llama/llama-3.3-70b-instruct", "LLAMA 3.3 70B")]),
-    key("google", "Google AI Studio", &["GOOGLE_API_KEY"], &[("google/gemini-2.5-flash", "GEMINI 2.5 FLASH")]),
-    key("deepinfra", "DeepInfra", &["DEEPINFRA_API_KEY", "DEEPINFRA_TOKEN"], &[("deepinfra/meta-llama/Llama-3.3-70B-Instruct", "LLAMA 3.3 70B")]),
-    key("huggingface", "Hugging Face", &["HUGGINGFACE_API_KEY", "HF_TOKEN"], &[("huggingface/meta-llama/Llama-3.3-70B-Instruct", "LLAMA 3.3 70B")]),
-    key("fireworks", "Fireworks", &["FIREWORKS_API_KEY"], &[("fireworks/accounts/fireworks/models/llama-v3p3-70b-instruct", "LLAMA 3.3 70B")]),
-    key("hyperbolic", "Hyperbolic", &["HYPERBOLIC_API_KEY"], &[("hyperbolic/meta-llama/Llama-3.3-70B-Instruct", "LLAMA 3.3 70B")]),
-    key("scaleway", "Scaleway", &["SCALEWAY_API_KEY"], &[("scaleway/llama-3.3-70b-instruct", "LLAMA 3.3 70B")]),
-    key("siliconflow", "SiliconFlow", &["SILICONFLOW_API_KEY"], &[("siliconflow/Qwen/Qwen3-8B", "QWEN3 8B")]),
-    key("together", "Together", &["TOGETHER_API_KEY"], &[("together/meta-llama/Llama-3.3-70B-Instruct-Turbo", "LLAMA 3.3 70B")]),
+    key("groq", "Groq", &["GROQ_API_KEY"], &[
+            ("groq/llama-3.3-70b-versatile", "LLAMA 3.3 70B"), ("groq/llama-3.1-8b-instant", "LLAMA 3.1 8B"),
+            ("groq/meta-llama/llama-4-scout-17b-16e-instruct", "LLAMA 4 SCOUT"),
+            ("groq/meta-llama/llama-4-maverick-17b-128e-instruct", "LLAMA 4 MAVERICK"),
+        ]),
+    key("cerebras", "Cerebras", &["CEREBRAS_API_KEY"], &[
+            ("cerebras/llama3.1-8b", "LLAMA 3.1 8B"),
+            ("cerebras/qwen-3-235b-a22b-instruct-2507", "QWEN3 235B"),
+        ]),
+    key("nvidia", "NVIDIA", &["NVIDIA_API_KEY"], &[
+            ("nvidia/meta/llama-3.3-70b-instruct", "LLAMA 3.3 70B"),
+            ("nvidia/qwen/qwen3-coder-480b-a35b-instruct", "QWEN3 CODER 480B"),
+            ("nvidia/mistralai/mistral-large-3-675b-instruct-2512", "MISTRAL LARGE 675B"),
+            ("nvidia/meta/llama-4-maverick-17b-128e-instruct", "LLAMA 4 MAVERICK"),
+            ("nvidia/meta/llama-4-scout-17b-16e-instruct", "LLAMA 4 SCOUT"),
+            ("nvidia/nvidia/llama-3.1-nemotron-ultra-253b-v1", "NEMOTRON ULTRA 253B"),
+            ("nvidia/mistralai/devstral-2-123b-instruct-2512", "DEVSTRAL 2 123B"),
+            ("nvidia/minimaxai/minimax-m2.5", "MINIMAX M2.5"),
+            ("nvidia/stepfun-ai/step-3.5-flash", "STEP 3.5 FLASH"),
+        ]),
+    key("sambanova", "SambaNova", &["SAMBANOVA_API_KEY"], &[
+            ("sambanova/Meta-Llama-3.3-70B-Instruct", "LLAMA 3.3 70B"), ("sambanova/QwQ-32B", "QWQ 32B"),
+            ("sambanova/Meta-Llama-3.1-8B-Instruct", "LLAMA 3.1 8B"),
+            ("sambanova/DeepSeek-R1", "DEEPSEEK R1"),
+            ("sambanova/DeepSeek-R1-Distill-Llama-70B", "R1 DISTILL 70B"),
+            ("sambanova/Qwen3-32B", "QWEN3 32B"),
+        ]),
+    key("openrouter", "OpenRouter", &["OPENROUTER_API_KEY"], &[
+            ("openrouter/meta-llama/llama-3.3-70b-instruct", "LLAMA 3.3 70B"),
+            ("openrouter/qwen/qwen3-coder", "QWEN3 CODER"),
+            ("openrouter/deepseek/deepseek-chat-v3-0324", "DEEPSEEK V3"),
+            ("openrouter/google/gemma-3-27b-it", "GEMMA 3 27B"),
+            ("openrouter/mistralai/mistral-small-3.1-24b-instruct", "MISTRAL SMALL 3.1"),
+        ]),
+    key("google", "Google AI Studio", &["GOOGLE_API_KEY"], &[
+            ("google/gemini-2.5-flash", "GEMINI 2.5 FLASH"), ("google/gemini-2.0-flash", "GEMINI 2.0 FLASH"),
+            ("google/gemma-3-27b-it", "GEMMA 3 27B"),
+        ]),
+    key("deepinfra", "DeepInfra", &["DEEPINFRA_API_KEY", "DEEPINFRA_TOKEN"], &[
+            ("deepinfra/meta-llama/Llama-3.3-70B-Instruct", "LLAMA 3.3 70B"),
+            ("deepinfra/Qwen/Qwen2.5-Coder-32B-Instruct", "QWEN2.5 CODER 32B"),
+            ("deepinfra/deepseek-ai/DeepSeek-V3-0324", "DEEPSEEK V3"),
+        ]),
+    key("huggingface", "Hugging Face", &["HUGGINGFACE_API_KEY", "HF_TOKEN"], &[
+            ("huggingface/meta-llama/Llama-3.3-70B-Instruct", "LLAMA 3.3 70B"),
+            ("huggingface/Qwen/Qwen2.5-72B-Instruct", "QWEN2.5 72B"),
+        ]),
+    key("fireworks", "Fireworks", &["FIREWORKS_API_KEY"], &[
+            ("fireworks/accounts/fireworks/models/llama-v3p3-70b-instruct", "LLAMA 3.3 70B"),
+            ("fireworks/accounts/fireworks/models/qwen2p5-coder-32b-instruct", "QWEN2.5 CODER 32B"),
+        ]),
+    key("hyperbolic", "Hyperbolic", &["HYPERBOLIC_API_KEY"], &[
+            ("hyperbolic/meta-llama/Llama-3.3-70B-Instruct", "LLAMA 3.3 70B"),
+            ("hyperbolic/Qwen/Qwen2.5-Coder-32B-Instruct", "QWEN2.5 CODER 32B"),
+            ("hyperbolic/deepseek-ai/DeepSeek-V3-0324", "DEEPSEEK V3"),
+        ]),
+    key("scaleway", "Scaleway", &["SCALEWAY_API_KEY"], &[
+            ("scaleway/llama-3.3-70b-instruct", "LLAMA 3.3 70B"), ("scaleway/qwen3-235b-a22b", "QWEN3 235B"),
+        ]),
+    key("siliconflow", "SiliconFlow", &["SILICONFLOW_API_KEY"], &[
+            ("siliconflow/Qwen/Qwen3-8B", "QWEN3 8B"),
+            ("siliconflow/deepseek-ai/DeepSeek-R1", "DEEPSEEK R1"),
+        ]),
+    key("together", "Together", &["TOGETHER_API_KEY"], &[
+            ("together/meta-llama/Llama-3.3-70B-Instruct-Turbo", "LLAMA 3.3 70B"),
+            ("together/Qwen/Qwen2.5-Coder-32B-Instruct", "QWEN2.5 CODER 32B"),
+            ("together/deepseek-ai/DeepSeek-V3", "DEEPSEEK V3"),
+        ]),
     key("chutes", "Chutes", &["CHUTES_API_KEY"], &[("chutes/deepseek-ai/DeepSeek-V3-0324", "DEEPSEEK V3")]),
     key("codestral", "Codestral", &["CODESTRAL_API_KEY"], &[("codestral/codestral-latest", "CODESTRAL")]),
     key("perplexity", "Perplexity", &["PERPLEXITY_API_KEY", "PPLX_API_KEY"], &[("perplexity/llama-3.1-sonar-large-128k-online", "SONAR LARGE")]),
-    key("ovhcloud", "OVHcloud", &["OVH_AI_ENDPOINTS_ACCESS_TOKEN"], &[("ovhcloud/Meta-Llama-3.3-70B-Instruct", "LLAMA 3.3 70B")]),
+    key("ovhcloud", "OVHcloud", &["OVH_AI_ENDPOINTS_ACCESS_TOKEN"], &[
+            ("ovhcloud/Meta-Llama-3.3-70B-Instruct", "LLAMA 3.3 70B"), ("ovhcloud/Qwen/QwQ-32B", "QWQ 32B"),
+        ]),
     key("inferx", "InferX", &["INFERX_API_KEY"], &[("inferx/deepseek-v4-flash", "DEEPSEEK V4 FLASH")]),
-    key("kimi", "Moonshot", &["MOONSHOT_API_KEY", "KIMI_API_KEY"], &[("kimi/kimi-k3.1-pro", "KIMI K3.1 PRO")]),
+    key("kimi", "Moonshot", &["MOONSHOT_API_KEY", "KIMI_API_KEY"], &[
+            ("kimi/kimi-k3.1-pro", "KIMI K3.1 PRO"),
+            ("kimi/kimi-k3.1-pro-highspeed", "KIMI K3.1 PRO HIGHSPEED"), ("kimi/kimi-k3", "KIMI K3"),
+            ("kimi/kimi-k2.7-code", "KIMI K2.7 CODE"),
+            ("kimi/kimi-k2.7-code-highspeed", "KIMI K2.7 CODE HIGHSPEED"), ("kimi/kimi-k2.6", "KIMI K2.6"),
+        ]),
 ];
 
-/// The accounts OTHER can list, in order: every sign-in but Claude's (`Status::others`: the
-/// ones it does).
-pub fn others() -> impl Iterator<Item = &'static Provider> {
-    ALL.iter().filter(|p| p.kind == Kind::OAuth && p.id != CLAUDE.id)
+/// SIGN IN's accounts, in order (`Status::accounts`: the ones it lists).
+pub fn accounts() -> impl Iterator<Item = &'static Provider> {
+    ALL.iter().filter(|p| p.kind == Kind::OAuth)
+}
+
+/// API KEY's services, in order.
+pub fn services() -> impl Iterator<Item = &'static Provider> {
+    ALL.iter().filter(|p| p.kind == Kind::Key)
 }
 
 /// Gemini's sign-in in Synaps 0.12 needs its Google OAuth client from this variable
@@ -106,7 +214,7 @@ pub fn of(model: &str) -> Option<&'static Provider> {
     match m.split_once('/') {
         Some((prefix, rest)) if !rest.is_empty() => ALL.iter().find(|p| p.id == prefix),
         Some(_) => None,
-        None => m.to_ascii_lowercase().starts_with("claude").then_some(&ALL[0]),
+        None => m.to_ascii_lowercase().starts_with("claude").then(|| by_id(CLAUDE.id)).flatten(),
     }
 }
 
@@ -421,14 +529,37 @@ pub enum Lock {
     Theirs,
 }
 
-/// One of MODEL's choices.
+/// One of MODEL's models.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Choice {
-    /// What picking it writes (`[session] model`); None: his own, set by hand, shown as it is.
+    /// What picking it writes (`[session] model`); None: hers, set by hand, shown as it is.
     pub pick: Option<&'static str>,
     pub label: String,
     /// The one in force.
     pub on: bool,
+}
+
+/// MODEL's menu, by provider: an account signed in to, a service with a key, the local server.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Group {
+    /// The provider's name on the page (`CLAUDE`, `GROQ`, `LOCAL`).
+    pub name: String,
+    pub models: Vec<Choice>,
+}
+
+/// A local model as `[session] model` takes it (`local/qwen3:8b`), for good: a server's names
+/// are few, each kept once (`Pref` is `Copy`, its model a `&'static str` like the tables').
+pub fn local_model(id: &str) -> &'static str {
+    use std::sync::{Mutex, OnceLock};
+    static KEPT: OnceLock<Mutex<Vec<&'static str>>> = OnceLock::new();
+    let m = format!("local/{}", id.trim());
+    let mut kept = KEPT.get_or_init(|| Mutex::new(Vec::new())).lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(&k) = kept.iter().find(|k| **k == m) {
+        return k;
+    }
+    let k: &'static str = Box::leak(m.into_boxed_str());
+    kept.push(k);
+    k
 }
 
 /// The same model: `anthropic/claude-x` is `claude-x`.
@@ -473,9 +604,14 @@ impl Status {
         self.model.as_deref().and_then(of)
     }
 
-    /// The accounts OTHER lists: Gemini only where it can be signed in to, or has a login.
-    pub fn others(&self) -> Vec<&'static Provider> {
-        others().filter(|&p| p.id != "google-gemini" || self.gemini || self.signed.contains(&p.id) || self.provider() == Some(p)).collect()
+    /// The accounts SIGN IN lists: Gemini only where it can be signed in to, or has a login.
+    pub fn accounts(&self) -> Vec<&'static Provider> {
+        accounts().filter(|&p| p.id != "google-gemini" || self.gemini || self.signed.contains(&p.id) || self.provider() == Some(p)).collect()
+    }
+
+    /// `p` has a login here (an account's, a service's key), or is hers with one.
+    pub fn has(&self, p: &Provider) -> bool {
+        self.signed.contains(&p.id) || (self.provider() == Some(p) && self.signed_in == Some(true))
     }
 
     /// Her daemon couldn't reach another local server than the one she looks at (`tried`): its
@@ -499,14 +635,36 @@ impl Status {
         }
     }
 
-    /// MODEL's choices: her provider's table (his own model, set by hand, in place of its last),
-    /// or hers alone where there is none (a local model: the server's are RUN LOCAL's).
-    pub fn choices(&self) -> Vec<Choice> {
-        let Some(m) = self.model.as_deref() else { return Vec::new() };
-        let mut v: Vec<Choice> = self.provider().map_or(&[][..], |p| p.models).iter().map(|&(id, l)| Choice { pick: Some(id), label: l.to_string(), on: same(id, m) }).collect();
-        if !v.iter().any(|c| c.on) {
-            v.truncate(2);
-            v.push(Choice { pick: None, label: model_label(m), on: true });
+    /// MODEL's menu: every model of every account signed in here and every service with a key
+    /// (`signed`), hers too unless she has no login (can't tell: hers stands), and the local
+    /// server's (`local/<id>`), by provider in the table's order. Hers is checked; set by hand and
+    /// not in its list, it's there as it is, not one to pick again. Empty: nothing to switch to
+    /// (sign in first).
+    pub fn menu(&self) -> Vec<Group> {
+        let mine = self.model.as_deref();
+        let hers = self.provider();
+        let on = |id: &str| mine.is_some_and(|m| same(id, m) || same(id, &format!("{m}:latest")));
+        let mut v = Vec::new();
+        for p in ALL {
+            let is_hers = hers == Some(p);
+            let mut models: Vec<Choice> = match (p.kind, &self.local) {
+                (Kind::Local, Some((_, Local::Up(ids)))) if self.here => ids
+                    .iter()
+                    .map(|id| {
+                        let m = local_model(id);
+                        Choice { pick: Some(m), label: model_label(m), on: on(m) }
+                    })
+                    .collect(),
+                (Kind::Local, _) => Vec::new(),
+                _ if self.has(p) || (is_hers && self.signed_in.is_none()) => p.models.iter().map(|&(id, l)| Choice { pick: Some(id), label: l.to_string(), on: on(id) }).collect(),
+                _ => Vec::new(),
+            };
+            if let Some(m) = mine.filter(|_| is_hers && !self.none() && !models.iter().any(|c| c.on)) {
+                models.push(Choice { pick: None, label: model_label(m), on: true });
+            }
+            if !models.is_empty() {
+                v.push(Group { name: p.name.to_uppercase(), models });
+            }
         }
         v
     }
@@ -542,20 +700,26 @@ mod tests {
         }
     }
 
-    /// Synaps' tables: 7 accounts (Claude first), the local server, 19 API-key services; ids
-    /// unique; every default model on its own provider; at most 3 MODEL choices (the page's room).
+    /// Synaps' tables: 7 accounts by name (none first by favour), the local server, 19 API-key
+    /// services; ids unique; every model on its own provider, once, with a label of its own.
+    /// The installers' account list is this one (their parity test).
     #[test]
     fn the_table_is_synaps_own() {
-        assert_eq!(ALL[0], CLAUDE);
         assert_eq!(ALL.iter().filter(|p| p.kind == Kind::OAuth).count(), 7);
         assert_eq!(ALL.iter().filter(|p| p.kind == Kind::Key).count(), 19);
-        assert_eq!(others().map(|p| p.name).collect::<Vec<_>>(), ["ChatGPT", "Copilot", "Gemini", "Grok", "Kimi", "Muse"]);
+        assert_eq!(accounts().map(|p| p.name).collect::<Vec<_>>(), ["ChatGPT", "Claude", "Copilot", "Gemini", "Grok", "Kimi", "Muse"]);
+        assert_eq!(accounts().map(|p| p.login).collect::<Vec<_>>(), ["openai-codex", "claude", "github-copilot", "google-gemini", "xai-auth", "kimi-code", "muse"]);
+        assert_eq!(services().count(), 19);
+        assert_eq!(by_id("anthropic"), Some(&CLAUDE));
         let mut ids: Vec<&str> = ALL.iter().map(|p| p.id).collect();
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), ALL.len());
         for p in ALL {
-            assert!(p.models.len() <= 3, "{}", p.id);
+            let mut labels: Vec<&str> = p.models.iter().map(|m| m.1).collect();
+            labels.sort_unstable();
+            labels.dedup();
+            assert_eq!(labels.len(), p.models.len(), "{}: a label each", p.id);
             for (m, label) in p.models {
                 assert_eq!(of(m), Some(p), "{m}");
                 assert_eq!(model_label(m), *label);
@@ -575,7 +739,8 @@ mod tests {
         assert_eq!(model_label("anthropic/claude-haiku-4-5"), "HAIKU 4.5", "the table's, its date aside");
         assert_eq!(model_label("claude-3-7-sonnet-20250219"), "CLAUDE-3-7-SONNET-20250219", "an older shape: as it is");
         assert_eq!(model_spoken("claude-sonnet-4-5-20250929"), "Sonnet 4.5");
-        assert_eq!(model_label("groq/llama-3.1-8b-instant"), "LLAMA-3.1-8B-INSTANT");
+        assert_eq!(model_label("groq/llama-3.1-8b-instant"), "LLAMA 3.1 8B");
+        assert_eq!(model_label("groq/qwen-x"), "QWEN-X", "not in the table: itself");
         assert_eq!(model_spoken("claude-opus-5-5"), "Opus 5.5");
         assert_eq!(model_spoken("openai-codex/gpt-5.4-mini"), "5.4 Mini");
         assert_eq!(model_spoken("openai-codex/gpt-5.5"), "GPT-5.5");
@@ -773,23 +938,49 @@ mod tests {
     #[test]
     fn the_page_knows_her_brain() {
         let s = |model: &str, signed_in: Option<bool>| Status { model: Some(model.into()), signed_in, here: true, ..Status::default() };
-        let labels = |s: &Status| s.choices().iter().map(|c| (c.label.clone(), c.on, c.pick.is_some())).collect::<Vec<_>>();
         assert!(s("claude-sonnet-4-6", Some(false)).none());
         assert!(s("claude-sonnet-4-6", Some(true)).ok());
         assert!(!s("claude-sonnet-4-6", None).ok() && !s("claude-sonnet-4-6", None).none(), "can't tell: neither");
-        let l = |x: &str, on: bool, pick: bool| (x.to_string(), on, pick);
-        assert_eq!(labels(&s("claude-sonnet-4-6", Some(true))), [l("SONNET 4.6", true, true), l("OPUS 5.5", false, true), l("HAIKU 4.5", false, true)]);
-        assert_eq!(labels(&s("anthropic/claude-opus-5-5", Some(true))), [l("SONNET 4.6", false, true), l("OPUS 5.5", true, true), l("HAIKU 4.5", false, true)], "the same model, with its provider");
-        // His own model, by hand: there, as it is, in force; not one to pick again.
-        assert_eq!(labels(&s("claude-opus-4-1", Some(true))), [l("SONNET 4.6", false, true), l("OPUS 5.5", false, true), l("OPUS 4.1", true, false)]);
-        // Local: hers alone; the server's (RUN LOCAL) aren't MODEL's.
         let mut lo = s("local/qwen3:8b", None);
         assert!(!lo.ok() && !lo.none());
-        assert_eq!(labels(&lo), [l("QWEN3:8B", true, false)]);
         lo.local = Some(("http://localhost:11434/v1".into(), Local::Up(vec!["llama3.2:latest".into(), "qwen3:8b".into()])));
         assert!(lo.ok());
         lo.local = Some(("http://localhost:11434/v1".into(), Local::Off));
         assert!(!lo.ok());
-        assert_eq!(Status::default().choices(), Vec::new(), "no model yet: no choices");
+    }
+
+    /// MODEL's menu: every model of every login here and the local server's, by provider in
+    /// the table's order, hers checked; no cap.
+    #[test]
+    fn the_menu_is_every_model_she_can_switch_to() {
+        let names = |s: &Status| s.menu().iter().map(|g| g.name.clone()).collect::<Vec<_>>();
+        let on = |s: &Status| s.menu().iter().flat_map(|g| g.models.clone()).filter(|c| c.on).map(|c| c.label).collect::<Vec<_>>();
+        let mut st = Status { model: Some("claude-sonnet-4-6".into()), signed_in: Some(true), here: true, ..Status::default() };
+        st.signed = vec!["anthropic", "openai-codex", "groq"];
+        st.local = Some(("http://localhost:11434/v1".into(), Local::Up(vec!["qwen3:8b".into(), "llama3.2:latest".into()])));
+        assert_eq!(names(&st), ["CHATGPT", "CLAUDE", "LOCAL", "GROQ"]);
+        let menu = st.menu();
+        assert_eq!(menu[1].models.len(), CLAUDE.models.len(), "no cap");
+        assert_eq!(on(&st), ["SONNET 4.6"]);
+        assert_eq!(menu[2].models.iter().map(|c| c.pick).collect::<Vec<_>>(), [Some("local/qwen3:8b"), Some("local/llama3.2:latest")]);
+        assert_eq!(local_model("qwen3:8b").as_ptr(), local_model("qwen3:8b").as_ptr(), "kept once");
+        // On a local model, untagged: the server's `:latest` is hers.
+        st.model = Some("local/llama3.2".into());
+        st.signed_in = None;
+        assert_eq!(on(&st), ["LLAMA3.2:LATEST"]);
+        // His own model, by hand: there, in force, not one to pick again.
+        st.model = Some("claude-opus-4-1".into());
+        st.signed_in = Some(true);
+        let mine: Vec<_> = st.menu()[1].models.iter().filter(|c| c.on).cloned().collect();
+        assert_eq!(mine, [Choice { pick: None, label: "OPUS 4.1".into(), on: true }]);
+        // Hers without a login: not hers to pick; can't tell: hers stands.
+        let none = Status { model: Some("claude-sonnet-4-6".into()), signed_in: Some(false), here: true, ..Status::default() };
+        assert!(none.menu().is_empty(), "nothing signed in, no local model: sign in first");
+        let unsure = Status { signed_in: None, ..none.clone() };
+        assert_eq!(names(&unsure), ["CLAUDE"]);
+        // A daemon on another machine: its local server isn't this one's.
+        let far = Status { here: false, local: Some(("http://localhost:11434/v1".into(), Local::Up(vec!["qwen3:8b".into()]))), ..none };
+        assert!(far.menu().is_empty());
+        assert_eq!(Status::default().menu(), Vec::new(), "no model yet: nothing");
     }
 }

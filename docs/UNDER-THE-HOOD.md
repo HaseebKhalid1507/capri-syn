@@ -41,19 +41,22 @@ A fresh session, in the terminal. Hers is listed when you open it. `/sessions` s
 ## Her brain
 
 She uses whichever model your Synaps is logged in to. Until it has one her tag reads NO BRAIN YET
-(on Windows, from your first message), and a click on her opens **Settings ▸ Brain**: the ways to
-give her one, Claude first, then RUN LOCAL (below) and the other providers. For now a sign-in there
-copies its line for a terminal, and she notices the login by herself. The lines:
+(on Windows, from your first message), and a click on her opens **Settings ▸ Brain**: three ways
+to give her one, none first. SIGN IN with an account (ChatGPT, Claude, Copilot, Gemini, Grok, Kimi,
+Muse): she runs Synaps' sign-in and your browser opens on the provider's page. API KEY: a key for
+one of Synaps' services, typed into a hidden field. RUN LOCAL: a model on your machine (below). In a
+terminal the same is:
 
 ```sh
-synaps login --provider claude     # a Claude subscription: it opens your browser
-synaps login                       # or pick a provider: a subscription, an API key
+synaps login --provider claude     # an account (claude, openai-codex, github-copilot, …): your browser opens
+synaps login                       # or pick from Synaps' list: an account, an API key
 ```
 
 On Windows a terminal's `synaps login` opens a cut sign-in page (Synaps 0.12): copy the whole URL it
-prints into your browser, or use her installer's sign-in ([WINDOWS.md](WINDOWS.md#the-installer)).
+prints into your browser, or sign in from her (she opens the whole page).
 
-To give her a model of her own, pick it under MODEL in Settings ▸ Brain (her provider's models), or
+To give her a model of her own, pick it under MODEL in Settings ▸ Brain (every model of your logins
+and your local server), or
 set it in `~/.config/synaps-avatar/settings.toml` (Windows: `%APPDATA%\synaps-avatar\settings.toml`):
 
 ```toml

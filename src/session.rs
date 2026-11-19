@@ -239,6 +239,9 @@ pub struct Link {
     /// The last settled read's own answer (`set_creds`), whatever `creds` kept: none since the
     /// last model change or answer.
     creds_read: Option<(Creds, crate::creds::Again)>,
+    /// Synaps' config sets a `model` (a read's; None: not read, or unreadable): with none, and
+    /// none of hers, her model is Synaps' default, picked by no one (`unpicked`).
+    synaps_model: Option<bool>,
     /// The daemon's profile and pid (`Connected`): where its credentials are, and its env.
     daemon: Option<(Option<String>, u32)>,
     /// The daemon's version (`Welcome`), for her maker's mark.
@@ -321,6 +324,7 @@ impl Link {
             creds_at: None,
             creds_by: Said::Read,
             creds_read: None,
+            synaps_model: None,
             local_tried: None,
             daemon: None,
             daemon_version: None,
@@ -538,6 +542,33 @@ impl Link {
             self.creds_by = Said::Read;
         }
         changed
+    }
+
+    /// The last turn's failure she can name (cleared by the next turn).
+    pub fn trouble(&self) -> Option<&Trouble> {
+        self.trouble.as_ref()
+    }
+
+    /// What a read found of Synaps' config `model` (`creds::check`); None says nothing new.
+    pub fn set_synaps_model(&mut self, set: Option<bool>) {
+        if set.is_some() {
+            self.synaps_model = set;
+        }
+    }
+
+    /// No one picked her model: no `[session] model`, no `--model`, not his session, and Synaps'
+    /// config sets none (read on this machine). It's Synaps' default (Claude's), not a choice:
+    /// with no login for it, she says to pick a brain, not to sign in to Claude.
+    pub fn unpicked(&self) -> bool {
+        self.synaps_model == Some(false) && self.opts.persona.model.is_none() && self.opts.model.is_none() && !self.rides_other()
+    }
+
+    /// A sign-in from her just landed: her credentials are read again now (not after an answer
+    /// on this model: that stands).
+    pub fn creds_now(&mut self, now: Instant) {
+        if self.creds_by != Said::Answer {
+            self.creds_at = Some(now);
+        }
     }
 
     /// `model` (a token count's, when the daemon names one) is hers: none named, or hers without
@@ -1047,7 +1078,7 @@ impl Link {
                 // The provider's token count: it answered (Synaps sends one per response, unnamed).
                 // A named one is a subagent's (`subagent/oneshot.rs`): only her own model counts.
                 StreamEvent::Session(SessionStreamEvent::Usage { input_tokens, output_tokens, model }) if (input_tokens > 0 || output_tokens > 0) && self.hers(model.as_deref()) => self.answered(),
-                StreamEvent::Session(SessionStreamEvent::Error { message }) => match Trouble::of(&message, self.model()) {
+                StreamEvent::Session(SessionStreamEvent::Error { message }) => match Trouble::of(&message, self.model()).map(|t| t.unpicked(self.unpicked())) {
                     Some(t) => {
                         // Her log and bubble show its URLs as she does (`urls_shown`): Synaps
                         // quotes its local URL whole, a `user:password@` too.
@@ -1055,7 +1086,7 @@ impl Link {
                         if matches!(t, Trouble::LocalDown { .. }) {
                             self.local_tried = local_tried(&message);
                         }
-                        if let Trouble::NoBrain { on } = t {
+                        if let Some(on) = t.no_brain() {
                             // The daemon's word: missing until a check or an answer says otherwise,
                             // or the files read otherwise than when it spoke (#76).
                             self.creds_by = Said::Daemon(self.creds_read);
@@ -1388,6 +1419,9 @@ pub enum Trouble {
     /// No model credentials: a fresh install before `synaps login`. `on`: the provider her
     /// model is on, when the daemon names it (`No credentials for anthropic`: Claude).
     NoBrain { on: Option<&'static str> },
+    /// No brain, and none picked: her model is Synaps' default, chosen by no one (`unpicked`).
+    /// Not a Claude login to ask for: a brain to pick, in Settings ▸ Brain.
+    NoPick,
     /// A login that lapsed or was rejected.
     LoggedOut,
     /// The provider's rate or usage limit.
@@ -1471,9 +1505,27 @@ impl Trouble {
         }
     }
 
+    /// NO BRAIN YET on a model no one picked: a brain to pick, not its login to name.
+    pub fn unpicked(self, unpicked: bool) -> Trouble {
+        match self {
+            Trouble::NoBrain { .. } if unpicked => Trouble::NoPick,
+            t => t,
+        }
+    }
+
+    /// No brain (its provider, as named): her tag's NO BRAIN YET.
+    pub fn no_brain(&self) -> Option<Option<&'static str>> {
+        match self {
+            Trouble::NoBrain { on } => Some(*on),
+            Trouble::NoPick => Some(None),
+            _ => None,
+        }
+    }
+
     pub fn key(&self) -> &'static str {
         match self {
             Trouble::NoBrain { .. } => "no_brain",
+            Trouble::NoPick => "no_pick",
             Trouble::LoggedOut => "logged_out",
             Trouble::Limited => "limited",
             Trouble::Swamped => "swamped",
@@ -1502,6 +1554,8 @@ impl Trouble {
             // the model as words.
             Trouble::NoBrain { on: Some(p) } => format!("No brain yet, choom. Synaps has no {p} login. Log in, or set another model ([session] model in my settings):\n`{}`", Self::login_cmd(Some(p))),
             Trouble::NoBrain { on: None } => format!("No brain yet, choom. Synaps has no login for my model. Log in, or set another model ([session] model in my settings):\n`{LOGIN_CMD}`"),
+            // His pick: an account, a key or a local model, none first (`SET ME UP ▸`: the Brain screen).
+            Trouble::NoPick => format!("No brain yet, choom. Pick one: an account, an API key, or a model on this machine.\n`{}`", crate::line::SET_ME_UP),
             Trouble::LoggedOut => format!("My login ran out. In a terminal:\n`{LOGIN_CMD}`"),
             Trouble::Limited => "Hit my model's limit for now. Give it a bit, then ask me again.".into(),
             Trouble::Swamped => "My model's swamped right now. Try me again in a minute.".into(),
@@ -1523,7 +1577,7 @@ impl Trouble {
     /// Her tag while it shows.
     pub fn tag(&self) -> &'static str {
         match self {
-            Trouble::NoBrain { .. } => "NO BRAIN YET",
+            Trouble::NoBrain { .. } | Trouble::NoPick => "NO BRAIN YET",
             Trouble::LoggedOut => "LOGGED OUT",
             Trouble::Limited => "AT THE LIMIT",
             Trouble::Swamped => "MODEL BUSY",
@@ -1539,6 +1593,7 @@ impl Trouble {
     pub fn tip(&self) -> &'static str {
         match self {
             Trouble::NoBrain { .. } | Trouble::LoggedOut => "after synaps login, ↑ resends your message",
+            Trouble::NoPick => "once I have a brain, ↑ resends your message",
             Trouble::LocalDown { .. } => "once it's up, ↑ resends your message",
             Trouble::ModelMissing { .. } => "once it's pulled, ↑ resends your message",
             _ => "↑ resends your message",
@@ -1549,7 +1604,7 @@ impl Trouble {
     /// trouble annoys her.
     fn mood(&self) -> Mood {
         match self {
-            Trouble::NoBrain { .. } | Trouble::LoggedOut | Trouble::LocalDown { .. } | Trouble::ModelMissing { .. } | Trouble::WrongModel => Mood::Idle,
+            Trouble::NoBrain { .. } | Trouble::NoPick | Trouble::LoggedOut | Trouble::LocalDown { .. } | Trouble::ModelMissing { .. } | Trouble::WrongModel => Mood::Idle,
             _ => Mood::Annoyed,
         }
     }
@@ -2431,6 +2486,48 @@ mod tests {
     /// What the daemon said stands: a read that can't tell leaves it (and reading goes on, on a
     /// Claude model: a login mid-write reads as Unknown); a read that finds the login, or an
     /// answer, clears it.
+    /// NO BRAIN YET on a model no one picked (no `[session] model`, no `--model`, Synaps' config
+    /// sets none): a brain to pick (SET ME UP), not Claude's login. Picked: its login, named.
+    #[test]
+    fn no_brain_on_a_model_no_one_picked_asks_for_a_pick() {
+        const NO_LOGIN: &str = "No Anthropic credentials. Run `synaps login`, or switch to a provider model with `/model groq/llama-3.3-70b-versatile`.";
+        let t0 = Instant::now();
+        let mut l = live_link(t0);
+        assert!(!l.unpicked(), "Synaps' config not read: can't say");
+        l.set_synaps_model(Some(false));
+        l.set_synaps_model(None);
+        assert!(l.unpicked(), "an unreadable config says nothing new");
+        failed_turn(&mut l, NO_LOGIN, t0);
+        let b = l.body(t0);
+        assert_eq!(b.trouble, Some(Trouble::NoPick));
+        assert_eq!(b.label.as_deref(), Some("NO BRAIN YET"));
+        assert!(b.reply.ends_with("\n`SET ME UP ▸`") && !b.reply.contains("synaps login") && !b.reply.contains("Claude"), "{}", b.reply);
+        assert_eq!(l.trouble(), Some(&Trouble::NoPick));
+        assert_eq!(l.creds(), Creds::Missing(None));
+        assert_eq!(Trouble::NoPick.tip(), "once I have a brain, ↑ resends your message");
+        // His TUI's /model wrote one to Synaps' config: picked.
+        l.set_synaps_model(Some(true));
+        failed_turn(&mut l, NO_LOGIN, t0);
+        assert_eq!(l.body(t0).trouble, Some(Trouble::NoBrain { on: Some("Claude") }));
+        // Her `[session] model`: picked.
+        l.set_synaps_model(Some(false));
+        let mut o = opts();
+        o.persona.model = Some("claude-opus-5-5".into());
+        let mut l = Link::new(o, t0);
+        l.on_event(connected(), t0);
+        l.attaching(1);
+        l.on_event(attached(1, "attached_create.json"), t0);
+        l.set_synaps_model(Some(false));
+        assert!(!l.unpicked());
+        // `--model`: picked.
+        let mut l = Link::new(Options { model: Some("claude-opus-5-5".into()), ..opts() }, t0);
+        l.set_synaps_model(Some(false));
+        assert!(!l.unpicked());
+        // Picked: as the daemon named it; a login that ran out is his either way.
+        assert_eq!(Trouble::NoBrain { on: Some("Kimi") }.unpicked(false), Trouble::NoBrain { on: Some("Kimi") });
+        assert_eq!(Trouble::LoggedOut.unpicked(true), Trouble::LoggedOut, "a login that ran out is his");
+    }
+
     #[test]
     fn the_daemons_no_brain_stands_until_an_answer() {
         let t0 = Instant::now();

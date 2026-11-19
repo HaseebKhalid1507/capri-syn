@@ -172,12 +172,14 @@ SETTINGS from her right-click menu. A change is written the moment you make it.
 </p>
 
 <p align="center">
-  <img src="docs/media/still-brain.png" width="100%" alt="Settings, Brain: CLAUDE with a tick, IN USE; RUN LOCAL; OTHER (ChatGPT, Copilot, keys); and MODEL, her model's choices">
+  <img src="docs/media/still-brain.png" width="100%" alt="Settings, Brain: three ways in, SIGN IN (IN USE · CLAUDE), API KEY and RUN LOCAL; and MODEL, her model">
   <br><b>Settings ▸ Brain</b> · <sub>Pick what she thinks with.</sub>
 </p>
 
-- **BRAIN:** her model and its login. Sign in with Claude, run a local model, or pick another account
-  (ChatGPT, Copilot, Grok, Kimi and more) or an API key. Then pick her MODEL.
+- **BRAIN:** her model and its login. Three ways in, none first: SIGN IN with an account you have
+  (ChatGPT, Claude, Copilot, Gemini, Grok, Kimi, Muse; she runs the sign-in and your browser opens on
+  it), an API KEY, or RUN LOCAL. Then MODEL: a menu of every model your logins and your local server
+  have.
 - **ATTENTION:** how she asks for it: a mix of bids, hanging only, or off.
 - **"HEY CAPRI":** her wake word, on or off.
 - **ABOUT:** her version, one click to copy for a bug report.
