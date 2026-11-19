@@ -3,10 +3,11 @@
 //! teleport bolt's geometry. The view samples them while they run and redraws only then.
 //! Some looks are modelled on what CapriCore's effects do on screen, and the palette below is
 //! its colours; none of this code is copied or translated from CapriCore's source. The bolt and
-//! the music notes are stubs, pending a clean-room rewrite written from a behaviour spec by
-//! someone who never read their earlier, CapriCore-derived versions.
+//! the music notes were rewritten clean-room, from a behaviour spec alone, by someone who never
+//! read their earlier, CapriCore-derived versions.
 
 use crate::anim::Rng;
+use crate::frames::NOTE_ANGLES;
 use crate::shape::{self, ShapeRect};
 use std::f32::consts::PI;
 use std::time::{Duration, Instant};
@@ -820,7 +821,6 @@ pub fn scale_bands(b: &[(i32, i32, i32, i32)], pivot: (f32, f32), sx: f32, sy: f
 
 /// One floating note, in the music frame's canvas px.
 #[derive(Clone, Copy, Debug)]
-#[allow(dead_code)] // never built while `music_notes` is a stub
 pub struct Note {
     pub sprite: usize,
     pub x: f32,
@@ -830,11 +830,100 @@ pub struct Note {
     pub deg: f32,
 }
 
+/// The most notes the view draws (`NOTES_MAX`, view.rs): past it the oldest go, not the newest.
+const NOTES_DRAWN: usize = 7;
+/// The note size the view decodes its sprites for, canvas px (`view::note_px`): never bigger.
+const NOTE_PX: f32 = 120.0;
+/// A note's life, seconds, each note within ±`NOTE_LIFE_VAR` of it: about five alive at once at
+/// 110 bpm, two at 40, the cap at 240.
+const NOTE_LIFE: f32 = 2.9;
+const NOTE_LIFE_VAR: f32 = 0.15;
+/// How far out and how far up a note drifts over its life, canvas px (each note somewhere in these
+/// ranges): from beside her headphones to well clear of her head, out to the side and above.
+const NOTE_OUT: (f32, f32) = (120.0, 230.0);
+const NOTE_UP: (f32, f32) = (300.0, 430.0);
+/// Its full size, canvas px; it pops in at `NOTE_POP` of that and is grown `NOTE_GROW` into its life.
+const NOTE_SIZE: (f32, f32) = (70.0, 92.0);
+const NOTE_POP: f32 = 0.3;
+const NOTE_GROW: f32 = 0.12;
+/// It fades in over the first `NOTE_FADE_IN` of its life and out, evenly, over the last
+/// `NOTE_FADE_OUT` (the view steps alpha in four, then pops it under a floor: no long faint tail).
+const NOTE_FADE_IN: f32 = 0.07;
+const NOTE_FADE_OUT: f32 = 0.32;
+/// Its own tilt (± degrees), and the one slow lean into its travel that swells to `NOTE_LEAN` at
+/// mid-life and relaxes (the view snaps to `NOTE_ANGLES`, 6° apart: this steps through two or three).
+const NOTE_TILT: f32 = 4.5;
+const NOTE_LEAN: f32 = 13.0;
+
 /// The notes alive `age_s` seconds into a music session at one beat per `beat_s` seconds,
-/// launched from `emitters` (the music frame's canvas px).
-/// Clean-room stub: no notes until the rewrite lands.
-pub fn music_notes(_age_s: f32, _beat_s: f32, _emitters: &[[i32; 2]]) -> Vec<Note> {
-    Vec::new()
+/// launched from `emitters` (the music frame's canvas px), oldest first.
+///
+/// One note is born on every beat (the head-nod's grid: beat `k` at `k * beat_s`), from the
+/// emitters in turn, so with Capri's two they alternate left, right, left. Each note is a pure
+/// function of its birth beat and its age, so this rebuilds the field from scratch on every call
+/// and only visits the births that can still be alive. A tempo change moves the grid, and the
+/// notes alive then jump once.
+pub fn music_notes(age_s: f32, beat_s: f32, emitters: &[[i32; 2]]) -> Vec<Note> {
+    if emitters.is_empty() || !age_s.is_finite() || !beat_s.is_finite() || beat_s <= 0.0 || age_s < 0.0 {
+        return Vec::new();
+    }
+    // f64: hours in, `age_s` is a big f32, and each note's age is a small difference of two.
+    let (age, beat) = (f64::from(age_s), f64::from(beat_s));
+    let mid = emitters.iter().map(|e| f64::from(e[0])).sum::<f64>() / emitters.len() as f64;
+    let longest = f64::from(NOTE_LIFE * (1.0 + NOTE_LIFE_VAR));
+    // Newest first, so the cap drops the oldest; then turned around.
+    let mut out = Vec::with_capacity(NOTES_DRAWN);
+    let mut k = (age / beat).floor() as u64;
+    loop {
+        let t = age - k as f64 * beat;
+        if t > longest || out.len() == NOTES_DRAWN {
+            break;
+        }
+        out.extend(note(k, t, emitters, mid));
+        match k.checked_sub(1) {
+            Some(j) => k = j,
+            None => break,
+        }
+    }
+    out.reverse();
+    out
+}
+
+/// Note `k` (born on beat `k`) `t` seconds into its life, or `None` once it has gone.
+fn note(k: u64, t: f64, emitters: &[[i32; 2]], mid: f64) -> Option<Note> {
+    let id = k as u32;
+    let roll = |salt: u32| hash01(id, salt);
+    let pick = |(lo, hi): (f32, f32), salt: u32| lo + (hi - lo) * roll(salt);
+    let life = NOTE_LIFE * (1.0 + NOTE_LIFE_VAR * (2.0 * roll(1) - 1.0));
+    if t > f64::from(life) {
+        return None;
+    }
+    // A hair under zero when the beat's multiple rounds past `age`: born just now.
+    let s = (t / f64::from(life)).max(0.0) as f32;
+    let e = emitters[(k % emitters.len() as u64) as usize];
+    // Outward: away from the other emitters. One alone (or in line with the rest): every other
+    // note goes left.
+    let off = f64::from(e[0]) - mid;
+    let side = if off.abs() > 0.5 {
+        off.signum() as f32
+    } else if k.is_multiple_of(2) {
+        -1.0
+    } else {
+        1.0
+    };
+    // It peels off sideways first (eased out), then the rise takes over (eased in), so the path
+    // bends from the side to straight up. Never down: `up` only grows.
+    let out = pick(NOTE_OUT, 2) * (1.0 - (1.0 - s).powf(1.7 + 0.8 * roll(6)));
+    let up = pick(NOTE_UP, 3) * (0.2 * s + 0.8 * s.powf(1.45 + 0.5 * roll(7)));
+    let grow = (s / NOTE_GROW).min(1.0);
+    let size = (pick(NOTE_SIZE, 4) * (NOTE_POP + (1.0 - NOTE_POP) * (1.0 - (1.0 - grow).powi(3)))).min(NOTE_PX);
+    let alpha = (s / NOTE_FADE_IN).min((1.0 - s) / NOTE_FADE_OUT).clamp(0.0, 1.0);
+    // Positive is clockwise: a note going right tips its top right, one going left tips it left.
+    let edge = NOTE_ANGLES[NOTE_ANGLES.len() - 1];
+    let deg = (NOTE_TILT * (2.0 * roll(5) - 1.0) + side * NOTE_LEAN * (PI * s).sin()).clamp(-edge, edge);
+    // The sprites cycle, with a skip every fourth birth: neighbours always differ, and each side
+    // shows every sprite in turn instead of the same two.
+    Some(Note { sprite: k.wrapping_add(k / 4) as usize, x: e[0] as f32 + side * out, y: e[1] as f32 - up, size, alpha, deg })
 }
 
 /// Breathing bob, device px upward: 0..=px on a cosine.
@@ -962,20 +1051,240 @@ pub const BOLT_END: f32 = 0.66;
 /// no glow, no core, no outline, no colour split; legibility may change length/thickness).
 pub const BOLT_LINE: u32 = 0xff1738;
 
+/// The strike's clock, fractions of `BOLT_MS` (`Bolt::span`). The tip leaves with a small head
+/// start (lit on the very first frame), shoots out and eases into the target at `HEAD_FLIGHT`:
+/// four 30 fps frames in flight, home well before `BOLT_ARRIVE`.
+const HEAD_START: f32 = 0.06;
+const HEAD_FLIGHT: f32 = 0.3;
+const HEAD_EASE: f32 = 2.2;
+/// The tail sets off just after the tip, slowly at first (a third of the strike is still lit at
+/// `BOLT_LAND`), then gathers speed and drains into her by `TAIL_HOME`, just before `BOLT_END`:
+/// a speck on the last frame, nothing left for the unmap to cut off.
+const TAIL_START: f32 = 0.05;
+const TAIL_HOME: f32 = 0.64;
+const TAIL_EASE: f32 = 1.8;
+
+/// The ribbon's half-width where it's thickest: `RIB` of the figure's size, within
+/// `[RIB_MIN, RIB_MAX]` px (readable on a small figure, no slab on a big one), and at most
+/// `RIB_OF_LEN` of a short hop's length.
+const RIB: f32 = 0.032;
+const RIB_MIN: f32 = 3.0;
+const RIB_MAX: f32 = 11.0;
+const RIB_OF_LEN: f32 = 0.06;
+/// How far each edge sits from the centre line at each route point, a share of the half-width,
+/// the two sides rolled apart: chipped, crystalline edges rather than a tube.
+const CHIP: (f32, f32) = (0.35, 1.35);
+/// Main corners: about one per `CORNER_EVERY` of the figure's size along the strike, 2 to
+/// `CORNERS_MAX` of them, never closer than `CORNER_GAP` half-widths.
+const CORNER_EVERY: f32 = 0.7;
+const CORNERS_MAX: usize = 7;
+const CORNER_GAP: f32 = 6.0;
+/// Their swing off the straight line at its widest (mid-strike): `SWING` of the strike's length,
+/// within `[SWING_MIN, SWING_MAX]` of the figure's size (a hop still reads as jagged, a strike
+/// across monitors doesn't flail), and at most `SWING_OF_LEN` of the length.
+const SWING: f32 = 0.17;
+const SWING_MIN: f32 = 0.08;
+const SWING_MAX: f32 = 0.4;
+const SWING_OF_LEN: f32 = 0.35;
+/// No leg leans more than 45° off the strike's line, so no corner turns more than 90°: sharp,
+/// but with `CORNER_GAP` the inner miter always fits inside its legs (see `unfold`).
+const LEG_SLOPE: f32 = 1.0;
+/// The small jags on the legs between corners: a kink of this share of the leg, at most `JAG_MAX`
+/// of the figure's size.
+const JAG: (f32, f32) = (0.07, 0.13);
+const JAG_MAX: f32 = 0.12;
+/// The route is resampled every `ROUTE_STEP` half-widths (or a `ROUTE_PIECES`th of a long strike),
+/// so the edges chip along straight legs too, in tens of points.
+const ROUTE_STEP: f32 = 2.6;
+const ROUTE_PIECES: f32 = 40.0;
+/// The width along the lit piece: thickest `LEAD` of the way back from the tip (at most
+/// `LEAD_MAX` of the figure's size), almost a point at the tip (`TIP_W`) and at the tail (`TAIL_W`).
+const LEAD: f32 = 0.25;
+const LEAD_MAX: f32 = 0.35;
+const TIP_W: f32 = 0.12;
+const TAIL_W: f32 = 0.08;
+/// A lit piece shorter than `THIN_BELOW` half-widths is thinner, down to `THIN_MIN` (the launch's
+/// first spark, the end of the drain).
+const THIN_BELOW: f32 = 8.0;
+const THIN_MIN: f32 = 0.3;
+/// The streak's half-width the box leaves room for, of the figure's size (the view's is far less).
+const STREAK_ROOM: f32 = 0.05;
+/// Shorter than this (px), a strike draws nothing.
+const BOLT_MIN_LEN: f32 = 1.0;
+/// Coordinates past this aren't on any desktop: such a strike draws nothing.
+const ROOT_MAX: f32 = 1.0e6;
+/// The box's largest side, px (shape rects are `i16` from its origin): a strike that needs more
+/// draws nothing.
+const BOX_MAX: i64 = 32_000;
+
+/// One point of a strike's route.
+#[derive(Clone, Copy, Debug)]
+struct Knot {
+    p: (f32, f32),
+    /// Px along the straight line from `a` (never decreasing along the route).
+    along: f32,
+    /// The left and right edges' share of the half-width here.
+    chip: (f32, f32),
+}
+
+/// A cross-section of the lit ribbon: a centre-line point and the half-width either side.
+#[derive(Clone, Copy, Debug)]
+struct Rib {
+    p: (f32, f32),
+    left: f32,
+    right: f32,
+}
+
 /// A jagged strike from `a` to `b` (root px): a plain red ribbon whose tip races from the
-/// origin to the target with the trail behind it.
-/// Clean-room stub: draws nothing until the rewrite lands. The teleport's timing (the `BOLT_*`
-/// constants above, read by the view) runs as before, the bolt layer stays unmapped.
+/// origin to the target with the trail behind it. The route is laid when the strike is made
+/// (corners alternating sides, uneven swings, small jags between); each frame lights the stretch
+/// of it between `span`'s tail and head.
 pub struct Bolt {
+    a: (f32, f32),
+    /// Unit vector a → b (straight down when there's no length).
+    dir: (f32, f32),
+    len: f32,
+    /// `a` to `b`, exact at both ends, monotone along `dir`; empty when the strike draws nothing.
+    route: Vec<Knot>,
+    /// The ribbon's half-width at its thickest, px.
+    half: f32,
+    /// The widest half-width a streak may take and still fit the box, px.
+    room: f32,
+    /// The longest the tip's taper gets, px.
+    lead_max: f32,
     bbox: (i32, i32, i32, i32),
 }
 
 impl Bolt {
     /// `scale`: figure size in px (the bolt's thickness follows it).
-    pub fn new(a: (f32, f32), b: (f32, f32), _seed: u64, _scale: f32) -> Bolt {
-        let (x0, y0) = (a.0.min(b.0), a.1.min(b.1));
-        let (x1, y1) = (a.0.max(b.0), a.1.max(b.1));
-        Bolt { bbox: (x0 as i32, y0 as i32, (x1 - x0) as i32 + 1, (y1 - y0) as i32 + 1) }
+    pub fn new(a: (f32, f32), b: (f32, f32), seed: u64, scale: f32) -> Bolt {
+        let scale = if scale.is_finite() { scale.clamp(20.0, 2000.0) } else { 220.0 };
+        let sane = [a.0, a.1, b.0, b.1].iter().all(|v| v.abs() <= ROOT_MAX);
+        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+        let len = if sane { dx.hypot(dy) } else { 0.0 };
+        let dir = if len > 1e-3 { (dx / len, dy / len) } else { (0.0, 1.0) };
+        let half = (RIB * scale).clamp(RIB_MIN, RIB_MAX).min((RIB_OF_LEN * len).max(1.5));
+        let mut bolt =
+            Bolt { a, dir, len, route: Vec::new(), half, room: STREAK_ROOM * scale, lead_max: LEAD_MAX * scale, bbox: (0, 0, 1, 1) };
+        if !sane {
+            return bolt;
+        }
+        let mut rng = Rng::new(seed ^ 0x0b01_7c0d_e5ee_d000);
+        let flip = |rng: &mut Rng| if rng.pick(2) == 0 { 1.0 } else { -1.0 };
+
+        // The main corners as (along, off): px along the straight line, px off it (+ = left of
+        // travel). Evenly spread with a jitter, sides alternating from a random first one.
+        let gap = CORNER_GAP * half;
+        let mut knots = vec![(0.0f32, 0.0f32)];
+        if len >= 2.0 * gap {
+            let n = ((len / (CORNER_EVERY * scale)).round() as usize + 1).clamp(2, CORNERS_MAX).min(((len / gap) as usize).saturating_sub(1));
+            let swing = (SWING * len).clamp(SWING_MIN * scale, SWING_MAX * scale).min(SWING_OF_LEN * len);
+            let mut side = flip(&mut rng);
+            let (mut at, mut last) = (0.0f32, None::<f32>);
+            for i in 1..=n {
+                let t = ((i as f32 + rng.range(-0.38, 0.38)) / (n + 1) as f32 * len).max(at + gap);
+                if t > len - gap {
+                    break;
+                }
+                at = t;
+                // Uneven: a big swing never sits next to one of about its size.
+                let mut r = rng.range(0.15, 1.0);
+                if last.is_some_and(|q| (r - q).abs() < 0.3) {
+                    r = if r < 0.55 { r + 0.45 } else { r - 0.45 };
+                }
+                last = Some(r);
+                // Gentlest near both ends (it leaves and lands almost head-on), widest mid-strike.
+                let env = (PI * t / len).sin().max(0.0).powf(0.8);
+                knots.push((t, side * swing * env * r));
+                side = -side;
+            }
+        }
+        knots.push((len, 0.0));
+        // Legs at most 45° off the line: shrink the corners a too-steep leg joins (a few passes
+        // settle it; the ends stay on the line).
+        for _ in 0..4 {
+            for i in 0..knots.len() - 1 {
+                let ((x0, o0), (x1, o1)) = (knots[i], knots[i + 1]);
+                let (rise, room) = ((o1 - o0).abs(), LEG_SLOPE * (x1 - x0));
+                if rise > room {
+                    let k = room / rise;
+                    if i > 0 {
+                        knots[i].1 = o0 * k;
+                    }
+                    if i + 2 < knots.len() {
+                        knots[i + 1].1 = o1 * k;
+                    }
+                }
+            }
+        }
+        let nrm = (-dir.1, dir.0);
+        let mut main: Vec<(f32, f32)> =
+            knots.iter().map(|&(t, o)| (a.0 + dir.0 * t + nrm.0 * o, a.1 + dir.1 * t + nrm.1 * o)).collect();
+        main[0] = a;
+        if let Some(p) = main.last_mut() {
+            *p = b;
+        }
+
+        // Small jags on the legs: one kink on a mid-size leg, two on a long one.
+        let mut path = vec![a];
+        for leg in main.windows(2) {
+            let (p, q) = (leg[0], leg[1]);
+            let (ex, ey) = (q.0 - p.0, q.1 - p.1);
+            let long = ex.hypot(ey);
+            let cuts: &[(f32, f32)] = if long >= 7.0 * gap {
+                &[(0.2, 0.36), (0.64, 0.8)]
+            } else if long >= 2.5 * gap {
+                &[(0.35, 0.65)]
+            } else {
+                &[]
+            };
+            for &(lo, hi) in cuts {
+                let f = rng.range(lo, hi);
+                let o = (rng.range(JAG.0, JAG.1) * long).min(JAG_MAX * scale) * flip(&mut rng);
+                path.push((p.0 + ex * f - ey / long * o, p.1 + ey * f + ex / long * o));
+            }
+            path.push(q);
+        }
+
+        // Resampled, each point with its own chip either side.
+        let step = (ROUTE_STEP * half).max(len / ROUTE_PIECES);
+        let mut pts = vec![a];
+        for seg in path.windows(2) {
+            let (p, q) = (seg[0], seg[1]);
+            let m = ((q.0 - p.0).hypot(q.1 - p.1) / step).ceil().max(1.0) as usize;
+            for j in 1..m {
+                let f = j as f32 / m as f32;
+                pts.push((p.0 + (q.0 - p.0) * f, p.1 + (q.1 - p.1) * f));
+            }
+            pts.push(q);
+        }
+        let last = pts.len() - 1;
+        let mut prev = 0.0f32;
+        bolt.route = pts
+            .into_iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let along = if i == last { len } else { ((p.0 - a.0) * dir.0 + (p.1 - a.1) * dir.1).clamp(prev, len) };
+                prev = along;
+                Knot { p, along, chip: (rng.range(CHIP.0, CHIP.1), rng.range(CHIP.0, CHIP.1)) }
+            })
+            .collect();
+
+        // The box: the route's, padded by the most an edge can stand off it (the widest chip at
+        // a miter's longest) or the streak's room.
+        let pad = (2.0 * CHIP.1 * half).max(bolt.room) + 2.0;
+        let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        for k in &bolt.route {
+            (x0, y0, x1, y1) = (x0.min(k.p.0), y0.min(k.p.1), x1.max(k.p.0), y1.max(k.p.1));
+        }
+        let (bx, by) = ((x0 - pad).floor() as i64, (y0 - pad).floor() as i64);
+        let (bw, bh) = ((x1 + pad).ceil() as i64 - bx + 1, (y1 + pad).ceil() as i64 - by + 1);
+        if bw > BOX_MAX || bh > BOX_MAX {
+            bolt.route.clear();
+            return bolt;
+        }
+        bolt.bbox = (bx as i32, by as i32, bw as i32, bh as i32);
+        bolt
     }
 
     /// Root-px box `(x, y, w, h)` holding every polygon `frame` and `streak` can return.
@@ -983,22 +1292,149 @@ impl Bolt {
         self.bbox
     }
 
-    /// Head and tail progress along the strike (each 0..1) at time `u` (0..1 of `BOLT_MS`).
-    #[allow(dead_code)] // nothing calls it while `frame` and `streak` are stubs
-    pub fn span(_u: f32) -> (f32, f32) {
-        (0.0, 0.0)
+    /// Head and tail progress along the strike (each 0..1) at time `u` (0..1 of `BOLT_MS`):
+    /// fractions of the straight line from `a` to `b`, for `frame` and `streak` alike. The head
+    /// shoots out and settles into the target; the tail follows, slow then fast, and is home just
+    /// before `BOLT_END`. From `BOLT_END` on, both are home (nothing lit).
+    pub fn span(u: f32) -> (f32, f32) {
+        if u.is_nan() || u >= BOLT_END {
+            return (1.0, 1.0);
+        }
+        let u = u.max(0.0);
+        let s = (u / HEAD_FLIGHT).min(1.0);
+        let head = 1.0 - (1.0 - HEAD_START) * (1.0 - s).powf(HEAD_EASE);
+        let s = ((u - TAIL_START) / (TAIL_HOME - TAIL_START)).clamp(0.0, 1.0);
+        (head, s.powf(TAIL_EASE).min(head))
     }
 
     /// The quiet (passive) strike at time `u`: one thin straight shard, `len` px long and `w` px
     /// wide. Root px, empty before/after.
-    pub fn streak(&self, _u: f32, _len: f32, _w: f32) -> Vec<(f32, f32)> {
-        Vec::new()
+    pub fn streak(&self, u: f32, len: f32, w: f32) -> Vec<(f32, f32)> {
+        if self.route.len() < 2 || self.len < BOLT_MIN_LEN || !len.is_finite() || !w.is_finite() {
+            return Vec::new();
+        }
+        let (head, tail) = Bolt::span(u);
+        let long = ((head - tail) * self.len).min(len);
+        let half = (0.5 * w).min(self.room).min(0.2 * long);
+        if long < 0.5 || half <= 0.0 {
+            return Vec::new();
+        }
+        // On the straight line: a point at the head, widest a little behind it, a point at the back.
+        let d = self.dir;
+        let tip = (self.a.0 + d.0 * head * self.len, self.a.1 + d.1 * head * self.len);
+        let at = |back: f32, off: f32| (tip.0 - d.0 * back - d.1 * off, tip.1 - d.1 * back + d.0 * off);
+        vec![tip, at(0.22 * long, half), at(long, 0.0), at(0.22 * long, -half)]
     }
 
     /// The bolt at time `u` (0..1 of `BOLT_MS`) as one polygon, root px (empty before/after
-    /// the strike).
-    pub fn frame(&self, _u: f32) -> Vec<(f32, f32)> {
-        Vec::new()
+    /// the strike): the lit piece's left edge from the tail's point to the tip's, then its right
+    /// edge back, mitred at every bend.
+    pub fn frame(&self, u: f32) -> Vec<(f32, f32)> {
+        let ribs = self.ribs(u);
+        if ribs.len() < 3 {
+            return Vec::new();
+        }
+        let across = |p: (f32, f32), q: (f32, f32)| {
+            let e = unit((q.0 - p.0, q.1 - p.1), self.dir);
+            (-e.1, e.0)
+        };
+        let (mut left, mut right) = (Vec::with_capacity(ribs.len()), Vec::with_capacity(ribs.len()));
+        for w in ribs.windows(3) {
+            let (r, n0, n1) = (w[1], across(w[0].p, w[1].p), across(w[1].p, w[2].p));
+            let m = unit((n0.0 + n1.0, n0.1 + n1.1), n0);
+            let c = (m.0 * n0.0 + m.1 * n0.1).max(0.5);
+            left.push((r.p.0 + m.0 * r.left / c, r.p.1 + m.1 * r.left / c));
+            right.push((r.p.0 - m.0 * r.right / c, r.p.1 - m.1 * r.right / c));
+        }
+        let mut poly = Vec::with_capacity(2 * ribs.len());
+        poly.push(ribs[0].p);
+        poly.extend(left);
+        poly.push(ribs[ribs.len() - 1].p);
+        poly.extend(right.into_iter().rev());
+        poly
+    }
+
+    /// The lit piece at `u` as cross-sections, tail (a point) to tip (a point): the route's own
+    /// points in between, plus the shoulder where it's thickest.
+    fn ribs(&self, u: f32) -> Vec<Rib> {
+        let (head, tail) = Bolt::span(u);
+        let (h, t) = (head * self.len, tail * self.len);
+        let piece = h - t;
+        if self.route.len() < 2 || self.len < BOLT_MIN_LEN || piece < 0.5 {
+            return Vec::new();
+        }
+        let lead = (LEAD * piece).min(self.lead_max);
+        let peak = self.half * (piece / (THIN_BELOW * self.half)).clamp(THIN_MIN, 1.0);
+        let mut at: Vec<f32> = self.route.iter().map(|k| k.along).filter(|&s| s > t + 0.5 && s < h - 0.5).collect();
+        let shoulder = h - lead;
+        if shoulder > t + 0.5 && shoulder < h - 0.5 {
+            at.insert(at.partition_point(|&s| s < shoulder), shoulder);
+        }
+        let mut ribs = Vec::with_capacity(at.len() + 2);
+        ribs.push(Rib { p: self.point(t).0, left: 0.0, right: 0.0 });
+        for s in at {
+            let (p, chip) = self.point(s);
+            // Rising fast from the tip to the shoulder, then thinning steadily back to the tail.
+            let back = h - s;
+            let w = if back < lead {
+                TIP_W + (1.0 - TIP_W) * (back / lead).powf(0.7)
+            } else {
+                TAIL_W + (1.0 - TAIL_W) * (1.0 - (back - lead) / (piece - lead).max(1e-3)).clamp(0.0, 1.0).powf(0.6)
+            };
+            ribs.push(Rib { p, left: peak * w * chip.0, right: peak * w * chip.1 });
+        }
+        ribs.push(Rib { p: self.point(h).0, left: 0.0, right: 0.0 });
+        unfold(&mut ribs);
+        ribs
+    }
+
+    /// The route's point `s` px along the strike, and the chip either side there.
+    fn point(&self, s: f32) -> ((f32, f32), (f32, f32)) {
+        let r = &self.route;
+        let i = r.partition_point(|k| k.along <= s).clamp(1, r.len() - 1);
+        let (k0, k1) = (r[i - 1], r[i]);
+        let f = ((s - k0.along) / (k1.along - k0.along).max(1e-6)).clamp(0.0, 1.0);
+        let mix = |x: f32, y: f32| if f >= 1.0 { y } else { x + (y - x) * f };
+        ((mix(k0.p.0, k1.p.0), mix(k0.p.1, k1.p.1)), (mix(k0.chip.0, k1.chip.0), mix(k0.chip.1, k1.chip.1)))
+    }
+}
+
+/// `v` at length 1, or `or` when it has (next to) none.
+fn unit(v: (f32, f32), or: (f32, f32)) -> (f32, f32) {
+    let l = v.0.hypot(v.1);
+    if l > 1e-6 { (v.0 / l, v.1 / l) } else { or }
+}
+
+/// How sharply the centre line turns at `b` (radians, 0 = straight on).
+fn bend(a: (f32, f32), b: (f32, f32), c: (f32, f32)) -> f32 {
+    let (u, v) = ((b.0 - a.0, b.1 - a.1), (c.0 - b.0, c.1 - b.1));
+    (u.0 * v.1 - u.1 * v.0).abs().atan2(u.0 * v.0 + u.1 * v.1)
+}
+
+/// Thins out cross-sections until every stretch between two is longer than both ends' inner
+/// miters reach back along it. Then neither edge can fold back over itself at a bend, and the
+/// outline is one simple loop: under `bolt_rects`' even-odd fill an overlap would be a hole in
+/// the line. The straighter of the two goes, never an end; real corners stay.
+fn unfold(ribs: &mut Vec<Rib>) {
+    fn turn(r: &[Rib], i: usize) -> f32 {
+        if i == 0 || i + 1 >= r.len() { 0.0 } else { bend(r[i - 1].p, r[i].p, r[i + 1].p) }
+    }
+    // The inner miter point, projected back onto a leg (`frame` caps the miter at 2×).
+    fn reach(r: &[Rib], i: usize) -> f32 {
+        let (s, c) = (0.5 * turn(r, i)).sin_cos();
+        r[i].left.max(r[i].right) * s / c.max(0.5)
+    }
+    fn pinch(r: &[Rib]) -> Option<usize> {
+        (0..r.len().saturating_sub(1)).find_map(|i| {
+            let gap = (r[i + 1].p.0 - r[i].p.0).hypot(r[i + 1].p.1 - r[i].p.1);
+            if gap >= reach(r, i) + reach(r, i + 1) + 0.5 {
+                return None;
+            }
+            [i, i + 1].into_iter().filter(|&j| j > 0 && j + 1 < r.len()).min_by(|&x, &y| turn(r, x).total_cmp(&turn(r, y)))
+        })
+    }
+    while let Some(j) = pinch(ribs) {
+        ribs.remove(j);
     }
 }
 
@@ -1399,5 +1835,678 @@ mod glint_tests {
         assert!(s.windows(2).skip(3).all(|w| w[1] < w[0]), "4 frames down: {s:?}");
         assert!(s[0] < 0.3 && *s.last().unwrap() < 0.3);
         assert!((g.offset(t0, life).0 + 4.0).abs() < 1e-3 && g.offset(t0 + Duration::from_millis(280), life).0.abs() < 1e-3);
+    }
+}
+
+#[cfg(test)]
+mod bolt_tests {
+    use super::*;
+
+    /// One 30 fps frame (`FRAME_FX`, the view's effect rate) on the strike's clock.
+    const FRAME_30: f32 = 1000.0 / 30.0 / BOLT_MS;
+    /// The view's quiet streak at sf 1: `len` and `w` (view.rs, `step_teleport`).
+    const STREAK: (f32, f32) = (90.0, 6.0);
+    /// Diagonal, the launch (straight down), across two monitors, very long, a short hop,
+    /// sideways back left, sub-pixel, none at all.
+    const STRIKES: [((f32, f32), (f32, f32)); 8] = [
+        ((120.0, 840.0), (930.0, 260.0)),
+        ((640.0, 0.0), (640.0, 560.0)),
+        ((-1700.0, 300.0), (1500.0, 340.0)),
+        ((-2400.0, -900.0), (5200.0, 1400.0)),
+        ((900.0, 500.0), (948.0, 506.0)),
+        ((1500.0, 900.0), (200.0, 950.0)),
+        ((300.0, 300.0), (300.4, 300.2)),
+        ((300.0, 300.0), (300.0, 300.0)),
+    ];
+
+    fn filled(poly: &[(f32, f32)]) -> Vec<ShapeRect> {
+        let mut rows = Vec::new();
+        shape::poly_rows(poly, &mut rows);
+        rows
+    }
+
+    /// `shape::hit` for `poly_rows`' output, which comes row by row from the top: a binary search.
+    fn lit(rows: &[ShapeRect], x: i32, y: i32) -> bool {
+        let from = rows.partition_point(|r| i32::from(r.1) < y);
+        rows[from..].iter().take_while(|r| i32::from(r.1) == y).any(|r| (i32::from(r.0)..i32::from(r.0) + i32::from(r.2)).contains(&x))
+    }
+
+    #[test]
+    fn bolt_reaches_both_ends() {
+        let (a, b) = STRIKES[0];
+        let bolt = Bolt::new(a, b, 0x5eed, 220.0);
+        // The centre line starts exactly at `a` and ends exactly at `b`.
+        assert_eq!(bolt.route.first().map(|k| k.p), Some(a));
+        assert_eq!(bolt.route.last().map(|k| k.p), Some(b));
+        assert_eq!((bolt.point(0.0).0, bolt.point(bolt.len).0), (a, b));
+        // Lit mid-flight, gone at the end, and the same `u` draws the same polygon (no flicker).
+        assert!(!bolt.frame(0.25).is_empty());
+        assert!(bolt.frame(1.0).is_empty());
+        assert_eq!(bolt.frame(0.25), bolt.frame(0.25));
+        assert_eq!(bolt.frame(0.47), bolt.frame(0.47));
+        // The tip travels: short of the target on a few 30 fps frames, not one, not a crawl.
+        let short = (0..30).filter(|&k| Bolt::span(k as f32 * FRAME_30).0 < 1.0).count();
+        assert!((3..=5).contains(&short), "{short} frames in flight");
+        // Home by the arrival; at the landing, a good stretch of trail behind it; drained by the end.
+        assert_eq!(Bolt::span(BOLT_ARRIVE).0, 1.0);
+        let (head, tail) = Bolt::span(BOLT_LAND);
+        assert_eq!(head, 1.0);
+        assert!(head - tail > 0.25, "trail at the landing: {}", head - tail);
+        assert_eq!(Bolt::span(BOLT_END), (1.0, 1.0));
+    }
+
+    #[test]
+    fn span_only_moves_forward_and_fits_the_view_timeline() {
+        let mut was = (0.0, 0.0);
+        for k in 0..=1500 {
+            let u = k as f32 / 1000.0;
+            let (h, t) = Bolt::span(u);
+            assert!((0.0..=1.0).contains(&t) && t <= h && h <= 1.0, "{u}: {h} {t}");
+            assert!(h >= was.0 && t >= was.1, "{u}: back from {was:?} to {:?}", (h, t));
+            was = (h, t);
+        }
+        let (h, t) = Bolt::span(0.0);
+        assert!(h - t > 0.03, "lit from the first frame");
+        let (h, t) = Bolt::span(BOLT_ARRIVE);
+        assert!(h - t > 0.5, "the tail well back at touchdown: {}", h - t);
+        // The last 30 fps frame before the unmap is a speck at most, nothing to cut off.
+        let last = ((BOLT_END / FRAME_30).ceil() - 1.0) * FRAME_30;
+        let (h, t) = Bolt::span(last);
+        assert!(h - t < 0.03, "{last}: {}", h - t);
+        for u in [f32::NAN, f32::INFINITY, 7.0, 1.0] {
+            assert_eq!(Bolt::span(u), (1.0, 1.0));
+        }
+        assert_eq!(Bolt::span(f32::NEG_INFINITY), Bolt::span(0.0));
+    }
+
+    #[test]
+    fn something_is_on_screen_from_the_first_frame_to_the_drain() {
+        // The launch: straight down from the top of the work area to her centre. Lit one frame in
+        // and within the intro's 60 ms hold (`BOLT_OVER_HOLD`).
+        let launch = Bolt::new(STRIKES[1].0, STRIKES[1].1, 4, 220.0);
+        for u in [FRAME_30, 60.0 / BOLT_MS] {
+            assert!(filled(&launch.frame(u)).len() > 20, "{u}");
+        }
+        // Never an empty frame mid-strike (at the view's 60 Hz), on any strike that has length.
+        for &(a, b) in &STRIKES[..6] {
+            let bolt = Bolt::new(a, b, 11, 220.0);
+            let mut u = 0.0;
+            while u < 0.6 {
+                assert!(!bolt.frame(u).is_empty(), "{a:?} {b:?} at {u}");
+                u += 0.016;
+            }
+        }
+    }
+
+    #[test]
+    fn every_polygon_stays_inside_the_box() {
+        for &(a, b) in &STRIKES {
+            for seed in [1, 7, 0xdead_beef, u64::MAX] {
+                for scale in [110.0, 220.0, 440.0] {
+                    let bolt = Bolt::new(a, b, seed, scale);
+                    let (x, y, w, h) = bolt.bbox();
+                    assert!(w > 0 && h > 0 && w < 32_767 && h < 32_767, "{a:?} {b:?}: {w}x{h}");
+                    let (x0, y0, x1, y1) = (x as f32, y as f32, (x + w) as f32, (y + h) as f32);
+                    let sf = scale / 220.0;
+                    let polys = |u: f32| [bolt.frame(u), bolt.streak(u, STREAK.0 * sf, STREAK.1 * sf)];
+                    for k in 0..=100 {
+                        let u = k as f32 / 100.0;
+                        for poly in polys(u) {
+                            for &(px, py) in &poly {
+                                assert!(px >= x0 && py >= y0 && px <= x1 && py <= y1, "{a:?} {b:?} seed {seed} u {u}: ({px}, {py}) outside {:?}", bolt.bbox());
+                            }
+                        }
+                    }
+                    // And through the view's own path: every row inside the box's window.
+                    for k in (0..=100).step_by(10) {
+                        for poly in polys(k as f32 / 100.0) {
+                            for r in bolt_rects(&poly, (x, y)) {
+                                assert!(r.0 >= 0 && r.1 >= 0 && i32::from(r.0) + i32::from(r.2) <= w && i32::from(r.1) + i32::from(r.3) <= h, "{a:?} {b:?}: {r:?} in {w}x{h}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn no_strike_makes_nan_or_panics() {
+        let (nan, inf) = (f32::NAN, f32::INFINITY);
+        let ends = [(0.0, 0.0), (0.3, 0.1), (900.0, 640.0), (-2500.0, 1200.0), (-40_000.0, 25_000.0), (nan, 3.0), (inf, -inf), (2.0e6, 0.0), (1.0e30, 1.0e30)];
+        for &a in &ends {
+            for &b in &ends {
+                for seed in [0, 0x5eed, u64::MAX] {
+                    for scale in [0.0, -5.0, 220.0, 1.0e9, nan] {
+                        let bolt = Bolt::new(a, b, seed, scale);
+                        let (_, _, w, h) = bolt.bbox();
+                        assert!((1..32_767).contains(&w) && (1..32_767).contains(&h), "{a:?} {b:?}: {w}x{h}");
+                        for u in [-1.0, 0.0, 1.0e-7, 0.05, 0.3, 0.5, 0.63, 0.66, 1.0, 1.0e9, nan, inf, -inf] {
+                            for poly in [bolt.frame(u), bolt.streak(u, 90.0, 6.0), bolt.streak(u, nan, inf), bolt.streak(u, -3.0, 1.0e9)] {
+                                assert!(poly.iter().all(|p| p.0.is_finite() && p.1.is_finite()), "{a:?} {b:?} {u}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn each_seed_strikes_its_own_shape() {
+        let (a, b) = STRIKES[0];
+        let polys: Vec<Vec<(f32, f32)>> = (0..12).map(|s| Bolt::new(a, b, s, 220.0).frame(0.25)).collect();
+        for (i, p) in polys.iter().enumerate() {
+            assert!(polys[i + 1..].iter().all(|q| q != p), "seed {i} repeats");
+        }
+        // The first big swing goes either way: no house shape.
+        let first_left = |seed: u64| {
+            let bolt = Bolt::new(a, b, seed, 220.0);
+            let n = (-bolt.dir.1, bolt.dir.0);
+            let off = |k: &Knot| (k.p.0 - a.0) * n.0 + (k.p.1 - a.1) * n.1;
+            let early = bolt.route.iter().filter(|k| k.along < 0.3 * bolt.len);
+            early.map(off).fold(0.0f32, |m, o| if o.abs() > m.abs() { o } else { m }) > 0.0
+        };
+        let left = (0..32).filter(|&s| first_left(s)).count();
+        assert!((6..=26).contains(&left), "{left} of 32 swing left first");
+    }
+
+    #[test]
+    fn the_route_zigzags_with_uneven_swings_gentle_at_the_ends() {
+        let (a, b) = STRIKES[0];
+        let mut lopsided = 0;
+        for seed in 0..16 {
+            let bolt = Bolt::new(a, b, seed, 220.0);
+            let n = (-bolt.dir.1, bolt.dir.0);
+            let offs: Vec<(f32, f32)> = bolt.route.iter().map(|k| (k.along / bolt.len, (k.p.0 - a.0) * n.0 + (k.p.1 - a.1) * n.1)).collect();
+            // Corners on both sides of the line, uneven.
+            let (lo, hi) = offs.iter().fold((0.0f32, 0.0f32), |(lo, hi), &(_, o)| (lo.min(o), hi.max(o)));
+            assert!(lo < -8.0 && hi > 8.0, "seed {seed}: {lo}..{hi}");
+            lopsided += usize::from((hi + lo).abs() > 3.0);
+            // Close to the line near both ends; never more than the swing's cap.
+            let cap = SWING_MAX * 220.0 + JAG_MAX * 220.0;
+            for &(f, o) in &offs {
+                let near_end = f.min(1.0 - f);
+                assert!(o.abs() <= cap && (near_end > 0.04 || o.abs() < 40.0), "seed {seed}: {o} at {f}");
+            }
+            // Bounded: tens of points, not thousands.
+            assert!(bolt.route.len() < 120, "{}", bolt.route.len());
+        }
+        assert!(lopsided >= 10, "swings mirror each other on {} of 16 seeds", 16 - lopsided);
+        let long = Bolt::new(STRIKES[3].0, STRIKES[3].1, 3, 220.0);
+        assert!(long.route.len() < 120 && long.frame(0.25).len() < 260, "{} {}", long.route.len(), long.frame(0.25).len());
+    }
+
+    #[test]
+    fn the_ribbon_is_one_solid_piece() {
+        // LOCKED #1 against the even-odd fill: wherever the ribbon is a few px wide, every point
+        // of its centre line between tail and tip is filled (a fold would read as a hole).
+        for &(a, b) in STRIKES[..6].iter().filter(|s| (s.1.0 - s.0.0).abs() < 4000.0) {
+            for seed in 0..24u64 {
+                let bolt = Bolt::new(a, b, seed.wrapping_mul(0x9e37_79b9_7f4a_7c15), 220.0);
+                for k in 0..40 {
+                    let u = k as f32 * 0.016;
+                    let rows = filled(&bolt.frame(u));
+                    for pair in bolt.ribs(u).windows(2) {
+                        let (r0, r1) = (pair[0], pair[1]);
+                        if r0.left.min(r0.right).min(r1.left).min(r1.right) < 2.0 {
+                            continue;
+                        }
+                        for j in 0..6 {
+                            let f = j as f32 / 6.0;
+                            let p = (r0.p.0 + (r1.p.0 - r0.p.0) * f, r0.p.1 + (r1.p.1 - r0.p.1) * f);
+                            assert!(lit(&rows, p.0.floor() as i32, p.1.floor() as i32), "{a:?} {b:?} seed {seed} u {u}: a hole at {p:?}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_outline_never_crosses_itself() {
+        // Stronger than the holes test: one simple loop, at every scale.
+        let side = |a: (f32, f32), b: (f32, f32), c: (f32, f32)| (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0);
+        let crosses = |p: (f32, f32), q: (f32, f32), r: (f32, f32), s: (f32, f32)| side(r, s, p) * side(r, s, q) < 0.0 && side(p, q, r) * side(p, q, s) < 0.0;
+        for &(a, b) in &STRIKES[..6] {
+            for seed in 0..12u64 {
+                for scale in [110.0, 220.0, 440.0] {
+                    let bolt = Bolt::new(a, b, seed.wrapping_mul(0x2545_f491_4f6c_dd1d), scale);
+                    for k in 0..34 {
+                        let poly = bolt.frame(k as f32 * 0.02);
+                        let n = poly.len();
+                        for i in 0..n {
+                            for j in i + 2..n {
+                                if i == 0 && j == n - 1 {
+                                    continue;
+                                }
+                                assert!(!crosses(poly[i], poly[(i + 1) % n], poly[j], poly[(j + 1) % n]), "{a:?} {b:?} seed {seed} scale {scale} u {}: edges {i} and {j} cross", k as f32 * 0.02);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_ribbon_is_thickest_behind_the_tip_and_follows_the_figure() {
+        let (a, b) = STRIKES[0];
+        for seed in 0..8 {
+            for u in [0.12, 0.2, 0.3, 0.45] {
+                // Tail first, tip last: the half nearer the tip is the thicker, both ends points.
+                let ribs = Bolt::new(a, b, seed, 220.0).ribs(u);
+                let n = ribs.len();
+                let mean = |rs: &[Rib]| rs.iter().map(|r| r.left + r.right).sum::<f32>() / rs.len() as f32;
+                assert!(mean(&ribs[n / 2..]) > mean(&ribs[..n / 2]), "seed {seed} u {u}");
+                assert!(ribs[0].left + ribs[0].right == 0.0 && ribs[n - 1].left + ribs[n - 1].right == 0.0);
+            }
+        }
+        // Thicker on a bigger figure, within limits.
+        let half = |scale: f32| Bolt::new(a, b, 5, scale).half;
+        assert!(RIB_MIN <= half(40.0) && half(110.0) < half(220.0) && half(220.0) < half(880.0) && half(880.0) <= RIB_MAX);
+        let widest = Bolt::new(a, b, 5, 880.0).ribs(0.2).iter().map(|r| r.left.max(r.right)).fold(0.0f32, f32::max);
+        assert!(widest <= RIB_MAX * CHIP.1, "{widest}");
+    }
+
+    #[test]
+    fn the_quiet_streak_is_a_thin_straight_shard() {
+        let (a, b) = ((200.0, 600.0), (1100.0, 380.0));
+        let bolt = Bolt::new(a, b, 9, 220.0);
+        let (len, w) = STREAK;
+        let d = bolt.dir;
+        for k in 0..=70 {
+            let u = k as f32 / 100.0;
+            let poly = bolt.streak(u, len, w);
+            if u < 0.6 {
+                assert!(poly.len() >= 3, "{u}: lit");
+            }
+            let along: Vec<f32> = poly.iter().map(|p| (p.0 - a.0) * d.0 + (p.1 - a.1) * d.1).collect();
+            let across = poly.iter().map(|p| (p.1 - a.1) * d.0 - (p.0 - a.0) * d.1);
+            let (lo, hi) = along.iter().fold((f32::MAX, f32::MIN), |(lo, hi), &s| (lo.min(s), hi.max(s)));
+            assert!(poly.is_empty() || (hi - lo <= len + 0.01 && lo >= -0.01 && hi <= bolt.len + 0.01), "{u}: {lo}..{hi}");
+            for c in across {
+                assert!(c.abs() <= 0.5 * w + 0.01, "{u}: {c} off the line");
+            }
+            // Its point leads, at `span`'s head.
+            if let Some(&tip) = along.first() {
+                assert!((tip - Bolt::span(u).0 * bolt.len).abs() < 0.05 && tip >= hi - 0.01, "{u}");
+            }
+        }
+        assert!(bolt.streak(1.0, len, w).is_empty());
+        assert!(bolt.streak(0.3, 0.0, w).is_empty() && bolt.streak(0.3, len, 0.0).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod note_tests {
+    use super::*;
+
+    /// The view draws the first seven (view.rs:759, `NOTES_MAX`).
+    const VIEW_NOTES_MAX: usize = 7;
+    /// Capri's default tempo (moods.json `music.bpm` 110).
+    const BEAT_110: f32 = 60.0 / 110.0;
+    /// Two emitters a head-width apart, the right one a little higher (Capri's music-window).
+    const EMITTERS: [[i32; 2]; 2] = [[533, 402], [764, 365]];
+
+    fn sprite_of(k: u64) -> usize {
+        (k + k / 4) as usize
+    }
+
+    #[test]
+    fn notes_rise_and_fade() {
+        assert!(music_notes(0.001, BEAT_110, &EMITTERS).len() <= 1, "one note at most in the first instant");
+        let lower = EMITTERS.iter().map(|e| e[1]).max().unwrap_or(0) as f32;
+        let edge = NOTE_ANGLES[NOTE_ANGLES.len() - 1] + 0.01;
+        let mut alive = 0;
+        for i in 0..400 {
+            let age = 20.0 + i as f32 * 0.025;
+            let notes = music_notes(age, BEAT_110, &EMITTERS);
+            assert!((3..=VIEW_NOTES_MAX).contains(&notes.len()), "{age}: {} alive", notes.len());
+            alive += notes.len();
+            for n in &notes {
+                assert!(n.y <= lower, "{age}: {n:?} below the lower emitter");
+                assert!((0.0..=1.0).contains(&n.alpha), "{n:?}");
+                assert!(n.deg.abs() <= edge, "{n:?}");
+                assert!(n.size > 0.0 && n.size <= NOTE_PX, "{n:?}");
+            }
+        }
+        assert!(alive >= 4 * 400, "a handful on average: {}", alive as f32 / 400.0);
+    }
+
+    #[test]
+    fn notes_are_a_pure_function_and_move_smoothly() {
+        for age in [0.3f32, 2.0, 7.77, 61.0, 900.5] {
+            let now = music_notes(age, BEAT_110, &EMITTERS);
+            assert_eq!(format!("{now:?}"), format!("{:?}", music_notes(age, BEAT_110, &EMITTERS)));
+            let later = music_notes(age + 0.004, BEAT_110, &EMITTERS);
+            let mut kept = 0;
+            for n in &now {
+                let Some(m) = later.iter().find(|m| m.sprite == n.sprite) else { continue };
+                kept += 1;
+                assert!((m.x - n.x).hypot(m.y - n.y) < 2.0, "{age}: moved {n:?} -> {m:?}");
+                assert!((m.size - n.size).abs() < 4.0 && (m.alpha - n.alpha).abs() < 0.05 && (m.deg - n.deg).abs() < 0.5, "{n:?} -> {m:?}");
+            }
+            assert!(kept + 1 >= now.len(), "{age}: {kept} of {} kept", now.len());
+        }
+    }
+
+    #[test]
+    fn the_fastest_tempo_keeps_the_newest_few_oldest_first() {
+        let beat = 60.0 / 240.0;
+        for i in 0..120 {
+            let age = 30.0 + i as f32 * 0.037;
+            let notes = music_notes(age, beat, &EMITTERS);
+            assert_eq!(notes.len(), VIEW_NOTES_MAX, "{age}");
+            let newest = (f64::from(age) / f64::from(beat)).floor() as u64;
+            assert_eq!(notes.last().map(|n| n.sprite), Some(sprite_of(newest)), "{age}: the newest last");
+            assert!(notes.windows(2).all(|w| w[0].sprite < w[1].sprite), "{age}: oldest first");
+        }
+        // The slowest: fewer, never none.
+        let slow: Vec<usize> = (0..100).map(|i| music_notes(30.0 + i as f32 * 0.1, 1.5, &EMITTERS).len()).collect();
+        assert!(slow.iter().all(|n| (1..=VIEW_NOTES_MAX).contains(n)), "{slow:?}");
+    }
+
+    #[test]
+    fn nonsense_gives_no_notes() {
+        let (nan, inf) = (f32::NAN, f32::INFINITY);
+        for (age, beat) in [(5.0, 0.0), (5.0, -0.5), (nan, 0.5), (5.0, nan), (inf, 0.5), (5.0, inf), (-1.0, 0.5), (-inf, 0.5)] {
+            assert!(music_notes(age, beat, &EMITTERS).is_empty(), "{age} {beat}");
+        }
+        assert!(music_notes(5.0, 0.5, &[]).is_empty());
+        // Silly but finite: bounded, and nothing out of range.
+        for (age, beat) in [(5.0, 1.0e-30), (16.0, 1.0e-18), (3.0e38, 1.0e-30), (1.0e30, 0.5)] {
+            let notes = music_notes(age, beat, &EMITTERS);
+            assert!(notes.len() <= VIEW_NOTES_MAX && notes.iter().all(|n| n.x.is_finite() && n.y.is_finite() && n.size.is_finite()), "{age} {beat}");
+        }
+    }
+
+    #[test]
+    fn births_alternate_sides_and_drift_outward() {
+        for k in 0..12u64 {
+            // Note `k` is the newest, 0.4 s old.
+            let notes = music_notes(k as f32 * BEAT_110 + 0.4, BEAT_110, &EMITTERS);
+            let Some(n) = notes.last().copied() else { panic!("note {k}: none") };
+            assert_eq!(n.sprite, sprite_of(k));
+            let (from, out) = if k.is_multiple_of(2) { (EMITTERS[0], -1.0) } else { (EMITTERS[1], 1.0) };
+            assert!((n.x - from[0] as f32) * out > 10.0, "note {k} at {} from {from:?}: not outward", n.x);
+            assert!(n.y < from[1] as f32, "note {k}: not rising");
+        }
+        // One emitter: they still take turns, left then right.
+        let one = [[400, 300]];
+        for k in 0..6u64 {
+            let Some(n) = music_notes(k as f32 * BEAT_110 + 0.4, BEAT_110, &one).last().copied() else { panic!("note {k}: none") };
+            assert!(if k.is_multiple_of(2) { n.x < 390.0 } else { n.x > 410.0 }, "note {k}: {}", n.x);
+        }
+        // Three: no panic, all used.
+        let three = [[100, 300], [300, 280], [500, 300]];
+        assert!(!music_notes(9.0, BEAT_110, &three).is_empty());
+    }
+
+    #[test]
+    fn each_note_leans_into_its_travel_through_a_few_angle_steps() {
+        let nearest = |deg: f32| NOTE_ANGLES.iter().enumerate().min_by(|a, b| (a.1 - deg).abs().total_cmp(&(b.1 - deg).abs())).map_or(3, |p| p.0);
+        for k in 0..16u64 {
+            let (mut steps, mut lean) = (std::collections::BTreeSet::new(), 0.0);
+            for j in 0..130 {
+                let age = k as f32 * BEAT_110 + j as f32 * 0.025;
+                if let Some(n) = music_notes(age, BEAT_110, &EMITTERS).iter().find(|n| n.sprite == sprite_of(k))
+                    && n.alpha >= 0.14
+                {
+                    steps.insert(nearest(n.deg));
+                    lean += n.deg;
+                }
+            }
+            assert!(steps.len() >= 3, "note {k}: {steps:?}");
+            // Left-going notes tip left (counter-clockwise), right-going ones right.
+            assert!(if k.is_multiple_of(2) { lean < 0.0 } else { lean > 0.0 }, "note {k}: {lean}");
+        }
+    }
+
+    #[test]
+    fn hours_into_a_session_it_still_holds() {
+        for hours in [1.0f32, 10.0, 100.0] {
+            let age = hours * 3600.0;
+            let notes = music_notes(age, BEAT_110, &EMITTERS);
+            assert!((3..=VIEW_NOTES_MAX).contains(&notes.len()), "{hours} h: {}", notes.len());
+            assert!(notes.iter().all(|n| n.x.is_finite() && n.y <= 402.0 && n.size > 0.0 && n.size <= NOTE_PX), "{hours} h: {notes:?}");
+            assert!(notes.windows(2).all(|w| w[0].sprite < w[1].sprite), "{hours} h");
+            // The next representable age: the same notes, barely moved.
+            let next = music_notes(f32::from_bits(age.to_bits() + 1), BEAT_110, &EMITTERS);
+            for n in &notes {
+                if let Some(m) = next.iter().find(|m| m.sprite == n.sprite) {
+                    assert!((m.y - n.y).abs() < 12.0, "{hours} h: {n:?} -> {m:?}");
+                }
+            }
+        }
+    }
+}
+
+/// Contact sheets of the bolt and the notes, for tuning them by eye:
+/// `FX_SHEETS=dir cargo test --bin synaps-avatar fx::sheets -- --ignored` (else the temp dir).
+/// The bolt is painted through `bolt_rects`, the view's own path; the notes through the view's
+/// quantisation in `update_notes` (the alpha floor and four shrink-and-dim steps, the size cap,
+/// the nearest pre-rotated angle), as stand-in glyphs in each sprite's colour (the art isn't in git).
+#[cfg(test)]
+mod sheets {
+    use super::*;
+    use image::{Rgb, RgbImage};
+
+    const BG: Rgb<u8> = Rgb([16, 18, 26]);
+    const GAP: Rgb<u8> = Rgb([64, 64, 72]);
+    const INK: Rgb<u8> = Rgb([150, 150, 165]);
+    /// view.rs `update_notes`, `NOTE_SCALE`, `NOTE_TINT`.
+    const NOTE_FLOOR: f32 = 0.14;
+    const NOTE_SCALE: f32 = 1.15;
+    const NOTE_TINT: u32 = 0x3a4656;
+    /// Capri's four note sprites' colours: cyan, lime, pink, violet.
+    const SPRITES: [u32; 4] = [0x00ffdd, 0x9cff3c, 0xff1769, 0xa668ff];
+    /// 3×5 digits, three bits a row from the top, the high bit leftmost.
+    const DIGITS: [u16; 10] = [0x7b6f, 0x2c97, 0x73e7, 0x73cf, 0x5bc9, 0x79cf, 0x79ef, 0x7249, 0x7bef, 0x7bcf];
+
+    fn rgb(c: u32) -> Rgb<u8> {
+        Rgb([(c >> 16) as u8, (c >> 8) as u8, c as u8])
+    }
+
+    fn put(im: &mut RgbImage, x: i64, y: i64, c: Rgb<u8>) {
+        if x >= 0 && y >= 0 && x < i64::from(im.width()) && y < i64::from(im.height()) {
+            im.put_pixel(x as u32, y as u32, c);
+        }
+    }
+
+    /// `n` in 3×5 digits, `px` px a dot, its top-left at (x, y).
+    fn label(im: &mut RgbImage, x: i64, y: i64, n: u32, px: i64) {
+        for (i, ch) in n.to_string().bytes().enumerate() {
+            let g = DIGITS[usize::from(ch - b'0')];
+            for bit in 0..15i64 {
+                if (g >> (14 - bit)) & 1 == 1 {
+                    let (cx, cy) = (x + (i as i64 * 4 + bit % 3) * px, y + bit / 3 * px);
+                    for d in 0..px * px {
+                        put(im, cx + d % px, cy + d / px, INK);
+                    }
+                }
+            }
+        }
+    }
+
+    fn ring(im: &mut RgbImage, cx: f32, cy: f32, rx: f32, ry: f32, c: Rgb<u8>) {
+        for i in 0..720 {
+            let a = i as f32 / 720.0 * 2.0 * PI;
+            put(im, (cx + rx * a.cos()).round() as i64, (cy + ry * a.sin()).round() as i64, c);
+        }
+    }
+
+    /// Cells left to right, `cols` a row, each `zoom`× (nearest), 4 px apart.
+    fn grid(cells: &[RgbImage], cols: usize, zoom: u32) -> RgbImage {
+        let w = cells.iter().map(RgbImage::width).max().unwrap_or(1) * zoom + 4;
+        let h = cells.iter().map(RgbImage::height).max().unwrap_or(1) * zoom + 4;
+        let rows = cells.len().div_ceil(cols) as u32;
+        let mut out = RgbImage::from_pixel(cols as u32 * w, rows * h, GAP);
+        for (i, c) in cells.iter().enumerate() {
+            let (ox, oy) = ((i % cols) as u32 * w, (i / cols) as u32 * h);
+            for (x, y, p) in c.enumerate_pixels() {
+                for d in 0..zoom * zoom {
+                    out.put_pixel(ox + x * zoom + d % zoom, oy + y * zoom + d / zoom, *p);
+                }
+            }
+        }
+        out
+    }
+
+    /// `im` at 1/`k`: a block takes any lit pixel in it, so thin lines survive.
+    fn shrink(im: &RgbImage, k: u32) -> RgbImage {
+        let mut out = RgbImage::from_pixel(im.width().div_ceil(k), im.height().div_ceil(k), BG);
+        for (x, y, p) in im.enumerate_pixels() {
+            if *p != BG {
+                out.put_pixel(x / k, y / k, *p);
+            }
+        }
+        out
+    }
+
+    fn save(im: &RgbImage, name: &str) {
+        let dir = std::env::var_os("FX_SHEETS").map_or_else(|| std::env::temp_dir().join("fx-sheets"), std::path::PathBuf::from);
+        std::fs::create_dir_all(&dir).expect("sheet dir");
+        im.save(dir.join(name)).expect("sheet png");
+        eprintln!("{}: {}x{}", dir.join(name).display(), im.width(), im.height());
+    }
+
+    /// `bolt` at `u` as the view paints it: `bolt_rects` in `BOLT_LINE` over its box; where she
+    /// was (cyan) and where she lands (yellow) ringed, for the sheet only.
+    fn bolt_cell(bolt: &Bolt, u: f32, quiet: bool, sf: f32) -> RgbImage {
+        let (bx, by, bw, bh) = bolt.bbox();
+        let mut im = RgbImage::from_pixel(bw as u32, bh as u32, BG);
+        let b = bolt.route.last().map_or(bolt.a, |k| k.p);
+        for (p, c) in [(bolt.a, CYAN), (b, YELLOW)] {
+            ring(&mut im, p.0 - bx as f32, p.1 - by as f32, 4.0, 4.0, rgb(c));
+        }
+        let poly = if quiet { bolt.streak(u, 90.0 * sf, 6.0 * sf) } else { bolt.frame(u) };
+        for (x, y, w, h) in bolt_rects(&poly, (bx, by)) {
+            for d in 0..i64::from(w) * i64::from(h) {
+                put(&mut im, i64::from(x) + d % i64::from(w), i64::from(y) + d / i64::from(w), rgb(BOLT_LINE));
+            }
+        }
+        im
+    }
+
+    /// One strike across its timeline at 30 fps (0 to 300 ms), each cell labelled in ms.
+    fn strike(name: &str, bolt: &Bolt, quiet: bool, cols: usize, zoom: u32, by: u32) {
+        let cells: Vec<RgbImage> = (0..10)
+            .map(|k| {
+                let u = k as f32 * 1000.0 / 30.0 / BOLT_MS;
+                let mut c = shrink(&bolt_cell(bolt, u, quiet, 1.0), by);
+                label(&mut c, 3, 3, (u * BOLT_MS).round() as u32, 2);
+                c
+            })
+            .collect();
+        save(&grid(&cells, cols, zoom), name);
+    }
+
+    /// The view's four alpha steps (`update_notes`).
+    fn step(alpha: f32) -> f32 {
+        if alpha > 0.8 {
+            1.0
+        } else if alpha > 0.55 {
+            0.72
+        } else if alpha > 0.32 {
+            0.48
+        } else {
+            0.28
+        }
+    }
+
+    fn mix(a: u32, b: u32, k: f32) -> Rgb<u8> {
+        let ch = |sh: u32| {
+            let (x, y) = (((a >> sh) & 0xff) as f32, ((b >> sh) & 0xff) as f32);
+            (x + (y - x) * k).round() as u8
+        };
+        Rgb([ch(16), ch(8), ch(0)])
+    }
+
+    /// A stand-in eighth note `size` px square centred at (cx, cy), turned `deg` clockwise.
+    fn glyph(im: &mut RgbImage, cx: f32, cy: f32, size: f32, deg: f32, c: Rgb<u8>) {
+        let (s, co) = deg.to_radians().sin_cos();
+        let r = size.ceil() as i64;
+        for d in 0..(2 * r + 1) * (2 * r + 1) {
+            let (x, y) = ((d % (2 * r + 1) - r) as f32, (d / (2 * r + 1) - r) as f32);
+            // Back into the glyph's own frame (y down, so clockwise is the plain rotation).
+            let (gx, gy) = ((co * x + s * y) / size, (co * y - s * x) / size);
+            let head = ((gx + 0.12) / 0.21).powi(2) + ((gy - 0.27) / 0.16).powi(2) < 1.0;
+            let stem = (0.05..0.14).contains(&gx) && (-0.45..0.27).contains(&gy);
+            let flag = (0.12..0.36).contains(&gx) && gy > -0.45 && gy < -0.3 + 0.5 * (gx - 0.12);
+            if head || stem || flag {
+                put(im, (cx + x).round() as i64, (cy + y).round() as i64, c);
+            }
+        }
+    }
+
+    /// The notes at `age` around her head (a ring between the emitters, for the sheet only), at
+    /// `geo` device px per canvas px, as the view quantises them; labelled in centiseconds.
+    fn notes_cell(age: f32, beat: f32, em: &[[i32; 2]], geo: f32) -> RgbImage {
+        let xs = (em.iter().map(|e| e[0]).min().unwrap_or(0) - 420, em.iter().map(|e| e[0]).max().unwrap_or(0) + 420);
+        let ys = (em.iter().map(|e| e[1]).min().unwrap_or(0) - 560, em.iter().map(|e| e[1]).max().unwrap_or(0) + 200);
+        let to = |x: f32, y: f32| ((x - xs.0 as f32) * geo, (y - ys.0 as f32) * geo);
+        let mut im = RgbImage::from_pixel(((xs.1 - xs.0) as f32 * geo) as u32, ((ys.1 - ys.0) as f32 * geo) as u32, BG);
+        let (l, r) = (em[0], em[em.len() - 1]);
+        let (hx, hy) = to((l[0] + r[0]) as f32 / 2.0, (l[1] + r[1]) as f32 / 2.0);
+        let rx = (r[0] - l[0]).abs() as f32 / 2.0 * geo;
+        ring(&mut im, hx, hy - 0.1 * rx, rx, 1.15 * rx, rgb(0x3a3a50));
+        for e in em {
+            let (x, y) = to(e[0] as f32, e[1] as f32);
+            ring(&mut im, x, y, 3.0, 3.0, INK);
+        }
+        let cap = (NOTE_PX * geo * NOTE_SCALE).ceil();
+        for n in music_notes(age, beat, em).iter().take(NOTES_DRAWN) {
+            if n.alpha < NOTE_FLOOR {
+                continue;
+            }
+            let k = step(n.alpha);
+            let size = (n.size * geo * NOTE_SCALE * (0.55 + 0.45 * k)).round().clamp(4.0, cap);
+            let deg = NOTE_ANGLES.iter().copied().min_by(|a, b| (a - n.deg).abs().total_cmp(&(b - n.deg).abs())).unwrap_or(0.0);
+            let (x, y) = to(n.x, n.y);
+            glyph(&mut im, x, y, size, deg, mix(NOTE_TINT, SPRITES[n.sprite % SPRITES.len()], k));
+        }
+        label(&mut im, 3, 3, (age * 100.0).round() as u32, 2);
+        im
+    }
+
+    fn notes(name: &str, beat: f32, em: &[[i32; 2]], from: f32, every: f32, n: usize) {
+        let cells: Vec<RgbImage> = (0..n).map(|i| notes_cell(from + i as f32 * every, beat, em, 0.4)).collect();
+        save(&grid(&cells, 6, 1), name);
+    }
+
+    #[test]
+    #[ignore = "writes PNG contact sheets for tuning by eye (FX_SHEETS=dir)"]
+    fn contact_sheets() {
+        // The bolt over its timeline: diagonal, the launch, a short hop, a mid hop zoomed in, across
+        // two monitors (at half size), and the quiet streak.
+        strike("bolt-diagonal.png", &Bolt::new((120.0, 840.0), (930.0, 260.0), 0x5eed, 220.0), false, 5, 1, 1);
+        strike("bolt-launch.png", &Bolt::new((640.0, 0.0), (640.0, 560.0), 4, 220.0), false, 10, 1, 1);
+        strike("bolt-hop48.png", &Bolt::new((900.0, 500.0), (948.0, 506.0), 21, 220.0), false, 5, 4, 1);
+        strike("bolt-hop300.png", &Bolt::new((100.0, 300.0), (380.0, 200.0), 77, 220.0), false, 5, 2, 1);
+        strike("bolt-monitors.png", &Bolt::new((-1700.0, 300.0), (1500.0, 700.0), 9, 220.0), false, 2, 1, 2);
+        strike("bolt-quiet.png", &Bolt::new((120.0, 840.0), (930.0, 260.0), 0x5eed, 220.0), true, 5, 1, 1);
+        // Twelve seeds of one strike, mostly lit (no house shape), and the same strike on a
+        // small, the usual and a 4K figure.
+        let seeds: Vec<RgbImage> = (0..12).map(|s| bolt_cell(&Bolt::new((60.0, 400.0), (700.0, 120.0), s * 7919 + 1, 220.0), 0.24, false, 1.0)).collect();
+        save(&grid(&seeds, 4, 1), "bolt-seeds.png");
+        let scales: Vec<RgbImage> = [110.0, 220.0, 440.0].iter().map(|&sc| bolt_cell(&Bolt::new((60.0, 400.0), (700.0, 120.0), 3, sc), 0.24, false, sc / 220.0)).collect();
+        save(&grid(&scales, 3, 1), "bolt-scales.png");
+
+        // The notes: the first seconds at Capri's 110 bpm, then steady state at 40, 110 and 240.
+        let window = [[533, 402], [764, 365]];
+        notes("notes-110-start.png", 60.0 / 110.0, &window, 0.0, 0.2, 24);
+        notes("notes-110.png", 60.0 / 110.0, &window, 30.0, 0.1, 18);
+        notes("notes-40.png", 1.5, &window, 30.0, 0.25, 12);
+        notes("notes-240.png", 0.25, &window, 30.0, 0.05, 12);
+        notes("notes-floor-1h.png", 60.0 / 110.0, &[[522, 642], [775, 591]], 3600.0, 0.1, 12);
+        // Every note's centre over ten seconds, in its sprite's colour.
+        let mut im = notes_cell(-1.0, 60.0 / 110.0, &window, 0.4);
+        for i in 0..600 {
+            for n in music_notes(20.0 + i as f32 / 60.0, 60.0 / 110.0, &window) {
+                put(&mut im, ((n.x - 113.0) * 0.4).round() as i64, ((n.y + 195.0) * 0.4).round() as i64, rgb(SPRITES[n.sprite % 4]));
+            }
+        }
+        save(&im, "notes-paths.png");
     }
 }
