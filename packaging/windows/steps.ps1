@@ -391,12 +391,31 @@ function Invoke-Login {
     $pi.RedirectStandardOutput = $true
     $pi.RedirectStandardError = $true
     $p = [Diagnostics.Process]::Start($pi)
-    $err = $p.StandardError.ReadToEndAsync()
     $null = $p.StandardOutput.ReadToEndAsync()
     Say 'your browser opens: sign in to Claude there (10 minutes)'
     $t0 = Get-Date
     $in = $false
+    $said = New-Object Collections.Generic.List[string]
+    $state = @{ Line = $p.StandardError.ReadLineAsync(); Opened = $false }
+    # Its stderr, what's there so far. Synaps 0.12 opens the page with `cmd /c start URL`, and cmd
+    # cuts the URL at its first & (no client_id: claude.ai can't sign him in). The whole URL is on
+    # its stderr: opened here, by the shell, which leaves it whole.
+    $read = {
+        while ($state.Line -and $state.Line.IsCompleted) {
+            $r = $state.Line.Result
+            if ($null -eq $r) { $state.Line = $null; break }
+            $state.Line = $p.StandardError.ReadLineAsync()
+            $l = ($r -replace "\x1b\[[0-9;]*m", '').Trim()
+            if ($l) { $said.Add($l) }
+            if (-not $state.Opened -and $l -match '^https://\S+\?\S*&\S+$') {
+                $state.Opened = $true
+                if ($env:CAPRI_NO_BROWSER) { Say "would open: $l" }
+                else { try { Start-Process $l; Good 'opened the sign-in page in your browser' } catch { Warn "your browser didn't open: go to $l" } }
+            }
+        }
+    }
     while (-not $p.HasExited -and ((Get-Date) - $t0).TotalMinutes -lt 10) {
+        & $read
         if (-not $in -and (Test-Path -LiteralPath $auth) -and (Get-Item -LiteralPath $auth).LastWriteTimeUtc -gt $was) {
             $in = $true
             $p.StandardInput.Close()
@@ -409,9 +428,8 @@ function Invoke-Login {
         try { $p.Kill() } catch { $null = $_ }
         if (-not $in) { Stop-Step 'no sign-in in 10 minutes: she says how to sign in when you talk to her' }
     }
-    $text = ''
-    if ($err.Wait(2000)) { $text = ($err.Result -replace "\x1b\[[0-9;]*m", '').Trim() }
-    if (-not $in -and $p.ExitCode) { Stop-Step "synaps login exited $($p.ExitCode): $(($text -split "`n" | Where-Object { $_.Trim() } | Select-Object -Last 1))" }
+    for ($i = 0; $i -lt 30 -and $state.Line; $i++) { & $read; if ($state.Line) { Start-Sleep -Milliseconds 100 } }
+    if (-not $in -and $p.ExitCode) { Stop-Step "synaps login exited $($p.ExitCode): $($said | Where-Object { $_ } | Select-Object -Last 1)" }
     Good 'signed in: her brain is in'
     Result 'brain: yes'
 }
