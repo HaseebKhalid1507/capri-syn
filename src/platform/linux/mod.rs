@@ -737,10 +737,13 @@ mod tests {
         child.wait().expect("true ends");
         std::os::unix::fs::symlink("/bin/sh", root.join("Hyprland")).unwrap();
         let mut hyprland = std::process::Command::new(root.join("Hyprland"))
-            .args(["-c", "read x"])
+            .args(["-c", "echo; read x"])
             .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
             .spawn()
             .expect("sh as Hyprland");
+        // Its first line: it's exec'd by now, its comm Hyprland (spawn can return before the exec).
+        std::io::Read::read_exact(hyprland.stdout.as_mut().unwrap(), &mut [0u8; 1]).expect("sh as Hyprland runs");
         assert!(is_hyprland(hyprland.id()) && !is_hyprland(std::process::id()) && !is_hyprland(gone));
         let at = |sig: &str, lock: Option<String>| {
             let d = root.join(sig);

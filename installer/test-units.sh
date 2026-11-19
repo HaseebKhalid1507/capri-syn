@@ -282,9 +282,10 @@ gsettings() {
         set) if [ "$3" = custom-keybindings ]; then GS["$2 $3"]=${4//\"/\'}; else GS["$2 $3"]=$(gs_in "$4"); fi ;;
         reset-recursively) for k in "${!GS[@]}"; do case $k in "$2 "*) unset "GS[$k]" ;; esac; done ;;
         list-recursively)
-            # With no schema: every one its source lists, the system's too. GLib before 2.82 (Ubuntu
-            # 24.04's 2.80) opens each from the default source, and aborts on the folder's own.
-            if [ $# -ge 2 ]; then ids=("$2"); else ids=("${SYS[@]}" "${own[@]}"); fi
+            # With no schema: every one its source lists, the system's too, sorted. GLib before 2.82
+            # (Ubuntu 24.04's 2.80) opens each from the default source: it prints the ones sorting
+            # before the folder's own, then aborts on that.
+            if [ $# -ge 2 ]; then ids=("$2"); else mapfile -t ids < <(printf '%s\n' "${SYS[@]}" "${own[@]}" | LC_ALL=C sort); fi
             for s in "${ids[@]}"; do
                 case $s in
                     org.gnome.desktop.wm.keybindings) printf '%s\n' "$s close ['<Alt>F4']" "$GS_WM" ;;
