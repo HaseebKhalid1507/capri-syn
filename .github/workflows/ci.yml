@@ -164,14 +164,6 @@ jobs:
           CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
         run: ./packaging/windows/build.ps1
 
-      - name: Her symbols (the PDB of this build's exe)
-        uses: actions/upload-artifact@v4
-        with:
-          name: synaps-avatar-pdb-${{ github.sha }}
-          path: target/release/synaps_avatar.pdb
-          retention-days: 14
-          if-no-files-found: error
-
       - name: Install, check, uninstall (unattended)
         timeout-minutes: 15
         shell: pwsh
@@ -214,8 +206,19 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: test-hang-${{ github.sha }}
-          path: ${{ runner.temp }}/sa-hang
+          path: |
+            ${{ runner.temp }}/sa-hang
+            target/release/synaps_avatar.pdb
           retention-days: 7
+          if-no-files-found: warn
+
+      - name: Her symbols (the PDB of this build's exe)
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: synaps-avatar-pdb-${{ github.sha }}
+          path: target/release/synaps_avatar.pdb
+          retention-days: 14
           if-no-files-found: warn
 
       # Uploaded even when the run above fails (a flake cost main 7b401ea its installer).
