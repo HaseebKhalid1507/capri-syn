@@ -36,6 +36,8 @@ $n = 0
 # Shots: spike's tools/shoot-win.ps1 (#82), dot-sourced: a window (by title glob or process),
 # cropped (+ Pad), numbered in the order taken.
 . (Join-Path $root 'tools\shoot-win.ps1')
+# The wizard's window as a person uses it (caption, answering, enabled, dragging): test-wizard-window.ps1.
+. (Join-Path $PSScriptRoot 'test-wizard-window.ps1')
 function Get-Shot([string]$Name, [string]$Title = '', [int]$ProcessId = 0, [int]$Pad = 12) {
     $script:n++
     $f = Join-Path $Shots ('{0:D2}-{1}.png' -f $script:n, $Name)
@@ -54,7 +56,11 @@ function Wait-Window([string]$Title, [int]$Secs = 60) {
 }
 # Every name shown in a window (its page's caption among them).
 # Trimmed: a heading's name can end in a line break (the finish page's does).
-function Get-WindowText($W) { @($W.FindAll($Tree::Descendants, [Windows.Automation.Condition]::TrueCondition) | ForEach-Object { "$($_.Current.Name)".Trim() } | Where-Object { $_ }) }
+function Get-WindowText($W) {
+    # A window that closes under the read (the uninstall's questions do) says nothing: not an error.
+    try { @($W.FindAll($Tree::Descendants, [Windows.Automation.Condition]::TrueCondition) | ForEach-Object { "$($_.Current.Name)".Trim() } | Where-Object { $_ }) }
+    catch { @() }
+}
 # A button by its caption, whatever UI Automation calls it (a VCL button can come through as a pane):
 # Invoke when it has that, else a real click on its middle.
 function Invoke-Button($W, [string]$Name) {
@@ -119,14 +125,17 @@ foreach ($page in @(
     if ($page[1] -eq 'her-brain') { Check (($t -match 'Install Synaps \(her brain, open source\)').Count -gt 0) 'her brain page offers to install Synaps' }
     if ($page[1] -eq 'her-voice') { Check (($t -match '^Talk to her$').Count -gt 0 -and ($t -match 'Read replies aloud').Count -gt 0) 'her voice page: talk, microphone, "hey Capri", replies aloud' }
     if ($page[1] -eq 'her-pack') { Check (($t -match 'Download her art').Count -gt 0) 'her pack page offers the download' }
+    if ($page[1] -in 'destination', 'ready') { Test-WizardWindow $w "the $($page[1]) page" }
     Invoke-Button $w $page[2]
 }
 # The steps, on their progress page (Synaps, her art, the daemon), then the finish page.
 $null = Wait-Page $w '^Setting her up$' 180
 Start-Sleep -Seconds 3
 Get-Shot 'setting-her-up' -Title 'Setup - capri-syn*'
+Test-WizardDuringStep $w
 $t = Wait-Page $w '^Completing the capri-syn Setup Wizard$' 1200
 Get-Shot 'finish' -Title 'Setup - capri-syn*'
+Write-StepTime
 Check (($t -match 'Synaps \d+\.\d+\.\d+, her brain: installed').Count -gt 0) 'the finish page: Synaps installed'
 Check (($t -match 'Her art: downloaded, built and checked').Count -gt 0) 'the finish page: her art'
 Check (($t -match 'Its daemon runs').Count -gt 0) 'the finish page: the daemon'

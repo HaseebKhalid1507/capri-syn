@@ -231,7 +231,10 @@ CI:
   its defaults (UI Automation; the runner is elevated, so first the administrator question, Yes), a
   screenshot of every page (`tools/shoot-win.ps1`), her on the desktop after "Start her now", and the
   uninstall's questions ("Remove Synaps too?": yes, then `synaps.exe`, `hidden.exe` and the receipt
-  gone). The shots are the job's artifact.
+  gone). The shots are the job's artifact. The wizard's window is looked at too
+  (`test-wizard-window.ps1`), on a page and again while a step runs: its title bar answers
+  `WM_NCHITTEST` with `HTCAPTION`, it isn't hung (`WM_NULL` answered within a second), it's enabled, and
+  a real mouse drag by its title bar (`SendInput`) moves it.
 
 ## Her voice: a second installer
 

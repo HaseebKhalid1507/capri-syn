@@ -326,6 +326,41 @@ begin
   if Progress <> nil then Progress.SetText(StepTitle, L);
 end;
 
+{ Setup disables every window of its own for as long as an Exec call waits, ExecAndLogOutput's too (so
+  nobody clicks into a half-run step). A disabled window takes no mouse: the wizard couldn't be dragged
+  for the minutes the steps take, though it kept painting and answering. On the progress page there is
+  nothing to click (no buttons, its close box greyed), so there a timer, run by the messages that wait
+  pumps, enables the wizard again (the call's own cleanup enables it once more, harmlessly). On the
+  other pages (the short looks before the install) it stays disabled: its buttons would be live. }
+function EnableWindow(Wnd: HWND; Enable: Integer): Integer; external 'EnableWindow@user32.dll stdcall';
+function SetTimer(Wnd: HWND; Id, Elapse, Proc: LongWord): LongWord; external 'SetTimer@user32.dll stdcall';
+function KillTimer(Wnd: HWND; Id: LongWord): Integer; external 'KillTimer@user32.dll stdcall';
+
+var
+  LiveProc: LongWord;
+
+procedure KeepWizardLive(Wnd, Msg, Id, Tick: LongWord);
+begin
+  if (Progress <> nil) and (WizardForm.CurPageID = Progress.ID) then EnableWindow(WizardForm.Handle, 1);
+end;
+
+{ PowerShell Params, its output through StepLine, waited for; the wizard live meanwhile (above). }
+function ExecLive(const Params: String; var Code: Integer): Boolean;
+var
+  Timer: LongWord;
+begin
+  Timer := 0;
+  if (Progress <> nil) and (WizardForm.CurPageID = Progress.ID) then begin
+    if LiveProc = 0 then LiveProc := CreateCallback(@KeepWizardLive);
+    Timer := SetTimer(0, 0, 50, LiveProc);
+  end;
+  try
+    Result := ExecAndLogOutput(PowerShell, Params, '', SW_HIDE, ewWaitUntilTerminated, Code, @StepLine);
+  finally
+    if Timer <> 0 then KillTimer(0, Timer);
+  end;
+end;
+
 { steps.ps1 Args in a PowerShell with no window; True when it says it's done. Its reason in StepFailed. }
 function RunStep(const Name, Title, Script, Args: String): Boolean;
 var
@@ -339,8 +374,7 @@ begin
   Log('step ' + Name + ': ' + Args);
   Result := False;
   try
-    if not ExecAndLogOutput(PowerShell, '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + Script + '" ' + Args,
-        '', SW_HIDE, ewWaitUntilTerminated, Code, @StepLine) then begin
+    if not ExecLive('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + Script + '" ' + Args, Code) then begin
       StepFailed := 'PowerShell didn''t start (' + SysErrorMessage(Code) + ')';
       exit;
     end;

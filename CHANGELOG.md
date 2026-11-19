@@ -22,6 +22,14 @@
   string, and the hover popup shows the current one alone; the name chains after a tooltip change. A
   follow-up is open.
 
+### Windows: Setup's window drags while she's being set up
+- On "Setting her up" (Synaps, her art, her daemon: minutes) the installer's window couldn't be dragged.
+  It kept painting and answering, but took no mouse: Setup disables its own windows for as long as a
+  program it started runs (so nobody clicks into a half-run step), and the steps are such programs. On
+  that page there is nothing to click (no buttons, the close box greyed), so it is enabled again there,
+  50 ms after each step starts. The short looks before the install (Synaps, the microphones: a second
+  or two each, on a click of Next) still hold it.
+
 ## 1.0.0 (2026-11-19)
 
 capri-syn's first release: Capri on your desktop, her brain in Synaps. Linux (X11, Hyprland, and
