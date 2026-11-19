@@ -145,12 +145,37 @@ pub fn list_key(key: &str, sel: usize, p: &Prefs) -> (usize, Act) {
         ("down", _) => return ((sel + 1).min(rows.len() - 1), Act::Nothing),
         ("left", SetRow::Attention) => p.attention.map_or(Act::Nothing, |a| Act::Pref(Pref::Attention(step(a, -1)))),
         ("right" | "space" | "enter", SetRow::Attention) => p.attention.map_or(Act::Nothing, |a| Act::Pref(Pref::Attention(step(a, 1)))),
-        ("left" | "right" | "space" | "enter", SetRow::Wake) => Act::Pref(Pref::Wake(!p.wake)),
+        // Locked while voice is off ([voice] enabled is his, in the file).
+        ("left" | "right" | "space" | "enter", SetRow::Wake) if p.voice => Act::Pref(Pref::Wake(!p.wake)),
         ("enter", SetRow::About) => Act::Copy,
         _ => Act::Nothing,
     };
     (sel, act)
 }
+
+/// The footer's keys for the row picked (⏎ copy only where it copies).
+pub fn hint(p: &Prefs, sel: usize) -> &'static str {
+    let rows = set_rows(p);
+    match rows[sel.min(rows.len() - 1)] {
+        SetRow::Attention => "↑↓ pick · ←→ change · esc chat",
+        SetRow::Wake if p.voice => "↑↓ pick · ←→ change · esc chat",
+        SetRow::Wake => "↑↓ pick · esc chat",
+        SetRow::About => "↑↓ pick · ⏎ copy · esc chat",
+    }
+}
+
+/// A held ALLOW fires at HOLD only if it is still that hold on that prompt, and the prompt is on
+/// screen: a page swap lets go of it (#74: nothing approved unseen).
+pub fn hold_fires(hold_at: Option<Instant>, started: Instant, page: Page, same_prompt: bool) -> bool {
+    hold_at == Some(started) && same_prompt && page == Page::Chat
+}
+
+/// The text field's height (one line): the cog stands as tall, and Settings' bar is as tall as
+/// the field's, so the swap moves nothing under it.
+const FIELD_H: f32 = super::LINE_H + 14.0;
+const COG_W: f32 = 34.0;
+/// Her line's slot on the Settings page.
+const QUOTE_H: f32 = 30.0;
 
 /// A gear (`theme::glyph`'s, 8 teeth) `size` px square, turned `turn` radians (a tooth: π/4).
 fn gear(fg: u32, bg: u32, size: f32, turn: f32) -> impl IntoElement {
@@ -210,30 +235,28 @@ impl Line {
         }
     }
 
-    /// The cog: a 28 px box, the gear in it. Idle a text-dim frame, red on hover; Settings up:
-    /// a solid red plate, an ink gear.
+    /// The cog: a chamfered shard as tall as the field, a dim-red edge, red on hover. On
+    /// Settings: a solid red plate with a back glyph (the way to chat).
     pub(super) fn cog_el(&self, cx: &Context<Line>) -> Stateful<Div> {
         let pal = self.pal;
         let on = self.nav.page == Page::Settings;
         let (turn, _) = self.cog_turn(Instant::now());
-        let (fg, bg) = if on { (pal.ink, pal.accent) } else { (pal.dim, pal.field) };
+        let cut = Cut::Corners(7.0);
+        let center = || div().absolute().top_0().left_0().size_full().flex().items_center().justify_center();
         div()
             .id("cog")
             .group("cog")
             .relative()
             .flex_none()
-            .w(px(28.0))
-            .h(px(28.0))
-            .flex()
-            .items_center()
-            .justify_center()
+            .w(px(COG_W))
+            .h(px(FIELD_H))
             .cursor_pointer()
-            .when(on, |d| d.child(theme::backdrop(Cut::Corners(6.0), Fill::solid(pal.accent))))
+            .when(on, |d| d.child(theme::backdrop(cut, Fill::solid(pal.accent))).child(center().child(theme::glyph_at("back", pal.ink, pal.accent, 12.0))))
             .when(!on, |d| {
-                d.child(theme::backdrop(Cut::Corners(6.0), Fill::framed(pal.field, pal.dim, 1.0)))
-                    .child(div().absolute().top_0().left_0().size_full().invisible().group_hover("cog", |s| s.visible()).child(theme::backdrop(Cut::Corners(6.0), Fill::framed(pal.field, pal.accent, 1.0))))
+                d.child(theme::backdrop(cut, Fill::framed(pal.field, pal.border, 1.0)))
+                    .child(center().child(gear(pal.dim, pal.field, 15.0, turn)))
+                    .child(center().invisible().group_hover("cog", |s| s.visible()).child(theme::backdrop(cut, Fill::solid(pal.accent))).child(gear(pal.ink, pal.accent, 15.0, turn)))
             })
-            .child(gear(fg, bg, 14.0, turn))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseDownEvent, window, cx| {
@@ -247,9 +270,18 @@ impl Line {
     /// The page changed (the cog, `ctrl+,`, Esc, the avatar): the hard cut, the keyboard where
     /// the page types, and the avatar told.
     pub(super) fn page_changed(&mut self, window: &mut Window, cx: &mut Context<Line>) {
-        self.swap = Some(Instant::now());
+        let now = Instant::now();
+        self.swap = Some(now);
+        // A held ALLOW lets go: its prompt is off screen now (or was, a moment ago).
+        self.hold_at = None;
         if self.nav.page == Page::Settings {
             self.sel = 0;
+            if self.nav.back.last() == Some(&Page::Chat) {
+                self.chat_h = self.height;
+            }
+        } else if !self.snap.prompts.is_empty() {
+            // Back to a prompt he couldn't see: its buttons arm afresh.
+            self.prompt_at = now;
         }
         self.refocus(window, cx);
         (self.on_ask)(Ask::Page(self.nav.page), cx).ok();
@@ -268,6 +300,16 @@ impl Line {
         };
         if changed {
             self.page_changed(window, cx);
+        }
+        // Asked for from her menu (or avatarctl): it comes with the keyboard, as the summon
+        // key's does (only a desktop that hands it over on his input leaves it waiting).
+        if page == Page::Settings && (self.parked || !window.is_window_active()) {
+            if let Err(e) = self.unpark(window, cx)
+                && !super::keyboard_refused(&e)
+            {
+                elog!("synaps-avatar: line: settings, but {e}");
+            }
+            cx.notify();
         }
     }
 
@@ -291,7 +333,8 @@ impl Line {
                 self.page_changed(window, cx);
             }
             key if plain => {
-                let prefs = self.snap.prefs.clone().unwrap_or_default();
+                // Her values not in yet: nothing to change from (never a write from defaults).
+                let Some(prefs) = self.snap.prefs.clone() else { return true };
                 let (sel, act) = list_key(key, self.sel, &prefs);
                 self.sel = sel;
                 self.settings_act(act, cx);
@@ -343,31 +386,33 @@ impl Line {
         .into_any_element()
     }
 
-    /// The Settings page: her line, the rows by section, the bar back to chat.
+    /// The Settings page: her line, the rows by section, the bar back to chat. Its height moves
+    /// on no key: her line has its slot whether she said something or not.
     pub(super) fn settings_el(&self, cx: &mut Context<Line>) -> Vec<AnyElement> {
         let pal = self.pal;
         let p = self.snap.prefs.clone().unwrap_or_default();
         let rows = set_rows(&p);
         let sel = self.sel.min(rows.len() - 1);
         let mut out: Vec<AnyElement> = Vec::new();
-        // Her one line: her face, what she says.
-        if let Some(says) = &p.says {
-            out.push(
-                div()
-                    .mx(px(PAD))
-                    .mt(px(10.0))
-                    .px(px(10.0))
-                    .py(px(5.0))
-                    .border_l_3()
-                    .border_color(rgb(pal.accent))
-                    .flex()
-                    .items_center()
-                    .gap(px(10.0))
-                    .children(self.snap.face.as_ref().map(|f| img(ImageSource::Render(f.0.clone())).w(px(22.0)).h(px(22.0)).flex_none()))
-                    .child(div().text_size(px(14.5)).text_color(rgb(pal.text)).child(format!("\u{201c}{says}\u{201d}")))
-                    .into_any_element(),
-            );
-        }
+        // Her one line (a change made, or why not); before any, what the page does. One line,
+        // its slot always there.
+        let said = p.says.is_some();
+        let says = p.says.as_ref().map_or_else(|| "Changes are saved to settings.toml as you make them.".to_string(), |s| format!("\u{201c}{s}\u{201d}"));
+        out.push(
+            div()
+                .mx(px(PAD))
+                .mt(px(10.0))
+                .h(px(QUOTE_H))
+                .px(px(10.0))
+                .border_l_3()
+                .border_color(rgb(if said { pal.accent } else { pal.rule }))
+                .flex()
+                .items_center()
+                .gap(px(10.0))
+                .children(self.snap.face.as_ref().filter(|_| said).map(|f| img(ImageSource::Render(f.0.clone())).w(px(22.0)).h(px(22.0)).flex_none()))
+                .child(div().flex_1().min_w(px(0.0)).overflow_hidden().whitespace_nowrap().text_size(px(14.5)).text_color(rgb(if said { pal.text } else { pal.dim })).child(says))
+                .into_any_element(),
+        );
         let section = |name: &str| {
             div()
                 .px(px(PAD))
@@ -383,53 +428,62 @@ impl Line {
                 .child(div().flex_1().h(px(1.0)).bg(rgb(pal.rule)))
                 .into_any_element()
         };
-        // A choice: its segments, the one in force on a solid red plate (ink type).
+        // A value in a group: the one in force on a solid red plate (ink type); locked, on a
+        // dim one. Red fill means only that: the row picked is shown by its notch.
         let seg = |label: &'static str, on: bool, live: bool, id: SharedString| {
-            let c = if on { pal.ink } else if live { pal.text } else { pal.dim };
+            let c = match (on, live) {
+                (true, true) => pal.ink,
+                (true, false) => pal.panel,
+                (false, true) => pal.text,
+                (false, false) => theme::mix(pal.dim, pal.panel, 0.4),
+            };
             div()
                 .id(id)
                 .relative()
-                .h(px(22.0))
+                .h(px(20.0))
                 .px(px(9.0))
                 .flex()
                 .items_center()
                 .text_size(px(11.5))
                 .font_weight(FontWeight::BOLD)
                 .text_color(rgb(c))
-                .when(on, |d| d.child(theme::backdrop(Cut::Corners(4.0), Fill::solid(if live { pal.accent } else { pal.dim }))))
+                .when(on, |d| d.child(theme::backdrop(Cut::Corners(4.0), Fill::solid(if live { pal.accent } else { theme::mix(pal.dim, pal.panel, 0.4) }))))
                 .child(tracked(label, 1.2))
         };
-        let label = |name: &str, on: bool, sub: Option<&str>| {
-            // The row picked: its label on the menu's red blade.
-            let plate = div()
+        // The group's track: one chamfered 1 px dim-red line round it (40 % when locked).
+        let track = |live: bool| {
+            div()
                 .relative()
-                .h(px(22.0))
-                .pl(px(8.0))
-                .pr(px(12.0))
                 .flex()
                 .items_center()
-                .text_size(px(12.5))
-                .font_weight(FontWeight::BOLD)
-                .text_color(rgb(if on { pal.ink } else { pal.text }))
-                .when(on, |d| d.child(theme::backdrop(Cut::Tab(8.0), Fill::solid(pal.accent))))
-                .child(tracked(name, 1.4));
+                .gap(px(2.0))
+                .p(px(3.0))
+                .child(theme::backdrop(Cut::Corners(7.0), Fill::line(if live { pal.border } else { theme::mix(pal.border, pal.panel, 0.6) }, 1.0)))
+        };
+        let label = |name: &str, on: bool, sub: Option<&str>| {
             div()
                 .w(px(170.0))
                 .flex_none()
                 .flex()
                 .flex_col()
-                .child(plate)
-                .children(sub.map(|s| div().pl(px(8.0)).text_size(px(11.0)).text_color(rgb(pal.dim)).child(s.to_string())))
+                .child(div().text_size(px(12.5)).font_weight(FontWeight::BOLD).text_color(rgb(if on { pal.text } else { theme::mix(pal.text, pal.dim, 0.55) })).child(tracked(name, 1.4)))
+                .children(sub.map(|s| div().text_size(px(11.0)).text_color(rgb(pal.dim)).child(s.to_string())))
         };
-        let row = |ix: usize| {
+        // A row: picked, a 3 px red notch on the panel's edge and a faint band across.
+        let row = |ix: usize, on: bool| {
             div()
                 .id(SharedString::from(format!("set-row-{ix}")))
-                .px(px(PAD - 6.0))
+                .relative()
+                .px(px(PAD))
                 .py(px(4.0))
-                .min_h(px(32.0))
+                .min_h(px(36.0))
                 .flex()
                 .items_center()
                 .gap(px(8.0))
+                .when(on, |d| {
+                    d.child(div().absolute().top_0().left_0().size_full().bg(theme::alpha(pal.accent, 0.09)))
+                        .child(div().absolute().top_0().left_0().bottom_0().w(px(3.0)).bg(rgb(pal.accent)))
+                })
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _: &MouseDownEvent, _, cx| {
@@ -457,25 +511,47 @@ impl Line {
                             }),
                         )
                     });
-                    out.push(row(ix).child(label("ATTENTION", on, None)).child(div().flex_1().flex().justify_end().gap(px(4.0)).children(segs)).into_any_element());
+                    out.push(row(ix, on).child(label("ATTENTION", on, None)).child(div().flex_1()).child(track(true).children(segs)).into_any_element());
                 }
                 SetRow::Wake => {
                     out.push(section("VOICE"));
-                    let sub = (!p.voice).then_some("voice is off in settings.toml");
+                    // Voice off ([voice] enabled = false): the word can't be heard, so OFF is
+                    // what runs; the group is locked to the file.
+                    let live = p.voice;
+                    let cur = p.wake && live;
                     let segs = [("ON", true), ("OFF", false)].map(|(l, v)| {
-                        seg(l, p.wake == v, p.voice, SharedString::from(format!("set-wake-{l}"))).cursor_pointer().on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                                cx.stop_propagation();
-                                this.sel = ix;
-                                if this.snap.prefs.as_ref().is_some_and(|p| p.wake != v) {
-                                    this.settings_act(Act::Pref(Pref::Wake(v)), cx);
-                                }
-                                cx.notify();
-                            }),
-                        )
+                        seg(l, cur == v, live, SharedString::from(format!("set-wake-{l}"))).when(live, |d| {
+                            d.cursor_pointer().on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                                    cx.stop_propagation();
+                                    this.sel = ix;
+                                    if this.snap.prefs.as_ref().is_some_and(|p| p.voice && p.wake != v) {
+                                        this.settings_act(Act::Pref(Pref::Wake(v)), cx);
+                                    }
+                                    cx.notify();
+                                }),
+                            )
+                        })
                     });
-                    out.push(row(ix).child(label("\u{201c}HEY CAPRI\u{201d}", on, sub)).child(div().flex_1().flex().justify_end().gap(px(4.0)).children(segs)).into_any_element());
+                    let lock = (!live).then(|| {
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .text_size(px(11.0))
+                            .text_color(rgb(pal.dim))
+                            .child(theme::glyph_at("lock", pal.dim, pal.panel, 11.0))
+                            .child("locked · settings.toml")
+                    });
+                    out.push(
+                        row(ix, on)
+                            .child(label("\u{201c}HEY CAPRI\u{201d}", on, (!live).then_some("voice is off")))
+                            .child(div().flex_1())
+                            .children(lock)
+                            .child(track(live).children(segs))
+                            .into_any_element(),
+                    );
                 }
                 SetRow::About => {
                     out.push(section("ABOUT"));
@@ -491,8 +567,9 @@ impl Line {
                             .child(tracked(text, 1.2))
                     };
                     out.push(
-                        row(ix)
-                            .child(div().flex_1().min_w(px(0.0)).pl(px(8.0)).text_size(px(12.5)).text_color(rgb(if on { pal.text } else { pal.dim })).overflow_hidden().whitespace_nowrap().child(p.about.clone()))
+                        row(ix, on)
+                            .child(label("VERSION", on, None))
+                            .child(div().flex_1().min_w(px(0.0)).text_size(px(12.5)).text_color(rgb(if on { pal.text } else { pal.dim })).overflow_hidden().whitespace_nowrap().child(p.about.clone()))
                             .child(button("set-github", "GITHUB ▸").on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |this, _: &MouseDownEvent, _, cx| {
@@ -516,17 +593,19 @@ impl Line {
                 }
             }
         }
-        // The bar where the field is: the cog (on), back to chat, and what came meanwhile.
+        // As tall as chat was (the content's min height): the bar stays where the field was.
+        out.push(div().flex_1().min_h(px(10.0)).into_any_element());
+        // The bar where the field is, as tall as the field's: the cog (back to chat), CHAT, and
+        // what came meanwhile.
         out.push(
             div()
-                .mt(px(10.0))
                 .px(px(PAD))
                 .pt(px(10.0))
                 .border_t_1()
                 .border_color(rgb(pal.rule))
                 .flex()
                 .items_center()
-                .gap(px(10.0))
+                .gap(px(8.0))
                 .child(self.cog_el(cx))
                 .child(
                     div()
@@ -535,7 +614,7 @@ impl Line {
                         .text_size(px(12.5))
                         .font_weight(FontWeight::BOLD)
                         .text_color(rgb(pal.text))
-                        .child(tracked("‹ CHAT", 1.4))
+                        .child(tracked("CHAT", 1.4))
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, _: &MouseDownEvent, window, cx| {
@@ -544,6 +623,7 @@ impl Line {
                             }),
                         ),
                 )
+                .child(div().flex_1())
                 .when(p.new > 0, |d| {
                     d.child(
                         theme::plate(Cut::Swallow(4.0), Fill::solid(pal.accent))
@@ -564,7 +644,7 @@ impl Line {
 
 #[cfg(test)]
 mod tests {
-    use super::{Act, Nav, Page, Pref, Prefs, SetRow, list_key, set_rows};
+    use super::{Act, Nav, Page, Pref, Prefs, SetRow, hint, hold_fires, list_key, set_rows};
     use crate::settings::Attention;
 
     #[test]
@@ -621,5 +701,34 @@ mod tests {
         assert_eq!(set_rows(&q), vec![SetRow::Wake, SetRow::About]);
         assert_eq!(list_key("enter", 0, &q), (0, Act::Pref(Pref::Wake(false))));
         assert_eq!(list_key("down", 5, &q), (1, Act::Nothing));
+        // Voice off: "HEY CAPRI" is locked to the file, no key changes it.
+        let off = Prefs { voice: false, ..prefs() };
+        for k in ["left", "right", "space", "enter"] {
+            assert_eq!(list_key(k, 1, &off), (1, Act::Nothing), "{k}");
+        }
+    }
+
+    #[test]
+    fn the_hint_is_the_rows_own() {
+        let p = prefs();
+        assert_eq!(hint(&p, 0), "↑↓ pick · ←→ change · esc chat");
+        assert_eq!(hint(&p, 1), "↑↓ pick · ←→ change · esc chat");
+        assert_eq!(hint(&p, 2), "↑↓ pick · ⏎ copy · esc chat", "⏎ copy only where it copies");
+        assert_eq!(hint(&Prefs { voice: false, ..prefs() }, 1), "↑↓ pick · esc chat", "locked: nothing to change");
+        assert_eq!(hint(&p, 9), hint(&p, 2));
+    }
+
+    #[test]
+    fn a_held_allow_never_fires_off_screen() {
+        let t0 = std::time::Instant::now();
+        // Held on chat, still held at HOLD, the same prompt: it allows.
+        assert!(hold_fires(Some(t0), t0, Page::Chat, true));
+        // He went to Settings meanwhile (the swap lets go: hold_at None), or it is still set
+        // but the prompt is off screen: never allowed unseen.
+        assert!(!hold_fires(None, t0, Page::Chat, true));
+        assert!(!hold_fires(Some(t0), t0, Page::Settings, true));
+        // A later hold, or another prompt in its place: not this one's.
+        assert!(!hold_fires(Some(t0 + std::time::Duration::from_millis(5)), t0, Page::Chat, true));
+        assert!(!hold_fires(Some(t0), t0, Page::Chat, false));
     }
 }

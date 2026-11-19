@@ -775,48 +775,120 @@ impl WriteError {
 
 /// `edits` applied to `path`'s file, the rest kept byte for byte (comments, order, spacing, a
 /// changed key's own trailing comment). Through a symlink: its target is written, the link
-/// stays. A file that is there but unreadable, or doesn't parse, is refused untouched; a result
-/// she couldn't load isn't written. Put in place atomically: a temp file beside it with its
-/// permissions, synced, renamed over it. Ok(false): nothing changed, nothing written.
+/// stays. A file that is there but unreadable, read-only to her, or doesn't parse, is refused
+/// untouched; a result she couldn't load isn't written. Put in place atomically: a temp file
+/// beside it, made with its permissions, synced, renamed over it. Saved by him meanwhile (its
+/// time or size changed before the rename): read again and the edits made on that. Ok(false):
+/// nothing changed, nothing written.
 pub fn write_at(path: &std::path::Path, edits: &[Edit]) -> std::result::Result<bool, WriteError> {
+    write_checked(path, edits, |_| {})
+}
+
+/// [`write_at`], `meanwhile` run between the temp file and the check before its rename (tests:
+/// his editor saving then).
+fn write_checked(path: &std::path::Path, edits: &[Edit], mut meanwhile: impl FnMut(&std::path::Path)) -> std::result::Result<bool, WriteError> {
     use std::io::ErrorKind::NotFound;
     let target = resolve(path).map_err(|e| WriteError::Unreadable(format!("{e}")))?;
-    let (text, perms) = match std::fs::metadata(&target) {
-        Ok(m) if !m.is_file() => return Err(WriteError::Unreadable("not a file".into())),
-        Ok(m) => (std::fs::read_to_string(&target).map_err(|e| WriteError::Unreadable(format!("{e}")))?, Some(m.permissions())),
-        Err(e) if e.kind() == NotFound => (String::new(), None),
-        Err(e) => return Err(WriteError::Unreadable(format!("{e}"))),
-    };
-    let out = edited(&text, edits)?;
-    if out == text {
-        return Ok(false);
-    }
     let fail = |e: std::io::Error| WriteError::Failed(format!("{e}"));
-    let dir = target.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
-    std::fs::create_dir_all(dir).map_err(fail)?;
-    let name = target.file_name().map_or("settings.toml".into(), |n| n.to_string_lossy().into_owned());
-    let tmp = dir.join(format!("{name}.{}.tmp", std::process::id()));
-    let put = || -> std::io::Result<()> {
-        use std::io::Write as _;
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(out.as_bytes())?;
-        if let Some(p) = &perms {
-            f.set_permissions(p.clone())?;
+    // Its time, size and (Unix) inode: an editor's own atomic save is a new inode.
+    let stamp = |m: &std::fs::Metadata| {
+        #[cfg(unix)]
+        let ino = std::os::unix::fs::MetadataExt::ino(m);
+        #[cfg(not(unix))]
+        let ino = 0u64;
+        (m.modified().ok(), m.len(), ino)
+    };
+    for _ in 0..3 {
+        let (text, meta) = match std::fs::metadata(&target) {
+            Ok(m) if !m.is_file() => return Err(WriteError::Unreadable("not a file".into())),
+            Ok(m) => (std::fs::read_to_string(&target).map_err(|e| WriteError::Unreadable(format!("{e}")))?, Some(m)),
+            Err(e) if e.kind() == NotFound => (String::new(), None),
+            Err(e) => return Err(WriteError::Unreadable(format!("{e}"))),
+        };
+        if meta.as_ref().is_some_and(|m| !writable(&target, m)) {
+            return Err(WriteError::Failed("read-only".into()));
         }
-        f.sync_all()?;
-        drop(f);
-        rename_over(&tmp, &target)?;
+        let out = edited(&text, edits)?;
+        if out == text {
+            return Ok(false);
+        }
+        let dir = target.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
+        std::fs::create_dir_all(dir).map_err(fail)?;
+        let name = target.file_name().map_or("settings.toml".into(), |n| n.to_string_lossy().into_owned());
+        let tmp = dir.join(format!("{name}.{}.tmp", std::process::id()));
+        std::fs::remove_file(&tmp).ok();
+        let made = (|| -> std::io::Result<()> {
+            use std::io::Write as _;
+            let mut f = create_like(&tmp, meta.as_ref())?;
+            f.write_all(out.as_bytes())?;
+            f.sync_all()
+        })();
+        if let Err(e) = made {
+            std::fs::remove_file(&tmp).ok();
+            return Err(fail(e));
+        }
+        meanwhile(&target);
+        let now = std::fs::metadata(&target).ok();
+        if now.as_ref().map(stamp) != meta.as_ref().map(stamp) {
+            std::fs::remove_file(&tmp).ok();
+            continue;
+        }
+        if let Err(e) = rename_over(&tmp, &target) {
+            std::fs::remove_file(&tmp).ok();
+            return Err(fail(e));
+        }
         // The rename itself, on disk (best effort).
-        if let Ok(d) = std::fs::File::open(dir) {
+        if cfg!(unix)
+            && let Ok(d) = std::fs::File::open(dir)
+        {
             d.sync_all().ok();
         }
-        Ok(())
-    };
-    put().map_err(|e| {
-        std::fs::remove_file(&tmp).ok();
-        fail(e)
-    })?;
-    Ok(true)
+        return Ok(true);
+    }
+    Err(WriteError::Failed("it kept changing while I wrote".into()))
+}
+
+/// She may write it: Unix, her write permission on it (a 0444 file, or root's, would be
+/// renamed over without a word); Windows, not marked read-only.
+fn writable(path: &std::path::Path, m: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let _ = m;
+        let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else { return false };
+        // SAFETY: a valid NUL-terminated path.
+        unsafe { libc::access(c.as_ptr(), libc::W_OK) == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        !m.permissions().readonly()
+    }
+}
+
+/// A new temp file with `like`'s permissions from the start (Unix: its mode, never wider while
+/// his settings are in it; a new file: 0644 less the umask).
+fn create_like(tmp: &std::path::Path, like: Option<&std::fs::Metadata>) -> std::io::Result<std::fs::File> {
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mode = like.map_or(0o644, |m| m.permissions().mode() & 0o7777);
+        o.mode(mode);
+        let f = o.open(tmp)?;
+        // The umask took bits off: exactly his mode (still never wider than it).
+        if like.is_some() {
+            f.set_permissions(std::fs::Permissions::from_mode(mode))?;
+        }
+        Ok(f)
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows: the only permission is read-only, and a read-only file was refused.
+        let _ = like;
+        o.open(tmp)
+    }
 }
 
 /// The file `path` names: its target when it is a symlink (his dotfiles' link stays a link),
@@ -837,12 +909,13 @@ fn resolve(path: &std::path::Path) -> std::io::Result<PathBuf> {
     Err(std::io::Error::other("too many symlinks"))
 }
 
-/// Windows: an editor holding the file fails a rename for a moment; three tries, 50 ms apart.
+/// Windows: an editor holding the file fails a rename for a moment; three tries, 30 ms apart
+/// (the write runs off her UI thread).
 fn rename_over(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
     let mut last = None;
     for k in 0..if cfg!(windows) { 3 } else { 1 } {
         if k > 0 {
-            std::thread::sleep(std::time::Duration::from_millis(50));
+            std::thread::sleep(std::time::Duration::from_millis(30));
         }
         match std::fs::rename(from, to) {
             Ok(()) => return Ok(()),
@@ -1209,6 +1282,62 @@ fullscreen = "stay"
     }
 
     #[test]
+    fn a_read_only_file_is_refused_and_no_temp_is_left() {
+        let d = tmp("ro");
+        let p = d.join("settings.toml");
+        std::fs::write(&p, HIS).unwrap();
+        let mut perm = std::fs::metadata(&p).unwrap().permissions();
+        perm.set_readonly(true);
+        std::fs::set_permissions(&p, perm.clone()).unwrap();
+        // Root writes anything: nothing to see there.
+        #[cfg(unix)]
+        let root = unsafe { libc::geteuid() } == 0;
+        #[cfg(not(unix))]
+        let root = false;
+        if !root {
+            match write_at(&p, &[att(Attention::Off)]) {
+                Err(e @ WriteError::Failed(_)) => assert!(e.says().contains("won't let me")),
+                other => panic!("{other:?}"),
+            }
+            assert_eq!(std::fs::read_to_string(&p).unwrap(), HIS);
+            assert!(std::fs::read_dir(&d).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().ends_with(".tmp")));
+        }
+        #[allow(clippy::permissions_set_readonly_false)]
+        perm.set_readonly(false);
+        std::fs::set_permissions(&p, perm).unwrap();
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn saved_by_him_meanwhile_is_read_again() {
+        let d = tmp("race");
+        let p = d.join("settings.toml");
+        std::fs::write(&p, HIS).unwrap();
+        // His editor saves a change between her read and her rename: hers is made on his.
+        let mut saves = 0;
+        let r = write_checked(&p, &[att(Attention::Off)], |t| {
+            if saves == 0 {
+                std::fs::write(t, HIS.replace("strength = 0.4", "strength = 0.75")).unwrap();
+            }
+            saves += 1;
+        });
+        assert!(r.unwrap());
+        assert_eq!(saves, 2, "read once more, then put in place");
+        let s = Settings::parse(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        assert_eq!((s.brain.attention, s.ragdoll.strength), (Attention::Off, 0.75));
+        // One that never stops changing: given up, his file as he left it, no temp.
+        let mut n = 0;
+        let r = write_checked(&p, &[att(Attention::HangOnly)], |t| {
+            n += 1;
+            std::fs::write(t, format!("{HIS}{}\n", "#".repeat(n))).unwrap();
+        });
+        assert!(matches!(r, Err(WriteError::Failed(_))), "{r:?}");
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), format!("{HIS}###\n"));
+        assert!(std::fs::read_dir(&d).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().ends_with(".tmp")));
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
     #[cfg(unix)]
     fn his_symlink_stays_a_symlink_and_its_target_is_written() {
         let d = tmp("link");
@@ -1232,6 +1361,10 @@ fullscreen = "stay"
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
         write_at(&p, &[att(Attention::Off)]).unwrap();
         assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
+        // Wider than the umask lets a new file be: exactly his still.
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o664)).unwrap();
+        write_at(&p, &[att(Attention::Mix)]).unwrap();
+        assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o664);
         std::fs::remove_dir_all(&d).ok();
     }
 }

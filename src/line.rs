@@ -245,6 +245,9 @@ pub struct Line {
     sel: usize,
     /// The last page swap (its RGB split, the cog's turn).
     swap: Option<Instant>,
+    /// The panel's height on chat when Settings opened: Settings is at least as tall, so the
+    /// swap doesn't move its top (more only if its rows need it).
+    chat_h: f32,
     on_ask: OnAsk,
     _subs: Vec<Subscription>,
 }
@@ -417,6 +420,7 @@ impl Line {
             nav: settings::Nav::on(page),
             sel: 0,
             swap: None,
+            chat_h: 0.0,
             on_ask,
             _subs: subs,
         };
@@ -501,11 +505,6 @@ impl Line {
         }
         if grew && !self.pinned_up {
             self.scroll.scroll_to_bottom();
-        }
-        // A voice turn (the mic held, the wake word, hands-free) is chat's.
-        if self.snap.mic.is_some() && self.nav.page == Page::Settings {
-            self.nav = settings::Nav::on(Page::Chat);
-            self.page_changed(window, cx);
         }
         cx.notify();
     }
@@ -843,7 +842,7 @@ impl Line {
         cx.spawn_in(window, async move |this, cx| {
             cx.background_executor().timer(HOLD).await;
             this.update_in(cx, |l, window, cx| {
-                if l.hold_at == Some(now) && l.prompt().is_some_and(|p| p.id == id) {
+                if settings::hold_fires(l.hold_at, now, l.nav.page, l.prompt().is_some_and(|p| p.id == id)) {
                     l.hold_at = None;
                     l.answer(id, Some("y".into()), window, cx);
                 }
@@ -1480,8 +1479,8 @@ impl Render for Line {
         // A text box you can't miss: filled, cut 9 px, edged in her red while it has the keyboard.
         let typing = self.mode == Mode::Text && !self.parked;
         let input = (self.mode == Mode::Text && !on_settings).then(|| {
-            // [cog] [field]: the cog on the field's first line, as the › is.
-            div().px(px(PAD)).pt(px(10.0)).border_t_1().border_color(rgb(pal.rule)).flex().items_start().gap(px(8.0)).child(div().flex_none().mt(px(4.5)).child(self.cog_el(cx))).child(
+            // [cog] [field]: the cog as tall as the field's line, beside it.
+            div().px(px(PAD)).pt(px(10.0)).border_t_1().border_color(rgb(pal.rule)).flex().items_start().gap(px(8.0)).child(self.cog_el(cx)).child(
                 div()
                     .flex_1()
                     .min_w(px(0.0))
@@ -1578,7 +1577,7 @@ impl Render for Line {
         // A failed turn's tip stands alone: the legend would bury it.
         let tip = self.tip.clone().filter(|_| self.note.is_none());
         let hint = if on_settings {
-            Some("↑↓ pick · ←→ change · ⏎ copy · esc chat".into())
+            Some(settings::hint(&self.snap.prefs.clone().unwrap_or_default(), self.sel).into())
         } else if self.mode == Mode::Prompt || tip.is_some() {
             None
         } else if self.snap.caption.is_some() {
@@ -1614,6 +1613,7 @@ impl Render for Line {
             .right_0()
             .flex()
             .flex_col()
+            .when(on_settings, |d| d.min_h(px(self.chat_h)))
             .child(header)
             .children(thread)
             .children(pending)

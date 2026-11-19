@@ -25,6 +25,13 @@ const LINE_H0: f32 = 120.0;
 /// Rows the Line holds (the transcript's tail).
 const ROWS_MAX: usize = 240;
 
+/// settings.toml writes waiting, and whether one is under way (`settings_write`).
+#[derive(Default)]
+pub(super) struct PrefsIo {
+    pub queue: std::collections::VecDeque<(Vec<Edit>, Option<Pref>)>,
+    pub busy: bool,
+}
+
 pub(super) struct LineWin {
     pub view: Entity<Line>,
     pub handle: AnyWindowHandle,
@@ -498,25 +505,73 @@ impl Avatar {
     }
 
     /// A change on the Settings page: written to settings.toml (only that key; a file she
-    /// can't read or parse is left alone), then applied as `settings reload` does. Her line
-    /// says which.
-    pub(super) fn set_pref(&mut self, p: Pref, now: Instant) {
-        let (edit, says) = match p {
-            Pref::Attention(a) => (
-                Edit::Set("brain", "attention", a.key().into()),
-                match a {
-                    Attention::Mix => "Mixing it up. Hang, cling, sit, peek.",
-                    Attention::HangOnly => "Hanging only. I like it up there.",
-                    Attention::Off => "Fine. I'll stay put.",
-                },
-            ),
-            Pref::Wake(on) => (Edit::Set("voice", "wake_word", on.into()), if on { "Say my name, I'll hear it." } else { "I'll stop listening for my name." }),
+    /// can't read or parse is left alone), off her UI thread; once it is in, that key alone is
+    /// applied (his other hand edits wait for `settings reload`). Her line says which.
+    pub(super) fn set_pref(&mut self, p: Pref, cx: &mut Context<Self>) {
+        let edit = match p {
+            Pref::Attention(a) => Edit::Set("brain", "attention", a.key().into()),
+            Pref::Wake(on) => Edit::Set("voice", "wake_word", on.into()),
         };
-        let r = Settings::write(&[edit]);
+        self.settings_write(vec![edit], Some(p), cx);
+    }
+
+    /// settings.toml written in the order asked, one write at a time, each off the UI thread
+    /// (its fsync, Windows' retries); `pref`: the page's change, applied once written.
+    pub(super) fn settings_write(&mut self, edits: Vec<Edit>, pref: Option<Pref>, cx: &mut Context<Self>) {
+        self.prefs_io.queue.push_back((edits, pref));
+        self.settings_write_next(cx);
+    }
+
+    fn settings_write_next(&mut self, cx: &mut Context<Self>) {
+        if self.prefs_io.busy {
+            return;
+        }
+        let Some((edits, pref)) = self.prefs_io.queue.pop_front() else { return };
+        self.prefs_io.busy = true;
+        cx.spawn(async move |this, cx| {
+            let r = crate::off_thread(move || Ok(Settings::write(&edits))).await;
+            let r = r.unwrap_or_else(|e| Err(crate::settings::WriteError::Failed(format!("{e:#}"))));
+            this.update(cx, |a, cx| {
+                a.prefs_io.busy = false;
+                a.settings_written(pref, r, cx);
+                a.settings_write_next(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn settings_written(&mut self, pref: Option<Pref>, r: Result<bool, crate::settings::WriteError>, cx: &mut Context<Self>) {
+        let Some(p) = pref else {
+            if let Err(e) = r {
+                elog!("synaps-avatar: settings.toml: {e}");
+            }
+            return;
+        };
         self.prefs_says = Some(match r {
             Ok(_) => {
-                let r = self.settings_reload(now);
-                elog!("synaps-avatar: settings: {p:?}: {r}");
+                let says = match p {
+                    Pref::Attention(a) => {
+                        if let Some(h) = &mut self.brain {
+                            h.settings.brain.attention = a;
+                            h.brain.settings.attention = a;
+                        }
+                        self.brain_touch(crate::brain::Touch::Menu);
+                        match a {
+                            Attention::Mix => "Mixing it up. Hang, cling, sit, peek.",
+                            Attention::HangOnly => "Hanging only. I like it up there.",
+                            Attention::Off => "Fine. I'll stay put.",
+                        }
+                    }
+                    Pref::Wake(on) => {
+                        if self.voice.cfg.wake_word != on {
+                            self.voice.cfg.wake_word = on;
+                            self.voice_config();
+                        }
+                        if on { "Say my name, I'll hear it." } else { "I'll stop listening for my name." }
+                    }
+                };
+                elog!("synaps-avatar: settings: {p:?}: ok (that key only)");
                 says.to_string()
             }
             Err(e) => {
@@ -524,9 +579,7 @@ impl Avatar {
                 e.says()
             }
         });
-        if let Pref::Attention(_) = p {
-            self.brain_touch(crate::brain::Touch::Menu);
-        }
+        self.line_push(cx);
     }
 
     /// Bring an open Line up to date (deferred: the Line may call back).
@@ -675,8 +728,7 @@ impl Avatar {
                 Ok(())
             }
             Ask::Pref(p) => {
-                self.set_pref(p, now);
-                self.line_push(cx);
+                self.set_pref(p, cx);
                 Ok(())
             }
             Ask::OpenUrl(u) => {

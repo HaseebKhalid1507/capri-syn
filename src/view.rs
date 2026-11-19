@@ -1177,6 +1177,8 @@ pub struct Avatar {
     renders: u64,
     /// Her line on the Settings page (a change made, or why not): until it goes to chat.
     prefs_says: Option<String>,
+    /// settings.toml writes, one at a time off the UI thread.
+    prefs_io: lineview::PrefsIo,
     /// Her work area this frame (`render`): None outside one; keyed by where she is.
     area_memo: Cell<Option<Option<AreaMemo>>>,
     moves: u64,
@@ -1395,6 +1397,7 @@ impl Avatar {
             view_ticks: 0,
             renders: 0,
             prefs_says: None,
+            prefs_io: Default::default(),
             area_memo: Cell::new(None),
             moves: 0,
             follow_at: None,
@@ -7820,7 +7823,7 @@ impl Avatar {
         if let Some((at, _)) = self.menu.filter(|_| hud) {
             // Red items; the hovered one on a red blade with ink type. QUIT? (armed) is a bone
             // blade: danger.
-            let (accent_c, ink_c, danger_c) = (pal.accent, pal.ink, pal.danger);
+            let (accent_c, ink_c, danger_c, dim_c) = (pal.accent, pal.ink, pal.danger, pal.dim);
             let blade = |c: u32| div().absolute().top_0().left_0().size_full().child(theme::backdrop(Cut::Tab(8.0), Fill::solid(c)));
             let item_as = |label: &'static str, armed: bool| {
                 let group = SharedString::from(format!("menu-{label}"));
@@ -7925,7 +7928,7 @@ impl Avatar {
                         MouseButton::Left,
                         cx.listener(|this, _: &MouseDownEvent, _, cx| {
                             cx.stop_propagation();
-                            this.cycle_attention();
+                            this.cycle_attention(cx);
                             if let Some(m) = &mut this.menu {
                                 m.1 = Instant::now() + Duration::from_secs(8);
                             }
@@ -7973,8 +7976,8 @@ impl Avatar {
                         this.schedule(cx);
                     }),
                 ))
-                // Her Settings (the Line's second page). With no brain yet, that is what it's for.
-                .child(item(if self.no_brain() { "SET UP MY BRAIN" } else { "SETTINGS" }).id("settings").on_mouse_down(
+                // Her Settings (the Line's second page; ctrl+, there).
+                .child(item("SETTINGS").id("settings").flex().items_center().gap(px(10.0)).child(div().flex_1()).child(div().text_size(px(10.0)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(dim_c)).group_hover("menu-SETTINGS", |s| s.text_color(rgb(ink_c))).child("ctrl+,")).on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, _: &MouseDownEvent, _, cx| {
                         cx.stop_propagation();

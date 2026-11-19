@@ -402,11 +402,6 @@ impl Link {
         self.creds_at.filter(|_| self.opts.local && self.live())
     }
 
-    /// Her model has no credentials (read, or the daemon said so): no brain yet.
-    pub fn no_brain(&self) -> bool {
-        matches!(self.creds, Creds::Missing(_))
-    }
-
     /// A credentials read is due (`creds::check`): what to read them for.
     pub fn creds_due(&self, now: Instant) -> Option<crate::creds::Query> {
         if self.creds_next().is_none_or(|t| now < t) {

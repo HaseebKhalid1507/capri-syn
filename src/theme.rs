@@ -875,6 +875,19 @@ pub fn glyph_at(kind: &str, fg: u32, bg: u32, size: f32) -> impl IntoElement + u
                     fill(window, &pts, fg);
                     fill(window, &circle(5.5, 5.5, 1.8), bg);
                 }
+                // A padlock: the shackle's arch over a body, a keyhole in it.
+                "lock" => {
+                    let arch: Vec<Pt> = std::iter::once((3.0, 5.4))
+                        .chain((0..=12).map(|i| {
+                            let a = std::f32::consts::PI * (1.0 + i as f32 / 12.0);
+                            (5.5 + 2.5 * a.cos(), 3.6 + 2.5 * a.sin())
+                        }))
+                        .chain(std::iter::once((8.0, 5.4)))
+                        .collect();
+                    stroke(window, &arch, 1.4, fg);
+                    fill(window, &[(1.4, 5.0), (9.6, 5.0), (9.6, 10.8), (1.4, 10.8)], fg);
+                    fill(window, &[(4.9, 6.9), (6.1, 6.9), (6.1, 9.0), (4.9, 9.0)], bg);
+                }
                 "play" => fill(window, &[(2.0, 0.8), (10.0, 5.5), (2.0, 10.2)], fg),
                 "back" => fill(window, &[(9.0, 0.8), (1.0, 5.5), (9.0, 10.2)], fg),
                 "check" => stroke(window, &[(1.0, 5.8), (4.3, 9.1), (10.2, 1.8)], 2.2, fg),
