@@ -558,24 +558,16 @@ step_synaps() {
             good "synaps $v ($(tilde "$cur"))"
             return 0
         fi
-        info "synaps ${v:-?} at $(tilde "$cur") is older than $M_synaps_min: installing the latest"
+        info "synaps ${v:-?} at $(tilde "$cur") is older than $M_synaps_min: installing $M_synaps_pin"
         SYNAPS_NEW=2
     else
         info "her brain runs on Synaps, an open-source agent runtime (github.com/$M_synaps_repo)"
-        info "not installed yet: installing the latest with its own installer (yours to keep; --uninstall says how to remove it)"
+        info "not installed yet: installing $M_synaps_pin with its own installer (yours to keep; --uninstall says how to remove it)"
         SYNAPS_NEW=1
     fi
-    # The latest release, and GitHub's sha256 of its installer; else the manifest's pin.
-    local j tag='' sha=''
-    if j=$(fetch_text -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/$M_synaps_repo/releases/latest" 2>/dev/null); then
-        tag=$(printf '%s' "$j" | grep -o '"tag_name": *"[^"]*"' | head -n1 | sed 's/.*"\([^"]*\)"$/\1/')
-        sha=$(printf '%s' "$j" | tr -d '\n' | sed 's/"name":/\n"name":/g' | grep '^"name": *"synaps-installer.sh"' |
-            grep -o '"digest": *"sha256:[0-9a-f]\{64\}"' | grep -o '[0-9a-f]\{64\}' || true)
-    fi
-    if [ -z "$tag" ] || [ -z "$sha" ]; then
-        tag=v$M_synaps_pin sha=$M_synaps_installer_sh_sha256
-        info "GitHub's API didn't answer: the pinned $tag"
-    fi
+    # The manifest's pin and its installer's sha256, never releases/latest: her client speaks
+    # synaps_protocol exactly, and a newer Synaps may speak another.
+    local tag=v$M_synaps_pin sha=$M_synaps_installer_sh_sha256
     local url=https://github.com/$M_synaps_repo/releases/download/$tag/synaps-installer.sh rc
     rc=$(synaps_rc_edits)
     if [ -n "$rc" ]; then
@@ -953,10 +945,20 @@ step_daemon() {
         DAEMON_STATE="not running"
         return 0
     fi
-    local p
+    # Never "running" unless it's her protocol: she'd start and never attach. A daemon still up from
+    # an older Synaps keeps its protocol until it's stopped (the unit's ExecCondition, or a restart
+    # of it, leaves a running one be): `daemon stop` ends any (its sessions are saved).
+    local p stop
     p=$(printf '%s' "$s" | grep -o 'protocol: [0-9]*' | grep -o '[0-9]*$' || true)
-    if [ -n "$p" ] && [ "$p" != "$M_synaps_protocol" ]; then
-        warn "the daemon speaks protocol $p; her client speaks $M_synaps_protocol (exact match): she can't attach. Install synaps $M_synaps_pin, or a capri-syn that speaks $p"
+    stop="\`$(tilde "$SYNAPS") daemon stop\` (--force if it won't)"
+    if [ -z "$p" ]; then
+        die "the daemon doesn't say which protocol it speaks (an older Synaps'?); her client speaks $M_synaps_protocol, exactly: stop it, $stop, then run this again"
+    fi
+    if [ "$p" != "$M_synaps_protocol" ] && [ "${SYNAPS_NEW:-0}" = 2 ]; then
+        die "synaps $SYNAPS_V is installed, but the daemon still running is the old one (protocol $p; hers is $M_synaps_protocol): stop it, $stop, then run this again"
+    fi
+    if [ "$p" != "$M_synaps_protocol" ]; then
+        die "the daemon speaks protocol $p; her client speaks $M_synaps_protocol (exact match): she can't attach. Install synaps $M_synaps_pin (curl -fsSL https://github.com/$M_synaps_repo/releases/download/v$M_synaps_pin/synaps-installer.sh | sh), stop the daemon, $stop, and run this again; or use a capri-syn that speaks $p"
     fi
     DAEMON_STATE="running (protocol ${p:-?})"
     good "daemon $DAEMON_STATE: $DAEMON_HOW"

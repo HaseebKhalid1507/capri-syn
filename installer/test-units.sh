@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # install.sh's start of her, on its own (CI's installer job): which running instances it quits,
-# where it won't start her, her log kept once, her working folder. install.sh's functions are
+# where it won't start her, her log kept once, her working folder; the Synaps it installs (the
+# manifest's pin) and the daemon's protocol, on stand-ins. install.sh's functions are
 # loaded without running it; pgrep only ever sees this test's own stand-ins (never a real Capri),
 # and `avatarctl` is never reached.
 #
 #   bash installer/test-units.sh
-# shellcheck disable=SC2034,SC2153 # install.sh's own variables, read by its functions
+# shellcheck disable=SC2034,SC2153,SC2154 # install.sh's own variables (M_*: its manifest's), read by its functions
 set -uo pipefail
 here=$(cd "$(dirname "$0")/.." && pwd)
 # shellcheck source=/dev/null
@@ -151,6 +152,52 @@ case $out in *"she's up"*STARTED=1) r=0 ;; *) r=1 ;; esac
 check $r "and she starts"
 kill "$(cat "$tmp/started.pid" 2>/dev/null)" 2>/dev/null
 pkill -P $$ -x sleep 2>/dev/null
+
+# Synaps: the manifest's pin and its hash, never releases/latest (a newer one may speak another
+# protocol). A stand-in `synaps` older than synaps_min; a dry run prints what it would fetch.
+CHECKOUT=$here QUIT_TAKES='' STEP_N=0 STEPS=7
+manifest
+mkdir -p "$tmp/old-synaps" "$tmp/cargo/bin"
+printf '#!/bin/sh\necho "synaps 0.9.0"\n' >"$tmp/old-synaps/synaps"
+chmod +x "$tmp/old-synaps/synaps"
+# From here on (the last checks): GitHub is never asked, nothing is recorded, no systemd.
+fetch_text() { echo "$*" >>"$tmp/fetched"; return 1; }
+curl() { echo "$*" >>"$tmp/fetched"; return 1; }
+rec_meta() { :; }
+systemd_user() { return 1; }
+out=$(PATH=$tmp/old-synaps:$PATH DRY=1 YES=1 CARGO_BIN=$tmp/cargo/bin TMP=$tmp step_synaps 2>&1)
+pin=https://github.com/$M_synaps_repo/releases/download/v$M_synaps_pin/synaps-installer.sh
+case $out in *"installing $M_synaps_pin"*"$pin"*"(checks its sha256: $M_synaps_installer_sh_sha256)"*) r=0 ;; *) r=1 ;; esac
+check $r "synaps older than $M_synaps_min: the pinned $M_synaps_pin, its manifest hash"
+check "$([ ! -e "$tmp/fetched" ] && echo 0)" "and never asks GitHub for its latest: $(head -n1 "$tmp/fetched" 2>/dev/null)"
+
+# The daemon's protocol is hers exactly, or the install stops (never "running"). A stand-in synaps
+# whose `daemon status` reads as 0.12.0's (no `pid:` line: none said); $2=2: this run upgraded Synaps.
+daemon_says() {
+    {
+        printf '#!/bin/sh\necho "daemon: running"\necho "socket: /run/user/1/synaps.sock"\n'
+        [ -z "$1" ] || printf 'echo "pid: 4242  version: 0.9.0  protocol: %s  started: 2026-11-19T00:00:00Z"\n' "$1"
+    } >"$tmp/synaps"
+    chmod +x "$tmp/synaps"
+    (SYNAPS=$tmp/synaps SYNAPS_V=$M_synaps_pin SYNAPS_NEW=${2:-0} UNITS=$tmp/units DRY=0 step_daemon) 2>&1
+    echo "rc=$?"
+}
+out=$(daemon_says "$M_synaps_protocol")
+case $out in *"daemon running (protocol $M_synaps_protocol)"*rc=0) r=0 ;; *) r=1 ;; esac
+check $r "a daemon that speaks protocol $M_synaps_protocol: running"
+out=$(daemon_says 4)
+case $out in *"speaks protocol 4"*"can't attach"*"v$M_synaps_pin/synaps-installer.sh"*"daemon stop"*rc=1) r=0 ;; *) r=1 ;; esac
+check $r "one that speaks 4: the install stops, saying how to fix it (the pin, then stop the daemon)"
+case $out in *"daemon running"*) r=1 ;; *) r=0 ;; esac
+check $r "and never says it's running"
+out=$(daemon_says 2 2)
+case $out in *"synaps $M_synaps_pin is installed, but the daemon still running is the old one (protocol 2"*"daemon stop"*rc=1) r=0 ;; *) r=1 ;; esac
+check $r "Synaps upgraded by this run, the old daemon still up: stop it (not: install the pin again)"
+case $out in *"Install synaps"* | *"daemon running"*) r=1 ;; *) r=0 ;; esac
+check $r "and nothing else said"
+out=$(daemon_says '')
+case $out in *"doesn't say which protocol"*"daemon stop"*rc=1) r=0 ;; *) r=1 ;; esac
+check $r "one that doesn't say its protocol: the install stops too"
 
 if [ "$fails" -gt 0 ]; then
     echo "$fails install.sh unit check(s) failed"

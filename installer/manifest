@@ -5,8 +5,10 @@
 repo=HaseebKhalid1507/capri-syn
 
 # 1. Synaps. Installed with its own release installer when `synaps` is missing or older than
-# synaps_min. The latest release is used, its installer checked against GitHub's sha256 of the asset.
-# If GitHub's API doesn't answer, the pinned release and hashes below are used instead.
+# synaps_min. install.sh: the pinned release below, its installer checked against
+# synaps_installer_sh_sha256; never the latest (her client speaks synaps_protocol exactly; a daemon
+# on another protocol stops the install). install.ps1: the latest release, its installer checked
+# against GitHub's sha256 of the asset; the pinned release and hash when GitHub's API doesn't answer.
 # synaps_min: her client speaks protocol 3, exact match (0.10.0 on); she's been run against 0.11.x.
 synaps_repo=HaseebKhalid1507/SynapsCLI
 synaps_min=0.11.0
