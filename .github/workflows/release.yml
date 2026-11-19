@@ -6,8 +6,8 @@ name: release
 # beside it:
 #
 #   synaps-avatar-x86_64-unknown-linux-gnu.tar.gz   her binary, avatarctl, tools, the user units, install.sh
-#   synaps-avatar-setup-x86_64.exe                  her Windows installer (packaging/windows)
-#   synaps-avatar-voice-setup-x86_64.exe            her Windows voice installer (its own download)
+#   capri-syn-setup-x86_64.exe                      her Windows installer (packaging/windows)
+#   capri-syn-voice-setup-x86_64.exe                her Windows voice installer (its own download)
 #
 # A pull request that touches the packaging runs the same builds and smoke tests, and releases
 # nothing. Nothing here pushes a tag or publishes a release.
@@ -143,8 +143,8 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
           $out = 'packaging/windows/Output'
-          Copy-Item (Get-ChildItem "$out/synaps-avatar-setup-*.exe" | Select-Object -First 1).FullName dist/synaps-avatar-setup-x86_64.exe
-          Copy-Item (Get-ChildItem "$out/synaps-avatar-voice-setup-*.exe" | Select-Object -First 1).FullName dist/synaps-avatar-voice-setup-x86_64.exe
+          Copy-Item (Get-ChildItem "$out/capri-syn-setup-*.exe" | Select-Object -First 1).FullName dist/capri-syn-setup-x86_64.exe
+          Copy-Item (Get-ChildItem "$out/capri-syn-voice-setup-*.exe" | Select-Object -First 1).FullName dist/capri-syn-voice-setup-x86_64.exe
           foreach ($f in Get-ChildItem dist/*.exe) {
             $h = (Get-FileHash -Algorithm SHA256 $f.FullName).Hash.ToLowerInvariant()
             [IO.File]::WriteAllText("$($f.FullName).sha256", "$h  $($f.Name)`n")
@@ -156,7 +156,7 @@ jobs:
       - name: install.ps1 with it
         timeout-minutes: 20
         shell: pwsh
-        run: ./installer/test-windows.ps1 -Setup dist/synaps-avatar-setup-x86_64.exe
+        run: ./installer/test-windows.ps1 -Setup dist/capri-syn-setup-x86_64.exe
 
       - uses: actions/upload-artifact@v4
         with:

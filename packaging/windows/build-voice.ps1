@@ -1,4 +1,4 @@
-# Builds her VOICE installer: packaging\windows\Output\synaps-avatar-voice-setup-<version>-<build>.exe.
+# Builds her VOICE installer: packaging\windows\Output\capri-syn-voice-setup-<version>-<build>.exe.
 # A separate download from hers (her installer stays ~9 MB): the voice bundle (voice-bundle.ps1)
 # beside her, and the model fetch. Needs a CPython 3.13 x64 (for pip) and Inno Setup 6: both on
 # GitHub's windows-latest (setup-python). Run from anywhere.
@@ -22,5 +22,5 @@ if (-not $iscc) { $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.
 if (-not (Test-Path $iscc)) { throw 'Inno Setup 6 (ISCC.exe) is not installed' }
 & $iscc /Qp "/DAppVersion=$version" "/DBuild=$build" "/DBundle=$bundle" (Join-Path $here 'synaps-avatar-voice.iss')
 if ($LASTEXITCODE) { throw "ISCC failed ($LASTEXITCODE)" }
-$setup = Get-ChildItem (Join-Path $here 'Output') -Filter "synaps-avatar-voice-setup-$version-$build.exe"
+$setup = Get-ChildItem (Join-Path $here 'Output') -Filter "capri-syn-voice-setup-$version-$build.exe"
 Write-Output "voice installer: $($setup.FullName) ($([math]::Round($setup.Length / 1MB, 1)) MB)"
