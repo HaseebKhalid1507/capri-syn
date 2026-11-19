@@ -75,6 +75,12 @@ kept as `launch.old.log`; Windows: her `synaps-avatar.log`, which she starts ove
   running, and it tells you to quit her, then start her. On Windows her binary can't be replaced
   while she runs, so that one stops anyway; it isn't replaced by a bare one, and you get its own
   command line back to start it again.
+- **On Windows, every run of yours stops for a new binary**, in any sign-in session (one on your
+  desktop, seen from an SSH install, too), each named as it stops (its pid, its session, its command
+  line when it's your own run). One stopped in another session is said again at the end: start her
+  there again from the Start menu.
+- **When her binary is replaced while she runs**, the step says now what the end will do: restart
+  her, leave your own run be, or not restart her from here (SSH, no desktop).
 - **No desktop here to show on**, so it doesn't start her and says so: an SSH session
   (`SSH_CONNECTION` or `SSH_TTY`: with `ssh -X` she'd open on the far screen and die with the
   tunnel), no `DISPLAY` or `WAYLAND_DISPLAY` (CI), or no interactive session on Windows.

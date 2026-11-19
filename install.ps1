@@ -226,7 +226,7 @@ function Read-Flags([string[]]$ArgList) {
     $script:Yes = $false; $script:Dry = $false; $script:Uninstall = $false; $script:Purge = $false
     $script:Voice = $false; $script:Watch = $false; $script:Autostart = $true; $script:FromSource = $false
     $script:LocalArt = $false; $script:Prefix = Join-Path $env:LOCALAPPDATA 'Programs\synaps-avatar'; $script:Artifact = ''; $script:PrefixGiven = $false
-    $script:HisRun = ''
+    $script:HisRun = ''; $script:StoppedElsewhere = $false
     $i = 0
     while ($ArgList -and $i -lt $ArgList.Count) {
         $a = [string]$ArgList[$i]
@@ -426,32 +426,47 @@ function Get-CommandArgs([string]$Line) {
     return $rest.Trim()
 }
 
-# Her runs in this sign-in session: Id, and Line, the command line of one started with arguments
-# (--socket, --profile, --session...: his own run), '' for one started bare (as the Start menu and
-# her Run value start her).
+# Her runs, his own, in every sign-in session (one in another, his desktop seen from ssh, holds her
+# binary too): Id, Session, Here (in this one), and Line, the command line of one started with
+# arguments (--socket, --profile, --session...: his own run), '' for one started bare (as the Start
+# menu and her Run value start her).
 function Get-HerRuns {
-    $me = (Get-Process -Id $PID).SessionId
+    $here = (Get-Process -Id $PID).SessionId
     foreach ($p in @(Get-CimInstance Win32_Process -Filter "Name = 'synaps-avatar.exe'" -ErrorAction SilentlyContinue)) {
-        if ($p.SessionId -ne $me) { continue }
+        $o = Invoke-CimMethod -InputObject $p -MethodName GetOwner -ErrorAction SilentlyContinue
+        if (-not $o -or $o.User -ne [Environment]::UserName) { continue }
         $line = [string]$p.CommandLine
-        [pscustomobject]@{ Id = [int]$p.ProcessId; Line = $(if (Get-CommandArgs $line) { $line.Trim() } else { '' }) }
+        [pscustomobject]@{ Id = [int]$p.ProcessId; Session = [int]$p.SessionId; Here = ($p.SessionId -eq $here); Line = $(if (Get-CommandArgs $line) { $line.Trim() } else { '' }) }
     }
 }
 
-# Before her binary is replaced (Windows locks a running one): every run of hers stops. One he
-# started with his own arguments is noted ($script:HisRun): she isn't started bare in its place.
-function Stop-Her {
+# A run of hers as a stop names it: its pid, its sign-in session when it isn't this one, its
+# command line when he started it with his own arguments.
+function Get-RunLabel($Run) {
+    $s = "pid $($Run.Id)"
+    if (-not $Run.Here) { $s += " in your other sign-in session ($($Run.Session))" }
+    if ($Run.Line) { $s += ", as you started her: $($Run.Line)" }
+    return $s
+}
+
+# Every run of his stops, in every sign-in session (Windows locks a running binary: one anywhere
+# would keep the old one), each one said with Why. One he started with his own arguments is noted
+# ($script:HisRun): she isn't started bare in its place. One in another session is noted too
+# ($script:StoppedElsewhere): from here she can't be started there again.
+function Stop-Her([string]$Why) {
     if ($script:Dry) { return }
     $runs = @(Get-HerRuns)
-    $his = @($runs | Where-Object { $_.Line } | Select-Object -First 1)
-    if ($his) { $script:HisRun = $his[0].Line }
-    $p = Get-Process -Name 'synaps-avatar' -ErrorAction SilentlyContinue
-    if ($p) { Invoke-Action 'Stop-Process -Name synaps-avatar (she is replaced)' { $p | Stop-Process -Force; Start-Sleep -Milliseconds 500 } }
+    foreach ($r in $runs) {
+        if ($r.Line -and -not $script:HisRun) { $script:HisRun = $r.Line }
+        if (-not $r.Here) { $script:StoppedElsewhere = $true }
+        Invoke-Action "Stop-Process -Id $($r.Id) ($Why; $(Get-RunLabel $r))" { Stop-Process -Id $r.Id -Force -ErrorAction SilentlyContinue }
+    }
+    if ($runs -and -not $script:Dry) { Start-Sleep -Milliseconds 500 }
 }
 
 # Her installer (packaging/windows), unattended; her autostart is step 6's, not its task.
 function Install-Setup([string]$Setup) {
-    Stop-Her
+    Stop-Her 'her binary is replaced'
     New-RecordedDir $script:Cache
     # Its folder and the ones on the way, made here: recorded (rmdir), so --uninstall takes them away
     # once her installer's uninstaller has emptied them.
@@ -608,7 +623,7 @@ function Build-FromSource {
         if (-not $script:Dry) { Pop-Location }
         Remove-Item Env:\CARGO_TARGET_DIR -ErrorAction SilentlyContinue
     }
-    Stop-Her
+    Stop-Her 'her binary is replaced'
     New-RecordedPath $script:Prefix
     $built = Join-Path $target 'release\synaps-avatar.exe'
     Invoke-Action "copy $built $($script:Exe)" { Copy-Item -Force $built $script:Exe }
@@ -912,13 +927,14 @@ function Read-LogSince([string]$Path, [long]$From) {
 function Start-HerNow {
     $script:Started = $false
     if ($script:Dry) { Write-Action "Start-Process `"$(Get-Tilde $script:Exe)`""; return }
-    $later = if ($script:Autostart) { 'she starts at your next sign-in, or from the Start menu' } else { 'start her from the Start menu' }
+    $later = if ($script:StoppedElsewhere) { 'her run on your desktop was stopped for her new binary: start her there again (the Start menu)' }
+    elseif ($script:Autostart) { 'she starts at your next sign-in, or from the Start menu' } else { 'start her from the Start menu' }
     if ($env:SSH_CONNECTION -or $env:SSH_TTY) { Write-Info "an ssh session (she would start where you can't see her, and close with it): not started here. $later"; return }
     if (-not [Environment]::UserInteractive) { Write-Info "no desktop session here: $later"; return }
     $his = @(Get-HerRuns | Where-Object { $_.Line } | Select-Object -First 1)
     if ($his) { Write-Info "she's running as you started her ($($his[0].Line)): left be. to run the new one, quit her (her menu: Quit), then start her"; return }
     if ($script:HisRun) { Write-Info "your own run of her was stopped to replace her binary: start it again: & $($script:HisRun)"; return }
-    Stop-Her
+    Stop-Her 'she is started again'
     $log = Join-Path $script:Data 'synaps-avatar.log'
     $from = if (Test-Path -LiteralPath $log) { (Get-Item -LiteralPath $log).Length } else { 0 }
     Write-Action "Start-Process `"$(Get-Tilde $script:Exe)`""
@@ -1027,7 +1043,7 @@ function Invoke-Uninstall {
     $synapsPathMine = Get-ReceiptMeta 'synaps_path'
     $rustupMine = Get-ReceiptMeta 'rustup'
     if (Test-Path $script:Receipt) {
-        Stop-Her
+        Stop-Her 'she is removed'
         $lines = @(Get-Content -LiteralPath $script:Receipt)
         [array]::Reverse($lines)
         foreach ($line in $lines) {

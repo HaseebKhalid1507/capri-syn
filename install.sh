@@ -636,7 +636,20 @@ install_tree() {
     run rm -rf "$LIB"
     run mv "$LIB.new" "$LIB"
     rec dir "$LIB"
-    if [ "$DRY" = 0 ] && pgrep -u "$(id -u)" -x synaps-avatar >/dev/null 2>&1; then
+    if [ "$DRY" = 0 ]; then old_run_note; fi
+}
+
+# A run of hers going while her binary is replaced: what the end of the install does with it
+# (start_her's rules), said now.
+old_run_note() {
+    local why
+    her_runs
+    if [ -z "$HIS" ] && [ ${#BARE[@]} = 0 ]; then return 0; fi
+    if why=$(no_desktop); then
+        info "she's running the old binary: $why, so she isn't restarted from here"
+    elif [ -n "$HIS" ]; then
+        info "she's running the old binary, as you started her: left be (quit her, then start her, for the new one)"
+    else
         info "she's running the old binary: restarted at the end"
     fi
 }
@@ -1365,7 +1378,11 @@ start_her() {
         return 0
     fi
     if [ ${#BARE[@]} -gt 0 ]; then
-        run "$BIN/avatarctl" quit || run kill "${BARE[@]}" || true
+        # Its pids read again just before a kill: the quit may have taken some of them already.
+        if ! run "$BIN/avatarctl" quit; then
+            her_runs
+            if [ ${#BARE[@]} -gt 0 ]; then run kill "${BARE[@]}" || true; fi
+        fi
         for i in $(seq 50); do
             her_runs
             [ ${#BARE[@]} -gt 0 ] || [ -n "$HIS" ] || break

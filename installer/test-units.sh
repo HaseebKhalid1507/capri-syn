@@ -38,6 +38,10 @@ pids+=("$bare")
 "$tmp/flags/synaps-avatar" 60 &
 flagged=$!
 pids+=("$flagged")
+# A second bare one, for a quit that takes her yet reports a failure.
+sleep 60 | "$tmp/My Apps/synaps-avatar" &
+bare2=$!
+pids+=("$bare2")
 FAKE=()
 # Only the stand-ins listed in FAKE, and only while alive (a reaped or zombie one has no cmdline).
 pgrep() {
@@ -46,9 +50,20 @@ pgrep() {
     return 0
 }
 RAN=()
+QUIT_TAKES=''
+# avatarctl fails (nothing answers here); with QUIT_TAKES it took that pid first (gone when it returns).
 run() {
     RAN+=("$*")
-    case $1 in kill) "$@" ;; *) return 1 ;; esac
+    case $1 in
+        kill) "$@" ;;
+        *)
+            if [ -n "$QUIT_TAKES" ]; then
+                kill "$QUIT_TAKES"
+                while [ -n "$(tr -d '\000' <"/proc/$QUIT_TAKES/cmdline" 2>/dev/null)" ]; do sleep 0.05; done
+            fi
+            return 1
+            ;;
+    esac
 }
 ui
 DRY=0 AUTOSTART=1 DESKTOP=hyprland SYSTEMD=1 BIN=$tmp/bin STATE=$tmp/state HOME=$tmp/home
@@ -74,6 +89,21 @@ check "$(ok no_desktop)" "SSH_TTY alone, too"
 unset SSH_TTY
 check "$([ "$(ok no_desktop)" = 1 ] && echo 0)" "a DISPLAY and no ssh: a desktop"
 check "$(DISPLAY='' ok no_desktop)" "no DISPLAY or WAYLAND_DISPLAY: no desktop"
+
+# What the binary step says of a run going: what the end of the install will do with it.
+note() { old_run_note 2>&1; }
+FAKE=()
+check "$([ -z "$(note)" ] && echo 0)" "no run going: nothing said"
+FAKE=("$bare")
+case $(note) in *'restarted at the end'*) r=0 ;; *) r=1 ;; esac
+check $r "a bare run, a desktop: restarted at the end"
+FAKE=("$bare" "$flagged")
+case $(note) in *'as you started her: left be'*) r=0 ;; *) r=1 ;; esac
+check $r "his own run: left be, not restarted: $(note)"
+case $(SSH_TTY=/dev/pts/3 note) in *'old binary: an ssh session'*"isn't restarted from here") r=0 ;; *) r=1 ;; esac
+check $r "over ssh: not restarted from here: $(SSH_TTY=/dev/pts/3 note)"
+case $(DISPLAY='' note) in *'old binary: no desktop'*"isn't restarted from here") r=0 ;; *) r=1 ;; esac
+check $r "no desktop: not restarted from here"
 
 # start_her over ssh -X: not started, nothing quit.
 FAKE=()
@@ -107,6 +137,18 @@ check $r "avatarctl quit first, else kill (that pid only): ${RAN[*]}"
 check "$(kill -0 "$flagged" 2>/dev/null && echo 0)" "his own run untouched"
 check "$(grep -qx "cwd=$tmp/home" "$tmp/state/synaps-avatar/launch.log" && echo 0)" "started from his home folder"
 check "$(grep -qx 'the last run' "$tmp/state/synaps-avatar/launch.old.log" && echo 0)" "the last run's log kept as launch.old.log"
+kill "$(cat "$tmp/started.pid" 2>/dev/null)" 2>/dev/null
+
+# Its pids read again right before a kill: one the quit already took isn't killed (its pid may be
+# another process's by then).
+FAKE=("$bare2")
+RAN=()
+QUIT_TAKES=$bare2
+start
+case "${RAN[*]}" in *'avatarctl quit'*kill*) r=1 ;; *'avatarctl quit'*) r=0 ;; *) r=1 ;; esac
+check $r "a quit that took her: no kill after it: ${RAN[*]}"
+case $out in *"she's up"*STARTED=1) r=0 ;; *) r=1 ;; esac
+check $r "and she starts"
 kill "$(cat "$tmp/started.pid" 2>/dev/null)" 2>/dev/null
 pkill -P $$ -x sleep 2>/dev/null
 
