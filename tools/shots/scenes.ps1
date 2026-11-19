@@ -14,6 +14,10 @@
               settings.toml; the cog and `CHAT` (their rects, from `state`) with an empty chat and a full one.
     header    the bubble's header (#78) at 470 px and at 340 px: hands-free and a reply, a prompt
               with 3 waiting, his long words (YOU) while the turn runs.
+    tray      her icon in the notification area (#79), promoted out of the overflow, on a dark
+              taskbar with its clock off: hovered (its tooltip, capri-syn · ONLINE), right-clicked (her
+              menu), cropped to the taskbar's corner and the menu; then QUIT leaves no icon behind.
+              Restarts Explorer (a runner only).
     brain     her brain (Settings PR 3), the daemon found as on his machine (its daemon.json in a
               Synaps folder of the take's own, no --socket): no login (her first words, SET ME UP,
               the Brain screen it opens, OTHER, esc, her menu); Claude with no login after his first
@@ -21,10 +25,6 @@
               screen, MODEL changed and written); his TUI's /model followed, a ChatGPT sign-in made in
               a terminal seen by the open screen, MODEL sent back (PR 4); and a daemon through
               --socket (another machine's).
-    tray      her icon in the notification area (#79), promoted out of the overflow, on a dark
-              taskbar with its clock off: hovered (its tooltip, capri-syn · ONLINE), right-clicked (her
-              menu), cropped to the taskbar's corner and the menu; then QUIT leaves no icon behind.
-              Restarts Explorer (a runner only).
   Out: <Out>\<set>\<take>\<step>.png + .json (her `state`), <Out>\index.json, <Out>\logs\.
 #>
 param(
