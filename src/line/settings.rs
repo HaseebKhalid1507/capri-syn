@@ -369,11 +369,11 @@ fn local_opens(m: &provider::Status) -> bool {
     m.lock.is_none() && local_picks(m).iter().any(|c| c.pick.is_some())
 }
 
-/// The sign-in running's own page (its provider's, `signin::allowed`), to open again.
-pub fn sign_in_page(p: &Prefs) -> Option<(&'static Provider, &str)> {
+/// The sign-in running's own page (its provider's, `signin::allowed`: as parsed), to open again.
+pub fn sign_in_page(p: &Prefs) -> Option<(&'static Provider, String)> {
     let s = p.signing.as_ref().filter(|s| s.failed.is_none())?;
     let to = provider::by_id(s.id)?;
-    s.url.as_deref().filter(|u| provider::signin::allowed(to, u)).map(|u| (to, u))
+    s.url.as_deref().and_then(|u| provider::signin::allowed(to, u)).map(|u| (to, u))
 }
 
 /// The Brain screen's rows (`fold`: the list open). MODEL once she has a model (attached).
@@ -523,7 +523,7 @@ pub fn brain_key(key: &str, sel: usize, p: &Prefs, fold: Option<Fold>) -> (usize
             let f = if fold == r.fold() { None } else { r.fold() };
             return (at(f, r), Act::Fold(f));
         }
-        (_, BrainRow::Page) if go => sign_in_page(p).map_or(Act::Nothing, |(_, u)| Act::Open(u.to_string())),
+        (_, BrainRow::Page) if go => sign_in_page(p).map_or(Act::Nothing, |(_, u)| Act::Open(u)),
         (_, BrainRow::Account(i)) if go => p.mind.accounts().get(i).map_or(Act::Nothing, |&to| use_provider(p, to)),
         (_, BrainRow::Service(i)) if go => provider::services().nth(i).map_or(Act::Nothing, |to| use_provider(p, to)),
         (_, BrainRow::Pick(i)) if go => match picks(&p.mind).get(i) {
@@ -1265,7 +1265,7 @@ impl Line {
                 }
                 // A way in: its name, what it takes (or ✓ where she has it), ▸ (▾: open).
                 let way = |name: &str, blurb: String, mark: Option<&'static str>, live: bool, open: Option<bool>| {
-                    let c = if !live { theme::mix(pal.dim, pal.panel, 0.3) } else if mark == Some("check") { pal.accent } else if mark == Some("disc") { pal.accent } else { small_c };
+                    let c = if !live { theme::mix(pal.dim, pal.panel, 0.3) } else if mark == Some("check") || mark == Some("disc") { pal.accent } else { small_c };
                     let arrow = if open == Some(true) { "down" } else { "play" };
                     row(ix, on)
                         .child(label(name, on && live, None, 230.0))
@@ -1275,10 +1275,11 @@ impl Line {
                         .into_any_element()
                 };
                 // ✓ on a provider with a login here; IN USE on hers (its login ran out: a red dot
-                // and ⏎ to sign in again).
+                // and ⏎ to sign in again; Grok on Windows can't, `signin::needs_newer`).
                 let state = |to: &'static Provider, blurb: &str| -> (String, Option<&'static str>) {
                     match (m.has(to), m.provider() == Some(to)) {
                         (_, true) if m.expired && m.here && to.kind == Kind::Key => ("KEY TURNED DOWN · ⏎ NEW KEY".into(), Some("disc")),
+                        (_, true) if m.expired && m.here && provider::signin::needs_newer(m.windows, to) => ("LOGGED OUT · NEEDS A NEWER SYNAPS".into(), Some("disc")),
                         (_, true) if m.expired && m.here => ("LOGGED OUT · ⏎ SIGN IN AGAIN".into(), Some("disc")),
                         (true, true) => ("IN USE".into(), Some("check")),
                         (true, false) => ("SIGNED IN".into(), Some("check")),
@@ -1339,8 +1340,12 @@ impl Line {
                             }
                         }
                     }
-                    // Under the account signing in: its page, for when his browser didn't open.
-                    BrainRow::Page => target.push(way("      NO BROWSER?", "OPEN THE SIGN-IN PAGE".into(), None, true, None)),
+                    // Under the account signing in: its page, for when his browser didn't open
+                    // (Copilot's: GitHub's, where its code goes).
+                    BrainRow::Page => {
+                        let github = sign_in_page(&p).is_some_and(|(to, _)| to.id == "github-copilot");
+                        target.push(way("      NO BROWSER?", if github { "OPEN GITHUB'S PAGE" } else { "OPEN THE SIGN-IN PAGE" }.into(), None, true, None));
+                    }
                     BrainRow::Key => {
                         let (b, mark) = key_word(m);
                         target.push(way("API KEY", b, mark, true, Some(self.fold == Some(Fold::Key))));
@@ -1632,6 +1637,9 @@ pub fn brain_line(m: &provider::Status) -> &'static str {
         _ if !m.here && !m.ok() => "My brain runs on another machine. Sign in there, then say hi.",
         _ if m.none() => "Give me a brain and I'll talk back.",
         _ if m.expired && m.provider().is_some_and(|p| p.kind == Kind::Key) => "My key was turned down. Paste a new one under API KEY.",
+        _ if m.expired && m.provider().is_some_and(|p| provider::signin::needs_newer(m.windows, p)) => {
+            "My Grok login ran out, and this Synaps can't sign in to Grok on Windows. Pick another brain for now."
+        }
         _ if m.expired => "My login ran out. Sign me in again under SIGN IN.",
         _ if local && m.stale_url() => "Synaps is still on its old local URL. Run `synaps daemon reload`, then ask me again.",
         _ if m.ok() => "That's what I think with. Swap it any time.",
@@ -1690,7 +1698,7 @@ pub fn brain_word(m: &provider::Status) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Act, BrainRow, FLASH, Fold, MenuSave, Mode, Nav, Note, Page, Pref, Prefs, SetRow, Signing, asked, asked_model, brain_hint, brain_key, brain_line, brain_reselect, brain_rows, brain_word, esc_closes, hint, hold_fires, key_word, list_key, next_attention, page_left, set_rows, spot_lift};
+    use super::{Act, BrainRow, FLASH, Fold, MenuSave, Mode, Nav, Note, Page, Pref, Prefs, SetRow, Signing, asked, asked_model, brain_hint, brain_key, brain_landing, brain_line, brain_reselect, brain_rows, brain_word, esc_closes, hint, hold_fires, key_word, list_key, next_attention, page_left, set_rows, spot_lift};
     use crate::provider::{self, Local, Lock, Status};
     use crate::settings::{Attention, Settings, WriteQueue, write_at};
 
@@ -1831,6 +1839,15 @@ mod tests {
         assert_eq!(brain_key("enter", 2, &w, in_), (2, Act::SignIn(by("anthropic"))));
         w.mind.signed.push("xai-auth");
         assert_eq!(brain_key("enter", 4, &w, in_), (4, Act::Pref(Pref::Model("xai-auth/grok-4.3"))), "a login on file: a switch, no sign-in");
+        // Hers, its login ran out: no sign-in again either; her line says so, not SIGN IN.
+        let mut g = Prefs { mind: mind("xai-auth/grok-4.3", Some(true)), ..prefs() };
+        g.mind.windows = true;
+        g.mind.expired = true;
+        assert_eq!(brain_key("enter", 4, &g, in_), (4, Act::Nothing));
+        assert_eq!(brain_hint(&g, 4, in_), "↑↓ pick · ← close · esc back");
+        assert_eq!(brain_line(&g.mind), "My Grok login ran out, and this Synaps can't sign in to Grok on Windows. Pick another brain for now.");
+        g.mind.windows = false;
+        assert_eq!(brain_key("enter", 4, &g, in_), (4, Act::SignIn(by("xai-auth"))), "elsewhere: signs in again");
         assert_eq!(brain_key("left", 4, &p, in_), (0, Act::Fold(None)), "← closes it, back on SIGN IN");
         assert_eq!(brain_key("down", 9, &p, in_), (9, Act::Nothing));
         // API KEY from under SIGN IN's accounts: SIGN IN closes, API KEY opens, picked.
@@ -2002,6 +2019,17 @@ mod tests {
         }
         p.signing = Some(Signing { url: Some(page.into()), failed: Some("x".into()), ..Signing::new("anthropic") });
         assert!(!brain_rows(&p, in_).contains(&BrainRow::Page), "failed: its page is gone");
+        // Copilot's: GitHub's device page, where its code is typed (exactly that page).
+        let github = "https://github.com/login/device";
+        p.signing = Some(Signing { url: Some(github.into()), code: Some("ABCD-1234".into()), ..Signing::new("github-copilot") });
+        assert_eq!(&brain_rows(&p, in_)[3..6], &[BrainRow::Account(2), BrainRow::Page, BrainRow::Account(3)]);
+        assert_eq!(brain_key("enter", 4, &p, in_), (4, Act::Open(github.into())));
+        for url in ["https://github.com/login/device?user_code=ABCD-1234", "https://github.com/login/device/x", "https://www.kimi.com/code/authorize_device?user_code=X"] {
+            p.signing = Some(Signing { url: Some(url.into()), ..Signing::new("github-copilot") });
+            assert!(!brain_rows(&p, in_).contains(&BrainRow::Page), "{url}");
+        }
+        p.signing = Some(Signing { url: Some("https://www.kimi.com/code/authorize_device?user_code=X".into()), ..Signing::new("kimi-code") });
+        assert!(!brain_rows(&p, in_).contains(&BrainRow::Page), "Kimi's: not one of hers to open");
     }
 
     /// Her login ran out (`LOGGED OUT`): her account's row signs in again, the same way as a

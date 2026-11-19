@@ -27,10 +27,11 @@
               ChatGPT sign-in made in a terminal seen by the open screen, MODEL sent back; a Groq key
               on file, its row under API KEY switching her to it; two accounts and a local server
               (tools/fakelocal.py): MODEL's menu by provider, End, scrolled, a local model picked,
-              RUN LOCAL's models; sign-ins from her (tools/fakesynaps.cmd: Copilot's code, then its
-              login; ChatGPT's page opened whole, again by keys, and its synaps login gone with her
-              when she's killed); an API key typed into her field; and a daemon through --socket
-              (another machine's).
+              RUN LOCAL's models; sign-ins from her (tools/fakesynaps.cmd: Copilot's code and
+              GitHub's page by keys, then its login; ChatGPT's page opened whole, then again by
+              keys); her killed mid Copilot sign-in (tools/fakesynaps-poll.cs, one process that
+              polls on: gone with her, the browser it started not); an API key typed into her
+              field; and a daemon through --socket (another machine's).
   Out: <Out>\<set>\<take>\<step>.png + .json (her `state`), <Out>\index.json, <Out>\logs\.
 #>
 param(
@@ -594,12 +595,13 @@ $Scenes = [ordered]@{
             Shot '22b-run-local' 'up to RUN LOCAL, enter: the local server''s models in place, hers checked'
         }
         # A sign-in from her (a stand-in synaps, Copilot's device login): SIGNING IN with its code
-        # large (copied), then its login on file: SIGNED IN, her model on Copilot.
+        # large (copied) and GitHub's page under it, opened by keys; then its login on file:
+        # SIGNED IN, her model on Copilot.
         signin = {
             $pids = Join-Path $Root 'brain-signin-pids.txt'
             $urlFile = Join-Path $Root 'brain-signin-url.txt'
             Start-Take brain signin -Local -Model 'claude-sonnet-4-6' -History $Short -SynapsExe (Join-Path $Tools 'fakesynaps.cmd') -Env @{
-                FAKE_SIGNIN_AFTER = '8'; FAKE_SIGNIN_NEVER = 'openai-codex'; FAKE_SYNAPS_PIDS = $pids
+                FAKE_SIGNIN_AFTER = '16'; FAKE_SIGNIN_NEVER = 'openai-codex'; FAKE_SYNAPS_PIDS = $pids
                 SA_CLIP_FILE = (Join-Path $Root 'brain-signin-clip.txt'); SA_URL_FILE = $urlFile
             }
             $null = Ctl 'brain off'
@@ -611,9 +613,18 @@ $Scenes = [ordered]@{
             Key 'enter' 1500
             if (-not (Wait-Until { (State).line.mind.signing.code } 15 'its code')) { $script:Fails.Add("${script:Take}: no code shown") }
             Start-Sleep 1
-            Shot '23-copilot-code' 'SIGN IN > COPILOT, enter: signing in from her, its code large and copied'
+            if (@((State).line.brain_rows) -notcontains 'Page') { $script:Fails.Add("${script:Take}: no row for GitHub's page under COPILOT") }
+            Shot '23-copilot-code' 'SIGN IN > COPILOT, enter: signing in from her, its code large and copied; GitHub''s page under it'
             $clip = Get-Content -Raw (Join-Path $Root 'brain-signin-clip.txt') -ErrorAction SilentlyContinue
             if ("$clip".Trim() -ne 'FAKE-C0DE') { $script:Fails.Add("${script:Take}: the code wasn't copied ($clip)") }
+            # GitHub's page, by keys: down to its row, enter; back up to COPILOT.
+            Remove-Item $urlFile -ErrorAction SilentlyContinue
+            Key 'down' 800
+            Key 'enter' 1200
+            if (-not (Wait-Until { (Get-Content -Raw $urlFile -ErrorAction SilentlyContinue) -ceq 'https://github.com/login/device' } 10 'GitHub''s page')) {
+                $script:Fails.Add("${script:Take}: its row didn't open GitHub's page ($(Get-Content -Raw $urlFile -ErrorAction SilentlyContinue))")
+            }
+            Key 'up' 800
             if (-not (Wait-Until { @((State).line.mind.signed) -contains 'github-copilot' } 20 'its login on file')) { $script:Fails.Add("${script:Take}: never signed in") }
             $dl = Join-Path $Logs 'brain-signin-daemon.log'
             if (-not (Wait-Until { (Get-Content -Raw $dl -ErrorAction SilentlyContinue) -match 'cmd set model github-copilot/' } 10 'her session on Copilot')) {
@@ -647,17 +658,45 @@ $Scenes = [ordered]@{
             Shot '26-page-again' 'down to NO BROWSER?, enter: the page opened again'
             $log = (Get-Content -Raw (Join-Path $Logs 'brain-signin-her.err') -ErrorAction SilentlyContinue) + (Get-Content -Raw (Join-Path $Logs 'brain-signin-her.log') -ErrorAction SilentlyContinue)
             if ("$log" -match 'FAKE-C0DE|github\.com/login/device|auth\.openai\.com') { $script:Fails.Add("${script:Take}: her log has a code or a URL") }
-            # She dies mid sign-in (killed, as a crash): its synaps login goes with her (her job object).
-            $last = @(Get-Content $pids -ErrorAction SilentlyContinue)[-1]
-            if (-not $last -or $last -eq $first -or -not (Get-Process -Id $last -ErrorAction SilentlyContinue)) {
-                $script:Fails.Add("${script:Take}: ChatGPT's synaps login isn't running (pid $last)")
-            } else {
-                Stop-Process -Id $script:Her.Id -Force
-                if (-not (Wait-Until { -not (Get-Process -Id $last -ErrorAction SilentlyContinue) } 10 'its stand-in gone with her')) {
-                    $script:Fails.Add("${script:Take}: synaps login (pid $last) outlived her")
-                    Stop-Process -Id $last -Force -ErrorAction SilentlyContinue
-                }
+        }
+        # She dies mid sign-in (killed, as a crash) during Copilot's device login. Its synaps is a
+        # stand-in of one process, as Synaps is (tools/fakesynaps-poll.cs, built here), that
+        # started a "browser" and polls on whatever its stdin does: her job object must end it
+        # (it's what she starts), and only it (the browser it started stays).
+        crash  = {
+            $exe = Join-Path $Root 'fakesynaps-poll.exe'
+            if (-not (Test-Path $exe)) {
+                New-Item -ItemType Directory -Force -Path $Root | Out-Null
+                $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+                $said = & $csc /nologo /out:$exe (Join-Path $Tools 'fakesynaps-poll.cs') 2>&1
+                if ($LASTEXITCODE -ne 0) { throw "csc: $said" }
             }
+            $pids = Join-Path $Root 'brain-crash-pids.txt'
+            Remove-Item $pids -ErrorAction SilentlyContinue
+            Start-Take brain crash -Local -Model 'claude-sonnet-4-6' -History $Short -SynapsExe $exe -Env @{
+                FAKE_SYNAPS_PIDS = $pids; SA_CLIP_FILE = (Join-Path $Root 'brain-crash-clip.txt'); SA_URL_FILE = (Join-Path $Root 'brain-crash-url.txt')
+            }
+            $null = Ctl 'brain off'
+            $null = Ctl 'settings open brain'
+            Start-Sleep 2
+            Focus-Line-Top
+            Key 'enter' 1000
+            Key 'down'; Key 'down'; Key 'down' 600
+            Key 'enter' 1500
+            if (-not (Wait-Until { (State).line.mind.signing.code } 15 'its code')) { $script:Fails.Add("${script:Take}: no code shown") }
+            $synaps, $browser = @(Get-Content $pids -ErrorAction SilentlyContinue)[0, 1]
+            if (-not $synaps -or -not $browser -or -not (Get-Process -Id $synaps -ErrorAction SilentlyContinue) -or -not (Get-Process -Id $browser -ErrorAction SilentlyContinue)) {
+                $script:Fails.Add("${script:Take}: its synaps login (pid $synaps) or its browser (pid $browser) isn't running")
+            } else {
+                Shot '29-before-crash' 'SIGN IN > COPILOT, enter: signing in from her (a stand-in that polls on), its code'
+                Stop-Process -Id $script:Her.Id -Force
+                if (-not (Wait-Until { -not (Get-Process -Id $synaps -ErrorAction SilentlyContinue) } 10 'its synaps login gone with her')) {
+                    $script:Fails.Add("${script:Take}: synaps login (pid $synaps) outlived her")
+                    Stop-Process -Id $synaps -Force -ErrorAction SilentlyContinue
+                }
+                if (-not (Get-Process -Id $browser -ErrorAction SilentlyContinue)) { $script:Fails.Add("${script:Take}: the browser it started (pid $browser) went with her") }
+            }
+            if ($browser) { Stop-Process -Id $browser -Force -ErrorAction SilentlyContinue }
         }
         # An API key from her: API KEY > GROQ, her masked field, the key typed; enter hands it to
         # synaps login on its stdin (the stand-in takes only that key), never logged; KEY SET, her

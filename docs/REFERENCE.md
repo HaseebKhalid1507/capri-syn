@@ -119,17 +119,20 @@ Paths here are Linux's: Windows keeps the same files under `%APPDATA%` and `%LOC
     with their code filled in, Copilot on GitHub's device page, its code shown large in the row and
     copied to type there (a short-lived, single-use code: the one thing she copies). The row says
     SIGNING IN… (⏎ stops it, killing Synaps); under it, for Claude, ChatGPT and Gemini, NO BROWSER?
-    opens the page again (keys or a click). Synaps' stdin is held open meanwhile (its 0.12 login
+    opens the page again (keys or a click), and for Copilot GitHub's device page. Synaps' stdin is held open meanwhile (its 0.12 login
     gives up at end of input) and closed once `auth.json` has the login or Synaps says it's done; it
     is killed 15 s later if it hasn't ended, after 10 minutes, on a stop and when she quits, and it
-    dies with her however she ends (Windows: a job object that kills it, and what it started, when
-    her handle closes; Linux: `PR_SET_PDEATHSIG`). A page is read only off the line its provider
+    dies with her, a crash too (Windows: a job object that kills it when her handle closes; Linux:
+    `PR_SET_PDEATHSIG`). Only Synaps: what it starts (its `cmd /c start`, your browser) is never in
+    that job and stays. A page is read only off the line its provider
     prints it on (the PKCE page alone, cyan, right after `If the browser didn't open, visit…`; a
     device's `At:`), and opened only when it's that provider's own sign-in page: https,
     `claude.ai/oauth/authorize`, `auth.openai.com/oauth/authorize` or
-    `accounts.google.com/o/oauth2/v2/auth` exactly, no `user@`, no port, no `\`. On Windows, where
+    `accounts.google.com/o/oauth2/v2/auth` exactly, no `user@`, no port, no `\`, no `#` (opened as
+    parsed); Copilot's, exactly `https://github.com/login/device`. On Windows, where
     Synaps' `cmd /c start` cuts the page's URL at its first `&`, she opens that page whole herself.
-    Grok on Windows reads NEEDS A NEWER SYNAPS and does nothing: Synaps 0.12.0's xAI login opens
+    Grok on Windows reads NEEDS A NEWER SYNAPS (where its login ran out, LOGGED OUT · NEEDS A NEWER
+    SYNAPS) and does nothing: Synaps 0.12.0's xAI login opens
     its page with `cmd /c start` and never prints it, so nothing can open it whole (in a terminal
     it's cut the same way). Signed in: ✓ SIGNED IN, and once the write of its first model is in,
     her model is that (`Opus 5.5 it is`; not under `--model`/`--session`, not when she's on it).

@@ -14,11 +14,15 @@
   says so once it's written; failed, she says why, with the terminal line in her bubble. An API key
   goes in a hidden field, to Synaps on its stdin (the field cleared, her copy zeroed). Never a
   copied command for a SIGN IN row, never the URL or the code in her log. Synaps' login dies with
-  her, a crash too (a job object on Windows, `PR_SET_PDEATHSIG` on Linux).
+  her, a crash too (a job object on Windows, `PR_SET_PDEATHSIG` on Linux): Synaps alone, never
+  what it started (your browser stays).
 - **Only its own sign-in page is opened:** read off the exact line its provider prints, then https,
-  `claude.ai`, `auth.openai.com` or `accounts.google.com` with their sign-in path, no userinfo, no
-  port, no `\`. On Windows she opens it whole (Synaps' `cmd /c start` cuts it at its `&`). Grok on
-  Windows says NEEDS A NEWER SYNAPS: Synaps 0.12.0 opens its page cut and never prints it.
+  `claude.ai`, `auth.openai.com` or `accounts.google.com` with their sign-in path exactly, no
+  userinfo, no port, no `\`, no `#`, opened as parsed; Copilot's, exactly
+  `https://github.com/login/device` (NO BROWSER? under it too, where its code goes). On Windows she
+  opens it whole (Synaps' `cmd /c start` cuts it at its `&`). Grok on Windows says NEEDS A NEWER
+  SYNAPS (LOGGED OUT · NEEDS A NEWER SYNAPS where its login ran out): Synaps 0.12.0 opens its page
+  cut and never prints it.
 - **LOGGED OUT signs in again from her:** `SIGN IN AGAIN ▸` in her bubble opens Settings ▸ Brain on
   her account's row (LOGGED OUT · ⏎ SIGN IN AGAIN, the same sign-in), no terminal.
 - **MODEL is a menu:** every model of every account signed in here, every key service with a key,

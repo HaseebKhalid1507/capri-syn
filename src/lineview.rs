@@ -748,16 +748,17 @@ impl Avatar {
                     }
                 }
                 provider::signin::Ev::Url(u) => {
-                    // Its own sign-in page only (`allowed`): opened whole where Synaps' was cut
-                    // (Windows), and kept for the Brain screen's row that opens it again.
-                    if provider::signin::reopen(cfg!(windows), p, &u) {
+                    // Its own sign-in page only (`allowed`, as parsed): opened whole where
+                    // Synaps' was cut (Windows), and kept for the Brain screen's row that opens it
+                    // again.
+                    if let Some(page) = provider::signin::reopen(cfg!(windows), p, &u) {
                         elog!("synaps-avatar: sign-in: {} page opened whole (Synaps' was cut at its &)", p.id);
-                        self.line_ask(Ask::OpenUrl(u.clone()), cx).ok();
+                        self.line_ask(Ask::OpenUrl(page), cx).ok();
                     }
-                    if provider::signin::allowed(p, &u)
+                    if let Some(page) = provider::signin::allowed(p, &u)
                         && let Some(s) = &mut self.signing
                     {
-                        s.url = Some(u);
+                        s.url = Some(page);
                     }
                 }
                 provider::signin::Ev::Done(Ok(())) => {

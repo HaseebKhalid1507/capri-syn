@@ -9,9 +9,10 @@
 //! Synaps' stdin is a pipe held open meanwhile: at end of input its 0.12 login gives up ("Manual
 //! input channel closed"), and once signed in it may wait on that read. So it closes once
 //! `auth.json` has the login or Synaps says it's done; Synaps is killed if it hasn't ended
-//! `WIND_DOWN` later, at `WITHIN`, on a stop, and when she quits. It ends with her however she
-//! ends (a crash too): in a job object that kills what it holds when she's gone (Windows), or
-//! with `PR_SET_PDEATHSIG` (Linux). Neither its URL nor its code is ever logged.
+//! `WIND_DOWN` later, at `WITHIN`, on a stop, and when she quits. A crash of hers takes it too:
+//! a job object that kills it when she's gone (Windows), `PR_SET_PDEATHSIG` (Linux). Only Synaps
+//! itself: what it starts (`cmd /c start`, his browser) is never in that job and stays. Neither
+//! its URL nor its code is ever logged.
 //!
 //! A page is taken only from the line its provider prints it on (`read`), and opened only when
 //! it is that provider's own sign-in page (`allowed`).
@@ -188,40 +189,48 @@ pub fn why(t: &str) -> String {
     if w.chars().count() > 90 { format!("{}…", w.chars().take(89).collect::<String>()) } else { w.to_string() }
 }
 
-/// `p`'s own sign-in page and nothing else (Synaps 0.12.0's `AUTHORIZE_URL`s: `auth/mod.rs`,
-/// `openai_codex.rs`, `google_gemini.rs`): https, that host exactly and that path, no `user@`, no
-/// port (not even `:443`), no `\` anywhere (a parser's `/`). Not another page of its domain (no
-/// `www.google.com/url?q=` redirect), not a device page (Copilot's, Kimi's, Muse's).
-pub fn allowed(p: &Provider, raw: &str) -> bool {
+/// GitHub's device page, where Copilot's code is typed (Synaps 0.12.0 prints it once its
+/// `validate_verification_uri` says it's GitHub's): the one page of a device login she opens.
+const GITHUB_DEVICE: &str = "https://github.com/login/device";
+
+/// `p`'s own sign-in page and nothing else, as parsed (what's opened: `Url::as_str`). Synaps
+/// 0.12.0's `AUTHORIZE_URL`s (`auth/mod.rs`, `openai_codex.rs`, `google_gemini.rs`): https, that
+/// host and that path exactly, no `user@`, no port (not even `:443`), no `\` anywhere (a parser's
+/// `/`), no `#`; Copilot's, exactly `GITHUB_DEVICE`. Not another page of its domain (no
+/// `www.google.com/url?q=` redirect), not Kimi's or Muse's device page (their code is on it).
+pub fn allowed(p: &Provider, raw: &str) -> Option<String> {
     let (host, path) = match p.id {
         "anthropic" => ("claude.ai", "/oauth/authorize"),
         "openai-codex" => ("auth.openai.com", "/oauth/authorize"),
         "google-gemini" => ("accounts.google.com", "/o/oauth2/v2/auth"),
-        _ => return false,
+        "github-copilot" if raw == GITHUB_DEVICE => ("github.com", "/login/device"),
+        _ => return None,
     };
     if raw.contains('\\') || raw.chars().any(|c| c.is_whitespace() || c.is_control()) {
-        return false;
+        return None;
     }
     // The authority as written (the parser drops a default port).
-    let Some(rest) = raw.strip_prefix("https://") else { return false };
+    let rest = raw.strip_prefix("https://")?;
     if rest.split(['/', '?', '#']).next().is_none_or(|a| a.contains(['@', ':'])) {
-        return false;
+        return None;
     }
-    let Ok(u) = url::Url::parse(raw) else { return false };
-    u.scheme() == "https"
+    let u = url::Url::parse(raw).ok()?;
+    let ok = u.scheme() == "https"
         && u.username().is_empty()
         && u.password().is_none()
         && u.port().is_none()
         && u.host_str() == Some(host)
-        && (u.path() == path || u.path().strip_prefix(path).is_some_and(|r| r.starts_with('/')))
+        && u.path() == path
+        && u.fragment().is_none();
+    ok.then(|| u.as_str().to_string())
 }
 
 /// On Windows Synaps 0.12 opens the page with `cmd /c start <url>`, and cmd cuts the URL at its
 /// first `&`: the page opens without its sign-in. Its whole URL is on Synaps' stderr: she opens
 /// it herself (`Ask::OpenUrl`; the shell leaves it whole), when it's the provider's own sign-in
-/// page and there's something to cut.
-pub fn reopen(windows: bool, p: &Provider, u: &str) -> bool {
-    windows && u.contains('&') && allowed(p, u)
+/// page and there's something to cut: that page, as parsed.
+pub fn reopen(windows: bool, p: &Provider, u: &str) -> Option<String> {
+    if windows && u.contains('&') { allowed(p, u) } else { None }
 }
 
 /// Synaps 0.12.0's xAI login (`xai.rs`) opens its page with `cmd /c start` (cut at its `&`) and
@@ -256,9 +265,9 @@ pub struct Run {
     lines: mpsc::Receiver<String>,
     /// The PKCE page's line is next (`read`).
     url_next: bool,
-    /// The job it runs in (Windows): what it starts ends with it, and with her.
+    /// The job it runs in (Windows): it ends with her, a crash too. Nothing it starts is in it.
     #[cfg(windows)]
-    job: Option<job::Job>,
+    _job: Option<job::Job>,
     auth: PathBuf,
     was: Option<SystemTime>,
     started: Instant,
@@ -313,8 +322,9 @@ impl Run {
         }
         let was = mtime(&auth);
         let mut child = c.spawn()?;
-        // Windows: in a job that kills it, and whatever it starts, when its handle closes (her
-        // exit, however she ends) or on a stop.
+        // Windows: in a job that kills it when its handle closes (the `Run` dropped, her exit, a
+        // crash). Only it: what it starts leaves the job (`SILENT_BREAKAWAY_OK`), his browser
+        // too. It's put in just after it starts: a crash of hers in that moment leaves it running.
         #[cfg(windows)]
         let job = match job::Job::new().and_then(|j| j.assign(&child).map(|_| j)) {
             Ok(j) => Some(j),
@@ -354,7 +364,7 @@ impl Run {
             lines,
             url_next: false,
             #[cfg(windows)]
-            job,
+            _job: job,
             auth,
             was,
             started: Instant::now(),
@@ -462,15 +472,10 @@ impl Run {
         ev
     }
 
-    /// Stopped: Synaps killed (a stop, a timeout, her quit), and on Windows whatever it started.
+    /// Stopped: Synaps killed (a stop, a timeout, her quit). Only it: what it started (his
+    /// browser) stays.
     pub fn kill(&mut self) {
         self.stdin.take();
-        #[cfg(windows)]
-        {
-            if let Some(j) = &self.job {
-                j.end();
-            }
-        }
         if self.child.try_wait().ok().flatten().is_none() {
             self.child.kill().ok();
             self.child.wait().ok();
@@ -487,14 +492,16 @@ impl Drop for Run {
     }
 }
 
-/// A job object for Synaps' login (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`): when its one handle
-/// closes (the `Run` dropped, or her process gone, a crash too) everything in it ends.
+/// A job object for Synaps' login (`KILL_ON_JOB_CLOSE`): when its one handle closes (the `Run`
+/// dropped, or her process gone, a crash too) Synaps ends. `SILENT_BREAKAWAY_OK`: what Synaps
+/// starts is never in it (its `cmd /c start`, and a browser that wasn't running yet, would be:
+/// closing the job would close his browser).
 #[cfg(windows)]
 mod job {
     use ::windows::Win32::Foundation::{CloseHandle, HANDLE};
     use ::windows::Win32::System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-        JobObjectExtendedLimitInformation, SetInformationJobObject, TerminateJobObject,
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation, SetInformationJobObject,
     };
     use ::windows::core::PCWSTR;
     use std::io;
@@ -507,7 +514,7 @@ mod job {
             let h = unsafe { CreateJobObjectW(None, PCWSTR::null()) }.map_err(io::Error::other)?;
             let job = Job(h);
             let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;
             let size = std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32;
             unsafe { SetInformationJobObject(job.0, JobObjectExtendedLimitInformation, &info as *const _ as *const _, size) }.map_err(io::Error::other)?;
             Ok(job)
@@ -515,11 +522,6 @@ mod job {
 
         pub fn assign(&self, c: &std::process::Child) -> io::Result<()> {
             unsafe { AssignProcessToJobObject(self.0, HANDLE(c.as_raw_handle())) }.map_err(io::Error::other)
-        }
-
-        /// Everything in it ends now.
-        pub fn end(&self) {
-            let _ = unsafe { TerminateJobObject(self.0, 1) };
         }
     }
 
@@ -595,14 +597,21 @@ mod tests {
         assert!(why(&"x".repeat(300)).chars().count() <= 90);
     }
 
-    /// Only the provider's own sign-in page is opened: its host and path exactly, https, no
-    /// `user@`, no port, no `\`.
+    /// Only the provider's own sign-in page is opened, as parsed: its host and path exactly,
+    /// https, no `user@`, no port, no `\`, no `#`; Copilot's, GitHub's device page exactly.
     #[test]
     fn only_its_own_sign_in_page_is_opened() {
         let (claude, codex, gemini, copilot) = (by("anthropic"), by("openai-codex"), by("google-gemini"), by("github-copilot"));
-        assert!(allowed(claude, "https://claude.ai/oauth/authorize?code=true&client_id=x&state=y"));
-        assert!(allowed(codex, "https://auth.openai.com/oauth/authorize?a=1&b=2"));
-        assert!(allowed(gemini, "https://accounts.google.com/o/oauth2/v2/auth?a=1&b=2"));
+        for (p, u) in [
+            (claude, "https://claude.ai/oauth/authorize?code=true&client_id=x&state=y"),
+            (codex, "https://auth.openai.com/oauth/authorize?a=1&b=2"),
+            (gemini, "https://accounts.google.com/o/oauth2/v2/auth?a=1&b=2"),
+            (copilot, "https://github.com/login/device"),
+        ] {
+            assert_eq!(allowed(p, u).as_deref(), Some(u));
+        }
+        // What's opened is the parser's (its host lowercased), not the text as it came.
+        assert_eq!(allowed(claude, "https://CLAUDE.ai/oauth/authorize?a=1").as_deref(), Some("https://claude.ai/oauth/authorize?a=1"));
         for (p, u, why) in [
             (claude, "https://evil.com\\.claude.ai/?a=1&b=2", "a backslash (a parser's /: evil.com)"),
             (claude, "https://claude.ai\\@evil.com/oauth/authorize?a=1", "a backslash"),
@@ -615,14 +624,23 @@ mod tests {
             (claude, "http://claude.ai/oauth/authorize?a=1&b=2", "not https"),
             (claude, "https://claude.ai/login?a=1&b=2", "another page of its host"),
             (claude, "https://claude.ai/oauth/authorizeX?a=1", "not its path"),
+            (claude, "https://claude.ai/oauth/authorize/x?a=1", "a path under it"),
+            (claude, "https://claude.ai/oauth/authorize/?a=1", "its path and a /"),
+            (claude, "https://claude.ai/oauth/authorize?a=1#b", "a fragment"),
             (claude, "https://claude.ai.evil.example/oauth/authorize?a=1&b=2", "a host under it"),
             (claude, "https://x.claude.ai/oauth/authorize?a=1&b=2", "another host of its domain"),
             (claude, "https://evil.example/claude.ai/oauth/authorize?a=1&b=2", "its name in the path"),
             (claude, "https://claude.ai/oauth/authorize?a=1 &b=2", "a space"),
             (codex, "https://claude.ai/oauth/authorize?a=1&b=2", "another's page"),
-            (copilot, "https://github.com/login/device?a=1&b=2", "a device page"),
+            (copilot, "https://github.com/login/device?a=1&b=2", "GitHub's page with more"),
+            (copilot, "https://github.com/login/device?user_code=ABCD-1234", "GitHub's page with more"),
+            (copilot, "https://github.com/login/device/", "GitHub's page and a /"),
+            (copilot, "https://GITHUB.com/login/device", "not that page exactly"),
+            (by("kimi-code"), "https://www.kimi.com/code/authorize_device?user_code=KX9-22", "Kimi's device page"),
+            (by("muse"), "https://www.meta.ai/device", "Muse's"),
+            (claude, "https://github.com/login/device", "Copilot's, not Claude's"),
         ] {
-            assert!(!allowed(p, u), "{why}: {u}");
+            assert_eq!(allowed(p, u), None, "{why}: {u}");
         }
     }
 
@@ -631,10 +649,11 @@ mod tests {
     fn a_cut_url_is_opened_whole_on_windows_only() {
         let claude = by("anthropic");
         let page = "https://claude.ai/oauth/authorize?code=true&client_id=x";
-        assert!(reopen(true, claude, page));
-        assert!(!reopen(false, claude, page), "Linux: xdg-open has it whole");
-        assert!(!reopen(true, claude, "https://claude.ai/oauth/authorize?a=1"), "nothing to cut");
-        assert!(!reopen(true, claude, "https://evil.com\\.claude.ai/?a=1&b=2"));
+        assert_eq!(reopen(true, claude, page).as_deref(), Some(page));
+        assert_eq!(reopen(false, claude, page), None, "Linux: xdg-open has it whole");
+        assert_eq!(reopen(true, claude, "https://claude.ai/oauth/authorize?a=1"), None, "nothing to cut");
+        assert_eq!(reopen(true, claude, "https://evil.com\\.claude.ai/?a=1&b=2"), None);
+        assert_eq!(reopen(true, by("github-copilot"), "https://github.com/login/device"), None, "Copilot's: nothing to cut");
         // Grok: Synaps 0.12.0 prints no page to open again.
         assert!(needs_newer(true, by("xai-auth")) && !needs_newer(false, by("xai-auth")) && !needs_newer(true, claude));
     }
