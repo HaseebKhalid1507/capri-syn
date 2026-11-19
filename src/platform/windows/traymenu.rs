@@ -431,7 +431,7 @@ mod tests {
     use super::*;
     use crate::menu::{self, State as Menu};
     use crate::settings::Attention;
-    use ::windows::Win32::Graphics::Gdi::{BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateDIBSection, DIB_RGB_COLORS, GetPixel, HBITMAP};
+    use ::windows::Win32::Graphics::Gdi::{BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CLR_INVALID, CreateDIBSection, DIB_RGB_COLORS, GdiFlush, GetPixel, HBITMAP};
 
     /// A row's words as Windows keeps them (a screen reader's; owner-drawn rows have no
     /// `GetMenuString`).
@@ -530,10 +530,15 @@ mod tests {
         }
     }
 
-    /// A 32-bit canvas `w`×`h` to draw rows on, and its pixels as 0xRRGGBB.
+    /// A 32-bit canvas `w`×`h` to draw rows on, and its pixels as 0xRRGGBB, read from its own
+    /// memory: a drawn row closes itself to the DC (its clip), and `GetPixel` through that DC
+    /// answers CLR_INVALID (white, read as a colour) for every pixel of it.
     struct Canvas {
         dc: HDC,
         bmp: HBITMAP,
+        bits: *const u32,
+        w: i32,
+        h: i32,
     }
 
     impl Canvas {
@@ -546,11 +551,20 @@ mod tests {
                 let bmp = CreateDIBSection(Some(dc), &bmi, DIB_RGB_COLORS, &mut bits, None, 0).unwrap();
                 SelectObject(dc, bmp.into());
                 fill(dc, RECT { left: 0, top: 0, right: w, bottom: h }, 0xffffff);
-                Canvas { dc, bmp }
+                Canvas { dc, bmp, bits: bits as *const u32, w, h }
             }
         }
+        /// Top-down BI_RGB: a pixel is 0x__RRGGBB in memory order (blue first).
         fn px(&self, x: i32, y: i32) -> u32 {
-            colorref(unsafe { GetPixel(self.dc, x, y) }.0)
+            assert!((0..self.w).contains(&x) && (0..self.h).contains(&y), "({x}, {y}) off the canvas");
+            unsafe {
+                let _ = GdiFlush();
+                *self.bits.add((y * self.w + x) as usize) & 0xff_ffff
+            }
+        }
+        /// Closed to the DC's drawing at (x, y): outside its clip.
+        fn closed(&self, x: i32, y: i32) -> bool {
+            unsafe { GetPixel(self.dc, x, y) }.0 == CLR_INVALID
         }
         /// Every pixel of `r`.
         fn all(&self, r: RECT) -> Vec<u32> {
@@ -603,6 +617,7 @@ mod tests {
         };
 
         let c = drawn(0, 0);
+        assert!(c.closed(1, 1) && c.closed(w - 1, h - 1), "a drawn row is closed to the system's drawing (its clip)");
         assert_eq!(c.px(1, 1), COLORS.bg, "her black");
         assert!(c.all(words).into_iter().filter(|&p| red(p)).count() > 20, "her red words");
         assert!(c.all(mark).into_iter().all(|p| p == COLORS.bg), "no mark");
