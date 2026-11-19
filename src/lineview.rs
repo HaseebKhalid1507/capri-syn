@@ -495,13 +495,16 @@ impl Avatar {
         }
     }
 
-    /// Her settings as she runs them, for the Settings page.
+    /// Her settings as asked (a change on its way to settings.toml), else as she runs them:
+    /// for the Settings page, which steps on from them as her menu does.
     pub(super) fn prefs_now(&self) -> Prefs {
         let mark = self.session.as_ref().and_then(|s| s.link.mark()).unwrap_or_else(|| "SYNAPS · OFFLINE".into());
+        let running = self.brain.as_ref().map_or(Attention::Off, |h| h.settings.brain.attention);
+        let (attention, wake) = crate::line::asked(self.prefs_io.pending().map(|j| &j.pref), running, self.voice.cfg.wake_word);
         Prefs {
-            attention: self.brain.as_ref().map_or(Attention::Off, |h| h.settings.brain.attention),
-            brain: self.brain.as_ref().is_some_and(|h| h.settings.brain.enabled),
-            wake: self.voice.cfg.wake_word,
+            attention,
+            brain: self.attention_live(),
+            wake,
             voice: self.voice.cfg.enabled,
             about: format!("CAPRI {} · {mark}", env!("CARGO_PKG_VERSION")),
             says: self.prefs_says.clone(),
@@ -525,6 +528,8 @@ impl Avatar {
             self.settings_stuck(cx);
         }
         self.settings_write_next(cx);
+        // The page shows it as asked at once (it steps on from it, as the menu does).
+        self.line_push(cx);
     }
 
     fn settings_write_next(&mut self, cx: &mut Context<Self>) {
@@ -556,6 +561,7 @@ impl Avatar {
 
     fn settings_stuck(&mut self, cx: &mut Context<Self>) {
         let n = self.prefs_io.pending().count();
+        self.menu_save = self.menu_save.stuck(self.prefs_io.pending().any(|j| j.menu));
         elog!("synaps-avatar: settings.toml: a write is stuck ({n} change(s) waiting)");
         self.prefs_says = Some(format!("Your settings file isn't answering. {n} change{} waiting.", if n == 1 { "" } else { "s" }));
         self.line_push(cx);
@@ -566,6 +572,7 @@ impl Avatar {
     /// then the reload asked for while it was under way, once the last is in.
     fn settings_written(&mut self, job: PrefJob, r: Result<bool, crate::settings::WriteError>, reload: bool, cx: &mut Context<Self>) {
         let p = job.pref;
+        self.menu_save = self.menu_save.written(p, job.menu, r.is_ok());
         self.prefs_says = Some(match r {
             Ok(_) => {
                 self.pref_apply(p);

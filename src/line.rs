@@ -9,7 +9,7 @@
 //! ([`Ask`]).
 
 mod settings;
-pub use settings::{Page, Pref, Prefs, next_attention};
+pub use settings::{MenuSave, Page, Pref, Prefs, asked, next_attention};
 
 use crate::reader::{Block, Mark, Pal, inline, parse};
 use crate::theme::{self, Cut, Fill, glyph, tracked};
@@ -1480,9 +1480,7 @@ impl Render for Line {
                     .text_color(rgb(pal.ink))
                     .child(tracked(&self.name.to_uppercase(), 1.6)),
             )
-            // Settings: the way back where the page's name is.
-            .when(self.nav.page == Page::Chat, |d| d.child(div().text_color(rgb(pal.dim)).child(tracked("LINE", 1.6))))
-            .when(self.nav.page == Page::Settings, |d| d.child(self.back_el(cx)))
+            .child(div().text_color(rgb(pal.dim)).child(tracked(if self.nav.page == Page::Settings { "SETTINGS" } else { "LINE" }, 1.6)))
             .child(div().flex_1())
             .child(state);
         let on_settings = self.nav.page == Page::Settings;
@@ -1647,9 +1645,8 @@ impl Render for Line {
         });
         // A failed turn's tip stands alone: the legend would bury it.
         let tip = self.tip.clone().filter(|_| self.note.is_none());
-        let hint = if on_settings {
-            Some(settings::hint(&self.snap.prefs.clone().unwrap_or_default(), self.sel).into())
-        } else if self.mode == Mode::Prompt || tip.is_some() {
+        // Settings has its keys in its bar (`settings_el`): no row under it.
+        let hint = if self.mode == Mode::Prompt || tip.is_some() {
             None
         } else if self.snap.caption.is_some() {
             Some("esc or $mod+c hush · the whole reply is in the thread".into())
@@ -1696,7 +1693,7 @@ impl Render for Line {
             .children(voice_row)
             .children(input)
             .children(if on_settings { self.settings_el(cx) } else { Vec::new() })
-            .child(footer)
+            .when(!on_settings, |d| d.child(footer))
             .child(
                 canvas(
                     move |b, _, cx| {

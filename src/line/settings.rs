@@ -77,10 +77,11 @@ impl Nav {
     }
 }
 
-/// What the Settings page shows: the values she runs with.
+/// What the Settings page shows: the values as asked (a change not written yet: that one,
+/// [`asked`]), else as she runs them. Her menu shows and steps from the same.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Prefs {
-    /// `[brain] attention`, as she runs it.
+    /// `[brain] attention`.
     pub attention: Attention,
     /// Her brain runs (`[brain] enabled`): ATTENTION is locked while it doesn't, and reads OFF.
     pub brain: bool,
@@ -119,19 +120,64 @@ impl Pref {
             Pref::Wake(on) => s.voice.wake_word = on,
         }
     }
+
+    /// Its value in what the page shows (asked: the page steps on from it at once).
+    pub fn show(self, p: &mut Prefs) {
+        match self {
+            Pref::Attention(a) => p.attention = a,
+            Pref::Wake(on) => p.wake = on,
+        }
+    }
 }
 
-/// The next attention for her menu's row: on from the last one asked for and not written yet,
-/// else from the one she runs (two clicks before the first write is in go two steps).
+/// Attention and the wake word as asked: the last change of each not written yet, else as
+/// she runs them (`attention`, `wake`). The page and her menu both show and step from these,
+/// so two quick changes before the first write is in go two steps, wherever they came from.
+pub fn asked<'a>(pending: impl Iterator<Item = &'a Pref>, attention: Attention, wake: bool) -> (Attention, bool) {
+    pending.fold((attention, wake), |(a, w), p| match *p {
+        Pref::Attention(x) => (x, w),
+        Pref::Wake(x) => (a, x),
+    })
+}
+
+/// The next attention for her menu's row: on from the one asked ([`asked`]).
 pub fn next_attention<'a>(pending: impl Iterator<Item = &'a Pref>, running: Attention) -> Attention {
-    pending
-        .filter_map(|p| match p {
-            Pref::Attention(a) => Some(*a),
-            Pref::Wake(_) => None,
-        })
-        .last()
-        .unwrap_or(running)
-        .next()
+    asked(pending, running, false).0.next()
+}
+
+/// Her menu's ATTENTION row, under its value: why its last click didn't stick (the write was
+/// refused, or hangs). Until an attention write lands, or a reload.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MenuSave {
+    #[default]
+    Fine,
+    Refused,
+    Stuck,
+}
+
+impl MenuSave {
+    /// A write is done (`ok`: it is in), its change from the menu or not.
+    pub fn written(self, pref: Pref, menu: bool, ok: bool) -> MenuSave {
+        match (pref, ok) {
+            (Pref::Attention(_), true) => MenuSave::Fine,
+            (_, false) if menu => MenuSave::Refused,
+            _ => self,
+        }
+    }
+
+    /// A write hangs; `menu`: a change of the menu's is among those waiting.
+    pub fn stuck(self, menu: bool) -> MenuSave {
+        if menu && self == MenuSave::Fine { MenuSave::Stuck } else { self }
+    }
+
+    /// The row's second line.
+    pub fn says(self) -> Option<&'static str> {
+        match self {
+            MenuSave::Fine => None,
+            MenuSave::Refused => Some("CAN'T SAVE · settings.toml"),
+            MenuSave::Stuck => Some("NOT SAVED YET · settings.toml"),
+        }
+    }
 }
 
 /// The page's rows, top to bottom.
@@ -202,8 +248,15 @@ pub(super) fn hold_fires(hold_at: Option<Instant>, started: Instant, page: Page,
 /// the field's, so the swap moves nothing under it.
 pub(super) const FIELD_H0: f32 = 52.0;
 const COG_W: f32 = 34.0;
+/// `◂ CHAT`, in the cog's spot on Settings.
+const BACK_W: f32 = 84.0;
 /// Her line's slot on the Settings page.
 const QUOTE_H: f32 = 28.0;
+/// How far chat's cog sits above Settings' bar's `◂ CHAT` with no room to spare: chat's row of
+/// keys under its field (4 + a line + 8) less the bar's 8 under it.
+const BAR_DROP: f32 = 4.0 + super::LINE_H;
+/// A row's height, a sub-line ("voice is off") inside it: the page is as tall locked or not.
+const ROW_H: f32 = 32.0;
 /// The page's small type (a version, a lock, a reason, the hints): px.
 pub(super) const SMALL: f32 = 12.0;
 
@@ -265,15 +318,13 @@ impl Line {
         }
     }
 
-    /// The cog: a chamfered shard as tall as the field, a dim-red edge round a red gear, solid
-    /// red on hover. On Settings it is lit (her red edge): the same spot flips back.
+    /// The cog, left of the field: a chamfered shard as tall as it, a dim-red edge round a red
+    /// gear, solid red on hover. On Settings its spot is `◂ CHAT` ([`Line::back_el`]).
     pub(super) fn cog_el(&self, cx: &Context<Line>) -> Stateful<Div> {
         let pal = self.pal;
-        let on = self.nav.page == Page::Settings;
         let (turn, _) = self.cog_turn(Instant::now());
         let cut = Cut::Corners(7.0);
         let center = || div().absolute().top_0().left_0().size_full().flex().items_center().justify_center();
-        let (edge, w) = if on { (pal.accent, 2.0) } else { (pal.border, 1.5) };
         div()
             .id("cog")
             .group("cog")
@@ -281,7 +332,7 @@ impl Line {
             .flex_none()
             .w(px(COG_W))
             .cursor_pointer()
-            .child(theme::backdrop(cut, Fill::framed(pal.field, edge, w)))
+            .child(theme::backdrop(cut, Fill::framed(pal.field, pal.border, 1.5)))
             .child(center().child(gear(pal.accent, pal.field, 15.0, turn)))
             .child(center().invisible().group_hover("cog", |s| s.visible()).child(theme::backdrop(cut, Fill::solid(pal.accent))).child(gear(pal.ink, pal.accent, 15.0, turn)))
             .on_mouse_down(
@@ -294,28 +345,37 @@ impl Line {
             )
     }
 
-    /// Settings' way back, in the header where the page's name was: one row tall, her dim-red
-    /// edge as the cog's (her red on hover).
+    /// Settings' way back, in the cog's spot (he leaves where he came in): `◂ CHAT`, as tall
+    /// as the cog and edged as it is, solid red on hover.
     pub(super) fn back_el(&self, cx: &Context<Line>) -> Stateful<Div> {
         let pal = self.pal;
-        let cut = Cut::Corners(5.0);
+        let cut = Cut::Corners(7.0);
+        let face = |fg: u32, bg: u32| {
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .gap(px(7.0))
+                .text_size(px(12.5))
+                .font_weight(FontWeight::BOLD)
+                .text_color(rgb(fg))
+                .child(theme::glyph_at("back", fg, bg, 10.0))
+                .child(tracked("CHAT", 1.4))
+        };
         div()
             .id("set-chat")
             .group("set-chat")
             .relative()
-            .h(px(20.0))
-            .pl(px(7.0))
-            .pr(px(10.0))
-            .flex()
-            .items_center()
-            .gap(px(5.0))
+            .flex_none()
+            .w(px(BACK_W))
             .cursor_pointer()
-            .text_size(px(11.5))
-            .text_color(rgb(pal.accent))
             .child(theme::backdrop(cut, Fill::framed(pal.field, pal.border, 1.5)))
-            .child(div().absolute().top_0().left_0().size_full().invisible().group_hover("set-chat", |s| s.visible()).child(theme::backdrop(cut, Fill::line(pal.accent, 1.5))))
-            .child(theme::glyph_at("back", pal.accent, pal.field, 9.0))
-            .child(div().group_hover("set-chat", |s| s.text_color(rgb(pal.text))).child(tracked("CHAT", 1.6)))
+            .child(face(pal.accent, pal.field))
+            .child(div().absolute().top_0().left_0().size_full().invisible().group_hover("set-chat", |s| s.visible()).child(theme::backdrop(cut, Fill::solid(pal.accent))).child(face(pal.ink, pal.accent)))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseDownEvent, window, cx| {
@@ -409,6 +469,11 @@ impl Line {
     fn settings_act(&mut self, act: Act, cx: &mut Context<Line>) {
         match act {
             Act::Pref(p) => {
+                // Shown as asked at once: a second key steps on from it, not from the value
+                // the first one's write hasn't changed yet (her next snapshot says the same).
+                if let Some(prefs) = &mut self.snap.prefs {
+                    p.show(prefs);
+                }
                 (self.on_ask)(Ask::Pref(p), cx).ok();
             }
             Act::Copy => {
@@ -529,6 +594,7 @@ impl Line {
                 .flex()
                 .items_center()
                 .gap(px(6.0))
+                .line_height(px(14.0))
                 .text_size(px(SMALL))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(rgb(small_c))
@@ -541,7 +607,7 @@ impl Line {
                 .flex_none()
                 .flex()
                 .flex_col()
-                .line_height(px(16.0))
+                .line_height(px(14.0))
                 .child(div().text_size(px(12.5)).font_weight(FontWeight::BOLD).text_color(rgb(if on { pal.text } else { theme::mix(pal.text, pal.dim, 0.55) })).child(tracked(name, 1.4)))
                 .children(sub.map(|s| div().text_size(px(SMALL)).font_weight(FontWeight::MEDIUM).text_color(rgb(small_c)).child(s.to_string())))
         };
@@ -551,8 +617,7 @@ impl Line {
                 .id(SharedString::from(format!("set-row-{ix}")))
                 .relative()
                 .px(px(PAD))
-                .py(px(3.0))
-                .min_h(px(32.0))
+                .h(px(ROW_H))
                 .flex()
                 .items_center()
                 .gap(px(8.0))
@@ -672,18 +737,24 @@ impl Line {
         }
         // As tall as chat was (the content's min height): the bar stays where the field was.
         out.push(div().flex_1().min_h(px(4.0)).into_any_element());
-        // The bar where the field is, as tall as the field's: the cog, lit (it flips back), and
-        // what came meanwhile.
+        // The bar where chat's field is (its keys on the same row, no row under it): `◂ CHAT` in
+        // the cog's spot, the keys (or what she just did: COPIED), what came meanwhile.
+        let (keys, keys_c, weight) = match &self.note {
+            Some(n) => (n.clone(), pal.accent, FontWeight::BOLD),
+            None => (hint(&p, sel).to_string(), small_c, FontWeight::MEDIUM),
+        };
         out.push(
             div()
                 .px(px(PAD))
                 .pt(px(10.0))
+                .pb(px(8.0))
                 .border_t_1()
                 .border_color(rgb(pal.rule))
                 .flex()
-                .h(px(10.0 + 1.0 + self.field_h.get()))
-                .gap(px(8.0))
-                .child(self.cog_el(cx))
+                .h(px(10.0 + 1.0 + self.field_h.get() + 8.0))
+                .gap(px(12.0))
+                .child(self.back_el(cx))
+                .child(div().self_center().text_size(px(SMALL)).line_height(px(16.0)).font_weight(weight).text_color(rgb(keys_c)).whitespace_nowrap().child(keys))
                 .child(div().flex_1())
                 .when(p.new > 0, |d| {
                     d.child(
@@ -700,13 +771,17 @@ impl Line {
                 })
                 .into_any_element(),
         );
+        // The room the page has over its rows (it is as tall as chat) goes under the bar first,
+        // up to chat's row of keys: `◂ CHAT` where the cog was, his second click in place
+        // goes back. The rest above it.
+        out.push(div().max_h(px(BAR_DROP)).flex_grow(1000.0).into_any_element());
         out
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Act, Mode, Nav, Page, Pref, Prefs, SetRow, hint, hold_fires, list_key, next_attention, set_rows};
+    use super::{Act, MenuSave, Mode, Nav, Page, Pref, Prefs, SetRow, asked, hint, hold_fires, list_key, next_attention, set_rows};
     use crate::settings::{Attention, Settings, WriteQueue, write_at};
 
     #[test]
@@ -799,6 +874,87 @@ mod tests {
         // A later hold, or another prompt in its place: not this one's.
         assert!(!hold_fires(Some(t0 + std::time::Duration::from_millis(5)), t0, Page::Chat, p, true));
         assert!(!hold_fires(Some(t0), t0, Page::Chat, p, false));
+    }
+
+    /// The page and her menu step from the same value: the one asked, not yet written.
+    #[test]
+    fn page_and_menu_step_from_what_was_asked() {
+        // Two quick → on the page, before the first write is in: two steps (the page shows
+        // each as asked at once, and steps on from it).
+        let mut p = prefs();
+        let (_, a) = list_key("right", 0, &p);
+        assert_eq!(a, Act::Pref(Pref::Attention(Attention::HangOnly)));
+        let Act::Pref(x) = a else { unreachable!() };
+        x.show(&mut p);
+        assert_eq!(list_key("right", 0, &p).1, Act::Pref(Pref::Attention(Attention::Off)));
+        // "HEY CAPRI" twice: off, then on again (not off twice).
+        let (_, w) = list_key("space", 1, &p);
+        let Act::Pref(x) = w else { unreachable!() };
+        x.show(&mut p);
+        assert_eq!(list_key("space", 1, &p).1, Act::Pref(Pref::Wake(true)));
+        // The menu clicked once (HANG ONLY on its way), then the page: the page's Prefs are as
+        // asked, so → goes to OFF, as the menu's next click would.
+        let pending = [Pref::Attention(Attention::HangOnly), Pref::Wake(false)];
+        let (att, wake) = asked(pending.iter(), Attention::Mix, true);
+        assert_eq!((att, wake), (Attention::HangOnly, false));
+        let page = Prefs { attention: att, wake, ..prefs() };
+        assert_eq!(list_key("right", 0, &page).1, Act::Pref(Pref::Attention(next_attention(pending.iter(), Attention::Mix))));
+        assert_eq!(asked(std::iter::empty(), Attention::Off, true), (Attention::Off, true), "nothing asked: as she runs");
+    }
+
+    /// Her menu's ATTENTION click refused (a read-only, typo'd or nix-store settings.toml) or
+    /// hanging: its row says so, until an attention write lands or a reload.
+    #[test]
+    fn a_menu_click_that_didnt_stick_says_so_on_its_row() {
+        let m = MenuSave::Fine;
+        assert_eq!(m.says(), None);
+        let att = Pref::Attention(Attention::Off);
+        assert_eq!(m.written(att, true, false).says(), Some("CAN'T SAVE · settings.toml"));
+        // The page's own refusal is the page's to say (her line there).
+        assert_eq!(m.written(att, false, false), MenuSave::Fine);
+        // Hanging, with a menu change waiting; not when only the page's are.
+        assert_eq!(m.stuck(true).says(), Some("NOT SAVED YET · settings.toml"));
+        assert_eq!(m.stuck(false), MenuSave::Fine);
+        assert_eq!(MenuSave::Refused.stuck(true), MenuSave::Refused, "refused stays refused");
+        // An attention write in (the menu's or the page's): fine again; a wake one: no news.
+        assert_eq!(MenuSave::Stuck.written(att, true, true), MenuSave::Fine);
+        assert_eq!(MenuSave::Refused.written(att, false, true), MenuSave::Fine);
+        assert_eq!(MenuSave::Refused.written(Pref::Wake(true), false, true), MenuSave::Refused);
+        // The real thing: a read-only file refuses the menu's write, nothing changes, the row
+        // says so; writable again, the next click lands and the row is clear.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let d = std::env::temp_dir().join(format!("sa-menu-save-{}", std::process::id()));
+            std::fs::remove_dir_all(&d).ok();
+            std::fs::create_dir_all(&d).unwrap();
+            let f = d.join("settings.toml");
+            std::fs::write(&f, "[brain]\nattention = \"mix\"\n").unwrap();
+            let load = || Settings::parse(&std::fs::read_to_string(&f).unwrap()).unwrap();
+            let mut mem = load();
+            let mut q: WriteQueue<(Pref, bool)> = WriteQueue::default();
+            let mut row = MenuSave::Fine;
+            let t0 = std::time::Instant::now();
+            let click = |q: &mut WriteQueue<(Pref, bool)>, mem: &mut Settings, row: &mut MenuSave| {
+                let a = next_attention(q.pending().map(|j| &j.0), mem.brain.attention);
+                q.push(vec![Pref::Attention(a).edit()], (Pref::Attention(a), true));
+                let (n, edits) = q.start(t0).unwrap();
+                let r = write_at(&f, &edits);
+                let ((p, menu), _) = q.finish(n).unwrap();
+                if r.is_ok() {
+                    p.apply(mem);
+                }
+                *row = row.written(p, menu, r.is_ok());
+            };
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o444)).unwrap();
+            click(&mut q, &mut mem, &mut row);
+            assert_eq!((mem.brain.attention, row.says()), (Attention::Mix, Some("CAN'T SAVE · settings.toml")));
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o644)).unwrap();
+            click(&mut q, &mut mem, &mut row);
+            assert_eq!((mem.brain.attention, row.says()), (Attention::HangOnly, None));
+            assert_eq!(load().brain.attention, Attention::HangOnly);
+            std::fs::remove_dir_all(&d).ok();
+        }
     }
 
     /// Her menu's ATTENTION row, a Settings change and a `settings reload`, mixed with the
