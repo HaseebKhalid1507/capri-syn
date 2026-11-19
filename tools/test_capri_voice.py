@@ -358,6 +358,7 @@ class FakeSd:
 
     def __init__(self, later=()):
         self.opened, self.streams, self.later, self.extra, self.gone = [], [], list(later), [], set()
+        self.busy = set()             # listed, but opening them fails (held exclusively, mic privacy)
         self._initialized, self.restarts, self.fail_start, self.no_stream_start = 1, 0, False, False
 
     def drop(self, name):
@@ -429,7 +430,7 @@ class FakeSd:
 
     def RawInputStream(self, **kw):
         name = {d['index']: d['name'] for d in self.query_devices()}.get(kw.get('device'))
-        if name in self.gone:
+        if name in self.gone or name in self.busy:
             raise RuntimeError('Error opening RawInputStream: Unanticipated host error [PaErrorCode -9999]')
         self.opened.append(('input', kw))
         self.streams.append(self.Stream(self, name, kw.get('finished_callback')))
@@ -449,10 +450,15 @@ class NamedMic(unittest.TestCase):
         self.addCleanup(p.stop)
         self.addCleanup(lambda: self.assertEqual([s for s in win._STREAMS if not s.closed], [], 'every stream closed'))
         self.t = 1000.0
+        self.logged = []
         for p in (mock.patch.object(win, '_clock', lambda: self.t), mock.patch.object(win, '_reloaded_at', None),
-                  mock.patch.object(win, '_stale', False)):
+                  mock.patch.object(win, '_stale', False), mock.patch.object(win, '_failing', set()),
+                  mock.patch.object(win, 'log', lambda *a: self.logged.append(' '.join(map(str, a))))):
             p.start()
             self.addCleanup(p.stop)
+
+    def found_lines(self):
+        return [line for line in self.logged if 'found once the device list was read again' in line]
 
     def test_one_device_per_name(self):
         sd, mic = self.sd, FakeSd.MIC
@@ -598,6 +604,45 @@ class NamedMic(unittest.TestCase):
         self.assertEqual(sd.restarts, 2)
         with self.assertRaises(LookupError):
             win.Mic(16000, FakeSd.BT)          # ITS SOURCE IS GONE, not CAPTURE FAILED
+
+    def test_a_mic_listed_but_refused_is_read_again_once_per_streak(self):
+        """Listed but it won't open (another app holds it exclusively, Windows' mic privacy): the wake
+        word asks every 3 s (CAPTURE FAILED), and PortAudio's list is read again once for that streak
+        of failures, not every 10 s while it lasts. Once it opens the streak is over: the next one gets
+        its read. The "found" line is for a miss only, so none here."""
+        sd, mic = self.use(FakeSd()), FakeSd.MIC
+
+        def streak():
+            for _ in range(40):                # two minutes of asks
+                self.assertFalse(win.node_missing('sources', mic), 'listed all along')
+                with self.assertRaises(RuntimeError):
+                    win.Mic(16000, mic)
+                self.t += 3
+        sd.busy.add(mic)
+        streak()
+        self.assertEqual(sd.restarts, 1, 'one read for the streak')
+        sd.busy.discard(mic)
+        win.Mic(16000, mic).terminate()        # it opens: the streak is over
+        sd.no_stream_start = True              # now it opens but won't start
+        streak()
+        self.assertEqual(sd.restarts, 2, 'a new streak, one more read')
+        self.assertEqual(self.found_lines(), [])
+        sd.no_stream_start = False
+        win.Mic(16000, mic).terminate()
+        self.assertEqual(sd.restarts, 2)
+
+    def test_found_is_logged_for_a_miss_only(self):
+        sd = self.use(FakeSd(later=[FakeSd.BT]))
+        self.assertFalse(win.node_missing('sources', FakeSd.BT))
+        self.assertEqual(len(self.found_lines()), 1, 'a miss, read again: found')
+        win.Mic(16000, FakeSd.BT).terminate()
+        sd.busy.add(FakeSd.BT)
+        with self.assertRaises(RuntimeError):
+            win.Mic(16000, FakeSd.BT)
+        self.t += 10
+        self.assertFalse(win.node_missing('sources', FakeSd.BT), 'stale: read again, still there')
+        self.assertEqual(sd.restarts, 2)
+        self.assertEqual(len(self.found_lines()), 1, 'it was never missing: no second line')
 
     def test_a_stream_that_will_not_start_is_closed(self):
         """A stream whose start fails is closed at once: left open (till the garbage collector) it

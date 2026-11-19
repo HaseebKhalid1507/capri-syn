@@ -149,8 +149,11 @@ _reloaded_at = None           # when it last started again (or tried)
 # A stream on a named device that wouldn't open or start: PortAudio may still list a device that
 # went away (a headset out of range: its list is a snapshot), so a hit on that name proves nothing.
 # The next look reads the list again (as for a miss, with the same cap), and finds it gone (ITS
-# SOURCE IS GONE) or back.
+# SOURCE IS GONE) or back. Once per streak of failures (_failing: the devices that have failed
+# since they last opened): one that is listed but won't open (another app holds it exclusively,
+# Windows' mic privacy) gets one read, not one every 10 s for as long as it's refused.
 _stale = False
+_failing = set()              # (kind, name)
 
 
 def _reload(sd):
@@ -203,9 +206,10 @@ def _named(sd, name, kind):
             i = None if down else _find(sd, name, kind)
         except Exception:
             i, down = None, True
-        if (i is None or _stale) and (down or _reload_due()) and _reload(sd):
+        miss = i is None
+        if (miss or _stale) and (down or _reload_due()) and _reload(sd):
             i = _find(sd, name, kind)
-            if i is not None:
+            if miss and i is not None:
                 log(f'audio: {kind} "{name.strip()}" found once the device list was read again')
         return i
 
@@ -242,7 +246,7 @@ def _open_at(sd, cls, rate, device, kind, **kw):
         try:
             return cls(device=idx, **wasapi, **kw)
         except Exception:
-            _went_stale()
+            _went_stale((kind, device))
             raise
     w = _wasapi(sd, kind)
     if w is not None:
@@ -253,10 +257,10 @@ def _open_at(sd, cls, rate, device, kind, **kw):
     return cls(samplerate=rate, channels=1, dtype='int16', **kw)
 
 
-def _start(s, named=False):
+def _start(s, named=None):
     """s.start(); a stream that won't start is closed (and leaves _STREAMS), or it would keep the
     device list from being read again till the garbage collector got to it. On a named device
-    (`named`) the list is marked stale too."""
+    (`named`: its (kind, name)) the list is marked stale too; one that starts ends its streak."""
     try:
         s.start()
     except Exception:
@@ -266,13 +270,19 @@ def _start(s, named=False):
             pass
         _STREAMS.discard(s)
         if named:
-            _went_stale()
+            _went_stale(named)
         raise
+    if named:
+        _failing.discard(named)
 
 
-def _went_stale():
+def _went_stale(dev):
+    """Named device `dev` failed (or its stream ended by itself): the list is read again at the next
+    look, if this is its first failure since it last opened."""
     global _stale
-    _stale = True
+    if dev not in _failing:
+        _failing.add(dev)
+        _stale = True
 
 
 class _Out:
@@ -290,14 +300,14 @@ class Mic:
         import sounddevice as sd
         self.q = queue.Queue()
         self.stdout = _Out()
-        self.closed, self.named = False, device is not None
+        self.closed, self.named = False, ('input', device) if device is not None else None
         self.stream = _open(sd, sd.RawInputStream, rate, device, 'input', blocksize=rate // 50,
                             callback=lambda data, n, t, st: self.q.put(bytes(data)), finished_callback=self._finished)
         _start(self.stream, named=self.named)
 
     def _finished(self):
         if self.named and not self.closed:
-            _went_stale()             # it ended by itself: his device went away (a headset out of range)
+            _went_stale(self.named)             # it ended by itself: his device went away (a headset out of range)
         self.q.put(b'')
 
     def read(self, wait):
@@ -336,7 +346,7 @@ class Player:
         self.lk, self.done = threading.Lock(), threading.Event()
         self.stdin = self
         self.stream = _open(sd, sd.RawOutputStream, rate, device, 'output', callback=self._fill, finished_callback=self.done.set)
-        _start(self.stream, named=device is not None)
+        _start(self.stream, named=('output', device) if device is not None else None)
 
     def write(self, data):
         with self.lk:

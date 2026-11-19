@@ -926,6 +926,7 @@ impl Avatar {
                 w.open = Some(now);
                 w.asked = None;
                 w.paused = None;
+                w.lost_hf = false; // a late handsfree-end no longer speaks for this stream
                 elog!("synaps-avatar: voice: wake word listening (sensitivity {})", self.voice.cfg.wake_sensitivity);
                 self.voice_changed(cx);
             }

@@ -65,6 +65,9 @@ connects later (a Bluetooth headset after sign-in) is found without a restart:
   (`WAKE PAUSED · MIC LOST`). PortAudio's list still holds it, so a stream on a named mic that ends by
   itself, or won't open or start, marks the list stale: the next look reads it again (the same 10 s
   cap) and finds the mic gone or back. The wake word is asked for again every 30 s, as for a gone one.
+  Once per streak of failures: a mic that's listed but refused (another app holds it exclusively,
+  Windows' mic privacy: `WAKE PAUSED · CAPTURE FAILED`, asked again every 3 s) gets one read, and the
+  next only after it has opened again.
 
 While the list is read again (PortAudio starting again: a fraction of a second, more with many
 devices) a new stream of hers waits, and a line the sidecar logs in that moment is lost (sounddevice
