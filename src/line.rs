@@ -558,7 +558,7 @@ impl Line {
     }
 
     pub fn state_json(&self, cx: &App) -> serde_json::Value {
-        serde_json::json!({
+        let mut v = serde_json::json!({
             "mode": if self.mode == Mode::Prompt { "prompt" } else { "text" },
             "parked": self.parked,
             "waiting": self.waiting,
@@ -579,13 +579,17 @@ impl Line {
             "page": self.nav.page.key(),
             "spot": self.spot.get(),
             "sel": self.sel,
-            "brain_sel": self.bsel,
-            "other": self.other,
-            "mind": self.snap.prefs.as_ref().map(|p| serde_json::json!({
+        });
+        // Settings ▸ Brain (apart: the macro's recursion limit).
+        v["brain_sel"] = self.bsel.into();
+        v["other"] = self.other.into();
+        v["mind"] = self.snap.prefs.as_ref().map_or(serde_json::Value::Null, |p| {
+            serde_json::json!({
                 "model": p.mind.model, "signed_in": p.mind.signed_in, "signed": p.mind.signed, "here": p.mind.here,
                 "local": p.mind.local.as_ref().map(|(u, l)| format!("{u} {l:?}")),
-            })),
-        })
+            })
+        });
+        v
     }
 
     /// Parked from outside (a click elsewhere): it shows so until the summon key or a click.

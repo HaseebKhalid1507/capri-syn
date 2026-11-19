@@ -4185,7 +4185,7 @@ impl Avatar {
             "session": self.session.as_ref().map(|s| {
                 let b = s.link.body(Instant::now());
                 serde_json::json!({ "live": b.live, "busy": b.busy, "mood": b.mood.key(), "label": b.label, "reply": b.reply,
-                                    "echo": b.echo, "prompt": b.prompt.map(|p| p.title), "creds": format!("{:?}", s.link.creds()), "here": s.link.local(),
+                                    "echo": b.echo, "prompt": b.prompt.map(|p| p.title),
                                     "mode": format!("{:?}", s.link.mode()).to_lowercase(), "client": s.generation })
             }),
             "input": self.input.as_ref().map(|i| serde_json::json!({ "len": i.text.chars().count(), "secret": i.secret.is_some(),
@@ -4199,6 +4199,11 @@ impl Avatar {
             }).collect::<serde_json::Map<_, _>>(),
         });
         v["art"] = self.art_json();
+        if let Some(s) = &self.session {
+            // Her brain as she reads it (outside the macro above: its recursion limit).
+            v["session"]["creds"] = format!("{:?}", s.link.creds()).into();
+            v["session"]["here"] = s.link.local().into();
+        }
         v["panel_layout"] = self.panel_probe.clone().filter(|_| self.panel_up()).into();
         // The header as last painted (its words may be newer than the layout's).
         if let Some(p) = v["panel_layout"].as_object_mut() {
