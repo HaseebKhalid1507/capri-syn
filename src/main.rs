@@ -84,11 +84,14 @@ struct Args {
     model: Option<String>,
     no_session: bool,
     sleepy_after: std::time::Duration,
+    /// `--set KEY=VALUE`: these settings written (her installer), then exit; nothing else runs.
+    set: Vec<settings::Edit>,
 }
 
 const USAGE: &str = "usage: synaps-avatar [--profile P | --socket PATH] [--session NAME|ID | --new [--cwd DIR] [--model M]] [--no-session]
                      [--sleepy-after MIN] [--pack DIR] [--height PX] [--name NAME] [--threads N] [--no-verify]
                      [--focus-probe] [--check [--dump DIR]]
+       synaps-avatar --set KEY=VALUE [--set KEY=VALUE ...]
 
 Session (one Synaps daemon session drives the body):
   --profile P     daemon profile (default $SYNAPS_PROFILE, else the default daemon)
@@ -113,6 +116,10 @@ Session (one Synaps daemon session drives the body):
   --check         validate and decode the pack, print stats, exit (no window)
   --dump DIR      with --check: every decoded frame as a PNG in DIR (her pixels at --height)
 
+  --set KEY=VALUE  write it to settings.toml through her settings writer (the rest of the file as
+                  it was; one with a typo is refused), then exit. Her installer's keys only:
+                  voice.enabled, voice.wake_word, voice.speak_unprompted (true|false), voice.mic
+
 Dev control: newline commands on $XDG_RUNTIME_DIR/synaps-avatar.sock
   mood <idle|thinking|working|talking|needs_you|done|annoyed|sleepy|away>
   clip <clip, action or frame id>   say <text>   page next|prev   collapse   expand
@@ -120,6 +127,24 @@ Dev control: newline commands on $XDG_RUNTIME_DIR/synaps-avatar.sock
   music on|off   glitch   state   hide   quit
   art <stand|perch|sleepFloor|sleepWindow> <variant id|next>   (a variant pool she is in)
   submit <text>   abort   prompt confirm|secret [text]   (session / dev)";
+
+/// One `--set KEY=VALUE`: the keys her installer's Voice page writes, and only those.
+fn set_edit(pair: &str) -> Result<settings::Edit> {
+    use settings::Edit;
+    let (key, value) = pair.split_once('=').with_context(|| format!("--set {pair}: KEY=VALUE"))?;
+    let flag = || match value.trim() {
+        "true" | "on" => Ok(true),
+        "false" | "off" => Ok(false),
+        v => Err(anyhow::anyhow!("--set {key}: true or false, not `{v}`")),
+    };
+    Ok(match key.trim() {
+        "voice.enabled" => Edit::Set("voice", "enabled", flag()?.into()),
+        "voice.wake_word" => Edit::Set("voice", "wake_word", flag()?.into()),
+        "voice.speak_unprompted" => Edit::Set("voice", "speak_unprompted", flag()?.into()),
+        "voice.mic" => Edit::Set("voice", "mic", value.trim().into()),
+        k => bail!("--set {k}: not a key she sets this way (voice.enabled, voice.wake_word, voice.speak_unprompted, voice.mic)"),
+    })
+}
 
 fn parse_args() -> Result<Args> {
     parse_args_from(std::env::args().skip(1))
@@ -144,6 +169,7 @@ fn parse_args_from(argv: impl IntoIterator<Item = String>) -> Result<Args> {
         model: None,
         no_session: false,
         sleepy_after: std::time::Duration::from_secs(600),
+        set: Vec::new(),
     };
     let (mut session, mut new) = (None, false);
     let mut it = argv.into_iter();
@@ -165,6 +191,7 @@ fn parse_args_from(argv: impl IntoIterator<Item = String>) -> Result<Args> {
             "--cwd" => a.cwd = Some(PathBuf::from(val("a directory")?)),
             "--model" => a.model = Some(val("a model")?),
             "--no-session" => a.no_session = true,
+            "--set" => a.set.push(set_edit(&val("KEY=VALUE")?)?),
             "--sleepy-after" => {
                 let m: f64 = val("minutes")?.parse().context("--sleepy-after: not a number")?;
                 if !(m > 0.0 && m < 1e6) {
@@ -244,11 +271,30 @@ fn main() {
 
 fn run(t_start: Instant) -> Result<()> {
     let args = parse_args()?;
+    if !args.set.is_empty() {
+        let path = settings::Settings::path();
+        return match settings::Settings::write(&args.set) {
+            Ok(written) => {
+                olog!("settings: {} ({})", if written { "written" } else { "already so" }, path.display());
+                Ok(())
+            }
+            Err(e) => bail!("settings: {} ({e:?}; {})", e.says(), path.display()),
+        };
+    }
     let pack = Arc::new(pack::Pack::load(&args.pack)?);
     if args.verify {
         frames::verify_poses(&pack)?;
     }
     let t_pack = t_start.elapsed().as_millis();
+    if !args.check {
+        // A write of hers that never finished (a crash, a kill) left its temp file: hers only.
+        std::thread::spawn(|| {
+            let n = settings::sweep_temps(&settings::Settings::path());
+            if n > 0 {
+                elog!("synaps-avatar: settings: {n} temp file(s) left by an unfinished write, removed");
+            }
+        });
+    }
 
     if args.check {
         let layout = view::Layout::new(&pack, 1.0, args.height);
@@ -634,7 +680,7 @@ fn fatal(e: anyhow::Error) -> ! {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: gpui's glob exports a `test` attribute that would shadow `#[test]`.
-    use super::{Args, PathBuf, Result, parse_args_from, session};
+    use super::{Args, PathBuf, Result, parse_args_from, session, settings};
 
     fn parse(args: &[&str]) -> Result<Args> {
         parse_args_from(args.iter().map(|s| s.to_string()))
@@ -668,6 +714,27 @@ mod tests {
             assert!(e.contains("exclude each other"), "{e}");
         }
         assert!(parse(&["--socket"]).err().expect("no path").to_string().contains("needs a socket path"));
+    }
+
+    /// Her installer's Voice page: `--set` takes its keys (and nothing else) to her settings writer.
+    #[test]
+    fn set_takes_the_installers_keys_only() {
+        let a = parse(&["--set", "voice.enabled=true", "--set", "voice.wake_word=off", "--set", "voice.mic=Microphone (USB Audio)"]).unwrap();
+        assert_eq!(a.set.len(), 3);
+        assert!(parse(&["--set", "voice.mic="]).is_ok(), "empty: Windows' default");
+        for bad in ["voice.enabled=maybe", "brain.attention=off", "voice.enabled", "voice.voice=af_heart"] {
+            assert!(parse(&["--set", bad]).is_err(), "{bad}");
+        }
+        let dir = std::env::temp_dir().join(format!("sa-set-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("settings.toml");
+        std::fs::write(&p, "# his\n[voice]\nspeed = 1.1 # mine\n").unwrap();
+        assert!(settings::write_at(&p, &a.set).unwrap());
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(text.starts_with("# his\n[voice]\nspeed = 1.1 # mine\n"), "{text}");
+        let v = settings::Settings::parse(&text).unwrap().voice;
+        assert!(v.enabled && !v.wake_word && v.mic == "Microphone (USB Audio)");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
