@@ -86,6 +86,15 @@
 - MODEL is refused under `--model` / `--session` whoever asks; with `[brain]` off its write reads
   `[session]` off her UI thread.
 
+### Windows voice: the VC++ runtime is in the bundle
+- A Windows PC without the Visual C++ Redistributable couldn't start her voice: onnxruntime's and
+  espeak-ng's DLLs import `MSVCP140.dll` (onnxruntime `MSVCP140_1.dll` too), and the sidecar died on
+  import ("DLL load failed") over and over, with nothing on screen. The voice bundle now carries the
+  runtime beside its Python (`msvcp140.dll`, `msvcp140_1.dll`, `vcruntime140*.dll`, from Visual
+  Studio, unmodified) with Microsoft's terms for it (`licenses\vc-runtime\LICENSE.txt`). Its build
+  stops when a DLL imports what neither the bundle nor Windows has, or a runtime older than the MSVC
+  that linked it (`voice-imports.py`), and CI checks the installed bundle loads its own copies.
+
 ### Every download carries its licences
 
 - The Linux tarball and both Windows installers now hold capri-syn's `LICENSE` and the notices that go
