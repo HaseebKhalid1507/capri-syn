@@ -1,18 +1,17 @@
 //! `-V` / `--version`, and her log's header, from her real binary: the flag exits before anything
-//! starts (no pack, no window, no daemon), and the header comes after the command line is read.
+//! starts (no pack, no window, no daemon; alone, before process_setup too), and the header comes
+//! after the command line is read.
 
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Her binary with these arguments. No GPU choice and no backend swap on Linux (`process_setup`
-/// says nothing of its own), no GPUI log.
+/// Her binary with these arguments, as this machine runs her (its GPUs: `process_setup` may say
+/// which it picked), without GPUI's log.
 fn her(args: &[&str]) -> (u32, Output) {
     let child = Command::new(env!("CARGO_BIN_EXE_synaps-avatar"))
         .args(args)
-        .env("SA_ANY_GPU", "1")
-        .env_remove("SA_BACKEND")
         .env_remove("SA_LOG")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -40,8 +39,12 @@ fn version_is_one_line_on_stdout_and_nothing_starts() {
         let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
         assert!(out.status.success(), "{args:?}: {:?}\n{stderr}", out.status);
         assert_eq!(stdout, format!("synaps-avatar {VERSION}\n"), "{args:?}");
-        // No log header: `$(synaps-avatar -V 2>&1)` in a script is her version and nothing else.
-        assert_eq!(stderr, "", "{args:?}");
+        assert!(!stderr.contains("--- synaps-avatar"), "no log header: {args:?}\n{stderr}");
+        // Alone, on any machine (a multi-GPU one too): `$(synaps-avatar -V 2>&1)` is her version
+        // and nothing else.
+        if args.len() == 1 {
+            assert_eq!(stderr, "", "{args:?}");
+        }
     }
     // An unknown flag before it is still refused.
     let (_, out) = her(&["--nope", "-V"]);
@@ -49,10 +52,10 @@ fn version_is_one_line_on_stdout_and_nothing_starts() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("unknown argument `--nope`"));
 }
 
-/// Linux: her log (stderr: install.sh's launch.log, a journal) starts with her version and pid,
-/// before the pack loads, so a pack that fails is still said by a known build. Windows writes its
-/// own header only into the log file she keeps without a console (`dirs::log_without_console`):
-/// stderr here is a pipe, so none.
+/// Linux: her log (stderr: install.sh's launch.log, a journal) has her version and pid at start,
+/// before the pack loads, so a pack that fails is still said by a known build (only process_setup's
+/// notes, the GPU pick, come before it). Windows writes its own header only into the log file she
+/// keeps without a console (`dirs::log_without_console`): stderr here is a pipe, so none.
 #[test]
 fn her_log_starts_with_her_version() {
     let missing = no_pack();
@@ -62,10 +65,13 @@ fn her_log_starts_with_her_version() {
     assert!(out.stdout.is_empty(), "{}", String::from_utf8_lossy(&out.stdout));
     let lines: Vec<&str> = stderr.lines().collect();
     assert!(lines.last().is_some_and(|l| l.starts_with("synaps-avatar: pack: cannot read")), "{stderr}");
+    let header = format!("--- synaps-avatar {VERSION} (pid {pid})");
+    let at: Vec<usize> = lines.iter().enumerate().filter(|(_, l)| l.starts_with("--- synaps-avatar")).map(|(i, _)| i).collect();
     if cfg!(target_os = "linux") {
-        assert_eq!(lines.first().copied().unwrap_or(""), format!("--- synaps-avatar {VERSION} (pid {pid})"), "{stderr}");
-        assert_eq!(lines.len(), 2, "the header, then the error: {stderr}");
+        assert_eq!(at.len(), 1, "one header: {stderr}");
+        assert_eq!(lines[at[0]], header, "{stderr}");
+        assert_eq!(at[0], lines.len() - 2, "the header, then the pack's error: {stderr}");
     } else {
-        assert!(!stderr.contains("--- synaps-avatar"), "{stderr}");
+        assert!(at.is_empty(), "{stderr}");
     }
 }

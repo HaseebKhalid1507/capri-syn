@@ -91,6 +91,7 @@ struct Args {
 const USAGE: &str = "usage: synaps-avatar [--profile P | --socket PATH] [--session NAME|ID | --new [--cwd DIR] [--model M]] [--no-session]
                      [--sleepy-after MIN] [--pack DIR] [--height PX] [--name NAME] [--threads N] [--no-verify]
                      [--focus-probe] [--check [--dump DIR]]
+       synaps-avatar -V | --version
 
 Session (one Synaps daemon session drives the body):
   --profile P     daemon profile (default $SYNAPS_PROFILE, else the default daemon)
@@ -125,12 +126,7 @@ Dev control: newline commands on $XDG_RUNTIME_DIR/synaps-avatar.sock
   submit <text>   abort   prompt confirm|secret [text]   (session / dev)";
 
 fn parse_args() -> Result<Args> {
-    let a = parse_args_from(std::env::args().skip(1))?;
-    // Her log's header on Linux too (Windows: `dirs::log_without_console`). After the command line,
-    // so -V and -h print their own line only.
-    #[cfg(target_os = "linux")]
-    elog!("--- synaps-avatar {} (pid {})", env!("CARGO_PKG_VERSION"), std::process::id());
-    Ok(a)
+    parse_args_from(std::env::args().skip(1))
 }
 
 fn parse_args_from(argv: impl IntoIterator<Item = String>) -> Result<Args> {
@@ -240,6 +236,15 @@ pub fn env_composited() -> Option<Option<bool>> {
 }
 
 fn main() {
+    // -V alone: before process_setup, whose notes (the GPU pick, SA_BACKEND) are stderr lines a
+    // version query doesn't want. With other arguments it's parse_args' (in order, as -h is).
+    let mut argv = std::env::args_os().skip(1);
+    if let (Some(a), None) = (argv.next(), argv.next())
+        && (a == "-V" || a == "--version")
+    {
+        olog!("synaps-avatar {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
     let t_start = Instant::now();
     platform::process_setup();
     if let Ok(level) = std::env::var("SA_LOG")
@@ -256,6 +261,10 @@ fn main() {
 
 fn run(t_start: Instant) -> Result<()> {
     let args = parse_args()?;
+    // Her log's header on Linux too (Windows: `dirs::log_without_console`). After the command line,
+    // so -V and -h print their own line only; before the pack loads.
+    #[cfg(target_os = "linux")]
+    elog!("--- synaps-avatar {} (pid {})", env!("CARGO_PKG_VERSION"), std::process::id());
     let pack = Arc::new(pack::Pack::load(&args.pack)?);
     if args.verify {
         frames::verify_poses(&pack)?;
