@@ -56,9 +56,15 @@ pub(super) struct ArriveState {
     pub unfold: Option<Instant>,
     /// A drawn touchdown is painted a frame before it shows (outside her shape).
     pub prepaint: bool,
-    /// Her icon as her windows have it (`set_icon_on`): what it was made from and its
-    /// `_NET_WM_ICON`. Made once, again only when `icon_reload` finds another icon.
-    icon: std::cell::RefCell<Option<(std::sync::Arc<crate::brand::Icon>, std::rc::Rc<Vec<u32>>)>>,
+    /// Her icon as her windows have it (`set_icon_on`). Made once, again only when
+    /// `icon_reload` finds another icon.
+    icon: std::cell::RefCell<Option<WindowIcon>>,
+}
+
+/// Her windows' icon: the icon it was made from, and its `_NET_WM_ICON`.
+struct WindowIcon {
+    from: std::sync::Arc<crate::brand::Icon>,
+    data: std::rc::Rc<Vec<u32>>,
 }
 
 impl ArriveState {
@@ -607,12 +613,12 @@ impl Avatar {
         }
         let data = {
             let mut c = self.arrive.icon.borrow_mut();
-            let (_, data) = c.get_or_insert_with(|| {
-                let i = crate::brand::icon(crate::brand::pack_icon(&self.pack).as_deref());
-                let d = std::rc::Rc::new(net_wm_icon(&i.img));
-                (i, d)
+            let w = c.get_or_insert_with(|| {
+                let from = crate::brand::icon(crate::brand::pack_icon(&self.pack).as_deref());
+                let data = std::rc::Rc::new(net_wm_icon(&from.img));
+                WindowIcon { from, data }
             });
-            data.clone()
+            w.data.clone()
         };
         if let Err(e) = self.os.set_icon(xid, &data) {
             elog!("synaps-avatar: icon on 0x{xid:x}: {e:#}");
@@ -627,7 +633,7 @@ impl Avatar {
         if self.os.tray_icon(i.tray()) {
             elog!("synaps-avatar: tray: her icon is now {}", i.source());
         }
-        let same = self.arrive.icon.borrow().as_ref().is_none_or(|(had, _)| std::sync::Arc::ptr_eq(had, &i));
+        let same = self.arrive.icon.borrow().as_ref().is_none_or(|w| std::sync::Arc::ptr_eq(&w.from, &i));
         if same {
             return;
         }
