@@ -600,12 +600,14 @@ $Scenes = [ordered]@{
             Start-Sleep 1
             Write-Host "  her menu at $($menu.X),$($menu.Y) $($menu.W)x$($menu.H), by $how"
             Shot '02-menu' "her menu, by $how" -At (Get-CornerRect -Icon $icon -Also @($menu) -Aspect 1.6 -Above 96)
-            # Her rows' names as a screen reader gets them: UI Automation (UIA3, Narrator's) through
-            # MSAA's menu proxy (an owner-drawn row's item data read as MSAAMENUINFO, from her memory).
+            # Her rows' names as a screen reader gets them: MSAA's menu proxy (oleacc, on her menu
+            # window). UI Automation is said, never failed: on the runner it sees no Win32 menu's
+            # rows at all (main's stock menu: the same).
             Show-UiaFocus 'her menu up'
-            $read = Get-MenuNames $menu.Handle 'her menu'
+            $read = Get-MenuNames $menu 'her menu'
             foreach ($want in 'RESET POSITION', 'ATTENTION: MIX', 'QUIT') {
-                if ($want -cnotin $read.Uia3) { $script:Fails.Add("${script:Take}: no row named '$want' for a screen reader (UI Automation reads: $($read.Uia3 -join ', '); MSAA: $($read.Msaa -join ', '))") }
+                if ($want -cnotin $read.Msaa) { $script:Fails.Add("${script:Take}: no row named '$want' for a screen reader (MSAA reads: $($read.Msaa -join ', '))") }
+                if ($want -cnotin $read.Uia3) { Write-Warning "${script:Take}: UI Automation reads no row named '$want' (it reads: $($read.Uia3 -join ', ')); not a failure: it sees no Win32 menu's rows here, main's stock menu's too" }
             }
             # His keys in it (a real right click gave it the keyboard): down x3 lights ATTENTION (a
             # lit row), right opens its choices (the one in force marked, the first lit).
@@ -620,8 +622,8 @@ $Scenes = [ordered]@{
                     Shot '03-keys' 'her menu by his keys: ATTENTION lit, its choices open' -At (Get-CornerRect -Icon $icon -Also $menus -Aspect 1.6 -Above 96)
                     # Its choices by name too (the one in force first: MIX).
                     $sub = $menus | Where-Object { $_.Handle -ne $menu.Handle } | Select-Object -First 1
-                    $subRead = Get-MenuNames $sub.Handle 'ATTENTION'
-                    if ('MIX' -cnotin $subRead.Uia3) { $script:Fails.Add("${script:Take}: no choice named 'MIX' under ATTENTION for a screen reader (UI Automation reads: $($subRead.Uia3 -join ', '); MSAA: $($subRead.Msaa -join ', '))") }
+                    $subRead = Get-MenuNames $sub 'ATTENTION'
+                    if ('MIX' -cnotin $subRead.Msaa) { $script:Fails.Add("${script:Take}: no choice named 'MIX' under ATTENTION for a screen reader (MSAA reads: $($subRead.Msaa -join ', '))") }
                 }
                 else { $script:Fails.Add("${script:Take}: down, down, down, right opened no ATTENTION choices ($($menus.Count) menu)") }
                 Key 'escape' 500
@@ -1014,11 +1016,14 @@ public static class Msaa {
 [ComImport, Guid("352ffba8-0973-437c-a61f-f64cafd81df9"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
 public interface IUiaCondition {}
 
+[StructLayout(LayoutKind.Sequential)]
+public struct UiaPoint { public int X, Y; }
+
 [ComImport, Guid("30cbe57d-d9d0-452a-ab13-7ac5ac4825ee"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
 public interface IUia {
     void _0(); void _1(); void _2();
     IUiaElement ElementFromHandle(IntPtr hwnd);
-    void _4();
+    IUiaElement ElementFromPoint(UiaPoint pt);
     IUiaElement GetFocusedElement();
     void _6(); void _7(); void _8(); void _9(); void _10();
     IUiaWalker ControlViewWalker();
@@ -1109,6 +1114,14 @@ public static class Uia3 {
         return o;
     }
 
+    /// The element at screen point x, y (physical px; the caller per-monitor aware), and its name.
+    public static string[] At(int x, int y) {
+        var e = U().ElementFromPoint(new UiaPoint { X = x, Y = y });
+        string n = null;
+        if (e != null) { try { n = e.CurrentName(); } catch { } }
+        return new[] { Say(e), n ?? "" };
+    }
+
     /// The focused element and its parent, said.
     public static string Focus() {
         var f = U().GetFocusedElement();
@@ -1131,12 +1144,14 @@ function Format-Uia($e) {
     catch { "($($_.Exception.Message))" }
 }
 
-<# What a screen reader can read in menu window $Handle, said: UI Automation's COM client (UIA3:
-   the element, its raw tree three deep, its descendants' names), MSAA's menu proxy (its client,
-   each row) and, for the record, PowerShell's own System.Windows.Automation (UIA2: no proxy for a
-   Win32 menu, so any #32768 is a bare Pane to it, no rows, the stock menu's too). Returns the names
-   UIA3 and MSAA read, @{ Uia3 = ...; Msaa = ... }. #>
-function Get-MenuNames([long]$Handle, [string]$What) {
+<# What a screen reader can read in menu window $Win (a [ShotsTray.Native]::Of window), said: MSAA's
+   menu proxy (oleacc: its client, each row), UI Automation's COM client (UIA3: the element, its raw
+   tree three deep, its descendants' names, what's under points down its middle) and, for the
+   record, PowerShell's own System.Windows.Automation (UIA2). On the runner neither UI Automation
+   sees a Win32 menu's rows, main's stock menu's included (#112, round 2): a #32768 is a bare Pane,
+   no children. Returns the names read, @{ Msaa = ...; Uia3 = ... }. #>
+function Get-MenuNames($Win, [string]$What) {
+    $Handle = [long]$Win.Handle
     $uia3 = @(); $msaa = @()
     if (Add-ShotReaders) {
         try {
@@ -1144,6 +1159,17 @@ function Get-MenuNames([long]$Handle, [string]$What) {
             $uia3 = @([ShotsTray.Uia3]::Names($Handle) | Where-Object { $_ })
         }
         catch { Write-Host "  uia3 ($What): $($_.Exception.Message)" }
+        try {
+            [ShootWin.Native]::Aware()
+            $x = [int]($Win.X + $Win.W / 2)
+            foreach ($k in 0..7) {
+                $y = [int]($Win.Y + $Win.H * (2 * $k + 1) / 16)
+                $at = [ShotsTray.Uia3]::At($x, $y)
+                Write-Host "    uia3 at $x,$y : $($at[0])"
+                if ($at[1] -and $at[1] -cnotin $uia3) { $uia3 += $at[1] }
+            }
+        }
+        catch { Write-Host "  uia3 ($What) by point: $($_.Exception.Message)" }
         try {
             foreach ($l in [ShotsTray.Msaa]::Rows($Handle)) { Write-Host "    msaa $l" }
             $msaa = @([ShotsTray.Msaa]::Names($Handle) | Where-Object { $_ })
