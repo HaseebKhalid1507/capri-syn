@@ -292,6 +292,16 @@ pub struct Os {
     /// A press on her: when the button was last asked about, since when it has been up, and
     /// whether the backend can tell (`press_lost`).
     press_seen: Cell<Option<(Instant, Option<Instant>, bool)>>,
+    /// Her tray icon (`Desktop::tray`; None: none here) and what it shows now.
+    tray: RefCell<Option<TrayLink>>,
+}
+
+/// Her tray icon and what it was last told (only a change goes to the desktop).
+struct TrayLink {
+    tray: Box<dyn super::Tray>,
+    tip: String,
+    menu: Vec<super::TrayItem>,
+    icon: super::TrayIcon,
 }
 
 impl Os {
@@ -318,6 +328,7 @@ impl Os {
             host_changed: Cell::new(None),
             settle: RefCell::new(Settle::default()),
             press_seen: Cell::new(None),
+            tray: RefCell::new(None),
         }
     }
 
@@ -818,6 +829,53 @@ impl Os {
 
     pub fn char_key_down(&self, ch: char) -> Result<bool> {
         self.desk.char_key_down(ch)
+    }
+
+    // ---- her tray icon --------------------------------------------------------------------
+
+    /// Her icon in the desktop's tray, where it has one she uses (`Desktop::tray`): Ok(false)
+    /// where none. `on` runs on the tray's thread.
+    pub fn start_tray(&self, icon: super::TrayIcon, on: impl Fn(super::TrayEv) + Send + 'static) -> Result<bool> {
+        let t = self.desk.tray(icon.clone(), Box::new(on))?;
+        let up = t.is_some();
+        *self.tray.borrow_mut() = t.map(|tray| TrayLink { tray, tip: String::new(), menu: Vec::new(), icon });
+        Ok(up)
+    }
+
+    /// She has a tray icon (the view keeps it current only then).
+    pub fn has_tray(&self) -> bool {
+        self.tray.borrow().is_some()
+    }
+
+    /// What her tray icon shows: its tooltip, its menu. Only what changed goes to the desktop.
+    pub fn tray_show(&self, tip: &str, menu: Vec<super::TrayItem>) {
+        let mut t = self.tray.borrow_mut();
+        let Some(t) = t.as_mut() else { return };
+        if t.tip != tip {
+            t.tip = tip.to_string();
+            t.tray.set_tip(tip);
+        }
+        if t.menu != menu {
+            t.tray.set_menu(menu.clone());
+            t.menu = menu;
+        }
+    }
+
+    /// Her tray icon's picture from now on (`crate::brand::icon` read again): to the desktop
+    /// only if it changed. True: it did.
+    pub fn tray_icon(&self, icon: super::TrayIcon) -> bool {
+        let mut t = self.tray.borrow_mut();
+        let Some(t) = t.as_mut().filter(|t| t.icon != icon) else { return false };
+        t.tray.set_icon(icon.clone());
+        t.icon = icon;
+        true
+    }
+
+    /// Her tray icon out of the tray (the end of a quit), nothing left behind.
+    pub fn tray_remove(&self) {
+        if let Some(t) = self.tray.borrow_mut().take() {
+            t.tray.remove();
+        }
     }
 
     // ---- compositor mode -----------------------------------------------------------------

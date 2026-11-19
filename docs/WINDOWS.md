@@ -23,6 +23,7 @@ Her files (`platform::base_dir`; `$XDG_*_HOME` still wins, as on Linux):
 | her pack (default `--pack`) | `%LOCALAPPDATA%\synaps-avatar\packs\capri` |
 | state | `%LOCALAPPDATA%\synaps-avatar\state.json`, `sessions.json` |
 | her log, without a console | `%LOCALAPPDATA%\synaps-avatar\synaps-avatar.log` (appended; over 4 MB at start, kept as `.old.log`) |
+| her icon (tray), your own | `%APPDATA%\synaps-avatar\icon.ico` if it's there, else the capri-syn icon (`assets/icon`, in her exe); read at start and on `capri-ctl settings reload` |
 
 ## The installer
 

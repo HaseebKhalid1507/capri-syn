@@ -473,6 +473,11 @@ impl Desktop for X11 {
         super::linux::watch_logind(on)
     }
 
+    /// None yet (`linux::tray`: where a StatusNotifierItem goes).
+    fn tray(&self, icon: super::TrayIcon, on: Box<dyn Fn(super::TrayEv) + Send>) -> Result<Option<Box<dyn super::Tray>>> {
+        super::linux::tray(icon, on)
+    }
+
     /// MIT-SCREEN-SAVER.
     fn idle_ms(&self) -> Option<u32> {
         use x11rb::protocol::screensaver::ConnectionExt as _;

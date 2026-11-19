@@ -37,6 +37,8 @@ pub enum Command {
     Stack,
     /// Dev: the right-click menu, at her head (as a right press there would open it).
     Menu,
+    /// Internal: a pick in her tray icon's menu (`menu::command_for`).
+    MenuPick(crate::menu::Item),
     /// One-line JSON snapshot of the avatar's state.
     State,
     /// The bounding rects of the last paint (computed in alpha mode too, just not sent).

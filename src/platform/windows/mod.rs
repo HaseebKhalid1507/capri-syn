@@ -1,7 +1,7 @@
 //! The Windows backend: plain translation between Win32/DWM and the core's types (her body, her
 //! idle loop, perching, her global keys, the Line's keyboard, effect layers, the media flyout's
-//! players, toasts; voice comes later). Every rule built on these answers is the core's
-//! (`os.rs`).
+//! players, toasts, her tray icon; voice comes later). Every rule built on these answers is the
+//! core's (`os.rs`).
 //!
 //! GPUI's Windows crate is vendored and patched (vendor/gpui-pre-windows/PATCHES.md): a `PopUp`
 //! is a bare `WS_POPUP` (PW-1), a click on a window opened without focus doesn't activate it
@@ -61,6 +61,7 @@ mod notifications;
 mod testkit;
 mod hold;
 mod sidecar;
+mod tray;
 mod voice;
 
 pub use dirs::{base_dir, home_dir};
@@ -884,6 +885,12 @@ impl Desktop for Win32 {
     /// `WIN+ALT+C` for the summon key (`chord`).
     fn key_label(&self, ev: KeyEv, key: char) -> Option<String> {
         key_label(ev, key)
+    }
+
+    /// Her icon in the notification area (`tray.rs`). A click on it or a pick in its menu is his
+    /// input to her, as her key is: the keyboard is hers to take for `GRANT_MS`.
+    fn tray(&self, icon: super::TrayIcon, on: Box<dyn Fn(super::TrayEv) + Send>) -> Result<Option<Box<dyn super::Tray>>> {
+        Ok(Some(Box::new(tray::start(icon, self.grant_at.clone(), on)?)))
     }
 
     /// One thread: out-of-context WinEvent hooks (moves, shows, hides, minimise, cloak,

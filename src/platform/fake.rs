@@ -44,6 +44,8 @@ struct World {
     his_input: bool,
     /// The primary button as the server has it (None: can't tell).
     primary: Option<bool>,
+    /// What her tray icon was told, in order.
+    tray: Vec<String>,
 }
 
 type HintFn = Box<dyn Fn(Hint) + Send>;
@@ -159,6 +161,31 @@ impl Desktop for FakeDesktop {
         Ok(())
     }
     fn arm_clicks(&self, _on: bool) {}
+    fn tray(&self, _icon: super::TrayIcon, _on: Box<dyn Fn(super::TrayEv) + Send>) -> Result<Option<Box<dyn super::Tray>>> {
+        Ok(Some(Box::new(FakeTray(self.0.clone()))))
+    }
+}
+
+/// A tray that writes down what it is told.
+struct FakeTray(Arc<Fake>);
+
+impl super::Tray for FakeTray {
+    fn set_tip(&self, tip: &str) {
+        self.0.w().tray.push(format!("tip {tip}"));
+    }
+    fn set_icon(&self, icon: super::TrayIcon) {
+        self.0.w().tray.push(format!("icon {}x{}", icon.w, icon.h));
+    }
+    fn set_menu(&self, items: Vec<super::TrayItem>) {
+        let lead = items.iter().find_map(|i| match i {
+            super::TrayItem::Item { label, lead: true, .. } => Some(label.clone()),
+            _ => None,
+        });
+        self.0.w().tray.push(format!("menu {} lead {}", items.len(), lead.unwrap_or_default()));
+    }
+    fn remove(&self) {
+        self.0.w().tray.push("remove".into());
+    }
 }
 
 struct FakeStage(Arc<Fake>);
@@ -393,6 +420,33 @@ fn contract_fake_keyboard_on_his_input() {
     // Nothing of his since the keyboard went back: none to take.
     assert!(!os.may_take_keyboard());
     assert!(os.grab_keyboard(os.body()).is_err());
+}
+
+/// Her tray hears only what changed: the same tooltip and menu every schedule cost the desktop
+/// nothing, and a quit takes the icon out once.
+#[test]
+fn the_tray_hears_only_changes() {
+    use crate::menu::{State, rows, tray_items};
+    let (os, d) = fake(true);
+    os.tray_show("capri-syn · ONLINE", Vec::new());
+    assert!(!os.has_tray() && d.0.w().tray.is_empty(), "no tray yet: nothing told");
+    let icon = |n: u32| super::TrayIcon { file: None, w: n, h: n, rgba: vec![0; (n * n * 4) as usize] };
+    assert!(os.start_tray(icon(256), |_| {}).unwrap() && os.has_tray());
+    let menu = |s: State| tray_items(&rows(&s));
+    for _ in 0..3 {
+        os.tray_show("capri-syn · ONLINE", menu(State::default()));
+    }
+    os.tray_show("capri-syn · SLEEPING", menu(State::default()));
+    os.tray_show("capri-syn · SLEEPING", menu(State { hidden: true, ..State::default() }));
+    // His own icon put in (`settings reload`); the same again is no news.
+    assert!(!os.tray_icon(icon(256)));
+    assert!(os.tray_icon(icon(48)) && !os.tray_icon(icon(48)));
+    os.tray_remove();
+    os.tray_remove();
+    os.tray_show("capri-syn · ONLINE", menu(State::default()));
+    assert!(!os.tray_icon(icon(32)));
+    assert!(!os.has_tray());
+    assert_eq!(d.0.w().tray, ["tip capri-syn · ONLINE", "menu 6 lead ", "tip capri-syn · SLEEPING", "menu 6 lead SHOW", "icon 48x48", "remove"]);
 }
 
 #[test]

@@ -75,6 +75,12 @@ pub enum BaseDir {
     State,
 }
 
+/// His own icon's name beside settings.toml (`crate::brand::icon`), in the OS's icon format.
+#[cfg(windows)]
+pub const ICON_FILE: &str = "icon.ico";
+#[cfg(not(windows))]
+pub const ICON_FILE: &str = "icon.png";
+
 impl BaseDir {
     /// Its `XDG_*_HOME` variable.
     pub fn xdg_var(self) -> &'static str {
@@ -471,6 +477,11 @@ pub trait Desktop: Send + Sync {
     /// The pointer's image over her surface `s` (None: the desktop's). Backends without it keep
     /// the desktop's.
     fn pointer_image(&self, _s: WinId, _img: Option<&PointerImage>) {}
+    /// Put her icon in the desktop's tray; `on` runs on the tray's own thread. Ok(None): no tray
+    /// she uses here (Linux for now: `linux::tray`).
+    fn tray(&self, _icon: TrayIcon, _on: Box<dyn Fn(TrayEv) + Send>) -> Result<Option<Box<dyn Tray>>> {
+        Ok(None)
+    }
 }
 
 /// A pointer image: premultiplied ARGB, `w`×`h`, its hotspot. `key` tells images apart (a backend
@@ -484,6 +495,58 @@ pub struct PointerImage {
     pub h: u16,
     pub hot: (u16, u16),
     pub argb: Vec<u32>,
+}
+
+// ---- her tray icon --------------------------------------------------------------------------
+// Only Windows has a tray so far: on Linux these are built and never read (`linux::tray`).
+
+/// Her icon for the desktop's tray (`crate::brand::Icon::tray`): its picture, straight-alpha RGBA
+/// `w`×`h`, which the backend scales to what its tray wants, and his file when it is his. A
+/// backend that can load an icon's own sizes takes them from his file, or with none from hers
+/// (Windows: her exe's icon resource), and the picture where that fails.
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Clone, Debug, PartialEq)]
+pub struct TrayIcon {
+    pub file: Option<std::path::PathBuf>,
+    pub w: u32,
+    pub h: u32,
+    pub rgba: Vec<u8>,
+}
+
+/// A row of her tray's menu, as her menu's model lays it out (`crate::menu`): the backend only
+/// draws it, and a pick comes back as its `id`.
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Clone, Debug, PartialEq)]
+pub enum TrayItem {
+    /// A pick (`id` never 0). `checked`: the choice in force; `lead`: the row that matters most
+    /// now (bold where the tray can).
+    Item { id: u32, label: String, checked: bool, lead: bool },
+    /// A row that opens its choices.
+    Sub { label: String, items: Vec<TrayItem> },
+    Rule,
+}
+
+/// What he does to her tray icon.
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrayEv {
+    /// A click on it (or Enter on it): what her summon key's tap does.
+    Open,
+    /// A row of its menu, by its `TrayItem::Item` id.
+    Pick(u32),
+}
+
+/// Her icon in the desktop's tray (`Desktop::tray`): it stays while she runs, hidden or not.
+/// The core sends only what changed (`Os::tray_show`). Main thread.
+pub trait Tray {
+    /// Its tooltip (`crate::brand::tooltip`).
+    fn set_tip(&self, tip: &str);
+    /// Its icon from now on (his own put in or taken away: `settings reload`).
+    fn set_icon(&self, icon: TrayIcon);
+    /// The menu its next right click opens.
+    fn set_menu(&self, items: Vec<TrayItem>);
+    /// Out of the tray now, nothing left behind (the end of a quit). Dropping it does the same.
+    fn remove(&self);
 }
 
 /// Primitive commands on her own surfaces. Main thread only (a backend may hold GPUI

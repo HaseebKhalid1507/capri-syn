@@ -464,9 +464,6 @@ pub struct Behaviour {
     pub land: Option<LandSpec>,
     #[serde(default)]
     pub arrive: Option<ArriveSpec>,
-    /// Her icon (a square PNG in the pack) for her windows' `_NET_WM_ICON`.
-    #[serde(default)]
-    pub icon: Option<String>,
     #[serde(default)]
     pub kiss: Option<KissSpec>,
     /// Variant pools: more than one art option per state (`crate::variants`).
@@ -1860,7 +1857,6 @@ pub mod tests {
         assert_eq!(pat.patch.as_ref().map(|x| (x.1.width, x.2, x.3)), Some((8, -1, 0)));
         assert_eq!(p.flatten(&p.behaviour.arrive.as_ref().unwrap().launch).len(), 2);
         assert_eq!(p.behaviour.brain.nap_deep.as_deref(), Some("lie"));
-        assert_eq!(p.behaviour.icon.as_deref(), Some("n.png"));
     }
 
     #[test]

@@ -23,7 +23,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 async-channel = "2"
 anyhow = "1"
-image = { version = "0.25", default-features = false, features = ["png", "webp"] }
+image = { version = "0.25", default-features = false, features = ["png", "webp", "ico"] }
 fast_image_resize = "6"
 sha2 = "0.10"
 raw-window-handle = "0.6"

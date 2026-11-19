@@ -21,6 +21,8 @@ mod motionview;
 pub(crate) mod introview;
 #[path = "cutinview.rs"]
 mod cutinview;
+#[path = "menuview.rs"]
+mod menuview;
 
 use crate::anim::{Animator, Mood, Rng, Seq};
 use crate::variants::PoolKey;
@@ -2813,6 +2815,7 @@ impl Avatar {
         self.cutin_fetch(cx);
         self.sync_shadow();
         self.sync_pointer_watch();
+        self.tray_sync();
         if self.os.fx_take_dirty() {
             cx.notify();
         }
@@ -3386,6 +3389,10 @@ impl Avatar {
                 self.rag_cancel(now);
             }
         }
+        // His own icon put in or taken out: read again with settings.toml.
+        if matches!(cmd, Command::SettingsReload) {
+            self.icon_reload();
+        }
         let reply = match cmd {
             Command::Mood(m) => {
                 self.set_mood(m, now);
@@ -3435,6 +3442,7 @@ impl Avatar {
                 self.menu = Some((self.head_point(), now + Duration::from_secs(8)));
                 "ok".into()
             }
+            Command::MenuPick(item) => self.menu_do(item, crate::menu::Via::Tray, cx),
             Command::Drop => {
                 if self.teleport.is_some() {
                     "error: teleporting".into()
@@ -4074,6 +4082,7 @@ impl Avatar {
         }
         self.save_seen();
         self.fx_hide_all();
+        self.os.tray_remove();
         std::fs::remove_file(crate::control::socket_path()).ok();
         if self.fatal {
             std::process::exit(2);
@@ -8136,25 +8145,6 @@ impl Avatar {
             self.menu_why = None;
         }
         if let Some((at, _)) = self.menu.filter(|_| hud) {
-            // Red items; the hovered one on a red blade with ink type. QUIT? (armed) is a bone
-            // blade: danger.
-            let (accent_c, ink_c, danger_c) = (pal.accent, pal.ink, pal.danger);
-            let blade = |c: u32| div().absolute().top_0().left_0().size_full().child(theme::backdrop(Cut::Tab(8.0), Fill::solid(c)));
-            let item_as = |label: &'static str, armed: bool| {
-                let group = SharedString::from(format!("menu-{label}"));
-                div()
-                    .group(group.clone())
-                    .relative()
-                    .px(px(10.0))
-                    .py(px(5.0))
-                    .text_size(px(11.0))
-                    .font_weight(if armed { FontWeight::BOLD } else { FontWeight::SEMIBOLD })
-                    .text_color(rgb(if armed { ink_c } else { accent_c }))
-                    .when(armed, |d| d.child(blade(danger_c)))
-                    .when(!armed, |d| d.hover(|s| s.text_color(rgb(ink_c))).child(blade(accent_c).invisible().group_hover(group, |s| s.visible())))
-                    .child(tracked(label, 1.2))
-            };
-            let item = |label: &'static str| item_as(label, false);
             let mark = self.menu_mark(window);
             // Under the click if it fits in her window, else as far up as it must (a perched
             // her: a click low on her body cut the menu's bottom rows off). Before its first
@@ -8163,7 +8153,7 @@ impl Avatar {
             let mut kept = self.menu_why.filter(|k| k.0 == at).map(|k| k.1);
             let cant = self.attention_label().and_then(|_| self.menu_save.line(&mut kept));
             self.menu_why = kept.map(|t| (at, t));
-            let rows = 7 + usize::from(self.brain.is_some()) + usize::from(self.attention_label().is_some()) + usize::from(cant.is_some()) + usize::from(self.voice_on() && self.voice.cfg.handsfree);
+            let rows = crate::menu::rows(&self.menu_state()).len() + 2 + usize::from(cant.is_some());
             // Her work area (under the bar, on her monitor), window-local logical px: the menu's
             // top left stays within it less the menu's size.
             let o = self.origin;
@@ -8235,133 +8225,8 @@ impl Avatar {
                 .py(px(4.0))
                 .child(theme::backdrop(MENU_CUT, Fill::framed(pal.panel, pal.accent, 2.0).ringed(pal.ring)))
                 .children(header)
-                .child(item("RESET POSITION").id("reset").on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                        cx.stop_propagation();
-                        this.reset_position(cx);
-                    }),
-                ))
-                .when(self.brain.is_some(), |m| {
-                    let dnd = self.dnd_on();
-                    m.child(item(if dnd { "DND OFF" } else { "DND 1 HOUR" }).id("dnd").on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                            cx.stop_propagation();
-                            this.menu = None;
-                            this.toggle_dnd();
-                            cx.notify();
-                            this.schedule(cx);
-                        }),
-                    ))
-                })
-                // Not with her brain off in settings.toml (the Settings page locks it).
-                .when_some(self.attention_label(), |m, att| {
-                    let label = match att {
-                        "MIX" => "ATTENTION: MIX ▸",
-                        "HANG ONLY" => "ATTENTION: HANG ONLY ▸",
-                        _ => "ATTENTION: OFF ▸",
-                    };
-                    // Its last click didn't stick (refused, or the write hangs): why, under it;
-                    // landed since it opened: the same room, unseen (the rows hold still).
-                    let why = cant.map(|(c, shown)| {
-                        div()
-                            .when(!shown, |d| d.invisible())
-                            .pt(px(2.0))
-                            .text_size(px(10.5))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(pal.text))
-                            .group_hover(SharedString::from(format!("menu-{label}")), |s| s.text_color(rgb(ink_c)))
-                            .child(c)
-                    });
-                    // In `state`'s buttons (a shot's click on it).
-                    let probe = self.buttons.clone();
-                    m.child(item(label).flex().flex_col().children(why).child(canvas(move |b, _, _| probe.borrow_mut().push(("menu-attention", b)), |_, _, _, _| {}).absolute().top_0().left_0().size_full()).id("attention").on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                            cx.stop_propagation();
-                            this.cycle_attention(cx);
-                            if let Some(m) = &mut this.menu {
-                                m.1 = Instant::now() + Duration::from_secs(8);
-                            }
-                            cx.notify();
-                            this.schedule(cx);
-                        }),
-                    ))
-                })
-                .when(self.voice_on() && self.voice.cfg.handsfree, |m| {
-                    let on = self.voice.hf.is_some();
-                    m.child(item(if on { "END HANDS-FREE" } else { "HANDS-FREE TALK" }).id("handsfree").on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                            cx.stop_propagation();
-                            this.menu = None;
-                            let r = if on {
-                                this.voice_hf_end("HANDS-FREE OFF", cx);
-                                "ok hands-free off".to_string()
-                            } else {
-                                this.voice_hf_start(cx)
-                            };
-                            elog!("synaps-avatar: menu hands-free: {r}");
-                            cx.notify();
-                            this.schedule(cx);
-                        }),
-                    ))
-                })
-                .child(item("COPY LAST REPLY").id("copy").on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                        cx.stop_propagation();
-                        this.menu = None;
-                        let r = this.copy_last_reply(cx);
-                        elog!("synaps-avatar: menu copy: {r}");
-                        cx.notify();
-                        this.schedule(cx);
-                    }),
-                ))
-                .child(item("HIDE").id("hide").on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                        cx.stop_propagation();
-                        this.park(Instant::now());
-                        cx.notify();
-                        this.schedule(cx);
-                    }),
-                ))
-                // Her Settings (the Line's second page).
-                .child(item("SETTINGS").id("settings").on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                        cx.stop_propagation();
-                        this.menu = None;
-                        let r = this.show_line_page(crate::line::Page::Settings, cx);
-                        elog!("synaps-avatar: menu settings: {r}");
-                        cx.notify();
-                        this.schedule(cx);
-                    }),
-                ))
-                .child(div().h(px(1.0)).mx(px(10.0)).my(px(3.0)).bg(rgb(pal.rule)))
-                .child(
-                    item_as(if self.quit_armed.is_some() { "QUIT? CLICK AGAIN" } else { "QUIT" }, self.quit_armed.is_some()).id("quit").on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                            cx.stop_propagation();
-                            let now = Instant::now();
-                            if this.quit_armed.is_some_and(|t| now < t) {
-                                this.quit_armed = None;
-                                this.vanish_quit(now);
-                            } else {
-                                // A second click within 2 s exits; the menu stays up that long.
-                                this.quit_armed = Some(now + Duration::from_secs(2));
-                                if let Some(m) = &mut this.menu {
-                                    m.1 = m.1.max(now + Duration::from_secs(3));
-                                }
-                            }
-                            cx.notify();
-                            this.schedule(cx);
-                        }),
-                    ),
-                )
+                // Her menu's rows: its one model's, as her tray's (`menuview.rs`).
+                .children(self.menu_rows(pal, cant, cx))
                 // Her maker's mark: what runs her, for whoever wonders. Dim, small, not a button;
                 // under a gap and a hairline, a footer.
                 .when_some(mark, |m, mark| {

@@ -595,20 +595,29 @@ impl Avatar {
 
     // ---- the icon -----------------------------------------------------------------------------
 
-    /// Her pack's icon (`moods.json` `icon`) on window `xid` as `_NET_WM_ICON` (48 and 32 px).
+    /// Her icon (`brand::icon`: his own, else the capri-syn icon) on window `xid` as
+    /// `_NET_WM_ICON` (48 and 32 px).
     pub(super) fn set_icon_on(&self, xid: u32) {
-        let Some(f) = &self.pack.behaviour.icon else { return };
-        let path = self.pack.dir.join(f);
-        let img = match image::open(&path) {
-            Ok(i) => i.into_rgba8(),
-            Err(e) => {
-                elog!("synaps-avatar: icon {}: {e}", path.display());
-                return;
-            }
-        };
+        self.icon_on(xid, &crate::brand::icon().img);
+    }
+
+    /// Her icon read again (`settings reload`: his own put in or taken out): her tray's, her
+    /// body's. The Line reads it when it opens.
+    pub(super) fn icon_reload(&self) {
+        let i = crate::brand::icon();
+        if self.os.tray_icon(i.tray()) {
+            elog!("synaps-avatar: tray: her icon is now {}", i.source());
+        }
+        let body = self.os.body();
+        if body != 0 {
+            self.icon_on(body, &i.img);
+        }
+    }
+
+    fn icon_on(&self, xid: u32, img: &image::RgbaImage) {
         let mut data: Vec<u32> = Vec::new();
         for n in [48u32, 32] {
-            let s = image::imageops::resize(&img, n, n, image::imageops::FilterType::Lanczos3);
+            let s = image::imageops::resize(img, n, n, image::imageops::FilterType::Lanczos3);
             data.extend([n, n]);
             data.extend(s.pixels().map(|p| (p[3] as u32) << 24 | (p[0] as u32) << 16 | (p[1] as u32) << 8 | p[2] as u32));
         }
