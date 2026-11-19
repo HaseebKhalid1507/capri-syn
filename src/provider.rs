@@ -119,14 +119,31 @@ pub fn by_name(name: &str) -> Option<&'static Provider> {
 /// model without its provider (`QWEN3:8B`).
 pub fn model_label(model: &str) -> String {
     let m = model.trim();
-    if let Some((_, l)) = of(m).and_then(|p| p.models.iter().find(|(id, _)| id.eq_ignore_ascii_case(m))) {
+    if let Some((_, l)) = of(m).and_then(|p| p.models.iter().find(|(id, _)| same(id, m))) {
         return l.to_string();
     }
     let bare = match m.split_once('/') {
         Some((p, rest)) if by_id(p).is_some() => rest,
         _ => m,
     };
+    // Claude's own names: `claude-<family>-<major>-<minor>[-<date>]` as its family and version.
+    if let Some(rest) = undated(bare).strip_prefix("claude-")
+        && let Some((family, v)) = rest.split_once('-')
+        && family.chars().all(|c| c.is_ascii_alphabetic())
+        && !v.is_empty()
+        && v.split('-').all(|n| !n.is_empty() && n.len() <= 2 && n.chars().all(|c| c.is_ascii_digit()))
+    {
+        return format!("{} {}", family.to_uppercase(), v.replace('-', "."));
+    }
     bare.to_uppercase()
+}
+
+/// A model name without its snapshot's date (`claude-haiku-4-5-20251001`: `claude-haiku-4-5`).
+fn undated(m: &str) -> &str {
+    match m.rsplit_once('-') {
+        Some((head, d)) if d.len() == 8 && d.chars().all(|c| c.is_ascii_digit()) => head,
+        _ => m,
+    }
 }
 
 /// A model as she says it: its label with its words in title case (`Opus 5.5`, `GPT-5.5`).
@@ -273,7 +290,8 @@ pub struct Choice {
 fn same(a: &str, b: &str) -> bool {
     let bare = |m: &str| {
         let m = m.trim().to_ascii_lowercase();
-        m.strip_prefix("anthropic/").map(str::to_string).unwrap_or(m)
+        let m = m.strip_prefix("anthropic/").unwrap_or(&m);
+        undated(m).to_string()
     };
     bare(a) == bare(b)
 }
@@ -391,7 +409,10 @@ mod tests {
         assert_eq!(model_label("claude-sonnet-4-6"), "SONNET 4.6");
         assert_eq!(model_label("openai-codex/gpt-5.5"), "GPT-5.5");
         assert_eq!(model_label("local/qwen3:8b"), "QWEN3:8B");
-        assert_eq!(model_label("claude-opus-4-1"), "CLAUDE-OPUS-4-1");
+        assert_eq!(model_label("claude-opus-4-1"), "OPUS 4.1");
+        assert_eq!(model_label("anthropic/claude-haiku-4-5"), "HAIKU 4.5", "the table's, its date aside");
+        assert_eq!(model_label("claude-3-7-sonnet-20250219"), "CLAUDE-3-7-SONNET-20250219", "an older shape: as it is");
+        assert_eq!(model_spoken("claude-sonnet-4-5-20250929"), "Sonnet 4.5");
         assert_eq!(model_label("groq/llama-3.1-8b-instant"), "LLAMA-3.1-8B-INSTANT");
         assert_eq!(model_spoken("claude-opus-5-5"), "Opus 5.5");
         assert_eq!(model_spoken("openai-codex/gpt-5.4-mini"), "5.4 Mini");
@@ -475,7 +496,7 @@ mod tests {
         assert_eq!(labels(&s("claude-sonnet-4-6", Some(true))), [l("SONNET 4.6", true, true), l("OPUS 5.5", false, true), l("HAIKU 4.5", false, true)]);
         assert_eq!(labels(&s("anthropic/claude-opus-5-5", Some(true))), [l("SONNET 4.6", false, true), l("OPUS 5.5", true, true), l("HAIKU 4.5", false, true)], "the same model, with its provider");
         // His own model, by hand: there, as it is, in force; not one to pick again.
-        assert_eq!(labels(&s("claude-opus-4-1", Some(true))), [l("SONNET 4.6", false, true), l("OPUS 5.5", false, true), l("CLAUDE-OPUS-4-1", true, false)]);
+        assert_eq!(labels(&s("claude-opus-4-1", Some(true))), [l("SONNET 4.6", false, true), l("OPUS 5.5", false, true), l("OPUS 4.1", true, false)]);
         // Local: hers alone; the server's (RUN LOCAL) aren't MODEL's.
         let mut lo = s("local/qwen3:8b", None);
         assert!(!lo.ok() && !lo.none());
