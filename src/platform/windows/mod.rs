@@ -1752,6 +1752,15 @@ pub fn process_env(_pid: u32, _key: &str) -> Option<Option<String>> {
 /// The system heap hands freed pages back on its own.
 pub fn trim_heap() {}
 
+/// Her tray icon out before her end is cut short (`platform::exit_now`): a process that ends with
+/// its icon in leaves a ghost in the tray until the pointer passes over it. From this thread, not
+/// her tray's; 300 ms at most. A quit took it out already (`Os::tray_remove`): nothing to do.
+pub fn tray_out_now() {
+    if tray::delete_now(Duration::from_millis(300)) {
+        elog!("synaps-avatar: tray: her icon taken out before her end");
+    }
+}
+
 /// QueryPerformanceCounter seconds (Python's `time.perf_counter` on Windows: logs line up).
 pub fn monotonic_s() -> f64 {
     use ::windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};

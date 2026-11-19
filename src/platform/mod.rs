@@ -617,12 +617,18 @@ pub fn connect() -> Result<Os> {
 /// Her end, now, with no teardown after it: every exit once GPUI is up (a quit saves her state
 /// before: `finish_quit`; a fatal error has nothing to save). Windows: `TerminateProcess` on
 /// herself, so no DLL's detach (a GPU driver's) and no thread can hold her there, her exe still
-/// mapped (an installer then can't replace it). Elsewhere: `exit`.
+/// mapped (an installer then can't replace it); her tray icon is taken out first, from this
+/// thread (a quit took it out already; the watchdog's end and a fatal one may not have).
+/// Elsewhere: `exit`.
 pub fn exit_now(code: i32) -> ! {
     #[cfg(windows)]
-    unsafe {
-        use ::windows::Win32::System::Threading::{GetCurrentProcess, TerminateProcess};
-        let _ = TerminateProcess(GetCurrentProcess(), code as u32);
+    {
+        // Her tray icon out first (it's quick, and bounded): ended with it in, she'd leave a ghost.
+        self::windows::tray_out_now();
+        unsafe {
+            use ::windows::Win32::System::Threading::{GetCurrentProcess, TerminateProcess};
+            let _ = TerminateProcess(GetCurrentProcess(), code as u32);
+        }
     }
     std::process::exit(code)
 }
