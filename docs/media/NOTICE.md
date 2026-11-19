@@ -12,7 +12,7 @@ The art files themselves are not in this repository: `make-pack` assembles them 
 
 ## Capri's sprites: CapriCore
 
-Her sprite art (the figure on the red starfield) comes from
+Her sprite art (the figure with the red starfield in her hair) comes from
 [CapriCore](https://github.com/CapriChooms/CapriCore). No licence is granted for it. CapriCore's licence
 covers its code, not its character art: its `docs/character-assets.md` says the GPL "does not grant
 ownership of … supplied artwork", and that anyone redistributing its character assets "must establish
@@ -46,11 +46,14 @@ CD PROJEKT RED. All trademarks belong to their owners.
 ## Not media: a note on `packs/capri/moods.json`
 
 JSON can't hold a comment, so this file carries its note. `moods.json` is capri-syn's own behaviour file,
-under the MIT License. Its key names follow CapriCore's schema, and a few of its numbers are facts taken
+under the MIT License. Its key names follow CapriCore's schema, and these numbers in it are facts taken
 from CapriCore, so her pack lines up with CapriCore's art:
 
 - the intro frame timings in `arrive` (208, 292, 417, 750 and 583 ms) are those of CapriCore's
   `assets/capri/intro-v1/runtime-intro.json`;
 - the note emitters for the two music poses (`music.emitters`: `music-window`, `music-floor`) and those
   poses' anchors in `extraFrames` (seat 628,771; ground 641,1164) are CapriCore's `MUSIC_POSES`
-  (its `music-animation.mjs`).
+  (its `music-animation.mjs`);
+- `extraFrames` anchors, visible bounds and sha256s for CapriCore's pose and intro frames, from
+  `assets/capri/sprites/poses-v2/runtime-poses.json` and `assets/capri/intro-v1/runtime-intro.json`
+  (`perch-headpat` reuses `pose-sit-edge`'s; `pose-ceiling`'s anchor is nudged from y 119 to 110).

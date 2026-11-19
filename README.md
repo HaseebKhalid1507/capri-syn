@@ -397,11 +397,11 @@ paths are excluded and keep their own terms:
   CC BY-NC-SA 4.0) and LibriSpeech dev-clean (CC BY 4.0); distributed under CC BY-NC-SA 4.0 (see
   [`tools/wake/NOTICE`](tools/wake/NOTICE)).
 
-Two MIT files carry a note: `packs/capri/moods.json` holds a few timings and anchor points taken from
-CapriCore (`docs/media/NOTICE.md` says which), and `tools/upscale_art.py` follows Real-ESRGAN's network
-(BSD-3-Clause; its licence text is in the file). Release binaries also contain third-party crates under
-their own licences (mostly MIT/Apache-2.0), and the Windows voice installer bundles Python and
-third-party Python packages under their own licences (espeak-ng's GPL-3.0 among them).
+Two MIT files carry a note: `packs/capri/moods.json` holds frame timings, anchor points, visible bounds
+and sha256s taken from CapriCore (`docs/media/NOTICE.md` says which), and `tools/upscale_art.py` follows
+Real-ESRGAN's network (BSD-3-Clause; its licence text is in the file). Release binaries also contain
+third-party crates under their own licences (mostly MIT/Apache-2.0), and the Windows voice installer
+bundles Python and third-party Python packages under their own licences (espeak-ng's GPL-3.0 among them).
 
 <p align="center">
   <sub>Capri runs on <a href="https://github.com/HaseebKhalid1507/SynapsCLI">Synaps</a>. Synaps is built with Synaps.</sub>
