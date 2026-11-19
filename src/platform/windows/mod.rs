@@ -64,7 +64,7 @@ mod sidecar;
 mod tray;
 mod voice;
 
-pub use dirs::{base_dir, home_dir};
+pub use dirs::{base_dir, home_dir, keep_log_under, stderr_file, stderr_seen};
 pub use media::watch_media;
 pub use notifications::notify;
 pub use sidecar::voice_sidecar;
@@ -1739,6 +1739,29 @@ pub fn process_setup() {
     let v2 = unsafe { AreDpiAwarenessContextsEqual(GetThreadDpiAwarenessContext(), DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) }.as_bool();
     if let (Err(e), false) = (set, v2) {
         elog!("synaps-avatar: windows: not per-monitor DPI aware (v2): {e}; Windows may scale her on some monitors");
+    }
+}
+
+/// A failed start said on screen (`crate::startfail`): a message box, from a thread of its own.
+/// She waits for his OK up to `SHOWN_FOR`, then goes on to her exit either way (the box goes with
+/// her): never long at a sign-in, and never started again.
+pub fn fail_notice(title: &str, text: &str) {
+    const SHOWN_FOR: Duration = Duration::from_secs(120);
+    let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+    let (title, text) = (wide(title), wide(text));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new().name("fail-notice".into()).spawn(move || {
+        // SAFETY: both strings NUL-terminated and alive for the call; no owner window.
+        unsafe { MessageBoxW(None, PCWSTR(text.as_ptr()), PCWSTR(title.as_ptr()), MB_OK | MB_ICONERROR | MB_SETFOREGROUND | MB_TOPMOST) };
+        tx.send(()).ok();
+    });
+    if let Err(e) = spawned {
+        elog!("synaps-avatar: not said on screen: {e}");
+        return;
+    }
+    elog!("synaps-avatar: said on screen too (a message box, up to {} s)", SHOWN_FOR.as_secs());
+    if rx.recv_timeout(SHOWN_FOR).is_err() {
+        elog!("synaps-avatar: the message box wasn't closed within {} s: she ends with it", SHOWN_FOR.as_secs());
     }
 }
 

@@ -124,6 +124,30 @@ Check (Test-Path (Join-Path $packTo 'anim\lachy\LICENSE.md')) "lachy's art, with
 Check (Test-Path $marker) 'marked as the steps'' own (.capri-syn-pack)'
 $hc = Test-HerPack $packTo
 Check ($hc.Code -eq 0 -and $hc.Line) "her --pack $packTo --check: $($hc.Line) (exit $($hc.Code))"
+# Her log from byte `from` on (as UTF-8; shared, as she may hold it).
+function Read-LogSince([long]$from) {
+    if (-not (Test-Path $herLog)) { return '' }
+    $fs = [IO.FileStream]::new($herLog, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]'ReadWrite, Delete')
+    try {
+        if ($fs.Length -lt $from) { $from = 0 }
+        [void]$fs.Seek($from, [IO.SeekOrigin]::Begin)
+        return [IO.StreamReader]::new($fs, [Text.Encoding]::UTF8).ReadToEnd()
+    } finally { $fs.Dispose() }
+}
+# A start with no pack there (S5), as the Start menu starts her (windowed, her log a file of her own):
+# exit 1, and said on screen too; here only in her log (SA_NO_NOTICE=1: no message box). --check on
+# the same folder is a script's: her log only. Bounded by RunFor: a box shown anyway fails, it never hangs.
+$env:SA_NO_NOTICE = '1'
+try {
+    $before = if (Test-Path $herLog) { (Get-Item $herLog).Length } else { 0 }
+    $code = RunFor $exe @('--pack', "`"$notPack`"") 60
+    $t = Read-LogSince $before
+    Check ($code -eq 1 -and $t -match 'synaps-avatar: pack: cannot read' -and $t -match "not said on screen \(SA_NO_NOTICE=1\): Capri couldn't start: her character pack is missing or damaged") "a start with no pack: exit $code, said on screen too$(if ($t -match 'not said on screen[^\r\n]*') { ': ' + $Matches[0] })"
+    $before = if (Test-Path $herLog) { (Get-Item $herLog).Length } else { 0 }
+    $nc = Test-HerPack $notPack
+    $t = Read-LogSince $before
+    Check ($nc.Code -eq 1 -and $t -match 'pack: cannot read' -and $t -notmatch 'said on screen') "--check with no pack: exit $($nc.Code), her log only"
+} finally { Remove-Item Env:\SA_NO_NOTICE -ErrorAction SilentlyContinue }
 $aside = @(Get-ChildItem -Directory -Path (Split-Path $packTo) -Filter 'capri.pre-install-*' | ForEach-Object { $_.FullName })
 Check ($aside.Count -eq 1 -and (Test-Path (Join-Path "$($aside[0])" 'made-by-hand.txt'))) "his pack went aside, whole ($($aside -join ', '))"
 Check ($script:SetupLog -match 'Required Notice: ') "lachy's Required Notice lines were said"

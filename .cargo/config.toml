@@ -1,0 +1,6 @@
+# Her Windows exe needs nothing a clean Windows 10/11 doesn't have: the MSVC C runtime is linked in
+# (+crt-static), so no VCRUNTIME140.dll (the Visual C++ Redistributable) is imported. Every build of
+# the msvc target takes it (build.ps1, CI, `cargo test`), so her tests run the CRT she ships; C code
+# that cc builds follows it (/MT). packaging/windows/build.ps1 checks her exe's imports.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

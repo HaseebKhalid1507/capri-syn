@@ -52,6 +52,17 @@ pub use linux::{base_dir, home_dir, local_day, monotonic_s, notify, process_envi
 #[cfg(windows)]
 pub use self::windows::{base_dir, home_dir, local_day, monotonic_s, notify, process_environ, process_setup, trim_heap, utc_offset_s, watch_media};
 
+/// Her stderr, as a failed start (`crate::startfail`) and her log's cap (`crate::logcap`) read it:
+/// `stderr_seen`, someone reads it as she writes it (a terminal; Windows: a console or a redirect,
+/// anything but her own log file); `stderr_file`, the file it goes to, when it's one (Windows: her
+/// own log only); `fail_notice(title, text)`, a failed start said on screen, bounded (Windows a
+/// message box, Linux a desktop notification); `keep_log_under`, her own log (Windows' without a
+/// console, Linux's install.sh `launch.log`) kept under the cap while she runs, from a thread.
+#[cfg(target_os = "linux")]
+pub use linux::{fail_notice, keep_log_under, stderr_file, stderr_seen};
+#[cfg(windows)]
+pub use self::windows::{fail_notice, keep_log_under, stderr_file, stderr_seen};
+
 /// Another process's environment as she reads it (`process_environ`: the daemon's): the names
 /// set, not blank (never a value), and its `LOCAL_ENDPOINT` (a URL Synaps keeps as non-secret
 /// configuration: the one value read).

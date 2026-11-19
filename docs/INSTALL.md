@@ -82,7 +82,8 @@ Then it starts her, `--no-autostart` or not (that flag is about login), the way 
 (Linux: `env SA_BACKEND=x11` off Hyprland and i3, so GNOME and KDE on Wayland run her through
 XWayland), from your home folder, in a session of her own so closing the terminal leaves her be, and
 waits up to 20 s for her first frame (`~/.local/state/synaps-avatar/launch.log`, the run before's
-kept as `launch.old.log`; Windows: her `synaps-avatar.log`, which she starts over past 4 MB).
+kept as `launch.old.log`; Windows: her `synaps-avatar.log`). Either one starts over past 4 MB while
+she runs, the earlier part kept as `.old.log`.
 
 - **One already running as autostart starts her** (no arguments: the old binary) is quit and started
   again.

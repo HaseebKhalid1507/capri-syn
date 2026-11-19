@@ -3,14 +3,16 @@
 //! installer) runs as her child inside a job object that kills it when the job's last handle
 //! closes: it dies with her, even when she is killed. It follows `[voice] enabled`, and `[voice] mic`
 //! (a new one starts it again on that one). A sidecar that exits is started again after 1, 2, 4 …
-//! 60 s (back to 1 s after a run of a minute). Its stdout and stderr go to
-//! `%LOCALAPPDATA%\capri-voice\capri-voice.log` (started over past 4 MB).
+//! 60 s (back to 1 s after a run of a minute). Its stdout and stderr go through a pipe into
+//! `%LOCALAPPDATA%\capri-voice\capri-voice.log`, which starts over past 4 MB as it's written
+//! (`logcap::Capped`; the old one kept as `capri-voice.old.log`).
 //!
 //! `CAPRI_VOICE_BUNDLE` names another bundle folder; `CAPRI_VOICE_SPAWN=0` leaves the sidecar to
 //! him (he runs it himself). Never under test (`SA_BRAIN_SYNTH`).
 
 use crate::platform::BaseDir;
-use super::dirs::{base_dir, starts_over};
+use super::dirs::base_dir;
+use crate::logcap::{CAP, Capped};
 use ::windows::Win32::Foundation::HANDLE;
 use ::windows::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
@@ -121,15 +123,26 @@ impl Job {
     }
 }
 
-/// Its log, appended (a new one past 4 MB, the old kept as `capri-voice.old.log`).
-fn open_log(path: &Path) -> io::Result<std::fs::File> {
-    if let Some(d) = path.parent() {
-        std::fs::create_dir_all(d)?;
+/// `c` started in the job (`launch`), its stdout and stderr into one pipe, and from there into
+/// `log` (`logcap::Capped`: appended, started over past `logcap::CAP` as it's written, the old one
+/// kept as `capri-voice.old.log`) by a thread of its own that ends with the pipe: when the sidecar
+/// has exited. The pipe is always read, so the sidecar never blocks on its output.
+fn launch_logged(mut c: Command, log: &Path, job: &Job) -> io::Result<(Child, std::thread::JoinHandle<()>)> {
+    let to = Capped::open(log, CAP)?;
+    let (from, into) = io::pipe()?;
+    c.stdout(into.try_clone()?).stderr(into);
+    let mut child = launch(&mut c, job)?;
+    // Her own ends of the pipe closed: it ends with the sidecar's.
+    drop(c);
+    match std::thread::Builder::new().name("voice-log".into()).spawn(move || crate::logcap::pump(from, to)) {
+        Ok(pump) => Ok((child, pump)),
+        Err(e) => {
+            // Nothing would read its output: not left to block on it.
+            child.kill().ok();
+            child.wait().ok();
+            Err(e)
+        }
     }
-    if starts_over(std::fs::metadata(path).map(|m| m.len()).ok()) {
-        std::fs::rename(path, path.with_extension("old.log")).ok();
-    }
-    std::fs::OpenOptions::new().create(true).append(true).open(path)
 }
 
 /// Her models' folder (`$CAPRI_VOICE_MODELS`, else `%LOCALAPPDATA%\capri-voice\models`, as the
@@ -147,11 +160,7 @@ fn start(dir: &Path, log: &Path, job: &Job, mic: &str) -> io::Result<Child> {
     if let Err(d) = models_ready() {
         return Err(io::Error::new(io::ErrorKind::NotFound, format!("no models in {} yet: run voice-models.ps1 (the voice installer does)", d.display())));
     }
-    let out = open_log(log)?;
-    let err = out.try_clone()?;
-    let mut c = command(dir, mic);
-    c.stdout(out).stderr(err);
-    launch(&mut c, job)
+    launch_logged(command(dir, mic), log, job).map(|(child, _)| child)
 }
 
 /// The sidecar's command: the bundle's interpreter on `capri-voice`, no console window. `mic`
@@ -315,6 +324,28 @@ mod tests {
         unsafe { ::windows::Win32::Foundation::CloseHandle(job.0) }.unwrap();
         c.wait().unwrap();
         assert!(t0.elapsed() < Duration::from_secs(5), "killed with the job, not after its 30 s ({:?})", t0.elapsed());
+    }
+
+    /// Its stdout and stderr reach its log through the pipe, both, and the pipe's thread ends with
+    /// it (her own ends of the pipe closed).
+    #[test]
+    fn the_sidecars_output_reaches_its_log() {
+        let d = std::env::temp_dir().join(format!("sa-sidecar-log-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let log = d.join("capri-voice.log");
+        let job = Job::new().unwrap();
+        let mut c = Command::new("cmd");
+        c.arg("/c").raw_arg("echo on stdout& echo on stderr 1>&2").stdin(Stdio::null()).creation_flags(CREATE_NO_WINDOW);
+        let (mut child, pump) = launch_logged(c, &log, &job).unwrap();
+        assert!(child.wait().unwrap().success());
+        let t0 = Instant::now();
+        while !pump.is_finished() && t0.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(pump.is_finished(), "the pipe ended with it");
+        let text = std::fs::read_to_string(&log).unwrap();
+        assert!(text.contains("on stdout") && text.contains("on stderr"), "{text:?}");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// Exits are started again after the backoff; voice off stops it.

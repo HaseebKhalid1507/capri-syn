@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### When she can't start, she says so; her logs stay small; Windows needs no VC++ runtime
+- A start that fails where no one reads her log (the Start menu, the app menu, autostart) now says
+  so on screen too, once, as she exits. Before, the click did nothing visible. On Windows it's a
+  message box titled capri-syn: one sentence (a missing or broken pack: install capri-syn again)
+  and where her log is. It goes away when she exits, after 2 minutes at the most. On Linux it's a
+  desktop notification (she waits up to 2 s for it). Nothing more for `--check`, `--set`, `-h`,
+  `-V`, a bad command line, one that's already running, or a terminal. Windows doesn't show it for
+  a redirected stderr either. `SA_NO_NOTICE=1` keeps it to her log (tests).
+- Her log starts over past 4 MB while she runs, not only at start, the earlier part kept as
+  `.old.log` (one kept). A thread that isn't her UI thread checks it every 30 s. That covers
+  Windows' `synaps-avatar.log` and Linux's install.sh `launch.log`; a terminal, the journal or your
+  own redirect are left alone. The Windows voice sidecar's output goes through a pipe, so
+  `capri-voice.log` starts over as it's written.
+- Her Windows exe links the C runtime in (`+crt-static`, `.cargo/config.toml`), so a PC without
+  the Visual C++ Redistributable runs her. Main's exe imported `VCRUNTIME140.dll` (CI's PDB at
+  0ea4ac9). `build.ps1` now lists her exe's DLL imports and stops on a C runtime one. The voice
+  bundle still wants `MSVCP140.dll` / `MSVCP140_1.dll` from the system (onnxruntime): a follow-up
+  (WINDOWS.md, VM item 13).
+
 ### Docs: true for v1
 - docs/ says what main does: her Settings page, menu and Windows tray; Settings ▸ Brain as the way to
   a brain; Windows 10 and Windows 11 on Arm untested; no `capri-ctl` (WINDOWS.md's Control: what

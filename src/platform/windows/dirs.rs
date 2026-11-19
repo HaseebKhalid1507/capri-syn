@@ -1,4 +1,5 @@
-//! Where her files go on Windows (`super::super::BaseDir`), and her log when she has no console.
+//! Where her files go on Windows (`super::super::BaseDir`), and her log when she has no console:
+//! started over past `logcap::CAP` at start, and while she runs (`keep_log_under`).
 //!
 //! `$XDG_<KIND>_HOME` wins, as on Linux (scripts and tests set it); else settings go under
 //! `%APPDATA%` (they roam with him) and packs, state and the log under `%LOCALAPPDATA%`. The
@@ -6,11 +7,16 @@
 //! `%LOCALAPPDATA%\synaps-avatar\packs\capri`.
 
 use super::super::BaseDir;
+use ::windows::Win32::Foundation::HANDLE;
+use ::windows::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle};
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, IntoRawHandle as _, OwnedHandle};
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
-/// The log starts over past this (at start): the previous one is kept as `.old.log`.
-const LOG_KEEP: u64 = 4 << 20;
+/// Her log without a console (`log_without_console`): where it is, and whether her stdout went
+/// there too (it had no handle either).
+static OWN: OnceLock<(PathBuf, bool)> = OnceLock::new();
 
 pub fn base_dir(d: BaseDir) -> Option<PathBuf> {
     base_dir_in(d, |k| std::env::var_os(k))
@@ -34,9 +40,6 @@ pub fn home_dir() -> Option<PathBuf> {
 /// a terminal (or with either redirected), nothing changes. Rust's stdio reads the std handle at
 /// each write, so swapping it here, first thing in main, takes for every later line.
 pub fn log_without_console() {
-    use ::windows::Win32::Foundation::HANDLE;
-    use ::windows::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle};
-    use std::os::windows::io::IntoRawHandle as _;
     // Err: no handle (null), as a windowed process gets from Explorer.
     if unsafe { GetStdHandle(STD_ERROR_HANDLE) }.is_ok() {
         return;
@@ -46,26 +49,72 @@ pub fn log_without_console() {
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }
-    if starts_over(std::fs::metadata(&path).map(|m| m.len()).ok()) {
+    if crate::logcap::due(std::fs::metadata(&path).map(|m| m.len()).ok()) {
         // A running instance may hold it: Rust opens files sharing delete, so the rename goes
         // through and that one keeps writing to the old file.
-        std::fs::rename(&path, dir.join("synaps-avatar.old.log")).ok();
+        std::fs::rename(&path, crate::logcap::old_of(&path)).ok();
     }
-    let Ok(f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) else { return };
-    // Hers for the life of the process.
+    let Ok(f) = crate::logcap::open(&path) else { return };
+    // Hers for the life of the process (or until it starts over: `keep_log_under`).
     let h = HANDLE(f.into_raw_handle());
-    unsafe {
-        SetStdHandle(STD_ERROR_HANDLE, h).ok();
-        if GetStdHandle(STD_OUTPUT_HANDLE).is_err() {
-            SetStdHandle(STD_OUTPUT_HANDLE, h).ok();
-        }
+    let out = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) }.is_err();
+    if unsafe { SetStdHandle(STD_ERROR_HANDLE, h) }.is_err() {
+        // SAFETY: just opened, handed to no one.
+        drop(unsafe { OwnedHandle::from_raw_handle(h.0) });
+        return;
     }
+    if out {
+        unsafe { SetStdHandle(STD_OUTPUT_HANDLE, h) }.ok();
+    }
+    OWN.set((path, out)).ok();
     elog!("--- synaps-avatar {} (pid {}): no console, logging here", env!("CARGO_PKG_VERSION"), std::process::id());
 }
 
-/// The log at start is `len` bytes (None: there is none): start a new one?
-pub(super) fn starts_over(len: Option<u64>) -> bool {
-    len.is_some_and(|n| n > LOG_KEEP)
+/// Whether someone reads her stderr as she writes it: a console, or a redirect (a script's). Her
+/// own log file (no console): no one does (`crate::startfail`).
+pub fn stderr_seen() -> bool {
+    OWN.get().is_none()
+}
+
+/// The file her stderr goes to, when it's her own log (no console).
+pub fn stderr_file() -> Option<PathBuf> {
+    OWN.get().map(|(p, _)| p.clone())
+}
+
+/// Her log kept under `logcap::CAP` while she runs (`logcap::keep_under`), when it's her own (no
+/// console): her stderr (stdout too, when it went there) moved into a new file. A console or a
+/// redirect is left as it is.
+pub fn keep_log_under() {
+    let Some((log, out)) = OWN.get().cloned() else { return };
+    crate::logcap::keep_under(log, stderr_len, move |log| into_new_log(log, out));
+}
+
+/// The size of the file her stderr writes now (her own handle's: what she wrote, wherever the
+/// file's name went).
+fn stderr_len() -> Option<u64> {
+    let h = unsafe { GetStdHandle(STD_ERROR_HANDLE) }.ok()?;
+    // SAFETY: her stderr handle, borrowed: ManuallyDrop never closes it.
+    let f = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_handle(h.0) });
+    f.metadata().ok().map(|m| m.len())
+}
+
+/// `log` started over (`logcap::start_over`), her stderr (and stdout, `out`) moved into the new
+/// one. Rust's stdio reads the std handle at each write, so the next line goes there. The old
+/// handle comes back, for `keep_under` to close a tick later: a write that read it just before
+/// the swap may still be using it.
+fn into_new_log(log: &Path, out: bool) -> std::io::Result<OwnedHandle> {
+    let old = unsafe { GetStdHandle(STD_ERROR_HANDLE) }.map_err(std::io::Error::other)?;
+    let new = OwnedHandle::from(crate::logcap::start_over(log)?);
+    let h = HANDLE(new.as_raw_handle());
+    unsafe { SetStdHandle(STD_ERROR_HANDLE, h) }.map_err(std::io::Error::other)?;
+    if out {
+        unsafe { SetStdHandle(STD_OUTPUT_HANDLE, h) }.ok();
+    }
+    // Hers now, for the life of the process (or the next start-over).
+    let _ = new.into_raw_handle();
+    // SAFETY: her stderr's handle until just now, opened by `log_without_console` or an earlier
+    // start-over, and no longer hers to keep.
+    Ok(unsafe { OwnedHandle::from_raw_handle(old.0) })
 }
 
 #[cfg(test)]
@@ -95,10 +144,10 @@ mod tests {
         assert_eq!(base_dir_in(BaseDir::Config, env(&[])), None);
     }
 
+    /// Under `cargo test` her stderr is the runner's (a console or a pipe): no log of her own, so
+    /// nothing kept under a cap and no failure said on screen.
     #[test]
-    fn the_log_starts_over_only_when_big() {
-        assert!(!starts_over(None));
-        assert!(!starts_over(Some(LOG_KEEP)));
-        assert!(starts_over(Some(LOG_KEEP + 1)));
+    fn a_console_or_a_redirect_is_not_her_log() {
+        assert!(stderr_seen() && stderr_file().is_none());
     }
 }

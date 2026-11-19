@@ -419,6 +419,84 @@ pub fn monotonic_s() -> f64 {
     ts.tv_sec as f64 + ts.tv_nsec as f64 * 1e-9
 }
 
+/// Whether someone reads her stderr as she writes it: a terminal. A file, a journal or a pipe: no
+/// one does (`crate::startfail`).
+pub fn stderr_seen() -> bool {
+    // SAFETY: a plain query on this process's own descriptor.
+    unsafe { libc::isatty(2) == 1 }
+}
+
+/// The file her stderr goes to, when it's one (install.sh's `launch.log`, a redirect of his).
+pub fn stderr_file() -> Option<PathBuf> {
+    let fd2 = std::path::Path::new("/proc/self/fd/2");
+    std::fs::metadata(fd2).ok().filter(|m| m.is_file())?;
+    std::fs::read_link(fd2).ok()
+}
+
+/// A failed start said on screen (`crate::startfail`): a desktop notification, from a thread of
+/// its own. She waits up to 2 s for the session bus to take it, then goes on to her exit either
+/// way (the notification is the server's by then). No server, no bus: her log only.
+pub fn fail_notice(title: &str, text: &str) {
+    const WITHIN: std::time::Duration = std::time::Duration::from_secs(2);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (title, text) = (title.to_string(), text.to_string());
+    let spawned = std::thread::Builder::new().name("fail-notice".into()).spawn(move || {
+        tx.send(notify(&title, &text, None)).ok();
+    });
+    if let Err(e) = spawned {
+        elog!("synaps-avatar: not said on screen: {e}");
+        return;
+    }
+    match rx.recv_timeout(WITHIN) {
+        Ok(Ok(id)) => elog!("synaps-avatar: said on screen too (notification {id})"),
+        Ok(Err(e)) => elog!("synaps-avatar: not said on screen: no desktop notification ({e:#})"),
+        Err(_) => elog!("synaps-avatar: not said on screen: the notification wasn't taken within {} s", WITHIN.as_secs()),
+    }
+}
+
+/// Her log kept under `logcap::CAP` while she runs (`logcap::keep_under`), when her stderr is her
+/// own: `launch.log` in her state folder, which install.sh starts her into. A terminal, a journal
+/// or a file he named are his, and left as they are.
+pub fn keep_log_under() {
+    let fd2 = std::path::Path::new("/proc/self/fd/2");
+    let Some(log) = base_dir(BaseDir::State).map(|b| b.join("synaps-avatar").join("launch.log")) else { return };
+    if !same_file(fd2, &log) {
+        return;
+    }
+    crate::logcap::keep_under(
+        log,
+        || std::fs::metadata("/proc/self/fd/2").ok().map(|m| m.len()),
+        |log| {
+            // stdout too when it's the same file (install.sh's `>launch.log 2>&1`).
+            let fds: &[std::os::fd::RawFd] = if same_file(std::path::Path::new("/proc/self/fd/1"), std::path::Path::new("/proc/self/fd/2")) { &[2, 1] } else { &[2] };
+            into_new_log(log, fds)
+        },
+    );
+}
+
+/// Whether `a` and `b` are the same regular file (a descriptor's `/proc/self/fd/N` too).
+fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    match (std::fs::metadata(a), std::fs::metadata(b)) {
+        (Ok(a), Ok(b)) => a.is_file() && a.dev() == b.dev() && a.ino() == b.ino(),
+        _ => false,
+    }
+}
+
+/// `log` started over (`logcap::start_over`), and `fds` moved into the new one with `dup2`: one
+/// step each, so a write under way ends in the old file and the next goes to the new one.
+fn into_new_log(log: &std::path::Path, fds: &[std::os::fd::RawFd]) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd as _;
+    let new = crate::logcap::start_over(log)?;
+    for &fd in fds {
+        // SAFETY: dup2 onto one of this process's own descriptors; `new` is open.
+        if unsafe { libc::dup2(new.as_raw_fd(), fd) } < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
 /// Tests: run `f` with stderr (fd 2) going into a pipe whose reader is gone; fd 2 is put back
 /// after.
 #[cfg(test)]
@@ -590,6 +668,52 @@ fn session_event(m: &zbus::Message, session: &zbus::zvariant::OwnedObjectPath) -
 mod tests {
     use super::*;
     use crate::platform::SessionEv;
+
+    /// Her log started over under her running process (`keep_log_under`'s step, on a descriptor
+    /// of this test's, not fd 2): the descriptors moved write into the new file, the earlier part
+    /// is in `.old.log`, and a file that isn't the one a descriptor writes is told apart.
+    #[test]
+    fn her_log_starts_over_under_her_descriptors() {
+        use std::io::Write as _;
+        use std::os::fd::AsRawFd as _;
+        let d = std::env::temp_dir().join(format!("sa-launch-log-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let log = d.join("launch.log");
+        // As install.sh opens it (`>launch.log 2>&1`: one file, two descriptors, no O_APPEND).
+        let mut err = std::fs::File::create(&log).unwrap();
+        let mut out = err.try_clone().unwrap();
+        let fd = |f: &std::fs::File| std::path::PathBuf::from(format!("/proc/self/fd/{}", f.as_raw_fd()));
+        assert!(same_file(&fd(&err), &log) && same_file(&fd(&out), &fd(&err)));
+        assert!(!same_file(&fd(&err), &d.join("launch.old.log")), "not there: not it");
+        err.write_all(b"before\n").unwrap();
+        into_new_log(&log, &[err.as_raw_fd(), out.as_raw_fd()]).unwrap();
+        err.write_all(b"after\n").unwrap();
+        out.write_all(b"stdout too\n").unwrap();
+        assert_eq!(std::fs::read_to_string(d.join("launch.old.log")).unwrap(), "before\n");
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "after\nstdout too\n");
+        assert!(same_file(&fd(&err), &log), "the descriptor is the new file's");
+        // A folder in the way of `.old.log`: it can't, and the descriptors stay where they were.
+        drop((err, out));
+        std::fs::remove_file(d.join("launch.old.log")).unwrap();
+        std::fs::create_dir_all(d.join("launch.old.log").join("x")).unwrap();
+        let mut err = std::fs::OpenOptions::new().append(true).open(&log).unwrap();
+        assert!(into_new_log(&log, &[err.as_raw_fd()]).is_err());
+        err.write_all(b"same file\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "after\nstdout too\nsame file\n");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A failed start names her log when her stderr is a file (install.sh's launch.log), and only
+    /// then (a pipe, a terminal, a journal: none).
+    #[test]
+    fn her_log_is_named_when_her_stderr_is_a_file() {
+        let fd2 = std::fs::metadata("/proc/self/fd/2");
+        match stderr_file() {
+            Some(p) => assert!(fd2.is_ok_and(|m| m.is_file()) && same_file(&p, std::path::Path::new("/proc/self/fd/2")), "{}", p.display()),
+            None => assert!(!fd2.is_ok_and(|m| m.is_file())),
+        }
+    }
 
     /// The daemon's environment, read from outside (a key exported in the shell that started it).
     #[test]
