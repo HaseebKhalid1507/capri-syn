@@ -147,6 +147,12 @@ function Start-Take {
     if (-not $up) { throw "$script:Take: she never loaded (see $log-her.err)" }
     $live = Wait-Until { (State).session.live -eq $true } 30 "her session ($script:Take)"
     if (-not $live) { $script:Fails.Add("$script:Take: OFFLINE (the fake daemon never answered)") }
+    # Her window whole on the screen (her bubble keeps to the part of it there), off the desktop's
+    # corner watermark where the Line still fits left of her.
+    $st = State
+    $sf = [double]$st.scale_factor
+    $x = [int][Math]::Min(1390 * $sf, [ShootWin.Native]::Screen()[2] - 24 - $st.window.w / 2)
+    $null = Ctl "pos $x 100000 now"
     Start-Sleep -Seconds 1
 }
 
@@ -375,6 +381,8 @@ function To-Edge {
 }
 
 # ---- run ---------------------------------------------------------------------------------------
+
+Clear-ShotDesktop
 
 foreach ($set in $Sets) {
     if (-not $Scenes.Contains($set)) { throw "no scene set '$set' (sets: $($Scenes.Keys -join ', '))" }
