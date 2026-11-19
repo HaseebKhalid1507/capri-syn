@@ -297,43 +297,66 @@ class WindowsPlayer(unittest.TestCase):
 class FakeSd:
     """sounddevice as the stock PortAudio shows a Windows PC: his USB mic three times (MME, its name
     cut at 31 characters; DirectSound; WASAPI), the built-in mic WASAPI's default, and a headset
-    that is only a speaker. What gets opened is kept."""
+    that is only a speaker. What gets opened is kept. `later`: devices PortAudio lists only once it
+    starts again (`_terminate`, `_initialize`: a Bluetooth headset that connected since), which
+    also closes every stream, as Pa_Terminate does."""
     MIC = 'Microphone (USB Audio Device Pro)'
+    BT = 'Headset Microphone (WH-1000XM4 Hands-Free)'
 
-    def __init__(self):
-        self.opened = []
+    def __init__(self, later=()):
+        self.opened, self.streams, self.later, self.extra = [], [], list(later), []
+        self._initialized, self.restarts, self.fail_start = 1, 0, False
+
+    def _terminate(self):
+        assert self._initialized > 0, 'Pa_Terminate: not initialized'
+        self._initialized -= 1
+        for st in self.streams:
+            st.closed, st.active = True, False
+
+    def _initialize(self):
+        if self.fail_start:
+            self.fail_start = False
+            raise RuntimeError('Error initializing PortAudio')
+        self._initialized += 1
+        self.restarts += 1
+        self.extra, self.later = self.extra + self.later, []
 
     def query_hostapis(self):
+        assert self._initialized > 0, 'PortAudio not initialized'
         return [{'name': 'MME', 'default_input_device': 0, 'default_output_device': -1},
                 {'name': 'Windows DirectSound', 'default_input_device': 2, 'default_output_device': -1},
                 {'name': 'Windows WASAPI', 'default_input_device': 4, 'default_output_device': 6}]
 
     def query_devices(self):
+        assert self._initialized > 0, 'PortAudio not initialized'
         d = lambda i, name, api, cin, cout: {'index': i, 'name': name, 'hostapi': api, 'max_input_channels': cin, 'max_output_channels': cout}
         return [d(0, 'Microsoft Sound Mapper - Input', 0, 2, 0), d(1, self.MIC[:31], 0, 2, 0),
                 d(2, 'Primary Sound Capture Driver', 1, 2, 0), d(3, self.MIC, 1, 2, 0),
                 d(4, 'Microphone (Realtek(R) Audio)', 2, 2, 0), d(5, self.MIC, 2, 1, 0),
-                d(6, 'Speakers (Realtek(R) Audio)', 2, 0, 2), d(7, 'Headset (USB)', 2, 0, 2)]
+                d(6, 'Speakers (Realtek(R) Audio)', 2, 0, 2), d(7, 'Headset (USB)', 2, 0, 2)] + \
+            [d(8 + i, name, 2, 1, 0) for i, name in enumerate(self.extra)]
 
     class WasapiSettings:
         def __init__(self, auto_convert):
             self.auto_convert = auto_convert
 
     class Stream:
-        active = True
+        def __init__(self):
+            self.active, self.closed = True, False
 
         def start(self):
             pass
 
         def abort(self):
-            pass
+            self.active = False
 
         def close(self):
-            pass
+            self.active, self.closed = False, True
 
     def RawInputStream(self, **kw):
         self.opened.append(('input', kw))
-        return self.Stream()
+        self.streams.append(self.Stream())
+        return self.streams[-1]
 
     RawOutputStream = RawInputStream
 
@@ -347,6 +370,7 @@ class NamedMic(unittest.TestCase):
         p = mock.patch.dict(sys.modules, {'sounddevice': self.sd})
         p.start()
         self.addCleanup(p.stop)
+        self.addCleanup(lambda: self.assertEqual([s for s in win._STREAMS if not s.closed], [], 'every stream closed'))
 
     def test_one_device_per_name(self):
         sd, mic = self.sd, FakeSd.MIC
@@ -372,8 +396,62 @@ class NamedMic(unittest.TestCase):
         self.assertEqual(self.sd.opened, [], 'a mic that is not there: nothing opened, never the default instead')
         win.Mic(16000).terminate()
         self.assertEqual(self.sd.opened.pop()[1]['device'], 4, "none named: WASAPI's default")
-        win.Player(24000, 'Headset (USB)').kill()
-        self.assertEqual(self.sd.opened.pop()[1]['device'], 7)
+        p = win.Player(24000, 'Headset (USB)')
+        p.kill()
+        self.assertEqual((p.wait(0), self.sd.opened.pop()[1]['device']), (1, 7))
+
+    def use(self, sd):
+        self.sd = sd
+        p = mock.patch.dict(sys.modules, {'sounddevice': sd})
+        p.start()
+        self.addCleanup(p.stop)
+        return sd
+
+    def test_a_mic_that_came_later_is_found(self):
+        """A mic PortAudio didn't list when it started (a Bluetooth headset connecting after
+        sign-in): on a miss its list is read again, so it's found without a restart of hers."""
+        sd = self.use(FakeSd(later=[FakeSd.BT]))
+        self.assertFalse(win.node_missing('sources', FakeSd.BT), 'found once the list was read again')
+        self.assertEqual((sd.restarts, sd._initialized), (1, 1))
+        self.assertFalse(win.node_missing('sources', FakeSd.BT))
+        self.assertEqual(sd.restarts, 1, 'a hit reads nothing again')
+        win.Mic(16000, FakeSd.BT).terminate()
+        self.assertEqual(sd.opened.pop()[1]['device'], 8)
+        self.assertTrue(win.node_missing('sources', 'Microphone (Nothing Here)'))
+        self.assertEqual((sd.restarts, sd._initialized), (2, 1), 'a miss is read again each time, and PortAudio stays up')
+
+    def test_never_while_a_stream_of_hers_is_open(self):
+        """Starting PortAudio again ends every stream: while one of hers is open (her speech, the
+        wake word's mic) a miss stays a miss; once it closes, the next look reads the list again."""
+        sd = self.use(FakeSd(later=[FakeSd.BT]))
+        p = win.Player(24000)
+        self.assertTrue(win.node_missing('sources', FakeSd.BT), 'not while she speaks')
+        self.assertEqual(sd.restarts, 0)
+        self.assertFalse(p.stream.closed, 'her speech plays on')
+        with self.assertRaises(LookupError):
+            win.Mic(16000, FakeSd.BT)
+        self.assertEqual(sd.restarts, 0)
+        p.close()
+        p.done.set()
+        self.assertEqual(p.wait(0), 0)
+        self.assertFalse(win.node_missing('sources', FakeSd.BT), 'her speech is over: read again, found')
+        self.assertEqual(sd.restarts, 1)
+        m = win.Mic(16000, FakeSd.BT)
+        self.assertTrue(win.node_missing('sources', 'Microphone (Nothing Here)'))
+        self.assertEqual(sd.restarts, 1, 'the mic is open')
+        self.assertFalse(m.stream.closed)
+        m.terminate()
+
+    def test_a_failed_start_is_tried_again(self):
+        sd = self.use(FakeSd(later=[FakeSd.BT]))
+        sd.fail_start = True
+        self.assertTrue(win.node_missing('sources', FakeSd.BT), 'PortAudio would not start again')
+        self.assertEqual(sd._initialized, 0)
+        self.assertFalse(win.node_missing('sources', FakeSd.BT), 'the next look starts it')
+        self.assertEqual((sd.restarts, sd._initialized), (1, 1))
+        sd._terminate()
+        win.Mic(16000).terminate()
+        self.assertEqual((sd.restarts, sd.opened.pop()[1]['device']), (2, 4), "down: started before an open, even of the default")
 
 
 class FakeSessions:
@@ -542,6 +620,13 @@ class WindowsSmoke(unittest.TestCase):
         import importlib.util
         if not all(importlib.util.find_spec(m) for m in ('pycaw', 'winrt', 'sounddevice')):
             self.skipTest('the bundle packages are not installed')
+        try:
+            import sounddevice as sd
+        except OSError as e:
+            print(f'  sounddevice: refused here ({e})', file=sys.stderr)
+        else:
+            for a in ('_initialize', '_terminate', '_initialized'):
+                self.assertTrue(hasattr(sd, a), f'sounddevice.{a}: how its device list is read again (capri_voice_win._reload)')
         for name, call in (('SMTC players', lambda: win.Smtc().players()), ('sessions', lambda: win.Sessions().list()),
                            ('mic', lambda: win.Mic(16000).terminate()), ('speaker', lambda: win.Player(24000).kill())):
             try:

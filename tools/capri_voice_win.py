@@ -14,7 +14,7 @@ same contracts:
 The Windows-only packages (sounddevice, pycaw/comtypes, winrt) are imported where they are used,
 so the module imports on any OS and its pure parts are tested on Linux too
 (tools/test_capri_voice.py). What only a real desktop can show is marked [VM] in docs/WINDOWS.md."""
-import hmac, json, ntpath, os, queue, re, secrets, socket, subprocess, sys, threading, time
+import hmac, json, ntpath, os, queue, re, secrets, socket, subprocess, sys, threading, time, weakref
 
 STATE = None                  # capri-voice sets these (setup)
 PLAYERS, DUCK_MATCH = [], None
@@ -136,6 +136,30 @@ def serve(accepted, path=None, ready=None, stop=None):
 
 # ---- audio: PortAudio (sounddevice) ------------------------------------------------------------
 
+# PortAudio reads its device list once, when it starts (`import sounddevice`): a mic that comes
+# later (a Bluetooth headset connecting after sign-in) isn't in it till PortAudio starts again,
+# and that ends every stream. So it starts again only on a miss, with none of ours open (_STREAMS:
+# the ones `_open` made), and never while another of these calls runs (_PA).
+_PA = threading.RLock()
+_STREAMS = weakref.WeakSet()
+
+
+def _reload(sd):
+    """PortAudio's device list read again (Pa_Terminate, then Pa_Initialize) if no stream of ours
+    is open: True when it was. A failed start is tried again on the next miss."""
+    with _PA:
+        if any(not s.closed for s in list(_STREAMS)):
+            return False
+        try:
+            while sd._initialized > 0:
+                sd._terminate()
+            sd._initialize()
+        except Exception as e:
+            log(f'audio: the device list could not be read again ({e})')
+            return False
+        return True
+
+
 def _wasapi(sd, kind):
     """WASAPI's host API index and its default device of `kind` ('input'/'output'), or None."""
     try:
@@ -148,14 +172,30 @@ def _wasapi(sd, kind):
 
 
 def _named(sd, name, kind):
-    """The one device `name` means ([voice] mic, by the name Sound settings shows), of `kind`
-    ('input'/'output'): its index under WASAPI, the exact name, with channels of that kind; None
-    when there's no such device. Used for the open and for the "is it there" check alike. A name
+    """The one device `name` means ([voice] mic: its WASAPI name, as her installer lists it), of
+    `kind` ('input'/'output'): its index under WASAPI, the exact name, with channels of that kind;
+    None when there's no such device, also after PortAudio's list is read again (`_reload`: a
+    device that came since). Used for the open and for the "is it there" check alike. A name
     alone is no device to PortAudio: the stock build lists every endpoint again under MME (its
     name cut at 31 characters) and DirectSound, so sounddevice refuses it ("Multiple input
     devices found")."""
+    if not name or not name.strip():
+        return None
+    with _PA:
+        try:
+            i = _find(sd, name, kind)
+        except Exception:
+            i = None                  # PortAudio is down (a start again failed): started below
+        if i is None and _reload(sd):
+            i = _find(sd, name, kind)
+            if i is not None:
+                log(f'audio: {kind} "{name.strip()}" found once the device list was read again')
+        return i
+
+
+def _find(sd, name, kind):
     w = _wasapi(sd, kind)
-    if w is None or not name or not name.strip():
+    if w is None:
         return None
     ch = f'max_{kind}_channels'
     for i, d in enumerate(sd.query_devices()):
@@ -168,6 +208,15 @@ def _open(sd, cls, rate, device, kind, **kw):
     """A WASAPI stream (shared mode, Windows resampling to our rate) on `device`: a name, the one
     device `_named` finds and never another (LookupError when there is none), or None: WASAPI's
     default, else PortAudio's default host API."""
+    with _PA:
+        if getattr(sd, '_initialized', 1) <= 0:
+            _reload(sd)               # down since a start again failed: up again first
+        s = _open_at(sd, cls, rate, device, kind, **kw)
+        _STREAMS.add(s)
+        return s
+
+
+def _open_at(sd, cls, rate, device, kind, **kw):
     wasapi = dict(samplerate=rate, channels=1, dtype='int16', extra_settings=sd.WasapiSettings(auto_convert=True))
     if device is not None:
         idx = _named(sd, device, kind)
@@ -301,9 +350,10 @@ def sink_kind(with_id=False):
     name = ''
     try:
         import sounddevice as sd
-        w = _wasapi(sd, 'output')
-        idx = w[1] if w and w[1] is not None and w[1] >= 0 else sd.default.device[1]
-        name = sd.query_devices(idx)['name']
+        with _PA:
+            w = _wasapi(sd, 'output')
+            idx = w[1] if w and w[1] is not None and w[1] >= 0 else sd.default.device[1]
+            name = sd.query_devices(idx)['name']
     except Exception:
         pass
     kind = 'headphones' if HEADPHONES.search(name) else 'speakers'

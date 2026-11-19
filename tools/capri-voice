@@ -44,8 +44,9 @@ on the CPU (whisper.cpp, Kokoro on onnxruntime's CPU provider).
 
 CAPRI_VOICE_SOURCE: the mic to record from (default: the default one). Linux: a PipeWire node
 (a test hook, or his service's own). Windows: in use, his `[voice] mic` (her installer's picker),
-set by her when she starts the sidecar: the device by the exact name Sound settings shows, under
-WASAPI. A named one that's gone is refused (NO MIC), never swapped for the default.
+set by her when she starts the sidecar (a new one: she starts it again): the device by its exact
+WASAPI name ("Microphone (USB Audio Device Pro)"). A named one that's gone is refused (NO MIC), never
+swapped for the default; one that came since is found (the device list is read again on a miss).
 Test hooks (never needed in use): CAPRI_VOICE_SINK names the node (Windows: the device) to play
 to (default: the default one); CAPRI_VOICE_PLAYERS limits pause to these MPRIS players (comma
 list); CAPRI_VOICE_DUCK_MATCH limits ducking to streams whose application name contains it.

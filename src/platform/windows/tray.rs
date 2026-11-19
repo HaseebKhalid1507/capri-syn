@@ -68,7 +68,7 @@ const REMOVE_WAIT: Duration = Duration::from_secs(1);
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
 
 /// Her icon's ids while it may be in the tray (her window, her GUID; 0: none), for an end that
-/// can't go through her tray's thread (`delete_now`). Cleared when that thread takes it out.
+/// can't go through her tray's thread (`delete_now`). Cleared once that thread has taken it out.
 static LIVE: Mutex<(isize, u128)> = Mutex::new((0, 0));
 
 fn forget_live(h: HWND) {
@@ -76,6 +76,15 @@ fn forget_live(h: HWND) {
     if l.0 == h.0 as isize {
         *l = (0, 0);
     }
+}
+
+/// Her tray's own delete: the shell's calls (`shell`) first, then `LIVE` cleared. Cleared before
+/// them, an end cut short while they wait on the shell (the quit watchdog) would find nothing to
+/// take out (`delete_now`), and the kill could cut them off: a ghost in the tray. Both deleting
+/// is harmless.
+fn deleting(h: HWND, shell: impl FnOnce()) {
+    shell();
+    forget_live(h);
 }
 
 /// Her icon out of the tray now, from whichever thread ends her (`platform::exit_now`: the quit
@@ -342,28 +351,27 @@ fn delete(h: HWND, s: &mut State) {
     if std::mem::replace(&mut s.left, true) {
         return;
     }
-    forget_live(h);
     let _ = unsafe { KillTimer(Some(h), ADD_TIMER) };
     let shown = s.shared.lock().map(|mut g| std::mem::replace(&mut g.shown, false)).unwrap_or(true);
-    unsafe {
+    let s = &*s;
+    deleting(h, || unsafe {
         if shown || s.timed_out {
             let _ = Shell_NotifyIconW(NIM_DELETE, &nid(h, s, NOTIFY_ICON_DATA_FLAGS(0)));
         }
         if s.fell_back {
             let _ = Shell_NotifyIconW(NIM_DELETE, &data_for(h, (!s.by_guid).then_some(s.guid), NOTIFY_ICON_DATA_FLAGS(0)));
         }
-    }
+    });
 }
 
 /// Out of the tray by every id she may have, without her state (it is in use below: the
 /// session ends while a call of hers waits on the shell).
 fn delete_any(h: HWND) {
-    forget_live(h);
     let none = NOTIFY_ICON_DATA_FLAGS(0);
-    unsafe {
+    deleting(h, || unsafe {
         let _ = Shell_NotifyIconW(NIM_DELETE, &data_for(h, Some(GUID::from_u128(GUID_NOW.get())), none));
         let _ = Shell_NotifyIconW(NIM_DELETE, &data_for(h, None, none));
-    }
+    });
 }
 
 /// The small icon's size where the tray is (the primary monitor), px.
@@ -1114,6 +1122,27 @@ mod tests {
             assert!(after.is_err(), "no ghost");
         }
         drop(t);
+    }
+
+    /// Her tray's own delete leaves her icon's ids for `delete_now` till the shell's calls are
+    /// done: an end cut short while they wait still takes her icon out (both deleting is
+    /// harmless). Cleared after them, and only if they are still hers.
+    #[test]
+    fn her_icon_stays_live_till_her_own_delete_is_done() {
+        let _one = LIVE_TEST.lock().unwrap_or_else(|p| p.into_inner());
+        let live = || *LIVE.lock().unwrap_or_else(|p| p.into_inner());
+        let (h, other) = (HWND(0x5a50 as *mut _), HWND(0x5a60 as *mut _));
+        *LIVE.lock().unwrap_or_else(|p| p.into_inner()) = (h.0 as isize, 7);
+        let mut during = None;
+        deleting(h, || during = Some(live()));
+        assert_eq!(during, Some((0x5a50, 7)), "still there while the shell's calls run");
+        assert_eq!(live(), (0, 0), "cleared after them");
+
+        // Not hers any more (taken mid-delete, another tray's since): left alone.
+        *LIVE.lock().unwrap_or_else(|p| p.into_inner()) = (other.0 as isize, 9);
+        deleting(h, || {});
+        assert_eq!(live(), (0x5a60, 9), "not hers: left");
+        *LIVE.lock().unwrap_or_else(|p| p.into_inner()) = (0, 0);
     }
 
     /// Her end cut short (the quit watchdog, a fatal exit: `platform::exit_now`): her icon out

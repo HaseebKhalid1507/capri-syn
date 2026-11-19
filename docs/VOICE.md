@@ -28,8 +28,34 @@ for speech. Setup: `tools/capri-voice-setup`, then `tools/systemd/capri-voice.se
 | `wake_handsfree` | `true` | "Hey Capri" starts hands-free (with `handsfree` on): quiet for `handsfree_timeout`, it ends and the wake word listens again. `false`: one turn, as before |
 | `echo` | `"auto"` | `"auto"` (the sink says headphones or speakers), `"headphones"` (talking over her stops her) or `"speakers"` (half-duplex) |
 | `vocab` | `[]` | your own words for speech-to-text: names, machines, jargon (`["Lynx", "polish-e", "devbox"]`). Whisper's recognition prompt is `Capri, choom, preem, Night City, Synaps, avatarctl` (`capri-ctl` on Windows), and these go after it. Up to 16 entries of at most 32 characters, 200 characters in all: past that, the first ones that fit are kept and the rest are left out, logged (not an error). A word already in her prompt (`Capri`, `choom`, …) still takes one of those slots, though the sidecar skips it, so don't repeat them. An empty entry, a comma or a control character in one is an error. They also join the prompt-echo filter (three or more words, all from the prompt, are dropped as junk; [What counts as speech](#what-counts-as-speech)), so leave out everyday words like "on", "off" or "build": "build on, off" would be thrown away |
+| `mic` | `""` | Windows: the microphone she listens on, by its WASAPI name (below); empty: Windows' default. Linux: unused (the service's own `CAPRI_VOICE_SOURCE`) |
 
-`avatarctl settings reload` re-sends changed voice settings to a connected sidecar.
+`avatarctl settings reload` re-sends changed voice settings to a connected sidecar. On Windows a new
+`mic` starts her sidecar again on it (`capri-ctl settings reload`); no restart of hers is needed.
+
+### Windows: which `mic`
+
+`mic` is the microphone's **WASAPI name** (its endpoint's friendly name), exactly:
+`mic = "Microphone (USB Audio Device Pro)"`. Sound settings shows it on two lines, `Microphone` with
+`USB Audio Device Pro` under it: the name is the first line with the second in brackets. Typed as
+those two lines, or as either one alone, it matches nothing. To see the names:
+
+- her installer's Voice page lists them and writes the one picked;
+- Device Manager, under "Audio inputs and outputs", shows the same names (the speakers too);
+- or in PowerShell, the microphones only:
+
+  ```powershell
+  Get-CimInstance Win32_PnPEntity -Filter "PNPClass = 'AudioEndpoint'" |
+    Where-Object { $_.PNPDeviceID -like 'SWD\MMDEVAPI\{0.0.1.*' -and $_.Status -eq 'OK' } |
+    Select-Object -ExpandProperty Name
+  ```
+
+The match is exact (case and spaces inside; the ends are trimmed) and only under WASAPI. A named mic
+that isn't there is said (NO MIC · ITS SOURCE IS GONE), never swapped for the default. One that
+connects later (a Bluetooth headset after sign-in) is found the next time she listens: on a miss the
+sidecar reads Windows' device list again, unless a stream of hers is open (her speech, the wake
+word's mic), as that would end it. A control character or a name over 256 characters is a settings
+error.
 
 ## Talking to her: hold, or toggle
 

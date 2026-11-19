@@ -38,6 +38,16 @@
 - `tools/synaps-avatar-remote` needs its host now (`synaps-avatar-remote <host>`); it had a personal
   default.
 
+### Windows: her mic by name (`[voice] mic`)
+- `[voice] mic` is the microphone she listens on, by its WASAPI name (`Microphone (USB Audio Device
+  Pro)`, not the two lines Sound settings shows; `docs/VOICE.md` says how to see the names). Her
+  installer's Voice page writes it. A new one on `settings reload` starts her voice sidecar again on
+  it.
+- A mic that connects after she started (a Bluetooth headset after sign-in) is found the next time she
+  listens: on a miss the sidecar reads the device list again, when no stream of hers is open.
+- A control character or a name over 256 characters is a settings error (`--set` exits 2), not a
+  sidecar that can never start.
+
 ### Windows: her icon in the tray
 - Her icon sits in the notification area while she runs. Its tooltip is `capri-syn · <her status>`
   (ONLINE, SLEEPING, NO BRAIN YET, HIDDEN, ...). It changes when her status does; her mic's clock
@@ -48,6 +58,8 @@
   choices (CAN'T SAVE / NOT SAVED YET), as her menu does under its row.
 - Explorer restarting puts it back. QUIT takes it out, with no ghost left. An icon the shell won't
   take at sign-in is tried again every 2 s for a minute.
+- A quit cut short (the watchdog) while her tray's own delete waits on the shell still takes her icon
+  out: the icon is left for it until those calls are done.
 - Linux: no tray yet. A StatusNotifierItem would plug in at `platform::linux::tray`, for X11 and
   Hyprland both.
 
