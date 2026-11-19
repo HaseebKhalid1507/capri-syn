@@ -62,6 +62,12 @@ const MENU_HEADER_PX: f32 = 96.0;
 const FIRST_WORDS_AFTER: Duration = Duration::from_millis(1_500);
 const FIRST_WORDS_RETRY: Duration = Duration::from_millis(700);
 const FIRST_WORDS_WITHIN: Duration = Duration::from_secs(180);
+/// Her first words wait at most this long for a look at her brain (a fresh install's are
+/// about it); none by then, the usual ones.
+const FIRST_WORDS_CREDS: Duration = Duration::from_secs(8);
+/// Her first words' button with no brain: the Line on Settings ▸ Brain. A chip line of her
+/// own words (`say`), never a command to copy.
+const SET_ME_UP: &str = "SET ME UP ▸";
 /// Her right-click menu's width, and its maker's mark's type size (logical px).
 const MENU_W: f32 = 210.0;
 /// The menu's picture row: the picture and its padding.
@@ -691,6 +697,12 @@ fn wrap_lines(text: &[char], wrap_w: f32, chip: Option<&dyn Fn(&str) -> f32>, mu
     Wrapped { lines, chips, width: widest, at: wrap_w }
 }
 
+/// Her first words have waited `FIRST_WORDS_CREDS` for a look at her login (`deadline`: their
+/// window's end, `FIRST_WORDS_WITHIN` after the first try's due time).
+fn creds_waited(now: Instant, deadline: Instant) -> bool {
+    deadline.saturating_duration_since(now) + FIRST_WORDS_CREDS <= FIRST_WORDS_WITHIN
+}
+
 /// A streaming reply's turn just ended (`was_more`, more no longer) behind the chip: he put it
 /// away (or it went) before its end, which he hasn't seen.
 fn ended_unseen(was_more: bool, b: &Bubble) -> bool {
@@ -1225,6 +1237,8 @@ pub struct Avatar {
     prefs_says: Option<String>,
     /// settings.toml writes, one at a time off the UI thread.
     prefs_io: lineview::PrefsIo,
+    /// The last look at her brain for the Settings page (her local server, the logins here).
+    brain_look: lineview::BrainLook,
     /// Why her menu's last ATTENTION click didn't stick, on its row.
     menu_save: crate::line::MenuSave,
     /// That line as the open menu (its click) last said it: its room is kept till it closes.
@@ -1449,6 +1463,7 @@ impl Avatar {
             renders: 0,
             prefs_says: None,
             prefs_io: Default::default(),
+            brain_look: Default::default(),
             menu_save: Default::default(),
             menu_why: None,
             area_memo: Cell::new(None),
@@ -3629,7 +3644,11 @@ impl Avatar {
                 self.line_push(cx);
                 r
             }
-            Command::SettingsPage(open) => self.show_line_page(if open { crate::line::Page::Settings } else { crate::line::Page::Chat }, cx),
+            Command::SettingsPage(page) => {
+                use crate::line::Page;
+                let page = [Page::Chat, Page::Settings, Page::Brain].into_iter().find(|p| p.key() == page).unwrap_or(Page::Chat);
+                self.show_line_page(page, cx)
+            }
             Command::Tap { head } => {
                 if self.hidden || self.teleport.is_some() || !self.loaded {
                     "error: not there".into()
@@ -3658,10 +3677,11 @@ impl Avatar {
     }
 
     /// Her first words, once in her life (touchpoint 7): who she is and how to call her. Not a
-    /// word about what runs her: the first minute is hers. Waits until she has landed and
-    /// nothing else is on; if he found the Line first, he knows the key and she skips it. A key
-    /// only when she bound it herself (Windows): his WM may have none (GNOME, KDE), and a click
-    /// on her always works.
+    /// word about what runs her: the first minute is hers, unless she has no brain (no login
+    /// for her model): then it's the one thing to do, with `SET ME UP ▸`. Waits until she has
+    /// landed, nothing else is on and her login was looked at (`FIRST_WORDS_CREDS` at most);
+    /// if he found the Line first, he knows the key and she skips it. A key only when she bound
+    /// it herself (Windows): his WM may have none (GNOME, KDE), and a click on her always works.
     fn first_words_try(&mut self, now: Instant) -> bool {
         if self.line.is_some() {
             self.first_words = None;
@@ -3681,7 +3701,8 @@ impl Avatar {
             || self.prompt_ui.is_some()
             || self.menu.is_some()
             || self.session.as_ref().is_some_and(|s| s.link.busy())
-            || self.brain_moving();
+            || self.brain_moving()
+            || (self.first_words.is_some_and(|f| !creds_waited(now, f.1)) && self.session.as_ref().is_some_and(|s| !s.link.creds_settled()));
         if busy {
             self.first_words = self.first_words.filter(|f| now < f.1).map(|f| (now + FIRST_WORDS_RETRY, f.1));
             if self.first_words.is_none() {
@@ -3695,6 +3716,7 @@ impl Avatar {
         let mut c = name.chars();
         let name = c.next().map_or_else(|| "Capri".to_string(), |f| f.to_uppercase().chain(c).collect());
         let text = match self.os.bound_key_label(crate::platform::KeyEv::Summon, self.voice.cfg.key) {
+            _ if self.no_brain() => format!("Hey. I'm {name}. Give me a brain and I'll talk back.\n`{SET_ME_UP}`"),
             Some(k) => format!("Hey. I'm {name}. Tap {k} when you want me. Headpats also accepted."),
             None => format!("Hey. I'm {name}. Click me when you want me. Headpats also accepted."),
         };
@@ -4163,7 +4185,7 @@ impl Avatar {
             "session": self.session.as_ref().map(|s| {
                 let b = s.link.body(Instant::now());
                 serde_json::json!({ "live": b.live, "busy": b.busy, "mood": b.mood.key(), "label": b.label, "reply": b.reply,
-                                    "echo": b.echo, "prompt": b.prompt.map(|p| p.title),
+                                    "echo": b.echo, "prompt": b.prompt.map(|p| p.title), "creds": format!("{:?}", s.link.creds()), "here": s.link.local(),
                                     "mode": format!("{:?}", s.link.mode()).to_lowercase(), "client": s.generation })
             }),
             "input": self.input.as_ref().map(|i| serde_json::json!({ "len": i.text.chars().count(), "secret": i.secret.is_some(),
@@ -5216,8 +5238,12 @@ impl Avatar {
             self.voice_hush("click");
         }
         self.click_reaction(p.head, ev.position, now);
-        // A tap on the body (not a headpat) opens the field to talk to the session.
-        if !p.head && self.session.is_some() {
+        // A tap on the body (not a headpat) opens the field to talk to the session; with no
+        // brain, the Line on Settings ▸ Brain (the way to one).
+        if !p.head && self.no_brain() {
+            let r = self.show_line_page(crate::line::Page::Brain, cx);
+            elog!("synaps-avatar: clicked with no brain: {r}");
+        } else if !p.head && self.session.is_some() {
             self.open_input(None, window, cx);
         }
         self.brain_touch(if p.head { crate::brain::Touch::Headpat } else { crate::brain::Touch::Click });
@@ -5332,6 +5358,9 @@ impl Avatar {
             if b.next_char.is_none() && !b.more {
                 b.hide_at = Some(now + Duration::from_secs(10));
             }
+        } else if self.no_brain() {
+            // NO BRAIN YET on the tag: the way to one.
+            self.show_line_page(crate::line::Page::Brain, cx);
         } else if self.session.is_some() {
             self.open_input(None, window, cx);
         }
@@ -7650,6 +7679,35 @@ impl Avatar {
                         && chips.get(k) == Some(&true)
                         && let Some(c) = crate::line::command(&t)
                     {
+                        // Her own words' SET ME UP (no brain): a solid red key to Settings ▸ Brain.
+                        if c == SET_ME_UP && self.bubble.as_ref().is_some_and(|b| b.turn == 0) {
+                            let whole = chips_whole.get(k) == Some(&true);
+                            let probes = self.buttons.clone();
+                            let go = theme::plate(Cut::Slant(6.0), Fill::solid(if whole { pal.accent } else { pal.dim }))
+                                .child(canvas(move |b, _, _| probes.borrow_mut().push(("setup", b)), |_, _, _, _| {}).absolute().top_0().left_0().size_full())
+                                .id("setup")
+                                .h(px(LINE_H - 4.0))
+                                .px(px(12.0))
+                                .when(whole, |d| d.cursor_pointer())
+                                .text_size(px(12.5))
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(rgb(pal.ink))
+                                .child(theme::tracked(SET_ME_UP, 1.4))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                                        cx.stop_propagation();
+                                        if !whole {
+                                            return;
+                                        }
+                                        let r = this.show_line_page(crate::line::Page::Brain, cx);
+                                        elog!("synaps-avatar: SET ME UP clicked: {r}");
+                                        cx.notify();
+                                    }),
+                                );
+                            body = body.child(div().h(px(LINE_H)).flex().items_center().when(k >= fits, |d| d.invisible()).child(go));
+                            continue;
+                        }
                         let copied = self.cmd_copied.as_deref() == Some(c);
                         // Still typing or streaming: no copy yet (a part of a command is another).
                         let whole = chips_whole.get(k) == Some(&true);

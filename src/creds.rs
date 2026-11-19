@@ -1,10 +1,13 @@
 //! Whether her model has credentials, read before she asks it anything: a fresh install shows
 //! NO BRAIN YET from the start, not ONLINE. Read where Synaps 0.12 keeps them (`auth.json` in
 //! its base folder, a profile's folder first: `core/config.rs` `resolve_read_path`), by key and
-//! type only: never a secret. Only the default case is decided, a Claude model on this machine's
-//! broker, its daemon's environment read; anything else is Unknown, and the daemon's first error
-//! says it (`session::Trouble`). A daemon reached through `--socket` (an ssh-forwarded remote one)
-//! isn't read at all: its files and its pid are another machine's (`session::Options::local`).
+//! type only: never a secret. Her model's provider (`provider::of`) decides what counts: an
+//! account's login on file, an API key on file, in Synaps' config or in the environment (hers or
+//! the daemon's). A local model needs none (whether its server answers is the Settings page's
+//! look, `provider::probe`); a provider Synaps doesn't know, a remote broker or a file she can't
+//! read is Unknown, and the daemon's first error says it (`session::Trouble`). A daemon reached
+//! through `--socket` (an ssh-forwarded remote one) isn't read at all: its files and its pid are
+//! another machine's (`session::Options::local`).
 
 use crate::session::Creds;
 use std::path::Path;
@@ -39,37 +42,32 @@ pub fn check(q: &Query) -> (Creds, Again) {
     check_at(&q.model, &synaps_client::discovery::base_dir(), q.profile.as_deref(), &env, daemon_read)
 }
 
-/// A model Synaps runs on Claude: bare `claude-*` (its default) or `anthropic/…`.
-pub fn on_claude(model: &str) -> bool {
-    let m = model.trim().to_ascii_lowercase();
-    m.starts_with("anthropic/") || (m.starts_with("claude") && !m.contains('/'))
-}
-
 /// `env`: her environment and the daemon's; `daemon_read`: whether the daemon's was read.
 pub fn check_at(model: &str, base: &Path, profile: Option<&str>, env: &dyn Fn(&str) -> Option<String>, daemon_read: bool) -> (Creds, Again) {
+    use crate::provider::Kind;
     const NEVER: (Creds, Again) = (Creds::Unknown, Again::Never);
     const TRY_AGAIN: (Creds, Again) = (Creds::Unknown, Again::Yes);
-    if !on_claude(model) {
+    let Some(p) = crate::provider::of(model).filter(|p| p.kind != Kind::Local) else {
         return NEVER;
-    }
-    let missing = if daemon_read { (Creds::Missing(Some("Claude")), Again::Yes) } else { (Creds::Unknown, Again::IfMissing) };
+    };
+    // A key in an environment counts (Synaps' broker takes it there): one she can't read (the
+    // daemon's, unread) can't be ruled out. An account with no env var (ChatGPT, Copilot, ...)
+    // has its login on file or none.
+    let missing = if daemon_read || p.env.is_empty() { (Creds::Missing(Some(p.name)), Again::Yes) } else { (Creds::Unknown, Again::IfMissing) };
     // A remote broker holds them (`auth.remote_endpoint`, `SYNAPS_AUTH_ENDPOINT`): not here to read.
     if env("SYNAPS_AUTH_ENDPOINT").is_some() {
         return NEVER;
     }
-    // Synaps' own first-run check: an OAuth login, or `ANTHROPIC_API_KEY` (`anthropic_credential_available`).
-    if env("ANTHROPIC_API_KEY").is_some() {
+    // Synaps' own first-run check: an OAuth login, or `ANTHROPIC_API_KEY` (`anthropic_credential_available`);
+    // the API-key services' env vars (`static_key_configured`).
+    if p.env.iter().any(|k| env(k).is_some()) {
         return (Creds::Have, Again::Never);
     }
-    let file = |name: &str| {
-        profile
-            .filter(|p| !p.trim().is_empty())
-            .map(|p| base.join(p).join(name))
-            .filter(|f| f.exists())
-            .unwrap_or_else(|| base.join(name))
-    };
+    let file = |name: &str| synaps_file(base, profile, name);
     match std::fs::read_to_string(file("config")) {
         Ok(c) if remote_broker(&c) => return NEVER,
+        // An API key in Synaps' login config (`provider.groq = …`): set, never read further.
+        Ok(c) if p.kind == Kind::Key && config_key(&c, p.id) => return (Creds::Have, Again::Never),
         Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(_) => return TRY_AGAIN,
@@ -85,10 +83,26 @@ pub fn check_at(model: &str, base: &Path, profile: Option<&str>, env: &dyn Fn(&s
     let Ok(serde_json::Value::Object(root)) = serde_json::from_str::<serde_json::Value>(&text) else {
         return TRY_AGAIN;
     };
-    // Its slots: `anthropic` (the default account) and `anthropic@<label>`. Any typed entry counts
-    // (an expired token is still a login: the broker refreshes it).
-    let has = root.iter().any(|(k, v)| (k == "anthropic" || k.starts_with("anthropic@")) && v.get("type").and_then(|t| t.as_str()).is_some());
+    // Its slots: `<id>` (the default account, or the key) and `<id>@<label>`. Any typed entry
+    // counts (an expired token is still a login: the broker refreshes it).
+    let named = |k: &str| k == p.id || k.strip_prefix(p.id).is_some_and(|r| r.starts_with('@'));
+    let has = root.iter().any(|(k, v)| named(k) && v.get("type").and_then(|t| t.as_str()).is_some());
     if has { (Creds::Have, Again::Never) } else { missing }
+}
+
+/// One of Synaps' files (`config`, `auth.json`): a profile's own folder first, else the base one
+/// (Synaps' `resolve_read_path`).
+pub fn synaps_file(base: &Path, profile: Option<&str>, name: &str) -> std::path::PathBuf {
+    profile.filter(|p| !p.trim().is_empty()).map(|p| base.join(p).join(name)).filter(|f| f.exists()).unwrap_or_else(|| base.join(name))
+}
+
+/// Synaps' login config has a key for `id` (`provider.<id> = <key>`, not empty).
+fn config_key(config: &str, id: &str) -> bool {
+    let want = format!("provider.{id}");
+    config.lines().any(|l| {
+        let l = l.trim();
+        !l.starts_with('#') && l.split_once('=').is_some_and(|(k, v)| k.trim() == want && !v.trim().is_empty())
+    })
 }
 
 /// The config sets `auth.remote_endpoint` (`key = value` lines, `#` comments).
@@ -142,12 +156,13 @@ mod tests {
         std::fs::remove_dir_all(&d).ok();
     }
 
-    /// Not hers to decide: another provider, a remote broker, a file she can't read.
+    /// Not hers to decide: a local model (no login: its server is the page's look), a provider
+    /// Synaps doesn't know, a remote broker, a file she can't read.
     #[test]
     fn what_she_cant_tell_is_unknown() {
         let d = dir("unknown");
-        for m in ["local/qwen3:8b", "openai-codex/gpt-5.5", "groq/llama-3.3-70b-versatile", ""] {
-            assert_eq!(check_at(m, &d, None, &none, true).0, Creds::Unknown, "{m}");
+        for m in ["local/qwen3:8b", "acme/x", "gpt-5", ""] {
+            assert_eq!(check_at(m, &d, None, &none, true), (Creds::Unknown, Again::Never), "{m}");
         }
         let remote = |k: &str| (k == "SYNAPS_AUTH_ENDPOINT").then(|| "https://broker.example".to_string());
         assert_eq!(check_at("claude-sonnet-4-6", &d, None, &remote, true).0, Creds::Unknown);
@@ -196,6 +211,52 @@ mod tests {
         assert_eq!(at("claude-sonnet-4-6", &none, false), (Creds::Have, Again::Never));
         std::fs::write(d.join("config"), "auth.remote_endpoint = https://broker.example\n").unwrap();
         assert_eq!(at("claude-sonnet-4-6", &none, true), (Creds::Unknown, Again::Never));
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// The other accounts: a login on file (`<id>` or `<id>@<label>`) or none. Nothing in an
+    /// environment signs them in, so none on file is Missing even with the daemon's unread
+    /// (Windows). Muse takes `META_API_KEY` as Synaps does.
+    #[test]
+    fn another_account_is_on_file_or_missing() {
+        let d = dir("accounts");
+        for read in [true, false] {
+            assert_eq!(check_at("openai-codex/gpt-5.5", &d, None, &none, read), (Creds::Missing(Some("ChatGPT")), Again::Yes), "daemon read: {read}");
+        }
+        std::fs::write(d.join("auth.json"), r#"{"anthropic": {"type": "oauth"}, "openai-codexx": {"type": "oauth"}}"#).unwrap();
+        assert_eq!(check_at("openai-codex/gpt-5.5", &d, None, &none, false).0, Creds::Missing(Some("ChatGPT")), "Claude's login isn't ChatGPT's");
+        std::fs::write(d.join("auth.json"), r#"{"openai-codex@work": {"type": "oauth"}, "github-copilot": {"type": "oauth"}}"#).unwrap();
+        assert_eq!(check_at("openai-codex/gpt-5.5", &d, None, &none, false), (Creds::Have, Again::Never));
+        assert_eq!(check_at("github-copilot/gpt-5.5", &d, None, &none, false).0, Creds::Have);
+        assert_eq!(check_at("kimi-code/k3", &d, None, &none, true).0, Creds::Missing(Some("Kimi")));
+        assert_eq!(check_at("muse/muse-wonder-1.0", &d, None, &none, false).0, Creds::Unknown, "META_API_KEY in an unread env");
+        let meta = |k: &str| (k == "META_API_KEY").then(|| "m".to_string());
+        assert_eq!(check_at("muse/muse-wonder-1.0", &d, None, &meta, false).0, Creds::Have);
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// An API-key service: its key on file (`type: api_key`), in Synaps' login config
+    /// (`provider.<id>`), or in an environment (its own variables). None anywhere she can read,
+    /// with the daemon's environment read: Missing; unread: Unknown, as Claude's key.
+    #[test]
+    fn an_api_key_is_on_file_in_the_config_or_in_the_env() {
+        let d = dir("keys");
+        let groq = "groq/llama-3.3-70b-versatile";
+        assert_eq!(check_at(groq, &d, None, &none, true), (Creds::Missing(Some("Groq")), Again::Yes));
+        assert_eq!(check_at(groq, &d, None, &none, false), (Creds::Unknown, Again::IfMissing));
+        let key = |k: &str| (k == "GROQ_API_KEY").then(|| "gsk".to_string());
+        assert_eq!(check_at(groq, &d, None, &key, true), (Creds::Have, Again::Never));
+        let other = |k: &str| (k == "CEREBRAS_API_KEY").then(|| "c".to_string());
+        assert_eq!(check_at(groq, &d, None, &other, true).0, Creds::Missing(Some("Groq")), "another service's key");
+        std::fs::write(d.join("config"), "# provider.groq = old\nprovider.groq =\n").unwrap();
+        assert_eq!(check_at(groq, &d, None, &none, true).0, Creds::Missing(Some("Groq")), "a comment, an empty value");
+        std::fs::write(d.join("config"), "provider.groq = gsk-x\n").unwrap();
+        assert_eq!(check_at(groq, &d, None, &none, false), (Creds::Have, Again::Never));
+        assert_eq!(check_at("claude-sonnet-4-6", &d, None, &none, true).0, MISSING, "a key's config line signs in only its service");
+        std::fs::remove_file(d.join("config")).unwrap();
+        std::fs::write(d.join("auth.json"), r#"{"groq": {"type": "api_key", "key": "gsk"}}"#).unwrap();
+        assert_eq!(check_at(groq, &d, None, &none, false).0, Creds::Have);
+        assert_eq!(check_at("kimi/kimi-k3.1-pro", &d, None, &none, true).0, Creds::Missing(Some("Moonshot")));
         std::fs::remove_dir_all(&d).ok();
     }
 

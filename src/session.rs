@@ -404,6 +404,28 @@ impl Link {
         self.view.as_ref().and_then(|v| v.get("model")).and_then(|m| m.as_str()).map(str::trim).filter(|m| !m.is_empty())
     }
 
+    /// Whether her model has credentials, as far as she can tell (her tag's NO BRAIN YET).
+    pub fn creds(&self) -> Creds {
+        self.creds
+    }
+
+    /// Her credentials have been looked at since she attached: a read settled, the daemon or an
+    /// answer said, or there is nothing here to read (a daemon through `--socket`). Her first
+    /// words wait for it a little (a fresh install's are about her brain).
+    pub fn creds_settled(&self) -> bool {
+        !self.opts.local || self.creds != Creds::Unknown || self.creds_read.is_some() || self.creds_by != Said::Read
+    }
+
+    /// The daemon runs on this machine (not one through `--socket`): its logins are here.
+    pub fn local(&self) -> bool {
+        self.opts.local
+    }
+
+    /// The daemon's profile and pid, once connected (where its files are; its environment).
+    pub fn daemon_at(&self) -> (Option<String>, Option<u32>) {
+        self.daemon.clone().map_or((None, None), |(p, pid)| (p, Some(pid)))
+    }
+
     /// When the next credentials read is: only while live, and only for a daemon on this machine.
     fn creds_next(&self) -> Option<Instant> {
         self.creds_at.filter(|_| self.opts.local && self.live())
@@ -414,7 +436,7 @@ impl Link {
         if self.creds_next().is_none_or(|t| now < t) {
             return None;
         }
-        let (profile, pid) = self.daemon.clone().map_or((None, None), |(p, pid)| (p, Some(pid)));
+        let (profile, pid) = self.daemon_at();
         Some(crate::creds::Query { model: self.model()?.to_string(), profile, pid })
     }
 
@@ -1282,18 +1304,6 @@ pub enum Trouble {
 /// The command a no-brain line ends on, on a line of its own (the bubble draws it as a chip).
 pub const LOGIN_CMD: &str = "synaps login";
 
-/// Synaps' OAuth providers: the key it stores and names them by, the `--provider` that signs in
-/// (it takes the storage keys; `claude` for Anthropic), and what she calls them.
-const PROVIDERS: &[(&str, &str, &str)] = &[
-    ("anthropic", "claude", "Claude"),
-    ("openai-codex", "openai-codex", "Codex"),
-    ("xai-auth", "xai-auth", "Grok"),
-    ("kimi-code", "kimi-code", "Kimi"),
-    ("github-copilot", "github-copilot", "Copilot"),
-    ("google-gemini", "google-gemini", "Gemini"),
-    ("muse", "muse", "Muse"),
-];
-
 /// A model name she can put in a command: Ollama's characters only, and short (her line stays
 /// a bubble's).
 fn model_word(m: &str) -> Option<&str> {
@@ -1361,8 +1371,8 @@ impl Trouble {
 
     /// The command that signs in for this provider (`--provider` skips Synaps' picker).
     fn login_cmd(on: Option<&str>) -> String {
-        match PROVIDERS.iter().find(|p| Some(p.2) == on) {
-            Some((_, flag, _)) => format!("{LOGIN_CMD} --provider {flag}"),
+        match on.and_then(crate::provider::by_name) {
+            Some(p) => format!("{LOGIN_CMD} --provider {}", p.login),
             None => LOGIN_CMD.to_string(),
         }
     }
@@ -1430,10 +1440,11 @@ impl Trouble {
     }
 }
 
-/// A provider key as Synaps names it (`no credential configured for 'kimi-code'`), as she'd say it.
+/// A provider key as Synaps names it (`no credential configured for 'kimi-code'`), as she'd say it
+/// (`provider::ALL`: its accounts and API-key services).
 fn provider_name(key: &str) -> Option<&'static str> {
     let key = key.trim_matches(|c: char| !(c.is_ascii_alphanumeric() || c == '-'));
-    PROVIDERS.iter().find(|p| p.0 == key).map(|p| p.2)
+    crate::provider::by_id(key).filter(|p| p.kind != crate::provider::Kind::Local).map(|p| p.name)
 }
 
 /// A tool name for the tag: short and safe (never arguments).
@@ -1996,7 +2007,7 @@ mod tests {
             ("Auth error: No API key or OAuth token found. Run `synaps login` to authenticate.", CLAUDE, Some(Trouble::NoBrain { on: Some("Claude") })),
             // v0.12.0, a fresh install's first message (measured in a container, never logged in).
             ("Auth error: Token refresh failed for account 'default': credential error: No credentials for anthropic at /home/chooms/.synaps-cli/auth.json. Run `synaps login --provider anthropic --account default`. Or check auth.remote_endpoint / broker reachability.", CLAUDE, Some(Trouble::NoBrain { on: Some("Claude") })),
-            ("request failed: credential error: No credentials for openai-codex at /home/user/.synaps/auth.json. Run `synaps login`.", None, Some(Trouble::NoBrain { on: Some("Codex") })),
+            ("request failed: credential error: No credentials for openai-codex at /home/user/.synaps/auth.json. Run `synaps login`.", None, Some(Trouble::NoBrain { on: Some("ChatGPT") })),
             ("Token refresh failed: no credential configured for 'anthropic'. Run `synaps login` to add one.. Run `synaps login` to re-authenticate, or check auth.remote_endpoint / broker reachability.", CLAUDE, Some(Trouble::NoBrain { on: Some("Claude") })),
             ("Config error: openai provider: no credential configured for 'kimi-code'. Run `synaps login` to add one.", None, Some(Trouble::NoBrain { on: Some("Kimi") })),
             ("API error: openai request failed: no credential configured for 'kimi-code'. Run `synaps login` to add one.", None, Some(Trouble::NoBrain { on: Some("Kimi") })),
@@ -2288,7 +2299,7 @@ mod tests {
             assert_eq!(l.creds_due(t2 + CREDS_EVERY * 10), None);
             std::fs::remove_dir_all(&d).ok();
         }
-        // Another provider: every read can't tell, the same as when it spoke. It stands.
+        // Another provider: no Kimi login on file, every read says so, as the daemon did. It stands.
         let d = creds_dir("daemon-kimi");
         let t0 = Instant::now();
         let mut l = live_link(t0);

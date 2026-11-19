@@ -932,6 +932,7 @@ pub fn glyph_at(kind: &str, fg: u32, bg: u32, size: f32) -> impl IntoElement + u
                 }
                 "play" => fill(window, &[(2.0, 0.8), (10.0, 5.5), (2.0, 10.2)], fg),
                 "back" => fill(window, &[(9.0, 0.8), (1.0, 5.5), (9.0, 10.2)], fg),
+                "down" => fill(window, &[(0.8, 2.0), (10.2, 2.0), (5.5, 10.0)], fg),
                 "check" => stroke(window, &[(1.0, 5.8), (4.3, 9.1), (10.2, 1.8)], 2.2, fg),
                 "bang" => {
                     fill(window, &[(4.1, 0.0), (6.9, 0.0), (6.9, 7.2), (4.1, 7.2)], fg);

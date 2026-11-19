@@ -6,21 +6,26 @@
   control socket, and keys or clicks (tools/shoot-win.ps1) only where it can't. Each step is shot
   cropped to her windows (her, the Line, the bubble, the menu), its `state` beside it.
 
-  pwsh tools/shots/scenes.ps1 -Exe her.exe -Pack packs\capri -Out shots\100 [-Sets settings,header] [-Only settings/on,header/hf-470]
+  pwsh tools/shots/scenes.ps1 -Exe her.exe -Pack packs\capri -Out shots\100 [-Sets settings,header,brain] [-Only settings/on,header/hf-470]
 
   Sets:
-    settings  her Settings page (#77): chat, ctrl+, then right, down, esc; her menu; voice off; brain
-              off; [brain] enabled = false by a reload; CAN'T SAVE on a read-only settings.toml; the
-              cog and `CHAT` (their rects, from `state`) with an empty chat and a full one.
+    settings  her Settings page (#77): chat, ctrl+, then down (past BRAIN), right, down, esc; her menu;
+              voice off; brain off; [brain] enabled = false by a reload; CAN'T SAVE on a read-only
+              settings.toml; the cog and `CHAT` (their rects, from `state`) with an empty chat and a full one.
     header    the bubble's header (#78) at 470 px and at 340 px: hands-free and a reply, a prompt
               with 3 waiting, his long words (YOU) while the turn runs.
+    brain     her brain (Settings PR 3), the daemon found as on his machine (its daemon.json in a
+              Synaps folder of the take's own, no --socket): no login (her first words, SET ME UP,
+              the Brain screen it opens, OTHER, esc, her menu); Claude with no login after his first
+              message (the tag, a click on her, the list's BRAIN row); signed in (the list, the Brain
+              screen, MODEL changed and written); and a daemon through --socket (another machine's).
   Out: <Out>\<set>\<take>\<step>.png + .json (her `state`), <Out>\index.json, <Out>\logs\.
 #>
 param(
     [Parameter(Mandatory)][string]$Exe,
     [Parameter(Mandatory)][string]$Pack,
     [Parameter(Mandatory)][string]$Out,
-    [string[]]$Sets = @('settings', 'header'),
+    [string[]]$Sets = @('settings', 'header', 'brain'),
     [string[]]$Only = @(),
     [string]$Python = 'python',
     [int]$FakePort = 47811
@@ -97,7 +102,10 @@ function Set-TakeEnv([hashtable]$Vars) {
 function Start-Take {
     param(
         [Parameter(Mandatory)][string]$Set, [Parameter(Mandatory)][string]$Name,
-        [string]$Settings = '', [hashtable]$Env = @{}, [object[]]$History, [switch]$Voice, [int]$DeltaMs = 30, [string[]]$HerArgs = @()
+        [string]$Settings = '', [hashtable]$Env = @{}, [object[]]$History, [switch]$Voice, [int]$DeltaMs = 30, [string[]]$HerArgs = @(),
+        # The daemon found as on his machine: a Synaps folder of the take's own (SYNAPS_BASE_DIR) with
+        # its daemon.json, these files in it (auth.json: a login), and no --socket.
+        [switch]$Local, [hashtable]$Synaps = @{}, [string]$Model = ''
     )
     $script:Take = "$Set/$Name"
     $t = Join-Path $Root "$Set-$Name"
@@ -112,6 +120,7 @@ function Start-Take {
 
     # The fake daemon (FAKE: canned replies, scripted prompts).
     $fakeEnv = @{ FAKE_DIR = (Join-Path $t 'fake'); FAKE_CTL_PORT = $FakePort; FAKE_DELTA_MS = $DeltaMs; PYTHONUTF8 = '1' }
+    if ($Model) { $fakeEnv.FAKE_MODEL = $Model }
     if ($null -ne $History) {
         $h = Join-Path $t 'history.json'
         Set-Content -Path $h -Value (ConvertTo-Json -InputObject @($History) -Depth 10) -Encoding utf8NoBOM
@@ -122,6 +131,7 @@ function Start-Take {
         -RedirectStandardOutput "$log-daemon.log" -RedirectStandardError "$log-daemon.err"
     $null = Wait-Until { (Get-Content -Raw "$log-daemon.log" -ErrorAction SilentlyContinue) -match 'fake daemon on' } 20 'the fake daemon'
     Remove-Item env:FAKE_HISTORY -ErrorAction SilentlyContinue
+    Remove-Item env:FAKE_MODEL -ErrorAction SilentlyContinue
 
     # The fake sidecar: her voice link (loopback TCP, endpoint.json), no audio.
     $script:VoiceProc = $null
@@ -137,10 +147,21 @@ function Start-Take {
         $herEnv.CAPRI_VOICE_ENDPOINT = $ep
         $herEnv.CAPRI_VOICE_SPAWN = '0'
     }
+    $sock = Join-Path $t 'fake\d.sock'
+    $where = @('--socket', (Q $sock))
+    if ($Local) {
+        $base = Join-Path $t 'synaps'
+        New-Item -ItemType Directory -Force -Path (Join-Path $base 'run') | Out-Null
+        foreach ($f in $Synaps.Keys) { Set-Content -Path (Join-Path $base $f) -Value $Synaps[$f] -Encoding utf8NoBOM }
+        $info = [ordered]@{ pid = $script:Daemon.Id; protocol_version = 3; daemon_version = '0.0.0-fake'; socket = $sock; exe = 'C:\fake\synaps.exe' }
+        Set-Content -Path (Join-Path $base 'run\daemon.json') -Value (ConvertTo-Json $info) -Encoding utf8NoBOM
+        $herEnv.SYNAPS_BASE_DIR = $base
+        $where = @()
+    }
     foreach ($k in $Env.Keys) { $herEnv[$k] = $Env[$k] }
     Set-TakeEnv $herEnv
 
-    $argv = @('--pack', (Q $Pack), '--socket', (Q (Join-Path $t 'fake\d.sock'))) + @($HerArgs | Where-Object { $_ })
+    $argv = @('--pack', (Q $Pack)) + $where + @($HerArgs | Where-Object { $_ })
     $script:Her = Start-Process $Exe -ArgumentList $argv -NoNewWindow -PassThru `
         -RedirectStandardOutput "$log-her.log" -RedirectStandardError "$log-her.err"
     $null = $script:Her.Handle  # held, so her exit code is still there after she's gone
@@ -222,6 +243,23 @@ function Focus-Line {
     $script:Fails.Add("$script:Take: the Line never took the keyboard")
 }
 
+<# The same by a click on the Line's header (nothing there acts): on Settings > Brain a click near
+   its bottom could take a way in. #>
+function Focus-Line-Top {
+    for ($i = 0; $i -lt 3; $i++) {
+        $s = State
+        $l = $s.line
+        if (-not $l) { throw "$script:Take: no Line to focus" }
+        if ($l.focused -and -not $l.parked) { return }
+        $sf = [double]$s.scale_factor
+        Send-ShotClick -X ([int]($l.at[0] + $l.at[2] * 0.6)) -Y ([int]($l.at[1] + 16 * $sf))
+        Start-Sleep -Milliseconds 300
+        Move-ShotPointer 0 0
+        Start-Sleep -Milliseconds 500
+    }
+    $script:Fails.Add("$script:Take: the Line never took the keyboard")
+}
+
 function Key([string]$Chord, [int]$AfterMs = 900) {
     Send-ShotKeys $Chord
     Start-Sleep -Milliseconds $AfterMs
@@ -264,7 +302,7 @@ $Scenes = [ordered]@{
             Focus-Line
             Shot '1-chat' 'her Line, a reply in it'
             Key 'ctrl+comma' 1400; Shot '2-settings' 'ctrl+,'
-            Key 'right' 1400; Shot '3-change' 'then right'
+            Key 'down'; Key 'right' 1400; Shot '3-change' 'then down (past BRAIN), right'
             Key 'down'; Shot '4-down' 'then down'
             Key 'escape' 1400; Shot '5-esc' 'then esc'
             Key 'escape' 1400
@@ -280,8 +318,8 @@ $Scenes = [ordered]@{
             $null = Ctl 'talk tap'
             Start-Sleep 2
             Focus-Line
-            Key 'ctrl+comma' 1400; Key 'down'; Key 'right' 1400
-            Shot '7-locked' 'voice off in settings.toml: ctrl+, down right'
+            Key 'ctrl+comma' 1400; Key 'down'; Key 'down'; Key 'right' 1400
+            Shot '7-locked' 'voice off in settings.toml: ctrl+, down down right'
         }
         nobrain  = {
             Start-Take settings nobrain -Env @{ SA_NO_BRAIN = '1' } -History $Short
@@ -290,8 +328,8 @@ $Scenes = [ordered]@{
             $null = Ctl 'talk tap'
             Start-Sleep 2
             Focus-Line
-            Key 'ctrl+comma' 1400; Key 'right' 1400
-            Shot '8-nobrain' 'brain off: ctrl+, right'
+            Key 'ctrl+comma' 1400; Key 'down'; Key 'right' 1400
+            Shot '8-nobrain' 'brain off: ctrl+, down right'
         }
         reload   = {
             Start-Take settings reload -History $Short
@@ -344,6 +382,75 @@ $Scenes = [ordered]@{
         }
     }
     header   = [ordered]@{}
+    brain    = [ordered]@{
+        # No login for her model (ChatGPT's: a file only, so a read tells even on Windows, where the
+        # daemon's environment can't be read): her first words say so, with SET ME UP.
+        first  = {
+            Start-Take brain first -Local -Model 'openai-codex/gpt-5.5' -History @()
+            $null = Ctl 'brain off'
+            $null = Wait-Until { (State).buttons.setup } 30 'her first words with SET ME UP'
+            Start-Sleep 2.5
+            Shot '01-first-words' 'no login: her first words, SET ME UP'
+            Click-Button 'setup'
+            Start-Sleep 2
+            Focus-Line-Top
+            Shot '02-set-me-up' 'SET ME UP: the Line on Settings > Brain, Claude picked'
+            Key 'down'; Key 'down'; Key 'enter' 1400
+            Shot '03-other' 'down down enter: OTHER open in place'
+            Key 'escape' 1400
+            Shot '04-esc' 'esc: chat (it opened on Brain)'
+            Key 'escape' 1400
+            $null = Ctl 'menu'
+            Start-Sleep 1
+            Shot '05-menu' 'her menu: SET UP MY BRAIN'
+        }
+        # Claude, no login: the first message fails as Synaps' does (FAKE: nobrain).
+        none   = {
+            Start-Take brain none -Local -Model 'claude-sonnet-4-6' -History $Short
+            $null = Ctl 'brain off'
+            $null = Fake 'nobrain'
+            Start-Sleep 3
+            $null = Ctl 'submit hi'
+            $null = Wait-Until { (State).session.label -eq 'NO BRAIN YET' } 20 'NO BRAIN YET'
+            Start-Sleep 3
+            Shot '06-tag' 'his first message: NO BRAIN YET'
+            $null = Ctl 'talk tap'
+            Start-Sleep 2
+            Focus-Line-Top
+            Shot '07-summon' 'the summon: Settings > Brain'
+            Key 'escape' 1400
+            Key 'ctrl+comma' 1400
+            Shot '08-list' 'ctrl+,: the list, BRAIN first: NO BRAIN YET, SET UP'
+        }
+        # Signed in to Claude (a login on file): the list, the Brain screen, MODEL changed.
+        signed = {
+            Start-Take brain signed -Local -Model 'claude-sonnet-4-6' -History $Short -Synaps @{ 'auth.json' = '{"anthropic": {"type": "oauth"}}' }
+            $null = Ctl 'brain off'
+            $null = Ctl 'talk tap'
+            Start-Sleep 2
+            Focus-Line-Top
+            Key 'ctrl+comma' 1400
+            Shot '09-list' 'signed in: the list, BRAIN first'
+            Key 'enter' 1400
+            Shot '10-brain' 'enter: the Brain screen, Claude in use, MODEL'
+            Key 'down'; Key 'down'; Key 'down'; Key 'right' 1800
+            Shot '11-model' 'down to MODEL, right: OPUS 5.5, written'
+            $f = Get-Content -Raw $script:SettingsFile
+            Write-Host "  settings.toml: $($f -replace "`n", ' | ')"
+            if ($f -notmatch '(?m)^model = "claude-opus-5-5"') { $script:Fails.Add("${script:Take}: [session] model not written: $f") }
+            Key 'escape' 1400
+            Shot '12-back' 'esc: back on the list'
+        }
+        # A daemon through --socket (maybe another machine's): its logins aren't hers to read or make.
+        remote = {
+            Start-Take brain remote -Model 'claude-sonnet-4-6' -History $Short
+            $null = Ctl 'brain off'
+            $null = Ctl 'settings open brain'
+            Start-Sleep 2
+            Focus-Line-Top
+            Shot '13-remote' 'a daemon through --socket: settings open brain'
+        }
+    }
 }
 
 # The header at two widths: 470 where she stands (a reply long enough to fill it), 340 against the

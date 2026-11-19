@@ -27,7 +27,9 @@ Reference for `synaps-avatar`, the crate behind capri-syn. The [README](../READM
   no `ground`, `seenUnix`, `brain` or `perch`), once she has landed and nothing else is on, she says
   "Hey. I'm Capri. Click me when you want me. Headpats also accepted.", then `met` is set. Where she
   binds her key herself (Windows) it names it instead: "Tap WIN+ALT+C when you want me." (a WM's key
-  may not exist: GNOME and KDE have none until he binds one). Not a word about what runs her. If the Line opens first she skips it.
+  may not exist: GNOME and KDE have none until he binds one). Not a word about what runs her, unless
+  she has no brain (below; she waits up to 8 s for that read): "Hey. I'm Capri. Give me a brain and
+  I'll talk back." with a red `SET ME UP ▸` that opens the Line on Settings ▸ Brain. If the Line opens first she skips it.
   Anyone who ran her before is marked met without it. `tools/shoot.py` writes `met` (`--first-run`:
   not).
 - She shows up in `/clients` as `capri` (the pack's character name). If the daemon is gone or the
@@ -61,13 +63,17 @@ Reference for `synaps-avatar`, the crate behind capri-syn. The [README](../READM
   ~7k tokens): nothing to name there, so [UNDER-THE-HOOD.md](UNDER-THE-HOOD.md#her-brain) has a
   16k copy of the model made first.
 - **No brain, before a word.** At each attach (and model change) she reads whether her model has
-  credentials (`creds.rs`): a Claude model (bare `claude-*` or `anthropic/…`) needs an `anthropic` or
-  `anthropic@<label>` entry in Synaps' `auth.json` (a profile's folder first), or `ANTHROPIC_API_KEY`
-  in her environment or the daemon's (Linux: `/proc/<pid>/environ`). Keys and types only, never a
+  credentials (`creds.rs`), by its provider as Synaps routes it (`provider.rs`: bare `claude-*` or
+  `anthropic/…` is Claude, `<id>/…` that provider): an `<id>` or `<id>@<label>` entry in Synaps'
+  `auth.json` (a profile's folder first; Claude's is `anthropic`), an API-key service's
+  `provider.<id>` in Synaps' `config`, or its key variable (`ANTHROPIC_API_KEY`, `GROQ_API_KEY`, …) in
+  her environment or the daemon's (Linux: `/proc/<pid>/environ`). Keys and types only, never a
   secret. None: her tag reads `NO BRAIN YET` in place of `ONLINE` (and asleep), and she reads again
-  every 5 s, so a `synaps login` in a terminal clears it without a message. A remote broker
-  (`auth.remote_endpoint`, `SYNAPS_AUTH_ENDPOINT`), another provider or an unreadable file is
-  unknown: the daemon's first error says it. A read that can't tell any more takes back the tag a
+  every 5 s, so a `synaps login` in a terminal clears it without a message. With no brain her summon
+  key, a click on her or on her tag open the Line on Settings ▸ Brain (Esc: chat), and her menu's
+  SETTINGS reads `SET UP MY BRAIN`. A remote broker (`auth.remote_endpoint`, `SYNAPS_AUTH_ENDPOINT`),
+  a local model (`local/…`: no login; the Brain screen looks at its server), a provider Synaps
+  doesn't know or an unreadable file is unknown: the daemon's first error says it. A read that can't tell any more takes back the tag a
   read put up (a remote broker set up instead of a login, #76). The daemon's own no-brain error
   holds it while the files read as they did when it spoke, until a turn answers or a read finds the
   login. A file caught mid-write changes neither: she reads again. Any sign of a working brain (a
@@ -77,9 +83,19 @@ Reference for `synaps-avatar`, the crate behind capri-syn. The [README](../READM
 
   The provider is read off the error (`No Anthropic credentials`: Claude; `no credential configured
   for 'kimi-code'`: Kimi); `synaps login` picks a provider, not a model. The other way out is
-  `[session] model` (applied on `avatarctl settings reload`); not `/model`, which the daemon doesn't
-  take (the Line would send it to the model as words). Anything else: `‹error: …›`
-  (cut at 90 characters), annoyed, as before.
+  `[session] model` (applied on `avatarctl settings reload`, or MODEL on Settings ▸ Brain); not
+  `/model`, which the daemon doesn't take (the Line would send it to the model as words). Anything
+  else: `‹error: …›` (cut at 90 characters), annoyed, as before.
+- **Settings ▸ Brain.** Settings' first row, BRAIN, shows her model and its login (`✓ CLAUDE ·
+  SONNET 4.6`, `● NO BRAIN YET` with a red `SET UP ▸`); ⏎ (or its button) opens the Brain screen:
+  SIGN IN WITH CLAUDE, RUN LOCAL (its server looked at: Ollama's port, or `provider.local.url`), OTHER
+  (opened in place: ChatGPT, Copilot, Gemini, Grok, Kimi, Muse, then API KEY), and, once she has a
+  brain, MODEL: her provider's few models, written to `settings.toml` as an explicit `[session]
+  model` (only that key; the safe writer) and set on her session at once. A provider with a login
+  on file shows ✓ and a click switches her to its first model; a sign-in copies its `synaps login
+  --provider …` for a terminal until she runs it herself. Locked: `--model` (`set by --model`),
+  `--session` (`their session`). A daemon through `--socket` signs in on its own machine: the ways in
+  say so and do nothing here.
 - **A turn shows as started** (THINKING, the busy bubble with ABORT) only once it has run 400 ms with
   no word, or its first word comes: one that fails at once never promises a reply.
 - **Sleep follows you, not the chat**: while you're at the desk she stays up,
@@ -449,7 +465,7 @@ page next|prev | scroll <n> | reader open [focus]|close|copy [n]|scroll <px> | c
 music on [BPM]|off | walk <x> [scoot] | glitch | face left|right|toggle | drag … | submit <text> | abort | copy
 art stand|perch|sleepFloor|sleepWindow <variant id|next> | intro [skip]
 talk press|release|tap|toggle | line close | prompt confirm|secret [text] | prompt off
-brain … | settings reload | tap head|body | menu | shape | state | hide | show | quit
+brain … | settings reload|open [brain]|close | tap head|body | menu | shape | state | hide | show | quit
 ```
 
 `brain` takes `on|off|state|dnd [min]|dnd off|scale <x>|seed <n>`, `force roam|seek|summon|sulk|nap`,

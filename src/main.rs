@@ -26,6 +26,7 @@ mod beside;
 mod brain;
 mod control;
 mod creds;
+mod provider;
 mod drag;
 mod edges;
 mod facing;

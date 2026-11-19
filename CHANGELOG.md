@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Her brain, in her Settings (Settings PR 3)
+- Settings' first row is BRAIN: her model and its login (`✓ CLAUDE · SONNET 4.6`, or `● NO BRAIN YET`
+  with a red `SET UP ▸`). It opens Settings ▸ Brain: SIGN IN WITH CLAUDE first, RUN LOCAL, and OTHER
+  (ChatGPT, Copilot, Gemini, Grok, Kimi, Muse, API KEY) a step away; MODEL once she has a brain,
+  written to `settings.toml` as `[session] model` and set on her session at once. The sign-ins copy
+  their `synaps login --provider …` for now (she runs them herself next).
+- NO BRAIN YET from the files for every Synaps provider, not just Claude: an account's login in
+  `auth.json`, an API key there, in Synaps' `config` or in its variable. One table (`provider.rs`) for
+  the detection, the bubble's login command and the Brain screen.
+- With no brain her first words say so, with `SET ME UP ▸`; her summon key, a click on her or on her
+  tag open the Line on Settings ▸ Brain (Esc: chat); her menu's SETTINGS reads `SET UP MY BRAIN`.
+- `avatarctl settings open brain`.
+
 ### Windows: one setup, called capri-syn
 
 - `capri-syn-setup-x86_64.exe` (was `synaps-avatar-setup-x86_64.exe`; the same AppId, so an older install

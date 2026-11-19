@@ -21,6 +21,7 @@ impl Avatar {
             handsfree: (self.voice_on() && self.voice.cfg.handsfree).then_some(self.voice.hf.is_some()),
             quit_armed: self.quit_armed.is_some(),
             unsaved: self.menu_save.says(),
+            no_brain: self.no_brain(),
         }
     }
 
@@ -104,10 +105,11 @@ impl Avatar {
                 self.menu = None;
                 self.copy_last_reply(cx)
             }
-            // Her Settings (the Line's second page).
+            // Her Settings (the Line's second page); with no brain, SET UP MY BRAIN: on Brain.
             menu::Item::Settings => {
                 self.menu = None;
-                self.show_line_page(crate::line::Page::Settings, cx)
+                let page = self.settings_page();
+                self.show_line_page(page, cx)
             }
             // Her own menu asks twice: a second click within 2 s quits, and it stays up that long.
             menu::Item::Quit if via == Via::Her && self.quit_armed.is_none_or(|t| now >= t) => {

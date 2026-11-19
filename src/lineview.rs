@@ -5,6 +5,8 @@
 use super::*;
 use crate::beside::{self, Panel, Place};
 use crate::line::{Ask, Line, Page, Pref, Prefs, Row, Snap, Who};
+use crate::provider::{self, Kind};
+use crate::session::Creds;
 use crate::settings::{Attention, Settings, WriteQueue};
 
 /// A press held this long is a hold (voice, later); shorter is a tap (type).
@@ -27,6 +29,44 @@ const ROWS_MAX: usize = 240;
 
 /// settings.toml writes, one at a time (`settings_write`).
 pub(super) type PrefsIo = WriteQueue<PrefJob>;
+
+/// A look at her brain is good this long: a Settings page opened again within it doesn't look
+/// again.
+const LOOK_EVERY: Duration = Duration::from_secs(5);
+/// A local model server answers in this or isn't there.
+const PROBE_WITHIN: Duration = Duration::from_millis(800);
+
+/// What a look at her brain found, off her UI thread, when a Settings page opens: her local
+/// model server, how he runs `synaps`, the accounts with a login on this machine.
+#[derive(Clone, Debug, Default)]
+pub(super) struct BrainLook {
+    pub local: Option<(String, provider::Local)>,
+    pub synaps: String,
+    pub signed: Vec<&'static str>,
+    /// When it was taken (None: never), and whether one is under way.
+    pub at: Option<Instant>,
+    pub busy: bool,
+}
+
+/// The look itself (`here`: the daemon runs on this machine; else nothing here is its).
+fn look_now(profile: Option<String>, pid: Option<u32>, here: bool) -> BrainLook {
+    let exe = provider::daemon_exe(&synaps_client::discovery::run_dir(), profile.as_deref());
+    let synaps = provider::synaps_cmd(exe.as_deref(), std::env::var_os("PATH").as_deref());
+    if !here {
+        return BrainLook { synaps, ..BrainLook::default() };
+    }
+    let base = synaps_client::discovery::base_dir();
+    let config = std::fs::read_to_string(crate::creds::synaps_file(&base, profile.as_deref(), "config")).ok();
+    let url = provider::local_url(config.as_deref(), std::env::var("LOCAL_ENDPOINT").ok());
+    let local = provider::probe(&url, PROBE_WITHIN);
+    let signed = provider::ALL
+        .iter()
+        .filter(|p| p.kind == Kind::OAuth)
+        .filter(|p| p.models.first().is_some_and(|m| crate::creds::check(&crate::creds::Query { model: m.0.into(), profile: profile.clone(), pid }).0 == Creds::Have))
+        .map(|p| p.id)
+        .collect();
+    BrainLook { local: Some((url, local)), synaps, signed, at: None, busy: false }
+}
 
 /// What a settings.toml write applies once it is in: the change, and whether her menu asked
 /// (else the Settings page).
@@ -180,7 +220,7 @@ impl Avatar {
             });
             return "ok line summoned".into();
         }
-        self.open_line(cx)
+        self.open_line_summoned(cx)
     }
 
     /// `talk release`: a tap typed (the Line is open); a hold sends what she heard (voice
@@ -291,8 +331,25 @@ impl Avatar {
         self.open_line_on(Page::Chat, cx)
     }
 
+    /// Her summon's Line (the key, a click on her): on chat, or straight on Settings ▸ Brain
+    /// while she has no brain (Esc from there: chat).
+    pub(super) fn open_line_summoned(&mut self, cx: &mut Context<Self>) -> String {
+        self.open_line_on(if self.no_brain() { Page::Brain } else { Page::Chat }, cx)
+    }
+
+    /// No login for her model: her tag reads NO BRAIN YET (a read of the files, or the daemon's
+    /// own word).
+    pub(super) fn no_brain(&self) -> bool {
+        self.session.as_ref().is_some_and(|s| matches!(s.link.creds(), Creds::Missing(_)))
+    }
+
+    /// Settings, or the Brain screen while she has no brain (her menu's SET UP MY BRAIN).
+    pub(super) fn settings_page(&self) -> Page {
+        if self.no_brain() { Page::Brain } else { Page::Settings }
+    }
+
     /// Her Settings: the Line opens on them, or an open one flips to them (the menu's
-    /// SETTINGS row, `avatarctl settings open`); `Page::Chat` flips it back.
+    /// SETTINGS row, `avatarctl settings open [brain]`); `Page::Chat` flips it back.
     pub(super) fn show_line_page(&mut self, page: Page, cx: &mut Context<Self>) -> String {
         match &self.line {
             Some(l) => {
@@ -302,7 +359,7 @@ impl Avatar {
                 });
                 format!("ok line on {}", page.key())
             }
-            None if page == Page::Settings => self.open_line_on(page, cx),
+            None if page.settings() => self.open_line_on(page, cx),
             None => "ok no line".into(),
         }
     }
@@ -327,8 +384,9 @@ impl Avatar {
         let options = self.os.window_options(Role::Line, bounds, take);
         self.prefs_says = None;
         let mut snap = self.line_snap();
-        if page == Page::Settings {
+        if page.settings() {
             snap.prefs = Some(self.prefs_now());
+            self.look_at_brain(cx);
         }
         let me = cx.entity().downgrade();
         let (name, font, pal) = (self.name.to_string(), self.font.clone(), self.reader_pal());
@@ -425,7 +483,7 @@ impl Avatar {
         let (status, glyph) = (st.label, st.glyph);
         let face = self.stills.as_ref().and_then(|s| s.moods.get(self.mood.key()).cloned()).map(crate::line::Face);
         let key = self.summon_label();
-        let prefs = self.line.as_ref().filter(|l| l.page == Page::Settings).map(|_| self.prefs_now());
+        let prefs = self.line.as_ref().filter(|l| l.page.settings()).map(|_| self.prefs_now());
         let (glitch, motion) = (self.hud_cfg.glitch, self.hud_cfg.motion);
         let Some(s) = &self.session else { return Snap { status, glyph, flag, alarm, live: false, face, key, prefs, glitch, motion, ..Default::default() } };
         let items = s.link.transcript().items();
@@ -507,9 +565,54 @@ impl Avatar {
             wake,
             voice: self.voice.cfg.enabled,
             about: format!("CAPRI {} · {mark}", env!("CARGO_PKG_VERSION")),
+            mind: self.mind_now(),
             says: self.prefs_says.clone(),
             new: self.unseen.strip.as_ref().filter(|u| !u.refused).map_or(0, |u| u.n),
         }
+    }
+
+    /// Her brain as the Settings page shows it: her model (as asked: a MODEL write on its way),
+    /// its login, what locks it, and the last look (`look_at_brain`).
+    pub(super) fn mind_now(&self) -> provider::Status {
+        let look = &self.brain_look;
+        let mut m = provider::Status { signed: look.signed.clone(), synaps: look.synaps.clone(), local: look.local.clone(), ..provider::Status::default() };
+        let Some(s) = &self.session else { return m };
+        m.model = crate::line::asked_model(self.prefs_io.pending().map(|j| &j.pref), s.link.model());
+        m.signed_in = match s.link.creds() {
+            Creds::Have => Some(true),
+            Creds::Missing(_) => Some(false),
+            Creds::Unknown => None,
+        };
+        m.lock = if s.link.rides_other() {
+            Some(provider::Lock::Theirs)
+        } else if s.link.cli_model().is_some() {
+            Some(provider::Lock::Cli)
+        } else {
+            None
+        };
+        m.here = s.link.local();
+        m
+    }
+
+    /// Look at her brain (off her UI thread): her local server, how he runs `synaps`, the
+    /// accounts with a login here. At most every `LOOK_EVERY`; the page gets it when it's in.
+    pub(super) fn look_at_brain(&mut self, cx: &mut Context<Self>) {
+        let now = Instant::now();
+        if self.brain_look.busy || self.brain_look.at.is_some_and(|t| now < t + LOOK_EVERY) {
+            return;
+        }
+        self.brain_look.busy = true;
+        let ((profile, pid), here) = self.session.as_ref().map_or(((None, None), false), |s| (s.link.daemon_at(), s.link.local()));
+        cx.spawn(async move |this, cx| {
+            let look = crate::off_thread(move || Ok(look_now(profile, pid, here))).await.unwrap_or_default();
+            this.update(cx, |a, cx| {
+                elog!("synaps-avatar: brain: local {:?}, signed in: {:?}", look.local, look.signed);
+                a.brain_look = BrainLook { at: Some(Instant::now()), busy: false, ..look };
+                a.line_push(cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// A change on the Settings page: written to settings.toml (only that key; a file she
@@ -588,11 +691,12 @@ impl Avatar {
                             Attention::HangOnly => "Hanging only. I like it up there.",
                             Attention::Off => "Fine. I'll stay put.",
                         }
+                        .to_string()
                     }
-                    Pref::Wake(true) => "Say my name, I'll hear it.",
-                    Pref::Wake(false) => "I'll stop listening for my name.",
+                    Pref::Wake(true) => "Say my name, I'll hear it.".into(),
+                    Pref::Wake(false) => "I'll stop listening for my name.".into(),
+                    Pref::Model(m) => format!("{} it is. Your next message runs on it.", provider::model_spoken(m)),
                 }
-                .to_string()
             }
             Err(e) => {
                 elog!("synaps-avatar: settings: {p:?} not saved: {e}");
@@ -624,6 +728,27 @@ impl Avatar {
                 if let Some(h) = &mut self.brain {
                     p.apply(&mut h.settings);
                 }
+            }
+            // Her own session's model, live (`Setting::Model`, as a reload sends it): the rest of
+            // `[session]` as she runs it. Never on a session she rides (`--session`), and `--model`
+            // wins (the page locks both).
+            Pref::Model(m) => {
+                let mut session = match &self.brain {
+                    Some(h) => h.settings.session.clone(),
+                    None => Settings::load().map(|s| s.session).unwrap_or_default(),
+                };
+                session.model = Some(m.to_string());
+                if let Some(h) = &mut self.brain {
+                    p.apply(&mut h.settings);
+                }
+                let acts = match &mut self.session {
+                    Some(sl) if !sl.link.rides_other() => {
+                        let persona = crate::session_persona(&session, &self.voice.cfg, sl.link.cli_model(), &self.pack.dir);
+                        sl.link.set_persona(persona, Instant::now())
+                    }
+                    _ => Vec::new(),
+                };
+                self.run_acts(acts);
             }
         }
     }
@@ -764,6 +889,9 @@ impl Avatar {
             Ask::Page(page) => {
                 if let Some(l) = &mut self.line {
                     l.page = page;
+                }
+                if page.settings() {
+                    self.look_at_brain(cx);
                 }
                 // To chat: he sees the thread (what came meanwhile is read); her line goes.
                 if page == Page::Chat {
