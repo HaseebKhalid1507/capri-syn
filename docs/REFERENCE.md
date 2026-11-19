@@ -69,7 +69,8 @@ Reference for `synaps-avatar`, the crate behind capri-syn. The [README](../READM
   alone, `type: api_key` with a key in it), an API-key service's `provider.<id>` in Synaps' `config`
   (its last line for it; only if the daemon started after it was written, by 2 s or more so no
   file time's rounding flips it: Synaps reads its config once, at start, `daemon.json`'s
-  `started_at`, so one added since, or too close to tell, is unknown until a restart), or
+  `started_at`, so one added since, or too close to tell, is unknown until a restart or her first
+  answer), or
   its key variable (`ANTHROPIC_API_KEY`, `GROQ_API_KEY`, …) in her environment or the daemon's
   (Linux: `/proc/<pid>/environ`, whether it's set, never its value). Keys and types only, never a
   secret. None: her tag reads `NO BRAIN YET` in place of `ONLINE` (and asleep), and she reads again
@@ -92,9 +93,12 @@ Reference for `synaps-avatar`, the crate behind capri-syn. The [README](../READM
   else: `‹error: …›` (cut at 90 characters), annoyed, as before.
 - **Settings ▸ Brain.** Settings' first row, BRAIN, shows her model and its login (`✓ CLAUDE ·
   SONNET 4.6`, `● NO BRAIN YET` with a red `SET UP ▸`); ⏎ (or its button) opens the Brain screen:
-  SIGN IN WITH CLAUDE, RUN LOCAL (its server looked at: `provider.local.url`'s last line, else the
+  SIGN IN WITH CLAUDE, RUN LOCAL (its server looked at: `provider.local.url`'s last line, read at
+  the daemon's start as its keys are, so one added since counts from its next start; else the
   daemon's `LOCAL_ENDPOINT` (Windows: hers), else Ollama's port; one deadline for the lookup, the
-  connect and the reply), OTHER
+  connect and the reply; asked again after 5 s, then less often while it answers the same, to every
+  40 s, and at once when a Settings page opens or the URL changes; never with the URL's
+  `user:password@`, and her log shows the URL without it or a `?query`), OTHER
   (opened in place: ChatGPT, Copilot, Gemini, Grok, Kimi, Muse, then API KEY; Gemini only with
   `SYNAPS_GOOGLE_GEMINI_CLIENT_ID` set, which Synaps 0.12 needs to sign in to it, or a Gemini login
   on file), and, once she has a brain, MODEL: her provider's few models, written to `settings.toml`
@@ -106,10 +110,12 @@ Reference for `synaps-avatar`, the crate behind capri-syn. The [README](../READM
   and a click switches her to its first model; a sign-in copies its `synaps login --provider …` for
   a terminal until she runs it herself (the keys under the list say what ⏎ does on the row picked).
   API KEY says `IN USE · GROQ` when her brain is a key service with its key, else `KEY SET · …` for
-  the services with a key here. Locked: `--model` (`set by --model`), `--session` (`their
+  the services with a key here; with one set (and her on another brain), ⏎ switches her to it (its
+  default model), else it copies `synaps login` to set one. Locked: `--model` (`set by --model`), `--session` (`their
   session`); nothing else writes MODEL then either. A daemon through `--socket` signs in on its own
   machine: the ways in (RUN LOCAL too) say ON ITS MACHINE and do nothing here. The open Brain
-  screen looks again every 5 s and when a read finds her login, so a sign-in made in a terminal
+  screen looks again every 5 s (Synaps' files and the daemon's environment read once a look) and
+  when a read finds her login, so a sign-in made in a terminal
   (to any provider) shows without reopening it; the row picked stays on its provider when that
   adds or drops a row. Her menu's last row and ABOUT name her model the same way (`SYNAPS 0.12.0 ·
   SONNET 4.6`).

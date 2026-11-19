@@ -35,6 +35,31 @@ pub(super) type PrefsIo = WriteQueue<PrefJob>;
 const LOOK_EVERY: Duration = Duration::from_secs(5);
 /// A local model server answers in this or isn't there.
 const PROBE_WITHIN: Duration = Duration::from_millis(800);
+/// The local server is asked again (each ask a line in Ollama's log) after `LOOK_EVERY`, the wait
+/// doubling while it answers the same, to this; a new URL, or a page opened, asks at once.
+const PROBE_MAX: Duration = Duration::from_secs(40);
+
+/// The local server's last probe: its URL (as shown: `provider::url_shown`), its answer, when,
+/// and the wait before the next.
+#[derive(Clone, Debug)]
+pub(super) struct Probed {
+    url: String,
+    local: provider::Local,
+    at: Instant,
+    wait: Duration,
+}
+
+/// Whether a look probes `url` now: never probed, another URL, or the wait is over.
+fn probe_due(last: Option<&Probed>, url: &str, now: Instant) -> bool {
+    last.is_none_or(|p| p.url != url || now >= p.at + p.wait)
+}
+
+/// A probe's answer at `now`: the same as the last (same URL) doubles the wait, else it's
+/// `LOOK_EVERY` again.
+fn probed(last: Option<&Probed>, url: String, local: provider::Local, now: Instant) -> Probed {
+    let wait = last.filter(|p| p.url == url && p.local == local).map_or(LOOK_EVERY, |p| (p.wait * 2).clamp(LOOK_EVERY, PROBE_MAX));
+    Probed { url, local, at: now, wait }
+}
 
 /// What a look at her brain found, off her UI thread, when a Settings page opens: her local
 /// model server, how he runs `synaps`, the accounts with a login on this machine.
@@ -50,6 +75,10 @@ pub(super) struct BrainLook {
     pub busy: bool,
     /// It went stale while one was under way (a login landed): look again once that one is in.
     pub again: bool,
+    /// The local server's last probe (`probe_due`), and the config's local URL as the daemon read
+    /// it (`creds::url_at_start`): each look's, for the next.
+    pub probed: Option<Probed>,
+    pub url_read: Option<crate::creds::UrlAtStart>,
 }
 
 impl BrainLook {
@@ -77,33 +106,42 @@ impl BrainLook {
         again
     }
 
+    /// A Settings page opened: its look asks the local server whatever the wait (he may have
+    /// just started it).
+    pub(super) fn opened(&mut self) {
+        if let Some(p) = &mut self.probed {
+            p.wait = Duration::ZERO;
+        }
+    }
+
     /// When the open Brain screen looks again (None: one is under way).
     fn due(&self, now: Instant) -> Option<Instant> {
         (!self.busy).then(|| self.at.map_or(now, |t| t + LOOK_EVERY))
     }
 }
 
-/// The look itself (`here`: the daemon runs on this machine; else nothing here is its).
-fn look_now(profile: Option<String>, pid: Option<u32>, here: bool) -> BrainLook {
+/// The look itself (`here`: the daemon runs on this machine; else nothing here is its; `last`:
+/// the last look's probe and local URL). Synaps' files and the daemon's environment are read
+/// once for all of it; the local server is asked only when `probe_due`.
+fn look_now(profile: Option<String>, pid: Option<u32>, here: bool, last: (Option<Probed>, Option<crate::creds::UrlAtStart>)) -> BrainLook {
     let exe = provider::daemon_exe(&synaps_client::discovery::run_dir(), profile.as_deref());
     let synaps = provider::synaps_cmd(exe.as_deref(), std::env::var_os("PATH").as_deref());
     if !here {
         return BrainLook { synaps, ..BrainLook::default() };
     }
-    let base = synaps_client::discovery::base_dir();
-    let config = std::fs::read_to_string(crate::creds::synaps_file(&base, profile.as_deref(), "config")).ok();
-    // The daemon's LOCAL_ENDPOINT is the one it uses; where it can't be read, hers.
-    let env = pid.and_then(crate::platform::local_endpoint).unwrap_or_else(|| std::env::var("LOCAL_ENDPOINT").ok());
-    let url = provider::local_url(config.as_deref(), env);
-    let local = provider::probe(&url, PROBE_WITHIN);
-    let signed = provider::ALL
-        .iter()
-        .filter(|p| p.kind != Kind::Local)
-        .filter(|p| p.models.first().is_some_and(|m| crate::creds::check(&crate::creds::Query { model: m.0.into(), profile: profile.clone(), pid }).0 == Creds::Have))
-        .map(|p| p.id)
-        .collect();
-    let gemini = crate::creds::env_set(provider::GEMINI_CLIENT_ID) || pid.and_then(|p| crate::platform::process_env(p, provider::GEMINI_CLIENT_ID)) == Some(true);
-    BrainLook { local: Some((url, local)), synaps, signed, gemini, ..BrainLook::default() }
+    let seen = crate::creds::Seen::read(profile.as_deref(), pid);
+    let (url, url_read) = seen.local_url(last.1.as_ref());
+    let shown = provider::url_shown(&url);
+    let probe = match last.0 {
+        Some(p) if !probe_due(Some(&p), &shown, Instant::now()) => p,
+        p => {
+            let local = provider::probe(&url, PROBE_WITHIN);
+            probed(p.as_ref(), shown, local, Instant::now())
+        }
+    };
+    let signed = provider::ALL.iter().filter(|p| p.kind != Kind::Local).filter(|p| p.models.first().is_some_and(|m| seen.check(m.0).0 == Creds::Have)).map(|p| p.id).collect();
+    let gemini = seen.env_set(provider::GEMINI_CLIENT_ID);
+    BrainLook { local: Some((probe.url.clone(), probe.local.clone())), synaps, signed, gemini, probed: Some(probe), url_read, ..BrainLook::default() }
 }
 
 /// A MODEL pick her session can't take now: her next start sets it.
@@ -437,6 +475,7 @@ impl Avatar {
         let mut snap = self.line_snap();
         if page.settings() {
             snap.prefs = Some(self.prefs_now());
+            self.brain_look.opened();
             self.look_at_brain(cx);
         }
         let me = cx.entity().downgrade();
@@ -653,11 +692,14 @@ impl Avatar {
             return;
         }
         let ((profile, pid), here) = self.session.as_ref().map_or(((None, None), false), |s| (s.link.daemon_at(), s.link.local()));
+        let last = (self.brain_look.probed.clone(), self.brain_look.url_read.clone());
         cx.spawn(async move |this, cx| {
-            let look = crate::off_thread(move || Ok(look_now(profile, pid, here))).await.unwrap_or_default();
+            let look = crate::off_thread(move || Ok(look_now(profile, pid, here, last))).await.unwrap_or_default();
             this.update(cx, |a, cx| {
                 if look.signed != a.brain_look.signed || look.local != a.brain_look.local {
-                    elog!("synaps-avatar: brain: local {:?}, signed in: {:?}", look.local, look.signed);
+                    // The URL as shown (never a `user:password@`; it is already, and once more here).
+                    let local = look.local.as_ref().map(|(u, l)| (provider::url_shown(u), l));
+                    elog!("synaps-avatar: brain: local {local:?}, signed in: {:?}", look.signed);
                 }
                 if a.brain_look.done(look, Instant::now()) {
                     a.look_at_brain(cx);
@@ -988,6 +1030,7 @@ impl Avatar {
                     l.page = page;
                 }
                 if page.settings() {
+                    self.brain_look.opened();
                     self.look_at_brain(cx);
                 }
                 // To chat: he sees the thread (what came meanwhile is read); her line goes.
@@ -1002,6 +1045,8 @@ impl Avatar {
             // this holds for anything else that asks).
             Ask::Pref(Pref::Model(m)) if self.mind_now().lock.is_some() => {
                 elog!("synaps-avatar: settings: model {m} not written: locked ({:?})", self.mind_now().lock);
+                // The page shows the model in force, not one it may have shown as asked.
+                self.line_push(cx);
                 Ok(())
             }
             Ask::Pref(p) => {
@@ -1514,6 +1559,45 @@ mod brain_look_tests {
         // Stale with none under way: the next look goes at once, nothing owed after it.
         b.stale();
         assert_eq!((b.due(t1), b.again), (Some(t1), false));
+    }
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::{BrainLook, LOOK_EVERY, PROBE_MAX, probe_due, probed};
+    use crate::provider::Local;
+    use std::time::{Duration, Instant};
+
+    /// The local server is asked again after LOOK_EVERY, the wait doubling (to PROBE_MAX) while it
+    /// answers the same; a new answer or URL starts over, and a page opened asks at once.
+    #[test]
+    fn the_local_server_is_asked_less_while_nothing_changes() {
+        let t0 = Instant::now();
+        let url = "http://localhost:11434/v1";
+        assert!(probe_due(None, url, t0), "never asked");
+        let mut p = probed(None, url.into(), Local::Off, t0);
+        assert_eq!(p.wait, LOOK_EVERY);
+        assert!(!probe_due(Some(&p), url, t0 + LOOK_EVERY - Duration::from_millis(1)));
+        assert!(probe_due(Some(&p), "http://localhost:1234/v1", t0), "another URL: at once");
+        let mut t = t0;
+        let mut waits = Vec::new();
+        for _ in 0..6 {
+            t = p.at + p.wait;
+            assert!(probe_due(Some(&p), url, t));
+            p = probed(Some(&p), url.into(), Local::Off, t);
+            waits.push(p.wait.as_secs());
+        }
+        assert_eq!(waits, [10, 20, 40, 40, 40, 40]);
+        p = probed(Some(&p), url.into(), Local::Up(vec!["qwen3:8b".into()]), t);
+        assert_eq!(p.wait, LOOK_EVERY, "he started Ollama: back to every look");
+        p = probed(Some(&p), "http://localhost:1234/v1".into(), Local::Up(vec!["qwen3:8b".into()]), t);
+        assert_eq!(p.wait, LOOK_EVERY, "another URL starts over");
+        // A Settings page opened: asked on its look, whatever the wait.
+        p.wait = PROBE_MAX;
+        let mut b = BrainLook { probed: Some(p), ..BrainLook::default() };
+        assert!(!probe_due(b.probed.as_ref(), "http://localhost:1234/v1", t + LOOK_EVERY));
+        b.opened();
+        assert!(probe_due(b.probed.as_ref(), "http://localhost:1234/v1", t));
     }
 }
 

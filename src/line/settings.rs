@@ -328,6 +328,23 @@ fn use_provider(p: &Prefs, to: &'static Provider) -> Act {
     }
 }
 
+/// API KEY's ⏎: with one service's key set here and her on another, switch her to it (its
+/// default model; not under `--model`/`--session`). Else, on this machine, Synaps' list of
+/// services, to set one; a daemon on another machine: nothing (a key here wouldn't reach it).
+fn key_act(p: &Prefs) -> Act {
+    let m = &p.mind;
+    let set: Vec<&'static Provider> = provider::ALL.iter().filter(|q| q.kind == Kind::Key && m.signed.contains(&q.id)).collect();
+    let to = match set.as_slice() {
+        [one] if m.provider() != Some(*one) && m.lock.is_none() => one.models.first(),
+        _ => None,
+    };
+    match to {
+        Some(d) => Act::Pref(Pref::Model(d.0)),
+        None if m.here => Act::Login(None),
+        None => Act::Nothing,
+    }
+}
+
 /// MODEL stepped by `d` from the one in force: the next one he can pick (his own, set by hand,
 /// is shown but not picked again). Locked (`--model`, `--session`): nothing.
 fn step_model(p: &Prefs, d: i32) -> Act {
@@ -365,7 +382,7 @@ pub fn brain_key(key: &str, sel: usize, p: &Prefs, other: bool) -> (usize, Act) 
         }
         (_, BrainRow::Claude) if go => use_provider(p, &provider::CLAUDE),
         (_, BrainRow::Account(i)) if go => p.mind.others().get(i).map_or(Act::Nothing, |&to| use_provider(p, to)),
-        (_, BrainRow::Key) if go && p.mind.here => Act::Login(None),
+        (_, BrainRow::Key) if go => key_act(p),
         (_, BrainRow::Local) if go && p.mind.here => Act::Local,
         _ => Act::Nothing,
     };
@@ -1551,6 +1568,39 @@ mod tests {
         assert_eq!(key_word(&none).1, None, "no key: not in use");
         none.here = false;
         assert_eq!(key_word(&none).0, "ON ITS MACHINE");
+    }
+
+    /// API KEY acts on what it says: one service's key set and her on another, ⏎ switches her to
+    /// it (its default model); IN USE, several keys, none or locked: Synaps' list (to set one)
+    /// on this machine, nothing on another.
+    #[test]
+    fn api_key_with_one_key_set_switches_her_to_it() {
+        let key_row = 8;
+        let mut p = Prefs { mind: mind("claude-sonnet-4-6", Some(true)), ..prefs() };
+        assert_eq!(brain_rows(&p, true)[key_row], BrainRow::Key);
+        assert_eq!(brain_key("enter", key_row, &p, true).1, Act::Login(None), "no key set: Synaps' list");
+        p.mind.signed.push("groq");
+        assert_eq!(key_word(&p.mind).0, "KEY SET · GROQ");
+        for k in ["enter", "right", "space"] {
+            assert_eq!(brain_key(k, key_row, &p, true), (key_row, Act::Pref(Pref::Model("groq/llama-3.3-70b-versatile"))), "{k}");
+        }
+        assert_eq!(brain_hint(&p, key_row, true), "↑↓ pick · ⏎ use it · ← close · esc back");
+        let mut locked = p.clone();
+        locked.mind.lock = Some(Lock::Cli);
+        assert_eq!(brain_key("enter", key_row, &locked, true).1, Act::Login(None), "--model: no switch");
+        let mut two = p.clone();
+        two.mind.signed.push("openrouter");
+        assert_eq!(brain_key("enter", key_row, &two, true).1, Act::Login(None), "two keys: which is MODEL's");
+        assert_eq!(brain_hint(&two, key_row, true), "↑↓ pick · ⏎ copy the sign-in · ← close · esc back");
+        let mut on_it = Prefs { mind: mind("groq/llama-3.3-70b-versatile", Some(true)), ..prefs() };
+        assert_eq!(key_word(&on_it.mind).0, "IN USE · GROQ");
+        let rows = brain_rows(&on_it, true);
+        let at = rows.iter().position(|r| *r == BrainRow::Key).unwrap();
+        assert_eq!(brain_key("enter", at, &on_it, true).1, Act::Login(None), "in use: set another");
+        on_it.mind.here = false;
+        on_it.mind.signed.clear();
+        assert_eq!(brain_key("enter", at, &on_it, true).1, Act::Nothing, "a daemon on another machine");
+        assert_eq!(brain_hint(&on_it, at, true), "↑↓ pick · ← close · esc back");
     }
 
     /// A look that adds or drops a row under OTHER (Gemini's client id found, a login on file)

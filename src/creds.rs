@@ -10,6 +10,7 @@
 //! another machine's (`session::Options::local`).
 
 use crate::session::Creds;
+use std::collections::HashSet;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
@@ -20,7 +21,7 @@ const MTIME_SLACK: Duration = Duration::from_secs(2);
 
 /// A file written at `written` was there when the daemon started at `started`: older by
 /// `MTIME_SLACK` at least. Closer than that, can't tell (false).
-fn there_at_start(written: SystemTime, started: SystemTime) -> bool {
+pub fn there_at_start(written: SystemTime, started: SystemTime) -> bool {
     written.checked_add(MTIME_SLACK).is_some_and(|w| w <= started)
 }
 
@@ -48,11 +49,127 @@ pub enum Again {
 /// that started it). Where the daemon's can't be read (Windows, no pid), such a key can't be ruled
 /// out: no login on file is Unknown there, not Missing.
 pub fn check(q: &Query) -> (Creds, Again) {
-    let daemon = |k: &str| q.pid.and_then(|p| crate::platform::process_env(p, k));
-    let env = |k: &str| env_set(k) || daemon(k) == Some(true);
-    let daemon_read = daemon("ANTHROPIC_API_KEY").is_some();
-    let started = crate::provider::daemon_started(&synaps_client::discovery::run_dir(), q.profile.as_deref());
-    check_at(&q.model, &synaps_client::discovery::base_dir(), q.profile.as_deref(), &env, daemon_read, started)
+    Seen::read(q.profile.as_deref(), q.pid).check(&q.model)
+}
+
+/// Synaps' files, the daemon's environment and its start as one read found them: any number of
+/// checks off it (the Settings page's look checks every provider), each file read once.
+pub struct Seen {
+    files: Files,
+    /// The daemon's environment (None: unread, as on Windows).
+    env: Option<crate::platform::Environ>,
+    started: Option<SystemTime>,
+}
+
+impl Seen {
+    pub fn read(profile: Option<&str>, pid: Option<u32>) -> Seen {
+        Seen {
+            files: Files::read(&synaps_client::discovery::base_dir(), profile),
+            env: pid.and_then(crate::platform::process_environ),
+            started: crate::provider::daemon_started(&synaps_client::discovery::run_dir(), profile),
+        }
+    }
+
+    /// A variable is set, not blank, in her environment or the daemon's.
+    pub fn env_set(&self, k: &str) -> bool {
+        env_set(k) || self.env.as_ref().is_some_and(|e| e.set.contains(k))
+    }
+
+    /// `model`'s credentials (`check`).
+    pub fn check(&self, model: &str) -> (Creds, Again) {
+        judge(model, &self.files, &|k: &str| self.env_set(k), self.env.is_some(), self.started)
+    }
+
+    /// The local server's URL as the daemon has it (`local_url`): its config's
+    /// `provider.local.url` as read at its start (`url_at_start`; `known`: what an earlier look
+    /// found it read then), its `LOCAL_ENDPOINT` (where it can't be read, hers). With what to
+    /// remember of the config's for the next look.
+    pub fn local_url(&self, known: Option<&UrlAtStart>) -> (String, Option<UrlAtStart>) {
+        let (set, keep) = url_at_start(self.files.local_url.clone(), self.files.config_at, self.started, known);
+        let env = self.env.as_ref().map_or_else(|| std::env::var("LOCAL_ENDPOINT").ok(), |e| e.local_endpoint.clone());
+        (crate::provider::local_url(set.as_deref(), env), keep)
+    }
+}
+
+/// The config's `provider.local.url` as the daemon read it at its start (None: not set then).
+pub type UrlAtStart = (SystemTime, Option<String>);
+
+/// The config's `provider.local.url` (`written`) as the daemon has it: Synaps reads it once, at
+/// its start, as it does its keys. A config there then (`there_at_start`), or no start known: as
+/// written, and remembered for that start. One written since (or too close to tell): what an
+/// earlier look found for that start, else none (the daemon's `LOCAL_ENDPOINT` or Ollama's) until
+/// its next start.
+pub fn url_at_start(written: Option<String>, config_at: Option<SystemTime>, started: Option<SystemTime>, known: Option<&UrlAtStart>) -> (Option<String>, Option<UrlAtStart>) {
+    let Some(t) = started else { return (written, None) };
+    if config_at.is_none_or(|w| there_at_start(w, t)) {
+        return (written.clone(), Some((t, written)));
+    }
+    match known.filter(|k| k.0 == t) {
+        Some(k) => (k.1.clone(), Some(k.clone())),
+        None => (None, None),
+    }
+}
+
+/// Synaps' `config` and `auth.json` as read, by key and type only: no secret kept.
+struct Files {
+    /// The config's keys set, not blank (its last line for each). None: unreadable.
+    config: Option<HashSet<String>>,
+    /// Its `provider.local.url` (its last line; a URL, not a secret).
+    local_url: Option<String>,
+    /// When the config was written (None: no config, or no time).
+    config_at: Option<SystemTime>,
+    /// `auth.json`'s entries. None: unreadable, or not a JSON object (caught mid-write).
+    auth: Option<Vec<Entry>>,
+}
+
+/// An `auth.json` entry: its name, its `type`, whether it has a `key` (not empty).
+struct Entry {
+    name: String,
+    kind: Option<String>,
+    key: bool,
+}
+
+impl Files {
+    fn read(base: &Path, profile: Option<&str>) -> Files {
+        let file = |name: &str| synaps_file(base, profile, name);
+        let gone = |e: &std::io::Error| e.kind() == std::io::ErrorKind::NotFound;
+        let text = std::fs::read_to_string(file("config"));
+        let config = match &text {
+            Ok(c) => Some(config_set(c)),
+            Err(e) if gone(e) => Some(HashSet::new()),
+            Err(_) => None,
+        };
+        let local_url = text.as_deref().ok().and_then(|c| crate::provider::config_value(c, "provider.local.url")).map(str::to_string);
+        let config_at = std::fs::metadata(file("config")).and_then(|m| m.modified()).ok();
+        let auth = match std::fs::read_to_string(file("auth.json")) {
+            Ok(t) if t.trim().is_empty() => Some(Vec::new()),
+            Ok(t) => match serde_json::from_str::<serde_json::Value>(&t) {
+                Ok(serde_json::Value::Object(root)) => Some(
+                    root.iter()
+                        .map(|(k, v)| Entry {
+                            name: k.clone(),
+                            kind: v.get("type").and_then(|t| t.as_str()).map(str::to_string),
+                            key: v.get("key").and_then(|k| k.as_str()).is_some_and(|k| !k.is_empty()),
+                        })
+                        .collect(),
+                ),
+                _ => None,
+            },
+            Err(e) if gone(&e) => Some(Vec::new()),
+            Err(_) => None,
+        };
+        Files { config, local_url, config_at, auth }
+    }
+}
+
+/// The config's keys set, not blank: Synaps' map of it (its last line for each, `#` comments
+/// skipped, trimmed: `provider::config_value`).
+fn config_set(config: &str) -> HashSet<String> {
+    let mut last = std::collections::HashMap::new();
+    for (k, v) in config.lines().map(str::trim).filter(|l| !l.starts_with('#')).filter_map(|l| l.split_once('=')) {
+        last.insert(k.trim(), !v.trim().is_empty());
+    }
+    last.into_iter().filter(|&(_, set)| set).map(|(k, _)| k.to_string()).collect()
 }
 
 /// A variable is set (not blank) in her environment. Only whether: a key's value is never read.
@@ -63,7 +180,13 @@ pub fn env_set(k: &str) -> bool {
 /// `env`: a variable is set in her environment or the daemon's; `daemon_read`: whether the
 /// daemon's was read; `started`: when the daemon started (it read its `config` then, and only
 /// then: a key put there since isn't its yet).
+#[cfg(test)]
 pub fn check_at(model: &str, base: &Path, profile: Option<&str>, env: &dyn Fn(&str) -> bool, daemon_read: bool, started: Option<SystemTime>) -> (Creds, Again) {
+    judge(model, &Files::read(base, profile), env, daemon_read, started)
+}
+
+/// `check_at` off files already read.
+fn judge(model: &str, f: &Files, env: &dyn Fn(&str) -> bool, daemon_read: bool, started: Option<SystemTime>) -> (Creds, Again) {
     use crate::provider::Kind;
     const NEVER: (Creds, Again) = (Creds::Unknown, Again::Never);
     const TRY_AGAIN: (Creds, Again) = (Creds::Unknown, Again::Yes);
@@ -83,40 +206,27 @@ pub fn check_at(model: &str, base: &Path, profile: Option<&str>, env: &dyn Fn(&s
     if p.env.iter().any(|k| env(k)) {
         return (Creds::Have, Again::Never);
     }
-    let file = |name: &str| synaps_file(base, profile, name);
     // A key in Synaps' login config (`provider.groq = …`), set (never read further) before the
     // daemon started: one put there since, or too close to its start to tell, waits for its next
     // start (Unknown, read again; her first answer settles it).
+    let Some(config) = &f.config else { return TRY_AGAIN };
+    if config.contains("auth.remote_endpoint") {
+        return NEVER;
+    }
     let mut config_key = None;
-    match std::fs::read_to_string(file("config")) {
-        Ok(c) if remote_broker(&c) => return NEVER,
-        Ok(c) if p.kind == Kind::Key && set(&c, &format!("provider.{}", p.id)) => {
-            let since = |t: SystemTime| std::fs::metadata(file("config")).and_then(|m| m.modified()).is_ok_and(|m| !there_at_start(m, t));
-            config_key = Some(if started.is_some_and(since) { TRY_AGAIN } else { (Creds::Have, Again::Never) });
-        }
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => return TRY_AGAIN,
+    if p.kind == Kind::Key && config.contains(&format!("provider.{}", p.id)) {
+        let since = |t: SystemTime| f.config_at.is_some_and(|m| !there_at_start(m, t));
+        config_key = Some(if started.is_some_and(since) { TRY_AGAIN } else { (Creds::Have, Again::Never) });
     }
     // One on file (read on every request: the daemon has it now) is a key either way.
     let missing = config_key.unwrap_or(missing);
-    let text = match std::fs::read_to_string(file("auth.json")) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return missing,
-        Err(_) => return TRY_AGAIN,
-    };
-    if text.trim().is_empty() {
-        return missing;
-    }
-    let Ok(serde_json::Value::Object(root)) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return TRY_AGAIN;
-    };
+    let Some(auth) = &f.auth else { return TRY_AGAIN };
     // An account's slots: `<id>` (the default one) and `<id>@<label>`, any typed entry (an
     // expired token is still a login: the broker refreshes it). A key service's: `<id>` alone,
     // `type: api_key` with a key in it (Synaps' `load_static_key`).
     let has = match p.kind {
-        Kind::Key => root.get(p.id).is_some_and(|v| v.get("type").and_then(|t| t.as_str()) == Some("api_key") && v.get("key").and_then(|k| k.as_str()).is_some_and(|k| !k.is_empty())),
-        _ => root.iter().any(|(k, v)| (k == p.id || k.strip_prefix(p.id).is_some_and(|r| r.starts_with('@'))) && v.get("type").and_then(|t| t.as_str()).is_some()),
+        Kind::Key => auth.iter().any(|e| e.name == p.id && e.kind.as_deref() == Some("api_key") && e.key),
+        _ => auth.iter().any(|e| (e.name == p.id || e.name.strip_prefix(p.id).is_some_and(|r| r.starts_with('@'))) && e.kind.is_some()),
     };
     if has { (Creds::Have, Again::Never) } else { missing }
 }
@@ -125,16 +235,6 @@ pub fn check_at(model: &str, base: &Path, profile: Option<&str>, env: &dyn Fn(&s
 /// (Synaps' `resolve_read_path`).
 pub fn synaps_file(base: &Path, profile: Option<&str>, name: &str) -> std::path::PathBuf {
     profile.filter(|p| !p.trim().is_empty()).map(|p| base.join(p).join(name)).filter(|f| f.exists()).unwrap_or_else(|| base.join(name))
-}
-
-/// Synaps' config sets `key`, not blank (its last line for it: `provider::config_value`).
-fn set(config: &str, key: &str) -> bool {
-    crate::provider::config_value(config, key).is_some_and(|v| !v.is_empty())
-}
-
-/// The config sets `auth.remote_endpoint`.
-fn remote_broker(config: &str) -> bool {
-    set(config, "auth.remote_endpoint")
 }
 
 #[cfg(test)]
@@ -342,5 +442,57 @@ mod tests {
         std::fs::write(d.join("work").join("auth.json"), "{}").unwrap();
         assert_eq!(check_at("claude-sonnet-4-6", &d, Some("work"), &none, true, None).0, MISSING);
         std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// One read of the files for any number of checks (the Settings page's look checks every
+    /// provider): what it found stands after the files change, until the next read.
+    #[test]
+    fn a_read_once_answers_every_check() {
+        let d = dir("once");
+        std::fs::write(d.join("auth.json"), r#"{"anthropic": {"type": "oauth", "access": "sk-secret"}, "groq": {"type": "api_key", "key": "gsk"}, "nvidia": {"type": "api_key", "key": ""}}"#).unwrap();
+        std::fs::write(d.join("config"), "provider.cerebras = csk\nprovider.local.url = http://localhost:1234/v1\n").unwrap();
+        let f = Files::read(&d, None);
+        std::fs::remove_dir_all(&d).ok();
+        let at = |m: &str| judge(m, &f, &none, true, None).0;
+        assert_eq!(at("claude-sonnet-4-6"), Creds::Have);
+        assert_eq!(at("groq/llama-3.3-70b-versatile"), Creds::Have);
+        assert_eq!(at("cerebras/x"), Creds::Have, "the config's key");
+        assert_eq!(at("nvidia/x"), Creds::Missing(Some("NVIDIA")), "an empty key isn't one");
+        assert_eq!(f.local_url.as_deref(), Some("http://localhost:1234/v1"));
+        // As it was read: no folder now, the same answers; a fresh read finds none.
+        assert_eq!(at("groq/llama-3.3-70b-versatile"), Creds::Have);
+        assert_eq!(check_at("groq/llama-3.3-70b-versatile", &d, None, &none, true, None).0, Creds::Missing(Some("Groq")));
+    }
+
+    /// The config's keys as Synaps' map has them: its last line for each, a blank one unset, a
+    /// comment none.
+    #[test]
+    fn the_configs_keys_are_its_last_lines() {
+        let c = config_set("# provider.groq = x\nprovider.groq = a\nprovider.groq =\n provider.cerebras = b \nauth.remote_endpoint = \nprovider.xai=c\n");
+        let mut keys: Vec<_> = c.iter().map(String::as_str).collect();
+        keys.sort();
+        assert_eq!(keys, ["provider.cerebras", "provider.xai"]);
+    }
+
+    /// `provider.local.url` as the daemon read it at its start, as its keys: written before it
+    /// (by 2 s), as written; since, what an earlier look found for that start, else none.
+    #[test]
+    fn the_local_url_is_the_one_read_at_its_start() {
+        let t = SystemTime::UNIX_EPOCH + Duration::from_secs(1_794_625_965);
+        let (before, since) = (t - Duration::from_secs(60), t + Duration::from_secs(60));
+        let a = || Some("http://a:1/v1".to_string());
+        assert_eq!(url_at_start(a(), Some(since), None, None), (a(), None), "no daemon.json: as written");
+        assert_eq!(url_at_start(a(), Some(before), Some(t), None), (a(), Some((t, a()))), "there at its start");
+        assert_eq!(url_at_start(a(), None, Some(t), None), (a(), Some((t, a()))), "no time for it: as written");
+        assert_eq!(url_at_start(a(), Some(since), Some(t), None), (None, None), "added since: not its until its next start");
+        assert_eq!(url_at_start(a(), Some(t - Duration::from_secs(1)), Some(t), None), (None, None), "too close to tell");
+        // His TUI writes the config (/theme) after its start: the URL seen there before stands.
+        let known = (t, Some("http://b:2/v1".to_string()));
+        assert_eq!(url_at_start(a(), Some(since), Some(t), Some(&known)), (known.1.clone(), Some(known.clone())));
+        let unset = (t, None);
+        assert_eq!(url_at_start(a(), Some(since), Some(t), Some(&unset)).0, None, "none at its start: none");
+        let other_start = (t - Duration::from_secs(3600), Some("http://old:3/v1".to_string()));
+        assert_eq!(url_at_start(a(), Some(since), Some(t), Some(&other_start)), (None, None), "another start's: not this one's");
+        assert_eq!(url_at_start(None, Some(before), Some(t), Some(&known)), (None, Some((t, None))), "taken out before it: none");
     }
 }

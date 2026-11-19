@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Her brain, last follow-ups (Settings PR 5)
+- API KEY acts on what it says: with one service's key set and her on another brain, ⏎ switches her
+  to it (`⏎ use it`); else it copies `synaps login` to set one.
+- A MODEL pick refused under `--model` / `--session` puts the page back on the model in force.
+- The Brain screen's look reads Synaps' `config`, `auth.json` and the daemon's environment once a
+  look, not once per provider. The local server is asked again after 5 s, then less often while it
+  answers the same (to every 40 s); a Settings page opened or a new URL asks at once. At most two
+  name lookups left hanging at a time; an address isn't looked up.
+- `provider.local.url` counts as Synaps reads it, at the daemon's start: one added since is used
+  from its next start (one she saw there before stands when his TUI rewrites the config).
+- No credentials in her log: the local server's URL is logged (and shown) without
+  `user:password@` or a `?query`, and the probe never sends them.
+
 ### Her brain, follow-ups (Settings PR 4)
 - MODEL follows her session when his TUI changes it (`/model`: the daemon's `setting_changed` to
   every client), so picking her model back sends it; a Set's reply lost for 10 s no longer leaves
@@ -15,7 +28,7 @@
 - API KEY shows `IN USE · <service>` / `KEY SET · …`. A service's key counts as Synaps counts it:
   `<id>` with `type: api_key` and a key in `auth.json`, the config's last line, and a config key
   only once the daemon has started since it was written (by 2 s or more: closer, no file time or
-  clock tells them apart, so it's unknown, not a ✓).
+  clock tells them apart, so it's unknown until a restart or her first answer, not a ✓).
 - RUN LOCAL's server: the config's last `provider.local.url`, the daemon's `LOCAL_ENDPOINT`
   (Linux), one deadline for the name lookup, the connect and the reply.
 - MODEL is refused under `--model` / `--session` whoever asks; with `[brain]` off its write reads
