@@ -117,7 +117,11 @@ function Wait-Window([string]$Title, [int]$Secs = 60) {
 }
 # Every name shown in a window (its page's caption among them).
 # Trimmed: a heading's name can end in a line break (the finish page's does).
-function Get-WindowText($W) { @($W.FindAll($Tree::Descendants, [Windows.Automation.Condition]::TrueCondition) | ForEach-Object { "$($_.Current.Name)".Trim() } | Where-Object { $_ }) }
+# A window that closes under the read (the uninstall's questions do) says nothing: not an error.
+function Get-WindowText($W) {
+    try { @($W.FindAll($Tree::Descendants, [Windows.Automation.Condition]::TrueCondition) | ForEach-Object { "$($_.Current.Name)".Trim() } | Where-Object { $_ }) }
+    catch [System.Runtime.InteropServices.COMException], [Windows.Automation.ElementNotAvailableException] { @() }
+}
 # A button by its caption, whatever UI Automation calls it (a VCL button can come through as a pane):
 # Invoke when it has that, else a real click on its middle.
 function Invoke-Button($W, [string]$Name) {
