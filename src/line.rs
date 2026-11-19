@@ -9,7 +9,7 @@
 //! ([`Ask`]).
 
 mod settings;
-pub use settings::{MenuSave, Page, Pref, Prefs, asked, next_attention};
+pub use settings::{MenuSave, Page, Pref, Prefs, asked, asked_model, next_attention};
 
 use crate::reader::{Block, Mark, Pal, inline, parse};
 use crate::theme::{self, Cut, Fill, glyph, tracked};
@@ -193,7 +193,7 @@ fn esc_does(listening: bool, speaking: bool, page: Page) -> Esc {
         Esc::CancelListen
     } else if speaking {
         Esc::Hush
-    } else if page == Page::Settings {
+    } else if page.settings() {
         Esc::Settings
     } else {
         Esc::Chat
@@ -261,10 +261,13 @@ pub struct Line {
     /// The mic row's rec dot blinks at 1 Hz from here; a wake-up is pending.
     born: Instant,
     blink_armed: bool,
-    /// Chat or Settings, and where Esc goes back to.
+    /// Chat or Settings (its list, or the Brain screen), and where Esc goes back to.
     nav: settings::Nav,
     /// The Settings row picked (↑↓).
     sel: usize,
+    /// The Brain screen's row picked, and whether its OTHER is open.
+    bsel: usize,
+    other: bool,
     /// The last page swap (its RGB split, the cog's turn).
     swap: Option<Instant>,
     /// The tallest the panel was on a page it left: both pages are at least as tall from then
@@ -455,6 +458,8 @@ impl Line {
             blink_armed: false,
             nav: settings::Nav::on(page),
             sel: 0,
+            bsel: 0,
+            other: false,
             swap: None,
             keep_h: 0.0,
             keep_chat: false,
@@ -478,7 +483,7 @@ impl Line {
     /// itself (a confirm: no field, so no typed word can answer it).
     fn refocus(&mut self, window: &mut Window, cx: &mut Context<Line>) {
         // Settings: the Line's own handle (keys never type into the hidden field).
-        if self.nav.page == Page::Settings {
+        if self.nav.page.settings() {
             window.focus(&self.focus, cx);
             return;
         }
@@ -553,7 +558,7 @@ impl Line {
     }
 
     pub fn state_json(&self, cx: &App) -> serde_json::Value {
-        serde_json::json!({
+        let mut v = serde_json::json!({
             "mode": if self.mode == Mode::Prompt { "prompt" } else { "text" },
             "parked": self.parked,
             "waiting": self.waiting,
@@ -574,7 +579,17 @@ impl Line {
             "page": self.nav.page.key(),
             "spot": self.spot.get(),
             "sel": self.sel,
-        })
+        });
+        // Settings ▸ Brain (apart: the macro's recursion limit).
+        v["brain_sel"] = self.bsel.into();
+        v["other"] = self.other.into();
+        v["mind"] = self.snap.prefs.as_ref().map_or(serde_json::Value::Null, |p| {
+            serde_json::json!({
+                "model": p.mind.model, "signed_in": p.mind.signed_in, "signed": p.mind.signed, "here": p.mind.here,
+                "local": p.mind.local.as_ref().map(|(u, l)| format!("{u} {l:?}")),
+            })
+        });
+        v
     }
 
     /// Parked from outside (a click elsewhere): it shows so until the summon key or a click.
@@ -789,7 +804,7 @@ impl Line {
                 Esc::Settings | Esc::Chat => {}
             }
         }
-        if self.nav.page == Page::Settings {
+        if self.nav.page.settings() {
             return self.settings_key(k, window, cx);
         }
         match (k.key.as_str(), self.mode) {
@@ -1501,10 +1516,17 @@ impl Render for Line {
                     .text_color(rgb(pal.ink))
                     .child(tracked(&self.name.to_uppercase(), 1.6)),
             )
-            .child(div().text_color(rgb(pal.dim)).child(tracked(if self.nav.page == Page::Settings { "SETTINGS" } else { "LINE" }, 1.6)))
+            .child(div().text_color(rgb(pal.dim)).child(tracked(
+                match self.nav.page {
+                    Page::Chat => "LINE",
+                    Page::Settings => "SETTINGS",
+                    Page::Brain => "SETTINGS ▸ BRAIN",
+                },
+                1.6,
+            )))
             .child(div().flex_1())
             .child(state);
-        let on_settings = self.nav.page == Page::Settings;
+        let on_settings = self.nav.page.settings();
         let rows: Vec<AnyElement> = if on_settings { Vec::new() } else { self.snap.rows.iter().enumerate().map(|(i, r)| self.row_el(i, r, cx)).collect() };
         // At the bottom the thread starts at a whole row: its height is cut to the rows that
         // fit (measured on the last layout; one more frame when that changes).
@@ -1858,7 +1880,7 @@ mod tests {
 
     #[test]
     fn esc_cancels_the_mic_and_hushes_on_either_page() {
-        for page in [Page::Chat, Page::Settings] {
+        for page in [Page::Chat, Page::Settings, Page::Brain] {
             // The mic open (its row says "esc to cancel"): cancelled, never a page step that
             // leaves it open to send on key-up.
             assert_eq!(esc_does(true, false, page), Esc::CancelListen, "{page:?}");
@@ -1866,6 +1888,7 @@ mod tests {
             assert_eq!(esc_does(false, true, page), Esc::Hush, "{page:?}");
         }
         assert_eq!(esc_does(false, false, Page::Settings), Esc::Settings);
+        assert_eq!(esc_does(false, false, Page::Brain), Esc::Settings, "a step back, as on the list");
         assert_eq!(esc_does(false, false, Page::Chat), Esc::Chat);
     }
 

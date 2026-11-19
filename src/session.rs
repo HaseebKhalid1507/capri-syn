@@ -269,6 +269,11 @@ pub struct Link {
     /// `Set`s waiting for their reply, and since when.
     persona_wait: usize,
     persona_sent: Instant,
+    /// What those `Set`s make the view (its keys): compared against while they're on their way,
+    /// so a change asked back before the reply (A, B, A) still goes out.
+    persona_asked: serde_json::Map<String, serde_json::Value>,
+    /// The last compare found another client owning her session's input: nothing was set.
+    persona_blocked: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -332,6 +337,8 @@ impl Link {
             owner: None,
             persona_done: None,
             persona_wait: 0,
+            persona_asked: serde_json::Map::new(),
+            persona_blocked: false,
             persona_sent: now,
         }
     }
@@ -372,7 +379,16 @@ impl Link {
             return Vec::new();
         }
         let Some(view) = &self.view else { return Vec::new() };
-        let diffs = self.persona_diffs(view);
+        // Her Sets on their way count as in (their replies bring the view).
+        let mut view = view.clone();
+        if self.persona_wait > 0
+            && now < self.persona_sent + PERSONA_WAIT
+            && let Some(v) = view.as_object_mut()
+        {
+            v.extend(self.persona_asked.clone());
+        }
+        let diffs = self.persona_diffs(&view);
+        self.persona_blocked = false;
         if diffs.is_empty() {
             self.persona_done = Some(id);
             return Vec::new();
@@ -381,6 +397,7 @@ impl Link {
         if !ours {
             elog!("synaps-avatar: persona: another client owns input on her session; not set");
             self.persona_done = Some(id);
+            self.persona_blocked = true;
             return Vec::new();
         }
         if self.mode != AttachMode::Mirror {
@@ -390,8 +407,31 @@ impl Link {
         self.persona_wait += diffs.len();
         self.persona_sent = now;
         self.touched = now;
+        let p = &self.opts.persona;
+        for d in &diffs {
+            let v = match d.name() {
+                "model" => &p.model,
+                "reasoning_level" => &p.thinking,
+                _ => &p.system,
+            };
+            if let Some(v) = v {
+                self.persona_asked.insert(d.name().into(), v.clone().into());
+            }
+        }
         elog!("synaps-avatar: persona: setting {} on her session", diffs.iter().map(Setting::name).collect::<Vec<_>>().join(", "));
         diffs.into_iter().map(Act::Set).collect()
+    }
+
+    /// The model she has asked her session for and it hasn't taken yet (her persona's: `--model`
+    /// or `[session] model`): the Settings page shows it meanwhile. None once it is in, or once
+    /// it couldn't be set (another client owns her session's input: the daemon's stands).
+    pub fn model_on_way(&self) -> Option<&str> {
+        self.opts.persona.model.as_deref().filter(|_| self.persona_wait > 0 || self.persona_done.is_none())
+    }
+
+    /// The last compare of her persona found another client owning her session's input.
+    pub fn persona_blocked(&self) -> bool {
+        self.persona_blocked
     }
 
     /// The `--model` she was started with.
@@ -404,6 +444,28 @@ impl Link {
         self.view.as_ref().and_then(|v| v.get("model")).and_then(|m| m.as_str()).map(str::trim).filter(|m| !m.is_empty())
     }
 
+    /// Whether her model has credentials, as far as she can tell (her tag's NO BRAIN YET).
+    pub fn creds(&self) -> Creds {
+        self.creds
+    }
+
+    /// Her credentials have been looked at since she attached: a read settled, the daemon or an
+    /// answer said, or there is nothing here to read (a daemon through `--socket`). Her first
+    /// words wait for it a little (a fresh install's are about her brain).
+    pub fn creds_settled(&self) -> bool {
+        !self.opts.local || self.creds != Creds::Unknown || self.creds_read.is_some() || self.creds_by != Said::Read
+    }
+
+    /// The daemon runs on this machine (not one through `--socket`): its logins are here.
+    pub fn local(&self) -> bool {
+        self.opts.local
+    }
+
+    /// The daemon's profile and pid, once connected (where its files are; its environment).
+    pub fn daemon_at(&self) -> (Option<String>, Option<u32>) {
+        self.daemon.clone().map_or((None, None), |(p, pid)| (p, Some(pid)))
+    }
+
     /// When the next credentials read is: only while live, and only for a daemon on this machine.
     fn creds_next(&self) -> Option<Instant> {
         self.creds_at.filter(|_| self.opts.local && self.live())
@@ -414,7 +476,7 @@ impl Link {
         if self.creds_next().is_none_or(|t| now < t) {
             return None;
         }
-        let (profile, pid) = self.daemon.clone().map_or((None, None), |(p, pid)| (p, Some(pid)));
+        let (profile, pid) = self.daemon_at();
         Some(crate::creds::Query { model: self.model()?.to_string(), profile, pid })
     }
 
@@ -427,11 +489,12 @@ impl Link {
     /// when it spoke (another provider, the daemon's environment unread): its next answer, or a
     /// read that finds the login, clears that; a read that changed (a remote broker since) takes
     /// it back too. A file mid-write or unreadable (Unknown, read again) changes neither.
-    pub fn set_creds(&mut self, c: Creds, again: crate::creds::Again, now: Instant) {
+    /// true: what she shows of her login changed (`creds`).
+    pub fn set_creds(&mut self, c: Creds, again: crate::creds::Again, now: Instant) -> bool {
         use crate::creds::Again;
         if self.creds_by == Said::Answer {
             self.creds_at = None;
-            return;
+            return false;
         }
         // A file mid-write or unreadable says nothing of the setup: whoever said Missing, it
         // stands and she reads again. Not what the daemon spoke over, nor a change under it.
@@ -455,13 +518,15 @@ impl Link {
             Again::Never => false,
         };
         self.creds_at = again.then_some(now + CREDS_EVERY);
-        if c != self.creds {
+        let changed = c != self.creds;
+        if changed {
             elog!("synaps-avatar: her model's credentials: {c:?}");
         }
         self.creds = c;
         if !keep {
             self.creds_by = Said::Read;
         }
+        changed
     }
 
     /// `model` (a token count's, when the daemon names one) is hers: none named, or hers without
@@ -487,6 +552,11 @@ impl Link {
         self.creds_at = None;
     }
 
+    /// The daemon's version, once it has said it (`0.12.0`).
+    pub fn daemon_version(&self) -> Option<&str> {
+        self.daemon_version.as_deref()
+    }
+
     /// Her maker's mark for the menu: `SYNAPS 0.12.0 · claude-opus-5` (the daemon's version and
     /// her session's model, without its provider). None until the daemon has said either.
     pub fn mark(&self) -> Option<String> {
@@ -510,6 +580,12 @@ impl Link {
         if p == self.opts.persona {
             return Vec::new();
         }
+        self.pick_persona(p, now)
+    }
+
+    /// The Settings page's MODEL: compared (and set) even when it is the persona already, as her
+    /// session may have moved off it (his TUI set another).
+    pub fn pick_persona(&mut self, p: Persona, now: Instant) -> Vec<Act> {
         self.opts.persona = p;
         self.persona_done = None;
         self.persona_step(now)
@@ -552,6 +628,7 @@ impl Link {
         self.prompts.clear();
         self.retry_at = None;
         self.persona_wait = 0;
+        self.persona_asked.clear();
     }
 
     /// The user's text (Enter): it goes out in Mirror, now or once the switch is done.
@@ -835,12 +912,12 @@ impl Link {
                     self.creds_at = Some(now);
                 }
                 self.view = Some(view);
-                self.persona_wait = self.persona_wait.saturating_sub(1);
+                self.persona_replied();
             }
             Event::Error { error: Error::SettingRefused { setting, reason, .. }, .. } => {
                 // Logged, never shown: she just keeps the session's own settings.
                 elog!("synaps-avatar: persona: {setting} not set: {reason}");
-                self.persona_wait = self.persona_wait.saturating_sub(1);
+                self.persona_replied();
             }
             Event::Reattaching { attach_seq, reason, .. } => {
                 elog!("synaps-avatar: session connection lost ({reason}); re-attaching");
@@ -869,6 +946,7 @@ impl Link {
                 self.switching = false;
                 self.mode = AttachMode::Observe;
                 self.persona_wait = 0;
+                self.persona_asked.clear();
                 self.restore_queued();
                 self.busy = false;
                 self.compacting = false;
@@ -1105,6 +1183,14 @@ impl Link {
         Vec::new()
     }
 
+    /// A `Set`'s reply: the last one in, the view is the daemon's alone again.
+    fn persona_replied(&mut self) {
+        self.persona_wait = self.persona_wait.saturating_sub(1);
+        if self.persona_wait == 0 {
+            self.persona_asked.clear();
+        }
+    }
+
     /// When the Mirror attach is no longer needed (turn done, nothing pending, field shut).
     fn downgrade_at(&self) -> Option<Instant> {
         let idle = self.mode == AttachMode::Mirror
@@ -1282,18 +1368,6 @@ pub enum Trouble {
 /// The command a no-brain line ends on, on a line of its own (the bubble draws it as a chip).
 pub const LOGIN_CMD: &str = "synaps login";
 
-/// Synaps' OAuth providers: the key it stores and names them by, the `--provider` that signs in
-/// (it takes the storage keys; `claude` for Anthropic), and what she calls them.
-const PROVIDERS: &[(&str, &str, &str)] = &[
-    ("anthropic", "claude", "Claude"),
-    ("openai-codex", "openai-codex", "Codex"),
-    ("xai-auth", "xai-auth", "Grok"),
-    ("kimi-code", "kimi-code", "Kimi"),
-    ("github-copilot", "github-copilot", "Copilot"),
-    ("google-gemini", "google-gemini", "Gemini"),
-    ("muse", "muse", "Muse"),
-];
-
 /// A model name she can put in a command: Ollama's characters only, and short (her line stays
 /// a bubble's).
 fn model_word(m: &str) -> Option<&str> {
@@ -1361,8 +1435,8 @@ impl Trouble {
 
     /// The command that signs in for this provider (`--provider` skips Synaps' picker).
     fn login_cmd(on: Option<&str>) -> String {
-        match PROVIDERS.iter().find(|p| Some(p.2) == on) {
-            Some((_, flag, _)) => format!("{LOGIN_CMD} --provider {flag}"),
+        match on.and_then(crate::provider::by_name) {
+            Some(p) => format!("{LOGIN_CMD} --provider {}", p.login),
             None => LOGIN_CMD.to_string(),
         }
     }
@@ -1430,10 +1504,11 @@ impl Trouble {
     }
 }
 
-/// A provider key as Synaps names it (`no credential configured for 'kimi-code'`), as she'd say it.
+/// A provider key as Synaps names it (`no credential configured for 'kimi-code'`), as she'd say it
+/// (`provider::ALL`: its accounts and API-key services).
 fn provider_name(key: &str) -> Option<&'static str> {
     let key = key.trim_matches(|c: char| !(c.is_ascii_alphanumeric() || c == '-'));
-    PROVIDERS.iter().find(|p| p.0 == key).map(|p| p.2)
+    crate::provider::by_id(key).filter(|p| p.kind != crate::provider::Kind::Local).map(|p| p.name)
 }
 
 /// A tool name for the tag: short and safe (never arguments).
@@ -1667,6 +1742,78 @@ mod tests {
         l.on_event(Event::Sessions(vec![meta(SID, Some("capri"))]), t0);
         l.attaching(1);
         assert!(on(&mut l, mine(1, AttachMode::Observe, None, Some("capri"), Some(&persona())), t0).is_empty());
+    }
+
+    /// MODEL on the Settings page shows the model she asked for until her session has it: while
+    /// it's on its way (the Mirror switch, the Set and its reply). If another client owns her
+    /// session's input it isn't set: the daemon's model stands (shown), and set_persona says so
+    /// by asking nothing.
+    #[test]
+    fn the_model_on_its_way_shows_until_it_is_in() {
+        let t0 = Instant::now();
+        let mut l = Link::new(Options { persona: persona(), ..opts() }, t0);
+        l.on_event(connected(), t0);
+        l.on_event(Event::Sessions(vec![meta(SID, Some("capri"))]), t0);
+        l.attaching(1);
+        let old = Persona { model: Some("claude-haiku-4-5-20251001".into()), ..persona() };
+        on(&mut l, mine(1, AttachMode::Observe, None, Some("capri"), Some(&old)), t0);
+        assert_eq!(l.model(), Some("claude-haiku-4-5-20251001"));
+        assert_eq!(l.model_on_way(), Some("anthropic/claude-sonnet-4-6"), "the Mirror switch on its way");
+        l.attaching(2);
+        let acts = on(&mut l, mine(2, AttachMode::Mirror, Some(1), Some("capri"), Some(&old)), t0);
+        assert!(matches!(acts.as_slice(), [Act::Set(_)]), "{acts:?}");
+        assert_eq!(l.model_on_way(), Some("anthropic/claude-sonnet-4-6"), "the Set sent, no reply yet");
+        l.on_event(applied(2, "model", &persona()), t0);
+        assert_eq!((l.model(), l.model_on_way()), (Some("anthropic/claude-sonnet-4-6"), None), "in");
+        // Another client owns the input: nothing asked, nothing on its way.
+        let mut l = Link::new(Options { persona: persona(), ..opts() }, t0);
+        l.on_event(connected(), t0);
+        l.on_event(Event::Sessions(vec![meta(SID, Some("capri"))]), t0);
+        l.attaching(1);
+        assert!(on(&mut l, mine(1, AttachMode::Observe, Some(7), Some("capri"), Some(&old)), t0).is_empty());
+        assert_eq!(l.model_on_way(), None);
+        let acts = l.set_persona(Persona { model: Some("claude-opus-5-5".into()), ..persona() }, t0);
+        assert!(acts.is_empty() && l.model_on_way().is_none(), "{acts:?}");
+        assert!(l.persona_blocked(), "it says another client has her input");
+        // The model it has already: nothing to set, and nothing blocked it.
+        assert!(l.pick_persona(old.clone(), t0).is_empty());
+        assert!(!l.persona_blocked());
+    }
+
+    /// Two MODEL picks within one round trip (A, B, A): B's Set is on its way, so A again is a
+    /// change and goes out after it; she ends on A. The same pick twice is one Set. A session his
+    /// TUI moved off her model gets it again on a pick (a reload with the persona as it was
+    /// leaves it).
+    #[test]
+    fn a_model_asked_back_before_its_reply_still_goes_out() {
+        let t0 = Instant::now();
+        let a = persona();
+        let b = Persona { model: Some("claude-opus-5-5".into()), ..persona() };
+        let set = |acts: &[Act], m: &str| matches!(acts, [Act::Set(s)] if *s == Setting::model(m));
+        let mut l = Link::new(Options { persona: a.clone(), ..opts() }, t0);
+        l.on_event(connected(), t0);
+        l.on_event(Event::Sessions(vec![meta(SID, Some("capri"))]), t0);
+        l.attaching(1);
+        assert!(on(&mut l, mine(1, AttachMode::Observe, None, Some("capri"), Some(&a)), t0).is_empty());
+        let acts = l.pick_persona(b.clone(), t0);
+        assert!(matches!(acts.as_slice(), [Act::Attach(_, AttachMode::Mirror)]), "{acts:?}");
+        l.attaching(2);
+        let acts = on(&mut l, mine(2, AttachMode::Mirror, Some(1), Some("capri"), Some(&a)), t0);
+        assert!(set(acts.as_slice(), "claude-opus-5-5"), "{acts:?}");
+        assert!(l.pick_persona(b.clone(), t0).is_empty(), "B again: on its way already");
+        let acts = l.pick_persona(a.clone(), t0);
+        assert!(set(acts.as_slice(), "anthropic/claude-sonnet-4-6"), "A again, before B's reply: {acts:?}");
+        l.on_event(applied(2, "model", &b), t0);
+        assert_eq!((l.model(), l.model_on_way()), (Some("claude-opus-5-5"), Some("anthropic/claude-sonnet-4-6")));
+        l.on_event(applied(2, "model", &a), t0);
+        assert_eq!((l.model(), l.model_on_way()), (Some("anthropic/claude-sonnet-4-6"), None), "she ends on A");
+        // His TUI moves her session to Haiku.
+        let haiku = Persona { model: Some("claude-haiku-4-5-20251001".into()), ..persona() };
+        l.on_event(applied(2, "model", &haiku), t0);
+        assert!(l.set_persona(a.clone(), t0).is_empty(), "a reload, the persona unchanged: his choice stands");
+        let acts = l.pick_persona(a.clone(), t0);
+        assert!(set(acts.as_slice(), "anthropic/claude-sonnet-4-6"), "MODEL picks it: {acts:?}");
+        assert!(!l.persona_blocked());
     }
 
     /// The hard guard: never a session she rides with --session (even named like her), never
@@ -1996,7 +2143,7 @@ mod tests {
             ("Auth error: No API key or OAuth token found. Run `synaps login` to authenticate.", CLAUDE, Some(Trouble::NoBrain { on: Some("Claude") })),
             // v0.12.0, a fresh install's first message (measured in a container, never logged in).
             ("Auth error: Token refresh failed for account 'default': credential error: No credentials for anthropic at /home/chooms/.synaps-cli/auth.json. Run `synaps login --provider anthropic --account default`. Or check auth.remote_endpoint / broker reachability.", CLAUDE, Some(Trouble::NoBrain { on: Some("Claude") })),
-            ("request failed: credential error: No credentials for openai-codex at /home/user/.synaps/auth.json. Run `synaps login`.", None, Some(Trouble::NoBrain { on: Some("Codex") })),
+            ("request failed: credential error: No credentials for openai-codex at /home/user/.synaps/auth.json. Run `synaps login`.", None, Some(Trouble::NoBrain { on: Some("ChatGPT") })),
             ("Token refresh failed: no credential configured for 'anthropic'. Run `synaps login` to add one.. Run `synaps login` to re-authenticate, or check auth.remote_endpoint / broker reachability.", CLAUDE, Some(Trouble::NoBrain { on: Some("Claude") })),
             ("Config error: openai provider: no credential configured for 'kimi-code'. Run `synaps login` to add one.", None, Some(Trouble::NoBrain { on: Some("Kimi") })),
             ("API error: openai request failed: no credential configured for 'kimi-code'. Run `synaps login` to add one.", None, Some(Trouble::NoBrain { on: Some("Kimi") })),
@@ -2105,7 +2252,7 @@ mod tests {
         let q = l.creds_due(t0).expect("due at attach");
         assert_eq!(q, crate::creds::Query { model: "anthropic/claude-haiku-4-5".into(), profile: None, pid: Some(1) });
         assert_eq!(l.body(t0).label, None);
-        l.set_creds(Creds::Missing(Some("Claude")), Again::Yes, t0);
+        assert!(l.set_creds(Creds::Missing(Some("Claude")), Again::Yes, t0), "news for an open Settings page");
         let b = l.body(t0);
         assert_eq!((b.mood, b.label.as_deref(), b.trouble), (Mood::Idle, Some("NO BRAIN YET"), None), "a tag, not a line he didn't ask for");
         let sleepy = l.body(t0 + Duration::from_secs(3600));
@@ -2113,9 +2260,10 @@ mod tests {
         assert_eq!(l.creds_due(t0), None);
         assert!(l.deadline(t0).is_some_and(|d| d <= t0 + CREDS_EVERY), "woken for the next read");
         assert!(l.creds_due(t0 + CREDS_EVERY).is_some());
-        // He logged in (a terminal): the next read finds it.
-        l.set_creds(Creds::Have, Again::Never, t0 + CREDS_EVERY);
-        assert_eq!(l.body(t0 + CREDS_EVERY).label, None, "ONLINE again");
+        assert!(!l.set_creds(Creds::Missing(Some("Claude")), Again::Yes, t0 + CREDS_EVERY), "the same: no news");
+        // He logged in (a terminal): the next read finds it, and the page hears of it.
+        assert!(l.set_creds(Creds::Have, Again::Never, t0 + CREDS_EVERY * 2));
+        assert_eq!(l.body(t0 + CREDS_EVERY * 2).label, None, "ONLINE again");
         assert_eq!(l.creds_due(t0 + CREDS_EVERY * 10), None, "no more reads");
     }
 
@@ -2130,7 +2278,7 @@ mod tests {
         let t1 = t0 + TROUBLE_FOR;
         assert_eq!(l.body(t1).label.as_deref(), Some("NO BRAIN YET"));
         assert!(l.creds_due(t0 + CREDS_EVERY).is_some());
-        l.set_creds(Creds::Unknown, Again::Yes, t0 + CREDS_EVERY);
+        assert!(!l.set_creds(Creds::Unknown, Again::Yes, t0 + CREDS_EVERY), "kept: no news");
         assert_eq!(l.body(t1).label.as_deref(), Some("NO BRAIN YET"), "an Unknown read doesn't undo the daemon's word");
         assert!(l.creds_due(t0 + CREDS_EVERY * 2).is_some(), "a file mid-write: read again");
         l.set_creds(Creds::Unknown, Again::IfMissing, t0 + CREDS_EVERY * 2);
@@ -2205,13 +2353,13 @@ mod tests {
         d
     }
 
-    fn no_env(_: &str) -> Option<String> {
-        None
+    fn no_env(_: &str) -> bool {
+        false
     }
 
     /// The read `view.rs` makes when one is due, of `base` (`env`: hers and the daemon's;
     /// `daemon_read`: false on Windows). False: none was due.
-    fn read(l: &mut Link, base: &std::path::Path, env: &dyn Fn(&str) -> Option<String>, daemon_read: bool, t: Instant) -> bool {
+    fn read(l: &mut Link, base: &std::path::Path, env: &dyn Fn(&str) -> bool, daemon_read: bool, t: Instant) -> bool {
         let Some(q) = l.creds_due(t) else { return false };
         let (c, again) = crate::creds::check_at(&q.model, base, q.profile.as_deref(), env, daemon_read);
         l.set_creds(c, again, t);
@@ -2255,7 +2403,7 @@ mod tests {
         let mut l = live_link(t0);
         assert!(read(&mut l, &d, &no_env, true, t0));
         assert_eq!(l.body(t0).label.as_deref(), Some("NO BRAIN YET"));
-        let broker = |k: &str| (k == "SYNAPS_AUTH_ENDPOINT").then(|| "https://broker.example".to_string());
+        let broker = |k: &str| k == "SYNAPS_AUTH_ENDPOINT";
         assert!(read(&mut l, &d, &broker, true, t1));
         assert_eq!(l.body(t1).label, None);
         std::fs::remove_dir_all(&d).ok();
@@ -2288,7 +2436,7 @@ mod tests {
             assert_eq!(l.creds_due(t2 + CREDS_EVERY * 10), None);
             std::fs::remove_dir_all(&d).ok();
         }
-        // Another provider: every read can't tell, the same as when it spoke. It stands.
+        // Another provider: no Kimi login on file, every read says so, as the daemon did. It stands.
         let d = creds_dir("daemon-kimi");
         let t0 = Instant::now();
         let mut l = live_link(t0);

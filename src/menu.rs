@@ -120,13 +120,15 @@ pub struct State {
     /// Why ATTENTION's last pick didn't stick (`line::MenuSave::says`: the write refused, or
     /// hanging); None: it did, or none was made.
     pub unsaved: Option<&'static str>,
+    /// Her model has no login (NO BRAIN YET): SETTINGS reads SET UP MY BRAIN and opens on Brain.
+    pub no_brain: bool,
 }
 
 /// By hand: `Attention` (settings.rs) has no `Hash`; its key stands in.
 impl std::hash::Hash for State {
     fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
         (self.quitting, self.teleporting, self.held, self.intro, self.hidden).hash(h);
-        (self.dnd, self.attention.map(Attention::key), self.handsfree, self.quit_armed, self.unsaved).hash(h);
+        (self.dnd, self.attention.map(Attention::key), self.handsfree, self.quit_armed, self.unsaved, self.no_brain).hash(h);
     }
 }
 
@@ -192,7 +194,7 @@ pub fn rows(s: &State) -> Vec<Row> {
     }
     v.push(Row::new(Item::Copy, "COPY LAST REPLY"));
     v.push(Row { lead: s.hidden, ..Row::new(Item::ShowHide, if s.hidden { "SHOW" } else { "HIDE" }) });
-    v.push(Row::new(Item::Settings, "SETTINGS"));
+    v.push(Row::new(Item::Settings, if s.no_brain { "SET UP MY BRAIN" } else { "SETTINGS" }));
     let quit = if s.quit_armed { "QUIT? CLICK AGAIN" } else { "QUIT" };
     v.push(Row { rule: true, armed: s.quit_armed, ..Row::new(Item::Quit, quit) });
     for r in &mut v {
@@ -253,6 +255,10 @@ mod tests {
         assert_eq!(labels(&State::default()), ["RESET POSITION", "COPY LAST REPLY", "HIDE", "SETTINGS", "QUIT"]);
         let on = State { dnd: Some(true), attention: Some(Attention::HangOnly), handsfree: Some(true), quit_armed: true, ..full };
         assert_eq!(labels(&on), ["RESET POSITION", "DND OFF", "ATTENTION: HANG ONLY", "END HANDS-FREE", "COPY LAST REPLY", "HIDE", "SETTINGS", "QUIT? CLICK AGAIN"]);
+        // No brain: SETTINGS is the way to one, in its place.
+        let none = State { no_brain: true, ..full };
+        assert_eq!(labels(&none), ["RESET POSITION", "DND 1 HOUR", "ATTENTION: MIX", "HANDS-FREE TALK", "COPY LAST REPLY", "HIDE", "SET UP MY BRAIN", "QUIT"]);
+        assert_eq!(rows(&none)[6].item, Item::Settings);
         let r = rows(&on);
         let quit = r.last().unwrap();
         assert!(quit.rule && quit.armed, "QUIT sits under a rule, armed after one click");

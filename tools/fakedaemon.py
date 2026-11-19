@@ -15,6 +15,8 @@ turn with trigger T. `resolve`: the pending prompts are answered elsewhere (they
 `nobrain`: every submit fails as a Synaps with no model credentials does (its exact error text);
 `fail TEXT`: every submit fails with TEXT; `brain`: replies again.
 FAKE_DAEMON_VERSION and FAKE_MODEL set what the Welcome and the attach say (default 0.0.0-fake, fake).
+A `set` (her persona, `[session] model`) is applied to the session's view and answered as the daemon
+does (`setting_changed`, ok, the new view): her model shows as set.
 FAKE_HISTORY=FILE: the attached chat's messages instead of the fixture's (a JSON list of api messages).
 Commands the avatar sends are printed; answer values are never printed (only their length).
 
@@ -38,6 +40,7 @@ if os.environ.get("FAKE_HISTORY"):
     ATTACHED["conversation"]["messages_len"] = len(_msgs)
     ATTACHED["replay"] = []
 MODEL = os.environ.get("FAKE_MODEL", "fake")
+VIEW = dict(ATTACHED.get("view") or {}, **({"model": MODEL} if "FAKE_MODEL" in os.environ else {}))
 WELCOME = {"type": "welcome", "protocol_version": 3, "daemon_version": os.environ.get("FAKE_DAEMON_VERSION", "0.0.0-fake"), "pid": os.getpid(), "profile": None,
            "sessions": [{"id": SID, "model": MODEL, "lifecycle": "live", "name": "capri"}],
            "progressive_tool_disclosure": False, "generation": 1, "features": []}
@@ -45,6 +48,7 @@ attached = []          # live session connections (socket, lock)
 pending = {}           # prompt id -> request (in every Attached snapshot until answered)
 seq = [100]
 client_id = [10]
+owner = [None]         # the input owner: the last Mirror attach, as the daemon hands it
 lock = threading.Lock()
 refuse_next = [False]
 fail_with = [None]     # every submit fails with this error text (`nobrain`, `fail TEXT`)
@@ -137,6 +141,7 @@ def event(ev):
 
 def serve(conn):
     wl = threading.Lock()
+    mine = set()           # this connection's client ids (its ownership goes with it)
     f = conn.makefile("r", encoding="utf-8")
     try:
         hello = f.readline()
@@ -154,15 +159,20 @@ def serve(conn):
                 with lock:
                     client_id[0] += 1
                     me = client_id[0]
+                    mine.add(me)
                 log(f"attach {a.get('attach')} {a.get('session_id', '')} mode={mode} -> client {me}")
                 if os.environ.get("FAKE_DEBUG"):
                     log("frame keys", sorted(fr.keys()))
                 v = dict(ATTACHED)
                 v["client"] = me
                 v["meta"] = dict(v["meta"], name="capri")
-                if "FAKE_MODEL" in os.environ:
-                    v["view"] = dict(v.get("view") or {}, model=MODEL)
                 with lock:
+                    if owner[0] in mine:            # this connection's last client is gone
+                        owner[0] = None
+                    if mode == "mirror":
+                        owner[0] = me
+                    v["input_owner"] = owner[0]
+                    v["view"] = dict(VIEW)
                     v["pending_prompts"] = list(pending.values())
                 send(conn, wl, v)
                 with lock:
@@ -175,6 +185,19 @@ def serve(conn):
                     with lock:
                         pending.pop(c.get("prompt_id"), None)
                     event({"ev": "prompt_resolved", "prompt_id": c.get("prompt_id")})
+                elif c.get("cmd") == "set":
+                    st = c.get("setting") or {}
+                    name = st.get("setting", "")
+                    log(f"cmd set {name}" + (f" {st.get('model')}" if name == "model" else ""))
+                    with lock:
+                        if name == "model":
+                            VIEW["model"] = st.get("model")
+                        elif name == "system_prompt":
+                            VIEW["system_prompt"] = st.get("text")
+                        elif name == "reasoning_level":
+                            VIEW["reasoning_level"] = st.get("level")
+                        view = dict(VIEW)
+                    event({"ev": "setting_changed", "applied": {"id": c.get("id"), "setting": name, "ok": True, "view": view}})
                 elif c.get("cmd") in ("submit", "steer"):
                     log(f"cmd {c.get('cmd')} <{len(c.get('text', ''))} chars>")
                     if refuse_next[0]:
@@ -198,6 +221,8 @@ def serve(conn):
     finally:
         with lock:
             attached[:] = [(c, w) for c, w in attached if c is not conn]
+            if owner[0] in mine:
+                owner[0] = None
         conn.close()
 
 

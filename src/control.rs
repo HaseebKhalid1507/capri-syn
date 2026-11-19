@@ -107,8 +107,9 @@ pub enum Command {
     Brain(BrainCmd),
     /// Re-read ~/.config/synaps-avatar/settings.toml.
     SettingsReload,
-    /// The Line on her Settings (it opens), or back to chat (`settings open|close`).
-    SettingsPage(bool),
+    /// The Line on her Settings (it opens), on Settings ▸ Brain, or back to chat
+    /// (`settings open|open brain|close`): the page's key, `settings`, `brain` or `chat`.
+    SettingsPage(&'static str),
     /// A synthetic tap on her head (headpat) or body, as a click would.
     Tap { head: bool },
     /// A scripted drag (the real pointer is never touched): ops in order.
@@ -453,9 +454,10 @@ impl Command {
             "brain" => Command::Brain(parse_brain(rest)?),
             "settings" => match rest {
                 "reload" => Command::SettingsReload,
-                "open" => Command::SettingsPage(true),
-                "close" => Command::SettingsPage(false),
-                _ => bail!("usage: settings reload|open|close"),
+                "open" => Command::SettingsPage("settings"),
+                "open brain" => Command::SettingsPage("brain"),
+                "close" => Command::SettingsPage("chat"),
+                _ => bail!("usage: settings reload|open [brain]|close"),
             },
             "tap" => match rest {
                 "head" => Command::Tap { head: true },
@@ -588,8 +590,10 @@ mod tests {
         assert!(Command::parse("brain fly").is_err());
         assert!(matches!(Command::parse("tap head").unwrap(), Command::Tap { head: true }));
         assert!(matches!(Command::parse("settings reload").unwrap(), Command::SettingsReload));
-        assert!(matches!(Command::parse("settings open").unwrap(), Command::SettingsPage(true)));
-        assert!(matches!(Command::parse("settings close").unwrap(), Command::SettingsPage(false)));
+        assert!(matches!(Command::parse("settings open").unwrap(), Command::SettingsPage("settings")));
+        assert!(matches!(Command::parse("settings open brain").unwrap(), Command::SettingsPage("brain")));
+        assert!(matches!(Command::parse("settings close").unwrap(), Command::SettingsPage("chat")));
+        assert!(Command::parse("settings open models").is_err());
         assert!(Command::parse("settings sideways").is_err());
         assert!(matches!(Command::parse("talk toggle").unwrap(), Command::TalkToggle));
         assert!(matches!(Command::parse("talk tap").unwrap(), Command::TalkTap));
