@@ -199,7 +199,8 @@ struct IntroRaw {
 /// "hey capri" (default true: while on, a mic stream stays open, shown on her tag; `false` turns it off); `wake_sensitivity`:
 /// 0.1..0.9 (default 0.5: tuned to ~0.5 false starts an hour on synthetic voices); `wake_handsfree`: "hey capri"
 /// starts a hands-free conversation (default true, with `handsfree` on; its request is the first turn; quiet for
-/// `handsfree_timeout`, it ends and the wake word listens again); false: one turn, as before.
+/// `handsfree_timeout`, it ends and the wake word listens again); false: one turn, as before. `vocab`: words
+/// Whisper should spell your way (names, machines, jargon), appended to the sidecar's generic prompt.
 #[derive(Clone, Debug, PartialEq)]
 pub struct VoiceSettings {
     pub enabled: bool,
@@ -225,7 +226,17 @@ pub struct VoiceSettings {
     /// Windows: her summon key talks while held (opt-in; a tap opens the Line either way). Linux:
     /// unused (his desktop's binding sends `talk press` and `talk release` itself).
     pub hold_to_talk: bool,
+    /// `[voice] vocab`: the user's own words for Whisper's recognition prompt, after the sidecar's
+    /// generic `VOCAB` (Capri, choom, …). Empty by default; capped by `VOCAB_*` below.
+    pub vocab: Vec<String>,
 }
+
+/// `[voice] vocab` caps, the same as the sidecar's (`VOCAB_MAX_WORDS, VOCAB_WORD_CHARS,
+/// VOCAB_USER_CHARS`): words or names, characters in one, characters in all (joined by ", ").
+/// Whisper's prompt is short (224 tokens) and a long one echoes into what it hears.
+pub const VOCAB_MAX: usize = 16;
+pub const VOCAB_WORD_CHARS: usize = 32;
+pub const VOCAB_CHARS: usize = 200;
 
 /// Her voice (Haseeb's picks, LOCKED 13 + 14, then r26 "R-A"): W3, the bright blend (timbre af_heart/
 /// af_bella/af_jessica; prosody af_heart/af_jessica pushed away from af_sarah), pitched to a ~306 Hz
@@ -237,7 +248,7 @@ pub const SPEED: f32 = 1.2987;
 
 impl Default for VoiceSettings {
     fn default() -> Self {
-        VoiceSettings { enabled: false, stt_model: "small.en".into(), voice: VOICE.into(), speed: SPEED, pace: "stretch".into(), flow: "emphasis".into(), duck: "duck".into(), speak_unprompted: true, key: 'c', silence_s: 1.0, toggle_key: 'c', handsfree: true, handsfree_timeout: 60, handsfree_max: 30, echo: "auto".into(), wake_word: true, wake_sensitivity: 0.5, wake_handsfree: true, hold_to_talk: false }
+        VoiceSettings { enabled: false, stt_model: "small.en".into(), voice: VOICE.into(), speed: SPEED, pace: "stretch".into(), flow: "emphasis".into(), duck: "duck".into(), speak_unprompted: true, key: 'c', silence_s: 1.0, toggle_key: 'c', handsfree: true, handsfree_timeout: 60, handsfree_max: 30, echo: "auto".into(), wake_word: true, wake_sensitivity: 0.5, wake_handsfree: true, hold_to_talk: false, vocab: Vec::new() }
     }
 }
 
@@ -263,6 +274,7 @@ struct VoiceRaw {
     wake_sensitivity: Option<f64>,
     wake_handsfree: Option<bool>,
     hold_to_talk: Option<bool>,
+    vocab: Option<Vec<String>>,
 }
 
 /// `[mirror]`: she faces where she goes. `drag`: turn while dragged (and flung), looking back
@@ -630,6 +642,18 @@ impl Settings {
             }
             if let Some(h) = v.wake_handsfree {
                 voice.wake_handsfree = h;
+            }
+            if let Some(words) = v.vocab {
+                anyhow::ensure!(words.len() <= VOCAB_MAX, "voice.vocab takes at most {VOCAB_MAX} words or names");
+                let words: Vec<String> = words.iter().map(|w| w.split_whitespace().collect::<Vec<_>>().join(" ")).collect();
+                for w in &words {
+                    anyhow::ensure!(
+                        !w.is_empty() && w.chars().count() <= VOCAB_WORD_CHARS && !w.contains(',') && !w.chars().any(char::is_control),
+                        "voice.vocab: each entry is one word or name, 1..{VOCAB_WORD_CHARS} characters, no commas"
+                    );
+                }
+                anyhow::ensure!(words.join(", ").chars().count() <= VOCAB_CHARS, "voice.vocab: at most {VOCAB_CHARS} characters in all");
+                voice.vocab = words;
             }
         }
         let mut intro = IntroSettings::default();
@@ -1242,6 +1266,31 @@ mod tests {
         let has = |want: String| py.lines().any(|l| l.trim_end() == want);
         assert!(has(format!("VOICE = '{VOICE}'")), "tools/capri-voice's VOICE is settings::VOICE");
         assert!(has(format!("SPEED, FLOW, PACE = {SPEED}, '{}', '{}'", d.flow, d.pace)), "and its SPEED, FLOW, PACE");
+        assert!(
+            py.lines().any(|l| l.starts_with(&format!("VOCAB_MAX_WORDS, VOCAB_WORD_CHARS, VOCAB_USER_CHARS = {VOCAB_MAX}, {VOCAB_WORD_CHARS}, {VOCAB_CHARS} "))),
+            "and its [voice] vocab caps"
+        );
+    }
+
+    /// `[voice] vocab`: the user's words for Whisper, cleaned and capped; the sidecar's own prompt is
+    /// generic (no one's names or machines).
+    #[test]
+    fn voice_vocab() {
+        assert!(Settings::parse("").unwrap().voice.vocab.is_empty());
+        let v = Settings::parse("[voice]\nvocab = [\"Lynx\", \" polish-e \", \"Night   City\"]\n").unwrap().voice;
+        assert_eq!(v.vocab, ["Lynx", "polish-e", "Night City"]);
+        assert!(Settings::parse("[voice]\nvocab = []\n").unwrap().voice.vocab.is_empty());
+        let many = format!("[{}]", (0..=VOCAB_MAX).map(|i| format!("\"w{i}\"")).collect::<Vec<_>>().join(", "));
+        let long = format!("[\"{}\"]", "x".repeat(VOCAB_WORD_CHARS + 1));
+        let total = format!("[{}]", (0..VOCAB_MAX).map(|_| format!("\"{}\"", "y".repeat(VOCAB_WORD_CHARS))).collect::<Vec<_>>().join(", "));
+        for bad in ["\"Lynx\"", "[\"\"]", "[\"  \"]", "[\"a, b\"]", "[\"bell\\u0007\"]", "[1]", many.as_str(), long.as_str(), total.as_str()] {
+            assert!(Settings::parse(&format!("[voice]\nvocab = {bad}\n")).is_err(), "vocab = {bad}");
+        }
+        let py = include_str!("../tools/capri-voice");
+        let vocab = py.lines().find(|l| l.starts_with("VOCAB = ")).expect("tools/capri-voice has a VOCAB").to_lowercase();
+        for w in ["haseeb", "bella", "avante", "parabellum", "jawz", "lynx", "spike"] {
+            assert!(!vocab.contains(w), "the sidecar's default prompt names `{w}`");
+        }
     }
 
     #[test]

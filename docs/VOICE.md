@@ -27,6 +27,7 @@ for speech. Setup: `tools/capri-voice-setup`, then `tools/systemd/capri-voice.se
 | `wake_sensitivity` | `0.5` | 0.1 to 0.9: higher wakes more easily (and falsely more often) |
 | `wake_handsfree` | `true` | "Hey Capri" starts hands-free (with `handsfree` on): quiet for `handsfree_timeout`, it ends and the wake word listens again. `false`: one turn, as before |
 | `echo` | `"auto"` | `"auto"` (the sink says headphones or speakers), `"headphones"` (talking over her stops her) or `"speakers"` (half-duplex) |
+| `vocab` | `[]` | your own words for speech-to-text: names, machines, jargon (`["Lynx", "polish-e", "devbox"]`). Whisper's recognition prompt is `Capri, choom, preem, Night City, Synaps, avatarctl`, and these go after it. Up to 16 entries, each one word or name of at most 32 characters with no commas, 200 characters in all |
 
 `avatarctl settings reload` re-sends changed voice settings to a connected sidecar.
 
@@ -277,7 +278,7 @@ thresholds) was fitted on stock synthetic voices only (Kokoro packs, espeak-ng),
     at speed 1.3). These hold in every mode: hold, toggle, wake and hands-free;
   - sound tags Whisper writes are cut first: `[Music]`, `(coughs)`, `*cough*` (letters between the stars only:
     `5 * 3 * 2` stays);
-  - three or more words that are all from the recognition prompt (Capri, spike, lynx, …).
+  - three or more words that are all from the recognition prompt (Capri, choom, …, and your `vocab`).
 - Silence, breaths, coughs, clicks and hum never reach Whisper: Silero scores them far under 0.70 (stock
   synthetic ones at −45 to −18 dBFS peak at 0.26). So a filler Whisper invents needs some real-looking speech.
 - A drop is logged by length and milliseconds of speech, never the words or the audio. Each heard or dropped

@@ -185,6 +185,7 @@ value rejects the whole file (the previous values stay). `avatarctl settings rel
 | `[voice] voice` | a stock Kokoro blend | a Kokoro voice or a blend (`"af_bella:0.6,af_nicole:0.4"`); `+glitch` adds the trace |
 | `[voice] speed` | `1.2987` (1 / 0.77, her pace) | 0.5..2 |
 | `[voice] duck` | `"duck"` | other audio while she listens or speaks: `"duck"` (PipeWire, −18 dB), `"pause"` (MPRIS) or `"off"` |
+| `[voice] vocab` | `[]` | your own words for speech-to-text (names, machines, jargon), after her generic prompt; up to 16, one word or name each (≤ 32 characters, no commas), 200 characters in all |
 | `[voice] key` | `"c"` | the talk key's letter, so an X auto-repeat isn't taken for a release. Match your binding |
 | `[voice] wake_word` | `true` | "Hey Capri" starts a hands-free conversation. While on (with voice on) one mic stream stays open, shown on her tag. The rest of `[voice]` (toggle, hands-free, echo, pace): [VOICE.md](VOICE.md) |
 | `[voice] hold_to_talk` | `false` | Windows: her summon key (Win+Alt+C) talks while held; a tap opens the Line either way. Linux: unused (the binding sends `talk press` / `talk release`) |

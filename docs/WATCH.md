@@ -5,50 +5,76 @@ stuck on an approval, a failed unit, a nearly full disk. It's one small stdlib-P
 (a systemd `--user` unit). For each new event it writes ONE short line into her session:
 
 ```
-[watch] ci_failed@bella: capri-syn main: ci failed on 09b138d (https://github.com/HaseebKhalid1507/capri-syn/actions/runs/43671709347)
+[watch] ci_failed@desk: capri-syn main: ci failed on 09b138d (https://github.com/you/capri-syn/actions/runs/43671709347)
 ```
 
 She answers like she answers anything else, in a line, and offers the obvious next step. Her persona has a
-paragraph for `[watch]` lines (`packs/capri/persona.md`): one line, no acting on anything risky without him.
+paragraph for `[watch]` lines (`packs/capri/persona.md`): one line, no acting on anything risky without your yes.
 With voice on, the voice PR speaks replies to events (never over music).
 
 ## Machines
 
-| | bella (`role = "bella"`) | avante (`role = "avante"`) |
+| | `role = "local"` (the default): the machine Capri lives on | `role = "remote"`: any other machine |
 |---|---|---|
-| watches | GitHub, bella's daemon, units, disk (+ battery, GPU, calendar when on) | avante's daemon (`synaps-dev`), units, disk, the Jawz backup |
-| delivers | `synaps send --session capri --source watch:<event> -- <line>` | the same command on bella, over ssh (BatchMode, ConnectTimeout 5) |
+| watches | GitHub (`[github] repos`), this daemon, units, disk (+ battery, GPU, calendar, a backup unit when set) | this daemon (`synaps`, its CLI name here), units, disk, a backup unit when set |
+| delivers | `synaps send --session capri --source watch:<event> -- <line>` | the same command on her machine (`[deliver] ssh_host`, required), over ssh (BatchMode, ConnectTimeout 5) |
 
-The ssh transport ships the argv base64-encoded in a Python script on stdin (`ssh bella python3 -`). No
-remote shell parses the line, so quotes, `$( )` and the like in a PR title arrive unchanged. bella's login
-shell is fish. `[deliver] transport = "command"` takes any argv with `{source}` `{text}` `{session}`, so
-agent-comms can replace ssh later without code changes.
+The role and the transport come from `watch.toml` only. The hostname never picks them. It's only the
+default label in event lines (`host = ""`: `ci_failed@<short hostname>`); set `host` for a nicer name.
+With no file at all, the watcher runs as `local`: it delivers on this machine and watches no GitHub repos
+until you list some.
 
-The role comes from the hostname when it isn't set (bella/parabellum → bella, else avante).
+The ssh transport ships the argv base64-encoded in a Python script on stdin (`ssh <ssh_host> python3 -`). No
+remote shell parses the line, so quotes, `$( )` and the like in a PR title arrive unchanged, whatever the
+login shell (fish too). `[deliver] transport = "command"` takes any argv with `{source}` `{text}` `{session}`,
+so another channel can replace ssh without code changes.
+
+Two machines, for example: her desktop runs it with the defaults plus your repos,
+
+```toml
+# her machine: ~/.config/synaps-avatar/watch.toml
+host = "desk"
+[github]
+repos = ["you/capri-syn", "you/other-repo"]
+```
+
+and a build box sends its own events to her over ssh:
+
+```toml
+# the other machine: ~/.config/synaps-avatar/watch.toml
+role = "remote"
+host = "buildbox"
+[deliver]
+ssh_host = "desk"          # an ssh host or ~/.ssh/config alias that reaches her machine without a prompt
+```
 
 ## Events
 
 | event | default | source | fires when |
 |---|---|---|---|
-| `ci_failed` | **on** | `gh run list` (each branch in `branches`, default main) + `gh pr list` (his open PRs) on `[github] repos` | a workflow's last completed run on main failed, or a check on one of his open PRs failed |
+| `ci_failed` | **on** | `gh run list` (each branch in `branches`, default main) + `gh pr list` (your open PRs) on `[github] repos` | a workflow's last completed run on main failed, or a check on one of your open PRs failed |
 | `approval_waiting` | **on** | `synaps daemon sessions --json` (`awaiting_input`) | a session has waited on an approval for 30 s (`after_s`) |
 | `session_error` | **on** | the listing + the session's journal + the daemon log | a turn ended without a reply: an error, or an abort |
 | `unit_failed` | **on** | `systemctl [--user] list-units --state=failed` | a unit failed. Noise filter (`ignore`, globs): dunst, xdg portals, `run-*`, `probe-*`, and every transient (systemd-run) unit |
 | `disk_low` | **on** | statvfs on `/` and `/home` (one line per filesystem) | under 10 % OR under 20 GB free |
-| `backup_failed` | **on** | `systemctl --user show jawz-backup-local` + its log | the last run exited non-zero, or logged ERROR lines (avante; nothing on a machine without the unit) |
+| `backup_failed` | **on**, once `unit` is set | `systemctl --user show <unit>` + its `log` (optional) | the last run exited non-zero, or logged ERROR lines since the last `log_start` line (nothing until a unit is named, or on a machine without it) |
 | `pr_opened` | off | `gh pr list` | a new open PR in a watched repo (any author) |
 | `pr_merged` | off | `gh pr list --state merged` | a PR merged |
-| `review_requested` | off | `gh search prs --review-requested=@me` | someone asks for his review |
-| `long_turn` | off | the listing (`busy`, `state_since`) + her avatar | a turn of 10 min or more (`min_s`) finished while he's away (her avatar says away, or idle for 5 min) |
+| `review_requested` | off | `gh search prs --review-requested=@me` | someone asks for your review |
+| `long_turn` | off | the listing (`busy`, `state_since`) + her avatar | a turn of 10 min or more (`min_s`) finished while you're away (her avatar says away, or idle for 5 min) |
 | `release` | off | `gh release list` | a release published |
 | `battery_low` | off | `/sys/class/power_supply/BAT*` | discharging below 15 % |
 | `gpu_hot` | off | `nvidia-smi` | 85 °C or more |
-| `calendar` | off | `~/Jawz/data/calendar.db` (read-only) | a timed event starts within 10 min |
+| `calendar` | off | `db`: a SQLite calendar, read-only (below) | a timed event starts within 10 min |
 
 A one-shot event (opened, merged, release, a turn's end, calendar) learns what already exists on its first
 pass and fires only for what's new. A condition (CI failing, unit failed, disk low, approval waiting, backup)
 fires when it starts holding, and again only after it cleared. capri-syn's main CI, which fails on every
 push while its secret is missing, therefore fires once.
+
+The calendar is read from two tables, dates and times in UTC: `events` (`id`, `title`, `date`, `time`,
+`recurring_pattern`) for one-off events and `event_instances` (`event_id`, `override_title`,
+`occurrence_date`, `occurrence_time`, `status = 'active'`) for recurring ones.
 
 ### Sessions: what 0.11.1 exposes
 
@@ -72,7 +98,8 @@ so her answering an event can't make another event.
   out as one digest (`--source watch:digest`, a header line plus up to 10 event lines).
 - **Wake cap:** `max_per_hour = 6` deliveries per rolling hour. The rest wait and arrive together.
 - **Her DND:** while it's on (DND 1 HOUR in her menu), events wait. The watcher reads it from the avatar's
-  control socket (`brain state`, the socket `capri-ctl` uses). On avante that check runs on bella over ssh.
+  control socket (`brain state`, the socket `capri-ctl` uses). On a `remote` machine that check runs on her
+  machine over ssh.
 - **Music:** `music = "defer"` waits until it stops, `"drop"` drops, `"ignore"` sends anyway. "Playing" is
   her music mode (MPRIS, `[music] ignore` honoured). Without her avatar running it falls back to `playerctl`.
 - **Quiet hours:** `quiet_hours = "23:00-08:00"` holds events. Off by default.
@@ -83,7 +110,7 @@ so her answering an event can't make another event.
 - **Lines:** built only from structured fields (repo, PR number and title, unit name, numbers). Titles are cut
   at 50 characters and a line at 400. Control characters are stripped and anything shaped like a token is
   redacted. No log text, no environment.
-- **Delivery failure** (bella asleep, ssh down): kept, retried every 60 s, dropped when stale.
+- **Delivery failure** (her machine asleep, ssh down): kept, retried every 60 s, dropped when stale.
 
 ## Running it
 

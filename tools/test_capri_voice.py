@@ -6,7 +6,7 @@ crash repair on fake sessions, the call check's reading of the privacy store, an
 the sidecar wires it all in. What needs a real desktop is [VM] (docs/WINDOWS.md).
 
 python3 tools/test_capri_voice.py   (needs numpy; on Windows also sounddevice, for the smoke checks)"""
-import atexit, collections, importlib.machinery, importlib.util, io, json, os, shutil, socket, sys, tempfile, threading, time, unittest
+import atexit, collections, importlib.machinery, importlib.util, io, json, os, shutil, socket, sys, tempfile, threading, time, types, unittest
 from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 from pathlib import Path
@@ -47,7 +47,7 @@ class Sidecar(unittest.TestCase):
         with redirect_stdout(out), redirect_stderr(io.StringIO()):
             CV.selftest()
         text = out.getvalue()
-        for part in ('parsing ok', 'plain Kokoro fallback ok', 'unprompted gate ok', 'junk filter ok', 'endpointer ok', 'hands-free helpers ok',
+        for part in ('parsing ok', 'plain Kokoro fallback ok', 'unprompted gate ok', 'junk filter ok', 'vocab ok', 'endpointer ok', 'hands-free helpers ok',
                      'wake word phrase check ok', 'no models, skipping the graph checks'):
             self.assertIn(part, text)
         self.assertIn('duck rules: Windows' if WIN else 'duck rules ok', text)
@@ -167,6 +167,51 @@ class FakePlayer:
 
     def kill(self):
         self.killed = True
+
+
+class Vocab(unittest.TestCase):
+    """`[voice] vocab` in the config op: appended to Whisper's prompt, kept across a model change."""
+
+    def voice(self):
+        v = object.__new__(CV.Voice)
+        v.cfg = {'stt_model': 'small.en', 'voice': CV.VOICE, 'speed': CV.SPEED, 'flow': CV.FLOW, 'pace': CV.PACE, 'vocab': []}
+        v.stt = types.SimpleNamespace(name='small.en', prompt=CV.VOCAB)
+        v.vocab = CV.VOCAB_WORDS
+        v.events = []
+        v.emit = lambda **ev: v.events.append(ev)
+        return v
+
+    def test_config_sets_the_prompt(self):
+        v = self.voice()
+        with redirect_stderr(io.StringIO()):
+            v.handle({'op': 'config', 'vocab': ['Lynx', 'polish-e', 'Capri']})
+        self.assertEqual(v.stt.prompt, CV.VOCAB + ', Lynx, polish-e')
+        self.assertIn('lynx', v.vocab)
+        self.assertEqual(v.events[-1]['ev'], 'ready')
+        self.assertEqual(v.events[-1]['cfg']['vocab'], ['Lynx', 'polish-e', 'Capri'])
+        with redirect_stderr(io.StringIO()):
+            v.handle({'op': 'config', 'voice': CV.VOICE})       # no vocab key: the words stay
+        self.assertEqual(v.stt.prompt, CV.VOCAB + ', Lynx, polish-e')
+        with redirect_stderr(io.StringIO()):
+            v.handle({'op': 'config', 'vocab': []})              # an empty list: back to the default
+        self.assertEqual((v.stt.prompt, v.vocab), (CV.VOCAB, CV.VOCAB_WORDS))
+
+    def test_a_new_model_gets_the_words(self):
+        v = self.voice()
+        made = []
+
+        def fake_stt(name):
+            made.append(name)
+            return types.SimpleNamespace(name=name, prompt=CV.VOCAB)
+        with mock.patch.object(CV, 'Stt', fake_stt), redirect_stderr(io.StringIO()):
+            v.handle({'op': 'config', 'stt_model': 'base.en', 'vocab': ['Lynx']})
+        self.assertEqual((made, v.stt.name, v.stt.prompt), (['base.en'], 'base.en', CV.VOCAB + ', Lynx'))
+
+    def test_a_bad_vocab_is_ignored(self):
+        v = self.voice()
+        with redirect_stderr(io.StringIO()):
+            v.handle({'op': 'config', 'vocab': 'Lynx'})
+        self.assertEqual(v.stt.prompt, CV.VOCAB)
 
 
 class SayEnd(unittest.TestCase):

@@ -1,17 +1,21 @@
 #!/bin/bash
-# synaps-avatar-remote [host] [avatar args...]   (default host: avante)
+# synaps-avatar-remote <host> [avatar args...]   (<host>: an ssh host or ~/.ssh/config alias)
 # Runs the desktop avatar here, attached to the Synaps daemon on <host> through an SSH-forwarded
 # Unix socket ($XDG_RUNTIME_DIR/synaps-<host>-capri.sock, 0600, never the desktop app's socket).
 # The avatar is long-lived, so the tunnel is respawned whenever ssh drops (network, <host> asleep);
 # the avatar shows Away meanwhile and comes back by itself. The tunnel goes when the avatar exits.
-# Extra args go to synaps-avatar (e.g. --session NAME). Modelled on lynx's synaps-desktop-remote.
+# Extra args go to synaps-avatar (e.g. --session NAME).
 #
 # Test hooks (sandbox only): SYNAPS_AVATAR_REMOTE_SOCK = the socket path on <host>
 # (default <remote $HOME>/.synaps-cli/run/daemon.sock); SYNAPS_AVATAR_SSH_OPTS = extra ssh options;
 # SYNAPS_AVATAR_BIN = the avatar binary (default ~/.local/bin/synaps-avatar).
 set -uo pipefail
-host=avante
-if [ $# -gt 0 ] && [[ $1 != -* ]]; then host=$1; shift; fi
+if [ $# -eq 0 ] || [[ $1 == -* ]]; then
+  echo "usage: synaps-avatar-remote <host> [avatar args...]   (the machine whose Synaps daemon she attaches to)" >&2
+  exit 2
+fi
+host=$1
+shift
 rt="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 sock="$rt/synaps-$host-capri.sock"
 bin="${SYNAPS_AVATAR_BIN:-$HOME/.local/bin/synaps-avatar}"

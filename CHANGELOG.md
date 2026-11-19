@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### No one's names or machines in the defaults
+
+- **Speech-to-text vocabulary:** Whisper's recognition prompt is generic now (`Capri, choom, preem,
+  Night City, Synaps, avatarctl`). It no longer carries the developer's names, agents and machines. Add your
+  own with `[voice] vocab = ["…"]` in `settings.toml`: the words are appended to the prompt and count for the
+  prompt-echo filter too. Up to 16 entries, each one word or name (≤ 32 characters, no commas), 200
+  characters in all. A bad list is a settings error; the sidecar caps and cleans it again on its side.
+- **capri-watch has no hostname magic:** the role comes only from `watch.toml`.
+  - `role = "local"` (the default) is her machine. It delivers here and watches GitHub.
+  - `role = "remote"` is any other machine. It delivers over ssh to `[deliver] ssh_host`, which it now
+    requires (there is no default host).
+  - `[github] repos` is empty by default.
+  - `backup_failed` watches nothing until `unit` names one. Its `log` is optional, and a new `log_start`
+    marks a run's start in it.
+  - The calendar's `db` has no default path.
+  - Before this, `install.sh --watch` on any machine not named bella ran as the remote role and tried to ssh
+    to `bella`. It now delivers locally.
+  - Breaking for a two-machine setup that leaned on the hostnames: set `role`, `host` and `[deliver]
+    ssh_host` in each machine's `watch.toml` (docs/WATCH.md has an example).
+- `tools/synaps-avatar-remote` needs its host now (`synaps-avatar-remote <host>`); it had a personal
+  default.
+
 ### Windows: her icon in the tray
 - Her icon sits in the notification area while she runs. Its tooltip is `capri-syn · <her status>`
   (ONLINE, SLEEPING, NO BRAIN YET, HIDDEN, ...). It changes when her status does; her mic's clock
