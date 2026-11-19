@@ -1,0 +1,32 @@
+# TEMPORARY (fix/setup-drag): the wizard test against main's own installer, in minutes instead of the
+# full ci run's half hour. Deleted before the PR is ready.
+name: drag-probe
+on:
+  push:
+    branches: [fix/setup-drag]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  before:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: capri-syn-setup-1902bc085c98eea7ad59f79337ec32ae82e808dc
+          path: setup
+          run-id: 44631499696
+          github-token: ${{ github.token }}
+      - name: The wizard test, main's installer
+        timeout-minutes: 20
+        shell: powershell
+        run: ./packaging/windows/test-setup-wizard.ps1 -Setup (Get-ChildItem setup/capri-syn-setup-*.exe | Select-Object -First 1).FullName -Shots shots
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: drag-probe-before-shots
+          path: shots
+          retention-days: 3
+          if-no-files-found: warn
