@@ -2,8 +2,8 @@
 
 **The screenshots and recordings here are not covered by capri-syn's MIT License. No commercial use.**
 
-Every screenshot and clip in this folder (`hero.webp`, `tour-*.webp`, `still-*.png`) is a screenshot
-or recording of capri-syn running, and every one shows third-party character art. capri-syn grants
+Every screenshot and clip in this folder (`banner.png`, `hero.webp`, `tour-*.webp`, `still-*.png`) is
+a screenshot or recording of capri-syn running, and every one shows third-party character art. capri-syn grants
 no licence of any kind for them. The art in them belongs to its owners, as set out below.
 Rights holders: open an issue and it comes down.
 
@@ -13,13 +13,12 @@ The one other image in them is her app icon, in the notification area of `still-
 `still-tray-tooltip.png`: a crop of Capri's face from a frame of Cyberpunk: Edgerunners 2, with a
 chamfered corner added. Its terms are in [`assets/icon/NOTICE`](../../assets/icon/NOTICE).
 
-## The banner and the cards: original
+## The cards: original
 
-`banner.png` and `card-*.png` are not captures. They are original artwork made for capri-syn: type
-and motifs drawn from scratch (a bolt, a tear, a heart, a waveform, scanlines, frames), with none of
-the art below in them. They are under capri-syn's MIT License, like the code. Their fonts are all
-under the SIL Open Font License 1.1: Saira Condensed, Chakra Petch, Exo 2, JetBrains Mono and Noto
-Sans CJK JP.
+`card-*.png` are not captures. They are original artwork made for capri-syn: type and motifs drawn
+from scratch (a bolt, a tear, a heart, a waveform, scanlines, frames), with none of the art below in
+them. They are under capri-syn's MIT License, like the code. Their fonts are all under the SIL Open
+Font License 1.1: Saira Condensed, Chakra Petch, Exo 2, JetBrains Mono and Noto Sans CJK JP.
 
 ## Capri's sprites: CapriCore
 
@@ -34,7 +33,7 @@ the necessary permissions separately".
 Her perch, sleep, walk, dance, dangle and transition animations come from Capri,
 <https://github.com/lachydotmcg/capri-desktop> (commit `156ed18`), under the PolyForm Noncommercial
 License 1.0.0: <https://polyformproject.org/licenses/noncommercial/1.0.0>. Those terms apply to the parts
-of these files that show it: noncommercial use only.
+of these files that show it: noncommercial use only. The banner uses its perch drawing.
 
 Its Required Notices, verbatim from its `LICENSE.md`:
 

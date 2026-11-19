@@ -1,11 +1,18 @@
 <h1 align="center">
-  <img src="docs/media/banner.png" width="100%" alt="capri-syn, in glitch-split type over a red bolt. Perches on your windows. Talks back when you say her name.">
+  <img src="docs/media/banner.png" width="100%" alt="capri-syn: Capri, a desktop companion who perches on your windows and patches you through to your agents">
 </h1>
 
 <p align="center">
   <b>A living desktop companion with a real agent's brain.</b><br>
   <sub>She perches on your windows, naps when you're away, and talks back when you say her name.</sub>
 </p>
+
+> [!IMPORTANT]
+> **An unofficial fan project.** Capri is a character from *Cyberpunk: Edgerunners 2*. capri-syn isn't
+> affiliated with or endorsed by CD PROJEKT RED, Studio Trigger or Netflix. **None of the art is ours:**
+> it's borrowed from other Capri projects, [CapriCore](https://github.com/CapriChooms/CapriCore) (her
+> sprites) and [Capri](https://github.com/lachydotmcg/capri-desktop) by lachydotmcg (her animations),
+> and her app icon is a frame from the show. Credits and terms: [Credits & legal](#credits--legal).
 
 <p align="center">
   <img alt="Linux: X11 and Wayland" src="https://img.shields.io/badge/linux-X11%20%C2%B7%20Wayland-ff1438?style=flat-square&labelColor=0a0a0b">
@@ -41,8 +48,6 @@ on your machine, and comes over when she needs a yes from you. Her brain is the 
 session on [Synaps](https://github.com/HaseebKhalid1507/SynapsCLI). The installer brings it.
 
 **Linux and Windows.** She's click-through, so your windows stay yours. She just sits on them.
-
-<sub>Capri is a character from <i>Cyberpunk: Edgerunners 2</i>. This is a fan project.</sub>
 
 <p align="center"><img src="docs/media/card-glitch.png" width="100%" alt="01 // GLITCH. Glitch, don't fade. Mood swings break into scanlines and snap back. She arrives on a red bolt."></p>
 
@@ -465,7 +470,7 @@ paths are excluded and keep their own terms:
   `LICENSE-APACHE`; our changes, listed in its `PATCHES.md`, are under the same licence).
 - `crates/synaps-client/`: MIT, except the portions named in its
   [`NOTICE`](crates/synaps-client/NOTICE), which are Apache-2.0.
-- `docs/media/`, except `banner.png` and `card-*.png` (original type and motifs, MIT): screenshots and
+- `docs/media/`, except `card-*.png` (original type and motifs, MIT): the banner, screenshots and
   recordings of the app showing third-party character art: Capri's sprites
   from [CapriCore](https://github.com/CapriChooms/CapriCore), for which no licence is granted (see its
   `docs/character-assets.md`), and Capri's desktop art from
