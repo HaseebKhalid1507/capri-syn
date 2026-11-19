@@ -609,7 +609,8 @@ fn goes_on(line: &str) -> String {
     let full = t.chars().count();
     while full - t.chars().count() < 3 {
         match t.trim_end().rfind(' ') {
-            Some(i) if i > 0 => t = t[..i].trim_end(),
+            // A word goes, never the line's last (an indented one kept only its indent: "…").
+            Some(i) if !t[..i].trim().is_empty() => t = t[..i].trim_end(),
             // One short word: the line is far from full, it keeps the word ("guess…", not "gue…").
             _ if full <= 8 => return format!("{}…", line.trim_end().trim_end_matches(['.', ',', ';', ':', '-', '—', '!', '?'])),
             _ => {
@@ -8532,6 +8533,7 @@ mod bubble_layout_tests {
     fn its_last_line_says_it_goes_on_and_keeps_a_short_word() {
         assert_eq!(super::goes_on("guess."), "guess…");
         assert_eq!(super::goes_on("---"), "…");
+        assert_eq!(super::goes_on("  src/view.rs"), "  src/view…");
         assert_eq!(super::goes_on("bella and opened four Windows PRs. It"), "bella and opened four Windows PRs…");
         assert_eq!(super::goes_on("though none of it is live yet. Bella's still on the"), "though none of it is live yet. Bella's still on…");
         assert_eq!(super::goes_on("https://github.com/HaseebKhalid1507/capri-"), "https://github.com/HaseebKhalid1507/cap…");
