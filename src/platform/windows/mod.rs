@@ -1069,6 +1069,22 @@ impl Win32 {
     }
 
     /// One of her windows has the foreground (her process may then move it among them).
+    /// `active_window` with `h` in front. Her tray's window counts as the shell's UI: it takes
+    /// the foreground for its menu (`tray::show_menu`), so a pick there that opens the Line
+    /// (SETTINGS) would else make it his last window, and Esc would hand his keyboard to a
+    /// hidden 0×0 window.
+    fn active_of(&self, h: HWND) -> Option<WinId> {
+        if h.0.is_null() || is_shell(h) {
+            return None;
+        }
+        if !is_shell_ui(h) && !tray::is_tray(h) {
+            self.last_app.store(id(h), Ordering::Relaxed);
+            return Some(id(h));
+        }
+        let last = self.last_app.load(Ordering::Relaxed);
+        (last != 0 && showing(hwnd(last))).then_some(last)
+    }
+
     fn hers_in_front(&self) -> bool {
         let fg = unsafe { GetForegroundWindow() };
         !fg.0.is_null() && self.mine(unsafe { GetAncestor(fg, GA_ROOT) })
@@ -1167,18 +1183,10 @@ impl Desktop for Win32 {
     }
 
     /// The foreground window; none on the desktop. With the shell's UI in front (Start, Search,
-    /// Alt+Tab, a flyout) his window is still the one he was in.
+    /// Alt+Tab, a flyout) or her tray's window (`active_of`), his window is still the one he
+    /// was in.
     fn active_window(&self) -> Option<WinId> {
-        let h = unsafe { GetForegroundWindow() };
-        if h.0.is_null() || is_shell(h) {
-            return None;
-        }
-        if !is_shell_ui(h) {
-            self.last_app.store(id(h), Ordering::Relaxed);
-            return Some(id(h));
-        }
-        let last = self.last_app.load(Ordering::Relaxed);
-        (last != 0 && showing(hwnd(last))).then_some(last)
+        self.active_of(unsafe { GetForegroundWindow() })
     }
 
     fn focused_window(&self) -> Option<WinId> {

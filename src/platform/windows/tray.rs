@@ -187,6 +187,8 @@ fn taskbar_up() -> bool {
 struct Added {
     /// In; else the error to tell (her GUID's, where both were refused).
     r: Result<(), WIN32_ERROR>,
+    /// Her GUID's error where it was refused and her window's id tried for it (her log).
+    guid_refused: Option<WIN32_ERROR>,
     /// By her GUID from now on; else by her window's id.
     by_guid: bool,
     /// Her window's id was tried: it may be in (a late add).
@@ -199,16 +201,17 @@ struct Added {
 fn add_by(by_guid: bool, up: impl FnOnce() -> bool, mut shell: impl FnMut(bool) -> Result<(), WIN32_ERROR>) -> Added {
     match shell(by_guid) {
         Err(e) if by_guid && e != ERROR_TIMEOUT && up() => match shell(false) {
-            Ok(()) => Added { r: Ok(()), by_guid: false, window_tried: true },
-            Err(_) => Added { r: Err(e), by_guid: true, window_tried: true },
+            Ok(()) => Added { r: Ok(()), guid_refused: Some(e), by_guid: false, window_tried: true },
+            Err(_) => Added { r: Err(e), guid_refused: Some(e), by_guid: true, window_tried: true },
         },
-        r => Added { r, by_guid, window_tried: !by_guid },
+        r => Added { r, guid_refused: None, by_guid, window_tried: !by_guid },
     }
 }
 
 /// Into the tray (again): what a run before left under her GUID goes first (and under her
-/// window's id, once that was tried). True: it is in.
-fn add(h: HWND, s: &mut State) -> bool {
+/// window's id, once that was tried). Ok: it is in; else the shell's error (her GUID's where
+/// both were refused).
+fn add(h: HWND, s: &mut State) -> Result<(), WIN32_ERROR> {
     let tip = s.shared.lock().map(|g| g.tip.clone()).unwrap_or_default();
     let full = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
     let data = |s: &State| NOTIFYICONDATAW { uCallbackMessage: WM_TRAY, hIcon: s.hicon, szTip: tip_w(&tip), ..nid(h, s, full) };
@@ -225,19 +228,23 @@ fn add(h: HWND, s: &mut State) -> bool {
             if Shell_NotifyIconW(NIM_ADD, &d).as_bool() { Ok(()) } else { Err(GetLastError()) }
         });
         if s.by_guid && !a.by_guid {
-            elog!("synaps-avatar: tray: the shell refused her icon's GUID; by her window from now on");
+            elog!("synaps-avatar: tray: the shell refused her icon's GUID ({}); by her window from now on", err(a.guid_refused));
         }
         s.by_guid = a.by_guid;
         s.fell_back |= a.window_tried;
         s.timed_out = a.r == Err(ERROR_TIMEOUT);
-        let ok = a.r.is_ok();
-        if ok {
+        if a.r.is_ok() {
             let mut v = data(s);
             v.Anonymous.uVersion = NOTIFYICON_VERSION_4;
             s.v4 = Shell_NotifyIconW(NIM_SETVERSION, &v).as_bool();
         }
-        ok
+        a.r
     }
+}
+
+/// A shell error for her log: `GetLastError`'s code (`error 1460`: ERROR_TIMEOUT).
+fn err(e: Option<WIN32_ERROR>) -> String {
+    e.map_or_else(|| "no error".into(), |e| format!("error {}", e.0))
 }
 
 /// Why an add is tried, for her log.
@@ -254,7 +261,8 @@ fn try_add(h: HWND, s: &mut State, why: Why) {
     if s.left {
         return;
     }
-    let ok = add(h, s);
+    let r = add(h, s);
+    let ok = r.is_ok();
     if let Ok(mut g) = s.shared.lock() {
         g.shown = ok;
         if why == Why::Restart {
@@ -278,7 +286,8 @@ fn try_add(h: HWND, s: &mut State, why: Why) {
             s.retry_until = Some(now + RETRY_FOR_MS);
             let _ = unsafe { SetTimer(Some(h), ADD_TIMER, RETRY_MS, None) };
             elog!(
-                "synaps-avatar: tray: her icon didn't go in (taskbar up: {}{}); again every {} s for {} s, and when Explorer starts again",
+                "synaps-avatar: tray: her icon didn't go in ({}; taskbar up: {}{}); again every {} s for {} s, and when Explorer starts again",
+                err(r.err()),
                 taskbar_up(),
                 if s.timed_out { ", timed out" } else { "" },
                 RETRY_MS / 1000,
@@ -287,7 +296,7 @@ fn try_add(h: HWND, s: &mut State, why: Why) {
         }
         Some(until) if now >= until => {
             let _ = unsafe { KillTimer(Some(h), ADD_TIMER) };
-            elog!("synaps-avatar: tray: her icon still isn't in; again when Explorer starts again");
+            elog!("synaps-avatar: tray: her icon still isn't in ({}); again when Explorer starts again", err(r.err()));
         }
         Some(_) => {}
     }
@@ -595,6 +604,25 @@ unsafe extern "system" fn tray_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -
     unsafe { DefWindowProcW(h, msg, wp, lp) }
 }
 
+/// Her tray's window class (`is_tray`).
+const CLASS: &str = "SynapsAvatarTray";
+
+/// `h` is a tray window of hers (this run's, or another instance's): hidden and 0×0, in front
+/// only while its menu is up (`show_menu`). Never his window (`Win32::active_window`).
+pub(super) fn is_tray(h: HWND) -> bool {
+    super::class_name(h) == CLASS
+}
+
+/// Her tray's window, on the calling thread: a real top-level window, never shown
+/// (`TaskbarCreated` skips message-only ones).
+fn window() -> Result<HWND> {
+    let inst = unsafe { GetModuleHandleW(None)? };
+    let class = HSTRING::from(CLASS);
+    let wc = WNDCLASSW { lpfnWndProc: Some(tray_proc), hInstance: inst.into(), lpszClassName: PCWSTR(class.as_ptr()), ..Default::default() };
+    unsafe { RegisterClassW(&wc) };
+    Ok(unsafe { CreateWindowExW(WS_EX_TOOLWINDOW, &class, w!("capri-syn tray"), WS_POPUP, 0, 0, 0, 0, None, None, Some(inst.into()), None)? })
+}
+
 /// Her icon in the tray, on a thread of its own (`instance`: `Desktop::tray`'s). Ok once its
 /// window is up, before any call to the shell: the icon goes in on that thread right after
 /// (`WM_TRAY_ADD`), and is tried again if it doesn't.
@@ -604,15 +632,7 @@ pub(super) fn start(icon: TrayIcon, instance: &str, grant: Arc<AtomicU64>, on: B
     let sh = shared.clone();
     let (tx, rx) = std::sync::mpsc::channel::<Result<isize>>();
     std::thread::Builder::new().name("avatar-tray".into()).spawn(move || {
-        let made = (|| -> Result<HWND> {
-            let inst = unsafe { ::windows::Win32::System::LibraryLoader::GetModuleHandleW(None)? };
-            let class = w!("SynapsAvatarTray");
-            let wc = WNDCLASSW { lpfnWndProc: Some(tray_proc), hInstance: inst.into(), lpszClassName: class, ..Default::default() };
-            unsafe { RegisterClassW(&wc) };
-            // A real top-level window, never shown: `TaskbarCreated` skips message-only ones.
-            Ok(unsafe { CreateWindowExW(WS_EX_TOOLWINDOW, class, w!("capri-syn tray"), WS_POPUP, 0, 0, 0, 0, None, None, Some(inst.into()), None)? })
-        })();
-        let h = match made {
+        let h = match window() {
             Ok(h) => h,
             Err(e) => {
                 tx.send(Err(e)).ok();
@@ -830,12 +850,14 @@ mod tests {
     #[test]
     fn her_guid_is_given_up_only_once_her_window_goes_in() {
         let no = WIN32_ERROR(5);
-        let added = |r, by_guid, window_tried| Added { r, by_guid, window_tried };
+        let added = |r, by_guid, window_tried| Added { r, guid_refused: None, by_guid, window_tried };
+        let refused = |r, by_guid| Added { r, guid_refused: Some(no), by_guid, window_tried: true };
         // At sign-in the tray refuses both: by her GUID still (the timer tries it again), and her
-        // window's id was tried (deletes go by both).
-        assert_eq!(add_with(true, true, &[Err(no), Err(no)]), (added(Err(no), true, true), vec![true, false]));
+        // window's id was tried (deletes go by both). The GUID's refusal is what her log tells.
+        let other = WIN32_ERROR(1008);
+        assert_eq!(add_with(true, true, &[Err(no), Err(other)]), (refused(Err(no), true), vec![true, false]));
         // Her GUID held for another path: by her window, for good.
-        assert_eq!(add_with(true, true, &[Err(no), Ok(())]), (added(Ok(()), false, true), vec![true, false]));
+        assert_eq!(add_with(true, true, &[Err(no), Ok(())]), (refused(Ok(()), false), vec![true, false]));
         // Late, not refused (it may still go in), or no taskbar yet: her GUID only.
         assert_eq!(add_with(true, true, &[Err(ERROR_TIMEOUT)]), (added(Err(ERROR_TIMEOUT), true, false), vec![true]));
         assert_eq!(add_with(true, false, &[Err(no)]), (added(Err(no), true, false), vec![true]));
@@ -856,7 +878,8 @@ mod tests {
 
     #[test]
     fn the_menu_is_drawn_as_her_model_lays_it_out() {
-        let s = Menu { hidden: true, dnd: Some(false), attention: Some(Attention::HangOnly), handsfree: Some(false), ..Menu::default() };
+        let why = crate::line::MenuSave::Refused.says();
+        let s = Menu { hidden: true, dnd: Some(false), attention: Some(Attention::HangOnly), handsfree: Some(false), unsaved: why, ..Menu::default() };
         let items = menu::tray_items(&menu::rows(&s));
         let m = build_menu(&items).unwrap();
         unsafe {
@@ -872,8 +895,12 @@ mod tests {
                         let sub = GetSubMenu(m, i as i32);
                         assert!(!sub.is_invalid());
                         assert_eq!(GetMenuItemCount(Some(sub)), items.len() as i32);
-                        let checked: Vec<bool> = (0..items.len()).map(|j| GetMenuState(sub, j as u32, MF_BYPOSITION) & MF_CHECKED.0 != 0).collect();
+                        let checked: Vec<bool> = (0..3).map(|j| GetMenuState(sub, j, MF_BYPOSITION) & MF_CHECKED.0 != 0).collect();
                         assert_eq!(checked, [false, true, false], "HANG ONLY in force");
+                        // Its last pick didn't save: why, under a rule, greyed (no pick).
+                        assert!(GetMenuState(sub, 3, MF_BYPOSITION) & MF_SEPARATOR.0 != 0);
+                        assert!(GetMenuState(sub, 4, MF_BYPOSITION) & MF_GRAYED.0 != 0);
+                        assert_eq!((GetMenuItemID(sub, 4), text(sub, 4)), (0, why.unwrap().to_string()));
                     }
                     TrayItem::Rule => assert!(state & MF_SEPARATOR.0 != 0),
                 }
@@ -906,6 +933,49 @@ mod tests {
             let live: Vec<&str> = greyed.iter().filter(|(_, g)| !g).map(|(l, _)| l.as_str()).collect();
             assert_eq!(live, ["QUIT"], "{greyed:?}");
             DestroyMenu(m).unwrap();
+        }
+    }
+
+    unsafe extern "system" fn his_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+        unsafe { DefWindowProcW(h, msg, wp, lp) }
+    }
+
+    /// Her tray's window takes the foreground for its menu (`show_menu`), and a pick that opens
+    /// the Line (SETTINGS) asks then which window of his was in front, to give his keyboard back
+    /// to on Esc (Shady on #79: it was her hidden 0×0 window). Never hers: his last window, as
+    /// with the shell's UI in front; none before he had one. Read off real windows; then, where
+    /// this desktop lets a test take the foreground, as `show_menu` takes it.
+    #[test]
+    fn her_tray_window_is_never_his_last_window() {
+        use crate::platform::Desktop;
+        use super::super::{Win32, id};
+        let tray = window().unwrap();
+        assert!(is_tray(tray), "her tray's window not known by its class ({})", super::super::class_name(tray));
+        let his = unsafe {
+            let inst = GetModuleHandleW(None).unwrap();
+            let class = w!("SaHisApp");
+            let wc = WNDCLASSW { lpfnWndProc: Some(his_proc), hInstance: inst.into(), lpszClassName: class, ..Default::default() };
+            RegisterClassW(&wc);
+            // Small, in the primary monitor's far corner: clear of the other tests' windows.
+            let (x, y) = (GetSystemMetrics(SM_CXSCREEN) - 110, GetSystemMetrics(SM_CYSCREEN) - 170);
+            CreateWindowExW(WS_EX_NOACTIVATE, class, w!("sa-his-app"), WS_POPUP | WS_VISIBLE, x, y, 100, 60, None, None, Some(inst.into()), None).unwrap()
+        };
+        assert!(!is_tray(his));
+        let x = Win32::connect().unwrap();
+        assert_eq!(x.active_of(tray), None, "her tray's window taken for his (none of his yet)");
+        assert_eq!(x.active_of(his), Some(id(his)));
+        assert_eq!(x.active_of(tray), Some(id(his)), "his window not kept with her tray's in front");
+        assert_eq!(x.last_app.load(Ordering::Relaxed), id(his), "her tray's window stored as his");
+        unsafe {
+            let _ = SetForegroundWindow(tray);
+            if GetForegroundWindow() == tray {
+                assert_eq!(x.active_window(), Some(id(his)), "her tray's menu up: his window is the one he was in");
+                elog!("tray test: her tray's window in front (as for its menu): his window kept");
+            } else {
+                elog!("tray test: this desktop didn't give the test the foreground; the real windows above stand");
+            }
+            let _ = DestroyWindow(tray);
+            let _ = DestroyWindow(his);
         }
     }
 

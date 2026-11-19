@@ -20,6 +20,7 @@ impl Avatar {
             attention: self.attention(),
             handsfree: (self.voice_on() && self.voice.cfg.handsfree).then_some(self.voice.hf.is_some()),
             quit_armed: self.quit_armed.is_some(),
+            unsaved: self.menu_save.says(),
         }
     }
 
@@ -200,7 +201,7 @@ mod tests {
         let hf = (0..200).flat_map(|s| levels.map(|l| hf_label(None, s, l))).collect();
         assert_eq!(tips(hf), ["capri-syn · MIC LIVE · HANDS-FREE"]);
         let ending = (0..10).map(|left| hf_label(Some(left), 0, 0.5)).collect();
-        assert_eq!(tips(ending), ["capri-syn · MIC LIVE · HANDS-FREE · ENDS IN"]);
+        assert_eq!(tips(ending), ["capri-syn · MIC LIVE · HANDS-FREE · ENDING"]);
         let mic = (0..200).flat_map(|s| levels.map(|l| mic_label(s, l, s % 2 == 0))).collect();
         assert_eq!(tips(mic), ["capri-syn · MIC"]);
         let speaking = levels.map(|l| format!("SPEAKING {}", level_bars(l))).to_vec();

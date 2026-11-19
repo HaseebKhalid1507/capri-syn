@@ -5,10 +5,11 @@
 ### Windows: her icon in the tray
 - Her icon sits in the notification area while she runs. Its tooltip is `capri-syn · <her status>`
   (ONLINE, SLEEPING, NO BRAIN YET, HIDDEN, ...). It changes when her status does; her mic's clock
-  and level meter stay off it.
+  and level meter stay off it, and hands-free's last seconds read ENDING.
 - A click opens the Line, as Win+Alt+C does. A right click opens her menu: the same rows as her
   right-click menu, from one model (`src/menu.rs`), with the same greying of what can't act now.
-  Hidden, the tray is the way back (SHOW).
+  Hidden, the tray is the way back (SHOW). An ATTENTION pick that didn't save says so under its
+  choices (CAN'T SAVE / NOT SAVED YET), as her menu does under its row.
 - Explorer restarting puts it back. QUIT takes it out, with no ghost left. An icon the shell won't
   take at sign-in is tried again every 2 s for a minute.
 - Linux: no tray yet. A StatusNotifierItem would plug in at `platform::linux::tray`, for X11 and

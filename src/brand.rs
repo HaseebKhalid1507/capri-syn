@@ -31,10 +31,12 @@ const PACK_ICON: bool = cfg!(not(windows));
 /// Her tray tooltip for her status (her tag's word: ONLINE, SLEEPING, NO BRAIN YET,
 /// OFFLINE...), steady: up to its first figure or meter bar (her mic's clock and level, a
 /// countdown's seconds: her tag moves with them many times a second, the tray hears the word
-/// once). Hidden (HIDE), it says so: the tray is the way back.
+/// once; `ENDS IN 0:07` reads ENDING). Hidden (HIDE), it says so: the tray is the way back.
 pub fn tooltip(status: &str, hidden: bool) -> String {
     let cut = status.find(|c: char| c.is_ascii_digit() || matches!(c, '▮' | '▯')).unwrap_or(status.len());
-    match if hidden { "HIDDEN" } else { status[..cut].trim_end_matches([' ', '·']).trim() } {
+    let word = status[..cut].trim_end_matches([' ', '·']).trim();
+    let word = word.strip_suffix("ENDS IN").map_or_else(|| word.to_string(), |head| format!("{head}ENDING"));
+    match if hidden { "HIDDEN" } else { word.as_str() } {
         "" => NAME.to_string(),
         s => format!("{NAME} · {s}"),
     }
@@ -200,7 +202,8 @@ mod tests {
         assert_eq!(tooltip("MIC LIVE · HANDS-FREE 1:23 ▮▮▯▯▯", false), "capri-syn · MIC LIVE · HANDS-FREE");
         assert_eq!(tooltip("MIC 0:03 ▮▯▯▯▯ · AUTO", false), "capri-syn · MIC");
         assert_eq!(tooltip("SPEAKING ▮▮▮▯▯", false), "capri-syn · SPEAKING");
-        assert_eq!(tooltip("MIC LIVE · HANDS-FREE · ENDS IN 0:09", false), "capri-syn · MIC LIVE · HANDS-FREE · ENDS IN");
+        assert_eq!(tooltip("MIC LIVE · HANDS-FREE · ENDS IN 0:09", false), "capri-syn · MIC LIVE · HANDS-FREE · ENDING");
+        assert_eq!(tooltip("ENDS IN 0:09", false), "capri-syn · ENDING");
         assert_eq!(tooltip("HEARD · …", false), "capri-syn · HEARD · …");
     }
 

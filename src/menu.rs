@@ -117,13 +117,16 @@ pub struct State {
     pub handsfree: Option<bool>,
     /// QUIT was clicked once on her menu: the next click quits.
     pub quit_armed: bool,
+    /// Why ATTENTION's last pick didn't stick (`line::MenuSave::says`: the write refused, or
+    /// hanging); None: it did, or none was made.
+    pub unsaved: Option<&'static str>,
 }
 
 /// By hand: `Attention` (settings.rs) has no `Hash`; its key stands in.
 impl std::hash::Hash for State {
     fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
         (self.quitting, self.teleporting, self.held, self.intro, self.hidden).hash(h);
-        (self.dnd, self.attention.map(Attention::key), self.handsfree, self.quit_armed).hash(h);
+        (self.dnd, self.attention.map(Attention::key), self.handsfree, self.quit_armed, self.unsaved).hash(h);
     }
 }
 
@@ -158,11 +161,14 @@ pub struct Row {
     pub lead: bool,
     /// It acts now (`enabled`); else greyed.
     pub enabled: bool,
+    /// Why its last pick didn't stick (ATTENTION's: `State::unsaved`): under its choices in
+    /// the tray. Her menu draws its own line under the row (`line::MenuSave::line`).
+    pub note: Option<&'static str>,
 }
 
 impl Row {
     fn new(item: Item, label: &'static str) -> Row {
-        Row { item, label, choices: Vec::new(), rule: false, armed: false, lead: false, enabled: true }
+        Row { item, label, choices: Vec::new(), rule: false, armed: false, lead: false, enabled: true, note: None }
     }
 }
 
@@ -179,7 +185,7 @@ pub fn rows(s: &State) -> Vec<Row> {
             Attention::Off => "ATTENTION: OFF",
         };
         let choices = [Attention::Mix, Attention::HangOnly, Attention::Off].into_iter().map(|c| (Item::Attention(Some(c)), c.label(), c == a)).collect();
-        v.push(Row { choices, ..Row::new(Item::Attention(None), label) });
+        v.push(Row { choices, note: s.unsaved, ..Row::new(Item::Attention(None), label) });
     }
     if let Some(on) = s.handsfree {
         v.push(Row::new(Item::HandsFree, if on { "END HANDS-FREE" } else { "HANDS-FREE TALK" }));
@@ -196,7 +202,7 @@ pub fn rows(s: &State) -> Vec<Row> {
 }
 
 /// The rows as a tray draws them: a row with choices opens them (the tray's own arrow), one
-/// checked.
+/// checked, its note under them greyed (id 0: never a pick).
 pub fn tray_items(rows: &[Row]) -> Vec<TrayItem> {
     let mut v = Vec::new();
     for r in rows {
@@ -207,7 +213,10 @@ pub fn tray_items(rows: &[Row]) -> Vec<TrayItem> {
         v.push(if r.choices.is_empty() {
             TrayItem::Item { id: r.item.id(), label: r.label.to_string(), checked: false, lead: r.lead, enabled }
         } else {
-            let items = r.choices.iter().map(|&(i, l, on)| TrayItem::Item { id: i.id(), label: l.to_string(), checked: on, lead: false, enabled }).collect();
+            let mut items: Vec<TrayItem> = r.choices.iter().map(|&(i, l, on)| TrayItem::Item { id: i.id(), label: l.to_string(), checked: on, lead: false, enabled }).collect();
+            if let Some(note) = r.note {
+                items.extend([TrayItem::Rule, TrayItem::Item { id: 0, label: note.to_string(), checked: false, lead: false, enabled: false }]);
+            }
             TrayItem::Sub { label: r.label.to_string(), items, enabled }
         });
     }
@@ -324,6 +333,38 @@ mod tests {
             .collect();
         assert_eq!(live, [false, false, false, false, false, false, false, true]);
         assert!(items.iter().any(|i| matches!(i, TrayItem::Sub { items, .. } if items.iter().all(|c| matches!(c, TrayItem::Item { enabled: false, .. })))));
+    }
+
+    /// ATTENTION's last pick didn't save (#77's writer refused it, or it hangs): the tray says
+    /// why under its choices, greyed and never a pick, as her menu does under its row; and the
+    /// tray's menu is made again when that changes (`State`'s hash).
+    #[test]
+    fn the_tray_says_when_attention_didnt_save() {
+        use crate::line::MenuSave;
+        use std::hash::{Hash, Hasher};
+        let hash = |s: &State| {
+            let mut h = std::hash::DefaultHasher::new();
+            s.hash(&mut h);
+            h.finish()
+        };
+        let sub = |s: &State| {
+            tray_items(&rows(s)).into_iter().find_map(|i| match i {
+                TrayItem::Sub { items, .. } => Some(items),
+                _ => None,
+            })
+        };
+        let fine = State { attention: Some(Attention::Mix), ..State::default() };
+        assert_eq!(sub(&fine).map(|c| c.len()), Some(3), "saved: the choices alone");
+        for why in [MenuSave::Refused, MenuSave::Stuck] {
+            let s = State { unsaved: why.says(), ..fine };
+            let c = sub(&s).unwrap();
+            let note = TrayItem::Item { id: 0, label: why.says().unwrap().into(), checked: false, lead: false, enabled: false };
+            assert_eq!(c[3..], [TrayItem::Rule, note], "{why:?}");
+            assert_ne!(hash(&s), hash(&fine), "{why:?}: the tray's menu kept as it was");
+            assert_eq!(labels(&s), labels(&fine), "her rows are the same rows");
+        }
+        assert!(command_for(TrayEv::Pick(0)).is_none(), "the note is no pick");
+        assert!(sub(&State { unsaved: MenuSave::Refused.says(), ..State::default() }).is_none(), "no ATTENTION row, no note");
     }
 
     #[test]
