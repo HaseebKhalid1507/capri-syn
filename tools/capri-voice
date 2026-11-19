@@ -42,10 +42,13 @@ listen-start and listen-stop/cancel; mic-open/mic-closed report that process, no
 Audio lives in RAM and is dropped after decoding; nothing is written to disk. Everything runs
 on the CPU (whisper.cpp, Kokoro on onnxruntime's CPU provider).
 
-Test hooks (never needed in use): CAPRI_VOICE_SOURCE / CAPRI_VOICE_SINK name PipeWire nodes
-to record from / play to (default: the default ones); CAPRI_VOICE_PLAYERS limits pause to
-these MPRIS players (comma list); CAPRI_VOICE_DUCK_MATCH limits ducking to streams whose
-application name contains it.
+CAPRI_VOICE_SOURCE: the mic to record from (default: the default one). Linux: a PipeWire node
+(a test hook, or his service's own). Windows: in use, his `[voice] mic` (her installer's picker),
+set by her when she starts the sidecar: the device by the exact name Sound settings shows, under
+WASAPI. A named one that's gone is refused (NO MIC), never swapped for the default.
+Test hooks (never needed in use): CAPRI_VOICE_SINK names the node (Windows: the device) to play
+to (default: the default one); CAPRI_VOICE_PLAYERS limits pause to these MPRIS players (comma
+list); CAPRI_VOICE_DUCK_MATCH limits ducking to streams whose application name contains it.
 
 Other modes: --render TEXT --out F.wav [--voice V --speed S --flow F --pace P] (a sample; never the mic),
 --selftest (no audio device; with the models, the graph patch and the flow rules).

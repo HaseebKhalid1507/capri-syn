@@ -243,6 +243,23 @@ jobs:
           retention-days: 14
           if-no-files-found: error
 
+      # Her quit is bounded (2 s after her bye) and frees her exe: unlocked, with her teardown held
+      # (the watchdog ends her), then with the session locked, as on his box when a quit stayed and
+      # pinned her exe. Last: the lock stays.
+      - name: Her quit, unlocked, held and locked
+        timeout-minutes: 5
+        shell: pwsh
+        run: ./tests/windows/test-quit.ps1 -Exe target/release/synaps-avatar.exe -Locked -Out "$env:RUNNER_TEMP/sa-quit"
+
+      - name: Her logs from a failed quit
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-quit-${{ github.sha }}
+          path: ${{ runner.temp }}/sa-quit
+          retention-days: 7
+          if-no-files-found: ignore
+
   # Her installer end to end, on a clean runner, as someone with nothing installed gets it: unattended
   # with its defaults, then Synaps, its daemon, her pack, her attached (not OFFLINE) and responsive for
   # 60 s of clicks, and an uninstall that leaves nothing of hers (test-setup-e2e.ps1).

@@ -86,12 +86,15 @@ struct Args {
     model: Option<String>,
     no_session: bool,
     sleepy_after: std::time::Duration,
+    /// `--set KEY=VALUE`: these settings written (her installer), then exit; nothing else runs.
+    set: Vec<settings::Edit>,
 }
 
 const USAGE: &str = "usage: synaps-avatar [--profile P | --socket PATH] [--session NAME|ID | --new [--cwd DIR] [--model M]] [--no-session]
                      [--sleepy-after MIN] [--pack DIR] [--height PX] [--name NAME] [--threads N] [--no-verify]
                      [--focus-probe] [--check [--dump DIR]]
        synaps-avatar -V | --version
+       synaps-avatar --set KEY=VALUE [--set KEY=VALUE ...]
 
 Session (one Synaps daemon session drives the body):
   --profile P     daemon profile (default $SYNAPS_PROFILE, else the default daemon)
@@ -117,6 +120,12 @@ Session (one Synaps daemon session drives the body):
   --check         validate and decode the pack, print stats, exit (no window)
   --dump DIR      with --check: every decoded frame as a PNG in DIR (her pixels at --height)
 
+  --set KEY=VALUE  write it to settings.toml through her settings writer (the rest of the file as
+                  it was; one with a typo is refused), then exit. Her installer's keys only:
+                  voice.enabled, voice.wake_word, voice.speak_unprompted (true|false), voice.mic.
+                  Exit 0 saved, 2 a bad --set, 3 settings.toml refused (a typo; can't read it),
+                  4 not saved
+
 Dev control: newline commands on $XDG_RUNTIME_DIR/synaps-avatar.sock
   mood <idle|thinking|working|talking|needs_you|done|annoyed|sleepy|away>
   clip <clip, action or frame id>   say <text>   page next|prev   collapse   expand
@@ -124,6 +133,51 @@ Dev control: newline commands on $XDG_RUNTIME_DIR/synaps-avatar.sock
   music on|off   glitch   state   hide   quit
   art <stand|perch|sleepFloor|sleepWindow> <variant id|next>   (a variant pool she is in)
   submit <text>   abort   prompt confirm|secret [text]   (session / dev)";
+
+/// An error with its own exit code: `--set`'s, for her installer (any other error exits 1).
+#[derive(Debug)]
+struct Coded(i32, String);
+
+impl std::fmt::Display for Coded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.1)
+    }
+}
+
+impl std::error::Error for Coded {}
+
+/// `--set`'s exit codes: 0 written (or already so), 2 a bad `--set` (nothing written), 3 his
+/// settings file refused (a typo in it, or it can't be read: never written over), 4 not saved
+/// (it can't be written, or the result wouldn't load).
+const SET_USAGE: i32 = 2;
+const SET_REFUSED: i32 = 3;
+const SET_FAILED: i32 = 4;
+
+fn set_exit(e: &settings::WriteError) -> i32 {
+    use settings::WriteError::*;
+    match e {
+        Typo { .. } | Unreadable(_) => SET_REFUSED,
+        Invalid(_) | Failed(_) => SET_FAILED,
+    }
+}
+
+/// One `--set KEY=VALUE`: the keys her installer's Voice page writes, and only those.
+fn set_edit(pair: &str) -> Result<settings::Edit> {
+    use settings::Edit;
+    let (key, value) = pair.split_once('=').with_context(|| format!("--set {pair}: KEY=VALUE"))?;
+    let flag = || match value.trim() {
+        "true" | "on" => Ok(true),
+        "false" | "off" => Ok(false),
+        v => Err(anyhow::anyhow!("--set {key}: true or false, not `{v}`")),
+    };
+    Ok(match key.trim() {
+        "voice.enabled" => Edit::Set("voice", "enabled", flag()?.into()),
+        "voice.wake_word" => Edit::Set("voice", "wake_word", flag()?.into()),
+        "voice.speak_unprompted" => Edit::Set("voice", "speak_unprompted", flag()?.into()),
+        "voice.mic" => Edit::Set("voice", "mic", value.trim().into()),
+        k => bail!("--set {k}: not a key she sets this way (voice.enabled, voice.wake_word, voice.speak_unprompted, voice.mic)"),
+    })
+}
 
 fn parse_args() -> Result<Args> {
     parse_args_from(std::env::args().skip(1))
@@ -148,6 +202,7 @@ fn parse_args_from(argv: impl IntoIterator<Item = String>) -> Result<Args> {
         model: None,
         no_session: false,
         sleepy_after: std::time::Duration::from_secs(600),
+        set: Vec::new(),
     };
     let (mut session, mut new) = (None, false);
     let mut it = argv.into_iter();
@@ -169,6 +224,7 @@ fn parse_args_from(argv: impl IntoIterator<Item = String>) -> Result<Args> {
             "--cwd" => a.cwd = Some(PathBuf::from(val("a directory")?)),
             "--model" => a.model = Some(val("a model")?),
             "--no-session" => a.no_session = true,
+            "--set" => a.set.push(val("KEY=VALUE").and_then(|v| set_edit(&v)).map_err(|e| Coded(SET_USAGE, format!("{e:#}")))?),
             "--sleepy-after" => {
                 let m: f64 = val("minutes")?.parse().context("--sleepy-after: not a number")?;
                 if !(m > 0.0 && m < 1e6) {
@@ -255,14 +311,24 @@ fn main() {
     }
     if let Err(e) = run(t_start) {
         elog!("synaps-avatar: {e:#}");
-        std::process::exit(1);
+        std::process::exit(e.downcast_ref::<Coded>().map_or(1, |c| c.0));
     }
 }
 
 fn run(t_start: Instant) -> Result<()> {
     let args = parse_args()?;
+    if !args.set.is_empty() {
+        let path = settings::Settings::path();
+        return match settings::Settings::write(&args.set) {
+            Ok(written) => {
+                olog!("settings: {} ({})", if written { "written" } else { "already so" }, path.display());
+                Ok(())
+            }
+            Err(e) => Err(Coded(set_exit(&e), format!("settings: {} ({e}; {})", e.says(), path.display())).into()),
+        };
+    }
     // Her log's header on Linux too (Windows: `dirs::log_without_console`). After the command line,
-    // so -V and -h print their own line only; before the pack loads.
+    // so -V, -h and --set print their own line only; before the pack loads.
     #[cfg(target_os = "linux")]
     elog!("--- synaps-avatar {} (pid {})", env!("CARGO_PKG_VERSION"), std::process::id());
     let pack = Arc::new(pack::Pack::load(&args.pack)?);
@@ -371,7 +437,7 @@ fn run(t_start: Instant) -> Result<()> {
                 Ok(w) => w,
                 Err(e) => {
                     elog!("synaps-avatar: {e:#}");
-                    std::process::exit(1);
+                    platform::exit_now(1);
                 }
             };
             os.force_composited(env_composited().unwrap_or_else(|| settings::Settings::load().ok().and_then(|s| s.display.composited)));
@@ -512,7 +578,7 @@ fn run(t_start: Instant) -> Result<()> {
         if let Err(e) = opened {
             elog!("synaps-avatar: cannot open the window: {e:#}");
             std::fs::remove_file(control::socket_path()).ok();
-            std::process::exit(1);
+            platform::exit_now(1);
         }
         let view = built.expect("window built");
         if let (Ok(w), Some(h)) = (&opened, first) {
@@ -590,6 +656,11 @@ fn run(t_start: Instant) -> Result<()> {
         })
         .detach();
     });
+    // Windows: nothing past GPUI's run (her state is saved: `finish_quit`). ExitProcess would run
+    // every DLL's detach, and a GPU driver's can hold her there, her exe still mapped.
+    if cfg!(windows) {
+        platform::exit_now(0);
+    }
     Ok(())
 }
 
@@ -679,13 +750,13 @@ async fn off_thread<T: Send + 'static>(f: impl FnOnce() -> anyhow::Result<T> + S
 fn fatal(e: anyhow::Error) -> ! {
     elog!("synaps-avatar: {e:#}");
     std::fs::remove_file(control::socket_path()).ok();
-    std::process::exit(1);
+    platform::exit_now(1);
 }
 
 #[cfg(test)]
 mod tests {
     // Not `super::*`: gpui's glob exports a `test` attribute that would shadow `#[test]`.
-    use super::{Args, PathBuf, Result, parse_args_from, session};
+    use super::{Args, Coded, PathBuf, Result, SET_FAILED, SET_REFUSED, SET_USAGE, parse_args_from, session, set_exit, settings};
 
     fn parse(args: &[&str]) -> Result<Args> {
         parse_args_from(args.iter().map(|s| s.to_string()))
@@ -719,6 +790,41 @@ mod tests {
             assert!(e.contains("exclude each other"), "{e}");
         }
         assert!(parse(&["--socket"]).err().expect("no path").to_string().contains("needs a socket path"));
+    }
+
+    /// Her installer's Voice page: `--set` takes its keys (and nothing else) to her settings writer.
+    #[test]
+    fn set_takes_the_installers_keys_only() {
+        let a = parse(&["--set", "voice.enabled=true", "--set", "voice.wake_word=off", "--set", "voice.mic=Microphone (USB Audio)"]).unwrap();
+        assert_eq!(a.set.len(), 3);
+        assert!(parse(&["--set", "voice.mic="]).is_ok(), "empty: Windows' default");
+        for bad in ["voice.enabled=maybe", "brain.attention=off", "voice.enabled", "voice.voice=af_heart"] {
+            let e = parse(&["--set", bad]).err().expect(bad);
+            assert_eq!(e.downcast_ref::<Coded>().map(|c| c.0), Some(SET_USAGE), "{bad}: a bad --set exits {SET_USAGE}");
+        }
+        let e = parse(&["--set"]).err().expect("no KEY=VALUE");
+        assert_eq!(e.downcast_ref::<Coded>().map(|c| c.0), Some(SET_USAGE));
+        let dir = std::env::temp_dir().join(format!("sa-set-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("settings.toml");
+        std::fs::write(&p, "# his\n[voice]\nspeed = 1.1 # mine\n").unwrap();
+        assert!(settings::write_at(&p, &a.set).unwrap());
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(text.starts_with("# his\n[voice]\nspeed = 1.1 # mine\n"), "{text}");
+        let v = settings::Settings::parse(&text).unwrap().voice;
+        assert!(v.enabled && !v.wake_word && v.mic == "Microphone (USB Audio)");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `--set`'s exit codes, for her installer: a refused file (a typo, unreadable) is 3, a write
+    /// that can't be done is 4; a bad `--set` is 2 (above).
+    #[test]
+    fn set_exit_codes_say_what_went_wrong() {
+        use settings::WriteError::*;
+        assert_eq!(set_exit(&Typo { line: Some(3), detail: "expected `=`".into() }), SET_REFUSED);
+        assert_eq!(set_exit(&Unreadable("access denied".into())), SET_REFUSED);
+        assert_eq!(set_exit(&Failed("disk full".into())), SET_FAILED);
+        assert_eq!(set_exit(&Invalid("attention: sideways".into())), SET_FAILED);
     }
 
     #[test]

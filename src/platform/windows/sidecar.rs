@@ -21,7 +21,7 @@ use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::Once;
+use std::sync::{Mutex, Once};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -33,11 +33,22 @@ const GOOD_RUN: Duration = Duration::from_secs(60);
 const MAX_WAIT: Duration = Duration::from_secs(60);
 
 static WANT: AtomicBool = AtomicBool::new(false);
+/// His microphone (`[voice] mic`) as she runs with it: her last good settings, never the file
+/// read again (a typo elsewhere in it must not swap his mic for the default; the wake word keeps
+/// the mic open).
+static MIC: Mutex<String> = Mutex::new(String::new());
 static STARTED: Once = Once::new();
 
-/// Whether the sidecar should run (`[voice] enabled`), called every tick: the first `true`
-/// starts the supervisor; it starts, restarts and stops the sidecar from then on.
-pub fn voice_sidecar(on: bool) {
+/// Whether the sidecar should run (`[voice] enabled`) and on which microphone (`[voice] mic`;
+/// empty: Windows' default), called every tick: the first `true` starts the supervisor; it
+/// starts, restarts and stops the sidecar from then on. The mic is read at each start.
+pub fn voice_sidecar(on: bool, mic: &str) {
+    {
+        let mut m = MIC.lock().unwrap_or_else(|p| p.into_inner());
+        if *m != mic {
+            mic.clone_into(&mut *m);
+        }
+    }
     WANT.store(on, Ordering::Relaxed);
     if !on || std::env::var_os("SA_BRAIN_SYNTH").is_some() || std::env::var("CAPRI_VOICE_SPAWN").is_ok_and(|v| v == "0") {
         return;
@@ -135,6 +146,16 @@ fn start(dir: &Path, log: &Path, job: &Job) -> io::Result<Child> {
     }
     let out = open_log(log)?;
     let err = out.try_clone()?;
+    let mic = MIC.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    let mut c = command(dir, &mic);
+    c.stdout(out).stderr(err);
+    launch(&mut c, job)
+}
+
+/// The sidecar's command: the bundle's interpreter on `capri-voice`, no console window. `mic`
+/// (`[voice] mic`): its capture device, by name; empty: Windows' default, and a
+/// `CAPRI_VOICE_SOURCE` she inherited is not passed on.
+fn command(dir: &Path, mic: &str) -> Command {
     let mut c = Command::new(dir.join("python").join("python.exe"));
     c.arg(dir.join("capri-voice"))
         .current_dir(dir)
@@ -142,10 +163,13 @@ fn start(dir: &Path, log: &Path, job: &Job) -> io::Result<Child> {
         .env("PYTHONUTF8", "1")
         .env("PYTHONIOENCODING", "utf-8")
         .stdin(Stdio::null())
-        .stdout(out)
-        .stderr(err)
         .creation_flags(CREATE_NO_WINDOW);
-    launch(&mut c, job)
+    if mic.is_empty() {
+        c.env_remove("CAPRI_VOICE_SOURCE");
+    } else {
+        c.env("CAPRI_VOICE_SOURCE", mic);
+    }
+    c
 }
 
 /// Spawn `c` and put it in the job; a child that can't be put there is killed (it would outlive
@@ -244,6 +268,22 @@ mod tests {
         assert_eq!(find_bundle(Some(d.join("nothing")), Some(&d)), Some(b.clone()), "a wrong CAPRI_VOICE_BUNDLE falls through");
         assert_eq!(find_bundle(Some(b.clone()), None), Some(b));
         std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// His mic reaches the sidecar as she runs with it (never the file read again); none:
+    /// Windows' default, and a CAPRI_VOICE_SOURCE she inherited is dropped, not passed on.
+    #[test]
+    fn the_sidecar_gets_his_mic_or_none() {
+        let source = |c: &Command| {
+            c.get_envs().find(|(k, _)| k.to_str() == Some("CAPRI_VOICE_SOURCE")).map(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
+        };
+        let d = Path::new(r"C:\voice");
+        assert_eq!(source(&command(d, "Microphone (USB Audio)")), Some(Some("Microphone (USB Audio)".into())));
+        assert_eq!(source(&command(d, "")), Some(None), "removed, not inherited");
+        voice_sidecar(false, "Microphone (USB Audio)");
+        assert_eq!(*MIC.lock().unwrap(), "Microphone (USB Audio)");
+        voice_sidecar(false, "");
+        assert_eq!(*MIC.lock().unwrap(), "");
     }
 
     /// The job kills its child when its last handle closes: she is that handle.

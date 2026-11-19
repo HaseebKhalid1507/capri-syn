@@ -294,8 +294,9 @@ impl Avatar {
     /// With voice on, the sidecar is kept connected (at start, and after it went away), so a
     /// reply to an event can be heard before he ever pressed the talk key.
     pub(super) fn voice_keepalive(&mut self, now: Instant, cx: &mut Context<Self>) {
-        // Windows: she runs the sidecar while voice is on (Linux: systemd does; nothing here).
-        crate::platform::voice_sidecar(self.voice_on());
+        // Windows: she runs the sidecar while voice is on, on his microphone as her running
+        // settings have it (Linux: systemd does; nothing here).
+        crate::platform::voice_sidecar(self.voice_on(), &self.voice.cfg.mic);
         if !self.voice_on() || self.voice.link.is_some() || self.voice.retry_at.is_some_and(|t| now < t) {
             return;
         }

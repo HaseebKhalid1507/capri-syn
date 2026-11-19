@@ -67,6 +67,40 @@ const REMOVE_WAIT: Duration = Duration::from_secs(1);
 /// `TaskbarCreated` (one value for the whole session, from `RegisterWindowMessageW`).
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
 
+/// Her icon's ids while it may be in the tray (her window, her GUID; 0: none), for an end that
+/// can't go through her tray's thread (`delete_now`). Cleared when that thread takes it out.
+static LIVE: Mutex<(isize, u128)> = Mutex::new((0, 0));
+
+fn forget_live(h: HWND) {
+    let mut l = LIVE.lock().unwrap_or_else(|p| p.into_inner());
+    if l.0 == h.0 as isize {
+        *l = (0, 0);
+    }
+}
+
+/// Her icon out of the tray now, from whichever thread ends her (`platform::exit_now`: the quit
+/// watchdog, a fatal exit), never through her tray's thread (it may be the one that's stuck): by
+/// her GUID and by her window's id, as `delete_any`. On a thread of its own, waited for `within`
+/// at most, so a hung Explorer can't hold her end. False: nothing to do (her tray took it out
+/// already), or it didn't answer in time.
+pub(super) fn delete_now(within: Duration) -> bool {
+    let (h, g) = std::mem::take(&mut *LIVE.lock().unwrap_or_else(|p| p.into_inner()));
+    if h == 0 {
+        return false;
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new().name("tray-out".into()).spawn(move || {
+        let h = HWND(h as *mut _);
+        let none = NOTIFY_ICON_DATA_FLAGS(0);
+        unsafe {
+            let _ = Shell_NotifyIconW(NIM_DELETE, &data_for(h, Some(GUID::from_u128(g)), none));
+            let _ = Shell_NotifyIconW(NIM_DELETE, &data_for(h, None, none));
+        }
+        tx.send(()).ok();
+    });
+    spawned.is_ok() && rx.recv_timeout(within).is_ok()
+}
+
 /// What the core and the tray's thread share.
 #[derive(Default)]
 struct Shared {
@@ -308,6 +342,7 @@ fn delete(h: HWND, s: &mut State) {
     if std::mem::replace(&mut s.left, true) {
         return;
     }
+    forget_live(h);
     let _ = unsafe { KillTimer(Some(h), ADD_TIMER) };
     let shown = s.shared.lock().map(|mut g| std::mem::replace(&mut g.shown, false)).unwrap_or(true);
     unsafe {
@@ -323,6 +358,7 @@ fn delete(h: HWND, s: &mut State) {
 /// Out of the tray by every id she may have, without her state (it is in use below: the
 /// session ends while a call of hers waits on the shell).
 fn delete_any(h: HWND) {
+    forget_live(h);
     let none = NOTIFY_ICON_DATA_FLAGS(0);
     unsafe {
         let _ = Shell_NotifyIconW(NIM_DELETE, &data_for(h, Some(GUID::from_u128(GUID_NOW.get())), none));
@@ -668,6 +704,7 @@ pub(super) fn start(icon: TrayIcon, instance: &str, grant: Arc<AtomicU64>, on: B
         };
         STATE.with(|st| *st.borrow_mut() = Some(s));
         GUID_NOW.set(guid.to_u128());
+        *LIVE.lock().unwrap_or_else(|p| p.into_inner()) = (h.0 as isize, guid.to_u128());
         // Her side goes on now; the shell is called from the loop.
         let _ = unsafe { PostMessageW(Some(h), WM_TRAY_ADD, WPARAM(0), LPARAM(0)) };
         tx.send(Ok(h.0 as isize)).ok();
@@ -778,10 +815,18 @@ mod tests {
 
     /// The test's own instance: never the GUID of a real run of hers on this machine.
     const TEST: &str = "tray test";
+    /// The cut-short end's test: an instance of its own.
+    const CUT: &str = "tray test, cut short";
+    /// The live tray tests one at a time: `LIVE` is one per process, as her tray is.
+    static LIVE_TEST: Mutex<()> = Mutex::new(());
 
     /// Her icon as the shell knows it (by the GUID, which a fresh start always gets here).
     fn found_by(h: HWND) -> NOTIFYICONIDENTIFIER {
-        NOTIFYICONIDENTIFIER { cbSize: std::mem::size_of::<NOTIFYICONIDENTIFIER>() as u32, hWnd: h, uID: UID, guidItem: guid(TEST) }
+        found_as(h, TEST)
+    }
+
+    fn found_as(h: HWND, instance: &str) -> NOTIFYICONIDENTIFIER {
+        NOTIFYICONIDENTIFIER { cbSize: std::mem::size_of::<NOTIFYICONIDENTIFIER>() as u32, hWnd: h, uID: UID, guidItem: guid(instance) }
     }
 
     /// Every pick in a menu, top to bottom, choices in place.
@@ -990,6 +1035,7 @@ mod tests {
             elog!("tray test: skipped (not CI; SA_TRAY_TEST=1 runs it here)");
             return;
         }
+        let _one = LIVE_TEST.lock().unwrap_or_else(|p| p.into_inner());
         let (tx, rx) = mpsc::channel();
         let grant = Arc::new(AtomicU64::new(0));
         let own = crate::brand::own();
@@ -1067,6 +1113,43 @@ mod tests {
         if found {
             assert!(after.is_err(), "no ghost");
         }
+        drop(t);
+    }
+
+    /// Her end cut short (the quit watchdog, a fatal exit: `platform::exit_now`): her icon out
+    /// from that thread, not her tray's, so no ghost is left in the tray; once. And after a quit
+    /// that took it out through her tray's thread, nothing left for it to do. CI only, as above.
+    #[test]
+    fn a_cut_short_end_takes_her_icon_out() {
+        if std::env::var_os("CI").is_none() && std::env::var_os("SA_TRAY_TEST").is_none() {
+            elog!("tray test: skipped (not CI; SA_TRAY_TEST=1 runs it here)");
+            return;
+        }
+        let _one = LIVE_TEST.lock().unwrap_or_else(|p| p.into_inner());
+        let icon = || {
+            let own = crate::brand::own();
+            TrayIcon { file: None, stamp: 0, w: own.width(), h: own.height(), rgba: own.into_raw() }
+        };
+        let t = start(icon(), CUT, Arc::new(AtomicU64::new(0)), Box::new(|_: TrayEv| {})).unwrap();
+        let h = t.h();
+        assert!(t.until(|t| t.shown()), "Shell_NotifyIconW(NIM_ADD) returned FALSE");
+        let found = unsafe { Shell_NotifyIconGetRect(&found_as(h, CUT)) }.is_ok();
+        assert!(delete_now(Duration::from_secs(2)), "taken out, from this thread");
+        let after = unsafe { Shell_NotifyIconGetRect(&found_as(h, CUT)) };
+        elog!("tray test: cut short; found before: {found}, after: {after:?}");
+        if found {
+            assert!(after.is_err(), "no ghost");
+        }
+        assert!(!delete_now(Duration::from_secs(2)), "once");
+        t.remove();
+        assert!(!unsafe { IsWindow(Some(h)) }.as_bool());
+        drop(t);
+
+        // A quit that took it out first (`tray_remove`): nothing for her end to do.
+        let t = start(icon(), CUT, Arc::new(AtomicU64::new(0)), Box::new(|_: TrayEv| {})).unwrap();
+        assert!(t.until(|t| t.shown()));
+        t.remove();
+        assert!(!delete_now(Duration::from_secs(2)), "her tray took it out already");
         drop(t);
     }
 }
