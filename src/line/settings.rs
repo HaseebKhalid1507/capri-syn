@@ -170,9 +170,9 @@ pub fn hold_fires(hold_at: Option<Instant>, started: Instant, page: Page, same_p
     hold_at == Some(started) && same_prompt && page == Page::Chat
 }
 
-/// The text field's height (one line): the cog stands as tall, and Settings' bar is as tall as
+/// The text field's height (one line) until it has been laid out: Settings' bar is as tall as
 /// the field's, so the swap moves nothing under it.
-const FIELD_H: f32 = super::LINE_H + 14.0;
+pub(super) const FIELD_H0: f32 = 52.0;
 const COG_W: f32 = 34.0;
 /// Her line's slot on the Settings page.
 const QUOTE_H: f32 = 30.0;
@@ -249,7 +249,6 @@ impl Line {
             .relative()
             .flex_none()
             .w(px(COG_W))
-            .h(px(FIELD_H))
             .cursor_pointer()
             .when(on, |d| d.child(theme::backdrop(cut, Fill::solid(pal.accent))).child(center().child(theme::glyph_at("back", pal.ink, pal.accent, 12.0))))
             .when(!on, |d| {
@@ -416,7 +415,7 @@ impl Line {
         let section = |name: &str| {
             div()
                 .px(px(PAD))
-                .pt(px(12.0))
+                .pt(px(10.0))
                 .pb(px(2.0))
                 .flex()
                 .items_center()
@@ -476,7 +475,7 @@ impl Line {
                 .relative()
                 .px(px(PAD))
                 .py(px(4.0))
-                .min_h(px(36.0))
+                .min_h(px(34.0))
                 .flex()
                 .items_center()
                 .gap(px(8.0))
@@ -594,7 +593,7 @@ impl Line {
             }
         }
         // As tall as chat was (the content's min height): the bar stays where the field was.
-        out.push(div().flex_1().min_h(px(10.0)).into_any_element());
+        out.push(div().flex_1().min_h(px(6.0)).into_any_element());
         // The bar where the field is, as tall as the field's: the cog (back to chat), CHAT, and
         // what came meanwhile.
         out.push(
@@ -604,12 +603,14 @@ impl Line {
                 .border_t_1()
                 .border_color(rgb(pal.rule))
                 .flex()
-                .items_center()
+                .h(px(10.0 + 1.0 + self.field_h.get()))
                 .gap(px(8.0))
                 .child(self.cog_el(cx))
                 .child(
                     div()
                         .id("set-chat")
+                        .flex()
+                        .items_center()
                         .cursor_pointer()
                         .text_size(px(12.5))
                         .font_weight(FontWeight::BOLD)
@@ -627,6 +628,7 @@ impl Line {
                 .when(p.new > 0, |d| {
                     d.child(
                         theme::plate(Cut::Swallow(4.0), Fill::solid(pal.accent))
+                            .self_center()
                             .h(px(16.0))
                             .pl(px(6.0))
                             .pr(px(10.0))

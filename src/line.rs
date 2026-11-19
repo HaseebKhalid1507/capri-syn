@@ -248,6 +248,8 @@ pub struct Line {
     /// The panel's height on chat when Settings opened: Settings is at least as tall, so the
     /// swap doesn't move its top (more only if its rows need it).
     chat_h: f32,
+    /// The field's height as last laid out (one line: the cog's; Settings' bar is as tall).
+    field_h: std::rc::Rc<std::cell::Cell<f32>>,
     on_ask: OnAsk,
     _subs: Vec<Subscription>,
 }
@@ -421,6 +423,7 @@ impl Line {
             sel: 0,
             swap: None,
             chat_h: 0.0,
+            field_h: std::rc::Rc::new(std::cell::Cell::new(settings::FIELD_H0)),
             on_ask,
             _subs: subs,
         };
@@ -1479,12 +1482,14 @@ impl Render for Line {
         // A text box you can't miss: filled, cut 9 px, edged in her red while it has the keyboard.
         let typing = self.mode == Mode::Text && !self.parked;
         let input = (self.mode == Mode::Text && !on_settings).then(|| {
-            // [cog] [field]: the cog as tall as the field's line, beside it.
-            div().px(px(PAD)).pt(px(10.0)).border_t_1().border_color(rgb(pal.rule)).flex().items_start().gap(px(8.0)).child(self.cog_el(cx)).child(
+            // [cog] [field]: the cog as tall as the field (the row stretches it), beside it.
+            let field_h = self.field_h.clone();
+            div().px(px(PAD)).pt(px(10.0)).border_t_1().border_color(rgb(pal.rule)).flex().gap(px(8.0)).child(self.cog_el(cx)).child(
                 div()
                     .flex_1()
                     .min_w(px(0.0))
                     .relative()
+                    .child(canvas(move |b, _, _| field_h.set(f32::from(b.size.height)), |_, _, _, _| {}).absolute().size_full())
                     .child(theme::backdrop(Cut::Corners(9.0), if typing { Fill::framed(pal.field, pal.accent, 2.0) } else { Fill::framed(pal.field, pal.dim, 1.0) }))
                     .flex()
                     .items_start()
