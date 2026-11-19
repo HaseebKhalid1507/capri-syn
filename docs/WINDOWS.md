@@ -49,20 +49,25 @@ What the client is for in daily use is on her instead:
 | `avatarctl talk handsfree on` | HANDS-FREE TALK in her menu or her tray's, or "Hey Capri" |
 | `avatarctl show` | SHOW in her tray's menu, or a click on her chip |
 | `avatarctl settings open [brain]` | SETTINGS in her menu or her tray's (SET UP MY BRAIN while she has none), the cog in the Line |
-| `avatarctl settings reload` | a change made in Settings applies at once. A hand edit of `settings.toml` applies when she starts again: QUIT (her menu, or her tray's), then start her from the Start menu (`synaps-avatar`) |
+| `avatarctl settings reload` | a change made in Settings applies at once. A hand edit of `settings.toml` applies when she starts again: QUIT (her menu, or her tray's), then start her from the Start menu (`synaps-avatar`); or at once, with the script below (PowerShell 7) |
 | `avatarctl quit` | QUIT in her menu (it asks twice) or in her tray's (once) |
 
 For scripts, the socket takes the same one-line commands as on Linux
 ([REFERENCE.md](REFERENCE.md#dev-control-and-test-tools)). It is `synaps-avatar.sock` in
 `[IO.Path]::GetTempPath()` (or in `%XDG_RUNTIME_DIR%` when that's set). PowerShell 7 can send one
-(Windows PowerShell 5.1's .NET has no Unix sockets); this is what CI's shots do
-(`tools/shots/scenes.ps1`):
+(Windows PowerShell 5.1's .NET has no Unix sockets; to get 7: `winget install Microsoft.PowerShell`,
+then run `pwsh`). This is what CI's shots do (`tools/shots/scenes.ps1`): her reply is one line,
+read until its newline, with a timeout.
 
 ```powershell
-$s = [Net.Sockets.Socket]::new('Unix', 'Stream', 'Unspecified')
-$s.Connect([Net.Sockets.UnixDomainSocketEndPoint]::new((Join-Path ([IO.Path]::GetTempPath()) 'synaps-avatar.sock')))
-$null = $s.Send([Text.Encoding]::UTF8.GetBytes("settings reload`n"))
-$b = [byte[]]::new(65536); [Text.Encoding]::UTF8.GetString($b, 0, $s.Receive($b)); $s.Dispose()
+$s = [Net.Sockets.Socket]::new('Unix', 'Stream', 'Unspecified'); $s.ReceiveTimeout = 5000
+try {
+    $s.Connect([Net.Sockets.UnixDomainSocketEndPoint]::new((Join-Path ([IO.Path]::GetTempPath()) 'synaps-avatar.sock')))
+    $null = $s.Send([Text.Encoding]::UTF8.GetBytes("settings reload`n"))
+    $b = [byte[]]::new(65536); $m = [IO.MemoryStream]::new()
+    do { $n = $s.Receive($b); $m.Write($b, 0, $n) } while ($n -gt 0 -and $b[$n - 1] -ne 10)
+    [Text.Encoding]::UTF8.GetString($m.ToArray()).Trim()
+} finally { $s.Dispose() }
 ```
 
 ## The installer
@@ -145,7 +150,10 @@ cargo-about, `installer/licenses/`).
   file is "unknown", `creds.rs`); her first question without a login turns it to NO BRAIN YET.
 - **Her exe is the windowed build** (`cargo rustc … /SUBSYSTEM:WINDOWS`, her binary only): no
   console window from the Start menu or at sign-in. Without a console she logs to the file above.
-  `--check` from a terminal therefore prints nothing there: read the log, or use a cargo build.
+  `--check`, `-V` and `--set` from a terminal therefore print nothing there (`--set` writes its
+  line to the log): pipe them, `& "$env:LOCALAPPDATA\Programs\synaps-avatar\synaps-avatar.exe" -V
+  2>&1 | Write-Output`. PowerShell then waits for her, shows what she printed, and `$LASTEXITCODE`
+  holds `--set`'s exit code. Or use a cargo build.
 - **Her AUMID** `Synaps.Avatar`: registered under `HKCU\Software\Classes\AppUserModelId` with
   `DisplayName` and `IconUri`, and set on the Start-menu shortcut, so toasts show under her name
   and icon. The icon is capri-syn's, `assets/icon/capri-syn.ico` (256 to 16 px) and its 256 px PNG,
@@ -317,7 +325,7 @@ What CI can't show is item 15 below.
 | notifications | toasts, see below | [VM] item 11 (after a fix) |
 | lock, sleep, idle | WTS session notifications, power broadcasts, `GetLastInputInfo` | P0 [VM] |
 | voice: the link | her end of the sidecar's link: loopback TCP after a two-token handshake (`endpoint.json` in `%LOCALAPPDATA%\capri-voice`); Linux keeps the Unix socket | CI (both ends, Rust and Python) |
-| voice: the sidecar | `tools/capri_voice_win.py`: PortAudio (WASAPI) capture and playback, SMTC pause, session-volume duck with Linux's crash repair, lock, calls (the mic privacy store), DND. The voice installer (below) puts its bundle (embeddable CPython 3.13 + wheels) beside her: `docs/design/windows-voice.md`. The lock is the session's own state (WTS): Windows 11's lock screen runs on the Default desktop | CI; [VM] item 14 (lock: after a fix); live audio: item 13 (his machine) |
+| voice: the sidecar | `tools/capri_voice_win.py`: PortAudio (WASAPI) capture and playback, SMTC pause, session-volume duck with Linux's crash repair, lock, calls (the mic privacy store), DND. The voice installer (below) puts its bundle (embeddable CPython 3.13 + wheels) beside her: `docs/design/windows-voice.md`. The lock is the session's own state (WTS): Windows 11's lock screen runs on the Default desktop | CI; [VM] item 14 (lock: after a fix); live audio: item 13 (real hardware) |
 | voice: she runs it | while `[voice] enabled`: `python.exe capri-voice` from `voice\` beside her exe (or `CAPRI_VOICE_BUNDLE`), no console window, in a job object that kills it with her (however she ends); restarted after 1, 2, 4 … 60 s; its log `%LOCALAPPDATA%\capri-voice\capri-voice.log`. Not before the models are there. `CAPRI_VOICE_SPAWN=0`: he runs it himself. `[voice] enabled` is read at start and on a `settings reload` ([Control](#control-no-avatarctl-here)); a new `[voice] mic` there starts the sidecar again on it (the sidecar reads its mic only when it starts) | CI (job, backoff, bundle lookup); [VM] item 14 |
 | voice: connecting | on a thread (a stale endpoint can't freeze her: up to ~2 s); Linux connects inline, as before | CI (a silent listener) |
 | hold-to-talk | opt-in, `[voice] hold_to_talk = true`: the summon key's press is `talk press`; her key thread then reads the key every 25 ms (`GetAsyncKeyState`, as OBS does) and its release is `talk release`. No keyboard hook. Off: the summon key is a tap, as before | CI (the state machine); [VM] item 14 |
@@ -378,7 +386,7 @@ The VM: Windows 11 Enterprise Evaluation 26H2 (build 26300), QEMU/KVM, two
 VirtIO GPU heads (1280×800 and 1920×1200), D3D on WARP (software), an HDA sound card with a silent
 input, 8 GB. Builds: main's CI installers (3713ff0) and this branch built in the VM by
 `install.ps1`'s source path. Driven from inside his session (`SendInput`, the QEMU keyboard for his
-keys and UAC); screenshots kept outside the repo. **[VM]**: true of the VM (software rendering, no real mic), to check again on his machine.
+keys and UAC); screenshots kept outside the repo. **[VM]**: true of the VM (software rendering, no real mic), to check again on real hardware.
 
 | # | what | result |
 |---|---|---|
@@ -394,7 +402,7 @@ keys and UAC); screenshots kept outside the repo. **[VM]**: true of the VM (soft
 | 10 | SMTC | **pass, one gap**. Media Player with a song: `smtc playing (Microsoft.ZuneMusic…=Playing)`, LISTENING, her headphones on; with a video: `(video)`. **Edge reports no playback type** for a video (a file or a page's `<video>`): to her it is music. A Discord call: not tried (no account in the VM) |
 | 11 | toasts | **pass after a fix**. `CAPRI // NEEDS YOU` under "synaps-avatar", the key there. It came without her face: `fs::canonicalize`'s `\\?\` path made a `file://///?/…` URI, which the shell drops silently |
 | 12 | the installer, interactively | **pass after a fix**. SmartScreen first (unsigned). The pack page: a non-pack refused, Browse (a folder picker), empty allowed; the shortcut starts her with no console; a toast shows her icon and face; autostart starts her 3.6 s after sign-in; uninstall from Settings → Apps, with her running, leaves none of hers (his settings stay). **Settings → Apps said 44.6 GB**: Inno sized the pack's line as `\*` (the root of C:) before the page had a value; fixed, and CI checks the size |
-| 13 | voice, live audio | not in the VM: his machine (mic, ears, Whisper and Kokoro speed). The bundle's onnxruntime loaded (the wake word ran), but on a VM with Build Tools, so whether a clean Windows wants the VC++ runtime is still open |
+| 13 | voice, live audio | not in the VM: real hardware (mic, ears, Whisper and Kokoro speed). The bundle's onnxruntime loaded (the wake word ran), but on a VM with Build Tools, so whether a clean Windows wants the VC++ runtime is still open |
 | 14 | voice, her side | **pass after a fix**. The voice installer (SmartScreen too) and its models window (~358 MB in ~40 s); `voice: sidecar started`, killed with her; `[voice] enabled = false` + `settings reload`: `sidecar stopped (voice off)`, on: started again; the voice uninstaller under her removes everything, she backs off (1, 2, 4, 8 s, `no models`); `hold_to_talk`: a hold listens and its release sends (`key up: transcribing`), a tap opens the Line, a release with Notepad in front ends it and Notepad keeps the keyboard, Win+L mid-hold ends it; the sidecar listens on 127.0.0.1 only: no firewall prompt. **The sidecar missed Windows 11's lock screen** (its curtain runs on the Default desktop): the wake word's mic stayed open on it for 14 s. It now asks the session (WTS) |
 | 15 | install.ps1, interactively | **pass after fixes**, below |
 

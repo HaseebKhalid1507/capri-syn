@@ -32,8 +32,9 @@ irm https://raw.githubusercontent.com/HaseebKhalid1507/capri-syn/main/install.ps
 $env:CAPRI_INSTALL_FLAGS = '--voice --yes'; irm https://raw.githubusercontent.com/HaseebKhalid1507/capri-syn/main/install.ps1 | iex
 ```
 
-Windows 11, x64. Windows 10 (1809 or newer) gets through both installers, but she has never been
-run on it: untested, and not supported yet ([WINDOWS.md](WINDOWS.md)).
+Windows 11, x64. Windows 10 (1809 or newer) and Windows 11 on Arm (x64 emulation) get through both
+installers, but she has never been run on either: untested, and not supported yet
+([WINDOWS.md](WINDOWS.md)).
 
 `CAPRI_INSTALL_FLAGS` applies to one run: install.ps1 removes it from your session once read, so a
 later bare `irm | iex` can't pick up an old `--uninstall`. (On Linux use `bash -s -- FLAGS`; a
@@ -163,7 +164,8 @@ she runs through XWayland, the X server those desktops keep for X apps.
   ([#72](https://github.com/HaseebKhalid1507/capri-syn/issues/72)): now and then her whole window's
   rectangle paints solid black behind her and her bubble, covering what's under it, more often while
   a prompt hangs below her. So far it has only been seen with no compositor running, where she cuts
-  her window to her outline with the X shape. Workaround: run a compositor (picom: `picom -b`).
+  her window to her outline with the X shape. Workaround (likely; not yet confirmed): run a
+compositor (picom: `picom -b`).
   With `[display] composited = "auto"`, the default, she switches to alpha when it starts, no
   restart.
 - **GNOME, KDE and sway** run her through XWayland, with its limits ([above](#gnome-kde-and-other-wayland-desktops)).
@@ -172,10 +174,12 @@ she runs through XWayland, the X server those desktops keep for X apps.
   for 5 min reads as away. Hyprland before 0.40 isn't supported: she takes XWayland there.
 - **Signing in is a terminal step.** Settings ▸ Brain copies the `synaps login` line; she doesn't
   run it herself yet. On Windows, Synaps 0.12's `synaps login` opens a sign-in tab cut at the URL's
-  first `&`: use her installer's own sign-in, or copy the whole URL it prints
+  first `&`: copy the whole URL it prints into your browser, or run her installer's own sign-in
+  (install.ps1 puts it there too; the default folder shown):
+  `powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Programs\synaps-avatar\steps\steps.ps1" login`
   ([WINDOWS.md](WINDOWS.md#the-installer)).
 - **Windows:** the installers are unsigned, so a browser download meets SmartScreen ("More info",
-  then "Run anyway"); Windows 10 is untested; a click on one of her notifications does nothing (as
+  then "Run anyway"); Windows 10 and Windows 11 on Arm are untested; a click on one of her notifications does nothing (as
   on Linux). Linux has no tray icon yet: HIDE's chip is the way back there.
 
 ## Flags

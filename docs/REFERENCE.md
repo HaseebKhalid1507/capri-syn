@@ -253,7 +253,7 @@ common ones with their defaults.
 | `[session] persona` | `true` | send the pack's `persona.md` as her session's system prompt |
 | `[session] persona_file` | none | a persona file of your own instead |
 | `[voice] enabled` | `false` | push-to-talk and spoken replies, through `capri-voice` |
-| `[voice] stt_model` | `"small.en"` | `"tiny.en"`, `"base.en"`, `"small.en"` or `"medium.en"` |
+| `[voice] stt_model` | `"small.en"` | `"tiny.en"`, `"base.en"`, `"small.en"` or `"medium.en"`; setup fetches only `small.en` and `base.en` ([VOICE.md](VOICE.md#settings-voice-in-configsynaps-avatarsettingstoml)) |
 | `[voice] voice` | a stock Kokoro blend | a Kokoro voice or a blend (`"af_bella:0.6,af_nicole:0.4"`); `+glitch` adds the trace |
 | `[voice] speed` | `1.2987` (1 / 0.77, her pace) | 0.5..2 |
 | `[voice] duck` | `"duck"` | other audio while she listens or speaks: `"duck"` (PipeWire, −18 dB), `"pause"` (MPRIS) or `"off"` |
@@ -288,7 +288,7 @@ synaps-avatar --set KEY=VALUE [--set KEY=VALUE ...]
 | `--check` | load and decode the pack, print a summary, exit (no window) |
 | `--dump DIR` | with `--check`: every decoded frame as a PNG, the pixels she draws at `--height` (scale it by the display's sf to see the real render) |
 | `-V`, `--version` | print `synaps-avatar <version>`, exit. Her log says it at start too: `--- synaps-avatar <version> (pid N)` |
-| `--set KEY=VALUE` | write these to `settings.toml` with her own writer (as Settings does), then exit; nothing else runs. Her Windows installer's Voice page uses it. Only `voice.enabled`, `voice.wake_word`, `voice.speak_unprompted` (`true`/`on`, `false`/`off`) and `voice.mic` (a name; empty: the default). Exit 2: a bad `--set`; 3: the file refused (a typo, unreadable); 4: it couldn't be written |
+| `--set KEY=VALUE` | write these to `settings.toml` with her own writer (as Settings does), then exit; nothing else runs. Her Windows installer's Voice page uses it. Only `voice.enabled`, `voice.wake_word`, `voice.speak_unprompted` (`true`/`on`, `false`/`off`) and `voice.mic` (a name; empty: the default). Exit 0: saved (or already so); 2: a bad `--set`; 3: the file refused (a typo, unreadable); 4: not saved (it couldn't be written, or the result wouldn't load) |
 
 `synaps-avatar --help` lists the rest (`--name`, `--threads`, `--no-verify`, `--focus-probe`).
 

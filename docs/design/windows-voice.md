@@ -239,7 +239,7 @@ What is Linux-only, and what Windows has in its place:
   - One small binary: tens of MB plus onnxruntime's DLL [G].
   - A fast start.
   - AF_UNIX on both ends, so the link doesn't change.
-  - No Python on his machine.
+  - No Python on the user's PC.
 - **Risks:**
   - Behaviour drifts from the tuned Python.
   - The espeak-ng licence.
@@ -260,7 +260,7 @@ machine. That isn't an end-user setup.
 - **VAD and the wake front end** are tiny: CPU always.
 - **Options:**
   - (i) CPU everywhere: the same numbers as Linux, no driver variance.
-  - (ii) DirectML or Windows ML as an opt-in for Kokoro, once measured on his box.
+  - (ii) DirectML or Windows ML as an opt-in for Kokoro, once measured on real hardware.
   - (iii) Vulkan whisper.cpp as an opt-in.
 - The VM can't measure any of this (WARP).
 

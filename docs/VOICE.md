@@ -20,7 +20,7 @@ Settings; the rest is the file.
 | key | default | |
 |---|---|---|
 | `enabled` | `false` | voice on: the talk key, spoken replies, and the persona lines below |
-| `stt_model` | `"small.en"` | `"tiny.en"`, `"base.en"`, `"small.en"` or `"medium.en"` |
+| `stt_model` | `"small.en"` | `"tiny.en"`, `"base.en"`, `"small.en"` or `"medium.en"`. Setup fetches `small.en` and `base.en` only: for `tiny.en` put `ggml-tiny.en-q5_1.bin` in her models folder yourself; `medium.en` is read from `~/.local/share/pywhispercpp/models/ggml-medium.en-q5_0.bin` (Windows: under `%USERPROFILE%`). Without the file her voice never gets ready (the sidecar logs why) |
 | `voice` | her voice (below) | a Kokoro voice or a voice string |
 | `speed` | `1.2987` | 0.5 to 2; 1.2987 = 1/0.77 goes with the default voice |
 | `pace` | `"stretch"` | how the speed is made: `"stretch"` (Kokoro at its own speed, the time scaled in the pitch pass) or `"model"` (Kokoro's speed) |
@@ -201,7 +201,7 @@ a settings error.
 ## "Hey Capri": the wake word (on by default)
 
 **On by default** (since 2026-11-16), with the known gaps below: far and fast/casual speech. Round 3 measured it on one tester's own takes (recorded with `tools/capri-wake-record`; they stay on
-his machine and only ids and counts left it). Everything it ships with (stage 1's head, the filter's two
+the tester's machine and only ids and counts left it). Everything it ships with (stage 1's head, the filter's two
 thresholds) was fitted on stock synthetic voices only (Kokoro packs, espeak-ng), never on a recording of anyone.
 
 - **On** whenever voice is on, unless `wake_word = false` (then nothing about it loads). One mic
