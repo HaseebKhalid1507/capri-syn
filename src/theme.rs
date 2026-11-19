@@ -968,7 +968,7 @@ mod tests {
         for level in 0..=5 {
             let s = format!("HANDS-FREE 1:{level:02} {}{}", "▮".repeat(level), "▯".repeat(5 - level));
             let runs = metered_runs(&s);
-            assert!(runs.iter().all(|r| !matches!(r, Metered::Words(t) if t.contains(|c: char| c == '▮' || c == '▯'))), "{s:?}: {runs:?}");
+            assert!(runs.iter().all(|r| !matches!(r, Metered::Words(t) if t.contains(['▮', '▯']))), "{s:?}: {runs:?}");
             assert_eq!(runs.iter().filter(|r| matches!(r, Metered::Meter(b) if b.len() == 5)).count(), 1, "{s:?}");
         }
     }
