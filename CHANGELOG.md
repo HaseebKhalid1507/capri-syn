@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Docs: true for v1
+- docs/ says what main does: her Settings page, menu and Windows tray; Settings ▸ Brain as the way to
+  a brain; Windows 10 untested; no `capri-ctl` (WINDOWS.md's Control: what Windows has instead);
+  Known issues in INSTALL.md (the dark slab on X11 without a compositor, #72, with its workaround);
+  no one's names or machines.
+
 ### Her brain, the last nits (Settings PR 6)
 - A local URL changed while the daemon runs: Synaps reads it at its start, so it keeps trying the
   old one. When its error names another URL than the one she shows, Settings ▸ Brain drops the ✓

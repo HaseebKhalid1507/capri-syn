@@ -40,15 +40,21 @@ A fresh session, in the terminal. Hers is listed when you open it. `/sessions` s
 
 ## Her brain
 
-She uses whichever model your Synaps is logged in to. Until it has one her tag reads NO BRAIN YET,
-and her answer to your first message ends on the command. Log in, or change it:
+She uses whichever model your Synaps is logged in to. Until it has one her tag reads NO BRAIN YET
+(on Windows, from your first message), and a click on her opens **Settings ▸ Brain**: the ways to
+give her one, Claude first, then RUN LOCAL (below) and the other providers. For now a sign-in there
+copies its line for a terminal, and she notices the login by herself. The lines:
 
 ```sh
 synaps login --provider claude     # a Claude subscription: it opens your browser
 synaps login                       # or pick a provider: a subscription, an API key
 ```
 
-To give her a model of her own, set it in `~/.config/synaps-avatar/settings.toml`:
+On Windows a terminal's `synaps login` opens a cut sign-in page (Synaps 0.12): copy the whole URL it
+prints into your browser, or use her installer's sign-in ([WINDOWS.md](WINDOWS.md#the-installer)).
+
+To give her a model of her own, pick it under MODEL in Settings ▸ Brain (her provider's models), or
+set it in `~/.config/synaps-avatar/settings.toml` (Windows: `%APPDATA%\synaps-avatar\settings.toml`):
 
 ```toml
 [session]
@@ -64,6 +70,14 @@ has 24 GB or more, and cuts a longer prompt without a word. So, once Ollama runs
 ollama pull qwen3:8b                                           # ~5 GB
 printf 'FROM qwen3:8b\nPARAMETER num_ctx 16384\n' > /tmp/Modelfile
 ollama create capri-qwen3 -f /tmp/Modelfile                    # the same model, a 16k context
+```
+
+On Windows, in PowerShell:
+
+```powershell
+ollama pull qwen3:8b
+"FROM qwen3:8b`nPARAMETER num_ctx 16384" | Set-Content "$env:TEMP\Modelfile"
+ollama create capri-qwen3 -f "$env:TEMP\Modelfile"
 ```
 
 then in her settings:
@@ -106,13 +120,16 @@ run commands, as you.
   depends on what your Synaps has installed. Don't count on a prompt you haven't seen.
 - **She never approves a prompt for you**, and events from `capri-watch` never make her act on her own:
   anything risky waits for your yes.
-- **Want her to only talk?** Take the tools away in `~/.synaps-cli/config`:
+- **Want her to only talk?** Take the tools away in `~/.synaps-cli/config` (Windows:
+  `%USERPROFILE%\.synaps-cli\config`):
   `disabled_tools = bash, shell_start, write, edit, multi_edit` (the built-ins that run commands or
   change files). That applies to every session on that daemon.
 - **Doing something you don't trust?** Use a container or a VM. Synaps says the same.
 
 ## Leaving
 
-`install.sh --uninstall` removes her. Synaps stays, because other clients of its daemon may use it: the
-binary is `~/.cargo/bin/synaps` and its data is in `~/.synaps-cli`. The uninstaller's last lines say
-where Synaps is and what to delete if you don't want it either.
+`install.sh --uninstall` removes her (Windows: Settings ▸ Apps ▸ capri-syn, or `install.ps1
+--uninstall`). Synaps stays, because other clients of its daemon may use it: the binary is
+`~/.cargo/bin/synaps` and its data is in `~/.synaps-cli` (Windows: under `%USERPROFILE%`). The
+uninstaller's last lines say where Synaps is and what to delete if you don't want it either. On
+Windows, when her installer installed Synaps, its uninstaller asks whether to remove that too.

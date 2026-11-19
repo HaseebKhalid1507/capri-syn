@@ -1,11 +1,11 @@
 # Voice on Windows: the capri-voice sidecar there
 
-**Status:** decided: **A, the bundled Python sidecar** (Jawz, for Haseeb). **V1a** (VM-free, CI-checked)
+**Status:** decided: **A, the bundled Python sidecar**. **V1a** (VM-free, CI-checked)
 built the link and the sidecar's Windows layer, and a script that builds the bundle. **V1b** (VM-free,
 CI-checked): she starts the sidecar, connects off her UI thread, the voice installer with the model
 fetch, hold-to-talk. What they are, and what is left, comes first below. The options as written before the decision follow, for the record. Sizes are
 agent-days and guesses **[G]**. **[checked]** marks a fact read from a source (named). **[VM]** marks
-what needs a real Windows desktop with audio (his machine: the capri-win VM has no real audio and no GPU).
+what needs a real Windows desktop with audio (real hardware: the Windows 11 VM has no real audio and no GPU).
 
 ## V1a: what is built
 
@@ -100,7 +100,7 @@ the wake word's 2.4).
 **Nothing is missing:** every package has a Windows x64 wheel for CPython 3.13. **Missing for ARM64 Windows:**
 pywhispercpp has no win_arm64 wheel; numpy, onnxruntime, espeakng-loader, sounddevice and winrt do.
 **[VM]:** onnxruntime on a clean Windows may want the VC++ runtime (the runners have it installed): run
-the bundle on the capri-win VM before shipping it.
+the bundle on the Windows 11 VM before shipping it.
 
 ### Into the installer: picked in V1b, a separate download (option (1))
 The options were:

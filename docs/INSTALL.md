@@ -18,7 +18,8 @@ curl -fsSL https://raw.githubusercontent.com/HaseebKhalid1507/capri-syn/main/ins
 
 Run it as yourself, not with sudo: it refuses root unless `--allow-root` (and always when `HOME` is
 someone else's, as `sudo` leaves it). It never runs `sudo` on its own. It prints the exact package
-command, then asks; `--yes` answers for it. x86_64, glibc 2.35 or newer for the prebuilt binary (older: `--from-source`). Tested on
+command, then asks; `--yes` answers for it. The prebuilt binary is x86_64 with glibc 2.35 or newer;
+on anything else (an older glibc, another architecture) it builds her from source by itself. Tested on
 Debian 12, Ubuntu 24.04, Arch and Fedora (see below). openSUSE (zypper) is wired, not tested.
 
 ## Windows
@@ -30,6 +31,9 @@ irm https://raw.githubusercontent.com/HaseebKhalid1507/capri-syn/main/install.ps
 # or from the environment (read when given no flags, said in the banner, then cleared):
 $env:CAPRI_INSTALL_FLAGS = '--voice --yes'; irm https://raw.githubusercontent.com/HaseebKhalid1507/capri-syn/main/install.ps1 | iex
 ```
+
+Windows 11, x64. Windows 10 (1809 or newer) gets through both installers, but she has never been
+run on it: untested, and not supported yet ([WINDOWS.md](WINDOWS.md)).
 
 `CAPRI_INSTALL_FLAGS` applies to one run: install.ps1 removes it from your session once read, so a
 later bare `irm | iex` can't pick up an old `--uninstall`. (On Linux use `bash -s -- FLAGS`; a
@@ -51,7 +55,7 @@ its finish page offers the Claude sign-in: [docs/WINDOWS.md](WINDOWS.md#the-inst
 | # | step | Linux | Windows |
 |---|---|---|---|
 | 1 | **Synaps** | When `synaps` is missing or older than `synaps_min` (0.11.0: her client speaks protocol 3), it says what Synaps is (her brain: an open-source agent runtime, yours to keep or remove) and which of your shell files its installer will add a PATH line to (`. "$HOME/.cargo/env"` in `~/.profile`, the bash rc files you have, a zsh one, fish's `conf.d`; none when `~/.cargo/bin` is on your PATH already), then **asks** (`--yes` is the consent; declined, it stops and prints how to install it yourself with `SYNAPS_NO_MODIFY_PATH=1`). Then it runs SynapsCLI's own `synaps-installer.sh` from the release the manifest pins (`synaps_pin`), checked against the manifest's sha256 of it. Never the latest: her client speaks one protocol exactly. | `synaps-installer.ps1` of the release the manifest pins (`synaps_pin`, one she was run against), checked against its pinned SHA-256; never the latest (a daemon on another protocol fails the daemon step). The edit it names is `~\.cargo\bin` on your user `Path`. |
-| 2 | **Her binary** | The release tarball (`synaps-avatar-x86_64-unknown-linux-gnu.tar.gz`), checked against its `.sha256`. With no release (today), or with `--from-source`: rustup if missing (`rustup-init` checked against its sha256, `--no-modify-path`), the toolchain `rust-toolchain.toml` pins, and `cargo build --release --locked`, in `~/.cache/synaps-avatar/installer`. Before that it prints the distro's packages (apt, pacman, dnf or zypper), the `-dev` libraries for a source build and the runtime ones for a binary, then asks. It checks for a Vulkan driver and only says which one to install. | Her installer (`capri-syn-setup-x86_64.exe`), checked against its `.sha256`, run unattended (`/SYNAPS=skip /PACK=skip`: those are this script's steps). Without one: rustup, Visual Studio's C++ build tools (winget, asks), and a windowed build. |
+| 2 | **Her binary** | The release tarball (`synaps-avatar-x86_64-unknown-linux-gnu.tar.gz`), checked against its `.sha256`. With no release binary for this machine (none published yet, not x86_64, or a glibc older than 2.35), or with `--from-source`: rustup if missing (`rustup-init` checked against its sha256, `--no-modify-path`), the toolchain `rust-toolchain.toml` pins, and `cargo build --release --locked`, in `~/.cache/synaps-avatar/installer`. Before that it prints the distro's packages (apt, pacman, dnf or zypper), the `-dev` libraries for a source build and the runtime ones for a binary, then asks. It checks for a Vulkan driver and only says which one to install. | Her installer (`capri-syn-setup-x86_64.exe`), checked against its `.sha256`, run unattended (`/SYNAPS=skip /PACK=skip`: those are this script's steps). Without one: rustup, Visual Studio's C++ build tools (winget, asks), and a windowed build. |
 | 3 | **Her art pack** | `tools/make-pack`: CapriCore v1.0.4 plus lachy's desktop art at their pinned commits, every file checked against `tools/*.sha256`, built with Python and fonttools in a venv of its own (never system-wide). It prints lachy's licence and Required Notice lines. A pack built from the same inputs is left alone. Mochi's art is **not** fetched: `--with-local-art` adds it, for local personal use only. | The same make-pack and pins, run by `packaging/windows/steps.ps1` (her installer's "Download her art" runs the same script) in CPython's embeddable package and pip, pinned and SHA-256 checked, in `%LOCALAPPDATA%\synaps-avatar\installer`: no Python of yours needed or touched. |
 | 4 | **Daemon and her session** | When systemd's user manager runs, it writes and enables a `synaps-daemon.service` user unit; a unit of your own is kept, and enabled only if you agree. With no user manager, it starts the daemon now, and her autostart line starts it at login. It checks the daemon speaks protocol 3; a daemon that speaks another, or doesn't say, stops the install (exit 1, with how to fix it: an older daemon still running after this run installed or upgraded Synaps is stopped, `synaps daemon stop`; an upgrade says so in step 1 too). Her session `capri` is her own, as before (attached if live, else resumed, else made). | It starts `synaps daemon --detach` now, plus a Run value (`synaps-daemon`) for sign-in. A `synaps-daemon` value of your own is left as it is and never recorded. It checks the daemon speaks protocol 3; one that speaks another, or doesn't say, stops the install (exit 1, with how to fix it: after this run installed or upgraded Synaps, it's an older daemon still running, `synaps daemon stop`; an upgrade says so in step 1 too). Her installer finishes anyway and says it on its finish page. |
 | 5 | **Summon key** | i3, sway or Hyprland: shows the binding (`$mod+c`: press and release, so a hold talks). With your consent (`--yes`) it appends it between marker comments, after a timestamped backup. The key is named as your config sets `$mod` (Super for Mod4, Alt for Mod1). One that is already taken is reported, not overridden; on Hyprland (whose stock config closes a window on Super+C) it offers Super+Alt+C instead, Windows' key, when that one's free. GNOME: it offers a custom keyboard shortcut, Super+Alt+C running `avatarctl talk tap`, only when you say yes on the terminal ([below](#gnome-kde-and-other-wayland-desktops)). On any other desktop it tells you what to bind (`avatarctl talk tap`). | Win+Alt+C: she registers it herself. |
@@ -62,11 +66,16 @@ At the end comes an `installed:` summary: what is where, how the daemon starts, 
 how to start her, and how to remove her (as you ran it: the checkout's script, or the piped form).
 
 When Synaps has no model yet (no login in `~/.synaps-cli/auth.json`, no `local/` model in its config
-or her `[session]`), one line says so: signing in is hers to walk you through, not a picker in the
-installer. Until Synaps has a model her tag reads NO BRAIN YET, and her answer to your first message
-ends on the command (`synaps login --provider claude` for Claude). The daemon picks a login up on her
-next turn, with no restart: Synaps reads `auth.json` per request. When Synaps was already there with
-a model, one line says her session is `capri`.
+or her `[session]`), one line says so: giving her a brain happens in her, not in a picker in the
+installer. Her tag reads NO BRAIN YET, her first words end on a red `SET ME UP ▸`, and while she has
+none a click on her or her summon key opens the Line on **Settings ▸ Brain**: SIGN IN WITH CLAUDE
+(and each provider under OTHER) copies its `synaps login --provider …` line for you to run in a
+terminal (she doesn't run the sign-in herself yet), and RUN LOCAL opens the local-model steps
+([UNDER-THE-HOOD.md](UNDER-THE-HOOD.md#her-brain)). She notices the login by herself, and the daemon
+picks it up on her next turn, with no restart: Synaps reads `auth.json` per request. On Windows her
+installer's finish page offers the Claude sign-in itself, and her tag reads ONLINE until your first
+message ([WINDOWS.md](WINDOWS.md#the-installer)). When Synaps was already there with a model, one
+line says her session is `capri`.
 
 Then it starts her, `--no-autostart` or not (that flag is about login), the way autostart will
 (Linux: `env SA_BACKEND=x11` off Hyprland and i3, so GNOME and KDE on Wayland run her through
@@ -147,6 +156,27 @@ she runs through XWayland, the X server those desktops keep for X apps.
   keeps nothing): when they don't hold it, you get a warning and the exact `gsettings` commands to
   run yourself, and `--uninstall` keeps that line in its receipt so the next one tries again. On
   KDE, bind `avatarctl talk tap` in its Shortcuts settings yourself.
+
+## Known issues
+
+- **A dark slab on X11 without a compositor**
+  ([#72](https://github.com/HaseebKhalid1507/capri-syn/issues/72)): now and then her whole window's
+  rectangle paints solid black behind her and her bubble, covering what's under it, more often while
+  a prompt hangs below her. So far it has only been seen with no compositor running, where she cuts
+  her window to her outline with the X shape. Workaround: run a compositor (picom: `picom -b`).
+  With `[display] composited = "auto"`, the default, she switches to alpha when it starts, no
+  restart.
+- **GNOME, KDE and sway** run her through XWayland, with its limits ([above](#gnome-kde-and-other-wayland-desktops)).
+  None of them has been tried on a real session yet: CI and the test containers stand in for them.
+- **Hyprland** has no idle time for her yet: your presence is the pointer moving, so typing alone
+  for 5 min reads as away. Hyprland before 0.40 isn't supported: she takes XWayland there.
+- **Signing in is a terminal step.** Settings ▸ Brain copies the `synaps login` line; she doesn't
+  run it herself yet. On Windows, Synaps 0.12's `synaps login` opens a sign-in tab cut at the URL's
+  first `&`: use her installer's own sign-in, or copy the whole URL it prints
+  ([WINDOWS.md](WINDOWS.md#the-installer)).
+- **Windows:** the installers are unsigned, so a browser download meets SmartScreen ("More info",
+  then "Run anyway"); Windows 10 is untested; a click on one of her notifications does nothing (as
+  on Linux). Linux has no tray icon yet: HIDE's chip is the way back there.
 
 ## Flags
 

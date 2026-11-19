@@ -1,6 +1,8 @@
 # Reference
 
 Reference for `synaps-avatar`, the crate behind capri-syn. The [README](../README.md) is the tour.
+Paths here are Linux's: Windows keeps the same files under `%APPDATA%` and `%LOCALAPPDATA%`
+([WINDOWS.md](WINDOWS.md)), and has no `avatarctl` ([what it has instead](WINDOWS.md#control-no-avatarctl-here)).
 
 ## The session rules
 
@@ -18,11 +20,16 @@ Reference for `synaps-avatar`, the crate behind capri-syn. The [README](../READM
 - **Never `subconscious`.** She refuses to attach to the session named `subconscious`, by name or by id.
   The refusal happens at argument parsing, when resolving the session list, and on `Attached`
   (she detaches and exits with status 2).
-- **Hide and quit.** HIDE (right-click menu) parks her: she glitches out and a small chip with her name
-  sits at the edge of her monitor; a click on it brings her back, as does `avatarctl show`. QUIT exits
-  and asks for a second click first. Under QUIT, one dim row that isn't a button: the daemon's version
-  and her session's model (`SYNAPS 0.12.0 · CLAUDE-OPUS-5`, the provider left off), once the daemon has
-  said them.
+- **Her menu** (a right-click on her; on Windows her tray icon's right-click shows the same rows,
+  `menu.rs`): RESET POSITION, DND 1 HOUR (DND OFF), ATTENTION: MIX / HANG ONLY / OFF (a click steps
+  to the next; only while `[brain] enabled`), HANDS-FREE TALK (END HANDS-FREE; only with voice and
+  `[voice] handsfree` on), COPY LAST REPLY, HIDE (SHOW), SETTINGS (SET UP MY BRAIN while she has
+  none) and QUIT.
+- **Hide and quit.** HIDE parks her: she glitches out and a small chip with her name sits at the edge
+  of her monitor; a click on it brings her back, as does `avatarctl show` (Windows: SHOW in her
+  tray's menu). QUIT exits and asks for a second click first (the tray's quits at once). Under QUIT,
+  one dim row that isn't a button: the daemon's version and her session's model (`SYNAPS 0.12.0 ·
+  SONNET 4.6`, as Settings' ABOUT names it), once the daemon has said them.
 - **Her first words.** On her first launch ever (`state.json` has no `met` and nothing else of hers:
   no `ground`, `seenUnix`, `brain` or `perch`), once she has landed and nothing else is on, she says
   "Hey. I'm Capri. Click me when you want me. Headpats also accepted.", then `met` is set. Where she
@@ -91,6 +98,16 @@ Reference for `synaps-avatar`, the crate behind capri-syn. The [README](../READM
   `[session] model` (applied on `avatarctl settings reload`, or MODEL on Settings ▸ Brain); not
   `/model`, which the daemon doesn't take (the Line would send it to the model as words). Anything
   else: `‹error: …›` (cut at 90 characters), annoyed, as before.
+- **Settings**: the Line's second page. The cog left of its field (or Ctrl+, in the Line) flips
+  between chat and Settings, and her menu's SETTINGS opens the Line on it; Esc goes back one step.
+  Its rows: BRAIN (below), ATTENTION (`[brain] attention`: MIX, HANG ONLY or OFF; locked, "brain is
+  off", while `[brain] enabled = false`), "HEY CAPRI" (`[voice] wake_word`; locked, "voice is off",
+  while `[voice] enabled = false`) and ABOUT (`CAPRI <version> · SYNAPS <version> · <model>`, with
+  GITHUB ▸ and COPY, which copies that line with the OS and architecture, for a bug report). A
+  change is written to `settings.toml` by her own writer (that one key; your comments, order and
+  spacing kept, the file replaced atomically) and applied at once. A file she can't read, or one
+  with a typo, is never written over: she says so on the page, and the change isn't made.
+  `avatarctl settings open [brain]|close` drives it.
 - **Settings ▸ Brain.** Settings' first row, BRAIN, shows her model and its login (`✓ CLAUDE ·
   SONNET 4.6`, `● NO BRAIN YET` with a red `SET UP ▸`); ⏎ (or its button) opens the Brain screen:
   SIGN IN WITH CLAUDE, RUN LOCAL (its server looked at: `provider.local.url`'s last line as the
@@ -198,9 +215,11 @@ Reference for `synaps-avatar`, the crate behind capri-syn. The [README](../READM
 
 ## Every setting
 
-`~/.config/synaps-avatar/settings.toml`; every key is optional, and an unknown key or an out-of-range
-value rejects the whole file (the previous values stay). `avatarctl settings reload` re-reads it. The
-[README](../README.md#configure) shows the common ones with their defaults.
+`~/.config/synaps-avatar/settings.toml` (Windows: `%APPDATA%\synaps-avatar\settings.toml`); every key
+is optional, and an unknown key or an out-of-range value rejects the whole file (the previous values
+stay). `avatarctl settings reload` re-reads it (Windows: [Control](WINDOWS.md#control-no-avatarctl-here));
+Settings writes and applies its own keys at once. The [README](../README.md#configure) shows the
+common ones with their defaults.
 
 | key | default | |
 |---|---|---|
@@ -234,7 +253,7 @@ value rejects the whole file (the previous values stay). `avatarctl settings rel
 | `[session] persona` | `true` | send the pack's `persona.md` as her session's system prompt |
 | `[session] persona_file` | none | a persona file of your own instead |
 | `[voice] enabled` | `false` | push-to-talk and spoken replies, through `capri-voice` |
-| `[voice] stt_model` | `"small.en"` | `"small.en"`, `"base.en"` or `"medium.en"` |
+| `[voice] stt_model` | `"small.en"` | `"tiny.en"`, `"base.en"`, `"small.en"` or `"medium.en"` |
 | `[voice] voice` | a stock Kokoro blend | a Kokoro voice or a blend (`"af_bella:0.6,af_nicole:0.4"`); `+glitch` adds the trace |
 | `[voice] speed` | `1.2987` (1 / 0.77, her pace) | 0.5..2 |
 | `[voice] duck` | `"duck"` | other audio while she listens or speaks: `"duck"` (PipeWire, −18 dB), `"pause"` (MPRIS) or `"off"` |
@@ -252,6 +271,8 @@ value rejects the whole file (the previous values stay). `avatarctl settings rel
 synaps-avatar [--profile P | --socket PATH] [--session NAME|ID | --new [--cwd DIR] [--model M]] [--no-session]
               [--sleepy-after MIN] [--pack DIR] [--height PX] [--name NAME] [--threads N] [--no-verify]
               [--focus-probe] [--check [--dump DIR]]
+synaps-avatar -V | --version
+synaps-avatar --set KEY=VALUE [--set KEY=VALUE ...]
 ```
 
 | flag | |
@@ -267,6 +288,7 @@ synaps-avatar [--profile P | --socket PATH] [--session NAME|ID | --new [--cwd DI
 | `--check` | load and decode the pack, print a summary, exit (no window) |
 | `--dump DIR` | with `--check`: every decoded frame as a PNG, the pixels she draws at `--height` (scale it by the display's sf to see the real render) |
 | `-V`, `--version` | print `synaps-avatar <version>`, exit. Her log says it at start too: `--- synaps-avatar <version> (pid N)` |
+| `--set KEY=VALUE` | write these to `settings.toml` with her own writer (as Settings does), then exit; nothing else runs. Her Windows installer's Voice page uses it. Only `voice.enabled`, `voice.wake_word`, `voice.speak_unprompted` (`true`/`on`, `false`/`off`) and `voice.mic` (a name; empty: the default). Exit 2: a bad `--set`; 3: the file refused (a typo, unreadable); 4: it couldn't be written |
 
 `synaps-avatar --help` lists the rest (`--name`, `--threads`, `--no-verify`, `--focus-probe`).
 
@@ -451,8 +473,8 @@ With `anim/`, `moods.json` `variants` mixes that art in; she never swaps one set
     never the burst; and the
     drawing before a cut goes under the first frame after it, so the screen never shows the old
     drawing clipped to the new outline.
-  - `click` (an effect strip): a click on her bursts under the pointer, at most one per `gapMs`, drawn
-    as three server-painted colour layers (no alpha without a compositor): her red, the green, and a
+  - `click` (an effect strip; Capri's pack has none, so no burst where you click her): a click on her
+    bursts under the pointer, at most one per `gapMs`, drawn as three server-painted colour layers (no alpha without a compositor): her red, the green, and a
     light inner edge on the ring so it reads over her red. Its specks (pieces under 40 cell px) are cut
     to her body; the ring shows whole.
 
@@ -492,8 +514,9 @@ through that host's shared build lane (lane locks, nice, memory cap, time limit)
 
 ## Dev control and test tools
 
-The avatar listens on `$XDG_RUNTIME_DIR/synaps-avatar.sock`, one command per line. `tools/avatarctl`
-sends one:
+The avatar listens on `$XDG_RUNTIME_DIR/synaps-avatar.sock` (Windows: `synaps-avatar.sock` in the
+temp folder), one command per line. `tools/avatarctl` (Linux) sends one; on Windows a script can
+([WINDOWS.md](WINDOWS.md#control-no-avatarctl-here)):
 
 ```
 mood <name> | clip <id> | say <text> | pos <x> <y> [now] | perch [sit|stand] [win] | perch off | drop | stack
@@ -535,6 +558,9 @@ she has no time of day until `sense clock` sets one, and logind isn't read.
 - Every run on a live desktop is short (≤ 30 s) and leaves nothing behind.
 - No real secrets, ever: secret prompts are tested against the fake daemon only.
 
-CI (`.github/workflows/ci.yml`) runs clippy and the unit tests headless. Nothing in them needs a display
-or a GPU. No secrets and no git dependencies: `synaps-client` is vendored. It covers the whole workspace,
-so the client's own tests run too.
+CI (`.github/workflows/ci.yml`) runs clippy and the unit tests on Linux (headless: nothing in them
+needs a display or a GPU) and on Windows. No secrets and no git dependencies: `synaps-client` is vendored. It
+covers the whole workspace, so the client's own tests run too. The installers' jobs (ci.yml and
+`release.yml`) and the shots ([WINDOWS.md](WINDOWS.md#shots-on-a-runner)) run on top of that. The
+contract suites on a real display (`contract_x11`, `contract_hypr`, `contract_windows`) are `#[ignore]`d
+there: they need a test X display, the Wayland rig (`tools/wlrig`) or a Windows desktop.
