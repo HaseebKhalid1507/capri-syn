@@ -34,6 +34,26 @@ $subsystem = [BitConverter]::ToUInt16($pe, [BitConverter]::ToInt32($pe, 0x3C) + 
 if (-not $NoCargo -and $subsystem -ne 2) { throw "synaps-avatar.exe is not windowed (subsystem $subsystem)" }
 if ($subsystem -ne 2) { Write-Warning "synaps-avatar.exe is a console build (subsystem $subsystem): a console window will open with her" }
 
+# The DLLs her exe imports (dumpbin /dependents, from the MSVC tools that built it): none a clean
+# Windows lacks. The C runtime is linked in (.cargo/config.toml: +crt-static), so no VCRUNTIME140.dll
+# or MSVCP140.dll (the Visual C++ Redistributable) and no UCRT forwarders (api-ms-win-crt-*).
+$vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+$dumpbin = if (Test-Path $vswhere) { & $vswhere -latest -products * -find 'VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe' | Select-Object -First 1 }
+if (-not $dumpbin) {
+    if (-not $NoCargo) { throw "no dumpbin.exe (MSVC's tools, found through $vswhere): her exe's imports can't be checked" }
+    Write-Warning 'no dumpbin.exe: her exe''s imports not checked'
+} else {
+    $deps = @(& $dumpbin /nologo /dependents $exe | ForEach-Object { if ($_ -match '^\s+(\S+\.dll)\s*$') { $Matches[1] } })
+    if ($LASTEXITCODE -or -not $deps) { throw "dumpbin /dependents $exe failed ($LASTEXITCODE)" }
+    Write-Output "her exe imports: $($deps -join ', ')"
+    $crt = @($deps | Where-Object { $_ -match '^(vcruntime|msvcp|vcomp|concrt|ucrtbase)\d*(_\d+)?\.dll$|^api-ms-win-crt-' })
+    if ($crt) {
+        $what = "synaps-avatar.exe imports the C runtime ($($crt -join ', ')): a PC without the Visual C++ Redistributable can't start her (is +crt-static in .cargo/config.toml?)"
+        if (-not $NoCargo) { throw $what }
+        Write-Warning $what
+    }
+}
+
 # Her licence and the notices that go with her binary (installer/licenses/list), laid out for the .iss
 # (under {app}), with the crates' licences for this target.
 $notices = Join-Path $here 'build\notices'

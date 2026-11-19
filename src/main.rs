@@ -47,6 +47,7 @@ mod platform;
 mod ragdoll;
 mod reader;
 mod line;
+mod logcap;
 mod chip;
 mod media;
 mod menu;
@@ -54,6 +55,7 @@ mod notify;
 mod session;
 mod settings;
 mod shape;
+mod startfail;
 mod ticker;
 mod state;
 mod theme;
@@ -313,6 +315,8 @@ fn main() {
     }
     if let Err(e) = run(t_start) {
         elog!("synaps-avatar: {e:#}");
+        // A start's failure, with no one reading her log: said on screen too (S5).
+        startfail::say(startfail::why_of(&e), e.downcast_ref::<control::Running>().is_some());
         std::process::exit(e.downcast_ref::<Coded>().map_or(1, |c| c.0));
     }
 }
@@ -329,13 +333,18 @@ fn run(t_start: Instant) -> Result<()> {
             Err(e) => Err(Coded(set_exit(&e), format!("settings: {} ({e}; {})", e.says(), path.display())).into()),
         };
     }
+    // A start of hers (not --check): from here on a failure is said on screen too, when no one
+    // reads her log (`startfail`: the Start menu, autostart).
+    if !args.check {
+        startfail::starting();
+    }
     // Her log's header on Linux too (Windows: `dirs::log_without_console`). After the command line,
     // so -V, -h and --set print their own line only; before the pack loads.
     #[cfg(target_os = "linux")]
     elog!("--- synaps-avatar {} (pid {})", env!("CARGO_PKG_VERSION"), std::process::id());
-    let pack = Arc::new(pack::Pack::load(&args.pack)?);
+    let pack = Arc::new(pack::Pack::load(&args.pack).map_err(startfail::PackError)?);
     if args.verify {
-        frames::verify_poses(&pack)?;
+        frames::verify_poses(&pack).map_err(startfail::PackError)?;
     }
     let t_pack = t_start.elapsed().as_millis();
     if !args.check {
@@ -400,6 +409,9 @@ fn run(t_start: Instant) -> Result<()> {
 
     let sock = control::socket_path();
     let listener = control::bind(&sock)?;
+    // Her own log (no console on Windows, install.sh's launch.log on Linux) kept under its cap
+    // while she runs, from a thread of its own.
+    platform::keep_log_under();
     let os = std::rc::Rc::new(platform::connect()?);
     let fonts: Vec<Cow<'static, [u8]>> = pack
         .behaviour
@@ -437,10 +449,7 @@ fn run(t_start: Instant) -> Result<()> {
         let build = |window: &mut Window, cx: &mut App| {
             let win = match os.adopt(platform::Role::Body, window) {
                 Ok(w) => w,
-                Err(e) => {
-                    elog!("synaps-avatar: {e:#}");
-                    platform::exit_now(1);
-                }
+                Err(e) => fatal(startfail::Why::Other, e),
             };
             os.force_composited(env_composited().unwrap_or_else(|| settings::Settings::load().ok().and_then(|s| s.display.composited)));
             // Nothing clickable until the first frame is decoded. Keep one pixel visible:
@@ -578,9 +587,7 @@ fn run(t_start: Instant) -> Result<()> {
             cx.open_window(options, build).map(Into::into)
         };
         if let Err(e) = opened {
-            elog!("synaps-avatar: cannot open the window: {e:#}");
-            std::fs::remove_file(control::socket_path()).ok();
-            platform::exit_now(1);
+            fatal(startfail::Why::Other, e.context("cannot open the window"));
         }
         let view = built.expect("window built");
         if let (Ok(w), Some(h)) = (&opened, first) {
@@ -608,7 +615,7 @@ fn run(t_start: Instant) -> Result<()> {
             let first = off_thread(move || frames::decode(&p1, &geo, &[default], verify, 1)).await;
             let first = match first {
                 Ok(d) => d,
-                Err(e) => fatal(e),
+                Err(e) => fatal(startfail::Why::Pack, e),
             };
             decode_view.update(cx, |v, cx| v.add_frames(vec![(default, first.frames.into_iter().next().unwrap())], false, cx));
             // A strip's cells are decoded when a pool shows them (the view asks).
@@ -618,7 +625,7 @@ fn run(t_start: Instant) -> Result<()> {
             let all = off_thread(move || frames::decode(&p2, &geo, &rest2, verify, threads)).await;
             let all = match all {
                 Ok(d) => d,
-                Err(e) => fatal(e),
+                Err(e) => fatal(startfail::Why::Pack, e),
             };
             elog!(
                 "synaps-avatar: decoded {} frames ({:.1} MB) in {} ms on {threads} threads; all frames ready {} ms after start",
@@ -643,7 +650,7 @@ fn run(t_start: Instant) -> Result<()> {
 
         if !args.no_session {
             if session::guarded(&who(&pack.name)) {
-                fatal(anyhow::anyhow!("this pack's character is called `{}`: that is the guarded session's name", pack.name));
+                fatal(startfail::Why::Pack, anyhow::anyhow!("this pack's character is called `{}`: that is the guarded session's name", pack.name));
             }
             let persona = persona_for(&args, &pack.dir);
             connect_session(&args, &pack.name, persona, &view, cx);
@@ -707,7 +714,7 @@ fn connect_session(args: &Args, character: &str, persona: session::Persona, view
     let me = who(character);
     let identity = match synaps_client::Identity::new(&me) {
         Ok(i) => i,
-        Err(e) => fatal(anyhow::anyhow!("identity: {e}")),
+        Err(e) => fatal(startfail::Why::Other, anyhow::anyhow!("identity: {e}")),
     };
     let (endpoint, key) = match &args.socket {
         Some(p) => (synaps_client::Endpoint::Socket(p.clone()), format!("socket:{}", p.display())),
@@ -749,9 +756,12 @@ async fn off_thread<T: Send + 'static>(f: impl FnOnce() -> anyhow::Result<T> + S
     rx.recv().await.map_err(|_| anyhow::anyhow!("decode thread died"))?
 }
 
-fn fatal(e: anyhow::Error) -> ! {
+/// A failure on her way up, once GPUI runs: in her log, her socket gone, said on screen too when no
+/// one reads her log (`startfail`, as `why`), then her end.
+fn fatal(why: startfail::Why, e: anyhow::Error) -> ! {
     elog!("synaps-avatar: {e:#}");
     std::fs::remove_file(control::socket_path()).ok();
+    startfail::say(why, false);
     platform::exit_now(1);
 }
 

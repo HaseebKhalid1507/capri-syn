@@ -851,8 +851,12 @@ function Start-HerNow {
     $from = if (Test-Path -LiteralPath $log) { (Get-Item -LiteralPath $log).Length } else { 0 }
     Write-Action "Start-Process `"$(Get-Tilde $script:Exe)`""
     $ErrorActionPreference = 'Continue'
+    # SA_NO_NOTICE=1: a failed start is said here, from her log. A message box would keep her up
+    # behind it (read here as "still starting").
+    $env:SA_NO_NOTICE = '1'
     try { $p = Start-Process -FilePath $script:Exe -WorkingDirectory $env:USERPROFILE -PassThru }
     catch { Write-Warn "she didn't start: $($_.Exception.Message)"; return }
+    finally { Remove-Item Env:\SA_NO_NOTICE -ErrorAction SilentlyContinue }
     # Up to 20 s (a cold start reads her pack): the lines she wrote since.
     $new = ''
     $ms = ''
@@ -868,7 +872,8 @@ function Start-HerNow {
     elseif (-not $p.HasExited) { Write-Info "she's still starting: her log is $(Get-Tilde $log)" }
     else {
         Write-Warn "she didn't start (exit $($p.ExitCode)). the end of her log ($(Get-Tilde $log)):"
-        $new -split "`r?`n" | Where-Object { $_ } | Select-Object -Last 4 | ForEach-Object { Write-Host "       | $_" -ForegroundColor DarkGray }
+        # Not the line saying no box was shown (SA_NO_NOTICE=1): her error is above it.
+        $new -split "`r?`n" | Where-Object { $_ -and $_ -notmatch '^synaps-avatar: not said on screen' } | Select-Object -Last 4 | ForEach-Object { Write-Host "       | $_" -ForegroundColor DarkGray }
     }
 }
 

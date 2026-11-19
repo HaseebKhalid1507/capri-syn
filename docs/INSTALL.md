@@ -82,7 +82,8 @@ Then it starts her, `--no-autostart` or not (that flag is about login), the way 
 (Linux: `env SA_BACKEND=x11` off Hyprland and i3, so GNOME and KDE on Wayland run her through
 XWayland), from your home folder, in a session of her own so closing the terminal leaves her be, and
 waits up to 20 s for her first frame (`~/.local/state/synaps-avatar/launch.log`, the run before's
-kept as `launch.old.log`; Windows: her `synaps-avatar.log`, which she starts over past 4 MB).
+kept as `launch.old.log`; Windows: her `synaps-avatar.log`). Either one starts over past 4 MB while
+she runs, the earlier part kept as `.old.log`.
 
 - **One already running as autostart starts her** (no arguments: the old binary) is quit and started
   again.
@@ -180,7 +181,7 @@ she runs through XWayland, the X server those desktops keep for X apps.
   ([WINDOWS.md](WINDOWS.md#the-installer)).
 - **Windows:** the installers are unsigned, so a browser download meets SmartScreen ("More info",
   then "Run anyway"); Windows 10 and Windows 11 on Arm are untested; a click on one of her notifications does nothing (as
-  on Linux). Linux has no tray icon yet: HIDE's chip is the way back there.
+  on Linux); her voice needs the VC++ runtime (MSVCP140) on a clean PC for now. Linux has no tray icon yet: HIDE's chip is the way back there.
 
 ## Flags
 

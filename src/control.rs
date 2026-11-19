@@ -482,12 +482,25 @@ pub fn socket_path() -> PathBuf {
     dir.join("synaps-avatar.sock")
 }
 
-/// Bind the socket. A live socket means another avatar is running: refuse. A dead one
+/// Another of her answers on the control socket (`bind`): she's up already, so nothing failed to
+/// say on screen (`crate::startfail`). Its text is the error's.
+#[derive(Debug)]
+pub struct Running(pub String);
+
+impl std::fmt::Display for Running {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Running {}
+
+/// Bind the socket. A live socket means another avatar is running: refuse (`Running`). A dead one
 /// (left by a killed process) is replaced.
 pub fn bind(path: &Path) -> Result<UnixListener> {
     if path.exists() {
         if UnixStream::connect(path).is_ok() {
-            bail!("another synaps-avatar is already running ({} answers)", path.display());
+            return Err(Running(format!("another synaps-avatar is already running ({} answers)", path.display())).into());
         }
         std::fs::remove_file(path).with_context(|| format!("cannot remove stale {}", path.display()))?;
     }
