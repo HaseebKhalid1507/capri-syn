@@ -7,7 +7,8 @@ sanitized rewrite of synaps-desktop `cea3639`). Capri depends on it by path, so 
 builds with no git dependencies and no tokens.
 
 Changed from upstream:
-- `Cargo.toml`: workspace-inherited fields and dependencies written out inline, and `license = "MIT"`.
+- `Cargo.toml`: workspace-inherited fields and dependencies written out inline, and
+  `license = "MIT AND Apache-2.0"` (MIT, except the Apache-2.0 portions `NOTICE` names).
 - Added `LICENSE`, `LICENSE-APACHE`, `NOTICE` and this file.
 
 `src/transcript.rs` and `tests/fixtures.rs` differ from upstream by one fix, to port back: a turn's

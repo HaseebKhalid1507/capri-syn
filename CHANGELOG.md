@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Licence: MIT, with exclusions
+- capri-syn is MIT (`LICENSE`, © 2026 Haseeb Khalid), except the paths README's Credits & legal names
+  (GPUI, parts of synaps-client, `docs/media`, the icon, the wake-word model), which keep their own terms.
+
 ### No one's names or machines in the defaults
 
 - **Speech-to-text vocabulary:** Whisper's recognition prompt is generic now (`Capri, choom, preem,
