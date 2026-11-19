@@ -92,7 +92,14 @@ persona; no art).
   her voice, her log, state and settings, the download cache, and her folders. A pack he put there
   himself (and one moved aside) stays. Synaps: when Setup installed it, the wizard asks whether to
   remove it too (his login and sessions in `~\.synaps-cli` stay either way); unattended, it stays.
-- **Upgrades** close her (Restart Manager) and don't restart her.
+- **Upgrades** close her (Restart Manager) and don't restart her. A process of hers that was killed and never went
+  (seen once on his box: one thread, 707 handles, for good) still maps her exe, and Windows won't
+  let it be replaced ("DeleteFile failed; code 5"; Setup used to abort with exit 5). So just before
+  her files go in, Setup renames the old exe aside (`synaps-avatar.exe.old-<time>`: a mapped exe
+  can be renamed), and deletes it once the new one is in. Still mapped, it's left for the next
+  Setup or the uninstall. If Setup stops before her files are in, it's renamed back. CI pins it as
+  an image in another process and upgrades over it (`test-install.ps1`). Her quit itself is bounded
+  in #91.
 - **Unsigned:** downloaded with a browser (Mark of the Web), SmartScreen stops it ("Windows
   protected your PC"; More info → Run anyway). Defender lets it be. Both installers, in the VM.
 

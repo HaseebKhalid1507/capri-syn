@@ -121,6 +121,8 @@ Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile
 Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM synaps-avatar.exe"; Flags: runhidden; RunOnceId: "StopHer"
 
 [UninstallDelete]
+; Her old exe, renamed aside by an upgrade while a process of hers still mapped it.
+Type: files; Name: "{app}\synaps-avatar.exe.old-*"
 ; What she and the steps wrote: her log and state, her settings, the steps' download cache and this
 ; installer's note of what it did. Any pack he put in packs\ himself stays (and the one moved aside);
 ; her pack goes in code (when the steps made it). Installed by install.ps1 (/BY=install.ps1), her
@@ -769,9 +771,64 @@ begin
   end;
 end;
 
+{ ---- her exe, even when a process of hers that won't go maps it ---------------------------------- }
+
+{ Restart Manager closes her first (CloseApplications=force). A process of hers that was killed and
+  never went (on his box: one thread, 707 handles, for good) still maps her exe, so it can't be
+  replaced ("DeleteFile failed; code 5", and Setup aborted). Renaming a mapped exe works: just
+  before her files go in, the old one is renamed aside; deleted once the new one is in (left for
+  the next Setup or the uninstall when it's still mapped); renamed back if Setup stops before. }
+var
+  ExeAside: String;
+  FilesIn: Boolean;
+
+function HerExe: String;
+begin
+  Result := ExpandConstant('{app}\synaps-avatar.exe');
+end;
+
+{ What earlier Setups left aside (mapped then, maybe free now). }
+procedure DeleteOldExes;
+var
+  F: TFindRec;
+  D: String;
+begin
+  D := ExpandConstant('{app}\');
+  if FindFirst(D + 'synaps-avatar.exe.old-*', F) then begin
+    try
+      repeat
+        if DeleteFile(D + F.Name) then Log('her exe: deleted ' + F.Name + ' (left aside before)')
+        else Log('her exe: ' + F.Name + ' is still in use: left');
+      until not FindNext(F);
+    finally
+      FindClose(F);
+    end;
+  end;
+end;
+
+procedure SetExeAside;
+begin
+  DeleteOldExes;
+  if not FileExists(HerExe) then exit;
+  ExeAside := HerExe + '.old-' + GetDateTimeString('yyyymmddhhnnss', #0, #0);
+  if RenameFile(HerExe, ExeAside) then Log('her exe: the old one renamed aside (' + ExtractFileName(ExeAside) + ')')
+  else begin
+    Log('her exe: the old one could not be renamed aside: replaced in place');
+    ExeAside := '';
+  end;
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
-  if CurStep = ssPostInstall then RunSteps;
+  if CurStep = ssInstall then SetExeAside;
+  if CurStep = ssPostInstall then begin
+    FilesIn := True;
+    if ExeAside <> '' then begin
+      if DeleteFile(ExeAside) then Log('her exe: the old one deleted')
+      else Log('her exe: the old one is still in use (a process of hers that never went): left for the next Setup or the uninstall');
+    end;
+    RunSteps;
+  end;
 end;
 
 { ---- the finish page ----------------------------------------------------------------------------- }
@@ -862,6 +919,10 @@ end;
 
 procedure DeinitializeSetup;
 begin
+  { Setup stopped before her files were in: her old exe back where it was. }
+  if (ExeAside <> '') and not FilesIn and not FileExists(HerExe) and FileExists(ExeAside) then
+    if RenameFile(ExeAside, HerExe) then Log('her exe: Setup stopped: the old one put back')
+    else Log('her exe: Setup stopped, and the old one could not be put back: it is ' + ExeAside);
   { Unattended there's no finish page: the log has the same. }
   if (StepResults <> nil) and WizardSilent then begin
     Log('finished: ' + FinishText);

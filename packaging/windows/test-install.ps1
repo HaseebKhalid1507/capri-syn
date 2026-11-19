@@ -126,9 +126,32 @@ Check ($aside.Count -eq 1 -and (Test-Path (Join-Path "$($aside[0])" 'made-by-han
 Check ($script:SetupLog -match 'Required Notice: ') "lachy's Required Notice lines were said"
 Check (-not (Test-Path $cache)) 'the download cache is gone after the build'
 
-# Again: up to date, nothing downloaded.
-$code = Install @('/PACK=download', '/SYNAPS=skip') 300
-Check ($code -eq 0 -and $script:SetupLog -match 'up to date \(') "/PACK=download again: up to date (exit $code)"
+# Again: up to date, nothing downloaded. And her exe pinned as on his box (a process of hers that
+# was killed and never went still mapped it: "DeleteFile failed; code 5", Setup aborted): mapped
+# here as an image by a helper process, and Restart Manager kept out (/NOCLOSEAPPLICATIONS: what it
+# would close is the helper). Setup renames it aside, puts the new one in, leaves the old one.
+$exeNow = Join-Path $app 'synaps-avatar.exe'
+$pinCode = @"
+Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class Pin { [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] public static extern IntPtr LoadLibraryExW(string f, IntPtr h, uint flags); }'
+`$h = [Pin]::LoadLibraryExW('$exeNow', [IntPtr]::Zero, 0x20)
+if (`$h -eq [IntPtr]::Zero) { exit 3 }
+Start-Sleep -Seconds 900
+"@
+$pin = Start-Process powershell -ArgumentList @('-NoProfile', '-NonInteractive', '-EncodedCommand', [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($pinCode))) -WindowStyle Hidden -PassThru
+$pinned = $false
+for ($i = 0; $i -lt 40 -and -not $pin.HasExited; $i++) {
+    try { [IO.File]::Open($exeNow, 'Open', 'ReadWrite', 'None').Dispose() } catch { $pinned = $true; break }
+    Start-Sleep -Milliseconds 250
+}
+Check $pinned "her exe is pinned (mapped by pid $($pin.Id)): the case proves something"
+$code = Install @('/PACK=download', '/SYNAPS=skip', '/NOCLOSEAPPLICATIONS') 300
+Check ($code -eq 0 -and $script:SetupLog -match 'up to date \(') "/PACK=download again, her exe pinned: up to date (exit $code)"
+Check ($script:SetupLog -match 'her exe: the old one renamed aside') 'the pinned exe was renamed aside'
+Check ($script:SetupLog -match 'her exe: the old one is still in use') 'and left there, still in use'
+$old = @(Get-ChildItem -Path $app -Filter 'synaps-avatar.exe.old-*' -ErrorAction SilentlyContinue)
+Check ($old.Count -eq 1 -and (Test-Path $exeNow)) "the new exe is in, the old one beside it ($($old.Name -join ', '))"
+Stop-Process -Id $pin.Id -Force -ErrorAction SilentlyContinue
+[void]$pin.WaitForExit(10000)
 
 # A pack folder of his (a stand-in), over the one Setup built: that one is replaced whole.
 $code = Install @("/PACK=`"$pack`"", '/SYNAPS=skip', '/TASKS=autostart')
@@ -138,6 +161,7 @@ Check (Test-Path (Join-Path $app 'unins000.exe')) 'an uninstaller'
 Check (Test-Path (Join-Path $packTo 'sprites.json')) "the pack copied to $packTo"
 Check (Test-Path (Join-Path $packTo 'poses\stand-in.txt')) "with its folders"
 Check (-not (Test-Path (Join-Path $packTo 'anim'))) 'the pack Setup built is replaced whole (nothing of it left)'
+Check ($script:SetupLog -match 'her exe: deleted synaps-avatar\.exe\.old-' -and -not (Get-ChildItem -Path $app -Filter 'synaps-avatar.exe.old-*')) 'the next Setup deleted the old exe (free by then)'
 Check (@(Get-ChildItem -Directory -Path (Split-Path $packTo) -Filter 'capri.pre-install-*').Count -eq 1) 'and not moved aside (it was the steps'' own)'
 Check ((Get-ItemProperty $aumid -ErrorAction SilentlyContinue).DisplayName -eq 'synaps-avatar') 'her AUMID registered (DisplayName)'
 Check ((Get-ItemProperty $aumid -ErrorAction SilentlyContinue).IconUri -eq (Join-Path $app 'synaps-avatar.png')) 'with her icon (IconUri)'

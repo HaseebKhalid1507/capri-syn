@@ -55,10 +55,6 @@ function Wait-Window([string]$Title, [int]$Secs = 60) {
 # Every name shown in a window (its page's caption among them).
 # Trimmed: a heading's name can end in a line break (the finish page's does).
 function Get-WindowText($W) { @($W.FindAll($Tree::Descendants, [Windows.Automation.Condition]::TrueCondition) | ForEach-Object { "$($_.Current.Name)".Trim() } | Where-Object { $_ }) }
-function Find-Named($W, [string]$Name) {
-    foreach ($e in $W.FindAll($Tree::Descendants, [Windows.Automation.Condition]::TrueCondition)) { if ($e.Current.Name -match $Name) { return $e } }
-    return $null
-}
 # A button by its caption, whatever UI Automation calls it (a VCL button can come through as a pane):
 # Invoke when it has that, else a real click on its middle.
 function Invoke-Button($W, [string]$Name) {
@@ -113,19 +109,22 @@ Get-Shot 'finish' -Title 'Setup - capri-syn*'
 Check (($t -match 'Synaps \d+\.\d+\.\d+, her brain: installed').Count -gt 0) 'the finish page: Synaps installed'
 Check (($t -match 'Her art: downloaded, built and checked').Count -gt 0) 'the finish page: her art'
 Check (($t -match 'Its daemon runs').Count -gt 0) 'the finish page: the daemon'
-# CI can't sign in: "Sign in to Claude" off (its box: a click at its left edge), "Start her now" on.
-$login = Find-Named $w '^Sign in to Claude'
-if ($login) {
-    $r = $login.Current.BoundingRectangle
-    [Wiz]::Click([int]($r.Left + 9), [int]($r.Top + $r.Height / 2))
-    Start-Sleep -Milliseconds 500
-    Get-Shot 'finish-sign-in-off' -Title 'Setup - capri-syn*'
-} else { Write-Host '  (no "Sign in to Claude" item found)' }
+# Its defaults: "Start her now" and "Sign in to Claude" ticked. The sign-in starts with no
+# terminal: steps.ps1 login, then synaps login, then his browser (CI can't sign in: stopped after).
 Invoke-Button $w 'Finish'
 [void]$p.WaitForExit(60000)
 Check ($p.ExitCode -eq 0) "the wizard exits 0 ($($p.ExitCode))"
-# Its sign-in, if it started anyway: stopped (CI can't sign in).
-Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'steps\.ps1" login|synaps\.exe"? login' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+$signIn = $null
+$t0 = Get-Date
+while (-not $signIn -and ((Get-Date) - $t0).TotalSeconds -lt 30) {
+    $signIn = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'synaps(\.exe)?"? login --provider claude' } | Select-Object -First 1
+    if (-not $signIn) { Start-Sleep -Milliseconds 500 }
+}
+Check ([bool]$signIn) "Finish started the sign-in, no terminal: $(if ($signIn) { $signIn.CommandLine })"
+Start-Sleep -Seconds 4
+$browser = @(Get-Process -Name msedge, chrome, firefox -ErrorAction SilentlyContinue)
+Write-Host "  a browser runs: $(if ($browser) { ($browser | Select-Object -ExpandProperty Name -Unique) -join ', ' } else { 'none seen' })"
+Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'steps\.ps1" login|synaps(\.exe)?"? login' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 
 # Her, started by the finish page.
 $her = $null
