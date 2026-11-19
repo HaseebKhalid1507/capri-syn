@@ -8004,7 +8004,9 @@ impl Avatar {
                             .group_hover(SharedString::from(format!("menu-{label}")), |s| s.text_color(rgb(ink_c)))
                             .child(c)
                     });
-                    m.child(item(label).flex().flex_col().children(why).id("attention").on_mouse_down(
+                    // In `state`'s buttons (a shot's click on it).
+                    let probe = self.buttons.clone();
+                    m.child(item(label).flex().flex_col().children(why).child(canvas(move |b, _, _| probe.borrow_mut().push(("menu-attention", b)), |_, _, _, _| {}).absolute().top_0().left_0().size_full()).id("attention").on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _: &MouseDownEvent, _, cx| {
                             cx.stop_propagation();
