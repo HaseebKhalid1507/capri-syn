@@ -773,40 +773,47 @@ pub fn metered(s: &str, spacing: f32, fg: u32) -> Div {
     metered_fixed(s, spacing, fg, &|_| None)
 }
 
-/// [`metered`], its words [`tracked_fixed`].
-pub fn metered_fixed(s: &str, spacing: f32, fg: u32, fixed: &dyn Fn(char) -> Option<f32>) -> Div {
-    let mut row = div().flex().flex_none().items_center();
-    let mut word = String::new();
-    let mut bars: Vec<bool> = Vec::new();
-    let flush_bars = |row: Div, bars: &mut Vec<bool>| {
-        if bars.is_empty() {
-            return row;
-        }
-        let m = div()
-            .flex()
-            .items_end()
-            .gap(px(METER_BAR_GAP))
-            .h(px(METER_BAR_H))
-            .mx(px(METER_MX))
-            .children(bars.drain(..).map(|on| div().w(px(METER_BAR_W)).h(px(METER_BAR_H)).bg(alpha(fg, if on { 1.0 } else { 0.28 }))));
-        row.child(m)
-    };
+/// A label as [`metered`] draws it: its words, and its level meters (each `▮▯` run, its bars
+/// lit or not). Whoever measures a metered label measures these.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Metered {
+    Words(String),
+    Meter(Vec<bool>),
+}
+
+/// `s` in [`Metered`] runs, in order.
+pub fn metered_runs(s: &str) -> Vec<Metered> {
+    let mut runs = Vec::new();
     for c in s.chars() {
         if c == '▮' || c == '▯' {
-            if !word.is_empty() {
-                row = row.child(tracked_fixed(&std::mem::take(&mut word), spacing, fixed));
+            if let Some(Metered::Meter(bars)) = runs.last_mut() {
+                bars.push(c == '▮');
+            } else {
+                runs.push(Metered::Meter(vec![c == '▮']));
             }
-            bars.push(c == '▮');
+        } else if let Some(Metered::Words(w)) = runs.last_mut() {
+            w.push(c);
         } else {
-            row = flush_bars(row, &mut bars);
-            word.push(c);
+            runs.push(Metered::Words(c.to_string()));
         }
     }
-    row = flush_bars(row, &mut bars);
-    if !word.is_empty() {
-        row = row.child(tracked_fixed(&word, spacing, fixed));
-    }
-    row
+    runs
+}
+
+/// [`metered`], its words [`tracked_fixed`].
+pub fn metered_fixed(s: &str, spacing: f32, fg: u32, fixed: &dyn Fn(char) -> Option<f32>) -> Div {
+    div().flex().flex_none().items_center().children(metered_runs(s).into_iter().map(|run| {
+        match run {
+            Metered::Words(w) => tracked_fixed(&w, spacing, fixed),
+            Metered::Meter(bars) => div()
+                .flex()
+                .items_end()
+                .gap(px(METER_BAR_GAP))
+                .h(px(METER_BAR_H))
+                .mx(px(METER_MX))
+                .children(bars.into_iter().map(|on| div().w(px(METER_BAR_W)).h(px(METER_BAR_H)).bg(alpha(fg, if on { 1.0 } else { 0.28 })))),
+        }
+    }))
 }
 
 /// A small status glyph drawn as shapes (crisp at any size, no font fallback). 11 px box;
@@ -947,6 +954,25 @@ pub fn glyph_at(kind: &str, fg: u32, bg: u32, size: f32) -> impl IntoElement + u
 
 #[cfg(test)]
 mod tests {
+    /// A level meter is bars, never glyphs: no `▮▯` is left in a run of words (drawn as glyphs,
+    /// they came out as hollow boxes on hands-free's red plate).
+    #[test]
+    fn a_meter_is_bars_never_words() {
+        use super::{Metered, metered_runs};
+        let w = |s: &str| Metered::Words(s.into());
+        assert_eq!(metered_runs("MIC LIVE · HANDS-FREE 0:06 ▯▯▯▯▯"), [w("MIC LIVE · HANDS-FREE 0:06 "), Metered::Meter(vec![false; 5])]);
+        assert_eq!(metered_runs("MIC 0:12 ▮▮▯▯▯ · AUTO"), [w("MIC 0:12 "), Metered::Meter(vec![true, true, false, false, false]), w(" · AUTO")]);
+        assert_eq!(metered_runs("▮▯"), [Metered::Meter(vec![true, false])]);
+        assert_eq!(metered_runs("ONLINE"), [w("ONLINE")]);
+        assert!(metered_runs("").is_empty());
+        for level in 0..=5 {
+            let s = format!("HANDS-FREE 1:{level:02} {}{}", "▮".repeat(level), "▯".repeat(5 - level));
+            let runs = metered_runs(&s);
+            assert!(runs.iter().all(|r| !matches!(r, Metered::Words(t) if t.contains(|c: char| c == '▮' || c == '▯'))), "{s:?}: {runs:?}");
+            assert_eq!(runs.iter().filter(|r| matches!(r, Metered::Meter(b) if b.len() == 5)).count(), 1, "{s:?}");
+        }
+    }
+
     #[test]
     fn a_morph_is_exact_at_its_ends_and_keeps_every_corner() {
         let arrow = [(9.0, 0.0), (196.0, 0.0), (206.0, 12.5), (196.0, 25.0), (0.0, 25.0)];

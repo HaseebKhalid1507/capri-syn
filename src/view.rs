@@ -6041,23 +6041,32 @@ fn header_text_w(s: &str, status: bool, cw: &dyn Fn(char, bool) -> f32) -> f32 {
     s.chars().map(|c| cw(c, status)).sum()
 }
 
+/// A status's words and level meter as [`status_text`] draws them (the meter as bars).
+fn status_text_w(s: &str, cw: &dyn Fn(char, bool) -> f32) -> f32 {
+    theme::metered_runs(s)
+        .iter()
+        .map(|r| match r {
+            theme::Metered::Words(w) => header_text_w(w, true, cw),
+            theme::Metered::Meter(bars) => theme::meter_w(bars.len()),
+        })
+        .sum()
+}
+
 /// A status in the header as [`header_row`] draws it, the wider of its two dresses: on its
-/// plate (glyph, words, a level meter as glyphs) or calm (glyph, words, a level meter as bars).
+/// plate or calm (its glyph, then [`status_text`]).
 fn header_status_w(s: &str, cw: &dyn Fn(char, bool) -> f32) -> f32 {
-    let plate = STATUS_PL + theme::GLYPH_W + STATUS_GAP + header_text_w(s, true, cw) + STATUS_PR;
-    let (mut calm, mut run) = (theme::GLYPH_W + STATUS_GAP, 0);
-    for c in s.chars().chain(['\0']) {
-        if is_bar(c) {
-            run += 1;
-            continue;
-        }
-        calm += theme::meter_w(run);
-        run = 0;
-        if c != '\0' {
-            calm += cw(c, true);
-        }
-    }
+    let text = status_text_w(s, cw);
+    let plate = STATUS_PL + theme::GLYPH_W + STATUS_GAP + text + STATUS_PR;
+    let calm = theme::GLYPH_W + STATUS_GAP + text;
     plate.max(calm)
+}
+
+/// A status's words and its level meter, in either dress: the words in the header's bold type
+/// (each digit `tab` px wide), the meter as bars, all in `ink`. One for both dresses: the plate
+/// drew its meter as glyphs once, hollow boxes from a fallback face (spike's shots, 2026-11-19).
+fn status_text(s: &str, tab: f32, ink: u32) -> Div {
+    let tab = move |c: char| c.is_ascii_digit().then_some(tab);
+    theme::metered_fixed(s, HEADER_TRACK, ink, &tab).text_size(px(HEADER_FONT)).font_weight(FontWeight::BOLD).text_color(rgb(ink))
 }
 
 /// A status, whole, then shorter: hands-free's `MIC LIVE · ` off, the level meter off,
@@ -6122,20 +6131,11 @@ fn cut_status(s: &str, fits: impl Fn(&str) -> bool) -> String {
     cut_to(s, 1, true, &fits).or_else(|| cut_to(s, 1, false, &fits)).unwrap_or_default()
 }
 
-/// `cw` with every digit as wide as the widest and the meter's two bars alike: a ticking timer
-/// or level measures the same each second (the status draws them so, `theme::tracked_fixed`).
-/// Boxes, not the font's `tnum`: Exo 2 has it, but its tabular 4 is 618/1000 to the others' 620,
-/// and the bars come from a fallback face.
+/// `cw` with every digit as wide as the widest: a ticking timer measures the same each second
+/// (the status draws them so, [`status_text`]; a level meter is bars of a fixed size). Boxes,
+/// not the font's `tnum`: Exo 2 has it, but its tabular 4 is 618/1000 to the others' 620.
 fn tabular(cw: impl Fn(char, bool) -> f32) -> impl Fn(char, bool) -> f32 {
-    move |c, status| {
-        if c.is_ascii_digit() {
-            ('0'..='9').map(|d| cw(d, status)).fold(0.0, f32::max)
-        } else if is_bar(c) {
-            cw('▮', status).max(cw('▯', status))
-        } else {
-            cw(c, status)
-        }
-    }
+    move |c, status| if c.is_ascii_digit() { ('0'..='9').map(|d| cw(d, status)).fold(0.0, f32::max) } else { cw(c, status) }
 }
 
 /// The header's label and status as they fit its row, `room` wide (`cw` as in
@@ -6179,8 +6179,7 @@ fn fit_header(room: f32, label: &HeaderLabel, status: &str, cw: &dyn Fn(char, bo
 
 /// How a header's status is dressed: its glyph, its plate's silhouette and paint (`key`,
 /// `tone`), on its plate (`invert`, or a summon's `pulse`: the bone swallowtail) or calm; a
-/// prompt's label `bright`; the digit's and the meter bar's boxes (`tabular`: as wide as they
-/// were measured).
+/// prompt's label `bright`; the digits' box (`tabular`: as wide as they were measured).
 #[derive(Clone, Debug, PartialEq)]
 struct HeaderDress {
     glyph: String,
@@ -6190,7 +6189,7 @@ struct HeaderDress {
     invert: bool,
     pulse: bool,
     bright: bool,
-    tab: (f32, f32),
+    tab: f32,
 }
 
 /// The header's glyph widths, (char, bold) → px.
@@ -6204,8 +6203,6 @@ type HeaderProbe = Rc<dyn Fn([f32; 3])>;
 /// spring, the status. Should the words ever be wider than [`fit_header`] measured, the label
 /// shrinks and clips and the row clips at its ends (in x only); never past the frame.
 fn header_row(label: &str, status: &str, d: &HeaderDress, pal: Pal, probe: Option<HeaderProbe>) -> Div {
-    let tab_w = d.tab;
-    let tab = move |c: char| if c.is_ascii_digit() { Some(tab_w.0) } else if is_bar(c) { Some(tab_w.1) } else { None };
     let label_c = if d.bright { pal.text } else { pal.dim };
     let natural = Rc::new(Cell::new(0.0f32));
     let mut label_box = div()
@@ -6232,7 +6229,7 @@ fn header_row(label: &str, status: &str, d: &HeaderDress, pal: Pal, probe: Optio
             .pr(px(STATUS_PR))
             .gap(px(STATUS_GAP))
             .child(glyph(&d.glyph, hl.mark, hl.fill))
-            .child(theme::tracked_fixed(status, HEADER_TRACK, &tab).text_size(px(HEADER_FONT)).font_weight(FontWeight::BOLD).text_color(rgb(hl.ink)))
+            .child(status_text(status, d.tab, hl.ink))
     } else {
         // Calm: a bone glyph, the state in text-dim (r21: a red dot read as "recording" or
         // "offline").
@@ -6243,7 +6240,7 @@ fn header_row(label: &str, status: &str, d: &HeaderDress, pal: Pal, probe: Optio
             .items_center()
             .gap(px(STATUS_GAP))
             .child(glyph(&d.glyph, glyph_c, pal.panel))
-            .child(theme::metered_fixed(status, HEADER_TRACK, pal.dim, &tab).text_size(px(HEADER_FONT)).font_weight(FontWeight::BOLD).text_color(rgb(pal.dim)))
+            .child(status_text(status, d.tab, pal.dim))
     };
     let mut row = div()
         .absolute()
@@ -7492,12 +7489,12 @@ impl Avatar {
             };
             // What of the header fits the box it is laid out in (while it resizes, the narrower
             // end: it fits once, not a word at a time on the way); the ghost keeps the same
-            // words and look. The status's digits and meter in boxes as wide as they measured.
+            // words and look. The status's digits in boxes as wide as they measured.
             let room = w.min(pf.fit_w) - PAD_L - PAD_R;
             let (header_label, label, dress, header_probe) = {
                 let cw = self.header_cw(window, &glyph_memo);
                 let (l, s) = fit_header(room, &header_label, &label, &cw);
-                let tab = (cw('0', true) - HEADER_TRACK, cw('▮', true) - HEADER_TRACK);
+                let tab = cw('0', true) - HEADER_TRACK;
                 let dress = HeaderDress { glyph: glyph_kind.clone(), plate: plate_kind, key: tone_key.clone(), tone, invert, pulse, bright: prompt_mode, tab };
                 let probe = layout_probe().then(|| {
                     let sink = self.header_px.clone();
@@ -9212,8 +9209,10 @@ mod prompt_button_tests {
 mod header_fit_tests {
     use super::voiceview::{hf_label, level_bars, mic_label};
     use super::{
-        HEADER_AIR, HEADER_KEEP, HeaderLabel, PAD_L, PAD_R, PANEL_MAX_W, PANEL_MIN_W, cut_to, fit_header, header_status_w, header_text_w, prompt_label, reply_label, status_steps, tabular,
+        HEADER_AIR, HEADER_KEEP, HeaderLabel, PAD_L, PAD_R, PANEL_MAX_W, PANEL_MIN_W, STATUS_GAP, STATUS_PL, STATUS_PR, cut_to, fit_header, header_status_w, header_text_w,
+        prompt_label, reply_label, status_steps, tabular,
     };
+    use crate::theme;
     use unicode_segmentation::UnicodeSegmentation as _;
     use crate::session::Trouble;
 
@@ -9405,6 +9404,27 @@ mod header_fit_tests {
         let echo = reply_label(Some("what's the weather like in toronto tomorrow morning"), false);
         let (l, s) = fit(PANEL_MIN_W, &echo, "LISTENING");
         assert!(l.starts_with("YOU › what") && l.ends_with('…') && s == "LISTENING", "{l:?} {s:?}");
+    }
+
+    /// Hands-free's level meter on its red plate (spike's shots, 2026-11-19: `MIC LIVE ·
+    /// HANDS-FREE 0:06 ▯▯▯▯▯` drawn as hollow glyph boxes): bars, as the calm status draws it. The
+    /// plate measures its words and five bars, never five glyphs, at every level and timer.
+    #[test]
+    fn the_plate_measures_its_meter_as_bars() {
+        let cw = tabular(exo2);
+        // Five glyphs measure otherwise: the test tells the two apart.
+        assert_ne!(5.0 * cw('▮', true), theme::meter_w(5));
+        for level in [0.0, 0.2, 0.4, 0.6, 0.8, 1.0] {
+            for secs in [6, 12, 71] {
+                for status in [hf_label(None, secs, level), mic_label(secs, level, false), mic_label(secs, level, true)] {
+                    let runs = theme::metered_runs(&status);
+                    let words: f32 = runs.iter().filter_map(|r| if let theme::Metered::Words(w) = r { Some(header_text_w(w, true, &cw)) } else { None }).sum();
+                    assert!(runs.contains(&theme::Metered::Meter(level_bars(level).chars().map(|c| c == '▮').collect())), "{status:?}: {runs:?}");
+                    let plate = STATUS_PL + theme::GLYPH_W + STATUS_GAP + words + theme::meter_w(5) + STATUS_PR;
+                    assert_eq!(header_status_w(&status, &cw), plate, "{status:?}");
+                }
+            }
+        }
     }
 
     /// A ticking timer or level never moves the header: the status measures the same each
