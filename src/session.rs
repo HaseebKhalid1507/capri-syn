@@ -394,6 +394,13 @@ impl Link {
         diffs.into_iter().map(Act::Set).collect()
     }
 
+    /// The model she has asked her session for and it hasn't taken yet (her persona's: `--model`
+    /// or `[session] model`): the Settings page shows it meanwhile. None once it is in, or once
+    /// it couldn't be set (another client owns her session's input: the daemon's stands).
+    pub fn model_on_way(&self) -> Option<&str> {
+        self.opts.persona.model.as_deref().filter(|_| self.persona_wait > 0 || self.persona_done.is_none())
+    }
+
     /// The `--model` she was started with.
     pub fn cli_model(&self) -> Option<String> {
         self.opts.model.clone()
@@ -1678,6 +1685,38 @@ mod tests {
         l.on_event(Event::Sessions(vec![meta(SID, Some("capri"))]), t0);
         l.attaching(1);
         assert!(on(&mut l, mine(1, AttachMode::Observe, None, Some("capri"), Some(&persona())), t0).is_empty());
+    }
+
+    /// MODEL on the Settings page shows the model she asked for until her session has it: while
+    /// it's on its way (the Mirror switch, the Set and its reply). If another client owns her
+    /// session's input it isn't set: the daemon's model stands (shown), and set_persona says so
+    /// by asking nothing.
+    #[test]
+    fn the_model_on_its_way_shows_until_it_is_in() {
+        let t0 = Instant::now();
+        let mut l = Link::new(Options { persona: persona(), ..opts() }, t0);
+        l.on_event(connected(), t0);
+        l.on_event(Event::Sessions(vec![meta(SID, Some("capri"))]), t0);
+        l.attaching(1);
+        let old = Persona { model: Some("claude-haiku-4-5-20251001".into()), ..persona() };
+        on(&mut l, mine(1, AttachMode::Observe, None, Some("capri"), Some(&old)), t0);
+        assert_eq!(l.model(), Some("claude-haiku-4-5-20251001"));
+        assert_eq!(l.model_on_way(), Some("anthropic/claude-sonnet-4-6"), "the Mirror switch on its way");
+        l.attaching(2);
+        let acts = on(&mut l, mine(2, AttachMode::Mirror, Some(1), Some("capri"), Some(&old)), t0);
+        assert!(matches!(acts.as_slice(), [Act::Set(_)]), "{acts:?}");
+        assert_eq!(l.model_on_way(), Some("anthropic/claude-sonnet-4-6"), "the Set sent, no reply yet");
+        l.on_event(applied(2, "model", &persona()), t0);
+        assert_eq!((l.model(), l.model_on_way()), (Some("anthropic/claude-sonnet-4-6"), None), "in");
+        // Another client owns the input: nothing asked, nothing on its way.
+        let mut l = Link::new(Options { persona: persona(), ..opts() }, t0);
+        l.on_event(connected(), t0);
+        l.on_event(Event::Sessions(vec![meta(SID, Some("capri"))]), t0);
+        l.attaching(1);
+        assert!(on(&mut l, mine(1, AttachMode::Observe, Some(7), Some("capri"), Some(&old)), t0).is_empty());
+        assert_eq!(l.model_on_way(), None);
+        let acts = l.set_persona(Persona { model: Some("claude-opus-5-5".into()), ..persona() }, t0);
+        assert!(acts.is_empty() && l.model_on_way().is_none(), "{acts:?}");
     }
 
     /// The hard guard: never a session she rides with --session (even named like her), never

@@ -48,6 +48,7 @@ attached = []          # live session connections (socket, lock)
 pending = {}           # prompt id -> request (in every Attached snapshot until answered)
 seq = [100]
 client_id = [10]
+owner = [None]         # the input owner: the last Mirror attach, as the daemon hands it
 lock = threading.Lock()
 refuse_next = [False]
 fail_with = [None]     # every submit fails with this error text (`nobrain`, `fail TEXT`)
@@ -140,6 +141,7 @@ def event(ev):
 
 def serve(conn):
     wl = threading.Lock()
+    mine = set()           # this connection's client ids (its ownership goes with it)
     f = conn.makefile("r", encoding="utf-8")
     try:
         hello = f.readline()
@@ -157,6 +159,7 @@ def serve(conn):
                 with lock:
                     client_id[0] += 1
                     me = client_id[0]
+                    mine.add(me)
                 log(f"attach {a.get('attach')} {a.get('session_id', '')} mode={mode} -> client {me}")
                 if os.environ.get("FAKE_DEBUG"):
                     log("frame keys", sorted(fr.keys()))
@@ -164,6 +167,11 @@ def serve(conn):
                 v["client"] = me
                 v["meta"] = dict(v["meta"], name="capri")
                 with lock:
+                    if owner[0] in mine:            # this connection's last client is gone
+                        owner[0] = None
+                    if mode == "mirror":
+                        owner[0] = me
+                    v["input_owner"] = owner[0]
                     v["view"] = dict(VIEW)
                     v["pending_prompts"] = list(pending.values())
                 send(conn, wl, v)
@@ -213,6 +221,8 @@ def serve(conn):
     finally:
         with lock:
             attached[:] = [(c, w) for c, w in attached if c is not conn]
+            if owner[0] in mine:
+                owner[0] = None
         conn.close()
 
 

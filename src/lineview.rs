@@ -577,7 +577,7 @@ impl Avatar {
         let look = &self.brain_look;
         let mut m = provider::Status { signed: look.signed.clone(), synaps: look.synaps.clone(), local: look.local.clone(), ..provider::Status::default() };
         let Some(s) = &self.session else { return m };
-        m.model = crate::line::asked_model(self.prefs_io.pending().map(|j| &j.pref), s.link.model());
+        m.model = crate::line::asked_model(self.prefs_io.pending().map(|j| &j.pref), s.link.model_on_way().or(s.link.model()));
         m.signed_in = match s.link.creds() {
             Creds::Have => Some(true),
             Creds::Missing(_) => Some(false),
@@ -678,7 +678,7 @@ impl Avatar {
         self.menu_save = self.menu_save.written(p, job.menu, r.is_ok());
         self.prefs_says = Some(match r {
             Ok(_) => {
-                self.pref_apply(p);
+                let took = self.pref_apply(p);
                 elog!("synaps-avatar: settings: {p:?}: ok (that key only{})", if job.menu { ", her menu" } else { "" });
                 match p {
                     Pref::Attention(a) => {
@@ -695,7 +695,8 @@ impl Avatar {
                     }
                     Pref::Wake(true) => "Say my name, I'll hear it.".into(),
                     Pref::Wake(false) => "I'll stop listening for my name.".into(),
-                    Pref::Model(m) => format!("{} it is. Your next message runs on it.", provider::model_spoken(m)),
+                    Pref::Model(m) if took => format!("{} it is. Your next message runs on it.", provider::model_spoken(m)),
+                    Pref::Model(_) => "Saved for my next start: another client has my session's input.".into(),
                 }
             }
             Err(e) => {
@@ -711,8 +712,9 @@ impl Avatar {
         cx.notify();
     }
 
-    /// A change written: its key in what she runs with, nothing else.
-    fn pref_apply(&mut self, p: Pref) {
+    /// A change written: its key in what she runs with, nothing else. false: a model her session
+    /// can't take now (another client owns its input; her next start sets it).
+    fn pref_apply(&mut self, p: Pref) -> bool {
         match p {
             Pref::Attention(a) => {
                 if let Some(h) = &mut self.brain {
@@ -741,16 +743,20 @@ impl Avatar {
                 if let Some(h) = &mut self.brain {
                     p.apply(&mut h.settings);
                 }
-                let acts = match &mut self.session {
+                let (acts, took) = match &mut self.session {
                     Some(sl) if !sl.link.rides_other() => {
                         let persona = crate::session_persona(&session, &self.voice.cfg, sl.link.cli_model(), &self.pack.dir);
-                        sl.link.set_persona(persona, Instant::now())
+                        let acts = sl.link.set_persona(persona, Instant::now());
+                        let took = !acts.is_empty() || sl.link.model() == Some(m) || sl.link.model_on_way() == Some(m);
+                        (acts, took)
                     }
-                    _ => Vec::new(),
+                    _ => (Vec::new(), false),
                 };
                 self.run_acts(acts);
+                return took;
             }
         }
+        true
     }
 
     /// Bring an open Line up to date (deferred: the Line may call back).
