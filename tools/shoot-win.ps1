@@ -273,6 +273,60 @@ public static class Native {
     [DllImport("user32.dll")] static extern uint GetDpiForSystem();
     public static uint SystemDpi() { Aware(); return GetDpiForSystem(); }
 }
+
+/// A flat window over the whole desktop, under every other (it never takes the foreground): what
+/// shows through a shot's transparent parts, whatever the desktop draws (its watermark too).
+public static class Cover {
+    public const string Class = "ShootWinCover";
+    delegate IntPtr Proc(IntPtr h, uint m, IntPtr w, IntPtr l);
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct WNDCLASS { public uint style; public Proc proc; public int cls; public int wnd; public IntPtr inst; public IntPtr icon; public IntPtr cursor; public IntPtr bg; public string menu; public string name; }
+    [StructLayout(LayoutKind.Sequential)]
+    struct MSG { public IntPtr h; public uint m; public IntPtr w; public IntPtr l; public uint t; public int x; public int y; }
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern ushort RegisterClass(ref WNDCLASS c);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr CreateWindowEx(uint ex, string cls, string title, uint style, int x, int y, int w, int h, IntPtr parent, IntPtr menu, IntPtr inst, IntPtr param);
+    [DllImport("user32.dll")] static extern IntPtr DefWindowProc(IntPtr h, uint m, IntPtr w, IntPtr l);
+    [DllImport("user32.dll")] static extern int GetMessage(out MSG m, IntPtr h, uint a, uint b);
+    [DllImport("user32.dll")] static extern bool TranslateMessage(ref MSG m);
+    [DllImport("user32.dll")] static extern IntPtr DispatchMessage(ref MSG m);
+    [DllImport("user32.dll")] static extern IntPtr SetTimer(IntPtr h, IntPtr id, uint ms, IntPtr f);
+    [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int w, int hh, uint f);
+    [DllImport("user32.dll")] static extern bool IsIconic(IntPtr h);
+    [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr h, int cmd);
+    [DllImport("user32.dll")] static extern int GetSystemMetrics(int i);
+    [DllImport("user32.dll")] static extern IntPtr SetThreadDpiAwarenessContext(IntPtr ctx);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr FindWindow(string cls, string title);
+    [DllImport("gdi32.dll")] static extern IntPtr CreateSolidBrush(uint c);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern IntPtr GetModuleHandle(string n);
+    static Proc keep;
+
+    public static bool Up() { return FindWindow(Class, null) != IntPtr.Zero; }
+
+    /// Runs till the process ends: the cover, kept on the whole screen (a scaling change resizes
+    /// it) and shown (a minimize-all would hide it).
+    public static void Run(int rgb) {
+        SetThreadDpiAwarenessContext(new IntPtr(-4));
+        keep = (h, m, w, l) => {
+            if (m == 0x0113) Fit(h);
+            return DefWindowProc(h, m, w, l);
+        };
+        uint cref = (uint)(((rgb & 0xFF) << 16) | (rgb & 0xFF00) | ((rgb >> 16) & 0xFF));
+        var c = new WNDCLASS { proc = keep, inst = GetModuleHandle(null), bg = CreateSolidBrush(cref), name = Class };
+        RegisterClass(ref c);
+        // Popup, visible; a tool window that never activates.
+        var win = CreateWindowEx(0x08000080, Class, "shoot-win cover", 0x90000000, 0, 0, 1, 1, IntPtr.Zero, IntPtr.Zero, c.inst, IntPtr.Zero);
+        Fit(win);
+        SetTimer(win, new IntPtr(1), 500, IntPtr.Zero);
+        MSG msg;
+        while (GetMessage(out msg, IntPtr.Zero, 0, 0) > 0) { TranslateMessage(ref msg); DispatchMessage(ref msg); }
+    }
+
+    static void Fit(IntPtr h) {
+        if (IsIconic(h)) ShowWindow(h, 4);
+        // Below every window but the desktop's own: under the desktop it would show nothing.
+        SetWindowPos(h, IntPtr.Zero, 0, 0, GetSystemMetrics(0), GetSystemMetrics(1), 0x0010 | 0x0004 | 0x0200);
+    }
+}
 }
 '@
 }
@@ -322,13 +376,24 @@ function Get-ShotWindows {
 }
 
 <# The desktop quiet behind a shot: every window minimized (the runner's own console), dialogs
-   closed, no wallpaper (one flat colour), no icons. #>
+   closed, no wallpaper (one flat colour), no icons, and a flat window of that colour over the
+   desktop under every other (`-Cover`, a process of its own that stays up: a second call keeps
+   it). #>
 function Clear-ShotDesktop {
     param([int]$Color = 0x202024)
     (New-Object -ComObject Shell.Application).MinimizeAll()
     foreach ($t in [ShootWin.Native]::CloseDialogs()) { Write-Host "desktop: closed a dialog: '$t'" }
     if (-not [ShootWin.Native]::Backdrop($Color)) { Write-Warning 'desktop: the backdrop stayed' }
     if (-not [ShootWin.Native]::HideIcons()) { Write-Warning 'desktop: its icons stayed' }
+    # Over all that, a flat window of that colour (the desktop's watermark is drawn whatever its
+    # wallpaper): its own process, left running.
+    if (-not [ShootWin.Cover]::Up()) {
+        $me = $MyInvocation.MyCommand.ScriptBlock.File
+        $null = Start-Process (Get-Process -Id $PID).Path -ArgumentList @('-NoProfile', '-File', "`"$me`"", '-Cover', ('0x{0:x6}' -f $Color)) -WindowStyle Hidden -PassThru
+        $t = [DateTime]::UtcNow.AddSeconds(15)
+        while (-not [ShootWin.Cover]::Up() -and [DateTime]::UtcNow -lt $t) { Start-Sleep -Milliseconds 200 }
+        if (-not [ShootWin.Cover]::Up()) { Write-Warning 'desktop: the cover never came up' }
+    }
     Start-Sleep -Milliseconds 800
 }
 
@@ -413,7 +478,8 @@ function Send-ShotClick {
     if ($n -ne 2) { throw "Send-ShotClick ${X},${Y}: SendInput took $n of 2" }
 }
 
-# ---- run as a script: -Display WxH[@scale] | -Shot PATH (-ProcessId N | -Title GLOB) [-Pad N] ---
+# ---- run as a script: -Display WxH[@scale] | -Shot PATH (-ProcessId N | -Title GLOB) [-Pad N] |
+#      -Cover 0xRRGGBB (Clear-ShotDesktop's; runs till killed) -----------------------------------
 
 if ($args.Count -gt 0) {
     $cli = @{}
@@ -422,6 +488,9 @@ if ($args.Count -gt 0) {
         if ($cli.display -notmatch '^(\d+)x(\d+)(?:@(\d+))?$') { throw "-Display WxH[@scale], e.g. 1920x1080@100" }
         $sc = if ($Matches[3]) { [int]$Matches[3] } else { 100 }
         Set-ShotDisplay -Width ([int]$Matches[1]) -Height ([int]$Matches[2]) -Scale $sc
+    }
+    if ($cli.cover) {
+        [ShootWin.Cover]::Run([int]$cli.cover)
     }
     if ($cli.shot) {
         $pad = if ($cli.pad) { [int]$cli.pad } else { 12 }
