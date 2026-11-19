@@ -17,7 +17,7 @@ on:
         required: true
         default: main
       sets:
-        description: "Scene sets, comma-separated: settings, header"
+        description: "Scene sets, comma-separated: settings, header, fx"
         required: true
         default: settings,header
       hidpi:

@@ -173,8 +173,8 @@ desktop to try it on.
 ## Shots on a runner
 
 `.github/workflows/shots.yml` shoots her on a GitHub Windows runner: Actions → shots → Run workflow
-(a ref and the scene sets), or the `shots` label on a PR (its head; `shots:settings` or
-`shots:header` for one set). It builds the release binary of that ref, assembles her pack with
+(a ref and the scene sets), or the `shots` label on a PR (its head; `shots:settings`,
+`shots:header` or `shots:fx` for one set; the `fx` set only that way or by name). It builds the release binary of that ref, assembles her pack with
 `tools/make-pack` (CapriCore v1.0.4 + lachy, `--lachy auto`; never mochi), starts the fake daemon
 (`tools/fakedaemon.py`: the daemon's named pipe, its control on 127.0.0.1:47811) and, for voice
 takes, the fake sidecar (`tools/fakevoice.py`, on the real link), then runs `tools/shots/scenes.ps1`
@@ -189,7 +189,11 @@ missed), and with no shots at all; the shots it did get are uploaded anyway.
 (`Set-ShotDisplay -Width 1920 -Height 1080 -Scale 150`, live, no sign-out), a process's or a
 title's windows shot cropped (`Save-WindowShot -Path x.png -ProcessId $p.Id` or `-Title 'Setup*'`),
 and SendInput keys and clicks (`Send-ShotKeys 'ctrl+comma'`, `Send-ShotClick`). Never the whole
-desktop. `Set-ShotDisplay` and `Clear-ShotDesktop` change the machine (scaling, wallpaper, every
+desktop. For motion, `Start-ShotBurst -Dir d -Fps 30 -Seconds 4` grabs the work area (or `-Rect`)
+on a thread of its own, frames written raw and gzipped (`fNNNN.bgra.gz`, BGRA top-down), and
+`Stop-ShotBurst` writes `burst.json` (the rect, each frame's time, marks such as when a command
+went out). The `fx` set uses it: a long and a short teleport, the launch replayed (`intro`), and
+music mode at 70 BPM, the pack's own and 170 BPM. `Set-ShotDisplay` and `Clear-ShotDesktop` change the machine (scaling, wallpaper, every
 dialog closed, a cover window left up), so they refuse to run off a GitHub-hosted runner
 (`RUNNER_ENVIRONMENT`) unless `SHOOT_WIN_ANYWAY` is set.
 

@@ -331,6 +331,123 @@ public static class Cover {
         SetWindowPos(h, IntPtr.Zero, 0, 0, GetSystemMetrics(0), GetSystemMetrics(1), 0x0010 | 0x0004 | 0x0200);
     }
 }
+
+/// A burst: a rect of the screen grabbed at a steady rate on a thread of its own (BitBlt with
+/// CAPTUREBLT into a DIB), each frame written raw (BGRA, top-down) and gzipped by worker threads
+/// as fNNNN.bgra.gz. Times: each frame's grab, in ms from the start.
+public sealed class Burst {
+    [DllImport("user32.dll")] static extern IntPtr GetDC(IntPtr h);
+    [DllImport("user32.dll")] static extern int ReleaseDC(IntPtr h, IntPtr dc);
+    [DllImport("user32.dll")] static extern IntPtr SetThreadDpiAwarenessContext(IntPtr ctx);
+    [DllImport("gdi32.dll")] static extern IntPtr CreateCompatibleDC(IntPtr dc);
+    [DllImport("gdi32.dll")] static extern bool DeleteDC(IntPtr dc);
+    [DllImport("gdi32.dll")] static extern IntPtr SelectObject(IntPtr dc, IntPtr o);
+    [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr o);
+    [DllImport("gdi32.dll")] static extern bool GdiFlush();
+    [DllImport("gdi32.dll")] static extern bool BitBlt(IntPtr dst, int x, int y, int w, int h, IntPtr src, int sx, int sy, uint rop);
+    [DllImport("gdi32.dll")] static extern IntPtr CreateDIBSection(IntPtr dc, ref BIH bi, uint usage, out IntPtr bits, IntPtr section, uint offset);
+    [DllImport("winmm.dll")] static extern uint timeBeginPeriod(uint p);
+    [DllImport("winmm.dll")] static extern uint timeEndPeriod(uint p);
+    [StructLayout(LayoutKind.Sequential)]
+    struct BIH { public uint Size; public int W, H; public ushort Planes, Bits; public uint Compression, SizeImage; public int Xppm, Yppm; public uint Used, Important; }
+
+    public readonly int X, Y, W, H, Fps; public readonly double Seconds; public readonly string Dir;
+    public readonly List<double> Times = new List<double>();
+    public string Error;
+    readonly System.Diagnostics.Stopwatch clock = new System.Diagnostics.Stopwatch();
+    readonly System.Collections.Concurrent.BlockingCollection<Tuple<int, byte[]>> queue =
+        new System.Collections.Concurrent.BlockingCollection<Tuple<int, byte[]>>(32);
+    readonly System.Collections.Concurrent.ConcurrentBag<byte[]> spare = new System.Collections.Concurrent.ConcurrentBag<byte[]>();
+    System.Threading.Thread grab;
+    readonly List<System.Threading.Thread> writers = new List<System.Threading.Thread>();
+
+    Burst(int x, int y, int w, int h, int fps, double seconds, string dir) { X = x; Y = y; W = w; H = h; Fps = fps; Seconds = seconds; Dir = dir; }
+
+    /// Ms since the burst started (to mark when something was asked of her).
+    public double Now() { return clock.Elapsed.TotalMilliseconds; }
+
+    public static Burst Start(int x, int y, int w, int h, int fps, double seconds, string dir) {
+        var b = new Burst(x, y, w, h, fps, seconds, dir);
+        System.IO.Directory.CreateDirectory(dir);
+        int n = Math.Max(2, Environment.ProcessorCount - 1);
+        for (int i = 0; i < n; i++) {
+            var t = new System.Threading.Thread(b.Write) { IsBackground = true };
+            t.Start();
+            b.writers.Add(t);
+        }
+        b.grab = new System.Threading.Thread(b.Grab) { IsBackground = true, Priority = System.Threading.ThreadPriority.Highest };
+        b.clock.Start();
+        b.grab.Start();
+        return b;
+    }
+
+    /// Blocks till the burst is over and every frame is on disk. The frame count.
+    public int Wait() {
+        grab.Join();
+        foreach (var t in writers) t.Join();
+        return Times.Count;
+    }
+
+    void Grab() {
+        IntPtr scr = IntPtr.Zero, mem = IntPtr.Zero, dib = IntPtr.Zero, old = IntPtr.Zero, bits;
+        bool hires = false;
+        try {
+            SetThreadDpiAwarenessContext(new IntPtr(-4));
+            hires = timeBeginPeriod(1) == 0;
+            scr = GetDC(IntPtr.Zero);
+            mem = CreateCompatibleDC(scr);
+            var bi = new BIH { Size = 40, W = W, H = -H, Planes = 1, Bits = 32 };
+            dib = CreateDIBSection(mem, ref bi, 0, out bits, IntPtr.Zero, 0);
+            if (dib == IntPtr.Zero) throw new InvalidOperationException("CreateDIBSection failed");
+            old = SelectObject(mem, dib);
+            double period = 1000.0 / Fps;
+            long slot = 0;
+            int n = 0, len = W * H * 4;
+            while (clock.Elapsed.TotalSeconds < Seconds) {
+                double due = slot * period;
+                double left = due - clock.Elapsed.TotalMilliseconds;
+                if (left > 2) System.Threading.Thread.Sleep((int)left - 1);
+                while (clock.Elapsed.TotalMilliseconds < due) System.Threading.Thread.SpinWait(64);
+                double t = clock.Elapsed.TotalMilliseconds;
+                if (!BitBlt(mem, 0, 0, W, H, scr, X, Y, 0x00CC0020u | 0x40000000u)) throw new InvalidOperationException("BitBlt failed");
+                GdiFlush();
+                byte[] buf;
+                if (!spare.TryTake(out buf)) buf = new byte[len];
+                Marshal.Copy(bits, buf, 0, len);
+                lock (Times) Times.Add(t);
+                queue.Add(Tuple.Create(n++, buf));
+                // Late: on to the next slot still ahead (a skipped slot shows in Times).
+                slot = Math.Max(slot + 1, (long)Math.Ceiling(clock.Elapsed.TotalMilliseconds / period));
+            }
+        } catch (Exception e) {
+            Error = e.Message;
+        } finally {
+            queue.CompleteAdding();
+            try {
+                if (old != IntPtr.Zero) SelectObject(mem, old);
+                if (dib != IntPtr.Zero) DeleteObject(dib);
+                if (mem != IntPtr.Zero) DeleteDC(mem);
+                if (scr != IntPtr.Zero) ReleaseDC(IntPtr.Zero, scr);
+                if (hires) timeEndPeriod(1);
+            } catch (Exception) { }
+        }
+    }
+
+    void Write() {
+        foreach (var f in queue.GetConsumingEnumerable()) {
+            try {
+                var path = System.IO.Path.Combine(Dir, string.Format("f{0:D4}.bgra.gz", f.Item1));
+                using (var fs = System.IO.File.Create(path))
+                using (var gz = new System.IO.Compression.GZipStream(fs, System.IO.Compression.CompressionLevel.Fastest)) {
+                    gz.Write(f.Item2, 0, f.Item2.Length);
+                }
+            } catch (Exception e) {
+                Error = e.Message;
+            }
+            spare.Add(f.Item2);
+        }
+    }
+}
 }
 '@
 }
@@ -456,6 +573,30 @@ function Save-WindowShot {
     if (-not $rect) { throw "shot ${Path}: no window on screen (pid $ProcessId, title '$Title')" }
     Save-RectShot -Path $Path -Rect $rect
     return $rect
+}
+
+<# A burst of frames: -Rect (physical px; default the work area) grabbed -Fps times a second for
+   -Seconds, into -Dir as fNNNN.bgra.gz (raw BGRA, top-down, gzipped). Returns the burst: mark
+   moments with $b.Now() (ms from its start), then Stop-ShotBurst. #>
+function Start-ShotBurst {
+    param([Parameter(Mandatory)][string]$Dir, [int[]]$Rect, [int]$Fps = 30, [double]$Seconds = 4)
+    if (-not $Rect) { $Rect = [ShootWin.Native]::WorkArea() }
+    [ShootWin.Burst]::Start($Rect[0], $Rect[1], $Rect[2], $Rect[3], $Fps, $Seconds, [IO.Path]::GetFullPath($Dir))
+}
+
+<# Waits for a burst to end and its frames to be written; writes burst.json beside them (the rect,
+   the rate, each frame's time in ms, and -Marks: name -> ms). Returns that. #>
+function Stop-ShotBurst {
+    param([Parameter(Mandatory)]$Burst, [hashtable]$Marks = @{}, [hashtable]$Extra = @{})
+    $n = $Burst.Wait()
+    $meta = [ordered]@{
+        rect = @($Burst.X, $Burst.Y, $Burst.W, $Burst.H); fps = $Burst.Fps; seconds = $Burst.Seconds; frames = $n
+        format = 'fNNNN.bgra.gz: gzip of raw BGRA, top-down, w*h*4 bytes'
+        times_ms = @($Burst.Times | ForEach-Object { [Math]::Round($_, 1) }); marks = $Marks; error = $Burst.Error
+    }
+    foreach ($k in $Extra.Keys) { $meta[$k] = $Extra[$k] }
+    $meta | ConvertTo-Json -Depth 6 | Set-Content -Path (Join-Path $Burst.Dir 'burst.json') -Encoding utf8NoBOM
+    [pscustomobject]$meta
 }
 
 # ---- input (only where the program's own control can't) ---------------------------------------

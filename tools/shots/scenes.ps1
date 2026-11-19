@@ -14,6 +14,10 @@
               cog and `CHAT` (their rects, from `state`) with an empty chat and a full one.
     header    the bubble's header (#78) at 470 px and at 340 px: hands-free and a reply, a prompt
               with 3 waiting, his long words (YOU) while the turn runs.
+    fx        her effects as frame bursts of the work area (Start-ShotBurst): a teleport across the
+              screen, a short one, the launch replayed (`intro`), each at 30 fps from just before
+              it is asked till well after; music mode at 70 BPM, the pack's own and 170 BPM, 7 s
+              each at 15 fps. A still of her before and after each.
   Out: <Out>\<set>\<take>\<step>.png + .json (her `state`), <Out>\index.json, <Out>\logs\.
 #>
 param(
@@ -344,6 +348,42 @@ $Scenes = [ordered]@{
         }
     }
     header   = [ordered]@{}
+    fx       = [ordered]@{
+        'bolt-long'     = { Fx-Take 'bolt-long' -From 300 -Ask 'pos 1650 100000' -Seconds 4 }
+        'bolt-short'    = { Fx-Take 'bolt-short' -From 1390 -Ask 'pos 1190 100000' -Seconds 3.5 }
+        'bolt-intro'    = { Fx-Take 'bolt-intro' -From 1390 -Ask 'intro' -Seconds 7 }
+        'notes-slow'    = { Fx-Take 'notes-slow' -From 1390 -Ask 'music on 70' -Seconds 7 -Fps 15 }
+        'notes-default' = { Fx-Take 'notes-default' -From 1390 -Ask 'music on' -Seconds 7 -Fps 15 }
+        'notes-fast'    = { Fx-Take 'notes-fast' -From 1390 -Ask 'music on 170' -Seconds 7 -Fps 15 }
+    }
+}
+
+<# An effect take: her at -From (root px, on the floor), still; a burst of the work area that starts
+   0.3 s before -Ask goes to her socket and runs -Seconds; a still of her before and after. The
+   burst's burst.json marks `ask` (sent) and `answered` (her reply), in ms from its start. #>
+function Fx-Take([string]$Name, [int]$From, [string]$Ask, [double]$Seconds, [int]$Fps = 30) {
+    Start-Take fx $Name
+    $null = Ctl 'brain off'
+    $null = Ctl "pos $From 100000 now"
+    Start-Sleep 1.5
+    $before = State
+    Shot 'before' "at $From, before: $Ask"
+    Move-ShotPointer 0 0
+    $b = Start-ShotBurst -Dir (Join-Path $script:TakeOut 'burst') -Fps $Fps -Seconds $Seconds
+    Start-Sleep -Milliseconds 300
+    $sent = $b.Now()
+    $r = Ctl $Ask
+    $answered = $b.Now()
+    $m = Stop-ShotBurst $b -Marks @{ ask = [Math]::Round($sent, 1); answered = [Math]::Round($answered, 1) } -Extra @{
+        ask = $Ask; reply = $r; window_before = $before.window; window_after = (State).window; scale_factor = $before.scale_factor
+    }
+    $gaps = @(for ($i = 1; $i -lt $m.times_ms.Count; $i++) { $m.times_ms[$i] - $m.times_ms[$i - 1] })
+    $worst = if ($gaps) { ($gaps | Measure-Object -Maximum).Maximum } else { 0 }
+    Write-Host "  burst ${Name}: $($m.frames) frames in $Seconds s at $Fps fps (worst gap $worst ms); '$Ask' -> $r"
+    if ($m.error) { $script:Fails.Add("fx/${Name}: burst: $($m.error)") }
+    if ($m.frames -lt $Fps * $Seconds * 0.8) { $script:Fails.Add("fx/${Name}: burst: $($m.frames) frames, under 80% of $Fps fps") }
+    if ($r -match '^error') { $script:Fails.Add("fx/${Name}: '$Ask' -> $r") }
+    Shot 'after' "after: $Ask"
 }
 
 # The header at two widths: 470 where she stands (a reply long enough to fill it), 340 against the
