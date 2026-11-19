@@ -600,16 +600,22 @@ pub trait Stage {
     fn release_keyboard(&self, s: WinId, to: Option<WinId>) -> Result<()>;
 }
 
-/// Connect to the desktop she runs on, the same one GPUI picks: Wayland when
-/// `WAYLAND_DISPLAY` is set (`SA_BACKEND=x11` unsets it first, in `process_setup`, for
-/// XWayland), else X11. On Wayland only Hyprland is supported so far.
+/// Connect to the desktop she runs on, the same one GPUI picks (`linux::backend`): Wayland on
+/// Hyprland, else X11, natively or through XWayland (`process_setup` unsets `WAYLAND_DISPLAY`
+/// first for that: `SA_BACKEND=x11`, or any other Wayland desktop with XWayland running).
 #[cfg(target_os = "linux")]
 pub fn connect() -> Result<Os> {
-    if std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty()) {
-        let (desk, stage) = hypr::connect().map_err(|e| {
-            anyhow::anyhow!("{e:#}; on another Wayland desktop run SA_BACKEND=x11 (through XWayland)")
-        })?;
-        return Ok(Os::new(desk, Box::new(stage)));
+    match linux::backend() {
+        linux::Backend::Wayland => {
+            let (desk, stage) = hypr::connect().map_err(|e| {
+                anyhow::anyhow!("{e:#}; Hyprland is the one Wayland desktop she runs on natively: elsewhere XWayland (SA_BACKEND unset, or x11)")
+            })?;
+            return Ok(Os::new(desk, Box::new(stage)));
+        }
+        linux::Backend::NoXWayland => anyhow::bail!(
+            "this Wayland desktop isn't Hyprland, and XWayland isn't running (DISPLAY is unset): off Hyprland she runs through XWayland. Turn XWayland on, or log in to an X11 session"
+        ),
+        linux::Backend::X11 | linux::Backend::XWayland | linux::Backend::XWaylandAuto => {}
     }
     let x = std::sync::Arc::new(x11::X11::connect()?);
     Ok(Os::new(x.clone(), Box::new(x)))

@@ -49,8 +49,8 @@ flag also has PowerShell's spelling: `-Yes`, `-DryRun`, `-NoAutostart`, and so o
 | 2 | **Her binary** | The release tarball (`synaps-avatar-x86_64-unknown-linux-gnu.tar.gz`), checked against its `.sha256`. With no release (today), or with `--from-source`: rustup if missing (`rustup-init` checked against its sha256, `--no-modify-path`), the toolchain `rust-toolchain.toml` pins, and `cargo build --release --locked`, in `~/.cache/synaps-avatar/installer`. Before that it prints the distro's packages (apt, pacman, dnf or zypper), the `-dev` libraries for a source build and the runtime ones for a binary, then asks. It checks for a Vulkan driver and only says which one to install. | Her installer (`synaps-avatar-setup-x86_64.exe`), checked against its `.sha256`, run unattended. Without one: rustup, Visual Studio's C++ build tools (winget, asks), and a windowed build. |
 | 3 | **Her art pack** | `tools/make-pack`: CapriCore v1.0.4 plus lachy's desktop art at their pinned commits, every file checked against `tools/*.sha256`, built with Python and fonttools in a venv of its own (never system-wide). It prints lachy's licence and Required Notice lines. A pack built from the same inputs is left alone. Mochi's art is **not** fetched: `--with-local-art` adds it, for local personal use only. | The same, with Python from winget when there's none (asks). |
 | 4 | **Daemon and her session** | When systemd's user manager runs, it writes and enables a `synaps-daemon.service` user unit; a unit of your own is kept, and enabled only if you agree. With no user manager, it starts the daemon now, and her autostart line starts it at login. It checks the daemon speaks protocol 3; a daemon that speaks another, or doesn't say, stops the install (exit 1, with how to fix it: an older daemon still running after this run installed or upgraded Synaps is stopped, `synaps daemon stop`; an upgrade says so in step 1 too). Her session `capri` is her own, as before (attached if live, else resumed, else made). | It starts `synaps daemon --detach` now, plus a Run value (`synaps-daemon`) for sign-in. A `synaps-daemon` value of your own is left as it is and never recorded. |
-| 5 | **Summon key** | i3, sway or Hyprland: shows the binding (`$mod+c`: press and release, so a hold talks). With your consent (`--yes`) it appends it between marker comments, after a timestamped backup. The key is named as your config sets `$mod` (Super for Mod4, Alt for Mod1). One that is already taken is reported, not overridden. On any other desktop it tells you what to bind (`avatarctl talk tap`). | Win+Alt+C: she registers it herself. |
-| 6 | **Autostart** (default on) | i3 and sway get an `exec` line, Hyprland an `exec-once`, others an XDG autostart `.desktop`. Each one starts the daemon first if needed. | A Run value (`synaps-avatar`). |
+| 5 | **Summon key** | i3, sway or Hyprland: shows the binding (`$mod+c`: press and release, so a hold talks). With your consent (`--yes`) it appends it between marker comments, after a timestamped backup. The key is named as your config sets `$mod` (Super for Mod4, Alt for Mod1). One that is already taken is reported, not overridden; on Hyprland (whose stock config closes a window on Super+C) it offers Super+Alt+C instead, Windows' key, when that one's free. GNOME: it offers a custom keyboard shortcut, Super+Alt+C running `avatarctl talk tap`, only when you say yes on the terminal ([below](#gnome-kde-and-other-wayland-desktops)). On any other desktop it tells you what to bind (`avatarctl talk tap`). | Win+Alt+C: she registers it herself. |
+| 6 | **Autostart** (default on) | i3 and sway get an `exec` line, Hyprland an `exec-once`, others an XDG autostart `.desktop`. Each one starts the daemon first if needed. Whatever `--no-autostart` says, she also goes in your app menu (`~/.local/share/applications/synaps-avatar.desktop`, with her icon), so once she's quit she starts from there. | A Run value (`synaps-avatar`). |
 | 7 | **`--voice`, `--watch`** | `--voice` runs `tools/capri-voice-setup` (its own venv, ~320 MB of models) and installs `capri-voice.service`. `--watch` installs `capri-watch.service`, enabled only with `--yes`. | `--voice` uses her voice installer (or builds the same bundle without a release) and fetches the models. `--watch` is Linux-only. |
 
 At the end comes an `installed:` summary: what is where, how the daemon starts, how to summon her,
@@ -90,11 +90,38 @@ The `start her:` line is the same command, to start her again later.
 A pack at her pack's place that this script didn't make (your own build) is moved aside to
 `capri.pre-install-<time>`, said so, and never removed by `--uninstall`.
 
+## GNOME, KDE and other Wayland desktops
+
+Hyprland is the one Wayland desktop she runs on natively. On any other (GNOME, KDE Plasma, sway...)
+she runs through XWayland, the X server those desktops keep for X apps.
+
+- **She picks it herself.** A bare `synaps-avatar` with `WAYLAND_DISPLAY` set, no Hyprland
+  (`HYPRLAND_INSTANCE_SIGNATURE` unset) and XWayland running (`DISPLAY` set) runs as
+  `SA_BACKEND=x11` does, and says so in one line of her log. Without XWayland (`DISPLAY` unset) she
+  stops with an error that says so: turn XWayland on, or log in to an X11 session. `SA_BACKEND`
+  always wins: `x11` is XWayland (on Hyprland too), `wayland` is Hyprland or nothing. The
+  installer's start line, autostart entry and app-menu entry still say `env SA_BACKEND=x11` off
+  Hyprland and i3.
+- **What she can't do there:**
+  - she perches only on X apps: a native Wayland window doesn't exist for her, so she can't sit on
+    it or follow it;
+  - she sees the pointer only while it's over an X window, so cursor play stops over native ones;
+  - presence (how long since you last typed or moved the mouse: XScreenSaver's idle time) counts
+    only input that X apps get. While you type in a native Wayland app she may decide you're away
+    and nap.
+- **Her summon key on GNOME** is a custom keyboard shortcut. The installer checks that Super+Alt+C
+  is free (GNOME's window, Shell and media-key shortcuts and every custom one), then asks on the
+  terminal whether to add it, running `avatarctl talk tap`. The default is no; `--yes` doesn't
+  answer it, and with no terminal it isn't asked. Said no, or the key is taken, it tells you where
+  to add one yourself: Settings > Keyboard > Keyboard Shortcuts > Custom Shortcuts. It's added to
+  the end of your list (yours stay), and `--uninstall` takes it out again (unless you changed it to
+  run something else). On KDE, bind `avatarctl talk tap` in its Shortcuts settings yourself.
+
 ## Flags
 
 | flag | |
 |---|---|
-| `--yes` | don't ask: Synaps' installer and its PATH edits, sudo for packages, edits to the window manager's config, enabling capri-watch (Windows: winget). It never opens `synaps login` |
+| `--yes` | don't ask: Synaps' installer and its PATH edits, sudo for packages, edits to the window manager's config, enabling capri-watch (Windows: winget). It never opens `synaps login`, and never adds a GNOME shortcut (that one takes your own yes) |
 | `--dry-run` | print every action, touch nothing |
 | `--uninstall` | remove what it installed; settings, state and her log stay (on Windows her installer's own uninstaller takes her state and log) |
 | `--purge` | with `--uninstall`: remove those too: her own files only (`settings.toml`, `state.json`, `sessions.json`, her log, the installer's cache), never the folders' other contents. A pack it didn't make (yours at `packs/capri`, or one moved aside) is never removed |
@@ -120,6 +147,8 @@ so a path with spaces stays one path. `--uninstall` walks it backwards:
 - it disables the units it enabled;
 - it removes the marker blocks, keeps your config's backup, and leaves a symlinked config a symlink
   (a config that would be left empty is left as it is);
+- it takes her GNOME shortcut out of your custom shortcuts and resets it (`gkey PATH`; one you made
+  run something else stays);
 - it removes the folders it made (when empty), the prefix's included.
 
 It removes only what is inside her folders (each `--prefix` she went to, and her data, config and
@@ -141,7 +170,9 @@ Linux:
 - `~/.local/bin/{synaps-avatar,avatarctl}` and `~/.local/lib/synaps-avatar/`: her binary and tools;
 - `~/.local/share/synaps-avatar/packs/capri`: her pack;
 - `~/.cache/synaps-avatar/`: the source, the build and the make-pack venv (reused by reruns);
-- `~/.config/systemd/user/`: the units.
+- `~/.config/systemd/user/`: the units;
+- `~/.local/share/applications/synaps-avatar.desktop` (her app-menu entry) and
+  `~/.config/autostart/synaps-avatar.desktop` (off i3, sway and Hyprland).
 
 Windows: her installer's folder, her pack under `%LOCALAPPDATA%\synaps-avatar`, and the Run values.
 
@@ -166,6 +197,9 @@ A pull request that touches the packaging runs the same builds and tests, and re
   - shellcheck on `install.sh`, PSScriptAnalyzer on `install.ps1`;
   - `installer/test_parity.py`: both scripts take the same flags, run the same steps in the same
     order, read keys the manifest has, and `install.ps1` keeps nothing in the caller's scope;
+  - `installer/test-units.sh`: her start at the end, the pinned Synaps and the daemon's protocol, her
+    app-menu entry, the GNOME shortcut (a stand-in `gsettings`: never on `--yes` or without a
+    terminal, your list kept) and Hyprland's Super+Alt+C, and `--uninstall` taking them away;
   - `install.sh --dry-run` several ways (one fetched from GitHub as `curl | bash` gets it, one with a
     `--prefix` with spaces, one from `CAPRI_INSTALL_FLAGS`), checked to change nothing; as root,
     refused without `--allow-root` and always with someone else's `HOME`.

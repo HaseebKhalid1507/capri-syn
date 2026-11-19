@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # install.sh's start of her, on its own (CI's installer job): which running instances it quits,
 # where it won't start her, her log kept once, her working folder; the Synaps it installs (the
-# manifest's pin) and the daemon's protocol, on stand-ins. install.sh's functions are
+# manifest's pin) and the daemon's protocol; her app-menu entry, her summon key on GNOME and
+# Hyprland, and --uninstall taking them away; on stand-ins. install.sh's functions are
 # loaded without running it; pgrep only ever sees this test's own stand-ins (never a real Capri),
-# and `avatarctl` is never reached.
+# and `avatarctl`, kill and pkill are never reached.
 #
 #   bash installer/test-units.sh
 # shellcheck disable=SC2034,SC2153,SC2154 # install.sh's own variables (M_*: its manifest's), read by its functions
+# shellcheck disable=SC2016 # $mainMod in single quotes is Hyprland's, as written in its config
 set -uo pipefail
 here=$(cd "$(dirname "$0")/.." && pwd)
 # shellcheck source=/dev/null
@@ -53,8 +55,15 @@ pgrep() {
 RAN=()
 QUIT_TAKES=''
 # avatarctl fails (nothing answers here); with QUIT_TAKES it took that pid first (gone when it returns).
+# RUN_REAL=1 (the last checks, in a home under $tmp): everything runs but avatarctl, kill and pkill.
+RUN_REAL=0
 run() {
     RAN+=("$*")
+    if [ "$RUN_REAL" = 1 ]; then
+        case $1 in kill | pkill | */avatarctl) return 0 ;; esac
+        "$@"
+        return
+    fi
     case $1 in
         kill) "$@" ;;
         *)
@@ -211,6 +220,121 @@ done
 out=$(daemon_says '')
 case $out in *"doesn't say which protocol"*"daemon stop"*rc=1) r=0 ;; *) r=1 ;; esac
 check $r "one that doesn't say its protocol: the install stops too"
+
+# Her app-menu entry (step 6, with --no-autostart too), her summon key as a GNOME custom shortcut
+# (only on his yes at a terminal) and Hyprland's Super+Alt+C when Super+C is taken; --uninstall takes
+# each away again. A home of its own under $tmp; gsettings is a stand-in (its values in GS), and
+# nothing here quits or kills anything.
+h=$tmp/h2
+mkdir -p "$h"
+HOME=$h DATA=$h/.local/share CONF=$h/.config STATE=$h/.local/state CACHE_BASE=$h/.cache
+CACHE_ROOT=$h/.cache/synaps-avatar CACHE=$h/.cache/synaps-avatar/installer BIN=$h/.local/bin
+PACK=$h/.local/share/synaps-avatar/packs/capri RECEIPT=$h/.local/share/synaps-avatar/install.receipt
+PREFIXES=("$h/.local") CARGO_BIN=$h/.cargo/bin TMP=$tmp DRY=0 YES=0 VOICE=0 UNINSTALL=0 PURGE=0 SYSTEMD=1 WMCONF=''
+RUN_REAL=1 FAKE=()
+mkdir -p "$PACK" "$BIN"
+: >"$PACK/icon.png"
+declare -A GS=()
+GS_WM=''
+gsettings() {
+    case $1 in
+        writable) echo true ;;
+        get)
+            if [ -n "${GS["$2 $3"]:-}" ]; then
+                echo "${GS["$2 $3"]}"
+            elif [ "$3" = custom-keybindings ]; then echo '@as []'; else echo "''"; fi
+            ;;
+        # A list reads back in single quotes, as gsettings prints one.
+        set) if [ "$3" = custom-keybindings ]; then GS["$2 $3"]=${4//\"/\'}; else GS["$2 $3"]=$4; fi ;;
+        reset-recursively) for k in "${!GS[@]}"; do case $k in "$2 "*) unset "GS[$k]" ;; esac; done ;;
+        list-recursively) if [ "$2" = org.gnome.desktop.wm.keybindings ]; then printf '%s\n' "$2 close ['<Alt>F4']" "$GS_WM"; fi ;;
+    esac
+}
+gk() { gsettings get "$GSCHEMA.custom-keybinding:$1" "$2"; }
+C0=/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/custom0/
+
+# The app-menu entry: written with --no-autostart, shown, her pack's icon, her start command.
+app=$DATA/applications/synaps-avatar.desktop
+out=$(AUTOSTART=0 DESKTOP=other step_autostart 2>&1)
+check "$([ -f "$app" ] && [ ! -e "$CONF/autostart/synaps-avatar.desktop" ] && echo 0)" "--no-autostart: her app-menu entry all the same, no autostart one"
+check "$(grep -q NoDisplay "$app" || echo 0)" "it shows in the menu (no NoDisplay)"
+check "$(grep -qx "Icon=$PACK/icon.png" "$app" && echo 0)" "her pack's icon"
+check "$(grep -qx "Exec=env SA_BACKEND=x11 $BIN/synaps-avatar" "$app" && grep -qx "TryExec=$BIN/synaps-avatar" "$app" && echo 0)" "her start command (XWayland off Hyprland and i3): $(grep '^Exec=' "$app")"
+check "$(grep -qxF "file	$app" "$RECEIPT" && echo 0)" "in the receipt"
+mkdir -p "$CONF/synaps-avatar"
+: >"$CONF/synaps-avatar/icon.png"
+out=$(AUTOSTART=1 DESKTOP=other step_autostart 2>&1)
+check "$(grep -qx "Icon=$CONF/synaps-avatar/icon.png" "$app" && echo 0)" "his own icon wins, as for her window"
+check "$(grep -qx NoDisplay=true "$CONF/autostart/synaps-avatar.desktop" && echo 0)" "autostart: its own entry, hidden from the menu"
+
+# GNOME: a custom shortcut, never on --yes, never without a terminal, default no.
+export XDG_CURRENT_DESKTOP=ubuntu:GNOME CAPRI_DESKTOP=other
+check "$(ok on_gnome)" "ubuntu:GNOME is GNOME"
+check "$([ "$(XDG_CURRENT_DESKTOP=KDE ok on_gnome)" = 1 ] && echo 0)" "KDE isn't"
+out=$(YES=1 confirm_tty 'add it' 2>&1)
+r=$?
+check "$([ $r = 1 ] && case $out in *"--yes doesn't answer"*) echo 0 ;; esac)" "--yes doesn't answer it"
+out=$(setsid -w bash -c 'source <(sed "\$d" "$1"); set +e; ui; YES=0 DRY=0; confirm_tty "add it"; echo "rc=$?"' _ "$here/install.sh" </dev/null 2>&1)
+case $out in *'no terminal to ask on: skipped (add it)'*rc=1) r=0 ;; *) r=1 ;; esac
+check $r "no terminal: not asked, not done"
+confirm_tty() { echo "asked: $1"; [ "$ANSWER" = y ]; }
+gsettings set "$GSCHEMA.custom-keybinding:$C0" command "'kgx'"
+gsettings set "$GSCHEMA.custom-keybinding:$C0" binding "'<Super>Return'"
+gsettings set "$GSCHEMA" custom-keybindings "['$C0']"
+ANSWER=n SUMMON='' SUMMON_KEY=''
+step_summon >"$tmp/out" 2>&1
+case $(cat "$tmp/out") in *'asked: add a GNOME keyboard shortcut: Super+Alt+C'*'Custom Shortcuts'*"$BIN/avatarctl talk tap"*) r=0 ;; *) r=1 ;; esac
+check $r "asked; his no: how to bind it himself"
+check "$([ "$(gsettings get "$GSCHEMA" custom-keybindings)" = "['$C0']" ] && [ "$(gk "$GKEY" command)" = "''" ] && echo 0)" "and nothing set"
+ANSWER=y
+step_summon >"$tmp/out" 2>&1
+check "$([ "$SUMMON_KEY" = Super+Alt+C ] && echo 0)" "his yes: Super+Alt+C ($SUMMON)"
+check "$([ "$(gsettings get "$GSCHEMA" custom-keybindings)" = "['$C0', '$GKEY']" ] && echo 0)" "added to his list, his own kept: $(gsettings get "$GSCHEMA" custom-keybindings)"
+check "$([ "$(gk "$GKEY" command)" = "\"$BIN/avatarctl talk tap\"" ] && [ "$(gk "$GKEY" binding)" = '"<Super><Alt>c"' ] && echo 0)" "running avatarctl talk tap on <Super><Alt>c"
+check "$(grep -qxF "gkey	$GKEY" "$RECEIPT" && echo 0)" "in the receipt"
+SUMMON='' SUMMON_KEY=''
+step_summon >"$tmp/out" 2>&1
+case $(cat "$tmp/out") in *asked:*) r=1 ;; *'already a GNOME shortcut: <Super><Alt>c runs'*) r=0 ;; *) r=1 ;; esac
+check "$([ $r = 0 ] && [ "$SUMMON_KEY" = Super+Alt+C ] && echo 0)" "run again: already there, not asked"
+GS_WM="org.gnome.desktop.wm.keybindings toggle-maximized ['<Alt><Super>c']"
+GS["$GSCHEMA.custom-keybinding:$GKEY command"]="'/usr/bin/true'"
+step_summon >"$tmp/out" 2>&1
+case $(cat "$tmp/out") in *asked:*) r=1 ;; *'Super+Alt+C is taken: org.gnome.desktop.wm.keybindings toggle-maximized'*) r=0 ;; *) r=1 ;; esac
+check $r "Super+Alt+C taken (any modifier order): not asked"
+GS["$GSCHEMA.custom-keybinding:$GKEY command"]="\"$BIN/avatarctl talk tap\"" GS_WM=''
+unset XDG_CURRENT_DESKTOP
+
+# Hyprland: its stock Super+C closes a window, so Super+Alt+C (Windows' key), when that's free.
+export CAPRI_DESKTOP=hyprland
+mkdir -p "$CONF/hypr"
+hc=$CONF/hypr/hyprland.conf
+hypr() {
+    printf '%s\n' '$mainMod = SUPER' "$@" 'bind = $mainMod, Q, exec, kitty' >"$hc"
+    SUMMON='' SUMMON_KEY=''
+    step_summon >"$tmp/out" 2>&1
+}
+confirm() { echo "asked: $1"; return 0; }
+hypr 'bind = $mainMod, C, killactive,'
+check "$([ "$SUMMON_KEY" = Super+Alt+C ] && grep -qx "bind = SUPER ALT, C, exec, $BIN/avatarctl talk press" "$hc" &&
+    grep -qx "bindr = SUPER ALT, C, exec, $BIN/avatarctl talk release" "$hc" && grep -qx 'bind = $mainMod, C, killactive,' "$hc" && echo 0)" \
+    "Super+C taken (killactive): Super+Alt+C, his line kept"
+VOICE=1 hypr 'bind = $mainMod, C, killactive,'
+check "$(grep -qx "bind = SUPER ALT CTRL, C, exec, $BIN/avatarctl talk toggle" "$hc" && echo 0)" "--voice: Super+Alt+Ctrl+C toggles her mic"
+hypr 'bind = SUPER, C, killactive,' 'bind = $mainMod ALT, C, exec, foo'
+case $(cat "$tmp/out") in *'Super+Alt+C is taken too: bind = $mainMod ALT, C, exec, foo'*'pick another key'*) r=0 ;; *) r=1 ;; esac
+check "$([ $r = 0 ] && [ -z "$SUMMON_KEY" ] && ! grep -q avatarctl "$hc" && echo 0)" "both taken: nothing added, he picks one"
+hypr 'bind = $mainMod, X, killactive,'
+check "$([ "$SUMMON_KEY" = Super+C ] && grep -qx "bind = SUPER, C, exec, $BIN/avatarctl talk press" "$hc" && echo 0)" "Super+C free: Super+C, as before"
+hypr 'bind = $mainMod, C, killactive,'
+unset CAPRI_DESKTOP
+
+# --uninstall: the app-menu and autostart entries, her GNOME shortcut (his stays), her Hyprland block.
+uninstall >"$tmp/out" 2>&1
+check "$([ ! -e "$app" ] && [ ! -e "$CONF/autostart/synaps-avatar.desktop" ] && echo 0)" "--uninstall: both desktop entries gone"
+check "$([ "$(gsettings get "$GSCHEMA" custom-keybindings)" = "['$C0']" ] && [ "$(gk "$GKEY" command)" = "''" ] && [ "$(gk "$C0" command)" = "'kgx'" ] && echo 0)" \
+    "her GNOME shortcut out of his list and reset, his own kept: $(gsettings get "$GSCHEMA" custom-keybindings)"
+check "$(! grep -q avatarctl "$hc" && grep -qx 'bind = $mainMod, C, killactive,' "$hc" && echo 0)" "her Hyprland block out, his lines kept"
+check "$([ ! -e "$RECEIPT" ] && echo 0)" "and the receipt"
 
 if [ "$fails" -gt 0 ]; then
     echo "$fails install.sh unit check(s) failed"

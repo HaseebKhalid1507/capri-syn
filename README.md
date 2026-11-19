@@ -344,7 +344,7 @@ On Windows she registers <kbd>Win</kbd>+<kbd>Alt</kbd>+<kbd>C</kbd> (the Line) a
 |---|---|
 | **Linux, X11** | Her home. Built and used daily on i3, with or without a compositor. Every clip on this page is X11. |
 | **Linux, Hyprland** | Works: perching, drag and fling, effects, several monitors. Tested in a nested Hyprland rig, not yet daily-driven. No idle time there yet, so typing alone for 5 minutes reads as away. |
-| **Other Wayland desktops** | Not supported. `SA_BACKEND=x11` runs her through XWayland. |
+| **Other Wayland desktops** (GNOME, KDE, sway) | Supported through XWayland: she perches on X apps only, and may nap while you type in native Wayland ones ([limits](docs/INSTALL.md#gnome-kde-and-other-wayland-desktops)). Not yet tried on a real GNOME or KDE session. |
 | **Windows 11** | In progress. CI builds, tests and lints it and builds an installer on every push, but it hasn't been run on real hardware or in the VM yet: [14 checks are open](docs/WINDOWS.md#vm-pending-one-vm-day). |
 | **macOS** | Not planned. |
 
