@@ -571,6 +571,11 @@ fn run(t_start: Instant) -> Result<()> {
         })
         .detach();
     });
+    // Windows: nothing past GPUI's run (her state is saved: `finish_quit`). ExitProcess would run
+    // every DLL's detach, and a GPU driver's can hold her there, her exe still mapped.
+    if cfg!(windows) {
+        platform::exit_now(0);
+    }
     Ok(())
 }
 

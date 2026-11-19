@@ -334,6 +334,9 @@ fn respawn_after() -> Duration {
 }
 /// After the client's thread stopped by itself, start a new one this soon.
 const RESPAWN_SOON: Duration = Duration::from_secs(5);
+/// Her quit's bound: her bye, the daemon told (800 ms at most), her state saved, GPUI's teardown;
+/// still here after this, she ends at once (`platform::quit_watchdog`).
+const QUIT_WITHIN: Duration = Duration::from_secs(2);
 
 /// The text field in the bubble.
 struct InputBox {
@@ -4039,12 +4042,15 @@ impl Avatar {
     }
 
     fn quit(&mut self, cx: &mut Context<Self>) {
+        if self.session.as_ref().is_some_and(|s| s.closing) {
+            return;
+        }
+        // Bounded: whatever holds her teardown (on his box, once, a quit said bye and she stayed,
+        // her exe pinned), she's gone `QUIT_WITHIN` from here.
+        crate::platform::quit_watchdog(QUIT_WITHIN);
         // Detach + Bye first, so the daemon drops us from the roster now; the pump ends
         // when the connection thread stops (or give it 800 ms).
         if let Some(s) = &mut self.session {
-            if s.closing {
-                return;
-            }
             s.closing = true;
             if s.client.shutdown().is_ok() {
                 let (tx, rx) = async_channel::bounded::<()>(1);
@@ -4086,7 +4092,7 @@ impl Avatar {
         self.os.tray_remove();
         std::fs::remove_file(crate::control::socket_path()).ok();
         if self.fatal {
-            std::process::exit(2);
+            crate::platform::exit_now(2);
         }
         cx.quit();
     }

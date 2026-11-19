@@ -230,6 +230,22 @@ jobs:
           retention-days: 14
           if-no-files-found: error
 
+      # Her quit is bounded (2 s after her bye) and frees her exe, then the same with the session
+      # locked, as on his box when a quit stayed and pinned her exe. Last: the lock stays.
+      - name: Her quit, unlocked and locked
+        timeout-minutes: 5
+        shell: pwsh
+        run: ./tests/windows/test-quit.ps1 -Exe target/release/synaps-avatar.exe -Locked -Out "$env:RUNNER_TEMP/sa-quit"
+
+      - name: Her logs from a failed quit
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-quit-${{ github.sha }}
+          path: ${{ runner.temp }}/sa-quit
+          retention-days: 7
+          if-no-files-found: ignore
+
   # Her voice installer (packaging/windows/synaps-avatar-voice.iss): the bundle beside her, as its
   # own download. Built, installed, checked and uninstalled unattended (without the models); then
   # the model fetch on its small files (resume, a bad hash). An artifact, never released.

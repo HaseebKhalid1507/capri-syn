@@ -374,8 +374,10 @@ const Z_EVERY: Duration = Duration::from_millis(250);
 /// The slowest the checks get while her puts don't hold (`ZPace`).
 const Z_MAX: Duration = Duration::from_secs(8);
 /// A window she couldn't get above is left out of the checks this long, then tried again (one
-/// bad reading never leaves her under his window for good).
+/// bad reading never leaves her under his window for good). Found over her again, its next stay
+/// out doubles, to `Z_CANT_MAX` (`cant_for`).
 const Z_CANT_FOR: Duration = Duration::from_secs(60);
+const Z_CANT_MAX: Duration = Duration::from_secs(600);
 /// A wake-up posted and not handled for this long was lost (its window never took it): posted
 /// again.
 const REPOST_MS: u64 = 500;
@@ -570,23 +572,36 @@ fn exe_of(h: HWND) -> String {
 }
 
 /// A fullscreen app: showing, not the shell's UI, and covering its whole monitor (a borderless
-/// full screen), or in front while the shell reports a D3D full screen or presentation mode
-/// (asked only when it doesn't cover its monitor).
-fn fullscreen(h: HWND) -> bool {
+/// full screen), or (`ask_shell`) in front while the shell reports a D3D full screen or
+/// presentation mode (asked only when it doesn't cover its monitor). Never `ask_shell` from the
+/// poller: that call is answered by explorer, and a hung explorer would stall the poller and her
+/// click-through with it (Shady on #85).
+fn fullscreen(h: HWND, ask_shell: bool) -> bool {
     if h.0.is_null() || is_shell_ui(h) || !showing(h) {
         return false;
     }
     if covers_monitor(h) {
         return true;
     }
+    if !ask_shell {
+        return false;
+    }
     let state = unsafe { SHQueryUserNotificationState() };
     matches!(state, Ok(s) if s == QUNS_RUNNING_D3D_FULL_SCREEN || s == QUNS_PRESENTATION_MODE) && unsafe { GetForegroundWindow() } == h
 }
 
 /// A fullscreen app in front (a game, a video, a slideshow): Windows may put it over topmost
-/// windows, and the core hides her there anyway (`fullscreen-hide`).
+/// windows, and the core hides her there anyway (`fullscreen-hide`). The poller's: the shell
+/// isn't asked (`fullscreen`).
 fn fullscreen_in_front() -> bool {
-    fullscreen(unsafe { GetForegroundWindow() })
+    fullscreen(unsafe { GetForegroundWindow() }, false)
+}
+
+/// How long a window she can't get above is left out, the `n`th time it's found over her:
+/// `Z_CANT_FOR`, doubled each time, to `Z_CANT_MAX` (a window above the topmost band for good
+/// isn't re-tried every minute all day).
+fn cant_for(n: u32) -> Duration {
+    Z_CANT_FOR.saturating_mul(1u32 << n.clamp(1, 8).saturating_sub(1)).min(Z_CANT_MAX)
 }
 
 /// One of her click-through surfaces: its input region (window px) and its click-through state.
@@ -692,15 +707,24 @@ struct ZWatch {
     last: std::time::Instant,
     pace: ZPace,
     puts: u64,
-    /// Windows she can't get above, since when.
-    cant: HashMap<WinId, std::time::Instant>,
-    /// Those her log has named (once a window).
-    said: HashSet<WinId>,
+    /// Windows she can't get above: since when, for how long (`cant_for`).
+    cant: HashMap<WinId, (std::time::Instant, Duration)>,
+    /// Those her log has named (once a window), and how often each was found over her.
+    said: HashMap<WinId, u32>,
+    /// A fullscreen app in front (`fullscreen_in_front`; a test's own).
+    front_fullscreen: fn() -> bool,
 }
 
 impl Default for ZWatch {
     fn default() -> ZWatch {
-        ZWatch { last: std::time::Instant::now(), pace: ZPace::default(), puts: 0, cant: HashMap::new(), said: HashSet::new() }
+        ZWatch {
+            last: std::time::Instant::now(),
+            pace: ZPace::default(),
+            puts: 0,
+            cant: HashMap::new(),
+            said: HashMap::new(),
+            front_fullscreen: fullscreen_in_front,
+        }
     }
 }
 
@@ -717,10 +741,11 @@ impl ZWatch {
         }
         let Some(pass) = relock(surfaces, "surfaces").get(&b).map(|s| s.pass.clone()) else { return };
         let alive = |w: WinId| unsafe { IsWindow(Some(hwnd(w))) }.as_bool();
-        self.cant.retain(|&w, at| alive(w) && at.elapsed() < Z_CANT_FOR);
-        self.said.retain(|&w| alive(w));
+        self.cant.retain(|&w, (at, stay)| alive(w) && at.elapsed() < *stay);
+        self.said.retain(|&w, _| alive(w));
         let is_mine = |w: WinId| mine.lock().is_ok_and(|m| m.contains(&w));
-        let over = under_plain_window(hwnd(b), is_mine, |w| self.cant.contains_key(&w)).filter(|_| !fullscreen_in_front());
+        let front = self.front_fullscreen;
+        let over = under_plain_window(hwnd(b), is_mine, |w| self.cant.contains_key(&w)).filter(|_| !front());
         let in_flight = pass.top.load(Ordering::SeqCst);
         // Her UI thread's word on its last put, read once (a stale one never names a later window).
         let reported = if in_flight { 0 } else { pass.still_under.swap(0, Ordering::SeqCst) };
@@ -733,10 +758,12 @@ impl ZWatch {
             ZStep::Cant => {
                 let mut o = over;
                 while let Some(w) = o {
-                    if self.said.insert(id(w)) {
+                    let n = self.said.entry(id(w)).or_insert(0);
+                    *n += 1;
+                    if *n == 1 {
                         elog!("synaps-avatar: z: can't get above {} of {} (0x{:x}): left there", class_name(w), exe_of(w), id(w));
                     }
-                    self.cant.insert(id(w), std::time::Instant::now());
+                    self.cant.insert(id(w), (std::time::Instant::now(), cant_for(*n)));
                     o = under_plain_window(w, is_mine, |x| self.cant.contains_key(&x));
                 }
             }
@@ -1214,7 +1241,7 @@ impl Desktop for Win32 {
     /// It covers its whole monitor (a borderless full screen), or it is in front while the
     /// shell reports a D3D full screen or presentation mode (`fullscreen`).
     fn is_fullscreen(&self, w: WinId) -> bool {
-        fullscreen(hwnd(w))
+        fullscreen(hwnd(w), true)
     }
 
     fn pointer(&self) -> Result<(i32, i32)> {
@@ -2054,6 +2081,104 @@ mod tests {
         // Still under that very window right after the put: above the band; settled, no doubling.
         assert_eq!(z.found(true, false, true), ZStep::Cant);
         assert_eq!((z.every, z.unsettled), (Z_EVERY, false));
+    }
+
+    /// A window above the topmost band, found over her again and again, is left out longer each
+    /// time: 1 min, 2, 4, 8, then 10 at most (Shady on #85: not re-tried every minute all day).
+    #[test]
+    fn a_window_she_cant_get_above_is_left_out_longer_each_time() {
+        let mins: Vec<u64> = (1..=7).map(|n| cant_for(n).as_secs()).collect();
+        assert_eq!(mins, [60, 120, 240, 480, 600, 600, 600]);
+        assert_eq!(cant_for(0), Z_CANT_FOR, "never less than the first stay");
+        assert_eq!(cant_for(u32::MAX), Z_CANT_MAX);
+    }
+
+    /// A fullscreen app in front (a game, a video) means no re-raise: she stays where Windows put
+    /// her, under another app's window, through a second of checks; with none in front she's put
+    /// back on top at the next check (Shady on #85). The poller's own check, by hand: the
+    /// fullscreen app is the test's word (`front_fullscreen`), as the foreground can't be taken
+    /// on a runner reliably.
+    #[test]
+    fn a_fullscreen_app_in_front_means_no_re_raise() {
+        use std::sync::mpsc::channel;
+        use std::time::Instant;
+        let (ox, oy) = origin();
+        let (wtx, wrx) = channel::<isize>();
+        let (stop_tx, stop_rx) = channel::<()>();
+        let other = std::thread::spawn(move || unsafe {
+            let inst = ::windows::Win32::System::LibraryLoader::GetModuleHandleW(None).unwrap();
+            let wc = WNDCLASSW { lpfnWndProc: Some(plain_proc), hInstance: inst.into(), lpszClassName: ::windows::core::w!("SaZFsOther"), ..Default::default() };
+            RegisterClassW(&wc);
+            let h = CreateWindowExW(WS_EX_NOACTIVATE, ::windows::core::w!("SaZFsOther"), ::windows::core::w!("sa-z-fs-other"), WS_POPUP | WS_VISIBLE, ox + 300, oy + 300, 300, 300, None, None, Some(inst.into()), None).unwrap();
+            wtx.send(h.0 as isize).unwrap();
+            let mut m = MSG::default();
+            while stop_rx.try_recv().is_err() {
+                while PeekMessageW(&mut m, None, 0, 0, PM_REMOVE).as_bool() {
+                    let _ = TranslateMessage(&m);
+                    DispatchMessageW(&m);
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let _ = DestroyWindow(h);
+        });
+        let plain = HWND(wrx.recv().unwrap() as *mut _);
+        let x = Win32::connect().unwrap();
+        let body = unsafe {
+            let inst = ::windows::Win32::System::LibraryLoader::GetModuleHandleW(None).unwrap();
+            let wc = WNDCLASSW { lpfnWndProc: Some(plain_proc), hInstance: inst.into(), lpszClassName: ::windows::core::w!("SaZFsBody"), ..Default::default() };
+            RegisterClassW(&wc);
+            CreateWindowExW(WINDOW_EX_STYLE(0), ::windows::core::w!("SaZFsBody"), ::windows::core::w!("sa-z-fs-body"), WS_POPUP | WS_VISIBLE, ox + 350, oy + 350, 200, 200, None, None, Some(inst.into()), None).unwrap()
+        };
+        let s = x.adopt_hwnd(Role::Body, body).unwrap();
+        let pass = x.surfaces.lock().unwrap().get(&s).map(|surf| surf.pass.clone()).expect("her body is a click-through surface");
+        let pump = || unsafe {
+            let mut m = MSG::default();
+            while PeekMessageW(&mut m, None, 0, 0, PM_REMOVE).as_bool() {
+                let _ = TranslateMessage(&m);
+                DispatchMessageW(&m);
+            }
+        };
+        let plain_over_her = || {
+            let mut w = body;
+            for _ in 0..4096 {
+                match unsafe { GetWindow(w, GW_HWNDPREV) } {
+                    Ok(p) if p == plain => return true,
+                    Ok(p) => w = p,
+                    Err(_) => return false,
+                }
+            }
+            false
+        };
+        pump();
+        unsafe { SetWindowPos(body, Some(plain), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE).unwrap() };
+        assert!(plain_over_her(), "the plain window isn't over her: the test proves nothing");
+        // A fullscreen app in front: a second of checks, no put.
+        let mut z = ZWatch { front_fullscreen: || true, ..ZWatch::default() };
+        let (t0, before) = (Instant::now(), pass.tops.load(Ordering::SeqCst));
+        while t0.elapsed() < Duration::from_secs(1) {
+            z.last = Instant::now() - Duration::from_secs(10);
+            z.tick(&x.body, &x.surfaces, &x.mine);
+            std::thread::sleep(Duration::from_millis(20));
+            pump();
+        }
+        assert_eq!((pass.tops.load(Ordering::SeqCst), z.puts), (before, 0), "re-raised over a fullscreen app in front");
+        assert!(plain_over_her(), "moved over the window while a fullscreen app was in front");
+        // None in front: put back at the next check.
+        z.front_fullscreen = || false;
+        let t0 = Instant::now();
+        while plain_over_her() {
+            assert!(t0.elapsed() < Duration::from_secs(3), "no fullscreen app in front, and still under the window after 3 s");
+            z.last = Instant::now() - Duration::from_secs(10);
+            z.tick(&x.body, &x.surfaces, &x.mine);
+            std::thread::sleep(Duration::from_millis(20));
+            pump();
+        }
+        assert!(z.puts > 0 && pass.tops.load(Ordering::SeqCst) > before, "put back, but not by the check");
+        stop_tx.send(()).ok();
+        other.join().unwrap();
+        unsafe {
+            let _ = DestroyWindow(body);
+        }
     }
 
     /// Start's host is a monitor-sized window of the shell's: never a fullscreen app (on

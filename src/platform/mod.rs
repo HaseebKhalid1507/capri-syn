@@ -614,6 +614,31 @@ pub fn connect() -> Result<Os> {
     Ok(Os::new(x.clone(), Box::new(x)))
 }
 
+/// Her end, now, with no teardown after it (her state is saved before: `finish_quit`). Windows:
+/// `TerminateProcess` on herself, so no DLL's detach (a GPU driver's) and no thread can hold her
+/// there, her exe still mapped (an installer then can't replace it). Elsewhere: `exit`.
+pub fn exit_now(code: i32) -> ! {
+    #[cfg(windows)]
+    unsafe {
+        use ::windows::Win32::System::Threading::{GetCurrentProcess, TerminateProcess};
+        let _ = TerminateProcess(GetCurrentProcess(), code as u32);
+    }
+    std::process::exit(code)
+}
+
+/// Her quit, bounded: still here `within` after her bye (a teardown that holds: a driver, a
+/// thread), she ends there (`exit_now`).
+pub fn quit_watchdog(within: std::time::Duration) {
+    let spawned = std::thread::Builder::new().name("quit-watchdog".into()).spawn(move || {
+        std::thread::sleep(within);
+        elog!("synaps-avatar: quit: still here {} ms after her bye: ending now", within.as_millis());
+        exit_now(0);
+    });
+    if let Err(e) = spawned {
+        elog!("synaps-avatar: quit: no watchdog ({e}): her quit has no bound");
+    }
+}
+
 /// Connect to the Windows desktop (DWM always composites).
 #[cfg(windows)]
 pub fn connect() -> Result<Os> {
