@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### A new personality, written from scratch
+
+Her persona's first paragraph is rewritten clean-room from the show's canon: a construct stitched
+together from many human minds, gleeful and fun-seeking, cocky, teasing, with a quiet side that
+watches the sky. She's firmly on her user's side, never possessive, and still keeps to one or two
+plain-text sentences. The old paragraph closely paraphrased CapriCore's GPL-3.0 `PERSONALITY.md`,
+so it's gone. The Synaps and capri-watch paragraphs are unchanged.
+
 ### "Hey Capri" is never sent as his words
 - "Hey Capri" alone could reach her as a turn he never said: Whisper decoding the phrase again in the first
   hands-free utterance wrote "Take a breath" (five times live since Nov 16), "Aye, capri", "And capri", "Ee capri" (his bare
