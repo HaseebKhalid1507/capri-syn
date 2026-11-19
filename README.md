@@ -201,13 +201,6 @@ It asks before anything needs sudo, and `--dry-run` prints every step without do
 **🪟 Windows 11.** **[⬇ capri-syn setup](https://github.com/HaseebKhalid1507/capri-syn/releases/latest/download/capri-syn-setup-x86_64.exe)**,
 then double-click it. Per user, no admin. It's unsigned for now, so SmartScreen asks first.
 
-<!-- remove at v1.0.0 publish -->
-> [!NOTE]
-> **The first release is on its way.** Until it's out, that link has nothing to serve: use the line
-> below. For now it builds her from source, and if it has to install Visual Studio's C++ build tools,
-> they ask for admin (a UAC prompt).
-<!-- /remove at v1.0.0 publish -->
-
 Rather a terminal?
 
 ```powershell
