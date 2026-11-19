@@ -85,6 +85,8 @@ function Wait-Page($W, [string]$Caption, [int]$Secs = 120) {
 
 # The wizard, as he gets it: double-clicked, every default left as it is.
 $log = Join-Path ([IO.Path]::GetTempPath()) "capri-setup-wizard-$PID.log"
+# The shots' desktop quiet (the runner's console minimized, a flat backdrop), before the wizard.
+try { Clear-ShotDesktop } catch { Write-Host "  (desktop stays as it is: $($_.Exception.Message))" }
 $p = Start-Process $Setup -ArgumentList "/LOG=`"$log`"" -PassThru
 $w = Wait-Window '^Setup - capri-syn'
 foreach ($page in @(

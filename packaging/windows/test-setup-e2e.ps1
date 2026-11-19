@@ -135,6 +135,9 @@ Check (-not (Test-Path (Join-Path $app 'voice')) -and -not (Test-Path (Join-Path
 # 4. She starts, from his profile folder (the finish page's "Start her now"), and attaches.
 $from = (Get-Item $herLog -ErrorAction SilentlyContinue).Length
 $t0 = Get-Date
+# The shots' desktop quiet (the runner's console minimized, a flat backdrop): before she's up, so
+# she isn't minimized with it.
+if ($Shots) { try { Clear-ShotDesktop } catch { Write-Host "  (desktop stays as it is: $($_.Exception.Message))" } }
 $her = Start-Process $exe -WorkingDirectory $env:USERPROFILE -PassThru
 $st = $null; $painted = $false
 while (((Get-Date) - $t0).TotalSeconds -lt 60) {
