@@ -1,7 +1,8 @@
 //! What Haseeb allows (the pack says what she *can* do): `~/.config/synaps-avatar/settings.toml`.
 //! Every key is optional. Read at start and by `settings reload`; a bad file is logged and the
-//! old values stay. The right-click ATTENTION line writes `brain.attention` back, keeping the
-//! rest of the file as it was.
+//! old values stay. Her Settings page and the right-click ATTENTION line write keys back
+//! (`Settings::write`): only those keys change, his comments and layout stay, and a file she
+//! can't read or parse is never written over.
 
 use crate::brain::{Approach, Arrival};
 use anyhow::{Context as _, Result};
@@ -719,28 +720,372 @@ impl Settings {
         }
     }
 
-    /// Write `brain.attention`, keeping the rest of the file (comments too).
-    pub fn save_attention(a: Attention) -> Result<()> {
-        let p = Self::path();
-        let text = std::fs::read_to_string(&p).unwrap_or_default();
-        let out = set_attention(&text, a)?;
-        if let Some(d) = p.parent() {
-            std::fs::create_dir_all(d)?;
-        }
-        let tmp = p.with_extension("toml.tmp");
-        std::fs::write(&tmp, out)?;
-        std::fs::rename(&tmp, &p)?;
-        Ok(())
+    /// Change these keys in his settings file (`Settings::path`), the rest as it was. Ok(true):
+    /// written; Ok(false): nothing changed. Err: refused, the file untouched (see `write_at`).
+    pub fn write(edits: &[Edit]) -> std::result::Result<bool, WriteError> {
+        write_at(&Self::path(), edits)
     }
 }
 
-fn set_attention(text: &str, a: Attention) -> Result<String> {
-    let mut doc: toml_edit::DocumentMut = text.parse().context("settings.toml")?;
-    if !doc.contains_key("brain") {
-        doc["brain"] = toml_edit::table();
+/// settings.toml writes, one at a time in the order asked (each `Settings::write` runs off her UI
+/// thread). What a write changes is applied only once it is in the file (`finish`), and a
+/// reload asked for meanwhile is owed again once the last write is in: what she runs with is
+/// what the file says. `T`: what to apply when its write lands.
+pub struct WriteQueue<T> {
+    jobs: std::collections::VecDeque<(Vec<Edit>, T)>,
+    /// The write under way: its number, when it started, what it applies.
+    under_way: Option<(u64, std::time::Instant, T)>,
+    seq: u64,
+    reload_owed: bool,
+}
+
+impl<T> Default for WriteQueue<T> {
+    fn default() -> Self {
+        WriteQueue { jobs: Default::default(), under_way: None, seq: 0, reload_owed: false }
     }
-    doc["brain"]["attention"] = toml_edit::value(a.key());
-    Ok(doc.to_string())
+}
+
+/// A write under way this long is stuck (a hung network home, a dead disk): she says so.
+pub const WRITE_STUCK: std::time::Duration = std::time::Duration::from_secs(4);
+
+impl<T> WriteQueue<T> {
+    pub fn push(&mut self, edits: Vec<Edit>, then: T) {
+        self.jobs.push_back((edits, then));
+    }
+
+    /// The next write to run, if none is under way: its number and its edits.
+    pub fn start(&mut self, now: std::time::Instant) -> Option<(u64, Vec<Edit>)> {
+        if self.under_way.is_some() {
+            return None;
+        }
+        let (edits, then) = self.jobs.pop_front()?;
+        self.seq += 1;
+        self.under_way = Some((self.seq, now, then));
+        Some((self.seq, edits))
+    }
+
+    /// Write `seq` is done (written or refused): what it applies, and whether a reload is owed
+    /// now (the last write is in).
+    pub fn finish(&mut self, seq: u64) -> Option<(T, bool)> {
+        if self.under_way.as_ref().is_none_or(|u| u.0 != seq) {
+            return None;
+        }
+        let (_, _, then) = self.under_way.take()?;
+        let reload = self.reload_owed && self.jobs.is_empty();
+        if reload {
+            self.reload_owed = false;
+        }
+        Some((then, reload))
+    }
+
+    /// A reload now: true if writes are pending (it is done again once they are in).
+    pub fn reload(&mut self) -> bool {
+        self.reload_owed = self.busy();
+        self.reload_owed
+    }
+
+    pub fn busy(&self) -> bool {
+        self.under_way.is_some() || !self.jobs.is_empty()
+    }
+
+    /// The writes not in yet, oldest first (the one under way, then the queue).
+    pub fn pending(&self) -> impl Iterator<Item = &T> {
+        self.under_way.iter().map(|u| &u.2).chain(self.jobs.iter().map(|j| &j.1))
+    }
+
+    /// Write `seq` still under way after WRITE_STUCK.
+    pub fn stuck(&self, seq: u64, now: std::time::Instant) -> bool {
+        self.under_way.as_ref().is_some_and(|u| u.0 == seq && now.saturating_duration_since(u.1) >= WRITE_STUCK)
+    }
+
+    /// The write under way has been for WRITE_STUCK.
+    pub fn stuck_now(&self, now: std::time::Instant) -> bool {
+        self.under_way.as_ref().is_some_and(|u| now.saturating_duration_since(u.1) >= WRITE_STUCK)
+    }
+}
+
+/// Her temp files left beside `path`'s file by a write that never finished (a crash, a kill):
+/// only her own pattern (`<name>.<pid>.tmp`, the pid not running, or this process's), never
+/// anything else. How many went.
+pub fn sweep_temps(path: &std::path::Path) -> usize {
+    let Ok(target) = resolve(path) else { return 0 };
+    let Some(dir) = target.parent().filter(|d| !d.as_os_str().is_empty()) else { return 0 };
+    let name = target.file_name().map_or("settings.toml".into(), |n| n.to_string_lossy().into_owned());
+    let Ok(rd) = std::fs::read_dir(dir) else { return 0 };
+    let mut gone = 0;
+    for e in rd.flatten() {
+        let f = e.file_name().to_string_lossy().into_owned();
+        let Some(ps) = f.strip_prefix(&format!("{name}.")).and_then(|r| r.strip_suffix(".tmp")) else { continue };
+        let Some(pid) = ps.parse::<u32>().ok().filter(|p| p.to_string() == ps) else { continue };
+        if !e.file_type().is_ok_and(|t| t.is_file()) {
+            continue;
+        }
+        if (pid == std::process::id() || !alive(pid, &e)) && std::fs::remove_file(e.path()).is_ok() {
+            gone += 1;
+        }
+    }
+    gone
+}
+
+/// Whether the process `pid` that made temp file `e` may still be writing it. Unix: it is
+/// running; elsewhere: the file is under a minute old.
+fn alive(pid: u32, e: &std::fs::DirEntry) -> bool {
+    #[cfg(unix)]
+    {
+        let _ = e;
+        let Ok(p) = libc::pid_t::try_from(pid) else { return false };
+        // SAFETY: signal 0 sends nothing; it only checks the pid.
+        unsafe { libc::kill(p, 0) == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_none_or(|a| a < std::time::Duration::from_secs(60))
+    }
+}
+
+/// One change to the settings file.
+#[derive(Clone, Debug)]
+pub enum Edit {
+    /// `[table] key = value`.
+    Set(&'static str, &'static str, toml_edit::Value),
+}
+
+/// Why a write was refused: what she says, and the detail for her log.
+#[derive(Debug)]
+pub enum WriteError {
+    /// It exists but she can't read it (permissions, not a file): never written over.
+    Unreadable(String),
+    /// It doesn't parse (`line`, 1-based): never "repaired".
+    Typo { line: Option<usize>, detail: String },
+    /// The result wouldn't load (a value of the wrong type): not written.
+    Invalid(String),
+    /// Couldn't put it in place (permissions, a full disk).
+    Failed(String),
+}
+
+impl std::fmt::Display for WriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WriteError::Unreadable(e) => write!(f, "settings.toml unreadable: {e}"),
+            WriteError::Typo { line: Some(l), detail } => write!(f, "settings.toml line {l}: {detail}"),
+            WriteError::Typo { line: None, detail } => write!(f, "settings.toml: {detail}"),
+            WriteError::Invalid(e) => write!(f, "settings.toml would not load: {e}"),
+            WriteError::Failed(e) => write!(f, "settings.toml not saved: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for WriteError {}
+
+impl WriteError {
+    /// Her line for it (the Settings page's SAYS strip).
+    pub fn says(&self) -> String {
+        match self {
+            WriteError::Typo { line: Some(l), .. } => format!("Your settings file has a typo on line {l}. I won't write over it."),
+            WriteError::Typo { line: None, .. } => "Your settings file has a typo. I won't write over it.".into(),
+            WriteError::Unreadable(_) => "I can't read your settings file. I won't write over it.".into(),
+            WriteError::Invalid(_) | WriteError::Failed(_) => "Couldn't save that. Your settings file won't let me.".into(),
+        }
+    }
+}
+
+/// `edits` applied to `path`'s file, the rest kept byte for byte (comments, order, spacing, a
+/// changed key's own trailing comment). Through a symlink: its target is written, the link
+/// stays. A file that is there but unreadable, read-only to her, or doesn't parse, is refused
+/// untouched; a result she couldn't load isn't written. Put in place atomically: a temp file
+/// beside it, made with its permissions, synced, renamed over it. Saved by him meanwhile (its
+/// time or size changed before the rename): read again and the edits made on that. Ok(false):
+/// nothing changed, nothing written.
+pub fn write_at(path: &std::path::Path, edits: &[Edit]) -> std::result::Result<bool, WriteError> {
+    write_checked(path, edits, |_| {})
+}
+
+/// [`write_at`], `meanwhile` run between the temp file and the check before its rename (tests:
+/// his editor saving then).
+fn write_checked(path: &std::path::Path, edits: &[Edit], mut meanwhile: impl FnMut(&std::path::Path)) -> std::result::Result<bool, WriteError> {
+    use std::io::ErrorKind::NotFound;
+    let target = resolve(path).map_err(|e| WriteError::Unreadable(format!("{e}")))?;
+    let fail = |e: std::io::Error| WriteError::Failed(format!("{e}"));
+    // Its time, size and (Unix) inode: an editor's own atomic save is a new inode.
+    let stamp = |m: &std::fs::Metadata| {
+        #[cfg(unix)]
+        let ino = std::os::unix::fs::MetadataExt::ino(m);
+        #[cfg(not(unix))]
+        let ino = 0u64;
+        (m.modified().ok(), m.len(), ino)
+    };
+    for _ in 0..3 {
+        let (text, meta) = match std::fs::metadata(&target) {
+            Ok(m) if !m.is_file() => return Err(WriteError::Unreadable("not a file".into())),
+            Ok(m) => (std::fs::read_to_string(&target).map_err(|e| WriteError::Unreadable(format!("{e}")))?, Some(m)),
+            Err(e) if e.kind() == NotFound => (String::new(), None),
+            Err(e) => return Err(WriteError::Unreadable(format!("{e}"))),
+        };
+        if meta.as_ref().is_some_and(|m| !writable(&target, m)) {
+            return Err(WriteError::Failed("read-only".into()));
+        }
+        let out = edited(&text, edits)?;
+        if out == text {
+            return Ok(false);
+        }
+        let dir = target.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
+        std::fs::create_dir_all(dir).map_err(fail)?;
+        let name = target.file_name().map_or("settings.toml".into(), |n| n.to_string_lossy().into_owned());
+        let tmp = dir.join(format!("{name}.{}.tmp", std::process::id()));
+        std::fs::remove_file(&tmp).ok();
+        let made = (|| -> std::io::Result<()> {
+            use std::io::Write as _;
+            let mut f = create_like(&tmp, meta.as_ref())?;
+            f.write_all(out.as_bytes())?;
+            f.sync_all()
+        })();
+        if let Err(e) = made {
+            std::fs::remove_file(&tmp).ok();
+            return Err(fail(e));
+        }
+        meanwhile(&target);
+        let now = std::fs::metadata(&target).ok();
+        if now.as_ref().map(stamp) != meta.as_ref().map(stamp) {
+            std::fs::remove_file(&tmp).ok();
+            continue;
+        }
+        if let Err(e) = rename_over(&tmp, &target) {
+            std::fs::remove_file(&tmp).ok();
+            return Err(fail(e));
+        }
+        // The rename itself, on disk (best effort).
+        if cfg!(unix)
+            && let Ok(d) = std::fs::File::open(dir)
+        {
+            d.sync_all().ok();
+        }
+        return Ok(true);
+    }
+    Err(WriteError::Failed("it kept changing while I wrote".into()))
+}
+
+/// She may write it: Unix, her write permission on it (a 0444 file, or root's, would be
+/// renamed over without a word); Windows, not marked read-only.
+fn writable(path: &std::path::Path, m: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let _ = m;
+        let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else { return false };
+        // SAFETY: a valid NUL-terminated path.
+        unsafe { libc::access(c.as_ptr(), libc::W_OK) == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        !m.permissions().readonly()
+    }
+}
+
+/// A new temp file with `like`'s permissions from the start (Unix: its mode, never wider while
+/// his settings are in it; a new file: 0644 less the umask).
+fn create_like(tmp: &std::path::Path, like: Option<&std::fs::Metadata>) -> std::io::Result<std::fs::File> {
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mode = like.map_or(0o644, |m| m.permissions().mode() & 0o7777);
+        o.mode(mode);
+        let f = o.open(tmp)?;
+        // The umask took bits off: exactly his mode (still never wider than it).
+        if like.is_some() {
+            f.set_permissions(std::fs::Permissions::from_mode(mode))?;
+        }
+        Ok(f)
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows: the only permission is read-only, and a read-only file was refused.
+        let _ = like;
+        o.open(tmp)
+    }
+}
+
+/// The file `path` names: its target when it is a symlink (his dotfiles' link stays a link),
+/// even one whose target isn't there yet.
+fn resolve(path: &std::path::Path) -> std::io::Result<PathBuf> {
+    let mut p = path.to_path_buf();
+    for _ in 0..16 {
+        match std::fs::symlink_metadata(&p) {
+            Ok(m) if m.file_type().is_symlink() => {
+                let to = std::fs::read_link(&p)?;
+                p = if to.is_absolute() { to } else { p.parent().map_or(to.clone(), |d| d.join(&to)) };
+            }
+            Ok(_) => return Ok(p),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(p),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::other("too many symlinks"))
+}
+
+/// Windows: an editor holding the file fails a rename for a moment; three tries, 30 ms apart
+/// (the write runs off her UI thread).
+fn rename_over(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    let mut last = None;
+    for k in 0..if cfg!(windows) { 3 } else { 1 } {
+        if k > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+        match std::fs::rename(from, to) {
+            Ok(()) => return Ok(()),
+            Err(e) => last = Some(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| std::io::Error::other("rename")))
+}
+
+/// `text` with `edits` applied (the document's own layout kept), checked to load.
+fn edited(text: &str, edits: &[Edit]) -> std::result::Result<String, WriteError> {
+    let mut doc: toml_edit::DocumentMut = text.parse().map_err(|e: toml_edit::TomlError| WriteError::Typo {
+        line: e.span().map(|s| text.as_bytes()[..s.start.min(text.len())].iter().filter(|&&b| b == b'\n').count() + 1),
+        detail: e.message().to_string(),
+    })?;
+    for e in edits {
+        match e {
+            Edit::Set(t, k, v) => {
+                if !doc.contains_key(t) {
+                    // A new table goes at the end, after what was there (a closing comment
+                    // stays before it, a blank line between).
+                    let lead = doc.trailing().as_str().unwrap_or("").to_string();
+                    doc.set_trailing("");
+                    let mut tbl = toml_edit::Table::new();
+                    let had = !doc.as_table().is_empty() || !lead.trim().is_empty();
+                    if had {
+                        let lead = if lead.is_empty() || lead.ends_with('\n') { lead } else { lead + "\n" };
+                        tbl.decor_mut().set_prefix(format!("{lead}\n"));
+                    }
+                    doc[*t] = toml_edit::Item::Table(tbl);
+                }
+                let Some(tbl) = doc.get_mut(t).and_then(|i| i.as_table_like_mut()) else {
+                    return Err(WriteError::Invalid(format!("{t} is not a table")));
+                };
+                let mut v = v.clone();
+                match tbl.get_mut(k) {
+                    // Its own decor (the spaces round it, its trailing comment) stays.
+                    Some(item) if item.is_value() => {
+                        if let Some(old) = item.as_value() {
+                            *v.decor_mut() = old.decor().clone();
+                        }
+                        *item = toml_edit::Item::Value(v);
+                    }
+                    _ => {
+                        tbl.insert(k, toml_edit::Item::Value(v));
+                    }
+                }
+            }
+        }
+    }
+    let out = doc.to_string();
+    Settings::parse(&out).map_err(|e| WriteError::Invalid(format!("{e:#}")))?;
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -959,15 +1304,237 @@ fullscreen = "stay"
         }
     }
 
+    fn att(a: Attention) -> Edit {
+        Edit::Set("brain", "attention", a.key().into())
+    }
+
     #[test]
     fn attention_round_trips_and_keeps_comments() {
         let text = "# mine\n[brain]\nno_repeat = 3 # keep\n";
-        let out = set_attention(text, Attention::HangOnly).unwrap();
+        let out = edited(text, &[att(Attention::HangOnly)]).unwrap();
         assert!(out.contains("# mine") && out.contains("no_repeat = 3 # keep"));
         let s = Settings::parse(&out).unwrap();
         assert_eq!((s.brain.attention, s.brain.no_repeat), (Attention::HangOnly, 3));
-        let out = set_attention("", Attention::Off).unwrap();
+        let out = edited("", &[att(Attention::Off)]).unwrap();
         assert_eq!(Settings::parse(&out).unwrap().brain.attention, Attention::Off);
         assert_eq!(Attention::Mix.next().next().next(), Attention::Mix);
+    }
+
+    /// A settings file as he keeps it: comments everywhere, blank lines, odd spacing, a key's
+    /// own comment, an inline table.
+    const HIS: &str = "# Capri, my way.\n\n[brain]\n# where she goes\nattention   =  \"mix\"   # my pick, keep\nno_repeat = 3\n\n[voice]\nenabled = true # mic on\nwake_word = true\n\n# the rest later\n[ragdoll]\nstrength = 0.4\n";
+
+    fn tmp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("sa-settings-{}-{name}", std::process::id()));
+        std::fs::remove_dir_all(&d).ok();
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn a_write_changes_its_one_key_and_nothing_else() {
+        let d = tmp("one");
+        let p = d.join("settings.toml");
+        std::fs::write(&p, HIS).unwrap();
+        assert!(write_at(&p, &[Edit::Set("voice", "wake_word", false.into())]).unwrap());
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), HIS.replace("wake_word = true", "wake_word = false"));
+        // The key's own spacing and comment stay.
+        assert!(write_at(&p, &[att(Attention::Off)]).unwrap());
+        let want = HIS.replace("wake_word = true", "wake_word = false").replace("attention   =  \"mix\"   # my pick, keep", "attention   =  \"off\"   # my pick, keep");
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), want);
+        // The same value again: nothing written.
+        assert!(!write_at(&p, &[att(Attention::Off)]).unwrap());
+        // A table that isn't there yet comes at the end; the rest stays.
+        let fresh = d.join("fresh.toml");
+        std::fs::write(&fresh, "# only this\n").unwrap();
+        write_at(&fresh, &[Edit::Set("voice", "wake_word", false.into())]).unwrap();
+        let out = std::fs::read_to_string(&fresh).unwrap();
+        assert_eq!(out, "# only this\n\n[voice]\nwake_word = false\n");
+        // After the last table's closing comment, a blank line between.
+        let tail = d.join("tail.toml");
+        std::fs::write(&tail, "[brain]\nno_repeat = 3\n# end of mine\n").unwrap();
+        write_at(&tail, &[Edit::Set("voice", "wake_word", false.into())]).unwrap();
+        assert_eq!(std::fs::read_to_string(&tail).unwrap(), "[brain]\nno_repeat = 3\n# end of mine\n\n[voice]\nwake_word = false\n");
+        // No file yet: made.
+        let none = d.join("sub/none.toml");
+        assert!(write_at(&none, &[att(Attention::HangOnly)]).unwrap());
+        assert_eq!(Settings::parse(&std::fs::read_to_string(&none).unwrap()).unwrap().brain.attention, Attention::HangOnly);
+        // No temp file left behind.
+        assert!(std::fs::read_dir(&d).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().ends_with(".tmp")));
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_file_she_cant_read_or_parse_is_left_untouched() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tmp("refuse");
+        // Unreadable (his permissions): refused, not written over (it was read as "" before).
+        let p = d.join("settings.toml");
+        std::fs::write(&p, HIS).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o200)).unwrap();
+        if std::fs::read_to_string(&p).is_err() {
+            assert!(matches!(write_at(&p, &[att(Attention::Off)]), Err(WriteError::Unreadable(_))));
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+            assert_eq!(std::fs::read_to_string(&p).unwrap(), HIS);
+        }
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+        // A typo: refused with its line, untouched.
+        let bad = "[brain]\nattention = \"mix\"\n\n[voice\nenabled = true\n";
+        std::fs::write(&p, bad).unwrap();
+        match write_at(&p, &[att(Attention::Off)]) {
+            Err(e @ WriteError::Typo { line: Some(4), .. }) => assert!(e.says().contains("line 4"), "{}", e.says()),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), bad);
+        // A value she couldn't load: not written.
+        std::fs::write(&p, HIS).unwrap();
+        assert!(matches!(write_at(&p, &[Edit::Set("brain", "attention", "sideways".into())]), Err(WriteError::Invalid(_))));
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), HIS);
+        // A directory where the file goes: refused.
+        let dir = d.join("dir.toml");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(matches!(write_at(&dir, &[att(Attention::Off)]), Err(WriteError::Unreadable(_))));
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_read_only_file_is_refused_and_no_temp_is_left() {
+        let d = tmp("ro");
+        let p = d.join("settings.toml");
+        std::fs::write(&p, HIS).unwrap();
+        let mut perm = std::fs::metadata(&p).unwrap().permissions();
+        perm.set_readonly(true);
+        std::fs::set_permissions(&p, perm.clone()).unwrap();
+        // Root writes anything: nothing to see there.
+        #[cfg(unix)]
+        let root = unsafe { libc::geteuid() } == 0;
+        #[cfg(not(unix))]
+        let root = false;
+        if !root {
+            match write_at(&p, &[att(Attention::Off)]) {
+                Err(e @ WriteError::Failed(_)) => assert!(e.says().contains("won't let me")),
+                other => panic!("{other:?}"),
+            }
+            assert_eq!(std::fs::read_to_string(&p).unwrap(), HIS);
+            assert!(std::fs::read_dir(&d).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().ends_with(".tmp")));
+        }
+        #[allow(clippy::permissions_set_readonly_false)]
+        perm.set_readonly(false);
+        std::fs::set_permissions(&p, perm).unwrap();
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn saved_by_him_meanwhile_is_read_again() {
+        let d = tmp("race");
+        let p = d.join("settings.toml");
+        std::fs::write(&p, HIS).unwrap();
+        // His editor saves a change between her read and her rename: hers is made on his.
+        let mut saves = 0;
+        let r = write_checked(&p, &[att(Attention::Off)], |t| {
+            if saves == 0 {
+                std::fs::write(t, HIS.replace("strength = 0.4", "strength = 0.75")).unwrap();
+            }
+            saves += 1;
+        });
+        assert!(r.unwrap());
+        assert_eq!(saves, 2, "read once more, then put in place");
+        let s = Settings::parse(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        assert_eq!((s.brain.attention, s.ragdoll.strength), (Attention::Off, 0.75));
+        // One that never stops changing: given up, his file as he left it, no temp.
+        let mut n = 0;
+        let r = write_checked(&p, &[att(Attention::HangOnly)], |t| {
+            n += 1;
+            std::fs::write(t, format!("{HIS}{}\n", "#".repeat(n))).unwrap();
+        });
+        assert!(matches!(r, Err(WriteError::Failed(_))), "{r:?}");
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), format!("{HIS}###\n"));
+        assert!(std::fs::read_dir(&d).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().ends_with(".tmp")));
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn his_symlink_stays_a_symlink_and_its_target_is_written() {
+        let d = tmp("link");
+        let real = d.join("dotfiles-settings.toml");
+        std::fs::write(&real, HIS).unwrap();
+        let link = d.join("settings.toml");
+        std::os::unix::fs::symlink("dotfiles-settings.toml", &link).unwrap();
+        assert!(write_at(&link, &[Edit::Set("voice", "wake_word", false.into())]).unwrap());
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), HIS.replace("wake_word = true", "wake_word = false"));
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn its_permissions_stay() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tmp("perm");
+        let p = d.join("settings.toml");
+        std::fs::write(&p, HIS).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+        write_at(&p, &[att(Attention::Off)]).unwrap();
+        assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
+        // Wider than the umask lets a new file be: exactly his still.
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o664)).unwrap();
+        write_at(&p, &[att(Attention::Mix)]).unwrap();
+        assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o664);
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn only_her_own_dead_temps_are_swept() {
+        let d = tmp("sweep");
+        let p = d.join("settings.toml");
+        std::fs::write(&p, HIS).unwrap();
+        // Hers, from a pid that can't be running (above any pid_max) and from this process.
+        let dead = d.join("settings.toml.4294967290.tmp");
+        let mine = d.join(format!("settings.toml.{}.tmp", std::process::id()));
+        // Not hers: another name, no pid, a padded pid, not a .tmp, a directory.
+        let keep = ["other.toml.12.tmp", "settings.toml.x1.tmp", "settings.toml.0012.tmp", "settings.toml.12.bak", "settings.toml..tmp"];
+        for f in [&dead, &mine] {
+            std::fs::write(f, "x").unwrap();
+        }
+        // Windows tells a dead writer's by its age (over a minute).
+        #[cfg(not(unix))]
+        std::fs::OpenOptions::new().write(true).open(&dead).unwrap().set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(120)).unwrap();
+        for k in keep {
+            std::fs::write(d.join(k), "x").unwrap();
+        }
+        std::fs::create_dir(d.join("settings.toml.99.tmp")).unwrap();
+        assert_eq!(sweep_temps(&p), 2);
+        assert!(!dead.exists() && !mine.exists() && p.exists());
+        assert!(keep.iter().all(|k| d.join(k).exists()) && d.join("settings.toml.99.tmp").is_dir());
+        #[cfg(unix)]
+        {
+            // A live writer's (pid 1 always runs) stays.
+            let live = d.join("settings.toml.1.tmp");
+            std::fs::write(&live, "x").unwrap();
+            assert_eq!(sweep_temps(&p), 0);
+            assert!(live.exists());
+        }
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn the_queue_runs_one_write_at_a_time_and_owes_a_reload() {
+        let t0 = std::time::Instant::now();
+        let mut q: WriteQueue<u8> = WriteQueue::default();
+        assert!(!q.reload(), "nothing pending: a reload is just a reload");
+        q.push(vec![att(Attention::Off)], 1);
+        q.push(vec![att(Attention::Mix)], 2);
+        let (a, _) = q.start(t0).unwrap();
+        assert!(q.start(t0).is_none(), "one under way");
+        assert_eq!(q.pending().copied().collect::<Vec<_>>(), vec![1, 2]);
+        assert!(q.reload(), "owed again once they are in");
+        assert!(q.finish(a + 7).is_none(), "not that write");
+        assert_eq!(q.finish(a), Some((1, false)), "one still queued: not yet");
+        let (b, _) = q.start(t0).unwrap();
+        assert!(!q.stuck(b, t0 + WRITE_STUCK / 2) && q.stuck(b, t0 + WRITE_STUCK) && q.stuck_now(t0 + WRITE_STUCK));
+        assert_eq!(q.finish(b), Some((2, true)), "the last is in: the reload now");
+        assert!(!q.busy() && q.start(t0).is_none());
     }
 }
