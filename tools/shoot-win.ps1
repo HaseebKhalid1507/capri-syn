@@ -77,6 +77,26 @@ public static class Native {
     [DllImport("user32.dll")] static extern bool SystemParametersInfo(uint a, uint b, ref RECT r, uint f);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern bool SystemParametersInfo(uint a, uint b, string s, uint f);
     [DllImport("user32.dll")] static extern bool SetSysColors(int n, int[] elems, int[] rgbs);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr h, StringBuilder s, int n);
+    [DllImport("user32.dll")] static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
+    /// Close every visible dialog box (class #32770) but ours: what a runner pops up (a scaling
+    /// change's notice) sits over the shots otherwise. Their titles.
+    public static List<string> CloseDialogs() {
+        var mine = (uint)System.Diagnostics.Process.GetCurrentProcess().Id;
+        var shut = new List<string>();
+        EnumWindows((h, l) => {
+            if (!IsWindowVisible(h)) return true;
+            var c = new StringBuilder(64); GetClassName(h, c, 64);
+            if (c.ToString() != "#32770") return true;
+            uint pid; GetWindowThreadProcessId(h, out pid);
+            if (pid == mine) return true;
+            var t = new StringBuilder(256); GetWindowText(h, t, 256);
+            PostMessage(h, 0x0010, IntPtr.Zero, IntPtr.Zero);
+            shut.Add(t.ToString());
+            return true;
+        }, IntPtr.Zero);
+        return shut;
+    }
     /// The primary monitor's work area (the screen less the taskbar): x, y, w, h.
     public static int[] WorkArea() {
         Aware();
@@ -292,6 +312,7 @@ function Get-ShotWindows {
 function Clear-ShotDesktop {
     param([int]$Color = 0x202024)
     (New-Object -ComObject Shell.Application).MinimizeAll()
+    foreach ($t in [ShootWin.Native]::CloseDialogs()) { Write-Host "desktop: closed a dialog: '$t'" }
     if (-not [ShootWin.Native]::Backdrop($Color)) { Write-Warning 'desktop: the backdrop stayed' }
     Start-Sleep -Milliseconds 800
 }
