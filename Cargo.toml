@@ -31,6 +31,8 @@ log = "0.4"
 # settings.toml (both already in the lock through GPUI).
 toml = "0.8"
 toml_edit = "0.22"
+# Cutting a header label never mid-character (already in the lock through GPUI).
+unicode-segmentation = "1"
 
 # The Linux desktops (src/platform/x11, src/platform/hypr) and services (src/platform/linux).
 [target.'cfg(target_os = "linux")'.dependencies]

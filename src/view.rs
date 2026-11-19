@@ -969,6 +969,9 @@ pub struct Avatar {
     /// `SA_LAYOUT_PROBE`: the bubble as last laid out (`state`'s `panel_layout`): its box, each
     /// line's width in the face it is drawn in, the room it had.
     panel_probe: Option<serde_json::Value>,
+    /// The bubble header as GPUI last laid it out (`SA_LAYOUT_PROBE`): its words, the room, the
+    /// widths it used next to the model's.
+    header_px: Rc<RefCell<serde_json::Value>>,
     warmed: bool,
     /// lachy's stills, decoded after the frames (`Stills`); her head-hover pointer is on.
     pub(super) stills: Option<Rc<Stills>>,
@@ -1284,6 +1287,7 @@ impl Avatar {
             focus: cx.focus_handle(),
             focus_probe: init.focus_probe.then(String::new),
             panel_probe: None,
+            header_px: Rc::default(),
             warmed: false,
             stills: None,
             pointer_on: false,
@@ -5327,12 +5331,12 @@ impl Avatar {
             .sum()
     }
 
-    /// [`header_text_w`]'s glyphs here: `tracked_width`'s at the header's 9.5 px, [`tabular`].
-    fn header_cw<'a>(&'a self, window: &'a Window) -> impl Fn(char, bool) -> f32 + 'a {
-        let memo = RefCell::new(std::collections::HashMap::new());
+    /// [`header_text_w`]'s glyphs here: `tracked_width`'s in the header's type, [`tabular`];
+    /// each measured once into `memo` (one a frame).
+    fn header_cw<'a>(&'a self, window: &'a Window, memo: &'a GlyphMemo) -> impl Fn(char, bool) -> f32 + 'a {
         tabular(move |c: char, status: bool| {
             let weight = if status { FontWeight::BOLD } else { FontWeight::SEMIBOLD };
-            *memo.borrow_mut().entry((c, status)).or_insert_with(|| self.tracked_width(&c.to_string(), 9.5, weight, 1.5, window))
+            *memo.borrow_mut().entry((c, status)).or_insert_with(|| self.tracked_width(&c.to_string(), HEADER_FONT, weight, HEADER_TRACK, window))
         })
     }
 
@@ -5965,16 +5969,60 @@ fn reply_label(echo: Option<&str>, reader: bool) -> String {
     }
 }
 
-/// A prompt's header label: its title, and its place when more wait.
-fn prompt_label(title: &str, more: usize) -> String {
-    let title = crate::session::one_line(&title.to_uppercase(), 28);
-    if more > 1 { format!("{title} · 1 OF {more}") } else { title }
+/// A header's label: its words (cut when they must be), a tail shown whole after them or not at
+/// all (a prompt's place among more: ` · 1 OF 3`), and whether it outranks the status (a
+/// prompt's title: the status steps down before it is cut).
+#[derive(Clone, Debug, Default, PartialEq)]
+struct HeaderLabel {
+    text: String,
+    tail: String,
+    first: bool,
 }
 
-/// The header row (label, a spring, the status): the gaps between its three children, and the
-/// least air between a label and the status.
-const HEADER_GAPS: f32 = 2.0 * 8.0;
+impl HeaderLabel {
+    fn whole(&self) -> String {
+        format!("{}{}", self.text, self.tail)
+    }
+}
+
+impl From<String> for HeaderLabel {
+    fn from(text: String) -> Self {
+        HeaderLabel { text, ..Default::default() }
+    }
+}
+
+impl From<&str> for HeaderLabel {
+    fn from(text: &str) -> Self {
+        text.to_string().into()
+    }
+}
+
+/// A prompt's header label: its title, and its place when more wait (whole, or not at all).
+fn prompt_label(title: &str, more: usize) -> HeaderLabel {
+    let text = crate::session::one_line(&title.to_uppercase(), 28);
+    let tail = if more > 1 { format!(" · 1 OF {more}") } else { String::new() };
+    HeaderLabel { text, tail, first: true }
+}
+
+/// The header's type: 9.5 px, its letters `HEADER_TRACK` apart (the label semibold, the status
+/// bold).
+const HEADER_FONT: f32 = 9.5;
+const HEADER_TRACK: f32 = 1.5;
+/// Its row: the label, a spring, the status, `HEADER_ROW_GAP` apart; and the least air between
+/// a label and the status.
+const HEADER_ROW_GAP: f32 = 8.0;
+const HEADER_GAPS: f32 = 2.0 * HEADER_ROW_GAP;
 const HEADER_AIR: f32 = 8.0;
+/// The status: its glyph `STATUS_GAP` from its words; on its plate (`STATUS_PLATE_H` tall),
+/// `STATUS_PL` of plate before the glyph and `STATUS_PR` after the words.
+const STATUS_GAP: f32 = 5.0;
+const STATUS_PL: f32 = 6.0;
+const STATUS_PR: f32 = 9.0;
+const STATUS_PLATE_H: f32 = 14.0;
+/// How far the row's clip reaches above and below it: GPUI's `overflow_x_hidden` clips y to its
+/// box too, and the plate stands out of the row.
+const HEADER_BLEED: f32 = 2.0;
+const _: () = assert!(HEADER_H + 2.0 * HEADER_BLEED >= STATUS_PLATE_H);
 /// A label cut to fewer chars than this goes instead ("INCO…" says nothing).
 const HEADER_KEEP: usize = 6;
 
@@ -5989,21 +6037,18 @@ fn header_text_w(s: &str, status: bool, cw: &dyn Fn(char, bool) -> f32) -> f32 {
     s.chars().map(|c| cw(c, status)).sum()
 }
 
-/// A status in the header, the wider of its two dresses: on its plate (inverted, or a summon's
-/// pulse: 6 + glyph 11 + 5 + its words + 9) or calm (glyph 11 + 5 + its words, a level meter as
-/// bars: 4 px, 2 apart, 3 either side).
+/// A status in the header as [`header_row`] draws it, the wider of its two dresses: on its
+/// plate (glyph, words, a level meter as glyphs) or calm (glyph, words, a level meter as bars).
 fn header_status_w(s: &str, cw: &dyn Fn(char, bool) -> f32) -> f32 {
-    let plate = 31.0 + header_text_w(s, true, cw);
-    let (mut calm, mut run) = (16.0, 0.0);
+    let plate = STATUS_PL + theme::GLYPH_W + STATUS_GAP + header_text_w(s, true, cw) + STATUS_PR;
+    let (mut calm, mut run) = (theme::GLYPH_W + STATUS_GAP, 0);
     for c in s.chars().chain(['\0']) {
         if is_bar(c) {
-            run += 1.0;
+            run += 1;
             continue;
         }
-        if run > 0.0 {
-            calm += 6.0 * run + 4.0;
-            run = 0.0;
-        }
+        calm += theme::meter_w(run);
+        run = 0;
         if c != '\0' {
             calm += cw(c, true);
         }
@@ -6036,20 +6081,41 @@ fn status_steps(s: &str) -> Vec<String> {
     out
 }
 
-/// `s` whole if it `fits`, else cut with "…": after a whole word (`words`; CJK and emoji at
-/// any char) or a whole char, a separator left hanging dropped; None when that keeps fewer than
-/// `keep` chars.
+/// `s` whole if it `fits`, else cut, never mid-character (a grapheme: an emoji with its
+/// modifiers, a letter with its marks): after a whole word (`words`; CJK and emoji at any
+/// character) or any character, with "…", a separator left hanging dropped. A cut that eats the
+/// speaker's `›` ends on the speaker, whole: no "…" (`⇄ SPIKE`). None when that keeps fewer
+/// than `keep` characters.
 fn cut_to(s: &str, keep: usize, words: bool, fits: impl Fn(&str) -> bool) -> Option<String> {
     if fits(s) {
         return Some(s.to_string());
     }
-    let c: Vec<char> = s.chars().collect();
-    let wide = |c: char| c as u32 >= 0x2E80;
-    (keep.max(1)..c.len())
-        .rev()
-        .filter(|&n| !words || c[n].is_whitespace() || wide(c[n]) || wide(c[n - 1]))
-        .map(|n| format!("{}…", c[..n].iter().collect::<String>().trim_end_matches(|c: char| c.is_whitespace() || "›·/".contains(c))))
-        .find(|t| t.chars().count() > keep && fits(t))
+    cuts(s, keep, words).find(|t| fits(t))
+}
+
+/// [`cut_to`]'s cuts of `s`, longest first.
+fn cuts(s: &str, keep: usize, words: bool) -> impl Iterator<Item = String> + '_ {
+    use unicode_segmentation::UnicodeSegmentation as _;
+    let g: Vec<&str> = s.graphemes(true).collect();
+    let wide = |g: &str| g.chars().next().is_some_and(|c| c as u32 >= 0x2E80);
+    let space = |g: &str| g.chars().all(char::is_whitespace);
+    (keep.max(1)..g.len()).rev().filter_map(move |n| {
+        if words && !(space(g[n]) || wide(g[n]) || wide(g[n - 1])) {
+            return None;
+        }
+        let head = g[..n].concat();
+        let kept = head.trim_end_matches(|c: char| c.is_whitespace() || "›·/".contains(c));
+        if kept.graphemes(true).count() < keep {
+            return None;
+        }
+        let speaker = !kept.contains('›') && (head[kept.len()..].contains('›') || g[n..].concat().trim_start().starts_with('›'));
+        Some(if speaker { kept.to_string() } else { format!("{kept}…") })
+    })
+}
+
+/// A status's last resort: cut after a whole word, else anywhere; else only its glyph shows.
+fn cut_status(s: &str, fits: impl Fn(&str) -> bool) -> String {
+    cut_to(s, 1, true, &fits).or_else(|| cut_to(s, 1, false, &fits)).unwrap_or_default()
 }
 
 /// `cw` with every digit as wide as the widest and the meter's two bars alike: a ticking timer
@@ -6066,44 +6132,145 @@ fn tabular(cw: impl Fn(char, bool) -> f32) -> impl Fn(char, bool) -> f32 {
     }
 }
 
-/// The header's label and status as they fit its row, `room` wide: the status whole if it
-/// fits, the label in what is left (cut, or gone); only with the label gone, the status shorter
-/// (`status_steps`), at last cut. `cw` as in [`header_text_w`], [`tabular`].
-fn fit_header(room: f32, label: &str, status: &str, cw: &dyn Fn(char, bool) -> f32) -> (String, String) {
+/// The header's label and status as they fit its row, `room` wide (`cw` as in
+/// [`header_text_w`], [`tabular`]). A reply's: the status whole if it fits, the label in what
+/// is left (cut, or gone); only with the label gone, the status shorter (`status_steps`), at
+/// last cut. A prompt's (`first`): its label whole beside the longest step that leaves it room,
+/// else its title cut beside the shortest step, else its title's shortest cut beside the status
+/// cut (or its glyph alone), else as a reply's. A label's tail shows whole or not at all.
+fn fit_header(room: f32, label: &HeaderLabel, status: &str, cw: &dyn Fn(char, bool) -> f32) -> (String, String) {
     let free = room - HEADER_GAPS;
     let steps = status_steps(status);
+    let tail_w = header_text_w(&label.tail, false, cw);
+    // The label beside status `s`: whole, or its words cut and its tail whole.
+    let beside = |s: &str| {
+        let left = free - header_status_w(s, cw) - HEADER_AIR;
+        cut_to(&label.text, HEADER_KEEP, true, |t| header_text_w(t, false, cw) + tail_w <= left).map(|t| format!("{t}{}", label.tail))
+    };
+    if label.first && !label.text.is_empty() {
+        let whole = label.whole();
+        let whole_w = header_text_w(&whole, false, cw);
+        if let Some(s) = steps.iter().find(|s| whole_w <= free - header_status_w(s, cw) - HEADER_AIR) {
+            return (whole, s.clone());
+        }
+        let last = steps.last().map_or("", String::as_str);
+        if let Some(l) = beside(last) {
+            return (l, last.to_string());
+        }
+        let l = format!("{}{}", cuts(&label.text, HEADER_KEEP, true).last().unwrap_or_else(|| label.text.clone()), label.tail);
+        let left = free - header_text_w(&l, false, cw) - HEADER_AIR;
+        if header_status_w("", cw) <= left {
+            return (l, cut_status(last, |t| header_status_w(t, cw) <= left));
+        }
+    }
     let short = match steps.iter().find(|s| header_status_w(s, cw) <= free) {
         Some(s) => s.clone(),
-        None => steps.last().and_then(|s| cut_to(s, 1, false, |t| header_status_w(t, cw) <= free)).unwrap_or_default(),
+        None => cut_status(steps.last().map_or("", String::as_str), |t| header_status_w(t, cw) <= free),
     };
-    let left = free - header_status_w(&short, cw) - HEADER_AIR;
-    let label = if short == status { cut_to(label, HEADER_KEEP, true, |t| header_text_w(t, false, cw) <= left) } else { None };
+    let label = if short == status { beside(&short) } else { None };
     (label.unwrap_or_default(), short)
 }
 
-/// A closing bubble's header: its label, its state.
-fn panel_header(header_label: &str, label: &str, pal: Pal) -> Div {
-    div()
-        .absolute()
-        .top(px(PAD_T))
-        .left(px(PAD_L))
-        .right(px(PAD_R))
-        .h(px(HEADER_H))
-        .flex()
-        .items_center()
-        .gap(px(8.0))
-        .line_height(px(HEADER_H))
-        .child(tracked(header_label, 1.5).text_size(px(9.5)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(pal.dim)))
-        .child(div().flex_1())
-        .child(tracked(label, 1.5).text_size(px(9.5)).font_weight(FontWeight::BOLD).text_color(rgb(pal.dim)))
+/// How a header's status is dressed: its glyph, its plate's silhouette and paint (`key`,
+/// `tone`), on its plate (`invert`, or a summon's `pulse`: the bone swallowtail) or calm; a
+/// prompt's label `bright`; the digit's and the meter bar's boxes (`tabular`: as wide as they
+/// were measured).
+#[derive(Clone, Debug, PartialEq)]
+struct HeaderDress {
+    glyph: String,
+    plate: Plate,
+    key: String,
+    tone: u32,
+    invert: bool,
+    pulse: bool,
+    bright: bool,
+    tab: (f32, f32),
 }
 
-/// What a closing bubble is drawn from: where it was, its words.
+/// The header's glyph widths, (char, bold) → px.
+type GlyphMemo = RefCell<std::collections::HashMap<(char, bool), f32>>;
+
+/// GPUI's own widths of a header row as it laid it out: its label's (whole, before any clip),
+/// the gaps, its status's.
+type HeaderProbe = Rc<dyn Fn([f32; 3])>;
+
+/// The header row, live or in a closing ghost (the same words, the same look): the label, a
+/// spring, the status. Should the words ever be wider than [`fit_header`] measured, the label
+/// shrinks and clips and the row clips at its ends (in x only); never past the frame.
+fn header_row(label: &str, status: &str, d: &HeaderDress, pal: Pal, probe: Option<HeaderProbe>) -> Div {
+    let tab_w = d.tab;
+    let tab = move |c: char| if c.is_ascii_digit() { Some(tab_w.0) } else if is_bar(c) { Some(tab_w.1) } else { None };
+    let label_c = if d.bright { pal.text } else { pal.dim };
+    let natural = Rc::new(Cell::new(0.0f32));
+    let mut label_box = div()
+        .flex()
+        .items_center()
+        .h(px(HEADER_H + 2.0 * HEADER_BLEED))
+        .flex_shrink(1.0)
+        .min_w(px(0.0))
+        .overflow_x_hidden()
+        .child(tracked(label, HEADER_TRACK).text_size(px(HEADER_FONT)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(label_c)));
+    if probe.is_some() {
+        let n = natural.clone();
+        label_box = label_box.on_children_prepainted(move |b, _, _| n.set(b.first().map_or(0.0, |b| f32::from(b.size.width))));
+    }
+    let status = if d.invert || d.pulse {
+        // The nameplate's own paint, on its first beat (NEEDS YOU: the bone swallowtail;
+        // ERROR: black, red type).
+        let hl = pal.look(d.plate, &d.key, d.tone, true, false);
+        let cut = if d.plate == Plate::Flag || d.pulse { Cut::Swallow(4.0) } else { Cut::Tab(4.0) };
+        theme::plate(cut, Fill::framed(hl.fill, hl.edge, 1.5))
+            .flex_none()
+            .h(px(STATUS_PLATE_H))
+            .pl(px(STATUS_PL))
+            .pr(px(STATUS_PR))
+            .gap(px(STATUS_GAP))
+            .child(glyph(&d.glyph, hl.mark, hl.fill))
+            .child(theme::tracked_fixed(status, HEADER_TRACK, &tab).text_size(px(HEADER_FONT)).font_weight(FontWeight::BOLD).text_color(rgb(hl.ink)))
+    } else {
+        // Calm: a bone glyph, the state in text-dim (r21: a red dot read as "recording" or
+        // "offline").
+        let glyph_c = if d.tone == pal.accent { pal.text } else { d.tone };
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(STATUS_GAP))
+            .child(glyph(&d.glyph, glyph_c, pal.panel))
+            .child(theme::metered_fixed(status, HEADER_TRACK, pal.dim, &tab).text_size(px(HEADER_FONT)).font_weight(FontWeight::BOLD).text_color(rgb(pal.dim)))
+    };
+    let mut row = div()
+        .absolute()
+        .top(px(PAD_T - HEADER_BLEED))
+        .left(px(PAD_L))
+        .right(px(PAD_R))
+        .h(px(HEADER_H + 2.0 * HEADER_BLEED))
+        .flex()
+        .items_center()
+        .gap(px(HEADER_ROW_GAP))
+        .line_height(px(HEADER_H))
+        .overflow_x_hidden()
+        .child(label_box)
+        .child(div().flex_1())
+        .child(status);
+    if let Some(p) = probe {
+        row = row.on_children_prepainted(move |b, _, _| {
+            if let [l, spring, s] = &b[..] {
+                let gaps = f32::from(spring.origin.x - (l.origin.x + l.size.width)) + f32::from(s.origin.x - (spring.origin.x + spring.size.width));
+                p([natural.get(), gaps, f32::from(s.size.width)]);
+            }
+        });
+    }
+    row
+}
+
+/// What a closing bubble is drawn from: where it was, its words, its header's look.
 #[derive(Clone, Debug)]
 struct GhostSnap {
     g: PanelGeom,
     header_label: String,
     label: String,
+    dress: HeaderDress,
     lines: Vec<String>,
     foot_zone: f32,
     frame_c: u32,
@@ -7112,7 +7279,7 @@ impl Avatar {
                 }
                 // Its own words, where they were, inside its box as it goes.
                 if own > 0.0 {
-                    let header = panel_header(&sn.header_label, &sn.label, pal);
+                    let header = header_row(&sn.header_label, &sn.label, &sn.dress, pal, None);
                     let body = div()
                         .absolute()
                         .top(px(PAD_T + HEADER_H + HEADER_GAP))
@@ -7173,7 +7340,7 @@ impl Avatar {
             // A reply's lines that are command chips (as wrapped), and those whole (they copy).
             let mut chips: Vec<bool> = Vec::new();
             let mut chips_whole: Vec<bool> = Vec::new();
-            let (lines, pages, text_w, total_lines, header_label): (Vec<String>, Option<(usize, usize)>, f32, usize, String) = match mode {
+            let (lines, pages, text_w, total_lines, header_label): (Vec<String>, Option<(usize, usize)>, f32, usize, HeaderLabel) = match mode {
                 PanelMode::Reply => {
                     let b = self.bubble.as_ref().expect("reply mode has a bubble");
                     // The reader open: the bubble is a stub (header + CLOSE READER), not a
@@ -7187,7 +7354,7 @@ impl Avatar {
                         placeholder = Some("…".into());
                     }
                     let label = reply_label(self.echo.as_deref(), self.reader.is_some());
-                    (lines, Some(b.pages()), b.wrap.as_ref().map_or(260.0, |w| w.width), b.wrap.as_ref().map_or(1, |w| w.lines.len()), label)
+                    (lines, Some(b.pages()), b.wrap.as_ref().map_or(260.0, |w| w.width), b.wrap.as_ref().map_or(1, |w| w.lines.len()), label.into())
                 }
                 PanelMode::Input { secret } => {
                     let i = self.input.as_ref().expect("input mode has a field");
@@ -7233,9 +7400,10 @@ impl Avatar {
             let max_w = (vis_r - vis_l - 2.0 * MARGIN).min(PANEL_MAX_W);
             // Never narrower than the header line (label .. glyph status), with air to spare;
             // past `max_w` the header gives way (`fit_header`).
+            let glyph_memo = GlyphMemo::default();
             let header_w = {
-                let cw = self.header_cw(window);
-                PAD_L + PAD_R + HEADER_GAPS + header_text_w(&header_label, false, &cw) + header_status_w(&label, &cw) + 32.0
+                let cw = self.header_cw(window, &glyph_memo);
+                PAD_L + PAD_R + HEADER_GAPS + header_text_w(&header_label.whole(), false, &cw) + header_status_w(&label, &cw) + 32.0
             };
             let min_w = PANEL_MIN_W.max(header_w).min(max_w);
             let mut w = (text_w + PAD_L + PAD_R + 2.0).clamp(min_w, max_w);
@@ -7312,53 +7480,33 @@ impl Avatar {
             let bg = panel_bg(g, pf.split, (pal.panel, frame_c, if warm { 3.0 } else { 2.0 }, pal.ring, pal.accent));
             let prompt_mode = matches!(mode, PanelMode::Prompt);
             let header_label = if probe {
-                if self.focus.is_focused(window) { "FOCUS PROBE // KEYS OK".to_string() } else { header_label }
+                if self.focus.is_focused(window) { "FOCUS PROBE // KEYS OK".into() } else { header_label }
             } else {
                 header_label
             };
-            // What of the header fits the box it is laid out in now (the ghost keeps the same);
-            // the status's digits and meter in boxes as wide as they were measured.
-            let (header_label, label, tab_w) = {
-                let cw = self.header_cw(window);
-                let (l, s) = fit_header(w - PAD_L - PAD_R, &header_label, &label, &cw);
-                (l, s, (cw('0', true) - 1.5, cw('▮', true) - 1.5))
-            };
-            let tab = move |c: char| if c.is_ascii_digit() { Some(tab_w.0) } else if is_bar(c) { Some(tab_w.1) } else { None };
-            let header = div()
-                .absolute()
-                .top(px(PAD_T))
-                .left(px(PAD_L))
-                .right(px(PAD_R))
-                .h(px(HEADER_H))
-                .flex()
-                .items_center()
-                .gap(px(8.0))
-                .line_height(px(HEADER_H))
-                .child(tracked(&header_label, 1.5).text_size(px(9.5)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(if prompt_mode { pal.text } else { pal.dim })))
-                .child(div().flex_1())
-                .child(if invert || pulse {
-                    // The nameplate's own paint, on its first beat (NEEDS YOU: the bone
-                    // swallowtail; ERROR: black, red type).
-                    let hl = pal.look(plate_kind, &tone_key, tone, true, false);
-                    let cut = if plate_kind == Plate::Flag || pulse { Cut::Swallow(4.0) } else { Cut::Tab(4.0) };
-                    theme::plate(cut, Fill::framed(hl.fill, hl.edge, 1.5))
-                        .h(px(14.0))
-                        .pl(px(6.0))
-                        .pr(px(9.0))
-                        .gap(px(5.0))
-                        .child(glyph(&glyph_kind, hl.mark, hl.fill))
-                        .child(theme::tracked_fixed(&label, 1.5, &tab).text_size(px(9.5)).font_weight(FontWeight::BOLD).text_color(rgb(hl.ink)))
-                } else {
-                    // Calm: a bone glyph, the state in text-dim (r21: a red dot read as
-                    // "recording" or "offline").
-                    let glyph_c = if tone == pal.accent { pal.text } else { tone };
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(5.0))
-                        .child(glyph(&glyph_kind, glyph_c, pal.panel))
-                        .child(theme::metered_fixed(&label, 1.5, pal.dim, &tab).text_size(px(9.5)).font_weight(FontWeight::BOLD).text_color(rgb(pal.dim)))
+            // What of the header fits the box it is laid out in (while it resizes, the narrower
+            // end: it fits once, not a word at a time on the way); the ghost keeps the same
+            // words and look. The status's digits and meter in boxes as wide as they measured.
+            let room = w.min(pf.fit_w) - PAD_L - PAD_R;
+            let (header_label, label, dress, header_probe) = {
+                let cw = self.header_cw(window, &glyph_memo);
+                let (l, s) = fit_header(room, &header_label, &label, &cw);
+                let tab = (cw('0', true) - HEADER_TRACK, cw('▮', true) - HEADER_TRACK);
+                let dress = HeaderDress { glyph: glyph_kind.clone(), plate: plate_kind, key: tone_key.clone(), tone, invert, pulse, bright: prompt_mode, tab };
+                let probe = layout_probe().then(|| {
+                    let sink = self.header_px.clone();
+                    let (lw, sw, laid) = (header_text_w(&l, false, &cw), header_status_w(&s, &cw), w - PAD_L - PAD_R);
+                    let (pl, ps) = (l.clone(), s.clone());
+                    Rc::new(move |[gl, gg, gs]: [f32; 3]| {
+                        *sink.borrow_mut() = serde_json::json!({
+                            "label": pl, "status": ps, "room": laid, "need": gl + gg + gs,
+                            "gpui": [gl, gg, gs], "model": [lw, HEADER_GAPS, sw],
+                        });
+                    }) as HeaderProbe
                 });
+                (l, s, dress, probe)
+            };
+            let header = header_row(&header_label, &label, &dress, pal, header_probe);
             let caret = matches!(mode, PanelMode::Input { .. });
             let body_weight = if prompt_mode { FontWeight::BOLD } else { FontWeight::SEMIBOLD };
             let n_lines = lines.len();
@@ -7389,6 +7537,7 @@ impl Avatar {
                     "panel": [ox + dev(x), oy + dev(y), dev(w), dev(h)],
                     "text_box": [ox + dev(x + PAD_L), oy + dev(y + PAD_T + HEADER_H + HEADER_GAP), dev(tw), dev(h - (PAD_T + HEADER_H + HEADER_GAP) - foot_zone)],
                     "text_w": tw, "line_h": LINE_H, "sf": sf, "fits": fits, "cap": cap, "rows": rows, "header": [&header_label, &label],
+                    "header_px": self.header_px.borrow().clone(),
                     "read": self.bubble.as_ref().is_some_and(|b| b.long()) && mode == PanelMode::Reply,
                     "total": total_lines, "area": area, "settled": !self.panel_fx.busy(now),
                 }));
@@ -7500,7 +7649,7 @@ impl Avatar {
                     .children(old.iter().map(|t| div().h(px(LINE_H)).flex().items_center().whitespace_nowrap().child(t.clone())))
             });
             // The snapshot a closing bubble is drawn from (where its words are).
-            self.panel_last_snap = Some(GhostSnap { g: gc, header_label: header_label.clone(), label: label.clone(), lines: ghost_lines, foot_zone, frame_c });
+            self.panel_last_snap = Some(GhostSnap { g: gc, header_label: header_label.clone(), label: label.clone(), dress, lines: ghost_lines, foot_zone, frame_c });
             // Out of the pill: the bubble's own shell grows out of the pill's outline, the pill
             // itself (plate and words, as it was when it opened) at its centre, whole, until the
             // words cross. Never a pill-red box, never words on the wrong plate.
@@ -9057,7 +9206,10 @@ mod prompt_button_tests {
 #[cfg(test)]
 mod header_fit_tests {
     use super::voiceview::{hf_label, level_bars, mic_label};
-    use super::{HEADER_AIR, HEADER_KEEP, PAD_L, PAD_R, PANEL_MAX_W, PANEL_MIN_W, fit_header, header_status_w, header_text_w, prompt_label, reply_label, status_steps, tabular};
+    use super::{
+        HEADER_AIR, HEADER_KEEP, HeaderLabel, PAD_L, PAD_R, PANEL_MAX_W, PANEL_MIN_W, cut_to, fit_header, header_status_w, header_text_w, prompt_label, reply_label, status_steps, tabular,
+    };
+    use unicode_segmentation::UnicodeSegmentation as _;
     use crate::session::Trouble;
 
     /// Exo 2 at the header's 9.5 px as `tracked_width` measures it (each glyph rounded up, 1.5
@@ -9134,19 +9286,45 @@ mod header_fit_tests {
 
     /// Every header label: a reply's (his words typed or said, another session's, none, the
     /// reader's), the field's, a prompt's (its place among more), the probe's; at their longest.
-    fn labels() -> Vec<String> {
-        let mut v = vec![String::new(), reply_label(None, false), reply_label(Some("hi"), true)];
-        let texts = ["what's the weather like in toronto tomorrow morning, and the day after", &"W".repeat(60), &"漢".repeat(60), &"🎉".repeat(40)];
+    fn labels() -> Vec<HeaderLabel> {
+        let mut v: Vec<HeaderLabel> = vec![String::new().into(), reply_label(None, false).into(), reply_label(Some("hi"), true).into()];
+        let texts = [
+            "what's the weather like in toronto tomorrow morning, and the day after",
+            "confirm edit",
+            &"W".repeat(60),
+            &"漢".repeat(60),
+            &"🎉".repeat(40),
+            &"👍🏽".repeat(30),
+            &"❤️ ".repeat(30),
+            &"👨‍👩‍👧".repeat(20),
+            &"🇨🇦".repeat(30),
+        ];
         for t in texts {
-            v.push(reply_label(Some(t), false));
-            v.push(reply_label(Some(&format!("[voice] {t}")), false));
-            v.push(reply_label(Some(&format!("[comms] #12 ask from spike: {t}")), false));
-            v.push(reply_label(Some(&format!("[comms] #7 tell from {}: {t}", "W".repeat(30))), false));
-            v.push(prompt_label(t, 1));
-            v.push(prompt_label(t, 12));
+            v.push(reply_label(Some(t), false).into());
+            v.push(reply_label(Some(&format!("[voice] {t}")), false).into());
+            v.push(reply_label(Some(&format!("[comms] #12 ask from spike: {t}")), false).into());
+            v.push(reply_label(Some(&format!("[comms] #7 tell from {}: {t}", "W".repeat(30))), false).into());
+            v.extend([1, 3, 12].map(|more| prompt_label(t, more)));
         }
-        v.extend(["TRANSMIT", "SECRET ANSWER", "FOCUS PROBE // CLICK ME", "FOCUS PROBE // KEYS OK"].map(String::from));
+        v.extend(["TRANSMIT", "SECRET ANSWER", "FOCUS PROBE // CLICK ME", "FOCUS PROBE // KEYS OK"].map(HeaderLabel::from));
         v
+    }
+
+    /// `k` a fair cut of `text`: on a character's edge, keeping some; after a whole word (or at a
+    /// CJK or emoji character) with "…", or the speaker whole before its `›`.
+    fn is_cut(text: &str, k: &str) -> bool {
+        let edge = |i: usize| text.grapheme_indices(true).any(|(j, _)| j == i);
+        let wide = |c: Option<char>| c.is_some_and(|c| c as u32 >= 0x2E80);
+        match k.strip_suffix('…') {
+            Some(base) => {
+                let rest = text.strip_prefix(base).unwrap_or("");
+                text.starts_with(base)
+                    && edge(base.len())
+                    && base.graphemes(true).count() >= HEADER_KEEP
+                    && (rest.starts_with(|c: char| c.is_whitespace() || "›·/".contains(c)) || wide(base.chars().last()) || wide(rest.chars().next()))
+            }
+            None => text.starts_with(k) && k.graphemes(true).count() >= HEADER_KEEP && !k.contains('›') && text[k.len()..].trim_start().starts_with('›'),
+        }
     }
 
     /// The row as `panel_header` and the live header build it, counted here on its own: three
@@ -9158,47 +9336,48 @@ mod header_fit_tests {
         ROW_GAPS + header_text_w(label, false, cw) + header_status_w(status, cw) + if label.is_empty() { 0.0 } else { HEADER_AIR }
     }
 
+    /// Every label beside every status, at every bubble width (each 5 px): never past the row;
+    /// a reply's label gives way before its status shortens; a prompt's status steps down before
+    /// its title is cut, and its place (` · 1 OF 3`) shows whole or not at all.
     #[test]
     fn every_header_fits_its_bubble() {
         let cw = tabular(exo2);
         let (statuses, labels) = (statuses(), labels());
         let mut n = 0;
-        for w in [PANEL_MIN_W, PANEL_MAX_W] {
+        for w in (PANEL_MIN_W as usize..=PANEL_MAX_W as usize).step_by(5).map(|w| w as f32) {
             let room = w - PAD_L - PAD_R;
-            let free = room - ROW_GAPS;
             for status in &statuses {
                 let steps = status_steps(status);
-                // Its longest step that fits.
-                let best = steps.iter().find(|s| header_status_w(s, &cw) <= free);
+                let last = steps.last().unwrap();
+                // Its longest step that fits on its own.
+                let best = steps.iter().position(|s| row_w("", s, &cw) <= room);
+                let cut_of_last = |s: &str| s.is_empty() || (s.ends_with('…') && last.starts_with(s.trim_end_matches('…').trim_end()));
                 for label in &labels {
                     let (l, s) = fit_header(room, label, status, &cw);
                     let used = row_w(&l, &s, &cw);
                     assert!(used <= room, "{w}: {label:?} + {status:?} shown as {l:?} + {s:?}: {used} px in {room}");
-                    match best {
-                        Some(b) => assert_eq!(&s, b, "{w}: {status:?} isn't its longest step that fits"),
-                        None => {
-                            let last = steps.last().unwrap();
-                            assert!(s.is_empty() || (s.ends_with('…') && last.starts_with(s.trim_end_matches('…').trim_end())), "{w}: {status:?} cut as {s:?}");
+                    let step = steps.iter().position(|t| *t == s);
+                    let whole = label.whole();
+                    // The label: whole, its words cut and its place whole, or gone.
+                    let words = l.strip_suffix(label.tail.as_str()).filter(|_| !l.is_empty());
+                    assert!(l.is_empty() || l == whole || words.is_some_and(|k| is_cut(&label.text, k)), "{w}: {whole:?} shown as {l:?}");
+                    if label.first && !label.text.is_empty() {
+                        match steps.iter().position(|t| row_w(&whole, t, &cw) <= room) {
+                            Some(k) => assert_eq!((l.as_str(), step), (whole.as_str(), Some(k)), "{w}: {whole:?} beside {status:?}"),
+                            None if l.is_empty() => assert!(step == best || best.is_none() && cut_of_last(&s), "{w}: {status:?} shown as {s:?}"),
+                            None => assert!(s == *last || cut_of_last(&s), "{w}: {whole:?} cut to {l:?} while {status:?} shows as {s:?}"),
                         }
-                    }
-                    // The label gives way first: whole, cut after a whole word (keeping some), or
-                    // gone; gone before the status shortens.
-                    let wide = |c: Option<char>| c.is_some_and(|c| c as u32 >= 0x2E80);
-                    let cut = l.strip_suffix('…').is_some_and(|k| {
-                        let rest = label.strip_prefix(k).unwrap_or("");
-                        label.starts_with(k)
-                            && k.chars().count() >= HEADER_KEEP
-                            && (rest.starts_with(|c: char| c.is_whitespace() || "›·/".contains(c)) || wide(k.chars().last()) || wide(rest.chars().next()))
-                    });
-                    assert!(l == *label || l.is_empty() || cut, "{w}: {label:?} shown as {l:?}");
-                    if s != *status {
-                        assert!(l.is_empty(), "{w}: {status:?} shortened to {s:?} while {l:?} still shows");
+                    } else {
+                        assert!(step == best || best.is_none() && cut_of_last(&s), "{w}: {status:?} isn't its longest step that fits: {s:?}");
+                        if s != *status {
+                            assert!(l.is_empty(), "{w}: {status:?} shortened to {s:?} while {l:?} still shows");
+                        }
                     }
                     n += 1;
                 }
             }
         }
-        assert!(n > 5000, "{n} headers");
+        assert!(n > 100_000, "{n} headers");
     }
 
     /// The bug (Haseeb's shot, 2026-11-18): hands-free over a reply ran off the bubble. With no
@@ -9210,7 +9389,7 @@ mod header_fit_tests {
         let cw = tabular(exo2);
         let status = hf_label(None, 12, 0.4);
         let label = reply_label(None, false);
-        let fit = |w: f32, label: &str, status: &str| fit_header(w - PAD_L - PAD_R, label, status, &cw);
+        let fit = |w: f32, label: &str, status: &str| fit_header(w - PAD_L - PAD_R, &label.into(), status, &cw);
         assert_eq!(fit(PANEL_MAX_W, &label, &status), ("INCOMING…".into(), status.clone()));
         assert_eq!(fit(PANEL_MIN_W, &label, &status), (String::new(), status.clone()));
         assert_eq!(fit(300.0, &label, &status), (String::new(), "HANDS-FREE 0:12 ▮▮▯▯▯".into()));
@@ -9248,7 +9427,7 @@ mod header_fit_tests {
                         assert_eq!(header_status_w(&make(t, l), &cw), w0, "{:?} measures apart from {first:?}", make(t, l));
                     }
                 }
-                for label in ["", "INCOMING TRANSMISSION"] {
+                for label in ["", "INCOMING TRANSMISSION"].map(HeaderLabel::from).iter().chain([&prompt_label("allow bash", 3)]) {
                     for w in (PANEL_MIN_W as i32 - 60..=PANEL_MAX_W as i32).step_by(3).map(|w| w as f32) {
                         let room = w - PAD_L - PAD_R;
                         let (l0, s0) = fit_header(room, label, &first, &cw);
@@ -9261,6 +9440,50 @@ mod header_fit_tests {
                     }
                 }
             }
+        }
+    }
+
+    /// A prompt's title and its place outrank the status (Shady on #78: at 470 beside hands-free
+    /// `CONFIRM EDIT · 1 OF 3` came out as `CONFIRM EDIT · 1…`).
+    #[test]
+    fn a_prompt_keeps_its_title_and_place() {
+        let cw = tabular(exo2);
+        let hf = hf_label(None, 12, 0.4);
+        let fit = |w: f32, label: &HeaderLabel, status: &str| fit_header(w - PAD_L - PAD_R, label, status, &cw);
+        let edit = prompt_label("confirm edit", 3);
+        assert_eq!(fit(PANEL_MAX_W, &edit, &hf), ("CONFIRM EDIT · 1 OF 3".into(), "HANDS-FREE 0:12 ▮▮▯▯▯".into()));
+        assert_eq!(fit(PANEL_MAX_W, &edit, "ONLINE"), ("CONFIRM EDIT · 1 OF 3".into(), "ONLINE".into()));
+        // A long title: cut after a whole word beside the status's shortest step, its place whole.
+        let (l, s) = fit(PANEL_MAX_W, &prompt_label("allow bash to run cargo build in the worktree", 12), &hf);
+        assert!(l.starts_with("ALLOW BASH") && l.ends_with("… · 1 OF 12") && s == "HANDS-FREE 0:12", "{l:?} {s:?}");
+        // Narrower still: its shortest cut, its place whole; the status cut after a word (never
+        // inside its timer), or only its glyph.
+        let (l, s) = fit(PANEL_MIN_W, &edit, &hf);
+        assert!(l == "CONFIRM… · 1 OF 3" && (s == "HANDS-FREE…" || s.is_empty()), "{l:?} {s:?}");
+    }
+
+    /// A cut never splits a character (an emoji with its skin tone or its variation selector, a
+    /// flag, a family), and one that eats the speaker's `›` shows the speaker whole, no "…".
+    #[test]
+    fn a_cut_never_splits_a_character_and_keeps_a_speaker_whole() {
+        let cw = tabular(exo2);
+        let w = |t: &str| header_text_w(t, false, &cw);
+        let spike = reply_label(Some("[comms] #12 ask from spike: what's the weather like"), false);
+        assert_eq!(cut_to(&spike, HEADER_KEEP, true, |t| w(t) <= w("⇄ SPIKE › wh")), Some("⇄ SPIKE".into()));
+        assert_eq!(cut_to(&spike, HEADER_KEEP, true, |t| w(t) <= w("⇄ SPIKE › what's the")), Some("⇄ SPIKE › what's…".into()));
+        for unit in ["👍🏽", "❤️", "👨‍👩‍👧", "🇨🇦", "漢"] {
+            let s = format!("YOU › {}", unit.repeat(20));
+            let mut cut = 0;
+            for room in (60..400).step_by(3) {
+                for words in [true, false] {
+                    if let Some(t) = cut_to(&s, HEADER_KEEP, words, |t| w(t) <= room as f32) {
+                        let body = t.trim_end_matches('…').trim_start_matches("YOU › ");
+                        assert!(body.len() % unit.len() == 0 && body.graphemes(true).all(|g| g == unit), "{unit:?} at {room}: {t:?}");
+                        cut += usize::from(t.ends_with('…'));
+                    }
+                }
+            }
+            assert!(cut > 20, "{unit:?}: only {cut} cuts");
         }
     }
 
