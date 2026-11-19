@@ -240,7 +240,7 @@ Ollama: [the steps](docs/UNDER-THE-HOOD.md#her-brain).
 `--uninstall` removes what it added and tells you where Synaps is. Every step, every flag and the manual
 route: [docs/INSTALL.md](docs/INSTALL.md).
 
-On Windows (in progress): `irm https://raw.githubusercontent.com/HaseebKhalid1507/capri-syn/main/install.ps1 | iex`,
+On Windows 11: `irm https://raw.githubusercontent.com/HaseebKhalid1507/capri-syn/main/install.ps1 | iex`,
 or her installer, `capri-syn-setup-x86_64.exe`: it installs Synaps if you don't have it, downloads
 her art, starts her brain's daemon and offers the Claude sign-in at the end.
 

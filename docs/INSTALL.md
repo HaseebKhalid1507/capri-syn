@@ -165,7 +165,7 @@ she runs through XWayland, the X server those desktops keep for X apps.
   rectangle paints solid black behind her and her bubble, covering what's under it, more often while
   a prompt hangs below her. So far it has only been seen with no compositor running, where she cuts
   her window to her outline with the X shape. Workaround (likely; not yet confirmed): run a
-compositor (picom: `picom -b`).
+  compositor (picom: `picom -b`).
   With `[display] composited = "auto"`, the default, she switches to alpha when it starts, no
   restart.
 - **GNOME, KDE and sway** run her through XWayland, with its limits ([above](#gnome-kde-and-other-wayland-desktops)).
@@ -174,7 +174,7 @@ compositor (picom: `picom -b`).
   for 5 min reads as away. Hyprland before 0.40 isn't supported: she takes XWayland there.
 - **Signing in is a terminal step.** Settings ▸ Brain copies the `synaps login` line; she doesn't
   run it herself yet. On Windows, Synaps 0.12's `synaps login` opens a sign-in tab cut at the URL's
-  first `&`: copy the whole URL it prints into your browser, or run her installer's own sign-in
+  first `&`: copy the whole URL it prints into your browser, or run her installer's Claude sign-in
   (install.ps1 puts it there too; the default folder shown):
   `powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Programs\synaps-avatar\steps\steps.ps1" login`
   ([WINDOWS.md](WINDOWS.md#the-installer)).

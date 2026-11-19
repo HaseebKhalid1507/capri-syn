@@ -20,7 +20,7 @@ Settings; the rest is the file.
 | key | default | |
 |---|---|---|
 | `enabled` | `false` | voice on: the talk key, spoken replies, and the persona lines below |
-| `stt_model` | `"small.en"` | `"tiny.en"`, `"base.en"`, `"small.en"` or `"medium.en"`. Setup fetches `small.en` and `base.en` only: for `tiny.en` put `ggml-tiny.en-q5_1.bin` in her models folder yourself; `medium.en` is read from `~/.local/share/pywhispercpp/models/ggml-medium.en-q5_0.bin` (Windows: under `%USERPROFILE%`). Without the file her voice never gets ready (the sidecar logs why) |
+| `stt_model` | `"small.en"` | `"tiny.en"`, `"base.en"`, `"small.en"` or `"medium.en"`. Setup fetches `small.en` and `base.en` only: for `tiny.en`, put `ggml-tiny.en-q5_1.bin` yourself in `~/.local/share/capri-voice/models` (`$XDG_DATA_HOME/capri-voice/models` when that's set; Windows: `%LOCALAPPDATA%\capri-voice\models`; `CAPRI_VOICE_MODELS` overrides); `medium.en` is read from `~/.local/share/pywhispercpp/models/ggml-medium.en-q5_0.bin` (Windows: under `%USERPROFILE%`). Without the file her voice never gets ready (the sidecar logs why) |
 | `voice` | her voice (below) | a Kokoro voice or a voice string |
 | `speed` | `1.2987` | 0.5 to 2; 1.2987 = 1/0.77 goes with the default voice |
 | `pace` | `"stretch"` | how the speed is made: `"stretch"` (Kokoro at its own speed, the time scaled in the pitch pass) or `"model"` (Kokoro's speed) |
