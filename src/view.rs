@@ -542,36 +542,74 @@ impl Bubble {
 }
 
 /// Where her menu's top left goes (window-local logical px, `x` and `y` its allowed ranges: her
-/// work area less its size): under the click, moved as far as it must to fit, and then off her
-/// face (`face`: x0, y0, x1, y1) if that put it over it: beside the face (the click's side
-/// first), else under it, else above it; over it only when none fits.
-fn menu_at(click: (f32, f32), (w, h): (f32, f32), (min_x, max_x): (f32, f32), (min_y, max_y): (f32, f32), face: Option<(f32, f32, f32, f32)>) -> (f32, f32) {
-    const GAP: f32 = 8.0;
+/// work area less its size), in one placement: under the click, moved as far as it must to fit;
+/// 12 px under her tag (`tag`: x0, y0, x1, y1) where it would run into it and there is room;
+/// then off her face (`face`) if that put it over it: beside the face (the click's side first),
+/// else under it, else above it, the first of those clear of the tag too (else the first); over
+/// it only when none fits.
+fn menu_at(click: (f32, f32), (w, h): (f32, f32), (min_x, max_x): (f32, f32), (min_y, max_y): (f32, f32), face: Option<(f32, f32, f32, f32)>, tag: Option<(f32, f32, f32, f32)>) -> (f32, f32) {
     let x = click.0.min(max_x).max(min_x);
     // Taller than its room: its bottom (Quit) stays in view.
     let y = click.1.max(min_y).min(max_y);
-    let Some((f0, f1, f2, f3)) = face else { return (x, y) };
-    let over = |x: f32, y: f32| x < f2 + GAP && x + w > f0 - GAP && y < f3 + GAP && y + h > f1 - GAP;
+    let on_tag = |x: f32, y: f32| menu_hits_tag((x, y), (w, h), tag);
+    let y = match tag {
+        Some(t) if on_tag(x, y) && t.3 + MENU_TAG_GAP <= max_y => t.3 + MENU_TAG_GAP,
+        _ => y,
+    };
+    let Some(f) = face else { return (x, y) };
+    let (f0, f1, f2, f3) = f;
+    let over = |x: f32, y: f32| x < f2 + MENU_FACE_GAP && x + w > f0 - MENU_FACE_GAP && y < f3 + MENU_FACE_GAP && y + h > f1 - MENU_FACE_GAP;
     if !over(x, y) {
         return (x, y);
     }
-    let (right, left) = (f2 + GAP, f0 - GAP - w);
-    let sides = if click.0 >= (f0 + f2) / 2.0 { [right, left] } else { [left, right] };
-    if let Some(sx) = sides.into_iter().find(|&sx| sx >= min_x && sx <= max_x) {
-        return (sx, y);
-    }
-    if f3 + GAP <= max_y {
-        return (x, f3 + GAP);
-    }
-    if f1 - GAP - h >= min_y {
-        return (x, f1 - GAP - h);
-    }
-    (x, y)
+    menu_off_face((x, y), (w, h), (min_x, max_x), (min_y, max_y), f, tag, click.0 >= (f0 + f2) / 2.0).unwrap_or((x, y))
 }
 
-/// An open menu at `at` that her face (after a pose change) is now under: the place across the
-/// face (its far side), same height, else the near side, whichever is in `x` first; else None
-/// (it stays).
+/// The menu keeps this far off her face.
+const MENU_FACE_GAP: f32 = 8.0;
+
+/// Off her face (`f`), for a menu at `p` over it: beside it (`right_first`: its right side
+/// first), else under it, else above it, inside `x`/`y`; the first of those clear of her tag
+/// too, else the first. None: nowhere off it fits.
+fn menu_off_face(p: (f32, f32), (w, h): (f32, f32), (min_x, max_x): (f32, f32), (min_y, max_y): (f32, f32), (f0, f1, f2, f3): (f32, f32, f32, f32), tag: Option<(f32, f32, f32, f32)>, right_first: bool) -> Option<(f32, f32)> {
+    let (right, left) = (f2 + MENU_FACE_GAP, f0 - MENU_FACE_GAP - w);
+    let sides = if right_first { [right, left] } else { [left, right] };
+    let mut ways: Vec<(f32, f32)> = sides.into_iter().filter(|&sx| sx >= min_x && sx <= max_x).map(|sx| (sx, p.1)).collect();
+    if f3 + MENU_FACE_GAP <= max_y {
+        ways.push((p.0, f3 + MENU_FACE_GAP));
+    }
+    if f1 - MENU_FACE_GAP - h >= min_y {
+        ways.push((p.0, f1 - MENU_FACE_GAP - h));
+    }
+    ways.iter().copied().find(|&q| !menu_hits_tag(q, (w, h), tag)).or_else(|| ways.first().copied())
+}
+
+/// Her open menu's place, decided once per opening (keyed by its click): whether it goes
+/// without its picture to keep clear of her tag (her tag bobs a pixel: decided every frame,
+/// the rows jumped under him at the threshold), and where (x, y; moved once off her face):
+/// its side never changes while it is open, whatever her pose does.
+#[derive(Clone, Copy, Debug)]
+struct MenuPlace {
+    at: Point<Pixels>,
+    squeezed: bool,
+    pos: Option<(f32, f32, bool)>,
+}
+
+/// The menu keeps this far under her tag.
+const MENU_TAG_GAP: f32 = 12.0;
+
+/// A menu at `(x, y)`, `w`×`h`, runs into her tag (or the gap under it).
+fn menu_hits_tag((x, y): (f32, f32), (w, h): (f32, f32), tag: Option<(f32, f32, f32, f32)>) -> bool {
+    tag.is_some_and(|(t0, t1, t2, t3)| x < t2 && x + w > t0 && y < t3 + MENU_TAG_GAP && y + h > t1)
+}
+
+/// A menu `h` tall (with its picture) clicked open at `click` would run into her tag with no
+/// room under it (her feet on the screen's bottom): it goes without its picture, and so lower.
+fn menu_tag_squeezed(click: (f32, f32), (w, h): (f32, f32), (min_x, max_x): (f32, f32), (min_y, max_y): (f32, f32), tag: Option<(f32, f32, f32, f32)>) -> bool {
+    let at = (click.0.min(max_x).max(min_x), click.1.max(min_y).min(max_y));
+    tag.is_some_and(|t| t.3 + MENU_TAG_GAP > max_y) && menu_hits_tag(at, (w, h), tag)
+}
+
 /// Where a menu `h` tall may put its top left (window-local logical px): inside her window's
 /// part on her monitor (`span`; `win_h` tall) and her work area (`area`: x, y, w, h), 4 px in.
 /// Also the height it has there.
@@ -599,17 +637,18 @@ fn menu_inside((x, y): (f32, f32), (min_x, max_x): (f32, f32), (min_y, max_y): (
     (x.min(max_x).max(min_x), y.max(min_y).min(max_y))
 }
 
-fn menu_reflow(at: (f32, f32), (w, h): (f32, f32), (min_x, max_x): (f32, f32), face: Option<(f32, f32, f32, f32)>) -> Option<(f32, f32)> {
-    const GAP: f32 = 8.0;
-    let (f0, f1, f2, f3) = face?;
+/// An open menu at `at` that her face (after a pose change) is now under: off it by the same
+/// placement as an opening's ([`menu_off_face`], clear of her tag too), across the face (its
+/// far side) first; else None (it stays).
+fn menu_reflow(at: (f32, f32), (w, h): (f32, f32), x: (f32, f32), y: (f32, f32), face: Option<(f32, f32, f32, f32)>, tag: Option<(f32, f32, f32, f32)>) -> Option<(f32, f32)> {
+    let f = face?;
+    let (f0, f1, f2, f3) = f;
     let over = at.0 < f2 && at.0 + w > f0 && at.1 < f3 && at.1 + h > f1;
     if !over {
         return None;
     }
-    let (right, left) = (f2 + GAP, f0 - GAP - w);
     // The face in the menu's right half: across it is its right.
-    let sides = if (f0 + f2) / 2.0 > at.0 + w / 2.0 { [right, left] } else { [left, right] };
-    sides.into_iter().find(|x| (min_x..=max_x).contains(x)).map(|x| (x, at.1))
+    menu_off_face(at, (w, h), x, y, f, tag, (f0 + f2) / 2.0 > at.0 + w / 2.0)
 }
 
 /// `text` in lines broken where `breaks` says (byte offsets in a paragraph; GPUI's wrapper at
@@ -1048,9 +1087,8 @@ pub struct Avatar {
     /// Her menu's height as last painted (logical px; 0: not yet): it opens upward when it
     /// wouldn't fit under the click.
     menu_h: Rc<Cell<(u32, f32)>>,
-    /// Where the open menu goes (the click, x, y), decided once: its side never changes while
-    /// it is open, whatever her pose does.
-    menu_place: Option<(Point<Pixels>, f32, f32, bool)>,
+    /// The open menu's place, decided once per opening.
+    menu_place: Option<MenuPlace>,
     /// `[hud]`: the bubble's and tag's glitch and motion.
     hud_cfg: crate::settings::HudSettings,
     /// The tag's (and pill's) glitch and width.
@@ -1178,6 +1216,14 @@ pub struct Avatar {
     view_ticks: u64,
     /// Renders and window moves since start (`brain state`, the perf meters).
     renders: u64,
+    /// Her line on the Settings page (a change made, or why not): until it goes to chat.
+    prefs_says: Option<String>,
+    /// settings.toml writes, one at a time off the UI thread.
+    prefs_io: lineview::PrefsIo,
+    /// Why her menu's last ATTENTION click didn't stick, on its row.
+    menu_save: crate::line::MenuSave,
+    /// That line as the open menu (its click) last said it: its room is kept till it closes.
+    menu_why: Option<(Point<Pixels>, &'static str)>,
     /// Her work area this frame (`render`): None outside one; keyed by where she is.
     area_memo: Cell<Option<Option<AreaMemo>>>,
     moves: u64,
@@ -1396,6 +1442,10 @@ impl Avatar {
             rag_strength: crate::ragdoll::Strength(crate::settings::Settings::load().map_or(0.5, |s| s.ragdoll.strength)),
             view_ticks: 0,
             renders: 0,
+            prefs_says: None,
+            prefs_io: Default::default(),
+            menu_save: Default::default(),
+            menu_why: None,
             area_memo: Cell::new(None),
             moves: 0,
             follow_at: None,
@@ -3561,7 +3611,13 @@ impl Avatar {
                 }
             }
             Command::Brain(c) => self.brain_cmd(c, now),
-            Command::SettingsReload => self.settings_reload(now),
+            // An open Settings page shows what she runs with now (a lock, the wake word).
+            Command::SettingsReload => {
+                let r = self.settings_reload(now);
+                self.line_push(cx);
+                r
+            }
+            Command::SettingsPage(open) => self.show_line_page(if open { crate::line::Page::Settings } else { crate::line::Page::Chat }, cx),
             Command::Tap { head } => {
                 if self.hidden || self.teleport.is_some() || !self.loaded {
                     "error: not there".into()
@@ -8077,6 +8133,7 @@ impl Avatar {
         // Context menu.
         if self.menu.is_none() {
             self.menu_place = None;
+            self.menu_why = None;
         }
         if let Some((at, _)) = self.menu.filter(|_| hud) {
             // Red items; the hovered one on a red blade with ink type. QUIT? (armed) is a bone
@@ -8102,7 +8159,11 @@ impl Avatar {
             // Under the click if it fits in her window, else as far up as it must (a perched
             // her: a click low on her body cut the menu's bottom rows off). Before its first
             // paint, its height is estimated from its rows.
-            let rows = 6 + usize::from(self.attention_label().is_some()) * 2 + usize::from(self.voice_on() && self.voice.cfg.handsfree);
+            // ATTENTION's second line (why its click didn't stick): kept as room till it closes.
+            let mut kept = self.menu_why.filter(|k| k.0 == at).map(|k| k.1);
+            let cant = self.attention_label().and_then(|_| self.menu_save.line(&mut kept));
+            self.menu_why = kept.map(|t| (at, t));
+            let rows = 7 + usize::from(self.brain.is_some()) + usize::from(self.attention_label().is_some()) + usize::from(cant.is_some()) + usize::from(self.voice_on() && self.voice.cfg.handsfree);
             // Her work area (under the bar, on her monitor), window-local logical px: the menu's
             // top left stays within it less the menu's size.
             let o = self.origin;
@@ -8111,7 +8172,22 @@ impl Avatar {
             // Its picture only where it fits whole: without it the menu is MENU_HEADER_H
             // shorter (her window cut off by the top of the screen left too little of it).
             let (last_sig, last_h) = self.menu_h.get();
-            let header_on = self.stills.as_ref().is_some_and(|s| s.capri.is_some()) && menu_header_fits(last_sig, last_h, menu_ranges(span, f32::from(l.lp(l.win_h)), area, 0.0).2);
+            // Nor where it would run into her tag with no room under it: decided at its opening.
+            let tag = self.tag_box.get().map(|b| (f32::from(b.left()), f32::from(b.top()), f32::from(b.right()), f32::from(b.bottom())));
+            let squeezed = match self.menu_place {
+                Some(m) if m.at == at => m.squeezed,
+                _ => {
+                    let with_h = if last_sig & 1 == 1 || last_h <= 0.0 { last_h } else { last_h + MENU_HEADER_H };
+                    let (xr_with, yr_with, _) = menu_ranges(span, f32::from(l.lp(l.win_h)), area, with_h);
+                    let s = last_h > 0.0 && menu_tag_squeezed((f32::from(at.x), f32::from(at.y)), (MENU_W, with_h), xr_with, yr_with, tag);
+                    // Never painted yet: decided once it has been (unseen, measured).
+                    if last_h > 0.0 {
+                        self.menu_place = Some(MenuPlace { at, squeezed: s, pos: None });
+                    }
+                    s
+                }
+            };
+            let header_on = self.stills.as_ref().is_some_and(|s| s.capri.is_some()) && menu_header_fits(last_sig, last_h, menu_ranges(span, f32::from(l.lp(l.win_h)), area, 0.0).2) && !squeezed;
             // Its height as painted for this set of rows: placed once that is known (a menu
             // never painted with these rows is laid out unseen for a frame and measured).
             let sig = (rows as u32) << 2 | u32::from(mark.is_some()) << 1 | u32::from(header_on);
@@ -8123,25 +8199,27 @@ impl Avatar {
                 let (ax, ay) = (l.avatar_x as f32, l.avatar_y as f32);
                 ((ax + fx0 as f32) / sf, (ay + fy0 as f32) / sf, (ax + fx1 as f32) / sf, (ay + fy1 as f32) / sf)
             });
-            let place = match self.menu_place {
+            let placed = self.menu_place.filter(|m| m.at == at).and_then(|m| m.pos);
+            let place = match placed {
                 // Placed; a pose change that put her face under it moves it once, to the far side.
                 // Kept inside her work area as it is now: she moved under it (a drop-in, a
                 // landing) or it grew (its footer came) and its last rows went off (Quit).
-                Some((a, x, y, moved)) if a == at => {
-                    let (p, moved) = match menu_reflow((x, y), (MENU_W, h), xr, face).filter(|_| !moved) {
+                Some((x, y, moved)) => {
+                    let (p, moved) = match menu_reflow((x, y), (MENU_W, h), xr, yr, face, tag).filter(|_| !moved) {
                         Some(p) => (p, true),
                         None => ((x, y), moved),
                     };
                     let p = if measured { menu_inside(p, xr, yr) } else { p };
-                    self.menu_place = Some((at, p.0, p.1, moved));
+                    self.menu_place = Some(MenuPlace { at, squeezed, pos: Some((p.0, p.1, moved)) });
                     Some(p)
                 }
-                _ if measured => {
-                    let p = menu_at((f32::from(at.x), f32::from(at.y)), (MENU_W, h), xr, yr, face);
-                    self.menu_place = Some((at, p.0, p.1, false));
+                // Clear of her face and of her tag (ONLINE ^) in one placement.
+                None if measured => {
+                    let p = menu_at((f32::from(at.x), f32::from(at.y)), (MENU_W, h), xr, yr, face, tag);
+                    self.menu_place = Some(MenuPlace { at, squeezed, pos: Some((p.0, p.1, false)) });
                     Some(p)
                 }
-                _ => None,
+                None => None,
             };
             // lachy's capri.png over the items: who this menu is.
             let header = self.stills.as_ref().and_then(|s| s.capri.clone()).filter(|_| header_on).map(|i| {
@@ -8164,7 +8242,7 @@ impl Avatar {
                         this.reset_position(cx);
                     }),
                 ))
-                .when_some(self.attention_label(), |m, att| {
+                .when(self.brain.is_some(), |m| {
                     let dnd = self.dnd_on();
                     m.child(item(if dnd { "DND OFF" } else { "DND 1 HOUR" }).id("dnd").on_mouse_down(
                         MouseButton::Left,
@@ -8176,17 +8254,33 @@ impl Avatar {
                             this.schedule(cx);
                         }),
                     ))
-                    .child(item(match att {
+                })
+                // Not with her brain off in settings.toml (the Settings page locks it).
+                .when_some(self.attention_label(), |m, att| {
+                    let label = match att {
                         "MIX" => "ATTENTION: MIX ▸",
                         "HANG ONLY" => "ATTENTION: HANG ONLY ▸",
                         _ => "ATTENTION: OFF ▸",
-                    })
-                    .id("attention")
-                    .on_mouse_down(
+                    };
+                    // Its last click didn't stick (refused, or the write hangs): why, under it;
+                    // landed since it opened: the same room, unseen (the rows hold still).
+                    let why = cant.map(|(c, shown)| {
+                        div()
+                            .when(!shown, |d| d.invisible())
+                            .pt(px(2.0))
+                            .text_size(px(10.5))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(pal.text))
+                            .group_hover(SharedString::from(format!("menu-{label}")), |s| s.text_color(rgb(ink_c)))
+                            .child(c)
+                    });
+                    // In `state`'s buttons (a shot's click on it).
+                    let probe = self.buttons.clone();
+                    m.child(item(label).flex().flex_col().children(why).child(canvas(move |b, _, _| probe.borrow_mut().push(("menu-attention", b)), |_, _, _, _| {}).absolute().top_0().left_0().size_full()).id("attention").on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _: &MouseDownEvent, _, cx| {
                             cx.stop_propagation();
-                            this.cycle_attention();
+                            this.cycle_attention(cx);
                             if let Some(m) = &mut this.menu {
                                 m.1 = Instant::now() + Duration::from_secs(8);
                             }
@@ -8230,6 +8324,18 @@ impl Avatar {
                     cx.listener(|this, _: &MouseDownEvent, _, cx| {
                         cx.stop_propagation();
                         this.park(Instant::now());
+                        cx.notify();
+                        this.schedule(cx);
+                    }),
+                ))
+                // Her Settings (the Line's second page).
+                .child(item("SETTINGS").id("settings").on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.menu = None;
+                        let r = this.show_line_page(crate::line::Page::Settings, cx);
+                        elog!("synaps-avatar: menu settings: {r}");
                         cx.notify();
                         this.schedule(cx);
                     }),
@@ -8563,7 +8669,7 @@ impl std::future::Future for YieldNow {
 
 #[cfg(test)]
 mod menu_tests {
-    use super::menu_at;
+    use super::{menu_at, menu_tag_squeezed};
 
     // A 500×695 window, her face at 190..240 × 300..340, a 210×300 menu.
     const FACE: Option<(f32, f32, f32, f32)> = Some((190.0, 300.0, 240.0, 340.0));
@@ -8573,27 +8679,52 @@ mod menu_tests {
 
     #[test]
     fn under_the_click_when_it_fits_and_misses_her_face() {
-        assert_eq!(menu_at((60.0, 360.0), SIZE, X, (0.0, 500.0), FACE), (60.0, 360.0), "under her face: as clicked");
-        assert_eq!(menu_at((100.0, 50.0), SIZE, X, Y, None), (100.0, 50.0));
+        assert_eq!(menu_at((60.0, 360.0), SIZE, X, (0.0, 500.0), FACE, None), (60.0, 360.0), "under her face: as clicked");
+        assert_eq!(menu_at((100.0, 50.0), SIZE, X, Y, None, None), (100.0, 50.0));
+        // Her tag: a menu that would touch it goes 12 px under it; one clear of it stays.
+        let tag = Some((150.0, 20.0, 260.0, 44.0));
+        assert_eq!(menu_at((100.0, 50.0), SIZE, X, (0.0, 500.0), None, tag), (100.0, 56.0));
+        assert_eq!(menu_at((100.0, 60.0), SIZE, X, (0.0, 500.0), None, tag), (100.0, 60.0));
+        assert_eq!(menu_at((270.0, 30.0), SIZE, (0.0, 300.0), (0.0, 500.0), None, tag), (270.0, 30.0), "beside it");
+        assert_eq!(menu_at((100.0, 50.0), SIZE, X, (0.0, 52.0), None, tag), (100.0, 50.0), "no room under it");
+        // Her feet on the screen's bottom (the menu pushed up into her tag): no picture.
+        assert!(menu_tag_squeezed((100.0, 300.0), SIZE, X, (0.0, 52.0), tag));
+        assert!(!menu_tag_squeezed((100.0, 300.0), SIZE, X, (0.0, 391.0), tag), "room under it: lower instead");
+        assert!(!menu_tag_squeezed((100.0, 300.0), SIZE, X, (0.0, 52.0), None));
+    }
+
+    #[test]
+    fn under_her_tag_and_off_her_face_in_one_placement() {
+        // The click right of her tag: under it (12 px) would cover her face, so it goes beside
+        // the face at once, still under the tag: never placed on the face to hop a frame later.
+        let tag = Some((150.0, 200.0, 260.0, 224.0));
+        let fb = (190.0, 240.0, 240.0, 280.0);
+        let face = Some(fb);
+        let (x, y) = menu_at((180.0, 210.0), SIZE, (0.0, 400.0), (0.0, 391.0), face, tag);
+        assert_eq!((x, y), (248.0, 236.0));
+        let over = |x: f32, y: f32, b: (f32, f32, f32, f32)| x < b.2 && x + SIZE.0 > b.0 && y < b.3 && y + SIZE.1 > b.1;
+        assert!(!over(x, y, fb) && !over(x, y, (150.0, 200.0, 260.0, 236.0)));
+        // No side clear of both: under her face, clear of the tag.
+        assert_eq!(menu_at((180.0, 210.0), SIZE, (150.0, 200.0), (0.0, 391.0), face, tag), (180.0, 288.0));
     }
 
     #[test]
     fn moved_up_over_her_face_it_goes_beside_it() {
         // Clicked on her face's right half: at the click it would cover it.
-        let (x, y) = menu_at((220.0, 200.0), SIZE, X, Y, FACE);
+        let (x, y) = menu_at((220.0, 200.0), SIZE, X, Y, FACE, None);
         assert_eq!((x, y), (248.0, 200.0), "right of her face, the click's side");
         // Clicked left of her face with no room left of it: the right side.
-        assert_eq!(menu_at((150.0, 200.0), SIZE, X, Y, FACE), (248.0, 200.0));
+        assert_eq!(menu_at((150.0, 200.0), SIZE, X, Y, FACE, None), (248.0, 200.0));
         // Room on the left (a wide window): the click's side.
-        assert_eq!(menu_at((150.0, 200.0), SIZE, (-100.0, 280.0), Y, FACE), (-28.0, 200.0));
+        assert_eq!(menu_at((150.0, 200.0), SIZE, (-100.0, 280.0), Y, FACE, None), (-28.0, 200.0));
     }
 
     #[test]
     fn no_room_beside_it_goes_under_then_above_then_over() {
         let narrow = (0.0, 150.0);
-        assert_eq!(menu_at((140.0, 200.0), SIZE, narrow, (0.0, 600.0), FACE), (140.0, 348.0), "under her face");
-        assert_eq!(menu_at((140.0, 700.0), (210.0, 200.0), narrow, (0.0, 300.0), FACE), (140.0, 92.0), "moved up over it, above it");
-        assert_eq!(menu_at((140.0, 200.0), SIZE, narrow, (0.0, 300.0), FACE), (140.0, 200.0), "over it: nothing else fits");
+        assert_eq!(menu_at((140.0, 200.0), SIZE, narrow, (0.0, 600.0), FACE, None), (140.0, 348.0), "under her face");
+        assert_eq!(menu_at((140.0, 700.0), (210.0, 200.0), narrow, (0.0, 300.0), FACE, None), (140.0, 92.0), "moved up over it, above it");
+        assert_eq!(menu_at((140.0, 200.0), SIZE, narrow, (0.0, 300.0), FACE, None), (140.0, 200.0), "over it: nothing else fits");
     }
 
     #[test]
@@ -8601,26 +8732,43 @@ mod menu_tests {
         use super::menu_reflow;
         // Placed left of her face (at 30); her pose moves the face onto its right half.
         let moved = Some((200.0, 300.0, 230.0, 330.0));
-        assert_eq!(menu_reflow((30.0, 200.0), SIZE, X, moved), Some((238.0, 200.0)), "to the face's right, same height");
+        assert_eq!(menu_reflow((30.0, 200.0), SIZE, X, Y, moved, None), Some((238.0, 200.0)), "to the face's right, same height");
         // Onto its left half: across it is its left, if the work area has room; else its right.
         let left = Some((60.0, 300.0, 90.0, 330.0));
-        assert_eq!(menu_reflow((40.0, 200.0), SIZE, (-200.0, 280.0), left), Some((-158.0, 200.0)));
-        assert_eq!(menu_reflow((40.0, 200.0), SIZE, X, left), Some((98.0, 200.0)), "no room across: the near side");
-        assert_eq!(menu_reflow((40.0, 200.0), SIZE, (0.0, 50.0), left), None, "no room either side: it stays");
+        assert_eq!(menu_reflow((40.0, 200.0), SIZE, (-200.0, 280.0), Y, left, None), Some((-158.0, 200.0)));
+        assert_eq!(menu_reflow((40.0, 200.0), SIZE, X, Y, left, None), Some((98.0, 200.0)), "no room across: the near side");
+        // No room either side: under it, as an opening would; nothing fits: it stays.
+        assert_eq!(menu_reflow((40.0, 200.0), SIZE, (0.0, 50.0), Y, left, None), Some((40.0, 338.0)));
+        assert_eq!(menu_reflow((40.0, 200.0), SIZE, (0.0, 50.0), (150.0, 250.0), left, None), None);
         // Not under it, or no face: it stays.
-        assert_eq!(menu_reflow((250.0, 200.0), SIZE, X, FACE), None);
-        assert_eq!(menu_reflow((30.0, 200.0), SIZE, X, None), None);
+        assert_eq!(menu_reflow((250.0, 200.0), SIZE, X, Y, FACE, None), None);
+        assert_eq!(menu_reflow((30.0, 200.0), SIZE, X, Y, None, None), None);
+    }
+
+    /// A pose change moves an open menu by the opening's own rules: off her face and clear of
+    /// her tag, not onto the tag across the face.
+    #[test]
+    fn a_reflow_keeps_clear_of_her_tag_too() {
+        use super::menu_reflow;
+        // The face moves onto the menu's right half; across it (its right) is her tag.
+        let moved = Some((200.0, 300.0, 230.0, 330.0));
+        let tag = Some((238.0, 250.0, 400.0, 274.0));
+        assert_eq!(menu_reflow((30.0, 200.0), SIZE, (-200.0, 280.0), Y, moved, None), Some((238.0, 200.0)), "no tag: across");
+        // With the tag there: the near side.
+        assert_eq!(menu_reflow((30.0, 200.0), SIZE, (-200.0, 280.0), Y, moved, tag), Some((-18.0, 200.0)));
+        // Nothing beside it clear of the tag: under the face.
+        assert_eq!(menu_reflow((30.0, 200.0), SIZE, (0.0, 280.0), (0.0, 391.0), moved, tag), Some((30.0, 338.0)));
     }
 
     #[test]
     fn it_stays_in_her_work_area() {
         // The window reaches off the screen's left edge and above the bar: the menu doesn't.
-        let (x, y) = menu_at((5.0, 2.0), (210.0, 200.0), (40.0, 280.0), (76.0, 391.0), None);
+        let (x, y) = menu_at((5.0, 2.0), (210.0, 200.0), (40.0, 280.0), (76.0, 391.0), None, None);
         assert_eq!((x, y), (40.0, 76.0));
         // Beside her face only where the work area has room: left is off it, so right.
-        assert_eq!(menu_at((200.0, 300.0), SIZE, (40.0, 280.0), Y, FACE), (248.0, 300.0));
+        assert_eq!(menu_at((200.0, 300.0), SIZE, (40.0, 280.0), Y, FACE, None), (248.0, 300.0));
         // Nothing beside, nothing under: above her face, not above the bar.
-        assert_eq!(menu_at((140.0, 300.0), (210.0, 200.0), (0.0, 150.0), (120.0, 300.0), FACE), (140.0, 300.0), "above would cross the bar: over it");
+        assert_eq!(menu_at((140.0, 300.0), (210.0, 200.0), (0.0, 150.0), (120.0, 300.0), FACE, None), (140.0, 300.0), "above would cross the bar: over it");
     }
 }
 
@@ -8681,7 +8829,7 @@ mod menu_edge_tests {
         let room = menu_ranges(vis, wh as f32 / sf, area, 0.0).2;
         let h = if menu_header_fits(1, MENU_H, room) { MENU_H } else { MENU_H - MENU_HEADER_H };
         let (xr, yr, _) = menu_ranges(vis, wh as f32 / sf, area, h);
-        let p = menu_at(click, (MENU_W, h), xr, yr, None);
+        let p = menu_at(click, (MENU_W, h), xr, yr, None, None);
         ((o.0 as f32 + p.0 * sf, o.1 as f32 + p.1 * sf, MENU_W * sf, h * sf), a, p, h)
     }
 
@@ -8740,7 +8888,7 @@ mod menu_edge_tests {
         let a = Some(((area.0 - o.0) as f32 / sf, (area.1 - o.1) as f32 / sf, area.2 as f32 / sf, area.3 as f32 / sf));
         let vis = (0.0, WIN.0);
         let (xr, yr, _) = menu_ranges(vis, WIN.1, a, 250.0);
-        let p = menu_at((250.0, 640.0), (MENU_W, 250.0), xr, yr, None);
+        let p = menu_at((250.0, 640.0), (MENU_W, 250.0), xr, yr, None, None);
         let (xr, yr, _) = menu_ranges(vis, WIN.1, a, MENU_H);
         let q = menu_inside(p, xr, yr);
         assert!(inside((o.0 as f32 + q.0 * sf, o.1 as f32 + q.1 * sf, MENU_W * sf, MENU_H * sf), area, o, sf));
@@ -8754,7 +8902,7 @@ mod menu_edge_tests {
         assert!(yr.1 < yr.0, "it can't fit");
         let bottom_in_view = |y: f32| (y + MENU_H - (100.0 + 200.0 - 4.0)).abs() < 0.01;
         for click in [(100.0, 50.0), (100.0, 150.0), (100.0, 600.0)] {
-            assert!(bottom_in_view(menu_at(click, (MENU_W, MENU_H), xr, yr, None).1), "{click:?}");
+            assert!(bottom_in_view(menu_at(click, (MENU_W, MENU_H), xr, yr, None, None).1), "{click:?}");
             assert!(bottom_in_view(menu_inside(click, xr, yr).1), "{click:?}");
         }
     }
