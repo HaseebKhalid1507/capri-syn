@@ -1169,7 +1169,7 @@ impl Bolt {
         if !sane {
             return bolt;
         }
-        let mut rng = Rng::new(seed ^ 0x0b01_7c0d_e5ee_d000);
+        let mut rng = Rng::new(stir(seed));
         let flip = |rng: &mut Rng| if rng.pick(2) == 0 { 1.0 } else { -1.0 };
 
         // The main corners as (along, off): px along the straight line, px off it (+ = left of
@@ -1397,6 +1397,15 @@ impl Bolt {
         let mix = |x: f32, y: f32| if f >= 1.0 { y } else { x + (y - x) * f };
         ((mix(k0.p.0, k1.p.0), mix(k0.p.1, k1.p.1)), (mix(k0.chip.0, k1.chip.0), mix(k0.chip.1, k1.chip.1)))
     }
+}
+
+/// Every bit of `seed` into every bit of the result (a splitmix64 finalizer): `Rng::new` drops
+/// bit 0, so two seeds one apart would otherwise lay the same strike.
+fn stir(seed: u64) -> u64 {
+    let mut x = seed.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    x ^ (x >> 31)
 }
 
 /// `v` at length 1, or `or` when it has (next to) none.
