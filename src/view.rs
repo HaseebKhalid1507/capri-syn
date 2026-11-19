@@ -4045,9 +4045,9 @@ impl Avatar {
         if self.session.as_ref().is_some_and(|s| s.closing) {
             return;
         }
-        // Bounded: whatever holds her teardown (on his box, once, a quit said bye and she stayed,
-        // her exe pinned), she's gone `QUIT_WITHIN` from here.
-        crate::platform::quit_watchdog(QUIT_WITHIN);
+        // Bounded (Windows): whatever holds her teardown (on his box, once, a quit said bye and
+        // she stayed, her exe pinned), she's gone `QUIT_WITHIN` from here, with her exit code.
+        crate::platform::quit_watchdog(QUIT_WITHIN, if self.fatal { 2 } else { 0 });
         // Detach + Bye first, so the daemon drops us from the roster now; the pump ends
         // when the connection thread stops (or give it 800 ms).
         if let Some(s) = &mut self.session {
@@ -4091,6 +4091,12 @@ impl Avatar {
         self.fx_hide_all();
         self.os.tray_remove();
         std::fs::remove_file(crate::control::socket_path()).ok();
+        // Tests only (tests/windows/test-quit.ps1): a teardown that holds, so her bound is seen
+        // ending her.
+        if let Some(ms) = std::env::var("SA_TEST_QUIT_STALL_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
+            elog!("synaps-avatar: quit: holding {ms} ms (SA_TEST_QUIT_STALL_MS)");
+            std::thread::sleep(Duration::from_millis(ms));
+        }
         if self.fatal {
             crate::platform::exit_now(2);
         }
@@ -4190,7 +4196,7 @@ impl Avatar {
             Ok(c) => c,
             Err(e) => {
                 elog!("synaps-avatar: cannot start the session client: {e}");
-                std::process::exit(1);
+                crate::platform::exit_now(1);
             }
         };
         self.session = Some(SessionLink { client, link, shown: None, closing: false, options, key, generation: 0, respawn_at: None });

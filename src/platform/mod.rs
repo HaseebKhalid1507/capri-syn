@@ -614,9 +614,10 @@ pub fn connect() -> Result<Os> {
     Ok(Os::new(x.clone(), Box::new(x)))
 }
 
-/// Her end, now, with no teardown after it (her state is saved before: `finish_quit`). Windows:
-/// `TerminateProcess` on herself, so no DLL's detach (a GPU driver's) and no thread can hold her
-/// there, her exe still mapped (an installer then can't replace it). Elsewhere: `exit`.
+/// Her end, now, with no teardown after it: every exit once GPUI is up (a quit saves her state
+/// before: `finish_quit`; a fatal error has nothing to save). Windows: `TerminateProcess` on
+/// herself, so no DLL's detach (a GPU driver's) and no thread can hold her there, her exe still
+/// mapped (an installer then can't replace it). Elsewhere: `exit`.
 pub fn exit_now(code: i32) -> ! {
     #[cfg(windows)]
     unsafe {
@@ -626,13 +627,18 @@ pub fn exit_now(code: i32) -> ! {
     std::process::exit(code)
 }
 
-/// Her quit, bounded: still here `within` after her bye (a teardown that holds: a driver, a
-/// thread), she ends there (`exit_now`).
-pub fn quit_watchdog(within: std::time::Duration) {
+/// Her quit, bounded (Windows): still here `within` after her bye (a teardown that holds: a
+/// driver, a thread), she ends there, with `code` (`exit_now`: 2 after a fatal error, else 0).
+/// Elsewhere nothing: her teardown runs to its end (no installer there has to replace her exe,
+/// and an exit from a side thread would cut that teardown short).
+pub fn quit_watchdog(within: std::time::Duration, code: i32) {
+    if !cfg!(windows) {
+        return;
+    }
     let spawned = std::thread::Builder::new().name("quit-watchdog".into()).spawn(move || {
         std::thread::sleep(within);
-        elog!("synaps-avatar: quit: still here {} ms after her bye: ending now", within.as_millis());
-        exit_now(0);
+        elog!("synaps-avatar: quit: still here {} ms after her bye: ending now (exit {code})", within.as_millis());
+        exit_now(code);
     });
     if let Err(e) = spawned {
         elog!("synaps-avatar: quit: no watchdog ({e}): her quit has no bound");

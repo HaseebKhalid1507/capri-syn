@@ -2,8 +2,11 @@
 # a `quit` on her control socket said "bye" and she stayed; a kill then left her process half-gone
 # (HasExited, 1 thread, 707 handles) with her exe still mapped, and her installer couldn't replace
 # it ("DeleteFile failed; code 5"). Here, offline as test-hang (no daemon):
-#   - she starts and answers `state`; `quit` says bye; she's gone within 5 s (her bound is 2 s);
+#   - she starts and answers `state`; `quit` says bye; she's gone within 5 s (her bound is 2 s),
+#     exit code 0;
 #   - her exe can then be opened for writing: nothing maps it;
+#   - stalled: her teardown held 10 s (SA_TEST_QUIT_STALL_MS, tests only): her bound ends her, her
+#     log says "still here 2000 ms after her bye", gone within 5 s, exit code 0, her exe free;
 #   - -Locked: again with the session locked (LockWorkStation; it stays locked: the job's last step).
 # A round she outlives says how far she got (threads, handles, a kill, the rename the installer
 # would do), so the next look starts from facts.
@@ -22,6 +25,7 @@ if (-not (Test-Path (Join-Path $Pack 'sprites.json'))) { throw "no pack in $Pack
 if (-not $Out) { $Out = Join-Path ([IO.Path]::GetTempPath()) "sa-quit-$PID" }
 New-Item -ItemType Directory -Force (Join-Path $Out 'bin') | Out-Null
 $her = Join-Path $Out 'bin\synaps-avatar.exe'
+if (Get-Process synaps-avatar -ErrorAction SilentlyContinue) { throw 'another synaps-avatar runs: not a clean machine' }
 Copy-Item -Force (Resolve-Path $Exe).Path $her
 $sock = Join-Path ([IO.Path]::GetTempPath()) 'synaps-avatar.sock'
 $fails = [System.Collections.Generic.List[string]]::new()
@@ -67,10 +71,13 @@ function Test-Free([string]$Path) {
     try { [IO.File]::Open($Path, 'Open', 'ReadWrite', 'None').Dispose(); return $true } catch { return $false }
 }
 
-function Round([string]$Name, [switch]$Lock) {
+function Round([string]$Name, [switch]$Lock, [int]$StallMs = 0) {
     Write-Output "--- $Name"
     $log = Join-Path $Out "$Name.log"
-    $p = Start-Process -FilePath $her -ArgumentList @('--pack', "`"$Pack`"", '--socket', "\\.\pipe\sa-quit-nobody-$PID") -PassThru -RedirectStandardError $log -RedirectStandardOutput (Join-Path $Out "$Name.out")
+    # Her teardown held (tests only): her bound has to end her.
+    if ($StallMs) { $env:SA_TEST_QUIT_STALL_MS = "$StallMs" }
+    try { $p = Start-Process -FilePath $her -ArgumentList @('--pack', "`"$Pack`"", '--socket', "\\.\pipe\sa-quit-nobody-$PID") -PassThru -RedirectStandardError $log -RedirectStandardOutput (Join-Path $Out "$Name.out") }
+    finally { Remove-Item Env:\SA_TEST_QUIT_STALL_MS -ErrorAction SilentlyContinue }
     $null = $p.Handle
     $t0 = Get-Date
     $st = $null
@@ -85,7 +92,8 @@ function Round([string]$Name, [switch]$Lock) {
     if ($Lock) {
         $ok = [QuitDesk]::LockWorkStation()
         Start-Sleep -Seconds 3
-        Write-Output "  LockWorkStation: $ok; the input desktop is out of reach (locked): $([QuitDesk]::Locked())"
+        Check $ok "$($Name): LockWorkStation"
+        Check ([QuitDesk]::Locked()) "$($Name): the input desktop is out of reach (locked)"
         $st = Send-Her 'state' 3000
         Write-Output "  locked, she answers state: $([bool]$st)"
     }
@@ -95,6 +103,7 @@ function Round([string]$Name, [switch]$Lock) {
     $gone = $p.WaitForExit(5000)
     $took = [int]((Get-Date) - $tq).TotalMilliseconds
     Check $gone "$($Name): she's gone within 5 s of her bye ($took ms)"
+    if ($gone) { Check ($p.ExitCode -eq 0) "$($Name): exit code 0 ($($p.ExitCode))" }
     if (-not $gone) {
         $q = Get-Process -Id $p.Id -ErrorAction SilentlyContinue
         if ($q) { Write-Output "  still here: $($q.Threads.Count) thread(s), $($q.HandleCount) handles" }
@@ -115,9 +124,15 @@ function Round([string]$Name, [switch]$Lock) {
     $said = if (Test-Path $log) { Get-Content $log } else { @() }
     $wd = $said | Where-Object { $_ -match 'quit: ' }
     Write-Output "  her log: $(if ($wd) { $wd -join ' / ' } else { 'no watchdog line (her teardown ended in time)' })"
+    if ($StallMs) {
+        Check (@($wd | Where-Object { $_ -match "quit: holding $StallMs ms" }).Count -eq 1) "$($Name): her teardown held (SA_TEST_QUIT_STALL_MS)"
+        Check (@($wd | Where-Object { $_ -match 'quit: still here 2000 ms after her bye: ending now \(exit 0\)' }).Count -eq 1) "$($Name): her bound ended her: 'still here 2000 ms after her bye'"
+        Check ($took -lt $StallMs) "$($Name): before her held teardown would have ended ($took ms < $StallMs ms)"
+    }
 }
 
 Round 'unlocked'
+Round 'stalled' -StallMs 10000
 if ($Locked) { Round 'locked' -Lock }
 
 if ($fails.Count) { throw "$($fails.Count) check(s) failed: $($fails -join '; ')" }
