@@ -1574,7 +1574,7 @@ fn unfold(ribs: &mut Vec<Rib>) {
 }
 
 /// The bolt polygon (root px) → shape rows relative to `origin`, run edges snapped to a
-/// 2 px grid with a little per-row jitter, so the outline stair-steps like Capri's bolt.
+/// 2 px grid, so the outline stair-steps like Capri's bolt.
 pub fn bolt_rects(poly: &[(f32, f32)], origin: (i32, i32)) -> Vec<ShapeRect> {
     const STEP: i32 = 2;
     let mut rows = Vec::new();
@@ -1582,9 +1582,8 @@ pub fn bolt_rects(poly: &[(f32, f32)], origin: (i32, i32)) -> Vec<ShapeRect> {
     shape::poly_rows(&local, &mut rows);
     rows.into_iter()
         .filter_map(|(x, y, w, h)| {
-            let jitter = (hash01(y as u32, x as u32 / STEP as u32) * STEP as f32) as i32;
-            let x0 = (x as i32 + jitter / 2).div_euclid(STEP) * STEP;
-            let x1 = (x as i32 + w as i32 + jitter / 2).div_euclid(STEP) * STEP;
+            let x0 = (x as i32).div_euclid(STEP) * STEP;
+            let x1 = (x as i32 + w as i32).div_euclid(STEP) * STEP;
             (x1 > x0).then_some((x0 as i16, y, (x1 - x0) as u16, h))
         })
         .collect()
@@ -2099,7 +2098,8 @@ mod bolt_tests {
         // LOCKED #1's one solid line, as the view draws it: through `bolt_rects`' 2 px steps, a
         // hop's thin stroke on its steep legs can lose whole rows and break apart (#102 as first
         // pushed: one hop frame in five). In flight, everything lit from 15 % to 85 % of the way
-        // along the lit piece is one 8-connected piece with its middle, on all but a few frames.
+        // along the lit piece is one 8-connected piece with its middle, on all but under 1 % of
+        // frames (fewer than 24 of these 2400; the tuning breaks 5). The ends may shed a speck.
         let (lens, seeds, us) = ([48.0f32, 64.0, 100.0], 200u64, [0.12f32, 0.2, 0.3, 0.4]);
         let mut broken = Vec::new();
         for len in lens {
@@ -2150,7 +2150,7 @@ mod bolt_tests {
             }
         }
         let frames = lens.len() * seeds as usize * us.len();
-        assert!(broken.len() * 20 < frames, "{} of {frames} frames broken: {broken:?}", broken.len());
+        assert!(broken.len() * 100 < frames, "{} of {frames} frames broken: {broken:?}", broken.len());
     }
 
     #[test]
