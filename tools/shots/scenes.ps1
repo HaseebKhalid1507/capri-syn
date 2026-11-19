@@ -105,9 +105,9 @@ function Set-TakeEnv([hashtable]$Vars) {
     }
 }
 
-# The Synaps her fake daemon says it is (her Settings' VERSION row shows it): the docs' (REFERENCE.md),
-# never a FAKE string on camera. The README's stills come from these shots.
-$DaemonVersion = '0.12.0'
+# The Synaps her fake daemon says it is (her Settings' VERSION row shows it): the one her installer
+# pins (installer/manifest's synaps_pin, fakedaemon.py's default too), never a FAKE string on camera.
+$DaemonVersion = (Get-Content (Join-Path (Split-Path -Parent $Tools) 'installer\manifest') | Where-Object { $_ -like 'synaps_pin=*' }) -replace '^synaps_pin=', ''
 
 function Start-Take {
     param(
@@ -515,6 +515,7 @@ $Scenes = [ordered]@{
             $null = [ShotsTray.Native]::Glide($cx, $cy)
             Start-Sleep 2.5
             $near = @(New-Windows $before | Where-Object { $_.Y + $_.H -ge $icon.Y - 400 * $sf -and [Math]::Abs($_.X + $_.W / 2 - $cx) -lt 400 * $sf })
+            if (-not $near) { $script:Fails.Add("${script:Take}: no tooltip window near her icon") }
             $tipBox = if ($near) { $near } else { @([pscustomobject]@{ X = $cx - [int](180 * $sf); Y = $icon.Y - [int](64 * $sf); W = [int](360 * $sf); H = [int](64 * $sf) }) }
             Shot '01-tip' "hovered: $tip$(if (-not $near) { ' (no tooltip window found: a box above her icon)' })" -At (Get-CornerRect -Icon $icon -Also $tipBox)
             Move-ShotPointer ($sc[0] + 8) ($sc[1] + 8)
@@ -891,6 +892,8 @@ function Get-CornerRect {
 
 # ---- run ---------------------------------------------------------------------------------------
 
+# The tray set last: its taskbar (dark, no clock, Explorer restarted) stays for whatever runs after.
+$Sets = @($Sets | Where-Object { $_ -ne 'tray' }) + @($Sets | Where-Object { $_ -eq 'tray' })
 Clear-ShotDesktop
 
 foreach ($set in $Sets) {
