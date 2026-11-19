@@ -4297,6 +4297,7 @@ impl Avatar {
             elog!("timing: first reply text from the daemon {} ms after Enter", t0.elapsed().as_millis());
         }
         let annoyed = b.mood == Mood::Annoyed;
+        let carried = self.rag_hides_bubble();
         let Some(bb) = self.bubble.as_mut().filter(|x| x.stream) else { return };
         let text: Vec<char> = b.reply.chars().collect();
         let same = bb.text.iter().zip(&text).take_while(|(a, c)| a == c).count();
@@ -4323,7 +4324,7 @@ impl Avatar {
             bb.hide_at = Some(now + hold_for(bb.text.len()));
         }
         // Put away while it streamed: its end came behind the chip, unseen.
-        if ended_unseen(was_more, bb) && !self.rag_hides_bubble() {
+        if ended_unseen(was_more, bb) && !carried {
             let (turn, text) = (bb.turn, bb.text.clone());
             self.reply_missed(turn, &text);
         }
