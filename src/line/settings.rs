@@ -1570,23 +1570,23 @@ mod tests {
         // Two quick → on the page, before the first write is in: two steps (the page shows
         // each as asked at once, and steps on from it).
         let mut p = prefs();
-        let (_, a) = list_key("right", 0, &p);
+        let (_, a) = list_key("right", 1, &p);
         assert_eq!(a, Act::Pref(Pref::Attention(Attention::HangOnly)));
         let Act::Pref(x) = a else { unreachable!() };
         x.show(&mut p);
-        assert_eq!(list_key("right", 0, &p).1, Act::Pref(Pref::Attention(Attention::Off)));
+        assert_eq!(list_key("right", 1, &p).1, Act::Pref(Pref::Attention(Attention::Off)));
         // "HEY CAPRI" twice: off, then on again (not off twice).
-        let (_, w) = list_key("space", 1, &p);
+        let (_, w) = list_key("space", 2, &p);
         let Act::Pref(x) = w else { unreachable!() };
         x.show(&mut p);
-        assert_eq!(list_key("space", 1, &p).1, Act::Pref(Pref::Wake(true)));
+        assert_eq!(list_key("space", 2, &p).1, Act::Pref(Pref::Wake(true)));
         // The menu clicked once (HANG ONLY on its way), then the page: the page's Prefs are as
         // asked, so → goes to OFF, as the menu's next click would.
         let pending = [Pref::Attention(Attention::HangOnly), Pref::Wake(false)];
         let (att, wake) = asked(pending.iter(), Attention::Mix, true);
         assert_eq!((att, wake), (Attention::HangOnly, false));
         let page = Prefs { attention: att, wake, ..prefs() };
-        assert_eq!(list_key("right", 0, &page).1, Act::Pref(Pref::Attention(next_attention(pending.iter(), Attention::Mix))));
+        assert_eq!(list_key("right", 1, &page).1, Act::Pref(Pref::Attention(next_attention(pending.iter(), Attention::Mix))));
         assert_eq!(asked(std::iter::empty(), Attention::Off, true), (Attention::Off, true), "nothing asked: as she runs");
     }
 
