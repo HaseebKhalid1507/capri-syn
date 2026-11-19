@@ -3607,7 +3607,12 @@ impl Avatar {
                 }
             }
             Command::Brain(c) => self.brain_cmd(c, now),
-            Command::SettingsReload => self.settings_reload(now),
+            // An open Settings page shows what she runs with now (a lock, the wake word).
+            Command::SettingsReload => {
+                let r = self.settings_reload(now);
+                self.line_push(cx);
+                r
+            }
             Command::SettingsPage(open) => self.show_line_page(if open { crate::line::Page::Settings } else { crate::line::Page::Chat }, cx),
             Command::Tap { head } => {
                 if self.hidden || self.teleport.is_some() || !self.loaded {
