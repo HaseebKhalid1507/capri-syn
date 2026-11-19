@@ -2,7 +2,9 @@
 # claude` does on Windows). Its `cmd /c start URL` cuts the URL at the first &, so the step opens the
 # URL from its stderr itself. Checked: the whole URL, with every & (CAPRI_NO_BROWSER: said, not
 # opened); stdin held open until auth.json changes (the stand-in, as 0.12, fails with "Manual input
-# channel closed" otherwise), then closed; `brain: yes`. And a login that fails says why.
+# channel closed" otherwise), then closed; `brain: yes`. A URL that isn't Claude's or Anthropic's is
+# never opened. And a login that fails says why. The same stand-in's daemon on protocol 4: steps.ps1
+# daemon fails, and says she can't attach (her installer's finish page then never says it runs).
 #
 #   powershell -File .\packaging\windows\test-login.ps1
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'Logs beside the checks.')]
@@ -26,6 +28,8 @@ public static class Program {
     static volatile bool closed;
     public static int Main(string[] a) {
         if (a.Length > 0 && a[0] == "--version") { Console.WriteLine("synaps 0.12.0"); return 0; }
+        if (a.Length > 1 && a[0] == "daemon" && a[1] == "status") { Console.WriteLine("daemon: running (pid 4242)"); Console.WriteLine("protocol: 4"); return 0; }
+        if (a.Length > 0 && a[0] == "daemon") { return 0; }
         if (Environment.GetEnvironmentVariable("FAKE_LOGIN_FAIL") == "1") { Console.Error.WriteLine("Error: token exchange failed (400)"); return 1; }
         // As 0.12: stdin read from the start (the paste); its end ends the login.
         var reader = new Thread(() => { Console.In.ReadToEnd(); closed = true; });
@@ -34,7 +38,8 @@ public static class Program {
         var e = Console.Error;
         e.WriteLine("\n\u001b[1mOpening browser to sign in...\u001b[0m\n");
         e.WriteLine("\u001b[2mIf the browser didn't open, visit this URL:\u001b[0m");
-        e.WriteLine("\u001b[36m$url\u001b[0m\n");
+        var u = Environment.GetEnvironmentVariable("FAKE_LOGIN_URL");
+        e.WriteLine("\u001b[36m" + (string.IsNullOrEmpty(u) ? "$url" : u) + "\u001b[0m\n");
         e.WriteLine("\u001b[2mOr paste the redirect URL here (must include ``state``):\u001b[0m");
         e.Flush();
         Thread.Sleep(1500);
@@ -56,12 +61,37 @@ Check ($LASTEXITCODE -eq 0) "steps.ps1 login exits 0 ($LASTEXITCODE)"
 Check ($out.Contains("would open: $url")) 'it opens the whole URL, every & in it (not cmd''s cut one)'
 Check ($out -match 'brain: yes') 'brain: yes once auth.json changes'
 
+# A synaps that prints another site's page: not opened.
+Remove-Item -Force -LiteralPath (Join-Path $base 'auth.json')
+$env:FAKE_LOGIN_URL = 'https://claude.ai.evil.example/oauth/authorize?code=true&client_id=9d1c250a&state=s7'
+$out = & $ps -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $steps login -Synaps (Join-Path $bin 'synaps.exe') 2>&1 | Out-String
+Write-Host ($out.Trim() -split "`n" | ForEach-Object { "  login: $_" } | Out-String)
+Check (-not $out.Contains('would open:') -and $out.Contains("not opened (not a Claude or Anthropic sign-in page): $($env:FAKE_LOGIN_URL)")) 'a page on another site is never opened'
+Remove-Item Env:\FAKE_LOGIN_URL
+
 $env:FAKE_LOGIN_FAIL = '1'
 $out = & $ps -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $steps login -Synaps (Join-Path $bin 'synaps.exe') 2>&1 | Out-String
 Write-Host ($out.Trim() -split "`n" | ForEach-Object { "  login: $_" } | Out-String)
 Check ($LASTEXITCODE -ne 0) "a failed login fails the step ($LASTEXITCODE)"
 Check ($out -match 'failed: synaps login exited 1: Error: token exchange failed \(400\)') 'and says why, in its words'
-Remove-Item Env:\FAKE_LOGIN_FAIL, Env:\CAPRI_NO_BROWSER, Env:\SYNAPS_BASE_DIR
+Remove-Item Env:\FAKE_LOGIN_FAIL
+
+# Its daemon on protocol 4 (hers is 3, exact match): the step fails, and says why. Run\synaps-daemon
+# as it was before, after.
+$run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+$had = (Get-ItemProperty -Path $run -Name 'synaps-daemon' -ErrorAction SilentlyContinue).'synaps-daemon'
+try {
+    $out = & $ps -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $steps daemon -Synaps (Join-Path $bin 'synaps.exe') 2>&1 | Out-String
+    $rc = $LASTEXITCODE
+} finally {
+    if ($null -ne $had) { Set-ItemProperty -Path $run -Name 'synaps-daemon' -Value $had } else { Remove-ItemProperty -Path $run -Name 'synaps-daemon' -ErrorAction SilentlyContinue }
+}
+Write-Host ($out.Trim() -split "`n" | ForEach-Object { "  daemon: $_" } | Out-String)
+Check ($rc -ne 0) "a daemon on another protocol fails the daemon step ($rc)"
+Check ($out -match '(?m)^daemon: wrong-protocol') 'daemon: wrong-protocol (her installer: "she can''t use it")'
+Check ($out -match 'failed: the daemon speaks protocol 4; she speaks 3 \(exact match\), so she can''t attach') 'and says why'
+Check ($out -notmatch '(?m)^daemon: running') 'never "daemon: running"'
+Remove-Item Env:\CAPRI_NO_BROWSER, Env:\SYNAPS_BASE_DIR
 Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 
 if ($fails.Count) { throw "$($fails.Count) check(s) failed: $($fails -join '; ')" }

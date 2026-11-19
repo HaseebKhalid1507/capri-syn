@@ -281,7 +281,7 @@ function Read-Manifest {
         if ($eq -lt 1) { Stop-Install "manifest: bad line '$l'" }
         $m[$l.Substring(0, $eq)] = $l.Substring($eq + 1)
     }
-    foreach ($k in 'repo', 'synaps_repo', 'synaps_min', 'asset_windows', 'asset_windows_voice', 'rustup_dist') {
+    foreach ($k in 'repo', 'synaps_repo', 'synaps_min', 'synaps_pin', 'asset_windows', 'asset_windows_voice', 'rustup_dist') {
         if (-not $m[$k]) { Stop-Install "manifest: no $k" }
     }
     $script:M = $m
@@ -409,21 +409,21 @@ function Install-Synaps {
         return
     }
     if ($s.State -eq 'old') {
-        Write-Info "installing the latest"
+        Write-Info "installing Synaps $($script:M.synaps_pin), the one she was tested with"
         $script:SynapsNew = 2
     } else {
         Write-Info "her brain runs on Synaps, an open-source agent runtime (github.com/$($script:M.synaps_repo))"
-        Write-Info 'not installed yet: installing the latest with its own installer (yours to keep; --uninstall says how to remove it)'
+        Write-Info "not installed yet: installing Synaps $($script:M.synaps_pin), the one she was tested with, with its own installer (yours to keep; --uninstall says how to remove it)"
         $script:SynapsNew = 1
     }
     $edit = Get-SynapsPathEdit
     if ($edit) { Write-Info "its installer puts $(Get-Tilde $script:CargoBin) on your user Path (HKCU\Environment, at the front)" }
     else { Write-Info 'its installer leaves your user Path as it is' }
     if (-not (Confirm-Action "install Synaps with its installer$(if ($edit) { ' (and that Path edit)' })")) {
-        Write-Info "or install it yourself, your Path untouched: `$env:SYNAPS_NO_MODIFY_PATH = '1'; irm https://github.com/$($script:M.synaps_repo)/releases/latest/download/synaps-installer.ps1 | iex"
+        Write-Info "or install it yourself, your Path untouched: `$env:SYNAPS_NO_MODIFY_PATH = '1'; irm https://github.com/$($script:M.synaps_repo)/releases/download/v$($script:M.synaps_pin)/synaps-installer.ps1 | iex"
         Stop-Install 'she needs Synaps: say yes (or --yes), or install it as above, then run this again'
     }
-    # The latest release's installer, sha256 checked (else the manifest's pin), run: steps.ps1 synaps.
+    # The pinned release's installer (synaps_pin), checked against its pinned SHA-256, run: steps.ps1 synaps.
     $r = Invoke-Step $steps @(@('synaps') + $(if ($script:Dry) { @('-DryRun') } else { @() }))
     $s = Read-SynapsResult $r['synaps']
     $script:Synaps = $s.Path; $script:SynapsV = $s.Version
@@ -762,11 +762,14 @@ function Install-Extras {
     if (-not $script:Voice) { return }
     # Where her voice comes from: steps.ps1 voice-check (her installer's page asks the same).
     $from = if ($script:FromSource) { 'none' } else { "$((Invoke-Step (Get-StepScript) @('voice-check') -NoStop)['voicefrom'])" }
+    # A voice that doesn't come (offline, a download cut short, settings he must fix first) is said in
+    # the summary with its retry; the rest of the install stands. Only [voice] enabled is written: a
+    # re-run keeps his microphone, "hey Capri" and read-aloud as he set them.
     if ($from -like 'release *') {
         # Her voice installer, sha256 checked, its models, and her settings through her own writer:
         # steps.ps1 voice (her installer's Voice page runs the same).
-        $null = Invoke-Step (Get-StepScript) @(@('voice', '-Exe', $script:Exe) + $(if ($script:Dry) { @('-DryRun') } else { @() }))
-        Add-Receipt @('inno', $script:VoiceKey)
+        $r = Invoke-Step (Get-StepScript) @(@('voice', '-Exe', $script:Exe) + $(if ($script:Dry) { @('-DryRun') } else { @() })) -NoStop
+        if (Get-ItemProperty -Path $script:VoiceKey -ErrorAction SilentlyContinue) { Add-Receipt @('inno', $script:VoiceKey) }
     } else {
         # No release: the same bundle, built here (CPython 3.13's embeddable package + wheels); then
         # steps.ps1 voice -Bundle for the models and her settings, as above.
@@ -780,7 +783,11 @@ function Install-Extras {
         Add-Receipt @('dir', $out)
         $models = Join-Path $env:LOCALAPPDATA 'capri-voice'
         if (-not (Test-Path $models)) { Add-Receipt @('dir', $models) }
-        $null = Invoke-Step (Get-StepScript) @('voice', '-Bundle', $out, '-Exe', $script:Exe)
+        $r = Invoke-Step (Get-StepScript) @('voice', '-Bundle', $out, '-Exe', $script:Exe) -NoStop
+    }
+    if ($r['exit']) {
+        $script:VoiceHow = "not on: $(if ($r['failed']) { $r['failed'] } else { "steps.ps1 voice exited $($r['exit'])" }). Again: .\install.ps1 --voice"
+        return
     }
     $script:VoiceHow = 'capri-voice (she starts it while [voice] enabled is on)'
 }

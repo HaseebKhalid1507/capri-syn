@@ -5,13 +5,15 @@
 ; the install steps install.ps1 runs too: one copy of them, packaging/windows/steps.ps1, installed in
 ; {app}\steps with what they read (the manifest, make-pack, the pins, her moods and persona: no art).
 ;   - Synaps, her brain: found as install.ps1 finds it; if it's missing or too old, the "Her brain"
-;     page installs the latest release with its own installer (checked).
+;     page installs the Synaps she's pinned to (installer/manifest: synaps_pin, a release she was run
+;     against; never the latest) with its own installer, checked against its pinned SHA-256.
 ;   - Her pack: the "Her pack" page downloads her art and builds it on his machine (the default), copies
 ;     a pack folder he has, or skips. Her art is never in this installer.
 ;   - The Synaps daemon, now and at sign-in (no console window).
-;   - Her voice (page "Her voice", on when Windows has a microphone): the voice installer and its
-;     models, downloaded; his choices (microphone, "hey Capri", replies aloud) saved by her own
-;     settings writer. Never her voice itself: she keeps her built-in default.
+;   - Her voice (page "Her voice", on when Windows has a microphone; never by default on an upgrade:
+;     one that is installed keeps his settings): the voice installer and its models, downloaded; his
+;     choices (microphone, "hey Capri", replies aloud) saved by her own settings writer. Never her
+;     voice itself: she keeps her built-in default.
 ; A step that fails doesn't fail Setup: she is installed, and the finish page says what happened in
 ; plain words, with the one command that tries it again. Unattended, the log says it.
 ;
@@ -19,9 +21,10 @@
 ;             [/PACK=download|skip|"C:\packs\capri"] [/VOICE=on|off] [/MIC="Microphone (...)"]
 ;             [/VOICEFROM="C:\...\capri-syn-voice-setup.exe" or a URL] [/TASKS=autostart]
 ; The defaults are the wizard's: Synaps if it's needed, her art downloaded, autostart on, her voice
-; when Windows has a microphone. Her voice comes from /VOICEFROM, else a capri-syn-voice-setup*.exe
-; beside this setup (CI hands its own build over so), else the latest release; with none of them
-; the page says it comes with her first release, and stays off.
+; when Windows has a microphone (on a first install only). Her voice comes from /VOICEFROM (a file,
+; or an https URL), else the latest release; never from a file found by name beside this setup (that
+; folder is usually Downloads). With neither, the page says it comes with her first release, and
+; stays off. Run as administrator, Setup asks first (she and her daemon would run elevated).
 ; install.ps1 runs it with /SYNAPS=skip /PACK=skip /VOICE=off /BY=install.ps1: those are its own
 ; steps (the same steps.ps1), and her settings and its cache are its own to remove.
 
@@ -116,10 +119,6 @@ Filename: "{app}\synaps-avatar.exe"; WorkingDir: "{%USERPROFILE}"; Description: 
 ; No brain yet: Synaps' Claude sign-in, with no window (steps.ps1 login): his browser opens.
 Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\steps\steps.ps1"" login"; Description: "Sign in to Claude, her brain (your browser opens; a Claude Pro or Max plan)"; Flags: nowait postinstall skipifsilent runhidden; Check: OfferLogin
 
-[UninstallRun]
-; She may be running: stop her (his own processes only: no admin).
-Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM synaps-avatar.exe"; Flags: runhidden; RunOnceId: "StopHer"
-
 [UninstallDelete]
 ; Her old exe, renamed aside by an upgrade while a process of hers still mapped it.
 Type: files; Name: "{app}\synaps-avatar.exe.old-*"
@@ -165,11 +164,16 @@ var
   Progress: TOutputMarqueeProgressWizardPage;
   { synaps-check before the pages: '' (not run), ok, old or missing; and what it said. }
   SynapsFound, SynapsFoundVer: String;
+  { The Synaps Setup installs: installer/manifest's synaps_pin (synaps-check says it). }
+  SynapsPin: String;
+  { Her install before this one (an upgrade: her AppId's uninstall key), and her voice's: read at
+    the start, before this install writes its own. }
+  HerBefore, VoiceBefore: Boolean;
   { One step's run: its name and title, its results (key=value) and its "failed:" reason. }
   StepName, StepTitle, StepFailed: String;
   StepResults: TStringList;
   { What the steps did, for the finish page. }
-  SynapsOk, SynapsNew, BrainOk, DaemonOk, PackOk, VoiceOk, VoiceRan: Boolean;
+  SynapsOk, SynapsNew, BrainOk, DaemonOk, DaemonWrong, PackOk, VoiceOk, VoiceRan: Boolean;
   SynapsVer, SynapsPath, SynapsWhy, DaemonWhy, PackWhy, VoiceWhy, PackFrom: String;
   Retry, Notices: TStringList;
 
@@ -286,7 +290,7 @@ end;
 
 function IsResultKey(const K: String): Boolean;
 begin
-  Result := Pos(',' + K + ',', ',synaps,brain,daemon,runvalue,pack,voice,voicefrom,release,was,remove,mic,mics,failed,') > 0;
+  Result := Pos(',' + K + ',', ',synaps,brain,daemon,runvalue,pack,voice,voicefrom,release,was,remove,mic,mics,failed,pin,') > 0;
 end;
 
 { One line of a step: in the log; a result is kept; anything else goes on the progress page. }
@@ -381,15 +385,20 @@ begin
     SynapsFoundVer := SynapsVer;
   end;
   BrainOk := StepResult('brain') = 'yes';
+  SynapsPin := StepResult('pin');
 end;
 
 procedure UpdateBrainPage;
+var
+  Which: String;
 begin
+  if SynapsPin <> '' then Which := 'Synaps ' + SynapsPin + ', the one she was tested with'
+  else Which := 'the Synaps she was tested with';
   if SynapsFound = 'old' then
     SynapsStatus.Caption := 'Synaps ' + SynapsFoundVer + ' is on this PC, but she needs a newer one. ' +
-      'Setup can install its latest release over it.'
+      'Setup can install ' + Which + ', over it.'
   else
-    SynapsStatus.Caption := 'Synaps isn''t on this PC yet. Setup can install its latest release now.';
+    SynapsStatus.Caption := 'Synaps isn''t on this PC yet. Setup can install ' + Which + ', now.';
 end;
 
 function NewText(Page: TWizardPage; const Caption: String; Left, Top: Integer): TNewStaticText;
@@ -419,7 +428,7 @@ begin
   SynapsBox.Height := ScaleY(20);
   SynapsBox.Caption := 'Install Synaps (her brain, open source)';
   SynapsBox.Checked := True;
-  NewText(BrainPage, 'With its own installer, from its latest GitHub release, checked against GitHub''s SHA-256. ' +
+  NewText(BrainPage, 'With its own installer, from the GitHub release she was tested with, checked against its pinned SHA-256. ' +
     'It goes in %USERPROFILE%\.cargo\bin and onto your Path. It''s yours to keep: removing her asks first.',
     ScaleX(18), SynapsBox.Top + SynapsBox.Height + ScaleY(4));
 end;
@@ -508,17 +517,11 @@ begin
   ReadBox.Enabled := TalkBox.Checked;
 end;
 
-{ Her voice installer: /VOICEFROM, else one beside this setup (CI's own build), else '' (the release). }
+{ Her voice installer: /VOICEFROM, else '' (the release). Never a file found by name beside Setup:
+  that folder is usually Downloads. }
 function VoiceFrom: String;
-var
-  F: TFindRec;
 begin
   Result := Trim(ExpandConstant('{param:VOICEFROM|}'));
-  if Result <> '' then exit;
-  if FindFirst(ExpandConstant('{src}\capri-syn-voice-setup*.exe'), F) then begin
-    Result := ExpandConstant('{src}\') + F.Name;
-    FindClose(F);
-  end;
 end;
 
 { steps.ps1 mics and voice-check, once (from the temporary copy): the picker's names, where her voice
@@ -562,9 +565,14 @@ begin
     if Pick < 0 then Pick := MicCombo.Items.Add(M);
   end;
   MicCombo.ItemIndex := Pick;
+  { An upgrade never turns her voice on by itself: one installed keeps his settings (microphone,
+    "hey Capri", replies aloud), one he left off stays off. Only his tick or /VOICE=on sets it up. }
   if VoiceParam = 'on' then TalkBox.Checked := True
   else if VoiceParam = 'off' then TalkBox.Checked := False
+  else if HerBefore or VoiceBefore then TalkBox.Checked := False
   else TalkBox.Checked := MicCount > 0;
+  if (VoiceParam = '') and VoiceBefore then
+    TalkNote.Caption := 'Her voice is installed already, with your settings. Tick this only to choose them again.';
   if MicCount = 0 then begin
     TalkNote.Caption := 'No microphone found. Plug one in and run Setup again to talk to her.';
     TalkBox.Enabled := VoiceParam = 'on';
@@ -599,13 +607,15 @@ begin
   if B then Result := 'on' else Result := 'off';
 end;
 
-{ steps.ps1 voice's arguments: his choices, and where his voice comes from when it isn't the release. }
+{ steps.ps1 voice's arguments: his choices (all of them: he ticked the box), and where his voice comes
+  from when it isn't the release. }
 function VoiceArgs: String;
 var
   V: String;
 begin
   Result := 'voice -WakeWord ' + OnOff(WakeBox.Checked) + ' -ReadAloud ' + OnOff(ReadBox.Checked);
-  if MicChosen <> '' then Result := Result + ' -Mic "' + MicChosen + '"';
+  if MicChosen <> '' then Result := Result + ' -Mic "' + MicChosen + '"'
+  else Result := Result + ' -MicDefault';
   V := VoiceFrom;
   if V <> '' then Result := Result + ' -VoiceFrom "' + V + '"';
 end;
@@ -654,12 +664,29 @@ begin
   VoiceClick(nil);
 end;
 
+{ Run as administrator (a right-click, or from an elevated prompt), what Setup starts would run so
+  too: her, her brain's daemon. Asked first, No the default. Unattended: logged, and on (CI's runners
+  and an elevated install.ps1 are elevated; their caller chose that). }
+function InitializeSetup: Boolean;
+begin
+  Result := True;
+  if not IsAdmin then exit;
+  Log('Setup runs as administrator: she and her brain''s daemon would run elevated too.');
+  if WizardSilent then exit;
+  Result := MsgBox('Setup is running as administrator.' + #13#10#13#10 +
+    'She and her brain''s daemon would then run as administrator too, which they don''t need. ' +
+    'Better: close this, and double-click Setup (no "Run as administrator").' + #13#10#13#10 +
+    'Go on as administrator anyway?', mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES;
+end;
+
 procedure InitializeWizard;
 begin
   StepResults := TStringList.Create;
   Retry := TStringList.Create;
   Notices := TStringList.Create;
   MicCount := -1;
+  HerBefore := RegKeyExists(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{2147942F-E90C-4536-BEA2-8AB4B7F51734}_is1');
+  VoiceBefore := RegKeyExists(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#VoiceAppId}_is1');
   CreateBrainPage;
   CreatePackPage;
   CreateVoicePage;
@@ -746,6 +773,7 @@ begin
     if SynapsOk then begin
       DaemonOk := RunStep('daemon', 'Her brain''s daemon', StepsScript, 'daemon -Synaps "' + SynapsPath + '"');
       DaemonOk := DaemonOk and (Copy(StepResult('daemon'), 1, 7) = 'running');
+      DaemonWrong := StepResult('daemon') = 'wrong-protocol';
       if StepResult('brain') <> '' then BrainOk := StepResult('brain') = 'yes';
       if not DaemonOk then begin
         DaemonWhy := StepFailed;
@@ -849,6 +877,7 @@ begin
   else if SynapsParam <> 'skip' then
     Result := Result + '- No Synaps: she can''t talk until it''s installed (github.com/HaseebKhalid1507/SynapsCLI).' + N;
   if DaemonOk then Result := Result + '+ Its daemon runs, and starts when you sign in.' + N
+  else if DaemonWrong then Result := Result + '- Its daemon runs, but she can''t use it: ' + DaemonWhy + N
   else if DaemonWhy <> '' then Result := Result + '- Its daemon didn''t start: ' + DaemonWhy + N;
   if PackOk and (PackFrom <> '') then Result := Result + '+ Her pack: a copy of ' + PackFrom + '.' + N
   else if PackOk then Result := Result + '+ Her art: downloaded, built and checked.' + N
@@ -861,6 +890,7 @@ begin
     if MicChosen <> '' then Result := Result + ' Microphone: ' + MicChosen + '.';
     Result := Result + N;
   end else if VoiceWhy <> '' then Result := Result + '- Her voice didn''t come: ' + VoiceWhy + ' She''s installed without it.' + N
+  else if VoiceBefore and not VoiceRan then Result := Result + '+ Her voice: as you set it.' + N
   else if VoiceKind = 'none' then Result := Result + '- Her voice comes with her first release.' + N
   else if VoiceKind = 'offline' then Result := Result + '- No voice: GitHub couldn''t be reached. Run Setup again to add it.' + N
   else if (VoicePage <> nil) and (MicCount = 0) and (VoiceParam <> 'off') then Result := Result + '- No voice: no microphone found.' + N;
@@ -935,11 +965,17 @@ end;
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   Code: Integer;
-  Synaps: String;
+  Synaps, Her: String;
 begin
   if CurUninstallStep <> usUninstall then exit;
-  { She may be running: stop her before her files go. }
-  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM synaps-avatar.exe', '', SW_HIDE, ewWaitUntilTerminated, Code);
+  { She may be running: stop her before her files go. Only this install of her (by its path), never
+    another synaps-avatar.exe (a build of his elsewhere). }
+  Her := HerExe;
+  StringChangeEx(Her, '''', '''''', True);
+  Exec(PowerShell, '-NoProfile -NonInteractive -Command "$e = ''' + Her + '''; ' +
+    'Get-Process synaps-avatar -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $e } | ' +
+    'ForEach-Object { Stop-Process -Id $_.Id -Force; Wait-Process -Id $_.Id -Timeout 5 -ErrorAction SilentlyContinue }"',
+    '', SW_HIDE, ewWaitUntilTerminated, Code);
   { What the steps made: her pack (when they did), their Run\synaps-daemon, her voice. }
   if FileExists(StepsScript) then begin
     Exec(PowerShell, '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + StepsScript + '" remove', '', SW_HIDE, ewWaitUntilTerminated, Code);
@@ -950,5 +986,5 @@ begin
   if (Synaps <> '') and FileExists(Synaps) and FileExists(StepsScript) and not UninstallSilent then
     if MsgBox('Remove Synaps too?' + #13#10#13#10 + 'Her installer installed it (' + Synaps + '). Other programs may use it. ' +
         'Your Synaps login and sessions stay either way.', mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
-      Exec(PowerShell, '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + StepsScript + '" synaps-remove', '', SW_HIDE, ewWaitUntilTerminated, Code);
+      Exec(PowerShell, '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + StepsScript + '" synaps-remove -Synaps "' + Synaps + '"', '', SW_HIDE, ewWaitUntilTerminated, Code);
 end;

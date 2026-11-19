@@ -104,6 +104,9 @@ New-Item -ItemType Directory -Force (Join-Path $bad 'docs') | Out-Null
 Set-Content (Join-Path $bad 'docs\character-assets.md') 'not CapriCore'
 $code = Install @('/PACK=download', '/SYNAPS=skip') 900
 Check ($code -eq 0) "a CapriCore that doesn't match its pins: Setup still exits 0 ($code)"
+# Run elevated (CI's runners are) and unattended: no question, a line in the log, and on.
+$elevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+Check (($script:SetupLog -match 'Setup runs as administrator') -eq $elevated) "elevated ($elevated), unattended: said in the log, not asked"
 Check (-not (Test-Path (Join-Path $packTo 'sprites.json'))) 'no pack from it'
 Check ($script:SetupLog -match "pack: failed: CapriCore's files don't match their pins") "the log says so: $([regex]::Match($script:SetupLog, 'pack: failed: [^\r\n]*').Value)"
 Check (-not (Test-Path $bad)) 'and the bad copy is gone'

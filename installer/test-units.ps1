@@ -1,8 +1,10 @@
 # install.ps1's path guard and recorded folders on their own, on real Windows paths (CI's
-# windows-installer job). Its functions are loaded from the script's syntax tree: nothing runs.
+# windows-installer job); and steps.ps1's Set-Pack, when the new pack can't go in. Their functions
+# are loaded from the scripts' syntax trees: nothing runs.
 #
 #   .\installer\test-units.ps1
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'install.ps1''s own functions print with it.')]
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidOverwritingBuiltInCmdlets', '', Justification = 'Move-Item, failing on cue: Set-Pack''s rollback.')]
 param()
 $ErrorActionPreference = 'Stop'
 $fails = [System.Collections.Generic.List[string]]::new()
@@ -90,6 +92,63 @@ $l = Get-RunLabel ([pscustomobject]@{ Id = 42; Session = 1; Here = $false; Line 
 Check ($l -eq 'pid 42 in your other sign-in session (1), as you started her: "C:\x\synaps-avatar.exe" --profile work') "Get-RunLabel: another session, his own run ($l)"
 $l = Get-RunLabel ([pscustomobject]@{ Id = 7; Session = 2; Here = $true; Line = '' })
 Check ($l -eq 'pid 7') "Get-RunLabel: here, bare ($l)"
+
+# steps.ps1's Set-Pack: a new pack that can't go in (a folder in use) leaves the one that was there
+# in place, his own or the steps', and the new one where it was. Move-Item fails on cue for it.
+$stepsAst = [Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path -Parent $PSScriptRoot) 'packaging\windows\steps.ps1'), [ref]$null, [ref]$null)
+foreach ($name in 'Set-Pack', 'Say', 'Good', 'Warn', 'Stop-Step', 'Test-SignInUrl') {
+    $fn = $stepsAst.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name }, $true)
+    . ([scriptblock]::Create($fn.Extent.Text))
+}
+function Move-Item([string]$LiteralPath, [Parameter(Position = 1)] [string]$Destination) {
+    if ($script:FailMove -and $LiteralPath -eq $script:FailMove) { throw 'The process cannot access the file because it is being used by another process. (a test)' }
+    Microsoft.PowerShell.Management\Move-Item -LiteralPath $LiteralPath -Destination $Destination
+}
+# The sign-in page steps.ps1 login opens: Claude's or Anthropic's, https, nothing else.
+foreach ($c in @(
+        @('https://claude.ai/oauth/authorize?code=true&client_id=9d1c&state=x', $true),
+        @('https://console.anthropic.com/oauth/authorize?a=1&b=2', $true),
+        @('https://CLAUDE.AI/oauth?a&b', $true),
+        @('http://claude.ai/oauth?a&b', $false),
+        @('https://claude.ai.evil.example/oauth?a&b', $false),
+        @('https://notclaude.ai/oauth?a&b', $false),
+        @('https://evil.example/claude.ai?a&b', $false),
+        @('https://claude.ai@evil.example/?a&b', $false),
+        @('https://me@claude.ai/?a&b', $false),
+        @('https://claude.ai:8443/?a&b', $false),
+        @('file:///C:/Windows/System32/calc.exe?a&b', $false),
+        @('not a url', $false))) {
+    Check ((Test-SignInUrl $c[0]) -eq $c[1]) "Test-SignInUrl $($c[0]) = $($c[1])"
+}
+
+$script:Marker = '.capri-syn-pack'
+$script:Ours = $false
+$packs = Join-Path $tmp 'packs'
+$Out = Join-Path $packs 'capri'
+function Add-Pack([string]$Dir, [string]$File, [switch]$Theirs) {
+    New-Item -ItemType Directory -Force $Dir | Out-Null
+    Set-Content -LiteralPath (Join-Path $Dir $File) -Value 'x'
+    if ($Theirs) { Set-Content -LiteralPath (Join-Path $Dir $script:Marker) -Value 'source=old' }
+}
+foreach ($case in @(@{ Name = 'his own pack'; Theirs = $false }, @{ Name = 'a pack the steps made'; Theirs = $true })) {
+    if (Test-Path -LiteralPath $packs) { Remove-Item -Recurse -Force -LiteralPath $packs }
+    Add-Pack $Out 'before.txt' -Theirs:$case.Theirs
+    $new = "$Out.new"
+    Add-Pack $new 'sprites.json'
+    $script:FailMove = $new
+    $said = ''
+    try { Set-Pack $new 'fp' 'test' 6>$null } catch { $said = "$_" }
+    $script:FailMove = $null
+    Check ($said -match "^step: her new pack couldn't go into") "Set-Pack, $($case.Name), the new one in use: it says so ($said)"
+    Check ((Test-Path -LiteralPath (Join-Path $Out 'before.txt')) -and -not (Test-Path -LiteralPath (Join-Path $Out 'sprites.json'))) "Set-Pack, $($case.Name): the one before is back in place"
+    Check (@(Get-ChildItem -LiteralPath $packs -Directory | Where-Object { $_.Name -ne 'capri' -and $_.Name -ne 'capri.new' }).Count -eq 0) "Set-Pack, $($case.Name): nothing left aside ($(@(Get-ChildItem -LiteralPath $packs -Name) -join ', '))"
+    Check (Test-Path -LiteralPath (Join-Path $new 'sprites.json')) "Set-Pack, $($case.Name): the new one is where it was"
+    # And with nothing in the way: in, the steps' old one gone, his aside.
+    Set-Pack $new 'fp' 'test' 6>$null
+    Check ((Test-Path -LiteralPath (Join-Path $Out 'sprites.json')) -and (Test-Path -LiteralPath (Join-Path $Out $script:Marker))) "Set-Pack, $($case.Name): then in, marked"
+    $aside = @(Get-ChildItem -LiteralPath $packs -Directory -Filter 'capri.pre-install-*')
+    Check ($aside.Count -eq [int](-not $case.Theirs) -and -not (Test-Path -LiteralPath "$Out.old")) "Set-Pack, $($case.Name): $(if ($case.Theirs) { 'replaced whole' } else { 'his moved aside' })"
+}
 
 Remove-Item -Recurse -Force -LiteralPath $tmp
 if ($fails.Count) { throw "$($fails.Count) check(s) failed: $($fails -join '; ')" }

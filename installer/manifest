@@ -5,8 +5,10 @@
 repo=HaseebKhalid1507/capri-syn
 
 # 1. Synaps. Installed with its own release installer when `synaps` is missing or older than
-# synaps_min. The latest release is used, its installer checked against GitHub's sha256 of the asset.
-# If GitHub's API doesn't answer, the pinned release and hashes below are used instead.
+# synaps_min. Windows (steps.ps1: install.ps1 and her installer): the pinned release below, its
+# installer checked against synaps_installer_ps1_sha256. install.sh: the latest release, its installer
+# checked against GitHub's sha256 of the asset; the pinned release and hash when GitHub's API doesn't
+# answer.
 # synaps_min: her client speaks protocol 3, exact match (0.10.0 on); she's been run against 0.11.x.
 synaps_repo=HaseebKhalid1507/SynapsCLI
 synaps_min=0.11.0
@@ -62,6 +64,9 @@ python_embed=3.13.17
 python_embed_sha256=9e35319bffedab8b36ad44d8f377cb4f1733bcec257a0b6d04d94f01486ddb38
 pip_wheel=https://files.pythonhosted.org/packages/07/25/ee8c38ae72d66b844ce8eb9711ba905dba21ca1a8a0c960057c41cd23337/pip-26.3-py3-none-any.whl
 pip_wheel_sha256=f3b60b20ffaadd4415ed7957212a38ac63fa4c5fa375bd0f4a797777940fad13
+# pip_pack's wheels there, by SHA-256 (pip --require-hashes): fonttools 4.65.0's cp313 win_amd64 and
+# py3-none-any, from PyPI. Bump with pip_pack.
+pip_pack_sha256=8ae1846b0f192fd485d26a455af19b8f5cf05aff08f9836f533913d8fcea133c 3060b8c1fc2329fa20265b7c138614143ea7c1624e26c5c180c76aeb74deae6f
 # --with-local-art: mochi's hair recolour (tools/mochi_hair.py) needs these too.
 pip_local_art=numpy>=1.26,<3 Pillow>=10,<14
 # --voice on Linux: tools/capri-voice-setup uses uv; installed in that venv when it's missing.

@@ -85,7 +85,27 @@ $log = Join-Path ([IO.Path]::GetTempPath()) "capri-setup-wizard-$PID.log"
 # The shots' desktop quiet (the runner's console minimized, a flat backdrop), before the wizard.
 try { Clear-ShotDesktop } catch { Write-Host "  (desktop stays as it is: $($_.Exception.Message))" }
 $p = Start-Process $Setup -ArgumentList "/LOG=`"$log`"" -PassThru
-$w = Wait-Window '^Setup - capri-syn'
+# Run elevated (CI's runners are), Setup asks first, No its default: he says Yes here. Not elevated
+# (a double-click on his PC), it doesn't ask.
+$elevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+$askedAdmin = $false
+$w = $null
+$t0 = Get-Date
+while (-not $w -and ((Get-Date) - $t0).TotalSeconds -lt 60) {
+    foreach ($d in Find-Windows '^Setup$|^capri-syn') {
+        $texts = Get-WindowText $d
+        if (-not $askedAdmin -and ($texts -match 'Setup is running as administrator')) {
+            $askedAdmin = $true
+            Get-Shot 'asked-as-administrator' -ProcessId $d.Current.ProcessId
+            Check (($texts -match 'Go on as administrator anyway').Count -gt 0) 'run as administrator, Setup asks first'
+            Invoke-Button $d 'Yes'
+        }
+    }
+    $w = Find-Window '^Setup - capri-syn'
+    if (-not $w) { Start-Sleep -Milliseconds 300 }
+}
+if (-not $w) { throw "no window '^Setup - capri-syn' in 60 s" }
+Check ($askedAdmin -eq $elevated) "it asks when run as administrator, and only then (elevated: $elevated, asked: $askedAdmin)"
 foreach ($page in @(
         @('^Select Destination Location$', 'destination', 'Next'),
         @('^Select Additional Tasks$', 'tasks', 'Next'),
@@ -137,6 +157,9 @@ $herLog = Join-Path $env:LOCALAPPDATA 'synaps-avatar\synaps-avatar.log'
 if (Test-Path $herLog) { Write-Output "--- her log (end) ---`n$((Get-Content $herLog -Tail 12) -join "`n")`n---" }
 
 # The uninstall, as he'd click it: sure? yes; Synaps too? yes (her installer installed it); done.
+$bin = Split-Path -Parent $synaps
+$hadHidden = Test-Path (Join-Path $bin 'hidden.exe')
+Check $hadHidden "Synaps' installer put hidden.exe beside synaps.exe ($bin)"
 $u = Start-Process (Join-Path $app 'unins000.exe') -PassThru
 $d = Wait-Window '^capri-syn Uninstall$' 60
 Get-Shot 'uninstall-sure' -Title 'capri-syn Uninstall'
@@ -160,6 +183,13 @@ Start-Sleep -Seconds 2
 Check (-not (Test-Path $app)) "$app is gone"
 Check (-not (Test-Path (Join-Path $env:LOCALAPPDATA 'synaps-avatar'))) 'her data folder is gone'
 Check (-not (Test-Path $synaps)) "Synaps is gone, as he said ($synaps)"
+Check (-not (Test-Path (Join-Path $bin 'hidden.exe'))) 'and hidden.exe, its other binary (its installer''s receipt lists both)'
+$rh = if ($env:XDG_CONFIG_HOME) { Join-Path $env:XDG_CONFIG_HOME 'synaps' } else { Join-Path $env:LOCALAPPDATA 'synaps' }
+Check (-not (Test-Path (Join-Path $rh 'synaps-receipt.json'))) "and its installer's receipt ($rh)"
+$userPath = @((Get-Item -LiteralPath 'registry::HKEY_CURRENT_USER\Environment').GetValue('Path', '', 'DoNotExpandEnvironmentNames') -split ';' |
+        Where-Object { $_ } | ForEach-Object { [Environment]::ExpandEnvironmentVariables($_).TrimEnd('\') })
+if (Test-Path $bin) { Check (@(Get-ChildItem -Force $bin).Count -gt 0) "$bin kept, with other programs' files in it: $((Get-ChildItem -Force $bin | Select-Object -First 5 | ForEach-Object { $_.Name }) -join ', ')" }
+else { Check ($userPath -notcontains $bin.TrimEnd('\')) "$bin is gone, and off his user Path" }
 $null = $u
 
 if ($fails.Count) { throw "$($fails.Count) check(s) failed: $($fails -join '; ')" }

@@ -4,26 +4,31 @@
 #
 #   steps.ps1 synaps-check   is Synaps here (`synaps` on PATH, else ~\.cargo\bin\synaps.exe) and at
 #                            least installer/manifest's synaps_min? Reads only.
-#   steps.ps1 synaps         the same, then, when it's missing or older: the latest release's
-#                            synaps-installer.ps1, checked against GitHub's sha256 of the asset (the
-#                            manifest's pinned release and hash when GitHub's API doesn't answer), run
-#                            unattended. Its installer puts ~\.cargo\bin on his user Path.
+#   steps.ps1 synaps         the same, then, when it's missing or older: the manifest's pinned release
+#                            (synaps_pin, a Synaps she was run against) and its synaps-installer.ps1,
+#                            checked against the pinned SHA-256, run unattended. Never the latest
+#                            release: a protocol bump there would leave her unable to attach. Its
+#                            installer puts ~\.cargo\bin on his user Path.
 #   steps.ps1 daemon         the Synaps daemon now (`synaps daemon --detach` unless it runs) and at
 #                            sign-in: Run\synaps-daemon through conhost --headless, so no console window
-#                            opens (a Run value of his own that starts it is left as it is).
+#                            opens (a Run value of his own that starts it is left as it is). A daemon
+#                            whose protocol isn't hers (synaps_protocol, exact match) fails the step.
 #   steps.ps1 pack           her art pack (below).
 #   steps.ps1 mics           the microphones Windows has (its capture endpoints that work). Reads only.
 #   steps.ps1 voice-check    where her voice would come from (-VoiceFrom, else the latest release), or
 #                            none yet. Reads only.
 #   steps.ps1 voice          her voice: its installer (-VoiceFrom FILE or URL, else the latest
 #                            release's; a .sha256 beside it checked), or -Bundle DIR already in place;
-#                            then its models (~375 MB, each pinned); then his choices (-Mic, -WakeWord,
-#                            -ReadAloud) written to settings.toml by her own settings writer
-#                            (synaps-avatar --set).
+#                            then its models (~375 MB, each pinned); then [voice] enabled, and the
+#                            choices given (-Mic NAME or -MicDefault, -WakeWord, -ReadAloud; one not
+#                            given stays as he set it), written to settings.toml by her own settings
+#                            writer (synaps-avatar --set).
 #   steps.ps1 login          `synaps login --provider claude` with no window: his browser opens, and he
 #                            signs in there (given 10 minutes).
-#   steps.ps1 synaps-remove  Synaps' daemon stopped, synaps.exe and its install record removed. His login
-#                            and sessions (~\.synaps-cli) stay.
+#   steps.ps1 synaps-remove  Synaps (-Synaps: the synaps.exe her installer installed and recorded): its
+#                            daemon stopped, the binaries its installer's receipt lists (synaps.exe,
+#                            hidden.exe) beside it, the receipt, and once nothing else is in it the
+#                            folder and its Path entry. His login and sessions (~\.synaps-cli) stay.
 #   steps.ps1 remove         her uninstaller's part: what these steps made that isn't in its own record
 #                            (her pack when it holds their marker, their Run\synaps-daemon, her voice).
 #
@@ -59,8 +64,9 @@ param(
     [string]$VoiceFrom = '',
     [string]$Bundle = '',
     [string]$Mic = '',
-    [ValidateSet('on', 'off')] [string]$WakeWord = 'on',
-    [ValidateSet('on', 'off')] [string]$ReadAloud = 'on',
+    [switch]$MicDefault,
+    [ValidateSet('', 'on', 'off')] [string]$WakeWord = '',
+    [ValidateSet('', 'on', 'off')] [string]$ReadAloud = '',
     [switch]$DryRun
 )
 
@@ -87,7 +93,7 @@ try {
     $script:M = Read-Manifest
     foreach ($s in $Step) {
         switch ($s) {
-            'synaps-check' { Show-Synaps (Find-Synaps) }
+            'synaps-check' { Show-Synaps (Find-Synaps); Result "pin: $(Get-Key 'synaps_pin')" }
             'synaps' { Install-Synaps }
             'daemon' { Start-Daemon }
             'pack' { if ($From) { Copy-Pack } else { Build-Pack } }
@@ -266,22 +272,14 @@ function Show-Synaps($S) {
 function Install-Synaps {
     $s = Find-Synaps
     if ($s.State -eq 'ok') { Show-Synaps $s; return }
-    if ($s.State -eq 'old') { Say "synaps $($s.Version) at $($s.Path) is older than $(Get-Key 'synaps_min'): installing the latest" }
-    else { Say 'installing Synaps with its own installer' }
-    Result "was: $($s.State)"
-    # The latest release, and GitHub's sha256 of its installer; else the manifest's pin.
+    # The manifest's pin: a Synaps she was run against (protocol synaps_protocol, exact match), its
+    # installer's SHA-256 pinned. Never releases/latest: a protocol bump there bricks new installs.
     $repo = Get-Key 'synaps_repo'
-    $tag = $null; $sha = $null
-    try {
-        $rel = Invoke-RestMethod -UseBasicParsing -Uri "https://api.github.com/repos/$repo/releases/latest" -Headers (Get-Headers) -TimeoutSec 30
-        $tag = [string]$rel.tag_name
-        $asset = $rel.assets | Where-Object { $_.name -eq 'synaps-installer.ps1' } | Select-Object -First 1
-        if ($asset -and $asset.digest) { $sha = ([string]$asset.digest) -replace '^sha256:', '' }
-    } catch { $tag = $null }
-    if (-not $tag -or $sha -notmatch '^[0-9a-f]{64}$') {
-        $tag = "v$(Get-Key 'synaps_pin')"; $sha = Get-Key 'synaps_installer_ps1_sha256'
-        Say "GitHub's API didn't answer: the pinned $tag"
-    }
+    $tag = "v$(Get-Key 'synaps_pin')"
+    $sha = Get-Key 'synaps_installer_ps1_sha256'
+    if ($s.State -eq 'old') { Say "synaps $($s.Version) at $($s.Path) is older than $(Get-Key 'synaps_min'): installing $tag" }
+    else { Say "installing Synaps $tag with its own installer" }
+    Result "was: $($s.State)"
     $url = "https://github.com/$repo/releases/download/$tag/synaps-installer.ps1"
     $mine = Join-Path $script:CargoBin 'synaps.exe'
     Result "release: $tag $url"
@@ -365,11 +363,22 @@ function Start-Daemon {
     }
     $proto = Get-Key 'synaps_protocol'
     if ($st.Protocol -ne '?' -and $st.Protocol -ne $proto) {
-        Warn "the daemon speaks protocol $($st.Protocol); her client speaks $proto (exact match): she can't attach. Install synaps $(Get-Key 'synaps_pin'), or a capri-syn that speaks $($st.Protocol)"
+        Result 'daemon: wrong-protocol'
+        Stop-Step "the daemon speaks protocol $($st.Protocol); she speaks $proto (exact match), so she can't attach. Install Synaps $(Get-Key 'synaps_pin'), or a capri-syn that speaks $($st.Protocol)"
     }
     Good "daemon running (protocol $($st.Protocol)): at sign-in too"
     Result "daemon: running $($st.Protocol)"
     Result "brain: $(if (Test-Brain) { 'yes' } else { 'no' })"
+}
+
+# A sign-in page these steps open in his browser: https on claude.ai or anthropic.com (or a name
+# under them), nothing else, whatever synaps prints.
+function Test-SignInUrl([string]$Url) {
+    $u = $null
+    if (-not [Uri]::TryCreate($Url, [UriKind]::Absolute, [ref]$u)) { return $false }
+    if ($u.Scheme -ne 'https' -or $u.UserInfo -or -not $u.IsDefaultPort) { return $false }
+    $h = $u.IdnHost.ToLowerInvariant()
+    return [bool]($h -match '^(([a-z0-9-]+\.)*)(claude\.ai|anthropic\.com)$')
 }
 
 # Her installer's "sign in" box (and her Start-menu "Sign in to Claude"): Synaps' Claude login with no
@@ -409,7 +418,8 @@ function Invoke-Login {
             if ($l) { $said.Add($l) }
             if (-not $state.Opened -and $l -match '^https://\S+\?\S*&\S+$') {
                 $state.Opened = $true
-                if ($env:CAPRI_NO_BROWSER) { Say "would open: $l" }
+                if (-not (Test-SignInUrl $l)) { Warn "not opened (not a Claude or Anthropic sign-in page): $l" }
+                elseif ($env:CAPRI_NO_BROWSER) { Say "would open: $l" }
                 else { try { Start-Process $l; Good 'opened the sign-in page in your browser' } catch { Warn "your browser didn't open: go to $l" } }
             }
         }
@@ -434,33 +444,54 @@ function Invoke-Login {
     Result 'brain: yes'
 }
 
-# Her uninstaller, when he says to remove Synaps too (it installed it): the daemon stopped, synaps.exe,
-# its installer's record and, once nothing else is in it, ~\.cargo\bin and its Path entry.
+# Her uninstaller, when he says to remove Synaps too (it installed it): -Synaps, the synaps.exe it
+# installed and recorded (never one found now: CARGO_HOME may point elsewhere since). Its daemon stopped;
+# the binaries its installer's receipt lists (synaps.exe, hidden.exe), from beside it; the receipt (only
+# that file: its folder goes once empty); and once nothing else is in it, the folder and its Path entry.
 function Remove-Synaps {
-    $exe = Join-Path $script:CargoBin 'synaps.exe'
+    $exe = if ($Synaps) { $Synaps } else { Join-Path $script:CargoBin 'synaps.exe' }
+    if ((Split-Path -Leaf $exe) -ne 'synaps.exe') { Stop-Step "not a synaps.exe: $exe" }
     if (-not (Test-Path -LiteralPath $exe)) { Say "no $exe"; Result 'synaps: missing'; return }
+    $bin = Split-Path -Parent $exe
     $ErrorActionPreference = 'Continue'
     & $exe daemon stop *> $null
     $ErrorActionPreference = 'Stop'
-    for ($i = 0; $i -lt 10 -and (Get-Process synaps -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe }); $i++) { Start-Sleep -Milliseconds 500 }
-    Get-Process synaps -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe } | Stop-Process -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Milliseconds 300
-    Remove-Item -Force -LiteralPath $exe
-    Good "removed $exe"
-    $record = Join-Path $env:LOCALAPPDATA 'synaps'
-    if (Test-Path -LiteralPath $record) { Remove-Item -Recurse -Force -LiteralPath $record; Good "removed $record" }
-    if ((Test-Path -LiteralPath $script:CargoBin) -and -not (Get-ChildItem -Force -LiteralPath $script:CargoBin)) {
-        Remove-Item -Force -LiteralPath $script:CargoBin
-        $cargo = Split-Path -Parent $script:CargoBin
-        if ((Test-Path -LiteralPath $cargo) -and -not (Get-ChildItem -Force -LiteralPath $cargo)) { Remove-Item -Force -LiteralPath $cargo }
-        $envKey = Get-Item -LiteralPath 'registry::HKEY_CURRENT_USER\Environment'
-        $path = $envKey.GetValue('Path', '', 'DoNotExpandEnvironmentNames')
-        $keep = @($path -split ';' | Where-Object { $_ -and $_.TrimEnd('\') -ne $script:CargoBin.TrimEnd('\') })
-        if ($keep.Count -ne @($path -split ';' | Where-Object { $_ }).Count) {
-            Set-ItemProperty -LiteralPath 'registry::HKEY_CURRENT_USER\Environment' -Name Path -Value ($keep -join ';') -Type ExpandString
-            Good "$($script:CargoBin) is off your user Path"
+    # The receipt: where synaps-installer.ps1 writes it ($XDG_CONFIG_HOME\synaps, else %LOCALAPPDATA%\synaps).
+    $rh = if ($env:XDG_CONFIG_HOME) { Join-Path $env:XDG_CONFIG_HOME 'synaps' } else { Join-Path $env:LOCALAPPDATA 'synaps' }
+    $rf = Join-Path $rh 'synaps-receipt.json'
+    $bins = @('synaps.exe')
+    if (Test-Path -LiteralPath $rf) {
+        try { $r = Get-Content -Raw -LiteralPath $rf | ConvertFrom-Json; if ($r.binaries) { $bins = @($r.binaries) + @('synaps.exe') | Select-Object -Unique } }
+        catch { Warn "its installer's receipt ($rf) doesn't read: synaps.exe only" }
+    }
+    foreach ($b in $bins) {
+        if ("$b" -notmatch '^[\w.-]+\.exe$') { continue }
+        $f = Join-Path $bin $b
+        for ($i = 0; $i -lt 10 -and (Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $f }); $i++) { Start-Sleep -Milliseconds 500 }
+        Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $f } | Stop-Process -Force -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $f) {
+            Start-Sleep -Milliseconds 300
+            Remove-Item -Force -LiteralPath $f
+            Good "removed $f"
         }
     }
+    if (Test-Path -LiteralPath $rf) { Remove-Item -Force -LiteralPath $rf; Good "removed its installer's receipt ($rf)" }
+    if ((Test-Path -LiteralPath $rh) -and -not (Get-ChildItem -Force -LiteralPath $rh)) { Remove-Item -Force -LiteralPath $rh }
+    if ((Test-Path -LiteralPath $bin) -and -not (Get-ChildItem -Force -LiteralPath $bin)) {
+        Remove-Item -Force -LiteralPath $bin
+        Good "removed $bin (empty)"
+        if ((Split-Path -Leaf $bin) -eq 'bin') {
+            $cargo = Split-Path -Parent $bin
+            if ((Test-Path -LiteralPath $cargo) -and -not (Get-ChildItem -Force -LiteralPath $cargo)) { Remove-Item -Force -LiteralPath $cargo }
+        }
+        $envKey = Get-Item -LiteralPath 'registry::HKEY_CURRENT_USER\Environment'
+        $path = $envKey.GetValue('Path', '', 'DoNotExpandEnvironmentNames')
+        $keep = @($path -split ';' | Where-Object { $_ -and [Environment]::ExpandEnvironmentVariables($_).TrimEnd('\') -ne $bin.TrimEnd('\') })
+        if ($keep.Count -ne @($path -split ';' | Where-Object { $_ }).Count) {
+            Set-ItemProperty -LiteralPath 'registry::HKEY_CURRENT_USER\Environment' -Name Path -Value ($keep -join ';') -Type ExpandString
+            Good "$bin is off your user Path"
+        }
+    } elseif (Test-Path -LiteralPath $bin) { Say "kept: $bin (other programs' files are in it)" }
     $h = if ($env:SYNAPS_BASE_DIR) { $env:SYNAPS_BASE_DIR } else { Join-Path $env:USERPROFILE '.synaps-cli' }
     if (Test-Path -LiteralPath $h) { Say "your Synaps login and sessions stay in $h (delete it if you want them gone)" }
     Result 'synaps: removed'
@@ -514,8 +545,11 @@ function Get-Python {
     $dir = Join-Path $Cache 'python'
     $py = Join-Path $dir 'python.exe'
     $want = @((Get-Key 'pip_pack') -split '\s+' | Where-Object { $_ })
-    if ($LocalArt -and $script:M['pip_local_art']) { $want += @($script:M['pip_local_art'] -split '\s+' | Where-Object { $_ }) }
-    $stampText = "$v $(Get-Key 'python_embed_sha256') $(Get-Key 'pip_wheel_sha256') $($want -join ' ')"
+    $hashes = @((Get-Key 'pip_pack_sha256') -split '\s+' | Where-Object { $_ -match '^[0-9a-f]{64}$' })
+    if (-not $hashes) { Stop-Step 'installer/manifest: no pip_pack_sha256' }
+    # --with-local-art's (ranges, LOCAL PERSONAL USE ONLY): no hashes to pin, so a pip run of their own.
+    $extra = @(if ($LocalArt -and $script:M['pip_local_art']) { $script:M['pip_local_art'] -split '\s+' | Where-Object { $_ } })
+    $stampText = "$v $(Get-Key 'python_embed_sha256') $(Get-Key 'pip_wheel_sha256') $($want -join ' ') $($hashes -join ' ') $($extra -join ' ')"
     $stamp = Join-Path $dir '.capri-pack'
     if ((Test-Path -LiteralPath $py) -and (Test-Path -LiteralPath $stamp) -and ((Get-Content -Raw -LiteralPath $stamp).Trim() -eq $stampText)) {
         Good "Python $v, $($want -join ' ') (cached)"
@@ -534,12 +568,23 @@ function Get-Python {
     $whl = Join-Path $Cache (Split-Path -Leaf ([Uri]$wheel).AbsolutePath)
     Get-Url $wheel $whl 'pip'
     Test-Pin $whl (Get-Key 'pip_wheel_sha256') (Split-Path -Leaf $whl)
-    Say "pip install $($want -join ' ')"
-    $rc = Invoke-Logged $py (@('-X', 'utf8', "$whl\pip", 'install', '-q', '--disable-pip-version-check', '--no-cache-dir', '--no-warn-script-location',
-            '--only-binary', ':all:', '--target', (Join-Path $dir 'site-packages')) + $want)
+    # pip_pack by its pinned wheels' hashes (--require-hashes: a wheel PyPI serves that isn't one of
+    # them is refused, as is any dependency it would pull in).
+    $req = Join-Path $Cache 'pip-pack.txt'
+    Set-Content -Encoding Ascii -LiteralPath $req -Value @($want | ForEach-Object { "$_ " + (($hashes | ForEach-Object { "--hash=sha256:$_" }) -join ' ') })
+    $pip = @('-X', 'utf8', "$whl\pip", 'install', '-q', '--disable-pip-version-check', '--no-cache-dir', '--no-warn-script-location',
+        '--only-binary', ':all:', '--target', (Join-Path $dir 'site-packages'))
+    Say "pip install $($want -join ' ') (hashes pinned)"
+    $rc = Invoke-Logged $py ($pip + @('--require-hashes', '-r', $req))
+    Remove-Item -Force -LiteralPath $req
+    if (-not $rc -and $extra) {
+        Say "pip install $($extra -join ' ') (--with-local-art)"
+        $rc = Invoke-Logged $py ($pip + @('--upgrade') + $extra)
+    }
     Remove-Item -Force -LiteralPath $whl
     if ($rc) {
         $l = @($script:Last | Select-Object -Last 1)
+        if ("$l" -match 'hash|HASH') { Stop-Step "pip refused $($want -join ' '): its wheel isn't the one pinned ($l)" }
         Stop-Step "pip couldn't install $($want -join ' ') from PyPI (exit $($rc): $l). Is this PC offline?"
     }
     Set-Content -Encoding Ascii -LiteralPath $stamp -Value $stampText
@@ -575,18 +620,30 @@ function Set-Pack([string]$New, [string]$Fingerprint, [string]$Source) {
         '# whole, and her uninstaller removes it. A pack without this file is yours: moved aside, never removed.',
         "source=$Source", "fingerprint=$Fingerprint")
     $old = "$Out.old"
+    # The one moved out of the way: put back if the new one can't go in.
+    $back = $null
     if (Test-Path -LiteralPath $Out) {
         if (-not (Get-ChildItem -Force -LiteralPath $Out)) { Remove-Item -Force -LiteralPath $Out }
         elseif ($Ours -or (Test-Path -LiteralPath (Join-Path $Out $script:Marker))) {
             if (Test-Path -LiteralPath $old) { Remove-Item -Recurse -Force -LiteralPath $old }
             Move-Item -LiteralPath $Out $old
+            $back = $old
         } else {
             $aside = "$Out.pre-install-$(Get-Date -Format yyyyMMdd-HHmmss)"
             Warn "$Out is a pack these steps didn't make (yours): it goes to $aside, and stays"
             Move-Item -LiteralPath $Out $aside
+            $back = $aside
         }
     }
-    Move-Item -LiteralPath $New $Out
+    try { Move-Item -LiteralPath $New $Out }
+    catch {
+        $why = $_.Exception.Message
+        if ($back -and -not (Test-Path -LiteralPath $Out)) {
+            try { Move-Item -LiteralPath $back $Out; Say "$Out is as it was" }
+            catch { Warn "and the pack that was there couldn't be put back: it is in $back" }
+        }
+        Stop-Step "her new pack couldn't go into $Out ($why)"
+    }
     if (Test-Path -LiteralPath $old) { Remove-Item -Recurse -Force -LiteralPath $old }
 }
 
@@ -682,11 +739,14 @@ function Show-Mics {
     Result "mics: $($eps.Count)"
 }
 
-# Where her voice installer comes from: Kind file (-VoiceFrom a path), url (-VoiceFrom a URL), release
-# (the latest release's asset), none (no release has one yet) or offline; Where; Sum, the SHA-256
-# from the .sha256 beside it ('' when there's none: a file of his, used as he gave it).
+# Where her voice installer comes from: Kind file (-VoiceFrom a path), url (-VoiceFrom an https URL),
+# release (the latest release's asset), none (no release has one yet) or offline; Where; Sum, the
+# SHA-256 from the .sha256 beside it ('' when there's none: a file of his, used as he gave it).
 function Find-Voice {
-    if ($VoiceFrom -match '^https?://') {
+    if ($VoiceFrom -match '^[a-z][a-z0-9+.-]*://' -and $VoiceFrom -notmatch '^https://') {
+        return @{ Kind = 'none'; Where = "(https only, not $VoiceFrom)"; Sum = '' }
+    }
+    if ($VoiceFrom -match '^https://') {
         $sum = ''
         try { $sum = ((Get-Text "$VoiceFrom.sha256") -split '\s+')[0] } catch { $sum = '' }
         return @{ Kind = 'url'; Where = $VoiceFrom; Sum = $sum }
@@ -756,10 +816,13 @@ function Install-Voice {
         Stop-Step "her speech models didn't all come: $(if ($l) { $l } else { "exit $rc" }) (what came is kept: the retry goes on from there)"
     }
     Result "voice: installed $dir"
-    # His choices, by her own settings writer: the rest of settings.toml stays as it was.
+    # His choices, by her own settings writer: the rest of settings.toml stays as it was, and so does
+    # any choice not given here (install.ps1 gives none: a re-run keeps his mic, wake word, read-aloud).
     if (-not $Exe) { Stop-Step "her voice is installed, but there's no synaps-avatar.exe here to save your choices with" }
-    $set = @("voice.enabled=true", "voice.wake_word=$(if ($WakeWord -eq 'on') { 'true' } else { 'false' })",
-        "voice.speak_unprompted=$(if ($ReadAloud -eq 'on') { 'true' } else { 'false' })", "voice.mic=$Mic")
+    $set = @('voice.enabled=true')
+    if ($WakeWord) { $set += "voice.wake_word=$(if ($WakeWord -eq 'on') { 'true' } else { 'false' })" }
+    if ($ReadAloud) { $set += "voice.speak_unprompted=$(if ($ReadAloud -eq 'on') { 'true' } else { 'false' })" }
+    if ($Mic) { $set += "voice.mic=$Mic" } elseif ($MicDefault) { $set += 'voice.mic=' }
     $argv = ($set | ForEach-Object { "--set `"$_`"" }) -join ' '
     $log = Join-Path $env:LOCALAPPDATA 'synaps-avatar\synaps-avatar.log'
     $before = if (Test-Path -LiteralPath $log) { (Get-Item -LiteralPath $log).Length } else { 0 }
@@ -772,9 +835,24 @@ function Install-Voice {
         }
         $said = (($said -split "`r?`n" | Where-Object { $_ -match 'synaps-avatar: ' } | Select-Object -Last 1) -replace '^.*synaps-avatar: ', '').Trim()
         if ($said -match 'unknown argument `--set`') { $said = "this build of her can't save settings from her installer yet (synaps-avatar --set)" }
+        # synaps-avatar --set's exit codes: 2 a bad --set, 3 settings.toml refused (a typo in it, or
+        # unreadable: never written over), 4 not saved.
+        $settings = Join-Path $env:APPDATA 'synaps-avatar\settings.toml'
+        if (-not $said) {
+            $said = switch ($p.ExitCode) {
+                3 { "your settings file ($settings) has a typo, and she won't write over it: fix it, then run this again" }
+                4 { "she couldn't write $settings" }
+                default { "synaps-avatar --set exited $($p.ExitCode)" }
+            }
+        } elseif ($p.ExitCode -eq 3) { $said = "$said Fix it ($settings), then run this again." }
         Stop-Step "her voice is installed, but your choices weren't saved: $said"
     }
-    Good "saved: talk to her on, `"hey Capri`" $WakeWord, replies read aloud $ReadAloud, microphone $(if ($Mic) { $Mic } else { "Windows' default" })"
+    $mine = @('talk to her on')
+    if ($WakeWord) { $mine += "`"hey Capri`" $WakeWord" }
+    if ($ReadAloud) { $mine += "replies read aloud $ReadAloud" }
+    if ($Mic) { $mine += "microphone $Mic" } elseif ($MicDefault) { $mine += "microphone: Windows' default" }
+    if ($set.Count -eq 1) { $mine += 'the rest as you had it' }
+    Good "saved: $($mine -join ', ')"
     Say 'she starts her voice the next time she starts (or on "settings reload")'
     Result 'voice: ok'
 }

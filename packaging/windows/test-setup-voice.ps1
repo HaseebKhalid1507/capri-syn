@@ -1,15 +1,17 @@
 # Her installer with her voice, unattended, on a clean Windows (CI's windows-setup-voice job): the
-# setup with /VOICE=on (a CI runner has no microphone, so the page's default would be off), with the
-# voice installer CI built beside it (the setup takes one it finds there; a release's takes the
-# release's). Then:
+# setup with /VOICE=on (a CI runner has no microphone, so the page's default would be off), and
+# /VOICEFROM= the voice installer CI built, beside it (the setup never takes one by its name alone:
+# that folder is usually Downloads). Then:
 #   - the voice bundle beside her, its selftest run by its own interpreter, the models in place;
 #   - settings.toml: [voice] enabled = true (and "hey Capri", replies aloud) through her own writer,
 #     and never her voice itself (voice, speed, pace, flow stay hers);
 #   - she starts, and her log says the sidecar started;
+#   - an upgrade (the same setup again, unattended, no /VOICE) leaves her voice as he set it: no voice
+#     step, settings.toml byte for byte (his mic, "hey Capri" off), "as you set it" said;
 #   - the uninstall leaves no voice: the bundle, %LOCALAPPDATA%\capri-voice, its Apps entry.
 #
-# Until her binary has `--set` (#84, on #77), the checks that need her choices saved (settings.toml,
-# the sidecar started) say SKIP with the reason, and the rest still run.
+# Until her binary has `--set` (#92), the checks that need her choices saved (settings.toml, the
+# sidecar started) say SKIP with the reason, and the rest still run.
 #
 #   pwsh .\packaging\windows\test-setup-voice.ps1 -Setup DIR\capri-syn-setup-....exe   (the voice installer beside it)
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'Logs beside the checks.')]
@@ -20,7 +22,8 @@ function Check([bool]$ok, [string]$what) {
     if ($ok) { Write-Output "ok   $what" } else { Write-Output "FAIL $what"; $fails.Add($what) }
 }
 $Setup = (Resolve-Path $Setup).Path
-if (-not (Get-ChildItem (Split-Path -Parent $Setup) -Filter 'capri-syn-voice-setup*.exe')) { throw "no capri-syn-voice-setup*.exe beside $Setup" }
+$voiceSetup = Get-ChildItem (Split-Path -Parent $Setup) -Filter 'capri-syn-voice-setup*.exe' | Select-Object -First 1
+if (-not $voiceSetup) { throw "no capri-syn-voice-setup*.exe beside $Setup" }
 $app = Join-Path $env:LOCALAPPDATA 'Programs\synaps-avatar'
 $exe = Join-Path $app 'synaps-avatar.exe'
 $voice = Join-Path $app 'voice'
@@ -35,17 +38,17 @@ if (Test-Path $app) { throw "$app exists already: not a clean machine" }
 # 1. Her installer, unattended, with her voice.
 $log = Join-Path ([IO.Path]::GetTempPath()) "capri-setup-voice-$PID.log"
 $t0 = Get-Date
-$p = Start-Process $Setup -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/VOICE=on', "/LOG=`"$log`"") -PassThru
+$p = Start-Process $Setup -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/VOICE=on', "/VOICEFROM=`"$($voiceSetup.FullName)`"", "/LOG=`"$log`"") -PassThru
 $null = $p.Handle
 if (-not $p.WaitForExit(30 * 60 * 1000)) { Stop-Process -Id $p.Id -Force; throw 'her installer still runs after 30 minutes' }
 $setupLog = if (Test-Path $log) { Get-Content -Raw $log } else { '' }
 ($setupLog -split "`r?`n" | Where-Object { $_ -match '(step |voice|mics|finished): ' }) | ForEach-Object { Write-Host "  setup: $_" }
 Check ($p.ExitCode -eq 0) "her installer with /VOICE=on exits 0 ($($p.ExitCode), $([int]((Get-Date) - $t0).TotalSeconds) s)"
 Check ($setupLog -match 'voice: voice: installed ') 'the voice step installed her voice'
-Check ($setupLog -match 'voicefrom: file [^\r\n]*capri-syn-voice-setup') "from the voice installer beside the setup: $([regex]::Match($setupLog, 'voicefrom: [^\r\n]*').Value)"
-# Her binary without --set (before #84): the voice is installed, his choices can't be saved yet.
+Check ($setupLog -match 'voicefrom: file [^\r\n]*capri-syn-voice-setup') "from /VOICEFROM: $([regex]::Match($setupLog, 'voicefrom: [^\r\n]*').Value)"
+# Her binary without --set (before #92): the voice is installed, his choices can't be saved yet.
 $noSet = $setupLog -match "can't save settings from her installer yet"
-if ($noSet) { Write-Output "SKIP her choices saved, settings.toml, the sidecar started: this build of her has no --set yet (#84, on #77)" }
+if ($noSet) { Write-Output "SKIP her choices saved, settings.toml, the sidecar started: this build of her has no --set yet (#92)" }
 else { Check ($setupLog -match 'voice: voice: ok') "and saved his choices through her writer$(if ($setupLog -match 'voice: failed: [^\r\n]*') { ': ' + $Matches[0] })" }
 
 # 2. The bundle, its selftest, the models.
@@ -92,7 +95,25 @@ Write-Output "--- her log (voice) ---`n$(($said -split "`r?`n" | Where-Object { 
 Stop-Process -Id $her.Id -Force -ErrorAction SilentlyContinue
 Start-Sleep -Seconds 2
 
-# 5. The uninstall: no voice is left.
+# 5. An upgrade keeps her voice as he set it: his settings (by hand here: "hey Capri" and read-aloud
+# off, a microphone of his), the same setup again, unattended, no /VOICE: no voice step, the file as
+# it was, byte for byte.
+New-Item -ItemType Directory -Force (Split-Path -Parent $settings) | Out-Null
+$his = "# his`n[voice]`nenabled = true`nwake_word = false`nspeak_unprompted = false`nmic = `"USB Microphone (his)`"`n"
+[IO.File]::WriteAllText($settings, $his)
+$log2 = Join-Path ([IO.Path]::GetTempPath()) "capri-setup-voice-up-$PID.log"
+$p = Start-Process $Setup -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=`"$log2`"") -PassThru
+$null = $p.Handle
+if (-not $p.WaitForExit(15 * 60 * 1000)) { Stop-Process -Id $p.Id -Force; throw 'the upgrade still runs after 15 minutes' }
+$upLog = if (Test-Path $log2) { Get-Content -Raw $log2 } else { '' }
+($upLog -split "`r?`n" | Where-Object { $_ -match '(step |voice|mics|finished): ' }) | ForEach-Object { Write-Host "  upgrade: $_" }
+Check ($p.ExitCode -eq 0) "the upgrade exits 0 ($($p.ExitCode))"
+Check ($upLog -notmatch 'step voice: ') 'the upgrade runs no voice step (never turned on again, nothing reset)'
+Check ([IO.File]::ReadAllText($settings) -ceq $his) 'settings.toml as he had it, byte for byte (his mic, "hey Capri" off)'
+Check ($upLog -match '\+ Her voice: as you set it\.') 'and says so: "Her voice: as you set it."'
+Check (Test-Path $py) 'her voice still in place'
+
+# 6. The uninstall: no voice is left.
 $u = Start-Process (Join-Path $app 'unins000.exe') -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -PassThru
 $null = $u.Handle
 [void]$u.WaitForExit(300000)

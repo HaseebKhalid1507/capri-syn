@@ -41,9 +41,10 @@ persona; no art).
 - **Per user, no admin**: she goes to `%LOCALAPPDATA%\Programs\synaps-avatar`.
 - **Her brain** (page "Her brain", shown only when it's needed): Synaps is looked for as install.ps1
   looks (`synaps` on PATH, else `~\.cargo\bin\synaps.exe`, at least the manifest's `synaps_min`).
-  Missing or too old: "Install Synaps (her brain, open source)", checked, runs the latest release's
-  own `synaps-installer.ps1`, checked against GitHub's sha256 of the asset (the manifest's pin when
-  GitHub's API doesn't answer).
+  Missing or too old: "Install Synaps (her brain, open source)", checked, runs the `synaps-installer.ps1`
+  of the release the manifest pins (`synaps_pin`, one she was run against), checked against its pinned
+  SHA-256. Never the latest: her client needs the daemon's protocol exactly (`synaps_protocol`), and a
+  daemon on another one fails the daemon step ("she can't use it", on the finish page).
 - **Her pack** (page "Her pack"): "Download her art (CapriCore + lachy's desktop art, ~100 MB)", the
   default; "Use a pack folder I already have" (copied; a folder without `sprites.json` is refused);
   or "Skip, I'll add one later". The download is the one install.ps1 does: CPython's embeddable
@@ -58,6 +59,8 @@ persona; no art).
   `capri.pre-install-<date>`, never deleted.
 - **The daemon**: `synaps daemon --detach` now, and a Run value for sign-in through
   `conhost --headless` (no console window; see the install.ps1 note below).
+- **Run as administrator** (a right-click), Setup asks first, No the default: she and her daemon
+  would run elevated too. Unattended, it's a line in the log.
 - **Her voice** (page "Her voice"): "Talk to her", on when Windows has a microphone (off and greyed,
   "no microphone found", when it doesn't); a microphone picker over Windows' capture endpoints
   ("Windows default" first); "Hey Capri" and "Read replies aloud", both on. Ticked, it downloads
@@ -65,7 +68,13 @@ persona; no art).
   the models (`voice-models.ps1`, each pinned), then saves his choices with her own settings writer
   (`synaps-avatar --set`: `[voice] enabled`, `wake_word`, `speak_unprompted`, `mic`). Her voice
   itself (`voice`, `speed`, `pace`, `flow`) is never written: she keeps her built-in default, so a
-  new voice is a change to her alone. install.ps1's `--voice` runs the same step.
+  new voice is a change to her alone. install.ps1's `--voice` runs the same step, writing only
+  `[voice] enabled` (a re-run keeps his microphone, "hey Capri" and read-aloud); a voice that doesn't
+  come is said in its summary, with the retry, and the rest of the install stands.
+- **Upgrades never turn her voice on by themselves.** Over an install of hers (or with her voice
+  installed), "Talk to her" starts unticked, unattended too: her voice and its settings (his
+  microphone, "hey Capri", read-aloud) stay as he set them, and the finish page says "Her voice: as
+  you set it". Only his tick (or `/VOICE=on`) sets it up again.
 - **Progress**: a page of its own while the steps run, with each step's lines (downloads in MB).
 - **A step that fails doesn't fail Setup.** Offline, a pin that doesn't match, a build that stops:
   she is installed without it, and the finish page says what happened in plain words, with the
@@ -87,11 +96,15 @@ persona; no art).
   and icon. The icon is capri-syn's, `assets/icon/capri-syn.ico` (256 to 16 px) and its 256 px PNG,
   used as they are (`assets/icon/NOTICE`): the setup's own icon, Apps & features, the shortcut, toasts.
 - **Autostart** (a task, checked): the `HKCU\…\Run` value.
-- **Uninstall** (Settings → Apps, or `unins000.exe /VERYSILENT`): stops her, then removes her exe,
+- **Uninstall** (Settings → Apps, or `unins000.exe /VERYSILENT`): stops her (this install of her, by
+  its path: never a synaps-avatar.exe of his elsewhere), then removes her exe,
   the steps, the shortcut, the AUMID key, her Run value and the daemon's, the pack the steps made,
   her voice, her log, state and settings, the download cache, and her folders. A pack he put there
   himself (and one moved aside) stays. Synaps: when Setup installed it, the wizard asks whether to
-  remove it too (his login and sessions in `~\.synaps-cli` stay either way); unattended, it stays.
+  remove it too (his login and sessions in `~\.synaps-cli` stay either way); unattended, it stays. Yes
+  removes the Synaps Setup recorded at install (never one found now): its daemon stopped, the
+  binaries its installer's receipt lists (`synaps.exe`, `hidden.exe`), the receipt, and once nothing
+  else is in it the folder and its Path entry.
 - **Upgrades** close her (Restart Manager) and don't restart her. A process of hers that was killed and never went
   (seen once on his box: one thread, 707 handles, for good) still maps her exe, and Windows won't
   let it be replaced ("DeleteFile failed; code 5"; Setup used to abort with exit 5). So just before
@@ -112,11 +125,12 @@ capri-syn-setup-….exe /VERYSILENT /SUPPRESSMSGBOXES [/SYNAPS=install|skip]
 ```
 
 The defaults are the wizard's: Synaps if it's needed, her art downloaded, autostart, her voice when
-Windows has a microphone and there's a voice to install. Her voice comes from `/VOICEFROM` (a path
-or a URL; a `.sha256` beside it is checked), else a `capri-syn-voice-setup*.exe` beside the setup
-(CI downloads both artifacts of a build into one folder: that's how the voice job gets the voice CI
-built), else the latest release's `capri-syn-voice-setup-x86_64.exe`, checked against the
-`capri-syn-voice-setup-x86_64.exe.sha256` release.yml uploads beside it. With none of those (no
+Windows has a microphone and there's a voice to install (a first install only: see Upgrades above).
+Her voice comes from `/VOICEFROM` (a path, or an `https://` URL; a `.sha256` beside it is checked),
+else the latest release's `capri-syn-voice-setup-x86_64.exe`, checked against the
+`capri-syn-voice-setup-x86_64.exe.sha256` release.yml uploads beside it. Never from a file found by
+its name beside the setup: that folder is usually Downloads (CI's voice job passes its build with
+`/VOICEFROM`). With none of those (no
 release yet), the Voice page says "Her voice comes with her first release" and stays off and greyed;
 nothing fails.
 install.ps1 runs it with `/SYNAPS=skip /PACK=skip /VOICE=off /BY=install.ps1`: Synaps, her pack, the
@@ -137,12 +151,16 @@ CI:
   starts, attaches (her control socket's `state`: `session.live`, the tag not OFFLINE), and answers
   for 60 s of clicks on her (every `state` from her UI thread, `WM_NULL` to her windows, her ticks,
   no Application Hang event); no microphone, so no voice files; the uninstall leaves nothing of hers.
-- `windows-setup-voice` (`test-setup-voice.ps1`, a clean runner): `/VOICE=on`, the voice installer
-  CI built beside the setup (as a release's comes from GitHub); the bundle and its selftest, the models, `settings.toml` (`[voice] enabled`,
-  never her voice itself), her log's `voice: sidecar started`, and an uninstall that leaves no voice.
+- `windows-setup-voice` (`test-setup-voice.ps1`, a clean runner): `/VOICE=on`, `/VOICEFROM=` the
+  voice installer CI built (as a release's comes from GitHub); the bundle and its selftest, the
+  models, `settings.toml` (`[voice] enabled`, never her voice itself), her log's `voice: sidecar
+  started`; an upgrade (the setup again, unattended, no `/VOICE`) that runs no voice step and leaves
+  his settings byte for byte; and an uninstall that leaves no voice.
 - `windows-setup-wizard` (`test-setup-wizard.ps1`, a clean runner): the wizard clicked through with
-  its defaults (UI Automation), a screenshot of every page (`tools/shoot-win.ps1`), her on the desktop
-  after "Start her now", and the uninstall's questions. The shots are the job's artifact.
+  its defaults (UI Automation; the runner is elevated, so first the administrator question, Yes), a
+  screenshot of every page (`tools/shoot-win.ps1`), her on the desktop after "Start her now", and the
+  uninstall's questions ("Remove Synaps too?": yes, then `synaps.exe`, `hidden.exe` and the receipt
+  gone). The shots are the job's artifact.
 
 ## Her voice: a second installer
 
