@@ -1175,6 +1175,8 @@ pub struct Avatar {
     view_ticks: u64,
     /// Renders and window moves since start (`brain state`, the perf meters).
     renders: u64,
+    /// Her line on the Settings page (a change made, or why not): until it goes to chat.
+    prefs_says: Option<String>,
     /// Her work area this frame (`render`): None outside one; keyed by where she is.
     area_memo: Cell<Option<Option<AreaMemo>>>,
     moves: u64,
@@ -1392,6 +1394,7 @@ impl Avatar {
             rag_strength: crate::ragdoll::Strength(crate::settings::Settings::load().map_or(0.5, |s| s.ragdoll.strength)),
             view_ticks: 0,
             renders: 0,
+            prefs_says: None,
             area_memo: Cell::new(None),
             moves: 0,
             follow_at: None,
@@ -3558,6 +3561,7 @@ impl Avatar {
             }
             Command::Brain(c) => self.brain_cmd(c, now),
             Command::SettingsReload => self.settings_reload(now),
+            Command::SettingsPage(open) => self.show_line_page(if open { crate::line::Page::Settings } else { crate::line::Page::Chat }, cx),
             Command::Tap { head } => {
                 if self.hidden || self.teleport.is_some() || !self.loaded {
                     "error: not there".into()
@@ -7837,7 +7841,7 @@ impl Avatar {
             // Under the click if it fits in her window, else as far up as it must (a perched
             // her: a click low on her body cut the menu's bottom rows off). Before its first
             // paint, its height is estimated from its rows.
-            let rows = 6 + usize::from(self.attention_label().is_some()) * 2 + usize::from(self.voice_on() && self.voice.cfg.handsfree);
+            let rows = 7 + usize::from(self.attention_label().is_some()) * 2 + usize::from(self.voice_on() && self.voice.cfg.handsfree);
             // Her work area (under the bar, on her monitor), window-local logical px: the menu's
             // top left stays within it less the menu's size.
             let o = self.origin;
@@ -7965,6 +7969,18 @@ impl Avatar {
                     cx.listener(|this, _: &MouseDownEvent, _, cx| {
                         cx.stop_propagation();
                         this.park(Instant::now());
+                        cx.notify();
+                        this.schedule(cx);
+                    }),
+                ))
+                // Her Settings (the Line's second page). With no brain yet, that is what it's for.
+                .child(item(if self.no_brain() { "SET UP MY BRAIN" } else { "SETTINGS" }).id("settings").on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.menu = None;
+                        let r = this.show_line_page(crate::line::Page::Settings, cx);
+                        elog!("synaps-avatar: menu settings: {r}");
                         cx.notify();
                         this.schedule(cx);
                     }),

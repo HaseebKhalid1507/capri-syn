@@ -8,6 +8,9 @@
 //! The avatar owns the session; the Line gets snapshots ([`Snap`]) and asks for things
 //! ([`Ask`]).
 
+mod settings;
+pub use settings::{Page, Pref, Prefs};
+
 use crate::reader::{Block, Mark, Pal, inline, parse};
 use crate::theme::{self, Cut, Fill, glyph, tracked};
 use crate::session::PromptView;
@@ -86,6 +89,11 @@ pub struct Snap {
     /// The last turn failed for a reason with a fix (`session::Trouble::tip`): a quiet line in
     /// the footer when it comes up.
     pub trouble: Option<String>,
+    /// Her settings as she runs them: while the Settings page is up.
+    pub prefs: Option<Prefs>,
+    /// `[hud] glitch` and `motion` (reduced motion: false): the page swap's split, the cog's turn.
+    pub glitch: bool,
+    pub motion: bool,
 }
 
 /// A face image in the snapshot: the same face is the same image.
@@ -142,6 +150,10 @@ pub enum Ask {
     Hush,
     /// Esc while the mic is held: nothing is transcribed or sent.
     CancelListen,
+    /// The page it shows now (the avatar fills `Snap::prefs` while it is Settings).
+    Page(Page),
+    /// A setting changed on the Settings page: written to settings.toml and applied.
+    Pref(Pref),
 }
 
 /// The command a paragraph (or a bubble line) is, when it is nothing but one `` `inline code` ``
@@ -227,6 +239,12 @@ pub struct Line {
     /// The mic row's rec dot blinks at 1 Hz from here; a wake-up is pending.
     born: Instant,
     blink_armed: bool,
+    /// Chat or Settings, and where Esc goes back to.
+    nav: settings::Nav,
+    /// The Settings row picked (↑↓).
+    sel: usize,
+    /// The last page swap (its RGB split, the cog's turn).
+    swap: Option<Instant>,
     on_ask: OnAsk,
     _subs: Vec<Subscription>,
 }
@@ -291,6 +309,7 @@ impl Line {
         pal: Pal,
         max_thread: f32,
         face: Option<std::sync::Arc<RenderImage>>,
+        page: Page,
         on_ask: OnAsk,
         window: &mut Window,
         cx: &mut Context<Line>,
@@ -395,6 +414,9 @@ impl Line {
             tail: None,
             born: Instant::now(),
             blink_armed: false,
+            nav: settings::Nav::on(page),
+            sel: 0,
+            swap: None,
             on_ask,
             _subs: subs,
         };
@@ -411,6 +433,11 @@ impl Line {
     /// The keyboard goes where this state types: the field, the masked field, or the Line
     /// itself (a confirm: no field, so no typed word can answer it).
     fn refocus(&mut self, window: &mut Window, cx: &mut Context<Line>) {
+        // Settings: the Line's own handle (keys never type into the hidden field).
+        if self.nav.page == Page::Settings {
+            window.focus(&self.focus, cx);
+            return;
+        }
         match (self.mode, &self.secret) {
             (Mode::Prompt, Some((_, s))) => s.update(cx, |s, cx| s.focus(window, cx)),
             (Mode::Prompt, None) => window.focus(&self.focus, cx),
@@ -465,8 +492,8 @@ impl Line {
             if new {
                 self.prompt_at = Instant::now();
             }
-            // A prompt arriving while he types is announced, never takes the field.
-            if !had_prompts && self.mode == Mode::Text && self.input.read(cx).value().trim().is_empty() && !self.parked {
+            // A prompt arriving while he types (or on Settings) is announced, never takes the field.
+            if !had_prompts && self.mode == Mode::Text && self.nav.page == Page::Chat && self.input.read(cx).value().trim().is_empty() && !self.parked {
                 self.mode = Mode::Prompt;
                 self.refocus(window, cx);
             }
@@ -474,6 +501,11 @@ impl Line {
         }
         if grew && !self.pinned_up {
             self.scroll.scroll_to_bottom();
+        }
+        // A voice turn (the mic held, the wake word, hands-free) is chat's.
+        if self.snap.mic.is_some() && self.nav.page == Page::Settings {
+            self.nav = settings::Nav::on(Page::Chat);
+            self.page_changed(window, cx);
         }
         cx.notify();
     }
@@ -497,6 +529,8 @@ impl Line {
             "prompt_ix": self.prompt_ix,
             "height": self.height,
             "scroll": [f32::from(self.scroll.offset().y), f32::from(self.scroll.max_offset().y)],
+            "page": self.nav.page.key(),
+            "sel": self.sel,
         })
     }
 
@@ -653,6 +687,15 @@ impl Line {
         }
         if k.key == "a" && self.a_down {
             return true;
+        }
+        // Ctrl+, : the cog's key.
+        if ctrl && !m.alt && k.key == "," {
+            self.nav.cog();
+            self.page_changed(window, cx);
+            return true;
+        }
+        if self.nav.page == Page::Settings {
+            return self.settings_key(k, window, cx);
         }
         match (k.key.as_str(), self.mode) {
             ("escape", _) if self.snap.listening => {
@@ -1371,13 +1414,16 @@ impl Render for Line {
                     .text_color(rgb(pal.ink))
                     .child(tracked(&self.name.to_uppercase(), 1.6)),
             )
-            .child(div().text_color(rgb(pal.dim)).child(tracked("LINE", 1.6)))
+            .child(div().text_color(rgb(pal.dim)).child(tracked(if self.nav.page == Page::Settings { "SETTINGS" } else { "LINE" }, 1.6)))
             .child(div().flex_1())
             .child(state);
-        let rows: Vec<AnyElement> = self.snap.rows.iter().enumerate().map(|(i, r)| self.row_el(i, r, cx)).collect();
+        let on_settings = self.nav.page == Page::Settings;
+        let rows: Vec<AnyElement> = if on_settings { Vec::new() } else { self.snap.rows.iter().enumerate().map(|(i, r)| self.row_el(i, r, cx)).collect() };
         // At the bottom the thread starts at a whole row: its height is cut to the rows that
         // fit (measured on the last layout; one more frame when that changes).
-        let fit = {
+        let fit = if on_settings {
+            self.fit_h
+        } else {
             let top = self.scroll.bounds().top();
             let items: Vec<Bounds<Pixels>> = (0..).map_while(|i| self.scroll.bounds_for_item(i)).collect();
             items.last().and_then(|last| {
@@ -1416,8 +1462,8 @@ impl Render for Line {
                 )
                 .children(scrolled.then(|| div().absolute().top_0().left_0().right_0().h(px(LINE_H * 1.2)).bg(fade)))
         });
-        let prompt = (self.mode == Mode::Prompt).then(|| self.prompt_el(window, cx)).flatten();
-        let pending = (self.mode == Mode::Text && !self.snap.prompts.is_empty()).then(|| {
+        let prompt = (self.mode == Mode::Prompt && !on_settings).then(|| self.prompt_el(window, cx)).flatten();
+        let pending = ((self.mode == Mode::Text || on_settings) && !self.snap.prompts.is_empty()).then(|| {
             div()
                 .flex()
                 .items_center()
@@ -1433,9 +1479,12 @@ impl Render for Line {
         });
         // A text box you can't miss: filled, cut 9 px, edged in her red while it has the keyboard.
         let typing = self.mode == Mode::Text && !self.parked;
-        let input = (self.mode == Mode::Text).then(|| {
-            div().px(px(PAD)).pt(px(10.0)).border_t_1().border_color(rgb(pal.rule)).child(
+        let input = (self.mode == Mode::Text && !on_settings).then(|| {
+            // [cog] [field]: the cog on the field's first line, as the › is.
+            div().px(px(PAD)).pt(px(10.0)).border_t_1().border_color(rgb(pal.rule)).flex().items_start().gap(px(8.0)).child(div().flex_none().mt(px(4.5)).child(self.cog_el(cx))).child(
                 div()
+                    .flex_1()
+                    .min_w(px(0.0))
                     .relative()
                     .child(theme::backdrop(Cut::Corners(9.0), if typing { Fill::framed(pal.field, pal.accent, 2.0) } else { Fill::framed(pal.field, pal.dim, 1.0) }))
                     .flex()
@@ -1512,7 +1561,7 @@ impl Render for Line {
                 .child(theme::metered(&label, 0.6, pal.ink))
                 .child(div().flex_1().min_w(px(0.0)).flex().justify_end().text_size(px(12.5)).font_weight(FontWeight::SEMIBOLD).overflow_hidden().whitespace_nowrap().child(hint))
         });
-        let caption = self.snap.caption.clone().map(|c| {
+        let caption = self.snap.caption.clone().filter(|_| !on_settings).map(|c| {
             div()
                 .mx(px(PAD))
                 .mt(px(6.0))
@@ -1528,7 +1577,9 @@ impl Render for Line {
         });
         // A failed turn's tip stands alone: the legend would bury it.
         let tip = self.tip.clone().filter(|_| self.note.is_none());
-        let hint = if self.mode == Mode::Prompt || tip.is_some() {
+        let hint = if on_settings {
+            Some("↑↓ pick · ←→ change · ⏎ copy · esc chat".into())
+        } else if self.mode == Mode::Prompt || tip.is_some() {
             None
         } else if self.snap.caption.is_some() {
             Some("esc or $mod+c hush · the whole reply is in the thread".into())
@@ -1570,6 +1621,7 @@ impl Render for Line {
             .children(caption)
             .children(voice_row)
             .children(input)
+            .children(if on_settings { self.settings_el(cx) } else { Vec::new() })
             .child(footer)
             .child(
                 canvas(
@@ -1592,7 +1644,14 @@ impl Render for Line {
                 .absolute()
                 .size_full(),
             );
-        let _ = window;
+        // The page swap: the RGB split for its two frames, the cog's turn (a frame each until
+        // done; nothing after).
+        let now = Instant::now();
+        let (split, owed) = self.swap_split(now);
+        let (_, turning) = self.cog_turn(now);
+        if owed || turning {
+            window.request_animation_frame();
+        }
         div()
             .id("line")
             .track_focus(&self.focus)
@@ -1618,6 +1677,7 @@ impl Render for Line {
             .bg(rgb(pal.ring))
             .child(panel_backdrop(pal, self.parked))
             .child(div().absolute().top(px(INSET)).left(px(INSET)).right(px(INSET)).bottom(px(INSET)).overflow_hidden().child(content))
+            .children((split > 0.0).then(|| Self::swap_overlay(split)))
             .children(self.tail())
     }
 }

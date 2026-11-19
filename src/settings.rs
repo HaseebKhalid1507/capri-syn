@@ -1,7 +1,8 @@
 //! What Haseeb allows (the pack says what she *can* do): `~/.config/synaps-avatar/settings.toml`.
 //! Every key is optional. Read at start and by `settings reload`; a bad file is logged and the
-//! old values stay. The right-click ATTENTION line writes `brain.attention` back, keeping the
-//! rest of the file as it was.
+//! old values stay. Her Settings page and the right-click ATTENTION line write keys back
+//! (`Settings::write`): only those keys change, his comments and layout stay, and a file she
+//! can't read or parse is never written over.
 
 use crate::brain::{Approach, Arrival};
 use anyhow::{Context as _, Result};
@@ -719,28 +720,182 @@ impl Settings {
         }
     }
 
-    /// Write `brain.attention`, keeping the rest of the file (comments too).
-    pub fn save_attention(a: Attention) -> Result<()> {
-        let p = Self::path();
-        let text = std::fs::read_to_string(&p).unwrap_or_default();
-        let out = set_attention(&text, a)?;
-        if let Some(d) = p.parent() {
-            std::fs::create_dir_all(d)?;
-        }
-        let tmp = p.with_extension("toml.tmp");
-        std::fs::write(&tmp, out)?;
-        std::fs::rename(&tmp, &p)?;
-        Ok(())
+    /// Change these keys in his settings file (`Settings::path`), the rest as it was. Ok(true):
+    /// written; Ok(false): nothing changed. Err: refused, the file untouched (see `write_at`).
+    pub fn write(edits: &[Edit]) -> std::result::Result<bool, WriteError> {
+        write_at(&Self::path(), edits)
     }
 }
 
-fn set_attention(text: &str, a: Attention) -> Result<String> {
-    let mut doc: toml_edit::DocumentMut = text.parse().context("settings.toml")?;
-    if !doc.contains_key("brain") {
-        doc["brain"] = toml_edit::table();
+/// One change to the settings file.
+#[derive(Clone, Debug)]
+pub enum Edit {
+    /// `[table] key = value`.
+    Set(&'static str, &'static str, toml_edit::Value),
+}
+
+/// Why a write was refused: what she says, and the detail for her log.
+#[derive(Debug)]
+pub enum WriteError {
+    /// It exists but she can't read it (permissions, not a file): never written over.
+    Unreadable(String),
+    /// It doesn't parse (`line`, 1-based): never "repaired".
+    Typo { line: Option<usize>, detail: String },
+    /// The result wouldn't load (a value of the wrong type): not written.
+    Invalid(String),
+    /// Couldn't put it in place (permissions, a full disk).
+    Failed(String),
+}
+
+impl std::fmt::Display for WriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WriteError::Unreadable(e) => write!(f, "settings.toml unreadable: {e}"),
+            WriteError::Typo { line: Some(l), detail } => write!(f, "settings.toml line {l}: {detail}"),
+            WriteError::Typo { line: None, detail } => write!(f, "settings.toml: {detail}"),
+            WriteError::Invalid(e) => write!(f, "settings.toml would not load: {e}"),
+            WriteError::Failed(e) => write!(f, "settings.toml not saved: {e}"),
+        }
     }
-    doc["brain"]["attention"] = toml_edit::value(a.key());
-    Ok(doc.to_string())
+}
+
+impl std::error::Error for WriteError {}
+
+impl WriteError {
+    /// Her line for it (the Settings page's SAYS strip).
+    pub fn says(&self) -> String {
+        match self {
+            WriteError::Typo { line: Some(l), .. } => format!("Your settings file has a typo on line {l}. I won't write over it."),
+            WriteError::Typo { line: None, .. } => "Your settings file has a typo. I won't write over it.".into(),
+            WriteError::Unreadable(_) => "I can't read your settings file. I won't write over it.".into(),
+            WriteError::Invalid(_) | WriteError::Failed(_) => "Couldn't save that. Your settings file won't let me.".into(),
+        }
+    }
+}
+
+/// `edits` applied to `path`'s file, the rest kept byte for byte (comments, order, spacing, a
+/// changed key's own trailing comment). Through a symlink: its target is written, the link
+/// stays. A file that is there but unreadable, or doesn't parse, is refused untouched; a result
+/// she couldn't load isn't written. Put in place atomically: a temp file beside it with its
+/// permissions, synced, renamed over it. Ok(false): nothing changed, nothing written.
+pub fn write_at(path: &std::path::Path, edits: &[Edit]) -> std::result::Result<bool, WriteError> {
+    use std::io::ErrorKind::NotFound;
+    let target = resolve(path).map_err(|e| WriteError::Unreadable(format!("{e}")))?;
+    let (text, perms) = match std::fs::metadata(&target) {
+        Ok(m) if !m.is_file() => return Err(WriteError::Unreadable("not a file".into())),
+        Ok(m) => (std::fs::read_to_string(&target).map_err(|e| WriteError::Unreadable(format!("{e}")))?, Some(m.permissions())),
+        Err(e) if e.kind() == NotFound => (String::new(), None),
+        Err(e) => return Err(WriteError::Unreadable(format!("{e}"))),
+    };
+    let out = edited(&text, edits)?;
+    if out == text {
+        return Ok(false);
+    }
+    let fail = |e: std::io::Error| WriteError::Failed(format!("{e}"));
+    let dir = target.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
+    std::fs::create_dir_all(dir).map_err(fail)?;
+    let name = target.file_name().map_or("settings.toml".into(), |n| n.to_string_lossy().into_owned());
+    let tmp = dir.join(format!("{name}.{}.tmp", std::process::id()));
+    let put = || -> std::io::Result<()> {
+        use std::io::Write as _;
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(out.as_bytes())?;
+        if let Some(p) = &perms {
+            f.set_permissions(p.clone())?;
+        }
+        f.sync_all()?;
+        drop(f);
+        rename_over(&tmp, &target)?;
+        // The rename itself, on disk (best effort).
+        if let Ok(d) = std::fs::File::open(dir) {
+            d.sync_all().ok();
+        }
+        Ok(())
+    };
+    put().map_err(|e| {
+        std::fs::remove_file(&tmp).ok();
+        fail(e)
+    })?;
+    Ok(true)
+}
+
+/// The file `path` names: its target when it is a symlink (his dotfiles' link stays a link),
+/// even one whose target isn't there yet.
+fn resolve(path: &std::path::Path) -> std::io::Result<PathBuf> {
+    let mut p = path.to_path_buf();
+    for _ in 0..16 {
+        match std::fs::symlink_metadata(&p) {
+            Ok(m) if m.file_type().is_symlink() => {
+                let to = std::fs::read_link(&p)?;
+                p = if to.is_absolute() { to } else { p.parent().map_or(to.clone(), |d| d.join(&to)) };
+            }
+            Ok(_) => return Ok(p),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(p),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::other("too many symlinks"))
+}
+
+/// Windows: an editor holding the file fails a rename for a moment; three tries, 50 ms apart.
+fn rename_over(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    let mut last = None;
+    for k in 0..if cfg!(windows) { 3 } else { 1 } {
+        if k > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        match std::fs::rename(from, to) {
+            Ok(()) => return Ok(()),
+            Err(e) => last = Some(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| std::io::Error::other("rename")))
+}
+
+/// `text` with `edits` applied (the document's own layout kept), checked to load.
+fn edited(text: &str, edits: &[Edit]) -> std::result::Result<String, WriteError> {
+    let mut doc: toml_edit::DocumentMut = text.parse().map_err(|e: toml_edit::TomlError| WriteError::Typo {
+        line: e.span().map(|s| text.as_bytes()[..s.start.min(text.len())].iter().filter(|&&b| b == b'\n').count() + 1),
+        detail: e.message().to_string(),
+    })?;
+    for e in edits {
+        match e {
+            Edit::Set(t, k, v) => {
+                if !doc.contains_key(t) {
+                    // A new table goes at the end, after what was there (a closing comment
+                    // stays before it, a blank line between).
+                    let lead = doc.trailing().as_str().unwrap_or("").to_string();
+                    doc.set_trailing("");
+                    let mut tbl = toml_edit::Table::new();
+                    let had = !doc.as_table().is_empty() || !lead.trim().is_empty();
+                    if had {
+                        let lead = if lead.is_empty() || lead.ends_with('\n') { lead } else { lead + "\n" };
+                        tbl.decor_mut().set_prefix(format!("{lead}\n"));
+                    }
+                    doc[*t] = toml_edit::Item::Table(tbl);
+                }
+                let Some(tbl) = doc.get_mut(t).and_then(|i| i.as_table_like_mut()) else {
+                    return Err(WriteError::Invalid(format!("{t} is not a table")));
+                };
+                let mut v = v.clone();
+                match tbl.get_mut(k) {
+                    // Its own decor (the spaces round it, its trailing comment) stays.
+                    Some(item) if item.is_value() => {
+                        if let Some(old) = item.as_value() {
+                            *v.decor_mut() = old.decor().clone();
+                        }
+                        *item = toml_edit::Item::Value(v);
+                    }
+                    _ => {
+                        tbl.insert(k, toml_edit::Item::Value(v));
+                    }
+                }
+            }
+        }
+    }
+    let out = doc.to_string();
+    Settings::parse(&out).map_err(|e| WriteError::Invalid(format!("{e:#}")))?;
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -959,15 +1114,124 @@ fullscreen = "stay"
         }
     }
 
+    fn att(a: Attention) -> Edit {
+        Edit::Set("brain", "attention", a.key().into())
+    }
+
     #[test]
     fn attention_round_trips_and_keeps_comments() {
         let text = "# mine\n[brain]\nno_repeat = 3 # keep\n";
-        let out = set_attention(text, Attention::HangOnly).unwrap();
+        let out = edited(text, &[att(Attention::HangOnly)]).unwrap();
         assert!(out.contains("# mine") && out.contains("no_repeat = 3 # keep"));
         let s = Settings::parse(&out).unwrap();
         assert_eq!((s.brain.attention, s.brain.no_repeat), (Attention::HangOnly, 3));
-        let out = set_attention("", Attention::Off).unwrap();
+        let out = edited("", &[att(Attention::Off)]).unwrap();
         assert_eq!(Settings::parse(&out).unwrap().brain.attention, Attention::Off);
         assert_eq!(Attention::Mix.next().next().next(), Attention::Mix);
+    }
+
+    /// A settings file as he keeps it: comments everywhere, blank lines, odd spacing, a key's
+    /// own comment, an inline table.
+    const HIS: &str = "# Capri, my way.\n\n[brain]\n# where she goes\nattention   =  \"mix\"   # my pick, keep\nno_repeat = 3\n\n[voice]\nenabled = true # mic on\nwake_word = true\n\n# the rest later\n[ragdoll]\nstrength = 0.4\n";
+
+    fn tmp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("sa-settings-{}-{name}", std::process::id()));
+        std::fs::remove_dir_all(&d).ok();
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn a_write_changes_its_one_key_and_nothing_else() {
+        let d = tmp("one");
+        let p = d.join("settings.toml");
+        std::fs::write(&p, HIS).unwrap();
+        assert!(write_at(&p, &[Edit::Set("voice", "wake_word", false.into())]).unwrap());
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), HIS.replace("wake_word = true", "wake_word = false"));
+        // The key's own spacing and comment stay.
+        assert!(write_at(&p, &[att(Attention::Off)]).unwrap());
+        let want = HIS.replace("wake_word = true", "wake_word = false").replace("attention   =  \"mix\"   # my pick, keep", "attention   =  \"off\"   # my pick, keep");
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), want);
+        // The same value again: nothing written.
+        assert!(!write_at(&p, &[att(Attention::Off)]).unwrap());
+        // A table that isn't there yet comes at the end; the rest stays.
+        let fresh = d.join("fresh.toml");
+        std::fs::write(&fresh, "# only this\n").unwrap();
+        write_at(&fresh, &[Edit::Set("voice", "wake_word", false.into())]).unwrap();
+        let out = std::fs::read_to_string(&fresh).unwrap();
+        assert_eq!(out, "# only this\n\n[voice]\nwake_word = false\n");
+        // After the last table's closing comment, a blank line between.
+        let tail = d.join("tail.toml");
+        std::fs::write(&tail, "[brain]\nno_repeat = 3\n# end of mine\n").unwrap();
+        write_at(&tail, &[Edit::Set("voice", "wake_word", false.into())]).unwrap();
+        assert_eq!(std::fs::read_to_string(&tail).unwrap(), "[brain]\nno_repeat = 3\n# end of mine\n\n[voice]\nwake_word = false\n");
+        // No file yet: made.
+        let none = d.join("sub/none.toml");
+        assert!(write_at(&none, &[att(Attention::HangOnly)]).unwrap());
+        assert_eq!(Settings::parse(&std::fs::read_to_string(&none).unwrap()).unwrap().brain.attention, Attention::HangOnly);
+        // No temp file left behind.
+        assert!(std::fs::read_dir(&d).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().ends_with(".tmp")));
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_file_she_cant_read_or_parse_is_left_untouched() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tmp("refuse");
+        // Unreadable (his permissions): refused, not written over (it was read as "" before).
+        let p = d.join("settings.toml");
+        std::fs::write(&p, HIS).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o200)).unwrap();
+        if std::fs::read_to_string(&p).is_err() {
+            assert!(matches!(write_at(&p, &[att(Attention::Off)]), Err(WriteError::Unreadable(_))));
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+            assert_eq!(std::fs::read_to_string(&p).unwrap(), HIS);
+        }
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+        // A typo: refused with its line, untouched.
+        let bad = "[brain]\nattention = \"mix\"\n\n[voice\nenabled = true\n";
+        std::fs::write(&p, bad).unwrap();
+        match write_at(&p, &[att(Attention::Off)]) {
+            Err(e @ WriteError::Typo { line: Some(4), .. }) => assert!(e.says().contains("line 4"), "{}", e.says()),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), bad);
+        // A value she couldn't load: not written.
+        std::fs::write(&p, HIS).unwrap();
+        assert!(matches!(write_at(&p, &[Edit::Set("brain", "attention", "sideways".into())]), Err(WriteError::Invalid(_))));
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), HIS);
+        // A directory where the file goes: refused.
+        let dir = d.join("dir.toml");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(matches!(write_at(&dir, &[att(Attention::Off)]), Err(WriteError::Unreadable(_))));
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn his_symlink_stays_a_symlink_and_its_target_is_written() {
+        let d = tmp("link");
+        let real = d.join("dotfiles-settings.toml");
+        std::fs::write(&real, HIS).unwrap();
+        let link = d.join("settings.toml");
+        std::os::unix::fs::symlink("dotfiles-settings.toml", &link).unwrap();
+        assert!(write_at(&link, &[Edit::Set("voice", "wake_word", false.into())]).unwrap());
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), HIS.replace("wake_word = true", "wake_word = false"));
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn its_permissions_stay() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tmp("perm");
+        let p = d.join("settings.toml");
+        std::fs::write(&p, HIS).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+        write_at(&p, &[att(Attention::Off)]).unwrap();
+        assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
+        std::fs::remove_dir_all(&d).ok();
     }
 }

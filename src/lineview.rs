@@ -4,7 +4,8 @@
 
 use super::*;
 use crate::beside::{self, Panel, Place};
-use crate::line::{Ask, Line, Row, Snap, Who};
+use crate::line::{Ask, Line, Page, Pref, Prefs, Row, Snap, Who};
+use crate::settings::{Attention, Edit, Settings};
 
 /// A press held this long is a hold (voice, later); shorter is a tap (type).
 pub(super) const TAP_MS: u128 = 250;
@@ -39,6 +40,8 @@ pub(super) struct LineWin {
     /// Her body box it was placed beside (she moves: it follows), and its side of her.
     pub her: WinRect,
     pub tail: Option<(beside::Side, i32)>,
+    /// The page it shows (chat, or her Settings).
+    pub page: Page,
 }
 
 /// A reply he didn't see before its bubble went: one line on her tag until he acknowledges
@@ -274,6 +277,26 @@ impl Avatar {
     }
 
     pub(super) fn open_line(&mut self, cx: &mut Context<Self>) -> String {
+        self.open_line_on(Page::Chat, cx)
+    }
+
+    /// Her Settings: the Line opens on them, or an open one flips to them (the menu's
+    /// SETTINGS row, `avatarctl settings open`); `Page::Chat` flips it back.
+    pub(super) fn show_line_page(&mut self, page: Page, cx: &mut Context<Self>) -> String {
+        match &self.line {
+            Some(l) => {
+                let (view, handle) = (l.view.clone(), l.handle);
+                cx.defer(move |cx| {
+                    handle.update(cx, |_, window, cx| view.update(cx, |l, cx| l.show(page, window, cx))).ok();
+                });
+                format!("ok line on {}", page.key())
+            }
+            None if page == Page::Settings => self.open_line_on(page, cx),
+            None => "ok no line".into(),
+        }
+    }
+
+    pub(super) fn open_line_on(&mut self, page: Page, cx: &mut Context<Self>) -> String {
         let now = Instant::now();
         let sf = self.layout.sf;
         let h0 = (LINE_H0 * sf) as i32;
@@ -291,7 +314,11 @@ impl Avatar {
         // the keyboard from the window he works in.
         let take = self.os.may_take_keyboard();
         let options = self.os.window_options(Role::Line, bounds, take);
-        let snap = self.line_snap();
+        self.prefs_says = None;
+        let mut snap = self.line_snap();
+        if page == Page::Settings {
+            snap.prefs = Some(self.prefs_now());
+        }
         let me = cx.entity().downgrade();
         let (name, font, pal) = (self.name.to_string(), self.font.clone(), self.reader_pal());
         let draft = std::mem::take(&mut self.draft);
@@ -306,7 +333,7 @@ impl Avatar {
         let opened = cx.open_window(options, move |window, cx| {
             xid2.set(os.adopt(Role::Line, window).unwrap_or(0));
             let on_ask: crate::line::OnAsk = Box::new(move |ask, cx: &mut App| me.update(cx, |a, cx| a.line_ask(ask, cx)).unwrap_or_else(|_| Err(crate::line::GONE.into())));
-            let view = cx.new(|cx| Line::new(snap, draft, sent, name, font, pal, max_thread, face, on_ask, window, cx));
+            let view = cx.new(|cx| Line::new(snap, draft, sent, name, font, pal, max_thread, face, page, on_ask, window, cx));
             *built2.borrow_mut() = Some(view.clone());
             cx.new(|cx| gpui_kit::base::Root::new(view, window, cx))
         });
@@ -329,7 +356,7 @@ impl Avatar {
             elog!("synaps-avatar: line: the keyboard stayed with his window: {e:#}");
             waits = true;
         }
-        self.line = Some(LineWin { view: view.clone(), handle: handle.into(), xid, prev, at: (x, bottom, w, h), parked: waits, waiting: waits, her, tail: Some((place.side, place.tail)) });
+        self.line = Some(LineWin { view: view.clone(), handle: handle.into(), xid, prev, at: (x, bottom, w, h), parked: waits, waiting: waits, her, tail: Some((place.side, place.tail)), page });
         // Clicks elsewhere park a Line that holds the keyboard (a waiting one holds nothing).
         self.os.arm_clicks(!waits);
         if waits {
@@ -341,13 +368,16 @@ impl Avatar {
         self.line_opened_ms = Some(now.elapsed().as_millis());
         // He is reading the thread now: nothing is unread, and the bubble gives way. Opened
         // with a reply unread (her strip, the summon key): the thread starts at that reply.
+        // On Settings: unread stays so until he goes to chat.
         if self.unseen.strip.as_ref().is_some_and(|u| !u.refused) {
             let (v, hd) = (view, handle);
             cx.defer(move |cx| {
                 hd.update(cx, |_, _, cx| v.update(cx, |l, cx| l.show_last_reply(cx))).ok();
             });
         }
-        self.ack_unread();
+        if page == Page::Chat {
+            self.ack_unread();
+        }
         if let Some(b) = &mut self.bubble {
             b.collapsed = true;
             b.hide_at = None;
@@ -384,7 +414,9 @@ impl Avatar {
         let (status, glyph) = (st.label, st.glyph);
         let face = self.stills.as_ref().and_then(|s| s.moods.get(self.mood.key()).cloned()).map(crate::line::Face);
         let key = self.summon_label();
-        let Some(s) = &self.session else { return Snap { status, glyph, flag, alarm, live: false, face, key, ..Default::default() } };
+        let prefs = self.line.as_ref().filter(|l| l.page == Page::Settings).map(|_| self.prefs_now());
+        let (glitch, motion) = (self.hud_cfg.glitch, self.hud_cfg.motion);
+        let Some(s) = &self.session else { return Snap { status, glyph, flag, alarm, live: false, face, key, prefs, glitch, motion, ..Default::default() } };
         let items = s.link.transcript().items();
         let mut rows = Vec::new();
         for it in items.iter().rev() {
@@ -446,6 +478,54 @@ impl Avatar {
             caption: self.voice_caption_now(),
             face,
             trouble: b.and_then(|b| b.trouble.as_ref()).map(|t| t.tip().to_string()),
+            prefs,
+            glitch,
+            motion,
+        }
+    }
+
+    /// Her settings as she runs them, for the Settings page.
+    pub(super) fn prefs_now(&self) -> Prefs {
+        let mark = self.session.as_ref().and_then(|s| s.link.mark()).unwrap_or_else(|| "SYNAPS · OFFLINE".into());
+        Prefs {
+            attention: self.brain.as_ref().map(|h| h.settings.brain.attention),
+            wake: self.voice.cfg.wake_word,
+            voice: self.voice.cfg.enabled,
+            about: format!("CAPRI {} · {mark}", env!("CARGO_PKG_VERSION")),
+            says: self.prefs_says.clone(),
+            new: self.unseen.strip.as_ref().filter(|u| !u.refused).map_or(0, |u| u.n),
+        }
+    }
+
+    /// A change on the Settings page: written to settings.toml (only that key; a file she
+    /// can't read or parse is left alone), then applied as `settings reload` does. Her line
+    /// says which.
+    pub(super) fn set_pref(&mut self, p: Pref, now: Instant) {
+        let (edit, says) = match p {
+            Pref::Attention(a) => (
+                Edit::Set("brain", "attention", a.key().into()),
+                match a {
+                    Attention::Mix => "Mixing it up. Hang, cling, sit, peek.",
+                    Attention::HangOnly => "Hanging only. I like it up there.",
+                    Attention::Off => "Fine. I'll stay put.",
+                },
+            ),
+            Pref::Wake(on) => (Edit::Set("voice", "wake_word", on.into()), if on { "Say my name, I'll hear it." } else { "I'll stop listening for my name." }),
+        };
+        let r = Settings::write(&[edit]);
+        self.prefs_says = Some(match r {
+            Ok(_) => {
+                let r = self.settings_reload(now);
+                elog!("synaps-avatar: settings: {p:?}: {r}");
+                says.to_string()
+            }
+            Err(e) => {
+                elog!("synaps-avatar: settings: {p:?} not saved: {e}");
+                e.says()
+            }
+        });
+        if let Pref::Attention(_) = p {
+            self.brain_touch(crate::brain::Touch::Menu);
         }
     }
 
@@ -454,7 +534,7 @@ impl Avatar {
         let Some(l) = &self.line else { return };
         let snap = self.line_snap();
         let (view, handle) = (l.view.clone(), l.handle);
-        if self.bubble.as_ref().is_some_and(|b| b.stream) {
+        if self.bubble.as_ref().is_some_and(|b| b.stream) && l.page == Page::Chat {
             self.ack_unread();
         }
         cx.defer(move |cx| {
@@ -582,6 +662,23 @@ impl Avatar {
                 copy_text(t, cx);
                 Ok(())
             }
+            Ask::Page(page) => {
+                if let Some(l) = &mut self.line {
+                    l.page = page;
+                }
+                // To chat: he sees the thread (what came meanwhile is read); her line goes.
+                if page == Page::Chat {
+                    self.ack_unread();
+                    self.prefs_says = None;
+                }
+                self.line_push(cx);
+                Ok(())
+            }
+            Ask::Pref(p) => {
+                self.set_pref(p, now);
+                self.line_push(cx);
+                Ok(())
+            }
             Ask::OpenUrl(u) => {
                 match std::env::var_os("SA_URL_FILE") {
                     Some(p) => {
@@ -684,7 +781,13 @@ impl Avatar {
 
     /// A reply's bubble went: if he never saw it (or heard it whole), it leaves a strip.
     pub(super) fn reply_missed(&mut self, turn: u64, text: &[char]) {
-        self.unseen.missed(turn, text, self.line.is_some());
+        // The Line on Settings: he isn't reading the thread.
+        self.unseen.missed(turn, text, self.line_on_chat());
+    }
+
+    /// The Line open on its thread.
+    pub(super) fn line_on_chat(&self) -> bool {
+        self.line.as_ref().is_some_and(|l| l.page == Page::Chat)
     }
 
     /// Her strip as drawn on her tag (none of "N NEW" while hands-free is on).

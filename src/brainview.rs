@@ -3286,12 +3286,20 @@ impl Avatar {
         let next = h.settings.brain.attention.next();
         h.settings.brain.attention = next;
         h.brain.settings.attention = next;
-        if let Err(e) = Settings::save_attention(next) {
-            elog!("synaps-avatar: settings.toml: {e:#}");
+        // Only that key, his file otherwise as it was (one he can't have read or that doesn't
+        // parse is left alone: it runs as picked until he fixes it).
+        if let Err(e) = Settings::write(&[crate::settings::Edit::Set("brain", "attention", next.key().into())]) {
+            elog!("synaps-avatar: settings.toml: {e}");
         }
         let now = Instant::now();
         self.brain_feed(BrainEvent::Interaction(Touch::Menu), now);
         next
+    }
+
+    /// No brain yet: her model has no credentials (read before his first message, or the
+    /// daemon's word on a turn).
+    pub(super) fn no_brain(&self) -> bool {
+        self.session.as_ref().is_some_and(|s| s.link.no_brain())
     }
 
     pub(super) fn attention_label(&self) -> Option<&'static str> {
