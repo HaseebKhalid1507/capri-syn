@@ -682,7 +682,12 @@ function Find-Voice {
     $url = "https://github.com/$(Get-Key 'repo')/releases/latest/download/$(Get-Key 'asset_windows_voice')"
     try { $sum = ((Get-Text "$url.sha256") -split '\s+')[0] } catch {
         $w = Get-NetWhy $_.Exception
-        if ($w.Offline) { return @{ Kind = 'offline'; Where = $w.Text; Sum = '' } }
+        # Windows PowerShell can read github.com's 404 (no release) as a closed connection: offline
+        # only when the repo itself doesn't answer either.
+        if ($w.Offline) {
+            try { $null = Invoke-WebRequest -UseBasicParsing -Method Head -Uri "https://github.com/$(Get-Key 'repo')" -Headers (Get-Headers) -TimeoutSec 30 }
+            catch { return @{ Kind = 'offline'; Where = $w.Text; Sum = '' } }
+        }
         return @{ Kind = 'none'; Where = '(no release has it yet)'; Sum = '' }
     }
     if ($sum -notmatch '^[0-9a-f]{64}$') { return @{ Kind = 'none'; Where = '(no release has it yet)'; Sum = '' } }
@@ -775,6 +780,13 @@ function Remove-Hers {
         # Inno's uninstaller hands off to a copy of itself: wait for that one too.
         for ($i = 0; $i -lt 120 -and (Test-Path $voice); $i++) { Start-Sleep -Milliseconds 500 }
         if ($p.ExitCode) { Warn "her voice's uninstaller exited $($p.ExitCode)" } else { Good 'removed her voice' }
+    }
+    # Her control socket: she's stopped by now (taskkill), and a killed process leaves the file.
+    # Only when nothing answers on it: another of her (a dev build) may be running.
+    $sock = Join-Path ([IO.Path]::GetTempPath()) 'synaps-avatar.sock'
+    for ($i = 0; $i -lt 20 -and (Get-Process -Name 'synaps-avatar' -ErrorAction SilentlyContinue); $i++) { Start-Sleep -Milliseconds 250 }
+    if ((Test-Path -LiteralPath $sock) -and -not (Get-Process -Name 'synaps-avatar' -ErrorAction SilentlyContinue)) {
+        try { [IO.File]::Delete($sock); Good "removed her control socket ($sock)" } catch { Warn "her control socket stays: $($_.Exception.Message)" }
     }
     Result 'remove: ok'
 }

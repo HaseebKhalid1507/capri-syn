@@ -58,11 +58,19 @@ function Find-Named($W, [string]$Name) {
     foreach ($e in $W.FindAll($Tree::Descendants, [Windows.Automation.Condition]::TrueCondition)) { if ($e.Current.Name -match $Name) { return $e } }
     return $null
 }
+# A button by its caption, whatever UI Automation calls it (a VCL button can come through as a pane):
+# Invoke when it has that, else a real click on its middle.
 function Invoke-Button($W, [string]$Name) {
-    $c = New-Object Windows.Automation.PropertyCondition($UIA::ControlTypeProperty, [Windows.Automation.ControlType]::Button)
-    $b = $W.FindAll($Tree::Descendants, $c) | Where-Object { $_.Current.Name -match "^$Name" -and -not $_.Current.IsOffscreen -and $_.Current.IsEnabled } | Select-Object -First 1
+    $b = @($W.FindAll($Tree::Descendants, [Windows.Automation.Condition]::TrueCondition) | Where-Object {
+            $_.Current.Name -match "^&?$Name( >)?$" -and $_.Current.IsEnabled -and $_.Current.BoundingRectangle.Width -gt 0 } |
+            Sort-Object { $_.Current.IsOffscreen }) | Select-Object -First 1
     if (-not $b) { throw "no button '$Name' (it shows: $((Get-WindowText $W) -join ' | '))" }
-    ($b.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern)).Invoke()
+    $o = $null
+    if ($b.TryGetCurrentPattern([Windows.Automation.InvokePattern]::Pattern, [ref]$o)) { $o.Invoke(); return }
+    $r = $b.Current.BoundingRectangle
+    Write-Host "  ('$Name' is a $($b.Current.ControlType.ProgrammaticName) $($b.Current.ClassName) with no Invoke: clicked at its middle)"
+    try { [void][Wiz]::SetForegroundWindow([IntPtr]$W.Current.NativeWindowHandle) } catch { $null = $_ }
+    [Wiz]::Click([int]($r.Left + $r.Width / 2), [int]($r.Top + $r.Height / 2))
 }
 # Waits until the wizard shows a page whose caption matches; its texts.
 function Wait-Page($W, [string]$Caption, [int]$Secs = 120) {
