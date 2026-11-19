@@ -9,6 +9,9 @@ Rights holders: open an issue and it comes down.
 
 They were shot with a pack built by `tools/make-pack` from the two sources below, and nothing else.
 The art files themselves are not in this repository: `make-pack` assembles them on your machine.
+The one other image in them is her app icon, in the notification area of `still-tray.png` and
+`still-tray-tooltip.png`: a crop of Capri's face from a frame of Cyberpunk: Edgerunners 2, with a
+chamfered corner added. Its terms are in [`assets/icon/NOTICE`](../../assets/icon/NOTICE).
 
 ## The banner and the cards: original
 

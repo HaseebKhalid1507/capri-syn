@@ -107,8 +107,9 @@ Two drives run in the background, one for wandering and one for attention. She a
 ## Talk to her
 
 She has her own Synaps session, named `capri`. **The Line** is how you reach it without leaving what
-you're doing: tap <kbd>$mod</kbd>+<kbd>c</kbd> (<kbd>Win</kbd>+<kbd>Alt</kbd>+<kbd>C</kbd> on Windows)
-and it opens right beside her, wherever she is.
+you're doing: tap <kbd>$mod</kbd>+<kbd>c</kbd> and it opens right beside her, wherever she is. On
+Windows it's <kbd>Win</kbd>+<kbd>Alt</kbd>+<kbd>C</kbd>; on GNOME and stock Hyprland it's
+<kbd>Super</kbd>+<kbd>Alt</kbd>+<kbd>C</kbd>, which the installer offers there.
 
 <p align="center">
   <img src="docs/media/tour-line.webp" width="100%" alt="The Line opens beside Capri with the earlier exchange in its thread; ship it is typed and sent, and her reply streams in">
@@ -193,8 +194,16 @@ curl -fsSL https://raw.githubusercontent.com/HaseebKhalid1507/capri-syn/main/ins
 It asks before anything needs sudo, and `--dry-run` prints every step without doing one.
 
 **🪟 Windows 11.** **[⬇ capri-syn setup](https://github.com/HaseebKhalid1507/capri-syn/releases/latest/download/capri-syn-setup-x86_64.exe)**,
-then double-click it. Per user, no admin. It's unsigned for now, so SmartScreen asks first. Rather a
-terminal?
+then double-click it. Per user, no admin. It's unsigned for now, so SmartScreen asks first.
+
+<!-- remove at v1.0.0 publish -->
+> [!NOTE]
+> **The first release is on its way.** Until it's out, that link has nothing to serve: use the line
+> below. For now it builds her from source, and if it has to install Visual Studio's C++ build tools,
+> they ask for admin (a UAC prompt).
+<!-- /remove at v1.0.0 publish -->
+
+Rather a terminal?
 
 ```powershell
 irm https://raw.githubusercontent.com/HaseebKhalid1507/capri-syn/main/install.ps1 | iex
@@ -220,10 +229,15 @@ setup's last page offers the Claude sign-in too. No account?
 <details>
 <summary><b>Flags, voice, uninstalling, the manual route</b></summary>
 
-- **Voice:** `bash -s -- --voice` on Linux. On Windows, setup's "Her voice" page (mic, "Hey Capri",
-  replies aloud).
-- **Uninstall:** `--uninstall` removes what it added, and says where Synaps is (it stays: other clients
-  may use its daemon). On Windows: Settings ▸ Apps ▸ capri-syn.
+- **Voice** on Linux:
+
+  ```sh
+  curl -fsSL https://raw.githubusercontent.com/HaseebKhalid1507/capri-syn/main/install.sh | bash -s -- --voice
+  ```
+
+  On Windows, setup's "Her voice" page (mic, "Hey Capri", replies aloud).
+- **Uninstall:** on Linux, the same line with `--uninstall` removes what it added, and says where
+  Synaps is (it stays: other clients may use its daemon). On Windows: Settings ▸ Apps ▸ capri-syn.
 - **Every step and flag**, prebuilt or from source: [docs/INSTALL.md](docs/INSTALL.md). Windows in
   depth: [docs/WINDOWS.md](docs/WINDOWS.md).
 - **Release assets:** `synaps-avatar-x86_64-unknown-linux-gnu.tar.gz`, `capri-syn-setup-x86_64.exe`
@@ -303,7 +317,7 @@ The session rules, flags, packs and the dev control: [docs/REFERENCE.md](docs/RE
 | Click her head | Headpat |
 | Drag her, fling her | Ragdoll. Drop her on a window edge to perch her there |
 | Right-click | Her menu |
-| <kbd>$mod</kbd>+<kbd>c</kbd> tap · Windows: <kbd>Win</kbd>+<kbd>Alt</kbd>+<kbd>C</kbd> | The Line, beside her |
+| <kbd>$mod</kbd>+<kbd>c</kbd> tap · GNOME, stock Hyprland: <kbd>Super</kbd>+<kbd>Alt</kbd>+<kbd>C</kbd> (the installer offers it) · Windows: <kbd>Win</kbd>+<kbd>Alt</kbd>+<kbd>C</kbd> | The Line, beside her |
 | "Hey Capri" | A hands-free conversation (voice on) |
 | <kbd>Ctrl</kbd>+<kbd>,</kbd> in the Line | Settings |
 
@@ -413,8 +427,8 @@ machine needs a look): [docs/WATCH.md](docs/WATCH.md).
 | **Linux, X11** | Her home. Used daily on i3, with or without a compositor. |
 | **Linux, Hyprland** | Native Wayland: perching, drag and fling, effects, several monitors. Tested in a nested rig, not yet daily-driven. No idle time there yet, so typing alone for 5 minutes reads as away. |
 | **Linux, GNOME, KDE, sway** | Through XWayland, which she picks herself. She perches on X apps only, and may nap while you type in native Wayland ones ([limits](docs/INSTALL.md#gnome-kde-and-other-wayland-desktops)). Untested on a real GNOME or KDE session. |
-| **Windows 11** | Her installer, her tray, her own keys, her voice. Checked by hand in a Windows 11 VM ([the VM day](docs/WINDOWS.md#the-vm-day-2026-11-18)); CI runs her installers end to end on every pull request. |
-| **Windows 10, Windows on Arm** | Both installers get through (Windows 10 1809 or newer; Arm through x64 emulation), but she has never been run on either. Untested, so not supported yet. |
+| **Windows 11** | Her installer, her tray, her own keys, her voice. Checked by hand in a Windows 11 VM ([the VM day](docs/WINDOWS.md#the-vm-day-2026-11-18)); live audio is still to check on real hardware. CI runs her installers end to end on every pull request. |
+| **Windows 10, Windows 11 on Arm** | Both installers get through (Windows 10 1809 or newer; Arm through x64 emulation), but she has never been run on either. Untested, so not supported yet. |
 | **macOS** | Not planned. |
 
 - **Names.** The repository and the Windows installers are `capri-syn`. The crate, the binary and the
