@@ -840,47 +840,75 @@ function Install-Extras {
 }
 
 function Get-SynapsHome { if ($env:SYNAPS_BASE_DIR) { $env:SYNAPS_BASE_DIR } else { Join-Path $env:USERPROFILE '.synaps-cli' } }
-# A model to talk through: a login (OAuth or API key, both in auth.json) or a local model.
+# A model to talk through: a login (OAuth or API key, both in auth.json) or a local model (in
+# Synaps' config or her own [session]).
 function Test-Brain {
     $h = Get-SynapsHome
     $auth = Join-Path $h 'auth.json'
     if ((Test-Path -LiteralPath $auth) -and (Get-Item -LiteralPath $auth).Length -gt 0) { return $true }
-    $cfg = Join-Path $h 'config'
-    return [bool]((Test-Path -LiteralPath $cfg) -and (Select-String -LiteralPath $cfg -Pattern '^\s*model\s*=\s*local/' -Quiet))
+    foreach ($cfg in @((Join-Path $h 'config'), (Join-Path $script:Conf 'settings.toml'))) {
+        if ((Test-Path -LiteralPath $cfg) -and (Select-String -LiteralPath $cfg -Pattern '^\s*model\s*=\s*"?local/' -Quiet)) { return $true }
+    }
+    return $false
 }
 
-# The brain step: she talks through Synaps, and Synaps needs a model (`synaps login`, a picker).
-# Run here only with a console to pick on, and never with --yes; a daemon already running picks the login up on her next
-# turn (Synaps reads auth.json per request).
+# Her brain: she talks through Synaps, and Synaps needs a model. Signing in is hers to walk him
+# through, not a picker here: until Synaps has one her tag reads NO BRAIN YET, and her answer to
+# his first message ends on the command (a chip; a click copies it).
 function Invoke-Brain {
-    $cmd = "& `"$(Get-Tilde $script:Synaps)`" login"
     if (Test-Brain) {
         if (-not $script:SynapsNew) { Write-Info 'she found your Synaps. her session is `capri`: it''ll show up in /sessions.' }
         return
     }
-    Write-Host ''
-    Write-Host " $Bar" -ForegroundColor Red -NoNewline
-    Write-Host ' one thing left: her brain' -ForegroundColor White
-    Write-Info 'she talks through Synaps, and Synaps needs a model.'
-    Write-Host "   `$ $cmd" -ForegroundColor White -NoNewline
-    Write-Host '        a subscription you already pay for, an API key, or a local model' -ForegroundColor DarkGray
-    Write-Info 'skip it and she still perches, naps and plays. she just can''t answer yet.'
-    # A picker waits for him: --yes (unattended) never opens it.
-    if ($script:Yes) { Write-Info '--yes: not opened here (it waits for you to pick): run that line when you want her to answer'; return }
-    if ($script:Dry) { Write-Info '(asks: pick one now [Y/n], with a console)'; return }
-    if (-not [Environment]::UserInteractive -or [Console]::IsInputRedirected -or [Console]::IsOutputRedirected) {
-        Write-Info 'no console to pick on: run that line when you want her to answer'
-        return
-    }
-    Write-Host '   ? pick one now [Y/n] ' -ForegroundColor Red -NoNewline
-    $a = Read-Host
-    if ($a -and $a -notmatch '^(y|yes)$') { Write-Info 'later, then: run that line when you want her to answer'; return }
-    # The picker draws on the console itself: Start-Process hands it the console (inside the module, a
-    # native command's output is a pipe, not the console).
+    Write-Info 'her brain: Synaps has no model yet. say hi to her: she''ll tell you how to give her one.'
+}
+
+# A log's text from byte From on (all of it when it started over), read beside the writer that has
+# it open; '' when it can't be read.
+function Read-LogSince([string]$Path, [long]$From) {
+    if (-not (Test-Path -LiteralPath $Path)) { return '' }
+    try {
+        $fs = [IO.FileStream]::new($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]'ReadWrite, Delete')
+        try {
+            if ($fs.Length -lt $From) { $From = 0 }
+            [void]$fs.Seek($From, [IO.SeekOrigin]::Begin)
+            return [IO.StreamReader]::new($fs, [Text.Encoding]::UTF8).ReadToEnd()
+        } finally { $fs.Dispose() }
+    } catch { return '' }
+}
+
+# Her, now: the first launch is the install's, not the next sign-in's. Without a console she logs to
+# synaps-avatar.log beside her state: up once it says her first frame is painted. Only in his desktop
+# session. One that runs already is the old binary: stopped, then started again. Sets
+# $script:Started when she's up.
+function Start-HerNow {
+    $script:Started = $false
+    if ($script:Dry) { Write-Action "Start-Process `"$(Get-Tilde $script:Exe)`""; return }
+    if (-not [Environment]::UserInteractive) { Write-Info 'no desktop session here: she starts at your next sign-in, or from the Start menu'; return }
+    Stop-Her
+    $log = Join-Path $script:Data 'synaps-avatar.log'
+    $from = if (Test-Path -LiteralPath $log) { (Get-Item -LiteralPath $log).Length } else { 0 }
+    Write-Action "Start-Process `"$(Get-Tilde $script:Exe)`""
     $ErrorActionPreference = 'Continue'
-    $p = Start-Process -FilePath $script:Synaps -ArgumentList 'login' -NoNewWindow -Wait -PassThru
-    if ($p.ExitCode -eq 0 -and (Test-Brain)) { Write-Good 'her brain: logged in (no restart: the daemon reads it on her next turn)' }
-    else { Write-Warn "no login yet: run ``$cmd`` when you want her to answer" }
+    try { $p = Start-Process -FilePath $script:Exe -PassThru }
+    catch { Write-Warn "she didn't start: $($_.Exception.Message)"; return }
+    # Up to 20 s (a cold start reads her pack): the lines she wrote since.
+    $new = ''
+    $ms = ''
+    $t0 = Get-Date
+    while (((Get-Date) - $t0).TotalSeconds -lt 20) {
+        $new = Read-LogSince $log $from
+        $m = [regex]::Match($new, 'first-frame: painted (\d+) ms')
+        if ($m.Success) { $script:Started = $true; $ms = $m.Groups[1].Value; break }
+        if ($p.HasExited) { $new = Read-LogSince $log $from; break }
+        Start-Sleep -Milliseconds 200
+    }
+    if ($script:Started) { Write-Good "she's up ($ms ms to her first frame)" }
+    elseif (-not $p.HasExited) { Write-Info "she's still starting: her log is $(Get-Tilde $log)" }
+    else {
+        Write-Warn "she didn't start (exit $($p.ExitCode)). the end of her log ($(Get-Tilde $log)):"
+        $new -split "`r?`n" | Where-Object { $_ } | Select-Object -Last 4 | ForEach-Object { Write-Host "       | $_" -ForegroundColor DarkGray }
+    }
 }
 
 # What stays of Synaps after --uninstall, where his login lives, and how to remove it too.
@@ -919,12 +947,20 @@ function Write-Summary {
     }
     if ($script:VoiceHow) { $rows['voice'] = $script:VoiceHow }
     foreach ($k in $rows.Keys) { Write-Host ('   {0,-14} {1}' -f $k, $rows[$k]) }
-    Write-Host ''
-    Write-Host '   start her: ' -ForegroundColor White -NoNewline
-    Write-Host "& `"$($script:Exe)`"" -NoNewline
-    Write-Host '      then tap Win+Alt+C (or click her) to talk' -ForegroundColor DarkGray
-    Write-Info "remove her: $(Get-SelfCommand) --uninstall   (synaps stays)"
     Invoke-Brain
+    Write-Host ''
+    Start-HerNow
+    Write-Host ''
+    if ($script:Started) {
+        Write-Host '   she''s on your screen: ' -ForegroundColor White -NoNewline
+        Write-Host 'tap Win+Alt+C (or click her) to talk' -ForegroundColor DarkGray
+        Write-Info "start her again: & `"$(Get-Tilde $script:Exe)`", or from the Start menu"
+    } else {
+        Write-Host '   start her: ' -ForegroundColor White -NoNewline
+        Write-Host "& `"$($script:Exe)`"" -NoNewline
+        Write-Host '      then tap Win+Alt+C (or click her) to talk' -ForegroundColor DarkGray
+    }
+    Write-Info "remove her: $(Get-SelfCommand) --uninstall   (synaps stays)"
 }
 
 # This script as he'd run it again with flags: the checkout's file, else the piped form (iex can't

@@ -1193,6 +1193,12 @@ pub fn process_setup() {
     }
 }
 
+/// Another process's environment variable: not read on Windows (its variables are his user's,
+/// which hers has too).
+pub fn process_env(_pid: u32, _key: &str) -> Option<String> {
+    None
+}
+
 /// The system heap hands freed pages back on its own.
 pub fn trim_heap() {}
 

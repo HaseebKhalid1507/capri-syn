@@ -2839,6 +2839,12 @@ impl Avatar {
         }
         if let Some(acts) = self.session.as_mut().map(|s| s.link.tick(now)) {
             self.run_acts(acts);
+            // Her model's credentials, when due: a small file, on its own schedule (`creds`).
+            if let Some(s) = self.session.as_mut()
+                && let Some(q) = s.link.creds_due(now)
+            {
+                s.link.set_creds(crate::creds::check(&q), now);
+            }
             let before = self.mood;
             self.sync_body(now);
             dirty |= self.mood != before;
@@ -3468,7 +3474,9 @@ impl Avatar {
 
     /// Her first words, once in her life (touchpoint 7): who she is and how to call her. Not a
     /// word about what runs her: the first minute is hers. Waits until she has landed and
-    /// nothing else is on; if he found the Line first, he knows the key and she skips it.
+    /// nothing else is on; if he found the Line first, he knows the key and she skips it. A key
+    /// only when she bound it herself (Windows): his WM may have none (GNOME, KDE), and a click
+    /// on her always works.
     fn first_words_try(&mut self, now: Instant) -> bool {
         if self.line.is_some() {
             self.first_words = None;
@@ -3501,7 +3509,10 @@ impl Avatar {
         let name = self.pack.name.trim();
         let mut c = name.chars();
         let name = c.next().map_or_else(|| "Capri".to_string(), |f| f.to_uppercase().chain(c).collect());
-        let text = format!("Hey. I'm {name}. Tap {} when you want me. Headpats also accepted.", self.summon_label());
+        let text = match self.os.bound_key_label(crate::platform::KeyEv::Summon, self.voice.cfg.key) {
+            Some(k) => format!("Hey. I'm {name}. Tap {k} when you want me. Headpats also accepted."),
+            None => format!("Hey. I'm {name}. Click me when you want me. Headpats also accepted."),
+        };
         elog!("synaps-avatar: first words: {text}");
         self.say(text, now);
         true

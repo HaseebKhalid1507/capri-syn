@@ -422,7 +422,7 @@ impl Avatar {
                 K::Notice => Row { who: Who::Sys, text: it.text.trim().to_string(), detail: String::new(), streaming: false },
                 // One she can name is said in her words, as in the bubble (the daemon's text
                 // names slash commands the Line doesn't have).
-                K::Error => match crate::session::Trouble::of(&it.text) {
+                K::Error => match crate::session::Trouble::of(&it.text, s.link.model()) {
                     // The command on a paragraph of its own: a chip.
                     Some(t) => Row { who: Who::Her, text: t.says().replace("\n`", "\n\n`"), detail: String::new(), streaming: false },
                     None => Row { who: Who::Error, text: it.text.trim().to_string(), detail: String::new(), streaming: false },
@@ -451,7 +451,7 @@ impl Avatar {
             mic: self.voice_mic_row(),
             caption: self.voice_caption_now(),
             face,
-            trouble: b.and_then(|b| b.trouble).map(|t| t.tip().to_string()),
+            trouble: b.and_then(|b| b.trouble.as_ref()).map(|t| t.tip().to_string()),
         }
     }
 

@@ -56,14 +56,19 @@ flag also has PowerShell's spelling: `-Yes`, `-DryRun`, `-NoAutostart`, and so o
 At the end comes an `installed:` summary: what is where, how the daemon starts, how to summon her,
 how to start her, and how to remove her (as you ran it: the checkout's script, or the piped form).
 
-Last comes the brain step, when Synaps has no model yet (no login in `~/.synaps-cli/auth.json`, no
-`local/` model in its config): she talks through Synaps, and Synaps needs a model. With a terminal
-to pick on (`curl | bash` reads it from `/dev/tty`), it asks, then runs `synaps login` (a picker:
-a subscription, an API key, or a local model). With `--yes` (unattended) or no terminal it only
-prints the command: the picker would wait. It comes after everything else, so leaving the picker
-with Ctrl-C loses nothing. Skipped, she still perches, naps and plays; she just can't answer yet. A
-daemon that is already running picks the login up on her next turn: Synaps reads `auth.json` per
-request. When Synaps was already there with a model, one line says her session is `capri`.
+When Synaps has no model yet (no login in `~/.synaps-cli/auth.json`, no `local/` model in its config
+or her `[session]`), one line says so: signing in is hers to walk you through, not a picker in the
+installer. Until Synaps has a model her tag reads NO BRAIN YET, and her answer to your first message
+ends on the command (`synaps login --provider claude` for Claude). The daemon picks a login up on her
+next turn, with no restart: Synaps reads `auth.json` per request. When Synaps was already there with
+a model, one line says her session is `capri`.
+
+Then it starts her, the way autostart will (Linux: `env SA_BACKEND=x11` off Hyprland and i3, so
+GNOME and KDE on Wayland run her through XWayland), in a session of her own so closing the terminal
+leaves her be, and waits up to 20 s for her first frame (`~/.local/state/synaps-avatar/launch.log`;
+Windows: her `synaps-avatar.log`). One already running (the old binary) is quit and started again.
+With no desktop to show on (an SSH session, CI) it doesn't, and says so. The `start her:` line is the
+same command, to start her again later.
 
 A pack at her pack's place that this script didn't make (your own build) is moved aside to
 `capri.pre-install-<time>`, said so, and never removed by `--uninstall`.

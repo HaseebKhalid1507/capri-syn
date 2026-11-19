@@ -25,6 +25,7 @@ mod anim;
 mod beside;
 mod brain;
 mod control;
+mod creds;
 mod drag;
 mod edges;
 mod facing;
