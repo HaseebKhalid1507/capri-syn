@@ -114,12 +114,13 @@ def load_config(path=None, text=None, hostname=None):
     cfg = merge(DEFAULTS, over)
     # The role and the transport come from the file (or the defaults), never from the hostname;
     # the hostname is only the label in event lines when `host` is empty.
+    # An empty role or synaps (as in watch.toml before v1) is the default.
+    cfg["role"] = cfg["role"] or "local"
     if cfg["role"] not in ROLES:
         raise ValueError('role must be "local" or "remote"')
     local = cfg["role"] == "local"
     cfg["host"] = cfg["host"] or (hostname or socket.gethostname()).split(".")[0].lower() or cfg["role"]
-    if not cfg["synaps"]:
-        raise ValueError("synaps must name this machine's synaps CLI")
+    cfg["synaps"] = cfg["synaps"] or "synaps"
     if cfg["github"]["enabled"] is None:
         cfg["github"]["enabled"] = local
     d = cfg["deliver"]

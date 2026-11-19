@@ -175,9 +175,12 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual((r["role"], r["host"], r["synaps"], r["deliver"]["transport"], r["deliver"]["ssh_host"], r["github"]["enabled"]),
                          ("remote", "box", "synaps-dev", "ssh", "desk", False), "GitHub runs on her machine only")
         self.assertEqual(cw.load_config(text='[github]\nenabled = true\n', hostname="x")["github"]["repos"], [], "no repos by default")
-        for bad in ('role = "remote"\n', 'role = "bella"\n', 'role = ""\n', '[deliver]\ntransport = "ssh"\n', 'synaps = ""\n'):
+        for bad in ('role = "remote"\n', 'role = "bella"\n', 'role = "avante"\n', '[deliver]\ntransport = "ssh"\n'):
             with self.assertRaises(ValueError, msg=bad):
                 cw.load_config(text=bad, hostname="x")
+        old = cw.load_config(text='role = ""\nsynaps = ""\n[deliver]\ntransport = ""\nssh_host = "elsewhere"\n', hostname="x")
+        self.assertEqual((old["role"], old["synaps"], old["deliver"]["transport"]), ("local", "synaps", "local"),
+                         "an old copy of watch.toml (empty role and synaps) runs as the defaults")
 
     def test_no_personal_leftovers_in_the_defaults(self):
         with open(os.path.join(HERE, "watch.toml")) as f:
