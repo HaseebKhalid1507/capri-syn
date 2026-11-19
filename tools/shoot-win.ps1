@@ -74,6 +74,24 @@ public static class Native {
         return new[] { GetSystemMetrics(76), GetSystemMetrics(77), GetSystemMetrics(78), GetSystemMetrics(79) };
     }
 
+    [DllImport("user32.dll")] static extern bool SystemParametersInfo(uint a, uint b, ref RECT r, uint f);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern bool SystemParametersInfo(uint a, uint b, string s, uint f);
+    [DllImport("user32.dll")] static extern bool SetSysColors(int n, int[] elems, int[] rgbs);
+    /// The primary monitor's work area (the screen less the taskbar): x, y, w, h.
+    public static int[] WorkArea() {
+        Aware();
+        var r = new RECT();
+        SystemParametersInfo(0x0030, 0, ref r, 0);
+        return new[] { r.L, r.T, r.R - r.L, r.B - r.T };
+    }
+    /// No wallpaper, the desktop one flat colour (0xRRGGBB).
+    public static bool Backdrop(int rgb) {
+        int cref = ((rgb & 0xFF) << 16) | (rgb & 0xFF00) | ((rgb >> 16) & 0xFF);
+        bool a = SetSysColors(1, new[] { 1 }, new[] { cref });
+        bool b = SystemParametersInfo(0x0014, 0, "", 3);
+        return a && b;
+    }
+
     [DllImport("user32.dll")] static extern IntPtr GetDC(IntPtr h);
     [DllImport("user32.dll")] static extern int ReleaseDC(IntPtr h, IntPtr dc);
     [DllImport("gdi32.dll")] static extern bool BitBlt(IntPtr dst, int x, int y, int w, int h, IntPtr src, int sx, int sy, uint rop);
@@ -269,15 +287,25 @@ function Get-ShotWindows {
     }
 }
 
-<# One rect around them all (x, y, w, h), padded and kept on the screen. Null: none. #>
+<# The desktop quiet behind a shot: every window minimized (the runner's own console), no
+   wallpaper, one flat colour. #>
+function Clear-ShotDesktop {
+    param([int]$Color = 0x202024)
+    (New-Object -ComObject Shell.Application).MinimizeAll()
+    if (-not [ShootWin.Native]::Backdrop($Color)) { Write-Warning 'desktop: the backdrop stayed' }
+    Start-Sleep -Milliseconds 800
+}
+
+<# One rect around them all (x, y, w, h), padded and kept on the work area (-Screen: the whole
+   screen, the taskbar too). Null: none. #>
 function Get-ShotRect {
-    param([object[]]$Windows, [int]$Pad = 12)
+    param([object[]]$Windows, [int]$Pad = 12, [switch]$Screen)
     if (-not $Windows) { return $null }
     $l = ($Windows | ForEach-Object { $_.X } | Measure-Object -Minimum).Minimum - $Pad
     $t = ($Windows | ForEach-Object { $_.Y } | Measure-Object -Minimum).Minimum - $Pad
     $r = ($Windows | ForEach-Object { $_.X + $_.W } | Measure-Object -Maximum).Maximum + $Pad
     $b = ($Windows | ForEach-Object { $_.Y + $_.H } | Measure-Object -Maximum).Maximum + $Pad
-    $s = [ShootWin.Native]::Screen()
+    $s = if ($Screen) { [ShootWin.Native]::Screen() } else { [ShootWin.Native]::WorkArea() }
     $l = [Math]::Max($l, $s[0]); $t = [Math]::Max($t, $s[1])
     $r = [Math]::Min($r, $s[0] + $s[2]); $b = [Math]::Min($b, $s[1] + $s[3])
     if ($r -le $l -or $b -le $t) { return $null }
