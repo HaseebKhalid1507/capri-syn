@@ -15,14 +15,28 @@ turn with trigger T. `resolve`: the pending prompts are answered elsewhere (they
 `nobrain`: every submit fails as a Synaps with no model credentials does (its exact error text);
 `fail TEXT`: every submit fails with TEXT; `brain`: replies again.
 FAKE_DAEMON_VERSION and FAKE_MODEL set what the Welcome and the attach say (default 0.0.0-fake, fake).
-Commands the avatar sends are printed; answer values are never printed (only their length)."""
-import json, os, socket, sys, threading, time
+FAKE_HISTORY=FILE: the attached chat's messages instead of the fixture's (a JSON list of api messages).
+Commands the avatar sends are printed; answer values are never printed (only their length).
 
-DIR = "/tmp/sa-fake"
+Windows (stock CPython has no AF_UNIX there; the shots workflow runs it): the daemon end is the
+named pipe synaps-client derives from %TEMP%\\sa-fake\\d.sock (run her with `--socket` that path), and
+control is 127.0.0.1:FAKE_CTL_PORT (default 47811), one line per connection as above. FAKE_DIR moves
+the folder on either OS."""
+import hashlib, json, os, socket, sys, tempfile, threading, time
+
+WIN = os.name == "nt"
+DIR = os.environ.get("FAKE_DIR") or (os.path.join(tempfile.gettempdir(), "sa-fake") if WIN else "/tmp/sa-fake")
+CTL_PORT = int(os.environ.get("FAKE_CTL_PORT", "47811"))
 SID = "20261113-073427-5fde"
 fixtures = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tests/fixtures")
 os.makedirs(DIR, mode=0o700, exist_ok=True)
-ATTACHED = json.loads(open(os.path.join(fixtures, "attached_history.json")).read())
+ATTACHED = json.loads(open(os.path.join(fixtures, "attached_history.json"), encoding="utf-8").read())
+if os.environ.get("FAKE_HISTORY"):
+    # Her chat as a shot wants it: these messages ([] for an empty chat), no replayed turn.
+    _msgs = json.loads(open(os.environ["FAKE_HISTORY"], encoding="utf-8").read())
+    ATTACHED["conversation"]["api_messages"] = _msgs
+    ATTACHED["conversation"]["messages_len"] = len(_msgs)
+    ATTACHED["replay"] = []
 MODEL = os.environ.get("FAKE_MODEL", "fake")
 WELCOME = {"type": "welcome", "protocol_version": 3, "daemon_version": os.environ.get("FAKE_DAEMON_VERSION", "0.0.0-fake"), "pid": os.getpid(), "profile": None,
            "sessions": [{"id": SID, "model": MODEL, "lifecycle": "live", "name": "capri"}],
@@ -123,7 +137,7 @@ def event(ev):
 
 def serve(conn):
     wl = threading.Lock()
-    f = conn.makefile("r")
+    f = conn.makefile("r", encoding="utf-8")
     try:
         hello = f.readline()
         if not hello:
@@ -188,16 +202,20 @@ def serve(conn):
 
 
 def control():
-    path = f"{DIR}/ctl.sock"
-    if os.path.exists(path):
-        os.unlink(path)
-    s = socket.socket(socket.AF_UNIX)
-    s.bind(path)
-    os.chmod(path, 0o600)
+    if WIN:
+        s = socket.socket(socket.AF_INET)
+        s.bind(("127.0.0.1", CTL_PORT))
+    else:
+        path = f"{DIR}/ctl.sock"
+        if os.path.exists(path):
+            os.unlink(path)
+        s = socket.socket(socket.AF_UNIX)
+        s.bind(path)
+        os.chmod(path, 0o600)
     s.listen()
     while True:
         c, _ = s.accept()
-        cmd = c.makefile("r").readline().strip()
+        cmd = c.makefile("r", encoding="utf-8").readline().strip()
         log(f"ctl {cmd}")
         req = None
         if cmd == "secret":
@@ -255,8 +273,105 @@ def control():
         c.close()
 
 
+# ---- Windows: the daemon's named pipe (overlapped, as multiprocessing's PipeConnection) --------
+
+def pipe_name(path):
+    """synaps-client's `ipc::pipe_name` (Synaps' own): the path in one spelling (absolute, its folder
+    resolved, `\\` separators, no `\\?\\` prefix, lowercase), hashed into the flat pipe namespace."""
+    d, n = os.path.split(os.path.abspath(path))
+    if os.path.isdir(d):
+        d = os.path.realpath(d)
+    s = os.path.join(d, n).replace("/", "\\")
+    if s.startswith("\\\\?\\UNC\\"):
+        s = "\\\\" + s[8:]
+    elif s.startswith("\\\\?\\"):
+        s = s[4:]
+    return "\\\\.\\pipe\\synaps-daemon-" + hashlib.sha256(s.lower().encode()).hexdigest()[:32]
+
+
+class Pipe:
+    """One connected pipe instance: as much of a socket as `serve` uses. Overlapped, so an event
+    goes out while a read waits."""
+
+    def __init__(self, h):
+        self.h, self.shut = h, False
+
+    def recv(self, n):
+        import _winapi
+        try:
+            ov, _ = _winapi.ReadFile(self.h, n, overlapped=True)
+            ov.GetOverlappedResult(True)
+            return bytes(ov.getbuffer())
+        except OSError:
+            return b""
+
+    def sendall(self, b):
+        import _winapi
+        ov, _ = _winapi.WriteFile(self.h, b, overlapped=True)
+        n, _ = ov.GetOverlappedResult(True)
+        if n != len(b):
+            raise OSError("short pipe write")
+
+    def makefile(self, mode="r", encoding="utf-8"):
+        import io
+        pipe = self
+
+        class Raw(io.RawIOBase):
+            def readable(self):
+                return True
+
+            def readinto(self, buf):
+                d = pipe.recv(len(buf))
+                buf[:len(d)] = d
+                return len(d)
+
+        return io.TextIOWrapper(io.BufferedReader(Raw()), encoding=encoding)
+
+    def close(self):
+        import _winapi
+        if not self.shut:
+            self.shut = True
+            _winapi.CloseHandle(self.h)
+
+
+def pipe_accept(name):
+    """Connected instances, one after another; the next one is listening before this one is
+    handed on (her client retries a busy pipe, not a missing one)."""
+    import _winapi
+    first = [True]
+
+    def new():
+        flags = _winapi.PIPE_ACCESS_DUPLEX | _winapi.FILE_FLAG_OVERLAPPED
+        if first[0]:
+            flags |= _winapi.FILE_FLAG_FIRST_PIPE_INSTANCE
+            first[0] = False
+        return _winapi.CreateNamedPipe(name, flags, _winapi.PIPE_WAIT, _winapi.PIPE_UNLIMITED_INSTANCES, 1 << 16, 1 << 16,
+                                       _winapi.NMPWAIT_WAIT_FOREVER, _winapi.NULL)
+
+    h = new()
+    while True:
+        try:
+            ov = _winapi.ConnectNamedPipe(h, overlapped=True)
+        except OSError as e:
+            if e.winerror != _winapi.ERROR_NO_DATA:
+                raise
+        else:
+            _winapi.WaitForMultipleObjects([ov.event], False, _winapi.INFINITE)
+            ov.GetOverlappedResult(True)
+        nxt = new()
+        yield Pipe(h)
+        h = nxt
+
+
 def main():
     path = f"{DIR}/d.sock"
+    os.makedirs(DIR, exist_ok=True)
+    if WIN:
+        threading.Thread(target=control, daemon=True).start()
+        name = pipe_name(path)
+        log(f"fake daemon on {path} = {name}, control 127.0.0.1:{CTL_PORT} (FAKE: no model, no real prompts)")
+        for c in pipe_accept(name):
+            threading.Thread(target=serve, args=(c,), daemon=True).start()
     if os.path.exists(path):
         os.unlink(path)
     s = socket.socket(socket.AF_UNIX)
