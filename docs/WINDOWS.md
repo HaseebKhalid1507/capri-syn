@@ -23,6 +23,7 @@ Her files (`platform::base_dir`; `$XDG_*_HOME` still wins, as on Linux):
 | her pack (default `--pack`) | `%LOCALAPPDATA%\synaps-avatar\packs\capri` |
 | state | `%LOCALAPPDATA%\synaps-avatar\state.json`, `sessions.json` |
 | her log, without a console | `%LOCALAPPDATA%\synaps-avatar\synaps-avatar.log` (appended; over 4 MB at start, kept as `.old.log`) |
+| her icon (tray), your own | `%APPDATA%\synaps-avatar\icon.ico` if it's there (up to 1024 px a side), else the capri-syn icon (`assets/icon`, in her exe; a pack's `icon` isn't used here); read at start and on `capri-ctl settings reload`, when it changed |
 
 ## The installer
 
@@ -94,7 +95,8 @@ persona; no art).
 - **Her AUMID** `Synaps.Avatar`: registered under `HKCU\Software\Classes\AppUserModelId` with
   `DisplayName` and `IconUri`, and set on the Start-menu shortcut, so toasts show under her name
   and icon. The icon is capri-syn's, `assets/icon/capri-syn.ico` (256 to 16 px) and its 256 px PNG,
-  used as they are (`assets/icon/NOTICE`): the setup's own icon, Apps & features, the shortcut, toasts.
+  used as they are (`assets/icon/NOTICE`): the setup's own icon, Apps & features, the shortcut, toasts,
+  her exe and her tray (#79).
 - **Autostart** (a task, checked): the `HKCU\…\Run` value.
 - **Uninstall** (Settings → Apps, or `unins000.exe /VERYSILENT`): stops her (this install of her, by
   its path: never a synaps-avatar.exe of his elsewhere), then removes her exe,

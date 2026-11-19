@@ -464,7 +464,8 @@ pub struct Behaviour {
     pub land: Option<LandSpec>,
     #[serde(default)]
     pub arrive: Option<ArriveSpec>,
-    /// Her icon (a square PNG in the pack) for her windows' `_NET_WM_ICON`.
+    /// Her icon (a square PNG in the pack) for her windows' `_NET_WM_ICON`, where his own isn't
+    /// there (`crate::brand::icon`).
     #[serde(default)]
     pub icon: Option<String>,
     #[serde(default)]

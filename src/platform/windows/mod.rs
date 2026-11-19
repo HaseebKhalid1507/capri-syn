@@ -1,7 +1,7 @@
 //! The Windows backend: plain translation between Win32/DWM and the core's types (her body, her
 //! idle loop, perching, her global keys, the Line's keyboard, effect layers, the media flyout's
-//! players, toasts; voice comes later). Every rule built on these answers is the core's
-//! (`os.rs`).
+//! players, toasts, her tray icon; voice comes later). Every rule built on these answers is the
+//! core's (`os.rs`).
 //!
 //! GPUI's Windows crate is vendored and patched (vendor/gpui-pre-windows/PATCHES.md): a `PopUp`
 //! is a bare `WS_POPUP` (PW-1), a click on a window opened without focus doesn't activate it
@@ -61,6 +61,7 @@ mod notifications;
 mod testkit;
 mod hold;
 mod sidecar;
+mod tray;
 mod voice;
 
 pub use dirs::{base_dir, home_dir};
@@ -1068,6 +1069,22 @@ impl Win32 {
     }
 
     /// One of her windows has the foreground (her process may then move it among them).
+    /// `active_window` with `h` in front. Her tray's window counts as the shell's UI: it takes
+    /// the foreground for its menu (`tray::show_menu`), so a pick there that opens the Line
+    /// (SETTINGS) would else make it his last window, and Esc would hand his keyboard to a
+    /// hidden 0×0 window.
+    fn active_of(&self, h: HWND) -> Option<WinId> {
+        if h.0.is_null() || is_shell(h) {
+            return None;
+        }
+        if !is_shell_ui(h) && !tray::is_tray(h) {
+            self.last_app.store(id(h), Ordering::Relaxed);
+            return Some(id(h));
+        }
+        let last = self.last_app.load(Ordering::Relaxed);
+        (last != 0 && showing(hwnd(last))).then_some(last)
+    }
+
     fn hers_in_front(&self) -> bool {
         let fg = unsafe { GetForegroundWindow() };
         !fg.0.is_null() && self.mine(unsafe { GetAncestor(fg, GA_ROOT) })
@@ -1166,18 +1183,10 @@ impl Desktop for Win32 {
     }
 
     /// The foreground window; none on the desktop. With the shell's UI in front (Start, Search,
-    /// Alt+Tab, a flyout) his window is still the one he was in.
+    /// Alt+Tab, a flyout) or her tray's window (`active_of`), his window is still the one he
+    /// was in.
     fn active_window(&self) -> Option<WinId> {
-        let h = unsafe { GetForegroundWindow() };
-        if h.0.is_null() || is_shell(h) {
-            return None;
-        }
-        if !is_shell_ui(h) {
-            self.last_app.store(id(h), Ordering::Relaxed);
-            return Some(id(h));
-        }
-        let last = self.last_app.load(Ordering::Relaxed);
-        (last != 0 && showing(hwnd(last))).then_some(last)
+        self.active_of(unsafe { GetForegroundWindow() })
     }
 
     fn focused_window(&self) -> Option<WinId> {
@@ -1343,6 +1352,12 @@ impl Desktop for Win32 {
     /// `WIN+ALT+C` for the summon key (`chord`).
     fn key_label(&self, ev: KeyEv, key: char) -> Option<String> {
         key_label(ev, key)
+    }
+
+    /// Her icon in the notification area (`tray.rs`). A click on it or a pick in its menu is his
+    /// input to her, as her key is: the keyboard is hers to take for `GRANT_MS`.
+    fn tray(&self, icon: super::TrayIcon, instance: &str, on: Box<dyn Fn(super::TrayEv) + Send>) -> Result<Option<Box<dyn super::Tray>>> {
+        Ok(Some(Box::new(tray::start(icon, instance, self.grant_at.clone(), on)?)))
     }
 
     /// One thread: out-of-context WinEvent hooks (moves, shows, hides, minimise, cloak,

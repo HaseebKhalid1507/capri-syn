@@ -374,6 +374,11 @@ impl Desktop for HyprDesktop {
         super::linux::watch_logind(on)
     }
 
+    /// None yet (`linux::tray`: where a StatusNotifierItem goes).
+    fn tray(&self, icon: super::TrayIcon, instance: &str, on: Box<dyn Fn(super::TrayEv) + Send>) -> Result<Option<Box<dyn super::Tray>>> {
+        super::linux::tray(icon, instance, on)
+    }
+
     fn char_key_down(&self, _ch: char) -> Result<bool> {
         bail!("hyprland: no global key state")
     }
