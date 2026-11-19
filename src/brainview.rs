@@ -709,13 +709,41 @@ impl Avatar {
         self.her_spot(&[], &[]).body
     }
 
+    /// Her work area (cut to the test arena). In a frame (`render`), asked once for where she is.
     pub(super) fn her_area(&self) -> Option<WinRect> {
+        let key = (self.origin, self.placement);
+        match self.area_memo.get() {
+            Some(Some((k, p, a))) if (k, p) == key => a,
+            Some(_) => {
+                let a = self.her_area_now();
+                self.area_memo.set(Some(Some((key.0, key.1, a))));
+                a
+            }
+            None => self.her_area_now(),
+        }
+    }
+
+    fn her_area_now(&self) -> Option<WinRect> {
         let (areas, monitors) = self.arena_filter(
             self.os.work_areas().iter().map(crate::platform::Monitor::rect).collect(),
             self.os.monitors().iter().map(crate::platform::Monitor::rect).collect(),
         );
         let her = self.her_spot(&areas, &monitors);
-        areas.get(her.area).copied()
+        let (x, y) = (her.anchor.0, her.anchor.1 - 1);
+        if areas.iter().any(|a| a.contains(x, y)) || monitors.iter().any(|m| m.contains(x, y)) {
+            return areas.get(her.area).copied();
+        }
+        // Her anchor on none (off an edge mid-move): the area of the monitor her bubble's span
+        // is on (`visible_range`'s: her window's middle), else the nearest one, never just the first.
+        let l = &self.layout;
+        let c = (self.origin.0 + l.avatar_x + l.geo.width as i32 / 2, self.origin.1 + l.avatar_y + l.geo.height as i32 / 2);
+        let off = |m: &WinRect| {
+            let dx = (m.x - c.0).max(c.0 - (m.right() - 1)).max(0) as i64;
+            let dy = (m.y - c.1).max(c.1 - (m.bottom() - 1)).max(0) as i64;
+            dx * dx + dy * dy
+        };
+        let i = monitors.iter().enumerate().min_by_key(|(_, m)| off(m)).map(|(i, _)| i)?;
+        areas.get(i).copied()
     }
 
     fn brain_senses(&self, now: Instant) -> Senses {
@@ -1145,11 +1173,20 @@ impl Avatar {
             self.wake_up("summon", now);
         }
         let emoting = !urgent && ((!matches!(plan.goal, Goal::Active { .. }) && self.anim.busy()) || self.waking(now));
-        if (moving || emoting) && self.press.is_none() && !self.quitting {
+        // Her menu open: he is choosing (Quit, maybe). Leaving his window and a summon (the two
+        // moves `busy` never holds) wait for it to go (a click, or its 8 s): the menu rode a
+        // drop-in off the screen's bottom, or a teleport took it away mid-aim. Other moves
+        // fail as busy, as ever.
+        let menu = self.menu.is_some() && matches!(plan.goal, Goal::Leave | Goal::Active { why: Why::Summon(_), .. });
+        if (moving || emoting || menu) && self.press.is_none() && !self.quitting {
             // Still landing from the last one: this one goes next (a sulk's far move after
             // the leave, a summon after a passive hop).
+            // A summon waiting stays: leaving his window doesn't take its place.
             if let Some(h) = &mut self.brain {
-                h.next_plan = Some(plan);
+                let summon = |p: &MovePlan| matches!(p.goal, Goal::Active { why: Why::Summon(_), .. });
+                if !(matches!(plan.goal, Goal::Leave) && h.next_plan.as_ref().is_some_and(summon)) {
+                    h.next_plan = Some(plan);
+                }
             }
             return;
         }

@@ -62,6 +62,8 @@ const FIRST_WORDS_RETRY: Duration = Duration::from_millis(700);
 const FIRST_WORDS_WITHIN: Duration = Duration::from_secs(180);
 /// Her right-click menu's width, and its maker's mark's type size (logical px).
 const MENU_W: f32 = 210.0;
+/// The menu's picture row: the picture and its padding.
+const MENU_HEADER_H: f32 = MENU_HEADER_PX + 8.0;
 const MARK_PX: f32 = 9.0;
 const CURSOR_PX: f32 = 32.0;
 
@@ -137,6 +139,9 @@ fn frame_log() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("SA_FRAME_LOG").is_some())
 }
+
+/// Her work area (`her_area`) for her window at this origin, in this placement.
+type AreaMemo = ((i32, i32), Placement, Option<WinRect>);
 
 /// After falling asleep or waking, a change of art family is the light swap this long (the
 /// wake, a stretch and the greeting fit in it).
@@ -260,6 +265,8 @@ struct Wrapped {
     lines: Vec<(usize, usize)>,
     /// Widest line, logical px.
     width: f32,
+    /// The width it was wrapped to (the bubble's text box): wrapped again when that changes.
+    at: f32,
 }
 
 struct Bubble {
@@ -284,6 +291,10 @@ struct Bubble {
     width: f32,
     /// This reply's number: a new one in an open bubble pulses, streaming text doesn't.
     serial: u64,
+    /// The session turn it shows (0: her own words, `say`).
+    turn: u64,
+    /// Rows that fit between her head and the top of her work area (`LINES_PER_PAGE` with room).
+    cap: usize,
 }
 
 /// How long a typed-out bubble stays open.
@@ -348,15 +359,16 @@ const ESC_AGAIN: Duration = Duration::from_millis(1_000);
 const INPUT_MAX: usize = 4_000;
 
 impl Bubble {
-    /// More lines than the bubble holds, or code: the opening lines plus READ.
+    /// More lines than the bubble holds (here: under the top of her work area), or code: the
+    /// opening lines plus READ.
     fn long(&self) -> bool {
-        self.wrap.as_ref().is_some_and(|w| w.lines.len() > LINES_PER_PAGE) || self.raw.contains("```") || self.raw.contains("~~~")
+        self.wrap.as_ref().is_some_and(|w| w.lines.len() > self.cap.clamp(1, LINES_PER_PAGE)) || self.raw.contains("```") || self.raw.contains("~~~")
     }
 
     /// Lines the bubble shows at once.
     fn rows(&self) -> usize {
         let total = self.wrap.as_ref().map_or(1, |w| w.lines.len().max(1));
-        if self.long() { OPENING_LINES.min(total) } else { total.min(LINES_PER_PAGE) }
+        if self.long() { OPENING_LINES.min(total).min(self.cap.max(1)) } else { total.min(LINES_PER_PAGE) }
     }
 
     /// (first line shown, line count). Before wrapping: (0, 1).
@@ -389,13 +401,33 @@ impl Bubble {
     fn page_lines_marked(&self) -> Vec<String> {
         let mut lines = self.page_lines();
         let (top, total) = self.pages();
+        // A command chip there stays whole (its "…" would be copied as part of it); READ or
+        // the pager says there is more.
         if top + self.rows() < total
             && self.shown >= self.text.len()
             && let Some(last) = lines.last_mut()
+            && crate::line::command(last).is_none()
         {
             *last = goes_on(last);
         }
         lines
+    }
+
+    /// Its last line is one command (its chip) and no code: with nothing else for the footer,
+    /// the collapse key sits on the chip's row.
+    fn ends_on_chip(&self) -> bool {
+        !self.raw.contains("```")
+            && !self.raw.contains("~~~")
+            && self.wrap.as_ref().and_then(|w| w.lines.last()).is_some_and(|&(a, e)| {
+                let t: String = self.text[a.min(self.text.len())..e.min(self.text.len())].iter().collect();
+                crate::line::command(&t).is_some()
+            })
+    }
+
+    /// A session reply still out in it (or put down only while she is carried): the strip it
+    /// leaves if the bubble goes now, replaced or dropped (#68). Behind the chip, it had its turn.
+    fn open_reply(&self, carried_open: bool) -> Option<(u64, Vec<char>)> {
+        (self.stream && (!self.collapsed || carried_open) && !self.text.is_empty()).then(|| (self.turn, self.text.clone()))
     }
 
     /// Type out short text only; anything longer appears at once.
@@ -413,7 +445,8 @@ impl Bubble {
 fn menu_at(click: (f32, f32), (w, h): (f32, f32), (min_x, max_x): (f32, f32), (min_y, max_y): (f32, f32), face: Option<(f32, f32, f32, f32)>) -> (f32, f32) {
     const GAP: f32 = 8.0;
     let x = click.0.min(max_x).max(min_x);
-    let y = click.1.min(max_y).max(min_y);
+    // Taller than its room: its bottom (Quit) stays in view.
+    let y = click.1.max(min_y).min(max_y);
     let Some((f0, f1, f2, f3)) = face else { return (x, y) };
     let over = |x: f32, y: f32| x < f2 + GAP && x + w > f0 - GAP && y < f3 + GAP && y + h > f1 - GAP;
     if !over(x, y) {
@@ -436,6 +469,33 @@ fn menu_at(click: (f32, f32), (w, h): (f32, f32), (min_x, max_x): (f32, f32), (m
 /// An open menu at `at` that her face (after a pose change) is now under: the place across the
 /// face (its far side), same height, else the near side, whichever is in `x` first; else None
 /// (it stays).
+/// Where a menu `h` tall may put its top left (window-local logical px): inside her window's
+/// part on her monitor (`span`; `win_h` tall) and her work area (`area`: x, y, w, h), 4 px in.
+/// Also the height it has there.
+fn menu_ranges(span: (f32, f32), win_h: f32, area: Option<(f32, f32, f32, f32)>, h: f32) -> ((f32, f32), (f32, f32), f32) {
+    let (mut x0, mut y0, mut x1, mut y1) = (span.0, 0.0f32, span.1, win_h);
+    if let Some((ax, ay, aw, ah)) = area {
+        x0 = x0.max(ax);
+        y0 = y0.max(ay);
+        x1 = x1.min(ax + aw);
+        y1 = y1.min(ay + ah);
+    }
+    ((x0 + 4.0, x1 - MENU_W - 4.0), (y0 + 4.0, y1 - h - 4.0), y1 - y0 - 8.0)
+}
+
+/// Whether the menu's picture fits in `room`, from its last measured height (`sig`'s low bit:
+/// it had the picture). Not measured yet: it does.
+fn menu_header_fits(sig: u32, h: f32, room: f32) -> bool {
+    let with = if sig & 1 == 1 || h <= 0.0 { h } else { h + MENU_HEADER_H };
+    with <= room
+}
+
+/// The menu's top left inside its ranges (`menu_at`'s). Where it can't fit: its left and its
+/// bottom (Quit) stay in view.
+fn menu_inside((x, y): (f32, f32), (min_x, max_x): (f32, f32), (min_y, max_y): (f32, f32)) -> (f32, f32) {
+    (x.min(max_x).max(min_x), y.max(min_y).min(max_y))
+}
+
 fn menu_reflow(at: (f32, f32), (w, h): (f32, f32), (min_x, max_x): (f32, f32), face: Option<(f32, f32, f32, f32)>) -> Option<(f32, f32)> {
     const GAP: f32 = 8.0;
     let (f0, f1, f2, f3) = face?;
@@ -449,6 +509,99 @@ fn menu_reflow(at: (f32, f32), (w, h): (f32, f32), (min_x, max_x): (f32, f32), f
     sides.into_iter().find(|x| (min_x..=max_x).contains(x)).map(|x| (x, at.1))
 }
 
+/// `text` in lines broken where `breaks` says (byte offsets in a paragraph; GPUI's wrapper at
+/// `wrap_w`), the widest as `width` measures it. With `chip`: a paragraph that is one command
+/// stays one line, its width its chip's (at most `wrap_w`: the chip fits itself, `chip_text`).
+fn wrap_lines(text: &[char], wrap_w: f32, chip: Option<&dyn Fn(&str) -> f32>, mut breaks: impl FnMut(&str) -> Vec<usize>, width: impl Fn(&str) -> f32) -> Wrapped {
+    let s: String = text.iter().collect();
+    let mut lines = Vec::new();
+    let mut widest = 0.0f32;
+    let mut base = 0usize;
+    for para in s.split('\n') {
+        let n = para.chars().count();
+        if let Some(cw) = chip
+            && let Some(c) = crate::line::command(para)
+        {
+            lines.push((base, base + n));
+            widest = widest.max(cw(c).min(wrap_w));
+            base += n + 1;
+            continue;
+        }
+        let mut start = 0usize;
+        for ix in breaks(para).into_iter().chain(std::iter::once(para.len())) {
+            let t = para[start..ix].trim_end();
+            if !t.is_empty() {
+                widest = widest.max(width(t));
+            }
+            lines.push((base + para[..start].chars().count(), base + para[..ix].chars().count()));
+            start = ix;
+        }
+        base += n + 1;
+    }
+    Wrapped { lines, width: widest, at: wrap_w }
+}
+
+/// The text box (logical px) of a bubble in `span`: the widest it may be, less its padding.
+fn text_box_for((l, r): (f32, f32)) -> f32 {
+    (r - l - 2.0 * MARGIN).min(PANEL_MAX_W) - PAD_L - PAD_R - 2.0
+}
+
+/// Rows a bubble whose bottom is at `bottom` holds under `top` (window-local logical px), with
+/// its footer or without: none fit (she is right under the bar), its opening lines, over her.
+fn rows_room(bottom: f32, top: f32, footer: bool) -> usize {
+    let chrome = PAD_T + HEADER_H + HEADER_GAP + PAD_B + if footer { FOOTER_GAP + FOOTER_H } else { 0.0 };
+    match ((bottom - top - chrome) / LINE_H + 0.02).floor() {
+        f if f >= 1.0 => (f as usize).min(LINES_PER_PAGE),
+        _ => OPENING_LINES,
+    }
+}
+
+/// The rows a reply gets under `top`: one that ends on a command chip and fits whole has no
+/// footer (the collapse key is on the chip's row), so that row is its too. `busy`: the turn
+/// runs (its abort key is in the footer).
+fn reply_cap(b: &Bubble, bottom: f32, top: f32, busy: bool) -> usize {
+    let with = rows_room(bottom, top, true);
+    if busy || !b.ends_on_chip() {
+        return with;
+    }
+    let without = rows_room(bottom, top, false);
+    let n = b.wrap.as_ref().map_or(1, |w| w.lines.len().max(1));
+    if n <= without { without } else { with }
+}
+
+/// The highest the bubble's top goes (window-local logical px) with her window's top at
+/// `win_y` (device px): under the top of her work area (`area_y`, the bar), never above her
+/// window.
+fn top_under(area_y: Option<i32>, win_y: i32, sf: f32) -> f32 {
+    TOP_MARGIN.max(area_y.map_or(f32::MIN, |y| (y - win_y) as f32 / sf + MARGIN))
+}
+
+/// `SA_LAYOUT_PROBE`: `state` carries the bubble's layout as drawn (tests, the r57 sweep).
+fn layout_probe() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("SA_LAYOUT_PROBE").is_some())
+}
+
+/// `s` whole if it `fits`, else as much of its start (two thirds) and end as fits around "…".
+fn fit_middle(s: &str, fits: impl Fn(&str) -> bool) -> String {
+    if fits(s) {
+        return s.to_string();
+    }
+    let c: Vec<char> = s.chars().collect();
+    let cut = |keep: usize| {
+        let head = (keep * 2).div_ceil(3);
+        let tail = keep - head;
+        format!("{}…{}", c[..head].iter().collect::<String>(), c[c.len() - tail..].iter().collect::<String>())
+    };
+    // The most kept that fits (fits is monotonic in what is kept).
+    let (mut lo, mut hi) = (0usize, c.len().saturating_sub(1));
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if fits(&cut(mid)) { lo = mid } else { hi = mid - 1 }
+    }
+    cut(lo)
+}
+
 /// `line` with "…" in place of its last word(s): at least three characters give way, so it is
 /// never wider than the wrapped line it replaces.
 fn goes_on(line: &str) -> String {
@@ -456,14 +609,17 @@ fn goes_on(line: &str) -> String {
     let full = t.chars().count();
     while full - t.chars().count() < 3 {
         match t.trim_end().rfind(' ') {
-            Some(i) if i > 0 => t = t[..i].trim_end(),
+            // A word goes, never the line's last (an indented one kept only its indent: "…").
+            Some(i) if !t[..i].trim().is_empty() => t = t[..i].trim_end(),
+            // One short word: the line is far from full, it keeps the word ("guess…", not "gue…").
+            _ if full <= 8 => return format!("{}…", line.trim_end().trim_end_matches(['.', ',', ';', ':', '-', '—', '!', '?'])),
             _ => {
                 let keep = full.saturating_sub(3);
                 return format!("{}…", line.chars().take(keep).collect::<String>().trim_end());
             }
         }
     }
-    format!("{}…", t.trim_end_matches([',', ';', ':', '-', '—']))
+    format!("{}…", t.trim_end_matches([',', ';', ':', '-', '—', '.']))
 }
 
 const TYPE_TICK: Duration = Duration::from_millis(35);
@@ -698,6 +854,9 @@ pub struct Avatar {
     first_frame: Rc<Cell<bool>>,
     focus: FocusHandle,
     focus_probe: Option<String>,
+    /// `SA_LAYOUT_PROBE`: the bubble as last laid out (`state`'s `panel_layout`): its box, each
+    /// line's width in the face it is drawn in, the room it had.
+    panel_probe: Option<serde_json::Value>,
     warmed: bool,
     /// lachy's stills, decoded after the frames (`Stills`); her head-hover pointer is on.
     pub(super) stills: Option<Rc<Stills>>,
@@ -904,6 +1063,8 @@ pub struct Avatar {
     view_ticks: u64,
     /// Renders and window moves since start (`brain state`, the perf meters).
     renders: u64,
+    /// Her work area this frame (`render`): None outside one; keyed by where she is.
+    area_memo: Cell<Option<Option<AreaMemo>>>,
     moves: u64,
     /// The held drag's window follow (ragview::rag_follow, once a frame): last move, the
     /// shortest gap between moves, and the pointer change it last saw (`Os::pointer_seq`).
@@ -1010,6 +1171,7 @@ impl Avatar {
             first_frame: Rc::new(Cell::new(false)),
             focus: cx.focus_handle(),
             focus_probe: init.focus_probe.then(String::new),
+            panel_probe: None,
             warmed: false,
             stills: None,
             pointer_on: false,
@@ -1118,6 +1280,7 @@ impl Avatar {
             rag_strength: crate::ragdoll::Strength(crate::settings::Settings::load().map_or(0.5, |s| s.ragdoll.strength)),
             view_ticks: 0,
             renders: 0,
+            area_memo: Cell::new(None),
             moves: 0,
             follow_at: None,
             follow_period: Duration::from_millis(16),
@@ -2595,8 +2758,8 @@ impl Avatar {
                     // The last reply stays behind the chip; unseen, it leaves a strip.
                     b.collapsed = true;
                     b.hide_at = None;
-                    let text = b.text.clone();
-                    self.reply_missed(&text);
+                    let (turn, text) = (b.turn, b.text.clone());
+                    self.reply_missed(turn, &text);
                 } else {
                     self.bubble = None;
                 }
@@ -3352,6 +3515,7 @@ impl Avatar {
         // Reveal in at most ~5 s however long the text is.
         let per_tick = (text.len() / (5_000 / TYPE_TICK.as_millis() as usize)).max(2);
         let long = text.len() >= TYPE_MAX_CHARS;
+        self.bubble_gone();
         self.bubble = Some(Bubble {
             // Long: all at once, finished by the next tick like a typed-out reply (the hold,
             // SPEAKING settling to idle).
@@ -3371,6 +3535,8 @@ impl Avatar {
                 self.bubble_serial += 1;
                 self.bubble_serial
             },
+            turn: 0,
+            cap: LINES_PER_PAGE,
         });
         if self.mood != Mood::Talking {
             self.set_mood(Mood::Talking, now);
@@ -3805,6 +3971,7 @@ impl Avatar {
             }).collect::<serde_json::Map<_, _>>(),
         });
         v["art"] = self.art_json();
+        v["panel_layout"] = self.panel_probe.clone().filter(|_| self.panel_up()).into();
         v["motion"] = self.motion_json();
         v["intro"] = self.intro_json();
         v.to_string()
@@ -4004,6 +4171,8 @@ impl Avatar {
     fn stream_reply(&mut self, b: &Body, new_turn: bool, now: Instant) {
         if new_turn {
             self.cmd_copied = None;
+            // The reply it replaces (cut off, its hold not yet out) leaves its strip first (#68).
+            self.bubble_gone();
             if b.reply.is_empty() && !b.busy {
                 self.bubble = self.bubble.take().filter(|x| !x.stream);
                 return;
@@ -4025,6 +4194,8 @@ impl Avatar {
                     self.bubble_serial += 1;
                     self.bubble_serial
                 },
+                turn: b.turn,
+                cap: LINES_PER_PAGE,
             });
         }
         // A spoken turn: its sentences go to the sidecar; the bubble is the caption.
@@ -5027,38 +5198,78 @@ impl Avatar {
             .sum()
     }
 
-    fn wrap_text(&self, text: &[char], window: &Window, cx: &App) -> Wrapped {
-        let f = Font { weight: FontWeight::SEMIBOLD, ..font(self.font.clone()) };
-        let wrap_w = PANEL_MAX_W - PAD_L - PAD_R;
-        let mut wrapper = cx.text_system().line_wrapper(f.clone(), px(BODY_FONT));
-        let s: String = text.iter().collect();
-        let mut lines = Vec::new();
-        let mut base = 0usize;
-        for para in s.split('\n') {
-            let breaks: Vec<usize> = wrapper
-                .wrap_line(&[LineFragment::text(para)], px(wrap_w), IndentAdjustment::NoIndent)
-                .map(|b| b.ix)
-                .collect();
-            let mut start = 0usize;
-            for ix in breaks.into_iter().chain(std::iter::once(para.len())) {
-                lines.push((base + para[..start].chars().count(), base + para[..ix].chars().count()));
-                start = ix;
-            }
-            base += para.chars().count() + 1;
+    /// The span of her window the bubble may use (window-local logical px): on her monitor,
+    /// inside her work area (a side panel included).
+    fn panel_span(&self) -> (f32, f32) {
+        let sf = self.layout.sf;
+        let (mut l, mut r) = (self.vis.0 as f32 / sf, self.vis.1 as f32 / sf);
+        if let Some(a) = self.her_area() {
+            l = l.max((a.x - self.origin.0) as f32 / sf);
+            r = r.min((a.x + a.w - self.origin.0) as f32 / sf);
         }
-        let width = lines
-            .iter()
-            .map(|&(a, b)| {
-                let t: String = text[a..b.min(text.len())].iter().collect();
-                let t = t.trim_end();
-                if t.is_empty() {
-                    return 0.0;
-                }
-                let run = TextRun { len: t.len(), font: f.clone(), color: black(), background_color: None, underline: None, strikethrough: None };
-                f32::from(window.text_system().layout_line(t, px(BODY_FONT), &[run], None).width)
-            })
-            .fold(0.0, f32::max);
-        Wrapped { lines, width }
+        (l, r.max(l + 2.0 * MARGIN + PANEL_MIN_W.min(PANEL_MAX_W)))
+    }
+
+    /// The highest the bubble's top goes (window-local logical px) with her window where it is
+    /// this frame (a bob, a hop, a drop-in on it): under the top of her work area (the bar),
+    /// never above her window.
+    fn panel_top(&self) -> f32 {
+        top_under(self.her_area().map(|a| a.y), self.applied.1, self.layout.sf)
+    }
+
+    /// The same with her window where it rests (no bob, hop or drop-in): the rows it holds
+    /// count from here, so a float bob doesn't take a row away and give it back.
+    fn panel_top_resting(&self) -> f32 {
+        top_under(self.her_area().map(|a| a.y), self.origin.1, self.layout.sf)
+    }
+
+    /// The widest text the bubble takes where she is (logical px): its lines wrap to this.
+    fn text_box_w(&self) -> f32 {
+        text_box_for(self.panel_span())
+    }
+
+    /// `text` in lines no wider than `wrap_w` (logical px) in the weight it is drawn in. A
+    /// paragraph that is one command stays one line: its chip fits itself (`chip_text`).
+    fn wrap_text(&self, text: &[char], wrap_w: f32, weight: FontWeight, chips: bool, window: &Window, cx: &App) -> Wrapped {
+        let f = Font { weight, ..font(self.font.clone()) };
+        let mut wrapper = cx.text_system().line_wrapper(f.clone(), px(BODY_FONT));
+        let breaks = |para: &str| -> Vec<usize> { wrapper.wrap_line(&[LineFragment::text(para)], px(wrap_w), IndentAdjustment::NoIndent).map(|b| b.ix).collect() };
+        let width = |t: &str| {
+            let run = TextRun { len: t.len(), font: f.clone(), color: black(), background_color: None, underline: None, strikethrough: None };
+            f32::from(window.text_system().layout_line(t, px(BODY_FONT), &[run], None).width)
+        };
+        wrap_lines(text, wrap_w, chips.then_some(&|c: &str| self.chip_w(c, window)), breaks, width)
+    }
+
+    /// Width of `s` in the command chip's face (logical px).
+    fn mono_w(&self, s: &str, size: f32, window: &Window) -> f32 {
+        if s.is_empty() {
+            return 0.0;
+        }
+        let run = TextRun { len: s.len(), font: font(MONO), color: black(), background_color: None, underline: None, strikethrough: None };
+        f32::from(window.text_system().layout_line(s, px(size), &[run], None).width)
+    }
+
+    /// The command chip around its command: padding, `$`, the gaps, the copy key (as wide as
+    /// "copied ✓", so a click never widens it).
+    fn chip_frame_w(&self, window: &Window) -> f32 {
+        let f = Font { weight: FontWeight::SEMIBOLD, ..font(self.font.clone()) };
+        let t = "copied ✓";
+        let run = TextRun { len: t.len(), font: f, color: black(), background_color: None, underline: None, strikethrough: None };
+        let copy = f32::from(window.text_system().layout_line(t, px(12.5), &[run], None).width);
+        20.0 + self.mono_w("$", BODY_FONT - 3.0, window) + 8.0 + 8.0 + 2.0 + 8.0 + 1.0 + copy + 2.0
+    }
+
+    /// A command's chip, whole.
+    fn chip_w(&self, cmd: &str, window: &Window) -> f32 {
+        self.chip_frame_w(window) + self.mono_w(cmd, BODY_FONT - 3.0, window)
+    }
+
+    /// The command as its chip shows it in `room` (logical px): whole if it fits, else its start
+    /// and end around "…" (the copy key copies it whole).
+    fn chip_text(&self, cmd: &str, room: f32, window: &Window) -> String {
+        let avail = room - self.chip_frame_w(window);
+        fit_middle(cmd, |s| self.mono_w(s, BODY_FONT - 3.0, window) <= avail)
     }
 }
 
@@ -5543,9 +5754,11 @@ impl PanelGeom {
 
 /// The bubble at `w` × `h`: its bottom at `bottom`, 45 % of it left of her head, inside `vis`
 /// (logical px); its tail at her head where the cuts allow.
-fn place_panel(w: f32, h: f32, head_l: f32, bottom: f32, (vis_l, vis_r): (f32, f32)) -> PanelGeom {
+/// The panel `w`×`h` over her head (`head_l`), its bottom at `bottom`, kept inside `vis` and
+/// under `top` (window-local logical px).
+fn place_panel(w: f32, h: f32, head_l: f32, bottom: f32, top: f32, (vis_l, vis_r): (f32, f32)) -> PanelGeom {
     let x = (head_l - w * 0.45).clamp(vis_l + MARGIN, (vis_r - MARGIN - w).max(vis_l + MARGIN));
-    let y = (bottom - h).max(TOP_MARGIN);
+    let y = (bottom - h).max(top);
     // The blade's root: 28 px, offset toward the bubble's end it is nearer.
     let lo = x + CUT + 16.0;
     let hi = x + w - CUT - 26.0;
@@ -5645,6 +5858,16 @@ const HEARTS: [(f32, f32, f32, u32); 4] = [
 
 impl Render for Avatar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Her work area: asked once a frame (the bubble's span and top, the menu, the probe).
+        self.area_memo.set(Some(None));
+        let e = self.frame(window, cx);
+        self.area_memo.set(None);
+        e
+    }
+}
+
+impl Avatar {
+    fn frame(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         self.renders += 1;
         let now = Instant::now();
         // Held: the window goes where the pointer was for this frame, and the next frame is
@@ -5665,10 +5888,14 @@ impl Render for Avatar {
             elog!("timing: first word on screen {} ms after Enter", t0.elapsed().as_millis());
             self.timing = Some(None);
         }
+        // Wrapped to the text box the bubble has where she is (narrower at a monitor's edge:
+        // wrapped to the widest box, lines ran past it and were cut).
+        let text_box = self.text_box_w();
         if let Some(b) = &self.bubble
-            && b.wrap.is_none()
+            && !b.collapsed
+            && b.wrap.as_ref().is_none_or(|w| w.at != text_box)
         {
-            let w = self.wrap_text(&b.text, window, cx);
+            let w = self.wrap_text(&b.text, text_box, FontWeight::SEMIBOLD, true, window, cx);
             if let Some(b) = &mut self.bubble {
                 b.wrap = Some(w);
             }
@@ -6653,6 +6880,30 @@ impl Render for Avatar {
             }
         }
         if let Some(mode) = mode {
+            // Its bottom (over her head) and the rows that fit under the top of her work area
+            // (perched high, under the bar: its top lines were off screen). No room for one: it
+            // comes down over her, its opening lines.
+            let want = top_l - TIP_GAP - TAIL_H;
+            let bottom = match self.panel_bottom {
+                Some(b) if matches!(mode, PanelMode::Prompt | PanelMode::Input { .. }) => b,
+                Some(b) => b.min(want),
+                None => want,
+            };
+            self.panel_bottom = Some(bottom);
+            // Placed under the bar where her window is this frame; its rows from where it
+            // rests (a bob moved the room by a few px: a row went and came back each cycle).
+            let top_lim = self.panel_top();
+            let top_rest = self.panel_top_resting();
+            let cap = rows_room(bottom, top_rest, true);
+            if mode == PanelMode::Reply
+                && let Some(b) = &mut self.bubble
+            {
+                b.cap = reply_cap(b, bottom, top_rest, busy);
+            }
+            // A prompt is never cut to a line or two under the bar: at least its opening lines,
+            // down over her. Cut even so, it has no one-click ALLOW (REVIEW: the Line, whole).
+            let prompt_cap = cap.max(OPENING_LINES);
+            let mut prompt_cut = false;
             let line_strings = |chars: &[char], w: &Wrapped| -> Vec<String> {
                 w.lines.iter().map(|&(a, b)| chars[a..b.min(chars.len())].iter().collect::<String>().trim_end().to_string()).collect()
             };
@@ -6684,9 +6935,9 @@ impl Render for Avatar {
                 PanelMode::Input { secret } => {
                     let i = self.input.as_ref().expect("input mode has a field");
                     let shown: Vec<char> = if secret { i.text.chars().map(|_| '•').collect() } else { i.text.chars().collect() };
-                    let w = self.wrap_text(&shown, window, cx);
+                    let w = self.wrap_text(&shown, text_box, FontWeight::SEMIBOLD, false, window, cx);
                     let all = line_strings(&shown, &w);
-                    let lines: Vec<String> = all[all.len().saturating_sub(LINES_PER_PAGE)..].to_vec();
+                    let lines: Vec<String> = all[all.len().saturating_sub(cap)..].to_vec();
                     if i.text.is_empty() {
                         placeholder = Some(if secret { "type the answer (hidden)".into() } else { format!("say something to {}", self.name.to_lowercase()) });
                     }
@@ -6697,12 +6948,14 @@ impl Render for Avatar {
                 PanelMode::Prompt => {
                     let u = self.prompt_ui.as_ref().expect("prompt mode has a prompt");
                     let chars: Vec<char> = u.view.text.chars().collect();
-                    let w = self.wrap_text(&chars, window, cx);
+                    // Drawn bold: wrapped bold (wrapped semibold, its lines ran past the box).
+                    let w = self.wrap_text(&chars, text_box, FontWeight::BOLD, false, window, cx);
                     let mut lines = line_strings(&chars, &w);
-                    if lines.len() > LINES_PER_PAGE {
-                        lines.truncate(LINES_PER_PAGE);
+                    if lines.len() > prompt_cap {
+                        lines.truncate(prompt_cap);
+                        prompt_cut = true;
                         if let Some(l) = lines.last_mut() {
-                            l.push('…');
+                            *l = goes_on(l);
                         }
                     }
                     let n = lines.len().max(1);
@@ -6718,7 +6971,7 @@ impl Render for Avatar {
                 }
             };
             let probe = mode == PanelMode::Probe;
-            let (vis_l, vis_r) = (self.vis.0 as f32 / sf, self.vis.1 as f32 / sf);
+            let (vis_l, vis_r) = self.panel_span();
             let max_w = (vis_r - vis_l - 2.0 * MARGIN).min(PANEL_MAX_W);
             // Never narrower than the header line (name plate, label .. glyph status).
             let header_w = PAD_L
@@ -6751,20 +7004,12 @@ impl Render for Avatar {
             let rows = match (mode, &self.bubble) {
                 _ if stub => 0,
                 (PanelMode::Reply, Some(b)) => b.rows().max(1),
-                _ => total_lines.clamp(1, LINES_PER_PAGE),
+                (PanelMode::Prompt, _) => total_lines.clamp(1, prompt_cap),
+                _ => total_lines.clamp(1, cap),
             };
             // A reply ending on a command chip with nothing else for the footer: the collapse key
             // sits on the chip's row, no empty band under it.
-            let chip_last = mode == PanelMode::Reply
-                && !stub
-                && !busy
-                && self.bubble.as_ref().is_some_and(|b| {
-                    !b.long()
-                        && b.wrap.as_ref().and_then(|w| w.lines.last()).is_some_and(|&(a, e)| {
-                            let t: String = b.text[a.min(b.text.len())..e.min(b.text.len())].iter().collect();
-                            crate::line::command(&t).is_some()
-                        })
-                });
+            let chip_last = mode == PanelMode::Reply && !stub && !busy && self.bubble.as_ref().is_some_and(|b| !b.long() && b.ends_on_chip());
             let footer = !probe && !chip_last;
             let mut h = PAD_T + HEADER_H + HEADER_GAP + rows as f32 * LINE_H + if footer { FOOTER_GAP + FOOTER_H } else { 0.0 } + PAD_B;
             if mode == PanelMode::Prompt
@@ -6776,13 +7021,6 @@ impl Render for Avatar {
                 }
                 self.prompt_h = Some((key, h));
             }
-            let want = top_l - TIP_GAP - TAIL_H;
-            let bottom = match self.panel_bottom {
-                Some(b) if matches!(mode, PanelMode::Prompt | PanelMode::Input { .. }) => b,
-                Some(b) => b.min(want),
-                None => want,
-            };
-            self.panel_bottom = Some(bottom);
             // Its size eases to the layout (one curve, `hud`); it opens from her at
             // OPEN_SCALE, or out of the pill. A new reply in it pulses; streaming text doesn't.
             let serial = match mode {
@@ -6803,8 +7041,8 @@ impl Render for Avatar {
             self.ghost = None;
             // Its shell, and the box its words are laid out in (the same, but while it opens:
             // the box it is going to, its words where they will be, shown only inside the shell).
-            let g = place_panel(pf.shell.0, pf.shell.1, head_l, bottom, (vis_l, vis_r));
-            let gc = place_panel(pf.content.0, pf.content.1, head_l, bottom, (vis_l, vis_r));
+            let g = place_panel(pf.shell.0, pf.shell.1, head_l, bottom, top_lim, (vis_l, vis_r));
+            let gc = place_panel(pf.content.0, pf.content.1, head_l, bottom, top_lim, (vis_l, vis_r));
             let (x, y, w, h) = (gc.x, gc.y, gc.w, gc.h);
             self.panel_rect.set(Some((x, y, w, h + TAIL_H)));
             panel_geom = Some(g);
@@ -6875,6 +7113,37 @@ impl Render for Avatar {
             let caret = matches!(mode, PanelMode::Input { .. });
             let body_weight = if prompt_mode { FontWeight::BOLD } else { FontWeight::SEMIBOLD };
             let n_lines = lines.len();
+            if layout_probe() {
+                let tw = w - PAD_L - PAD_R;
+                let f = Font { weight: body_weight, ..font(self.font.clone()) };
+                let rows: Vec<serde_json::Value> = lines
+                    .iter()
+                    .enumerate()
+                    .map(|(k, t)| {
+                        let chip = (mode == PanelMode::Reply).then(|| crate::line::command(t)).flatten();
+                        let lw = match chip {
+                            Some(c) => self.chip_w(&self.chip_text(c, tw, window), window),
+                            None if t.is_empty() => 0.0,
+                            None => {
+                                let run = TextRun { len: t.len(), font: f.clone(), color: black(), background_color: None, underline: None, strikethrough: None };
+                                f32::from(window.text_system().layout_line(t, px(BODY_FONT), &[run], None).width)
+                            }
+                        };
+                        serde_json::json!({ "text": t, "w": lw, "chip": chip.is_some(), "shown": k < fits })
+                    })
+                    .collect();
+                let (ox, oy) = (self.applied.0 as f32, self.applied.1 as f32);
+                let dev = |v: f32| (v * sf).round();
+                let area = self.her_area().map(|a| [a.x, a.y, a.w, a.h]);
+                self.panel_probe = Some(serde_json::json!({
+                    "mode": match mode { PanelMode::Reply => "reply", PanelMode::Prompt => "prompt", PanelMode::Input { .. } => "input", PanelMode::Probe => "probe" },
+                    "panel": [ox + dev(x), oy + dev(y), dev(w), dev(h)],
+                    "text_box": [ox + dev(x + PAD_L), oy + dev(y + PAD_T + HEADER_H + HEADER_GAP), dev(tw), dev(h - (PAD_T + HEADER_H + HEADER_GAP) - foot_zone)],
+                    "text_w": tw, "line_h": LINE_H, "sf": sf, "fits": fits, "cap": cap, "rows": rows,
+                    "read": self.bubble.as_ref().is_some_and(|b| b.long()) && mode == PanelMode::Reply,
+                    "total": total_lines, "area": area, "settled": !self.panel_fx.busy(now),
+                }));
+            }
             let caret_c = pal.focus;
             let mut body = div()
                 .absolute()
@@ -6903,6 +7172,8 @@ impl Render for Avatar {
                         && let Some(c) = crate::line::command(&t)
                     {
                         let copied = self.cmd_copied.as_deref() == Some(c);
+                        // Too long for the box: its start and end around "…"; copied whole.
+                        let face = self.chip_text(c, w - PAD_L - PAD_R, window);
                         let c = c.to_string();
                         let cmd_probes = self.buttons.clone();
                         let chip = div()
@@ -6920,7 +7191,7 @@ impl Render for Avatar {
                             .text_size(px(BODY_FONT - 3.0))
                             .font_weight(FontWeight::NORMAL)
                             .child(div().text_color(rgb(pal.dim)).child("$"))
-                            .child(div().text_color(rgb(pal.text)).child(c.clone()))
+                            .child(div().text_color(rgb(pal.text)).whitespace_nowrap().child(face))
                             .child(
                                 div()
                                     .ml(px(2.0))
@@ -7095,7 +7366,14 @@ impl Render for Avatar {
                                 p.dismissed = true;
                             }
                         } else if let Some(b) = &mut this.bubble {
+                            // He put it away: read, no strip when its hold runs out or the
+                            // next reply replaces it.
                             b.collapsed = true;
+                            b.hide_at = None;
+                            if b.stream && b.turn > 0 {
+                                let turn = b.turn;
+                                this.unseen.heard(turn);
+                            }
                         }
                         cx.notify();
                         this.schedule(cx);
@@ -7258,7 +7536,7 @@ impl Render for Avatar {
                                 }
                             }),
                         ));
-                    } else if risky {
+                    } else if risky || prompt_cut {
                         row = row.child(tbtn("review", "REVIEW ▸", Key::Go, armed).on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, _: &MouseDownEvent, _, cx| {
@@ -7422,24 +7700,21 @@ impl Render for Avatar {
             // her: a click low on her body cut the menu's bottom rows off). Before its first
             // paint, its height is estimated from its rows.
             let rows = 6 + usize::from(self.attention_label().is_some()) * 2 + usize::from(self.voice_on() && self.voice.cfg.handsfree);
-            let header_on = self.stills.as_ref().is_some_and(|s| s.capri.is_some());
-            // Its height as painted for this set of rows: placed once that is known (a menu
-            // never painted with these rows is laid out unseen for a frame and measured).
-            let sig = (rows as u32) << 2 | u32::from(mark.is_some()) << 1 | u32::from(header_on);
-            let measured = self.menu_h.get().0 == sig;
             // Her work area (under the bar, on her monitor), window-local logical px: the menu's
             // top left stays within it less the menu's size.
             let o = self.origin;
-            let (mut x0, mut y0) = (f32::from(l.lp(self.vis.0)), 0.0f32);
-            let (mut x1, mut y1) = (f32::from(l.lp(self.vis.1)), f32::from(l.lp(l.win_h)));
-            if let Some(a) = self.her_area() {
-                x0 = x0.max((a.x - o.0) as f32 / sf);
-                y0 = y0.max((a.y - o.1) as f32 / sf);
-                x1 = x1.min((a.x + a.w - o.0) as f32 / sf);
-                y1 = y1.min((a.y + a.h - o.1) as f32 / sf);
-            }
-            let h = self.menu_h.get().1;
-            let (xr, yr) = ((x0 + 4.0, x1 - MENU_W - 4.0), (y0 + 4.0, y1 - h - 4.0));
+            let area = self.her_area().map(|a| ((a.x - o.0) as f32 / sf, (a.y - o.1) as f32 / sf, a.w as f32 / sf, a.h as f32 / sf));
+            let span = (f32::from(l.lp(self.vis.0)), f32::from(l.lp(self.vis.1)));
+            // Its picture only where it fits whole: without it the menu is MENU_HEADER_H
+            // shorter (her window cut off by the top of the screen left too little of it).
+            let (last_sig, last_h) = self.menu_h.get();
+            let header_on = self.stills.as_ref().is_some_and(|s| s.capri.is_some()) && menu_header_fits(last_sig, last_h, menu_ranges(span, f32::from(l.lp(l.win_h)), area, 0.0).2);
+            // Its height as painted for this set of rows: placed once that is known (a menu
+            // never painted with these rows is laid out unseen for a frame and measured).
+            let sig = (rows as u32) << 2 | u32::from(mark.is_some()) << 1 | u32::from(header_on);
+            let measured = last_sig == sig;
+            let h = last_h;
+            let (xr, yr, _) = menu_ranges(span, f32::from(l.lp(l.win_h)), area, h);
             // Her face as drawn now: the menu keeps off it.
             let face = self.frame_or_default(self.anim.frame()).and_then(|f| f.face_box).map(|(fx0, fy0, fx1, fy1)| {
                 let (ax, ay) = (l.avatar_x as f32, l.avatar_y as f32);
@@ -7447,13 +7722,17 @@ impl Render for Avatar {
             });
             let place = match self.menu_place {
                 // Placed; a pose change that put her face under it moves it once, to the far side.
-                Some((a, x, y, moved)) if a == at => match menu_reflow((x, y), (MENU_W, h), xr, face).filter(|_| !moved) {
-                    Some(p) => {
-                        self.menu_place = Some((at, p.0, p.1, true));
-                        Some(p)
-                    }
-                    None => Some((x, y)),
-                },
+                // Kept inside her work area as it is now: she moved under it (a drop-in, a
+                // landing) or it grew (its footer came) and its last rows went off (Quit).
+                Some((a, x, y, moved)) if a == at => {
+                    let (p, moved) = match menu_reflow((x, y), (MENU_W, h), xr, face).filter(|_| !moved) {
+                        Some(p) => (p, true),
+                        None => ((x, y), moved),
+                    };
+                    let p = if measured { menu_inside(p, xr, yr) } else { p };
+                    self.menu_place = Some((at, p.0, p.1, moved));
+                    Some(p)
+                }
                 _ if measured => {
                     let p = menu_at((f32::from(at.x), f32::from(at.y)), (MENU_W, h), xr, yr, face);
                     self.menu_place = Some((at, p.0, p.1, false));
@@ -7462,7 +7741,7 @@ impl Render for Avatar {
                 _ => None,
             };
             // lachy's capri.png over the items: who this menu is.
-            let header = self.stills.as_ref().and_then(|s| s.capri.clone()).map(|i| {
+            let header = self.stills.as_ref().and_then(|s| s.capri.clone()).filter(|_| header_on).map(|i| {
                 let s = i.size(0);
                 let w = MENU_HEADER_PX * u32::from(s.width) as f32 / (u32::from(s.height) as f32).max(1.0);
                 div().flex().justify_center().pt(px(6.0)).pb(px(2.0)).child(img(ImageSource::Render(i)).w(px(w)).h(px(MENU_HEADER_PX)))
@@ -7666,7 +7945,11 @@ impl Render for Avatar {
                         }
                     }
                     if let Some(b) = menu_cell.get() {
-                        menu_h.set((menu_sig, f32::from(b.size.height)));
+                        let h = (menu_sig, f32::from(b.size.height));
+                        // A new height is placed again next frame.
+                        if menu_h.replace(h) != h {
+                            window.request_animation_frame();
+                        }
                     }
                     if menu_unseen {
                         // Measured: placed and shown next frame.
@@ -7935,5 +8218,416 @@ mod menu_tests {
         assert_eq!(menu_at((200.0, 300.0), SIZE, (40.0, 280.0), Y, FACE), (248.0, 300.0));
         // Nothing beside, nothing under: above her face, not above the bar.
         assert_eq!(menu_at((140.0, 300.0), (210.0, 200.0), (0.0, 150.0), (120.0, 300.0), FACE), (140.0, 300.0), "above would cross the bar: over it");
+    }
+}
+
+#[cfg(test)]
+mod menu_edge_tests {
+    use super::{MENU_HEADER_H, MENU_W, menu_at, menu_header_fits, menu_inside, menu_ranges};
+
+    /// x, y, w, h (device px).
+    type R = (i32, i32, i32, i32);
+    /// A rect in float px.
+    type F4 = (f32, f32, f32, f32);
+
+    struct Desk {
+        name: &'static str,
+        monitors: Vec<R>,
+        /// Each monitor less its panels.
+        areas: Vec<R>,
+    }
+
+    fn desks() -> Vec<Desk> {
+        vec![
+            Desk { name: "one, bar on top", monitors: vec![(0, 0, 1600, 900)], areas: vec![(0, 28, 1600, 872)] },
+            Desk { name: "two side by side", monitors: vec![(0, 0, 2560, 1600), (2560, 0, 2560, 1600)], areas: vec![(0, 28, 2560, 1572), (2560, 28, 2560, 1572)] },
+            // Different heights, the shorter one lower, a bottom panel on it.
+            Desk { name: "two heights, bottom panel", monitors: vec![(0, 160, 2560, 1440), (2560, 0, 2560, 1600)], areas: vec![(0, 188, 2560, 1372), (2560, 28, 2560, 1572)] },
+            Desk { name: "stacked", monitors: vec![(0, 0, 1920, 1080), (0, 1080, 1920, 1080)], areas: vec![(0, 0, 1920, 1080), (0, 1108, 1920, 1052)] },
+            Desk { name: "laptop 1366x768", monitors: vec![(0, 0, 1366, 768)], areas: vec![(0, 0, 1366, 740)] },
+        ]
+    }
+
+    /// Her window (logical px, as `Layout` makes it at the default height) and her body in it.
+    const WIN: (f32, f32) = (500.0, 696.0);
+    const BODY: (f32, f32, f32, f32) = (68.0, 304.0, 364.0, 363.0);
+    /// The menu as painted (header, eight rows, its mark).
+    const MENU_H: f32 = 290.0;
+
+    /// Window origins (device px) with her body at each edge of `area`: left, right, the top
+    /// (perched high, hanging under the bar), the bottom (on the floor), and the middle.
+    fn spots(area: R, sf: f32) -> Vec<(&'static str, (i32, i32))> {
+        let d = |v: f32| (v * sf).round() as i32;
+        let (ax, ay, aw, ah) = area;
+        let (bx, by, bw, bh) = (d(BODY.0), d(BODY.1), d(BODY.2), d(BODY.3));
+        let (xl, xr, xm) = (ax - bx, ax + aw - bx - bw, ax + aw / 2 - bx - bw / 2);
+        let (yt, yb, ym) = (ay - by, ay + ah - 6 - by - bh, ay + ah / 2 - by - bh / 2);
+        vec![("left", (xl, yb)), ("right", (xr, yb)), ("top", (xm, yt)), ("top-left", (xl, yt)), ("top-right", (xr, yt)), ("bottom", (xm, yb)), ("middle", (xm, ym))]
+    }
+
+    /// As `render` places it: the ranges on her monitor and work area, the picture dropped
+    /// where it doesn't fit, under the click. The menu's rect, root device px.
+    fn place(desk: &Desk, o: (i32, i32), sf: f32, click: (f32, f32)) -> (F4, R, (f32, f32), f32) {
+        let (ww, wh) = ((WIN.0 * sf).round() as i32, (WIN.1 * sf).round() as i32);
+        let c = (o.0 + ((BODY.0 + BODY.2 / 2.0) * sf) as i32, o.1 + ((BODY.1 + BODY.3 / 2.0) * sf) as i32);
+        let i = desk.monitors.iter().position(|m| c.0 >= m.0 && c.0 < m.0 + m.2 && c.1 >= m.1 && c.1 < m.1 + m.3).unwrap_or(0);
+        let (m, a) = (desk.monitors[i], desk.areas[i]);
+        // `visible_range`, then window-local logical px.
+        let vis = (((m.0 - o.0).max(0)) as f32 / sf, ((m.0 + m.2 - o.0).min(ww)) as f32 / sf);
+        let area = Some(((a.0 - o.0) as f32 / sf, (a.1 - o.1) as f32 / sf, a.2 as f32 / sf, a.3 as f32 / sf));
+        let room = menu_ranges(vis, wh as f32 / sf, area, 0.0).2;
+        let h = if menu_header_fits(1, MENU_H, room) { MENU_H } else { MENU_H - MENU_HEADER_H };
+        let (xr, yr, _) = menu_ranges(vis, wh as f32 / sf, area, h);
+        let p = menu_at(click, (MENU_W, h), xr, yr, None);
+        ((o.0 as f32 + p.0 * sf, o.1 as f32 + p.1 * sf, MENU_W * sf, h * sf), a, p, h)
+    }
+
+    fn inside(menu: F4, area: R, o: (i32, i32), sf: f32) -> bool {
+        let (ww, wh) = (WIN.0 * sf, WIN.1 * sf);
+        let (x0, y0) = ((area.0 as f32).max(o.0 as f32), (area.1 as f32).max(o.1 as f32));
+        let (x1, y1) = (((area.0 + area.2) as f32).min(o.0 as f32 + ww), ((area.1 + area.3) as f32).min(o.1 as f32 + wh));
+        menu.0 >= x0 - 0.5 && menu.1 >= y0 - 0.5 && menu.0 + menu.2 <= x1 + 0.5 && menu.1 + menu.3 <= y1 + 0.5
+    }
+
+    #[test]
+    fn the_whole_menu_quit_included_is_inside_her_work_area_at_every_edge() {
+        let mut n = 0;
+        for desk in desks() {
+            for sf in [1.0, 1.167, 1.5, 2.0] {
+                for (k, &area) in desk.areas.iter().enumerate() {
+                    for (spot, o) in spots(area, sf) {
+                        for q in [0.15, 0.5, 0.85] {
+                            let click = (BODY.0 + BODY.2 * 0.5, BODY.1 + BODY.3 * q);
+                            let (menu, a, _, _) = place(&desk, o, sf, click);
+                            assert_eq!(a, area, "{} monitor {k} {spot}: her work area", desk.name);
+                            // Quit is its last row: the menu's bottom inside is Quit inside.
+                            assert!(inside(menu, area, o, sf), "{} monitor {k} {spot} sf {sf} click {q}: menu {menu:?} outside {area:?} / window at {o:?}", desk.name);
+                            n += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(n > 400);
+    }
+
+    #[test]
+    fn she_moves_under_an_open_menu_or_it_grows_and_it_stays_inside() {
+        // r57: opened on her hanging under the bar, then a drop-in took her (and her window,
+        // the menu in it) to the floor: placed where it was, its bottom rows (Quit) went under
+        // the screen's edge. Kept inside her work area as it is each frame, it doesn't.
+        let desk = &desks()[1];
+        let sf = 1.167;
+        let area = desk.areas[1];
+        let top = spots(area, sf).into_iter().find(|s| s.0 == "top").unwrap().1;
+        let floor = spots(area, sf).into_iter().find(|s| s.0 == "right").unwrap().1;
+        let click = (BODY.0 + BODY.2 * 0.5, BODY.1 + BODY.3 * 0.5);
+        let (_, _, p, h) = place(desk, top, sf, click);
+        // Where it was in her window, with her window on the floor now.
+        let o = floor;
+        let vis = (((desk.monitors[1].0 - o.0).max(0)) as f32 / sf, ((desk.monitors[1].0 + desk.monitors[1].2 - o.0).min((WIN.0 * sf) as i32)) as f32 / sf);
+        let a = Some(((area.0 - o.0) as f32 / sf, (area.1 - o.1) as f32 / sf, area.2 as f32 / sf, area.3 as f32 / sf));
+        let stale = (o.0 as f32 + p.0 * sf, o.1 as f32 + p.1 * sf, MENU_W * sf, h * sf);
+        assert!(!inside(stale, area, o, sf), "the case: left where it was, it is cut");
+        let (xr, yr, _) = menu_ranges(vis, WIN.1, a, h);
+        let q = menu_inside(p, xr, yr);
+        assert!(inside((o.0 as f32 + q.0 * sf, o.1 as f32 + q.1 * sf, MENU_W * sf, h * sf), area, o, sf), "kept inside: {q:?}");
+        // Grown after it was placed (its mark row came with the session): the same.
+        let o = (area.0 + 400, area.1 + area.3 - (WIN.1 * sf) as i32 + 20);
+        let a = Some(((area.0 - o.0) as f32 / sf, (area.1 - o.1) as f32 / sf, area.2 as f32 / sf, area.3 as f32 / sf));
+        let vis = (0.0, WIN.0);
+        let (xr, yr, _) = menu_ranges(vis, WIN.1, a, 250.0);
+        let p = menu_at((250.0, 640.0), (MENU_W, 250.0), xr, yr, None);
+        let (xr, yr, _) = menu_ranges(vis, WIN.1, a, MENU_H);
+        let q = menu_inside(p, xr, yr);
+        assert!(inside((o.0 as f32 + q.0 * sf, o.1 as f32 + q.1 * sf, MENU_W * sf, MENU_H * sf), area, o, sf));
+    }
+
+    #[test]
+    fn too_tall_for_its_room_its_bottom_quit_stays_in_view() {
+        // Shady (#71): with no room for all of it, the top won and Quit went under the edge.
+        let area = Some((0.0, 100.0, 1366.0, 200.0));
+        let (xr, yr, _) = menu_ranges((0.0, 500.0), WIN.1, area, MENU_H);
+        assert!(yr.1 < yr.0, "it can't fit");
+        let bottom_in_view = |y: f32| (y + MENU_H - (100.0 + 200.0 - 4.0)).abs() < 0.01;
+        for click in [(100.0, 50.0), (100.0, 150.0), (100.0, 600.0)] {
+            assert!(bottom_in_view(menu_at(click, (MENU_W, MENU_H), xr, yr, None).1), "{click:?}");
+            assert!(bottom_in_view(menu_inside(click, xr, yr).1), "{click:?}");
+        }
+    }
+
+    #[test]
+    fn its_picture_goes_where_the_menu_would_not_fit_with_it() {
+        // Measured with the picture (sig bit 0) or without it: the same verdict.
+        assert!(menu_header_fits(1, 290.0, 300.0));
+        assert!(!menu_header_fits(1, 290.0, 280.0));
+        assert!(!menu_header_fits(0, 290.0 - MENU_HEADER_H, 280.0));
+        assert!(menu_header_fits(0, 290.0 - MENU_HEADER_H, 290.0));
+        // Never measured: it has it (the first frame is laid out unseen and measured).
+        assert!(menu_header_fits(0, 0.0, 100.0));
+    }
+}
+
+#[cfg(test)]
+mod bubble_layout_tests {
+    use super::{
+        Bubble, FOOTER_GAP, FOOTER_H, HEADER_GAP, HEADER_H, LINE_H, LINES_PER_PAGE, MARGIN, OPENING_LINES, PAD_B, PAD_L, PAD_R, PAD_T, PANEL_MAX_W, PANEL_MIN_W, fit_middle,
+        place_panel, reply_cap, rows_room, text_box_for, top_under, wrap_lines,
+    };
+
+    /// A proportional face's widths (logical px at the bubble's 20 px): wide glyphs (CJK, emoji)
+    /// twice a letter. Stands in for the real font: the wrap and the check use the same one.
+    fn cw(c: char) -> f32 {
+        match c {
+            'i' | 'l' | 'j' | '.' | ',' | '\'' | '!' | '|' | ':' | ';' => 5.5,
+            ' ' => 5.0,
+            'm' | 'w' | 'M' | 'W' => 16.0,
+            c if c.is_ascii_uppercase() => 13.0,
+            c if c.is_ascii() => 11.0,
+            c if (c as u32) >= 0x2E80 => 20.0,
+            _ => 11.0,
+        }
+    }
+    fn width(s: &str) -> f32 {
+        s.chars().map(cw).sum()
+    }
+    /// The command chip: its frame and a monospace command.
+    fn chip_w(cmd: &str) -> f32 {
+        92.0 + 10.2 * cmd.chars().count() as f32
+    }
+
+    /// Greedy word wrap at `w` (GPUI's: a line keeps its trailing space; a word wider than the
+    /// line breaks between characters). Byte offsets where lines start.
+    fn breaks(para: &str, w: f32) -> Vec<usize> {
+        let mut out = Vec::new();
+        let mut x = 0.0f32;
+        let mut words: Vec<(usize, &str)> = Vec::new();
+        let mut start = 0usize;
+        let mut prev_space = false;
+        for (i, c) in para.char_indices() {
+            if !c.is_whitespace() && prev_space {
+                words.push((start, &para[start..i]));
+                start = i;
+            }
+            prev_space = c.is_whitespace();
+        }
+        words.push((start, &para[start..]));
+        for (ix, word) in words {
+            let ww = width(word.trim_end());
+            if x > 0.0 && x + ww > w {
+                out.push(ix);
+                x = 0.0;
+            }
+            if ww > w {
+                for (ci, ch) in word.char_indices() {
+                    if x > 0.0 && x + cw(ch) > w && !ch.is_whitespace() {
+                        out.push(ix + ci);
+                        x = 0.0;
+                    }
+                    x += cw(ch);
+                }
+            } else {
+                x += width(word);
+            }
+        }
+        out.retain(|&b| b > 0 && b < para.len());
+        out.dedup();
+        out
+    }
+
+    fn samples() -> Vec<(String, String)> {
+        let v: serde_json::Value = serde_json::from_str(include_str!("../tests/fixtures/bubble_replies.json")).unwrap();
+        let mut out = Vec::new();
+        for k in ["replies", "synthetic"] {
+            for (i, r) in v[k].as_array().unwrap().iter().enumerate() {
+                out.push((format!("{k}[{i}]"), r.as_str().unwrap().to_string()));
+            }
+        }
+        out
+    }
+
+    /// Lines shown, the panel's text width, its rect, rows, the bubble.
+    type Laid = (Vec<String>, f32, (f32, f32, f32, f32), usize, Bubble);
+
+    /// The bubble laid out as `render` does for a reply.
+    fn lay(raw: &str, span: (f32, f32), top: f32, bottom: f32) -> Laid {
+        let text: Vec<char> = crate::session::clean(raw).chars().collect();
+        let tb = text_box_for(span);
+        let wrap = wrap_lines(&text, tb, Some(&chip_w), |p| breaks(p, tb), width);
+        let max_w = (span.1 - span.0 - 2.0 * MARGIN).min(PANEL_MAX_W);
+        let pw = (wrap.width + PAD_L + PAD_R + 2.0).clamp(PANEL_MIN_W.min(max_w), max_w);
+        let b = Bubble {
+            shown: text.len(),
+            text,
+            per_tick: 2,
+            next_char: None,
+            hide_at: None,
+            wrap: Some(wrap),
+            page: None,
+            raw: raw.to_string(),
+            collapsed: false,
+            stream: true,
+            more: false,
+            width: 0.0,
+            serial: 1,
+            turn: 1,
+            cap: LINES_PER_PAGE,
+        };
+        let mut b = b;
+        b.cap = reply_cap(&b, bottom, top, false);
+        let rows = b.rows().max(1);
+        let h = PAD_T + HEADER_H + HEADER_GAP + rows as f32 * LINE_H + foot(&b) + PAD_B;
+        let g = place_panel(pw, h, (span.0 + span.1) / 2.0, bottom, top, span);
+        (b.page_lines_marked(), pw - PAD_L - PAD_R, (g.x, g.y, g.w, g.h), rows, b)
+    }
+
+    /// Its footer's height over PAD_B, as `render` lays it: none when it ends on a chip, whole.
+    fn foot(b: &Bubble) -> f32 {
+        if !b.long() && b.ends_on_chip() { 0.0 } else { FOOTER_GAP + FOOTER_H }
+    }
+
+    #[test]
+    fn every_line_of_every_reply_is_inside_the_bubble_wherever_she_is() {
+        // Her window's part on her monitor (window-local logical px): all of it, cut at the
+        // right edge of the screen (her default spot: r57's clipped lines), at the left, narrow.
+        let spans = [(0.0, 500.0), (0.0, 432.0), (68.0, 500.0), (40.0, 420.0)];
+        // (top, bottom): room for eight rows; perched high (one row's room); right under the
+        // bar (none: it comes down over her).
+        let rooms = [(6.0, 300.0), (200.0, 300.0), (250.0, 300.0)];
+        let mut n = 0;
+        for (name, raw) in samples() {
+            for span in spans {
+                for (top, bottom) in rooms {
+                    let (lines, text_w, (x, y, w, h), rows, b) = lay(&raw, span, top, bottom);
+                    let at = format!("{name} span {span:?} room {top}..{bottom}");
+                    for l in &lines {
+                        let lw = match crate::line::command(l) {
+                            Some(c) => chip_w(&fit_middle(c, |s| chip_w(s) <= text_w)),
+                            None => width(l),
+                        };
+                        assert!(lw <= text_w + 0.01, "{at}: line {l:?} is {lw} px in a {text_w} px box");
+                    }
+                    // The last line shown is inside the text box, above the footer.
+                    assert!(lines.len() <= rows, "{at}");
+                    let text_bottom = y + PAD_T + HEADER_H + HEADER_GAP + rows as f32 * LINE_H;
+                    assert!(text_bottom <= y + h - (foot(&b) + PAD_B) + 0.01, "{at}");
+                    // The bubble is inside its span and under the top of her work area.
+                    assert!(x >= span.0 + MARGIN - 0.01 && x + w <= span.1 - MARGIN + 0.01, "{at}: x {x} w {w}");
+                    assert!(y >= top - 0.01, "{at}: y {y} above {top}");
+                    // Nothing cut silently: more lines than shown, the footer has READ (and its
+                    // last line says so, "…", unless it is a command chip: kept whole).
+                    let total = b.wrap.as_ref().unwrap().lines.len();
+                    if total > rows {
+                        let last = lines.last().unwrap();
+                        assert!(last.ends_with('…') || crate::line::command(last).is_some(), "{at}: {total} lines, {rows} shown, no …: {lines:?}");
+                        assert!(b.long(), "{at}");
+                    }
+                    n += 1;
+                }
+            }
+        }
+        assert!(n >= 63 * 12, "{n}");
+    }
+
+    #[test]
+    fn its_last_line_says_it_goes_on_and_keeps_a_short_word() {
+        assert_eq!(super::goes_on("guess."), "guess…");
+        assert_eq!(super::goes_on("---"), "…");
+        assert_eq!(super::goes_on("  src/view.rs"), "  src/view…");
+        assert_eq!(super::goes_on("bella and opened four Windows PRs. It"), "bella and opened four Windows PRs…");
+        assert_eq!(super::goes_on("though none of it is live yet. Bella's still on the"), "though none of it is live yet. Bella's still on…");
+        assert_eq!(super::goes_on("https://github.com/HaseebKhalid1507/capri-"), "https://github.com/HaseebKhalid1507/cap…");
+    }
+
+    #[test]
+    fn the_room_over_her_head_caps_the_rows() {
+        assert_eq!(rows_room(300.0, 6.0, true), LINES_PER_PAGE);
+        assert_eq!(rows_room(300.0, 200.0, true), 1);
+        // Not even one: it comes down over her with its opening lines.
+        assert_eq!(rows_room(300.0, 250.0, true), OPENING_LINES);
+        // Ten lines with room for four: its opening lines, "…", READ.
+        let ten: String = (1..=10).map(|i| format!("Line {i}.")).collect::<Vec<_>>().join("\n");
+        let (lines, _, _, rows, b) = lay(&ten, (0.0, 500.0), 120.0, 300.0);
+        assert!(b.long() && rows == OPENING_LINES && lines.last().unwrap().ends_with('…'), "{lines:?}");
+    }
+
+    #[test]
+    fn a_command_too_long_for_its_chip_keeps_its_ends_and_is_copied_whole() {
+        let cmd = "SYNAPS_DESKTOP_BIN=$HOME/.local/bin/synaps-desktop-hybrid.motion synaps-desktop --verbose";
+        let shown = fit_middle(cmd, |s| chip_w(s) <= 420.0);
+        assert!(chip_w(&shown) <= 420.0 && shown.contains('…'), "{shown}");
+        assert!(shown.starts_with("SYNAPS_DESKTOP_BIN") && shown.ends_with("--verbose"), "{shown}");
+        assert_eq!(fit_middle("synaps login", |s| chip_w(s) <= 300.0), "synaps login");
+        // A command paragraph is one line (its chip), never split into a chip and loose text.
+        let raw = format!("Run this:\n`{cmd}`");
+        let (lines, ..) = lay(&raw, (0.0, 432.0), 6.0, 300.0);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_eq!(crate::line::command(&lines[1]), Some(cmd));
+    }
+
+    #[test]
+    fn a_chip_on_the_last_row_shown_is_copied_whole() {
+        // Shady (#71): the last row of a cut page got its "…" even as a chip, and `command`
+        // took "…synaps-desktop…" without --verbose, so that is what copy copied.
+        let cmd = "SYNAPS_DESKTOP_BIN=$HOME/.local/bin/synaps-desktop synaps-desktop --verbose";
+        let two = "cargo run --release -- --pack capri";
+        let raw = format!("One.\nTwo.\n`{cmd}`\nFour.\nFive.\n`{two}`\nSeven.\nEight.\nNine.\nTen.");
+        // Long: its opening lines, the chip the last of them.
+        let (lines, _, _, rows, mut b) = lay(&raw, (0.0, 500.0), 6.0, 300.0);
+        assert!(b.long() && rows == OPENING_LINES, "{lines:?}");
+        assert_eq!(crate::line::command(lines.last().unwrap()), Some(cmd), "{lines:?}");
+        // Paged on: the chip the last row of the page.
+        b.page = Some(3);
+        let lines = b.page_lines_marked();
+        assert_eq!(lines.len(), OPENING_LINES);
+        assert_eq!(crate::line::command(lines.last().unwrap()), Some(two), "{lines:?}");
+        // A text line there still says it goes on.
+        b.page = Some(1);
+        assert!(b.page_lines_marked().last().unwrap().ends_with('…'));
+    }
+
+    #[test]
+    fn a_reply_ending_on_its_chip_gets_the_footers_row() {
+        // Room for three rows with the footer, four without: four lines ending on a chip have
+        // no footer (the collapse key is on the chip's row), so all four show, nothing cut.
+        let chrome = PAD_T + HEADER_H + HEADER_GAP + PAD_B;
+        let bottom = 300.0;
+        let top = bottom - chrome - 4.0 * LINE_H - 1.0;
+        assert_eq!(rows_room(bottom, top, true), 3);
+        assert_eq!(rows_room(bottom, top, false), 4);
+        let raw = "One.\nTwo.\nThree:\n`synaps login`";
+        let (lines, _, (_, y, _, h), rows, b) = lay(raw, (0.0, 500.0), top, bottom);
+        assert!(!b.long() && rows == 4 && lines.len() == 4, "{lines:?}");
+        assert!(y >= top - 0.01 && y + h <= bottom + 0.01, "{y} {h}");
+        // Busy (the abort key in the footer), or text after the chip: the footer's room counts.
+        assert_eq!(reply_cap(&b, bottom, top, true), 3);
+        let (_, _, _, rows, b) = lay("One.\nTwo.\nThree.\nFour.", (0.0, 500.0), top, bottom);
+        assert!(b.long() && rows == OPENING_LINES, "{rows}");
+    }
+
+    #[test]
+    fn a_float_bob_does_not_take_a_row_and_give_it_back() {
+        // Perched high, the room right at a row's edge: her window bobs (float_bob, 2.5 px
+        // a side). Counted where her window is each frame, the rows flickered; counted where it
+        // rests, they hold, and the bubble placed where it is stays under the bar.
+        let sf = 1.167f32;
+        let (area_y, bottom) = (28, 300.0f32);
+        let caps = |win_y: i32| rows_room(bottom, top_under(Some(area_y), win_y, sf), true);
+        // A resting spot with four rows, three a few px higher.
+        let rest = (-400..0).find(|&y| caps(y) == 4 && caps(y - 3) == 3).expect("a spot on the edge");
+        let mut seen_now = std::collections::BTreeSet::new();
+        let mut seen_rest = std::collections::BTreeSet::new();
+        for k in 0..80 {
+            let t = k as f32 * 0.04;
+            let bob = -(2.5 * sf * (t * std::f32::consts::TAU / 3.2).sin()).round() as i32;
+            let win_y = rest + bob;
+            seen_now.insert(caps(win_y));
+            seen_rest.insert(caps(rest));
+            // Placed: its top under the bar on screen with her window where it is.
+            let top = top_under(Some(area_y), win_y, sf);
+            assert!(win_y as f32 + top * sf >= area_y as f32 - 0.01);
+        }
+        assert!(seen_now.len() > 1, "the case: counted on the bobbing window, the rows change");
+        assert_eq!(seen_rest.len(), 1);
     }
 }

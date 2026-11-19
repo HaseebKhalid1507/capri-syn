@@ -31,6 +31,13 @@ pub(super) struct Shown {
     pub plan: BodyPlan,
 }
 
+impl Avatar {
+    /// She is carried with her bubble put down for the ride (it comes back at the landing).
+    pub(super) fn rag_hides_bubble(&self) -> bool {
+        self.rag.as_ref().is_some_and(|r| r.restore.0)
+    }
+}
+
 pub(super) struct Rag {
     pub m: RagMachine,
     rigid: bool,
