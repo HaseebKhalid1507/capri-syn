@@ -79,6 +79,20 @@ public static class Native {
     [DllImport("user32.dll")] static extern bool SetSysColors(int n, int[] elems, int[] rgbs);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr h, StringBuilder s, int n);
     [DllImport("user32.dll")] static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr FindWindowEx(IntPtr parent, IntPtr after, string cls, string title);
+    [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr h, int cmd);
+    /// The desktop's icons hidden (its list view, wherever Explorer keeps it): whether found.
+    public static bool HideIcons() {
+        bool hid = false;
+        EnumWindows((h, l) => {
+            var view = FindWindowEx(h, IntPtr.Zero, "SHELLDLL_DefView", null);
+            if (view == IntPtr.Zero) return true;
+            var list = FindWindowEx(view, IntPtr.Zero, "SysListView32", null);
+            if (list != IntPtr.Zero) { ShowWindow(list, 0); hid = true; }
+            return true;
+        }, IntPtr.Zero);
+        return hid;
+    }
     /// Close every visible dialog box (class #32770) but ours: what a runner pops up (a scaling
     /// change's notice) sits over the shots otherwise. Their titles.
     public static List<string> CloseDialogs() {
@@ -307,13 +321,14 @@ function Get-ShotWindows {
     }
 }
 
-<# The desktop quiet behind a shot: every window minimized (the runner's own console), no
-   wallpaper, one flat colour. #>
+<# The desktop quiet behind a shot: every window minimized (the runner's own console), dialogs
+   closed, no wallpaper (one flat colour), no icons. #>
 function Clear-ShotDesktop {
     param([int]$Color = 0x202024)
     (New-Object -ComObject Shell.Application).MinimizeAll()
     foreach ($t in [ShootWin.Native]::CloseDialogs()) { Write-Host "desktop: closed a dialog: '$t'" }
     if (-not [ShootWin.Native]::Backdrop($Color)) { Write-Warning 'desktop: the backdrop stayed' }
+    if (-not [ShootWin.Native]::HideIcons()) { Write-Warning 'desktop: its icons stayed' }
     Start-Sleep -Milliseconds 800
 }
 
