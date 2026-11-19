@@ -130,6 +130,25 @@ class Parity(unittest.TestCase):
         self.assertRegex(req, rf"(?m)^espeakng-loader=={re.escape(loader)}\b")
         whisper = re.search(r'"pywhispercpp": \("([^"]+)"', vl).group(1)
         self.assertRegex(req, rf"(?m)^pywhispercpp=={re.escape(whisper)}\b")
+        sounddevice = re.search(r'"sounddevice": \("([^"]+)"', vl).group(1)
+        self.assertRegex(req, rf"(?m)^sounddevice=={re.escape(sounddevice)}\b")
+
+    def test_the_release_carries_espeak_ngs_source(self):
+        # GPL-3.0 6(d): espeak-ng's Corresponding Source beside the voice setup, as assets of the same
+        # release (voice-licenses.py's SOURCE.txt points there), summed and attested with the rest.
+        rel = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        vl = (ROOT / "packaging/windows/voice-licenses.py").read_text(encoding="utf-8")
+        ver = re.search(r'^ESPEAK_NG = "([^"]+)"', vl, re.M).group(1)
+        loader = re.search(r'^LOADER = "([^"]+)"', vl, re.M).group(1)
+        assemble = code(block(rel, "  assemble:", "  publish:"))
+        sums = assemble.index("> SHA256SUMS")
+        # Fetched by the versions voice-licenses.py names, checked against SHA-256s pinned for these
+        # file names: a version bump on one side only fails here, and in the job.
+        for asset in (f"release/espeak-ng-{ver}.tar.gz", f"release/espeakng-loader-{loader}-build.tar.gz"):
+            self.assertRegex(assemble[:sums], rf"[0-9a-f]{{64}}  {re.escape(asset)}", f"no pinned SHA-256 for {asset} before SHA256SUMS")
+        for name in ("ESPEAK_NG", "LOADER", "LOADER_COMMIT"):
+            self.assertTrue(f"v {name}" in assemble, f"assemble doesn't read {name} from voice-licenses.py")
+        self.assertTrue("sha256sum -c -" in assemble[:sums])
 
     def test_install_ps1_is_ascii(self):
         # Windows PowerShell 5.1 reads a script without a BOM as ANSI.

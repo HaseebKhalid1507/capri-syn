@@ -101,7 +101,7 @@ Source: "..\..\packs\capri\persona.md"; DestDir: "{app}\steps\packs\capri"; Flag
 Source: "{#Exe}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#IconDir}\capri-syn.ico"; DestDir: "{app}"; DestName: "synaps-avatar.ico"; Flags: ignoreversion
 Source: "{#IconDir}\capri-syn-256.png"; DestDir: "{app}"; DestName: "synaps-avatar.png"; Flags: ignoreversion
-; LICENSE and licenses\ (GPUI's Apache-2.0, the crates' licences, the icon's and synaps-client's notices).
+; LICENSE and licenses\ (GPUI's Apache-2.0, the crates' licences, Lucide's, the icon's and synaps-client's notices).
 Source: "{#Notices}\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
 
 [Dirs]

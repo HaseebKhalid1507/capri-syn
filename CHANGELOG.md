@@ -26,9 +26,14 @@
 - The Linux tarball and both Windows installers now hold capri-syn's `LICENSE` and the notices that go
   with what's inside them: GPUI's Apache-2.0 licence and our patches to it, synaps-client's notice, the
   icon's, and a `THIRD-PARTY-LICENSES.txt` listing every Rust crate compiled into that build with its
-  licence text. The wake-word model's `NOTICE` sits beside it. The voice installer also lists every
-  Python package it bundles with its licence, carries espeak-ng's and whisper.cpp's licences, and says
-  where the source of its GPL parts (espeak-ng 1.52.0, phonemizer) is.
+  licence text, and Lucide's licence for the icons built in. The wake-word model's `NOTICE` sits beside
+  it. The voice installer also lists every Python package it bundles with its licence, carries
+  espeak-ng's, whisper.cpp's and PortAudio's licences, and says where the source of its GPL parts
+  (espeak-ng 1.52.0, phonemizer) is: espeak-ng's is attached to every release.
+- The voice installer is a little smaller: of the PortAudio builds sounddevice ships, only the one she
+  loads stays (no ASIO builds, no other platforms').
+- Her binary no longer compiles in syntect and two-face's syntax definitions: she never highlighted
+  code with them.
 - Release notes come from this file (a version's own `## X.Y.Z` section), not a list of merged PRs.
   Each release also carries `install.sh`, `install.ps1`, `SHA256SUMS` and a build-provenance
   attestation.

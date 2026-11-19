@@ -56,6 +56,12 @@ $site = Join-Path $Out 'site-packages'
 if ($LASTEXITCODE) { throw "pip failed ($LASTEXITCODE)" }
 # What pip leaves that the sidecar never runs.
 Get-ChildItem -Path $site -Directory -Filter 'bin' | Remove-Item -Recurse -Force
+# sounddevice's wheel carries PortAudio for every platform, and builds of it with Steinberg's ASIO SDK
+# (GPL-3.0 or Steinberg's own terms). She loads libportaudio64bit.dll only (never SD_ENABLE_ASIO):
+# the rest goes. PortAudio's licence: voice-licenses.py (licenses\portaudio\).
+$pa = Join-Path $site '_sounddevice_data\portaudio-binaries'
+if (-not (Test-Path (Join-Path $pa 'libportaudio64bit.dll'))) { throw "no libportaudio64bit.dll in $pa (sounddevice's wheel changed)" }
+Get-ChildItem $pa -Force | Where-Object Name -NotIn 'libportaudio64bit.dll', 'README.md' | Remove-Item -Recurse -Force
 
 Copy-Item (Join-Path $repo 'tools\capri-voice') $Out
 Copy-Item (Join-Path $repo 'tools\capri_voice_win.py') $Out

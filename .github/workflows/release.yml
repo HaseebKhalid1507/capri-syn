@@ -12,7 +12,11 @@ name: release
 # Also attached: synaps-avatar-x86_64.pdb (and its .sha256), her Windows exe's symbols (line
 # tables): a dump of hers from a machine reads with them. Never in the installer. And install.sh,
 # install.ps1 (this commit's), SHA256SUMS (every asset's), and a build-provenance attestation of
-# each (`gh attestation verify FILE --repo HaseebKhalid1507/capri-syn`).
+# each (`gh attestation verify FILE --repo HaseebKhalid1507/capri-syn`). And espeak-ng's source
+# (GPL-3.0 6(d), beside the voice setup that carries its DLL): espeak-ng-<ver>.tar.gz and
+# espeakng-loader-<ver>-build.tar.gz (the scripts that built it), SHA-256 pinned here; the voice
+# setup's licenses\SOURCE.txt names them (packaging/windows/voice-licenses.py). From v1.0.0 every
+# asset name here is frozen: installers, docs and SOURCE.txt in the field point at them.
 #
 # The notes are CHANGELOG.md's `## <version>` section (installer/release-notes.sh): a tag without
 # one fails before anything is built. Every artifact carries her LICENSE and the notices that go
@@ -39,6 +43,12 @@ on:
 
 permissions:
   contents: read
+
+# One run per tag, dry run or PR at a time: two dry runs would race to delete and remake the same
+# draft. A PR's newer push cancels its older run; a tag's or a dry run's never is.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # The tag says the version: Cargo.toml must agree (her Windows installer's version comes from it),
@@ -106,7 +116,7 @@ jobs:
       - name: Toolchain (rust-toolchain.toml)
         run: rustup show active-toolchain || rustup toolchain install
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3 (pinned: these builds are attested)
         with:
           key: release-linux
           cache-on-failure: true
@@ -165,7 +175,7 @@ jobs:
         shell: bash
         run: rustup show active-toolchain || rustup toolchain install
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3 (pinned: these builds are attested)
         with:
           key: release
           cache-on-failure: true
@@ -210,6 +220,13 @@ jobs:
           [IO.File]::WriteAllText("$PWD/dist/synaps-avatar-x86_64.pdb.sha256", "$h  synaps-avatar-x86_64.pdb`n")
           Write-Output "$h  synaps-avatar-x86_64.pdb  $([math]::Round((Get-Item dist/synaps-avatar-x86_64.pdb).Length / 1MB, 1)) MB"
 
+      # The release's own voice setup (not ci.yml's build: the wheels float within their bounds),
+      # installed and checked, its licences among them (test-voice-install.ps1), and uninstalled.
+      - name: Her voice installer, installed and checked
+        timeout-minutes: 15
+        shell: pwsh
+        run: ./packaging/windows/test-voice-install.ps1 -Setup dist/capri-syn-voice-setup-x86_64.exe
+
       # The installer as a user gets it: install.ps1 with this release's installer, then the checks
       # (synaps --version, her --check, the daemon, a rerun, --uninstall).
       - name: install.ps1 with it
@@ -224,8 +241,8 @@ jobs:
           if-no-files-found: error
 
   # The release's files, every time (a PR too, read-only): the builds, this commit's install.sh and
-  # install.ps1, SHA256SUMS. Every asset the installers fetch by name (installer/manifest) must be
-  # there with its .sha256, or nothing is released.
+  # install.ps1, espeak-ng's source, SHA256SUMS. Every asset the installers fetch by name
+  # (installer/manifest) must be there with its .sha256, or nothing is released.
   assemble:
     needs: [version, linux, windows]
     runs-on: ubuntu-24.04
@@ -245,6 +262,20 @@ jobs:
             [ -n "$a" ] && [ -s "release/$a" ] && [ -s "release/$a.sha256" ] || { echo "::error::installer/manifest's $k ($a): not built, or no .sha256"; exit 1; }
             (cd release && sha256sum -c "$a.sha256")
           done
+
+          # GPL-3.0 6(d): espeak-ng's Corresponding Source, and the scripts that built its DLL, beside
+          # the voice setup that carries it (its SOURCE.txt names these files; versions from
+          # voice-licenses.py). GitHub's archives, pinned: if their bytes ever change this fails, and
+          # `git archive` of the same commits is the fallback.
+          v() { sed -n "s/^$1 = \"\([^\"]*\)\".*/\1/p" packaging/windows/voice-licenses.py; }
+          ng=$(v ESPEAK_NG) loader=$(v LOADER) loader_commit=$(v LOADER_COMMIT)
+          curl -fsSL --retry 3 -o "release/espeak-ng-$ng.tar.gz" "https://github.com/espeak-ng/espeak-ng/archive/refs/tags/$ng.tar.gz"
+          curl -fsSL --retry 3 -o "release/espeakng-loader-$loader-build.tar.gz" "https://github.com/thewh1teagle/espeakng-loader/archive/$loader_commit.tar.gz"
+          printf '%s\n' \
+            "bb4338102ff3b49a81423da8a1a158b420124b055b60fa76cfb4b18677130a23  release/espeak-ng-1.52.0.tar.gz" \
+            "d6496114cd0608988f5291f54d2d15b50cb37b7f007af00bb62cf93be1b3ceca  release/espeakng-loader-0.2.4-build.tar.gz" |
+            sha256sum -c -
+          printf '\n---\n\n%s\n' "\`capri-syn-voice-setup-x86_64.exe\` contains espeak-ng $ng (GPL-3.0-or-later). Its source is attached: \`espeak-ng-$ng.tar.gz\` (espeak-ng's $ng tag), built into the DLL by \`build.sh\` in \`espeakng-loader-$loader-build.tar.gz\` (espeakng-loader $loader, commit ${loader_commit:0:7}). Every download carries its licences: \`LICENSE\` and \`licenses/\` beside her files." >> notes/notes.md
           (cd release && sha256sum -- $(ls | grep -v -e '\.sha256$' -e '^SHA256SUMS$') > SHA256SUMS)
           cat release/SHA256SUMS
           ls -l release

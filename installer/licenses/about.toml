@@ -19,9 +19,6 @@ accepted = [
     "Unicode-DFS-2016",
     "NCSA",
     "CDLA-Permissive-2.0",
-    # File-level copyleft: unmodified crates; their source is on crates.io at the version listed (the
-    # header of the generated file says so, as MPL-2.0 3.2 asks).
-    "MPL-2.0",
 ]
 
 # Test-only crates aren't in her binary. Build dependencies stay listed: some generate code into it.
@@ -33,3 +30,11 @@ private = { ignore = true }
 
 # cargo-about's built-in clarifications for crates whose licence files a scan misreads.
 workarounds = ["chrono", "linux-raw-sys", "ring", "rustix", "rustls", "unicode-ident"]
+
+# File-level copyleft, crate by crate (never in the list above: a new MPL crate is a decision too).
+# Unmodified; its source is on crates.io at the version listed, as the generated file's header says
+# (MPL-2.0 3.2). The only one in her Linux and Windows builds: Cargo.lock's other two, cbindgen (GPUI's
+# macOS platform) and dwrote (font-kit's, which her Windows build doesn't use), aren't. cargo-about
+# reads crate tables last.
+[option-ext]
+accepted = ["MPL-2.0"]

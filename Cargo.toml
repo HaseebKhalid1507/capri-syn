@@ -18,7 +18,10 @@ path = "src/main.rs"
 # The Synaps daemon client, vendored (crates/synaps-client/VENDORED.md): no git deps, no tokens.
 synaps-client = { path = "crates/synaps-client" }
 # Longbridge's GPUI Kit pins Zed's GPUI snapshot exactly; both pins are spelled out so neither drifts.
-gpui-kit = { version = "=0.9.1", features = ["syntect", "profiler"] }
+# No "syntect": she highlights no code (her Line and reader draw replies with their own markdown-lite,
+# and her inputs are plain), and it embedded syntect's and two-face's syntax definitions, each under its own
+# licence. installer/licenses/third-party.ps1 stops a build that brings syntect or two-face back.
+gpui-kit = { version = "=0.9.1", features = ["profiler"] }
 gpui-pre = "=0.3.12"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }

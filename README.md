@@ -406,8 +406,9 @@ and sha256s taken from CapriCore (`docs/media/NOTICE.md` says which), and `tools
 Real-ESRGAN's network (BSD-3-Clause; its licence text is in the file). Release binaries also contain
 third-party crates under their own licences (mostly MIT/Apache-2.0), and the Windows voice installer
 bundles Python and third-party Python packages under their own licences (espeak-ng's GPL-3.0 among them).
-Every release artifact carries their texts in its `licenses/` folder, and the voice installer's
-`licenses/SOURCE.txt` says where the GPL parts' source is ([docs/INSTALL.md](docs/INSTALL.md#releases)).
+Every release artifact carries their texts in its `licenses/` folder. espeak-ng's source is attached to
+every release beside the voice installer, and its `licenses/SOURCE.txt` says where the GPL parts' source
+is ([docs/INSTALL.md](docs/INSTALL.md#releases)).
 
 <p align="center">
   <sub>Capri runs on <a href="https://github.com/HaseebKhalid1507/SynapsCLI">Synaps</a>. Synaps is built with Synaps.</sub>

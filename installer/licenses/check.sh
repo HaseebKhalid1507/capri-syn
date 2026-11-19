@@ -20,6 +20,19 @@ l=$art/lib/synaps-avatar
 bad=0
 ok() { echo "ok   $*"; }
 no() { echo "FAIL $*"; bad=1; }
+# A THIRD-PARTY-LICENSES.txt read by its sections (about.hbs's layout, as check.ps1 reads it): prints
+# its number of crate entries, then `yes` if CRATE sits in an Apache-2.0 section that holds the
+# licence's full text (not merely somewhere in the file), else `no`.
+third_party() { # FILE CRATE
+    awk -v want="$2" '
+        BEGIN { r = sprintf("%80s", ""); d = r; gsub(/ /, "=", r); gsub(/ /, "-", d) }
+        $0 == r { getline; head = $0; crates = 1; listed = 0; full = 0; next }
+        crates && $0 == d { crates = 0; next }
+        crates && /^  [^ ]+ [^ ]+/ { n++; if ($1 == want) listed = 1; next }
+        !crates && index($0, "Version 2.0, January 2004") { full = 1 }
+        head ~ /\(Apache-2\.0\), used by:$/ && listed && full { ok = 1 }
+        END { print n + 0, (ok ? "yes" : "no") }' "$1"
+}
 same() { # FILE IN_ARTIFACT
     if [ ! -s "$2" ]; then no "${2#"$art"/}: missing"
     elif cmp -s "$1" "$2"; then ok "${2#"$art"/}"
@@ -36,10 +49,10 @@ while IFS=$'\t' read -r from to; do
             if [ -e "$f" ]; then no "${f#"$art"/}: in a build without --third-party"; fi
         elif [ ! -s "$f" ]; then
             no "${f#"$art"/}: missing"
-        elif ! grep -q '^  gpui-pre-linux ' "$f" || ! grep -q 'Version 2.0, January 2004' "$f"; then
-            no "${f#"$art"/}: no gpui-pre-linux under Apache-2.0's text"
         else
-            ok "${f#"$art"/} ($(grep -c '^  [^ ][^ ]* [0-9][0-9]*\.[0-9]' "$f") crate entries)"
+            read -r entries gpui < <(third_party "$f" gpui-pre-linux)
+            if [ "$gpui" = yes ]; then ok "${f#"$art"/}: gpui-pre-linux under Apache-2.0's text ($entries crate entries)"
+            else no "${f#"$art"/}: no gpui-pre-linux under Apache-2.0's text ($entries crate entries)"; fi
         fi
         continue
     fi

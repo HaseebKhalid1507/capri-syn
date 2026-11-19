@@ -10,6 +10,10 @@ crates/synaps-client/NOTICE	licenses/synaps-client/NOTICE
 crates/synaps-client/LICENSE-APACHE	licenses/synaps-client/LICENSE-APACHE
 vendor/gpui-pre-@os@/LICENSE-APACHE	licenses/gpui/LICENSE-APACHE
 vendor/gpui-pre-@os@/PATCHES.md	licenses/gpui/PATCHES.md
+# Lucide's icons, embedded in her binary by gpui-kit-assets 0.9.1 (its LICENSE-LUCIDE, verbatim): the
+# crate declares only Apache-2.0, so cargo-about never sees them. third-party.ps1 stops a build whose
+# gpui-kit-assets isn't 0.9.1 until this file is checked again.
+installer/licenses/vendored/lucide-LICENSE	licenses/lucide/LICENSE
 # Generated for the target built (installer/licenses/third-party.ps1: cargo-about). A source build
 # on his own machine has none (nothing is redistributed); every release artifact does.
 @third-party@	licenses/THIRD-PARTY-LICENSES.txt

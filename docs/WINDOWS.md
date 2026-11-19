@@ -38,8 +38,9 @@ Double-clicked on a PC with nothing installed, it leaves a working Capri. After 
 install steps install.ps1 runs too: one copy of them, `packaging/windows/steps.ps1`, installed with
 her in `{app}\steps` along with what they read (the manifest, `make-pack`, the pins, her moods and
 persona; no art). With her exe: `LICENSE` and `licenses\` (GPUI's Apache-2.0 and `PATCHES.md`, the
-icon's and synaps-client's notices, and `THIRD-PARTY-LICENSES.txt`, the licences of every crate in
-that exe: `build.ps1` generates it with cargo-about, `installer/licenses/`).
+icon's and synaps-client's notices, Lucide's ISC licence for the icons compiled in, and
+`THIRD-PARTY-LICENSES.txt`, the licences of every crate in that exe: `build.ps1` generates it with
+cargo-about, `installer/licenses/`).
 
 - **Per user, no admin**: she goes to `%LOCALAPPDATA%\Programs\synaps-avatar`.
 - **Her brain** (page "Her brain", shown only when it's needed): Synaps is looked for as install.ps1
@@ -195,9 +196,13 @@ stays ~9 MB (CI fails hers past 20 MB), and only he who wants voice gets the res
 - She starts the sidecar once the models are there (her log says so until then).
 - **Licences:** `LICENSE`, `wake\NOTICE` beside the wake-word model, and `licenses\`: every Python
   package with the licence texts its wheel carries, espeak-ng's licence files and `SOURCE.txt` (where
-  the source of espeak-ng 1.52.0's DLL and of phonemizer is: GPL-3.0), whisper.cpp's MIT licence
-  (pywhispercpp's DLLs), and CPython's in `python\LICENSE.txt`. `voice-licenses.py` writes them, and
-  stops the build when espeakng-loader or pywhispercpp isn't the version its notes were written for.
+  the source of espeak-ng 1.52.0's DLL and of phonemizer is: GPL-3.0; espeak-ng's is attached to the
+  same release), whisper.cpp's MIT licence (pywhispercpp's DLLs), PortAudio's (sounddevice's
+  `libportaudio64bit.dll`, the only one of its builds kept: the ASIO ones and other platforms' are
+  removed), Microsoft's terms for the VC++ runtime, and CPython's in `python\LICENSE.txt`.
+  `voice-licenses.py` writes them, and stops the build when espeakng-loader, pywhispercpp or
+  sounddevice isn't the version its notes were written for, on a native binary nobody named, on a
+  licence not accepted, and on a new or compiled GPL-family package.
 - **Uninstall** stops the sidecar (only the `python.exe` in that folder), removes the bundle, Python's
   caches, and `%LOCALAPPDATA%\capri-voice` (models, log, link, media state).
 - CI installs, checks and uninstalls it unattended without the models (`test-voice-install.ps1`: the

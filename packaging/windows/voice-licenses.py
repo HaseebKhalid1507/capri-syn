@@ -5,15 +5,21 @@
 writes BUNDLE/licenses/:
   THIRD-PARTY-LICENSES.txt  every package in BUNDLE/site-packages: its version, its declared licence,
                             where its source is, and the licence texts its wheel carries
-  SOURCE.txt                where the source of the GPL-licensed parts is (GPL-3.0 section 6)
-  espeak-ng/, whisper.cpp/  the licence files of what two wheels carry inside them without one
+  SOURCE.txt                where the source of the GPL-licensed parts is (GPL-3.0 section 6): the
+                            release this installer came from carries it (release.yml's assemble)
+  espeak-ng/, whisper.cpp/, portaudio/
+                            the licence files of what three wheels carry inside them without one
                             (packaging/windows/voice-licenses/)
 
 espeak-ng's DLL comes inside espeakng-loader's wheel, whisper.cpp's and ggml's DLLs inside
-pywhispercpp's; neither wheel has their licence text. Both wheels are pinned
-(tools/capri-voice-win-requirements.txt) and checked here against the versions INSIDE was written
-for, and espeak-ng's DLL against the version SOURCE.txt names: a new wheel can't ship under a stale
-notice.
+pywhispercpp's, PortAudio's inside sounddevice's; none of the three has their licence text. All three
+are pinned (tools/capri-voice-win-requirements.txt) and checked here against the versions INSIDE was
+written for, and the espeak-ng and PortAudio DLLs against the versions named: a new wheel can't ship
+under a stale notice.
+
+It also stops the bundle on what nobody has looked at: a native binary not in NATIVE (a debug C
+runtime among them), a package whose declared licence isn't on ACCEPTED, a new GPL-family package,
+or a compiled one (SOURCE.txt calls the GPL packages their own source).
 """
 
 import re
@@ -27,6 +33,15 @@ from pathlib import Path
 ESPEAK_NG = "1.52.0"
 ESPEAK_NG_COMMIT = "4870adfa25b1a32b4361592f1be8a40337c58d6c"
 LOADER = "0.2.4"
+# espeakng-loader 0.2.4's commit (untagged): its build.sh and workflows built the DLL.
+LOADER_COMMIT = "146599e29be31bf17d99f0bcb7dbb2f92aef3d95"
+# GPL-3.0 section 6(d): the Corresponding Source beside the object code, as assets of the release this
+# installer came from (release.yml's assemble attaches them, SHA-256 pinned there).
+ESPEAK_NG_SOURCE = f"espeak-ng-{ESPEAK_NG}.tar.gz"
+LOADER_SOURCE = f"espeakng-loader-{LOADER}-build.tar.gz"
+# The PortAudio in sounddevice 0.5.6's wheel: what its DLL reports (spatialaudio/portaudio-binaries
+# builds the v19.7.0 tag).
+PORTAUDIO = "19.7.0"
 
 # What a wheel carries inside it without its licence text: (the wheel's version these lines were
 # checked for, the lines, the folder of licence files under voice-licenses/ that goes with them).
@@ -43,7 +58,28 @@ INSIDE = {
         "msvcp140-*.dll and vcomp140-*.dll: Microsoft's Visual C++ runtime, as its wheel ships them",
         "(Distributable Code under Microsoft's Visual Studio licence terms)",
     ], "whisper.cpp"),
+    "sounddevice": ("0.5.6", [
+        f"PortAudio v{PORTAUDIO} (_sounddevice_data\\portaudio-binaries\\libportaudio64bit.dll; the other",
+        "platforms' builds and the ASIO ones are removed by voice-bundle.ps1): MIT-style, licenses\\portaudio\\LICENSE.txt",
+    ], "portaudio"),
 }
+
+# Every native binary in site-packages, by whose it is (its licence: INSIDE, or its wheel's own). A new
+# one stops the bundle until it's named here, with its licence. Release builds only: a debug C runtime
+# (msvcp140d, vcruntime140d, ucrtbased: not redistributable) matches none of these.
+NATIVE = [
+    r"^numpy\.libs/(libscipy_openblas64_|msvcp140)-[0-9a-f]+\.dll$",  # numpy's: OpenBLAS (its LICENSE.txt), the VC++ runtime
+    r"^(whisper|ggml|ggml-base|ggml-cpu|msvcp140|vcomp140)-[0-9a-f]+\.dll$",  # pywhispercpp's (INSIDE)
+    r"^espeakng_loader/espeak-ng\.dll$",  # espeakng-loader's (INSIDE)
+    r"^onnxruntime/capi/onnxruntime(_providers_shared)?\.dll$",  # onnxruntime's (its ThirdPartyNotices)
+    r"^_sounddevice_data/portaudio-binaries/libportaudio64bit\.dll$",  # sounddevice's (INSIDE)
+]
+# The licences a package may declare (an SPDX expression, a License field, or its classifiers).
+ACCEPTED = re.compile(r"MIT|BSD|Apache|ISC|PSF|Python Software Foundation|MPL-2\.0|Mozilla Public|Unlicense|Zlib|CC0", re.I)
+# Packages that declare none, read by hand from the licence file their wheel carries.
+UNDECLARED = {"kokoro-onnx": "MIT"}
+# GPL-family packages, each a decision: pure Python, so the bundle holds their source.
+GPL_OK = {"phonemizer"}
 
 HERE = Path(__file__).resolve().parent
 LICENCE_NAME = re.compile(r"^(LICEN[CS]E|COPYING|NOTICE|COPYRIGHT|AUTHORS|THIRD[-_ ]?PARTY)", re.I)
@@ -98,7 +134,8 @@ def key(dist):
 
 def is_gpl(dist):
     text = " ".join([declared(dist), dist.metadata.get("License") or ""] + (dist.metadata.get_all("Classifier") or []))
-    return re.search(r"\bGPL|General Public License", text) is not None
+    # LGPL-* and AGPL-* too: there's no word boundary inside "LGPL".
+    return re.search(r"\b(?:A|L)?GPL|General Public License", text) is not None
 
 
 def main(bundle):
@@ -123,6 +160,23 @@ def main(bundle):
         sys.exit(f"voice-licenses: no {dll}")
     if b"\0" + ESPEAK_NG.encode() + b"\0" not in dll.read_bytes():
         sys.exit(f"voice-licenses: {dll.name} doesn't say espeak-ng {ESPEAK_NG}: update ESPEAK_NG (and SOURCE.txt's pointer)")
+    pa = site / "_sounddevice_data" / "portaudio-binaries" / "libportaudio64bit.dll"
+    if not pa.is_file() or f"PortAudio V{PORTAUDIO}".encode() not in pa.read_bytes():
+        sys.exit(f"voice-licenses: {pa} isn't PortAudio V{PORTAUDIO}: update PORTAUDIO and licenses\\portaudio\\")
+
+    # Every native binary is someone's: one nobody named stops the bundle.
+    native = sorted(p.relative_to(site).as_posix() for p in site.rglob("*") if p.suffix.lower() in (".dll", ".dylib", ".so"))
+    unknown = [n for n in native if not any(re.match(rx, n) for rx in NATIVE)]
+    if unknown:
+        sys.exit("voice-licenses: native binaries nobody vouched for (name each in NATIVE, with its licence): " + ", ".join(unknown))
+    for d in dists:
+        if is_gpl(d):
+            if key(d) not in GPL_OK:
+                sys.exit(f"voice-licenses: {d.metadata['Name']} is {declared(d)}: a new GPL-family package is a decision (GPL_OK)")
+            if any(str(f).lower().endswith((".pyd", ".dll", ".so")) for f in d.files or []):
+                sys.exit(f"voice-licenses: {d.metadata['Name']} is GPL and compiled: SOURCE.txt can't call it its own source")
+        elif not ACCEPTED.search(declared(d)) and key(d) not in INSIDE and key(d) not in UNDECLARED:
+            sys.exit(f"voice-licenses: {d.metadata['Name']} {d.version} declares {declared(d)!r}: not on ACCEPTED")
 
     python_licence = bundle / "python" / "LICENSE.txt"
     if not python_licence.is_file():
@@ -137,6 +191,12 @@ def main(bundle):
         "                    carries. Every one is on PyPI at the version shown (https://pypi.org/project/NAME/VERSION/).",
         f"  espeak-ng {ESPEAK_NG}   inside espeakng-loader (its DLL and espeak-ng-data): GPL-3.0-or-later; its",
         "                    licence files are in licenses\\espeak-ng\\, and where its source is, in licenses\\SOURCE.txt.",
+        f"  PortAudio {PORTAUDIO}  inside sounddevice (libportaudio64bit.dll): licenses\\portaudio\\LICENSE.txt.",
+        "  whisper.cpp       inside pywhispercpp (whisper-*.dll, ggml-*.dll): licenses\\whisper.cpp\\LICENSE.",
+        "  Microsoft's Visual C++ runtime (python\\vcruntime140*.dll; msvcp140-*.dll, vcomp140-*.dll from numpy's",
+        "                    and pywhispercpp's wheels): Microsoft Distributable Code, redistributed unmodified under",
+        "                    Microsoft's Visual Studio licence terms. Don't alter its notices, use Microsoft's trademarks",
+        "                    to suggest endorsement, run it off Microsoft platforms, or ship it in malicious programs.",
         "",
     ]
     no_text = []
@@ -151,6 +211,8 @@ def main(bundle):
         if key(d) in INSIDE:
             lines += ["  inside:  " + INSIDE[key(d)][1][0]] + ["           " + x for x in INSIDE[key(d)][1][1:]]
         long_licence = (d.metadata.get("License") or "").strip()
+        if key(d) in UNDECLARED:
+            lines.append(f"  (declares none; the licence its wheel carries is {UNDECLARED[key(d)]})")
         if not files and "\n" in long_licence:
             lines += ["", "--- its License field:", long_licence]
         elif not files and APACHE.match(declared(d)):
@@ -167,6 +229,8 @@ def main(bundle):
     (out / "THIRD-PARTY-LICENSES.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     gpl = [d for d in dists if is_gpl(d)]
+    version = re.search(r'(?m)^version = "([^"]+)"', (HERE.parents[1] / "Cargo.toml").read_text(encoding="utf-8")).group(1)
+    rel = f"https://github.com/HaseebKhalid1507/capri-syn/releases/download/v{version}"
     src = [
         "Where the source of the GPL-licensed software in capri-syn's voice bundle is (GPL-3.0, section 6).",
         "",
@@ -175,11 +239,14 @@ def main(bundle):
         "source tree). In object code form here: site-packages\\espeakng_loader\\espeak-ng.dll and its data,",
         f"site-packages\\espeakng_loader\\espeak-ng-data\\, from espeakng-loader {LOADER}'s wheel. espeakng-loader",
         "builds espeak-ng's own source unchanged (its build.sh: CMake with BUILD_SHARED_LIBS=ON,",
-        "ENABLE_TESTS=OFF, COMPILE_INTONATIONS=OFF, Release): https://github.com/thewh1teagle/espeakng-loader",
+        "ENABLE_TESTS=OFF, COMPILE_INTONATIONS=OFF, Release).",
         "",
-        "Its Corresponding Source, espeak-ng's release " + ESPEAK_NG + ":",
-        f"  https://github.com/espeak-ng/espeak-ng/tree/{ESPEAK_NG} (commit {ESPEAK_NG_COMMIT})",
-        f"  https://github.com/espeak-ng/espeak-ng/archive/refs/tags/{ESPEAK_NG}.tar.gz",
+        f"Its Corresponding Source, attached to capri-syn's release v{version}, the one this installer came from:",
+        f"  {rel}/{ESPEAK_NG_SOURCE}   (espeak-ng {ESPEAK_NG}, commit {ESPEAK_NG_COMMIT})",
+        f"  {rel}/{LOADER_SOURCE}   (the scripts that built the DLL: build.sh, .github/workflows/)",
+        "The same, upstream:",
+        f"  https://github.com/espeak-ng/espeak-ng/tree/{ESPEAK_NG}",
+        f"  https://github.com/thewh1teagle/espeakng-loader/tree/{LOADER_COMMIT}",
         "",
     ]
     if gpl:
@@ -187,11 +254,7 @@ def main(bundle):
         for d in gpl:
             src.append(f"  {d.metadata['Name']} {d.version} ({declared(d)}): https://pypi.org/project/{d.metadata['Name']}/{d.version}/#files")
         src.append("")
-    src += [
-        "If a link above stops working, open an issue at https://github.com/HaseebKhalid1507/capri-syn/issues",
-        "and you'll be sent the same source.",
-    ]
-    (out / "SOURCE.txt").write_text("\n".join(src) + "\n", encoding="utf-8")
+    (out / "SOURCE.txt").write_text("\n".join(src).rstrip("\n") + "\n", encoding="utf-8")
 
     print(f"voice licences: {len(dists)} packages, {sum(1 for d in dists if licence_files(d))} with their licence texts"
           + (f"; none in the wheel: {', '.join(no_text)}" if no_text else "")

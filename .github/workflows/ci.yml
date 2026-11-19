@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   check:
     runs-on: ubuntu-24.04
@@ -37,6 +40,13 @@ jobs:
       - name: Tests
         run: cargo test --locked --workspace
 
+      # The crates' licences for the Linux tarball (installer/licenses/third-party.ps1, as release.yml's
+      # linux job makes them): a dependency that brings a licence nobody accepted, a crate with no
+      # copyright line, or syntect back fails on its PR, not on the tag. Windows': windows-installer.
+      - name: The crates' licences (Linux)
+        shell: pwsh
+        run: ./installer/licenses/third-party.ps1 -Target x86_64-unknown-linux-gnu -Out "$env:RUNNER_TEMP/third-party.txt"
+
   # The compile gate for Windows (x86_64-pc-windows-msvc, the runner's host): build, the unit tests
   # (the fake contract suite in both modes among them) and clippy. The Windows contract suite proper
   # needs a desktop (`contract_windows`, ignored here: run it in the capri-win VM).
@@ -57,7 +67,7 @@ jobs:
 
       # The registry and the dependencies' build (the workspace's own crates pruned); saved on a
       # failed run too, so a red run still warms the next.
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           cache-on-failure: true
 
@@ -164,7 +174,7 @@ jobs:
 
       # The release build's own cache (the `windows` job's is a dev build).
       # Not ~/.cargo/bin: a Synaps an earlier run installed there would come back.
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: release
           cache-on-failure: true
@@ -420,7 +430,7 @@ jobs:
         shell: pwsh
         run: |
           if (-not (Get-Module -ListAvailable PSScriptAnalyzer)) { Install-Module PSScriptAnalyzer -Force -Scope CurrentUser }
-          $found = foreach ($f in 'install.ps1', 'installer/test-windows.ps1', 'installer/test-units.ps1', 'packaging/windows/steps.ps1', 'packaging/windows/test-install.ps1', 'packaging/windows/test-setup-e2e.ps1', 'packaging/windows/test-setup-wizard.ps1', 'packaging/windows/test-setup-voice.ps1', 'packaging/windows/test-login.ps1', 'installer/licenses/third-party.ps1', 'installer/licenses/check.ps1') { Invoke-ScriptAnalyzer -Path $f -Severity Warning, Error }
+          $found = foreach ($f in 'install.ps1', 'installer/test-windows.ps1', 'installer/test-units.ps1', 'packaging/windows/steps.ps1', 'packaging/windows/test-install.ps1', 'packaging/windows/test-setup-e2e.ps1', 'packaging/windows/test-setup-wizard.ps1', 'packaging/windows/test-setup-voice.ps1', 'packaging/windows/test-login.ps1', 'installer/licenses/third-party.ps1', 'installer/licenses/check.ps1', 'packaging/windows/build.ps1', 'packaging/windows/build-voice.ps1', 'packaging/windows/voice-bundle.ps1', 'packaging/windows/test-voice-install.ps1') { Invoke-ScriptAnalyzer -Path $f -Severity Warning, Error }
           $found | Format-Table -AutoSize ScriptName, Line, RuleName, Message | Out-String -Width 220
           if ($found) { throw "PSScriptAnalyzer: $(@($found).Count) finding(s)" }
           Write-Output 'PSScriptAnalyzer: clean'
