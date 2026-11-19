@@ -188,6 +188,14 @@ jobs:
         shell: pwsh
         run: ./installer/test-windows.ps1 -Setup (Get-ChildItem packaging/windows/Output/synaps-avatar-setup-*.exe | Select-Object -First 1).FullName -Ref ${{ github.event.pull_request.head.sha || github.sha }}
 
+      # Her release exe, offline (no daemon), a minute of clicks and carries on her: every WM_NULL
+      # answered within 1 s, no WER event, no panic (the "not responding" hang of 2026-11-19: her
+      # UI thread and her click-through poller waited on each other). Last: it leaves her state.
+      - name: She keeps answering through a minute of clicks (offline)
+        timeout-minutes: 15
+        shell: pwsh
+        run: ./tests/windows/test-hang.ps1 -Exe target/release/synaps-avatar.exe
+
       - uses: actions/upload-artifact@v4
         with:
           name: synaps-avatar-setup-${{ github.sha }}
