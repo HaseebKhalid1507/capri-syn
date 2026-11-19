@@ -11,6 +11,9 @@ name: release
 #
 # A pull request that touches the packaging runs the same builds and smoke tests, and releases
 # nothing. Nothing here pushes a tag or publishes a release.
+#
+# Also attached: synaps-avatar-x86_64.pdb (and its .sha256), her Windows exe's symbols (line
+# tables): a dump of hers from a machine reads with them. Never in the installer.
 
 on:
   push:
@@ -129,8 +132,13 @@ jobs:
         with:
           python-version: "3.13"
 
+      # Her symbols in a PDB beside the exe (MSVC keeps them out of it): line tables, the same
+      # optimised code.
       - name: Her installer
         shell: pwsh
+        env:
+          CARGO_PROFILE_RELEASE_STRIP: none
+          CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
         run: ./packaging/windows/build.ps1
 
       - name: Her voice installer
@@ -150,6 +158,15 @@ jobs:
             [IO.File]::WriteAllText("$($f.FullName).sha256", "$h  $($f.Name)`n")
             Write-Output "$h  $($f.Name)  $([math]::Round($f.Length / 1MB, 1)) MB"
           }
+
+      # Her exe's symbols: an asset of their own, never in the installer.
+      - name: Her symbols and their sha256
+        shell: pwsh
+        run: |
+          Copy-Item target/release/synaps_avatar.pdb dist/synaps-avatar-x86_64.pdb
+          $h = (Get-FileHash -Algorithm SHA256 dist/synaps-avatar-x86_64.pdb).Hash.ToLowerInvariant()
+          [IO.File]::WriteAllText("$PWD/dist/synaps-avatar-x86_64.pdb.sha256", "$h  synaps-avatar-x86_64.pdb`n")
+          Write-Output "$h  synaps-avatar-x86_64.pdb  $([math]::Round((Get-Item dist/synaps-avatar-x86_64.pdb).Length / 1MB, 1)) MB"
 
       # The installer as a user gets it: install.ps1 with this release's installer, then the checks
       # (synaps --version, her --check, the daemon, a rerun, --uninstall).
