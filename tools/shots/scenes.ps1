@@ -601,22 +601,27 @@ $Scenes = [ordered]@{
             Write-Host "  her menu at $($menu.X),$($menu.Y) $($menu.W)x$($menu.H), by $how"
             Shot '02-menu' "her menu, by $how" -At (Get-CornerRect -Icon $icon -Also @($menu) -Aspect 1.6 -Above 96)
             # Her rows' names as a screen reader gets them: UI Automation's menu proxy (an owner-drawn
-            # row's item data read as MSAAMENUINFO, from her memory).
-            if (-not ('System.Windows.Automation.AutomationElement' -as [type])) { Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes }
-            $uia = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$menu.Handle).FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
-            $names = @($uia | ForEach-Object { $_.Current.Name })
-            Write-Host "  her rows for a screen reader: $($names -join ' | ')"
+            # row's item data read as MSAAMENUINFO, from her memory), every way it's looked at.
+            Show-UiaFocus 'her menu up'
+            $read = Get-MenuNames $menu.Handle 'her menu'
             foreach ($want in 'RESET POSITION', 'ATTENTION: MIX', 'QUIT') {
-                if ($want -cnotin $names) { $script:Fails.Add("${script:Take}: no row named '$want' for a screen reader (UI Automation reads: $($names -join ', '))") }
+                if ($want -cnotin $read.Uia) { $script:Fails.Add("${script:Take}: no row named '$want' for a screen reader (UI Automation reads: $($read.Uia -join ', '); MSAA: $($read.Msaa -join ', '))") }
             }
             # His keys in it (a real right click gave it the keyboard): down x3 lights ATTENTION (a
             # lit row), right opens its choices (the one in force marked, the first lit).
             if ($how -eq 'a real right click') {
-                foreach ($k in 'down', 'down', 'down') { Key $k 200 }
+                Key 'down' 300
+                Show-UiaFocus 'down: the first row lit'
+                foreach ($k in 'down', 'down') { Key $k 200 }
                 Key 'right' 800
+                Show-UiaFocus 'right: into ATTENTION'
                 $menus = @([ShotsTray.Native]::Of([uint32]$script:Her.Id) | Where-Object { $_.Class -eq '#32768' })
                 if ($menus.Count -ge 2) {
                     Shot '03-keys' 'her menu by his keys: ATTENTION lit, its choices open' -At (Get-CornerRect -Icon $icon -Also $menus -Aspect 1.6 -Above 96)
+                    # Its choices by name too (the one in force first: MIX).
+                    $sub = $menus | Where-Object { $_.Handle -ne $menu.Handle } | Select-Object -First 1
+                    $subRead = Get-MenuNames $sub.Handle 'ATTENTION'
+                    if ('MIX' -cnotin $subRead.Uia) { $script:Fails.Add("${script:Take}: no choice named 'MIX' under ATTENTION for a screen reader (UI Automation reads: $($subRead.Uia -join ', '); MSAA: $($subRead.Msaa -join ', '))") }
                 }
                 else { $script:Fails.Add("${script:Take}: down, down, down, right opened no ATTENTION choices ($($menus.Count) menu)") }
                 Key 'escape' 500
@@ -931,6 +936,164 @@ function New-Windows([object[]]$Before) {
 <# Her open menu: a visible #32768 window of hers. #>
 function Get-HerMenu {
     [ShotsTray.Native]::Of([uint32]$script:Her.Id) | Where-Object { $_.Class -eq '#32768' } | Select-Object -First 1
+}
+
+<# MSAA, as a screen reader's menu proxy reads a window (oleacc: AccessibleObjectFromWindow, its
+   client; a menu window's rows are its children). Compiled apart: a failure here is said, never
+   the set's. #>
+function Add-ShotMsaa {
+    if ('ShotsTray.Msaa' -as [type]) { return $true }
+    try {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+
+namespace ShotsTray {
+// IAccessible's first slots after IDispatch's, in its vtable's order.
+[ComImport, Guid("618736E0-3C3D-11CF-810C-00AA00389B71"), InterfaceType(ComInterfaceType.InterfaceIsDual)]
+public interface IAcc {
+    [return: MarshalAs(UnmanagedType.IDispatch)] object Parent();
+    int ChildCount();
+    [return: MarshalAs(UnmanagedType.IDispatch)] object Child(object id);
+    [return: MarshalAs(UnmanagedType.BStr)] string Name(object id);
+    [return: MarshalAs(UnmanagedType.BStr)] string Value(object id);
+    [return: MarshalAs(UnmanagedType.BStr)] string Description(object id);
+    object Role(object id);
+}
+
+public static class Msaa {
+    [DllImport("oleacc.dll")] static extern int AccessibleObjectFromWindow(IntPtr h, uint id, ref Guid iid, [MarshalAs(UnmanagedType.IUnknown)] out object acc);
+
+    /// Window h's client as MSAA reads it, a line each (indented by depth): self's name, role and
+    /// child count, then each simple child's id, name and role. Its HRESULT if there's none.
+    public static List<string> Rows(long h) {
+        var o = new List<string>();
+        var iid = new Guid("618736E0-3C3D-11CF-810C-00AA00389B71");
+        object acc;
+        int hr = AccessibleObjectFromWindow(new IntPtr(h), 0xFFFFFFFC, ref iid, out acc);
+        if (hr != 0 || acc == null) { o.Add("AccessibleObjectFromWindow: 0x" + hr.ToString("x8")); return o; }
+        Walk((IAcc)acc, 0, o);
+        return o;
+    }
+
+    /// The names of window h's simple children (a menu's rows), in order.
+    public static List<string> Names(long h) {
+        var o = new List<string>();
+        var iid = new Guid("618736E0-3C3D-11CF-810C-00AA00389B71");
+        object acc;
+        if (AccessibleObjectFromWindow(new IntPtr(h), 0xFFFFFFFC, ref iid, out acc) != 0 || acc == null) return o;
+        var a = (IAcc)acc;
+        int n = 0;
+        try { n = a.ChildCount(); } catch { return o; }
+        for (int i = 1; i <= n; i++) o.Add(Safe(() => a.Name(i)));
+        return o;
+    }
+
+    static void Walk(IAcc a, int depth, List<string> o) {
+        string pad = new string(' ', depth * 2);
+        int n;
+        try { n = a.ChildCount(); } catch (Exception e) { o.Add(pad + "children: " + e.Message); return; }
+        o.Add(pad + "'" + Safe(() => a.Name(0)) + "' role " + Safe(() => Convert.ToString(a.Role(0))) + ", " + n + " children");
+        for (int i = 1; i <= n && o.Count < 80; i++) {
+            object child = null;
+            try { child = a.Child(i); } catch { }
+            var sub = child as IAcc;
+            if (sub != null && depth < 3) { Walk(sub, depth + 1, o); continue; }
+            o.Add(pad + "  " + i + ": '" + Safe(() => a.Name(i)) + "' role " + Safe(() => Convert.ToString(a.Role(i))));
+        }
+    }
+
+    static string Safe(Func<string> f) { try { return f() ?? "(null)"; } catch (Exception e) { return "(" + e.Message + ")"; } }
+}
+}
+'@
+        return $true
+    }
+    catch { Write-Host "  msaa: not compiled: $($_.Exception.Message)"; return $false }
+}
+
+<# A UI Automation element, said: its control type, class, framework, name. #>
+function Format-Uia($e) {
+    if (-not $e) { return '(none)' }
+    try { $c = $e.Current; "$($c.ControlType.ProgrammaticName) '$($c.ClassName)' fw=$($c.FrameworkId) '$($c.Name)'" }
+    catch { "($($_.Exception.Message))" }
+}
+
+<# What a screen reader can read in menu window $Handle, said every way there is to look: UI
+   Automation from the window (its descendants, its raw tree, its Menu/MenuItem children), from the
+   desktop's root (the #32768 windows there) and MSAA's own menu proxy. Returns the row names UI
+   Automation gives by the first of those ways that gives any (@{ Uia = ...; Msaa = ... }). #>
+function Get-MenuNames([long]$Handle, [string]$What) {
+    if (-not ('System.Windows.Automation.AutomationElement' -as [type])) { Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes }
+    $A = [System.Windows.Automation.AutomationElement]
+    $Scope = [System.Windows.Automation.TreeScope]
+    $ways = [ordered]@{}
+    try {
+        $el = $A::FromHandle([IntPtr]$Handle)
+        $uia = @($el.FindAll($Scope::Descendants, [System.Windows.Automation.Condition]::TrueCondition))
+        Write-Host "  uia ($What): $(Format-Uia $el) rows=$($uia.Count)"
+        $ways['descendants'] = @($uia | ForEach-Object { $_.Current.Name })
+
+        # The raw tree, three deep.
+        $raw = [System.Windows.Automation.TreeWalker]::RawViewWalker
+        $seen = [System.Collections.Generic.List[string]]::new()
+        $walk = {
+            param($e, $d)
+            $k = $raw.GetFirstChild($e)
+            while ($k -and $seen.Count -lt 60) {
+                Write-Host "    raw $('  ' * $d)$(Format-Uia $k)"
+                $seen.Add([string]$k.Current.Name)
+                if ($d -lt 3) { & $walk $k ($d + 1) }
+                $k = $raw.GetNextSibling($k)
+            }
+        }
+        & $walk $el 0
+        $ways['raw'] = @($seen)
+
+        $isMenu = [System.Windows.Automation.OrCondition]::new([System.Windows.Automation.Condition[]]@(
+                [System.Windows.Automation.PropertyCondition]::new($A::ControlTypeProperty, [System.Windows.Automation.ControlType]::Menu),
+                [System.Windows.Automation.PropertyCondition]::new($A::ControlTypeProperty, [System.Windows.Automation.ControlType]::MenuItem)))
+        $kids = @($el.FindAll($Scope::Children, $isMenu))
+        Write-Host "  uia ($What) Menu/MenuItem children: $($kids.Count): $(($kids | ForEach-Object { Format-Uia $_ }) -join '; ')"
+        $ways['menu children'] = @($kids | ForEach-Object { $_.Current.Name })
+
+        # From the desktop's root: the menu windows there, and what's under each.
+        $cls = [System.Windows.Automation.PropertyCondition]::new($A::ClassNameProperty, '#32768')
+        foreach ($m in @($A::RootElement.FindAll($Scope::Children, $cls))) {
+            $under = @($m.FindAll($Scope::Descendants, [System.Windows.Automation.Condition]::TrueCondition))
+            Write-Host "  uia root: $(Format-Uia $m) hwnd=$($m.Current.NativeWindowHandle) (hers: $Handle) rows=$($under.Count): $(($under | ForEach-Object { $_.Current.Name }) -join ' | ')"
+            if ($m.Current.NativeWindowHandle -eq $Handle) { $ways['from root'] = @($under | ForEach-Object { $_.Current.Name }) }
+        }
+    }
+    catch { Write-Host "  uia ($What): $($_.Exception.GetType().Name): $($_.Exception.Message)" }
+    $names = @()
+    foreach ($w in $ways.Keys) {
+        $got = @($ways[$w] | Where-Object { $_ })
+        Write-Host "  uia ($What) by $w : $($got -join ' | ')"
+        if (-not $names -and $got) { $names = $got; Write-Host "  uia ($What): her rows' names by $w" }
+    }
+    $msaa = @()
+    if (Add-ShotMsaa) {
+        try {
+            foreach ($l in [ShotsTray.Msaa]::Rows($Handle)) { Write-Host "    msaa $l" }
+            $msaa = @([ShotsTray.Msaa]::Names($Handle) | Where-Object { $_ })
+        }
+        catch { Write-Host "  msaa ($What): $($_.Exception.Message)" }
+    }
+    Write-Host "  msaa ($What): $($msaa -join ' | ')"
+    @{ Uia = $names; Msaa = $msaa }
+}
+
+<# UI Automation's focused element (and its parent), said. #>
+function Show-UiaFocus([string]$When) {
+    if (-not ('System.Windows.Automation.AutomationElement' -as [type])) { Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes }
+    try {
+        $f = [System.Windows.Automation.AutomationElement]::FocusedElement
+        $p = [System.Windows.Automation.TreeWalker]::RawViewWalker.GetParent($f)
+        Write-Host "  uia focus ($When): $(Format-Uia $f), under $(Format-Uia $p)"
+    }
+    catch { Write-Host "  uia focus ($When): $($_.Exception.Message)" }
 }
 
 <# A shot of the taskbar's corner: her icon and -Also (her menu, the tooltip), padded (-Above px
