@@ -1,7 +1,10 @@
 //! Effects as pure functions of time: glitch bursts (RGB split, slice displacement,
 //! scanlines), the pat squash, the breathing bob, the attention hop, hair glints and the
 //! teleport bolt's geometry. The view samples them while they run and redraws only then.
-//! Behaviour follows CapriCore's signal-fx / teleport choreography; the code is ours.
+//! Some looks are modelled on what CapriCore's effects do on screen, and the palette below is
+//! its colours; none of this code is copied or translated from CapriCore's source. The bolt and
+//! the music notes are stubs, pending a clean-room rewrite written from a behaviour spec by
+//! someone who never read their earlier, CapriCore-derived versions.
 
 use crate::anim::Rng;
 use crate::shape::{self, ShapeRect};
@@ -815,24 +818,9 @@ pub fn scale_bands(b: &[(i32, i32, i32, i32)], pivot: (f32, f32), sx: f32, sy: f
         .collect()
 }
 
-/// Capri's note particle noise.
-fn noise(n: u64, seed: u32) -> f32 {
-    let v = (((n + 1) as f32) * 12.9898 + seed as f32 * 78.233).sin() * 43758.547;
-    v - v.floor()
-}
-
-fn smooth(a: f32, b: f32, v: f32) -> f32 {
-    let t = ((v - a) / (b - a)).clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
-}
-
-fn cubic(a: f32, b: f32, c: f32, d: f32, t: f32) -> f32 {
-    let u = 1.0 - t;
-    u * u * u * a + 3.0 * u * u * t * b + 3.0 * u * t * t * c + t * t * t * d
-}
-
 /// One floating note, in the music frame's canvas px.
 #[derive(Clone, Copy, Debug)]
+#[allow(dead_code)] // never built while `music_notes` is a stub
 pub struct Note {
     pub sprite: usize,
     pub x: f32,
@@ -842,43 +830,11 @@ pub struct Note {
     pub deg: f32,
 }
 
-/// Notes alive `age_s` into a session: one born per beat from alternating emitters, each
-/// drifting out and up along a curve for 2.5–3.15 s, growing in, fading out, rocking.
-/// (Capri's music-animation behaviour; at most seven.)
-pub fn music_notes(age_s: f32, beat_s: f32, emitters: &[[i32; 2]]) -> Vec<Note> {
-    let mut out = Vec::new();
-    if emitters.is_empty() || beat_s <= 0.0 {
-        return out;
-    }
-    let last = (age_s / beat_s).floor() as i64;
-    let first = (((age_s - 3.15) / beat_s).floor() as i64).max(0);
-    for n in first..=last {
-        let n = n as u64;
-        let at = n as f32 * beat_s;
-        let life = 2.5 + noise(n, 1) * 0.65;
-        let p = (age_s - at) / life;
-        if p <= 0.0 || p >= 1.0 {
-            continue;
-        }
-        let side = (n % 2) as usize;
-        let dir = if side == 1 { 1.0 } else { -1.0 };
-        let [ex, ey] = emitters[side.min(emitters.len() - 1)];
-        let (ex, ey) = (ex as f32, ey as f32);
-        let dx = dir * (270.0 + 60.0 * noise(n, 2));
-        let dy = -(185.0 + 65.0 * noise(n, 3));
-        out.push(Note {
-            sprite: ((n / 2) as usize + side) % 4,
-            x: cubic(ex, ex + dir * 74.0, ex + dx * 0.85, ex + dx, p),
-            y: ey + cubic(0.0, -14.0, dy * 0.52, dy, p),
-            size: (92.0 + 28.0 * noise(n, 4)) * (0.62 + 0.38 * smooth(0.0, 0.22, p)),
-            alpha: smooth(0.0, 0.16, p) * (1.0 - smooth(0.68, 1.0, p)),
-            deg: dir * ((noise(n, 5) - 0.5) * 8.0 + (p * PI).sin() * 14.0),
-        });
-    }
-    if out.len() > 7 {
-        out.drain(..out.len() - 7);
-    }
-    out
+/// The notes alive `age_s` seconds into a music session at one beat per `beat_s` seconds,
+/// launched from `emitters` (the music frame's canvas px).
+/// Clean-room stub: no notes until the rewrite lands.
+pub fn music_notes(_age_s: f32, _beat_s: f32, _emitters: &[[i32; 2]]) -> Vec<Note> {
+    Vec::new()
 }
 
 /// Breathing bob, device px upward: 0..=px on a cosine.
@@ -1006,146 +962,44 @@ pub const BOLT_END: f32 = 0.66;
 /// no glow, no core, no outline, no colour split; legibility may change length/thickness).
 pub const BOLT_LINE: u32 = 0xff1738;
 
-#[derive(Clone, Copy, Debug)]
-struct RoutePt {
-    x: f32,
-    y: f32,
-    t: f32,
-}
-
 /// A jagged strike from `a` to `b` (root px): a plain red ribbon whose tip races from the
 /// origin to the target with the trail behind it.
+/// Clean-room stub: draws nothing until the rewrite lands. The teleport's timing (the `BOLT_*`
+/// constants above, read by the view) runs as before, the bolt layer stays unmapped.
 pub struct Bolt {
-    a: (f32, f32),
-    axis: (f32, f32),
-    len: f32,
-    seed: u64,
-    scale: f32,
     bbox: (i32, i32, i32, i32),
-}
-
-fn along(p: (f32, f32), axis: (f32, f32), fwd: f32, across: f32) -> (f32, f32) {
-    (p.0 + axis.0 * fwd - axis.1 * across, p.1 + axis.1 * fwd + axis.0 * across)
 }
 
 impl Bolt {
     /// `scale`: figure size in px (the bolt's thickness follows it).
-    pub fn new(a: (f32, f32), b: (f32, f32), seed: u64, scale: f32) -> Bolt {
-        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
-        let len = (dx * dx + dy * dy).sqrt().max(1.0);
-        let axis = (dx / len, dy / len);
-        let amp = (len * 0.11).clamp(16.0, 90.0);
-        let pad = scale * 0.6 + amp * 1.6 + 24.0;
-        let (x0, x1) = (a.0.min(b.0) - pad, a.0.max(b.0) + pad);
-        let (y0, y1) = (a.1.min(b.1) - pad, a.1.max(b.1) + pad);
-        Bolt { a, axis, len, seed, scale, bbox: (x0 as i32, y0 as i32, (x1 - x0) as i32, (y1 - y0) as i32) }
+    pub fn new(a: (f32, f32), b: (f32, f32), _seed: u64, _scale: f32) -> Bolt {
+        let (x0, y0) = (a.0.min(b.0), a.1.min(b.1));
+        let (x1, y1) = (a.0.max(b.0), a.1.max(b.1));
+        Bolt { bbox: (x0 as i32, y0 as i32, (x1 - x0) as i32 + 1, (y1 - y0) as i32 + 1) }
     }
 
-    /// The zig-zag route, fixed for the whole strike.
-    fn route(&self) -> Vec<RoutePt> {
-        let mut rng = Rng::new(self.seed | 1);
-        let amp = (self.len * 0.11).clamp(16.0, 90.0);
-        let a = self.a;
-        let mirror = if rng.range(0.0, 1.0) < 0.5 { -1.0 } else { 1.0 };
-        let mut route = vec![RoutePt { x: a.0, y: a.1, t: 0.0 }];
-        for &(base, off) in &[(0.13, -0.3), (0.27, 0.66), (0.41, -0.6), (0.55, 0.78), (0.69, -0.26), (0.8, 0.7), (0.91, -0.16)] {
-            let t = base + rng.range(-0.02, 0.02);
-            let bend = off * amp * mirror * rng.range(0.73, 1.18);
-            let prev = *route.last().expect("route start");
-            let corner = along(a, self.axis, t * self.len, bend);
-            let crack = rng.range(0.18, 0.34) * amp * 0.6;
-            let mid = ((prev.x + (corner.0 - prev.x) * 0.62), (prev.y + (corner.1 - prev.y) * 0.62));
-            let mid = along(mid, self.axis, 0.0, -bend.signum() * crack);
-            route.push(RoutePt { x: mid.0, y: mid.1, t: prev.t + (t - prev.t) * 0.62 });
-            route.push(RoutePt { x: corner.0, y: corner.1, t });
-        }
-        let b = along(a, self.axis, self.len, 0.0);
-        route.push(RoutePt { x: b.0, y: b.1, t: 1.0 });
-        route
-    }
-
-    fn at(route: &[RoutePt], t: f32) -> (f32, f32) {
-        let t = t.clamp(0.0, 1.0);
-        let i = route.iter().position(|p| p.t >= t).unwrap_or(route.len() - 1).max(1);
-        let (a, b) = (route[i - 1], route[i]);
-        let u = if b.t > a.t { (t - a.t) / (b.t - a.t) } else { 0.0 };
-        (a.x + (b.x - a.x) * u, a.y + (b.y - a.y) * u)
-    }
-
+    /// Root-px box `(x, y, w, h)` holding every polygon `frame` and `streak` can return.
     pub fn bbox(&self) -> (i32, i32, i32, i32) {
         self.bbox
     }
 
-    /// Tip and tail along the route at time `u` (0..1 of BOLT_MS): the tip races from the
-    /// origin to the target in ~170 ms with the trail behind it, then the trail drains
-    /// into the target.
-    pub fn span(u: f32) -> (f32, f32) {
-        let ease = |v: f32| {
-            let v = v.clamp(0.0, 1.0);
-            1.0 - (1.0 - v) * (1.0 - v)
-        };
-        (ease(0.06 + u / 0.4), ease((u - 0.13) / 0.55))
+    /// Head and tail progress along the strike (each 0..1) at time `u` (0..1 of `BOLT_MS`).
+    #[allow(dead_code)] // nothing calls it while `frame` and `streak` are stubs
+    pub fn span(_u: f32) -> (f32, f32) {
+        (0.0, 0.0)
     }
 
-    /// The quiet (passive) strike: one thin straight shard, `len` px long and `w` px wide
-    /// at its head, flying along the same span. Root px, empty before/after.
-    pub fn streak(&self, u: f32, len: f32, w: f32) -> Vec<(f32, f32)> {
-        let (head, tail) = Bolt::span(u);
-        if head <= tail + 0.004 {
-            return Vec::new();
-        }
-        let h = head * self.len;
-        let t = (tail * self.len).max(h - len);
-        let tip = along(self.a, self.axis, h, 0.0);
-        let back = along(self.a, self.axis, t, 0.0);
-        let mid = h - (h - t).min(w * 2.5);
-        let (l, r) = (along(self.a, self.axis, mid, w / 2.0), along(self.a, self.axis, mid, -w / 2.0));
-        vec![back, l, tip, r]
+    /// The quiet (passive) strike at time `u`: one thin straight shard, `len` px long and `w` px
+    /// wide. Root px, empty before/after.
+    pub fn streak(&self, _u: f32, _len: f32, _w: f32) -> Vec<(f32, f32)> {
+        Vec::new()
     }
 
-    /// The bolt at time `u` as one polygon, root px (empty before/after the strike):
-    /// thickest just behind the tip, tapering to the trail.
-    pub fn frame(&self, u: f32) -> Vec<(f32, f32)> {
-        let (head, tail) = Bolt::span(u);
-        if head <= tail + 0.004 {
-            return Vec::new();
-        }
-        let route = self.route();
-        let travelled = head - tail;
-        let mut seg: Vec<(f32, f32, f32)> = vec![{
-            let p = Bolt::at(&route, tail);
-            (p.0, p.1, tail)
-        }];
-        seg.extend(route.iter().filter(|p| p.t > tail && p.t < head).map(|p| (p.x, p.y, p.t)));
-        let hp = Bolt::at(&route, head);
-        seg.push((hp.0, hp.1, head));
-        let radius = (self.scale * 0.07).clamp(4.0, 18.0);
-        let n = seg.len();
-        let widths: Vec<f32> = seg
-            .iter()
-            .enumerate()
-            .map(|(i, p)| if i == 0 || i == n - 1 { 0.6 } else { radius * (0.45 + 0.6 * (p.2 - tail) / travelled) })
-            .collect();
-        ribbon(&seg.iter().map(|p| (p.0, p.1)).collect::<Vec<_>>(), &widths)
+    /// The bolt at time `u` (0..1 of `BOLT_MS`) as one polygon, root px (empty before/after
+    /// the strike).
+    pub fn frame(&self, _u: f32) -> Vec<(f32, f32)> {
+        Vec::new()
     }
-}
-
-/// Asymmetric ribbon around a polyline: a filled polygon.
-fn ribbon(pts: &[(f32, f32)], widths: &[f32]) -> Vec<(f32, f32)> {
-    let n = pts.len();
-    let mut upper = Vec::with_capacity(n);
-    let mut lower = Vec::with_capacity(n);
-    for i in 0..n {
-        let (l, r) = (pts[i.saturating_sub(1)], pts[(i + 1).min(n - 1)]);
-        let (ax, ay) = (r.0 - l.0, r.1 - l.1);
-        let al = (ax * ax + ay * ay).sqrt().max(1e-3);
-        let axis = (ax / al, ay / al);
-        let w = widths[i];
-        upper.push(along(pts[i], axis, 0.0, w * if i % 2 == 1 { 0.63 } else { 1.12 }));
-        lower.push(along(pts[i], axis, 0.0, -w * if i % 2 == 1 { 1.06 } else { 0.59 }));
-    }
-    upper.extend(lower.into_iter().rev());
-    upper
 }
 
 /// The bolt polygon (root px) → shape rows relative to `origin`, run edges snapped to a
@@ -1520,38 +1374,6 @@ mod tests {
         assert_eq!(leg.extra(last, 120, 20), leg.dx[last]);
         assert_eq!(leg.extra(last, 60, 20), 0, "the other leg stays");
         assert!(pose_leg(Pose { kick: 0, ..p }, rows, &kick).is_none());
-    }
-
-    #[test]
-    fn notes_rise_and_fade() {
-        let em = [[500, 600], [760, 590]];
-        assert!(music_notes(0.01, 0.545, &em).len() <= 1);
-        let steady = music_notes(20.0, 0.545, &em);
-        assert!((4..=7).contains(&steady.len()), "{}", steady.len());
-        assert!(steady.iter().all(|n| n.y < 600.0 && n.alpha >= 0.0 && n.alpha <= 1.0 && n.deg.abs() <= 18.5));
-    }
-
-    #[test]
-    fn bolt_reaches_both_ends() {
-        let b = Bolt::new((0.0, 0.0), (400.0, 100.0), 3, 300.0);
-        let r = b.route();
-        assert_eq!(Bolt::at(&r, 0.0), (0.0, 0.0));
-        let end = Bolt::at(&r, 1.0);
-        assert!((end.0 - 400.0).abs() < 0.01 && (end.1 - 100.0).abs() < 0.01);
-        assert!(!b.frame(0.3).is_empty());
-        assert!(b.frame(1.0).is_empty());
-        // No flicker: the same shape for the same time, the same route every frame.
-        assert_eq!(b.frame(0.3), b.frame(0.3));
-        // The tip travels: it advances over 3–5 frames at 30 fps before reaching the target.
-        let frames = (BOLT_MS / 33.3) as usize;
-        let tips: Vec<f32> = (0..frames).map(|i| Bolt::span(i as f32 * 33.3 / BOLT_MS).0).collect();
-        let racing = tips.iter().filter(|&&h| h < 0.98).count();
-        assert!((3..=5).contains(&racing), "{tips:?}");
-        // The landing starts with the trail still in view; the trail is gone by the end.
-        let (h, t) = Bolt::span(BOLT_LAND);
-        assert!(h > 0.99 && h - t > 0.08, "{h} {t}");
-        let (h, t) = Bolt::span(BOLT_END);
-        assert!(h > 0.99 && t > 0.98, "{h} {t}");
     }
 }
 
