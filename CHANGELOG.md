@@ -5,9 +5,11 @@
 ### Her brain, in her Settings (Settings PR 3)
 - Settings' first row is BRAIN: her model and its login (`✓ CLAUDE · SONNET 4.6`, or `● NO BRAIN YET`
   with a red `SET UP ▸`). It opens Settings ▸ Brain: SIGN IN WITH CLAUDE first, RUN LOCAL, and OTHER
-  (ChatGPT, Copilot, Gemini, Grok, Kimi, Muse, API KEY) a step away; MODEL once she has a brain,
-  written to `settings.toml` as `[session] model` and set on her session at once. The sign-ins copy
-  their `synaps login --provider …` for now (she runs them herself next).
+  (ChatGPT, Copilot, Gemini, Grok, Kimi, Muse, API KEY) a step away (Gemini only with
+  `SYNAPS_GOOGLE_GEMINI_CLIENT_ID` set or its login on file: Synaps 0.12 can't sign in to it
+  without); MODEL once she has a brain, written to `settings.toml` as `[session] model` and set on
+  her session at once. The sign-ins copy their `synaps login --provider …` for now (she runs them
+  herself next). A login made in a terminal shows on the open page.
 - NO BRAIN YET from the files for every Synaps provider, not just Claude: an account's login in
   `auth.json`, an API key there, in Synaps' `config` or in its variable. One table (`provider.rs`) for
   the detection, the bubble's login command and the Brain screen.

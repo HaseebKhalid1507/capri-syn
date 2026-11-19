@@ -3027,11 +3027,14 @@ impl Avatar {
         if let Some(acts) = self.session.as_mut().map(|s| s.link.tick(now)) {
             self.run_acts(acts);
             // Her model's credentials, when due: a small file, on its own schedule (`creds`).
-            if let Some(s) = self.session.as_mut()
-                && let Some(q) = s.link.creds_due(now)
-            {
+            let news = self.session.as_mut().and_then(|s| {
+                let q = s.link.creds_due(now)?;
                 let (c, again) = crate::creds::check(&q);
-                s.link.set_creds(c, again, now);
+                Some(s.link.set_creds(c, again, now))
+            });
+            // A login since (his terminal's `synaps login`): the open Settings page sees it.
+            if news == Some(true) {
+                self.brain_news(cx);
             }
             let before = self.mood;
             self.sync_body(now);

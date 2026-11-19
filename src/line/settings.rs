@@ -98,7 +98,7 @@ pub struct Prefs {
     pub wake: bool,
     /// `[voice] enabled`: "HEY CAPRI" is dim while it is off.
     pub voice: bool,
-    /// `CAPRI 0.0.1 · SYNAPS 0.12.0 · sonnet-4-6`.
+    /// `CAPRI 0.0.1 · SYNAPS 0.12.0 · SONNET 4.6`.
     pub about: String,
     /// Her BRAIN: the model she thinks with and whether it has a login (`brain` above is her
     /// behaviour engine's switch).
@@ -285,7 +285,7 @@ pub enum BrainRow {
 pub fn brain_rows(p: &Prefs, other: bool) -> Vec<BrainRow> {
     let mut v = vec![BrainRow::Claude, BrainRow::Local, BrainRow::Other];
     if other {
-        v.extend((0..provider::others().count()).map(BrainRow::Account));
+        v.extend((0..p.mind.others().len()).map(BrainRow::Account));
         v.push(BrainRow::Key);
     }
     if p.mind.model.is_some() && !p.mind.none() {
@@ -345,9 +345,9 @@ pub fn brain_key(key: &str, sel: usize, p: &Prefs, other: bool) -> (usize, Act) 
             return (at, Act::Other(false));
         }
         (_, BrainRow::Claude) if go => use_provider(p, &provider::CLAUDE),
-        (_, BrainRow::Account(i)) if go => provider::others().nth(i).map_or(Act::Nothing, |to| use_provider(p, to)),
+        (_, BrainRow::Account(i)) if go => p.mind.others().get(i).map_or(Act::Nothing, |&to| use_provider(p, to)),
         (_, BrainRow::Key) if go && p.mind.here => Act::Login(None),
-        (_, BrainRow::Local) if go => Act::Local,
+        (_, BrainRow::Local) if go && p.mind.here => Act::Local,
         _ => Act::Nothing,
     };
     (sel, act)
@@ -667,8 +667,10 @@ impl Line {
         // a pending Esc's close: a cog click in its beat closed the Line on Settings.
         page_left(&mut self.note, &mut self.esc_at, self.nav.page);
         // The page left was this tall: both stay at least that (chat's draft or prompt strip
-        // let go of it when they go: `relax`).
-        if self.height > self.keep_h {
+        // let go of it when they go: `relax`). Not the Brain screen's OTHER, open: it's a list
+        // shown for a moment, not a height to keep.
+        let other_open = self.nav.left == Page::Brain && self.other;
+        if self.height > self.keep_h && !other_open {
             self.keep_h = self.height;
             self.keep_chat = self.nav.left == Page::Chat;
         }
@@ -1014,19 +1016,20 @@ impl Line {
                         let hers = m.provider().is_some_and(|x| x.kind == Kind::Local);
                         let (b, mark) = match m.local.as_ref().map(|l| &l.1) {
                             _ if hers && m.ok() => ("IN USE".to_string(), Some("check")),
+                            _ if !m.here => ("ON ITS MACHINE".into(), None),
                             Some(provider::Local::Up(ids)) => (format!("{} · {} MODEL{} HERE", if ollama { "OLLAMA" } else { "SERVER" }, ids.len(), if ids.len() == 1 { "" } else { "S" }), None),
                             Some(provider::Local::Off) if ollama => ("free · offline · Ollama isn't running".into(), None),
                             _ => ("free · offline · Ollama".into(), None),
                         };
-                        out.push(way("RUN LOCAL", b, mark, true, None));
+                        out.push(way("RUN LOCAL", b, mark, m.here, None));
                     }
                     BrainRow::Other => {
-                        let n = provider::others().filter(|&to| has(to)).count();
+                        let n = m.others().into_iter().filter(|&to| has(to)).count();
                         let b = if n > 0 { format!("{n} SIGNED IN · ChatGPT · Copilot · keys") } else { "ChatGPT · Copilot · keys".into() };
                         out.push(way("OTHER", b, None, true, Some(self.other)));
                     }
                     BrainRow::Account(i) => {
-                        let Some(to) = provider::others().nth(i) else { continue };
+                        let Some(&to) = m.others().get(i) else { continue };
                         let blurb = match to.id {
                             "openai-codex" => "Plus or Pro · browser",
                             "github-copilot" | "kimi-code" | "muse" => "a code to type in",
@@ -1067,10 +1070,9 @@ impl Line {
                                 })
                             })
                             .collect();
-                        let model = m.model.clone().unwrap_or_default();
                         out.push(
                             row(ix, on)
-                                .child(label("MODEL", on, Some(model.as_str()), 150.0))
+                                .child(label("MODEL", on, None, 150.0))
                                 .child(div().flex_1())
                                 .children(why.map(lock))
                                 .child(track(live).children(segs))
@@ -1099,7 +1101,6 @@ impl Line {
                         } else {
                             None
                         };
-                        let sub = m.model.clone().unwrap_or_else(|| "not attached yet".into());
                         let go = |b: Stateful<Div>| {
                             b.on_mouse_down(
                                 MouseButton::Left,
@@ -1113,7 +1114,7 @@ impl Line {
                         };
                         out.push(
                             row(ix, on)
-                                .child(label("BRAIN", on, Some(sub.as_str()), 170.0))
+                                .child(label("BRAIN", on, None, 170.0))
                                 .child(div().flex_1().min_w(px(0.0)).flex().justify_end().overflow_hidden().child(word(brain_word(m), mark, c)))
                                 .child(go(if none { button("set-brain", "SET UP ▸", true) } else { button("set-brain", "CHANGE ▸", false) }))
                                 .into_any_element(),
@@ -1257,7 +1258,7 @@ pub fn brain_line(m: &provider::Status) -> &'static str {
     let local = m.provider().is_some_and(|p| p.kind == Kind::Local);
     let ollama = m.local.as_ref().is_none_or(|(u, _)| u.contains(":11434"));
     match m.local.as_ref().map(|l| &l.1) {
-        _ if !m.here && !m.ok() => "My brain runs on another machine. Sign in there, I'll pick it up.",
+        _ if !m.here && !m.ok() => "My brain runs on another machine. Sign in there, then say hi.",
         _ if m.none() => "Give me a brain and I'll talk back.",
         _ if m.ok() => "That's what I think with. Swap it any time.",
         Some(provider::Local::Off) if local && ollama => "Ollama's asleep. Start it and I'll look again.",
@@ -1406,7 +1407,8 @@ mod tests {
     }
 
     /// No brain: the three ways in, Claude picked; ⏎ on Claude copies its sign-in (until PR 4
-    /// runs it here). OTHER opens in place (six accounts, then API KEY) and ← closes it.
+    /// runs it here). OTHER opens in place (five accounts: Gemini can't sign in without its
+    /// client id; then API KEY) and ← closes it.
     #[test]
     fn no_brain_the_ways_in_claude_first() {
         let p = Prefs { mind: mind("claude-sonnet-4-6", Some(false)), ..prefs() };
@@ -1418,14 +1420,27 @@ mod tests {
         assert_eq!(brain_key("enter", 2, &p, false), (2, Act::Other(true)));
         assert_eq!(brain_key("enter", 2, &p, true), (2, Act::Other(false)));
         let open = brain_rows(&p, true);
-        assert_eq!(open.len(), 3 + 6 + 1);
+        assert_eq!(open.len(), 3 + 5 + 1);
         assert_eq!(open[3], BrainRow::Account(0));
-        assert_eq!(open[9], BrainRow::Key);
+        assert_eq!(open[8], BrainRow::Key);
+        let name = |p: &Prefs| p.mind.others().iter().map(|a| a.name).collect::<Vec<_>>();
+        assert_eq!(name(&p), ["ChatGPT", "Copilot", "Grok", "Kimi", "Muse"]);
         let codex = provider::by_id("openai-codex").unwrap();
         assert_eq!(brain_key("enter", 3, &p, true), (3, Act::Login(Some(codex))));
-        assert_eq!(brain_key("enter", 9, &p, true), (9, Act::Login(None)), "API KEY: Synaps' list of services");
+        assert_eq!(brain_key("enter", 5, &p, true), (5, Act::Login(provider::by_id("xai-auth"))), "Grok, where Gemini would be");
+        assert_eq!(brain_key("enter", 8, &p, true), (8, Act::Login(None)), "API KEY: Synaps' list of services");
         assert_eq!(brain_key("left", 7, &p, true), (2, Act::Other(false)), "← closes OTHER, back on it");
-        assert_eq!(brain_key("down", 9, &p, true), (9, Act::Nothing));
+        assert_eq!(brain_key("down", 8, &p, true), (8, Act::Nothing));
+        // Gemini: with its client id set, a login on file, or hers.
+        let mut g = p.clone();
+        g.mind.gemini = true;
+        assert_eq!(name(&g), ["ChatGPT", "Copilot", "Gemini", "Grok", "Kimi", "Muse"]);
+        assert_eq!(brain_key("enter", 5, &g, true), (5, Act::Login(provider::by_id("google-gemini"))));
+        let mut g = p.clone();
+        g.mind.signed.push("google-gemini");
+        assert_eq!(name(&g).len(), 6, "signed in already");
+        let g = Prefs { mind: mind("google-gemini/gemini-2.5-pro", Some(false)), ..prefs() };
+        assert_eq!(name(&g).len(), 6, "hers");
         assert_eq!(brain_key("down", 2, &p, false), (2, Act::Nothing), "closed: nothing under OTHER");
         assert_eq!(brain_hint(&p, 0, false), "↑↓ pick · ⏎ copy the sign-in · esc back");
         assert_eq!(brain_hint(&p, 1, false), "↑↓ pick · ⏎ the steps · esc back");
@@ -1482,11 +1497,12 @@ mod tests {
         p.mind.here = false;
         assert_eq!(brain_key("enter", 0, &p, false).1, Act::Nothing);
         assert_eq!(brain_key("enter", 3, &p, true).1, Act::Nothing);
-        assert_eq!(brain_key("enter", 9, &p, true).1, Act::Nothing);
-        assert_eq!(brain_key("enter", 1, &p, false).1, Act::Local, "the steps are still the steps");
+        assert_eq!(brain_key("enter", 8, &p, true).1, Act::Nothing, "API KEY");
+        assert_eq!(brain_key("enter", 1, &p, false).1, Act::Nothing, "RUN LOCAL: its machine's server, not this one's");
+        assert_eq!(brain_hint(&p, 1, false), "↑↓ pick · esc back");
         let model = brain_rows(&p, false).len() - 1;
         assert_eq!(brain_key("right", model, &p, false).1, Act::Pref(Pref::Model("claude-opus-5-5")));
-        assert_eq!(brain_line(&p.mind), "My brain runs on another machine. Sign in there, I'll pick it up.");
+        assert_eq!(brain_line(&p.mind), "My brain runs on another machine. Sign in there, then say hi.");
         assert_eq!(brain_word(&p.mind), "CLAUDE · SONNET 4.6");
         // It answered: a brain, there or here.
         p.mind.signed_in = Some(true);

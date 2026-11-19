@@ -37,13 +37,19 @@ pub enum Again {
 /// out: no login on file is Unknown there, not Missing.
 pub fn check(q: &Query) -> (Creds, Again) {
     let daemon = |k: &str| q.pid.and_then(|p| crate::platform::process_env(p, k));
-    let env = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty()).or_else(|| daemon(k).flatten());
+    let env = |k: &str| env_set(k) || daemon(k) == Some(true);
     let daemon_read = daemon("ANTHROPIC_API_KEY").is_some();
     check_at(&q.model, &synaps_client::discovery::base_dir(), q.profile.as_deref(), &env, daemon_read)
 }
 
-/// `env`: her environment and the daemon's; `daemon_read`: whether the daemon's was read.
-pub fn check_at(model: &str, base: &Path, profile: Option<&str>, env: &dyn Fn(&str) -> Option<String>, daemon_read: bool) -> (Creds, Again) {
+/// A variable is set (not blank) in her environment. Only whether: a key's value is never read.
+pub fn env_set(k: &str) -> bool {
+    std::env::var_os(k).is_some_and(|v| !v.to_string_lossy().trim().is_empty())
+}
+
+/// `env`: a variable is set in her environment or the daemon's; `daemon_read`: whether the
+/// daemon's was read.
+pub fn check_at(model: &str, base: &Path, profile: Option<&str>, env: &dyn Fn(&str) -> bool, daemon_read: bool) -> (Creds, Again) {
     use crate::provider::Kind;
     const NEVER: (Creds, Again) = (Creds::Unknown, Again::Never);
     const TRY_AGAIN: (Creds, Again) = (Creds::Unknown, Again::Yes);
@@ -55,12 +61,12 @@ pub fn check_at(model: &str, base: &Path, profile: Option<&str>, env: &dyn Fn(&s
     // has its login on file or none.
     let missing = if daemon_read || p.env.is_empty() { (Creds::Missing(Some(p.name)), Again::Yes) } else { (Creds::Unknown, Again::IfMissing) };
     // A remote broker holds them (`auth.remote_endpoint`, `SYNAPS_AUTH_ENDPOINT`): not here to read.
-    if env("SYNAPS_AUTH_ENDPOINT").is_some() {
+    if env("SYNAPS_AUTH_ENDPOINT") {
         return NEVER;
     }
     // Synaps' own first-run check: an OAuth login, or `ANTHROPIC_API_KEY` (`anthropic_credential_available`);
     // the API-key services' env vars (`static_key_configured`).
-    if p.env.iter().any(|k| env(k).is_some()) {
+    if p.env.iter().any(|k| env(k)) {
         return (Creds::Have, Again::Never);
     }
     let file = |name: &str| synaps_file(base, profile, name);
@@ -124,8 +130,8 @@ mod tests {
         d
     }
 
-    fn none(_: &str) -> Option<String> {
-        None
+    fn none(_: &str) -> bool {
+        false
     }
 
     const MISSING: Creds = Creds::Missing(Some("Claude"));
@@ -151,7 +157,7 @@ mod tests {
         std::fs::write(d.join("auth.json"), r#"{"anthropic@work": {"type": "oauth"}}"#).unwrap();
         assert_eq!(check_at("claude-sonnet-4-6", &d, None, &none, true).0, Creds::Have, "a named account");
         std::fs::remove_file(d.join("auth.json")).unwrap();
-        let key = |k: &str| (k == "ANTHROPIC_API_KEY").then(|| "sk-x".to_string());
+        let key = |k: &str| k == "ANTHROPIC_API_KEY";
         assert_eq!(check_at("claude-sonnet-4-6", &d, None, &key, true).0, Creds::Have, "Synaps takes ANTHROPIC_API_KEY");
         std::fs::remove_dir_all(&d).ok();
     }
@@ -164,7 +170,7 @@ mod tests {
         for m in ["local/qwen3:8b", "acme/x", "gpt-5", ""] {
             assert_eq!(check_at(m, &d, None, &none, true), (Creds::Unknown, Again::Never), "{m}");
         }
-        let remote = |k: &str| (k == "SYNAPS_AUTH_ENDPOINT").then(|| "https://broker.example".to_string());
+        let remote = |k: &str| k == "SYNAPS_AUTH_ENDPOINT";
         assert_eq!(check_at("claude-sonnet-4-6", &d, None, &remote, true).0, Creds::Unknown);
         std::fs::write(d.join("config"), "# auth.remote_endpoint = x\nmodel = claude-sonnet-4-6\n").unwrap();
         assert_eq!(check_at("claude-sonnet-4-6", &d, None, &none, true).0, MISSING, "a comment isn't a setting");
@@ -185,7 +191,7 @@ mod tests {
         assert_eq!(check_at("claude-sonnet-4-6", &d, None, &none, false).0, Creds::Unknown);
         std::fs::write(d.join("auth.json"), "{}").unwrap();
         assert_eq!(check_at("claude-sonnet-4-6", &d, None, &none, false).0, Creds::Unknown);
-        let key = |k: &str| (k == "ANTHROPIC_API_KEY").then(|| "sk-x".to_string());
+        let key = |k: &str| k == "ANTHROPIC_API_KEY";
         assert_eq!(check_at("claude-sonnet-4-6", &d, None, &key, false).0, Creds::Have);
         std::fs::write(d.join("auth.json"), r#"{"anthropic": {"type": "oauth"}}"#).unwrap();
         assert_eq!(check_at("claude-sonnet-4-6", &d, None, &none, false).0, Creds::Have);
@@ -199,9 +205,9 @@ mod tests {
     #[test]
     fn reads_stop_where_nothing_here_can_change_them() {
         let d = dir("again");
-        let at = |m: &str, env: &dyn Fn(&str) -> Option<String>, read: bool| check_at(m, &d, None, env, read);
+        let at = |m: &str, env: &dyn Fn(&str) -> bool, read: bool| check_at(m, &d, None, env, read);
         assert_eq!(at("local/qwen3:8b", &none, true), (Creds::Unknown, Again::Never));
-        let remote = |k: &str| (k == "SYNAPS_AUTH_ENDPOINT").then(|| "https://broker.example".to_string());
+        let remote = |k: &str| k == "SYNAPS_AUTH_ENDPOINT";
         assert_eq!(at("claude-sonnet-4-6", &remote, true), (Creds::Unknown, Again::Never));
         assert_eq!(at("claude-sonnet-4-6", &none, true), (MISSING, Again::Yes));
         assert_eq!(at("claude-sonnet-4-6", &none, false), (Creds::Unknown, Again::IfMissing), "Windows, no login on file");
@@ -230,7 +236,7 @@ mod tests {
         assert_eq!(check_at("github-copilot/gpt-5.5", &d, None, &none, false).0, Creds::Have);
         assert_eq!(check_at("kimi-code/k3", &d, None, &none, true).0, Creds::Missing(Some("Kimi")));
         assert_eq!(check_at("muse/muse-wonder-1.0", &d, None, &none, false).0, Creds::Unknown, "META_API_KEY in an unread env");
-        let meta = |k: &str| (k == "META_API_KEY").then(|| "m".to_string());
+        let meta = |k: &str| k == "META_API_KEY";
         assert_eq!(check_at("muse/muse-wonder-1.0", &d, None, &meta, false).0, Creds::Have);
         std::fs::remove_dir_all(&d).ok();
     }
@@ -244,9 +250,9 @@ mod tests {
         let groq = "groq/llama-3.3-70b-versatile";
         assert_eq!(check_at(groq, &d, None, &none, true), (Creds::Missing(Some("Groq")), Again::Yes));
         assert_eq!(check_at(groq, &d, None, &none, false), (Creds::Unknown, Again::IfMissing));
-        let key = |k: &str| (k == "GROQ_API_KEY").then(|| "gsk".to_string());
+        let key = |k: &str| k == "GROQ_API_KEY";
         assert_eq!(check_at(groq, &d, None, &key, true), (Creds::Have, Again::Never));
-        let other = |k: &str| (k == "CEREBRAS_API_KEY").then(|| "c".to_string());
+        let other = |k: &str| k == "CEREBRAS_API_KEY";
         assert_eq!(check_at(groq, &d, None, &other, true).0, Creds::Missing(Some("Groq")), "another service's key");
         std::fs::write(d.join("config"), "# provider.groq = old\nprovider.groq =\n").unwrap();
         assert_eq!(check_at(groq, &d, None, &none, true).0, Creds::Missing(Some("Groq")), "a comment, an empty value");

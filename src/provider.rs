@@ -88,10 +88,15 @@ pub static ALL: &[Provider] = &[
     key("kimi", "Moonshot", &["MOONSHOT_API_KEY", "KIMI_API_KEY"], &[("kimi/kimi-k3.1-pro", "KIMI K3.1 PRO")]),
 ];
 
-/// The accounts OTHER lists, in order: every sign-in but Claude's.
+/// The accounts OTHER can list, in order: every sign-in but Claude's (`Status::others`: the
+/// ones it does).
 pub fn others() -> impl Iterator<Item = &'static Provider> {
     ALL.iter().filter(|p| p.kind == Kind::OAuth && p.id != CLAUDE.id)
 }
+
+/// Gemini's sign-in in Synaps 0.12 needs its Google OAuth client from this variable
+/// (`google_gemini.rs`, its login and its refresh): without it there's no signing in to it.
+pub const GEMINI_CLIENT_ID: &str = "SYNAPS_GOOGLE_GEMINI_CLIENT_ID";
 
 /// The provider a model runs on, as Synaps routes it: bare `claude-*` and `anthropic/…` on
 /// Claude, `<id>/…` on that provider. None: a prefix Synaps doesn't know (it fails closed), or
@@ -315,12 +320,19 @@ pub struct Status {
     pub synaps: String,
     /// The local server (`local_url`), and what a look at it found (None: not looked yet).
     pub local: Option<(String, Local)>,
+    /// `GEMINI_CLIENT_ID` is set (hers, or the daemon's): Gemini can be signed in to.
+    pub gemini: bool,
 }
 
 impl Status {
     /// Her model's provider.
     pub fn provider(&self) -> Option<&'static Provider> {
         self.model.as_deref().and_then(of)
+    }
+
+    /// The accounts OTHER lists: Gemini only where it can be signed in to, or has a login.
+    pub fn others(&self) -> Vec<&'static Provider> {
+        others().filter(|&p| p.id != "google-gemini" || self.gemini || self.signed.contains(&p.id) || self.provider() == Some(p)).collect()
     }
 
     /// No brain: no login for her model (her tag's NO BRAIN YET).

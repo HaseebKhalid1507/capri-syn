@@ -43,6 +43,8 @@ pub(super) struct BrainLook {
     pub local: Option<(String, provider::Local)>,
     pub synaps: String,
     pub signed: Vec<&'static str>,
+    /// Gemini can be signed in to (`provider::GEMINI_CLIENT_ID` set, hers or the daemon's).
+    pub gemini: bool,
     /// When it was taken (None: never), and whether one is under way.
     pub at: Option<Instant>,
     pub busy: bool,
@@ -65,7 +67,8 @@ fn look_now(profile: Option<String>, pid: Option<u32>, here: bool) -> BrainLook 
         .filter(|p| p.models.first().is_some_and(|m| crate::creds::check(&crate::creds::Query { model: m.0.into(), profile: profile.clone(), pid }).0 == Creds::Have))
         .map(|p| p.id)
         .collect();
-    BrainLook { local: Some((url, local)), synaps, signed, at: None, busy: false }
+    let gemini = crate::creds::env_set(provider::GEMINI_CLIENT_ID) || pid.and_then(|p| crate::platform::process_env(p, provider::GEMINI_CLIENT_ID)) == Some(true);
+    BrainLook { local: Some((url, local)), synaps, signed, gemini, at: None, busy: false }
 }
 
 /// What a settings.toml write applies once it is in: the change, and whether her menu asked
@@ -556,7 +559,14 @@ impl Avatar {
     /// Her settings as asked (a change on its way to settings.toml), else as she runs them:
     /// for the Settings page, which steps on from them as her menu does.
     pub(super) fn prefs_now(&self) -> Prefs {
-        let mark = self.session.as_ref().and_then(|s| s.link.mark()).unwrap_or_else(|| "SYNAPS · OFFLINE".into());
+        // ABOUT: the versions, and her model as the page says it (`SONNET 4.6`, not its id).
+        let link = self.session.as_ref().map(|s| &s.link);
+        let synaps = link.and_then(|l| l.daemon_version()).map_or_else(|| "SYNAPS".to_string(), |v| format!("SYNAPS {v}"));
+        let mark = match link.and_then(|l| l.model()) {
+            Some(m) => format!("{synaps} · {}", provider::model_label(m)),
+            None if link.is_some_and(|l| l.daemon_version().is_some()) => synaps,
+            None => "SYNAPS · OFFLINE".into(),
+        };
         let running = self.brain.as_ref().map_or(Attention::Off, |h| h.settings.brain.attention);
         let (attention, wake) = crate::line::asked(self.prefs_io.pending().map(|j| &j.pref), running, self.voice.cfg.wake_word);
         Prefs {
@@ -575,7 +585,7 @@ impl Avatar {
     /// its login, what locks it, and the last look (`look_at_brain`).
     pub(super) fn mind_now(&self) -> provider::Status {
         let look = &self.brain_look;
-        let mut m = provider::Status { signed: look.signed.clone(), synaps: look.synaps.clone(), local: look.local.clone(), ..provider::Status::default() };
+        let mut m = provider::Status { signed: look.signed.clone(), synaps: look.synaps.clone(), local: look.local.clone(), gemini: look.gemini, ..provider::Status::default() };
         let Some(s) = &self.session else { return m };
         m.model = crate::line::asked_model(self.prefs_io.pending().map(|j| &j.pref), s.link.model_on_way().or(s.link.model()));
         m.signed_in = match s.link.creds() {
@@ -613,6 +623,16 @@ impl Avatar {
             .ok();
         })
         .detach();
+    }
+
+    /// Her login changed (a read found one, or lost it): the open Settings page shows it, and
+    /// looks again at once (the accounts signed in here).
+    pub(super) fn brain_news(&mut self, cx: &mut Context<Self>) {
+        self.brain_look.at = None;
+        if self.line.as_ref().is_some_and(|l| l.page.settings()) {
+            self.look_at_brain(cx);
+            self.line_push(cx);
+        }
     }
 
     /// A change on the Settings page: written to settings.toml (only that key; a file she
@@ -678,7 +698,7 @@ impl Avatar {
         self.menu_save = self.menu_save.written(p, job.menu, r.is_ok());
         self.prefs_says = Some(match r {
             Ok(_) => {
-                let took = self.pref_apply(p);
+                let held = self.pref_apply(p);
                 elog!("synaps-avatar: settings: {p:?}: ok (that key only{})", if job.menu { ", her menu" } else { "" });
                 match p {
                     Pref::Attention(a) => {
@@ -695,8 +715,10 @@ impl Avatar {
                     }
                     Pref::Wake(true) => "Say my name, I'll hear it.".into(),
                     Pref::Wake(false) => "I'll stop listening for my name.".into(),
-                    Pref::Model(m) if took => format!("{} it is. Your next message runs on it.", provider::model_spoken(m)),
-                    Pref::Model(_) => "Saved for my next start: another client has my session's input.".into(),
+                    Pref::Model(m) => match held {
+                        None => format!("{} it is. Your next message runs on it.", provider::model_spoken(m)),
+                        Some(why) => why.into(),
+                    },
                 }
             }
             Err(e) => {
@@ -712,9 +734,9 @@ impl Avatar {
         cx.notify();
     }
 
-    /// A change written: its key in what she runs with, nothing else. false: a model her session
-    /// can't take now (another client owns its input; her next start sets it).
-    fn pref_apply(&mut self, p: Pref) -> bool {
+    /// A change written: its key in what she runs with, nothing else. Some: why her session
+    /// didn't take a model now (her next start sets it), as she says it.
+    fn pref_apply(&mut self, p: Pref) -> Option<&'static str> {
         match p {
             Pref::Attention(a) => {
                 if let Some(h) = &mut self.brain {
@@ -743,20 +765,27 @@ impl Avatar {
                 if let Some(h) = &mut self.brain {
                     p.apply(&mut h.settings);
                 }
-                let (acts, took) = match &mut self.session {
+                const LATER: &str = "Saved for my next start.";
+                let (acts, held) = match &mut self.session {
                     Some(sl) if !sl.link.rides_other() => {
                         let persona = crate::session_persona(&session, &self.voice.cfg, sl.link.cli_model(), &self.pack.dir);
-                        let acts = sl.link.set_persona(persona, Instant::now());
-                        let took = !acts.is_empty() || sl.link.model() == Some(m) || sl.link.model_on_way() == Some(m);
-                        (acts, took)
+                        let acts = sl.link.pick_persona(persona, Instant::now());
+                        let held = if !acts.is_empty() || sl.link.model() == Some(m) || sl.link.model_on_way() == Some(m) {
+                            None
+                        } else if sl.link.persona_blocked() {
+                            Some("Saved for my next start: another client has my session's input.")
+                        } else {
+                            Some(LATER)
+                        };
+                        (acts, held)
                     }
-                    _ => (Vec::new(), false),
+                    _ => (Vec::new(), Some(LATER)),
                 };
                 self.run_acts(acts);
-                return took;
+                return held;
             }
         }
-        true
+        None
     }
 
     /// Bring an open Line up to date (deferred: the Line may call back).

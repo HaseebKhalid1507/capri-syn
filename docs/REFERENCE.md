@@ -89,13 +89,17 @@ Reference for `synaps-avatar`, the crate behind capri-syn. The [README](../READM
 - **Settings ▸ Brain.** Settings' first row, BRAIN, shows her model and its login (`✓ CLAUDE ·
   SONNET 4.6`, `● NO BRAIN YET` with a red `SET UP ▸`); ⏎ (or its button) opens the Brain screen:
   SIGN IN WITH CLAUDE, RUN LOCAL (its server looked at: Ollama's port, or `provider.local.url`), OTHER
-  (opened in place: ChatGPT, Copilot, Gemini, Grok, Kimi, Muse, then API KEY), and, once she has a
-  brain, MODEL: her provider's few models, written to `settings.toml` as an explicit `[session]
-  model` (only that key; the safe writer) and set on her session at once. A provider with a login
+  (opened in place: ChatGPT, Copilot, Gemini, Grok, Kimi, Muse, then API KEY; Gemini only with
+  `SYNAPS_GOOGLE_GEMINI_CLIENT_ID` set, which Synaps 0.12 needs to sign in to it, or a Gemini login
+  on file), and, once she has a brain, MODEL: her provider's few models, written to `settings.toml`
+  as an explicit `[session] model` (only that key; the safe writer) and set on her session at once,
+  even when the file has it already (her session may have moved off it). If another client owns her
+  session's input it isn't set: she says so, and her next start sets it. A provider with a login
   on file shows ✓ and a click switches her to its first model; a sign-in copies its `synaps login
   --provider …` for a terminal until she runs it herself. Locked: `--model` (`set by --model`),
   `--session` (`their session`). A daemon through `--socket` signs in on its own machine: the ways in
-  say so and do nothing here.
+  (RUN LOCAL too) say ON ITS MACHINE and do nothing here. The page looks again when a read finds a
+  login (one made in a terminal shows without reopening it).
 - **A turn shows as started** (THINKING, the busy bubble with ABORT) only once it has run 400 ms with
   no word, or its first word comes: one that fails at once never promises a reply.
 - **Sleep follows you, not the chat**: while you're at the desk she stays up,
