@@ -4,7 +4,7 @@
 
 ## 1.1.1 (2026-11-20)
 
-She runs free on any ChatGPT account, a free one too: no API key, no card, no GPU. On Linux her context
+She runs free on a ChatGPT account, a free one too: no API key, no card, no GPU. On Linux her context
 rolls over by itself, so an always-on chat doesn't fill her model's context.
 
 ### Her brain
@@ -12,7 +12,7 @@ rolls over by itself, so an always-on chat doesn't fill her model's context.
   "Her model" page and the installers' lists. Free accounts have usage limits: when yours is used up she
   says she's hit her model's limit (AT THE LIMIT). Wait for it to reset, or pick another brain.
 - **ChatGPT's default is GPT-5.6 Terra,** which a free account runs (GPT-5.6 Luna too): a ChatGPT sign-in
-  puts her on it. GPT-5.6 Sol, GPT-6 Astra and GPT-6.1 Sol need a paid plan; on one that doesn't run her
+  puts her on it. GPT-5.6 Sol, GPT-6 Astra and GPT-6.1 Sol need a paid plan; on a plan that doesn't run her
   model she says NOT ON YOUR PLAN and to pick another in Settings ▸ Brain ▸ MODEL, instead of Synaps'
   error (only while her model is on ChatGPT). A model you picked stays yours.
 - **GPT-5.5, GPT-5.4, GPT-5.4 Mini and GPT-5.3 Codex Spark are gone from ChatGPT's list:** OpenAI retired
@@ -22,13 +22,14 @@ rolls over by itself, so an always-on chat doesn't fill her model's context.
   service, Gemini; Claude's `rate_limit_error`) is AT THE LIMIT, a 500, 502, 503, 504 or 529 (or a reply
   stopped at capacity) is MODEL BUSY, and a 408 is NO CONNECTION. ChatGPT's 401 is LOGGED OUT, with
   `SIGN IN AGAIN ▸` (only while her model is on that account).
+- **Settings ▸ Brain's account and key-service rows fit** at the Line's narrowest (480 px).
 
 ### Her session
 - **Her context rolls over by itself (Linux).** She turns on Synaps' automatic context rollover for her
   own session only (`/context auto`; Synaps' config and your other sessions stay as they are): when the
   context gets long, Synaps archives the older messages and carries on in a fresh window with the
   recent ones, and the Line shows one quiet row where it happened. It's for ChatGPT, Claude and other
-  brains with a 200k window or more: she skips it for a local model and for a window under 128k, and
+  brains with room for it (most have 200k): she skips it for a local model and for a window under 128k, and
   when Synaps has it on already (its config, or another client's `/context auto`) she leaves it to
   Synaps. Her log says which. `[session] rollover = false` leaves it to Synaps. Not on Windows yet
   (Known issues).
