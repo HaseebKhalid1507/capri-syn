@@ -221,9 +221,9 @@ Both do the same steps, and a rerun is an upgrade:
   <img src="docs/media/still-first-words.png" width="36%" alt="Capri's bubble: Hey. I'm Capri. Give me a brain and I'll talk back. A red SET ME UP button under it">
 </p>
 
-`SET ME UP ▸` opens **Settings ▸ Brain**. For now a sign-in there copies its one `synaps login` line
-for you to run in a terminal (Claude's opens your browser); she notices the login by herself. Windows
-setup's last page offers the Claude sign-in too. No account?
+`SET ME UP ▸` opens **Settings ▸ Brain**: sign in to an account (she runs the sign-in, your browser
+opens on it), add an API key or run a local model. Her installers ask first: an account, a model on
+your PC, an API key, or later. No account?
 [Run a local model](docs/UNDER-THE-HOOD.md#her-brain). Without a brain she still perches, naps and plays.
 
 <details>

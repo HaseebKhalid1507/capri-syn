@@ -49,7 +49,8 @@ flag also has PowerShell's spelling: `-Yes`, `-DryRun`, `-NoAutostart`, and so o
 Or her installer, no terminal: `capri-syn-setup-x86_64.exe` from the latest release. Double-clicked,
 it does what this script does (Synaps when it's missing, her art downloaded and built, the daemon,
 autostart, her voice if you tick it) through the same steps (`packaging/windows/steps.ps1`), and
-its finish page offers the Claude sign-in: [docs/WINDOWS.md](WINDOWS.md#the-installer).
+its "Her model" page asks which brain, as this script does:
+[docs/WINDOWS.md](WINDOWS.md#the-installer).
 
 ## The steps
 
@@ -67,21 +68,41 @@ At the end comes an `installed:` summary: what is where, how the daemon starts, 
 how to start her, and how to remove her (as you ran it: the checkout's script, or the piped form).
 
 When Synaps has no model yet (no login in `~/.synaps-cli/auth.json`, no `local/` model in its config
-or her `[session]`), one line says so: giving her a brain happens in her, not in a picker in the
-installer. Her tag reads NO BRAIN YET, her first words end on a red `SET ME UP ▸`, and while she has
-none a click on her or her summon key opens the Line on **Settings ▸ Brain**: three ways in, none
-first. SIGN IN lists the accounts by name (ChatGPT, Claude, Copilot, Gemini, Grok, Kimi, Muse); a
-click runs Synaps' sign-in for it with no window and your browser opens on the provider's page
-(Copilot's code is shown large and copied, to type there; on Windows Grok needs a newer Synaps).
-API KEY takes a key in a hidden field and hands it to Synaps on its stdin. RUN LOCAL lists your
-local server's models when it's up with some, else opens the local-model steps
-([UNDER-THE-HOOD.md](UNDER-THE-HOOD.md#her-brain)). Signed in, she switches to that account's model;
-the daemon picks the login up on her next turn, with no restart: Synaps reads `auth.json` per
-request. With no model picked anywhere and no login, her failed first message says to pick a brain
-(`SET ME UP ▸`), not to sign in to Claude. On Windows her
-installer's finish page offers the Claude sign-in itself, and her tag reads ONLINE until your first
-message ([WINDOWS.md](WINDOWS.md#the-installer)). When Synaps was already there with a model, one
-line says her session is `capri`.
+or her `[session]`), it asks which brain, in your terminal. None is picked for you; Enter is later.
+
+1. **Sign in to an account**: ChatGPT, Claude, Copilot, Gemini (when Synaps has its Google client),
+   Grok, Kimi or Muse: her own table's (`synaps-avatar --providers`, `src/provider.rs`' `ALL` in its
+   order), the same as her Settings ▸ Brain; the installers keep no copy. It runs
+   `synaps login --provider …` here, and your browser opens on the sign-in page by itself; Copilot's
+   page asks for the code Synaps prints. Nothing to copy. Once `auth.json` is written, its stdin (a
+   pipe held open: Synaps 0.12 gives up on a closed one, and asks about its app on a terminal) is
+   closed and it ends: no wait. Ctrl-C stops it too.
+2. **A model on this machine**: the models Ollama (`:11434`) and LM Studio (`:1234`) serve now, if
+   either runs (asked directly, never through a proxy; embedding models left out, and any id with
+   more than letters, digits and `._:/@+-`). With none, it says so (Ollama: ollama.com) and picks
+   later. It downloads nothing.
+3. **An API key**: Groq, OpenRouter and the other key services. The key is read without echo and
+   goes to `synaps login` on its stdin: never in an argument, a log or on screen.
+4. **Later**: her tag reads NO BRAIN YET, her first words end on a red `SET ME UP ▸`, and while she
+   has none a click on her or her summon key opens the Line on **Settings ▸ Brain**: three ways in,
+   none first. SIGN IN lists the same accounts; a click runs Synaps' sign-in for it with no window and
+   your browser opens on the provider's page (Copilot's code is shown large and copied, to type there;
+   on Windows Grok needs a newer Synaps). API KEY takes a key in a hidden field and hands it to Synaps
+   on its stdin. RUN LOCAL lists your local server's models when it's up with some, else opens the
+   local-model steps ([UNDER-THE-HOOD.md](UNDER-THE-HOOD.md#her-brain)). Signed in, she switches to
+   that account's model. With no model picked anywhere and no login, her failed first message says to
+   pick a brain (`SET ME UP ▸`), not to sign in to Claude.
+
+Then her model is that one: an account's or a key service's default (her own table's,
+`synaps-avatar --providers`; an account's once you're signed in, never before), or `local/<model>`,
+through `synaps-avatar --set session.model=…` (a running her reads her settings again). A
+model on LM Studio also sets Synaps' `provider.local.url` (Ollama's is its default) and reloads the
+daemon. `--brain` picks without asking (unattended: `--brain=later`, `--brain=claude`,
+`--brain=local:qwen3:8b`), and with `--yes`, `--dry-run` or no terminal it's later unless `--brain`
+says otherwise. A key needs your terminal. The daemon picks a login up on her next turn, with no
+restart: Synaps reads `auth.json` per request. Her installer on Windows asks the same on its
+"Her model" page ([WINDOWS.md](WINDOWS.md#the-installer)). When Synaps was already there with a
+model, one line says her session is `capri`.
 
 Then it starts her, `--no-autostart` or not (that flag is about login), the way autostart will
 (Linux: `env SA_BACKEND=x11` off Hyprland and i3, so GNOME and KDE on Wayland run her through
@@ -178,11 +199,12 @@ she runs through XWayland, the X server those desktops keep for X apps.
   None of them has been tried on a real session yet: CI and the test containers stand in for them.
 - **Hyprland** has no idle time for her yet: your presence is the pointer moving, so typing alone
   for 5 min reads as away. Hyprland before 0.40 isn't supported: she takes XWayland there.
-- **Signing in is a terminal step.** Settings ▸ Brain copies the `synaps login` line; she doesn't
-  run it herself yet. On Windows, Synaps 0.12's `synaps login` opens a sign-in tab cut at the URL's
-  first `&`: copy the whole URL it prints into your browser, or run her installer's Claude sign-in
-  (install.ps1 puts it there too; the default folder shown):
+- **On Windows, Synaps 0.12's own `synaps login`** opens a sign-in tab cut at the URL's first `&`:
+  copy the whole URL it prints into your browser, or sign in through her installers' step, which
+  opens it whole (install.ps1 puts it there too; the default folder shown; `-Provider` for another
+  account than Claude):
   `powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Programs\synaps-avatar\steps\steps.ps1" login`
+  Grok's sign-in never prints its URL, so the Windows installers don't offer Grok yet
   ([WINDOWS.md](WINDOWS.md#the-installer)).
 - **Windows:** the installers are unsigned, so a browser download meets SmartScreen ("More info",
   then "Run anyway"); Windows 10 and Windows 11 on Arm are untested; a click on one of her notifications does nothing (as
@@ -198,7 +220,8 @@ she runs through XWayland, the X server those desktops keep for X apps.
 
 | flag | |
 |---|---|
-| `--yes` | don't ask: Synaps' installer and its PATH edits, sudo for packages, edits to the window manager's config, enabling capri-watch (Windows: winget). It never opens `synaps login`, and never adds a GNOME shortcut (that one takes your own yes) |
+| `--yes` | don't ask: Synaps' installer and its PATH edits, sudo for packages, edits to the window manager's config, enabling capri-watch (Windows: winget). Her brain is later (unless `--brain`): it never opens `synaps login`, and never adds a GNOME shortcut (that one takes your own yes) |
+| `--brain=WHICH` | her brain, unasked, when Synaps has none: an account (`claude`, `openai-codex`, `github-copilot`… its provider id or login), `local` (the first model running here) or `local:MODEL`, a key service (`groq`…: asks for the key, so it needs your terminal), or `later` |
 | `--dry-run` | print every action, touch nothing |
 | `--uninstall` | remove what it installed; settings, state and her log stay (on Windows her installer's own uninstaller takes her state and log) |
 | `--purge` | with `--uninstall`: remove those too: her own files only (`settings.toml`, `state.json`, `sessions.json`, her log, the installer's cache), never the folders' other contents. A pack it didn't make (yours at `packs/capri`, or one moved aside) is never removed |
@@ -360,6 +383,14 @@ never published; delete it when you're done.
     file touched), refused when answered `n`, and with `--yes` the files it named are the ones it
     edited;
   - the brain step under a terminal with `--yes` (the picker isn't opened), after "start her";
+  - the brain step against a stand-in `synaps` and her `--providers`, and stand-in Ollama and LM
+    Studio servers: later with no terminal; `--brain` with an account (its login, then her model
+    its default; a stand-in that waits on its stdin once signed in, as 0.12's does, ends at once,
+    and Ctrl-C mid sign-in leaves no synaps and no holder of its stdin), a key (on synaps' stdin,
+    never in its arguments or the output), a local model
+    (Ollama's leaves Synaps' config alone; LM Studio's sets `provider.local.url` and reloads the
+    daemon), one not running and a name she doesn't know (later, said); the picker (a local
+    model, an account, Enter is later); a login already (nothing asked); `--dry-run`;
   - `--uninstall` naming the removal recipe only for a Synaps it installed;
   - `--uninstall --purge` with your own pack at `packs/capri` (kept); a receipt with a `dir` entry
     that isn't one of hers (left alone); a relative `--prefix` with `..` in it;

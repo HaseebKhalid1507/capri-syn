@@ -33,6 +33,7 @@ $Cross = [string][char]0x2717
 $Usage = @'
 usage: install.ps1 [--yes] [--dry-run] [--uninstall [--purge]] [--voice] [--watch] [--no-autostart]
                    [--from-source] [--prefix DIR] [--with-local-art] [--artifact FILE] [--allow-root]
+                   [--brain WHICH]
 
   --yes             don't ask: Synaps' installer, and Visual Studio's C++ build tools (admin) for a
                     source build
@@ -48,9 +49,13 @@ usage: install.ps1 [--yes] [--dry-run] [--uninstall [--purge]] [--voice] [--watc
   --with-local-art  also mochi's art: LOCAL PERSONAL USE ONLY, never publish or share it
   --artifact FILE   install this release asset (her setup .exe) instead of downloading one
   --allow-root      install.sh's (installing as root); nothing to allow here
+  --brain WHICH     her model, when Synaps has none: an account to sign in to now, in your browser
+                    (claude, openai-codex, github-copilot, kimi-code, muse...), an API key's service
+                    (groq, openrouter...: asked for here, unshown), local or local:MODEL (a model on
+                    this PC: Ollama, LM Studio), or later. Without it she asks; --yes means later
 
 Each flag also has PowerShell's spelling: -Yes, -DryRun, -Uninstall, -Purge, -Voice, -Watch,
--NoAutostart, -FromSource, -Prefix DIR, -WithLocalArt, -Artifact FILE, -AllowRoot.
+-NoAutostart, -FromSource, -Prefix DIR, -WithLocalArt, -Artifact FILE, -AllowRoot, -Brain WHICH.
 With no flags (irm | iex can't pass any), $env:CAPRI_INSTALL_FLAGS is read instead (space-separated),
 said in the banner, then cleared from your session: it applies to one run only.
 Steps and details: docs/INSTALL.md (https://github.com/HaseebKhalid1507/capri-syn)
@@ -221,7 +226,7 @@ function Read-Flags([string[]]$ArgList) {
     $script:Yes = $false; $script:Dry = $false; $script:Uninstall = $false; $script:Purge = $false
     $script:Voice = $false; $script:Watch = $false; $script:Autostart = $true; $script:FromSource = $false
     $script:LocalArt = $false; $script:Prefix = Join-Path $env:LOCALAPPDATA 'Programs\synaps-avatar'; $script:Artifact = ''; $script:PrefixGiven = $false
-    $script:HisRun = ''; $script:StoppedElsewhere = $false
+    $script:HisRun = ''; $script:StoppedElsewhere = $false; $script:BrainPick = ''
     $i = 0
     while ($ArgList -and $i -lt $ArgList.Count) {
         $a = [string]$ArgList[$i]
@@ -239,13 +244,15 @@ function Read-Flags([string[]]$ArgList) {
             'fromsource' { $script:FromSource = $true }
             'withlocalart' { $script:LocalArt = $true }
             'allowroot' { }
-            { $_ -in 'prefix', 'artifact' } {
+            { $_ -in 'prefix', 'artifact', 'brain' } {
                 if ($null -eq $val) {
                     $i++
                     if ($i -ge $ArgList.Count) { Stop-Install "--$k needs a value" }
                     $val = [string]$ArgList[$i]
                 }
-                if ($k -eq 'prefix') { $script:Prefix = $val; $script:PrefixGiven = $true } else { $script:Artifact = $val }
+                if ($k -eq 'prefix') { $script:Prefix = $val; $script:PrefixGiven = $true }
+                elseif ($k -eq 'brain') { $script:BrainPick = $val.Trim() }
+                else { $script:Artifact = $val }
             }
             { $_ -in 'h', 'help' } { Write-Output $Usage; $script:HelpOnly = $true; return }
             default { Write-Host $Usage; Stop-Install "unknown flag: $a" }
@@ -365,6 +372,8 @@ function Get-StepScript {
 # (in plain words), unless -NoStop.
 function Invoke-Step([string]$Script, [string[]]$ArgList, [switch]$NoStop) {
     $r = @{}
+    # Every result, in order (a key given more than once: brain-check's lists).
+    $all = New-Object Collections.Generic.List[string]
     $ps = (Get-Process -Id $PID).Path
     $enc = [Console]::OutputEncoding
     $ErrorActionPreference = 'Continue'
@@ -373,13 +382,14 @@ function Invoke-Step([string]$Script, [string[]]$ArgList, [switch]$NoStop) {
         try { [Console]::OutputEncoding = New-Object Text.UTF8Encoding $false } catch { $null = $_ }
         & $ps -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $Script @ArgList 2>&1 | ForEach-Object {
             $l = "$_"
-            if ($l -match '^([a-z]+): (.*)$') { $r[$Matches[1]] = $Matches[2] }
+            if ($l -match '^([a-z]+): (.*)$') { $r[$Matches[1]] = $Matches[2]; $all.Add("$($Matches[1]): $($Matches[2])") }
             elseif ($l -match '^   \+ (.*)$') { Write-Good $Matches[1] }
             elseif ($l -match '^   ! (.*)$') { Write-Warn $Matches[1] }
             elseif ($l -match '^   \$ (.*)$') { Write-Action $Matches[1] }
             elseif ($l.Trim()) { Write-Info $l.Trim() }
         }
         $r['exit'] = $LASTEXITCODE
+        $r['all'] = $all
     } finally {
         try { [Console]::OutputEncoding = $enc } catch { $null = $_ }
     }
@@ -804,16 +814,119 @@ function Install-Extras {
 
 function Get-SynapsHome { if ($env:SYNAPS_BASE_DIR) { $env:SYNAPS_BASE_DIR } else { Join-Path $env:USERPROFILE '.synaps-cli' } }
 
-# Her brain: she talks through Synaps, and Synaps needs a model. Signing in is hers to walk him
-# through, not a picker here: until Synaps has one her tag reads NO BRAIN YET, and her answer to
-# his first message ends on the command (a chip; a click copies it).
+# Her brain: she talks through Synaps, and Synaps needs a model. With none yet, he picks one here (or
+# --brain): an account, signed in to now (steps.ps1 login: his browser opens on its page, Copilot's
+# code in a small window), a model on this PC (steps.ps1 local), an API key (read here, unshown, and
+# on synaps login's stdin: steps.ps1 key), or later (her tag reads NO BRAIN YET; her Settings > Brain
+# gives her one). Then her model is that one (steps.ps1 model: the account's default, her own table's).
 function Invoke-Brain {
     # $script:Brain: a login or a local model, as steps 1 and 4 read it (steps.ps1).
     if ($script:Brain) {
         if (-not $script:SynapsNew) { Write-Info 'she found your Synaps. her session is `capri`: it''ll show up in /sessions.' }
         return
     }
-    Write-Info 'her brain: Synaps has no model yet. say hi to her: she''ll tell you how to give her one.'
+    $pick = $script:BrainPick
+    $ask = -not $pick -and -not $script:Yes -and -not $script:Dry -and [Environment]::UserInteractive -and -not [Console]::IsInputRedirected
+    if (-not $pick -and -not $ask) {
+        if ($script:Dry) { Write-Info '(asks which brain: an account, a model on this PC, an API key, or later)' }
+        Write-Info 'her brain: later. she shows NO BRAIN YET; her Settings > Brain gives her one (or run this again with --brain)'
+        return
+    }
+    $steps = Get-StepScript
+    # Her brains are her own table (synaps-avatar --providers: src/provider.rs' ALL, in its order).
+    $c = Invoke-Step $steps @('brain-check', '-Exe', $script:Exe) -NoStop
+    $brains = @(); $local = @()
+    foreach ($l in $c['all']) {
+        if ($l -match '^brains: (.*)$') { $f = $Matches[1] -split '\|'; $brains += [pscustomobject]@{ Id = $f[0]; Login = $f[1]; Name = $f[2]; How = $f[3]; Why = $(if ($f.Count -gt 4) { $f[4] } else { '' }) } }
+        elseif ($l -match '^local: (.*)$') { $f = $Matches[1] -split '\|', 3; $local += [pscustomobject]@{ Server = $f[0]; Url = $f[1]; Model = $f[2] } }
+    }
+    if ($pick -and -not $brains.Count -and $pick -notmatch '^(local(:.+)?|later)$') {
+        if ($script:Dry) { Write-Info "(her brain: --brain $pick, from her own list of brains once she's installed)" }
+        else { Write-Warn "her brain: this build of her can't list her brains (synaps-avatar --providers): later, in her Settings > Brain" }
+        return
+    }
+    $accounts = @($brains | Where-Object { $_.How -ne 'key' })
+    $keys = @($brains | Where-Object { $_.How -eq 'key' })
+    if ($ask) {
+        Write-Host ''
+        Write-Host '   her brain: Synaps has no model yet. which one?' -ForegroundColor White
+        Write-Host '     1  sign in to an account (in your browser)'
+        Write-Host "     2  a model on this PC $(if ($local.Count) { "($($local.Count) found)" } else { '(none running: get Ollama, ollama.com)' })"
+        Write-Host '     3  an API key'
+        Write-Host '     4  later: her Settings > Brain'
+        $n = Read-Choice 4 4
+        if ($n -eq 1) { $b = Select-Row $accounts { param($x) "$($x.Name)$(if ($x.Why) { "  (not here: $($x.Why))" } elseif ($x.How -eq 'code') { '  (your browser, and a code shown to you)' })" }; if ($b) { $pick = $b.Id } }
+        elseif ($n -eq 2 -and $local.Count) { $m = Select-Row $local { param($x) "$($x.Model)  ($($x.Server))" }; if ($m) { $pick = "local:$($m.Model)" } }
+        elseif ($n -eq 3) { $b = Select-Row $keys { param($x) $x.Name }; if ($b) { $pick = $b.Id } }
+        if (-not $pick) { $pick = 'later' }
+    }
+    $ok = $false
+    $dry = if ($script:Dry) { @('-DryRun') } else { @() }
+    if ($pick -eq 'later') {
+        Write-Info 'her brain: later. she shows NO BRAIN YET; her Settings > Brain gives her one'
+        return
+    } elseif ($pick -match '^local(:(.+))?$') {
+        $want = $Matches[2]
+        $m = $local | Where-Object { -not $want -or $_.Model -eq $want } | Select-Object -First 1
+        if (-not $m) { Write-Warn "her brain: no $(if ($want) { "model $want" } else { 'model' }) running on this PC (Ollama, LM Studio): later, in her Settings > Brain"; return }
+        $r = Invoke-Step $steps (@('local', '-Model', $m.Model, '-Url', $m.Url, '-Exe', $script:Exe) + $dry) -NoStop
+        $ok = -not $r['exit']
+    } else {
+        $b = $brains | Where-Object { $_.Id -eq $pick -or $_.Login -eq $pick } | Select-Object -First 1
+        if (-not $b) { Write-Warn "her brain: --brain $pick isn't one she knows ($(($brains | ForEach-Object { $_.Id }) -join ', '), local, later): later"; return }
+        if ($b.Why) { Write-Warn "her brain: $($b.Name): $($b.Why). later, in her Settings > Brain"; return }
+        if ($b.How -eq 'key' -and $script:Dry) {
+            $r = Invoke-Step $steps (@('key', '-Provider', $b.Id, '-Exe', $script:Exe) + $dry) -NoStop
+        } elseif ($b.How -eq 'key') {
+            if (-not $ask -and ([Console]::IsInputRedirected -or -not [Environment]::UserInteractive)) { Write-Warn "her brain: a $($b.Name) key is asked for, and there's no console to ask on: later, in her Settings > Brain"; return }
+            $sec = Read-Host "   paste your $($b.Name) API key (it isn't shown)" -AsSecureString
+            # The key in this process' environment for the step alone, out of it however that ends
+            # (Ctrl-C too): one try.
+            $bstr = [IntPtr]::Zero
+            try {
+                $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec)
+                $env:CAPRI_BRAIN_KEY = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+                $r = Invoke-Step $steps @('key', '-Provider', $b.Id, '-Exe', $script:Exe) -NoStop
+            } finally {
+                Remove-Item Env:\CAPRI_BRAIN_KEY -ErrorAction SilentlyContinue
+                if ($bstr -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
+                if ($sec) { $sec.Dispose() }
+            }
+        } else {
+            $r = Invoke-Step $steps (@('login', '-Provider', $b.Login, '-Exe', $script:Exe) + $dry) -NoStop
+        }
+        if (-not $r['exit']) {
+            $r = Invoke-Step $steps (@('model', '-Provider', $b.Id, '-Exe', $script:Exe) + $dry) -NoStop
+            if ($r['exit']) { Write-Info "her model stays as it was: pick $($b.Name)'s in her Settings > Brain" }
+        }
+        $ok = -not $r['exit']
+    }
+    if ($ok) { $script:Brain = $true } else { Write-Info 'her brain: her Settings > Brain gives her one (NO BRAIN YET until then)' }
+}
+
+# A number from 1 to Max, Enter for Default; asked again until it is one.
+function Read-Choice([int]$Max, [int]$Default) {
+    while ($true) {
+        Write-Host "   ? [1-$Max, Enter: $Default] " -ForegroundColor Red -NoNewline
+        $a = "$(Read-Host)".Trim()
+        if (-not $a) { return $Default }
+        $n = 0
+        if ([int]::TryParse($a, [ref]$n) -and $n -ge 1 -and $n -le $Max) { return $n }
+    }
+}
+
+# One of Rows, numbered (Label: a row's words); $null for Enter.
+function Select-Row($Rows, [scriptblock]$Label) {
+    $Rows = @($Rows)
+    if (-not $Rows.Count) { return $null }
+    for ($i = 0; $i -lt $Rows.Count; $i++) { Write-Host ('     {0,2}  {1}' -f ($i + 1), (& $Label $Rows[$i])) }
+    while ($true) {
+        Write-Host "   ? [1-$($Rows.Count), Enter: later] " -ForegroundColor Red -NoNewline
+        $a = "$(Read-Host)".Trim()
+        if (-not $a) { return $null }
+        $n = 0
+        if ([int]::TryParse($a, [ref]$n) -and $n -ge 1 -and $n -le $Rows.Count) { return $Rows[$n - 1] }
+    }
 }
 
 # A log's text from byte From on (all of it when it started over), read beside the writer that has

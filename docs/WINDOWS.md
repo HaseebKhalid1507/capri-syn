@@ -101,6 +101,35 @@ cargo-about, `installer/licenses/`).
   A daemon on another protocol than the `synaps.exe` asking doesn't answer it: Synaps' `daemon
   status` says "running (not answering)", exits 1, and still gives its protocol. The step reads that
   as a daemon that runs and checks its protocol; one of hers that doesn't answer is "not running".
+- **Her model** (page "Her model", shown when Synaps has no brain yet: no login in `auth.json`, no
+  `local/` model; `steps.ps1 brain-check`, from Setup's temporary copy of the steps). Four choices
+  at the same level, and only "Choose later" picked:
+  - "Sign in to an account": Claude, ChatGPT, Copilot, Gemini (when Synaps has its Google client),
+    Kimi, Muse, each with how it signs in ("your browser", or for Copilot "your browser, and a code
+    shown to you"). Grok is listed, "not here" with why: Synaps 0.12's xAI sign-in never prints its
+    URL, so the step can't open it whole on Windows yet (Next says so if he picks it).
+  - "A model on this PC": the models Ollama (`:11434`) and LM Studio (`:1234`) serve, embedding
+    models left out, and any whose id has more than letters, digits and `._:/@+-` (it goes on a
+    command line). With neither running: "None running here: get Ollama, then pick it in her
+    Settings > Brain", and an ollama.com link. Nothing is downloaded.
+  - "An API key": a key service (Groq, OpenRouter…) and its key in a password box. It reaches
+    `synaps login` on its stdin only (`steps.ps1 key`: the key in Setup's environment for that child
+    alone, taken out before anything starts), never on a command line, in a log or the process list.
+    Its bytes and a line's end, nothing before them: Windows PowerShell puts a UTF-8 console's BOM
+    on a child's stdin, and Synaps 0.12 would keep it in the key.
+    A key Synaps refuses is said on the finish page; add it in her Settings > Brain.
+  - "Choose later": she shows NO BRAIN YET, and her Settings > Brain has all of these.
+
+  The accounts and key services are her own table, `src/provider.rs`' `ALL` in its order, read
+  from her exe (`synaps-avatar --providers`; Setup unpacks it to its temporary folder for this
+  page): the installers keep no copy. What steps.ps1 adds per account, one of three (its sign-in
+  page, as `host/path`; none to reopen, a device sign-in; or why it isn't offered here), a test
+  holds to `ALL`, so an account added there fails CI until steps.ps1 knows it. A model on this PC
+  or a key is carried out before she starts: her model `local/<model>` (`steps.ps1 local`; LM
+  Studio's also sets Synaps' `provider.local.url` and reloads the daemon: Ollama's is its default),
+  or the key service's default from her own table (`steps.ps1 model`, through `synaps-avatar --set
+  session.model=…`). An account's model is set only once he's signed in (the finish page's `login
+  model`); unticked, stopped or failed, it stays unset and she reads NO BRAIN YET.
 - **Her pack** (page "Her pack"): "Download her art (CapriCore + lachy's desktop art, ~100 MB)", the
   default; "Use a pack folder I already have" (copied; a folder without `sprites.json` is refused);
   or "Skip, I'll add one later". The download is the one install.ps1 does: CPython's embeddable
@@ -136,18 +165,30 @@ cargo-about, `installer/licenses/`).
   she is installed without it, and the finish page says what happened in plain words, with the
   one command that tries it again (`powershell -NoProfile -ExecutionPolicy Bypass -File
   "…\steps\steps.ps1" pack`). Unattended, the setup log says the same.
-- **The finish page**: "Start her now", and with no login yet "Sign in to Claude" (`steps.ps1 login`:
-  Synaps' `synaps login --provider claude`, no window: his browser opens). Synaps 0.12 opens the
-  page with `cmd /c start URL`, and cmd cuts the URL at its first `&` (no `client_id`: claude.ai
-  can't sign him in), so the step opens the whole URL from Synaps' stderr itself (a broken tab from
-  Synaps may open first, until Synaps quotes it). Its stdin is held open until `auth.json` changes:
-  0.12 gives up at once on a closed one. The same sign-in later, from PowerShell (her install
-  folder's `steps`; the default folder shown): `powershell -NoProfile -ExecutionPolicy Bypass -File
+- **The finish page**: "Start her now", and with an account picked "Sign in to <it>", ticked
+  (`steps.ps1 login model -Provider …`: Synaps' `synaps login --provider …`, no window: his browser
+  opens on the sign-in page; signed in, her model is that account's default, and she reads her
+  settings again: `--set` tells a running her). Synaps 0.12 opens the page with `cmd /c start URL`,
+  and cmd cuts the URL at its first `&` (no `client_id`: the provider can't sign him in), so the step
+  opens the whole URL itself: only the line after Synaps' "If the browser didn't open, visit this
+  URL:", only https on exactly that provider's host and path (`claude.ai/oauth/authorize`,
+  `auth.openai.com/oauth/authorize`, `accounts.google.com/o/oauth2/v2/auth`: no `user@`, no port, no
+  `\`, no `#`; her Settings' rules, `signin::allowed`), as `[Uri]` reads it (a broken tab from Synaps
+  may open first, until Synaps quotes it).
+  Claude, ChatGPT and Gemini come back on Synaps' localhost callback; Kimi's and Muse's page comes
+  with its code filled in, nothing to reopen. Copilot's (github.com/login/device) comes without it: a
+  small window shows the code, and puts it on the clipboard (taken off it after, if it's still
+  there); closing the window stops synaps and the step, which says so. The URL and the code never go
+  to a log. Its stdin is held open until `auth.json` changes (0.12 gives up at once on a closed one),
+  then closed: synaps waits on that read before it exits. With "Choose later" the page says she
+  shows NO BRAIN YET until then. The same sign-in later, from PowerShell (her
+  install folder's `steps`; the default folder shown; `-Provider openai-codex` and so on for
+  another account): `powershell -NoProfile -ExecutionPolicy Bypass -File
   "$env:LOCALAPPDATA\Programs\synaps-avatar\steps\steps.ps1" login`. A plain `synaps login
-  --provider claude` in a terminal (the line Settings ▸ Brain copies) opens the cut tab: copy the
-  whole URL it prints into your browser instead. Until her first question her tag reads ONLINE on
-  Windows for Claude, her default (the daemon's environment can't be read there, so no login on
-  file is "unknown", `creds.rs`); her first question without a login turns it to NO BRAIN YET.
+  --provider claude` in a terminal opens the cut tab: copy the whole URL it prints into your
+  browser instead. Until her first question her tag reads ONLINE on Windows for Claude, her default
+  (the daemon's environment can't be read there, so no login on file is "unknown", `creds.rs`); her
+  first question without a login turns it to NO BRAIN YET.
 - **Her exe is the windowed build** (`cargo rustc … /SUBSYSTEM:WINDOWS`, her binary only): no
   console window from the Start menu or at sign-in. Without a console she logs to the file above.
   `--check`, `-V` and `--set` from a terminal therefore print nothing there (`--set` writes its
@@ -191,7 +232,13 @@ Unattended:
 capri-syn-setup-….exe /VERYSILENT /SUPPRESSMSGBOXES [/SYNAPS=install|skip]
                       [/PACK=download|skip|"C:\packs\capri"] [/VOICE=on|off] [/MIC="name"]
                       [/VOICEFROM="C:\...\capri-syn-voice-setup.exe" or a URL] [/TASKS=autostart]
+                      [/BRAIN=later|local|local:MODEL|ACCOUNT]
 ```
+
+`/BRAIN=` starts the "Her model" page on that pick (ACCOUNT: a provider id or login, `claude`,
+`openai-codex`…). Unattended, a local model is set; an account is his to sign in to later (the
+setup log has the `steps.ps1 login model` line: her model is set once he has), and a key can't be
+given unattended. Without it, later.
 
 The defaults are the wizard's: Synaps if it's needed, her art downloaded, autostart, her voice when
 Windows has a microphone and there's a voice to install (a first install only: see Upgrades above).
@@ -214,9 +261,18 @@ CI:
   retry), a CapriCore that doesn't match its pins (refused, deleted), `/PACK=download` over a pack of
   his (moved aside, kept; hers built, `--check` passes; lachy's notices), again (up to date), a pack
   folder over the one Setup built (replaced whole), the files, keys, shortcut AUMID, the windowed
-  exe, her size in Settings → Apps, and that nothing is left after. `test-login.ps1`: `steps.ps1
-  login` against a stand-in `synaps.exe` (compiled there): the whole URL, stdin held open, a failed
-  login in its own words.
+  exe, her size in Settings → Apps, and that nothing is left after. `test-login.ps1`: the brain
+  steps against stand-ins compiled there (a `synaps.exe` that logs in as 0.12 does, her exe's
+  `--providers` and `--set`, Ollama's and LM Studio's model lists): the whole URL for each account,
+  its own page only and only from the line after "If the browser didn't open" (a bare line, another
+  site's, one with a `\`: never), never in the output; stdin held open, then closed; `login model`
+  sets her model once signed in, never when it fails; Copilot's code in its window and on the
+  clipboard (off it once signed in), never in the output, and the window closed stops it and
+  synaps; Grok not offered; a key on synaps' stdin only, exactly its bytes and a line's end;
+  brain-check's lists; her model an account's default, and a local one (LM Studio's
+  `provider.local.url`, the daemon reloaded); a failed login in its own words. `test-units.ps1`
+  holds the sign-in page check to its cases (another host, path or provider, `user@`, a port, `\`,
+  a Google redirect).
 - `windows-setup-e2e` (`test-setup-e2e.ps1`, a clean runner): the defaults, unattended; `synaps
   --version`, the daemon (protocol 3, and its Run value), her pack, autostart, the Start menu; she
   starts, attaches (her control socket's `state`: `session.live`, the tag not OFFLINE), and answers
@@ -228,8 +284,13 @@ CI:
   started`; an upgrade (the setup again, unattended, no `/VOICE`) that runs no voice step and leaves
   his settings byte for byte; and an uninstall that leaves no voice.
 - `windows-setup-wizard` (`test-setup-wizard.ps1`, a clean runner): the wizard clicked through with
-  its defaults (UI Automation; the runner is elevated, so first the administrator question, Yes), a
-  screenshot of every page (`tools/shoot-win.ps1`), her on the desktop after "Start her now", and the
+  its defaults (UI Automation; the runner is elevated, so first the administrator question, Yes) but
+  her model: "Choose later" picked as it opens, then "Sign in to an account", ChatGPT; a screenshot
+  of every page (`tools/shoot-win.ps1`); her model unset at install, Finish starting `login model`
+  and its sign-in (stopped there: CI can't sign in; her model still unset), her on the desktop after
+  "Start her now". Then Setup again,
+  "Choose later" (no sign-in, her model as it was), and again with an Ollama stand-in on `:11434`
+  ("A model on this PC", its model: `local/qwen3:8b`, Synaps' config untouched); then the
   uninstall's questions ("Remove Synaps too?": yes, then `synaps.exe`, `hidden.exe` and the receipt
   gone). The shots are the job's artifact. The wizard's window is looked at too
   (`test-wizard-window.ps1`), on a page and again while a step runs: its title bar answers
@@ -290,6 +351,11 @@ Unattended: `capri-syn-voice-setup-….exe /VERYSILENT /SUPPRESSMSGBOXES [/MERGE
 7. `--voice`: her voice installer and the models.
 
 Per user. A receipt in `%LOCALAPPDATA%\synaps-avatar` drives `--uninstall`.
+
+With no brain yet, it asks which, as install.sh does (`docs/INSTALL.md`): an account (signed in to
+in his browser through `steps.ps1 login`, the URL opened whole), a model on this PC, an API key
+(read unshown, on `synaps login`'s stdin through `steps.ps1 key`), or later (Enter). `--brain=`
+picks without asking; `--yes` is later. Grok is listed as "not here", as in her installer.
 
 **`conhost --headless` and security software.** `--headless` is the switch Windows' pseudo-console
 (ConPTY) starts conhost with, not a documented interface, and starting a program hidden behind it is
@@ -430,7 +496,8 @@ keys and UAC); screenshots kept outside the repo. **[VM]**: true of the VM (soft
   ~1 min), found at once without a new terminal; the pack in ~1.5 min. **~12 min end to end**,
   his answers included.
 - `synaps login` (y at "pick one now"): its provider picker draws in the console. (install.ps1
-  offered a sign-in then; it no longer does: giving her a brain is hers, Settings ▸ Brain.)
+  offered Synaps' own picker then; it now asks which brain itself, and signs in through
+  `steps.ps1 login`.)
 - After a sign-out and in (a restart, autologon): the Run values start the daemon and her (her
   window 3.4 s after sign-in) and she finds her session. **`synaps.exe daemon --detach` opened a
   terminal** that took the foreground for a moment: the Run value now goes through

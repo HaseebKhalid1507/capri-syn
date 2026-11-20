@@ -482,6 +482,18 @@ pub fn socket_path() -> PathBuf {
     dir.join("synaps-avatar.sock")
 }
 
+/// One command to her running self on her control socket at `path` (`--set`: `settings reload`):
+/// her reply, or None when nothing of hers answers there (she isn't running) or she's silent for 4 s.
+pub fn tell(path: &Path, line: &str) -> Option<String> {
+    let mut s = UnixStream::connect(path).ok()?;
+    s.set_read_timeout(Some(Duration::from_secs(4))).ok()?;
+    s.set_write_timeout(Some(Duration::from_secs(4))).ok()?;
+    writeln!(s, "{line}").ok()?;
+    let mut reply = String::new();
+    BufReader::new(s).read_line(&mut reply).ok()?;
+    Some(reply.trim().to_string()).filter(|r| !r.is_empty())
+}
+
 /// Another of her answers on the control socket (`bind`): she's up already, so nothing failed to
 /// say on screen (`crate::startfail`). Its text is the error's.
 #[derive(Debug)]
