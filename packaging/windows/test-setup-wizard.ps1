@@ -305,6 +305,8 @@ function Invoke-Again([string]$Name, [scriptblock]$OnModel) {
     while (((Get-Date) - $t0).TotalSeconds -lt 900) {
         $t = Get-WindowText $script:w
         if ($t -match '^Completing the capri-syn Setup Wizard$') { Start-Sleep -Milliseconds 400; return Get-WindowText $script:w }
+        # The progress page names its steps (RunPick's is "Her model"): no page to answer while it's up.
+        if (@($t -ceq 'Setting her up').Count -gt 0) { Start-Sleep -Milliseconds 500; continue }
         $page = @($t -match '^(Select Destination Location|Select Additional Tasks|Her brain|Her model|Her pack|Her voice|Ready to Install|Preparing to Install)$') | Select-Object -First 1
         if ($page) {
             Start-Sleep -Milliseconds 400

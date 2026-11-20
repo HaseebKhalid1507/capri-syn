@@ -29,8 +29,9 @@
 ;             [/BRAIN=later|local|local:MODEL|ACCOUNT]
 ; The defaults are the wizard's: Synaps if it's needed, her art downloaded, autostart on, her voice
 ; when Windows has a microphone (on a first install only), her model later. /BRAIN= starts her model
-; page on it (ACCOUNT: an id or login, claude, openai-codex...; unattended, her model is set to its
-; default, and the sign-in is his to do: the log says so). A key can't be given unattended.
+; page on it (ACCOUNT: an id or login, claude, openai-codex...; unattended, nothing is set: her
+; model waits for the sign-in, which is his to do, and the log gives the `login model` line). A key
+; can't be given unattended.
 ; Her voice comes from /VOICEFROM (a file, or an https URL), else her own release (v<AppVersion>;
 ; never the latest: steps.ps1 voice-check); never from a file found by name beside this setup (that
 ; folder is usually Downloads). With neither, the page says it comes with her first release, and
