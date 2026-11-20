@@ -367,6 +367,7 @@ end;
   wizard stays disabled: its buttons are live. }
 function EnableWindow(Wnd: HWND; Enable: Integer): Integer; external 'EnableWindow@user32.dll stdcall';
 function IsWindowVisible(Wnd: HWND): Integer; external 'IsWindowVisible@user32.dll stdcall';
+function IsWindowEnabled(Wnd: HWND): Integer; external 'IsWindowEnabled@user32.dll stdcall';
 function EnumThreadWindows(Thread, Proc, Param: LongWord): Integer; external 'EnumThreadWindows@user32.dll stdcall';
 function GetCurrentThreadId: LongWord; external 'GetCurrentThreadId@kernel32.dll stdcall';
 function SetTimer(Wnd: HWND; Id, Elapse, Proc: LongWord): LongWord; external 'SetTimer@user32.dll stdcall';
@@ -376,11 +377,12 @@ var
   LiveProc, SeeProc: LongWord;
   OtherUp: Boolean;
 
-{ EnumThreadWindows' callback (0 stops it): a window of Setup's, other than the wizard, that shows. }
+{ EnumThreadWindows' callback (0 stops it): a window of Setup's, other than the wizard, that shows and
+  takes input: not one the exec's window disabler holds, a box opened since. }
 function SeeOther(Wnd: HWND; Param: LongWord): LongWord;
 begin
   Result := 1;
-  if (Wnd <> WizardForm.Handle) and (IsWindowVisible(Wnd) <> 0) then begin
+  if (Wnd <> WizardForm.Handle) and (IsWindowVisible(Wnd) <> 0) and (IsWindowEnabled(Wnd) <> 0) then begin
     OtherUp := True;
     Result := 0;
   end;
