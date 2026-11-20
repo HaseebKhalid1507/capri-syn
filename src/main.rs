@@ -925,7 +925,9 @@ mod tests {
         assert!(rows.contains(&vec!["local", "local", "local", "", "Local", "none", ""]), "{t}");
         // A hint beside ChatGPT's name alone, the last field: the pickers show it as it is.
         let hinted: Vec<(&str, &str)> = rows.iter().filter(|r| !r[6].is_empty()).map(|r| (r[0], r[6])).collect();
-        assert_eq!(hinted, [("openai-codex", "free with any ChatGPT account")], "{t}");
+        assert_eq!(hinted, [("openai-codex", "free account works")], "{t}");
+        let chatgpt = rows.iter().find(|r| r[0] == "openai-codex").expect("ChatGPT");
+        assert_eq!(chatgpt[3], provider::CHATGPT_DEFAULT.0, "her installers' --set session.model= for ChatGPT: a model a free account runs");
         for r in rows.iter().filter(|r| r[2] != "local") {
             assert!(session_model(r[3]).is_ok(), "{r:?}: a default she takes");
             assert_eq!(provider::of(r[3]).map(|p| p.id), Some(r[0]), "{r:?}: its default is its own");

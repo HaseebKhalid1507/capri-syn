@@ -60,6 +60,12 @@ pub const CLAUDE: Provider = oauth("anthropic", "claude", "Claude", &["ANTHROPIC
 /// A model server on his machine: `local/<name>`. Its models are the server's (the probe).
 pub const LOCAL: Provider = Provider { id: "local", login: "local", name: "Local", kind: Kind::Local, env: &[], models: &[] };
 
+/// ChatGPT's default, the head of its MODEL list (what a ChatGPT sign-in switches her to, and her
+/// installers' `--set session.model=`): a model a free ChatGPT account runs her on (measured on
+/// Synaps 0.12.0). Not `gpt-6-luna` yet: Synaps 0.12.0 has no capability row for it and refuses it
+/// ("no capability metadata"). A swap is this line.
+pub const CHATGPT_DEFAULT: (&str, &str) = ("openai-codex/gpt-5.6-luna", "GPT-5.6 LUNA");
+
 /// Every provider: the accounts in SIGN IN's order (by name: none comes first by favour), the
 /// local server, then the API-key services (Synaps' `STATIC_PROVIDERS`). Their models are Synaps
 /// 0.12.0's own catalogs (the accounts' static ones, `agent-engine` `openai/catalog/*.rs` and
@@ -67,9 +73,9 @@ pub const LOCAL: Provider = Provider { id: "local", login: "local", name: "Local
 /// each one's first is what a sign-in switches her to.
 pub static ALL: &[Provider] = &[
     oauth("openai-codex", "openai-codex", "ChatGPT", &[], &[
-            ("openai-codex/gpt-5.5", "GPT-5.5"), ("openai-codex/gpt-6.1-sol", "GPT-6.1 SOL"),
+            CHATGPT_DEFAULT, ("openai-codex/gpt-6.1-sol", "GPT-6.1 SOL"),
             ("openai-codex/gpt-6-astra", "GPT-6 ASTRA"), ("openai-codex/gpt-5.6-sol", "GPT-5.6 SOL"),
-            ("openai-codex/gpt-5.6-terra", "GPT-5.6 TERRA"), ("openai-codex/gpt-5.6-luna", "GPT-5.6 LUNA"),
+            ("openai-codex/gpt-5.6-terra", "GPT-5.6 TERRA"), ("openai-codex/gpt-5.5", "GPT-5.5"),
             ("openai-codex/gpt-5.4", "GPT-5.4"), ("openai-codex/gpt-5.4-mini", "GPT-5.4 MINI"),
             ("openai-codex/gpt-5.3-codex-spark", "GPT-5.3 CODEX SPARK"),
         ]),
@@ -195,10 +201,11 @@ pub static ALL: &[Provider] = &[
 impl Provider {
     /// A few words beside its name wherever a brain is picked (Settings ▸ Brain's SIGN IN, her
     /// installers' lists: `--providers`' last field), or none. ChatGPT's alone: a free account
-    /// signs her in, so she costs nothing. The installers keep no copy of it.
+    /// signs her in, so she costs nothing. Short: Settings ▸ Brain's row has ~184 px for it at the
+    /// Line's narrowest (480). The installers keep no copy of it.
     pub fn hint(&self) -> &'static str {
         match self.id {
-            "openai-codex" => "free with any ChatGPT account",
+            "openai-codex" => "free account works",
             _ => "",
         }
     }
@@ -755,16 +762,33 @@ mod tests {
         assert_eq!(by_id("anthropic").map(|p| p.login), Some("claude"));
     }
 
-    /// A hint beside ChatGPT alone (free with any account): a few plain words, one field of
+    /// A hint beside ChatGPT alone (a free account works): a few plain words, one field of
     /// `--providers` and of the installers' `|` lines.
     #[test]
     fn chatgpt_alone_says_it_is_free() {
         let hinted: Vec<(&str, &str)> = ALL.iter().filter(|p| !p.hint().is_empty()).map(|p| (p.id, p.hint())).collect();
-        assert_eq!(hinted, [("openai-codex", "free with any ChatGPT account")]);
+        assert_eq!(hinted, [("openai-codex", "free account works")]);
         for p in ALL {
             let h = p.hint();
-            assert!(h.len() <= 40 && h.is_ascii() && !h.contains(['\t', '|', '\n', '\r']) && h.trim() == h, "{}: `{h}`", p.id);
+            assert!(h.len() <= 24 && h.is_ascii() && !h.contains(['\t', '|', '\n', '\r']) && h.trim() == h, "{}: `{h}`", p.id);
         }
+    }
+
+    /// ChatGPT's default heads its list (a sign-in's switch, `--providers`' default), and every
+    /// model on it is one Synaps 0.12.0 has a capability row for (`openai/catalog/codex.rs`
+    /// `codex_static_capability`): it refuses another (`gpt-6-luna`: "no capability metadata").
+    #[test]
+    fn chatgpt_runs_on_models_synaps_knows() {
+        let chatgpt = by_id("openai-codex").unwrap();
+        assert_eq!(chatgpt.models[0], CHATGPT_DEFAULT);
+        let known = ["gpt-6.1-sol", "gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"];
+        for (m, _) in chatgpt.models {
+            assert!(known.iter().any(|k| m.strip_prefix("openai-codex/") == Some(*k)), "{m}: not in Synaps 0.12.0's Codex table");
+        }
+        let mut ids: Vec<&str> = chatgpt.models.iter().map(|m| m.0).collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), chatgpt.models.len(), "one row a model");
     }
 
     #[test]

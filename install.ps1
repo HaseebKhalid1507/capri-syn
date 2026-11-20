@@ -855,7 +855,7 @@ function Invoke-Brain {
         Write-Host '     3  an API key'
         Write-Host '     4  later: her Settings > Brain'
         $n = Read-Choice 4 4
-        # An account: its hint (her table's: ChatGPT's, free with any account), and Copilot's code.
+        # An account: its hint (her table's: ChatGPT's, that a free account will do), and Copilot's code.
         if ($n -eq 1) { $b = Select-Row $accounts { param($x) $note = if ($x.Why) { "not here: $($x.Why)" } elseif ($x.How -eq 'code') { (@($x.Hint, 'your browser, and a code shown to you') | Where-Object { $_ }) -join '; ' } else { $x.Hint }; "$($x.Name)$(if ($note) { "  ($note)" })" }; if ($b) { $pick = $b.Id } }
         elseif ($n -eq 2 -and $local.Count) { $m = Select-Row $local { param($x) "$($x.Model)  ($($x.Server))" }; if ($m) { $pick = "local:$($m.Model)" } }
         elseif ($n -eq 3) { $b = Select-Row $keys { param($x) $x.Name }; if ($b) { $pick = $b.Id } }

@@ -231,7 +231,7 @@ foreach ($page in @(
         # An account: ChatGPT, signed in to at the end (short of the real sign-in).
         Check (Select-Radio $w 'Sign in to an account') 'a click picks "Sign in to an account"'
         $picked = Select-Item $w 'ChatGPT*'
-        Check ($picked -eq 'ChatGPT (free with any ChatGPT account; your browser)') "ChatGPT, its hint and how it signs in: $picked"
+        Check ($picked -eq 'ChatGPT (free account works; your browser)') "ChatGPT, its hint and how it signs in: $picked"
     }
     Get-Shot $page[1] -Title 'Setup - capri-syn*'
     if ($page[1] -eq 'her-brain') { Check (($t -match 'Install Synaps \(her brain, open source\)').Count -gt 0) 'her brain page offers to install Synaps' }

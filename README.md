@@ -242,11 +242,12 @@ Both do the same steps, and a rerun is an upgrade:
 opens on it), add an API key or run a local model. Her installers ask first: an account, a model on
 your PC, an API key, or later.
 
-**Free:** pick ChatGPT and sign in with any ChatGPT account, a free one too. No API key, no card, no
-GPU. Free accounts have usage limits: when hers is used up she says she's hit her model's limit (her
-tag flashes AT THE LIMIT). Wait for it to reset, or pick another brain in Settings ▸ Brain. No account
-at all? [Run a local model](docs/UNDER-THE-HOOD.md#her-brain). Without a brain she still perches, naps
-and plays.
+**Free:** pick ChatGPT and sign in with any ChatGPT account, a free one too: it runs her on GPT-5.6
+Luna, her ChatGPT default (bigger models need a paid plan). No API key, no card, no GPU. Free accounts
+have usage limits: when hers is used up she says she's hit her model's limit (her tag flashes AT THE
+LIMIT). Wait for it to reset, or pick another brain in Settings ▸ Brain. No account at all?
+[Run a local model](docs/UNDER-THE-HOOD.md#her-brain). Without a brain she still perches, naps and
+plays.
 
 <details>
 <summary><b>Flags, voice, uninstalling, the manual route</b></summary>

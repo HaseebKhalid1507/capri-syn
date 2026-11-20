@@ -447,17 +447,15 @@ fn signing<'a>(p: &'a Prefs, to: &Provider) -> Option<&'a Signing> {
     p.signing.as_ref().filter(|s| s.id == to.id)
 }
 
-/// An account's row under SIGN IN, with no login here: what it takes, and its hint first
-/// (`Provider::hint`: ChatGPT's, free with any account).
-fn account_blurb(to: &Provider) -> String {
-    let how = match to.id {
-        "anthropic" => "Pro or Max · browser",
-        "github-copilot" => "browser · a code to type",
-        _ => "browser",
-    };
-    match to.hint() {
-        "" => how.to_string(),
-        h => format!("{h} · {how}"),
+/// An account's row under SIGN IN, with no login here: what it takes. ChatGPT's: its hint
+/// (`Provider::hint`, a free account works) in place of "browser": the two don't fit at the Line's
+/// narrowest (480 px leaves ~184 px for it).
+fn account_blurb(to: &Provider) -> &'static str {
+    match (to.hint(), to.id) {
+        ("", "anthropic") => "Pro or Max · browser",
+        ("", "github-copilot") => "browser · a code to type",
+        ("", _) => "browser",
+        (hint, _) => hint,
     }
 }
 
@@ -1343,7 +1341,7 @@ impl Line {
                             // Grok on Windows: Synaps 0.12.0 can't open its page whole.
                             None if !m.has(to) && m.here && provider::signin::needs_newer(m.windows, to) => target.push(way(&name, "NEEDS A NEWER SYNAPS".into(), None, false, None)),
                             None => {
-                                let (b, mark) = state(to, account_blurb(to).as_str());
+                                let (b, mark) = state(to, account_blurb(to));
                                 target.push(way(&name, b, mark, m.here || m.has(to), None));
                             }
                         }
@@ -1888,14 +1886,17 @@ mod tests {
     }
 
     /// SIGN IN's accounts, no login yet: ChatGPT's row says a free account will do (its hint,
-    /// `Provider::hint`), before how it signs in; no other account's has one.
+    /// `Provider::hint`); no other account's has one. Each fits beside its name at the Line's
+    /// narrowest (480 px: ~184 px; Copilot's 24 characters, the longest, are ~160 px).
     #[test]
-    fn chatgpt_says_free_with_any_account() {
-        assert_eq!(account_blurb(provider::by_id("openai-codex").unwrap()), "free with any ChatGPT account · browser");
+    fn chatgpt_says_a_free_account_works() {
+        assert_eq!(account_blurb(provider::by_id("openai-codex").unwrap()), "free account works");
         assert_eq!(account_blurb(&provider::CLAUDE), "Pro or Max · browser");
         assert_eq!(account_blurb(provider::by_id("github-copilot").unwrap()), "browser · a code to type");
-        for to in provider::accounts().filter(|to| to.id != "openai-codex") {
-            assert!(!account_blurb(to).contains("free"), "{}: {}", to.id, account_blurb(to));
+        for to in provider::accounts() {
+            let b = account_blurb(to);
+            assert!(b.chars().count() <= 24, "{}: `{b}` overflows its row at 480 px", to.id);
+            assert_eq!(b.contains("free"), to.id == "openai-codex", "{}: {b}", to.id);
         }
     }
 
@@ -1937,9 +1938,9 @@ mod tests {
         assert_eq!(q.mind.menu().iter().map(|g| g.name.as_str()).collect::<Vec<_>>(), ["CHATGPT", "CLAUDE", "LOCAL"]);
         let last = brain_rows(&q, m).len() - 1;
         assert_eq!(brain_key("enter", last, &q, m), (model, Act::Pref(Pref::Model("local/qwen3:8b"))));
-        assert_eq!(brain_key("enter", 4, &q, m), (model, Act::Pref(Pref::Model("openai-codex/gpt-5.5"))));
+        assert_eq!(brain_key("enter", 4, &q, m), (model, Act::Pref(Pref::Model(provider::CHATGPT_DEFAULT.0))));
         let in_ = Some(Fold::SignIn);
-        assert_eq!(brain_key("enter", 1, &q, in_), (1, Act::Pref(Pref::Model("openai-codex/gpt-5.5"))), "ChatGPT's login on file: a switch");
+        assert_eq!(brain_key("enter", 1, &q, in_), (1, Act::Pref(Pref::Model(provider::CHATGPT_DEFAULT.0))), "ChatGPT's login on file: a switch to its default");
         assert_eq!(brain_hint(&q, 1, in_), "↑↓ pick · ⏎ switch to it · ← close · esc back");
         assert_eq!(brain_key("enter", 2, &q, in_), (2, Act::Nothing), "Claude is hers already");
         // On ChatGPT: Claude's row (its login on file) switches back.
@@ -2065,7 +2066,7 @@ mod tests {
         assert_eq!(brain_word(&p.mind), "CLAUDE · SONNET 4.6 · LOGGED OUT");
         // Another account with a login: a switch, as ever.
         p.mind.signed.push("openai-codex");
-        assert_eq!(brain_key("enter", 1, &p, in_).1, Act::Pref(Pref::Model("openai-codex/gpt-5.5")));
+        assert_eq!(brain_key("enter", 1, &p, in_).1, Act::Pref(Pref::Model(provider::CHATGPT_DEFAULT.0)));
         let mut k = Prefs { mind: mind("groq/llama-3.3-70b-versatile", Some(true)), ..prefs() };
         k.mind.expired = true;
         assert_eq!(brain_key("enter", 2, &k, Some(Fold::Key)).1, Act::Key(provider::by_id("groq").unwrap()));

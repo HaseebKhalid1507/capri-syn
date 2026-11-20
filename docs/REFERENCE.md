@@ -57,9 +57,9 @@ Paths here are Linux's: Windows keeps the same files under `%APPDATA%` and `%LOC
   |---|---|---|---|
   | no credentials (`synaps login` + no credential; 0.12.0: `No credentials for anthropic at …`) | No brain yet, choom. Synaps has no Claude login. Log in, or set another model ([session] model in my settings): `$ synaps login --provider claude` (the provider's own `--provider`; none named: `$ synaps login`) | `NO BRAIN YET` | idle |
   | the same, with no model picked (no `[session] model`, none in Synaps' config, her session on its default: "NO BRAIN YET, none picked", below) | No brain yet, choom. Pick one: an account, an API key, or a model on this machine. `SET ME UP ▸` (a button to Settings ▸ Brain) | `NO BRAIN YET` | idle |
-  | a lapsed or rejected login | My login ran out. Sign me in again: `SIGN IN AGAIN ▸` (a button to Settings ▸ Brain, where her account's row signs in again) | `LOGGED OUT` | idle |
-  | rate or usage limit, billing; a provider's 429 once Synaps' retries are spent (`codex request failed: 429 Too Many Requests`, the broker's `provider request failed: 429 …`: the status right after `request failed: `, not a 429 elsewhere in the text) | Hit my model's limit for now. Give it a bit, then ask me again. | `AT THE LIMIT` | annoyed |
-  | overloaded, a 5xx; at capacity mid-reply, retries spent (`Codex reports the model is at capacity (retries exhausted)…`: ChatGPT's in-stream rate limit or overload; xAI's, Muse's) | My model's swamped right now. Try me again in a minute. | `MODEL BUSY` | annoyed |
+  | a lapsed or rejected login; ChatGPT's 401 (`codex request failed: 401 …`) and a stream's `… authentication rejected in stream` (ChatGPT's, xAI's, Muse's). A 403, 400 or 404 isn't one: its own words show | My login ran out. Sign me in again: `SIGN IN AGAIN ▸` (a button to Settings ▸ Brain, where her account's row signs in again) | `LOGGED OUT` | idle |
+  | rate or usage limit, billing (Anthropic's in-stream `(rate_limit_error)` too); a provider's 429 once Synaps' retries are spent (`codex request failed: 429 Too Many Requests`, the broker's `provider request failed: 429 …`: the status right after `request failed: `, not a 429 elsewhere in the text) | Hit my model's limit for now. Give it a bit, then ask me again. | `AT THE LIMIT` | annoyed |
+  | overloaded, a 5xx (Anthropic's; any provider's 500, 502, 503, 504 or 529 after `request failed: `, the ones Synaps calls transient, its retries spent); at capacity mid-reply, retries spent (`Codex reports the model is at capacity (retries exhausted)…`: ChatGPT's in-stream rate limit or overload; xAI's, Muse's) | My model's swamped right now. Try me again in a minute. | `MODEL BUSY` | annoyed |
   | unreachable, timed out, a dropped stream | Can't reach my model. Check the connection, then ask me again. | `NO CONNECTION` | annoyed |
   | `local/…`: `can't reach local endpoint` (Ollama's port 11434) | Ollama's not answering, so I've got no brain. Start Ollama, then ask me again. | `OLLAMA IS OFF` | idle |
   | the same, another port (LM Studio, llama.cpp) | My local model's server isn't answering. Start it, then ask me again. | `LOCAL MODEL OFF` | idle |
@@ -171,7 +171,9 @@ Paths here are Linux's: Windows keeps the same files under `%APPDATA%` and `%LOC
   there, checked, not one to pick again. The lists are Synaps 0.12.0's own catalogs (the accounts'
   static ones, the key services' registry; aliases such as `grok-latest` aside): Synaps 0.12 has no
   model catalog a client can ask for (its daemon protocol has none; `synaps rpc` has one, but boots
-  a whole runtime). Nothing signed in and no local model: `sign in first`, and ⏎ does nothing. A
+  a whole runtime). Each list's first is its provider's default, what a sign-in switches her to:
+  ChatGPT's is GPT-5.6 Luna (`provider::CHATGPT_DEFAULT`), a model a free account runs her on
+  (Synaps 0.12.0 refuses `gpt-6-luna`: no capability row for it). Nothing signed in and no local model: `sign in first`, and ⏎ does nothing. A
   pick is written to `settings.toml` as an explicit `[session] model` (only that key; the safe
   writer) and set on her session at once, even when the file has it already (his TUI's `/model`
   moves her session off it: the daemon's `setting_changed` to every client, which she follows). If

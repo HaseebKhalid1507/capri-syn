@@ -5,18 +5,23 @@
 ### Her brain
 - **She runs free on a free ChatGPT account.** ChatGPT's sign-in (Synaps' `openai-codex`) takes any
   ChatGPT account, a free one too: no API key, no card, no GPU. Its row says so wherever a brain is
-  picked: "free with any ChatGPT account" in Settings ▸ Brain's SIGN IN, in her setup's "Her model"
-  page, and in install.sh's and install.ps1's lists. The README says it up top and in Get her, with
-  the usage limits free accounts have: when one is used up she says she's hit her model's limit (AT
-  THE LIMIT). Nothing is picked for you: "Choose later" is still the default, and the order is the
-  same.
+  picked: "free account works" in Settings ▸ Brain's SIGN IN, in her setup's "Her model" page, and in
+  install.sh's and install.ps1's lists. The README says it up top and in Get her, with the usage
+  limits free accounts have: when one is used up she says she's hit her model's limit (AT THE LIMIT).
+  Nothing is picked for you: "Choose later" is still the default, and the order is the same.
+- **ChatGPT's default model is GPT-5.6 Luna**, one a free account runs her on: a ChatGPT sign-in,
+  from her Settings or her installers, puts her on it. The others are still in MODEL's list (the
+  bigger ones need a paid plan), and a model you picked stays yours.
 - **A provider's rate limit reads as one.** When ChatGPT, a key service or Gemini answers 429 Too Many
-  Requests and Synaps' retries are spent, she says she's hit her model's limit (AT THE LIMIT), as for
-  a used-up allowance. A ChatGPT account or model that's turned away (401, 403, a model the account
-  doesn't have) isn't a limit: its own error shows.
-- **At capacity mid-reply reads as MODEL BUSY.** When ChatGPT (or xAI, or Muse) stops a reply because
-  the model is at capacity and Synaps' retries are spent, she says her model's swamped, to try her
-  again in a minute.
+  Requests and Synaps' retries are spent, or Claude's stream says `rate_limit_error`, she says she's
+  hit her model's limit (AT THE LIMIT), as for a used-up allowance.
+- **A provider's server error reads as MODEL BUSY.** A 500, 502, 503, 504 or 529 once Synaps' retries
+  are spent, and a reply stopped mid-way because the model is at capacity (ChatGPT's, xAI's or
+  Muse's): she says her model's swamped, to try her again in a minute.
+- **ChatGPT turning her login down reads as LOGGED OUT.** Its 401, and a reply stopped because its
+  sign-in was rejected (ChatGPT's, xAI's or Muse's): she asks to be signed in again, and her account's
+  row in Settings ▸ Brain signs in again. An account or model that's turned away (403, a model the
+  account doesn't have) still shows its own error.
 
 ### For developers
 - `synaps-avatar --providers` has a seventh field: a hint shown beside a brain's name (ChatGPT's alone

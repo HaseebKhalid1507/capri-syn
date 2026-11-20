@@ -13,6 +13,8 @@ PS = (ROOT / "install.ps1").read_text(encoding="utf-8")
 MANIFEST = (ROOT / "installer/manifest").read_text()
 # Windows' install steps, shared with her installer (where they are, the Synaps step is).
 STEPS = ROOT / "packaging/windows/steps.ps1"
+# Her provider table: the brains both installers list (`synaps-avatar --providers`).
+PROVIDER = (ROOT / "src/provider.rs").read_text(encoding="utf-8")
 
 
 def block(text, start, end):
@@ -281,8 +283,19 @@ class Parity(unittest.TestCase):
         self.assertIn("Hint = $(if ($f.Count -gt 5) { $f[5] }", code(PS))
         self.assertIn("$x.Hint", code(block(PS, "function Invoke-Brain", "\n}\n")))
         self.assertIn("Field(L, 6)", block(iss, "procedure FillModelPage", "\nend;\n"))
+        hint = re.search(r'"openai-codex" => "([^"]+)"', block(PROVIDER, "pub fn hint(", "\n    }\n")).group(1)
         for name, text in (("install.sh", SH), ("install.ps1", PS), ("steps.ps1", steps), ("synaps-avatar.iss", iss)):
-            self.assertNotIn("free with any ChatGPT account", text, f"{name} keeps a copy of ChatGPT's hint")
+            self.assertNotIn(hint, text, f"{name} keeps a copy of ChatGPT's hint")
+
+    def test_the_readme_names_chatgpts_default(self):
+        # "Free" is true on the model a ChatGPT sign-in puts her on (provider::CHATGPT_DEFAULT, the
+        # head of its list, her installers' --set session.model=): the README names that one, so a
+        # swap of it is a swap of the README's words too.
+        model, label = re.search(r'pub const CHATGPT_DEFAULT: \(&str, &str\) = \("([^"]+)", "([^"]+)"\);', PROVIDER).groups()
+        self.assertTrue(model.startswith("openai-codex/"), model)
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        free = " ".join(block(readme, "**Free:**", "\n\n").split())
+        self.assertIn(label.lower(), free.lower(), f"README's Free line names ChatGPT's default, {label}")
 
 
 if __name__ == "__main__":

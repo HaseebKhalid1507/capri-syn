@@ -1493,17 +1493,18 @@ fn local_tried(message: &str) -> Option<String> {
     Some(url.strip_suffix("/chat/completions").unwrap_or(url).trim_end_matches('/').to_string()).filter(|u| !u.is_empty())
 }
 
-/// A provider's refusal with this HTTP status (`m` lowercased), where Synaps 0.12 writes one: right
-/// after `request failed: ` (`codex request failed: 429 Too Many Requests`; the broker's `provider
-/// request failed: 429 …`, nested in `openai request failed: broker transport error: …` or a
-/// `Config error: openai provider: …`), then a space, `:`, `(` or the end, as its own
-/// `classify_error` (`extensions/session_driver.rs`) reads it. A number anywhere else (a path, an
-/// id, a session's name) is none.
-fn says_status(m: &str, status: &str) -> bool {
-    const AT: &str = "request failed: ";
-    m.match_indices(AT).any(|(i, _)| {
-        let rest = &m[i + AT.len()..];
-        rest.strip_prefix(status).is_some_and(|after| after.is_empty() || after.starts_with([' ', ':', '(']))
+/// A provider's refusal with one of these HTTP statuses (`m` lowercased): one right after `at`
+/// (`request failed: `, where Synaps 0.12 writes a status: `codex request failed: 429 Too Many
+/// Requests`, the broker's `provider request failed: 503 …`), then a space, `:`, `(` or the end.
+/// Any such `at` in `m` counts, wherever it is: unlike Synaps' own `classify_error`
+/// (`extensions/session_driver.rs`), which reads a status only at the head of the message (its
+/// `codex`/`openai`/`provider request failed: ` prefixes, then the broker's nesting), this reads one
+/// under a wrapper too (`Config error: openai provider: …`, `API error: …`). A number with no `at`
+/// before it (a path, an id, a session's name) is none, nor a longer one (`4290`).
+fn says_status(m: &str, at: &str, statuses: &[&str]) -> bool {
+    m.match_indices(at).any(|(i, _)| {
+        let rest = &m[i + at.len()..];
+        statuses.iter().any(|s| rest.strip_prefix(*s).is_some_and(|after| after.is_empty() || after.starts_with([' ', ':', '('])))
     })
 }
 
@@ -1538,6 +1539,13 @@ impl Trouble {
             }
             return Some(Trouble::LoggedOut);
         }
+        // Synaps 0.12: ChatGPT's 401 once its retries are spent (`codex request failed: 401
+        // Unauthorized`), and a Responses stream's auth failure (`Codex authentication rejected in
+        // stream. Sign in again …`; xAI's and Muse's the same). A 403, a 400 or a 404 isn't a
+        // login: an account or a model turned away, its own words shown.
+        if m.contains(" authentication rejected in stream") || says_status(&m, "codex request failed: ", &["401"]) {
+            return Some(Trouble::LoggedOut);
+        }
         // `can't reach local endpoint at http://localhost:11434/v1/… — is Ollama/LM Studio running?`
         if m.contains("reach local endpoint") {
             return Some(Trouble::LocalDown { ollama: m.contains(":11434/") });
@@ -1551,9 +1559,11 @@ impl Trouble {
                 return Some(Trouble::WrongModel);
             }
         }
-        if any(&["rate limit", "(http 429", "usage limit", "quota", "(billing_error)", "429 too many requests"]) || says_status(&m, "429") {
+        // A status after `request failed: `, Synaps 0.12's own sets (`status_kind`): 429 a limit;
+        // 500, 502, 503, 504 and 529 transient, so swamped once its retries are spent.
+        if any(&["rate limit", "(http 429", "usage limit", "quota", "(billing_error)", "(rate_limit_error)"]) || says_status(&m, "request failed: ", &["429"]) {
             Some(Trouble::Limited)
-        } else if any(&["overloaded", "server error (http 5", "reports the model is at capacity"]) {
+        } else if any(&["overloaded", "server error (http 5", "reports the model is at capacity"]) || says_status(&m, "request failed: ", &["500", "502", "503", "504", "529"]) {
             // `reports the model is at capacity`: Synaps 0.12's in-stream capacity failure (a Codex
             // `rate_limit_exceeded`, or an overload, its retries spent; RESPONSES_CAPACITY_SUFFIX).
             Some(Trouble::Swamped)
@@ -2415,7 +2425,7 @@ mod tests {
     fn troubles_are_read_off_the_daemons_words() {
         const CLAUDE: Option<&str> = Some("claude-sonnet-4-6");
         const LOCAL: Option<&str> = Some("local/qwen3:8b");
-        const CODEX: Option<&str> = Some("openai-codex/gpt-5.5");
+        const CODEX: Option<&str> = Some(crate::provider::CHATGPT_DEFAULT.0);
         let cases = [
             ("No Anthropic credentials. Run `synaps login`, or switch to a provider model with `/model groq/llama-3.3-70b-versatile`.", CLAUDE, Some(Trouble::NoBrain { on: Some("Claude") })),
             ("Auth error: No API key or OAuth token found. Run `synaps login` to authenticate.", CLAUDE, Some(Trouble::NoBrain { on: Some("Claude") })),
@@ -2433,6 +2443,8 @@ mod tests {
             ("API stream error (authentication_error). Provider error details withheld — they can echo request content.", CLAUDE, Some(Trouble::LoggedOut)),
             ("Rate limited by Anthropic (HTTP 429). Retry after 30 s.", CLAUDE, Some(Trouble::Limited)),
             ("Rate limit exhausted — retries used up while waiting for reset (next window in 4 min).", CLAUDE, Some(Trouble::Limited)),
+            // v0.12.0, Anthropic's in-stream rate limit (its SSE template, retries spent).
+            ("API stream error (rate_limit_error). Provider error details withheld — they can echo request content.", CLAUDE, Some(Trouble::Limited)),
             // v0.12.0, a ChatGPT account's usage spent (a free one's too: a 429 `usage_limit_reached`,
             // or a window's header at 100%; runtime/openai/stream.rs RESPONSES_QUOTA_SUFFIX).
             ("Codex usage quota exhausted in stream. Add credit, wait for reset, or switch models.", CODEX, Some(Trouble::Limited)),
@@ -2444,10 +2456,19 @@ mod tests {
             ("Config error: openai provider: broker transport error: provider request failed: 429 Too Many Requests", Some("google-gemini/gemini-2.5-pro"), Some(Trouble::Limited)),
             ("broker transport error: provider request failed: 429 Too Many Requests [unlisted_error]", None, Some(Trouble::Limited)),
             ("xai-auth: rate limited (HTTP 429). Wait for the limit to reset, or switch models with /model.", Some("xai-auth/grok-4.3"), Some(Trouble::Limited)),
-            // ChatGPT turning the account or its model away isn't a limit (codex_wire.rs: a 401,
-            // a 403, a model the account doesn't have). Nor is a 429 in a path, an id or a name.
-            ("codex request failed: 401 Unauthorized", CODEX, None),
+            ("API error: codex request failed: 429: too many", CODEX, Some(Trouble::Limited)),
+            // v0.12.0, ChatGPT's login turned down: its 401 (retries spent), or in the stream
+            // (RESPONSES_AUTH_SUFFIX; xAI's the same): sign in again.
+            ("codex request failed: 401 Unauthorized", CODEX, Some(Trouble::LoggedOut)),
+            ("API error: codex request failed: 401: unauthorized", CODEX, Some(Trouble::LoggedOut)),
+            ("Codex authentication rejected in stream. Sign in again or switch to an available account.", CODEX, Some(Trouble::LoggedOut)),
+            ("xAI authentication rejected in stream. Sign in again or switch to an available account.", Some("xai-auth/grok-4.3"), Some(Trouble::LoggedOut)),
+            // ChatGPT turning the account or its model away isn't a limit, nor a login
+            // (codex_wire.rs: a 403, a model the account doesn't have). Nor is a 429 in a path, an
+            // id or a name; nor another provider's 401 (a key's: not hers to sign in again).
             ("codex request failed: 403 Forbidden", CODEX, None),
+            ("codex request failed: 4010 Unknown", CODEX, None),
+            ("openai request failed: broker transport error: provider request failed: 401 Unauthorized", Some("groq/llama-3.3-70b-versatile"), None),
             ("codex request failed: 400 Bad Request [invalid_request_error] — this model isn't available on the selected ChatGPT account; switch account (`synaps auth use --provider openai-codex`) or model (/model).", CODEX, None),
             ("codex request failed: 404 Not Found [model_not_found] — the backend doesn't know this model for this account; pick another with /model.", Some("openai-codex/gpt-429"), None),
             ("Tool execution failed: GET https://example.com/v1/items/429 returned nothing", CODEX, None),
@@ -2455,6 +2476,17 @@ mod tests {
             ("Session error: no session 20260714-429000-3dab (request failed: 4291)", None, None),
             ("Anthropic is overloaded right now. Retries exhausted — wait a minute and try again.", CLAUDE, Some(Trouble::Swamped)),
             ("Anthropic server error (HTTP 502). Try again.", CLAUDE, Some(Trouble::Swamped)),
+            // v0.12.0, a 5xx its classify_error calls transient (500, 502, 503, 504, 529), its
+            // retries spent: ChatGPT's and the broker's. Not another 5xx (501), nor one in a path.
+            ("codex request failed: 503 Service Unavailable", CODEX, Some(Trouble::Swamped)),
+            ("codex request failed: 500 Internal Server Error", CODEX, Some(Trouble::Swamped)),
+            ("API error: openai request failed: broker transport error: provider request failed: 503 Service Unavailable [server_error]", Some("groq/llama-3.3-70b-versatile"), Some(Trouble::Swamped)),
+            ("Config error: openai provider: broker transport error: provider request failed: 502 Bad Gateway", Some("google-gemini/gemini-2.5-pro"), Some(Trouble::Swamped)),
+            ("openai request failed: broker transport error: provider request failed: 504 Gateway Timeout", None, Some(Trouble::Swamped)),
+            ("openai request failed: broker transport error: provider request failed: 529 <unknown status code>", None, Some(Trouble::Swamped)),
+            ("codex request failed: 501 Not Implemented", CODEX, None),
+            ("Tool execution failed: GET https://example.com/v1/jobs/503 returned nothing", CODEX, None),
+            ("Session error: no session 20260714-503000-3dab (request failed: 5030)", None, None),
             // v0.12.0, a Responses stream's failure at capacity (ChatGPT's in-stream
             // `rate_limit_exceeded` or an overload, retries spent; xAI's and Muse's the same).
             // Its other in-stream failures aren't capacity: a spent quota stays a limit (above),

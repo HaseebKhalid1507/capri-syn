@@ -1669,8 +1669,8 @@ LM Studio|http://localhost:1234/v1|http://127.0.0.1:1234/v1/models'
 # Her brains here, "id|login|name|how|hint" a line: her own table (synaps-avatar --providers:
 # src/provider.rs' ALL, in its order; never a copy here), its accounts and key services. how:
 # browser (his browser opens on the sign-in page), code (it opens, and he types the code Synaps
-# shows: Copilot's), key (an API key). hint: shown beside its name (ChatGPT's: free with any
-# account), most often none. Gemini's sign-in needs its Google client (Synaps' google_gemini.rs),
+# shows: Copilot's), key (an API key). hint: shown beside its name (ChatGPT's: that a
+# free account will do), most often none. Gemini's sign-in needs its Google client (Synaps' google_gemini.rs),
 # so not without it.
 brains_here() {
     local l

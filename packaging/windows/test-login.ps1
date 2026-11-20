@@ -129,7 +129,7 @@ public static class Her {
                     return p.ExitCode;
                 }
             }
-            Console.WriteLine("openai-codex\topenai-codex\taccount\topenai-codex/gpt-5.5\tChatGPT\tbrowser\tfree with any ChatGPT account");
+            Console.WriteLine("openai-codex\topenai-codex\taccount\topenai-codex/gpt-5.6-luna\tChatGPT\tbrowser\tfree account works");
             Console.WriteLine("anthropic\tclaude\taccount\tclaude-sonnet-4-6\tClaude\tbrowser");
             Console.WriteLine("github-copilot\tgithub-copilot\taccount\tgithub-copilot/claude-sonnet-4.6\tCopilot\tcode");
             Console.WriteLine("google-gemini\tgoogle-gemini\taccount\tgoogle-gemini/gemini-2.5-pro\tGemini\tbrowser");
@@ -363,9 +363,9 @@ $want = @(foreach ($t in $table) {
 $got = @($lines | Where-Object { $_ -like 'brains: *' })
 Check (($got -join "`n") -ceq ($want -join "`n")) "its accounts and key services: her table's, in its order ($($got.Count) of $($want.Count); first $($got | Select-Object -First 1))"
 Check ($got -contains 'brains: anthropic|claude|Claude|browser||' -and $got -contains 'brains: github-copilot|github-copilot|Copilot|code||') 'Claude in the browser, Copilot with a code'
-# A hint (her table's last field) beside ChatGPT alone: free with any account.
+# A hint (her table's last field) beside ChatGPT alone: a free account works.
 $hinted = @($got | Where-Object { ($_ -split '\|')[5] })
-Check ($hinted.Count -eq 1 -and $hinted[0] -ceq 'brains: openai-codex|openai-codex|ChatGPT|browser||free with any ChatGPT account') "ChatGPT's hint, and no other's: $($hinted -join ', ')"
+Check ($hinted.Count -eq 1 -and $hinted[0] -ceq 'brains: openai-codex|openai-codex|ChatGPT|browser||free account works') "ChatGPT's hint, and no other's: $($hinted -join ', ')"
 Check (@($got | Where-Object { $_ -like 'brains: google-gemini|*' }).Count -eq 0) 'no Gemini without its Google client'
 Check (@($got | Where-Object { $_ -match "^brains: xai-auth\|xai-auth\|Grok\|browser\|Synaps 0\.12 can't open" }).Count -eq 1) 'Grok, with why it is not here'
 $keys = @($got | Where-Object { $_ -like 'brains: *|key||' }).Count
