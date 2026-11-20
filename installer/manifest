@@ -45,6 +45,12 @@ vulkan_apt=mesa-vulkan-drivers
 vulkan_pacman=vulkan-radeon, vulkan-intel or nvidia-utils
 vulkan_dnf=mesa-vulkan-drivers
 vulkan_zypper=libvulkan_radeon or libvulkan_intel
+# --voice's microphone and speakers: PipeWire's pw-record and pw-play (checked, never installed). They are
+# in a package of their own, not in the one named `pipewire` (Arch: `pipewire-audio`; Debian: `pipewire-bin`).
+pipewire_apt=pipewire-bin
+pipewire_pacman=pipewire-audio
+pipewire_dnf=pipewire-utils
+pipewire_zypper=pipewire-tools
 
 # 3. Her art pack: tools/make-pack checks every file against its pins (tools/*.sha256).
 # CapriCore v1.0.4 comes as GitHub's tarball of the commit; lachy at the commit make-pack pins.

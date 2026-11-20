@@ -6,7 +6,7 @@
 
 Her brain is yours to pick: an account you have, an API key or a model on your own PC, from Settings ▸
 Brain and from her installers, with nothing picked for you. On Windows 11 her tray icon starts on the
-taskbar.
+taskbar, and on Linux her voice installs where `python3` is 3.14.
 
 ### Her brain (Settings ▸ Brain and her installers)
 - **Three ways in, none first.** Settings ▸ Brain offers SIGN IN, API KEY and RUN LOCAL, each opened in
@@ -49,14 +49,29 @@ taskbar.
 - **Her tray icon starts on the taskbar.** Windows 11 hides a new tray icon in the `^` overflow. She
   moves hers out once; after that it's your setting, an icon you placed is left alone, and Windows 10
   gets nothing.
-- **Setup's window drags** on its "Setting her up" page, where there is nothing to click.
+- **Setup's window drags** on its "Setting her up" page (its buttons are hidden there and the close
+  box is greyed). While its system menu's About box is open it holds off, so a second box can't open
+  on top. Setup's log has a `step NAME: exit N` for every step (`-1` when there is no exit code), and
+  names any other window of Setup's that keeps the wizard disabled.
+
+### Linux voice
+- **Her voice installs where `python3` is 3.14 (Arch now).** kokoro-onnx takes Python 3.10 to 3.13: she
+  uses your `python3` when it is one of them, else a `python3.13` to `python3.10` on your PATH; with
+  none, uv fetches 3.13 (105 MB) into `~/.local/share/capri-voice/python` and nowhere else; with no uv
+  she says what to install.
+- **`pw-record` and `pw-play` are checked first,** before anything is installed. A missing one names
+  its package: `pipewire-bin` (Debian, Ubuntu), `pipewire-utils` (Fedora), `pipewire-audio` (Arch) or
+  `pipewire-tools` (openSUSE).
+- **`capri-voice` started by hand (no systemd) runs on the voice's venv,** not the system Python,
+  which has no kokoro-onnx.
 
 ### Docs
 - The repository has a code of conduct, contributing notes, a security policy, a support page, issue
   forms and a pull request template; the bug form's Version asks for what Settings ▸ ABOUT ▸ COPY
   copies. The README has a Requirements section: OS, graphics, CPU, RAM and disk, her brain, voice,
   network, and its Brain picture shows the current Settings ▸ Brain. docs/ describe it and the
-  installers' picker.
+  installers' picker. REFERENCE.md's trouble table has her reply when no model is picked, and INSTALL.md
+  and VOICE.md say what the Linux voice needs.
 
 ### For developers
 - `synaps-avatar --providers` prints her accounts, key services and local server, a line each, in her
@@ -93,6 +108,7 @@ taskbar.
 - With `XDG_RUNTIME_DIR` unset, she and her voice sidecar look for the Linux socket in different places:
   she in the temp dir (`$TMPDIR`, else `/tmp`), the sidecar in `/run/user/<uid>`. Set it, or set
   `CAPRI_VOICE_SOCK` for both. It isn't aligned yet because that would change how she behaves.
+
 
 ## 1.0.0 (2026-11-19)
 

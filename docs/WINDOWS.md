@@ -295,7 +295,8 @@ CI:
   gone). The shots are the job's artifact. The wizard's window is looked at too
   (`test-wizard-window.ps1`), on a page and again while a step runs: its title bar answers
   `WM_NCHITTEST` with `HTCAPTION`, it isn't hung (`WM_NULL` answered within a second), it's enabled, and
-  a real mouse drag by its title bar (`SendInput`) moves it.
+  a real mouse drag by its title bar (`SendInput`) moves it. While a step runs, the wizard's "About
+  Setup..." box is opened too: the window stays disabled under it, and is live again once it's closed.
 
 ## Her voice: a second installer
 

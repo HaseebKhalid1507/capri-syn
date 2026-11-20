@@ -424,7 +424,7 @@ jobs:
       - name: shellcheck
         run: |
           shellcheck --version | sed -n 2p
-          shellcheck -x install.sh installer/stage.sh installer/test-units.sh installer/licenses/check.sh installer/release-notes.sh
+          shellcheck -x install.sh installer/stage.sh installer/test-units.sh installer/licenses/check.sh installer/release-notes.sh tools/capri-voice-setup
 
       - name: PSScriptAnalyzer
         shell: pwsh
@@ -453,7 +453,7 @@ jobs:
           bash installer/release-notes.sh --dry-run "$v" > "$RUNNER_TEMP/notes.md"
           echo "the notes for $v: $(wc -l < "$RUNNER_TEMP/notes.md") lines"; head -n 3 "$RUNNER_TEMP/notes.md"
 
-      - name: install.sh's start of her (which runs it quits, ssh, her log, her folder)
+      - name: install.sh's start of her (which runs it quits, ssh, her log, her folder) and --voice's PipeWire tools and Python
         run: bash installer/test-units.sh
 
       - name: install.sh --dry-run touches nothing

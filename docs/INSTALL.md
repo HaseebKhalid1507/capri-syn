@@ -62,10 +62,23 @@ its "Her model" page asks which brain, as this script does:
 | 4 | **Daemon and her session** | When systemd's user manager runs, it writes and enables a `synaps-daemon.service` user unit; a unit of your own is kept, and enabled only if you agree. With no user manager, it starts the daemon now, and her autostart line starts it at login. It checks the daemon speaks protocol 3; a daemon that speaks another, or doesn't say, stops the install (exit 1, with how to fix it: an older daemon still running after this run installed or upgraded Synaps is stopped, `synaps daemon stop`; an upgrade says so in step 1 too). Her session `capri` is her own, as before (attached if live, else resumed, else made). | It starts `synaps daemon --detach` now, plus a Run value (`synaps-daemon`) for sign-in. A `synaps-daemon` value of your own is left as it is and never recorded. It checks the daemon speaks protocol 3; one that speaks another, or doesn't say, stops the install (exit 1, with how to fix it: after this run installed or upgraded Synaps, it's an older daemon still running, `synaps daemon stop`; an upgrade says so in step 1 too). Her installer finishes anyway and says it on its finish page. |
 | 5 | **Summon key** | i3, sway or Hyprland: shows the binding (`$mod+c`: press and release, so a hold talks). With your consent (`--yes`) it appends it between marker comments, after a timestamped backup. The key is named as your config sets `$mod` (Super for Mod4, Alt for Mod1). One that is already taken is reported, not overridden; on Hyprland (whose stock config closes a window on Super+C) it offers Super+Alt+C instead, Windows' key, when that one's free. GNOME: it offers a custom keyboard shortcut, Super+Alt+C running `avatarctl talk tap`, only when you say yes on the terminal ([below](#gnome-kde-and-other-wayland-desktops)). On any other desktop it tells you what to bind (`avatarctl talk tap`). | Win+Alt+C: she registers it herself. |
 | 6 | **Autostart** (default on) | i3 and sway get an `exec` line, Hyprland an `exec-once`, others an XDG autostart `.desktop`. Each one starts the daemon first if needed. Whatever `--no-autostart` says, she also goes in your app menu as Capri (`~/.local/share/applications/synaps-avatar.desktop`, with her icon), so once she's quit she starts from there. | A Run value (`synaps-avatar`). |
-| 7 | **`--voice`, `--watch`** | `--voice` runs `tools/capri-voice-setup` (its own venv, ~375 MB of models) and installs `capri-voice.service`. `--watch` installs `capri-watch.service`, enabled only with `--yes`. | `--voice` uses her voice installer (or builds the same bundle without a release) and fetches the models. `--watch` is Linux-only. |
+| 7 | **`--voice`, `--watch`** | `--voice` runs `tools/capri-voice-setup` (its own venv and ~375 MB of models, and ~105 MB for Python 3.13 if your system has none of 3.10 to 3.13), installs `capri-voice` (run by hand it uses that venv's Python) and `capri-voice.service`. `--watch` installs `capri-watch.service`, enabled only with `--yes`. | `--voice` uses her voice installer (or builds the same bundle without a release) and fetches the models. `--watch` is Linux-only. |
 
 At the end comes an `installed:` summary: what is where, how the daemon starts, how to summon her,
 how to start her, and how to remove her (as you ran it: the checkout's script, or the piped form).
+
+**`--voice` on Linux needs** PipeWire's `pw-record` and `pw-play`, and a Python 3.10 to 3.13 for its
+venv (kokoro-onnx doesn't take 3.14, which is Arch's `python3` now). The first is checked before
+anything is installed, and never installed for you; the package is `pipewire-bin` on Debian and Ubuntu,
+`pipewire-utils` on Fedora, `pipewire-audio` on Arch (not `pipewire`: it has neither tool) and
+`pipewire-tools` on openSUSE. For the second, `tools/capri-voice-setup` uses your `python3` when it is
+a CPython 3.10 to 3.13 (the distro's own: its `pywhispercpp` goes with it), else a `python3.13` to
+`python3.10` on your PATH; with none, uv fetches Python 3.13 (a 34 MB download, 105 MB on disk) into
+`~/.local/share/capri-voice/python`, inside the voice's own folder (whatever `python-preference` uv has
+for you). install.sh puts uv in its own venv when you have none. Run the setup by hand with no uv and
+no such Python, and it stops with one line: install `uv` (Arch: `pacman -S uv`) or `python3.13` (Arch:
+`python313` from the AUR). Started by hand (no systemd), `capri-voice` runs on the voice's venv: its
+first line is that venv's `python`.
 
 When Synaps has no model yet (no login in `~/.synaps-cli/auth.json`, no `local/` model in its config
 or her `[session]`), it asks which brain, in your terminal. None is picked for you; Enter is later.
@@ -200,11 +213,11 @@ she runs through XWayland, the X server those desktops keep for X apps.
 - **Hyprland** has no idle time for her yet: your presence is the pointer moving, so typing alone
   for 5 min reads as away. Hyprland before 0.40 isn't supported: she takes XWayland there.
 - **On Windows, Synaps 0.12's own `synaps login`** opens a sign-in tab cut at the URL's first `&`:
-  copy the whole URL it prints into your browser, or sign in from her (Settings ▸ Brain) or through
-  her installers' step, which open it whole (install.ps1 puts it there too; the default folder
-  shown; `-Provider` for another account than Claude):
+  copy the whole URL it prints into your browser, or sign in through her installers' step, which
+  opens it whole (install.ps1 puts it there too; the default folder shown; `-Provider` for another
+  account than Claude):
   `powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Programs\synaps-avatar\steps\steps.ps1" login`
-  Grok's sign-in never prints its URL, so Grok can't be signed in on Windows yet
+  Grok's sign-in never prints its URL, so the Windows installers don't offer Grok yet
   ([WINDOWS.md](WINDOWS.md#the-installer)).
 - **Windows:** the installers are unsigned, so a browser download meets SmartScreen ("More info",
   then "Run anyway"); Windows 10 and Windows 11 on Arm are untested; a click on one of her notifications does nothing (as
@@ -212,10 +225,6 @@ she runs through XWayland, the X server those desktops keep for X apps.
   Redistributable; live audio is still to check on real hardware: her desktop checks ran in a
   Windows 11 VM, with no real audio ([WINDOWS.md](WINDOWS.md)). Linux has no tray icon yet: HIDE's
   chip is the way back there.
-- **Her taskbar button's name, for a screen reader (Windows):** on a first run, Explorer can name
-  her button with her old tooltip followed by the current one, so a screen reader hears both
-  (`capri-syn · SPEAKING capri-syn · ONLINE`). Her tooltip is one string, and the hover popup shows
-  the current one alone: the name chains after a tooltip change ([WINDOWS.md](WINDOWS.md)).
 - **`XDG_RUNTIME_DIR` unset:** she and her voice sidecar look for the Linux socket in different
   places: she in the temp dir (`$TMPDIR`, else `/tmp`), the sidecar in `/run/user/<uid>`. Set it, or
   set `CAPRI_VOICE_SOCK` for both. It isn't aligned yet because that would change how she behaves.
@@ -280,6 +289,8 @@ it only says to uninstall it the way you installed it.
 Linux:
 - `~/.local/bin/{synaps-avatar,avatarctl}` and `~/.local/lib/synaps-avatar/`: her binary and tools;
 - `~/.local/share/synaps-avatar/packs/capri`: her pack;
+- `--voice`: `~/.local/bin/capri-voice` and `~/.local/share/capri-voice/` (its venv, ~375 MB of models,
+  and the Python 3.13 uv fetched, if it did);
 - `~/.cache/synaps-avatar/`: the source, the build and the make-pack venv (reused by reruns);
 - `~/.config/systemd/user/`: the units;
 - `~/.local/share/applications/synaps-avatar.desktop` (her app-menu entry) and
