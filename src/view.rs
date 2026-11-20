@@ -4341,6 +4341,7 @@ impl Avatar {
                 Act::Detach => s.client.detach(),
                 Act::Set(setting) => s.client.set(setting).map(drop),
                 Act::EngineCommand(name, arg) => s.client.engine_command(name, arg).map(drop),
+                Act::Query(q) => s.client.query(q).map(drop),
                 Act::Remember(id) => {
                     state::remember_session(&s.key, &id);
                     Ok(())

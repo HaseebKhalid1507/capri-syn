@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use synaps_client::history::{HistoryUpdate, messages_hash};
+use synaps_client::protocol::SessionQuery;
 use synaps_client::{AttachMode, Client, ClientOptions, CreateOptions, Cwd, Endpoint, Error, Event, Identity, Setting, Status};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::net::UnixListener;
@@ -1217,5 +1218,42 @@ async fn an_engine_command_cut_off_by_a_drop_is_refused() {
     .await;
     assert_eq!(got, id);
     assert!(reason.contains("may have run"), "{reason}");
+    client.shutdown().unwrap();
+}
+
+/// `query` goes out as `Query{id}` from an `Observe` attach too; only the
+/// `QueryResult` with that id answers it (another client's, broadcast, does
+/// not), its `value` as sent. One still waiting when the session connection
+/// drops fails (`QueryFailed`).
+#[tokio::test]
+async fn a_query_is_answered_by_its_own_id() {
+    let mut fake = Fake::start("query").await;
+    let (client, events) = fake.client();
+    client.attach(SID, AttachMode::Observe).unwrap();
+    let mut conn = attached(&mut fake, &events, 2).await;
+
+    let id = client.query(SessionQuery::ContextReport).unwrap();
+    assert_eq!(conn.recv_cmd().await, json!({"cmd": "query", "id": id, "query": {"query": "context_report"}}));
+    conn.event(50, json!({"ev": "query_result", "id": id + 1000, "value": {"text": "theirs"}})).await;
+    let report = json!({"text": "context \u{2014} model m\ncontext management: off | window 1 | capacity 200000"});
+    conn.event(51, json!({"ev": "query_result", "id": id, "value": report})).await;
+    let got = wait(&events, "reply", |e| match e {
+        Event::QueryReply { id, query, value, .. } => Some((*id, query.clone(), value.clone())),
+        _ => None,
+    })
+    .await;
+    assert_eq!(got, (id, "context_report".to_string(), report));
+
+    let id2 = client.query(SessionQuery::ContextReport).unwrap();
+    assert_ne!(id2, id);
+    conn.recv_cmd().await;
+    drop(conn);
+    let (got, query, reason) = wait(&events, "failed", |e| match e {
+        Event::Error { error: Error::QueryFailed { id, query, reason }, .. } => Some((*id, query.clone(), reason.clone())),
+        _ => None,
+    })
+    .await;
+    assert_eq!((got, query.as_str()), (id2, "context_report"));
+    assert!(reason.contains("dropped before the reply"), "{reason}");
     client.shutdown().unwrap();
 }

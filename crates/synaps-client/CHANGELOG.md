@@ -2,14 +2,17 @@
 
 ## Since 4101e93
 
-Additive (capri-syn `feat/session-rollover`), for synaps-avatar's `[session] rollover`. `Command`, `Event` and `Error` gain a variant each (all `#[non_exhaustive]`); `protocol::SessionCommand` gains `EngineCommand`.
+Additive (capri-syn `feat/session-rollover`), for synaps-avatar's `[session] rollover`. `Command`, `Event` and `Error` gain two variants each (all `#[non_exhaustive]`); `protocol::SessionCommand` gains `EngineCommand`, `protocol::SessionQuery` gains `ContextReport` (and `SessionQuery::name`).
 
 - New `Client::engine_command(name, arg) -> Result<u64, ClientClosed>` and `Command::EngineCommand { id, name, arg }`: the session's `EngineCommand{id, name, arg}`, a runtime-backed slash command (agent-engine `engine::commands::handle_engine_command`; `synaps attach`'s `/cmd <name> <arg>`), wire `{"cmd":"engine_command","id":…,"name":"context","arg":"auto"}`. Ids from `Client::set`'s counter (random below `RESERVED_QUERY_ID_BASE`, then counting). Input-owner only, as `Set`.
 - New `Event::EngineReply { attach_seq, session_id, id, name, value }`: the `QueryResult` with our id, its `value` as sent (`{kind, text}`: `output`, `error` for the command's own refusal, `unhandled` for a name the daemon has no command for). Another client's `QueryResult` never becomes one (still dropped).
 - New `Error::EngineCommandRefused { id, name, reason }`: refused by the session (`Refused{command: "engine_command"}`, the oldest waiting; not an `Error::Refused` while one of ours waits), sent while attaching/reconnecting, or cut off by a dropped connection ("it may have run").
-- Tests: `tests/fixtures.rs` `an_engine_command_encodes_as_the_daemon_expects`; `tests/fake_daemon.rs` `an_engine_command_is_answered_by_its_own_id`, `an_engine_command_cut_off_by_a_drop_is_refused`.
+- New `Client::query(SessionQuery) -> Result<u64, ClientClosed>` and `Command::Query { id, query }`: the session's `Query{id, query}`, open to every attached client (`Observe` too), wire `{"cmd":"query","id":…,"query":{"query":"context_report"}}`. Ids from `Client::set`'s counter. `SessionQuery::ContextReport` (agent-engine `SessionQuery::ContextReport`): `/context`'s report, `{text}` (`engine::commands::context_command`: the context's sizes, then `context management: auto|off | …`); a parked session is woken for it (`{error}` if it can't be). `SessionQuery::name()`: the wire name.
+- New `Event::QueryReply { attach_seq, session_id, id, query, value }`: the `QueryResult` with our id, its `value` as sent; `query` is the wire name. Another client's never becomes one.
+- New `Error::QueryFailed { id, query, reason }`: sent while attaching/reconnecting, or cut off by a dropped connection.
+- Tests: `tests/fixtures.rs` `an_engine_command_encodes_as_the_daemon_expects`, `a_context_report_query_encodes_as_the_daemon_expects`; `tests/fake_daemon.rs` `an_engine_command_is_answered_by_its_own_id`, `an_engine_command_cut_off_by_a_drop_is_refused`, `a_query_is_answered_by_its_own_id`.
 
-For synaps-avatar: `engine_command("context", "auto")` from the Mirror attach of her own session turns Synaps' automatic context rollover on for it alone (session-only on the daemon: send it again after a reconnect).
+For synaps-avatar: `query(SessionQuery::ContextReport)` asks her own session's context management mode from any attach; when it's off, `engine_command("context", "auto")` from the Mirror attach turns Synaps' automatic context rollover on for it alone (session-only on the daemon: ask again after a reconnect).
 
 ## Since a982132
 

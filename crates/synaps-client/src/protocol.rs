@@ -343,6 +343,23 @@ pub enum SessionQuery {
     /// Reply value: the session's `api_messages` array.
     Messages,
     Status,
+    /// Reply value: `{text}`, `/context`'s report
+    /// (`engine::commands::context_command`): the context's sizes, then
+    /// `context management: auto|off | window … | capacity … | …`. Open to
+    /// every attached client (an `Observe` attach asks it). Wakes a parked
+    /// session (`{error}` if it can't).
+    ContextReport,
+}
+
+impl SessionQuery {
+    /// The wire name (`{"query": …}`).
+    pub fn name(&self) -> &'static str {
+        match self {
+            SessionQuery::Messages => "messages",
+            SessionQuery::Status => "status",
+            SessionQuery::ContextReport => "context_report",
+        }
+    }
 }
 
 // ── daemon → client ───────────────────────────────────────────────────────────

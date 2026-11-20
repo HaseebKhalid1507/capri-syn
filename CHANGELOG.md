@@ -5,13 +5,14 @@
 ### Her session
 - **Her context rolls over by itself.** An always-on chat no longer fills her model's context: she
   turns Synaps' automatic context rollover on for her own session (`/context auto`, that session only;
-  Synaps' config and your other sessions stay as they are), between turns. When the context gets
-  long, Synaps archives the older messages and carries on in a fresh window with the recent ones, with
-  no summarizing call. It's for brains with a 200k window or more (ChatGPT, Claude, most API models):
-  she skips it for a local model and for a window under 64k, and a brain picked later is decided
-  again. The Line shows one quiet row where it happened, and Synaps' own notices about it go to her
-  log, with one line saying it's on or why not (a `synaps attach` open on her session prints her
-  `/context` reply and her join and leave lines each time she sends it). `[session] rollover = false`
+  Synaps' config and your other sessions stay as they are), between turns. If Synaps has it on there
+  already (`context_management.mode = auto` in its config), she leaves it to Synaps. When the context
+  gets long, Synaps archives the older messages and carries on in a fresh window with the recent ones,
+  with no summarizing call. It's for ChatGPT, Claude and other 200k+ brains: she skips it for a local
+  model and for a window under 128k, and a brain picked later is decided again. The Line shows one
+  quiet row where it happened, and Synaps' own notices about it go to her log, with one line saying
+  it's on or why not (a `synaps attach` open on her session prints the answers to her mode query and
+  her `/context`, and her join and leave lines each time she sends it). `[session] rollover = false`
   leaves it to Synaps. Not on Windows yet: Synaps 0.12 archives on Linux and macOS only (her log says
   so).
 - **Privacy:** the archive holds both sides of the chat word for word, and Synaps never prunes it (it
@@ -22,8 +23,10 @@
 
 ### For developers
 - The vendored synaps-client sends engine commands (`Client::engine_command`, `Event::EngineReply`,
-  `Error::EngineCommandRefused`), to port back (`crates/synaps-client/VENDORED.md`). The fake daemon
-  answers `context auto` and `context off` as Synaps 0.12 does.
+  `Error::EngineCommandRefused`) and queries (`Client::query`, `SessionQuery::ContextReport`,
+  `Event::QueryReply`, `Error::QueryFailed`), to port back (`crates/synaps-client/VENDORED.md`). The
+  fake daemon answers `context auto`, `context off` and the context report as Synaps 0.12 does
+  (`FAKE_CONTEXT=auto`: on by its config).
 
 ## 1.1.0 (2026-11-19)
 

@@ -15,12 +15,14 @@ Changed from upstream:
 error or abort note (`turn_notice`) is anchored to the end of its turn (`Item::after_turns`,
 `opens_turn`), so a refold (a re-attach, a resync) that brings the turn's prompt after the note no
 longer puts the note above the prompt (`a_turns_error_stays_after_its_turn_on_a_refold`). Nothing
-else in `src/` or `tests/` differs, but one addition, also to port back: `EngineCommand`
-(`protocol.rs` `SessionCommand::EngineCommand`; `client.rs` `Client::engine_command`,
-`Command::EngineCommand`, `Event::EngineReply`, `Error::EngineCommandRefused`; tests
-`an_engine_command_encodes_as_the_daemon_expects`, `an_engine_command_is_answered_by_its_own_id`,
-`an_engine_command_cut_off_by_a_drop_is_refused`), for her `/context auto` (CHANGELOG.md, "Since
-4101e93"). To check:
+else in `src/` or `tests/` differs, but two additions, also to port back (CHANGELOG.md, "Since
+4101e93"), for her `/context auto`: `EngineCommand` (`protocol.rs` `SessionCommand::EngineCommand`;
+`client.rs` `Client::engine_command`, `Command::EngineCommand`, `Event::EngineReply`,
+`Error::EngineCommandRefused`; tests `an_engine_command_encodes_as_the_daemon_expects`,
+`an_engine_command_is_answered_by_its_own_id`, `an_engine_command_cut_off_by_a_drop_is_refused`), and
+queries of your own (`protocol.rs` `SessionQuery::ContextReport`, `SessionQuery::name`; `client.rs`
+`Client::query`, `Command::Query`, `Event::QueryReply`, `Error::QueryFailed`; tests
+`a_context_report_query_encodes_as_the_daemon_expects`, `a_query_is_answered_by_its_own_id`). To check:
 `git -C <synaps-desk> diff --stat 4101e93 -- crates/synaps-client` against this directory.
 
 Syncing: port fixes by hand in either direction, and update the commit above. The long-term

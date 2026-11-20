@@ -19,7 +19,9 @@ installer pins, installer/manifest's synaps_pin, so no FAKE string reaches a sho
 A `set` (her persona, `[session] model`) is applied to the session's view and answered as the daemon
 does (`setting_changed`, ok, the new view): her model shows as set. Her `engine_command` `context auto`
 or `context off` (`[session] rollover`) is answered as Synaps 0.12 answers it (`query_result`: the
-mode, or on Windows auto's Unix-only refusal); any other name `unhandled`. `model M`: another client's
+mode, or on Windows auto's Unix-only refusal); any other name `unhandled`. Her `context_report` query
+(the session's mode, asked first) is answered as 0.12 does (`{text}`, its `context management:` line).
+FAKE_CONTEXT=auto: the session's mode starts auto (Synaps' config has it on), not off. `model M`: another client's
 `/model M` (his TUI's): the view changed, broadcast as the daemon does an engine command's change
 (`setting_changed` with its reserved id, `VIEW_CHANGED_SETTING_ID`), a reply to no one's Set.
 FAKE_HISTORY=FILE: the attached chat's messages instead of the fixture's (a JSON list of api messages).
@@ -71,6 +73,14 @@ owner = [None]         # the input owner: the last Mirror attach, as the daemon 
 lock = threading.Lock()
 refuse_next = [False]
 fail_with = [None]     # every submit fails with this error text (`nobrain`, `fail TEXT`)
+context = [os.environ.get("FAKE_CONTEXT") or "off"]  # the session's context management mode
+
+
+def context_status():
+    """0.12 `context_management_status`'s first line: the mode, then the window's numbers."""
+    return f"context management: {context[0]} | window 1 | capacity 200000 | pressure 127000 | rollover 150000 | archive none"
+
+
 NO_CREDENTIALS = "No Anthropic credentials. Run `synaps login`, or switch to a provider model with `/model groq/llama-3.3-70b-versatile`."
 replies = [
     "Build's green, choom. Spike pushed the reader fix eleven minutes ago.",
@@ -226,9 +236,15 @@ def serve(conn):
                     elif WIN and arg.startswith("auto"):
                         value = {"kind": "error", "text": "context archive is currently supported on Unix only; mode unchanged"}
                     else:
-                        mode = "off" if arg == "off" else "auto"
-                        value = {"kind": "output", "text": f"context management: {mode} | window 1 | capacity 200000 | pressure 140000 | rollover 180000 | archive none\nSession-only setting. (FAKE)"}
+                        with lock:
+                            context[0] = "off" if arg == "off" else "auto"
+                        value = {"kind": "output", "text": context_status() + "\nSession-only setting. (FAKE)"}
                     event({"ev": "query_result", "id": c.get("id"), "value": value})
+                elif c.get("cmd") == "query" and (c.get("query") or {}).get("query") == "context_report":
+                    # `/context`'s report, as 0.12's `ContextReport` (`context_command`): sizes, then the mode.
+                    log("cmd query context_report")
+                    text = f"context \u2014 model {VIEW.get('model')}\n  system prompt: 0 bytes\n  tools: 0 (FAKE)\n" + context_status()
+                    event({"ev": "query_result", "id": c.get("id"), "value": {"text": text}})
                 elif c.get("cmd") in ("submit", "steer"):
                     log(f"cmd {c.get('cmd')} <{len(c.get('text', ''))} chars>")
                     if refuse_next[0]:
