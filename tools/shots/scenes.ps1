@@ -501,7 +501,7 @@ $Scenes = [ordered]@{
             Shot '15-terminal-signin' 'ChatGPT signed in from a terminal: its check without reopening; the keys say what enter does'
             # MODEL's menu: ChatGPT's models now, then Claude's; Sonnet is Claude's first.
             Key 'left'; Key 'down'; Key 'down'; Key 'down'; Key 'enter' 1000
-            $codex = 9
+            $codex = 5   # ChatGPT's models in MODEL (src/provider.rs ALL: Terra, Luna, 6.1 Sol, 6 Astra, 5.6 Sol)
             1..($codex + 1) | ForEach-Object { Key 'down' 120 }
             Key 'enter' 1800
             $dl = Join-Path $Logs 'brain-drift-daemon.log'
