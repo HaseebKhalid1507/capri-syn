@@ -172,7 +172,7 @@ SETTINGS from her right-click menu. A change is written the moment you make it.
 </p>
 
 <p align="center">
-  <img src="docs/media/still-brain.png" width="100%" alt="Settings, Brain: three ways in, SIGN IN (IN USE · CLAUDE), API KEY and RUN LOCAL; and MODEL, her model">
+  <img src="docs/media/still-brain.png" width="100%" alt="Settings, Brain: three ways in, SIGN IN (IN USE · CLAUDE), API KEY and RUN LOCAL (2 MODELS HERE); and MODEL open as a menu: Claude's models, then the local server's QWEN3:8B and LLAMA3.2:LATEST">
   <br><b>Settings ▸ Brain</b> · <sub>Pick what she thinks with.</sub>
 </p>
 
