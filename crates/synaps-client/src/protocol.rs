@@ -247,6 +247,19 @@ pub enum SessionCommand {
         id: u64,
         setting: Setting,
     },
+    /// A runtime-backed slash command (`engine::commands::handle_engine_command`:
+    /// `context auto`, ...; `synaps attach`'s `/cmd <name> <arg>`). Reply:
+    /// `QueryResult{id, value: {kind, text}}` (`kind`: `output`, `error`,
+    /// `notice`, `unhandled` for a name this daemon has no command for, ...),
+    /// broadcast to every attached client, so pick an id below
+    /// [`RESERVED_QUERY_ID_BASE`] that others won't. Input-owner only, as
+    /// `Set`: from an `Observe` attach the session answers
+    /// `Refused{command: "engine_command"}`.
+    EngineCommand {
+        id: u64,
+        name: String,
+        arg: String,
+    },
 }
 
 /// `types::SessionSetting`, the variants this client sets ([`crate::Client::set`]).
@@ -315,6 +328,9 @@ impl std::fmt::Debug for SessionCommand {
             Self::Query { id, query } => f.debug_struct("Query").field("id", id).field("query", query).finish(),
             Self::Detach { client } => f.debug_struct("Detach").field("client", client).finish(),
             Self::Set { id, setting } => f.debug_struct("Set").field("id", id).field("setting", setting).finish(),
+            Self::EngineCommand { id, name, arg } => {
+                f.debug_struct("EngineCommand").field("id", id).field("name", name).field("arg", arg).finish()
+            }
         }
     }
 }

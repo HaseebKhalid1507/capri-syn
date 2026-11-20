@@ -1,5 +1,16 @@
 # synaps-client changelog
 
+## Since 4101e93
+
+Additive (capri-syn `feat/session-rollover`), for synaps-avatar's `[session] rollover`. `Command`, `Event` and `Error` gain a variant each (all `#[non_exhaustive]`); `protocol::SessionCommand` gains `EngineCommand`.
+
+- New `Client::engine_command(name, arg) -> Result<u64, ClientClosed>` and `Command::EngineCommand { id, name, arg }`: the session's `EngineCommand{id, name, arg}`, a runtime-backed slash command (agent-engine `engine::commands::handle_engine_command`; `synaps attach`'s `/cmd <name> <arg>`), wire `{"cmd":"engine_command","id":…,"name":"context","arg":"auto"}`. Ids from `Client::set`'s counter (random below `RESERVED_QUERY_ID_BASE`, then counting). Input-owner only, as `Set`.
+- New `Event::EngineReply { attach_seq, session_id, id, name, value }`: the `QueryResult` with our id, its `value` as sent (`{kind, text}`: `output`, `error` for the command's own refusal, `unhandled` for a name the daemon has no command for). Another client's `QueryResult` never becomes one (still dropped).
+- New `Error::EngineCommandRefused { id, name, reason }`: refused by the session (`Refused{command: "engine_command"}`, the oldest waiting; not an `Error::Refused` while one of ours waits), sent while attaching/reconnecting, or cut off by a dropped connection ("it may have run").
+- Tests: `tests/fixtures.rs` `an_engine_command_encodes_as_the_daemon_expects`; `tests/fake_daemon.rs` `an_engine_command_is_answered_by_its_own_id`, `an_engine_command_cut_off_by_a_drop_is_refused`.
+
+For synaps-avatar: `engine_command("context", "auto")` from the Mirror attach of her own session turns Synaps' automatic context rollover on for it alone (session-only on the daemon: send it again after a reconnect).
+
 ## Since a982132
 
 Additive (PR `feat/client-set-system`), for synaps-avatar's persona. One struct-literal break: `CreateConfig` gained a field (a literal needs `..Default::default()`; nothing in this workspace builds one without it).

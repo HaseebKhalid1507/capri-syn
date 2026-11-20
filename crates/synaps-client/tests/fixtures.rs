@@ -488,6 +488,20 @@ fn settings_and_the_create_system_prompt_encode_as_the_daemon_expects() {
     assert!(create.contains("\"system\":\"You are Capri.\""), "{create}");
 }
 
+/// `EngineCommand` exactly as agent-engine's `types.rs` reads it (`synaps attach`'s `/cmd
+/// context auto`; `wire.rs` `client_frames_roundtrip_and_daemon_frames_roundtrip`).
+#[test]
+fn an_engine_command_encodes_as_the_daemon_expects() {
+    let cmd = SessionCommand::EngineCommand { id: 9, name: "context".into(), arg: "auto".into() };
+    assert_eq!(
+        encode_frame(&ClientFrame::Cmd { session_id: "s".into(), cmd: cmd.clone() }).unwrap(),
+        "{\"type\":\"cmd\",\"session_id\":\"s\",\"cmd\":{\"cmd\":\"engine_command\",\"id\":9,\"name\":\"context\",\"arg\":\"auto\"}}\n"
+    );
+    assert_eq!(format!("{cmd:?}"), "EngineCommand { id: 9, name: \"context\", arg: \"auto\" }");
+    let c = synaps_client::Command::EngineCommand { id: 9, name: "context".into(), arg: "auto".into() };
+    assert_eq!(c.name(), "engine_command", "the daemon's `command_name`, as its `Refused` says it");
+}
+
 /// M9: `Debug` never prints user text or a secret answer.
 #[test]
 fn debug_redacts_text_and_answers() {
