@@ -536,6 +536,22 @@ vulkan_check() {
     warn "no Vulkan driver found. She renders through Vulkan: install your GPU's driver (${!v:-mesa-vulkan-drivers}). --check works without one."
 }
 
+# --voice's microphone and speakers: PipeWire's pw-record and pw-play. Checked before anything is
+# installed, never installed here (the audio stack is his); a dry run says it and goes on.
+voice_check() {
+    local c miss='' v=M_pipewire_${PM:-none} fix
+    for c in pw-record pw-play; do have "$c" || miss+=" $c"; done
+    [ -n "$miss" ] || return 0
+    fix=${!v:-}
+    if [ -n "$fix" ]; then
+        fix="install $fix"
+    else
+        fix="install PipeWire's tools (Debian, Ubuntu: pipewire-bin; Fedora: pipewire-utils; Arch: pipewire-audio; openSUSE: pipewire-tools)"
+    fi
+    fix="--voice needs PipeWire's pw-record and pw-play (missing:$miss): $fix, then run this again"
+    if [ "$DRY" = 1 ]; then warn "$fix (a real run stops here)"; else die "$fix"; fi
+}
+
 # ---- 1. synaps --------------------------------------------------------------------------------
 
 synaps_version() { "$1" --version 2>/dev/null | awk '{print $2; exit}'; }
@@ -1540,6 +1556,22 @@ user_unit() { # SRC NAME: a tools/systemd unit with her folders, marked as ours
     if [ "$SYSTEMD" = 1 ]; then run systemctl --user daemon-reload; fi
 }
 
+# The Python her voice's venv gets, as tools/capri-voice-setup picks it: kokoro-onnx wants 3.10 to 3.13
+# (a rolling distro's python3 is 3.14). That one when there is one (the venv of an earlier run, then a
+# python3.13 to python3.10 on PATH, then python3); else uv fetches 3.13 into the voice's own folder.
+voice_python() {
+    local n p v have=''
+    for n in "$DATA/capri-voice/venv/bin/python" python3.13 python3.12 python3.11 python3.10 python3; do
+        p=$(command -v "$n" 2>/dev/null) || continue
+        v=$("$p" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || true)
+        case $v in
+            3.10 | 3.11 | 3.12 | 3.13) good "her voice's Python: $v ($(tilde "$p"))"; return 0 ;;
+        esac
+        [ -z "$v" ] || have=$v
+    done
+    info "no Python 3.10–3.13 here (you have ${have:-no python3}): uv fetches 3.13 for her voice, into $(tilde "$DATA/capri-voice/python")"
+}
+
 step_extras() {
     step "Voice and watch"
     if [ "$VOICE" = 0 ] && [ "$WATCH" = 0 ]; then
@@ -1548,10 +1580,12 @@ step_extras() {
     fi
     if [ "$VOICE" = 1 ]; then
         local path=$PATH
+        voice_python
         if ! have uv; then
             read -r -a uvp <<<"${M_pip_uv:-uv}"
             run "$VENV/bin/python" -m pip install -q --disable-pip-version-check --no-cache-dir "${uvp[@]}"
-            path=$VENV/bin:$PATH
+            # After his own PATH: the venv's python3.N links must never come before his (the setup picks by name).
+            path=$PATH:$VENV/bin
         fi
         [ -d "$DATA/capri-voice" ] || rec dir "$DATA/capri-voice"
         # onnxruntime's telemetry id, written by the setup's import check (outermost recorded first).
@@ -2310,6 +2344,7 @@ main() {
     manifest
     banner
     preflight
+    [ "$VOICE" = 0 ] || voice_check
     receipt_init
     rec prefix "$PREFIX"
     step_synaps

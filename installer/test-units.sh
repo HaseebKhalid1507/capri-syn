@@ -2,7 +2,8 @@
 # install.sh's start of her, on its own (CI's installer job): which running instances it quits,
 # where it won't start her, her log kept once, her working folder; the Synaps it installs (the
 # manifest's pin) and the daemon's protocol; her app-menu entry, her summon key on GNOME and
-# Hyprland, and --uninstall taking them away; on stand-ins. install.sh's functions are
+# Hyprland, and --uninstall taking them away; --voice's PipeWire tools and the Python her voice gets
+# (tools/capri-voice-setup too, with a python3 that says 3.14); on stand-ins. install.sh's functions are
 # loaded without running it; pgrep only ever sees this test's own stand-ins (never a real Capri),
 # and `avatarctl`, kill and pkill are never reached.
 #
@@ -560,6 +561,121 @@ check "$(grep -qx '   left in ~/.local/share/synaps-avatar, not hers: packs ' "$
     "--purge: her receipt, kept, isn't called not hers"
 uninstall >"$tmp/out" 2>&1
 check "$([ ! -e "$RECEIPT" ] && grep -qx 'Name=His own' "$app" && echo 0)" "--uninstall again, gsettings there: done, his entry and its folder kept"
+
+# --voice: PipeWire's pw-record and pw-play (voice_check), and the Python her voice gets (voice_python,
+# and tools/capri-voice-setup's own pick). kokoro-onnx wants Python 3.10 to 3.13 and a rolling distro's
+# python3 is 3.14: a stand-in python3 that says 3.14 must end in uv fetching 3.13, or in one line that
+# says what to install. Only stand-ins run: PATH is a folder of them (and mkdir, rm); the real uv never.
+# shellcheck disable=SC2030,SC2031 # this group's own count of failures, added to the outer one
+(
+    fails=0
+    v=$tmp/voice
+    mkdir -p "$v/tools" "$v/nopw"
+    for t in mkdir rm; do ln -s "$(command -v "$t")" "$v/tools/$t"; done
+    # standin DIR NAME OUTPUT: an executable NAME in DIR that prints OUTPUT, whatever it is asked.
+    standin() { mkdir -p "$1"; printf '#!/bin/sh\necho %s\n' "$3" >"$1/$2"; chmod +x "$1/$2"; }
+    standin "$v/pw" pw-record x
+    standin "$v/pw" pw-play x
+    standin "$v/halfpw" pw-record x
+
+    r=$(PATH=$v/pw PM=apt DRY=0 voice_check 2>&1)
+    rc=$?
+    check "$([ "$rc" = 0 ] && [ -z "$r" ] && echo 0)" "--voice with pw-record and pw-play there: nothing said, nothing stops"
+    # The package of each family (Arch's `pipewire` has neither tool: `pipewire-audio` does).
+    for pm in apt:pipewire-bin pacman:pipewire-audio dnf:pipewire-utils zypper:pipewire-tools; do
+        r=$(PATH=$v/halfpw PM=${pm%%:*} DRY=0 voice_check 2>&1)
+        rc=$?
+        case $r in *"needs PipeWire's pw-record and pw-play (missing: pw-play): install ${pm#*:}, then run this again"*) w=0 ;; *) w=1 ;; esac
+        check "$([ "$rc" = 1 ] && [ $w = 0 ] && echo 0)" "--voice without pw-play on ${pm%%:*}: stops, naming ${pm#*:}"
+    done
+    r=$(PATH=$v/nopw PM='' DRY=0 voice_check 2>&1)
+    rc=$?
+    case $r in *"(missing: pw-record pw-play)"*"pipewire-bin"*"pipewire-utils"*"pipewire-audio"*"pipewire-tools"*) w=0 ;; *) w=1 ;; esac
+    check "$([ "$rc" = 1 ] && [ $w = 0 ] && echo 0)" "no package manager known: every family's package named"
+    r=$(PATH=$v/nopw PM=pacman DRY=1 voice_check 2>&1)
+    rc=$?
+    case $r in *"pipewire-audio"*"a real run stops here"*) w=0 ;; *) w=1 ;; esac
+    check "$([ "$rc" = 0 ] && [ $w = 0 ] && echo 0)" "a dry run says it and goes on"
+    check "$(grep -A1 '^    preflight$' "$here/install.sh" | grep -q '^    \[ "\$VOICE" = 0 \] || voice_check$' && echo 0)" "the check comes right after preflight: before anything is installed"
+
+    # voice_python: the venv of an earlier run, then python3.13 .. python3.10, then python3; else uv's fetch.
+    DATA=$v/data
+    standin "$v/py314" python3 3.14
+    r=$(PATH=$v/py314 voice_python 2>&1)
+    case $r in *"no Python 3.10–3.13 here (you have 3.14)"*"uv fetches 3.13"*"$v/data/capri-voice/python"*) w=0 ;; *) w=1 ;; esac
+    check $w "python3 3.14 and nothing else: uv fetches 3.13 (said): $r"
+    standin "$v/py312" python3.12 3.12
+    standin "$v/py312" python3 3.14
+    r=$(PATH=$v/py312 voice_python 2>&1)
+    case $r in *"her voice's Python: 3.12 ("*"/python3.12)"*) w=0 ;; *) w=1 ;; esac
+    check $w "python3.12 beside a python3 of 3.14: python3.12 is it: $r"
+    standin "$v/py313" python3.13 3.13
+    r=$(PATH=$v/py313:$v/py312 voice_python 2>&1)
+    case $r in *"her voice's Python: 3.13 ("*) w=0 ;; *) w=1 ;; esac
+    check $w "python3.13 and python3.12: the newer: $r"
+    standin "$v/py3" python3 3.11
+    r=$(PATH=$v/py3 voice_python 2>&1)
+    case $r in *"her voice's Python: 3.11 ("*"/python3)"*) w=0 ;; *) w=1 ;; esac
+    check $w "only a python3 of 3.11: that one: $r"
+    standin "$DATA/capri-voice/venv/bin" python 3.13
+    r=$(PATH=$v/py314 voice_python 2>&1)
+    case $r in *"her voice's Python: 3.13 ("*"/venv/bin/python)"*) w=0 ;; *) w=1 ;; esac
+    check $w "a venv of an earlier run on 3.13 stays: $r"
+    rm -rf "$DATA"
+
+    # tools/capri-voice-setup itself. uv is a stand-in that says what it was asked and stops at `venv`
+    # or `pip` (exit 42; `python install` it lets through), with the folders it was told to use.
+    setup() { env -i PATH="$1" HOME="$tmp/home" "$BASH" "$here/tools/capri-voice-setup" "$2" 2>&1; }
+    uvlog=$v/uv.log
+    mkuv() {
+        mkdir -p "$1"
+        # shellcheck disable=SC2016 # the stand-in's own $@, $1, $2
+        printf '#!/bin/sh\necho "uv $*" >>%s\necho "dirs ${UV_PYTHON_INSTALL_DIR:-} ${UV_PYTHON_INSTALL_BIN:-}" >>%s\ncase $1 in python) [ "$2" = install ] && exit 0 ;; esac\nexit 42\n' "$uvlog" "$uvlog" >"$1/uv"
+        chmod +x "$1/uv"
+    }
+    r=$(setup "$v/py314:$v/tools" "$v/h1")
+    rc=$?
+    check "$([ "$rc" = 1 ] && [ "$r" = "capri-voice-setup: her voice needs Python 3.10–3.13; you have 3.14: install python3.13 (Arch: python313 from the AUR) or uv" ] && [ ! -e "$v/h1" ] && echo 0)" \
+        "setup with a python3 of 3.14 and no uv: one line says what to install, nothing made (exit $rc): $r"
+    mkdir -p "$v/nothing"
+    r=$(setup "$v/nothing" "$v/h1")
+    rc=$?
+    case $r in *"you have no python3: install python3.13"*) w=0 ;; *) w=1 ;; esac
+    check "$([ "$rc" = 1 ] && [ $w = 0 ] && echo 0)" "and with no python at all: the same line: $r"
+
+    mkuv "$v/uv"
+    : >"$uvlog"
+    r=$(setup "$v/py314:$v/uv:$v/tools" "$v/h2")
+    rc=$?
+    check "$([ "$rc" = 42 ] && [ "$(cat "$uvlog")" = "uv python install -q 3.13
+dirs $v/h2/python 0
+uv venv -q --system-site-packages -p 3.13 venv
+dirs $v/h2/python 0" ] && echo 0)" "setup with a python3 of 3.14 and uv: uv fetches 3.13 into its own folder (no link in ~/.local/bin), then the venv is on it (exit $rc): $(tr '\n' ' ' <"$uvlog")"
+    case $r in *"uv fetches 3.13 into $v/h2/python"*) w=0 ;; *) w=1 ;; esac
+    check $w "and says so: $r"
+
+    : >"$uvlog"
+    r=$(setup "$v/py313:$v/py312:$v/py314:$v/uv:$v/tools" "$v/h3")
+    check "$([ "$(head -n1 "$uvlog")" = "uv venv -q --system-site-packages -p $v/py313/python3.13 venv" ] && ! grep -q 'python install' "$uvlog" && echo 0)" \
+        "setup with python3.13 and python3.12 on PATH: the venv is on python3.13, nothing fetched: $(head -n1 "$uvlog")"
+    : >"$uvlog"
+    r=$(setup "$v/py312:$v/uv:$v/tools" "$v/h4")
+    check "$([ "$(head -n1 "$uvlog")" = "uv venv -q --system-site-packages -p $v/py312/python3.12 venv" ] && echo 0)" "only python3.12 (beside a python3 of 3.14): that one"
+
+    # A venv of an earlier run on 3.14 never got kokoro-onnx: made again. One on 3.13 is kept.
+    : >"$uvlog"
+    standin "$v/h5/venv/bin" python 3.14
+    r=$(setup "$v/py312:$v/uv:$v/tools" "$v/h5")
+    case $r in *"the venv isn't on Python 3.10–3.13: made again"*) w=0 ;; *) w=1 ;; esac
+    check "$([ $w = 0 ] && [ ! -e "$v/h5/venv" ] && [ "$(head -n1 "$uvlog")" = "uv venv -q --system-site-packages -p $v/py312/python3.12 venv" ] && echo 0)" "a venv on 3.14 from an earlier run: removed, made again on python3.12"
+    : >"$uvlog"
+    standin "$v/h6/venv/bin" python 3.13
+    r=$(setup "$v/py314:$v/uv:$v/tools" "$v/h6")
+    check "$([ -e "$v/h6/venv/bin/python" ] && [ "$(head -n1 "$uvlog")" = "uv pip install -q kokoro-onnx==0.6.1" ] && ! grep -q 'venv -q\|python install' "$uvlog" && echo 0)" \
+        "a venv on 3.13 from an earlier run: kept, nothing fetched, even with a python3 of 3.14"
+    rm -rf "$v"
+    exit "$fails"
+) || fails=$((fails + $?))
 
 # Her brain (brain): --brain and the picker, on stand-ins. A synaps that signs in as 0.12's does (its
 # stdin must be a pipe: a terminal there would ask to open its app; a browser sign-in fails at once at
