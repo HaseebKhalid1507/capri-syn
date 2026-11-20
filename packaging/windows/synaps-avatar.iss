@@ -358,8 +358,11 @@ end;
   but not nothing: its system menu is live (the icon, Alt+Space, a right click on the title bar), with
   Minimize and Inno's "About Setup...", a modal box that opens from inside that pump. So the timer
   leaves the wizard alone while another window of Setup's is up (that box), else it would enable the
-  wizard under its own modal and About boxes would stack. (Not GetWindow(GW_ENABLEDPOPUP): tried, with
-  no box up it still names a popup the wizard owns, so the wizard was never enabled again.) While the
+  wizard under its own modal and About boxes would stack. Which windows are "another": not the exec's
+  own window disabler (class TWindowDisabler-Window), a visible, enabled window of Setup's that is up
+  for the whole exec, and not the application's (TApplication, hidden away, disabled). Tried, and the
+  wizard was never enabled again: GetWindow(GW_ENABLEDPOPUP) (with no box up it still names a popup the
+  wizard owns), and any visible, enabled window (that is the disabler). While the
   box is up, or a drag is held (the mouse down on the title bar runs Windows' move loop inside that
   pump), the wait doesn't run: the step goes on until its output fills the pipe (about 4 KB, read only
   in that wait) and its next write blocks; it goes on when the box is closed or the mouse is let go.
@@ -369,6 +372,7 @@ function EnableWindow(Wnd: HWND; Enable: Integer): Integer; external 'EnableWind
 function IsWindowVisible(Wnd: HWND): Integer; external 'IsWindowVisible@user32.dll stdcall';
 function IsWindowEnabled(Wnd: HWND): Integer; external 'IsWindowEnabled@user32.dll stdcall';
 function EnumThreadWindows(Thread, Proc, Param: LongWord): Integer; external 'EnumThreadWindows@user32.dll stdcall';
+function GetClassNameW(Wnd: HWND; Buf: String; Max: Integer): Integer; external 'GetClassNameW@user32.dll stdcall';
 function GetCurrentThreadId: LongWord; external 'GetCurrentThreadId@kernel32.dll stdcall';
 function SetTimer(Wnd: HWND; Id, Elapse, Proc: LongWord): LongWord; external 'SetTimer@user32.dll stdcall';
 function KillTimer(Wnd: HWND; Id: LongWord): Integer; external 'KillTimer@user32.dll stdcall';
@@ -377,15 +381,31 @@ var
   LiveProc, SeeProc: LongWord;
   OtherUp: Boolean;
 
+{ A window's class name ('' when it can't be read). }
+function WindowClass(Wnd: HWND): String;
+var
+  S: String;
+  N: Integer;
+begin
+  SetLength(S, 128);
+  N := GetClassNameW(Wnd, S, 128);
+  if N < 0 then N := 0;
+  SetLength(S, N);
+  Result := S;
+end;
+
 { EnumThreadWindows' callback (0 stops it): a window of Setup's, other than the wizard, that shows and
-  takes input: not one the exec's window disabler holds, a box opened since. }
+  takes input and is a box opened since, not the exec's window disabler or the application's window. }
 function SeeOther(Wnd: HWND; Param: LongWord): LongWord;
+var
+  Cls: String;
 begin
   Result := 1;
-  if (Wnd <> WizardForm.Handle) and (IsWindowVisible(Wnd) <> 0) and (IsWindowEnabled(Wnd) <> 0) then begin
-    OtherUp := True;
-    Result := 0;
-  end;
+  if (Wnd = WizardForm.Handle) or (IsWindowVisible(Wnd) = 0) or (IsWindowEnabled(Wnd) = 0) then exit;
+  Cls := WindowClass(Wnd);
+  if (Cls = 'TWindowDisabler-Window') or (Cls = 'TApplication') then exit;
+  OtherUp := True;
+  Result := 0;
 end;
 
 procedure KeepWizardLive(Wnd, Msg, Id, Tick: LongWord);
