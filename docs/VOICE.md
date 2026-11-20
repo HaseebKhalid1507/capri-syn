@@ -5,7 +5,9 @@ Push-to-talk, hands-free and "Hey Capri" in, spoken replies out. The avatar hold
 avatar over a unix socket (Windows: loopback TCP with a token handshake). The protocol is at the top of
 that file. Everything runs on the CPU: whisper.cpp for speech-to-text, Kokoro (int8, onnxruntime) for
 speech. Setup on Linux: `install.sh --voice` (it runs `tools/capri-voice-setup`, then installs
-`tools/systemd/capri-voice.service`). On Windows: the "Her voice" page of her installer, or
+`tools/systemd/capri-voice.service`). It needs PipeWire's `pw-record` and `pw-play`, and a Python
+3.10 to 3.13 for the venv (kokoro-onnx doesn't take 3.14; the setup fetches 3.13 with uv when there is
+none: [INSTALL.md](INSTALL.md#linux)). Started by hand, `capri-voice` runs on that venv. On Windows: the "Her voice" page of her installer, or
 `install.ps1 --voice`; she starts the sidecar herself ([WINDOWS.md](WINDOWS.md#her-voice-a-second-installer)).
 
 What follows is the Linux sidecar unless it says Windows. On Windows its audio layer is WASAPI

@@ -27,7 +27,8 @@ usage: install.sh [--yes] [--dry-run] [--uninstall [--purge]] [--voice] [--watch
   --dry-run         print every action, touch nothing
   --uninstall       remove what this script installed; your settings and her state stay
   --purge           with --uninstall: remove those too (only her own files in those folders)
-  --voice           also her voice: capri-voice (a user venv, ~320 MB of models, its user unit)
+  --voice           also her voice: capri-voice (a user venv, ~375 MB of models, its user unit;
+                    and ~105 MB for Python 3.13 if you have none of 3.10 to 3.13)
   --watch           also capri-watch (its user unit; enabled only with --yes)
   --no-autostart    don't start her at login (she still starts now, at the end)
   --from-source     build her from source even when a release has a binary
@@ -534,6 +535,22 @@ vulkan_check() {
     done
     local v=M_vulkan_${PM:-apt}
     warn "no Vulkan driver found. She renders through Vulkan: install your GPU's driver (${!v:-mesa-vulkan-drivers}). --check works without one."
+}
+
+# --voice's microphone and speakers: PipeWire's pw-record and pw-play. Checked before anything is
+# installed, never installed here (the audio stack is his); a dry run says it and goes on.
+voice_check() {
+    local c miss='' v=M_pipewire_${PM:-none} fix
+    for c in pw-record pw-play; do have "$c" || miss+=" $c"; done
+    [ -n "$miss" ] || return 0
+    fix=${!v:-}
+    if [ -n "$fix" ]; then
+        fix="install $fix"
+    else
+        fix="install PipeWire's tools (Debian, Ubuntu: pipewire-bin; Fedora: pipewire-utils; Arch: pipewire-audio; openSUSE: pipewire-tools)"
+    fi
+    fix="--voice needs PipeWire's pw-record and pw-play (missing:$miss): $fix, then run this again"
+    if [ "$DRY" = 1 ]; then warn "$fix (a real run stops here)"; else die "$fix"; fi
 }
 
 # ---- 1. synaps --------------------------------------------------------------------------------
@@ -1540,6 +1557,35 @@ user_unit() { # SRC NAME: a tools/systemd unit with her folders, marked as ours
     if [ "$SYSTEMD" = 1 ]; then run systemctl --user daemon-reload; fi
 }
 
+# The Python her voice's venv gets, as tools/capri-voice-setup picks it: kokoro-onnx wants CPython 3.10 to
+# 3.13 (a rolling distro's python3 is 3.14). That one when there is one (the venv of an earlier run, then
+# python3, then a python3.13 to python3.10 on PATH: the distro's own python3 keeps its pywhispercpp);
+# else uv fetches 3.13 into the voice's own folder.
+voice_python() {
+    local n p v have=''
+    for n in "$DATA/capri-voice/venv/bin/python" python3 python3.13 python3.12 python3.11 python3.10; do
+        p=$(command -v "$n" 2>/dev/null) || continue
+        v=$("$p" -I -S -c 'import sys; v = "%d.%d" % sys.version_info[:2]; print(v if sys.implementation.name == "cpython" else sys.implementation.name + " " + v)' 2>/dev/null || true)
+        case $v in
+            3.10 | 3.11 | 3.12 | 3.13) good "her voice's Python: $v ($(tilde "$p"))"; return 0 ;;
+        esac
+        [ -z "$v" ] || have=$v
+    done
+    info "no Python 3.10–3.13 here (you have ${have:-no python3}): uv fetches 3.13 for her voice, into $(tilde "$DATA/capri-voice/python")"
+}
+
+# $BIN/capri-voice is a script with the shebang `env python3`: the system's, where kokoro-onnx isn't. Run
+# by hand (no systemd), it must run on the voice's venv: its first line is that python, when a shebang can
+# hold it (no space in the path: the kernel splits there; and a short line, 127 bytes on older kernels).
+voice_shebang_ok() { [ "${#1}" -le 120 ] && [[ $1 != *[[:space:]]* ]]; }
+voice_shebang() { # FILE PYTHON: FILE (an executable, 755), its first line `#!PYTHON`
+    local t
+    t=$(mktemp "$1.XXXXXX") || return 1
+    { printf '#!%s\n' "$2"; tail -n +2 "$1"; } >"$t"
+    chmod 755 "$t"
+    mv "$t" "$1"
+}
+
 step_extras() {
     step "Voice and watch"
     if [ "$VOICE" = 0 ] && [ "$WATCH" = 0 ]; then
@@ -1548,10 +1594,12 @@ step_extras() {
     fi
     if [ "$VOICE" = 1 ]; then
         local path=$PATH
+        voice_python
         if ! have uv; then
             read -r -a uvp <<<"${M_pip_uv:-uv}"
             run "$VENV/bin/python" -m pip install -q --disable-pip-version-check --no-cache-dir "${uvp[@]}"
-            path=$VENV/bin:$PATH
+            # After his own PATH: the venv's python3.N links must never come before his (the setup picks by name).
+            path=$PATH:$VENV/bin
         fi
         [ -d "$DATA/capri-voice" ] || rec dir "$DATA/capri-voice"
         # onnxruntime's telemetry id, written by the setup's import check (outermost recorded first).
@@ -1564,6 +1612,13 @@ step_extras() {
         run env PATH="$path" UV_NO_CACHE=1 bash "$LIB/tools/capri-voice-setup" "$DATA/capri-voice"
         run install -m 755 "$LIB/tools/capri-voice" "$BIN/capri-voice"
         rec file "$BIN/capri-voice"
+        local vpy=$DATA/capri-voice/venv/bin/python start=capri-voice
+        if voice_shebang_ok "$vpy"; then
+            info "$(tilde "$BIN/capri-voice") runs on the voice's venv: its first line is #!$vpy"
+            [ "$DRY" = 1 ] || voice_shebang "$BIN/capri-voice" "$vpy"
+        else
+            start="$(tq "$vpy") $(tq "$BIN/capri-voice")"
+        fi
         user_unit "$LIB/tools/systemd/capri-voice.service" capri-voice.service
         if [ "$SYSTEMD" = 1 ]; then run systemctl --user enable --now capri-voice.service; fi
         local s=$CONF/synaps-avatar/settings.toml
@@ -1572,7 +1627,7 @@ step_extras() {
         elif ! grep -Eq '^\s*enabled\s*=\s*true' <(sed -n '/^\[voice\]/,/^\[/p' "$s"); then
             info "turn her voice on in $(tilde "$s"):  [voice] enabled = true"
         fi
-        VOICE_HOW="capri-voice ($([ "$SYSTEMD" = 1 ] && echo "user unit" || echo "start it: capri-voice"))"
+        VOICE_HOW="capri-voice ($([ "$SYSTEMD" = 1 ] && echo "user unit" || echo "start it: $start"))"
     fi
     if [ "$WATCH" = 1 ]; then
         run install -m 755 "$LIB/tools/capri-watch/capri-watch" "$BIN/capri-watch"
@@ -2310,6 +2365,7 @@ main() {
     manifest
     banner
     preflight
+    [ "$VOICE" = 0 ] || voice_check
     receipt_init
     rec prefix "$PREFIX"
     step_synaps

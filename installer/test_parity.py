@@ -75,7 +75,7 @@ class Parity(unittest.TestCase):
         for k in sorted(used_sh | used_ps):
             self.assertIn(k, keys, f"installer/manifest has no {k}")
         # The per-package-manager lists install.sh builds names for.
-        for kind in ("base", "build", "run", "vulkan"):
+        for kind in ("base", "build", "run", "vulkan", "pipewire"):
             for pm in ("apt", "pacman", "dnf", "zypper"):
                 self.assertIn(f"{kind}_{pm}", keys)
 
@@ -107,6 +107,20 @@ class Parity(unittest.TestCase):
         extras = code(block(PS, "function Install-Extras", "\n}\n"))
         self.assertIn("@('-Release', \"v$ver\")", extras)
         self.assertEqual(extras.count("$herRelease"), 3)
+
+    def test_her_voice_asks_for_one_python_range(self):
+        # kokoro-onnx 0.6.1 wants Python >=3.10,<3.14: install.sh's voice_python and the setup it runs
+        # (tools/capri-voice-setup) look for the same interpreters (python3 first), accept the same versions (CPython only) and say the
+        # same range; the Windows bundle's CPython is inside it.
+        setup = (ROOT / "tools/capri-voice-setup").read_text(encoding="utf-8")
+        for what, text in (("install.sh", SH), ("tools/capri-voice-setup", setup)):
+            self.assertIn("python3 python3.13 python3.12 python3.11 python3.10", text, what)
+            self.assertIn("-I -S -c", text, what)
+            self.assertIn('sys.implementation.name == "cpython"', text, what)
+            self.assertIn("3.10 | 3.11 | 3.12 | 3.13", text, what)
+            self.assertIn("Python 3.10–3.13", text, what)
+        embed = int(re.search(r"^python_embed=3\.(\d+)\.", MANIFEST, re.M).group(1))
+        self.assertTrue(10 <= embed <= 13, "the Windows bundle's CPython is outside kokoro-onnx's range")
 
     def test_the_release_builds_the_assets_the_installers_fetch(self):
         # install.sh and install.ps1 fetch releases/latest/download/<asset_*> (installer/manifest); a
