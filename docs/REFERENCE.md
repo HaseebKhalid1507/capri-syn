@@ -17,6 +17,21 @@ Paths here are Linux's: Windows keeps the same files under `%APPDATA%` and `%LOC
   lowercased (`capri`). She attaches to it if it's live. Otherwise she resumes the id she remembered last
   time (`~/.local/state/synaps-avatar/sessions.json`, one entry per daemon), else creates it by name.
   She only rides another session when you pass `--session`.
+- **Her context rolls over** (`[session] rollover`, on by default). An always-on chat would
+  otherwise fill her model's context. At each attach of her own session she turns Synaps' automatic
+  context rollover on for it: `/context auto`, sent as an engine command from the Mirror attach (the
+  input owner's, as her persona's Sets; not if another client owns input). It is that session's
+  alone: Synaps' `context_management.mode` in `~/.synaps-cli/config`, and every other session, stay
+  as they are. It is session-only on Synaps' side, so she sends it again after a re-attach (a
+  daemon reload, a resume). Past its rollover mark (180k tokens of a 200k window, 400k of 1m)
+  Synaps seals the older messages into its archive (`~/.synaps-cli/context-archives`, per folder) and
+  carries on in a fresh window with the recent messages and a note; no summarizing model call, so it
+  works on any brain. The model can look the archived ones up (`memory_search`), and so can any
+  other session in her folder. The Line shows one row where it happened, "older messages archived to
+  make room (context rollover)"; Synaps' rollover notices go to her log. One log line says it's on,
+  or why not. Windows: not yet (Synaps 0.12 keeps its archive on Linux and macOS only), so she
+  doesn't ask; one log line says so. A local model: Synaps counts 200k tokens of context unless its
+  `context_window` says otherwise, so a 16k model's context runs out long before a rollover would come.
 - **Never `subconscious`.** She refuses to attach to the session named `subconscious`, by name or by id.
   The refusal happens at argument parsing, when resolving the session list, and on `Attached`
   (she detaches and exits with status 2).
@@ -299,6 +314,7 @@ common ones with their defaults.
 | `[session] thinking` | daemon default | `"low"`, `"medium"`, `"high"` or `"xhigh"` |
 | `[session] persona` | `true` | send the pack's `persona.md` as her session's system prompt |
 | `[session] persona_file` | none | a persona file of your own instead |
+| `[session] rollover` | `true` | turn Synaps' automatic context rollover on for her session (`/context auto`, that session only; [above](#the-session-rules)). `false`: Synaps' own `context_management.mode` stands (off unless set); one she turned it on for keeps it until it restarts |
 | `[voice] enabled` | `false` | push-to-talk and spoken replies, through `capri-voice` |
 | `[voice] stt_model` | `"small.en"` | `"tiny.en"`, `"base.en"`, `"small.en"` or `"medium.en"`; setup fetches only `small.en` and `base.en` ([VOICE.md](VOICE.md#settings-voice-in-configsynaps-avatarsettingstoml)) |
 | `[voice] voice` | a stock Kokoro blend | a Kokoro voice or a blend (`"af_bella:0.6,af_nicole:0.4"`); `+glitch` adds the trace |

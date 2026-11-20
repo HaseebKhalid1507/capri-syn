@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Her session
+- **Her context rolls over by itself.** An always-on chat no longer fills her model's context: at each
+  attach of her own session she turns Synaps' automatic context rollover on for it (`/context auto`,
+  that session only; Synaps' config and your other sessions stay as they are). When the context gets
+  long, Synaps archives the older messages and carries on in a fresh window with the recent ones; no
+  summarizing call, so it works on any brain. The Line shows one quiet row where it happened, and
+  Synaps' own notices about it go to her log, with one line saying it's on or why not.
+  `[session] rollover = false` leaves it to Synaps. Not on Windows yet: Synaps 0.12 archives on Linux
+  and macOS only (her log says so).
+
+### For developers
+- The vendored synaps-client sends engine commands (`Client::engine_command`, `Event::EngineReply`,
+  `Error::EngineCommandRefused`), to port back (`crates/synaps-client/VENDORED.md`). The fake daemon
+  answers `context auto` as Synaps 0.12 does.
+
 ## 1.1.0 (2026-11-19)
 
 Her brain is yours to pick: an account you have, an API key or a model on your own PC, from Settings ▸

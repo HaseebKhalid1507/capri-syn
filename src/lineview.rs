@@ -596,6 +596,10 @@ impl Avatar {
             use synaps_client::transcript::ItemKind as K;
             let row = match it.kind {
                 K::Thinking => continue,
+                // A rolled-over context window's head is the model's note, not his words.
+                K::User if crate::session::rollover_head(&it.text) => {
+                    Row { who: Who::Sys, text: crate::session::ROLLED_OVER.into(), detail: String::new(), streaming: false }
+                }
                 K::User => match crate::session::origin(&it.text) {
                     Some((who, kind, text)) => Row { who: Who::Relay(who, kind), text, detail: String::new(), streaming: false },
                     None => match crate::voice::spoken(&it.text) {
@@ -624,6 +628,8 @@ impl Avatar {
                     // One line of the input (LOCKED #11.4), only here, in the thread he opened.
                     Row { who: Who::Tool, text: format!("{name} {mark}"), detail: crate::session::one_line(&t.input, 110), streaming: false }
                 }
+                // Synaps' rollover notices go to her log (the head's row says it here).
+                K::Notice if crate::session::rollover_notice(&it.text) => continue,
                 K::Notice => Row { who: Who::Sys, text: it.text.trim().to_string(), detail: String::new(), streaming: false },
                 K::Error => error_row(&it.text, s.link.model(), s.link.unpicked_error(it.id)),
                 _ => continue,

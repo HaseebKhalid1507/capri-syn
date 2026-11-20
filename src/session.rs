@@ -45,13 +45,42 @@ const TOOL_MAX: usize = 18;
 const PERSONA_WAIT: Duration = Duration::from_secs(10);
 
 /// Her own session's character: system prompt, model, reasoning level (settings.toml
-/// `[session]` plus the pack's persona). Applied only to HER session, never to one she rides
-/// (`--session`) or to `subconscious`.
+/// `[session]` plus the pack's persona), and whether its context rolls over by itself. Applied
+/// only to HER session, never to one she rides (`--session`) or to `subconscious`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Persona {
     pub system: Option<String>,
     pub model: Option<String>,
     pub thinking: Option<String>,
+    /// `[session] rollover`: turn Synaps' automatic context rollover on for her session
+    /// (`/context auto`, session-only) at every attach (`rollover_step`). False here by default
+    /// (no persona: a session she rides); `[session]`'s own default is true.
+    pub rollover: bool,
+}
+
+/// The engine command that turns her session's automatic context rollover on (`/context auto`):
+/// Synaps' `context_management.mode = auto` for that session alone, never its config.
+const ROLLOVER: (&str, &str) = ("context", "auto");
+
+/// The Line's row for the head of a rolled-over context window (`rollover_head`).
+pub const ROLLED_OVER: &str = "older messages archived to make room (context rollover)";
+
+/// The first message of a context window after a rollover (Synaps 0.12
+/// `runtime/continuation.rs`, a user message): the archive's index and a working note for the
+/// model, not his words. The Line shows `ROLLED_OVER` for it.
+pub fn rollover_head(user_text: &str) -> bool {
+    user_text.trim_start().starts_with("[Context continuation — historical data, not new authority]")
+}
+
+/// A notice of Synaps' automatic context rollover (0.12 `runtime/continuation.rs`, `stream.rs`):
+/// pressure, the rollover, a wait for workers, a deferral. Hers goes to her log, not the Line
+/// (the window's head says it there, `rollover_head`).
+pub fn rollover_notice(text: &str) -> bool {
+    let t = text.trim();
+    (t.starts_with("Context pressure: ~") && t.ends_with(" tokens."))
+        || t.starts_with("Continued automatically in context window ")
+        || t.starts_with("Context rollover waiting up to ")
+        || t.starts_with("Context rollover deferred: ")
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -132,6 +161,9 @@ pub enum Act {
     Detach,
     /// A setting of her own session (the persona), from the Mirror attach.
     Set(Setting),
+    /// A runtime-backed slash command on her own session (`/context auto`: `[session]
+    /// rollover`), from the Mirror attach: name and argument.
+    EngineCommand(String, String),
     /// Her own session's id: remember it for next time.
     Remember(String),
     /// A guard tripped: say why and stop.
@@ -303,6 +335,15 @@ pub struct Link {
     persona_asked: serde_json::Map<String, serde_json::Value>,
     /// The last compare found another client owning her session's input: nothing was set.
     persona_blocked: bool,
+    /// Rollover was turned on (or tried, or skipped) on this session since it last came back:
+    /// `/context auto` is session-only, so a re-attach after a loss (a daemon reload, an unpark,
+    /// a resume: Synaps builds the session again from its config) sends it again.
+    rollover_done: Option<String>,
+    /// Its command on its way, since: Mirror stays for the reply (`PERSONA_WAIT` at most).
+    rollover_sent: Option<Instant>,
+    /// Synaps keeps its context archive here (0.12: Unix only). A daemon on this machine is on
+    /// this OS; one through `--socket` may be another's: it is asked, and says.
+    archive_here: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -372,6 +413,9 @@ impl Link {
             persona_asked: serde_json::Map::new(),
             persona_blocked: false,
             persona_sent: now,
+            rollover_done: None,
+            rollover_sent: None,
+            archive_here: cfg!(unix),
         }
     }
 
@@ -452,6 +496,56 @@ impl Link {
         }
         elog!("synaps-avatar: persona: setting {} on her session", diffs.iter().map(Setting::name).collect::<Vec<_>>().join(", "));
         diffs.into_iter().map(Act::Set).collect()
+    }
+
+    /// `[session] rollover`: turn Synaps' automatic context rollover on for her own session
+    /// (`/context auto`), so a companion that never ends doesn't fill her context. Session-only on
+    /// Synaps' side (its config's `context_management.mode`, and every other session, untouched),
+    /// so once per attach that may have a new session under it (`rollover_done`). Needs input, as
+    /// a Set does: from the Mirror attach, never past another client's. One log line for what came
+    /// of it: on, refused and why (`rollover_replied`), or skipped and why.
+    fn rollover_step(&mut self, now: Instant) -> Vec<Act> {
+        let Some(id) = self.follow.clone() else { return Vec::new() };
+        if !self.opts.persona.rollover || self.own.as_deref() != Some(id.as_str()) || self.rollover_done.as_deref() == Some(id.as_str()) || self.switching || !self.live() {
+            return Vec::new();
+        }
+        if matches!(self.opts.target, Target::Session(_)) || guarded(&id) || guarded(&self.opts.name) {
+            self.rollover_done = Some(id);
+            return Vec::new();
+        }
+        // Synaps 0.12 refuses it off Unix ("context archive is currently supported on Unix only"):
+        // not asked for, so no Mirror switch for nothing. A daemon through `--socket` is asked.
+        if !self.archive_here && self.opts.local {
+            elog!("synaps-avatar: rollover: not turned on: Synaps keeps its context archive on Linux and macOS only (not on Windows yet)");
+            self.rollover_done = Some(id);
+            return Vec::new();
+        }
+        let ours = if self.mode == AttachMode::Mirror { self.owner == Some(self.me) } else { self.owner.is_none() };
+        if !ours {
+            elog!("synaps-avatar: rollover: not turned on: another client owns input on her session");
+            self.rollover_done = Some(id);
+            return Vec::new();
+        }
+        if self.mode != AttachMode::Mirror {
+            return self.upgrade();
+        }
+        self.rollover_done = Some(id);
+        self.rollover_sent = Some(now);
+        self.touched = now;
+        vec![Act::EngineCommand(ROLLOVER.0.into(), ROLLOVER.1.into())]
+    }
+
+    /// The reply to `/context auto`: its `QueryResult` value (`{kind, text}`), one log line.
+    fn rollover_replied(&mut self, value: &serde_json::Value) {
+        self.rollover_sent = None;
+        let text = value.get("text").and_then(|t| t.as_str()).unwrap_or("");
+        match value.get("kind").and_then(|k| k.as_str()).unwrap_or("") {
+            // `context management: auto | window 1 | capacity 200000 | pressure 140000 | ...`
+            "output" => elog!("synaps-avatar: rollover: on for her session ({})", one_line(text.lines().next().unwrap_or(""), 160)),
+            "unhandled" => elog!("synaps-avatar: rollover: not turned on: this Synaps has no /context command"),
+            "error" => elog!("synaps-avatar: rollover: not turned on: {}", one_line(text, 200)),
+            other => elog!("synaps-avatar: rollover: not turned on: an answer of kind `{other}`: {}", one_line(text, 160)),
+        }
     }
 
     /// The model she has asked her session for and it hasn't taken yet (her persona's: `--model`
@@ -659,11 +753,14 @@ impl Link {
     }
 
     /// The Settings page's MODEL: compared (and set) even when it is the persona already, as her
-    /// session may have moved off it (his TUI set another).
+    /// session may have moved off it (his TUI set another). A `rollover` turned on since goes out
+    /// too (one already on this session isn't sent again; one turned off stays as it is there).
     pub fn pick_persona(&mut self, p: Persona, now: Instant) -> Vec<Act> {
         self.opts.persona = p;
         self.persona_done = None;
-        self.persona_step(now)
+        let mut acts = self.persona_step(now);
+        acts.extend(self.rollover_step(now));
+        acts
     }
 
     fn current(&self) -> Option<u64> {
@@ -704,6 +801,7 @@ impl Link {
         self.retry_at = None;
         self.persona_wait = 0;
         self.persona_asked.clear();
+        self.rollover_sent = None;
     }
 
     /// The user's text (Enter): it goes out in Mirror, now or once the switch is done.
@@ -920,6 +1018,11 @@ impl Link {
                 // A mode switch on the session we follow: same body, no new bubble.
                 let switch = self.switching && !reconnect && self.follow.as_deref() == Some(attached.meta.id.as_str());
                 let again = reconnect || self.lost;
+                // Back after a loss: the session may be another runtime now (a reload, an unpark),
+                // without the session-only rollover. A mode switch keeps it.
+                if again {
+                    self.rollover_done = None;
+                }
                 self.attach = Attach::Live(attach_seq);
                 self.mode = mode;
                 self.switching = false;
@@ -975,6 +1078,7 @@ impl Link {
                     }
                 }
                 acts.extend(self.persona_step(now));
+                acts.extend(self.rollover_step(now));
             }
             Event::InputOwner { client, owner, .. } => {
                 self.me = client;
@@ -989,6 +1093,12 @@ impl Link {
                 // Logged, never shown: she just keeps the session's own settings.
                 elog!("synaps-avatar: persona: {setting} not set: {reason}");
                 self.persona_replied();
+            }
+            // Her `/context auto`: logged, never shown (nor any text of his given back).
+            Event::EngineReply { name, value, .. } if name == ROLLOVER.0 => self.rollover_replied(&value),
+            Event::Error { error: Error::EngineCommandRefused { name, reason, .. }, .. } if name == ROLLOVER.0 => {
+                self.rollover_sent = None;
+                elog!("synaps-avatar: rollover: not turned on: {}", one_line(&reason, 200));
             }
             Event::Reattaching { attach_seq, reason, .. } => {
                 elog!("synaps-avatar: session connection lost ({reason}); re-attaching");
@@ -1018,6 +1128,7 @@ impl Link {
                 self.mode = AttachMode::Observe;
                 self.persona_wait = 0;
                 self.persona_asked.clear();
+                self.rollover_sent = None;
                 self.restore_queued();
                 self.busy = false;
                 self.compacting = false;
@@ -1115,6 +1226,10 @@ impl Link {
                 // The provider's token count: it answered (Synaps sends one per response, unnamed).
                 // A named one is a subagent's (`subagent/oneshot.rs`): only her own model counts.
                 StreamEvent::Session(SessionStreamEvent::Usage { input_tokens, output_tokens, model }) if (input_tokens > 0 || output_tokens > 0) && self.hers(model.as_deref()) => self.answered(),
+                // Her session's context rolling over: the Line doesn't show these, her log does.
+                StreamEvent::Session(SessionStreamEvent::Notice { text, .. }) if rollover_notice(&text) => {
+                    elog!("synaps-avatar: rollover: {}", one_line(&text, 200));
+                }
                 StreamEvent::Session(SessionStreamEvent::Error { message }) => match Trouble::of(&message, self.model()).map(|t| t.unpicked(self.unpicked())) {
                     Some(t) => {
                         // Its row in the thread (just made from this event) keeps these words.
@@ -1268,6 +1383,10 @@ impl Link {
             self.persona_wait = 0;
             self.persona_asked.clear();
         }
+        if self.rollover_sent.is_some_and(|t| now >= t + PERSONA_WAIT) {
+            elog!("synaps-avatar: rollover: no reply to /context auto in {}s; not known to be on", PERSONA_WAIT.as_secs());
+            self.rollover_sent = None;
+        }
         if self.retry_at.is_some_and(|t| t <= now) && self.attach == Attach::None && self.connected {
             // The answer (`Sessions`) resolves.
             self.retry_at = None;
@@ -1314,7 +1433,12 @@ impl Link {
             && self.prompts.is_empty()
             && self.queued.is_empty()
             && self.pending_input.is_none();
-        idle.then_some(if self.persona_wait > 0 { self.persona_sent + PERSONA_WAIT } else { self.touched + MIRROR_LINGER })
+        // A reply on its way holds it (its attach must stay up for it), PERSONA_WAIT at most.
+        let waits = [(self.persona_wait > 0).then_some(self.persona_sent), self.rollover_sent].into_iter().flatten().max();
+        idle.then_some(match waits {
+            Some(t) => t + PERSONA_WAIT,
+            None => self.touched + MIRROR_LINGER,
+        })
     }
 
     /// The next instant the body or the link changes by itself.
@@ -1334,6 +1458,9 @@ impl Link {
         }
         if self.persona_wait > 0 {
             t.push((self.persona_sent + PERSONA_WAIT).max(now + Duration::from_millis(1)));
+        }
+        if let Some(s) = self.rollover_sent {
+            t.push((s + PERSONA_WAIT).max(now + Duration::from_millis(1)));
         }
         if let Some((_, until)) = self.flash {
             t.push(until);
@@ -1815,8 +1942,9 @@ mod tests {
         l.on_event(ev, t).into_iter().filter(|a| !matches!(a, Act::Remember(_))).collect()
     }
 
+    /// The persona the persona tests set (no rollover: those tests are about the Sets).
     fn persona() -> Persona {
-        Persona { system: Some("You are Capri.".into()), model: Some("anthropic/claude-sonnet-4-6".into()), thinking: Some("medium".into()) }
+        Persona { system: Some("You are Capri.".into()), model: Some("anthropic/claude-sonnet-4-6".into()), thinking: Some("medium".into()), rollover: false }
     }
 
     /// Her session (named `capri`) attached in `mode`; `owner`: who owns input (she is client 1).
@@ -2138,6 +2266,194 @@ mod tests {
         l.attaching(2);
         let acts = on(&mut l, mine(2, AttachMode::Mirror, Some(1), Some("capri"), Some(&persona())), t0);
         assert!(matches!(acts.as_slice(), [Act::Set(s)] if *s == Setting::reasoning_level("high")), "{acts:?}");
+    }
+
+    /// `[session] rollover`'s persona: the Sets' persona, with rollover on.
+    fn rolling() -> Persona {
+        Persona { rollover: true, ..persona() }
+    }
+
+    /// Her `/context auto`'s reply, as the daemon's `QueryResult` value comes.
+    fn engine_reply(seq: u64, value: serde_json::Value) -> Event {
+        Event::EngineReply { attach_seq: seq, session_id: SID.into(), id: 1, name: "context".into(), value }
+    }
+
+    fn rollover_cmd(acts: &[Act]) -> bool {
+        matches!(acts, [Act::EngineCommand(n, a)] if n == "context" && a == "auto")
+    }
+
+    /// Her own session, its settings the persona's already: the one thing sent is `/context
+    /// auto`, from a Mirror attach that stays up for its reply, then Observe again. A mode switch
+    /// doesn't send it again; a re-attach after a loss (a daemon reload: a new runtime, without
+    /// the session-only setting) does.
+    #[test]
+    fn rollover_is_turned_on_for_her_session() {
+        let t0 = Instant::now();
+        let p = rolling();
+        let mut l = Link::new(Options { persona: p.clone(), ..opts() }, t0);
+        l.archive_here = true;
+        l.on_event(connected(), t0);
+        l.on_event(Event::Sessions(vec![meta(SID, Some("capri"))]), t0);
+        l.attaching(1);
+        let acts = on(&mut l, mine(1, AttachMode::Observe, None, Some("capri"), Some(&p)), t0);
+        assert!(matches!(acts.as_slice(), [Act::Attach(id, AttachMode::Mirror)] if id == SID), "{acts:?}");
+        l.attaching(2);
+        let acts = on(&mut l, mine(2, AttachMode::Mirror, Some(1), Some("capri"), Some(&p)), t0);
+        assert!(rollover_cmd(&acts), "{acts:?}");
+        assert!(l.tick(t0 + MIRROR_LINGER).is_empty(), "still waiting for the reply");
+        assert!(l.deadline(t0).is_some_and(|d| d <= t0 + PERSONA_WAIT));
+        let status = "context management: auto | window 1 | capacity 200000 | pressure 140000 | rollover 180000 | archive none\nSession-only setting. Enabling auto authorizes local archival …";
+        assert!(on(&mut l, engine_reply(2, serde_json::json!({"kind": "output", "text": status})), t0).is_empty());
+        assert_eq!(l.take_once(), vec![], "nothing shown");
+        assert!(matches!(l.tick(t0 + MIRROR_LINGER).as_slice(), [Act::Attach(_, AttachMode::Observe)]));
+        l.attaching(3);
+        assert!(on(&mut l, mine(3, AttachMode::Observe, None, Some("capri"), Some(&p)), t0).is_empty(), "a switch: on already");
+        assert!(l.pick_persona(p.clone(), t0).is_empty(), "a pick: on already");
+        // The daemon reloads: the client re-attaches (reconnect), the session is rebuilt.
+        let Event::Attached { attached, mode, .. } = mine(3, AttachMode::Observe, None, Some("capri"), Some(&p)) else { panic!() };
+        let acts = on(&mut l, Event::Attached { attach_seq: 3, attached, mode, reconnect: true }, t0);
+        assert!(matches!(acts.as_slice(), [Act::Attach(_, AttachMode::Mirror)]), "{acts:?}");
+        l.attaching(4);
+        assert!(rollover_cmd(&on(&mut l, mine(4, AttachMode::Mirror, Some(1), Some("capri"), Some(&p)), t0)));
+    }
+
+    /// A session whose persona differs gets its Sets and `/context auto` from the same Mirror
+    /// attach; one created by her gets it too (a create is a new session).
+    #[test]
+    fn rollover_rides_with_the_persona_s_sets() {
+        let t0 = Instant::now();
+        let mut l = Link::new(Options { persona: rolling(), ..opts() }, t0);
+        l.archive_here = true;
+        l.on_event(connected(), t0);
+        let acts = l.on_event(Event::Sessions(vec![]), t0);
+        assert!(matches!(acts.as_slice(), [Act::Create(_)]), "{acts:?}");
+        l.attaching(1);
+        let created = Persona { thinking: Some("low".into()), ..rolling() };
+        let acts = on(&mut l, mine(1, AttachMode::Observe, None, Some("capri"), Some(&created)), t0);
+        assert!(matches!(acts.as_slice(), [Act::Attach(_, AttachMode::Mirror)]), "one switch for both: {acts:?}");
+        l.attaching(2);
+        let acts = on(&mut l, mine(2, AttachMode::Mirror, Some(1), Some("capri"), Some(&created)), t0);
+        assert!(matches!(acts.as_slice(), [Act::Set(s), Act::EngineCommand(n, _)] if *s == Setting::reasoning_level("medium") && n == "context"), "{acts:?}");
+    }
+
+    /// Refused, by the command (Synaps on Windows; no project scope) or by the session (not the
+    /// input owner): one log line, nothing shown, nothing of his given back, and Mirror let go.
+    /// No reply at all: let go after PERSONA_WAIT.
+    #[test]
+    fn a_refused_rollover_is_logged_not_shown() {
+        let t0 = Instant::now();
+        let p = rolling();
+        let start = |t0: Instant| {
+            let mut l = Link::new(Options { persona: p.clone(), ..opts() }, t0);
+            l.archive_here = true;
+            l.on_event(connected(), t0);
+            l.on_event(Event::Sessions(vec![meta(SID, Some("capri"))]), t0);
+            l.attaching(1);
+            on(&mut l, mine(1, AttachMode::Observe, None, Some("capri"), Some(&p)), t0);
+            l.attaching(2);
+            assert!(rollover_cmd(&on(&mut l, mine(2, AttachMode::Mirror, Some(1), Some("capri"), Some(&p)), t0)));
+            l
+        };
+        let refused = || serde_json::json!({"kind": "error", "text": "context archive is currently supported on Unix only; mode unchanged"});
+        let read_only = || Error::EngineCommandRefused { id: 1, name: "context".into(), reason: "this client is read-only (attached with --observe)".into() };
+        // His line on its way isn't given back for her command's refusal (a refused input is).
+        for by_session in [false, true] {
+            let mut l = start(t0);
+            l.submitted("hi".into());
+            let ev = if by_session { Event::Error { attach_seq: Some(2), error: read_only() } } else { engine_reply(2, refused()) };
+            assert!(on(&mut l, ev, t0).is_empty());
+            assert_eq!(l.take_once(), vec![], "by_session={by_session}");
+            let b = l.body(t0);
+            assert_eq!((b.reply.as_str(), b.trouble.is_none(), b.mood), ("", true, Mood::Idle), "{b:?}");
+        }
+        // Answered either way: no reply left to wait for, so Observe after the linger.
+        for by_session in [false, true] {
+            let mut l = start(t0);
+            let ev = if by_session { Event::Error { attach_seq: Some(2), error: read_only() } } else { engine_reply(2, refused()) };
+            on(&mut l, ev, t0);
+            assert!(matches!(l.tick(t0 + MIRROR_LINGER).as_slice(), [Act::Attach(_, AttachMode::Observe)]), "by_session={by_session}");
+        }
+        let mut l = start(t0);
+        assert!(l.tick(t0 + MIRROR_LINGER).is_empty());
+        assert!(matches!(l.tick(t0 + PERSONA_WAIT).as_slice(), [Act::Attach(_, AttachMode::Observe)]));
+        assert!(l.tick(t0 + PERSONA_WAIT * 2).is_empty(), "once");
+    }
+
+    /// Not sent: `rollover = false`; a session she rides; another client owning her session's
+    /// input; Windows with the daemon on this machine (Synaps 0.12 archives on Unix only: skipped
+    /// with a log line, no Mirror switch). A daemon through `--socket` from there is asked.
+    #[test]
+    fn rollover_is_skipped_where_it_can_t_be_asked() {
+        let t0 = Instant::now();
+        let attach = |o: Options, archive_here: bool, owner: Option<u64>| {
+            let p = o.persona.clone();
+            let mut l = Link::new(o, t0);
+            l.archive_here = archive_here;
+            l.on_event(connected(), t0);
+            l.on_event(Event::Sessions(vec![meta(SID, Some("capri"))]), t0);
+            l.attaching(1);
+            on(&mut l, mine(1, AttachMode::Observe, owner, Some("capri"), Some(&p)), t0)
+        };
+        assert!(attach(Options { persona: persona(), ..opts() }, true, None).is_empty(), "rollover = false");
+        assert!(attach(Options { persona: rolling(), ..opts() }, true, Some(7)).is_empty(), "his TUI owns input");
+        assert!(attach(Options { persona: rolling(), ..opts() }, false, None).is_empty(), "Windows, a daemon here");
+        let remote = attach(Options { persona: rolling(), local: false, ..opts() }, false, None);
+        assert!(matches!(remote.as_slice(), [Act::Attach(_, AttachMode::Mirror)]), "Windows, a daemon through --socket: {remote:?}");
+        // His session (`--session`): no persona, so no rollover; never sent even when asked for.
+        let mut l = Link::new(Options { target: Target::Session(SID.into()), persona: rolling(), ..opts() }, t0);
+        l.archive_here = true;
+        l.on_event(connected(), t0);
+        l.on_event(Event::Sessions(vec![meta(SID, Some("his"))]), t0);
+        l.attaching(1);
+        assert!(on(&mut l, mine(1, AttachMode::Observe, None, Some("his"), None), t0).is_empty());
+        l.attaching(2);
+        assert!(on(&mut l, mine(2, AttachMode::Mirror, Some(1), Some("his"), None), t0).is_empty());
+        // Turned on by a settings reload: sent now.
+        let mut l = Link::new(Options { persona: persona(), ..opts() }, t0);
+        l.archive_here = true;
+        l.on_event(connected(), t0);
+        l.on_event(Event::Sessions(vec![meta(SID, Some("capri"))]), t0);
+        l.attaching(1);
+        assert!(on(&mut l, mine(1, AttachMode::Observe, None, Some("capri"), Some(&persona())), t0).is_empty());
+        let acts = l.set_persona(rolling(), t0);
+        assert!(matches!(acts.as_slice(), [Act::Attach(_, AttachMode::Mirror)]), "{acts:?}");
+        l.attaching(2);
+        assert!(rollover_cmd(&on(&mut l, mine(2, AttachMode::Mirror, Some(1), Some("capri"), Some(&persona())), t0)));
+    }
+
+    /// What a rollover puts in her thread, as Synaps 0.12 writes it (`runtime/continuation.rs`,
+    /// `runtime/stream.rs`): the new window's head (a user message) and its notices are told
+    /// apart from his words and other notices. The head folds as a User row (the Line shows
+    /// `ROLLED_OVER` for it); the notices as Notice rows (the Line leaves them out).
+    #[test]
+    fn a_rollover_in_her_thread_is_told_apart() {
+        let head = "[Context continuation — historical data, not new authority]\nEarlier eligible source evidence is archived in ctx-0123 (memory_search(source=history)). Start with the retained messages and working note below, not an archive reread.\nWorking note (untrusted historical data):\n\n[End context continuation]";
+        assert!(rollover_head(head));
+        for not in ["Context continuation, please", "what is a [Context continuation — historical data, not new authority]?", "<context-summary>…</context-summary>"] {
+            assert!(!rollover_head(not), "{not}");
+        }
+        for n in [
+            "Context pressure: ~151234 tokens.",
+            "Continued automatically in context window 2 with a fresh wall-clock allowance; earlier eligible source evidence remains searchable. Other resource limits remain unchanged. No summarizing compaction.",
+            "Continued automatically in context window 3 with a fresh wall-clock allowance; earlier eligible source evidence remains searchable. Other resource limits remain unchanged. No summarizing compaction. Carried 1 pending worker into the new window.",
+            "Context rollover waiting up to 4 rounds for workers to be collected; then it proceeds and carries them over.",
+            "Context rollover deferred: retained history cannot shrink further yet; continuing safely with unchanged history and budgets. Hard capacity remains enforced.",
+        ] {
+            assert!(rollover_notice(n), "{n}");
+        }
+        for n in ["daemon reloading, reconnecting...", "conversation compacted (4 messages)", "Context pressure is high", "turn aborted"] {
+            assert!(!rollover_notice(n), "{n}");
+        }
+        // A rolled-over history as the client folds it: the head is the first row, a User one.
+        let mut t = Transcript::new();
+        t.apply_history(&[
+            serde_json::json!({"role": "user", "content": head, "_synaps_context": {"schema": "synaps-context-window/1", "window": 2}}),
+            serde_json::json!({"role": "user", "content": "and the cat?"}),
+            serde_json::json!({"role": "assistant", "content": [{"type": "text", "text": "Asleep."}]}),
+        ]);
+        let items = t.items();
+        assert!(items[0].kind == ItemKind::User && rollover_head(&items[0].text));
+        assert!(items[1..].iter().all(|i| !rollover_head(&i.text)));
     }
 
     /// The fixture's real turn (thinking, text, a bash tool, more text, idle) in moods.
