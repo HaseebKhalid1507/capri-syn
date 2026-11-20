@@ -75,17 +75,23 @@
 ### Linux voice: Python 3.14, and PipeWire's tools
 - **`install.sh --voice` works where `python3` is 3.14 (Arch now).** kokoro-onnx 0.6.1 takes Python
   3.10 to 3.13, and `tools/capri-voice-setup` built its venv on `/usr/bin/python3`, so it failed there.
-  It now uses a `python3.13` to `python3.10` on your PATH (your `python3` when it is one of them);
-  with none, uv fetches Python 3.13 (a 34 MB download, 105 MB on disk) into
-  `~/.local/share/capri-voice/python` and nowhere else; with no uv it stops with one line:
-  `her voice needs Python 3.10–3.13; you have 3.14: install python3.13 (Arch: python313 from the AUR)
-  or uv`. A venv an earlier failed run left on 3.14 is made again. install.sh says which Python she
+  It now uses your `python3` when it is a CPython 3.10 to 3.13 (the distro's own keeps its
+  `pywhispercpp`), else a `python3.13` to `python3.10` on your PATH; with none, uv fetches Python 3.13
+  (a 34 MB download, 105 MB on disk) into `~/.local/share/capri-voice/python` and nowhere else (a
+  `python-preference = "only-system"` of yours doesn't matter); with no uv it stops with one line:
+  `her voice needs Python 3.10–3.13; you have 3.14: install uv (Arch: pacman -S uv) or python3.13 (Arch:
+  python313 from the AUR)`. A venv an earlier failed run left on 3.14, or whose Python is gone, is made
+  again. install.sh says which Python she
   gets, in its voice step. The installer unit tests run the setup on a stand-in `python3` that says
   3.14, both ways.
 - **`install.sh --voice` checks for `pw-record` and `pw-play` first,** before anything is installed
   (a dry run says it and goes on). Missing, it names the package: `pipewire-bin` (Debian, Ubuntu),
   `pipewire-utils` (Fedora), `pipewire-audio` (Arch: its `pipewire` has neither tool) or
   `pipewire-tools` (openSUSE). It installs nothing itself.
+- **`capri-voice` started by hand (no systemd) runs on the voice's venv.** Its first line was
+  `#!/usr/bin/env python3`: the system's Python, with no kokoro-onnx, so the summary's "start it:
+  capri-voice" failed. install.sh now writes the venv's `python` there (a data folder with a space can't
+  be in a shebang: the summary then names the whole command).
 - **docs:** REFERENCE.md's trouble table has her reply for no model picked (`SET ME UP ▸`); INSTALL.md
   and VOICE.md say what the Linux voice needs.
 

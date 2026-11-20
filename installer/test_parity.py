@@ -110,11 +110,13 @@ class Parity(unittest.TestCase):
 
     def test_her_voice_asks_for_one_python_range(self):
         # kokoro-onnx 0.6.1 wants Python >=3.10,<3.14: install.sh's voice_python and the setup it runs
-        # (tools/capri-voice-setup) look for the same interpreters, accept the same versions and say the
+        # (tools/capri-voice-setup) look for the same interpreters (python3 first), accept the same versions (CPython only) and say the
         # same range; the Windows bundle's CPython is inside it.
         setup = (ROOT / "tools/capri-voice-setup").read_text(encoding="utf-8")
         for what, text in (("install.sh", SH), ("tools/capri-voice-setup", setup)):
-            self.assertIn("python3.13 python3.12 python3.11 python3.10 python3", text, what)
+            self.assertIn("python3 python3.13 python3.12 python3.11 python3.10", text, what)
+            self.assertIn("-I -S -c", text, what)
+            self.assertIn('sys.implementation.name == "cpython"', text, what)
             self.assertIn("3.10 | 3.11 | 3.12 | 3.13", text, what)
             self.assertIn("Python 3.10–3.13", text, what)
         embed = int(re.search(r"^python_embed=3\.(\d+)\.", MANIFEST, re.M).group(1))

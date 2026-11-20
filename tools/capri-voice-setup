@@ -10,9 +10,10 @@
 # the shift is done inside the model.
 # pywhispercpp comes from the distro when it has one (python-pywhispercpp-cpu on Arch, for its own python3),
 # else PyPI's wheel.
-# The venv's Python is 3.10 to 3.13 (kokoro-onnx 0.6.1: requires-python >=3.10,<3.14; a rolling distro's
-# python3 is 3.14): a python3.13 to python3.10 on PATH, or python3 when it is one of them; with none, uv
-# fetches 3.13 into DIR/python (only there: it goes with DIR); with no uv, it says what to install.
+# The venv's Python is CPython 3.10 to 3.13 (kokoro-onnx 0.6.1: requires-python >=3.10,<3.14; a rolling
+# distro's python3 is 3.14): python3 when it is one of them (the distro's own: its pywhispercpp is for it),
+# else a python3.13 to python3.10 on PATH; with none, uv fetches 3.13 into DIR/python (only there: it goes
+# with DIR); with no uv, it says what to install.
 # install.sh's voice_python names the same range (installer/test_parity.py keeps the two in step).
 # Every model is pinned by sha256 (packaging/windows/voice-models.ps1 pins the same files); one already
 # there with another hash is fetched again.
@@ -20,15 +21,16 @@ set -eu
 V=${1:-${CAPRI_VOICE_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/capri-voice}}
 case $V in /*) ;; *) echo "capri-voice-setup: $V isn't an absolute path" >&2; exit 2 ;; esac
 die() { echo "capri-voice-setup: $*" >&2; exit 1; }
-# pyver INTERPRETER: its "3.13" (nothing when it won't run).
-pyver() { "$1" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || true; }
+# pyver INTERPRETER: its "3.13" ("pypy 3.10" for another implementation; nothing when it won't run). -I -S:
+# nothing of his PYTHON* variables or site-packages is read.
+pyver() { "$1" -I -S -c 'import sys; v = "%d.%d" % sys.version_info[:2]; print(v if sys.implementation.name == "cpython" else sys.implementation.name + " " + v)' 2>/dev/null || true; }
 supported() { case $1 in 3.10 | 3.11 | 3.12 | 3.13) return 0 ;; esac; return 1; }
 
 # Which Python, decided before anything is made. A venv from an earlier run stays when it is on a
 # supported one; one on 3.14 never got kokoro-onnx, so it is made again.
 PY='' FETCH=0 have=''
 if ! supported "$(pyver "$V/venv/bin/python")"; then
-    for n in python3.13 python3.12 python3.11 python3.10 python3; do
+    for n in python3 python3.13 python3.12 python3.11 python3.10; do
         p=$(command -v "$n" 2>/dev/null) || continue
         v=$(pyver "$p")
         if supported "$v"; then PY=$p; break; fi
@@ -36,11 +38,12 @@ if ! supported "$(pyver "$V/venv/bin/python")"; then
     done
     if [ -z "$PY" ]; then
         command -v uv >/dev/null 2>&1 ||
-            die "her voice needs Python 3.10–3.13; you have ${have:-no python3}: install python3.13 (Arch: python313 from the AUR) or uv"
+            die "her voice needs Python 3.10–3.13; you have ${have:-no python3}: install uv (Arch: pacman -S uv) or python3.13 (Arch: python313 from the AUR)"
         echo "capri-voice-setup: no Python 3.10–3.13 here (you have ${have:-no python3}): uv fetches 3.13 into $V/python"
         PY=3.13 FETCH=1
-        # Only into DIR/python (it goes with DIR), and no python3.13 link in ~/.local/bin.
-        export UV_PYTHON_INSTALL_DIR=$V/python UV_PYTHON_INSTALL_BIN=0
+        # Only into DIR/python (it goes with DIR), no python3.13 link in ~/.local/bin, and the venv on
+        # that one (a UV_PYTHON_PREFERENCE or python-preference of his, only-system, would not find it).
+        export UV_PYTHON_INSTALL_DIR=$V/python UV_PYTHON_INSTALL_BIN=0 UV_PYTHON_PREFERENCE=only-managed
     fi
 fi
 
@@ -49,7 +52,7 @@ cd "$V"
 # The versions CI and the Windows bundle run (kokoro-onnx 0.6.1, pywhispercpp 1.5.1's wheel).
 if [ -n "$PY" ]; then
     if [ -e venv ]; then echo "capri-voice-setup: the venv isn't on Python 3.10–3.13: made again"; rm -rf venv; fi
-    [ "$FETCH" = 0 ] || uv python install -q "$PY" || die "uv couldn't fetch Python $PY: install python3.13 (Arch: python313 from the AUR) and run this again"
+    [ "$FETCH" = 0 ] || uv python install -q "$PY" || die "uv couldn't fetch Python $PY: install python3.13 (Arch: python313 from the AUR), or fix uv, and run this again"
     uv venv -q --system-site-packages -p "$PY" venv
 fi
 VIRTUAL_ENV=$V/venv uv pip install -q kokoro-onnx==0.6.1

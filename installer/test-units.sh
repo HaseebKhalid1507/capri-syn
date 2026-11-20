@@ -565,7 +565,9 @@ check "$([ ! -e "$RECEIPT" ] && grep -qx 'Name=His own' "$app" && echo 0)" "--un
 # --voice: PipeWire's pw-record and pw-play (voice_check), and the Python her voice gets (voice_python,
 # and tools/capri-voice-setup's own pick). kokoro-onnx wants Python 3.10 to 3.13 and a rolling distro's
 # python3 is 3.14: a stand-in python3 that says 3.14 must end in uv fetching 3.13, or in one line that
-# says what to install. Only stand-ins run: PATH is a folder of them (and mkdir, rm); the real uv never.
+# says what to install; python3 first when it is one (the distro's own keeps its pywhispercpp). A
+# python that isn't CPython isn't one. Only stand-ins run: PATH is a folder of them (and mkdir, rm); the
+# real uv never.
 # shellcheck disable=SC2030,SC2031 # this group's own count of failures, added to the outer one
 (
     fails=0
@@ -598,7 +600,7 @@ check "$([ ! -e "$RECEIPT" ] && grep -qx 'Name=His own' "$app" && echo 0)" "--un
     check "$([ "$rc" = 0 ] && [ $w = 0 ] && echo 0)" "a dry run says it and goes on"
     check "$(grep -A1 '^    preflight$' "$here/install.sh" | grep -q '^    \[ "\$VOICE" = 0 \] || voice_check$' && echo 0)" "the check comes right after preflight: before anything is installed"
 
-    # voice_python: the venv of an earlier run, then python3.13 .. python3.10, then python3; else uv's fetch.
+    # voice_python: the venv of an earlier run, then python3, then python3.13 .. python3.10; else uv's fetch.
     DATA=$v/data
     standin "$v/py314" python3 3.14
     r=$(PATH=$v/py314 voice_python 2>&1)
@@ -617,6 +619,24 @@ check "$([ ! -e "$RECEIPT" ] && grep -qx 'Name=His own' "$app" && echo 0)" "--un
     r=$(PATH=$v/py3 voice_python 2>&1)
     case $r in *"her voice's Python: 3.11 ("*"/python3)"*) w=0 ;; *) w=1 ;; esac
     check $w "only a python3 of 3.11: that one: $r"
+    # Ubuntu 24.04 with deadsnakes: the distro's python3 (3.12, with its pywhispercpp) over a python3.13.
+    standin "$v/py3" python3 3.12
+    r=$(PATH=$v/py3:$v/py313 voice_python 2>&1)
+    case $r in *"her voice's Python: 3.12 ("*"/py3/python3)"*) w=0 ;; *) w=1 ;; esac
+    check $w "a python3 of 3.12 and a python3.13: the python3, not the newer: $r"
+    # Not CPython (PyPy 3.10 passes a version check, and onnxruntime has no wheel for it).
+    standin "$v/pypy" python3 "pypy 3.10"
+    r=$(PATH=$v/pypy voice_python 2>&1)
+    case $r in *"no Python 3.10–3.13 here (you have pypy 3.10)"*"uv fetches 3.13"*) w=0 ;; *) w=1 ;; esac
+    check $w "a python3 that is PyPy 3.10: not one, said as it is: $r"
+    # The version check ignores his PYTHON* and site-packages (-I -S), whatever python3 it asks: a stand-in
+    # that answers only when it is asked that way.
+    mkdir -p "$v/strict"
+    printf '#!/bin/sh\ncase "$1 $2 $3" in "-I -S -c") echo 3.11 ;; esac\n' >"$v/strict/python3"
+    chmod +x "$v/strict/python3"
+    r=$(PATH=$v/strict voice_python 2>&1)
+    case $r in *"her voice's Python: 3.11 ("*) w=0 ;; *) w=1 ;; esac
+    check $w "it asks python3 with -I -S: $r"
     standin "$DATA/capri-voice/venv/bin" python 3.13
     r=$(PATH=$v/py314 voice_python 2>&1)
     case $r in *"her voice's Python: 3.13 ("*"/venv/bin/python)"*) w=0 ;; *) w=1 ;; esac
@@ -625,22 +645,23 @@ check "$([ ! -e "$RECEIPT" ] && grep -qx 'Name=His own' "$app" && echo 0)" "--un
 
     # tools/capri-voice-setup itself. uv is a stand-in that says what it was asked and stops at `venv`
     # or `pip` (exit 42; `python install` it lets through), with the folders it was told to use.
-    setup() { env -i PATH="$1" HOME="$tmp/home" "$BASH" "$here/tools/capri-voice-setup" "$2" 2>&1; }
+    # setup PATH DIR [VAR=VALUE]: an environment of its own (his PATH, and the one variable, if any).
+    setup() { env -i PATH="$1" HOME="$tmp/home" ${3:+"$3"} "$BASH" "$here/tools/capri-voice-setup" "$2" 2>&1; }
     uvlog=$v/uv.log
     mkuv() {
         mkdir -p "$1"
         # shellcheck disable=SC2016 # the stand-in's own $@, $1, $2
-        printf '#!/bin/sh\necho "uv $*" >>%s\necho "dirs ${UV_PYTHON_INSTALL_DIR:-} ${UV_PYTHON_INSTALL_BIN:-}" >>%s\ncase $1 in python) [ "$2" = install ] && exit 0 ;; esac\nexit 42\n' "$uvlog" "$uvlog" >"$1/uv"
+        printf '#!/bin/sh\necho "uv $*" >>%s\necho "env ${UV_PYTHON_INSTALL_DIR:-} ${UV_PYTHON_INSTALL_BIN:-} ${UV_PYTHON_PREFERENCE:-}" >>%s\ncase $1 in python) [ "$2" = install ] && exit 0 ;; esac\nexit 42\n' "$uvlog" "$uvlog" >"$1/uv"
         chmod +x "$1/uv"
     }
     r=$(setup "$v/py314:$v/tools" "$v/h1")
     rc=$?
-    check "$([ "$rc" = 1 ] && [ "$r" = "capri-voice-setup: her voice needs Python 3.10–3.13; you have 3.14: install python3.13 (Arch: python313 from the AUR) or uv" ] && [ ! -e "$v/h1" ] && echo 0)" \
+    check "$([ "$rc" = 1 ] && [ "$r" = "capri-voice-setup: her voice needs Python 3.10–3.13; you have 3.14: install uv (Arch: pacman -S uv) or python3.13 (Arch: python313 from the AUR)" ] && [ ! -e "$v/h1" ] && echo 0)" \
         "setup with a python3 of 3.14 and no uv: one line says what to install, nothing made (exit $rc): $r"
     mkdir -p "$v/nothing"
     r=$(setup "$v/nothing" "$v/h1")
     rc=$?
-    case $r in *"you have no python3: install python3.13"*) w=0 ;; *) w=1 ;; esac
+    case $r in *"you have no python3: install uv (Arch: pacman -S uv) or python3.13"*) w=0 ;; *) w=1 ;; esac
     check "$([ "$rc" = 1 ] && [ $w = 0 ] && echo 0)" "and with no python at all: the same line: $r"
 
     mkuv "$v/uv"
@@ -648,11 +669,15 @@ check "$([ ! -e "$RECEIPT" ] && grep -qx 'Name=His own' "$app" && echo 0)" "--un
     r=$(setup "$v/py314:$v/uv:$v/tools" "$v/h2")
     rc=$?
     check "$([ "$rc" = 42 ] && [ "$(cat "$uvlog")" = "uv python install -q 3.13
-dirs $v/h2/python 0
+env $v/h2/python 0 only-managed
 uv venv -q --system-site-packages -p 3.13 venv
-dirs $v/h2/python 0" ] && echo 0)" "setup with a python3 of 3.14 and uv: uv fetches 3.13 into its own folder (no link in ~/.local/bin), then the venv is on it (exit $rc): $(tr '\n' ' ' <"$uvlog")"
+env $v/h2/python 0 only-managed" ] && echo 0)" "setup with a python3 of 3.14 and uv: uv fetches 3.13 into its own folder (no link in ~/.local/bin), then the venv is on it, whatever python-preference he has (exit $rc): $(tr '\n' ' ' <"$uvlog")"
     case $r in *"uv fetches 3.13 into $v/h2/python"*) w=0 ;; *) w=1 ;; esac
     check $w "and says so: $r"
+    # His own UV_PYTHON_PREFERENCE=only-system is overridden for the fetch (it would not find the one fetched).
+    : >"$uvlog"
+    r=$(setup "$v/py314:$v/uv:$v/tools" "$v/h2b" UV_PYTHON_PREFERENCE=only-system)
+    check "$([ "$(grep -c ' only-managed$' "$uvlog")" = 2 ] && echo 0)" "with UV_PYTHON_PREFERENCE=only-system in his environment: uv still gets only-managed"
 
     : >"$uvlog"
     r=$(setup "$v/py313:$v/py312:$v/py314:$v/uv:$v/tools" "$v/h3")
@@ -673,6 +698,72 @@ dirs $v/h2/python 0" ] && echo 0)" "setup with a python3 of 3.14 and uv: uv fetc
     r=$(setup "$v/py314:$v/uv:$v/tools" "$v/h6")
     check "$([ -e "$v/h6/venv/bin/python" ] && [ "$(head -n1 "$uvlog")" = "uv pip install -q kokoro-onnx==0.6.1" ] && ! grep -q 'venv -q\|python install' "$uvlog" && echo 0)" \
         "a venv on 3.13 from an earlier run: kept, nothing fetched, even with a python3 of 3.14"
+    # A venv whose python is gone (its base Python was removed): not a Python at all, made again.
+    : >"$uvlog"
+    mkdir -p "$v/h7/venv/bin"
+    ln -s "$v/gone/python3.13" "$v/h7/venv/bin/python"
+    r=$(setup "$v/py312:$v/uv:$v/tools" "$v/h7")
+    check "$([ ! -e "$v/h7/venv" ] && [ "$(head -n1 "$uvlog")" = "uv venv -q --system-site-packages -p $v/py312/python3.12 venv" ] && echo 0)" \
+        "a venv whose python is a dangling link: removed, made again on python3.12"
+
+    # python3 first, as install.sh's voice_python: a python3 of 3.12 over a python3.13 (Ubuntu with deadsnakes).
+    : >"$uvlog"
+    mkdir -p "$v/both"
+    ln -s "$v/py312/python3" "$v/both/python3"
+    ln -s "$v/py313/python3.13" "$v/both/python3.13"
+    standin "$v/py312d" python3 3.12
+    r=$(setup "$v/py312d:$v/py313:$v/uv:$v/tools" "$v/h8")
+    check "$([ "$(head -n1 "$uvlog")" = "uv venv -q --system-site-packages -p $v/py312d/python3 venv" ] && echo 0)" \
+        "a python3 of 3.12 and a python3.13 on PATH: the venv is on python3 (the distro's: its pywhispercpp)"
+    # The version is asked with -I -S here too (the stand-in only answers to that).
+    : >"$uvlog"
+    r=$(setup "$v/strict:$v/uv:$v/tools" "$v/h8b")
+    check "$([ "$(head -n1 "$uvlog")" = "uv venv -q --system-site-packages -p $v/strict/python3 venv" ] && echo 0)" "the setup asks python3 for its version with -I -S"
+    # PyPy isn't one (the line says what he has).
+    r=$(setup "$v/pypy:$v/tools" "$v/h9")
+    case $r in *"you have pypy 3.10: install uv"*) w=0 ;; *) w=1 ;; esac
+    check "$([ $w = 0 ] && [ ! -e "$v/h9" ] && echo 0)" "a python3 that is PyPy 3.10: not used: $r"
+
+    # The installer's own step: tools/capri-voice-setup's PATH (his own first: the installer's venv, with its
+    # python3.N links, last), and $BIN/capri-voice running on the voice's venv. Stand-ins for the setup and
+    # for the script; step_extras runs here for real (no systemd, no uv: the installer puts its own in a venv).
+    x=$v/x
+    mkdir -p "$x/lib/tools/systemd" "$x/bin" "$x/conf" "$x/venv/bin" "$x/cache"
+    # the installer's own venv: its python takes `-m pip install uv` (logged)
+    printf '#!/bin/sh\necho "$*" >>%s/pip.log\n' "$x" >"$x/venv/bin/python"
+    chmod +x "$x/venv/bin/python"
+    printf '#!/bin/sh\necho "setup: $PATH" >%s/setup.log\nmkdir -p "$1/venv/bin"\nprintf "#!/bin/sh\\necho \\"on the venv: \\$*\\"\\n" >"$1/venv/bin/python"\nchmod +x "$1/venv/bin/python"\n' "$x" >"$x/lib/tools/capri-voice-setup"
+    printf '#!/usr/bin/env python3\n# the sidecar\n' >"$x/lib/tools/capri-voice"
+    chmod +x "$x/lib/tools/capri-voice"
+    cp "$here/tools/systemd/capri-voice.service" "$x/lib/tools/systemd/"
+    extras() { # DATA: step_extras on stand-ins, its output in $x/out, VOICE_HOW after
+        (
+            DATA=$1 BIN=$x/bin LIB=$x/lib CONF=$x/conf VENV=$x/venv CACHE_BASE=$x/cache UNITS=$x/units
+            RECEIPT=$x/receipt VOICE=1 WATCH=0 DRY=0 SYSTEMD=0 YES=1 STEP_N=0 STEPS=7
+            PATH=$v/tools:/usr/bin:/bin
+            # shellcheck disable=SC2329 # step_extras' own
+            have() { return 1; }   # no uv of his
+            step_extras >"$x/out" 2>&1
+            echo "$VOICE_HOW" >"$x/how"
+        )
+    }
+    extras "$x/data"
+    check "$([ "$(cat "$x/setup.log")" = "setup: $v/tools:/usr/bin:/bin:$x/venv/bin" ] && echo 0)" \
+        "no uv of his: the setup's PATH is his own, then the installer's venv last: $(cat "$x/setup.log")"
+    read -r -a uvp <<<"${M_pip_uv:-uv}"
+    check "$([ "$(cat "$x/pip.log")" = "-m pip install -q --disable-pip-version-check --no-cache-dir ${uvp[*]}" ] && echo 0)" "and it put uv in that venv: $(cat "$x/pip.log")"
+    check "$([ "$(head -n1 "$x/bin/capri-voice")" = "#!$x/data/capri-voice/venv/bin/python" ] && [ "$(sed -n 2p "$x/bin/capri-voice")" = "# the sidecar" ] && [ -x "$x/bin/capri-voice" ] && echo 0)" \
+        "capri-voice's first line is the voice's venv python, the rest as it was, still executable"
+    check "$([ "$("$x/bin/capri-voice" a b)" = "on the venv: $x/bin/capri-voice a b" ] && echo 0)" "started by hand (no systemd), it runs on the venv's python, not the system's"
+    check "$([ "$(cat "$x/how")" = "capri-voice (start it: capri-voice)" ] && grep -qx "file	$x/bin/capri-voice" "$x/receipt" && echo 0)" "the summary's line is true, and the file is in the receipt (--uninstall removes it): $(cat "$x/how")"
+    # A path a shebang can't hold (a space): the script is as it was, and the summary names the command that works.
+    rm -rf "$x/bin/capri-voice" "$x/receipt"
+    extras "$x/my data"
+    check "$([ "$(head -n1 "$x/bin/capri-voice")" = "#!/usr/bin/env python3" ] && echo 0)" "a data folder with a space: the shebang is left alone (the kernel would split it)"
+    check "$([ "$(cat "$x/how")" = "capri-voice (start it: '$x/my data/capri-voice/venv/bin/python' $x/bin/capri-voice)" ] && echo 0)" "and the summary says the command that runs: $(cat "$x/how")"
+    # With systemd the unit runs the venv's python on the script (its shebang is not read).
+    check "$(! voice_shebang_ok "$(printf 'a/%0130d' 0)" && voice_shebang_ok /home/me/.local/share/capri-voice/venv/bin/python && ! voice_shebang_ok "/home/a b/python" && echo 0)" \
+        "a shebang line: no space, and short enough for older kernels"
     rm -rf "$v"
     exit "$fails"
 ) || fails=$((fails + $?))
