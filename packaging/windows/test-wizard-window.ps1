@@ -14,6 +14,7 @@
 Add-Type @'
 using System;
 using System.Runtime.InteropServices;
+using System.Collections.Generic;
 using System.Text;
 using System.Threading;
 public static class WizWin {
@@ -33,6 +34,11 @@ public static class WizWin {
     [DllImport("user32.dll")] static extern int GetSystemMetrics(int i);
     [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr h, uint cmd);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr h, StringBuilder s, int n);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+    delegate bool EnumProc(IntPtr h, IntPtr l);
+    [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc p, IntPtr l);
     [DllImport("user32.dll")] static extern bool IsWindow(IntPtr h);
     [DllImport("user32.dll")] static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
 
@@ -52,6 +58,18 @@ public static class WizWin {
     // A window's owner (GW_OWNER), 0 when it has none; its class name.
     public static IntPtr Owner(IntPtr h) { return GetWindow(h, 4); }
     public static string Class(IntPtr h) { StringBuilder sb = new StringBuilder(256); GetClassName(h, sb, 256); return sb.ToString(); }
+    public static string Title(IntPtr h) { StringBuilder sb = new StringBuilder(256); GetWindowText(h, sb, 256); return sb.ToString(); }
+    // The top-level windows of a process that show (visible), other than one (the wizard): Setup's own
+    // About box, an error box, anything that would sit over the wizard.
+    public static IntPtr[] Showing(uint pid, IntPtr except) {
+        List<IntPtr> l = new List<IntPtr>();
+        EnumWindows(delegate (IntPtr h, IntPtr x) {
+            uint p; GetWindowThreadProcessId(h, out p);
+            if (p == pid && h != except && IsWindowVisible(h)) l.Add(h);
+            return true;
+        }, IntPtr.Zero);
+        return l.ToArray();
+    }
     public static bool Alive(IntPtr h) { return IsWindow(h); }
     // PostMessage: it returns at once (SendMessage waits for a modal box, and times out).
     public static bool Post(IntPtr h, uint msg, int w) { return PostMessage(h, msg, new IntPtr(w), IntPtr.Zero); }
@@ -155,6 +173,13 @@ function Write-StepTime {
     Check ($runs.Count -gt 0 -and $open.Count -eq 0) "Setup's log has an exit line for each of its $($runs.Count) steps$(if ($open) { " (none for: $(($open | ForEach-Object { $_.Name }) -join ', '))" })"
 }
 
+# What shows of Setup's besides the wizard, one line each.
+function Format-Showing([uint32]$ProcessId, [IntPtr]$Wizard) {
+    $l = @([WizWin]::Showing($ProcessId, $Wizard) | ForEach-Object {
+            "$($_.ToInt64()): $([WizWin]::Class($_)) '$([WizWin]::Title($_))' owner=$([WizWin]::Owner($_).ToInt64()) enabled=$([WizWin]::Enabled($_))" })
+    if ($l) { $l -join ' | ' } else { '(nothing)' }
+}
+
 # The wizard's "About Setup..." (its system menu: the icon, Alt+Space, a right click on the title bar)
 # opened while a step runs: a modal box inside Setup's wait for the step. The wizard must stay disabled
 # under it (enabled, its title bar would open a second box), and be live again once the box is closed.
@@ -163,29 +188,36 @@ function Test-WizardAbout {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'Logs beside the checks.')]
     param($W)
     $h = [IntPtr][int]$W.Current.NativeWindowHandle
+    $setupPid = [uint32]$W.Current.ProcessId
     $run = Get-StepNow
     if (-not $run) { return }
+    $was = @([WizWin]::Showing($setupPid, $h))
+    Write-Host "  before the About box: besides the wizard, Setup shows: $(Format-Showing $setupPid $h)"
     [void][WizWin]::Post($h, 0x112, 9999) # WM_SYSCOMMAND, Inno's "About Setup..." item
-    $box = $null
+    $bh = [IntPtr]::Zero
     $t0 = Get-Date
-    while (-not $box -and ((Get-Date) - $t0).TotalSeconds -lt 15) { $box = Find-Window '^About Setup$'; if (-not $box) { Start-Sleep -Milliseconds 200 } }
-    Check ([bool]$box) "while step '$($run.Name)' runs: the wizard's About box opens"
-    if (-not $box) { $script:AboutRan = $true; return }
-    $bh = [IntPtr][int]$box.Current.NativeWindowHandle
+    while ($bh -eq [IntPtr]::Zero -and ((Get-Date) - $t0).TotalSeconds -lt 15) {
+        $new = @([WizWin]::Showing($setupPid, $h) | Where-Object { $was -notcontains $_ })
+        if ($new) { $bh = $new[0] } else { Start-Sleep -Milliseconds 200 }
+    }
+    Check ($bh -ne [IntPtr]::Zero) "while step '$($run.Name)' runs: the wizard's About box opens"
+    if ($bh -eq [IntPtr]::Zero) { $script:AboutRan = $true; return }
     # The box is up: the 50 ms timer that keeps the wizard live runs in its loop too, 24 ticks or so.
     $live = 0
     for ($i = 0; $i -lt 12; $i++) { Start-Sleep -Milliseconds 100; if ([WizWin]::Enabled($h)) { $live++ } }
-    Write-Host "  while the About box is up: it is a $([WizWin]::Class($bh)), owned by the wizard: $([WizWin]::Owner($bh) -eq $h); the wizard was enabled in $live of 12 looks"
+    Write-Host "  while the About box is up: $(Format-Showing $setupPid $h); the wizard was enabled in $live of 12 looks"
     Check ($live -eq 0) "while the About box is up: the wizard stays disabled under it ($live of 12 looks enabled)"
     # Closed as he would: OK; the close message when that finds no button.
-    try { Invoke-Button $box 'OK' } catch { Write-Host "  ($($_.Exception.Message))" }
+    try { Invoke-Button ([Windows.Automation.AutomationElement]::FromHandle($bh)) 'OK' } catch { Write-Host "  ($($_.Exception.Message))" }
+    $up = { @([WizWin]::Showing($setupPid, $h)) -contains $bh }
     $t0 = Get-Date
-    while ([WizWin]::Alive($bh) -and ((Get-Date) - $t0).TotalSeconds -lt 3) { Start-Sleep -Milliseconds 200 }
-    if ([WizWin]::Alive($bh)) { [void][WizWin]::Post($bh, 0x10, 0) } # WM_CLOSE
+    while ((& $up) -and ((Get-Date) - $t0).TotalSeconds -lt 3) { Start-Sleep -Milliseconds 200 }
+    if (& $up) { [void][WizWin]::Post($bh, 0x10, 0) } # WM_CLOSE
     $t0 = Get-Date
-    while ([WizWin]::Alive($bh) -and ((Get-Date) - $t0).TotalSeconds -lt 5) { Start-Sleep -Milliseconds 200 }
-    Check (-not [WizWin]::Alive($bh)) 'the About box closes'
-    if ([WizWin]::Alive($bh)) { throw 'the About box stays open: Setup waits behind it' }
+    while ((& $up) -and ((Get-Date) - $t0).TotalSeconds -lt 5) { Start-Sleep -Milliseconds 200 }
+    $closed = -not (& $up)
+    Check $closed 'the About box closes'
+    if (-not $closed) { throw 'the About box stays open: Setup waits behind it' }
     $t0 = Get-Date
     while (-not [WizWin]::Enabled($h) -and ((Get-Date) - $t0).TotalSeconds -lt 3) { Start-Sleep -Milliseconds 100 }
     Check ([WizWin]::Enabled($h)) 'after the About box is closed: the wizard is enabled again (a step is running)'
@@ -219,6 +251,7 @@ function Test-WizardDuringStep {
         # Once, from the fifth look on, inside a step.
         if (-not $script:AboutRan -and $during.Count -ge 5) { Test-WizardAbout $W }
     }
+    Write-Host "  after the looks, besides the wizard, Setup shows: $(Format-Showing ([uint32]$W.Current.ProcessId) $h)"
     Check $script:AboutRan 'the About box was opened and closed while a step ran'
     $names = @($during | ForEach-Object { $_.Step } | Select-Object -Unique)
     Check ($during.Count -ge 3) "the window was looked at $($during.Count) times while a step ran ($($names -join ', ')): at least 3"

@@ -63,7 +63,7 @@ jobs:
         shell: pwsh
         run: ./packaging/windows/build.ps1 -NoCargo
       - name: The wizard test, the ${{ matrix.iss }} installer
-        timeout-minutes: 20
+        timeout-minutes: 12
         shell: powershell
         run: ./packaging/windows/test-setup-wizard.ps1 -Setup (Get-ChildItem packaging/windows/Output/capri-syn-setup-*.exe | Select-Object -First 1).FullName -Shots shots
       - uses: actions/upload-artifact@v4
