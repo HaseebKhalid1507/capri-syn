@@ -83,9 +83,10 @@ first line is that venv's `python`.
 When Synaps has no model yet (no login in `~/.synaps-cli/auth.json`, no `local/` model in its config
 or her `[session]`), it asks which brain, in your terminal. None is picked for you; Enter is later.
 
-1. **Sign in to an account**: ChatGPT, Claude, Copilot, Gemini (when Synaps has its Google client),
-   Grok, Kimi or Muse: her own table's (`synaps-avatar --providers`, `src/provider.rs`' `ALL` in its
-   order), the same as her Settings ▸ Brain; the installers keep no copy. It runs
+1. **Sign in to an account**: ChatGPT (free with any ChatGPT account, as the list says), Claude,
+   Copilot, Gemini (when Synaps has its Google client), Grok, Kimi or Muse: her own table's
+   (`synaps-avatar --providers`, `src/provider.rs`' `ALL` in its order, a hint beside a name its last
+   field), the same as her Settings ▸ Brain; the installers keep no copy. It runs
    `synaps login --provider …` here, and your browser opens on the sign-in page by itself; Copilot's
    page asks for the code Synaps prints. Nothing to copy. Once `auth.json` is written, its stdin (a
    pipe held open: Synaps 0.12 gives up on a closed one, and asks about its app on a terminal) is

@@ -809,12 +809,13 @@ SYNAPS
     cat >"$BIN/synaps-avatar" <<'HER'
 #!/usr/bin/env bash
 case $1 in
-    # Her table (src/provider.rs ALL), not in the order main had it: the picker's is hers. HER_OLD: a
-    # build before --providers.
+    # Her table (src/provider.rs ALL), not in the order main had it: the picker's is hers; a hint
+    # (its last field) on ChatGPT's line, none on the rest (1.1.0's lines had no such field).
+    # HER_OLD: a build before --providers.
     --providers)
         [ -z "${HER_OLD:-}" ] || exit 1
-        printf 'openai-codex\topenai-codex\taccount\topenai-codex/gpt-5.5\tChatGPT\tbrowser\n'
-        printf 'anthropic\tclaude\taccount\tclaude-sonnet-4-6\tClaude\tbrowser\n'
+        printf 'openai-codex\topenai-codex\taccount\topenai-codex/gpt-5.5\tChatGPT\tbrowser\tfree with any ChatGPT account\n'
+        printf 'anthropic\tclaude\taccount\tclaude-sonnet-4-6\tClaude\tbrowser\t\n'
         printf 'github-copilot\tgithub-copilot\taccount\tgithub-copilot/claude-sonnet-4.6\tCopilot\tcode\n'
         printf 'google-gemini\tgoogle-gemini\taccount\tgoogle-gemini/gemini-2.5-pro\tGemini\tbrowser\n'
         printf 'local\tlocal\tlocal\t\tLocal\tnone\n'
@@ -852,10 +853,10 @@ LM Studio|http://localhost:1234/v1|http://127.0.0.1:$pl/v1/models"
     check "$([ "$(local_models)" = "Ollama|http://localhost:11434/v1|qwen3:8b"$'\n'"LM Studio|http://localhost:1234/v1|qwen/qwen3-8b" ] && echo 0)" \
         "local_models: Ollama's and LM Studio's, no embedding model ($(local_models | tr '\n' ' '))"
     rows=$(brains_here)
-    check "$([ "$rows" = $'openai-codex|openai-codex|ChatGPT|browser\nanthropic|claude|Claude|browser\ngithub-copilot|github-copilot|Copilot|code\ngroq|groq|Groq|key' ] && echo 0)" \
-        "her brains are her table's (--providers), in its order, no local server, no Gemini without its Google client ($(tr '\n' ' ' <<<"$rows"))"
+    check "$([ "$rows" = $'openai-codex|openai-codex|ChatGPT|browser|free with any ChatGPT account\nanthropic|claude|Claude|browser|\ngithub-copilot|github-copilot|Copilot|code|\ngroq|groq|Groq|key|' ] && echo 0)" \
+        "her brains are her table's (--providers), in its order, its hints, no local server, no Gemini without its Google client ($(tr '\n' ' ' <<<"$rows"))"
     rows=$(SYNAPS_GOOGLE_GEMINI_CLIENT_ID=x brains_here)
-    check "$(case $'\n'$rows$'\n' in *$'\n''google-gemini|google-gemini|Gemini|browser'$'\n'*) echo 0 ;; esac)" "Gemini with it"
+    check "$(case $'\n'$rows$'\n' in *$'\n''google-gemini|google-gemini|Gemini|browser|'$'\n'*) echo 0 ;; esac)" "Gemini with it"
 
     # No --brain, no terminal: later, nothing run.
     again
@@ -919,6 +920,15 @@ LM Studio|http://localhost:1234/v1|http://127.0.0.1:$pl/v1/models"
     printf '1\n3\n' >"$b/tty"
     TTYIN=$b/tty BRAIN_PICK='' brains
     check "$([ "$(cat "$SYNAPS_BASE_DIR/args")" = 'login --provider github-copilot' ] && echo 0)" "the picker: an account, Copilot: $(said)"
+    # Its accounts as he sees them (his terminal a pipe here, stderr: the picker's number is read
+    # off its stdout): ChatGPT's hint, her table's, beside it and no other's; Copilot's code. Then
+    # Enter: later.
+    again
+    printf '1\n\n' >"$b/tty"
+    TTYOUT=/dev/stderr TTYIN=$b/tty BRAIN_PICK='' brain </dev/null 2>&1 | cat >"$b/shown"
+    accts=$(LC_ALL=C grep -oE '[0-9]  [A-Z].*' "$b/shown")
+    check "$([ "$accts" = $'1  ChatGPT  (free with any ChatGPT account)\n2  Claude\n3  Copilot  (your browser, and a code to type there)' ] && [ ! -e "$SYNAPS_BASE_DIR/args" ] && echo 0)" \
+        "the picker's accounts: ChatGPT's hint beside it, no other's ($(tr '\n' '/' <<<"$accts"))"
     # Enter (or the end of his input): later.
     again
     printf '\n' >"$b/tty"

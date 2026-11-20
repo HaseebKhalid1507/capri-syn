@@ -447,6 +447,20 @@ fn signing<'a>(p: &'a Prefs, to: &Provider) -> Option<&'a Signing> {
     p.signing.as_ref().filter(|s| s.id == to.id)
 }
 
+/// An account's row under SIGN IN, with no login here: what it takes, and its hint first
+/// (`Provider::hint`: ChatGPT's, free with any account).
+fn account_blurb(to: &Provider) -> String {
+    let how = match to.id {
+        "anthropic" => "Pro or Max · browser",
+        "github-copilot" => "browser · a code to type",
+        _ => "browser",
+    };
+    match to.hint() {
+        "" => how.to_string(),
+        h => format!("{h} · {how}"),
+    }
+}
+
 /// An account's or a service's row: what ⏎ on it does. One with a login here, not hers: switch
 /// her to it (its default model). Without one: sign in (an account: in his browser; a service:
 /// its key in her field), not for a daemon on another machine (a sign-in here wouldn't reach
@@ -1308,12 +1322,6 @@ impl Line {
                     }
                     BrainRow::Account(i) => {
                         let Some(&to) = m.accounts().get(i) else { continue };
-                        let blurb = match to.id {
-                            "anthropic" => "Pro or Max · browser",
-                            "openai-codex" => "Plus or Pro · browser",
-                            "github-copilot" => "browser · a code to type",
-                            _ => "browser",
-                        };
                         let name = format!("   {}", to.name.to_uppercase());
                         match running(to) {
                             // Its code, large: Copilot's he types on GitHub's page (it's copied);
@@ -1335,7 +1343,7 @@ impl Line {
                             // Grok on Windows: Synaps 0.12.0 can't open its page whole.
                             None if !m.has(to) && m.here && provider::signin::needs_newer(m.windows, to) => target.push(way(&name, "NEEDS A NEWER SYNAPS".into(), None, false, None)),
                             None => {
-                                let (b, mark) = state(to, blurb);
+                                let (b, mark) = state(to, account_blurb(to).as_str());
                                 target.push(way(&name, b, mark, m.here || m.has(to), None));
                             }
                         }
@@ -1698,7 +1706,7 @@ pub fn brain_word(m: &provider::Status) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Act, BrainRow, FLASH, Fold, MenuSave, Mode, Nav, Note, Page, Pref, Prefs, SetRow, Signing, asked, asked_model, brain_hint, brain_key, brain_landing, brain_line, brain_reselect, brain_rows, brain_word, esc_closes, hint, hold_fires, key_word, list_key, next_attention, page_left, set_rows, spot_lift};
+    use super::{Act, BrainRow, FLASH, Fold, MenuSave, Mode, Nav, Note, Page, Pref, Prefs, SetRow, Signing, account_blurb, asked, asked_model, brain_hint, brain_key, brain_landing, brain_line, brain_reselect, brain_rows, brain_word, esc_closes, hint, hold_fires, key_word, list_key, next_attention, page_left, set_rows, spot_lift};
     use crate::provider::{self, Local, Lock, Status};
     use crate::settings::{Attention, Settings, WriteQueue, write_at};
 
@@ -1877,6 +1885,18 @@ mod tests {
         assert_eq!(brain_hint(&p, 2, None), "↑↓ pick · ⏎ the steps · esc back");
         assert_eq!(brain_line(&p.mind), "Give me a brain and I'll talk back.");
         assert_eq!(brain_word(&p.mind), "NO BRAIN YET");
+    }
+
+    /// SIGN IN's accounts, no login yet: ChatGPT's row says a free account will do (its hint,
+    /// `Provider::hint`), before how it signs in; no other account's has one.
+    #[test]
+    fn chatgpt_says_free_with_any_account() {
+        assert_eq!(account_blurb(provider::by_id("openai-codex").unwrap()), "free with any ChatGPT account · browser");
+        assert_eq!(account_blurb(&provider::CLAUDE), "Pro or Max · browser");
+        assert_eq!(account_blurb(provider::by_id("github-copilot").unwrap()), "browser · a code to type");
+        for to in provider::accounts().filter(|to| to.id != "openai-codex") {
+            assert!(!account_blurb(to).contains("free"), "{}: {}", to.id, account_blurb(to));
+        }
     }
 
     /// Signed in on Claude: MODEL opens its menu in place, every model of every login here and

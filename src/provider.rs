@@ -192,6 +192,18 @@ pub static ALL: &[Provider] = &[
         ]),
 ];
 
+impl Provider {
+    /// A few words beside its name wherever a brain is picked (Settings ▸ Brain's SIGN IN, her
+    /// installers' lists: `--providers`' last field), or none. ChatGPT's alone: a free account
+    /// signs her in, so she costs nothing. The installers keep no copy of it.
+    pub fn hint(&self) -> &'static str {
+        match self.id {
+            "openai-codex" => "free with any ChatGPT account",
+            _ => "",
+        }
+    }
+}
+
 /// SIGN IN's accounts, in order (`Status::accounts`: the ones it lists).
 pub fn accounts() -> impl Iterator<Item = &'static Provider> {
     ALL.iter().filter(|p| p.kind == Kind::OAuth)
@@ -741,6 +753,18 @@ mod tests {
             assert_eq!(by_name(p.name), Some(p));
         }
         assert_eq!(by_id("anthropic").map(|p| p.login), Some("claude"));
+    }
+
+    /// A hint beside ChatGPT alone (free with any account): a few plain words, one field of
+    /// `--providers` and of the installers' `|` lines.
+    #[test]
+    fn chatgpt_alone_says_it_is_free() {
+        let hinted: Vec<(&str, &str)> = ALL.iter().filter(|p| !p.hint().is_empty()).map(|p| (p.id, p.hint())).collect();
+        assert_eq!(hinted, [("openai-codex", "free with any ChatGPT account")]);
+        for p in ALL {
+            let h = p.hint();
+            assert!(h.len() <= 40 && h.is_ascii() && !h.contains(['\t', '|', '\n', '\r']) && h.trim() == h, "{}: `{h}`", p.id);
+        }
     }
 
     #[test]

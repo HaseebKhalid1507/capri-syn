@@ -1666,18 +1666,19 @@ has_brain() {
 SERVERS='Ollama|http://localhost:11434/v1|http://127.0.0.1:11434/v1/models
 LM Studio|http://localhost:1234/v1|http://127.0.0.1:1234/v1/models'
 
-# Her brains here, "id|login|name|how" a line: her own table (synaps-avatar --providers:
+# Her brains here, "id|login|name|how|hint" a line: her own table (synaps-avatar --providers:
 # src/provider.rs' ALL, in its order; never a copy here), its accounts and key services. how:
 # browser (his browser opens on the sign-in page), code (it opens, and he types the code Synaps
-# shows: Copilot's), key (an API key). Gemini's sign-in needs its Google client (Synaps'
-# google_gemini.rs), so not without it.
+# shows: Copilot's), key (an API key). hint: shown beside its name (ChatGPT's: free with any
+# account), most often none. Gemini's sign-in needs its Google client (Synaps' google_gemini.rs),
+# so not without it.
 brains_here() {
     local l
     while IFS= read -r l; do
         if [ "${l%%|*}" = google-gemini ] && [ -z "${SYNAPS_GOOGLE_GEMINI_CLIENT_ID:-}" ]; then continue; fi
         printf '%s\n' "$l"
     done < <("$BIN/synaps-avatar" --providers 2>/dev/null |
-        awk -F'\t' '($3 == "account" || $3 == "key") && $1 != "" && $2 != "" && $5 != "" && $6 != "" { print $1 "|" $2 "|" $5 "|" $6 }' || true)
+        awk -F'\t' '($3 == "account" || $3 == "key") && $1 != "" && $2 != "" && $5 != "" && $6 != "" { print $1 "|" $2 "|" $5 "|" $6 "|" $7 }' || true)
 }
 
 # A model's id she lists and passes on (her --set, a command line): letters, digits and ._:/@+-
@@ -1719,18 +1720,20 @@ pick_n() {
     done
 }
 
-# One of the rows after $1 (a brain's id|login|name|how, or a local model's server|url|model),
-# numbered on the terminal by $1's words; its line, or nothing for Enter.
+# One of the rows after $1 (a brain's id|login|name|how|hint, or a local model's server|url|model),
+# numbered on the terminal by $1's words (a brain's: its hint, and Copilot's code); its line, or
+# nothing for Enter.
 pick_row() {
-    local kind=$1 i=0 n line a b c d
+    local kind=$1 i=0 n line a b c d e
     shift
     [ $# -gt 0 ] || return 0
     for line in "$@"; do
         i=$((i + 1))
-        IFS='|' read -r a b c d <<<"$line"
+        IFS='|' read -r a b c d e <<<"$line"
+        if [ "$d" = code ]; then e=${e:+$e; }'your browser, and a code to type there'; fi
         case $kind in
             local) printf '     %2d  %s  (%s)\n' "$i" "$c" "$a" ;;
-            *) printf '     %2d  %s%s\n' "$i" "$c" "$([ "$d" = code ] && printf '  (your browser, and a code to type there)')" ;;
+            *) printf '     %2d  %s%s\n' "$i" "$c" "${e:+  ($e)}" ;;
         esac
     done >"$TTYOUT"
     n=$(pick_n $# '' later)
@@ -1939,7 +1942,8 @@ brain_pick() {
         return 0
     fi
     for l in "${rows[@]}"; do
-        case $l in *'|key') keys+=("$l") ;; *) accounts+=("$l") ;; esac
+        IFS='|' read -r _ _ _ how _ <<<"$l"
+        if [ "$how" = key ]; then keys+=("$l"); else accounts+=("$l"); fi
     done
     if [ "$ask" = 1 ]; then
         printf '\n   %sher brain: Synaps has no model yet. which one?%s\n' "$B$T" "$N"
@@ -1982,14 +1986,14 @@ brain_pick() {
         *)
             line=''
             for l in "${rows[@]}"; do
-                IFS='|' read -r id login name how <<<"$l"
+                IFS='|' read -r id login name how _ <<<"$l"
                 if [ "$id" = "$pick" ] || [ "$login" = "$pick" ]; then line=$l && break; fi
             done
             if [ -z "$line" ]; then
                 warn "her brain: --brain $pick isn't one she knows here ($(printf '%s\n' "${rows[@]}" | cut -d'|' -f1 | tr '\n' ' ')local, later): later"
                 return 0
             fi
-            IFS='|' read -r id login name how <<<"$line"
+            IFS='|' read -r id login name how _ <<<"$line"
             if [ "$how" = key ]; then
                 if key_brain "$login" "$name"; then set_model "$id" || true; fi
             elif login_brain "$login" "$name"; then

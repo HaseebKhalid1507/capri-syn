@@ -131,8 +131,9 @@ Session (one Synaps daemon session drives the body):
                   A running her reads them again (settings reload). Exit 0 saved, 2 a bad --set,
                   3 settings.toml refused (a typo; can't read it), 4 not saved
   --providers     her brains, one a line, then exit: id, login, kind (account|key|local), default
-                  model (none for local), name, how it's signed in to (browser|code|key|none);
-                  tab-separated, in her Settings' order (her installers' list)
+                  model (none for local), name, how it's signed in to (browser|code|key|none), a
+                  hint shown beside its name (most have none); tab-separated, in her Settings'
+                  order (her installers' list)
 
 Dev control: newline commands on $XDG_RUNTIME_DIR/synaps-avatar.sock
   mood <idle|thinking|working|talking|needs_you|done|annoyed|sleepy|away>
@@ -199,7 +200,8 @@ fn session_model(value: &str) -> Result<String> {
 }
 
 /// `--providers`: provider.rs' `ALL`, in its order, a line each: id, login, kind, default model
-/// (none for a local server: its models are its own), name, how. Her installers' brains are this
+/// (none for a local server: its models are its own), name, how, hint (`Provider::hint`: shown
+/// beside its name in their pickers; empty for most). Her installers' brains are this
 /// table (install.sh and steps.ps1 read it from her: no copy of their own), so a provider added to
 /// `ALL` is in them too; `the_installers_know_every_account` holds what they add to it.
 fn providers_table() -> String {
@@ -212,7 +214,7 @@ fn providers_table() -> String {
                 provider::Kind::Local => ("local", "none"),
             };
             let model = p.models.first().map_or("", |&(m, _)| m);
-            format!("{}\t{}\t{kind}\t{model}\t{}\t{how}", p.id, p.login, p.name)
+            format!("{}\t{}\t{kind}\t{model}\t{}\t{how}\t{}", p.id, p.login, p.name, p.hint())
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -917,10 +919,13 @@ mod tests {
         let t = providers_table();
         let rows: Vec<Vec<&str>> = t.lines().map(|l| l.split('\t').collect()).collect();
         assert_eq!(rows.iter().map(|r| r[0]).collect::<Vec<_>>(), provider::ALL.iter().map(|p| p.id).collect::<Vec<_>>(), "{t}");
-        assert!(rows.iter().all(|r| r.len() == 6 && !r[0].is_empty() && !r[4].is_empty()), "{t}");
+        assert!(rows.iter().all(|r| r.len() == 7 && !r[0].is_empty() && !r[4].is_empty()), "{t}");
         let claude = rows.iter().find(|r| r[0] == "anthropic").expect("Claude");
-        assert_eq!(*claude, ["anthropic", "claude", "account", provider::CLAUDE.models[0].0, "Claude", "browser"]);
-        assert!(rows.contains(&vec!["local", "local", "local", "", "Local", "none"]), "{t}");
+        assert_eq!(*claude, ["anthropic", "claude", "account", provider::CLAUDE.models[0].0, "Claude", "browser", ""]);
+        assert!(rows.contains(&vec!["local", "local", "local", "", "Local", "none", ""]), "{t}");
+        // A hint beside ChatGPT's name alone, the last field: the pickers show it as it is.
+        let hinted: Vec<(&str, &str)> = rows.iter().filter(|r| !r[6].is_empty()).map(|r| (r[0], r[6])).collect();
+        assert_eq!(hinted, [("openai-codex", "free with any ChatGPT account")], "{t}");
         for r in rows.iter().filter(|r| r[2] != "local") {
             assert!(session_model(r[3]).is_ok(), "{r:?}: a default she takes");
             assert_eq!(provider::of(r[3]).map(|p| p.id), Some(r[0]), "{r:?}: its default is its own");
@@ -992,6 +997,14 @@ mod tests {
         assert!(ps.contains("Invoke-Her @('--providers')") && sh.contains("--providers"), "the installers read her table");
         for (file, text) in [("steps.ps1", ps), ("install.sh", sh)] {
             assert!(!text.contains("openai-codex|openai-codex|ChatGPT"), "{file} has a copy of the list of brains");
+        }
+        // Nor of a hint (`--providers`' last field): each picker shows what her table says.
+        let iss = include_str!("../packaging/windows/synaps-avatar.iss");
+        let ps1 = include_str!("../install.ps1");
+        for p in provider::ALL.iter().filter(|p| !p.hint().is_empty()) {
+            for (file, text) in [("steps.ps1", ps), ("install.sh", sh), ("install.ps1", ps1), ("synaps-avatar.iss", iss)] {
+                assert!(!text.contains(p.hint()), "{file} has a copy of {}'s hint", p.id);
+            }
         }
     }
 

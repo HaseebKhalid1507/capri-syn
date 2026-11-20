@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Her brain
+- **She runs free on a free ChatGPT account.** ChatGPT's sign-in (Synaps' `openai-codex`) takes any
+  ChatGPT account, a free one too: no API key, no card, no GPU. Its row says so wherever a brain is
+  picked: "free with any ChatGPT account" in Settings ▸ Brain's SIGN IN, in her setup's "Her model"
+  page, and in install.sh's and install.ps1's lists. The README says it up top and in Get her, with
+  the usage limits free accounts have: when one is used up she says she's hit her model's limit (AT
+  THE LIMIT). Nothing is picked for you: "Choose later" is still the default, and the order is the
+  same.
+
+### For developers
+- `synaps-avatar --providers` has a seventh field: a hint shown beside a brain's name (ChatGPT's alone
+  has one; `Provider::hint`). Her installers show it as her table gives it and keep no copy; an older
+  her's six fields still read, with no hint. steps.ps1's `brains:` lines end on it.
+
 ## 1.1.0 (2026-11-19)
 
 Her brain is yours to pick: an account you have, an API key or a model on your own PC, from Settings ▸

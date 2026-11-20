@@ -268,6 +268,22 @@ class Parity(unittest.TestCase):
         # Step 1's upgrade warning: any daemon the old Synaps left, answering or not.
         self.assertIn("(Get-DaemonStatus $mine).Alive", STEPS.read_text(encoding="utf-8"))
 
+    def test_both_pickers_show_her_tables_hint(self):
+        # --providers' last field (src/provider.rs' Provider::hint: ChatGPT's, that any account,
+        # a free one too, signs her in), beside an account's name in both pickers and setup's.
+        # Neither keeps a copy of it: what her table says is what they show.
+        steps = STEPS.read_text(encoding="utf-8")
+        iss = (ROOT / "packaging/windows/synaps-avatar.iss").read_text(encoding="utf-8")
+        self.assertIn('"|" $7', block(code(SH), "brains_here() {", "\n}\n"))
+        self.assertIn("read -r a b c d e", block(code(SH), "pick_row() {", "\n}\n"))
+        self.assertIn("Hint = $(if ($f.Count -ge 7) { $f[6] }", code(block(steps, "function Get-Brains", "\n}\n")))
+        self.assertIn("|$($b.Hint)\"", code(block(steps, "function Show-Brains", "\n}\n")))
+        self.assertIn("Hint = $(if ($f.Count -gt 5) { $f[5] }", code(PS))
+        self.assertIn("$x.Hint", code(block(PS, "function Invoke-Brain", "\n}\n")))
+        self.assertIn("Field(L, 6)", block(iss, "procedure FillModelPage", "\nend;\n"))
+        for name, text in (("install.sh", SH), ("install.ps1", PS), ("steps.ps1", steps), ("synaps-avatar.iss", iss)):
+            self.assertNotIn("free with any ChatGPT account", text, f"{name} keeps a copy of ChatGPT's hint")
+
 
 if __name__ == "__main__":
     unittest.main()

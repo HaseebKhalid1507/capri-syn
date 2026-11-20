@@ -2416,6 +2416,9 @@ mod tests {
             ("API stream error (authentication_error). Provider error details withheld — they can echo request content.", CLAUDE, Some(Trouble::LoggedOut)),
             ("Rate limited by Anthropic (HTTP 429). Retry after 30 s.", CLAUDE, Some(Trouble::Limited)),
             ("Rate limit exhausted — retries used up while waiting for reset (next window in 4 min).", CLAUDE, Some(Trouble::Limited)),
+            // v0.12.0, a ChatGPT account's usage spent (a free one's too: a 429 `usage_limit_reached`,
+            // or a window's header at 100%; runtime/openai/stream.rs RESPONSES_QUOTA_SUFFIX).
+            ("Codex usage quota exhausted in stream. Add credit, wait for reset, or switch models.", Some("openai-codex/gpt-5.5"), Some(Trouble::Limited)),
             ("Anthropic is overloaded right now. Retries exhausted — wait a minute and try again.", CLAUDE, Some(Trouble::Swamped)),
             ("Anthropic server error (HTTP 502). Try again.", CLAUDE, Some(Trouble::Swamped)),
             ("Could not reach api.anthropic.com (connection failed). Check your network, DNS, or proxy settings.", CLAUDE, Some(Trouble::Offline)),
