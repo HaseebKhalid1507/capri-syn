@@ -62,7 +62,7 @@ its "Her model" page asks which brain, as this script does:
 | 4 | **Daemon and her session** | When systemd's user manager runs, it writes and enables a `synaps-daemon.service` user unit; a unit of your own is kept, and enabled only if you agree. With no user manager, it starts the daemon now, and her autostart line starts it at login. It checks the daemon speaks protocol 3; a daemon that speaks another, or doesn't say, stops the install (exit 1, with how to fix it: an older daemon still running after this run installed or upgraded Synaps is stopped, `synaps daemon stop`; an upgrade says so in step 1 too). Her session `capri` is her own, as before (attached if live, else resumed, else made). | It starts `synaps daemon --detach` now, plus a Run value (`synaps-daemon`) for sign-in. A `synaps-daemon` value of your own is left as it is and never recorded. It checks the daemon speaks protocol 3; one that speaks another, or doesn't say, stops the install (exit 1, with how to fix it: after this run installed or upgraded Synaps, it's an older daemon still running, `synaps daemon stop`; an upgrade says so in step 1 too). Her installer finishes anyway and says it on its finish page. |
 | 5 | **Summon key** | i3, sway or Hyprland: shows the binding (`$mod+c`: press and release, so a hold talks). With your consent (`--yes`) it appends it between marker comments, after a timestamped backup. The key is named as your config sets `$mod` (Super for Mod4, Alt for Mod1). One that is already taken is reported, not overridden; on Hyprland (whose stock config closes a window on Super+C) it offers Super+Alt+C instead, Windows' key, when that one's free. GNOME: it offers a custom keyboard shortcut, Super+Alt+C running `avatarctl talk tap`, only when you say yes on the terminal ([below](#gnome-kde-and-other-wayland-desktops)). On any other desktop it tells you what to bind (`avatarctl talk tap`). | Win+Alt+C: she registers it herself. |
 | 6 | **Autostart** (default on) | i3 and sway get an `exec` line, Hyprland an `exec-once`, others an XDG autostart `.desktop`. Each one starts the daemon first if needed. Whatever `--no-autostart` says, she also goes in your app menu as Capri (`~/.local/share/applications/synaps-avatar.desktop`, with her icon), so once she's quit she starts from there. | A Run value (`synaps-avatar`). |
-| 7 | **`--voice`, `--watch`** | `--voice` runs `tools/capri-voice-setup` (its own venv, ~320 MB of models) and installs `capri-voice.service`. `--watch` installs `capri-watch.service`, enabled only with `--yes`. | `--voice` uses her voice installer (or builds the same bundle without a release) and fetches the models. `--watch` is Linux-only. |
+| 7 | **`--voice`, `--watch`** | `--voice` runs `tools/capri-voice-setup` (its own venv, ~375 MB of models) and installs `capri-voice.service`. `--watch` installs `capri-watch.service`, enabled only with `--yes`. | `--voice` uses her voice installer (or builds the same bundle without a release) and fetches the models. `--watch` is Linux-only. |
 
 At the end comes an `installed:` summary: what is where, how the daemon starts, how to summon her,
 how to start her, and how to remove her (as you ran it: the checkout's script, or the piped form).
@@ -200,9 +200,9 @@ she runs through XWayland, the X server those desktops keep for X apps.
 - **Hyprland** has no idle time for her yet: your presence is the pointer moving, so typing alone
   for 5 min reads as away. Hyprland before 0.40 isn't supported: she takes XWayland there.
 - **On Windows, Synaps 0.12's own `synaps login`** opens a sign-in tab cut at the URL's first `&`:
-  copy the whole URL it prints into your browser, or sign in through her installers' step, which
-  opens it whole (install.ps1 puts it there too; the default folder shown; `-Provider` for another
-  account than Claude):
+  copy the whole URL it prints into your browser, or sign in from her (Settings ▸ Brain) or through
+  her installers' step, which open it whole (install.ps1 puts it there too; the default folder
+  shown; `-Provider` for another account than Claude):
   `powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Programs\synaps-avatar\steps\steps.ps1" login`
   Grok's sign-in never prints its URL, so the Windows installers don't offer Grok yet
   ([WINDOWS.md](WINDOWS.md#the-installer)).
@@ -212,6 +212,10 @@ she runs through XWayland, the X server those desktops keep for X apps.
   Redistributable; live audio is still to check on real hardware: her desktop checks ran in a
   Windows 11 VM, with no real audio ([WINDOWS.md](WINDOWS.md)). Linux has no tray icon yet: HIDE's
   chip is the way back there.
+- **Her taskbar button's name, for a screen reader (Windows):** on a first run, Explorer can name
+  her button with her old tooltip followed by the current one, so a screen reader hears both
+  (`capri-syn · SPEAKING capri-syn · ONLINE`). Her tooltip is one string, and the hover popup shows
+  the current one alone: the name chains after a tooltip change ([WINDOWS.md](WINDOWS.md)).
 - **`XDG_RUNTIME_DIR` unset:** she and her voice sidecar look for the Linux socket in different
   places: she in the temp dir (`$TMPDIR`, else `/tmp`), the sidecar in `/run/user/<uid>`. Set it, or
   set `CAPRI_VOICE_SOCK` for both. It isn't aligned yet because that would change how she behaves.
