@@ -59,7 +59,7 @@ Paths here are Linux's: Windows keeps the same files under `%APPDATA%` and `%LOC
   | the same, with no model picked (no `[session] model`, none in Synaps' config, her session on its default: "NO BRAIN YET, none picked", below) | No brain yet, choom. Pick one: an account, an API key, or a model on this machine. `SET ME UP ▸` (a button to Settings ▸ Brain) | `NO BRAIN YET` | idle |
   | a lapsed or rejected login; ChatGPT's 401 (`codex request failed: 401 …`) and a stream's `… authentication rejected in stream` (ChatGPT's, xAI's, Muse's), each only where her model is on that account (another's shows as it is: SIGN IN AGAIN would sign in hers). A 403, 400 or 404 isn't one | My login ran out. Sign me in again: `SIGN IN AGAIN ▸` (a button to Settings ▸ Brain, where her account's row signs in again) | `LOGGED OUT` | idle |
   | rate or usage limit, billing (Anthropic's in-stream `(rate_limit_error)` too); a provider's 429 once Synaps' retries are spent (`codex request failed: 429 Too Many Requests`, the broker's `provider request failed: 429 …`: the status right after `request failed: `, not a 429 elsewhere in the text) | Hit my model's limit for now. Give it a bit, then ask me again. | `AT THE LIMIT` | annoyed |
-  | her ChatGPT model isn't one her account runs: a paid plan's, or one retired from ChatGPT sign-ins (Synaps' Codex `[…/model_not_found]`, `this model isn't available on the selected ChatGPT account`, `the backend doesn't know this model for this account`), her model on ChatGPT only | That model isn't on your ChatGPT plan. Pick another in Settings ▸ Brain ▸ MODEL. | `NOT ON YOUR PLAN` | idle |
+  | her ChatGPT model isn't one her account runs: a paid plan's, or one retired from ChatGPT sign-ins (Synaps' Codex `[…/model_not_found]`, `this model isn't available on the selected ChatGPT account`, `the backend doesn't know this model for this account`), her model on ChatGPT only; gone once another model is hers (picked, or set on her session) | That model isn't on your ChatGPT plan. Pick another in Settings ▸ Brain ▸ MODEL. | `NOT ON YOUR PLAN` | idle |
   | overloaded, a 5xx (Anthropic's; any provider's 500, 502, 503, 504 or 529 after `request failed: `, the ones Synaps calls transient, its retries spent); at capacity mid-reply, retries spent (`Codex reports the model is at capacity (retries exhausted)…`: ChatGPT's in-stream rate limit or overload; xAI's, Muse's) | My model's swamped right now. Try me again in a minute. | `MODEL BUSY` | annoyed |
   | unreachable, timed out, a dropped stream; a 408 (Request Timeout) after `request failed: `, its retries spent | Can't reach my model. Check the connection, then ask me again. | `NO CONNECTION` | annoyed |
   | `local/…`: `can't reach local endpoint` (Ollama's port 11434) | Ollama's not answering, so I've got no brain. Start Ollama, then ask me again. | `OLLAMA IS OFF` | idle |
@@ -144,7 +144,9 @@ Paths here are Linux's: Windows keeps the same files under `%APPDATA%` and `%LOC
     Her login ran out (LOGGED OUT): her bubble's `SIGN IN AGAIN ▸` opens the Brain screen on her
     account's row, its list open; it reads ⏎ SIGN IN AGAIN by a red dot (SIGN IN's row: LOGGED OUT
     · CHATGPT) and runs the same sign-in (a key service's: REFUSED · ⏎ NEW KEY); the BRAIN row says
-    SIGN IN AGAIN. Every row's words fit beside its name at the Line's narrowest (480 px).
+    SIGN IN AGAIN. An account's or a key service's row fits beside its name at the Line's narrowest
+    (480 px); the section rows' summaries (SIGN IN's `ChatGPT · Claude · Copilot +4`, API KEY's,
+    RUN LOCAL's) can still run past it there.
   - **API KEY**: Synaps' 19 key services (`KEY SET · GROQ`, `IN USE · GROQ +1` on the row). ⏎ on
     one with a key switches her to it; on one without, a hidden field takes the key and ⏎ hands it
     to `synaps login --provider <id>` on its stdin (never its command line, never a log; the field
@@ -178,14 +180,15 @@ Paths here are Linux's: Windows keeps the same files under `%APPDATA%` and `%LOC
   a free account runs her on, as it does Luna, the next; the rest need a paid plan (Synaps 0.12.0
   refuses `gpt-6-luna`: no capability row for it). GPT-5.5, 5.4, 5.4 Mini and 5.3 Codex Spark,
   retired from ChatGPT sign-ins, aren't listed: a `[session] model` of one moves to the default as
-  she starts (written back, once; her log says so). Nothing signed in and no local model:
-  `sign in first`, and ⏎ does nothing. A pick is written to `settings.toml` as an explicit
-  `[session] model` (only that key; the safe writer) and set on her session at once, even when the
-  file has it already (his TUI's `/model` moves her session off it: the daemon's `setting_changed`
-  to every client, which she follows). If another client owns her session's input it isn't set: she
-  says so, and her next start sets it. A Set whose reply doesn't come within 10 s counts as lost:
-  MODEL shows her session's model again. Locked: `--model` (`set by --model`), `--session`
-  (`their session`); no pick, no switch then.
+  she starts (written back, once; her log says so), and none reaches her session by any path
+  (`provider::unretired`: a file she couldn't write, read again on a reload; `--model`). Nothing
+  signed in and no local model: `sign in first`, and ⏎ does nothing. A pick is written to
+  `settings.toml` as an explicit `[session] model` (only that key; the safe writer) and set on her
+  session at once, even when the file has it already (his TUI's `/model` moves her session off it:
+  the daemon's `setting_changed` to every client, which she follows). If another client owns her
+  session's input it isn't set: she says so, and her next start sets it. A Set whose reply doesn't
+  come within 10 s counts as lost: MODEL shows her session's model again. Locked: `--model`
+  (`set by --model`), `--session` (`their session`); no pick, no switch then.
   A daemon through `--socket` signs in on its own machine: the ways in say ON ITS MACHINE and do
   nothing here. The open Brain screen looks again every 5 s (Synaps' files and the daemon's
   environment read once a look) and when a read finds her login, so a sign-in made in a terminal

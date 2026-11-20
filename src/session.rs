@@ -597,6 +597,14 @@ impl Link {
         self.unpicked_errors.contains(&id)
     }
 
+    /// Another model picked or on her session: one her plan didn't run (`NOT ON YOUR PLAN`) is
+    /// behind her, as a sign-in puts `LOGGED OUT` behind her (`creds_now`).
+    fn plan_behind(&mut self) {
+        if self.trouble == Some(Trouble::NotOnPlan) {
+            self.trouble = None;
+        }
+    }
+
     /// A sign-in from her just landed: her credentials are read again now (not after an answer
     /// on this model: that stands), and a login that ran out (`LOGGED OUT`) is in again.
     pub fn creds_now(&mut self, now: Instant) {
@@ -661,6 +669,9 @@ impl Link {
     /// The Settings page's MODEL: compared (and set) even when it is the persona already, as her
     /// session may have moved off it (his TUI set another).
     pub fn pick_persona(&mut self, p: Persona, now: Instant) -> Vec<Act> {
+        if p.model != self.opts.persona.model {
+            self.plan_behind();
+        }
         self.opts.persona = p;
         self.persona_done = None;
         self.persona_step(now)
@@ -912,6 +923,7 @@ impl Link {
                     self.creds = Creds::Unknown;
                     self.creds_by = Said::Read;
                     self.creds_read = None;
+                    self.plan_behind();
                 }
                 self.view = Some(attached.view.clone());
                 self.creds_at = (self.creds_by != Said::Answer).then_some(now);
@@ -1291,6 +1303,7 @@ impl Link {
             self.creds_by = Said::Read;
             self.creds_read = None;
             self.creds_at = Some(now);
+            self.plan_behind();
         }
         self.view = Some(view);
     }
@@ -2424,6 +2437,35 @@ mod tests {
         l.on_event(wire(1, serde_json::json!({"ev": "turn_started", "turn_baseline": 1, "trigger": "user", "user_text": "hi"})), t);
         l.on_event(wire(1, serde_json::json!({"ev": "stream", "event": {"kind": "session", "session": "error", "message": message}})), t);
         l.on_event(wire(1, serde_json::json!({"ev": "idle"})), t);
+    }
+
+    /// NOT ON YOUR PLAN is behind her once another model is hers: picked in Settings ▸ Brain ▸
+    /// MODEL (her persona's), or on her session from elsewhere (his TUI's /model). The same
+    /// persona again (a reload) keeps it.
+    #[test]
+    fn not_on_your_plan_clears_with_another_model() {
+        const REFUSED: &str = "codex request failed: 400 Bad Request [invalid_request_error/model_not_found] — this model isn't available on the selected ChatGPT account; switch account (`synaps auth use --provider openai-codex`) or model (/model).";
+        let t0 = Instant::now();
+        let sol = Persona { model: Some("openai-codex/gpt-6.1-sol".into()), ..persona() };
+        let terra = Persona { model: Some(crate::provider::CHATGPT_DEFAULT.0.into()), ..persona() };
+        let refused = || {
+            let mut l = Link::new(Options { persona: sol.clone(), ..opts() }, t0);
+            l.on_event(connected(), t0);
+            l.attaching(1);
+            l.on_event(mine(1, AttachMode::Observe, None, Some("capri"), Some(&sol)), t0);
+            failed_turn(&mut l, REFUSED, t0);
+            assert_eq!(l.trouble(), Some(&Trouble::NotOnPlan));
+            l
+        };
+        let mut l = refused();
+        l.set_persona(sol.clone(), t0);
+        l.pick_persona(Persona { thinking: Some("high".into()), ..sol.clone() }, t0);
+        assert_eq!(l.trouble(), Some(&Trouble::NotOnPlan), "her model as it was: still");
+        l.pick_persona(terra.clone(), t0);
+        assert_eq!(l.trouble(), None, "another picked");
+        let mut l = refused();
+        l.on_event(applied(1, "model", &terra), t0);
+        assert_eq!(l.trouble(), None, "another on her session");
     }
 
     /// The local server a LocalDown names, as she shows it: its path and any `user:password@`

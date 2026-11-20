@@ -77,6 +77,12 @@ pub fn retired(model: &str) -> Option<&'static str> {
     CHATGPT_RETIRED.contains(&model).then_some(CHATGPT_DEFAULT.0)
 }
 
+/// A model as her session gets it: a retired ChatGPT one (`retired`) is `CHATGPT_DEFAULT`, any
+/// other itself.
+pub fn unretired(model: String) -> String {
+    retired(&model).map_or(model, str::to_string)
+}
+
 /// Every provider: the accounts in SIGN IN's order (by name: none comes first by favour), the
 /// local server, then the API-key services (Synaps' `STATIC_PROVIDERS`). Their models are Synaps
 /// 0.12.0's own catalogs (the accounts' static ones, `agent-engine` `openai/catalog/*.rs` and
@@ -800,11 +806,13 @@ mod tests {
         }
         for m in CHATGPT_RETIRED {
             assert_eq!(retired(m), Some(CHATGPT_DEFAULT.0), "{m}");
+            assert_eq!(unretired(m.to_string()), CHATGPT_DEFAULT.0, "{m}");
             assert_eq!(of(m), Some(chatgpt), "{m}");
         }
         // Exactly those: not another provider's model of that name, nor one spelled otherwise.
         for m in ["github-copilot/gpt-5.5", "gpt-5.5", "openai-codex/gpt-5.5-pro", "openai-codex/GPT-5.5", " openai-codex/gpt-5.5", CHATGPT_DEFAULT.0, "openai-codex/gpt-5.6-luna"] {
             assert_eq!(retired(m), None, "{m}");
+            assert_eq!(unretired(m.to_string()), m, "{m}");
         }
         let mut ids: Vec<&str> = chatgpt.models.iter().map(|m| m.0).collect();
         ids.sort();

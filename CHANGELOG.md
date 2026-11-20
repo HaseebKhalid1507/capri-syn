@@ -11,16 +11,19 @@
   Nothing is picked for you: "Choose later" is still the default, and the order is the same.
 - **ChatGPT's default model is GPT-5.6 Terra**, one a free account runs her on (GPT-5.6 Luna, next in
   the list, too): a ChatGPT sign-in, from her Settings or her installers, puts her on it. The bigger
-  ones in MODEL's list (GPT-5.6 Sol, GPT-6 Astra, GPT-6.1 Sol) need a paid plan, and a model you
-  picked stays yours.
+  ones in MODEL's list (GPT-5.6 Sol, GPT-6 Astra, GPT-6.1 Sol) need a paid plan: on one, pick GPT-6.1
+  Sol in Settings ▸ Brain ▸ MODEL, OpenAI's recommendation for paid plans. A model you picked stays
+  yours.
 - **GPT-5.5, GPT-5.4, GPT-5.4 Mini and GPT-5.3 Codex Spark are gone from ChatGPT's list**: OpenAI
   retired them from ChatGPT sign-ins, for every plan. If her `[session] model` is one of those four
   (v1.1.0's ChatGPT default was GPT-5.5), it moves to GPT-5.6 Terra once as she starts, written back
-  to settings.toml, and her log says `model … is retired from ChatGPT sign-ins: now …`. Nothing else
-  is changed.
+  to settings.toml, and her log says `model … is retired from ChatGPT sign-ins: now …`. If
+  settings.toml can't be written she runs on Terra all the same, after a reload too, and `--model`
+  with one of the four is Terra as well. Nothing else is changed.
 - **A model your ChatGPT plan doesn't run reads as NOT ON YOUR PLAN.** She says "That model isn't on
   your ChatGPT plan. Pick another in Settings ▸ Brain ▸ MODEL." instead of Synaps' error, which
-  pointed at a `/model` her Line doesn't take. Only when her model is on ChatGPT.
+  pointed at a `/model` her Line doesn't take. Only when her model is on ChatGPT; it's gone as soon
+  as another model is hers.
 - **A provider's rate limit reads as one.** When ChatGPT, a key service or Gemini answers 429 Too Many
   Requests and Synaps' retries are spent, or Claude's stream says `rate_limit_error`, she says she's
   hit her model's limit (AT THE LIMIT), as for a used-up allowance.

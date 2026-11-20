@@ -762,13 +762,16 @@ fn persona_for(args: &Args, pack_dir: &std::path::Path) -> session::Persona {
 }
 
 /// The persona from `[session]` (and a model that overrides it); with voice on, the lines on
-/// writing for the ear (voice::PERSONA) follow it.
+/// writing for the ear (voice::PERSONA) follow it. A model retired from ChatGPT sign-ins is her
+/// ChatGPT default here (`provider::retired`), whatever path it came by: a settings.toml her
+/// start couldn't write (`settings::retire_model`) and a reload reads again, or `--model`.
 pub(crate) fn session_persona(s: &settings::SessionSettings, voice: &settings::VoiceSettings, model: Option<String>, pack_dir: &std::path::Path) -> session::Persona {
     let system = s.persona_text(pack_dir).unwrap_or_else(|e| {
         elog!("synaps-avatar: persona: {e:#}; none sent");
         None
     });
-    session::Persona { system: voice::persona(system, voice.enabled, voice.speak_unprompted), model: model.or_else(|| s.model.clone()), thinking: s.thinking.clone() }
+    let model = model.or_else(|| s.model.clone()).map(provider::unretired);
+    session::Persona { system: voice::persona(system, voice.enabled, voice.speak_unprompted), model, thinking: s.thinking.clone() }
 }
 
 /// Start the session link: the client and its pump live in the view.
@@ -797,7 +800,8 @@ fn connect_session(args: &Args, character: &str, persona: session::Persona, view
         name: me,
         remembered,
         cwd: args.cwd.clone(),
-        model: args.model.clone(),
+        // The model her session is made on, before the persona's: a retired one is the default.
+        model: args.model.clone().map(provider::unretired),
         sleepy_after: args.sleepy_after,
         persona,
         // `--socket`: maybe another machine's daemon (`tools/synaps-avatar-remote`).
@@ -830,7 +834,7 @@ fn fatal(why: startfail::Why, e: anyhow::Error) -> ! {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: gpui's glob exports a `test` attribute that would shadow `#[test]`.
-    use super::{Args, Coded, PathBuf, Result, SET_FAILED, SET_REFUSED, SET_USAGE, parse_args_from, provider, providers_table, session, session_model, set_exit, settings};
+    use super::{Args, Coded, PathBuf, Result, SET_FAILED, SET_REFUSED, SET_USAGE, parse_args_from, provider, providers_table, session, session_model, session_persona, set_exit, settings};
 
     fn parse(args: &[&str]) -> Result<Args> {
         parse_args_from(args.iter().map(|s| s.to_string()))
@@ -913,6 +917,28 @@ mod tests {
         assert_eq!((s.model.as_deref(), s.thinking.as_deref()), (Some("local/qwen3:8b"), Some("high")), "{text}");
         assert!(text.starts_with("# his\n[session]\n"), "{text}");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A retired ChatGPT model never reaches her session: `[session] model` (a reload of a file
+    /// her start couldn't write) or `--model`, it's her ChatGPT default; any other is as given.
+    #[test]
+    fn a_retired_model_never_reaches_her_session() {
+        let voice = settings::VoiceSettings::default();
+        let dir = std::path::Path::new("/nonexistent-pack");
+        let on = |m: Option<&str>, cli: Option<&str>| {
+            let s = settings::SessionSettings { model: m.map(str::to_string), persona: false, ..Default::default() };
+            session_persona(&s, &voice, cli.map(str::to_string), dir).model
+        };
+        for &old in provider::CHATGPT_RETIRED {
+            assert_eq!(on(Some(old), None).as_deref(), Some(provider::CHATGPT_DEFAULT.0), "[session] model {old}");
+            assert_eq!(on(None, Some(old)).as_deref(), Some(provider::CHATGPT_DEFAULT.0), "--model {old}");
+            assert_eq!(on(Some("claude-sonnet-4-6"), Some(old)).as_deref(), Some(provider::CHATGPT_DEFAULT.0), "--model {old} wins");
+        }
+        for keep in ["openai-codex/gpt-5.6-luna", "openai-codex/gpt-6.1-sol", "github-copilot/gpt-5.5", "claude-sonnet-4-6", "local/qwen3:8b"] {
+            assert_eq!(on(Some(keep), None).as_deref(), Some(keep));
+            assert_eq!(on(None, Some(keep)).as_deref(), Some(keep));
+        }
+        assert_eq!(on(None, None), None, "none picked: none");
     }
 
     /// `--providers`: provider.rs' table as her installers read it, in `ALL`'s order, each
