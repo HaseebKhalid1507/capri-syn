@@ -751,10 +751,13 @@ fn persona_for(args: &Args, pack_dir: &std::path::Path) -> session::Persona {
     if matches!(args.target, session::Target::Session(_)) {
         return session::Persona::default();
     }
-    let (s, voice) = settings::Settings::load().map(|s| (s.session, s.voice)).unwrap_or_else(|e| {
+    let (mut s, voice) = settings::Settings::load().map(|s| (s.session, s.voice)).unwrap_or_else(|e| {
         elog!("synaps-avatar: {e:#}; the session gets no persona settings");
         (settings::SessionSettings { persona: false, ..Default::default() }, Default::default())
     });
+    if let Some(line) = settings::retire_model(&settings::Settings::path(), &mut s) {
+        elog!("synaps-avatar: settings: {line}");
+    }
     session_persona(&s, &voice, args.model.clone(), pack_dir)
 }
 
@@ -892,7 +895,7 @@ mod tests {
     #[test]
     fn set_takes_a_model_synaps_routes() {
         let default = provider::CLAUDE.models[0].0;
-        for ok in [default, "openai-codex/gpt-5.5", "local/qwen3:8b", "local/qwen/qwen3-8b", " anthropic/claude-opus-5-5 "] {
+        for ok in [default, "openai-codex/gpt-5.6-luna", "local/qwen3:8b", "local/qwen/qwen3-8b", " anthropic/claude-opus-5-5 "] {
             assert!(parse(&["--set", &format!("session.model={ok}")]).is_ok(), "{ok}");
         }
         for bad in ["", "gpt-5.5", "nope/x", "local/", "/x", "claude sonnet", "local/q\u{1b}[31m", "openai-codex/gpt\t5"] {

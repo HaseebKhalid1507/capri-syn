@@ -84,7 +84,7 @@ When Synaps has no model yet (no login in `~/.synaps-cli/auth.json`, no `local/`
 or her `[session]`), it asks which brain, in your terminal. None is picked for you; Enter is later.
 
 1. **Sign in to an account**: ChatGPT (a free account works, as the list says: her model is then
-   its default, GPT-5.6 Luna, which a free account runs), Claude, Copilot, Gemini (when Synaps has
+   its default, GPT-5.6 Terra, which a free account runs), Claude, Copilot, Gemini (when Synaps has
    its Google client), Grok, Kimi or Muse: her own table's (`synaps-avatar --providers`,
    `src/provider.rs`' `ALL` in its order, a hint beside a name its last field), the same as her
    Settings ▸ Brain; the installers keep no copy. It runs

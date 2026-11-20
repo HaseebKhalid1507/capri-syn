@@ -459,6 +459,33 @@ fn account_blurb(to: &Provider) -> &'static str {
     }
 }
 
+/// An account's or a service's row, beside its name, while its sign-in runs and once it failed;
+/// Grok's on Windows (`signin::needs_newer`); a service's while its key is saved, once it wasn't,
+/// and with none. Each fits at the Line's narrowest (`login_word`).
+const SIGNING: &str = "SIGNING IN… · ⏎ STOP";
+const SIGN_IN_FAILED: &str = "DIDN'T WORK · ⏎ AGAIN";
+const NEEDS_NEWER: &str = "NEEDS A NEWER SYNAPS";
+const SAVING: &str = "SAVING…";
+const KEY_FAILED: &str = "DIDN'T TAKE · ⏎ AGAIN";
+const PASTE_A_KEY: &str = "paste a key";
+
+/// An account's or a service's row, beside its name, with no sign-in running: ✓ with a login
+/// here; IN USE on hers; her login ran out, a red dot and ⏎ to sign in again (Grok on Windows
+/// can't, `signin::needs_newer`; a key service's, a new key); else `blurb`, what it takes. Short
+/// enough to fit beside its name at the Line's narrowest (480 px leaves ~184 px, a mark's 16 of
+/// them): LOGGED OUT is SIGN IN's row's, above it (`LOGGED OUT · CHATGPT`), and her tag's.
+fn login_word(m: &provider::Status, to: &'static Provider, blurb: &'static str) -> (String, Option<&'static str>) {
+    match (m.has(to), m.provider() == Some(to)) {
+        (_, true) if m.expired && m.here && to.kind == Kind::Key => ("REFUSED · ⏎ NEW KEY".into(), Some("disc")),
+        (_, true) if m.expired && m.here && provider::signin::needs_newer(m.windows, to) => ("NEEDS NEWER SYNAPS".into(), Some("disc")),
+        (_, true) if m.expired && m.here => ("⏎ SIGN IN AGAIN".into(), Some("disc")),
+        (true, true) => ("IN USE".into(), Some("check")),
+        (true, false) => ("SIGNED IN".into(), Some("check")),
+        _ if !m.here => ("ON ITS MACHINE".into(), None),
+        _ => (blurb.into(), None),
+    }
+}
+
 /// An account's or a service's row: what ⏎ on it does. One with a login here, not hers: switch
 /// her to it (its default model). Without one: sign in (an account: in his browser; a service:
 /// its key in her field), not for a daemon on another machine (a sign-in here wouldn't reach
@@ -1286,19 +1313,7 @@ impl Line {
                         .child(div().w(px(14.0)).flex().justify_center().child(theme::glyph_at(arrow, if live { pal.accent } else { c }, pal.panel, 9.0)))
                         .into_any_element()
                 };
-                // ✓ on a provider with a login here; IN USE on hers (its login ran out: a red dot
-                // and ⏎ to sign in again; Grok on Windows can't, `signin::needs_newer`).
-                let state = |to: &'static Provider, blurb: &str| -> (String, Option<&'static str>) {
-                    match (m.has(to), m.provider() == Some(to)) {
-                        (_, true) if m.expired && m.here && to.kind == Kind::Key => ("KEY TURNED DOWN · ⏎ NEW KEY".into(), Some("disc")),
-                        (_, true) if m.expired && m.here && provider::signin::needs_newer(m.windows, to) => ("LOGGED OUT · NEEDS A NEWER SYNAPS".into(), Some("disc")),
-                        (_, true) if m.expired && m.here => ("LOGGED OUT · ⏎ SIGN IN AGAIN".into(), Some("disc")),
-                        (true, true) => ("IN USE".into(), Some("check")),
-                        (true, false) => ("SIGNED IN".into(), Some("check")),
-                        _ if !m.here => ("ON ITS MACHINE".into(), None),
-                        _ => (blurb.into(), None),
-                    }
-                };
+                let state = |to: &'static Provider, blurb: &'static str| login_word(m, to, blurb);
                 // Its sign-in, running or failed: in place of what it takes.
                 let running = |to: &'static Provider| p.signing.as_ref().filter(|s| s.id == to.id);
                 let target = if r.inside() { &mut fold } else { &mut out };
@@ -1336,10 +1351,10 @@ impl Line {
                                         .into_any_element(),
                                 );
                             }
-                            Some(sg) if sg.failed.is_none() => target.push(way(&name, "SIGNING IN… · ⏎ STOP".into(), None, true, None)),
-                            Some(_) => target.push(way(&name, "DIDN'T WORK · ⏎ AGAIN".into(), Some("disc"), true, None)),
+                            Some(sg) if sg.failed.is_none() => target.push(way(&name, SIGNING.into(), None, true, None)),
+                            Some(_) => target.push(way(&name, SIGN_IN_FAILED.into(), Some("disc"), true, None)),
                             // Grok on Windows: Synaps 0.12.0 can't open its page whole.
-                            None if !m.has(to) && m.here && provider::signin::needs_newer(m.windows, to) => target.push(way(&name, "NEEDS A NEWER SYNAPS".into(), None, false, None)),
+                            None if !m.has(to) && m.here && provider::signin::needs_newer(m.windows, to) => target.push(way(&name, NEEDS_NEWER.into(), None, false, None)),
                             None => {
                                 let (b, mark) = state(to, account_blurb(to));
                                 target.push(way(&name, b, mark, m.here || m.has(to), None));
@@ -1360,10 +1375,10 @@ impl Line {
                         let Some(to) = provider::services().nth(i) else { continue };
                         let name = format!("   {}", to.name.to_uppercase());
                         match running(to) {
-                            Some(sg) if sg.failed.is_none() => target.push(way(&name, "SAVING…".into(), None, true, None)),
-                            Some(_) => target.push(way(&name, "DIDN'T TAKE · ⏎ AGAIN".into(), Some("disc"), true, None)),
+                            Some(sg) if sg.failed.is_none() => target.push(way(&name, SAVING.into(), None, true, None)),
+                            Some(_) => target.push(way(&name, KEY_FAILED.into(), Some("disc"), true, None)),
                             None => {
-                                let (b, mark) = state(to, "paste a key");
+                                let (b, mark) = state(to, PASTE_A_KEY);
                                 let (b, mark) = if mark.is_some() && b == "SIGNED IN" { ("KEY SET".to_string(), mark) } else { (b, mark) };
                                 target.push(way(&name, b, mark, m.here || m.has(to), None));
                             }
@@ -1704,8 +1719,10 @@ pub fn brain_word(m: &provider::Status) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Act, BrainRow, FLASH, Fold, MenuSave, Mode, Nav, Note, Page, Pref, Prefs, SetRow, Signing, account_blurb, asked, asked_model, brain_hint, brain_key, brain_landing, brain_line, brain_reselect, brain_rows, brain_word, esc_closes, hint, hold_fires, key_word, list_key, next_attention, page_left, set_rows, spot_lift};
-    use crate::provider::{self, Local, Lock, Status};
+    use super::{
+        Act, BrainRow, FLASH, Fold, KEY_FAILED, MenuSave, Mode, NEEDS_NEWER, Nav, Note, PASTE_A_KEY, Page, Pref, Prefs, SAVING, SIGN_IN_FAILED, SIGNING, SetRow, Signing, account_blurb, asked, asked_model, brain_hint, brain_key, brain_landing, brain_line, brain_reselect, brain_rows, brain_word, esc_closes, hint, hold_fires, key_word, list_key, login_word, next_attention, page_left, set_rows, spot_lift,
+    };
+    use crate::provider::{self, Kind, Local, Lock, Status};
     use crate::settings::{Attention, Settings, WriteQueue, write_at};
 
     #[test]
@@ -1886,8 +1903,7 @@ mod tests {
     }
 
     /// SIGN IN's accounts, no login yet: ChatGPT's row says a free account will do (its hint,
-    /// `Provider::hint`); no other account's has one. Each fits beside its name at the Line's
-    /// narrowest (480 px: ~184 px; Copilot's 24 characters, the longest, are ~160 px).
+    /// `Provider::hint`); no other account's has one.
     #[test]
     fn chatgpt_says_a_free_account_works() {
         assert_eq!(account_blurb(provider::by_id("openai-codex").unwrap()), "free account works");
@@ -1895,8 +1911,65 @@ mod tests {
         assert_eq!(account_blurb(provider::by_id("github-copilot").unwrap()), "browser · a code to type");
         for to in provider::accounts() {
             let b = account_blurb(to);
-            assert!(b.chars().count() <= 24, "{}: `{b}` overflows its row at 480 px", to.id);
             assert_eq!(b.contains("free"), to.id == "openai-codex", "{}: {b}", to.id);
+        }
+    }
+
+    /// A row's word as wide as the Brain screen draws it, never narrower: Exo 2 Bold at `SMALL`
+    /// (12 px; ⏎ DejaVu Sans Bold's), each glyph rounded up, 1 px of tracking (`tracked`); a mark
+    /// (✓, a red dot) and its gap, 16 px.
+    fn word_w(text: &str, mark: bool) -> f32 {
+        let glyph = |c: char| match c {
+            '.' | ',' | '\'' | ' ' => 3.0,
+            'I' | 'i' | 'j' | 'l' | '·' | ':' | '!' => 4.0,
+            'J' | 'f' | 't' | '(' | ')' | '-' => 5.0,
+            'r' | '1' => 6.0,
+            'E' | 'F' | 'L' | 'a' | 'c' | 'e' | 'g' | 'k' | 's' | 'v' | 'x' | 'y' | 'z' | '2' | '3' | '5' | '7' | '/' | '+' | '?' => 7.0,
+            'D' | 'H' | 'N' | 'O' | 'Q' | 'U' => 9.0,
+            'M' | 'm' | 'w' | '…' | '⏎' => 11.0,
+            'W' | '#' | '%' | '&' | '@' => 12.0,
+            c if c.is_ascii() => 8.0,
+            _ => 12.0,
+        };
+        text.chars().map(|c| glyph(c) + 1.0).sum::<f32>() + if mark { 16.0 } else { 0.0 }
+    }
+
+    /// Every word an account's or a service's row shows fits beside its name at the Line's
+    /// narrowest (480 px: 2 × 14 of padding, the name's 230, the arrow's 14 and 3 gaps of 8 leave
+    /// 184): what it takes, each login state (hers or not, a login or none, ran out, on its
+    /// machine; on Windows and not), its sign-in running or failed, a key being saved.
+    #[test]
+    fn every_rows_word_fits_beside_its_name() {
+        const BESIDE: f32 = 184.0;
+        let fits = |w: &str, mark: Option<&str>| {
+            let px = word_w(w, mark.is_some());
+            assert!(px <= BESIDE, "`{w}`{}: {px} px, beside its name at 480 px: {BESIDE}", if mark.is_some() { " and its mark" } else { "" });
+        };
+        assert_eq!(word_w("LOGGED OUT · ⏎ SIGN IN AGAIN", true), 230.0, "what it read: over by 46");
+        for (w, mark) in [(SIGNING, None), (SIGN_IN_FAILED, Some("disc")), (NEEDS_NEWER, None), (SAVING, None), (KEY_FAILED, Some("disc")), ("KEY SET", Some("check"))] {
+            fits(w, mark);
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for to in provider::accounts().chain(provider::services()) {
+            let blurb = if to.kind == Kind::Key { PASTE_A_KEY } else { account_blurb(to) };
+            for bits in 0..32u8 {
+                let on = |i: u8| bits & (1 << i) != 0;
+                let m = Status {
+                    model: Some(if on(0) { format!("{}/x", to.id) } else { "local/qwen3:8b".into() }),
+                    signed_in: Some(on(1)),
+                    signed: if on(1) { vec![to.id] } else { Vec::new() },
+                    expired: on(2),
+                    here: on(3),
+                    windows: on(4),
+                    ..Status::default()
+                };
+                let (w, mark) = login_word(&m, to, blurb);
+                fits(&w, mark);
+                seen.insert(w);
+            }
+        }
+        for w in ["⏎ SIGN IN AGAIN", "REFUSED · ⏎ NEW KEY", "NEEDS NEWER SYNAPS", "IN USE", "SIGNED IN", "ON ITS MACHINE", "free account works", "paste a key"] {
+            assert!(seen.contains(w), "`{w}` among them: {seen:?}");
         }
     }
 
@@ -1944,10 +2017,10 @@ mod tests {
         assert_eq!(brain_hint(&q, 1, in_), "↑↓ pick · ⏎ switch to it · ← close · esc back");
         assert_eq!(brain_key("enter", 2, &q, in_), (2, Act::Nothing), "Claude is hers already");
         // On ChatGPT: Claude's row (its login on file) switches back.
-        let mut r = Prefs { mind: mind("openai-codex/gpt-5.5", Some(true)), ..prefs() };
+        let mut r = Prefs { mind: mind("openai-codex/gpt-5.6-luna", Some(true)), ..prefs() };
         r.mind.signed.push("anthropic");
         assert_eq!(brain_key("enter", 2, &r, in_), (2, Act::Pref(Pref::Model("claude-sonnet-4-6"))));
-        assert_eq!(brain_word(&r.mind), "CHATGPT · GPT-5.5");
+        assert_eq!(brain_word(&r.mind), "CHATGPT · GPT-5.6 LUNA");
         // Locked: started with --model, or riding his session.
         for lock in [Lock::Cli, Lock::Theirs] {
             let mut l = prefs();

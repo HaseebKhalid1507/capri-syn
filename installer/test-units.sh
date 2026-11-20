@@ -814,7 +814,7 @@ case $1 in
     # HER_OLD: a build before --providers.
     --providers)
         [ -z "${HER_OLD:-}" ] || exit 1
-        printf 'openai-codex\topenai-codex\taccount\topenai-codex/gpt-5.6-luna\tChatGPT\tbrowser\tfree account works\n'
+        printf 'openai-codex\topenai-codex\taccount\topenai-codex/gpt-5.6-terra\tChatGPT\tbrowser\tfree account works\n'
         printf 'anthropic\tclaude\taccount\tclaude-sonnet-4-6\tClaude\tbrowser\t\n'
         printf 'github-copilot\tgithub-copilot\taccount\tgithub-copilot/claude-sonnet-4.6\tCopilot\tcode\n'
         printf 'google-gemini\tgoogle-gemini\taccount\tgoogle-gemini/gemini-2.5-pro\tGemini\tbrowser\n'
@@ -869,7 +869,7 @@ LM Studio|http://localhost:1234/v1|http://127.0.0.1:$pl/v1/models"
     t0=$(date +%s%N)
     TTYIN=$b/none BRAIN_PICK=openai-codex brains
     took=$(ms)
-    check "$([ "$(cat "$SYNAPS_BASE_DIR/args")" = 'login --provider openai-codex' ] && [ "$(cat "$SYNAPS_BASE_DIR/her")" = 'session.model=openai-codex/gpt-5.6-luna' ] && echo 0)" \
+    check "$([ "$(cat "$SYNAPS_BASE_DIR/args")" = 'login --provider openai-codex' ] && [ "$(cat "$SYNAPS_BASE_DIR/her")" = 'session.model=openai-codex/gpt-5.6-terra' ] && echo 0)" \
         "--brain openai-codex: signed in, her model its default: $(said)"
     check "$([ "$(cat "$SYNAPS_BASE_DIR/stdin" 2>/dev/null)" = closed ] && [ "$took" -lt 5000 ] && ! command pgrep -P "$me" -fx 'sleep 900' >/dev/null && echo 0)" \
         "signed in: synaps' stdin closed, so it ends (${took} ms; its stdin $(cat "$SYNAPS_BASE_DIR/stdin" 2>/dev/null || echo '?'); the holder $(command pgrep -P "$me" -fx 'sleep 900' >/dev/null && echo 'still there' || echo gone))"
@@ -976,7 +976,7 @@ INT
     RAN=() RUN_REAL=0
     DRY=1 TTYIN=$b/none BRAIN_PICK=openai-codex brains
     check "$([ ! -e "$SYNAPS_BASE_DIR/args" ] && [ ! -e "$SYNAPS_BASE_DIR/her" ] && [ "${RAN[0]}" = "$SYNAPS login --provider openai-codex" ] &&
-        [ "${RAN[1]}" = "$BIN/synaps-avatar --set session.model=openai-codex/gpt-5.6-luna" ] && echo 0)" "--dry-run: the sign-in and her model through run, not run: $([ -e "$SYNAPS_BASE_DIR/args" ] && echo "(synaps ran: $(cat "$SYNAPS_BASE_DIR/args")) ")$([ -e "$SYNAPS_BASE_DIR/her" ] && echo "(her set: $(cat "$SYNAPS_BASE_DIR/her")) ")${RAN[*]}"
+        [ "${RAN[1]}" = "$BIN/synaps-avatar --set session.model=openai-codex/gpt-5.6-terra" ] && echo 0)" "--dry-run: the sign-in and her model through run, not run: $([ -e "$SYNAPS_BASE_DIR/args" ] && echo "(synaps ran: $(cat "$SYNAPS_BASE_DIR/args")) ")$([ -e "$SYNAPS_BASE_DIR/her" ] && echo "(her set: $(cat "$SYNAPS_BASE_DIR/her")) ")${RAN[*]}"
     xargs kill <"$b/servers" 2>/dev/null
     exit "$fails"
 ) || fails=$((fails + $?))

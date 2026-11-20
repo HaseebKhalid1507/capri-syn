@@ -25,7 +25,7 @@ pub enum Kind {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Provider {
-    /// Synaps' id: `auth.json`'s key and the model's prefix (`openai-codex/gpt-5.5`). Claude is
+    /// Synaps' id: `auth.json`'s key and the model's prefix (`openai-codex/gpt-5.6-terra`). Claude is
     /// `anthropic` (and its models may be bare: `claude-sonnet-4-6`).
     pub id: &'static str,
     /// What `synaps login --provider` takes (Claude: `claude`).
@@ -62,9 +62,20 @@ pub const LOCAL: Provider = Provider { id: "local", login: "local", name: "Local
 
 /// ChatGPT's default, the head of its MODEL list (what a ChatGPT sign-in switches her to, and her
 /// installers' `--set session.model=`): a model a free ChatGPT account runs her on (measured on
-/// Synaps 0.12.0). Not `gpt-6-luna` yet: Synaps 0.12.0 has no capability row for it and refuses it
+/// Synaps 0.12.0: GPT-5.6 Terra and Luna answer a free account; the others in its list need a
+/// paid plan). Not `gpt-6-luna` yet: Synaps 0.12.0 has no capability row for it and refuses it
 /// ("no capability metadata"). A swap is this line.
-pub const CHATGPT_DEFAULT: (&str, &str) = ("openai-codex/gpt-5.6-luna", "GPT-5.6 LUNA");
+pub const CHATGPT_DEFAULT: (&str, &str) = ("openai-codex/gpt-5.6-terra", "GPT-5.6 TERRA");
+
+/// ChatGPT models retired from Codex for every ChatGPT sign-in (OpenAI's models page; Synaps
+/// 0.12.0 answers `400 … [invalid_request_error/model_not_found]`): out of her list, and a
+/// `[session] model` of one moves to `CHATGPT_DEFAULT` (`settings::retire_model`).
+pub const CHATGPT_RETIRED: &[&str] = &["openai-codex/gpt-5.5", "openai-codex/gpt-5.4", "openai-codex/gpt-5.4-mini", "openai-codex/gpt-5.3-codex-spark"];
+
+/// The model a retired ChatGPT one (`CHATGPT_RETIRED`, exactly) moves to: `CHATGPT_DEFAULT`.
+pub fn retired(model: &str) -> Option<&'static str> {
+    CHATGPT_RETIRED.contains(&model).then_some(CHATGPT_DEFAULT.0)
+}
 
 /// Every provider: the accounts in SIGN IN's order (by name: none comes first by favour), the
 /// local server, then the API-key services (Synaps' `STATIC_PROVIDERS`). Their models are Synaps
@@ -73,11 +84,9 @@ pub const CHATGPT_DEFAULT: (&str, &str) = ("openai-codex/gpt-5.6-luna", "GPT-5.6
 /// each one's first is what a sign-in switches her to.
 pub static ALL: &[Provider] = &[
     oauth("openai-codex", "openai-codex", "ChatGPT", &[], &[
-            CHATGPT_DEFAULT, ("openai-codex/gpt-6.1-sol", "GPT-6.1 SOL"),
-            ("openai-codex/gpt-6-astra", "GPT-6 ASTRA"), ("openai-codex/gpt-5.6-sol", "GPT-5.6 SOL"),
-            ("openai-codex/gpt-5.6-terra", "GPT-5.6 TERRA"), ("openai-codex/gpt-5.5", "GPT-5.5"),
-            ("openai-codex/gpt-5.4", "GPT-5.4"), ("openai-codex/gpt-5.4-mini", "GPT-5.4 MINI"),
-            ("openai-codex/gpt-5.3-codex-spark", "GPT-5.3 CODEX SPARK"),
+            CHATGPT_DEFAULT, ("openai-codex/gpt-5.6-luna", "GPT-5.6 LUNA"),
+            ("openai-codex/gpt-6.1-sol", "GPT-6.1 SOL"), ("openai-codex/gpt-6-astra", "GPT-6 ASTRA"),
+            ("openai-codex/gpt-5.6-sol", "GPT-5.6 SOL"),
         ]),
     CLAUDE,
     oauth("github-copilot", "github-copilot", "Copilot", &[], &[
@@ -719,7 +728,7 @@ mod tests {
     fn a_model_runs_on_the_provider_synaps_routes_it_to() {
         assert_eq!(of("claude-sonnet-4-6").map(|p| p.name), Some("Claude"));
         assert_eq!(of("anthropic/claude-opus-5-5").map(|p| p.name), Some("Claude"));
-        assert_eq!(of("openai-codex/gpt-5.5").map(|p| p.name), Some("ChatGPT"));
+        assert_eq!(of("openai-codex/gpt-5.6-terra").map(|p| p.name), Some("ChatGPT"));
         assert_eq!(of("xai-auth/grok-4.3").map(|p| p.name), Some("Grok"));
         assert_eq!(of("kimi-code/k3").map(|p| p.name), Some("Kimi"));
         assert_eq!(of("kimi/kimi-k3.1-pro").map(|p| p.name), Some("Moonshot"), "the API key, not the Kimi Code account");
@@ -774,16 +783,28 @@ mod tests {
         }
     }
 
-    /// ChatGPT's default heads its list (a sign-in's switch, `--providers`' default), and every
-    /// model on it is one Synaps 0.12.0 has a capability row for (`openai/catalog/codex.rs`
-    /// `codex_static_capability`): it refuses another (`gpt-6-luna`: "no capability metadata").
+    /// ChatGPT's default heads its list (a sign-in's switch, `--providers`' default), then the
+    /// other model a free account runs (measured: Terra, Luna; the rest a paid plan's). Every model
+    /// on it is one Synaps 0.12.0 has a capability row for (`openai/catalog/codex.rs`
+    /// `codex_static_capability`; it refuses another: `gpt-6-luna`, "no capability metadata"),
+    /// and none retired from ChatGPT sign-ins (`CHATGPT_RETIRED`), which move to the default.
     #[test]
     fn chatgpt_runs_on_models_synaps_knows() {
         let chatgpt = by_id("openai-codex").unwrap();
         assert_eq!(chatgpt.models[0], CHATGPT_DEFAULT);
+        assert_eq!(chatgpt.models.iter().map(|m| m.0).collect::<Vec<_>>(), ["openai-codex/gpt-5.6-terra", "openai-codex/gpt-5.6-luna", "openai-codex/gpt-6.1-sol", "openai-codex/gpt-6-astra", "openai-codex/gpt-5.6-sol"]);
         let known = ["gpt-6.1-sol", "gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"];
         for (m, _) in chatgpt.models {
             assert!(known.iter().any(|k| m.strip_prefix("openai-codex/") == Some(*k)), "{m}: not in Synaps 0.12.0's Codex table");
+            assert_eq!(retired(m), None, "{m}: retired from ChatGPT sign-ins");
+        }
+        for m in CHATGPT_RETIRED {
+            assert_eq!(retired(m), Some(CHATGPT_DEFAULT.0), "{m}");
+            assert_eq!(of(m), Some(chatgpt), "{m}");
+        }
+        // Exactly those: not another provider's model of that name, nor one spelled otherwise.
+        for m in ["github-copilot/gpt-5.5", "gpt-5.5", "openai-codex/gpt-5.5-pro", "openai-codex/GPT-5.5", " openai-codex/gpt-5.5", CHATGPT_DEFAULT.0, "openai-codex/gpt-5.6-luna"] {
+            assert_eq!(retired(m), None, "{m}");
         }
         let mut ids: Vec<&str> = chatgpt.models.iter().map(|m| m.0).collect();
         ids.sort();
@@ -794,7 +815,8 @@ mod tests {
     #[test]
     fn a_model_is_named_by_its_label_or_itself() {
         assert_eq!(model_label("claude-sonnet-4-6"), "SONNET 4.6");
-        assert_eq!(model_label("openai-codex/gpt-5.5"), "GPT-5.5");
+        assert_eq!(model_label("openai-codex/gpt-5.6-terra"), "GPT-5.6 TERRA");
+        assert_eq!(model_label("openai-codex/gpt-5.5"), "GPT-5.5", "out of the table: itself");
         assert_eq!(model_label("local/qwen3:8b"), "QWEN3:8B");
         assert_eq!(model_label("claude-opus-4-1"), "OPUS 4.1");
         assert_eq!(model_label("anthropic/claude-haiku-4-5"), "HAIKU 4.5", "the table's, its date aside");
@@ -803,7 +825,8 @@ mod tests {
         assert_eq!(model_label("groq/llama-3.1-8b-instant"), "LLAMA 3.1 8B");
         assert_eq!(model_label("groq/qwen-x"), "QWEN-X", "not in the table: itself");
         assert_eq!(model_spoken("claude-opus-5-5"), "Opus 5.5");
-        assert_eq!(model_spoken("openai-codex/gpt-5.4-mini"), "GPT-5.4 Mini");
+        assert_eq!(model_spoken("github-copilot/gpt-5.4-mini"), "GPT-5.4 Mini");
+        assert_eq!(model_spoken("openai-codex/gpt-5.6-terra"), "GPT-5.6 Terra");
         assert_eq!(model_spoken("openai-codex/gpt-5.5"), "GPT-5.5");
         assert_eq!(model_spoken("kimi-code/k3-256k"), "K3 256K");
     }

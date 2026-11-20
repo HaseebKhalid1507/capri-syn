@@ -1469,6 +1469,9 @@ pub enum Trouble {
     LoggedOut,
     /// The provider's rate or usage limit.
     Limited,
+    /// Her ChatGPT model isn't one her account runs: a paid plan's, or one retired from ChatGPT
+    /// sign-ins (Synaps' Codex `model_not_found`). Another model, picked in Settings ▸ Brain.
+    NotOnPlan,
     /// The provider is overloaded or erroring (5xx).
     Swamped,
     /// The model can't be reached (network, timeout, a dropped stream).
@@ -1539,12 +1542,32 @@ impl Trouble {
             }
             return Some(Trouble::LoggedOut);
         }
+        // Her model's provider: an account's refusal is hers to sign in again (or pick another
+        // model) only where it's her model's account; another's (a tool's, a sub-agent's) shows
+        // as it is: SIGN IN AGAIN would sign in hers.
+        let mine = model.and_then(crate::provider::of).map(|p| p.id);
         // Synaps 0.12: ChatGPT's 401 once its retries are spent (`codex request failed: 401
-        // Unauthorized`), and a Responses stream's auth failure (`Codex authentication rejected in
-        // stream. Sign in again …`; xAI's and Muse's the same). A 403, a 400 or a 404 isn't a
-        // login: an account or a model turned away, its own words shown.
-        if m.contains(" authentication rejected in stream") || says_status(&m, "codex request failed: ", &["401"]) {
+        // Unauthorized`), and a Responses stream's auth failure, by Synaps' label for the account
+        // (stream.rs `for_provider`: `Codex authentication rejected in stream. Sign in again …`;
+        // xAI's, Meta Muse's). A 403, a 400 or a 404 isn't a login: an account or a model turned
+        // away.
+        let rejected = [("openai-codex", "codex"), ("xai-auth", "xai"), ("muse", "meta muse")]
+            .iter()
+            .any(|&(id, label)| mine == Some(id) && m.contains(&format!("{label} authentication rejected in stream")));
+        if rejected || (mine == Some("openai-codex") && says_status(&m, "codex request failed: ", &["401"])) {
             return Some(Trouble::LoggedOut);
+        }
+        // Synaps 0.12's Codex wire (codex_wire.rs), a model her ChatGPT account doesn't run: a
+        // paid plan's or a retired one, `400 Bad Request [invalid_request_error/model_not_found] —
+        // this model isn't available on the selected ChatGPT account; …` (measured, a free
+        // account), or a `[model_not_found]` with "the backend doesn't know this model for this
+        // account". ChatGPT's alone: these are its words, and "plan" is a ChatGPT account's; a key
+        // service's 404 or model_not_found (a typo, an endpoint) has other fixes.
+        if mine == Some("openai-codex")
+            && m.contains("codex request failed: ")
+            && any(&["isn't available on the selected chatgpt account", "doesn't know this model for this account", "model_not_found]"])
+        {
+            return Some(Trouble::NotOnPlan);
         }
         // `can't reach local endpoint at http://localhost:11434/v1/… — is Ollama/LM Studio running?`
         if m.contains("reach local endpoint") {
@@ -1567,7 +1590,9 @@ impl Trouble {
             // `reports the model is at capacity`: Synaps 0.12's in-stream capacity failure (a Codex
             // `rate_limit_exceeded`, or an overload, its retries spent; RESPONSES_CAPACITY_SUFFIX).
             Some(Trouble::Swamped)
-        } else if any(&["could not reach", "timed out", "connection failed", "connection lost"]) {
+        } else if any(&["could not reach", "timed out", "connection failed", "connection lost"]) || says_status(&m, "request failed: ", &["408"]) {
+            // A 408 (Request Timeout), transient to Synaps too, its retries spent: a timeout, not
+            // a busy model.
             Some(Trouble::Offline)
         } else {
             None
@@ -1597,6 +1622,7 @@ impl Trouble {
             Trouble::NoPick => "no_pick",
             Trouble::LoggedOut => "logged_out",
             Trouble::Limited => "limited",
+            Trouble::NotOnPlan => "not_on_plan",
             Trouble::Swamped => "swamped",
             Trouble::Offline => "offline",
             Trouble::LocalDown { .. } => "local_down",
@@ -1628,6 +1654,9 @@ impl Trouble {
             // Signed in again from her (Settings ▸ Brain: her account's row), no terminal.
             Trouble::LoggedOut => format!("My login ran out. Sign me in again:\n`{}`", crate::line::SIGN_IN_AGAIN),
             Trouble::Limited => "Hit my model's limit for now. Give it a bit, then ask me again.".into(),
+            // Not `/model`: the Line takes no slash commands. MODEL lists hers (Terra and Luna run
+            // on a free account).
+            Trouble::NotOnPlan => "That model isn't on your ChatGPT plan. Pick another in Settings ▸ Brain ▸ MODEL.".into(),
             Trouble::Swamped => "My model's swamped right now. Try me again in a minute.".into(),
             Trouble::Offline => "Can't reach my model. Check the connection, then ask me again.".into(),
             Trouble::LocalDown { ollama: true } => "Ollama's not answering, so I've got no brain. Start Ollama, then ask me again.".into(),
@@ -1650,6 +1679,7 @@ impl Trouble {
             Trouble::NoBrain { .. } | Trouble::NoPick => "NO BRAIN YET",
             Trouble::LoggedOut => "LOGGED OUT",
             Trouble::Limited => "AT THE LIMIT",
+            Trouble::NotOnPlan => "NOT ON YOUR PLAN",
             Trouble::Swamped => "MODEL BUSY",
             Trouble::Offline => "NO CONNECTION",
             Trouble::LocalDown { ollama: true } => "OLLAMA IS OFF",
@@ -1667,6 +1697,7 @@ impl Trouble {
             Trouble::NoPick => "once I have a brain, ↑ resends your message",
             Trouble::LocalDown { .. } => "once it's up, ↑ resends your message",
             Trouble::ModelMissing { .. } => "once it's pulled, ↑ resends your message",
+            Trouble::NotOnPlan => "another model picked, ↑ resends your message",
             _ => "↑ resends your message",
         }
     }
@@ -1675,7 +1706,7 @@ impl Trouble {
     /// trouble annoys her.
     fn mood(&self) -> Mood {
         match self {
-            Trouble::NoBrain { .. } | Trouble::NoPick | Trouble::LoggedOut | Trouble::LocalDown { .. } | Trouble::ModelMissing { .. } | Trouble::WrongModel => Mood::Idle,
+            Trouble::NoBrain { .. } | Trouble::NoPick | Trouble::LoggedOut | Trouble::NotOnPlan | Trouble::LocalDown { .. } | Trouble::ModelMissing { .. } | Trouble::WrongModel => Mood::Idle,
             _ => Mood::Annoyed,
         }
     }
@@ -2458,19 +2489,39 @@ mod tests {
             ("xai-auth: rate limited (HTTP 429). Wait for the limit to reset, or switch models with /model.", Some("xai-auth/grok-4.3"), Some(Trouble::Limited)),
             ("API error: codex request failed: 429: too many", CODEX, Some(Trouble::Limited)),
             // v0.12.0, ChatGPT's login turned down: its 401 (retries spent), or in the stream
-            // (RESPONSES_AUTH_SUFFIX; xAI's the same): sign in again.
+            // (RESPONSES_AUTH_SUFFIX; xAI's and Meta Muse's the same): sign in again, where it's
+            // her model's account. Another's (her session on Claude, or not known yet) shows as
+            // it is: SIGN IN AGAIN would sign in hers.
             ("codex request failed: 401 Unauthorized", CODEX, Some(Trouble::LoggedOut)),
             ("API error: codex request failed: 401: unauthorized", CODEX, Some(Trouble::LoggedOut)),
             ("Codex authentication rejected in stream. Sign in again or switch to an available account.", CODEX, Some(Trouble::LoggedOut)),
             ("xAI authentication rejected in stream. Sign in again or switch to an available account.", Some("xai-auth/grok-4.3"), Some(Trouble::LoggedOut)),
+            ("Meta Muse authentication rejected in stream. Sign in again or switch to an available account.", Some("muse/muse-wonder-1.0"), Some(Trouble::LoggedOut)),
+            ("codex request failed: 401 Unauthorized", CLAUDE, None),
+            ("codex request failed: 401 Unauthorized", None, None),
+            ("Codex authentication rejected in stream. Sign in again or switch to an available account.", CLAUDE, None),
+            ("xAI authentication rejected in stream. Sign in again or switch to an available account.", CODEX, None),
+            // v0.12.0's Codex wire (codex_wire.rs), a model her ChatGPT account doesn't run:
+            // measured, a free account on GPT-5.5 (retired from ChatGPT sign-ins) and on a paid
+            // plan's (GPT-5.6 Sol, GPT-6 Astra, GPT-6.1 Sol), all this; and `model_not_found` in
+            // a 404. A model to pick in Settings ▸ Brain, ChatGPT's only: another provider's
+            // model_not_found, or this text on another model, shows as it is.
+            ("codex request failed: 400 Bad Request [invalid_request_error/model_not_found] — this model isn't available on the selected ChatGPT account; switch account (`synaps auth use --provider openai-codex`) or model (/model).", Some("openai-codex/gpt-5.5"), Some(Trouble::NotOnPlan)),
+            ("codex request failed: 400 Bad Request [invalid_request_error/model_not_found] — this model isn't available on the selected ChatGPT account; switch account (`synaps auth use --provider openai-codex`) or model (/model).", Some("openai-codex/gpt-6.1-sol"), Some(Trouble::NotOnPlan)),
+            ("API error: codex request failed: 400 Bad Request [invalid_request_error] — this model isn't available on the selected ChatGPT account; switch account (`synaps auth use --provider openai-codex`) or model (/model).", CODEX, Some(Trouble::NotOnPlan)),
+            ("codex request failed: 404 Not Found [model_not_found] — the backend doesn't know this model for this account; pick another with /model.", Some("openai-codex/gpt-429"), Some(Trouble::NotOnPlan)),
+            ("codex request failed: 404 Not Found [invalid_request_error/model_not_found]", CODEX, Some(Trouble::NotOnPlan)),
+            ("codex request failed: 400 Bad Request [invalid_request_error/model_not_found] — this model isn't available on the selected ChatGPT account; switch account (`synaps auth use --provider openai-codex`) or model (/model).", CLAUDE, None),
+            ("openai request failed: broker transport error: provider request failed: 404 Not Found [model_not_found]", Some("groq/llama-3.3-70b-versatile"), None),
+            ("openai request failed: broker transport error: provider request failed: 400 Bad Request [invalid_request_error/model_not_found]", Some("openrouter/acme/x"), None),
             // ChatGPT turning the account or its model away isn't a limit, nor a login
             // (codex_wire.rs: a 403, a model the account doesn't have). Nor is a 429 in a path, an
             // id or a name; nor another provider's 401 (a key's: not hers to sign in again).
             ("codex request failed: 403 Forbidden", CODEX, None),
+            ("codex request failed: 403 Forbidden [usage_not_included]", CODEX, None),
             ("codex request failed: 4010 Unknown", CODEX, None),
             ("openai request failed: broker transport error: provider request failed: 401 Unauthorized", Some("groq/llama-3.3-70b-versatile"), None),
-            ("codex request failed: 400 Bad Request [invalid_request_error] — this model isn't available on the selected ChatGPT account; switch account (`synaps auth use --provider openai-codex`) or model (/model).", CODEX, None),
-            ("codex request failed: 404 Not Found [model_not_found] — the backend doesn't know this model for this account; pick another with /model.", Some("openai-codex/gpt-429"), None),
+            ("codex request failed: 400 Bad Request [invalid_request_error/unsupported_value, param reasoning.effort] — this model rejected the requested reasoning setting; pick another level with /effort.", CODEX, None),
             ("Tool execution failed: GET https://example.com/v1/items/429 returned nothing", CODEX, None),
             ("openai request failed: broker transport error: provider request failed: 4290 Unknown", None, None),
             ("Session error: no session 20260714-429000-3dab (request failed: 4291)", None, None),
@@ -2496,6 +2547,10 @@ mod tests {
             ("Codex rejected the request: the conversation exceeds this model's context window. Run /compact or start a fresh session to continue.", CODEX, None),
             ("Codex response failed in stream. Provider error details withheld because they can echo request content.", CODEX, None),
             ("Could not reach api.anthropic.com (connection failed). Check your network, DNS, or proxy settings.", CLAUDE, Some(Trouble::Offline)),
+            // v0.12.0, a 408 its classify_error calls transient, retries spent: a timeout.
+            ("codex request failed: 408 Request Timeout", CODEX, Some(Trouble::Offline)),
+            ("openai request failed: broker transport error: provider request failed: 408 Request Timeout", Some("groq/llama-3.3-70b-versatile"), Some(Trouble::Offline)),
+            ("Session error: no session 20260714-408000-3dab (request failed: 4080)", None, None),
             ("Connection lost mid-response. Partial reply kept — send again to continue.", CLAUDE, Some(Trouble::Offline)),
             // v0.12.0's local provider (measured: Ollama off; a model it hasn't pulled).
             ("openai request failed: broker transport error: can't reach local endpoint at http://localhost:11434/v1/chat/completions — is Ollama/LM Studio running?", LOCAL, Some(Trouble::LocalDown { ollama: true })),
@@ -2519,6 +2574,7 @@ mod tests {
             Trouble::NoBrain { on: None },
             Trouble::LoggedOut,
             Trouble::Limited,
+            Trouble::NotOnPlan,
             Trouble::Swamped,
             Trouble::Offline,
             Trouble::LocalDown { ollama: true },

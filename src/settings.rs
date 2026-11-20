@@ -802,6 +802,20 @@ impl Settings {
     }
 }
 
+/// A `[session] model` retired from ChatGPT sign-ins (`provider::CHATGPT_RETIRED`, exactly one
+/// of those) moves to her ChatGPT default: in `session`, and in the file at `path` (that key
+/// only, `write_at`), so once. Nothing else moves. Her log's line, if it moved.
+pub fn retire_model(path: &std::path::Path, session: &mut SessionSettings) -> Option<String> {
+    let old = session.model.clone()?;
+    let new = crate::provider::retired(&old)?;
+    session.model = Some(new.to_string());
+    let line = format!("model {old} is retired from ChatGPT sign-ins: now {new}");
+    Some(match write_at(path, &[Edit::Set("session", "model", new.into())]) {
+        Ok(_) => line,
+        Err(e) => format!("{line} (for this run: {e})"),
+    })
+}
+
 /// settings.toml writes, one at a time in the order asked (each `Settings::write` runs off her UI
 /// thread). What a write changes is applied only once it is in the file (`finish`), and a
 /// reload asked for meanwhile is owed again once the last write is in: what she runs with is
@@ -1502,6 +1516,38 @@ fullscreen = "stay"
         assert_eq!(Settings::parse(&std::fs::read_to_string(&none).unwrap()).unwrap().brain.attention, Attention::HangOnly);
         // No temp file left behind.
         assert!(std::fs::read_dir(&d).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().ends_with(".tmp")));
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// A ChatGPT model retired from sign-ins (v1.1.0's default, GPT-5.5, among them) moves to her
+    /// ChatGPT default once, the rest of the file as it was; any other model stays.
+    #[test]
+    fn a_retired_chatgpt_model_moves_to_the_default_once() {
+        let d = tmp("retired");
+        let p = d.join("settings.toml");
+        let new = crate::provider::CHATGPT_DEFAULT.0;
+        for old in crate::provider::CHATGPT_RETIRED {
+            let file = format!("{HIS}\n[session]\nmodel = \"{old}\" # mine\nthinking = \"low\"\n");
+            std::fs::write(&p, &file).unwrap();
+            let mut s = Settings::parse(&std::fs::read_to_string(&p).unwrap()).unwrap().session;
+            assert_eq!(retire_model(&p, &mut s), Some(format!("model {old} is retired from ChatGPT sign-ins: now {new}")));
+            assert_eq!(s.model.as_deref(), Some(new));
+            assert_eq!(std::fs::read_to_string(&p).unwrap(), file.replace(old, new), "that key alone, its comment kept");
+            let mut again = Settings::parse(&std::fs::read_to_string(&p).unwrap()).unwrap().session;
+            assert_eq!(retire_model(&p, &mut again), None, "once");
+            assert_eq!(again, s);
+        }
+        for keep in [None, Some(new), Some("openai-codex/gpt-5.6-luna"), Some("openai-codex/gpt-6.1-sol"), Some("github-copilot/gpt-5.5"), Some("claude-sonnet-4-6"), Some("local/qwen3:8b")] {
+            let file = match keep {
+                Some(m) => format!("{HIS}\n[session]\nmodel = \"{m}\"\n"),
+                None => HIS.to_string(),
+            };
+            std::fs::write(&p, &file).unwrap();
+            let mut s = Settings::parse(&std::fs::read_to_string(&p).unwrap()).unwrap().session;
+            assert_eq!(retire_model(&p, &mut s), None, "{keep:?}");
+            assert_eq!(s.model.as_deref(), keep);
+            assert_eq!(std::fs::read_to_string(&p).unwrap(), file, "{keep:?}: untouched");
+        }
         std::fs::remove_dir_all(&d).ok();
     }
 

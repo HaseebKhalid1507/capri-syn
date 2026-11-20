@@ -129,7 +129,7 @@ public static class Her {
                     return p.ExitCode;
                 }
             }
-            Console.WriteLine("openai-codex\topenai-codex\taccount\topenai-codex/gpt-5.6-luna\tChatGPT\tbrowser\tfree account works");
+            Console.WriteLine("openai-codex\topenai-codex\taccount\topenai-codex/gpt-5.6-terra\tChatGPT\tbrowser\tfree account works");
             Console.WriteLine("anthropic\tclaude\taccount\tclaude-sonnet-4-6\tClaude\tbrowser");
             Console.WriteLine("github-copilot\tgithub-copilot\taccount\tgithub-copilot/claude-sonnet-4.6\tCopilot\tcode");
             Console.WriteLine("google-gemini\tgoogle-gemini\taccount\tgoogle-gemini/gemini-2.5-pro\tGemini\tbrowser");
