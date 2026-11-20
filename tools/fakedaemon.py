@@ -77,8 +77,9 @@ context = [os.environ.get("FAKE_CONTEXT") or "off"]  # the session's context man
 
 
 def context_status():
-    """0.12 `context_management_status`'s first line: the mode, then the window's numbers."""
-    return f"context management: {context[0]} | window 1 | capacity 200000 | pressure 127000 | rollover 150000 | archive none"
+    """0.12 `context_management_status`'s first line: the mode, then the window's numbers (a 200k
+    window's bands, `ContextThresholds::bands`: pressure 70%, rollover 90%)."""
+    return f"context management: {context[0]} | window 1 | capacity 200000 | pressure 140000 | rollover 180000 | archive none"
 
 
 NO_CREDENTIALS = "No Anthropic credentials. Run `synaps login`, or switch to a provider model with `/model groq/llama-3.3-70b-versatile`."

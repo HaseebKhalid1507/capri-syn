@@ -17,18 +17,20 @@ Paths here are Linux's: Windows keeps the same files under `%APPDATA%` and `%LOC
   lowercased (`capri`). She attaches to it if it's live. Otherwise she resumes the id she remembered last
   time (`~/.local/state/synaps-avatar/sessions.json`, one entry per daemon), else creates it by name.
   She only rides another session when you pass `--session`.
-- **Her context rolls over** (`[session] rollover`, on by default). An always-on chat would
-  otherwise fill her model's context. She turns Synaps' automatic context rollover on for her own
-  session. First she asks its mode (`/context`'s report: a query, which any attached client may
-  send, so no Mirror switch for it). On already, and not by her (`context_management.mode = auto`
-  in `~/.synaps-cli/config`, or another client's `/context auto`): she leaves it to Synaps, and never
-  turns it on or off there. Off: she sends `/context auto` as an engine command from the Mirror
+- **Her context rolls over** (`[session] rollover`, on by default). An always-on chat would otherwise
+  fill her model's context. She turns Synaps' automatic context rollover on for her own session. First
+  she asks its mode (`/context`'s report: a query, which any attached client may send, so no Mirror
+  switch for it). On already, and not by her (`context_management.mode = auto` in
+  `~/.synaps-cli/config`, or another client's `/context auto`): she leaves it to Synaps, and never
+  turns it on or off there. Hers is only one she turned on while attached: after a re-attach from a
+  loss (a daemon reload keeps her session's id but builds it again from Synaps' config) an auto she
+  finds counts as Synaps' own. Off: she sends `/context auto` as an engine command from the Mirror
   attach (the input owner's, as her persona's Sets). It is that session's alone: Synaps'
   `context_management.mode` in `~/.synaps-cli/config`, and every other session, stay as they are. It
   is session-only on Synaps' side, so she asks again after a re-attach (a daemon reload, a resume).
   She asks and sends between turns, never mid-turn (a turn reads the mode as it starts). If another
-  client owns her session's input then, or takes it before her command lands, she tries once more
-  when it's free, then leaves it until she re-attaches.
+  client owns her session's input then, or takes it before her command lands, she tries once more when
+  it's free, then leaves it until she re-attaches.
   - **For ChatGPT, Claude and other 200k+ brains.** Synaps 0.12 takes every model's window for 200k.
     Past about 127k tokens by its estimate on a 200k window (hard capacity comes first; 400k on a 1m
     window) it seals the older messages into its archive and carries on in a fresh window with the
@@ -36,9 +38,10 @@ Paths here are Linux's: Windows keeps the same files under `%APPDATA%` and `%LOC
     local model (Ollama, LM Studio: its real window is smaller, so the rollover would never come
     before it fills, and auto's guidance and archive tools would crowd every request), and for a
     session whose `context_window` is under 128k (a rollover can't make room there: the recent
-    messages it keeps don't fit under Synaps' hard limit). A brain picked later (Settings ▸ Brain) is
-    decided again: her own auto is turned off (`/context off`) for one it doesn't fit, and on for one
-    it does. Synaps' own auto stays as it is.
+    messages it keeps don't fit under Synaps' hard limit). A brain picked later (Settings ▸ Brain, or
+    another client's `/model`) is decided again, her session's mode asked first: her own auto is
+    turned off (`/context off`) for one it doesn't fit, and on for one it does. An auto that isn't
+    hers (Synaps' config, or another client's `/context auto` since) stays as it is.
   - **Privacy.** The archive (`~/.synaps-cli/context-archives/`) is per Synaps project: the nearest
     folder up from her session's folder with a `.git` or a `.synaps-project` in it, else that folder
     itself (`SYNAPS_PROJECT_ROOT` overrides it). Her session's folder is your home unless you gave

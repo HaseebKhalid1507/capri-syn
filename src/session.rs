@@ -77,15 +77,19 @@ enum Roll {
     /// Its mode asked (`SessionQuery::ContextReport`, on attach `seq`, at `at`): nothing sent
     /// before the answer.
     Asking { seq: u64, at: Instant },
-    /// Synaps has it off: hers to turn on.
+    /// Its report just said off: hers to turn on.
     Off,
-    /// She asked it for `/context auto`.
+    /// Its report just said auto, and that auto is hers (`rollover_mine`): kept for a brain it
+    /// fits (`On`), turned off for one it doesn't.
+    Auto,
+    /// She asked it for `/context auto` (or its report found hers, and her brain fits it).
+    /// Settled: her brain changing asks its mode again before an off.
     On,
     /// Synaps has it on, not by her (its config's `context_management.mode`, another client's
     /// `/context`): never turned on or off by her.
     Theirs,
-    /// Not on by her, for a brain it doesn't fit (`rollover_unfit`; or turned off again): asked
-    /// for auto if her brain changes to one it fits.
+    /// Not on by her, for a brain it doesn't fit (`rollover_unfit`; or turned off again).
+    /// Settled: her brain changing to one it fits asks its mode again before an auto.
     Unfit,
     /// Another client owned its input: asked once more when that frees (`spent`: that once is on
     /// its way, or done). `on`: her auto is on there from before (a brain change wants it off).
@@ -395,8 +399,10 @@ pub struct Link {
     /// Her `/context` on its way: Mirror stays for the reply (`PERSONA_WAIT` at most). A reply
     /// on another attach is an earlier one's, late.
     rollover_sent: Option<RollSent>,
-    /// The session her `/context auto` last turned it on for (a re-attach that finds auto there
-    /// finds hers, not Synaps' own, when no new runtime came with it).
+    /// The session her `/context auto` turned it on for, on this attach: a report of auto there
+    /// is hers (her brain changing turns it off) while she stays attached (a mode switch keeps
+    /// it). Forgotten at any re-attach after a loss: a daemon reload keeps the session id but
+    /// builds a new runtime from Synaps' config, so an auto found then counts as Synaps' own.
     rollover_mine: Option<String>,
     /// Synaps keeps its context archive here (0.12: Unix only). A daemon on this machine is on
     /// this OS; one through `--socket` may be another's: it is asked, and says.
@@ -560,14 +566,14 @@ impl Link {
     /// auto`), so a companion that never ends doesn't fill her context. Session-only on Synaps'
     /// side (its config's `context_management.mode`, and every other session, untouched), so
     /// decided once per attach that may have a new session under it, and again when her brain
-    /// changes. First its mode is asked (`/context`'s report, a query: any attach, no Mirror):
-    /// auto that isn't hers (Synaps' config, another client's) is left alone, never turned on or
-    /// off. Off: plain auto, for a brain with room for it (`rollover_unfit`); her own auto is
-    /// turned off again (`/context off`) on a brain it doesn't fit. A command needs input, as a
-    /// Set does: from the Mirror attach, never past another client's (asked once more when it
-    /// frees), never mid-turn (a turn reads the mode as it starts: asked at the Idle). One log
-    /// line for each outcome: on or off (`rollover_replied`), left to Synaps, refused and why, or
-    /// skipped and why.
+    /// changes. Each time its mode is asked first (`/context`'s report, a query: any attach, no
+    /// Mirror): auto that isn't hers (Synaps' config, another client's) is left alone, never turned
+    /// on or off. Off: plain auto, for a brain with room for it (`rollover_unfit`); her own auto is
+    /// turned off again (`/context off`) on a brain it doesn't fit. A command needs input, as a Set
+    /// does: from the Mirror attach, never past another client's (asked once more when it frees),
+    /// never mid-turn (a turn reads the mode as it starts: asked at the Idle). One log line for
+    /// each outcome: on or off (`rollover_replied`), left to Synaps, refused and why, or skipped
+    /// and why.
     fn rollover_step(&mut self, now: Instant) -> Vec<Act> {
         let Some(id) = self.follow.clone() else { return Vec::new() };
         if !self.opts.persona.rollover
@@ -602,10 +608,15 @@ impl Link {
             self.rollover = Some((id, Roll::Asking { seq: self.current().unwrap_or_default(), at: now }));
             return vec![Act::Query(SessionQuery::ContextReport)];
         };
-        let on = matches!(was, Roll::On | Roll::Held { on: true, .. });
+        let on = matches!(was, Roll::On | Roll::Auto | Roll::Held { on: true, .. });
         let unfit = self.rollover_unfit();
         match &unfit {
-            None if on => return Vec::new(),
+            None if on => {
+                if was == Roll::Auto {
+                    self.rollover = Some((id, Roll::On));
+                }
+                return Vec::new();
+            }
             Some(why) if !on => {
                 if was != Roll::Unfit {
                     elog!("synaps-avatar: rollover: not turned on: {why}");
@@ -614,6 +625,13 @@ impl Link {
                 return Vec::new();
             }
             _ => {}
+        }
+        // Her brain changed since its mode was last asked: asked again first (a query, no
+        // Mirror), so a `/context` another client sent meanwhile counts (its auto: theirs, left
+        // alone; its off: nothing of hers to turn off).
+        if matches!(was, Roll::On | Roll::Unfit) {
+            self.rollover = Some((id, Roll::Asking { seq: self.current().unwrap_or_default(), at: now }));
+            return vec![Act::Query(SessionQuery::ContextReport)];
         }
         let word = if unfit.is_none() { "on" } else { "off" };
         let ours = if self.mode == AttachMode::Mirror { self.owner == Some(self.me) } else { self.owner.is_none() };
@@ -669,9 +687,10 @@ impl Link {
 
     /// Her session's mode, from its `/context` report on attach `seq` (`{text}`, or `{error}`
     /// for a session that couldn't wake). Off: hers to turn on (`rollover_step`). Auto: hers if
-    /// she turned it on there and no new runtime came since, else Synaps' own, left alone. No
-    /// mode in it (a Synaps without context management): not asked again until she re-attaches.
-    /// One on another attach than her query's is an earlier one's, late: logged, nothing more.
+    /// her `/context auto` turned it on there since she last re-attached after a loss
+    /// (`rollover_mine`), else Synaps' own (its config, another client's), left alone. No mode in
+    /// it (a Synaps without context management): not asked again until she re-attaches. One on
+    /// another attach than her query's is an earlier one's, late: logged, nothing more.
     fn rollover_mode(&mut self, seq: u64, value: &serde_json::Value) {
         let text = value.get("text").and_then(|t| t.as_str()).unwrap_or("");
         let asked = self.rollover.as_ref().filter(|r| matches!(r.1, Roll::Asking { seq: s, .. } if s == seq)).map(|r| r.0.clone());
@@ -681,9 +700,9 @@ impl Link {
         };
         let roll = match context_mode(text) {
             Some("off") => Roll::Off,
-            Some("auto") if self.rollover_mine.as_deref() == Some(id.as_str()) => Roll::On,
+            Some("auto") if self.rollover_mine.as_deref() == Some(id.as_str()) => Roll::Auto,
             Some(m) => {
-                elog!("synaps-avatar: rollover: left to Synaps: context management is {m} on her session already (its config, or another client's /context)");
+                elog!("synaps-avatar: rollover: left to Synaps: context management is {m} on her session already, not by her since she attached (its config, another client's /context)");
                 Roll::Theirs
             }
             None => {
@@ -951,8 +970,8 @@ impl Link {
 
     /// The Settings page's MODEL: compared (and set) even when it is the persona already, as her
     /// session may have moved off it (his TUI set another). Her rollover is decided again for the
-    /// brain (`rollover_step`); one turned on since goes out too (one turned off stays as it is
-    /// there).
+    /// brain (`rollover_step`, its mode asked first); one turned on since goes out too (one turned
+    /// off stays as it is there).
     pub fn pick_persona(&mut self, p: Persona, now: Instant) -> Vec<Act> {
         self.opts.persona = p;
         self.persona_done = None;
@@ -1221,6 +1240,7 @@ impl Link {
                 if again {
                     self.rollover = None;
                     self.rollover_sent = None;
+                    self.rollover_mine = None;
                 }
                 // Her mode query on the attach before (a mode switch) gets no answer: asked again.
                 if self.rollover.as_ref().is_some_and(|r| matches!(r.1, Roll::Asking { seq, .. } if seq != attach_seq)) {
@@ -2527,7 +2547,7 @@ mod tests {
     /// its context management `mode`.
     fn report(seq: u64, mode: &str) -> Event {
         let text = format!(
-            "context \u{2014} model claude-sonnet-4-6\n  system prompt: 812 bytes\n  tools: 14\ncontext management: {mode} | window 1 | capacity 200000 | pressure 127000 | rollover 150000 | archive none\nAutomatic rollover preserves eligible source evidence in this folder's archive store and starts a fresh wall-clock allowance; permissions, running environment and other resource/cost budgets are unchanged."
+            "context \u{2014} model claude-sonnet-4-6\n  system prompt: 812 bytes\n  tools: 14\ncontext management: {mode} | window 1 | capacity 200000 | pressure 140000 | rollover 180000 | archive none\nAutomatic rollover preserves eligible source evidence in this folder's archive store and starts a fresh wall-clock allowance; permissions, running environment and other resource/cost budgets are unchanged."
         );
         Event::QueryReply { attach_seq: seq, session_id: SID.into(), id: 2, query: "context_report".into(), value: serde_json::json!({ "text": text }) }
     }
@@ -2547,9 +2567,10 @@ mod tests {
     /// mode is asked (a query: from Observe, no Mirror for it), then `/context auto` is the one
     /// thing sent, from a Mirror attach that stays up for its reply, then Observe again. A mode
     /// switch doesn't send it again; a re-attach after a loss (a daemon reload: a new runtime,
-    /// without the session-only setting) asks again and sends it again. One after a blip that
-    /// finds her own auto still there sends nothing, and the auto is still hers (a local brain
-    /// turns it off).
+    /// without the session-only setting) asks again and sends it again. Any re-attach after a
+    /// loss forgets the auto was hers (a reload keeps the session id, and the new runtime takes
+    /// its mode from Synaps' config): one found then is left alone, and a local brain doesn't
+    /// turn it off.
     #[test]
     fn rollover_is_turned_on_for_her_session() {
         let t0 = Instant::now();
@@ -2569,7 +2590,7 @@ mod tests {
         assert!(rollover_cmd(&acts), "{acts:?}");
         assert!(l.tick(t0 + MIRROR_LINGER).is_empty(), "still waiting for the reply");
         assert!(l.deadline(t0).is_some_and(|d| d <= t0 + PERSONA_WAIT));
-        let status = "context management: auto | window 1 | capacity 200000 | pressure 127000 | rollover 150000 | archive none\nAutomatic rollover preserves eligible source evidence …";
+        let status = "context management: auto | window 1 | capacity 200000 | pressure 140000 | rollover 180000 | archive none\nAutomatic rollover preserves eligible source evidence …";
         assert!(on(&mut l, engine_reply(2, serde_json::json!({"kind": "output", "text": status})), t0).is_empty());
         assert_eq!(l.take_once(), vec![], "nothing shown");
         assert!(matches!(l.tick(t0 + MIRROR_LINGER).as_slice(), [Act::Attach(_, AttachMode::Observe)]));
@@ -2583,13 +2604,13 @@ mod tests {
         l.attaching(4);
         assert!(rollover_cmd(&on(&mut l, mine(4, AttachMode::Mirror, Some(1), Some("capri"), Some(&p)), t0)));
         on(&mut l, engine_reply(4, serde_json::json!({"kind": "output", "text": status})), t0);
-        // A blip (the same runtime): her auto is still there, and still hers.
+        // A blip (the same runtime, her auto still there): not known to be hers now.
         let Event::Attached { attached, mode, .. } = mine(4, AttachMode::Mirror, Some(1), Some("capri"), Some(&p)) else { panic!() };
         assert!(asks_mode(&on(&mut l, Event::Attached { attach_seq: 4, attached, mode, reconnect: true }, t0)));
-        assert!(on(&mut l, report(4, "auto"), t0).is_empty(), "on already");
+        assert!(on(&mut l, report(4, "auto"), t0).is_empty(), "left to Synaps");
         let local = Persona { model: Some("local/qwen3:8b".into()), ..p };
         let acts = l.pick_persona(local, t0);
-        assert!(matches!(acts.as_slice(), [Act::Set(_), Act::EngineCommand(n, a)] if n == "context" && a == "off"), "hers: {acts:?}");
+        assert!(matches!(acts.as_slice(), [Act::Set(s)] if *s == Setting::model("local/qwen3:8b")), "no query, no off: {acts:?}");
     }
 
     /// Synaps' own auto (its config's `context_management.mode = auto`, or another client's
@@ -2830,9 +2851,10 @@ mod tests {
 
     /// Plain auto only for a brain with room for it: not for a local model (its real window is
     /// small whatever Synaps thinks; auto's guidance and tools would crowd it), nor under a 128k
-    /// window. Skipped with a log line, no Mirror switch. Her brain changing decides it again:
-    /// her own auto off again for a local one, on again for one it fits; a local model asked
-    /// for counts while its Set is on its way, and a refused Set leaves the brain she had.
+    /// window. Skipped with a log line, no Mirror switch. Her brain changing decides it again,
+    /// its mode asked first: her own auto off again for a local one, on again for one it fits; a
+    /// local model asked for counts while its Set is on its way, and a refused Set leaves the
+    /// brain she had.
     #[test]
     fn rollover_fits_her_brain() {
         let t0 = Instant::now();
@@ -2844,21 +2866,25 @@ mod tests {
         assert!(window(100_000).is_empty(), "100k");
         assert!(matches!(window(131_072).as_slice(), [Act::Attach(_, AttachMode::Mirror)]), "128k");
         assert!(matches!(window(1_000_000).as_slice(), [Act::Attach(_, AttachMode::Mirror)]), "1m");
-        // On with Claude, then a local model picked (Settings ▸ Brain): off again, with its Set.
+        // On with Claude, then a local model picked (Settings ▸ Brain): its Set, its mode asked
+        // with it, and off again (hers).
         let p = rolling();
         let (mut l, _) = attach_rolling(&p, |_| {}, t0);
         l.attaching(2);
         assert!(rollover_cmd(&on(&mut l, mine(2, AttachMode::Mirror, Some(1), Some("capri"), Some(&p)), t0)));
         on(&mut l, engine_reply(2, serde_json::json!({"kind": "output", "text": "context management: auto"})), t0);
         let acts = l.pick_persona(local.clone(), t0);
-        assert!(matches!(acts.as_slice(), [Act::Set(s), Act::EngineCommand(n, a)] if *s == Setting::model("local/qwen3:8b") && n == "context" && a == "off"), "{acts:?}");
+        assert!(matches!(acts.as_slice(), [Act::Set(s), Act::Query(SessionQuery::ContextReport)] if *s == Setting::model("local/qwen3:8b")), "{acts:?}");
+        let acts = on(&mut l, report(2, "auto"), t0);
+        assert!(matches!(acts.as_slice(), [Act::EngineCommand(n, a)] if n == "context" && a == "off"), "hers: {acts:?}");
         on(&mut l, applied(2, "model", &local), t0);
         assert!(on(&mut l, engine_reply(2, serde_json::json!({"kind": "output", "text": "context management: off"})), t0).is_empty());
-        // And back: on again.
+        // And back: asked again, on again.
         let acts = l.pick_persona(p.clone(), t0);
-        assert!(matches!(acts.as_slice(), [Act::Set(s), Act::EngineCommand(n, a)] if *s == Setting::model("anthropic/claude-sonnet-4-6") && n == "context" && a == "auto"), "{acts:?}");
+        assert!(matches!(acts.as_slice(), [Act::Set(s), Act::Query(SessionQuery::ContextReport)] if *s == Setting::model("anthropic/claude-sonnet-4-6")), "{acts:?}");
+        assert!(rollover_cmd(&on(&mut l, report(2, "off"), t0)));
         // A local model on its way at the attach (the session still on Synaps' default): not
-        // sent with its Set; that Set refused, the brain is Claude still, so it is.
+        // sent with its Set; that Set refused, the brain is Claude still: asked again, sent.
         let claude = Persona { model: Some("claude-opus-5-5".into()), ..local.clone() };
         let mut l = Link::new(Options { persona: local.clone(), ..opts() }, t0);
         l.archive_here = true;
@@ -2871,7 +2897,8 @@ mod tests {
         assert!(matches!(acts.as_slice(), [Act::Set(s), Act::Query(SessionQuery::ContextReport)] if *s == Setting::model("local/qwen3:8b")), "{acts:?}");
         assert!(on(&mut l, report(2, "off"), t0).is_empty(), "a local model on its way");
         let e = Error::SettingRefused { id: 1, setting: "model".into(), reason: "unknown model".into() };
-        assert!(rollover_cmd(&on(&mut l, Event::Error { attach_seq: Some(2), error: e }, t0)));
+        assert!(asks_mode(&on(&mut l, Event::Error { attach_seq: Some(2), error: e }, t0)));
+        assert!(rollover_cmd(&on(&mut l, report(2, "off"), t0)));
     }
 
     /// Another client owning her session's input at the try: asked once more when it frees
@@ -2933,14 +2960,16 @@ mod tests {
         let t0 = Instant::now();
         let p = rolling();
         let local = Persona { model: Some("local/qwen3:8b".into()), ..p.clone() };
-        // On with Claude, then a local brain: `/context off` with its Set.
+        // On with Claude, then a local brain: its Set and its mode asked, then `/context off`.
         let start = || {
             let (mut l, _) = attach_rolling(&p, |_| {}, t0);
             l.attaching(2);
             assert!(rollover_cmd(&on(&mut l, mine(2, AttachMode::Mirror, Some(1), Some("capri"), Some(&p)), t0)));
             on(&mut l, engine_reply(2, serde_json::json!({"kind": "output", "text": "context management: auto"})), t0);
             let acts = l.pick_persona(local.clone(), t0);
-            assert!(matches!(acts.as_slice(), [Act::Set(_), Act::EngineCommand(n, a)] if n == "context" && a == "off"), "{acts:?}");
+            assert!(matches!(acts.as_slice(), [Act::Set(_), Act::Query(SessionQuery::ContextReport)]), "{acts:?}");
+            let acts = on(&mut l, report(2, "auto"), t0);
+            assert!(matches!(acts.as_slice(), [Act::EngineCommand(n, a)] if n == "context" && a == "off"), "{acts:?}");
             on(&mut l, applied(2, "model", &local), t0);
             l
         };
@@ -2969,6 +2998,100 @@ mod tests {
         assert!(on(&mut l, Event::Error { attach_seq: Some(4), error: race() }, t0).is_empty());
         assert!(on(&mut l, owner(4, Some(1)), t0).is_empty(), "refused again: left");
         assert!(on(&mut l, sev(4, serde_json::json!({"ev": "idle"})), t0).is_empty());
+    }
+
+    /// Her brain changing asks its mode again first (a query: no Mirror for it), so a
+    /// `/context` another client sent meanwhile counts. His `/context auto` while hers was off
+    /// for a local brain: Claude again finds it on, and it's his: no auto from her, and no off
+    /// for the next local brain. The same when her brain never fit before (a local one at the
+    /// attach).
+    #[test]
+    fn a_context_another_client_sent_since_is_theirs() {
+        let t0 = Instant::now();
+        let p = rolling();
+        let local = Persona { model: Some("local/qwen3:8b".into()), ..p.clone() };
+        let claude = |acts: &[Act]| matches!(acts, [Act::Set(s), Act::Query(SessionQuery::ContextReport)] if *s == Setting::model("anthropic/claude-sonnet-4-6"));
+        let only_set = |acts: &[Act]| matches!(acts, [Act::Set(s)] if *s == Setting::model("local/qwen3:8b"));
+        // Hers on with Claude, off again for a local brain.
+        let (mut l, _) = attach_rolling(&p, |_| {}, t0);
+        l.attaching(2);
+        assert!(rollover_cmd(&on(&mut l, mine(2, AttachMode::Mirror, Some(1), Some("capri"), Some(&p)), t0)));
+        on(&mut l, engine_reply(2, serde_json::json!({"kind": "output", "text": "context management: auto"})), t0);
+        assert!(matches!(l.pick_persona(local.clone(), t0).as_slice(), [Act::Set(_), Act::Query(SessionQuery::ContextReport)]));
+        on(&mut l, applied(2, "model", &local), t0);
+        assert!(matches!(on(&mut l, report(2, "auto"), t0).as_slice(), [Act::EngineCommand(n, a)] if n == "context" && a == "off"));
+        on(&mut l, engine_reply(2, serde_json::json!({"kind": "output", "text": "context management: off"})), t0);
+        // His TUI sends `/context auto` (no event of it reaches her). Claude again: asked, his.
+        let acts = l.pick_persona(p.clone(), t0);
+        assert!(claude(&acts), "{acts:?}");
+        assert!(on(&mut l, report(2, "auto"), t0).is_empty(), "his: no auto");
+        on(&mut l, applied(2, "model", &p), t0);
+        let acts = l.pick_persona(local.clone(), t0);
+        assert!(only_set(&acts), "his: no query, no off: {acts:?}");
+        // A local brain at the attach (not on, for a brain it doesn't fit), his auto since.
+        let (mut l, acts) = attach_rolling(&local, |_| {}, t0);
+        assert!(acts.is_empty(), "{acts:?}");
+        assert!(matches!(l.pick_persona(p.clone(), t0).as_slice(), [Act::Attach(_, AttachMode::Mirror)]));
+        l.attaching(2);
+        let acts = on(&mut l, mine(2, AttachMode::Mirror, Some(1), Some("capri"), Some(&local)), t0);
+        assert!(claude(&acts), "{acts:?}");
+        assert!(on(&mut l, report(2, "auto"), t0).is_empty(), "his: no auto");
+        on(&mut l, applied(2, "model", &p), t0);
+        assert!(only_set(&l.pick_persona(local, t0)));
+    }
+
+    /// Her mode query failed (it couldn't go out while attaching, or its connection dropped):
+    /// not given up, asked again at her next step (here the Idle; after a drop, the re-attach).
+    /// One failed on an earlier attach changes nothing: the wait for hers holds. A report with
+    /// no mode line in it (a Synaps without context management, or `{error}` from a session
+    /// that couldn't wake): nothing sent, not asked again until she re-attaches.
+    #[test]
+    fn a_failed_query_is_asked_again_and_a_report_without_a_mode_is_left() {
+        let t0 = Instant::now();
+        let p = rolling();
+        let local = Persona { model: Some("local/qwen3:8b".into()), ..p.clone() };
+        let failed = |seq: u64| Event::Error {
+            attach_seq: Some(seq),
+            error: Error::QueryFailed { id: 2, query: "context_report".into(), reason: "not connected to the session (attaching or reconnecting)".into() },
+        };
+        let idle = |seq: u64| sev(seq, serde_json::json!({"ev": "idle"}));
+        let fresh = || {
+            let mut l = Link::new(Options { persona: p.clone(), ..opts() }, t0);
+            l.archive_here = true;
+            l.on_event(connected(), t0);
+            l.on_event(Event::Sessions(vec![meta(SID, Some("capri"))]), t0);
+            l.attaching(1);
+            assert!(asks_mode(&on(&mut l, mine(1, AttachMode::Observe, None, Some("capri"), Some(&p)), t0)));
+            l
+        };
+        // Failed on her attach: asked again.
+        let mut l = fresh();
+        assert!(on(&mut l, failed(1), t0).is_empty());
+        assert!(l.tick(t0 + QUERY_WAIT).is_empty(), "nothing to give up");
+        assert!(asks_mode(&on(&mut l, idle(1), t0 + QUERY_WAIT)), "asked again");
+        assert!(matches!(on(&mut l, report(1, "off"), t0 + QUERY_WAIT).as_slice(), [Act::Attach(_, AttachMode::Mirror)]));
+        // Failed on an earlier attach: hers still on its way, not asked twice.
+        let mut l = fresh();
+        assert!(on(&mut l, failed(0), t0).is_empty());
+        assert!(on(&mut l, idle(1), t0).is_empty(), "still asking");
+        assert!(matches!(on(&mut l, report(1, "off"), t0).as_slice(), [Act::Attach(_, AttachMode::Mirror)]));
+        // No mode in the report: left until she re-attaches.
+        let reply = |value: serde_json::Value| Event::QueryReply { attach_seq: 1, session_id: SID.into(), id: 2, query: "context_report".into(), value };
+        for value in [
+            serde_json::json!({"text": "context \u{2014} model claude-sonnet-4-6\n  system prompt: 812 bytes\n  tools: 14"}),
+            serde_json::json!({"error": "session could not wake"}),
+        ] {
+            let mut l = fresh();
+            assert!(on(&mut l, reply(value.clone()), t0).is_empty(), "{value}");
+            assert!(on(&mut l, idle(1), t0).is_empty(), "not asked again: {value}");
+            // Nor for another brain: its Set alone.
+            assert!(matches!(l.pick_persona(local.clone(), t0).as_slice(), [Act::Attach(_, AttachMode::Mirror)]));
+            l.attaching(2);
+            let acts = on(&mut l, mine(2, AttachMode::Mirror, Some(1), Some("capri"), Some(&p)), t0);
+            assert!(matches!(acts.as_slice(), [Act::Set(s)] if *s == Setting::model("local/qwen3:8b")), "{value}: {acts:?}");
+            let Event::Attached { attached, mode, .. } = mine(2, AttachMode::Observe, None, Some("capri"), Some(&local)) else { panic!() };
+            assert!(asks_mode(&on(&mut l, Event::Attached { attach_seq: 2, attached, mode, reconnect: true }, t0)), "re-attached: {value}");
+        }
     }
 
     /// What a rollover puts in her thread, as Synaps 0.12 writes it (`runtime/continuation.rs`,
