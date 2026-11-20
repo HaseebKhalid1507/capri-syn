@@ -55,7 +55,8 @@ taskbar.
 - The repository has a code of conduct, contributing notes, a security policy, a support page, issue
   forms and a pull request template; the bug form's Version asks for what Settings ▸ ABOUT ▸ COPY
   copies. The README has a Requirements section: OS, graphics, CPU, RAM and disk, her brain, voice,
-  network. docs/ describe Settings ▸ Brain and the installers' picker.
+  network, and its Brain picture shows the current Settings ▸ Brain. docs/ describe it and the
+  installers' picker.
 
 ### For developers
 - `synaps-avatar --providers` prints her accounts, key services and local server, a line each, in her
