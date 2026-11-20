@@ -194,11 +194,12 @@ SETTINGS from her right-click menu. A change is written the moment you make it.
 
 | | Minimum | Recommended |
 |---|---|---|
-| **OS** | Windows 11 x64, or Linux x86_64 with glibc 2.35+ (Ubuntu 22.04, Debian 12, Fedora 36, Arch) on X11, Hyprland 0.40+, or GNOME, KDE or sway through XWayland. Windows 10 (1809+) and Windows on Arm: untested ([Platforms](#platforms)) | X11 with a compositor, or Windows 11 |
+| **OS** | Windows 11 x64, or Linux x86_64 with glibc 2.35+ (Ubuntu 22.04, Debian 12, Fedora 36, Arch) on X11, Hyprland 0.40+, or GNOME, KDE or sway through XWayland. Windows 10 (1809+) and Windows 11 on Arm: untested ([Platforms](#platforms)) | X11 with a compositor, or Windows 11 |
 | **Graphics** | Linux: a Vulkan 1.1+ driver (OpenGL ES is GPUI's fallback). Windows: Direct3D 11, feature level 10.1, with compute shaders and structured buffers | A GPU with its driver. CI and the Windows VM run on software rendering (WARP): fine for layout, not for colour or timing |
-| **CPU, RAM, disk** | x86_64. RAM: about 84 MB resident on Linux (one measurement); Windows not measured. Disk: about 120 MB for her and her art on Linux (binary 43 MB, built art pack 77 MB); Windows: a 9 MB setup, installed size not measured | CPU speed: not measured |
-| **Her brain** | [Synaps](https://github.com/HaseebKhalid1507/SynapsCLI) 0.11.0 or newer (the installers fetch 0.12.0) and one of: an account (ChatGPT, Claude, Copilot, Gemini, Grok, Kimi, Muse), an API key, or a local model: Ollama or LM Studio, with tool calling and a 16k+ context (`qwen3:8b`: ~5 GB) | A GPU for a local model; without one it is slow |
-| **Voice** (optional) | A microphone. Linux: PipeWire's `pw-record` and `pw-play`, system Python 3.10 to 3.13; ~540 MB (venv 167 MB, models 375 MB). Windows: Python comes with it; a 40 MB installer, 143 MB installed, 375 MB of models | Runs on the CPU, no GPU; speed not measured |
+| **Tools** (Linux) | `curl` and Python 3 with `venv` (`python3-venv` on Debian and Ubuntu), for her art pack; the installer fetches what's missing, asking first | |
+| **CPU, RAM, disk** | x86_64. RAM: about 84 MB idle on Linux, measured once during development; Windows not measured. Disk: about 120 MB for her and her art on Linux (binary 43 MB, built art pack 77 MB); Windows: a 10 MB setup, installed size not measured | CPU speed: not measured |
+| **Her brain** | [Synaps](https://github.com/HaseebKhalid1507/SynapsCLI) 0.11.0 or newer (the installers fetch 0.12.0) and one of: an account (ChatGPT, Claude, Copilot, Gemini, Grok, Kimi, Muse; Gemini needs Synaps' Google client, and Grok can't be signed in on Windows yet), an API key, or a local model: Ollama or LM Studio, with tool calling and a 16k+ context (`qwen3:8b`: ~5 GB) | A GPU for a local model; without one it is slow |
+| **Voice** (optional) | A microphone. Linux: PipeWire's `pw-record` and `pw-play`, system Python 3.10 to 3.13; ~540 MB (venv 169 MB, models 375 MB). Windows: Python comes with it; a 40 MB installer, 143 MB installed, 375 MB of models | Runs on the CPU, no GPU; speed not measured |
 | **Network** | To install (Synaps, her release, ~100 MB of art, the voice models) and for an account or an API key | A local model needs none once installed |
 
 "Untested" means the installers accept it but she has never run there; "not measured" means nobody has measured it.

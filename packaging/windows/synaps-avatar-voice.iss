@@ -6,7 +6,7 @@
 ; It installs the bundle (packaging/windows/voice-bundle.ps1: CPython 3.13 embeddable + wheels, the
 ; sidecar, the model fetch) into "voice" in her folder, where she looks for it: she starts it while
 ; [voice] enabled is on. The models are never in here: the "models" task (checked) runs
-; voice-models.ps1, which fetches them (~320 MB, SHA-256 pinned) into %LOCALAPPDATA%\capri-voice\models.
+; voice-models.ps1, which fetches them (~375 MB, SHA-256 pinned) into %LOCALAPPDATA%\capri-voice\models.
 ;
 ; Unattended: setup.exe /VERYSILENT /SUPPRESSMSGBOXES [/MERGETASKS="!models"]
 
@@ -49,7 +49,7 @@ CloseApplications=force
 RestartApplications=no
 
 [Tasks]
-Name: models; Description: "Download her voice models now (~320 MB: Whisper, Kokoro, Silero, the wake word; SHA-256 checked)"
+Name: models; Description: "Download her voice models now (~375 MB: Whisper, Kokoro, Silero, the wake word; SHA-256 checked)"
 
 [Files]
 Source: "{#Bundle}\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
@@ -59,7 +59,7 @@ Source: "{#Bundle}\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs 
 Name: "{autoprograms}\synaps-avatar voice models"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -NoExit -File ""{app}\voice-models.ps1"""; WorkingDir: "{app}"; Comment: "Fetch (or finish fetching) her voice models"
 
 [Run]
-Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\voice-models.ps1"""; WorkingDir: "{app}"; StatusMsg: "Fetching her voice models (~320 MB)..."; Flags: waituntilterminated; Tasks: models
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\voice-models.ps1"""; WorkingDir: "{app}"; StatusMsg: "Fetching her voice models (~375 MB)..."; Flags: waituntilterminated; Tasks: models
 
 [UninstallRun]
 ; The sidecar, if she runs it now: only the python.exe in this folder (his other Pythons are his).

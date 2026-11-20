@@ -204,7 +204,7 @@ she runs through XWayland, the X server those desktops keep for X apps.
   her installers' step, which open it whole (install.ps1 puts it there too; the default folder
   shown; `-Provider` for another account than Claude):
   `powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Programs\synaps-avatar\steps\steps.ps1" login`
-  Grok's sign-in never prints its URL, so the Windows installers don't offer Grok yet
+  Grok's sign-in never prints its URL, so Grok can't be signed in on Windows yet
   ([WINDOWS.md](WINDOWS.md#the-installer)).
 - **Windows:** the installers are unsigned, so a browser download meets SmartScreen ("More info",
   then "Run anyway"); Windows 10 and Windows 11 on Arm are untested; a click on one of her notifications does nothing (as

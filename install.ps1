@@ -41,7 +41,7 @@ usage: install.ps1 [--yes] [--dry-run] [--uninstall [--purge]] [--voice] [--watc
   --uninstall       remove what this script installed; your settings stay, and her state and log
                     (her installer's own uninstaller takes those when it runs)
   --purge           with --uninstall: remove those too (only her own files in those folders)
-  --voice           also her voice: the voice installer (or bundle), ~320 MB of models
+  --voice           also her voice: the voice installer (or bundle), ~375 MB of models
   --watch           capri-watch (Linux only: skipped here)
   --no-autostart    don't start her at sign-in (she still starts now, at the end)
   --from-source     build her from source even when a release has an installer

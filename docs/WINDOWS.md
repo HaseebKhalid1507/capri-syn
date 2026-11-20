@@ -305,7 +305,7 @@ CI:
 **Its own download, not a
 component of hers:** an Inno component sits inside `setup.exe` even unchecked, so every download of
 her would carry the 143 MB bundle (~45 MB compressed). As a second installer, her default download
-stays ~9 MB (CI fails hers past 20 MB), and only he who wants voice gets the rest.
+stays ~10 MB (CI fails hers past 20 MB), and only he who wants voice gets the rest.
 
 - **Per user, no admin**: the bundle goes to `voice\` in her install folder (read from her installer's
   record, else its default), where she looks for it.

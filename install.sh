@@ -27,7 +27,7 @@ usage: install.sh [--yes] [--dry-run] [--uninstall [--purge]] [--voice] [--watch
   --dry-run         print every action, touch nothing
   --uninstall       remove what this script installed; your settings and her state stay
   --purge           with --uninstall: remove those too (only her own files in those folders)
-  --voice           also her voice: capri-voice (a user venv, ~320 MB of models, its user unit)
+  --voice           also her voice: capri-voice (a user venv, ~375 MB of models, its user unit)
   --watch           also capri-watch (its user unit; enabled only with --yes)
   --no-autostart    don't start her at login (she still starts now, at the end)
   --from-source     build her from source even when a release has a binary

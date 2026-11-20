@@ -10,85 +10,58 @@ taskbar.
 
 ### Her brain (Settings ▸ Brain and her installers)
 - **Three ways in, none first.** Settings ▸ Brain offers SIGN IN, API KEY and RUN LOCAL, each opened in
-  place, then MODEL. SIGN IN lists the accounts by name: ChatGPT, Claude, Copilot, Gemini, Grok, Kimi
-  and Muse (Gemini when Synaps has its Google client, a Gemini login is on file, or she's on Gemini).
-  API KEY lists Synaps' 19 key services. RUN LOCAL lists the models of the server on your PC when it's
-  up, and otherwise opens the local-model steps.
+  place, then MODEL. SIGN IN lists the accounts by name: ChatGPT, Claude, Copilot, Gemini (when Synaps
+  has its Google client), Grok, Kimi and Muse. API KEY lists Synaps' 19 key services. RUN LOCAL lists
+  the models of the server on your PC when it's up, and otherwise opens the local-model steps.
 - **She signs you in herself.** A SIGN IN row runs Synaps' sign-in with no window, and your browser
   opens on the provider's sign-in page. Copilot's code is shown large and copied, to type there: the
   one thing she copies, since it is short-lived and single-use. While it runs the row reads SIGNING
-  IN…, ⏎ stops it, and NO BROWSER? under it opens the page again (by key or click). Signed in, she
-  switches to that account's model and says so once it's written. If it fails she says why, with the
-  terminal's line in her bubble. A sign-in not finished within 10 minutes is stopped. An API key goes
-  in a hidden field and to Synaps on its stdin: the field is cleared and her copy zeroed. A SIGN IN row
-  never copies a command, and neither the page's address nor the code goes to her log. Her sign-in
-  ends when she does, a crash too: only Synaps' login stops, never your browser.
-- **Only the provider's own sign-in page is opened.** She reads the page off the line Synaps prints for
-  it, and opens it only when it is https on that provider's own address, with no user name, port,
-  backslash or fragment: `claude.ai`, `auth.openai.com` or `accounts.google.com` at their sign-in path
-  exactly, and for Copilot exactly `https://github.com/login/device`. On Windows she opens the whole
-  page herself, since Synaps' own `cmd /c start` cuts it at its first `&`. Grok on Windows says NEEDS A
-  NEWER SYNAPS (LOGGED OUT · NEEDS A NEWER SYNAPS where its login ran out), because Synaps 0.12.0 opens
-  its page cut and never prints it.
+  IN…, ⏎ stops it, and NO BROWSER? under it (Claude, ChatGPT, Gemini and Copilot only) opens the page
+  again. Signed in, she switches to that account's model and says so. If it fails she says why, with
+  the terminal's line in her bubble. A sign-in not finished within 10 minutes is stopped. An API key
+  goes in a hidden field and to Synaps on its stdin. Neither the page's address nor the code goes to
+  her log.
+- **Only the provider's own sign-in page is opened.** She reads the page off the line Synaps prints and
+  opens it only when it is that provider's own. On Windows she opens the whole page herself, since
+  Synaps' `cmd /c start` cuts it at its first `&`. Grok there says NEEDS A NEWER SYNAPS: its page is
+  never printed.
 - **LOGGED OUT signs in again from her.** `SIGN IN AGAIN ▸` in her bubble opens Settings ▸ Brain on her
   account's row (LOGGED OUT · ⏎ SIGN IN AGAIN), with no terminal.
 - **MODEL is a menu.** It lists every model of every account signed in on this PC, every key service
-  with a key, and the local server's, grouped by provider with hers checked. It has no cap and it
-  scrolls (PgUp/PgDn, Home/End). Only a confirmed login counts, so a fresh install lists no Claude
-  models until you sign in; with nothing to list it says `sign in first`. The model lists are Synaps
-  0.12.0's catalogs.
-- **NO BRAIN YET asks for a pick.** With no brain picked anywhere (no `[session] model`, no model in
-  Synaps' config, her session on Synaps' default), her first failed message asks you to pick one, with
-  `SET ME UP ▸` to Settings ▸ Brain. A brain you picked whose login is missing names that provider and
-  its login line.
+  with a key, and the local server's, grouped by provider with hers checked, and it scrolls. Only a
+  confirmed login counts, so a fresh install lists no Claude models until you sign in; with nothing to
+  list it says `sign in first`.
+- **NO BRAIN YET asks for a pick.** With no brain picked anywhere, a failed message asks you to pick
+  one, with `SET ME UP ▸` to Settings ▸ Brain. A brain you picked whose login is missing names that
+  provider and its login line.
 - **Her installers ask which brain.** When Synaps has no brain yet, her setup's "Her model" page, and
-  install.sh and install.ps1 in your terminal, offer the same four choices: sign in to an account (the
-  same list as Settings: your browser opens on the sign-in page, and Copilot's code is shown to you), a
-  model on this PC (Ollama or LM Studio, whichever is running), an API key (never on a command line or
-  in a log), or later. Later is the default: nothing is picked for you. Her model then becomes that
-  choice's default, an account's once you're signed in and never before. On Windows the finish page
-  offers the sign-in for the account you picked, ticked; unticked or stopped, her model stays unset.
-  The Windows installers don't offer Grok yet. Unattended: `--brain=` (`/BRAIN=` for her setup);
-  `--yes`, `--dry-run` or no terminal mean later unless `--brain` says otherwise.
-  `synaps-avatar --set session.model=…` sets her model, and a running her reads her settings again.
+  install.sh and install.ps1 in your terminal, offer four choices: sign in to an account (the same
+  list as Settings, Copilot's code shown to you), a model on this PC (Ollama or LM Studio, whichever
+  is running), an API key (never on a command line or in a log), or later, the default: nothing is
+  picked for you. Her model then becomes the account's default (once you're signed in), the key
+  service's default, or the local model you picked. On Windows the finish page offers the sign-in for
+  the account you picked, ticked; unticked or stopped, her model stays unset. Grok can't be signed in
+  on Windows yet. Unattended: `--brain=` (`/BRAIN=` for her setup); `--yes`, `--dry-run` or no
+  terminal mean later unless `--brain` says otherwise. `synaps-avatar --set session.model=…` sets her
+  model.
 
 ### Windows
-- **Her tray icon starts on the taskbar.** Windows 11 puts a new tray icon in the hidden `^` overflow.
-  The first time her icon is in, she sets `IsPromoted` on her own entry in
-  `HKCU\Control Panel\NotifyIconSettings` (matched by her exe's path and her icon's GUID), so it sits
-  on the taskbar. Explorer takes no value written while it adds the icon, so she waits a few seconds
-  first, then asks the shell whether her icon is on the taskbar and, if not, writes the same 1 once
-  more. Once only: a `tray-promoted` file in her state folder (`%LOCALAPPDATA%\synaps-avatar`) says
-  it's done, and after that the setting is yours: hide her and she stays hidden. An entry that already
-  has `IsPromoted` is left as it is. Windows 10 has no such key, so nothing is done there. Her log says
-  which of these happened, and later starts read her entry and write nothing. Uninstalling removes the
-  marker.
-- **Setup's window drags while she's being set up.** On "Setting her up" (Synaps, her art, her daemon:
-  minutes) the installer's window moves with the mouse. Setup disables its own windows while a program
-  it started runs, so on that page, where there is nothing to click (no buttons, the close box greyed),
-  it enables the window again just after each step starts. The short checks before the install
-  (Synaps, the microphones: a second or two each, on a click of Next) still hold it still.
+- **Her tray icon starts on the taskbar.** Windows 11 hides a new tray icon in the `^` overflow. She
+  moves hers out once; after that it's your setting, an icon you placed is left alone, and Windows 10
+  gets nothing.
+- **Setup's window drags** on its "Setting her up" page, where there is nothing to click.
 
 ### Docs
-- The repository has a code of conduct, contributing notes, a security policy (a vulnerability goes to
-  GitHub's private reporting, never a public issue), a support page, issue forms for a bug and for an
-  idea, and a pull request template. The bug form's Version asks for what Settings ▸ ABOUT ▸ COPY
-  copies: her version, her OS and her model.
-- The README has a Requirements section: OS, graphics, CPU, RAM and disk, her brain, voice, network.
-  Its platform table lists macOS as planned: being scoped, to be tested on a real Mac before anything
-  ships, with no build yet.
-- docs/ describe Settings ▸ Brain and the installers' picker, and give her voice models as ~375 MB.
+- The repository has a code of conduct, contributing notes, a security policy, a support page, issue
+  forms and a pull request template; the bug form's Version asks for what Settings ▸ ABOUT ▸ COPY
+  copies. The README has a Requirements section: OS, graphics, CPU, RAM and disk, her brain, voice,
+  network. docs/ describe Settings ▸ Brain and the installers' picker.
 
 ### For developers
-- `synaps-avatar --providers` prints her accounts, key services and local server, one a line (id,
-  login, kind, default model), in the order Settings shows them. Her installers read it, so they keep
-  no copy, and a test holds steps.ps1's per-account sign-in pages to it.
-- `tools/fakesynaps.py` (with `fakesynaps.cmd`, and `fakesynaps-poll.cs` for Copilot's code) stands in
-  for `synaps login --provider`, and `tools/fakelocal.py` for a local model server. The screenshot rig
-  has Brain scenes for the menu, a sign-in, a typed key, and a crash in the middle of a sign-in.
-- CI: the Windows setup wizard test reads Setup's radio buttons and lists as Win32 controls, quits her
-  before each rerun, checks that her model stays unset after a stopped sign-in, and checks that Setup's
-  window drags while a step runs.
+- `synaps-avatar --providers` prints her accounts, key services and local server, a line each, in her
+  own table's order: six tab-separated fields (id, login, kind, default model, name, how it's signed in
+  to). Her installers read it, so they keep no copy.
+- `tools/fakesynaps.py` and `tools/fakelocal.py` stand in for Synaps' sign-in and a local model server.
 
 ### Known issues
 - A dark slab on X11 without a compositor (#72): now and then her whole window's rectangle paints solid
@@ -105,7 +78,7 @@ taskbar.
   installers' step, which open it whole (install.ps1 puts it there too; the default folder shown;
   `-Provider` for another account than Claude):
   `powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Programs\synaps-avatar\steps\steps.ps1" login`
-  Grok's sign-in never prints its URL, so the Windows installers don't offer Grok yet.
+  Grok's sign-in never prints its URL, so Grok can't be signed in on Windows yet.
 - Windows: the installers are unsigned, so a browser download meets SmartScreen ("More info", then "Run
   anyway"). Windows 10 and Windows 11 on Arm are untested. A click on one of her notifications does
   nothing (as on Linux). Her voice brings its own VC++ runtime but hasn't yet run on a PC without the
