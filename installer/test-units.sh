@@ -741,7 +741,7 @@ env $v/h2/python 0 only-managed" ] && echo 0)" "setup with a python3 of 3.14 and
             DATA=$1 BIN=$x/bin LIB=$x/lib CONF=$x/conf VENV=$x/venv CACHE_BASE=$x/cache UNITS=$x/units
             RECEIPT=$x/receipt VOICE=1 WATCH=0 DRY=0 SYSTEMD=0 YES=1 STEP_N=0 STEPS=7
             PATH=$v/tools:/usr/bin:/bin
-            # shellcheck disable=SC2329 # step_extras' own
+            # shellcheck disable=SC2317,SC2329 # step_extras' own
             have() { return 1; }   # no uv of his
             step_extras >"$x/out" 2>&1
             echo "$VOICE_HOW" >"$x/how"
