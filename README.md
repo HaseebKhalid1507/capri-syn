@@ -429,7 +429,7 @@ machine needs a look): [docs/WATCH.md](docs/WATCH.md).
 | **Linux, GNOME, KDE, sway** | Through XWayland, which she picks herself. She perches on X apps only, and may nap while you type in native Wayland ones ([limits](docs/INSTALL.md#gnome-kde-and-other-wayland-desktops)). Untested on a real GNOME or KDE session. |
 | **Windows 11** | Her installer, her tray, her own keys, her voice. Checked by hand in a Windows 11 VM ([the VM day](docs/WINDOWS.md#the-vm-day-2026-11-18)); live audio is still to check on real hardware. CI runs her installers end to end on every pull request. |
 | **Windows 10, Windows 11 on Arm** | Both installers get through (Windows 10 1809 or newer; Arm through x64 emulation), but she has never been run on either. Untested, so not supported yet. |
-| **macOS** | Not planned. |
+| **macOS** | Planned. Being scoped now, to be tested on a real Mac before anything ships. No build yet. |
 
 - **Names.** The repository and the Windows installers are `capri-syn`. The crate, the binary and the
   config and state paths are still `synaps-avatar`.

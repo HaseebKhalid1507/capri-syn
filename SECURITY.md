@@ -17,7 +17,7 @@ Only the maintainer can see it.
 
 Please include:
 - what's affected (her app, the Linux or Windows installer, the voice sidecar, `capri-watch`)
-- the version (`synaps-avatar --version`) and your OS
+- the version and your OS (Settings ▸ ABOUT ▸ COPY copies both; on Linux, `synaps-avatar --version`)
 - steps to reproduce, and what an attacker could do with it
 
 You should hear back within a few days. Once there's a fix, it ships in a release, and the advisory is
