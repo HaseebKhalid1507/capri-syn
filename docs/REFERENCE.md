@@ -18,20 +18,35 @@ Paths here are Linux's: Windows keeps the same files under `%APPDATA%` and `%LOC
   time (`~/.local/state/synaps-avatar/sessions.json`, one entry per daemon), else creates it by name.
   She only rides another session when you pass `--session`.
 - **Her context rolls over** (`[session] rollover`, on by default). An always-on chat would
-  otherwise fill her model's context. At each attach of her own session she turns Synaps' automatic
-  context rollover on for it: `/context auto`, sent as an engine command from the Mirror attach (the
-  input owner's, as her persona's Sets; not if another client owns input). It is that session's
-  alone: Synaps' `context_management.mode` in `~/.synaps-cli/config`, and every other session, stay
-  as they are. It is session-only on Synaps' side, so she sends it again after a re-attach (a
-  daemon reload, a resume). Past its rollover mark (180k tokens of a 200k window, 400k of 1m)
-  Synaps seals the older messages into its archive (`~/.synaps-cli/context-archives`, per folder) and
-  carries on in a fresh window with the recent messages and a note; no summarizing model call, so it
-  works on any brain. The model can look the archived ones up (`memory_search`), and so can any
-  other session in her folder. The Line shows one row where it happened, "older messages archived to
-  make room (context rollover)"; Synaps' rollover notices go to her log. One log line says it's on,
-  or why not. Windows: not yet (Synaps 0.12 keeps its archive on Linux and macOS only), so she
-  doesn't ask; one log line says so. A local model: Synaps counts 200k tokens of context unless its
-  `context_window` says otherwise, so a 16k model's context runs out long before a rollover would come.
+  otherwise fill her model's context. She turns Synaps' automatic context rollover on for her own
+  session: `/context auto`, sent as an engine command from the Mirror attach (the input owner's, as
+  her persona's Sets). It is that session's alone: Synaps' `context_management.mode` in
+  `~/.synaps-cli/config`, and every other session, stay as they are. It is session-only on Synaps'
+  side, so she sends it again after a re-attach (a daemon reload, a resume). She sends it between
+  turns, never mid-turn (a turn reads the mode as it starts). If another client owns her session's
+  input then, she asks once more when it's free, then leaves it until she re-attaches.
+  - **For brains with a 200k window or more** (ChatGPT, Claude, most API models). Synaps 0.12 takes
+    every model's window for 200k. Past about 127k tokens by its estimate on a 200k window (hard
+    capacity comes first; 400k on a 1m window) it seals the older messages into its archive and
+    carries on in a fresh window with the recent messages and a note, with no summarizing model call.
+    She skips it, with a log line, for a local model (Ollama, LM Studio: its real window is smaller,
+    so the rollover would never come before it fills, and auto's guidance and archive tools would
+    crowd every request), and for a session whose `context_window` is under 64k (a rollover can't
+    make room there). A brain picked later (Settings ▸ Brain) is decided again: her own auto is
+    turned off (`/context off`) for one it doesn't fit, and on for one it does.
+  - **Privacy.** The archive (`~/.synaps-cli/context-archives/`) is per Synaps project: the nearest
+    folder up from her session's folder with a `.git` or a `.synaps-project` in it, else that folder
+    itself (`SYNAPS_PROJECT_ROOT` overrides it). Her session's folder is your home unless you gave
+    one (`--new --cwd`). So if your home has a `.git` or a `.synaps-project`, every session in a
+    folder under it that has neither shares her archive, and its model can look her archived
+    messages up (`memory_search`). The archive holds both sides of the chat word for word, and
+    Synaps never prunes it: it stays after `rollover = false` and after `/clear`.
+  - **What you see.** The Line shows one row where it happened, "older messages archived to make
+    room (context rollover)"; Synaps' rollover notices go to her log. One log line says it's on or
+    off, or why not. A thin `synaps attach` client open on her session prints her `/context` reply
+    (its JSON) and her Mirror attach's join and leave lines each time she sends it. Windows: not yet
+    (Synaps 0.12 keeps its archive on Linux and macOS only), so she doesn't ask; one log line says
+    so.
 - **Never `subconscious`.** She refuses to attach to the session named `subconscious`, by name or by id.
   The refusal happens at argument parsing, when resolving the session list, and on `Attached`
   (she detaches and exits with status 2).
@@ -314,7 +329,7 @@ common ones with their defaults.
 | `[session] thinking` | daemon default | `"low"`, `"medium"`, `"high"` or `"xhigh"` |
 | `[session] persona` | `true` | send the pack's `persona.md` as her session's system prompt |
 | `[session] persona_file` | none | a persona file of your own instead |
-| `[session] rollover` | `true` | turn Synaps' automatic context rollover on for her session (`/context auto`, that session only; [above](#the-session-rules)). `false`: Synaps' own `context_management.mode` stands (off unless set); one she turned it on for keeps it until it restarts |
+| `[session] rollover` | `true` | turn Synaps' automatic context rollover on for her session (`/context auto`, that session only), for a brain with a 200k window or more: skipped for a local model and under a 64k window ([above](#the-session-rules)). `false`: Synaps' own `context_management.mode` stands (off unless set); one she turned it on for keeps it until it restarts |
 | `[voice] enabled` | `false` | push-to-talk and spoken replies, through `capri-voice` |
 | `[voice] stt_model` | `"small.en"` | `"tiny.en"`, `"base.en"`, `"small.en"` or `"medium.en"`; setup fetches only `small.en` and `base.en` ([VOICE.md](VOICE.md#settings-voice-in-configsynaps-avatarsettingstoml)) |
 | `[voice] voice` | a stock Kokoro blend | a Kokoro voice or a blend (`"af_bella:0.6,af_nicole:0.4"`); `+glitch` adds the trace |

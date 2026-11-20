@@ -415,7 +415,9 @@ pub struct SessionSettings {
     /// A persona file of your own instead of the pack's.
     pub persona_file: Option<PathBuf>,
     /// Turn Synaps' automatic context rollover on for her session (`/context auto`, that session
-    /// only), so an always-on chat never fills its context. False: Synaps' own setting stands.
+    /// only), so an always-on chat never fills its context; for a brain with room for it (not a
+    /// local model, not under a 64k window: `session::Link::rollover_step`). False: Synaps' own
+    /// setting stands.
     pub rollover: bool,
 }
 

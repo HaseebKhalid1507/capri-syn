@@ -18,8 +18,8 @@ FAKE_DAEMON_VERSION and FAKE_MODEL set what the Welcome and the attach say (defa
 installer pins, installer/manifest's synaps_pin, so no FAKE string reaches a shot; and fake).
 A `set` (her persona, `[session] model`) is applied to the session's view and answered as the daemon
 does (`setting_changed`, ok, the new view): her model shows as set. Her `engine_command` `context auto`
-(`[session] rollover`) is answered as Synaps 0.12 answers it (`query_result`: on, or on Windows its
-Unix-only refusal); any other name `unhandled`. `model M`: another client's
+or `context off` (`[session] rollover`) is answered as Synaps 0.12 answers it (`query_result`: the
+mode, or on Windows auto's Unix-only refusal); any other name `unhandled`. `model M`: another client's
 `/model M` (his TUI's): the view changed, broadcast as the daemon does an engine command's change
 (`setting_changed` with its reserved id, `VIEW_CHANGED_SETTING_ID`), a reply to no one's Set.
 FAKE_HISTORY=FILE: the attached chat's messages instead of the fixture's (a JSON list of api messages).
@@ -218,7 +218,7 @@ def serve(conn):
                         view = dict(VIEW)
                     event({"ev": "setting_changed", "applied": {"id": c.get("id"), "setting": name, "ok": True, "view": view}})
                 elif c.get("cmd") == "engine_command":
-                    # Her `/context auto` ([session] rollover): answered as Synaps 0.12 does, on this OS.
+                    # Her `/context auto` or `off` ([session] rollover): answered as Synaps 0.12 does, on this OS.
                     name, arg = c.get("name", ""), c.get("arg", "")
                     log(f"cmd engine_command {name} {arg}")
                     if name != "context":

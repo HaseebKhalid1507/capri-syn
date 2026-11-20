@@ -3,19 +3,27 @@
 ## Unreleased
 
 ### Her session
-- **Her context rolls over by itself.** An always-on chat no longer fills her model's context: at each
-  attach of her own session she turns Synaps' automatic context rollover on for it (`/context auto`,
-  that session only; Synaps' config and your other sessions stay as they are). When the context gets
-  long, Synaps archives the older messages and carries on in a fresh window with the recent ones; no
-  summarizing call, so it works on any brain. The Line shows one quiet row where it happened, and
-  Synaps' own notices about it go to her log, with one line saying it's on or why not.
-  `[session] rollover = false` leaves it to Synaps. Not on Windows yet: Synaps 0.12 archives on Linux
-  and macOS only (her log says so).
+- **Her context rolls over by itself.** An always-on chat no longer fills her model's context: she
+  turns Synaps' automatic context rollover on for her own session (`/context auto`, that session only;
+  Synaps' config and your other sessions stay as they are), between turns. When the context gets
+  long, Synaps archives the older messages and carries on in a fresh window with the recent ones, with
+  no summarizing call. It's for brains with a 200k window or more (ChatGPT, Claude, most API models):
+  she skips it for a local model and for a window under 64k, and a brain picked later is decided
+  again. The Line shows one quiet row where it happened, and Synaps' own notices about it go to her
+  log, with one line saying it's on or why not (a `synaps attach` open on her session prints her
+  `/context` reply and her join and leave lines each time she sends it). `[session] rollover = false`
+  leaves it to Synaps. Not on Windows yet: Synaps 0.12 archives on Linux and macOS only (her log says
+  so).
+- **Privacy:** the archive holds both sides of the chat word for word, and Synaps never prunes it (it
+  stays after `rollover = false` and `/clear`). It's shared by every session in the same Synaps
+  project. Her session's folder is your home by default, so if your home has a `.git` or a
+  `.synaps-project`, sessions in folders under it without their own can search her archived messages
+  ([REFERENCE.md](docs/REFERENCE.md#the-session-rules)).
 
 ### For developers
 - The vendored synaps-client sends engine commands (`Client::engine_command`, `Event::EngineReply`,
   `Error::EngineCommandRefused`), to port back (`crates/synaps-client/VENDORED.md`). The fake daemon
-  answers `context auto` as Synaps 0.12 does.
+  answers `context auto` and `context off` as Synaps 0.12 does.
 
 ## 1.1.0 (2026-11-19)
 
