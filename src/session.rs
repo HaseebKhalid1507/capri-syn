@@ -1493,6 +1493,20 @@ fn local_tried(message: &str) -> Option<String> {
     Some(url.strip_suffix("/chat/completions").unwrap_or(url).trim_end_matches('/').to_string()).filter(|u| !u.is_empty())
 }
 
+/// A provider's refusal with this HTTP status (`m` lowercased), where Synaps 0.12 writes one: right
+/// after `request failed: ` (`codex request failed: 429 Too Many Requests`; the broker's `provider
+/// request failed: 429 …`, nested in `openai request failed: broker transport error: …` or a
+/// `Config error: openai provider: …`), then a space, `:`, `(` or the end, as its own
+/// `classify_error` (`extensions/session_driver.rs`) reads it. A number anywhere else (a path, an
+/// id, a session's name) is none.
+fn says_status(m: &str, status: &str) -> bool {
+    const AT: &str = "request failed: ";
+    m.match_indices(AT).any(|(i, _)| {
+        let rest = &m[i + AT.len()..];
+        rest.strip_prefix(status).is_some_and(|after| after.is_empty() || after.starts_with([' ', ':', '(']))
+    })
+}
+
 /// The command a no-brain line ends on, on a line of its own (the bubble draws it as a chip).
 pub const LOGIN_CMD: &str = "synaps login";
 
@@ -1537,7 +1551,7 @@ impl Trouble {
                 return Some(Trouble::WrongModel);
             }
         }
-        if any(&["rate limit", "(http 429", "usage limit", "quota", "(billing_error)"]) {
+        if any(&["rate limit", "(http 429", "usage limit", "quota", "(billing_error)", "429 too many requests"]) || says_status(&m, "429") {
             Some(Trouble::Limited)
         } else if any(&["overloaded", "server error (http 5"]) {
             Some(Trouble::Swamped)
@@ -2399,6 +2413,7 @@ mod tests {
     fn troubles_are_read_off_the_daemons_words() {
         const CLAUDE: Option<&str> = Some("claude-sonnet-4-6");
         const LOCAL: Option<&str> = Some("local/qwen3:8b");
+        const CODEX: Option<&str> = Some("openai-codex/gpt-5.5");
         let cases = [
             ("No Anthropic credentials. Run `synaps login`, or switch to a provider model with `/model groq/llama-3.3-70b-versatile`.", CLAUDE, Some(Trouble::NoBrain { on: Some("Claude") })),
             ("Auth error: No API key or OAuth token found. Run `synaps login` to authenticate.", CLAUDE, Some(Trouble::NoBrain { on: Some("Claude") })),
@@ -2418,7 +2433,24 @@ mod tests {
             ("Rate limit exhausted — retries used up while waiting for reset (next window in 4 min).", CLAUDE, Some(Trouble::Limited)),
             // v0.12.0, a ChatGPT account's usage spent (a free one's too: a 429 `usage_limit_reached`,
             // or a window's header at 100%; runtime/openai/stream.rs RESPONSES_QUOTA_SUFFIX).
-            ("Codex usage quota exhausted in stream. Add credit, wait for reset, or switch models.", Some("openai-codex/gpt-5.5"), Some(Trouble::Limited)),
+            ("Codex usage quota exhausted in stream. Add credit, wait for reset, or switch models.", CODEX, Some(Trouble::Limited)),
+            // v0.12.0, an ordinary 429 once its retries are spent: ChatGPT's (stream.rs
+            // send_with_retries) and the broker's (an API key's, Gemini's, under Config error), as
+            // its own classify_error reads them; a named one is said in words.
+            ("codex request failed: 429 Too Many Requests", CODEX, Some(Trouble::Limited)),
+            ("openai request failed: broker transport error: provider request failed: 429 Too Many Requests", Some("groq/llama-3.3-70b-versatile"), Some(Trouble::Limited)),
+            ("Config error: openai provider: broker transport error: provider request failed: 429 Too Many Requests", Some("google-gemini/gemini-2.5-pro"), Some(Trouble::Limited)),
+            ("broker transport error: provider request failed: 429 Too Many Requests [unlisted_error]", None, Some(Trouble::Limited)),
+            ("xai-auth: rate limited (HTTP 429). Wait for the limit to reset, or switch models with /model.", Some("xai-auth/grok-4.3"), Some(Trouble::Limited)),
+            // ChatGPT turning the account or its model away isn't a limit (codex_wire.rs: a 401,
+            // a 403, a model the account doesn't have). Nor is a 429 in a path, an id or a name.
+            ("codex request failed: 401 Unauthorized", CODEX, None),
+            ("codex request failed: 403 Forbidden", CODEX, None),
+            ("codex request failed: 400 Bad Request [invalid_request_error] — this model isn't available on the selected ChatGPT account; switch account (`synaps auth use --provider openai-codex`) or model (/model).", CODEX, None),
+            ("codex request failed: 404 Not Found [model_not_found] — the backend doesn't know this model for this account; pick another with /model.", Some("openai-codex/gpt-429"), None),
+            ("Tool execution failed: GET https://example.com/v1/items/429 returned nothing", CODEX, None),
+            ("openai request failed: broker transport error: provider request failed: 4290 Unknown", None, None),
+            ("Session error: no session 20260714-429000-3dab (request failed: 4291)", None, None),
             ("Anthropic is overloaded right now. Retries exhausted — wait a minute and try again.", CLAUDE, Some(Trouble::Swamped)),
             ("Anthropic server error (HTTP 502). Try again.", CLAUDE, Some(Trouble::Swamped)),
             ("Could not reach api.anthropic.com (connection failed). Check your network, DNS, or proxy settings.", CLAUDE, Some(Trouble::Offline)),

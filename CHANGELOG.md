@@ -10,6 +10,10 @@
   the usage limits free accounts have: when one is used up she says she's hit her model's limit (AT
   THE LIMIT). Nothing is picked for you: "Choose later" is still the default, and the order is the
   same.
+- **A provider's rate limit reads as one.** When ChatGPT, a key service or Gemini answers 429 Too Many
+  Requests and Synaps' retries are spent, she says she's hit her model's limit (AT THE LIMIT), as for
+  a used-up allowance. A ChatGPT account or model that's turned away (401, 403, a model the account
+  doesn't have) isn't a limit: its own error shows.
 
 ### For developers
 - `synaps-avatar --providers` has a seventh field: a hint shown beside a brain's name (ChatGPT's alone
