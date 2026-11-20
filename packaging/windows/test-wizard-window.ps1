@@ -197,7 +197,8 @@ function Test-WizardAbout {
     $bh = [IntPtr]::Zero
     $t0 = Get-Date
     while ($bh -eq [IntPtr]::Zero -and ((Get-Date) - $t0).TotalSeconds -lt 15) {
-        $new = @([WizWin]::Showing($setupPid, $h) | Where-Object { $was -notcontains $_ })
+        # The box itself: not whatever else is new (at a step boundary, the next step's window disabler is).
+        $new = @([WizWin]::Showing($setupPid, $h) | Where-Object { $was -notcontains $_ -and [WizWin]::Title($_) -eq 'About Setup' })
         if ($new) { $bh = $new[0] } else { Start-Sleep -Milliseconds 200 }
     }
     Check ($bh -ne [IntPtr]::Zero) "while step '$($run.Name)' runs: the wizard's About box opens"

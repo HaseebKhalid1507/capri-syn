@@ -360,14 +360,17 @@ end;
   leaves the wizard alone while another window of Setup's is up (that box), else it would enable the
   wizard under its own modal and About boxes would stack. Which windows are "another": not the exec's
   own window disabler (class TWindowDisabler-Window), a visible, enabled window of Setup's that is up
-  for the whole exec, and not the application's (TApplication, hidden away, disabled). Tried, and the
-  wizard was never enabled again: GetWindow(GW_ENABLEDPOPUP) (with no box up it still names a popup the
-  wizard owns), and any visible, enabled window (that is the disabler). While the
+  for the whole exec, and not the application's (TApplication: visible, but zero in size, and disabled).
+  Tried, and the wizard was never enabled again: GetWindow(GW_ENABLEDPOPUP) (with no box up it still
+  names a popup: the disabler's fallback window, owned by its hidden window), and any visible, enabled
+  window (that is the disabler). The class test matches any disabler, which is safe only because
+  nothing runs a step from inside the wait: no second exec, no second disabler. While the
   box is up, or a drag is held (the mouse down on the title bar runs Windows' move loop inside that
   pump), the wait doesn't run: the step goes on until its output fills the pipe (about 4 KB, read only
   in that wait) and its next write blocks; it goes on when the box is closed or the mouse is let go.
-  Nothing is lost, nothing deadlocks. On the other pages (the short looks before the install) the
-  wizard stays disabled: its buttons are live. }
+  Nothing is lost, nothing deadlocks, but the step waits: an About box left open stalls a download for
+  as long as it is open. On the other pages (the short looks before the install) the wizard stays
+  disabled: its buttons are live. }
 function EnableWindow(Wnd: HWND; Enable: Integer): Integer; external 'EnableWindow@user32.dll stdcall';
 function IsWindowVisible(Wnd: HWND): Integer; external 'IsWindowVisible@user32.dll stdcall';
 function IsWindowEnabled(Wnd: HWND): Integer; external 'IsWindowEnabled@user32.dll stdcall';
@@ -379,7 +382,8 @@ function KillTimer(Wnd: HWND; Id: LongWord): Integer; external 'KillTimer@user32
 
 var
   LiveProc, SeeProc: LongWord;
-  OtherUp: Boolean;
+  OtherUp, HeldLogged: Boolean;
+  HeldBy: String;
 
 { A window's class name ('' when it can't be read). }
 function WindowClass(Wnd: HWND): String;
@@ -405,6 +409,7 @@ begin
   Cls := WindowClass(Wnd);
   if (Cls = 'TWindowDisabler-Window') or (Cls = 'TApplication') then exit;
   OtherUp := True;
+  HeldBy := Cls;
   Result := 0;
 end;
 
@@ -413,7 +418,12 @@ begin
   if (Progress = nil) or (WizardForm.CurPageID <> Progress.ID) then exit;
   OtherUp := False;
   EnumThreadWindows(GetCurrentThreadId, SeeProc, 0);
-  if not OtherUp then EnableWindow(WizardForm.Handle, 1);
+  if not OtherUp then EnableWindow(WizardForm.Handle, 1)
+  else if not HeldLogged then begin
+    { Once per step (it is a tick every 50 ms): why the wizard may stay undraggable. The About box is one. }
+    HeldLogged := True;
+    Log('drag: step ' + StepName + ': the wizard is kept disabled while another window of Setup''s is up (class ' + HeldBy + ')');
+  end;
 end;
 
 { PowerShell Params, its output through StepLine, waited for; the wizard live meanwhile (above). }
@@ -422,6 +432,7 @@ var
   Timer: LongWord;
 begin
   Timer := 0;
+  HeldLogged := False;
   if (Progress <> nil) and (WizardForm.CurPageID = Progress.ID) then begin
     if LiveProc = 0 then LiveProc := CreateCallback(@KeepWizardLive);
     if SeeProc = 0 then SeeProc := CreateCallback(@SeeOther);
@@ -438,12 +449,14 @@ begin
 end;
 
 { steps.ps1 Args in a PowerShell with no window; True when it says it's done. Its reason in StepFailed.
-  The log has a "step NAME: exit N" for every "step NAME: ARGS", whichever way it ended. }
+  The log has a "step NAME: exit N" for every "step NAME: ARGS", whichever way it ended. N is PowerShell's
+  exit code; -1 when there is none: it didn't start (the Windows error in the line), or Setup's wait
+  for it raised (a callback's exception: PowerShell may well have started). }
 function RunStep(const Name, Title, Script, Args: String): Boolean;
 var
   Code: Integer;
   Ran: Boolean;
-  Tail: String;
+  Tail, Why: String;
 begin
   StepName := Name;
   StepTitle := Title;
@@ -454,18 +467,25 @@ begin
   Result := False;
   Ran := False;
   Code := -1;
+  Tail := '';
   try
     Ran := ExecLive('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + Script + '" ' + Args, Code);
-    if not Ran then StepFailed := 'PowerShell didn''t start (' + SysErrorMessage(Code) + ')';
+    if not Ran then begin
+      { Code is the Windows error here, not an exit code. }
+      StepFailed := 'PowerShell didn''t start (' + SysErrorMessage(Code) + ')';
+      Tail := ' (PowerShell didn''t start: ' + SysErrorMessage(Code) + ', Windows error ' + IntToStr(Code) + ')';
+      Code := -1;
+    end;
   except
-    StepFailed := 'PowerShell didn''t run: ' + GetExceptionMessage;
+    Why := GetExceptionMessage;
+    StepFailed := 'Setup lost the step: ' + Why;
+    Tail := ' (no exit code: ' + Why + ')';
+    Code := -1;
   end;
-  Tail := '';
   if Ran then begin
     Result := Code = 0;
     if not Result and (StepFailed = '') then StepFailed := 'it stopped (exit ' + IntToStr(Code) + '): the setup log has its lines';
-  end else
-    Tail := ' (not run: ' + StepFailed + ')';
+  end;
   Log('step ' + Name + ': exit ' + IntToStr(Code) + Tail);
 end;
 

@@ -87,11 +87,12 @@ function Wait-Window([string]$Title, [int]$Secs = 60) {
 # Trimmed: a heading's name can end in a line break (the finish page's does).
 function Get-WindowText($W) {
     # A window that closes under the read (the uninstall's questions do) says nothing: not an error.
-    # Only that: UI Automation's two ways of saying it (PowerShell wraps a method's exception: look inside).
+    # Only that: UI Automation's two ways of saying it, and its timeout when Setup is busy (PowerShell
+    # wraps a method's exception: look inside). The caller's loop asks again.
     try { @($W.FindAll($Tree::Descendants, [Windows.Automation.Condition]::TrueCondition) | ForEach-Object { "$($_.Current.Name)".Trim() } | Where-Object { $_ }) }
     catch {
         for ($e = $_.Exception; $e; $e = $e.InnerException) {
-            if ($e -is [Windows.Automation.ElementNotAvailableException] -or $e -is [System.Runtime.InteropServices.COMException]) { return @() }
+            if ($e -is [Windows.Automation.ElementNotAvailableException] -or $e -is [System.Runtime.InteropServices.COMException] -or $e -is [System.TimeoutException]) { return @() }
         }
         throw
     }
