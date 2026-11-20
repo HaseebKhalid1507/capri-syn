@@ -73,9 +73,10 @@ anything is installed, and never installed for you; the package is `pipewire-bin
 `pipewire-utils` on Fedora, `pipewire-audio` on Arch (not `pipewire`: it has neither tool) and
 `pipewire-tools` on openSUSE. For the second, `tools/capri-voice-setup` uses a `python3.13` to
 `python3.10` on your PATH (or your `python3`, when it is one of them); with none, uv fetches Python
-3.13 (about 35 MB) into `~/.local/share/capri-voice/python`, inside the voice's own folder. install.sh
-puts uv in its own venv when you have none. Run the setup by hand with no uv and no such Python, and it
-stops with one line: install `python3.13` (Arch: `python313` from the AUR) or `uv`.
+3.13 (a 34 MB download, 105 MB on disk) into `~/.local/share/capri-voice/python`, inside the voice's
+own folder. install.sh puts uv in its own venv when you have none. Run the setup by hand with no uv
+and no such Python, and it stops with one line: install `python3.13` (Arch: `python313` from the AUR)
+or `uv`.
 
 When Synaps has no model yet (no login in `~/.synaps-cli/auth.json`, no `local/` model in its config
 or her `[session]`), it asks which brain, in your terminal. None is picked for you; Enter is later.

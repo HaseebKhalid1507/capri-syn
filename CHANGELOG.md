@@ -75,12 +75,13 @@
 ### Linux voice: Python 3.14, and PipeWire's tools
 - **`install.sh --voice` works where `python3` is 3.14 (Arch now).** kokoro-onnx 0.6.1 takes Python
   3.10 to 3.13, and `tools/capri-voice-setup` built its venv on `/usr/bin/python3`, so it failed there.
-  It now uses a `python3.13` to `python3.10` on your PATH (your `python3` when it is one of them); with
-  none, uv fetches Python 3.13 (~35 MB) into `~/.local/share/capri-voice/python` and nowhere else; with
-  no uv it stops with one line: `her voice needs Python 3.10–3.13; you have 3.14: install python3.13
-  (Arch: python313 from the AUR) or uv`. A venv an earlier failed run left on 3.14 is made again.
-  install.sh says which Python she gets, in its voice step. The installer unit tests run the setup on
-  a stand-in `python3` that says 3.14, both ways.
+  It now uses a `python3.13` to `python3.10` on your PATH (your `python3` when it is one of them);
+  with none, uv fetches Python 3.13 (a 34 MB download, 105 MB on disk) into
+  `~/.local/share/capri-voice/python` and nowhere else; with no uv it stops with one line:
+  `her voice needs Python 3.10–3.13; you have 3.14: install python3.13 (Arch: python313 from the AUR)
+  or uv`. A venv an earlier failed run left on 3.14 is made again. install.sh says which Python she
+  gets, in its voice step. The installer unit tests run the setup on a stand-in `python3` that says
+  3.14, both ways.
 - **`install.sh --voice` checks for `pw-record` and `pw-play` first,** before anything is installed
   (a dry run says it and goes on). Missing, it names the package: `pipewire-bin` (Debian, Ubuntu),
   `pipewire-utils` (Fedora), `pipewire-audio` (Arch: its `pipewire` has neither tool) or
