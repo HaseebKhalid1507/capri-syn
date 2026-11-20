@@ -310,7 +310,7 @@ stays ~9 MB (CI fails hers past 20 MB), and only he who wants voice gets the res
 - **Per user, no admin**: the bundle goes to `voice\` in her install folder (read from her installer's
   record, else its default), where she looks for it.
 - **The models are never in it.** The "models" task (checked) runs `voice-models.ps1`: Whisper small.en and
-  base.en, Kokoro int8 and its voices, Silero, the wake word's two feature models (~320 MB, each SHA-256
+  base.en, Kokoro int8 and its voices, Silero, the wake word's two feature models (~375 MB, each SHA-256
   pinned; "hey capri" itself comes with the bundle) into `%LOCALAPPDATA%\capri-voice\models`. A cut
   download resumes (`curl.exe -C -`); a wrong hash is deleted and the run fails. A Start-menu entry,
   "synaps-avatar voice models", runs it again.
