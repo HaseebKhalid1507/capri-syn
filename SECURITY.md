@@ -6,8 +6,8 @@ Security fixes go into the latest release. Please update before reporting.
 
 | Version | Supported |
 |---|---|
-| 1.0.x | ✅ |
-| < 1.0 | ❌ |
+| the latest release | ✅ |
+| older releases | ❌ |
 
 ## Reporting a vulnerability
 

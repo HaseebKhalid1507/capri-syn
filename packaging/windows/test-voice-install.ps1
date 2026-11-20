@@ -1,5 +1,5 @@
 # Installs, checks and uninstalls her VOICE installer, unattended, as his own user (CI runs it after
-# build-voice.ps1; it also runs as is in the capri-win VM). The models task is left out (~320 MB;
+# build-voice.ps1; it also runs as is in the capri-win VM). The models task is left out (~375 MB;
 # voice-models.ps1 has its own test): the bundle's own interpreter runs the selftest without them.
 #
 # release.yml runs it on the release's own voice setup too.

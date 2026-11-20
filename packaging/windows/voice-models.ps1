@@ -6,7 +6,7 @@
 # part of Windows since 10 1803). A file whose hash doesn't match its pin is deleted and the script
 # fails (run it again for a fresh copy). A file already there with the right hash is kept.
 #
-#   .\voice-models.ps1                         # all of them (~320 MB)
+#   .\voice-models.ps1                         # all of them (~375 MB)
 #   .\voice-models.ps1 -Stt base.en            # Whisper base.en only (60 MB instead of 250)
 #   .\voice-models.ps1 -Only silero_vad.onnx   # just these (tests)
 #   .\voice-models.ps1 -To D:\models

@@ -2,115 +2,113 @@
 
 ## Unreleased
 
-### Her brain: any provider, signed in from her, every model
-- **Settings ▸ Brain is neutral:** three ways in, none first: SIGN IN (the accounts by name:
-  ChatGPT, Claude, Copilot, Gemini, Grok, Kimi, Muse), API KEY (Synaps' 19 key services) and RUN
-  LOCAL, each opened in place. Claude has no row or label of its own any more. `provider.rs` `ALL`
-  lists its accounts in that order (by name), Claude second.
-- **She signs in herself:** a SIGN IN account runs `synaps login --provider …` with no window and
-  your browser opens on the provider's page (Copilot: its code shown large and copied, the one
-  thing she copies: short-lived, single-use). SIGNING IN… with ⏎ to stop, and NO BROWSER? under it
-  to open the page again (keys or a click); signed in, she switches to that account's model and
-  says so once it's written; failed, she says why, with the terminal line in her bubble. An API key
-  goes in a hidden field, to Synaps on its stdin (the field cleared, her copy zeroed). Never a
-  copied command for a SIGN IN row, never the URL or the code in her log. Synaps' login dies with
-  her, a crash too (a job object on Windows, `PR_SET_PDEATHSIG` on Linux): Synaps alone, never
-  what it started (your browser stays).
-- **Only its own sign-in page is opened:** read off the exact line its provider prints, then https,
-  `claude.ai`, `auth.openai.com` or `accounts.google.com` with their sign-in path exactly, no
-  userinfo, no port, no `\`, no `#`, opened as parsed; Copilot's, exactly
-  `https://github.com/login/device` (NO BROWSER? under it too, where its code goes). On Windows she
-  opens it whole (Synaps' `cmd /c start` cuts it at its `&`). Grok on Windows says NEEDS A NEWER
-  SYNAPS (LOGGED OUT · NEEDS A NEWER SYNAPS where its login ran out): Synaps 0.12.0 opens its page
-  cut and never prints it.
-- **LOGGED OUT signs in again from her:** `SIGN IN AGAIN ▸` in her bubble opens Settings ▸ Brain on
-  her account's row (LOGGED OUT · ⏎ SIGN IN AGAIN, the same sign-in), no terminal.
-- **MODEL is a menu:** every model of every account signed in here, every key service with a key,
-  and the local server's, by provider, hers checked; no cap, it scrolls (PgUp/PgDn, Home/End).
-  Only confirmed logins count: a fresh install lists no Claude models. `sign in first` when there's
-  nothing. The model lists are Synaps 0.12.0's catalogs. RUN LOCAL with the server up lists its
-  models in place.
-- **NO BRAIN YET with nothing picked** (no `[session] model`, no model in Synaps' config, her
-  session on Synaps' default) says to pick a brain, with `SET ME UP ▸` to Settings ▸ Brain, not to
-  sign in to Claude.
+## 1.1.0 (2026-11-19)
 
-### Windows: her tray icon starts on the taskbar
-- Windows 11 puts every new tray icon in the hidden `^` overflow, so on a first install she was there
-  and nobody saw her. The first time her icon is in, she now sets `IsPromoted` on her own entry in
-  `HKCU\Control Panel\NotifyIconSettings` (matched by her exe's path and her icon's GUID), so it sits on
-  the taskbar. Explorer takes no value written while it adds the icon, so she waits a few seconds first,
-  then asks the shell whether her icon is on the taskbar and, if not, writes the same 1 once more.
-  Once only: a `tray-promoted` file in her state folder (`%LOCALAPPDATA%\synaps-avatar`) says it was
-  done, and after that the setting is his: hide her and she stays hidden. An entry that already has
-  `IsPromoted` is left as it is. Windows 10 has no such key: nothing is done there. Her log says what is
-  true: `tray: shown on the taskbar (first run)` (`, written twice` if it took the 1 a second time),
-  `tray: set to show on the taskbar; Explorer hasn't moved her yet (next sign-in)`, `tray: left as he
-  set it` or `tray: no NotifyIconSettings entry yet`. Later starts read her entry and say what
-  `IsPromoted` is now, writing nothing. The uninstaller removes the marker.
+Her brain is yours to pick: an account you have, an API key or a model on your own PC, from Settings ▸
+Brain and from her installers, with nothing picked for you. On Windows 11 her tray icon starts on the
+taskbar, and on Linux her voice installs where `python3` is 3.14.
 
-### Her installers ask which brain, and pick none for you
-- With no brain yet, her setup's new "Her model" page, and install.sh and install.ps1 in your terminal,
-  offer the same four choices: sign in to an account (ChatGPT, Claude, Copilot, Gemini, Grok, Kimi,
-  Muse, her own list: your browser opens on the sign-in page; Copilot's code is shown to you), a model
-  running on this PC (Ollama or LM Studio), an API key (never on a command line or in a log), or later.
-  Later is the default, and her setup no longer ticks "Sign in to Claude". Then her model is that one's
-  default. Grok isn't offered on Windows yet. An account's model is set once you're signed in, never
-  before. Unattended: `--brain=` (`/BRAIN=` for her setup). `synaps-avatar --set session.model=…` sets
-  her model, and a running her reads her settings again.
+### Her brain (Settings ▸ Brain and her installers)
+- **Three ways in, none first.** Settings ▸ Brain offers SIGN IN, API KEY and RUN LOCAL, each opened in
+  place, then MODEL. SIGN IN lists the accounts by name: ChatGPT, Claude, Copilot, Gemini (when Synaps
+  has its Google client), Grok, Kimi and Muse. API KEY lists Synaps' 19 key services. RUN LOCAL lists
+  the models of the server on your PC when it's up, and otherwise opens the local-model steps.
+- **She signs you in herself.** A SIGN IN row runs Synaps' sign-in with no window, and your browser
+  opens on the provider's sign-in page. Copilot's code is shown large and copied, to type there: the
+  one thing she copies, since it is short-lived and single-use. While it runs the row reads SIGNING
+  IN…, ⏎ stops it, and NO BROWSER? under it (Claude, ChatGPT, Gemini and Copilot only) opens the page
+  again. Signed in, she switches to that account's model and says so. If it fails she says why, with
+  the terminal's line in her bubble. A sign-in not finished within 10 minutes is stopped. An API key
+  goes in a hidden field and to Synaps on its stdin. Neither the page's address nor the code goes to
+  her log.
+- **Only the provider's own sign-in page is opened.** She reads the page off the line Synaps prints and
+  opens it only when it is that provider's own. On Windows she opens the whole page herself, since
+  Synaps' `cmd /c start` cuts it at its first `&`. Grok there says NEEDS A NEWER SYNAPS: its page is
+  never printed.
+- **LOGGED OUT signs in again from her.** `SIGN IN AGAIN ▸` in her bubble opens Settings ▸ Brain on her
+  account's row (LOGGED OUT · ⏎ SIGN IN AGAIN), with no terminal.
+- **MODEL is a menu.** It lists every model of every account signed in on this PC, every key service
+  with a key, and the local server's, grouped by provider with hers checked, and it scrolls. Only a
+  confirmed login counts, so a fresh install lists no Claude models until you sign in; with nothing to
+  list it says `sign in first`.
+- **NO BRAIN YET asks for a pick.** With no brain picked anywhere, a failed message asks you to pick
+  one, with `SET ME UP ▸` to Settings ▸ Brain. A brain you picked whose login is missing names that
+  provider and its login line.
+- **Her installers ask which brain.** When Synaps has no brain yet, her setup's "Her model" page, and
+  install.sh and install.ps1 in your terminal, offer four choices: sign in to an account (the same
+  list as Settings, Copilot's code shown to you), a model on this PC (Ollama or LM Studio, whichever
+  is running), an API key (never on a command line or in a log), or later, the default: nothing is
+  picked for you. Her model then becomes the account's default (once you're signed in), the key
+  service's default, or the local model you picked. On Windows the finish page offers the sign-in for
+  the account you picked, ticked; unticked or stopped, her model stays unset. Grok can't be signed in
+  on Windows yet. Unattended: `--brain=` (`/BRAIN=` for her setup); `--yes`, `--dry-run` or no
+  terminal mean later unless `--brain` says otherwise. `synaps-avatar --set session.model=…` sets her
+  model.
+
+### Windows
+- **Her tray icon starts on the taskbar.** Windows 11 hides a new tray icon in the `^` overflow. She
+  moves hers out once; after that it's your setting, an icon you placed is left alone, and Windows 10
+  gets nothing.
+- **Setup's window drags** on its "Setting her up" page (its buttons are hidden there and the close
+  box is greyed). While its system menu's About box is open it holds off, so a second box can't open
+  on top. Setup's log has a `step NAME: exit N` for every step (`-1` when there is no exit code), and
+  names any other window of Setup's that keeps the wizard disabled.
+
+### Linux voice
+- **Her voice installs where `python3` is 3.14 (Arch now).** kokoro-onnx takes Python 3.10 to 3.13: she
+  uses your `python3` when it is one of them, else a `python3.13` to `python3.10` on your PATH; with
+  none, uv fetches 3.13 (105 MB) into `~/.local/share/capri-voice/python` and nowhere else; with no uv
+  she says what to install.
+- **`pw-record` and `pw-play` are checked first,** before anything is installed. A missing one names
+  its package: `pipewire-bin` (Debian, Ubuntu), `pipewire-utils` (Fedora), `pipewire-audio` (Arch) or
+  `pipewire-tools` (openSUSE).
+- **`capri-voice` started by hand (no systemd) runs on the voice's venv,** not the system Python,
+  which has no kokoro-onnx.
+
+### Docs
+- The repository has a code of conduct, contributing notes, a security policy, a support page, issue
+  forms and a pull request template; the bug form's Version asks for what Settings ▸ ABOUT ▸ COPY
+  copies. The README has a Requirements section: OS, graphics, CPU, RAM and disk, her brain, voice,
+  network, and its Brain picture shows the current Settings ▸ Brain. docs/ describe it and the
+  installers' picker. REFERENCE.md's trouble table has her reply when no model is picked, and INSTALL.md
+  and VOICE.md say what the Linux voice needs.
+
+### For developers
+- `synaps-avatar --providers` prints her accounts, key services and local server, a line each, in her
+  own table's order: six tab-separated fields (id, login, kind, default model, name, how it's signed in
+  to). Her installers read it, so they keep no copy.
+- `tools/fakesynaps.py` and `tools/fakelocal.py` stand in for Synaps' sign-in and a local model server.
 
 ### Known issues
-- On a first run, Explorer can name her taskbar button with her old tooltip followed by the current
-  one (`capri-syn · SPEAKING capri-syn · ONLINE`), so a screen reader hears both. Her tooltip is one
-  string, and the hover popup shows the current one alone; the name chains after a tooltip change. A
-  follow-up is open.
+- A dark slab on X11 without a compositor (#72): now and then her whole window's rectangle paints solid
+  black behind her and her bubble, covering what's under it, more often while a prompt hangs below her.
+  So far it has only been seen with no compositor running, where she cuts her window to her outline
+  with the X shape. Workaround (likely; not yet confirmed): run a compositor (picom: `picom -b`). With
+  `[display] composited = "auto"`, the default, she switches to alpha when it starts, no restart.
+- GNOME, KDE and sway run her through XWayland, with its limits (docs/INSTALL.md). None of them has been
+  tried on a real session yet: CI and the test containers stand in for them.
+- Hyprland has no idle time for her yet: your presence is the pointer moving, so typing alone for 5 min
+  reads as away. Hyprland before 0.40 isn't supported: she takes XWayland there.
+- On Windows, Synaps 0.12's own `synaps login` opens a sign-in tab cut at the URL's first `&`: copy the
+  whole URL it prints into your browser, or sign in from her (Settings ▸ Brain) or through her
+  installers' step, which open it whole (install.ps1 puts it there too; the default folder shown;
+  `-Provider` for another account than Claude):
+  `powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Programs\synaps-avatar\steps\steps.ps1" login`
+  Grok's sign-in never prints its URL, so Grok can't be signed in on Windows yet.
+- Windows: the installers are unsigned, so a browser download meets SmartScreen ("More info", then "Run
+  anyway"). Windows 10 and Windows 11 on Arm are untested. A click on one of her notifications does
+  nothing (as on Linux). Her voice brings its own VC++ runtime but hasn't yet run on a PC without the
+  Visual C++ Redistributable. Live audio is still to check on real hardware: her desktop checks ran in
+  a Windows 11 VM, with no real audio.
+- Linux has no tray icon yet: HIDE's chip is the way back there.
+- Her taskbar button's name, for a screen reader (Windows): on a first run, Explorer can name her button
+  with her old tooltip followed by the current one, so a screen reader hears both
+  (`capri-syn · SPEAKING capri-syn · ONLINE`). Her tooltip is one string, and the hover popup shows the
+  current one alone: the name chains after a tooltip change.
+- With `XDG_RUNTIME_DIR` unset, she and her voice sidecar look for the Linux socket in different places:
+  she in the temp dir (`$TMPDIR`, else `/tmp`), the sidecar in `/run/user/<uid>`. Set it, or set
+  `CAPRI_VOICE_SOCK` for both. It isn't aligned yet because that would change how she behaves.
 
-### Windows: Setup's window drags while she's being set up
-- On "Setting her up" (Synaps, her art, her daemon: minutes) the installer's window couldn't be dragged.
-  It kept painting and answering, but took no mouse: Setup disables its own windows for as long as a
-  program it started runs (so nobody clicks into a half-run step), and the steps are such programs. On
-  that page its buttons are hidden and the close box is greyed, so it is enabled again there, 50 ms
-  after each step starts. The short looks before the install (Synaps, the microphones: a second
-  or two each, on a click of Next) still hold it.
-
-### Windows: Setup's About box, and its log
-- On "Setting her up" the wizard's system menu is live (Minimize, "About Setup..."). The 50 ms timer
-  that keeps the wizard draggable now holds off while that box is up (it opens from inside Setup's wait
-  for the step, and a wizard enabled under it would let a second box open on top), and enables the
-  wizard again once it is closed. What counts as a box: a visible, enabled window of Setup's that
-  isn't Inno's own window disabler (`TWindowDisabler-Window`, up for the whole step) or its
-  application window (`TApplication`, zero in size and disabled). A drag held down, or the box, pauses
-  Setup's wait on the step: the step goes on until its output fills the pipe (about 4 KB, read only in
-  that wait), then waits there for the mouse to be let go or the box closed. Nothing is lost, but the
-  step waits: an About box left open stalls a download for as long as it is open.
-- Setup's log has a `step NAME: exit N` for every `step NAME: ARGS`. N is PowerShell's exit code, or
-  -1 when there is none: `exit -1 (PowerShell didn't start: ..., Windows error N)`, or `exit -1 (no exit
-  code: ...)` when Setup's own wait for the step raised (PowerShell may have started). It also says when
-  the timer couldn't be set (`drag: no timer for step NAME`), and, once per step, when another window of
-  Setup's keeps the wizard disabled (`drag: step NAME: the wizard is kept disabled while another window
-  of Setup's is up (class C)`).
-
-### Linux voice: Python 3.14, and PipeWire's tools
-- **`install.sh --voice` works where `python3` is 3.14 (Arch now).** kokoro-onnx 0.6.1 takes Python
-  3.10 to 3.13, and `tools/capri-voice-setup` built its venv on `/usr/bin/python3`, so it failed there.
-  It now uses your `python3` when it is a CPython 3.10 to 3.13 (the distro's own keeps its
-  `pywhispercpp`), else a `python3.13` to `python3.10` on your PATH; with none, uv fetches Python 3.13
-  (a 34 MB download, 105 MB on disk) into `~/.local/share/capri-voice/python` and nowhere else (a
-  `python-preference = "only-system"` of yours doesn't matter); with no uv it stops with one line:
-  `her voice needs Python 3.10–3.13; you have 3.14: install uv (Arch: pacman -S uv) or python3.13 (Arch:
-  python313 from the AUR)`. A venv an earlier failed run left on 3.14, or whose Python is gone, is made
-  again. install.sh says which Python she
-  gets, in its voice step. The installer unit tests run the setup on a stand-in `python3` that says
-  3.14, both ways.
-- **`install.sh --voice` checks for `pw-record` and `pw-play` first,** before anything is installed
-  (a dry run says it and goes on). Missing, it names the package: `pipewire-bin` (Debian, Ubuntu),
-  `pipewire-utils` (Fedora), `pipewire-audio` (Arch: its `pipewire` has neither tool) or
-  `pipewire-tools` (openSUSE). It installs nothing itself.
-- **`capri-voice` started by hand (no systemd) runs on the voice's venv.** Its first line was
-  `#!/usr/bin/env python3`: the system's Python, with no kokoro-onnx, so the summary's "start it:
-  capri-voice" failed. install.sh now writes the venv's `python` there (a data folder with a space can't
-  be in a shebang: the summary then names the whole command).
-- **docs:** REFERENCE.md's trouble table has her reply for no model picked (`SET ME UP ▸`); INSTALL.md
-  and VOICE.md say what the Linux voice needs.
 
 ## 1.0.0 (2026-11-19)
 
