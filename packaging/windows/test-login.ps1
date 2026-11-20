@@ -129,7 +129,7 @@ public static class Her {
                     return p.ExitCode;
                 }
             }
-            Console.WriteLine("openai-codex\topenai-codex\taccount\topenai-codex/gpt-5.5\tChatGPT\tbrowser");
+            Console.WriteLine("openai-codex\topenai-codex\taccount\topenai-codex/gpt-5.6-terra\tChatGPT\tbrowser\tfree account works");
             Console.WriteLine("anthropic\tclaude\taccount\tclaude-sonnet-4-6\tClaude\tbrowser");
             Console.WriteLine("github-copilot\tgithub-copilot\taccount\tgithub-copilot/claude-sonnet-4.6\tCopilot\tcode");
             Console.WriteLine("google-gemini\tgoogle-gemini\taccount\tgoogle-gemini/gemini-2.5-pro\tGemini\tbrowser");
@@ -358,15 +358,18 @@ $want = @(foreach ($t in $table) {
         $f = $t -split "`t"
         if ($f[2] -notin @('account', 'key') -or $f[0] -eq 'google-gemini') { continue }
         $why = if ($f[0] -eq 'xai-auth') { "Synaps 0.12 can't open xAI's sign-in page whole on Windows yet" } else { '' }
-        "brains: $($f[0])|$($f[1])|$($f[4])|$($f[5])|$why"
+        "brains: $($f[0])|$($f[1])|$($f[4])|$($f[5])|$why|$($f[6])"
     })
 $got = @($lines | Where-Object { $_ -like 'brains: *' })
 Check (($got -join "`n") -ceq ($want -join "`n")) "its accounts and key services: her table's, in its order ($($got.Count) of $($want.Count); first $($got | Select-Object -First 1))"
-Check ($got -contains 'brains: anthropic|claude|Claude|browser|' -and $got -contains 'brains: github-copilot|github-copilot|Copilot|code|') 'Claude in the browser, Copilot with a code'
+Check ($got -contains 'brains: anthropic|claude|Claude|browser||' -and $got -contains 'brains: github-copilot|github-copilot|Copilot|code||') 'Claude in the browser, Copilot with a code'
+# A hint (her table's last field) beside ChatGPT alone: a free account works.
+$hinted = @($got | Where-Object { ($_ -split '\|')[5] })
+Check ($hinted.Count -eq 1 -and $hinted[0] -ceq 'brains: openai-codex|openai-codex|ChatGPT|browser||free account works') "ChatGPT's hint, and no other's: $($hinted -join ', ')"
 Check (@($got | Where-Object { $_ -like 'brains: google-gemini|*' }).Count -eq 0) 'no Gemini without its Google client'
 Check (@($got | Where-Object { $_ -match "^brains: xai-auth\|xai-auth\|Grok\|browser\|Synaps 0\.12 can't open" }).Count -eq 1) 'Grok, with why it is not here'
-$keys = @($got | Where-Object { $_ -like 'brains: *|key|' }).Count
-Check ($got -contains 'brains: groq|groq|Groq|key|' -and $keys -eq @($table | Where-Object { ($_ -split "`t")[2] -eq 'key' }).Count) "the key services ($keys)"
+$keys = @($got | Where-Object { $_ -like 'brains: *|key||' }).Count
+Check ($got -contains 'brains: groq|groq|Groq|key||' -and $keys -eq @($table | Where-Object { ($_ -split "`t")[2] -eq 'key' }).Count) "the key services ($keys)"
 if ($env:REAL_HER) {
     # Her real table: ALL's 7 accounts, 19 key services (src/provider.rs; Gemini's needs its client).
     Check (@($table | Where-Object { ($_ -split "`t")[2] -eq 'account' }).Count -eq 7 -and $keys -eq 19) "her own table, through a pipe from her windowed exe: 7 accounts, $keys key services"
@@ -376,7 +379,7 @@ Check (-not ($out -match 'embed')) 'no embedding model'
 $env:SYNAPS_GOOGLE_GEMINI_CLIENT_ID = 'x'
 $out = Invoke-Step @('brain-check')
 Remove-Item Env:\SYNAPS_GOOGLE_GEMINI_CLIENT_ID
-Check ($out -match '(?m)^brains: google-gemini\|google-gemini\|Gemini\|browser\|\s*$') 'Gemini with its Google client'
+Check ($out -match '(?m)^brains: google-gemini\|google-gemini\|Gemini\|browser\|\|\s*$') 'Gemini with its Google client'
 
 # Her model: an account's default from her own table, by her settings writer.
 Clear-Fake

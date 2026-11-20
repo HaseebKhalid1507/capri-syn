@@ -104,10 +104,11 @@ cargo-about, `installer/licenses/`).
 - **Her model** (page "Her model", shown when Synaps has no brain yet: no login in `auth.json`, no
   `local/` model; `steps.ps1 brain-check`, from Setup's temporary copy of the steps). Four choices
   at the same level, and only "Choose later" picked:
-  - "Sign in to an account": Claude, ChatGPT, Copilot, Gemini (when Synaps has its Google client),
-    Kimi, Muse, each with how it signs in ("your browser", or for Copilot "your browser, and a code
-    shown to you"). Grok is listed, "not here" with why: Synaps 0.12's xAI sign-in never prints its
-    URL, so the step can't open it whole on Windows yet (Next says so if he picks it).
+  - "Sign in to an account": ChatGPT, Claude, Copilot, Gemini (when Synaps has its Google client),
+    Kimi, Muse, in her table's order, each with how it signs in ("your browser", or for Copilot
+    "your browser, and a code shown to you"), ChatGPT's after its hint, "free account works" (her
+    table's last field). Grok is listed, "not here" with why: Synaps 0.12's xAI sign-in never prints its URL, so
+    the step can't open it whole on Windows yet (Next says so if he picks it).
   - "A model on this PC": the models Ollama (`:11434`) and LM Studio (`:1234`) serve, embedding
     models left out, and any whose id has more than letters, digits and `._:/@+-` (it goes on a
     command line). With neither running: "None running here: get Ollama, then pick it in her

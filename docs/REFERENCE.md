@@ -57,10 +57,11 @@ Paths here are Linux's: Windows keeps the same files under `%APPDATA%` and `%LOC
   |---|---|---|---|
   | no credentials (`synaps login` + no credential; 0.12.0: `No credentials for anthropic at …`) | No brain yet, choom. Synaps has no Claude login. Log in, or set another model ([session] model in my settings): `$ synaps login --provider claude` (the provider's own `--provider`; none named: `$ synaps login`) | `NO BRAIN YET` | idle |
   | the same, with no model picked (no `[session] model`, none in Synaps' config, her session on its default: "NO BRAIN YET, none picked", below) | No brain yet, choom. Pick one: an account, an API key, or a model on this machine. `SET ME UP ▸` (a button to Settings ▸ Brain) | `NO BRAIN YET` | idle |
-  | a lapsed or rejected login | My login ran out. Sign me in again: `SIGN IN AGAIN ▸` (a button to Settings ▸ Brain, where her account's row signs in again) | `LOGGED OUT` | idle |
-  | rate or usage limit, billing | Hit my model's limit for now. Give it a bit, then ask me again. | `AT THE LIMIT` | annoyed |
-  | overloaded, a 5xx | My model's swamped right now. Try me again in a minute. | `MODEL BUSY` | annoyed |
-  | unreachable, timed out, a dropped stream | Can't reach my model. Check the connection, then ask me again. | `NO CONNECTION` | annoyed |
+  | a lapsed or rejected login; ChatGPT's 401 (`codex request failed: 401 …`) and a stream's `… authentication rejected in stream` (ChatGPT's, xAI's, Muse's), each only where her model is on that account (another's shows as it is: SIGN IN AGAIN would sign in hers). A 403, 400 or 404 isn't one | My login ran out. Sign me in again: `SIGN IN AGAIN ▸` (a button to Settings ▸ Brain, where her account's row signs in again) | `LOGGED OUT` | idle |
+  | rate or usage limit, billing (Anthropic's in-stream `(rate_limit_error)` too); a provider's 429 once Synaps' retries are spent (`codex request failed: 429 Too Many Requests`, the broker's `provider request failed: 429 …`: the status right after `request failed: `, not a 429 elsewhere in the text) | Hit my model's limit for now. Give it a bit, then ask me again. | `AT THE LIMIT` | annoyed |
+  | her ChatGPT model isn't one her account runs: a paid plan's, or one retired from ChatGPT sign-ins (Synaps' Codex `[…/model_not_found]`, `this model isn't available on the selected ChatGPT account`, `the backend doesn't know this model for this account`), her model on ChatGPT only; gone once another model is hers (picked, or set on her session) | That model isn't on your ChatGPT plan. Pick another in Settings ▸ Brain ▸ MODEL. | `NOT ON YOUR PLAN` | idle |
+  | overloaded, a 5xx (Anthropic's; any provider's 500, 502, 503, 504 or 529 after `request failed: `, the ones Synaps calls transient, its retries spent); at capacity mid-reply, retries spent (`Codex reports the model is at capacity (retries exhausted)…`: ChatGPT's in-stream rate limit or overload; xAI's, Muse's) | My model's swamped right now. Try me again in a minute. | `MODEL BUSY` | annoyed |
+  | unreachable, timed out, a dropped stream; a 408 (Request Timeout) after `request failed: `, its retries spent | Can't reach my model. Check the connection, then ask me again. | `NO CONNECTION` | annoyed |
   | `local/…`: `can't reach local endpoint` (Ollama's port 11434) | Ollama's not answering, so I've got no brain. Start Ollama, then ask me again. | `OLLAMA IS OFF` | idle |
   | the same, another port (LM Studio, llama.cpp) | My local model's server isn't answering. Start it, then ask me again. | `LOCAL MODEL OFF` | idle |
   | `local/<model>`: a 404 (Ollama hasn't pulled it) | qwen3:8b isn't on my local server. Pull it, then ask me again: `$ ollama pull qwen3:8b` | `MODEL MISSING` | idle |
@@ -132,7 +133,7 @@ Paths here are Linux's: Windows keeps the same files under `%APPDATA%` and `%LOC
     `accounts.google.com/o/oauth2/v2/auth` exactly, no `user@`, no port, no `\`, no `#` (opened as
     parsed); Copilot's, exactly `https://github.com/login/device`. On Windows, where
     Synaps' `cmd /c start` cuts the page's URL at its first `&`, she opens that page whole herself.
-    Grok on Windows reads NEEDS A NEWER SYNAPS (where its login ran out, LOGGED OUT · NEEDS A NEWER
+    Grok on Windows reads NEEDS A NEWER SYNAPS (where its login ran out, a red dot and NEEDS NEWER
     SYNAPS) and does nothing: Synaps 0.12.0's xAI login opens
     its page with `cmd /c start` and never prints it, so nothing can open it whole (in a terminal
     it's cut the same way). Signed in: ✓ SIGNED IN, and once the write of its first model is in,
@@ -141,8 +142,11 @@ Paths here are Linux's: Windows keeps the same files under `%APPDATA%` and `%LOC
     stored`): she says why, the row reads DIDN'T WORK (⏎ tries again), and her bubble has the
     `synaps login --provider …` line for a terminal. Neither the URL nor the code is ever logged.
     Her login ran out (LOGGED OUT): her bubble's `SIGN IN AGAIN ▸` opens the Brain screen on her
-    account's row, its list open; it reads LOGGED OUT · ⏎ SIGN IN AGAIN and runs the same sign-in (a key service's:
-    KEY TURNED DOWN · ⏎ NEW KEY); the BRAIN row says SIGN IN AGAIN.
+    account's row, its list open; it reads ⏎ SIGN IN AGAIN by a red dot (SIGN IN's row: LOGGED OUT
+    · CHATGPT) and runs the same sign-in (a key service's: REFUSED · ⏎ NEW KEY); the BRAIN row says
+    SIGN IN AGAIN. An account's or a key service's row fits beside its name at the Line's narrowest
+    (480 px); the section rows' summaries (SIGN IN's `ChatGPT · Claude · Copilot +4`, API KEY's,
+    RUN LOCAL's) can still run past it there.
   - **API KEY**: Synaps' 19 key services (`KEY SET · GROQ`, `IN USE · GROQ +1` on the row). ⏎ on
     one with a key switches her to it; on one without, a hidden field takes the key and ⏎ hands it
     to `synaps login --provider <id>` on its stdin (never its command line, never a log; the field
@@ -166,18 +170,25 @@ Paths here are Linux's: Windows keeps the same files under `%APPDATA%` and `%LOC
   Then **MODEL**: her model, and ⏎ opens its menu in place: every model of every account signed in
   here and every service with a key (a login confirmed: on file, or her model answered; none while
   it can't be told, so a fresh install lists no Claude models for Synaps' default), and the local
-  server's (`local/<id>`), grouped under each provider's name in the table's order, hers checked;
-  no cap, the list scrolls (↑↓, PgUp/PgDn, Home/End). A model she runs that isn't in its provider's list (set by hand) is
-  there, checked, not one to pick again. The lists are Synaps 0.12.0's own catalogs (the accounts'
-  static ones, the key services' registry; aliases such as `grok-latest` aside): Synaps 0.12 has no
-  model catalog a client can ask for (its daemon protocol has none; `synaps rpc` has one, but boots
-  a whole runtime). Nothing signed in and no local model: `sign in first`, and ⏎ does nothing. A
-  pick is written to `settings.toml` as an explicit `[session] model` (only that key; the safe
-  writer) and set on her session at once, even when the file has it already (his TUI's `/model`
-  moves her session off it: the daemon's `setting_changed` to every client, which she follows). If
-  another client owns her session's input it isn't set: she says so, and her next start sets it. A
-  Set whose reply doesn't come within 10 s counts as lost: MODEL shows her session's model again.
-  Locked: `--model` (`set by --model`), `--session` (`their session`); no pick, no switch then.
+  server's (`local/<id>`), grouped under each provider's name in the table's order, hers checked; no
+  cap, the list scrolls (↑↓, PgUp/PgDn, Home/End). A model she runs that isn't in its provider's
+  list (set by hand) is there, checked, not one to pick again. The lists are Synaps 0.12.0's own
+  catalogs (the accounts' static ones, the key services' registry; aliases such as `grok-latest`
+  aside): Synaps 0.12 has no model catalog a client can ask for (its daemon protocol has none;
+  `synaps rpc` has one, but boots a whole runtime). Each list's first is its provider's default,
+  what a sign-in switches her to: ChatGPT's is GPT-5.6 Terra (`provider::CHATGPT_DEFAULT`), a model
+  a free account runs her on, as it does Luna, the next; the rest need a paid plan (Synaps 0.12.0
+  refuses `gpt-6-luna`: no capability row for it). GPT-5.5, 5.4, 5.4 Mini and 5.3 Codex Spark,
+  retired from ChatGPT sign-ins, aren't listed: a `[session] model` of one moves to the default as
+  she starts (written back, once; her log says so), and none reaches her session by any path
+  (`provider::unretired`: a file she couldn't write, read again on a reload; `--model`). Nothing
+  signed in and no local model: `sign in first`, and ⏎ does nothing. A pick is written to
+  `settings.toml` as an explicit `[session] model` (only that key; the safe writer) and set on her
+  session at once, even when the file has it already (his TUI's `/model` moves her session off it:
+  the daemon's `setting_changed` to every client, which she follows). If another client owns her
+  session's input it isn't set: she says so, and her next start sets it. A Set whose reply doesn't
+  come within 10 s counts as lost: MODEL shows her session's model again. Locked: `--model`
+  (`set by --model`), `--session` (`their session`); no pick, no switch then.
   A daemon through `--socket` signs in on its own machine: the ways in say ON ITS MACHINE and do
   nothing here. The open Brain screen looks again every 5 s (Synaps' files and the daemon's
   environment read once a look) and when a read finds her login, so a sign-in made in a terminal

@@ -9395,6 +9395,7 @@ mod header_fit_tests {
             Trouble::NoBrain { on: None },
             Trouble::LoggedOut,
             Trouble::Limited,
+            Trouble::NotOnPlan,
             Trouble::Swamped,
             Trouble::Offline,
             Trouble::LocalDown { ollama: true },

@@ -2,6 +2,48 @@
 
 ## Unreleased
 
+### Her brain
+- **She runs free on a free ChatGPT account.** ChatGPT's sign-in (Synaps' `openai-codex`) takes any
+  ChatGPT account, a free one too: no API key, no card, no GPU. Its row says so wherever a brain is
+  picked: "free account works" in Settings ▸ Brain's SIGN IN, in her setup's "Her model" page, and in
+  install.sh's and install.ps1's lists. The README says it up top and in Get her, with the usage
+  limits free accounts have: when one is used up she says she's hit her model's limit (AT THE LIMIT).
+  Nothing is picked for you: "Choose later" is still the default, and the order is the same.
+- **ChatGPT's default model is GPT-5.6 Terra**, one a free account runs her on (GPT-5.6 Luna, next in
+  the list, too): a ChatGPT sign-in, from her Settings or her installers, puts her on it. The bigger
+  ones in MODEL's list (GPT-5.6 Sol, GPT-6 Astra, GPT-6.1 Sol) need a paid plan: on one, pick GPT-6.1
+  Sol in Settings ▸ Brain ▸ MODEL, OpenAI's recommendation for paid plans. A model you picked stays
+  yours.
+- **GPT-5.5, GPT-5.4, GPT-5.4 Mini and GPT-5.3 Codex Spark are gone from ChatGPT's list**: OpenAI
+  retired them from ChatGPT sign-ins, for every plan. If her `[session] model` is one of those four
+  (v1.1.0's ChatGPT default was GPT-5.5), it moves to GPT-5.6 Terra once as she starts, written back
+  to settings.toml, and her log says `model … is retired from ChatGPT sign-ins: now …`. If
+  settings.toml can't be written she runs on Terra all the same, after a reload too, and `--model`
+  with one of the four is Terra as well. Nothing else is changed.
+- **A model your ChatGPT plan doesn't run reads as NOT ON YOUR PLAN.** She says "That model isn't on
+  your ChatGPT plan. Pick another in Settings ▸ Brain ▸ MODEL." instead of Synaps' error, which
+  pointed at a `/model` her Line doesn't take. Only when her model is on ChatGPT; it's gone as soon
+  as another model is hers.
+- **A provider's rate limit reads as one.** When ChatGPT, a key service or Gemini answers 429 Too Many
+  Requests and Synaps' retries are spent, or Claude's stream says `rate_limit_error`, she says she's
+  hit her model's limit (AT THE LIMIT), as for a used-up allowance.
+- **A provider's server error reads as MODEL BUSY.** A 500, 502, 503, 504 or 529 once Synaps' retries
+  are spent, and a reply stopped mid-way because the model is at capacity (ChatGPT's, xAI's or
+  Muse's): she says her model's swamped, to try her again in a minute. A 408 (a request that timed
+  out) reads as NO CONNECTION.
+- **ChatGPT turning her login down reads as LOGGED OUT.** Its 401, and a reply stopped because its
+  sign-in was rejected (ChatGPT's, xAI's or Muse's): she asks to be signed in again, and her account's
+  row in Settings ▸ Brain signs in again. Only when her model is on that account; a 403 still shows
+  its own error.
+- **An account's or a key service's row in Settings ▸ Brain fits at the Line's narrowest.** A login
+  that ran out reads `⏎ SIGN IN AGAIN` by its red dot (a key service's, `REFUSED · ⏎ NEW KEY`; Grok's
+  on Windows, `NEEDS NEWER SYNAPS`): the longer words ran past the row at 480 px.
+
+### For developers
+- `synaps-avatar --providers` has a seventh field: a hint shown beside a brain's name (ChatGPT's alone
+  has one; `Provider::hint`). Her installers show it as her table gives it and keep no copy; an older
+  her's six fields still read, with no hint. steps.ps1's `brains:` lines end on it.
+
 ## 1.1.0 (2026-11-19)
 
 Her brain is yours to pick: an account you have, an API key or a model on your own PC, from Settings ▸
