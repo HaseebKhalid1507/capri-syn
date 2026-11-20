@@ -771,7 +771,12 @@ pub(crate) fn session_persona(s: &settings::SessionSettings, voice: &settings::V
         None
     });
     let model = model.or_else(|| s.model.clone()).map(provider::unretired);
-    session::Persona { system: voice::persona(system, voice.enabled, voice.speak_unprompted), model, thinking: s.thinking.clone() }
+    session::Persona {
+        system: voice::persona(system, voice.enabled, voice.speak_unprompted),
+        model,
+        thinking: s.thinking.clone(),
+        rollover: s.rollover,
+    }
 }
 
 /// Start the session link: the client and its pump live in the view.

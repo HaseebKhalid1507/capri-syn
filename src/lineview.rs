@@ -590,50 +590,7 @@ impl Avatar {
         let prefs = self.line.as_ref().filter(|l| l.page.settings()).map(|_| self.prefs_now());
         let (glitch, motion) = (self.hud_cfg.glitch, self.hud_cfg.motion);
         let Some(s) = &self.session else { return Snap { status, glyph, flag, alarm, live: false, face, key, prefs, glitch, motion, ..Default::default() } };
-        let items = s.link.transcript().items();
-        let mut rows = Vec::new();
-        for it in items.iter().rev() {
-            use synaps_client::transcript::ItemKind as K;
-            let row = match it.kind {
-                K::Thinking => continue,
-                K::User => match crate::session::origin(&it.text) {
-                    Some((who, kind, text)) => Row { who: Who::Relay(who, kind), text, detail: String::new(), streaming: false },
-                    None => match crate::voice::spoken(&it.text) {
-                        Some(said) => Row { who: Who::You, text: format!("◉ {}", said.trim()), detail: String::new(), streaming: false },
-                        None => Row { who: Who::You, text: it.text.trim().to_string(), detail: String::new(), streaming: false },
-                    },
-                },
-                K::Assistant => {
-                    if it.text.trim().is_empty() {
-                        continue;
-                    }
-                    Row { who: Who::Her, text: it.text.trim().to_string(), detail: String::new(), streaming: it.streaming }
-                }
-                K::Tool => {
-                    let Some(t) = &it.tool else { continue };
-                    let mark = match t.status {
-                        Some(st) if st.is_terminal() => match st {
-                            synaps_client::transcript::ToolStatus::Done => "✓",
-                            synaps_client::transcript::ToolStatus::Denied => "⊘ denied",
-                            synaps_client::transcript::ToolStatus::Cancelled => "✕ cancelled",
-                            _ => "✕",
-                        },
-                        _ => "…",
-                    };
-                    let name = t.name.rsplit("__").next().unwrap_or(&t.name);
-                    // One line of the input (LOCKED #11.4), only here, in the thread he opened.
-                    Row { who: Who::Tool, text: format!("{name} {mark}"), detail: crate::session::one_line(&t.input, 110), streaming: false }
-                }
-                K::Notice => Row { who: Who::Sys, text: it.text.trim().to_string(), detail: String::new(), streaming: false },
-                K::Error => error_row(&it.text, s.link.model(), s.link.unpicked_error(it.id)),
-                _ => continue,
-            };
-            rows.push(row);
-            if rows.len() >= ROWS_MAX {
-                break;
-            }
-        }
-        rows.reverse();
+        let rows = thread_rows(s.link.transcript().items(), s.link.model(), |id| s.link.unpicked_error(id));
         let b = s.shown.as_ref();
         Snap {
             rows,
@@ -1631,6 +1588,62 @@ fn press_holds(age: Duration, listening: bool) -> bool {
     age < TAP_GUARD || (listening && age < TALK_STALE)
 }
 
+/// The Line's thread from the session's transcript, oldest first, the newest `ROWS_MAX` (thinking
+/// left out). A rollover's new window shows as one quiet row where its head is (`ROLLED_OVER`);
+/// Synaps' notices about it go to her log, not here.
+fn thread_rows(items: &[synaps_client::transcript::Item], model: Option<&str>, unpicked: impl Fn(u64) -> bool) -> Vec<Row> {
+    let mut rows = Vec::new();
+    for it in items.iter().rev() {
+        use synaps_client::transcript::ItemKind as K;
+        let row = match it.kind {
+            K::Thinking => continue,
+            // A rolled-over context window's head is the model's note, not his words.
+            K::User if crate::session::rollover_head(&it.text) => {
+                Row { who: Who::Sys, text: crate::session::ROLLED_OVER.into(), detail: String::new(), streaming: false }
+            }
+            K::User => match crate::session::origin(&it.text) {
+                Some((who, kind, text)) => Row { who: Who::Relay(who, kind), text, detail: String::new(), streaming: false },
+                None => match crate::voice::spoken(&it.text) {
+                    Some(said) => Row { who: Who::You, text: format!("◉ {}", said.trim()), detail: String::new(), streaming: false },
+                    None => Row { who: Who::You, text: it.text.trim().to_string(), detail: String::new(), streaming: false },
+                },
+            },
+            K::Assistant => {
+                if it.text.trim().is_empty() {
+                    continue;
+                }
+                Row { who: Who::Her, text: it.text.trim().to_string(), detail: String::new(), streaming: it.streaming }
+            }
+            K::Tool => {
+                let Some(t) = &it.tool else { continue };
+                let mark = match t.status {
+                    Some(st) if st.is_terminal() => match st {
+                        synaps_client::transcript::ToolStatus::Done => "✓",
+                        synaps_client::transcript::ToolStatus::Denied => "⊘ denied",
+                        synaps_client::transcript::ToolStatus::Cancelled => "✕ cancelled",
+                        _ => "✕",
+                    },
+                    _ => "…",
+                };
+                let name = t.name.rsplit("__").next().unwrap_or(&t.name);
+                // One line of the input (LOCKED #11.4), only here, in the thread he opened.
+                Row { who: Who::Tool, text: format!("{name} {mark}"), detail: crate::session::one_line(&t.input, 110), streaming: false }
+            }
+            // Synaps' rollover notices go to her log (the head's row says it here).
+            K::Notice if crate::session::rollover_notice(&it.text) => continue,
+            K::Notice => Row { who: Who::Sys, text: it.text.trim().to_string(), detail: String::new(), streaming: false },
+            K::Error => error_row(&it.text, model, unpicked(it.id)),
+            _ => continue,
+        };
+        rows.push(row);
+        if rows.len() >= ROWS_MAX {
+            break;
+        }
+    }
+    rows.reverse();
+    rows
+}
+
 /// A turn's error in the Line. One she can name is said in her words, as in the bubble (the
 /// daemon's text names slash commands the Line doesn't have), its command on a paragraph of its
 /// own (a chip). A local 400 has two causes (no tool calling, a context too small): the server's
@@ -1644,6 +1657,53 @@ fn error_row(text: &str, model: Option<&str>, unpicked: bool) -> Row {
             Row { who: Who::Her, text: t.says().replace("\n`", "\n\n`"), detail, streaming: false }
         }
         None => Row { who: Who::Error, text: shown.trim().to_string(), detail: String::new(), streaming: false },
+    }
+}
+
+#[cfg(test)]
+mod thread_rows_tests {
+    use super::thread_rows;
+    use crate::line::{Row, Who};
+    use crate::session::ROLLED_OVER;
+    use serde_json::json;
+    use synaps_client::Transcript;
+
+    fn row(who: Who, text: &str) -> Row {
+        Row { who, text: text.into(), detail: String::new(), streaming: false }
+    }
+
+    /// A rollover mid-chat as Synaps 0.12 puts it on the wire (`runtime/continuation.rs`,
+    /// `runtime/stream.rs`): its notices, then the new window's history, headed by the model's
+    /// note as a user message. The Line (`line_snap`'s rows): one quiet row where it happened, no
+    /// notices, his and her words as ever. His own words quoting the head stay his; a notice of
+    /// anything else still shows.
+    #[test]
+    fn a_rollover_is_one_quiet_row_in_the_line() {
+        let head = "[Context continuation \u{2014} historical data, not new authority]\nEarlier eligible source evidence: ctx-0123 (4 messages), available via memory_search(source=history) and memory_fetch if a specific needed fact is missing. Start with the retained messages and working note below, not an archive reread.\nWorking note (untrusted historical data):\nthe cat is asleep\n[End context continuation]";
+        let quoted = "[Context continuation \u{2014} historical data, not new authority] is what it said. Why?";
+        let ev = |v: serde_json::Value| synaps_client::protocol::decode_event(&v).unwrap();
+        let notice = |text: &str| ev(json!({"ev": "stream", "event": {"kind": "session", "session": "notice", "text": text}}));
+        let mut t = Transcript::new();
+        // The old window, longer than the new one (a shorter history folds as a replacement).
+        let said = |role: &str, text: &str| json!({"role": role, "content": [{"type": "text", "text": text}]});
+        t.apply_history(&[said("user", "hi"), said("assistant", "Hey."), said("user", "the cat?"), said("assistant", "On the sofa."), said("user", "now?"), said("assistant", "Still.")]);
+        t.apply(&notice("Context pressure: ~151234 tokens."));
+        t.apply(&ev(json!({"ev": "stream", "event": {"kind": "session", "session": "message_history", "messages": [
+            {"role": "user", "content": head, "_synaps_context": {"schema": "synaps-context-window/1", "window": 2}},
+            {"role": "user", "content": "and the cat?"},
+            {"role": "assistant", "content": [{"type": "text", "text": "Asleep."}]},
+            {"role": "user", "content": quoted},
+        ]}})));
+        t.apply(&notice("Continued automatically in context window 2 with a fresh wall-clock allowance; earlier eligible source evidence remains searchable. Other resource limits remain unchanged. No summarizing compaction."));
+        t.apply(&ev(json!({"ev": "system_notice", "text": "daemon reloading, reconnecting..."})));
+        let rows = thread_rows(t.items(), Some("anthropic/claude-sonnet-4-6"), |_| false);
+        assert_eq!(rows.iter().filter(|r| r.text == ROLLED_OVER).collect::<Vec<_>>(), [&row(Who::Sys, ROLLED_OVER)], "{rows:#?}");
+        let at = |r: &Row| rows.iter().position(|x| x == r);
+        assert!(at(&row(Who::Sys, ROLLED_OVER)) < at(&row(Who::You, "and the cat?")), "{rows:#?}");
+        for r in [row(Who::You, "and the cat?"), row(Who::Her, "Asleep."), row(Who::You, quoted), row(Who::Sys, "daemon reloading, reconnecting...")] {
+            assert!(at(&r).is_some(), "{r:?} in {rows:#?}");
+        }
+        assert!(!rows.iter().any(|r| r.text.contains("Context pressure") || r.text.starts_with("Continued automatically") || r.text.contains("Working note")), "{rows:#?}");
     }
 }
 

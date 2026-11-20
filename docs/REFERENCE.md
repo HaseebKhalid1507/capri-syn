@@ -17,6 +17,44 @@ Paths here are Linux's: Windows keeps the same files under `%APPDATA%` and `%LOC
   lowercased (`capri`). She attaches to it if it's live. Otherwise she resumes the id she remembered last
   time (`~/.local/state/synaps-avatar/sessions.json`, one entry per daemon), else creates it by name.
   She only rides another session when you pass `--session`.
+- **Her context rolls over** (`[session] rollover`, on by default). An always-on chat would otherwise
+  fill her model's context. She turns Synaps' automatic context rollover on for her own session. First
+  she asks its mode (`/context`'s report: a query, which any attached client may send, so no Mirror
+  switch for it). On already, and not by her (`context_management.mode = auto` in
+  `~/.synaps-cli/config`, or another client's `/context auto`): she leaves it to Synaps, and never
+  turns it on or off there. Hers is only one she turned on while attached: after a re-attach from a
+  loss (a daemon reload keeps her session's id but builds it again from Synaps' config) an auto she
+  finds counts as Synaps' own. Off: she sends `/context auto` as an engine command from the Mirror
+  attach (the input owner's, as her persona's Sets). It is that session's alone: Synaps'
+  `context_management.mode` in `~/.synaps-cli/config`, and every other session, stay as they are. It
+  is session-only on Synaps' side, so she asks again after a re-attach (a daemon reload, a resume).
+  She asks and sends between turns, never mid-turn (a turn reads the mode as it starts). If another
+  client owns her session's input then, or takes it before her command lands, she tries once more when
+  it's free, then leaves it until she re-attaches.
+  - **For ChatGPT, Claude and other 200k+ brains.** Synaps 0.12 takes every model's window for 200k.
+    Past about 127k tokens by its estimate on a 200k window (hard capacity comes first; 400k on a 1m
+    window) it seals the older messages into its archive and carries on in a fresh window with the
+    recent messages and a note, with no summarizing model call. She skips it, with a log line, for a
+    local model (Ollama, LM Studio: its real window is smaller, so the rollover would never come
+    before it fills, and auto's guidance and archive tools would crowd every request), and for a
+    session whose `context_window` is under 128k (a rollover can't make room there: the recent
+    messages it keeps don't fit under Synaps' hard limit). A brain picked later (Settings ▸ Brain, or
+    another client's `/model`) is decided again, her session's mode asked first: her own auto is
+    turned off (`/context off`) for one it doesn't fit, and on for one it does. An auto that isn't
+    hers (Synaps' config, or another client's `/context auto` since) stays as it is.
+  - **Privacy.** The archive (`~/.synaps-cli/context-archives/`) is per Synaps project: the nearest
+    folder up from her session's folder with a `.git` or a `.synaps-project` in it, else that folder
+    itself (`SYNAPS_PROJECT_ROOT` overrides it). Her session's folder is your home unless you gave
+    one (`--new --cwd`). So if your home has a `.git` or a `.synaps-project`, every session in a
+    folder under it that has neither shares her archive, and its model can look her archived
+    messages up (`memory_search`). The archive holds both sides of the chat word for word, and
+    Synaps never prunes it: it stays after `rollover = false` and after `/clear`.
+  - **What you see.** The Line shows one row where it happened, "older messages archived to make room
+    (context rollover)"; Synaps' rollover notices go to her log. One log line says it's on or off,
+    left to Synaps, or why not. A thin `synaps attach` client open on her session prints the answers
+    to her mode query and her `/context` (their JSON), and her Mirror attach's join and leave lines
+    each time she sends it. Windows: not yet (Synaps 0.12 keeps its archive on Linux and macOS only),
+    so she doesn't ask; one log line says so.
 - **Never `subconscious`.** She refuses to attach to the session named `subconscious`, by name or by id.
   The refusal happens at argument parsing, when resolving the session list, and on `Attached`
   (she detaches and exits with status 2).
@@ -310,6 +348,7 @@ common ones with their defaults.
 | `[session] thinking` | daemon default | `"low"`, `"medium"`, `"high"` or `"xhigh"` |
 | `[session] persona` | `true` | send the pack's `persona.md` as her session's system prompt |
 | `[session] persona_file` | none | a persona file of your own instead |
+| `[session] rollover` | `true` | turn Synaps' automatic context rollover on for her session (`/context auto`, that session only), when Synaps has it off there (on already by its config: left alone), for a brain with a 200k window or more: skipped for a local model and under a 128k window ([above](#the-session-rules)). `false`: Synaps' own `context_management.mode` stands (off unless set); one she turned it on for keeps it until it restarts |
 | `[voice] enabled` | `false` | push-to-talk and spoken replies, through `capri-voice` |
 | `[voice] stt_model` | `"small.en"` | `"tiny.en"`, `"base.en"`, `"small.en"` or `"medium.en"`; setup fetches only `small.en` and `base.en` ([VOICE.md](VOICE.md#settings-voice-in-configsynaps-avatarsettingstoml)) |
 | `[voice] voice` | a stock Kokoro blend | a Kokoro voice or a blend (`"af_bella:0.6,af_nicole:0.4"`); `+glitch` adds the trace |

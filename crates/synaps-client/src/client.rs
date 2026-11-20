@@ -220,6 +220,20 @@ pub enum Command {
         id: u64,
         setting: Setting,
     },
+    /// `EngineCommand` on the session → `Event::EngineReply` or
+    /// `Error::EngineCommandRefused` with this `id`. See
+    /// [`Client::engine_command`].
+    EngineCommand {
+        id: u64,
+        name: String,
+        arg: String,
+    },
+    /// `Query` on the session → `Event::QueryReply` or `Error::QueryFailed`
+    /// with this `id`. See [`Client::query`].
+    Query {
+        id: u64,
+        query: SessionQuery,
+    },
     Detach,
     Shutdown,
 }
@@ -235,10 +249,11 @@ impl Command {
             Command::Steer { .. } => "steer",
             Command::Cancel => "cancel",
             Command::Answer { .. } | Command::AnswerOn { .. } => "answer",
-            Command::Resync => "query",
+            Command::Resync | Command::Query { .. } => "query",
             Command::SavedSessions { .. } => "saved_sessions",
             Command::Rename { .. } => "rename",
             Command::Set { .. } => "set",
+            Command::EngineCommand { .. } => "engine_command",
             Command::Detach => "detach",
             Command::Shutdown => "shutdown",
         }
@@ -270,6 +285,10 @@ impl std::fmt::Debug for Command {
                 f.debug_struct("Rename").field("session_id", session_id).field("name", name).field("expect", expect).finish()
             }
             Command::Set { id, setting } => f.debug_struct("Set").field("id", id).field("setting", setting).finish(),
+            Command::EngineCommand { id, name, arg } => {
+                f.debug_struct("EngineCommand").field("id", id).field("name", name).field("arg", arg).finish()
+            }
+            Command::Query { id, query } => f.debug_struct("Query").field("id", id).field("query", query).finish(),
             other => f.write_str(match other {
                 Command::RefreshSessions => "RefreshSessions",
                 Command::Cancel => "Cancel",
@@ -334,6 +353,17 @@ pub enum Error {
     /// connection dropped before the reply: compare the next `Attached`
     /// view, it may have applied). `setting` is the wire name.
     SettingRefused { id: u64, setting: String, reason: String },
+    /// A [`Client::engine_command`] that got no reply: the session refused
+    /// it (not the input owner: an `Observe` attach; a reload fence), or it
+    /// could not go out (not connected, or the connection dropped before
+    /// the reply: it may have run). A command the daemon ran and answered
+    /// with an error (`kind: "error"`) is an `Event::EngineReply`, not this.
+    EngineCommandRefused { id: u64, name: String, reason: String },
+    /// A [`Client::query`] that got no reply: it could not go out (not
+    /// connected), or the connection dropped before the reply. `query` is
+    /// the wire name (`SessionQuery::name`). Never refused for input: a
+    /// query is open to every attached client.
+    QueryFailed { id: u64, query: String, reason: String },
 }
 
 impl std::fmt::Display for Error {
@@ -347,6 +377,8 @@ impl std::fmt::Display for Error {
             Error::NotAttached { command } => write!(f, "{command}: not attached to a session"),
             Error::Unsupported { feature } => write!(f, "this daemon does not support {feature}"),
             Error::SettingRefused { setting, reason, .. } => write!(f, "set {setting} refused: {reason}"),
+            Error::EngineCommandRefused { name, reason, .. } => write!(f, "/{name} refused: {reason}"),
+            Error::QueryFailed { query, reason, .. } => write!(f, "query {query} failed: {reason}"),
         }
     }
 }
@@ -457,6 +489,27 @@ pub enum Event {
         message: Option<String>,
         view: Value,
     },
+    /// Reply to [`Client::engine_command`] `id`: the `QueryResult` value as
+    /// the daemon sent it (`{kind, text, ..}`; `kind: "error"` is the
+    /// command's own refusal, `"unhandled"` a daemon with no such command).
+    /// Another client's `QueryResult` never becomes one.
+    EngineReply {
+        attach_seq: u64,
+        session_id: String,
+        id: u64,
+        name: String,
+        value: Value,
+    },
+    /// Reply to [`Client::query`] `id`: the `QueryResult` value as the
+    /// daemon sent it. `query` is the wire name (`SessionQuery::name`).
+    /// Another client's `QueryResult` never becomes one.
+    QueryReply {
+        attach_seq: u64,
+        session_id: String,
+        id: u64,
+        query: String,
+        value: Value,
+    },
 }
 
 impl Event {
@@ -470,6 +523,8 @@ impl Event {
             | Event::InputOwner { attach_seq, .. }
             | Event::CwdFallback { attach_seq, .. }
             | Event::SettingApplied { attach_seq, .. }
+            | Event::EngineReply { attach_seq, .. }
+            | Event::QueryReply { attach_seq, .. }
             | Event::Detached { attach_seq, .. } => Some(*attach_seq),
             Event::Error { attach_seq, .. } => *attach_seq,
             Event::Status(_)
@@ -641,6 +696,31 @@ impl Client {
     pub fn set(&self, setting: Setting) -> Result<u64, ClientClosed> {
         let id = self.set_ids.fetch_add(1, Ordering::Relaxed);
         self.post(Command::Set { id, setting })?;
+        Ok(id)
+    }
+
+    /// Run a runtime-backed slash command on the attached session
+    /// (`EngineCommand`: `engine_command("context", "auto")` is `/context
+    /// auto`). Returns the id the reply carries: `Event::EngineReply { id,
+    /// value, .. }`, or `Event::Error { error: Error::EngineCommandRefused {
+    /// id, .. } }` when the session refuses it (only the input owner may
+    /// run one: attach `Mirror` first) or it cannot go out. Ids come from
+    /// the same counter as [`Client::set`]'s.
+    pub fn engine_command(&self, name: impl Into<String>, arg: impl Into<String>) -> Result<u64, ClientClosed> {
+        let id = self.set_ids.fetch_add(1, Ordering::Relaxed);
+        self.post(Command::EngineCommand { id, name: name.into(), arg: arg.into() })?;
+        Ok(id)
+    }
+
+    /// Ask the attached session something (`Query`: `SessionQuery::ContextReport`
+    /// is `/context`'s report). Open to every attached client, `Observe`
+    /// too. Returns the id the reply carries: `Event::QueryReply { id,
+    /// value, .. }`, or `Event::Error { error: Error::QueryFailed { id, .. }
+    /// }` when it cannot go out or the connection drops first. Ids come
+    /// from the same counter as [`Client::set`]'s.
+    pub fn query(&self, query: SessionQuery) -> Result<u64, ClientClosed> {
+        let id = self.set_ids.fetch_add(1, Ordering::Relaxed);
+        self.post(Command::Query { id, query })?;
         Ok(id)
     }
 
@@ -1206,6 +1286,16 @@ async fn without_session<F: Future>(
                     setting: setting.name().into(),
                     reason: "not connected to the session (attaching or reconnecting)".into(),
                 }),
+                Some(Command::EngineCommand { id, name, .. }) => emit_error(events, Some(attach_seq), Error::EngineCommandRefused {
+                    id,
+                    name,
+                    reason: "not connected to the session (attaching or reconnecting)".into(),
+                }),
+                Some(Command::Query { id, query }) => emit_error(events, Some(attach_seq), Error::QueryFailed {
+                    id,
+                    query: query.name().into(),
+                    reason: "not connected to the session (attaching or reconnecting)".into(),
+                }),
                 Some(c) => emit_error(events, Some(attach_seq), Error::Refused {
                     command: Some(c.name().into()),
                     reason: "not connected to the session (attaching or reconnecting)".into(),
@@ -1304,6 +1394,10 @@ async fn session_loop(
         let rejected = attached.rejected;
         // Our `Set`s awaiting their `SettingChanged` (or a refusal), in order.
         let mut sets: VecDeque<(u64, &'static str)> = VecDeque::new();
+        // Our engine commands awaiting their `QueryResult` (or a refusal), in order.
+        let mut engine: VecDeque<(u64, String)> = VecDeque::new();
+        // Our queries awaiting their `QueryResult`, by id (wire name).
+        let mut asked: Vec<(u64, &'static str)> = Vec::new();
         let connection = sh.connections.fetch_add(1, Ordering::Relaxed) + 1;
         attached.connection = connection;
         emit(&events, Event::Attached { attach_seq, attached, mode, reconnect: previous.is_some() });
@@ -1345,6 +1439,14 @@ async fn session_loop(
                             sets.push_back((id, setting.name()));
                             SessionCommand::Set { id, setting }
                         }
+                        Command::EngineCommand { id, name, arg } => {
+                            engine.push_back((id, name.clone()));
+                            SessionCommand::EngineCommand { id, name, arg }
+                        }
+                        Command::Query { id, query: q } => {
+                            asked.push((id, q.name()));
+                            SessionCommand::Query { id, query: q }
+                        }
                         _ => continue,
                     };
                     if let Err(e) = conn.send(&ClientFrame::Cmd { session_id: sid.clone(), cmd: wire }).await {
@@ -1384,11 +1486,25 @@ async fn session_loop(
                             }
                         }
                         if v.get("ev").and_then(Value::as_str) == Some("query_result") {
-                            // Only our own resync is ours. Another client's
-                            // result (broadcast: a co-attached TUI's resync is
-                            // the whole history) and daemon-internal reserved
-                            // ids are dropped, as `absorb` does.
-                            let ours = v.get("id").and_then(Value::as_u64) == Some(query_id);
+                            // Only our own engine commands' and queries' replies
+                            // and our own resync are ours. Another client's result
+                            // (broadcast: a co-attached TUI's resync is the
+                            // whole history) and daemon-internal reserved ids
+                            // are dropped, as `absorb` does.
+                            let id = v.get("id").and_then(Value::as_u64);
+                            if let Some(at) = engine.iter().position(|e| Some(e.0) == id) {
+                                let (id, name) = engine.remove(at).expect("position");
+                                let value = v.get_mut("value").map(Value::take).unwrap_or(Value::Null);
+                                emit(&events, Event::EngineReply { attach_seq, session_id: esid, id, name, value });
+                                continue;
+                            }
+                            if let Some(at) = asked.iter().position(|a| Some(a.0) == id) {
+                                let (id, q) = asked.swap_remove(at);
+                                let value = v.get_mut("value").map(Value::take).unwrap_or(Value::Null);
+                                emit(&events, Event::QueryReply { attach_seq, session_id: esid, id, query: q.into(), value });
+                                continue;
+                            }
+                            let ours = id == Some(query_id);
                             if ours
                                 && let Some(m) = mirror.as_mut()
                                 && let Some(trigger) = resync.take()
@@ -1425,6 +1541,11 @@ async fn session_loop(
                             SessionEvent::Refused { client, command, reason } if *client == me && command == "set" && !sets.is_empty() => {
                                 let (id, setting) = sets.pop_front().expect("non-empty");
                                 emit_error(&events, Some(attach_seq), Error::SettingRefused { id, setting: setting.into(), reason: reason.clone() });
+                            }
+                            // The same for our oldest engine command.
+                            SessionEvent::Refused { client, command, reason } if *client == me && command == "engine_command" && !engine.is_empty() => {
+                                let (id, name) = engine.pop_front().expect("non-empty");
+                                emit_error(&events, Some(attach_seq), Error::EngineCommandRefused { id, name, reason: reason.clone() });
                             }
                             SessionEvent::Refused { client, command, reason } if *client == me => {
                                 emit_error(&events, Some(attach_seq), Error::Refused { command: Some(command.clone()), reason: reason.clone() });
@@ -1498,6 +1619,14 @@ async fn session_loop(
                     ),
                 },
             );
+        }
+        for (id, name) in engine.drain(..) {
+            let reason = format!("the session connection dropped before the reply ({why}); it may have run");
+            emit_error(&events, Some(attach_seq), Error::EngineCommandRefused { id, name, reason });
+        }
+        for (id, q) in asked.drain(..) {
+            let reason = format!("the session connection dropped before the reply ({why})");
+            emit_error(&events, Some(attach_seq), Error::QueryFailed { id, query: q.into(), reason });
         }
         emit(&events, Event::Reattaching { attach_seq, session_id: sid.clone(), reason: why });
         previous = Some(Previous { client: me, session_id: sid, was_owner: owner == Some(me), generation });

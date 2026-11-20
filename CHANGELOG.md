@@ -39,10 +39,35 @@
   that ran out reads `⏎ SIGN IN AGAIN` by its red dot (a key service's, `REFUSED · ⏎ NEW KEY`; Grok's
   on Windows, `NEEDS NEWER SYNAPS`): the longer words ran past the row at 480 px.
 
+### Her session
+- **Her context rolls over by itself.** An always-on chat no longer fills her model's context: she
+  turns Synaps' automatic context rollover on for her own session (`/context auto`, that session only;
+  Synaps' config and your other sessions stay as they are), between turns. If Synaps has it on there
+  already (`context_management.mode = auto` in its config, or another client's `/context auto`), she
+  leaves it to Synaps; after a daemon reload any auto she finds counts as Synaps'. When the context
+  gets long, Synaps archives the older messages and carries on in a fresh window with the recent ones,
+  with no summarizing call. It's for ChatGPT, Claude and other 200k+ brains: she skips it for a local
+  model and for a window under 128k, and a brain picked later is decided again (her session's mode
+  asked first). The Line shows one quiet row where it happened, and Synaps' own notices about it go to
+  her log, with one line saying it's on or why not (a `synaps attach` open on her session prints the
+  answers to her mode query and her `/context`, and her join and leave lines each time she sends it).
+  `[session] rollover = false` leaves it to Synaps. Not on Windows yet: Synaps 0.12 archives on Linux
+  and macOS only (her log says so).
+- **Privacy:** the archive holds both sides of the chat word for word, and Synaps never prunes it (it
+  stays after `rollover = false` and `/clear`). It's shared by every session in the same Synaps
+  project. Her session's folder is your home by default, so if your home has a `.git` or a
+  `.synaps-project`, sessions in folders under it without their own can search her archived messages
+  ([REFERENCE.md](docs/REFERENCE.md#the-session-rules)).
+
 ### For developers
 - `synaps-avatar --providers` has a seventh field: a hint shown beside a brain's name (ChatGPT's alone
   has one; `Provider::hint`). Her installers show it as her table gives it and keep no copy; an older
   her's six fields still read, with no hint. steps.ps1's `brains:` lines end on it.
+- The vendored synaps-client sends engine commands (`Client::engine_command`, `Event::EngineReply`,
+  `Error::EngineCommandRefused`) and queries (`Client::query`, `SessionQuery::ContextReport`,
+  `Event::QueryReply`, `Error::QueryFailed`), to port back (`crates/synaps-client/VENDORED.md`). The
+  fake daemon answers `context auto`, `context off` and the context report as Synaps 0.12 does
+  (`FAKE_CONTEXT=auto`: on by its config).
 
 ## 1.1.0 (2026-11-19)
 

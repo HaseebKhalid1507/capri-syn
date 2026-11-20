@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use synaps_client::history::{HistoryUpdate, messages_hash};
+use synaps_client::protocol::SessionQuery;
 use synaps_client::{AttachMode, Client, ClientOptions, CreateOptions, Cwd, Endpoint, Error, Event, Identity, Setting, Status};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::net::UnixListener;
@@ -1152,5 +1153,107 @@ async fn a_set_cut_off_by_a_drop_is_refused() {
     .await;
     assert_eq!(got, id);
     assert!(reason.contains("may have applied"), "{reason}");
+    client.shutdown().unwrap();
+}
+
+/// `engine_command` goes out as `EngineCommand{id}`; only the `QueryResult`
+/// with that id answers it (another client's, broadcast, does not), whatever
+/// its `kind` (`output`, or the command's own `error`). The session's refusal
+/// (not the input owner; no id on the wire) is `EngineCommandRefused` for the
+/// oldest one waiting, and is not taken for a refused `set`.
+#[tokio::test]
+async fn an_engine_command_is_answered_by_its_own_id() {
+    let mut fake = Fake::start("engine").await;
+    let (client, events) = fake.client();
+    client.attach(SID, AttachMode::Mirror).unwrap();
+    let mut conn = attached(&mut fake, &events, 2).await;
+
+    let id = client.engine_command("context", "auto").unwrap();
+    assert_eq!(conn.recv_cmd().await, json!({"cmd": "engine_command", "id": id, "name": "context", "arg": "auto"}));
+    let reply = |e: &Event| match e {
+        Event::EngineReply { id, name, value, .. } => Some((*id, name.clone(), value.clone())),
+        _ => None,
+    };
+    // Someone else's result first (a TUI's own `/context`): not ours.
+    conn.event(50, json!({"ev": "query_result", "id": id + 1000, "value": {"kind": "output", "text": "theirs"}})).await;
+    let on = json!({"kind": "output", "text": "context management: auto | window 1"});
+    conn.event(51, json!({"ev": "query_result", "id": id, "value": on})).await;
+    assert_eq!(wait(&events, "reply", reply).await, (id, "context".to_string(), on));
+
+    let id2 = client.engine_command("context", "auto").unwrap();
+    assert_ne!(id2, id);
+    conn.recv_cmd().await;
+    let refused = json!({"kind": "error", "text": "context archive is currently supported on Unix only; mode unchanged"});
+    conn.event(52, json!({"ev": "query_result", "id": id2, "value": refused})).await;
+    assert_eq!(wait(&events, "error reply", reply).await, (id2, "context".to_string(), refused));
+
+    let id3 = client.engine_command("context", "auto").unwrap();
+    conn.recv_cmd().await;
+    conn.event(53, json!({"ev": "refused", "client": 2, "command": "engine_command", "reason": "this client is read-only (attached with --observe)"})).await;
+    let r = wait(&events, "session refusal", |e| match e {
+        Event::Error { error: Error::EngineCommandRefused { id, name, reason }, .. } => Some((*id, name.clone(), reason.clone())),
+        Event::Error { error: Error::SettingRefused { .. } | Error::Refused { .. }, .. } => panic!("taken for another refusal: {e:?}"),
+        _ => None,
+    })
+    .await;
+    assert_eq!(r, (id3, "context".to_string(), "this client is read-only (attached with --observe)".to_string()));
+    client.shutdown().unwrap();
+}
+
+/// An engine command still waiting when the session connection drops is
+/// refused (it may have run: ask again on the next `Attached`).
+#[tokio::test]
+async fn an_engine_command_cut_off_by_a_drop_is_refused() {
+    let mut fake = Fake::start("engine-drop").await;
+    let (client, events) = fake.client();
+    client.attach(SID, AttachMode::Mirror).unwrap();
+    let mut conn = attached(&mut fake, &events, 2).await;
+    let id = client.engine_command("context", "auto").unwrap();
+    conn.recv_cmd().await;
+    drop(conn);
+    let (got, reason) = wait(&events, "refused", |e| match e {
+        Event::Error { error: Error::EngineCommandRefused { id, reason, .. }, .. } => Some((*id, reason.clone())),
+        _ => None,
+    })
+    .await;
+    assert_eq!(got, id);
+    assert!(reason.contains("may have run"), "{reason}");
+    client.shutdown().unwrap();
+}
+
+/// `query` goes out as `Query{id}` from an `Observe` attach too; only the
+/// `QueryResult` with that id answers it (another client's, broadcast, does
+/// not), its `value` as sent. One still waiting when the session connection
+/// drops fails (`QueryFailed`).
+#[tokio::test]
+async fn a_query_is_answered_by_its_own_id() {
+    let mut fake = Fake::start("query").await;
+    let (client, events) = fake.client();
+    client.attach(SID, AttachMode::Observe).unwrap();
+    let mut conn = attached(&mut fake, &events, 2).await;
+
+    let id = client.query(SessionQuery::ContextReport).unwrap();
+    assert_eq!(conn.recv_cmd().await, json!({"cmd": "query", "id": id, "query": {"query": "context_report"}}));
+    conn.event(50, json!({"ev": "query_result", "id": id + 1000, "value": {"text": "theirs"}})).await;
+    let report = json!({"text": "context \u{2014} model m\ncontext management: off | window 1 | capacity 200000"});
+    conn.event(51, json!({"ev": "query_result", "id": id, "value": report})).await;
+    let got = wait(&events, "reply", |e| match e {
+        Event::QueryReply { id, query, value, .. } => Some((*id, query.clone(), value.clone())),
+        _ => None,
+    })
+    .await;
+    assert_eq!(got, (id, "context_report".to_string(), report));
+
+    let id2 = client.query(SessionQuery::ContextReport).unwrap();
+    assert_ne!(id2, id);
+    conn.recv_cmd().await;
+    drop(conn);
+    let (got, query, reason) = wait(&events, "failed", |e| match e {
+        Event::Error { error: Error::QueryFailed { id, query, reason }, .. } => Some((*id, query.clone(), reason.clone())),
+        _ => None,
+    })
+    .await;
+    assert_eq!((got, query.as_str()), (id2, "context_report"));
+    assert!(reason.contains("dropped before the reply"), "{reason}");
     client.shutdown().unwrap();
 }

@@ -403,8 +403,8 @@ struct MusicRaw {
     ignore: Option<Vec<String>>,
 }
 
-/// `[session]`: her OWN session's persona, model and thinking (never applied to a session
-/// she rides with `--session`, nor to `subconscious`).
+/// `[session]`: her OWN session's persona, model, thinking and context rollover (never applied
+/// to a session she rides with `--session`, nor to `subconscious`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct SessionSettings {
     pub model: Option<String>,
@@ -414,11 +414,16 @@ pub struct SessionSettings {
     pub persona: bool,
     /// A persona file of your own instead of the pack's.
     pub persona_file: Option<PathBuf>,
+    /// Turn Synaps' automatic context rollover on for her session (`/context auto`, that session
+    /// only) when Synaps has it off there, so an always-on chat never fills its context; for a
+    /// brain with room for it (not a local model, not under a 128k window:
+    /// `session::Link::rollover_step`). False: Synaps' own setting stands.
+    pub rollover: bool,
 }
 
 impl Default for SessionSettings {
     fn default() -> Self {
-        SessionSettings { model: None, thinking: None, persona: true, persona_file: None }
+        SessionSettings { model: None, thinking: None, persona: true, persona_file: None, rollover: true }
     }
 }
 
@@ -488,6 +493,7 @@ struct SessionRaw {
     thinking: Option<String>,
     persona: Option<bool>,
     persona_file: Option<String>,
+    rollover: Option<bool>,
 }
 
 /// `~/…` and `$HOME/…` in a path setting (Windows: his profile folder).
@@ -610,6 +616,9 @@ impl Settings {
             }
             if let Some(f) = r.persona_file.filter(|f| !f.trim().is_empty()) {
                 session.persona_file = Some(expand_home(f.trim()));
+            }
+            if let Some(on) = r.rollover {
+                session.rollover = on;
             }
         }
         let mut voice = VoiceSettings::default();
@@ -1223,12 +1232,14 @@ mod tests {
     #[test]
     fn session_section() {
         let s = Settings::parse("").unwrap().session;
-        assert_eq!(s, SessionSettings { model: None, thinking: None, persona: true, persona_file: None });
-        let s = Settings::parse("[session]\nmodel = \"claude-sonnet-4-6\"\nthinking = \"Low\"\npersona = false\npersona_file = \"~/p.txt\"").unwrap().session;
+        assert_eq!(s, SessionSettings { model: None, thinking: None, persona: true, persona_file: None, rollover: true });
+        let s = Settings::parse("[session]\nmodel = \"claude-sonnet-4-6\"\nthinking = \"Low\"\npersona = false\npersona_file = \"~/p.txt\"\nrollover = false").unwrap().session;
         assert_eq!(s.model.as_deref(), Some("claude-sonnet-4-6"));
         assert_eq!(s.thinking.as_deref(), Some("low"));
         assert!(!s.persona);
+        assert!(!s.rollover);
         assert!(s.persona_file.unwrap().ends_with("p.txt"));
+        assert!(Settings::parse("[session]\nrollover = \"auto\"").is_err(), "rollover is a bool");
         assert!(Settings::parse("[session]\nthinking = \"ultra\"").is_err());
         assert!(Settings::parse("[session]\nmodel = \"\"").is_err());
         assert!(Settings::parse("[session]\npersonna = true").is_err(), "unknown keys are errors");
