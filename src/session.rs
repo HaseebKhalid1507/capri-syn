@@ -1553,7 +1553,9 @@ impl Trouble {
         }
         if any(&["rate limit", "(http 429", "usage limit", "quota", "(billing_error)", "429 too many requests"]) || says_status(&m, "429") {
             Some(Trouble::Limited)
-        } else if any(&["overloaded", "server error (http 5"]) {
+        } else if any(&["overloaded", "server error (http 5", "reports the model is at capacity"]) {
+            // `reports the model is at capacity`: Synaps 0.12's in-stream capacity failure (a Codex
+            // `rate_limit_exceeded`, or an overload, its retries spent; RESPONSES_CAPACITY_SUFFIX).
             Some(Trouble::Swamped)
         } else if any(&["could not reach", "timed out", "connection failed", "connection lost"]) {
             Some(Trouble::Offline)
@@ -2453,6 +2455,14 @@ mod tests {
             ("Session error: no session 20260714-429000-3dab (request failed: 4291)", None, None),
             ("Anthropic is overloaded right now. Retries exhausted — wait a minute and try again.", CLAUDE, Some(Trouble::Swamped)),
             ("Anthropic server error (HTTP 502). Try again.", CLAUDE, Some(Trouble::Swamped)),
+            // v0.12.0, a Responses stream's failure at capacity (ChatGPT's in-stream
+            // `rate_limit_exceeded` or an overload, retries spent; xAI's and Muse's the same).
+            // Its other in-stream failures aren't capacity: a spent quota stays a limit (above),
+            // a context or a withheld failure unnamed.
+            ("Codex reports the model is at capacity (retries exhausted). Try again in a few minutes or switch models with /model.", CODEX, Some(Trouble::Swamped)),
+            ("xAI reports the model is at capacity (retries exhausted). Try again in a few minutes or switch models with /model.", Some("xai-auth/grok-4.3"), Some(Trouble::Swamped)),
+            ("Codex rejected the request: the conversation exceeds this model's context window. Run /compact or start a fresh session to continue.", CODEX, None),
+            ("Codex response failed in stream. Provider error details withheld because they can echo request content.", CODEX, None),
             ("Could not reach api.anthropic.com (connection failed). Check your network, DNS, or proxy settings.", CLAUDE, Some(Trouble::Offline)),
             ("Connection lost mid-response. Partial reply kept — send again to continue.", CLAUDE, Some(Trouble::Offline)),
             // v0.12.0's local provider (measured: Ollama off; a model it hasn't pulled).

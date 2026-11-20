@@ -59,7 +59,7 @@ Paths here are Linux's: Windows keeps the same files under `%APPDATA%` and `%LOC
   | the same, with no model picked (no `[session] model`, none in Synaps' config, her session on its default: "NO BRAIN YET, none picked", below) | No brain yet, choom. Pick one: an account, an API key, or a model on this machine. `SET ME UP ▸` (a button to Settings ▸ Brain) | `NO BRAIN YET` | idle |
   | a lapsed or rejected login | My login ran out. Sign me in again: `SIGN IN AGAIN ▸` (a button to Settings ▸ Brain, where her account's row signs in again) | `LOGGED OUT` | idle |
   | rate or usage limit, billing; a provider's 429 once Synaps' retries are spent (`codex request failed: 429 Too Many Requests`, the broker's `provider request failed: 429 …`: the status right after `request failed: `, not a 429 elsewhere in the text) | Hit my model's limit for now. Give it a bit, then ask me again. | `AT THE LIMIT` | annoyed |
-  | overloaded, a 5xx | My model's swamped right now. Try me again in a minute. | `MODEL BUSY` | annoyed |
+  | overloaded, a 5xx; at capacity mid-reply, retries spent (`Codex reports the model is at capacity (retries exhausted)…`: ChatGPT's in-stream rate limit or overload; xAI's, Muse's) | My model's swamped right now. Try me again in a minute. | `MODEL BUSY` | annoyed |
   | unreachable, timed out, a dropped stream | Can't reach my model. Check the connection, then ask me again. | `NO CONNECTION` | annoyed |
   | `local/…`: `can't reach local endpoint` (Ollama's port 11434) | Ollama's not answering, so I've got no brain. Start Ollama, then ask me again. | `OLLAMA IS OFF` | idle |
   | the same, another port (LM Studio, llama.cpp) | My local model's server isn't answering. Start it, then ask me again. | `LOCAL MODEL OFF` | idle |

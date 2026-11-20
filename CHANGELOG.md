@@ -14,6 +14,9 @@
   Requests and Synaps' retries are spent, she says she's hit her model's limit (AT THE LIMIT), as for
   a used-up allowance. A ChatGPT account or model that's turned away (401, 403, a model the account
   doesn't have) isn't a limit: its own error shows.
+- **At capacity mid-reply reads as MODEL BUSY.** When ChatGPT (or xAI, or Muse) stops a reply because
+  the model is at capacity and Synaps' retries are spent, she says her model's swamped, to try her
+  again in a minute.
 
 ### For developers
 - `synaps-avatar --providers` has a seventh field: a hint shown beside a brain's name (ChatGPT's alone
