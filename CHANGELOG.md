@@ -2,72 +2,59 @@
 
 ## Unreleased
 
+## 1.1.1 (2026-11-20)
+
+She runs free on a ChatGPT account, a free one too: no API key, no card, no GPU. On Linux her context
+rolls over by itself, so an always-on chat doesn't fill her model's context.
+
 ### Her brain
-- **She runs free on a free ChatGPT account.** ChatGPT's sign-in (Synaps' `openai-codex`) takes any
-  ChatGPT account, a free one too: no API key, no card, no GPU. Its row says so wherever a brain is
-  picked: "free account works" in Settings ▸ Brain's SIGN IN, in her setup's "Her model" page, and in
-  install.sh's and install.ps1's lists. The README says it up top and in Get her, with the usage
-  limits free accounts have: when one is used up she says she's hit her model's limit (AT THE LIMIT).
-  Nothing is picked for you: "Choose later" is still the default, and the order is the same.
-- **ChatGPT's default model is GPT-5.6 Terra**, one a free account runs her on (GPT-5.6 Luna, next in
-  the list, too): a ChatGPT sign-in, from her Settings or her installers, puts her on it. The bigger
-  ones in MODEL's list (GPT-5.6 Sol, GPT-6 Astra, GPT-6.1 Sol) need a paid plan: on one, pick GPT-6.1
-  Sol in Settings ▸ Brain ▸ MODEL, OpenAI's recommendation for paid plans. A model you picked stays
-  yours.
-- **GPT-5.5, GPT-5.4, GPT-5.4 Mini and GPT-5.3 Codex Spark are gone from ChatGPT's list**: OpenAI
-  retired them from ChatGPT sign-ins, for every plan. If her `[session] model` is one of those four
-  (v1.1.0's ChatGPT default was GPT-5.5), it moves to GPT-5.6 Terra once as she starts, written back
-  to settings.toml, and her log says `model … is retired from ChatGPT sign-ins: now …`. If
-  settings.toml can't be written she runs on Terra all the same, after a reload too, and `--model`
-  with one of the four is Terra as well. Nothing else is changed.
-- **A model your ChatGPT plan doesn't run reads as NOT ON YOUR PLAN.** She says "That model isn't on
-  your ChatGPT plan. Pick another in Settings ▸ Brain ▸ MODEL." instead of Synaps' error, which
-  pointed at a `/model` her Line doesn't take. Only when her model is on ChatGPT; it's gone as soon
-  as another model is hers.
-- **A provider's rate limit reads as one.** When ChatGPT, a key service or Gemini answers 429 Too Many
-  Requests and Synaps' retries are spent, or Claude's stream says `rate_limit_error`, she says she's
-  hit her model's limit (AT THE LIMIT), as for a used-up allowance.
-- **A provider's server error reads as MODEL BUSY.** A 500, 502, 503, 504 or 529 once Synaps' retries
-  are spent, and a reply stopped mid-way because the model is at capacity (ChatGPT's, xAI's or
-  Muse's): she says her model's swamped, to try her again in a minute. A 408 (a request that timed
-  out) reads as NO CONNECTION.
-- **ChatGPT turning her login down reads as LOGGED OUT.** Its 401, and a reply stopped because its
-  sign-in was rejected (ChatGPT's, xAI's or Muse's): she asks to be signed in again, and her account's
-  row in Settings ▸ Brain signs in again. Only when her model is on that account; a 403 still shows
-  its own error.
-- **An account's or a key service's row in Settings ▸ Brain fits at the Line's narrowest.** A login
-  that ran out reads `⏎ SIGN IN AGAIN` by its red dot (a key service's, `REFUSED · ⏎ NEW KEY`; Grok's
-  on Windows, `NEEDS NEWER SYNAPS`): the longer words ran past the row at 480 px.
+- **Free on a free ChatGPT account.** Its row says "free account works" in Settings ▸ Brain, her setup's
+  "Her model" page and the installers' lists. Free accounts have usage limits: when yours is used up she
+  says she's hit her model's limit (AT THE LIMIT). Wait for it to reset, or pick another brain.
+- **ChatGPT's default is GPT-5.6 Terra,** which a free account runs (GPT-5.6 Luna too): a ChatGPT sign-in
+  puts her on it. GPT-5.6 Sol, GPT-6 Astra and GPT-6.1 Sol need a paid plan; on a plan that doesn't run her
+  model she says NOT ON YOUR PLAN and to pick another in Settings ▸ Brain ▸ MODEL, instead of Synaps'
+  error (only while her model is on ChatGPT). A model you picked stays yours.
+- **GPT-5.5, GPT-5.4, GPT-5.4 Mini and GPT-5.3 Codex Spark are gone from ChatGPT's list:** OpenAI retired
+  them from ChatGPT sign-ins. A `[session] model` set to one of them moves to GPT-5.6 Terra once, as she
+  starts (written to settings.toml, said in her log); `--model` with one of them runs Terra.
+- **A provider's trouble reads in her words.** Once Synaps' retries are spent, a 429 (ChatGPT, a key
+  service, Gemini; Claude's `rate_limit_error`) is AT THE LIMIT, a 500, 502, 503, 504 or 529 (or a reply
+  stopped at capacity) is MODEL BUSY, and a 408 is NO CONNECTION. ChatGPT's 401 is LOGGED OUT, with
+  `SIGN IN AGAIN ▸` (only while her model is on that account).
+- **Settings ▸ Brain's account and key-service rows fit** at the Line's narrowest (480 px).
 
 ### Her session
-- **Her context rolls over by itself.** An always-on chat no longer fills her model's context: she
-  turns Synaps' automatic context rollover on for her own session (`/context auto`, that session only;
-  Synaps' config and your other sessions stay as they are), between turns. If Synaps has it on there
-  already (`context_management.mode = auto` in its config, or another client's `/context auto`), she
-  leaves it to Synaps; after a daemon reload any auto she finds counts as Synaps'. When the context
-  gets long, Synaps archives the older messages and carries on in a fresh window with the recent ones,
-  with no summarizing call. It's for ChatGPT, Claude and other 200k+ brains: she skips it for a local
-  model and for a window under 128k, and a brain picked later is decided again (her session's mode
-  asked first). The Line shows one quiet row where it happened, and Synaps' own notices about it go to
-  her log, with one line saying it's on or why not (a `synaps attach` open on her session prints the
-  answers to her mode query and her `/context`, and her join and leave lines each time she sends it).
-  `[session] rollover = false` leaves it to Synaps. Not on Windows yet: Synaps 0.12 archives on Linux
-  and macOS only (her log says so).
-- **Privacy:** the archive holds both sides of the chat word for word, and Synaps never prunes it (it
-  stays after `rollover = false` and `/clear`). It's shared by every session in the same Synaps
-  project. Her session's folder is your home by default, so if your home has a `.git` or a
-  `.synaps-project`, sessions in folders under it without their own can search her archived messages
-  ([REFERENCE.md](docs/REFERENCE.md#the-session-rules)).
+- **Her context rolls over by itself (Linux).** She turns on Synaps' automatic context rollover for her
+  own session only (`/context auto`; Synaps' config and your other sessions stay as they are): when the
+  context gets long, Synaps archives the older messages and carries on in a fresh window with the
+  recent ones, and the Line shows one quiet row where it happened. It's for ChatGPT, Claude and other
+  brains with room for it (most have 200k): she skips it for a local model and for a window under 128k, and
+  when Synaps has it on already (its config, or another client's `/context auto`) she leaves it to
+  Synaps. Her log says which. `[session] rollover = false` leaves it to Synaps. Not on Windows yet
+  (Known issues).
+- **Privacy:** the archive (`~/.synaps-cli/context-archives/`) holds both sides of the chat word for
+  word, and Synaps never prunes it: it stays after `rollover = false` and `/clear`. It's shared by every
+  session in the same Synaps project. Her session's folder is your home by default, so if your home has
+  a `.git` or a `.synaps-project`, sessions in folders under it without their own can search her
+  archived messages (docs/REFERENCE.md, The session rules).
 
 ### For developers
-- `synaps-avatar --providers` has a seventh field: a hint shown beside a brain's name (ChatGPT's alone
-  has one; `Provider::hint`). Her installers show it as her table gives it and keep no copy; an older
-  her's six fields still read, with no hint. steps.ps1's `brains:` lines end on it.
-- The vendored synaps-client sends engine commands (`Client::engine_command`, `Event::EngineReply`,
-  `Error::EngineCommandRefused`) and queries (`Client::query`, `SessionQuery::ContextReport`,
-  `Event::QueryReply`, `Error::QueryFailed`), to port back (`crates/synaps-client/VENDORED.md`). The
-  fake daemon answers `context auto`, `context off` and the context report as Synaps 0.12 does
-  (`FAKE_CONTEXT=auto`: on by its config).
+- `synaps-avatar --providers` has a seventh field, a hint beside a brain's name (ChatGPT's alone); her
+  installers show it as given, and an older her's six fields still read.
+- The vendored synaps-client sends engine commands and queries (`Client::engine_command`, `Client::query`
+  and their events and errors), to port back (crates/synaps-client/VENDORED.md). The fake daemon
+  answers `context auto`, `context off` and the context report as Synaps 0.12 does.
+
+### Known issues
+- Windows: her context doesn't roll over yet. Synaps 0.12 keeps its context archive on Linux and macOS
+  only, so `[session] rollover` (docs/REFERENCE.md) is skipped there (her log says so). A long chat
+  fills her model's context until a turn is refused as too long; then compact or clear it from Synaps
+  (`/compact` or `/clear` in `synaps --attach capri`).
+- A ChatGPT account without Codex (coding) access reads as AT THE LIMIT: Synaps 0.12 words its refusal
+  as the same 429 Too Many Requests a rate limit gets, so she can't tell them apart. If it never
+  clears, pick another brain in Settings ▸ Brain.
+- The rest are in docs/INSTALL.md's Known issues.
 
 ## 1.1.0 (2026-11-19)
 

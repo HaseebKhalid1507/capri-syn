@@ -174,7 +174,7 @@ SETTINGS from her right-click menu. A change is written the moment you make it.
 </p>
 
 <p align="center">
-  <img src="docs/media/still-brain.png" width="100%" alt="Settings, Brain: three ways in, SIGN IN (IN USE · CLAUDE), API KEY and RUN LOCAL (2 MODELS HERE); and MODEL open as a menu of every model she can use, by provider: ChatGPT's GPT-5.5, GPT-6.1 SOL and the rest">
+  <img src="docs/media/still-brain.png" width="100%" alt="Settings, Brain: three ways in, SIGN IN (IN USE · CLAUDE), API KEY and RUN LOCAL; and MODEL open as a menu of every model she can use, by provider: Claude's SONNET 4.6 (IN USE), FABLE 5.2 and the rest">
   <br><b>Settings ▸ Brain</b> · <sub>Pick what she thinks with.</sub>
 </p>
 
@@ -242,7 +242,7 @@ Both do the same steps, and a rerun is an upgrade:
 opens on it), add an API key or run a local model. Her installers ask first: an account, a model on
 your PC, an API key, or later.
 
-**Free:** pick ChatGPT and sign in with any ChatGPT account, a free one too: a free account runs her
+**Free:** pick ChatGPT and sign in with a ChatGPT account, a free one too: a free account runs her
 on GPT-5.6 Terra (Luna works too); the bigger models need a paid plan. No API key, no card, no GPU.
 Free accounts have usage limits: when hers is used up she says she's hit her model's limit (her tag
 flashes AT THE LIMIT). Wait for it to reset, or pick another brain in Settings ▸ Brain. No account

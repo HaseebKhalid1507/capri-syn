@@ -215,11 +215,11 @@ she runs through XWayland, the X server those desktops keep for X apps.
 - **Hyprland** has no idle time for her yet: your presence is the pointer moving, so typing alone
   for 5 min reads as away. Hyprland before 0.40 isn't supported: she takes XWayland there.
 - **On Windows, Synaps 0.12's own `synaps login`** opens a sign-in tab cut at the URL's first `&`:
-  copy the whole URL it prints into your browser, or sign in through her installers' step, which
-  opens it whole (install.ps1 puts it there too; the default folder shown; `-Provider` for another
-  account than Claude):
+  copy the whole URL it prints into your browser, or sign in from her (Settings ▸ Brain) or through
+  her installers' step, which open it whole (install.ps1 puts it there too; the default folder
+  shown; `-Provider` for another account than Claude):
   `powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Programs\synaps-avatar\steps\steps.ps1" login`
-  Grok's sign-in never prints its URL, so the Windows installers don't offer Grok yet
+  Grok's sign-in never prints its URL, so Grok can't be signed in on Windows yet
   ([WINDOWS.md](WINDOWS.md#the-installer)).
 - **Windows:** the installers are unsigned, so a browser download meets SmartScreen ("More info",
   then "Run anyway"); Windows 10 and Windows 11 on Arm are untested; a click on one of her notifications does nothing (as
@@ -227,10 +227,17 @@ she runs through XWayland, the X server those desktops keep for X apps.
   Redistributable; live audio is still to check on real hardware: her desktop checks ran in a
   Windows 11 VM, with no real audio ([WINDOWS.md](WINDOWS.md)). Linux has no tray icon yet: HIDE's
   chip is the way back there.
+- **Her taskbar button's name, for a screen reader (Windows):** on a first run, Explorer can name
+  her button with her old tooltip followed by the current one, so a screen reader hears both
+  (`capri-syn · SPEAKING capri-syn · ONLINE`). Her tooltip is one string, and the hover popup shows
+  the current one alone: the name chains after a tooltip change ([WINDOWS.md](WINDOWS.md)).
 - **Windows: her context doesn't roll over yet.** Synaps 0.12 keeps its context archive on Linux and
   macOS only, so `[session] rollover` ([REFERENCE.md](REFERENCE.md#the-session-rules)) is skipped there
   (her log says so). A long chat fills her model's context until a turn is refused as too long; then
   compact or clear it from Synaps (`/compact` or `/clear` in `synaps --attach capri`).
+- **A ChatGPT account without Codex (coding) access** reads as AT THE LIMIT: Synaps 0.12 words its
+  refusal as the same 429 Too Many Requests a rate limit gets, so she can't tell them apart. If it
+  never clears, pick another brain in Settings ▸ Brain.
 - **`XDG_RUNTIME_DIR` unset:** she and her voice sidecar look for the Linux socket in different
   places: she in the temp dir (`$TMPDIR`, else `/tmp`), the sidecar in `/run/user/<uid>`. Set it, or
   set `CAPRI_VOICE_SOCK` for both. It isn't aligned yet because that would change how she behaves.
