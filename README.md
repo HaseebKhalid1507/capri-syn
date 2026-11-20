@@ -174,7 +174,7 @@ SETTINGS from her right-click menu. A change is written the moment you make it.
 </p>
 
 <p align="center">
-  <img src="docs/media/still-brain.png" width="100%" alt="Settings, Brain: three ways in, SIGN IN (IN USE · CLAUDE), API KEY and RUN LOCAL (2 MODELS HERE); and MODEL open as a menu of every model she can use, by provider: ChatGPT's GPT-5.5, GPT-6.1 SOL and the rest">
+  <img src="docs/media/still-brain.png" width="100%" alt="Settings, Brain: three ways in, SIGN IN (IN USE · CLAUDE), API KEY and RUN LOCAL; and MODEL open as a menu of every model she can use, by provider: Claude's SONNET 4.6 (IN USE), FABLE 5.2 and the rest">
   <br><b>Settings ▸ Brain</b> · <sub>Pick what she thinks with.</sub>
 </p>
 
