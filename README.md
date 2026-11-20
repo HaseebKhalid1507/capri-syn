@@ -47,6 +47,8 @@ away and comes to find you when she wants attention. Nobody scripts her day.
 on your machine, and comes over when she needs a yes from you. Her brain is the real thing: an agent
 session on [Synaps](https://github.com/HaseebKhalid1507/SynapsCLI). The installer brings it.
 
+**And she's free.** Sign her in with a free ChatGPT account: no API key, no card, no GPU.
+
 **Linux and Windows.** She's click-through, so your windows stay yours. She just sits on them.
 
 <p align="center"><img src="docs/media/card-glitch.png" width="100%" alt="01 // GLITCH. Glitch, don't fade. Mood swings break into scanlines and snap back. She arrives on a red bolt."></p>
@@ -238,8 +240,14 @@ Both do the same steps, and a rerun is an upgrade:
 
 `SET ME UP ▸` opens **Settings ▸ Brain**: sign in to an account (she runs the sign-in, your browser
 opens on it), add an API key or run a local model. Her installers ask first: an account, a model on
-your PC, an API key, or later. No account?
-[Run a local model](docs/UNDER-THE-HOOD.md#her-brain). Without a brain she still perches, naps and plays.
+your PC, an API key, or later.
+
+**Free:** pick ChatGPT and sign in with any ChatGPT account, a free one too: a free account runs her
+on GPT-5.6 Terra (Luna works too); the bigger models need a paid plan. No API key, no card, no GPU.
+Free accounts have usage limits: when hers is used up she says she's hit her model's limit (her tag
+flashes AT THE LIMIT). Wait for it to reset, or pick another brain in Settings ▸ Brain. No account
+at all? [Run a local model](docs/UNDER-THE-HOOD.md#her-brain). Without a brain she still perches,
+naps and plays.
 
 <details>
 <summary><b>Flags, voice, uninstalling, the manual route</b></summary>

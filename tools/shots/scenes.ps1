@@ -419,7 +419,7 @@ $Scenes = [ordered]@{
         # No login for her model (ChatGPT's: a file only, so a read tells even on Windows, where the
         # daemon's environment can't be read): her first words say so, with SET ME UP.
         first  = {
-            Start-Take brain first -Local -Model 'openai-codex/gpt-5.5' -History @()
+            Start-Take brain first -Local -Model 'openai-codex/gpt-5.6-terra' -History @()
             $null = Ctl 'brain off'
             $null = Wait-Until { (State).buttons.setup } 30 'her first words with SET ME UP'
             Start-Sleep 2.5
@@ -501,7 +501,7 @@ $Scenes = [ordered]@{
             Shot '15-terminal-signin' 'ChatGPT signed in from a terminal: its check without reopening; the keys say what enter does'
             # MODEL's menu: ChatGPT's models now, then Claude's; Sonnet is Claude's first.
             Key 'left'; Key 'down'; Key 'down'; Key 'down'; Key 'enter' 1000
-            $codex = 9
+            $codex = 5   # ChatGPT's models in MODEL (src/provider.rs ALL: Terra, Luna, 6.1 Sol, 6 Astra, 5.6 Sol)
             1..($codex + 1) | ForEach-Object { Key 'down' 120 }
             Key 'enter' 1800
             $dl = Join-Path $Logs 'brain-drift-daemon.log'

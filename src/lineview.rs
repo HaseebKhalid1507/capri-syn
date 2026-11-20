@@ -1722,7 +1722,7 @@ mod error_row_tests {
         let r = error_row(raw, Some("claude-sonnet-4-6"), false);
         assert!(r.text.ends_with("\n\n`synaps login --provider claude`"), "{}", r.text);
         let codex = "request failed: credential error: No credentials for openai-codex at /home/u/.synaps/auth.json. Run `synaps login`.";
-        assert!(error_row(codex, Some("openai-codex/gpt-5.5"), false).text.contains("ChatGPT"));
+        assert!(error_row(codex, Some(crate::provider::CHATGPT_DEFAULT.0), false).text.contains("ChatGPT"));
     }
 
     #[test]

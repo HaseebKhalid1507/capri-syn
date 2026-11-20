@@ -837,7 +837,7 @@ function Invoke-Brain {
     $c = Invoke-Step $steps @('brain-check', '-Exe', $script:Exe) -NoStop
     $brains = @(); $local = @()
     foreach ($l in $c['all']) {
-        if ($l -match '^brains: (.*)$') { $f = $Matches[1] -split '\|'; $brains += [pscustomobject]@{ Id = $f[0]; Login = $f[1]; Name = $f[2]; How = $f[3]; Why = $(if ($f.Count -gt 4) { $f[4] } else { '' }) } }
+        if ($l -match '^brains: (.*)$') { $f = $Matches[1] -split '\|'; $brains += [pscustomobject]@{ Id = $f[0]; Login = $f[1]; Name = $f[2]; How = $f[3]; Why = $(if ($f.Count -gt 4) { $f[4] } else { '' }); Hint = $(if ($f.Count -gt 5) { $f[5] } else { '' }) } }
         elseif ($l -match '^local: (.*)$') { $f = $Matches[1] -split '\|', 3; $local += [pscustomobject]@{ Server = $f[0]; Url = $f[1]; Model = $f[2] } }
     }
     if ($pick -and -not $brains.Count -and $pick -notmatch '^(local(:.+)?|later)$') {
@@ -855,7 +855,8 @@ function Invoke-Brain {
         Write-Host '     3  an API key'
         Write-Host '     4  later: her Settings > Brain'
         $n = Read-Choice 4 4
-        if ($n -eq 1) { $b = Select-Row $accounts { param($x) "$($x.Name)$(if ($x.Why) { "  (not here: $($x.Why))" } elseif ($x.How -eq 'code') { '  (your browser, and a code shown to you)' })" }; if ($b) { $pick = $b.Id } }
+        # An account: its hint (her table's: ChatGPT's, that a free account will do), and Copilot's code.
+        if ($n -eq 1) { $b = Select-Row $accounts { param($x) $note = if ($x.Why) { "not here: $($x.Why)" } elseif ($x.How -eq 'code') { (@($x.Hint, 'your browser, and a code shown to you') | Where-Object { $_ }) -join '; ' } else { $x.Hint }; "$($x.Name)$(if ($note) { "  ($note)" })" }; if ($b) { $pick = $b.Id } }
         elseif ($n -eq 2 -and $local.Count) { $m = Select-Row $local { param($x) "$($x.Model)  ($($x.Server))" }; if ($m) { $pick = "local:$($m.Model)" } }
         elseif ($n -eq 3) { $b = Select-Row $keys { param($x) $x.Name }; if ($b) { $pick = $b.Id } }
         if (-not $pick) { $pick = 'later' }

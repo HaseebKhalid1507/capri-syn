@@ -596,8 +596,9 @@ var
   AccountCombo, LocalCombo, KeyCombo: TNewComboBox;
   KeyEdit: TPasswordEdit;
   LocalNote, OllamaLink: TNewStaticText;
-  { brain-check's, once: the accounts and the key services (id|login|name|how|why not), the models on
-    this PC (server|url|model), in their combos' order. ModelAsked: the page was his to see. }
+  { brain-check's, once: the accounts and the key services (id|login|name|how|why not|hint), the
+    models on this PC (server|url|model), in their combos' order. ModelAsked: the page was his to
+    see. }
   BrainChecked, ModelFilled, ModelAsked: Boolean;
   Accounts, KeyBrains, LocalModels: TStringList;
   { The pick, carried out at install (RunPick): its step's result, and the model it set. }
@@ -735,7 +736,8 @@ begin
   else Result := 'your browser';
 end;
 
-{ The page's lists from brain-check, once; then /BRAIN=, when it names one of them. }
+{ The page's lists from brain-check, once (an account: its hint, her table's, and how it signs in);
+  then /BRAIN=, when it names one of them. }
 procedure FillModelPage;
 var
   I: Integer;
@@ -746,6 +748,7 @@ begin
   for I := 0 to Accounts.Count - 1 do begin
     L := Accounts[I];
     if Field(L, 5) <> '' then AccountCombo.Items.Add(Field(L, 3) + ' (not here: ' + Field(L, 5) + ')')
+    else if Field(L, 6) <> '' then AccountCombo.Items.Add(Field(L, 3) + ' (' + Field(L, 6) + '; ' + HowText(Field(L, 4)) + ')')
     else AccountCombo.Items.Add(Field(L, 3) + ' (' + HowText(Field(L, 4)) + ')');
   end;
   for I := 0 to KeyBrains.Count - 1 do KeyCombo.Items.Add(Field(KeyBrains[I], 3));
@@ -790,7 +793,7 @@ begin
   else Result := 'later';
 end;
 
-{ The pick's brain-check line: an account's or key service's (id|login|name|how|why not), or a
+{ The pick's brain-check line: an account's or key service's (id|login|name|how|why not|hint), or a
   local model's (server|url|model). }
 function PickLine: String;
 var

@@ -29,7 +29,7 @@
 #                            given stays as he set it), written to settings.toml by her own settings
 #                            writer (synaps-avatar --set).
 #   steps.ps1 brain-check    her brain: is there one (`brain: yes|no`), the accounts and key services
-#                            she can take (`brains: id|login|name|how|why not`, from -Exe's table:
+#                            she can take (`brains: id|login|name|how|why not|hint`, from -Exe's table:
 #                            synaps-avatar --providers), and the models on this PC (`local:
 #                            server|url|model`: Ollama's, LM Studio's). Reads only.
 #   steps.ps1 login          `synaps login --provider` -Provider's (Claude when none), with no window:
@@ -465,8 +465,9 @@ function Resolve-Her {
     if (-not $Exe) { $c = Join-Path (Split-Path -Parent $script:Root) 'synaps-avatar.exe'; if (Test-Path -LiteralPath $c) { $script:Exe = $c } }
     if ($Exe -and -not (Test-Path -LiteralPath $Exe)) { $script:Exe = '' }
 }
-# Her accounts and key services, from her table (Id, Login, Name, How, Model: its default); none,
-# and BrainsWhy says why, when there's no exe of hers or it has no table.
+# Her accounts and key services, from her table (Id, Login, Name, How, Model: its default; Hint:
+# shown beside its name, most often none, and none from an older her); none, and BrainsWhy says
+# why, when there's no exe of hers or it has no table.
 function Get-Brains {
     if ($null -eq $script:BrainList) {
         $script:BrainList = @()
@@ -477,7 +478,7 @@ function Get-Brains {
             foreach ($l in $r.Out) {
                 $f = @($l -split "`t")
                 if ($f.Count -ge 6 -and $f[2] -in @('account', 'key') -and $f[0] -and $f[1] -and $f[4]) {
-                    $script:BrainList += [pscustomobject]@{ Id = $f[0]; Login = $f[1]; Name = $f[4]; How = $f[5]; Model = $f[3] }
+                    $script:BrainList += [pscustomobject]@{ Id = $f[0]; Login = $f[1]; Name = $f[4]; How = $f[5]; Model = $f[3]; Hint = $(if ($f.Count -ge 7) { $f[6] } else { '' }) }
                 }
             }
             if (-not $script:BrainList.Count) { $script:BrainsWhy = "this build of her can't list her brains (synaps-avatar --providers)" }
@@ -513,7 +514,7 @@ function Show-Brains {
     foreach ($b in $all) {
         # Gemini's sign-in needs its Google client (Synaps' google_gemini.rs): not without it.
         if ($b.Id -eq 'google-gemini' -and -not $env:SYNAPS_GOOGLE_GEMINI_CLIENT_ID) { continue }
-        Result "brains: $($b.Id)|$($b.Login)|$($b.Name)|$($b.How)|$($script:NotHere[$b.Id])"
+        Result "brains: $($b.Id)|$($b.Login)|$($b.Name)|$($b.How)|$($script:NotHere[$b.Id])|$($b.Hint)"
     }
     $n = 0
     foreach ($l in Find-Local) { Result "local: $($l.Server)|$($l.Url)|$($l.Model)"; $n++ }

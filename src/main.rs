@@ -131,8 +131,9 @@ Session (one Synaps daemon session drives the body):
                   A running her reads them again (settings reload). Exit 0 saved, 2 a bad --set,
                   3 settings.toml refused (a typo; can't read it), 4 not saved
   --providers     her brains, one a line, then exit: id, login, kind (account|key|local), default
-                  model (none for local), name, how it's signed in to (browser|code|key|none);
-                  tab-separated, in her Settings' order (her installers' list)
+                  model (none for local), name, how it's signed in to (browser|code|key|none), a
+                  hint shown beside its name (most have none); tab-separated, in her Settings'
+                  order (her installers' list)
 
 Dev control: newline commands on $XDG_RUNTIME_DIR/synaps-avatar.sock
   mood <idle|thinking|working|talking|needs_you|done|annoyed|sleepy|away>
@@ -199,7 +200,8 @@ fn session_model(value: &str) -> Result<String> {
 }
 
 /// `--providers`: provider.rs' `ALL`, in its order, a line each: id, login, kind, default model
-/// (none for a local server: its models are its own), name, how. Her installers' brains are this
+/// (none for a local server: its models are its own), name, how, hint (`Provider::hint`: shown
+/// beside its name in their pickers; empty for most). Her installers' brains are this
 /// table (install.sh and steps.ps1 read it from her: no copy of their own), so a provider added to
 /// `ALL` is in them too; `the_installers_know_every_account` holds what they add to it.
 fn providers_table() -> String {
@@ -212,7 +214,7 @@ fn providers_table() -> String {
                 provider::Kind::Local => ("local", "none"),
             };
             let model = p.models.first().map_or("", |&(m, _)| m);
-            format!("{}\t{}\t{kind}\t{model}\t{}\t{how}", p.id, p.login, p.name)
+            format!("{}\t{}\t{kind}\t{model}\t{}\t{how}\t{}", p.id, p.login, p.name, p.hint())
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -749,23 +751,29 @@ fn persona_for(args: &Args, pack_dir: &std::path::Path) -> session::Persona {
     if matches!(args.target, session::Target::Session(_)) {
         return session::Persona::default();
     }
-    let (s, voice) = settings::Settings::load().map(|s| (s.session, s.voice)).unwrap_or_else(|e| {
+    let (mut s, voice) = settings::Settings::load().map(|s| (s.session, s.voice)).unwrap_or_else(|e| {
         elog!("synaps-avatar: {e:#}; the session gets no persona settings");
         (settings::SessionSettings { persona: false, ..Default::default() }, Default::default())
     });
+    if let Some(line) = settings::retire_model(&settings::Settings::path(), &mut s) {
+        elog!("synaps-avatar: settings: {line}");
+    }
     session_persona(&s, &voice, args.model.clone(), pack_dir)
 }
 
 /// The persona from `[session]` (and a model that overrides it); with voice on, the lines on
-/// writing for the ear (voice::PERSONA) follow it.
+/// writing for the ear (voice::PERSONA) follow it. A model retired from ChatGPT sign-ins is her
+/// ChatGPT default here (`provider::retired`), whatever path it came by: a settings.toml her
+/// start couldn't write (`settings::retire_model`) and a reload reads again, or `--model`.
 pub(crate) fn session_persona(s: &settings::SessionSettings, voice: &settings::VoiceSettings, model: Option<String>, pack_dir: &std::path::Path) -> session::Persona {
     let system = s.persona_text(pack_dir).unwrap_or_else(|e| {
         elog!("synaps-avatar: persona: {e:#}; none sent");
         None
     });
+    let model = model.or_else(|| s.model.clone()).map(provider::unretired);
     session::Persona {
         system: voice::persona(system, voice.enabled, voice.speak_unprompted),
-        model: model.or_else(|| s.model.clone()),
+        model,
         thinking: s.thinking.clone(),
         rollover: s.rollover,
     }
@@ -797,7 +805,8 @@ fn connect_session(args: &Args, character: &str, persona: session::Persona, view
         name: me,
         remembered,
         cwd: args.cwd.clone(),
-        model: args.model.clone(),
+        // The model her session is made on, before the persona's: a retired one is the default.
+        model: args.model.clone().map(provider::unretired),
         sleepy_after: args.sleepy_after,
         persona,
         // `--socket`: maybe another machine's daemon (`tools/synaps-avatar-remote`).
@@ -830,7 +839,7 @@ fn fatal(why: startfail::Why, e: anyhow::Error) -> ! {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: gpui's glob exports a `test` attribute that would shadow `#[test]`.
-    use super::{Args, Coded, PathBuf, Result, SET_FAILED, SET_REFUSED, SET_USAGE, parse_args_from, provider, providers_table, session, session_model, set_exit, settings};
+    use super::{Args, Coded, PathBuf, Result, SET_FAILED, SET_REFUSED, SET_USAGE, parse_args_from, provider, providers_table, session, session_model, session_persona, set_exit, settings};
 
     fn parse(args: &[&str]) -> Result<Args> {
         parse_args_from(args.iter().map(|s| s.to_string()))
@@ -895,7 +904,7 @@ mod tests {
     #[test]
     fn set_takes_a_model_synaps_routes() {
         let default = provider::CLAUDE.models[0].0;
-        for ok in [default, "openai-codex/gpt-5.5", "local/qwen3:8b", "local/qwen/qwen3-8b", " anthropic/claude-opus-5-5 "] {
+        for ok in [default, "openai-codex/gpt-5.6-luna", "local/qwen3:8b", "local/qwen/qwen3-8b", " anthropic/claude-opus-5-5 "] {
             assert!(parse(&["--set", &format!("session.model={ok}")]).is_ok(), "{ok}");
         }
         for bad in ["", "gpt-5.5", "nope/x", "local/", "/x", "claude sonnet", "local/q\u{1b}[31m", "openai-codex/gpt\t5"] {
@@ -915,6 +924,28 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// A retired ChatGPT model never reaches her session: `[session] model` (a reload of a file
+    /// her start couldn't write) or `--model`, it's her ChatGPT default; any other is as given.
+    #[test]
+    fn a_retired_model_never_reaches_her_session() {
+        let voice = settings::VoiceSettings::default();
+        let dir = std::path::Path::new("/nonexistent-pack");
+        let on = |m: Option<&str>, cli: Option<&str>| {
+            let s = settings::SessionSettings { model: m.map(str::to_string), persona: false, ..Default::default() };
+            session_persona(&s, &voice, cli.map(str::to_string), dir).model
+        };
+        for &old in provider::CHATGPT_RETIRED {
+            assert_eq!(on(Some(old), None).as_deref(), Some(provider::CHATGPT_DEFAULT.0), "[session] model {old}");
+            assert_eq!(on(None, Some(old)).as_deref(), Some(provider::CHATGPT_DEFAULT.0), "--model {old}");
+            assert_eq!(on(Some("claude-sonnet-4-6"), Some(old)).as_deref(), Some(provider::CHATGPT_DEFAULT.0), "--model {old} wins");
+        }
+        for keep in ["openai-codex/gpt-5.6-luna", "openai-codex/gpt-6.1-sol", "github-copilot/gpt-5.5", "claude-sonnet-4-6", "local/qwen3:8b"] {
+            assert_eq!(on(Some(keep), None).as_deref(), Some(keep));
+            assert_eq!(on(None, Some(keep)).as_deref(), Some(keep));
+        }
+        assert_eq!(on(None, None), None, "none picked: none");
+    }
+
     /// `--providers`: provider.rs' table as her installers read it, in `ALL`'s order, each
     /// provider's default model one she'd take.
     #[test]
@@ -922,10 +953,15 @@ mod tests {
         let t = providers_table();
         let rows: Vec<Vec<&str>> = t.lines().map(|l| l.split('\t').collect()).collect();
         assert_eq!(rows.iter().map(|r| r[0]).collect::<Vec<_>>(), provider::ALL.iter().map(|p| p.id).collect::<Vec<_>>(), "{t}");
-        assert!(rows.iter().all(|r| r.len() == 6 && !r[0].is_empty() && !r[4].is_empty()), "{t}");
+        assert!(rows.iter().all(|r| r.len() == 7 && !r[0].is_empty() && !r[4].is_empty()), "{t}");
         let claude = rows.iter().find(|r| r[0] == "anthropic").expect("Claude");
-        assert_eq!(*claude, ["anthropic", "claude", "account", provider::CLAUDE.models[0].0, "Claude", "browser"]);
-        assert!(rows.contains(&vec!["local", "local", "local", "", "Local", "none"]), "{t}");
+        assert_eq!(*claude, ["anthropic", "claude", "account", provider::CLAUDE.models[0].0, "Claude", "browser", ""]);
+        assert!(rows.contains(&vec!["local", "local", "local", "", "Local", "none", ""]), "{t}");
+        // A hint beside ChatGPT's name alone, the last field: the pickers show it as it is.
+        let hinted: Vec<(&str, &str)> = rows.iter().filter(|r| !r[6].is_empty()).map(|r| (r[0], r[6])).collect();
+        assert_eq!(hinted, [("openai-codex", "free account works")], "{t}");
+        let chatgpt = rows.iter().find(|r| r[0] == "openai-codex").expect("ChatGPT");
+        assert_eq!(chatgpt[3], provider::CHATGPT_DEFAULT.0, "her installers' --set session.model= for ChatGPT: a model a free account runs");
         for r in rows.iter().filter(|r| r[2] != "local") {
             assert!(session_model(r[3]).is_ok(), "{r:?}: a default she takes");
             assert_eq!(provider::of(r[3]).map(|p| p.id), Some(r[0]), "{r:?}: its default is its own");
@@ -997,6 +1033,14 @@ mod tests {
         assert!(ps.contains("Invoke-Her @('--providers')") && sh.contains("--providers"), "the installers read her table");
         for (file, text) in [("steps.ps1", ps), ("install.sh", sh)] {
             assert!(!text.contains("openai-codex|openai-codex|ChatGPT"), "{file} has a copy of the list of brains");
+        }
+        // Nor of a hint (`--providers`' last field): each picker shows what her table says.
+        let iss = include_str!("../packaging/windows/synaps-avatar.iss");
+        let ps1 = include_str!("../install.ps1");
+        for p in provider::ALL.iter().filter(|p| !p.hint().is_empty()) {
+            for (file, text) in [("steps.ps1", ps), ("install.sh", sh), ("install.ps1", ps1), ("synaps-avatar.iss", iss)] {
+                assert!(!text.contains(p.hint()), "{file} has a copy of {}'s hint", p.id);
+            }
         }
     }
 
