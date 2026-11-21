@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Her life
+- **She's restless:** idle beats every few seconds from whatever the pack fills, never the same one
+  twice running; now and then a quick glance at the pointer or a window that came forward, dropped for
+  something else; steady while her session works; more gestures the longer nobody engages her, up to her
+  attention bids. Asleep, held (the Line, a prompt, the menu, a drag, the voice) or moving: still. No
+  new settings.
+
 ### Packs
 - **New optional slots any character pack can fill** (docs/REFERENCE.md, "Slots any pack can fill"): cel
   sheets (grid, geometry file, keys and in-betweens, per-frame timing) and animated WebP strips; a strip
