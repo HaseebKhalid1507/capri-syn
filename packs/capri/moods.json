@@ -19,7 +19,137 @@
     "firstActivityMs": 6000,
     "activityGapMs": 7500,
     "swayPx": 4,
-    "swayPeriodMs": 7200
+    "swayPeriodMs": 7200,
+    "fidgets": [
+      [
+        {
+          "frame": "idle-blink_half",
+          "ms": 70
+        },
+        {
+          "frame": "idle-blink_closed",
+          "ms": 110
+        },
+        {
+          "frame": "idle-blink_half",
+          "ms": 70
+        }
+      ],
+      [
+        {
+          "frame": "idle-blink_half",
+          "ms": 70
+        },
+        {
+          "frame": "idle-blink_closed",
+          "ms": 110
+        },
+        {
+          "frame": "idle-blink_half",
+          "ms": 70
+        },
+        {
+          "frame": "neutral",
+          "ms": 160
+        },
+        {
+          "frame": "idle-blink_half",
+          "ms": 70
+        },
+        {
+          "frame": "idle-blink_closed",
+          "ms": 110
+        },
+        {
+          "frame": "idle-blink_half",
+          "ms": 70
+        }
+      ],
+      [
+        {
+          "frame": "idle-look_left",
+          "ms": 900
+        }
+      ],
+      [
+        {
+          "frame": "idle-look_right",
+          "ms": 900
+        }
+      ],
+      [
+        {
+          "frame": "idle-look_up",
+          "ms": 700
+        }
+      ],
+      [
+        {
+          "frame": "idle-look_down",
+          "ms": 800
+        }
+      ],
+      [
+        {
+          "frame": "idle-mouth_small",
+          "ms": 160
+        },
+        {
+          "frame": "idle-mouth_round",
+          "ms": 220
+        },
+        {
+          "frame": "idle-mouth_small",
+          "ms": 140
+        }
+      ],
+      [
+        {
+          "frame": "idle-mouth_wide",
+          "ms": 260
+        },
+        {
+          "frame": "idle-mouth_small",
+          "ms": 140
+        }
+      ],
+      [
+        {
+          "frame": "idle-wink_half",
+          "ms": 80
+        },
+        {
+          "frame": "idle-wink_closed",
+          "ms": 200
+        },
+        {
+          "frame": "idle-wink_half",
+          "ms": 80
+        }
+      ]
+    ],
+    "poses": {
+      "lean": [
+        {
+          "frame": "lean_in-neutral",
+          "ms": 2600
+        }
+      ],
+      "sit_floor": [
+        {
+          "frame": "pose-crouch",
+          "ms": 220
+        },
+        {
+          "frame": "pose-sit-floor",
+          "ms": 3200
+        },
+        {
+          "frame": "pose-crouch",
+          "ms": 220
+        }
+      ]
+    }
   },
   "moods": {
     "idle": {
@@ -634,6 +764,42 @@
       "sparkleEveryMs": [
         4500,
         8000
+      ],
+      "fidgets": [
+        [
+          {
+            "frame": "idle-blink_half",
+            "ms": 200
+          },
+          {
+            "frame": "idle-blink_closed",
+            "ms": 700
+          },
+          {
+            "frame": "idle-blink_half",
+            "ms": 200
+          }
+        ],
+        [
+          {
+            "frame": "sleepy",
+            "ms": 1400
+          },
+          {
+            "frame": "idle-blink_closed",
+            "ms": 500
+          },
+          {
+            "frame": "sleepy",
+            "ms": 900
+          }
+        ],
+        [
+          {
+            "frame": "idle-look_down",
+            "ms": 1200
+          }
+        ]
       ]
     },
     "mid": {
@@ -1099,6 +1265,38 @@
       "sha256": "83bc69576286372a428bcc00704a973b5b47de1b3f6e59921ff20dc6a30adc31"
     },
     {
+      "id": "pose-crouch-seat",
+      "file": "poses/capri-crouch.png",
+      "anchor": {
+        "name": "seat",
+        "x": 625,
+        "y": 1166
+      },
+      "visibleBounds": {
+        "x": 185,
+        "y": 339,
+        "width": 883,
+        "height": 832
+      },
+      "sha256": "83bc69576286372a428bcc00704a973b5b47de1b3f6e59921ff20dc6a30adc31"
+    },
+    {
+      "id": "pose-sit-floor",
+      "file": "poses/capri-sit-floor.png",
+      "anchor": {
+        "name": "ground",
+        "x": 643,
+        "y": 1166
+      },
+      "visibleBounds": {
+        "x": 185,
+        "y": 247,
+        "width": 884,
+        "height": 920
+      },
+      "sha256": "111377a8486400569a70d088f83bb076cb182532f9780a3e78159d73d8cfca67"
+    },
+    {
       "id": "pose-sleep",
       "file": "poses/capri-sleep.png",
       "anchor": {
@@ -1209,7 +1407,8 @@
     ],
     "annoyedAfter": 5,
     "streakMs": 1600,
-    "headFraction": 0.3
+    "headFraction": 0.3,
+    "hearts": "effect-heart"
   },
   "perch": {
     "base": "pose-sit-edge",
@@ -1445,7 +1644,17 @@
           }
         ]
       }
-    }
+    },
+    "outfits": [
+      {
+        "id": "jacket"
+      },
+      {
+        "id": "no-jacket",
+        "weight": 1,
+        "sprites": "outfits/no-jacket/sprites.json"
+      }
+    ]
   },
   "music": {
     "floor": "music-floor",
@@ -1497,6 +1706,26 @@
           200,
           84
         ]
+      ],
+      "ledge_keytar": [
+        [
+          225,
+          246
+        ],
+        [
+          389,
+          164
+        ]
+      ],
+      "ledge_keytar_bd": [
+        [
+          225,
+          246
+        ],
+        [
+          389,
+          164
+        ]
       ]
     },
     "status": "LISTENING",
@@ -1504,7 +1733,81 @@
     "plate": "arrow",
     "glyph": "note",
     "activityChance": 0.0,
-    "activityMs": 24000
+    "activityMs": 24000,
+    "windowLoop": [
+      {
+        "frame": "pose-sit-edge",
+        "ms": 130
+      },
+      {
+        "frame": "ledge_keytar_bd#0",
+        "ms": 80
+      },
+      {
+        "frame": "ledge_keytar#0",
+        "ms": 110
+      },
+      {
+        "frame": "ledge_keytar_bd#1",
+        "ms": 95
+      },
+      {
+        "frame": "ledge_keytar#1",
+        "ms": 175
+      },
+      {
+        "frame": "ledge_keytar_bd#2",
+        "ms": 80
+      },
+      {
+        "frame": "ledge_keytar#2",
+        "ms": 175
+      },
+      {
+        "frame": "ledge_keytar_bd#3",
+        "ms": 80
+      },
+      {
+        "frame": "ledge_keytar#3",
+        "ms": 245
+      },
+      {
+        "frame": "ledge_keytar_bd#3",
+        "ms": 80
+      },
+      {
+        "frame": "ledge_keytar#2",
+        "ms": 155
+      },
+      {
+        "frame": "ledge_keytar_bd#3",
+        "ms": 80
+      },
+      {
+        "frame": "ledge_keytar#3",
+        "ms": 300
+      },
+      {
+        "frame": "ledge_keytar_bd#4",
+        "ms": 95
+      },
+      {
+        "frame": "ledge_keytar#4",
+        "ms": 140
+      },
+      {
+        "frame": "ledge_keytar_bd#5",
+        "ms": 105
+      },
+      {
+        "frame": "ledge_keytar#5",
+        "ms": 110
+      },
+      {
+        "frame": "pose-sit-edge",
+        "ms": 190
+      }
+    ]
   },
   "brain": {
     "bid": [
@@ -1601,84 +1904,14 @@
       "wave"
     ],
     "greet": [
-      {
-        "frame": "idle-wave_raise",
-        "ms": 180
-      },
-      {
-        "frame": "idle-wave_a",
-        "ms": 240
-      },
-      {
-        "frame": "idle-wave_b",
-        "ms": 220
-      },
-      {
-        "frame": "idle-wave_a",
-        "ms": 240
-      },
-      {
-        "frame": "idle-wave_b",
-        "ms": 220
-      },
-      {
-        "frame": "idle-wave_a",
-        "ms": 240
-      },
-      {
-        "frame": "idle-wave_b",
-        "ms": 220
-      },
-      {
-        "frame": "idle-wave_a",
-        "ms": 320
-      },
-      {
-        "frame": "idle-wave_raise",
-        "ms": 160
-      },
+      "wave",
       {
         "frame": "happy",
         "ms": 900
       }
     ],
     "greetMorning": [
-      {
-        "frame": "idle-wave_raise",
-        "ms": 180
-      },
-      {
-        "frame": "idle-wave_a",
-        "ms": 240
-      },
-      {
-        "frame": "idle-wave_b",
-        "ms": 220
-      },
-      {
-        "frame": "idle-wave_a",
-        "ms": 240
-      },
-      {
-        "frame": "idle-wave_b",
-        "ms": 220
-      },
-      {
-        "frame": "idle-wave_a",
-        "ms": 240
-      },
-      {
-        "frame": "idle-wave_b",
-        "ms": 220
-      },
-      {
-        "frame": "idle-wave_a",
-        "ms": 320
-      },
-      {
-        "frame": "idle-wave_raise",
-        "ms": 160
-      },
+      "wave",
       {
         "frame": "idle-excited",
         "ms": 700
@@ -1821,6 +2054,178 @@
       "status": "SULKING",
       "tone": "offline",
       "glyph": "ring"
+    },
+    "hangFidgets": {
+      "pullup": [
+        {
+          "frame": "pose-ceiling",
+          "ms": 125
+        },
+        {
+          "frame": "hang_pullup_bd#0",
+          "ms": 80
+        },
+        {
+          "frame": "hang_pullup#0",
+          "ms": 105
+        },
+        {
+          "frame": "hang_pullup_bd#1",
+          "ms": 95
+        },
+        {
+          "frame": "hang_pullup#1",
+          "ms": 170
+        },
+        {
+          "frame": "hang_pullup_bd#2",
+          "ms": 75
+        },
+        {
+          "frame": "hang_pullup#2",
+          "ms": 100
+        },
+        {
+          "frame": "hang_pullup_bd#3",
+          "ms": 75
+        },
+        {
+          "frame": "hang_pullup#3",
+          "ms": 310
+        },
+        {
+          "frame": "hang_pullup#4",
+          "ms": 150
+        },
+        {
+          "frame": "hang_pullup_bd#4",
+          "ms": 105
+        },
+        {
+          "frame": "hang_pullup_bd#5",
+          "ms": 85
+        },
+        {
+          "frame": "hang_pullup#5",
+          "ms": 105
+        },
+        {
+          "frame": "pose-ceiling",
+          "ms": 185
+        }
+      ],
+      "catch": [
+        {
+          "frame": "pose-ceiling",
+          "ms": 125
+        },
+        {
+          "frame": "hang_catch#0",
+          "ms": 125
+        },
+        {
+          "frame": "hang_catch_bd#0",
+          "ms": 80
+        },
+        {
+          "frame": "hang_catch_bd#1",
+          "ms": 95
+        },
+        {
+          "frame": "hang_catch#1",
+          "ms": 170
+        },
+        {
+          "frame": "hang_catch_bd#2",
+          "ms": 65
+        },
+        {
+          "frame": "hang_catch#2",
+          "ms": 115
+        },
+        {
+          "frame": "hang_catch_bd#3",
+          "ms": 80
+        },
+        {
+          "frame": "hang_catch#3",
+          "ms": 1000
+        },
+        {
+          "frame": "hang_catch_bd#4",
+          "ms": 65
+        },
+        {
+          "frame": "hang_catch#4",
+          "ms": 110
+        },
+        {
+          "frame": "hang_catch_bd#5",
+          "ms": 100
+        },
+        {
+          "frame": "hang_catch#5",
+          "ms": 95
+        },
+        {
+          "frame": "pose-ceiling",
+          "ms": 185
+        }
+      ],
+      "wrist_glance": [
+        {
+          "frame": "pose-ceiling",
+          "ms": 130
+        },
+        {
+          "frame": "hang_wrist_scan#0",
+          "ms": 95
+        },
+        {
+          "frame": "hang_wrist_scan#1",
+          "ms": 110
+        },
+        {
+          "frame": "hang_wrist_scan#2",
+          "ms": 150
+        },
+        {
+          "frame": "hang_wrist_scan#3",
+          "ms": 200
+        },
+        {
+          "frame": "hang_wrist_scan#4",
+          "ms": 225
+        },
+        {
+          "frame": "hang_wrist_scan#5",
+          "ms": 3000
+        },
+        {
+          "frame": "hang_wrist_scan#4",
+          "ms": 155
+        },
+        {
+          "frame": "hang_wrist_scan#3",
+          "ms": 110
+        },
+        {
+          "frame": "hang_wrist_scan#2",
+          "ms": 135
+        },
+        {
+          "frame": "hang_wrist_scan#1",
+          "ms": 130
+        },
+        {
+          "frame": "hang_wrist_scan#0",
+          "ms": 105
+        },
+        {
+          "frame": "pose-ceiling",
+          "ms": 180
+        }
+      ]
     }
   },
   "drag": {
@@ -1993,7 +2398,58 @@
       }
     ],
     "perchDipMs": 60,
-    "teleportChance": 0.5
+    "teleportChance": 0.5,
+    "alt": {
+      "launch": [
+        [
+          {
+            "frame": "pose-crouch",
+            "ms": 417
+          },
+          "wave"
+        ]
+      ],
+      "cinematic": [
+        [
+          {
+            "frame": "pose-crouch",
+            "ms": 300
+          }
+        ]
+      ],
+      "summon": [
+        [
+          {
+            "frame": "pose-crouch",
+            "ms": 417
+          },
+          {
+            "frame": "intro-wink",
+            "ms": 583
+          },
+          {
+            "frame": "neutral",
+            "ms": 300
+          }
+        ]
+      ],
+      "teleport": [
+        [
+          {
+            "frame": "pose-crouch",
+            "ms": 417
+          }
+        ]
+      ],
+      "perch": [
+        [
+          {
+            "frame": "pose-crouch-seat",
+            "ms": 340
+          }
+        ]
+      ]
+    }
   },
   "kiss": {
     "steps": [

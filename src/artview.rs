@@ -532,7 +532,8 @@ impl Avatar {
             .iter()
             .flat_map(Step::leaves)
             .filter_map(|s| match s {
-                Step::Clip(c) => a.by_name.get(c).copied().filter(|si| self.pack.step_strips.contains(si)),
+                // Drawn in the look she wears (another look's drawing of a clip isn't wanted).
+                Step::Clip(c) => a.by_name.get(c).copied().filter(|&si| self.pack.step_strips.contains(&si) && self.pack.strip_wears(si)),
                 Step::Hold { .. } | Step::Repeat(_) => None,
             })
             .collect()

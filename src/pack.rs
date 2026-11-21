@@ -66,6 +66,10 @@ pub struct Sprite {
     pub visible_bounds: Rect,
     #[serde(default)]
     pub sha256: Option<String>,
+    /// An outfit's sprite only: a face painted on at decode, like an extra frame's (`patch`,
+    /// its file from the pack's root).
+    #[serde(default)]
+    pub patch: Option<Patch>,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -1142,7 +1146,8 @@ fn resolve_transitions(b: &Behaviour, anim: Option<&crate::art::Anim>, errors: &
     out
 }
 
-/// Every clip id the sidecar's steps name (where a strip may stand in as a clip).
+/// Every clip id the sidecar's steps name (where a strip may stand in as a clip), and every
+/// strip a held frame is a cell of (`{"frame": "<strip>#<cell>"}`: its cells become frames).
 fn step_clip_ids(b: &Behaviour) -> Vec<&str> {
     let mut lists: Vec<&[Step]> = Vec::new();
     let mut ids: Vec<&str> = Vec::new();
@@ -1194,7 +1199,8 @@ fn step_clip_ids(b: &Behaviour) -> Vec<&str> {
     }
     ids.extend(lists.iter().flat_map(|l| l.iter()).flat_map(Step::leaves).filter_map(|s| match s {
         Step::Clip(c) => Some(c.as_str()),
-        Step::Hold { .. } | Step::Repeat(_) => None,
+        Step::Hold { frame, .. } => frame.rsplit_once('#').filter(|(n, i)| !n.starts_with('~') && i.parse::<u32>().is_ok()).map(|(n, _)| n),
+        Step::Repeat(_) => None,
     }));
     ids
 }
@@ -1275,7 +1281,13 @@ fn resolve_outfits(dir: &Path, b: &Behaviour, catalog: &Catalog, frames: &[Frame
                 errors.push(format!("{at}: sprite `{}` is a strip cell (tag the strip with its outfit instead)", sp.id));
                 continue;
             }
-            mine.insert(fi, FrameSource { id: sp.id, path, anchor: sp.anchor, bounds: bd, sha256: sp.sha256, patch: None, cell: None });
+            let patch = sp.patch.as_ref().map(|p| (dir.join(&p.file), p.rect, p.dx, p.dy, p.sha256.clone()));
+            if let Some((pp, ..)) = &patch
+                && !pp.is_file()
+            {
+                errors.push(format!("{at}: sprite `{}`: patch {} is missing", sp.id, pp.display()));
+            }
+            mine.insert(fi, FrameSource { id: sp.id, path, anchor: sp.anchor, bounds: bd, sha256: sp.sha256, patch, cell: None });
         }
         let lacks: Vec<&str> = need.iter().filter(|id| index.get(id.as_str()).is_some_and(|fi| !mine.contains_key(fi))).map(String::as_str).collect();
         if !lacks.is_empty() {
@@ -1438,6 +1450,9 @@ pub struct Pack {
     /// Strips standing in as clips in the sidecar's steps (`Clip(strip name)`): decoded when
     /// wanted, like a pool's.
     pub step_strips: Vec<usize>,
+    /// A strip tagged for one outfit and named like a catalog clip: that outfit's drawing of
+    /// the clip (outfit id, the strip's cells as the clip), played instead while she wears it.
+    pub outfit_clips: Vec<(String, Clip)>,
 }
 
 /// One look (`variants.outfits`), resolved: its own drawing of the pack's frames, by frame index.
@@ -1525,7 +1540,9 @@ impl Pack {
 
     pub fn clip(&self, id: &str) -> Option<&Clip> {
         let id = self.catalog.actions.iter().find(|a| a.id == id).map_or(id, |a| a.animation.as_str());
-        self.catalog.clips.iter().find(|c| c.id == id)
+        let worn = self.outfit_id();
+        let own = self.outfit_clips.iter().find(|(o, c)| c.id == id && o == worn).map(|(_, c)| c);
+        own.or_else(|| self.catalog.clips.iter().find(|c| c.id == id))
     }
 
     /// Where a frame is drawn on the canonical canvas: its own anchor moved onto the
@@ -1742,11 +1759,13 @@ impl Pack {
         let motions = resolve_motions(&behaviour, anim.as_ref(), &mut errors);
         // A strip named where a clip goes: its cells play as that clip.
         let mut step_strips: Vec<usize> = Vec::new();
+        let mut outfit_clips: Vec<(String, Clip)> = Vec::new();
         if let Some(a) = &anim {
             for id in step_clip_ids(&behaviour) {
                 let known = catalog.clips.iter().any(|c| c.id == id) || catalog.actions.iter().any(|x| x.id == id);
+                // A clip's name on a strip of one outfit: that outfit's drawing of it.
                 if let Some(&si) = a.by_name.get(id)
-                    && !known
+                    && (!known || a.strips[si].outfit_only().is_some())
                     && !step_strips.contains(&si)
                 {
                     step_strips.push(si);
@@ -1819,7 +1838,12 @@ impl Pack {
             for &si in &step_strips {
                 let s = &a.strips[si];
                 let cells = s.played(clip_every[si]).into_iter().map(|(c, ms)| ClipFrame { id: s.cell_id(c), ms }).collect();
-                catalog.clips.push(Clip { id: s.name.clone(), frames: cells });
+                let clip = Clip { id: s.name.clone(), frames: cells };
+                let known = catalog.clips.iter().any(|c| c.id == s.name) || catalog.actions.iter().any(|x| x.id == s.name);
+                match s.outfit_only() {
+                    Some(o) if known => outfit_clips.push((o.to_string(), clip)),
+                    _ => catalog.clips.push(clip),
+                }
             }
         }
         let cache_bytes = behaviour.variants.as_ref().and_then(|v| v.cache_mb).unwrap_or(64) as usize * 1_000_000;
@@ -1847,6 +1871,7 @@ impl Pack {
             effects,
             hang_ref,
             step_strips,
+            outfit_clips,
         };
 
         // Behaviour references.
@@ -2241,7 +2266,7 @@ impl Pack {
     /// The seam family of frame `fi`: the pack's own art, or a strip family.
     pub fn art_of(&self, fi: usize) -> crate::variants::Art {
         match (self.frames.get(fi).and_then(|f| f.cell.as_ref()), &self.anim) {
-            (Some(c), Some(a)) => crate::variants::Art::Family(a.strips[c.strip].family_id),
+            (Some(c), Some(a)) if !a.strips[c.strip].own => crate::variants::Art::Family(a.strips[c.strip].family_id),
             _ => crate::variants::Art::Pack,
         }
     }
@@ -2756,6 +2781,79 @@ pub mod tests {
         assert!(mo.walk.is_none() && mo.click.is_none());
     }
 
+    /// `outfitted`'s looks, `main` and `alt`, with catalog clip `wave` (neutral, sit).
+    fn waving() -> serde_json::Value {
+        json!({"perch": {"base": "sit"}, "activities": [["wave"]],
+               "variants": {"outfits": [{"id": "main"}, {"id": "alt", "sprites": "outfits/alt/sprites.json"}]}})
+    }
+
+    fn add_wave_clip(d: &Path) {
+        let p = d.join("sprites.json");
+        let mut v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        v["clips"] = json!([{"id": "wave", "frames": [{"id": "neutral", "ms": 100}, {"id": "sit", "ms": 100}]}]);
+        std::fs::write(&p, v.to_string()).unwrap();
+    }
+
+    #[test]
+    fn a_strip_drawn_for_one_outfit_plays_in_place_of_the_clip_it_is_named_for() {
+        let setup = |d: &Path| {
+            crate::art::tests::write_anim(d);
+            crate::art::tests::write_own(d, "wave", Some("alt"));
+            write_outfit(d, &["neutral", "sit"]);
+            add_wave_clip(d);
+        };
+        pack_setup("outfitclip", waving(), setup, |p| {
+            let p = p.unwrap();
+            let ids = |p: &Pack| p.clip("wave").unwrap().frames.iter().map(|f| f.id.clone()).collect::<Vec<_>>();
+            assert_eq!(ids(&p), ["neutral", "sit"], "the pack's look: the catalog's clip");
+            assert_eq!(p.catalog.clips.iter().filter(|c| c.id == "wave").count(), 1);
+            p.wear(1);
+            assert_eq!(ids(&p), ["wave#0", "wave#1"], "the alt look: its own drawing");
+            let seq = p.flatten(&[Step::Clip("wave".into())]);
+            assert_eq!(seq.iter().map(|s| s.1).collect::<Vec<_>>(), [100, 100]);
+            assert!(seq.iter().all(|s| p.wears(s.0)));
+            // The pack's own art: no seam to or from it.
+            assert_eq!(p.art_of(seq[0].0), crate::variants::Art::Pack);
+            p.wear(0);
+            assert!(!p.wears(seq[0].0), "never shown in the other look");
+        });
+    }
+
+    #[test]
+    fn a_held_cell_of_a_strip_is_a_frame() {
+        let moods = json!({"activities": [[{"frame": "sheet#2", "ms": 400}]]});
+        pack_cels("cellframe", moods, None, |p| {
+            let p = p.unwrap();
+            let sheet = p.anim.as_ref().unwrap().by_name["sheet"];
+            assert!(p.step_strips.contains(&sheet), "its cells are frames");
+            assert_eq!(p.flatten(&p.behaviour.activities[0]), [(p.index["sheet#2"], 400)]);
+            assert_eq!(p.frames[p.index["sheet#2"]].cell.as_ref().map(|c| c.strip), Some(sheet));
+        });
+        let e = pack_cels("cellframe-bad", json!({"activities": [[{"frame": "sheet#9", "ms": 400}]]}), None, |p| format!("{:#}", p.err().unwrap()));
+        assert!(e.contains("frame `sheet#9` does not resolve"), "{e}");
+    }
+
+    #[test]
+    fn an_outfit_sprite_takes_a_patch() {
+        let patched = |d: &Path, file: &str| {
+            write_outfit(d, &["neutral", "sit"]);
+            let p = d.join("outfits/alt/sprites.json");
+            let mut v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+            v["sprites"][1]["patch"] = json!({"file": file, "rect": {"x": 0, "y": 0, "width": 8, "height": 4}, "dx": -2, "dy": 1});
+            std::fs::write(&p, v.to_string()).unwrap();
+        };
+        pack_setup("outfitpatch", outfitted(), |d| patched(d, "n.png"), |p| {
+            let p = p.unwrap();
+            let src = &p.outfits[1].frames[&p.index["sit"]];
+            let (file, rect, dx, dy, _) = src.patch.as_ref().unwrap();
+            assert!(file.ends_with("n.png"), "from the pack's root");
+            assert_eq!((rect.height, *dx, *dy), (4, -2, 1));
+            assert!(p.outfits[1].frames[&p.index["neutral"]].patch.is_none());
+        });
+        let e = pack_setup("outfitpatch-bad", outfitted(), |d| patched(d, "gone.png"), |p| format!("{:#}", p.err().unwrap()));
+        assert!(e.contains("sprite `sit`: patch") && e.contains("gone.png is missing"), "{e}");
+    }
+
     #[test]
     fn transitions_name_one_shot_strips_with_their_anchor() {
         let with = |t: serde_json::Value, anim: bool| {
@@ -2876,5 +2974,13 @@ pub mod tests {
         let files: Vec<&str> = b.extra_frames.iter().map(|x| x.file.as_str()).collect();
         assert!(files.iter().all(|f| !f.contains("01-signal") && !f.contains("07-ready")));
         assert_eq!(files.iter().filter(|f| f.contains("capri-sleep")).count(), 2);
+        // v1.2.2 (Haseeb 11-21): the no-jacket look is her second outfit and waves with its own
+        // drawing (the `wave` strip, tagged for it); the jacket look keeps the catalog's wave.
+        let outfits: Vec<&str> = b.variants.as_ref().unwrap().outfits.iter().map(|o| o.id.as_str()).collect();
+        assert_eq!(outfits, ["jacket", "no-jacket"]);
+        assert_eq!(ids(&b.brain.greet).first().map(String::as_str), Some("wave"));
+        let cels = |s: &[Step], strip: &str| ids(s).iter().any(|f| f.starts_with(&format!("{strip}#")));
+        assert!(cels(&b.music.as_ref().unwrap().window_loop, "ledge_keytar"), "the keytar on a window top");
+        assert!(cels(&b.brain.hang_fidgets["pullup"], "hang_pullup"));
     }
 }

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Tests for tools/make-pack: the v1.0.4 pin, the pinned pose-sleep, what gets copied, the optional
+"""Tests for tools/make-pack: the v1.0.4 pin, the pinned pose-sleep, the v1.2.2 files (wave, cels,
+no-jacket look), what gets copied, the optional
 capri-desktop art (--lachy/--mochi: pins, auto-fetch, anim.json, NOTICE) and the --upscale pins.
 
 python3 tools/test_make_pack.py   (stdlib only; fake checkouts, no CapriCore art needed)"""
@@ -39,18 +40,38 @@ class Fake:
         self.sleep.write_bytes(b"sleep frame")
 
 
+def v122_cache(root):
+    return root / "cache/synaps-avatar/capri-desktop" / f"capricore-{mp.V122_COMMIT[:7]}"
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self.fake = Fake(self.root)
-        self.saved = (mp.pins, mp.SLEEP_SHA, mp.WEIGHTS)
+        self.saved = (mp.pins, mp.SLEEP_SHA, mp.WEIGHTS, mp.v122_pins, mp.fetch_url)
         mp.pins = lambda repo: dict(self.fake.pinned)
         mp.SLEEP_SHA = sha(b"sleep frame")
         mp.WEIGHTS = {}  # no fontTools here
+        # v1.2.2's files (the real list, tiny stand-ins), in the download cache; never the network.
+        self.v122 = {}
+        for rel in self.saved[3](HERE.parent):
+            data = b"# Character assets\n\nThe wave was contributed by a member of the Capri community.\n" if rel.endswith(".md") else f"v122 {rel}".encode()
+            p = v122_cache(self.root) / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(data)
+            self.v122[rel] = sha(data)
+        mp.v122_pins = lambda repo: dict(self.v122)
+        mp.fetch_url = lambda url: (_ for _ in ()).throw(OSError(f"no network in tests: {url}"))
+        self.cache_env = os.environ.get("XDG_CACHE_HOME")
+        os.environ["XDG_CACHE_HOME"] = str(self.root / "cache")
 
     def tearDown(self):
-        mp.pins, mp.SLEEP_SHA, mp.WEIGHTS = self.saved
+        mp.pins, mp.SLEEP_SHA, mp.WEIGHTS, mp.v122_pins, mp.fetch_url = self.saved
+        if self.cache_env is None:
+            os.environ.pop("XDG_CACHE_HOME", None)
+        else:
+            os.environ["XDG_CACHE_HOME"] = self.cache_env
         self.tmp.cleanup()
 
     def run_mp(self, *args):
@@ -80,8 +101,47 @@ class MakePack(Base):
         self.assertEqual(notice.strip().splitlines()[-1], mp.NOTICE_LINE)
         self.assertIn("v1.0.4 (bc93892)", mp.NOTICE_LINE)
         self.assertIn("v1.1.2 (bb0c2d7)", mp.NOTICE_LINE)
+        self.assertIn("v1.2.2 (828f272)", mp.NOTICE_LINE)
+        self.assertIn("contributed by a member of the Capri community", notice, "v1.2.2's own notice")
         self.assertEqual(json.loads((out / "moods.json").read_text())["icon"], "icon.png")
         self.assertEqual((out / "persona.md").read_bytes(), (HERE.parent / "packs/capri/persona.md").read_bytes())
+
+    def test_v1_2_2_gives_the_wave_the_cels_and_the_no_jacket_look(self):
+        out = self.root / "pack"
+        rc, msg = self.run_mp(str(self.fake.src), str(out), "--sleep", str(self.fake.sleep))
+        self.assertEqual(rc, 0, msg)
+        doc = json.loads((out / "anim/anim.json").read_text())
+        side = doc["capricore"]
+        self.assertEqual(set(doc) - {"schemaVersion", "about"}, {"capricore"}, "no lachy/mochi without their flags")
+        for name, st in side["strips"].items():
+            rel = side["root"] + st["file"]
+            self.assertEqual((out / "anim/capricore" / st["file"]).read_bytes(), f"v122 {rel}".encode(), name)
+            self.assertEqual(side["files"][st["file"]]["sha256"], self.v122[rel])
+            self.assertEqual(st["outfit"], "no-jacket", name)
+        cat = json.loads((out / "outfits/no-jacket/sprites.json").read_text())
+        tpl = json.loads((HERE.parent / mp.OUTFIT).read_text())
+        self.assertEqual([s["id"] for s in cat["sprites"]], [s["id"] for s in tpl["sprites"]])
+        for s, t in zip(cat["sprites"], tpl["sprites"]):
+            self.assertEqual(s["sha256"], self.v122[t["from"]], s["id"])
+            self.assertEqual((out / "outfits/no-jacket" / s["file"]).read_bytes(), f"v122 {t['from']}".encode())
+            self.assertEqual(s.get("patch"), t.get("patch"))
+        moods = json.loads((out / "moods.json").read_text())
+        self.assertEqual(moods["variants"]["outfits"][1]["sprites"], "outfits/no-jacket/sprites.json")
+
+    def test_v1_2_2_from_a_dir_else_refused_without_the_network(self):
+        given = self.root / "v122"
+        rel = "assets/default/capri-wave.webp"
+        (given / rel).parent.mkdir(parents=True)
+        (given / rel).write_bytes(f"v122 {rel}".encode())
+        (v122_cache(self.root) / rel).write_bytes(b"truncated")
+        rc, msg = self.run_mp(str(self.fake.src), str(self.root / "a"), "--sleep", str(self.fake.sleep), "--v122", str(given))
+        self.assertEqual(rc, 0, msg)
+        rc, msg = self.run_mp(str(self.fake.src), str(self.root / "b"), "--sleep", str(self.fake.sleep))
+        self.assertEqual(rc, 1)
+        self.assertIn("1 CapriCore v1.2.2 file(s) match tools/capricore-v1.2.2.sha256 nowhere", msg)
+        self.assertIn(rel, msg)
+        self.assertIn("no network in tests", msg)
+        self.assertFalse((self.root / "b/anim").exists(), "nothing written")
 
     def test_persona_is_the_one_given(self):
         out, persona = self.root / "pack", self.root / "mine.md"
@@ -130,6 +190,23 @@ class MakePack(Base):
         for skip in ["01-signal", "07-ready", "screenshot-capture", "avatar.png", "brand/", "app.ico", "capri-sleep"]:
             self.assertNotIn(skip, names)
         self.assertEqual(mp.PIN_COMMIT[:7], "bc93892")
+
+    def test_the_real_v1_2_2_pins_cover_the_outfit_and_the_strips(self):
+        repo = HERE.parent
+        pins = self.saved[3](repo)
+        self.assertEqual(len(pins), 48)
+        self.assertTrue(all(len(h) == 64 for h in pins.values()))
+        self.assertEqual(mp.V122_COMMIT[:7], "828f272")
+        tpl = json.loads((repo / mp.OUTFIT).read_text())
+        geo = json.loads((repo / mp.GEOMETRY).read_text())["capricore"]
+        used = {s["from"] for s in tpl["sprites"]} | {geo["root"] + s["file"] for s in geo["strips"].values()} | {"docs/character-assets.md"}
+        self.assertEqual(used, set(pins), "every pinned file is used, every used file pinned")
+        ids = [s["id"] for s in tpl["sprites"]]
+        self.assertEqual(len(ids), len(set(ids)))
+        names = [Path(f).name for f in {s["from"] for s in tpl["sprites"]}]
+        self.assertEqual(len(names), len(set(names)), "the outfit's files land side by side")
+        for skip in ["lava.svg", "installer-sleep", "uninstall-portrait", "07-ready", "01-signal", "capri-headpat.png"]:
+            self.assertNotIn(skip, " ".join(pins))
 
 
 def zip_bytes(members):
@@ -194,17 +271,12 @@ class SidesBase(Base):
         mp.mochi_hair = lambda repo, mode: None if mode == "original" else self.hair
         mp.side_pins = lambda repo, side: dict(self.sides[side].pinned)
         geo = self.root / "desktop-art.json"
-        geo.write_text(json.dumps(GEOMETRY))
+        real = json.loads((HERE.parent / "tools/desktop-art.json").read_text())
+        geo.write_text(json.dumps({**GEOMETRY, "capricore": real["capricore"]}))
         mp.GEOMETRY = str(geo)
-        self.env = os.environ.get("XDG_CACHE_HOME")
-        os.environ["XDG_CACHE_HOME"] = str(self.root / "cache")
 
     def tearDown(self):
         mp.side_pins, mp.fetch_url, mp.GEOMETRY, mp.mochi_hair = self.saved_side
-        if self.env is None:
-            os.environ.pop("XDG_CACHE_HOME", None)
-        else:
-            os.environ["XDG_CACHE_HOME"] = self.env
         super().tearDown()
 
     def build(self, *extra, out="pack"):
@@ -271,7 +343,7 @@ class DesktopArt(SidesBase):
     def test_without_the_flags_the_pack_is_as_before(self):
         rc, msg = self.build()
         self.assertEqual(rc, 0, msg)
-        self.assertFalse((self.root / "pack/anim").exists())
+        self.assertEqual(sorted(p.name for p in (self.root / "pack/anim").iterdir()), ["anim.json", "capricore"], "v1.2.2's only")
         self.assertNotIn("capri-desktop", (self.root / "pack/NOTICE.md").read_text())
 
     def test_lachy_only(self):

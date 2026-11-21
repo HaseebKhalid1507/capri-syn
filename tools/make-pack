@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""make-pack CAPRICORE_DIR [OUT_DIR] [--moods FILE] [--persona FILE] [--sleep FILE] [--lachy DIR|auto] [--mochi DIR|auto]
+"""make-pack CAPRICORE_DIR [OUT_DIR] [--moods FILE] [--persona FILE] [--sleep FILE] [--v122 DIR] [--lachy DIR|auto] [--mochi DIR|auto]
           [--mochi-hair red|flat|original]
           [--upscale [--record-upscale]]
 
@@ -13,6 +13,10 @@ of the frames her behaviour uses). One frame comes from v1.1.2 (bb0c2d7): pose-s
 against its own pinned sha256. It is read from the checkout's git objects if they have it, else
 from --sleep FILE, else downloaded from GitHub at that commit.
 
+Beside them, CapriCore v1.2.2 (828f272): her wave, the hanging and ledge cels and the no-jacket redraws
+(her second outfit), each checked against tools/capricore-v1.2.2.sha256: from --v122 DIR (a v1.2.2
+checkout), else the checkout's git objects, else downloaded from GitHub at that commit (cached).
+
 OUT_DIR defaults to $XDG_DATA_HOME/synaps-avatar/packs/capri (~/.local/share/...).
 --moods defaults to packs/capri/moods.json in this repo (the avatar's own behaviour file).
 --persona defaults to packs/capri/persona.md in this repo: her session's system prompt (`[session] persona`).
@@ -25,6 +29,8 @@ Layout produced:
   intro/0[2-6]-*.png    <- assets/capri/intro-v1/PNG (+ runtime-intro.json); her bolt replaces 01,
                            and 07 is her neutral frame
   music/*.png           <- assets/default/capri-music-v1/*.png
+  anim/capricore/       <- v1.2.2 assets/default/capri-wave.webp, hanging-cels/*.webp (anim.json: capricore)
+  outfits/no-jacket/    <- v1.2.2 redraws + sprites.json (tools/capricore-outfit.json), her no-jacket look
   icon.png              <- assets/default/icon-source.png
   fonts/Exo2-*.ttf      <- static instances of assets/fonts/exo2/Exo2-Variable.ttf (fontTools), + OFL.txt
   NOTICE.md             <- docs/character-assets.md + one line naming the CapriCore versions
@@ -72,8 +78,13 @@ GEOMETRY = "tools/desktop-art.json"
 LACHY_CREDITS = ("Window perch and music perch animations: her artist, who prefers to stay private. Click effect: "
                  "mixmix312352. Transformation animation she forms from when she teleports, and her two secret emotes: "
                  "Qewiw (mix_qewiw1412_86144).")
+V122_COMMIT = "828f27243df3d1b9669cbe1a5d16633b68c1108a"
+V122_PINS = "tools/capricore-v1.2.2.sha256"
+V122_URL = "https://raw.githubusercontent.com/CapriChooms/CapriCore/{commit}/{rel}"
+OUTFIT = "tools/capricore-outfit.json"
 NOTICE_LINE = ("Assembled by capri-syn's tools/make-pack from CapriCore v1.0.4 (bc93892), "
-               "plus one frame (pose-sleep) from CapriCore v1.1.2 (bb0c2d7).")
+               "plus one frame (pose-sleep) from CapriCore v1.1.2 (bb0c2d7), "
+               "plus the wave, the hanging and ledge cels and the no-jacket redraws from CapriCore v1.2.2 (828f272).")
 
 
 def sha(b):
@@ -116,6 +127,80 @@ def side_pins(repo, side):
             h, p = line.split(None, 1)
             out[p.strip()] = h
     return out
+
+
+def v122_pins(repo):
+    out = {}
+    for line in (repo / V122_PINS).read_text().splitlines():
+        if line.strip() and not line.startswith("#"):
+            h, p = line.split(None, 1)
+            out[p.strip()] = h
+    return out
+
+
+def v122_files(src, given, pinned):
+    """CapriCore v1.2.2's pinned files (rel -> bytes): --v122 DIR, the checkout's git objects, the
+    download cache, else GitHub at that commit (then cached). Any that matches its sha256 nowhere: refused."""
+    cache = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / f"synaps-avatar/capri-desktop/capricore-{V122_COMMIT[:7]}"
+    git = (src / ".git").exists()
+    out, bad = {}, []
+    for rel, want in sorted(pinned.items()):
+        tried = []
+        for how in ("dir", "git", "cache", "url"):
+            b = None
+            if how == "dir" and given and (Path(given) / rel).is_file():
+                b = (Path(given) / rel).read_bytes()
+            elif how == "git" and git:
+                r = subprocess.run(["git", "-C", str(src), "show", f"{V122_COMMIT}:{rel}"], capture_output=True)
+                b = r.stdout if r.returncode == 0 else None
+            elif how == "cache" and (cache / rel).is_file():
+                b = (cache / rel).read_bytes()
+            elif how == "url":
+                url = V122_URL.format(commit=V122_COMMIT, rel=rel)
+                try:
+                    b = fetch_url(url)
+                except OSError as e:
+                    tried.append(f"{url} ({e})")
+                    continue
+                if sha(b) == want:
+                    (cache / rel).parent.mkdir(parents=True, exist_ok=True)
+                    (cache / rel).write_bytes(b)
+            if b is not None and sha(b) == want:
+                out[rel] = b
+                break
+            if b is not None:
+                tried.append(f"{how}: sha256 {sha(b)[:12]}…")
+        else:
+            bad.append(f"{rel} ({'; '.join(tried) or 'nowhere'})")
+    if bad:
+        sys.exit(f"make-pack: {len(bad)} CapriCore v1.2.2 file(s) match {V122_PINS} nowhere (pass --v122 DIR, a v1.2.2 "
+                 "checkout, or `git -C CAPRICORE_DIR fetch --tags`):\n  " + "\n  ".join(bad[:10]) + ("\n  ..." if len(bad) > 10 else ""))
+    return out
+
+
+def add_capricore(out, files, pinned, geometry, outfit):
+    """anim/capricore/ (the wave, the cels) and outfits/<id>/ (the redraws and their sprites.json);
+    returns anim.json's capricore side."""
+    g = geometry["capricore"]
+    dst = out / "anim/capricore"
+    strip_files = {}
+    for st in g["strips"].values():
+        rel = g["root"] + st["file"]
+        (dst / st["file"]).parent.mkdir(parents=True, exist_ok=True)
+        (dst / st["file"]).write_bytes(files[rel])
+        strip_files[st["file"]] = {"sha256": pinned[rel]}
+    od = out / "outfits" / outfit["id"]
+    od.mkdir(parents=True, exist_ok=True)
+    sprites = []
+    for e in outfit["sprites"]:
+        name = Path(e["from"]).name
+        (od / name).write_bytes(files[e["from"]])
+        sp = {"id": e["id"], "file": name, "anchor": e["anchor"], "visibleBounds": e["visibleBounds"], "sha256": pinned[e["from"]]}
+        if "patch" in e:
+            sp["patch"] = e["patch"]
+        sprites.append(sp)
+    (od / "sprites.json").write_text(json.dumps({"outfit": outfit["id"], "sprites": sprites}, indent=1) + "\n")
+    return {**g, "files": strip_files}
 
 
 def fetch_url(url):
@@ -336,7 +421,7 @@ def main(argv):
             flags[k] = True
             argv.remove(k)
     opts = {"--moods": repo / "packs/capri/moods.json", "--persona": repo / "packs/capri/persona.md", "--sleep": None,
-            "--lachy": None, "--mochi": None, "--mochi-hair": "red"}
+            "--v122": None, "--lachy": None, "--mochi": None, "--mochi-hair": "red"}
     for k in list(opts):
         if k in argv:
             i = argv.index(k)
@@ -362,6 +447,8 @@ def main(argv):
     pinned = pins(repo)
     check_source(src, pinned)
     sleep = sleep_frame(src, opts["--sleep"])
+    pinned122 = v122_pins(repo)
+    files122 = v122_files(src, opts["--v122"], pinned122)
     side_srcs, side_pinned = {}, {}
     for side in SIDES:
         arg = opts[f"--{side}"]
@@ -370,7 +457,7 @@ def main(argv):
             d = side_dir(side, arg, side_pinned[side])
             check_side(side, d, side_pinned[side])
             side_srcs[side] = d
-    geometry = json.loads((repo / GEOMETRY).read_text()) if side_srcs else None
+    geometry = json.loads((repo / GEOMETRY).read_text())
     if flags["--upscale"]:
         if not (repo / UPSCALE_PINS).is_file() and not flags["--record-upscale"]:
             sys.exit(f"make-pack: --upscale: no {UPSCALE_PINS} yet. Run once with --record-upscale on the machine "
@@ -410,6 +497,12 @@ def main(argv):
     notice = (src / "docs/character-assets.md").read_text().rstrip("\n")
     hair = mochi_hair(repo, opts["--mochi-hair"]) if "mochi" in side_srcs else None
     extra = add_sides(out, side_srcs, side_pinned, geometry, hair, opts["--mochi-hair"]) if side_srcs else []
+    doc = json.loads((out / "anim/anim.json").read_text()) if side_srcs else {k: v for k, v in geometry.items() if k not in SIDES}
+    doc["capricore"] = add_capricore(out, files122, pinned122, geometry, json.loads((repo / OUTFIT).read_text()))
+    (out / "anim/anim.json").write_text(json.dumps(doc, indent=1) + "\n")
+    notice122 = "\n".join(l for l in files122["docs/character-assets.md"].decode().strip().splitlines() if not l.startswith("# "))
+    notice += (f"\n\n## CapriCore v1.2.2 ({V122_COMMIT[:7]}): her wave, the hanging and ledge cels, the no-jacket redraws\n\n"
+               f"`anim/capricore/` and `outfits/no-jacket/` hold files from CapriCore v1.2.2. Its notice:\n\n{notice122.strip()}")
     (out / "NOTICE.md").write_text(f"{notice}\n\n{NOTICE_LINE}\n" + "".join(f"\n{x}" for x in extra))
     shutil.copy2(moods, out / "moods.json")
     shutil.copy2(persona, out / "persona.md")
@@ -424,7 +517,7 @@ def main(argv):
             sys.exit(f"make-pack: fontTools could not cut Exo2 {name} (pip install fonttools): {r.stderr.strip()[:200]}")
 
     cat = json.loads((out / "sprites.json").read_text())
-    print(f"make-pack: {cat.get('character')} (CapriCore v1.0.4 + pose-sleep v1.1.2) -> {out}: {n + 1} frames, "
+    print(f"make-pack: {cat.get('character')} (CapriCore v1.0.4 + pose-sleep v1.1.2 + v1.2.2's wave, cels and no-jacket look) -> {out}: {n + 1} frames, "
           f"{len(list((out / 'poses').glob('*.png')))} poses, {len(list((out / 'intro').glob('*.png')))} intro frames, "
           f"{len(list((out / 'music').glob('*.png')))} music sprites, {len(WEIGHTS)} font weights, icon")
     for side in side_srcs:
