@@ -1361,6 +1361,8 @@ impl Avatar {
         if let Some(r) = travel {
             self.face(r, "travel", now, true);
         }
+        // She's off: a loop's exit (drawn for where she was) doesn't play on the way.
+        self.anim.cut(now);
         let Some(h) = &mut self.brain else { return };
         h.rng = rng;
         h.write(line);
@@ -1612,6 +1614,8 @@ impl Avatar {
         let crouch = self.pack.behaviour.brain.hop_crouch.as_ref().and_then(|c| self.pack.index.get(c)).copied();
         if !sc.crouched {
             sc.crouched = true;
+            // A loop's exit doesn't hop along with her.
+            self.anim.cut(now);
             if let Some(c) = crouch {
                 self.anim.play(vec![(c, moves::HOP_CROUCH_MS)], now);
             }
@@ -1847,7 +1851,7 @@ impl Avatar {
         let l = self.layout;
         let Some(si) = self.pack.motions.walk else { return };
         // Its cells at their own ms (`ms`, a WebP's delays).
-        let Some(cells) = self.pack.anim.as_ref().map(|a| a.strips[si].played(1)) else { return };
+        let Some(cells) = self.pack.anim.as_ref().map(|a| a.strips[si].ranged(a.strips[si].played(1))) else { return };
         let Some(first) = self.pack.strip_first.get(si).copied().flatten() else { return };
         let Some(wm) = self.brain.as_mut().and_then(|h| h.walk.as_mut()) else { return };
         wm.started = true;
@@ -1857,6 +1861,8 @@ impl Avatar {
         self.placement = Placement::Ground;
         self.set_origin((walk.from_x.round() as i32 - l.ground_x, feet_y - l.ground_y));
         self.face(walk.to_x > walk.from_x, "walk", now, true);
+        // A loop's exit doesn't slide along with her.
+        self.anim.cut(now);
         // The walk is on before the relayer: a window top's pick holds through it.
         self.relayer(now);
         self.anim.play(crate::motion::walk_seq_timed(first, &cells, walk.secs), now);
@@ -2633,6 +2639,13 @@ impl Avatar {
                     Step::Hold { frame: f.into(), ms: 1400 }
                 }
                 Step::Clip(id) if id == "@point" => self.point_step(right),
+                // A one-shot beat's repeat: its own looks and points too.
+                Step::Repeat(r) => Step::Repeat(Box::new(crate::pack::RepeatSteps {
+                    entry: self.resolve_steps_at(&r.entry, c),
+                    r#loop: self.resolve_steps_at(&r.r#loop, c),
+                    exit: self.resolve_steps_at(&r.exit, c),
+                    repeat: r.repeat,
+                })),
                 s => s.clone(),
             })
             .collect()
@@ -3128,7 +3141,7 @@ impl Avatar {
 
     /// The brain's part of `layer()`: an approach pose always; a rest pose only while idle or
     /// sleepy (a session mood wins over it).
-    pub(super) fn brain_layer(&self, m: Mood) -> Option<(usize, Option<Seq>)> {
+    pub(super) fn brain_layer(&self, m: Mood) -> Option<(usize, Option<crate::anim::Looped>)> {
         if let Placement::Pose { frame } = self.placement {
             return Some((frame, None));
         }

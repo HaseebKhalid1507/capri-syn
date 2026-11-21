@@ -86,14 +86,16 @@ impl Avatar {
     }
 
     /// The dance as a layer: its cells round and round, two beats a loop when the tempo is known.
-    pub(super) fn dance_layer(&self) -> Option<(usize, Option<Seq>)> {
+    pub(super) fn dance_layer(&self) -> Option<(usize, Option<crate::anim::Looped>)> {
         let si = self.dance_strip()?;
         let first = self.pack.strip_first.get(si).copied().flatten()?;
         let s = &self.pack.anim.as_ref()?.strips[si];
         // Its clean cells only: two of lachy's have a chroma ghost drawn in (a flash on the beat).
         // Each at its own ms (`ms`, a WebP's delays), the loop fitted to the tempo.
-        let cells = crate::motion::dance_seq(self.music.as_ref().and_then(|m| m.bpm), &s.clean_played());
-        Some((first, Some(cells.iter().map(|&(c, ms)| (first + c as usize, ms)).collect())))
+        // Its loop fitted to the tempo; its entry and exit (`entry`/`exit`) at the drawing's pace.
+        let mut r = s.ranged(s.clean_played());
+        r.body = crate::motion::dance_seq(self.music.as_ref().and_then(|m| m.bpm), &r.body);
+        Some((first, Some(r.map(|&(c, ms)| (first + c as usize, ms)))))
     }
 
     /// The dance's cell on screen (for the notes' emitters), or its first.
@@ -173,7 +175,8 @@ impl Avatar {
         };
         // Its clean cells, round and round (six have a chroma ghost drawn in).
         // Each at its own ms (`ms`, a WebP's delays).
-        crate::motion::cell_at(&s.clean_played(), (secs.max(0.0) * 1000.0) as u64).map_or(first, |c| first + c as usize)
+        // Its entry once (`entry`), then its loop; it ends in a drop (a cut: no exit).
+        s.ranged(s.clean_played()).cell_at((secs.max(0.0) * 1000.0) as u64).map_or(first, |c| first + c as usize)
     }
 
     // ---- the click burst -----------------------------------------------------------------------

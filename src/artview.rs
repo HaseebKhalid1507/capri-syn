@@ -5,7 +5,7 @@
 //! pack's budget (`variants.cacheMb`). A pack without pools or `anim/` never gets here.
 
 use super::{Avatar, Placement};
-use crate::anim::{Mood, Seq};
+use crate::anim::{Looped, Mood, Seq};
 use crate::brain::RestPose;
 use crate::frames::Decoded;
 use crate::fx::{Glitch, Transition};
@@ -352,31 +352,41 @@ impl Avatar {
 
     /// The layer for mood `m` from the strip variant on screen: the music, talk or base loop.
     /// None: the pack's own frames (no pool here, its own variant, or the cells aren't in yet).
-    pub(super) fn art_layer(&self, m: Mood) -> Option<(usize, Option<Seq>)> {
+    pub(super) fn art_layer(&self, m: Mood) -> Option<(usize, Option<Looped>)> {
         let a = self.art_strip()?;
         let si = match (self.music.is_some(), m) {
             (true, _) => a.music?,
             (false, Mood::Talking) => a.talk.filter(|&t| self.art_ready(t)).unwrap_or(a.base),
             _ => a.base,
         };
+        // At rest (the base loop): a pass, then a rest on its first cell (blinks come back to it).
+        let rest = (si == a.base && self.art.hold_ms > 0).then_some(self.art.hold_ms);
+        self.art_loop(si, a.every, rest)
+    }
+
+    /// Strip `si` looped at thinning `every` (its cells in): its entry, loop and exit
+    /// (`entry`/`exit` in anim.json), a rest of `rest` ms after each pass of the loop.
+    fn art_loop(&self, si: usize, every: u32, rest: Option<u32>) -> Option<(usize, Option<Looped>)> {
         if !self.art_ready(si) {
             return None;
         }
-        let mut seq = self.pack.strip_seq(si, a.every);
+        let (an, first) = (self.pack.anim.as_ref()?, self.pack.strip_first.get(si).copied().flatten()?);
+        let s = &an.strips[si];
+        let mut played = s.played(every);
         // A loop she holds skips the cells with a chroma ghost drawn in (`glitchCells`: the
         // sleep's green scan lines).
-        if let (Some(an), Some(Some(first))) = (&self.pack.anim, self.pack.strip_first.get(si)) {
-            let skip = &an.strips[si].glitch_cells;
-            if seq.iter().any(|(fi, _)| !skip.contains(&((fi - first) as u32))) {
-                seq.retain(|(fi, _)| !skip.contains(&((fi - first) as u32)));
-            }
+        if played.iter().any(|(c, _)| !s.glitch_cells.contains(c)) {
+            played.retain(|(c, _)| !s.glitch_cells.contains(c));
         }
-        let base = seq.first()?.0;
-        // At rest (the base loop): a pass, then a rest on its first cell (blinks come back to it).
-        if si == a.base && self.art.hold_ms > 0 {
-            seq.push((base, self.art.hold_ms));
+        let mut r = s.ranged(played).map(|&(c, ms)| (first + c as usize, ms));
+        if r.body.is_empty() {
+            r = Looped::whole([r.entry, r.exit].concat());
         }
-        Some((base, Some(seq)))
+        let base = r.first()?.0;
+        if let Some(ms) = rest {
+            r.body.push((r.body[0].0, ms));
+        }
+        Some((base, Some(r)))
     }
 
     /// The layer for mood `m` is a strip's base loop with a rest at its end.
@@ -414,6 +424,11 @@ impl Avatar {
     /// a pack leaves them out), so no frame that isn't there ever shows.
     pub(super) fn flat(&self, steps: &[Step]) -> Seq {
         let seq = self.pack.flatten(steps);
+        if self.seq_ready(&seq) { seq } else { Vec::new() }
+    }
+
+    /// The strips these frames are cells of are in (each asked for: they decode together).
+    pub(super) fn seq_ready(&self, seq: &[(usize, u32)]) -> bool {
         let mut strips: Vec<usize> = Vec::new();
         for c in seq.iter().filter_map(|&(fi, _)| self.pack.frames.get(fi).and_then(|f| f.cell.as_ref())) {
             if !c.mirror && !strips.contains(&c.strip) {
@@ -425,7 +440,7 @@ impl Avatar {
         for &si in &strips {
             ready &= self.art_ready(si);
         }
-        if ready { seq } else { Vec::new() }
+        ready
     }
 
     /// The step strips these steps name (`Pack::step_strips`).
@@ -433,9 +448,10 @@ impl Avatar {
         let Some(a) = &self.pack.anim else { return Vec::new() };
         steps
             .iter()
+            .flat_map(Step::leaves)
             .filter_map(|s| match s {
                 Step::Clip(c) => a.by_name.get(c).copied().filter(|si| self.pack.step_strips.contains(si)),
-                Step::Hold { .. } => None,
+                Step::Hold { .. } | Step::Repeat(_) => None,
             })
             .collect()
     }

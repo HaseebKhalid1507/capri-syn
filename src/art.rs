@@ -50,6 +50,12 @@ struct StripDoc {
     outfit: Option<String>,
     #[serde(default)]
     r#loop: bool,
+    /// A looping strip's way in and out: its first `entry` positions play once on entry, its
+    /// last `exit` once when the loop ends in place; the rest loops (absent: all of it).
+    #[serde(default)]
+    entry: u32,
+    #[serde(default)]
+    exit: u32,
     family: String,
     #[serde(default)]
     anchor: Option<AnchorDoc>,
@@ -146,6 +152,9 @@ pub struct Strip {
     /// Per cell, from the strip's fps.
     pub ms: u32,
     pub looping: bool,
+    /// Positions at its start and end that play once (`entry`, `exit`): the loop is between.
+    pub entry: u32,
+    pub exit: u32,
     /// Its family's index in anim.json (a seam is a change of it).
     pub family_id: u16,
     /// The pack's anchor kind: `ground` (feet), `seat` (a seat or a lying figure's surface),
@@ -229,6 +238,11 @@ impl Strip {
                 (s, (s..end).fold(0u32, |t, i| t.saturating_add(self.ms_at(i))).max(1))
             })
             .collect()
+    }
+
+    /// Positions it plays (`played`, `clean_played`) split into its entry, loop and exit.
+    pub fn ranged(&self, played: Vec<(u32, u32)>) -> crate::anim::Ranged<(u32, u32)> {
+        crate::anim::Ranged::by_pos(played, self.frames, self.entry, self.exit)
     }
 
     /// Wearable in outfit `outfit` (`moods.json` `variants.outfits`).
@@ -565,6 +579,12 @@ impl Anim {
             {
                 errors.push(format!("anim strip `{name}`: contact {c:?} outside its {cw}x{ch} cell"));
             }
+            let ranged = d.entry > 0 || d.exit > 0;
+            if ranged && !d.r#loop {
+                errors.push(format!("anim strip `{name}`: entry/exit on a strip that doesn't loop (`loop: true`)"));
+            } else if ranged && d.entry.saturating_add(d.exit) >= sheet.frames {
+                errors.push(format!("anim strip `{name}`: entry {} + exit {} leave nothing to loop ({} positions)", d.entry, d.exit, sheet.frames));
+            }
             let x2 = root.join("x2").join(&d.file);
             anim.by_name.insert(name.clone(), anim.strips.len());
             anim.strips.push(Strip {
@@ -576,6 +596,8 @@ impl Anim {
                 cell: (cw, ch),
                 ms: sheet.ms,
                 looping: d.r#loop,
+                entry: d.entry,
+                exit: d.exit,
                 family_id: side.families.keys().position(|f| *f == d.family).unwrap_or(usize::MAX) as u16,
                 anchor: (kind.into(), a.x, a.y),
                 bounds,
@@ -759,6 +781,48 @@ pub mod tests {
             st["pullup"]["outfit"] = json!(o);
         }
         std::fs::write(&p, v.to_string()).unwrap();
+    }
+
+    #[test]
+    fn a_looping_strip_takes_an_entry_and_an_exit() {
+        let d = tmp("strip-range");
+        write_anim(&d);
+        write_cels(&d, None);
+        let p = d.join("anim/anim.json");
+        let doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        let with = |f: &dyn Fn(&mut serde_json::Value)| {
+            let mut v = doc.clone();
+            f(&mut v["lachy"]["strips"]);
+            std::fs::write(&p, v.to_string()).unwrap();
+            Anim::load(&d, 8).map(|a| a.unwrap())
+        };
+        // The cel sheet's five positions: in on 0, loop 1-3, out on 4 (thinned: what's left of each).
+        let a = with(&|st| {
+            st["sheet"]["loop"] = json!(true);
+            st["sheet"]["entry"] = json!(1);
+            st["sheet"]["exit"] = json!(1);
+        })
+        .unwrap();
+        let s = a.strip("sheet").unwrap();
+        let r = s.ranged(s.played(1));
+        assert_eq!((r.entry, r.body, r.exit), (vec![(0, 100)], vec![(1, 50), (2, 300), (3, 50)], vec![(4, 100)]));
+        let r = s.ranged(s.played(2));
+        assert_eq!((r.entry, r.body, r.exit), (vec![(0, 150)], vec![(2, 450)], vec![]));
+        // None given: all of it loops, as before.
+        let a = with(&|_| {}).unwrap();
+        let s = a.strip("stand").unwrap();
+        assert!(!s.ranged(s.played(1)).ranged());
+        // On a one-shot, or nothing left to loop: an error at --check.
+        let e = with(&|st| st["perch_in"]["entry"] = json!(1)).err().unwrap();
+        assert!(format!("{e:#}").contains("anim strip `perch_in`: entry/exit on a strip that doesn't loop"), "{e:#}");
+        let e = with(&|st| {
+            st["stand"]["entry"] = json!(2);
+            st["stand"]["exit"] = json!(1);
+        })
+        .err()
+        .unwrap();
+        assert!(format!("{e:#}").contains("anim strip `stand`: entry 2 + exit 1 leave nothing to loop (3 positions)"), "{e:#}");
+        std::fs::remove_dir_all(&d).ok();
     }
 
     #[test]
