@@ -6,7 +6,7 @@
   control socket, and keys or clicks (tools/shoot-win.ps1) only where it can't. Each step is shot
   cropped to her windows (her, the Line, the bubble, the menu), its `state` beside it.
 
-  pwsh tools/shots/scenes.ps1 -Exe her.exe -Pack packs\capri -Out shots\100 [-Sets settings,header,brain] [-Only settings/on,header/hf-470]
+  pwsh tools/shots/scenes.ps1 -Exe her.exe -Pack packs\capri -Out shots\100 [-Sets settings,header,bubble,brain] [-Only settings/on,header/hf-470]
 
   Sets:
     settings  her Settings page (#77): chat, ctrl+, then down (past BRAIN), right, down, esc; her menu;
@@ -14,6 +14,9 @@
               settings.toml; the cog and `CHAT` (their rects, from `state`) with an empty chat and a full one.
     header    the bubble's header (#78) at 470 px and at 340 px: hands-free and a reply, a prompt
               with 3 waiting, his long words (YOU) while the turn runs.
+    bubble    the bubble fit to what she says: very short replies ("ok", "on it 👍"), two or three
+              lines (mid-stream and done), a list of short lines, a command chip, a long one (READ),
+              and a short and a medium one against the screen's left edge.
     tray      her icon in the notification area (#79), promoted out of the overflow, on a dark
               taskbar with its clock off: hovered (its tooltip, capri-syn · ONLINE), right-clicked (her
               menu), cropped to the taskbar's corner and the menu; the menu by his keys (ATTENTION lit,
@@ -38,7 +41,7 @@ param(
     [Parameter(Mandatory)][string]$Exe,
     [Parameter(Mandatory)][string]$Pack,
     [Parameter(Mandatory)][string]$Out,
-    [string[]]$Sets = @('settings', 'header', 'brain'),
+    [string[]]$Sets = @('settings', 'header', 'bubble', 'brain'),
     [string[]]$Only = @(),
     [string]$Python = 'python',
     [int]$FakePort = 47811,
@@ -415,6 +418,7 @@ $Scenes = [ordered]@{
         }
     }
     header   = [ordered]@{}
+    bubble   = [ordered]@{}
     brain    = [ordered]@{
         # No login for her model (ChatGPT's: a file only, so a read tells even on Windows, where the
         # daemon's environment can't be read): her first words say so, with SET ME UP.
@@ -877,7 +881,7 @@ $Scenes = [ordered]@{
 # The header at two widths: 470 where she stands (a reply long enough to fill it), 340 against the
 # screen's left edge: her bubble keeps to the part of her window on the screen, and her window is
 # 500 px with her in its middle, so she is drawn 190 px tall there (--height) to leave it 352 px
-# (the bubble's least, 340, then).
+# (the narrowest span her bubble is placed in, 340 wide).
 $HfReply = 'Spike pushed the reader fix eleven minutes ago, and CI went green right after. The Windows installer job took nineteen minutes and the voice bundle eleven. Want me to nudge lynx about the rebase, or leave it for the morning?'
 $YouSay = 'can you check whether the windows runner still builds the release binary after the vendored gpui patch from last night'
 foreach ($w in 470, 340) {
@@ -909,6 +913,43 @@ foreach ($w in 470, 340) {
         `$null = Ctl "submit `$YouSay"
         Start-Sleep 2.5
         Shot 'you' 'his long words while the turn runs'
+"@)
+}
+
+# The bubble fit to what she says (src/bubblefit.rs): a reply each, streamed by the fake daemon a
+# word every 120 ms (`say`), shot when it is done (and one mid-stream). `state`'s panel_layout.fit
+# has its width, floor and text width.
+$BubbleSays = [ordered]@{
+    short  = @('ok', 'on it 👍')
+    medium = @("Pushed the fix and opened the PR. CI is running now, and I'll ping you when it's green.")
+    list   = @('Left for today:\n- tests\n- shots\n- the PR\n- a nap')
+    chip   = @('Log in first:\n`synaps login`')
+    long   = @("Spike pushed the reader fix eleven minutes ago, and CI went green right after. The Windows installer job took nineteen minutes and the voice bundle eleven, which is about what it took last week. The shots came back clean at both scales, the header fits at the narrowest width, and nothing in the bubble is cut at the screen's edge. Lynx still owes a rebase on the polish branch, and the release notes need a line about the reader. Want me to nudge lynx about the rebase now, or leave it for the morning when the queue is quieter?")
+}
+foreach ($take in $BubbleSays.Keys) {
+    $Scenes.bubble[$take] = [scriptblock]::Create(@"
+        Start-Take bubble $take -History `$Short -DeltaMs 120
+        `$null = Ctl 'brain off'
+        `$i = 0
+        foreach (`$say in `$BubbleSays['$take']) {
+            `$i++
+            `$words = @(`$say -split ' ').Count
+            `$null = Fake "say `$say"
+            if ('$take' -eq 'medium') { Start-Sleep -Milliseconds (120 * [Math]::Floor(`$words / 2)); Shot "`$i-streaming" 'mid-stream: grown to what has come' }
+            Start-Sleep -Milliseconds (120 * `$words + 2500)
+            Shot "`$i-done" "`$say"
+        }
+"@)
+}
+foreach ($take in 'short', 'medium') {
+    $Scenes.bubble["edge-$take"] = [scriptblock]::Create(@"
+        Start-Take bubble edge-$take -History `$Short -DeltaMs 120 -HerArgs @('--height', '190')
+        `$null = Ctl 'brain off'
+        To-Edge
+        `$say = `$BubbleSays['$take'][-1]
+        `$null = Fake "say `$say"
+        Start-Sleep -Milliseconds (120 * @(`$say -split ' ').Count + 2500)
+        Shot 'done' "at the screen's left edge: `$say"
 "@)
 }
 
