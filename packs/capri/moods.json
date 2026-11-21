@@ -1734,80 +1734,86 @@
     "glyph": "note",
     "activityChance": 0.0,
     "activityMs": 24000,
-    "windowLoop": [
-      {
-        "frame": "pose-sit-edge",
-        "ms": 130
-      },
-      {
-        "frame": "ledge_keytar_bd#0",
-        "ms": 80
-      },
-      {
-        "frame": "ledge_keytar#0",
-        "ms": 110
-      },
-      {
-        "frame": "ledge_keytar_bd#1",
-        "ms": 95
-      },
-      {
-        "frame": "ledge_keytar#1",
-        "ms": 175
-      },
-      {
-        "frame": "ledge_keytar_bd#2",
-        "ms": 80
-      },
-      {
-        "frame": "ledge_keytar#2",
-        "ms": 175
-      },
-      {
-        "frame": "ledge_keytar_bd#3",
-        "ms": 80
-      },
-      {
-        "frame": "ledge_keytar#3",
-        "ms": 245
-      },
-      {
-        "frame": "ledge_keytar_bd#3",
-        "ms": 80
-      },
-      {
-        "frame": "ledge_keytar#2",
-        "ms": 155
-      },
-      {
-        "frame": "ledge_keytar_bd#3",
-        "ms": 80
-      },
-      {
-        "frame": "ledge_keytar#3",
-        "ms": 300
-      },
-      {
-        "frame": "ledge_keytar_bd#4",
-        "ms": 95
-      },
-      {
-        "frame": "ledge_keytar#4",
-        "ms": 140
-      },
-      {
-        "frame": "ledge_keytar_bd#5",
-        "ms": 105
-      },
-      {
-        "frame": "ledge_keytar#5",
-        "ms": 110
-      },
-      {
-        "frame": "pose-sit-edge",
-        "ms": 190
-      }
-    ]
+    "windowLoop": {
+      "entry": [
+        {
+          "frame": "pose-sit-edge",
+          "ms": 130
+        },
+        {
+          "frame": "ledge_keytar_bd#0",
+          "ms": 80
+        },
+        {
+          "frame": "ledge_keytar#0",
+          "ms": 110
+        },
+        {
+          "frame": "ledge_keytar_bd#1",
+          "ms": 95
+        },
+        {
+          "frame": "ledge_keytar#1",
+          "ms": 175
+        }
+      ],
+      "loop": [
+        {
+          "frame": "ledge_keytar_bd#2",
+          "ms": 80
+        },
+        {
+          "frame": "ledge_keytar#2",
+          "ms": 175
+        },
+        {
+          "frame": "ledge_keytar_bd#3",
+          "ms": 80
+        },
+        {
+          "frame": "ledge_keytar#3",
+          "ms": 245
+        },
+        {
+          "frame": "ledge_keytar_bd#3",
+          "ms": 80
+        },
+        {
+          "frame": "ledge_keytar#2",
+          "ms": 155
+        },
+        {
+          "frame": "ledge_keytar_bd#3",
+          "ms": 80
+        },
+        {
+          "frame": "ledge_keytar#3",
+          "ms": 300
+        }
+      ],
+      "exit": [
+        {
+          "frame": "ledge_keytar_bd#4",
+          "ms": 95
+        },
+        {
+          "frame": "ledge_keytar#4",
+          "ms": 140
+        },
+        {
+          "frame": "ledge_keytar_bd#5",
+          "ms": 105
+        },
+        {
+          "frame": "ledge_keytar#5",
+          "ms": 110
+        },
+        {
+          "frame": "pose-sit-edge",
+          "ms": 190
+        }
+      ]
+    }
   },
   "brain": {
     "bid": [
@@ -2056,64 +2062,74 @@
       "glyph": "ring"
     },
     "hangFidgets": {
-      "pullup": [
-        {
-          "frame": "pose-ceiling",
-          "ms": 125
-        },
-        {
-          "frame": "hang_pullup_bd#0",
-          "ms": 80
-        },
-        {
-          "frame": "hang_pullup#0",
-          "ms": 105
-        },
-        {
-          "frame": "hang_pullup_bd#1",
-          "ms": 95
-        },
-        {
-          "frame": "hang_pullup#1",
-          "ms": 170
-        },
-        {
-          "frame": "hang_pullup_bd#2",
-          "ms": 75
-        },
-        {
-          "frame": "hang_pullup#2",
-          "ms": 100
-        },
-        {
-          "frame": "hang_pullup_bd#3",
-          "ms": 75
-        },
-        {
-          "frame": "hang_pullup#3",
-          "ms": 310
-        },
-        {
-          "frame": "hang_pullup#4",
-          "ms": 150
-        },
-        {
-          "frame": "hang_pullup_bd#4",
-          "ms": 105
-        },
-        {
-          "frame": "hang_pullup_bd#5",
-          "ms": 85
-        },
-        {
-          "frame": "hang_pullup#5",
-          "ms": 105
-        },
-        {
-          "frame": "pose-ceiling",
-          "ms": 185
-        }
-      ],
+      "pullup": {
+        "entry": [
+          {
+            "frame": "pose-ceiling",
+            "ms": 125
+          },
+          {
+            "frame": "hang_pullup_bd#0",
+            "ms": 80
+          },
+          {
+            "frame": "hang_pullup#0",
+            "ms": 105
+          }
+        ],
+        "loop": [
+          {
+            "frame": "hang_pullup_bd#1",
+            "ms": 95
+          },
+          {
+            "frame": "hang_pullup#1",
+            "ms": 170
+          },
+          {
+            "frame": "hang_pullup_bd#2",
+            "ms": 75
+          },
+          {
+            "frame": "hang_pullup#2",
+            "ms": 100
+          },
+          {
+            "frame": "hang_pullup_bd#3",
+            "ms": 75
+          },
+          {
+            "frame": "hang_pullup#3",
+            "ms": 310
+          },
+          {
+            "frame": "hang_pullup#4",
+            "ms": 150
+          },
+          {
+            "frame": "hang_pullup_bd#4",
+            "ms": 105
+          }
+        ],
+        "exit": [
+          {
+            "frame": "hang_pullup_bd#5",
+            "ms": 85
+          },
+          {
+            "frame": "hang_pullup#5",
+            "ms": 105
+          },
+          {
+            "frame": "pose-ceiling",
+            "ms": 185
+          }
+        ],
+        "repeat": [
+          1,
+          3
+        ]
+      },
       "catch": [
         {
           "frame": "pose-ceiling",

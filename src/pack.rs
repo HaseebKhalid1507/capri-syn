@@ -2980,7 +2980,12 @@ pub mod tests {
         assert_eq!(outfits, ["jacket", "no-jacket"]);
         assert_eq!(ids(&b.brain.greet).first().map(String::as_str), Some("wave"));
         let cels = |s: &[Step], strip: &str| ids(s).iter().any(|f| f.starts_with(&format!("{strip}#")));
-        assert!(cels(&b.music.as_ref().unwrap().window_loop, "ledge_keytar"), "the keytar on a window top");
-        assert!(cels(&b.brain.hang_fidgets["pullup"], "hang_pullup"));
+        // The keytar: it appears (entry), plays (loop), sparks away (exit); the pull-up repeats its rep.
+        let [entry, body, exit] = b.music.as_ref().unwrap().window_loop.parts();
+        assert!([&entry, &body, &exit].iter().all(|p| cels(p, "ledge_keytar")), "the keytar on a window top, in three parts");
+        assert_eq!((entry.len(), body.len(), exit.len()), (5, 8, 5));
+        let [Step::Repeat(r)] = b.brain.hang_fidgets["pullup"].as_slice() else { panic!("the pull-up repeats its rep") };
+        assert!(cels(&r.r#loop, "hang_pullup") && r.repeat[0] >= 1);
+        assert!(["catch", "wrist_glance"].iter().all(|k| !matches!(b.brain.hang_fidgets[*k].as_slice(), [Step::Repeat(_)])), "one-shots");
     }
 }
