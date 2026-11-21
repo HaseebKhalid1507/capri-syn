@@ -85,9 +85,36 @@ fn outfit_at(p: &Path) -> Option<String> {
     read(p).get("outfit").and_then(serde_json::Value::as_str).map(str::to_string)
 }
 
-/// Off the UI thread (a file write, at a bolt or a wake).
+/// The outfit writes still going (`save_outfit`): a quit waits for them (`flush`).
+static PENDING: std::sync::Mutex<Vec<std::thread::JoinHandle<()>>> = std::sync::Mutex::new(Vec::new());
+
+/// Off the UI thread (a file write, at a bolt or a wake); a quit waits for it (`flush`).
 pub fn save_outfit(id: String) {
-    std::thread::spawn(move || merge(&path(), "outfit", serde_json::json!(id)));
+    let h = std::thread::spawn(move || merge(&path(), "outfit", serde_json::json!(id)));
+    let mut p = PENDING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    p.retain(|h| !h.is_finished());
+    p.push(h);
+}
+
+/// Wait for the writes still going off the UI thread (at a quit: the last outfit change is
+/// on disk before she exits).
+pub fn flush() {
+    let hs = std::mem::take(&mut *PENDING.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+    for h in hs {
+        h.join().ok();
+    }
+}
+
+/// The temp file older builds wrote (`state.json.tmp`, no pid), left by a crash or a kill:
+/// removed once over a minute old (an older build still running may be mid-write). True if gone.
+pub fn sweep_legacy_temp() -> bool {
+    legacy_temp_at(&path())
+}
+
+fn legacy_temp_at(p: &Path) -> bool {
+    let tmp = p.with_extension("json.tmp");
+    let old = std::fs::metadata(&tmp).ok().filter(std::fs::Metadata::is_file).and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok()).is_some_and(|age| age >= std::time::Duration::from_secs(60));
+    old && std::fs::remove_file(&tmp).is_ok()
 }
 
 /// The brain's drives (brain.rs `Saved`).
@@ -211,6 +238,24 @@ mod tests {
         assert!((0..8).all(|i| v.get(format!("k{i}")) == Some(&serde_json::json!(i))), "{v}");
         let left: Vec<String> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
         assert_eq!(left, ["state.json"], "its own temp file, renamed into place");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_older_builds_temp_file_goes_once_stale() {
+        let dir = std::env::temp_dir().join(format!("sa-state-legacy-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("state.json");
+        let tmp = dir.join("state.json.tmp");
+        assert!(!legacy_temp_at(&p), "none there");
+        std::fs::write(&tmp, "{}").unwrap();
+        assert!(!legacy_temp_at(&p), "fresh: an older build may be mid-write");
+        let f = std::fs::File::options().write(true).open(&tmp).unwrap();
+        f.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(120)).unwrap();
+        drop(f);
+        assert!(legacy_temp_at(&p));
+        assert!(!tmp.exists());
         std::fs::remove_dir_all(&dir).ok();
     }
 

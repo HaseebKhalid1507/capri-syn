@@ -854,7 +854,7 @@ pub struct BrainSpec {
     /// `wrist_glance`, ...), `ceiling`-anchored frames or strips, registered on the hang pose's
     /// grip. Empty: the hang's swing alone, as before.
     pub hang_fidgets: BTreeMap<String, Vec<Step>>,
-    /// A glance (a notification came, a window moved, the pointer went by), then back: steps,
+    /// A glance (the pointer coming by, a window gaining focus), then back: steps,
     /// `@look` turning toward it. Empty: `@look` alone.
     pub glance: Vec<Step>,
 }

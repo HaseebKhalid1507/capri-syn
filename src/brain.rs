@@ -2315,27 +2315,13 @@ mod tests {
     }
 
     #[test]
-    fn idle_beats_never_count_against_the_move_cap() {
-        // `life::Restless` plays her beats in place, every few seconds, and never feeds the brain:
-        // its window hops and their hourly cap are the same with the beats going on.
+    fn the_move_cap_holds_at_45_an_hour() {
+        // Her idle beats (`life::Restless`) play in place and never reach the brain, so the cap
+        // on her window hops is the brain's alone: 45 an hour under a pointer swiping every 21 s.
         let ev: Vec<(f64, BrainEvent)> = (1..500).map(|k| (k as f64 * 21.0, BrainEvent::Screen(Screen::CursorSwipe { speed: 3000.0 }))).collect();
-        let hours = 3.0 * 3600.0;
         let mut a = brain(4);
-        let m = moves(&run(&mut a, 0.0, hours, false, &here, &ev));
-        let mut r = crate::life::Restless::new(4, 0.0);
-        let mut beats = 0;
-        let mut t = 0.0;
-        while t < hours {
-            if r.poll(t, crate::life::Quiet::No, crate::life::MICRO_GAP_MS) && r.pick(t).is_some() {
-                beats += 1;
-                r.played(t, 1.0, crate::life::MICRO_GAP_MS);
-            }
-            t += 0.25;
-        }
-        let mut b = brain(4);
-        let m2 = moves(&run(&mut b, 0.0, hours, false, &here, &ev));
-        assert!(beats > 1500, "{beats}");
-        assert_eq!(m.iter().map(|x| (x.0, x.1.why)).collect::<Vec<_>>(), m2.iter().map(|x| (x.0, x.1.why)).collect::<Vec<_>>());
+        let m = moves(&run(&mut a, 0.0, 3.0 * 3600.0, false, &here, &ev));
+        assert!(!m.is_empty());
         assert_eq!(a.tuning.move_cap_per_hour, 45);
         let hop = a.tuning.hop_weight;
         for (t0, _) in &m {

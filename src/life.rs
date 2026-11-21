@@ -448,6 +448,11 @@ impl Restless {
     }
 
     /// When she next wants a beat (None: keeping still).
+    /// Keeping still (a hold, a sleep, nothing to play): `poll` saw it and hasn't seen it end.
+    pub fn holding(&self) -> bool {
+        self.held.is_some()
+    }
+
     pub fn due(&self) -> Option<f64> {
         [self.next, self.cue].into_iter().flatten().reduce(f64::min)
     }
