@@ -633,7 +633,7 @@ impl Avatar {
         Spot { kind, anchor, body, area, approach: None, cover_pct: 0.0 }
     }
 
-    fn brain_busy(&self) -> Vec<&'static str> {
+    pub(super) fn brain_busy(&self) -> Vec<&'static str> {
         let now = Instant::now();
         let mut v = Vec::new();
         if self.bubble.as_ref().is_some_and(|b| !b.collapsed) {
@@ -2238,6 +2238,12 @@ impl Avatar {
             self.brain_feed(BrainEvent::Locked(on), now);
             return;
         }
+        // Something to glance at (`life::Restless`): a window came forward, the pointer came by.
+        match ev {
+            WatchEvent::Focus if self.loaded => self.restless_cue(self.brain_focused().map(|r| r.center()), now),
+            WatchEvent::Pointer(crate::platform::PointerEv::Near | crate::platform::PointerEv::Swipe(_)) => self.restless_cue(None, now),
+            _ => {}
+        }
         if self.brain.is_none() || !self.loaded {
             return;
         }
@@ -2549,6 +2555,14 @@ impl Avatar {
         }
     }
 
+    /// Something to glance at, at root point `at` (None: the pointer): a tangent soon.
+    pub(super) fn restless_cue(&mut self, at: Option<(i32, i32)>, now: Instant) {
+        let t = now.saturating_duration_since(self.t_start).as_secs_f64();
+        if self.restless.cue(t) {
+            self.glance_at = at;
+        }
+    }
+
     /// A reaction that keeps up with the pointer is on (no idle beats meanwhile).
     pub(super) fn following(&self) -> bool {
         self.brain.as_ref().is_some_and(|h| h.follow.is_some())
@@ -2587,8 +2601,12 @@ impl Avatar {
 
     /// `@look` / `@point` toward the cursor.
     pub(super) fn resolve_steps(&self, steps: &[crate::pack::Step]) -> Vec<crate::pack::Step> {
+        self.resolve_steps_at(steps, self.brain_cursor())
+    }
+
+    /// `resolve_steps` looking at root point `c` instead of the pointer.
+    pub(super) fn resolve_steps_at(&self, steps: &[crate::pack::Step], c: (i32, i32)) -> Vec<crate::pack::Step> {
         use crate::pack::Step;
-        let c = self.brain_cursor();
         let (gx, gy) = self.ground();
         let head_y = gy - (self.layout.geo.height as f32 * 0.8) as i32;
         // The look and point frames are drawn to a side: mirrored, the other one points there.

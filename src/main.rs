@@ -419,7 +419,7 @@ fn run(t_start: Instant) -> Result<()> {
             if n > 0 {
                 elog!("synaps-avatar: settings: {n} temp file(s) left by an unfinished write, removed");
             }
-            let n = settings::sweep_temps(&state::state_path());
+            let n = settings::sweep_temps(&state::state_path()) + usize::from(state::sweep_legacy_temp());
             if n > 0 {
                 elog!("synaps-avatar: state: {n} temp file(s) left by an unfinished write, removed");
             }

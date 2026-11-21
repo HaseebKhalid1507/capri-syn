@@ -2315,6 +2315,22 @@ mod tests {
     }
 
     #[test]
+    fn the_move_cap_holds_at_45_an_hour() {
+        // Her idle beats (`life::Restless`) play in place and never reach the brain, so the cap
+        // on her window hops is the brain's alone: 45 an hour under a pointer swiping every 21 s.
+        let ev: Vec<(f64, BrainEvent)> = (1..500).map(|k| (k as f64 * 21.0, BrainEvent::Screen(Screen::CursorSwipe { speed: 3000.0 }))).collect();
+        let mut a = brain(4);
+        let m = moves(&run(&mut a, 0.0, 3.0 * 3600.0, false, &here, &ev));
+        assert!(!m.is_empty());
+        assert_eq!(a.tuning.move_cap_per_hour, 45);
+        let hop = a.tuning.hop_weight;
+        for (t0, _) in &m {
+            let load: f64 = m.iter().filter(|(t, _)| t >= t0 && *t < t0 + 3600.0).map(|(_, p)| weight_of(p.why, hop)).sum();
+            assert!(load <= 45.0 + 1.0, "load {load} in the hour from {t0}");
+        }
+    }
+
+    #[test]
     fn attention_builds_and_seeks() {
         for seed in 1..20 {
             let mut b = brain(seed);
