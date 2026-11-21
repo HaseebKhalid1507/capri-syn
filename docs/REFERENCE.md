@@ -277,7 +277,8 @@ Paths here are Linux's: Windows keeps the same files under `%APPDATA%` and `%LOC
   now and then (one in five; never with music on) a short beat of hers first, then the next one's
   entry and its loop, under the cut's glitch. The pool's long-stay shift (`shiftMs`) keeps its own
   clock through the turns, and a lounge with its own length (`stayMs`) stays it out (the long-stay
-  shift ends it), whether she settled into it or turned to it. A new seat, music starting or
+  shift ends it, and the turns' clock goes a span on), whether she settled into it or turned to
+  it. A new seat, music starting or
   stopping, or an outfit change starts the clock over from the seat's own loop (a music strip the
   outfit doesn't draw is never on). Asleep she keeps
   her loop. So do a holder (the Line, a prompt, the menu, a drag, a reply bubble), the voice, a

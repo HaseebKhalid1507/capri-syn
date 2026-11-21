@@ -48,7 +48,31 @@ impl Held {
 
 /// Where she is held (sitting, on her feet on the ground, music on, the window, the outfit she
 /// wears): a change starts its clock over, from the seat's own music.
-type HeldOf = (bool, bool, bool, Option<u32>, String);
+type HeldOf = (bool, bool, bool, Option<u32>, usize);
+
+/// The rotation's music sequence as it may show: only perched with music on, and never a strip
+/// the outfit she wears doesn't draw (an outfit swap on the seat).
+fn tune_shown(tune: Option<Tune>, perched_music: bool, wears: impl Fn(usize) -> bool) -> Option<Tune> {
+    tune.filter(|t| perched_music && !matches!(*t, Tune::Strip(si, _) if !wears(si)))
+}
+
+/// A lounge with its own length (`stayMs`) stays it out (the long-stay shift ends it): the
+/// rotation never turns away from it.
+fn held_stays(cur: Held, stay: impl Fn(PoolKey, usize) -> bool) -> bool {
+    matches!(cur, Held::Pool(k, j) if stay(k, j))
+}
+
+/// A turn's short beat: when the restless clock asks for one, never with music on (her idle
+/// beats would knock her out of the music mid-song).
+fn tangent_wanted(tangent: bool, music: bool) -> bool {
+    tangent && !music
+}
+
+/// The long-stay shift after a turn to a pool's variant: its own clock (`kept`) goes on, unless
+/// the new one has its own length (`stay`) or there was none; then the pick's (`picked`).
+fn shift_after_turn(kept: Option<Instant>, picked: Option<Instant>, stay: bool) -> Option<Instant> {
+    if stay || kept.is_none() { picked } else { kept }
+}
 
 /// How often, at most, what holds a still layer is looked at while a shift waits (a loop: once
 /// a pass).
@@ -724,8 +748,7 @@ impl Avatar {
 
     /// The held rotation's music sequence, while she sits with music on (None: the seat's own).
     pub(super) fn perch_tune(&self) -> Option<Tune> {
-        // A strip the outfit she wears doesn't draw is never on (an outfit swap on the seat).
-        self.art.tune.filter(|t| self.music.is_some() && self.sitting() && !matches!(*t, Tune::Strip(si, _) if !self.pack.strip_wears(si)))
+        tune_shown(self.art.tune, self.music.is_some() && self.sitting(), |si| self.pack.strip_wears(si))
     }
 
     /// Every looped music sequence for this seat that can play now (worn, its cells in; asked
@@ -814,16 +837,21 @@ impl Avatar {
     /// move. One loop here: nothing changes.
     fn held_tick(&mut self, now: Instant) -> bool {
         let rt = self.restless_secs(now);
-        let of = (self.sitting(), self.placement == Placement::Ground && self.standing(), self.music.is_some(), self.art.perch_of, self.pack.outfit_id().to_string());
-        if self.art.held_of.as_ref() != Some(&of) {
+        let of = (self.sitting(), self.placement == Placement::Ground && self.standing(), self.music.is_some(), self.art.perch_of, self.pack.wearing());
+        let mut dirty = false;
+        if self.art.held_of != Some(of) {
             self.art.held_of = Some(of);
             self.restless.shift_reset();
-            self.art.tune = None;
+            // Back to the seat's own loop: its layer now, not whenever one comes.
+            if self.art.tune.take().is_some() {
+                self.relayer(now);
+                dirty = true;
+            }
         }
         // Looked at only at a boundary (once a pass of the loop, on the step its wrap put it on;
         // a still layer with nothing over it, at most every `HELD_LOOK`) once a shift is due.
         if !self.restless.shift_wants(rt) || !self.anim.at_boundary() {
-            return false;
+            return dirty;
         }
         let pass = self.anim.wrapped().then(|| self.anim.passes());
         let seen = match pass {
@@ -831,42 +859,39 @@ impl Avatar {
             None => self.art.held_seen.is_some_and(|t| now.saturating_duration_since(t) < HELD_LOOK),
         };
         if seen {
-            return false;
+            return dirty;
         }
         (self.art.held_seen, self.art.held_pass) = (Some(now), pass);
+        let Some(cur) = self.held_on() else { return dirty };
+        // A lounge with its own length stays it out: no options gathered, nothing decoded; its
+        // clock goes a span on, as for one loop (no turn the moment the long-stay shift ends it).
+        if held_stays(cur, |k, j| self.pack.pools[&k].variants[j].stay_ms.is_some()) {
+            self.restless.shift_poll(rt, crate::life::Quiet::No, 1);
+            return dirty;
+        }
         let calm = self.loaded && self.mood == Mood::Idle && self.rag.is_none() && self.teleport.is_none() && self.glitch.is_none() && !self.posed();
         let q = if calm { self.held_quiet() } else { crate::life::Quiet::Off };
         let opts = if q == crate::life::Quiet::No { self.held_options(now) } else { Vec::new() };
         if !self.restless.shift_poll(rt, q, opts.len()) {
-            return false;
-        }
-        let Some(cur) = self.held_on() else { return false };
-        // A lounge with its own length (`stayMs`) stays it out: the long-stay shift ends it.
-        if let Held::Pool(k, j) = cur
-            && self.pack.pools[&k].variants[j].stay_ms.is_some()
-        {
-            return false;
+            return dirty;
         }
         let keys: Vec<u64> = opts.iter().map(|o| o.0.key()).collect();
         let weights: Vec<f32> = opts.iter().map(|o| o.1).collect();
         self.art.held_beats.mark(cur.key());
         let picked = self.art.held_beats.pick_weighted(&keys, &weights, &mut self.rng);
         let tangent = self.restless.shifted(rt);
-        let Some(i) = picked.filter(|&i| keys[i] != cur.key()) else { return false };
-        // The short beat first (one of her beats here, picked like any), before she settles; with
-        // music on none (her idle beats would knock her out of the music mid-song).
-        let beat = if tangent && self.music.is_none() { self.held_tangent() } else { Vec::new() };
+        let Some(i) = picked.filter(|&i| keys[i] != cur.key()) else { return dirty };
+        // The short beat first (one of her beats here, picked like any), before she settles.
+        let beat = if tangent_wanted(tangent, self.music.is_some()) { self.held_tangent() } else { Vec::new() };
         match opts[i].0 {
             Held::Pool(k, j) => {
                 self.art.picker.force(k, j);
                 self.art_set(k, j);
                 // The long-stay shift (`shiftMs`) keeps its own clock; one with its own length
                 // (`stayMs`) starts that.
-                let shift_at = self.art.shift_at;
+                let kept = self.art.shift_at;
                 self.art_after_pick(now);
-                if self.pack.pools[&k].variants[j].stay_ms.is_none() && shift_at.is_some() {
-                    self.art.shift_at = shift_at;
-                }
+                self.art.shift_at = shift_after_turn(kept, self.art.shift_at, self.pack.pools[&k].variants[j].stay_ms.is_some());
             }
             Held::Tune(t) => self.art.tune = Some(t),
         }
@@ -1233,6 +1258,31 @@ impl Avatar {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_held_rotation_s_rules_hold() {
+        // perch_tune: a strip the outfit doesn't draw never shows; the window loop always may.
+        let worn = |si: usize| si != 7;
+        assert_eq!(tune_shown(Some(Tune::Strip(3, 1)), true, worn), Some(Tune::Strip(3, 1)));
+        assert_eq!(tune_shown(Some(Tune::Strip(7, 1)), true, worn), None, "the old outfit's music strip");
+        assert_eq!(tune_shown(Some(Tune::Window), true, worn), Some(Tune::Window));
+        assert_eq!(tune_shown(Some(Tune::Strip(3, 1)), false, worn), None, "not perched with music");
+        // No short beat with music on.
+        assert!(tangent_wanted(true, false));
+        assert!(!tangent_wanted(true, true), "music: no idle beat between its loops");
+        assert!(!tangent_wanted(false, false));
+        // A stayMs lounge is never turned away from; the rest are; a tune isn't a pool's.
+        let lounge = |k: PoolKey, j: usize| k == PoolKey::Perch && j == 1;
+        assert!(held_stays(Held::Pool(PoolKey::Perch, 1), lounge));
+        assert!(!held_stays(Held::Pool(PoolKey::Perch, 0), lounge));
+        assert!(!held_stays(Held::Tune(Tune::Window), lounge));
+        // The long-stay shift keeps its clock through a turn; a stay starts its own.
+        let t = Instant::now();
+        let (kept, picked) = (Some(t + Duration::from_secs(200)), Some(t + Duration::from_secs(20)));
+        assert_eq!(shift_after_turn(kept, picked, false), kept, "shiftMs runs on");
+        assert_eq!(shift_after_turn(kept, picked, true), picked, "into a lounge: its stayMs");
+        assert_eq!(shift_after_turn(None, picked, false), picked, "none running: the pick's");
+    }
 
     #[test]
     fn a_change_of_outfit_decodes_only_the_frames_that_differ() {
