@@ -1345,6 +1345,7 @@ mod unseen_tests {
             stream: true,
             more: false,
             fit: crate::bubblefit::Grow::default(),
+            chip_last: false,
             serial: turn,
             turn,
             cap: super::LINES_PER_PAGE,
