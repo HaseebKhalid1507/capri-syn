@@ -1033,15 +1033,19 @@ impl Avatar {
         {
             self.glitch = if k == GlitchKind::Seam { Glitch::for_cut(Transition::Mood, now, self.rng.next()) } else { Some(Glitch::new(k, now, self.rng.next())) };
         }
-        // A player's music that went quiet while she was carried stays off (its stop found no
-        // music to schedule); one still playing stays a player's, so its quiet stops it.
-        let stopping = self.music_stop_at.is_some_and(|t| t > now);
-        if let Some(m) = r.music.and_then(|m| m.after_carry(now, self.player.playing, stopping))
+        // A player's music that went quiet while she was carried stays off (the grab took it
+        // and nothing rebuilds it mid-drag, so the quiet had no music to stop); one still
+        // playing stays a player's, so its quiet stops it. Not into a session mood begun
+        // meanwhile (`music_on` would force Idle).
+        let (back, stop) = MusicOn::land(r.music, now, self.player, self.music_stop_at, self.mood == Mood::Idle);
+        self.music_stop_at = stop;
+        if let Some(m) = back
             && self.music_on(now, m.until).is_ok()
             && let Some(n) = &mut self.music
         {
             n.auto = m.auto;
             n.bpm = m.bpm;
+            n.dance_rolled = m.dance_rolled;
         }
         // The brain's emotes from while she was carried (a fling's sulk).
         let queued = self.brain.as_mut().map(|h| std::mem::take(h.queued_mut())).unwrap_or_default();
