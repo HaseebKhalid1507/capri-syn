@@ -28,7 +28,7 @@ pub(super) enum ArriveKind {
 #[derive(Default)]
 pub(super) struct ArriveState {
     /// Played as she appears from the teleport in flight.
-    on_appear: Option<Seq>,
+    on_appear: Option<Arrival>,
     /// An arrival sequence is playing until then: a relayer doesn't cut it.
     pub until: Option<Instant>,
     /// A drawn arrival shows as the red land silhouette until then.
@@ -67,6 +67,29 @@ pub(super) struct ArriveState {
 struct WindowIcon {
     from: std::sync::Arc<crate::brand::Icon>,
     data: std::rc::Rc<Vec<u32>>,
+}
+
+/// An arrival waiting for her to appear: its frames, flattened in the outfit she wore then
+/// (`outfit`), and the steps they came from (the drawing picked, then the key's own as its
+/// fallback). A look that goes on in the bolt in between gets them flattened again in it.
+pub(super) struct Arrival {
+    seq: Seq,
+    steps: Vec<Step>,
+    own: Vec<Step>,
+    outfit: usize,
+}
+
+/// The arrival's frames as she appears, wearing outfit `wearing`: as flattened, or (another
+/// look went on since: the bolt's swap) flattened again in it by `flat` (its drawing, else the
+/// key's own), so the two looks never mix. None: nothing to play in it.
+pub(super) fn arrival_frames(a: Arrival, wearing: usize, flat: impl Fn(&[Step]) -> Seq) -> Option<Seq> {
+    let seq = if a.outfit == wearing {
+        a.seq
+    } else {
+        let s = flat(&a.steps);
+        if s.is_empty() { flat(&a.own) } else { s }
+    };
+    (!seq.is_empty()).then_some(seq)
 }
 
 /// One of `n` drawings at random, never `last` again (when there are two or more).
@@ -175,11 +198,16 @@ impl Avatar {
         all.swap_remove(i)
     }
 
-    /// `arrive_alt`, flattened; a drawing whose cells aren't in yet: its own steps.
-    fn arrive_seq(&mut self, key: &'static str, own: &[Step]) -> Seq {
-        let steps = self.arrive_alt(key, own);
+    /// `arrive_alt`, flattened in the outfit she wears now; a drawing whose cells aren't in yet:
+    /// its own steps. `key` None: `own` alone.
+    fn arrive_seq(&mut self, key: Option<&'static str>, own: &[Step]) -> Arrival {
+        let steps = match key {
+            Some(k) => self.arrive_alt(k, own),
+            None => own.to_vec(),
+        };
         let seq = self.flat(&steps);
-        if seq.is_empty() { self.flat(own) } else { seq }
+        let seq = if seq.is_empty() { self.flat(own) } else { seq };
+        Arrival { seq, steps, own: own.to_vec(), outfit: self.pack.wearing() }
     }
 
     fn teleport_place(&self) -> Option<Placement> {
@@ -205,14 +233,12 @@ impl Avatar {
             }
         }
         let own = self.arrive_steps(k);
-        let seq = match self.arrive_key() {
-            Some(key) => self.arrive_seq(key, &own),
-            None => self.flat(&own),
-        };
-        if !seq.is_empty() {
-            elog!("synaps-avatar: arrival {k:?}: {} frames", seq.len());
+        let key = self.arrive_key();
+        let a = self.arrive_seq(key, &own);
+        if !a.seq.is_empty() {
+            elog!("synaps-avatar: arrival {k:?}: {} frames", a.seq.len());
         }
-        self.arrive.on_appear = (!seq.is_empty()).then_some(seq);
+        self.arrive.on_appear = (!a.seq.is_empty()).then_some(a);
     }
 
     /// She reappears from a teleport (the landing glitch starts now): its arrival sequence, if
@@ -222,7 +248,8 @@ impl Avatar {
     /// only the touchdown's first frame plays, cut inside the landing glitch, so the change of
     /// art happens before she is solid; the dip is then the settle at the glitch's end.
     pub(super) fn arrive_appeared(&mut self, now: Instant) {
-        let own = self.arrive.on_appear.take();
+        // Built before the vanish: a look that went on in the bolt since gets it built again.
+        let own = self.arrive.on_appear.take().and_then(|a| arrival_frames(a, self.pack.wearing(), |s| self.flat(s)));
         if let Some(seq) = self.drawn_floor_arrival() {
             // The drawing is the materialisation: no landing glitch over it. She then stands in
             // the drawing it ends in a few seconds (the stand pool's bridge).
@@ -350,8 +377,11 @@ impl Avatar {
             Some(a) if place == Placement::Ground => ("launch", a.launch.clone()),
             _ => ("", Vec::new()),
         };
-        let seq = if key.is_empty() { Vec::new() } else { self.arrive_seq(key, &steps) };
-        if seq.is_empty() {
+        if key.is_empty() {
+            return false;
+        }
+        let arrival = self.arrive_seq(Some(key), &steps);
+        if arrival.seq.is_empty() {
             return false;
         }
         let at = self.center_root(to);
@@ -365,8 +395,8 @@ impl Avatar {
         self.outfit_swap("launch", now);
         let moved = to == self.origin && place == self.placement;
         self.teleport = Some(Teleport { seed, leg: Leg::Bolt(now), to, place, bolt: Some(bolt), moved, no_bolt: false, quiet: false, leave_until: None });
-        elog!("synaps-avatar: arrival Launch: {} frames after the bolt", seq.len());
-        self.arrive.on_appear = Some(seq);
+        elog!("synaps-avatar: arrival Launch: {} frames after the bolt", arrival.seq.len());
+        self.arrive.on_appear = Some(arrival);
         self.arrive.launching = true;
         true
     }
@@ -433,8 +463,6 @@ impl Avatar {
     pub(super) fn play_nap_wake_for(&mut self, greet: bool, now: Instant) {
         // A strip's floor sleep has its own way out: its drawn wake (then she stands in the
         // drawing it ends in a few seconds), else the seam's glitch. No CapriCore stand-up.
-        // A changed outfit goes on as she gets up (she wakes in it).
-        self.outfit_swap("wake", now);
         if std::mem::take(&mut self.art.floor_strip) {
             self.play_drawn_wake(now);
             return;
@@ -535,6 +563,8 @@ impl Avatar {
             (false, Some(_)) => {
                 // (On the floor the nap's pose ended with the brain's Pose(None): the
                 // stand-up played there, before any move in the same decision.)
+                // Up: a changed outfit goes on before her frames are picked, under the wake's cut.
+                self.outfit_wake(now);
                 self.arrive.nap_since = None;
                 self.arrive.placed = false;
                 if std::mem::take(&mut self.arrive.deep) {
@@ -754,6 +784,34 @@ fn rare(last: Option<Instant>, now: Instant, gap: Duration, roll: f32, p: f32) -
 mod tests {
     use super::*;
     use crate::anim::Rng;
+
+    #[test]
+    fn an_arrival_built_before_the_bolt_is_built_again_in_the_look_put_on_in_it() {
+        use crate::pack::Step;
+        // The alt look draws `neutral` and `sit`, not `wink`.
+        let moods = serde_json::json!({"perch": {"base": "sit"}, "extraFrames": [{"id": "wink", "file": "l.png", "like": "neutral"}],
+            "variants": {"outfits": [{"id": "main"}, {"id": "alt", "sprites": "outfits/alt/sprites.json"}]}});
+        crate::pack::tests::pack_setup("arrive-outfit", moods, |d| crate::pack::tests::write_outfit(d, &["neutral", "sit"]), |p| {
+            let p = p.unwrap();
+            let (n, w) = (p.index["neutral"], p.index["wink"]);
+            let hold = |f: &str| Step::Hold { frame: f.into(), ms: 100 };
+            let build = |steps: Vec<Step>, own: Vec<Step>| Arrival { seq: p.flatten(&steps), steps, own, outfit: p.wearing() };
+            // Built in the pack's own look (the vanish), then the alt look goes on (the bolt).
+            let a = build(vec![hold("wink"), hold("neutral")], vec![hold("neutral")]);
+            assert_eq!(a.seq, vec![(w, 100), (n, 100)]);
+            p.wear(1);
+            // The wink isn't drawn in it: the key's own steps, in the alt look, never the old wink.
+            assert_eq!(arrival_frames(a, p.wearing(), |s| p.flatten(s)), Some(vec![(n, 100)]));
+            // Nothing of it drawn in the new look: no arrival sequence at all.
+            p.wear(0);
+            let a = build(vec![hold("wink")], vec![hold("wink")]);
+            p.wear(1);
+            assert_eq!(arrival_frames(a, p.wearing(), |s| p.flatten(s)), None);
+            // Unchanged look: exactly what was built.
+            let a = build(vec![hold("neutral")], Vec::new());
+            assert_eq!(arrival_frames(a, p.wearing(), |_| panic!("not built again")), Some(vec![(n, 100)]));
+        });
+    }
 
     #[test]
     fn an_arrival_drawing_never_comes_twice_running() {

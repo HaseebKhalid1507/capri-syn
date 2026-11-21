@@ -1234,9 +1234,10 @@ pub struct Pack {
     /// `mirrorArt` twin's cells, stored mirrored.
     pub strip_first: Vec<Option<usize>>,
     pub mirror_first: Vec<Option<usize>>,
-    /// Per strip: only every n-th cell is ever played (the `every` of the variants using it),
-    /// so only those are decoded.
-    pub strip_every: Vec<u32>,
+    /// Per strip: the thinnings it plays at (the `every` of the variants using it; a strip
+    /// named as a clip plays at its pools' finest, else whole; a transition or a motion whole),
+    /// ascending. Only the positions those play (`Strip::played`) are decoded.
+    pub strip_every: Vec<Vec<u32>>,
     /// The variant pools (`moods.json` `variants`); a strip variant is dropped when the pack
     /// has no `anim/`, so an old pack's pool is its own art alone.
     pub pools: HashMap<crate::variants::PoolKey, Pool>,
@@ -1318,6 +1319,16 @@ impl Pack {
     /// Strip `si` is drawn for the outfit she wears (untagged and `any`: every outfit).
     pub fn strip_wears(&self, si: usize) -> bool {
         self.anim.as_ref().and_then(|a| a.strips.get(si)).is_none_or(|s| s.worn_in(self.outfit_id()))
+    }
+
+    /// A glance's steps (the pointer came by, a window gained focus): the pack's `brain.glance`
+    /// when it's filled, else the look (`@look`). Unresolved: `@look` in either still turns
+    /// toward what she glances at (the view's `resolve_steps`).
+    pub fn glance_steps(&self) -> Vec<Step> {
+        match &self.behaviour.brain.glance {
+            g if g.is_empty() => vec![Step::Clip("@look".into())],
+            g => g.clone(),
+        }
     }
 
     pub fn clip(&self, id: &str) -> Option<&Clip> {
@@ -1549,17 +1560,28 @@ impl Pack {
                 }
             }
         }
-        let mut strip_every = vec![u32::MAX; n_strips];
+        let mut strip_every: Vec<Vec<u32>> = vec![Vec::new(); n_strips];
         for v in pools.values().flat_map(|p| &p.variants).filter_map(|v| v.art.as_ref()) {
             for si in std::iter::once(v.base).chain(v.talk).chain(v.music).chain(v.blinks.iter().map(|b| b.0)) {
-                strip_every[si] = strip_every[si].min(v.every);
+                strip_every[si].push(v.every.max(1));
             }
         }
-        // A clip plays every cell.
-        for &si in &step_strips {
-            strip_every[si] = 1;
+        // A strip named as a clip plays at its pools' finest thinning (their keys, when thinned),
+        // else whole; a transition and a motion whole.
+        let clip_every: Vec<u32> = strip_every.iter().map(|e| e.iter().copied().min().unwrap_or(1)).collect();
+        for si in transitions.values().copied().chain(motions.strips()) {
+            strip_every[si].push(1);
         }
-        let strip_every: Vec<u32> = strip_every.into_iter().map(|e| if e == u32::MAX { 1 } else { e }).collect();
+        for &si in &step_strips {
+            strip_every[si].push(clip_every[si]);
+        }
+        for e in &mut strip_every {
+            if e.is_empty() {
+                e.push(1);
+            }
+            e.sort_unstable();
+            e.dedup();
+        }
         if let Some(a) = &anim {
             // Every strip a pool uses (and its mirrorArt twin, stored mirrored), as frames.
             let mut used: Vec<usize> = pools.values().flat_map(|p| &p.variants).filter_map(|v| v.art.as_ref()).flat_map(|v| {
@@ -1594,7 +1616,7 @@ impl Pack {
             }
             for &si in &step_strips {
                 let s = &a.strips[si];
-                let cells = s.played(1).into_iter().map(|(c, ms)| ClipFrame { id: s.cell_id(c), ms }).collect();
+                let cells = s.played(clip_every[si]).into_iter().map(|(c, ms)| ClipFrame { id: s.cell_id(c), ms }).collect();
                 catalog.clips.push(Clip { id: s.name.clone(), frames: cells });
             }
         }
@@ -1959,20 +1981,25 @@ impl Pack {
         Ok(pack)
     }
 
-    /// A strip's cells as a sequence, every `every`-th cell held `every` times as long.
+    /// A strip's cells as a sequence (`Strip::played`): each position its own ms (`ms`, a
+    /// WebP's delays, else `fps`); thinned to every `every`-th (with `keys`: its keys), each held
+    /// until the next one played.
     pub fn strip_seq(&self, si: usize, every: u32) -> Seq {
         let (Some(a), Some(Some(first))) = (&self.anim, self.strip_first.get(si)) else { return Vec::new() };
-        let s = &a.strips[si];
-        let e = every.max(1);
-        (0..s.frames).step_by(e as usize).map(|c| (first + c as usize, s.ms * e)).collect()
+        a.strips[si].played(every).into_iter().map(|(c, ms)| (first + c as usize, ms)).collect()
     }
 
-    /// The cells of strip `si` (or its twin's) that are ever played: the ones to decode.
+    /// The cells of strip `si` (or its twin's) that are ever played, at every thinning it plays
+    /// at (`strip_every`): the ones to decode.
     pub fn strip_cells(&self, si: usize, twin: bool) -> Vec<usize> {
         let first = if twin { self.mirror_first.get(si) } else { self.strip_first.get(si) };
         let (Some(Some(f)), Some(a)) = (first, &self.anim) else { return Vec::new() };
-        let e = self.strip_every.get(si).copied().unwrap_or(1).max(1) as usize;
-        (*f..*f + a.strips[si].frames as usize).step_by(e).collect()
+        let s = &a.strips[si];
+        let everys = self.strip_every.get(si).map_or(&[1][..], Vec::as_slice);
+        let mut v: Vec<usize> = everys.iter().flat_map(|&e| s.played(e)).map(|(c, _)| *f + c as usize).collect();
+        v.sort_unstable();
+        v.dedup();
+        v
     }
 
     /// The pre-mirrored twin of cell frame `fi` (its strip's `mirrorArt`), if the pack has it.
@@ -2144,6 +2171,41 @@ pub mod tests {
         // Without anim/ the name is just an unknown clip, as before.
         let e = pack_with("stripclip-none", json!({"activities": [["greet"]]})).err().unwrap();
         assert!(format!("{e:#}").contains("clip `greet` does not exist"));
+    }
+
+    #[test]
+    fn per_cell_timing_and_keys_play_wherever_a_strip_plays() {
+        // The cel sheet (keys 0 and 2; 100, 50, 300, 50, 100 ms) blinks over a pool thinned to every
+        // 2nd cell and plays as a clip; the animated WebP (80, 120, 200 ms) is a transition.
+        let moods = json!({"activities": [["sheet"]], "transitions": {"floorArrive": "greet"},
+            "variants": {"pools": {"sleepFloor": {"variants": [{"id": "pack"}, {"id": "doze", "strip": "stand", "every": 2, "blinks": [{"strip": "sheet"}]}]}}}});
+        pack_cels("timing", moods, None, |p| {
+            let p = p.unwrap();
+            let a = p.anim.as_ref().unwrap();
+            let (sheet, greet) = (a.by_name["sheet"], a.by_name["greet"]);
+            let (s0, g0) = (p.strip_first[sheet].unwrap(), p.strip_first[greet].unwrap());
+            // Thinned (the pool's blink): its keys, each held until the next.
+            assert_eq!(p.strip_seq(sheet, 2), vec![(s0, 150), (s0 + 2, 450)]);
+            // A transition: the WebP's own delays, not their mean.
+            assert_eq!(p.strip_seq(greet, 1), vec![(g0, 80), (g0 + 1, 120), (g0 + 2, 200)]);
+            // As a clip it plays at its pool's thinning: the keys again.
+            assert_eq!(p.flatten(&[Step::Clip("sheet".into())]), vec![(s0, 150), (s0 + 2, 450)]);
+            // Decoded: what plays, nothing more.
+            assert_eq!(p.strip_cells(sheet, false), vec![s0, s0 + 2]);
+            assert_eq!(p.strip_cells(greet, false), vec![g0, g0 + 1, g0 + 2]);
+            // A plain strip thinned as before.
+            let st0 = p.strip_first[a.by_name["stand"]].unwrap();
+            assert_eq!(p.strip_seq(a.by_name["stand"], 2), vec![(st0, 200), (st0 + 2, 200)]);
+        });
+    }
+
+    #[test]
+    fn a_glance_is_the_packs_when_filled_else_the_look() {
+        let glance = json!([{"frame": "neutral", "ms": 400}, "@look"]);
+        let p = pack_with("glance", json!({"brain": {"glance": glance}})).unwrap();
+        assert_eq!(p.glance_steps(), vec![Step::Hold { frame: "neutral".into(), ms: 400 }, Step::Clip("@look".into())]);
+        let p = pack_with("glance-none", json!({})).unwrap();
+        assert_eq!(p.glance_steps(), vec![Step::Clip("@look".into())], "left out: the look");
     }
 
     #[test]

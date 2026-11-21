@@ -880,6 +880,16 @@ fn now_ms(t0: Instant, now: Instant) -> f32 {
 const LEAN_BEAT_PX: i32 = 14;
 /// An idle beat that changes her outline (a hop, a hand on her hip, arms crossed, her chin on
 /// her hand, a point, a shrug), not just her face.
+/// Where her idle beats come from (`Avatar::activities`): none here; the hang fidgets; the perch's
+/// activities; standing, the activities and the micro-fidgets in force (her band's, else the
+/// pack's), then `life.poses`.
+enum ActivityPlace<'a> {
+    Nothing,
+    Hang,
+    Perch(&'a PerchSpec),
+    Stand(&'a [Vec<crate::pack::Step>], &'a [Vec<crate::pack::Step>]),
+}
+
 fn gesture(steps: &[crate::pack::Step]) -> bool {
     use crate::pack::Step;
     const BODY: [&str; 7] = ["hand_on_hip", "arms_crossed", "chin_rest", "idle-point", "idle-shrug", "point_", "shrug"];
@@ -1902,7 +1912,7 @@ impl Avatar {
     fn activity_pick(&mut self, n: usize) -> usize {
         // An idle pose (`life.poses`) changes her outline: a gesture.
         let poses = &self.pack.behaviour.life.poses;
-        let gesture: Vec<bool> = self.activities().iter().take(n).map(|a| gesture(a) || poses.values().any(|p| p == a)).collect();
+        let gesture: Vec<bool> = self.activities().iter().take(n).map(|a| gesture(a) || poses.values().any(|p| p.as_slice() == *a)).collect();
         self.beats.pick(&gesture, &mut self.rng)
     }
 
@@ -2277,25 +2287,48 @@ impl Avatar {
         (base, self.loop_seq(spec.and_then(|s| s.r#loop.as_ref())))
     }
 
-    /// Her idle beats here: hanging, the pack's hang fidgets; perched, its perch activities (none:
-    /// one perch frame, §6.2); standing, the activities (her band's), her micro-fidgets
-    /// (`life.fidgets`, her band's) and her idle poses (`life.poses`).
-    fn activities(&self) -> Vec<Vec<crate::pack::Step>> {
+    /// Her idle beats here (borrowed from the pack: nothing cloned): hanging, the pack's hang
+    /// fidgets; perched, its perch activities (none: one perch frame, §6.2); standing, the
+    /// activities (her band's), her micro-fidgets (`life.fidgets`, her band's) and her idle poses
+    /// (`life.poses`).
+    fn activities(&self) -> Vec<&[crate::pack::Step]> {
+        let b = &self.pack.behaviour;
+        let (own, fidgets) = match self.activity_place() {
+            ActivityPlace::Nothing => return Vec::new(),
+            ActivityPlace::Hang => return b.brain.hang_fidgets.values().map(Vec::as_slice).collect(),
+            ActivityPlace::Perch(p) => return p.activities.iter().map(Vec::as_slice).collect(),
+            ActivityPlace::Stand(own, fidgets) => (own, fidgets),
+        };
+        own.iter().chain(fidgets).chain(b.life.poses.values()).map(Vec::as_slice).collect()
+    }
+
+    /// She has idle beats here (`activities`, without building the list: asked every tick).
+    fn has_activities(&self) -> bool {
+        match self.activity_place() {
+            ActivityPlace::Nothing => false,
+            ActivityPlace::Hang => !self.pack.behaviour.brain.hang_fidgets.is_empty(),
+            ActivityPlace::Perch(p) => !p.activities.is_empty(),
+            ActivityPlace::Stand(own, fidgets) => !own.is_empty() || !fidgets.is_empty() || !self.pack.behaviour.life.poses.is_empty(),
+        }
+    }
+
+    /// Which idle beats are hers here (`activities`).
+    fn activity_place(&self) -> ActivityPlace<'_> {
         let b = &self.pack.behaviour;
         if self.hanging() {
-            return b.brain.hang_fidgets.values().cloned().collect();
+            return ActivityPlace::Hang;
         }
         // Standing clips would break a hang or a floor sit; a strip variant blinks on its own.
         if self.posed() || (!self.sitting() && !self.standing()) || self.art_strip().is_some() {
-            return Vec::new();
+            return ActivityPlace::Nothing;
         }
         match self.perch_spec() {
-            Some(p) if self.sitting() => p.activities.clone(),
+            Some(p) if self.sitting() => ActivityPlace::Perch(p),
             _ => {
                 let band = b.energy.band(self.band());
                 let own = if band.activities.is_empty() { &b.activities } else { &band.activities };
                 let fidgets = if band.fidgets.is_empty() { &b.life.fidgets } else { &band.fidgets };
-                own.iter().chain(fidgets).chain(b.life.poses.values()).cloned().collect()
+                ActivityPlace::Stand(own, fidgets)
             }
         }
     }
@@ -2315,9 +2348,10 @@ impl Avatar {
             self.music = None;
         }
         let prev = self.mood;
-        // Waking: a changed outfit goes on before any of her frames are picked (she wakes in it).
+        // Waking: a changed outfit goes on before any of her frames are picked (she wakes in it),
+        // under the wake's cut (`outfit_wake`).
         if prev == Mood::Sleepy && m != prev {
-            self.outfit_swap("wake", now);
+            self.outfit_wake(now);
         }
         let shown_before = self.anim.frame();
         self.cutin_mood(prev, m, now);
@@ -2426,7 +2460,7 @@ impl Avatar {
             .and_then(|s| s.then.as_ref())
             .and_then(|t| Some((now + Duration::from_millis(t.after_ms), Mood::parse(&t.mood)?)));
         let autonomous = spec.as_ref().map_or(m == Mood::Idle, |s| s.autonomy);
-        self.next_activity = if autonomous && self.pack.catalog.autonomy.enabled && !self.activities().is_empty() {
+        self.next_activity = if autonomous && self.pack.catalog.autonomy.enabled && self.has_activities() {
             Some(now + self.autonomy_gap())
         } else {
             None
@@ -2454,7 +2488,7 @@ impl Avatar {
         }
         self.lying_cut(before, now);
         let autonomous =
-            self.music.is_none() && self.spec(self.mood).map_or(self.mood == Mood::Idle, |s| s.autonomy) && !self.activities().is_empty();
+            self.music.is_none() && self.spec(self.mood).map_or(self.mood == Mood::Idle, |s| s.autonomy) && self.has_activities();
         let next = if autonomous { Some(now + self.autonomy_gap()) } else { None };
         self.next_activity = next;
     }
@@ -2954,12 +2988,13 @@ impl Avatar {
         if let Some(at) = self.next_activity
             && at <= now
             && !self.anim.busy()
-            && !self.activities().is_empty()
+            && self.has_activities()
             && !self.following()
         {
+            // Never while she hangs (her hang fidgets are beats too; music isn't one there).
             let music = self
                 .music_spec()
-                .filter(|m| m.activity_chance > 0.0 && self.mood == Mood::Idle && self.music.is_none())
+                .filter(|m| m.activity_chance > 0.0 && self.mood == Mood::Idle && self.music.is_none() && !self.posed())
                 .map(|m| (m.activity_chance, m.activity_ms));
             if let Some((chance, ms)) = music
                 && self.rng.range(0.0, 1.0) < chance
@@ -2969,7 +3004,8 @@ impl Avatar {
             } else {
                 let n = self.activities().len();
                 let i = self.activity_pick(n);
-                let steps = self.activities()[i].clone();
+                // The one picked, cloned once (the list itself is borrowed).
+                let steps = self.activities().get(i).map(|s| s.to_vec()).unwrap_or_default();
                 let seq = self.flat(&self.resolve_steps(&steps));
                 let len: u64 = seq.iter().map(|s| s.1 as u64).sum();
                 self.activity_beats(&steps, Duration::from_millis(len), now);
@@ -3494,6 +3530,8 @@ impl Avatar {
                 let seq = self.flat(&steps);
                 if seq.is_empty() {
                     match self.pack.frame(&id) {
+                        // Never a frame the outfit she wears doesn't draw (`Pack::wears`).
+                        Ok(i) if !self.pack.wears(i) => format!("error: `{id}` isn't drawn in the outfit she wears (`{}`)", self.pack.outfit_id()),
                         Ok(i) => {
                             self.anim.play(vec![(i, 1_500)], now);
                             "ok (frame)".into()

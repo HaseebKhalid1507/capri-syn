@@ -382,7 +382,7 @@ synaps-avatar --set KEY=VALUE [--set KEY=VALUE ...]
 | `--sleepy-after MIN` | under `SA_NO_BRAIN` only: sleepy after this many minutes without a turn (default 10). Otherwise sleep follows you (see above) |
 | `--pack DIR` | character pack (default `$XDG_DATA_HOME/synaps-avatar/packs/capri`) |
 | `--height PX` | standing body height in logical px (default 340) |
-| `--check` | load and decode the pack, print a summary, exit (no window) |
+| `--check` | load and decode the pack, print a summary (and the strips played as clips), exit (no window) |
 | `--dump DIR` | with `--check`: every decoded frame as a PNG, the pixels she draws at `--height` (scale it by the display's sf to see the real render) |
 | `-V`, `--version` | print `synaps-avatar <version>`, exit. Her log says it at start too: `--- synaps-avatar <version> (pid N)` |
 | `--set KEY=VALUE` | write these to `settings.toml` with her own writer (as Settings does), then exit; nothing else runs but, when she's running, a `settings reload` on her control socket (she reads them again). Her installers use it (Voice, her model). Only `voice.enabled`, `voice.wake_word`, `voice.speak_unprompted` (`true`/`on`, `false`/`off`), `voice.mic` (a name; empty: the default) and `session.model` (a model Synaps routes: `claude-…`, `<provider>/<model>`, `local/<name>`). Exit 0: saved (or already so); 2: a bad `--set`; 3: the file refused (a typo, unreadable); 4: not saved (it couldn't be written, or the result wouldn't load) |
@@ -635,18 +635,21 @@ the hang pose's grip), scale against the pack's body like any strip, mirror with
 main thread when first wanted, inside `variants.cacheMb` (least recently shown go first); until
 they are in, the steps play as nothing and the caller's fallback runs (the drawn hearts and
 squash of an emote, the pack's own arrival). While she sleeps, the strips in `brain.greet`,
-`greetMorning`, `napWakeGreet` and `napWake` are kept ready, so she wakes into them.
+`greetMorning`, `napWakeGreet` and `napWake` are kept ready, so she wakes into them; the
+strips in `brain.glance` stay once they are in. A step naming a clip the catalog doesn't have
+used to fail validation; if it names a strip it now plays that strip: `--check` prints the
+strips played as clips.
 
 **Strip loaders** (`anim/anim.json` strip entries, under the side's `strips` as today; old entries load as before):
 
 | field | |
 |---|---|
-| `grid` | `[cols, rows]`: a cel sheet, cells row by row (absent: one row of `frames`). `frames` is how many of the grid's cells are used (absent: all) |
+| `grid` | `[cols, rows]`: a cel sheet, cells row by row (absent: one row of `frames`). `frames` is how many of the grid's cells are used (absent: all); the sheet is the whole grid, unused cells and rows included |
 | `order` | the cells played, in order: keys and in-betweens, a cell may repeat (absent: each cell once) |
-| `keys` | positions in `order` that are keys: when a strip plays thinned (`every` > 1) only they play, each held until the next |
-| `ms` | per position (or per cell) ms, instead of `fps` |
+| `keys` | positions in `order` that are keys: when a strip plays thinned (a pool variant's `every` > 1, for its loop, talk, music and blinks; a strip named as a clip plays at its pools' finest `every`, else whole) only they play, each held until the next (absent: every n-th position). Only the positions played are decoded |
+| `ms` | per position (or per cell) ms, instead of `fps`, wherever the strip plays: a pool's loop and blinks, a transition, a clip, the walk, the dangle and the dance (the whole loop fitted to the tempo, each cell keeping its share) |
 | `geometry` | a JSON file beside the sheet (path from the side's root) supplying any of `cell`, `grid`, `frames`, `fps`, `order`, `keys`, `ms`, `bounds`, `anchor`, `contact` the entry leaves out (the entry wins) |
-| `animated` | `true`: an animated WebP. Its frames are the cells (each a whole canvas, composited), `cell` is its canvas and `ms` its frame delays (0 reads as 100), all read from the file's chunks at load; `order`/`keys`/`ms` apply on top. Only the frames a decode wants are kept |
+| `animated` | `true`: an animated WebP. Its frames are the cells (each a whole canvas, composited), `cell` is its canvas and `ms` its frame delays (0 reads as 100), all read from the file's chunks at load; `order`/`keys`/`ms` apply on top. Limits, checked at load and before each decode (the x2 file too): a canvas of 4096 px a side and 8 Mpx at most, 1000 frames, 512 MiB for all its frames decoded; past them the strip is refused. A decode keeps only the frames it wants and stops after the last one (a frame composites over those before it, so they decode too) |
 | `anchor.name` | `feet`, `seat`, `surface`, `grip`, and now `ceiling`: hands on a bar, the cell's anchor put on `brain.poses.hang`'s anchor |
 | `outfit` | the outfit (`variants.outfits` id) this strip is drawn in; absent or `any`: every outfit |
 
@@ -659,16 +662,20 @@ An outfit without `sprites` is the pack's own frames (absent: one called `pack` 
 frame ids (catalog sprites and extra frames), its files beside it. Rules:
 
 - She changes outfit on her own about every 45-120 min (weighted, never into the one she wears):
-  the other look decodes off the main thread, then goes on only where it can't be seen: in the
-  bolt of a teleport (or the launch's), or as she wakes (she wakes in it). Never mid-animation,
-  never into a pose that look doesn't draw; every frame changes at once, so two looks never mix.
-  A decoded look with no such moment in 20 min is dropped and tried again later.
+  the other look decodes off the main thread (only the frames it or the look she wears draws,
+  counted in `variants.cacheMb` while it waits), then goes on only where it can't be seen: in
+  the bolt of a teleport (or the launch's), or as she wakes, under the wake's glitch cut (the
+  sleep cut's), before her waking frames are picked (she wakes in it; the sleep drawing on
+  screen leaves with the wake). Not while he carries her. Never mid-animation, never into a
+  pose that look doesn't draw; every frame changes at once, and an arrival picked before the
+  bolt is picked again in the new look, so two looks never mix. A decoded look with no such
+  moment in 20 min is dropped and tried again later.
 - The outfit she wears is saved in `state.json` (`outfit`): a restart keeps it.
 - An outfit must draw every single frame the sidecar names (the default sprite, each mood's base,
   the bands' idle bases, the perch base and per-mood perch frames, `music.floor`/`window`, the
   drag/fling frames, the nap, crouch and look-front frames, the floor and sulk sits' bases), or
   the pack fails validation. A sequence (steps) with any frame it doesn't draw is skipped whole
-  in that outfit, and an approach whose pose it doesn't draw (`brain.poses`) has weight 0: she
+  in that outfit (so is a single frame asked for by the control socket's `clip <id>`), and an approach whose pose it doesn't draw (`brain.poses`) has weight 0: she
   doesn't enter that state while wearing it. A strip tagged for another outfit doesn't play (its
   pool variant, transition or clip is skipped).
 - `--check` decodes every outfit's frames too.
@@ -679,7 +686,7 @@ frame ids (catalog sprites and extra frames), its files beside it. Rules:
 |---|---|---|
 | `greet` (wake, return, bid, satisfied) | `brain.napWakeGreet`, `brain.greet` / `greetMorning`, an entry of `brain.bid`, `brain.satisfied.pat` / `other` (any of them may name a strip, e.g. a full-body greeting WebP) | today's: the get-up, the wave, the bid's beat, the hearts |
 | `hang.fidget.*` | `brain.hangFidgets` (`{"pullup": [...], "catch": [...], "wrist_glance": [...]}`): `ceiling`-anchored frames or strips, played as idle beats while she hangs from a top bar or a window (`brain.poses.hang`) | the hang's swing alone |
-| `glance` | `brain.glance`: steps for a glance at a notification, a window that moved or the pointer going by (`@look` turns toward it) | `@look` |
+| `glance` | `brain.glance`: steps for a glance at the pointer coming by or a window gaining focus (a focus change); `@look` in them turns toward it. Its strips decode when first wanted (that glance is the look) | `@look` |
 | `perch.music` | `music.windowLoop`: seat-anchored steps (a perched music loop strip) looped while music plays on a window top; notes from `music.emitters` by the strip's name | `music.window` |
 | `idle.pose.*` | `life.poses` (`{"lean": [...], "sit_floor": [...]}`): in, a hold, out, in place; counted as gestures among her idle beats | the activities' gestures |
 | expressions | `life.fidgets` (and per band `energy.<band>.fidgets`): a rotation pool of short beats (blinks, looks, mouths, winks, sleepy blinks), never the same twice running | the activities' face beats |

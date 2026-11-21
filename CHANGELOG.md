@@ -9,6 +9,9 @@
   teleport's bolt or as she wakes, kept across restarts; hang fidgets, a glance, a perched music loop, idle
   fidget and pose pools, arrival alternatives, and hearts drawn from the pack's own effect sprite. A pack
   without them behaves as before.
+- Animated WebP strips are refused past 4096 px a side, 8 Mpx, 1000 frames or 512 MiB decoded; a cel
+  sheet's `keys` and per-frame `ms` hold wherever the strip plays. `--check` names the strips played
+  as clips.
 
 ## 1.1.1 (2026-11-20)
 

@@ -617,23 +617,46 @@ fn strip_image(strips: &Strips, path: &std::path::Path, sha: Option<&str>, verif
                 let img = image::load_from_memory(&bytes).with_context(|| format!("strip {}: not a valid PNG or WebP", path.display()))?;
                 return Ok(Arc::new(Sheet::Grid(img.into_rgba8())));
             }
-            use image::AnimationDecoder as _;
-            let keep = strips.wanted.get(path);
-            let dec = image::codecs::webp::WebPDecoder::new(std::io::Cursor::new(&bytes[..])).with_context(|| format!("strip {}: not a valid WebP", path.display()))?;
-            let mut out = std::collections::HashMap::new();
-            for (i, f) in dec.into_frames().enumerate() {
-                let f = f.with_context(|| format!("strip {}: frame {i} does not decode", path.display()))?;
-                let i = i as u32;
-                if keep.is_none_or(|k| k.contains(&i)) {
-                    out.insert(i, f.into_buffer());
-                }
-            }
-            Ok(Arc::new(Sheet::Frames(out)))
+            Ok(Arc::new(Sheet::Frames(webp_wanted(path, &bytes, strips.wanted.get(path))?)))
         };
         load().map_err(|e| format!("{e:#}"))
     })
     .clone()
     .map_err(|e| anyhow::anyhow!(e))
+}
+
+/// An animated WebP's frames at `keep` (None: all), each a whole canvas. Within the limits
+/// (`art::WEBP_MAX_*`, checked on the file itself: it may be the x2 one, or changed since the
+/// load), else an error, never an aborting allocation. A frame composites over the ones
+/// before it, so those decode too (and go at once); none after the last one wanted.
+fn webp_wanted(path: &std::path::Path, bytes: &[u8], keep: Option<&std::collections::HashSet<u32>>) -> Result<std::collections::HashMap<u32, image::RgbaImage>> {
+    use image::{AnimationDecoder as _, ImageDecoder as _};
+    let mut dec = image::codecs::webp::WebPDecoder::new(std::io::Cursor::new(bytes)).with_context(|| format!("strip {}: not a valid WebP", path.display()))?;
+    let (w, h) = dec.dimensions();
+    crate::art::webp_canvas_ok(w, h).with_context(|| format!("strip {}", path.display()))?;
+    let frame = u64::from(w) * u64::from(h) * 4;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(crate::art::WEBP_MAX_SIDE);
+    limits.max_image_height = Some(crate::art::WEBP_MAX_SIDE);
+    limits.max_alloc = Some(frame.max(1) * 2);
+    dec.set_limits(limits).with_context(|| format!("strip {}: past the decoder's limits", path.display()))?;
+    let last = match keep {
+        Some(k) => k.iter().max().copied().map_or(0, |m| m + 1),
+        None => crate::art::WEBP_MAX_FRAMES,
+    };
+    let kept = keep.map_or(u64::from(last), |k| k.len() as u64);
+    if kept.saturating_mul(frame) > crate::art::WEBP_MAX_BYTES {
+        bail!("strip {}: {kept} frames of {w}x{h} are past {} MiB decoded", path.display(), crate::art::WEBP_MAX_BYTES >> 20);
+    }
+    let mut out = std::collections::HashMap::new();
+    for (i, f) in dec.into_frames().take(last.min(crate::art::WEBP_MAX_FRAMES) as usize).enumerate() {
+        let f = f.with_context(|| format!("strip {}: frame {i} does not decode", path.display()))?;
+        let i = i as u32;
+        if keep.is_none_or(|k| k.contains(&i)) {
+            out.insert(i, f.into_buffer());
+        }
+    }
+    Ok(out)
 }
 
 /// A strip's cell, scaled to device px and laid into an avatar-rect buffer at its registration:
@@ -645,12 +668,12 @@ fn cell_pixels(pack: &Pack, f: &FrameSource, c: &crate::art::CellSrc, geo: &Geom
     let dev = geo.scale * st.k;
     let (path, n, sha) = cell_file(st, geo);
     let sheet = strip_image(strips, path, sha, verify, st.animated)?;
-    let (cw, ch) = (st.cell.0 * n, st.cell.1 * n);
+    let (cw, ch) = (st.cell.0.saturating_mul(n), st.cell.1.saturating_mul(n));
     let sc = st.sheet_cell(c.i);
     let mut cell = match &*sheet {
         Sheet::Grid(img) => {
-            let rows = st.sheet_cells.div_ceil(st.cols);
-            if img.width() != cw * st.cols || img.height() != ch * rows {
+            // The grid's own rows (an unused row is still on the sheet), in u64: no wrap.
+            if u64::from(img.width()) != u64::from(cw) * u64::from(st.cols) || u64::from(img.height()) != u64::from(ch) * u64::from(st.rows) {
                 bail!("strip `{}`: {} is {}x{}, anim.json says {} cells of {cw}x{ch}", st.name, path.display(), img.width(), img.height(), st.sheet_cells);
             }
             let mut cell = vec![0u8; (cw * ch * 4) as usize];
@@ -1128,6 +1151,58 @@ mod tests {
             let (_, gy) = geo.to_device(p.catalog.canonical_anchor.x, p.catalog.canonical_anchor.y);
             assert!((d.frames[0].bottom as f32 - gy).abs() <= 2.0 * geo.scale, "bottom {} ground {gy}", d.frames[0].bottom);
         });
+    }
+
+    #[test]
+    fn a_cel_sheet_with_an_unused_row_decodes() {
+        // A 2x3 grid holding 3 cells (`frames: 3`, as the docs allow): its last row is empty.
+        let moods = serde_json::json!({"activities": [["sheet"]]});
+        let setup = |d: &std::path::Path| {
+            crate::art::tests::write_anim(d);
+            crate::art::tests::write_cels(d, None);
+            let cells = crate::art::tests::solid_cells(4, 6, &[[255, 0, 0], [0, 255, 0], [0, 0, 255]]);
+            let mut sheet = image::RgbaImage::new(8, 18);
+            for (i, c) in cells.iter().enumerate() {
+                image::imageops::replace(&mut sheet, c, (i as i64 % 2) * 4, (i as i64 / 2) * 6);
+            }
+            sheet.save(d.join("anim/lachy/sprites/sheet.png")).unwrap();
+            let p = d.join("anim/anim.json");
+            let mut v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+            v["lachy"]["strips"]["sheet"]["grid"] = serde_json::json!([2, 3]);
+            std::fs::write(&p, v.to_string()).unwrap();
+        };
+        crate::pack::tests::pack_setup("celrows", moods, setup, |p| {
+            let p = p.unwrap();
+            let geo = Geometry::new(&p, 60.0);
+            let sheet: Vec<usize> = p.flatten(&[crate::pack::Step::Clip("sheet".into())]).into_iter().map(|s| s.0).collect();
+            let d = decode(&p, &geo, &sheet, false, 2).unwrap();
+            let got: Vec<[u8; 3]> = d.frames.iter().map(colour).collect();
+            let want = [[255, 0, 0], [0, 255, 0], [0, 0, 255], [0, 255, 0], [255, 0, 0]];
+            for (g, w) in got.iter().zip(want) {
+                assert!(g.iter().zip(w).all(|(a, b)| a.abs_diff(b) < 40), "{got:?}");
+            }
+        });
+    }
+
+    #[test]
+    fn an_animated_webp_decodes_within_its_limits_and_only_up_to_the_frames_wanted() {
+        let cells = crate::art::tests::solid_cells(4, 6, &[[255, 0, 0], [0, 255, 0], [0, 0, 255]]);
+        let mut bytes = crate::art::tests::animated_webp(&cells, &[80, 120, 200]);
+        let p = std::path::Path::new("synthetic.webp");
+        let want = |k: &[u32]| Some(k.iter().copied().collect::<std::collections::HashSet<u32>>());
+        let got = webp_wanted(p, &bytes, want(&[1]).as_ref()).unwrap();
+        assert_eq!(got.keys().copied().collect::<Vec<_>>(), [1], "only the frame asked for is kept");
+        // Break the last frame's bitstream: wanting the first two never decodes it.
+        let last = bytes.windows(4).rposition(|w| w == b"VP8L").unwrap();
+        bytes[last + 8] = 0;
+        assert!(webp_wanted(p, &bytes, want(&[0, 1]).as_ref()).is_ok(), "nothing past the last frame wanted is decoded");
+        assert!(webp_wanted(p, &bytes, want(&[2]).as_ref()).is_err());
+        // A canvas past the limits (here 16384x16384, 1 GiB a frame): an error, never an allocation.
+        let mut huge = crate::art::tests::animated_webp(&cells, &[80, 120, 200]);
+        huge[24..27].copy_from_slice(&16383u32.to_le_bytes()[..3]);
+        huge[27..30].copy_from_slice(&16383u32.to_le_bytes()[..3]);
+        let e = format!("{:#}", webp_wanted(p, &huge, want(&[0]).as_ref()).unwrap_err());
+        assert!(e.contains("past the limit") || e.contains("not a valid WebP"), "{e}");
     }
 
     #[test]

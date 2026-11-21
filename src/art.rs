@@ -166,8 +166,10 @@ pub struct Strip {
     /// Cells with a chroma ghost drawn into them (`glitchCells`): a loop she holds (a dance,
     /// a dangle) skips them, so no glitch runs inside it.
     pub glitch_cells: Vec<u32>,
-    /// The sheet: cells per row, and how many cells it holds (a plain strip: `frames`, 1 row).
+    /// The sheet: cells per row, its rows (a cel sheet's `grid`, unused cells and rows
+    /// included), and how many cells it holds (a plain strip: `frames` cells, 1 row).
     pub cols: u32,
+    pub rows: u32,
     pub sheet_cells: u32,
     /// Per position (0..frames), the sheet cell it shows (empty: position = cell).
     pub src: Vec<u32>,
@@ -186,6 +188,11 @@ impl Strip {
     pub fn clean_cells(&self) -> Vec<u32> {
         let v: Vec<u32> = (0..self.frames).filter(|c| !self.glitch_cells.contains(c)).collect();
         if v.is_empty() { (0..self.frames).collect() } else { v }
+    }
+
+    /// `clean_cells`, each with its own ms (`ms_at`): a loop she holds at the drawing's pace.
+    pub fn clean_played(&self) -> Vec<(u32, u32)> {
+        self.clean_cells().into_iter().map(|c| (c, self.ms_at(c))).collect()
     }
 
     /// Frame id of cell `i` (the twin's cells are stored mirrored: `~` marks them).
@@ -211,7 +218,7 @@ impl Strip {
             return (0..self.frames).map(|i| (i, self.ms_at(i))).collect();
         }
         if self.cell_ms.is_empty() && self.keys.is_empty() {
-            return (0..self.frames).step_by(e as usize).map(|i| (i, self.ms * e)).collect();
+            return (0..self.frames).step_by(e as usize).map(|i| (i, self.ms.saturating_mul(e))).collect();
         }
         let starts: Vec<u32> = if self.keys.is_empty() { (0..self.frames).step_by(e as usize).collect() } else { self.keys.clone() };
         starts
@@ -219,7 +226,7 @@ impl Strip {
             .enumerate()
             .map(|(j, &s)| {
                 let end = starts.get(j + 1).copied().unwrap_or(self.frames);
-                (s, (s..end).map(|i| self.ms_at(i)).sum::<u32>().max(1))
+                (s, (s..end).fold(0u32, |t, i| t.saturating_add(self.ms_at(i))).max(1))
             })
             .collect()
     }
@@ -230,8 +237,25 @@ impl Strip {
     }
 }
 
+/// An animated WebP strip's limits, checked from its chunks at load and again before a decode
+/// (the x2 file too): a canvas side, a canvas's pixels (each frame decodes to a whole RGBA
+/// canvas, 4 bytes a pixel: 32 MiB at most), its frame count, and every frame's canvas
+/// together. Today's strips are 60 cells at most, of 576x516 px at most (x2: 1152x1032).
+pub const WEBP_MAX_SIDE: u32 = 4096;
+pub const WEBP_MAX_PIXELS: u64 = 4096 * 2048;
+pub const WEBP_MAX_FRAMES: u32 = 1000;
+pub const WEBP_MAX_BYTES: u64 = 512 << 20;
+
+/// A `w`x`h` canvas within the limits (`WEBP_MAX_SIDE`, `WEBP_MAX_PIXELS`), else why not.
+pub fn webp_canvas_ok(w: u32, h: u32) -> Result<()> {
+    if w == 0 || h == 0 || w > WEBP_MAX_SIDE || h > WEBP_MAX_SIDE || u64::from(w) * u64::from(h) > WEBP_MAX_PIXELS {
+        bail!("its {w}x{h} canvas is past the limit ({WEBP_MAX_SIDE} px a side, {WEBP_MAX_PIXELS} px in all)");
+    }
+    Ok(())
+}
+
 /// An animated WebP's canvas and per-frame delays (ms; 0 reads as 100, as browsers do), from
-/// its RIFF chunks alone: nothing is decoded.
+/// its RIFF chunks alone: nothing is decoded. Refused past the limits (`WEBP_MAX_*`).
 pub fn webp_frames(path: &Path) -> Result<((u32, u32), Vec<u32>)> {
     use std::io::{Read, Seek, SeekFrom};
     let u24 = |b: &[u8]| u32::from_le_bytes([b[0], b[1], b[2], 0]);
@@ -255,12 +279,17 @@ pub fn webp_frames(path: &Path) -> Result<((u32, u32), Vec<u32>)> {
             b"VP8X" => {
                 let mut p = [0u8; 10];
                 f.read_exact(&mut p)?;
-                canvas = Some((u24(&p[4..7]) + 1, u24(&p[7..10]) + 1));
+                let c = (u24(&p[4..7]) + 1, u24(&p[7..10]) + 1);
+                webp_canvas_ok(c.0, c.1).with_context(|| format!("{}", path.display()))?;
+                canvas = Some(c);
             }
             b"ANMF" => {
                 let mut p = [0u8; 16];
                 f.read_exact(&mut p)?;
                 let d = u24(&p[12..15]);
+                if ms.len() as u32 >= WEBP_MAX_FRAMES {
+                    bail!("{}: more than {WEBP_MAX_FRAMES} frames", path.display());
+                }
                 ms.push(if d == 0 { 100 } else { d });
             }
             _ => {}
@@ -268,7 +297,13 @@ pub fn webp_frames(path: &Path) -> Result<((u32, u32), Vec<u32>)> {
         pos += 8 + len + (len & 1);
     }
     match canvas {
-        Some(c) if !ms.is_empty() => Ok((c, ms)),
+        Some(c) if !ms.is_empty() => {
+            let all = u64::from(c.0) * u64::from(c.1) * 4 * ms.len() as u64;
+            if all > WEBP_MAX_BYTES {
+                bail!("{}: {} frames of {}x{} are {} MiB decoded, past {} MiB", path.display(), ms.len(), c.0, c.1, all >> 20, WEBP_MAX_BYTES >> 20);
+            }
+            Ok((c, ms))
+        }
         _ => bail!("{} is not an animated WebP", path.display()),
     }
 }
@@ -363,6 +398,7 @@ fn strip_doc(root: &Path, raw: &serde_json::Value) -> Result<StripDoc> {
 struct Sheet {
     cell: (u32, u32),
     cols: u32,
+    rows: u32,
     cells: u32,
     frames: u32,
     ms: u32,
@@ -374,9 +410,9 @@ struct Sheet {
 /// One row of `frames` cells (as ever), a cel sheet's grid, or an animated WebP's frames; then
 /// `order` (keys and in-betweens), `keys` and per-position `ms`. None: refused (in `errors`).
 fn sheet_of(name: &str, d: &StripDoc, path: &Path, errors: &mut Vec<String>) -> Option<Sheet> {
-    let (cell, cols, cells, own_ms) = if d.animated {
+    let (cell, cols, rows, cells, own_ms) = if d.animated {
         match webp_frames(path) {
-            Ok((c, ms)) => (c, ms.len() as u32, ms.len() as u32, ms),
+            Ok((c, ms)) => (c, ms.len() as u32, 1, ms.len() as u32, ms),
             Err(e) if path.is_file() => {
                 errors.push(format!("anim strip `{name}`: {e:#}"));
                 return None;
@@ -386,12 +422,18 @@ fn sheet_of(name: &str, d: &StripDoc, path: &Path, errors: &mut Vec<String>) -> 
         }
     } else {
         let (cols, rows) = d.grid.map_or((d.frames, 1), |[c, r]| (c, r));
-        let cells = if d.grid.is_some() && d.frames == 0 { cols * rows } else { d.frames };
-        if d.grid.is_some() && (cols == 0 || cells > cols * rows) {
+        // The sheet's whole size, in u32 (a cell's px too): past it, refused, never wrapped.
+        let size = cols.checked_mul(rows).filter(|_| cols.checked_mul(d.cell[0]).is_some() && rows.checked_mul(d.cell[1]).is_some());
+        let Some(size) = size else {
+            errors.push(format!("anim strip `{name}`: a {cols}x{rows} grid of {}x{} cells is too large", d.cell[0], d.cell[1]));
+            return None;
+        };
+        let cells = if d.grid.is_some() && d.frames == 0 { size } else { d.frames };
+        if d.grid.is_some() && (cols == 0 || rows == 0 || cells > size) {
             errors.push(format!("anim strip `{name}`: {cells} cells in a {cols}x{rows} grid"));
             return None;
         }
-        ((d.cell[0], d.cell[1]), cols, cells, Vec::new())
+        ((d.cell[0], d.cell[1]), cols, rows, cells, Vec::new())
     };
     let (cw, ch) = cell;
     if cells == 0 || cw == 0 || ch == 0 || (d.fps <= 0.0 && d.ms.is_empty() && own_ms.is_empty()) {
@@ -423,7 +465,7 @@ fn sheet_of(name: &str, d: &StripDoc, path: &Path, errors: &mut Vec<String>) -> 
         return None;
     }
     let ms = if cell_ms.is_empty() { (1000.0 / d.fps).round().max(1.0) as u32 } else { (cell_ms.iter().map(|&m| u64::from(m)).sum::<u64>() / u64::from(frames)).max(1) as u32 };
-    Some(Sheet { cell, cols: cols.max(1), cells, frames, ms, src: d.order.clone(), cell_ms, keys })
+    Some(Sheet { cell, cols: cols.max(1), rows: rows.max(1), cells, frames, ms, src: d.order.clone(), cell_ms, keys })
 }
 
 impl Anim {
@@ -544,6 +586,7 @@ impl Anim {
                 fx: d.family == "fx",
                 glitch_cells: d.glitch_cells.iter().copied().filter(|&c| c < sheet.frames).collect(),
                 cols: sheet.cols,
+                rows: sheet.rows,
                 sheet_cells: sheet.cells,
                 src: sheet.src,
                 cell_ms: sheet.cell_ms,
@@ -556,7 +599,7 @@ impl Anim {
             if let Some(m) = &s.mirror_art {
                 match anim.strip(m) {
                     None => errors.push(format!("anim strip `{}`: mirrorArt `{m}` is not a strip", s.name)),
-                    Some(t) if t.cell != s.cell || t.frames != s.frames => {
+                    Some(t) if t.cell != s.cell || t.frames != s.frames || (t.cols, t.rows) != (s.cols, s.rows) => {
                         errors.push(format!("anim strip `{}`: mirrorArt `{m}` has another grid", s.name))
                     }
                     _ => {}
@@ -770,6 +813,84 @@ pub mod tests {
         std::fs::write(&p, v.to_string()).unwrap();
         let e = format!("{:#}", Anim::load(&d, 8).unwrap_err());
         assert!(e.contains("order cell 3 past its 3 cells") && e.contains("2 ms for 3 positions"), "{e}");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// A RIFF/WEBP file of a VP8X canvas `w`x`h` (animated) and `n` bare ANMF headers: no image
+    /// data at all (synthetic, only its chunks are read).
+    fn webp_header(w: u32, h: u32, n: u32) -> Vec<u8> {
+        let u24 = |v: u32| v.to_le_bytes()[..3].to_vec();
+        let mut body = b"VP8X".to_vec();
+        body.extend(10u32.to_le_bytes());
+        body.extend([vec![0x12, 0, 0, 0], u24(w - 1), u24(h - 1)].concat());
+        for _ in 0..n {
+            body.extend(b"ANMF");
+            body.extend(16u32.to_le_bytes());
+            body.extend([u24(0), u24(0), u24(0), u24(0), u24(100)].concat());
+            body.push(0);
+        }
+        let mut out = b"RIFF".to_vec();
+        out.extend((body.len() as u32 + 4).to_le_bytes());
+        out.extend(b"WEBP");
+        out.extend(body);
+        out
+    }
+
+    #[test]
+    fn an_animated_webp_past_the_limits_is_refused_at_load() {
+        let d = tmp("webp-limits");
+        let at = |name: &str, bytes: Vec<u8>| {
+            let p = d.join(name);
+            std::fs::write(&p, bytes).unwrap();
+            webp_frames(&p).map_err(|e| format!("{e:#}"))
+        };
+        // The largest canvas a WebP can claim (1 GiB a frame decoded): refused, nothing allocated.
+        let e = at("huge.webp", webp_header(16384, 16384, 1)).unwrap_err();
+        assert!(e.contains("16384x16384 canvas is past the limit"), "{e}");
+        // Within a side, past the pixels.
+        assert!(at("wide.webp", webp_header(4096, 4096, 1)).unwrap_err().contains("past the limit"));
+        // Past the frame count.
+        let e = at("long.webp", webp_header(4, 6, WEBP_MAX_FRAMES + 1)).unwrap_err();
+        assert!(e.contains(&format!("more than {WEBP_MAX_FRAMES} frames")), "{e}");
+        // Every frame's canvas together: 17 of 32 MiB.
+        let e = at("heavy.webp", webp_header(4096, 2048, 17)).unwrap_err();
+        assert!(e.contains("17 frames of 4096x2048"), "{e}");
+        // Today's largest strip, at x2, fits: 60 frames of 1152x1032.
+        assert_eq!(at("today.webp", webp_header(1152, 1032, 60)).unwrap(), ((1152, 1032), vec![100; 60]));
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_grid_too_large_for_its_sizes_is_refused_not_wrapped() {
+        let d = tmp("grid-huge");
+        write_anim(&d);
+        write_cels(&d, None);
+        let p = d.join("anim/anim.json");
+        let mut v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        v["lachy"]["strips"]["sheet"]["grid"] = json!([65536, 65536]);
+        v["lachy"]["strips"]["sheet"]["frames"] = json!(0);
+        v["lachy"]["strips"]["sheet"]["order"] = json!([]);
+        v["lachy"]["strips"]["sheet"]["keys"] = json!([]);
+        v["lachy"]["strips"]["sheet"]["ms"] = json!([]);
+        v["lachy"]["strips"]["sheet"]["fps"] = json!(10);
+        std::fs::write(&p, v.to_string()).unwrap();
+        let e = format!("{:#}", Anim::load(&d, 8).unwrap_err());
+        assert!(e.contains("a 65536x65536 grid of 4x6 cells is too large"), "{e}");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_cel_sheet_keeps_its_grid_rows_even_unused() {
+        let d = tmp("cel-rows");
+        write_anim(&d);
+        write_cels(&d, None);
+        let p = d.join("anim/anim.json");
+        let mut v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        v["lachy"]["strips"]["sheet"]["grid"] = json!([2, 3]);
+        std::fs::write(&p, v.to_string()).unwrap();
+        let a = Anim::load(&d, 8).unwrap().unwrap();
+        let s = a.strip("sheet").unwrap();
+        assert_eq!((s.cols, s.rows, s.sheet_cells), (2, 3, 3), "3 cells used of a 2x3 grid: its third row unused");
         std::fs::remove_dir_all(&d).ok();
     }
 

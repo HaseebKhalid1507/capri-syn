@@ -121,6 +121,16 @@ impl ArtState {
     }
 }
 
+/// The frames a change from outfit `cur` to `o` repaints: those `o` draws, and those `cur` drew
+/// (back to the pack's own). Every other frame is the pack's own in both: not decoded again.
+pub(super) fn outfit_frames(pack: &crate::pack::Pack, cur: usize, o: usize) -> Vec<usize> {
+    let drawn = |i: usize| pack.outfits.get(i).map(|x| x.frames.keys().copied());
+    let mut v: Vec<usize> = drawn(cur).into_iter().flatten().chain(drawn(o).into_iter().flatten()).collect();
+    v.sort_unstable();
+    v.dedup();
+    v
+}
+
 impl Avatar {
     // ---- which pools ------------------------------------------------------------------------
 
@@ -464,7 +474,9 @@ impl Avatar {
         let cur = self.pack.wearing();
         let w: Vec<f32> = self.pack.outfits.iter().enumerate().map(|(i, o)| if i == cur { 0.0 } else { o.weight }).collect();
         let Some(o) = weighted(self.art.picker.rng(), &w) else { return };
-        let which: Vec<usize> = (0..self.pack.frames.len()).filter(|&i| self.pack.frames[i].cell.is_none()).collect();
+        // Only the frames that differ: the ones it draws, and the ones the look she wears drew
+        // (back to the pack's own). Every other frame is the pack's in both.
+        let which = outfit_frames(&self.pack, cur, o);
         let (p, geo) = (self.pack.clone(), self.layout.geo);
         self.art.outfit_busy = true;
         cx.spawn(async move |this, cx| {
@@ -486,23 +498,56 @@ impl Avatar {
             Ok(d) => {
                 elog!("synaps-avatar: outfit `{}` decoded ({} frames, {} ms): on at her next bolt or wake", self.pack.outfits.get(o).map_or("", |x| x.id.as_str()), d.frames.len(), d.decode_ms);
                 self.art.outfit_ready = Some((o, idx.into_iter().zip(d.frames).collect(), now));
+                // It counts in the budget: strips out of use make room for it.
+                self.art_evict(cx);
             }
         }
         self.schedule(cx);
     }
 
-    /// Where it can't be seen (the bolt of a teleport; waking): the decoded look goes on, every
+    /// The decoded look waiting for an unseen moment: its bytes (inside `variants.cacheMb`).
+    fn outfit_bytes(&self) -> usize {
+        self.art.outfit_ready.as_ref().map_or(0, |r| r.1.iter().map(|(_, f)| f.bytes()).sum())
+    }
+
+    /// She wakes (out of Sleepy, the brain's nap ends): the decoded look goes on under the wake's
+    /// cut, the same light glitch the sleep cut gets (`Transition::Sleep`), so the change itself
+    /// is never seen. Not while he carries her or mid-vanish (the glitch can't cover it there:
+    /// the next bolt or wake does it), and not before her frames are in. Call before the wake's
+    /// frames are picked, so they are the new look's. The sleep strip on screen keeps its pick:
+    /// it leaves with the wake.
+    pub(super) fn outfit_wake(&mut self, now: Instant) {
+        if self.art.outfit_ready.is_none() || !self.loaded || self.rag.is_some() || (self.teleport.is_some() && !self.hidden) {
+            return;
+        }
+        let unseen = self.hidden;
+        if !self.outfit_swap_keeping("wake", true, now) || unseen {
+            return;
+        }
+        self.art.quiet_seams = Some(now + super::QUIET_SEAMS);
+        if self.glitch.is_none_or(|g| g.t0 < now) {
+            self.glitch = Glitch::for_cut(Transition::Sleep, now, self.rng.next());
+        }
+    }
+
+    /// Where it can't be seen (the bolt of a teleport, hidden): the decoded look goes on, every
     /// frame at once, never mid-animation. Not into a pose that look doesn't draw.
     pub(super) fn outfit_swap(&mut self, why: &str, now: Instant) {
-        let Some((o, _, _)) = self.art.outfit_ready.as_ref() else { return };
+        self.outfit_swap_keeping(why, false, now);
+    }
+
+    /// `outfit_swap`; `keep_sleep`: the sleep pools' picks stay (on screen as she wakes, they go
+    /// with the wake), the others drawn for the old look are picked again. True: it went on.
+    fn outfit_swap_keeping(&mut self, why: &str, keep_sleep: bool, now: Instant) -> bool {
+        let Some((o, _, _)) = self.art.outfit_ready.as_ref() else { return false };
         let o = *o;
         let target = self.teleport.as_ref().map_or(self.placement, |t| t.place);
         if let Placement::Pose { frame } = target
             && !self.pack.draws(o, frame)
         {
-            return;
+            return false;
         }
-        let Some((_, frames, _)) = self.art.outfit_ready.take() else { return };
+        let Some((_, frames, _)) = self.art.outfit_ready.take() else { return false };
         self.pack.wear(o);
         for (i, f) in frames {
             if let Some(old) = self.frames[i].replace(f) {
@@ -517,6 +562,7 @@ impl Avatar {
             .art
             .picks
             .iter()
+            .filter(|&(k, _)| !(keep_sleep && matches!(k, PoolKey::SleepFloor | PoolKey::SleepWindow)))
             .filter(|&(k, &i)| self.pack.pools[k].variants[i].art.as_ref().is_some_and(|a| !self.pack.strip_wears(a.base)))
             .map(|(&k, _)| k)
             .collect();
@@ -526,9 +572,10 @@ impl Avatar {
         self.art_sync(now);
         self.contact = [self.measure_contact(true), self.measure_contact(false)];
         self.brain_rebox();
-        crate::state::save_outfit(self.pack.outfit_id());
+        crate::state::save_outfit(self.pack.outfit_id().to_string());
         self.art.outfit_at = Some(now + self.art.picker.shift_in(OUTFIT_EVERY));
         elog!("synaps-avatar: outfit `{}` on ({why})", self.pack.outfit_id());
+        true
     }
 
     // ---- time -------------------------------------------------------------------------------
@@ -773,8 +820,11 @@ impl Avatar {
         self.pack.strip_cells(u.0, u.1)
     }
 
+    /// The strips' bytes, plus a decoded look waiting to go on (it counts in `variants.cacheMb`
+    /// too: the strips make room for it).
     fn art_bytes(&self) -> usize {
-        self.art.ready.keys().flat_map(|&u| self.unit_frames(u)).filter_map(|i| self.frames[i].as_ref()).map(|f| f.bytes()).sum()
+        let strips: usize = self.art.ready.keys().flat_map(|&u| self.unit_frames(u)).filter_map(|i| self.frames[i].as_ref()).map(|f| f.bytes()).sum();
+        strips + self.outfit_bytes()
     }
 
     /// From `schedule`: decode what the layer asked for, off the main thread.
@@ -874,6 +924,10 @@ impl Avatar {
         for &si in &self.art.soon {
             in_use.insert(self.art_unit(si));
         }
+        // The glance's strips, once in: glances come further apart than `UNUSED_DROP`.
+        for si in self.strips_of(&self.pack.behaviour.brain.glance) {
+            in_use.insert(self.art_unit(si));
+        }
         let m = &self.pack.motions;
         let motions = [(m.walk, self.brain_walking()), (m.dance, self.dance_strip().is_some()), (m.dangle, self.rag.is_some())];
         for (si, on) in motions {
@@ -912,5 +966,25 @@ impl Avatar {
             crate::platform::trim_heap();
         }
         bytes
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_change_of_outfit_decodes_only_the_frames_that_differ() {
+        // The alt look draws `neutral` and `sit`; the pack has `wink` too, drawn only by its own.
+        let moods = serde_json::json!({"perch": {"base": "sit"}, "extraFrames": [{"id": "wink", "file": "l.png", "like": "neutral"}],
+            "variants": {"outfits": [{"id": "main"}, {"id": "alt", "sprites": "outfits/alt/sprites.json"}]}});
+        crate::pack::tests::pack_setup("outfit-frames", moods, |d| crate::pack::tests::write_outfit(d, &["neutral", "sit"]), |p| {
+            let p = p.unwrap();
+            let mut drawn = vec![p.index["neutral"], p.index["sit"]];
+            drawn.sort_unstable();
+            assert_eq!(outfit_frames(&p, 0, 1), drawn, "into the alt look: what it draws, not the wink");
+            assert_eq!(outfit_frames(&p, 1, 0), drawn, "back: what it drew, as the pack's own");
+            assert!(outfit_frames(&p, 0, 0).is_empty());
+        });
     }
 }

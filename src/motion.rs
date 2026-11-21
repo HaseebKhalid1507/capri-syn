@@ -101,11 +101,52 @@ fn progress(t: f32, secs: f32) -> f32 {
     (d / total).clamp(0.0, 1.0)
 }
 
-/// The walk's cells: its strip from `first` (`n` cells, `ms` each) round and round, at least
-/// `secs` long (the oneshot under the walk; it is stopped where she arrives).
-pub fn walk_seq(first: usize, n: u32, ms: u32, secs: f32) -> Seq {
-    let cells = ((secs * 1000.0 / ms.max(1) as f32).ceil() as u32).max(1) + 1;
-    (0..cells).map(|k| (first + (k % n.max(1)) as usize, ms)).collect()
+/// The walk's cells: its strip from `first`, positions each with its own ms (`Strip::played`),
+/// round and round, at least `secs` long, then one more (the oneshot under the walk; it is
+/// stopped where she arrives).
+pub fn walk_seq_timed(first: usize, cells: &[(u32, u32)], secs: f32) -> Seq {
+    if cells.is_empty() {
+        return Vec::new();
+    }
+    let want = (secs.max(0.0) * 1000.0) as u64;
+    let mut out = Vec::new();
+    let mut t = 0u64;
+    for &(c, ms) in cells.iter().cycle() {
+        out.push((first + c as usize, ms.max(1)));
+        if t >= want {
+            break;
+        }
+        t += u64::from(ms.max(1));
+    }
+    out
+}
+
+/// A dance's cells (position, ms) at the music's tempo: the loop two beats long when the tempo is
+/// known, each cell keeping its share of it (kept within 0.75-1.4x of the drawing's pace, as
+/// `dance_ms`).
+pub fn dance_seq(bpm: Option<f32>, cells: &[(u32, u32)]) -> Vec<(u32, u32)> {
+    let n = cells.len().max(1) as u32;
+    let total = cells.iter().fold(0u32, |t, c| t.saturating_add(c.1));
+    let mean = (total / n).max(1);
+    let per = dance_ms(bpm, mean, n);
+    cells.iter().map(|&(c, ms)| (c, ((ms as f32 * per as f32 / mean as f32).round() as u32).max(1))).collect()
+}
+
+/// The position `ms` into a loop of `cells` (position, ms), round and round.
+pub fn cell_at(cells: &[(u32, u32)], ms: u64) -> Option<u32> {
+    let total: u64 = cells.iter().map(|c| u64::from(c.1.max(1))).sum();
+    if total == 0 {
+        return None;
+    }
+    let mut u = ms % total;
+    for &(c, d) in cells {
+        let d = u64::from(d.max(1));
+        if u < d {
+            return Some(c);
+        }
+        u -= d;
+    }
+    cells.last().map(|c| c.0)
 }
 
 /// Every `step` px from `from` to `to` (both ends included) passes `ok`.
@@ -337,12 +378,29 @@ mod tests {
 
     #[test]
     fn the_walk_cells_cycle_and_cover_the_walk() {
-        let s = walk_seq(10, 12, 83, 2.0);
+        let s = walk_seq_timed(10, &(0..12).map(|i| (i, 83)).collect::<Vec<_>>(), 2.0);
         assert!(s.iter().map(|c| c.1).sum::<u32>() >= 2000);
         assert_eq!(s[0].0, 10);
         assert_eq!(s[12].0, 10);
         assert_eq!(s[13].0, 11);
         assert!(s.iter().all(|c| (10..22).contains(&c.0)));
+    }
+
+    #[test]
+    fn per_cell_timing_carries_through_the_walk_the_dance_and_a_held_loop() {
+        // A WebP's delays: 100, 300, 100 ms.
+        let cells = [(0, 100), (1, 300), (2, 100)];
+        let w = walk_seq_timed(10, &cells, 0.9);
+        assert_eq!(w, vec![(10, 100), (11, 300), (12, 100), (10, 100), (11, 300), (12, 100)], "round and round, past the walk's end");
+        assert!(walk_seq_timed(10, &[], 1.0).is_empty());
+        // Uniform cells: as `dance_ms`.
+        assert_eq!(dance_seq(Some(60.0), &[(0, 63); 16]), vec![(0, 88); 16]);
+        // Uneven: each keeps its share; unknown tempo, the drawing's own.
+        assert_eq!(dance_seq(None, &cells), cells.to_vec());
+        let d = dance_seq(Some(100.0), &cells);
+        assert!(d[1].1.abs_diff(3 * d[0].1) <= 2 && d[0].1 == d[2].1 && d[0].1 > 100, "{d:?}");
+        assert_eq!([0, 99, 100, 399, 400, 500].map(|t| cell_at(&cells, t)), [0, 0, 1, 1, 2, 0].map(Some));
+        assert_eq!(cell_at(&[], 5), None);
     }
 
     #[test]

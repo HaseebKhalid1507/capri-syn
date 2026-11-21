@@ -1044,7 +1044,7 @@ impl Avatar {
         }
         let spec = self.spec(self.mood).cloned();
         let autonomous = spec.as_ref().map_or(self.mood == Mood::Idle, |s| s.autonomy);
-        if autonomous && self.pack.catalog.autonomy.enabled && !self.activities().is_empty() {
+        if autonomous && self.pack.catalog.autonomy.enabled && self.has_activities() {
             self.next_activity = Some(now + self.autonomy_gap());
         }
     }

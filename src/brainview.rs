@@ -891,6 +891,9 @@ impl Avatar {
                     }
                     if up {
                         self.arrive.deep = false;
+                        // A changed outfit goes on before the get-up's frames are picked, under
+                        // the wake's cut (she wakes in it).
+                        self.outfit_wake(now);
                     }
                     self.relayer(now);
                     // A stretch due replaces a drawn wake: the pack's own get-up (a floor sit, the
@@ -1843,7 +1846,8 @@ impl Avatar {
     fn walk_go(&mut self, now: Instant) {
         let l = self.layout;
         let Some(si) = self.pack.motions.walk else { return };
-        let Some((n, ms)) = self.pack.anim.as_ref().map(|a| (a.strips[si].frames, a.strips[si].ms)) else { return };
+        // Its cells at their own ms (`ms`, a WebP's delays).
+        let Some(cells) = self.pack.anim.as_ref().map(|a| a.strips[si].played(1)) else { return };
         let Some(first) = self.pack.strip_first.get(si).copied().flatten() else { return };
         let Some(wm) = self.brain.as_mut().and_then(|h| h.walk.as_mut()) else { return };
         wm.started = true;
@@ -1855,7 +1859,7 @@ impl Avatar {
         self.face(walk.to_x > walk.from_x, "walk", now, true);
         // The walk is on before the relayer: a window top's pick holds through it.
         self.relayer(now);
-        self.anim.play(crate::motion::walk_seq(first, n, ms, walk.secs), now);
+        self.anim.play(crate::motion::walk_seq_timed(first, &cells, walk.secs), now);
     }
 
     fn step_walk(&mut self, now: Instant) -> bool {
@@ -2076,7 +2080,12 @@ impl Avatar {
                     self.face(right, "look", now, false);
                 }
                 if standing {
-                    let seq = self.flat(&self.resolve_steps(&[crate::pack::Step::Clip("@look".into())]));
+                    // The pack's glance (`brain.glance`), else the look; a glance whose strip
+                    // isn't in yet (asked for now): the look this time.
+                    let mut seq = self.flat(&self.resolve_steps(&self.pack.glance_steps()));
+                    if seq.is_empty() && !self.pack.behaviour.brain.glance.is_empty() {
+                        seq = self.flat(&self.resolve_steps(&[crate::pack::Step::Clip("@look".into())]));
+                    }
                     if !seq.is_empty() {
                         self.anim.play(seq, now);
                     }

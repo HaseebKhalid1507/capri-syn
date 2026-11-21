@@ -419,6 +419,10 @@ fn run(t_start: Instant) -> Result<()> {
             if n > 0 {
                 elog!("synaps-avatar: settings: {n} temp file(s) left by an unfinished write, removed");
             }
+            let n = settings::sweep_temps(&state::state_path());
+            if n > 0 {
+                elog!("synaps-avatar: state: {n} temp file(s) left by an unfinished write, removed");
+            }
         });
     }
 
@@ -463,6 +467,10 @@ fn run(t_start: Instant) -> Result<()> {
             args.threads,
             args.verify
         );
+        // The strips that play as clips: a step names them and no catalog clip or action has the
+        // name (before, such a step was refused as an unknown clip).
+        let as_clips: Vec<&str> = pack.anim.as_ref().map(|a| pack.step_strips.iter().map(|&si| a.strips[si].name.as_str()).collect()).unwrap_or_default();
+        olog!("strips played as clips: {}", if as_clips.is_empty() { "none".to_string() } else { as_clips.join(", ") });
         // Every other outfit's own frames (`variants.outfits`), decoded and checked the same way.
         for (o, look) in pack.outfits.iter().enumerate().skip(1) {
             let which: Vec<usize> = look.frames.keys().copied().collect();
