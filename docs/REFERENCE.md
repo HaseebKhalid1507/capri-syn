@@ -268,6 +268,23 @@ Paths here are Linux's: Windows keeps the same files under `%APPDATA%` and `%LOC
   take turns), until her attention bids take over (8-15 min). Asleep she keeps still; a beat plays in
   place, so it never counts against `max_moves_per_hour`; DND, the fullscreen hide and click-through are
   as before.
+- **She doesn't hold one loop** (always on, no setting): held a while in one state, her attention
+  wanders to another of its loops on the same restless clock, about every 8-25 s (jittered), picked
+  like her beats (weighted, a shuffled round, never the same one twice running). The states and what
+  they turn among: perched (the perch pool's variants: sits, lounges, lying poses that fit),
+  perched with music (`music.windowLoop` and every eligible perch variant's `music` strip), standing
+  idle (the stand pool's variants). She swaps only as a pass of the loop on screen ends: its exit,
+  now and then (one in five; never with music on) a short beat of hers first, then the next one's
+  entry and its loop, under the cut's glitch. The pool's long-stay shift (`shiftMs`) keeps its own
+  clock through the turns, and a lounge with its own length (`stayMs`) stays it out (the long-stay
+  shift ends it), whether she settled into it or turned to it. A new seat, music starting or
+  stopping, or an outfit change starts the clock over from the seat's own loop (a music strip the
+  outfit doesn't draw is never on). Asleep she keeps
+  her loop. So do a holder (the Line, a prompt, the menu, a drag, a reply bubble), the voice, a
+  reaction, and her session's turn (hyperfocus: one steady loop; the clock starts over after). Hidden,
+  fullscreen and DND keep it too. Never a move: `max_moves_per_hour` never sees it. A state with one
+  loop (music on the floor, a hang, a floor sit, a pack without pools or a second music sequence)
+  behaves exactly as before.
 - **Her energy shows**: its band (high from 0.65, low under 0.35) picks her idle activities (a
   gesture that changes her outline and a face beat take turns, each from its own shuffled round) and
   their gaps (`energy.high|mid|low` in moods.json: 1.2-3 / 1.5-3.5 / 2-4 s), her breath (`bobPx`,

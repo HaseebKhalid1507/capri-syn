@@ -247,6 +247,8 @@ pub struct Beats {
     gesture_next: bool,
     /// The list the rounds are of.
     keys: Vec<u64>,
+    /// How many times each comes in a round (`pick_weighted`; empty: once each).
+    copies: Vec<u32>,
 }
 
 impl Beats {
@@ -278,7 +280,7 @@ impl Beats {
             return (!again).then_some(0);
         }
         if keys != self.keys.as_slice() {
-            *self = Beats { keys: keys.to_vec(), gesture_next: true, last: self.last, ..Beats::default() };
+            *self = Beats { keys: keys.to_vec(), gesture_next: true, last: self.last, copies: std::mem::take(&mut self.copies), ..Beats::default() };
         }
         let gestures = gesture.iter().filter(|&&g| g).count();
         if !self.gesture_next && gestures > 1 && rng.range(0.0, 1.0) < BORED_GESTURE[stage.min(BORED_GESTURE.len() - 1)] {
@@ -288,7 +290,9 @@ impl Beats {
         let g = if has(self.gesture_next) { self.gesture_next } else { !self.gesture_next };
         let k = usize::from(g);
         if self.bags[k].is_empty() {
-            let mut bag: Vec<usize> = (0..n).filter(|&i| gesture[i] == g).collect();
+            let copies = &self.copies;
+            let mut bag: Vec<usize> =
+                (0..n).filter(|&i| gesture[i] == g).flat_map(|i| std::iter::repeat_n(i, copies.get(i).map_or(1, |&c| c as usize))).collect();
             for j in (1..bag.len()).rev() {
                 bag.swap(j, rng.pick(j + 1));
             }
@@ -308,6 +312,14 @@ impl Beats {
             } else if let Some(i) = (0..n).find(|&i| gesture[i] != g && Some(keys[i]) != self.last) {
                 self.last = Some(keys[i]);
                 return Some(i);
+            } else if !self.copies.is_empty() && (0..n).any(|i| gesture[i] == g && Some(keys[i]) != self.last) {
+                // Weighted: what's left of the round is only the one just played (its extra
+                // copies). The round ends; another comes now, a new round after.
+                let others: Vec<usize> = (0..n).filter(|&i| gesture[i] == g && Some(keys[i]) != self.last).collect();
+                let i = others[rng.pick(others.len())];
+                bag.clear();
+                self.last = Some(keys[i]);
+                return Some(i);
             } else {
                 self.last = None;
                 return None;
@@ -317,6 +329,19 @@ impl Beats {
         self.last = Some(keys[i]);
         self.gesture_next = !g;
         Some(i)
+    }
+
+    /// `pick_at` over one kind, weighted: each comes `weight` times as often as the lightest in a
+    /// round (1-4 times), still never the same twice running. For her held state's loops
+    /// (`Restless::shift_poll`).
+    pub fn pick_weighted(&mut self, keys: &[u64], weights: &[f32], rng: &mut crate::anim::Rng) -> Option<usize> {
+        let lo = weights.iter().copied().filter(|&w| w > 0.0).fold(f32::INFINITY, f32::min);
+        let copies: Vec<u32> = weights.iter().map(|&w| if lo.is_finite() && w > 0.0 { (w / lo).round().clamp(1.0, 4.0) as u32 } else { 1 }).collect();
+        if copies != self.copies {
+            self.copies = copies;
+            self.bags = Default::default();
+        }
+        self.pick_at(&vec![false; keys.len()], keys, 0, rng)
     }
 }
 
@@ -346,6 +371,11 @@ pub const RESUME_MS: [u64; 2] = [1_200, 2_500];
 pub const BORED_S: [f64; 3] = [60.0, 180.0, 420.0];
 /// ...and per stage the chance a gesture follows a gesture (0: they take turns, r42).
 pub const BORED_GESTURE: [f32; 4] = [0.0, 0.25, 0.5, 0.75];
+/// Held a while in one state (perched, music, standing idle), her attention wanders: the next of
+/// its loops after this long (`Restless::shift_poll`)...
+pub const SHIFT_MS: [u64; 2] = [8_000, 25_000];
+/// ...and now and then a short beat first, before she settles into it.
+pub const SHIFT_TANGENT_P: f32 = 0.2;
 
 /// Why she keeps still now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -384,6 +414,12 @@ pub struct Still {
     pub nothing: bool,
 }
 
+/// Why her held state keeps its loop (`Restless::shift_poll`): as `quiet`, but having no idle
+/// beats here doesn't hold it (music is the state, not a move: the view leaves it out).
+pub fn shift_quiet(s: Still) -> Quiet {
+    quiet(Still { nothing: false, ..s })
+}
+
 /// Why she keeps still, from what the view sees.
 pub fn quiet(s: Still) -> Quiet {
     if s.asleep {
@@ -416,11 +452,13 @@ pub struct Restless {
     engaged: f64,
     /// Keeping still, and whether it engaged her.
     held: Option<bool>,
+    /// Her held state's next shift to another of its loops (`shift_poll`).
+    shift: Option<f64>,
 }
 
 impl Restless {
     pub fn new(seed: u64, t: f64) -> Restless {
-        Restless { rng: crate::anim::Rng::new(seed), next: None, cue: None, glanced: false, engaged: t, held: None }
+        Restless { rng: crate::anim::Rng::new(seed), next: None, cue: None, glanced: false, engaged: t, held: None, shift: None }
     }
 
     fn secs(&mut self, r: [u64; 2]) -> f64 {
@@ -505,6 +543,46 @@ impl Restless {
         self.glanced = false;
     }
 
+    /// Her held state's loops (perched, music, standing idle: `n` of them here now), on the same
+    /// clock as her beats: a shift about every `SHIFT_MS` (the view swaps at the next loop
+    /// boundary, then calls `shifted`). Keeping still (`shift_quiet`: asleep, a holder, the voice,
+    /// her session's turn, hidden) drops it and the clock starts over after; one loop: never (it
+    /// looks again a span later). `wants` first: nothing to gather until one is due.
+    pub fn shift_poll(&mut self, t: f64, quiet: Quiet, n: usize) -> bool {
+        if quiet != Quiet::No {
+            self.shift = None;
+            return false;
+        }
+        let Some(at) = self.shift else {
+            self.shift = Some(t + self.secs(SHIFT_MS));
+            return false;
+        };
+        if at > t {
+            return false;
+        }
+        if n < 2 {
+            self.shift = Some(t + self.secs(SHIFT_MS));
+            return false;
+        }
+        true
+    }
+
+    /// `shift_poll` would look now: unarmed, or a shift due.
+    pub fn shift_wants(&self, t: f64) -> bool {
+        self.shift.is_none_or(|at| at <= t)
+    }
+
+    /// The held state changed (she sat, stood, the music came or went): its clock starts over.
+    pub fn shift_reset(&mut self) {
+        self.shift = None;
+    }
+
+    /// A shift happened at `t`: the next a span on. True: a short tangent beat first.
+    pub fn shifted(&mut self, t: f64) -> bool {
+        self.shift = Some(t + self.secs(SHIFT_MS));
+        self.rng.range(0.0, 1.0) < SHIFT_TANGENT_P
+    }
+
     /// A beat played from `t`, `len_s` long: the next comes a gap after it (soon after a tangent).
     pub fn played(&mut self, t: f64, len_s: f64, gap: [u64; 2]) {
         let after = if self.glanced { AFTER_TANGENT_MS } else { gap };
@@ -515,6 +593,89 @@ impl Restless {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_held_state_shifts_every_8_to_25_s_on_the_restless_clock() {
+        let mut r = Restless::new(5, 0.0);
+        assert!(!r.shift_poll(0.0, Quiet::No, 3), "the first look arms it");
+        assert!(!r.shift_wants(SHIFT_MS[0] as f64 / 1000.0 - 0.01), "not before 8 s");
+        assert!(r.shift_wants(SHIFT_MS[1] as f64 / 1000.0), "by 25 s");
+        let due = SHIFT_MS[1] as f64 / 1000.0;
+        assert!(r.shift_poll(due, Quiet::No, 3), "due");
+        assert!(r.shift_poll(due + 0.5, Quiet::No, 3), "still due until the boundary comes and it shifts");
+        let mut tangents = 0;
+        let mut t = due + 1.0;
+        for _ in 0..400 {
+            tangents += usize::from(r.shifted(t));
+            assert!(!r.shift_wants(t + 7.99) && r.shift_wants(t + 25.0), "the next 8-25 s on");
+            t += 25.0;
+            assert!(r.shift_poll(t, Quiet::No, 2));
+        }
+        assert!((40..=130).contains(&tangents), "now and then a tangent first: {tangents}/400");
+    }
+
+    #[test]
+    fn hyperfocus_sleep_and_holders_hold_the_loop() {
+        let still = |f: &dyn Fn(&mut Still)| {
+            let mut s = Still::default();
+            f(&mut s);
+            shift_quiet(s)
+        };
+        assert_eq!(still(&|s| s.session = true), Quiet::Busy, "her session's turn: one steady loop");
+        assert_eq!(still(&|s| s.asleep = true), Quiet::Asleep);
+        assert_eq!(still(&|s| s.held = true), Quiet::Busy, "a holder: the Line, a prompt, the menu, a drag");
+        assert_eq!(still(&|s| s.voice = true), Quiet::Busy);
+        assert_eq!(still(&|s| s.hidden = true), Quiet::Off, "hidden, fullscreen, DND");
+        assert_eq!(still(&|s| s.moving = true), Quiet::Off, "a move");
+        assert_eq!(still(&|s| s.nothing = true), Quiet::No, "no idle beats here: her loops still turn");
+        let mut r = Restless::new(9, 0.0);
+        r.shift_poll(0.0, Quiet::No, 3);
+        for q in [Quiet::Busy, Quiet::Asleep, Quiet::Off] {
+            assert!(!r.shift_poll(100.0, q, 3), "{q:?}: no shift");
+            assert!(r.shift_wants(100.0), "and the clock starts over after");
+            assert!(!r.shift_poll(100.0, Quiet::No, 3), "a fresh span first");
+            assert!(!r.shift_poll(107.9, Quiet::No, 3));
+        }
+    }
+
+    #[test]
+    fn one_held_loop_never_shifts() {
+        let mut r = Restless::new(2, 0.0);
+        let mut t = 0.0;
+        for _ in 0..50 {
+            assert!(!r.shift_poll(t, Quiet::No, 1));
+            assert!(!r.shift_poll(t, Quiet::No, 0));
+            t += 30.0;
+        }
+        assert!(!r.shift_wants(t - 30.0 + 7.9), "it looks again a span later, not every tick");
+    }
+
+    #[test]
+    fn held_loops_are_weighted_and_never_the_same_twice_running() {
+        let mut rng = crate::anim::Rng::new(11);
+        let mut b = Beats::default();
+        let keys = [1u64, 2, 3];
+        let mut on = 1u64;
+        let mut count = [0u32; 3];
+        for _ in 0..3000 {
+            b.mark(on);
+            let Some(i) = b.pick_weighted(&keys, &[3.0, 1.0, 1.0], &mut rng) else { continue };
+            assert_ne!(keys[i], on, "the same twice running");
+            on = keys[i];
+            count[i] += 1;
+        }
+        assert!(count[0] > count[1] && count[0] > count[2], "the heavier comes more often: {count:?}");
+        assert!(count[1] > 300 && count[2] > 300, "the light ones still come: {count:?}");
+        // Two: they alternate.
+        let mut b = Beats::default();
+        let mut on = 1u64;
+        for _ in 0..20 {
+            b.mark(on);
+            let i = b.pick_weighted(&[1, 2], &[1.0, 5.0], &mut rng).expect("a turn");
+            assert_ne!([1, 2][i], on);
+            on = [1u64, 2][i];
+        }
+    }
 
     #[test]
     fn idle_beats_take_turns_and_come_round_evenly() {

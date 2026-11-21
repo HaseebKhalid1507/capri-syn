@@ -1648,11 +1648,16 @@ impl Avatar {
     }
 
     /// Music on a window top with the pack's `music.windowLoop` (worn, its cells in): its loop,
-    /// instead of the `window` frame.
+    /// instead of the `window` frame (unless the held rotation is on a perch strip now).
     fn music_loop(&self) -> Option<Looped> {
-        if self.music.is_none() || !self.sitting() {
+        if self.music.is_none() || !self.sitting() || matches!(self.perch_tune(), Some(artview::Tune::Strip(..))) {
             return None;
         }
+        self.window_loop()
+    }
+
+    /// `music.windowLoop` as it would play now (worn, its cells in), wherever she is.
+    fn window_loop(&self) -> Option<Looped> {
         self.loop_seq(Some(&self.music_spec()?.window_loop))
     }
 
@@ -2053,20 +2058,27 @@ impl Avatar {
     /// off (her own words in a bubble, a move, a reaction, music, the intro, hidden by the menu
     /// or a fullscreen window, a mood without autonomy, no beats here).
     fn restless_quiet(&self) -> crate::life::Quiet {
-        let fs = self.brain.as_ref().is_some_and(|h| h.fs != brainview::FsHide::Shown);
-        let q = crate::life::quiet(still_of(&StillSeen {
-            busy: &self.brain_busy(),
-            own_words: self.bubble.as_ref().is_some_and(|b| !b.stream && b.turn == 0),
-            asleep: self.mood == Mood::Sleepy || self.brain.as_ref().is_some_and(|h| h.brain.napping()),
-            voice: self.voice.hf.is_some() || self.voice_listening() || self.voice_speaking(),
-            following: self.following(),
-            hidden: self.hidden || fs,
-        }));
+        let q = crate::life::quiet(self.still_now(|_| true, false));
         // Nothing to play here, looked at last (`activities` builds a list).
         if q == crate::life::Quiet::No && (self.next_activity.is_none() || !self.has_activities()) {
             return crate::life::Quiet::Off;
         }
         q
+    }
+
+    /// What keeps her still, as the view sees it (`life::quiet`, `life::shift_quiet`): her
+    /// `brain_busy` names that `keep` keeps; hidden counts DND too when `dnd`.
+    fn still_now(&self, keep: impl Fn(&str) -> bool, dnd: bool) -> crate::life::Still {
+        let fs = self.brain.as_ref().is_some_and(|h| h.fs != brainview::FsHide::Shown);
+        let busy: Vec<&'static str> = self.brain_busy().into_iter().filter(|&b| keep(b)).collect();
+        still_of(&StillSeen {
+            busy: &busy,
+            own_words: self.bubble.as_ref().is_some_and(|b| !b.stream && b.turn == 0),
+            asleep: self.mood == Mood::Sleepy || self.brain.as_ref().is_some_and(|h| h.brain.napping()),
+            voice: self.voice.hf.is_some() || self.voice_listening() || self.voice_speaking(),
+            following: self.following(),
+            hidden: self.hidden || fs || (dnd && self.dnd_on()),
+        })
     }
 
     /// A glance at `at`: the steps that play and their frames. The pack's glance (`brain.glance`,
