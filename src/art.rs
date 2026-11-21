@@ -555,7 +555,7 @@ impl Anim {
             }
         }
         for (name, raw) in &side.strips {
-            let d = match strip_doc(&root, raw) {
+            let d = match strip_doc(root, raw) {
                 Ok(d) => d,
                 Err(e) => {
                     errors.push(format!("anim strip `{name}`: {e:#}"));

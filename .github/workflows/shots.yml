@@ -124,7 +124,7 @@ jobs:
         id: pack
         with:
           path: ${{ runner.temp }}/pack
-          key: shots-pack-${{ hashFiles('app/tools/make-pack', 'app/tools/*.sha256', 'app/tools/desktop-art.json', 'app/packs/capri/**') }}
+          key: shots-pack-${{ hashFiles('app/tools/make-pack', 'app/tools/*.sha256', 'app/tools/desktop-art.json', 'app/tools/capricore-outfit.json', 'app/packs/capri/**') }}
 
       - name: Her pack (CapriCore + lachy, no mochi)
         if: steps.pack.outputs.cache-hit != 'true'

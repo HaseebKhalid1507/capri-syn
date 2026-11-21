@@ -939,7 +939,7 @@ function Show-Notices {
 # The inputs a pack is made from: one hash over them (the same files in her installer's copy and the repo).
 function Get-Fingerprint {
     $tools = Join-Path $script:Root 'tools'
-    $parts = @('tools\make-pack', 'tools\desktop-art.json', 'packs\capri\moods.json', 'packs\capri\persona.md') | ForEach-Object { Join-Path $script:Root $_ }
+    $parts = @('tools\make-pack', 'tools\desktop-art.json', 'tools\capricore-outfit.json', 'packs\capri\moods.json', 'packs\capri\persona.md') | ForEach-Object { Join-Path $script:Root $_ }
     $pins = @('capricore-*.sha256', 'lachy-desktop-*.sha256')
     if ($LocalArt) { $pins += 'mochi-desktop-*.sha256'; $parts += Join-Path $tools 'mochi_hair.py' }
     foreach ($p in $pins) { $parts += @(Get-ChildItem -LiteralPath $tools -Filter $p | ForEach-Object { $_.FullName }) }
@@ -1094,7 +1094,7 @@ function Build-Pack {
             Remove-Item -Recurse -Force -LiteralPath $cc
             Stop-Step "CapriCore's files don't match their pins (tools/capricore-*.sha256), so none of it was used. That download is deleted: try again"
         }
-        if ($l -match 'cannot download|no checksum-matching pose-sleep') { Stop-Step "couldn't download lachy's desktop art or her sleep frame from GitHub. Is this PC offline? ($l)" }
+        if ($l -match 'cannot download|no checksum-matching pose-sleep|CapriCore v1.2.2 file') { Stop-Step "couldn't download lachy's desktop art or CapriCore's newer frames from GitHub. Is this PC offline? ($l)" }
         if ($l -match 'does not match|is not lachydotmcg') { Stop-Step "a file of lachy's desktop art doesn't match its pin (tools/lachy-desktop-*.sha256), so none of it was used ($l)" }
         Stop-Step "make-pack couldn't build her pack (exit $rc): $l"
     }
