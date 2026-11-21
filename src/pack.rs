@@ -1459,8 +1459,6 @@ impl Pack {
         self.worn.load(Ordering::Relaxed)
     }
 
-    /// Wear outfit `i` (ignored past the list). Frames decoded after this are in it: the view
-    /// swaps them all at once, only where it can't be seen.
     /// The repeat rolls (`Step::Repeat`) go on from her rng's `seed`.
     pub fn seed_rolls(&self, seed: u64) {
         self.rolls.store(seed, Ordering::Relaxed);
@@ -1474,6 +1472,8 @@ impl Pack {
         k
     }
 
+    /// Wear outfit `i` (ignored past the list). Frames decoded after this are in it: the view
+    /// swaps them all at once, only where it can't be seen.
     pub fn wear(&self, i: usize) {
         if i < self.outfits.len() {
             self.worn.store(i, Ordering::Relaxed);

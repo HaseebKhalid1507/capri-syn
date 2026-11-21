@@ -192,7 +192,8 @@ pub struct Animator {
     entered: bool,
     /// Its exit plays when the loop ends (`cut` disarms it: a drag, a teleport, sleep).
     armed: bool,
-    /// Cut since the loop on (or pending) went on: nothing arms until another loop goes on.
+    /// Cut, and the interruption not over yet: nothing arms until the one-shot that interrupts
+    /// it ends (the walk, the arrival) or another loop goes on.
     disarmed: bool,
     oneshot: Option<Seq>,
     one_pos: usize,
@@ -372,7 +373,13 @@ impl Animator {
             } else {
                 (self.in_entry, self.loop_pos) = (false, 0);
             }
-            if !rest.is_empty() {
+            if in_tail && !rest.is_empty() {
+                // The hold on screen finishes on its own deadline, then what was asked for.
+                let mut q = vec![s[pos]];
+                q.extend(rest);
+                self.oneshot = Some(q);
+                self.one_pos = 0;
+            } else if !rest.is_empty() {
                 self.play(rest, now);
             } else if !in_tail {
                 self.run_loop(now);
@@ -436,10 +443,12 @@ impl Animator {
     }
 
     /// An interruption (a drag, a teleport, a move, sleep): the loop's exit won't play (nor will
-    /// that of a loop pending under it, until another goes on), and one playing stops here.
+    /// that of a loop pending under it), and one playing stops here. Once the one-shot that
+    /// interrupts it ends, the loop goes back in from its entry and its exit arms again.
     pub fn cut(&mut self, now: Instant) {
         self.armed = false;
         self.disarmed = true;
+        self.entered = false;
         if self.in_exit() {
             let rest = self.oneshot.take().map(|s| s[self.exit_n..].to_vec()).unwrap_or_default();
             self.clear_exit();
@@ -498,6 +507,7 @@ impl Animator {
             return;
         }
         if self.oneshot.take().is_some() {
+            self.disarmed = false;
             self.resume_loop(now);
         }
     }
@@ -529,6 +539,7 @@ impl Animator {
                     self.due = Some(from + Duration::from_millis(ms as u64));
                 } else {
                     self.oneshot = None;
+                    self.disarmed = false;
                     self.resume_loop(from);
                 }
             } else if let Some(l) = &self.looping {
@@ -741,16 +752,82 @@ mod tests {
         b.set_layer(7, None, ms(t, 130));
         assert!(!b.in_exit());
         assert_eq!(b.frame(), 7);
-        // A cut under a one-shot: the loop it resumes into doesn't arm either.
+        // A cut under a one-shot: that one-shot is the interruption; when it ends the loop
+        // goes in from its entry and arms (`after_a_cut_and_its_one_shot_...`).
         let mut c = Animator::new(0);
         c.play(vec![(6, 50)], t);
         c.set_layer_looped(0, Some(ranged()), false, t);
         c.cut(ms(t, 10));
         c.tick(ms(t, 50));
+        assert_eq!(c.frame(), 1);
         c.tick(ms(t, 150));
         assert_eq!(c.frame(), 2);
         c.set_layer(7, None, ms(t, 160));
+        assert!(c.in_exit());
+    }
+
+    #[test]
+    fn after_a_cut_and_its_one_shot_the_loop_goes_back_in_and_arms() {
+        let t = Instant::now();
+        // A walk: cut, the same loop set again, the walk over it; she arrives.
+        for stop in [false, true] {
+            let mut a = Animator::new(0);
+            a.set_layer_looped(0, Some(ranged()), false, t);
+            a.tick(ms(t, 100));
+            a.cut(ms(t, 110));
+            a.set_layer_looped(0, Some(ranged()), false, ms(t, 110));
+            a.play(vec![(6, 100)], ms(t, 110));
+            if stop {
+                a.stop_oneshot(ms(t, 150));
+            } else {
+                a.tick(ms(t, 210));
+            }
+            let back = if stop { 150 } else { 210 };
+            assert_eq!(a.frame(), 1, "back in from its entry (stop_oneshot {stop})");
+            a.tick(ms(t, back + 100));
+            assert_eq!(a.frame(), 2);
+            // It ends in place: its exit plays.
+            a.set_layer(7, None, ms(t, back + 100));
+            assert!(a.in_exit(), "the exit armed again (stop_oneshot {stop})");
+            assert_eq!([back + 150, back + 250, back + 350].map(|n| a.frame_at(ms(t, n))), [2, 3, 9]);
+        }
+        // The other order: the walk on, then the same loop set again.
+        let mut b = Animator::new(0);
+        b.set_layer_looped(0, Some(ranged()), false, t);
+        b.tick(ms(t, 100));
+        b.cut(ms(t, 110));
+        b.play(vec![(6, 100)], ms(t, 110));
+        b.set_layer_looped(0, Some(ranged()), false, ms(t, 120));
+        b.set_layer_looped(0, Some(ranged()), false, ms(t, 130));
+        b.tick(ms(t, 210));
+        assert_eq!(b.frame(), 1, "its entry again");
+        // While the interrupting one-shot plays, nothing arms: a layer change then has no exit.
+        let mut c = Animator::new(0);
+        c.set_layer_looped(0, Some(ranged()), false, t);
+        c.tick(ms(t, 100));
+        c.cut(ms(t, 110));
+        c.play(vec![(6, 500)], ms(t, 110));
+        c.set_layer_looped(0, Some(ranged()), false, ms(t, 120));
+        c.set_layer(7, None, ms(t, 130));
+        assert!(!c.in_exit());
+        assert_eq!(c.frame(), 6, "the walk goes on");
+        c.tick(ms(t, 610));
         assert_eq!(c.frame(), 7);
+    }
+
+    #[test]
+    fn back_on_during_the_pass_with_a_one_shot_queued_lets_the_hold_finish() {
+        let t = Instant::now();
+        let mut a = Animator::new(0);
+        a.set_layer_looped(0, Some(ranged()), false, t);
+        a.tick(ms(t, 100));
+        a.set_layer(7, None, ms(t, 150));
+        a.play(vec![(6, 100)], ms(t, 160));
+        a.set_layer_looped(0, Some(ranged()), false, ms(t, 170));
+        assert!(!a.in_exit());
+        assert_eq!(a.frame(), 2, "the hold on screen");
+        assert_eq!(a.deadline(), Some(ms(t, 200)), "on its own deadline");
+        assert_eq!([199, 200, 299, 300].map(|n| a.frame_at(ms(t, n))), [2, 6, 6, 2], "then the one-shot, then the loop");
     }
 
     #[test]
