@@ -136,12 +136,64 @@ pub struct PoseCatalog {
     pub sprites: Vec<Sprite>,
 }
 
-/// One step of a scripted sequence: a catalog clip id, or one frame held for `ms`.
+/// One step of a scripted sequence: a catalog clip id, or one frame held for `ms`; in a one-shot
+/// beat, also a middle repeated a few times (`RepeatSteps`).
 #[derive(Deserialize, Clone, Debug, PartialEq)]
 #[serde(untagged)]
 pub enum Step {
     Clip(String),
     Hold { frame: String, ms: u32 },
+    Repeat(Box<RepeatSteps>),
+}
+
+/// A one-shot beat's `{"entry": [...], "loop": [...], "exit": [...], "repeat": [min, max]}`:
+/// the entry once, the loop `min..=max` times (picked each time it plays), the exit once (a
+/// hang fidget's rep: a few pull-ups, not one, not forever).
+#[derive(Deserialize, Clone, Debug, PartialEq)]
+pub struct RepeatSteps {
+    #[serde(default)]
+    pub entry: Vec<Step>,
+    pub r#loop: Vec<Step>,
+    #[serde(default)]
+    pub exit: Vec<Step>,
+    pub repeat: [u32; 2],
+}
+
+impl Step {
+    /// The plain steps it plays (a repeat's entry, loop and exit, each once; else itself).
+    pub fn leaves(&self) -> Vec<&Step> {
+        match self {
+            Step::Repeat(r) => r.entry.iter().chain(&r.r#loop).chain(&r.exit).flat_map(Step::leaves).collect(),
+            s => vec![s],
+        }
+    }
+}
+
+/// A one-shot beat as written: its steps, or one repeat range (a step of its own).
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum BeatDoc {
+    List(Vec<Step>),
+    One(Box<RepeatSteps>),
+}
+
+impl From<BeatDoc> for Vec<Step> {
+    fn from(b: BeatDoc) -> Vec<Step> {
+        match b {
+            BeatDoc::List(v) => v,
+            BeatDoc::One(r) => vec![Step::Repeat(r)],
+        }
+    }
+}
+
+/// A list of one-shot beats (`BeatDoc`s).
+fn beats<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Vec<Step>>, D::Error> {
+    Ok(Vec::<BeatDoc>::deserialize(d)?.into_iter().map(Into::into).collect())
+}
+
+/// Named one-shot beats (`BeatDoc`s).
+fn beat_map<'de, D: serde::Deserializer<'de>>(d: D) -> Result<BTreeMap<String, Vec<Step>>, D::Error> {
+    Ok(BTreeMap::<String, BeatDoc>::deserialize(d)?.into_iter().map(|(k, b)| (k, b.into())).collect())
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -195,20 +247,119 @@ pub struct MoodSpec {
     pub big: bool,
 }
 
-/// A clip id, or steps written inline.
+/// A looped list: a clip id, steps written inline (all of it loops), or steps with a way in and
+/// out, `{"entry": [...], "loop": [...], "exit": [...]}` (`LoopSteps`).
 #[derive(Deserialize, Clone, Debug)]
 #[serde(untagged)]
 pub enum Steps {
     Clip(String),
     Inline(Vec<Step>),
+    Ranged(LoopSteps),
+}
+
+impl Default for Steps {
+    fn default() -> Self {
+        Steps::Inline(Vec::new())
+    }
+}
+
+/// A looped list's range: `entry` plays once on entry, `loop` repeats while the loop holds,
+/// `exit` plays once when it ends in place (not when a drag, a teleport or sleep cuts it).
+#[derive(Deserialize, Clone, Debug, Default)]
+pub struct LoopSteps {
+    #[serde(default)]
+    pub entry: Vec<Step>,
+    #[serde(default)]
+    pub r#loop: Vec<Step>,
+    #[serde(default)]
+    pub exit: Vec<Step>,
 }
 
 impl Steps {
+    /// Every step, in the order they first play (entry, loop, exit).
     pub fn as_steps(&self) -> Vec<Step> {
+        self.parts().concat()
+    }
+
+    /// Entry, loop, exit (a plain list: all loop).
+    pub fn parts(&self) -> [Vec<Step>; 3] {
         match self {
-            Steps::Clip(id) => vec![Step::Clip(id.clone())],
-            Steps::Inline(v) => v.clone(),
+            Steps::Clip(id) => [Vec::new(), vec![Step::Clip(id.clone())], Vec::new()],
+            Steps::Inline(v) => [Vec::new(), v.clone(), Vec::new()],
+            Steps::Ranged(r) => [r.entry.clone(), r.r#loop.clone(), r.exit.clone()],
         }
+    }
+}
+
+/// Where moods.json takes a loop range: its looped lists (`Steps`), and (with `repeat`) its
+/// one-shot beats.
+const LOOPED_KEYS: &str = "a mood's `loop`, `energy.<band>.idle.loop`, `brain.floorSit.loop`, `brain.sulkSit.loop` or `music.windowLoop`";
+const BEAT_KEYS: &str = "`activities`, `life.fidgets`, `life.poses`, `energy.<band>.fidgets`/`activities`, `brain.hangFidgets` or `perch.activities`";
+
+fn looped_path(p: &[&str]) -> bool {
+    matches!(p, ["moods", _, "loop"] | ["energy", _, "idle", "loop"] | ["brain", "floorSit" | "sulkSit", "loop"] | ["music", "windowLoop"])
+}
+
+/// A one-shot beat (`beats`, `beat_map`), or a step of one.
+fn beat_path(p: &[&str]) -> bool {
+    let slot = |p: &[&str]| {
+        matches!(
+            p,
+            ["activities", _] | ["life", "fidgets" | "poses", _] | ["energy", _, "fidgets" | "activities", _] | ["brain", "hangFidgets", _] | ["perch", "activities", _]
+        )
+    };
+    slot(p) || p.split_last().is_some_and(|(i, rest)| i.parse::<usize>().is_ok() && slot(rest))
+}
+
+/// A loop range where it can't go, or with a key it doesn't know, read off the raw moods.json
+/// (the typed parse would only say "invalid type" or "did not match any variant"). A range is an
+/// object of nothing but `entry`, `loop`, `exit` and `repeat` (a mood has its `base`).
+fn loop_range_errors(v: &serde_json::Value, path: &mut Vec<String>, errors: &mut Vec<String>) {
+    match v {
+        serde_json::Value::Object(o) => {
+            let p: Vec<&str> = path.iter().map(String::as_str).collect();
+            let at = if path.is_empty() { "(top)".to_string() } else { path.join(".") };
+            let unknown = |allowed: &[&str], errors: &mut Vec<String>| {
+                for k in o.keys().filter(|k| !allowed.contains(&k.as_str())) {
+                    errors.push(format!("moods.json {at}: unknown key `{k}` in a loop range ({})", allowed.join("|")));
+                }
+            };
+            if looped_path(&p) {
+                if o.contains_key("repeat") {
+                    errors.push(format!("moods.json {at}: `repeat` is for one-shot beats ({BEAT_KEYS}); a looped list repeats while it holds"));
+                }
+                unknown(&["entry", "loop", "exit", "repeat"], errors);
+            } else if beat_path(&p) && (o.contains_key("loop") || o.contains_key("repeat")) {
+                unknown(&["entry", "loop", "exit", "repeat"], errors);
+                if !o.contains_key("repeat") {
+                    errors.push(format!("moods.json {at}: a one-shot beat's loop range needs `repeat`: [min, max] (it plays once, not forever)"));
+                }
+            } else if !o.is_empty() && o.keys().all(|k| matches!(k.as_str(), "entry" | "loop" | "exit" | "repeat")) {
+                errors.push(format!("moods.json {at}: a loop range only goes on a looped list ({LOOPED_KEYS}) or, with `repeat`, a one-shot beat ({BEAT_KEYS})"));
+            }
+            for (k, x) in o {
+                path.push(k.clone());
+                loop_range_errors(x, path, errors);
+                path.pop();
+            }
+        }
+        serde_json::Value::Array(a) => {
+            for (i, x) in a.iter().enumerate() {
+                path.push(format!("{i}"));
+                loop_range_errors(x, path, errors);
+                path.pop();
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A looped list's range is well formed: something to loop between its entry and exit.
+fn check_loop_range(what: &str, l: &Steps, errors: &mut Vec<String>) {
+    if let Steps::Ranged(r) = l
+        && r.r#loop.is_empty()
+    {
+        errors.push(format!("moods.json {what}: the loop range's `loop` is empty (entry and exit need steps to loop between)"));
     }
 }
 
@@ -233,9 +384,11 @@ pub struct Life {
     /// Her micro-fidgets: short beats in place (a blink, a look, a mouth, a wink, a sleepy
     /// blink), a rotation pool the restless idle draws from every few seconds, never the same
     /// twice running. Empty: the activities' face beats.
+    #[serde(deserialize_with = "beats")]
     pub fidgets: Vec<Vec<Step>>,
     /// Her bigger idle poses by name (`lean`, `sit_floor`, ...): in, a hold, out, in place. The
     /// restless idle reaches for them as she gets bored. Empty: the activities' gestures.
+    #[serde(deserialize_with = "beat_map")]
     pub poses: BTreeMap<String, Vec<Step>>,
 }
 
@@ -264,7 +417,7 @@ pub struct PerchSpec {
     /// Seat frame per mood key; moods not listed use `base`.
     #[serde(default)]
     pub moods: BTreeMap<String, String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "beats")]
     pub activities: Vec<Vec<Step>>,
     #[serde(default)]
     pub click: Vec<Step>,
@@ -380,9 +533,10 @@ pub struct MusicSpec {
     #[serde(default)]
     pub window: Option<String>,
     /// On a window top: these seat-anchored steps loop instead of the `window` frame (a perched
-    /// music loop, typically a strip). Empty, not worn, or its cells not in yet: `window`.
+    /// music loop, typically a strip; a loop range takes an entry and an exit). Empty, not
+    /// worn, or its cells not in yet: `window`.
     #[serde(default)]
-    pub window_loop: Vec<Step>,
+    pub window_loop: Steps,
     #[serde(default = "bpm_default")]
     pub bpm: f32,
     /// Note images (any size, square), used in turn.
@@ -457,7 +611,7 @@ pub struct Behaviour {
     pub font_files: Vec<String>,
     #[serde(default)]
     pub moods: BTreeMap<String, MoodSpec>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "beats")]
     pub activities: Vec<Vec<Step>>,
     /// Her energy's bands (BRIEF-alive S11): their own activities, gaps and idle; absent, the
     /// defaults (`activities`, `life.activityGapMs`, the idle mood).
@@ -853,6 +1007,7 @@ pub struct BrainSpec {
     /// Hanging from a top bar or a window (`poses.hang`): fidgets by name (`pullup`, `catch`,
     /// `wrist_glance`, ...), `ceiling`-anchored frames or strips, registered on the hang pose's
     /// grip. Empty: the hang's swing alone, as before.
+    #[serde(deserialize_with = "beat_map")]
     pub hang_fidgets: BTreeMap<String, Vec<Step>>,
     /// A glance (the pointer coming by, a window gaining focus), then back: steps,
     /// `@look` turning toward it. Empty: `@look` alone.
@@ -984,6 +1139,7 @@ fn step_clip_ids(b: &Behaviour) -> Vec<&str> {
         match &m.r#loop {
             Some(Steps::Inline(l)) => lists.push(l),
             Some(Steps::Clip(c)) => ids.push(c),
+            Some(Steps::Ranged(r)) => lists.extend([&r.entry, &r.r#loop, &r.exit].map(Vec::as_slice)),
             None => {}
         }
     }
@@ -1003,7 +1159,11 @@ fn step_clip_ids(b: &Behaviour) -> Vec<&str> {
         lists.push(&k.steps);
     }
     if let Some(m) = &b.music {
-        lists.push(&m.window_loop);
+        match &m.window_loop {
+            Steps::Inline(l) => lists.push(l),
+            Steps::Clip(c) => ids.push(c),
+            Steps::Ranged(r) => lists.extend([&r.entry, &r.r#loop, &r.exit].map(Vec::as_slice)),
+        }
     }
     let br = &b.brain;
     let own = [&br.satisfied.pat, &br.satisfied.other, &br.sulk, &br.wave, &br.greet, &br.greet_morning, &br.stretch, &br.nap_wake, &br.startle, &br.curious, &br.bat, &br.missed, &br.make_up, &br.cold, &br.nap_wake_greet, &br.glance];
@@ -1017,9 +1177,9 @@ fn step_clip_ids(b: &Behaviour) -> Vec<&str> {
     if let Some(l) = &b.land {
         lists.extend([&l.soft, &l.hard, &l.perch].map(Vec::as_slice));
     }
-    ids.extend(lists.iter().flat_map(|l| l.iter()).filter_map(|s| match s {
+    ids.extend(lists.iter().flat_map(|l| l.iter()).flat_map(Step::leaves).filter_map(|s| match s {
         Step::Clip(c) => Some(c.as_str()),
-        Step::Hold { .. } => None,
+        Step::Hold { .. } | Step::Repeat(_) => None,
     }));
     ids
 }
@@ -1139,8 +1299,10 @@ pub struct EnergySpec {
 #[serde(rename_all = "camelCase", default)]
 pub struct EnergyBand {
     /// Instead of `activities` (empty: those).
+    #[serde(deserialize_with = "beats")]
     pub activities: Vec<Vec<Step>>,
     /// Instead of `life.fidgets` in this band (empty: those): sleepy blinks at night.
+    #[serde(deserialize_with = "beats")]
     pub fidgets: Vec<Vec<Step>>,
     /// The gap between activities [min, max] (absent: `life.activityGapMs`).
     pub gap_ms: Option<[u64; 2]>,
@@ -1397,8 +1559,18 @@ impl Pack {
             bail!("pack: sprites.json schemaVersion {} (expected 2)", catalog.schema_version);
         }
         let behaviour: Behaviour = match std::fs::read_to_string(dir.join("moods.json")) {
-            Ok(s) => serde_json::from_str(&s)
-                .with_context(|| format!("pack: {}/moods.json is invalid", dir.display()))?,
+            Ok(s) => {
+                // A loop range where it can't go: said plainly, before the typed parse's
+                // "invalid type: map".
+                if let Ok(raw) = serde_json::from_str::<serde_json::Value>(&s) {
+                    let mut bad = Vec::new();
+                    loop_range_errors(&raw, &mut Vec::new(), &mut bad);
+                    if !bad.is_empty() {
+                        bail!("pack {} failed validation:\n  - {}", dir.display(), bad.join("\n  - "));
+                    }
+                }
+                serde_json::from_str(&s).with_context(|| format!("pack: {}/moods.json is invalid", dir.display()))?
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Behaviour::default(),
             Err(e) => return Err(e).context("pack: cannot read moods.json"),
         };
@@ -1648,24 +1820,37 @@ impl Pack {
 
         // Behaviour references.
         let check_steps = |what: &str, steps: &[Step], errors: &mut Vec<String>, pack: &Pack| {
-            for s in steps {
-                match s {
-                    Step::Clip(id) if pack.clip(id).is_none() => {
-                        errors.push(format!("moods.json {what}: clip `{id}` does not exist"))
+            for st in steps {
+                if let Step::Repeat(r) = st {
+                    if r.r#loop.is_empty() {
+                        errors.push(format!("moods.json {what}: the repeat's `loop` is empty"));
                     }
-                    Step::Hold { frame, .. } if !pack.index.contains_key(frame) => {
-                        errors.push(format!("moods.json {what}: frame `{frame}` does not resolve"))
+                    if r.repeat[0] == 0 || r.repeat[0] > r.repeat[1] {
+                        errors.push(format!("moods.json {what}: repeat {:?} (`[min, max]`, 1 <= min <= max)", r.repeat));
                     }
-                    _ => {}
+                }
+                // A repeat's own `@look`s resolve as they play, as a beat's do.
+                let nested = matches!(st, Step::Repeat(_));
+                for s in st.leaves() {
+                    match s {
+                        Step::Clip(id) if pack.clip(id).is_none() && !(nested && id.starts_with('@')) => {
+                            errors.push(format!("moods.json {what}: clip `{id}` does not exist"))
+                        }
+                        Step::Hold { frame, .. } if !pack.index.contains_key(frame) => {
+                            errors.push(format!("moods.json {what}: frame `{frame}` does not resolve"))
+                        }
+                        _ => {}
+                    }
                 }
             }
         };
         // Steps shown on a window top: seat-anchored frames only.
         let seat_only = |what: &str, steps: &[Step], errors: &mut Vec<String>, pack: &Pack| {
-            for st in steps {
+            for st in steps.iter().flat_map(Step::leaves) {
                 let ids: Vec<String> = match st {
                     Step::Hold { frame, .. } => vec![frame.clone()],
                     Step::Clip(c) => pack.clip(c).map(|c| c.frames.iter().map(|f| f.id.clone()).collect()).unwrap_or_default(),
+                    Step::Repeat(_) => Vec::new(),
                 };
                 for id in ids {
                     if pack.index.get(&id).is_some_and(|&i| pack.frames[i].anchor.name != "seat") {
@@ -1683,6 +1868,7 @@ impl Pack {
             }
             if let Some(l) = &m.r#loop {
                 check_steps(&format!("mood `{name}` loop"), &l.as_steps(), &mut errors, &pack);
+                check_loop_range(&format!("mood `{name}` loop"), l, &mut errors);
             }
             check_steps(&format!("mood `{name}` entry"), m.entry.as_deref().unwrap_or(&[]), &mut errors, &pack);
             check_steps(&format!("mood `{name}` exit"), m.exit.as_deref().unwrap_or(&[]), &mut errors, &pack);
@@ -1706,6 +1892,7 @@ impl Pack {
                 }
                 if let Some(l) = &m.r#loop {
                     check_steps(&format!("energy.{name}.idle loop"), &l.as_steps(), &mut errors, &pack);
+                    check_loop_range(&format!("energy.{name}.idle loop"), l, &mut errors);
                 }
             }
             if band.gap_ms.is_some_and(|[a, b]| a == 0 || a > b) {
@@ -1775,6 +1962,11 @@ impl Pack {
                 }
                 check_steps("brain.floorSit entry", fs.entry.as_deref().unwrap_or(&[]), &mut errors, &pack);
                 check_steps("brain.floorSit exit", fs.exit.as_deref().unwrap_or(&[]), &mut errors, &pack);
+            }
+            for (k, sit) in [("floorSit", &b.floor_sit), ("sulkSit", &b.sulk_sit)] {
+                if let Some(l) = sit.as_ref().and_then(|s| s.r#loop.as_ref()) {
+                    check_loop_range(&format!("brain.{k} loop"), l, &mut errors);
+                }
             }
             if let Some(ss) = &b.sulk_sit
                 && !pack.index.contains_key(&ss.base)
@@ -1864,10 +2056,11 @@ impl Pack {
             check_steps("land.soft", &l.soft, &mut errors, &pack);
             check_steps("land.hard", &l.hard, &mut errors, &pack);
             check_steps("land.perch", &l.perch, &mut errors, &pack);
-            for st in &l.perch {
+            for st in l.perch.iter().flat_map(Step::leaves) {
                 let ids: Vec<String> = match st {
                     Step::Hold { frame, .. } => vec![frame.clone()],
                     Step::Clip(c) => pack.clip(c).map(|c| c.frames.iter().map(|f| f.id.clone()).collect()).unwrap_or_default(),
+                    Step::Repeat(_) => Vec::new(),
                 };
                 for id in ids {
                     if pack.index.get(&id).is_some_and(|&i| pack.frames[i].anchor.name != "seat") {
@@ -1885,10 +2078,11 @@ impl Pack {
         // arrivals' other drawings, the hearts' sprite.
         {
             let anchored = |what: &str, want: &str, steps: &[Step], errors: &mut Vec<String>, pack: &Pack| {
-                for st in steps {
+                for st in steps.iter().flat_map(Step::leaves) {
                     let ids: Vec<String> = match st {
                         Step::Hold { frame, .. } => vec![frame.clone()],
                         Step::Clip(c) => pack.clip(c).map(|c| c.frames.iter().map(|f| f.id.clone()).collect()).unwrap_or_default(),
+                        Step::Repeat(_) => Vec::new(),
                     };
                     for id in ids {
                         if pack.index.get(&id).is_some_and(|&i| pack.frames[i].anchor.name != want) {
@@ -1916,8 +2110,10 @@ impl Pack {
                 anchored(&format!("brain.hangFidgets.{k}"), "ceiling", st, &mut errors, &pack);
             }
             if let Some(m) = &b.music {
-                check_steps("music.windowLoop", &m.window_loop, &mut errors, &pack);
-                anchored("music.windowLoop", "seat", &m.window_loop, &mut errors, &pack);
+                let wl = m.window_loop.as_steps();
+                check_steps("music.windowLoop", &wl, &mut errors, &pack);
+                anchored("music.windowLoop", "seat", &wl, &mut errors, &pack);
+                check_loop_range("music.windowLoop", &m.window_loop, &mut errors);
             }
             if let Some(a) = &b.arrive {
                 for (k, alts) in &a.alt {
@@ -2022,6 +2218,16 @@ impl Pack {
     /// Flatten steps into (frame index, ms) pairs.
     pub fn flatten(&self, steps: &[Step]) -> Vec<(usize, u32)> {
         let mut out = Vec::new();
+        self.flatten_into(steps, &mut out);
+        // A frame the outfit she wears doesn't draw: the whole sequence is skipped (never one
+        // drawing from another look in it).
+        if out.iter().any(|&(i, _)| !self.wears(i)) {
+            return Vec::new();
+        }
+        out
+    }
+
+    fn flatten_into(&self, steps: &[Step], out: &mut Vec<(usize, u32)>) {
         for s in steps {
             match s {
                 Step::Clip(id) => {
@@ -2034,14 +2240,18 @@ impl Pack {
                         out.push((i, *ms));
                     }
                 }
+                // Its loop a few times (`repeat`, picked as it plays), between its entry and exit.
+                Step::Repeat(r) => {
+                    let [lo, hi] = [r.repeat[0].max(1), r.repeat[1].max(r.repeat[0]).max(1)];
+                    let n = lo + crate::anim::Rng::seeded().pick((hi - lo + 1) as usize) as u32;
+                    self.flatten_into(&r.entry, out);
+                    for _ in 0..n {
+                        self.flatten_into(&r.r#loop, out);
+                    }
+                    self.flatten_into(&r.exit, out);
+                }
             }
         }
-        // A frame the outfit she wears doesn't draw: the whole sequence is skipped (never one
-        // drawing from another look in it).
-        if out.iter().any(|&(i, _)| !self.wears(i)) {
-            return Vec::new();
-        }
-        out
     }
 
     /// A state's colour: the pack's `tones` entry for `key`, else the theme's.
@@ -2228,6 +2438,92 @@ pub mod tests {
         assert!(e.contains("brain.hangFidgets.catch: frame `sheet#0` needs a `ceiling` anchor"), "{e}");
         assert!(e.contains("music.windowLoop: frame `greet#0` needs a `seat` anchor"), "{e}");
         assert!(e.contains("arrive.alt: unknown arrival `warp`") && !e.contains("arrive.alt.launch"), "{e}");
+    }
+
+    #[test]
+    fn a_looped_list_takes_a_loop_range_and_a_plain_list_loops_whole() {
+        let sit = |ms: u32| json!({"frame": "sit", "ms": ms});
+        let moods = json!({"perch": {"base": "sit"},
+            "moods": {"idle": {"base": "neutral", "entry": [{"frame": "neutral", "ms": 20}],
+                               "loop": {"entry": [{"frame": "neutral", "ms": 50}], "loop": [{"frame": "neutral", "ms": 100}]}},
+                      "thinking": {"base": "neutral", "loop": [{"frame": "neutral", "ms": 100}]}},
+            "music": {"floor": "neutral", "notes": [], "windowLoop": {"entry": [sit(130)], "loop": [sit(80), sit(110)], "exit": [sit(190)]}}});
+        let p = pack_with("looprange", moods).unwrap();
+        let [entry, body, exit] = p.behaviour.music.as_ref().unwrap().window_loop.parts();
+        assert_eq!((entry.len(), body.len(), exit.len()), (1, 2, 1));
+        assert_eq!(p.flatten(&body), vec![(p.index["sit"], 80), (p.index["sit"], 110)]);
+        // A mood's own entry is the mood's; its loop's entry is the loop's.
+        let idle = &p.behaviour.moods["idle"];
+        assert_eq!(idle.entry.as_ref().map(Vec::len), Some(1));
+        assert!(matches!(idle.r#loop.as_ref().unwrap(), Steps::Ranged(r) if r.entry.len() == 1 && r.exit.is_empty()));
+        // A plain list: all of it loops (no entry, no exit), as before.
+        let [i, b, o] = p.behaviour.moods["thinking"].r#loop.as_ref().unwrap().parts();
+        assert!(i.is_empty() && b.len() == 1 && o.is_empty());
+        let [i, b, o] = Steps::Clip("blink".into()).parts();
+        assert!(i.is_empty() && b == vec![Step::Clip("blink".into())] && o.is_empty());
+    }
+
+    #[test]
+    fn a_one_shot_beat_repeats_its_middle_a_few_times() {
+        let n = |ms: u32| json!({"frame": "neutral", "ms": ms});
+        let rep = json!({"entry": [n(10)], "loop": [n(20), n(30)], "exit": [n(40)], "repeat": [2, 4]});
+        let hang = json!({"id": "hang", "file": "l.png", "anchor": {"name": "ceiling", "x": 4, "y": 1}, "visibleBounds": {"x": 1, "y": 1, "width": 6, "height": 6}});
+        let h = |ms: u32| json!({"frame": "hang", "ms": ms});
+        let pullups = json!({"entry": [h(100)], "loop": [h(200), h(200)], "exit": [h(100)], "repeat": [2, 5]});
+        let moods = json!({"life": {"fidgets": [rep.clone(), [n(5), rep.clone()]], "poses": {"lean": rep.clone()}}, "extraFrames": [hang],
+                           "brain": {"poses": {"hang": "hang"}, "hangFidgets": {"pullup": pullups}}, "activities": [[n(5)]]});
+        let p = pack_with("repeat", moods).unwrap();
+        let b = &p.behaviour;
+        // As a beat, or as a step of one: one `Repeat` step.
+        assert!(matches!(b.life.fidgets[0].as_slice(), [Step::Repeat(r)] if r.repeat == [2, 4]));
+        assert!(matches!(b.life.fidgets[1].as_slice(), [Step::Hold { .. }, Step::Repeat(_)]));
+        assert!(matches!(b.life.poses["lean"].as_slice(), [Step::Repeat(_)]));
+        assert!(matches!(b.brain.hang_fidgets["pullup"].as_slice(), [Step::Repeat(r)] if r.repeat == [2, 5]), "a hang fidget's rep");
+        // Each play: in once, the middle 2-4 times, out once.
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..200 {
+            let seq = p.flatten(&b.life.fidgets[0]);
+            let ms: Vec<u32> = seq.iter().map(|s| s.1).collect();
+            let reps = (ms.len() - 2) / 2;
+            assert!((2..=4).contains(&reps) && ms.len() == 2 + 2 * reps, "{ms:?}");
+            assert_eq!((ms[0], ms[ms.len() - 1]), (10, 40));
+            assert!(ms[1..ms.len() - 1].chunks(2).all(|c| c == [20, 30]));
+            seen.insert(reps);
+        }
+        assert!(seen.len() > 1, "the count varies");
+        // Validated like any steps: a bad repeat, an empty middle, a frame that isn't there.
+        let bad = |r: serde_json::Value| format!("{:#}", pack_with("repeat-bad", json!({"life": {"fidgets": [r]}})).err().unwrap());
+        assert!(bad(json!({"loop": [n(1)], "repeat": [0, 2]})).contains("life.fidgets #0: repeat [0, 2]"));
+        assert!(bad(json!({"loop": [n(1)], "repeat": [3, 2]})).contains("repeat [3, 2] (`[min, max]`, 1 <= min <= max)"));
+        assert!(bad(json!({"loop": [], "repeat": [1, 2]})).contains("life.fidgets #0: the repeat's `loop` is empty"));
+        assert!(bad(json!({"loop": [{"frame": "nope", "ms": 1}], "repeat": [1, 2]})).contains("frame `nope` does not resolve"));
+        assert!(bad(json!({"entry": [n(1)], "loop": [n(1)]})).contains("moods.json life.fidgets.0: a one-shot beat's loop range needs `repeat`"));
+    }
+
+    #[test]
+    fn a_bad_loop_range_fails_the_check_plainly() {
+        let n = |ms: u32| json!({"frame": "neutral", "ms": ms});
+        let err = |name: &str, m: serde_json::Value| format!("{:#}", pack_with(name, m).err().unwrap());
+        // An empty loop between an entry and an exit.
+        let e = err("lr-empty", json!({"moods": {"idle": {"base": "neutral", "loop": {"entry": [n(50)], "loop": [], "exit": [n(50)]}}}}));
+        assert!(e.contains("mood `idle` loop: the loop range's `loop` is empty"), "{e}");
+        let e = err("lr-empty-w", json!({"music": {"floor": "neutral", "notes": [], "windowLoop": {"entry": [n(50)]}}}));
+        assert!(e.contains("music.windowLoop: the loop range's `loop` is empty"), "{e}");
+        // A range on a list that doesn't loop: said where, not "invalid type: map".
+        let e = err("lr-oneshot", json!({"moods": {"idle": {"base": "neutral", "entry": {"entry": [n(50)], "loop": [n(50)]}}}}));
+        assert!(e.contains("moods.json moods.idle.entry: a loop range only goes on a looped list"), "{e}");
+        let e = err("lr-click", json!({"click": {"head": {"loop": [n(50)], "exit": [n(50)]}}}));
+        assert!(e.contains("moods.json click.head: a loop range only goes on a looped list"), "{e}");
+        // A key it doesn't know (`outro`), or `repeat` on a list that loops anyway.
+        let e = err("lr-key", json!({"energy": {"low": {"idle": {"base": "neutral", "loop": {"loop": [n(50)], "outro": [n(50)]}}}}}));
+        assert!(e.contains("energy.low.idle.loop: unknown key `outro` in a loop range (entry|loop|exit|repeat)"), "{e}");
+        let e = err("lr-rep", json!({"music": {"floor": "neutral", "notes": [], "windowLoop": {"loop": [n(50)], "repeat": [1, 2]}}}));
+        assert!(e.contains("music.windowLoop: `repeat` is for one-shot beats"), "{e}");
+        // Ranges don't nest.
+        let e = err("lr-nest", json!({"moods": {"idle": {"base": "neutral", "loop": {"loop": [{"loop": [n(5)], "repeat": [1, 2]}]}}}}));
+        assert!(e.contains("moods.idle.loop.loop.0: a loop range only goes on a looped list"), "{e}");
+        // Well formed: loads.
+        assert!(pack_with("lr-ok", json!({"brain": {"floorSit": {"base": "neutral", "loop": {"loop": [n(50)], "exit": [n(50)]}}}})).is_ok());
     }
 
     #[test]
@@ -2491,6 +2787,7 @@ pub mod tests {
             s.iter().map(|x| match x {
                 Step::Hold { frame, .. } => frame.clone(),
                 Step::Clip(c) => c.clone(),
+                Step::Repeat(_) => String::new(),
             })
             .collect()
         };

@@ -1847,7 +1847,7 @@ impl Avatar {
         let l = self.layout;
         let Some(si) = self.pack.motions.walk else { return };
         // Its cells at their own ms (`ms`, a WebP's delays).
-        let Some(cells) = self.pack.anim.as_ref().map(|a| a.strips[si].played(1)) else { return };
+        let Some(cells) = self.pack.anim.as_ref().map(|a| a.strips[si].ranged(a.strips[si].played(1))) else { return };
         let Some(first) = self.pack.strip_first.get(si).copied().flatten() else { return };
         let Some(wm) = self.brain.as_mut().and_then(|h| h.walk.as_mut()) else { return };
         wm.started = true;
@@ -2633,6 +2633,13 @@ impl Avatar {
                     Step::Hold { frame: f.into(), ms: 1400 }
                 }
                 Step::Clip(id) if id == "@point" => self.point_step(right),
+                // A one-shot beat's repeat: its own looks and points too.
+                Step::Repeat(r) => Step::Repeat(Box::new(crate::pack::RepeatSteps {
+                    entry: self.resolve_steps_at(&r.entry, c),
+                    r#loop: self.resolve_steps_at(&r.r#loop, c),
+                    exit: self.resolve_steps_at(&r.exit, c),
+                    repeat: r.repeat,
+                })),
                 s => s.clone(),
             })
             .collect()
@@ -3128,7 +3135,7 @@ impl Avatar {
 
     /// The brain's part of `layer()`: an approach pose always; a rest pose only while idle or
     /// sleepy (a session mood wins over it).
-    pub(super) fn brain_layer(&self, m: Mood) -> Option<(usize, Option<Seq>)> {
+    pub(super) fn brain_layer(&self, m: Mood) -> Option<(usize, Option<crate::anim::Looped>)> {
         if let Placement::Pose { frame } = self.placement {
             return Some((frame, None));
         }

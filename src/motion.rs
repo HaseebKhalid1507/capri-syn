@@ -4,7 +4,7 @@
 //! the walk's path and timing, the dance decision and tempo, the rate caps, the click burst's
 //! colour layers. The view (`motionview.rs`) shows them.
 
-use crate::anim::Seq;
+use crate::anim::{Ranged, Seq};
 use crate::shape::ShapeRect;
 use std::time::{Duration, Instant};
 
@@ -101,23 +101,27 @@ fn progress(t: f32, secs: f32) -> f32 {
     (d / total).clamp(0.0, 1.0)
 }
 
-/// The walk's cells: its strip from `first`, positions each with its own ms (`Strip::played`),
-/// round and round, at least `secs` long, then one more (the oneshot under the walk; it is
-/// stopped where she arrives).
-pub fn walk_seq_timed(first: usize, cells: &[(u32, u32)], secs: f32) -> Seq {
-    if cells.is_empty() {
+/// The walk's cells: its strip from `first`, positions each with its own ms (`Strip::played`):
+/// its entry once, its loop round and round until, with its exit after, at least `secs` long,
+/// then one more pass step and the exit (the oneshot under the walk; it is stopped where she
+/// arrives). A strip without a range: all of it round and round.
+pub fn walk_seq_timed(first: usize, cells: &Ranged<(u32, u32)>, secs: f32) -> Seq {
+    if cells.body.is_empty() {
         return Vec::new();
     }
     let want = (secs.max(0.0) * 1000.0) as u64;
-    let mut out = Vec::new();
-    let mut t = 0u64;
-    for &(c, ms) in cells.iter().cycle() {
-        out.push((first + c as usize, ms.max(1)));
-        if t >= want {
+    let exit: u64 = cells.exit.iter().map(|c| u64::from(c.1.max(1))).sum();
+    let at = |&(c, ms): &(u32, u32)| (first + c as usize, ms.max(1));
+    let mut out: Seq = cells.entry.iter().map(at).collect();
+    let mut t: u64 = out.iter().map(|c| u64::from(c.1)).sum();
+    for c in cells.body.iter().cycle() {
+        out.push(at(c));
+        if t + exit >= want {
             break;
         }
-        t += u64::from(ms.max(1));
+        t += u64::from(c.1.max(1));
     }
+    out.extend(cells.exit.iter().map(at));
     out
 }
 
@@ -378,7 +382,7 @@ mod tests {
 
     #[test]
     fn the_walk_cells_cycle_and_cover_the_walk() {
-        let s = walk_seq_timed(10, &(0..12).map(|i| (i, 83)).collect::<Vec<_>>(), 2.0);
+        let s = walk_seq_timed(10, &Ranged::whole((0..12).map(|i| (i, 83)).collect()), 2.0);
         assert!(s.iter().map(|c| c.1).sum::<u32>() >= 2000);
         assert_eq!(s[0].0, 10);
         assert_eq!(s[12].0, 10);
@@ -390,9 +394,14 @@ mod tests {
     fn per_cell_timing_carries_through_the_walk_the_dance_and_a_held_loop() {
         // A WebP's delays: 100, 300, 100 ms.
         let cells = [(0, 100), (1, 300), (2, 100)];
-        let w = walk_seq_timed(10, &cells, 0.9);
+        let w = walk_seq_timed(10, &Ranged::whole(cells.to_vec()), 0.9);
         assert_eq!(w, vec![(10, 100), (11, 300), (12, 100), (10, 100), (11, 300), (12, 100)], "round and round, past the walk's end");
-        assert!(walk_seq_timed(10, &[], 1.0).is_empty());
+        assert!(walk_seq_timed(10, &Ranged::whole(Vec::new()), 1.0).is_empty());
+        // A range: in once, the loop until the exit would end past the walk (one step more, as
+        // a plain walk), then out once.
+        let r = Ranged::by_pos(vec![(0, 50), (1, 100), (2, 100), (3, 70)], 4, 1, 1);
+        let w = walk_seq_timed(10, &r, 0.5);
+        assert_eq!(w, vec![(10, 50), (11, 100), (12, 100), (11, 100), (12, 100), (11, 100), (13, 70)]);
         // Uniform cells: as `dance_ms`.
         assert_eq!(dance_seq(Some(60.0), &[(0, 63); 16]), vec![(0, 88); 16]);
         // Uneven: each keeps its share; unknown tempo, the drawing's own.

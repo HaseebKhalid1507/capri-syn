@@ -24,7 +24,7 @@ mod cutinview;
 #[path = "menuview.rs"]
 mod menuview;
 
-use crate::anim::{Animator, Mood, Rng, Seq};
+use crate::anim::{Animator, Looped, Mood, Rng, Seq};
 use crate::variants::PoolKey;
 use crate::control::Command;
 use crate::edges;
@@ -941,9 +941,10 @@ enum ActivityPlace<'a> {
 fn gesture(steps: &[crate::pack::Step]) -> bool {
     use crate::pack::Step;
     const BODY: [&str; 7] = ["hand_on_hip", "arms_crossed", "chin_rest", "idle-point", "idle-shrug", "point_", "shrug"];
-    steps.iter().any(|s| match s {
+    steps.iter().flat_map(Step::leaves).any(|s| match s {
         Step::Clip(id) => id == "@hop" || BODY.iter().any(|b| id.starts_with(b)),
         Step::Hold { frame, .. } => BODY.iter().any(|b| frame.starts_with(b)),
+        Step::Repeat(_) => false,
     })
 }
 
@@ -975,6 +976,16 @@ enum Placement {
     Pose { frame: usize },
     /// On `win`'s top edge; `dx` = seat (or feet) x minus the window's left edge.
     Perch { win: u32, sit: bool, dx: i32 },
+}
+
+impl Placement {
+    /// The same place for a loop's exit: the same window top (along it or not), the same pose.
+    fn same_spot(self, o: Placement) -> bool {
+        match (self, o) {
+            (Placement::Perch { win, sit, .. }, Placement::Perch { win: w, sit: s, .. }) => win == w && sit == s,
+            _ => self == o,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1155,6 +1166,9 @@ pub struct Avatar {
     /// Quit at the next tick (from where there is no `cx`).
     quit_requested: bool,
     placement: Placement,
+    /// Where she was when the layer was last set: a loop ended anywhere else is cut, not
+    /// played out (its exit is drawn for where she was).
+    layer_place: Placement,
     /// Ground point to fall back to when a perch ends.
     home: (i32, i32),
     /// What touches a perch edge, x relative to the seat (sitting) / feet (standing).
@@ -1464,6 +1478,7 @@ impl Avatar {
             prompt_h: None,
             quit_requested: false,
             placement: Placement::Ground,
+            layer_place: Placement::Ground,
             home,
             contact: [None, None],
             shadow: None,
@@ -1588,12 +1603,11 @@ impl Avatar {
 
     /// Music on a window top with the pack's `music.windowLoop` (worn, its cells in): its loop,
     /// instead of the `window` frame.
-    fn music_loop(&self) -> Option<Seq> {
+    fn music_loop(&self) -> Option<Looped> {
         if self.music.is_none() || !self.sitting() {
             return None;
         }
-        let seq = self.flat(&self.music_spec()?.window_loop);
-        (!seq.is_empty()).then_some(seq)
+        self.loop_seq(Some(&self.music_spec()?.window_loop))
     }
 
     fn music_on(&mut self, now: Instant, until: Option<Instant>) -> anyhow::Result<()> {
@@ -2396,9 +2410,33 @@ impl Avatar {
         true
     }
 
-    fn loop_seq(&self, l: Option<&Steps>) -> Option<Seq> {
-        let seq = self.flat(&l?.as_steps());
-        (!seq.is_empty()).then_some(seq)
+    /// A looped list's frames: its entry, loop and exit (a plain list: all loop). Each part
+    /// flattens as any steps do (mirroring, x2, per-frame ms and keys apply inside it); the
+    /// cells and the outfit are asked of the whole, so one part missing is none of it.
+    fn loop_seq(&self, l: Option<&Steps>) -> Option<Looped> {
+        let [entry, body, exit] = l?.parts();
+        if self.flat(&[entry.as_slice(), body.as_slice(), exit.as_slice()].concat()).is_empty() {
+            return None;
+        }
+        let r = Looped { entry: self.pack.flatten(&entry), body: self.pack.flatten(&body), exit: self.pack.flatten(&exit) };
+        (!r.body.is_empty()).then_some(r)
+    }
+
+    /// The loop on screen ends here without its exit: an interruption (a drag, a teleport,
+    /// sleep) or a move (the exit is drawn for where she was).
+    fn loop_cut(&self, m: Mood) -> bool {
+        m == Mood::Sleepy || self.rag.is_some() || self.teleport.is_some() || !self.placement.same_spot(self.layer_place)
+    }
+
+    /// The mood layer goes on the animator (a loop that ended plays its exit unless cut).
+    fn apply_layer(&mut self, m: Mood, now: Instant) {
+        let (base, looping) = self.layer(m);
+        let rests = self.art_rests(m);
+        if self.loop_cut(m) {
+            self.anim.cut(now);
+        }
+        self.layer_place = self.placement;
+        self.anim.set_layer_looped(base, looping, rests, now);
     }
 
     fn autonomy_gap(&mut self) -> Duration {
@@ -2419,7 +2457,7 @@ impl Avatar {
     }
 
     /// Base frame and loop for a mood, given where the avatar is (standing or perched).
-    fn layer(&self, m: Mood) -> (usize, Option<Seq>) {
+    fn layer(&self, m: Mood) -> (usize, Option<Looped>) {
         let default = self.pack.frame(&self.pack.catalog.default_sprite).unwrap_or(0);
         // A strip variant on screen (a perch, a sleep): its own loops for every mood.
         if let Some(l) = self.art_layer(m) {
@@ -2578,9 +2616,7 @@ impl Avatar {
                 seq.extend(self.flat(&entry));
             }
         }
-        let (base, looping) = self.layer(m);
-        let rests = self.art_rests(m);
-        self.anim.set_layer_resting(base, looping, rests, now);
+        self.apply_layer(m, now);
         if !seq.is_empty() && arriving {
             self.anim.then(seq, now);
         } else if !seq.is_empty() {
@@ -2648,9 +2684,7 @@ impl Avatar {
         self.art.fits.borrow_mut().clear();
         self.art_sync(now);
         let before = self.anim.frame();
-        let (base, looping) = self.layer(self.mood);
-        let rests = self.art_rests(self.mood);
-        self.anim.set_layer_resting(base, looping, rests, now);
+        self.apply_layer(self.mood, now);
         // An arrival sequence plays through the landing's relayer, a walk through its pool's
         // art coming in, a stand-up out of her sleep through the nap's end, a cut's hold.
         let holding = self.art.cut_hold.is_some_and(|t| now < t);
