@@ -42,11 +42,6 @@ struct StripDoc {
     /// Per position (or per cell) ms, instead of `fps`.
     #[serde(default)]
     ms: Vec<u32>,
-    /// A geometry file beside the sheet (relative to the side's root): the fields this entry
-    /// leaves out (`cell`, `grid`, `frames`, `fps`, `order`, `keys`, `ms`, `bounds`, `anchor`,
-    /// `contact`) come from it.
-    #[serde(default)]
-    geometry: Option<String>,
     /// An animated WebP: its cells are the file's frames, `cell` its canvas, `ms` its delays.
     #[serde(default)]
     animated: bool,
@@ -346,7 +341,9 @@ fn intro_files(dir: &Path, m: Option<&MochiDoc>) -> Vec<(PathBuf, Option<String>
     out
 }
 
-/// A strip entry with its `geometry` file merged under it (the entry's own fields win).
+/// A strip entry with its `geometry` file merged under it (the entry's own fields win): a JSON
+/// file beside the sheet (relative to the side's root) giving the fields the entry leaves out
+/// (`cell`, `grid`, `frames`, `fps`, `order`, `keys`, `ms`, `bounds`, `anchor`, `contact`).
 fn strip_doc(root: &Path, raw: &serde_json::Value) -> Result<StripDoc> {
     let mut v = raw.clone();
     if let Some(g) = raw.get("geometry").and_then(|g| g.as_str()) {

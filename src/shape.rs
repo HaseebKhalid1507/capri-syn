@@ -80,8 +80,9 @@ mod tests {
         let (h, r) = mask_rows(2, 2, |x, _| x == 0, 4);
         assert_eq!(h, 4);
         assert_eq!(r, vec![(0, 0, 2, 1), (0, 1, 2, 1), (0, 2, 2, 1), (0, 3, 2, 1)]);
-        // Half width: the 1 px column, 1 px tall.
-        assert_eq!(mask_rows(2, 2, |x, y| x == 0 && y == 0, 1), (1, vec![(0, 0, 1, 1)]));
+        // Half size: each device px samples the mask at its centre (here pixel 1,1).
+        assert_eq!(mask_rows(2, 2, |x, y| x == 1 && y == 1, 1), (1, vec![(0, 0, 1, 1)]));
+        assert_eq!(mask_rows(2, 2, |x, y| x == 0 && y == 0, 1).1, vec![]);
         assert_eq!(mask_rows(2, 2, |_, _| false, 4).1, vec![]);
     }
 

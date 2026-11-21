@@ -32,6 +32,9 @@ const OUTFIT_EVERY: [u64; 2] = [45 * 60_000, 120 * 60_000];
 /// A look decoded and not put on by then (no bolt, no wake): dropped, tried again later.
 const OUTFIT_KEEP: Duration = Duration::from_secs(20 * 60);
 
+/// A decoded outfit waiting for an unseen moment: the outfit, its frames by index, when it came in.
+type OutfitReady = (usize, Vec<(usize, crate::frames::Frame)>, Instant);
+
 pub(super) struct ArtState {
     picker: Picker,
     /// The variant in effect per pooled state she is in (or is teleporting into).
@@ -78,7 +81,7 @@ pub(super) struct ArtState {
     /// schedule.
     outfit_at: Option<Instant>,
     outfit_busy: bool,
-    outfit_ready: Option<(usize, Vec<(usize, crate::frames::Frame)>, Instant)>,
+    outfit_ready: Option<OutfitReady>,
     to_drop: Vec<std::sync::Arc<gpui_kit::RenderImage>>,
 }
 
