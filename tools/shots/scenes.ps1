@@ -16,7 +16,10 @@
               with 3 waiting, his long words (YOU) while the turn runs.
     bubble    the bubble fit to what she says: very short replies ("ok", "on it 👍"), two or three
               lines (mid-stream and done), a list of short lines, a command chip, a long one (READ),
-              and a short and a medium one against the screen's left edge.
+              a short and a medium one against the screen's left edge, a spoken "ok" in hands-free,
+              and the reader opened while a long reply still comes (the stub: ABORT, CLOSE READER).
+    Every shot with a settled bubble: its keys (`state`'s buttons) whole inside it, none over
+    another, else a problem.
     tray      her icon in the notification area (#79), promoted out of the overflow, on a dark
               taskbar with its clock off: hovered (its tooltip, capri-syn · ONLINE), right-clicked (her
               menu), cropped to the taskbar's corner and the menu; the menu by his keys (ATTENTION lit,
@@ -260,10 +263,39 @@ function Shot([string]$Step, [string]$Note = '', [int[]]$At = $null) {
             bubble_w = if ($panel) { $panel[2] } else { $null }
             header = $s.panel_layout.header_px
         })
+    Test-Keys $s "$script:Take/$Step"
     Write-Host "  $script:Take/$Step $(if ($rect) { $rect -join ',' } else { '(no shot)' })"
 }
 
 <# The Line takes the keyboard: a click on its field (it opens parked from her socket). #>
+<# The bubble's keys (`state`'s buttons, device px) each whole inside its panel and none over
+   another: a key cut or under another is one he can't click (QUIT, #78). A settled bubble only
+   (one easing is between sizes); the tag (`chip`) isn't the bubble's. #>
+function Test-Keys($s, [string]$Where) {
+    $pl = $s.panel_layout
+    if (-not $pl -or -not $pl.panel -or -not $pl.settled -or -not $s.buttons) { return }
+    $p = @($pl.panel)
+    $keys = @($s.buttons.PSObject.Properties | Where-Object { $_.Name -ne 'chip' } | ForEach-Object { [pscustomobject]@{ Id = $_.Name; R = @($_.Value) } })
+    # The panel's rect and the keys' are rounded apart (and taken from two origins): 2 px of slack.
+    $e = 2
+    foreach ($k in $keys) {
+        $r = $k.R
+        if ($r[0] -lt $p[0] - $e -or $r[1] -lt $p[1] - $e -or $r[0] + $r[2] -gt $p[0] + $p[2] + $e -or $r[1] + $r[3] -gt $p[1] + $p[3] + $e) {
+            $script:Fails.Add("${Where}: key '$($k.Id)' ($($r -join ',')) isn't inside its bubble ($($p -join ','))")
+        }
+    }
+    for ($i = 0; $i -lt $keys.Count; $i++) {
+        for ($j = $i + 1; $j -lt $keys.Count; $j++) {
+            $a = $keys[$i].R; $b = $keys[$j].R
+            $ox = [Math]::Min($a[0] + $a[2], $b[0] + $b[2]) - [Math]::Max($a[0], $b[0])
+            $oy = [Math]::Min($a[1] + $a[3], $b[1] + $b[3]) - [Math]::Max($a[1], $b[1])
+            if ($ox -gt $e -and $oy -gt $e) {
+                $script:Fails.Add("${Where}: keys '$($keys[$i].Id)' ($($a -join ',')) and '$($keys[$j].Id)' ($($b -join ',')) overlap")
+            }
+        }
+    }
+}
+
 function Focus-Line {
     for ($i = 0; $i -lt 3; $i++) {
         $s = State
@@ -951,6 +983,29 @@ foreach ($take in 'short', 'medium') {
         Start-Sleep -Milliseconds (120 * @(`$say -split ' ').Count + 2500)
         Shot 'done' "at the screen's left edge: `$say"
 "@)
+}
+# A spoken "ok": hands-free's status in its header (at its shortest, the countdown), the bubble small.
+$Scenes.bubble['hf-short'] = {
+    Start-Take bubble hf-short -Settings "[voice]`nenabled = true`nwake_word = false`n" -History $Short -Voice -DeltaMs 120
+    $null = Ctl 'brain off'
+    $null = Ctl 'talk handsfree on'
+    Start-Sleep 1.5
+    $null = Fake 'say ok'
+    Start-Sleep 3
+    Shot 'done' 'hands-free, a spoken "ok"'
+}
+# The reader opened while a long reply still comes: the stub, ABORT and CLOSE READER whole.
+$Scenes.bubble['stub-busy'] = {
+    Start-Take bubble stub-busy -History $Short -DeltaMs 300
+    $null = Ctl 'brain off'
+    $null = Fake "say $($BubbleSays['long'][-1])"
+    Start-Sleep 5
+    $null = Ctl 'reader open'
+    Start-Sleep 1.5
+    Shot 'stub' 'the reader open mid-turn: ABORT and CLOSE READER'
+    $null = Ctl 'reader close'
+    Start-Sleep 1
+    Shot 'back' 'the reader closed: the reply as it was'
 }
 
 <# Her against the screen's left edge. #>
