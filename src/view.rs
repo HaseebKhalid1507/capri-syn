@@ -893,8 +893,39 @@ fn beat_key(steps: &[crate::pack::Step]) -> u64 {
 /// Music's (`beat_key`'s place for it).
 const MUSIC_BEAT: u64 = u64::MAX;
 
-/// An idle beat that changes her outline (a hop, a hand on her hip, arms crossed, her chin on
-/// her hand, a point, a shrug), not just her face.
+/// What the view sees that may keep her still (`Avatar::restless_quiet`).
+struct StillSeen<'a> {
+    /// `Avatar::brain_busy`'s names.
+    busy: &'a [&'static str],
+    /// The bubble up is her own unprompted words (not a session reply).
+    own_words: bool,
+    /// Sleepy, or the brain's nap.
+    asleep: bool,
+    /// Hands-free, listening or speaking.
+    voice: bool,
+    /// A reaction keeping up with the pointer.
+    following: bool,
+    /// The menu's HIDE or the fullscreen hide (parked is `busy`'s `hidden`).
+    hidden: bool,
+}
+
+/// `life::Still` from what the view sees.
+fn still_of(s: &StillSeen) -> crate::life::Still {
+    let has = |n: &str| s.busy.contains(&n);
+    let own_bubble = has("bubble") && s.own_words;
+    crate::life::Still {
+        asleep: s.asleep,
+        held: s.busy.iter().any(|b| crate::brain::HOLDERS.contains(b) && !(*b == "bubble" && own_bubble)),
+        session: has("session"),
+        voice: s.voice,
+        following: s.following,
+        own_bubble,
+        moving: s.busy.iter().any(|b| matches!(*b, "teleport" | "intro" | "music" | "reaction")),
+        hidden: s.hidden || has("hidden"),
+        nothing: false,
+    }
+}
+
 /// Where her idle beats come from (`Avatar::activities`): none here; the hang fidgets; the perch's
 /// activities; standing, the activities and the micro-fidgets in force (her band's, else the
 /// pack's), then `life.poses`.
@@ -905,6 +936,8 @@ enum ActivityPlace<'a> {
     Stand(&'a [Vec<crate::pack::Step>], &'a [Vec<crate::pack::Step>]),
 }
 
+/// An idle beat that changes her outline (a hop, a hand on her hip, arms crossed, her chin on
+/// her hand, a point, a shrug), not just her face.
 fn gesture(steps: &[crate::pack::Step]) -> bool {
     use crate::pack::Step;
     const BODY: [&str; 7] = ["hand_on_hip", "arms_crossed", "chin_rest", "idle-point", "idle-shrug", "point_", "shrug"];
@@ -1959,29 +1992,34 @@ impl Avatar {
     /// off (her own words in a bubble, a move, a reaction, music, the intro, hidden by the menu
     /// or a fullscreen window, a mood without autonomy, no beats here).
     fn restless_quiet(&self) -> crate::life::Quiet {
-        let napping = self.brain.as_ref().is_some_and(|h| h.brain.napping());
-        if self.mood == Mood::Sleepy || napping {
-            return crate::life::Quiet::Asleep;
-        }
-        let busy = self.brain_busy();
-        let own_bubble = busy.contains(&"bubble") && self.bubble.as_ref().is_some_and(|b| !b.stream && b.turn == 0);
         let fs = self.brain.as_ref().is_some_and(|h| h.fs != brainview::FsHide::Shown);
-        let q = crate::life::quiet(crate::life::Still {
-            asleep: false,
-            held: busy.iter().any(|b| crate::brain::HOLDERS.contains(b) && !(*b == "bubble" && own_bubble)),
-            session: busy.contains(&"session"),
+        let q = crate::life::quiet(still_of(&StillSeen {
+            busy: &self.brain_busy(),
+            own_words: self.bubble.as_ref().is_some_and(|b| !b.stream && b.turn == 0),
+            asleep: self.mood == Mood::Sleepy || self.brain.as_ref().is_some_and(|h| h.brain.napping()),
             voice: self.voice.hf.is_some() || self.voice_listening() || self.voice_speaking(),
             following: self.following(),
-            own_bubble,
-            moving: busy.iter().any(|b| matches!(*b, "teleport" | "intro" | "music" | "reaction")),
-            hidden: self.hidden || fs || busy.contains(&"hidden"),
-            nothing: false,
-        });
+            hidden: self.hidden || fs,
+        }));
         // Nothing to play here, looked at last (`activities` builds a list).
         if q == crate::life::Quiet::No && (self.next_activity.is_none() || !self.has_activities()) {
             return crate::life::Quiet::Off;
         }
         q
+    }
+
+    /// A glance at `at`: the steps that play and their frames. The pack's glance (`brain.glance`,
+    /// else the look); one whose strip isn't in yet (asked for now): the look this time. Empty:
+    /// nothing to play.
+    fn glance_seq(&self, at: (i32, i32)) -> (Vec<crate::pack::Step>, Seq) {
+        let steps = self.pack.glance_steps();
+        let seq = self.flat(&self.resolve_steps_at(&steps, at));
+        if seq.is_empty() && !self.pack.behaviour.brain.glance.is_empty() {
+            let look = vec![crate::pack::Step::Clip("@look".into())];
+            let seq = self.flat(&self.resolve_steps_at(&look, at));
+            return (look, seq);
+        }
+        (steps, seq)
     }
 
     /// Play the idle beat `life::Restless` says is due.
@@ -1995,20 +2033,18 @@ impl Avatar {
             && self.standing()
         {
             let at = target.filter(|_| cued).unwrap_or_else(|| self.brain_cursor());
-            let steps = self.pack.glance_steps();
-            if self.mirror_cfg.own {
+            // Turned toward it only if something plays, then resolved again for that side.
+            let (mut played, mut seq) = self.glance_seq(at);
+            if !seq.is_empty() && self.mirror_cfg.own {
                 self.face(at.0 > self.ground().0, "look", now, false);
-            }
-            let mut seq = self.flat(&self.resolve_steps_at(&steps, at));
-            // A glance whose strip isn't in yet (asked for now): the look this time.
-            if seq.is_empty() && !self.pack.behaviour.brain.glance.is_empty() {
-                seq = self.flat(&self.resolve_steps_at(&[crate::pack::Step::Clip("@look".into())], at));
+                (played, seq) = self.glance_seq(at);
             }
             let len: u64 = seq.iter().map(|s| s.1 as u64).sum();
             if !seq.is_empty() {
                 self.anim.play(seq, now);
+                // What played (the look when the glance fell back to it): not that again next.
+                self.beats.mark(beat_key(&played));
             }
-            self.beats.mark(beat_key(&steps));
             self.restless.played(rt, len as f64 / 1000.0, gap);
             self.next_activity = Some(now + Duration::from_millis(len));
             self.beat_until = Some(now + Duration::from_millis(len));
@@ -3128,7 +3164,9 @@ impl Avatar {
         // The cheap checks first: an idle animation, and a beat due or `RESTLESS_LOOK` since
         // what keeps her still was last looked at (a hold coming and going between beats).
         let rt = self.restless_secs(now);
-        let due = self.next_activity.is_some_and(|at| at <= now) && self.restless.due().is_none_or(|d| d <= rt);
+        // Due: a beat's time has come, or nothing is scheduled outside a hold (the first one).
+        // In a hold nothing is: what ends it is looked at every `RESTLESS_LOOK`.
+        let due = self.next_activity.is_some_and(|at| at <= now) && self.restless.due().map_or(!self.restless.holding(), |d| d <= rt);
         if !self.anim.busy() && (due || self.restless_seen.is_none_or(|t| now.saturating_duration_since(t) >= RESTLESS_LOOK)) {
             self.restless_seen = Some(now);
             let quiet = self.restless_quiet();
@@ -4350,6 +4388,8 @@ impl Avatar {
             state::save_ground(self.ground());
         }
         self.save_seen();
+        // The last outfit change, if its write is still going (`state::save_outfit`).
+        state::flush();
         self.fx_hide_all();
         self.os.tray_remove();
         std::fs::remove_file(crate::control::socket_path()).ok();
@@ -9578,6 +9618,43 @@ mod prompt_button_tests {
         let titled = PromptView { title: "Confirm tool call (again)".into(), ..new };
         u.update(&titled, ms(4000));
         assert!(!u.allows(ms(4000)) && u.allows(ms(4000) + PROMPT_ARM));
+    }
+}
+
+#[cfg(test)]
+mod restless_still_tests {
+    use super::{StillSeen, still_of};
+    use crate::life::{Quiet, quiet};
+
+    /// The view's states, as `Avatar::restless_quiet` sees them, to what her idle beats do.
+    #[test]
+    fn what_the_view_sees_keeps_her_still_as_documented() {
+        let calm = StillSeen { busy: &[], own_words: false, asleep: false, voice: false, following: false, hidden: false };
+        let q = |s: StillSeen| quiet(still_of(&s));
+        let busy = |b: &'static [&'static str]| StillSeen { busy: b, ..calm };
+        assert_eq!(q(busy(&[])), Quiet::No, "calm, nothing up");
+        let cases: [(&str, StillSeen, Quiet); 17] = [
+            ("the Line", busy(&["line"]), Quiet::Busy),
+            ("the menu", busy(&["menu"]), Quiet::Busy),
+            ("a prompt", busy(&["prompt"]), Quiet::Busy),
+            ("the field", busy(&["field"]), Quiet::Busy),
+            ("a drag", busy(&["drag"]), Quiet::Busy),
+            ("his reply in a bubble", busy(&["bubble"]), Quiet::Busy),
+            ("her session works", busy(&["session"]), Quiet::Busy),
+            ("the voice", StillSeen { voice: true, ..calm }, Quiet::Busy),
+            ("following the pointer", StillSeen { following: true, ..calm }, Quiet::Busy),
+            ("her own words in a bubble", StillSeen { busy: &["bubble"], own_words: true, ..calm }, Quiet::Off),
+            ("her own words, the Line up too", StillSeen { busy: &["bubble", "line"], own_words: true, ..calm }, Quiet::Busy),
+            ("sleepy or napping", StillSeen { asleep: true, ..calm }, Quiet::Asleep),
+            ("asleep, with a turn and the Line", StillSeen { busy: &["session", "line"], asleep: true, voice: true, ..calm }, Quiet::Asleep),
+            ("the fullscreen hide or the menu's HIDE", StillSeen { hidden: true, ..calm }, Quiet::Off),
+            ("parked", busy(&["hidden"]), Quiet::Off),
+            ("a teleport", busy(&["teleport"]), Quiet::Off),
+            ("music, the intro, a reaction", busy(&["music", "intro", "reaction"]), Quiet::Off),
+        ];
+        for (what, s, want) in cases {
+            assert_eq!(q(s), want, "{what}");
+        }
     }
 }
 

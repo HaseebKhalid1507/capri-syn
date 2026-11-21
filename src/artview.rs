@@ -525,7 +525,9 @@ impl Avatar {
             return;
         }
         self.art.quiet_seams = Some(now + super::QUIET_SEAMS);
-        if self.glitch.is_none_or(|g| g.t0 < now) {
+        // Its own glitch, unless one starts this very instant: one still to come (or long
+        // under way) would leave the swap uncovered.
+        if self.glitch.is_none_or(|g| g.t0 != now) {
             self.glitch = Glitch::for_cut(Transition::Sleep, now, self.rng.next());
         }
     }

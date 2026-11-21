@@ -625,21 +625,19 @@ fn strip_image(strips: &Strips, path: &std::path::Path, sha: Option<&str>, verif
     .map_err(|e| anyhow::anyhow!(e))
 }
 
-/// An animated WebP's frames at `keep` (None: all), each a whole canvas. Within the limits
-/// (`art::WEBP_MAX_*`, checked on the file itself: it may be the x2 one, or changed since the
-/// load), else an error, never an aborting allocation. A frame composites over the ones
-/// before it, so those decode too (and go at once); none after the last one wanted.
+/// An animated WebP's frames at `keep` (None: all), each a whole canvas. The guard is ours:
+/// the canvas (`art::webp_canvas_ok`, read off the file itself: it may be the x2 one, or changed
+/// since the load) and the frames kept (`WEBP_MAX_BYTES`) are checked before any decode, and
+/// `take` stops after the last one wanted (at most `WEBP_MAX_FRAMES`); past them an error, never
+/// an aborting allocation. (`image::Limits` would do nothing here: the WebP decoder doesn't
+/// apply them.) A frame composites over the ones before it, so those decode too (and go at
+/// once); none after the last one wanted.
 fn webp_wanted(path: &std::path::Path, bytes: &[u8], keep: Option<&std::collections::HashSet<u32>>) -> Result<std::collections::HashMap<u32, image::RgbaImage>> {
     use image::{AnimationDecoder as _, ImageDecoder as _};
-    let mut dec = image::codecs::webp::WebPDecoder::new(std::io::Cursor::new(bytes)).with_context(|| format!("strip {}: not a valid WebP", path.display()))?;
+    let dec = image::codecs::webp::WebPDecoder::new(std::io::Cursor::new(bytes)).with_context(|| format!("strip {}: not a valid WebP", path.display()))?;
     let (w, h) = dec.dimensions();
     crate::art::webp_canvas_ok(w, h).with_context(|| format!("strip {}", path.display()))?;
     let frame = u64::from(w) * u64::from(h) * 4;
-    let mut limits = image::Limits::default();
-    limits.max_image_width = Some(crate::art::WEBP_MAX_SIDE);
-    limits.max_image_height = Some(crate::art::WEBP_MAX_SIDE);
-    limits.max_alloc = Some(frame.max(1) * 2);
-    dec.set_limits(limits).with_context(|| format!("strip {}: past the decoder's limits", path.display()))?;
     let last = match keep {
         Some(k) => k.iter().max().copied().map_or(0, |m| m + 1),
         None => crate::art::WEBP_MAX_FRAMES,
