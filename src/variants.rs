@@ -54,6 +54,21 @@ pub struct VariantsSpec {
     /// first.
     pub cache_mb: Option<u32>,
     pub pools: BTreeMap<String, PoolSpec>,
+    /// Whole other looks (a second outfit): one without `sprites` is the pack's own frames
+    /// (absent: it leads, weight 1). She changes only where it can't be seen.
+    pub outfits: Vec<OutfitSpec>,
+}
+
+/// One look. `sprites`: a sprite catalog (`sprites.json`'s schema, the pack's canvas) drawing the
+/// pack's frame ids in it, files beside it.
+#[derive(Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct OutfitSpec {
+    pub id: String,
+    #[serde(default = "one")]
+    pub weight: f32,
+    #[serde(default)]
+    pub sprites: Option<String>,
 }
 
 #[derive(Deserialize, Clone, Debug, Default)]

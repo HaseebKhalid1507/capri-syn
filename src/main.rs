@@ -406,12 +406,22 @@ fn run(t_start: Instant) -> Result<()> {
         frames::verify_poses(&pack).map_err(startfail::PackError)?;
     }
     let t_pack = t_start.elapsed().as_millis();
+    // The outfit she wore last (`state.json` `outfit`): every frame decodes in it.
+    if !args.check
+        && let Some(o) = state::load_outfit().and_then(|id| pack.outfit_by_id(&id))
+    {
+        pack.wear(o);
+    }
     if !args.check {
         // A write of hers that never finished (a crash, a kill) left its temp file: hers only.
         std::thread::spawn(|| {
             let n = settings::sweep_temps(&settings::Settings::path());
             if n > 0 {
                 elog!("synaps-avatar: settings: {n} temp file(s) left by an unfinished write, removed");
+            }
+            let n = settings::sweep_temps(&state::state_path());
+            if n > 0 {
+                elog!("synaps-avatar: state: {n} temp file(s) left by an unfinished write, removed");
             }
         });
     }
@@ -457,6 +467,16 @@ fn run(t_start: Instant) -> Result<()> {
             args.threads,
             args.verify
         );
+        // The strips that play as clips: a step names them and no catalog clip or action has the
+        // name (before, such a step was refused as an unknown clip).
+        let as_clips: Vec<&str> = pack.anim.as_ref().map(|a| pack.step_strips.iter().map(|&si| a.strips[si].name.as_str()).collect()).unwrap_or_default();
+        olog!("strips played as clips: {}", if as_clips.is_empty() { "none".to_string() } else { as_clips.join(", ") });
+        // Every other outfit's own frames (`variants.outfits`), decoded and checked the same way.
+        for (o, look) in pack.outfits.iter().enumerate().skip(1) {
+            let which: Vec<usize> = look.frames.keys().copied().collect();
+            let d = frames::decode_dressed(&pack, &layout.geo, &which, o, args.verify, args.threads)?;
+            olog!("outfit `{}`: {} frames ok, decode {} ms", look.id, d.frames.len(), d.decode_ms);
+        }
         if let Some(files) = pack.anim.as_ref().map(|a| &a.intro).filter(|f| !f.is_empty()) {
             // The size she shows them at on a 1440 px monitor.
             let t0 = std::time::Instant::now();

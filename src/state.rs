@@ -1,9 +1,23 @@
 //! Persisted state in `$XDG_STATE_HOME/synaps-avatar/state.json`: the ground point (feet) in
 //! root pixels, so a changed `--height` still stands on the same spot, and the brain's
-//! drives. Each writer merges its own key into the file (read, merge, write a temp file,
-//! rename), so saving one never wipes another.
+//! drives. Each writer merges its own key into the file (read, merge, write a temp file of
+//! its own, rename), one at a time (`WRITE`), so saving one never wipes another, from any
+//! thread.
 
 use std::path::{Path, PathBuf};
+
+/// One read-merge-write at a time: a save off the UI thread (`save_outfit`) never loses a key
+/// another writer set meanwhile.
+static WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn locked() -> std::sync::MutexGuard<'static, ()> {
+    WRITE.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The state file (`settings::sweep_temps` clears its temp files left by a crash).
+pub fn state_path() -> PathBuf {
+    path()
+}
 
 fn path() -> PathBuf {
     let base = crate::platform::base_dir(crate::platform::BaseDir::State).unwrap_or_else(std::env::temp_dir);
@@ -20,6 +34,7 @@ fn read(p: &Path) -> serde_json::Value {
 
 /// Set `key` in the JSON object at `p`, keeping every other key.
 fn merge(p: &Path, key: &str, val: serde_json::Value) {
+    let _w = locked();
     let mut v = read(p);
     v[key] = val;
     write(p, &v);
@@ -29,9 +44,12 @@ fn write(p: &Path, v: &serde_json::Value) {
     if let Some(dir) = p.parent() {
         std::fs::create_dir_all(dir).ok();
     }
-    let tmp = p.with_extension("json.tmp");
-    if std::fs::write(&tmp, v.to_string()).is_ok() {
-        std::fs::rename(&tmp, p).ok();
+    // Her own temp file (`<name>.<pid>.tmp`, as the settings' writes): never one another
+    // process (a second instance) is writing; one a crash left is swept at the next start.
+    let name = p.file_name().map_or_else(|| "state.json".into(), |n| n.to_string_lossy().into_owned());
+    let tmp = p.with_file_name(format!("{name}.{}.tmp", std::process::id()));
+    if std::fs::write(&tmp, v.to_string()).is_ok() && std::fs::rename(&tmp, p).is_err() {
+        std::fs::remove_file(&tmp).ok();
     }
 }
 
@@ -56,6 +74,20 @@ pub fn load_hidden() -> bool {
 
 pub fn save_hidden(hidden: bool) {
     merge(&path(), "hidden", serde_json::json!(hidden));
+}
+
+/// The outfit she wears (`moods.json` `variants.outfits` id): a restart keeps it.
+pub fn load_outfit() -> Option<String> {
+    outfit_at(&path())
+}
+
+fn outfit_at(p: &Path) -> Option<String> {
+    read(p).get("outfit").and_then(serde_json::Value::as_str).map(str::to_string)
+}
+
+/// Off the UI thread (a file write, at a bolt or a wake).
+pub fn save_outfit(id: String) {
+    std::thread::spawn(move || merge(&path(), "outfit", serde_json::json!(id)));
 }
 
 /// The brain's drives (brain.rs `Saved`).
@@ -106,6 +138,7 @@ fn perch_at(p: &Path) -> Option<SavedPerch> {
 }
 
 fn seen_at(p: &Path, unix: f64, perch: Option<SavedPerch>) {
+    let _w = locked();
     let mut v = read(p);
     v["seenUnix"] = serde_json::json!(unix);
     v["perch"] = match perch {
@@ -159,6 +192,39 @@ pub fn remember_session(key: &str, id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn writers_on_threads_keep_each_others_keys_and_leave_no_temp_file() {
+        let dir = std::env::temp_dir().join(format!("sa-state-threads-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let p = dir.join("state.json");
+        let ts: Vec<_> = (0..8)
+            .map(|i| {
+                let p = p.clone();
+                std::thread::spawn(move || merge(&p, &format!("k{i}"), serde_json::json!(i)))
+            })
+            .collect();
+        for t in ts {
+            t.join().unwrap();
+        }
+        let v = read(&p);
+        assert!((0..8).all(|i| v.get(format!("k{i}")) == Some(&serde_json::json!(i))), "{v}");
+        let left: Vec<String> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(left, ["state.json"], "its own temp file, renamed into place");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_outfit_round_trips_beside_the_rest() {
+        let p = std::env::temp_dir().join(format!("sa-state-outfit-{}.json", std::process::id()));
+        std::fs::remove_file(&p).ok();
+        assert_eq!(outfit_at(&p), None);
+        merge(&p, "ground", serde_json::json!([1, 2]));
+        merge(&p, "outfit", serde_json::json!("alt"));
+        assert_eq!(outfit_at(&p).as_deref(), Some("alt"));
+        assert_eq!(ground_at(&p), Some((1, 2)), "the other keys stay");
+        std::fs::remove_file(&p).ok();
+    }
 
     #[test]
     fn saving_one_key_keeps_the_others() {

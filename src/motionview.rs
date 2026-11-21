@@ -91,9 +91,9 @@ impl Avatar {
         let first = self.pack.strip_first.get(si).copied().flatten()?;
         let s = &self.pack.anim.as_ref()?.strips[si];
         // Its clean cells only: two of lachy's have a chroma ghost drawn in (a flash on the beat).
-        let cells = s.clean_cells();
-        let ms = crate::motion::dance_ms(self.music.as_ref().and_then(|m| m.bpm), s.ms, cells.len() as u32);
-        Some((first, Some(cells.iter().map(|&c| (first + c as usize, ms)).collect())))
+        // Each at its own ms (`ms`, a WebP's delays), the loop fitted to the tempo.
+        let cells = crate::motion::dance_seq(self.music.as_ref().and_then(|m| m.bpm), &s.clean_played());
+        Some((first, Some(cells.iter().map(|&(c, ms)| (first + c as usize, ms)).collect())))
     }
 
     /// The dance's cell on screen (for the notes' emitters), or its first.
@@ -172,8 +172,8 @@ impl Avatar {
             return self.anim.frame();
         };
         // Its clean cells, round and round (six have a chroma ghost drawn in).
-        let cells = s.clean_cells();
-        first + cells[(secs.max(0.0) * 1000.0 / s.ms.max(1) as f32) as usize % cells.len()] as usize
+        // Each at its own ms (`ms`, a WebP's delays).
+        crate::motion::cell_at(&s.clean_played(), (secs.max(0.0) * 1000.0) as u64).map_or(first, |c| first + c as usize)
     }
 
     // ---- the click burst -----------------------------------------------------------------------

@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Packs
+- **New optional slots any character pack can fill** (docs/REFERENCE.md, "Slots any pack can fill"): cel
+  sheets (grid, geometry file, keys and in-betweens, per-frame timing) and animated WebP strips; a strip
+  named wherever steps go plays as a clip; a second outfit (`variants.outfits`) she changes into only in a
+  teleport's bolt or as she wakes, kept across restarts; hang fidgets, a glance, a perched music loop, idle
+  fidget and pose pools, arrival alternatives, and hearts drawn from the pack's own effect sprite. A pack
+  without them behaves as before.
+- Animated WebP strips are refused past 4096 px a side, 8 Mpx, 1000 frames or 512 MiB decoded; a cel
+  sheet's `keys` and per-frame `ms` hold wherever the strip plays. `--check` names the strips played
+  as clips.
+
 ## 1.1.1 (2026-11-20)
 
 She runs free on a ChatGPT account, a free one too: no API key, no card, no GPU. On Linux her context

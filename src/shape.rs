@@ -43,9 +43,48 @@ pub fn heart(cx: f32, cy: f32, size: f32) -> Vec<(f32, f32)> {
         .collect()
 }
 
+/// A 1-bit mask (`mw`×`mh`, `get`) drawn `w` device px wide, its height in proportion
+/// (nearest pixel): (that height, its rows as X shape rectangles, origin top-left). An effect
+/// sprite on the hearts' path.
+pub fn mask_rows(mw: u32, mh: u32, get: impl Fn(i32, i32) -> bool, w: i32) -> (i32, Vec<ShapeRect>) {
+    let w = w.max(1);
+    let k = w as f32 / mw.max(1) as f32;
+    let h = ((mh as f32 * k).round() as i32).max(1);
+    let at = |v: i32| ((v as f32 + 0.5) / k) as i32;
+    let mut out = Vec::new();
+    for y in 0..h {
+        let my = at(y);
+        let mut x = 0;
+        while x < w {
+            if !get(at(x), my) {
+                x += 1;
+                continue;
+            }
+            let x0 = x;
+            while x < w && get(at(x), my) {
+                x += 1;
+            }
+            out.push((x0 as i16, y as i16, (x - x0) as u16, 1));
+        }
+    }
+    (h, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mask_scales_to_rows() {
+        // A 2x2 mask with its left column set, drawn 4 px wide: 4 rows of 2 px at x 0.
+        let (h, r) = mask_rows(2, 2, |x, _| x == 0, 4);
+        assert_eq!(h, 4);
+        assert_eq!(r, vec![(0, 0, 2, 1), (0, 1, 2, 1), (0, 2, 2, 1), (0, 3, 2, 1)]);
+        // Half size: each device px samples the mask at its centre (here pixel 1,1).
+        assert_eq!(mask_rows(2, 2, |x, y| x == 1 && y == 1, 1), (1, vec![(0, 0, 1, 1)]));
+        assert_eq!(mask_rows(2, 2, |x, y| x == 0 && y == 0, 1).1, vec![]);
+        assert_eq!(mask_rows(2, 2, |_, _| false, 4).1, vec![]);
+    }
 
     #[test]
     fn square_fills() {

@@ -9,7 +9,7 @@ use crate::anim::{Mood, Seq};
 use crate::brain::RestPose;
 use crate::frames::Decoded;
 use crate::fx::{Glitch, Transition};
-use crate::pack::{Variant, VariantArt};
+use crate::pack::{Step, Variant, VariantArt};
 use crate::variants::{Art, Picker, PoolKey, seam, weighted};
 use gpui_kit::Context;
 use std::cell::RefCell;
@@ -25,6 +25,15 @@ const SHIFT_RETRY: Duration = Duration::from_secs(20);
 /// A strip off screen and out of use this long goes (a dance after the music, a walk's): its
 /// pixels and atlas tiles, decoded again when it next plays (~15 ms).
 const UNUSED_DROP: Duration = Duration::from_secs(45);
+
+/// She changes outfit (`variants.outfits`) about this often, ms [min, max]; only where it can't
+/// be seen: in the bolt of a teleport, or waking (she wakes in it).
+const OUTFIT_EVERY: [u64; 2] = [45 * 60_000, 120 * 60_000];
+/// A look decoded and not put on by then (no bolt, no wake): dropped, tried again later.
+const OUTFIT_KEEP: Duration = Duration::from_secs(20 * 60);
+
+/// A decoded outfit waiting for an unseen moment: the outfit, its frames by index, when it came in.
+type OutfitReady = (usize, Vec<(usize, crate::frames::Frame)>, Instant);
 
 pub(super) struct ArtState {
     picker: Picker,
@@ -63,6 +72,17 @@ pub(super) struct ArtState {
     /// whole): falling asleep, waking, the greeting and the stretch after it (r38: a burst
     /// there read as a rendering failure).
     pub quiet_seams: Option<Instant>,
+    /// Strips standing in as clips that are about to play (a greeting while she sleeps, the
+    /// restless idle's next beat): asked for ahead and kept while wanted.
+    pub soon: HashSet<usize>,
+    soon_asleep: bool,
+    /// The next change of outfit; a look decoding; one decoded, waiting for an unseen moment
+    /// (outfit, its frames, when it came in); the replaced drawings' images, dropped at the next
+    /// schedule.
+    outfit_at: Option<Instant>,
+    outfit_busy: bool,
+    outfit_ready: Option<OutfitReady>,
+    to_drop: Vec<std::sync::Arc<gpui_kit::RenderImage>>,
 }
 
 impl ArtState {
@@ -78,6 +98,12 @@ impl ArtState {
             hold_ms: 0,
             ready: HashMap::new(),
             pending: HashSet::new(),
+            soon: HashSet::new(),
+            soon_asleep: false,
+            outfit_at: None,
+            outfit_busy: false,
+            outfit_ready: None,
+            to_drop: Vec::new(),
             failed: HashSet::new(),
             want: RefCell::new(Vec::new()),
             expire_at: None,
@@ -91,8 +117,18 @@ impl ArtState {
     }
 
     pub fn deadline(&self) -> Option<Instant> {
-        [self.shift_at, self.next_blink, self.expire_at].into_iter().flatten().min()
+        [self.shift_at, self.next_blink, self.expire_at, self.outfit_at].into_iter().flatten().min()
     }
+}
+
+/// The frames a change from outfit `cur` to `o` repaints: those `o` draws, and those `cur` drew
+/// (back to the pack's own). Every other frame is the pack's own in both: not decoded again.
+pub(super) fn outfit_frames(pack: &crate::pack::Pack, cur: usize, o: usize) -> Vec<usize> {
+    let drawn = |i: usize| pack.outfits.get(i).map(|x| x.frames.keys().copied());
+    let mut v: Vec<usize> = drawn(cur).into_iter().flatten().chain(drawn(o).into_iter().flatten()).collect();
+    v.sort_unstable();
+    v.dedup();
+    v
 }
 
 impl Avatar {
@@ -255,7 +291,9 @@ impl Avatar {
     fn art_eligible(&self, v: &Variant, place: Placement, now: Instant) -> bool {
         let long = v.after_ms.is_none_or(|ms| self.art.perch_since.is_some_and(|t| now.saturating_duration_since(t) >= Duration::from_millis(ms)));
         let band = v.energy.is_empty() || v.energy.contains(&self.band());
-        long && band && match &v.art {
+        // A strip drawn for another outfit isn't hers to show now.
+        let worn = v.art.as_ref().is_none_or(|a| self.pack.strip_wears(a.base));
+        long && band && worn && match &v.art {
             Some(a) if v.lying => self.art_fits(a.base, place),
             _ => true,
         }
@@ -371,6 +409,175 @@ impl Avatar {
         Some(self.pack.strip_seq(a.blinks[i].0, a.every))
     }
 
+    /// `Pack::flatten`, with every strip cell in it decoded: steps naming a strip whose cells
+    /// aren't in yet ask for them and play as nothing this time (the caller's fallback, as when
+    /// a pack leaves them out), so no frame that isn't there ever shows.
+    pub(super) fn flat(&self, steps: &[Step]) -> Seq {
+        let seq = self.pack.flatten(steps);
+        let mut strips: Vec<usize> = Vec::new();
+        for c in seq.iter().filter_map(|&(fi, _)| self.pack.frames.get(fi).and_then(|f| f.cell.as_ref())) {
+            if !c.mirror && !strips.contains(&c.strip) {
+                strips.push(c.strip);
+            }
+        }
+        // Each asked for (not just the first missing one): they decode together.
+        let mut ready = true;
+        for &si in &strips {
+            ready &= self.art_ready(si);
+        }
+        if ready { seq } else { Vec::new() }
+    }
+
+    /// The step strips these steps name (`Pack::step_strips`).
+    pub(super) fn strips_of(&self, steps: &[Step]) -> Vec<usize> {
+        let Some(a) = &self.pack.anim else { return Vec::new() };
+        steps
+            .iter()
+            .filter_map(|s| match s {
+                Step::Clip(c) => a.by_name.get(c).copied().filter(|si| self.pack.step_strips.contains(si)),
+                Step::Hold { .. } => None,
+            })
+            .collect()
+    }
+
+    /// These steps are about to play: their strips are asked for now and kept until `art_soon`
+    /// changes again (empty: nothing wanted ahead).
+    pub(super) fn art_soon(&mut self, steps: &[Step]) {
+        let want: HashSet<usize> = self.strips_of(steps).into_iter().collect();
+        for &si in &want {
+            self.art_need(si);
+        }
+        self.art.soon = want;
+    }
+
+    // ---- outfits ------------------------------------------------------------------------------
+
+    /// The frames are in: the first change of outfit is due a while from now.
+    pub(super) fn outfit_start(&mut self, now: Instant) {
+        if self.pack.outfits.len() > 1 {
+            self.art.outfit_at = Some(now + self.art.picker.shift_in(OUTFIT_EVERY));
+        }
+    }
+
+    /// From `schedule`: a change due decodes the other look (weighted, never the one she wears)
+    /// off the main thread; one kept too long without an unseen moment goes.
+    fn outfit_fetch(&mut self, cx: &mut Context<Self>) {
+        let now = Instant::now();
+        if self.art.outfit_ready.as_ref().is_some_and(|r| now.saturating_duration_since(r.2) >= OUTFIT_KEEP) {
+            self.art.outfit_ready = None;
+            self.art.outfit_at = Some(now + self.art.picker.shift_in(OUTFIT_EVERY));
+        }
+        if !self.loaded || self.art.outfit_busy || self.art.outfit_ready.is_some() || !self.art.outfit_at.is_some_and(|t| t <= now) {
+            return;
+        }
+        self.art.outfit_at = None;
+        let cur = self.pack.wearing();
+        let w: Vec<f32> = self.pack.outfits.iter().enumerate().map(|(i, o)| if i == cur { 0.0 } else { o.weight }).collect();
+        let Some(o) = weighted(self.art.picker.rng(), &w) else { return };
+        // Only the frames that differ: the ones it draws, and the ones the look she wears drew
+        // (back to the pack's own). Every other frame is the pack's in both.
+        let which = outfit_frames(&self.pack, cur, o);
+        let (p, geo) = (self.pack.clone(), self.layout.geo);
+        self.art.outfit_busy = true;
+        cx.spawn(async move |this, cx| {
+            let w2 = which.clone();
+            let r = crate::off_thread(move || crate::frames::decode_dressed(&p, &geo, &w2, o, false, 2)).await;
+            this.update(cx, |v, cx| v.outfit_loaded(o, which, r, cx)).ok();
+        })
+        .detach();
+    }
+
+    fn outfit_loaded(&mut self, o: usize, idx: Vec<usize>, r: anyhow::Result<Decoded>, cx: &mut Context<Self>) {
+        self.art.outfit_busy = false;
+        let now = Instant::now();
+        match r {
+            Err(e) => {
+                elog!("synaps-avatar: outfit `{}` unavailable: {e:#}", self.pack.outfits.get(o).map_or("", |x| x.id.as_str()));
+                self.art.outfit_at = Some(now + self.art.picker.shift_in(OUTFIT_EVERY));
+            }
+            Ok(d) => {
+                elog!("synaps-avatar: outfit `{}` decoded ({} frames, {} ms): on at her next bolt or wake", self.pack.outfits.get(o).map_or("", |x| x.id.as_str()), d.frames.len(), d.decode_ms);
+                self.art.outfit_ready = Some((o, idx.into_iter().zip(d.frames).collect(), now));
+                // It counts in the budget: strips out of use make room for it.
+                self.art_evict(cx);
+            }
+        }
+        self.schedule(cx);
+    }
+
+    /// The decoded look waiting for an unseen moment: its bytes (inside `variants.cacheMb`).
+    fn outfit_bytes(&self) -> usize {
+        self.art.outfit_ready.as_ref().map_or(0, |r| r.1.iter().map(|(_, f)| f.bytes()).sum())
+    }
+
+    /// She wakes (out of Sleepy, the brain's nap ends): the decoded look goes on under the wake's
+    /// cut, the same light glitch the sleep cut gets (`Transition::Sleep`), so the change itself
+    /// is never seen. Not while he carries her or mid-vanish (the glitch can't cover it there:
+    /// the next bolt or wake does it), and not before her frames are in. Call before the wake's
+    /// frames are picked, so they are the new look's. The sleep strip on screen keeps its pick:
+    /// it leaves with the wake.
+    pub(super) fn outfit_wake(&mut self, now: Instant) {
+        if self.art.outfit_ready.is_none() || !self.loaded || self.rag.is_some() || (self.teleport.is_some() && !self.hidden) {
+            return;
+        }
+        let unseen = self.hidden;
+        if !self.outfit_swap_keeping("wake", true, now) || unseen {
+            return;
+        }
+        self.art.quiet_seams = Some(now + super::QUIET_SEAMS);
+        if self.glitch.is_none_or(|g| g.t0 < now) {
+            self.glitch = Glitch::for_cut(Transition::Sleep, now, self.rng.next());
+        }
+    }
+
+    /// Where it can't be seen (the bolt of a teleport, hidden): the decoded look goes on, every
+    /// frame at once, never mid-animation. Not into a pose that look doesn't draw.
+    pub(super) fn outfit_swap(&mut self, why: &str, now: Instant) {
+        self.outfit_swap_keeping(why, false, now);
+    }
+
+    /// `outfit_swap`; `keep_sleep`: the sleep pools' picks stay (on screen as she wakes, they go
+    /// with the wake), the others drawn for the old look are picked again. True: it went on.
+    fn outfit_swap_keeping(&mut self, why: &str, keep_sleep: bool, now: Instant) -> bool {
+        let Some((o, _, _)) = self.art.outfit_ready.as_ref() else { return false };
+        let o = *o;
+        let target = self.teleport.as_ref().map_or(self.placement, |t| t.place);
+        if let Placement::Pose { frame } = target
+            && !self.pack.draws(o, frame)
+        {
+            return false;
+        }
+        let Some((_, frames, _)) = self.art.outfit_ready.take() else { return false };
+        self.pack.wear(o);
+        for (i, f) in frames {
+            if let Some(old) = self.frames[i].replace(f) {
+                if let Some(m) = old.mirror_built() {
+                    self.art.to_drop.push(m.image.clone());
+                }
+                self.art.to_drop.push(old.image.clone());
+            }
+        }
+        // Picks drawn for the other look are dropped (still unseen) and picked again.
+        let stale: Vec<PoolKey> = self
+            .art
+            .picks
+            .iter()
+            .filter(|&(k, _)| !(keep_sleep && matches!(k, PoolKey::SleepFloor | PoolKey::SleepWindow)))
+            .filter(|&(k, &i)| self.pack.pools[k].variants[i].art.as_ref().is_some_and(|a| !self.pack.strip_wears(a.base)))
+            .map(|(&k, _)| k)
+            .collect();
+        for k in stale {
+            self.art_drop(k);
+        }
+        self.art_sync(now);
+        self.contact = [self.measure_contact(true), self.measure_contact(false)];
+        self.brain_rebox();
+        crate::state::save_outfit(self.pack.outfit_id().to_string());
+        self.art.outfit_at = Some(now + self.art.picker.shift_in(OUTFIT_EVERY));
+        elog!("synaps-avatar: outfit `{}` on ({why})", self.pack.outfit_id());
+        true
+    }
+
     // ---- time -------------------------------------------------------------------------------
 
     /// Per tick: blinks over a strip loop, the in-place shift. True: redraw.
@@ -386,6 +593,18 @@ impl Avatar {
 
     pub(super) fn art_tick(&mut self, now: Instant) -> bool {
         let mut dirty = false;
+        // Asleep: the strips of her waking greeting stay ready (she wakes into it).
+        let asleep = self.asleep();
+        if asleep != self.art.soon_asleep && !self.pack.step_strips.is_empty() {
+            self.art.soon_asleep = asleep;
+            if asleep {
+                let b = &self.pack.behaviour.brain;
+                let steps: Vec<Step> = b.greet.iter().chain(&b.greet_morning).chain(&b.nap_wake_greet).chain(&b.nap_wake).cloned().collect();
+                self.art_soon(&steps);
+            } else {
+                self.art.soon.clear();
+            }
+        }
         if let Some(at) = self.art.next_blink
             && at <= now
         {
@@ -489,7 +708,7 @@ impl Avatar {
     /// its frames. Asked for if not.
     pub(super) fn art_transition(&self, key: &str) -> Option<Seq> {
         let si = *self.pack.transitions.get(key)?;
-        self.art_ready(si).then(|| self.pack.strip_seq(si, 1))
+        (self.pack.strip_wears(si) && self.art_ready(si)).then(|| self.pack.strip_seq(si, 1))
     }
 
     /// Transition `key` without its drawn glitch cells (`glitchCells`): the wake's own flash
@@ -601,12 +820,19 @@ impl Avatar {
         self.pack.strip_cells(u.0, u.1)
     }
 
+    /// The strips' bytes, plus a decoded look waiting to go on (it counts in `variants.cacheMb`
+    /// too: the strips make room for it).
     fn art_bytes(&self) -> usize {
-        self.art.ready.keys().flat_map(|&u| self.unit_frames(u)).filter_map(|i| self.frames[i].as_ref()).map(|f| f.bytes()).sum()
+        let strips: usize = self.art.ready.keys().flat_map(|&u| self.unit_frames(u)).filter_map(|i| self.frames[i].as_ref()).map(|f| f.bytes()).sum();
+        strips + self.outfit_bytes()
     }
 
     /// From `schedule`: decode what the layer asked for, off the main thread.
     pub(super) fn art_fetch(&mut self, cx: &mut Context<Self>) {
+        for img in std::mem::take(&mut self.art.to_drop) {
+            cx.drop_image(img, None);
+        }
+        self.outfit_fetch(cx);
         if self.art.expire_at.is_some_and(|t| t <= Instant::now()) {
             self.art_evict(cx);
         }
@@ -694,6 +920,14 @@ impl Avatar {
         {
             in_use.insert(self.art_unit(si));
         }
+        // Wanted ahead (a greeting while she sleeps, the restless idle's next beat).
+        for &si in &self.art.soon {
+            in_use.insert(self.art_unit(si));
+        }
+        // The glance's strips, once in: glances come further apart than `UNUSED_DROP`.
+        for si in self.strips_of(&self.pack.behaviour.brain.glance) {
+            in_use.insert(self.art_unit(si));
+        }
         let m = &self.pack.motions;
         let motions = [(m.walk, self.brain_walking()), (m.dance, self.dance_strip().is_some()), (m.dangle, self.rag.is_some())];
         for (si, on) in motions {
@@ -732,5 +966,25 @@ impl Avatar {
             crate::platform::trim_heap();
         }
         bytes
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_change_of_outfit_decodes_only_the_frames_that_differ() {
+        // The alt look draws `neutral` and `sit`; the pack has `wink` too, drawn only by its own.
+        let moods = serde_json::json!({"perch": {"base": "sit"}, "extraFrames": [{"id": "wink", "file": "l.png", "like": "neutral"}],
+            "variants": {"outfits": [{"id": "main"}, {"id": "alt", "sprites": "outfits/alt/sprites.json"}]}});
+        crate::pack::tests::pack_setup("outfit-frames", moods, |d| crate::pack::tests::write_outfit(d, &["neutral", "sit"]), |p| {
+            let p = p.unwrap();
+            let mut drawn = vec![p.index["neutral"], p.index["sit"]];
+            drawn.sort_unstable();
+            assert_eq!(outfit_frames(&p, 0, 1), drawn, "into the alt look: what it draws, not the wink");
+            assert_eq!(outfit_frames(&p, 1, 0), drawn, "back: what it drew, as the pack's own");
+            assert!(outfit_frames(&p, 0, 0).is_empty());
+        });
     }
 }

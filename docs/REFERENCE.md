@@ -382,7 +382,7 @@ synaps-avatar --set KEY=VALUE [--set KEY=VALUE ...]
 | `--sleepy-after MIN` | under `SA_NO_BRAIN` only: sleepy after this many minutes without a turn (default 10). Otherwise sleep follows you (see above) |
 | `--pack DIR` | character pack (default `$XDG_DATA_HOME/synaps-avatar/packs/capri`) |
 | `--height PX` | standing body height in logical px (default 340) |
-| `--check` | load and decode the pack, print a summary, exit (no window) |
+| `--check` | load and decode the pack, print a summary (and the strips played as clips), exit (no window) |
 | `--dump DIR` | with `--check`: every decoded frame as a PNG, the pixels she draws at `--height` (scale it by the display's sf to see the real render) |
 | `-V`, `--version` | print `synaps-avatar <version>`, exit. Her log says it at start too: `--- synaps-avatar <version> (pid N)` |
 | `--set KEY=VALUE` | write these to `settings.toml` with her own writer (as Settings does), then exit; nothing else runs but, when she's running, a `settings reload` on her control socket (she reads them again). Her installers use it (Voice, her model). Only `voice.enabled`, `voice.wake_word`, `voice.speak_unprompted` (`true`/`on`, `false`/`off`), `voice.mic` (a name; empty: the default) and `session.model` (a model Synaps routes: `claude-…`, `<provider>/<model>`, `local/<name>`). Exit 0: saved (or already so); 2: a bad `--set`; 3: the file refused (a typo, unreadable); 4: not saved (it couldn't be written, or the result wouldn't load) |
@@ -450,7 +450,7 @@ A pack is a directory:
 | `icon.png` | her icon (`_NET_WM_ICON` on her window and the Line), unless yours is at `$XDG_CONFIG_HOME/synaps-avatar/icon.png`; with neither, capri-syn's (`assets/icon`). Windows doesn't use it: her icon there is the app's |
 | `music/*.png` | headphones frames and note sprites for the music idle |
 | `fonts/*.ttf` | the HUD font (Exo 2 static instances; OFL) |
-| `moods.json` | **the avatar's behaviour sidecar**, our file: HUD tones (overrides of the theme's tokens by name: `accent`, `text`, `danger`, …; empty for Capri), each mood's nameplate shape (`plate`: slant / arrow / flag / square / split), idle life (bob, sway, sparkles, activity timing), the mood table (frames, entry clips, labels, glyphs), idle activities, extra frames (an extra frame may paint another file's face onto it: `patch`), click reactions (head pat / body / annoyed streak), perch rules (one frame, plus the headpat face), music, arrivals (`arrive`: launch / cinematic (the landing after the close-up) / summon / teleport / perch sequences, `teleportChance`), the deep nap (`brain.napDeep`, `napPerch`, `napDeepAfterMs`, `napWake`), the greeting when he's back (`brain.greet`, `greetMorning`), the startle and big-leap crouch, the look straight ahead (`brain.lookFront`), the rare air kiss (`kiss`) and the icon. The code ships no character ids: everything character-specific is in here |
+| `moods.json` | **the avatar's behaviour sidecar**, our file (the slots any pack can fill: [below](#slots-any-pack-can-fill)): HUD tones (overrides of the theme's tokens by name: `accent`, `text`, `danger`, …; empty for Capri), each mood's nameplate shape (`plate`: slant / arrow / flag / square / split), idle life (bob, sway, sparkles, activity timing), the mood table (frames, entry clips, labels, glyphs), idle activities, extra frames (an extra frame may paint another file's face onto it: `patch`), click reactions (head pat / body / annoyed streak), perch rules (one frame, plus the headpat face), music, arrivals (`arrive`: launch / cinematic (the landing after the close-up) / summon / teleport / perch sequences, `teleportChance`), the deep nap (`brain.napDeep`, `napPerch`, `napDeepAfterMs`, `napWake`), the greeting when he's back (`brain.greet`, `greetMorning`), the startle and big-leap crouch, the look straight ahead (`brain.lookFront`), the rare air kiss (`kiss`) and the icon. The code ships no character ids: everything character-specific is in here |
 | `persona.md` | optional: her session's system prompt (`[session] persona`) |
 | `NOTICE.md` | the art's notice, plus a line naming the CapriCore versions it came from |
 
@@ -618,6 +618,85 @@ The launch, with `[intro] cinematic` on:
 - Without the close-ups, the launch is just that bolt. The close-ups are decoded for each launch and
   dropped after it (their memory back to the system); ones that decode after the launch went on are
   not kept.
+
+### Slots any pack can fill
+
+Every slot below is optional. A pack that leaves one out behaves exactly as before (its
+fallback); nothing here names a character. Each extends a key the sidecar already has: no new
+top-level keys, `schemaVersion` unchanged (1 for `anim/anim.json`, 2 for `sprites.json`).
+
+**Strips as clips.** Anywhere the sidecar takes steps (a mood's `entry`/`exit`/`loop`, an
+activity, a click, an arrival, every `brain` list, `drag`/`fling`/`land`, and the slots below), a
+step may name an `anim/anim.json` strip as if it were a clip (`["greeting"]`): its cells play in
+their order, each for its own ms. A catalog clip or action of the same name wins. Its cells
+register by the strip's anchor (feet on the ground point, a seat on the seat line, `ceiling` on
+the hang pose's grip), scale against the pack's body like any strip, mirror with its
+`mirrorArt` twin (else on the fly) and use the x2 file when there is one. They decode off the
+main thread when first wanted, inside `variants.cacheMb` (least recently shown go first); until
+they are in, the steps play as nothing and the caller's fallback runs (the drawn hearts and
+squash of an emote, the pack's own arrival). While she sleeps, the strips in `brain.greet`,
+`greetMorning`, `napWakeGreet` and `napWake` are kept ready, so she wakes into them; the
+strips in `brain.glance` stay once they are in. A step naming a clip the catalog doesn't have
+used to fail validation; if it names a strip it now plays that strip: `--check` prints the
+strips played as clips.
+
+**Strip loaders** (`anim/anim.json` strip entries, under the side's `strips` as today; old entries load as before):
+
+| field | |
+|---|---|
+| `grid` | `[cols, rows]`: a cel sheet, cells row by row (absent: one row of `frames`). `frames` is how many of the grid's cells are used (absent: all); the sheet is the whole grid, unused cells and rows included |
+| `order` | the cells played, in order: keys and in-betweens, a cell may repeat (absent: each cell once) |
+| `keys` | positions in `order` that are keys: when a strip plays thinned (a pool variant's `every` > 1, for its loop, talk, music and blinks; a strip named as a clip plays at its pools' finest `every`, else whole) only they play, each held until the next (absent: every n-th position). Only the positions played are decoded |
+| `ms` | per position (or per cell) ms, instead of `fps`, wherever the strip plays: a pool's loop and blinks, a transition, a clip, the walk, the dangle and the dance (the whole loop fitted to the tempo, each cell keeping its share) |
+| `geometry` | a JSON file beside the sheet (path from the side's root) supplying any of `cell`, `grid`, `frames`, `fps`, `order`, `keys`, `ms`, `bounds`, `anchor`, `contact` the entry leaves out (the entry wins) |
+| `animated` | `true`: an animated WebP. Its frames are the cells (each a whole canvas, composited), `cell` is its canvas and `ms` its frame delays (0 reads as 100), all read from the file's chunks at load; `order`/`keys`/`ms` apply on top. Limits, checked at load and before each decode (the x2 file too): a canvas of 4096 px a side and 8 Mpx at most, 1000 frames, 512 MiB for all its frames decoded; past them the strip is refused. A decode keeps only the frames it wants and stops after the last one (a frame composites over those before it, so they decode too) |
+| `anchor.name` | `feet`, `seat`, `surface`, `grip`, and now `ceiling`: hands on a bar, the cell's anchor put on `brain.poses.hang`'s anchor |
+| `outfit` | the outfit (`variants.outfits` id) this strip is drawn in; absent or `any`: every outfit |
+
+Sheets may be PNG or WebP (by their magic), and so may catalog frames. Decoding uses the `image`
+crate's PNG and WebP decoders on every platform.
+
+**Outfits** (`variants.outfits`): `[{"id": "main"}, {"id": "alt", "weight": 1, "sprites": "outfits/alt/sprites.json"}]`.
+An outfit without `sprites` is the pack's own frames (absent: one called `pack` leads, weight 1).
+`sprites` is a catalog in `sprites.json`'s schema on the pack's canvas whose ids are the pack's
+frame ids (catalog sprites and extra frames), its files beside it. Rules:
+
+- She changes outfit on her own about every 45-120 min (weighted, never into the one she wears):
+  the other look decodes off the main thread (only the frames it or the look she wears draws,
+  counted in `variants.cacheMb` while it waits), then goes on only where it can't be seen: in
+  the bolt of a teleport (or the launch's), or as she wakes, under the wake's glitch cut (the
+  sleep cut's), before her waking frames are picked (she wakes in it; the sleep drawing on
+  screen leaves with the wake). Not while he carries her. Never mid-animation, never into a
+  pose that look doesn't draw; every frame changes at once, and an arrival picked before the
+  bolt is picked again in the new look, so two looks never mix. A decoded look with no such
+  moment in 20 min is dropped and tried again later.
+- The outfit she wears is saved in `state.json` (`outfit`): a restart keeps it.
+- An outfit must draw every single frame the sidecar names (the default sprite, each mood's base,
+  the bands' idle bases, the perch base and per-mood perch frames, `music.floor`/`window`, the
+  drag/fling frames, the nap, crouch and look-front frames, the floor and sulk sits' bases), or
+  the pack fails validation. A sequence (steps) with any frame it doesn't draw is skipped whole
+  in that outfit (so is a single frame asked for by the control socket's `clip <id>`), and an approach whose pose it doesn't draw (`brain.poses`) has weight 0: she
+  doesn't enter that state while wearing it. A strip tagged for another outfit doesn't play (its
+  pool variant, transition or clip is skipped).
+- `--check` decodes every outfit's frames too.
+
+**Behaviour slots:**
+
+| slot | key | fallback (left out) |
+|---|---|---|
+| `greet` (wake, return, bid, satisfied) | `brain.napWakeGreet`, `brain.greet` / `greetMorning`, an entry of `brain.bid`, `brain.satisfied.pat` / `other` (any of them may name a strip, e.g. a full-body greeting WebP) | today's: the get-up, the wave, the bid's beat, the hearts |
+| `hang.fidget.*` | `brain.hangFidgets` (`{"pullup": [...], "catch": [...], "wrist_glance": [...]}`): `ceiling`-anchored frames or strips, played as idle beats while she hangs from a top bar or a window (`brain.poses.hang`) | the hang's swing alone |
+| `glance` | `brain.glance`: steps for a glance at the pointer coming by or a window gaining focus (a focus change); `@look` in them turns toward it. Its strips decode when first wanted (that glance is the look) | `@look` |
+| `perch.music` | `music.windowLoop`: seat-anchored steps (a perched music loop strip) looped while music plays on a window top; notes from `music.emitters` by the strip's name | `music.window` |
+| `idle.pose.*` | `life.poses` (`{"lean": [...], "sit_floor": [...]}`): in, a hold, out, in place; counted as gestures among her idle beats | the activities' gestures |
+| expressions | `life.fidgets` (and per band `energy.<band>.fidgets`): a rotation pool of short beats (blinks, looks, mouths, winks, sleepy blinks), never the same twice running | the activities' face beats |
+| `perch.fidget.*` | `perch.activities`: beats while she sits on a window top. Filling it opts a pack in; empty keeps one perch frame (§6.2) | one perch frame |
+| alternate intro frames | `arrive.alt` (`{"launch": [[...], [...]], "cinematic": ..., "teleport": ..., "perch": ...}`): each arrival picks among its own steps and these, never the same twice running; `summon` is accepted like `arrive.summon` | the key's own steps |
+| effect sprites (hearts) | a catalog sprite or extra frame with `kind: "effect"` (an overlay, never one of her frames), named by `click.hearts`: every heart burst (a headpat, the kiss, a happy emote) draws its outline in its colour over a white rim, through the hearts' effect layers on every platform | the drawn hearts |
+| portrait | `anim/anim.json` stills `face` (the Line) and `capri` (the menu header, the notification image) | none shown |
+
+The installer shows no pack art: it is built from `assets/icon` before any pack exists, and a pack
+is assembled locally afterwards, so there is no installer slot.
 
 ## Building
 

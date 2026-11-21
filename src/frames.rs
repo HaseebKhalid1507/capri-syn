@@ -471,6 +471,38 @@ pub fn still(path: &std::path::Path, sha: Option<&str>, h: u32) -> Result<image:
     image::RgbaImage::from_raw(w, h.max(1), dst.into_vec()).context("still size")
 }
 
+/// An effect sprite (`kind: "effect"`: the pack's hearts) for the hearts' path: its outline as
+/// a 1-bit mask `h` px tall (cut to its opaque box), and its colour (the mean of its opaque
+/// pixels). Drawn like the drawn hearts: a shaped solid-colour layer over a white rim, on every
+/// platform's effect layers.
+pub struct EffectMask {
+    pub mask: Mask,
+    pub rgb: u32,
+}
+
+pub fn decode_effect(path: &std::path::Path, sha: Option<&str>, h: u32) -> Result<EffectMask> {
+    let img = still(path, sha, h)?;
+    let (w, h) = img.dimensions();
+    let mut mask = Mask::new(w, h);
+    let (mut sum, mut n) = ([0u64; 3], 0u64);
+    for (x, y, p) in img.enumerate_pixels() {
+        if p[3] >= 128 {
+            mask.set(x, y);
+        }
+        if p[3] >= 200 {
+            for (s, v) in sum.iter_mut().zip(p.0) {
+                *s += u64::from(v);
+            }
+            n += 1;
+        }
+    }
+    if n == 0 {
+        bail!("{}: no opaque pixels", path.display());
+    }
+    let rgb = ((sum[0] / n) << 16) | ((sum[1] / n) << 8) | (sum[2] / n);
+    Ok(EffectMask { mask, rgb: rgb as u32 })
+}
+
 /// A face tile `px` square from a still: the square of it at `centre` about `size` px across,
 /// rounded to a whole multiple of `px` (inside the image), averaged down by that whole number:
 /// sharp, no resampling blur.
@@ -543,13 +575,36 @@ pub fn sha_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Strips decoded once per `decode` call, shared by their cells (and its threads).
-type Strips = std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, Arc<std::sync::OnceLock<Result<Arc<image::RgbaImage>, String>>>>>;
+/// A strip's pixels: one image of cells (a row, or a cel sheet's grid), or an animated WebP's
+/// frames (only those a `decode` call wants are kept: each is a whole canvas).
+enum Sheet {
+    Grid(image::RgbaImage),
+    Frames(std::collections::HashMap<u32, image::RgbaImage>),
+}
 
-fn strip_image(strips: &Strips, path: &std::path::Path, sha: Option<&str>, verify: bool) -> Result<Arc<image::RgbaImage>> {
-    let slot = strips.lock().unwrap().entry(path.to_owned()).or_default().clone();
+type SheetSlot = Arc<std::sync::OnceLock<Result<Arc<Sheet>, String>>>;
+
+/// Strips decoded once per `decode` call, shared by their cells (and its threads); per animated
+/// file, the frames the call wants.
+#[derive(Default)]
+struct Strips {
+    sheets: std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, SheetSlot>>,
+    wanted: std::collections::HashMap<std::path::PathBuf, std::collections::HashSet<u32>>,
+}
+
+/// The file a strip's cells come from at this size: its x2 twin (`make-pack --upscale`) when the
+/// cell would be enlarged, else the strip as shipped (sha-checked). (path, cell px factor, sha256)
+fn cell_file<'a>(st: &'a crate::art::Strip, geo: &Geometry) -> (&'a std::path::Path, u32, Option<&'a str>) {
+    match &st.x2 {
+        Some(p) if geo.scale * st.k > 1.0 => (p.as_path(), 2, None),
+        _ => (st.path.as_path(), 1, st.sha256.as_deref()),
+    }
+}
+
+fn strip_image(strips: &Strips, path: &std::path::Path, sha: Option<&str>, verify: bool, animated: bool) -> Result<Arc<Sheet>> {
+    let slot = strips.sheets.lock().unwrap().entry(path.to_owned()).or_default().clone();
     slot.get_or_init(|| {
-        let load = || -> Result<Arc<image::RgbaImage>> {
+        let load = || -> Result<Arc<Sheet>> {
             let bytes = std::fs::read(path).with_context(|| format!("strip {}: cannot read", path.display()))?;
             if verify && let Some(want) = sha {
                 let got = sha_hex(&bytes);
@@ -557,14 +612,51 @@ fn strip_image(strips: &Strips, path: &std::path::Path, sha: Option<&str>, verif
                     bail!("strip {}: sha256 mismatch (anim.json {want}, file {got})", path.display());
                 }
             }
-            let img = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)
-                .with_context(|| format!("strip {}: not a valid PNG", path.display()))?;
-            Ok(Arc::new(img.into_rgba8()))
+            if !animated {
+                // PNG or WebP, by its magic.
+                let img = image::load_from_memory(&bytes).with_context(|| format!("strip {}: not a valid PNG or WebP", path.display()))?;
+                return Ok(Arc::new(Sheet::Grid(img.into_rgba8())));
+            }
+            Ok(Arc::new(Sheet::Frames(webp_wanted(path, &bytes, strips.wanted.get(path))?)))
         };
         load().map_err(|e| format!("{e:#}"))
     })
     .clone()
     .map_err(|e| anyhow::anyhow!(e))
+}
+
+/// An animated WebP's frames at `keep` (None: all), each a whole canvas. Within the limits
+/// (`art::WEBP_MAX_*`, checked on the file itself: it may be the x2 one, or changed since the
+/// load), else an error, never an aborting allocation. A frame composites over the ones
+/// before it, so those decode too (and go at once); none after the last one wanted.
+fn webp_wanted(path: &std::path::Path, bytes: &[u8], keep: Option<&std::collections::HashSet<u32>>) -> Result<std::collections::HashMap<u32, image::RgbaImage>> {
+    use image::{AnimationDecoder as _, ImageDecoder as _};
+    let mut dec = image::codecs::webp::WebPDecoder::new(std::io::Cursor::new(bytes)).with_context(|| format!("strip {}: not a valid WebP", path.display()))?;
+    let (w, h) = dec.dimensions();
+    crate::art::webp_canvas_ok(w, h).with_context(|| format!("strip {}", path.display()))?;
+    let frame = u64::from(w) * u64::from(h) * 4;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(crate::art::WEBP_MAX_SIDE);
+    limits.max_image_height = Some(crate::art::WEBP_MAX_SIDE);
+    limits.max_alloc = Some(frame.max(1) * 2);
+    dec.set_limits(limits).with_context(|| format!("strip {}: past the decoder's limits", path.display()))?;
+    let last = match keep {
+        Some(k) => k.iter().max().copied().map_or(0, |m| m + 1),
+        None => crate::art::WEBP_MAX_FRAMES,
+    };
+    let kept = keep.map_or(u64::from(last), |k| k.len() as u64);
+    if kept.saturating_mul(frame) > crate::art::WEBP_MAX_BYTES {
+        bail!("strip {}: {kept} frames of {w}x{h} are past {} MiB decoded", path.display(), crate::art::WEBP_MAX_BYTES >> 20);
+    }
+    let mut out = std::collections::HashMap::new();
+    for (i, f) in dec.into_frames().take(last.min(crate::art::WEBP_MAX_FRAMES) as usize).enumerate() {
+        let f = f.with_context(|| format!("strip {}: frame {i} does not decode", path.display()))?;
+        let i = i as u32;
+        if keep.is_none_or(|k| k.contains(&i)) {
+            out.insert(i, f.into_buffer());
+        }
+    }
+    Ok(out)
 }
 
 /// A strip's cell, scaled to device px and laid into an avatar-rect buffer at its registration:
@@ -574,22 +666,34 @@ fn cell_pixels(pack: &Pack, f: &FrameSource, c: &crate::art::CellSrc, geo: &Geom
     let a = pack.anim.as_ref().context("a strip cell without anim/")?;
     let st = &a.strips[c.strip];
     let dev = geo.scale * st.k;
-    let (path, n, sha) = match &st.x2 {
-        Some(p) if dev > 1.0 => (p, 2u32, None),
-        _ => (&st.path, 1, st.sha256.as_deref()),
+    let (path, n, sha) = cell_file(st, geo);
+    let sheet = strip_image(strips, path, sha, verify, st.animated)?;
+    let (cw, ch) = (st.cell.0.saturating_mul(n), st.cell.1.saturating_mul(n));
+    let sc = st.sheet_cell(c.i);
+    let mut cell = match &*sheet {
+        Sheet::Grid(img) => {
+            // The grid's own rows (an unused row is still on the sheet), in u64: no wrap.
+            if u64::from(img.width()) != u64::from(cw) * u64::from(st.cols) || u64::from(img.height()) != u64::from(ch) * u64::from(st.rows) {
+                bail!("strip `{}`: {} is {}x{}, anim.json says {} cells of {cw}x{ch}", st.name, path.display(), img.width(), img.height(), st.sheet_cells);
+            }
+            let mut cell = vec![0u8; (cw * ch * 4) as usize];
+            let raw = img.as_raw();
+            let row = cw as usize * 4;
+            let (x0, y0) = ((sc % st.cols * cw) as usize, (sc / st.cols * ch) as usize);
+            for y in 0..ch as usize {
+                let s0 = ((y0 + y) * img.width() as usize + x0) * 4;
+                cell[y * row..(y + 1) * row].copy_from_slice(&raw[s0..s0 + row]);
+            }
+            cell
+        }
+        Sheet::Frames(fs) => {
+            let f = fs.get(&sc).with_context(|| format!("strip `{}`: {} has no frame {sc}", st.name, path.display()))?;
+            if f.width() != cw || f.height() != ch {
+                bail!("strip `{}`: {} frames are {}x{}, anim.json says {cw}x{ch}", st.name, path.display(), f.width(), f.height());
+            }
+            f.as_raw().clone()
+        }
     };
-    let img = strip_image(strips, path, sha, verify)?;
-    let (cw, ch) = (st.cell.0 * n, st.cell.1 * n);
-    if img.width() != cw * st.frames || img.height() != ch {
-        bail!("strip `{}`: {} is {}x{}, anim.json says {} cells of {cw}x{ch}", st.name, path.display(), img.width(), img.height(), st.frames);
-    }
-    let mut cell = vec![0u8; (cw * ch * 4) as usize];
-    let raw = img.as_raw();
-    let row = cw as usize * 4;
-    for y in 0..ch as usize {
-        let s0 = (y * img.width() as usize + (c.i * cw) as usize) * 4;
-        cell[y * row..(y + 1) * row].copy_from_slice(&raw[s0..s0 + row]);
-    }
     if let Some(k) = st.contact {
         cut_below(&mut cell, cw, k.line * n, [k.legs[0] * n, k.legs[1] * n]);
     }
@@ -652,8 +756,9 @@ fn canvas_pixels(pack: &Pack, f: &FrameSource, geo: &Geometry, verify: bool, res
             bail!("frame `{}`: sha256 mismatch for {} (catalog {want}, file {got})", f.id, f.path.display());
         }
     }
-    let mut img = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)
-        .with_context(|| format!("frame `{}`: {} is not a valid PNG", f.id, f.path.display()))?
+    // PNG or WebP, by its magic.
+    let mut img = image::load_from_memory(&bytes)
+        .with_context(|| format!("frame `{}`: {} is not a valid PNG or WebP", f.id, f.path.display()))?
         .into_rgba8();
     if let Some((path, rect, pdx, pdy, sha)) = &f.patch {
         let pb = std::fs::read(path).with_context(|| format!("frame `{}`: cannot read its patch {}", f.id, path.display()))?;
@@ -797,13 +902,30 @@ fn crop_opaque(px: Vec<u8>, w: u32, h: u32) -> ((i32, i32), image::RgbaImage) {
     ((x0 as i32, y0 as i32), image::RgbaImage::from_raw(cw, ch, out).expect("buffer size"))
 }
 
-/// Decode the frames at `which` (indices into `pack.frames`) on up to `threads` threads.
+/// Decode the frames at `which` (indices into `pack.frames`) on up to `threads` threads, in the
+/// outfit she wears (`Pack::wearing`).
 pub fn decode(pack: &Pack, geo: &Geometry, which: &[usize], verify: bool, threads: usize) -> Result<Decoded> {
+    decode_dressed(pack, geo, which, pack.wearing(), verify, threads)
+}
+
+/// `decode` in outfit `outfit` (`moods.json` `variants.outfits`): its own drawing of each frame it
+/// has (the pack's otherwise; she never shows those in it: `Pack::wears`).
+pub fn decode_dressed(pack: &Pack, geo: &Geometry, which: &[usize], outfit: usize, verify: bool, threads: usize) -> Result<Decoded> {
     let t0 = std::time::Instant::now();
     let next = AtomicUsize::new(0);
     let slots: std::sync::Mutex<Vec<Option<Result<Frame>>>> =
         std::sync::Mutex::new((0..which.len()).map(|_| None).collect());
-    let strips = Strips::default();
+    let mut strips = Strips::default();
+    // An animated strip keeps only the frames these cells show.
+    if let Some(a) = &pack.anim {
+        for f in which.iter().filter_map(|&i| pack.frames[i].cell.as_ref()) {
+            let st = &a.strips[f.strip];
+            if st.animated {
+                strips.wanted.entry(cell_file(st, geo).0.to_owned()).or_default().insert(st.sheet_cell(f.i));
+            }
+        }
+    }
+    let strips = strips;
     std::thread::scope(|s| {
         for _ in 0..threads.max(1).min(which.len().max(1)) {
             s.spawn(|| {
@@ -813,7 +935,7 @@ pub fn decode(pack: &Pack, geo: &Geometry, which: &[usize], verify: bool, thread
                     if i >= which.len() {
                         break;
                     }
-                    let r = decode_one(pack, &pack.frames[which[i]], geo, verify, &mut resizer, &strips);
+                    let r = decode_one(pack, pack.source_in(which[i], outfit), geo, verify, &mut resizer, &strips);
                     slots.lock().unwrap()[i] = Some(r);
                 }
             });
@@ -995,6 +1117,128 @@ mod tests {
         put(95, 75, [30, 120, 230, 255]);
         assert_eq!(super::face_box(&px, w, (50, 120)), Some((90, 70, 109, 79)));
         assert_eq!(super::face_box(&px, w, (0, 50)), None);
+    }
+
+    /// The colour in the middle of a decoded frame's opaque pixels (RGB).
+    fn colour(f: &Frame) -> [u8; 3] {
+        let px = f.image.as_bytes(0).unwrap();
+        let solid: Vec<&[u8; 4]> = px.as_chunks::<4>().0.iter().filter(|p| p[3] > 250).collect();
+        let m = solid[solid.len() / 2];
+        [m[2], m[1], m[0]]
+    }
+
+    #[test]
+    fn cel_sheet_and_animated_webp_cells_decode_to_their_own_drawing() {
+        let moods = serde_json::json!({"activities": [["sheet"], ["greet"]]});
+        crate::pack::tests::pack_cels("celdecode", moods, None, |p| {
+            let p = p.unwrap();
+            let geo = Geometry::new(&p, 60.0);
+            let cells = |name: &str| p.flatten(&[crate::pack::Step::Clip(name.into())]).into_iter().map(|s| s.0).collect::<Vec<_>>();
+            let (sheet, greet) = (cells("sheet"), cells("greet"));
+            // order [0, 1, 2, 1, 0] over red, green, blue cells in a 2x2 grid.
+            let d = decode(&p, &geo, &sheet, false, 2).unwrap();
+            let got: Vec<[u8; 3]> = d.frames.iter().map(colour).collect();
+            let want = [[255, 0, 0], [0, 255, 0], [0, 0, 255], [0, 255, 0], [255, 0, 0]];
+            for (g, w) in got.iter().zip(want) {
+                assert!(g.iter().zip(w).all(|(a, b)| a.abs_diff(b) < 40), "{got:?}");
+            }
+            // An animated WebP: each cell is its own frame; only the frames asked for are kept.
+            let d = decode(&p, &geo, &greet[2..], false, 1).unwrap();
+            assert!(colour(&d.frames[0])[2] > 215 && colour(&d.frames[0])[0] < 40);
+            let d = decode(&p, &geo, &greet, false, 2).unwrap();
+            assert!(colour(&d.frames[1])[1] > 215, "{:?}", colour(&d.frames[1]));
+            // Sized and registered like any standing strip: feet on the ground point.
+            let (_, gy) = geo.to_device(p.catalog.canonical_anchor.x, p.catalog.canonical_anchor.y);
+            assert!((d.frames[0].bottom as f32 - gy).abs() <= 2.0 * geo.scale, "bottom {} ground {gy}", d.frames[0].bottom);
+        });
+    }
+
+    #[test]
+    fn a_cel_sheet_with_an_unused_row_decodes() {
+        // A 2x3 grid holding 3 cells (`frames: 3`, as the docs allow): its last row is empty.
+        let moods = serde_json::json!({"activities": [["sheet"]]});
+        let setup = |d: &std::path::Path| {
+            crate::art::tests::write_anim(d);
+            crate::art::tests::write_cels(d, None);
+            let cells = crate::art::tests::solid_cells(4, 6, &[[255, 0, 0], [0, 255, 0], [0, 0, 255]]);
+            let mut sheet = image::RgbaImage::new(8, 18);
+            for (i, c) in cells.iter().enumerate() {
+                image::imageops::replace(&mut sheet, c, (i as i64 % 2) * 4, (i as i64 / 2) * 6);
+            }
+            sheet.save(d.join("anim/lachy/sprites/sheet.png")).unwrap();
+            let p = d.join("anim/anim.json");
+            let mut v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+            v["lachy"]["strips"]["sheet"]["grid"] = serde_json::json!([2, 3]);
+            std::fs::write(&p, v.to_string()).unwrap();
+        };
+        crate::pack::tests::pack_setup("celrows", moods, setup, |p| {
+            let p = p.unwrap();
+            let geo = Geometry::new(&p, 60.0);
+            let sheet: Vec<usize> = p.flatten(&[crate::pack::Step::Clip("sheet".into())]).into_iter().map(|s| s.0).collect();
+            let d = decode(&p, &geo, &sheet, false, 2).unwrap();
+            let got: Vec<[u8; 3]> = d.frames.iter().map(colour).collect();
+            let want = [[255, 0, 0], [0, 255, 0], [0, 0, 255], [0, 255, 0], [255, 0, 0]];
+            for (g, w) in got.iter().zip(want) {
+                assert!(g.iter().zip(w).all(|(a, b)| a.abs_diff(b) < 40), "{got:?}");
+            }
+        });
+    }
+
+    #[test]
+    fn an_animated_webp_decodes_within_its_limits_and_only_up_to_the_frames_wanted() {
+        let cells = crate::art::tests::solid_cells(4, 6, &[[255, 0, 0], [0, 255, 0], [0, 0, 255]]);
+        let mut bytes = crate::art::tests::animated_webp(&cells, &[80, 120, 200]);
+        let p = std::path::Path::new("synthetic.webp");
+        let want = |k: &[u32]| Some(k.iter().copied().collect::<std::collections::HashSet<u32>>());
+        let got = webp_wanted(p, &bytes, want(&[1]).as_ref()).unwrap();
+        assert_eq!(got.keys().copied().collect::<Vec<_>>(), [1], "only the frame asked for is kept");
+        // Break the last frame's bitstream: wanting the first two never decodes it.
+        let last = bytes.windows(4).rposition(|w| w == b"VP8L").unwrap();
+        bytes[last + 8] = 0;
+        assert!(webp_wanted(p, &bytes, want(&[0, 1]).as_ref()).is_ok(), "nothing past the last frame wanted is decoded");
+        assert!(webp_wanted(p, &bytes, want(&[2]).as_ref()).is_err());
+        // A canvas past the limits (here 16384x16384, 1 GiB a frame): an error, never an allocation.
+        let mut huge = crate::art::tests::animated_webp(&cells, &[80, 120, 200]);
+        huge[24..27].copy_from_slice(&16383u32.to_le_bytes()[..3]);
+        huge[27..30].copy_from_slice(&16383u32.to_le_bytes()[..3]);
+        let e = format!("{:#}", webp_wanted(p, &huge, want(&[0]).as_ref()).unwrap_err());
+        assert!(e.contains("past the limit") || e.contains("not a valid WebP"), "{e}");
+    }
+
+    #[test]
+    fn an_outfit_decodes_its_own_drawing_of_a_frame() {
+        let moods = serde_json::json!({"perch": {"base": "sit"}, "variants": {"outfits": [{"id": "alt", "sprites": "outfits/alt/sprites.json"}]}});
+        crate::pack::tests::pack_setup("outfitdecode", moods, |d| crate::pack::tests::write_outfit(d, &["neutral", "sit"]), |p| {
+            let p = p.unwrap();
+            assert_eq!(p.outfits[0].id, "pack", "the pack's own look leads");
+            let geo = Geometry::new(&p, 60.0);
+            let n = p.index["neutral"];
+            let own = decode(&p, &geo, &[n], false, 1).unwrap();
+            let alt = decode_dressed(&p, &geo, &[n], 1, false, 1).unwrap();
+            assert!(colour(&own.frames[0])[1] > 200 && colour(&alt.frames[0])[0] > 200, "green, then red");
+            p.wear(1);
+            assert!(colour(&decode(&p, &geo, &[n], false, 1).unwrap().frames[0])[0] > 200, "decode follows what she wears");
+        });
+    }
+
+    #[test]
+    fn an_effect_sprite_is_its_outline_and_colour() {
+        let dir = std::env::temp_dir().join(format!("sa-effect-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("e.png");
+        let mut img = image::RgbaImage::new(40, 40);
+        for y in 10..30 {
+            for x in 10..20 {
+                img.put_pixel(x, y, image::Rgba([250, 40, 120, 255]));
+            }
+        }
+        img.save(&p).unwrap();
+        let e = decode_effect(&p, None, 20).unwrap();
+        assert_eq!((e.mask.w, e.mask.h), (10, 20), "cut to its box, 20 px tall");
+        assert!(e.mask.get(5, 10) && !e.mask.get(10, 10));
+        assert_eq!(e.rgb, 0xfa2878);
+        assert!(decode_effect(&dir.join("none.png"), None, 20).is_err());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -9,6 +9,7 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Deserialize, Clone, Debug)]
 pub struct Anchor {
@@ -136,7 +137,7 @@ pub struct PoseCatalog {
 }
 
 /// One step of a scripted sequence: a catalog clip id, or one frame held for `ms`.
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, Clone, Debug, PartialEq)]
 #[serde(untagged)]
 pub enum Step {
     Clip(String),
@@ -229,6 +230,13 @@ pub struct Life {
     /// Override the catalog's autonomy timing.
     pub first_activity_ms: Option<u64>,
     pub activity_gap_ms: Option<u64>,
+    /// Her micro-fidgets: short beats in place (a blink, a look, a mouth, a wink, a sleepy
+    /// blink), a rotation pool the restless idle draws from every few seconds, never the same
+    /// twice running. Empty: the activities' face beats.
+    pub fidgets: Vec<Vec<Step>>,
+    /// Her bigger idle poses by name (`lean`, `sit_floor`, ...): in, a hold, out, in place. The
+    /// restless idle reaches for them as she gets bored. Empty: the activities' gestures.
+    pub poses: BTreeMap<String, Vec<Step>>,
 }
 
 impl Default for Life {
@@ -242,6 +250,8 @@ impl Default for Life {
             sparkle_ms: 560,
             first_activity_ms: None,
             activity_gap_ms: None,
+            fidgets: Vec::new(),
+            poses: BTreeMap::new(),
         }
     }
 }
@@ -292,6 +302,9 @@ pub struct Then {
 pub struct ExtraFrame {
     pub id: String,
     pub file: String,
+    /// `effect`: an overlay (`click.hearts`), like a catalog sprite of that kind: not a frame.
+    #[serde(default)]
+    pub kind: Option<String>,
     /// Borrow anchor and visible bounds from this catalog sprite (same registration)…
     #[serde(default)]
     pub like: Option<String>,
@@ -341,6 +354,10 @@ pub struct ArriveSpec {
     /// The chance a passive or bid teleport lands with `teleport` / `perch` when the last one
     /// didn't (never twice running: 0.5 gives 1 in 3).
     pub teleport_chance: f32,
+    /// Other drawings of an arrival, by key (`launch`, `cinematic`, `summon`, `teleport`,
+    /// `perch`): each arrival picks among the key's own steps and these, never the same twice
+    /// running. Empty: always the key's own.
+    pub alt: BTreeMap<String, Vec<Vec<Step>>>,
 }
 
 /// The rare air kiss after a headpat: its steps, the chance per headpat, the hearts' start
@@ -362,6 +379,10 @@ pub struct MusicSpec {
     pub floor: String,
     #[serde(default)]
     pub window: Option<String>,
+    /// On a window top: these seat-anchored steps loop instead of the `window` frame (a perched
+    /// music loop, typically a strip). Empty, not worn, or its cells not in yet: `window`.
+    #[serde(default)]
+    pub window_loop: Vec<Step>,
     #[serde(default = "bpm_default")]
     pub bpm: f32,
     /// Note images (any size, square), used in turn.
@@ -408,6 +429,11 @@ pub struct ClickSpec {
     /// Fraction of the frame's visible height counted as the head, from the top.
     #[serde(default = "head_fraction")]
     pub head_fraction: f32,
+    /// The hearts (a headpat, the kiss, a happy emote) drawn from this effect sprite (a catalog
+    /// sprite or extra frame of kind `effect`): its outline, filled in its colour over a white
+    /// rim. Absent: the drawn hearts.
+    #[serde(default)]
+    pub hearts: Option<String>,
 }
 
 fn annoyed_after() -> u32 {
@@ -824,6 +850,13 @@ pub struct BrainSpec {
     /// Approach → frame: `hang`, `hang_upside_down`, `cling_left`, `cling_right`, `peek`. A
     /// missing one gives that approach weight 0.
     pub poses: BTreeMap<String, String>,
+    /// Hanging from a top bar or a window (`poses.hang`): fidgets by name (`pullup`, `catch`,
+    /// `wrist_glance`, ...), `ceiling`-anchored frames or strips, registered on the hang pose's
+    /// grip. Empty: the hang's swing alone, as before.
+    pub hang_fidgets: BTreeMap<String, Vec<Step>>,
+    /// A glance (a notification came, a window moved, the pointer went by), then back: steps,
+    /// `@look` turning toward it. Empty: `@look` alone.
+    pub glance: Vec<Step>,
 }
 
 #[derive(Deserialize, Clone, Debug, Default)]
@@ -939,6 +972,146 @@ fn resolve_transitions(b: &Behaviour, anim: Option<&crate::art::Anim>, errors: &
     out
 }
 
+/// Every clip id the sidecar's steps name (where a strip may stand in as a clip).
+fn step_clip_ids(b: &Behaviour) -> Vec<&str> {
+    let mut lists: Vec<&[Step]> = Vec::new();
+    let mut ids: Vec<&str> = Vec::new();
+    let bands = [&b.energy.low, &b.energy.mid, &b.energy.high];
+    let moods = b.moods.values().chain(bands.iter().filter_map(|e| e.idle.as_ref())).chain(b.brain.floor_sit.iter()).chain(b.brain.sulk_sit.iter());
+    for m in moods {
+        lists.extend(m.entry.as_deref());
+        lists.extend(m.exit.as_deref());
+        match &m.r#loop {
+            Some(Steps::Inline(l)) => lists.push(l),
+            Some(Steps::Clip(c)) => ids.push(c),
+            None => {}
+        }
+    }
+    for e in bands {
+        lists.extend(e.activities.iter().chain(e.fidgets.iter()).map(Vec::as_slice));
+    }
+    lists.extend(b.activities.iter().chain(b.life.fidgets.iter()).chain(b.life.poses.values()).map(Vec::as_slice));
+    let c = &b.click;
+    lists.extend(c.body.iter().chain([&c.head, &c.annoyed]).map(Vec::as_slice));
+    if let Some(p) = &b.perch {
+        lists.extend(p.activities.iter().chain([&p.click, &p.headpat]).map(Vec::as_slice));
+    }
+    if let Some(a) = &b.arrive {
+        lists.extend([&a.launch, &a.cinematic, &a.summon, &a.teleport, &a.perch].into_iter().chain(a.alt.values().flatten()).map(Vec::as_slice));
+    }
+    if let Some(k) = &b.kiss {
+        lists.push(&k.steps);
+    }
+    if let Some(m) = &b.music {
+        lists.push(&m.window_loop);
+    }
+    let br = &b.brain;
+    let own = [&br.satisfied.pat, &br.satisfied.other, &br.sulk, &br.wave, &br.greet, &br.greet_morning, &br.stretch, &br.nap_wake, &br.startle, &br.curious, &br.bat, &br.missed, &br.make_up, &br.cold, &br.nap_wake_greet, &br.glance];
+    lists.extend(br.bid.iter().chain(br.insist.iter()).chain(own).chain(br.hang_fidgets.values()).map(Vec::as_slice));
+    if let Some(d) = &b.drag {
+        lists.extend([&d.grab, &d.swing, &d.dizzy].map(Vec::as_slice));
+    }
+    if let Some(f) = &b.fling {
+        lists.extend([&f.launch, &f.bounce, &f.tuck].map(Vec::as_slice));
+    }
+    if let Some(l) = &b.land {
+        lists.extend([&l.soft, &l.hard, &l.perch].map(Vec::as_slice));
+    }
+    ids.extend(lists.iter().flat_map(|l| l.iter()).filter_map(|s| match s {
+        Step::Clip(c) => Some(c.as_str()),
+        Step::Hold { .. } => None,
+    }));
+    ids
+}
+
+/// The single frames the sidecar names (not sequences): an outfit must draw all of them (one
+/// it lacked would leave her nothing to show in that state).
+fn required_frames(b: &Behaviour, catalog: &Catalog) -> Vec<String> {
+    let mut v = vec![catalog.default_sprite.clone()];
+    v.extend(b.moods.values().map(|m| m.base.clone()));
+    v.extend([&b.energy.low, &b.energy.mid, &b.energy.high].into_iter().filter_map(|e| e.idle.as_ref()).map(|m| m.base.clone()));
+    if let Some(p) = &b.perch {
+        v.push(p.base.clone());
+        v.extend(p.moods.values().cloned());
+    }
+    if let Some(m) = &b.music {
+        v.push(m.floor.clone());
+        v.extend(m.window.clone());
+    }
+    if let Some(d) = &b.drag {
+        v.extend([&d.hang, &d.shake, &d.ankle, &d.cling].into_iter().flatten().cloned());
+        v.extend(d.still.iter().map(|s| s.frame.clone()));
+    }
+    if let Some(f) = &b.fling {
+        v.extend([&f.fly, &f.fall].into_iter().flatten().cloned());
+    }
+    let br = &b.brain;
+    v.extend([&br.nap, &br.nap_deep, &br.nap_perch, &br.hop_crouch, &br.big_hop_crouch, &br.look_front].into_iter().flatten().cloned());
+    v.extend([&br.floor_sit, &br.sulk_sit].into_iter().flatten().map(|m| m.base.clone()));
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// `variants.outfits` -> looks: the pack's own first (the outfit without `sprites`, or `pack`),
+/// then each other one's catalog against the pack's frame ids. One that lacks a single frame the
+/// sidecar names is refused.
+fn resolve_outfits(dir: &Path, b: &Behaviour, catalog: &Catalog, frames: &[FrameSource], index: &HashMap<String, usize>, errors: &mut Vec<String>) -> Vec<Outfit> {
+    let specs = b.variants.as_ref().map_or(&[][..], |v| v.outfits.as_slice());
+    if specs.is_empty() {
+        return Vec::new();
+    }
+    let own = specs.iter().find(|o| o.sprites.is_none());
+    let mut out = vec![Outfit { id: own.map_or_else(|| "pack".to_string(), |o| o.id.clone()), weight: own.map_or(1.0, |o| o.weight), frames: HashMap::new() }];
+    let need = required_frames(b, catalog);
+    let (cw, ch) = (catalog.canvas.width as i32, catalog.canvas.height as i32);
+    for o in specs {
+        let Some(rel) = o.sprites.as_deref() else { continue };
+        let at = format!("moods.json variants.outfits `{}`", o.id);
+        if o.weight.is_nan() || o.weight < 0.0 || out.iter().any(|x| x.id == o.id) {
+            errors.push(format!("{at}: weight {} (>= 0) and ids unique", o.weight));
+            continue;
+        }
+        let p = dir.join(rel);
+        let cat = std::fs::read_to_string(&p).map_err(anyhow::Error::from).and_then(|t| serde_json::from_str::<PoseCatalog>(&t).map_err(Into::into));
+        let cat = match cat {
+            Ok(c) => c,
+            Err(e) => {
+                errors.push(format!("{at}: {}: {e:#}", p.display()));
+                continue;
+            }
+        };
+        let base = p.parent().unwrap_or(dir);
+        let mut mine = HashMap::new();
+        for sp in cat.sprites {
+            let Some(&fi) = index.get(&sp.id) else {
+                errors.push(format!("{at}: sprite `{}` is not one of the pack's frames", sp.id));
+                continue;
+            };
+            let path = base.join(&sp.file);
+            if !path.is_file() {
+                errors.push(format!("{at}: sprite `{}`: file {} is missing", sp.id, sp.file));
+            }
+            let bd = sp.visible_bounds;
+            if bd.x < 0 || bd.y < 0 || bd.right() > cw || bd.bottom() > ch || bd.width <= 0 || bd.height <= 0 {
+                errors.push(format!("{at}: sprite `{}`: visibleBounds {bd:?} outside the {cw}x{ch} canvas", sp.id));
+            }
+            if frames[fi].cell.is_some() {
+                errors.push(format!("{at}: sprite `{}` is a strip cell (tag the strip with its outfit instead)", sp.id));
+                continue;
+            }
+            mine.insert(fi, FrameSource { id: sp.id, path, anchor: sp.anchor, bounds: bd, sha256: sp.sha256, patch: None, cell: None });
+        }
+        let lacks: Vec<&str> = need.iter().filter(|id| index.get(id.as_str()).is_some_and(|fi| !mine.contains_key(fi))).map(String::as_str).collect();
+        if !lacks.is_empty() {
+            errors.push(format!("{at}: lacks {} (it must draw every single frame the sidecar names; sequences it lacks are skipped)", lacks.join(", ")));
+            continue;
+        }
+        out.push(Outfit { id: o.id.clone(), weight: o.weight, frames: mine });
+    }
+    out
+}
+
 /// A frame to decode: catalog sprite or sidecar extra.
 #[derive(Clone, Debug)]
 pub struct FrameSource {
@@ -967,6 +1140,8 @@ pub struct EnergySpec {
 pub struct EnergyBand {
     /// Instead of `activities` (empty: those).
     pub activities: Vec<Vec<Step>>,
+    /// Instead of `life.fidgets` in this band (empty: those): sleepy blinks at night.
+    pub fidgets: Vec<Vec<Step>>,
     /// The gap between activities [min, max] (absent: `life.activityGapMs`).
     pub gap_ms: Option<[u64; 2]>,
     /// The idle mood's base and loop in this band (a tired face at night).
@@ -1059,9 +1234,10 @@ pub struct Pack {
     /// `mirrorArt` twin's cells, stored mirrored.
     pub strip_first: Vec<Option<usize>>,
     pub mirror_first: Vec<Option<usize>>,
-    /// Per strip: only every n-th cell is ever played (the `every` of the variants using it),
-    /// so only those are decoded.
-    pub strip_every: Vec<u32>,
+    /// Per strip: the thinnings it plays at (the `every` of the variants using it; a strip
+    /// named as a clip plays at its pools' finest, else whole; a transition or a motion whole),
+    /// ascending. Only the positions those play (`Strip::played`) are decoded.
+    pub strip_every: Vec<Vec<u32>>,
     /// The variant pools (`moods.json` `variants`); a strip variant is dropped when the pack
     /// has no `anim/`, so an old pack's pool is its own art alone.
     pub pools: HashMap<crate::variants::PoolKey, Pool>,
@@ -1070,11 +1246,89 @@ pub struct Pack {
     /// `moods.json` `motions`, resolved.
     pub motions: Motions,
     pub cache_bytes: usize,
+    /// `variants.outfits`, resolved: the pack's own look first. Empty: one look.
+    pub outfits: Vec<Outfit>,
+    /// The outfit she wears (an index into `outfits`): every frame decodes in it.
+    worn: AtomicUsize,
+    /// Effect sprites (`kind: "effect"`: catalog sprites, extra frames) by id: overlays, never
+    /// her frames (`click.hearts`).
+    pub effects: HashMap<String, FrameSource>,
+    /// The hang pose's grip (`brain.poses.hang`'s anchor, canvas px): a `ceiling` strip's cells
+    /// register on it.
+    pub hang_ref: Option<(i32, i32)>,
+    /// Strips standing in as clips in the sidecar's steps (`Clip(strip name)`): decoded when
+    /// wanted, like a pool's.
+    pub step_strips: Vec<usize>,
+}
+
+/// One look (`variants.outfits`), resolved: its own drawing of the pack's frames, by frame index.
+/// The pack's own look has none (every frame is its own).
+#[derive(Clone, Debug)]
+pub struct Outfit {
+    pub id: String,
+    pub weight: f32,
+    pub frames: HashMap<usize, FrameSource>,
 }
 
 impl Pack {
     pub fn frame(&self, id: &str) -> Result<usize> {
         self.index.get(id).copied().ok_or_else(|| anyhow!("unknown frame id `{id}`"))
+    }
+
+    /// The outfit she wears (an index into `outfits`; 0 without any).
+    pub fn wearing(&self) -> usize {
+        self.worn.load(Ordering::Relaxed)
+    }
+
+    /// Wear outfit `i` (ignored past the list). Frames decoded after this are in it: the view
+    /// swaps them all at once, only where it can't be seen.
+    pub fn wear(&self, i: usize) {
+        if i < self.outfits.len() {
+            self.worn.store(i, Ordering::Relaxed);
+        }
+    }
+
+    /// The id of the outfit she wears (empty without any).
+    pub fn outfit_id(&self) -> &str {
+        self.outfits.get(self.wearing()).map_or("", |o| o.id.as_str())
+    }
+
+    pub fn outfit_by_id(&self, id: &str) -> Option<usize> {
+        self.outfits.iter().position(|o| o.id == id)
+    }
+
+    /// Outfit `o` draws frame `fi` (the pack's own look draws every frame).
+    pub fn draws(&self, o: usize, fi: usize) -> bool {
+        o == 0 || self.outfits.get(o).is_some_and(|x| x.frames.contains_key(&fi))
+    }
+
+    /// Frame `fi` as outfit `o` draws it (the pack's own where it has none).
+    pub fn source_in(&self, fi: usize, o: usize) -> &FrameSource {
+        self.outfits.get(o).and_then(|x| x.frames.get(&fi)).unwrap_or(&self.frames[fi])
+    }
+
+    /// Frame `fi` is drawn in the outfit she wears: a strip cell of a strip tagged for it (or
+    /// `any`), else one of its frames. She never shows another.
+    pub fn wears(&self, fi: usize) -> bool {
+        match self.frames.get(fi).and_then(|f| f.cell.as_ref()) {
+            Some(c) => self.strip_wears(c.strip),
+            None => self.wearing() == 0 || self.outfits.get(self.wearing()).is_none_or(|o| o.frames.contains_key(&fi)),
+        }
+    }
+
+    /// Strip `si` is drawn for the outfit she wears (untagged and `any`: every outfit).
+    pub fn strip_wears(&self, si: usize) -> bool {
+        self.anim.as_ref().and_then(|a| a.strips.get(si)).is_none_or(|s| s.worn_in(self.outfit_id()))
+    }
+
+    /// A glance's steps (the pointer came by, a window gained focus): the pack's `brain.glance`
+    /// when it's filled, else the look (`@look`). Unresolved: `@look` in either still turns
+    /// toward what she glances at (the view's `resolve_steps`).
+    pub fn glance_steps(&self) -> Vec<Step> {
+        match &self.behaviour.brain.glance {
+            g if g.is_empty() => vec![Step::Clip("@look".into())],
+            g => g.clone(),
+        }
     }
 
     pub fn clip(&self, id: &str) -> Option<&Clip> {
@@ -1093,12 +1347,15 @@ impl Pack {
             // Hanging from its grip (lachy's dangle): its feet where hers are, so the body
             // hangs where she stood and a drop lands without a jump.
             ("grip", _) => c.y - (f.bounds.y + f.bounds.height),
+            // A hang fidget's cell: its grip on the hang pose's (the bar she holds).
+            ("ceiling", _) if f.cell.is_some() => self.hang_ref.map_or(0, |h| h.1 - f.anchor.y),
             _ => 0,
         };
         // Grip anchors (ceiling, dock-left/right) keep their canvas registration: centring a
         // wall grip at x would push the body off the canvas.
         let dx = match f.anchor.name.as_str() {
             "ground" | "seat" | "grip" => c.x - f.anchor.x,
+            "ceiling" if f.cell.is_some() => self.hang_ref.map_or(0, |h| h.0 - f.anchor.x),
             _ => 0,
         };
         (dx, dy)
@@ -1113,7 +1370,8 @@ impl Pack {
     /// it is cut to them). Every frame is cropped to this one rect so they stay aligned.
     pub fn crop_rect(&self) -> Rect {
         let mut r: Option<Rect> = None;
-        for f in self.frames.iter().filter(|f| !self.fx_frame(f)) {
+        let worn = self.outfits.iter().flat_map(|o| o.frames.values());
+        for f in self.frames.iter().filter(|f| !self.fx_frame(f)).chain(worn) {
             let (dx, dy) = self.offset(f);
             let b = f.bounds.offset(dx, dy);
             r = Some(r.map_or(b, |r| r.union(&b)));
@@ -1133,7 +1391,7 @@ impl Pack {
             let p = dir.join(rel);
             std::fs::read_to_string(&p).with_context(|| format!("pack: cannot read {}", p.display()))
         };
-        let catalog: Catalog = serde_json::from_str(&read("sprites.json")?)
+        let mut catalog: Catalog = serde_json::from_str(&read("sprites.json")?)
             .with_context(|| format!("pack: {}/sprites.json is not a valid sprite catalog", dir.display()))?;
         if catalog.schema_version != 2 {
             bail!("pack: sprites.json schemaVersion {} (expected 2)", catalog.schema_version);
@@ -1148,10 +1406,13 @@ impl Pack {
         let mut errors = Vec::new();
         let mut frames = Vec::new();
         let mut index = HashMap::new();
+        let mut effects = HashMap::new();
         let (cw, ch) = (catalog.canvas.width as i32, catalog.canvas.height as i32);
         for s in &catalog.sprites {
             // Effects (e.g. a heart burst) are overlays, not body frames.
             if s.kind == "effect" {
+                let src = FrameSource { id: s.id.clone(), path: dir.join(&s.file), anchor: s.anchor.clone(), bounds: s.visible_bounds, sha256: s.sha256.clone(), patch: None, cell: None };
+                effects.insert(s.id.clone(), src);
                 continue;
             }
             let path = dir.join(&s.file);
@@ -1177,6 +1438,15 @@ impl Pack {
         }
         for x in &behaviour.extra_frames {
             let path = dir.join(&x.file);
+            if x.kind.as_deref() == Some("effect") {
+                if path.is_file() {
+                    let (anchor, bounds) = (x.anchor.clone().unwrap_or(Anchor { name: "effect".into(), x: 0, y: 0 }), x.visible_bounds.unwrap_or(Rect { x: 0, y: 0, width: 1, height: 1 }));
+                    effects.insert(x.id.clone(), FrameSource { id: x.id.clone(), path, anchor, bounds, sha256: x.sha256.clone(), patch: None, cell: None });
+                } else {
+                    elog!("synaps-avatar: pack effect `{}`: {} is missing; skipped", x.id, x.file);
+                }
+                continue;
+            }
             if !path.is_file() {
                 // Optional add-ons (e.g. music/) may be absent; their users check for the id.
                 if x.like.is_none() {
@@ -1259,6 +1529,8 @@ impl Pack {
             }
         }
         perch_frames.extend(behaviour.brain.nap_perch.clone());
+        let hang_ref = behaviour.brain.poses.get("hang").and_then(|id| index.get(id)).map(|&i| (frames[i].anchor.x, frames[i].anchor.y));
+        let outfits = resolve_outfits(dir, &behaviour, &catalog, &frames, &index, &mut errors);
         let ref_h = index.get(&catalog.default_sprite).map_or(1000, |&i| frames[i].bounds.height);
         let anim = crate::art::Anim::load(dir, ref_h)?;
         let n_strips = anim.as_ref().map_or(0, |a| a.strips.len());
@@ -1266,13 +1538,50 @@ impl Pack {
         let pools = resolve_pools(&behaviour, anim.as_ref(), &mut errors);
         let transitions = resolve_transitions(&behaviour, anim.as_ref(), &mut errors);
         let motions = resolve_motions(&behaviour, anim.as_ref(), &mut errors);
-        let mut strip_every = vec![u32::MAX; n_strips];
-        for v in pools.values().flat_map(|p| &p.variants).filter_map(|v| v.art.as_ref()) {
-            for si in std::iter::once(v.base).chain(v.talk).chain(v.music).chain(v.blinks.iter().map(|b| b.0)) {
-                strip_every[si] = strip_every[si].min(v.every);
+        // A strip named where a clip goes: its cells play as that clip.
+        let mut step_strips: Vec<usize> = Vec::new();
+        if let Some(a) = &anim {
+            for id in step_clip_ids(&behaviour) {
+                let known = catalog.clips.iter().any(|c| c.id == id) || catalog.actions.iter().any(|x| x.id == id);
+                if let Some(&si) = a.by_name.get(id)
+                    && !known
+                    && !step_strips.contains(&si)
+                {
+                    step_strips.push(si);
+                }
+            }
+            let ids: Vec<&str> = outfits.iter().map(|o| o.id.as_str()).collect();
+            for st in &a.strips {
+                if let Some(o) = &st.outfit
+                    && !o.eq_ignore_ascii_case("any")
+                    && !ids.contains(&o.as_str())
+                {
+                    errors.push(format!("anim strip `{}`: outfit `{o}` is not in moods.json variants.outfits", st.name));
+                }
             }
         }
-        let strip_every: Vec<u32> = strip_every.into_iter().map(|e| if e == u32::MAX { 1 } else { e }).collect();
+        let mut strip_every: Vec<Vec<u32>> = vec![Vec::new(); n_strips];
+        for v in pools.values().flat_map(|p| &p.variants).filter_map(|v| v.art.as_ref()) {
+            for si in std::iter::once(v.base).chain(v.talk).chain(v.music).chain(v.blinks.iter().map(|b| b.0)) {
+                strip_every[si].push(v.every.max(1));
+            }
+        }
+        // A strip named as a clip plays at its pools' finest thinning (their keys, when thinned),
+        // else whole; a transition and a motion whole.
+        let clip_every: Vec<u32> = strip_every.iter().map(|e| e.iter().copied().min().unwrap_or(1)).collect();
+        for si in transitions.values().copied().chain(motions.strips()) {
+            strip_every[si].push(1);
+        }
+        for &si in &step_strips {
+            strip_every[si].push(clip_every[si]);
+        }
+        for e in &mut strip_every {
+            if e.is_empty() {
+                e.push(1);
+            }
+            e.sort_unstable();
+            e.dedup();
+        }
         if let Some(a) = &anim {
             // Every strip a pool uses (and its mirrorArt twin, stored mirrored), as frames.
             let mut used: Vec<usize> = pools.values().flat_map(|p| &p.variants).filter_map(|v| v.art.as_ref()).flat_map(|v| {
@@ -1280,6 +1589,7 @@ impl Pack {
             })
             .chain(transitions.values().copied())
             .chain(motions.strips())
+            .chain(step_strips.iter().copied())
             .collect();
             used.sort_unstable();
             used.dedup();
@@ -1304,6 +1614,11 @@ impl Pack {
                     }
                 }
             }
+            for &si in &step_strips {
+                let s = &a.strips[si];
+                let cells = s.played(clip_every[si]).into_iter().map(|(c, ms)| ClipFrame { id: s.cell_id(c), ms }).collect();
+                catalog.clips.push(Clip { id: s.name.clone(), frames: cells });
+            }
         }
         let cache_bytes = behaviour.variants.as_ref().and_then(|v| v.cache_mb).unwrap_or(64) as usize * 1_000_000;
         let mut pack = Pack {
@@ -1324,6 +1639,11 @@ impl Pack {
             transitions,
             motions,
             cache_bytes,
+            outfits,
+            worn: AtomicUsize::new(0),
+            effects,
+            hang_ref,
+            step_strips,
         };
 
         // Behaviour references.
@@ -1561,6 +1881,64 @@ impl Pack {
                 errors.push(format!("moods.json land.hardGlitch: `{g}` (land|burst|none)"));
             }
         }
+        // The restless idle's pools, the glance, the hang fidgets, the perched music loop, the
+        // arrivals' other drawings, the hearts' sprite.
+        {
+            let anchored = |what: &str, want: &str, steps: &[Step], errors: &mut Vec<String>, pack: &Pack| {
+                for st in steps {
+                    let ids: Vec<String> = match st {
+                        Step::Hold { frame, .. } => vec![frame.clone()],
+                        Step::Clip(c) => pack.clip(c).map(|c| c.frames.iter().map(|f| f.id.clone()).collect()).unwrap_or_default(),
+                    };
+                    for id in ids {
+                        if pack.index.get(&id).is_some_and(|&i| pack.frames[i].anchor.name != want) {
+                            errors.push(format!("moods.json {what}: frame `{id}` needs a `{want}` anchor"));
+                        }
+                    }
+                }
+            };
+            let no_at = |st: &[Step]| -> Vec<Step> { st.iter().filter(|x| !matches!(x, Step::Clip(id) if id.starts_with('@'))).cloned().collect() };
+            let b = &pack.behaviour;
+            for (i, f) in b.life.fidgets.iter().enumerate() {
+                check_steps(&format!("life.fidgets #{i}"), &no_at(f), &mut errors, &pack);
+            }
+            for (k, st) in &b.life.poses {
+                check_steps(&format!("life.poses.{k}"), &no_at(st), &mut errors, &pack);
+            }
+            for (name, band) in [("low", &b.energy.low), ("mid", &b.energy.mid), ("high", &b.energy.high)] {
+                for (i, f) in band.fidgets.iter().enumerate() {
+                    check_steps(&format!("energy.{name}.fidgets #{i}"), &no_at(f), &mut errors, &pack);
+                }
+            }
+            check_steps("brain.glance", &no_at(&b.brain.glance), &mut errors, &pack);
+            for (k, st) in &b.brain.hang_fidgets {
+                check_steps(&format!("brain.hangFidgets.{k}"), st, &mut errors, &pack);
+                anchored(&format!("brain.hangFidgets.{k}"), "ceiling", st, &mut errors, &pack);
+            }
+            if let Some(m) = &b.music {
+                check_steps("music.windowLoop", &m.window_loop, &mut errors, &pack);
+                anchored("music.windowLoop", "seat", &m.window_loop, &mut errors, &pack);
+            }
+            if let Some(a) = &b.arrive {
+                for (k, alts) in &a.alt {
+                    if !matches!(k.as_str(), "launch" | "cinematic" | "summon" | "teleport" | "perch") {
+                        errors.push(format!("moods.json arrive.alt: unknown arrival `{k}` (launch|cinematic|summon|teleport|perch)"));
+                        continue;
+                    }
+                    for (i, st) in alts.iter().enumerate() {
+                        check_steps(&format!("arrive.alt.{k} #{i}"), st, &mut errors, &pack);
+                        if k == "perch" {
+                            anchored(&format!("arrive.alt.perch #{i}"), "seat", st, &mut errors, &pack);
+                        }
+                    }
+                }
+            }
+            if let Some(h) = &b.click.hearts
+                && !pack.effects.contains_key(h)
+            {
+                errors.push(format!("moods.json click.hearts: `{h}` is not an effect sprite (kind \"effect\")"));
+            }
+        }
         for f in &pack.behaviour.font_files {
             if !dir.join(f).is_file() {
                 errors.push(format!("moods.json fontFiles: {f} is missing"));
@@ -1603,20 +1981,25 @@ impl Pack {
         Ok(pack)
     }
 
-    /// A strip's cells as a sequence, every `every`-th cell held `every` times as long.
+    /// A strip's cells as a sequence (`Strip::played`): each position its own ms (`ms`, a
+    /// WebP's delays, else `fps`); thinned to every `every`-th (with `keys`: its keys), each held
+    /// until the next one played.
     pub fn strip_seq(&self, si: usize, every: u32) -> Seq {
         let (Some(a), Some(Some(first))) = (&self.anim, self.strip_first.get(si)) else { return Vec::new() };
-        let s = &a.strips[si];
-        let e = every.max(1);
-        (0..s.frames).step_by(e as usize).map(|c| (first + c as usize, s.ms * e)).collect()
+        a.strips[si].played(every).into_iter().map(|(c, ms)| (first + c as usize, ms)).collect()
     }
 
-    /// The cells of strip `si` (or its twin's) that are ever played: the ones to decode.
+    /// The cells of strip `si` (or its twin's) that are ever played, at every thinning it plays
+    /// at (`strip_every`): the ones to decode.
     pub fn strip_cells(&self, si: usize, twin: bool) -> Vec<usize> {
         let first = if twin { self.mirror_first.get(si) } else { self.strip_first.get(si) };
         let (Some(Some(f)), Some(a)) = (first, &self.anim) else { return Vec::new() };
-        let e = self.strip_every.get(si).copied().unwrap_or(1).max(1) as usize;
-        (*f..*f + a.strips[si].frames as usize).step_by(e).collect()
+        let s = &a.strips[si];
+        let everys = self.strip_every.get(si).map_or(&[1][..], Vec::as_slice);
+        let mut v: Vec<usize> = everys.iter().flat_map(|&e| s.played(e)).map(|(c, _)| *f + c as usize).collect();
+        v.sort_unstable();
+        v.dedup();
+        v
     }
 
     /// The pre-mirrored twin of cell frame `fi` (its strip's `mirrorArt`), if the pack has it.
@@ -1653,6 +2036,11 @@ impl Pack {
                 }
             }
         }
+        // A frame the outfit she wears doesn't draw: the whole sequence is skipped (never one
+        // drawing from another look in it).
+        if out.iter().any(|&(i, _)| !self.wears(i)) {
+            return Vec::new();
+        }
         out
     }
 
@@ -1686,12 +2074,23 @@ pub mod tests {
     /// `pack_with`, optionally with `crate::art`'s test strips in `anim/`; `keep` sees the pack
     /// before its directory goes (decode tests read the files).
     pub fn pack_in<T>(name: &str, moods: serde_json::Value, anim: bool, keep: impl FnOnce(Result<Pack>) -> T) -> T {
+        pack_setup(
+            name,
+            moods,
+            |d| {
+                if anim {
+                    crate::art::tests::write_anim(d);
+                }
+            },
+            keep,
+        )
+    }
+
+    /// `pack_in` with `setup` adding files to the pack's directory before it loads.
+    pub fn pack_setup<T>(name: &str, moods: serde_json::Value, setup: impl FnOnce(&Path), keep: impl FnOnce(Result<Pack>) -> T) -> T {
         let dir = std::env::temp_dir().join(format!("sa-pack-{name}-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
-        if anim {
-            crate::art::tests::write_anim(&dir);
-        }
         let png = |f: &str| image::RgbaImage::from_pixel(8, 8, image::Rgba([0, 255, 0, 255])).save(dir.join(f)).unwrap();
         for f in ["n.png", "s.png", "l.png"] {
             png(f);
@@ -1703,9 +2102,208 @@ pub mod tests {
             "canonicalAnchor": {"x": 4, "y": 7}, "sprites": [sprite("neutral", "n.png", "ground"), sprite("sit", "s.png", "seat")]});
         std::fs::write(dir.join("sprites.json"), cat.to_string()).unwrap();
         std::fs::write(dir.join("moods.json"), moods.to_string()).unwrap();
+        setup(&dir);
         let out = keep(Pack::load(&dir));
         std::fs::remove_dir_all(&dir).ok();
         out
+    }
+
+    /// The test strips plus `crate::art`'s cel sheet, animated WebP and hang strip.
+    pub fn pack_cels<T>(name: &str, moods: serde_json::Value, outfit: Option<&str>, keep: impl FnOnce(Result<Pack>) -> T) -> T {
+        pack_setup(
+            name,
+            moods,
+            |d| {
+                crate::art::tests::write_anim(d);
+                crate::art::tests::write_cels(d, outfit);
+            },
+            keep,
+        )
+    }
+
+    /// An outfit `alt` in `outfits/alt/`: red frames for `ids` (of the test pack's).
+    pub fn write_outfit(dir: &Path, ids: &[&str]) {
+        let o = dir.join("outfits/alt");
+        std::fs::create_dir_all(&o).unwrap();
+        let sprites: Vec<serde_json::Value> = ids
+            .iter()
+            .map(|id| {
+                image::RgbaImage::from_pixel(8, 8, image::Rgba([255, 0, 0, 255])).save(o.join(format!("{id}.png"))).unwrap();
+                let anchor = match *id {
+                    "sit" => "seat",
+                    "hang" => "ceiling",
+                    _ => "ground",
+                };
+                json!({"id": id, "file": format!("{id}.png"), "anchor": {"name": anchor, "x": 4, "y": 7},
+                       "visibleBounds": {"x": 1, "y": 1, "width": 6, "height": 6}})
+            })
+            .collect();
+        std::fs::write(o.join("sprites.json"), json!({ "sprites": sprites }).to_string()).unwrap();
+    }
+
+    fn outfitted() -> serde_json::Value {
+        json!({"perch": {"base": "sit"}, "extraFrames": [{"id": "wink", "file": "l.png", "like": "neutral"}],
+               "activities": [[{"frame": "wink", "ms": 300}], [{"frame": "neutral", "ms": 300}]],
+               "variants": {"outfits": [{"id": "main", "weight": 2}, {"id": "alt", "sprites": "outfits/alt/sprites.json"}]}})
+    }
+
+    #[test]
+    fn a_strip_named_as_a_clip_plays_its_cells() {
+        let moods = json!({"activities": [["sheet"], ["greet"]], "brain": {"greet": ["greet"], "bid": [["sheet", "@look"]]}});
+        pack_cels("stripclip", moods, None, |p| {
+            let p = p.unwrap();
+            let a = p.anim.as_ref().unwrap();
+            let (sheet, greet) = (a.by_name["sheet"], a.by_name["greet"]);
+            assert!(p.step_strips.contains(&sheet) && p.step_strips.contains(&greet));
+            assert!(!p.step_strips.contains(&a.by_name["pullup"]), "only the strips steps name");
+            let c = p.clip("greet").unwrap();
+            assert_eq!(c.frames.iter().map(|f| (f.id.as_str(), f.ms)).collect::<Vec<_>>(), [("greet#0", 80), ("greet#1", 120), ("greet#2", 200)]);
+            let seq = p.flatten(&[Step::Clip("sheet".into())]);
+            assert_eq!(seq.iter().map(|s| s.1).collect::<Vec<_>>(), [100, 50, 300, 50, 100], "keys and in-betweens, their own timing");
+            // A clip plays every cell: all of them decode.
+            assert_eq!(p.strip_cells(sheet, false).len(), 5);
+            // Registered on her feet like any standing strip.
+            let f = &p.frames[seq[0].0];
+            let (dx, dy) = p.offset(f);
+            let c = p.catalog.canonical_anchor;
+            assert_eq!((f.anchor.x + dx, f.anchor.y + dy), (c.x, c.y));
+        });
+        // Without anim/ the name is just an unknown clip, as before.
+        let e = pack_with("stripclip-none", json!({"activities": [["greet"]]})).err().unwrap();
+        assert!(format!("{e:#}").contains("clip `greet` does not exist"));
+    }
+
+    #[test]
+    fn per_cell_timing_and_keys_play_wherever_a_strip_plays() {
+        // The cel sheet (keys 0 and 2; 100, 50, 300, 50, 100 ms) blinks over a pool thinned to every
+        // 2nd cell and plays as a clip; the animated WebP (80, 120, 200 ms) is a transition.
+        let moods = json!({"activities": [["sheet"]], "transitions": {"floorArrive": "greet"},
+            "variants": {"pools": {"sleepFloor": {"variants": [{"id": "pack"}, {"id": "doze", "strip": "stand", "every": 2, "blinks": [{"strip": "sheet"}]}]}}}});
+        pack_cels("timing", moods, None, |p| {
+            let p = p.unwrap();
+            let a = p.anim.as_ref().unwrap();
+            let (sheet, greet) = (a.by_name["sheet"], a.by_name["greet"]);
+            let (s0, g0) = (p.strip_first[sheet].unwrap(), p.strip_first[greet].unwrap());
+            // Thinned (the pool's blink): its keys, each held until the next.
+            assert_eq!(p.strip_seq(sheet, 2), vec![(s0, 150), (s0 + 2, 450)]);
+            // A transition: the WebP's own delays, not their mean.
+            assert_eq!(p.strip_seq(greet, 1), vec![(g0, 80), (g0 + 1, 120), (g0 + 2, 200)]);
+            // As a clip it plays at its pool's thinning: the keys again.
+            assert_eq!(p.flatten(&[Step::Clip("sheet".into())]), vec![(s0, 150), (s0 + 2, 450)]);
+            // Decoded: what plays, nothing more.
+            assert_eq!(p.strip_cells(sheet, false), vec![s0, s0 + 2]);
+            assert_eq!(p.strip_cells(greet, false), vec![g0, g0 + 1, g0 + 2]);
+            // A plain strip thinned as before.
+            let st0 = p.strip_first[a.by_name["stand"]].unwrap();
+            assert_eq!(p.strip_seq(a.by_name["stand"], 2), vec![(st0, 200), (st0 + 2, 200)]);
+        });
+    }
+
+    #[test]
+    fn a_glance_is_the_packs_when_filled_else_the_look() {
+        let glance = json!([{"frame": "neutral", "ms": 400}, "@look"]);
+        let p = pack_with("glance", json!({"brain": {"glance": glance}})).unwrap();
+        assert_eq!(p.glance_steps(), vec![Step::Hold { frame: "neutral".into(), ms: 400 }, Step::Clip("@look".into())]);
+        let p = pack_with("glance-none", json!({})).unwrap();
+        assert_eq!(p.glance_steps(), vec![Step::Clip("@look".into())], "left out: the look");
+    }
+
+    #[test]
+    fn hang_fidgets_register_on_the_hang_pose_and_need_its_anchor() {
+        let hang = json!({"id": "hang", "file": "l.png", "anchor": {"name": "ceiling", "x": 4, "y": 1}, "visibleBounds": {"x": 1, "y": 1, "width": 6, "height": 6}});
+        let moods = json!({"extraFrames": [hang], "brain": {"poses": {"hang": "hang"}, "hangFidgets": {"pullup": ["pullup"]}}});
+        pack_cels("hangfidget", moods.clone(), None, |p| {
+            let p = p.unwrap();
+            assert_eq!(p.hang_ref, Some((4, 1)));
+            let fi = p.flatten(&[Step::Clip("pullup".into())])[0].0;
+            let f = &p.frames[fi];
+            let (dx, dy) = p.offset(f);
+            assert_eq!((f.anchor.x + dx, f.anchor.y + dy), (4, 1), "its grip on the bar she holds");
+        });
+        let mut bad = moods;
+        bad["brain"]["hangFidgets"]["catch"] = json!(["sheet"]);
+        bad["music"] = json!({"floor": "neutral", "notes": [], "windowLoop": ["greet"]});
+        bad["arrive"] = json!({"alt": {"launch": [["greet"]], "warp": [["greet"]]}});
+        let e = pack_cels("hangfidget-bad", bad, None, |p| format!("{:#}", p.err().unwrap()));
+        assert!(e.contains("brain.hangFidgets.catch: frame `sheet#0` needs a `ceiling` anchor"), "{e}");
+        assert!(e.contains("music.windowLoop: frame `greet#0` needs a `seat` anchor"), "{e}");
+        assert!(e.contains("arrive.alt: unknown arrival `warp`") && !e.contains("arrive.alt.launch"), "{e}");
+    }
+
+    #[test]
+    fn the_idle_pools_and_the_glance_resolve_like_activities() {
+        let moods = json!({"life": {"fidgets": [[{"frame": "neutral", "ms": 200}], ["@look"]], "poses": {"lean": ["sheet"]}},
+                           "energy": {"low": {"fidgets": [["greet"]]}}, "brain": {"glance": ["@look", {"frame": "neutral", "ms": 400}]}});
+        pack_cels("pools-idle", moods, None, |p| {
+            let p = p.unwrap();
+            let b = &p.behaviour;
+            assert_eq!((b.life.fidgets.len(), b.life.poses.len(), b.energy.low.fidgets.len(), b.brain.glance.len()), (2, 1, 1, 2));
+            assert!(p.step_strips.len() == 2, "the lean and the sleepy fidget are strips");
+        });
+        let e = pack_with("pools-bad", json!({"life": {"fidgets": [[{"frame": "nope", "ms": 1}]]}})).err().unwrap();
+        assert!(format!("{e:#}").contains("life.fidgets #0: frame `nope` does not resolve"));
+    }
+
+    #[test]
+    fn effect_sprites_are_overlays_and_the_hearts_may_use_one() {
+        let moods = json!({"extraFrames": [{"id": "heart", "file": "l.png", "kind": "effect"}], "click": {"hearts": "heart"}});
+        let p = pack_with("hearts", moods).unwrap();
+        assert!(p.effects.contains_key("heart") && !p.index.contains_key("heart"), "never one of her frames");
+        assert_eq!(p.behaviour.click.hearts.as_deref(), Some("heart"));
+        let e = pack_with("hearts-bad", json!({"click": {"hearts": "neutral"}})).err().unwrap();
+        assert!(format!("{e:#}").contains("click.hearts: `neutral` is not an effect sprite"));
+        // Without one: the drawn hearts (nothing to resolve).
+        assert!(pack_with("hearts-none", json!({})).unwrap().behaviour.click.hearts.is_none());
+    }
+
+    #[test]
+    fn an_outfit_draws_her_frames_and_she_never_mixes_two() {
+        pack_setup("outfit", outfitted(), |d| write_outfit(d, &["neutral", "sit"]), |p| {
+            let p = p.unwrap();
+            assert_eq!(p.outfits.iter().map(|o| (o.id.as_str(), o.weight)).collect::<Vec<_>>(), [("main", 2.0), ("alt", 1.0)]);
+            let (n, w) = (p.index["neutral"], p.index["wink"]);
+            assert!(p.source_in(n, 1).path.ends_with("outfits/alt/neutral.png") && p.source_in(n, 0).path.ends_with("n.png"));
+            assert_eq!(p.source_in(w, 1).path, p.frames[w].path, "a frame it doesn't draw decodes as the pack's");
+            assert_eq!((p.wearing(), p.outfit_id()), (0, "main"));
+            assert!(p.wears(w) && !p.flatten(&[Step::Hold { frame: "wink".into(), ms: 1 }]).is_empty());
+            p.wear(1);
+            assert_eq!(p.outfit_id(), "alt");
+            assert!(p.wears(n) && !p.wears(w) && p.draws(1, n) && !p.draws(1, w));
+            // A sequence with a frame it doesn't draw is skipped whole, never half one look.
+            assert!(p.flatten(&[Step::Hold { frame: "neutral".into(), ms: 1 }, Step::Hold { frame: "wink".into(), ms: 1 }]).is_empty());
+            assert_eq!(p.flatten(&[Step::Hold { frame: "neutral".into(), ms: 1 }]).len(), 1);
+            p.wear(7);
+            assert_eq!(p.wearing(), 1, "no such outfit: unchanged");
+            assert_eq!(p.outfit_by_id("main"), Some(0));
+        });
+    }
+
+    #[test]
+    fn strips_are_tagged_per_outfit_and_an_outfit_must_draw_every_single_frame() {
+        let mut moods = outfitted();
+        moods["brain"] = json!({"hangFidgets": {"pullup": ["pullup"]}, "poses": {"hang": "hang"}});
+        moods["extraFrames"].as_array_mut().unwrap().push(json!({"id": "hang", "file": "l.png", "anchor": {"name": "ceiling", "x": 4, "y": 1}, "visibleBounds": {"x": 1, "y": 1, "width": 6, "height": 6}}));
+        let setup = |d: &Path| {
+            crate::art::tests::write_anim(d);
+            crate::art::tests::write_cels(d, Some("alt"));
+            write_outfit(d, &["neutral", "sit", "hang"]);
+        };
+        pack_setup("outfit-strips", moods.clone(), setup, |p| {
+            let p = p.unwrap();
+            let a = p.anim.as_ref().unwrap();
+            let (pullup, greet) = (a.by_name["pullup"], a.by_name["greet"]);
+            assert!(!p.strip_wears(pullup) && p.strip_wears(greet), "the pack's own look: not the alt's strip");
+            assert!(p.flatten(&[Step::Clip("pullup".into())]).is_empty());
+            p.wear(1);
+            assert!(p.strip_wears(pullup) && p.strip_wears(greet), "untagged: every look");
+            assert_eq!(p.flatten(&[Step::Clip("pullup".into())]).len(), 1);
+        });
+        // It lacks the perch base (a single frame): refused.
+        let e = pack_setup("outfit-lacks", outfitted(), |d| write_outfit(d, &["neutral"]), |p| format!("{:#}", p.err().unwrap()));
+        assert!(e.contains("variants.outfits `alt`: lacks sit"), "{e}");
+        // A strip tagged for an outfit the pack doesn't have.
+        let e = pack_cels("outfit-unknown", json!({}), Some("beach"), |p| format!("{:#}", p.err().unwrap()));
+        assert!(e.contains("anim strip `pullup`: outfit `beach` is not in moods.json variants.outfits"), "{e}");
     }
 
     /// Two pools over the test strips (`crate::art::tests::write_anim`).
