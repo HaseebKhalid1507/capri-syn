@@ -969,6 +969,14 @@ fn still_of(s: &StillSeen) -> crate::life::Still {
     }
 }
 
+/// `still_of` with her `busy` names as `keep` keeps them, DND counting as hidden when `dnd`
+/// (`Avatar::still_now`: the restless idle keeps all and ignores DND; the held rotation drops
+/// music, its state, and keeps still under DND).
+fn still_kept(seen: StillSeen, busy: &[&'static str], keep: impl Fn(&str) -> bool, dnd: bool) -> crate::life::Still {
+    let busy: Vec<&'static str> = busy.iter().copied().filter(|&b| keep(b)).collect();
+    still_of(&StillSeen { busy: &busy, hidden: seen.hidden || dnd, ..seen })
+}
+
 /// Where her idle beats come from (`Avatar::activities`): none here; the hang fidgets; the perch's
 /// activities; standing, the activities and the micro-fidgets in force (her band's, else the
 /// pack's), then `life.poses`.
@@ -1648,11 +1656,16 @@ impl Avatar {
     }
 
     /// Music on a window top with the pack's `music.windowLoop` (worn, its cells in): its loop,
-    /// instead of the `window` frame.
+    /// instead of the `window` frame (unless the held rotation is on a perch strip now).
     fn music_loop(&self) -> Option<Looped> {
-        if self.music.is_none() || !self.sitting() {
+        if self.music.is_none() || !self.sitting() || matches!(self.perch_tune(), Some(artview::Tune::Strip(..))) {
             return None;
         }
+        self.window_loop()
+    }
+
+    /// `music.windowLoop` as it would play now (worn, its cells in), wherever she is.
+    fn window_loop(&self) -> Option<Looped> {
         self.loop_seq(Some(&self.music_spec()?.window_loop))
     }
 
@@ -2053,20 +2066,27 @@ impl Avatar {
     /// off (her own words in a bubble, a move, a reaction, music, the intro, hidden by the menu
     /// or a fullscreen window, a mood without autonomy, no beats here).
     fn restless_quiet(&self) -> crate::life::Quiet {
-        let fs = self.brain.as_ref().is_some_and(|h| h.fs != brainview::FsHide::Shown);
-        let q = crate::life::quiet(still_of(&StillSeen {
-            busy: &self.brain_busy(),
-            own_words: self.bubble.as_ref().is_some_and(|b| !b.stream && b.turn == 0),
-            asleep: self.mood == Mood::Sleepy || self.brain.as_ref().is_some_and(|h| h.brain.napping()),
-            voice: self.voice.hf.is_some() || self.voice_listening() || self.voice_speaking(),
-            following: self.following(),
-            hidden: self.hidden || fs,
-        }));
+        let q = crate::life::quiet(self.still_now(|_| true, false));
         // Nothing to play here, looked at last (`activities` builds a list).
         if q == crate::life::Quiet::No && (self.next_activity.is_none() || !self.has_activities()) {
             return crate::life::Quiet::Off;
         }
         q
+    }
+
+    /// What keeps her still, as the view sees it (`life::quiet`, `life::shift_quiet`): her
+    /// `brain_busy` names that `keep` keeps; hidden counts DND too when `dnd`.
+    fn still_now(&self, keep: impl Fn(&str) -> bool, dnd: bool) -> crate::life::Still {
+        let fs = self.brain.as_ref().is_some_and(|h| h.fs != brainview::FsHide::Shown);
+        let seen = StillSeen {
+            busy: &[],
+            own_words: self.bubble.as_ref().is_some_and(|b| !b.stream && b.turn == 0),
+            asleep: self.mood == Mood::Sleepy || self.brain.as_ref().is_some_and(|h| h.brain.napping()),
+            voice: self.voice.hf.is_some() || self.voice_listening() || self.voice_speaking(),
+            following: self.following(),
+            hidden: self.hidden || fs,
+        };
+        still_kept(seen, &self.brain_busy(), keep, dnd && self.dnd_on())
     }
 
     /// A glance at `at`: the steps that play and their frames. The pack's glance (`brain.glance`,
@@ -9741,6 +9761,25 @@ mod restless_still_tests {
         for (what, s, want) in cases {
             assert_eq!(q(s), want, "{what}");
         }
+    }
+
+    /// `Avatar::still_now` for the restless idle (all of `brain_busy`, DND aside) and the held
+    /// rotation (music is its state, DND keeps her loop).
+    #[test]
+    fn the_held_rotation_sees_music_as_its_state_and_dnd_as_hidden() {
+        use super::still_kept;
+        use crate::life::shift_quiet;
+        let calm = StillSeen { busy: &[], own_words: false, asleep: false, voice: false, following: false, hidden: false };
+        // `restless_quiet`: every name, DND not asked.
+        let restless = |b: &[&'static str]| quiet(still_kept(StillSeen { ..calm }, b, |_| true, false));
+        let held = |b: &[&'static str], dnd: bool| shift_quiet(still_kept(StillSeen { ..calm }, b, |n| n != "music", dnd));
+        assert_eq!(restless(&["music"]), Quiet::Off, "music: no idle beats");
+        assert_eq!(held(&["music"], false), Quiet::No, "music: the rotation turns among its loops");
+        assert_eq!(held(&["music", "line"], false), Quiet::Busy, "a holder still holds it");
+        assert_eq!(restless(&[]), Quiet::No, "DND or not: her beats as before");
+        assert_eq!(held(&[], true), Quiet::Off, "DND: she keeps her loop");
+        assert_eq!(held(&[], false), Quiet::No);
+        assert_eq!(held(&["session"], false), Quiet::Busy, "hyperfocus");
     }
 }
 

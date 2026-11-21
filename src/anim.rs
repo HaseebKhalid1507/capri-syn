@@ -203,6 +203,8 @@ pub struct Animator {
     tail_n: usize,
     tail_at: (bool, usize),
     exit_of: Option<Looped>,
+    /// How many passes of a loop have ended (`passes`).
+    passes: u64,
     due: Option<Instant>,
     rng: Rng,
     /// The loop ends on a rest: a one-shot over it (a blink) returns to that rest, not to
@@ -229,6 +231,7 @@ impl Animator {
             tail_n: 0,
             tail_at: (false, 0),
             exit_of: None,
+            passes: 0,
             due: None,
             rng: Rng::seeded(),
             rest_last: false,
@@ -277,6 +280,22 @@ impl Animator {
 
     pub fn deadline(&self) -> Option<Instant> {
         self.due
+    }
+
+    /// A swap here jumps nowhere mid-loop: no one-shot (an exit, a beat) on screen, and the loop
+    /// (if any) just finished a pass: on the first step the wrap put it on, however late the tick.
+    pub fn at_boundary(&self) -> bool {
+        self.oneshot.is_none() && (self.looping.is_none() || self.wrapped())
+    }
+
+    /// The loop just finished a pass: on the first step the wrap put it on.
+    pub fn wrapped(&self) -> bool {
+        self.looping.is_some() && self.on_wrap
+    }
+
+    /// Passes of a loop ended so far (one look per pass: `held_tick`).
+    pub fn passes(&self) -> u64 {
+        self.passes
     }
 
     /// Looped clips breathe: long holds vary so a blink loop doesn't tick like a metronome.
@@ -551,6 +570,7 @@ impl Animator {
                     let n = if self.in_entry { l.entry.len() } else { l.body.len() };
                     self.loop_pos = (self.loop_pos + 1) % n;
                     self.on_wrap = !self.in_entry && self.loop_pos == 0;
+                    self.passes += u64::from(self.on_wrap);
                 }
                 let ms = self.part().map_or(0, |s| s[self.loop_pos].1);
                 let ms = self.loop_ms(ms);
@@ -887,6 +907,39 @@ mod tests {
         c.set_layer_looped(0, Some(ranged()), false, t);
         c.tick(ms(t, 50));
         assert_eq!(c.frame(), 1, "in once, after the one-shot");
+    }
+
+    #[test]
+    fn a_held_state_swaps_only_at_a_boundary_exit_then_entry() {
+        let t = Instant::now();
+        let mut a = Animator::new(0);
+        a.set_layer_looped(0, Some(ranged()), false, t);
+        assert!(!a.at_boundary(), "on its entry");
+        a.tick(ms(t, 100));
+        assert!(!a.at_boundary(), "into the loop, not a pass of it");
+        a.tick(ms(t, 200));
+        assert!(!a.at_boundary(), "mid-loop");
+        assert_eq!(a.passes(), 0);
+        let mut late = a.clone();
+        a.tick(ms(t, 300));
+        assert!(a.at_boundary(), "a pass just ended");
+        assert_eq!(a.passes(), 1);
+        // A late tick still finds it: on the step the wrap put it on.
+        late.tick(ms(t, 390));
+        assert!(late.at_boundary(), "a tick 90 ms late, inside its first step");
+        late.tick(ms(t, 400));
+        assert!(!late.at_boundary(), "not past it");
+        // The next sequence: the old one's exit, then the new one's entry, then its loop.
+        let next = Ranged { entry: vec![(11, 100)], body: vec![(12, 100)], exit: vec![(19, 100)] };
+        a.set_layer_looped(0, Some(next), false, ms(t, 300));
+        assert!(!a.at_boundary(), "the exit is on");
+        let shown: Vec<usize> = (3..7).map(|i| a.frame_at(ms(t, i * 100))).collect();
+        assert_eq!(shown, vec![9, 11, 12, 12]);
+        // A layer without a loop: any moment nothing plays over it.
+        let mut b = Animator::new(4);
+        assert!(b.at_boundary());
+        b.play(vec![(6, 100)], t);
+        assert!(!b.at_boundary());
     }
 
     #[test]
