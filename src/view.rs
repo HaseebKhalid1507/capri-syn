@@ -863,6 +863,25 @@ struct MusicOn {
     dance_rolled: bool,
 }
 
+impl MusicOn {
+    /// A player went quiet: when this session comes off (`None`: it stays). Only a player's
+    /// own music stops with it; `music on` by hand and timed sessions keep their own ends.
+    fn quiet_stop(m: Option<&MusicOn>, now: Instant) -> Option<Instant> {
+        m.is_some_and(|m| m.auto).then_some(now + MUSIC_GRACE)
+    }
+
+    /// The music the ragdoll took at a grab, back at the landing (`None`: it ended while she
+    /// was carried). A timed session only within its end; a player's only while it still
+    /// plays (or its grace runs: `stopping`); `music on` by hand always. Keeps `auto` and
+    /// `bpm`: a player's music stays one (a later quiet stops it).
+    fn after_carry(self, now: Instant, playing: bool, stopping: bool) -> Option<MusicOn> {
+        if self.until.is_some_and(|u| u <= now) || (self.auto && !playing && !stopping) {
+            return None;
+        }
+        Some(self)
+    }
+}
+
 /// After a player pauses or stops, the headphones stay this long (a track change, a seek).
 const MUSIC_GRACE: Duration = Duration::from_secs(5);
 const FRAME_FAST: Duration = Duration::from_millis(16);
@@ -1643,8 +1662,8 @@ impl Avatar {
             self.dance_decide(now);
             if p.video { "ok listening (video)".into() } else { "ok listening".into() }
         } else {
-            if self.music.as_ref().is_some_and(|m| m.auto) {
-                self.music_stop_at = Some(now + MUSIC_GRACE);
+            if let Some(t) = MusicOn::quiet_stop(self.music.as_ref(), now) {
+                self.music_stop_at = Some(t);
             }
             "ok quiet".into()
         }
@@ -9977,5 +9996,66 @@ mod header_fit_tests {
         assert_eq!(status_steps(&mic_label(5, 1.0, true)), ["MIC 0:05 ▮▮▮▮▮ · AUTO", "MIC 0:05 · AUTO", "MIC 0:05"].map(String::from));
         assert_eq!(status_steps("WAKE PAUSED · TOO MANY FALSE STARTS"), ["WAKE PAUSED · TOO MANY FALSE STARTS", "WAKE PAUSED"].map(String::from));
         assert_eq!(status_steps("ONLINE"), ["ONLINE"].map(String::from));
+    }
+}
+
+#[cfg(test)]
+mod music_carry_tests {
+    use super::{MUSIC_GRACE, MusicOn};
+    use std::time::{Duration, Instant};
+
+    fn music(now: Instant, until: Option<Instant>, auto: bool) -> MusicOn {
+        MusicOn { t0: now, until, bpm: auto.then_some(128.0), auto, dance_until: None, dance_rolled: false }
+    }
+
+    #[test]
+    fn a_players_music_that_went_quiet_while_she_was_carried_stays_off() {
+        let t0 = Instant::now();
+        // The grab takes her music (`self.music.take()`): a quiet mid-carry finds none.
+        let m = music(t0, None, true);
+        let stop_at = MusicOn::quiet_stop(None, t0);
+        assert_eq!(stop_at, None);
+        let land = t0 + Duration::from_secs(2);
+        assert!(m.after_carry(land, false, stop_at.is_some_and(|t| t > land)).is_none(), "she lands out of music");
+    }
+
+    #[test]
+    fn a_players_music_carried_and_landed_still_stops_with_the_player() {
+        let t0 = Instant::now();
+        let land = t0 + Duration::from_secs(2);
+        let back = music(t0, None, true).after_carry(land, true, false).expect("still playing: back on");
+        assert!(back.auto && back.until.is_none() && back.bpm == Some(128.0), "still a player's (auto, bpm)");
+        // The later quiet stops it after the grace (before: rebuilt as `music on` by hand, forever).
+        let quiet = land + Duration::from_secs(10);
+        assert_eq!(MusicOn::quiet_stop(Some(&back), quiet), Some(quiet + MUSIC_GRACE));
+    }
+
+    #[test]
+    fn a_players_music_in_its_grace_at_the_landing_comes_back_to_stop_on_time() {
+        let t0 = Instant::now();
+        let stop_at = MusicOn::quiet_stop(Some(&music(t0, None, true)), t0).unwrap();
+        let land = t0 + Duration::from_secs(1);
+        assert!(music(t0, None, true).after_carry(land, false, stop_at > land).is_some());
+        let late = t0 + MUSIC_GRACE + Duration::from_secs(1);
+        assert!(music(t0, None, true).after_carry(late, false, stop_at > late).is_none(), "the grace ran out mid-carry");
+    }
+
+    #[test]
+    fn music_on_by_hand_survives_a_drag_and_a_quiet() {
+        let t0 = Instant::now();
+        let land = t0 + Duration::from_secs(30);
+        let back = music(t0, None, false).after_carry(land, false, false).expect("by hand: back on");
+        assert!(!back.auto && back.until.is_none());
+        assert_eq!(MusicOn::quiet_stop(Some(&back), land), None, "a player's quiet leaves it alone");
+    }
+
+    #[test]
+    fn timed_music_survives_a_drag_only_within_its_end() {
+        let t0 = Instant::now();
+        let until = t0 + Duration::from_secs(10);
+        let back = music(t0, Some(until), false).after_carry(t0 + Duration::from_secs(5), false, false);
+        assert_eq!(back.map(|m| m.until), Some(Some(until)));
+        assert!(music(t0, Some(until), false).after_carry(until, false, false).is_none());
+        assert!(music(t0, Some(until), false).after_carry(t0 + Duration::from_secs(11), false, false).is_none());
     }
 }

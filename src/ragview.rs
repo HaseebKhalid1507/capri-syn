@@ -79,7 +79,8 @@ pub(super) struct Rag {
     restore: (bool, bool),
     mood_at_grab: Mood,
     pub pending_glitch: Option<GlitchKind>,
-    music_until: Option<Option<Instant>>,
+    /// Her music at the grab (`MusicOn::after_carry` at the landing).
+    music: Option<MusicOn>,
     flip: Option<(f32, usize)>,
     landed: Option<&'static str>,
     hard: bool,
@@ -333,7 +334,7 @@ impl Avatar {
         if self.input.is_some() {
             self.close_input(true);
         }
-        let music_until = self.music.take().map(|m| m.until);
+        let music = self.music.take();
         self.update_notes(now);
         let rigid = !rag_enabled() || self.rag_strength.k() <= 0.0 || std::env::var("SA_REDUCED_MOTION").is_ok_and(|v| v == "1");
         let frame = self.anim.frame();
@@ -381,7 +382,7 @@ impl Avatar {
             restore: (bubble_open, prompt),
             mood_at_grab: self.mood,
             pending_glitch: None,
-            music_until,
+            music,
             flip: None,
             landed: None,
             hard: false,
@@ -1032,10 +1033,15 @@ impl Avatar {
         {
             self.glitch = if k == GlitchKind::Seam { Glitch::for_cut(Transition::Mood, now, self.rng.next()) } else { Some(Glitch::new(k, now, self.rng.next())) };
         }
-        if let Some(until) = r.music_until
-            && until.is_none_or(|u| u > now)
+        // A player's music that went quiet while she was carried stays off (its stop found no
+        // music to schedule); one still playing stays a player's, so its quiet stops it.
+        let stopping = self.music_stop_at.is_some_and(|t| t > now);
+        if let Some(m) = r.music.and_then(|m| m.after_carry(now, self.player.playing, stopping))
+            && self.music_on(now, m.until).is_ok()
+            && let Some(n) = &mut self.music
         {
-            self.music_on(now, until).ok();
+            n.auto = m.auto;
+            n.bpm = m.bpm;
         }
         // The brain's emotes from while she was carried (a fling's sulk).
         let queued = self.brain.as_mut().map(|h| std::mem::take(h.queued_mut())).unwrap_or_default();
