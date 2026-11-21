@@ -186,6 +186,8 @@ pub struct Animator {
     /// On the loop's entry (else its body).
     in_entry: bool,
     loop_pos: usize,
+    /// On the loop's first step because a pass of it just ended (not a start or a resume).
+    on_wrap: bool,
     /// The loop has started (its entry played or playing): a one-shot over it resumes the body.
     entered: bool,
     /// Its exit plays when the loop ends (`cut` disarms it: a drag, a teleport, sleep).
@@ -216,6 +218,7 @@ impl Animator {
             looping: None,
             in_entry: false,
             loop_pos: 0,
+            on_wrap: false,
             entered: false,
             armed: false,
             disarmed: false,
@@ -310,6 +313,7 @@ impl Animator {
     }
 
     fn run_loop(&mut self, now: Instant) {
+        self.on_wrap = false;
         self.due = match self.part() {
             Some(s) => {
                 let ms = s[self.loop_pos].1;
@@ -385,12 +389,14 @@ impl Animator {
             return;
         }
         // It ends in place: the rest of its pass (its exit follows the pass's last cell; a
-        // rest at its end doesn't wait), then its exit, over any one-shot that was over it.
+        // rest at its end doesn't wait; a pass that just ended is done), then its exit, over any
+        // one-shot that was over it.
         let exit = match &self.looping {
             Some(l) if self.armed && self.entered && !l.exit.is_empty() && !self.in_exit() && looping != self.looping => Some(l.clone()),
             _ => None,
         };
         let tail: Seq = match (&exit, &self.oneshot) {
+            (Some(_), None) if self.on_wrap => Vec::new(),
             (Some(l), None) if self.in_entry => vec![l.entry[self.loop_pos]],
             (Some(l), None) => {
                 let end = if rested { l.body.len() - 1 } else { l.body.len() };
@@ -529,9 +535,11 @@ impl Animator {
                 if self.in_entry && self.loop_pos + 1 >= l.entry.len() {
                     self.in_entry = false;
                     self.loop_pos = 0;
+                    self.on_wrap = false;
                 } else {
                     let n = if self.in_entry { l.entry.len() } else { l.body.len() };
                     self.loop_pos = (self.loop_pos + 1) % n;
+                    self.on_wrap = !self.in_entry && self.loop_pos == 0;
                 }
                 let ms = self.part().map_or(0, |s| s[self.loop_pos].1);
                 let ms = self.loop_ms(ms);
@@ -616,6 +624,19 @@ mod tests {
         d.tick(ms(t, 200));
         d.set_layer(7, None, ms(t, 210));
         assert_eq!([250, 300, 400].map(|n| d.frame_at(ms(t, n))), [3, 9, 7]);
+        // A pass just ended (back on its first step by the wrap, the tick late or not): that
+        // pass is done, out now. Into the body from the entry is no wrap: a whole pass first.
+        for late in [0, 60] {
+            let mut w = Animator::new(0);
+            w.set_layer_looped(0, Some(ranged()), false, t);
+            w.tick(ms(t, 100));
+            assert!(!w.on_wrap, "in from the entry");
+            w.tick(ms(t, 300 + late));
+            assert!(w.on_wrap && w.frame() == 2);
+            w.set_layer(7, None, ms(t, 300 + late));
+            assert_eq!(w.frame(), 9, "out now, late {late}");
+            assert_eq!(w.deadline(), Some(ms(t, 400 + late)));
+        }
         // A rest at the loop's end doesn't hold the exit back: the pass, then out.
         let mut e = Animator::new(0);
         let rested = Ranged { entry: vec![], body: vec![(2, 100), (3, 100), (2, 5000)], exit: vec![(9, 100)] };
