@@ -303,6 +303,9 @@ struct Bubble {
     /// Its size as laid out: as wide and tall as what it says; streaming, it grows in steps and
     /// never shrinks until the turn ends (`bubblefit`).
     fit: bubblefit::Grow,
+    /// Its last line, a command chip, sits beside the collapse key (no footer), as `reply_size`
+    /// last laid it out: what that line needs of the box (`Bubble::need`).
+    chip_last: bool,
     /// This reply's number: a new one in an open bubble pulses, streaming text doesn't.
     serial: u64,
     /// The session turn it shows (0: her own words, `say`).
@@ -469,10 +472,10 @@ impl Bubble {
         if self.long() { OPENING_LINES.min(total).min(self.cap.max(1)) } else { total.min(LINES_PER_PAGE) }
     }
 
-    /// How far its words may type out now, toward `upto`: never into a line of the page the box
-    /// it was drawn in doesn't hold (`Grow::holds_back`): it waits for the box to grow around it,
-    /// never cut by it. Its wrap stale (new text, wrapped on the next frame): no further than
-    /// shown meanwhile (not drawn, behind the chip, it isn't wrapped: on).
+    /// How far its words may type out now, toward `upto`: not into a line of the page the box as
+    /// drawn doesn't hold while it grows to hold it (`Grow::waits`, bounded): it waits for the box
+    /// to grow around it, never cut by it. Its wrap stale (new text, wrapped on the next frame):
+    /// no further than shown meanwhile (not drawn, behind the chip, it isn't wrapped: on).
     fn typed_to(&self, upto: usize, now: Instant) -> usize {
         let Some(w) = self.wrap.as_ref().filter(|w| w.lines.last().is_some_and(|&(_, e)| e >= self.text.len())) else {
             return if !self.collapsed && self.fit.drawing(now) { self.shown.min(upto) } else { upto };
@@ -484,7 +487,7 @@ impl Bubble {
             if start >= upto || (long && row >= rows) {
                 break;
             }
-            if self.fit.holds_back(w.widths.get(i).copied().unwrap_or(0.0) + TEXT_PAD, row, now) {
+            if self.fit.waits(self.need(i, w.widths.get(i).copied().unwrap_or(0.0)), row, now) {
                 return start.max(self.shown).min(upto);
             }
         }
@@ -515,29 +518,37 @@ impl Bubble {
             .collect()
     }
 
-    /// What the words it shows need (`widths`: `page_widths`), (width with padding, rows): the
-    /// box never keeps them waiting for a step (`bubblefit::Ask::hold`).
-    fn hold(widths: &[f32]) -> (f32, usize) {
-        match widths.iter().copied().reduce(f32::max) {
-            Some(w) => (w + TEXT_PAD, widths.len()),
+    /// What line `i` of its wrap, `lw` px of it showing, needs of the box's width (`line_need`):
+    /// its last, a chip beside the collapse key (`chip_last`), that key's room too.
+    fn need(&self, i: usize, lw: f32) -> f32 {
+        let by_key = self.chip_last && self.wrap.as_ref().is_some_and(|w| i + 1 == w.lines.len() && w.chips.get(i) == Some(&true));
+        line_need(lw, by_key)
+    }
+
+    /// What the words it shows need (`widths`: `page_widths`), (width, rows): the box never keeps
+    /// them waiting for a step (`bubblefit::Ask::hold`).
+    fn hold(&self, widths: &[f32]) -> (f32, usize) {
+        let (top, _) = self.pages();
+        match widths.iter().enumerate().map(|(k, &lw)| self.need(top + k, lw)).reduce(f32::max) {
+            Some(w) => (w, widths.len()),
             None => (0.0, 0),
         }
     }
 
-    /// Which lines of its page show in a box `w` wide (`widths`: what of each shows,
-    /// `page_widths`), its body `w` less its padding (a chip on the collapse key's row,
-    /// `chip_last`, beside that key): a line wider than the box as drawn waits for it to grow
-    /// around it, never cut. (Grown, it holds them all: wrapped to the widest it may be.)
-    fn page_shows(&self, w: f32, chip_last: bool, widths: &[f32]) -> Vec<bool> {
+    /// Which lines of its page show in the box as drawn (`Grow::draw`; `widths`: what of each
+    /// shows, `page_widths`): one it doesn't hold waits while the box grows to hold it
+    /// (`Grow::waits`, the same need its words wait on as they type), and every line under it
+    /// with it: never cut, no gap. One the box will never hold (wider than the most, as shaped;
+    /// a chip, cut to its room by `chip_text`) shows once the box is as wide as it gets.
+    fn page_shows(&self, widths: &[f32], now: Instant) -> Vec<bool> {
         let (top, _) = self.pages();
-        let chips = self.wrap.as_ref().map_or(&[][..], |wr| &wr.chips[..]);
-        let n = widths.len();
+        let mut gone = false;
         widths
             .iter()
             .enumerate()
             .map(|(k, &lw)| {
-                let room = if chip_last && k + 1 == n && chips.get(top + k) == Some(&true) { chip_last_room(w) } else { w - PAD_L - PAD_R };
-                lw <= room + 0.01
+                gone = gone || self.fit.waits(self.need(top + k, lw), k, now);
+                !gone
             })
             .collect()
     }
@@ -821,6 +832,14 @@ fn text_box_for((l, r): (f32, f32)) -> f32 {
 /// A line's need over its own width: the bubble's padding, and a little air.
 const TEXT_PAD: f32 = PAD_L + PAD_R + 2.0;
 
+/// What a line `lw` px wide needs of the bubble's width: its padding and air (`TEXT_PAD`); on the
+/// collapse key's row (`by_key`: a chip, no footer), that key and its air too (`chip_last_room`).
+/// The one threshold: the words typing (`Bubble::typed_to`), the lines showing (`page_shows`)
+/// and the box growing to them (`Bubble::hold`) all go by it.
+fn line_need(lw: f32, by_key: bool) -> f32 {
+    if by_key { lw + PAD_L + (PAD_R - 4.0) + bubblefit::CHEVRON_W + bubblefit::FOOT_AIR } else { lw + TEXT_PAD }
+}
+
 /// The abort key's words.
 const ABORT: &str = "✕ ABORT";
 
@@ -991,6 +1010,7 @@ struct ReplySize {
 #[allow(clippy::too_many_arguments)]
 fn reply_size(b: &mut Bubble, head: f32, stub: bool, busy: bool, fixed: bool, max_w: f32, now: Instant, tw: &dyn Fn(&str, FootType) -> f32, body_w: &dyn Fn(&str) -> f32) -> ReplySize {
     let chip_last = !stub && !busy && !b.long() && b.ends_on_chip();
+    b.chip_last = chip_last;
     let foot = reply_foot(b, stub, busy, chip_last, max_w, tw);
     if stub {
         let (_, floor) = bubble_w(0.0, head, &foot.foot, max_w);
@@ -998,10 +1018,18 @@ fn reply_size(b: &mut Bubble, head: f32, stub: bool, busy: bool, fixed: bool, ma
     }
     let head = b.fit.head(head);
     let (fit_w, floor) = bubble_w(b.wrap.as_ref().map_or(0.0, |w| w.width), head, &foot.foot, max_w);
-    let hold = Bubble::hold(&b.page_widths(body_w));
+    let hold = b.hold(&b.page_widths(body_w));
     let ask = bubblefit::Ask { fit: (fit_w, b.rows().max(1)), floor, hold, long: b.long(), more: b.stream && b.more, fixed, max_w };
     let (w, rows) = b.fit.next(ask, now);
     ReplySize { w, rows, fit_w, floor, foot, chip_last }
+}
+
+/// A reply's keys that come with its growing (READ, the pager: `foot`, `reply_size`'s) wait while
+/// the box as drawn is short of them and growing to hold them (`Grow::waits`), as its lines do:
+/// never drawn past it (the rest of its keys were in the box before it grew). The stub, the chip's
+/// row: none.
+fn keys_wait(b: &Bubble, foot: &ReplyFoot, chip_last: bool, now: Instant) -> bool {
+    !chip_last && b.fit.waits(foot.foot.need(), 0, now)
 }
 
 /// A prompt's footer: DENY and its go key (ANSWER and DENY for a secret), the collapse key.
@@ -4444,6 +4472,7 @@ impl Avatar {
             stream: false,
             more: false,
             fit: bubblefit::Grow::default(),
+            chip_last: false,
             serial: {
                 self.bubble_serial += 1;
                 self.bubble_serial
@@ -5131,6 +5160,7 @@ impl Avatar {
                 stream: true,
                 more: b.busy,
                 fit: bubblefit::Grow::default(),
+                chip_last: false,
                 serial: {
                     self.bubble_serial += 1;
                     self.bubble_serial
@@ -6889,9 +6919,11 @@ fn status_text(s: &str, tab: f32, ink: u32) -> Div {
     theme::metered_fixed(s, HEADER_TRACK, ink, &tab).text_size(px(HEADER_FONT)).font_weight(FontWeight::BOLD).text_color(rgb(ink))
 }
 
-/// A status, whole, then shorter: hands-free's `MIC LIVE · ` off, the level meter off,
-/// `HANDS-FREE · ` off (its countdown stays), then its `· …` parts from the end. Whole words
-/// and marks only, so a ticking status shortens the same way every second.
+/// A status, whole, then shorter: hands-free's `MIC LIVE · ` off, the level meter off, then its
+/// `· …` parts from the end. Whole words and marks only, so a ticking status shortens the same way
+/// every second. Hands-free never gives up its name or its clock (Shady, #143: never a form that
+/// loses what is ending): `HANDS-FREE 1:12` at its shortest, `HANDS-FREE · ENDS IN 0:09` then
+/// `HANDS-FREE 0:09`, never `ENDS IN 0:09` alone.
 fn status_steps(s: &str) -> Vec<String> {
     let mut out = vec![s.to_string()];
     let mut push = |t: &str| {
@@ -6904,12 +6936,14 @@ fn status_steps(s: &str) -> Vec<String> {
     push(s);
     let s = s.split(' ').filter(|w| w.is_empty() || !w.chars().all(is_bar)).collect::<Vec<_>>().join(" ");
     push(&s);
-    let s = s.strip_prefix("HANDS-FREE · ").unwrap_or(&s);
-    push(s);
     let mut parts: Vec<&str> = s.split(" · ").collect();
-    while parts.len() > 1 {
+    let ending = parts.len() > 1 && parts[0] == "HANDS-FREE" && parts[1].starts_with("ENDS IN ");
+    while parts.len() > if ending { 2 } else { 1 } {
         parts.pop();
         push(&parts.join(" · "));
+    }
+    if ending {
+        push(&format!("HANDS-FREE {}", parts[1].trim_start_matches("ENDS IN ")));
     }
     out
 }
@@ -8253,12 +8287,13 @@ impl Avatar {
                 }
                 PanelMode::Input { secret } => {
                     // The field grows in steps as he types, not a letter at a time, and doesn't
-                    // flip at a step's edge or narrow for its note (`bubblefit::Field`).
+                    // flip at a step's edge or narrow for its note (`bubblefit::Field`); with no
+                    // compositor at the most while it is open, as a stream.
                     let (note, _) = self.input_note(secret, busy);
                     let keys = if busy && !secret { vec![bubblefit::text_key(tw(ABORT, FootType::Key))] } else { Vec::new() };
                     let foot = bubblefit::Foot { inset: PAD_L, left: tw(&note, FootType::Note), keys, edge: PAD_R - 4.0 };
                     let (fit_w, floor) = bubble_w(text_w, head_need, &foot, max_w);
-                    let w = self.input.as_mut().map_or(fit_w, |i| i.size.next(fit_w, floor, max_w));
+                    let w = self.input.as_mut().map_or(fit_w, |i| i.size.next(fit_w, floor, max_w, !alpha));
                     (w, total_lines.clamp(1, cap), fit_w, floor, false, None)
                 }
                 PanelMode::Prompt => {
@@ -8313,15 +8348,17 @@ impl Avatar {
             // it, never cut in half by a growing box.
             let fits = ((h - (PAD_T + HEADER_H + HEADER_GAP) - foot_zone) / LINE_H + 0.02).floor().max(0.0) as usize;
             // A reply's lines the box as drawn holds whole: a wider one waits a frame or two for it
-            // to grow around it (all of a long reply at once, a caption), never cut. Its words
-            // wait for this box as they type (`Bubble::typed_to`).
+            // to grow around it (all of a long reply at once, a caption), never cut, and the lines
+            // under it with it. Its words wait for this box as they type (`Bubble::typed_to`);
+            // READ and the pager for it as its lines do (`keys_wait`).
             let family = self.font.clone();
-            let shows: Vec<bool> = match (mode, self.bubble.as_mut()) {
+            let (shows, wait_keys): (Vec<bool>, bool) = match (mode, self.bubble.as_mut()) {
                 (PanelMode::Reply, Some(b)) if !stub => {
                     b.fit.draw(w, fits, now);
-                    b.page_shows(w, chip_last, &b.page_widths(&|t| body_width(&family, t, window)))
+                    let shows = b.page_shows(&b.page_widths(&|t| body_width(&family, t, window)), now);
+                    (shows, reply_foot_fit.as_ref().is_some_and(|f| keys_wait(b, f, chip_last, now)))
                 }
-                _ => Vec::new(),
+                _ => (Vec::new(), false),
             };
             let hidden = |k: usize| k >= fits || shows.get(k) == Some(&false);
             // Settled after a summon: the border breathes toward bone; the pulse turns it bone.
@@ -8684,7 +8721,7 @@ impl Avatar {
                     // they need more, READ without its count (`reply_foot`).
                     let (pager_fits, read_count) = reply_foot_fit.as_ref().map_or((true, true), |f| (f.pager, f.read_count));
                     let rows_shown = self.bubble.as_ref().map_or(1, |b| b.rows().max(1));
-                    if let Some((top, total)) = pages.filter(|_| !stub && pager_fits)
+                    if let Some((top, total)) = pages.filter(|_| !stub && pager_fits && !wait_keys)
                         && total > rows_shown
                     {
                         let n = total.div_ceil(rows_shown);
@@ -8735,7 +8772,7 @@ impl Avatar {
                         row = row.child(abort_btn(cx)).child(spacer());
                     }
                     let open = self.reader.is_some();
-                    if let Some(b) = self.bubble.as_ref().filter(|b| b.long()) {
+                    if let Some(b) = self.bubble.as_ref().filter(|b| b.long() && !wait_keys) {
                         // The bubble's one primary control: a bone slanted pill, ink type and a
                         // red arrow (17:1; r21: ink on red was too weak, and the red pager
                         // beside it read as a second way on; the pager is text-dim now). While
@@ -9655,7 +9692,7 @@ mod bubble_layout_tests {
     use super::{
         Bubble, FOOTER_GAP, FOOTER_H, FootType, HEADER_GAP, HEADER_GAPS, HEADER_H, HeaderLabel, LINE_H, LINES_PER_PAGE, MARGIN, OPENING_LINES, PAD_B, PAD_L, PAD_R, PAD_T,
         PANEL_MAX_W, ReplyFoot, ReplySize, TYPE_MAX_CHARS, bubble_w, chip_last_room, ended_unseen, fit_header, fit_middle, header_need, header_status_w, place_panel,
-        reply_cap, reply_label, reply_size, rows_room, status_steps, text_box_for, top_under, wrap_lines,
+        TEXT_PAD, keys_wait, reply_cap, reply_label, reply_size, rows_room, status_steps, text_box_for, top_under, wrap_lines,
     };
     use crate::bubblefit::{self, Grow};
     use crate::hud::PanelFx;
@@ -9732,6 +9769,9 @@ mod bubble_layout_tests {
         out
     }
 
+    /// A face's width of a line (logical px).
+    type Measure<'a> = &'a dyn Fn(&str) -> f32;
+
     /// Lines shown, the panel's text width, its rect, rows, the bubble.
     type Laid = (Vec<String>, f32, (f32, f32, f32, f32), usize, Bubble);
 
@@ -9776,6 +9816,7 @@ mod bubble_layout_tests {
             stream: true,
             more: false,
             fit: Grow::default(),
+            chip_last: false,
             serial: 1,
             turn: 1,
             cap: LINES_PER_PAGE,
@@ -9851,6 +9892,8 @@ mod bubble_layout_tests {
     const MEDIUM: &str = "Pushed the fix and opened the PR. CI is running now, and I'll ping you when it's green.";
     const LIST: &str = "Left for today:\n- tests\n- shots\n- the PR\n- a nap";
     const CHIP: &str = "Log in first:\n`synaps login`";
+    /// A command longer than the room beside the collapse key: cut there, its ends kept (#71).
+    const RUN: &str = "Run this to see it:\n`SYNAPS_DESKTOP_BIN=$HOME/.local/bin/synaps-desktop-hybrid.motion synaps-desktop --verbose`";
     const LONG: &str = "Spike pushed the reader fix eleven minutes ago, and CI went green right after. The Windows installer job took nineteen minutes and the voice bundle eleven, which is about what it took last week. The shots came back clean at both scales, the header fits at the narrowest width, and nothing in the bubble is cut at the screen's edge. Lynx still owes a rebase on the polish branch, and the release notes need a line about the reader. Want me to nudge lynx about the rebase now, or leave it for the morning when the queue is quieter?";
     /// Her window's part on her monitor: all of it, at the right edge, at the left, a narrow work
     /// area, the narrowest the bubble is placed in (`panel_span`).
@@ -9859,7 +9902,7 @@ mod bubble_layout_tests {
     #[test]
     fn the_fixture_has_every_size() {
         let all = samples();
-        for s in [OK, ON_IT, MEDIUM, LIST, CHIP, LONG] {
+        for s in [OK, ON_IT, MEDIUM, LIST, CHIP, RUN, LONG] {
             assert!(all.iter().any(|(_, r)| r == s), "{s:?} is not in bubble_replies.json");
         }
     }
@@ -9913,6 +9956,12 @@ mod bubble_layout_tests {
                         let chip_last = !busy && !b.long() && b.ends_on_chip();
                         let head = head_of("ONLINE");
                         assert!(head <= w + 0.01 && floor <= w + 0.01 && w <= max_w + 0.01, "{at}: header {head}, floor {floor}, w {w}");
+                        // Drawn at its size, every line of its page shows: a chip beside the
+                        // collapse key too, cut to its room (Shady, #143: a long one went).
+                        let now = Instant::now();
+                        b.fit.draw(w, b.rows().max(1), now);
+                        let shows = b.page_shows(&b.page_widths(&width), now);
+                        assert!(shows.iter().all(|&s| s), "{at}: {shows:?} of {lines:?}");
                         if chip_last {
                             // The collapse key on the chip's row: the chip whole beside it wherever
                             // the bubble can be that wide, else cut to the room beside it.
@@ -9976,7 +10025,9 @@ mod bubble_layout_tests {
                     if r.chip_last {
                         let c = wr.widths.last().copied().unwrap();
                         assert!(c <= chip_last_room(r.w), "{at}: a {c} px chip in {} px", chip_last_room(r.w));
-                        assert_eq!(b.page_shows(r.w, true, &b.page_widths(&text_w)).last(), Some(&true), "{at}");
+                        let now = Instant::now();
+                        b.fit.draw(r.w, r.rows, now);
+                        assert_eq!(b.page_shows(&b.page_widths(&text_w), now).last(), Some(&true), "{at}");
                     }
                     for (k, &lw) in wr.widths.iter().enumerate() {
                         assert!(lw <= r.w - PAD_L - PAD_R, "{at}: line {k} is {lw} px");
@@ -10009,7 +10060,7 @@ mod bubble_layout_tests {
         let span = (0.0, 500.0);
         let max_w = max_w_in(span);
         let chrome = PAD_L + PAD_R + HEADER_GAPS;
-        for (status, least) in [("MIC LIVE · HANDS-FREE 0:05 ▯▯▯▯▯", "HANDS-FREE 0:05"), ("SPEAKING ▮▮▮▯▯", "SPEAKING"), ("MIC LIVE · HANDS-FREE · ENDS IN 0:09", "ENDS IN 0:09")] {
+        for (status, least) in [("MIC LIVE · HANDS-FREE 0:05 ▯▯▯▯▯", "HANDS-FREE 0:05"), ("SPEAKING ▮▮▮▯▯", "SPEAKING"), ("MIC LIVE · HANDS-FREE · ENDS IN 0:09", "HANDS-FREE 0:09")] {
             assert_eq!(status_steps(status).last().map(String::as_str), Some(least), "{status}");
             let mut b = lay(OK, span, 6.0, 300.0).4;
             let r = reply_size(&mut b, head_of(status), false, false, false, max_w, Instant::now(), &foot_tw, &width);
@@ -10054,17 +10105,26 @@ mod bubble_layout_tests {
         fits: usize,
         /// The lines of its page that show in it (`Bubble::page_shows`).
         shows: Vec<bool>,
+        /// READ and the pager wait for it (`keys_wait`).
+        keys_wait: bool,
     }
 
     /// A frame as `render` lays it out: wrapped (when stale), its size, the box it is drawn in,
     /// what shows in it, and the box its words wait for (`Grow::draw`).
-    fn frame(b: &mut Bubble, fx: &mut PanelFx, span: (f32, f32), (top, bottom): (f32, f32), status: &str, busy: bool, now: Instant) -> Frame {
+    fn frame(b: &mut Bubble, fx: &mut PanelFx, span: (f32, f32), room: (f32, f32), status: &str, busy: bool, now: Instant) -> Frame {
+        frame_in(b, fx, span, room, status, busy, now, &width)
+    }
+
+    /// [`frame`], its lines measured by `shaped` (as GPUI lays them out) and wrapped by `breaks`
+    /// (as its wrapper sums them).
+    #[allow(clippy::too_many_arguments)]
+    fn frame_in(b: &mut Bubble, fx: &mut PanelFx, span: (f32, f32), (top, bottom): (f32, f32), status: &str, busy: bool, now: Instant, shaped: &dyn Fn(&str) -> f32) -> Frame {
         let tb = text_box_for(span);
         if b.wrap.is_none() {
-            b.wrap = Some(wrap_lines(&b.text, tb, Some(&chip_w), |p| breaks(p, tb), width));
+            b.wrap = Some(wrap_lines(&b.text, tb, Some(&chip_w), |p| breaks(p, tb), shaped));
         }
         b.cap = reply_cap(b, bottom, top, busy);
-        let size = reply_size(b, head_of(status), false, busy, false, max_w_in(span), now, &foot_tw, &width);
+        let size = reply_size(b, head_of(status), false, busy, false, max_w_in(span), now, &foot_tw, shaped);
         let footer = !size.chip_last;
         let foot_zone = if footer { FOOTER_GAP + FOOTER_H + PAD_B } else { PAD_B };
         let h = PAD_T + HEADER_H + HEADER_GAP + size.rows as f32 * LINE_H + foot_zone;
@@ -10072,8 +10132,9 @@ mod bubble_layout_tests {
         let drawn = pf.content;
         let fits = ((drawn.1 - (PAD_T + HEADER_H + HEADER_GAP) - foot_zone) / LINE_H + 0.02).floor().max(0.0) as usize;
         b.fit.draw(drawn.0, fits, now);
-        let shows = b.page_shows(drawn.0, size.chip_last, &b.page_widths(&width));
-        Frame { size, drawn, fits, shows }
+        let shows = b.page_shows(&b.page_widths(shaped), now);
+        let keys_wait = keys_wait(b, &size.foot, size.chip_last, now);
+        Frame { size, drawn, fits, shows, keys_wait }
     }
 
     /// What a run of frames saw: no line drawn outside its box, ever; how long a line that had
@@ -10089,8 +10150,15 @@ mod bubble_layout_tests {
 
     impl Seen {
         fn look(&mut self, b: &Bubble, f: &Frame, ms: u64, at: &str) {
+            self.look_in(b, f, ms, at, &width, f32::INFINITY);
+        }
+
+        /// [`look`], its lines as `shaped` lays them out; one wider than the most a bubble may take
+        /// where she is (`max_w`) shows once the box is that wide, cut by what it is over.
+        fn look_in(&mut self, b: &Bubble, f: &Frame, ms: u64, at: &str, shaped: &dyn Fn(&str) -> f32, max_w: f32) {
             let room = f.drawn.0 - PAD_L - PAD_R;
             let mut waiting = false;
+            let mut gap = None;
             for (k, t) in b.page_lines().iter().enumerate() {
                 let shown = k < f.fits && f.shows.get(k) != Some(&false);
                 let lw = match b.page_chips().get(k).copied().unwrap_or(false).then(|| crate::line::command(t)).flatten() {
@@ -10098,12 +10166,16 @@ mod bubble_layout_tests {
                         let r = if f.size.chip_last && k + 1 == b.page_lines().len() { chip_last_room(f.drawn.0) } else { room };
                         chip_w(&fit_middle(c, |s| chip_w(s) <= r)).min(r)
                     }
-                    None => width(t),
+                    None => shaped(t),
                 };
                 if shown {
-                    assert!(lw <= room + 0.01, "{at}: {t:?} ({lw} px) drawn in a {room} px box");
-                } else if !t.is_empty() {
-                    waiting = true;
+                    let over = lw + TEXT_PAD > max_w + 0.01 && f.drawn.0 + 0.01 >= max_w;
+                    assert!(lw <= room + 0.01 || over, "{at}: {t:?} ({lw} px) drawn in a {room} px box");
+                    // No gap: a line shows only under lines that show (Shady, #143).
+                    assert!(gap.is_none() || t.is_empty(), "{at}: line {k} shows under hidden line {gap:?}");
+                } else {
+                    gap = gap.or(Some(k));
+                    waiting |= !t.is_empty();
                 }
             }
             match (waiting, self.hidden_since) {
@@ -10118,6 +10190,9 @@ mod bubble_layout_tests {
             if !f.size.chip_last {
                 let need = f.size.foot.foot.need();
                 assert!(need <= f.size.w + 0.01, "{at}: its footer needs {need} in a box laid out {}", f.size.w);
+                // READ and the pager never drawn past the box as drawn: they wait for it (Shady, #143).
+                let grown = b.long() || f.size.foot.pager;
+                assert!(!grown || f.keys_wait || need <= f.drawn.0 + 0.01, "{at}: READ or the pager drawn in a {} px box (they need {need})", f.drawn.0);
                 match (need > f.drawn.0 + 0.01, self.foot_since) {
                     (true, None) => self.foot_since = Some(ms),
                     (false, Some(s)) => {
@@ -10145,7 +10220,7 @@ mod bubble_layout_tests {
         let last30 = samples().into_iter().map(|(_, r)| r).find(|r| r.starts_with("Line 1:")).unwrap();
         for span in [(0.0, 500.0), (40.0, 420.0)] {
             let tb = text_box_for(span);
-            for raw in [ON_IT, MEDIUM, LIST, LONG, last30.as_str()] {
+            for raw in [ON_IT, MEDIUM, LIST, RUN, LONG, last30.as_str()] {
                 let words: Vec<&str> = raw.split(' ').collect();
                 let t0 = Instant::now();
                 let mut b = bubble("", Vec::new(), wrap_lines(&[], tb, Some(&chip_w), |p| breaks(p, tb), width));
@@ -10261,7 +10336,7 @@ mod bubble_layout_tests {
                         let f = frame(&mut b, &mut fx, span, (6.0, 300.0), "SPEAKING", busy, now);
                         if revealed_at == Some(ms) {
                             // Laid out around all of it on the frame it came.
-                            let hold = Bubble::hold(&b.page_widths(&width));
+                            let hold = b.hold(&b.page_widths(&width));
                             assert!(f.size.w + 0.01 >= hold.0.min(max_w_in(span)) && f.size.rows >= hold.1, "{at}: {:?} for {hold:?}", (f.size.w, f.size.rows));
                         }
                         seen.look(&b, &f, ms, &at);
@@ -10321,6 +10396,108 @@ mod bubble_layout_tests {
             assert!(seen.line_wait <= EASE_WAIT && seen.hidden_since.is_none(), "{span:?}: a line waited {} ms", seen.line_wait);
             assert!(seen.foot_wait <= EASE_WAIT && seen.foot_since.is_none(), "{span:?}: its keys waited {} ms", seen.foot_wait);
             assert!(!b.more && b.shown == b.text.len(), "{span:?}");
+        }
+    }
+
+    /// Shady (#143): mid-reveal, a line waited for the box while a short one under it showed: a
+    /// gap. A line that waits takes every line under it with it.
+    #[test]
+    fn a_line_waiting_for_the_box_hides_the_lines_under_it() {
+        for span in [(0.0, 500.0), (40.0, 420.0)] {
+            let raw = "ok\nPushed the fix and opened the PR. CI is running now.\nok";
+            let mut b = lay(raw, span, 6.0, 300.0).4;
+            b.more = true;
+            let t0 = Instant::now();
+            let r = reply_size(&mut b, head_of("ONLINE"), false, true, false, max_w_in(span), t0, &foot_tw, &width);
+            // Drawn at its floor still, easing out to its size.
+            b.fit.draw(r.floor, r.rows, t0);
+            let shows = b.page_shows(&b.page_widths(&width), t0);
+            assert!(shows.len() >= 3 && shows[0] && shows[1..].iter().all(|&s| !s), "{span:?}: {shows:?} of {:?}", b.page_lines());
+            // Eased there: all of them.
+            let then = t0 + Duration::from_millis(200);
+            b.fit.draw(r.w, r.rows, then);
+            assert!(b.page_shows(&b.page_widths(&width), then).iter().all(|&s| s), "{span:?}");
+        }
+    }
+
+    /// Shady (#143): GPUI's shaped width over its wrapper's sum (kerning; an emoji with VS16,
+    /// ⚠️ ✅️ ❤️) puts a line past the most the box may take: the box never grows to it. It never
+    /// stops the typing nor stays hidden: typed out or streamed, it shows within `WAIT` (once the
+    /// box is as wide as it gets, cut by what it is over), and the typing goes on.
+    #[test]
+    fn a_line_wider_than_the_most_as_shaped_still_shows_and_the_typing_goes_on() {
+        const VS16: &str = "Done ✅️ tests ✅️ shots ✅️ the PR ✅️ the notes ✅️ the rebase ✅️ the installer ✅️ the voice bundle ✅️ and the nap ❤️ ⚠️ ❤️ ✅️";
+        let wait = bubblefit::WAIT.as_millis() as u64;
+        for span in [(0.0, 500.0), (40.0, 420.0)] {
+            let tb = text_box_for(span);
+            let max_w = max_w_in(span);
+            let laid = |raw: &str, shaped: &dyn Fn(&str) -> f32| {
+                let text: Vec<char> = crate::session::clean(raw).chars().collect();
+                wrap_lines(&text, tb, Some(&chip_w), |p| breaks(p, tb), shaped)
+            };
+            // Kerning: every line wider as shaped, its widest max_w + 5 with its padding.
+            let d = (tb + 5.0) / laid(MEDIUM, &width).width - 1.0;
+            let kerned = move |t: &str| width(t) * (1.0 + d);
+            let emoji = |t: &str| width(t) + 6.0 * t.matches('\u{FE0F}').count() as f32;
+            let cases: [(&str, Measure); 2] = [(MEDIUM, &kerned), (VS16, &emoji)];
+            for (raw, shaped) in cases {
+                let over = laid(raw, shaped).widths.iter().filter(|&&w| w + TEXT_PAD > max_w + 0.01).count();
+                assert!(over > 0, "{span:?} {raw:.20?}: no line past the most");
+                for streamed in [false, true] {
+                    let at = format!("{span:?} {raw:.20?} streamed {streamed}");
+                    let words: Vec<&str> = raw.split(' ').collect();
+                    let t0 = Instant::now();
+                    let mut b = bubble("", Vec::new(), wrap_lines(&[], tb, Some(&chip_w), |p| breaks(p, tb), shaped));
+                    b.shown = 0;
+                    b.more = streamed;
+                    if !streamed {
+                        b.text = crate::session::clean(raw).chars().collect();
+                        b.raw = raw.to_string();
+                        b.wrap = None;
+                    }
+                    let mut fx = PanelFx::default();
+                    let mut seen = Seen::default();
+                    let end = if streamed { words.len() as u64 * 30 } else { 0 };
+                    let (mut got, mut since, mut stall) = (0, 0u64, 0u64);
+                    for ms in 0..end + 3_000 {
+                        let now = t0 + Duration::from_millis(ms);
+                        if streamed && ms % 30 == 0 && got < words.len() {
+                            got += 1;
+                            let r = words[..got].join(" ");
+                            let text: Vec<char> = crate::session::clean(&r).chars().collect();
+                            let same = b.text.iter().zip(&text).take_while(|(a, c)| a == c).count();
+                            b.shown = b.shown.min(same);
+                            b.text = text;
+                            b.raw = r;
+                            b.wrap = None;
+                        }
+                        if streamed && ms == end + 30 {
+                            b.more = false;
+                        }
+                        if ms % 16 == 0 || b.wrap.is_none() {
+                            let busy = b.more;
+                            let f = frame_in(&mut b, &mut fx, span, (6.0, 300.0), "SPEAKING", busy, now, shaped);
+                            seen.look_in(&b, &f, ms, &format!("{at} at {ms} ms"), shaped, max_w);
+                        }
+                        if ms % 35 == 0 {
+                            if b.shown < b.text.len() {
+                                let step = ((b.text.len() - b.shown) / 6).max(b.per_tick);
+                                let was = b.shown;
+                                b.shown = b.typed_to((b.shown + step).min(b.text.len()), now);
+                                if b.shown > was {
+                                    since = ms;
+                                }
+                                stall = stall.max(ms - since);
+                            } else {
+                                since = ms;
+                            }
+                        }
+                    }
+                    assert_eq!(b.shown, b.text.len(), "{at}: typed out");
+                    assert!(stall <= wait, "{at}: the typing stood {stall} ms");
+                    assert!(seen.line_wait <= wait && seen.hidden_since.is_none(), "{at}: a line waited {} ms", seen.line_wait);
+                }
+            }
         }
     }
 
@@ -10971,7 +11148,16 @@ mod header_fit_tests {
             status_steps(&hf_label(None, 72, 0.4)),
             ["MIC LIVE · HANDS-FREE 1:12 ▮▮▯▯▯", "HANDS-FREE 1:12 ▮▮▯▯▯", "HANDS-FREE 1:12"].map(String::from)
         );
-        assert_eq!(status_steps(&hf_label(Some(7), 0, 0.0)), ["MIC LIVE · HANDS-FREE · ENDS IN 0:07", "HANDS-FREE · ENDS IN 0:07", "ENDS IN 0:07"].map(String::from));
+        assert_eq!(status_steps(&hf_label(Some(7), 0, 0.0)), ["MIC LIVE · HANDS-FREE · ENDS IN 0:07", "HANDS-FREE · ENDS IN 0:07", "HANDS-FREE 0:07"].map(String::from));
+        assert_eq!(
+            status_steps(&format!("{} · WIN+ALT+C TO TYPE", hf_label(None, 9, 0.0))).last().map(String::as_str),
+            Some("HANDS-FREE 0:09"),
+            "the Line's words go, its name and clock stay"
+        );
+        // Never a form that loses what is ending: its name and its clock in every step.
+        for st in [hf_label(Some(9), 0, 0.0), hf_label(None, 9, 0.6)].into_iter().flat_map(|s| [format!("{s} · WIN+ALT+C TO TYPE"), s]) {
+            assert!(status_steps(&st).iter().all(|t| t.contains("HANDS-FREE") && t.contains("0:09")), "{st}: {:?}", status_steps(&st));
+        }
         assert_eq!(status_steps(&mic_label(5, 1.0, true)), ["MIC 0:05 ▮▮▮▮▮ · AUTO", "MIC 0:05 · AUTO", "MIC 0:05"].map(String::from));
         assert_eq!(status_steps("WAKE PAUSED · TOO MANY FALSE STARTS"), ["WAKE PAUSED · TOO MANY FALSE STARTS", "WAKE PAUSED"].map(String::from));
         assert_eq!(status_steps("ONLINE"), ["ONLINE"].map(String::from));

@@ -14,9 +14,9 @@ pub const STEP_W: f32 = 48.0;
 /// ...and its size changes at most this often (`hud::SIZE_MS` and a little: one ease ends before
 /// the next starts).
 pub const STEP: Duration = Duration::from_millis(250);
-/// New words wait for the box only while it is drawn: within this of its last frame (the view
-/// draws it every typing tick meanwhile, and its next change is due within `STEP`). A bubble not
-/// drawn (behind the chip) holds its words no longer.
+/// The longest words wait for the box to grow around them, from when it fell short of what it is
+/// growing to (its last change; its next is due within `STEP` and eases in `hud::SIZE_MS`). Its
+/// stale wrap holds its words no longer either, from its last frame (behind the chip: none).
 pub const WAIT: Duration = Duration::from_millis(750);
 /// The text field narrows a step only once its words are this far under the step below: typing
 /// and deleting at a step's edge never flips its width.
@@ -119,10 +119,16 @@ pub struct Grow {
     /// The widest its header has needed in this reply: a status changing under a settled reply
     /// (SPEAKING, DONE, ONLINE) doesn't resize it.
     head: f32,
+    /// What its last layout asked for, (width, rows): laid out, or its next step (due within
+    /// `STEP`); and the most it may take where she is, then.
+    want: (f32, usize),
+    most: f32,
     /// The box it was drawn in last frame, (width, rows), and when: its words wait for it, not
     /// for a guess.
     drawn: (f32, usize),
     drawn_at: Option<Instant>,
+    /// Since when the box as drawn has been short of what it is growing to (None: it holds it).
+    short_since: Option<Instant>,
 }
 
 impl Grow {
@@ -142,6 +148,7 @@ impl Grow {
         };
         let w = if !first && (a.more || a.fixed) { w.max(self.w) } else { w }.min(a.max_w);
         let rows = if !first && a.more && !a.long { a.fit.1.max(self.rows) } else { a.fit.1 };
+        (self.want, self.most) = ((w, rows), a.max_w);
         let due = !a.more
             || a.fixed
             || first
@@ -164,23 +171,35 @@ impl Grow {
         self.head
     }
 
+    /// What it is growing to: its size laid out, or its next step.
+    fn target(&self) -> (f32, usize) {
+        (self.w.max(self.want.0), self.rows.max(self.want.1))
+    }
+
     /// The box it was drawn in this frame, (width, rows it holds).
     pub fn draw(&mut self, w: f32, rows: usize, now: Instant) {
         self.drawn = (w, rows);
         self.drawn_at = Some(now);
+        let (tw, tr) = self.target();
+        let short = w + 0.01 < tw || rows < tr;
+        self.short_since = if short { self.short_since.or(Some(now)) } else { None };
     }
 
-    /// Drawn within `WAIT`: its words may wait for it to grow.
+    /// Drawn within `WAIT`.
     pub fn drawing(&self, now: Instant) -> bool {
         self.drawn_at.is_some_and(|t| now < t + WAIT)
     }
 
-    /// Words of a line that needs `need` px (its text and padding), at row `row` of the page,
-    /// wait: the box it was drawn in doesn't hold it (it is growing to, or its next step will:
-    /// its fit holds every line). A bubble not drawn (behind the chip) holds them back no longer
-    /// than `WAIT`.
-    pub fn holds_back(&self, need: f32, row: usize, now: Instant) -> bool {
-        self.drawing(now) && (need > self.drawn.0 + 0.01 || row >= self.drawn.1)
+    /// What needs `need` px (a line with its padding, the footer's keys), at row `row` of the
+    /// page, waits: the box as drawn doesn't hold it and is growing to (laid out, or its next
+    /// step), short of that for under `WAIT`. A need wider than the most it may take waits for
+    /// that much only (then shows, clipped by what it is over); growth that isn't coming never
+    /// keeps it waiting.
+    pub fn waits(&self, need: f32, row: usize, now: Instant) -> bool {
+        let need = need.min(self.most);
+        let (w, rows) = self.target();
+        let short = need > self.drawn.0 + 0.01 || row >= self.drawn.1;
+        short && need <= w + 0.01 && row < rows && self.short_since.is_some_and(|t| now < t + WAIT)
     }
 }
 
@@ -194,7 +213,13 @@ pub struct Field {
 }
 
 impl Field {
-    pub fn next(&mut self, fit: f32, floor: f32, max_w: f32) -> f32 {
+    /// Its width now. `fixed` (a shaped window, no compositor): `max_w` while it is open, never
+    /// a step (a width change drops it from the shape for a frame).
+    pub fn next(&mut self, fit: f32, floor: f32, max_w: f32, fixed: bool) -> f32 {
+        if fixed {
+            self.w = max_w;
+            return max_w;
+        }
         self.floor = self.floor.max(floor);
         let floor = self.floor.min(max_w);
         let up = step_up(fit, floor, max_w);
@@ -365,39 +390,81 @@ mod tests {
     }
 
     #[test]
-    fn words_wait_for_the_box_as_drawn_only_while_it_is_drawn() {
+    fn words_wait_for_the_box_as_drawn_only_while_it_grows_to_them() {
         let t0 = Instant::now();
         let mut g = Grow::default();
-        assert!(!g.holds_back(999.0, 9, t0), "never drawn: nothing waits");
+        assert!(!g.waits(999.0, 9, t0), "never drawn: nothing waits");
         g.next(ask((200.0, 1), 140.0, false, true, 470.0), t0);
         g.draw(g.w, 1, t0);
         let w = g.w;
-        assert!(!g.holds_back(w, 0, at(t0, 10)));
-        assert!(g.holds_back(w + 1.0, 0, at(t0, 10)), "wider than the box");
-        assert!(g.holds_back(w, 1, at(t0, 10)), "a row it hasn't");
-        assert!(g.holds_back(w + 1.0, 1, at(t0, 260)), "its next step is due: still waiting");
-        assert!(!g.holds_back(w + 1.0, 1, at(t0, WAIT.as_millis() as u64)), "not drawn since (behind the chip): it goes on");
-        // Grown: its words wait until the box is drawn around them, however long its ease.
-        g.next(ask((330.0, 2), 140.0, false, true, 470.0), at(t0, 260));
+        assert!(!g.waits(w, 0, at(t0, 10)), "it holds it");
+        // Its next step (due within STEP) will hold a line a little wider: it waits for it.
+        g.next(ask((w + 30.0, 2), 140.0, false, true, 470.0), at(t0, 16));
+        assert_eq!(g.w, w, "not due yet");
+        g.draw(g.w, 1, at(t0, 16));
+        assert!(g.waits(w + 20.0, 0, at(t0, 20)), "wider than the box, its next step holds it");
+        assert!(g.waits(w, 1, at(t0, 20)), "a row it hasn't, its next step has");
+        assert!(!g.waits(w + 200.0, 0, at(t0, 20)), "no step coming holds it: no wait");
+        assert!(!g.waits(w, 2, at(t0, 20)), "nor a row none coming has");
+        // Grown: its words wait until the box is drawn around them...
+        g.next(ask((w + 30.0, 2), 140.0, false, true, 470.0), at(t0, 260));
+        assert!(g.w > w);
         g.draw(w + 0.5, 1, at(t0, 280));
-        assert!(g.holds_back(w + 1.0, 0, at(t0, 300)), "drawn short of it");
-        g.draw(g.w, 2, at(t0, 300));
-        assert!(!g.holds_back(w + 1.0, 1, at(t0, 300)), "drawn around it");
+        assert!(g.waits(w + 20.0, 0, at(t0, 300)), "drawn short of it");
+        g.draw(g.w, 2, at(t0, 460));
+        assert!(!g.waits(w + 20.0, 1, at(t0, 460)), "drawn around it");
+        // ...and never past WAIT from when it fell short (a box that never gets there: no
+        // redraw keeps them waiting).
+        g.next(ask((g.w + 60.0, 2), 140.0, false, true, 470.0), at(t0, 720));
+        for ms in (720..2_000).step_by(35) {
+            g.draw(w, 2, at(t0, ms));
+            let waits = g.waits(g.w, 0, at(t0, ms));
+            assert_eq!(waits, ms < 720 + WAIT.as_millis() as u64, "{ms}");
+        }
+    }
+
+    /// Shady (#143): GPUI's shaped width over the wrapper's (kerning, an emoji with VS16): a line
+    /// wider than the most the box may take. It waits for the box to reach that, then shows.
+    #[test]
+    fn a_line_wider_than_the_most_waits_only_for_the_most() {
+        let t0 = Instant::now();
+        let mut g = Grow::default();
+        g.next(ask((470.0, 2), 140.0, false, true, 470.0), t0);
+        g.draw(300.0, 2, at(t0, 16));
+        assert!(g.waits(475.0, 0, at(t0, 20)), "easing out to the most: it waits");
+        g.draw(470.0, 2, at(t0, 220));
+        assert!(!g.waits(475.0, 0, at(t0, 230)), "at the most: it shows");
+        for ms in (230..3_000).step_by(35) {
+            g.next(ask((470.0, 2), 140.0, false, true, 470.0), at(t0, ms));
+            g.draw(470.0, 2, at(t0, ms));
+            assert!(!g.waits(475.0, 1, at(t0, ms)), "{ms}");
+        }
     }
 
     #[test]
     fn the_field_grows_in_steps_and_doesnt_flip_at_a_steps_edge() {
         let mut f = Field::default();
-        assert_eq!(f.next(100.0, 140.0, 470.0), 140.0);
+        assert_eq!(f.next(100.0, 140.0, 470.0, false), 140.0);
         let edge = 140.0 + STEP_W;
-        assert_eq!(f.next(edge + 1.0, 140.0, 470.0), edge + STEP_W, "a letter over: a step up");
-        assert_eq!(f.next(edge - 1.0, 140.0, 470.0), edge + STEP_W, "deleted back: it stays");
-        assert_eq!(f.next(edge + 1.0, 140.0, 470.0), edge + STEP_W);
-        assert_eq!(f.next(edge - HYST - 1.0, 140.0, 470.0), edge, "well under: a step down");
+        assert_eq!(f.next(edge + 1.0, 140.0, 470.0, false), edge + STEP_W, "a letter over: a step up");
+        assert_eq!(f.next(edge - 1.0, 140.0, 470.0, false), edge + STEP_W, "deleted back: it stays");
+        assert_eq!(f.next(edge + 1.0, 140.0, 470.0, false), edge + STEP_W);
+        assert_eq!(f.next(edge - HYST - 1.0, 140.0, 470.0, false), edge, "well under: a step down");
         // A hint widened its floor; it went: the floor stays while the field is open.
-        assert_eq!(f.next(100.0, 300.0, 470.0), 300.0);
-        assert_eq!(f.next(100.0, 140.0, 470.0), 300.0);
+        assert_eq!(f.next(100.0, 300.0, 470.0, false), 300.0);
+        assert_eq!(f.next(100.0, 140.0, 470.0, false), 300.0);
         // Her room shrank: inside it.
-        assert_eq!(f.next(100.0, 140.0, 260.0), 260.0);
+        assert_eq!(f.next(100.0, 140.0, 260.0, false), 260.0);
+    }
+
+    /// No compositor: the field at the most while it is open, as a stream (no step drops it from
+    /// the window's shape).
+    #[test]
+    fn a_shaped_window_holds_the_field_at_the_most() {
+        let mut f = Field::default();
+        for fit in [100.0, 200.0, 300.0, 120.0] {
+            assert_eq!(f.next(fit, 140.0, 470.0, true), 470.0, "{fit}");
+        }
+        assert_eq!(f.next(100.0, 140.0, 420.0, true), 420.0, "her room: inside it");
     }
 }

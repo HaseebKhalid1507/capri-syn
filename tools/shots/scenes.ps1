@@ -991,7 +991,12 @@ $Scenes.bubble['hf-short'] = {
     $null = Ctl 'talk handsfree on'
     Start-Sleep 1.5
     $null = Fake 'say ok'
-    Start-Sleep 3
+    # Shot about a second after `say`, while it is up (by 3 s it was closing: collapsed, no
+    # panel_layout).
+    $null = Wait-Until { $s = State; $s.panel_layout -and -not $s.collapsed } 5 'her bubble open around "ok"'
+    Start-Sleep -Milliseconds 750
+    $s = State
+    if (-not $s.panel_layout -or $s.collapsed) { $script:Fails.Add("${script:Take}: no bubble to shoot (collapsed: $($s.collapsed), panel_layout: $([bool]$s.panel_layout))") }
     Shot 'done' 'hands-free, a spoken "ok"'
 }
 # The reader opened while a long reply still comes: the stub, ABORT and CLOSE READER whole.
@@ -999,7 +1004,9 @@ $Scenes.bubble['stub-busy'] = {
     Start-Take bubble stub-busy -History $Short -DeltaMs 300
     $null = Ctl 'brain off'
     $null = Fake "say $($BubbleSays['long'][-1])"
-    Start-Sleep 5
+    # READ first (gone long, a word every 300 ms: still coming), so the stub has CLOSE READER.
+    if (-not (Wait-Until { (State).read } 40 'READ: her reply gone long')) { $script:Fails.Add("${script:Take}: her reply never went long (no READ)") }
+    Start-Sleep -Milliseconds 500
     $null = Ctl 'reader open'
     Start-Sleep 1.5
     Shot 'stub' 'the reader open mid-turn: ABORT and CLOSE READER'
