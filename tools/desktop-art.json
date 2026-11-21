@@ -1696,7 +1696,6 @@
     ],
     "fps": 10,
     "family": "cel",
-    "outfit": "no-jacket",
     "anchor": {
      "name": "seat",
      "x": 245,
@@ -1721,7 +1720,6 @@
     ],
     "fps": 10,
     "family": "cel",
-    "outfit": "no-jacket",
     "anchor": {
      "name": "seat",
      "x": 245,

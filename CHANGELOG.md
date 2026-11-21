@@ -25,7 +25,7 @@
   arrival alternative the worn look doesn't draw is never picked.
 - **Capri's pack fills them from CapriCore v1.2.2** (`make-pack`, pinned at `828f272`): her wave, the
   hanging pull-up, catch and wrist-scan cels, the keytar on a window top while music plays, and her
-  no-jacket look as a second outfit (the jacket look waves with its own clip).
+  no-jacket look as a second outfit (the jacket look waves with its own clip; the keytar plays in both).
 
 ## 1.1.1 (2026-11-20)
 

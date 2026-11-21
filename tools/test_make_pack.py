@@ -117,7 +117,8 @@ class MakePack(Base):
             rel = side["root"] + st["file"]
             self.assertEqual((out / "anim/capricore" / st["file"]).read_bytes(), f"v122 {rel}".encode(), name)
             self.assertEqual(side["files"][st["file"]]["sha256"], self.v122[rel])
-            self.assertEqual(st["outfit"], "no-jacket", name)
+            # The keytar plays in both looks (Haseeb 11-21); the rest is drawn for no-jacket only.
+            self.assertEqual(st.get("outfit"), None if name.startswith("ledge_keytar") else "no-jacket", name)
         cat = json.loads((out / "outfits/no-jacket/sprites.json").read_text())
         tpl = json.loads((HERE.parent / mp.OUTFIT).read_text())
         self.assertEqual([s["id"] for s in cat["sprites"]], [s["id"] for s in tpl["sprites"]])
