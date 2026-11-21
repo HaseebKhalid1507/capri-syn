@@ -878,6 +878,21 @@ fn now_ms(t0: Instant, now: Instant) -> f32 {
 
 /// An idle weight shift (`@lean`): the upper body this far (px at 1x).
 const LEAN_BEAT_PX: i32 = 14;
+/// How often, at most, what keeps her still is looked at between beats.
+const RESTLESS_LOOK: Duration = Duration::from_millis(250);
+
+/// An idle beat's identity (`life::Beats`: never the same twice running, wherever it sits in
+/// the list).
+fn beat_key(steps: &[crate::pack::Step]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    format!("{steps:?}").hash(&mut h);
+    h.finish()
+}
+
+/// Music's (`beat_key`'s place for it).
+const MUSIC_BEAT: u64 = u64::MAX;
+
 /// An idle beat that changes her outline (a hop, a hand on her hip, arms crossed, her chin on
 /// her hand, a point, a shrug), not just her face.
 /// Where her idle beats come from (`Avatar::activities`): none here; the hang fidgets; the perch's
@@ -1074,6 +1089,12 @@ pub struct Avatar {
     lean_beat: Option<(Instant, Duration, i32)>,
     /// Her idle beats' rounds (`activity_pick`).
     beats: crate::life::Beats,
+    /// When they come, the tangents, hyperfocus and boredom (`life::Restless`), and where a cued
+    /// glance looks (a window that came forward; None: the pointer).
+    restless: crate::life::Restless,
+    glance_at: Option<(i32, i32)>,
+    /// When what keeps her still was last looked at (`RESTLESS_LOOK`).
+    restless_seen: Option<Instant>,
     /// Her upper body bent toward the pointer (r42, a linger or a wiggle): px at 1x at her neck
     /// from, to, since (eased over `BEND_IN` / `BEND_OUT`).
     bend: (f32, f32, Instant),
@@ -1390,6 +1411,9 @@ impl Avatar {
             squash: None,
             lean_beat: None,
             beats: crate::life::Beats::default(),
+            restless: crate::life::Restless::new(Rng::seeded().next(), 0.0),
+            glance_at: None,
+            restless_seen: None,
             bend: (0.0, 0.0, Instant::now()),
             glints: Vec::new(),
             next_glint: None,
@@ -1908,12 +1932,123 @@ impl Avatar {
         }
     }
 
-    /// The next idle beat (`life::Beats`): a gesture and a face beat take turns.
-    fn activity_pick(&mut self, n: usize) -> usize {
-        // An idle pose (`life.poses`) changes her outline: a gesture.
+    /// The next idle beat (`life::Beats`): a gesture and a face beat take turns (more gestures as
+    /// she gets bored, `stage`). None: only the one just played (never twice running).
+    fn activity_pick(&mut self, n: usize, stage: usize) -> Option<usize> {
+        // An idle pose (`life.poses`) or a hang fidget changes her outline: a gesture.
         let poses = &self.pack.behaviour.life.poses;
-        let gesture: Vec<bool> = self.activities().iter().take(n).map(|a| gesture(a) || poses.values().any(|p| p.as_slice() == *a)).collect();
-        self.beats.pick(&gesture, &mut self.rng)
+        let hanging = self.hanging();
+        let all = self.activities();
+        let gesture: Vec<bool> = all.iter().take(n).map(|a| hanging || gesture(a) || poses.values().any(|p| p.as_slice() == *a)).collect();
+        let keys: Vec<u64> = all.iter().take(n).copied().map(beat_key).collect();
+        self.beats.pick_at(&gesture, &keys, stage, &mut self.rng)
+    }
+
+    /// Seconds on `life::Restless`'s clock.
+    fn restless_secs(&self, now: Instant) -> f64 {
+        now.saturating_duration_since(self.t_start).as_secs_f64()
+    }
+
+    /// The gap between her idle beats: her band's (`energy.<band>.gapMs`), else `MICRO_GAP_MS`.
+    fn restless_gap(&self) -> [u64; 2] {
+        self.pack.behaviour.energy.band(self.band()).gap_ms.unwrap_or(crate::life::MICRO_GAP_MS)
+    }
+
+    /// Why she keeps still now (`life::quiet`): asleep; busy (her session working: hyperfocus;
+    /// a holder he raised, `brain::HOLDERS`; the voice; a reaction that follows the pointer); or
+    /// off (her own words in a bubble, a move, a reaction, music, the intro, hidden by the menu
+    /// or a fullscreen window, a mood without autonomy, no beats here).
+    fn restless_quiet(&self) -> crate::life::Quiet {
+        let napping = self.brain.as_ref().is_some_and(|h| h.brain.napping());
+        if self.mood == Mood::Sleepy || napping {
+            return crate::life::Quiet::Asleep;
+        }
+        let busy = self.brain_busy();
+        let own_bubble = busy.contains(&"bubble") && self.bubble.as_ref().is_some_and(|b| !b.stream && b.turn == 0);
+        let fs = self.brain.as_ref().is_some_and(|h| h.fs != brainview::FsHide::Shown);
+        let q = crate::life::quiet(crate::life::Still {
+            asleep: false,
+            held: busy.iter().any(|b| crate::brain::HOLDERS.contains(b) && !(*b == "bubble" && own_bubble)),
+            session: busy.contains(&"session"),
+            voice: self.voice.hf.is_some() || self.voice_listening() || self.voice_speaking(),
+            following: self.following(),
+            own_bubble,
+            moving: busy.iter().any(|b| matches!(*b, "teleport" | "intro" | "music" | "reaction")),
+            hidden: self.hidden || fs || busy.contains(&"hidden"),
+            nothing: false,
+        });
+        // Nothing to play here, looked at last (`activities` builds a list).
+        if q == crate::life::Quiet::No && (self.next_activity.is_none() || !self.has_activities()) {
+            return crate::life::Quiet::Off;
+        }
+        q
+    }
+
+    /// Play the idle beat `life::Restless` says is due.
+    fn restless_beat(&mut self, beat: crate::life::Beat, rt: f64, gap: [u64; 2], now: Instant) {
+        use crate::life::Beat;
+        let target = self.glance_at.take();
+        // A tangent: a glance (`brain.glance`, else the look) at a window that came forward, else the pointer;
+        // standing only (the look frames are hers on her feet), else a beat as usual.
+        if let Beat::Glance { cued } = beat
+            && self.placement == Placement::Ground
+            && self.standing()
+        {
+            let at = target.filter(|_| cued).unwrap_or_else(|| self.brain_cursor());
+            let steps = self.pack.glance_steps();
+            if self.mirror_cfg.own {
+                self.face(at.0 > self.ground().0, "look", now, false);
+            }
+            let mut seq = self.flat(&self.resolve_steps_at(&steps, at));
+            // A glance whose strip isn't in yet (asked for now): the look this time.
+            if seq.is_empty() && !self.pack.behaviour.brain.glance.is_empty() {
+                seq = self.flat(&self.resolve_steps_at(&[crate::pack::Step::Clip("@look".into())], at));
+            }
+            let len: u64 = seq.iter().map(|s| s.1 as u64).sum();
+            if !seq.is_empty() {
+                self.anim.play(seq, now);
+            }
+            self.beats.mark(beat_key(&steps));
+            self.restless.played(rt, len as f64 / 1000.0, gap);
+            self.next_activity = Some(now + Duration::from_millis(len));
+            self.beat_until = Some(now + Duration::from_millis(len));
+            self.autonomy_started = true;
+            return;
+        }
+        if matches!(beat, Beat::Glance { .. }) {
+            // Not on her feet: a plain beat instead.
+            self.restless.unglance();
+        }
+        // Music, never twice running either.
+        let music = self
+            .music_spec()
+            .filter(|m| m.activity_chance > 0.0 && self.mood == Mood::Idle && self.music.is_none() && !self.posed() && self.beats.last() != Some(MUSIC_BEAT))
+            .map(|m| (m.activity_chance, m.activity_ms));
+        if let Some((chance, ms)) = music
+            && self.rng.range(0.0, 1.0) < chance
+            && self.music_on(now, Some(now + Duration::from_millis(ms))).is_ok()
+        {
+            self.beats.mark(MUSIC_BEAT);
+            self.autonomy_started = true;
+            self.restless.played(rt, 0.0, gap);
+            return;
+        }
+        let n = self.activities().len();
+        let Some(i) = self.activity_pick(n, self.restless.stage(rt)) else {
+            // Only the one just played: a turn skipped.
+            self.restless.played(rt, 0.0, gap);
+            return;
+        };
+        // The one picked, cloned once (the list itself is borrowed).
+        let steps = self.activities().get(i).map(|s| s.to_vec()).unwrap_or_default();
+        let seq = self.flat(&self.resolve_steps(&steps));
+        let len: u64 = seq.iter().map(|s| s.1 as u64).sum();
+        self.activity_beats(&steps, Duration::from_millis(len), now);
+        self.anim.play(seq, now);
+        self.beat_until = Some(now + Duration::from_millis(len));
+        self.autonomy_started = true;
+        self.restless.played(rt, len as f64 / 1000.0, gap);
+        self.next_activity = Some(now + Duration::from_millis(len));
     }
 
     fn pose_next_change(&self, now: Instant) -> Option<Instant> {
@@ -2781,8 +2916,10 @@ impl Avatar {
         take(self.dance_deadline());
         take(self.burst_deadline());
         take(self.voice_deadline(now));
-        if !self.anim.busy() {
-            take(self.next_activity);
+        if !self.anim.busy()
+            && let (Some(at), Some(due)) = (self.next_activity, self.restless.due())
+        {
+            take(Some(at.max(self.t_start + Duration::from_secs_f64(due.max(0.0)))));
         }
         take(self.mood_then.map(|m| m.0));
         if let Some(b) = &self.bubble {
@@ -2985,36 +3122,24 @@ impl Avatar {
             self.relayer(now);
             dirty = true;
         }
-        if let Some(at) = self.next_activity
-            && at <= now
-            && !self.anim.busy()
-            && self.has_activities()
-            && !self.following()
-        {
-            // Never while she hangs (her hang fidgets are beats too; music isn't one there).
-            let music = self
-                .music_spec()
-                .filter(|m| m.activity_chance > 0.0 && self.mood == Mood::Idle && self.music.is_none() && !self.posed())
-                .map(|m| (m.activity_chance, m.activity_ms));
-            if let Some((chance, ms)) = music
-                && self.rng.range(0.0, 1.0) < chance
-                && self.music_on(now, Some(now + Duration::from_millis(ms))).is_ok()
+        // Her idle beats (`life::Restless`): every few seconds, a tangent now and then, none
+        // while her session works, a holder is up or she sleeps. `next_activity` arms them (an
+        // autonomous mood with beats here) and holds them off (a reaction, a click).
+        // The cheap checks first: an idle animation, and a beat due or `RESTLESS_LOOK` since
+        // what keeps her still was last looked at (a hold coming and going between beats).
+        let rt = self.restless_secs(now);
+        let due = self.next_activity.is_some_and(|at| at <= now) && self.restless.due().is_none_or(|d| d <= rt);
+        if !self.anim.busy() && (due || self.restless_seen.is_none_or(|t| now.saturating_duration_since(t) >= RESTLESS_LOOK)) {
+            self.restless_seen = Some(now);
+            let quiet = self.restless_quiet();
+            let gap = self.restless_gap();
+            if self.restless.poll(rt, quiet, gap)
+                && self.next_activity.is_some_and(|at| at <= now)
+                && let Some(beat) = self.restless.pick(rt)
             {
-                self.autonomy_started = true;
-            } else {
-                let n = self.activities().len();
-                let i = self.activity_pick(n);
-                // The one picked, cloned once (the list itself is borrowed).
-                let steps = self.activities().get(i).map(|s| s.to_vec()).unwrap_or_default();
-                let seq = self.flat(&self.resolve_steps(&steps));
-                let len: u64 = seq.iter().map(|s| s.1 as u64).sum();
-                self.activity_beats(&steps, Duration::from_millis(len), now);
-                self.anim.play(seq, now);
-                self.beat_until = Some(now + Duration::from_millis(len));
-                self.autonomy_started = true;
-                self.next_activity = Some(now + Duration::from_millis(len) + self.autonomy_gap());
+                self.restless_beat(beat, rt, gap, now);
+                dirty = true;
             }
-            dirty = true;
         }
         let mut typed_out = false;
         let mut stream = false;
@@ -5459,6 +5584,7 @@ impl Avatar {
         if self.next_activity.is_some() {
             self.next_activity = Some(now + self.autonomy_gap());
         }
+        self.restless.engage(self.restless_secs(now));
     }
 
     /// The status tag: reopen what is behind the chip (a prompt put off, the last reply),

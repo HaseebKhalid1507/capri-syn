@@ -253,6 +253,21 @@ Paths here are Linux's: Windows keeps the same files under `%APPDATA%` and `%LOC
   without a brain at all (`SA_NO_BRAIN`, tests) the old rule holds: sleepy after `--sleepy-after`
   minutes without a turn. On Hyprland there's no idle time yet (ext-idle-notify isn't
   wired): your presence is the pointer moving, so typing alone for 5 min reads as away.
+- **She's restless** (always on, no setting): her idle beats come every few seconds (her band's
+  `gapMs`, else 2.5-6 s), from whatever activities, `life.fidgets`, `life.poses` or hang fidgets the
+  pack fills, never the same clip twice running (a glance or music included, wherever the clip sits
+  in her band's list). About one in eight is a tangent: a glance (`brain.glance`, else the look) at
+  the pointer, then something else 0.9-1.8 s later; a window coming forward (a focus change) or the
+  pointer coming near her cues one 0.3-0.9 s later, at that window or the pointer, never right after
+  another glance. Off her feet a tangent is a plain beat. While her session works (thinking,
+  replying, a tool) she's steady, no beats; they come back 1.2-2.5 s after, as they do after the
+  Line, a prompt, the menu, a drag, a reply bubble, the field or the voice (hands-free, listening,
+  speaking). Her own unprompted words in a bubble keep her still too, and hidden (the menu's HIDE,
+  the fullscreen hide) she plays none; neither counts as engaging her. Nobody engaging her (no click, no turn, no holder)
+  for 1 / 3 / 7 min, the gestures come more often (the chance a gesture follows a gesture: 25 / 50 / 75 %, else they
+  take turns), until her attention bids take over (8-15 min). Asleep she keeps still; a beat plays in
+  place, so it never counts against `max_moves_per_hour`; DND, the fullscreen hide and click-through are
+  as before.
 - **Her energy shows**: its band (high from 0.65, low under 0.35) picks her idle activities (a
   gesture that changes her outline and a face beat take turns, each from its own shuffled round) and
   their gaps (`energy.high|mid|low` in moods.json: 1.2-3 / 1.5-3.5 / 2-4 s), her breath (`bobPx`,
