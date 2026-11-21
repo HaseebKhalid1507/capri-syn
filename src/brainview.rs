@@ -1361,6 +1361,8 @@ impl Avatar {
         if let Some(r) = travel {
             self.face(r, "travel", now, true);
         }
+        // She's off: a loop's exit (drawn for where she was) doesn't play on the way.
+        self.anim.cut(now);
         let Some(h) = &mut self.brain else { return };
         h.rng = rng;
         h.write(line);
@@ -1612,6 +1614,8 @@ impl Avatar {
         let crouch = self.pack.behaviour.brain.hop_crouch.as_ref().and_then(|c| self.pack.index.get(c)).copied();
         if !sc.crouched {
             sc.crouched = true;
+            // A loop's exit doesn't hop along with her.
+            self.anim.cut(now);
             if let Some(c) = crouch {
                 self.anim.play(vec![(c, moves::HOP_CROUCH_MS)], now);
             }
@@ -1857,6 +1861,8 @@ impl Avatar {
         self.placement = Placement::Ground;
         self.set_origin((walk.from_x.round() as i32 - l.ground_x, feet_y - l.ground_y));
         self.face(walk.to_x > walk.from_x, "walk", now, true);
+        // A loop's exit doesn't slide along with her.
+        self.anim.cut(now);
         // The walk is on before the relayer: a window top's pick holds through it.
         self.relayer(now);
         self.anim.play(crate::motion::walk_seq_timed(first, &cells, walk.secs), now);

@@ -1382,6 +1382,9 @@ impl Avatar {
         let l = init.layout;
         let home = (init.origin.0 + l.ground_x, init.origin.1 + l.ground_y);
         let now = Instant::now();
+        let mut rng = Rng::seeded();
+        // A one-shot beat's repeat counts roll on from her own rng.
+        pack.seed_rolls(rng.next());
         let mut a = Avatar {
             frames: (0..pack.frames.len()).map(|_| None).collect(),
             anim: Animator::new(default),
@@ -1397,7 +1400,7 @@ impl Avatar {
             frame_logged: usize::MAX,
             band_relayer: false,
             autonomy_started: false,
-            rng: Rng::seeded(),
+            rng,
             bubble: None,
             hearts: None,
             heart_sprite: None,
@@ -2411,15 +2414,16 @@ impl Avatar {
     }
 
     /// A looped list's frames: its entry, loop and exit (a plain list: all loop). Each part
-    /// flattens as any steps do (mirroring, x2, per-frame ms and keys apply inside it); the
-    /// cells and the outfit are asked of the whole, so one part missing is none of it.
+    /// flattens once, as any steps do (mirroring, x2, per-frame ms and keys apply inside it);
+    /// the cells and the outfit are asked of the whole, so one part missing is none of it.
     fn loop_seq(&self, l: Option<&Steps>) -> Option<Looped> {
-        let [entry, body, exit] = l?.parts();
-        if self.flat(&[entry.as_slice(), body.as_slice(), exit.as_slice()].concat()).is_empty() {
+        let parts = l?.parts();
+        let [entry, body, exit] = parts.each_ref().map(|p| self.pack.flatten(p));
+        let missing = parts.iter().zip([&entry, &body, &exit]).any(|(p, f)| !p.is_empty() && f.is_empty());
+        if missing || body.is_empty() || ![&entry, &body, &exit].into_iter().all(|s| self.seq_ready(s)) {
             return None;
         }
-        let r = Looped { entry: self.pack.flatten(&entry), body: self.pack.flatten(&body), exit: self.pack.flatten(&exit) };
-        (!r.body.is_empty()).then_some(r)
+        Some(Looped { entry, body, exit })
     }
 
     /// The loop on screen ends here without its exit: an interruption (a drag, a teleport,
@@ -2960,6 +2964,8 @@ impl Avatar {
             && self.rag.is_none()
             && self.teleport.is_none()
             && self.music.is_none()
+            // A loop's exit is drawn for where she is: no hop under it.
+            && !self.anim.in_exit()
     }
 
     fn next_deadline(&self) -> Option<Instant> {

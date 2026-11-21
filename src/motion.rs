@@ -101,27 +101,51 @@ fn progress(t: f32, secs: f32) -> f32 {
     (d / total).clamp(0.0, 1.0)
 }
 
-/// The walk's cells: its strip from `first`, positions each with its own ms (`Strip::played`):
-/// its entry once, its loop round and round until, with its exit after, at least `secs` long,
-/// then one more pass step and the exit (the oneshot under the walk; it is stopped where she
-/// arrives). A strip without a range: all of it round and round.
+/// The walk's cells: its strip from `first`, positions each with its own ms (`Strip::played`),
+/// round and round, at least `secs` long, then one more (the oneshot under the walk; it is
+/// stopped where she arrives). With a range: its entry once, its loop for as long as fits, and
+/// its exit done by the time she arrives, its last cell held through it (a walk too short for
+/// both drops the entry).
 pub fn walk_seq_timed(first: usize, cells: &Ranged<(u32, u32)>, secs: f32) -> Seq {
     if cells.body.is_empty() {
         return Vec::new();
     }
     let want = (secs.max(0.0) * 1000.0) as u64;
-    let exit: u64 = cells.exit.iter().map(|c| u64::from(c.1.max(1))).sum();
     let at = |&(c, ms): &(u32, u32)| (first + c as usize, ms.max(1));
-    let mut out: Seq = cells.entry.iter().map(at).collect();
-    let mut t: u64 = out.iter().map(|c| u64::from(c.1)).sum();
+    let len = |s: &[(u32, u32)]| s.iter().map(|c| u64::from(c.1.max(1))).sum::<u64>();
+    let mut out = Vec::new();
+    if cells.exit.is_empty() {
+        out.extend(cells.entry.iter().map(at));
+        let mut t = len(&cells.entry);
+        for c in cells.body.iter().cycle() {
+            out.push(at(c));
+            if t >= want {
+                break;
+            }
+            t += u64::from(c.1.max(1));
+        }
+        return out;
+    }
+    let exit = len(&cells.exit);
+    let mut t = 0;
+    if len(&cells.entry) + exit <= want {
+        out.extend(cells.entry.iter().map(at));
+        t = len(&cells.entry);
+    }
     for c in cells.body.iter().cycle() {
-        out.push(at(c));
-        if t + exit >= want {
+        let ms = u64::from(c.1.max(1));
+        if t + ms + exit > want {
             break;
         }
-        t += u64::from(c.1.max(1));
+        out.push(at(c));
+        t += ms;
     }
     out.extend(cells.exit.iter().map(at));
+    // Her last exit cell holds until she's there, and a step past it (stopped on arrival).
+    let last_at = t + exit - u64::from(cells.exit[cells.exit.len() - 1].1.max(1));
+    if let Some(l) = out.last_mut() {
+        l.1 = l.1.max((want.saturating_sub(last_at) + u64::from(l.1)).min(u64::from(u32::MAX)) as u32);
+    }
     out
 }
 
@@ -397,11 +421,21 @@ mod tests {
         let w = walk_seq_timed(10, &Ranged::whole(cells.to_vec()), 0.9);
         assert_eq!(w, vec![(10, 100), (11, 300), (12, 100), (10, 100), (11, 300), (12, 100)], "round and round, past the walk's end");
         assert!(walk_seq_timed(10, &Ranged::whole(Vec::new()), 1.0).is_empty());
-        // A range: in once, the loop until the exit would end past the walk (one step more, as
-        // a plain walk), then out once.
+        // A range: in once, the loop as long as the exit still ends by her arrival, then out
+        // once, its last cell held through the arrival (she's stopped there, so the exit shows).
         let r = Ranged::by_pos(vec![(0, 50), (1, 100), (2, 100), (3, 70)], 4, 1, 1);
         let w = walk_seq_timed(10, &r, 0.5);
-        assert_eq!(w, vec![(10, 50), (11, 100), (12, 100), (11, 100), (12, 100), (11, 100), (13, 70)]);
+        assert_eq!(w, vec![(10, 50), (11, 100), (12, 100), (11, 100), (13, 220)]);
+        let starts: Vec<u32> = w.iter().scan(0, |t, c| { let s = *t; *t += c.1; Some(s) }).collect();
+        assert!(starts[4] + 70 <= 500, "the exit is through by the arrival (500 ms)");
+        assert!(w.iter().map(|c| c.1).sum::<u32>() > 500, "and held past it");
+        // A two-cell exit: both shown before she's there.
+        let r = Ranged::by_pos(vec![(0, 50), (1, 100), (2, 60), (3, 60)], 4, 1, 2);
+        let w = walk_seq_timed(10, &r, 0.4);
+        assert_eq!(w, vec![(10, 50), (11, 100), (11, 100), (12, 60), (13, 150)]);
+        // Too short for the entry and the exit: the entry goes.
+        let r = Ranged::by_pos(vec![(0, 300), (1, 100), (2, 100)], 3, 1, 1);
+        assert_eq!(walk_seq_timed(10, &r, 0.25), vec![(11, 100), (12, 250)]);
         // Uniform cells: as `dance_ms`.
         assert_eq!(dance_seq(Some(60.0), &[(0, 63); 16]), vec![(0, 88); 16]);
         // Uneven: each keeps its share; unknown tempo, the drawing's own.

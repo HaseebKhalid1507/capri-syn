@@ -9,7 +9,7 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 #[derive(Deserialize, Clone, Debug)]
 pub struct Anchor {
@@ -145,6 +145,9 @@ pub enum Step {
     Hold { frame: String, ms: u32 },
     Repeat(Box<RepeatSteps>),
 }
+
+/// The most times a one-shot beat's loop repeats (`repeat: [min, max]`, max at most this).
+pub const MAX_REPEAT: u32 = 64;
 
 /// A one-shot beat's `{"entry": [...], "loop": [...], "exit": [...], "repeat": [min, max]}`:
 /// the entry once, the loop `min..=max` times (picked each time it plays), the exit once (a
@@ -331,8 +334,12 @@ fn loop_range_errors(v: &serde_json::Value, path: &mut Vec<String>, errors: &mut
                 unknown(&["entry", "loop", "exit", "repeat"], errors);
             } else if beat_path(&p) && (o.contains_key("loop") || o.contains_key("repeat")) {
                 unknown(&["entry", "loop", "exit", "repeat"], errors);
-                if !o.contains_key("repeat") {
-                    errors.push(format!("moods.json {at}: a one-shot beat's loop range needs `repeat`: [min, max] (it plays once, not forever)"));
+                match o.get("repeat") {
+                    None => errors.push(format!("moods.json {at}: a one-shot beat's loop range needs `repeat`: [min, max] (it plays once, not forever)")),
+                    Some(r) if repeat_range(r).is_none() => errors.push(format!(
+                        "moods.json {at}: `repeat` is {r}; it takes [min, max], whole numbers with 1 <= min <= max <= {MAX_REPEAT}"
+                    )),
+                    Some(_) => {}
                 }
             } else if !o.is_empty() && o.keys().all(|k| matches!(k.as_str(), "entry" | "loop" | "exit" | "repeat")) {
                 errors.push(format!("moods.json {at}: a loop range only goes on a looped list ({LOOPED_KEYS}) or, with `repeat`, a one-shot beat ({BEAT_KEYS})"));
@@ -352,6 +359,14 @@ fn loop_range_errors(v: &serde_json::Value, path: &mut Vec<String>, errors: &mut
         }
         _ => {}
     }
+}
+
+/// A `repeat` as written: `[min, max]`, 1 <= min <= max <= `MAX_REPEAT`.
+fn repeat_range(v: &serde_json::Value) -> Option<[u32; 2]> {
+    let a = v.as_array().filter(|a| a.len() == 2)?;
+    let n = |x: &serde_json::Value| x.as_u64().filter(|&n| n <= u64::from(MAX_REPEAT)).map(|n| n as u32);
+    let (lo, hi) = (n(&a[0])?, n(&a[1])?);
+    (1..=hi).contains(&lo).then_some([lo, hi])
 }
 
 /// A looped list's range is well formed: something to loop between its entry and exit.
@@ -1412,6 +1427,8 @@ pub struct Pack {
     pub outfits: Vec<Outfit>,
     /// The outfit she wears (an index into `outfits`): every frame decodes in it.
     worn: AtomicUsize,
+    /// The repeat rolls' xorshift state (`roll`; `seed_rolls` from her own rng).
+    rolls: AtomicU64,
     /// Effect sprites (`kind: "effect"`: catalog sprites, extra frames) by id: overlays, never
     /// her frames (`click.hearts`).
     pub effects: HashMap<String, FrameSource>,
@@ -1444,6 +1461,19 @@ impl Pack {
 
     /// Wear outfit `i` (ignored past the list). Frames decoded after this are in it: the view
     /// swaps them all at once, only where it can't be seen.
+    /// The repeat rolls (`Step::Repeat`) go on from her rng's `seed`.
+    pub fn seed_rolls(&self, seed: u64) {
+        self.rolls.store(seed, Ordering::Relaxed);
+    }
+
+    /// One repeat roll: 0..n.
+    fn roll(&self, n: usize) -> usize {
+        let mut r = crate::anim::Rng::new(self.rolls.load(Ordering::Relaxed));
+        let k = r.pick(n);
+        self.rolls.store(r.next(), Ordering::Relaxed);
+        k
+    }
+
     pub fn wear(&self, i: usize) {
         if i < self.outfits.len() {
             self.worn.store(i, Ordering::Relaxed);
@@ -1813,6 +1843,7 @@ impl Pack {
             cache_bytes,
             outfits,
             worn: AtomicUsize::new(0),
+            rolls: AtomicU64::new(crate::anim::Rng::seeded().next()),
             effects,
             hang_ref,
             step_strips,
@@ -1825,8 +1856,8 @@ impl Pack {
                     if r.r#loop.is_empty() {
                         errors.push(format!("moods.json {what}: the repeat's `loop` is empty"));
                     }
-                    if r.repeat[0] == 0 || r.repeat[0] > r.repeat[1] {
-                        errors.push(format!("moods.json {what}: repeat {:?} (`[min, max]`, 1 <= min <= max)", r.repeat));
+                    if r.repeat[0] == 0 || r.repeat[0] > r.repeat[1] || r.repeat[1] > MAX_REPEAT {
+                        errors.push(format!("moods.json {what}: `repeat` is {:?}; it takes [min, max], 1 <= min <= max <= {MAX_REPEAT}", r.repeat));
                     }
                 }
                 // A repeat's own `@look`s resolve as they play, as a beat's do.
@@ -2242,8 +2273,9 @@ impl Pack {
                 }
                 // Its loop a few times (`repeat`, picked as it plays), between its entry and exit.
                 Step::Repeat(r) => {
-                    let [lo, hi] = [r.repeat[0].max(1), r.repeat[1].max(r.repeat[0]).max(1)];
-                    let n = lo + crate::anim::Rng::seeded().pick((hi - lo + 1) as usize) as u32;
+                    let lo = r.repeat[0].clamp(1, MAX_REPEAT);
+                    let hi = r.repeat[1].clamp(lo, MAX_REPEAT);
+                    let n = lo + self.roll((hi - lo + 1) as usize) as u32;
                     self.flatten_into(&r.entry, out);
                     for _ in 0..n {
                         self.flatten_into(&r.r#loop, out);
@@ -2491,10 +2523,29 @@ pub mod tests {
             seen.insert(reps);
         }
         assert!(seen.len() > 1, "the count varies");
+        // The rolls go on from her rng: the same seed, the same counts.
+        let counts = |seed: u64| {
+            p.seed_rolls(seed);
+            (0..20).map(|_| p.flatten(&b.life.fidgets[0]).len()).collect::<Vec<_>>()
+        };
+        assert_eq!(counts(42), counts(42));
+        // Past the cap (a pack built by hand, never through --check): held to it as it plays.
+        let huge = Step::Repeat(Box::new(RepeatSteps { entry: vec![], r#loop: vec![Step::Hold { frame: "neutral".into(), ms: 1 }], exit: vec![], repeat: [1_000_000, u32::MAX] }));
+        assert_eq!(p.flatten(&[huge]).len(), MAX_REPEAT as usize);
         // Validated like any steps: a bad repeat, an empty middle, a frame that isn't there.
         let bad = |r: serde_json::Value| format!("{:#}", pack_with("repeat-bad", json!({"life": {"fidgets": [r]}})).err().unwrap());
-        assert!(bad(json!({"loop": [n(1)], "repeat": [0, 2]})).contains("life.fidgets #0: repeat [0, 2]"));
-        assert!(bad(json!({"loop": [n(1)], "repeat": [3, 2]})).contains("repeat [3, 2] (`[min, max]`, 1 <= min <= max)"));
+        let shape = |r: serde_json::Value, got: &str| {
+            let e = bad(json!({"loop": [n(1)], "repeat": r}));
+            assert!(e.contains(&format!("moods.json life.fidgets.0: `repeat` is {got}; it takes [min, max], whole numbers with 1 <= min <= max <= 64")), "{e}");
+        };
+        shape(json!([0, 2]), "[0,2]");
+        shape(json!([3, 2]), "[3,2]");
+        shape(json!([1, 65]), "[1,65]");
+        shape(json!([1, 1_000_000_000]), "[1,1000000000]");
+        shape(json!(3), "3");
+        shape(json!([2]), "[2]");
+        shape(json!(["2", 3]), "[\"2\",3]");
+        assert!(pack_with("repeat-max", json!({"life": {"fidgets": [{"loop": [n(1)], "repeat": [64, 64]}]}})).is_ok(), "64 is fine");
         assert!(bad(json!({"loop": [], "repeat": [1, 2]})).contains("life.fidgets #0: the repeat's `loop` is empty"));
         assert!(bad(json!({"loop": [{"frame": "nope", "ms": 1}], "repeat": [1, 2]})).contains("frame `nope` does not resolve"));
         assert!(bad(json!({"entry": [n(1)], "loop": [n(1)]})).contains("moods.json life.fidgets.0: a one-shot beat's loop range needs `repeat`"));

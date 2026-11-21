@@ -138,6 +138,14 @@ impl<T: Clone> Ranged<T> {
     }
 }
 
+impl Looped {
+    /// The same frames in the same parts, whatever their ms (a loop retimed: a new tempo).
+    pub fn same_cells(&self, o: &Looped) -> bool {
+        let c = |s: &Seq| s.iter().map(|x| x.0).collect::<Vec<_>>();
+        c(&self.entry) == c(&o.entry) && c(&self.body) == c(&o.body) && c(&self.exit) == c(&o.exit)
+    }
+}
+
 impl Ranged<(u32, u32)> {
     /// Positions `(pos, ms)` split by where they sit in a run of `len`: the first `entry`
     /// positions once, the last `exit` once, the rest loop (a strip's range, thinned or with
@@ -182,10 +190,15 @@ pub struct Animator {
     entered: bool,
     /// Its exit plays when the loop ends (`cut` disarms it: a drag, a teleport, sleep).
     armed: bool,
+    /// Cut since the loop on (or pending) went on: nothing arms until another loop goes on.
+    disarmed: bool,
     oneshot: Option<Seq>,
     one_pos: usize,
-    /// The first `exit_n` steps of the one-shot are the exit of `exit_of` (the loop that ended).
+    /// The first `exit_n` steps of the one-shot are the exit of `exit_of` (the loop that ended):
+    /// the rest of its pass (`tail_n` steps, from `tail_at`: in its entry?, position), then its exit.
     exit_n: usize,
+    tail_n: usize,
+    tail_at: (bool, usize),
     exit_of: Option<Looped>,
     due: Option<Instant>,
     rng: Rng,
@@ -205,9 +218,12 @@ impl Animator {
             loop_pos: 0,
             entered: false,
             armed: false,
+            disarmed: false,
             oneshot: None,
             one_pos: 0,
             exit_n: 0,
+            tail_n: 0,
+            tail_at: (false, 0),
             exit_of: None,
             due: None,
             rng: Rng::seeded(),
@@ -268,18 +284,22 @@ impl Animator {
     /// Into the loop: its entry (if any), then the body.
     fn start_loop(&mut self, now: Instant) {
         self.entered = self.looping.is_some();
-        self.armed = self.entered;
+        self.armed = self.entered && !self.disarmed;
         self.in_entry = self.looping.as_ref().is_some_and(|l| !l.entry.is_empty());
         self.loop_pos = 0;
         self.run_loop(now);
     }
 
-    /// After a one-shot: the loop from its start (its entry, if it hadn't started), or the body
-    /// from its start, or back on its rest.
+    /// After a one-shot: the loop's entry (if it hadn't started and has one), else its body from
+    /// its start, or back on its rest (a loop set under a one-shot rests too, as it always did).
     fn resume_loop(&mut self, now: Instant) {
-        if !self.entered {
+        if !self.entered && self.looping.as_ref().is_some_and(|l| !l.entry.is_empty()) {
             self.start_loop(now);
             return;
+        }
+        if !self.entered {
+            self.entered = self.looping.is_some();
+            self.armed = self.entered && !self.disarmed;
         }
         self.in_entry = false;
         self.loop_pos = match &self.looping {
@@ -323,64 +343,100 @@ impl Animator {
         self.set_layer_looped(base, looping.map(Looped::whole), rest_last, now);
     }
 
-    /// `set_layer_resting` with a loop range. The loop that was playing ends: its exit plays
-    /// first (unless `cut`), then the new loop's entry and body. The same ranged loop again
-    /// carries on where it is; the one whose exit is playing goes straight back into its body.
+    /// `set_layer_resting` with a loop range. The loop that was playing ends: the rest of its
+    /// pass and its exit play first (unless `cut`), then the new loop's entry and body. The same
+    /// ranged loop again (or retimed) carries on where it is; the one whose exit is playing goes
+    /// straight back into its body.
     pub fn set_layer_looped(&mut self, base: usize, looping: Option<Looped>, rest_last: bool, now: Instant) {
         let looping = looping.filter(|l| !l.body.is_empty());
         self.base = base;
-        self.rest_last = rest_last;
-        // Back on during its exit: into the loop, not its entry.
-        if looping.is_some() && self.in_exit() && looping == self.exit_of {
-            let rest = self.oneshot.take().map(|s| s[self.exit_n..].to_vec()).unwrap_or_default();
-            self.exit_n = 0;
-            self.exit_of = None;
+        let rested = std::mem::replace(&mut self.rest_last, rest_last);
+        // Back on during its exit: into the loop, not its entry (on its pass still: where it is).
+        if let Some(l) = &looping
+            && self.in_exit()
+            && self.exit_of.as_ref().is_some_and(|o| o.same_cells(l))
+        {
+            let s = self.oneshot.take().unwrap_or_default();
+            let (pos, in_tail, rest) = (self.one_pos, self.one_pos < self.tail_n, s[self.exit_n..].to_vec());
+            let (e, p) = self.tail_at;
+            self.clear_exit();
             self.looping = looping;
             self.entered = true;
-            self.armed = true;
-            self.in_entry = false;
-            self.loop_pos = 0;
-            if rest.is_empty() {
-                self.run_loop(now);
+            self.armed = !self.disarmed;
+            if in_tail {
+                (self.in_entry, self.loop_pos) = (e, p + pos);
             } else {
+                (self.in_entry, self.loop_pos) = (false, 0);
+            }
+            if !rest.is_empty() {
                 self.play(rest, now);
+            } else if !in_tail {
+                self.run_loop(now);
             }
             return;
         }
-        // The same ranged loop: no seam, no entry again.
-        if looping.as_ref().is_some_and(Looped::ranged) && looping == self.looping {
-            self.armed |= self.entered;
+        // The same ranged loop, or its cells retimed (a new tempo): no seam, no entry again.
+        if let (Some(new), Some(cur)) = (&looping, &self.looping)
+            && new.ranged()
+            && new.same_cells(cur)
+        {
+            self.looping = looping;
+            self.armed |= self.entered && !self.disarmed;
             return;
         }
-        // It ends in place: its exit, over any one-shot that was over it.
+        // It ends in place: the rest of its pass (its exit follows the pass's last cell; a
+        // rest at its end doesn't wait), then its exit, over any one-shot that was over it.
         let exit = match &self.looping {
             Some(l) if self.armed && self.entered && !l.exit.is_empty() && !self.in_exit() && looping != self.looping => Some(l.clone()),
             _ => None,
         };
+        let tail: Seq = match (&exit, &self.oneshot) {
+            (Some(l), None) if self.in_entry => vec![l.entry[self.loop_pos]],
+            (Some(l), None) => {
+                let end = if rested { l.body.len() - 1 } else { l.body.len() };
+                l.body.get(self.loop_pos..end).map(<[_]>::to_vec).unwrap_or_default()
+            }
+            _ => Vec::new(),
+        };
+        let tail_at = (self.in_entry, self.loop_pos);
         self.looping = looping;
         self.entered = false;
         self.armed = false;
+        self.disarmed = false;
         self.in_entry = false;
         self.loop_pos = 0;
         if let Some(old) = exit {
-            self.due = Some(now + Duration::from_millis(old.exit[0].1 as u64));
-            self.oneshot = Some(old.exit.clone());
+            // On its pass: the step showing keeps its own deadline.
+            if tail.is_empty() {
+                self.due = Some(now + Duration::from_millis(old.exit[0].1 as u64));
+            }
+            self.tail_n = tail.len();
+            self.tail_at = tail_at;
+            let mut s = tail;
+            s.extend(old.exit.iter().copied());
+            self.exit_n = s.len();
+            self.oneshot = Some(s);
             self.one_pos = 0;
-            self.exit_n = old.exit.len();
             self.exit_of = Some(old);
         } else if self.oneshot.is_none() {
             self.start_loop(now);
         }
     }
 
-    /// An interruption (a drag, a teleport, sleep): the loop's exit won't play, and one
-    /// playing stops here.
+    fn clear_exit(&mut self) {
+        self.exit_n = 0;
+        self.tail_n = 0;
+        self.exit_of = None;
+    }
+
+    /// An interruption (a drag, a teleport, a move, sleep): the loop's exit won't play (nor will
+    /// that of a loop pending under it, until another goes on), and one playing stops here.
     pub fn cut(&mut self, now: Instant) {
         self.armed = false;
+        self.disarmed = true;
         if self.in_exit() {
             let rest = self.oneshot.take().map(|s| s[self.exit_n..].to_vec()).unwrap_or_default();
-            self.exit_n = 0;
-            self.exit_of = None;
+            self.clear_exit();
             if rest.is_empty() {
                 self.resume_loop(now);
             } else {
@@ -402,8 +458,7 @@ impl Animator {
             s.extend(seq);
             return;
         }
-        self.exit_n = 0;
-        self.exit_of = None;
+        self.clear_exit();
         self.due = Some(now + Duration::from_millis(seq[0].1 as u64));
         self.oneshot = Some(seq);
         self.one_pos = 0;
@@ -416,8 +471,7 @@ impl Animator {
         if let Some(s) = self.oneshot.take() {
             seq.extend(s[self.one_pos..].iter().copied());
         }
-        self.exit_n = 0;
-        self.exit_of = None;
+        self.clear_exit();
         self.play(seq, now);
     }
 
@@ -462,8 +516,7 @@ impl Animator {
                 self.one_pos += 1;
                 let len = s.len();
                 if self.exit_n > 0 && self.one_pos >= self.exit_n {
-                    self.exit_n = 0;
-                    self.exit_of = None;
+                    self.clear_exit();
                 }
                 if self.one_pos < len {
                     let ms = self.oneshot.as_ref().map_or(0, |s| s[self.one_pos].1);
@@ -533,26 +586,47 @@ mod tests {
         a.set_layer_looped(0, Some(ranged()), false, t);
         a.tick(ms(t, 100));
         assert_eq!(a.frame(), 2);
-        // The music stops: the exit, then the next layer (a plain loop of 5).
+        // The music stops mid-hold: the rest of the pass on its own deadlines (no frame
+        // skipped), the exit once, then the next layer (a plain loop of 5).
         a.set_layer(4, Some(vec![(5, 100)]), ms(t, 150));
-        assert_eq!(a.frame(), 9, "out once");
+        assert_eq!(a.frame(), 2, "the hold showing finishes");
+        assert_eq!(a.deadline(), Some(ms(t, 200)), "on its own deadline");
         assert!(a.in_exit() && a.busy());
-        a.tick(ms(t, 250));
-        assert_eq!(a.frame(), 5, "then the new layer");
+        let shown: Vec<usize> = [199, 200, 299, 300, 399, 400].map(|n| a.frame_at(ms(t, n))).to_vec();
+        assert_eq!(shown, vec![2, 3, 3, 9, 9, 5], "its pass, out once, then the new layer");
+        for n in [200, 300, 400] {
+            a.tick(ms(t, n));
+        }
+        assert_eq!(a.frame(), 5);
         assert!(!a.in_exit());
-        // No loop after: the exit, then the base.
+        // No loop after: the pass, the exit, then the base.
         let mut b = Animator::new(0);
         b.set_layer_looped(0, Some(ranged()), false, t);
         b.tick(ms(t, 100));
         b.set_layer(7, None, ms(t, 120));
-        assert_eq!(b.frame(), 9);
-        b.tick(ms(t, 220));
-        assert_eq!(b.frame(), 7);
-        // Still in its entry: it hadn't started looping, but it ends the same way.
+        assert_eq!([150, 250, 350, 450].map(|n| b.frame_at(ms(t, n))), [2, 3, 9, 7]);
+        // Still in its entry: the entry's step finishes, then the exit.
         let mut c = Animator::new(0);
         c.set_layer_looped(0, Some(ranged()), false, t);
         c.set_layer(7, None, ms(t, 50));
-        assert_eq!(c.frame(), 9);
+        assert_eq!([60, 150, 250].map(|n| c.frame_at(ms(t, n))), [1, 9, 7]);
+        // On the last step of the pass: straight out after it.
+        let mut d = Animator::new(0);
+        d.set_layer_looped(0, Some(ranged()), false, t);
+        d.tick(ms(t, 200));
+        d.set_layer(7, None, ms(t, 210));
+        assert_eq!([250, 300, 400].map(|n| d.frame_at(ms(t, n))), [3, 9, 7]);
+        // A rest at the loop's end doesn't hold the exit back: the pass, then out.
+        let mut e = Animator::new(0);
+        let rested = Ranged { entry: vec![], body: vec![(2, 100), (3, 100), (2, 5000)], exit: vec![(9, 100)] };
+        e.set_layer_looped(0, Some(rested.clone()), true, t);
+        e.set_layer(7, None, ms(t, 50));
+        assert_eq!([150, 250, 350].map(|n| e.frame_at(ms(t, n))), [3, 9, 7]);
+        let mut f = Animator::new(0);
+        f.set_layer_looped(0, Some(rested), true, t);
+        f.tick(ms(t, 200));
+        f.set_layer(7, None, ms(t, 250));
+        assert_eq!([250, 349, 350].map(|n| f.frame_at(ms(t, n))), [9, 9, 7], "on the rest: out now");
     }
 
     #[test]
@@ -565,11 +639,33 @@ mod tests {
         assert!(a.in_exit());
         a.set_layer(7, None, ms(t, 160));
         assert!(a.in_exit(), "a relayer to the same doesn't stop it");
+        // Still on its pass: it carries on where it is.
         a.set_layer_looped(0, Some(ranged()), false, ms(t, 180));
         assert!(!a.in_exit());
-        assert_eq!(a.frame(), 2, "the loop's first step, not the entry");
-        a.tick(ms(t, 280));
+        assert_eq!(a.frame(), 2, "the loop's step, not the entry");
+        assert_eq!(a.deadline(), Some(ms(t, 200)), "no seam");
+        a.tick(ms(t, 200));
         assert_eq!(a.frame(), 3);
+        // In the exit itself: into the loop's first step, not the entry.
+        let mut b = Animator::new(0);
+        b.set_layer_looped(0, Some(ranged()), false, t);
+        b.tick(ms(t, 100));
+        b.set_layer(7, None, ms(t, 150));
+        b.tick(ms(t, 200));
+        b.tick(ms(t, 300));
+        assert_eq!(b.frame(), 9);
+        b.set_layer_looped(0, Some(ranged()), false, ms(t, 320));
+        assert!(!b.in_exit());
+        assert_eq!(b.frame(), 2);
+        assert_eq!([419, 420, 520].map(|n| b.frame_at(ms(t, n))), [2, 3, 2]);
+        // Retimed (a new tempo, the same cells): it carries on, no exit, no entry.
+        let mut c = Animator::new(0);
+        c.set_layer_looped(0, Some(ranged()), false, t);
+        c.tick(ms(t, 100));
+        let faster = Ranged { entry: vec![(1, 50)], body: vec![(2, 50), (3, 50)], exit: vec![(9, 50)] };
+        c.set_layer_looped(0, Some(faster), false, ms(t, 150));
+        assert!(!c.busy());
+        assert_eq!([199, 200, 250, 300].map(|n| c.frame_at(ms(t, n))), [2, 3, 2, 3], "the new ms from the next step");
     }
 
     #[test]
@@ -593,6 +689,81 @@ mod tests {
     }
 
     #[test]
+    fn a_cut_disarms_the_loop_pending_under_the_exit() {
+        let t = Instant::now();
+        let other = Ranged { entry: vec![(4, 100)], body: vec![(5, 100)], exit: vec![(6, 100)] };
+        let mut a = Animator::new(0);
+        a.set_layer_looped(0, Some(ranged()), false, t);
+        a.tick(ms(t, 100));
+        // A ends (its pass and exit play) with B pending; a drag cuts the exit: B goes on.
+        a.set_layer_looped(0, Some(other.clone()), false, ms(t, 150));
+        assert!(a.in_exit());
+        a.cut(ms(t, 160));
+        assert_eq!(a.frame(), 4, "B, from its entry");
+        a.tick(ms(t, 260));
+        assert_eq!(a.frame(), 5);
+        // B ends: the cut came after it went on, so no exit of B.
+        a.set_layer(7, Some(vec![(8, 100)]), ms(t, 270));
+        assert_eq!(a.frame(), 8, "straight to C, no exit of B");
+        assert!(!a.busy());
+        // A loop that goes on after the cut arms again.
+        a.set_layer_looped(0, Some(other), false, ms(t, 280));
+        a.tick(ms(t, 380));
+        a.set_layer(7, None, ms(t, 390));
+        assert!(a.in_exit(), "a new loop's exit plays");
+        // A cut, then the same loop re-asserted: still disarmed.
+        let mut b = Animator::new(0);
+        b.set_layer_looped(0, Some(ranged()), false, t);
+        b.tick(ms(t, 100));
+        b.cut(ms(t, 110));
+        b.set_layer_looped(0, Some(ranged()), false, ms(t, 120));
+        b.set_layer(7, None, ms(t, 130));
+        assert!(!b.in_exit());
+        assert_eq!(b.frame(), 7);
+        // A cut under a one-shot: the loop it resumes into doesn't arm either.
+        let mut c = Animator::new(0);
+        c.play(vec![(6, 50)], t);
+        c.set_layer_looped(0, Some(ranged()), false, t);
+        c.cut(ms(t, 10));
+        c.tick(ms(t, 50));
+        c.tick(ms(t, 150));
+        assert_eq!(c.frame(), 2);
+        c.set_layer(7, None, ms(t, 160));
+        assert_eq!(c.frame(), 7);
+    }
+
+    #[test]
+    fn a_plain_loop_set_under_a_one_shot_comes_back_to_its_rest() {
+        // capri's holdMs pools: a pass, then a rest; relayered under a one-shot (a landing, a
+        // stopped one-shot), she comes back to the rest, not the start of the pass.
+        let t = Instant::now();
+        let pass = vec![(0, 100), (1, 100), (2, 100), (0, 300)];
+        let mut a = Animator::new(0);
+        a.set_layer_resting(0, Some(pass.clone()), true, t);
+        a.play(vec![(9, 50)], ms(t, 10));
+        a.set_layer_resting(0, Some(pass.clone()), true, ms(t, 20));
+        a.tick(ms(t, 60));
+        assert_eq!(a.loop_pos, pass.len() - 1, "on the rest");
+        assert_eq!(a.frame(), 0);
+        assert!(a.at_rest());
+        // stop_oneshot after a relayer: the same.
+        let mut b = Animator::new(0);
+        b.set_layer_resting(0, Some(pass.clone()), true, t);
+        b.play(vec![(9, 500)], ms(t, 10));
+        b.set_layer_resting(0, Some(pass.clone()), true, ms(t, 20));
+        b.stop_oneshot(ms(t, 30));
+        assert_eq!(b.loop_pos, pass.len() - 1);
+        // A ranged loop without an entry rests too; one with an entry plays it.
+        let mut c = Animator::new(0);
+        c.play(vec![(9, 50)], t);
+        c.set_layer_looped(0, Some(Ranged { entry: vec![], body: pass.clone(), exit: vec![(8, 100)] }), true, t);
+        c.tick(ms(t, 50));
+        assert_eq!(c.loop_pos, pass.len() - 1);
+        c.set_layer(7, None, ms(t, 60));
+        assert!(c.in_exit(), "it went on, so its exit plays");
+    }
+
+    #[test]
     fn one_shots_wait_for_the_exit_and_a_relayer_keeps_it() {
         let t = Instant::now();
         let mut a = Animator::new(0);
@@ -600,14 +771,11 @@ mod tests {
         a.tick(ms(t, 100));
         a.set_layer(7, None, ms(t, 120));
         a.play(vec![(6, 100)], ms(t, 130));
-        assert_eq!(a.frame(), 9, "the exit finishes first");
+        assert_eq!(a.frame(), 2, "the pass and the exit finish first");
         a.stop_oneshot(ms(t, 140));
         assert!(a.in_exit(), "only what follows it goes");
         a.play(vec![(6, 100)], ms(t, 150));
-        a.tick(ms(t, 220));
-        assert_eq!(a.frame(), 6, "then the one-shot");
-        a.tick(ms(t, 320));
-        assert_eq!(a.frame(), 7);
+        assert_eq!([250, 350, 450, 550].map(|n| a.frame_at(ms(t, n))), [3, 9, 6, 7], "then the one-shot");
         // A one-shot over the loop (a blink) comes back to the loop, not the entry.
         let mut b = Animator::new(0);
         b.set_layer_looped(0, Some(ranged()), false, t);

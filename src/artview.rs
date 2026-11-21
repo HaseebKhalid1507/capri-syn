@@ -424,6 +424,11 @@ impl Avatar {
     /// a pack leaves them out), so no frame that isn't there ever shows.
     pub(super) fn flat(&self, steps: &[Step]) -> Seq {
         let seq = self.pack.flatten(steps);
+        if self.seq_ready(&seq) { seq } else { Vec::new() }
+    }
+
+    /// The strips these frames are cells of are in (each asked for: they decode together).
+    pub(super) fn seq_ready(&self, seq: &[(usize, u32)]) -> bool {
         let mut strips: Vec<usize> = Vec::new();
         for c in seq.iter().filter_map(|&(fi, _)| self.pack.frames.get(fi).and_then(|f| f.cell.as_ref())) {
             if !c.mirror && !strips.contains(&c.strip) {
@@ -435,7 +440,7 @@ impl Avatar {
         for &si in &strips {
             ready &= self.art_ready(si);
         }
-        if ready { seq } else { Vec::new() }
+        ready
     }
 
     /// The step strips these steps name (`Pack::step_strips`).

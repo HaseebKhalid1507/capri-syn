@@ -667,7 +667,7 @@ strips played as clips.
 | `animated` | `true`: an animated WebP. Its frames are the cells (each a whole canvas, composited), `cell` is its canvas and `ms` its frame delays (0 reads as 100), all read from the file's chunks at load; `order`/`keys`/`ms` apply on top. Limits, checked at load and before each decode (the x2 file too): a canvas of 4096 px a side and 8 Mpx at most, 1000 frames, 512 MiB for all its frames decoded; past them the strip is refused. Decoding one briefly holds the full frames it keeps (up to that 512 MiB, bounded) outside `cacheMb`, until its cells are cut out; only those cells count in the cache. A decode keeps only the frames it wants and stops after the last one (a frame composites over those before it, so they decode too) |
 | `anchor.name` | `feet`, `seat`, `surface`, `grip`, and now `ceiling`: hands on a bar, the cell's anchor put on `brain.poses.hang`'s anchor |
 | `outfit` | the outfit (`variants.outfits` id) this strip is drawn in; absent or `any`: every outfit |
-| `entry` / `exit` | on a strip with `loop: true`: how many positions at its start play once as she goes into it, and how many at its end play once as it ends in place; only the positions between loop (absent: 0, the whole strip loops as before). Wherever the engine loops the strip itself: a pool variant's base, talk and music loops, the dance (its loop fitted to the tempo, the entry and exit at the drawing's pace), the walk (in once, the loop for the distance, out once) and the dangle (in once, then the loop; it only ends in a drop, a cut). Thinned (`every`, `keys`), what's left of each part stays in it. Named as a clip in steps, the strip plays whole and the list's own range governs. `--check`: an `entry`/`exit` on a strip without `loop: true`, or one that leaves nothing to loop, is an error |
+| `entry` / `exit` | on a strip with `loop: true`: how many positions at its start play once as she goes into it, and how many at its end play once as it ends in place; only the positions between loop (absent: 0, the whole strip loops as before). Wherever the engine loops the strip itself: a pool variant's base, talk and music loops, the dance (its loop fitted to the tempo, the entry and exit at the drawing's pace), the walk (in once, the loop for as long as fits, out once, done by the time she arrives: its last cell holds through the arrival; a walk too short for both drops the entry) and the dangle (in once, then the loop; it only ends in a drop, a cut). Thinned (`every`, `keys`), what's left of each part stays in it. Named as a clip in steps, the strip plays whole and the list's own range governs. `--check`: an `entry`/`exit` on a strip without `loop: true`, or one that leaves nothing to loop, is an error |
 
 Sheets may be PNG or WebP (by their magic), and so may catalog frames. Decoding uses the `image`
 crate's PNG and WebP decoders on every platform.
@@ -707,13 +707,18 @@ id, the same entry / loop / exit split a mood has:
 `entry` plays once as she goes into the loop, `loop` repeats while it holds, with no gap and no
 skipped frame at its seam (its last step hands to its first on its own deadline), and `exit`
 plays once when the loop ends in place: the music stops, the layer changes (a holder, the voice,
-a mood), a pool's drawing changes. Swapping away from a looped sequence plays its exit before the
-cut, so it never vanishes mid-loop. A drag, a teleport, sleep, or a move to another spot (the exit
-is drawn for where she was) cut it as before: no exit. Back on during its exit (the music starts
-again), she goes straight back into the loop, not its entry; the same loop set again (a relayer)
-carries on where it is. A one-shot over the loop (a blink) comes back to the loop, not the entry;
-one set while a one-shot plays starts with its entry after it. A one-shot asked for during an
-exit follows it. Each part flattens like any steps (mirroring, anchors, x2, per-frame `ms` and
+a mood), a pool's drawing changes. The exit waits for the pass it's on: the step showing keeps its
+own deadline and the rest of the pass plays (a rest at the loop's end doesn't hold it back; ended
+in the entry, its step finishes), so the exit always follows the pass's last cell and no frame is
+skipped. Swapping away from a looped sequence plays its exit before the cut, so it never vanishes
+mid-loop. A drag, a teleport, sleep, or a move (a walk, a scoot, a flight, another spot: the exit
+is drawn for where she was) cut it as before: no exit, and a loop that was waiting under the exit
+doesn't get one either, until another loop goes on; no hop starts under an exit. Back on during
+its exit (the music starts again), she goes straight back into the loop, not its entry (still on
+its pass: right where she was); the same loop set again (a relayer), or the same cells retimed (a
+new tempo), carries on where it is. A one-shot over the loop (a blink) comes back to the loop, not
+the entry; one set while a one-shot plays starts with its entry after it (a loop without an entry
+comes back to its rest, as a plain one always did). A one-shot asked for during an exit follows it. Each part flattens like any steps (mirroring, anchors, x2, per-frame `ms` and
 `keys`); the outfit and the cells are asked of the whole, so if one part isn't worn or in yet
 none of it plays (the fallback runs, as for a plain list). Only `loop` breathes (its long holds
 vary); the entry and exit play at their own ms. A plain list loops whole, exactly as before.
@@ -721,7 +726,8 @@ Music counts as one beat for the restless idle's never-twice-running rule, whate
 
 **Repeats.** A one-shot beat (`activities`, `life.fidgets`, `life.poses`, `energy.<band>.fidgets`
 / `activities`, `brain.hangFidgets`, `perch.activities`) may be the same split with a
-`"repeat": [min, max]`: the entry once, the loop `min..=max` times (picked each time it plays), the
+`"repeat": [min, max]`: the entry once, the loop `min..=max` times (picked each time it plays, from
+her own rng), the
 exit once, still one beat per turn (a hang fidget's rep: a few pull-ups, not one, not forever):
 
 ```json
@@ -731,7 +737,8 @@ exit once, still one beat per turn (a hang fidget's rep: a few pull-ups, not one
 It may also stand as one step inside a beat's list. `--check` errors, each naming the key: an
 empty `loop`; a range anywhere but these slots (an `entry`/`exit` list, a click, an arrival...);
 a range on a one-shot beat without `repeat`, or `repeat` on a looped list (it repeats while it
-holds); a `repeat` outside `1 <= min <= max`; a key other than `entry`, `loop`, `exit`,
+holds); a `repeat` that isn't `[min, max]` in whole numbers with `1 <= min <= max <= 64` (it's
+held to 64 as it plays too); a key other than `entry`, `loop`, `exit`,
 `repeat`; ranges nested in ranges.
 
 **Behaviour slots:**
