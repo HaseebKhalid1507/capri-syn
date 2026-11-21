@@ -39,6 +39,8 @@ pub(super) struct ArriveState {
     pub formed: Option<Instant>,
     /// The last passive/bid teleport landed with the sequence.
     last_variant: bool,
+    /// Per arrival key, the drawing it landed with last (its own: 0, `arrive.alt`'s after it).
+    alt_last: std::collections::HashMap<&'static str, usize>,
     /// The pack has a launch intro: hidden until the frames are in, then the bolt.
     pub launch_wait: bool,
     /// The launch intro's bolt is in flight: an appearance, not a move (the brain isn't held).
@@ -65,6 +67,18 @@ pub(super) struct ArriveState {
 struct WindowIcon {
     from: std::sync::Arc<crate::brand::Icon>,
     data: std::rc::Rc<Vec<u32>>,
+}
+
+/// One of `n` drawings at random, never `last` again (when there are two or more).
+pub(super) fn other_than(n: usize, last: Option<usize>, rng: &mut crate::anim::Rng) -> usize {
+    if n <= 1 {
+        return 0;
+    }
+    let i = rng.pick(n);
+    match last {
+        Some(l) if l == i => (i + 1 + rng.pick(n - 1)) % n,
+        _ => i,
+    }
 }
 
 impl ArriveState {
@@ -135,6 +149,39 @@ impl Avatar {
         }
     }
 
+    /// The `arrive.alt` key of the teleport in flight's arrival.
+    fn arrive_key(&self) -> Option<&'static str> {
+        if self.sitting_at(self.teleport_place()) {
+            Some("perch")
+        } else if self.teleport_place() == Some(Placement::Ground) {
+            Some("teleport")
+        } else {
+            None
+        }
+    }
+
+    /// Arrival `key`'s steps: its own (`own`) or one of `arrive.alt.<key>`, never the same
+    /// drawing twice running. Without alternatives: `own`.
+    fn arrive_alt(&mut self, key: &'static str, own: &[Step]) -> Vec<Step> {
+        let alts = self.pack.behaviour.arrive.as_ref().and_then(|a| a.alt.get(key)).filter(|v| !v.is_empty()).cloned();
+        let Some(alts) = alts else { return own.to_vec() };
+        let mut all: Vec<Vec<Step>> = Vec::new();
+        if !own.is_empty() {
+            all.push(own.to_vec());
+        }
+        all.extend(alts);
+        let i = other_than(all.len(), self.arrive.alt_last.get(key).copied(), &mut self.rng);
+        self.arrive.alt_last.insert(key, i);
+        all.swap_remove(i)
+    }
+
+    /// `arrive_alt`, flattened; a drawing whose cells aren't in yet: its own steps.
+    fn arrive_seq(&mut self, key: &'static str, own: &[Step]) -> Seq {
+        let steps = self.arrive_alt(key, own);
+        let seq = self.flat(&steps);
+        if seq.is_empty() { self.flat(own) } else { seq }
+    }
+
     fn teleport_place(&self) -> Option<Placement> {
         self.teleport.as_ref().map(|t| t.place)
     }
@@ -157,7 +204,11 @@ impl Avatar {
                 return;
             }
         }
-        let seq = self.pack.flatten(&self.arrive_steps(k));
+        let own = self.arrive_steps(k);
+        let seq = match self.arrive_key() {
+            Some(key) => self.arrive_seq(key, &own),
+            None => self.flat(&own),
+        };
         if !seq.is_empty() {
             elog!("synaps-avatar: arrival {k:?}: {} frames", seq.len());
         }
@@ -293,13 +344,13 @@ impl Avatar {
     /// (`arrive_appeared`). False: nothing to play (an old pack on a window top).
     pub(super) fn launch_bolt(&mut self, (to, place): ((i32, i32), Placement), greeted: bool, now: Instant) -> bool {
         let perch = self.sitting_at(Some(place));
-        let steps = match &self.pack.behaviour.arrive {
-            Some(a) if perch => a.perch.clone(),
-            Some(a) if place == Placement::Ground && greeted && !a.cinematic.is_empty() => a.cinematic.clone(),
-            Some(a) if place == Placement::Ground => a.launch.clone(),
-            _ => Vec::new(),
+        let (key, steps) = match &self.pack.behaviour.arrive {
+            Some(a) if perch => ("perch", a.perch.clone()),
+            Some(a) if place == Placement::Ground && greeted && (!a.cinematic.is_empty() || a.alt.contains_key("cinematic")) => ("cinematic", a.cinematic.clone()),
+            Some(a) if place == Placement::Ground => ("launch", a.launch.clone()),
+            _ => ("", Vec::new()),
         };
-        let seq = self.pack.flatten(&steps);
+        let seq = if key.is_empty() { Vec::new() } else { self.arrive_seq(key, &steps) };
         if seq.is_empty() {
             return false;
         }
@@ -310,6 +361,8 @@ impl Avatar {
         let bolt = Bolt::new((at.0, top), at, seed, 220.0 * self.layout.sf);
         self.hidden = true;
         self.glitch = None;
+        // In the bolt nothing of her shows: a changed outfit goes on here.
+        self.outfit_swap("launch", now);
         let moved = to == self.origin && place == self.placement;
         self.teleport = Some(Teleport { seed, leg: Leg::Bolt(now), to, place, bolt: Some(bolt), moved, no_bolt: false, quiet: false, leave_until: None });
         elog!("synaps-avatar: arrival Launch: {} frames after the bolt", seq.len());
@@ -380,13 +433,15 @@ impl Avatar {
     pub(super) fn play_nap_wake_for(&mut self, greet: bool, now: Instant) {
         // A strip's floor sleep has its own way out: its drawn wake (then she stands in the
         // drawing it ends in a few seconds), else the seam's glitch. No CapriCore stand-up.
+        // A changed outfit goes on as she gets up (she wakes in it).
+        self.outfit_swap("wake", now);
         if std::mem::take(&mut self.art.floor_strip) {
             self.play_drawn_wake(now);
             return;
         }
         let b = &self.pack.behaviour.brain;
         let steps = if greet && !b.nap_wake_greet.is_empty() { b.nap_wake_greet.clone() } else { b.nap_wake.clone() };
-        let wake = self.pack.flatten(&steps);
+        let wake = self.flat(&steps);
         if wake.is_empty() {
             return;
         }
@@ -426,7 +481,7 @@ impl Avatar {
         h.stretches.retain(|&s| t - s < 3600.0);
         h.stretches.push(t);
         h.write(serde_json::json!({ "t": t - h.brain.start(), "k": "stretch", "napped_s": napped_s.round() }));
-        let seq = self.pack.flatten(&steps);
+        let seq = self.flat(&steps);
         let ms: u64 = seq.iter().map(|s| s.1 as u64).sum();
         let from = if self.anim.busy() { self.waking_until.filter(|&w| w > now).unwrap_or(now) } else { now };
         if self.anim.busy() {
@@ -699,6 +754,21 @@ fn rare(last: Option<Instant>, now: Instant, gap: Duration, roll: f32, p: f32) -
 mod tests {
     use super::*;
     use crate::anim::Rng;
+
+    #[test]
+    fn an_arrival_drawing_never_comes_twice_running() {
+        let mut rng = Rng::new(3);
+        let mut last = None;
+        let mut seen = [0; 3];
+        for _ in 0..300 {
+            let i = other_than(3, last, &mut rng);
+            assert_ne!(Some(i), last);
+            seen[i] += 1;
+            last = Some(i);
+        }
+        assert!(seen.iter().all(|&n| n > 60), "{seen:?}");
+        assert_eq!(other_than(1, Some(0), &mut rng), 0, "one drawing: that one");
+    }
 
     #[test]
     fn the_legs_come_in_row_by_row_where_they_are_drawn() {

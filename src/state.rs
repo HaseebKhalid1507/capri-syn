@@ -58,6 +58,19 @@ pub fn save_hidden(hidden: bool) {
     merge(&path(), "hidden", serde_json::json!(hidden));
 }
 
+/// The outfit she wears (`moods.json` `variants.outfits` id): a restart keeps it.
+pub fn load_outfit() -> Option<String> {
+    outfit_at(&path())
+}
+
+fn outfit_at(p: &Path) -> Option<String> {
+    read(p).get("outfit").and_then(serde_json::Value::as_str).map(str::to_string)
+}
+
+pub fn save_outfit(id: &str) {
+    merge(&path(), "outfit", serde_json::json!(id));
+}
+
 /// The brain's drives (brain.rs `Saved`).
 pub fn load_brain() -> Option<serde_json::Value> {
     read(&path()).get("brain").cloned()
@@ -159,6 +172,18 @@ pub fn remember_session(key: &str, id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_outfit_round_trips_beside_the_rest() {
+        let p = std::env::temp_dir().join(format!("sa-state-outfit-{}.json", std::process::id()));
+        std::fs::remove_file(&p).ok();
+        assert_eq!(outfit_at(&p), None);
+        merge(&p, "ground", serde_json::json!([1, 2]));
+        merge(&p, "outfit", serde_json::json!("alt"));
+        assert_eq!(outfit_at(&p).as_deref(), Some("alt"));
+        assert_eq!(ground_at(&p), Some((1, 2)), "the other keys stay");
+        std::fs::remove_file(&p).ok();
+    }
 
     #[test]
     fn saving_one_key_keeps_the_others() {

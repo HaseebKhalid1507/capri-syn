@@ -22,9 +22,37 @@ struct AnchorDoc {
 #[serde(rename_all = "camelCase")]
 struct StripDoc {
     file: String,
+    #[serde(default)]
     frames: u32,
+    #[serde(default)]
     cell: [u32; 2],
+    #[serde(default)]
     fps: f32,
+    /// A cel sheet: its cells in `[cols, rows]`, row by row (absent: one row of `frames`).
+    #[serde(default)]
+    grid: Option<[u32; 2]>,
+    /// The cells played, in order: keys and in-betweens, a cell may come again (absent: each
+    /// cell once).
+    #[serde(default)]
+    order: Vec<u32>,
+    /// The positions in `order` that are keys: thinned (`every` > 1), only they play, each held
+    /// until the next (absent: every n-th position).
+    #[serde(default)]
+    keys: Vec<u32>,
+    /// Per position (or per cell) ms, instead of `fps`.
+    #[serde(default)]
+    ms: Vec<u32>,
+    /// A geometry file beside the sheet (relative to the side's root): the fields this entry
+    /// leaves out (`cell`, `grid`, `frames`, `fps`, `order`, `keys`, `ms`, `bounds`, `anchor`,
+    /// `contact`) come from it.
+    #[serde(default)]
+    geometry: Option<String>,
+    /// An animated WebP: its cells are the file's frames, `cell` its canvas, `ms` its delays.
+    #[serde(default)]
+    animated: bool,
+    /// The outfit (`moods.json` `variants.outfits`) this strip is drawn in; absent or `any`: all.
+    #[serde(default)]
+    outfit: Option<String>,
     #[serde(default)]
     r#loop: bool,
     family: String,
@@ -69,7 +97,8 @@ struct FileDoc {
 #[derive(Deserialize, Debug, Default)]
 #[serde(default)]
 struct SideDoc {
-    strips: BTreeMap<String, StripDoc>,
+    /// Parsed one by one, after their `geometry` file is merged in.
+    strips: BTreeMap<String, serde_json::Value>,
     stills: BTreeMap<String, StillDoc>,
     families: BTreeMap<String, FamilyDoc>,
     files: BTreeMap<String, FileDoc>,
@@ -125,7 +154,7 @@ pub struct Strip {
     /// Its family's index in anim.json (a seam is a change of it).
     pub family_id: u16,
     /// The pack's anchor kind: `ground` (feet), `seat` (a seat or a lying figure's surface),
-    /// `grip`; cell px.
+    /// `grip`, `ceiling` (hands on a bar, on the hang pose's grip); cell px.
     pub anchor: (String, i32, i32),
     /// The union of every cell's opaque box, cell px.
     pub bounds: Rect,
@@ -142,6 +171,19 @@ pub struct Strip {
     /// Cells with a chroma ghost drawn into them (`glitchCells`): a loop she holds (a dance,
     /// a dangle) skips them, so no glitch runs inside it.
     pub glitch_cells: Vec<u32>,
+    /// The sheet: cells per row, and how many cells it holds (a plain strip: `frames`, 1 row).
+    pub cols: u32,
+    pub sheet_cells: u32,
+    /// Per position (0..frames), the sheet cell it shows (empty: position = cell).
+    pub src: Vec<u32>,
+    /// Per position, its ms (empty: `ms` each).
+    pub cell_ms: Vec<u32>,
+    /// Key positions, ascending (empty: none marked).
+    pub keys: Vec<u32>,
+    /// An animated WebP: cells are its frames.
+    pub animated: bool,
+    /// Drawn in this outfit only (None: any outfit).
+    pub outfit: Option<String>,
 }
 
 impl Strip {
@@ -154,6 +196,85 @@ impl Strip {
     /// Frame id of cell `i` (the twin's cells are stored mirrored: `~` marks them).
     pub fn cell_id(&self, i: u32) -> String {
         format!("{}#{i}", self.name)
+    }
+
+    /// The sheet cell position `i` shows.
+    pub fn sheet_cell(&self, i: u32) -> u32 {
+        self.src.get(i as usize).copied().unwrap_or(i)
+    }
+
+    /// How long position `i` holds.
+    pub fn ms_at(&self, i: u32) -> u32 {
+        self.cell_ms.get(i as usize).copied().unwrap_or(self.ms)
+    }
+
+    /// The positions played thinned to every `every`-th (a cel sheet with keys: its keys), each
+    /// with how long it holds: its own ms, or (thinned) until the next one played.
+    pub fn played(&self, every: u32) -> Vec<(u32, u32)> {
+        let e = every.max(1);
+        if e == 1 {
+            return (0..self.frames).map(|i| (i, self.ms_at(i))).collect();
+        }
+        if self.cell_ms.is_empty() && self.keys.is_empty() {
+            return (0..self.frames).step_by(e as usize).map(|i| (i, self.ms * e)).collect();
+        }
+        let starts: Vec<u32> = if self.keys.is_empty() { (0..self.frames).step_by(e as usize).collect() } else { self.keys.clone() };
+        starts
+            .iter()
+            .enumerate()
+            .map(|(j, &s)| {
+                let end = starts.get(j + 1).copied().unwrap_or(self.frames);
+                (s, (s..end).map(|i| self.ms_at(i)).sum::<u32>().max(1))
+            })
+            .collect()
+    }
+
+    /// Wearable in outfit `outfit` (`moods.json` `variants.outfits`).
+    pub fn worn_in(&self, outfit: &str) -> bool {
+        self.outfit.as_deref().is_none_or(|o| o == outfit || o.eq_ignore_ascii_case("any"))
+    }
+}
+
+/// An animated WebP's canvas and per-frame delays (ms; 0 reads as 100, as browsers do), from
+/// its RIFF chunks alone: nothing is decoded.
+pub fn webp_frames(path: &Path) -> Result<((u32, u32), Vec<u32>)> {
+    use std::io::{Read, Seek, SeekFrom};
+    let u24 = |b: &[u8]| u32::from_le_bytes([b[0], b[1], b[2], 0]);
+    let mut f = std::fs::File::open(path).with_context(|| format!("cannot read {}", path.display()))?;
+    let mut hdr = [0u8; 12];
+    f.read_exact(&mut hdr).with_context(|| format!("{} is not a WebP", path.display()))?;
+    if &hdr[0..4] != b"RIFF" || &hdr[8..12] != b"WEBP" {
+        bail!("{} is not a WebP", path.display());
+    }
+    let end = 8 + u64::from(u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]));
+    let (mut canvas, mut ms) = (None, Vec::new());
+    let mut pos = 12u64;
+    while pos + 8 <= end {
+        f.seek(SeekFrom::Start(pos))?;
+        let mut ch = [0u8; 8];
+        if f.read_exact(&mut ch).is_err() {
+            break;
+        }
+        let len = u64::from(u32::from_le_bytes([ch[4], ch[5], ch[6], ch[7]]));
+        match &ch[0..4] {
+            b"VP8X" => {
+                let mut p = [0u8; 10];
+                f.read_exact(&mut p)?;
+                canvas = Some((u24(&p[4..7]) + 1, u24(&p[7..10]) + 1));
+            }
+            b"ANMF" => {
+                let mut p = [0u8; 16];
+                f.read_exact(&mut p)?;
+                let d = u24(&p[12..15]);
+                ms.push(if d == 0 { 100 } else { d });
+            }
+            _ => {}
+        }
+        pos += 8 + len + (len & 1);
+    }
+    match canvas {
+        Some(c) if !ms.is_empty() => Ok((c, ms)),
+        _ => bail!("{} is not an animated WebP", path.display()),
     }
 }
 
@@ -225,6 +346,89 @@ fn intro_files(dir: &Path, m: Option<&MochiDoc>) -> Vec<(PathBuf, Option<String>
     out
 }
 
+/// A strip entry with its `geometry` file merged under it (the entry's own fields win).
+fn strip_doc(root: &Path, raw: &serde_json::Value) -> Result<StripDoc> {
+    let mut v = raw.clone();
+    if let Some(g) = raw.get("geometry").and_then(|g| g.as_str()) {
+        let p = root.join(g);
+        let text = std::fs::read_to_string(&p).with_context(|| format!("geometry {} is missing", p.display()))?;
+        let geo: serde_json::Value = serde_json::from_str(&text).with_context(|| format!("geometry {} is invalid", p.display()))?;
+        if let (Some(obj), Some(geo)) = (v.as_object_mut(), geo.as_object()) {
+            for (k, x) in geo {
+                obj.entry(k.clone()).or_insert_with(|| x.clone());
+            }
+        }
+    }
+    serde_json::from_value(v).context("not a strip entry")
+}
+
+/// A strip's sheet, resolved: its cells, the positions played and their timing.
+struct Sheet {
+    cell: (u32, u32),
+    cols: u32,
+    cells: u32,
+    frames: u32,
+    ms: u32,
+    src: Vec<u32>,
+    cell_ms: Vec<u32>,
+    keys: Vec<u32>,
+}
+
+/// One row of `frames` cells (as ever), a cel sheet's grid, or an animated WebP's frames; then
+/// `order` (keys and in-betweens), `keys` and per-position `ms`. None: refused (in `errors`).
+fn sheet_of(name: &str, d: &StripDoc, path: &Path, errors: &mut Vec<String>) -> Option<Sheet> {
+    let (cell, cols, cells, own_ms) = if d.animated {
+        match webp_frames(path) {
+            Ok((c, ms)) => (c, ms.len() as u32, ms.len() as u32, ms),
+            Err(e) if path.is_file() => {
+                errors.push(format!("anim strip `{name}`: {e:#}"));
+                return None;
+            }
+            // Missing: reported with the other strips' missing files.
+            Err(_) => return None,
+        }
+    } else {
+        let (cols, rows) = d.grid.map_or((d.frames, 1), |[c, r]| (c, r));
+        let cells = if d.grid.is_some() && d.frames == 0 { cols * rows } else { d.frames };
+        if d.grid.is_some() && (cols == 0 || cells > cols * rows) {
+            errors.push(format!("anim strip `{name}`: {cells} cells in a {cols}x{rows} grid"));
+            return None;
+        }
+        ((d.cell[0], d.cell[1]), cols, cells, Vec::new())
+    };
+    let (cw, ch) = cell;
+    if cells == 0 || cw == 0 || ch == 0 || (d.fps <= 0.0 && d.ms.is_empty() && own_ms.is_empty()) {
+        errors.push(format!("anim strip `{name}`: {cells} frames of {cw}x{ch} at {} fps", d.fps));
+        return None;
+    }
+    if let Some(bad) = d.order.iter().find(|&&c| c >= cells) {
+        errors.push(format!("anim strip `{name}`: order cell {bad} past its {cells} cells"));
+        return None;
+    }
+    let frames = if d.order.is_empty() { cells } else { d.order.len() as u32 };
+    let by_cell = |per_cell: &[u32]| -> Vec<u32> { (0..frames).map(|i| per_cell[d.order.get(i as usize).copied().unwrap_or(i) as usize]).collect() };
+    let cell_ms: Vec<u32> = match d.ms.len() {
+        0 if own_ms.is_empty() => Vec::new(),
+        0 => by_cell(&own_ms),
+        n if n == frames as usize => d.ms.clone(),
+        n if n == cells as usize => by_cell(&d.ms),
+        n => {
+            errors.push(format!("anim strip `{name}`: {n} ms for {frames} positions ({cells} cells)"));
+            return None;
+        }
+    };
+    let cell_ms: Vec<u32> = cell_ms.into_iter().map(|m| m.max(1)).collect();
+    let mut keys = d.keys.clone();
+    keys.sort_unstable();
+    keys.dedup();
+    if let Some(bad) = keys.iter().find(|&&k| k >= frames) {
+        errors.push(format!("anim strip `{name}`: key {bad} past its {frames} positions"));
+        return None;
+    }
+    let ms = if cell_ms.is_empty() { (1000.0 / d.fps).round().max(1.0) as u32 } else { (cell_ms.iter().map(|&m| u64::from(m)).sum::<u64>() / u64::from(frames)).max(1) as u32 };
+    Some(Sheet { cell, cols: cols.max(1), cells, frames, ms, src: d.order.clone(), cell_ms, keys })
+}
+
 impl Anim {
     pub fn strip(&self, name: &str) -> Option<&Strip> {
         self.by_name.get(name).map(|&i| &self.strips[i])
@@ -256,7 +460,15 @@ impl Anim {
                 anim.stills.insert(name.clone(), (path, side.files.get(&s.file).and_then(|f| f.sha256.clone())));
             }
         }
-        for (name, d) in &side.strips {
+        for (name, raw) in &side.strips {
+            let d = match strip_doc(&root, raw) {
+                Ok(d) => d,
+                Err(e) => {
+                    errors.push(format!("anim strip `{name}`: {e:#}"));
+                    continue;
+                }
+            };
+            let d = &d;
             // Effects and overlays have no anchor: not body frames. An effect is kept as such.
             let Some(a) = &d.anchor else {
                 let fam = side.families.get(&d.family).cloned().unwrap_or_default();
@@ -285,8 +497,10 @@ impl Anim {
                 "feet" => "ground",
                 "seat" | "surface" => "seat",
                 "grip" => "grip",
+                // Hanging from a bar: its grip on the hang pose's (`brain.hangFidgets`).
+                "ceiling" => "ceiling",
                 other => {
-                    errors.push(format!("anim strip `{name}`: anchor `{other}` (feet|seat|surface|grip)"));
+                    errors.push(format!("anim strip `{name}`: anchor `{other}` (feet|seat|surface|grip|ceiling)"));
                     continue;
                 }
             };
@@ -300,11 +514,8 @@ impl Anim {
             if !path.is_file() {
                 errors.push(format!("anim strip `{name}`: {} is missing", d.file));
             }
-            let (cw, ch) = (d.cell[0], d.cell[1]);
-            if d.frames == 0 || cw == 0 || ch == 0 || d.fps <= 0.0 {
-                errors.push(format!("anim strip `{name}`: {} frames of {cw}x{ch} at {} fps", d.frames, d.fps));
-                continue;
-            }
+            let Some(sheet) = sheet_of(name, d, &path, &mut errors) else { continue };
+            let (cw, ch) = sheet.cell;
             let b = d.bounds.unwrap_or([0, 0, cw as i32, ch as i32]);
             let bounds = Rect { x: b[0], y: b[1], width: b[2], height: b[3] };
             if bounds.x < 0 || bounds.y < 0 || bounds.right() > cw as i32 || bounds.bottom() > ch as i32 || b[2] <= 0 || b[3] <= 0 {
@@ -322,9 +533,9 @@ impl Anim {
                 path,
                 x2: x2.is_file().then_some(x2),
                 sha256: side.files.get(&d.file).and_then(|f| f.sha256.clone()),
-                frames: d.frames,
+                frames: sheet.frames,
                 cell: (cw, ch),
-                ms: (1000.0 / d.fps).round().max(1.0) as u32,
+                ms: sheet.ms,
                 looping: d.r#loop,
                 family_id: side.families.keys().position(|f| *f == d.family).unwrap_or(usize::MAX) as u16,
                 anchor: (kind.into(), a.x, a.y),
@@ -334,7 +545,14 @@ impl Anim {
                 mirror_art: d.mirror_art.clone(),
                 contact: d.contact,
                 fx: d.family == "fx",
-                glitch_cells: d.glitch_cells.iter().copied().filter(|&c| c < d.frames).collect(),
+                glitch_cells: d.glitch_cells.iter().copied().filter(|&c| c < sheet.frames).collect(),
+                cols: sheet.cols,
+                sheet_cells: sheet.cells,
+                src: sheet.src,
+                cell_ms: sheet.cell_ms,
+                keys: sheet.keys,
+                animated: d.animated,
+                outfit: d.outfit.clone(),
             });
         }
         for s in &anim.strips {
@@ -424,6 +642,138 @@ pub mod tests {
             },
             "files": {"sprites/stand.png": {"sha256": "ab"}}}});
         std::fs::write(dir.join("anim/anim.json"), doc.to_string()).unwrap();
+    }
+
+    /// An animated WebP of `frames` (lossless), `ms` each: the encoder's still VP8L bitstreams
+    /// wrapped in ANMF chunks (synthetic test art: solid shapes only).
+    pub fn animated_webp(frames: &[image::RgbaImage], ms: &[u32]) -> Vec<u8> {
+        let (w, h) = frames[0].dimensions();
+        let u24 = |v: u32| v.to_le_bytes()[..3].to_vec();
+        let chunk = |tag: &[u8], data: &[u8]| -> Vec<u8> {
+            let mut c = tag.to_vec();
+            c.extend((data.len() as u32).to_le_bytes());
+            c.extend(data);
+            if data.len() & 1 == 1 {
+                c.push(0);
+            }
+            c
+        };
+        let mut body = chunk(b"VP8X", &[vec![0x12, 0, 0, 0], u24(w - 1), u24(h - 1)].concat());
+        body.extend(chunk(b"ANIM", &[0, 0, 0, 0, 0, 0]));
+        for (f, &d) in frames.iter().zip(ms) {
+            let mut still = Vec::new();
+            image::codecs::webp::WebPEncoder::new_lossless(&mut still).encode(f.as_raw(), w, h, image::ExtendedColorType::Rgba8).unwrap();
+            assert_eq!(&still[12..16], b"VP8L", "the simple container");
+            let n = u32::from_le_bytes([still[16], still[17], still[18], still[19]]) as usize;
+            let mut anmf = [u24(0), u24(0), u24(w - 1), u24(h - 1), u24(d)].concat();
+            anmf.push(0x02);
+            anmf.extend(chunk(b"VP8L", &still[20..20 + n]));
+            body.extend(chunk(b"ANMF", &anmf));
+        }
+        let mut out = b"RIFF".to_vec();
+        out.extend((body.len() as u32 + 4).to_le_bytes());
+        out.extend(b"WEBP");
+        out.extend(body);
+        out
+    }
+
+    /// A `w`×`h` cell of one colour with a 2 px column of it (the rest clear): `n` such cells.
+    pub fn solid_cells(w: u32, h: u32, colours: &[[u8; 3]]) -> Vec<image::RgbaImage> {
+        colours
+            .iter()
+            .map(|c| {
+                let mut im = image::RgbaImage::new(w, h);
+                for y in 1..h - 1 {
+                    for x in 1..3 {
+                        im.put_pixel(x, y, image::Rgba([c[0], c[1], c[2], 255]));
+                    }
+                }
+                im
+            })
+            .collect()
+    }
+
+    /// Add to `dir/anim/`: a 2x2 cel sheet (`sheet`, 3 cells used, a geometry file, keys and
+    /// in-betweens, per-position ms), an animated WebP (`greet`, 3 frames) and a hang strip
+    /// (`pullup`, ceiling anchor, drawn for `outfit` if given). Cells: red, green, blue.
+    pub fn write_cels(dir: &Path, outfit: Option<&str>) {
+        let s = dir.join("anim/lachy/sprites");
+        let cells = solid_cells(4, 6, &[[255, 0, 0], [0, 255, 0], [0, 0, 255]]);
+        let mut sheet = image::RgbaImage::new(8, 12);
+        for (i, c) in cells.iter().enumerate() {
+            image::imageops::replace(&mut sheet, c, (i as i64 % 2) * 4, (i as i64 / 2) * 6);
+        }
+        sheet.save(s.join("sheet.png")).unwrap();
+        std::fs::write(s.join("sheet.json"), json!({"cell": [4, 6], "grid": [2, 2], "frames": 3, "anchor": {"name": "feet", "x": 2, "y": 5}, "bounds": [1, 1, 3, 4]}).to_string()).unwrap();
+        std::fs::write(s.join("greet.webp"), animated_webp(&cells, &[80, 120, 200])).unwrap();
+        cells[0].save(s.join("pullup.png")).unwrap();
+        let p = dir.join("anim/anim.json");
+        let mut v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        let st = &mut v["lachy"]["strips"];
+        st["sheet"] = json!({"file": "sprites/sheet.png", "geometry": "sprites/sheet.json", "family": "stand",
+                             "order": [0, 1, 2, 1, 0], "keys": [0, 2], "ms": [100, 50, 300, 50, 100]});
+        st["greet"] = json!({"file": "sprites/greet.webp", "animated": true, "family": "stand", "anchor": {"name": "feet", "x": 2, "y": 5}});
+        st["pullup"] = json!({"file": "sprites/pullup.png", "frames": 1, "cell": [4, 6], "fps": 10, "family": "hang",
+                              "anchor": {"name": "ceiling", "x": 2, "y": 0}});
+        if let Some(o) = outfit {
+            st["pullup"]["outfit"] = json!(o);
+        }
+        std::fs::write(&p, v.to_string()).unwrap();
+    }
+
+    #[test]
+    fn a_cel_sheet_plays_its_order_keys_and_timing() {
+        let d = tmp("cels");
+        write_anim(&d);
+        write_cels(&d, None);
+        let a = Anim::load(&d, 8).unwrap().unwrap();
+        let s = a.strip("sheet").unwrap();
+        // The geometry file filled cell, grid, frames, anchor and bounds.
+        assert_eq!((s.cell, s.cols, s.sheet_cells, s.frames), ((4, 6), 2, 3, 5));
+        assert_eq!((s.anchor.0.as_str(), s.bounds.width), ("ground", 3));
+        assert_eq!((0..5).map(|i| s.sheet_cell(i)).collect::<Vec<_>>(), [0, 1, 2, 1, 0], "keys and in-betweens");
+        assert_eq!(s.played(1), [(0, 100), (1, 50), (2, 300), (3, 50), (4, 100)]);
+        // Thinned: the keys, each held until the next.
+        assert_eq!(s.played(2), [(0, 150), (2, 450)]);
+        assert_eq!(s.ms, 120, "the mean, for whatever wants one");
+        // A plain strip thins as it always did.
+        assert_eq!(a.strip("stand").unwrap().played(2), [(0, 200), (2, 200)]);
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn an_animated_webp_strip_takes_its_frames_and_delays_from_the_file() {
+        let d = tmp("webp");
+        write_anim(&d);
+        write_cels(&d, Some("alt"));
+        let ((w, h), ms) = webp_frames(&d.join("anim/lachy/sprites/greet.webp")).unwrap();
+        assert_eq!(((w, h), ms.as_slice()), ((4, 6), &[80, 120, 200][..]));
+        let a = Anim::load(&d, 8).unwrap().unwrap();
+        let g = a.strip("greet").unwrap();
+        assert!(g.animated);
+        assert_eq!((g.cell, g.frames, g.cell_ms.as_slice()), ((4, 6), 3, &[80, 120, 200][..]));
+        assert_eq!(g.played(1).iter().map(|p| p.1).sum::<u32>(), 400);
+        // A hang strip registers on the hang pose, drawn for one outfit only.
+        let p = a.strip("pullup").unwrap();
+        assert_eq!(p.anchor.0, "ceiling");
+        assert!(p.worn_in("alt") && !p.worn_in("pack") && a.strip("greet").unwrap().worn_in("pack"));
+        assert!(webp_frames(&d.join("anim/lachy/sprites/sheet.png")).is_err(), "a PNG isn't one");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_cel_sheet_out_of_its_grid_is_refused() {
+        let d = tmp("celbad");
+        write_anim(&d);
+        write_cels(&d, None);
+        let p = d.join("anim/anim.json");
+        let mut v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        v["lachy"]["strips"]["sheet"]["order"] = json!([0, 3]);
+        v["lachy"]["strips"]["greet"]["ms"] = json!([1, 2]);
+        std::fs::write(&p, v.to_string()).unwrap();
+        let e = format!("{:#}", Anim::load(&d, 8).unwrap_err());
+        assert!(e.contains("order cell 3 past its 3 cells") && e.contains("2 ms for 3 positions"), "{e}");
+        std::fs::remove_dir_all(&d).ok();
     }
 
     fn tmp(name: &str) -> PathBuf {

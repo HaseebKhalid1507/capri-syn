@@ -963,6 +963,8 @@ pub struct Avatar {
     rng: Rng,
     bubble: Option<Bubble>,
     hearts: Option<(Instant, Point<Pixels>)>,
+    /// The pack's heart sprite (`click.hearts`), decoded after the frames; None: drawn hearts.
+    heart_sprite: Option<Rc<crate::frames::EffectMask>>,
     /// The HUD stays down until then (a beat after a teleport).
     hud_after: Option<Instant>,
     /// Woken: the stand-up plays until then, and no move starts before it ends.
@@ -1320,6 +1322,7 @@ impl Avatar {
             rng: Rng::seeded(),
             bubble: None,
             hearts: None,
+            heart_sprite: None,
             hud_after: None,
             waking_until: None,
             hearts_area: (None, None),
@@ -1504,6 +1507,9 @@ impl Avatar {
         if let Some(i) = self.art_music_frame() {
             return Some(i);
         }
+        if let Some(s) = self.music_loop() {
+            return s.first().map(|f| f.0);
+        }
         let spec = self.music_spec()?;
         let idx = |id: &str| self.pack.index.get(id).copied();
         if self.sitting() {
@@ -1511,6 +1517,16 @@ impl Avatar {
         } else {
             idx(&spec.floor).filter(|&i| self.pack.frames[i].anchor.name == "ground")
         }
+    }
+
+    /// Music on a window top with the pack's `music.windowLoop` (worn, its cells in): its loop,
+    /// instead of the `window` frame.
+    fn music_loop(&self) -> Option<Seq> {
+        if self.music.is_none() || !self.sitting() {
+            return None;
+        }
+        let seq = self.flat(&self.music_spec()?.window_loop);
+        (!seq.is_empty()).then_some(seq)
     }
 
     fn music_on(&mut self, now: Instant, until: Option<Instant>) -> anyhow::Result<()> {
@@ -1884,7 +1900,9 @@ impl Avatar {
 
     /// The next idle beat (`life::Beats`): a gesture and a face beat take turns.
     fn activity_pick(&mut self, n: usize) -> usize {
-        let gesture: Vec<bool> = self.activities().iter().take(n).map(|a| gesture(a)).collect();
+        // An idle pose (`life.poses`) changes her outline: a gesture.
+        let poses = &self.pack.behaviour.life.poses;
+        let gesture: Vec<bool> = self.activities().iter().take(n).map(|a| gesture(a) || poses.values().any(|p| p == a)).collect();
         self.beats.pick(&gesture, &mut self.rng)
     }
 
@@ -1965,6 +1983,8 @@ impl Avatar {
             }
             self.stills_decode(cx);
             self.burst_decode(cx);
+            self.hearts_decode(cx);
+            self.outfit_start(now);
             let win = self.os.body();
             self.set_icon_on(win);
             self.next_glint = Some(now + Duration::from_millis(700));
@@ -1977,6 +1997,23 @@ impl Avatar {
         }
         cx.notify();
         self.schedule(cx);
+    }
+
+    /// The pack's heart sprite (`click.hearts`), off the main thread; one that fails: the drawn
+    /// hearts, as without one.
+    fn hearts_decode(&mut self, cx: &mut Context<Self>) {
+        let Some(src) = self.pack.behaviour.click.hearts.as_ref().and_then(|id| self.pack.effects.get(id)).cloned() else { return };
+        // As tall as the biggest drawn heart is wide, at her scale (the mask is resampled per size).
+        let h = (40.0 * self.layout.sf).round().max(8.0) as u32;
+        cx.spawn(async move |this, cx| {
+            let r = crate::off_thread(move || crate::frames::decode_effect(&src.path, src.sha256.as_deref(), h)).await;
+            this.update(cx, |v, _| match r {
+                Ok(m) => v.heart_sprite = Some(Rc::new(m)),
+                Err(e) => elog!("synaps-avatar: heart sprite unavailable (drawn hearts): {e:#}"),
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// lachy's stills, off the main thread (a few ms each).
@@ -2179,7 +2216,7 @@ impl Avatar {
     }
 
     fn loop_seq(&self, l: Option<&Steps>) -> Option<Seq> {
-        let seq = self.pack.flatten(&l?.as_steps());
+        let seq = self.flat(&l?.as_steps());
         (!seq.is_empty()).then_some(seq)
     }
 
@@ -2211,7 +2248,7 @@ impl Avatar {
             return l;
         }
         if let Some(i) = self.music_frame() {
-            return (i, None);
+            return (i, self.music_loop().filter(|s| s.first().map(|f| f.0) == Some(i)));
         }
         if let Some(i) = self.voice_layer() {
             return (i, None);
@@ -2240,18 +2277,32 @@ impl Avatar {
         (base, self.loop_seq(spec.and_then(|s| s.r#loop.as_ref())))
     }
 
-    fn activities(&self) -> &[Vec<crate::pack::Step>] {
+    /// Her idle beats here: hanging, the pack's hang fidgets; perched, its perch activities (none:
+    /// one perch frame, §6.2); standing, the activities (her band's), her micro-fidgets
+    /// (`life.fidgets`, her band's) and her idle poses (`life.poses`).
+    fn activities(&self) -> Vec<Vec<crate::pack::Step>> {
+        let b = &self.pack.behaviour;
+        if self.hanging() {
+            return b.brain.hang_fidgets.values().cloned().collect();
+        }
         // Standing clips would break a hang or a floor sit; a strip variant blinks on its own.
         if self.posed() || (!self.sitting() && !self.standing()) || self.art_strip().is_some() {
-            return &[];
+            return Vec::new();
         }
         match self.perch_spec() {
-            Some(p) if self.sitting() => &p.activities,
+            Some(p) if self.sitting() => p.activities.clone(),
             _ => {
-                let own = &self.pack.behaviour.energy.band(self.band()).activities;
-                if own.is_empty() { &self.pack.behaviour.activities } else { own }
+                let band = b.energy.band(self.band());
+                let own = if band.activities.is_empty() { &b.activities } else { &band.activities };
+                let fidgets = if band.fidgets.is_empty() { &b.life.fidgets } else { &band.fidgets };
+                own.iter().chain(fidgets).chain(b.life.poses.values()).cloned().collect()
             }
         }
+    }
+
+    /// Hanging from a top bar or a window (the pack's `hang` pose).
+    pub(super) fn hanging(&self) -> bool {
+        matches!(self.placement, Placement::Pose { frame } if self.brain_pose("hang") == Some(frame))
     }
 
     /// Her energy's band now (mid without a brain or a time of day).
@@ -2264,6 +2315,10 @@ impl Avatar {
             self.music = None;
         }
         let prev = self.mood;
+        // Waking: a changed outfit goes on before any of her frames are picked (she wakes in it).
+        if prev == Mood::Sleepy && m != prev {
+            self.outfit_swap("wake", now);
+        }
         let shown_before = self.anim.frame();
         self.cutin_mood(prev, m, now);
         // NEEDS YOU while she's hidden under a fullscreen window: a desktop notification with
@@ -2307,7 +2362,7 @@ impl Avatar {
                 && !was_strip
                 && let Some(exit) = self.spec(prev).and_then(|s| s.exit.clone())
             {
-                seq.extend(self.pack.flatten(&exit));
+                seq.extend(self.flat(&exit));
                 // Out of her sleep: she stands up before anything moves her.
                 if prev == Mood::Sleepy {
                     let ms: u64 = seq.iter().map(|s| s.1 as u64).sum();
@@ -2315,7 +2370,7 @@ impl Avatar {
                 }
             }
             if !to_strip && let Some(entry) = self.spec(m).and_then(|s| s.entry.clone()) {
-                seq.extend(self.pack.flatten(&entry));
+                seq.extend(self.flat(&entry));
             }
         }
         let (base, looping) = self.layer(m);
@@ -2915,7 +2970,7 @@ impl Avatar {
                 let n = self.activities().len();
                 let i = self.activity_pick(n);
                 let steps = self.activities()[i].clone();
-                let seq = self.pack.flatten(&self.resolve_steps(&steps));
+                let seq = self.flat(&self.resolve_steps(&steps));
                 let len: u64 = seq.iter().map(|s| s.1 as u64).sum();
                 self.activity_beats(&steps, Duration::from_millis(len), now);
                 self.anim.play(seq, now);
@@ -3256,6 +3311,8 @@ impl Avatar {
             return;
         }
         self.hidden = true;
+        // In the bolt nothing of her shows: a changed outfit goes on here.
+        self.outfit_swap("teleport", now);
         let from = self.center_root(self.origin);
         let to = self.center_root(to);
         let bolt = Bolt::new(from, to, seed ^ 0xb017_5eed, 220.0 * self.layout.sf);
@@ -3434,7 +3491,7 @@ impl Avatar {
             }
             Command::Clip(id) => {
                 let steps = [crate::pack::Step::Clip(id.clone())];
-                let seq = self.pack.flatten(&steps);
+                let seq = self.flat(&steps);
                 if seq.is_empty() {
                     match self.pack.frame(&id) {
                         Ok(i) => {
@@ -5335,7 +5392,7 @@ impl Avatar {
         } else if head && !click.head.is_empty() {
             self.hearts = Some((now, at));
             // Rarely the headpat ends in an air kiss.
-            let ms: u64 = self.pack.flatten(&click.head).iter().map(|s| s.1 as u64).sum();
+            let ms: u64 = self.flat(&click.head).iter().map(|s| s.1 as u64).sum();
             let mut steps = click.head;
             if let Some(k) = self.maybe_kiss(ms, now) {
                 steps.extend(k);
@@ -5350,7 +5407,7 @@ impl Avatar {
         } else {
             Vec::new()
         };
-        let seq = art_click.unwrap_or_else(|| self.pack.flatten(&steps));
+        let seq = art_click.unwrap_or_else(|| self.flat(&steps));
         let len: u64 = seq.iter().map(|s| s.1 as u64).sum();
         if !seq.is_empty() {
             self.anim.play(seq, now);
@@ -8362,6 +8419,7 @@ impl Avatar {
         let t_start = self.t_start;
         let ground_px = (l.ground_x as i16, (l.ground_y - 1) as i16, 1u16, 1u16);
         let hearts = self.hearts.filter(|_| hud).map(|(t0, at)| (now.saturating_duration_since(t0).as_secs_f32() * 1000.0, at));
+        let heart_sprite = self.heart_sprite.clone();
         // The hearts stay inside her work area (under the bar, on screen).
         if let Some((t0, _)) = self.hearts
             && self.hearts_area.0 != Some(t0)
@@ -8520,12 +8578,27 @@ impl Avatar {
                             };
                             (scale >= 0.1).then_some((x, y, size * scale))
                         });
-                        match geom {
-                            Some((x, y, s)) => {
+                        // The pack's heart sprite (`click.hearts`): its outline at the heart's width,
+                        // in its colour over the same white rim; else the drawn heart.
+                        let sprite_win = |layer: usize, over: Option<usize>, rgb: u32, m: &crate::frames::Mask, x: f32, y: f32, s: f32| {
+                            let w = (s * sf).round() as i32;
+                            let (h, r) = shape::mask_rows(m.w, m.h, |a, b| m.get(a, b), w);
+                            let o = ((x * sf + worigin.0 as f32).round() as i32 - w / 2, (y * sf + worigin.1 as f32).round() as i32 - h / 2);
+                            match over {
+                                Some(j) => os.fx_set_below(layer, j, rgb, o, (w, h), &r).ok(),
+                                None => os.fx_set(layer, rgb, o, (w, h), &r).ok(),
+                            };
+                        };
+                        match (geom, &heart_sprite) {
+                            (Some((x, y, s)), Some(hs)) => {
+                                sprite_win(fill, None, hs.rgb, &hs.mask, x, y, s);
+                                sprite_win(rim, Some(fill), 0xffffff, &hs.mask, x, y, s + 5.0);
+                            }
+                            (Some((x, y, s)), None) => {
                                 heart_win(fill, None, *colour, &shape::heart(x, y, s));
                                 heart_win(rim, Some(fill), 0xffffff, &shape::heart(x, y, s + 5.0));
                             }
-                            None => {
+                            (None, _) => {
                                 os.fx_unmap(rim);
                                 os.fx_unmap(fill);
                             }

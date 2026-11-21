@@ -195,7 +195,7 @@ impl Avatar {
     pub(super) fn rag_spec(&self) -> RagSpec {
         let b = &self.pack.behaviour;
         let ids = |steps: &[crate::pack::Step]| -> Vec<crate::drag::Step> {
-            self.pack.flatten(steps).into_iter().map(|(i, ms)| crate::drag::Step { frame: self.pack.frames[i].id.clone(), ms }).collect()
+            self.flat(steps).into_iter().map(|(i, ms)| crate::drag::Step { frame: self.pack.frames[i].id.clone(), ms }).collect()
         };
         let have = |id: &Option<String>| id.clone().filter(|i| self.pack.index.contains_key(i));
         let hang = b.drag.as_ref().and_then(|d| have(&d.hang)).unwrap_or_else(|| self.pack.catalog.default_sprite.clone());

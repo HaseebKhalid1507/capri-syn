@@ -369,9 +369,18 @@ impl BrainHost {
 }
 
 impl Avatar {
-    /// The pack's frame for an approach pose (`hang`, `cling_left`, …).
-    fn brain_pose(&self, key: &str) -> Option<usize> {
-        self.pack.behaviour.brain.poses.get(key).and_then(|id| self.pack.index.get(id)).copied()
+    /// The pack's frame for an approach pose (`hang`, `cling_left`, …): the frame of approach `key`, if the pack has it and the outfit she wears draws it (an
+    /// approach without one has weight 0).
+    pub(super) fn brain_pose(&self, key: &str) -> Option<usize> {
+        self.pack.behaviour.brain.poses.get(key).and_then(|id| self.pack.index.get(id)).copied().filter(|&i| self.pack.wears(i))
+    }
+
+    /// Her body's boxes again: a changed outfit may draw her a little differently.
+    pub(super) fn brain_rebox(&mut self) {
+        let b = self.brain_boxes();
+        if let Some(h) = &mut self.brain {
+            h.boxes = b;
+        }
     }
 
     /// Window-local device px of frame `i`'s anchor point.
@@ -1649,7 +1658,7 @@ impl Avatar {
             h.rest = Some(RestPose::FloorSit);
             let entry = self.pack.behaviour.brain.floor_sit.as_ref().and_then(|s| s.entry.clone()).unwrap_or_default();
             self.relayer(now);
-            let seq = self.pack.flatten(&entry);
+            let seq = self.flat(&entry);
             if !seq.is_empty() {
                 self.anim.play(seq, now);
             }
@@ -1688,7 +1697,7 @@ impl Avatar {
             self.hop_or_squash(now);
             let right = self.brain_focused().is_some_and(|f| f.center().0 > self.ground().0);
             let steps = [crate::pack::Step::Clip(if right { "point_right" } else { "point_left" }.into())];
-            let seq = self.pack.flatten(&steps);
+            let seq = self.flat(&steps);
             if !seq.is_empty() {
                 self.anim.play(seq, now);
             }
@@ -2067,7 +2076,7 @@ impl Avatar {
                     self.face(right, "look", now, false);
                 }
                 if standing {
-                    let seq = self.pack.flatten(&self.resolve_steps(&[crate::pack::Step::Clip("@look".into())]));
+                    let seq = self.flat(&self.resolve_steps(&[crate::pack::Step::Clip("@look".into())]));
                     if !seq.is_empty() {
                         self.anim.play(seq, now);
                     }
@@ -2088,7 +2097,7 @@ impl Avatar {
                         s if s.is_empty() => vec![crate::pack::Step::Hold { frame: "surprised".into(), ms: 600 }],
                         s => s.clone(),
                     };
-                    let seq = self.pack.flatten(&steps);
+                    let seq = self.flat(&steps);
                     if !seq.is_empty() {
                         self.anim.play(seq, now);
                     }
@@ -2127,7 +2136,7 @@ impl Avatar {
                             s => s,
                         })
                         .collect();
-                    let seq = self.pack.flatten(&steps);
+                    let seq = self.flat(&steps);
                     if !seq.is_empty() {
                         self.anim.play(seq, now);
                     }
@@ -2147,7 +2156,7 @@ impl Avatar {
                 }
                 let steps = self.pack.behaviour.brain.bat.clone();
                 if standing && !steps.is_empty() {
-                    let seq = self.pack.flatten(&self.resolve_steps(&steps));
+                    let seq = self.flat(&self.resolve_steps(&steps));
                     if !seq.is_empty() {
                         self.anim.play(seq, now);
                     }
@@ -2175,7 +2184,7 @@ impl Avatar {
                     }
                     let steps = self.pack.behaviour.brain.cold.clone();
                     if standing && !steps.is_empty() {
-                        let seq = self.pack.flatten(&steps);
+                        let seq = self.flat(&steps);
                         self.anim.then(seq, now);
                     }
                     "cold"
@@ -2697,8 +2706,8 @@ impl Avatar {
             self.relayer(now);
             let b = &self.pack.behaviour.brain;
             let exit = b.sulk_sit.as_ref().and_then(|s| s.exit.clone()).or_else(|| b.floor_sit.as_ref().and_then(|s| s.exit.clone())).unwrap_or_default();
-            let mut seq = self.pack.flatten(&exit);
-            seq.extend(self.pack.flatten(&self.resolve_steps(&steps)));
+            let mut seq = self.flat(&exit);
+            seq.extend(self.flat(&self.resolve_steps(&steps)));
             if !seq.is_empty() {
                 if !self.hidden {
                     seq.insert(0, (before, super::FRAME_FX.as_millis() as u32));
@@ -2716,14 +2725,14 @@ impl Avatar {
             // The sulk sit's own entry (a head-down crouch, no standing beat), else the floor sit's.
             let b = &self.pack.behaviour.brain;
             let entry = b.sulk_sit.as_ref().and_then(|s| s.entry.clone()).or_else(|| b.floor_sit.as_ref().and_then(|s| s.entry.clone())).unwrap_or_default();
-            let mut seq = self.pack.flatten(&self.resolve_steps(&steps));
-            seq.extend(self.pack.flatten(&entry));
+            let mut seq = self.flat(&self.resolve_steps(&steps));
+            seq.extend(self.flat(&entry));
             if !seq.is_empty() {
                 self.anim.play(seq, now);
             }
             played = "clip+sit";
         } else if standing && !steps.is_empty() {
-            let seq = self.pack.flatten(&self.resolve_steps(&steps));
+            let seq = self.flat(&self.resolve_steps(&steps));
             if !seq.is_empty() {
                 // A greeting out of her sleep comes after the stand-up (and a stretch), held
                 // like it: nothing cuts it short (r38: a relayer after the wake dropped it).
