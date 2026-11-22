@@ -1,5 +1,6 @@
 //! The pack's optional desktop art: `anim/anim.json`, written by tools/make-pack from
-//! lachydotmcg/capri-desktop at its pin (our own measured geometry plus the sha256 of every file).
+//! lachydotmcg/capri-desktop at its pin (our own measured geometry plus the sha256 of every file),
+//! and from CapriCore's own animations (`capricore`: the wave and the cels, the pack's own art).
 //! Each sprite strip is cut into cells at decode; every cell is a frame like any other,
 //! registered on the pack's canvas by its strip's anchor: feet on the ground point, a seat (or
 //! a lying figure's surface) on the seat line. Strips are sized against the pack's own body:
@@ -87,6 +88,10 @@ struct FamilyDoc {
     units_high_vs_stand: Option<f32>,
     #[serde(default)]
     faces: Option<String>,
+    /// Canvas px per cell px, instead of sizing against `stand.bodyPx` (art drawn on the
+    /// pack's own canvas, at a known ratio).
+    #[serde(default)]
+    scale: Option<f32>,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -133,6 +138,10 @@ struct AnimDoc {
     lachy: Option<SideDoc>,
     #[serde(default)]
     mochi: Option<MochiDoc>,
+    /// The pack's own source's animations (`make-pack`: CapriCore's wave and cels), in
+    /// `anim/capricore/`: registered like the pack's frames, so no seam to or from them.
+    #[serde(default)]
+    capricore: Option<SideDoc>,
 }
 
 /// The cinematic intro's close-ups, in `crate::intro::FRAMES` order: `anim/mochi/intro-<name>.*`.
@@ -190,6 +199,8 @@ pub struct Strip {
     pub animated: bool,
     /// Drawn in this outfit only (None: any outfit).
     pub outfit: Option<String>,
+    /// The pack's own art (the `capricore` side): a cut to or from it is no seam.
+    pub own: bool,
 }
 
 impl Strip {
@@ -243,6 +254,11 @@ impl Strip {
     /// Positions it plays (`played`, `clean_played`) split into its entry, loop and exit.
     pub fn ranged(&self, played: Vec<(u32, u32)>) -> crate::anim::Ranged<(u32, u32)> {
         crate::anim::Ranged::by_pos(played, self.frames, self.entry, self.exit)
+    }
+
+    /// The one outfit it is drawn for (None: untagged or `any`).
+    pub fn outfit_only(&self) -> Option<&str> {
+        self.outfit.as_deref().filter(|o| !o.eq_ignore_ascii_case("any"))
     }
 
     /// Wearable in outfit `outfit` (`moods.json` `variants.outfits`).
@@ -502,19 +518,44 @@ impl Anim {
         }
         let intro = intro_files(dir, doc.mochi.as_ref());
         let mochi = mochi_files(dir, doc.mochi.as_ref());
-        let Some(side) = doc.lachy else { return Ok(Some(Anim { intro, mochi, ..Anim::default() })) };
-        let root = dir.join("anim/lachy");
-        let mut errors = Vec::new();
-        let stand = side.families.get("stand").and_then(|f| f.body_px).filter(|&b| b > 0.0);
         let mut anim = Anim { intro, mochi, ..Anim::default() };
+        let mut errors = Vec::new();
+        // Family ids run on across the sides (a seam is a change of family).
+        let mut family_base = 0usize;
+        for (key, side, own) in [("lachy", &doc.lachy, false), ("capricore", &doc.capricore, true)] {
+            let Some(side) = side else { continue };
+            anim.load_side(&dir.join("anim").join(key), side, ref_h, own, family_base, &mut errors);
+            family_base += side.families.len();
+        }
+        for s in &anim.strips {
+            if let Some(m) = &s.mirror_art {
+                match anim.strip(m) {
+                    None => errors.push(format!("anim strip `{}`: mirrorArt `{m}` is not a strip", s.name)),
+                    Some(t) if t.cell != s.cell || t.frames != s.frames || (t.cols, t.rows) != (s.cols, s.rows) => {
+                        errors.push(format!("anim strip `{}`: mirrorArt `{m}` has another grid", s.name))
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if !errors.is_empty() {
+            bail!("pack {} anim/anim.json failed validation:\n  - {}", dir.display(), errors.join("\n  - "));
+        }
+        Ok(Some(anim))
+    }
+
+    /// One side of anim.json (`root`: its directory): its stills, effects and strips. `own`:
+    /// the pack's own art (no seam to its frames).
+    fn load_side(&mut self, root: &Path, side: &SideDoc, ref_h: i32, own: bool, family_base: usize, errors: &mut Vec<String>) {
+        let stand = side.families.get("stand").and_then(|f| f.body_px).filter(|&b| b > 0.0);
         for (name, s) in &side.stills {
             let path = root.join(&s.file);
             if path.is_file() {
-                anim.stills.insert(name.clone(), (path, side.files.get(&s.file).and_then(|f| f.sha256.clone())));
+                self.stills.insert(name.clone(), (path, side.files.get(&s.file).and_then(|f| f.sha256.clone())));
             }
         }
         for (name, raw) in &side.strips {
-            let d = match strip_doc(&root, raw) {
+            let d = match strip_doc(root, raw) {
                 Ok(d) => d,
                 Err(e) => {
                     errors.push(format!("anim strip `{name}`: {e:#}"));
@@ -534,7 +575,7 @@ impl Anim {
                 {
                     let path = root.join(&d.file);
                     if path.is_file() {
-                        anim.effects.insert(name.clone(), Effect {
+                        self.effects.insert(name.clone(), Effect {
                             path,
                             sha256: side.files.get(&d.file).and_then(|f| f.sha256.clone()),
                             frames: d.frames,
@@ -558,16 +599,23 @@ impl Anim {
                 }
             };
             let fam = side.families.get(&d.family).cloned().unwrap_or_default();
-            let Some(body) = stand else {
-                errors.push("anim.json: families.stand.bodyPx is missing".into());
-                break;
+            let k = match (fam.scale.filter(|&s| s > 0.0 && s.is_finite()), stand) {
+                (Some(s), _) => s,
+                (None, Some(body)) => ref_h as f32 / body * fam.units_high_vs_stand.unwrap_or(1.0),
+                (None, None) => {
+                    errors.push("anim.json: families.stand.bodyPx is missing".into());
+                    break;
+                }
             };
-            let k = ref_h as f32 / body * fam.units_high_vs_stand.unwrap_or(1.0);
+            if self.by_name.contains_key(name) {
+                errors.push(format!("anim strip `{name}`: another side has a strip of that name"));
+                continue;
+            }
             let path = root.join(&d.file);
             if !path.is_file() {
                 errors.push(format!("anim strip `{name}`: {} is missing", d.file));
             }
-            let Some(sheet) = sheet_of(name, d, &path, &mut errors) else { continue };
+            let Some(sheet) = sheet_of(name, d, &path, errors) else { continue };
             let (cw, ch) = sheet.cell;
             let b = d.bounds.unwrap_or([0, 0, cw as i32, ch as i32]);
             let bounds = Rect { x: b[0], y: b[1], width: b[2], height: b[3] };
@@ -586,8 +634,8 @@ impl Anim {
                 errors.push(format!("anim strip `{name}`: entry {} + exit {} leave nothing to loop ({} positions)", d.entry, d.exit, sheet.frames));
             }
             let x2 = root.join("x2").join(&d.file);
-            anim.by_name.insert(name.clone(), anim.strips.len());
-            anim.strips.push(Strip {
+            self.by_name.insert(name.clone(), self.strips.len());
+            self.strips.push(Strip {
                 name: name.clone(),
                 path,
                 x2: x2.is_file().then_some(x2),
@@ -598,7 +646,7 @@ impl Anim {
                 looping: d.r#loop,
                 entry: d.entry,
                 exit: d.exit,
-                family_id: side.families.keys().position(|f| *f == d.family).unwrap_or(usize::MAX) as u16,
+                family_id: side.families.keys().position(|f| *f == d.family).map_or(u16::MAX, |i| (family_base + i) as u16),
                 anchor: (kind.into(), a.x, a.y),
                 bounds,
                 k,
@@ -615,23 +663,9 @@ impl Anim {
                 keys: sheet.keys,
                 animated: d.animated,
                 outfit: d.outfit.clone(),
+                own,
             });
         }
-        for s in &anim.strips {
-            if let Some(m) = &s.mirror_art {
-                match anim.strip(m) {
-                    None => errors.push(format!("anim strip `{}`: mirrorArt `{m}` is not a strip", s.name)),
-                    Some(t) if t.cell != s.cell || t.frames != s.frames || (t.cols, t.rows) != (s.cols, s.rows) => {
-                        errors.push(format!("anim strip `{}`: mirrorArt `{m}` has another grid", s.name))
-                    }
-                    _ => {}
-                }
-            }
-        }
-        if !errors.is_empty() {
-            bail!("pack {} anim/anim.json failed validation:\n  - {}", dir.display(), errors.join("\n  - "));
-        }
-        Ok(Some(anim))
     }
 
     /// The frame sources of strip `si`'s cells (`mirror`: stored mirrored, a twin's).
@@ -780,6 +814,30 @@ pub mod tests {
         if let Some(o) = outfit {
             st["pullup"]["outfit"] = json!(o);
         }
+        std::fs::write(&p, v.to_string()).unwrap();
+    }
+
+    /// Add to `dir/anim/`'s `capricore` side (the pack's own art): a 2-cell 4×6 standing strip
+    /// `name` in family `wave` (scale 2), drawn for `outfit` if given.
+    pub fn write_own(dir: &Path, name: &str, outfit: Option<&str>) {
+        let s = dir.join("anim/capricore");
+        std::fs::create_dir_all(&s).unwrap();
+        let mut im = image::RgbaImage::new(8, 6);
+        for (i, c) in solid_cells(4, 6, &[[255, 0, 255], [0, 255, 255]]).iter().enumerate() {
+            image::imageops::replace(&mut im, c, i as i64 * 4, 0);
+        }
+        im.save(s.join(format!("{name}.png"))).unwrap();
+        let p = dir.join("anim/anim.json");
+        let mut v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        if v.get("capricore").is_none() {
+            v["capricore"] = json!({"families": {"wave": {"scale": 2.0}}, "strips": {}});
+        }
+        let mut d = json!({"file": format!("{name}.png"), "frames": 2, "cell": [4, 6], "fps": 10, "family": "wave",
+                           "anchor": {"name": "feet", "x": 2, "y": 5}, "bounds": [1, 1, 2, 4]});
+        if let Some(o) = outfit {
+            d["outfit"] = json!(o);
+        }
+        v["capricore"]["strips"][name] = d;
         std::fs::write(&p, v.to_string()).unwrap();
     }
 
@@ -994,6 +1052,25 @@ pub mod tests {
         assert_eq!(id, "stand#2");
         assert_eq!((f.anchor.x, f.anchor.y, f.bounds.x, f.bounds.width, f.bounds.height), (4, 10, 2, 6, 8));
         assert_eq!(a.cells(a.by_name["stand_flipped"], true)[0].0, "~stand_flipped#0");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn the_pack_own_side_loads_at_its_own_scale_with_no_seam() {
+        let d = tmp("own");
+        write_anim(&d);
+        write_own(&d, "wave", Some("alt"));
+        let a = Anim::load(&d, 8).unwrap().unwrap();
+        let (w, st) = (a.strip("wave").unwrap(), a.strip("stand").unwrap());
+        assert!(w.own && !st.own);
+        assert!(w.path.ends_with("anim/capricore/wave.png"));
+        assert_eq!((w.k, st.k), (2.0, 2.0), "its family's scale; lachy's still against stand.bodyPx");
+        assert!(a.strips.iter().filter(|s| !s.own).all(|s| s.family_id != w.family_id), "a family of its own");
+        assert_eq!((w.outfit_only(), st.outfit_only()), (Some("alt"), None));
+        // A name the other side has is refused (a step names a strip by name alone).
+        write_own(&d, "stand", None);
+        let e = format!("{:#}", Anim::load(&d, 8).unwrap_err());
+        assert!(e.contains("anim strip `stand`: another side has a strip of that name"), "{e}");
         std::fs::remove_dir_all(&d).ok();
     }
 

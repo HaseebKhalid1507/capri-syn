@@ -1,0 +1,835 @@
+{
+ "id": "no-jacket",
+ "about": "Her no-jacket look (make-pack -> outfits/no-jacket/sprites.json): CapriCore v1.2.2's redraws, by the pack's frame ids. `from` is the v1.2.2 file (tools/capricore-v1.2.2.sha256); `standIn` marks a frame v1.2.2 no longer draws, shown in this look by its nearest redraw. The headpat faces are the pack's own (v1.0.4) headpat face, moved onto these faces.",
+ "sprites": [
+  {
+   "id": "neutral",
+   "from": "assets/capri/sprites/v1/capri-neutral.png",
+   "anchor": {
+    "name": "ground",
+    "x": 627,
+    "y": 1166
+   },
+   "visibleBounds": {
+    "x": 210,
+    "y": 115,
+    "width": 835,
+    "height": 1052
+   }
+  },
+  {
+   "id": "annoyed",
+   "from": "assets/capri/sprites/v1/capri-idle-annoyed.png",
+   "anchor": {
+    "name": "ground",
+    "x": 627,
+    "y": 1166
+   },
+   "visibleBounds": {
+    "x": 210,
+    "y": 115,
+    "width": 835,
+    "height": 1052
+   }
+  },
+  {
+   "id": "attentive",
+   "from": "assets/capri/sprites/v1/capri-idle-attentive.png",
+   "anchor": {
+    "name": "ground",
+    "x": 627,
+    "y": 1166
+   },
+   "visibleBounds": {
+    "x": 210,
+    "y": 115,
+    "width": 835,
+    "height": 1052
+   }
+  },
+  {
+   "id": "idle-blink_closed",
+   "from": "assets/capri/sprites/v1/capri-idle-blink_closed.png",
+   "anchor": {
+    "name": "ground",
+    "x": 627,
+    "y": 1166
+   },
+   "visibleBounds": {
+    "x": 210,
+    "y": 115,
+    "width": 835,
+    "height": 1052
+   }
+  },
+  {
+   "id": "idle-blink_half",
+   "from": "assets/capri/sprites/v1/capri-idle-blink_half.png",
+   "anchor": {
+    "name": "ground",
+    "x": 627,
+    "y": 1166
+   },
+   "visibleBounds": {
+    "x": 210,
+    "y": 115,
+    "width": 835,
+    "height": 1052
+   }
+  },
+  {
+   "id": "concerned",
+   "from": "assets/capri/sprites/v1/capri-idle-concerned.png",
+   "anchor": {
+    "name": "ground",
+    "x": 627,
+    "y": 1166
+   },
+   "visibleBounds": {
+    "x": 210,
+    "y": 115,
+    "width": 835,
+    "height": 1052
+   }
+  },
+  {
+   "id": "embarrassed",
+   "from": "assets/capri/sprites/v1/capri-idle-embarrassed.png",
+   "anchor": {
+    "name": "ground",
+    "x": 627,
+    "y": 1166
+   },
+   "visibleBounds": {
+    "x": 210,
+    "y": 115,
+    "width": 835,
+    "height": 1052
+   }
+  },
+  {
+   "id": "idle-excited",
+   "from": "assets/capri/sprites/v1/capri-idle-excited.png",
+   "anchor": {
+    "name": "ground",
+    "x": 627,
+    "y": 1166
+   },
+   "visibleBounds": {
+    "x": 210,
+    "y": 115,
+    "width": 835,
+    "height": 1052
+   }
+  },
+  {
+   "id": "flirty",
+   "from": "assets/capri/sprites/v1/capri-idle-flirty.png",
+   "anchor": {
+    "name": "ground",
+    "x": 627,
+    "y": 1166
+   },
+   "visibleBounds": {
+    "x": 210,
+    "y": 115,
+    "width": 835,
+    "height": 1052
+   }
+  },
+  {
+   "id": "focused",
+   "from": "assets/capri/sprites/v1/capri-idle-focused.png",
+   "anchor": {
+    "name": "ground",
+    "x": 627,
+    "y": 1166
+   },
+   "visibleBounds": {
+    "x": 210,
+    "y": 115,
+    "width": 835,
+    "height": 1052
+   }
+  },
+  {
+   "id": "happy",
+   "from": "assets/capri/sprites/v1/capri-idle-happy.png",
+   "anchor": {
+    "name": "ground",
+    "x": 627,
+    "y": 1166
+   },
+   "visibleBounds": {
+    "x": 210,
+    "y": 115,
+    "width": 835,
+    "height": 1052
+   }
+  },
+  {
+   "id": "idle-laughing",
+   "from": "assets/capri/sprites/v1/capri-idle-laughing.png",
+   "anchor": {
+    "name": "ground",
+    "x": 627,
+    "y": 1166
+   },
+   "visibleBounds": {
+    "x": 210,
+    "y": 115,
+    "width": 835,
+    "height": 1052
+   }
+  },
+  {
+   "id": "idle-look_down",
+   "from": "assets/capri/sprites/v1/capri-idle-look_down.png",
+   "anchor": {
+    "name": "ground",
+    "x": 627,
+    "y": 1166
+   },
+   "visibleBounds": {
+    "x": 210,
+    "y": 115,
+    "width": 835,
+    "height": 1052
+   }
+  },
+  {
+   "id": "idle-look_left",
+   "from": "assets/capri/sprites/v1/capri-idle-look_left.png",
+   "anchor": {
+    "name": "ground",
+    "x": 627,
+    "y": 1166
+   },
+   "visibleBounds": {
+    "x": 210,
+    "y": 115,
+    "width": 835,
+    "height": 1052
+   }
+  },
+  {
+   "id": "idle-look_right",
+   "from": "assets/capri/sprites/v1/capri-idle-look_right.png",
+   "anchor": {
+    "name": "ground",
+    "x": 627,
+    "y": 1166
+   },
+   "visibleBounds": {
+    "x": 210,
+    "y": 115,
+    "width": 835,
+    "height": 1052
+   }
+  },
+  {
+   "id": "idle-look_up",
+   "from": "assets/capri/sprites/v1/capri-idle-look_up.png",
+   "anchor": {
+    "name": "ground",
+    "x": 627,
+    "y": 1166
+   },
+   "visibleBounds": {
+    "x": 210,
+    "y": 115,
+    "width": 835,
+    "height": 1052
+   }
+  },
+  {
+   "id": "idle-mouth_round",
+   "from": "assets/capri/sprites/v1/capri-idle-mouth_round.png",
+   "anchor": {
+    "name": "ground",
+    "x": 627,
+    "y": 1166
+   },
+   "visibleBounds": {
+    "x": 210,
+    "y": 115,
+    "width": 835,
+    "height": 1052
+   }
+  },
+  {
+   "id": "idle-mouth_small",
+   "from": "assets/capri/sprites/v1/capri-idle-mouth_small.png",
+   "anchor": {
+    "name": "ground",
+    "x": 627,
+    "y": 1166
+   },
+   "visibleBounds": {
+    "x": 210,
+    "y": 115,
+    "width": 835,
+    "height": 1052
+   }
+  },
+  {
+   "id": "idle-mouth_wide",
+   "from": "assets/capri/sprites/v1/capri-idle-mouth_wide.png",
+   "anchor": {
+    "name": "ground",
+    "x": 627,
+    "y": 1166
+   },
+   "visibleBounds": {
+    "x": 210,
+    "y": 115,
+    "width": 835,
+    "height": 1052
+   }
+  },
+  {
+   "id": "sad",
+   "from": "assets/capri/sprites/v1/capri-idle-sad.png",
+   "anchor": {
+    "name": "ground",
+    "x": 627,
+    "y": 1166
+   },
+   "visibleBounds": {
+    "x": 210,
+    "y": 115,
+    "width": 835,
+    "height": 1052
+   }
+  },
+  {
+   "id": "skeptical",
+   "from": "assets/capri/sprites/v1/capri-idle-skeptical.png",
+   "anchor": {
+    "name": "ground",
+    "x": 627,
+    "y": 1166
+   },
+   "visibleBounds": {
+    "x": 210,
+    "y": 115,
+    "width": 835,
+    "height": 1052
+   }
+  },
+  {
+   "id": "sleepy",
+   "from": "assets/capri/sprites/v1/capri-idle-sleepy.png",
+   "anchor": {
+    "name": "ground",
+    "x": 627,
+    "y": 1166
+   },
+   "visibleBounds": {
+    "x": 210,
+    "y": 115,
+    "width": 835,
+    "height": 1052
+   }
+  },
+  {
+   "id": "smirk",
+   "from": "assets/capri/sprites/v1/capri-idle-smirk.png",
+   "anchor": {
+    "name": "ground",
+    "x": 627,
+    "y": 1166
+   },
+   "visibleBounds": {
+    "x": 210,
+    "y": 115,
+    "width": 835,
+    "height": 1052
+   }
+  },
+  {
+   "id": "idle-surprised_closed",
+   "from": "assets/capri/sprites/v1/capri-idle-surprised_closed.png",
+   "anchor": {
+    "name": "ground",
+    "x": 627,
+    "y": 1166
+   },
+   "visibleBounds": {
+    "x": 210,
+    "y": 115,
+    "width": 835,
+    "height": 1052
+   }
+  },
+  {
+   "id": "surprised",
+   "from": "assets/capri/sprites/v1/capri-idle-surprised.png",
+   "anchor": {
+    "name": "ground",
+    "x": 627,
+    "y": 1166
+   },
+   "visibleBounds": {
+    "x": 210,
+    "y": 115,
+    "width": 835,
+    "height": 1052
+   }
+  },
+  {
+   "id": "thinking",
+   "from": "assets/capri/sprites/v1/capri-idle-thinking.png",
+   "anchor": {
+    "name": "ground",
+    "x": 627,
+    "y": 1166
+   },
+   "visibleBounds": {
+    "x": 210,
+    "y": 115,
+    "width": 835,
+    "height": 1052
+   }
+  },
+  {
+   "id": "idle-wink_closed",
+   "from": "assets/capri/sprites/v1/capri-idle-wink_closed.png",
+   "anchor": {
+    "name": "ground",
+    "x": 627,
+    "y": 1166
+   },
+   "visibleBounds": {
+    "x": 210,
+    "y": 115,
+    "width": 835,
+    "height": 1052
+   }
+  },
+  {
+   "id": "idle-wink_half",
+   "from": "assets/capri/sprites/v1/capri-idle-wink_half.png",
+   "anchor": {
+    "name": "ground",
+    "x": 627,
+    "y": 1166
+   },
+   "visibleBounds": {
+    "x": 210,
+    "y": 115,
+    "width": 835,
+    "height": 1052
+   }
+  },
+  {
+   "id": "arms_crossed-focused",
+   "from": "assets/capri/sprites/v1/capri-idle-focused.png",
+   "anchor": {
+    "name": "ground",
+    "x": 627,
+    "y": 1166
+   },
+   "visibleBounds": {
+    "x": 210,
+    "y": 115,
+    "width": 835,
+    "height": 1052
+   },
+   "standIn": "focused"
+  },
+  {
+   "id": "arms_crossed-annoyed",
+   "from": "assets/capri/sprites/v1/capri-idle-annoyed.png",
+   "anchor": {
+    "name": "ground",
+    "x": 627,
+    "y": 1166
+   },
+   "visibleBounds": {
+    "x": 210,
+    "y": 115,
+    "width": 835,
+    "height": 1052
+   },
+   "standIn": "annoyed"
+  },
+  {
+   "id": "chin_rest-neutral",
+   "from": "assets/capri/sprites/v1/capri-idle-thinking.png",
+   "anchor": {
+    "name": "ground",
+    "x": 627,
+    "y": 1166
+   },
+   "visibleBounds": {
+    "x": 210,
+    "y": 115,
+    "width": 835,
+    "height": 1052
+   },
+   "standIn": "thinking"
+  },
+  {
+   "id": "crouch-surprised",
+   "from": "assets/capri/sprites/v1/capri-idle-annoyed.png",
+   "anchor": {
+    "name": "ground",
+    "x": 627,
+    "y": 1166
+   },
+   "visibleBounds": {
+    "x": 210,
+    "y": 115,
+    "width": 835,
+    "height": 1052
+   },
+   "standIn": "annoyed"
+  },
+  {
+   "id": "hand_on_hip-happy",
+   "from": "assets/capri/sprites/v1/capri-idle-happy.png",
+   "anchor": {
+    "name": "ground",
+    "x": 627,
+    "y": 1166
+   },
+   "visibleBounds": {
+    "x": 210,
+    "y": 115,
+    "width": 835,
+    "height": 1052
+   },
+   "standIn": "happy"
+  },
+  {
+   "id": "lean_in-attentive",
+   "from": "assets/capri/sprites/v1/capri-idle-attentive.png",
+   "anchor": {
+    "name": "ground",
+    "x": 627,
+    "y": 1166
+   },
+   "visibleBounds": {
+    "x": 210,
+    "y": 115,
+    "width": 835,
+    "height": 1052
+   },
+   "standIn": "attentive"
+  },
+  {
+   "id": "recline-sleepy",
+   "from": "assets/capri/sprites/v1/capri-idle-sleepy.png",
+   "anchor": {
+    "name": "ground",
+    "x": 627,
+    "y": 1166
+   },
+   "visibleBounds": {
+    "x": 210,
+    "y": 115,
+    "width": 835,
+    "height": 1052
+   },
+   "standIn": "sleepy"
+  },
+  {
+   "id": "sit_floor-neutral",
+   "from": "assets/capri/sprites/poses-v2/PNG/capri-sit-floor.png",
+   "anchor": {
+    "name": "ground",
+    "x": 627,
+    "y": 1166
+   },
+   "visibleBounds": {
+    "x": 186,
+    "y": 255,
+    "width": 884,
+    "height": 911
+   },
+   "standIn": "pose-sit-floor"
+  },
+  {
+   "id": "sit_floor-sleepy",
+   "from": "assets/capri/sprites/poses-v2/PNG/capri-sleep.png",
+   "anchor": {
+    "name": "ground",
+    "x": 627,
+    "y": 1166
+   },
+   "visibleBounds": {
+    "x": 76,
+    "y": 709,
+    "width": 1102,
+    "height": 457
+   },
+   "standIn": "pose-sleep"
+  },
+  {
+   "id": "transition-stand_crouch",
+   "from": "assets/capri/sprites/poses-v2/PNG/capri-crouch.png",
+   "anchor": {
+    "name": "ground",
+    "x": 627,
+    "y": 1166
+   },
+   "visibleBounds": {
+    "x": 225,
+    "y": 333,
+    "width": 803,
+    "height": 834
+   },
+   "standIn": "pose-crouch"
+  },
+  {
+   "id": "pose-sit-edge",
+   "from": "assets/capri/sprites/poses-v2/PNG/capri-sit-edge.png",
+   "anchor": {
+    "name": "seat",
+    "x": 599,
+    "y": 773
+   },
+   "visibleBounds": {
+    "x": 183,
+    "y": 110,
+    "width": 887,
+    "height": 1067
+   }
+  },
+  {
+   "id": "pose-ceiling",
+   "from": "assets/capri/sprites/poses-v2/PNG/capri-ceiling.png",
+   "anchor": {
+    "name": "ceiling",
+    "x": 615,
+    "y": 111
+   },
+   "visibleBounds": {
+    "x": 208,
+    "y": 75,
+    "width": 836,
+    "height": 1102
+   }
+  },
+  {
+   "id": "pose-ceiling-upside-down",
+   "from": "assets/capri/sprites/poses-v2/PNG/capri-ceiling-upside-down.png",
+   "anchor": {
+    "name": "ceiling-upside-down",
+    "x": 629,
+    "y": 94
+   },
+   "visibleBounds": {
+    "x": 201,
+    "y": 84,
+    "width": 851,
+    "height": 933
+   }
+  },
+  {
+   "id": "pose-dock-left",
+   "from": "assets/capri/sprites/poses-v2/PNG/capri-dock-left.png",
+   "anchor": {
+    "name": "dock-left",
+    "x": 239,
+    "y": 555
+   },
+   "visibleBounds": {
+    "x": 219,
+    "y": 76,
+    "width": 815,
+    "height": 1101
+   }
+  },
+  {
+   "id": "pose-dock-right",
+   "from": "assets/capri/sprites/poses-v2/PNG/capri-dock-right.png",
+   "anchor": {
+    "name": "dock-right",
+    "x": 994,
+    "y": 505
+   },
+   "visibleBounds": {
+    "x": 212,
+    "y": 75,
+    "width": 831,
+    "height": 1103
+   }
+  },
+  {
+   "id": "pose-crouch",
+   "from": "assets/capri/sprites/poses-v2/PNG/capri-crouch.png",
+   "anchor": {
+    "name": "ground",
+    "x": 627,
+    "y": 1166
+   },
+   "visibleBounds": {
+    "x": 225,
+    "y": 333,
+    "width": 803,
+    "height": 834
+   }
+  },
+  {
+   "id": "pose-sit-floor",
+   "from": "assets/capri/sprites/poses-v2/PNG/capri-sit-floor.png",
+   "anchor": {
+    "name": "ground",
+    "x": 627,
+    "y": 1166
+   },
+   "visibleBounds": {
+    "x": 186,
+    "y": 255,
+    "width": 884,
+    "height": 911
+   }
+  },
+  {
+   "id": "pose-sleep",
+   "from": "assets/capri/sprites/poses-v2/PNG/capri-sleep.png",
+   "anchor": {
+    "name": "ground",
+    "x": 627,
+    "y": 1166
+   },
+   "visibleBounds": {
+    "x": 76,
+    "y": 709,
+    "width": 1102,
+    "height": 457
+   }
+  },
+  {
+   "id": "pose-sleep-seat",
+   "from": "assets/capri/sprites/poses-v2/PNG/capri-sleep.png",
+   "anchor": {
+    "name": "seat",
+    "x": 627,
+    "y": 1166
+   },
+   "visibleBounds": {
+    "x": 76,
+    "y": 709,
+    "width": 1102,
+    "height": 457
+   }
+  },
+  {
+   "id": "pose-crouch-seat",
+   "from": "assets/capri/sprites/poses-v2/PNG/capri-crouch.png",
+   "anchor": {
+    "name": "seat",
+    "x": 627,
+    "y": 1166
+   },
+   "visibleBounds": {
+    "x": 225,
+    "y": 333,
+    "width": 803,
+    "height": 834
+   }
+  },
+  {
+   "id": "music-window",
+   "from": "assets/default/capri-music-v1/capri-music-window.png",
+   "anchor": {
+    "name": "seat",
+    "x": 650,
+    "y": 762
+   },
+   "visibleBounds": {
+    "x": 188,
+    "y": 75,
+    "width": 877,
+    "height": 1090
+   }
+  },
+  {
+   "id": "music-floor",
+   "from": "assets/default/capri-music-v1/capri-music-floor.png",
+   "anchor": {
+    "name": "ground",
+    "x": 627,
+    "y": 1166
+   },
+   "visibleBounds": {
+    "x": 207,
+    "y": 295,
+    "width": 840,
+    "height": 871
+   }
+  },
+  {
+   "id": "intro-wink",
+   "from": "assets/capri/intro-v1/PNG/06-wink.png",
+   "anchor": {
+    "name": "ground",
+    "x": 627,
+    "y": 1166
+   },
+   "visibleBounds": {
+    "x": 207,
+    "y": 114,
+    "width": 840,
+    "height": 1054
+   }
+  },
+  {
+   "id": "headpat",
+   "from": "assets/capri/sprites/v1/capri-neutral.png",
+   "anchor": {
+    "name": "ground",
+    "x": 627,
+    "y": 1166
+   },
+   "visibleBounds": {
+    "x": 210,
+    "y": 115,
+    "width": 835,
+    "height": 1052
+   },
+   "patch": {
+    "file": "capri-headpat.png",
+    "rect": {
+     "x": 560,
+     "y": 318,
+     "width": 165,
+     "height": 125
+    },
+    "dx": -13,
+    "dy": 0,
+    "sha256": "05b4e109a921f9c48e14535d396e4afcae75d6cb161bc09f7e82f53a9f0bb181"
+   }
+  },
+  {
+   "id": "perch-headpat",
+   "from": "assets/capri/sprites/poses-v2/PNG/capri-sit-edge.png",
+   "anchor": {
+    "name": "seat",
+    "x": 599,
+    "y": 773
+   },
+   "visibleBounds": {
+    "x": 183,
+    "y": 110,
+    "width": 887,
+    "height": 1067
+   },
+   "patch": {
+    "file": "capri-headpat.png",
+    "rect": {
+     "x": 560,
+     "y": 318,
+     "width": 165,
+     "height": 125
+    },
+    "dx": -20,
+    "dy": 17,
+    "sha256": "05b4e109a921f9c48e14535d396e4afcae75d6cb161bc09f7e82f53a9f0bb181"
+   }
+  }
+ ]
+}

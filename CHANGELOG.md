@@ -19,6 +19,13 @@
 - Animated WebP strips are refused past 4096 px a side, 8 Mpx, 1000 frames or 512 MiB decoded; a cel
   sheet's `keys` and per-frame `ms` hold wherever the strip plays. `--check` names the strips played
   as clips.
+- A strip drawn for one outfit and named like a catalog clip plays in its place in that outfit; a step
+  may hold one cell of a strip (`<strip>#<cell>`); an outfit's sprite may take a `patch`; anim.json may
+  carry the pack's own animations (a `capricore` side, a family `scale`), cut to with no seam. An
+  arrival alternative the worn look doesn't draw is never picked.
+- **Capri's pack fills them from CapriCore v1.2.2** (`make-pack`, pinned at `828f272`): her wave, the
+  hanging pull-up, catch and wrist-scan cels, the keytar on a window top while music plays, and her
+  no-jacket look as a second outfit (the jacket look waves with its own clip; the keytar plays in both).
 
 ## 1.1.1 (2026-11-20)
 

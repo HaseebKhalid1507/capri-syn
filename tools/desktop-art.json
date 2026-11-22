@@ -1,6 +1,6 @@
 {
  "schemaVersion": 1,
- "about": "capri-syn's own measurements of the capri-desktop art (cell grid, anchors, loop/one-shot), taken from the PNGs at the pinned commits. Anchors and bounds are in cell px; x/y from the cell's top-left; bounds [x, y, w, h] = the union of every cell's opaque box. A laydown anchor's x is the figure's middle (edgeX: where her hanging leg leaves the surface). faces: the side her face looks to, unmirrored. fpsFrom 'clips.json' = lachy's quest clips.json lists the same frame count and cell width; 'guess' = ours. mirrorArt: the strip drawn for mirroring (same silhouette, the suit's asymmetric details swapped): when she faces the other way, draw mirror(mirrorArt), not mirror(strip). contact (seat and surface strips): on a window top, below cell row `line` only the columns `legs` [x0, x1) stay, the lower legs hanging over the edge; the window's front face hides the rest (a hand, the mane, an arm). glitchCells: cells with a chroma ghost drawn in (violet px > 2.5x the strip's median and > 1500 over it, measured on the pinned PNGs); a loop she holds skips them.",
+ "about": "capri-syn's own measurements of the capri-desktop art (cell grid, anchors, loop/one-shot), taken from the PNGs at the pinned commits. Anchors and bounds are in cell px; x/y from the cell's top-left; bounds [x, y, w, h] = the union of every cell's opaque box. A laydown anchor's x is the figure's middle (edgeX: where her hanging leg leaves the surface). faces: the side her face looks to, unmirrored. fpsFrom 'clips.json' = lachy's quest clips.json lists the same frame count and cell width; 'guess' = ours. mirrorArt: the strip drawn for mirroring (same silhouette, the suit's asymmetric details swapped): when she faces the other way, draw mirror(mirrorArt), not mirror(strip). contact (seat and surface strips): on a window top, below cell row `line` only the columns `legs` [x0, x1) stay, the lower legs hanging over the edge; the window's front face hides the rest (a hand, the mane, an arm). glitchCells: cells with a chroma ghost drawn in (violet px > 2.5x the strip's median and > 1500 over it, measured on the pinned PNGs); a loop she holds skips them. capricore: CapriCore v1.2.2's own animations, drawn on her canvas (scale: canvas px per cell px; the cels are 512 px cells of the 1254 canvas). Its cel actions play cell by cell from moods.json (`<strip>#<cell>`, CapriCore's own timings: apps/desktop/renderer/hanging-cels.mjs); anchors are the v1.2.2 poses' (pose-ceiling's grip as the pack registers it, pose-sit-edge's seat) over the scale.",
  "lachy": {
   "repo": "https://github.com/lachydotmcg/capri-desktop",
   "commit": "156ed188a2ac00854eb1c9e932087eb5e824ccb9",
@@ -1528,5 +1528,210 @@
   "root": "assets/capri",
   "localOnly": true,
   "note": "Show frames, a fan cut-out and fan art: local personal use only. make-pack lists the copied files (name, sha256, kind by name: capri-cutout/capri-full = cutout, capri-face/face-* = face, cutin-* = cutin, intro-* = intro)."
+ },
+ "capricore": {
+  "repo": "CapriChooms/CapriCore",
+  "commit": "828f27243df3d1b9669cbe1a5d16633b68c1108a",
+  "root": "assets/default/",
+  "families": {
+   "wave": {
+    "scale": 1.0
+   },
+   "cel": {
+    "scale": 2.44921875
+   }
+  },
+  "strips": {
+   "wave": {
+    "file": "capri-wave.webp",
+    "animated": true,
+    "family": "wave",
+    "outfit": "no-jacket",
+    "anchor": {
+     "name": "feet",
+     "x": 627,
+     "y": 1166
+    },
+    "bounds": [
+     205,
+     113,
+     842,
+     1055
+    ]
+   },
+   "hang_pullup": {
+    "file": "hanging-cels/hang-pullup.webp",
+    "grid": [
+     3,
+     2
+    ],
+    "cell": [
+     512,
+     512
+    ],
+    "fps": 10,
+    "family": "cel",
+    "outfit": "no-jacket",
+    "anchor": {
+     "name": "ceiling",
+     "x": 256,
+     "y": 45
+    },
+    "bounds": [
+     81,
+     28,
+     350,
+     469
+    ]
+   },
+   "hang_pullup_bd": {
+    "file": "hanging-cels/hang-pullup-breakdowns.webp",
+    "grid": [
+     3,
+     2
+    ],
+    "cell": [
+     512,
+     512
+    ],
+    "fps": 10,
+    "family": "cel",
+    "outfit": "no-jacket",
+    "anchor": {
+     "name": "ceiling",
+     "x": 256,
+     "y": 45
+    },
+    "bounds": [
+     86,
+     28,
+     338,
+     470
+    ]
+   },
+   "hang_catch": {
+    "file": "hanging-cels/hang-catch.webp",
+    "grid": [
+     3,
+     2
+    ],
+    "cell": [
+     512,
+     512
+    ],
+    "fps": 10,
+    "family": "cel",
+    "outfit": "no-jacket",
+    "anchor": {
+     "name": "ceiling",
+     "x": 256,
+     "y": 45
+    },
+    "bounds": [
+     88,
+     28,
+     382,
+     461
+    ]
+   },
+   "hang_catch_bd": {
+    "file": "hanging-cels/hang-catch-breakdowns.webp",
+    "grid": [
+     3,
+     2
+    ],
+    "cell": [
+     512,
+     512
+    ],
+    "fps": 10,
+    "family": "cel",
+    "outfit": "no-jacket",
+    "anchor": {
+     "name": "ceiling",
+     "x": 256,
+     "y": 45
+    },
+    "bounds": [
+     98,
+     26,
+     357,
+     462
+    ]
+   },
+   "hang_wrist_scan": {
+    "file": "hanging-cels/hang-wrist-scan.webp",
+    "grid": [
+     3,
+     2
+    ],
+    "cell": [
+     512,
+     512
+    ],
+    "fps": 10,
+    "family": "cel",
+    "outfit": "no-jacket",
+    "anchor": {
+     "name": "ceiling",
+     "x": 256,
+     "y": 45
+    },
+    "bounds": [
+     83,
+     29,
+     381,
+     454
+    ]
+   },
+   "ledge_keytar": {
+    "file": "hanging-cels/ledge-keytar.webp",
+    "grid": [
+     3,
+     2
+    ],
+    "cell": [
+     512,
+     512
+    ],
+    "fps": 10,
+    "family": "cel",
+    "anchor": {
+     "name": "seat",
+     "x": 245,
+     "y": 316
+    },
+    "bounds": [
+     31,
+     45,
+     416,
+     443
+    ]
+   },
+   "ledge_keytar_bd": {
+    "file": "hanging-cels/ledge-keytar-breakdowns.webp",
+    "grid": [
+     3,
+     2
+    ],
+    "cell": [
+     512,
+     512
+    ],
+    "fps": 10,
+    "family": "cel",
+    "anchor": {
+     "name": "seat",
+     "x": 245,
+     "y": 316
+    },
+    "bounds": [
+     51,
+     39,
+     374,
+     447
+    ]
+   }
+  }
  }
 }

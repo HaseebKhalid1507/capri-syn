@@ -35,7 +35,7 @@ install -m 644 "$src/installer/manifest" "$l/installer/manifest"
 install -m 644 "$src/packs/capri/moods.json" "$src/packs/capri/persona.md" "$l/packs/capri/"
 # make-pack and everything it reads (its pins, the desktop art's geometry, the hair recolour).
 install -m 755 "$src/tools/make-pack" "$l/tools/"
-install -m 644 "$src"/tools/*.sha256 "$src/tools/desktop-art.json" "$src/tools/mochi_hair.py" "$l/tools/"
+install -m 644 "$src"/tools/*.sha256 "$src/tools/desktop-art.json" "$src/tools/capricore-outfit.json" "$src/tools/mochi_hair.py" "$l/tools/"
 # Voice, watch and the remote helper (installed into bin/ by --voice / --watch).
 install -m 755 "$src/tools/capri-voice" "$src/tools/capri-voice-setup" "$src/tools/synaps-avatar-remote" "$l/tools/"
 install -m 644 "$src/tools/wake/hey-capri-v1.npz" "$src/tools/wake/NOTICE" "$l/tools/wake/"

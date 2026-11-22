@@ -849,7 +849,7 @@ step_pack() {
 
     # Up to date: same make-pack, pins, moods, persona and flags as last time, and it still checks.
     local fp
-    fp=$({ cat "$LIB/tools/make-pack" "$LIB"/tools/*.sha256 "$LIB/tools/desktop-art.json" "$LIB/packs/capri/moods.json" \
+    fp=$({ cat "$LIB/tools/make-pack" "$LIB"/tools/*.sha256 "$LIB/tools/desktop-art.json" "$LIB/tools/capricore-outfit.json" "$LIB/packs/capri/moods.json" \
         "$LIB/packs/capri/persona.md" 2>/dev/null || true; } | sha256sum | cut -c1-16)-$LOCAL_ART
     if [ "$DRY" = 0 ] && [ "$(meta pack)" = "$fp" ] && [ -f "$PACK/sprites.json" ] &&
         "$BIN/synaps-avatar" --pack "$PACK" --check >/dev/null 2>&1; then

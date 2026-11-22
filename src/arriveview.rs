@@ -104,6 +104,16 @@ pub(super) fn other_than(n: usize, last: Option<usize>, rng: &mut crate::anim::R
     }
 }
 
+/// One of the drawings `drawn` marks, never `last` again unless it's the only one.
+pub(super) fn pick_drawn(drawn: &[bool], last: Option<usize>, rng: &mut crate::anim::Rng) -> Option<usize> {
+    let ok: Vec<usize> = (0..drawn.len()).filter(|&i| drawn[i]).collect();
+    if ok.is_empty() {
+        return None;
+    }
+    let last = last.and_then(|l| ok.iter().position(|&i| i == l));
+    Some(ok[other_than(ok.len(), last, rng)])
+}
+
 impl ArriveState {
     /// An arrival sequence waits for her to appear.
     pub(super) fn pending(&self) -> bool {
@@ -183,8 +193,8 @@ impl Avatar {
         }
     }
 
-    /// Arrival `key`'s steps: its own (`own`) or one of `arrive.alt.<key>`, never the same
-    /// drawing twice running. Without alternatives: `own`.
+    /// Arrival `key`'s steps: its own (`own`) or one of `arrive.alt.<key>` the look she wears
+    /// draws, never the same drawing twice running. Without alternatives: `own`.
     fn arrive_alt(&mut self, key: &'static str, own: &[Step]) -> Vec<Step> {
         let alts = self.pack.behaviour.arrive.as_ref().and_then(|a| a.alt.get(key)).filter(|v| !v.is_empty()).cloned();
         let Some(alts) = alts else { return own.to_vec() };
@@ -193,7 +203,9 @@ impl Avatar {
             all.push(own.to_vec());
         }
         all.extend(alts);
-        let i = other_than(all.len(), self.arrive.alt_last.get(key).copied(), &mut self.rng);
+        // Only the drawings the look she wears draws (any other is skipped whole in it).
+        let drawn: Vec<bool> = all.iter().map(|s| !self.pack.flatten(s).is_empty()).collect();
+        let Some(i) = pick_drawn(&drawn, self.arrive.alt_last.get(key).copied(), &mut self.rng) else { return own.to_vec() };
         self.arrive.alt_last.insert(key, i);
         all.swap_remove(i)
     }
@@ -826,6 +838,20 @@ mod tests {
         }
         assert!(seen.iter().all(|&n| n > 60), "{seen:?}");
         assert_eq!(other_than(1, Some(0), &mut rng), 0, "one drawing: that one");
+    }
+
+    #[test]
+    fn an_arrival_drawing_the_look_doesnt_draw_is_never_picked() {
+        let mut rng = Rng::new(5);
+        let drawn = [true, false, true, false];
+        let mut last = None;
+        for _ in 0..200 {
+            let i = pick_drawn(&drawn, last, &mut rng).unwrap();
+            assert!(drawn[i] && Some(i) != last, "{i} after {last:?}");
+            last = Some(i);
+        }
+        assert_eq!(pick_drawn(&[false, true], Some(1), &mut rng), Some(1), "the only one drawn, even again");
+        assert_eq!(pick_drawn(&[false, false], None, &mut rng), None, "none drawn: the key's own steps");
     }
 
     #[test]

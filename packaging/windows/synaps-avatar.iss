@@ -107,6 +107,7 @@ Source: "..\..\tools\make-pack"; DestDir: "{app}\steps\tools"; Flags: ignorevers
 Source: "..\..\tools\capricore-*.sha256"; DestDir: "{app}\steps\tools"; Flags: ignoreversion
 Source: "..\..\tools\lachy-desktop-*.sha256"; DestDir: "{app}\steps\tools"; Flags: ignoreversion
 Source: "..\..\tools\desktop-art.json"; DestDir: "{app}\steps\tools"; Flags: ignoreversion
+Source: "..\..\tools\capricore-outfit.json"; DestDir: "{app}\steps\tools"; Flags: ignoreversion
 Source: "..\..\packs\capri\moods.json"; DestDir: "{app}\steps\packs\capri"; Flags: ignoreversion
 Source: "..\..\packs\capri\persona.md"; DestDir: "{app}\steps\packs\capri"; Flags: ignoreversion
 Source: "{#Exe}"; DestDir: "{app}"; Flags: ignoreversion

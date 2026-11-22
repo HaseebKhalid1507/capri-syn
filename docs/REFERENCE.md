@@ -501,6 +501,11 @@ file it copies against `tools/capricore-v1.0.4.sha256` (1.1.x retired and redrew
 behaviour uses). One frame comes from v1.1.2 (`bb0c2d7`): `pose-sleep`, checked against its own pinned
 sha256. It's read from the checkout's git objects when they have it (`git fetch --tags`), else downloaded
 from GitHub at that commit, or given with `--sleep FILE`. It needs `fonttools` for the Exo 2 instances.
+Beside them, from v1.2.2 (`828f272`, pinned in `tools/capricore-v1.2.2.sha256`, found the same way or
+given with `--v122 DIR`): her wave and the hanging and ledge cels into `anim/capricore/` (anim.json's
+`capricore` side, geometry in `tools/desktop-art.json`), and the no-jacket redraws as her second outfit
+in `outfits/no-jacket/` (`tools/capricore-outfit.json`: which redraw draws which frame, stand-ins where
+v1.2.2 has none, and patches). Its notice is appended to the pack's NOTICE.
 `python3 tools/test_make_pack.py` tests it on fake checkouts.
 
 Optional desktop art, into the pack's `anim/` (a pack without it loads as before):
@@ -671,7 +676,10 @@ squash of an emote, the pack's own arrival). While she sleeps, the strips in `br
 `greetMorning`, `napWakeGreet` and `napWake` are kept ready, so she wakes into them; the
 strips in `brain.glance` stay once they are in. A step naming a clip the catalog doesn't have
 used to fail validation; if it names a strip it now plays that strip: `--check` prints the
-strips played as clips.
+strips played as clips. A strip tagged for one outfit and named like a catalog clip or action is
+that outfit's drawing of it: it plays in its place while she wears that outfit, the catalog's
+elsewhere. A held frame may be one cell of a strip, `{"frame": "<strip>#<cell>", "ms": 120}`
+(cell: the position in its `order`): the strip's cells become frames, registered by its anchor.
 
 **Strip loaders** (`anim/anim.json` strip entries, under the side's `strips` as today; old entries load as before):
 
@@ -687,13 +695,19 @@ strips played as clips.
 | `outfit` | the outfit (`variants.outfits` id) this strip is drawn in; absent or `any`: every outfit |
 | `entry` / `exit` | on a strip with `loop: true`: how many positions at its start play once as she goes into it, and how many at its end play once as it ends in place; only the positions between loop (absent: 0, the whole strip loops as before). Wherever the engine loops the strip itself: a pool variant's base, talk and music loops, the dance (its loop fitted to the tempo, the entry and exit at the drawing's pace), the walk (in once, the loop for as long as fits, out once, ending as she arrives; a walk too short for both drops the entry, one shorter than the exit plays the loop alone) and the dangle (in once, then the loop; it only ends in a drop, a cut). Thinned (`every`, `keys`), what's left of each part stays in it. Named as a clip in steps, the strip plays whole and the list's own range governs. `--check`: an `entry`/`exit` on a strip without `loop: true`, or one that leaves nothing to loop, is an error |
 
+A family may give `scale` (canvas px per cell px) instead of sizing against `stand.bodyPx`. Beside
+`lachy`, anim.json may have a `capricore` side (`anim/capricore/`, same schema): the pack's own
+source's animations, drawn on its canvas. A cut to or from its strips is no seam (they are the
+pack's art), and a strip name may be on one side only.
+
 Sheets may be PNG or WebP (by their magic), and so may catalog frames. Decoding uses the `image`
 crate's PNG and WebP decoders on every platform.
 
 **Outfits** (`variants.outfits`): `[{"id": "main"}, {"id": "alt", "weight": 1, "sprites": "outfits/alt/sprites.json"}]`.
 An outfit without `sprites` is the pack's own frames (absent: one called `pack` leads, weight 1).
 `sprites` is a catalog in `sprites.json`'s schema on the pack's canvas whose ids are the pack's
-frame ids (catalog sprites and extra frames), its files beside it. Rules:
+frame ids (catalog sprites and extra frames), its files beside it; a sprite may take a `patch`
+like an extra frame's (its file from the pack's root). Rules:
 
 - She changes outfit on her own about every 45-120 min (weighted, never into the one she wears):
   the other look decodes off the main thread (only the frames it or the look she wears draws,
@@ -772,7 +786,7 @@ held to 64 as it plays too); a key other than `entry`, `loop`, `exit`,
 | `idle.pose.*` | `life.poses` (`{"lean": [...], "sit_floor": [...]}`): in, a hold, out, in place; counted as gestures among her idle beats | the activities' gestures |
 | expressions | `life.fidgets` (and per band `energy.<band>.fidgets`): a rotation pool of short beats (blinks, looks, mouths, winks, sleepy blinks), never the same twice running | the activities' face beats |
 | `perch.fidget.*` | `perch.activities`: beats while she sits on a window top. Filling it opts a pack in; empty keeps one perch frame (§6.2) | one perch frame |
-| alternate intro frames | `arrive.alt` (`{"launch": [[...], [...]], "cinematic": ..., "teleport": ..., "perch": ...}`): each arrival picks among its own steps and these, never the same twice running; `summon` is accepted like `arrive.summon` | the key's own steps |
+| alternate intro frames | `arrive.alt` (`{"launch": [[...], [...]], "cinematic": ..., "teleport": ..., "perch": ...}`): each arrival picks among its own steps and these (those the look she wears draws), never the same twice running; `summon` is accepted like `arrive.summon` | the key's own steps |
 | effect sprites (hearts) | a catalog sprite or extra frame with `kind: "effect"` (an overlay, never one of her frames), named by `click.hearts`: every heart burst (a headpat, the kiss, a happy emote) draws its outline in its colour over a white rim, through the hearts' effect layers on every platform | the drawn hearts |
 | portrait | `anim/anim.json` stills `face` (the Line) and `capri` (the menu header, the notification image) | none shown |
 
