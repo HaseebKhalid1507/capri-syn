@@ -1008,11 +1008,22 @@ $Scenes.bubble['stub-busy'] = {
     if (-not (Wait-Until { (State).read } 40 'READ: her reply gone long')) { $script:Fails.Add("${script:Take}: her reply never went long (no READ)") }
     Start-Sleep -Milliseconds 500
     $null = Ctl 'reader open'
-    Start-Sleep 1.5
+    Start-Sleep 1
+    # Settled, so Test-Keys checks its keys: its count in its widest digits and never narrower
+    # while open, the stub holds still as lines come.
+    Wait-Settled 'the stub'
     Shot 'stub' 'the reader open mid-turn: ABORT and CLOSE READER'
     $null = Ctl 'reader close'
     Start-Sleep 1
+    Wait-Settled 'the reply, the reader closed'
     Shot 'back' 'the reader closed: the reply as it was'
+}
+
+<# Her bubble settled (no ease, no glitch: `panel_layout.settled`), or the take fails. #>
+function Wait-Settled([string]$What) {
+    if (-not (Wait-Until { $s = State; $s.panel_layout -and $s.panel_layout.settled } 5 "$What settled")) {
+        $script:Fails.Add("${script:Take}: $What never settled")
+    }
 }
 
 <# Her against the screen's left edge. #>

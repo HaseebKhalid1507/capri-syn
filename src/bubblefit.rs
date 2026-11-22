@@ -18,6 +18,8 @@ pub const STEP: Duration = Duration::from_millis(250);
 /// growing to (its last change; its next is due within `STEP` and eases in `hud::SIZE_MS`). Its
 /// stale wrap holds its words no longer either, from its last frame (behind the chip: none).
 pub const WAIT: Duration = Duration::from_millis(750);
+/// Drawn again after this long unseen (behind the reader's stub): its words' wait starts afresh.
+pub const GAP: Duration = Duration::from_millis(100);
 /// The text field narrows a step only once its words are this far under the step below: typing
 /// and deleting at a step's edge never flips its width.
 pub const HYST: f32 = 16.0;
@@ -129,6 +131,13 @@ pub struct Grow {
     drawn_at: Option<Instant>,
     /// Since when the box as drawn has been short of what it is growing to (None: it holds it).
     short_since: Option<Instant>,
+    /// What it was growing to when last drawn: its wait starts afresh when that grows.
+    aim: (f32, usize),
+    /// The box as drawn is easing toward a smaller width, fewer rows: the ease's overshoot dips
+    /// under it for a few frames, never short.
+    down: (bool, bool),
+    /// The reader's stub: the widest it has been since it opened.
+    stub: f32,
 }
 
 impl Grow {
@@ -140,6 +149,7 @@ impl Grow {
     /// streaming: the fit (an ended stream settles once). `fixed`: `max_w` while streaming, never
     /// narrower within the reply, no settling.
     pub fn next(&mut self, a: Ask, now: Instant) -> (f32, usize) {
+        self.stub = 0.0;
         let first = self.at.is_none();
         let w = match (a.more, a.fixed) {
             (true, true) => a.max_w,
@@ -171,18 +181,42 @@ impl Grow {
         self.head
     }
 
+    /// The reader's stub at `floor` (its header and keys): never narrower while it is open (a
+    /// status, its line count changing under it don't resize it), at most `max_w`.
+    pub fn stub(&mut self, floor: f32, max_w: f32) -> f32 {
+        self.stub = self.stub.max(floor);
+        self.stub.min(max_w)
+    }
+
     /// What it is growing to: its size laid out, or its next step.
     fn target(&self) -> (f32, usize) {
         (self.w.max(self.want.0), self.rows.max(self.want.1))
     }
 
-    /// The box it was drawn in this frame, (width, rows it holds).
-    pub fn draw(&mut self, w: f32, rows: usize, now: Instant) {
-        self.drawn = (w, rows);
-        self.drawn_at = Some(now);
+    /// The box it was drawn in this frame, (width, rows it holds). Short of what it is growing
+    /// to, but never while it eases toward a smaller size (it settling narrower, going long: the
+    /// ease's overshoot dips under it for a few frames). Its wait starts when it falls short, and
+    /// afresh when what it grows to grows (a fast stream's next step) or it is drawn again after a
+    /// `GAP` (the reader's stub). Returns the rows its lines show in: easing toward fewer, never
+    /// fewer than it goes to (a line that showed doesn't hide for the overshoot).
+    pub fn draw(&mut self, w: f32, rows: usize, now: Instant) -> usize {
         let (tw, tr) = self.target();
-        let short = w + 0.01 < tw || rows < tr;
-        self.short_since = if short { self.short_since.or(Some(now)) } else { None };
+        let (aw, ar) = self.aim;
+        let grew = (tw > aw + 0.01, tr > ar);
+        let gap = self.drawn_at.is_none_or(|t| now >= t + GAP);
+        // Easing down: from when it is drawn over what it goes to until that grows (or a gap: it
+        // comes back from the stub, the chip, growing).
+        self.down.0 = w > tw + 0.01 || (self.down.0 && !grew.0 && !gap);
+        self.down.1 = rows > tr || (self.down.1 && !grew.1 && !gap);
+        let short = (w + 0.01 < tw && !self.down.0) || (rows < tr && !self.down.1);
+        let fresh = grew.0 || grew.1 || gap;
+        self.short_since = match self.short_since {
+            _ if !short => None,
+            Some(t) if !fresh => Some(t),
+            _ => Some(now),
+        };
+        (self.aim, self.drawn, self.drawn_at) = ((tw, tr), (w, rows), Some(now));
+        if self.down.1 { rows.max(tr) } else { rows }
     }
 
     /// Drawn within `WAIT`.
@@ -439,6 +473,120 @@ mod tests {
             g.draw(470.0, 2, at(t0, ms));
             assert!(!g.waits(475.0, 1, at(t0, ms)), "{ms}");
         }
+    }
+
+    /// Shady (#143, N3): MEDIUM streamed at 470 and settled to 459; its line 2 needs 458.94 and
+    /// the ease's overshoot dipped the box to 458.78: line 2 and every line under it hid for four
+    /// frames. A box easing toward a smaller size is never short of it; one growing still is.
+    #[test]
+    fn a_box_easing_narrower_is_never_short_of_it() {
+        let t0 = Instant::now();
+        let mut g = Grow::default();
+        g.next(ask((459.0, 3), 140.0, false, true, 470.0), t0);
+        assert_eq!(g.w, 470.0);
+        g.draw(470.0, 3, at(t0, 16));
+        // Ended: it settles to 459, drawn 470 → 458.78 (the overshoot) → 459.
+        assert_eq!(g.next(ask((459.0, 3), 140.0, false, false, 470.0), at(t0, 400)), (459.0, 3));
+        for (ms, w) in [(416, 470.0), (450, 464.0), (500, 459.005), (540, 458.78), (580, 458.9), (620, 459.0)] {
+            g.draw(w, 3, at(t0, ms));
+            assert!(!g.waits(458.94, 1, at(t0, ms)) && !g.waits(459.0, 2, at(t0, ms)), "{ms}: drawn {w}");
+        }
+        // Going long: its rows ease from 8 to 3, the overshoot dipping to 2 for a frame.
+        let mut g = Grow::default();
+        g.next(ask((470.0, 8), 140.0, false, true, 470.0), t0);
+        g.draw(470.0, 8, at(t0, 16));
+        g.next(ask((470.0, 3), 140.0, true, true, 470.0), at(t0, 30));
+        for (ms, rows) in [(46, 8), (100, 4), (120, 3), (150, 2), (200, 3)] {
+            assert_eq!(g.draw(470.0, rows, at(t0, ms)), rows.max(3), "{ms}: its lines show in the rows it goes to");
+            assert!(!g.waits(400.0, 1, at(t0, ms)), "{ms}: {rows} rows");
+        }
+        // Growing: the rows as drawn.
+        assert_eq!(g.draw(470.0, 3, at(t0, 220)), 3);
+        g.next(ask((470.0, 5), 140.0, false, false, 470.0), at(t0, 240));
+        assert_eq!(g.draw(470.0, 4, at(t0, 256)), 4);
+        // Growing it still waits for the box: the dip is a narrowing's only.
+        let mut g = Grow::default();
+        g.next(ask((300.0, 2), 140.0, false, false, 470.0), t0);
+        g.draw(200.0, 2, at(t0, 16));
+        assert!(g.waits(280.0, 0, at(t0, 20)));
+        // A narrowing that turns into growth: short again.
+        g.draw(300.0, 2, at(t0, 220));
+        g.next(ask((250.0, 2), 140.0, false, false, 470.0), at(t0, 240));
+        g.draw(290.0, 2, at(t0, 256));
+        g.next(ask((400.0, 2), 140.0, false, false, 470.0), at(t0, 270));
+        g.draw(285.0, 2, at(t0, 286));
+        assert!(g.waits(380.0, 0, at(t0, 290)), "grows past where it narrowed from: it waits");
+    }
+
+    /// Shady (#143, G1): a fast stream's box is always a step behind what it grows to; its wait
+    /// ran out 750 ms in, and lines showed past the box. It starts afresh as that grows.
+    #[test]
+    fn a_fast_stream_waits_afresh_each_time_what_it_grows_to_grows() {
+        let t0 = Instant::now();
+        let mut g = Grow::default();
+        let mut waited = 0;
+        // The box as drawn: easing (linearly, over `STEP` less a frame) to each size laid out.
+        let (mut from, mut to, mut since) = (0.0f32, 0.0f32, 0u64);
+        for ms in (0..1_500u64).step_by(16) {
+            let now = at(t0, ms);
+            let fit = 140.0 + 0.3 * ms as f32;
+            g.next(ask((fit.min(470.0), 2), 140.0, false, true, 470.0), now);
+            if g.w != to {
+                (from, to, since) = (from + (to - from) * ((ms - since) as f32 / 234.0).min(1.0), g.w, ms);
+            }
+            let drawn = from + (to - from) * ((ms - since) as f32 / 234.0).min(1.0);
+            g.draw(drawn, 2, now);
+            // A line its next step holds, wider than the box as drawn: it waits, however long the
+            // stream has kept the box short.
+            let (tw, _) = g.target();
+            if tw > drawn + 1.0 && tw < 470.0 {
+                assert!(g.waits(tw, 0, now), "{ms}: drawn {drawn}, growing to {tw}: shown past the box");
+                waited = ms;
+            }
+        }
+        assert!(waited > WAIT.as_millis() as u64, "{waited}");
+    }
+
+    /// Shady (#143, G2): not drawn behind the reader's stub, its wait went stale: the reader
+    /// closed, the box grew back, and its lines showed past it at once. Drawn again after a gap,
+    /// its wait starts afresh.
+    #[test]
+    fn drawn_again_after_a_gap_its_wait_starts_afresh() {
+        let t0 = Instant::now();
+        let mut g = Grow::default();
+        g.next(ask((400.0, 3), 140.0, false, false, 470.0), t0);
+        g.draw(300.0, 3, at(t0, 16));
+        assert!(g.waits(390.0, 0, at(t0, 20)));
+        // The reader opened: the stub, no draw for 2 s; it closed, the box easing back.
+        assert_eq!(g.stub(180.0, 470.0), 180.0);
+        g.draw(200.0, 3, at(t0, 2_016));
+        assert!(g.waits(390.0, 0, at(t0, 2_020)), "a stale wait: shown past the box");
+        assert!(!g.waits(390.0, 0, at(t0, 2_016 + WAIT.as_millis() as u64)), "and bounded");
+        // Settled narrower (its overshoot never short), then the stub: back from it, short again.
+        let mut g = Grow::default();
+        g.next(ask((459.0, 3), 140.0, false, true, 470.0), t0);
+        g.draw(470.0, 3, at(t0, 16));
+        g.next(ask((459.0, 3), 140.0, false, false, 470.0), at(t0, 400));
+        g.draw(462.0, 3, at(t0, 416));
+        g.draw(458.8, 3, at(t0, 432));
+        assert!(!g.waits(458.9, 0, at(t0, 436)), "the overshoot");
+        g.stub(200.0, 470.0);
+        g.draw(220.0, 3, at(t0, 3_000));
+        assert!(g.waits(400.0, 0, at(t0, 3_004)), "back from the stub, growing to it: it waits");
+    }
+
+    /// Shady (#143, G3): the stub resized as CLOSE READER's count changed. Never narrower while it
+    /// is open; afresh when it opens again.
+    #[test]
+    fn the_stub_never_narrows_while_it_is_open() {
+        let t0 = Instant::now();
+        let mut g = Grow::default();
+        assert_eq!(g.stub(240.0, 470.0), 240.0);
+        assert_eq!(g.stub(236.0, 470.0), 240.0, "a narrower count");
+        assert_eq!(g.stub(250.0, 470.0), 250.0, "a digit more");
+        assert_eq!(g.stub(250.0, 230.0), 230.0, "her room: inside it");
+        g.next(ask((300.0, 2), 140.0, false, false, 470.0), t0);
+        assert_eq!(g.stub(236.0, 470.0), 236.0, "opened again");
     }
 
     #[test]
