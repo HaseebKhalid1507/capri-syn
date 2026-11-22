@@ -38,6 +38,7 @@ mod life;
 mod pack;
 mod art;
 mod brand;
+mod bubblefit;
 mod variants;
 mod places;
 mod moves;

@@ -6,25 +6,26 @@
 # see this repo's runs can download it): only the fakes' canned words, never anything private.
 #
 # Run it: Actions → shots → Run workflow (a ref: a branch, tag or sha; the sets), or put the
-# `shots` label on a PR (its head; `shots:settings`, `shots:header`, `shots:brain` or `shots:tray` for
-# one set only). The tray set isn't in the defaults: it restarts Explorer.
+# `shots` label on a PR (its head; `shots:settings`, `shots:header`, `shots:bubble`, `shots:brain` or
+# `shots:tray` for one set only). The tray set isn't in the defaults: it restarts Explorer. Before and
+# after: dispatch it from a PR's branch (its rig) with `ref` its base, then label the PR.
 name: shots
 
 on:
   workflow_dispatch:
     inputs:
       ref:
-        description: The branch, tag or commit to shoot
+        description: The branch, tag or commit to shoot (a short sha is looked up)
         required: true
         default: main
       sets:
-        description: "Scene sets, comma-separated: settings, header, brain, tray (restarts Explorer)"
+        description: "Scene sets, comma-separated: settings, header, bubble, brain, tray (restarts Explorer)"
         required: true
-        default: settings,header,brain
+        default: settings,header,bubble,brain
       hidpi:
         description: "Takes shot again at 150% (set/take, comma-separated; empty: none)"
         required: false
-        default: settings/on,settings/empty,header/hf-470,header/prompt-470,brain/first
+        default: settings/on,settings/empty,header/hf-470,header/prompt-470,bubble/short,bubble/medium,bubble/list,bubble/chip,bubble/long,bubble/hf-short,brain/first
   pull_request:
     types: [labeled, synchronize, reopened]
 
@@ -65,10 +66,27 @@ jobs:
           path: rig
           persist-credentials: false
 
+      # actions/checkout fetches a ref by name or a full sha; a short sha it takes for a branch name
+      # and fails on a bare `git fetch` error. Looked up here, or a clear failure.
+      - name: The ref to shoot, as a full sha
+        id: ref
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $r = "$env:SHOT_REF".Trim()
+          if ($r -match '^[0-9a-fA-F]{7,39}$') {
+            $sha = gh api "repos/$env:GITHUB_REPOSITORY/commits/$r" --jq .sha 2>$null
+            if ($LASTEXITCODE -or -not $sha) { throw "ref '$r': no commit (or branch) by that name in $env:GITHUB_REPOSITORY. Give a branch, a tag or the full 40-character sha." }
+            Write-Host "ref $r is $sha"
+            $r = "$sha".Trim()
+          }
+          "ref=$r" >> $env:GITHUB_OUTPUT
+
       - name: Her, at the ref to shoot
         uses: actions/checkout@v4
         with:
-          ref: ${{ env.SHOT_REF }}
+          ref: ${{ steps.ref.outputs.ref }}
           path: app
           persist-credentials: false
 
@@ -85,8 +103,8 @@ jobs:
           } else {
             $labels = @($env:LABELS | ConvertFrom-Json)
             $only = @($labels | Where-Object { $_ -like 'shots:*' } | ForEach-Object { $_.Substring(6) })
-            $sets = if ($only) { $only -join ',' } else { 'settings,header,brain' }
-            $hidpi = 'settings/on,settings/empty,header/hf-470,header/prompt-470,brain/first,tray/menu'
+            $sets = if ($only) { $only -join ',' } else { 'settings,header,bubble,brain' }
+            $hidpi = 'settings/on,settings/empty,header/hf-470,header/prompt-470,bubble/short,bubble/medium,bubble/list,bubble/chip,bubble/long,bubble/hf-short,brain/first,tray/menu'
           }
           # Only the 150% takes of the sets shot (none: that step is skipped, not "no shots at all").
           $hidpi = @($hidpi -split ',' | Where-Object { $_ -and ($_ -split '/')[0] -in ($sets -split ',') }) -join ','

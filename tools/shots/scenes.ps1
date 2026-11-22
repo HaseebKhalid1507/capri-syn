@@ -6,7 +6,7 @@
   control socket, and keys or clicks (tools/shoot-win.ps1) only where it can't. Each step is shot
   cropped to her windows (her, the Line, the bubble, the menu), its `state` beside it.
 
-  pwsh tools/shots/scenes.ps1 -Exe her.exe -Pack packs\capri -Out shots\100 [-Sets settings,header,brain] [-Only settings/on,header/hf-470]
+  pwsh tools/shots/scenes.ps1 -Exe her.exe -Pack packs\capri -Out shots\100 [-Sets settings,header,bubble,brain] [-Only settings/on,header/hf-470]
 
   Sets:
     settings  her Settings page (#77): chat, ctrl+, then down (past BRAIN), right, down, esc; her menu;
@@ -14,6 +14,12 @@
               settings.toml; the cog and `CHAT` (their rects, from `state`) with an empty chat and a full one.
     header    the bubble's header (#78) at 470 px and at 340 px: hands-free and a reply, a prompt
               with 3 waiting, his long words (YOU) while the turn runs.
+    bubble    the bubble fit to what she says: very short replies ("ok", "on it 👍"), two or three
+              lines (mid-stream and done), a list of short lines, a command chip, a long one (READ),
+              a short and a medium one against the screen's left edge, a spoken "ok" in hands-free,
+              and the reader opened while a long reply still comes (the stub: ABORT, CLOSE READER).
+    Every shot with a settled bubble: its keys (`state`'s buttons) whole inside it, none over
+    another, else a problem.
     tray      her icon in the notification area (#79), promoted out of the overflow, on a dark
               taskbar with its clock off: hovered (its tooltip, capri-syn · ONLINE), right-clicked (her
               menu), cropped to the taskbar's corner and the menu; the menu by his keys (ATTENTION lit,
@@ -38,7 +44,7 @@ param(
     [Parameter(Mandatory)][string]$Exe,
     [Parameter(Mandatory)][string]$Pack,
     [Parameter(Mandatory)][string]$Out,
-    [string[]]$Sets = @('settings', 'header', 'brain'),
+    [string[]]$Sets = @('settings', 'header', 'bubble', 'brain'),
     [string[]]$Only = @(),
     [string]$Python = 'python',
     [int]$FakePort = 47811,
@@ -257,10 +263,39 @@ function Shot([string]$Step, [string]$Note = '', [int[]]$At = $null) {
             bubble_w = if ($panel) { $panel[2] } else { $null }
             header = $s.panel_layout.header_px
         })
+    Test-Keys $s "$script:Take/$Step"
     Write-Host "  $script:Take/$Step $(if ($rect) { $rect -join ',' } else { '(no shot)' })"
 }
 
 <# The Line takes the keyboard: a click on its field (it opens parked from her socket). #>
+<# The bubble's keys (`state`'s buttons, device px) each whole inside its panel and none over
+   another: a key cut or under another is one he can't click (QUIT, #78). A settled bubble only
+   (one easing is between sizes); the tag (`chip`) isn't the bubble's. #>
+function Test-Keys($s, [string]$Where) {
+    $pl = $s.panel_layout
+    if (-not $pl -or -not $pl.panel -or -not $pl.settled -or -not $s.buttons) { return }
+    $p = @($pl.panel)
+    $keys = @($s.buttons.PSObject.Properties | Where-Object { $_.Name -ne 'chip' } | ForEach-Object { [pscustomobject]@{ Id = $_.Name; R = @($_.Value) } })
+    # The panel's rect and the keys' are rounded apart (and taken from two origins): 2 px of slack.
+    $e = 2
+    foreach ($k in $keys) {
+        $r = $k.R
+        if ($r[0] -lt $p[0] - $e -or $r[1] -lt $p[1] - $e -or $r[0] + $r[2] -gt $p[0] + $p[2] + $e -or $r[1] + $r[3] -gt $p[1] + $p[3] + $e) {
+            $script:Fails.Add("${Where}: key '$($k.Id)' ($($r -join ',')) isn't inside its bubble ($($p -join ','))")
+        }
+    }
+    for ($i = 0; $i -lt $keys.Count; $i++) {
+        for ($j = $i + 1; $j -lt $keys.Count; $j++) {
+            $a = $keys[$i].R; $b = $keys[$j].R
+            $ox = [Math]::Min($a[0] + $a[2], $b[0] + $b[2]) - [Math]::Max($a[0], $b[0])
+            $oy = [Math]::Min($a[1] + $a[3], $b[1] + $b[3]) - [Math]::Max($a[1], $b[1])
+            if ($ox -gt $e -and $oy -gt $e) {
+                $script:Fails.Add("${Where}: keys '$($keys[$i].Id)' ($($a -join ',')) and '$($keys[$j].Id)' ($($b -join ',')) overlap")
+            }
+        }
+    }
+}
+
 function Focus-Line {
     for ($i = 0; $i -lt 3; $i++) {
         $s = State
@@ -415,6 +450,7 @@ $Scenes = [ordered]@{
         }
     }
     header   = [ordered]@{}
+    bubble   = [ordered]@{}
     brain    = [ordered]@{
         # No login for her model (ChatGPT's: a file only, so a read tells even on Windows, where the
         # daemon's environment can't be read): her first words say so, with SET ME UP.
@@ -877,7 +913,7 @@ $Scenes = [ordered]@{
 # The header at two widths: 470 where she stands (a reply long enough to fill it), 340 against the
 # screen's left edge: her bubble keeps to the part of her window on the screen, and her window is
 # 500 px with her in its middle, so she is drawn 190 px tall there (--height) to leave it 352 px
-# (the bubble's least, 340, then).
+# (the narrowest span her bubble is placed in, 340 wide).
 $HfReply = 'Spike pushed the reader fix eleven minutes ago, and CI went green right after. The Windows installer job took nineteen minutes and the voice bundle eleven. Want me to nudge lynx about the rebase, or leave it for the morning?'
 $YouSay = 'can you check whether the windows runner still builds the release binary after the vendored gpui patch from last night'
 foreach ($w in 470, 340) {
@@ -910,6 +946,84 @@ foreach ($w in 470, 340) {
         Start-Sleep 2.5
         Shot 'you' 'his long words while the turn runs'
 "@)
+}
+
+# The bubble fit to what she says (src/bubblefit.rs): a reply each, streamed by the fake daemon a
+# word every 120 ms (`say`), shot when it is done (and one mid-stream). `state`'s panel_layout.fit
+# has its width, floor and text width.
+$BubbleSays = [ordered]@{
+    short  = @('ok', 'on it 👍')
+    medium = @("Pushed the fix and opened the PR. CI is running now, and I'll ping you when it's green.")
+    list   = @('Left for today:\n- tests\n- shots\n- the PR\n- a nap')
+    chip   = @('Log in first:\n`synaps login`')
+    long   = @("Spike pushed the reader fix eleven minutes ago, and CI went green right after. The Windows installer job took nineteen minutes and the voice bundle eleven, which is about what it took last week. The shots came back clean at both scales, the header fits at the narrowest width, and nothing in the bubble is cut at the screen's edge. Lynx still owes a rebase on the polish branch, and the release notes need a line about the reader. Want me to nudge lynx about the rebase now, or leave it for the morning when the queue is quieter?")
+}
+foreach ($take in $BubbleSays.Keys) {
+    $Scenes.bubble[$take] = [scriptblock]::Create(@"
+        Start-Take bubble $take -History `$Short -DeltaMs 120
+        `$null = Ctl 'brain off'
+        `$i = 0
+        foreach (`$say in `$BubbleSays['$take']) {
+            `$i++
+            `$words = @(`$say -split ' ').Count
+            `$null = Fake "say `$say"
+            if ('$take' -eq 'medium') { Start-Sleep -Milliseconds (120 * [Math]::Floor(`$words / 2)); Shot "`$i-streaming" 'mid-stream: grown to what has come' }
+            Start-Sleep -Milliseconds (120 * `$words + 2500)
+            Shot "`$i-done" "`$say"
+        }
+"@)
+}
+foreach ($take in 'short', 'medium') {
+    $Scenes.bubble["edge-$take"] = [scriptblock]::Create(@"
+        Start-Take bubble edge-$take -History `$Short -DeltaMs 120 -HerArgs @('--height', '190')
+        `$null = Ctl 'brain off'
+        To-Edge
+        `$say = `$BubbleSays['$take'][-1]
+        `$null = Fake "say `$say"
+        Start-Sleep -Milliseconds (120 * @(`$say -split ' ').Count + 2500)
+        Shot 'done' "at the screen's left edge: `$say"
+"@)
+}
+# A spoken "ok": hands-free's status in its header (at its shortest, the countdown), the bubble small.
+$Scenes.bubble['hf-short'] = {
+    Start-Take bubble hf-short -Settings "[voice]`nenabled = true`nwake_word = false`n" -History $Short -Voice -DeltaMs 120
+    $null = Ctl 'brain off'
+    $null = Ctl 'talk handsfree on'
+    Start-Sleep 1.5
+    $null = Fake 'say ok'
+    # Shot about a second after `say`, while it is up (by 3 s it was closing: collapsed, no
+    # panel_layout).
+    $null = Wait-Until { $s = State; $s.panel_layout -and -not $s.collapsed } 5 'her bubble open around "ok"'
+    Start-Sleep -Milliseconds 750
+    $s = State
+    if (-not $s.panel_layout -or $s.collapsed) { $script:Fails.Add("${script:Take}: no bubble to shoot (collapsed: $($s.collapsed), panel_layout: $([bool]$s.panel_layout))") }
+    Shot 'done' 'hands-free, a spoken "ok"'
+}
+# The reader opened while a long reply still comes: the stub, ABORT and CLOSE READER whole.
+$Scenes.bubble['stub-busy'] = {
+    Start-Take bubble stub-busy -History $Short -DeltaMs 300
+    $null = Ctl 'brain off'
+    $null = Fake "say $($BubbleSays['long'][-1])"
+    # READ first (gone long, a word every 300 ms: still coming), so the stub has CLOSE READER.
+    if (-not (Wait-Until { (State).read } 40 'READ: her reply gone long')) { $script:Fails.Add("${script:Take}: her reply never went long (no READ)") }
+    Start-Sleep -Milliseconds 500
+    $null = Ctl 'reader open'
+    Start-Sleep 1
+    # Settled, so Test-Keys checks its keys: its count in its widest digits and never narrower
+    # while open, the stub holds still as lines come.
+    Wait-Settled 'the stub'
+    Shot 'stub' 'the reader open mid-turn: ABORT and CLOSE READER'
+    $null = Ctl 'reader close'
+    Start-Sleep 1
+    Wait-Settled 'the reply, the reader closed'
+    Shot 'back' 'the reader closed: the reply as it was'
+}
+
+<# Her bubble settled (no ease, no glitch: `panel_layout.settled`), or the take fails. #>
+function Wait-Settled([string]$What) {
+    if (-not (Wait-Until { $s = State; $s.panel_layout -and $s.panel_layout.settled } 5 "$What settled")) {
+        $script:Fails.Add("${script:Take}: $What never settled")
+    }
 }
 
 <# Her against the screen's left edge. #>

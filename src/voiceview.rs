@@ -1534,14 +1534,7 @@ impl Avatar {
             return;
         }
         let Some(bb) = self.bubble.as_mut().filter(|x| x.stream) else { return };
-        bb.text = text.chars().collect();
-        bb.shown = bb.text.len();
-        bb.wrap = None;
-        bb.page = None;
-        bb.more = true;
-        bb.collapsed = false;
-        bb.hide_at = None;
-        bb.next_char = None;
+        bb.caption(text);
     }
 
     fn voice_caption_done(&mut self) {
@@ -1549,19 +1542,8 @@ impl Avatar {
         if std::mem::take(&mut self.voice.orphan) {
             return;
         }
-        let now = Instant::now();
         let Some(bb) = self.bubble.as_mut().filter(|x| x.stream) else { return };
-        if !reply.is_empty() {
-            bb.text = reply.chars().collect();
-            bb.shown = bb.text.len();
-            bb.wrap = None;
-            bb.page = None;
-        }
-        bb.more = false;
-        bb.reveal_all_if_long();
-        if !bb.collapsed {
-            bb.hide_at = Some(now + hold_for(bb.text.len()));
-        }
+        bb.caption_done(&reply, Instant::now());
     }
 
     // ---- what shows -----------------------------------------------------------------------
