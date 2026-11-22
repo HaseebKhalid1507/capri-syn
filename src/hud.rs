@@ -143,15 +143,11 @@ impl Tween {
         self.t0.is_some_and(|t0| ms(now, t0) < self.ms)
     }
 
-    /// The least it is on its way while it moves (from where it came, or where it goes less
-    /// the curve's overshoot past it); else where it is.
-    pub fn low(&self, now: Instant) -> f32 {
-        if !self.moving(now) || self.to >= self.from {
-            return if self.moving(now) { self.from } else { self.to };
-        }
-        // `ease`'s peak: where its slope is 0.
-        let over = ease(1.0 - 2.0 * BACK / (3.0 * (BACK + 1.0))) - 1.0;
-        self.to - (self.from - self.to) * over
+    /// Its narrower end while it moves (where it came from as it grows, where it goes as it
+    /// narrows: never the overshoot's dip under that, which comes out of the padding, `kept`);
+    /// else where it is.
+    pub fn narrow_end(&self, now: Instant) -> f32 {
+        if self.moving(now) { self.from.min(self.to) } else { self.to }
     }
 
     /// Where it is, but never under where it goes while it narrows: the curve's overshoot dips
@@ -161,12 +157,15 @@ impl Tween {
         if self.moving(now) && self.to < self.from { v.max(self.to) } else { v }
     }
 
-    /// Toward `to` from wherever it is now; no change when that is already where it goes.
+    /// Toward `to` from wherever it is now; no change when that is already where it goes. Past
+    /// where it is, from where its words' box is (`kept`): a grow that interrupts a narrowing's
+    /// dip starts from the size it was narrowing to, never under the lines laid out in it.
     pub fn go(&mut self, to: f32, now: Instant, ms: f32) {
         if (to - self.to).abs() < 0.25 {
             return;
         }
-        *self = Tween::start(self.at(now), to, now, ms);
+        let at = self.at(now);
+        *self = Tween::start(if to > at { self.kept(now) } else { at }, to, now, ms);
     }
 
     pub fn snap(&mut self, v: f32) {
@@ -515,7 +514,9 @@ pub struct PanelFrame {
     pub shell: (f32, f32),
     pub content: (f32, f32),
     /// The width its header is fit to: its content's, but while it resizes the narrower end
-    /// (the header fits once, not a word at a time on the way).
+    /// (the header fits once, not a word at a time on the way): where it came from as it grows,
+    /// where it goes as it narrows (never the overshoot's dip under that: the header is laid out
+    /// in its content, which never dips).
     pub fit_w: f32,
     /// Everything inside it (out of the tag: 0 until its shell covers its words, then cut in).
     pub inner: f32,
@@ -621,7 +622,7 @@ impl PanelFx {
         if self.pill_x0.is_some_and(|(x, cover)| ms(now, x) >= cover + STEP_MS) {
             self.pill_x0 = None;
         }
-        let fit_w = if self.opened.is_some() { w } else { self.w.low(now) };
+        let fit_w = if self.opened.is_some() { w } else { self.w.narrow_end(now) };
         PanelFrame {
             shell,
             content,
@@ -648,6 +649,7 @@ impl PanelFx {
     }
 
     /// Opening (its words laid out in the box it is going to, the shell easing out around them).
+    #[cfg(test)]
     pub fn opening(&self) -> bool {
         self.opened.is_some()
     }
@@ -944,17 +946,19 @@ mod tests {
         // the border split on that frame; the box eases to it.
         let f = p.open((300.0, 80.0), 2, None, at(t0, 700), true, true);
         assert!(f.replaced && f.old == 0.0 && f.words == 1.0 && f.split > 0.0);
-        let mut t = 708;
-        let fit = p.open((300.0, 80.0), 2, None, at(t0, 704), true, true).fit_w;
-        assert!(fit < 300.0 && fit > 297.0, "a shrink: its header fit under the overshoot, {fit}");
+        let mut t = 704;
+        let mut dipped = false;
         while t <= 1000 {
             let f = p.open((300.0, 80.0), 2, None, at(t0, t), true, true);
             assert!(!f.replaced && f.old == 0.0 && f.words == 1.0, "at {t}");
-            // Its header fit once, never wider than the box on the way.
-            assert!((f.fit_w == fit || f.fit_w == 300.0) && f.fit_w <= f.shell.0 + 1e-3, "at {t}: {f:?}");
+            // A shrink: its header fit once, to where it goes (Shady, #144: fit to the overshoot's
+            // dip, a status at the floor was cut for 200 ms), never wider than its words' box.
+            assert!(f.fit_w == 300.0 && f.fit_w <= f.content.0 + 1e-3, "at {t}: {f:?}");
+            dipped |= f.shell.0 < 300.0 - 0.5;
             assert!(t < 700 + 2 * STEP_MS as u64 || f.split == 0.0, "two frames of split at most");
             t += 8;
         }
+        assert!(dipped, "the shell dipped under it on the way (into its padding)");
         let f = p.open((300.0, 80.0), 2, None, at(t0, 1000), true, true);
         assert_eq!(f.shell, (300.0, 80.0));
         // Growing: the header keeps the width it had until the box is there.
@@ -991,6 +995,46 @@ mod tests {
             let f = p.open((400.0, 200.0), 1, None, at(t0, t), true, false);
             assert_eq!(f.content, f.shell, "at {t}");
         }
+    }
+
+    /// Shady (#144): a grow that came while a narrowing dipped under where it went restarted from
+    /// the dipped shell, and its words' box (the shell, growing) went under the lines laid out to
+    /// that size. It starts from where its words' box is; a further narrowing, from the shell.
+    #[test]
+    fn a_grow_in_a_narrowings_dip_starts_from_its_words_box() {
+        let t0 = Instant::now();
+        let mut p = PanelFx::default();
+        p.open((470.0, 250.0), 1, None, t0, true, false);
+        p.open((470.0, 250.0), 1, None, at(t0, 400), true, false);
+        // 470 → 120: into its dip.
+        let mut t = 400;
+        let f = loop {
+            let f = p.open((120.0, 250.0), 1, None, at(t0, t), true, false);
+            if f.shell.0 < 120.0 - 3.0 {
+                break f;
+            }
+            t += 4;
+            assert!(t < 800, "it dips");
+        };
+        assert_eq!(f.content.0, 120.0);
+        // A grow to 200 now: never under the 120 its lines were laid out to.
+        let f = p.open((200.0, 250.0), 1, None, at(t0, t + 4), true, false);
+        assert!(f.shell.0 >= 120.0 && f.content.0 >= 120.0, "{f:?}");
+        for u in (t + 8..t + 400).step_by(4) {
+            let f = p.open((200.0, 250.0), 1, None, at(t0, u), true, false);
+            assert!(f.content.0 >= 120.0 && f.content == f.shell, "at {u}: {f:?}");
+        }
+        // A further narrowing in a dip: from the shell (no jump out), its words' box at least where
+        // it goes.
+        let mut p = PanelFx::default();
+        p.open((470.0, 250.0), 1, None, t0, true, false);
+        p.open((470.0, 250.0), 1, None, at(t0, 400), true, false);
+        let mut t = 400;
+        while p.open((300.0, 250.0), 1, None, at(t0, t), true, false).shell.0 >= 300.0 - 2.0 {
+            t += 4;
+        }
+        let f = p.open((150.0, 250.0), 1, None, at(t0, t + 4), true, false);
+        assert!(f.shell.0 < 300.0 - 1.0 && f.content.0 >= 150.0, "{f:?}");
     }
 
     #[test]

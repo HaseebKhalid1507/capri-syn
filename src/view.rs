@@ -592,9 +592,19 @@ impl Bubble {
         self.chips_seen.clear();
     }
 
+    /// Its text from now on: the chips that showed (`chips_seen`, where each starts) are kept
+    /// only where it is unchanged (Shady, #144: a rewrite left stale offsets). `same`: how much
+    /// of it is.
+    fn retext(&mut self, text: Vec<char>) -> usize {
+        let same = self.text.iter().zip(&text).take_while(|(a, c)| a == c).count();
+        self.chips_seen.retain(|&s| s < same);
+        self.text = text;
+        same
+    }
+
     /// A spoken reply's caption so far (`voiceview`): all of it at once, the turn still on.
     fn caption(&mut self, text: &str) {
-        self.text = text.chars().collect();
+        self.retext(text.chars().collect());
         self.shown = self.text.len();
         self.wrap = None;
         self.page = None;
@@ -607,7 +617,7 @@ impl Bubble {
     /// The spoken turn over: its reply whole (as said, if it came), held for reading.
     fn caption_done(&mut self, reply: &str, now: Instant) {
         if !reply.is_empty() {
-            self.text = reply.chars().collect();
+            self.retext(reply.chars().collect());
             self.shown = self.text.len();
             self.wrap = None;
             self.page = None;
@@ -820,6 +830,10 @@ fn menu_reflow(at: (f32, f32), (w, h): (f32, f32), x: (f32, f32), y: (f32, f32),
 /// `text` in lines broken where `breaks` says (byte offsets in a paragraph; GPUI's wrapper at
 /// `wrap_w`), the widest as `width` measures it. With `chip`: a paragraph that is one command
 /// stays one line, its width its chip's (at most `wrap_w`: the chip fits itself, `chip_text`).
+/// A paragraph is broken as it will be once more comes after it (`then_space`): GPUI counts a
+/// word's trailing space against its line, so a last word that fits only without one moved
+/// down as the next word came, and the box had grown for it for good (Shady, #144: 470 for a
+/// stream that fit 437). Its lines never reflow as a stream grows.
 fn wrap_lines(text: &[char], wrap_w: f32, chip: Option<&dyn Fn(&str) -> f32>, mut breaks: impl FnMut(&str) -> Vec<usize>, width: impl Fn(&str) -> f32) -> Wrapped {
     let s: String = text.iter().collect();
     let mut lines = Vec::new();
@@ -838,7 +852,11 @@ fn wrap_lines(text: &[char], wrap_w: f32, chip: Option<&dyn Fn(&str) -> f32>, mu
             continue;
         }
         let mut start = 0usize;
-        for ix in breaks(para).into_iter().chain(std::iter::once(para.len())) {
+        let found = match para.chars().last() {
+            Some(c) if then_space(c) => breaks(&format!("{para} ")),
+            _ => breaks(para),
+        };
+        for ix in found.into_iter().filter(|&ix| ix < para.len()).chain(std::iter::once(para.len())) {
             let t = para[start..ix].trim_end();
             lines.push((base + para[..start].chars().count(), base + para[..ix].chars().count()));
             chips.push(false);
@@ -849,6 +867,13 @@ fn wrap_lines(text: &[char], wrap_w: f32, chip: Option<&dyn Fn(&str) -> f32>, mu
     }
     let width = widths.iter().copied().fold(0.0, f32::max);
     Wrapped { lines, chips, width, widths, at: wrap_w }
+}
+
+/// What comes after `c` as more text streams in is a space (or a new line): its words are spaced.
+/// Not after a space, nor in a script that breaks between its characters with none (CJK, kana,
+/// fullwidth forms): there the next character comes straight after it.
+fn then_space(c: char) -> bool {
+    !c.is_whitespace() && !matches!(c, '\u{2E80}'..='\u{A4CF}' | '\u{F900}'..='\u{FAFF}' | '\u{FE30}'..='\u{FE4F}' | '\u{FF00}'..='\u{FFEF}' | '\u{20000}'..='\u{3FFFF}')
 }
 
 /// Her first words have waited `FIRST_WORDS_CREDS` for a look at her login (`deadline`: their
@@ -5248,14 +5273,13 @@ impl Avatar {
         let carried = self.rag_hides_bubble();
         let Some(bb) = self.bubble.as_mut().filter(|x| x.stream) else { return };
         let text: Vec<char> = b.reply.chars().collect();
-        let same = bb.text.iter().zip(&text).take_while(|(a, c)| a == c).count();
-        if same != bb.text.len() || text.len() != bb.text.len() {
+        if text != bb.text {
             bb.wrap = None;
         }
+        let same = bb.retext(text);
         // An old reply (on attach) shows whole; a failed turn's line (it never showed as busy:
         // `session::QUIET_START`) types out like any reply.
-        bb.shown = if new_turn && !b.busy && b.trouble.is_none() { text.len() } else { bb.shown.min(same) };
-        bb.text = text;
+        bb.shown = if new_turn && !b.busy && b.trouble.is_none() { bb.text.len() } else { bb.shown.min(same) };
         bb.raw = b.raw.clone();
         bb.reveal_all_if_long();
         let was_more = std::mem::replace(&mut bb.more, b.busy);
@@ -9768,7 +9792,7 @@ mod bubble_layout_tests {
     use super::{
         Bubble, FOOTER_GAP, FOOTER_H, FootType, HEADER_GAP, HEADER_GAPS, HEADER_H, HeaderLabel, LINE_H, LINES_PER_PAGE, MARGIN, OPENING_LINES, PAD_B, PAD_L, PAD_R, PAD_T,
         PANEL_MAX_W, ReplyFoot, ReplySize, TYPE_MAX_CHARS, bubble_w, chip_last_room, ended_unseen, fit_header, fit_middle, header_need, header_status_w, place_panel,
-        TEXT_PAD, keys_wait, reply_cap, reply_label, reply_size, rows_room, status_steps, text_box_for, top_under, wrap_lines,
+        TEXT_PAD, keys_wait, reply_cap, reply_label, reply_size, rows_room, status_steps, text_box_for, then_space, top_under, wrap_lines,
     };
     use crate::bubblefit::{self, Grow};
     use crate::hud::PanelFx;
@@ -9795,8 +9819,9 @@ mod bubble_layout_tests {
         92.0 + 10.2 * cmd.chars().count() as f32
     }
 
-    /// Greedy word wrap at `w` (GPUI's: a line keeps its trailing space; a word wider than the
-    /// line breaks between characters). Byte offsets where lines start.
+    /// Greedy word wrap at `w` (GPUI's: a line keeps its trailing space, and it counts: a word
+    /// whose space after it overflows goes down; a word wider than the line breaks between
+    /// characters). Byte offsets where lines start.
     fn breaks(para: &str, w: f32) -> Vec<usize> {
         let mut out = Vec::new();
         let mut x = 0.0f32;
@@ -9813,7 +9838,7 @@ mod bubble_layout_tests {
         words.push((start, &para[start..]));
         for (ix, word) in words {
             let ww = width(word.trim_end());
-            if x > 0.0 && x + ww > w {
+            if x > 0.0 && x + width(word) > w {
                 out.push(ix);
                 x = 0.0;
             }
@@ -9966,6 +9991,9 @@ mod bubble_layout_tests {
     const OK: &str = "ok";
     const ON_IT: &str = "on it 👍";
     const MEDIUM: &str = "Pushed the fix and opened the PR. CI is running now, and I'll ping you when it's green.";
+    /// MEDIUM with a last word on its first line that fits there only with no space after it
+    /// (as "running" did in GPUI's widths, Shady #144), in the stand-in's widths at 500 px.
+    const FIXED: &str = "Pushed the fix and opened the PR. CI is fixed now, and I'll ping you when it's green.";
     const LIST: &str = "Left for today:\n- tests\n- shots\n- the PR\n- a nap";
     const CHIP: &str = "Log in first:\n`synaps login`";
     /// A command longer than the room beside the collapse key: cut there, its ends kept (#71).
@@ -10182,6 +10210,9 @@ mod bubble_layout_tests {
         shell: (f32, f32),
         /// Opening (`hud::PanelFx::opening`).
         opening: bool,
+        /// The width its header is fit to, as `render`'s: its words' box, while it resizes no wider
+        /// than its narrower end (`hud::PanelFrame::fit_w`).
+        header: f32,
         /// Rows that box holds.
         fits: usize,
         /// The lines of its page that show in it (`Bubble::page_shows`).
@@ -10215,7 +10246,7 @@ mod bubble_layout_tests {
         b.fit.draw(drawn.0, fits, now);
         let shows = b.page_shows(&b.page_widths(shaped), now);
         let keys_wait = keys_wait(b, &size.foot, size.chip_last, now);
-        Frame { size, drawn, shell: pf.shell, opening: fx.opening(), fits, shows, keys_wait }
+        Frame { size, drawn, shell: pf.shell, opening: fx.opening(), header: drawn.0.min(pf.fit_w), fits, shows, keys_wait }
     }
 
     /// What a run of frames saw: no line drawn outside its box, ever, nor a chip cut that its box
@@ -10511,6 +10542,106 @@ mod bubble_layout_tests {
         }
     }
 
+    /// Shady (#144): mid-stream the box was 470 for a reply that fit 437. Its last word ("running")
+    /// fit at the end of its line only with no space after it (GPUI counts that space), moved
+    /// down as the next word came, and the box had grown around it in between, never to narrow
+    /// while the turn ran. Each paragraph is wrapped as it will be once more comes: every reply's
+    /// text, cut at the end of any word, wraps as all of it does, at every width.
+    #[test]
+    fn a_reply_cut_after_any_word_wraps_as_all_of_it_does() {
+        for (name, raw) in samples().iter().map(|(n, r)| (n.as_str(), r.as_str())).chain([("fixed", FIXED)]) {
+            let text: Vec<char> = crate::session::clean(raw).chars().collect();
+            for span in [(0.0, 500.0), (40.0, 420.0), (0.0, 2.0 * MARGIN + 300.0), (0.0, 2.0 * MARGIN + 260.0)] {
+                let tb = text_box_for(span);
+                let starts = |t: &[char]| wrap_lines(t, tb, None, |p| breaks(p, tb), width).lines.iter().map(|l| l.0).collect::<Vec<_>>();
+                let all = starts(&text);
+                for i in (1..text.len()).filter(|&i| text[i].is_whitespace() && then_space(text[i - 1])) {
+                    let want: Vec<usize> = all.iter().copied().filter(|&s| s < i).collect();
+                    assert_eq!(starts(&text[..i]), want, "{name} {span:?}: cut at {i} ({:?})", text[..i].iter().collect::<String>());
+                }
+            }
+        }
+    }
+
+    /// The space it is wrapped with is the one that will come: after a word, not after a space,
+    /// nor in CJK (the next character comes straight after it: GPUI breaks between them).
+    #[test]
+    fn it_wraps_with_a_space_after_it_only_where_one_will_come() {
+        for (text, then) in [("on it 👍", true), ("ok.", true), ("ok ", false), ("好的", false), ("了解しました。", false), ("ＯＫ", false), ("확인", true)] {
+            let chars: Vec<char> = format!("{text}\nok").chars().collect();
+            let mut asked = Vec::new();
+            wrap_lines(&chars, 300.0, None, |p| {
+                asked.push(p.to_string());
+                Vec::new()
+            }, width);
+            assert_eq!(asked, vec![if then { format!("{text} ") } else { text.to_string() }, "ok ".to_string()], "{text:?}");
+        }
+    }
+
+    /// ...and streamed, its box never wider than a step over what all of it needs, however long
+    /// its last word ends a line ("fixed" fits there with no space after it, 600 ms).
+    #[test]
+    fn a_streams_last_word_never_widens_its_box_for_good() {
+        let span = (0.0, 500.0);
+        let tb = text_box_for(span);
+        let max_w = max_w_in(span);
+        let words: Vec<&str> = FIXED.split(' ').collect();
+        let k = words.iter().position(|&w| w == "fixed").unwrap() + 1;
+        // At the end of its first line, "fixed" fits only with no space after it.
+        let line0 = words[..k].join(" ");
+        assert!(width(&line0) <= tb && width(&line0) + width(" ") > tb, "{} in {tb}", width(&line0));
+        let mut parts: Vec<String> = (1..=words.len()).map(|n| words[..n].join(" ")).collect();
+        parts.splice(k..k, std::iter::repeat_n(line0.clone(), 20));
+        let full = wrap_lines(&crate::session::clean(FIXED).chars().collect::<Vec<_>>(), tb, Some(&chip_w), |p| breaks(p, tb), width);
+        stream_parts(&parts, span, 300, &width, &mut |_, f, ms, busy| {
+            if busy {
+                let fit = bubble_w(full.width, 0.0, &f.size.foot.foot, max_w).0.max(f.size.floor);
+                let most = bubblefit::step_up(fit, f.size.floor, max_w);
+                assert!(f.size.w <= most + 0.01, "at {ms} ms: {} wide, a step over all of it is {most}", f.size.w);
+            }
+        });
+    }
+
+    /// Shady (#144): a short hands-free reply taking the place of a wider one (its box narrowing to
+    /// its floor, its status's at its shortest) fit its header to the ease's dip under where it
+    /// went: its status cut ("HANDS-FREE…") for 200 ms. It fits to where it goes: the status whole
+    /// on every frame.
+    #[test]
+    fn a_box_narrowing_to_its_status_keeps_it_whole() {
+        const HF: &str = "MIC LIVE · HANDS-FREE 0:05 ▯▯▯▯▯";
+        let head = head_of(HF);
+        for span in [(0.0, 500.0), (40.0, 420.0), (0.0, 2.0 * MARGIN + 300.0)] {
+            let tb = text_box_for(span);
+            let laid = |raw: &str| {
+                let text: Vec<char> = crate::session::clean(raw).chars().collect();
+                let wrap = wrap_lines(&text, tb, Some(&chip_w), |p| breaks(p, tb), width);
+                (text, wrap)
+            };
+            let (text, wrap) = laid(MEDIUM);
+            let mut b = bubble(MEDIUM, text, wrap);
+            let t0 = Instant::now();
+            let mut fx = PanelFx::default();
+            let (mut wide, mut last) = (0.0f32, 0.0f32);
+            for ms in (0..1_400u64).step_by(8) {
+                if ms == 600 {
+                    // Hers in its place: "ok".
+                    let (text, wrap) = laid("ok");
+                    b = bubble("ok", text, wrap);
+                    b.serial = 2;
+                }
+                let f = frame(&mut b, &mut fx, span, (6.0, 300.0), HF, false, t0 + Duration::from_millis(ms));
+                if ms < 600 {
+                    wide = f.size.w;
+                } else {
+                    assert!(f.header + 0.01 >= f.size.w, "{span:?} at {ms}: its header fit to {}, under the {} it goes to (shell {:?})", f.header, f.size.w, f.shell);
+                    assert!(f.header + 0.01 >= head.min(max_w_in(span)), "{span:?} at {ms}: its header fit to {} ({head} needed)", f.header);
+                }
+                last = f.size.w;
+            }
+            assert!(wide > last + 60.0 && (last - head.ceil().min(max_w_in(span))).abs() < 0.01, "{span:?}: it narrowed from {wide} to its status's {head}, at {last}");
+        }
+    }
+
     /// Shady (#143): mid-reveal, a line waited for the box while a short one under it showed: a
     /// gap. A line that waits takes every line under it with it.
     #[test]
@@ -10560,9 +10691,8 @@ mod bubble_layout_tests {
                 got += 1;
                 let r = parts[got - 1].clone();
                 let text: Vec<char> = crate::session::clean(&r).chars().collect();
-                let same = b.text.iter().zip(&text).take_while(|(a, c)| a == c).count();
+                let same = b.retext(text);
                 b.shown = b.shown.min(same);
-                b.text = text;
                 b.raw = r;
                 b.wrap = None;
                 b.reveal_all_if_long();
@@ -10646,10 +10776,12 @@ mod bubble_layout_tests {
         }
     }
 
-    /// Shady (#143 follow-up): a chip that comes whole (a spoken caption, her own words) showed
-    /// cut in the middle for ~100 ms as the box grew around it. It waits as a line does until it
-    /// first shows, whole, then never hides; the collapse key's room is kept for it all along
-    /// (`Seen`: a chip its box as laid out holds is never drawn cut).
+    /// Shady (#143 follow-up): a chip that comes whole (her own words, a long reply all at once)
+    /// showed cut in the middle for ~100 ms as the box grew around it. It waits as a line does
+    /// until it first shows, whole, then never hides; the collapse key's room is kept for it all
+    /// along (`Seen`: a chip its box as laid out holds is never drawn cut). The caption case is
+    /// SYNTHETIC: a real caption is what she says, its backticks gone (`voice`), so it never holds
+    /// a chip; it stands in for text that comes whole into a box that has to grow for it.
     #[test]
     fn a_chip_that_comes_whole_waits_for_the_box_and_shows_whole() {
         const FIRST: &str = "Here's the fix.";
@@ -10666,19 +10798,20 @@ mod bubble_layout_tests {
             // A caption: the first sentence, then the chip with the next, all at once; then done.
             // Her own words: a short reply in the bubble, then hers in its place, typed out or (long)
             // all at once, the box widening from the reply's.
-            for case in ["caption", "say typed", "say at once"] {
+            for case in ["caption (synthetic)", "say typed", "say at once"] {
                 let at = format!("{span:?} {case}");
                 let t0 = Instant::now();
+                let caption = case.starts_with("caption");
                 let mut b = bubble("", Vec::new(), wrap_lines(&[], tb, Some(&chip_w), |p| breaks(p, tb), width));
                 b.shown = 0;
-                b.more = case == "caption";
+                b.more = caption;
                 let mut fx = PanelFx::default();
                 let mut seen = Seen::default();
                 let mut chip_showed = None;
                 for ms in 0..3_000u64 {
                     let now = t0 + Duration::from_millis(ms);
-                    match (case, ms) {
-                        ("caption", 0) => {
+                    match (caption, ms) {
+                        (true, 0) => {
                             b.caption(&laid(FIRST).0.iter().collect::<String>());
                             b.raw = FIRST.to_string();
                         }
@@ -10688,11 +10821,11 @@ mod bubble_layout_tests {
                             b.wrap = None;
                             b.raw = BEFORE.to_string();
                         }
-                        ("caption", 700) => {
+                        (true, 700) => {
                             b.caption(&laid(THEN).0.iter().collect::<String>());
                             b.raw = THEN.to_string();
                         }
-                        ("caption", 1_400) => {
+                        (true, 1_400) => {
                             b.caption_done(&laid(THEN).0.iter().collect::<String>(), now);
                         }
                         (_, 700) => {
@@ -10756,6 +10889,43 @@ mod bubble_layout_tests {
         reply_size(&mut b, head_of("ONLINE"), false, true, false, max_w, ms(late + 2_000), &foot_tw, &width);
         b.fit.draw(r.floor, r.rows, ms(late + 2_016));
         assert_eq!(shows(&mut b, ms(late + 2_020)), vec![true, false], "back from the stub");
+    }
+
+    /// Shady (#144): `chips_seen` kept the offsets of chips a rewrite had replaced. Its text
+    /// rewritten (a stream's reply, a caption, the caption done): the chips that showed are kept
+    /// only where it is unchanged; more of the same text keeps them all.
+    #[test]
+    fn a_rewrite_forgets_the_chips_that_showed_where_it_changed() {
+        let span = (0.0, 500.0);
+        let chars = |s: &str| s.chars().collect::<Vec<char>>();
+        const RAW: &str = "Run:\n`synaps login`\nthen:\n`synaps status`";
+        let mut b = lay(RAW, span, 6.0, 300.0).4;
+        let starts: Vec<usize> = b.wrap.as_ref().unwrap().lines.iter().zip(&b.wrap.as_ref().unwrap().chips).filter(|&(_, &c)| c).map(|(l, _)| l.0).collect();
+        assert_eq!(starts.len(), 2);
+        let text: String = b.text.iter().collect();
+        // More of it: both kept.
+        b.chips_seen = starts.clone();
+        assert_eq!(b.retext(chars(&format!("{text}\nok"))), text.chars().count());
+        assert_eq!(b.chips_seen, starts);
+        // Changed between them: the first kept, the second gone.
+        let cut = starts[1] - 2;
+        let mut other = chars(&text);
+        other[cut] = 'X';
+        assert_eq!(b.retext(other), cut);
+        assert_eq!(b.chips_seen, starts[..1].to_vec());
+        // A caption, then the caption done with other words: none.
+        b.retext(chars(&text));
+        b.chips_seen = starts.clone();
+        b.caption(&text);
+        assert_eq!(b.chips_seen, starts, "the caption so far, the same");
+        b.caption("Something else entirely.");
+        assert!(b.chips_seen.is_empty());
+        b.caption(&text);
+        b.chips_seen = starts.clone();
+        b.caption_done("", Instant::now());
+        assert_eq!(b.chips_seen, starts, "done, as said");
+        b.caption_done("Run: that.", Instant::now());
+        assert!(b.chips_seen.is_empty());
     }
 
     /// Shady (#143, N3): `synaps login` streamed in a 245 px box; its turn ended, the collapse key

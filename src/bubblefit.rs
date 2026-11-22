@@ -246,6 +246,10 @@ impl Grow {
     /// wider than the most it may take waits for that much only (then shows, clipped by what it
     /// is over); growth that isn't coming never keeps it waiting.
     pub fn waits(&self, need: f32, row: usize, now: Instant) -> bool {
+        // Not drawn as a reply: no box to wait for (Shady, #144).
+        if self.away {
+            return false;
+        }
         let need = need.min(self.most);
         let (w, rows) = self.target();
         let short = need > self.drawn.0 + 0.01 || row >= self.drawn.1;
@@ -609,6 +613,7 @@ mod tests {
         // The reader opened: the stub, no draw for 2 s; it closed, the box easing back.
         assert_eq!(g.stub(180.0, 470.0), 180.0);
         assert!(!g.drawing(at(t0, 30)), "away: its words don't wait for a box that isn't drawn");
+        assert!(!g.waits(390.0, 0, at(t0, 30)), "nor its lines or keys (Shady, #144)");
         g.next(ask((400.0, 3), 140.0, false, false, 470.0), at(t0, 2_000));
         g.draw(200.0, 3, at(t0, 2_016));
         assert!(g.drawing(at(t0, 2_020)));
@@ -617,6 +622,7 @@ mod tests {
         // A prompt or the field took the panel (`away`): the same, however soon it is back.
         g.draw(200.0, 3, at(t0, 3_000));
         g.away();
+        assert!(!g.waits(390.0, 0, at(t0, 3_004)), "away");
         g.draw(200.0, 3, at(t0, 3_016));
         assert!(g.waits(390.0, 0, at(t0, 3_020)));
         // At 10 fps, every frame 120 ms apart: one wait, not one a frame.

@@ -243,6 +243,11 @@ function Shot([string]$Step, [string]$Note = '', [int[]]$At = $null) {
     # of hers (an error box) is a failure, closed or not.
     Close-Dialogs "$script:Take/$Step"
     Start-Sleep -Milliseconds 400
+    # A take that waited for her bubble to settle (Wait-Settled): settled again right before the
+    # shot, so its keys are checked on the bubble shot, not one that moved since (Shady, #144).
+    if ($script:MustSettle) {
+        $null = Wait-Until { $st = State; $st.panel_layout -and $st.panel_layout.settled } 5 "$script:Take/${Step}: $script:MustSettle"
+    }
     $png = Join-Path $script:TakeOut "$Step.png"
     $rect = $null
     try {
