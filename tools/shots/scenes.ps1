@@ -19,7 +19,8 @@
               a short and a medium one against the screen's left edge, a spoken "ok" in hands-free,
               and the reader opened while a long reply still comes (the stub: ABORT, CLOSE READER).
     Every shot with a settled bubble: its keys (`state`'s buttons) whole inside it, none over
-    another, else a problem.
+    another, else a problem. A shot a take waited to be settled (Wait-Settled) that isn't settled
+    when its `state` is read is a problem too: its keys would go unchecked.
     tray      her icon in the notification area (#79), promoted out of the overflow, on a dark
               taskbar with its clock off: hovered (its tooltip, capri-syn · ONLINE), right-clicked (her
               menu), cropped to the taskbar's corner and the menu; the menu by his keys (ATTENTION lit,
@@ -60,6 +61,7 @@ $Logs = Join-Path $Out 'logs'
 New-Item -ItemType Directory -Force -Path $Logs | Out-Null
 $script:Index = [System.Collections.Generic.List[object]]::new()
 $script:Fails = [System.Collections.Generic.List[string]]::new()
+$script:MustSettle = $null
 
 function Q([string]$s) { '"' + $s + '"' }
 
@@ -136,6 +138,7 @@ function Start-Take {
         [string[]]$LocalModels = @()
     )
     $script:Take = "$Set/$Name"
+    $script:MustSettle = $null
     $t = Join-Path $Root "$Set-$Name"
     Remove-Item -Recurse -Force $t -ErrorAction SilentlyContinue
     foreach ($d in 'cfg\synaps-avatar', 'data', 'state', 'run', 'fake', 'voice') { New-Item -ItemType Directory -Force -Path (Join-Path $t $d) | Out-Null }
@@ -263,16 +266,24 @@ function Shot([string]$Step, [string]$Note = '', [int[]]$At = $null) {
             bubble_w = if ($panel) { $panel[2] } else { $null }
             header = $s.panel_layout.header_px
         })
-    Test-Keys $s "$script:Take/$Step"
+    Test-Keys $s "$script:Take/$Step" $script:MustSettle
+    $script:MustSettle = $null
     Write-Host "  $script:Take/$Step $(if ($rect) { $rect -join ',' } else { '(no shot)' })"
 }
 
 <# The Line takes the keyboard: a click on its field (it opens parked from her socket). #>
 <# The bubble's keys (`state`'s buttons, device px) each whole inside its panel and none over
    another: a key cut or under another is one he can't click (QUIT, #78). A settled bubble only
-   (one easing is between sizes); the tag (`chip`) isn't the bubble's. #>
-function Test-Keys($s, [string]$Where) {
+   (one easing is between sizes); the tag (`chip`) isn't the bubble's. `$Settled`: what the take
+   waited to be settled (Wait-Settled) for this shot: not settled, no bubble or no keys when its
+   `state` is read is a failure, never a quiet skip. #>
+function Test-Keys($s, [string]$Where, [string]$Settled = $null) {
     $pl = $s.panel_layout
+    if ($Settled -and (-not $pl -or -not $pl.panel -or -not $pl.settled -or -not $s.buttons)) {
+        $why = if (-not $pl -or -not $pl.panel) { 'no bubble' } elseif (-not $pl.settled) { 'not settled' } else { 'no keys' }
+        $script:Fails.Add("${Where}: waited for $Settled, but $why when shot: its keys unchecked")
+        return
+    }
     if (-not $pl -or -not $pl.panel -or -not $pl.settled -or -not $s.buttons) { return }
     $p = @($pl.panel)
     $keys = @($s.buttons.PSObject.Properties | Where-Object { $_.Name -ne 'chip' } | ForEach-Object { [pscustomobject]@{ Id = $_.Name; R = @($_.Value) } })
@@ -1019,8 +1030,10 @@ $Scenes.bubble['stub-busy'] = {
     Shot 'back' 'the reader closed: the reply as it was'
 }
 
-<# Her bubble settled (no ease, no glitch: `panel_layout.settled`), or the take fails. #>
+<# Her bubble settled (no ease, no glitch: `panel_layout.settled`), or the take fails. The next
+   shot's keys are checked, or it fails (Test-Keys): settled now and not when shot is a failure. #>
 function Wait-Settled([string]$What) {
+    $script:MustSettle = "$What settled"
     if (-not (Wait-Until { $s = State; $s.panel_layout -and $s.panel_layout.settled } 5 "$What settled")) {
         $script:Fails.Add("${script:Take}: $What never settled")
     }

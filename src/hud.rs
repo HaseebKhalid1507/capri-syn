@@ -154,6 +154,13 @@ impl Tween {
         self.to - (self.from - self.to) * over
     }
 
+    /// Where it is, but never under where it goes while it narrows: the curve's overshoot dips
+    /// it under that for a few frames (2 % of the way), and what is laid out in it never.
+    pub fn kept(&self, now: Instant) -> f32 {
+        let v = self.at(now);
+        if self.moving(now) && self.to < self.from { v.max(self.to) } else { v }
+    }
+
     /// Toward `to` from wherever it is now; no change when that is already where it goes.
     pub fn go(&mut self, to: f32, now: Instant, ms: f32) {
         if (to - self.to).abs() < 0.25 {
@@ -501,7 +508,8 @@ impl<T: Clone + PartialEq> TagFx<T> {
 
 /// The bubble this frame: its shell's size, its content's (the box its words are laid out
 /// in: the one it is going to while it opens, its words where they will be, shown only inside
-/// the shell), their levels.
+/// the shell; while it narrows, never under the size it goes to, so the ease's overshoot dips
+/// the shell into its padding, never into its words), their levels.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PanelFrame {
     pub shell: (f32, f32),
@@ -598,7 +606,9 @@ impl PanelFx {
         }
         let shell = (self.w.at(now), self.h.at(now));
         // Opening: its words where they will be (the view shows them only inside the shell).
-        let content = if self.opened.is_some() { (w, h) } else { shell };
+        // Narrowing: never under where it goes (the overshoot's dip, 2 % of the way, comes out of
+        // its padding: a 470 → 120 narrowing dips 7 px, its right padding is 15).
+        let content = if self.opened.is_some() { (w, h) } else { (self.w.kept(now), self.h.kept(now)) };
         // Out of the tag: its label at the centre until the shell covers the words, which cut
         // in then (never both, never neither).
         let (pill_words, inner) = match self.pill_x0 {
@@ -635,6 +645,11 @@ impl PanelFx {
 
     pub fn busy(&self, now: Instant) -> bool {
         self.w.moving(now) || self.h.moving(now) || self.glitch.is_some_and(|g| !g.done(now)) || self.opened.is_some() || self.pill_x0.is_some()
+    }
+
+    /// Opening (its words laid out in the box it is going to, the shell easing out around them).
+    pub fn opening(&self) -> bool {
+        self.opened.is_some()
     }
 
     /// A glitch now would be over the limit.
@@ -948,6 +963,34 @@ mod tests {
             assert!(f.fit_w == 300.0 && f.fit_w <= f.shell.0, "at {t}: {f:?}");
         }
         assert_eq!(p.open((380.0, 80.0), 2, None, at(t0, 1400), true, true).fit_w, 380.0);
+    }
+
+    /// Shady (#143 follow-up): the ease dips 2 % under a narrowing's target, and the box its words
+    /// are laid out in dipped with it: a narrowing over ~98 px cut its widest line for ~60 ms.
+    /// Narrowing, the content box is never under the size it goes to (the shell dips into its
+    /// padding); growing or settled, it is the shell.
+    #[test]
+    fn narrowing_its_words_box_never_dips_under_where_it_goes() {
+        let t0 = Instant::now();
+        let mut p = PanelFx::default();
+        p.open((470.0, 250.0), 1, None, t0, true, false);
+        p.open((470.0, 250.0), 1, None, at(t0, 400), true, false);
+        let mut dipped = 0.0f32;
+        for t in (400..=800).step_by(4) {
+            // Its width 470 → 120, its rows 8 → 3 (going long): both narrow.
+            let f = p.open((120.0, 120.0), 1, None, at(t0, t), true, false);
+            assert!(f.content.0 >= 120.0 && f.content.1 >= 120.0, "at {t}: {f:?}");
+            assert!(f.content.0 >= f.shell.0 && f.content.1 >= f.shell.1, "at {t}: {f:?}");
+            assert!(f.content.0 == f.shell.0 || f.content.0 == 120.0, "at {t}: {f:?}");
+            dipped = dipped.max(f.content.0 - f.shell.0);
+        }
+        assert!(dipped > 6.0 && dipped < 0.021 * 350.0, "the shell's dip, inside a 15 px padding: {dipped}");
+        assert_eq!(p.open((120.0, 120.0), 1, None, at(t0, 900), true, false).content, (120.0, 120.0));
+        // Growing: its words in the shell as it is (never past it), overshoot and all.
+        for t in (1000..=1400).step_by(4) {
+            let f = p.open((400.0, 200.0), 1, None, at(t0, t), true, false);
+            assert_eq!(f.content, f.shell, "at {t}");
+        }
     }
 
     #[test]
