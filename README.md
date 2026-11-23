@@ -373,11 +373,14 @@ The session rules, flags, packs and the dev control: [docs/REFERENCE.md](docs/RE
 | <kbd>Tab</kbd> | Answer in words instead |
 
 On Linux the app grabs no global keys; the installer binds them for i3, sway and Hyprland (with your
-consent). On Hyprland it prefers `~/.config/hypr/hyprland.lua` when present, otherwise
-`hyprland.conf`: Lua gets `hl.bind` press/release bindings with literal key strings, not local
-helpers. Super+C taken? It offers Super+Alt+C; `--voice` adds Ctrl for the mic toggle. It backs up
-the config first and removes only its marked blocks on uninstall. Lua collision checks cover
-literal keys and the stock `mainMod` concatenation, not arbitrary Lua helpers.
+consent). On Hyprland it searches for `hyprland.lua` in `$XDG_CONFIG_HOME/hypr`,
+`~/.config/hypr`, `$XDG_CONFIG_DIRS` and `/etc/xdg/hypr`, then legacy `hyprland.conf`
+(Hyprland 0.57+ ignores `.conf`, so it warns). Lua gets literal `hl.bind` press/release
+bindings. Super+C taken? It offers Super+Alt+C; `--voice` adds Ctrl for the mic toggle.
+It checks live `hyprctl binds -j` first, including helper/import-generated keys. Offline, it
+scans literal keys and stock `mainMod` concatenation; unresolved helpers, loops or imports
+are shown for manual setup, never assumed free. It backs up first, checks with `luac -p`
+when installed (restoring on failure), and removes only its marked blocks on uninstall.
 
 By hand, in i3:
 
