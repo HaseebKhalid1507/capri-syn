@@ -3,6 +3,8 @@
 //! output, empty otherwise. The core picks the host (`Os::move_to`); the view flips them
 //! (`Avatar::hosts_sync`). Dormant hosts take no input and draw nothing after their last frame.
 
+mod startup;
+
 use crate::platform::{Monitor, Os, Role, WinId};
 use crate::view::Avatar;
 use gpui_kit::*;
@@ -28,17 +30,29 @@ pub fn options(cx: &App, os: &Os, role: Role, bounds: Bounds<Pixels>) -> anyhow:
 /// wl_output.done/name can lag hyprctl at startup. Yield to GPUI's event loop until the
 /// named output is complete; never block dispatch or silently bind to a different output.
 /// Keep the startup closure (pack/listener included) until it can run exactly once.
+/// A removed/unadvertised output must fail startup, not leave an unserved control socket.
 pub fn when_ready(cx: &mut App, os: Rc<Os>, bounds: Bounds<Pixels>, start: impl FnOnce(WindowOptions, &mut App) + 'static) {
+    let began = std::time::Instant::now();
     match options(cx, &os, Role::Body, bounds) {
         Ok(options) => start(options, cx),
-        Err(e) => {
-            elog!("synaps-avatar: waiting for the body output's wl_output name: {e:#}");
+        Err(mut error) => {
+            elog!("synaps-avatar: waiting for the body output's wl_output name: {error:#}");
             cx.spawn(async move |cx| {
                 loop {
-                    cx.background_executor().timer(std::time::Duration::from_millis(50)).await;
-                    if let Ok(options) = cx.update(|cx| options(cx, &os, Role::Body, bounds)) {
-                        cx.update(|cx| start(options, cx));
-                        break;
+                    let elapsed = began.elapsed();
+                    let Some(delay) = startup::retry_after(elapsed) else {
+                        // fatal logs the last lookup (wanted name + GPUI's displays), removes
+                        // the bound socket and exits; the event watcher has not started yet.
+                        crate::fatal(crate::startfail::Why::Other, error.context(format!("body output unavailable after {} ms", elapsed.as_millis())));
+                    };
+                    cx.background_executor().timer(delay).await;
+                    match cx.update(|cx| options(cx, &os, Role::Body, bounds)) {
+                        Ok(options) => {
+                            elog!("synaps-avatar: body output ready after {} ms", began.elapsed().as_millis());
+                            cx.update(|cx| start(options, cx));
+                            break;
+                        }
+                        Err(next) => error = next,
                     }
                 }
             }).detach();

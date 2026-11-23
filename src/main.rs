@@ -518,7 +518,6 @@ fn run(t_start: Instant) -> Result<()> {
             .unwrap_or_else(|| view::Avatar::default_origin(&os, &layout));
 
         let bounds = Bounds::new(point(px(origin.0 as f32 / sf), px(origin.1 as f32 / sf)), size(px(layout.win_w as f32 / sf), px(layout.win_h as f32 / sf)));
-        let options = os.window_options(platform::Role::Body, bounds, false);
         let startup_os = os.clone();
         let start = move |options, cx: &mut App| {
             let (tx, rx) = async_channel::unbounded::<(control::Command, control::Reply)>();
@@ -747,6 +746,7 @@ fn run(t_start: Instant) -> Result<()> {
         if hosts {
             host::when_ready(cx, startup_os, bounds, start);
         } else {
+            let options = startup_os.window_options(platform::Role::Body, bounds, false);
             start(options, cx);
         }
     });

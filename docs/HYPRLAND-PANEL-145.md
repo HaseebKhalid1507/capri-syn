@@ -90,8 +90,12 @@ unmanaged surfaces are not opted in. Configures are still acknowledged.
   The earlier `output_id(body)` dependency is removed: an implicitly created body no longer
   disables every panel. `host::options` is shared by production and the contract. A genuinely
   unadvertised/removed output is still an error, not permission to use the focused output.
-  At startup, `host::when_ready` retries the name lookup every 50 ms, yielding to GPUI's
-  event loop so wl_output.name/done can arrive; it no longer exits on this startup race.
+  At startup, `host::when_ready` retries the name lookup every 50 ms for up to 5 seconds,
+  yielding to GPUI's event loop so wl_output.name/done can arrive. Successful retries log
+  the elapsed wait. On timeout, `fatal(startfail::Why::Other, …)` logs the requested name
+  (including an empty name) and GPUI's actual display list with names, removes the bound
+  control socket and exits. The monitor cache is not refreshed before the watcher starts:
+  an unplugged/unadvertised output fails startup rather than waiting invisibly forever.
   The application startup closure runs once after resolution; other backends remain immediate.
   `main.rs` explicitly sets `sf=1` for per-output hosts, independent of GPUI's primary display.
 - Fractional-scale evidence from review: 2560×1600 @1.25 has Hyprland bounds 2048×1280, but

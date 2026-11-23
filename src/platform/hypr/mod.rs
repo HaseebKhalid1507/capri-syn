@@ -588,7 +588,11 @@ impl Stage for LayerStage {
         // GPUI's integer-scale display bounds are NOT Hyprland's fractional-scale
         // logical bounds. Match wl_output v4 names, for hosts and panels alike.
         let name = self.dressed.borrow().get(layer.namespace.as_str()).cloned().context("layer has no output")?;
-        o.display_id = Some(layer_ctl::display_id_for_name(&name, &cx.displays()).context("wl_output name not yet advertised")?);
+        let displays = cx.displays();
+        // PlatformDisplay has no name accessor; WaylandDisplay's Debug includes its
+        // wl_output name (also None before advertised), not just an opaque UUID.
+        o.display_id = Some(layer_ctl::display_id_for_name(&name, &displays)
+            .with_context(|| format!("wl_output {name:?} not yet advertised; GPUI displays (including names): {displays:?}"))?);
         Ok(())
     }
 
