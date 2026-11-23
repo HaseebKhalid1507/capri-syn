@@ -131,7 +131,7 @@ cargo-about, `installer/licenses/`).
   or the key service's default from her own table (`steps.ps1 model`, through `synaps-avatar --set
   session.model=…`). An account's model is set only once he's signed in (the finish page's `login
   model`); unticked, stopped or failed, it stays unset and she reads NO BRAIN YET.
-- **Her pack** (page "Her pack"): "Download her art (CapriCore + lachy's desktop art, ~100 MB)", the
+- **Her pack** (page "Her pack"): "Download her art (CapriCore + lachy's desktop art, ~120 MB)", the
   default; "Use a pack folder I already have" (copied; a folder without `sprites.json` is refused);
   or "Skip, I'll add one later". The download is the one install.ps1 does: CPython's embeddable
   package and pip (pinned, SHA-256 checked) in a cache folder, fonttools into it, CapriCore at

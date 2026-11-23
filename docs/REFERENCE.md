@@ -337,8 +337,22 @@ Paths here are Linux's: Windows keeps the same files under `%APPDATA%` and `%LOC
   conversation so far, a text field, prompts answered from the keyboard. It stays open after Enter;
   Esc closes it and keeps the draft. A reply that lands while it's closed leaves a one-line strip on her
   tag until you open it.
-- **Her bubble** shows short replies as they stream. A tap on her body also opens a text field there.
-  Long replies, and replies with code, open in the **reader** beside her (scrollable, copy buttons).
+- **Her bubble** shows short replies as they stream, and fits them: as wide as its widest line (470 px
+  at most, less where she has less room) and as tall as its lines, up to a page of 8, so "ok" gets a
+  small one. Its least width is what its header and every key in its footer (ABORT, READ · N LINES, DENY,
+  ALLOW, REVIEW ▸, ANSWER, the collapse key, the pager) need, whole: a reply's status at its shortest
+  step, its label giving way; a prompt's title and the field's name in full. Where the keys can't all
+  fit, the pager goes first (the wheel still pages), then READ's count. Prompts, the text field and the
+  focus probe fit their words the same way. A streaming reply grows in steps of 48 px, at most one
+  change every 250 ms, and doesn't shrink until the turn ends, then settles once to its fit; a reply
+  shown whole at once, or a spoken caption, grows the box at once. A line the box doesn't hold yet
+  waits for it to grow around it (at most 1.5 s); a command chip waits until its whole face fits, then
+  stays. The text field grows in 48 px steps and narrows only once its text is 16 px under the step below. With no
+  compositor (the shaped window) a width change takes the bubble out of the window's shape for a frame:
+  there a streaming reply and the field take the most the room allows, and a reply neither narrows
+  within itself nor settles. A tap on her body also opens a text field there.
+  Long replies (past a page), and replies with code, open in the **reader** beside her (scrollable,
+  copy buttons).
 - **Prompts**: ALLOW/DENY for a confirm, a masked field for a secret. Anything that runs, writes or
   deletes needs <kbd>A</kbd> held (or the ALLOW button held) for 0.45 s; a tap does nothing.
 
@@ -502,8 +516,9 @@ behaviour uses). One frame comes from v1.1.2 (`bb0c2d7`): `pose-sleep`, checked 
 sha256. It's read from the checkout's git objects when they have it (`git fetch --tags`), else downloaded
 from GitHub at that commit, or given with `--sleep FILE`. It needs `fonttools` for the Exo 2 instances.
 Beside them, from v1.2.2 (`828f272`, pinned in `tools/capricore-v1.2.2.sha256`, found the same way or
-given with `--v122 DIR`): her wave and the hanging and ledge cels into `anim/capricore/` (anim.json's
-`capricore` side, geometry in `tools/desktop-art.json`), and the no-jacket redraws as her second outfit
+given with `--v122 DIR`): her wave, the hanging cels (pull-up, catch, wrist scan) and the ledge cel (her
+keytar, one of her loops on a window top while music plays) into `anim/capricore/` (anim.json's `capricore` side,
+geometry in `tools/desktop-art.json`), and the no-jacket redraws as her second outfit
 in `outfits/no-jacket/` (`tools/capricore-outfit.json`: which redraw draws which frame, stand-ins where
 v1.2.2 has none, and patches). Its notice is appended to the pack's NOTICE.
 `python3 tools/test_make_pack.py` tests it on fake checkouts.

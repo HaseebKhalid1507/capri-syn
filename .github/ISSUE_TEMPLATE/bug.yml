@@ -27,7 +27,7 @@ body:
     attributes:
       label: Version
       description: "Settings ▸ ABOUT ▸ COPY copies her version, OS and model in one go. On Linux, `synaps-avatar --version` works too."
-      placeholder: "1.1.1"
+      placeholder: "1.2.0"
     validations:
       required: true
   - type: dropdown
