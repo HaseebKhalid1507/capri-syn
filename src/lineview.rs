@@ -392,7 +392,7 @@ impl Avatar {
     fn line_place(&self, h: i32) -> (Place, WinRect, WinRect) {
         let sf = self.layout.sf;
         let her = self.her_body();
-        let area = self.her_area().unwrap_or_else(|| {
+        let area = self.os.panel_area().or_else(|| self.her_area()).unwrap_or_else(|| {
             let m = self.os.area_at(her.center().0, her.center().1);
             WinRect::new(m.x, m.y, m.w, m.h)
         });
@@ -407,6 +407,10 @@ impl Avatar {
     /// and its tail follow.
     pub(super) fn line_follow(&mut self, h: Option<i32>, cx: &mut Context<Self>) {
         let Some(l) = &self.line else { return };
+        if self.os.panel_needs_reopen(l.xid) {
+            self.line_reopen_on_output(cx);
+            return;
+        }
         let h = h.unwrap_or(l.at.3);
         let (p, _, her) = self.line_place(h);
         let sf = self.layout.sf;
@@ -427,6 +431,39 @@ impl Avatar {
                 hd.update(cx, |_, _, cx| v.update(cx, |l, cx| l.set_tail(t, cx))).ok();
             });
         }
+    }
+
+    /// A layer's wl_output is immutable. Rebuild the view too: its text input and
+    /// keystroke/activation subscriptions belong to the old GPUI WindowId.
+    pub(super) fn line_reopen_on_output(&mut self, cx: &mut Context<Self>) {
+        let Some(old) = self.line.take() else { return };
+        let me = cx.entity().downgrade();
+        cx.defer(move |cx| {
+            let saved = old.handle.update(cx, |_, window, cx| old.view.update(cx, |line, cx| line.detach_for_output(window, cx)));
+            if let Ok((draft, sent, page)) = saved {
+                me.update(cx, |a, cx| {
+                    if a.line.is_some() { return; }
+                    a.draft = draft;
+                    a.sent = sent;
+                    let result = a.open_line_with_focus(page, Some(!old.parked), cx);
+                    if let Some(l) = &mut a.line {
+                        l.prev = old.prev;
+                        // Moving her is not permission to steal the keyboard from his terminal.
+                        l.parked = old.parked;
+                        l.waiting = old.waiting;
+                        let (v, hd, parked, waiting) = (l.view.clone(), l.handle, old.parked, old.waiting);
+                        if parked {
+                            a.os.release_keyboard(l.xid, None).ok();
+                            cx.defer(move |cx| { hd.update(cx, |_, _, cx| v.update(cx, |l, cx| l.park_on_output(waiting, cx))).ok(); });
+                        } else {
+                            a.os.grab_keyboard(l.xid).ok();
+                        }
+                        a.os.arm_clicks(!parked);
+                    }
+                    elog!("synaps-avatar: Line recreated on body output: {result}");
+                }).ok();
+            }
+        });
     }
 
     pub(super) fn open_line(&mut self, cx: &mut Context<Self>) -> String {
@@ -467,6 +504,10 @@ impl Avatar {
     }
 
     pub(super) fn open_line_on(&mut self, page: Page, cx: &mut Context<Self>) -> String {
+        self.open_line_with_focus(page, None, cx)
+    }
+
+    fn open_line_with_focus(&mut self, page: Page, take: Option<bool>, cx: &mut Context<Self>) -> String {
         let now = Instant::now();
         let sf = self.layout.sf;
         let h0 = (LINE_H0 * sf) as i32;
@@ -482,8 +523,11 @@ impl Avatar {
         // The keyboard comes with the Line when this opening is his doing (his key, his click
         // on her: `Os::may_take_keyboard`). Else the Line opens waiting for him, never taking
         // the keyboard from the window he works in.
-        let take = self.os.may_take_keyboard();
-        let options = self.os.window_options(Role::Line, bounds, take);
+        let take = take.unwrap_or_else(|| self.os.may_take_keyboard());
+        let options = match self.os.panel_options(Role::Line, bounds, take, cx) {
+            Ok(options) => options,
+            Err(e) => return format!("error: line output: {e:#}"),
+        };
         self.prefs_says = None;
         let mut snap = self.line_snap();
         if page.settings() {
@@ -1127,7 +1171,7 @@ impl Avatar {
                 let sf = self.layout.sf;
                 if let Some(l) = &self.line {
                     // No taller than her work area allows (it scrolls inside).
-                    let area_h = self.her_area().map_or(i32::MAX / 2, |a| a.h);
+                    let area_h = self.os.panel_area().or_else(|| self.her_area()).map_or(i32::MAX / 2, |a| a.h);
                     let hd = line_height::device_height(h, sf, area_h);
                     if hd != l.at.3 {
                         self.line_follow(Some(hd), cx);

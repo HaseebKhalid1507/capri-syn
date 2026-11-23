@@ -854,6 +854,9 @@ impl WaylandWindow {
         target_output: Option<wl_output::WlOutput>,
     ) -> anyhow::Result<(Self, ObjectId)> {
         let surface = globals.compositor.create_surface(&globals.qh, ());
+        // Preserve the output chosen at creation, before wl_surface.enter arrives.
+        // Hyprland's per-moment layers copy their body host's actual wl_output id.
+        let output_id = target_output.as_ref().map(|output| output.id().protocol_id() as u64);
         let surface_state = WaylandSurfaceState::new(
             &surface,
             &globals,
@@ -893,6 +896,7 @@ impl WaylandWindow {
             scheduled_frame_at: Rc::new(Cell::new(None)),
             ctl: Rc::new(layer_ctl::Ctl::default()),
         });
+        this.0.ctl.output_id.set(output_id);
         layer_ctl::register(&this.0);
 
         // Kick things off
@@ -2653,6 +2657,8 @@ pub mod layer_ctl {
 
     #[derive(Default)]
     pub(super) struct Ctl {
+        /// Immutable wl_output selected for get_layer_surface (None: compositor chose).
+        pub(super) output_id: Cell<Option<u64>>,
         /// Last explicit layer bounds request. A configure already in flight must not
         /// replace a newer size when configure handling echoes the window geometry.
         pub(super) requested_size: Cell<Option<(u32, u32)>>,
@@ -2687,6 +2693,11 @@ pub mod layer_ctl {
         let w = LAYERS.with(|l| l.borrow().get(&surface).cloned())?;
         let ls = w.layer_surface()?;
         Some(f(&w, &ls))
+    }
+
+    /// The wl_output protocol id named at creation, not a compositor monitor id or focus.
+    pub fn output_id(surface: usize) -> Option<u64> {
+        with(surface, |w, _| w.ctl.output_id.get()).flatten()
     }
 
     fn commit_now(w: &WaylandWindowStatePtr) {

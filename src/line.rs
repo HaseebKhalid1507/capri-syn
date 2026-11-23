@@ -758,6 +758,22 @@ impl Line {
         cx.notify();
     }
 
+    /// Retain a parked Line's waiting hint when only its output changed.
+    pub(crate) fn park_on_output(&mut self, waiting: bool, cx: &mut Context<Line>) {
+        self.parked = true;
+        self.waiting = waiting;
+        cx.notify();
+    }
+
+    /// Output migration is not a user close: no Ask::Closed, no focus restore or
+    /// session state change. Recreate window-bound input subscriptions on the new output.
+    pub(crate) fn detach_for_output(&mut self, window: &mut Window, cx: &mut Context<Line>) -> (String, Vec<String>, Page) {
+        self.closing = true;
+        let saved = (self.input.read(cx).value().to_string(), std::mem::take(&mut self.sent), self.nav.page);
+        window.remove_window();
+        saved
+    }
+
     pub fn close(&mut self, restore: bool, window: &mut Window, cx: &mut Context<Line>) {
         if self.closing {
             return;
