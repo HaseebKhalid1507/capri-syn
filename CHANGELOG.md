@@ -2,30 +2,96 @@
 
 ## Unreleased
 
+## 1.2.0 (2026-11-23)
+
+She's restless, turns to another loop while she sits or stands, and changes outfit now and then. Her
+bubble fits what she says. Capri's pack takes CapriCore v1.2.2's wave, hanging cels, keytar and
+no-jacket look.
+
 ### Her life
-- **She's restless:** idle beats every few seconds from whatever the pack fills, never the same one
-  twice running; now and then a quick glance at the pointer or a window that came forward, dropped for
-  something else; steady while her session works; more gestures the longer nobody engages her, up to her
-  attention bids. Asleep, held (the Line, a prompt, the menu, a drag, the voice) or moving: still. No
-  new settings.
+- **She's restless:** an idle beat every few seconds from whatever the pack fills (blinks, looks, a wink,
+  a lean in, a sit on the floor, her gestures), never the same one twice running; now and then a quick
+  glance at the pointer or at a window that came forward, dropped for something else; steady while her
+  session works; more gestures the longer nobody engages her, up to her attention bids. Asleep, held (the
+  Line, a prompt, the menu, a drag, a reply bubble, the voice) or moving: still. No new settings.
+- **She doesn't hold one loop:** perched, perched with music or standing idle, she turns to another of
+  that state's loops every 8–25 s, as a pass of the one on screen ends: its exit, now and then a short
+  beat of hers, then the next one's entry. Never a move, so `max_moves_per_hour` doesn't see it.
+- **She changes outfit,** her jacket or the new no-jacket look, about every 45–120 min, where it can't be
+  seen: in a bolt (a teleport's or her launch's) or as she wakes; the one she wears is kept across
+  restarts. In the no-jacket look her greeting starts with a new wave, and hanging from a bar she now and
+  then does a pull-up, a catch or a wrist scan. In both looks she sometimes plays a keytar on a window top
+  while music plays. In her jacket look a summon, a teleport or a landing on a window top can open a
+  second way, never the same one twice running.
+
+### The bubble
+- **It fits what she says.** A short reply gets a small bubble, a longer one grows with its lines, and a
+  reply past a page (or with code) goes to READ at about the full width; prompts and the text field fit
+  their words too. Her status shortens before it is cut, and the keys under a reply or a prompt (ABORT,
+  READ · N LINES, DENY, ALLOW, REVIEW ▸, the collapse key, the pager) are never cut; where they can't all
+  fit, the pager goes first, then READ's count.
+- **A streaming reply grows in steps,** at most four a second, and doesn't shrink until the turn ends,
+  then settles once to its fit; the text field grows with what you type, in steps, and doesn't flip at a
+  step's edge. A reply shown all at once, or a spoken caption, sizes to its text at once. A line waits for
+  the box to grow around it, so a word or a command isn't cut while it grows, and the widest line isn't
+  clipped as the box narrows to settle. With no compositor (she cuts her window to her outline there) a
+  streaming reply and the field open at their widest and stay there.
 
 ### Packs
 - **New optional slots any character pack can fill** (docs/REFERENCE.md, "Slots any pack can fill"): cel
-  sheets (grid, geometry file, keys and in-betweens, per-frame timing) and animated WebP strips; a strip
-  named wherever steps go plays as a clip; a second outfit (`variants.outfits`) she changes into only in a
-  teleport's bolt or as she wakes, kept across restarts; hang fidgets, a glance, a perched music loop, idle
-  fidget and pose pools, arrival alternatives, and hearts drawn from the pack's own effect sprite. A pack
-  without them behaves as before.
-- Animated WebP strips are refused past 4096 px a side, 8 Mpx, 1000 frames or 512 MiB decoded; a cel
-  sheet's `keys` and per-frame `ms` hold wherever the strip plays. `--check` names the strips played
-  as clips.
-- A strip drawn for one outfit and named like a catalog clip plays in its place in that outfit; a step
-  may hold one cell of a strip (`<strip>#<cell>`); an outfit's sprite may take a `patch`; anim.json may
-  carry the pack's own animations (a `capricore` side, a family `scale`), cut to with no seam. An
-  arrival alternative the worn look doesn't draw is never picked.
-- **Capri's pack fills them from CapriCore v1.2.2** (`make-pack`, pinned at `828f272`): her wave, the
-  hanging pull-up, catch and wrist-scan cels, the keytar on a window top while music plays, and her
-  no-jacket look as a second outfit (the jacket look waves with its own clip; the keytar plays in both).
+  sheets and animated WebP strips, which play as clips wherever steps go; a second outfit (a strip may be
+  one outfit's drawing of a clip); hang fidgets; a glance; a perched music loop; idle face and pose pools;
+  arrival alternatives; hearts drawn from the pack's own effect sprite. A pack without them behaves as
+  before.
+- **Loop ranges:** a looped list or strip splits into an `entry` that plays once, a `loop` and an `exit`
+  that plays once as the loop ends; a one-shot beat adds `repeat: [min, max]`. `--check` names the key of
+  any mistake.
+- **Capri's pack takes CapriCore v1.2.2's files,** pinned by `make-pack` at `828f272` and checked against
+  `tools/capricore-v1.2.2.sha256`. The installers fetch them with the rest of her art (~120 MB to
+  download, ~115 MB built); an upgrade rebuilds her pack once.
+
+### Fixes
+- **Music after a carry.** Carried while a player's music played, she used to land still listening, and
+  pausing it no longer took her out. Now music still playing when she lands stops with the player, and
+  music that stopped while she was carried lands her out of music mode.
+
+### Known issues
+- A dark slab on X11 without a compositor (#72): now and then her whole window's rectangle paints solid
+  black behind her and her bubble, covering what's under it, more often while a prompt hangs below her. So
+  far only seen with no compositor, where she cuts her window to her outline with the X shape. Workaround
+  (likely; not yet confirmed): run a compositor (picom: `picom -b`); with `[display] composited = "auto"`,
+  the default, she switches to alpha when it starts, no restart.
+- GNOME, KDE and sway run her through XWayland, with its limits (docs/INSTALL.md). None of them has been
+  tried on a real session yet: CI and the test containers stand in for them.
+- Hyprland has no idle time for her yet: your presence is the pointer moving, so typing alone for 5 min
+  reads as away. Hyprland before 0.40 isn't supported: she takes XWayland there.
+- Hyprland: the Line and Settings can open cut short, with no room to type (#145). Being looked at.
+- On Windows, Synaps 0.12's own `synaps login` opens a sign-in tab cut at the URL's first `&`: copy the
+  whole URL it prints into your browser, or sign in from her (Settings ▸ Brain) or through her installers'
+  step, which open it whole (docs/INSTALL.md has the command). Grok's sign-in never prints its URL, so
+  Grok can't be signed in on Windows yet.
+- Windows: the installers are unsigned, so a browser download meets SmartScreen ("More info", then "Run
+  anyway"). Windows 10 and Windows 11 on Arm are untested. A click on one of her notifications does
+  nothing (as on Linux). Her voice brings its own VC++ runtime but hasn't yet run on a PC without the
+  Visual C++ Redistributable. Live audio is still to check on real hardware: her desktop checks ran in a
+  Windows 11 VM, with no real audio.
+- Linux has no tray icon yet: HIDE's chip is the way back there.
+- Her taskbar button's name, for a screen reader (Windows): on a first run, Explorer can name her button
+  with her old tooltip followed by the current one, so a screen reader hears both
+  (`capri-syn · SPEAKING capri-syn · ONLINE`). Her tooltip is one string, and the hover popup shows the
+  current one alone: the name chains after a tooltip change.
+- Windows: her context doesn't roll over yet. Synaps 0.12 keeps its context archive on Linux and macOS
+  only, so `[session] rollover` (docs/REFERENCE.md) is skipped there (her log says so). A long chat fills
+  her model's context until a turn is refused as too long; then compact or clear it from Synaps
+  (`/compact` or `/clear` in `synaps --attach capri`).
+- A ChatGPT account without Codex (coding) access reads as AT THE LIMIT: Synaps 0.12 words its refusal as
+  the same 429 Too Many Requests a rate limit gets, so she can't tell them apart. If it never clears, pick
+  another brain in Settings ▸ Brain.
+- With `XDG_RUNTIME_DIR` unset, she and her voice sidecar look for the Linux socket in different places:
+  she in the temp dir (`$TMPDIR`, else `/tmp`), the sidecar in `/run/user/<uid>`. Set it, or set
+  `CAPRI_VOICE_SOCK` for both. It isn't aligned yet because that would change how she behaves.
+- A word streamed in pieces can leave the bubble a step too wide until the reply ends, and the half-typed
+  word drops a line. Nothing is cut (#146).
 
 ## 1.1.1 (2026-11-20)
 

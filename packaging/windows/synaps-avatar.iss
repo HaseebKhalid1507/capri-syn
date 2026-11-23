@@ -898,7 +898,7 @@ begin
   T := NewText(PackPage, 'Her art isn''t in this installer. Setup can download it from its artists'' GitHub ' +
     'repositories and build her pack on this PC.', 0, 0);
   Y := T.Top + T.Height + ScaleY(10);
-  DownloadRadio := NewRadio(PackPage, 'Download her art (CapriCore + lachy''s desktop art, ~100 MB)', Y, @PackChoiceClick);
+  DownloadRadio := NewRadio(PackPage, 'Download her art (CapriCore + lachy''s desktop art, ~120 MB)', Y, @PackChoiceClick);
   T := NewText(PackPage, 'At pinned versions, every file checked against its SHA-256. lachy''s desktop art is under ' +
     'the PolyForm Noncommercial License 1.0.0 (noncommercial use only): its notices are shown when it''s done.',
     ScaleX(18), DownloadRadio.Top + DownloadRadio.Height + ScaleY(2));
