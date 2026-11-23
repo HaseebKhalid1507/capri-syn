@@ -3,7 +3,8 @@
 output; a teleport to HEADLESS-2 shows her there (and nothing of her is left on WAYLAND-1); back; HEADLESS-2 removed
 while she's on it: she comes down on WAYLAND-1 and its host is gone; added again: a dormant host for it. A drag from
 WAYLAND-1 let go over HEADLESS-2, with no window focused and with one: held to the release (her window follows the
-pointer), let go there, the keyboard where it was. `drop` while his press holds her: let go.
+pointer), let go there, the keyboard where it was. `drop` while his press holds her: let go. Her Line summoned
+mid-drag: held on, the Line takes the keyboard at the release.
 Inside the sandbox only (run.sh python3 p2hosts.py ...). One line per check."""
 import json, os, subprocess, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -44,6 +45,12 @@ def body_ki():
     """Her body hosts' keyboard interactivity (0 none, 1 exclusive, 2 on demand), one digit each."""
     return hyprctl("repl", "local r = '' for _, l in ipairs(hl.get_layers()) do if l.namespace == 'capri-body' then "
                            "r = r .. l.keyboard_interactivity end end return r").strip()
+
+
+def line_ki():
+    """Her Line's keyboard interactivity as Hyprland has it (0 none, 1 exclusive); '' with no Line mapped."""
+    return hyprctl("repl", "local r = '' for _, l in ipairs(hl.get_layers()) do if l.namespace == 'capri-line' and l.mapped "
+                           "then r = r .. l.keyboard_interactivity end end return r").strip()
 
 
 def grab(x, y, w, h):
@@ -183,6 +190,35 @@ with RigApp(BIN, PACK, LOG) as app:
     let_go = until(lambda: (state().get("rag") or {}).get("phase") != "held", 2)
     w.button(False)
     line("drop-his-press", phase == "held" and r.strip() == "ok released" and bool(let_go), f"held {phase}; drop -> {r.strip()!r}")
+    # Her Line summoned while he holds her (the talk key, Mod+C). Hyprland releases every button when a layer takes the
+    # keyboard (CLayerSurface::takeKeyboardFocus): she was let go mid-drag. The grab waits for his release
+    # (Os::grab_keyboard): she's held on, her Line asking for no keyboard meanwhile, and it has it after.
+    ctl(f"pos 900 {m1['height']}")
+    until(lambda: not state().get("teleporting") and state().get("rag") is None, 6)
+    time.sleep(1.0)
+    av = state()["avatar"]
+    sx, sy = av["x"] + av["w"] // 2, av["y"] + av["h"] // 2
+    w.warp(sx, sy); time.sleep(0.2); w.button(True)
+    for k in range(1, 11):
+        w.warp(sx + 8 * k, sy); time.sleep(1 / 60)
+    summoned = ctl("talk press").strip()
+    ctl("talk release")
+    time.sleep(0.8)
+    for k in range(11, 21):
+        w.warp(sx + 8 * k, sy); time.sleep(1 / 60)
+    time.sleep(0.2)
+    phase = (state().get("rag") or {}).get("phase")
+    ki_held = line_ki()
+    w.button(False)
+    until(lambda: (state().get("rag") or {}).get("phase") != "held", 2)
+    ki_after = until(lambda: line_ki() == "1" and "1", 2)
+    line("line-summoned-mid-drag", phase == "held" and ki_held == "0" and ki_after == "1",
+         f"talk press -> {summoned!r}; while held: rag {phase}, her Line's keyboard asks {ki_held!r}; after the release {line_ki()!r}")
+    ctl("line close")
+    time.sleep(0.5)
+    # No check of a press on her while his press holds her (Avatar::mouse_down, rule 3): real input can't make one here.
+    # Hyprland drops a press of a button the client's wl_pointer still has down (CWLPointerResource::sendButton), and
+    # every way it comes up there sends her its release first (sendLeave); GPUI has one wl_pointer. press_end_tests.
     w.destroy("p2-focus")
     time.sleep(0.3)
     log = open(LOG).read()

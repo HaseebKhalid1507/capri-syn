@@ -505,6 +505,9 @@ pub struct LayerStage {
     /// The body host asking for the keyboard on demand while a press on her lasts
     /// (`Stage::keep_pointer`).
     kept: std::cell::Cell<Option<WinId>>,
+    /// Her surfaces asking for the keyboard exclusively (`grab_keyboard`) until they let it go
+    /// (`release_keyboard`) or a new surface takes their id (`adopt`).
+    asked: RefCell<Vec<WinId>>,
 }
 
 /// The id key of one of her surfaces: its namespace (body hosts: and their output).
@@ -583,6 +586,8 @@ impl Stage for LayerStage {
                 layer_ctl::set_input_region(ptr, Some(&[]));
             }
         }
+        // A new surface under that id (a Line opened again) asks for no keyboard (`dress`).
+        self.asked.borrow_mut().retain(|&x| x != id);
         Ok(id)
     }
 
@@ -659,19 +664,29 @@ impl Stage for LayerStage {
 
     /// Exclusive keyboard interactivity: Hyprland gives her surface the keyboard in that commit.
     /// Over a press's ask on demand (`keep_pointer`): the press's end leaves it be.
+    /// Hyprland takes the keyboard for a layer by releasing every button first
+    /// (`CLayerSurface::takeKeyboardFocus`), on this commit or, not mapped yet, as it maps
+    /// (`onMap`; on demand too): never while his button is down on her (`grab_ends_press`). Hers
+    /// map asking for none (`dress`), and ask only here.
     fn grab_keyboard(&self, s: WinId) -> Result<()> {
         if self.kept.get() == Some(s) {
             self.kept.set(None);
         }
+        let id = s;
         let s = self.surface(s).context("not one of her surfaces")?;
         if !layer_ctl::set_keyboard_interactivity(s.ptr, layer_ctl::KeyboardInteractivity::Exclusive) {
             bail!("{}: not a layer surface", s.ns);
+        }
+        let mut a = self.asked.borrow_mut();
+        if !a.contains(&id) {
+            a.push(id);
         }
         Ok(())
     }
 
     /// No keyboard for her surface; the keyboard goes to `to` when given (else Hyprland picks).
     fn release_keyboard(&self, s: WinId, to: Option<WinId>) -> Result<()> {
+        self.asked.borrow_mut().retain(|&x| x != s);
         let s = self.surface(s).context("not one of her surfaces")?;
         layer_ctl::set_keyboard_interactivity(s.ptr, layer_ctl::KeyboardInteractivity::None);
         if let Some(w) = to {
@@ -693,14 +708,29 @@ impl Stage for LayerStage {
     /// (`keyboard_free`): else the pointer is kept anyway, and taking the keyboard from a window
     /// would show. At the end `s` asks for none, and Hyprland gives the keyboard to what is under
     /// the pointer (`CLayerSurface::onCommit`, `refocusLastWindow`). Should the pointer leave her
-    /// before that next motion (a flick), the press ends there, as it did.
+    /// before that next motion (a flick), the press ends there, as it did. Under `follow_mouse = 3`
+    /// no motion gives a layer the keyboard, and a layer of someone else's that may take it
+    /// makes `keyboard_free` say no: either way she can still slip at the seam with nothing
+    /// focused. A window that takes the keyboard mid-press (one opens, a keybind spawns one)
+    /// loses it to `s` at the next motion, to the release; it gets it back then only if it is on
+    /// `s`'s monitor (`refocusLastWindow(s's monitor)`), else what is under the pointer does.
+    /// Asked again whenever the keyboard changes hands mid-press (`Os::press_recheck`): with his
+    /// window that held it at the press closed and nothing focused, `s` asks then (helping while
+    /// the pointer is still on it). It never asks less before the end: letting the keyboard go
+    /// mid-press releases his button (`refocusLastWindow` calls `releaseAllMouseButtons`). So
+    /// does a layer of hers that holds the keyboard going mid-press (a Mod+C tap closing the
+    /// Line: `CLayerSurface::onUnmap`): she's let go where he has her, its release coming to
+    /// `s`; never held on.
     fn keep_pointer(&self, s: WinId, on: bool) {
-        if let Some(h) = self.kept.take()
-            && let Some(h) = self.surface(h)
-        {
-            layer_ctl::set_keyboard_interactivity(h.ptr, layer_ctl::KeyboardInteractivity::None);
-        }
         if !on {
+            if let Some(h) = self.kept.take()
+                && let Some(h) = self.surface(h)
+            {
+                layer_ctl::set_keyboard_interactivity(h.ptr, layer_ctl::KeyboardInteractivity::None);
+            }
+            return;
+        }
+        if self.kept.get().is_some() {
             return;
         }
         if let Some(h) = self.surface(s)
@@ -709,6 +739,35 @@ impl Stage for LayerStage {
         {
             self.kept.set(Some(s));
         }
+    }
+
+    fn grab_ends_press(&self) -> bool {
+        true
+    }
+
+    /// Those of hers asking for the keyboard that Hyprland hasn't mapped yet (opened a moment
+    /// ago: their first frame not in) ask for none: mapping one that asks takes the keyboard,
+    /// releasing his button (`CLayerSurface::onMap`). A mapped one is left be, as letting the
+    /// keyboard go would release it as well (`refocusLastWindow`). Mapped or not is Hyprland's
+    /// word per namespace (`hl.get_layers()`); without a reply it can read, each is taken as
+    /// mapped.
+    fn disarm_keyboard(&self) -> Vec<WinId> {
+        if self.asked.borrow().is_empty() {
+            return Vec::new();
+        }
+        let reply = self.desk.ipc.lua(MAPPED_LAYERS).unwrap_or_default();
+        let Some(mapped) = reply.strip_prefix("mapped:") else { return Vec::new() };
+        let mut out = Vec::new();
+        self.asked.borrow_mut().retain(|&id| {
+            let Some(s) = self.surface(id) else { return false };
+            if mapped.split_whitespace().any(|n| n == s.ns) {
+                return true;
+            }
+            layer_ctl::set_keyboard_interactivity(s.ptr, layer_ctl::KeyboardInteractivity::None);
+            out.push(id);
+            false
+        });
+        out
     }
 }
 
@@ -720,13 +779,16 @@ fn keyboard_free(ipc: &ipc::Ipc) -> bool {
     ipc.lua(KEYBOARD_FREE).is_ok_and(|r| r == "free")
 }
 
+/// `mapped:` and the namespaces of the mapped layers, space-separated (hers have no spaces).
+const MAPPED_LAYERS: &str = "local r = 'mapped:' for _, l in ipairs(hl.get_layers()) do if l.mapped then r = r .. ' ' .. l.namespace end end return r";
+
 const KEYBOARD_FREE: &str = "if hl.get_active_window() then return 'held' end for _, l in ipairs(hl.get_layers()) do if l.mapped and l.keyboard_interactivity ~= 0 then return 'held' end end return 'free'";
 
 /// The running Hyprland (its request socket answers), and a stage for her layer surfaces.
 pub fn connect() -> Result<(Arc<HyprDesktop>, LayerStage)> {
     let ipc = ipc::Ipc::from_env().context("hyprland")?;
     let desk = Arc::new(HyprDesktop { ipc, ids: Mutex::default(), pointer: Mutex::new(None) });
-    let stage = LayerStage { desk: desk.clone(), surfaces: RefCell::default(), dressed: RefCell::default(), body: std::cell::Cell::new(0), kept: std::cell::Cell::new(None) };
+    let stage = LayerStage { desk: desk.clone(), surfaces: RefCell::default(), dressed: RefCell::default(), body: std::cell::Cell::new(0), kept: std::cell::Cell::new(None), asked: RefCell::default() };
     Ok((desk, stage))
 }
 

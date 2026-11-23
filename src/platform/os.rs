@@ -294,6 +294,11 @@ pub struct Os {
     press_seen: Cell<Option<(Instant, Option<Instant>, bool)>>,
     /// The body host a press of his on her went down in, while it lasts (`set_held`).
     press_host: Cell<Option<WinId>>,
+    /// His button is down on her: from his press (`set_held`) to its release (`button_up`) or
+    /// the press's end.
+    button_down: Cell<bool>,
+    /// Her surfaces' keyboard grabs held for his release, oldest first (`grab_keyboard`).
+    held_grabs: RefCell<Vec<WinId>>,
     /// Her tray icon (`Desktop::tray`; None: none here) and what it shows now.
     tray: RefCell<Option<TrayLink>>,
 }
@@ -334,6 +339,8 @@ impl Os {
             settle: RefCell::new(Settle::default()),
             press_seen: Cell::new(None),
             press_host: Cell::new(None),
+            button_down: Cell::new(false),
+            held_grabs: RefCell::new(Vec::new()),
             tray: RefCell::new(None),
         }
     }
@@ -543,19 +550,55 @@ impl Os {
         self.settle.borrow_mut().press((press && self.caps.implicit_grab) || script, Instant::now());
     }
 
+    /// His button came up on her (`Avatar::mouse_up`), before what the release does: a grab
+    /// goes through from here (a tap's talk field, while the press still lasts: `set_held`).
+    pub fn button_up(&self) {
+        self.button_down.set(false);
+    }
+
+    /// The keyboard changed hands (`WatchEvent::Focus`): while his button is down on her, the
+    /// stage looks again whether to keep the pointer on the host pressed. His window that held
+    /// the keyboard at the press may have closed, leaving nothing to keep it there.
+    pub fn press_recheck(&self) {
+        if self.button_down.get()
+            && let Some(s) = self.press_host.get()
+        {
+            self.stage.keep_pointer(s, true);
+        }
+    }
+
     /// A press of his on her starts (`down`) or ends: the view says so on each, and every tick
     /// (`set_held`), so this runs once a press whichever way it ends. Nothing is known of the
     /// new one's button yet (`press_lost`: an up an earlier press saw isn't this one's, should
     /// that one have ended without a tick since). The stage may keep the pointer on the host it
-    /// went down in to its end (`Stage::keep_pointer`).
+    /// went down in to its end (`Stage::keep_pointer`). Where her taking the keyboard ends a
+    /// press, surfaces of hers about to take it as they show stop asking at its start
+    /// (`Stage::disarm_keyboard`), and at its end they and the grabs held meanwhile go
+    /// (`grab_keyboard`), before the host pressed stops asking: one takes the keyboard straight
+    /// from it, his window never getting it in between (letting it go hands it on).
     fn press_edge(&self, down: bool) {
         if down {
             self.press_seen.set(None);
             let s = self.stage.body();
             self.press_host.set(Some(s));
+            self.button_down.set(true);
+            if self.stage.grab_ends_press() {
+                for d in self.stage.disarm_keyboard() {
+                    elog!("synaps-avatar: the keyboard for {d:#x} waits for his release (it shows during his press)");
+                    self.hold_grab(d);
+                }
+            }
             self.stage.keep_pointer(s, true);
-        } else if let Some(s) = self.press_host.take() {
-            self.stage.keep_pointer(s, false);
+        } else {
+            self.button_down.set(false);
+            for g in self.held_grabs.take() {
+                if let Err(e) = self.stage.grab_keyboard(g) {
+                    elog!("synaps-avatar: the keyboard for {g:#x}, held for his release: {e:#}");
+                }
+            }
+            if let Some(s) = self.press_host.take() {
+                self.stage.keep_pointer(s, false);
+            }
         }
     }
 
@@ -824,13 +867,33 @@ impl Os {
 
     // ---- keyboard ------------------------------------------------------------------------
 
-    /// The keyboard to her surface `s` (her body, the reader, the Line).
+    /// The keyboard to her surface `s` (her body, the reader, the Line). Where taking it ends a
+    /// press (`Stage::grab_ends_press`: Hyprland releases every button first), a grab made while
+    /// his button is down on her (her Line summoned mid-drag, the voice key, `settings open`)
+    /// waits for his release instead of letting her go wherever he has her: Ok, it will go
+    /// then (`press_edge`). A grab that goes now is newer than any waiting: they're dropped (a
+    /// tap's talk field, after its button came up, keeps the keyboard).
     pub fn grab_keyboard(&self, s: WinId) -> Result<()> {
+        if self.button_down.get() && self.stage.grab_ends_press() {
+            elog!("synaps-avatar: the keyboard for {s:#x} waits for his release (taking it now would end his press)");
+            self.hold_grab(s);
+            return Ok(());
+        }
+        self.held_grabs.borrow_mut().clear();
         self.stage.grab_keyboard(s)
     }
 
-    /// Her surface `s` lets the keyboard go, back to `to` (the window that had it).
+    /// A grab of `s` waits for his release (one per surface, in the order last asked).
+    fn hold_grab(&self, s: WinId) {
+        let mut g = self.held_grabs.borrow_mut();
+        g.retain(|&x| x != s);
+        g.push(s);
+    }
+
+    /// Her surface `s` lets the keyboard go, back to `to` (the window that had it). A grab of
+    /// it waiting for his release is dropped.
     pub fn release_keyboard(&self, s: WinId, to: Option<WinId>) -> Result<()> {
+        self.held_grabs.borrow_mut().retain(|&x| x != s);
         self.stage.release_keyboard(s, to)
     }
 

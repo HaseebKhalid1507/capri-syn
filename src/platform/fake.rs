@@ -11,6 +11,8 @@ use std::sync::{Arc, Mutex};
 const BODY: WinId = 1;
 /// Her second body host (`fake_hosts`: the second output's, dormant at first).
 const HOST_B: WinId = 2;
+/// Her Line: a surface of hers that takes the keyboard.
+const LINE: WinId = 3;
 /// Her body's size here (the contract places effects inside it).
 const BODY_SIZE: (i32, i32) = (300, 400);
 
@@ -59,6 +61,15 @@ struct World {
     /// stage was told, in order.
     on_demand: Option<WinId>,
     keeps: Vec<(WinId, bool)>,
+    /// Like Hyprland: her surface taking the keyboard ends a press (`Stage::grab_ends_press`).
+    grab_ends_press: bool,
+    /// Her surfaces not mapped yet, and those of them asking for the keyboard: one takes it as
+    /// it maps (`FakeDriver::map`).
+    unmapped: Vec<WinId>,
+    armed: Vec<WinId>,
+    /// A surface of hers took the keyboard, releasing every button, as Hyprland does
+    /// (`CLayerSurface::takeKeyboardFocus`); the `Seat` takes it in at its next step.
+    released_all: bool,
     /// The primary button as the server has it (None: can't tell).
     primary: Option<bool>,
     /// What her tray icon was told, in order.
@@ -273,14 +284,23 @@ impl Stage for FakeStage {
         self.0.w().fx.clear();
     }
     fn flush(&self) {}
-    /// Where the keyboard comes only on his input (as on Windows): refused without it.
+    /// Where the keyboard comes only on his input (as on Windows): refused without it. As on
+    /// Hyprland, taking it releases every button (`World::released_all`), and a surface not
+    /// mapped yet takes it as it maps.
     fn grab_keyboard(&self, s: WinId) -> Result<()> {
         if self.0.caps.keyboard_on_input && !self.keyboard_granted() {
             anyhow::bail!("fake: no input of his to her");
         }
         let mut w = self.0.w();
-        w.focus = Some(s);
         w.on_demand = w.on_demand.filter(|&h| h != s);
+        if w.unmapped.contains(&s) {
+            if !w.armed.contains(&s) {
+                w.armed.push(s);
+            }
+            return Ok(());
+        }
+        w.focus = Some(s);
+        w.released_all = true;
         Ok(())
     }
     fn keyboard_granted(&self) -> bool {
@@ -288,8 +308,9 @@ impl Stage for FakeStage {
         w.his_input || w.focus == Some(BODY)
     }
     /// Back to `to` only from her (where the keyboard comes on his input, his input is spent).
-    fn release_keyboard(&self, _s: WinId, to: Option<WinId>) -> Result<()> {
+    fn release_keyboard(&self, s: WinId, to: Option<WinId>) -> Result<()> {
         let mut w = self.0.w();
+        w.armed.retain(|&x| x != s);
         if self.0.caps.keyboard_on_input {
             if w.focus != Some(BODY) {
                 return Ok(());
@@ -302,26 +323,47 @@ impl Stage for FakeStage {
         Ok(())
     }
     /// As the Hyprland stage: with nothing holding the keyboard, host `s` asks for it on demand
-    /// while the press lasts (a `Seat` motion over it then gives it). At the end it asks for none,
-    /// and gives the keyboard back if it had it (Hyprland looks under the pointer for the next
-    /// holder: here nothing).
+    /// while the press lasts (a `Seat` motion over it then gives it); asked again mid-press, it
+    /// asks no less. At the end it asks for none, and gives the keyboard back if it had it
+    /// (Hyprland looks under the pointer for the next holder: here nothing).
     fn keep_pointer(&self, s: WinId, on: bool) {
         let mut w = self.0.w();
         w.keeps.push((s, on));
+        if on {
+            if w.on_demand.is_none() && w.focus.is_none() {
+                w.on_demand = Some(s);
+            }
+            return;
+        }
         if let Some(h) = w.on_demand.take()
             && w.focus == Some(h)
         {
             w.focus = None;
         }
-        if on && w.focus.is_none() {
-            w.on_demand = Some(s);
-        }
+    }
+    fn grab_ends_press(&self) -> bool {
+        self.0.w().grab_ends_press
+    }
+    /// As the Hyprland stage: those not mapped yet stop asking.
+    fn disarm_keyboard(&self) -> Vec<WinId> {
+        std::mem::take(&mut self.0.w().armed)
     }
 }
 
 struct FakeDriver(Arc<Fake>);
 
 impl FakeDriver {
+    /// Her surface `s` maps (its first frame in): asking for the keyboard, it takes it, releasing
+    /// every button (Hyprland's `CLayerSurface::onMap`).
+    fn map(&mut self, s: WinId) {
+        let mut w = self.0.w();
+        w.unmapped.retain(|&x| x != s);
+        if let Some(i) = w.armed.iter().position(|&x| x == s) {
+            w.armed.remove(i);
+            w.focus = Some(s);
+            w.released_all = true;
+        }
+    }
     fn add(&mut self, rect: WinRect, managed: bool, reserve_top: i32) -> WinId {
         let id = {
             let mut w = self.0.w();
@@ -769,7 +811,7 @@ fn effects_fit_in_her_window_when_composited() {
 fn fake_hosts() -> (Os, FakeDriver) {
     let mons = vec![Monitor { primary: true, x: 0, y: 0, w: 2560, h: 1600 }, Monitor { primary: false, x: 2560, y: 0, w: 2560, h: 1440 }];
     let dormant = HashMap::from([(HOST_B, ((2560, 0), Vec::new()))]);
-    let world = World { root: (5120, 1600), monitors: mons.clone(), next: 100, body: BODY, dormant, no_reshapes: true, ..World::default() };
+    let world = World { root: (5120, 1600), monitors: mons.clone(), next: 100, body: BODY, dormant, no_reshapes: true, grab_ends_press: true, ..World::default() };
     let caps = Caps { shape_mode: false, target_events: false, fx_layers: false, costly_redraw: true, implicit_grab: false, goal_geometry: true, layout_events: true, host_per_output: true, keyboard_on_input: false };
     let f = Arc::new(Fake { world: Mutex::new(world), hint: Mutex::new(None), session: Mutex::new(None), caps });
     let os = Os::new(Arc::new(FakeDesktop(f.clone())), Box::new(FakeStage(f.clone())));
@@ -787,12 +829,16 @@ fn fake_hosts() -> (Os, FakeDriver) {
 /// - a layer of hers it is on that asks for the keyboard on demand gets it (same);
 /// - the pointer leaving her surface with her button down releases the button there on its way
 ///   out, and the real release then goes nowhere (`CWLPointerResource::sendLeave`, `sendButton`);
-/// - a press or a release goes to the surface the pointer is on.
+/// - a press or a release goes to the surface the pointer is on;
+/// - a layer taking the keyboard releases every button there first, the button down still
+///   but no longer held (`CLayerSurface::takeKeyboardFocus`, `releaseAllMouseButtons`).
 ///
 /// Kept on someone else's surface isn't modelled (each motion looks again): no press of hers is
 /// down then.
 struct Seat {
-    down: bool,
+    /// The button is down as Hyprland has it: from the press to its release, or to every
+    /// button released.
+    held: bool,
     /// Her surface the pointer is on (None: someone else's, or nothing).
     on: Option<WinId>,
     /// The button went down on a surface of hers, and no release came to her since.
@@ -803,13 +849,28 @@ struct Seat {
 
 impl Seat {
     fn new() -> Seat {
-        Seat { down: false, on: None, pressed: false, releases: Vec::new() }
+        Seat { held: false, on: None, pressed: false, releases: Vec::new() }
+    }
+
+    /// A surface of hers took the keyboard since the last step (`World::released_all`): every
+    /// button was released, to the surface the pointer is on.
+    fn sync(&mut self, d: &FakeDriver) {
+        if !std::mem::take(&mut d.0.w().released_all) {
+            return;
+        }
+        self.held = false;
+        if let Some(s) = self.on
+            && std::mem::take(&mut self.pressed)
+        {
+            self.releases.push((s, false));
+        }
     }
 
     /// The pointer moves to root (x, y).
     fn to(&mut self, d: &mut FakeDriver, x: i32, y: i32) {
+        self.sync(d);
         d.warp(x, y);
-        let kept = self.down && self.on.is_some() && d.0.w().focus.is_some();
+        let kept = self.held && self.on.is_some() && d.0.w().focus.is_some();
         let on = if kept { self.on } else { d.surface_at(x, y) };
         {
             let mut w = d.0.w();
@@ -827,9 +888,10 @@ impl Seat {
         }
     }
 
-    /// The button goes down or up.
-    fn button(&mut self, down: bool) {
-        self.down = down;
+    /// The button goes down or up (up after every button was released: nothing comes).
+    fn button(&mut self, d: &FakeDriver, down: bool) {
+        self.sync(d);
+        self.held = down;
         if down {
             self.pressed = self.on.is_some();
         } else if let Some(s) = self.on
@@ -853,7 +915,7 @@ fn press_on_her(os: &Os, d: &mut FakeDriver, seat: &mut Seat) -> Option<WinId> {
     os.move_to(1000, 600).unwrap();
     os.set_shapes(Some(&FIGURE), None).unwrap();
     seat.to(d, 1000 + GRIP.0, 600 + GRIP.1);
-    seat.button(true);
+    seat.button(d, true);
     os.set_held(true, false);
     os.set_shapes(Some(&WHOLE), None).unwrap();
     seat.on.filter(|_| seat.pressed)
@@ -894,7 +956,7 @@ fn a_drag_across_outputs_holds_her_to_the_release_on_the_host_pressed() {
         assert_eq!((os.take_host_change(), os.body()), (Some(HOST_B), HOST_B), "carried into DP-2's host");
         assert!(seat.releases.is_empty(), "held into DP-2 (his window: {his_window}), no release while the button is down: {:?}", seat.releases);
         assert_eq!(d.0.w().focus, win.or(Some(BODY)), "the keyboard: his window's, else host A's for the press");
-        seat.button(false);
+        seat.button(&d, false);
         assert_eq!(seat.releases, [(BODY, true)], "the release, as the button comes up: to host A (his window: {his_window})");
         // Her view ends the press there (`Avatar::release_elsewhere`).
         os.set_held(false, false);
@@ -914,11 +976,104 @@ fn a_flick_off_her_before_she_has_the_keyboard_ends_the_press_there() {
     assert_eq!(press_on_her(&os, &mut d, &mut seat), Some(BODY));
     seat.to(&mut d, 1900, 800);
     assert_eq!(seat.releases, [(BODY, false)], "released to host A on the pointer's way off it");
-    seat.button(false);
+    seat.button(&d, false);
     assert_eq!(seat.releases, [(BODY, false)], "the real release goes nowhere");
     os.set_held(false, false);
     let w = d.0.w();
     assert_eq!((w.focus, w.on_demand), (None, None), "host A asks for the keyboard no more");
+}
+
+/// Her Line summoned while he drags her (Mod+C), or anything else of hers taking the keyboard
+/// then (the voice key, `settings open`, `reader open --focus`). Hyprland takes the keyboard for
+/// a layer by releasing every button first (`CLayerSurface::takeKeyboardFocus`): she was let go
+/// there, mid-drag, his button still down. The grab waits for his release (`Os::grab_keyboard`):
+/// she's held to it, and the Line has the keyboard after.
+#[test]
+fn a_keyboard_grab_mid_drag_waits_for_his_release() {
+    for his_window in [false, true] {
+        let (os, mut d) = fake_hosts();
+        if his_window {
+            let id = d.add(WinRect { id: 0, x: 200, y: 200, w: 800, h: 600 }, true, 0);
+            d.0.w().focus = Some(id);
+        }
+        let mut seat = Seat::new();
+        assert_eq!(press_on_her(&os, &mut d, &mut seat), Some(BODY));
+        carry(&os, &mut d, &mut seat, (1200..=2000).step_by(100), 800);
+        os.grab_keyboard(LINE).expect("the Line's grab, held for his release");
+        carry(&os, &mut d, &mut seat, (2100..=3200).step_by(100), 800);
+        assert!(seat.releases.is_empty(), "no release while his button is down (his window: {his_window}): {:?}", seat.releases);
+        assert_ne!(d.0.w().focus, Some(LINE), "the Line waits for his release");
+        seat.button(&d, false);
+        assert_eq!(seat.releases, [(BODY, true)], "his own release, to host A (his window: {his_window})");
+        // Her view ends the press there (`Avatar::release_elsewhere`).
+        os.set_held(false, false);
+        assert_eq!(d.0.w().focus, Some(LINE), "the Line has the keyboard after his release (his window: {his_window})");
+    }
+}
+
+/// His press lands on her as her Line opens: its keyboard asked for, its first frame not in yet.
+/// Hyprland gives a layer that asks the keyboard as it maps, releasing every button
+/// (`CLayerSurface::onMap`): she was let go as it showed. At his press it stops asking
+/// (`Stage::disarm_keyboard`); at his release it asks again, and has the keyboard.
+#[test]
+fn a_line_showing_during_his_press_takes_the_keyboard_after_his_release() {
+    let (os, mut d) = fake_hosts();
+    d.0.w().unmapped.push(LINE);
+    os.grab_keyboard(LINE).expect("asked for before his press");
+    let mut seat = Seat::new();
+    assert_eq!(press_on_her(&os, &mut d, &mut seat), Some(BODY));
+    d.map(LINE);
+    carry(&os, &mut d, &mut seat, (1200..=1600).step_by(100), 800);
+    assert!(seat.releases.is_empty(), "no release while his button is down: {:?}", seat.releases);
+    assert_ne!(d.0.w().focus, Some(LINE), "the Line waits for his release");
+    seat.button(&d, false);
+    os.set_held(false, false);
+    assert_eq!(seat.releases, [(BODY, true)], "his own release");
+    assert_eq!(d.0.w().focus, Some(LINE), "the Line has the keyboard after his release");
+}
+
+/// A tap on her body opens her talk field as his button comes up (`Avatar::mouse_up`), the press
+/// still on: its grab goes at once (`Os::button_up`), and one held for his release (her Line,
+/// summoned mid-tap) is dropped, older. The field keeps the keyboard past the press's end.
+#[test]
+fn a_tap_s_talk_field_takes_the_keyboard_as_his_button_comes_up() {
+    let (os, mut d) = fake_hosts();
+    let mut seat = Seat::new();
+    assert_eq!(press_on_her(&os, &mut d, &mut seat), Some(BODY));
+    os.grab_keyboard(LINE).expect("held for his release");
+    seat.button(&d, false);
+    os.button_up();
+    os.grab_keyboard(BODY).expect("the field's grab, at once");
+    assert_eq!(d.0.w().focus, Some(BODY), "the field has the keyboard");
+    os.set_held(false, false);
+    assert_eq!(d.0.w().focus, Some(BODY), "the field keeps the keyboard past the press's end");
+    assert_eq!(seat.releases, [(BODY, true)]);
+}
+
+/// His window held the keyboard at his press, so host A asked for nothing, and it closes
+/// mid-press with nothing focused after: nothing keeps the pointer on host A, and leaving it
+/// let her go at the seam. The keyboard changing hands has host A ask then
+/// (`Os::press_recheck`), and asked again, it asks no less: she's held to the release.
+#[test]
+fn his_window_closing_mid_press_has_host_a_ask_for_the_keyboard() {
+    let (os, mut d) = fake_hosts();
+    let win = d.add(WinRect { id: 0, x: 200, y: 200, w: 800, h: 600 }, true, 0);
+    d.0.w().focus = Some(win);
+    let mut seat = Seat::new();
+    assert_eq!(press_on_her(&os, &mut d, &mut seat), Some(BODY));
+    carry(&os, &mut d, &mut seat, (1200..=1500).step_by(100), 800);
+    d.0.w().focus = None;
+    os.press_recheck();
+    carry(&os, &mut d, &mut seat, [1600], 800);
+    assert_eq!(d.0.w().focus, Some(BODY), "host A has the keyboard, at the first motion over her");
+    os.press_recheck();
+    carry(&os, &mut d, &mut seat, (1700..=3200).step_by(100), 800);
+    assert!(seat.releases.is_empty(), "held into DP-2: {:?}", seat.releases);
+    assert_eq!(d.0.w().focus, Some(BODY), "asked again, host A kept the keyboard");
+    seat.button(&d, false);
+    assert_eq!(seat.releases, [(BODY, true)]);
+    os.set_held(false, false);
+    assert_eq!(d.0.w().focus, None, "host A asks for the keyboard no more");
 }
 
 /// Moved across outputs in one step with her frame as it is (a `pos` onto DP-2): the view sends
@@ -935,7 +1090,7 @@ fn the_host_she_crosses_into_takes_the_pointer_at_once() {
     os.move_to(3000, 600).unwrap();
     assert_eq!((os.take_host_change(), os.body()), (Some(HOST_B), HOST_B), "into DP-2's host");
     seat.to(&mut d, 3000 + GRIP.0, 600 + GRIP.1);
-    seat.button(true);
+    seat.button(&d, true);
     assert_eq!(seat.on, Some(HOST_B), "a press on her lands on her, in host B");
     assert_eq!(d.surface_at(1000 + GRIP.0, 600 + GRIP.1), None, "host A takes nothing where she was");
 }

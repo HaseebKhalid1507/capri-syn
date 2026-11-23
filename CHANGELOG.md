@@ -24,8 +24,15 @@
   is thrown, as on one monitor) instead of hanging held for good. With no window focused she also used
   to slip out of your hand at the monitor edge; now she stays held to the release, as with one focused:
   while you hold her, her surface takes the keyboard on demand (only when nothing else has it) and lets
-  it go at the release. A quick flick off her as you press can still let her go where it left her. If a
-  release ever goes astray, your next click on her or `drop` lets her go.
+  it go at the release. A quick flick off her as you press can still let her go where it left her, and
+  with no window focused she can still slip at the monitor edge under `follow_mouse = 3`, or with a
+  shell layer that can take the keyboard (caelestia, some quickshell setups). If a release ever goes
+  astray, your next click on her or `drop` lets her go.
+- **Hyprland: summoning the Line while you hold her no longer drops her** (Mod+C, the voice key,
+  `settings open`, `reader open --focus`): Hyprland releases the mouse button whenever a surface takes
+  the keyboard, so she was let go mid-drag. Now the Line (or the reader, or her talk field) takes the
+  keyboard when you let go of her, also when it was still opening as you grabbed her. Closing a Line
+  that has the keyboard while you hold her (a Mod+C tap) still lets her go there.
 
 ## 1.2.0 (2026-11-23)
 

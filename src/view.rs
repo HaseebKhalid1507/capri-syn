@@ -5998,7 +5998,13 @@ impl Avatar {
                     self.fall("layout", now);
                 }
             }
-            WatchEvent::Focus | WatchEvent::Desktop | WatchEvent::Pointer(_) | WatchEvent::Session(_) => self.brain_watch(ev, now),
+            WatchEvent::Focus => {
+                // The keyboard changed hands: a press on her may need its host to keep the
+                // pointer now (`Os::press_recheck`).
+                self.os.press_recheck();
+                self.brain_watch(ev, now);
+            }
+            WatchEvent::Desktop | WatchEvent::Pointer(_) | WatchEvent::Session(_) => self.brain_watch(ev, now),
         }
     }
 
@@ -6158,6 +6164,8 @@ impl Avatar {
             return;
         }
         let Some(p) = self.press.take() else { return };
+        // The button is up: what the release does may take the keyboard (`Os::button_up`).
+        self.os.button_up();
         let now = Instant::now();
         if p.dragging {
             self.os.set_held(false, self.rag_script_held());
