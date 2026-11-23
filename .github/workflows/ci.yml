@@ -38,7 +38,46 @@ jobs:
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
       - name: Tests
-        run: cargo test --locked --workspace
+        shell: bash
+        run: cargo test --locked --workspace --message-format=json | tee "$RUNNER_TEMP/test-build.jsonl"
+
+      # Publish the exact harness built above (not the application binary or a stale cache hit).
+      # The compositor contract stays manual: tools/wlrig requires a seatless Intel-render-node host.
+      - name: Package Hyprland contract harness
+        shell: python
+        run: |
+          import hashlib, json, os, pathlib, shutil, subprocess, tarfile
+          events = pathlib.Path(os.environ["RUNNER_TEMP"], "test-build.jsonl").read_text().splitlines()
+          binaries = set()
+          for line in events:
+              try:
+                  event = json.loads(line)
+              except json.JSONDecodeError:
+                  continue
+              if (isinstance(event, dict) and event.get("reason") == "compiler-artifact"
+                  and event.get("target", {}).get("name") == "synaps-avatar"
+                  and event.get("profile", {}).get("test") and event.get("executable")):
+                  binaries.add(event["executable"])
+          assert len(binaries) == 1, binaries
+          out = pathlib.Path(os.environ["RUNNER_TEMP"], "hypr-panel-contract")
+          out.mkdir()
+          binary = out / "synaps-avatar-tests"
+          shutil.copy2(binaries.pop(), binary)
+          digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+          (out / "SHA256SUMS").write_text(f"{digest}  {binary.name}\n")
+          (out / "HEAD").write_text(subprocess.check_output(["git", "rev-parse", "HEAD"], text=True))
+          event = json.loads(pathlib.Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
+          source = event.get("pull_request", {}).get("head", {}).get("sha", os.environ["GITHUB_SHA"])
+          (out / "SOURCE_HEAD").write_text(source + "\n")
+          (out / "ldd.txt").write_text(subprocess.check_output(["ldd", str(binary)], text=True))
+          with tarfile.open(out.with_suffix(".tar.gz"), "w:gz") as archive:
+              archive.add(out, arcname=out.name)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hypr-panel-contract-linux
+          path: ${{ runner.temp }}/hypr-panel-contract.tar.gz
+          retention-days: 7
 
       # The crates' licences for the Linux tarball (installer/licenses/third-party.ps1, as release.yml's
       # linux job makes them): a dependency that brings a licence nobody accepted, a crate with no

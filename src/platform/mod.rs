@@ -598,6 +598,14 @@ pub trait Tray {
 pub trait Stage {
     /// The backend's part of a window's options (its kind).
     fn dress(&self, role: Role, o: &mut WindowOptions);
+    /// Bind a per-moment surface to its dressed output. Other backends need no binding.
+    fn pin_output(&self, _o: &mut WindowOptions, _cx: &gpui_kit::App) -> Result<()> { Ok(()) }
+    /// Usable area of the active output-bound body host (not the focused output).
+    fn body_area(&self) -> Option<WinRect> { None }
+    /// Named output of a per-output host; never inferred from GPUI integer-scale bounds.
+    fn surface_monitor(&self, _s: WinId) -> Option<Monitor> { None }
+    /// Layer-shell cannot retarget an existing surface to another output.
+    fn needs_reopen(&self, _s: WinId) -> bool { false }
     /// After `open_window`: the backend's id for it (the body's is remembered).
     fn adopt(&self, role: Role, window: &Window) -> Result<WinId>;
     /// Her body's id (0 before `adopt`): the host she shows in.

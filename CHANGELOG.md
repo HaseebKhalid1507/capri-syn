@@ -9,6 +9,17 @@
   as a cover; bars, docks, side panels and popups still do. A modal overlay that big (a launcher's or
   logout screen's dimmer) doesn't count either, so she may sit on what it hides: `hyprctl layers`
   doesn't say which layers take the keyboard.
+- **Hyprland: the Line and Settings grow to fit their contents** instead of staying at their
+  initial 120 px height with the input field or Settings rows cut off (#145). They remain overlay
+  layer surfaces, never tiled; no Hyprland config changes are needed. The Line's width also
+  follows placement instead of freezing at its opening width. The first real Hyprland run
+  confirmed growth but exposed a second bug: panels opened on the focused monitor instead of
+  hers. All per-moment layers now name her body's output explicitly; open Line/Settings,
+  Reader and chip follow output changes by recreation. The Line is clamped to that output's
+  usable edges. Hosts and panels match outputs by name, including fractional scaling; panels
+  recreate after landing, keeping chat draft/selection and height. Unsent API-key/hidden-prompt
+  text must be re-entered after migration. **Output fix pending real-run confirmation.** Other
+  backends are unchanged.
 
 - **Hyprland: a drag let go on the other monitor lets her go there** (she falls, lands on a window or
   is thrown, as on one monitor) instead of hanging held for good. With no window focused she also used

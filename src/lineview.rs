@@ -20,8 +20,7 @@ const TAP_GUARD: Duration = Duration::from_secs(1);
 const LINE_W: f32 = 780.0;
 /// Squeezed beside her, down to this wide (logical px); narrower, it goes above her or over.
 const LINE_MIN_W: f32 = 480.0;
-/// The least the Line is tall (logical px), and its gap to her.
-const LINE_MIN_H: f32 = 60.0;
+/// The Line's gap to her (logical px).
 const LINE_GAP: f32 = 12.0;
 /// The Line's first height (logical px), until it measures itself.
 const LINE_H0: f32 = 120.0;
@@ -393,7 +392,7 @@ impl Avatar {
     fn line_place(&self, h: i32) -> (Place, WinRect, WinRect) {
         let sf = self.layout.sf;
         let her = self.her_body();
-        let area = self.her_area().unwrap_or_else(|| {
+        let area = self.os.panel_area().or_else(|| self.her_area()).unwrap_or_else(|| {
             let m = self.os.area_at(her.center().0, her.center().1);
             WinRect::new(m.x, m.y, m.w, m.h)
         });
@@ -408,17 +407,22 @@ impl Avatar {
     /// and its tail follow.
     pub(super) fn line_follow(&mut self, h: Option<i32>, cx: &mut Context<Self>) {
         let Some(l) = &self.line else { return };
+        if self.os.panel_needs_reopen(l.xid) {
+            if self.teleport.is_some() || self.rag.is_some() || self.press.is_some() || self.brain_in_flight() { return; }
+            self.line_reopen_on_output(cx);
+            return;
+        }
         let h = h.unwrap_or(l.at.3);
         let (p, _, her) = self.line_place(h);
         let sf = self.layout.sf;
         let Some(l) = &mut self.line else { return };
         let r = p.rect;
-        l.her = her;
         let at = (r.x, r.bottom(), r.w, r.h);
         if at != l.at {
+            if self.os.place(l.xid, r.x, r.y, r.w, r.h).is_err() { return; }
             l.at = at;
-            self.os.place(l.xid, r.x, r.y, r.w, r.h).ok();
         }
+        l.her = her;
         let tail = Some((p.side, p.tail));
         if tail != l.tail {
             l.tail = tail;
@@ -428,6 +432,41 @@ impl Avatar {
                 hd.update(cx, |_, _, cx| v.update(cx, |l, cx| l.set_tail(t, cx))).ok();
             });
         }
+    }
+
+    /// A layer's wl_output is immutable. Rebuild the view too: its text input and
+    /// keystroke/activation subscriptions belong to the old GPUI WindowId.
+    pub(super) fn line_reopen_on_output(&mut self, cx: &mut Context<Self>) {
+        let Some(old) = self.line.take() else { return };
+        let me = cx.entity().downgrade();
+        cx.defer(move |cx| {
+            let saved = old.handle.update(cx, |_, window, cx| old.view.update(cx, |line, cx| line.detach_for_output(window, cx)))
+                .unwrap_or_else(|_| old.view.update(cx, |line, cx| line.output_draft(cx)));
+            me.update(cx, |a, cx| {
+                // Even if a user opened another Line during this defer, retain the old
+                // draft in the avatar; never overwrite the new live field.
+                a.draft = saved.draft.clone();
+                if a.line.is_some() { return; }
+                a.sent = saved.sent.clone();
+                let result = a.open_line_with_focus(saved.page, Some(!old.parked), Some(old.at.3), cx);
+                if let Some(l) = &mut a.line {
+                    l.prev = old.prev;
+                    l.view.update(cx, |line, cx| line.restore_output_selection(&saved, cx));
+                    // Moving her is not permission to steal the keyboard from his terminal.
+                    l.parked = old.parked;
+                    l.waiting = old.waiting;
+                    let (v, hd, parked, waiting) = (l.view.clone(), l.handle, old.parked, old.waiting);
+                    if parked {
+                        a.os.release_keyboard(l.xid, None).ok();
+                        cx.defer(move |cx| { hd.update(cx, |_, _, cx| v.update(cx, |l, cx| l.park_on_output(waiting, cx))).ok(); });
+                    } else {
+                        a.os.grab_keyboard(l.xid).ok();
+                    }
+                    a.os.arm_clicks(!parked);
+                }
+                elog!("synaps-avatar: Line recreated on body output: {result}");
+            }).ok();
+        });
     }
 
     pub(super) fn open_line(&mut self, cx: &mut Context<Self>) -> String {
@@ -468,9 +507,13 @@ impl Avatar {
     }
 
     pub(super) fn open_line_on(&mut self, page: Page, cx: &mut Context<Self>) -> String {
+        self.open_line_with_focus(page, None, None, cx)
+    }
+
+    fn open_line_with_focus(&mut self, page: Page, take: Option<bool>, height: Option<i32>, cx: &mut Context<Self>) -> String {
         let now = Instant::now();
         let sf = self.layout.sf;
-        let h0 = (LINE_H0 * sf) as i32;
+        let h0 = height.unwrap_or((LINE_H0 * sf) as i32);
         let (place, area, her) = self.line_place(h0);
         let (x, w, h) = (place.rect.x, place.rect.w, place.rect.h);
         let bottom = place.rect.bottom();
@@ -483,8 +526,11 @@ impl Avatar {
         // The keyboard comes with the Line when this opening is his doing (his key, his click
         // on her: `Os::may_take_keyboard`). Else the Line opens waiting for him, never taking
         // the keyboard from the window he works in.
-        let take = self.os.may_take_keyboard();
-        let options = self.os.window_options(Role::Line, bounds, take);
+        let take = take.unwrap_or_else(|| self.os.may_take_keyboard());
+        let options = match self.os.panel_options(Role::Line, bounds, take, cx) {
+            Ok(options) => options,
+            Err(e) => return format!("error: line output: {e:#}"),
+        };
         self.prefs_says = None;
         let mut snap = self.line_snap();
         if page.settings() {
@@ -1128,8 +1174,8 @@ impl Avatar {
                 let sf = self.layout.sf;
                 if let Some(l) = &self.line {
                     // No taller than her work area allows (it scrolls inside).
-                    let area_h = self.her_area().map_or(i32::MAX / 2, |a| a.h);
-                    let hd = ((h * sf) as i32).min(area_h - (36.0 * sf) as i32).max((LINE_MIN_H * sf) as i32);
+                    let area_h = self.os.panel_area().or_else(|| self.her_area()).map_or(i32::MAX / 2, |a| a.h);
+                    let hd = line_height::device_height(h, sf, area_h);
                     if hd != l.at.3 {
                         self.line_follow(Some(hd), cx);
                     }

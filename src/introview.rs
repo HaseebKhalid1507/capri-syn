@@ -320,23 +320,33 @@ impl Avatar {
         true
     }
 
-    /// Open the close-up's window over her target's monitor.
+    /// Open the close-up's window over her current body host's monitor.
     fn intro_open(&mut self, cx: &mut Context<Self>) {
         let Some(frames) = self.intro.frames.clone() else { return };
         let (to, place) = self.intro.target.unwrap_or((self.origin, self.placement));
         let (gx, gy) = self.target_point(to, place);
         let m = self.os.monitor_at(gx, gy - 1);
         let a = self.os.area_at(gx, gy - 1);
+        let body_area = self.os.panel_area();
+        let area = body_area.map_or((a.x, a.y, a.w, a.h), |a| (a.x, a.y, a.w, a.h));
         let sf = self.layout.sf;
         let size = frames.first().map(|c| c.image.size(0)).map_or((1, 1), |s| (u32::from(s.width), u32::from(s.height)));
         // The decoded size wins (a monitor of another height since: still centred on its bottom).
-        let mut p = intro::place((a.x, a.y, a.w, a.h), m.h, size, sf);
+        let mut p = intro::place(area, body_area.map_or(m.h, |a| a.h), size, sf);
         let (dw, dh) = (size.0 as i32 - p.image.0, size.1 as i32 - p.image.1);
         p.image = (size.0 as i32, size.1 as i32);
         p.window = (p.window.0 - dw / 2, p.window.1 - dh, p.window.2 + dw, p.window.3 + dh);
         let (x, y, w, h) = p.window;
         let bounds = Bounds::new(point(px(x as f32 / sf), px(y as f32 / sf)), gpui_kit::size(px(w as f32 / sf), px(h as f32 / sf)));
-        let options = self.os.window_options(Role::Intro, bounds, false);
+        let options = match self.os.panel_options(Role::Intro, bounds, false, cx) {
+            Ok(options) => options,
+            Err(e) => {
+                elog!("synaps-avatar: intro output: {e:#}");
+                self.intro.last = "no: output".into();
+                self.intro_chain(false, Instant::now(), cx);
+                return;
+            }
+        };
         let me = cx.entity().downgrade();
         let os = self.os.clone();
         let (font, pal) = (self.font.clone(), self.pack.palette());

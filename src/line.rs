@@ -19,6 +19,15 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 use std::time::{Duration, Instant};
 
+/// In-memory handoff between output-bound Line windows; never persisted or logged.
+pub(crate) struct OutputDraft {
+    pub draft: String,
+    pub sent: Vec<String>,
+    pub page: Page,
+    pub(crate) selection: std::ops::Range<usize>,
+    pub(crate) reversed: bool,
+}
+
 /// Prompt keys do nothing this long after a prompt shows (as the buttons).
 pub const ARM: Duration = Duration::from_millis(400);
 /// A risky prompt (a tool activation, shell/exec/write-class tools) allows only on A (or a
@@ -756,6 +765,49 @@ impl Line {
         self.secret = None;
         let _ = window;
         cx.notify();
+    }
+
+    /// Retain a parked Line's waiting hint when only its output changed.
+    pub(crate) fn park_on_output(&mut self, waiting: bool, cx: &mut Context<Line>) {
+        self.parked = true;
+        self.waiting = waiting;
+        cx.notify();
+    }
+
+    /// Output migration is not a user close: no Ask::Closed, no focus restore or
+    /// session state change. Recreate window-bound input subscriptions on the new output.
+    pub(crate) fn detach_for_output(&mut self, window: &mut Window, cx: &mut Context<Line>) -> OutputDraft {
+        // Accept the currently displayed preedit before reading. Never send it to Capri.
+        self.input.update(cx, |input, cx| gpui_kit::EntityInputHandler::unmark_text(input, window, cx));
+        let saved = self.output_draft(cx);
+        self.keying_off(window, cx);
+        if let Some((_, field)) = self.secret.take() {
+            field.update(cx, |s, cx| s.set_value("", window, cx));
+        }
+        window.remove_window();
+        saved
+    }
+
+    /// Also works after the compositor closed the window (unplug). Copying the displayed
+    /// value into a fresh input commits its preedit; no stale IME range crosses windows.
+    /// API-key and hidden-prompt fields are intentionally NOT copied; see #145 notes.
+    pub(crate) fn output_draft(&mut self, cx: &mut Context<Line>) -> OutputDraft {
+        self.closing = true;
+        let input = self.input.read(cx);
+        OutputDraft { draft: input.value().to_string(), sent: self.sent.clone(), page: self.nav.page,
+            selection: input.selected_range(), reversed: input.is_selection_reversed() }
+    }
+
+    pub(crate) fn restore_output_selection(&mut self, saved: &OutputDraft, cx: &mut Context<Line>) {
+        self.input.update(cx, |input, cx| input.set_selected_range_with_direction(saved.selection.clone(), saved.reversed, cx));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn output_preedit_fixture(&mut self, window: &mut Window, cx: &mut Context<Line>) {
+        self.input.update(cx, |input, cx| {
+            gpui_kit::EntityInputHandler::replace_and_mark_text_in_range(input, Some(0..10), "入力", Some(2..2), window, cx);
+            input.set_selected_range_with_direction(0..6, true, cx);
+        });
     }
 
     pub fn close(&mut self, restore: bool, window: &mut Window, cx: &mut Context<Line>) {

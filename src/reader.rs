@@ -258,6 +258,14 @@ impl Reader {
         }
     }
 
+    pub(crate) fn detach_for_output(&mut self, window: &mut Window) -> (String, f32) {
+        self.closing = true;
+        self.on_close = None;
+        let saved = (self.raw.clone(), self.scroll_info().0);
+        window.remove_window();
+        saved
+    }
+
     pub fn close(&mut self, restore: bool, window: &mut Window, cx: &mut Context<Reader>) {
         if self.closing {
             return;

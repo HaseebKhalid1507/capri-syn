@@ -35,4 +35,24 @@ interactivity once, at creation, and commits every input-region change on its ow
 - **PL-4** `set_layer(surface, Layer)` (v2+): committed now (`[brain] fullscreen = "stay"`, later).
 - `commit_pending(surface)`: commit and flush now (tests drive the stage with the loop blocked).
 
+- **Panel sizing (#145)** `set_bounds(surface, margins, size)`: present new logical size,
+  margins and resized buffer together, not an old buffer stretched to the new geometry.
+  Like `PlatformWindow::resize`, it queues GPUI's resize callback out of the active App/frame
+  borrow, without waiting for configure. Protocol state is queued with that resize, followed
+  by a forced redraw; there is no geometry-only idle commit. A late configure is acknowledged,
+  but neither its buffer size nor its geometry echo replaces the newest explicit request.
+  A later `PlatformWindow::resize` updates the remembered request on managed surfaces only.
+  `LayerStage::place` calls this setter **only for Role::Line** (`capri-line`, including
+  Settings). Its measured height and placement width are now live; formerly both froze at
+  opening size (120 px high). Reader-follow and effect-host `place` remain margin-only;
+  effect hosts continue sizing through their original `Window::resize` path and scale.
+  Xdg toplevels/popups, other layers and other compositors retain their existing behavior.
+  `layer_size.rs` holds the pure buffer/echo/resize policies and their unit tests.
+
+- **Named output (#145 review)** `display_id_for_name` resolves `wl_output.name` through
+  the existing WaylandDisplay UUIDv5(name) identity, returning its protocol DisplayId.
+  Both hosts and panels use it. GPUI's integer-scale bounds do not match Hyprland logical
+  bounds at fractional scale, so containment is not a reliable output selector. This
+  helper does not alter GPUI display geometry or output selection for any other caller.
+
 Drop these if upstream GPUI grows runtime layer-surface setters.

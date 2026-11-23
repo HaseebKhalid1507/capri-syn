@@ -9,6 +9,8 @@ mod brainview;
 mod ragview;
 #[path = "lineview.rs"]
 mod lineview;
+#[path = "line_height.rs"]
+pub(crate) mod line_height;
 #[path = "voiceview.rs"]
 mod voiceview;
 #[path = "arriveview.rs"]
@@ -3673,7 +3675,8 @@ impl Avatar {
         if self.hosts.is_empty() {
             return;
         }
-        if std::mem::take(&mut self.hosts_stale) {
+        let layout_changed = std::mem::take(&mut self.hosts_stale);
+        if layout_changed {
             let gone = self.os.hosts_gone();
             for (id, _, w) in self.hosts.iter().filter(|h| gone.contains(&h.0)) {
                 elog!("synaps-avatar: body host 0x{id:x} closed (its monitor went away)");
@@ -3695,7 +3698,12 @@ impl Avatar {
             self.applied = (i32::MIN, i32::MIN);
             self.apply_offset(Instant::now());
         }
+        if layout_changed && self.os.panel_area().is_some() {
+            self.line_follow(None, cx);
+        }
         if let Some(active) = self.os.take_host_change() {
+            // Only body hosts switch during drag. Panels keep their keyboard holder
+            // until panels_follow runs on landing (also important for drag release).
             for (id, v, _) in &self.hosts {
                 v.update(cx, |h, cx| {
                     h.active = *id == active;
@@ -4708,7 +4716,7 @@ impl Avatar {
         }
         let (bcx, bcy) = body.center();
         let m = self.os.monitor_at(bcx, bcy);
-        let area = self.her_area().unwrap_or(WinRect { id: 0, x: m.x, y: m.y, w: m.w, h: m.h });
+        let area = self.os.panel_area().or_else(|| self.her_area()).unwrap_or(WinRect { id: 0, x: m.x, y: m.y, w: m.w, h: m.h });
         let gap = (12.0 * sf) as i32;
         let min_w = (420.0 * sf) as i32;
         let w = ((0.40 * m.w as f32) as i32).max(min_w).min(area.w);
@@ -4726,12 +4734,21 @@ impl Avatar {
 
     /// The open reader and Line follow her (a drag, a summon, a fall), once she has landed.
     fn panels_follow(&mut self, cx: &mut Context<Self>) {
-        if (self.line.is_none() && self.reader.is_none()) || self.teleport.is_some() || self.rag.is_some() || self.press.is_some() || self.brain_in_flight() {
+        if (self.line.is_none() && self.reader.is_none() && self.chip.is_none()) || self.teleport.is_some() || self.rag.is_some() || self.press.is_some() || self.brain_in_flight() {
             return;
         }
+        if self.chip_rect.is_some_and(|r| self.os.panel_needs_reopen(r.4)) {
+            if let Some(h) = self.chip.take() { h.update(cx, |_, window, _| window.remove_window()).ok(); }
+            self.chip_rect = None;
+            self.open_chip(cx);
+        }
         let her = self.her_body();
-        if self.line.as_ref().is_some_and(|l| l.her != her) {
+        if self.line.as_ref().is_some_and(|l| l.her != her || self.os.panel_needs_reopen(l.xid)) {
             self.line_follow(None, cx);
+        }
+        if self.reader.as_ref().is_some_and(|(_, id, _)| self.os.panel_needs_reopen(*id)) {
+            self.reader_reopen_on_output(cx);
+            return;
         }
         if let Some((was, _)) = self.reader_at
             && was != her
@@ -4741,19 +4758,47 @@ impl Avatar {
             let raw = self.bubble.as_ref().map(|b| if b.raw.trim().is_empty() { b.text.iter().collect::<String>() } else { b.raw.clone() }).unwrap_or_default();
             let p = self.reader_rect(&raw);
             let r = p.rect;
-            if self.reader_at.is_none_or(|(_, q)| q.rect != r) {
-                self.os.place(xid, r.x, r.y, r.w, r.h).ok();
-            }
+            if self.reader_at.is_none_or(|(_, q)| q.rect != r) && self.os.place(xid, r.x, r.y, r.w, r.h).is_err() { return; }
             self.reader_at = Some((her, p));
             let t = Some((p.side, p.tail as f32 / self.layout.sf));
             h.update(cx, |rd, _, cx| rd.set_tail(t, cx)).ok();
         }
     }
 
+    /// Rebuild the Reader on her new layer output, retaining text, scroll and focus owner.
+    fn reader_reopen_on_output(&mut self, cx: &mut Context<Self>) {
+        let Some((old, id, prev)) = self.reader.take() else { return };
+        self.reader_at = None;
+        let focused = self.os.focused_window() == Some(id);
+        let me = cx.entity().downgrade();
+        cx.defer(move |cx| {
+            let saved = old.update(cx, |r, window, _| r.detach_for_output(window));
+            if let Ok((raw, scroll)) = saved {
+                me.update(cx, |a, cx| {
+                    if a.reader.is_some() { return; }
+                    let result = a.open_reader_text(raw, focused, cx);
+                    if let Some((h, _, owner)) = &mut a.reader {
+                        *owner = prev;
+                        let h = *h;
+                        h.update(cx, |_, window, cx| {
+                            let reader = cx.entity();
+                            window.on_next_frame(move |_, cx| { reader.update(cx, |r, cx| r.scroll_by(scroll, cx)); });
+                        }).ok();
+                    }
+                    elog!("synaps-avatar: Reader recreated on body output: {result}");
+                }).ok();
+            }
+        });
+    }
+
     /// Open the reader on the current reply (or bring the open one up to date).
     fn open_reader(&mut self, take_focus: bool, cx: &mut Context<Self>) -> String {
         let Some(b) = &self.bubble else { return "error: no reply".into() };
         let raw = if b.raw.trim().is_empty() { b.text.iter().collect::<String>() } else { b.raw.clone() };
+        self.open_reader_text(raw, take_focus, cx)
+    }
+
+    fn open_reader_text(&mut self, raw: String, take_focus: bool, cx: &mut Context<Self>) -> String {
         if let Some((h, _, _)) = &self.reader {
             h.update(cx, |r, _, cx| r.set_text(raw, cx)).ok();
             return "ok (open)".into();
@@ -4764,7 +4809,10 @@ impl Avatar {
         let place = self.reader_rect(&raw);
         let (x, y, w, h) = (place.rect.x, place.rect.y, place.rect.w, place.rect.h);
         let bounds = Bounds::new(point(px(x as f32 / sf), px(y as f32 / sf)), size(px(w as f32 / sf), px(h as f32 / sf)));
-        let options = self.os.window_options(Role::Reader, bounds, take_focus);
+        let options = match self.os.panel_options(Role::Reader, bounds, take_focus, cx) {
+            Ok(options) => options,
+            Err(e) => return format!("error: reader output: {e:#}"),
+        };
         let prev = if take_focus { self.os.prev_focus() } else { None };
         let me = cx.entity().downgrade();
         let (title, font, pal) = (self.name.to_uppercase(), self.font.clone(), self.reader_pal());
@@ -4934,14 +4982,17 @@ impl Avatar {
         let sf = l.sf;
         let (gx, gy) = self.ground();
         let m = self.os.monitor_at(gx, gy.saturating_sub(10));
-        let area = self.her_area().unwrap_or(WinRect { id: 0, x: m.x, y: m.y, w: m.w, h: m.h });
+        let area = self.os.panel_area().or_else(|| self.her_area()).unwrap_or(WinRect { id: 0, x: m.x, y: m.y, w: m.w, h: m.h });
         let (cw, ch) = ((crate::chip::SIZE.0 * sf) as i32, (crate::chip::SIZE.1 * sf) as i32);
         let pad = (14.0 * sf) as i32;
         let right = gx >= area.x + area.w / 2;
         let x = if right { area.right() - cw - pad } else { area.x + pad };
         let y = area.bottom() - ch - pad;
         let bounds = Bounds::new(point(px(x as f32 / sf), px(y as f32 / sf)), size(px(crate::chip::SIZE.0), px(crate::chip::SIZE.1)));
-        let options = self.os.window_options(Role::Chip, bounds, false);
+        let options = match self.os.panel_options(Role::Chip, bounds, false, cx) {
+            Ok(options) => options,
+            Err(e) => { elog!("synaps-avatar: chip output: {e:#}"); return; }
+        };
         let me = cx.entity().downgrade();
         let (name, font, pal) = (self.name.clone(), self.font.clone(), self.reader_pal());
         let xid = Rc::new(Cell::new(0u32));

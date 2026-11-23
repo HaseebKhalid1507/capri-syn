@@ -4,7 +4,7 @@
 use super::settle::Settle;
 use super::track::Track;
 use super::{Caps, Desktop, FxZ, Hint, Monitor, MoveAnim, PointerCfg, PointerEv, Role, SEAT_MIN, ShapeRect, Stage, Visible, WatchEvent, WinId, WinRect};
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use gpui_kit::{Bounds, Pixels, TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, fill, point, px, rgb, size};
 use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
@@ -371,17 +371,33 @@ impl Os {
         o
     }
 
+    /// Per-moment windows must name the same output their margins are relative to.
+    /// A missing GPUI output is an error, never permission to open on the focused monitor.
+    pub fn panel_options(&self, role: Role, bounds: Bounds<Pixels>, focus: bool, cx: &gpui_kit::App) -> Result<WindowOptions> {
+        let mut options = self.window_options(role, bounds, focus);
+        self.stage.pin_output(&mut options, cx)?;
+        Ok(options)
+    }
+
+    pub fn panel_area(&self) -> Option<WinRect> {
+        self.stage.body_area()
+    }
+
+    pub fn panel_needs_reopen(&self, id: WinId) -> bool {
+        self.stage.needs_reopen(id)
+    }
+
     pub fn adopt(&self, role: Role, window: &Window) -> Result<WinId> {
         if role == Role::Body {
-            let (v, sf) = (window.viewport_size(), window.scale_factor());
+            let v = window.viewport_size();
+            // Hyprland's core coordinates are logical (startup sf=1). The buffer's
+            // fractional scale is not the coordinate scale used to select a host.
+            let sf = if self.caps.host_per_output { 1.0 } else { window.scale_factor() };
             self.set_body_size((f32::from(v.width) * sf).round() as i32, (f32::from(v.height) * sf).round() as i32);
         }
         let id = self.stage.adopt(role, window)?;
         if role == Role::Body && self.caps.host_per_output {
-            let (b, k) = (window.bounds(), window.scale_factor());
-            let d = |v: Pixels| (f32::from(v) * k).round() as i32;
-            let (w, h) = self.body_size.get();
-            let m = self.monitor_at(d(b.origin.x) + w / 2, d(b.origin.y) + h / 2);
+            let m = self.stage.surface_monitor(id).context("body host has no named output")?;
             self.hosts.borrow_mut().push((id, m));
         }
         Ok(id)

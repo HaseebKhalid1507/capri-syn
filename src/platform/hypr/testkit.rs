@@ -72,7 +72,7 @@ impl World {
     }
 }
 
-fn hyprctl(args: &[&str]) -> String {
+pub(super) fn hyprctl(args: &[&str]) -> String {
     let o = Command::new("hyprctl").args(args).output().expect("hyprctl");
     String::from_utf8_lossy(&o.stdout).trim().to_string()
 }
@@ -281,9 +281,7 @@ impl Driver for HDriver {
     }
 }
 
-#[test]
-#[ignore = "needs the Wayland rig: tools/wlrig/run.sh env SA_CONTRACT_HYPR=1 <test binary> --ignored contract_hypr"]
-fn contract_hypr() {
+pub(super) fn require_rig() {
     // Inside the rig's sandbox only: its runtime dir, its Hyprland.
     let rig = std::env::var("RIG").unwrap_or_default();
     assert!(std::env::var("SA_CONTRACT_HYPR").is_ok_and(|v| v == "1") && !rig.is_empty(), "refusing: run inside tools/wlrig (run.sh) with SA_CONTRACT_HYPR=1");
@@ -292,6 +290,42 @@ fn contract_hypr() {
     let run = std::path::PathBuf::from(std::env::var("XDG_RUNTIME_DIR").unwrap_or_default());
     assert!(run.join("rig.ready").exists(), "refusing: not the rig's runtime dir");
     assert_eq!(std::fs::read_dir(run.join("hypr")).map(|d| d.count()).unwrap_or(0), 1, "exactly the rig's Hyprland");
+}
+
+/// Three outputs, including 150% scale; focus deliberately opposite her body. Called
+/// before GPUI connects so all wl_output globals exist when the harness opens windows.
+pub(super) fn panel_outputs() {
+    require_rig();
+    let mons: serde_json::Value = serde_json::from_str(&hyprctl(&["-j", "monitors"])).expect("monitors");
+    for name in ["HEADLESS-2", "HEADLESS-3"] {
+        if !mons.as_array().expect("monitor list").iter().any(|m| m["name"] == name) {
+            hyprctl(&["output", "create", "headless", name]);
+        }
+    }
+    let until = Instant::now() + Duration::from_secs(5);
+    loop {
+        let mons: serde_json::Value = serde_json::from_str(&hyprctl(&["-j", "monitors"])).expect("monitors");
+        let ms = mons.as_array().expect("monitor list");
+        if ms.iter().any(|m| m["name"] == "WAYLAND-1" && m["x"] == 0 && m["height"] == 1600)
+            && ms.iter().any(|m| m["name"] == "HEADLESS-2" && m["x"] == 2560 && m["height"] == 1440)
+            && ms.iter().any(|m| m["name"] == "HEADLESS-3" && m["x"] == 5120 && m["height"] == 1920 && m["scale"] == 1.5) {
+            return;
+        }
+        assert!(Instant::now() < until, "need the rig's 100% + 100% + 150% outputs: {mons}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+pub(super) fn focus_output(name: &str) {
+    dispatch(&format!("hl.dsp.focus({{ monitor = {name:?} }})"));
+    let mons: serde_json::Value = serde_json::from_str(&hyprctl(&["-j", "monitors"])).expect("monitors");
+    assert!(mons.as_array().unwrap().iter().any(|m| m["name"] == name && m["focused"] == true), "focus must be on {name}: {mons}");
+}
+
+#[test]
+#[ignore = "needs the Wayland rig: tools/wlrig/run.sh env SA_CONTRACT_HYPR=1 <test binary> --ignored contract_hypr"]
+fn contract_hypr() {
+    require_rig();
     let (desk, stage) = super::connect().expect("the rig's Hyprland");
     let os = Rc::new(Os::new(desk.clone(), Box::new(stage)));
     let result: Rc<RefCell<Option<anyhow::Result<Vec<&'static str>>>>> = Rc::default();

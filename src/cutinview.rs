@@ -172,6 +172,7 @@ impl Avatar {
         }
         let (gx, gy) = self.ground();
         let a = self.os.area_at(gx, gy - 1);
+        let area = self.os.panel_area().map_or((a.x, a.y, a.w, a.h), |a| (a.x, a.y, a.w, a.h));
         // His windows (not hers, not popups), and her bubble's room above her head.
         let mut windows: Vec<(i32, i32, i32, i32)> =
             self.os.stack().into_iter().filter(|(r, big)| *big && r.id != self.os.body()).map(|(r, _)| (r.x, r.y, r.w, r.h)).collect();
@@ -179,12 +180,15 @@ impl Avatar {
             let (w, _) = (self.layout.geo.width as i32, self.layout.geo.height as i32);
             windows.push((self.origin.0, self.origin.1, w, (body.y - self.origin.1).max(0)));
         }
-        let Some((x, y)) = cutin::place((body.x, body.y, body.w, body.h), (a.x, a.y, a.w, a.h), still.size, (GAP * sf).round() as i32, &windows, !self.panel_up()) else {
+        let Some((x, y)) = cutin::place((body.x, body.y, body.w, body.h), area, still.size, (GAP * sf).round() as i32, &windows, !self.panel_up()) else {
             return;
         };
         let (w, h) = still.size;
         let bounds = Bounds::new(point(px(x as f32 / sf), px(y as f32 / sf)), size(px(w as f32 / sf), px(h as f32 / sf)));
-        let options = self.os.window_options(Role::Intro, bounds, false);
+        let options = match self.os.panel_options(Role::Intro, bounds, false, cx) {
+            Ok(options) => options,
+            Err(e) => { elog!("synaps-avatar: cut-in output: {e:#}"); return; }
+        };
         let me = cx.entity().downgrade();
         let os = self.os.clone();
         let seed = self.rng.next();
