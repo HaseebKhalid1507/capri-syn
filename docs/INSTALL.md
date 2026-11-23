@@ -214,6 +214,8 @@ she runs through XWayland, the X server those desktops keep for X apps.
   None of them has been tried on a real session yet: CI and the test containers stand in for them.
 - **Hyprland** has no idle time for her yet: your presence is the pointer moving, so typing alone
   for 5 min reads as away. Hyprland before 0.40 isn't supported: she takes XWayland there.
+- **Hyprland: the Line and Settings can open cut short**, with no room to type
+  ([#145](https://github.com/HaseebKhalid1507/capri-syn/issues/145)). Being looked at.
 - **On Windows, Synaps 0.12's own `synaps login`** opens a sign-in tab cut at the URL's first `&`:
   copy the whole URL it prints into your browser, or sign in from her (Settings ▸ Brain) or through
   her installers' step, which open it whole (install.ps1 puts it there too; the default folder
@@ -241,8 +243,9 @@ she runs through XWayland, the X server those desktops keep for X apps.
 - **`XDG_RUNTIME_DIR` unset:** she and her voice sidecar look for the Linux socket in different
   places: she in the temp dir (`$TMPDIR`, else `/tmp`), the sidecar in `/run/user/<uid>`. Set it, or
   set `CAPRI_VOICE_SOCK` for both. It isn't aligned yet because that would change how she behaves.
-- **A word streamed in pieces** can leave her bubble a step too wide until the reply ends
-  ([#146](https://github.com/HaseebKhalid1507/capri-syn/issues/146)). Nothing is cut.
+- **A word streamed in pieces** can leave her bubble a step too wide until the reply ends, and the
+  half-typed word drops a line ([#146](https://github.com/HaseebKhalid1507/capri-syn/issues/146)).
+  Nothing is cut.
 
 ## Flags
 

@@ -21,13 +21,15 @@ no-jacket look.
   seen: in a bolt (a teleport's or her launch's) or as she wakes; the one she wears is kept across
   restarts. In the no-jacket look her greeting starts with a new wave, and hanging from a bar she now and
   then does a pull-up, a catch or a wrist scan. In both looks she sometimes plays a keytar on a window top
-  while music plays, and each kind of arrival has a second opening, never the same one twice running.
+  while music plays. In her jacket look a summon, a teleport or a landing on a window top can open a
+  second way, never the same one twice running.
 
 ### The bubble
 - **It fits what she says.** A short reply gets a small bubble, a longer one grows with its lines, and a
   reply past a page (or with code) goes to READ at about the full width; prompts and the text field fit
-  their words too. Her status shortens before it is cut, and every key under a reply or a prompt (ABORT,
-  READ · N LINES, DENY, ALLOW, REVIEW ▸, the collapse key, the pager) is whole.
+  their words too. Her status shortens before it is cut, and the keys under a reply or a prompt (ABORT,
+  READ · N LINES, DENY, ALLOW, REVIEW ▸, the collapse key, the pager) are never cut; where they can't all
+  fit, the pager goes first, then READ's count.
 - **A streaming reply grows in steps,** at most four a second, and doesn't shrink until the turn ends,
   then settles once to its fit; the text field grows with what you type, in steps, and doesn't flip at a
   step's edge. A reply shown all at once, or a spoken caption, sizes to its text at once. A line waits for
@@ -49,8 +51,9 @@ no-jacket look.
   download, ~115 MB built); an upgrade rebuilds her pack once.
 
 ### Fixes
-- **Music after a carry.** If a player's music stopped while she was carried, she lands out of music mode;
-  music still playing when she lands stops with the player, as before.
+- **Music after a carry.** Carried while a player's music played, she used to land still listening, and
+  pausing it no longer took her out. Now music still playing when she lands stops with the player, and
+  music that stopped while she was carried lands her out of music mode.
 
 ### Known issues
 - A dark slab on X11 without a compositor (#72): now and then her whole window's rectangle paints solid
@@ -62,6 +65,7 @@ no-jacket look.
   tried on a real session yet: CI and the test containers stand in for them.
 - Hyprland has no idle time for her yet: your presence is the pointer moving, so typing alone for 5 min
   reads as away. Hyprland before 0.40 isn't supported: she takes XWayland there.
+- Hyprland: the Line and Settings can open cut short, with no room to type (#145). Being looked at.
 - On Windows, Synaps 0.12's own `synaps login` opens a sign-in tab cut at the URL's first `&`: copy the
   whole URL it prints into your browser, or sign in from her (Settings ▸ Brain) or through her installers'
   step, which open it whole (docs/INSTALL.md has the command). Grok's sign-in never prints its URL, so
@@ -86,8 +90,8 @@ no-jacket look.
 - With `XDG_RUNTIME_DIR` unset, she and her voice sidecar look for the Linux socket in different places:
   she in the temp dir (`$TMPDIR`, else `/tmp`), the sidecar in `/run/user/<uid>`. Set it, or set
   `CAPRI_VOICE_SOCK` for both. It isn't aligned yet because that would change how she behaves.
-- A word streamed in pieces can leave the bubble a step too wide until the reply ends. Nothing is cut
-  (#146).
+- A word streamed in pieces can leave the bubble a step too wide until the reply ends, and the half-typed
+  word drops a line. Nothing is cut (#146).
 
 ## 1.1.1 (2026-11-20)
 
