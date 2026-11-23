@@ -502,6 +502,9 @@ pub struct LayerStage {
     /// Where `dress` put each role (the output it was made on).
     dressed: RefCell<HashMap<&'static str, Output>>,
     body: std::cell::Cell<WinId>,
+    /// The body host asking for the keyboard on demand while a press on her lasts
+    /// (`Stage::keep_pointer`).
+    kept: std::cell::Cell<Option<WinId>>,
 }
 
 /// The id key of one of her surfaces: its namespace (body hosts: and their output).
@@ -655,7 +658,11 @@ impl Stage for LayerStage {
     fn flush(&self) {}
 
     /// Exclusive keyboard interactivity: Hyprland gives her surface the keyboard in that commit.
+    /// Over a press's ask on demand (`keep_pointer`): the press's end leaves it be.
     fn grab_keyboard(&self, s: WinId) -> Result<()> {
+        if self.kept.get() == Some(s) {
+            self.kept.set(None);
+        }
         let s = self.surface(s).context("not one of her surfaces")?;
         if !layer_ctl::set_keyboard_interactivity(s.ptr, layer_ctl::KeyboardInteractivity::Exclusive) {
             bail!("{}: not a layer surface", s.ns);
@@ -672,13 +679,54 @@ impl Stage for LayerStage {
         }
         Ok(())
     }
+
+    /// While a button is down Hyprland keeps the pointer on the surface it went down on only
+    /// if some surface holds the keyboard (`InputManager::mouseMoveUnified`); else each motion
+    /// looks under the pointer, and the pointer leaving the surface releases the button there
+    /// on its way out and drops the real release (`CWLPointerResource::sendLeave`,
+    /// `sendButton`). So with nothing holding the keyboard a drag onto another output was let
+    /// go at the seam, the button still down. Here host `s` asks for the keyboard on demand
+    /// while the press lasts: Hyprland gives it at the next motion over her (an on-demand layer
+    /// under the pointer gets it), which releases nothing, unlike asking exclusively
+    /// (`CLayerSurface::takeKeyboardFocus` releases every button). From then the pointer stays
+    /// on `s` to the release, wherever she is shown. Only with nothing holding the keyboard
+    /// (`keyboard_free`): else the pointer is kept anyway, and taking the keyboard from a window
+    /// would show. At the end `s` asks for none, and Hyprland gives the keyboard to what is under
+    /// the pointer (`CLayerSurface::onCommit`, `refocusLastWindow`). Should the pointer leave her
+    /// before that next motion (a flick), the press ends there, as it did.
+    fn keep_pointer(&self, s: WinId, on: bool) {
+        if let Some(h) = self.kept.take()
+            && let Some(h) = self.surface(h)
+        {
+            layer_ctl::set_keyboard_interactivity(h.ptr, layer_ctl::KeyboardInteractivity::None);
+        }
+        if !on {
+            return;
+        }
+        if let Some(h) = self.surface(s)
+            && keyboard_free(&self.desk.ipc)
+            && layer_ctl::set_keyboard_interactivity(h.ptr, layer_ctl::KeyboardInteractivity::OnDemand)
+        {
+            self.kept.set(Some(s));
+        }
+    }
 }
+
+/// Nothing holds the keyboard nor asks for it: no active window, and no mapped layer (hers
+/// included) that takes it, exclusively or on demand. Hyprland can't say which surface holds it
+/// (`hl.get_layers()` has no focus), so this errs toward held: an on-demand layer that has it
+/// says so, and one that merely could does too. A reply it can't read is held as well.
+fn keyboard_free(ipc: &ipc::Ipc) -> bool {
+    ipc.lua(KEYBOARD_FREE).is_ok_and(|r| r == "free")
+}
+
+const KEYBOARD_FREE: &str = "if hl.get_active_window() then return 'held' end for _, l in ipairs(hl.get_layers()) do if l.mapped and l.keyboard_interactivity ~= 0 then return 'held' end end return 'free'";
 
 /// The running Hyprland (its request socket answers), and a stage for her layer surfaces.
 pub fn connect() -> Result<(Arc<HyprDesktop>, LayerStage)> {
     let ipc = ipc::Ipc::from_env().context("hyprland")?;
     let desk = Arc::new(HyprDesktop { ipc, ids: Mutex::default(), pointer: Mutex::new(None) });
-    let stage = LayerStage { desk: desk.clone(), surfaces: RefCell::default(), dressed: RefCell::default(), body: std::cell::Cell::new(0) };
+    let stage = LayerStage { desk: desk.clone(), surfaces: RefCell::default(), dressed: RefCell::default(), body: std::cell::Cell::new(0), kept: std::cell::Cell::new(None) };
     Ok((desk, stage))
 }
 

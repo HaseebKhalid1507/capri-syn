@@ -20,10 +20,13 @@ impl Render for HostView {
         if self.active {
             return root.child(self.avatar.clone());
         }
-        // Not showing her, it may still get the release of a press on her: while a button is
-        // down Hyprland keeps the pointer on the surface it went down on (when a surface holds the
-        // keyboard; `InputManager::mouseMoveUnified`), and she may have crossed into another
-        // output's host since. Her own listeners are painted in the host she shows in only.
+        // Not showing her, it may still get the release of a press on her, which went down in it
+        // before she crossed into another output's host: Hyprland keeps the pointer on the
+        // surface pressed to the release while some surface holds the keyboard
+        // (`InputManager::mouseMoveUnified`; with none, this one asks for it while the press
+        // lasts: `Stage::keep_pointer`), and should the pointer leave it anyway, it releases
+        // the button to it on the way out. Her own listeners are painted in the host she shows
+        // in only.
         let avatar = self.avatar.clone();
         root.child(
             canvas(

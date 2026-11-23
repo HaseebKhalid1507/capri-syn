@@ -10,10 +10,12 @@
   logout screen's dimmer) doesn't count either, so she may sit on what it hides: `hyprctl layers`
   doesn't say which layers take the keyboard.
 
-- **Hyprland: a drag let go on the other monitor lets her go** (she falls, lands on a window or is
-  thrown, as on one monitor) instead of hanging held for good with no click reaching her. The host
-  she crosses into takes the pointer at once, a release that comes to the host she left still lets
-  her go, and should a release go astray anyway, your next click on her or `drop` ends the hold.
+- **Hyprland: a drag let go on the other monitor lets her go there** (she falls, lands on a window or
+  is thrown, as on one monitor) instead of hanging held for good. With no window focused she also used
+  to slip out of your hand at the monitor edge; now she stays held to the release, as with one focused:
+  while you hold her, her surface takes the keyboard on demand (only when nothing else has it) and lets
+  it go at the release. A quick flick off her as you press can still let her go where it left her. If a
+  release ever goes astray, your next click on her or `drop` lets her go.
 
 ## 1.2.0 (2026-11-23)
 

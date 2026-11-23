@@ -639,6 +639,12 @@ pub trait Stage {
     }
     /// Her surface `s` lets the keyboard go, to `to` when given.
     fn release_keyboard(&self, s: WinId, to: Option<WinId>) -> Result<()>;
+    /// A press of his on her went down in body host `s` and lasts (`on`), or it ended (the same
+    /// `s`): from `Os::set_held`, once each. Where the desktop takes the pointer off the surface
+    /// pressed mid-press (with a release of its own on the way out: Hyprland with nothing
+    /// holding the keyboard), the stage may keep it on `s` meanwhile. Default: nothing to do
+    /// (an implicit grab keeps every pointer event hers already).
+    fn keep_pointer(&self, _s: WinId, _on: bool) {}
 }
 
 /// Connect to the desktop she runs on, the same one GPUI picks (`linux::backend`): Wayland on
