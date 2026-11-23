@@ -55,6 +55,10 @@ struct World {
     no_reshapes: bool,
     /// He clicked on her since the keyboard last went back (`Caps::keyboard_on_input`).
     his_input: bool,
+    /// Her body host asking for the keyboard on demand (`Stage::keep_pointer`), and what the
+    /// stage was told, in order.
+    on_demand: Option<WinId>,
+    keeps: Vec<(WinId, bool)>,
     /// The primary button as the server has it (None: can't tell).
     primary: Option<bool>,
     /// What her tray icon was told, in order.
@@ -274,7 +278,9 @@ impl Stage for FakeStage {
         if self.0.caps.keyboard_on_input && !self.keyboard_granted() {
             anyhow::bail!("fake: no input of his to her");
         }
-        self.0.w().focus = Some(s);
+        let mut w = self.0.w();
+        w.focus = Some(s);
+        w.on_demand = w.on_demand.filter(|&h| h != s);
         Ok(())
     }
     fn keyboard_granted(&self) -> bool {
@@ -294,6 +300,22 @@ impl Stage for FakeStage {
             w.focus = to;
         }
         Ok(())
+    }
+    /// As the Hyprland stage: with nothing holding the keyboard, host `s` asks for it on demand
+    /// while the press lasts (a `Seat` motion over it then gives it). At the end it asks for none,
+    /// and gives the keyboard back if it had it (Hyprland looks under the pointer for the next
+    /// holder: here nothing).
+    fn keep_pointer(&self, s: WinId, on: bool) {
+        let mut w = self.0.w();
+        w.keeps.push((s, on));
+        if let Some(h) = w.on_demand.take()
+            && w.focus == Some(h)
+        {
+            w.focus = None;
+        }
+        if on && w.focus.is_none() {
+            w.on_demand = Some(s);
+        }
     }
 }
 
@@ -758,34 +780,63 @@ fn fake_hosts() -> (Os, FakeDriver) {
     (os, FakeDriver(f))
 }
 
-/// Hyprland's pointer focus around a press (`InputManager::mouseMoveUnified`): while the button
-/// is down and some surface holds the keyboard (`keep`), the pointer stays on the surface it
-/// went down on wherever it moves; else each motion hit-tests the input regions under it. A
-/// press or a release goes to the surface focused then: one of hers, or None (someone else's).
+/// Hyprland's seat around a press on her, as its source has it (v0.57.2):
+/// - a motion looks under the pointer (input regions: hers, or someone else's or nothing),
+///   except while the button is down with some surface holding the keyboard (`World::focus`):
+///   then the pointer stays on the surface it is on (`InputManager::mouseMoveUnified`);
+/// - a layer of hers it is on that asks for the keyboard on demand gets it (same);
+/// - the pointer leaving her surface with her button down releases the button there on its way
+///   out, and the real release then goes nowhere (`CWLPointerResource::sendLeave`, `sendButton`);
+/// - a press or a release goes to the surface the pointer is on.
+///
+/// Kept on someone else's surface isn't modelled (each motion looks again): no press of hers is
+/// down then.
 struct Seat {
-    keep: bool,
     down: bool,
-    focus: Option<WinId>,
+    /// Her surface the pointer is on (None: someone else's, or nothing).
+    on: Option<WinId>,
+    /// The button went down on a surface of hers, and no release came to her since.
+    pressed: bool,
+    /// The releases that came to her surfaces: which, and whether the button was up then.
+    releases: Vec<(WinId, bool)>,
 }
 
 impl Seat {
-    fn new(keep: bool) -> Seat {
-        Seat { keep, down: false, focus: None }
+    fn new() -> Seat {
+        Seat { down: false, on: None, pressed: false, releases: Vec::new() }
     }
 
     /// The pointer moves to root (x, y).
     fn to(&mut self, d: &mut FakeDriver, x: i32, y: i32) {
         d.warp(x, y);
-        let kept = self.down && self.keep && self.focus.is_some();
-        if !kept {
-            self.focus = d.surface_at(x, y);
+        let kept = self.down && self.on.is_some() && d.0.w().focus.is_some();
+        let on = if kept { self.on } else { d.surface_at(x, y) };
+        {
+            let mut w = d.0.w();
+            if on.is_some() && w.on_demand == on {
+                w.focus = on;
+            }
+        }
+        if on != self.on {
+            if let Some(left) = self.on
+                && std::mem::take(&mut self.pressed)
+            {
+                self.releases.push((left, false));
+            }
+            self.on = on;
         }
     }
 
-    /// The button goes down or up: where it goes.
-    fn button(&mut self, down: bool) -> Option<WinId> {
+    /// The button goes down or up.
+    fn button(&mut self, down: bool) {
         self.down = down;
-        self.focus
+        if down {
+            self.pressed = self.on.is_some();
+        } else if let Some(s) = self.on
+            && std::mem::take(&mut self.pressed)
+        {
+            self.releases.push((s, true));
+        }
     }
 }
 
@@ -802,71 +853,109 @@ fn press_on_her(os: &Os, d: &mut FakeDriver, seat: &mut Seat) -> Option<WinId> {
     os.move_to(1000, 600).unwrap();
     os.set_shapes(Some(&FIGURE), None).unwrap();
     seat.to(d, 1000 + GRIP.0, 600 + GRIP.1);
-    let on = seat.button(true);
+    seat.button(true);
     os.set_held(true, false);
     os.set_shapes(Some(&WHOLE), None).unwrap();
-    on
+    seat.on.filter(|_| seat.pressed)
 }
 
-/// Carried to each x in turn, y kept, her window a frame behind the pointer (`rag_follow`). The
-/// view sends no region meanwhile: all of her window, unchanged.
+/// Carried to each x in turn, y kept, her window a frame behind the pointer (`rag_follow`); a
+/// tick each time (the view says she's pressed every frame: `Avatar::tick`). The view sends no
+/// region meanwhile: all of her window, unchanged.
 fn carry(os: &Os, d: &mut FakeDriver, seat: &mut Seat, xs: impl IntoIterator<Item = i32>, y: i32) {
     for x in xs {
         seat.to(d, x, y);
         os.move_to(x - GRIP.0, y - GRIP.1).unwrap();
+        os.set_held(true, false);
     }
 }
 
 /// A drag that ends on another output, where her body has a host per output (Hyprland, bella's
-/// eDP-1 and DP-2): pressed on her in host A, carried into host B, let go. The release comes to a
-/// host of hers on both of Hyprland's ways with a held button (`Seat`): kept on the surface
-/// pressed (host A, which no longer shows her: its view hands the release to her,
-/// `host::HostView`), or hit-tested under the pointer, where host B must take it. B has her input
-/// region from the handover on: a dormant host has none, and the view doesn't send it again (all
-/// of her window while pressed: unchanged). Before, B took nothing and the release went to
-/// whatever was under her, or to A, which dropped it: she hung held for good.
+/// eDP-1 and DP-2): pressed on her in host A, carried into host B, let go over DP-2. Hyprland
+/// keeps the pointer on host A to the end only while something holds the keyboard (`Seat`).
+/// With his window holding it, it does: the release comes to host A, which no longer shows her
+/// (its view hands it to her: `host::HostView`, `Avatar::release_elsewhere`). With nothing
+/// holding it, host A asks for it on demand while the press lasts (`Stage::keep_pointer`) and
+/// gets it at the first motion over her: the same. Before, with nothing holding it, Hyprland
+/// took the pointer off host A at the handover with a release of its own, the button still
+/// down: she was let go at the seam mid-drag, and the real release went nowhere.
 #[test]
-fn a_drag_across_outputs_is_let_go_on_a_host_of_hers() {
-    for keep in [false, true] {
+fn a_drag_across_outputs_holds_her_to_the_release_on_the_host_pressed() {
+    for his_window in [true, false] {
         let (os, mut d) = fake_hosts();
-        let mut seat = Seat::new(keep);
+        let win = his_window.then(|| {
+            let id = d.add(WinRect { id: 0, x: 200, y: 200, w: 800, h: 600 }, true, 0);
+            d.0.w().focus = Some(id);
+            id
+        });
+        let mut seat = Seat::new();
         assert_eq!(press_on_her(&os, &mut d, &mut seat), Some(BODY), "the press lands on her in host A (eDP-1)");
         carry(&os, &mut d, &mut seat, (1200..=3200).step_by(100), 800);
         assert_eq!((os.take_host_change(), os.body()), (Some(HOST_B), HOST_B), "carried into DP-2's host");
-        assert_eq!(d.0.w().input, WHOLE, "her region went with her into host B");
-        assert_eq!(d.surface_at(1150, 800), None, "host A takes no input once she left it");
-        carry(&os, &mut d, &mut seat, [3210], 805);
-        let (want, why) = if keep { (BODY, "kept on the surface pressed: host A") } else { (HOST_B, "hit-tested under the pointer: host B") };
-        assert_eq!(seat.button(false), Some(want), "let go over DP-2 (keep {keep}): {why}");
-    }
-    // Let go in the frame she crossed in: Hyprland hasn't looked under the pointer since, so the
-    // pointer is still host A's either way.
-    for keep in [false, true] {
-        let (os, mut d) = fake_hosts();
-        let mut seat = Seat::new(keep);
-        press_on_her(&os, &mut d, &mut seat);
-        carry(&os, &mut d, &mut seat, (1200..=2600).step_by(100), 800);
-        assert_eq!(os.body(), HOST_B, "she crossed at the outputs' edge");
-        assert_eq!(seat.button(false), Some(BODY), "let go as she crossed (keep {keep}): host A");
+        assert!(seat.releases.is_empty(), "held into DP-2 (his window: {his_window}), no release while the button is down: {:?}", seat.releases);
+        assert_eq!(d.0.w().focus, win.or(Some(BODY)), "the keyboard: his window's, else host A's for the press");
+        seat.button(false);
+        assert_eq!(seat.releases, [(BODY, true)], "the release, as the button comes up: to host A (his window: {his_window})");
+        // Her view ends the press there (`Avatar::release_elsewhere`).
+        os.set_held(false, false);
+        os.set_held(false, false);
+        assert_eq!(d.0.w().keeps, [(BODY, true), (BODY, false)], "the stage told once each way, of host A");
+        assert_eq!(d.0.w().focus, win, "the keyboard as before the press");
     }
 }
 
-/// A release that went to someone else's surface: a flick that outran her window (Hyprland looked
-/// under the pointer before she caught up) let go before Hyprland looked again. Nothing of hers
-/// heard it, so the view still holds the press, and all of her window still takes the pointer,
-/// in the host she's in now: his next press lands on her, and ends the one that went astray
-/// (`Avatar::mouse_down`). Before, host B took nothing: no press of his could reach her again.
+/// With nothing holding the keyboard, a pointer that leaves her before Hyprland's next look
+/// under it gave host A the keyboard (a flick as the button goes down) ends the press there,
+/// with Hyprland's own release: she's let go where it left her, never held on with no button.
 #[test]
-fn after_a_release_that_went_astray_her_next_press_lands_on_her() {
+fn a_flick_off_her_before_she_has_the_keyboard_ends_the_press_there() {
     let (os, mut d) = fake_hosts();
-    let mut seat = Seat::new(false);
-    press_on_her(&os, &mut d, &mut seat);
-    carry(&os, &mut d, &mut seat, (1200..=2400).step_by(100), 800);
-    // One flick 800 px on, onto DP-2, and the button comes up before her window caught up.
-    carry(&os, &mut d, &mut seat, [3200], 800);
-    assert_eq!(os.body(), HOST_B, "she followed into DP-2's host");
-    assert_eq!(seat.button(false), None, "the release went to someone else's surface");
-    // Still held: her window still all hers to press, under the pointer.
-    seat.to(&mut d, 3205, 802);
-    assert_eq!(seat.button(true), Some(HOST_B), "his next press lands on her, in host B");
+    let mut seat = Seat::new();
+    assert_eq!(press_on_her(&os, &mut d, &mut seat), Some(BODY));
+    seat.to(&mut d, 1900, 800);
+    assert_eq!(seat.releases, [(BODY, false)], "released to host A on the pointer's way off it");
+    seat.button(false);
+    assert_eq!(seat.releases, [(BODY, false)], "the real release goes nowhere");
+    os.set_held(false, false);
+    let w = d.0.w();
+    assert_eq!((w.focus, w.on_demand), (None, None), "host A asks for the keyboard no more");
+}
+
+/// Moved across outputs in one step with her frame as it is (a `pos` onto DP-2): the view sends
+/// no region (it hasn't changed), yet the host she shows in takes the pointer where she is at
+/// once: her region goes with her (`Os::send_move`). Before, host B took nothing until her region
+/// next changed: clicks went through her there, the one too that ends a press whose release
+/// never came (`Avatar::mouse_down`).
+#[test]
+fn the_host_she_crosses_into_takes_the_pointer_at_once() {
+    let (os, mut d) = fake_hosts();
+    let mut seat = Seat::new();
+    os.move_to(1000, 600).unwrap();
+    os.set_shapes(Some(&FIGURE), None).unwrap();
+    os.move_to(3000, 600).unwrap();
+    assert_eq!((os.take_host_change(), os.body()), (Some(HOST_B), HOST_B), "into DP-2's host");
+    seat.to(&mut d, 3000 + GRIP.0, 600 + GRIP.1);
+    seat.button(true);
+    assert_eq!(seat.on, Some(HOST_B), "a press on her lands on her, in host B");
+    assert_eq!(d.surface_at(1000 + GRIP.0, 600 + GRIP.1), None, "host A takes nothing where she was");
+}
+
+/// A press that ends with no tick since its button was last asked about (a new press ends it:
+/// `Avatar::mouse_down`) leaves nothing it saw to the next: the old one's up isn't the new one's.
+/// Before, the new press, its button down, was lost on the old one's up.
+#[test]
+fn a_new_press_starts_with_nothing_seen_of_its_button() {
+    use std::time::{Duration, Instant};
+    let (os, d) = fake(true);
+    let t0 = Instant::now();
+    let at = |ms: u64| t0 + Duration::from_millis(ms);
+    d.0.w().primary = Some(false);
+    os.set_held(true, false);
+    assert!(!os.press_lost(true, at(0)), "up since 0: its release may be on its way");
+    assert!(!os.press_lost(true, at(170)), "up for 170 ms: not yet");
+    // Pressed again at 180 (the old release went astray): the old press ends, a new one starts.
+    os.set_held(false, false);
+    d.0.w().primary = Some(true);
+    os.set_held(true, false);
+    assert!(!os.press_lost(true, at(210)), "the new press, its button down, isn't lost for the old one's up");
 }

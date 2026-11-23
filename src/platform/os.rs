@@ -292,6 +292,8 @@ pub struct Os {
     /// A press on her: when the button was last asked about, since when it has been up, and
     /// whether the backend can tell (`press_lost`).
     press_seen: Cell<Option<(Instant, Option<Instant>, bool)>>,
+    /// The body host a press of his on her went down in, while it lasts (`set_held`).
+    press_host: Cell<Option<WinId>>,
     /// Her tray icon (`Desktop::tray`; None: none here) and what it shows now.
     tray: RefCell<Option<TrayLink>>,
 }
@@ -331,6 +333,7 @@ impl Os {
             host_changed: Cell::new(None),
             settle: RefCell::new(Settle::default()),
             press_seen: Cell::new(None),
+            press_host: Cell::new(None),
             tray: RefCell::new(None),
         }
     }
@@ -464,11 +467,15 @@ impl Os {
         {
             self.stage.set_body(h);
             self.host_changed.set(Some(h));
-            // The host she moves into has no input region of its own (a dormant host takes
-            // none): the one out goes with her, in the same commit as the move. The view sends a
-            // region only when it changes, and while a press on her lasts it doesn't (all of her
-            // window): without this the host under the pointer took nothing until the press
-            // ended, and a release over it went to whatever was below her.
+            // The host she moves into keeps no input region of its own (a dormant host takes
+            // none): the one out goes with her, in the same step as the move, so the host she
+            // shows in takes the pointer where she is from the start. The view sends a region
+            // only when it changes, and it may not for a while (a frame carried across as it is:
+            // a `pos`, all of her window while a press lasts): until then she let clicks
+            // through on the new output, the one that ends a press whose release never came
+            // (`Avatar::mouse_down`) too. `out` is what the stage has only while nothing of
+            // hers is held back, so never under picom (`settle.rs`), where no host is per output.
+            debug_assert!(!self.settling(), "a body host per output under picom's settling");
             self.stage.set_shapes(Some(self.settle.borrow().out()), None).ok();
         }
         self.stage.move_to(x, y)
@@ -530,7 +537,26 @@ impl Os {
     /// real drag, so it moves as one does). In hand, her region waits for the release, so no
     /// move waits for one (a catch right after a region out waits out `GAP` first: `settle.rs`).
     pub fn set_held(&self, press: bool, script: bool) {
+        if press != self.press_host.get().is_some() {
+            self.press_edge(press);
+        }
         self.settle.borrow_mut().press((press && self.caps.implicit_grab) || script, Instant::now());
+    }
+
+    /// A press of his on her starts (`down`) or ends: the view says so on each, and every tick
+    /// (`set_held`), so this runs once a press whichever way it ends. Nothing is known of the
+    /// new one's button yet (`press_lost`: an up an earlier press saw isn't this one's, should
+    /// that one have ended without a tick since). The stage may keep the pointer on the host it
+    /// went down in to its end (`Stage::keep_pointer`).
+    fn press_edge(&self, down: bool) {
+        if down {
+            self.press_seen.set(None);
+            let s = self.stage.body();
+            self.press_host.set(Some(s));
+            self.stage.keep_pointer(s, true);
+        } else if let Some(s) = self.press_host.take() {
+            self.stage.keep_pointer(s, false);
+        }
     }
 
     /// A press on her whose release never came (`pressed`: the view holds one): the server

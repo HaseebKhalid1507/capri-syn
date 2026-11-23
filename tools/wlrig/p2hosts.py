@@ -2,7 +2,8 @@
 """p2hosts.py BIN PACK: her body hosts across outputs in the rig (BRIEF-wayland §2.3, §5 P2): one capri-body layer per
 output; a teleport to HEADLESS-2 shows her there (and nothing of her is left on WAYLAND-1); back; HEADLESS-2 removed
 while she's on it: she comes down on WAYLAND-1 and its host is gone; added again: a dormant host for it. A drag from
-WAYLAND-1 let go over HEADLESS-2, with no window focused and with one: she's let go there, as on one output.
+WAYLAND-1 let go over HEADLESS-2, with no window focused and with one: held to the release (her window follows the
+pointer), let go there, the keyboard where it was. `drop` while his press holds her: let go.
 Inside the sandbox only (run.sh python3 p2hosts.py ...). One line per check."""
 import json, os, subprocess, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -37,6 +38,12 @@ def bodies():
         for ls in v["levels"].values():
             out += [(mon, l["x"], l["y"], l["w"], l["h"]) for l in ls if l["namespace"] == "capri-body"]
     return sorted(out)
+
+
+def body_ki():
+    """Her body hosts' keyboard interactivity (0 none, 1 exclusive, 2 on demand), one digit each."""
+    return hyprctl("repl", "local r = '' for _, l in ipairs(hl.get_layers()) do if l.namespace == 'capri-body' then "
+                           "r = r .. l.keyboard_interactivity end end return r").strip()
 
 
 def grab(x, y, w, h):
@@ -115,10 +122,13 @@ with RigApp(BIN, PACK, LOG) as app:
     time.sleep(2.0)
     b = bodies()
     line("hotplug-added", sorted(x[0] for x in b) == ["HEADLESS-2", "WAYLAND-1"], f"{b}")
-    # A drag across outputs: pressed on her in her WAYLAND-1 host, let go over HEADLESS-2. She's let go as on one
-    # output, on both of Hyprland's ways with a held button (InputManager::mouseMoveUnified): with no surface
-    # holding the keyboard it hit-tests under the pointer (her HEADLESS-2 host must take the release); with a window
-    # focused it keeps the pointer on the surface pressed (her WAYLAND-1 host, no longer showing her, gets it).
+    # A drag across outputs: pressed on her in her WAYLAND-1 host, let go over HEADLESS-2. Hyprland keeps the pointer
+    # on the surface pressed to the release only while some surface holds the keyboard (InputManager::mouseMoveUnified);
+    # leaving it releases the button on the way out (CWLPointerResource::sendLeave). With a window focused it holds:
+    # the release comes to her WAYLAND-1 host, no longer showing her, which hands it to her. With nothing focused her
+    # host asks for the keyboard on demand while the press lasts (Stage::keep_pointer), so the same. Either way she's
+    # held to the release, following the pointer onto HEADLESS-2 (not let go at the seam), then let go there, and the
+    # keyboard is where it was: his window's, or no host of hers asking for it.
     w = app.world
     for focused in (False, True):
         ms = mons()
@@ -132,7 +142,7 @@ with RigApp(BIN, PACK, LOG) as app:
         until(lambda: not state().get("teleporting") and state().get("rag") is None and state()["window"]["x"] < m2["x"], 6)
         time.sleep(1.0)
         st = state()
-        xid0, av = st["xid"], st["avatar"]
+        xid0, av, win0 = st["xid"], st["avatar"], st["window"]
         sx, sy = av["x"] + av["w"] // 2, av["y"] + av["h"] // 2
         tx = m2["x"] + 600
         w.warp(sx, sy); time.sleep(0.2); w.button(True)
@@ -140,15 +150,39 @@ with RigApp(BIN, PACK, LOG) as app:
             w.warp(round(sx + (tx - sx) * k / 60), sy); time.sleep(1 / 120)
         time.sleep(0.3)
         held = state()
+        ki_held = body_ki()
         w.button(False)
         let_go = until(lambda: (state().get("rag") or {}).get("phase") != "held", 2)
         until(lambda: state().get("rag") is None, 6)
         st = state()
+        ki_after = body_ki()
+        active_after = json.loads(hyprctl("-j", "activewindow") or "{}").get("class")
         on2 = st["window"]["x"] + st["window"]["w"] // 2 >= m2["x"]
         crossed = (held.get("rag") or {}).get("phase") == "held" and held["xid"] != xid0
-        line(f"drop-across-outputs-{'focused' if focused else 'unfocused'}", crossed and bool(let_go) and on2,
-             f"activewindow {active}; held: host {xid0:#x} -> {held['xid']:#x}, rag {json.dumps(held.get('rag'))[:80]}; "
-             f"after the release: rag {json.dumps(st.get('rag'))[:60]}, her window {st['window']}")
+        # "Following nothing": held, her window moved with the pointer (as far as it went, within her dangle).
+        follows = abs((held["window"]["x"] - win0["x"]) - (tx - sx)) <= 60
+        asked = "2" in ki_held
+        kbd_ok = (active_after == "p2-focus" and not asked) if focused else (active is None and asked and "2" not in ki_after)
+        line(f"drop-across-outputs-{'focused' if focused else 'unfocused'}",
+             (active == "p2-focus") == focused and crossed and follows and bool(let_go) and on2 and kbd_ok,
+             f"activewindow {active} -> {active_after}; body hosts' keyboard asks held {ki_held!r}, after {ki_after!r}; "
+             f"held: host {xid0:#x} -> {held['xid']:#x}, window x {win0['x']} -> {held['window']['x']} (pointer {sx} -> {tx}), "
+             f"rag {json.dumps(held.get('rag'))[:80]}; after the release: rag {json.dumps(st.get('rag'))[:60]}, her window {st['window']}")
+    # `drop` while his press holds her lets her go; the button's release then finds no press.
+    ctl(f"pos 900 {m1['height']}")
+    until(lambda: not state().get("teleporting") and state().get("rag") is None, 6)
+    time.sleep(1.0)
+    av = state()["avatar"]
+    sx, sy = av["x"] + av["w"] // 2, av["y"] + av["h"] // 2
+    w.warp(sx, sy); time.sleep(0.2); w.button(True)
+    for k in range(1, 11):
+        w.warp(sx + 8 * k, sy); time.sleep(1 / 60)
+    time.sleep(0.2)
+    phase = (state().get("rag") or {}).get("phase")
+    r = ctl("drop")
+    let_go = until(lambda: (state().get("rag") or {}).get("phase") != "held", 2)
+    w.button(False)
+    line("drop-his-press", phase == "held" and r.strip() == "ok released" and bool(let_go), f"held {phase}; drop -> {r.strip()!r}")
     w.destroy("p2-focus")
     time.sleep(0.3)
     log = open(LOG).read()

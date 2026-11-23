@@ -849,6 +849,11 @@ and `sense …` (focus, cursor, idle, fullscreen, near, arena, windows, `clock H
 running on the brain's clock), each with `real` to go back to the real senses). Under `SA_BRAIN_SYNTH`
 she has no time of day until `sense clock` sets one, and logind isn't read.
 
+`drop` puts her down where she is: off a perch, onto an exposed window edge by her seat or feet, else
+there (`ok ground`, `ok perch …`). While she's held it's refused (`error: held`), unless a press of his
+holds her: then it lets her go as his release would (`ok released`), for a release that never reached
+her. His next click on her does the same. A scripted `drag` holding her is still refused.
+
 - `tools/shoot.py` runs one short scenario on a desktop: launch, steps, screenshots, recordings,
   then always kills the app. Its guards matter because someone else may be using that desktop:
   - it only connects to the `desktopproto` sandbox profile or a fake daemon;
